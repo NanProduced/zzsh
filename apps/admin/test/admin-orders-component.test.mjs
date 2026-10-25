@@ -58,12 +58,22 @@ async function setup(t) {
     window: browser,
     document: browser.document,
     HTMLElement: browser.HTMLElement,
+    Element: browser.Element,
+    SVGElement: browser.SVGElement,
     Node: browser.Node,
     Event: browser.Event,
+    CustomEvent: browser.CustomEvent,
     KeyboardEvent: browser.KeyboardEvent,
+    MouseEvent: browser.MouseEvent,
+    PointerEvent: browser.PointerEvent,
+    FocusEvent: browser.FocusEvent,
     CSS: browser.CSS,
     FormData: browser.FormData,
+    MutationObserver: browser.MutationObserver,
+    ResizeObserver: browser.ResizeObserver,
+    getComputedStyle: browser.getComputedStyle.bind(browser),
     requestAnimationFrame: browser.requestAnimationFrame.bind(browser),
+    cancelAnimationFrame: browser.cancelAnimationFrame.bind(browser),
     IS_REACT_ACT_ENVIRONMENT: true,
   });
   Object.defineProperty(globalThis, "navigator", { value: browser.navigator, configurable: true });
@@ -263,9 +273,11 @@ test('numbered chain survives StrictMode cancellation and separates paid cancell
   assert(signals.length >= 2); assert.equal(signals[0].aborted, true);
   assert(node.textContent.includes('已取消')); assert(node.textContent.includes('支付已记录')); assert(node.textContent.includes('退款待核'));
   assert(node.textContent.includes('押 ¥0.00')); assert(!node.textContent.includes('加载更多'));
+  assert(node.textContent.includes('当前进度') && node.textContent.includes('费用'));
+  assert(!node.textContent.includes('需付金额') && !node.textContent.includes('订单状态 / 已知事实'), 'cancelled rows no longer look like a payment request');
   globalThis.fetch = async () => response({ order:chainOrder });
   await act(async () => root.render(createElement(AdminOrderChainView, {...chainProps('chain-detail'), objectOnly:true, initialOrderId:chainOrder.id})));
-  await until(() => node.textContent.includes('金额口径'));
+  await until(() => node.textContent.includes('关键费用'));
   assert(node.textContent.includes('支付时间待确认')); assert(node.textContent.includes('未知')); assert(node.textContent.includes('¥0.00'));
 });
 
@@ -325,14 +337,32 @@ test('optional finance/group reads are independent and never call controlled set
   const proof=p=>({document:{ref:'ORDER:'+decodeURIComponent(p).match(/ORDER:([^?]+)/)[1]},orderSettlement:undefined});
   globalThis.fetch=async url=>{const p=String(url);calls.push(p);if(p.includes('/finance/'))return mode==='slow'?new Promise(resolve=>{finishFinance=resolve;}):response(proof(p));if(p.includes('/im?'))return response({error:{code:'FORBIDDEN'}},403);return response({order:p.includes('native-current')?{...native,id:'native-current',displayNo:'NATIVE-CURRENT'}:native});};
   const props={...chainProps('chain-optional'),snapshot:{...snapshotFor('chain-optional'),permissions:['order.read','finance.document.read','im.support.read']},objectOnly:true,initialOrderId:native.id};
-  await act(async () => root.render(createElement(AdminOrderChainView,props)));await until(()=>node.textContent.includes('金额口径')&&node.textContent.includes('当前身份无权读取本单群'));
+  await act(async () => root.render(createElement(AdminOrderChainView,props)));await until(()=>node.textContent.includes('关键费用')&&node.textContent.includes('当前身份无权读取本单群'));
   assert(node.textContent.includes(native.displayNo));assert.equal(node.querySelectorAll('[aria-busy="true"]').length,1);
   await act(async () => finishFinance(response({error:{code:'NOT_FOUND'}},404)));await until(()=>node.textContent.includes('未找到当前范围内可读的资金单据'));
   const bodyReads=calls.filter(p=>p.includes('readMode')).length;mode='ready';await act(async () => buttonNamed(node,'重新读取资金依据').click());await until(()=>node.textContent.includes('尚未提供受权订单资金依据'));
   assert.equal(calls.filter(p=>p.includes('readMode')).length,bodyReads);assert(node.textContent.includes('开租待核'));
-  mode='slow';await act(async () => root.render(createElement(AdminOrderChainView,{...props,refreshNonce:1})));await until(()=>node.textContent.includes('金额口径'));const stale=finishFinance;
+  mode='slow';await act(async () => root.render(createElement(AdminOrderChainView,{...props,refreshNonce:1})));await until(()=>node.textContent.includes('关键费用'));const stale=finishFinance;
   mode='ready';await act(async () => root.render(createElement(AdminOrderChainView,{...props,initialOrderId:'native-current'})));await until(()=>node.textContent.includes('NATIVE-CURRENT'));
   await act(async () => stale(response(proof('/finance/documents/ORDER:native-old'))));assert(node.textContent.includes('NATIVE-CURRENT'));assert(!node.textContent.includes('NATIVE-OLD'));assert(node.textContent.includes('开租待核'));assert(!calls.some(p=>p.includes('/settlement')));
+});
+
+test('server progress drives opening/ending without inferring them from PAID or a cancelled status', async t => {
+  const {root,node,AdminOrderChainView}=await setup(t);
+  const base={...chainOrder,id:'progress-order',displayNo:'PROGRESS-ORDER',source:{origin:'NATIVE'},payment:{state:'RECORDED_PAID',recordedAt:null,recordedAmount:null}};
+  const cases=[
+    {status:'PAID',progress:undefined,expect:['开租待核'],forbid:['已开租']},
+    {status:'PAID',progress:{asOfUtc:'2026-10-25T00:00:00.000000Z',opening:{state:'CONFIRMED',confirmedAtUtc:'2026-10-25T01:00:00.000000Z'},ending:{state:'PENDING_PARTIES',currentVersionNo:2,postedAtUtc:null}},expect:['已开租','待双方确认'],forbid:['开租待核']},
+    {status:'CANCELLED',paidAt:null,payment:{state:'RECORDED_UNPAID',recordedAt:null,recordedAmount:null},progress:{asOfUtc:'2026-10-25T00:00:00.000000Z',opening:{state:'NOT_APPLICABLE',confirmedAtUtc:null},ending:{state:'NOT_APPLICABLE',currentVersionNo:null,postedAtUtc:null}},expect:['开租不适用','结算不适用'],forbid:['开租待核','退款待核']},
+  ];
+  for(const [index,item] of cases.entries()){
+    const order={...base,...item};
+    globalThis.fetch=async()=>response({order});
+    await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('progress-'+index),objectOnly:true,initialOrderId:order.id})));
+    await until(()=>node.textContent.includes(order.displayNo));
+    for(const text of item.expect)assert(node.textContent.includes(text),`${item.status} should show ${text}`);
+    for(const text of item.forbid)assert(!node.textContent.includes(text),`${item.status} should not show ${text}`);
+  }
 });
 
 test('resource read uses human labels and returns to the exact originating user section and order', async t => {
@@ -364,7 +394,7 @@ test('order account labels distinguish legacy source numbers in lists, detail an
   await act(async()=>[...node.querySelectorAll('.oc-table tbody tr button')].find(b=>b.textContent===cases[0].expected).click());
   assert.equal(opened.at(-1).title,cases[0].expected);assert(opened.at(-1).path.includes('/supply/accounts/'));
   globalThis.fetch=async()=>response({order:items[0]});
-  await act(async()=>root.render(createElement(AdminOrderChainView,{...props,objectOnly:true,initialOrderId:items[0].id})));await until(()=>node.textContent.includes('关联核对'));
+  await act(async()=>root.render(createElement(AdminOrderChainView,{...props,objectOnly:true,initialOrderId:items[0].id})));await until(()=>node.textContent.includes('本单账号和双方'));
   assert(node.querySelector('.oc-heading p').textContent.includes(cases[0].expected));
   const resourceLink=[...node.querySelectorAll('.oc-related button')].find(b=>b.textContent===cases[0].expected);assert(resourceLink);
   await act(async()=>resourceLink.click());assert.equal(opened.at(-1).title,cases[0].expected);
@@ -377,7 +407,7 @@ test('order party history labels follow order origin for both renter and owner',
   for(const origin of ['LEGACY','NATIVE']){
     const item={...chainOrder,id:'party-'+origin,displayNo:'ORDER-PARTY-'+origin,source:{origin}};
     globalThis.fetch=async url=>String(url).includes('readMode=combined')?response({order:item}):response({error:{code:'NOT_FOUND'}},404);
-    await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('party-'+origin),objectOnly:true,initialOrderId:item.id})));await until(()=>node.textContent.includes(item.displayNo)&&node.textContent.includes('关联核对'));
+    await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('party-'+origin),objectOnly:true,initialOrderId:item.id})));await until(()=>node.textContent.includes(item.displayNo)&&node.textContent.includes('本单账号和双方'));
     const labels=[...node.querySelectorAll('.oc-related-person small')].map(e=>e.textContent),prefix=origin==='LEGACY'?'历史':'';
     assert(labels.includes(prefix+'租客 · 编号 U-RENTER'));assert(labels.includes(prefix+'号主 · 编号 U-OWNER'));
     if(origin==='NATIVE')assert(labels.every(label=>!label.includes('历史租客')&&!label.includes('历史号主')));
@@ -415,4 +445,17 @@ test('channel payment summary keeps local acceptance and simulated evidence dist
       assert(node.textContent.includes('按已核时区换算')); assert.equal(node.textContent.includes('协议模拟观察'),false);
     }
   }
+});
+
+test('FLOW02 Root F1: cancelled payment remains paid, known unpaid, or unknown', async t => {
+ const {root,node,AdminOrderChainView}=await setup(t);let current;
+ globalThis.fetch=async()=>response({items:[current],page:1,pageSize:20,total:1,contextKey:'root-f1'});
+ for(const [index,state]of ['RECORDED_PAID','RECORDED_UNPAID','UNKNOWN'].entries()){
+  current={...order,id:'cancel-'+state,displayNo:'CANCEL-'+state,status:'CANCELLED',source:{origin:'LEGACY',statusLabel:'已取消'},payment:{state,recordedAt:null,recordedAmount:null}};
+  await act(async()=>root.render(createElement(AdminOrderChainView,{snapshot:snapshotFor('root-f1-'+state),onOpenPath:()=>{},onQueryChange:()=>{},refreshNonce:index})));await until(()=>node.textContent.includes(current.displayNo));
+  const fee=node.querySelector('.oc-table td.oc-amount small').textContent;
+  if(state==='RECORDED_PAID')assert.match(fee,/退款待核/);
+  else if(state==='RECORDED_UNPAID')assert.match(fee,/未形成支付/);
+  else{assert.match(fee,/支付.*待核|支付.*未知/);assert.doesNotMatch(fee,/未形成支付/);}
+ }
 });

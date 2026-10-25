@@ -7,12 +7,13 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { InlineStatus } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { Sheet, SheetContent } from "@/components/ui/sheet";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { DropdownMenu, DropdownMenuGroup, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { SupplySelect } from "@/components/supply/supply-select";
-import { newOrdersStatus, reviewStateLabel, supplyObjectLabel, attributeFacts, historicalAttributeFacts, historicalReadSummary, historicalResourceText, inventoryRows, formatAmount, type SupplyQueryKind, type SupplyWorkDetail, type SupplyWorkItem } from "../supply-review/model";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
+import { newOrdersStatus, supplyObjectLabel, attributeFacts, historicalReadSummary, historicalResourceText, inventoryRows, formatAmount, formatFundingCents, quantityText, quoteLineFacts, type SupplyQueryKind, type SupplyWorkDetail, type SupplyWorkItem } from "../supply-review/model";
 import {
   fullShanghaiTime,
   KIND_LABELS,
@@ -20,6 +21,7 @@ import {
   alignedQuickRow,
   groupConditions,
   kindHint,
+  newOrdersReasonText,
   parseSavedViews,
   primaryReason,
   savedKey,
@@ -30,12 +32,11 @@ import {
   rowHaffText,
   rowQuoteText,
   rowDepositText,
-  rowGuaranteeRequirementText,
   rowGuaranteeEligibilityText,
-  rowGuaranteeProofText,
+  rowGuaranteeCondensed,
   rowFullPayout,
 } from "./account-list-model";
-import { AccountFacts, condText } from "./reason-summary";
+import { condText } from "./reason-summary";
 import { OwnerHoverCard } from "./owner-hover-card";
 
 const KINDS: SupplyQueryKind[] = ["account", "legacy", "order", "owner", "nickname", "link"];
@@ -58,7 +59,7 @@ export function StatusBadge({ facts }: { facts: SupplyWorkItem["facts"] }) {
 }
 export function ReasonCell({ facts, onMore }: { facts: SupplyWorkItem["facts"]; onMore: () => void }) {
   const { code, others } = primaryReason(facts);
-  if (!code) return <span className="text-sm text-muted-foreground">服务端未返回阻塞</span>;
+  if (!code) return <span className="text-sm text-muted-foreground">{newOrdersReasonText(facts.newOrders)}</span>;
   return <div className="text-sm"><div>{condText(code)}</div>{others > 0 && <Button type="button" variant="link" size="xs" className="h-auto px-0 text-xs text-muted-foreground" onClick={e => { e.stopPropagation(); onMore(); }} aria-label={"查看全部 " + (others + 1) + " 项原因"}>另 {others} 项</Button>}</div>;
 }
 export function TimeText({ iso, label = "更新时间" }: { iso: string; label?: string }) {
@@ -162,225 +163,91 @@ export function AccountCards({ items, onView }: { items: SupplyWorkItem[]; onVie
       <div className="mt-1 text-xs text-muted-foreground">{versionText(row.sequence)} · 资料排序 <TimeText iso={row.sortAt} label="资料排序时间"/></div></Card>; })}</div>;
 }
 
-export function summaryText(row: SupplyWorkItem, detail?: SupplyWorkDetail) {
-  const f = detail?.supervision.facts ?? row.facts, g = groupConditions(f);
-  return [(row.title ?? "资料未提供") + " · " + (row.displayNo ?? "未登记编号") + " · " + row.accountId, "号主：" + row.ownerName, (f.newOrders === null ? "新单资格待核" : f.newOrders ? "可接新单" : "不可接新单") + "；已确认阻塞 " + g.blocked.length + " 项、待核 " + g.pending.length + " 项", ...g.blocked.map(c => "· " + condText(c.code) + " → " + c.who), ...g.pending.map(c => "· [待核] " + condText(c.code) + " → " + c.who), "各条件独立，解除一项不代表账号可以接单。"].join("\n");
-}
-
-export function QuickViewAssetSummary({
-  row,
-  detail,
-}: {
-  row: SupplyWorkItem;
-  detail?: SupplyWorkDetail;
-}) {
-  const viewed = alignedQuickRow(row, detail);
-  const resourceTotal = viewed === row ? (row.summary?.quote?.resourceTotal ?? detail?.version?.quote?.resourceTotal ?? null) : (detail?.version?.quote?.resourceTotal ?? null);
-  const facts = detail?.version ? attributeFacts(detail.version).filter(f => ["安全箱配置", "体力等级", "负重等级", "潜水等级", "角色等级", "段位", "绝密 KD"].includes(f.label)) : [];
-  const fullPayout = rowFullPayout(viewed);
-  const inventory = detail?.version ? inventoryRows(detail.version, null).filter(item => item.itemId !== viewed.summary?.haff?.itemId) : [];
-  const historical = detail?.supervision.facts.historicalRead ?? row.facts.historicalRead;
-  const display = historical?.display?.state === "KNOWN" ? historical.display.facts : null;
-
-  return (
-    <div className="my-3 space-y-3.5">
-      {historical ? <section data-historical-summary="" className="space-y-2 rounded-lg border bg-muted/20 p-3">
-        <h3 className="text-sm font-semibold">历史来源记录</h3>
-        <p className="text-xs text-muted-foreground">{historicalReadSummary(historical)}</p>
-        <dl className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-3">
-          <div><dt className="text-xs text-muted-foreground">历史租金</dt><dd className="tabular-nums">¥{formatAmount(historical.historicalQuote.haffRentYuan)}</dd></div>
-          <div><dt className="text-xs text-muted-foreground">历史物资费</dt><dd className="tabular-nums">¥{formatAmount(historical.historicalQuote.goodsYuan)}</dd></div>
-          <div><dt className="text-xs text-muted-foreground">历史押金</dt><dd className="tabular-nums">¥{formatAmount(historical.historicalQuote.depositYuan)}</dd></div>
-          <div><dt className="text-xs text-muted-foreground">历史租期</dt><dd>{historical.historicalQuote.termDays} 天</dd></div>
-        </dl>
-        {display?.attributes && Array.isArray(display.resources) ? <>
-          <p className="text-xs text-muted-foreground">来源更新：<TimeText iso={display.sourceUpdatedAt} label="历史来源更新时间"/></p>
-          <Collapsible className="border-t">
-            <CollapsibleTrigger className="group flex w-full items-center justify-between rounded-sm py-2 text-left text-xs font-medium outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
-              历史属性与物资<ChevronDown className="size-3.5 transition-transform group-data-[panel-open]:rotate-180"/>
-            </CollapsibleTrigger>
-            <CollapsibleContent>
-              <dl className="grid grid-cols-2 gap-2 pb-2 text-sm sm:grid-cols-3">{historicalAttributeFacts(historical).filter(fact => fact.label !== "租期规则").map(fact => <div key={fact.label}><dt className="text-xs text-muted-foreground">{fact.label}</dt><dd>{fact.value}</dd></div>)}</dl>
-              <ul className="flex flex-wrap gap-x-3 gap-y-1 pb-2 text-xs">{display.resources.map(resource => <li key={resource.code}>{resource.name}：{historicalResourceText(resource)}</li>)}</ul>
-            </CollapsibleContent>
-          </Collapsible>
-        </> : <p className="text-xs text-muted-foreground">历史扩展资料尚待接入，缺失数量不按零显示。</p>}
-        <p className="text-xs text-muted-foreground">历史记录仅供核对，不代表当前报价、下单应付或可租资格。</p>
-      </section> : null}
-      <div>
-        <div className="mb-1.5 flex items-center justify-between text-xs font-semibold text-muted-foreground">
-          <span>核心游戏资产</span>
-          {!historical ? <span className="text-[10px] text-muted-foreground">来源：当前资料版本申报值</span> : null}
-        </div>
-        <div className="grid grid-cols-3 gap-2">
-          <div className="rounded-lg border bg-card p-2.5 shadow-xs">
-            <span className="block text-[11px] text-muted-foreground">哈夫币数量</span>
-            <span className="mt-0.5 block font-mono text-sm font-bold tabular-nums text-amber-900 dark:text-amber-300">{rowHaffText(viewed)}</span>
-          </div>
-          {facts.map(fact => (
-            <div className="rounded-lg border bg-card p-2.5 shadow-xs" key={fact.label}>
-              <span className="block text-[11px] text-muted-foreground">{fact.label}</span>
-              <span className={"mt-0.5 block text-sm font-semibold " + (fact.unconfirmed ? "text-amber-700 dark:text-amber-400" : "")}>{fact.value}</span>
-            </div>
-          ))}
-          <div className="rounded-lg border bg-card p-2.5 shadow-xs">
-            <span className="block text-[11px] text-muted-foreground">全额包赔</span>
-            <span className="mt-0.5 block text-sm font-semibold">{fullPayout.label}</span>
-          </div>
-        </div>
-        {!detail ? <p className="mt-1 text-[11px] text-muted-foreground">属性需读取当前资料版本；未读到版本时不显示为“未申报”以外的结论。</p> : null}
-      </div>
-
-      <div>
-        <div className="mb-1.5 text-xs font-semibold text-muted-foreground">资金与报价构成</div>
-        <div className="grid grid-cols-3 gap-2">
-          <div className="rounded-lg border bg-muted/30 p-2.5">
-            <span className="block text-[11px] text-muted-foreground">资源金额（冻结报价）</span>
-            <span className="mt-0.5 block text-sm font-bold tabular-nums text-primary">{resourceTotal ? `¥${formatAmount(resourceTotal.amount)}` : "未提供"}</span>
-            <span className="mt-0.5 block text-[10px] text-muted-foreground">资料版本保存值，非下单应付</span>
-          </div>
-          <div className="rounded-lg border bg-muted/30 p-2.5">
-            <span className="block text-[11px] text-muted-foreground">{historical ? "押金" : "押金（号主申报）"}</span>
-            <span className="mt-0.5 block text-sm font-semibold tabular-nums">{rowDepositText(viewed)}</span>
-            <span className="mt-0.5 block text-[10px] text-muted-foreground">{!row.summary?.baseDeposit && historical ? "历史来源值，不替代当前申报或应付" : "基础申报押金，不含会员个性化减免"}</span>
-          </div>
-          <div className="rounded-lg border bg-muted/30 p-2.5">
-            <span className="block text-[11px] text-muted-foreground">号主保证金</span>
-            <span className="mt-0.5 block text-sm font-semibold">{rowGuaranteeRequirementText(row)}</span>
-            <span className="mt-0.5 block text-[10px] text-muted-foreground">{rowGuaranteeEligibilityText(row)}</span>
-          </div>
-        </div>
-        <p className="mt-1 text-[11px] text-muted-foreground">{rowGuaranteeProofText(row)}</p>
-      </div>
-
-      {inventory.length > 0 && (
-        <div>
-          <div className="mb-1.5 flex items-center justify-between text-xs font-semibold text-muted-foreground">
-            <span>物品与装备资源 ({inventory.length} 种)</span>
-          </div>
-          <div className="flex max-h-24 flex-wrap gap-1.5 overflow-y-auto rounded-lg border bg-muted/20 p-2">
-            {inventory.map(item => (
-              <span key={item.itemId} className="inline-flex items-center gap-1 rounded border bg-background px-2 py-1 text-xs font-medium text-foreground shadow-2xs">
-                <span>{item.name}</span>
-                <span className="font-mono text-muted-foreground">{item.current} {item.unit}</span>
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-type QuickProps = { row: SupplyWorkItem; canRead: boolean; canRestrict: boolean; canOrders: boolean; onClose: () => void; onOpenFull: (context: string) => void };
-/** 快速判断：结论 + 需要处理 + 折叠的已满足/待核 + 资料摘要；完整核对与风险操作在对象页。 */
-export function QuickView({ row, canRead, canRestrict, canOrders, onClose, onOpenFull }: QuickProps) {
-  const [detail, setDetail] = useState<SupplyWorkDetail>(), [error, setError] = useState<string>(), [note, setNote] = useState(""), title = useRef<HTMLHeadingElement>(null);
+type QuickProps = { row: SupplyWorkItem; canRead: boolean; onClose: () => void; onOpenFull: (context: string) => void };
+/** 快速核对：身份/状态、基本属性与使用条件、全部申报资源、同版基础费用；历史折叠，完整处置在对象页。 */
+export function QuickView({ row, canRead, onClose, onOpenFull }: QuickProps) {
+  const [detail, setDetail] = useState<SupplyWorkDetail>(), [error, setError] = useState<string>();
   useEffect(() => { if (!canRead) { onClose(); return; } const c = new AbortController(); setDetail(undefined); setError(undefined);
     adminRequest<SupplyWorkDetail>("/supply/listing-reviews/" + encodeURIComponent(row.id) + "?queryVersion=3", undefined, "GET", {}, c.signal).then(d => { if (!c.signal.aborted) setDetail(d); }).catch(e => { if (!c.signal.aborted) setError(friendlyError(e)); });
     return () => c.abort(); }, [row.id, canRead]);
-  useEffect(() => { title.current?.focus(); }, [row.id]);
   if (!canRead) return null;
-  const facts = detail?.supervision.facts ?? row.facts, g = groupConditions(facts), v = detail?.version, hist = detail?.supervision.restrictionHistory, orders = detail?.supervision.orders;
-  const copy = (text: string, done: string) => { void navigator.clipboard?.writeText(text).then(() => setNote(done), () => setNote("剪贴板不可用")); };
+  const facts = detail?.supervision.facts ?? row.facts, g = groupConditions(facts), v = detail?.version, viewed = alignedQuickRow(row, detail);
+  const historical = detail?.supervision.facts.historicalRead ?? row.facts.historicalRead;
+  const attrs = v ? attributeFacts(v) : [], inventory = v ? inventoryRows(v, null) : [], lines = v ? quoteLineFacts(v) : [];
   const verdict = facts.newOrders === null ? "新单资格待核" : facts.newOrders ? "可接新单" : "不可接新单";
-  const soft = facts.newOrders ? "bg-emerald-500/10" : "bg-amber-500/10";
-  return <Sheet open onOpenChange={open => { if (!open) onClose(); }}>
-  <SheetContent side="right" showCloseButton={false} initialFocus={title} finalFocus={false} aria-labelledby="qv-title" data-quick-view="" className="w-full gap-0 bg-background data-[side=right]:w-full data-[side=right]:sm:max-w-[560px]">
-    <div className="border-b px-5 pt-4 pb-3">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-xs text-muted-foreground">账号快速查看 · 资产速查</span>
-        <div className="flex items-center gap-1">
-          {canRestrict && (
-            <DropdownMenu>
-              <DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" aria-label="风险操作"><MoreHorizontal/></Button>}/>
-              <DropdownMenuContent align="end" className="w-44">
-                <DropdownMenuGroup>
-                  <DropdownMenuLabel>风险操作</DropdownMenuLabel>
-                  <DropdownMenuItem onClick={() => onOpenFull("review")}>
-                    {facts.staffRestricted ? "复核已有限制" : "新增运营限制"}
-                  </DropdownMenuItem>
-                </DropdownMenuGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )}
-          <Button variant="ghost" size="icon-sm" aria-label="关闭快速查看" onClick={onClose}><X/></Button>
-        </div>
-      </div>
-      <div className="mt-1 flex items-center gap-2">
-        <h2 id="qv-title" ref={title} tabIndex={-1} className="text-lg font-semibold outline-none">{row.title ?? "资料未提供"}</h2>
-        <Button variant="ghost" size="icon-xs" aria-label="复制内部 ID" title={row.accountId} onClick={() => copy(row.accountId, "已复制内部 ID")} className="text-muted-foreground"><Copy className="size-3.5"/></Button>
-      </div>
+  const guarantee = rowGuaranteeCondensed(row);
+  const releaseId = v?.releaseId ?? null;
+  const ratio = v?.quote?.baseRenterHaffRatioWanPerYuan ?? null;
+  const declared = v?.declaration.attributes ?? {};
+  const deposit = declared.owner_deposit_declaration as Record<string, unknown> | undefined;
+  const depositText = v && deposit?.schema === "owner-deposit-declaration-v1" && typeof deposit.amountCents === "string" && /^(0|[1-9]\d*)$/.test(deposit.amountCents)
+    ? formatFundingCents(deposit.amountCents) : rowDepositText(viewed);
+  const payout = declared.full_payout_declaration as Record<string, unknown> | undefined;
+  const payoutLabel = v ? (payout?.selected === true ? "已选" : payout?.selected === false ? "未选" : "未申报") : rowFullPayout(viewed).label;
+  const haffLine = v ? v.declaration.inventory.find(item => item.itemId === "haff" || v.presentation.items?.find(entry => entry.id === item.itemId)?.unit === "HAFF_BASE") : null;
+  const haffText = haffLine ? quantityText(haffLine.quantity) : rowHaffText(viewed);
+  return <Dialog open onOpenChange={open => { if (!open) onClose(); }}>
+  <DialogContent showCloseButton={false} aria-labelledby="qv-title" data-quick-view="" className="max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] gap-0 overflow-hidden p-0 sm:max-w-3xl">
+    <header className="border-b px-5 pb-3 pt-4">
+      <DialogTitle id="qv-title" className="text-lg font-semibold">{row.title ?? "资料未提供"}</DialogTitle>
+      <DialogDescription className="sr-only">账号基本信息、申报资源与同版基础费用速览</DialogDescription>
       <div className="mt-1 flex flex-wrap items-center gap-2">
         <IdLine row={row}/>
         <span className="text-xs text-muted-foreground">·</span>
         <StatusBadge facts={facts}/>
+        <span className="text-xs text-muted-foreground">· {verdict}{g.blocked.length ? ` · ${g.blocked.length} 项已确认阻塞` : ""}{g.pending.length ? `、${g.pending.length} 项待核` : ""}</span>
       </div>
-    </div>
-    <div className="flex-1 overflow-y-auto px-5 pb-4">
-      <div className={"mt-3 rounded-lg px-4 py-3 " + soft}>
-        <div className="font-semibold">{verdict}<span className="mx-2 opacity-40">·</span><span className="font-medium">{g.blocked.length} 项已确认阻塞{g.pending.length ? "、" + g.pending.length + " 项待核" : ""}</span></div>
-        <div className="text-xs text-muted-foreground">各条件独立，解除一项不代表账号可以接单。</div>
-      </div>
-      {error && <Alert variant="warning" role="status" className="mt-3"><CircleAlert aria-hidden="true" /><AlertTitle>详情未读到</AlertTitle><AlertDescription><p>{error}</p><p>以下仍为列表已读取的事实。</p></AlertDescription></Alert>}
+    </header>
+    <div className="max-h-[calc(100dvh-14rem)] overflow-y-auto px-5 py-4">
+      {error && <Alert variant="warning" role="status" className="mb-3"><CircleAlert aria-hidden="true" /><AlertTitle>详情未读到</AlertTitle><AlertDescription><p>{error}</p><p>以下仍为列表已读取的事实。</p></AlertDescription></Alert>}
+      {!detail && !error ? <p className="mb-3 text-sm text-muted-foreground" aria-busy="true">正在读取当前资料…</p> : null}
 
-      <QuickViewAssetSummary row={row} detail={detail} />
+      <section className="border-t pt-3 first:border-t-0 first:pt-0">
+        <h3 className="mb-2 text-sm font-semibold">基本属性与使用条件</h3>
+        {v ? <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm sm:grid-cols-3">{attrs.map(fact => <div key={fact.label}><dt className="text-xs text-muted-foreground">{fact.label}</dt><dd className={fact.unconfirmed ? "text-amber-700 dark:text-amber-400" : ""}>{fact.value}</dd></div>)}<div><dt className="text-xs text-muted-foreground">全额包赔</dt><dd>{payoutLabel}</dd></div></dl> : <p className="text-sm text-muted-foreground">{error ? "详情未读到，属性暂不可核对。" : "正在读取属性…"}</p>}
+      </section>
 
-      <h3 className="mt-4 mb-1 text-sm font-semibold">需要处理 · {g.blocked.length} 项</h3>
-      {g.blocked.length ? (
-        <ul className="divide-y rounded-lg border px-3">
-          {g.blocked.map(c => (
-            <li key={c.code} className="flex items-center justify-between gap-3 py-2 text-sm">
-              <span><span className="mr-2 inline-block size-1.5 -translate-y-0.5 rounded-full bg-amber-500" aria-hidden="true"/>{condText(c.code)}</span>
-              <span className="text-xs text-muted-foreground">{c.who}</span>
-            </li>
-          ))}
-        </ul>
-      ) : <p className="py-2 text-sm text-muted-foreground">没有已确认阻塞</p>}
+      <section className="mt-4 border-t pt-3">
+        <h3 className="mb-2 text-sm font-semibold">哈夫币与已申报物资 <span className="ml-1 text-xs font-normal text-muted-foreground">{v ? `第 ${v.sequence} 版全部申报` : "列表摘要"}</span></h3>
+        <p className="mb-2 text-sm">哈夫币：<span className="font-mono font-semibold tabular-nums text-amber-900 dark:text-amber-300">{haffText}</span></p>
+        {v ? (inventory.length ? <Table className="text-sm"><TableHeader><TableRow><TableHead>物品</TableHead><TableHead className="text-right">申报数量</TableHead></TableRow></TableHeader><TableBody>{inventory.map(item => <TableRow key={item.itemId}><TableCell className="whitespace-normal">{item.name}</TableCell><TableCell className="text-right tabular-nums">{item.current} {item.unit}</TableCell></TableRow>)}</TableBody></Table> : <p className="text-sm text-muted-foreground">本版未申报物资；不代表没有该物品。</p>) : <p className="text-sm text-muted-foreground">{error ? "详情未读到，完整物资表暂不可核对。" : "正在读取完整物资表…"}</p>}
+      </section>
 
-      <div className="mt-2 flex items-center justify-between border-t py-2.5">
-        <span className="text-sm font-medium">已满足 · {g.satisfied.length} 项</span>
-        <span className="text-xs text-muted-foreground">{g.satisfied.join("、") || "—"}</span>
-      </div>
+      <section className="mt-4 border-t pt-3">
+        <h3 className="mb-2 text-sm font-semibold">同版基础费用</h3>
+        <dl className="grid gap-2 text-sm sm:grid-cols-2">
+          <div><dt className="text-xs text-muted-foreground">资源费（资料版冻结参考）</dt><dd className="tabular-nums">{v?.quote ? `¥${formatAmount(v.quote.resourceTotal.amount)}` : rowQuoteText(viewed).total}</dd></div>
+          <div><dt className="text-xs text-muted-foreground">租客基础押金（号主申报）</dt><dd className="tabular-nums">{depositText}</dd></div>
+          <div><dt className="text-xs text-muted-foreground">全额包赔</dt><dd>{payoutLabel}</dd></div>
+          {guarantee ? <div><dt className="text-xs text-muted-foreground">号主保证金</dt><dd>{guarantee}</dd></div> : null}
+          <div><dt className="text-xs text-muted-foreground">规则版本</dt><dd className="break-all">{releaseId ?? "未提供"}</dd></div>
+          <div><dt className="text-xs text-muted-foreground">基础客价比例</dt><dd>{ratio ? `${ratio} 万哈夫币/元` : "未提供"}</dd></div>
+        </dl>
+        {lines.length ? <div className="mt-2 overflow-x-auto"><Table className="text-xs"><TableHeader><TableRow><TableHead>参考行</TableHead><TableHead>计价基数</TableHead><TableHead>参考单价</TableHead><TableHead className="text-right">原行金额</TableHead></TableRow></TableHeader><TableBody>{lines.map(line => <TableRow key={line.itemId}><TableCell className="whitespace-normal">{line.name} · {line.quantity}</TableCell><TableCell className="tabular-nums">{line.unitQuantity ?? "未提供"}</TableCell><TableCell className="tabular-nums">{line.buyerUnitAmount ? `¥${formatAmount(line.buyerUnitAmount)}` : "未提供"}</TableCell><TableCell className="text-right tabular-nums">{line.amount ? `¥${formatAmount(line.amount)}` : "未提供"}</TableCell></TableRow>)}</TableBody></Table></div> : null}
+        <p className="mt-2 text-xs text-muted-foreground">资料版本保存值，非按当前规则重新试算，也不是下单应付；租客档位口径未提供，会员个性化金额不在列表推断。</p>
+      </section>
 
-      <Collapsible className="border-t">
-        <CollapsibleTrigger disabled={!g.pending.length} className="group flex w-full items-center justify-between rounded-sm py-2.5 text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
-          <span className="text-sm font-medium">待核 · {g.pending.length} 项</span>
-          <span className="flex items-center gap-1 text-xs text-muted-foreground">
-            {g.pending.length ? "展开" : "暂无待核项"}
-            {g.pending.length > 0 && <ChevronDown className="size-3.5 transition-transform group-data-[panel-open]:rotate-180"/>}
-          </span>
-        </CollapsibleTrigger>
-        <CollapsibleContent>
-          {g.pending.map(c => (
-            <div key={c.code} className="flex justify-between gap-3 py-1.5 pl-4 text-sm">
-              <span>{condText(c.code)}</span>
-              <span className="text-xs text-muted-foreground">{c.who}</span>
-            </div>
-          ))}
+      {historical ? <Collapsible className="mt-4 border-t pt-3">
+        <CollapsibleTrigger className="group flex w-full items-center justify-between rounded-sm text-left text-sm font-semibold outline-none focus-visible:ring-3 focus-visible:ring-ring/50">历史来源记录（仅参考）<ChevronDown className="size-3.5 transition-transform group-data-[panel-open]:rotate-180"/></CollapsibleTrigger>
+        <CollapsibleContent keepMounted data-historical-summary="" className="pt-2 data-[closed]:hidden">
+          <p className="text-xs text-muted-foreground">{historicalReadSummary(historical)}</p>
+          {historical.display?.state === "KNOWN" && historical.display.facts?.sourceUpdatedAt ? <p className="text-xs text-muted-foreground">来源更新：<TimeText iso={historical.display.facts.sourceUpdatedAt} label="历史来源更新时间"/></p> : null}
+          <dl className="mt-2 grid grid-cols-2 gap-2 text-sm sm:grid-cols-3">
+            <div><dt className="text-xs text-muted-foreground">历史租金</dt><dd className="tabular-nums">¥{formatAmount(historical.historicalQuote.haffRentYuan)}</dd></div>
+            <div><dt className="text-xs text-muted-foreground">历史物资费</dt><dd className="tabular-nums">¥{formatAmount(historical.historicalQuote.goodsYuan)}</dd></div>
+            <div><dt className="text-xs text-muted-foreground">历史押金</dt><dd className="tabular-nums">¥{formatAmount(historical.historicalQuote.depositYuan)}</dd></div>
+            <div><dt className="text-xs text-muted-foreground">历史租期</dt><dd>{historical.historicalQuote.termDays} 天</dd></div>
+          </dl>
+          {historical.display?.state === "KNOWN" && Array.isArray(historical.display.facts?.resources) ? <ul className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs">{historical.display.facts.resources.map(resource => <li key={resource.code}>{resource.name}：{historicalResourceText(resource)}</li>)}</ul> : <p className="mt-2 text-xs text-muted-foreground">历史扩展资料尚待接入，缺失数量不按零显示。</p>}
+          <p className="mt-2 text-xs text-muted-foreground">历史记录不代表当前报价、下单应付或可租资格。</p>
         </CollapsibleContent>
-      </Collapsible>
-
-      <div className="mt-4 border-t pt-3">
-        <h3 className="mb-2 text-sm font-semibold">当前资料 <span className="ml-1 text-xs font-normal text-muted-foreground">{v ? versionText(v.sequence) + " · " + reviewStateLabel(v.reviewState) : detail ? "版本未提供" : error ? "详情未读到" : "读取中…"}</span></h3>
-        {detail ? <AccountFacts version={v}/> : <p className="text-sm text-muted-foreground">{error ? "详情未读到，属性、押金与报价暂不可核对。" : "正在读取属性、押金与报价…"}</p>}
-      </div>
-
-      <div className="mt-3 border-t">
-        <EntryRow label="关联订单" value={!detail ? error ? "详情未读到" : "读取中…" : !canOrders || orders?.state === "DENIED" ? "无订单读取权限" : orders?.items?.length ? "当前范围 " + (orders.total ?? orders.items.length) + " 条" : "当前授权范围内未匹配订单"} onClick={() => onOpenFull("orders")}/>
-        <EntryRow label="操作记录" value={!hist ? error ? "详情未读到" : "读取中…" : hist.state === "NOT_RECORDED" ? "限制历史未提供" : hist.items.length ? "最近 " + hist.items.length + " 条" : "最近 " + hist.limit + " 条内无限制事件"} onClick={() => onOpenFull("records")}/>
-      </div>
-      {note && <p role="status" className="mt-2 text-xs text-muted-foreground">{note}</p>}
+      </Collapsible> : null}
     </div>
-    <div className="sticky bottom-0 grid grid-cols-2 gap-2 border-t bg-background px-5 py-3">
-      <Button size="lg" variant="outline" onClick={() => copy(summaryText(row, detail), "核对摘要已复制，未自动发送")}>复制核对摘要</Button>
-      <Button size="lg" onClick={() => onOpenFull("situation")}>打开完整详情</Button>
-    </div>
-  </SheetContent></Sheet>;
-}
-
-function EntryRow({ label, value, onClick }: { label: string; value: string; onClick: () => void }) {
-  return <Button type="button" variant="ghost" onClick={onClick} className="h-auto w-full justify-between gap-3 rounded-none border-b px-0 py-3 text-left whitespace-normal"><span className="font-medium">{label}</span><span className="flex items-center gap-1 text-xs text-muted-foreground">{value}<ChevronRight size={14}/></span></Button>;
+    <footer className="flex items-center justify-end gap-2 border-t bg-background px-5 py-3">
+      <Button size="lg" variant="outline" onClick={onClose}>关闭</Button>
+      <Button size="lg" onClick={() => onOpenFull("situation")}>查看完整档案</Button>
+    </footer>
+  </DialogContent></Dialog>;
 }
 
 type SavedApi = ReturnType<typeof useSavedViews>;

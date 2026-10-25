@@ -22,13 +22,15 @@ test('ordinary native document reuses its exact complete receipt and keeps refun
  assert.equal(read.schema,'admin-order-settlement-evidence.v1');assert.equal(read.posting.state,'POSTED');
  assert.deepEqual([read.captured.cents,read.ownerNet.cents,read.refundPayable.cents],['15908','9000','5000']);
  assert.equal(read.refundPayable.knowledge,'KNOWN');assert.equal(read.refunded.knowledge,'UNKNOWN');assert.equal(read.refunded.cents,null);assert.equal(read.channel.state,'UNKNOWN');
+ assert.equal(read.platformContribution.knowledge,'KNOWN');assert.equal(read.platformContribution.cents,'1908');
+ assert(read.reasonCodes.includes('PLATFORM_CONTRIBUTION_IS_NOT_NET_PROFIT'));
  assert.equal(f.entries.length,4);assert.equal(read.documentRef,'ORDER:order1');
 });
 test('native proved zero stays known while a missing receipt or contradictory header stays unknown',()=>{
  const zero=evidence(facts(false,entries('0','0')));assert.equal(zero.refundPayable.cents,'0');assert.equal(zero.ownerNet.cents,'0');assert.equal(zero.ownerNet.knowledge,'KNOWN');
- const absent=evidence(facts(false,[]));assert.equal(absent.posting.state,'NOT_POSTED');assert.equal(absent.refundPayable.cents,null);
- const f=facts();f.entries[0]!.evidence.refundPayableCents='5001';const bad=evidence(f);assert.equal(bad.posting.state,'UNKNOWN');assert.equal(bad.refundPayable.cents,null);
- const partial=facts();partial.entries=partial.entries.filter(row=>row.subjectId==='renter');assert.equal(evidence(partial).refundPayable.cents,null);
+ const absent=evidence(facts(false,[]));assert.equal(absent.posting.state,'NOT_POSTED');assert.equal(absent.refundPayable.cents,null);assert.equal(absent.platformContribution.cents,null);
+ const f=facts();f.entries[0]!.evidence.refundPayableCents='5001';const bad=evidence(f);assert.equal(bad.posting.state,'UNKNOWN');assert.equal(bad.refundPayable.cents,null);assert.equal(bad.platformContribution.cents,null);
+ const partial=facts();partial.entries=partial.entries.filter(row=>row.subjectId==='renter');assert.equal(evidence(partial).refundPayable.cents,null);assert.equal(evidence(partial).platformContribution.cents,null);
  const wrongParty=facts();wrongParty.entries.find(row=>row.accountCode==='OWNER_AVAILABLE')!.subjectId='other';assert.equal(evidence(wrongParty).ownerNet.cents,null);
 });
 test('object scope withholds only the new projection and leaves the existing finance document untouched',()=>{
@@ -38,6 +40,7 @@ test('object scope withholds only the new projection and leaves the existing fin
 test('legacy history remains a source observation, not captured funds or a current refund',()=>{
  const read=evidence(facts(true));assert.equal(read.historicalRefund.cents,'8200');assert.equal(read.historicalRefund.knowledge,'KNOWN');
  assert.equal(read.captured.cents,null);assert.equal(read.refundPayable.cents,null);assert.equal(read.refunded.cents,null);assert.equal(read.readiness,'UNAVAILABLE');
+ assert.equal(read.platformContribution.cents,null);assert.equal(read.platformContribution.knowledge,'UNKNOWN','legacy has no verified platform component');
 });
 
 function legacyFixture(amount='8200',suffix='b',kind:LegacyFinanceDuty['kind']='RENTER_REFUND'){

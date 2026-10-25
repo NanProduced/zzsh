@@ -16,11 +16,12 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { InlineStatus } from "@/components/ui/badge";
 import { EntityPreviewEnabledContext } from "@/components/admin-preview/entity-preview-trigger";
 import { SupplyActionDialog, type ActionFeedback } from "./supply-review/action-bar";
-import { PublicBasisView, SupplyDetailPane } from "./supply-review/detail-pane";
+import { AccountCompleteView, PublicBasisView } from "./supply-review/detail-pane";
 import { AccountCards, IdLine, KindHint, KindSelect, MoreFilters, QuickView, ReasonCell, RowActions, RowMenu, SavedViewsMenu, StatusBadge, TimeText, useSavedViews } from "./supply-accounts/account-list-parts";
-import { KIND_LABELS, groupConditions, versionText, rowHaffText, rowQuoteText, rowDepositText, rowGuaranteeRequirementText, rowGuaranteeEligibilityText, rowFullPayout, rowInfoSource, rowListingStatus } from "./supply-accounts/account-list-model";
-import { ConditionCheck, FactsCard, ReasonSummary, type CheckTarget } from "./supply-accounts/reason-summary";
-import { historicalReadSummary, blockerLabel, inventoryRows, knownSupplyLink, mediaContentUrl, mediaReviewLabel, orderHandoff, orderPaymentText, publicBasisVersion, reasonIsDirty, restrictionConditions, reviewStateLabel, supplyFactText, supplyObjectLabel, type Detail, type MediaBinding, type QueueItem, type SupplyLinkedOrder, type SupplyWorkDetail, type SupplyWorkItem, type SupplyWorkPage, type SupplyWorkView, type SupplyQueryKind, type Version, type ZoomTarget } from "./supply-review/model";
+import { KIND_LABELS, groupConditions, versionText, rowHaffText, rowQuoteText, rowDepositText, rowGuaranteeCondensed, rowGuaranteeEligibilityText, rowFullPayout, rowListingStatus } from "./supply-accounts/account-list-model";
+import { ListPagination } from "@/components/admin-list/list-pagination";
+import { ConditionCheck, ReasonSummary, type CheckTarget } from "./supply-accounts/reason-summary";
+import { historicalReadSummary, blockerLabel, inventoryRows, knownSupplyLink, mediaContentUrl, mediaReviewLabel, orderHandoff, orderPaymentText, reasonIsDirty, restrictionConditions, reviewStateLabel, supplyFactText, supplyObjectLabel, type Detail, type MediaBinding, type QueueItem, type SupplyLinkedOrder, type SupplyWorkDetail, type SupplyWorkItem, type SupplyWorkPage, type SupplyWorkView, type SupplyQueryKind, type Version, type ZoomTarget } from "./supply-review/model";
 type Snapshot = Extract<SessionSnapshot, {
     authenticated: true;
 }>;
@@ -70,7 +71,7 @@ type Intent = {
 };
 const positions = new Map<string, Saved>();
 const views = [["all", "全部账号"], ["changes", "最近资料变更"], ["restricted", "运营限制"], ["paused", "号主暂停"], ["orders", "有关联订单"]] as const;
-const sections = [["situation", "当前情况"], ["changes", "资料与图片"], ["orders", "关联订单"], ["records", "操作记录"], ["archive", "完整档案"], ["review", "风险操作"]] as const;
+const sections = [["situation", "账号资料"], ["changes", "审核与图片"], ["orders", "关联订单"], ["records", "操作记录"], ["review", "风险操作"]] as const;
 const lookup = [["account", "账号业务编号 / 稳定ID"], ["legacy", "旧来源编号"], ["owner", "号主稳定ID / 旧用户ID"], ["nickname", "号主昵称"], ["link", "本站账号/订单链接"], ["order", "关联订单号"]] as const;
 const parseCursorHistory = (value: string | undefined): string[] => { try {
     const result = JSON.parse(value ?? "[]");
@@ -79,7 +80,7 @@ const parseCursorHistory = (value: string | undefined): string[] => { try {
 catch {
     return [];
 } };
-const emptyFilter: Filter = { view: "all", kind: "account", q: "", gameId: "", limit: "5", cursor: "" };
+const emptyFilter: Filter = { view: "all", kind: "account", q: "", gameId: "", limit: "20", cursor: "" };
 const fail = (error: unknown) => error instanceof AdminApiError && error.status === 409 ? "查询或确认上下文已变化，请回到首页或重新核对。" : friendlyError(error);
 export function SupplyListingReviewView(props: Props) {
     if (!hasPermission(props.snapshot, "supply.review.read"))
@@ -89,12 +90,12 @@ export function SupplyListingReviewView(props: Props) {
 }
 function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, initialQuery, onOpenPath, onQueryChange }: Props) {
     const identity = snapshot.adminUserId + "|" + snapshot.session.id, can = (permission: string) => hasPermission(snapshot, permission), saved = positions.get(identity);
-    const [filter, setFilter] = useState<Filter>(() => saved?.filter ?? { ...emptyFilter, view: views.some(v => v[0] === initialQuery.view) ? initialQuery.view as SupplyWorkView : "all", kind: lookup.some(k => k[0] === initialQuery.queryKind) ? initialQuery.queryKind as SupplyQueryKind : "account", q: initialQuery.q ?? "", gameId: initialQuery.gameId ?? "", limit: ["5", "20", "50"].includes(initialQuery.limit ?? "") ? initialQuery.limit! : "5", cursor: initialQuery.cursor ?? "" });
+    const [filter, setFilter] = useState<Filter>(() => saved?.filter ?? { ...emptyFilter, view: views.some(v => v[0] === initialQuery.view) ? initialQuery.view as SupplyWorkView : "all", kind: lookup.some(k => k[0] === initialQuery.queryKind) ? initialQuery.queryKind as SupplyQueryKind : "account", q: initialQuery.q ?? "", gameId: initialQuery.gameId ?? "", limit: ["5", "20", "50"].includes(initialQuery.limit ?? "") ? initialQuery.limit! : "20", cursor: initialQuery.cursor ?? "" });
     const [draftKind, setDraftKind] = useState<SupplyQueryKind>(saved?.filter.kind ?? filter.kind), [draftQ, setDraftQ] = useState(saved?.filter.q ?? filter.q);
     const [stack, setStack] = useState<string[]>(saved?.stack ?? parseCursorHistory(initialQuery.supplyCursorHistory)), [page, setPage] = useState<SupplyWorkPage>(), [listBusy, setListBusy] = useState(!initialAccountId), [listError, setListError] = useState<string>(), [queryError, setQueryError] = useState<string>();
     const origins = useRef<SupplyWorkPage["stationOrigins"] | undefined>(saved?.stationOrigins);
     const [detail, setDetail] = useState<SupplyWorkDetail>(), [detailBusy, setDetailBusy] = useState(Boolean(initialAccountId)), [detailError, setDetailError] = useState<string>(), [versionId, setVersionId] = useState<string | null>(initialQuery.versionId ?? null), [publicDraftAccount, setPublicDraftAccount] = useState<string | null>(null);
-    const [section, setSection] = useState<string>(sections.some(s => s[0] === initialQuery.context) ? initialQuery.context ?? "situation" : "situation"), [archiveTab, setArchiveTab] = useState<"data" | "media" | "history">("data");
+    const [section, setSection] = useState<string>(sections.some(s => s[0] === initialQuery.context) ? initialQuery.context! : "situation");
     const [reason, setReason] = useState(""), [checked, setChecked] = useState(false), [intent, setIntent] = useState<Intent>(), [busy, setBusy] = useState(false), [feedback, setFeedback] = useState<ActionFeedback>(), [readFailed, setReadFailed] = useState(false);
     const [versionChoice, setVersionChoice] = useState<{ id: string | null }>();
     const [zoom, setZoom] = useState<ZoomTarget>(), [copyNotice, setCopyNotice] = useState(""), [manualSummary, setManualSummary] = useState<string>(), [related, setRelated] = useState(""), [relatedItems, setRelatedItems] = useState<QueueItem[]>([]);
@@ -103,6 +104,10 @@ function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, i
     const zoomOrigin = useRef<HTMLElement | null>(null), zoomClose = useRef<HTMLButtonElement>(null);
     const [quick, setQuick] = useState<string | null>(null), savedViews = useSavedViews(snapshot.adminUserId);
     const listSeq = useRef(0), detailSeq = useRef(0), alive = useRef(true), actionLock = useRef(false), viewport = useRef<HTMLDivElement>(null);
+    const version = detail?.version, historical = detail?.supervision.historical ?? false;
+    const publicDefault = detail && !versionId && publicDraftAccount !== detail.account.id && !historical && detail.supervision.facts.publicBasis && version && detail.supervision.facts.publicBasis.id !== version.id ? detail.supervision.facts.publicBasis : null;
+    const contextSwitchBlocked = busy || detailBusy || Boolean(intent);
+    const switchVersionContext = (useDraft: boolean) => { if (!detail || contextSwitchBlocked || actionLock.current) return; setPublicDraftAccount(useDraft ? detail.account.id : null); };
     const closeZoom = useCallback(() => { setZoom(undefined); requestAnimationFrame(() => (zoomOrigin.current?.isConnected ? zoomOrigin.current : document.getElementById("supply-detail-title"))?.focus({ preventScroll: true })); }, []);
     const openZoom = (target: ZoomTarget, trigger?: HTMLElement) => { zoomOrigin.current = trigger ?? document.activeElement as HTMLElement | null; setZoom(target); };
     useEffect(() => { alive.current = true; return () => { alive.current = false; listSeq.current++; detailSeq.current++; }; }, []);
@@ -163,10 +168,7 @@ function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, i
         return; window.scrollTo(0, 0); document.getElementById("supply-detail-title")?.focus({ preventScroll: true }); }, [initialAccountId, detail?.account.id]);
     useEffect(() => { if (!feedback || intent)
         return; const target = viewport.current?.querySelector<HTMLElement>(".wf-result"); target?.focus({ preventScroll: true }); target?.scrollIntoView({ block: "center" }); }, [feedback, intent]);
-    useEffect(() => { if (section !== "archive" || !detail || !can("supply.duplicate.review"))
-        return; let active = true; void adminRequest<SupplyWorkPage>("/supply/listing-reviews?" + new URLSearchParams({ queryVersion: "3", gameId: detail.account.game_id, limit: "50" })).then(data => { if (active)
-        setRelatedItems(data.items.map(r => ({ id: r.id, game_id: detail.account.game_id, title: r.title, owner_name: r.ownerName, game_name: r.gameName, review_state: r.reviewState ?? "", sequence: r.sequence ?? "", owner_paused: r.facts.ownerPaused, staff_restricted: r.facts.staffRestricted }))); }).catch(() => { if (active)
-        setRelatedItems([]); }); return () => { active = false; }; }, [section, detail?.account.id, detail?.account.game_id, can("supply.duplicate.review")]);
+    useEffect(() => { if (section !== "changes" || !detail || !can("supply.duplicate.review")) return; let active = true; void adminRequest<SupplyWorkPage>("/supply/listing-reviews?" + new URLSearchParams({ queryVersion: "3", gameId: detail.account.game_id, limit: "50" })).then(data => { if (!active) return; setRelatedItems(data.items.map(r => ({ id: r.id, game_id: detail.account.game_id, title: r.title, owner_name: r.ownerName, game_name: r.gameName, review_state: r.reviewState ?? "", sequence: r.sequence ?? "", owner_paused: r.facts.ownerPaused, staff_restricted: r.facts.staffRestricted }))); }).catch(() => { if (active) setRelatedItems([]); }); return () => { active = false; }; }, [section, detail?.account.id, detail?.account.game_id, can("supply.duplicate.review")]);
     useEffect(() => { if (initialAccountId)
         return; onQueryChange({ view: filter.view, queryKind: filter.kind, q: filter.q, gameId: filter.gameId, limit: filter.limit, cursor: filter.cursor, supplyCursorHistory: JSON.stringify(stack) }); }, [filter, stack, initialAccountId]);
     const remember = (focus: string) => positions.set(identity, { filter, stack, scroll: viewport.current?.closest(".workspace-page")?.scrollTop ?? 0, windowScroll: window.scrollY, focus, contextKey: page?.contextKey ?? saved?.contextKey, stationOrigins: origins.current });
@@ -195,7 +197,7 @@ function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, i
             revision?: string;
         })?.revision, release: data.version?.releaseId, hash: data.version?.contentHash, historical: data.supervision.historical, media: assetId ? data.version?.declaration.mediaBindings.find(m => m.assetId === assetId) : undefined });
     const begin = (kind: "restriction" | "media" | "duplicate" | "APPROVE" | "REJECT", assetId?: string, decision?: "QUARANTINE" | "APPROVE") => {
-        if (!detail || detail.supervision.historical || readFailed || actionLock.current || intent?.unknown || !detail.version)
+        if (!detail || detail.supervision.historical || readFailed || actionLock.current || intent?.unknown || !detail.version || publicDefault && (kind === "media" || kind === "APPROVE" || kind === "REJECT"))
             return;
         const a = detail.account, v = detail.version;
         let path = "", body: Record<string, unknown> = {}, permission = "", title = "", consequence = "", success = "";
@@ -312,13 +314,13 @@ function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, i
             setDetailBusy(false);
     } };
     const image = (binding: MediaBinding | undefined, caption: string) => binding ? <Button variant="ghost" type="button" className="wf-image wf-review-image h-auto flex-col whitespace-normal p-0" aria-label={"放大核对 " + caption} onClick={event => openZoom({ src: mediaContentUrl(binding.assetId), alt: caption, caption }, event.currentTarget)}><img src={mediaContentUrl(binding.assetId)} alt={caption} loading="lazy"/><span>{caption} · {mediaReviewLabel(binding)} · 放大核对</span></Button> : <p className="wf-hint">未提供对应图片，不能视作证据已核齐。</p>;
-    const changeArchiveVersion = (id: string | null) => { if (busy || intent?.unknown) return; setIntent(undefined); setReason(""); setChecked(false); setVersionId(id); setVersionChoice(undefined); const query: Record<string, string> = { ...initialQuery, context: "archive" }; if (id) query.versionId = id; else delete query.versionId; onQueryChange(query); };
+    const changeArchiveVersion = (id: string | null) => { if (busy || intent?.unknown) return; setIntent(undefined); setReason(""); setChecked(false); setVersionId(id); setVersionChoice(undefined); const query: Record<string, string> = { ...initialQuery, context: "situation" }; if (id) query.versionId = id; else delete query.versionId; onQueryChange(query); };
     const checkTarget = (code: string): CheckTarget => { const owner = ["OWNER_UNAVAILABLE", "IDENTITY_REQUIRED", "ADULT_REQUIRED", "OWNER_PAUSED"], profile = ["RULE_CHANGED", "QUOTE_REQUIRED", "ACCEPTANCE_REQUIRED", "MEDIA_REQUIRED", "CONFIRMATION_OR_MEDIA_REQUIRED", "CURRENT_VERSION_MISSING", "PUBLICATION_REQUIRED", "ACCOUNT_NOT_PUBLISHABLE", "HISTORICAL_VERSION"];
         if (code === "STAFF_RESTRICTED") return { label: can("supply.restrict") ? "复核限制" : "查看记录", go: () => goSection(can("supply.restrict") ? "review" : "records") };
         if (owner.includes(code)) return detail?.supervision.ownerLink.state === "READY" ? { label: "查看号主", go: userTarget } : null;
         if (profile.includes(code)) return { label: "查看资料", go: () => goSection("changes") };
         if (code === "OCCUPIED" || code === "OCCUPANCY_UNKNOWN") return { label: "查看订单", go: () => goSection("orders") };
-        return { label: "查看档案", go: () => goSection("archive") }; };
+        return { label: "查看账号资料", go: () => goSection("situation") }; };
     const emptyState = <div className="p-8 text-center"><h2 className="text-base font-semibold">当前范围没有匹配账号</h2><p className="mt-1 text-muted-foreground">查询与视图已保留；不代表范围外或全平台没有账号。{filter.view === "restricted" ? "已解除的账号不再匹配运营限制视图，可返回全部账号核对剩余问题。" : ""}</p>{broaderMatch ? <p className="wf-hint">同一线索在“全部账号”视图下有匹配，被当前“{views.find(v => v[0] === filter.view)?.[1]}”视图条件过滤；可切换视图核对。</p> : null}</div>;
     const submitSearch = (event: React.FormEvent) => { event.preventDefault(); setQueryError(undefined); if (/(?:\+?86[\s-]*)?1[3-9](?:[\s-]*\d){9}/.test(draftQ)) {
         setQueryError("手机号请从用户管理按独立权限查找。");
@@ -336,7 +338,7 @@ function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, i
         const viewRow = (row: SupplyWorkItem, trigger?: HTMLElement) => { quickOrigin.current = trigger ?? document.getElementById("supply-open-" + row.id); remember("supply-open-" + row.id); setQuick(row.id); };
         const openFull = (row: SupplyWorkItem, context: string) => { setQuick(null); open(row.id, supplyObjectLabel(row), context); };
         return <div className="sa-page text-sm" ref={viewport}><header className="mb-4 flex flex-wrap items-start justify-between gap-3"><div><h1 id="supply-work-title" tabIndex={-1} className="text-2xl leading-9 font-semibold outline-none">账号供给</h1><p className="mt-0.5 text-muted-foreground">管理账号资料与接单条件</p></div><div className="text-right"><Button variant="outline" size="lg" onClick={() => setFilter({ ...filter })}><RefreshCw size={15}/>刷新列表</Button><p className="mt-2 text-xs text-muted-foreground">仅展示当前授权范围</p></div></header>
- <Tabs value={filter.view} onValueChange={value => { const v = value as SupplyWorkView; positions.delete(identity); setStack([]); setQuick(null); setFilter({ ...filter, view: v, cursor: "" }); onQueryChange({ view: v }); }} className="mb-4"><TabsList aria-label="供给工作视图" className="overflow-x-auto gap-5 [&>button]:shrink-0 [&>button]:whitespace-nowrap [&>button]:px-1">{views.map(([value, label]) => <TabsTrigger key={value} value={value}>{label}</TabsTrigger>)}<TabsTrigger value="rule" disabled title="需要后端新增筛选">待规则确认</TabsTrigger></TabsList></Tabs>
+ <Tabs value={filter.view} onValueChange={value => { const v = value as SupplyWorkView; positions.delete(identity); setStack([]); setQuick(null); setFilter({ ...filter, view: v, cursor: "" }); onQueryChange({ view: v }); }} className="mb-4"><TabsList aria-label="供给工作视图" className="overflow-x-auto gap-5 [&>button]:shrink-0 [&>button]:whitespace-nowrap [&>button]:px-1">{views.map(([value, label]) => <TabsTrigger key={value} value={value}>{label}</TabsTrigger>)}</TabsList></Tabs>
  <form className="sa-search flex flex-col gap-2 md:flex-row md:flex-wrap md:items-center" onSubmit={submitSearch}><div className="flex min-w-0 flex-1 items-center md:min-w-[380px]"><KindSelect kind={draftKind} onKind={setDraftKind}/><span className="sr-only">业务线索</span><Input className="h-9 min-w-0 flex-1 rounded-l-none" aria-label="业务线索" value={draftQ} maxLength={128} autoComplete="off" onChange={e => setDraftQ(e.target.value)} placeholder={"输入" + KIND_LABELS[draftKind] + "查找"}/><Button type="submit" size="lg" className="ml-2 px-4" disabled={listBusy}>查找</Button></div><div className="flex flex-wrap items-center gap-2"><SupplySelect label="游戏" className="w-44" value={filter.gameId} options={[{ value: "", label: "当前范围全部游戏" }, ...(page?.games ?? []).map(g => ({ value: g.id, label: g.name }))]} onValueChange={v => { positions.delete(identity); setStack([]); setFilter({ ...filter, gameId: v, cursor: "" }); }}/><MoreFilters/><SavedViewsMenu saved={savedViews} current={{ view: filter.view, kind: draftKind, q: draftQ.trim(), gameId: filter.gameId }} onLoad={v => { positions.delete(identity); setStack([]); setDraftKind(v.kind); setDraftQ(v.q); setFilter({ ...filter, view: v.view, kind: v.kind, q: v.q, gameId: v.gameId, cursor: "" }); }}/>{draftQ && <Button variant="ghost" type="button" size="lg" className="text-xs text-muted-foreground" onClick={() => { positions.delete(identity); setDraftQ(""); setStack([]); setFilter({ ...filter, q: "", cursor: "" }); setQueryError(undefined); }}>清除线索</Button>}</div></form>
  <KindHint q={draftQ} kind={draftKind} onKind={setDraftKind}/>
  {savedViews.notice && <p role="status" className="mt-1 text-xs text-amber-700 dark:text-amber-400">{savedViews.notice} <Button variant="link" type="button" className="underline" onClick={savedViews.dismiss}>知道了</Button></p>}
@@ -357,20 +359,15 @@ function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, i
    ) : (
      <>
        <div className="hidden overflow-hidden rounded-xl border md:block">
-         <Table className="sa-table w-full min-w-[1080px] text-sm">
+         <Table className="sa-table w-full min-w-[1040px] text-sm">
            <TableHeader>
              <TableRow className="border-b text-left text-xs text-muted-foreground">
-               <TableHead className="min-w-[240px] px-3 py-2 text-xs font-normal text-muted-foreground">账号</TableHead>
-               <TableHead className="px-3 py-2 text-xs font-normal tabular-nums text-muted-foreground">哈夫币</TableHead>
-               <TableHead className="px-3 py-2 text-xs font-normal text-muted-foreground">资源金额</TableHead>
-               <TableHead className="px-3 py-2 text-xs font-normal text-muted-foreground">押金</TableHead>
-               <TableHead className="px-3 py-2 text-xs font-normal text-muted-foreground">号主保证金</TableHead>
-               <TableHead className="px-3 py-2 text-xs font-normal text-muted-foreground">状态</TableHead>
-               <TableHead className="px-3 py-2 text-center text-xs font-normal text-muted-foreground">全额包赔（申报）</TableHead>
-               <TableHead className="px-3 py-2 text-xs font-normal text-muted-foreground">信息来源</TableHead>
-               <TableHead className="px-3 py-2 text-xs font-normal text-muted-foreground">账号创建时间</TableHead>
-               <TableHead className="px-3 py-2 text-xs font-normal text-muted-foreground">账号更新时间</TableHead>
-               <TableHead className="px-3 py-2 text-xs font-normal text-muted-foreground">资料排序时间</TableHead>
+               <TableHead className="min-w-[240px] px-3 py-2 text-xs font-normal text-muted-foreground">账号 / 号主</TableHead>
+               <TableHead className="px-3 py-2 text-xs font-normal text-muted-foreground">核心资产配置</TableHead>
+               <TableHead className="px-3 py-2 text-xs font-normal text-muted-foreground">租用条件</TableHead>
+               <TableHead className="px-3 py-2 text-xs font-normal text-muted-foreground">基础资源费 / 租客押金</TableHead>
+               <TableHead className="px-3 py-2 text-xs font-normal text-muted-foreground">业务状态</TableHead>
+               <TableHead className="px-3 py-2 text-xs font-normal text-muted-foreground">更新时间</TableHead>
                <TableHead className="w-24 px-3 py-2 text-xs font-normal text-muted-foreground">操作</TableHead>
              </TableRow>
            </TableHeader>
@@ -379,9 +376,9 @@ function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, i
                const label = supplyObjectLabel(row);
                const context = filter.view === "changes" ? "changes" : filter.view === "orders" ? "orders" : "situation";
                const status = rowListingStatus(row);
-               const infoSource = rowInfoSource(row);
                const quote = rowQuoteText(row);
                const payout = rowFullPayout(row);
+               const guarantee = rowGuaranteeCondensed(row);
                return (
                  <TableRow
                    key={row.id}
@@ -398,71 +395,33 @@ function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, i
                    }}
                    className={"cursor-pointer border-b align-middle outline-none transition-colors hover:bg-muted/50 focus-visible:bg-muted/50 focus-visible:shadow-[inset_3px_0_0_var(--ring)] " + (quick === row.id ? "bg-muted/60 " : "")}
                  >
-                   {/* 账号：名称 + 编号 + 当前行受权号主入口 */}
-                   <TableCell className="max-w-[280px] px-3 py-3 whitespace-normal">
+                   <TableCell className="max-w-[300px] px-3 py-2.5 whitespace-normal">
                      <div className="break-words font-semibold">{row.title ?? "资料未提供"}</div>
-                     <div className="mt-0.5">
-                       <IdLine row={row} onOpenOwner={rowOwnerTarget}/>
-                     </div>
-                     {row.facts.historicalRead ? <p className="mt-1 text-xs text-muted-foreground">{historicalReadSummary(row.facts.historicalRead)}</p> : null}
-                     <div className="mt-1 text-xs">
-                       <ReasonCell facts={row.facts} onMore={() => viewRow(row)}/>
-                     </div>
-                     {row.facts.legacyNumbers.length > 1 && (
-                       <div className="mt-0.5 text-[11px] text-amber-900 dark:text-amber-300">
-                         多个旧来源号，需按来源核对
-                       </div>
-                     )}
+                     <div className="mt-0.5"><IdLine row={row} onOpenOwner={rowOwnerTarget}/></div>
+                     {row.facts.historicalRead ? <p className="mt-0.5 text-[11px] text-muted-foreground">{historicalReadSummary(row.facts.historicalRead)}</p> : null}
+                     {row.facts.legacyNumbers.length > 1 ? <div className="mt-0.5 text-[11px] text-amber-900 dark:text-amber-300">多个旧来源号，需按来源核对</div> : null}
                    </TableCell>
-
-                   {/* 当前库存优先，历史显示量显式带来源 */}
-                   <TableCell className="px-3 py-3 font-mono font-medium tabular-nums text-amber-900 dark:text-amber-300">
-                     {rowHaffText(row)}
+                   <TableCell className="px-3 py-2.5 whitespace-normal">
+                     <div className="font-mono font-medium tabular-nums text-amber-900 dark:text-amber-300">{rowHaffText(row)}</div>
+                     <div className="mt-0.5 text-xs text-muted-foreground">包赔申报：{payout.label} · {versionText(row.sequence)}</div>
                    </TableCell>
-
-                   {/* 当前冻结报价优先，历史租金与物资费分别显示 */}
-                   <TableCell className="px-3 py-3 tabular-nums">
-                     <div className="font-semibold text-primary">{quote.total}</div>
-                     <div className="max-w-60 whitespace-normal text-[10px] text-muted-foreground">{quote.note}</div>
+                   <TableCell className="px-3 py-2.5 whitespace-normal text-xs text-muted-foreground">
+                     <div>{guarantee ?? "—"}</div>
+                     {guarantee ? <div className="mt-0.5">{rowGuaranteeEligibilityText(row)}</div> : null}
                    </TableCell>
-
-                   {/* 历史押金只补显示，不替代当前申报或租客最终应付 */}
-                   <TableCell className="px-3 py-3 tabular-nums text-muted-foreground">
-                     {rowDepositText(row)}
+                   <TableCell className="px-3 py-2.5 whitespace-normal">
+                     <div className="font-semibold tabular-nums text-primary">{quote.total}</div>
+                     <div className="text-xs text-muted-foreground">租客基础押金 {rowDepositText(row)}</div>
+                     <div className="max-w-60 text-[10px] text-muted-foreground">{quote.note}</div>
                    </TableCell>
-
-                   {/* 号主保证金：要求与资格分开，待核不等于未缴 */}
-                   <TableCell className="px-3 py-3 tabular-nums text-muted-foreground">
-                     <div>{rowGuaranteeRequirementText(row)}</div>
-                     <div className="text-[10px]">{rowGuaranteeEligibilityText(row)}</div>
-                   </TableCell>
-
-                   <TableCell className="px-3 py-3">
+                   <TableCell className="px-3 py-2.5 whitespace-normal">
                      <InlineStatus tone={status.tone}>{status.label}</InlineStatus>
+                     <div className="mt-1 text-xs"><ReasonCell facts={row.facts} onMore={() => viewRow(row)}/></div>
                    </TableCell>
-
-                   {/* 全额包赔申报三态 */}
-                   <TableCell className="px-3 py-3 text-center text-xs">
-                     {payout.label}
-                   </TableCell>
-
-                   <TableCell className="px-3 py-3 text-xs text-muted-foreground">
-                     {infoSource || "—"}
-                   </TableCell>
-
-                   <TableCell className="px-3 py-3 text-muted-foreground">
-                     {row.accountCreatedAt ? <TimeText iso={row.accountCreatedAt} label="账号创建时间"/> : <span className="text-xs">未提供</span>}
-                   </TableCell>
-
-                   <TableCell className="px-3 py-3 text-muted-foreground">
+                   <TableCell className="px-3 py-2.5 text-muted-foreground">
                      {row.accountUpdatedAt ? <TimeText iso={row.accountUpdatedAt} label="账号更新时间"/> : <span className="text-xs">未提供</span>}
                    </TableCell>
-
-                   <TableCell className="px-3 py-3 text-muted-foreground">
-                     <TimeText iso={row.sortAt} label="资料排序时间"/>
-                   </TableCell>
-
-                   <TableCell className="w-24 px-2 py-2.5">
+                   <TableCell className="w-24 px-2 py-2">
                      <RowActions row={row} onFull={() => open(row.id, label, context)}/>
                    </TableCell>
                  </TableRow>
@@ -470,7 +429,7 @@ function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, i
              })}
              {!page?.items.length && (
                <TableRow>
-                 <TableCell colSpan={12}>{emptyState}</TableCell>
+                 <TableCell colSpan={7}>{emptyState}</TableCell>
                </TableRow>
              )}
            </TableBody>
@@ -482,20 +441,17 @@ function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, i
      </>
    )}
  </div>
- <footer className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-   <span>{page ? "本页 " + page.items.length + " 条 · 总数未提供" : "本页数量未提供"} · 每页 <SupplySelect label="每页条数" className="h-9 w-16" value={filter.limit} options={["5", "20", "50"].map(n => ({ value: n, label: n }))} onValueChange={v => { positions.delete(identity); setStack([]); setFilter({ ...filter, limit: v, cursor: "" }); }}/></span>
-   <div className="flex items-center gap-2">
-     <Button variant="outline" size="lg" disabled={!stack.length || listBusy} onClick={() => { positions.delete(identity); const prior = [...stack], cursor = prior.pop()!; setStack(prior); setFilter({ ...filter, cursor }); }}>上一页</Button>
-     <span>第 {stack.length + 1} 页</span>
-     <Button variant="outline" size="lg" disabled={!page?.nextCursor || listBusy} onClick={() => { positions.delete(identity); setStack([...stack, filter.cursor]); setFilter({ ...filter, cursor: page!.nextCursor! }); }}>下一页</Button>
-   </div>
+ <footer className="mt-3">
+   <ListPagination mode="cursor" pageSize={Number(filter.limit)} loadedCount={page?.items.length ?? 0} loading={listBusy} pageSizeOptions={[5, 20, 50]} itemLabel="个账号"
+     hasPrevious={stack.length > 0} hasNext={Boolean(page?.nextCursor)}
+     onPageSizeChange={v => { positions.delete(identity); setStack([]); setFilter({ ...filter, limit: String(v), cursor: "" }); }}
+     onPrevious={() => { positions.delete(identity); const prior = [...stack], cursor = prior.pop()!; setStack(prior); setFilter({ ...filter, cursor }); }}
+     onNext={() => { positions.delete(identity); setStack([...stack, filter.cursor]); setFilter({ ...filter, cursor: page!.nextCursor! }); }}/>
  </footer>
  {quickRow && (
    <QuickView
      row={quickRow}
      canRead={can("supply.review.read")}
-     canRestrict={can("supply.restrict")}
-     canOrders={can("order.read")}
      onClose={() => {
        setQuick(null);
        requestAnimationFrame(() => (quickOrigin.current?.isConnected ? quickOrigin.current : document.getElementById("supply-work-title"))?.focus());
@@ -507,23 +463,38 @@ function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, i
  {/* 批量下架/退还保证金与单账号上/下架、退款都没有正式合同，不提供假处置入口。 */}
 </div>;
     }
-    const version = detail?.version, original = detail?.supervision.restrictionHistory.items.find(e => e.restricted === true), currentMedia = version?.declaration.mediaBindings.find(m => m.purpose === "ACCOUNT_DISPLAY" && (!initialQuery.assetId || m.assetId === initialQuery.assetId)), previous = detail?.supervision.previousVersion, previousMedia = detail?.supervision.originalRestrictionVersion?.declaration.mediaBindings.find(m => m.purpose === "ACCOUNT_DISPLAY"), historical = detail?.supervision.historical ?? false, restricted = detail?.account.staff_restricted ?? false;
-    const publicDefault = detail && !versionId && publicDraftAccount !== detail.account.id && !historical && detail.supervision.facts.publicBasis && version && detail.supervision.facts.publicBasis.id !== version.id ? detail.supervision.facts.publicBasis : null;
-    const archiveVersion = publicDefault ? publicBasisVersion(publicDefault) : version;
+    const original = detail?.supervision.restrictionHistory.items.find(e => e.restricted === true), currentMedia = version?.declaration.mediaBindings.find(m => m.purpose === "ACCOUNT_DISPLAY" && (!initialQuery.assetId || m.assetId === initialQuery.assetId)), previous = detail?.supervision.previousVersion, previousMedia = detail?.supervision.originalRestrictionVersion?.declaration.mediaBindings.find(m => m.purpose === "ACCOUNT_DISPLAY"), restricted = detail?.account.staff_restricted ?? false;
     return <section className="wf-detail" ref={viewport}><div className="mb-3"><Button variant="ghost" className="-ml-2.5" onClick={back} disabled={busy || intent?.unknown}><ArrowLeft size={15}/>返回账号供给</Button></div>
  {feedback && !intent && <Alert tabIndex={-1} variant={feedback.kind === "error" ? "destructive" : "success"} role={feedback.kind === "error" ? "alert" : "status"}>{feedback.kind === "error" ? <TriangleAlert aria-hidden /> : <CheckCircle2 aria-hidden />}<AlertTitle>{feedback.message}</AlertTitle>{readFailed ? <AlertDescription>当前详情未读到，只重读本次结果。</AlertDescription> : null}{readFailed ? <AlertAction><Button variant="outline" disabled={detailBusy} onClick={() => void reread()}>只重读本次结果</Button></AlertAction> : null}</Alert>}
  {detailBusy && !detail ? <div className="wf-empty" aria-busy="true">正在读取账号详情…</div> : detailError && !detail ? <Alert variant="destructive"><TriangleAlert aria-hidden /><AlertTitle>本次详情未读到</AlertTitle><AlertDescription>{detailError}</AlertDescription><AlertAction><Button onClick={() => void reread()} disabled={busy}>重读当前账号</Button></AlertAction></Alert> : detail && <>
- <header className="mb-3 flex flex-wrap items-start justify-between gap-3 text-sm"><div className="min-w-0"><h1 id="supply-detail-title" tabIndex={-1} className="text-xl font-semibold outline-none">{(publicDefault ? archiveVersion : version)?.declaration.title ?? "当前资料未提供"} <span className="mx-1 font-normal text-muted-foreground">/</span><span className="font-semibold">{objectLabel}</span></h1><p className="mt-1 text-muted-foreground">号主：{detail.ownerName}<span className="mx-1.5">·</span>{publicDefault ? "对外版本 " + publicDefault.id : version ? "第" + version.sequence + "版 · " + reviewStateLabel(version.reviewState) : "版本未提供"}<span className="mx-1.5">·</span>修订 {detail.account.revision}</p></div><div className="flex flex-wrap gap-2">{detail.supervision.ownerLink.state === "READY" && <Button variant="outline" onClick={userTarget}>查看号主资料</Button>}<Button variant="outline" onClick={() => void copy()}>复制核对摘要</Button></div></header>
+ <header className="mb-3 flex flex-wrap items-start justify-between gap-3 text-sm"><div className="min-w-0"><h1 id="supply-detail-title" tabIndex={-1} className="text-xl font-semibold outline-none">{(publicDefault ? publicDefault.title : version?.declaration.title) ?? "当前资料未提供"} <span className="mx-1 font-normal text-muted-foreground">/</span><span className="font-semibold">{objectLabel}</span></h1><p className="mt-1 text-muted-foreground">号主：{detail.ownerName}<span className="mx-1.5">·</span>{publicDefault ? "对外版本 " + publicDefault.id : version ? "第" + version.sequence + "版 · " + reviewStateLabel(version.reviewState) : "版本未提供"}<span className="mx-1.5">·</span>修订 {detail.account.revision}</p></div><div className="flex flex-wrap gap-2">{detail.supervision.ownerLink.state === "READY" && <Button variant="outline" onClick={userTarget}>查看号主资料</Button>}<Button variant="outline" onClick={() => void copy()}>复制核对摘要</Button></div></header>
  {historical && <div className="wf-notice" role="status"><p>正在查看历史版本，所有处置关闭。业务情况仍指当前账号。</p><Button variant="outline" onClick={() => { setVersionId(null); setChecked(false); setReason(""); const query: Record<string, string> = { ...initialQuery, context: section }; delete query.versionId; onQueryChange(query); }}>回到当前资料</Button></div>}
- {(() => { const g = groupConditions(detail.supervision.facts), f = detail.supervision.facts; return <div className={"mb-4 flex flex-wrap items-center justify-between gap-2 rounded-lg px-4 py-3 text-sm " + (f.newOrders ? "bg-emerald-500/10" : "bg-amber-500/10")} role="status"><div className="flex flex-wrap items-center gap-x-4 gap-y-1 font-semibold"><span>{f.newOrders === null ? "新单资格待核" : f.newOrders ? "可接新单" : "不可接新单"}</span><span className="opacity-30">|</span><span>{g.blocked.length} 项阻塞{g.pending.length ? "、" + g.pending.length + " 项待核" : ""}</span><span className="opacity-30">|</span><span className="font-medium">{f.publicVisible === null ? "公开状态待核" : f.publicVisible ? "当前公开展示" : "当前未公开"}</span></div><span className="text-xs text-muted-foreground">解除单项条件不代表账号可以接单</span></div>; })()}
- {section === "review" ? <div className="mb-4 flex items-center justify-between border-b pb-2 text-sm"><span className="font-semibold">风险操作 · {restricted ? "复核已有限制" : "新增运营限制"}</span><Button variant="ghost" size="sm" disabled={busy || intent?.unknown} onClick={() => goSection("situation")}>返回当前情况</Button></div> : <Tabs value={section} onValueChange={v => goSection(String(v))} className="mb-4"><TabsList aria-label="账号核对分区" className="overflow-x-auto gap-5 [&>button]:shrink-0 [&>button]:px-1">{sections.filter(([key]) => key !== "review").map(([key, label]) => <TabsTrigger key={key} value={key}>{label}</TabsTrigger>)}</TabsList></Tabs>}
- {section === "situation" && <div className="grid gap-4 text-sm lg:grid-cols-[minmax(0,1fr)_340px]"><ConditionCheck facts={detail.supervision.facts} target={checkTarget}/><div className="grid content-start gap-3"><FactsCard version={version}/>{detail.supervision.facts.historicalRead ? <p className="text-xs text-muted-foreground">{historicalReadSummary(detail.supervision.facts.historicalRead)}。历史资料不替代当前可租资格，完整记录见档案。</p> : null}<Card size="sm" className="px-4"><Collapsible><CollapsibleTrigger className="group flex w-full items-center justify-between rounded-sm text-left font-semibold outline-none focus-visible:ring-3 focus-visible:ring-ring/50">数据来源与旧编号<span aria-hidden="true" className="text-muted-foreground transition-transform group-data-[panel-open]:rotate-90">›</span></CollapsibleTrigger><CollapsibleContent keepMounted className="data-[closed]:hidden"><dl className="mt-3 grid gap-2"><div><dt className="text-xs text-muted-foreground">已知来源</dt><dd>{detail.supervision.facts.sources.length ? detail.supervision.facts.sources.map(s => s.sourceSystem + "/" + s.sourceEntity + " · " + s.sourceId + "（旧编号：" + (s.businessNo ?? "待核") + "）").join("；") : "未记录旧来源"}</dd></div><div><dt className="text-xs text-muted-foreground">旧业务编号</dt><dd>{detail.supervision.facts.legacyNumbers.length ? detail.supervision.facts.legacyNumbers.join("、") : "未记录旧业务编号"}</dd></div></dl></CollapsibleContent></Collapsible></Card><Card size="sm" className="gap-2 px-4"><h2 className="font-semibold">处理工具</h2><div className="grid gap-1.5"><Button variant="link" type="button" className="text-left hover:underline" onClick={() => goSection("changes")}>查看相关资料与图片 ›</Button><Button variant="link" type="button" className="text-left hover:underline" onClick={() => goSection("orders")}>核对关联订单 ›</Button>{detail.supervision.ownerLink.state === "READY" && <Button variant="link" type="button" className="text-left hover:underline" onClick={userTarget}>查看号主与关联资料 ›</Button>}</div>{can("supply.restrict") && !historical && <div className="mt-3 border-t pt-3"><div className="text-xs text-muted-foreground">风险操作</div><Button variant="outline" size="lg" type="button" aria-label={restricted ? "复核已有限制" : "新增运营限制"} className="mt-1.5 w-full justify-between px-3 text-left" onClick={() => goSection("review")}>{restricted ? "复核已有限制" : "新增运营限制"}<span aria-hidden="true">›</span></Button></div>}</Card><p className="text-xs text-muted-foreground">关联订单仅展示当前授权范围内的结果。</p></div></div>}
+ {(() => { const g = groupConditions(detail.supervision.facts), f = detail.supervision.facts; const abnormal = g.blocked.length > 0 || g.pending.length > 0 || f.newOrders !== true; return abnormal ? <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-amber-500/10 px-4 py-2.5 text-sm" role="status"><div className="flex flex-wrap items-center gap-x-4 gap-y-1 font-semibold"><span>{f.newOrders === null ? "新单资格待核" : f.newOrders ? "可接新单" : "不可接新单"}</span><span>{g.blocked.length} 项阻塞{g.pending.length ? "、" + g.pending.length + " 项待核" : ""}</span><span className="font-medium">{f.publicVisible === null ? "公开状态待核" : f.publicVisible ? "当前公开展示" : "当前未公开"}</span></div><span className="text-xs text-muted-foreground">各项独立读取，解除一项不代表可接单</span></div> : <p className="mb-3 text-xs text-muted-foreground" role="status">当前无接新单阻塞 · {f.publicVisible ? "公开展示中" : "当前未公开"} · 资料与资源如下</p>; })()}
+ {section === "review" ? <div className="mb-4 flex items-center justify-between border-b pb-2 text-sm"><span className="font-semibold">风险操作 · {restricted ? "复核已有限制" : "新增运营限制"}</span><Button variant="ghost" size="sm" disabled={busy || intent?.unknown} onClick={() => goSection("situation")}>返回账号资料</Button></div> : <Tabs value={section} onValueChange={v => goSection(String(v))} className="mb-4"><TabsList aria-label="账号核对分区" className="overflow-x-auto gap-5 [&>button]:shrink-0 [&>button]:px-1">{sections.filter(([key]) => key !== "review").map(([key, label]) => <TabsTrigger key={key} value={key}>{label}</TabsTrigger>)}</TabsList></Tabs>}
+ {section === "situation" && <div className="grid gap-4 text-sm">
+   {groupConditions(detail.supervision.facts).blocked.length ? <ConditionCheck facts={detail.supervision.facts} target={checkTarget}/> : null}
+   {publicDefault ? <div className="space-y-3">
+     <PublicBasisView basis={publicDefault}/>
+     <div className="flex flex-wrap gap-2"><Button variant="outline" disabled={contextSwitchBlocked} onClick={() => switchVersionContext(true)}>查看当前草稿</Button>{detail.supervision.ownerLink.state === "READY" && <Button variant="outline" onClick={userTarget}>查看号主资料</Button>}<Button variant="outline" onClick={() => goSection("orders")}>查看关联订单</Button></div>
+   </div> : version ? <div className="space-y-3">
+     <div className="flex flex-wrap gap-2">{publicDraftAccount === detail.account.id && detail.supervision.facts.publicBasis ? <Button variant="outline" disabled={contextSwitchBlocked} onClick={() => switchVersionContext(false)}>回到对外版本</Button> : null}{detail.supervision.ownerLink.state === "READY" && <Button variant="outline" onClick={userTarget}>查看号主资料</Button>}<Button variant="outline" onClick={() => goSection("orders")}>查看关联订单</Button>{can("supply.restrict") && !historical ? <Button variant="outline" onClick={() => goSection("review")}>{restricted ? "复核已有限制" : "新增运营限制"}</Button> : null}</div>
+     {!publicDraftAccount && detail.supervision.facts.publicVisible === false ? <p className="text-xs text-muted-foreground" role="status">当前没有对外版本。下面是当前资料，不是租客页面。</p> : null}
+     {!publicDraftAccount && detail.supervision.facts.publicVisible === true && !detail.supervision.facts.publicVersionId ? <p className="text-xs text-muted-foreground" role="status">这次公开读取没有版本号；下面的当前资料不能当作租客看到的版本。</p> : null}
+     {!publicDraftAccount && detail.supervision.facts.publicVersionId && version.id === detail.supervision.facts.publicVersionId ? <p className="text-xs text-muted-foreground" role="status">租客看到的就是当前版本 {version.id}。</p> : null}
+     <AccountCompleteView detail={detail} version={version} historicalRead={detail.supervision.facts.historicalRead}
+       canReviewMedia={!historical && can("supply.review.decide")} busy={busy || readFailed} reasonReady={reason.trim().length >= 2}
+       onZoom={openZoom} onQuarantine={id => begin("media", id, "QUARANTINE")} onRestore={id => begin("media", id, "APPROVE")}
+       onSelectVersion={id => { if (busy || intent?.unknown) return; if (reasonIsDirty(reason)) { setVersionChoice({ id }); return; } changeArchiveVersion(id); }}
+       versionId={versionId} onRefresh={() => void reread()} refreshing={detailBusy}
+       actions={!historical && version.reviewState === "SUBMITTED" && can("supply.review.decide") ? <><Button variant="outline" disabled={busy || readFailed} onClick={() => begin("APPROVE")}>通过历史审核</Button><Button variant="outline" disabled={busy || readFailed} onClick={() => begin("REJECT")}>退回历史审核</Button></> : undefined}/>
+     <Collapsible className="text-xs text-muted-foreground"><CollapsibleTrigger className="group flex w-full items-center justify-between rounded-sm border-t pt-2 text-left font-medium outline-none focus-visible:ring-3 focus-visible:ring-ring/50">数据来源与旧编号<span aria-hidden="true" className="transition-transform group-data-[panel-open]:rotate-90">›</span></CollapsibleTrigger><CollapsibleContent keepMounted className="mt-2 data-[closed]:hidden"><dl className="grid gap-1.5"><div><dt>已知来源</dt><dd>{detail.supervision.facts.sources.length ? detail.supervision.facts.sources.map(s => s.sourceSystem + "/" + s.sourceEntity + " · " + s.sourceId + "（旧编号：" + (s.businessNo ?? "待核") + "）").join("；") : "未记录旧来源"}</dd></div><div><dt>旧业务编号</dt><dd>{detail.supervision.facts.legacyNumbers.length ? detail.supervision.facts.legacyNumbers.join("、") : "未记录旧业务编号"}</dd></div></dl></CollapsibleContent></Collapsible>
+   </div> : <p className="wf-empty">本账号尚无资料版本，其他对象事实仍可核对。</p>}
+ </div>}
  {section === "records" && <div className="grid gap-4 text-sm"><section><h2 className="mb-2 text-base font-semibold">运营限制记录</h2>{detail.supervision.restrictionHistory.state === "NOT_RECORDED" ? <p className="text-muted-foreground">限制历史未提供</p> : detail.supervision.restrictionHistory.items.length ? <ul className="divide-y">{detail.supervision.restrictionHistory.items.map(e => <li key={e.id} className="flex flex-wrap justify-between gap-2 py-2"><span>{e.restricted === true ? "施加限制" : e.restricted === false ? "解除限制" : "处置状态未记录"} · {e.reason ?? "原因未记录"}</span><span className="text-xs text-muted-foreground">{e.actorName ?? "处理人未记录"} · {formatDate(e.occurredAt)}</span></li>)}</ul> : <p className="text-muted-foreground">最近 {detail.supervision.restrictionHistory.limit} 条已记录事件中没有限制事件。</p>}</section><section><h2 className="mb-2 text-base font-semibold">资料版本</h2>{detail.supervision.changes ? <p>相对第{detail.supervision.changes.previousSequence}版{detail.supervision.changes.changed ? "有资料变化" : "无资料变化"}。<Button variant="link" type="button" className="ml-2 hover:underline" onClick={() => goSection("changes")}>查看差异 ›</Button></p> : <p className="text-muted-foreground">没有更早的资料版本记录。</p>}</section></div>}
- {section === "changes" && <div className="grid gap-4 text-sm lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]"><Card size="sm" className="min-w-0 px-4"><h2 className="text-base font-semibold">本版申报与对应图片</h2>{version ? <><Table className="text-sm"><TableHeader><TableRow><TableHead>申报项</TableHead><TableHead>{previous ? "前版 " + previous.sequence : "前版未提供"}</TableHead><TableHead>当前第{version.sequence}版</TableHead></TableRow></TableHeader><TableBody>{inventoryRows(version, detail.previousDeclaration, detail.previousPresentation?.items).map(row => <TableRow key={row.itemId}><TableHead>{row.name} · {row.unit}</TableHead><TableCell>{row.previous}</TableCell><TableCell>{row.current}</TableCell></TableRow>)}</TableBody></Table>{image(currentMedia, "本版相关展示图")}<p className="wf-hint">前版差异来自记录的资料版本，不作自动风险判断；完整字段在档案中核对。</p></> : <p>当前没有资料版本，不能编造库存或图片。</p>}</Card><Card size="sm" className="min-w-0 px-4"><h2 className="text-base font-semibold">核对结论与处理</h2>{currentMedia && can("supply.review.decide") ? <><label className="grid gap-1.5 text-sm font-medium">本次图片核对说明<Textarea aria-label="本次图片核对说明" value={reason} disabled={historical || readFailed || busy} onChange={e => setReason(e.target.value)} maxLength={500}/></label><Button variant="destructive" disabled={historical || readFailed || busy || reason.trim().length < 2 || !currentMedia.mediaRevision || !currentMedia.byteHash} onClick={() => begin("media", currentMedia.assetId, currentMedia.reviewState === "QUARANTINED" ? "APPROVE" : "QUARANTINE")}>{currentMedia.reviewState === "QUARANTINED" ? "核对后恢复本图" : "确认前核对并隔离本图"}</Button><p className="wf-hint">确认绑定当前账号修订、资料版、图片修订与字节摘要；其他阻断仍独立核对。</p></> : <p>{currentMedia ? "当前没有图片处置权限，可核对并交受权人员处理。" : initialQuery.assetId ? "所选图片未绑定当前版本，只能核对历史/未绑定来源；合法后续处理合同尚待补齐。" : "没有可处置的当前展示图。"}来源缺失不认定图文正确。</p>}<div className="wf-task-actions">{detail.supervision.ownerLink.state === "READY" && <Button variant="outline" onClick={userTarget}>查看当前号主资料</Button>}<Button variant="outline" onClick={() => void copy()}>复制修订核对摘要</Button></div></Card></div>}
+ {section === "changes" && <div className="grid gap-4 text-sm lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]"><Card size="sm" className="min-w-0 px-4"><h2 className="text-base font-semibold">本版申报与对应图片</h2>{publicDefault ? <PublicBasisView basis={publicDefault}/> : version ? <><Table className="text-sm"><TableHeader><TableRow><TableHead>申报项</TableHead><TableHead>{previous ? "前版 " + previous.sequence : "前版未提供"}</TableHead><TableHead>当前第{version.sequence}版</TableHead></TableRow></TableHeader><TableBody>{inventoryRows(version, detail.previousDeclaration, detail.previousPresentation?.items).map(row => <TableRow key={row.itemId}><TableHead>{row.name} · {row.unit}</TableHead><TableCell>{row.previous}</TableCell><TableCell>{row.current}</TableCell></TableRow>)}</TableBody></Table>{image(currentMedia, "本版相关展示图")}<p className="wf-hint">前版差异来自记录的资料版本，不作自动风险判断；完整字段在档案中核对。</p></> : <p>当前没有资料版本，不能编造库存或图片。</p>}</Card><Card size="sm" className="min-w-0 px-4"><h2 className="text-base font-semibold">核对结论与处理</h2>{publicDefault ? <Alert role="status"><AlertTitle>对外版本只读</AlertTitle><AlertDescription><p>正在查看对外版本 {publicDefault.id}。审核和图片处置属于当前草稿，请先明确切换后核对。</p><Button variant="outline" disabled={contextSwitchBlocked} onClick={() => switchVersionContext(true)}>查看当前草稿</Button></AlertDescription></Alert> : currentMedia && can("supply.review.decide") ? <><label className="grid gap-1.5 text-sm font-medium">本次图片核对说明<Textarea aria-label="本次图片核对说明" value={reason} disabled={historical || readFailed || busy} onChange={e => setReason(e.target.value)} maxLength={500}/></label><Button variant="destructive" disabled={historical || readFailed || busy || reason.trim().length < 2 || !currentMedia.mediaRevision || !currentMedia.byteHash} onClick={() => begin("media", currentMedia.assetId, currentMedia.reviewState === "QUARANTINED" ? "APPROVE" : "QUARANTINE")}>{currentMedia.reviewState === "QUARANTINED" ? "核对后恢复本图" : "确认前核对并隔离本图"}</Button><p className="wf-hint">确认绑定当前账号修订、资料版、图片修订与字节摘要；其他阻断仍独立核对。</p></> : <p>{currentMedia ? "当前没有图片处置权限，可核对并交受权人员处理。" : initialQuery.assetId ? "所选图片未绑定当前版本，只能核对历史/未绑定来源；合法后续处理合同尚待补齐。" : "没有可处置的当前展示图。"}来源缺失不认定图文正确。</p>}<div className="wf-task-actions">{detail.supervision.ownerLink.state === "READY" && <Button variant="outline" onClick={userTarget}>查看当前号主资料</Button>}<Button variant="outline" onClick={() => void copy()}>复制修订核对摘要</Button></div></Card>{can("supply.duplicate.review") && !historical ? <Card size="sm" className="min-w-0 px-4"><h2 className="text-base font-semibold">疑似重复线索</h2><p className="text-xs text-muted-foreground">仅记录人工判断，不自动合并账号或改变归属。</p>{detail.duplicateHints.map(hint => <p key={hint.id} className="text-sm">{hint.result === "DISTINCT" ? "已判断为不同账号" : hint.result === "POSSIBLE_SAME" ? "可能为同一账号" : "待核对"}：{hint.reason}</p>)}<label className="mt-2 grid gap-1 text-sm font-medium">关联队列中的另一个账号<SupplySelect label="关联队列中的另一个账号" value={related} onValueChange={setRelated} disabled={busy} options={[{ value: "", label: "请选择同游戏账号" }, ...relatedItems.filter(item => item.id !== detail.account.id && item.game_id === detail.account.game_id).map(item => ({ value: item.id, label: (item.title || "未命名资料") + " · " + item.owner_name }))]}/></label>{!currentMedia ? <p className="text-xs text-muted-foreground">记录线索需要至少一张账号图片作为证据。</p> : null}<Button variant="outline" size="sm" disabled={busy || !related || !currentMedia} onClick={() => begin("duplicate")}>记录关联线索</Button></Card> : null}</div>}
  {section === "review" && restricted && <div className="grid gap-4 text-sm lg:grid-cols-3"><section className="rounded-xl p-4 ring-1 ring-foreground/10 grid content-start gap-2"><h2 className="text-base font-semibold">复核已有限制 · 原限制与证据</h2><p className="font-medium">{original?.reason ?? (restricted ? detail.account.restriction_reason : "未提供已施加的原限制记录") ?? "原因未记录"}</p><p className="text-xs text-muted-foreground">{original?.actorName ?? "处理人未记录"} · {original ? formatDate(original.occurredAt) : "时间未记录"} · {original?.beforeRevision ? "原修订" + original.beforeRevision : "原修订未提供"}</p>{image(original?.versionId === version?.id ? currentMedia : previousMedia, "原版相关展示图")}<p className="text-xs text-muted-foreground">图片仅是对应版本资料，原审计未绑定具体图时不宣称它就是原限制依据。原记录保留。</p></section><section className="rounded-xl p-4 ring-1 ring-foreground/10 grid content-start gap-2"><h2 className="text-base font-semibold">本次资料：核对后再处置</h2><p>{version ? "当前第" + version.sequence + "版 · " + reviewStateLabel(version.reviewState) : "当前资料未提供"}</p>{image(currentMedia, "当前新版相关展示图")}<p className="text-xs text-muted-foreground">{summary!.reason}。查看图片不会自动完成复核。</p></section><section className="rounded-xl p-4 ring-1 ring-foreground/10 grid content-start gap-2"><h2 className="text-base font-semibold">核对结论与处置</h2>{can("supply.restrict") && version ? <div className="grid gap-3">{restricted && <div className="flex items-start gap-2"><Checkbox id="supply-restriction-check" className="mt-0.5" aria-label="已核对当前资料且原限制问题已解决" checked={checked} disabled={historical || readFailed || busy} onCheckedChange={setChecked}/><label htmlFor="supply-restriction-check">我已核对当前资料，确认原限制问题已解决</label></div>}<label className="grid gap-1.5 font-medium">{restricted ? "本次解除依据与说明" : "已核对的问题与限制原因"}<Textarea className="min-h-24 w-full rounded-lg border border-input bg-transparent px-2.5 py-2 text-sm font-normal outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50 dark:bg-input/30" aria-label={restricted ? "本次解除依据与说明" : "已核对的问题与限制原因"} value={reason} disabled={historical || readFailed || busy} onChange={e => setReason(e.target.value)} maxLength={500}/></label><Button variant="destructive" disabled={historical || readFailed || busy || reason.trim().length < 2 || restricted && !checked} onClick={() => begin("restriction")}>{restricted ? "核对完成，确认解除影响" : "核对后确认运营限制"}</Button><p className="text-xs text-muted-foreground">对象/版本/权限/原因在确认时再核。号主暂停、其他资格与既有订单独立保留。</p></div> : <p className="text-amber-700 dark:text-amber-400">当前只读监管依据，没有运营限制处置权限。</p>}<Collapsible className="border-t pt-2 text-xs text-muted-foreground"><CollapsibleTrigger render={<Button variant="ghost" size="sm" className="justify-start px-0"/>}>原记录与交接</CollapsibleTrigger><CollapsibleContent keepMounted className="mt-2 space-y-2 data-[closed]:hidden">{detail.supervision.restrictionHistory.items.map(e => <p key={e.id}>{e.restricted === true ? "施加限制" : e.restricted === false ? "解除限制" : "处置状态未记录"} · {e.reason ?? "原因未记录"} · {e.actorName ?? "处理人未记录"} · {formatDate(e.occurredAt)}</p>)}<p>显示最近{detail.supervision.restrictionHistory.limit}条相关成功事件；未记录不等于无历史问题。</p><Button variant="outline" onClick={() => void copy()}>复制给复核人员的摘要</Button></CollapsibleContent></Collapsible></section></div>}
  {section === "review" && !restricted && <div className="grid gap-4 text-sm lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]"><section className="rounded-xl p-4 ring-1 ring-foreground/10 grid content-start gap-2"><h2 className="text-base font-semibold">新增运营限制</h2><p className="text-xs text-muted-foreground">当前没有运营限制。发现违规、资料不实或纠纷时可限制接新单；进行中的订单按原订单处理。</p><ReasonSummary facts={detail.supervision.facts} heading="当前接单情况"/></section><section className="rounded-xl p-4 ring-1 ring-foreground/10 grid content-start gap-2"><h2 className="text-base font-semibold">限制原因与确认</h2>{can("supply.restrict") && version ? <div className="grid gap-3">{restricted && <div className="flex items-start gap-2"><Checkbox id="supply-restriction-check" className="mt-0.5" aria-label="已核对当前资料且原限制问题已解决" checked={checked} disabled={historical || readFailed || busy} onCheckedChange={setChecked}/><label htmlFor="supply-restriction-check">我已核对当前资料，确认原限制问题已解决</label></div>}<label className="grid gap-1.5 font-medium">{restricted ? "本次解除依据与说明" : "已核对的问题与限制原因"}<Textarea className="min-h-24 w-full rounded-lg border border-input bg-transparent px-2.5 py-2 text-sm font-normal outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50 dark:bg-input/30" aria-label={restricted ? "本次解除依据与说明" : "已核对的问题与限制原因"} value={reason} disabled={historical || readFailed || busy} onChange={e => setReason(e.target.value)} maxLength={500}/></label><Button variant="destructive" disabled={historical || readFailed || busy || reason.trim().length < 2 || restricted && !checked} onClick={() => begin("restriction")}>{restricted ? "核对完成，确认解除影响" : "核对后确认运营限制"}</Button><p className="text-xs text-muted-foreground">对象/版本/权限/原因在确认时再核。号主暂停、其他资格与既有订单独立保留。</p></div> : <p className="text-amber-700 dark:text-amber-400">当前只读监管依据，没有运营限制处置权限。</p>}<Collapsible className="border-t pt-2 text-xs text-muted-foreground"><CollapsibleTrigger render={<Button variant="ghost" size="sm" className="justify-start px-0"/>}>原记录与交接</CollapsibleTrigger><CollapsibleContent keepMounted className="mt-2 space-y-2 data-[closed]:hidden">{detail.supervision.restrictionHistory.items.map(e => <p key={e.id}>{e.restricted === true ? "施加限制" : e.restricted === false ? "解除限制" : "处置状态未记录"} · {e.reason ?? "原因未记录"} · {e.actorName ?? "处理人未记录"} · {formatDate(e.occurredAt)}</p>)}<p>显示最近{detail.supervision.restrictionHistory.limit}条相关成功事件；未记录不等于无历史问题。</p><Button variant="outline" onClick={() => void copy()}>复制给复核人员的摘要</Button></CollapsibleContent></Collapsible></section></div>}
  {section === "orders" && <div className="wf-order-context wf-work-face"><section><h2>当前账号与号主</h2><dl className="wf-definitions"><div><dt>当前号主</dt><dd>{detail.ownerName} · {detail.account.owner_user_id}</dd></div><div><dt>当前资料</dt><dd>{version ? "第" + version.sequence + "版" : "未提供"}</dd></div></dl><p className="wf-hint">本单原主体与冻结资料按订单接口保留，不用当前号主或资料覆盖。</p>{detail.supervision.ownerLink.state === "READY" && <Button variant="link" type="button" className="wf-link" onClick={userTarget}>查看当前号主<ArrowUpRight size={13}/></Button>}</section><section><h2>关联订单与履约入口</h2>{detail.supervision.orders.state === "DENIED" ? <p className="wf-warning">没有订单读取权限，原双方和订单数量不显示为0。</p> : <>{detail.supervision.orders.items?.map(order => <div className="wf-linked-order" key={order.id}><strong className="wf-order-no">{order.displayNo}</strong><p>{order.source.statusLabel ?? order.status} · {orderPaymentText(order.payment.state)}</p><p>本单原号主：{order.ownerName ?? "未提供"} · 租客：{order.renterName ?? "未提供"}</p><p>订单资料：{order.versionId ? "已冻结原版本" : "旧版本引用未完整，不能编造"}；{order.ownerUserId !== detail.account.owner_user_id ? "当前号主与本单原号主不同。" : "当前号主与本单原号主相同。"}</p><div className="wf-task-actions"><Button onClick={() => orderTarget(order.id, order.displayNo)}>进入本单完整详情</Button><Button variant="outline" onClick={() => void copy(order)}>复制本单核对摘要</Button></div></div>)}{!detail.supervision.orders.items?.length && <p>当前授权范围没有匹配订单；不能推定全平台没有历史订单。</p>}<p className="wf-hint">当前范围{detail.supervision.orders.total}条，显示最近5条；订单读取不等群、利润或资金权限。</p></>}</section></div>}
- {publicDefault ? <div className="mb-3"><PublicBasisView basis={publicDefault} /><Button type="button" variant="outline" onClick={() => setPublicDraftAccount(detail.account.id)}>查看当前草稿</Button></div> : null}{section === "archive" && !versionId && !publicDefault && detail.supervision.facts.publicBasis && version && detail.supervision.facts.publicBasis.id !== version.id ? <Button type="button" variant="outline" className="mb-3" onClick={() => setPublicDraftAccount(null)}>回到对外版本</Button> : null}{section === "archive" && !versionId && detail.supervision.facts.publicVisible === false ? <p className="mb-3 text-sm" role="status">当前没有对外版本。下面是当前资料，不是租客页面。</p> : null}{section === "archive" && !versionId && detail.supervision.facts.publicVisible === true && !detail.supervision.facts.publicVersionId ? <p className="mb-3 text-sm" role="status">这次公开读取没有版本号。下面的当前资料不能当作租客看到的版本。</p> : null}{section === "archive" && !versionId && detail.supervision.facts.publicVersionId && version?.id === detail.supervision.facts.publicVersionId ? <p className="mb-3 text-sm" role="status">租客看到的就是当前版本 {version.id}。</p> : null}{section === "archive" && (version ? <SupplyDetailPane entryNote={publicDefault ? "默认显示租客看到的版本。审批和图片处置仍只对当前版本，先打开当前草稿。" : undefined} detail={{ ...detail, version: archiveVersion ?? version } as Detail} historicalRead={detail.supervision.facts.historicalRead} loading={detailBusy} tab={archiveTab} onTabChange={setArchiveTab} versionId={versionId} onSelectVersion={id => { if (busy || intent?.unknown) return; if (reasonIsDirty(reason)) { setVersionChoice({ id }); return; } changeArchiveVersion(id); }} canDuplicate={!publicDefault && can("supply.duplicate.review")} canReviewMedia={!publicDefault && can("supply.review.decide")} queueItems={relatedItems} related={related} onRelatedChange={setRelated} busy={busy || readFailed} reasonReady={reason.trim().length >= 2} onRecordDuplicate={() => begin("duplicate")} onQuarantine={id => begin("media", id, "QUARANTINE")} onRestore={id => begin("media", id, "APPROVE")} onZoom={openZoom} releaseGeneration={null} onRefresh={() => void reread()} refreshing={detailBusy} actions={!publicDefault && version.reviewState === "SUBMITTED" && can("supply.review.decide") && !historical ? <><Button variant="outline" disabled={busy || readFailed} onClick={() => begin("APPROVE")}>通过历史审核</Button><Button variant="outline" disabled={busy || readFailed} onClick={() => begin("REJECT")}>退回历史审核</Button></> : undefined}/> : <p className="wf-empty">本账号尚无资料版本，其他对象事实仍可核对。</p>)}
  <footer className="wf-handoff"><Collapsible className="min-w-0 flex-1 text-xs text-muted-foreground"><CollapsibleTrigger render={<Button variant="ghost" size="sm" className="justify-start px-0 whitespace-normal"/>}>最近选择的核对摘要与手动交接</CollapsibleTrigger><CollapsibleContent keepMounted className="data-[closed]:hidden"><pre>{manualSummary ?? handoff}</pre><Button variant="outline" onClick={() => void copy()}><Copy size={15}/>复制业务核对摘要</Button></CollapsibleContent></Collapsible><Button variant="ghost" onClick={back} disabled={busy || intent?.unknown}>回原工作视图继续查看</Button>{copyNotice && <p role="status">{copyNotice}</p>}</footer></>}
  {intent && <SupplyActionDialog title={intent.title} objectLabel={intent.objectLabel} imageSrc={intent.assetId ? mediaContentUrl(intent.assetId) : undefined} stale={stale && !intent.unknown} unknown={Boolean(intent.unknown)} onRecheck={() => { if (busy || intent.unknown)
         return; setIntent(undefined); setChecked(false); setFeedback(undefined); void reread(); }} consequence={intent.consequence} conditions={intent.conditions} reason={String(intent.request?.body.reason ?? reason)} onReasonChange={value => { if (!intent.request)

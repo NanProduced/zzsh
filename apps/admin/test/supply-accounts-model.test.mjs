@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { suggestKind, kindHint, groupConditions, liftSummary, conditionHeadline, independentFacts, parseSavedViews, serializeSavedViews, rowListingStatus, nextStep, primaryReason } from '../src/views/supply-accounts/account-list-model.ts';
+import { suggestKind, kindHint, groupConditions, liftSummary, conditionHeadline, newOrdersReasonText, independentFacts, parseSavedViews, serializeSavedViews, rowListingStatus, nextStep, primaryReason } from '../src/views/supply-accounts/account-list-model.ts';
 
 const facts = (o = {}) => ({ publicVisible: true, publicSource: null, newOrders: true, reasons: [], ownerPaused: false, staffRestricted: false, occupancy: 'FREE', sources: [], legacyNumbers: [], ...o });
 
@@ -10,6 +10,17 @@ test('search type is only a suggestion; pure digits never become nickname', () =
   assert.equal(suggestKind('小鹿出租'), 'nickname');
   assert.equal(suggestKind('ZZ-D-1'), null);
   assert.equal(suggestKind('account_abc'), 'account');
+});
+
+test('empty reasons use the real newOrders tri-state, never “服务端未返回阻塞”', () => {
+  const empty = groupConditions(facts());
+  assert.equal(conditionHeadline(empty, true), '接新单条件：当前无阻塞');
+  assert.equal(conditionHeadline(empty, false), '接新单条件：存在阻塞，原因未提供');
+  assert.equal(conditionHeadline(empty, null), '接新单条件：待核');
+  assert.equal(newOrdersReasonText(true), '当前无接新单阻塞');
+  assert.equal(newOrdersReasonText(false), '不可接新单，原因未提供');
+  assert.equal(newOrdersReasonText(null), '接新单待核');
+  assert.ok(![true, false, null].some(value => conditionHeadline(empty, value).includes('服务端未返回阻塞')));
 });
 
 test('pending conditions are counted, never folded into satisfied', () => {

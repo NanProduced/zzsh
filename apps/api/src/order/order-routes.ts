@@ -288,6 +288,7 @@ export async function handleOrderAdminRoute(
         isBoss: access.isBoss,
         internalQuote: access.permissions.has("supply.quote.internal.read"),
         financeReadable: access.permissions.has(ADMIN_PERMISSION.financeRead),
+        permissions: access.permissions,
         authorizationKey: sha256Hex(JSON.stringify([context.userId,context.sessionId,access.isBoss,[...access.permissions].sort(),gameScopeSignature(gameScope)])),
       };
       if (path === "/") {

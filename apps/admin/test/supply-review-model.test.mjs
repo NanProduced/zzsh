@@ -32,9 +32,24 @@ import {
   reviewStateLabel,
   skinsText,
   orderTitleText,
+  publicBasisVersion,
   supplyObjectLabel,
   unitText,
 } from "../src/views/supply-review/model.ts";
+
+test("same public basis keeps its own release, ratio and line pricing metadata", () => {
+  const basis = { id: "v-public", releaseId: "rel-public", accountId: "a", title: "对外版", description: null, attributes: {}, presentation: { items: [{ id: "barrett", name: "巴雷特", unit: "ROUND" }] }, media: [], termOption: null, fullPayoutSelected: true, publishedAt: null,
+    quote: { resourceTotal: { amount: "100.00" }, termSeconds: "86400", unitAmountsInformational: true, baseRenterHaffRatioWanPerYuan: "12.5",
+      lines: [{ itemId: "barrett", quantity: "2", unit: "ROUND", unitQuantity: "10", buyerUnitAmount: { amount: "0.50" }, buyerAmount: { amount: "1.00" } }] } };
+  const version = publicBasisVersion(basis), line = quoteLineFacts(version)[0];
+  assert.equal(version.releaseId, "rel-public");
+  assert.equal(version.quote.unitAmountsInformational, true);
+  assert.equal(version.quote.baseRenterHaffRatioWanPerYuan, "12.5");
+  assert.equal(line.unitQuantity, "10");
+  assert.equal(line.buyerUnitAmount, "0.50");
+  assert.equal(line.amount, "1.00");
+  assert.equal(publicBasisVersion({ ...basis, releaseId: null }).releaseId, null);
+});
 
 test("mixed account numbers keep canonical ZZ/AC separate from numeric legacy sources", () => {
   assert.equal(accountNumberLabel("ZZ20261018000001"), "账号 ZZ20261018000001");

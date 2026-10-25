@@ -10,6 +10,12 @@ export interface OrderStagesSource {
   statusLabel?: string;
 }
 
+export type OrderProgress = {
+  asOfUtc: string | null;
+  opening: { state: 'NOT_STARTED' | 'AWAITING_CONFIRMATION' | 'CONFIRMED' | 'NOT_APPLICABLE' | 'UNKNOWN'; confirmedAtUtc: string | null };
+  ending: { state: 'NOT_STARTED' | 'PENDING_CLASSIFICATION' | 'PENDING_PARTIES' | 'PENDING_SUPPORT_REVIEW' | 'PENDING_APPROVAL' | 'READY' | 'POSTED' | 'NOT_APPLICABLE' | 'UNKNOWN'; currentVersionNo: number | null; postedAtUtc: string | null };
+};
+
 export interface OrderStagesInput {
   status: string;
   createdAt?: string | null;
@@ -17,6 +23,7 @@ export interface OrderStagesInput {
   source?: OrderStagesSource | null;
   cancelledAt?: string | null;
   cancelReason?: string | null;
+  progress?: OrderProgress | null;
 }
 
 export const ORDER_STATUS_LABELS: Record<string, string> = {
@@ -39,6 +46,26 @@ export const CANCEL_ACTOR_MAP: Record<string, string> = {
   RISK: '风控拦截取消',
 };
 
+export const OPENING_STATE_LABELS: Record<OrderProgress['opening']['state'], string> = {
+  CONFIRMED: '已开租',
+  AWAITING_CONFIRMATION: '待期初确认',
+  NOT_STARTED: '未开租',
+  NOT_APPLICABLE: '开租不适用',
+  UNKNOWN: '开租待核',
+};
+
+export const ENDING_STATE_LABELS: Record<OrderProgress['ending']['state'], string> = {
+  POSTED: '已过账',
+  PENDING_CLASSIFICATION: '待结束分类',
+  PENDING_PARTIES: '待双方确认',
+  PENDING_SUPPORT_REVIEW: '待客服复核',
+  PENDING_APPROVAL: '待批准',
+  READY: '待过账',
+  NOT_STARTED: '未进入结算',
+  NOT_APPLICABLE: '结算不适用',
+  UNKNOWN: '结束待核',
+};
+
 export function cancelReasonText(reason: string | null | undefined): string {
   if (!reason) return '';
   return CANCEL_ACTOR_MAP[reason] || reason;
@@ -51,18 +78,31 @@ export function orderPaymentLabel(payment?: OrderStagesPayment | null): string {
   return '支付事实待核';
 }
 
+function stageTone(state: string): 'done' | 'unknown' | 'none' | 'cancel' | 'active' {
+  if (state === 'CONFIRMED' || state === 'POSTED') return 'done';
+  if (state === 'AWAITING_CONFIRMATION' || state === 'PENDING_CLASSIFICATION' || state === 'PENDING_PARTIES' || state === 'PENDING_SUPPORT_REVIEW' || state === 'PENDING_APPROVAL' || state === 'READY') return 'active';
+  if (state === 'NOT_APPLICABLE') return 'cancel';
+  if (state === 'NOT_STARTED') return 'none';
+  return 'unknown';
+}
+
 /**
- * 订单流程节点图形组件（Stages）：
- * 统一主订单页、详情页与用户订单表的状态机呈现。
- * UNKNOWN 不冒充已开租/已支付；保留取消退款待核逻辑；取消主体转换为中文映射。
+ * 订单进度（Stages）：
+ * - NATIVE progress 只来自服务端同单 opening/intake/version/posting 事实；
+ * - 没有 progress 的旧调用（用户详情）保留未知，不默认已开租/已完成；
+ * - LEGACY 使用原 source.statusLabel，不套 NATIVE 流程。
  */
 export function OrderStages({
   order: o,
   rentalStarted,
+  progress,
+  variant = 'detail',
   className,
 }: {
   order: OrderStagesInput;
   rentalStarted?: unknown;
+  progress?: OrderProgress | null;
+  variant?: 'compact' | 'detail';
   className?: string;
 }) {
   const p = o.payment;
@@ -72,32 +112,57 @@ export function OrderStages({
     Icon: CreditCard,
     state: pState === 'RECORDED_PAID' ? 'done' : pState === 'UNKNOWN' || !pState ? 'unknown' : 'none',
   };
+  const legacy = o.source?.origin === 'LEGACY';
+  const opening = progress ? progress.opening.state : rentalStarted === true ? 'CONFIRMED' : rentalStarted === false ? 'NOT_STARTED' : null;
+  const ending = progress?.ending.state ?? null;
   const facts = o.status === 'CANCELLED'
     ? [
         { name: '创建', Icon: FileText, state: o.createdAt ? 'done' : 'unknown' },
         paid,
         { name: '取消', Icon: X, state: 'cancel' },
       ]
-    : [
-        { name: '创建', Icon: FileText, state: o.createdAt ? 'done' : 'unknown' },
-        paid,
-        {
-          name: rentalStarted === true ? '已开租' : rentalStarted === false ? '未开租' : '开租待核',
-          Icon: KeyRound,
-          state: rentalStarted === true ? 'done' : rentalStarted === false ? 'none' : 'unknown',
-        },
-        { name: '完成', Icon: Flag, state: o.status === 'COMPLETED' ? 'done' : 'none' },
-      ];
+    : legacy && !progress
+      ? [
+          { name: '创建', Icon: FileText, state: o.createdAt ? 'done' : 'unknown' },
+          paid,
+          { name: o.source?.statusLabel || ORDER_STATUS_LABELS[o.status] || '原来源阶段待核', Icon: Flag, state: 'active' },
+        ]
+      : [
+          { name: '创建', Icon: FileText, state: o.createdAt ? 'done' : 'unknown' },
+          paid,
+          {
+            name: opening ? OPENING_STATE_LABELS[opening] : '开租待核',
+            Icon: KeyRound,
+            state: stageTone(opening ?? 'UNKNOWN'),
+          },
+          {
+            name: ending ? ENDING_STATE_LABELS[ending] : o.status === 'COMPLETED' ? '已完成' : '完成',
+            Icon: Flag,
+            state: ending ? stageTone(ending) : o.status === 'COMPLETED' ? 'done' : 'none',
+          },
+        ];
 
-  const sourceLabel = o.source?.origin === 'LEGACY' ? `${o.source.statusLabel ?? '历史状态待核'} · ` : '';
+  const sourceLabel = legacy ? `${o.source?.statusLabel ?? '历史状态待核'} · ` : '';
   const paymentText = orderPaymentLabel(p);
   const refundText = o.status === 'CANCELLED' && pState === 'RECORDED_PAID' ? ' · 退款待核' : '';
   const cancelText = o.status === 'CANCELLED' && o.cancelReason ? ` · ${cancelReasonText(o.cancelReason)}` : '';
+  const compactText = progress
+    ? `${OPENING_STATE_LABELS[progress.opening.state]} · ${ENDING_STATE_LABELS[progress.ending.state]}`
+    : legacy
+      ? o.source?.statusLabel ?? ORDER_STATUS_LABELS[o.status] ?? '原来源阶段待核'
+      : o.status === 'COMPLETED' ? '开租待核 · 已完成' : '开租待核';
+
+  if (variant === 'compact') {
+    return <div className={`oc-stages oc-stages-compact ${className ?? ''}`.trim()}>
+      <strong className="oc-stage-label">{ORDER_STATUS_LABELS[o.status] ?? '状态待核'}</strong>
+      <small>{compactText} · {paymentText}{refundText}{cancelText}</small>
+    </div>;
+  }
 
   return (
     <div className={`oc-stages ${className ?? ''}`.trim()}>
       <strong className="oc-stage-label">{ORDER_STATUS_LABELS[o.status] ?? '状态待核'}</strong>
-      <ol aria-label="已知订单事实">
+      <ol aria-label="订单进度">
         {facts.map((f, i) => (
           <li key={f.name} className={f.state}>
             <span className="oc-stage-node">
@@ -110,9 +175,12 @@ export function OrderStages({
       </ol>
       <small>
         {sourceLabel}
+        {o.status === 'CANCELLED' && progress ? `${OPENING_STATE_LABELS[progress.opening.state]} · ${ENDING_STATE_LABELS[progress.ending.state]} · ` : ''}
         {paymentText}
         {refundText}
         {cancelText}
+        {progress?.ending.postedAtUtc ? ` · 过账时间 ${progress.ending.postedAtUtc}` : ''}
+        {progress?.opening.confirmedAtUtc ? ` · 开租时间 ${progress.opening.confirmedAtUtc}` : ''}
       </small>
     </div>
   );

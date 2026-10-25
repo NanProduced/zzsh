@@ -53,7 +53,7 @@ type Key={origin:string;id:string};
 type Statement={sql:string;values:unknown[]};
 /** The admin list reads its keys first and their records second; the harness
  *  answers both statements and records what was asked. */
-function orderClient(options:{keys?:Key[];total?:string;records?:Array<{origin:string;id:string;record:Record<string,any>}>;ready?:boolean;channelReady?:boolean;paymentSnapshot?:Record<string,unknown>;paymentReadyError?:Error;paymentReadError?:Error}={}){
+function orderClient(options:{keys?:Key[];total?:string;records?:Array<{origin:string;id:string;record:Record<string,any>}>;ready?:boolean;channelReady?:boolean;paymentSnapshot?:Record<string,unknown>;paymentReadyError?:Error;paymentReadError?:Error;progressRows?:Record<string,any>[];progressError?:Error;directoryRows?:Record<string,any>[]}={}){
  const statements:Statement[]=[];
  const client={query:async(sql:string,values:unknown[]=[])=>{
   statements.push({sql,values:[...values]});
@@ -69,6 +69,11 @@ function orderClient(options:{keys?:Key[];total?:string;records?:Array<{origin:s
   if(sql.includes("AS keys"))return {rows:[{total:options.total??String(options.keys?.length??0),keys:options.keys??[]}]};
   if(sql.includes("SELECT x.origin,x.record"))return {rows:(options.records??[]).filter(r=>values[0]&&(values[0] as string[]).includes(r.id))};
   if(sql.includes("SELECT x.origin,x.id,x.record"))return {rows:options.records??[]};
+  if(sql.includes("zzsh_order.rental_opening")){
+   if(options.progressError)throw options.progressError;
+   return {rows:options.progressRows??[]};
+  }
+  if(sql.includes('"phoneNumber" AS phone'))return {rows:options.directoryRows??[]};
   return {rows:[]};
  }} as unknown as PoolClient;
  return {client,statements};
@@ -190,7 +195,7 @@ test("detail passes only financeReadable to the five sensitive summary paths and
   assert.ok(objectRead>=0&&summaryRead>objectRead,"the scoped object must be read before its payment summary");
   assert.ok(statements[objectRead]!.sql.includes("admin_supply_scope"));
   assert.deepEqual(statements.find(s=>s.sql.includes("WITH scoped AS"))!.values,[native.id,null]);
-  for(const {sql} of statements){assert.match(sql.trimStart(),/^(SELECT|WITH)\b/);assert.doesNotMatch(sql,/\b(?:INSERT|UPDATE|DELETE|TRUNCATE|FOR UPDATE|pg_advisory)\b/i);}
+  for(const {sql} of statements){assert.match(sql.trimStart(),/^(SELECT|WITH|SAVEPOINT|RELEASE SAVEPOINT|ROLLBACK TO SAVEPOINT)\b/);assert.doesNotMatch(sql,/\b(?:INSERT|UPDATE|DELETE|TRUNCATE|FOR UPDATE|pg_advisory)\b/i);}
  }
 });
 
@@ -344,13 +349,177 @@ test('prepayment: 混源同ID页与详情按各自原件拆分，不增加SQL或
  const fresh=prepaymentNative(),old={...record,id:fresh.id},options={keys:[{origin:'NATIVE',id:fresh.id},{origin:'LEGACY',id:fresh.id}],total:'2',records:[{origin:'NATIVE',id:fresh.id,record:fresh},{origin:'LEGACY',id:fresh.id,record:old}]};
  const pageClient=orderClient(options),page=await queryAdminReadOrders(pageClient.client,viewer,{page:1,pageSize:20});
  assert.equal(page.items[0]!.prepaymentBreakdown.basis,'NATIVE_FROZEN_ORDER_QUOTE');assert.equal(page.items[0]!.prepaymentBreakdown.haffRental.amount,'99.00');
- assert.equal(page.items[1]!.prepaymentBreakdown.basis,'LEGACY_ORIGINAL_ORDER');assert.equal(page.items[1]!.prepaymentBreakdown.haffRental.amount,'36.00');assert.equal(pageClient.statements.length,3);
+ assert.equal(page.items[1]!.prepaymentBreakdown.basis,'LEGACY_ORIGINAL_ORDER');assert.equal(page.items[1]!.prepaymentBreakdown.haffRental.amount,'36.00');
+ assert.equal(pageClient.statements.length,6,'continuation probe, key page, record page, savepoint, progress batch and its release');
+ assert.equal(pageClient.statements.filter(s=>s.sql.includes('zzsh_order.rental_opening')).length,1);
  const detailClient=orderClient({records:[options.records[0]!]}),detail=await getAdminReadOrder(detailClient.client,viewer,fresh.id);assert.deepEqual(detail.order.prepaymentBreakdown,page.items[0]!.prepaymentBreakdown);
- for(const {sql}of [...pageClient.statements,...detailClient.statements]){assert.match(sql.trimStart(),/^(SELECT|WITH)\b/);assert.doesNotMatch(sql,/\b(?:INSERT|UPDATE|DELETE|FOR UPDATE|pg_advisory)\b/i);}
+ for(const {sql}of [...pageClient.statements,...detailClient.statements]){assert.match(sql.trimStart(),/^(SELECT|WITH|SAVEPOINT|RELEASE SAVEPOINT|ROLLBACK TO SAVEPOINT)\b/);assert.doesNotMatch(sql,/\b(?:INSERT|UPDATE|DELETE|FOR UPDATE|pg_advisory)\b/i);}
 });
 
 test('prepayment: 金额局部fail-soft不吞查询或范围异常',async()=>{
  const denied=Object.assign(new Error('synthetic query denied'),{code:'42501'}),client={query:async()=>{throw denied;}} as unknown as PoolClient;
  await assert.rejects(queryAdminReadOrders(client,viewer,{page:1,pageSize:20}),error=>error===denied);
  await assert.rejects(getAdminReadOrder(orderClient().client,viewer,'missing'),(error:any)=>error.status===404);
+});
+
+const progressRow=(overrides:Record<string,any>={})=>({id:'native-1',versionId:null,orderStatus:'PENDING_PAYMENT',asOf:'2026-10-25T00:00:00.000000Z',openingConfirmedAt:null,openingAny:false,intakeOpen:false,versionNo:null,kind:null,early:null,initiatorParty:null,versionHash:null,renterConfirmed:false,ownerConfirmed:false,renterRejected:false,ownerRejected:false,supportReviewed:false,approvalStatus:null,approvalRequestedBy:null,approvalDecidedBy:null,approvalPayloadHash:null,postedAt:null,...overrides});
+async function progressOf(overrides:Record<string,any>={}){
+ const {client}=orderClient({records:[{origin:'NATIVE',id:native.id,record:native}],progressRows:[progressRow(overrides)]});
+ return (await getAdminReadOrder(client,viewer,native.id)).order.progress;
+}
+const readyFacts={versionId:'settlement-version-2',versionNo:2,kind:'SYSTEM',early:false,initiatorParty:'RENTER',versionHash:'a'.repeat(64),renterConfirmed:true,ownerConfirmed:true};
+
+test('progress: 开租只认同单已确认opening，未付取消才是原生不适用',async()=>{
+ assert.deepEqual(await progressOf(),{asOfUtc:'2026-10-25T00:00:00.000000Z',opening:{state:'NOT_STARTED',confirmedAtUtc:null},ending:{state:'NOT_STARTED',currentVersionNo:null,postedAtUtc:null}});
+ assert.equal((await progressOf({openingAny:true})).opening.state,'AWAITING_CONFIRMATION');
+ assert.equal((await progressOf({openingConfirmedAt:'2026-10-25T01:00:00.000000Z'})).opening.state,'CONFIRMED');
+ const cancelled=await progressOf({orderStatus:'CANCELLED'});
+ assert.deepEqual([cancelled.opening.state,cancelled.ending.state],['NOT_APPLICABLE','NOT_APPLICABLE']);
+ const conflict=await progressOf({orderStatus:'CANCELLED',openingConfirmedAt:'2026-10-25T01:00:00.000000Z'});
+ assert.equal(conflict.opening.state,'CONFIRMED','an opening row is not hidden by the order status');
+ const draftConflict=await progressOf({orderStatus:'CANCELLED',openingAny:true});
+ assert.equal(draftConflict.opening.state,'AWAITING_CONFIRMATION');
+});
+
+test('progress: 当前intake优先于旧费用版，posting优先于分类',async()=>{
+ const pending=await progressOf({...readyFacts,intakeOpen:true});
+ assert.deepEqual([pending.ending.state,pending.ending.currentVersionNo],['PENDING_CLASSIFICATION',2]);
+ const posted=await progressOf({...readyFacts,intakeOpen:true,postedAt:'2026-10-25T02:00:00.000000Z'});
+ assert.deepEqual([posted.ending.state,posted.ending.postedAtUtc],['POSTED','2026-10-25T02:00:00.000000Z']);
+ const postedNoVersion=await progressOf({postedAt:'2026-10-25T02:00:00.000000Z'});
+ assert.equal(postedNoVersion.ending.state,'POSTED');
+ assert.equal(postedNoVersion.ending.currentVersionNo,null);
+});
+
+test('progress: 双方、客服复核、人工批准分别使用原判定，不把缺少依据画成已就绪',async()=>{
+ assert.equal((await progressOf({versionId:'settlement-version-2',versionNo:2,kind:'SYSTEM',early:false,initiatorParty:'RENTER',versionHash:'a'.repeat(64)})).ending.state,'PENDING_PARTIES');
+ assert.equal((await progressOf({...readyFacts,renterRejected:true})).ending.state,'PENDING_PARTIES');
+ assert.equal((await progressOf({...readyFacts,ownerConfirmed:false})).ending.state,'PENDING_PARTIES');
+ assert.equal((await progressOf({...readyFacts,early:true})).ending.state,'PENDING_SUPPORT_REVIEW');
+ assert.equal((await progressOf({...readyFacts,early:true,supportReviewed:true})).ending.state,'READY');
+ assert.equal((await progressOf(readyFacts)).ending.state,'READY');
+ const manual={...readyFacts,kind:'MANUAL_ADJUSTMENT'};
+ assert.equal((await progressOf(manual)).ending.state,'PENDING_APPROVAL');
+ assert.equal((await progressOf({...manual,approvalStatus:'PENDING',approvalRequestedBy:'admin-a',approvalPayloadHash:'a'.repeat(64)})).ending.state,'PENDING_APPROVAL');
+ assert.equal((await progressOf({...manual,approvalStatus:'APPROVED',approvalRequestedBy:'admin-a',approvalDecidedBy:'admin-a',approvalPayloadHash:'a'.repeat(64)})).ending.state,'PENDING_APPROVAL');
+ assert.equal((await progressOf({...manual,approvalStatus:'APPROVED',approvalRequestedBy:'admin-a',approvalDecidedBy:'admin-b',approvalPayloadHash:'b'.repeat(64)})).ending.state,'PENDING_APPROVAL');
+ assert.equal((await progressOf({...manual,approvalStatus:'APPROVED',approvalRequestedBy:'admin-a',approvalDecidedBy:'admin-b',approvalPayloadHash:'a'.repeat(64)})).ending.state,'READY');
+ assert.equal((await progressOf({...readyFacts,kind:'UNRECOGNIZED'})).ending.state,'UNKNOWN');
+ assert.equal((await progressOf({versionId:'settlement-version-2',versionNo:2,kind:'SYSTEM',early:false,initiatorParty:'RENTER'})).ending.state,'UNKNOWN');
+});
+
+test('progress: 单页一次有界批读；缺失或无权关系为UNKNOWN，连接错误仍抛出',async()=>{
+ const page=orderClient({keys:[{origin:'NATIVE',id:'native-1'},{origin:'NATIVE',id:'native-2'},{origin:'LEGACY',id:'legacy-1'}],total:'3',
+  records:[{origin:'NATIVE',id:'native-1',record:native},{origin:'NATIVE',id:'native-2',record:{...native,id:'native-2'}},{origin:'LEGACY',id:'legacy-1',record}],
+  progressRows:[progressRow(),progressRow({id:'native-2',orderStatus:'CANCELLED'})]});
+ const result=await queryAdminReadOrders(page.client,viewer,{page:1,pageSize:20});
+ assert.equal(result.items[0]!.progress.ending.state,'NOT_STARTED');
+ assert.equal(result.items[1]!.progress.opening.state,'NOT_APPLICABLE');
+ assert.equal('progress' in result.items[2]!,false,'legacy carries its source stage, not a native progress shell');
+ const progressStatements=page.statements.filter(s=>s.sql.includes('zzsh_order.rental_opening'));
+ assert.equal(progressStatements.length,1);
+ assert.deepEqual(progressStatements[0]!.values,[['native-1','native-2']]);
+ assert.match(progressStatements[0]!.sql,/transaction_timestamp\(\)/);
+ assert.match(progressStatements[0]!.sql,/superseded_at IS NULL/);
+ assert.doesNotMatch(progressStatements[0]!.sql,/FOR UPDATE|FOR SHARE|INSERT|UPDATE|DELETE/);
+ for(const code of ['42P01','42501']){
+  const unavailable=orderClient({records:[{origin:'NATIVE',id:native.id,record:native}],progressError:Object.assign(new Error(code),{code})});
+  assert.deepEqual((await getAdminReadOrder(unavailable.client,viewer,native.id)).order.progress,{asOfUtc:null,opening:{state:'UNKNOWN',confirmedAtUtc:null},ending:{state:'UNKNOWN',currentVersionNo:null,postedAtUtc:null}});
+ }
+ const connection=Object.assign(new Error('synthetic disconnect'),{code:'ECONNRESET'}),broken=orderClient({records:[{origin:'NATIVE',id:native.id,record:native}],progressError:connection});
+ await assert.rejects(()=>getAdminReadOrder(broken.client,viewer,native.id),error=>error===connection);
+});
+
+test('progress: 缺表/无权后回滚保存点，事务恢复并继续后续双方摘要',async()=>{
+ for(const code of ['42P01','42501']){
+  const statements:string[]=[];let aborted=false,inSavepoint=false;
+  const client={query:async(sql:string,values:unknown[]=[])=>{
+   statements.push(sql);
+   if(sql.startsWith('SAVEPOINT')){inSavepoint=true;return{rows:[]};}
+   if(sql.startsWith('ROLLBACK TO SAVEPOINT')){if(!inSavepoint)throw new Error('missing savepoint');aborted=false;return{rows:[]};}
+   if(sql.startsWith('RELEASE SAVEPOINT')){inSavepoint=false;return{rows:[]};}
+   if(aborted)throw Object.assign(new Error('current transaction is aborted'),{code:'25P02'});
+   if(sql.includes('zzsh_order.rental_opening')){aborted=true;throw Object.assign(new Error(code),{code});}
+   if(sql.includes('to_regclass'))return{rows:[{ready:false}]};
+   if(sql.includes('AS keys'))return{rows:[{total:'1',keys:[{origin:'NATIVE',id:native.id}]}]};
+   if(sql.includes('SELECT x.origin,x.id,x.record'))return{rows:[{origin:'NATIVE',id:native.id,record:native}]};
+   if(sql.includes('"phoneNumber" AS phone'))return{rows:[{id:'owner',name:'Owner',image:null,phone:'13800138000'},{id:'renter',name:'Renter',image:null,phone:'13900139000'}]};
+   return{rows:[]};
+  }} as unknown as PoolClient;
+  const page=await queryAdminReadOrders(client,{...viewer,permissions:new Set(['user.directory.read'])},{page:1,pageSize:20});
+  assert.deepEqual(page.items[0]!.progress,{asOfUtc:null,opening:{state:'UNKNOWN',confirmedAtUtc:null},ending:{state:'UNKNOWN',currentVersionNo:null,postedAtUtc:null}});
+  assert.equal(page.items[0]!.ownerSummary.name,'Owner','the directory read still runs after the transaction is recovered');
+  assert.equal(page.items[0]!.renterSummary.name,'Renter');
+  assert.ok(statements.some(sql=>sql.startsWith('ROLLBACK TO SAVEPOINT')));
+  assert.equal(statements.filter(sql=>sql.includes('zzsh_order.rental_opening')).length,1);
+  assert.equal(statements.some(sql=>sql.includes('25P02')),false);
+ }
+});
+
+test('party summaries: 仅真实目录权限、整页去重一次批读，无权限不查',async()=>{
+ const keys=[{origin:'NATIVE',id:'native-1'},{origin:'LEGACY',id:'legacy-1'}];
+ const records=[{origin:'NATIVE',id:'native-1',record:native},{origin:'LEGACY',id:'legacy-1',record}];
+ const directoryRows=[{id:'owner',name:'Owner',image:'owner.png',phone:'13800138000'},{id:'renter',name:'Renter',image:null,phone:'13900139000'}];
+ const allowed=orderClient({keys,total:'2',records,progressRows:[progressRow()],directoryRows});
+ const page=await queryAdminReadOrders(allowed.client,{...viewer,permissions:new Set(['user.directory.read'])},{page:1,pageSize:20});
+ assert.equal(page.items[0]!.ownerSummary.maskedPhone,'138****8000');
+ assert.equal(page.items[0]!.renterSummary.maskedPhone,'139****9000');
+ assert.equal(page.items[1]!.ownerSummary.name,'Owner','the legacy row uses the same authorized summary read');
+ assert.equal(page.items[1]!.renterSummary.name,'Renter');
+ const directory=allowed.statements.filter(s=>s.sql.includes('"phoneNumber" AS phone'));
+ assert.equal(directory.length,1);
+ assert.deepEqual([...new Set(directory[0]!.values[0] as string[])].sort(),['owner','renter']);
+ const denied=orderClient({keys,total:'2',records,progressRows:[progressRow()],directoryRows});
+ const without=await queryAdminReadOrders(denied.client,viewer,{page:1,pageSize:20});
+ assert.equal('ownerSummary' in without.items[0]!,false);
+ assert.equal('renterSummary' in without.items[0]!,false);
+ assert.equal(denied.statements.some(s=>s.sql.includes('"phoneNumber" AS phone')),false);
+ const notGranted=orderClient({keys,total:'2',records,progressRows:[progressRow()],directoryRows});
+ const noGrant=await queryAdminReadOrders(notGranted.client,{...viewer,permissions:new Set(['order.read'])},{page:1,pageSize:20});
+ assert.equal('ownerSummary' in noGrant.items[0]!,false);
+ assert.equal(notGranted.statements.some(s=>s.sql.includes('"phoneNumber" AS phone')),false);
+});
+
+function progressRecoveryFailure(originalCode:string,phase:'rollback'|'release'){
+ const original=Object.assign(new Error('synthetic original progress failure'),{code:originalCode});
+ const recovery=Object.assign(new Error('synthetic recovery disconnect'),{code:'ECONNRESET'});
+ const state={aborted:false,disconnected:false,savepoint:false,afterRecoveryFailure:0};
+ const client={query:async(sql:string)=>{
+  if(sql.startsWith('SAVEPOINT')){state.savepoint=true;return{rows:[]};}
+  if(sql.startsWith('ROLLBACK TO SAVEPOINT')){if(phase==='rollback'){state.disconnected=true;throw recovery;}assert(state.savepoint);state.aborted=false;return{rows:[]};}
+  if(sql.startsWith('RELEASE SAVEPOINT')){if(phase==='release'){state.disconnected=true;throw recovery;}state.savepoint=false;return{rows:[]};}
+  if(state.disconnected){state.afterRecoveryFailure++;throw recovery;}
+  if(state.aborted)throw Object.assign(new Error('transaction is aborted'),{code:'25P02'});
+  if(sql.includes('zzsh_order.rental_opening')){state.aborted=true;throw original;}
+  if(sql.includes('to_regclass'))return{rows:[{ready:false}]};
+  if(sql.includes('AS keys'))return{rows:[{total:'1',keys:[{origin:'NATIVE',id:native.id}]}]};
+  if(sql.includes('SELECT x.origin,x.id,x.record'))return{rows:[{origin:'NATIVE',id:native.id,record:native}]};
+  return{rows:[]};
+ }} as unknown as PoolClient;
+ return{client,original,recovery,state};
+}
+
+test('progress: 可选关系错误只有在保存点完整恢复后降级，恢复断连立即抛出',async()=>{
+ for(const code of ['42P01','42501'])for(const phase of ['rollback','release'] as const){
+  const f=progressRecoveryFailure(code,phase);
+  await assert.rejects(queryAdminReadOrders(f.client,viewer,{page:1,pageSize:20}),error=>error===f.recovery);
+  assert.equal(f.state.disconnected,true);assert.equal(f.state.afterRecoveryFailure,0,'no later SQL after unconfirmed recovery');
+ }
+});
+
+test('progress: 非可选原错误不被保存点恢复错误替换',async()=>{
+ for(const code of ['ECONNRESET','57014','XX000']){
+  const f=progressRecoveryFailure(code,'rollback');
+  await assert.rejects(queryAdminReadOrders(f.client,viewer,{page:1,pageSize:20}),error=>error===f.original);
+  assert.equal(f.state.afterRecoveryFailure,0);
+ }
+});
+
+test('progress: 提前结算先完成双方决定再客服复核，人工调整仍先批准',async()=>{
+ const early={...readyFacts,early:true,ownerConfirmed:false,supportReviewed:false};
+ assert.equal((await progressOf(early)).ending.state,'PENDING_PARTIES');
+ assert.equal((await progressOf({...early,ownerRejected:true})).ending.state,'PENDING_PARTIES');
+ assert.equal((await progressOf({...early,ownerConfirmed:true})).ending.state,'PENDING_SUPPORT_REVIEW');
+ assert.equal((await progressOf({...early,ownerConfirmed:true,supportReviewed:true})).ending.state,'READY');
+ assert.equal((await progressOf({...early,kind:'MANUAL_ADJUSTMENT',renterConfirmed:false,approvalStatus:'PENDING',approvalRequestedBy:'admin-a',approvalPayloadHash:'a'.repeat(64)})).ending.state,'PENDING_APPROVAL');
 });

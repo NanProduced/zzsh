@@ -276,4 +276,9 @@ test("public declaration reads face and ban as tri-state without inventing a ver
     const basis = publicListingBasis({ versionId: "version-a", id: "a", fullPayoutSelected: selected, attributes: { full_payout_declaration: { selected: !selected } } });
     assert.equal(basis?.fullPayoutSelected, selected);
   }
+  // Only the release read with this public version is forwarded; a missing one stays null.
+  assert.equal(publicListingBasis({ versionId: "version-a", id: "a", releaseId: "release-public-a" })?.releaseId, "release-public-a");
+  assert.equal(publicListingBasis({ versionId: "version-a", id: "a", releaseId: 42 })?.releaseId, null);
+  assert.equal(publicListingBasis({ versionId: "version-a", id: "a" })?.releaseId, null);
+  assert.equal(publicListingBasis({ id: "a", releaseId: "release-without-version" }), null);
 });

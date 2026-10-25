@@ -1734,6 +1734,7 @@ export function publicListingBasis(listing: Record<string, unknown>) {
   if (!id) return null;
   return {
     id,
+    releaseId: typeof listing.releaseId === "string" ? listing.releaseId : null,
     accountId: typeof listing.id === "string" ? listing.id : null,
     title: typeof listing.title === "string" ? listing.title : null,
     description: typeof listing.description === "string" ? listing.description : null,

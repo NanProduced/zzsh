@@ -7,8 +7,10 @@ import { orderAccountTitleFact } from "../supply/publishing";
 import { conflict, invalid, notFound } from "../supply/supply-util";
 import { escapeLike } from "../supply/catalog";
 import { legacyContinuationReady, legacyMoneyCents, legacyOrderReadState, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
+import { settlementConfirmationReady, type SettlementConfirmationFacts } from "./settlement";
+import { readDirectoryUserSummaries, type DirectoryUserSummary } from "../auth/user-directory-summary";
 
-export type OrderReadViewer = { adminId: string; isBoss: boolean; internalQuote: boolean; authorizationKey: string; financeReadable?: boolean };
+export type OrderReadViewer = { adminId: string; isBoss: boolean; internalQuote: boolean; authorizationKey: string; financeReadable?: boolean; permissions?: ReadonlySet<string> };
 export type OrderReadFilters = { page: number; pageSize: number; status?: string; displayNo?: string; accountId?: string; renterUserId?: string; ownerUserId?: string; createdFrom?: string; createdTo?: string; qKind?: "order" | "account" | "party" | "renter" | "owner"; qValue?: string; restoreKey?: string };
 const utc=(column:string)=>`to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 const CONTINUATION_JOIN = `LEFT JOIN zzsh_order.legacy_continuation_version h ON h.order_id=l.id AND h.superseded_at IS NULL`;
@@ -162,6 +164,99 @@ export function projectAdminReadOrder(origin:string,r:Record<string,any>,viewer:
   source:{origin:'LEGACY',ruleOrigin:'LEGACY_ORDER',originalStatus:r.source_order_status,statusLabel:state.statusLabel,originalPayStatus:r.source_pay_status},
   legacyAmounts:{required:money(r.due_amount_cents),paid:paid?money(r.recorded_paid_amount_cents):null,deposit:money(r.deposit_amount_cents),refund:money(legacyMoneyCents(raw.return_order_money)),refundChannelState:'UNKNOWN'},quote:null};
 }
+export type AdminOrderProgress={
+ asOfUtc:string|null;
+ opening:{state:'NOT_STARTED'|'AWAITING_CONFIRMATION'|'CONFIRMED'|'NOT_APPLICABLE'|'UNKNOWN';confirmedAtUtc:string|null};
+ ending:{state:'NOT_STARTED'|'PENDING_CLASSIFICATION'|'PENDING_PARTIES'|'PENDING_SUPPORT_REVIEW'|'PENDING_APPROVAL'|'READY'|'POSTED'|'NOT_APPLICABLE'|'UNKNOWN';currentVersionNo:number|null;postedAtUtc:string|null};
+};
+const unknownProgress=():AdminOrderProgress=>({asOfUtc:null,opening:{state:'UNKNOWN',confirmedAtUtc:null},ending:{state:'UNKNOWN',currentVersionNo:null,postedAtUtc:null}});
+type ProgressRow={id:string;versionId:string|null;orderStatus:string;asOf:string|null;openingConfirmedAt:string|null;openingAny:boolean;intakeOpen:boolean;versionNo:number|null;kind:string|null;early:boolean|null;initiatorParty:string|null;versionHash:string|null;renterConfirmed:boolean;ownerConfirmed:boolean;renterRejected:boolean;ownerRejected:boolean;supportReviewed:boolean;approvalStatus:string|null;approvalRequestedBy:string|null;approvalDecidedBy:string|null;approvalPayloadHash:string|null;postedAt:string|null};
+const PROGRESS_SQL=`WITH orders AS(
+ SELECT r.id,r.status FROM zzsh_order.rental_order r WHERE r.id=ANY($1::text[])
+),opening AS(
+ SELECT o.id,max(op.confirmed_at) FILTER(WHERE op.status='CONFIRMED') AS confirmed_at,count(op.id)>0 AS any_row
+ FROM orders o LEFT JOIN zzsh_order.rental_opening op ON op.order_id=o.id GROUP BY o.id
+),latest_intake AS(
+ SELECT DISTINCT ON(i.order_id) i.order_id AS id,i.status FROM zzsh_order.settlement_intake i JOIN orders o ON o.id=i.order_id ORDER BY i.order_id,i.version_no DESC
+),current_version AS(
+ SELECT v.order_id AS id,v.id AS version_id,v.version_no,v.kind,v.early,v.initiator_party,v.version_hash,v.approval_request_id
+ FROM zzsh_order.settlement_version v JOIN orders o ON o.id=v.order_id WHERE v.superseded_at IS NULL
+),decisions AS(
+ SELECT cv.id,bool_or(d.party='RENTER' AND d.action='CONFIRM') AS renter_confirmed,bool_or(d.party='OWNER' AND d.action='CONFIRM') AS owner_confirmed,
+  bool_or(d.party='RENTER' AND d.action='REJECT') AS renter_rejected,bool_or(d.party='OWNER' AND d.action='REJECT') AS owner_rejected,bool_or(d.party='SUPPORT' AND d.action='REVIEW') AS support_reviewed
+ FROM current_version cv LEFT JOIN zzsh_order.settlement_decision d ON d.settlement_version_id=cv.version_id GROUP BY cv.id
+),approval AS(
+ SELECT cv.id,CASE WHEN a.status IN('PENDING','APPROVED') AND a.expires_at<=transaction_timestamp() THEN 'EXPIRED' ELSE a.status END AS status,
+  a.requested_by,a.decided_by,a.operation_payload_hash
+ FROM current_version cv JOIN zzsh_iam.approval_request a ON a.id=cv.approval_request_id
+),posting AS(
+ SELECT p.order_id AS id,p.posted_at FROM zzsh_order.settlement_posting p JOIN orders o ON o.id=p.order_id
+)
+SELECT o.id,o.status AS "orderStatus",to_char(transaction_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "asOf",
+ op.confirmed_at AS "openingConfirmedAt",COALESCE(op.any_row,false) AS "openingAny",COALESCE(li.status='OPEN',false) AS "intakeOpen",
+ cv.version_id AS "versionId",cv.version_no AS "versionNo",cv.kind,cv.early,cv.initiator_party AS "initiatorParty",cv.version_hash AS "versionHash",
+ COALESCE(d.renter_confirmed,false) AS "renterConfirmed",COALESCE(d.owner_confirmed,false) AS "ownerConfirmed",
+ COALESCE(d.renter_rejected,false) AS "renterRejected",COALESCE(d.owner_rejected,false) AS "ownerRejected",COALESCE(d.support_reviewed,false) AS "supportReviewed",
+ a.status AS "approvalStatus",a.requested_by AS "approvalRequestedBy",a.decided_by AS "approvalDecidedBy",a.operation_payload_hash AS "approvalPayloadHash",
+ p.posted_at AS "postedAt"
+ FROM orders o LEFT JOIN opening op ON op.id=o.id LEFT JOIN latest_intake li ON li.id=o.id
+ LEFT JOIN current_version cv ON cv.id=o.id LEFT JOIN decisions d ON d.id=o.id
+ LEFT JOIN approval a ON a.id=o.id LEFT JOIN posting p ON p.id=o.id`;
+function orderProgress(row:ProgressRow):AdminOrderProgress{
+ const versionNo=row.versionNo??null;
+ let ending:AdminOrderProgress['ending'];
+ if(row.postedAt)ending={state:'POSTED',currentVersionNo:versionNo,postedAtUtc:row.postedAt};
+ else if(row.intakeOpen)ending={state:'PENDING_CLASSIFICATION',currentVersionNo:versionNo,postedAtUtc:null};
+ else if(row.versionNo===null)ending={state:row.orderStatus==='CANCELLED'?'NOT_APPLICABLE':'NOT_STARTED',currentVersionNo:null,postedAtUtc:null};
+ else if(row.versionHash===null)ending={state:'UNKNOWN',currentVersionNo:versionNo,postedAtUtc:null};
+ else{
+  const status=row.approvalStatus,versionId=row.versionId??row.id;
+  const opsApproval=status==='APPROVED'||status==='PENDING'||status==='REJECTED'?{status:status as 'APPROVED'|'PENDING'|'REJECTED',requesterId:row.approvalRequestedBy??'',approverId:row.approvalDecidedBy??'',payloadHash:row.approvalPayloadHash??''}:null;
+  const readiness=settlementConfirmationReady({settlementVersionId:versionId,currentVersionHash:row.versionHash,kind:row.kind as SettlementConfirmationFacts['kind'],early:row.early===true,initiatorParty:row.initiatorParty as SettlementConfirmationFacts['initiatorParty'],
+   renterConfirmedVersionId:row.renterConfirmed?versionId:null,ownerConfirmedVersionId:row.ownerConfirmed?versionId:null,renterRejectedVersionId:row.renterRejected?versionId:null,ownerRejectedVersionId:row.ownerRejected?versionId:null,
+   supportReviewedVersionId:row.supportReviewed?versionId:null,opsApproval});
+  const reasons=new Set(readiness.reasons);
+  const state:AdminOrderProgress['ending']['state']=readiness.ready?'READY':[...reasons].some(reason=>reason.startsWith('OPS_'))?'PENDING_APPROVAL'
+   :reasons.has('RENTER_CONFIRMATION_MISSING')||reasons.has('OWNER_CONFIRMATION_MISSING')||reasons.has('PARTY_REJECTED')?'PENDING_PARTIES'
+   :reasons.has('SUPPORT_REVIEW_MISSING')?'PENDING_SUPPORT_REVIEW':'UNKNOWN';
+  ending={state,currentVersionNo:versionNo,postedAtUtc:null};
+ }
+ const opening:AdminOrderProgress['opening']=row.openingConfirmedAt?{state:'CONFIRMED',confirmedAtUtc:row.openingConfirmedAt}
+  :row.openingAny?{state:'AWAITING_CONFIRMATION',confirmedAtUtc:null}
+  :row.orderStatus==='CANCELLED'?{state:'NOT_APPLICABLE',confirmedAtUtc:null}:{state:'NOT_STARTED',confirmedAtUtc:null};
+ return {asOfUtc:row.asOf,opening,ending};
+}
+/** One bounded read for this page's native orders. Missing or denied relations stay UNKNOWN, never "not started".
+ *  A failed statement aborts the surrounding RR transaction; the savepoint restores it before any later read. */
+async function readNativeOrderProgress(client:PoolClient,ids:string[]):Promise<Map<string,AdminOrderProgress>>{
+ const unique=[...new Set(ids)],result=new Map<string,AdminOrderProgress>(),savepoint='admin_order_progress_read';
+ if(!unique.length)return result;
+ let rows:ProgressRow[]=[];
+ await client.query(`SAVEPOINT ${savepoint}`);
+ try{
+  rows=(await client.query<ProgressRow>(PROGRESS_SQL,[unique])).rows;
+  await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+ }catch(error){
+  const code=(error as {code?:string}).code;
+  const unavailable=code==='42P01'||code==='42501';
+  try{await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);await client.query(`RELEASE SAVEPOINT ${savepoint}`);}catch(recoveryError){if(unavailable)throw recoveryError;}
+  if(unavailable){for(const id of unique)result.set(id,unknownProgress());return result;}
+  throw error;
+ }
+ for(const row of rows)result.set(row.id,orderProgress(row));
+ return result;
+}
+function summaryOf(summaries:Map<string,DirectoryUserSummary>,id:unknown){return typeof id==='string'?summaries.get(id):undefined;}
+/** Page-selected ids only: one progress read for native rows and one directory summary read for both parties. */
+async function attachAdminOrderExtras(client:PoolClient,items:Record<string,any>[],viewer:OrderReadViewer){
+ const progress=await readNativeOrderProgress(client,items.filter(item=>item.source?.origin==='NATIVE').map(item=>item.id));
+ const summaries=await readDirectoryUserSummaries(client,items.flatMap(item=>[item.ownerUserId,item.renterUserId]).filter((id):id is string=>typeof id==='string'),viewer.permissions);
+ for(const item of items){
+  if(item.source?.origin==='NATIVE')item.progress=progress.get(item.id)??unknownProgress();
+  const owner=summaryOf(summaries,item.ownerUserId),renter=summaryOf(summaries,item.renterUserId);
+  if(owner)item.ownerSummary=owner;if(renter)item.renterSummary=renter;
+ }
+}
 export async function queryAdminReadOrders(client:PoolClient,viewer:OrderReadViewer,filter:OrderReadFilters){
  if(filter.restoreKey&&filter.restoreKey!==viewer.authorizationKey)throw conflict('Authorization context changed');
  const values:unknown[]=[viewer.isBoss,viewer.adminId],where=[gameScopeSql("x.game_id","$2","$1")];
@@ -191,13 +286,16 @@ export async function queryAdminReadOrders(client:PoolClient,viewer:OrderReadVie
    items.push(projectAdminReadOrder(key.origin,record,viewer));
   }
  }
+ await attachAdminOrderExtras(client,items,viewer);
  return {items,page:filter.page,pageSize:filter.pageSize,total:Number(page.total),contextKey:viewer.authorizationKey};
 }
 export async function getAdminReadOrder(client:PoolClient,viewer:OrderReadViewer,id:string,paymentReadOptions?:ChannelPaymentReadOptions){
  const relation=orderReadRelation(await legacyContinuationReady(client),false,{nativeIds:'$1',legacyIds:'$1'});
  const row=(await client.query<{origin:string;record:Record<string,any>}>(`WITH all_orders AS(${relation}) SELECT x.origin,x.record FROM all_orders x WHERE x.id=ANY($1::text[]) AND ${gameScopeSql("x.game_id","$3","$2")}`,[[id],viewer.isBoss,viewer.adminId])).rows[0];
  if(!row)throw notFound();
+ const order=projectAdminReadOrder(row.origin,row.record,viewer);
+ await attachAdminOrderExtras(client,[order],viewer);
  const paymentSummary=await readOrderPaymentSummary(client,{orderId:id,origin:row.origin==="NATIVE"?"NATIVE":"LEGACY",financeReadable:viewer.financeReadable===true},paymentReadOptions);
  const refundSummary=await readAdminOrderRefundSummary(client,{orderId:id,origin:row.origin==='NATIVE'?'NATIVE':'LEGACY',financeReadable:viewer.financeReadable===true});
- return {order:projectAdminReadOrder(row.origin,row.record,viewer),contextKey:viewer.authorizationKey,paymentSummary,refundSummary};
+ return {order,contextKey:viewer.authorizationKey,paymentSummary,refundSummary};
 }

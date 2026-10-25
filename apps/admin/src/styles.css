@@ -699,3 +699,15 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
 /* 保留七列事实与可读表头，中小屏由 table-wrap 承接横向滚动。 */
 .admin-directory-table{min-width:1080px}
+
+/* ADM-ACCOUNT-ORDER-FLOW-02: denser order list and compact progress; scoped to the order page only. */
+.oc-table-compact th{padding:9px 12px}
+.oc-table-compact td{padding:10px 12px}
+.oc-table-compact small{margin-top:3px;line-height:1.45}
+.oc-table-compact .oc-account-title{margin-top:3px;-webkit-line-clamp:1}
+.oc-table-compact .oc-party-line+.oc-party-line{margin-top:4px}
+.oc-table-compact .oc-stages small{margin-top:4px}
+.oc-stages-compact{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px}
+.oc-stages-compact .oc-stage-label{margin:0;font-size:12px}
+.oc-stages-compact small{margin:0;font-size:11px}
+.oc-next-step{margin:0 0 12px;color:var(--foreground);font-size:13px;line-height:1.6}

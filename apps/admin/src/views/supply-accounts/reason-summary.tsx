@@ -14,7 +14,7 @@ export const condText = (code: string) => PENDING_TEXT[code] ?? (code === "OCCUP
 export function ReasonSummary({ facts, heading = "能不能接新单" }: { facts: SupplyFacts; heading?: string }) {
   const g = groupConditions(facts);
   return <div className="sa-reasons" data-testid="reason-summary">
-    <h3 className="mb-1 text-[15px] font-semibold">{heading} <span className="text-xs font-normal text-muted-foreground">{conditionHeadline(g)}</span></h3>
+    <h3 className="mb-1 text-[15px] font-semibold">{heading} <span className="text-xs font-normal text-muted-foreground">{conditionHeadline(g, facts.newOrders)}</span></h3>
     <Group title="已确认阻塞" empty="无已确认阻塞" items={g.blocked.map(c => [condText(c.code), c.who])} tone="error"/>
     <Group title="待核" empty="无待核条件" items={g.pending.map(c => [condText(c.code), c.who])} tone="unknown"/>
     <Group title="已满足" empty="—" items={g.satisfied.map(t => [t, ""])} tone="success"/>

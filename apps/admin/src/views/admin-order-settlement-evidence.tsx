@@ -12,7 +12,9 @@ const money = (value: OrderSettlementMoney | undefined) => financeMoney(value?.k
 const dutyKinds: Record<string, string> = { RENTER_REFUND: '租客退款责任', OWNER_CREDIT: '号主收益责任', COMMISSION: '分销责任', DEPOSIT_COMPENSATION: '押金补偿责任' };
 const dutyStates: Record<string, string> = { PENDING: '原责任待处理', MATURED: '原责任已成熟', SETTLED: '原责任已终定', VOID: '原责任已作废' };
 function moneyRows(evidence: OrderSettlementEvidence): [string, OrderSettlementMoney][] {
+  const platform = (evidence as OrderSettlementEvidence & { platformContribution?: OrderSettlementMoney }).platformContribution;
   return [[evidence.posting.state === 'FINALIZED_ZERO' ? '原收款依据金额' : '原入账基数', evidence.captured], [evidence.documentRef.startsWith('LEGACY_ORDER:') ? '号主租赁收益责任' : '号主结算净额', evidence.ownerNet], ['租客应退责任', evidence.refundPayable], ['退款出款记录', evidence.refunded],
+    ...(platform ? [['本单已记平台结算贡献', platform] as [string, OrderSettlementMoney]] : []),
     ...(evidence.documentRef.startsWith('LEGACY_ORDER:') ? [['历史应退记录', evidence.historicalRefund] as [string, OrderSettlementMoney]] : [])];
 }
 const postingLabel = (evidence: OrderSettlementEvidence) => evidence.posting.state === 'FINALIZED_ZERO' ? '零额责任已终定' : evidence.posting.state === 'POSTED' ? '原过账已证实' : evidence.posting.state === 'NOT_POSTED' ? '当前未查到过账记录' : '过账待核';
@@ -40,7 +42,7 @@ export function AdminOrderSettlementEvidence({ state = 'ready', evidence, reques
       <div className="flex flex-wrap justify-between gap-x-4 gap-y-1"><dt className="text-muted-foreground">退款责任到期</dt><dd>{financeTime(evidence.refundDueAt)}</dd></div>
       <div className="flex flex-wrap justify-between gap-x-4 gap-y-1"><dt className="text-muted-foreground">渠道到账</dt><dd>未核定</dd></div>
     </dl>
-    <p className="text-xs leading-relaxed text-muted-foreground">读取完成不代表资金全部结清。应退责任、历史记录和退款出款记录分别核对，均不证明渠道到账。</p>
+    <p className="text-xs leading-relaxed text-muted-foreground">读取完成不代表资金全部结清。应退责任、历史记录和退款出款记录分别核对，均不证明渠道到账。{(evidence as OrderSettlementEvidence & { platformContribution?: OrderSettlementMoney }).platformContribution ? "平台结算贡献不是净利润，未扣分销与渠道成本。" : ""}</p>
     {evidence.dutyRefs?.length ? <div className="space-y-2 border-t border-border pt-3"><h3 className="text-sm font-medium">关联责任记录</h3>{evidence.dutyRefs.map((duty, index) => <div key={`${duty.documentRef ?? 'unresolved'}:${index}`} className="flex flex-wrap items-center justify-between gap-2 text-sm"><div><span>{dutyKinds[duty.kind] ?? '责任记录'} · {dutyStates[duty.state] ?? '责任状态待核'}</span><span className="ml-2 tabular-nums">{money(duty.amount)}</span></div>{duty.documentRef && /^LEGACY_DUTY:[A-Za-z0-9_-]+$/.test(duty.documentRef) && onOpenDocument ? <Button data-duty-ref={duty.documentRef} variant="link" size="sm" className="h-auto px-0" onClick={() => onOpenDocument(duty.documentRef!, '责任资金依据')}>查看责任依据<ArrowUpRight aria-hidden size={13} /></Button> : <span className="text-xs text-muted-foreground">关联依据未核定</span>}</div>)}</div> : null}
     {reasons.length || evidence.posting.ref ? <Collapsible><CollapsibleTrigger render={<Button variant="ghost" size="sm" className="px-0" />}>依据与待核项<ChevronDown aria-hidden size={13} /></CollapsibleTrigger><CollapsibleContent className="space-y-2 pt-2 text-xs text-muted-foreground">{evidence.posting.ref ? <p className="break-all">{evidence.posting.state === 'FINALIZED_ZERO' ? '原责任依据' : '原过账引用'}：{evidence.posting.ref}</p> : null}{reasons.map(reason => <p key={reason}>{reasonLabels[reason] ?? '原始资金依据仍待核对'}<span className="ml-2 break-all font-mono">{reason}</span></p>)}</CollapsibleContent></Collapsible> : null}
   </section>;

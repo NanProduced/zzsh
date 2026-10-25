@@ -24,7 +24,7 @@ test('detail pane renders declaration, catalog resources and quote lines', async
   assert.match(h.el.textContent, /号主声明非本人脸/);
   assert.match(h.el.textContent, /号主声明有封禁记录/);
   assert.match(h.el.textContent, /巴雷特/);
-  assert.match(h.el.textContent, /参考 ¥1\.00/);
+  assert.match(h.el.textContent, /¥1\.00/);
 });
 
 test('StrictMode discards an aborted old query after a work view changes',async t=>{
@@ -47,4 +47,13 @@ test('an identity/permission switch clears UNKNOWN and historical page stays zer
  const h=await prepare(t,async(url,init)=>init.method==='POST'?failure(500):json(workDetail()));await confirm(h);await tick(h);assert.ok(h.el.querySelector('[data-slot="dialog-content"]'));
  await h.render('different-admin',['supply.review.read'],'a',{context:'review'});await tick(h);assert.equal(h.el.querySelectorAll('[data-slot="dialog-content"]').length,0);assert.ok(!h.btn('核对后确认运营限制'));assert.equal(h.writes.length,1);
  const old=workDetail(false,true);globalThis.fetch=async()=>json(old);await h.render('history-admin',permissions,'a',{context:'review',versionId:'v-old'});await tick(h);assert.ok(h.btn('核对后确认运营限制').disabled);await h.click(h.btn('核对后确认运营限制'));await tick(h);assert.equal(h.writes.length,1);
+});
+
+test('FLOW02 Root F2: public publication time comes only from the original basis, including unknown',async t=>{
+ const d=workDetail();d.version.id='current-v3';d.version.declaration.title='Current private v3';d.version.publication={source:'OWNER_DIRECT',publishedAt:'2026-10-24T01:02:03Z'};
+ d.supervision.facts={...d.supervision.facts,publicVersionId:'public-v1',publicBasis:{id:'public-v1',accountId:'a',releaseId:'release-v1',title:'Original public v1',description:null,attributes:{},presentation:{items:[],skins:[],entitlements:[]},media:[],quote:null,termOption:null,fullPayoutSelected:null,publishedAt:'2026-10-21T01:02:03Z'}};
+ const h=await mountHarness(t,{permissions,initialAccountId:'a',initialQuery:{context:'situation'},fetchImpl:async()=>json(d)});await tick(h);
+ const publication=()=>{const section=h.el.querySelector('[aria-label="租客当前看到的版本"]'),label=[...section.querySelectorAll('dt')].find(node=>node.textContent==='发布时间');assert(label,'public publication field is present');return label.nextElementSibling.textContent;};
+ assert.match(publication(),/2026.10.21/);assert.doesNotMatch(publication(),/2026.10.24/);
+ d.supervision.facts.publicBasis.publishedAt=null;await h.render('admin',permissions,'a',{context:'situation'},1);await tick(h);assert.match(publication(),/未提供|未知/);assert.doesNotMatch(publication(),/2026.10.24/);assert.equal(h.writes.length,0);
 });

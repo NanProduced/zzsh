@@ -10,6 +10,8 @@ export type AdminOrderSettlementEvidence={
  schema:'admin-order-settlement-evidence.v1';documentRef:string;readiness:'READY'|'UNAVAILABLE';
  posting:{state:'POSTED'|'FINALIZED_ZERO'|'NOT_POSTED'|'UNKNOWN';ref:string|null;postedAt:string|null};
  captured:OrderSettlementMoney;ownerNet:OrderSettlementMoney;refundPayable:OrderSettlementMoney;refunded:OrderSettlementMoney;historicalRefund:OrderSettlementMoney;
+ /** The verified posting's platform component. It is not net profit and excludes distribution/channel costs. */
+ platformContribution:OrderSettlementMoney;
  refundDueAt:string|null;channel:{state:'UNKNOWN';reference:null};
  dutyRefs:{documentRef:string|null;kind:string;state:string;amount:OrderSettlementMoney}[];reasonCodes:string[];
 };
@@ -40,12 +42,12 @@ function nativeReceipt(order:FinanceOrderFact,entries:readonly FinanceEntry[],ba
   }catch{balanced=false;}
  }
  if(!balanced)return{...base,reasonCodes:['SETTLEMENT_ORIGINAL_RECEIPT_INCONSISTENT']};
- return{...base,posting:{state:'POSTED',ref:postingId,postedAt},captured,ownerNet,refundPayable,refundDueAt,reasonCodes:['REFUND_PAYABLE_NOT_CHANNEL_PAYMENT']};
+ return{...base,posting:{state:'POSTED',ref:postingId,postedAt},captured,ownerNet,refundPayable,platformContribution:platform,refundDueAt,reasonCodes:['REFUND_PAYABLE_NOT_CHANNEL_PAYMENT','PLATFORM_CONTRIBUTION_IS_NOT_NET_PROFIT']};
 }
 /** No quote recalculation, current policy lookup, financial write or channel result inference. */
 export function projectAdminOrderSettlementEvidence(order:FinanceOrderFact,entries:readonly FinanceEntry[],legacy?:OrderSettlementFacts):AdminOrderSettlementEvidence{
  const base:AdminOrderSettlementEvidence={schema:'admin-order-settlement-evidence.v1',documentRef:order.ref,readiness:order.sourceType==='NATIVE'||legacy?.legacyDutyReady===true?'READY':'UNAVAILABLE',posting:{state:'UNKNOWN',ref:null,postedAt:null},
-  captured:unknown('ORIGINAL_CAPTURED_EVIDENCE_UNAVAILABLE'),ownerNet:unknown('ORIGINAL_OWNER_NET_EVIDENCE_UNAVAILABLE'),refundPayable:unknown('ORIGINAL_REFUND_RESPONSIBILITY_UNAVAILABLE'),refunded:unknown('REFUND_PAYMENT_SOURCE_NOT_AVAILABLE'),historicalRefund:unknown('HISTORICAL_REFUND_SOURCE_UNAVAILABLE'),refundDueAt:null,channel:{state:'UNKNOWN',reference:null},dutyRefs:[],reasonCodes:[]};
+  captured:unknown('ORIGINAL_CAPTURED_EVIDENCE_UNAVAILABLE'),ownerNet:unknown('ORIGINAL_OWNER_NET_EVIDENCE_UNAVAILABLE'),refundPayable:unknown('ORIGINAL_REFUND_RESPONSIBILITY_UNAVAILABLE'),refunded:unknown('REFUND_PAYMENT_SOURCE_NOT_AVAILABLE'),historicalRefund:unknown('HISTORICAL_REFUND_SOURCE_UNAVAILABLE'),platformContribution:unknown('SETTLEMENT_PLATFORM_COMPONENT_UNAVAILABLE'),refundDueAt:null,channel:{state:'UNKNOWN',reference:null},dutyRefs:[],reasonCodes:[]};
  if(order.sourceType==='NATIVE')return nativeReceipt(order,entries,base);
  const raw=order.legacySource?.snapshot.return_order_money;
  try{base.historicalRefund=money(sourceYuanToCents(raw),'HISTORICAL_REFUND_SOURCE_INVALID');}catch{if(raw!==null&&raw!==undefined)base.historicalRefund=unknown('HISTORICAL_REFUND_SOURCE_INVALID');}

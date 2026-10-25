@@ -60,9 +60,20 @@ export function groupConditions(facts: SupplyFacts): ConditionGroups {
   return { blocked, pending, satisfied };
 }
 
-export function conditionHeadline(g: ConditionGroups): string {
-  if (!g.blocked.length && !g.pending.length) return "接新单条件：服务端未返回阻塞";
+export function conditionHeadline(g: ConditionGroups, newOrders?: boolean | null): string {
+  if (!g.blocked.length && !g.pending.length) {
+    if (newOrders === true) return "接新单条件：当前无阻塞";
+    if (newOrders === false) return "接新单条件：存在阻塞，原因未提供";
+    return "接新单条件：待核";
+  }
   return [g.blocked.length ? g.blocked.length + " 项已确认阻塞" : "", g.pending.length ? g.pending.length + " 项待核" : ""].filter(Boolean).join("、");
+}
+
+/** 空原因不是“服务端未返回阻塞”：true/false/null 各自表达确定结果、缺原因与待核。 */
+export function newOrdersReasonText(newOrders: boolean | null): string {
+  if (newOrders === true) return "当前无接新单阻塞";
+  if (newOrders === false) return "不可接新单，原因未提供";
+  return "接新单待核";
 }
 
 /** 解除弹窗摘要：排除运营限制本身。 */
@@ -192,6 +203,12 @@ export function rowDepositText(row: QuickViewRow): string {
   if (!row.summary) return "摘要未装配";
   if (row.depositDeclarationUnknown) return "未提供";
   return "未申报";
+}
+
+/** 列表只在保证金构成条件时占位；明确不要求不常驻术语。 */
+export function rowGuaranteeCondensed(row: SupplyWorkItem): string | null {
+  const text = rowGuaranteeRequirementText(row);
+  return text.includes("不要求") ? null : text;
 }
 
 /** 保证金要求轴：按当前启用机制投影，并带上依据来源；只有权威写明 NOT_REQUIRED 才称“不要求”。 */

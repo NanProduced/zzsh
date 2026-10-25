@@ -52,6 +52,7 @@ export type SupplyQueryKind = "account" | "legacy" | "owner" | "nickname" | "ord
 /** The renter's already-returned version. It is not the admin current/draft version. */
 export type PublicBasis = {
   id: string;
+  releaseId?: string | null;
   accountId: string | null;
   title: string | null;
   description: string | null;
@@ -59,7 +60,14 @@ export type PublicBasis = {
   attributeDisplay?: AttributeDisplay | null;
   presentation: Presentation | null;
   media: Array<{ assetId?: string; url?: string; category?: string | null }>;
-  quote: { resourceTotal?: { amount?: string } | null; termSeconds?: string; lines?: Array<{ itemId?: string; quantity?: string; unit?: string; buyerAmount?: { amount?: string } }>; expiryDisclosures?: Array<{ entitlementId?: string; expiresAt?: string | null }> } | null;
+  quote: {
+    resourceTotal?: { amount?: string } | null;
+    termSeconds?: string;
+    lines?: Array<{ itemId?: string; quantity?: string; unit?: string; unitQuantity?: string; buyerUnitAmount?: { amount?: string }; buyerAmount?: { amount?: string } }>;
+    baseRenterHaffRatioWanPerYuan?: string | null;
+    unitAmountsInformational?: boolean;
+    expiryDisclosures?: Array<{ entitlementId?: string; expiresAt?: string | null }>;
+  } | null;
   termOption: { code?: string; displayName?: string | null; dailyConsumption?: { quantity: string; unit: "HAFF_BASE" } | null } | null;
   fullPayoutSelected?: boolean | null;
   publishedAt: string | null;
@@ -74,7 +82,7 @@ export function publicBasisVersion(basis: PublicBasis): Version {
     id: basis.id,
     sequence: "",
     reviewState: "PUBLISHED",
-    releaseId: null,
+    releaseId: basis.releaseId ?? null,
     contentHash: null,
     publication: basis.publishedAt ? { source: "PUBLIC", publishedAt: basis.publishedAt } : null,
     termOption: basis.termOption ? { code: basis.termOption.code ?? "", displayName: basis.termOption.displayName ?? null, dailyConsumption: basis.termOption.dailyConsumption ?? null } : null,
@@ -96,7 +104,14 @@ export function publicBasisVersion(basis: PublicBasis): Version {
     quote: typeof basis.quote?.resourceTotal?.amount === "string" ? {
       resourceTotal: { amount: basis.quote.resourceTotal.amount },
       termSeconds: basis.quote.termSeconds ?? "0",
-      lines: lines.flatMap(line => typeof line.itemId === "string" ? [{ itemId: line.itemId, quantity: line.quantity ?? "", unit: line.unit ?? "", ...(line.buyerAmount?.amount ? { buyerAmount: { amount: line.buyerAmount.amount } } : {}) }] : []),
+      baseRenterHaffRatioWanPerYuan: basis.quote.baseRenterHaffRatioWanPerYuan ?? null,
+      unitAmountsInformational: basis.quote.unitAmountsInformational === true,
+      lines: lines.flatMap(line => typeof line.itemId === "string" ? [{
+        itemId: line.itemId, quantity: line.quantity ?? "", unit: line.unit ?? "",
+        ...(line.unitQuantity ? { unitQuantity: line.unitQuantity } : {}),
+        ...(line.buyerUnitAmount?.amount ? { buyerUnitAmount: { amount: line.buyerUnitAmount.amount } } : {}),
+        ...(line.buyerAmount?.amount ? { buyerAmount: { amount: line.buyerAmount.amount } } : {}),
+      }] : []),
     } : null,
   };
 }
@@ -238,7 +253,13 @@ export type Version = {
   presentation: Presentation;
   catalogItems?: Array<{ id: string; code?: string; name?: string; unit?: string }>;
   draftSkinSummary?: { source?: string; items?: PresentationSkin[]; withheld?: number } | null;
-  quote: { resourceTotal: { amount: string }; termSeconds: string; lines?: Array<{ itemId: string; quantity: string; unit: string; buyerAmount?: { amount: string }; ownerAmount?: { amount: string } }> } | null;
+  quote: {
+    resourceTotal: { amount: string };
+    termSeconds: string;
+    baseRenterHaffRatioWanPerYuan?: string | null;
+    unitAmountsInformational?: boolean;
+    lines?: Array<{ itemId: string; quantity: string; unit: string; unitQuantity?: string; buyerUnitAmount?: { amount: string }; buyerAmount?: { amount: string }; ownerAmount?: { amount: string } }>;
+  } | null;
 };
 
 export type VersionHistoryEntry = {
@@ -653,10 +674,15 @@ export function skinFacts(version: Pick<Version, "draftSkinSummary" | "presentat
   return { source: draft && Array.isArray(draft.items) ? "CURRENT_DRAFT_SELECTION" : "PRESENTATION", withheld: draft && Array.isArray(draft.items) && typeof draft.withheld === "number" ? draft.withheld : null, rows: source.map(map) };
 }
 
-export function quoteLineFacts(version: Version): Array<{ itemId: string; name: string; quantity: string; amount: string | null; ownerAmount: string | null }> {
+export function quoteLineFacts(version: Version): Array<{ itemId: string; name: string; quantity: string; amount: string | null; ownerAmount: string | null; unitQuantity: string | null; buyerUnitAmount: string | null }> {
   return (version.quote?.lines ?? []).map(line => {
     const named = version.catalogItems?.find(item => item.id === line.itemId) ?? version.presentation.items?.find(item => item.id === line.itemId);
-    return { itemId: line.itemId, name: named && "name" in named && named.name ? named.name : "名称待核", quantity: `${line.quantity} ${unitText(line.unit, named && "code" in named ? named.code : undefined)}`, amount: line.buyerAmount?.amount ?? null, ownerAmount: line.ownerAmount?.amount ?? null };
+    return {
+      itemId: line.itemId, name: named && "name" in named && named.name ? named.name : "名称待核",
+      quantity: `${line.quantity} ${unitText(line.unit, named && "code" in named ? named.code : undefined)}`,
+      amount: line.buyerAmount?.amount ?? null, ownerAmount: line.ownerAmount?.amount ?? null,
+      unitQuantity: line.unitQuantity ?? null, buyerUnitAmount: line.buyerUnitAmount?.amount ?? null,
+    };
   });
 }
 
