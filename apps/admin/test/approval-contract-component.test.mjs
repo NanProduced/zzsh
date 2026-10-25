@@ -1473,6 +1473,9 @@ test("a rejected receipt reads back as a refusal, never as the original success 
     assert.equal(text(view).includes("已记录首个有效批准"), false, "不得拼接原批准的成功文案");
     assert.equal(text(view).includes("可按当前资格继续处理"), false, "拒绝不是可继续办理的暗示");
     assert.equal(writes.length, 1, "读回不重发命令");
+    const refusalNotice = [...view.rootNode.querySelectorAll('[data-slot=status-message]')].find(node => node.textContent.includes('原请求当时已被拒绝'));
+    assert.ok(refusalNotice, 'the verified refusal remains visible');
+    assert.doesNotMatch(refusalNotice.className, /bg-success|border-success|bg-emerald|text-emerald/, 'known original refusal is not a green success notice');
   } finally {
     await cleanup();
   }

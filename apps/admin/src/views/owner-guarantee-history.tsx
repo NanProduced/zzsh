@@ -1,6 +1,8 @@
 import {useEffect,useRef,useState} from 'react';
 import {adminRequest,AdminApiError} from '../api';
 import {Button} from '@/components/ui/button';
+import {Alert,AlertAction,AlertDescription,AlertTitle} from '@/components/ui/alert';
+import {TriangleAlert} from 'lucide-react';
 import {financeMoney,financeTime} from './admin-finance-api';
 import './owner-guarantee-history.css';
 
@@ -40,6 +42,6 @@ export function AdminOwnerGuaranteeHistory({subjectUserId,adminUserId,scopeKey,c
  if(!canRead)return null;const page=visible.page;
  return<section className="finance-guarantee-history"><div className="ud-section-heading"><h3>号主保证金历史来源</h3><Button variant="outline" size="sm" disabled={visible.busy} onClick={()=>setReload(n=>n+1)}>重新读取</Button></div><p>仅展示当前有权读取的游戏与账号范围。原缴退观察不计入钱包或抵扣新保证金。</p>
   {page?<><p>当前范围已入账在押：<strong>{financeMoney(page.postedHeld.amountCents)}</strong> · 历史在押 / 可退责任：待核定</p>{page.items.length?<ul>{page.items.map(item=><li key={item.id}><details><summary><strong>{item.accountNumber??item.legacyAccountId}</strong> · 历史已付记录 {financeMoney(item.paidRecordCents)}</summary><p>账号原金额字段 {financeMoney(item.accountFieldCents)}；原金额与付款记录分别保留。</p>{item.conflicts.length?<p>存在多笔或金额不一致的来源记录，当前责任仍须核对。</p>:null}{item.payments.length?<ol>{item.payments.map(p=><li key={p.id}><strong>{p.sourceStatus==='1'?'来源标记已付':'来源未付尝试'} · {financeMoney(p.amountCents)}</strong><span>原商户单号 {p.merchantOrderNumber??'未提供'}</span><small>创建 {financeTime(p.sourceCreatedAt)} · 原支付 {financeTime(p.sourcePaidAt)}；渠道到账待核</small></li>)}</ol>:<p>未关联支付表记录，不据此认定从未缴款。</p>}</details></li>)}</ul>:<p>{page.coverage.knowledge==='KNOWN'?'当前可见的已核定来源范围没有记录。':'当前范围来源尚未核全，没有可展示的记录。'}</p>}<p>{page.coverage.count===null?`已读取 ${page.coverage.mappedRecordCount??'待核定'} 条，完整范围待核`:`已显示 ${page.items.length} / ${page.coverage.count} 条`}</p>{page.nextCursor?<Button variant="outline" disabled={visible.busy} onClick={()=>void load(page.nextCursor)}>加载更多来源</Button>:null}</>:visible.busy?<p role="status">正在读取保证金资金来源…</p>:null}
-  {visible.error?<div role="alert"><p>{visible.error.status===403?'当前角色没有读取保证金资金来源的权限。':visible.error.status===404?'该用户或当前可见范围不存在。':visible.error.status===409?'资金来源或权限范围已变化，请重新读取。':'保证金来源暂时无法读取，未确认金额不按零展示。'}</p><Button variant="outline" onClick={()=>setReload(n=>n+1)}>重试读取</Button></div>:null}
+  {visible.error?<Alert variant={visible.error.status===403||visible.error.status===409?'warning':'destructive'} role={visible.error.status===403||visible.error.status===409?'status':'alert'}><TriangleAlert aria-hidden="true"/><AlertTitle>{visible.error.status===403?'当前角色没有读取保证金资金来源的权限':visible.error.status===404?'该用户或当前可见范围不存在':visible.error.status===409?'资金来源或权限范围已变化':'保证金来源暂时无法读取'}</AlertTitle>{visible.error.status!==403&&visible.error.status!==404&&visible.error.status!==409?<AlertDescription>未确认金额不按零展示。</AlertDescription>:null}{visible.error.status!==403?<AlertAction><Button variant="outline" onClick={()=>setReload(n=>n+1)}>重试读取</Button></AlertAction>:null}</Alert>:null}
  </section>;
 }

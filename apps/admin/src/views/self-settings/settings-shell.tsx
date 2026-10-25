@@ -1,7 +1,9 @@
 import type { ReactNode } from "react";
 
+import { AlertCircle, CheckCircle2, Info, TriangleAlert } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge, InlineStatus, type InlineStatusTone } from "../../components/ui/badge";
+import { Alert, AlertAction, AlertDescription } from "../../components/ui/alert";
 
 /**
  * 设置工作区共用骨架。结构与 `views/settings-view.tsx`（外观）和
@@ -100,13 +102,6 @@ export function MissingValue({ label = "未提供" }: { label?: string }) {
 
 export type NoticeTone = "info" | "warning" | "danger" | "success";
 
-const noticeTones: Record<NoticeTone, string> = {
-  info: "border-border bg-muted/40 text-muted-foreground",
-  warning: "border-amber-500/30 bg-amber-500/10 text-amber-900 dark:text-amber-300",
-  danger: "border-rose-500/30 bg-rose-500/10 text-rose-900 dark:text-rose-300",
-  success: "border-emerald-500/30 bg-emerald-500/10 text-emerald-900 dark:text-emerald-300",
-};
-
 /** 页面级结果与责任提示：紧贴它所描述的对象，不堆成全局 toast。 */
 export function SettingsNotice({
   tone = "info",
@@ -119,13 +114,13 @@ export function SettingsNotice({
   children: ReactNode;
   action?: ReactNode;
 }) {
+  const variant = tone === "danger" ? "destructive" : tone;
+  const Icon = tone === "danger" ? AlertCircle : tone === "warning" ? TriangleAlert : tone === "success" ? CheckCircle2 : Info;
   return (
-    <div
-      role={role}
-      className={cn("flex flex-col gap-2 rounded-lg border p-3 text-xs leading-relaxed sm:flex-row sm:items-center sm:justify-between", noticeTones[tone])}
-    >
-      <div className="min-w-0 break-words [overflow-wrap:anywhere]">{children}</div>
-      {action ? <div className="flex shrink-0 flex-wrap items-center gap-2">{action}</div> : null}
-    </div>
+    <Alert variant={variant} role={role}>
+      <Icon aria-hidden="true" />
+      <AlertDescription className="text-foreground/85">{children}</AlertDescription>
+      {action ? <AlertAction>{action}</AlertAction> : null}
+    </Alert>
   );
 }

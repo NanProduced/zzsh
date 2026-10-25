@@ -1268,14 +1268,11 @@ function ProfitSimulationModal({
               <Skeleton className="h-32 w-full rounded-lg" />
             </div>
           ) : contextError ? (
-            <div className="rounded-xl border border-warning/40 bg-warning/5 p-4 space-y-2 text-warning-foreground">
-              <div className="flex items-center gap-2 font-medium">
-                <TriangleAlert className="h-4 w-4" />
-                <span>试算依据暂不可用</span>
-              </div>
-              <p className="text-muted-foreground">{contextError}</p>
-              <p className="text-[11px] text-muted-foreground">未读取到价目时不生成结果，不以全 0 或旧结果代替。</p>
-            </div>
+            <Alert variant="warning" role="status">
+              <TriangleAlert aria-hidden />
+              <AlertTitle>试算依据暂不可用</AlertTitle>
+              <AlertDescription><p>{contextError}</p><p>未读取到价目时不生成结果，不以全 0 或旧结果代替。</p></AlertDescription>
+            </Alert>
           ) : context ? (
             <div className="space-y-4">
               <div className="rounded-xl border border-border bg-card/60 p-4 space-y-3">
@@ -1483,7 +1480,7 @@ function stateMessage(state: Exclude<MembershipGrowthAdminState, { status: "read
   const loading = state.status === "loading", denied = state.status === "permission";
   const title = loading ? "正在读取会员政策" : denied ? "没有会员政策查看权限" : "会员政策暂不可用";
   return <section className="membership-admin-view" data-state={state.status}>
-    <Alert variant={loading ? "default" : denied ? "warning" : "danger"} role={loading ? "status" : "alert"}>
+    <Alert variant={loading ? "default" : denied ? "warning" : "destructive"} role={loading || denied ? "status" : "alert"}>
       {loading ? <RefreshCw aria-hidden className="animate-spin" /> : <TriangleAlert aria-hidden />}
       <AlertTitle>{title}</AlertTitle>
       <AlertDescription>{loading ? "请稍候。" : denied ? "请联系有权限的管理员。" : state.message}</AlertDescription>
@@ -1685,7 +1682,7 @@ export function MembershipGrowthAdminView({
   const noticeDescription = policyNotice?.description ?? (!unifiedSupported ? "会员配置暂时只读，请刷新后再操作。" : dirty ? "修改尚未保存，当前权益不受影响。" : descriptions[changeCard.kind]);
   const noticeRequestId = policyNotice?.requestId ?? changeCard.requestId ?? policyReadbackId;
   const NoticeIcon = noticeTone === "info" ? changeCard.kind === "effective" ? CheckCircle2 : Clock : TriangleAlert;
-  const policyFeedback = <Alert variant={noticeTone === "info" ? "default" : noticeTone === "error" ? "danger" : "warning"} role={noticeTone === "info" ? "status" : "alert"} data-testid="membership-policy-feedback">
+  const policyFeedback = <Alert variant={noticeTone === "info" ? "info" : noticeTone === "error" ? "destructive" : "warning"} role={noticeTone === "error" || policyNotice?.blocking ? "alert" : "status"} data-testid="membership-policy-feedback">
     <NoticeIcon aria-hidden />
     <AlertTitle id="membership-change-heading" role="heading" aria-level={3}>{noticeTitle}</AlertTitle>
     <AlertDescription>

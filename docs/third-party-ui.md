@@ -1,5 +1,7 @@
 # 第三方前端来源
 
+管理端持续反馈统一复用 `components/ui/alert.tsx`，由 [ReUI Alert](https://reui.io/docs/components/base/alert) 的 MIT 组件适配；保留 Alert、AlertTitle、AlertDescription、AlertAction 四部件及旧 danger 别名。StatusMessage、SettingsNotice共用该入口，不另建反馈引擎。正常说明用status，风险/结果待核用warning，明确失败用destructive；已核拒绝不显示为成功。可关闭提示只影响展示，原请求责任和业务门禁由调用方保留。高敏确认继续使用项目现有Dialog，未新增依赖。
+
 管理平台新增及优化页面优先复用已有成熟组件，缺口按需采用 [ReUI](https://reui.io/docs) 与 [shadcn/ui](https://ui.shadcn.com/docs/components)，沿当前 Base UI、主题及工作区浮层实现适配。专用能力允许采用其他来源。ReUI 公共仓库的组件示例、primitives 与 hooks 按其 [MIT 许可范围](https://reui.io/legal/license)使用并保留声明，Pro blocks/templates 不混作免费源码；采用时逐件登记出处和改造范围。此处记录选型原则，不代表所有候选已经进入正式产品；4291 展示候选仅供参考。
 
 站内客服的接口、配置及未验收边界见[客服接入说明](architecture/customer-support.md)。

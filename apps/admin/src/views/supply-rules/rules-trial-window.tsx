@@ -473,15 +473,15 @@ export function TrialWindow({ rules, seed, onClose }: { rules: RulesResponse; se
                     <span className="font-semibold text-foreground/80">线上基准规则</span>
                     {quote?.ownerHaffRatio ? <Badge variant="outline" className="text-[10px]">号主比例 {quote.ownerHaffRatio}</Badge> : null}
                   </div>
-                  {result.status === "busy" ? <p role="status" aria-busy="true" className="text-[11px]">计算中…</p> : null}
+                  {result.status === "busy" ? <p role="status" aria-busy="true" className="text-xs">计算中…</p> : null}
                   {result.status === "error" ? <p role="alert" className="text-[11px] text-destructive">试算失败：{result.message}</p> : null}
-                  {result.status === "ok" && !quote ? <p role="status" className="text-[11px]">无法报价：{(result.result.reasonCodes ?? []).map(code => REASON_TEXT[code] ?? code).join("、") || "原因未提供"}</p> : null}
-                  {!validation.ready ? <p role="status" className="text-[11px]">待计算：请完善共同账号条件。</p> : null}
+                  {result.status === "ok" && !quote ? <p role="status" className="text-xs">无法报价：{(result.result.reasonCodes ?? []).map(code => REASON_TEXT[code] ?? code).join("、") || "原因未提供"}</p> : null}
+                  {!validation.ready ? <p role="status" className="text-xs">待计算：请完善共同账号条件。</p> : null}
                   {left.length > 0 ? (
                     <p className="text-[11px] tabular-nums">
                       租客资源金额 {leftTenant === null ? "未配置" : yuan(leftTenant)} · 号主金额（扣费前） {leftOwner === null ? "未配置" : yuan(leftOwner)} · 平台价差 {leftPlatform === null ? "未配置" : yuan(leftPlatform)}
                     </p>
-                  ) : validation.ready && result.status !== "busy" ? <p className="text-[11px]">基准金额未提供：服务端本次没有返回可报价结果，右侧数字为本地模拟，不代表线上基准。</p> : null}
+                  ) : validation.ready && result.status !== "busy" ? <p className="text-xs">基准金额未提供：服务端本次没有返回可报价结果，右侧数字为本地模拟，不代表线上基准。</p> : null}
                 </div>
 
                 <div aria-label="可调整参数" className="rounded-md border border-primary/20 bg-primary/5 px-2.5 py-1.5 text-xs text-muted-foreground">
@@ -494,7 +494,7 @@ export function TrialWindow({ rules, seed, onClose }: { rules: RulesResponse; se
                       租客资源金额 {rightTenant === null ? "待计算" : yuan(rightTenant)} · 号主金额（扣费前） {rightOwner === null ? "待计算" : yuan(rightOwner)} · 平台价差 {rightPlatform === null ? "待计算" : yuan(rightPlatform)}
                     </p>
                   ) : (
-                    <p role="status" className="text-[11px]">{estimate.message || "待计算：请在下方调整参数"}</p>
+                    <p role="status" className="text-xs">{estimate.message || "待计算：请在下方调整参数"}</p>
                   )}
                 </div>
               </div>

@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { AdminApiError, adminRequest, hasPermission, type SessionSnapshot } from "../api";
 import { directoryScopeOf } from "../workspace/admin-directory-read";
 import { Button } from "@/components/ui/button";
+import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { CircleAlert, TriangleAlert } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
@@ -68,9 +70,9 @@ export function DistributionPolicyPanel({ snapshot }: { snapshot: Snapshot }) {
     } catch (e) { patch(owner, { status: "error", message: failure(e) }, gen); }
   };
   useEffect(() => { if (access.canRead) void load(scope); return () => { genRef.current += 1; }; }, [scope]);
-  if (!access.canRead) return <div className="space-y-2"><p role="alert" className="text-sm">当前管理员没有分销政策权限</p></div>;
-  if (view.status === "loading") return <p className="text-sm text-muted-foreground">正在读取分销政策…</p>;
-  if (view.status === "error" || !view.read) return <div className="space-y-2"><p role="alert" className="text-sm">{view.message}</p><Button type="button" size="sm" variant="outline" onClick={() => void load(scope)}>重试</Button></div>;
+  if (!access.canRead) return <Alert variant="warning" role="status"><TriangleAlert aria-hidden="true" /><AlertTitle>当前管理员没有分销政策权限</AlertTitle><AlertDescription>需要读取权限；修改还需要管理权限。</AlertDescription></Alert>;
+  if (view.status === "loading") return <p className="text-sm text-muted-foreground" role="status">正在读取分销政策…</p>;
+  if (view.status === "error" || !view.read) return <Alert variant="destructive"><CircleAlert aria-hidden="true" /><AlertTitle>分销政策读取失败</AlertTitle><AlertDescription>{view.message}</AlertDescription><AlertAction><Button type="button" size="sm" variant="outline" onClick={() => void load(scope)}>重试</Button></AlertAction></Alert>;
   const read = view.read;
   if (read.knowledge === "UNKNOWN") return <section className="space-y-2 text-sm"><h2 className="text-base font-semibold">分销政策</h2><p>当前未配置分销政策（{read.reason}），不按任何默认比例显示。</p></section>;
   const { config } = read.policy;

@@ -707,7 +707,7 @@ export function SupplyCatalogView({
   }, [catalog, editor]);
 
   if (!canManage) {
-    return <section className="section-panel"><StatusMessage themeAware error="当前账号没有供给目录维护权限；Boss 也需按游戏对象范围操作。" /></section>;
+    return <section className="section-panel"><StatusMessage themeAware tone="warning" error="当前账号没有供给目录维护权限；Boss 也需按游戏对象范围操作。" /></section>;
   }
 
   const gameItems = games.map((game) => ({ value: game.id, label: `${game.name}（${game.code}）` }));

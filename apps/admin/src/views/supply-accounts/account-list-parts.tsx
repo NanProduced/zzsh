@@ -322,7 +322,7 @@ export function QuickView({ row, canRead, canRestrict, canOrders, onClose, onOpe
         <div className="font-semibold">{verdict}<span className="mx-2 opacity-40">·</span><span className="font-medium">{g.blocked.length} 项已确认阻塞{g.pending.length ? "、" + g.pending.length + " 项待核" : ""}</span></div>
         <div className="text-xs text-muted-foreground">各条件独立，解除一项不代表账号可以接单。</div>
       </div>
-      {error && <Alert variant="warning" className="mt-3"><CircleAlert aria-hidden="true" /><AlertTitle>详情未读到</AlertTitle><AlertDescription><p>{error}</p><p>以下仍为列表已读取的事实。</p></AlertDescription></Alert>}
+      {error && <Alert variant="warning" role="status" className="mt-3"><CircleAlert aria-hidden="true" /><AlertTitle>详情未读到</AlertTitle><AlertDescription><p>{error}</p><p>以下仍为列表已读取的事实。</p></AlertDescription></Alert>}
 
       <QuickViewAssetSummary row={row} detail={detail} />
 

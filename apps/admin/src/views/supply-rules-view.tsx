@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ComponentProps, type FormEvent, type ReactNode } from "react";
-import { CircleAlert } from "lucide-react";
+import { CircleAlert, TriangleAlert } from "lucide-react";
 
 import { adminRequest, friendlyError, hasPermission, type CatalogItem, type PriceLineRecord, type PriceVersionRecord, type RulesResponse, type SessionSnapshot, type SupplyGame } from "../api";
 import { StatusMessage } from "../components/ui-elements";
@@ -392,7 +392,7 @@ export function SupplyRulesView({
   };
 
   if (!canEdit) {
-    return <section className="section-panel"><StatusMessage themeAware error="当前账号没有规则草稿编辑权限；生效仅限 Boss。" /></section>;
+    return <section className="section-panel"><StatusMessage themeAware tone="warning" error="当前账号没有规则草稿编辑权限；生效仅限 Boss。" /></section>;
   }
 
   return (
@@ -422,13 +422,13 @@ export function SupplyRulesView({
           </Alert>
         ) : null}
         {command.state.kind === "conflict" ? (
-          <Alert variant="danger" className="mt-3">
-            <CircleAlert aria-hidden="true" />
+          <Alert variant="warning" role="alert" className="mt-3">
+            <TriangleAlert aria-hidden="true" />
             <AlertTitle>版本已变化（409）</AlertTitle>
             <AlertDescription><p>输入已保留。请核对当前版本后再操作。</p></AlertDescription>
           </Alert>
         ) : command.state.kind === "error" ? (
-          <Alert variant="danger" className="mt-3">
+          <Alert variant="destructive" className="mt-3">
             <CircleAlert aria-hidden="true" />
             <AlertTitle>请求被明确拒绝</AlertTitle>
             <AlertDescription><p>{command.state.message}</p></AlertDescription>

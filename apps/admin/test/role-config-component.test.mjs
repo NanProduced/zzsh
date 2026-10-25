@@ -40,6 +40,7 @@ const SNAPSHOT = {
 const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
 const button = (node, label) => [...node.querySelectorAll("button")].find((item) => item.textContent.trim() === label);
 const popup = () => browser.document.querySelector('[data-slot="dialog-content"]');
+const closeButton = () => popup()?.querySelector('[data-slot="dialog-close"]') ?? undefined;
 const settle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
 async function until(predicate) {
   for (let attempt = 0; attempt < 100; attempt += 1) { if (predicate()) return; await settle(); }
@@ -80,7 +81,7 @@ test("保存在途拒绝 ESC、遮罩、底栏退出；成功回执只关闭当�
   await rename("A 已修改");
   await click(button(popup(), "保存更改"));
   await until(() => finish);
-  assert.equal(button(popup(), "Close"), undefined, "在途提交隐藏右上角关闭");
+  assert.equal(closeButton(), undefined, "在途提交隐藏右上角关闭");
   assert.equal(button(popup(), "放弃修改").disabled, true);
   await escape();
   assert.ok(popup(), "ESC 不能关闭在途提交");
@@ -103,7 +104,7 @@ test("普通关闭保留草稿，明确放弃才退出，零 fixture POST", asyn
   const view = await setup(t);
   await click(button(view.container, "编辑「角色A」"));
   await rename("未保存的角色草稿");
-  await click(button(popup(), "Close"));
+  await click(closeButton());
   assert.ok(popup());
   assert.equal(popup().querySelector("input[required]").value, "未保存的角色草稿");
   assert.ok(popup().textContent.includes("选择“放弃修改”才会关闭"));

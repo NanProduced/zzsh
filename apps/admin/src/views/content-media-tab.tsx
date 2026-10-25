@@ -215,7 +215,7 @@ export function ContentMediaTab({
                     </div>
                   ) : null}
                 </>
-              ) : <StatusMessage error="当前账号可以查看但不能审核或公开素材。" />}
+              ) : <StatusMessage tone="warning" error="当前账号可以查看但不能审核或公开素材。" />}
               <p className="text-[11px] text-muted-foreground">审核与公开在服务端校验 content.platform.publish；此面板不显示存储键或原始文件。</p>
             </div>
           </div>

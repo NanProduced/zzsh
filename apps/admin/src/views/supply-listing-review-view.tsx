@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, ArrowUpRight, Copy, Search, RefreshCw, CheckCircle2 } from "lucide-react";
+import { ArrowLeft, ArrowUpRight, Copy, Search, RefreshCw, CheckCircle2, TriangleAlert } from "lucide-react";
+import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { AdminApiError, adminRequest, friendlyError, formatDate, hasPermission, type SessionSnapshot } from "../api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -342,13 +343,12 @@ function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, i
  {queryError && <p role="alert" className="mt-1 text-xs text-destructive">{queryError}</p>}{filter.kind === "nickname" && filter.q && <p className="mt-1 text-xs text-muted-foreground">昵称可能重名，请按编号核对主体。</p>}
  <div className="mt-3">
    {listError ? (
-     <div className="rounded-lg border border-dashed p-8 text-center" role="alert">
-       <h2 className="text-base font-semibold">本次列表未读到</h2>
-       <p className="mt-1 text-muted-foreground">{listError}</p>
-       <div className="mt-3">
-         <Button onClick={() => { positions.delete(identity); setStack([]); setFilter({ ...filter, cursor: "" }); }}>回首页重读</Button>
-       </div>
-     </div>
+     <Alert variant="destructive">
+       <TriangleAlert aria-hidden />
+       <AlertTitle>本次列表未读到</AlertTitle>
+       <AlertDescription>{listError}</AlertDescription>
+       <AlertAction><Button onClick={() => { positions.delete(identity); setStack([]); setFilter({ ...filter, cursor: "" }); }}>回首页重读</Button></AlertAction>
+     </Alert>
    ) : listBusy ? (
      <div className="space-y-2 py-2" aria-busy="true">
        <p className="sr-only">正在读取账号供给…</p>
@@ -511,8 +511,8 @@ function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, i
     const publicDefault = detail && !versionId && publicDraftAccount !== detail.account.id && !historical && detail.supervision.facts.publicBasis && version && detail.supervision.facts.publicBasis.id !== version.id ? detail.supervision.facts.publicBasis : null;
     const archiveVersion = publicDefault ? publicBasisVersion(publicDefault) : version;
     return <section className="wf-detail" ref={viewport}><div className="mb-3"><Button variant="ghost" className="-ml-2.5" onClick={back} disabled={busy || intent?.unknown}><ArrowLeft size={15}/>返回账号供给</Button></div>
- {feedback && !intent && <div role="status" tabIndex={-1} className="wf-result"><CheckCircle2 size={19}/><div><h2>{feedback.message}</h2>{readFailed && <p>当前详情未读到，只重读本次结果。</p>}</div>{readFailed && <Button variant="outline" disabled={detailBusy} onClick={() => void reread()}>只重读本次结果</Button>}</div>}
- {detailBusy && !detail ? <div className="wf-empty" aria-busy="true">正在读取账号详情…</div> : detailError && !detail ? <div className="wf-empty" role="alert"><h1>本次详情未读到</h1><p>{detailError}</p><Button onClick={() => void reread()} disabled={busy}>重读当前账号</Button></div> : detail && <>
+ {feedback && !intent && <Alert tabIndex={-1} variant={feedback.kind === "error" ? "destructive" : "success"} role={feedback.kind === "error" ? "alert" : "status"}>{feedback.kind === "error" ? <TriangleAlert aria-hidden /> : <CheckCircle2 aria-hidden />}<AlertTitle>{feedback.message}</AlertTitle>{readFailed ? <AlertDescription>当前详情未读到，只重读本次结果。</AlertDescription> : null}{readFailed ? <AlertAction><Button variant="outline" disabled={detailBusy} onClick={() => void reread()}>只重读本次结果</Button></AlertAction> : null}</Alert>}
+ {detailBusy && !detail ? <div className="wf-empty" aria-busy="true">正在读取账号详情…</div> : detailError && !detail ? <Alert variant="destructive"><TriangleAlert aria-hidden /><AlertTitle>本次详情未读到</AlertTitle><AlertDescription>{detailError}</AlertDescription><AlertAction><Button onClick={() => void reread()} disabled={busy}>重读当前账号</Button></AlertAction></Alert> : detail && <>
  <header className="mb-3 flex flex-wrap items-start justify-between gap-3 text-sm"><div className="min-w-0"><h1 id="supply-detail-title" tabIndex={-1} className="text-xl font-semibold outline-none">{(publicDefault ? archiveVersion : version)?.declaration.title ?? "当前资料未提供"} <span className="mx-1 font-normal text-muted-foreground">/</span><span className="font-semibold">{objectLabel}</span></h1><p className="mt-1 text-muted-foreground">号主：{detail.ownerName}<span className="mx-1.5">·</span>{publicDefault ? "对外版本 " + publicDefault.id : version ? "第" + version.sequence + "版 · " + reviewStateLabel(version.reviewState) : "版本未提供"}<span className="mx-1.5">·</span>修订 {detail.account.revision}</p></div><div className="flex flex-wrap gap-2">{detail.supervision.ownerLink.state === "READY" && <Button variant="outline" onClick={userTarget}>查看号主资料</Button>}<Button variant="outline" onClick={() => void copy()}>复制核对摘要</Button></div></header>
  {historical && <div className="wf-notice" role="status"><p>正在查看历史版本，所有处置关闭。业务情况仍指当前账号。</p><Button variant="outline" onClick={() => { setVersionId(null); setChecked(false); setReason(""); const query: Record<string, string> = { ...initialQuery, context: section }; delete query.versionId; onQueryChange(query); }}>回到当前资料</Button></div>}
  {(() => { const g = groupConditions(detail.supervision.facts), f = detail.supervision.facts; return <div className={"mb-4 flex flex-wrap items-center justify-between gap-2 rounded-lg px-4 py-3 text-sm " + (f.newOrders ? "bg-emerald-500/10" : "bg-amber-500/10")} role="status"><div className="flex flex-wrap items-center gap-x-4 gap-y-1 font-semibold"><span>{f.newOrders === null ? "新单资格待核" : f.newOrders ? "可接新单" : "不可接新单"}</span><span className="opacity-30">|</span><span>{g.blocked.length} 项阻塞{g.pending.length ? "、" + g.pending.length + " 项待核" : ""}</span><span className="opacity-30">|</span><span className="font-medium">{f.publicVisible === null ? "公开状态待核" : f.publicVisible ? "当前公开展示" : "当前未公开"}</span></div><span className="text-xs text-muted-foreground">解除单项条件不代表账号可以接单</span></div>; })()}

@@ -1,3 +1,4 @@
+import { CircleCheck, TriangleAlert } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
 import { Button } from "../../components/ui-elements";
 import { formatDate } from "../../api";
@@ -37,9 +38,10 @@ function Receipt({ result }: { result: RecoveryResult }) {
         <Fact label="原请求标识" value={result.key} mono />
       </FactGrid>
       {rejection ? (
-        <Alert variant="warning">
-          <AlertTitle className="text-sm">原请求当时被拒绝</AlertTitle>
-          <AlertDescription className="text-xs break-words">
+        <Alert variant="warning" role="status">
+          <TriangleAlert aria-hidden="true" />
+          <AlertTitle>原请求当时被拒绝</AlertTitle>
+          <AlertDescription className="break-words">
             <span className="font-mono">{rejection.code}</span> · {rejection.message}
             {rejection.reasons?.length ? ` · ${rejection.reasons.map(reasonLabel).join("；")}` : ""}
             。这是原回执，不是新的失败；同一标识重放会得到同一个拒绝。
@@ -96,9 +98,10 @@ export function RecoveryPanel({
     // 终态证据已到达：不再给出与结果矛盾的 UNKNOWN 重放出口。
     return (
       <section className="space-y-3 rounded-md border border-border bg-foreground/[0.02] p-3">
-        <Alert variant="success">
-          <AlertTitle className="text-sm">原结果已核清</AlertTitle>
-          <AlertDescription className="text-xs leading-relaxed">
+        <Alert variant="success" role="status">
+          <CircleCheck aria-hidden="true" />
+          <AlertTitle>原结果已核清</AlertTitle>
+          <AlertDescription>
             已拿到与这把请求标识一致的回执，这笔责任不再未决。下面是原回执内容；业务是否落地仍以领域结果为准。
           </AlertDescription>
         </Alert>
@@ -112,11 +115,12 @@ export function RecoveryPanel({
 
   return (
     <section className="space-y-3 rounded-md border border-border bg-foreground/[0.02] p-3">
-      <Alert variant={kind === "unknown" ? "danger" : "warning"}>
-        <AlertTitle className="text-sm">
+      <Alert variant="warning" role="status">
+        <TriangleAlert aria-hidden="true" />
+        <AlertTitle>
           {kind === "unknown" ? "审批请求 · 结果未知" : "已受理，但最新状态未确认"}
         </AlertTitle>
-        <AlertDescription className="text-xs leading-relaxed">
+        <AlertDescription>
           {kind === "unknown"
             ? "服务端可能已经处理这次请求。责任尚未核清前不要换新标识重试，也不要把它当作失败；下面两个入口都不会产生第二次业务写入以外的效果。"
             : "请求已被受理，但回读最新状态失败。原申请上下文与请求标识已保留，先确认状态再决定是否继续。"}
@@ -125,25 +129,31 @@ export function RecoveryPanel({
 
       {lookup.state === "known" ? <Receipt result={lookup.result} /> : null}
       {lookup.state === "not_found" ? (
-        <Alert variant="warning">
-          <AlertTitle className="text-sm">没有找到这把请求标识对应的回执</AlertTitle>
-          <AlertDescription className="text-xs leading-relaxed">
+        <Alert variant="warning" role="status">
+          <TriangleAlert aria-hidden="true" />
+          <AlertTitle>没有找到这把请求标识对应的回执</AlertTitle>
+          <AlertDescription>
             {reasonLabel(lookup.result.explanationCode)}；{reasonLabel(lookup.result.resolution)}。
             没有回执不能证明原操作没有发生（例如写入已提交但回执读取路径不可达），因此不自动允许换新标识重试。
           </AlertDescription>
         </Alert>
       ) : null}
       {lookup.state === "denied" ? (
-        <Alert variant="danger">
-          <AlertTitle className="text-sm">恢复读取被拒</AlertTitle>
-          <AlertDescription className="text-xs leading-relaxed break-words">
+        <Alert variant="warning" role="status">
+          <TriangleAlert aria-hidden="true" />
+          <AlertTitle>恢复读取被拒</AlertTitle>
+          <AlertDescription className="break-words">
             {lookup.message}。这是恢复被拒，不是原操作失败：服务端没有回任何回执字段，也没有产生第二次写入。
             常见原因是授权或业务范围在提交后发生变化，或这张申请已不在你的可读范围内。
           </AlertDescription>
         </Alert>
       ) : null}
       {lookup.state === "error" ? (
-        <p className="text-xs leading-relaxed text-muted-foreground break-words">查询原结果失败：{lookup.message}。原责任仍未核清，可重新查询或用原请求重试。</p>
+        <Alert variant="destructive">
+          <TriangleAlert aria-hidden="true" />
+          <AlertTitle>查询原结果失败</AlertTitle>
+          <AlertDescription className="break-words">{lookup.message}。原责任仍未核清，可重新查询或用原请求重试。</AlertDescription>
+        </Alert>
       ) : null}
       {lookup.state === "loading" ? <p className="text-xs text-muted-foreground">正在查询原结果…</p> : null}
 

@@ -10,7 +10,7 @@ import { Icons } from "../components/icons";
 import { Button, StatusMessage } from "../components/ui-elements";
 import { EmptyState, EndOfFeed } from "../components/empty-state";
 import { Skeleton } from "../components/ui/skeleton";
-import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
+import { Alert, AlertAction, AlertDescription, AlertTitle } from "../components/ui/alert";
 import {
   AdminApiError,
   adminRequest,
@@ -352,7 +352,7 @@ export function AdminAuditView({
   }, [initialQueryKey]);
 
   if (!canRead || isForbidden) {
-    return <section className="section-panel"><StatusMessage error="当前账号没有账号与权限审计读取权限。普通账号读取权限不自动包含此权限。" /></section>;
+    return <section className="section-panel"><StatusMessage tone="warning" error="当前账号没有账号与权限审计读取权限。普通账号读取权限不自动包含此权限。" /></section>;
   }
 
   const navigate = (kind: "prev" | "next" | "first") => {
@@ -456,22 +456,13 @@ export function AdminAuditView({
         </div>
 
         {refreshWarning ? (
-          <Alert variant="warning" className="mb-4">
+          <Alert variant="warning" role="status" className="mb-4">
             <AlertTriangleIcon className="size-4" />
             <AlertTitle>数据未更新</AlertTitle>
-            <AlertDescription className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mt-1">
-              <span>刷新失败：当前展示为上次成功获取的内容（未能更新）。{refreshWarning}</span>
-              <Button
-                type="button"
-                size="sm"
-                variant="secondary"
-                disabled={loading}
-                onClick={retryLast}
-                className="h-7 px-3 text-xs shrink-0 self-start sm:self-auto"
-              >
-                重新刷新
-              </Button>
-            </AlertDescription>
+            <AlertDescription>刷新失败：当前展示为上次成功获取的内容（未能更新）。{refreshWarning}</AlertDescription>
+            <AlertAction>
+              <Button type="button" size="sm" variant="secondary" disabled={loading} onClick={retryLast}>重新刷新</Button>
+            </AlertAction>
           </Alert>
         ) : null}
 

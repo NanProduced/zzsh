@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { XIcon } from "lucide-react";
+import { TriangleAlert, XIcon } from "lucide-react";
 
 import { Button, PasswordInput, StatusMessage } from "../../components/ui-elements";
+import { Alert, AlertAction, AlertDescription, AlertTitle } from "../../components/ui/alert";
 import { Icons } from "../../components/icons";
 import {
   Dialog,
@@ -181,19 +182,20 @@ function UnknownPanel({
 }) {
   return (
     <div className="space-y-3">
-      <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-relaxed text-amber-600 dark:text-amber-400">
-        <p className="font-medium">提交后未收到明确结果</p>
-        <div className="mt-1 space-y-1">{children}</div>
-      </div>
-      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
-        <Button type="button" size="sm" variant="secondary" onClick={() => handlers.openLookup(origin, commandId)}>
-          <Icons.AlertCircle size={14} />
-          <span>核对原结果</span>
-        </Button>
-        <Button type="button" size="sm" variant="ghost" onClick={onClose}>
-          <span>关闭窗口</span>
-        </Button>
-      </div>
+      <Alert variant="warning" role="status">
+        <TriangleAlert aria-hidden="true" />
+        <AlertTitle>提交后未收到明确结果</AlertTitle>
+        <AlertDescription>{children}</AlertDescription>
+        <AlertAction>
+          <Button type="button" size="sm" variant="secondary" onClick={() => handlers.openLookup(origin, commandId)}>
+            <Icons.AlertCircle size={14} />
+            <span>核对原结果</span>
+          </Button>
+          <Button type="button" size="sm" variant="ghost" onClick={onClose}>
+            <span>关闭窗口</span>
+          </Button>
+        </AlertAction>
+      </Alert>
     </div>
   );
 }
@@ -208,30 +210,28 @@ function GatePanel({
   onAcknowledge: () => void;
 }) {
   return (
-    <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-relaxed text-amber-600 dark:text-amber-400">
-      <p>{notice}</p>
-      <Button
-        type="button"
-        variant="secondary"
-        size="sm"
-        className="mt-2 border-current/40 text-current"
-        aria-pressed={acknowledged}
-        onClick={onAcknowledge}
-        disabled={acknowledged}
-      >
-        {acknowledged ? "已确认：将发起新的独立操作" : "我了解，仍要发起一次新的独立操作"}
-      </Button>
-    </div>
+    <Alert variant="warning" role="status">
+      <TriangleAlert aria-hidden="true" />
+      <AlertDescription>{notice}</AlertDescription>
+      <AlertAction>
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          aria-pressed={acknowledged}
+          onClick={onAcknowledge}
+          disabled={acknowledged}
+        >
+          {acknowledged ? "已确认：将发起新的独立操作" : "我了解，仍要发起一次新的独立操作"}
+        </Button>
+      </AlertAction>
+    </Alert>
   );
 }
 
 function PassiveNotice({ notice }: { notice?: string }) {
   if (!notice) return null;
-  return (
-    <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-relaxed text-amber-600 dark:text-amber-400">
-      <p>{notice}</p>
-    </div>
-  );
+  return <Alert variant="warning" role="status"><TriangleAlert aria-hidden="true" /><AlertDescription>{notice}</AlertDescription></Alert>;
 }
 
 function FieldError({ children }: { children?: string }) {

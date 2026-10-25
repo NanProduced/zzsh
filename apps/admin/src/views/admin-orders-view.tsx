@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import { ArrowLeft, CheckCircle2, CircleAlert, Clock3, ExternalLink, FileText, Search, ShieldAlert } from "lucide-react";
 
 import { Button, StatusMessage } from "../components/ui-elements";
+import { Alert, AlertAction, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { BEIJING_TIME_ZONE } from "../workspace/beijing-time";
 import {
   AdminApiError,
@@ -187,12 +188,12 @@ function EmptyState({ onReset }: { onReset: () => void }) {
 
 function ListErrorState({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
-    <div className="flex min-h-48 flex-col items-center justify-center rounded-lg border border-rose-500/25 bg-rose-500/5 px-6 py-10 text-center" role="alert">
-      <CircleAlert className="mb-3 text-rose-400" size={24} aria-hidden="true" />
-      <strong className="text-sm font-medium text-foreground">订单列表加载失败</strong>
-      <p className="mt-2 max-w-xl text-xs leading-relaxed text-muted-foreground">{message}</p>
-      <Button type="button" size="sm" className="mt-4" onClick={onRetry}>重试</Button>
-    </div>
+    <Alert variant="destructive">
+      <CircleAlert aria-hidden="true" />
+      <AlertTitle>订单列表加载失败</AlertTitle>
+      <AlertDescription>{message}</AlertDescription>
+      <AlertAction><Button type="button" size="sm" variant="secondary" onClick={onRetry}>重试</Button></AlertAction>
+    </Alert>
   );
 }
 
@@ -470,9 +471,18 @@ function OrderListView({
 
 function DetailError({ message, requestId, onBack, onRetry }: { message: string; requestId?: string; onBack: () => void; onRetry: () => void }) {
   return (
-    <section className="section-panel" role="alert">
-      <div className="flex items-start gap-3"><CircleAlert className="mt-0.5 text-rose-400" size={19} aria-hidden="true" /><div><h1 className="text-sm font-semibold text-foreground">{message}</h1><p className="mt-2 text-xs leading-relaxed text-muted-foreground">可返回订单列表；若持续失败，请记录请求编号并联系平台维护。</p>{requestId ? <p className="mt-2 break-all font-mono text-[11px] text-muted-foreground">requestId：{requestId}</p> : null}<div className="mt-4 flex gap-2"><Button type="button" size="sm" variant="secondary" onClick={onBack}>返回订单列表</Button><Button type="button" size="sm" onClick={onRetry}>重试</Button></div></div></div>
-    </section>
+    <Alert variant="destructive">
+      <CircleAlert aria-hidden="true" />
+      <AlertTitle>{message}</AlertTitle>
+      <AlertDescription>
+        <p>可返回订单列表；若持续失败，请记录请求编号并联系平台维护。</p>
+        {requestId ? <p className="mt-1 break-all font-mono text-xs">requestId：{requestId}</p> : null}
+      </AlertDescription>
+      <AlertAction>
+        <Button type="button" size="sm" variant="secondary" onClick={onBack}>返回订单列表</Button>
+        <Button type="button" size="sm" onClick={onRetry}>重试</Button>
+      </AlertAction>
+    </Alert>
   );
 }
 

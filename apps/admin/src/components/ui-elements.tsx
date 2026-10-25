@@ -1,39 +1,38 @@
 import { useState, forwardRef, type InputHTMLAttributes, type ButtonHTMLAttributes } from "react";
+import { AlertCircle, CheckCircle2, CheckIcon, Info, LaptopIcon, MoonIcon, SunIcon, TriangleAlert } from "lucide-react";
 import { Icons } from "./icons";
+import { Alert, AlertDescription } from "./ui/alert";
 
+/**
+ * Page-level result / responsibility message. `themeAware` is kept so existing
+ * callers keep compiling; theme adaptation now comes from the shared Alert tokens.
+ */
 export function StatusMessage({
   error,
   success,
   className = "",
-  themeAware = false,
+  tone,
 }: {
   error?: string;
   success?: string;
   className?: string;
   themeAware?: boolean;
+  tone?: "warning" | "info";
 }) {
   if (!error && !success) return null;
-  const isError = Boolean(error);
+  const variant = tone ?? (error ? "destructive" : "success");
+  const Icon = variant === "destructive" ? AlertCircle : variant === "warning" ? TriangleAlert : variant === "info" ? Info : CheckCircle2;
 
   return (
-    <div
-      role={isError ? "alert" : "status"}
-      aria-live="polite"
-      className={`flex items-start gap-2.5 p-3 rounded-md text-xs leading-relaxed transition-all ${
-        isError
-          ? themeAware ? "bg-destructive/10 text-destructive border border-destructive/20" : "bg-rose-500/10 text-rose-400 border border-rose-500/20"
-          : themeAware ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/20" : "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
-      } ${className}`}
+    <Alert
+      variant={variant}
+      role={variant === "destructive" || variant === "warning" ? "alert" : "status"}
+      data-slot="status-message"
+      className={className}
     >
-      <span className="shrink-0 mt-0.5">
-        {isError ? (
-          <Icons.AlertCircle size={15} className={themeAware ? "text-destructive" : "text-rose-400"} />
-        ) : (
-          <Icons.CheckCircle2 size={15} className={themeAware ? "text-emerald-700 dark:text-emerald-400" : "text-emerald-400"} />
-        )}
-      </span>
-      <span className="flex-1 break-words">{error ?? success}</span>
-    </div>
+      <Icon aria-hidden="true" />
+      <AlertDescription className="text-foreground/85">{error || success}</AlertDescription>
+    </Alert>
   );
 }
 
@@ -43,7 +42,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { CheckIcon, LaptopIcon, MoonIcon, SunIcon } from "lucide-react";
 
 export function ThemeToggle({
   theme,

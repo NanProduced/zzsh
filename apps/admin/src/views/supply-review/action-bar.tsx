@@ -1,5 +1,7 @@
 import { useRef } from "react";
 import { StatusMessage } from "../../components/ui-elements";
+import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from "@/components/ui/dialog";
@@ -32,9 +34,9 @@ export function SupplyActionDialog({ title, objectLabel, imageSrc, stale, unknow
         <span className="text-right text-xs font-normal text-muted-foreground">{reason.length} / 500</span>
       </label>
       {feedback && <StatusMessage themeAware error={feedback.kind === "error" ? feedback.message : undefined} success={feedback.kind === "success" ? feedback.message : undefined} />}
-      {conflict && <div role="alert" className="grid gap-2 rounded-lg bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-300">资料已变化，已保留原因。请刷新后重新核对。<Button variant="outline" className="justify-self-start" onClick={onRefresh} disabled={busy}>刷新详情</Button></div>}
-      {stale && <div role="alert" className="grid gap-2 rounded-lg bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-300">原账号版本已失效、操作被拒绝或读取失败。原因仍保留，请返回核对当前资料后重新发起操作。<Button variant="outline" className="justify-self-start" onClick={onRecheck} disabled={busy}>返回核对（保留原因）</Button></div>}
-      {unknown && <p role="status" className="rounded-lg bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-300">结果未知，确认按钮仅重试原操作。确认结果前不能修改原因或另发操作。</p>}
+      {conflict && <Alert variant="warning"><TriangleAlert aria-hidden="true" /><AlertTitle>资料已变化，原因已保留</AlertTitle><AlertDescription>请刷新后重新核对，再决定是否继续。</AlertDescription><AlertAction><Button variant="outline" onClick={onRefresh} disabled={busy}>刷新详情</Button></AlertAction></Alert>}
+      {stale && <Alert variant="warning"><TriangleAlert aria-hidden="true" /><AlertTitle>原账号版本已失效</AlertTitle><AlertDescription>操作被拒绝或读取失败，已保留原因。请返回核对当前资料后重新发起操作。</AlertDescription><AlertAction><Button variant="outline" onClick={onRecheck} disabled={busy}>返回核对（保留原因）</Button></AlertAction></Alert>}
+      {unknown && <Alert variant="warning" role="status"><TriangleAlert aria-hidden="true" /><AlertTitle>结果未知</AlertTitle><AlertDescription>确认按钮仅重试原操作；确认结果前不能修改原因或另发操作。</AlertDescription></Alert>}
       <DialogFooter>
         <Button variant="outline" size="lg" onClick={onClose} disabled={locked}>取消</Button>
         <Button variant="destructive" size="lg" onClick={onConfirm} disabled={busy || conflict || stale || reason.trim().length < 2} aria-busy={busy || undefined}>{busy ? "处理中…" : "确认" + title.replace(/…$/, "")}</Button>

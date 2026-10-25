@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { ClipboardCheck } from "lucide-react";
+import { ClipboardCheck, TriangleAlert } from "lucide-react";
 
 import { Icons } from "../components/icons";
 import { Button, StatusMessage } from "../components/ui-elements";
@@ -196,7 +196,12 @@ export function ApprovalAuditView({
   const [newTrigger, setNewTrigger] = useState("");
   const [candidateUsernames, setCandidateUsernames] = useState<string[]>([]);
   const [error, setError] = useState<string>();
-  const [message, setMessage] = useState<string>();
+  const [message, setMessageState] = useState<string>();
+  const [messageTone, setMessageTone] = useState<"warning" | "info">();
+  const setMessage = useCallback((value: string | undefined, tone?: "warning" | "info") => {
+    setMessageState(value);
+    setMessageTone(tone);
+  }, []);
   const [loading, setLoading] = useState(false);
   const [reading, setReading] = useState<Record<string, boolean>>({});
   const [confirm, setConfirm] = useState<{ kind: "template" } | null>(null);
@@ -709,7 +714,7 @@ export function ApprovalAuditView({
         const downgraded = updatePendingWriteKind(subject, intent.idempotencyKey, "readback");
         updateRecovery({ kind: "readback", intent, persisted: downgraded?.persisted ?? false });
         setError(undefined);
-        setMessage(`${intent.successMessage} 已成功，最新状态未确认。`);
+        setMessage(`${intent.successMessage} 已成功，最新状态未确认。`, "warning");
       }
     } catch (failure) {
       if (!isCurrentIntent(intent)) return;
@@ -763,13 +768,14 @@ export function ApprovalAuditView({
         updateRecovery(null);
         setMessage(current.kind === "resolved" && current.receipt
           ? recoveryOutcomeSummary(current.receipt)
-          : `${current.intent.successMessage} 最新状态已读取，可按当前资格继续处理。`);
+          : `${current.intent.successMessage} 最新状态已读取，可按当前资格继续处理。`,
+          current.kind === "resolved" && current.receipt?.outcome === "REJECTED" ? "warning" : undefined);
       } else {
         setError(undefined);
         // resolved 已有核实回执：读回仍失败时只补充「最新状态暂未读到」，不拼接原命令成功文案。
         setMessage(current.kind === "resolved" && current.receipt
           ? recoveryOutcomeUnconfirmedSummary(current.receipt)
-          : `${current.intent.successMessage} 已成功，最新状态未确认。`);
+          : `${current.intent.successMessage} 已成功，最新状态未确认。`, "warning");
       }
     } finally {
       if (isCurrentIntent(current.intent)) {
@@ -827,7 +833,7 @@ export function ApprovalAuditView({
           // StatusMessage 以 error 优先，必须先清掉未知写留下的错误，否则结果说明被盖住。
           updateRecovery(null);
           setError(undefined);
-          setMessage(recoveryOutcomeSummary(result));
+          setMessage(recoveryOutcomeSummary(result), result.outcome === "REJECTED" ? "warning" : undefined);
         } else {
           // 与手动刷新共用同一判断：只陈述已核实的回执结果，不说成已读取最新状态。
           setError(recoveryOutcomeUnconfirmedSummary(result));
@@ -944,7 +950,7 @@ export function ApprovalAuditView({
   if (availableTabs.length === 0) {
     return (
       <section className="section-panel">
-        <StatusMessage error={
+        <StatusMessage tone="warning" error={
           canExecute
             ? "你的账号持有审批执行权限，但没有审批读取权限：审批详情与待处理队列都要求 approval.request.read（待处理队列另要求 approval.request.approve）。因此本页无法显示可执行的事项，需要由来源业务深链进入并由管理员补齐读取授权。"
             : "当前账号没有审批或审批审计读取权限。"
@@ -957,7 +963,7 @@ export function ApprovalAuditView({
     return (
       <TooltipProvider>
         <div className="space-y-6">
-          <StatusMessage error={error} success={message} />
+          <StatusMessage error={error} success={message} tone={error ? undefined : messageTone} />
           {recoveryPanel}
           {detail && detailFresh ? (
             <section className="section-panel">
@@ -1018,7 +1024,7 @@ export function ApprovalAuditView({
               </Button>)}
             </div>)}
           </div>
-          <StatusMessage error={error} success={message} className="mt-4" />
+          <StatusMessage error={error} success={message} tone={error ? undefined : messageTone} className="mt-4" />
           {recoveryPanel}
         </section>
 
@@ -1126,9 +1132,10 @@ export function ApprovalAuditView({
                 <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
                   「具备通用资格」只表示账号状态、双因素与通用审批权限；能不能处理某一单还取决于业务权限与游戏范围。
                 </p>
-                <Alert variant="warning" className="mt-4">
-                  <AlertTitle className="text-sm">待接：供给规则发布的审批绑定</AlertTitle>
-                  <AlertDescription className="text-xs leading-relaxed">
+                <Alert variant="warning" role="status" className="mt-4">
+                  <TriangleAlert aria-hidden="true" />
+                  <AlertTitle>待接：供给规则发布的审批绑定</AlertTitle>
+                  <AlertDescription>
                     供给规则发布尚未接入审批流程，接入前不能在此发起；接入范围与排期由管理员协调。本页不提供临时入口或占位按钮绕过。
                   </AlertDescription>
                 </Alert>

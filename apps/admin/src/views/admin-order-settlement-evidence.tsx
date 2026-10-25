@@ -1,5 +1,5 @@
 import { ChevronDown, CircleAlert, ArrowUpRight } from 'lucide-react';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Alert, AlertAction, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
@@ -28,7 +28,8 @@ export function AdminOrderSettlementEvidence({ state = 'ready', evidence, reques
   if (state === 'loading') return <section data-order-settlement-evidence aria-busy="true" className="space-y-3 rounded-lg border border-border bg-card p-4"><h2 className="text-base font-semibold">{title}</h2><p className="text-sm text-muted-foreground">正在读取资金依据…</p><Skeleton className="h-20 w-full" /></section>;
   if (state !== 'ready' || !evidence) {
     const message = state === 'forbidden' ? '当前无权读取本单资金依据' : state === 'missing' ? '未找到当前范围内可读的资金单据' : state === 'conflict' ? '资金依据已变化，请重新读取' : state === 'ready' ? '尚未提供受权订单资金依据' : '资金依据暂不可用';
-    return <section data-order-settlement-evidence className="space-y-3"><h2 className="text-base font-semibold">{title}</h2><Alert variant="warning"><CircleAlert aria-hidden /><AlertTitle>{message}</AlertTitle><AlertDescription><p>本次未取得完整依据，不能判断为没有过账、金额为零或退款完成。</p>{requestId ? <p className="break-all font-mono text-xs">请求编号：{requestId}</p> : null}{onRetry && state !== 'forbidden' ? <Button variant="outline" size="sm" onClick={onRetry}>重新读取资金依据</Button> : null}</AlertDescription></Alert></section>;
+    const warning = state === 'forbidden' || state === 'missing' || state === 'conflict';
+    return <section data-order-settlement-evidence className="space-y-3"><h2 className="text-base font-semibold">{title}</h2><Alert variant={warning ? 'warning' : 'destructive'} role={warning ? 'status' : 'alert'}><CircleAlert aria-hidden /><AlertTitle>{message}</AlertTitle><AlertDescription><p>本次未取得完整依据，不能判断为没有过账、金额为零或退款完成。</p>{requestId ? <p className="break-all font-mono text-xs">请求编号：{requestId}</p> : null}</AlertDescription>{onRetry && state !== 'forbidden' ? <AlertAction><Button variant="outline" size="sm" onClick={onRetry}>重新读取资金依据</Button></AlertAction> : null}</Alert></section>;
   }
   const rows = moneyRows(evidence), reasons = [...new Set([...(evidence.reasonCodes ?? []), ...rows.flatMap(([, value]) => value?.reasonCodes ?? [])])];
   return <section data-order-settlement-evidence className="space-y-4 rounded-lg border border-border bg-card p-4 text-card-foreground">

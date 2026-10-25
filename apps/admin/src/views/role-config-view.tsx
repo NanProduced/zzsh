@@ -791,7 +791,7 @@ export function RoleConfigView({
   const permissionTotal = groupAdminPermissions(permissions).reduce((sum, group) => sum + group.codes.length, 0);
 
   if (!canRead) {
-    return <StatusMessage error="当前账号没有查看角色配置的权限。" />;
+    return <StatusMessage tone="warning" error="当前账号没有查看角色配置的权限。" />;
   }
 
   if (objectOnly && !ready) {

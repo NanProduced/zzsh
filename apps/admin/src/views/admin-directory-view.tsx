@@ -7,11 +7,12 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Icons } from "../components/icons";
 import { Timeline, TimelineContent, TimelineDate, TimelineHeader, TimelineIndicator, TimelineItem, TimelineSeparator } from "@/components/reui/timeline";
-import { ArrowDown, ArrowUp, ArrowUpDown, CircleHelp, Eye, KeyRound, Lock, LogOut, MoreHorizontal, ShieldAlert, SquarePen, UserCog } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, CircleHelp, Eye, KeyRound, Lock, LogOut, MoreHorizontal, ShieldAlert, SquarePen, TriangleAlert, UserCog } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button, PasswordInput, StatusMessage } from "../components/ui-elements";
+import { Alert, AlertAction, AlertDescription, AlertTitle } from "../components/ui/alert";
 import {
   AdminApiError,
   adminRequest,
@@ -1162,7 +1163,7 @@ export function AdminDirectoryView({
   if (!canRead) {
     return (
       <section className="section-panel">
-        <StatusMessage error="当前账号没有查看管理员目录的权限。直接请求接口也会被服务端拒绝。" />
+        <StatusMessage tone="warning" error="当前账号没有查看管理员目录的权限。直接请求接口也会被服务端拒绝。" />
       </section>
     );
   }
@@ -1464,14 +1465,16 @@ export function AdminDirectoryView({
           {detailError ? <StatusMessage error={detailError} /> : null}
           {menuReasons(detail) ? <p className="text-xs text-muted-foreground">{menuReasons(detail)}</p> : null}
           {targetPending.map((record) => (
-            <div key={record.subject} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-300" role="status">
-              <p>
+            <Alert key={record.subject} variant="warning" role="status">
+              <TriangleAlert aria-hidden="true" />
+              <AlertTitle>{record.kind === "UNKNOWN" ? "操作结果未确认，该项已锁定" : "已保存，但页面数据未能刷新"}</AlertTitle>
+              <AlertDescription>
                 {record.kind === "UNKNOWN"
-                  ? `「${pendingLabel(record.operation)}」无法确认这次操作是否已送达服务端，该项已锁定。重新读取不代表原请求已经结束。`
-                  : `「${pendingLabel(record.operation)}」已保存，但页面数据未能刷新。重新读取只读取，不会重复提交。`}
-              </p>
-              <Button type="button" size="sm" variant="secondary" disabled={loading || detailLoading} onClick={() => void recheckWrite()}>重新读取账号</Button>
-            </div>
+                  ? `「${pendingLabel(record.operation)}」无法确认这次操作是否已送达服务端。重新读取不代表原请求已经结束。`
+                  : `「${pendingLabel(record.operation)}」重新读取只读取，不会重复提交。`}
+              </AlertDescription>
+              <AlertAction><Button type="button" size="sm" variant="secondary" disabled={loading || detailLoading} onClick={() => void recheckWrite()}>重新读取账号</Button></AlertAction>
+            </Alert>
           ))}
           <div className="space-y-6">
               <section className="space-y-4" aria-labelledby="admin-access-title">
@@ -1583,11 +1586,15 @@ export function AdminDirectoryView({
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 pb-6">
           <StatusMessage error={error} success={message} />
           {actionReason(editSection === "profile" ? "update" : editSection === "access" ? "assign" : "scope") ? <p className="text-xs text-muted-foreground">{actionReason(editSection === "profile" ? "update" : editSection === "access" ? "assign" : "scope")}</p> : null}
-          {editSection && pendingFor(editSection) ? <div className="space-y-2 rounded-md bg-amber-500/10 p-3 text-xs text-amber-900 dark:text-amber-300">
-            <p>{pendingFor(editSection)?.kind === "UNKNOWN" ? "无法确认这次修改是否已送达，本项已锁定；重新读取或丢弃草稿都不能证明原请求已结束。" : "已保存，但页面数据未能刷新。重试只读取，不会重复提交。"}</p>
-            <Button type="button" size="sm" variant="secondary" disabled={loading || detailLoading} onClick={() => void recheckWrite()}>重试刷新</Button>
-            {pendingFor(editSection)?.kind === "UNKNOWN" ? <Button type="button" size="sm" variant="ghost" disabled={loading || detailLoading} onClick={() => discardDrafts()}>丢弃本地草稿重新读取（本项仍锁定）</Button> : null}
-          </div> : null}
+          {editSection && pendingFor(editSection) ? <Alert variant="warning" role="status">
+            <TriangleAlert aria-hidden="true" />
+            <AlertTitle>{pendingFor(editSection)?.kind === "UNKNOWN" ? "无法确认这次修改是否已送达" : "已保存，但页面数据未能刷新"}</AlertTitle>
+            <AlertDescription>{pendingFor(editSection)?.kind === "UNKNOWN" ? "本项已锁定；重新读取或丢弃草稿都不能证明原请求已结束。" : "重试只读取，不会重复提交。"}</AlertDescription>
+            <AlertAction>
+              <Button type="button" size="sm" variant="secondary" disabled={loading || detailLoading} onClick={() => void recheckWrite()}>重试刷新</Button>
+              {pendingFor(editSection)?.kind === "UNKNOWN" ? <Button type="button" size="sm" variant="ghost" disabled={loading || detailLoading} onClick={() => discardDrafts()}>丢弃本地草稿重新读取（本项仍锁定）</Button> : null}
+            </AlertAction>
+          </Alert> : null}
           {editorContent}
         </div>
         <div className="flex flex-wrap items-center justify-end gap-3 border-t border-border/60 px-6 py-3">

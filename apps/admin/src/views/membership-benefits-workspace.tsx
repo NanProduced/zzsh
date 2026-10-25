@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Gift, Plus, RefreshCw, RotateCcw, Search, TriangleAlert, X, Loader2 } from "lucide-react";
+import { Gift, Info, Plus, RefreshCw, RotateCcw, Search, TriangleAlert, X, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AdminApiError, adminRequest, formatDate, friendlyError, hasPermission, type SessionSnapshot } from "../api";
-import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
+import { Alert, AlertAction, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -231,8 +231,10 @@ export function useMembershipApprovalRequest(snapshot: Snapshot, business: Membe
 }
 
 function ErrorBox({ error, retry }: { error: unknown; retry?: () => void }) {
-  const title = error instanceof AdminApiError && error.status === 403 ? "无权查看这部分内容" : error instanceof AdminApiError && error.status === 409 ? "读取范围已变化" : "读取失败";
-  return <Alert variant="danger"><TriangleAlert aria-hidden /><AlertTitle>{title}</AlertTitle><AlertDescription>{error instanceof AdminApiError && error.status === 409 ? "请重新读取当前范围后继续。" : friendlyError(error)}{retry ? <Button className="mt-2" size="sm" variant="outline" onClick={retry}>重试</Button> : null}</AlertDescription></Alert>;
+  const denied = error instanceof AdminApiError && error.status === 403;
+  const changed = error instanceof AdminApiError && error.status === 409;
+  const title = denied ? "无权查看这部分内容" : changed ? "读取范围已变化" : "读取失败";
+  return <Alert variant={denied || changed ? "warning" : "destructive"} role={denied || changed ? "status" : "alert"}><TriangleAlert aria-hidden /><AlertTitle>{title}</AlertTitle><AlertDescription>{changed ? "请重新读取当前范围后继续。" : friendlyError(error)}</AlertDescription>{retry ? <AlertAction><Button size="sm" variant="outline" onClick={retry}>重试</Button></AlertAction> : null}</Alert>;
 }
 
 function UserPicker({
@@ -662,39 +664,47 @@ function BenefitsWorkspace({ snapshot, initialUserId, initialGameId, refreshNonc
           </div>
         </div>
         {optionsError ? <ErrorBox error={optionsError} retry={() => setReload(value => value + 1)} /> : null}
-        {command.error ? <Alert variant="warning"><AlertTitle>{command.error}</AlertTitle></Alert> : null}
+        {command.error ? <Alert variant="warning" role="status"><TriangleAlert aria-hidden /><AlertTitle>{command.error}</AlertTitle></Alert> : null}
         {command.foreignPending?.state === "valid" ? (
-          <Alert variant="warning">
+          <Alert variant="warning" role="status">
+            <TriangleAlert aria-hidden />
             <AlertTitle>另有会员政策变更待核对</AlertTitle>
             <AlertDescription>
               {membershipPendingLabel(command.foreignPending.record)}。请到「会员政策」子页处理；政策责任不写入礼遇记录，也不清除原请求。
             </AlertDescription>
           </Alert>
         ) : command.legacyPending ? (
-          <Alert variant="warning">
+          <Alert variant="warning" role="status">
+            <TriangleAlert aria-hidden />
             <AlertTitle>原请求记录缺少业务类型</AlertTitle>
             <AlertDescription>原请求记录保留，无法自动判断是政策还是礼遇；请到审批中心核对。</AlertDescription>
           </Alert>
         ) : command.pending.state === "valid" ? (
-          <Alert variant="warning">
+          <Alert variant="warning" role="status">
+            <TriangleAlert aria-hidden />
             <AlertTitle>礼遇申请待核对</AlertTitle>
             <AlertDescription>
               {membershipPendingLabel(command.pending.record)}。原请求记录保留，核清前不创建新申请。
-              <div className="mt-2 flex flex-wrap gap-2">
-                <Button size="sm" variant="outline" disabled={command.busy} onClick={() => void command.recover()}>查询原结果</Button>
-                {command.requestId && onOpenPath ? <Button size="sm" variant="ghost" onClick={() => onOpenPath(`/approvals/${encodeURIComponent(command.requestId!)}?from=membership-growth&fromTab=entitlements`)}>查看原申请</Button> : null}
-              </div>
             </AlertDescription>
+            <AlertAction>
+              <Button size="sm" variant="outline" disabled={command.busy} onClick={() => void command.recover()}>查询原结果</Button>
+              {command.requestId && onOpenPath ? <Button size="sm" variant="ghost" onClick={() => onOpenPath(`/approvals/${encodeURIComponent(command.requestId!)}?from=membership-growth&fromTab=entitlements`)}>查看原申请</Button> : null}
+            </AlertAction>
           </Alert>
         ) : command.pending.state === "unreadable" ? (
-          <Alert variant="warning"><AlertTitle>原请求记录不可读</AlertTitle><AlertDescription>原记录保留，核清前不创建新申请；请保留现场并到审批中心核对。</AlertDescription></Alert>
+          <Alert variant="warning" role="status">
+            <TriangleAlert aria-hidden />
+            <AlertTitle>原请求记录不可读</AlertTitle>
+            <AlertDescription>原记录保留，核清前不创建新申请；请保留现场并到审批中心核对。</AlertDescription>
+          </Alert>
         ) : command.requestId ? (
-          <Alert variant="success">
+          <Alert variant={command.detailStatus === "REJECTED" ? "warning" : "info"} role="status">
+            {command.detailStatus === "REJECTED" ? <TriangleAlert aria-hidden /> : <Info aria-hidden />}
             <AlertTitle>{command.detailStatus === "REJECTED" ? "审批已驳回" : command.detailStatus && command.detailStatus !== "PENDING" ? "审批状态已读取" : "已提交审批"}</AlertTitle>
             <AlertDescription>
               {command.detailStatus === "PENDING" ? "审批通过并执行后才会生效。" : command.detailStatus === "REJECTED" ? "请核对原因后重新办理。" : command.detailStatus ? `服务端状态：${command.detailStatus}。` : "审批通过后仍需确认业务执行结果。"}
-              {onOpenPath ? <Button size="sm" variant="link" onClick={() => openApproval(command.requestId)}>查看审批</Button> : null}
             </AlertDescription>
+            {onOpenPath ? <AlertAction><Button size="sm" variant="link" onClick={() => openApproval(command.requestId)}>查看审批</Button></AlertAction> : null}
           </Alert>
         ) : null}
         {!options && !optionsError ? <Skeleton className="h-12 w-full" aria-label="正在读取礼遇权限" /> : null}

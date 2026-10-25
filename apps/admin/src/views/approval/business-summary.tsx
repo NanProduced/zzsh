@@ -1,3 +1,4 @@
+import { Info, TriangleAlert } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
 import { formatDate } from "../../api";
@@ -232,9 +233,10 @@ function DomainResult({ business }: { business: BusinessView }) {
       hint="与审批状态、执行状态分列。审批执行成功不代表业务对象已生效或资金已到账。"
     >
       {business.resultAvailability === "UNRESOLVED" ? (
-        <Alert variant="warning">
-          <AlertTitle className="text-sm">业务结果未读到</AlertTitle>
-          <AlertDescription className="text-xs">
+        <Alert variant="warning" role="status">
+          <TriangleAlert aria-hidden="true" />
+          <AlertTitle>业务结果未读到</AlertTitle>
+          <AlertDescription>
             {reasonLabel(business.resultReasonCode)}。申请可能已执行，但读不到对应业务行；这不等于失败，也不等于成功，请按来源业务核对。
           </AlertDescription>
         </Alert>
@@ -314,9 +316,10 @@ export function BusinessSummary({ business, operationCode }: { business: Busines
   if (business === undefined) {
     return (
       <Section title="此次申请改变什么">
-        <Alert variant="default">
-          <AlertTitle className="text-sm">{BUSINESS_NOT_CONNECTED}</AlertTitle>
-          <AlertDescription className="text-xs">
+        <Alert variant="info" role="status">
+          <Info aria-hidden="true" />
+          <AlertTitle>{BUSINESS_NOT_CONNECTED}</AlertTitle>
+          <AlertDescription>
             这笔申请的受权摘要与领域结果暂未接入，本页不解析载荷猜测含义；请联系管理员确认接入进度。
             操作标识见页面底部「技术追溯」。
           </AlertDescription>

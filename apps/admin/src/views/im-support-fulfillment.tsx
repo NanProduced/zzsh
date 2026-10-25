@@ -1,10 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CircleAlert, ClipboardList, RefreshCw, ShieldCheck, X } from "lucide-react";
+import { CircleAlert, ClipboardList, Info, RefreshCw, ShieldCheck, TriangleAlert, X } from "lucide-react";
 import { AdminApiError, friendlyError } from "../api";
 import { Dialog, DialogContent } from "../components/ui/dialog";
-import { Alert, AlertDescription } from "../components/ui/alert";
+import { Alert, AlertAction, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardDescription, CardTitle } from "../components/ui/card";
@@ -469,15 +469,14 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, frozenIn
 
   const statusMessages = <>
     {error ? <Alert variant="destructive"><CircleAlert /><AlertDescription>{error}</AlertDescription></Alert> : null}
-    {notice ? <Alert role="status"><AlertDescription>{notice}</AlertDescription></Alert> : null}
-    {storageBlocked ? <Alert variant="destructive"><CircleAlert /><AlertDescription>{phase === "ACCEPTED_READBACK_PENDING" ? ACCEPTED_STORAGE_WARNING : "本地无法保存操作意图，已阻止新写入；请刷新后重试。"}</AlertDescription></Alert> : null}
-    {phase !== "IDLE" ? <Alert role="status" variant="destructive"><CircleAlert /><AlertDescription>
-      <span>{phase === "SENDING" ? "本次操作正在发送…" : phase === "AUTH" ? "登录状态已变化，原操作责任仍保留（同一幂等键）。" : phase === "ACCEPTED_READBACK_PENDING" ? "操作已受理，等待读取最新状态；不会重复提交。" : "本次操作结果未确认，原幂等键与责任已保留。"}</span>
-      <span className="flex flex-wrap gap-1.5 pt-1">
-        <Button variant="outline" size="xs" onClick={() => void observeCurrent()} disabled={loading || busy}>查看当前状态</Button>
-        {phase !== "SENDING" && phase !== "ACCEPTED_READBACK_PENDING" ? <Button variant="outline" size="xs" onClick={() => void replay()} disabled={busy || loading}>按原请求重放</Button> : null}
-      </span>
-    </AlertDescription></Alert> : null}
+    {notice ? <Alert variant="info" role="status"><Info /><AlertDescription>{notice}</AlertDescription></Alert> : null}
+    {storageBlocked ? <Alert variant="destructive"><CircleAlert /><AlertTitle>本地写入已暂停</AlertTitle><AlertDescription>{phase === "ACCEPTED_READBACK_PENDING" ? ACCEPTED_STORAGE_WARNING : "本地无法保存操作意图，已阻止新写入；请刷新后重试。"}</AlertDescription></Alert> : null}
+    {phase !== "IDLE" ? <Alert role="status" variant="warning"><TriangleAlert /><AlertTitle>{phase === "SENDING" ? "本次操作正在发送" : phase === "AUTH" ? "登录状态已变化，原责任仍保留" : phase === "ACCEPTED_READBACK_PENDING" ? "操作已受理，等待最新状态" : "本次操作结果未确认"}</AlertTitle><AlertDescription>
+      {phase === "SENDING" ? "请求尚未返回，请勿重复提交。" : phase === "AUTH" ? "原操作责任仍保留（同一幂等键）。" : phase === "ACCEPTED_READBACK_PENDING" ? "操作已受理，等待读取最新状态；不会重复提交。" : "原幂等键与责任已保留。"}
+    </AlertDescription><AlertAction>
+      <Button variant="outline" size="xs" onClick={() => void observeCurrent()} disabled={loading || busy}>查看当前状态</Button>
+      {phase !== "SENDING" && phase !== "ACCEPTED_READBACK_PENDING" ? <Button variant="outline" size="xs" onClick={() => void replay()} disabled={busy || loading}>按原请求重放</Button> : null}
+    </AlertAction></Alert> : null}
   </>;
 
   const readButton = <Button variant="ghost" size="icon-sm" onClick={() => void load()} disabled={loading || busy} aria-label="重新读取本单进度"><RefreshCw /></Button>;
@@ -486,12 +485,9 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, frozenIn
   if (!view) return <Card className="im-support-fulfillment im-order-card" data-available="false" aria-label="本单当前任务">
     <CardContent className="grid gap-2 p-4">
       {statusMessages}
-      <Alert role="status"><ShieldCheck /><AlertDescription>
-        <span className="font-medium text-foreground">{loading ? "正在读取本单进度…" : "本单进度暂时读不到"}</span>
-        <span>不影响在这里沟通，稍后可重新读取。{error ? ` ${error}` : ""}</span>
-      </AlertDescription>
-        <Button variant="outline" size="sm" data-action="fulfillment-reload" className="col-start-2 mt-1" onClick={() => void load()} disabled={loading || busy}>重新读取</Button>
-      </Alert>
+      <Alert variant="warning" role="status"><TriangleAlert /><AlertTitle>{loading ? "正在读取本单进度…" : "本单进度暂时读不到"}</AlertTitle><AlertDescription>不影响在这里沟通，稍后可重新读取。{error ? ` ${error}` : ""}</AlertDescription><AlertAction>
+        <Button variant="outline" size="sm" data-action="fulfillment-reload" onClick={() => void load()} disabled={loading || busy}>重新读取</Button>
+      </AlertAction></Alert>
     </CardContent>
   </Card>;
 

@@ -419,7 +419,7 @@ export function SupplyGunsmithView({
   };
 
   if (!canManage) {
-    return <section className="section-panel"><StatusMessage themeAware error="当前账号没有改枪码目录维护权限。" /></section>;
+    return <section className="section-panel"><StatusMessage themeAware tone="warning" error="当前账号没有改枪码目录维护权限。" /></section>;
   }
 
   const editing = (entity: GunsmithEntity, id?: string) => editor?.entity === entity && editor?.id === id;

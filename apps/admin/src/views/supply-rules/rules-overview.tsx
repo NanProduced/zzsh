@@ -1,8 +1,8 @@
 import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
-import { ChevronDownIcon, ChevronRightIcon } from "lucide-react";
+import { CircleAlert, ChevronDownIcon, ChevronRightIcon, Clock, Info, TriangleAlert } from "lucide-react";
 
 import { formatDate, type RulesResponse } from "../../api";
-import { Alert, AlertDescription } from "../../components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
 import { Button, buttonVariants } from "../../components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../../components/ui/collapsible";
@@ -182,7 +182,7 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
         </div>
         <p className="mt-3 border-t border-border pt-2 text-xs text-muted-foreground">按「价格 + 租期 + 出租协议」组合生效；封存后由 Boss 选择并确认生效。</p>
         <p className="mt-2 text-sm text-muted-foreground">整页编辑与试算可预览调整；审批接口尚未接入，本轮修改不能保存。</p>
-        {editing ? <Alert role="note" className="mt-2"><AlertDescription><p>本地预览中：改过的输入会高亮并显示原值。确认修改只展示差异，暂不能保存或提交审批；当前生效规则不变。</p></AlertDescription></Alert> : null}
+        {editing ? <Alert variant="info" role="status" className="mt-2"><Info aria-hidden="true" /><AlertDescription><p>本地预览中：改过的输入会高亮并显示原值。确认修改只展示差异，暂不能保存或提交审批；当前生效规则不变。</p></AlertDescription></Alert> : null}
         {notice ? <p role="status" className="mt-2 rounded-md bg-muted px-3 py-2 text-xs">{notice}</p> : null}
       </section>
 
@@ -590,11 +590,12 @@ function ConfirmDialog({ rules, command, onClose }: { rules: RulesResponse; comm
               <p>切换后，依赖旧规则的后续操作需重新确认；具体数量在生效后显示。</p>
               <p className="mt-1 text-muted-foreground">已冻结报价的订单按冻结时的报价结算。</p>
             </div>
-            {state.kind === "conflict" ? <p role="alert" className="text-xs text-destructive">规则已被其他人更新（版本冲突）。请关闭后刷新页面，核对当前生效版本再确认。</p> : null}
-            {state.kind === "unknown" ? <p role="alert" className="text-sm text-amber-700 dark:text-amber-300">结果未知：{state.message ?? "请求可能已执行。核对原回执前不能重复提交；关闭或刷新仍保留原请求。"}</p> : null}
-            {state.kind === "accepted" ? <p role="status" className="text-sm text-amber-700 dark:text-amber-300">{state.message ?? "已收到生效回执，但当前规则尚未完成回读。不能再次提交。"}</p> : null}
-            {state.kind === "blocked" || state.kind === "error" ? <p role="alert" className="text-sm text-destructive">{state.kind === "error" ? "请求被明确拒绝：" : ""}{state.message}</p> : null}
-            {state.kind === "not_sent" ? <p role="status" className="text-sm text-muted-foreground">{state.message}</p> : null}
+            {state.kind === "conflict" ? <Alert variant="warning" role="alert"><TriangleAlert aria-hidden="true" /><AlertTitle>规则已被其他人更新</AlertTitle><AlertDescription>版本冲突。请关闭后刷新页面，核对当前生效版本再确认。</AlertDescription></Alert> : null}
+            {state.kind === "unknown" ? <Alert variant="warning" role="status"><TriangleAlert aria-hidden="true" /><AlertTitle>结果未知</AlertTitle><AlertDescription>{state.message ?? "请求可能已执行。核对原回执前不能重复提交；关闭或刷新仍保留原请求。"}</AlertDescription></Alert> : null}
+            {state.kind === "accepted" ? <Alert variant="warning" role="status"><Clock aria-hidden="true" /><AlertTitle>已收到生效回执，尚未完成回读</AlertTitle><AlertDescription>{state.message ?? "当前规则尚未完成回读，不能再次提交。"}</AlertDescription></Alert> : null}
+            {state.kind === "blocked" ? <Alert variant="warning" role="alert"><TriangleAlert aria-hidden="true" /><AlertTitle>当前条件不允许提交</AlertTitle><AlertDescription>{state.message}</AlertDescription></Alert> : null}
+            {state.kind === "error" ? <Alert variant="destructive"><CircleAlert aria-hidden="true" /><AlertTitle>请求被明确拒绝</AlertTitle><AlertDescription>{state.message}</AlertDescription></Alert> : null}
+            {state.kind === "not_sent" ? <Alert variant="info" role="status"><Info aria-hidden="true" /><AlertDescription>{state.message}</AlertDescription></Alert> : null}
           </>
         )}
         <DialogFooter>

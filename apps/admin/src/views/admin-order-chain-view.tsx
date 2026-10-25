@@ -3,12 +3,13 @@ import type { AdminOrderPaymentSummary as PaymentSummary } from '../api';
 import { PublicBasisView } from "./supply-review/detail-pane";
 import { accountNumberLabel, historicalAttributeFacts, historicalReadSummary, historicalResourceText, orderTitleText } from "./supply-review/model";
 import { useCallback,useEffect,useLayoutEffect,useRef,useState } from "react";
-import { ArrowLeft,ArrowUpRight,ChevronLeft,ChevronRight,CreditCard,FileText,Flag,KeyRound,Search,X } from "lucide-react";
+import { ArrowLeft,ArrowUpRight,ChevronLeft,ChevronRight,CircleAlert,CreditCard,FileText,Flag,KeyRound,Search,X } from "lucide-react";
 import { adminRequest,friendlyError,formatDate,AdminApiError,type SessionSnapshot,type AdminOrderMoney,type AdminOrder } from "../api";
 import { AdminOrderSettlementEvidence, type OrderSettlementReadState } from './admin-order-settlement-evidence';
 import { defaultFinanceFilters, financeRead, type OrderSettlementEvidence } from './admin-finance-api';
 import { LegacyAdminContinuationPanel } from "./legacy-continuation-panel";
 import { Button } from "../components/ui-elements";
+import { Alert, AlertAction, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { OrderStages as Stages, ORDER_STATUS_LABELS } from "./admin-order-stages";
 import { financeContextIdentity, financeOriginPath, registerFinanceOrigin } from "./admin-finance-view";
 import { sanitizeFinanceReturn } from '../workspace/tab-model';
@@ -44,7 +45,7 @@ function resourcePublicBasis(data: Record<string, any>, snapshot: Snapshot, acco
   if (!basis || typeof basis !== "object" || typeof basis.id !== "string") return <section className="oc-section"><h2>对外版本</h2><p>{data.publicVisible === false ? "当前没有对外版本。" : "这次没有读到租客看到的版本。"}</p><p>当前资料标题：{typeof data.title === "string" && data.title ? data.title : "未提供"} · 版本 {data.versionId ?? "未提供"}</p>{jump}</section>;
   return <div className="oc-section"><PublicBasisView basis={basis} /><p className="text-sm text-muted-foreground">当前资料版本 {data.versionId ?? "未提供"} 不替代上面这一版。</p>{jump}</div>;
 }
-function ErrorState({error,retry}:{error:string;retry:()=>void}){return <div className="oc-empty" role="alert"><h2>读取暂不可用</h2><p>{error}</p><Button size="sm" onClick={retry}>重试</Button></div>;}
+function ErrorState({error,retry}:{error:string;retry:()=>void}){return <Alert variant="destructive"><CircleAlert aria-hidden /><AlertTitle>读取暂不可用</AlertTitle><AlertDescription>{error}</AlertDescription><AlertAction><Button size="sm" variant="secondary" onClick={retry}>重试</Button></AlertAction></Alert>;}
 function OrderList({snapshot,onOpenPath,refreshNonce,initialQuery,onQueryChange}:{snapshot:Snapshot;onOpenPath:(path:string,title?:string)=>void;refreshNonce:number;initialQuery?:Record<string,string>;onQueryChange?:(query:Record<string,string>)=>void;}){
  const identity=keyOf(snapshot);const previous=saved.get(identity);
  // 同地址返回才恢复本地线索；新地址仍独立决定公共筛选和分页。

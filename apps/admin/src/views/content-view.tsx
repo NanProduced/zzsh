@@ -256,7 +256,7 @@ export function ContentView({
   if (availableTabs.length === 0) {
     return (
       <section className="section-panel">
-        <StatusMessage error="当前账号没有内容管理权限。平台级内容与游戏级内容需要不同的动态操作权限。" />
+        <StatusMessage tone="warning" error="当前账号没有内容管理权限。平台级内容与游戏级内容需要不同的动态操作权限。" />
       </section>
     );
   }
