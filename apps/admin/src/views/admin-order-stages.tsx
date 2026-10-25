@@ -1,4 +1,5 @@
 import { CreditCard, FileText, Flag, KeyRound, X } from 'lucide-react';
+import { formatDate } from '../api';
 
 export interface OrderStagesPayment {
   state: 'RECORDED_PAID' | 'RECORDED_UNPAID' | 'UNKNOWN' | string;
@@ -146,7 +147,7 @@ export function OrderStages({
   const paymentText = orderPaymentLabel(p);
   const refundText = o.status === 'CANCELLED' && pState === 'RECORDED_PAID' ? ' · 退款待核' : '';
   const cancelText = o.status === 'CANCELLED' && o.cancelReason ? ` · ${cancelReasonText(o.cancelReason)}` : '';
-  const compactText = progress
+  const compactText = o.status === 'CANCELLED' ? null : progress
     ? `${OPENING_STATE_LABELS[progress.opening.state]} · ${ENDING_STATE_LABELS[progress.ending.state]}`
     : legacy
       ? o.source?.statusLabel ?? ORDER_STATUS_LABELS[o.status] ?? '原来源阶段待核'
@@ -155,7 +156,7 @@ export function OrderStages({
   if (variant === 'compact') {
     return <div className={`oc-stages oc-stages-compact ${className ?? ''}`.trim()}>
       <strong className="oc-stage-label">{ORDER_STATUS_LABELS[o.status] ?? '状态待核'}</strong>
-      <small>{compactText} · {paymentText}{refundText}{cancelText}</small>
+      <small>{compactText ? `${compactText} · ` : ''}{paymentText}{refundText}{cancelText}</small>
     </div>;
   }
 
@@ -179,8 +180,8 @@ export function OrderStages({
         {paymentText}
         {refundText}
         {cancelText}
-        {progress?.ending.postedAtUtc ? ` · 过账时间 ${progress.ending.postedAtUtc}` : ''}
-        {progress?.opening.confirmedAtUtc ? ` · 开租时间 ${progress.opening.confirmedAtUtc}` : ''}
+        {progress?.ending.postedAtUtc ? ` · 过账时间 ${formatDate(progress.ending.postedAtUtc)}` : ''}
+        {progress?.opening.confirmedAtUtc ? ` · 开租时间 ${formatDate(progress.opening.confirmedAtUtc)}` : ''}
       </small>
     </div>
   );

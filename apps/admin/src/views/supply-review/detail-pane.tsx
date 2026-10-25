@@ -96,10 +96,10 @@ export function AccountCompleteView({
   return <div className="supervision-detail-body min-w-0 space-y-5">
     <header className="flex flex-wrap items-start justify-between gap-4">
       <div className="min-w-0">
-        <h2 className="break-words text-lg font-semibold">{version.declaration.title || "未命名资料"}</h2>
+        <h2 className="break-words text-lg font-semibold">完整账号资料</h2>
         {entryNote ? <p className="mt-1 text-sm text-muted-foreground">{entryNote}</p> : null}
         <p className="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-          <span>{detail.ownerName} · {version.sequence ? `第 ${version.sequence} 版` : ""} · 规则 {version.releaseId ?? "未提供"}</span>
+          <span>{version.sequence ? `第 ${version.sequence} 版` : "资料版本未提供"}</span>
           <StateBadge state={version.reviewState} />
         </p>
       </div>
@@ -107,9 +107,6 @@ export function AccountCompleteView({
     </header>
     {historical ? <div className="flex flex-wrap items-center gap-3 rounded-lg border border-border bg-soft-warning px-3 py-2 text-xs text-warning"><span>正在查看历史版本（只读），处置只对当前版本开放。</span><Button size="sm" variant="outline" onClick={() => onSelectVersion(null)}>回到当前资料</Button></div> : null}
 
-    <Section title="账号图片" aside={<span className="text-xs text-muted-foreground">展示图与私有凭证分区；目录图不是持有证明</span>}>
-      {media.length ? <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">{media.map((binding, index) => <MediaCard key={binding.assetId} binding={binding} index={index} total={media.length} canReviewMedia={canReviewMedia} readOnly={historical} busy={busy} reasonReady={reasonReady} onZoom={onZoom} onQuarantine={onQuarantine} onRestore={onRestore}/>)}</div> : <p className="text-sm text-muted-foreground">本版本未绑定图片；不能据此认定账号没有图片。</p>}
-    </Section>
 
     <Section title="申报属性" aside={<span className="text-xs text-muted-foreground">基本资料与使用条件 · 未申报不按否处理</span>}>
       <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm sm:grid-cols-3">{attributeFacts(version).map(fact => <div key={fact.label}><dt className="text-xs text-muted-foreground">{fact.label}</dt><dd className={fact.unconfirmed ? "text-warning" : ""}>{fact.value}</dd></div>)}</dl>
@@ -134,6 +131,12 @@ export function AccountCompleteView({
       {lines.length ? <div className="overflow-x-auto"><Table className="w-full text-left text-sm"><TableHeader className="bg-surface-raised"><TableRow><TableHead className="px-4 py-2.5 font-medium">报价行</TableHead><TableHead className="px-4 py-2.5 font-medium">数量</TableHead><TableHead className="px-4 py-2.5 font-medium">计价基数</TableHead><TableHead className="px-4 py-2.5 font-medium">参考单价</TableHead><TableHead className="px-4 py-2.5 text-right font-medium">原行金额</TableHead></TableRow></TableHeader><TableBody>{lines.map(line => <TableRow key={line.itemId} className="border-t border-border"><TableCell className="px-4 py-2.5 whitespace-normal">{line.name}</TableCell><TableCell className="px-4 py-2.5 tabular-nums">{line.quantity}</TableCell><TableCell className="px-4 py-2.5 tabular-nums">{line.unitQuantity ?? "未提供"}</TableCell><TableCell className="px-4 py-2.5 tabular-nums">{line.buyerUnitAmount ? `¥${formatAmount(line.buyerUnitAmount)}` : "未提供"}</TableCell><TableCell className="px-4 py-2.5 text-right tabular-nums">{line.amount ? `¥${formatAmount(line.amount)}` : "未提供"}</TableCell></TableRow>)}</TableBody></Table></div> : <p className="text-sm text-muted-foreground">本版没有可读报价行；不从当前价目补算。</p>}
       <p className="text-xs text-muted-foreground">金额为资料版本冻结参考；租客档位与会员个性化减免不在本页推断，真实应付以原订单冻结价为准。</p>
     </Section>
+
+    <Section title="账号图片" aside={<span className="text-xs text-muted-foreground">展示图与私有凭证分区；目录图不是持有证明</span>}>
+      {media.length ? <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">{media.map((binding, index) => <MediaCard key={binding.assetId} binding={binding} index={index} total={media.length} canReviewMedia={canReviewMedia} readOnly={historical} busy={busy} reasonReady={reasonReady} onZoom={onZoom} onQuarantine={onQuarantine} onRestore={onRestore}/>)}</div> : <p className="text-sm text-muted-foreground">本版本未绑定图片；不能据此认定账号没有图片。</p>}
+    </Section>
+
+    <Collapsible className="border-t pt-4"><CollapsibleTrigger className="group flex w-full items-center justify-between text-sm font-semibold">版本依据<ChevronDown className="size-3.5"/></CollapsibleTrigger><CollapsibleContent className="pt-2 text-xs text-muted-foreground"><dl className="grid gap-2 break-all"><div><dt>资料版本</dt><dd>{version.id}</dd></div><div><dt>规则版本</dt><dd>{version.releaseId ?? "未提供"}</dd></div></dl></CollapsibleContent></Collapsible>
 
     {historicalRead ? <Collapsible className="border-t pt-4"><CollapsibleTrigger className="group flex w-full items-center justify-between rounded-sm text-left text-sm font-semibold outline-none focus-visible:ring-3 focus-visible:ring-ring/50">历史来源资料（仅参考，不覆盖当前资料）<span aria-hidden="true" className="text-muted-foreground transition-transform group-data-[panel-open]:rotate-90">›</span></CollapsibleTrigger><CollapsibleContent className="pt-2"><p className="text-sm text-muted-foreground">{historicalReadSummary(historicalRead)}</p>{historicalRead.display?.state === "KNOWN" && historicalRead.display.facts?.attributes && Array.isArray(historicalRead.display.facts.resources) ? <><dl className="mt-2 grid grid-cols-2 gap-3 text-sm sm:grid-cols-3">{historicalAttributeFacts(historicalRead).map(fact => <div key={fact.label}><dt className="text-xs text-muted-foreground">{fact.label}</dt><dd>{fact.value}</dd></div>)}</dl><ul className="mt-2 grid gap-1 text-sm sm:grid-cols-2">{historicalRead.display.facts.resources.map(resource => <li key={resource.code}>{resource.name}：{historicalResourceText(resource)}</li>)}</ul></> : <p className="mt-2 text-sm text-muted-foreground">历史扩展资料尚待接入，未提供的数量不能按零处理。</p>}<p className="mt-2 text-sm">历史租金 {historicalRead.historicalQuote.haffRentYuan} 元 · 历史物资金额 {historicalRead.historicalQuote.goodsYuan} 元 · 历史押金 {historicalRead.historicalQuote.depositYuan} 元</p><p className="mt-1 text-xs text-muted-foreground">来源记录，不是当前报价、余额、保证金到账或退款结果。</p></CollapsibleContent></Collapsible> : null}
 

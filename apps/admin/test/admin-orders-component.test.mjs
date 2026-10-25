@@ -387,7 +387,7 @@ test('order account labels distinguish legacy source numbers in lists, detail an
   const props={...chainProps('number-list'),snapshot:{...snapshotFor('number-list'),permissions:['order.read','user.directory.read','supply.rental_account.read']},onOpenPath:(path,title)=>opened.push({path,title})};
   globalThis.fetch=async()=>response(chainPage(items,{total:items.length}));
   await act(async()=>root.render(createElement(AdminOrderChainView,props)));await until(()=>node.querySelectorAll('.oc-table tbody tr').length===items.length);
-  cases.forEach((c,i)=>assert(node.querySelectorAll('.oc-table tbody tr')[i].textContent.includes(c.expected),c.expected));
+  cases.forEach((c,i)=>assert(node.querySelectorAll('.oc-table tbody tr')[i].textContent.includes(c.expected.replace(/^账号 /, '')),c.expected));
   assert.deepEqual([...node.querySelectorAll('.oc-table tbody tr')[0].querySelectorAll('.oc-party-role')].map(e=>e.textContent),['历史租客','历史号主']);
   assert.deepEqual([...node.querySelectorAll('.oc-table tbody tr')[1].querySelectorAll('.oc-party-role')].map(e=>e.textContent),['租客','号主']);
   assert.equal(node.querySelector('.oc-table').textContent.includes('账号 0000123'),false);
@@ -458,4 +458,28 @@ test('FLOW02 Root F1: cancelled payment remains paid, known unpaid, or unknown',
   else if(state==='RECORDED_UNPAID')assert.match(fee,/未形成支付/);
   else{assert.match(fee,/支付.*待核|支付.*未知/);assert.doesNotMatch(fee,/未形成支付/);}
  }
+});
+
+test('FLOW02 visual: cancelled compact progress omits inapplicable stages and keeps payment uncertainty', async t => {
+  const {root,node,AdminOrderChainView}=await setup(t);
+  const value={...chainOrder,payment:{state:'UNKNOWN',recordedAt:null,recordedAmount:null},progress:{asOfUtc:null,opening:{state:'NOT_APPLICABLE',confirmedAtUtc:null},ending:{state:'NOT_APPLICABLE',currentVersionNo:null,postedAtUtc:null}}};
+  globalThis.fetch=async()=>response(chainPage([value]));
+  await act(async()=>root.render(createElement(AdminOrderChainView,chainProps('visual-cancelled'))));
+  await until(()=>node.querySelector('.oc-stages-compact'));
+  const text=node.querySelector('.oc-stages-compact').textContent;
+  assert(text.includes('已取消')&&text.includes('支付事实待核'));
+  assert(!text.includes('开租不适用')&&!text.includes('结算不适用'));
+});
+
+test('FLOW02 visual: progress timestamps use the same display formatter as order dates', async t => {
+  const {root,node,AdminOrderChainView}=await setup(t);
+  const instant='2026-10-25T01:02:03.000000Z';
+  const value={...chainOrder,status:'COMPLETED',source:{origin:'NATIVE'},createdAt:instant,progress:{asOfUtc:instant,opening:{state:'CONFIRMED',confirmedAtUtc:instant},ending:{state:'POSTED',currentVersionNo:1,postedAtUtc:instant}}};
+  globalThis.fetch=async()=>response({order:value});
+  await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('visual-dates'),objectOnly:true,initialOrderId:value.id})));
+  await until(()=>node.textContent.includes('过账时间'));
+  const expected=new Intl.DateTimeFormat('zh-CN',{dateStyle:'medium',timeStyle:'short'}).format(new Date(instant));
+  assert(node.querySelector('.oc-stages').textContent.includes('过账时间 '+expected));
+  assert(node.querySelector('.oc-stages').textContent.includes('开租时间 '+expected));
+  assert(!node.querySelector('.oc-stages').textContent.includes(instant));
 });

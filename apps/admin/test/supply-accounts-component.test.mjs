@@ -25,9 +25,9 @@ test('daily list uses seven columns, 20 rows and shared cursor pagination withou
     return json(workDetail());
   } });
   await tick(h);
-  assert.deepEqual([...h.el.querySelectorAll('thead th')].map(th => th.textContent.trim()), ['账号 / 号主', '核心资产配置', '租用条件', '基础资源费 / 租客押金', '业务状态', '更新时间', '操作']);
+  assert.deepEqual([...h.el.querySelectorAll('thead th')].map(th => th.textContent.trim()), ['账号 / 号主', '哈夫币', '包赔申报', '基础资源费 / 租客押金', '业务状态', '更新时间', '操作']);
   assert.equal(new URL(calls[0], 'http://localhost').searchParams.get('limit'), '20');
-  assert.ok(h.el.textContent.includes('当前无接新单阻塞'));
+  assert.ok(!h.el.querySelector('tbody').textContent.includes('当前无接新单阻塞'), 'ready status is not repeated as a reason');
   assert.ok(h.el.textContent.includes('不可接新单，原因未提供'));
   assert.ok(!h.el.textContent.includes('服务端未返回阻塞'));
   await h.click([...h.el.querySelectorAll('button')].find(button => button.getAttribute('aria-label') === '下一页'));

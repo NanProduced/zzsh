@@ -59,7 +59,7 @@ export function StatusBadge({ facts }: { facts: SupplyWorkItem["facts"] }) {
 }
 export function ReasonCell({ facts, onMore }: { facts: SupplyWorkItem["facts"]; onMore: () => void }) {
   const { code, others } = primaryReason(facts);
-  if (!code) return <span className="text-sm text-muted-foreground">{newOrdersReasonText(facts.newOrders)}</span>;
+  if (!code) return facts.newOrders === true ? null : <span className="text-sm text-muted-foreground">{newOrdersReasonText(facts.newOrders)}</span>;
   return <div className="text-sm"><div>{condText(code)}</div>{others > 0 && <Button type="button" variant="link" size="xs" className="h-auto px-0 text-xs text-muted-foreground" onClick={e => { e.stopPropagation(); onMore(); }} aria-label={"查看全部 " + (others + 1) + " 项原因"}>另 {others} 项</Button>}</div>;
 }
 export function TimeText({ iso, label = "更新时间" }: { iso: string; label?: string }) {
