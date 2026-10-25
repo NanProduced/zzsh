@@ -436,3 +436,30 @@ test("skin audit masks an unparseable legacy source URL without failing the audi
   assert.equal((snapshot.media_source as typeof mediaSource).url, "[REDACTED_URL]");
   assert.equal(snapshot.rarity_evidence, null);
 });
+
+test("skin audit masks OSS credentials and temporary tokens in both metadata URL paths", async () => {
+  const keys = ["x-oss-signature", "x-oss-credential", "x-oss-security-token", "security-token", "X_OSS_SIGNATURE", "X-OSS-CREDENTIAL", "%78-oss-security-token"];
+  for (const key of keys) for (const separator of ["?", "#", "#/callback?"]) {
+    const url = `https://example.org/image.png${separator}${key}=SYNTHETIC_OSS_AUTH`;
+    const row = { ...legacy, rarity_evidence: { ...rarityEvidence, references: [{ ...evidence.evidenceRefs[0], url }] }, is_collectible: false, default_state: "UNKNOWN", media_source: { ...mediaSource, url } };
+    const before = JSON.stringify(row);
+    Object.freeze(row.rarity_evidence.references[0]); Object.freeze(row.rarity_evidence.references); Object.freeze(row.rarity_evidence); Object.freeze(row.media_source); Object.freeze(row);
+    const snapshot = await auditSnapshot(skinAuditFixture(row).client, "skin", row.id);
+    assert.ok(snapshot);
+    assert.equal((snapshot.rarity_evidence as typeof rarityEvidence).references[0]!.url, "[REDACTED_URL]");
+    assert.equal((snapshot.media_source as typeof mediaSource).url, "[REDACTED_URL]");
+    assert.equal(JSON.stringify(snapshot).includes("SYNTHETIC_OSS_AUTH"), false);
+    assert.equal(JSON.stringify(row), before);
+  }
+});
+
+test("skin audit preserves ordinary OSS image processing parameters and source objects", async () => {
+  for (const url of ["https://example.org/image.png?x-oss-process=image/resize,w_200", "https://example.org/image.png?x-oss-signature-version=OSS4-HMAC-SHA256&x-oss-date=20261025T080000Z#/gallery?x-oss-process=image/format,webp"]) {
+    const row = { ...legacy, rarity_evidence: { ...rarityEvidence, references: [{ ...evidence.evidenceRefs[0], url }] }, is_collectible: false, default_state: "UNKNOWN", media_source: { ...mediaSource, url } };
+    const before = JSON.stringify(row), snapshot = await auditSnapshot(skinAuditFixture(row).client, "skin", row.id);
+    assert.ok(snapshot);
+    assert.deepEqual(snapshot.rarity_evidence, row.rarity_evidence);
+    assert.deepEqual(snapshot.media_source, row.media_source);
+    assert.equal(JSON.stringify(row), before);
+  }
+});

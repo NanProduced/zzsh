@@ -23,7 +23,7 @@ const FIELDS: Record<string, string> = {
   account_guarantee_proof: "id account_id owner_user_id version_no price_version_id policy_version status required_cents covered_cents evidence_ref evidence_digest verified_by_admin_id valid_from valid_until supersedes_id reason created_at",
 };
 
-const SOURCE_AUTH_PARAMETER = /^(?:token|accesstoken|refreshtoken|idtoken|authtoken|sessiontoken|signature|sig|xamzcredential|xamzsignature|xamzsecuritytoken|xgoogcredential|xgoogsignature|awsaccesskeyid|apikey|authorization|auth|session|sessionid|password|passwd|secret|clientsecret|credential|credentials)$/i;
+const SOURCE_AUTH_PARAMETER = /^(?:token|accesstoken|refreshtoken|idtoken|authtoken|sessiontoken|signature|sig|xamzcredential|xamzsignature|xamzsecuritytoken|xgoogcredential|xgoogsignature|xosscredential|xosssignature|xosssecuritytoken|securitytoken|awsaccesskeyid|apikey|authorization|auth|session|sessionid|password|passwd|secret|clientsecret|credential|credentials)$/i;
 
 /** Audit only: catalog metadata and its original public URL remain untouched. */
 function skinAuditSource(source: unknown): unknown {
