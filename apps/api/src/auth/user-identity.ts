@@ -159,8 +159,8 @@ export async function readUserContext(request: AuthSecurityNodeRequest, options:
 }
 
 /** Revalidate SDK-authenticated identity using the already-owned transaction connection. */
-export async function assertUserContextInTransaction(client: PoolClient, context: UserContext): Promise<void> {
-  await assertActiveInTransaction(client, context.userId);
+export async function assertUserContextInTransaction(client: PoolClient, context: UserContext, purpose: "READ" | "WRITE" = "WRITE"): Promise<void> {
+  await assertActiveInTransaction(client, context.userId, purpose);
   const session = await client.query(`SELECT 1 FROM "zzsh_auth_user"."session" WHERE "id"=$1 AND "userId"=$2 AND "expiresAt">clock_timestamp()`, [context.sessionId, context.userId]);
   if (!session.rowCount) throw new SecurityApiError(401, API_V1_ERROR_CODES.UNAUTHENTICATED, "Authentication required");
 }
@@ -282,9 +282,9 @@ export async function restoreDeactivatedUserAccount(
   });
 }
 
-export async function assertActiveInTransaction(client: PoolClient, userId: string): Promise<void> {
+export async function assertActiveInTransaction(client: PoolClient, userId: string, purpose: "READ" | "WRITE" = "WRITE"): Promise<void> {
   const user = await client.query<{ suspended: boolean }>(
-    `SELECT "suspended" FROM "zzsh_auth_user"."user" WHERE "id" = $1 FOR UPDATE`,
+    `SELECT "suspended" FROM "zzsh_auth_user"."user" WHERE "id" = $1${purpose === "READ" ? "" : " FOR UPDATE"}`,
     [userId],
   );
   const state = await readState(client, userId);

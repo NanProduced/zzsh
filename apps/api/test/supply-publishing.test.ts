@@ -4,6 +4,19 @@ import { assertCurrentRelease, evaluatePublication, freezePresentationSkin, orde
 import { createCatalogEntry, updateCatalogEntry } from "../src/supply/catalog";
 import { updatePriceDraft } from "../src/supply/rules";
 import { assertDeltaResourceUnit, DELTA_RESOURCE_UNITS } from "../src/supply/delta-rental";
+import { assertActiveInTransaction, assertUserContextInTransaction } from "../src/auth/user-identity";
+
+test("identity READ purpose omits row locks while every existing default WRITE keeps the original lock", async () => {
+  for (const purpose of [undefined, "WRITE", "READ"] as const) {
+    const sqls: string[] = [];
+    const client = { query: async (sql: string) => { sqls.push(sql); return { rows: [{ suspended: false, accountStatus: "ACTIVE" }], rowCount: 1 }; } };
+    await assertUserContextInTransaction(client as never, { userId: "fixture_owner", sessionId: "fixture_session" }, purpose);
+    assert.equal(sqls.some(sql => /FOR UPDATE/.test(sql)), purpose !== "READ");
+    assert.equal(sqls.filter(sql => sql.includes('"expiresAt">clock_timestamp()')).length, 1);
+    sqls.length = 0; await assertActiveInTransaction(client as never, "fixture_owner", purpose);
+    assert.equal(sqls.some(sql => /FOR UPDATE/.test(sql)), purpose !== "READ");
+  }
+});
 
 test("unquoted draft skins use current visible identities with explicit withheld and empty states, without snapshot writes", async () => {
   const calls: Array<{ sql: string; values: unknown[] }> = [];

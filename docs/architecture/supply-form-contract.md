@@ -100,3 +100,13 @@ publishing-catalog.ready仅表示目录与生效价目配置齐备，不代表�
 绝密KD输入保留原文，负值、非数字、超过100不能保存或核价；合法小数、空值及历史原值不静默截断或清洗。公开详情主图库、缩略图、计数、预览共用非PENALTY集合；处罚图独立公示，全部为处罚图时不冒充普通主图。
 
 发布与我的账号、收藏订阅根用户会话；身份未确认时隐藏私有视图并暂停后续写步骤，同用户恢复保留上下文，实际换身份才失效。页面查询、草稿和上传操作代次独立于会话身份代次。Admin仍可按原权限查看和处理媒体；`ACCOUNT_DISPLAY` 的公开资格来自技术校验与有效发布事实，不要求人工预审，`ACCOUNT_EVIDENCE` 只允许私有访问。服务端仍执行完整权限、用途、对象归属和隔离校验。
+
+## 未保存的号主收入预览
+
+用户专用 POST `/api/v1/supply/games/{gameId}/owner-income-preview` 消费未保存的计价子集：releaseId/catalogRevision、可选本人accountId、安全箱/体力/负重/租赁方案、当前termOptionCode、库存、权益及基础租客押金/包赔声明。仅JSON原文≤64KiB、库存/权益各≤100；不接图片、备注、皮肤展示、客户端金额/会员或内部模拟参数。复用正式Delta计算和owner白名单，结果schema为`owner-income-preview.v1`。号主比例是名义万哈夫币/元，PERCENT的提成后收入以服务端金额为准。
+
+`READY`仅收入输入完整，总预计收入取原ownerTotal；`PARTIAL/INCOMPLETE/UNAVAILABLE`保留可核行、已知物资小计及缺项，完整总额为null，不将缺价或未知补0。哈夫币收入/物资收入/总收入和基础租客押金分列；押金有独立depositState。收入为扣费前预计，不是最终到手、发布资格或条款接受。绑定同一game/release/price/term/catalog；30秒只提示刷新，不是可提交凭据。
+
+Cookie/Origin沿用户边界、响应private/no-store；可选账号缺失/他人/跨游戏统一404，绑定变化409，非法输入400，未知依赖错误安全返回。业务使用RR READ ONLY及显式READ身份复核，普通SELECT不取显式行锁，不保存草稿/报价/hash/版本、初始化资格或签接受记录；SDK会话生命周期在此承诺之外。现物资resource-income-preview GET同样使用READ路径，原物资小计合同保持。
+
+Web需精确白名单接该叶路径；沿原身份/输入代际、AbortController和跨标签身份失效处理，不建轮询/跨用户缓存，不将旧预览替换UNKNOWN正式请求。新预览不是MySupply或正式quote对象；最终仍显式save→quote→核对并接受条款→submit，金额/规则变化重新核对。

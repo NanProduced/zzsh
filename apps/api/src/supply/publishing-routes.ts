@@ -19,10 +19,12 @@ import {
 } from "../auth/user-identity";
 import {
   recordAudit,
+  SecurityApiError,
   setAuditContext,
   withTransaction,
 } from "../auth/security-core";
-import { validateIdempotencyKey } from "../contracts/api-v1";
+import { API_V1_ERROR_CODES, validateIdempotencyKey } from "../contracts/api-v1";
+import { OWNER_INCOME_PREVIEW_MAX_BYTES, parseOwnerIncomePreviewInput, readOwnerIncomePreview } from "./owner-income-preview";
 import type { SupplyRuntimeOptions } from "./supply-routes";
 import { GAME_SERVICE, requirePublicGameService } from "./game-services";
 import { loadMediaAsset } from "./media";
@@ -113,6 +115,31 @@ export async function handlePublishingRoute(
 ): Promise<boolean> {
   const method = (request.method ?? "GET").toUpperCase();
   const gate = options.supplyGateReader ?? unknownSupplyGate;
+  const ownerPreviewMatch = /^\/games\/([A-Za-z0-9._:-]+)\/owner-income-preview$/.exec(path);
+  if (!admin && ownerPreviewMatch) {
+    const cacheControl = "private, no-store";
+    try {
+      if (method !== "POST") throw notFound();
+      if (typeof request.headers.origin !== "string" || ![options.userOrigin, options.apiOrigin].includes(request.headers.origin)) throw forbidden();
+      if ([...query.keys()].length) throw invalid("预览不接受查询参数");
+      if (typeof request.headers["content-type"] !== "string" || !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(request.headers["content-type"])) throw invalid("预览须使用JSON内容");
+      // Nest's existing rawBody parser supplies actual bytes, including whitespace and escaped text.
+      if (!Buffer.isBuffer(request.rawBody) || request.rawBody.length > OWNER_INCOME_PREVIEW_MAX_BYTES) throw invalid("预览内容缺失或过大");
+      const input = parseOwnerIncomePreviewInput(bodyOf(request));
+      const context = await readUserContext(request, options);
+      const result = await withPublicListingSnapshot(options.pool, async client => {
+        await client.query("SELECT set_config('statement_timeout','3s',true),set_config('lock_timeout','500ms',true)");
+        await assertUserContextInTransaction(client, context, "READ");
+        await requirePublicGameService(client, ownerPreviewMatch[1]!, GAME_SERVICE.ACCOUNT_RENTAL);
+        return readOwnerIncomePreview(client, context, ownerPreviewMatch[1]!, input);
+      });
+      sendJson(response, 200, result, requestId, cacheControl);
+    } catch (error) {
+      const known = error instanceof SecurityApiError ? error : null;
+      sendJson(response, known?.status ?? 500, { error: { code: known?.code ?? API_V1_ERROR_CODES.INTERNAL_ERROR, message: known?.message ?? "号主收入预览暂不可用", requestId, ...(known?.details ? { details: known.details } : {}) } }, requestId, cacheControl);
+    }
+    return true;
+  }
   const resourcePreviewMatch = /^\/games\/([A-Za-z0-9._:-]+)\/resource-income-preview$/.exec(path);
   if(!admin&&method==="GET"&&resourcePreviewMatch){
     for(const key of query.keys())if(!["inventory","catalogRevision","releaseId"].includes(key)||query.getAll(key).length!==1)throw invalid("资源预估参数错误",key);
@@ -120,9 +147,8 @@ export async function handlePublishingRoute(
     const catalogRevision=query.get("catalogRevision"),releaseId=query.get("releaseId");
     if(!catalogRevision||!/^\d+$/.test(catalogRevision)||!releaseId||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(releaseId))throw invalid("资源预估须绑定当前目录和规则");
     const context=await readUserContext(request,options);
-    const result=await withTransaction(options.pool,async client=>{
-      await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
-      await assertUserContextInTransaction(client,context);
+    const result=await withPublicListingSnapshot(options.pool,async client=>{
+      await assertUserContextInTransaction(client,context,"READ");
       await requirePublicGameService(client,resourcePreviewMatch[1]!,GAME_SERVICE.ACCOUNT_RENTAL);
       return readResourceIncomePreview(client,resourcePreviewMatch[1]!,inventory,{catalogRevision,releaseId});
     });

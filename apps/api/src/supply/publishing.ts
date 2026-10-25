@@ -959,7 +959,7 @@ export async function readDepositRecommendation(
     };
   }
 }
-export async function readResourceIncomePreview(client: PoolClient, gameId: string, inventory: unknown, expected: {catalogRevision: string; releaseId: string}) {
+export function parseIncomePreviewInventory(inventory: unknown): Map<string, string | null> {
   if (!Array.isArray(inventory) || inventory.length > 100) throw invalid("库存格式错误", "inventory");
   const quantities = new Map<string, string | null>();
   for (const row of inventory) {
@@ -969,13 +969,29 @@ export async function readResourceIncomePreview(client: PoolClient, gameId: stri
       || (row.quantity !== null && (typeof row.quantity !== "string" || !/^(0|[1-9]\d{0,23})$/.test(row.quantity)))) throw invalid("库存须为不重复的物品身份和整数数量", "inventory");
     quantities.set(row.itemId, row.quantity);
   }
-  const release = (await client.query(`SELECT r.id AS "releaseId",r.generation::text AS generation,r.price_version_id AS "priceVersionId",g.catalog_revision::text AS "catalogRevision",p.mode,p.commission_rate::text AS "commissionRate",p.rounding_policy AS "roundingPolicy" FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id JOIN zzsh_supply.price_version p ON p.id=r.price_version_id WHERE g.id=$1 AND g.enabled`, [gameId])).rows[0];
-  if (!release) return {available:false,reason:"RULE_UNCONFIGURED"};
+  return quantities;
+}
+
+export type IncomePreviewRelease = {
+  releaseId: string; generation: string; priceVersionId: string; termVersionId: string; catalogRevision: string;
+  mode: "SPREAD" | "PERCENT"; commissionRate: string | null; roundingPolicy: string; priceStatus: string; haffRule: QuoteInput["haffRule"];
+};
+export type IncomePreviewItem = {
+  itemId: string; code: string; name: string; unit: "HAFF_BASE" | "ROUND" | "PIECE" | "DAY"; enabled: boolean; required: boolean;
+  pricingKind: "FIXED_UNIT" | "HAFF_RATIO" | null; unitQuantity: string | null; buyerUnitAmount: string | null; ownerUnitAmount: string | null;
+};
+export async function readIncomePreviewContext(client: PoolClient, gameId: string, expected: {catalogRevision: string; releaseId: string}, includeHaff = false) {
+  const release = (await client.query<IncomePreviewRelease>(`SELECT r.id AS "releaseId",r.generation::text AS generation,r.price_version_id AS "priceVersionId",r.term_version_id AS "termVersionId",g.catalog_revision::text AS "catalogRevision",p.mode,p.commission_rate::text AS "commissionRate",p.rounding_policy AS "roundingPolicy",p.status AS "priceStatus",p.haff_rule AS "haffRule" FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id JOIN zzsh_supply.price_version p ON p.id=r.price_version_id WHERE g.id=$1 AND g.enabled`, [gameId])).rows[0];
+  if (!release) return {available:false as const,reason:"RULE_UNCONFIGURED"};
   if (release.releaseId !== expected.releaseId || release.catalogRevision !== expected.catalogRevision) throw conflict("资源规则已更新，请重新读取目录");
-  if (release.roundingPolicy !== ROUNDING_POLICY || !["SPREAD", "PERCENT"].includes(release.mode)) return {available:false,reason:"RULE_UNSUPPORTED"};
+  if (release.roundingPolicy !== ROUNDING_POLICY || !["SPREAD", "PERCENT"].includes(release.mode)) return {available:false as const,reason:"RULE_UNSUPPORTED"};
   const commission = release.mode === "PERCENT" && release.commissionRate !== null ? parseNonNegativeDecimal(release.commissionRate,8,"commission") : null;
-  if (release.mode === "PERCENT" && (!commission || commission.value >= 10n ** BigInt(commission.scale))) return {available:false,reason:"RULE_UNCONFIGURED"};
-  const items=(await client.query(`SELECT i.id AS "itemId",i.code,i.name,i.unit,i.enabled,p.pricing_kind AS "pricingKind",p.unit_quantity::text AS "unitQuantity",p.buyer_unit_amount::text AS "buyerUnitAmount",p.owner_unit_amount::text AS "ownerUnitAmount" FROM zzsh_supply.billable_item i LEFT JOIN zzsh_supply.price_line p ON p.item_id=i.id AND p.price_version_id=$2 AND p.customer_tier='STANDARD' WHERE i.game_id=$1 AND i.unit<>'HAFF_BASE' ORDER BY i.sort_order,i.code,i.id`,[gameId,release.priceVersionId])).rows;
+  if (release.mode === "PERCENT" && (!commission || commission.value >= 10n ** BigInt(commission.scale))) return {available:false as const,reason:"RULE_UNCONFIGURED"};
+  const items=(await client.query<IncomePreviewItem>(`SELECT i.id AS "itemId",i.code,i.name,i.unit,i.enabled,i.required,p.pricing_kind AS "pricingKind",p.unit_quantity::text AS "unitQuantity",p.buyer_unit_amount::text AS "buyerUnitAmount",p.owner_unit_amount::text AS "ownerUnitAmount" FROM zzsh_supply.billable_item i LEFT JOIN zzsh_supply.price_line p ON p.item_id=i.id AND p.price_version_id=$2 AND p.customer_tier='STANDARD' WHERE i.game_id=$1${includeHaff ? "" : " AND i.unit<>'HAFF_BASE'"} ORDER BY i.sort_order,i.code,i.id`,[gameId,release.priceVersionId])).rows;
+  return {available:true as const,release,items,commission};
+}
+
+export function projectResourceIncomePreview(items: readonly IncomePreviewItem[], quantities: ReadonlyMap<string, string | null>, release: IncomePreviewRelease, commission: ReturnType<typeof parseNonNegativeDecimal> | null) {
   if([...quantities.keys()].some(id=>!items.some(row=>row.itemId===id)))throw invalid("库存物品不属于当前游戏资源", "inventory");
   const lines=[],unpricedItemIds:string[]=[];let total=0n,declared=0;
   for(const item of items){
@@ -984,13 +1000,24 @@ export async function readResourceIncomePreview(client: PoolClient, gameId: stri
     if(!item.enabled||item.pricingKind!=="FIXED_UNIT") {if(quantity!==null)unpricedItemIds.push(item.itemId);continue;}
     assertDeltaResourceUnit(item.code,item.unit);
     try {
-      const amounts=computeFixedUnitAmounts({...item,quantity:quantity??"0",...(item.ownerUnitAmount===null?{ownerUnitAmount:undefined}:{})},release.mode,commission);
+      const amounts=computeFixedUnitAmounts({...item,pricingKind:"FIXED_UNIT",quantity:quantity??"0",unitQuantity:item.unitQuantity??undefined,buyerUnitAmount:item.buyerUnitAmount??undefined,ownerUnitAmount:item.ownerUnitAmount??undefined},release.mode,commission);
       const ownerAmount=quantity===null?null:yuanAmountObject(amounts.ownerAmount.value);
       if(ownerAmount){total+=amounts.ownerAmount.value;declared++;}
-      lines.push({itemId:item.itemId,code:item.code,name:item.name,unit:item.unit,unitQuantity:amounts.unitQuantity.value.toString(),ownerUnitAmount:{currency:"CNY",unit:"yuan",amount:formatDecimalExact(amounts.ownerUnit),scale:amounts.ownerUnit.scale},quantity,ownerAmount});
+      lines.push({itemId:item.itemId,code:item.code,name:item.name,unit:item.unit,unitQuantity:amounts.unitQuantity.value.toString(),ownerUnitAmount:{currency:"CNY" as const,unit:"yuan" as const,amount:formatDecimalExact(amounts.ownerUnit),scale:amounts.ownerUnit.scale},quantity,ownerAmount});
     }catch {if(quantity!==null)unpricedItemIds.push(item.itemId);}
   }
-  return {available:true,binding:{gameId,releaseId:release.releaseId,releaseGeneration:release.generation,priceVersionId:release.priceVersionId,catalogRevision:release.catalogRevision},lines,ownerTotal:declared&&unpricedItemIds.length===0?yuanAmountObject(total):null,unreportedItemIds:lines.filter(row=>row.quantity===null).map(row=>row.itemId),unpricedItemIds,informationalOnly:true};
+  return {lines,ownerTotal:declared&&unpricedItemIds.length===0?yuanAmountObject(total):null,unreportedItemIds:lines.filter(row=>row.quantity===null).map(row=>row.itemId),unpricedItemIds};
+}
+
+export async function readResourceIncomePreview(client: PoolClient, gameId: string, inventory: unknown, expected: {catalogRevision: string; releaseId: string}): Promise<Partial<ReturnType<typeof projectResourceIncomePreview>> & {
+  available: boolean; reason?: string; informationalOnly?: boolean;
+  binding?: { gameId: string; releaseId: string; releaseGeneration: string; priceVersionId: string; catalogRevision: string };
+}> {
+  const quantities = parseIncomePreviewInventory(inventory);
+  const context = await readIncomePreviewContext(client, gameId, expected);
+  if (!context.available) return {available:false,reason:context.reason};
+  const {release, items, commission} = context;
+  return {available:true,binding:{gameId,releaseId:release.releaseId,releaseGeneration:release.generation,priceVersionId:release.priceVersionId,catalogRevision:release.catalogRevision},...projectResourceIncomePreview(items,quantities,release,commission),informationalOnly:true};
 }
 
 // Only the formal takeover writer supplies this after checking the immutable source map/observation.
