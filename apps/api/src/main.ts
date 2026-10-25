@@ -1,5 +1,6 @@
 import { createApp } from "./app";
 import { loadJoinpayCollectionRuntime } from "./order/joinpay-collection-runtime";
+import { loadJoinpayRefundRuntime } from "./order/joinpay-refund-runtime";
 import { ConfigurationError, loadConfig } from "./config/config";
 import {
   createFakeHealthDependencies,
@@ -18,6 +19,7 @@ export async function bootstrap() {
     throw new ConfigurationError("AUTH_ENABLED must be true or false");
   }
   const joinpayCollection = loadJoinpayCollectionRuntime({ provider: config.provider, database: config.database, authEnabled: authEnabledValue === "true" });
+  const joinpayRefund = loadJoinpayRefundRuntime({ provider: config.provider, database: config.database, authEnabled: authEnabledValue === "true" });
   const readinessMode = process.env.READINESS_MODE?.trim() || "real";
   if (readinessMode !== "real" && readinessMode !== "fake") {
     throw new ConfigurationError("READINESS_MODE is invalid");
@@ -43,6 +45,7 @@ export async function bootstrap() {
               ...loadAuthRuntimeConfig(undefined, undefined, { testOperationsEnabled: config.testOperationsEnabled }),
               pool: businessPool,
               ...(joinpayCollection ? { joinpayCollection } : {}),
+              ...(joinpayRefund ? { joinpayRefund } : {}),
               directoryReadPool,
               ...(config.database.name===milestoneDistributionReceipt.database?{distributionReadScope:createLocalDistributionReadScope(config,milestoneDistributionReceipt)}:{}),
               ...(config.orderImSdkRouteConfig ? { orderImSdkRouteConfig: config.orderImSdkRouteConfig } : {}),

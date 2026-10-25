@@ -3,9 +3,9 @@ import type { Pool, PoolClient } from "pg";
 import { recordAudit, withTransaction } from "../auth/security-core";
 import { conflict, invalid } from "../supply/supply-util";
 import { consumeNativeRentalRefundTerminal } from "../finance/native-rental-refund-store";
-import { assertRefundResource, createFormalRefundIntent, formalRefundBinding, lockFormalRefundContext, FORMAL_REFUND_COLUMNS,
+import { assertRefundResource, createFormalRefundIntent, createPostedNativeRefundIntent, postedRefundAllocationKey, formalRefundBinding, lockFormalRefundContext, FORMAL_REFUND_COLUMNS,
   type FormalRefundCreateInput, type FormalRefundRow, type NativeRefundState } from "./channel-refund-store";
-import { assertFormalRefundProfile, describeRefundProfile, inspectRefundProfile, produceRefundRequest, readFormalRefundAdmission,
+import { assertFormalRefundProfile, assertRefundStart, describeRefundProfile, inspectRefundProfile, produceRefundRequest, readFormalRefundAdmission,
   readRefundOutbound, readRefundProfileEvidence, refundCompleteTimeToUtc, refundFailureMayRelease, refundWayAccepted, RefundProfileError, type BoundRefundProfile, type RefundBinding, type RefundOperation, type RefundOutbound } from "./joinpay-refund-profile";
 import { captureRefundTerminalFact, refundTerminalConflicts, type RefundSourceOptions } from "./joinpay-refund-source";
 import { preflightJoinpayRefundResponse } from "./joinpay-refund-protocol";
@@ -18,7 +18,7 @@ async function confirmed<T>(pool: Pool, id: string, phase: "CLAIM" | "RESULT", c
   catch (error) { if (done) throw new RefundAttemptCommitUnknown(id, phase); throw error; }
 }
 export const createJoinpayNativeRefund = (pool: Pool, input: FormalRefundCreateInput) => withTransaction(pool, c => createFormalRefundIntent(c, input));
-export type RefundExecution = RefundSourceOptions & { pool: Pool; fetch?: typeof globalThis.fetch };
+export type RefundExecution = RefundSourceOptions & { pool: Pool; fetch?: typeof globalThis.fetch; initialProfile?: BoundRefundProfile };
 type Prepared = { row: FormalRefundRow; binding: RefundBinding; profile: BoundRefundProfile; operation: "SUBMIT" | "QUERY"; attemptId: string; key: string; request: RefundOutbound; owner: string; version: string };
 export type RefundExchange = Readonly<{ body: Uint8Array | null; responseComplete: boolean; receivedBytes: number; httpStatus: number | null;
   failure: "TIMEOUT" | "ABORTED" | "BODY_TOO_LARGE" | "HTTP_STATUS" | "NETWORK_ERROR" | null; evidenceLevel: "SYNTHETIC_PROTOCOL" | "PROVIDER_RESPONSE" }>;
@@ -166,4 +166,49 @@ export async function readNativeRefundRecovery(c: PoolClient, intentId: string) 
   if (!ID.test(intentId)) throw invalid(); const r = (await c.query(`SELECT id,refund_order_no,state,budget_disposition,requires_review,terminal_evidence_id,terminal_root_id,terminal_event_id FROM zzsh_order.channel_refund_intent WHERE id=$1 AND payment_source='JOINPAY'`, [intentId])).rows[0];
   return r ? { intentId: r.id, originalRefundOrderNo: r.refund_order_no, state: r.state, budgetDisposition: r.budget_disposition, requiresReview: r.requires_review,
     evidenceId: r.terminal_evidence_id, rootId: r.terminal_root_id, eventId: r.terminal_event_id, mayResubmit: false } : null;
+}
+
+export class RefundAllocationCommitUnknown extends Error {
+  readonly code = "REFUND_ALLOCATION_UNKNOWN";
+  constructor(readonly postingId: string, readonly idempotencyKey: string) { super("Recover the original posting refund key before any new allocation"); }
+}
+/** 可选首分配；无initialProfile即关闭，旧原号查询/通知不借新申请资格。 */
+export async function allocatePostedJoinpayRefunds(o: RefundExecution, batchLimit: number, signal?: AbortSignal) {
+  const result = { selected: 0, allocated: 0, replayed: 0, skipped: 0 };
+  if (!Number.isSafeInteger(batchLimit) || batchLimit < 1 || batchLimit > 10) throw invalid();
+  if (!o.initialProfile || signal?.aborted) return result;
+  const profile = o.initialProfile, a = assertFormalRefundProfile(o.admission, profile, "SUBMIT");
+  assertRefundStart(o.admission);
+  const scan = await o.pool.connect(); let rows: { posting_id: string }[];
+  try {
+    const identity = (await scan.query("SELECT current_database() AS db,current_user AS actor")).rows[0];
+    if (identity?.db !== a.database || identity?.actor !== a.runtimeUser) throw conflict("Refund allocation resource differs");
+    rows = (await scan.query<{ posting_id: string }>(
+      `SELECT p.id AS posting_id FROM zzsh_order.settlement_posting p
+       JOIN zzsh_order.rental_order o ON o.id=p.order_id
+       JOIN zzsh_order.payment_confirmation c ON c.id=p.payment_confirmation_id AND c.id=o.paid_confirmation_id
+       WHERE c.order_id=o.id AND c.source='JOINPAY' AND c.disposition='APPLIED' AND o.status='COMPLETED'
+         AND c.merchant_scope_id=$1 AND c.currency='CNY' AND p.currency=c.currency AND p.captured_cents=c.amount_cents
+         AND p.renter_refund_cents>0 AND NOT EXISTS(SELECT 1 FROM zzsh_order.channel_refund_intent i WHERE i.posting_id=p.id)
+       ORDER BY p.refund_due_at,p.id LIMIT $2`, [a.merchantIdentityId, batchLimit])).rows;
+  } finally { scan.release(); }
+  if (rows.length > batchLimit || new Set(rows.map(r => r.posting_id)).size !== rows.length
+    || rows.some(row => typeof row.posting_id !== "string" || !ID.test(row.posting_id))) throw conflict("Refund allocation candidates invalid");
+  result.selected = rows.length;
+  for (const row of rows) {
+    if (signal?.aborted) break;
+    const requestId = "auto_refund_" + sha(row.posting_id).slice(0, 40);
+    let completed = false;
+    try {
+      const receipt = await withTransaction(o.pool, async client => {
+        const allocated = await createPostedNativeRefundIntent(client, { postingId: row.posting_id, requestId, admission: o.admission, profile });
+        completed = true; return allocated;
+      });
+      if (receipt.outcome === "ALLOCATED") result.allocated++; else if (receipt.outcome === "REPLAYED") result.replayed++; else result.skipped++;
+    } catch (error) {
+      if (completed) throw new RefundAllocationCommitUnknown(row.posting_id, postedRefundAllocationKey(row.posting_id));
+      throw error;
+    }
+  }
+  return result;
 }

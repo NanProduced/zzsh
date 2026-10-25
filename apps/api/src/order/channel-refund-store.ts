@@ -273,3 +273,31 @@ export async function createFormalRefundIntent(client: PoolClient, input: Formal
     details: { postingId: input.postingId, amountCents: input.amountCents, initialAdmissionSha256: a.sha256, formalRefundComplete: false } });
   return { replayed: false, intentId: row.id, refundOrderNo: row.refund_order_no, state: row.state, budgetDisposition: row.budget_disposition };
 }
+
+export function postedRefundAllocationKey(postingId: string): string {
+  if (!validId(postingId)) throw invalid();
+  return "auto_rental_refund_" + createHash("sha256").update(postingId, "utf8").digest("hex");
+}
+/** 系统仅执行已过账原责任；不重算价格，不接收客户端金额，不重开已失败/其他键的退款。 */
+export async function createPostedNativeRefundIntent(client: PoolClient, input: {
+  postingId: string; requestId: string; admission: FormalRefundAdmission; profile: BoundRefundProfile;
+}) {
+  if (!validId(input.postingId) || !validId(input.requestId)) throw invalid();
+  const a = assertFormalRefundProfile(input.admission, input.profile, "SUBMIT"), p = describeRefundProfile(input.profile, "SUBMIT");
+  assertRefundStart(input.admission); await assertRefundResource(client, input.admission);
+  const basis = await readRefundBasis(client, input.postingId);
+  if (!basis || basis.source !== "JOINPAY" || basis.currency !== "CNY" || basis.merchant_scope_id !== a.merchantIdentityId) {
+    return { outcome: "SKIPPED" as const, reason: "NO_MATCHING_JOINPAY_RESPONSIBILITY" as const };
+  }
+  if (basis.responsibility_cents === "0") return { outcome: "SKIPPED" as const, reason: "NO_REFUND_DUE" as const };
+  wireAmountForCents(basis.responsibility_cents);
+  await lockRefundFunds(client, basis.source, basis.merchant_scope_id, basis.provider_transaction_id);
+  const key = postedRefundAllocationKey(input.postingId);
+  const existing = (await client.query<{ id: string; idempotency_key: string }>(
+    "SELECT id,idempotency_key FROM zzsh_order.channel_refund_intent WHERE posting_id=$1 ORDER BY id", [input.postingId])).rows;
+  if (existing.some(row => row.idempotency_key !== key)) return { outcome: "SKIPPED" as const, reason: "EXISTING_REFUND_INTENT" as const };
+  const receipt = await createFormalRefundIntent(client, { postingId: input.postingId, renterUserId: basis.renter_user_id,
+    amountCents: basis.responsibility_cents, idempotencyKey: key, requestId: input.requestId,
+    admission: input.admission, profile: input.profile, notifyUrl: p.notifyUrl });
+  return { outcome: receipt.replayed ? "REPLAYED" as const : "ALLOCATED" as const, receipt };
+}

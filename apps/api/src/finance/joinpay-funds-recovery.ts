@@ -1,7 +1,7 @@
 import { Injectable, type BeforeApplicationShutdown, type OnApplicationBootstrap } from "@nestjs/common";
 import type { Pool } from "pg";
-import { executeJoinpayRefund, RefundAttemptCommitUnknown, JOINPAY_REFUND_MAX_AUTOMATIC_QUERIES, type RefundExecution } from "../order/joinpay-refund-attempt";
-import { readFormalRefundAdmission } from "../order/joinpay-refund-profile";
+import { executeJoinpayRefund, allocatePostedJoinpayRefunds, RefundAllocationCommitUnknown, RefundAttemptCommitUnknown, JOINPAY_REFUND_MAX_AUTOMATIC_QUERIES, type RefundExecution } from "../order/joinpay-refund-attempt";
+import { readFormalRefundAdmission, assertFormalRefundProfile, assertRefundStart } from "../order/joinpay-refund-profile";
 import { executeJoinpayPayout, PayoutCommitUnknown, JOINPAY_PAYOUT_MAX_AUTOMATIC_QUERIES, type PayoutExecution } from "./joinpay-payout-attempt";
 import { readPayoutScope } from "./joinpay-payout-profile";
 
@@ -20,7 +20,9 @@ function settings<T extends JoinpayFundsRecoverySettings>(value: T): T {
   }
   return { ...value };
 }
-function refundOptions(value: RefundOptions) { const copy = settings(value); readFormalRefundAdmission(copy.execution?.admission); return { ...copy, execution: { ...copy.execution } }; }
+function refundOptions(value: RefundOptions) { const copy = settings(value); readFormalRefundAdmission(copy.execution?.admission);
+  if (copy.execution.initialProfile) { assertFormalRefundProfile(copy.execution.admission, copy.execution.initialProfile, "SUBMIT"); assertRefundStart(copy.execution.admission); }
+  return { ...copy, execution: { ...copy.execution } }; }
 function payoutOptions(value: PayoutOptions) { const copy = settings(value); readPayoutScope(copy.execution?.scope); return { ...copy, execution: { ...copy.execution } }; }
 async function scan(pool: Pool, resource: { database: string; runtimeUser: string }, sql: string, values: unknown[],
   states: readonly string[], limit: number, kind: "REFUND" | "PAYOUT", signal?: AbortSignal) {
@@ -42,20 +44,23 @@ async function scan(pool: Pool, resource: { database: string; runtimeUser: strin
 /** 只扫描既有正式原单；扫描连接释放后逐单复用执行器，执行器在原行锁内再核间隔和预算。 */
 export async function recoverJoinpayRefundBatch(input: RefundOptions, signal?: AbortSignal) {
   const o = refundOptions(input), a = readFormalRefundAdmission(o.execution.admission);
+  const allocation = o.execution.initialProfile ? await allocatePostedJoinpayRefunds(o.execution, o.batchLimit, signal) : undefined;
   const accepted = [{ reference: a.reference, sha256: a.sha256 }, ...a.historicalInitialAdmissions];
+  const canSubmit = a.acceptedProfiles.some(profile => profile.operation === "SUBMIT");
   const rows = await scan(o.execution.pool, a, `SELECT i.id,i.state FROM zzsh_order.channel_refund_intent i
     WHERE i.payment_source='JOINPAY' AND i.evidence_level='JOINPAY_FORMAL' AND i.merchant_identity_id=$1 AND i.wire_merchant_no=$2
       AND i.budget_disposition='ALLOCATED' AND i.state=ANY($4::text[]) AND i.due_at<=clock_timestamp()
       AND EXISTS(SELECT 1 FROM jsonb_to_recordset($3::jsonb) AS accepted(reference text,sha256 text)
         WHERE accepted.reference=i.initial_admission_ref AND accepted.sha256=i.initial_admission_sha256)
       AND (i.state<>'READY' OR i.lease_version>0 OR NOT i.requires_review)
+      AND (i.lease_version>0 OR $8::boolean)
       AND (i.lease_until IS NULL OR i.lease_until<=clock_timestamp())
       AND (SELECT count(*) FROM zzsh_order.joinpay_refund_attempt counted WHERE counted.intent_id=i.id AND counted.operation='QUERY')<$7::integer
       AND NOT EXISTS(SELECT 1 FROM zzsh_order.joinpay_refund_attempt recent WHERE recent.intent_id=i.id
         AND recent.created_at>clock_timestamp()-make_interval(secs=>$5::integer))
     ORDER BY i.due_at,i.id LIMIT $6`, [a.merchantIdentityId, a.merchantNo, JSON.stringify(accepted), REFUND_STATES,
-    o.minimumIntervalSeconds, o.batchLimit, JOINPAY_REFUND_MAX_AUTOMATIC_QUERIES], REFUND_STATES, o.batchLimit, "REFUND", signal);
-  const result = { selected: rows.length, recorded: 0, skipped: 0 };
+    o.minimumIntervalSeconds, o.batchLimit, JOINPAY_REFUND_MAX_AUTOMATIC_QUERIES, canSubmit], REFUND_STATES, o.batchLimit, "REFUND", signal);
+  const result = { selected: rows.length, recorded: 0, skipped: 0, ...(allocation ? { allocation } : {}) };
   for (const row of rows) {
     if (signal?.aborted) break;
     const observed = await executeJoinpayRefund(o.execution, row.id, o.workerId, o.minimumIntervalSeconds);
@@ -90,14 +95,16 @@ export async function recoverJoinpayPayoutBatch(input: PayoutOptions, signal?: A
 
 function start(run: (signal: AbortSignal) => Promise<unknown>, interval: number) {
   const controller = new AbortController(); let timer: ReturnType<typeof setTimeout> | undefined, active: Promise<void> | undefined;
-  let failure: { code: string; intentId?: string; phase?: "CLAIM" | "RESULT" } | null = null;
+  let failure: { code: string; intentId?: string; postingId?: string; idempotencyKey?: string; phase?: "CLAIM" | "RESULT" | "ALLOCATION" } | null = null;
   const tick = () => {
     if (controller.signal.aborted) return;
     active = run(controller.signal).then(() => {
       if (!controller.signal.aborted) { timer = setTimeout(tick, interval * 1000); timer.unref(); }
     }, error => {
-      failure = error instanceof RefundAttemptCommitUnknown || error instanceof PayoutCommitUnknown
-        ? { code: error.code, intentId: error.intentId, phase: error.phase } : { code: "FUNDS_RECOVERY_FAILED" };
+      failure = error instanceof RefundAllocationCommitUnknown
+        ? { code: error.code, postingId: error.postingId, idempotencyKey: error.idempotencyKey, phase: "ALLOCATION" }
+        : error instanceof RefundAttemptCommitUnknown || error instanceof PayoutCommitUnknown
+          ? { code: error.code, intentId: error.intentId, phase: error.phase } : { code: "FUNDS_RECOVERY_FAILED" };
       controller.abort();
     });
   };

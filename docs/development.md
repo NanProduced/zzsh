@@ -88,9 +88,13 @@ Admin 免账号 mock 预览已移除。真实初始化使用独立测试账号�
 
 确实退役SUBMIT、只保留QUERY/NOTIFY时，旧单须在 `acceptedInitialAdmissions` 显式保留原准入引用/摘要；通知映射可引用退役的初始key版本，但不读取旧下单钥，仍只选一份明确通知profile。后台从受信准入操作集合确定首派资格，QUERY/NOTIFY型在扫描和原执行器两处禁止首次SUBMIT，继续查已尝试原号及接纳已验观察。历史证据按原profileId/摘要/keyVersionRef三元复验，不轮试或猜钥；历史QUERY/NOTIFY自身三元所需的profile和旧钥仍须保留，不能一并当作退役下单钥删除。key引用限 `JOINPAY_COLLECTION_KEY_` 前缀，实际值或 `_FILE` 惰性读取，按版本在进程内缓存；A2不能进入正式收款装配。普通GET只读本地，不读取支付钥或调用商户。
 
-collection `recovery` 显式配置workerId、每批1–10、最小间隔30–86400秒；缺省不启动。退款/提现恢复分别由受信服务端 `AuthRuntimeOptions.joinpayRefund.recovery`、`joinpayWithdrawal.recovery` 配置，普通main不会从环境自动生成这两类资金装配。提现还须真实executor、通知和routes使用同一scope；不能用客户端参数或单独flag替代。未配置保持关闭，不创建或批准新意图。
+collection `recovery` 显式配置workerId、每批1–10、最小间隔30–86400秒；缺省不启动。退款可由下述显式运行配置装配；提现仍仅由受信服务端 `AuthRuntimeOptions.joinpayWithdrawal.recovery` 配置，普通main不从环境生成提现资格。提现还须真实executor、通知和routes使用同一scope；不能用客户端参数或单独flag替代。未配置保持关闭，不创建或批准新意图。
 
 恢复任务在Nest启动后才派发，先释放扫描连接，再顺序调用原单执行器；自动QUERY在原行锁内按PG时间重核间隔，持久化计数最多10次，不靠重启清零。关闭先停止下一轮、排空在途，再结束原池；不承诺固定排空时长。提交未知保留原单/阶段并停止对应域，预算耗尽不标失败、不换号重发、不释放或核销。实际Schema/窄权、资源与商户资格、官方协议/KAT及资金链须独立验收，源码/合成测试不是到账证明。
+
+退款 `JOINPAY_REFUND_ENABLED` 缺省/false时不额外读取退款配置或钥，不注册该装配；启用仍须原真实provider、认证及准确runtime身份，在建池前校验。配置经原 `readSecret` 从 `JOINPAY_REFUND_CONFIG`/`JOINPAY_REFUND_CONFIG_FILE` 读取，JSON最多256KiB、文件限相对工作目录的 `.secrets`，不新增 `.env` 加载。结构见 `JoinpayRefundRuntimeDocument`：最多32份按操作＋profileId索引的受审profile、准入引用、当前QUERY、原初始key到单一NOTIFY的明确映射、`JOINPAY_REFUND_KEY_` 变量引用及可选recovery；私钥惰性读取并按退款领域独立缓存。原证据按profileId/摘要/keyVersionRef三元复验，所需历史QUERY/NOTIFY profile和钥继续保留，不轮试或猜钥。收款与退款可明确引用同一商户私钥文件，变量前缀隔离不要求供应商另发密钥；A2不获正式能力。
+
+`newRefundsEnabled=true` 必须有初始SUBMIT、完整三操作准入及显式recovery。仅对原JOINPAY/APPLIED款项和已冻结posting创建原租客全额应退意图，原key由posting稳定派生；复用原付款预算锁、金额/期限复核、幂等与审计，不重算七天截止，不接收客户端金额，不重开其他key或已失败责任。分配提交未知保留posting和原key并停止该域，不伪造intentId或继续外呼。关闭新分配不撤销已持久化旧授权；真正仅QUERY/NOTIFY准入在扫描与原执行器两处禁止首次SUBMIT，仍可查原号。此源码接线不启用受控结算或商户能力，暂停/恢复、正式结算及真实退款到账另验；旧单、保证金和过账后新增责任不在本路径。
 
 ## 供给发布验证
 

@@ -51,6 +51,13 @@ test("两个域均先核准确数据库/runtime身份；不符不扫描且释放
   assert.equal(f.trace.length, 2); assert.equal(f.releases(), 2);
 });
 
+test("退款query-only准入的扫描首派门禁关闭，完整准入保持既有READY派发资格", async t => {
+  const f = fixture(t); await recoverJoinpayRefundBatch(f.refund);
+  assert.equal(f.trace[1]!.values!.at(-1), false); assert.match(f.trace[1]!.sql, /i\.lease_version>0 OR \$8::boolean/);
+  f.view.acceptedProfiles.push({ operation: "SUBMIT" } as never); await recoverJoinpayRefundBatch(f.refund);
+  assert.equal(f.trace[3]!.values!.at(-1), true);
+});
+
 test("只消费原退款/提现意图，按商户及已接受历史绑定扫描；外呼前释放扫描连接", async t => {
   const f = fixture(t, [{ id: "unit_one", state: "UNKNOWN" }, { id: "unit_two", state: "PROCESSING" }]);
   const calls: string[] = [];
@@ -66,7 +73,7 @@ test("只消费原退款/提现意图，按商户及已接受历史绑定扫描�
   const refundScan = f.trace[1]!, payoutScan = f.trace[3]!;
   assert.deepEqual(refundScan.values!.slice(0, 2), [f.view.merchantIdentityId, f.view.merchantNo]);
   assert.deepEqual(JSON.parse(refundScan.values![2] as string), [{ reference: f.view.reference, sha256: f.view.sha256 }, ...f.view.historicalInitialAdmissions]);
-  assert.equal(refundScan.values!.at(-1), refunds.JOINPAY_REFUND_MAX_AUTOMATIC_QUERIES);
+  assert.equal(refundScan.values![6], refunds.JOINPAY_REFUND_MAX_AUTOMATIC_QUERIES); assert.equal(refundScan.values!.at(-1), false);
   assert.deepEqual(payoutScan.values!.slice(0, 3), [f.view.merchantIdentityId, f.view.userNo, null]);
   assert.deepEqual(JSON.parse(payoutScan.values![3] as string), [{ reference: f.view.reference, sha256: f.view.sha256 }, ...f.view.historicalScopes]);
   assert.equal(payoutScan.values!.at(-1), payouts.JOINPAY_PAYOUT_MAX_AUTOMATIC_QUERIES);
