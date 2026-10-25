@@ -31,7 +31,7 @@ operations.set("supply.media.upload", { table: "media_upload_intent", permission
 // 这不是放开新审核能力，权限、对象范围与游戏范围仍按原写复核。
 for (const operation of ["review", "visibility"]) operations.set(`supply.media.${operation}`, { table: "media_asset", permission: ADMIN_PERMISSION.supplyReviewDecide, scopeIsTarget: true });
 
-const safeFields = ["id", "intentId", "assetId", "gameId", "releaseId", "revision", "generation", "status", "technicalState", "reviewState", "accessClass", "visibility", "expiresAt", "noop", "enabled"];
+const safeFields = ["id", "intentId", "assetId", "gameId", "releaseId", "revision", "catalogRevision", "generation", "status", "technicalState", "reviewState", "accessClass", "visibility", "expiresAt", "noop", "enabled"];
 const id = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value);
 
 export async function readUserSupplyOperationResult(client: PoolClient, userId: string, query: URLSearchParams, keyHeader: string | undefined) {

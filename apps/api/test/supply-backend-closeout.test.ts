@@ -137,6 +137,40 @@ test("original-result recovery returns bounded receipt data and omits tokens, ev
   assert.deepEqual(await readAdminSupplyOperationResult(f.client,"admin-1",access,query(),key),{receipt:"RECORDED",operation:"supply.rules.full_payout_terms_draft.create",resourceId:null,responseStatus:200,result:{id:"payout-1",status:"DRAFT"}});
 });
 
+test("catalog operation recovery returns the original persisted catalogRevision without private fields", async () => {
+  const operation = "supply.catalog.skins.update", resourceId = "skin-1";
+  const f = scopedRecoveryClient({ id: resourceId, gameId: "game-1", catalogRevision: "1828", sourceSnapshot: { token: "SYNTHETIC_PRIVATE_SOURCE" }, uploadToken: "SYNTHETIC_PRIVATE_UPLOAD", responseBody: { password: "SYNTHETIC_PRIVATE_BODY" } }, resourceId);
+  const result = await readAdminSupplyOperationResult(f.client, "admin-1", access, query(operation, resourceId), key);
+  assert.deepEqual(result, { receipt: "RECORDED", operation, resourceId, responseStatus: 200, result: { id: resourceId, gameId: "game-1", catalogRevision: "1828" } });
+  assert.deepEqual(f.scopes, [JSON.stringify(["admin", "admin-1", operation, resourceId])]);
+  assert.equal(JSON.stringify(result).includes("SYNTHETIC_PRIVATE_"), false);
+});
+
+test("legacy catalog receipts keep an absent catalogRevision absent and reject non-scalar receipt data", async () => {
+  for (const extra of [{}, { catalogRevision: { token: "SYNTHETIC_PRIVATE_REVISION" } }, { catalogRevision: "x".repeat(161) }]) {
+    const f = scopedRecoveryClient({ id: "skin-1", ...extra }, "skin-1");
+    const result = await readAdminSupplyOperationResult(f.client, "admin-1", access, query("supply.catalog.skins.update", "skin-1"), key);
+    assert.equal(result.receipt, "RECORDED");
+    assert.equal(Object.hasOwn(result.result!, "catalogRevision"), false);
+    assert.deepEqual(result.result, { id: "skin-1" });
+  }
+});
+
+test("catalog revision recovery retains permission, actor, resource and fingerprint isolation", async () => {
+  const operation = "supply.catalog.skins.update", body = { id: "skin-1", catalogRevision: "1828" };
+  const denied = scopedRecoveryClient(body, "skin-1");
+  await assert.rejects(() => readAdminSupplyOperationResult(denied.client, "admin-1", { ...access, isBoss: false, permissions: new Set() }, query(operation, "skin-1"), key), (error: any) => error.status === 403);
+  assert.equal(denied.scopes.length, 0);
+  const otherActor = recoveryClient(body, "other-admin");
+  assert.deepEqual(await readAdminSupplyOperationResult(otherActor.client, "admin-1", access, query(operation, "skin-1"), key), { receipt: "UNRESOLVED" });
+  assert.equal(otherActor.sql.length, 1);
+  const otherResource = scopedRecoveryClient(body, "skin-1");
+  assert.deepEqual(await readAdminSupplyOperationResult(otherResource.client, "admin-1", access, query(operation, "skin-2"), key), { receipt: "UNRESOLVED" });
+  const mismatch = recoveryClient(body, "admin-1", "PLATFORM_CATALOG", "0".repeat(64));
+  await assert.rejects(() => readAdminSupplyOperationResult(mismatch.client, "admin-1", access, query(operation, "skin-1"), key), (error: any) => error.code === "IDEMPOTENCY_KEY_REUSED");
+  assert.equal(mismatch.sql.length, 1);
+});
+
 test("game recovery returns its stable identity without copying nested configuration",async()=>{
   for (const [operation,resourceId] of [["supply.game.create",undefined],["supply.game.update","game-1"]] as const) {
     const f=recoveryClient({game:{id:"game-1",name:"Private configuration",description:"Not a receipt field",enabled:true}});
