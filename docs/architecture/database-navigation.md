@@ -4,9 +4,9 @@
 
 ## 迁移基线与结构事实
 
-业务迁移位于 `apps/api/migrations/business/`，源码共 **101 份 SQL**，`meta/_journal.json` **101 条**登记（idx 0…100，tag 与文件名一一对应）。源码登记不表示数据库已经执行；实际链与权限须分别核验。另有一条独立正式迁移线 `apps/api/migrations/0000_fnd004_test_metadata.sql`（`zzsh_meta.database_marker`，journal 1 条）。两条线分别由 `apps/api/src/database/migrations.ts` 与 `business-migrations.ts` 执行，记账 schema 分别为 `zzsh_meta` 与 `zzsh_business_meta`（后者不在任何 SQL 中 CREATE，由 migrator 自建）。
+业务迁移位于 `apps/api/migrations/business/`，源码共 **102 份 SQL**，`meta/_journal.json` **102 条**登记（idx 0…101，tag 与文件名一一对应）。源码登记不表示数据库已经执行；实际链与权限须分别核验。另有一条独立正式迁移线 `apps/api/migrations/0000_fnd004_test_metadata.sql`（`zzsh_meta.database_marker`，journal 1 条）。两条线分别由 `apps/api/src/database/migrations.ts` 与 `business-migrations.ts` 执行，记账 schema 分别为 `zzsh_meta` 与 `zzsh_business_meta`（后者不在任何 SQL 中 CREATE，由 migrator 自建）。
 
-下列计数仅为 0000–0090 的历史静态扫描基线，不含 0091–0100，**不是真实 PostgreSQL 目录核验**：`CREATE TABLE` 146 条（全部当前存在，含 5 张 `LIKE … INCLUDING ALL` 克隆表，全部在 `zzsh_auth_admin`）、`CREATE SEQUENCE` 3 条、函数定义事件 222 次对应 **182 个输入类型签名身份**（76 次 `CREATE OR REPLACE`，0 个同名重载）、触发器创建事件 256 次（211 条 `CREATE TRIGGER` + 45 条 `CREATE CONSTRAINT TRIGGER`）对应 **233 个（目标表+名称）身份**（当前存在 232、已删除 1），`DROP TRIGGER` 49 条、`DROP COLUMN` 2 条、`CREATE INDEX` 128 条（36 UNIQUE + 92 非唯一）对应 **126 个不同索引身份**（当前存在 123、已删除 3、删除后重建 3；其中 39 个 partial、2 个表达式索引）、隐式索引身份 277（当前存在 275）、约束身份 1348（当前存在 1332）。无 `DROP TABLE`/`DROP FUNCTION`、无 `RENAME`、无 `CREATE VIEW`、无 `CREATE POLICY`、无 `ROW LEVEL SECURITY`、无 `COMMENT ON`。
+下列计数仅为 0000–0090 的历史静态扫描基线，不含 0091–0101，**不是真实 PostgreSQL 目录核验**：`CREATE TABLE` 146 条（全部当前存在，含 5 张 `LIKE … INCLUDING ALL` 克隆表，全部在 `zzsh_auth_admin`）、`CREATE SEQUENCE` 3 条、函数定义事件 222 次对应 **182 个输入类型签名身份**（76 次 `CREATE OR REPLACE`，0 个同名重载）、触发器创建事件 256 次（211 条 `CREATE TRIGGER` + 45 条 `CREATE CONSTRAINT TRIGGER`）对应 **233 个（目标表+名称）身份**（当前存在 232、已删除 1），`DROP TRIGGER` 49 条、`DROP COLUMN` 2 条、`CREATE INDEX` 128 条（36 UNIQUE + 92 非唯一）对应 **126 个不同索引身份**（当前存在 123、已删除 3、删除后重建 3；其中 39 个 partial、2 个表达式索引）、隐式索引身份 277（当前存在 275）、约束身份 1348（当前存在 1332）。无 `DROP TABLE`/`DROP FUNCTION`、无 `RENAME`、无 `CREATE VIEW`、无 `CREATE POLICY`、无 `ROW LEVEL SECURITY`、无 `COMMENT ON`。
 
 > 计数用于导航，不替代逐对象清单。创建/修改/删除/重建事件、源文件行号和跨 schema 依赖由按需生成的静态结构索引给出；该索引是只读派生资料，不进入迁移链，也不随正式文档发布。
 
@@ -40,6 +40,7 @@
 | 0098 | 原生租赁退款意图、观察及证据，5 个新关系 |
 | 0099 | 原生提现意图、尝试、观察及证据，依赖0098父守卫，4 个新关系 |
 | 0100 | 商户账户只读观察，1 个新关系 |
+| 0101 | 本人银行卡加密资料及版本守卫，1 个新关系 |
 
 ### 按 schema 查对象（0000–0090 历史静态基线）
 
@@ -58,6 +59,8 @@
 按对象查源头的顺序：先按 `schema.table` 找到 `CREATE TABLE` 所在迁移，再沿该对象的后续 `ALTER TABLE`/`DROP`/重建事件读；函数按输入类型签名、触发器按目标表+名称、索引按 schema+名称区分。创建位置只是定义出现处，不是当前完整定义。
 
 0097–0100的fresh-install前检要求本组新关系均不存在，并核对被替换父函数的准确签名及正文；已有支付fixture不能直接重装。运行角色窄权统一由 `configureJoinpayFinancialPrivileges` 在既有独立ACL事务中收敛，迁移SQL不使用测试角色GUC授予权限。Schema提交与ACL提交/未知分别报告；本源码登记不授权安装、服务切换或渠道启用。
+
+`0101` 保存银行卡密文、脱敏摘要与版本；前检拒绝已有同名表/守卫并要求用户父表存在。已有对象须另核采用，不能直接重装或补记迁移账；runtime由上述helper授8列SELECT、6列INSERT、4列UPDATE。
 
 ## 权限与不可变性模型
 
@@ -98,7 +101,7 @@ DDL 与 ACL 是两个事务：`runBusinessMigrations` 先迁移，再单独开 A
 | 身份 | `zzsh_auth_user.user`(0000)、`zzsh_iam.user_identity_state`(0010)、`zzsh_auth_admin.user`(0000, LIKE 克隆)、`zzsh_iam.admin_role`/`admin_permission`/`admin_user_role`/`admin_user_permission`(0008)、`zzsh_iam.approval_request`(0009)、`zzsh_iam.audit_event`(0000) | `apps/api/src/auth/*` | 审计表 REVOKE UPDATE/DELETE/TRUNCATE + 追加型语义；启动身份断言否定 CREATE（6 探针） | IO-ID-01/02、IO-ID-04/05 |
 | 目录与发布 | `zzsh_supply.game`(0015)、`game_service_operation`(0026)、`billable_item`(0015)、`skin`(0015)、`skin_category`(0015)、`skin_rarity`(0015)、`skin_owner`(0055)、`firearm`(0026)、`entitlement`(0015)、`rental_account`(0015)、`listing_version`(0018)、`listing_publication`(0052)、`rule_release`(0015)、`rule_acceptance`(0015)、`price_version`/`price_line`(0015)、`term_version`/`term_option`(0015)、`agreement_version`(0015)、`full_payout_terms_version`(0071)、`media_asset`(0015)、`listing_filter_config`(0042) | `apps/api/src/supply/catalog.ts`、`publishing.ts`、`publishing-routes.ts`、`rules.ts`、`media.ts`、`gunsmith.ts`、`listing-filter-routes.ts` | `zzsh_supply` schema USAGE + 列级 GRANT；`assertGameScope`/`ADMIN_PERMISSION` | SUP-CATALOG-013、SUP-QTY-004/005、SUP-QTY-006、SUP-SKIN-019/020、SUP-SOURCE-001/002、SUP-VIS-014、SUP-NUM-015 v2、SUP-MODE-009/PRICE-011/TERM-012、SUP-MEDIA-017 |
 | 订单 | `zzsh_order.rental_order`(0030)、`payment_confirmation`(0036)、`rental_opening`(0046)、`settlement_version`(0046)、`settlement_intake`(0047)、`settlement_posting`(0048)、`settlement_ledger_entry`(0048)、`legacy_order_read_snapshot`(0057) | `apps/api/src/order/*` | `zzsh_order` schema USAGE + 结算不可变触发器 + 无 DELETE 权限 | IO-ORD-01…08 |
-| 资金和观察 | `zzsh_order.finance_opening_basis`/`finance_covered_event`/`finance_economic_root`/`finance_event`/`finance_observation_admission`(0058)、`wallet_coverage`/`wallet_revision`(0058)、`personal_finance_observation`(0058)、`personal_finance_observation_coverage`(0075)、`withdrawal_intent`(0059) | `apps/api/src/finance/*` | 列级 GRANT（无 DELETE/TRUNCATE）；`finance_immutable` 触发器 | GF-HISTORY-008、GF-OPENING-009、GF-COVERAGE-006、GF-WITHDRAW-010 |
+| 资金和观察 | `zzsh_order.finance_opening_basis`/`finance_covered_event`/`finance_economic_root`/`finance_event`/`finance_observation_admission`(0058)、`wallet_coverage`/`wallet_revision`(0058)、`personal_finance_observation`(0058)、`personal_finance_observation_coverage`(0075)、`withdrawal_intent`(0059)、`withdrawal_bank_binding`(0101) | `apps/api/src/finance/*` | 列级 GRANT（无 DELETE/TRUNCATE）；`finance_immutable` 触发器 | GF-HISTORY-008、GF-OPENING-009、GF-COVERAGE-006、GF-WITHDRAW-010 |
 | 成长信用 | `zzsh_credit.user_credit_state`/`credit_event`/`credit_recovery_request`(0067)、`zzsh_iam.membership_growth_policy`/`contribution`/`state`/`membership_entitlement`(0068)、`membership_growth_legacy_coverage`(0080)、`user_rental_membership`(0040) | `apps/api/src/credit/*`、`membership-*` | `zzsh_credit` 单独分支（USAGE + REVOKE CREATE + 列级 GRANT）；函数 `REVOKE ALL … FROM PUBLIC` + 单函数 `GRANT EXECUTE` | GF-CREDIT-007、GF-GROWTH-003、GF-MEMBER-002 |
 | 内容 | `zzsh_content.content_item`/`content_version`/`carousel_item`(0024) | `apps/api/src/content/*` | `zzsh_content` schema USAGE + `GRANT SELECT, INSERT, UPDATE` / `REVOKE DELETE, TRUNCATE` + `ALTER DEFAULT PRIVILEGES` | CONTENT-HISTORY-020（承接用途未裁定，见下） |
 
