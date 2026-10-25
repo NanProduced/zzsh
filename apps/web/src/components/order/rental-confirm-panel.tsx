@@ -423,12 +423,11 @@ export function RentalConfirmPanel({ accountId, gameId, versionId, releaseId, re
       return <div className="rental-confirm rental-confirm--quote">
         <div className="rental-confirm-head"><strong>订单已创建</strong><span className="rental-confirm-tier">{orderId}</span></div>
         {stage.kind === "created" ? <p className="rental-confirm-total-line">预计合计 {formatMoneyLabel(stage.quote.quote?.tenantPayableTotal ?? null) ?? "以服务端确认为准"}</p> : null}
-        <p className="detail-stage-note">本地受控支付只生成本地收款依据，不代表真实渠道到账；付款不等于交付或开租。</p>
+        <p className="detail-stage-note">请在订单中选择当前可用的支付方式。下方本地受控测试只生成本地收款依据，不代表真实渠道到账；付款不等于交付或开租。</p>
         <div className="rental-confirm-actions">
-          <div className="rental-confirm-primary-action">{dockPrice}<button type="button" className="button rental-confirm-primary" onClick={() => void pay(orderId)} disabled={stage.kind === "paying"}>
+          <div className="rental-confirm-primary-action">{dockPrice}<Link className="button rental-confirm-primary" href={orderHref(orderId)}>前往订单支付</Link><button type="button" className="button secondary button--sm" onClick={() => void pay(orderId)} disabled={stage.kind === "paying"}>
             {stage.kind === "paying" ? "提交支付请求…" : "提交本地受控支付"}
           </button></div>
-          <Link className="button quiet button--sm" href={orderHref(orderId)}>稍后支付，查看订单</Link>
         </div>
       </div>;
     }

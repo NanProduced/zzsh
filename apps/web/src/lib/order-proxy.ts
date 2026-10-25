@@ -14,8 +14,8 @@ const apiOrigin =
 const webOrigin =
   process.env.ZZSH_WEB_ORIGIN ?? (local ? "http://127.0.0.1:3100" : "");
 const id = "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}";
-const getPath = new RegExp(`^/(?:legacy(?:/${id}(?:/continuation(?:/receipt)?)?)?|${id}(?:/(?:im|settlement|payment-requests))?)?$`);
-const postPath = new RegExp(`^/(?:legacy/${id}/continuation/(?:preview|propose|confirm|reject)|${id}/(?:cancel|payment-requests|settlement-preview|settlements(?:/${id}/decision)?|openings/${id}/confirm))?$`);
+const getPath = new RegExp(`^/(?:legacy(?:/${id}(?:/continuation(?:/receipt)?)?)?|${id}(?:/(?:im|settlement|payment-requests|channel-payment-requests))?)?$`);
+const postPath = new RegExp(`^/(?:legacy/${id}/continuation/(?:preview|propose|confirm|reject)|${id}/(?:cancel|payment-requests|channel-payment-requests|settlement-preview|settlements(?:/${id}/decision)?|openings/${id}/confirm))?$`);
 const error = (status: number, code: string, requestId: string) =>
   Response.json(
     { error: { code, message: "订单请求未完成", requestId } },
@@ -50,6 +50,10 @@ export async function forwardOrderRequest(
     (method !== "GET" && request.headers.get("origin") !== webOrigin)
   )
     return error(403, "FORBIDDEN", requestId);
+  const channelPayment = resource === "orders" && path.endsWith("/channel-payment-requests");
+  const expectedUserId = request.headers.get("x-zzsh-expected-user-id");
+  if (channelPayment && (!expectedUserId || !new RegExp(`^${id}$`).test(expectedUserId)))
+    return error(400, "INVALID_ARGUMENT", requestId);
   const headers = new Headers({ origin: webOrigin, "x-request-id": requestId }),
     cookies = userCookies(request.headers.get("cookie"));
   if (cookies) headers.set("cookie", cookies);
@@ -74,6 +78,16 @@ export async function forwardOrderRequest(
   }
   let upstream: Response;
   try {
+    if (channelPayment) {
+      const authHeaders = new Headers({ origin: webOrigin, "x-request-id": requestId });
+      if (cookies) authHeaders.set("cookie", cookies);
+      // 同一份捕获Cookie核身份，旧标签页不能借新账号会话提交或读取渠道请求。
+      const auth = await fetch(new URL("/api/auth/user/get-session", apiOrigin), { method: "GET", headers: authHeaders, cache: "no-store", redirect: "error", signal: deadline });
+      if (!auth.ok) return error(auth.status >= 400 && auth.status < 500 ? auth.status : 503, auth.status === 403 ? "FORBIDDEN" : auth.status >= 400 && auth.status < 500 ? "UNAUTHENTICATED" : "INTERNAL_ERROR", requestId);
+      const session = JSON.parse(new TextDecoder().decode(await readBoundedBody(auth, 64 * 1024, deadline)));
+      if (!session?.user || typeof session.user.id !== "string") return error(401, "UNAUTHENTICATED", requestId);
+      if (session.user.id !== expectedUserId) return error(401, "IDENTITY_CHANGED", requestId);
+    }
     upstream = await fetch(
       new URL(
         "/api/bff/user/" + resource + (resource === "orders" ? path : "") + new URL(request.url).search,

@@ -226,6 +226,13 @@
 .order-trade-facts { margin: 0; }
 .order-trade-facts dd { font-variant-numeric: tabular-nums; }
 .order-trade-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; }
+.order-channel-payment { display: grid; gap: 10px; width: 100%; min-width: 0; }
+.order-channel-payment > p { margin: 0; }
+.order-channel-payment label { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; color: var(--color-text-secondary); }
+.order-channel-payment select { min-height: 40px; max-width: 100%; padding: 7px 10px; border: 1px solid var(--color-border-default); border-radius: 7px; color: var(--color-text-primary); background: var(--color-bg-card); font: inherit; }
+.order-channel-code { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 0; }
+.order-channel-code svg { display: block; flex: none; max-width: 100%; height: auto; }
+.order-channel-code figcaption { flex: 1 1 180px; max-width: 32ch; }
 .order-trade-confirm, .order-trade-reject { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 7px; color: var(--color-text-secondary); font-size: 12px; }
 .order-trade-reject input { min-height: 38px; min-width: 220px; padding: 7px 9px; border: 1px solid var(--color-border-default); border-radius: 7px; color: var(--color-text-primary); background: var(--color-bg-card); font-size: 12px; }
 .order-trade-preview { display: grid; gap: 10px; }

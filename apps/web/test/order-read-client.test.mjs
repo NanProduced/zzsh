@@ -91,3 +91,36 @@ test("order pagination retains equal ids from different internal sources", () =>
  assert.equal(mergeOrderItems([current],[old]).length,2);
  assert.equal(mergeOrderItems([current,old],[{...old,title:"updated"}]).length,2);
 });
+
+test("channel payment client reads the separate contract and preserves absent payment/action/amount",async()=>{
+ const before=globalThis.fetch;let seen;
+ const view={contractVersion:"order-payment-request.v1",dataOrigin:"JOINPAY_CANDIDATE",request:{id:"request_1",state:"UNKNOWN",amount:null},paymentAction:null,payment:null};
+ globalThis.fetch=async(url,init)=>{seen={url:String(url),init};return Response.json(view);};
+ try{
+  assert.deepEqual(await orderApi.channelPaymentStatus("user_a","order/private"),view);
+  assert.equal(seen.url,"/api/orders/order%2Fprivate/channel-payment-requests");assert.equal(seen.init.cache,"no-store");assert.equal(seen.init.credentials,"same-origin");
+ }finally{globalThis.fetch=before;}
+});
+
+test("channel POST sends only the selected Native method and original key, without replacing the controlled entry",async()=>{
+ const before=globalThis.fetch;const seen=[];
+ const receipt={contractVersion:"order-payment-request.v1",replay:true,request:{id:"request_1",state:"UNKNOWN"},paymentAction:null,payment:null};
+ globalThis.fetch=async(url,init)=>{seen.push({url:String(url),init});return Response.json(receipt,{status:202});};
+ try{
+  assert.deepEqual(await orderApi.requestChannelPayment("user_a","order_1","WEIXIN_NATIVE","frozen-channel-key"),receipt);
+  assert.equal(seen[0].url,"/api/orders/order_1/channel-payment-requests");assert.equal(seen[0].init.method,"POST");
+  assert.equal(new Headers(seen[0].init.headers).get("idempotency-key"),"frozen-channel-key");assert.deepEqual(JSON.parse(seen[0].init.body),{method:"WEIXIN_NATIVE"});
+  await orderApi.pay("order_1","original-controlled-key");assert.equal(seen[1].url,"/api/orders/order_1/payment-requests");assert.deepEqual(JSON.parse(seen[1].init.body),{});
+ }finally{globalThis.fetch=before;}
+});
+
+test("channel failure keeps the API error and never falls back to a controlled payment or new request",async()=>{
+ const before=globalThis.fetch;const calls=[];
+ globalThis.fetch=async(url)=>{calls.push(String(url));return Response.json({error:{code:"PAYMENT_CHANNEL_NOT_ENABLED",message:"not enabled",requestId:"req_channel"}},{status:503});};
+ try{
+  await assert.rejects(()=>orderApi.requestChannelPayment("user_a","order_1","ALIPAY_NATIVE","same-key"),e=>e instanceof OrderRequestError&&e.status===503&&e.code==="PAYMENT_CHANNEL_NOT_ENABLED");
+  assert.deepEqual(calls,["/api/orders/order_1/channel-payment-requests"]);
+ }finally{globalThis.fetch=before;}
+});
+
+test('channel client supplies expected subject for both local read and command without changing business body',async()=>{const old=globalThis.fetch,calls=[];globalThis.fetch=async(url,init)=>{calls.push({url:String(url),init});return Response.json({request:null});};try{await orderApi.channelPaymentStatus('user_a','order_subject');await orderApi.requestChannelPayment('user_a','order_subject','WEIXIN_NATIVE','original_subject_key');assert.equal(calls.length,2);for(const c of calls){assert.match(c.url,/order_subject\/channel-payment-requests$/);assert.equal(new Headers(c.init.headers).get('x-zzsh-expected-user-id'),'user_a');}assert.equal(calls[1].init.body,'{"method":"WEIXIN_NATIVE"}');assert.equal(new Headers(calls[1].init.headers).get('idempotency-key'),'original_subject_key');}finally{globalThis.fetch=old;}});

@@ -93,3 +93,54 @@ test('historical order BFF forwards only GET list/detail and preserves authoriza
     assert.equal(calls,1);
   }finally{globalThis.fetch=old;}
 });
+
+test('channel payment GET forwards the v1 local projection, user session and null unknowns without changing legacy reads',async()=>{
+  const old=globalThis.fetch;const seen=[];
+  const projection={contractVersion:'order-payment-request.v1',dataOrigin:'UNKNOWN',request:null,paymentAction:null,payment:null};
+  globalThis.fetch=async(url,options)=>{if(String(url).endsWith('/get-session'))return Response.json({user:{id:'user_a'}});seen.push({url:String(url),options});return Response.json(projection);};
+  try{
+    const path=['order_channel','channel-payment-requests'];
+    const response=await GET(input(path,{headers:{cookie:'zzsh_user.session_token=user; zzsh_admin.session_token=admin','x-zzsh-expected-user-id':'user_a'}}),ctx(path));
+    assert.equal(response.status,200);assert.deepEqual(await response.json(),projection);
+    assert.equal(seen[0].url,'http://127.0.0.1:3102/api/bff/user/orders/order_channel/channel-payment-requests');
+    assert.equal(seen[0].options.headers.get('cookie'),'zzsh_user.session_token=user');
+    assert.equal(seen[0].options.method,'GET');assert.equal(response.headers.get('cache-control'),'no-store');
+    await GET(input(['order_channel','payment-requests']),ctx(['order_channel','payment-requests']));
+    assert.equal(seen[1].url,'http://127.0.0.1:3102/api/bff/user/orders/order_channel/payment-requests');
+  }finally{globalThis.fetch=old;}
+});
+
+test('channel payment POST keeps method, frozen key, pending receipt and upstream status instead of manufacturing paid',async()=>{
+  const old=globalThis.fetch;let seen;
+  const receipt={contractVersion:'order-payment-request.v1',replay:false,request:{id:'payreq_channel',state:'SUBMITTING'},paymentAction:null,payment:null};
+  globalThis.fetch=async(url,options)=>{if(String(url).endsWith('/get-session'))return Response.json({user:{id:'user_a'}});seen={url:String(url),options};return Response.json(receipt,{status:202});};
+  try{
+    const path=['order_channel','channel-payment-requests'],body=JSON.stringify({method:'WEIXIN_NATIVE'});
+    const response=await POST(input(path,{method:'POST',headers:{'content-type':'application/json','idempotency-key':'original-channel-key','x-zzsh-expected-user-id':'user_a'},body}),ctx(path));
+    assert.equal(response.status,202);assert.deepEqual(await response.json(),receipt);
+    assert.equal(seen.url,'http://127.0.0.1:3102/api/bff/user/orders/order_channel/channel-payment-requests');
+    assert.equal(seen.options.headers.get('idempotency-key'),'original-channel-key');assert.equal(seen.options.headers.get('origin'),'http://127.0.0.1:3100');
+    assert.equal(new TextDecoder().decode(seen.options.body),body);assert.equal(seen.options.redirect,'error');
+  }finally{globalThis.fetch=old;}
+});
+
+test('channel paths retain origin and bearer rejection and do not open nested or legacy channel commands',async()=>{
+  const old=globalThis.fetch;let calls=0;globalThis.fetch=async()=>{calls++;return Response.json({});};
+  try{
+    const p=['order_channel','channel-payment-requests'];
+    assert.equal((await POST(input(p,{method:'POST',headers:{origin:'https://other.invalid','content-type':'application/json'},body:'{}'}),ctx(p))).status,403);
+    assert.equal((await GET(input(p,{headers:{authorization:'Bearer unsafe'}}),ctx(p))).status,403);
+    for(const path of [[...p,'refresh'],['legacy','old_order','channel-payment-requests']]){
+      assert.equal((await POST(input(path,{method:'POST',headers:{'content-type':'application/json'},body:'{}'}),ctx(path))).status,404);
+    }
+    assert.equal(calls,0);
+  }finally{globalThis.fetch=old;}
+});
+
+const channelSubjectCtx={params:Promise.resolve({path:['order_subject','channel-payment-requests']})};
+const channelSubjectRequest=(method='POST',user='user_a')=>new Request('http://127.0.0.1:3100/api/orders/order_subject/channel-payment-requests',{method,headers:{origin:'http://127.0.0.1:3100','content-type':'application/json',cookie:'zzsh_user.session_token=synthetic_user_b; zzsh_admin.session_token=not-forwarded','idempotency-key':'original_subject_key',...(user?{'x-zzsh-expected-user-id':user}:{})},...(method==='POST'?{body:'{"method":"WEIXIN_NATIVE"}'}:{})});
+test('channel command from page A with captured cookie B never reaches a payment command',async()=>{const old=globalThis.fetch,calls=[];globalThis.fetch=async(url,options)=>{calls.push(String(url));return String(url).endsWith('/get-session')?Response.json({user:{id:'user_b'}}):Response.json({request:{id:'must_not_submit'}});};try{const r=await POST(channelSubjectRequest(),channelSubjectCtx);assert.equal(r.status,401);assert.equal((await r.json()).error.code,'IDENTITY_CHANGED');assert.equal(calls.filter(s=>s.includes('/channel-payment-requests')).length,0);}finally{globalThis.fetch=old;}});
+test('channel local GET checks the captured session subject before exposing a projection',async()=>{const old=globalThis.fetch,calls=[];globalThis.fetch=async(url)=>{calls.push(String(url));return Response.json({user:{id:'user_b'}});};try{const r=await GET(channelSubjectRequest('GET'),channelSubjectCtx);assert.equal(r.status,401);assert.equal(calls.filter(s=>s.includes('/channel-payment-requests')).length,0);}finally{globalThis.fetch=old;}});
+test('missing expected subject is rejected before any upstream fetch',async()=>{const old=globalThis.fetch;let calls=0;globalThis.fetch=async()=>{calls++;return Response.json({});};try{assert.equal((await POST(channelSubjectRequest('POST',null),channelSubjectCtx)).status,400);assert.equal(calls,0);}finally{globalThis.fetch=old;}});
+test('matched subject preserves captured user cookie and original key/body, stripping internal header',async()=>{const old=globalThis.fetch,calls=[];globalThis.fetch=async(url,options)=>{calls.push({url:String(url),options});return String(url).endsWith('/get-session')?Response.json({user:{id:'user_a'}}):Response.json({request:{id:'synthetic_request'}},{status:202});};try{const r=await POST(channelSubjectRequest(),channelSubjectCtx);assert.equal(r.status,202);assert.equal(calls.length,2);for(const c of calls)assert.equal(c.options.headers.get('cookie'),'zzsh_user.session_token=synthetic_user_b');const c=calls[1];assert.equal(c.options.headers.get('idempotency-key'),'original_subject_key');assert.equal(c.options.headers.has('x-zzsh-expected-user-id'),false);assert.equal(new TextDecoder().decode(c.options.body),'{"method":"WEIXIN_NATIVE"}');}finally{globalThis.fetch=old;}});
+test('failed or malformed session evidence cannot cause a channel command',async()=>{const old=globalThis.fetch;try{for(const response of [()=>Response.json(null),()=>Response.json({user:null}),()=>Response.json({user:{id:7}}),()=>new Response('not-json'),()=>Response.json({error:{code:'UNAUTHENTICATED'}},{status:401})]){const commands=[];globalThis.fetch=async(url)=>{if(!String(url).endsWith('/get-session'))commands.push(String(url));return response();};const r=await POST(channelSubjectRequest(),channelSubjectCtx);assert(r.status>=400);assert.equal(commands.length,0);}}finally{globalThis.fetch=old;}});

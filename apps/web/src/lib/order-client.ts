@@ -5,6 +5,27 @@ export type OrderParty = "renter" | "owner";
 export type OrderStatus = "PENDING_PAYMENT" | "PAID" | "CANCELLED" | "COMPLETED";
 export type OrderStatusFilter = OrderStatus | "";
 
+export type ChannelPaymentMethod = "ALIPAY_NATIVE" | "WEIXIN_NATIVE";
+export type ChannelPaymentDataOrigin = "SYNTHETIC_PROTOCOL" | "LOCAL_CONTROLLED" | "JOINPAY_CANDIDATE" | "JOINPAY_PROVIDER" | "UNKNOWN";
+type ChannelPaymentMoney = { cents: string; currency: string };
+export type ChannelPaymentView = {
+  contractVersion: "order-payment-request.v1";
+  dataOrigin: ChannelPaymentDataOrigin;
+  capability: { channelEnabled: boolean; methods: ChannelPaymentMethod[]; evidenceProfile: "JOINPAY_AGG_2_6_MD5"; productionPaymentCapability: boolean };
+  order: { id: string; displayNo: string; status: string; paidAt: string | null };
+  request: { id: string; state: string; method: string; amount: ChannelPaymentMoney | null; updatedAt: string;
+    recovery: { mode: "ORIGINAL_NUMBER_QUERY"; nextAttemptAt: null; manualQueryOpen: false } | null } | null;
+  projection: { displayState: string; actionBlockedReason: string | null };
+  paymentAction: { kind: "QR_URL"; url: string; expiresAt: null; expiryKnown: false } | null;
+  payment: { confirmationId: string; disposition: "APPLIED" | "REVIEW_REQUIRED"; reasonCode: string | null; amount: ChannelPaymentMoney | null; acceptedAt: string } | null;
+};
+// POST只确认请求已持久化；支付参数和付款事实须从独立的本地GET读取。
+export type ChannelPaymentCommandReceipt = {
+  contractVersion: "order-payment-request.v1"; replay: boolean; dataOrigin: ChannelPaymentDataOrigin;
+  request: { id: string; orderId: string; state: string; method: string; amount: ChannelPaymentMoney; createdAt: string; updatedAt: string };
+  paymentAction: null; payment: null;
+};
+
 export type OrderLine = {
   itemId?: string;
   name?: string;
@@ -242,7 +263,7 @@ export class OrderRequestError extends Error {
   }
 }
 
-type ReadOptions = { signal?: AbortSignal };
+type ReadOptions = { signal?: AbortSignal; expectedUserId?: string };
 
 async function requestJson<T>(path: string, options: ReadOptions = {}): Promise<T> {
   if (!path.startsWith("/") || path.startsWith("//") || path.includes("://")) {
@@ -250,7 +271,7 @@ async function requestJson<T>(path: string, options: ReadOptions = {}): Promise<
   }
   let response: Response;
   try {
-    response = await fetch(path, { credentials: "same-origin", cache: "no-store", signal: options.signal });
+    response = await fetch(path, { credentials: "same-origin", cache: "no-store", signal: options.signal, ...(options.expectedUserId === undefined ? {} : { headers: { "x-zzsh-expected-user-id": options.expectedUserId } }) });
   } catch (error) {
     if (options.signal?.aborted) throw error;
     throw new OrderRequestError(0, null);
@@ -266,7 +287,7 @@ function unwrapOrder(body: { order?: Order } | Order): Order {
   return body && typeof body === "object" && "order" in body && body.order ? body.order : body as Order;
 }
 
-type WriteOptions = { method?: "POST"; body?: unknown; key?: string; signal?: AbortSignal };
+type WriteOptions = { method?: "POST"; body?: unknown; key?: string; signal?: AbortSignal; expectedUserId?: string };
 
 async function requestWrite<T>(path: string, options: WriteOptions): Promise<T> {
   if (!path.startsWith("/") || path.startsWith("//") || path.includes("://")) {
@@ -274,6 +295,7 @@ async function requestWrite<T>(path: string, options: WriteOptions): Promise<T> 
   }
   const headers = new Headers({ "content-type": "application/json" });
   if (options.key) headers.set("idempotency-key", options.key);
+  if (options.expectedUserId !== undefined) headers.set("x-zzsh-expected-user-id", options.expectedUserId);
   let response: Response;
   try {
     response = await fetch(path, {
@@ -337,6 +359,10 @@ export const orderApi = {
   paymentStatus: (orderId: string, signal?: AbortSignal) =>
     requestJson<{ order: { id: string; displayNo?: string | null; status: string; paidAt?: string | null }; payment: { confirmationId: string; disposition: string; reasonCode?: string | null; amountCents: string; currency: string; acceptedAt: string } | null }>(
       `/api/orders/${encodeURIComponent(orderId)}/payment-requests`, { signal }),
+  requestChannelPayment: (userId: string, orderId: string, method: ChannelPaymentMethod, key: string, signal?: AbortSignal) =>
+    requestWrite<ChannelPaymentCommandReceipt>(`/api/orders/${encodeURIComponent(orderId)}/channel-payment-requests`, { body: { method }, key, signal, expectedUserId: userId }),
+  channelPaymentStatus: (userId: string, orderId: string, signal?: AbortSignal) =>
+    requestJson<ChannelPaymentView>(`/api/orders/${encodeURIComponent(orderId)}/channel-payment-requests`, { signal, expectedUserId: userId }),
   settlement: (orderId: string, signal?: AbortSignal) =>
     requestJson<OrderSettlement>(`/api/orders/${encodeURIComponent(orderId)}/settlement`, { signal }),
   settlementPreview: (orderId: string, body: { lines: Array<{ itemId: string; remainingQuantity: string }>; endReason?: string }, signal?: AbortSignal) =>

@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
+import { QRCodeSVG } from "qrcode.react";
 import { AlertCircle, CheckCircle2, CircleSlash, Clock3, RefreshCw, WalletCards } from "lucide-react";
 import { useUserSession } from "@/components/session/user-session-provider";
 import { useIdentityReset } from "@/components/session/identity-reset";
@@ -11,12 +12,14 @@ import {
   OrderRequestError,
   type Order,
   type OrderParty,
+  type ChannelPaymentView,
+  type ChannelPaymentMethod,
   type OrderSettlement,
   type SettlementOpening,
   type SettlementPreview,
   type SettlementVersion,
 } from "@/lib/order-client";
-import { clearIntent, isIntentStale, loadIntent, saveIntent, type IntentKind } from "@/lib/order-intents";
+import { clearIntent, inspectIntent, isIntentStale, loadIntent, saveIntent, type IntentKind } from "@/lib/order-intents";
 import { cancelEntryOpen, chargeRowLabel, consumptionRows, decisionAmountRows, isAdjustedVersion, moneyCents, moneyText, paymentEntryOpen, postingAmountRows, previewAmounts, proposedConfirmationCents, quantityText, resourceName, settlementAmountRows, unitHint, type SettlementAmountRow } from "@/lib/order-display";
 import "./order.css";
 
@@ -144,6 +147,127 @@ function RecordList({ title, records }: { title: string; records: Array<{ label:
   </div>;
 }
 
+const channelStateLabels: Record<string, string> = {
+  SUBMITTING: "正在提交支付请求", UNKNOWN: "支付结果正在确认", ACTION_READY: "等待付款", PROCESSING_UNCONFIRMED: "支付状态正在确认",
+  CHANNEL_SUCCEEDED_PENDING_ACCEPTANCE: "付款依据正在接纳", ACCEPTED: "付款依据待确认", REVIEW_REQUIRED: "支付需要人工核对", REJECTED_BY_CHANNEL: "渠道未受理本次请求",
+};
+function channelMoneyText(value: { cents: string; currency: string } | null | undefined) {
+  if (!value || value.currency !== "CNY" || typeof value.cents !== "string" || !/^(0|[1-9][0-9]{0,15})$/.test(value.cents)) return "待确认";
+  const cents = BigInt(value.cents);
+  return moneyText({ amount: `${cents / 100n}.${(cents % 100n).toString().padStart(2, "0")}`, currency: "CNY" });
+}
+function channelPaymentUrl(value: unknown): string | null {
+  if (typeof value !== "string" || value.length > 2048 || /[\s\u0000-\u001f\u007f]/u.test(value)) return null;
+  try { const url = new URL(value); return url.protocol === "https:" && !url.username && !url.password && !url.hash ? value : null; } catch { return null; }
+}
+function channelApplied(view: ChannelPaymentView | null): boolean {
+  const payment = view?.payment;
+  return view?.dataOrigin === "JOINPAY_PROVIDER" && payment?.disposition === "APPLIED" && typeof payment.confirmationId === "string" && payment.confirmationId.length > 0
+    && payment.amount?.currency === "CNY" && typeof payment.amount.cents === "string" && /^[1-9][0-9]{0,15}$/.test(payment.amount.cents);
+}
+
+/** 新渠道独立保留原键；普通刷新只读本地状态，不把旧受控请求当作渠道付款。 */
+function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendingChange, children }: {
+  order: Order; blocked: boolean; onChanged: () => void; onModeChange: (active: boolean) => void; onPendingChange: (pending: boolean) => void; children: ReactNode;
+}) {
+  const session = useUserSession();
+  const [snapshot, setSnapshot] = useState<{ userId: string; orderId: string; view: ChannelPaymentView } | null>(null);
+  const [readError, setReadError] = useState<string | null>(null), [notice, setNotice] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false), [reading, setReading] = useState(true);
+  const [method, setMethod] = useState<ChannelPaymentMethod>("ALIPAY_NATIVE");
+  const latest = useRef({ orderId: order.id, onChanged }); latest.current = { orderId: order.id, onChanged };
+  const reset = useCallback(() => { setSnapshot(null); setReadError(null); setNotice(null); setBusy(false); setReading(true); setMethod("ALIPAY_NATIVE"); }, []);
+  const { userId, isCurrent } = useIdentityReset(session, reset);
+  const identity = useRef(isCurrent); identity.current = isCurrent;
+  const mounted = useRef(false);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const [visibleOrder, setVisibleOrder] = useState(order.id);
+  if (visibleOrder !== order.id) { setVisibleOrder(order.id); reset(); }
+  const view = snapshot?.userId === userId && snapshot.orderId === order.id ? snapshot.view : null;
+  const pending = userId ? inspectIntent(userId, "order.channel-payment", order.id) : { state: "NONE" as const, intent: null };
+  const active = pending.state === "VALID" || !!view && view.dataOrigin !== "LOCAL_CONTROLLED" && (view.capability?.channelEnabled === true && view.capability.productionPaymentCapability === true
+    || ["JOINPAY_CANDIDATE", "JOINPAY_PROVIDER"].includes(view.dataOrigin));
+  const unsettled = busy || pending.state === "VALID" || active && (pending.state === "UNREADABLE" || view?.payment != null
+    || view?.request != null && !["ACTION_READY", "REJECTED_BY_CHANNEL"].includes(view.request.state));
+  useEffect(() => { onModeChange(active); onPendingChange(unsettled); }, [active, unsettled, onModeChange, onPendingChange]);
+  useEffect(() => () => { onModeChange(false); onPendingChange(false); }, [onModeChange, onPendingChange]);
+  const refresh = useCallback(async (acting: string, signal?: AbortSignal, notify = false) => {
+    const expected = order.id;
+    setReading(true);
+    try {
+      const next = await orderApi.channelPaymentStatus(acting, expected, signal);
+      if (!mounted.current || !identity.current(acting) || latest.current.orderId !== expected || signal?.aborted) return;
+      if (next?.contractVersion !== "order-payment-request.v1" || next.order?.id !== expected || !Array.isArray(next.capability?.methods)) throw new OrderRequestError(502, null);
+      setSnapshot({ userId: acting, orderId: expected, view: next }); setReadError(null);
+      if (notify && channelApplied(next)) latest.current.onChanged();
+    } catch (error) {
+      if (mounted.current && identity.current(acting) && latest.current.orderId === expected && !signal?.aborted) setReadError(panelError(error).message);
+    } finally { if (mounted.current && identity.current(acting) && latest.current.orderId === expected && !signal?.aborted) setReading(false); }
+  }, [order.id]);
+  useEffect(() => {
+    if (!userId) { setReading(false); return; }
+    const controller = new AbortController(); void refresh(userId, controller.signal);
+    return () => controller.abort();
+  }, [userId, refresh]);
+  const submit = async (recover = false) => {
+    if (!userId || busy || blocked) return;
+    const acting = userId, expected = order.id, original = inspectIntent(acting, "order.channel-payment", expected);
+    if (recover) await refresh(acting);
+    if (!mounted.current || !isCurrent(acting) || latest.current.orderId !== expected) return;
+    if (original.state === "UNREADABLE") { setNotice("原支付请求记录无法读取，已停止提交；请保留本页并联系平台核对。"); return; }
+    if (original.intent && isIntentStale(original.intent)) { setNotice("原支付请求已超出自动恢复时限；原请求已保留，请刷新状态或联系平台核对。"); return; }
+    const selected = original.intent?.body?.method ?? method;
+    if (selected !== "ALIPAY_NATIVE" && selected !== "WEIXIN_NATIVE") { setNotice("原支付方式未能确认，不能更换方式重新提交。"); return; }
+    setBusy(true); setNotice(null);
+    const outcome = await performGuardedWrite(acting, "order.channel-payment", expected, { method: selected }, undefined, async (key, body) => {
+      if (body.method !== "ALIPAY_NATIVE" && body.method !== "WEIXIN_NATIVE") throw new OrderRequestError(400, null);
+      const receipt = await orderApi.requestChannelPayment(acting, expected, body.method, key);
+      const amount = receipt?.request?.amount;
+      if (receipt?.contractVersion !== "order-payment-request.v1" || receipt.dataOrigin !== "JOINPAY_CANDIDATE" || typeof receipt.replay !== "boolean"
+        || receipt.request?.orderId !== expected || receipt.request.method !== body.method || typeof receipt.request.id !== "string" || !receipt.request.id
+        || typeof receipt.request.createdAt !== "string" || !Number.isFinite(Date.parse(receipt.request.createdAt)) || typeof receipt.request.updatedAt !== "string" || !Number.isFinite(Date.parse(receipt.request.updatedAt))
+        || amount?.currency !== "CNY" || typeof amount.cents !== "string" || !/^[1-9][0-9]{0,15}$/.test(amount.cents)
+        || receipt.payment !== null || receipt.paymentAction !== null) throw new OrderRequestError(502, null);
+      return receipt;
+    });
+    if (!mounted.current || !isCurrent(acting) || latest.current.orderId !== expected) return;
+    setBusy(false);
+    if (outcome.status === "ok") { await refresh(acting, undefined, true); return; }
+    if (outcome.status === "unknown") setNotice("支付请求回执尚未确认，原请求和支付方式已保留；请恢复原请求，不要重复付款。");
+    else if (outcome.status === "blocked") setNotice(BLOCKED_MESSAGE);
+    else if (outcome.status === "unauthorized") { setNotice(AUTH_MESSAGE); void session.confirm(); }
+    else setNotice(outcome.status === "recovery-unresolved" ? "原请求仍待确认，恢复记录已保留；请刷新状态或联系平台核对。" : panelError(outcome.error).message);
+  };
+  if (!active) return <>{reading ? <p className="order-muted" role="status">正在读取支付方式…</p> : children}</>;
+  const methods = (view?.capability?.methods ?? []).filter(m => m === "ALIPAY_NATIVE" || m === "WEIXIN_NATIVE");
+  const selected = view?.request?.method ?? pending.intent?.body?.method ?? method;
+  const applied = channelApplied(view);
+  const payable = paymentEntryOpen(order) && view?.order.status === "PENDING_PAYMENT";
+  const amount = view?.request?.amount;
+  const amountKnown = amount?.currency === "CNY" && typeof amount.cents === "string" && /^[1-9][0-9]{0,15}$/.test(amount.cents);
+  const url = !applied && payable && view?.payment === null && view.dataOrigin === "JOINPAY_CANDIDATE" && view.capability.channelEnabled === true && view.capability.productionPaymentCapability === true
+    && amountKnown && ["ACTION_READY", "PROCESSING_UNCONFIRMED"].includes(view.request?.state ?? "") && view.projection?.actionBlockedReason === null
+    && view.paymentAction?.kind === "QR_URL" ? channelPaymentUrl(view.paymentAction.url) : null;
+  const mayStart = payable && view?.capability.channelEnabled === true && view.capability.productionPaymentCapability === true
+    && view.payment === null && view.request === null && pending.state === "NONE" && methods.includes(method) && !blocked;
+  return <div className="order-channel-payment" aria-busy={busy || reading}>
+    <p role="status">{applied ? "渠道付款已接纳" : view?.dataOrigin === "LOCAL_CONTROLLED" ? "当前付款记录属于本地受控测试" : view?.request && view.dataOrigin === "SYNTHETIC_PROTOCOL" ? "协议测试记录，不代表真实付款" : view?.payment?.disposition === "REVIEW_REQUIRED" ? "支付需要人工核对" : view?.payment?.disposition === "APPLIED" ? "付款依据待确认" : view?.request ? channelStateLabels[view.request.state] ?? "支付状态待确认" : "请选择支付方式"}</p>
+    {view?.request ? <p className="order-muted">本次请求金额：{channelMoneyText(view.request.amount)}。支付方式与原请求保持一致。</p> : null}
+    {url ? <figure className="order-channel-code"><QRCodeSVG value={url} size={176} level="M" marginSize={4} role="img" aria-label="本单支付二维码" /><figcaption className="order-muted">请使用{view?.request?.method === "WEIXIN_NATIVE" ? "微信" : "支付宝"}扫描本单二维码。二维码有效期未确认，请以渠道提示为准。</figcaption></figure> : null}
+    {!applied && !view?.request ? <label>支付方式<select aria-label="支付方式" value={typeof selected === "string" ? selected : method} disabled={busy || reading || pending.state !== "NONE" || blocked} onChange={e => setMethod(e.currentTarget.value as ChannelPaymentMethod)}>
+      {methods.map(value => <option key={value} value={value}>{value === "ALIPAY_NATIVE" ? "支付宝" : "微信支付"}</option>)}
+    </select></label> : null}
+    {pending.state === "UNREADABLE" || notice || readError ? <p className="order-inline-notice" role="alert">{pending.state === "UNREADABLE" ? "原支付请求恢复记录无法读取，已停止提交；请刷新状态或联系平台核对。" : notice ?? readError}</p> : null}
+    <div className="order-trade-actions">
+      {mayStart ? <button type="button" className="button" disabled={busy || reading} onClick={() => void submit()}>获取支付参数</button> : null}
+      {url ? <a className="button" href={url} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">打开支付页面</a> : null}
+      <button type="button" className="button secondary button--sm" disabled={busy || reading || !userId} onClick={() => userId && void refresh(userId, undefined, true)}>刷新支付状态</button>
+      {pending.state === "VALID" && !applied ? <button type="button" className="button secondary button--sm" disabled={busy || reading || blocked} onClick={() => void submit(true)}>恢复原请求回执</button> : null}
+    </div>
+    <p className="order-trade-note">打开支付页面不代表付款成功；付款状态以平台接纳记录为准，支付后仍须完成交付与开租确认。</p>
+  </div>;
+}
+
 function PaymentAction({ order, party, onChanged }: { order: Order; party: OrderParty; onChanged: () => void }) {
   const session = useUserSession();
   const [busy, setBusy] = useState(false);
@@ -152,6 +276,7 @@ function PaymentAction({ order, party, onChanged }: { order: Order; party: Order
   const [receipt, setReceipt] = useState<{ disposition: string; reasonCode?: string | null; replay: boolean } | null>(null);
   const [cancelArmed, setCancelArmed] = useState(false);
   const [cancelUnknown, setCancelUnknown] = useState<string | null>(null);
+  const [channelMode, setChannelMode] = useState(false), [channelPending, setChannelPending] = useState(false);
   const reset = useCallback(() => { setBusy(false); setUnknown(null); setError(null); setReceipt(null); setCancelArmed(false); setCancelUnknown(null); }, []);
   const { userId, isCurrent } = useIdentityReset(session, reset);
   useEffect(() => {
@@ -238,7 +363,7 @@ function PaymentAction({ order, party, onChanged }: { order: Order; party: Order
     applyOutcome(acting, outcome as WriteOutcome<{ payment: { confirmationId: string; disposition: string; reasonCode?: string | null; replay: boolean } }>, "cancel");
   };
   const payLocked = busy || receipt !== null || unknown !== null || cancelUnknown !== null;
-  const cancelLocked = busy || receipt !== null || unknown !== null || cancelUnknown !== null;
+  const cancelLocked = busy || receipt !== null || unknown !== null || cancelUnknown !== null || channelPending;
   const paymentOpen = paymentEntryOpen(order);
   const cancelOpen = cancelEntryOpen(order);
   const expired = order.status === "PENDING_PAYMENT" && order.expiredAwaitingCancel === true;
@@ -252,13 +377,13 @@ function PaymentAction({ order, party, onChanged }: { order: Order; party: Order
     {cancelUnknown ? <UnknownNotice label="取消结果未知" message={cancelUnknown} onQuery={() => void queryCancel()} onOpenOrder={onChanged} /> : null}
     {error ? <p className="order-inline-notice" role="alert">{error.message}</p> : null}
     {party === "renter" ? <div className="order-trade-actions">
-      {paymentOpen ? <button type="button" className="button" onClick={() => void pay()} disabled={payLocked}>
-        <WalletCards size={15} aria-hidden="true" />{busy ? "提交支付请求…" : "提交支付"}
-      </button> : <p className="order-muted">当前订单不可继续支付；请刷新查看最新订单记录。</p>}
+      <ChannelPaymentAction order={order} blocked={payLocked || cancelArmed} onChanged={onChanged} onModeChange={setChannelMode} onPendingChange={setChannelPending}>{paymentOpen ? <button type="button" className="button" onClick={() => void pay()} disabled={payLocked}>
+        <WalletCards size={15} aria-hidden="true" />{busy ? "提交支付请求…" : "提交支付（本地受控测试）"}
+      </button> : <p className="order-muted">当前订单不可继续支付；请刷新查看最新订单记录。</p>}</ChannelPaymentAction>
       {cancelOpen ? (!cancelArmed ? <button type="button" className="button quiet" onClick={() => setCancelArmed(true)} disabled={cancelLocked}>取消订单</button> :
         <span className="order-trade-confirm">确认取消该订单？账号占用将释放。<button type="button" className="button secondary button--sm" onClick={() => void cancel()} disabled={cancelLocked}>{busy ? "取消中…" : "确认取消"}</button><button type="button" className="button quiet button--sm" onClick={() => setCancelArmed(false)} disabled={busy}>保留订单</button></span>) : null}
     </div> : <p className="order-muted">等待租客完成支付；订单不提供代付或代为接单操作。</p>}
-    <p className="order-trade-note">当前为本地受控收款环境：服务端生成明确的本地收款依据，不发生真实渠道扣款。</p>
+    {!channelMode ? <p className="order-trade-note">当前为本地受控收款入口：服务端生成本地收款依据，不代表真实渠道扣款。</p> : null}
   </section>;
 }
 

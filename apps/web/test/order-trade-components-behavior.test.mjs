@@ -142,6 +142,119 @@ function router(routes, log) {
 
 const session = (userId) => ({ status: "authenticated", userId, identityVersion: 1, revalidate() {}, confirm: async () => "authenticated", signOut: async () => undefined });
 
+// SYNTHETIC_COMPONENT_MODEL：只验证真实组件与本地API替身，不能当渠道付款或浏览器验收。
+const channelOrder={...paidOrder,status:"PENDING_PAYMENT",paymentOpen:true,cancelOpen:true,expiredAwaitingCancel:false};
+const channelView=(id="order_A",over={})=>({contractVersion:"order-payment-request.v1",dataOrigin:"SYNTHETIC_PROTOCOL",
+  capability:{channelEnabled:true,productionPaymentCapability:true,methods:["ALIPAY_NATIVE","WEIXIN_NATIVE"],evidenceProfile:"JOINPAY_AGG_2_6_MD5"},
+  order:{id,displayNo:"SYNTHETIC",status:"PENDING_PAYMENT",paidAt:null},request:null,projection:{displayState:"NOT_STARTED",actionBlockedReason:"NO_REQUEST"},paymentAction:null,payment:null,...over});
+const channelRequest=(state="ACTION_READY",method="WEIXIN_NATIVE")=>({id:"payreq_component",state,method,amount:{cents:"125",currency:"CNY"},updatedAt:"2026-10-24T10:00:00.000Z",recovery:null});
+const channelReceipt=(method,replay=false,state="SUBMITTING")=>({contractVersion:"order-payment-request.v1",dataOrigin:"JOINPAY_CANDIDATE",replay,
+  request:{...channelRequest(state,method),orderId:"order_A",createdAt:"2026-10-24T10:00:00.000Z"},paymentAction:null,payment:null});
+async function chooseChannel(window,probe,value){const select=probe.host.querySelector('select[aria-label="支付方式"]');assert.ok(select);await React.act(async()=>{select.value=value;select.dispatchEvent(new window.Event("change",{bubbles:true}));await tick();});}
+
+test("Native UI selects method, persists a request, reads its action and waits for an actual APPLIED projection",async()=>{
+ await withDom(async window=>{
+  let phase="NEW",changed=0;const calls=[];
+  const view=()=>channelView("order_A",phase==="NEW"?{}:phase==="ACTION"?{dataOrigin:"JOINPAY_CANDIDATE",request:channelRequest(),projection:{displayState:"AWAITING_PAYMENT",actionBlockedReason:null},paymentAction:{kind:"QR_URL",url:"https://example.invalid/synthetic-pay",expiresAt:null,expiryKnown:false}}:
+   {dataOrigin:"JOINPAY_PROVIDER",request:channelRequest("ACCEPTED"),order:{id:"order_A",displayNo:"SYNTHETIC",status:"PAID",paidAt:"2026-10-24T10:00:01.000Z"},payment:{confirmationId:"formal_component_fact",disposition:"APPLIED",reasonCode:null,amount:{cents:"125",currency:"CNY"},acceptedAt:"2026-10-24T10:00:01.000Z"}});
+  const Component=loadComponent("apps/web/src/components/order/order-trade-actions.tsx",session("user_A")).OrderTradeActions;
+  const probe=createProbe(window,Component,{order:channelOrder,party:"renter",onChanged(){changed++;}},async(url,init={})=>{
+   calls.push({url:String(url),method:init.method??"GET",key:new Headers(init.headers).get("idempotency-key"),body:init.body});
+   assert.match(String(url),/\/channel-payment-requests$/);
+   if(init.method==="POST"){const body=JSON.parse(init.body);assert.deepEqual(body,{method:"WEIXIN_NATIVE"});assert.equal(intents.loadIntent("user_A","order.channel-payment","order_A").key,new Headers(init.headers).get("idempotency-key"));phase="ACTION";return json(channelReceipt(body.method),202);}
+   return json(view());
+  });
+  try{
+   await probe.render();await chooseChannel(window,probe,"WEIXIN_NATIVE");await probe.click("获取支付参数");
+   assert.equal(calls.filter(c=>c.method==="POST").length,1);assert.equal(changed,0);assert.doesNotMatch(probe.host.textContent,/渠道付款已接纳/);
+   const link=probe.host.querySelector('.order-channel-payment a');assert.equal(link?.getAttribute("href"),"https://example.invalid/synthetic-pay");assert.equal(link?.getAttribute("rel"),"noopener noreferrer");assert.match(probe.host.textContent,/1\.25/);assert.ok(probe.host.querySelector('svg[aria-label="本单支付二维码"]'));
+   assert.equal(intents.loadIntent("user_A","order.channel-payment","order_A"),null);assert.equal(intents.loadIntent("user_A","order.payment","order_A"),null);
+   phase="PAID";await probe.click("刷新支付状态");assert.match(probe.host.textContent,/渠道付款已接纳/);assert.equal(changed,1);assert.equal(calls.filter(c=>c.method==="POST").length,1);assert.equal([...probe.host.querySelectorAll("button")].find(b=>b.textContent==="取消订单")?.disabled,true);
+  }finally{await probe.dispose(()=>intents.clearIntent("user_A","order.channel-payment","order_A"));}
+ });
+});
+
+test("Native UI unknown POST restores exactly its old key/method even after new collection is closed",async()=>{
+ await withDom(async window=>{
+  let posts=0;const writes=[];const Component=loadComponent("apps/web/src/components/order/order-trade-actions.tsx",session("user_A")).OrderTradeActions;
+  const probe=createProbe(window,Component,{order:channelOrder,party:"renter",onChanged(){}},async(url,init={})=>{
+   assert.match(String(url),/\/channel-payment-requests$/);
+   if(init.method==="POST"){posts++;writes.push({key:new Headers(init.headers).get("idempotency-key"),body:init.body});if(posts===1)throw new TypeError("synthetic response lost");return json(channelReceipt("WEIXIN_NATIVE",true,"UNKNOWN"),202);}
+   return json(posts?channelView("order_A",{dataOrigin:"JOINPAY_CANDIDATE",capability:{channelEnabled:false,productionPaymentCapability:false,methods:["ALIPAY_NATIVE","WEIXIN_NATIVE"]},request:channelRequest("UNKNOWN"),projection:{displayState:"CONFIRMING",actionBlockedReason:"CHANNEL_RESULT_UNKNOWN"}}):channelView());
+  });
+  try{
+   await probe.render();await chooseChannel(window,probe,"WEIXIN_NATIVE");await probe.click("获取支付参数");
+   assert.match(probe.host.textContent,/回执尚未确认/);const original=intents.loadIntent("user_A","order.channel-payment","order_A");assert.equal(original.body.method,"WEIXIN_NATIVE");
+   await probe.click("恢复原请求回执");assert.equal(posts,2);assert.equal(writes[0].key,writes[1].key);assert.equal(writes[0].body,writes[1].body);
+   assert.equal(intents.loadIntent("user_A","order.channel-payment","order_A"),null);assert.match(probe.host.textContent,/支付结果正在确认/);assert.doesNotMatch(probe.host.textContent,/渠道付款已接纳/);
+  }finally{await probe.dispose(()=>intents.clearIntent("user_A","order.channel-payment","order_A"));}
+ });
+});
+
+test("Native UI drops the old order/identity response instead of showing another subject's payment",async()=>{
+ await withDom(async window=>{
+  const late=deferred(),identity=session("user_A");let reads=0;
+  const Component=loadComponent("apps/web/src/components/order/order-trade-actions.tsx",identity).OrderTradeActions;
+  const probe=createProbe(window,Component,{order:channelOrder,party:"renter",onChanged(){}},async(url)=>{
+   reads++;if(String(url).includes("/order_A/"))return late.promise;return json(channelView("order_B"));
+  });
+  try{
+   await probe.render();assert.equal(reads,1);identity.userId="user_B";identity.identityVersion++;
+   await probe.render({order:{...channelOrder,id:"order_B"},party:"renter",onChanged(){}});assert.ok(probe.host.querySelector('select[aria-label="支付方式"]'));
+   await React.act(async()=>{late.resolve(json(channelView("order_A",{dataOrigin:"JOINPAY_PROVIDER",payment:{disposition:"APPLIED",confirmationId:"old_private_fact",amount:{cents:"125",currency:"CNY"},acceptedAt:"2026-10-24T10:00:01.000Z"}})));await tick();});
+   assert.doesNotMatch(probe.host.textContent,/渠道付款已接纳|old_private_fact/);assert.ok(probe.host.querySelector('select[aria-label="支付方式"]'));assert.equal(reads,2);
+  }finally{await probe.dispose();}
+ });
+});
+
+test("Native UI never turns accepted request state, unsafe action URLs or unknown amounts into proof or a payable link",async()=>{
+ await withDom(async window=>{
+  let current=channelView("order_A",{dataOrigin:"JOINPAY_CANDIDATE",request:channelRequest("ACCEPTED"),projection:{displayState:"PAID",actionBlockedReason:null},paymentAction:{kind:"QR_URL",url:"https://example.invalid/synthetic",expiresAt:null,expiryKnown:false}});
+  const Component=loadComponent("apps/web/src/components/order/order-trade-actions.tsx",session("user_A")).OrderTradeActions;
+  const probe=createProbe(window,Component,{order:channelOrder,party:"renter",onChanged(){}},async()=>json(current));
+  try{
+   await probe.render();assert.match(probe.host.textContent,/付款依据待确认/);assert.doesNotMatch(probe.host.textContent,/渠道付款已接纳/);assert.equal(Boolean(probe.host.querySelector('.order-channel-payment a')),false);
+   for(const url of ["http://example.invalid/pay","https://user:password@example.invalid/pay","javascript:alert(1)","https://example.invalid/pay#secret","https://example.invalid/pay\n?request=changed","https://example.invalid/pay path"]){current={...current,request:channelRequest(),paymentAction:{kind:"QR_URL",url,expiresAt:null,expiryKnown:false}};await probe.click("刷新支付状态");assert.equal(Boolean(probe.host.querySelector('.order-channel-payment a')),false);assert.equal(Boolean(probe.host.querySelector('svg[aria-label="本单支付二维码"]')),false);}
+   current={...current,request:{...channelRequest(),amount:null},paymentAction:{kind:"QR_URL",url:"https://example.invalid/synthetic-pay",expiresAt:null,expiryKnown:false}};await probe.click("刷新支付状态");assert.equal(Boolean(probe.host.querySelector('.order-channel-payment a')),false);assert.match(probe.host.textContent,/金额：待确认/);
+   current={...current,dataOrigin:"SYNTHETIC_PROTOCOL",request:channelRequest(),paymentAction:{kind:"QR_URL",url:"https://example.invalid/pay",expiresAt:null,expiryKnown:false}};await probe.click("刷新支付状态");assert.equal(Boolean(probe.host.querySelector('.order-channel-payment a')),false);
+   current={...current,dataOrigin:"JOINPAY_CANDIDATE",payment:{confirmationId:"review_fact",disposition:"REVIEW_REQUIRED",amount:{cents:"125",currency:"CNY"}}};await probe.click("刷新支付状态");assert.equal(Boolean(probe.host.querySelector('.order-channel-payment a')),false);assert.match(probe.host.textContent,/支付需要人工核对/);
+   current={...current,dataOrigin:"JOINPAY_PROVIDER",payment:{confirmationId:"",disposition:"APPLIED",amount:{cents:"125",currency:"CNY"}}};await probe.click("刷新支付状态");assert.doesNotMatch(probe.host.textContent,/渠道付款已接纳/);assert.match(probe.host.textContent,/付款依据待确认/);
+  }finally{await probe.dispose();}
+ });
+});
+
+test("Native UI keeps unreadable recovery bytes and blocks new payment/cancel instead of making a replacement key",async()=>{
+ await withDom(async window=>{
+  const key="zzsh.order-intent.v1:user_A:order.channel-payment:order_A";window.sessionStorage.setItem(key,"{unreadable");let writes=0;
+  const Component=loadComponent("apps/web/src/components/order/order-trade-actions.tsx",session("user_A")).OrderTradeActions;
+  const probe=createProbe(window,Component,{order:channelOrder,party:"renter",onChanged(){}},async(_url,init={})=>{if(init.method==="POST")writes++;return json(channelView());});
+  try{await probe.render();assert.match(probe.host.textContent,/恢复记录无法读取/);assert.equal(probe.buttons().some(t=>t.includes("获取支付参数")),false);const cancel=[...probe.host.querySelectorAll("button")].find(b=>b.textContent==="取消订单");assert.equal(cancel?.disabled,true);await probe.click("刷新支付状态");assert.equal(writes,0);assert.equal(window.sessionStorage.getItem(key),"{unreadable");}
+  finally{await probe.dispose(()=>window.sessionStorage.removeItem(key));}
+ });
+});
+
+test("Native readiness never relabels an existing controlled payment as provider payment",async()=>{
+ await withDom(async window=>{
+  let reads=0;const Component=loadComponent("apps/web/src/components/order/order-trade-actions.tsx",session("user_A")).OrderTradeActions;
+  const probe=createProbe(window,Component,{order:channelOrder,party:"renter",onChanged(){}},async()=>{reads++;return json(channelView("order_A",{dataOrigin:"LOCAL_CONTROLLED",payment:{confirmationId:"controlled_fact",disposition:"APPLIED",amount:{cents:"125",currency:"CNY"}}}));});
+  try{await probe.render();assert.equal(reads,1);assert.match(probe.host.textContent,/本地受控收款入口/);assert.doesNotMatch(probe.host.textContent,/渠道付款已接纳/);assert.equal(probe.buttons().some(t=>t.includes("获取支付参数")),false);}
+  finally{await probe.dispose();}
+ });
+});
+
+test("Native malformed POST receipt preserves its original intent instead of acknowledging another source or lossy amount",async()=>{
+ for(const corrupt of [r=>({...r,dataOrigin:"LOCAL_CONTROLLED"}),r=>({...r,request:{...r.request,id:null}}),r=>({...r,request:{...r.request,amount:{cents:125,currency:"CNY"}}})]){
+  await withDom(async window=>{
+   let writes=0;const Component=loadComponent("apps/web/src/components/order/order-trade-actions.tsx",session("user_A")).OrderTradeActions;
+   const probe=createProbe(window,Component,{order:channelOrder,party:"renter",onChanged(){}},async(url,init={})=>{
+    assert.match(String(url),/\/channel-payment-requests$/);if(init.method==="POST"){writes++;return json(corrupt(channelReceipt("ALIPAY_NATIVE")),202);}return json(channelView());
+   });
+   try{await probe.render();await probe.click("获取支付参数");assert.equal(writes,1);assert.match(probe.host.textContent,/回执尚未确认/);assert.equal(intents.loadIntent("user_A","order.channel-payment","order_A").body.method,"ALIPAY_NATIVE");assert.equal(intents.loadIntent("user_A","order.payment","order_A"),null);assert.doesNotMatch(probe.host.textContent,/渠道付款已接纳/);}
+   finally{await probe.dispose(()=>intents.clearIntent("user_A","order.channel-payment","order_A"));}
+  });
+ }
+});
+
 test("F3: blank and negative quantities are refused as unknown, never coerced to 0 or positive", async () => {
   await withDom(async (window) => {
     const log = [];
@@ -240,8 +353,9 @@ test("F2: an unknown payment retries the original key and never double-charges",
     await probe.click("提交支付");
     assert.ok(probe.host.textContent.includes("支付结果未知"), probe.host.textContent.slice(0, 300));
     await probe.click("查询原请求结果");
-    const pays = log.filter((entry) => entry.url.includes("payment-requests"));
+    const pays = log.filter((entry) => entry.method === "POST");
     assert.equal(pays.length, 2);
+    assert.ok(pays.every(entry => entry.url.endsWith("/payment-requests")));
     assert.equal(pays[0].key, pays[1].key);
     assert.ok(probe.host.textContent.includes("支付已接纳"));
     await probe.dispose(() => intents.clearIntent("user_A", "order.payment", "order_A"));
@@ -833,10 +947,11 @@ test("R3: an aged intent is not auto-replayed and stays available for an explici
     const probe = createProbe(window, OrderTradeActions, { order: { ...paidOrder, status: "PENDING_PAYMENT" }, party: "renter", onChanged() {} }, fetchImpl);
     await probe.render();
     assert.ok(probe.host.textContent.includes("超出自动查询窗口"), probe.host.textContent.slice(0, 300));
-    assert.equal(log.length, 0, "an aged intent must not be replayed automatically");
+    assert.equal(log.filter(entry => entry.method === "POST").length, 0, "an aged intent must not be replayed automatically");
     await probe.click("查询原请求结果");
-    assert.equal(log.length, 1, "explicit query still uses the frozen key");
-    assert.equal(log[0].key, "key_aged");
+    const writes = log.filter(entry => entry.method === "POST");
+    assert.equal(writes.length, 1, "explicit query still uses the frozen key");
+    assert.equal(writes[0].key, "key_aged");
     await probe.dispose(() => intents.clearIntent("user_A", "order.payment", "order_A"));
   });
 });

@@ -11,6 +11,7 @@
 export type IntentKind =
   | "order.create.v2"
   | "order.payment"
+  | "order.channel-payment"
   | "order.cancel"
   | "opening.confirm"
   | "settlement.submit"

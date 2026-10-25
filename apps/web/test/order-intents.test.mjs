@@ -28,6 +28,16 @@ test("another identity can never load or reuse the intent", () => {
   assert.notEqual(intents.loadIntent("user_A", "order.payment", "order_1"), null);
 });
 
+test("Native channel intent keeps its own method/key and never replaces the controlled payment slot", () => {
+  intents.saveIntent({userId:"user_native",kind:"order.payment",resourceId:"same_order",key:"controlled_key",body:{}});
+  intents.saveIntent({userId:"user_native",kind:"order.channel-payment",resourceId:"same_order",key:"native_key",body:{method:"WEIXIN_NATIVE"}});
+  const recovered=intents.loadIntent("user_native","order.channel-payment","same_order");
+  assert.equal(recovered.key,"native_key");assert.deepEqual(recovered.body,{method:"WEIXIN_NATIVE"});
+  assert.equal(intents.loadIntent("user_native","order.payment","same_order").key,"controlled_key");
+  assert.equal(intents.loadIntent("other_user","order.channel-payment","same_order"),null);
+  intents.clearIntent("user_native","order.channel-payment","same_order");intents.clearIntent("user_native","order.payment","same_order");
+});
+
 test("saving again preserves the original key and creation time", async () => {
   const first = intents.saveIntent({ userId: "user_A", kind: "order.cancel", resourceId: "order_2", key: "key_3", body: {} }).intent;
   await new Promise((resolve) => setTimeout(resolve, 10));
