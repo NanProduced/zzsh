@@ -178,3 +178,31 @@ test("permission loss removes protected tabs and falls back to workbench", () =>
   assert.equal(canOpenKind("admins", limited), false);
   assert.equal(canOpenKind("account", limited), true);
 });
+
+
+test('return context approval open and close preserves only the bounded membership source subtab', () => {
+  const workbench = tabFromLocation('/workbench');
+  const member = tabFromLocation('/membership-growth', '?userId=user-a&gameId=game-1&tab=entitlements&page=3');
+  const original = structuredClone(member);
+  for (const fromTab of ['policy', 'entitlements']) {
+    const approval = tabFromLocation('/approvals/member-request', '?from=membership-growth&fromTab=' + fromTab);
+    const opened = upsertTab([workbench, member], approval);
+    assert.equal(opened.length, 3, 'opening a detail adds only that detail');
+    assert.deepEqual(opened.find(tab => tab.id === member.id).query, { ...original.query, tab: fromTab });
+    assert.deepEqual(member, original, 'upsert does not mutate the existing source tab');
+    const closed = closeTabs(opened, approval.id, 'self', approval.id);
+    assert.equal(closed.activeId, member.id);
+    assert.deepEqual(closed.tabs.find(tab => tab.id === member.id).query, { ...original.query, tab: fromTab });
+    const reopened = upsertTab(upsertTab([workbench, member], approval), { ...approval, title: '同一申请' });
+    assert.equal(reopened.filter(tab => tab.id === approval.id).length, 1, 'existing detail still uses the original de-duplication path');
+    assert.equal(reopened.find(tab => tab.id === member.id).query.tab, fromTab);
+    assert.equal(upsertTab([workbench], approval).some(tab => tab.kind === 'membership-growth'), false, 'no new membership page is created');
+  }
+  for (const next of [
+    tabFromLocation('/approvals/member-request', '?from=users&fromTab=policy'),
+    tabFromLocation('/approvals/member-request', '?from=membership-growth&fromTab=unknown'),
+    tabFromLocation('/approvals/member-request', '?from=membership-growth'),
+    tabFromLocation('/approvals', '?from=membership-growth&fromTab=policy'),
+    tabFromLocation('/orders/order-one', '?from=membership-growth&fromTab=policy'),
+  ]) assert.deepEqual(upsertTab([workbench, member], next).find(tab => tab.id === member.id), original, 'other origins/kinds/invalid subtabs do not change membership context');
+});

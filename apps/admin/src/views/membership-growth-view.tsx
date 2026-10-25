@@ -2015,13 +2015,17 @@ export function MembershipGrowthAdminView({
                     const completed = step.state === "COMPLETED";
                     const failed = step.state === "FAILED";
                     const current = step.state === "CURRENT";
+                    const endedBeforeStep = ["expired", "cancelled"].includes(changeCard.kind) && !completed && !failed;
+                    const stateLabel = completed ? "已完成" : failed ? "未通过" : endedBeforeStep
+                      ? ({ APPROVAL: "未审批", EXECUTION: "未执行", EFFECTIVE: "未生效" } as Record<string, string>)[step.key] ?? "未发生"
+                      : current ? "当前" : step.state === "UNKNOWN" ? "状态未知" : "待处理";
                     return (
                       <li key={step.key} className="flex min-w-0 items-start gap-2.5">
                         <span className={cn("mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border", completed ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400" : failed ? "border-destructive/40 bg-destructive/10 text-destructive" : current ? "border-amber-500/40 bg-amber-500/15 text-amber-600 dark:text-amber-400" : "border-border text-muted-foreground")}>
                           {completed ? <CheckCircle2 className="size-3" /> : failed ? <X className="size-3" /> : current ? <Clock className="size-3" /> : <span className="size-1.5 rounded-full bg-current" />}
                         </span>
                         <div className="min-w-0 space-y-0.5">
-                          <p className="font-medium text-foreground">{step.label}<span className="ml-2 text-[11px] font-normal text-muted-foreground">{completed ? "已完成" : failed ? "未通过" : current ? "当前" : step.state === "UNKNOWN" ? "状态未知" : "待处理"}</span></p>
+                          <p className="font-medium text-foreground">{step.label}<span className="ml-2 text-[11px] font-normal text-muted-foreground">{stateLabel}</span></p>
                           {completed || failed ? (
                             <p className="text-muted-foreground">{step.actor ? `${step.actor.name ?? step.actor.id}` : "经手人未取得"} · {step.atUtc ? formatDate(step.atUtc) : "时间未取得"}</p>
                           ) : null}

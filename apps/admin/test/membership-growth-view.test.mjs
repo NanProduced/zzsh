@@ -752,3 +752,36 @@ test('closeout expired and cancelled are closed requests, preserve audit links a
     assert.equal(h.button('调整会员政策').disabled, true);
   }
 });
+
+
+test('live polish closed requests show steps not taken while preserving completed and failed facts', async t => {
+  const h = await ui(t), state = readyState();
+  const completedApproval = { key: 'APPROVAL', label: '审批处理', state: 'COMPLETED', actor: { id: 'boss-completed', name: '审批人甲' }, atUtc: '2026-10-21T03:00:00.000Z' };
+  const failedApproval = { ...completedApproval, state: 'FAILED', actor: { id: 'boss-failed', name: '审批人乙' } };
+  const cases = [
+    { status: 'EXPIRED', steps: null, expectedApproval: '未审批' },
+    { status: 'CANCELLED', steps: [...contextSteps('PENDING'), { key: 'EXECUTION', label: '执行发布', state: 'UNKNOWN' }, { key: 'EFFECTIVE', label: '生效', state: 'PENDING' }], expectedApproval: '未审批' },
+    { status: 'EXPIRED', steps: [contextSteps('PENDING')[0], completedApproval], expectedApproval: '已完成', actor: '审批人甲' },
+    { status: 'CANCELLED', steps: [contextSteps('PENDING')[0], failedApproval], expectedApproval: '未通过', actor: '审批人乙' },
+  ];
+  for (const [index, example] of cases.entries()) {
+    await h.render(h.view.MembershipGrowthAdminView, { state: { ...state, policyChange: contextChange({ immutableDiff: null, request: contextRequest({ id: 'closed-step-' + index, approvalStatus: example.status, steps: example.steps }) }) }, onOpenPath: () => {} });
+    await h.click(h.button('查看变更详情'));
+    const dialog = h.browser.document.querySelector('[data-slot=dialog-content]'); assert.ok(dialog);
+    const flow = dialog.querySelector('section[aria-label="流程摘要"]'); assert.ok(flow);
+    const step = label => [...flow.querySelectorAll('li')].find(item => item.querySelector('p')?.textContent.startsWith(label));
+    assert.ok(step('审批处理')); assert.ok(step('执行发布')); assert.ok(step('生效'));
+    assert.equal(step('审批处理').querySelector('p span').textContent, example.expectedApproval, example.status);
+    assert.equal(step('执行发布').querySelector('p span').textContent, '未执行', example.status);
+    assert.equal(step('生效').querySelector('p span').textContent, '未生效', example.status);
+    assert.doesNotMatch(flow.textContent, /状态未知|待处理/, 'closed request steps cannot imply future work');
+    assert.match(flow.textContent, /已提交已完成/);
+    if (example.actor) {
+      assert.match(step('审批处理').textContent, new RegExp(example.actor));
+      assert.match(step('审批处理').textContent, /2026年10月21日 11:00/);
+      assert.doesNotMatch(step('审批处理').textContent, /未审批|经手人未取得/);
+    } else assert.doesNotMatch(step('审批处理').textContent, /审批人甲|审批人乙/);
+    await h.click([...dialog.querySelectorAll('button')].find(button => button.textContent.trim() === '关闭'));
+  }
+  assert.equal(h.fetches.length, 0);
+});

@@ -276,6 +276,10 @@ export function canOpenKind(kind: WorkspaceRouteKind, nav: NavPermission): boole
 }
 
 export function upsertTab(tabs: WorkspaceTab[], next: WorkspaceTab): WorkspaceTab[] {
+  if (next.kind === "approval-object" && next.query.from === "membership-growth" && (next.query.fromTab === "policy" || next.query.fromTab === "entitlements")) {
+    const fromTab = next.query.fromTab;
+    tabs = tabs.map(tab => tab.kind === "membership-growth" ? { ...tab, query: { ...tab.query, tab: fromTab } } : tab);
+  }
   if(next.kind.startsWith("finance-"))return tabs.some(tab=>tab.id===next.id)?tabs.map(tab=>tab.id===next.id?next:tab):[...tabs,next];
   if (next.kind === "users" || next.kind === "user-object") return tabs.some(tab => tab.id === next.id) ? tabs.map(tab => tab.id === next.id ? next : tab) : [...tabs, next];
   if (next.kind === "admins" || next.kind === "roles" || next.kind === "approvals" || next.kind === "audit" || next.kind === "account" || next.kind === "user-restore" || next.kind === "workbench" || next.kind === "support" || next.kind === "membership-growth" || next.kind === "distribution-policy" || next.kind === "catalog" || next.kind === "gunsmith" || next.kind === "rules" || next.kind === "media-review" || next.kind === "listing-review" || next.kind === "content" || next.kind === "orders") {

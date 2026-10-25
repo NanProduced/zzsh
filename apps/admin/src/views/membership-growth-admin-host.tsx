@@ -286,7 +286,7 @@ type HostProps = { tab: WorkspaceTab; snapshot: Extract<SessionSnapshot, { authe
 export function MembershipGrowthAdminHost(props: HostProps) {
   const access = membershipGrowthAccess(props.snapshot);
   return <MembershipBenefitsWorkspace snapshot={props.snapshot} initialUserId={props.tab.query.userId} initialGameId={props.tab.query.gameId} refreshNonce={props.refreshNonce} onOpenPath={props.onOpenPath}
-    initialTab={access.canReadPolicy && !access.canRequestEntitlement ? "policy" : "entitlements"}
+    initialTab={access.canReadPolicy && (props.tab.query.tab === "policy" || !access.canRequestEntitlement) ? "policy" : "entitlements"}
     policy={access.canReadPolicy ? <MembershipGrowthPolicyHost {...props} /> : undefined} />;
 }
 

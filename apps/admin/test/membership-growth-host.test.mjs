@@ -1144,3 +1144,37 @@ test('closeout Host unresolved original key blocks edit and save without droppin
   assert.equal(pending.record.idempotencyKey, key); assert.deepEqual(pending.record.body, body);
   assert.equal(requests.some(item => item.method !== 'GET'), false);
 });
+
+
+test('return context Host honors a direct policy query only with policy access and preserves default selection', async t => {
+  const browser = installBrowser(), { vite, MembershipGrowthAdminHost } = await loadHost();
+  t.after(async () => { await closeUI(vite, browser); });
+  const { tabFromLocation } = await vite.ssrLoadModule('/src/workspace/tab-model.ts');
+  const requests = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const path = String(url), method = (init.method ?? 'GET').toUpperCase(); requests.push({ path, method });
+    if (method === 'GET') { const shared = workspaceRead(path); if (shared) return shared; }
+    if (method === 'GET' && path.endsWith('/membership-growth/policy')) return respond(policyResponse());
+    throw new Error('unexpected ' + method + ' ' + path);
+  };
+  const cases = [
+    { query: '?tab=policy', snapshot: actorSnapshot(), selected: '会员政策', canPolicy: true },
+    { query: '', snapshot: actorSnapshot(), selected: '礼遇管理', canPolicy: true },
+    { query: '?tab=entitlements', snapshot: actorSnapshot(), selected: '礼遇管理', canPolicy: true },
+    { query: '?tab=policy', snapshot: actorSnapshot(['approval.request.create', 'membership.entitlement.request'], false), selected: '礼遇管理', canPolicy: false },
+    { query: '?tab=entitlements', snapshot: actorSnapshot(['membership.growth.read.summary'], false), selected: '会员政策', canPolicy: true },
+  ];
+  for (const [index, example] of cases.entries()) {
+    const host = browser.document.createElement('div'); browser.document.body.append(host);
+    const { createRoot } = await import('react-dom/client'), root = createRoot(host); roots.add(root);
+    const requestStart = requests.length;
+    await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: tabFromLocation('/membership-growth', example.query), snapshot: example.snapshot, onDirtyChange: () => {}, refreshNonce: 0 })));
+    const selected = host.querySelector('[role=tab][aria-selected=true]'); assert.ok(selected, 'active subtab for case ' + index);
+    assert.equal(selected.textContent, example.selected, 'initial subtab for ' + example.query + '/' + index);
+    const policyTab = [...host.querySelectorAll('[role=tab]')].find(item => item.textContent === '会员政策');
+    assert.equal(Boolean(policyTab), example.canPolicy);
+    if (!example.canPolicy) assert.equal(requests.slice(requestStart).some(item => item.path.endsWith('/membership-growth/policy')), false, 'query cannot grant policy read access');
+    await act(async () => root.unmount()); roots.delete(root); host.remove();
+  }
+  assert.ok(requests.every(request => request.method === 'GET'));
+});
