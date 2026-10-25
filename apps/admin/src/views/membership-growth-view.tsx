@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, useRef } from "react";
-import { CheckCircle2, ChevronRight, Copy, LineChart, Lock, Pencil, Plus, Trash2, TriangleAlert, X, History, AlertCircle, FileEdit, Send } from "lucide-react";
+import { CheckCircle2, ChevronRight, Copy, LineChart, Lock, Pencil, Plus, Trash2, TriangleAlert, X, History, AlertCircle, FileEdit, Send, Clock, RefreshCw } from "lucide-react";
+import { Alert, AlertTitle, AlertDescription, AlertAction } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -80,7 +81,49 @@ export type AdminPolicyChange = { label: string; before: string; after: string; 
 
 export type AdminGrowthPreview = { status: "NOT_RUN" | "LOCAL_FIXTURE" | "KNOWN" | "UNKNOWN"; totalCents?: string; priceBasis?: string; depositBasis?: string; reason?: string };
 export type AdminGrowthSubject = { subjectId: string; status: "NOT_LOADED" | "LOADED" | "UNKNOWN" | "FORBIDDEN"; userLabel?: string; tier?: string; rollingPoints?: string; lifetimePoints?: string; evidence?: string[]; reason?: string };
-export type AdminApproval = { status: "NOT_REQUESTED" | "REQUESTED" | "APPLIED" | "REJECTED" | "UNKNOWN"; requestId?: string; message?: string };
+export type AdminApproval = { status: "NOT_REQUESTED" | "REQUESTED" | "APPLIED" | "REJECTED" | "EXPIRED" | "CANCELLED" | "UNKNOWN"; requestId?: string; message?: string };
+
+export type AdminPolicyRequestedValue = { label: string; value: string | null; format: "TEXT" | "DISCOUNT" | "CENTS" };
+export type AdminPolicyNotice = { tone: "info" | "warning" | "error"; title: string; description: string; requestId?: string | null; onRecover?: () => void; recovering?: boolean; blocking?: boolean };
+export type AdminPolicyChangePerson = { id: string; name: string | null };
+export type AdminPolicyChangeStep = {
+  key: "SUBMITTED" | "APPROVAL" | "EXECUTION" | "EFFECTIVE";
+  label: string;
+  state: "COMPLETED" | "CURRENT" | "PENDING" | "FAILED" | "UNKNOWN";
+  actor?: AdminPolicyChangePerson | null;
+  atUtc?: string | null;
+  note?: string | null;
+};
+export type AdminPolicyChangeDiff = {
+  label: string;
+  baseline: string | null;
+  requested: string | null;
+  format?: "TEXT" | "DISCOUNT" | "CENTS";
+  risk?: "LOW" | "REVIEW_REQUIRED";
+};
+export type AdminPolicyChangeRequest = {
+  id: string;
+  operationCode?: string | null;
+  approvalStatus: string;
+  executionStatus?: string | null;
+  reason?: string | null;
+  submittedBy?: AdminPolicyChangePerson | null;
+  submittedAtUtc?: string | null;
+  plannedEffectiveAtUtc?: string | null;
+  steps?: AdminPolicyChangeStep[] | null;
+};
+export type AdminPolicyChangeProjection = {
+  knowledge: "KNOWN" | "UNKNOWN" | "FORBIDDEN";
+  draftReference?: { id: string; version: string; payloadHash: string } | null;
+  request?: AdminPolicyChangeRequest | null;
+  immutableDiff?: AdminPolicyChangeDiff[] | null;
+  requestedValues?: AdminPolicyRequestedValue[] | null;
+  effectiveState?: { status: string; effectiveAtUtc?: string | null; executed?: boolean | null } | null;
+  message?: string | null;
+};
+export type AdminPolicyChangeRead =
+  | { status: "READY"; change: AdminPolicyChangeProjection | null; knownRequestId?: string | null }
+  | { status: "UNAVAILABLE"; message?: string | null; knownRequestId?: string | null };
 
 export type MembershipGrowthAdminState =
   | { status: "loading" }
@@ -96,6 +139,8 @@ export type MembershipGrowthAdminState =
       preview: AdminGrowthPreview;
       subject: AdminGrowthSubject;
       approval: AdminApproval;
+      policyChange: AdminPolicyChangeRead;
+      draftReference: { id: string; version: string; payloadHash: string } | null;
     };
 
 const TIER_LABELS: Record<AdminGrowthTier, string> = { STANDARD: "普通", SILVER: "银卡", GOLD: "金卡", PLATINUM: "铂金", DIAMOND: "钻石" };
@@ -233,6 +278,26 @@ function depositText(tier: AdminGrowthPolicy["tiers"][number]): string {
   return formatDepositBenefitText(tier.tenantDeposit === "WAIVED", tier.depositAllowanceCents);
 }
 
+export const BLACK_GOLD_CONDITION = "累计有效成长积分 50,000";
+
+function formatPointValue(value: string | undefined): string {
+  if (!value) return "—";
+  return /^\d+$/.test(value) ? value.replace(/\B(?=(\d{3})+(?!\d))/g, ",") : value;
+}
+
+export function blackGoldBenefits(policy: AdminGrowthPolicy | null, unified: UnifiedPricingProjection | null) {
+  const diamondTier = policy?.tiers.find((tier) => tier.tier === "DIAMOND") ?? null;
+  const display = unifiedTierText(unified?.tiers.DIAMOND);
+  return {
+    discountText: display.text,
+    discountConfigured: display.configured,
+    discountDetail: display.detail,
+    depositText: diamondTier ? depositText(diamondTier) : "未取得",
+    depositKnown: Boolean(diamondTier),
+    depositVariant: (diamondTier?.tenantDeposit === "WAIVED" ? "success" : diamondTier?.depositAllowanceCents && diamondTier.depositAllowanceCents !== "0" ? "info" : "outline") as "success" | "info" | "outline",
+  };
+}
+
 /** Mirrors the backend's integer-cents bound; a valid raw text must be sent unchanged, never replaced by an older value. */
 export function parsePolicyAllowanceYuan(value: string): { cents: string | null; error: string } {
   const trimmed = value.trim();
@@ -295,6 +360,409 @@ export function diffGrowthPolicies(
     }
   }
   return changes;
+}
+
+export function withBlackGoldChanges(changes: AdminPolicyChange[]): AdminPolicyChange[] {
+  if (changes.some((change) => change.label.includes("黑金"))) return changes;
+  return changes.flatMap((change) => {
+    const derived: AdminPolicyChange[] = [change];
+    if (change.label === "钻石 · 统一应付折扣") derived.push({ ...change, label: "黑金（永久） · 统一应付折扣（随钻石）" });
+    if (change.label === "钻石 · 押金权益") derived.push({ ...change, label: "黑金（永久） · 押金权益（随钻石）" });
+    return derived;
+  });
+}
+
+export function withBlackGoldDiffs(diffs: AdminPolicyChangeDiff[]): AdminPolicyChangeDiff[] {
+  if (diffs.some((diff) => diff.label.includes("黑金"))) return diffs;
+  return diffs.flatMap((diff) => {
+    const derived: AdminPolicyChangeDiff[] = [diff];
+    if (diff.label === "钻石 · 统一应付折扣") derived.push({ ...diff, label: "黑金（永久） · 统一应付折扣（随钻石）" });
+    if (diff.label === "钻石 · 押金权益") derived.push({ ...diff, label: "黑金（永久） · 押金权益（随钻石）" });
+    return derived;
+  });
+}
+
+export type PolicyChangeCardKind = "draft" | "pending" | "rejected" | "approved" | "execution-unknown" | "pending-effective" | "effective" | "expired" | "cancelled" | "unknown" | "forbidden" | "unavailable" | "foreign" | "none";
+
+export type PolicyChangeCardModel = {
+  kind: PolicyChangeCardKind;
+  label: string;
+  summary: string;
+  diffs: AdminPolicyChangeDiff[];
+  detailDiffs: AdminPolicyChangeDiff[];
+  diffGap: string | null;
+  request: AdminPolicyChangeRequest | null;
+  requestId: string | null;
+  priorRequest: boolean;
+  submittedBy: AdminPolicyChangePerson | null;
+  submittedAtUtc: string | null;
+  plannedEffectiveAtUtc: string | null;
+  nextStep: string;
+  effectiveNote: string;
+  canSubmit: boolean;
+  submitReason: string | null;
+  canOpenDetail: boolean;
+  approvalActionLabel: string | null;
+  sourceNote: string | null;
+  steps: AdminPolicyChangeStep[];
+};
+
+type PolicyChangeCardInput = {
+  read: AdminPolicyChangeRead;
+  approval: AdminApproval;
+  hasDraft: boolean;
+  currentDraft: { id: string; version: string; payloadHash: string } | null;
+  draftDiffs: AdminPolicyChangeDiff[];
+  submitReady: boolean;
+  localPending: boolean;
+};
+
+function formatPolicyChangeValue(value: string | null | undefined, format: AdminPolicyChangeDiff["format"]): string {
+  if (value === null || value === undefined || value === "") return "未取得";
+  if (format === "DISCOUNT") {
+    if (parsePayableRatio(value) === null) return "未取得";
+    const label = formatDiscountLabel(value);
+    return label === "原价" ? "原价" : `${label}（实付 ${formatPayablePercent(value)}）`;
+  }
+  if (format === "CENTS") return /^-?(0|[1-9]\d*)$/.test(value) ? formatCents(value) : "未取得";
+  return value;
+}
+
+export function policyChangeDiffText(item: AdminPolicyChangeDiff, side: "baseline" | "requested"): string {
+  return formatPolicyChangeValue(side === "baseline" ? item.baseline : item.requested, item.format);
+}
+
+export function requestKind(request: AdminPolicyChangeRequest, change: AdminPolicyChangeProjection): Exclude<PolicyChangeCardKind, "draft" | "none" | "foreign" | "forbidden" | "unavailable"> {
+  const approval = request.approvalStatus.toUpperCase();
+  if (approval === "EXPIRED") return "expired";
+  if (approval === "CANCELLED") return "cancelled";
+  const execution = (request.executionStatus ?? "").toUpperCase();
+  const effective = (change.effectiveState?.status ?? "").toUpperCase();
+  const executed = request.executionStatus
+    ? ["EXECUTED", "SUCCEEDED", "DONE", "PUBLISHED"].some((value) => execution.includes(value))
+    : change.effectiveState?.executed === true;
+  const executionFailed = ["FAILED", "ERROR", "UNKNOWN"].some((value) => execution.includes(value));
+  if (approval.includes("REJECT") || approval.includes("DENIED")) return "rejected";
+  if (approval.includes("APPROVED")) {
+    if (executionFailed) return "execution-unknown";
+    if (effective === "EFFECTIVE") return "effective";
+    if (executed) {
+      if (effective === "PENDING_EFFECTIVE" || effective === "SCHEDULED") return "pending-effective";
+      // Without a server effective projection, an executed request is not proof of a scheduled/effective result.
+      return "unknown";
+    }
+    return "approved";
+  }
+  if (approval.includes("PENDING") || approval.includes("REVIEW") || approval.includes("SUBMITTED")) return "pending";
+  return "unknown";
+}
+
+function policyChangeSteps(request: AdminPolicyChangeRequest, change: AdminPolicyChangeProjection, kind: PolicyChangeCardKind): AdminPolicyChangeStep[] {
+  const effective = change.effectiveState;
+  const provided = new Map((request.steps ?? []).map((step) => [step.key, step]));
+  const base = (key: AdminPolicyChangeStep["key"], label: string, state: AdminPolicyChangeStep["state"]): AdminPolicyChangeStep => ({ key, label, state });
+  const steps = [
+    base("SUBMITTED", "已提交", request.id ? "COMPLETED" : "UNKNOWN"),
+    base("APPROVAL", "审批处理", kind === "pending" ? "CURRENT" : kind === "rejected" ? "FAILED" : kind === "unknown" || kind === "expired" || kind === "cancelled" ? "UNKNOWN" : "COMPLETED"),
+    base("EXECUTION", "执行发布", kind === "execution-unknown" ? "UNKNOWN" : kind === "approved" || kind === "pending" ? (kind === "approved" ? "CURRENT" : "PENDING") : kind === "pending-effective" || kind === "effective" ? "COMPLETED" : "PENDING"),
+    base("EFFECTIVE", "生效", kind === "effective" ? "COMPLETED" : kind === "pending-effective" ? "CURRENT" : "PENDING"),
+  ];
+  for (const step of steps) {
+    const actual = provided.get(step.key);
+    if (!actual) continue;
+    step.label = actual.label || step.label;
+    step.state = actual.state;
+    step.note = actual.note ?? null;
+    if (step.state === "COMPLETED" || step.state === "FAILED") {
+      step.actor = actual.actor ?? null;
+      step.atUtc = actual.atUtc ?? null;
+    }
+  }
+  const submitted = steps[0]!;
+  if (submitted.state === "COMPLETED") {
+    submitted.actor = submitted.actor ?? request.submittedBy ?? null;
+    submitted.atUtc = submitted.atUtc ?? request.submittedAtUtc ?? null;
+  }
+  const effectiveStep = steps[3]!;
+  if (effectiveStep.state === "COMPLETED" && !effectiveStep.atUtc) effectiveStep.atUtc = effective?.effectiveAtUtc ?? request.plannedEffectiveAtUtc ?? null;
+  return steps;
+}
+
+const POLICY_CHANGE_COPY: Record<PolicyChangeCardKind, { label: string; nextStep: string; effectiveNote: string }> = {
+  draft: { label: "草稿待提交", nextStep: "下一步：保存并核对差异后可提交审批；审批通过并执行后才生效。", effectiveNote: "尚未提交；当前生效仍以本页权益表为准。" },
+  pending: { label: "待审批", nextStep: "下一步：由具备审批权限的管理员在审批中心处理；当前审批不是多人逐级必签。", effectiveNote: "批准并执行后才生效；计划时间不构成按时生效保证。" },
+  rejected: { label: "已退回", nextStep: "下一步：调整草稿并保存后可重新提交；服务端仍会复核重复申请。", effectiveNote: "本次申请未生效；当前权益不变。" },
+  approved: { label: "审批已过待发布", nextStep: "下一步：执行/发布；批准不等于生效。", effectiveNote: "执行并到达计划时间后才生效。" },
+  "execution-unknown": { label: "执行状态待核对", nextStep: "下一步：核对执行结果；失败或未知不能当作已生效。", effectiveNote: "执行未确认，当前不能称为已生效。" },
+  "pending-effective": { label: "已发布待生效", nextStep: "下一步：等待到达计划生效时点；以服务端当前生效投影为准。", effectiveNote: "已发布但尚未到生效时点。" },
+  effective: { label: "已生效", nextStep: "当前已生效；以本页生效权益为准。", effectiveNote: "已生效。" },
+  expired: { label: "已过期", nextStep: "请调整并保存草稿后重新提交。", effectiveNote: "这份申请已过期。" },
+  cancelled: { label: "已撤销", nextStep: "请调整并保存草稿后重新提交。", effectiveNote: "这份申请已撤销。" },
+  unknown: { label: "暂未取得变更状态", nextStep: "下一步：刷新状态或查看原申请；关联未清前不能新建政策申请。", effectiveNote: "生效状态未取得。" },
+  forbidden: { label: "无权读取变更状态", nextStep: "下一步：联系具备审批读取权限的管理员。", effectiveNote: "当前身份不能读取变更详情。" },
+  unavailable: { label: "暂未取得变更状态", nextStep: "下一步：刷新状态或查看原申请；服务端变更投影未就绪前不能新建政策申请。", effectiveNote: "生效状态未取得。" },
+  foreign: { label: "原申请属于另一份草稿", nextStep: "下一步：刷新状态或查看原申请；不会把该申请贴到当前草稿。", effectiveNote: "当前草稿关联未知。" },
+  none: { label: "暂无待处理变更", nextStep: "当前无需处理。", effectiveNote: "当前生效以本页权益表为准。" },
+};
+
+export function policyChangeCardModel(input: PolicyChangeCardInput): PolicyChangeCardModel {
+  const { read, approval, hasDraft, currentDraft, draftDiffs, submitReady, localPending } = input;
+  const localId = approval.requestId ?? null;
+  const localActive = approval.status === "REQUESTED";
+  const localRejected = approval.status === "REJECTED";
+  const serverId = read.knownRequestId ?? (read.status === "READY" ? read.change?.request?.id ?? null : null);
+  const fallbackId = localId ?? serverId;
+  const localClosed = ["REJECTED", "EXPIRED", "CANCELLED", "APPLIED"].includes(approval.status);
+  const localUnresolvedReal = localActive || Boolean(localId && !localClosed) || localPending;
+  const localRequest = (): AdminPolicyChangeRequest | null => localId ? {
+    id: localId,
+    approvalStatus: localRejected ? "REJECTED" : localActive ? "PENDING" : "UNKNOWN",
+    submittedBy: null,
+    submittedAtUtc: null,
+    plannedEffectiveAtUtc: null,
+    steps: null,
+  } : null;
+  const localKind: PolicyChangeCardKind = localRejected ? "rejected" : localActive ? "pending" : "unknown";
+  const localLabel = localRejected ? "已退回" : localActive ? "已提交审批" : "暂未取得变更状态";
+  const localCard = (sourceNote: string): PolicyChangeCardModel => ({
+    kind: localKind,
+    label: localLabel,
+    summary: approval.message ?? (localRejected ? "本页保留的原申请已退回；服务端状态待复核" : localActive ? "本页保留原申请号；服务端变更状态待复核" : "关联申请待核对"),
+    diffs: [],
+    detailDiffs: [],
+    diffGap: "差异未取得：需服务端返回原申请冻结值，不能用当前草稿代替。",
+    request: localRequest(),
+    requestId: fallbackId,
+    priorRequest: false,
+    submittedBy: null,
+    submittedAtUtc: null,
+    plannedEffectiveAtUtc: null,
+    nextStep: localActive ? "下一步：到审批中心查看/处理；本页不能据此新建申请。" : POLICY_CHANGE_COPY[localKind].nextStep,
+    effectiveNote: POLICY_CHANGE_COPY[localKind].effectiveNote,
+    canSubmit: false,
+    submitReason: sourceNote,
+    canOpenDetail: Boolean(fallbackId),
+    approvalActionLabel: localActive ? "到审批中心处理" : "查看原申请",
+    sourceNote,
+    steps: localRequest() ? policyChangeSteps(localRequest()!, { knowledge: "UNKNOWN" }, localKind) : [],
+  });
+  const idOnlyCard = (kind: "forbidden" | "unknown", label: string, summary: string, sourceNote: string): PolicyChangeCardModel => ({
+    kind,
+    label,
+    summary,
+    diffs: [],
+    detailDiffs: [],
+    diffGap: kind === "forbidden" ? "无权读取差异详情；原申请号已保留。" : "差异未取得：需服务端返回原申请冻结值。",
+    request: null,
+    requestId: fallbackId,
+    priorRequest: false,
+    submittedBy: null,
+    submittedAtUtc: null,
+    plannedEffectiveAtUtc: null,
+    nextStep: POLICY_CHANGE_COPY[kind].nextStep,
+    effectiveNote: POLICY_CHANGE_COPY[kind].effectiveNote,
+    canSubmit: false,
+    submitReason: sourceNote,
+    canOpenDetail: Boolean(fallbackId),
+    approvalActionLabel: fallbackId ? "查看原申请" : null,
+    sourceNote,
+    steps: [],
+  });
+  const draftOrNone = (request: AdminPolicyChangeRequest | null, change: AdminPolicyChangeProjection | null, sourceNote: string | null, prior: boolean): PolicyChangeCardModel => {
+    const kind: PolicyChangeCardKind = hasDraft ? "draft" : "none";
+    const copy = POLICY_CHANGE_COPY[kind];
+    const priorLabel = request ? `；上次申请已${requestKind(request, change ?? { knowledge: "UNKNOWN" }) === "effective" ? "生效" : "退回"}（另一份草稿）` : "";
+    return {
+      kind,
+      label: copy.label,
+      summary: hasDraft
+        ? `草稿待提交 · ${draftDiffs.length ? `与当前生效基线相差${draftDiffs.length}项` : "与当前生效基线一致"}${priorLabel}`
+        : "服务端确认当前没有在途政策申请",
+      diffs: draftDiffs,
+      detailDiffs: prior && request && change ? (change.immutableDiff ?? []) : draftDiffs,
+      diffGap: prior && request && change && change.immutableDiff == null ? "差异未取得：需服务端返回原申请冻结值。" : null,
+      request,
+      requestId: request?.id ?? null,
+      priorRequest: prior,
+      submittedBy: null,
+      submittedAtUtc: null,
+      plannedEffectiveAtUtc: null,
+      nextStep: copy.nextStep,
+      effectiveNote: copy.effectiveNote,
+      canSubmit: submitReady && !localUnresolvedReal,
+      submitReason: localUnresolvedReal ? "本页仍有原申请责任未核清；服务端确认前不能新建申请。" : null,
+      canOpenDetail: Boolean(request) || hasDraft,
+      approvalActionLabel: request ? "查看原申请" : null,
+      sourceNote,
+      steps: [],
+    };
+  };
+
+  if (read.status === "UNAVAILABLE") {
+    if (localUnresolvedReal) return localCard(read.message ?? "服务端尚未提供变更状态；本页原申请号已保留。");
+    if (fallbackId) return idOnlyCard("unknown", POLICY_CHANGE_COPY.unknown.label, "服务端变更状态未取得；原申请号保留", read.message ?? "服务端尚未提供变更状态；仅保留原申请号。");
+    return {
+      kind: "unavailable", label: POLICY_CHANGE_COPY.unavailable.label,
+      summary: "服务端尚未提供政策变更读取投影；不能据此判断没有申请",
+      diffs: [], detailDiffs: [], diffGap: null, request: null, requestId: null, priorRequest: false,
+      submittedBy: null, submittedAtUtc: null, plannedEffectiveAtUtc: null,
+      nextStep: POLICY_CHANGE_COPY.unavailable.nextStep, effectiveNote: POLICY_CHANGE_COPY.unavailable.effectiveNote,
+      canSubmit: false, submitReason: read.message ?? "变更状态尚未取得；当前不能提交新申请。",
+      canOpenDetail: false, approvalActionLabel: null, sourceNote: read.message ?? null, steps: [],
+    };
+  }
+  const change = read.change;
+  if (!change) {
+    if (localUnresolvedReal) return localCard("服务端未返回变更状态；本页原申请号已保留。");
+    if (fallbackId) return idOnlyCard("unknown", POLICY_CHANGE_COPY.unknown.label, "服务端未返回变更状态；原申请号保留", "服务端未返回变更状态；仅保留原申请号。");
+    return { ...draftOrNone(null, null, null, false), canSubmit: false, submitReason: "服务端未返回变更状态；当前不能提交新申请。" };
+  }
+  if (change.knowledge === "FORBIDDEN") {
+    if (fallbackId) return idOnlyCard("forbidden", POLICY_CHANGE_COPY.forbidden.label, "变更详情已受限；原申请号保留", "变更详情权限已变化；受限差异、人员和时已清除，仅保留原申请号。");
+    return {
+      kind: "forbidden", label: POLICY_CHANGE_COPY.forbidden.label, summary: "当前身份不能读取政策变更详情",
+      diffs: [], detailDiffs: [], diffGap: null, request: null, requestId: null, priorRequest: false,
+      submittedBy: null, submittedAtUtc: null, plannedEffectiveAtUtc: null,
+      nextStep: POLICY_CHANGE_COPY.forbidden.nextStep, effectiveNote: POLICY_CHANGE_COPY.forbidden.effectiveNote,
+      canSubmit: false, submitReason: "无权读取变更状态；当前不能提交新申请。",
+      canOpenDetail: false, approvalActionLabel: null, sourceNote: change.message ?? null, steps: [],
+    };
+  }
+  if (change.knowledge === "UNKNOWN") {
+    if (localUnresolvedReal) return localCard(change.message ?? "服务端暂未取得变更状态；本页原申请号已保留。");
+    if (fallbackId) return idOnlyCard("unknown", POLICY_CHANGE_COPY.unknown.label, change.message ?? "服务端暂未取得变更状态；原申请号保留", change.message ?? "服务端暂未取得变更状态；仅保留原申请号。");
+    return {
+      kind: "unknown", label: POLICY_CHANGE_COPY.unknown.label, summary: change.message ?? "服务端暂未取得政策变更状态",
+      diffs: [], detailDiffs: [], diffGap: null, request: null, requestId: null, priorRequest: false,
+      submittedBy: null, submittedAtUtc: null, plannedEffectiveAtUtc: null,
+      nextStep: POLICY_CHANGE_COPY.unknown.nextStep, effectiveNote: POLICY_CHANGE_COPY.unknown.effectiveNote,
+      canSubmit: false, submitReason: "变更状态未取得；当前不能提交新申请。",
+      canOpenDetail: false, approvalActionLabel: null, sourceNote: change.message ?? null, steps: [],
+    };
+  }
+
+  const request = change.request ?? null;
+  if (!request) {
+    if (localUnresolvedReal) return localCard("服务端未返回该申请；本页原申请号已保留。");
+    return draftOrNone(null, change, null, false);
+  }
+  const reference = change.draftReference ?? null;
+  const referenceComplete = Boolean(reference && reference.id && reference.version && reference.payloadHash);
+  const operationOk = request.operationCode === "membership.benefit.policy.publish";
+  if (!operationOk || !referenceComplete || !reference) {
+    const operationMissing = !request.operationCode;
+    const label = operationMissing || operationOk ? "暂未取得变更状态" : "业务类型不匹配";
+    const summary = operationMissing
+      ? "申请业务类型未取得；不能核对是否会员政策"
+      : operationOk
+        ? "申请草稿引用未取得；不能确认对应当前政策"
+        : "返回的申请不是会员政策发布；未贴到当前草稿";
+    const sourceNote = operationMissing
+      ? "申请缺少业务类型；不能视为已核实的会员政策申请。"
+      : operationOk
+        ? "草稿引用缺少完整 id/version/hash；保持未知。"
+        : "业务类型与 policy publish 不一致。";
+    return {
+      kind: "unknown", label, summary,
+      diffs: [], detailDiffs: [], diffGap: "差异未取得：关联未核实，不能按当前草稿展示。",
+      request, requestId: request.id, priorRequest: false,
+      submittedBy: request.submittedBy ?? null, submittedAtUtc: request.submittedAtUtc ?? null, plannedEffectiveAtUtc: request.plannedEffectiveAtUtc ?? null,
+      nextStep: "下一步：刷新状态或查看原申请；未核清前不能新建政策申请。",
+      effectiveNote: "当前草稿关联与生效状态未取得。",
+      canSubmit: false, submitReason: "申请业务类型或草稿引用未核清；当前不能提交新申请。",
+      canOpenDetail: true, approvalActionLabel: "查看原申请", sourceNote, steps: policyChangeSteps(request, change, "unknown"),
+    };
+  }
+  const matchesDraft = Boolean(currentDraft
+    && reference.id === currentDraft.id
+    && reference.version === currentDraft.version
+    && reference.payloadHash === currentDraft.payloadHash);
+  const kind = requestKind(request, change);
+  const copy = POLICY_CHANGE_COPY[kind];
+  const diffs = withBlackGoldDiffs(change.immutableDiff ?? []);
+  const diffGap = change.immutableDiff == null ? "差异未取得：需服务端返回原申请冻结值，不能用当前草稿代替。" : null;
+  const planned = request.plannedEffectiveAtUtc ?? change.effectiveState?.effectiveAtUtc ?? null;
+  const localConflict = localPending || Boolean(localId && localId !== request.id && !localClosed);
+  if (kind === "expired" || kind === "cancelled") {
+    const sameDraft = Boolean(currentDraft && matchesDraft);
+    const canSubmit = !sameDraft && Boolean(currentDraft) && hasDraft && submitReady && !localConflict;
+    return {
+      kind, label: copy.label, summary: copy.effectiveNote,
+      diffs, detailDiffs: diffs, diffGap, request, requestId: request.id, priorRequest: Boolean(currentDraft && !sameDraft),
+      submittedBy: request.submittedBy ?? null, submittedAtUtc: request.submittedAtUtc ?? null, plannedEffectiveAtUtc: planned,
+      nextStep: canSubmit ? "新草稿已保存，可以重新提交审批。" : copy.nextStep, effectiveNote: copy.effectiveNote,
+      canSubmit, submitReason: localConflict ? "上次提交结果仍待核对，请先查询原结果。" : sameDraft ? "请调整并保存草稿后重新提交。" : null,
+      canOpenDetail: true, approvalActionLabel: "查看原申请", sourceNote: null, steps: policyChangeSteps(request, change, kind),
+    };
+  }
+  if (!currentDraft) {
+    if (kind === "pending-effective" || kind === "effective") {
+      return {
+        kind, label: copy.label,
+        summary: `${copy.label} · ${diffs.length ? `调整${diffs.length}项权益` : diffGap ? "差异未取得" : "未显示权益差异"}`,
+        diffs, detailDiffs: diffs, diffGap, request, requestId: request.id, priorRequest: false,
+        submittedBy: request.submittedBy ?? null, submittedAtUtc: request.submittedAtUtc ?? null, plannedEffectiveAtUtc: planned,
+        nextStep: copy.nextStep, effectiveNote: copy.effectiveNote,
+        canSubmit: false, submitReason: "已核发布申请不当作当前草稿；当前不能新建同类申请。",
+        canOpenDetail: true, approvalActionLabel: "查看原申请",
+        sourceNote: "原申请引用的是已发布政策；当前没有可编辑草稿。",
+        steps: policyChangeSteps(request, change, kind),
+      };
+    }
+    if (kind === "rejected") {
+      return {
+        kind, label: copy.label, summary: "申请已退回；当前没有可编辑草稿",
+        diffs, detailDiffs: diffs, diffGap, request, requestId: request.id, priorRequest: false,
+        submittedBy: request.submittedBy ?? null, submittedAtUtc: request.submittedAtUtc ?? null, plannedEffectiveAtUtc: planned,
+        nextStep: copy.nextStep, effectiveNote: copy.effectiveNote,
+        canSubmit: false, submitReason: "当前没有可编辑草稿；不能新建同类申请。",
+        canOpenDetail: true, approvalActionLabel: "查看原申请",
+        sourceNote: "原申请引用的是已退回政策草稿；当前没有可编辑草稿。",
+        steps: policyChangeSteps(request, change, kind),
+      };
+    }
+    return {
+      kind: "unknown", label: "暂未取得变更状态", summary: "当前没有可编辑草稿；申请关联与生效依据待核",
+      diffs: [], detailDiffs: [], diffGap: "差异未取得：缺少可核对的当前草稿或生效投影。",
+      request, requestId: request.id, priorRequest: false,
+      submittedBy: request.submittedBy ?? null, submittedAtUtc: request.submittedAtUtc ?? null, plannedEffectiveAtUtc: planned,
+      nextStep: POLICY_CHANGE_COPY.unknown.nextStep, effectiveNote: "当前没有可编辑草稿；生效状态未取得。",
+      canSubmit: false, submitReason: "申请关联未核实；当前不能新建同类申请。",
+      canOpenDetail: true, approvalActionLabel: "查看原申请",
+      sourceNote: "当前没有可编辑草稿；不能把该申请当作当前草稿。",
+      steps: policyChangeSteps(request, change, "unknown"),
+    };
+  }
+  if (!matchesDraft) {
+    if (kind === "rejected" || kind === "effective") {
+      const previous = draftOrNone(request, change, `上次申请（另一份草稿）${kind === "effective" ? "已生效" : "已退回"}；未贴到当前草稿。`, true);
+      return { ...previous, canSubmit: submitReady && !localConflict, submitReason: localConflict ? "上次提交结果仍待核对，请先查询原结果。" : null };
+    }
+    return {
+      kind: "foreign",
+      label: "原申请属于另一份草稿",
+      summary: `原申请${copy.label}；当前草稿关联未知`,
+      diffs, detailDiffs: diffs, diffGap, request, requestId: request.id, priorRequest: true,
+      submittedBy: request.submittedBy ?? null, submittedAtUtc: request.submittedAtUtc ?? null, plannedEffectiveAtUtc: planned,
+      nextStep: copy.nextStep, effectiveNote: copy.effectiveNote,
+      canSubmit: false, submitReason: "原申请引用另一份草稿；当前草稿关联未清，不能提交新申请。",
+      canOpenDetail: true, approvalActionLabel: "查看原申请",
+      sourceNote: "原申请引用的草稿 id/version/hash 与当前草稿不一致。",
+      steps: policyChangeSteps(request, change, kind),
+    };
+  }
+  const canSubmit = false;
+  return {
+    kind, label: copy.label,
+    summary: `${copy.label} · ${diffs.length ? `调整${diffs.length}项权益` : diffGap ? "差异未取得" : "未显示权益差异"}`,
+    diffs, detailDiffs: diffs, diffGap, request, requestId: request.id, priorRequest: false,
+    submittedBy: request.submittedBy ?? null, submittedAtUtc: request.submittedAtUtc ?? null, plannedEffectiveAtUtc: planned,
+    nextStep: copy.nextStep, effectiveNote: copy.effectiveNote,
+    canSubmit, submitReason: canSubmit ? null : "该申请已有在途/关联记录；当前不能新建同类申请。",
+    canOpenDetail: true, approvalActionLabel: kind === "pending" || kind === "approved" || kind === "execution-unknown" ? "到审批中心处理" : "查看原申请",
+    sourceNote: localConflict ? "本页仍有另一条原申请责任待核；服务端投影与本地记录同时保留。" : null,
+    steps: policyChangeSteps(request, change, kind),
+  };
 }
 
 export function formatCents(cents: string | undefined): string {
@@ -1011,23 +1479,21 @@ function CopyButton({ value }: { value: string }) {
   );
 }
 
-function stateMessage(state: Exclude<MembershipGrowthAdminState, { status: "ready" }>) {
-  const title = state.status === "loading" ? "正在读取会员政策" : state.status === "permission" ? "没有会员政策查看权限" : "会员政策暂不可用";
-  return (
-    <section className="membership-admin-view" data-state={state.status} role={state.status === "error" ? "alert" : "status"}>
-      <div className="membership-admin-state">
-        <strong>{title}</strong>
-        {state.status === "loading" ? (
-          <>
-            <Skeleton className="h-8 w-full" />
-            <Skeleton className="h-36 w-full" />
-          </>
-        ) : (
-          <p>{state.message}</p>
-        )}
-      </div>
-    </section>
-  );
+function stateMessage(state: Exclude<MembershipGrowthAdminState, { status: "ready" }>, refresh?: () => void, requestId?: string | null, open?: (path: string, title?: string) => void) {
+  const loading = state.status === "loading", denied = state.status === "permission";
+  const title = loading ? "正在读取会员政策" : denied ? "没有会员政策查看权限" : "会员政策暂不可用";
+  return <section className="membership-admin-view" data-state={state.status}>
+    <Alert variant={loading ? "default" : denied ? "warning" : "danger"} role={loading ? "status" : "alert"}>
+      {loading ? <RefreshCw aria-hidden className="animate-spin" /> : <TriangleAlert aria-hidden />}
+      <AlertTitle>{title}</AlertTitle>
+      <AlertDescription>{loading ? "请稍候。" : denied ? "请联系有权限的管理员。" : state.message}</AlertDescription>
+      <AlertAction>
+        {!loading && refresh ? <Button size="sm" variant="outline" onClick={refresh}>刷新状态</Button> : null}
+        {requestId && open ? <Button size="sm" variant="ghost" onClick={() => open(`/approvals/${encodeURIComponent(requestId)}?from=membership-growth&fromTab=policy`, "审批详情")}>查看原申请</Button> : null}
+      </AlertAction>
+    </Alert>
+    {loading ? <div className="space-y-3" aria-hidden><Skeleton className="h-8 w-full" /><Skeleton className="h-36 w-full" /></div> : null}
+  </section>;
 }
 
 export function MembershipGrowthAdminView({
@@ -1042,11 +1508,16 @@ export function MembershipGrowthAdminView({
   canSimulateProfit = false,
   binding,
   approvedMeta,
+  localPending = false,
+  policyChangeRefreshing = false,
+  policyNotice,
+  policyReadbackId,
   onPolicyChange,
   onSavePolicyDraft,
   onSubmitPolicy,
   onOpenApproval,
   onOpenPath,
+  onRefreshPolicyChange,
 }: {
   state: MembershipGrowthAdminState;
   policySaved?: boolean;
@@ -1059,11 +1530,16 @@ export function MembershipGrowthAdminView({
   canSimulateProfit?: boolean;
   binding?: { ruleReleaseId?: string; priceVersionId?: string; sourceRef?: string } | null;
   approvedMeta?: { id: string; version: string; effectiveAtUtc: string | null; priceVersionId?: string; payloadHash?: string } | null;
+  localPending?: boolean;
+  policyChangeRefreshing?: boolean;
+  policyNotice?: AdminPolicyNotice;
+  policyReadbackId?: string | null;
   onPolicyChange?: (policy: AdminGrowthPolicy, unified: UnifiedDraft) => void;
   onSavePolicyDraft?: () => void;
   onSubmitPolicy?: () => void;
   onOpenApproval?: () => void;
   onOpenPath?: (path: string, title?: string) => void;
+  onRefreshPolicyChange?: () => void;
   onEntitlementChange?: (draft: AdminEntitlementDraft) => void;
   onSubmitEntitlement?: () => void;
   onRevokeEntitlement?: (reason: string) => void;
@@ -1075,11 +1551,13 @@ export function MembershipGrowthAdminView({
   const [isEditOpen, setIsEditOpen] = useState(false);
   const [isDiscardDialogOpen, setIsDiscardDialogOpen] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [isChangeDetailOpen, setIsChangeDetailOpen] = useState(false);
   const [isSimulateOpen, setIsSimulateOpen] = useState(false);
   const [editStage, setEditStage] = useState<1 | 2 | 3>(1);
   const [visitedStage2, setVisitedStage2] = useState(false);
   const [depositInputs, setDepositInputs] = useState<Record<string, string>>({});
   const [selectedWorkflowStep, setSelectedWorkflowStep] = useState<string | null>("boss_review");
+  const changeDialogTitleRef = useRef<HTMLSpanElement>(null);
   const isHappyDOM = typeof window !== "undefined" && Boolean((window as any).happyDOM);
 
   useEffect(() => { setMounted(true); }, []);
@@ -1112,7 +1590,7 @@ export function MembershipGrowthAdminView({
     if (!canSimulateProfit) setIsSimulateOpen(false);
   }, [canSimulateProfit]);
 
-  if (state.status !== "ready") return stateMessage(state);
+  if (state.status !== "ready") return stateMessage(state, onRefreshPolicyChange, policyReadbackId, onOpenPath);
   if (!draftPolicy || !unifiedDraft) return stateMessage({ status: "loading" });
 
   const policy = draftPolicy;
@@ -1120,8 +1598,7 @@ export function MembershipGrowthAdminView({
   const approvedUnified = state.approvedUnifiedPricing;
   const capability = state.capability;
   const unifiedSupported = capability.unifiedPricingSupported === true;
-  const editable = Boolean(onPolicyChange && unifiedSupported && capability.canDraft !== false);
-  const rangeEditable = editable && canEditEntitlementRanges;
+  const canEditPolicy = Boolean(onPolicyChange && unifiedSupported && capability.canDraft !== false);
   const validation = validateAdminPolicyDraft(policy, unifiedDraft);
   const depositErrors = TIER_ORDER.flatMap((tierName) => {
     const tier = policy.tiers.find((entry) => entry.tier === tierName);
@@ -1148,7 +1625,8 @@ export function MembershipGrowthAdminView({
   };
   const warnings = [...new Set([...validation.warnings, ...policyWarnings])];
   const draftExists = policy.status === "DRAFT";
-  const changes = approvedPolicy && approvedUnified ? diffGrowthPolicies(approvedPolicy, approvedUnified, policy, unifiedDraft) : [];
+  const changes = approvedPolicy && approvedUnified ? withBlackGoldChanges(diffGrowthPolicies(approvedPolicy, approvedUnified, policy, unifiedDraft)) : [];
+  const draftDiffs: AdminPolicyChangeDiff[] = changes.map((change) => ({ label: change.label, baseline: change.before, requested: change.after, risk: change.risk, format: "TEXT" }));
   const approval = state.approval;
   const approvalId = approval.requestId;
   const canOpenApproval = Boolean(onOpenApproval && approvalId);
@@ -1160,6 +1638,74 @@ export function MembershipGrowthAdminView({
     : { label: "尚未配置", variant: "secondary" as const };
   const workflowPolicy = buildPolicyApprovalPolicy(policy, approval);
   const hasResizeObserver = typeof globalThis !== "undefined" && typeof globalThis.ResizeObserver !== "undefined";
+  const submitReady = Boolean(onSubmitPolicy) && !dirty && policySaved && serverPublishable && !policySaving && allErrors.length === 0;
+  const changeCard = policyChangeCardModel({
+    read: state.policyChange,
+    approval,
+    hasDraft: draftExists,
+    currentDraft: state.draftReference,
+    draftDiffs,
+    submitReady,
+    localPending,
+  });
+  const changeRequest = changeCard.request;
+  const changeSteps = changeCard.steps;
+  const changePlannedAt = changeCard.plannedEffectiveAtUtc;
+  const blackGold = blackGoldBenefits(approvedPolicy, approvedUnified);
+  const draftDiamond = policy.tiers.find((tier) => tier.tier === "DIAMOND") ?? null;
+  const draftDiamondRatio = unifiedDraft.tiers.DIAMOND;
+  const draftBlackGoldDiscount = draftDiamondRatio
+    ? (formatDiscountLabel(draftDiamondRatio) === "原价" ? "原价" : `${formatDiscountLabel(draftDiamondRatio)}（实付 ${formatPayablePercent(draftDiamondRatio)}）`)
+    : "待填写";
+  const draftBlackGoldDeposit = draftDiamond ? formatDepositBenefitText(draftDiamond.tenantDeposit === "WAIVED", draftDiamond.depositAllowanceCents) : "待配置";
+  const openChangeApproval = (id: string) => {
+    if (onOpenPath) onOpenPath(`/approvals/${encodeURIComponent(id)}?from=membership-growth&fromTab=policy`, "审批详情");
+    else if (onOpenApproval && id === approvalId) onOpenApproval();
+  };
+  const canOpenChangeApproval = Boolean(changeCard.requestId && (onOpenPath || (onOpenApproval && changeCard.requestId === approvalId)));
+  const editLocked = localPending || Boolean(policyNotice?.blocking) || !["draft", "none", "rejected", "expired", "cancelled", "effective"].includes(changeCard.kind);
+  const editable = canEditPolicy && !editLocked;
+  const rangeEditable = editable && canEditEntitlementRanges;
+  const canSubmitNow = changeCard.canSubmit && !policyNotice?.blocking;
+  const readChange = state.policyChange.status === "READY" ? state.policyChange.change : null;
+  const requestedValues = readChange?.knowledge === "KNOWN" && readChange.request?.id === changeCard.requestId
+    && readChange.request.operationCode === "membership.benefit.policy.publish" && readChange.draftReference
+    && !["unknown", "unavailable", "forbidden"].includes(changeCard.kind) ? readChange.requestedValues ?? null : null;
+  const descriptions: Record<PolicyChangeCardKind, string> = {
+    draft: "核对并保存草稿后，可提交审批。", none: "当前没有待处理的政策申请。",
+    pending: "申请已提交，等待审批。", approved: "审批已通过，执行发布后才会生效。",
+    rejected: "申请已退回，请调整并保存草稿后重新提交。", expired: "申请已过期，请调整并保存草稿后重新提交。",
+    cancelled: "申请已撤销，请调整并保存草稿后重新提交。", "execution-unknown": "执行结果尚未确认，请先核对原结果。",
+    "pending-effective": "已发布，等待生效。", effective: "这份申请已生效。",
+    unknown: "申请状态暂未确认，请刷新或查看原申请。", unavailable: "申请状态暂未确认，请刷新后再操作。",
+    forbidden: "暂时无法查看申请，请联系有权限的管理员。", foreign: "原申请对应另一份草稿，请先核对原申请。",
+  };
+  const noticeTone = policyNotice?.tone ?? (["unknown", "unavailable", "forbidden", "foreign", "execution-unknown", "rejected", "expired", "cancelled"].includes(changeCard.kind) ? "warning" : "info");
+  const noticeTitle = policyNotice?.title ?? `${["rejected", "expired", "cancelled", "effective"].includes(changeCard.kind) ? "最近变更" : changeCard.kind === "none" ? "政策变更" : "待处理变更"} · ${["unknown", "unavailable"].includes(changeCard.kind) ? "申请状态待确认" : changeCard.label}`;
+  const noticeDescription = policyNotice?.description ?? (!unifiedSupported ? "会员配置暂时只读，请刷新后再操作。" : dirty ? "修改尚未保存，当前权益不受影响。" : descriptions[changeCard.kind]);
+  const noticeRequestId = policyNotice?.requestId ?? changeCard.requestId ?? policyReadbackId;
+  const NoticeIcon = noticeTone === "info" ? changeCard.kind === "effective" ? CheckCircle2 : Clock : TriangleAlert;
+  const policyFeedback = <Alert variant={noticeTone === "info" ? "default" : noticeTone === "error" ? "danger" : "warning"} role={noticeTone === "info" ? "status" : "alert"} data-testid="membership-policy-feedback">
+    <NoticeIcon aria-hidden />
+    <AlertTitle id="membership-change-heading" role="heading" aria-level={3}>{noticeTitle}</AlertTitle>
+    <AlertDescription>
+      <p>{noticeDescription}</p>
+      {!policyNotice && changeRequest ? <p className="flex flex-wrap gap-x-4 gap-y-1">
+        <span>提交人：{changeRequest.submittedBy?.name ?? changeRequest.submittedBy?.id ?? "未取得"}</span>
+        <span>提交时间：{changeRequest.submittedAtUtc ? formatDate(changeRequest.submittedAtUtc) : "未取得"}</span>
+        <span>{changeCard.kind === "effective" ? "生效时间" : "计划生效"}：{changePlannedAt ? formatDate(changePlannedAt) : "未取得"}</span>
+      </p> : null}
+      {dirty ? <Badge variant="warning">未保存修改</Badge> : null}
+    </AlertDescription>
+    <AlertAction>
+      {policyNotice?.onRecover ? <Button size="sm" variant="outline" disabled={policyNotice.recovering} onClick={policyNotice.onRecover}>查询原结果</Button> : null}
+      {canSubmitNow ? <Button size="sm" onClick={onSubmitPolicy}><Send aria-hidden />提交审批</Button> : null}
+      {!policyNotice && changeCard.canOpenDetail ? <Button size="sm" variant="outline" onClick={() => setIsChangeDetailOpen(true)}>查看变更详情</Button> : null}
+      {noticeRequestId && (onOpenPath || (onOpenApproval && noticeRequestId === approvalId)) ? <Button size="sm" variant="ghost" onClick={() => openChangeApproval(noticeRequestId)}>{!policyNotice && changeCard.requestId && ["pending", "approved"].includes(changeCard.kind) ? "到审批中心处理" : !policyNotice && readChange?.knowledge === "KNOWN" && readChange.request === null ? "查看上次申请" : "查看原申请"}</Button> : null}
+      {!policyNotice && policyReadbackId && changeCard.requestId && policyReadbackId !== changeCard.requestId && onOpenPath ? <Button size="sm" variant="ghost" onClick={() => openChangeApproval(policyReadbackId)}>查看上次申请</Button> : null}
+      {(policyNotice?.blocking || ["unknown", "unavailable", "foreign", "execution-unknown", "forbidden"].includes(changeCard.kind)) && onRefreshPolicyChange ? <Button size="sm" variant="outline" disabled={policyChangeRefreshing || policyNotice?.recovering} onClick={onRefreshPolicyChange}><RefreshCw aria-hidden className={cn(policyChangeRefreshing && "animate-spin")} />{policyChangeRefreshing ? "刷新中…" : "刷新状态"}</Button> : null}
+    </AlertAction>
+  </Alert>;
 
   const updatePolicy = (next: AdminGrowthPolicy) => {
     if (!editable) return;
@@ -1247,15 +1793,8 @@ export function MembershipGrowthAdminView({
               />
             </div>
           ))}
-          {onSavePolicyDraft ? <Button type="button" disabled={(!dirty && policySaved) || allErrors.length > 0 || policySaving} onClick={onSavePolicyDraft}>{policySaving ? "保存中…" : "保存草稿"}</Button> : null}
-          {onSubmitPolicy ? <Button type="button" variant="outline" disabled={dirty || !policySaved || !serverPublishable} onClick={onSubmitPolicy}>提交审批</Button> : null}
-        </div>
-      ) : null}
-
-      {!unifiedSupported ? (
-        <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3.5 text-xs text-amber-800 dark:text-amber-300" role="status">
-          <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
-          <p>服务端尚未提供统一折扣合同（API_DEPENDENCY_PENDING）。当前仅展示只读数据，编辑、保存与礼遇办理暂不可用；请等待已接纳 API 部署后再操作。</p>
+          {onSavePolicyDraft ? <Button type="button" disabled={!editable || (!dirty && policySaved) || allErrors.length > 0 || policySaving} onClick={onSavePolicyDraft}>{policySaving ? "保存中…" : "保存草稿"}</Button> : null}
+          {onSubmitPolicy ? <Button type="button" variant="outline" disabled={!canSubmitNow} onClick={() => { if (canSubmitNow) onSubmitPolicy(); }}>提交审批</Button> : null}
         </div>
       ) : null}
 
@@ -1281,8 +1820,8 @@ export function MembershipGrowthAdminView({
                 租金价差试算
               </Button>
             ) : null}
-            {editable ? (
-              <Button size="sm" variant="default" onClick={() => { setEditStage(1); setIsEditOpen(true); }}>
+            {canEditPolicy ? (
+              <Button size="sm" variant="default" disabled={!editable} aria-describedby={editLocked ? "membership-change-heading" : undefined} onClick={() => { setEditStage(1); setIsEditOpen(true); }}>
                 <Pencil className="h-3.5 w-3.5 mr-1.5" />
                 调整会员政策
               </Button>
@@ -1304,74 +1843,16 @@ export function MembershipGrowthAdminView({
           ) : null}
         </div>
 
-        {draftExists ? (
-          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3.5 flex flex-wrap items-center justify-between gap-3 text-xs">
-            <div className="flex items-center gap-2.5 min-w-[280px]">
-              <div className="p-1.5 rounded-md bg-amber-500/20 text-amber-600 dark:text-amber-400"><FileEdit className="h-4 w-4" /></div>
-              <div className="space-y-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-semibold text-foreground">待处理变更</span>
-                  <Badge variant={dirty ? "warning" : approval.status === "REQUESTED" ? "info" : approval.status === "REJECTED" ? "destructive" : "secondary"} className="text-[10px] py-0">
-                    {dirty ? "未保存修改" : approval.status === "REQUESTED" ? "已提交审批" : approval.status === "REJECTED" ? "已退回" : approval.status === "UNKNOWN" ? "关联申请待核对" : "草稿已保存"}
-                  </Badge>
-                  {!dirty && (!serverPublishable || warnings.length) ? (
-                    <span className="inline-flex items-center gap-1 text-[11px] text-amber-700 dark:text-amber-300">
-                      待补齐
-                      <InfoHint label="待补齐项"><span>{[...allErrors, ...warnings].slice(0, 6).join("；") || "请打开编辑窗口查看待补齐项。"}</span></InfoHint>
-                    </span>
-                  ) : null}
-                </div>
-                <p className="text-muted-foreground">
-                  {dirty
-                    ? "本次修改尚未保存；保存后才会进入待提交状态。"
-                    : approval.status === "REQUESTED"
-                      ? approval.message ?? "已提交审批，等待审批中心处理。"
-                      : approval.status === "REJECTED"
-                        ? approval.message ?? "审批已退回；可调整后重新提交。"
-                        : approval.status === "UNKNOWN"
-                          ? approval.message ?? "关联申请暂未读到；本次页面内存为空不代表从未申请，请到审批中心核对。"
-                          : "草稿已保存，尚未提交审批。"}
-                </p>
-                {approval.status === "UNKNOWN" ? <p className="text-[11px] text-amber-700 dark:text-amber-300">提交前请先到审批中心核对是否已有同一草稿的申请。</p> : null}
-                {approval.status === "REJECTED" ? <p className="text-destructive">{approval.message ?? "申请被驳回，可修改后重新提交。"}</p> : null}
-              </div>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              {onSavePolicyDraft && dirty ? (
-                <Button size="sm" variant="secondary" className="h-8 text-xs" title={allErrors.length ? "请先在编辑草稿中修正校验问题" : undefined} disabled={policySaving || allErrors.length > 0} onClick={onSavePolicyDraft}>
-                  {policySaving ? "保存中…" : "保存草稿"}
-                </Button>
-              ) : null}
-              {onSubmitPolicy ? (
-                <Button size="sm" variant="default" className="h-8 text-xs" disabled={dirty || policySaving || !policySaved || !serverPublishable || allErrors.length > 0} onClick={onSubmitPolicy}>
-                  <Send className="h-3.5 w-3.5 mr-1" />
-                  提交审批
-                </Button>
-              ) : null}
-              {canOpenApproval ? <Button size="sm" variant="outline" className="h-8 text-xs" onClick={onOpenApproval}>查看审批</Button> : null}
-            </div>
-          </div>
-        ) : (
-          <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3.5 flex flex-wrap items-center justify-between gap-3 text-xs">
-            <div className="flex items-center gap-2.5">
-              <div className="p-1.5 rounded-md bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"><CheckCircle2 className="h-4 w-4" /></div>
-              <div>
-                <span className="font-medium text-foreground">{approvedPolicy ? "当前生效权益" : "尚未配置统一权益"}</span>
-                <p className="text-muted-foreground text-[11px] mt-0.5">
-                  {approvedPolicy ? "编辑会创建新草稿；审批通过并执行前不影响线上折扣。" : "创建首份草稿，提交审批后生效。"}
-                </p>
-              </div>
-            </div>
-          </div>
-        )}
       </div>
+
+      <section aria-labelledby="membership-change-heading">{!isEditOpen ? policyFeedback : null}</section>
 
       <section className="rounded-xl border border-border bg-card overflow-hidden shadow-2xs" aria-labelledby="membership-admin-policy-heading">
         <div className="p-4 sm:px-5 border-b border-border/80 flex flex-wrap items-center justify-between gap-3 bg-muted/20">
           <div>
-            <h3 id="membership-admin-policy-heading" className="flex items-center gap-1.5 text-sm font-semibold text-foreground">统一成长等级权益<InfoHint label="统一折扣说明">总价折扣只作用于哈夫币租金与物资费合计；押金、号主保证金不参与。0.95 = 实付 95%。</InfoHint></h3>
-            <p className="mt-0.5 text-xs text-muted-foreground">总价折扣作用于租金与物资费合计；所有已启用租赁方式统一；押金不参与。</p>
-            <p className="mt-1 text-[10px] text-muted-foreground md:hidden">左右滑动表格查看押金权益。</p>
+            <h3 id="membership-admin-policy-heading" className="flex items-center gap-1.5 text-sm font-semibold text-foreground">统一成长等级权益<InfoHint label="统一折扣说明">普通档按近90天成长积分；黑金按累计有效成长积分，永久有效。总价折扣只作用于哈夫币租金与物资费合计；押金、号主保证金不参与。</InfoHint></h3>
+            <p className="mt-0.5 text-xs text-muted-foreground">普通档按近90天成长积分；黑金按累计有效成长积分，永久有效。总价折扣作用于租金与物资费合计；所有已启用租赁方式统一；押金不参与。</p>
+            <p className="mt-1 text-[10px] text-muted-foreground md:hidden">左右滑动表格查看成长条件、有效期与押金权益。</p>
           </div>
           <Badge variant={approvedPolicy ? "success" : "outline"}>{approvedPolicy ? "当前生效" : "尚无生效配置"}</Badge>
         </div>
@@ -1380,9 +1861,10 @@ export function MembershipGrowthAdminView({
             <TableHeader className="bg-muted/40">
               <TableRow className="hover:bg-transparent">
                 <TableHead className="font-medium text-xs">会员等级</TableHead>
-                <TableHead className="font-medium text-xs">成长门槛（固定）</TableHead>
+                <TableHead className="font-medium text-xs">成长条件</TableHead>
                 <TableHead className="font-medium text-xs"><span className="inline-flex items-center gap-1">统一应付折扣<InfoHint label="折扣说明">0.95 = 实付 95%；1 = 原价。折扣只作用于租金与物资费合计。</InfoHint></span></TableHead>
                 <TableHead className="font-medium text-xs"><span className="inline-flex items-center gap-1">押金权益<InfoHint label="押金权益说明">按账号原押金减免，最高有效额度不累加；完全免押优先。</InfoHint></span></TableHead>
+                <TableHead className="font-medium text-xs">有效期</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -1395,7 +1877,7 @@ export function MembershipGrowthAdminView({
                     <TableCell className="font-medium">
                       <span className="inline-flex items-center gap-1.5"><span aria-hidden="true" className="size-2 rounded-full bg-primary/70" />{TIER_LABELS[tierName]}</span>
                     </TableCell>
-                    <TableCell className="tabular-nums font-mono">{tier?.threshold ?? "—"} 分</TableCell>
+                    <TableCell className="tabular-nums font-mono">近90天 {formatPointValue(tier?.threshold)} 分</TableCell>
                     <TableCell>
                       <span className={display.configured ? "font-semibold text-primary" : "font-medium text-amber-600 dark:text-amber-400"}>{display.text}</span>
                       {display.detail ? <span className="block text-[10px] text-muted-foreground">{display.detail}</span> : null}
@@ -1407,9 +1889,25 @@ export function MembershipGrowthAdminView({
                         </Badge>
                       ) : "—"}
                     </TableCell>
+                    <TableCell className="text-xs text-muted-foreground">按近90天积分</TableCell>
                   </TableRow>
                 );
               })}
+              <TableRow key="BLACK_GOLD" className="bg-amber-500/5 hover:bg-amber-500/10 transition-colors">
+                <TableCell className="font-medium">
+                  <span className="inline-flex flex-wrap items-center gap-1.5"><span aria-hidden="true" className="size-2 rounded-full bg-amber-500" />黑金（永久）</span>
+                  <span className="mt-0.5 block text-[10px] text-muted-foreground">权益随钻石档调整</span>
+                </TableCell>
+                <TableCell className="whitespace-nowrap text-xs font-medium">{BLACK_GOLD_CONDITION}</TableCell>
+                <TableCell>
+                  <span className={blackGold.discountConfigured ? "font-semibold text-primary" : "font-medium text-amber-600 dark:text-amber-400"}>{blackGold.discountText}</span>
+                  {blackGold.discountDetail ? <span className="block text-[10px] text-muted-foreground">{blackGold.discountDetail}</span> : null}
+                </TableCell>
+                <TableCell>
+                  <Badge variant={blackGold.depositVariant}>{blackGold.depositText}</Badge>
+                </TableCell>
+                <TableCell className="whitespace-nowrap text-xs font-medium">永久</TableCell>
+              </TableRow>
             </TableBody>
           </Table>
         ) : (
@@ -1466,6 +1964,83 @@ export function MembershipGrowthAdminView({
           </div>
         )}
       </section>
+
+      {mounted ? (
+        <Dialog open={isChangeDetailOpen} onOpenChange={setIsChangeDetailOpen}>
+          <DialogContent size="lg" initialFocus={changeDialogTitleRef} className="max-h-[90vh] min-w-0 overflow-y-auto p-5 sm:max-w-[900px]">
+            <DialogHeader>
+              <DialogTitle className="flex flex-wrap items-center gap-2"><FileEdit className="h-4 w-4 text-primary" /><span ref={changeDialogTitleRef} tabIndex={-1} className="rounded-sm outline-none focus:ring-2 focus:ring-primary/30">变更基本信息</span><Badge variant={changeCard.kind === "effective" ? "success" : changeCard.kind === "rejected" ? "destructive" : "secondary"}>{changeCard.label}</Badge></DialogTitle>
+              <DialogDescription>查看这份申请的配置、处理记录与生效时间。</DialogDescription>
+            </DialogHeader>
+            <div className="min-w-0 space-y-4 text-xs">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="min-w-0 space-y-0.5">
+                  <span className="text-muted-foreground">申请摘要</span>
+                  <p className="font-medium text-foreground">{changeCard.label}</p>
+                  {changeCard.priorRequest ? <p className="text-amber-700 dark:text-amber-300">此申请对应另一份草稿。</p> : null}
+                </div>
+                <div className="min-w-0 space-y-0.5">
+                  <span className="text-muted-foreground">提交人 / 提交时间</span>
+                  <p className="font-medium text-foreground">{changeRequest ? `${changeRequest.submittedBy?.name ?? changeRequest.submittedBy?.id ?? "未取得"} · ${changeRequest.submittedAtUtc ? formatDate(changeRequest.submittedAtUtc) : "提交时间未取得"}` : changeCard.requestId ? "原申请详情受限" : "尚未提交"}</p>
+                </div>
+                <div className="min-w-0 space-y-0.5">
+                  <span className="text-muted-foreground">{changeCard.kind === "effective" ? "生效时间" : "拟生效时间"}</span>
+                  <p className="font-medium text-foreground">{changePlannedAt ? formatDate(changePlannedAt) : "未取得"}</p>
+                </div>
+                <div className="min-w-0 space-y-0.5">
+                  <span className="text-muted-foreground">原申请号</span>
+                  <p className="break-all font-mono text-[11px] text-foreground">{changeCard.requestId ?? "未取得"}</p>
+                </div>
+              </div>
+
+              <p className="rounded-lg bg-muted/40 p-3 leading-relaxed text-muted-foreground" data-testid="policy-change-effective-note">{descriptions[changeCard.kind]}</p>
+
+              <section className="min-w-0 space-y-2" aria-label="申请配置">
+                <h4 className="font-semibold text-foreground">申请配置（不是当前生效权益）</h4>
+                {requestedValues?.length ? <div className="overflow-x-auto rounded-lg border" data-testid="policy-requested-values">
+                  <Table><TableHeader><TableRow><TableHead>配置项</TableHead><TableHead>本次申请值</TableHead></TableRow></TableHeader><TableBody>
+                    {requestedValues.map((item, index) => <TableRow key={`${index}:${item.label}`}><TableCell>{item.label}</TableCell><TableCell className="font-medium">{formatPolicyChangeValue(item.value, item.format)}</TableCell></TableRow>)}
+                  </TableBody></Table>
+                </div> : changeCard.requestId && changeCard.detailDiffs.length ? <div className="overflow-x-auto rounded-lg border" data-testid="policy-change-diff-scroll">
+                  <Table className="min-w-[560px]"><TableHeader><TableRow><TableHead>权益项</TableHead><TableHead>申请对应基线</TableHead><TableHead>本次申请值</TableHead></TableRow></TableHeader><TableBody>
+                    {changeCard.detailDiffs.map(diff => <TableRow key={diff.label}><TableCell>{diff.label}</TableCell><TableCell>{policyChangeDiffText(diff, "baseline")}</TableCell><TableCell>{policyChangeDiffText(diff, "requested")}</TableCell></TableRow>)}
+                  </TableBody></Table>
+                </div> : <p className="text-muted-foreground">{changeCard.requestId ? "暂未取得这份申请的配置，可打开原申请查看。" : "草稿尚未提交，提交后可查看申请配置。"}</p>}
+              </section>
+
+              <section className="min-w-0 space-y-2" aria-label="流程摘要">
+                <h4 className="font-semibold text-foreground">流程摘要</h4>
+                {changeSteps.length ? <ol className="space-y-2">
+                  {changeSteps.map((step) => {
+                    const completed = step.state === "COMPLETED";
+                    const failed = step.state === "FAILED";
+                    const current = step.state === "CURRENT";
+                    return (
+                      <li key={step.key} className="flex min-w-0 items-start gap-2.5">
+                        <span className={cn("mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border", completed ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400" : failed ? "border-destructive/40 bg-destructive/10 text-destructive" : current ? "border-amber-500/40 bg-amber-500/15 text-amber-600 dark:text-amber-400" : "border-border text-muted-foreground")}>
+                          {completed ? <CheckCircle2 className="size-3" /> : failed ? <X className="size-3" /> : current ? <Clock className="size-3" /> : <span className="size-1.5 rounded-full bg-current" />}
+                        </span>
+                        <div className="min-w-0 space-y-0.5">
+                          <p className="font-medium text-foreground">{step.label}<span className="ml-2 text-[11px] font-normal text-muted-foreground">{completed ? "已完成" : failed ? "未通过" : current ? "当前" : step.state === "UNKNOWN" ? "状态未知" : "待处理"}</span></p>
+                          {completed || failed ? (
+                            <p className="text-muted-foreground">{step.actor ? `${step.actor.name ?? step.actor.id}` : "经手人未取得"} · {step.atUtc ? formatDate(step.atUtc) : "时间未取得"}</p>
+                          ) : null}
+                          {step.note ? <p className="text-muted-foreground">{step.note}</p> : null}
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ol> : <p className="text-muted-foreground">{changeCard.requestId ? "处理记录暂不可用，请打开原申请查看。" : "尚未提交申请。"}</p>}
+              </section>
+
+            </div>
+            <div className="sticky bottom-0 z-10 -mx-5 -mb-5 mt-4 flex flex-wrap items-center justify-end gap-2 border-t bg-popover px-5 py-3">
+              <Button size="sm" variant="outline" onClick={() => setIsChangeDetailOpen(false)}>关闭</Button>
+              {canOpenChangeApproval ? <Button size="sm" onClick={() => { setIsChangeDetailOpen(false); openChangeApproval(changeCard.requestId!); }}>打开审批详情</Button> : null}
+            </div>
+          </DialogContent>
+        </Dialog>
+      ) : null}
 
       {mounted ? (
         <Dialog open={isHistoryOpen} onOpenChange={setIsHistoryOpen}>
@@ -1559,6 +2134,7 @@ export function MembershipGrowthAdminView({
             </DialogHeader>
 
             <div className="min-w-0 space-y-4 text-xs py-1">
+              {isEditOpen ? policyFeedback : null}
               <div style={editStage === 1 ? undefined : { display: "none" }} className="min-w-0 space-y-4">
                 <div>
                   <h4 id="membership-policy-stage-1" tabIndex={-1} className="flex items-center gap-1.5 font-semibold text-sm text-foreground outline-none">统一等级折扣与押金<InfoHint label="统一折扣与押金说明">总价折扣只作用于哈夫币租金与物资费合计；押金、号主保证金不参与。押金减免取最高有效额度，不累加。成长门槛由成长规则固定。</InfoHint></h4>
@@ -1628,6 +2204,16 @@ export function MembershipGrowthAdminView({
                     })}
                   </TableBody>
                 </Table>
+
+                <div className="rounded-lg border border-amber-500/25 bg-amber-500/5 p-3 text-xs" aria-label="黑金（永久）只读联动">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span aria-hidden="true" className="size-2 rounded-full bg-amber-500" />
+                    <span className="font-semibold text-foreground">黑金（永久） · 只读跟随钻石档</span>
+                    <Badge variant="outline">不新增第六档</Badge>
+                  </div>
+                  <p className="mt-1 text-muted-foreground">获得条件：{BLACK_GOLD_CONDITION}；有效期永久。保存与提审仍只包含五个普通档，不生成独立黑金字段或阈值。</p>
+                  <p className="mt-1 text-muted-foreground">当前草稿联动预览：折扣 <span className="font-medium text-foreground">{draftBlackGoldDiscount}</span>；押金 <span className="font-medium text-foreground">{draftBlackGoldDeposit}</span>。修改钻石档时同步更新。</p>
+                </div>
 
                 <div className="space-y-2 pt-2.5 border-t">
                   <h4 className="flex items-center gap-1.5 font-semibold text-sm text-foreground">统一礼遇折扣范围<InfoHint label="礼遇范围说明">挚友与尊享各一份最小/最大应付比例；范围为应付比例区间，发放仍需逐单审批。</InfoHint></h4>
@@ -1706,11 +2292,11 @@ export function MembershipGrowthAdminView({
                 {onSavePolicyDraft ? (
                   <>
                     <InfoHint label="保存草稿说明">保存后成为草稿；当前接口不支持删除草稿，可继续修改后重新保存。</InfoHint>
-                    <Button type="button" size="sm" variant="outline" disabled={(!dirty && policySaved) || allErrors.length > 0 || policySaving} onClick={onSavePolicyDraft}>{policySaving ? "保存中…" : "保存草稿"}</Button>
+                    <Button type="button" size="sm" variant="outline" disabled={!editable || (!dirty && policySaved) || allErrors.length > 0 || policySaving} onClick={onSavePolicyDraft}>{policySaving ? "保存中…" : "保存草稿"}</Button>
                   </>
                 ) : null}
-                {editStage < 3 ? <Button size="sm" variant="default" disabled={editStage === 1 && !stageOneComplete} onClick={() => goToStage((editStage + 1) as 2 | 3)}>下一步</Button> : onSubmitPolicy ? (
-                  <Button type="button" size="sm" variant="default" disabled={dirty || policySaving || !policySaved || !serverPublishable || allErrors.length > 0} onClick={() => { onSubmitPolicy(); setIsEditOpen(false); }}><Send className="h-3.5 w-3.5 mr-1" />提交审批</Button>
+                {editStage < 3 ? <Button size="sm" variant="default" disabled={!editable || editStage === 1 && !stageOneComplete} onClick={() => goToStage((editStage + 1) as 2 | 3)}>下一步</Button> : onSubmitPolicy ? (
+                  <Button type="button" size="sm" disabled={!canSubmitNow} onClick={() => { if (canSubmitNow) { onSubmitPolicy(); setIsEditOpen(false); } }}><Send className="h-3.5 w-3.5 mr-1" />提交审批</Button>
                 ) : null}
               </div>
             </div>

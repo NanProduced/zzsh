@@ -50,7 +50,15 @@ const unifiedFixture = () => ({
   },
 });
 const unifiedCapability = { canDraft: true, canChangeEntitlementRanges: true, canRequestEntitlement: true, depositAllowanceSupported: true, unifiedPricingSupported: true, canSimulateProfit: true };
-const policyResponse = (overrides = {}) => ({ policy: policyPayload(), meta: metaFixture(), catalog, thresholds, bootstrap: null, unifiedPricing: unifiedFixture(), capability: unifiedCapability, ...overrides });
+const policyResponse = (overrides = {}) => ({ policy: policyPayload(), meta: metaFixture(), catalog, thresholds, bootstrap: null, unifiedPricing: unifiedFixture(), capability: unifiedCapability, policyChange: { knowledge: "KNOWN", request: null, immutableDiff: [] }, ...overrides });
+const serverChange = (overrides = {}) => ({
+  knowledge: "KNOWN",
+  draftReference: { id: "draft-1", version: "1", payloadHash: "a".repeat(64) },
+  request: { id: "server-context-1", operationCode: "membership.benefit.policy.publish", approvalStatus: "PENDING", executionStatus: null, submittedBy: { id: "ops-2", name: "运营乙" }, submittedAtUtc: "2026-10-20T02:30:00.000Z", plannedEffectiveAtUtc: "2026-11-01T00:00:00.000Z", steps: null },
+  immutableDiff: [{ label: "金卡 · 统一应付折扣", baseline: "1", requested: "0.9", format: "DISCOUNT" }],
+  effectiveState: { status: "NOT_EFFECTIVE" },
+  ...overrides,
+});
 const catalog = { safeBoxes: [], materials: [], priceVersions: [{ id: "price-v1", label: "price-v1" }], enabledModes: ["ordinary", "custom"], haffSchema: "haff-ratio-v2", releaseMode: "SPREAD", catalogSource: "SEALED" };
 const thresholds = { STANDARD: "0", SILVER: "5000", GOLD: "10000", PLATINUM: "20000", DIAMOND: "40000" };
 const metaFixture = () => ({ id: "draft-1", version: "1", status: "DRAFT", effectiveAtUtc: "2026-11-01T00:00:00.000Z", ruleReleaseId: "release-1", priceVersionId: "price-v1", sourceRef: "fixture", payloadHash: "a".repeat(64) });
@@ -167,8 +175,6 @@ test("R1-03 discard restores the last saved Host baseline instead of leaving the
     const snapshot = actorSnapshot();
     const { savePendingWrite, inspectPending, pendingWriteSubject } = await vite.ssrLoadModule("/src/views/approval/pending-writes.ts");
     const subject = pendingWriteSubject(snapshot.adminUserId, snapshot.session.id, "", "approval.request.create");
-    const pendingSaved = savePendingWrite({ actorId: snapshot.adminUserId, sessionId: snapshot.session.id, target: "", operation: "approval.request.create", path: "/security/approvals/requests", idempotencyKey: `idem_${"a".repeat(32)}`, body: {}, readback: { kind: "lists", keys: [] }, successMessage: "fixture", kind: "unknown" });
-    assert.equal(pendingSaved.ok, true, "the pre-existing unknown write is stored before the policy edit");
     await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: { query: { userId: "user-a", gameId: "game-1" } }, snapshot, onDirtyChange: (value) => dirty.push(value), refreshNonce: 0 })));
     await openPolicyTab(host);
     const dialog = () => [...browser.document.querySelectorAll("[role=dialog]")].find((element) => element.textContent.includes("调整会员政策"));
@@ -197,6 +203,12 @@ test("R1-03 discard restores the last saved Host baseline instead of leaving the
     assert.equal(savedPost.body.expectedVersion, "1", "the discarded draft never advanced the Host CAS baseline");
     assert.equal(savedPost.body.ruleReleaseId, "release-1");
     assert.equal(savedPost.body.priceVersionId, "price-v1");
+    await setInput(browser, dialog().querySelector("input[aria-label='钻石 统一应付折扣']"), "0.8");
+    const pendingSaved = savePendingWrite({ actorId: snapshot.adminUserId, sessionId: snapshot.session.id, target: "", operation: "approval.request.create", path: "/security/approvals/requests", idempotencyKey: `idem_${"a".repeat(32)}`, body: {}, readback: { kind: "lists", keys: [] }, successMessage: "fixture", kind: "unknown" });
+    assert.equal(pendingSaved.ok, true, "the pre-existing unknown write is stored while the policy editor is open");
+    await act(async () => browser.dispatchEvent(new browser.Event("zzsh:membership-approval-pending")));
+    await act(async () => buttonByText(dialog(), "取消修改").click());
+    await act(async () => buttonByText(browser.document, "放弃修改并关闭").click());
     const pendingAfter = inspectPending(subject);
     assert.equal(pendingAfter.state, "valid", "discard never clears an already-sent write's original key or UNKNOWN responsibility");
     assert.equal(pendingAfter.record.idempotencyKey, `idem_${"a".repeat(32)}`);
@@ -235,7 +247,7 @@ test("policy pending after remount auto-recovers the accepted id without posting
     assert.equal(inspectPending(pendingWriteSubject(snapshot.adminUserId, snapshot.session.id, "", "approval.request.create")).state, "absent", "verified recovery clears the original responsibility");
     assert.equal(requests.some((request) => request.method === "POST" && request.path.endsWith("/security/approvals/requests")), false, "recovery is read-only and never re-sends the approval");
     assert.ok(requests.some((request) => request.method === "GET" && request.path.includes("/security/approvals/requests/detail")));
-    await act(async () => buttonByText(host, "查看审批").click());
+    await act(async () => buttonByText(host, "到审批中心处理").click());
     assert.equal(opened.at(-1).path, "/approvals/policy-approval?from=membership-growth&fromTab=policy");
     assert.equal(opened.at(-1).title, "审批详情");
     await act(async () => root.unmount());
@@ -274,7 +286,7 @@ test("recovery that finishes before policy load still binds once the current dra
     assert.match(host.textContent, /已提交审批/);
     assert.doesNotMatch(host.textContent, /关联申请暂未读到/);
     assert.equal(requests.some((request) => request.method === "POST" && request.path.endsWith("/security/approvals/requests")), false);
-    await act(async () => buttonByText(host, "查看审批").click());
+    await act(async () => buttonByText(host, "到审批中心处理").click());
     assert.equal(opened.at(-1).path, "/approvals/policy-approval?from=membership-growth&fromTab=policy");
     await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: { query: { userId: "user-a", gameId: "game-1" } }, snapshot, onDirtyChange: () => {}, refreshNonce: 1, onOpenPath: (path, title) => opened.push({ path, title }) })));
     await flushUntil(() => host.textContent.includes("已提交审批"), "same-draft refresh keeps the binding");
@@ -312,10 +324,10 @@ test("a verified request for another draft never binds the current draft", async
       await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: { query: { userId: "user-a", gameId: "game-1" } }, snapshot, onDirtyChange: () => {}, refreshNonce: 0, onOpenPath: (path, title) => opened.push({ path, title }) })));
       await openPolicyTab(host);
       await flushUntil(() => inspectPending(subject).state === "absent", testCase.name);
-      await flushUntil(() => host.textContent.includes("原申请已核对"), testCase.name);
-      assert.match(host.textContent, /原申请已核对/, testCase.name);
-      assert.match(host.textContent, /不是当前草稿/, testCase.name);
-      assert.match(host.textContent, /当前草稿关联仍未知/, testCase.name);
+      await flushUntil(() => host.textContent.includes("原申请需核对"), testCase.name);
+      assert.match(host.textContent, /原申请需核对/, testCase.name);
+      assert.match(host.textContent, /确认对应的政策草稿/, testCase.name);
+      assert.match(host.textContent, /核对|确认对应的政策草稿/, testCase.name);
       assert.doesNotMatch(host.textContent, /已提交审批/, testCase.name);
       const link = buttonByText(host, "查看原申请"); assert.ok(link, testCase.name);
       await act(async () => link.click());
@@ -357,7 +369,7 @@ test("wrong detail id or operation keeps the original key/body and does not bind
       assert.equal(saved.ok, true, testCase.name);
       await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: { query: { userId: "user-a", gameId: "game-1" } }, snapshot, onDirtyChange: () => {}, refreshNonce: 0 })));
       await openPolicyTab(host);
-      await flushUntil(() => host.textContent.includes("原申请号已保留"), testCase.name);
+      await flushUntil(() => buttonByText(host, "查询原结果") && !buttonByText(host, "查询原结果").disabled, testCase.name);
       const pending = inspectPending(subject);
       assert.equal(pending.state, "valid", testCase.name);
       assert.equal(pending.record.idempotencyKey, key, testCase.name);
@@ -413,23 +425,23 @@ test("R2 an accepted id without a verified same-draft detail never marks the cur
       if (testCase.detail) {
         await flushUntil(() => host.textContent.includes("已提交审批"), `${testCase.mode} verified same-draft detail`);
         assert.match(host.textContent, /已提交审批/, testCase.mode);
-        assert.doesNotMatch(host.textContent, /当前草稿关联未知/, testCase.mode);
+        assert.doesNotMatch(host.textContent, /原申请对应另一份草稿|原申请需核对/, testCase.mode);
         assert.equal(inspectPending(pendingWriteSubject(snapshot.adminUserId, snapshot.session.id, "", "approval.request.create")).state, "absent", testCase.mode);
-        await act(async () => buttonByText(host, "查看审批").click());
+        await act(async () => buttonByText(host, "到审批中心处理").click());
         assert.equal(opened.at(-1), `/approvals/${id}?from=membership-growth&fromTab=policy`, testCase.mode);
       } else {
-        await flushUntil(() => releaseDetail !== null && host.textContent.includes("原申请号已保留"), `${testCase.mode} accepted id rendered before detail`);
-        assert.match(host.textContent, /关联申请待核对/, `${testCase.mode}: an accepted id alone is not a verified current-draft approval`);
+        await flushUntil(() => releaseDetail !== null && Boolean(buttonByText(host, "查看原申请")), `${testCase.mode} accepted id rendered before detail`);
+        assert.match(host.textContent, /待核对|正在确认提交结果/, `${testCase.mode}: an accepted id alone is not a verified current-draft approval`);
         assert.doesNotMatch(host.textContent, /已提交审批/, testCase.mode);
         await act(async () => releaseDetail());
-        await flushUntil(() => host.textContent.includes(`申请号 ${id} 已保留`) && buttonByText(host, "查询原结果") && !buttonByText(host, "查询原结果").disabled, `${testCase.mode} detail failure settled`);
+        await flushUntil(() => Boolean(buttonByText(host, "查看原申请")) && buttonByText(host, "查询原结果") && !buttonByText(host, "查询原结果").disabled, `${testCase.mode} detail failure settled`);
         const subject = pendingWriteSubject(snapshot.adminUserId, snapshot.session.id, "", "approval.request.create");
         const record = inspectPending(subject);
         assert.equal(record.state, "valid", testCase.mode);
         assert.equal(record.record.idempotencyKey, postedKey, testCase.mode);
         assert.deepEqual(record.record.body, postedBody, testCase.mode);
-        assert.match(host.textContent, /关联申请待核对/, testCase.mode);
-        assert.match(host.textContent, /当前草稿关联仍未知/, testCase.mode);
+        assert.match(host.textContent, /待核对|正在确认提交结果/, testCase.mode);
+        assert.match(host.textContent, /核对|确认对应的政策草稿/, testCase.mode);
         assert.doesNotMatch(host.textContent, /已提交审批/, testCase.mode);
         const link = buttonByText(host, "查看原申请"); assert.ok(link, testCase.mode);
         await act(async () => link.click());
@@ -470,8 +482,8 @@ test("a recovery finishing after a policy refresh cannot bind the new current dr
     await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: { query: { userId: "user-a", gameId: "game-1" } }, snapshot, onDirtyChange: () => {}, refreshNonce: 1 })));
     await flushUntil(() => policyCalls === 2, "policy refresh");
     releaseRecovery();
-    await flushUntil(() => host.textContent.includes("原申请已核对"), "late recovery mismatch");
-    assert.match(host.textContent, /当前草稿关联仍未知/);
+    await flushUntil(() => host.textContent.includes("原申请需核对"), "late recovery mismatch");
+    assert.match(host.textContent, /核对|确认对应的政策草稿/);
     assert.doesNotMatch(host.textContent, /已提交审批/);
     assert.equal(inspectPending(subject).state, "absent");
     await act(async () => root.unmount());
@@ -511,8 +523,8 @@ test("a saved new draft does not inherit an old-draft request after remount", as
     host = browser.document.createElement("div"); browser.document.body.append(host); root = createRoot(host); roots.add(root);
     await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: { query: { userId: "user-a", gameId: "game-1" } }, snapshot, onDirtyChange: () => {}, refreshNonce: 0 })));
     await openPolicyTab(host);
-    await flushUntil(() => host.textContent.includes("原申请已核对"), "old request after saved draft");
-    assert.match(host.textContent, /当前草稿关联仍未知/);
+    await flushUntil(() => host.textContent.includes("原申请需核对"), "old request after saved draft");
+    assert.match(host.textContent, /核对|确认对应的政策草稿/);
     assert.doesNotMatch(host.textContent, /已提交审批/);
     assert.equal(inspectPending(subject).state, "absent");
     assert.equal(requests.some(request => request.method === "POST" && request.path.endsWith("/security/approvals/requests")), false);
@@ -676,4 +688,459 @@ test('summary-only policy readers retain read-only UI and revocation removes the
     assert.equal([...host.querySelectorAll('[role=tab]')].some(element=>element.textContent==='会员政策'),false);
     assert.equal(requests.some(request=>request.method!=='GET'),false);
   }finally{await closeUI(vite,browser);}
+});
+
+test("policy change reads the same server-linked request on a fresh mount without posting", async () => {
+  const browser = installBrowser();
+  const { vite, MembershipGrowthAdminHost } = await loadHost();
+  try {
+    const requests = [], opened = [];
+    globalThis.fetch = async (url, init = {}) => {
+      const path = String(url), method = (init.method ?? "GET").toUpperCase();
+      requests.push({ path, method });
+      if (method === "GET") { const shared = workspaceRead(path); if (shared) return shared; }
+      if (method === "GET" && path.endsWith("/membership-growth/policy")) return respond(policyResponse({ policyChange: serverChange() }));
+      throw new Error(`unexpected ${method} ${path}`);
+    };
+    const mount = async (snapshot) => {
+      const host = browser.document.createElement("div"); browser.document.body.append(host);
+      const { createRoot } = await import("react-dom/client"); const root = createRoot(host); roots.add(root);
+      await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: { query: { userId: "user-a", gameId: "game-1" } }, snapshot, onDirtyChange: () => {}, refreshNonce: 0, onOpenPath: (path, title) => opened.push({ path, title }) })));
+      await openPolicyTab(host);
+      return { host, root };
+    };
+    const first = await mount(actorSnapshot());
+    await flushUntil(() => first.host.textContent.includes("待处理变更 · 待审批"), "server request on first mount");
+    assert.match(first.host.textContent, /申请已提交，等待审批/);
+    assert.match(first.host.textContent, /运营乙/);
+    await act(async () => buttonByText(first.host, "查看变更详情").click());
+    const dialog = browser.document.querySelector("[data-slot=dialog-content]"); assert.ok(dialog);
+    assert.match(dialog.textContent, /原价/); assert.match(dialog.textContent, /9折/);
+    const detail = [...dialog.querySelectorAll("button")].find((button) => button.textContent.trim() === "打开审批详情"); assert.ok(detail);
+    await act(async () => detail.click());
+    assert.deepEqual(opened.at(-1), { path: "/approvals/server-context-1?from=membership-growth&fromTab=policy", title: "审批详情" });
+    await act(async () => first.root.unmount()); roots.delete(first.root); first.host.remove();
+    const next = actorSnapshot(); next.adminUserId = "another-admin"; next.session = { ...next.session, id: "another-session" };
+    const second = await mount(next);
+    await flushUntil(() => second.host.textContent.includes("待处理变更 · 待审批"), "server request on a fresh session");
+    assert.match(second.host.textContent, /申请已提交，等待审批/);
+    assert.equal(requests.filter((request) => request.method === "POST" && request.path.endsWith("/security/approvals/requests")).length, 0);
+    await act(async () => second.root.unmount());
+  } finally { await closeUI(vite, browser); }
+});
+
+test("policy change refresh reads the server projection and never creates an approval", async () => {
+  const browser = installBrowser();
+  const { vite, MembershipGrowthAdminHost } = await loadHost();
+  try {
+    let policyGets = 0;
+    const requests = [];
+    globalThis.fetch = async (url, init = {}) => {
+      const path = String(url), method = (init.method ?? "GET").toUpperCase();
+      requests.push({ path, method });
+      if (method === "GET") { const shared = workspaceRead(path); if (shared) return shared; }
+      if (method === "GET" && path.endsWith("/membership-growth/policy")) {
+        policyGets += 1;
+        return respond(policyResponse(policyGets === 1 ? { policyChange: undefined } : { policyChange: serverChange() }));
+      }
+      throw new Error(`unexpected ${method} ${path}`);
+    };
+    const host = browser.document.createElement("div"); browser.document.body.append(host);
+    const { createRoot } = await import("react-dom/client"); const root = createRoot(host); roots.add(root);
+    await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: { query: { userId: "user-a", gameId: "game-1" } }, snapshot: actorSnapshot(), onDirtyChange: () => {}, refreshNonce: 0 })));
+    await openPolicyTab(host);
+    await flushUntil(() => host.textContent.includes("待处理变更 · 申请状态待确认"), "undeployed projection");
+    assert.match(host.textContent, /申请状态暂未确认/);assert.doesNotMatch(host.textContent, /字段未部署/);
+    const submit = buttonByText(host, "提交审批"); assert.ok(submit); assert.equal(submit.disabled, true);
+    await act(async () => buttonByText(host, "刷新状态").click());
+    await flushUntil(() => host.textContent.includes("待处理变更 · 待审批"), "change refresh");
+    assert.equal(policyGets, 2);
+    assert.match(host.textContent, /申请已提交，等待审批/);
+    assert.equal(requests.filter((request) => request.method === "POST" && request.path.endsWith("/security/approvals/requests")).length, 0);
+    await act(async () => root.unmount());
+  } finally { await closeUI(vite, browser); }
+});
+
+test("policy change for another draft is not attached to the current draft", async () => {
+  const browser = installBrowser();
+  const { vite, MembershipGrowthAdminHost } = await loadHost();
+  try {
+    const requests = [], opened = [];
+    globalThis.fetch = async (url, init = {}) => {
+      const path = String(url), method = (init.method ?? "GET").toUpperCase();
+      requests.push({ path, method });
+      if (method === "GET") { const shared = workspaceRead(path); if (shared) return shared; }
+      if (method === "GET" && path.endsWith("/membership-growth/policy")) return respond(policyResponse({ policyChange: serverChange({ draftReference: { id: "draft-old", version: "4", payloadHash: "b".repeat(64) } }) }));
+      throw new Error(`unexpected ${method} ${path}`);
+    };
+    const host = browser.document.createElement("div"); browser.document.body.append(host);
+    const { createRoot } = await import("react-dom/client"); const root = createRoot(host); roots.add(root);
+    await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: { query: { userId: "user-a", gameId: "game-1" } }, snapshot: actorSnapshot(), onDirtyChange: () => {}, refreshNonce: 0, onOpenPath: (path, title) => opened.push({ path, title }) })));
+    await openPolicyTab(host);
+    await flushUntil(() => host.textContent.includes("待处理变更 · 原申请属于另一份草稿"), "old draft isolation");
+    assert.match(host.textContent, /原申请对应另一份草稿|原申请需核对/);
+    assert.equal(buttonByText(host, "提交审批").disabled, true);
+    await act(async () => buttonByText(host, "查看原申请").click());
+    assert.deepEqual(opened.at(-1), { path: "/approvals/server-context-1?from=membership-growth&fromTab=policy", title: "审批详情" });
+    assert.equal(requests.filter((request) => request.method === "POST" && request.path.endsWith("/security/approvals/requests")).length, 0);
+    await act(async () => root.unmount());
+  } finally { await closeUI(vite, browser); }
+});
+
+test("a late policy-change read from a previous identity cannot overwrite the new identity", async () => {
+  const browser = installBrowser();
+  const { vite, MembershipGrowthAdminHost } = await loadHost();
+  try {
+    let policyGets = 0, releaseFirst;
+    const firstRead = new Promise((resolve) => { releaseFirst = () => resolve(respond(policyResponse({ policyChange: serverChange({ request: { ...serverChange().request, id: "actor-a-approval", submittedBy: { id: "a", name: "运营甲" } } }) }))); });
+    globalThis.fetch = async (url, init = {}) => {
+      const path = String(url), method = (init.method ?? "GET").toUpperCase();
+      if (method === "GET") { const shared = workspaceRead(path); if (shared) return shared; }
+      if (method === "GET" && path.endsWith("/membership-growth/policy")) {
+        policyGets += 1;
+        if (policyGets === 1) return firstRead;
+        return respond(policyResponse({ policyChange: serverChange({ request: { ...serverChange().request, id: "actor-b-approval", submittedBy: { id: "b", name: "运营乙" } } }) }));
+      }
+      throw new Error(`unexpected ${method} ${path}`);
+    };
+    const host = browser.document.createElement("div"); browser.document.body.append(host);
+    const { createRoot } = await import("react-dom/client"); const root = createRoot(host); roots.add(root);
+    const first = actorSnapshot();
+    await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: { query: { userId: "user-a", gameId: "game-1" } }, snapshot: first, onDirtyChange: () => {}, refreshNonce: 0 })));
+    await openPolicyTab(host);
+    await flushUntil(() => policyGets === 1, "first identity read");
+    const next = actorSnapshot(); next.adminUserId = "another-admin"; next.session = { ...next.session, id: "another-session" };
+    await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: { query: { userId: "user-a", gameId: "game-1" } }, snapshot: next, onDirtyChange: () => {}, refreshNonce: 0 })));
+    await openPolicyTab(host);
+    await flushUntil(() => host.textContent.includes("待处理变更 · 待审批") && host.textContent.includes("运营乙"), "second identity read");
+    releaseFirst();
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    assert.match(host.textContent, /运营乙/);
+    assert.doesNotMatch(host.textContent, /运营甲/);
+    assert.equal(policyGets, 2);
+    await act(async () => root.unmount());
+  } finally { await closeUI(vite, browser); }
+});
+
+test("policy read failures stay inline and never call window.alert", async () => {
+  const browser = installBrowser();
+  const { vite, MembershipGrowthAdminHost } = await loadHost();
+  try {
+    let alerted = false;
+    browser.alert = () => { alerted = true; };
+    globalThis.fetch = async (url, init = {}) => {
+      const path = String(url), method = (init.method ?? "GET").toUpperCase();
+      if (method === "GET") { const shared = workspaceRead(path); if (shared) return shared; }
+      if (method === "GET" && path.endsWith("/membership-growth/policy")) return respond({ error: { code: "FORBIDDEN" } }, 403);
+      throw new Error(`unexpected ${method} ${path}`);
+    };
+    const host = browser.document.createElement("div"); browser.document.body.append(host);
+    const { createRoot } = await import("react-dom/client"); const root = createRoot(host); roots.add(root);
+    await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: { query: { userId: "user-a", gameId: "game-1" } }, snapshot: actorSnapshot(), onDirtyChange: () => {}, refreshNonce: 0 })));
+    await openPolicyTab(host);
+    await flushUntil(() => host.textContent.includes("没有会员成长读取权限"), "inline policy error");
+    assert.ok(host.querySelector("[role=alert]"));
+    assert.equal(alerted, false);
+    await act(async () => root.unmount());
+  } finally { await closeUI(vite, browser); }
+});
+
+test("R1 a server-only original request survives FORBIDDEN with an ID-only readback", async () => {
+  const browser = installBrowser();
+  const { vite, MembershipGrowthAdminHost } = await loadHost();
+  try {
+    let policyGets = 0, failNext = false;
+    const requests = [], opened = [];
+    const initial = policyResponse({ policyChange: serverChange({
+      request: { ...serverChange().request, id: "server-read-only-request", approvalStatus: "APPROVED", executionStatus: "FAILED", submittedBy: { id: "ops-c", name: "运营丙" }, submittedAtUtc: "2026-10-25T01:00:00.000Z" },
+      immutableDiff: [{ label: "金卡 · 押金权益", baseline: "0", requested: "20000", format: "CENTS" }],
+      effectiveState: { status: "NOT_EFFECTIVE" },
+    }) });
+    const forbidden = policyResponse({ policyChange: { knowledge: "FORBIDDEN", request: null, draftReference: null, immutableDiff: null, effectiveState: null } });
+    globalThis.fetch = async (url, init = {}) => {
+      const path = String(url), method = (init.method ?? "GET").toUpperCase();
+      requests.push({ path, method });
+      if (method === "GET") { const shared = workspaceRead(path); if (shared) return shared; }
+      if (method === "GET" && path.endsWith("/membership-growth/policy")) {
+        policyGets += 1;
+        if (policyGets === 1) return respond(initial);
+        if (failNext) { failNext = false; throw new Error("synthetic refresh failure"); }
+        return respond(forbidden);
+      }
+      throw new Error(`unexpected ${method} ${path}`);
+    };
+    const host = browser.document.createElement("div"); browser.document.body.append(host);
+    const { createRoot } = await import("react-dom/client"); const root = createRoot(host); roots.add(root);
+    await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: { query: { userId: "user-a", gameId: "game-1" } }, snapshot: actorSnapshot(), onDirtyChange: () => {}, refreshNonce: 0, onOpenPath: (path, title) => opened.push({ path, title }) })));
+    await openPolicyTab(host);
+    await flushUntil(() => host.textContent.includes("待处理变更 · 执行状态待核对"), "server-only execution failure");
+    assert.match(host.textContent, /运营丙/);
+    await act(async () => buttonByText(host, "查看变更详情").click());
+    const originalDialog = browser.document.querySelector("[data-slot=dialog-content]");
+    assert.match(originalDialog.textContent, /金卡 · 押金权益/);
+    await act(async () => buttonByText(originalDialog, "关闭").click());
+    failNext = true;
+    await act(async () => buttonByText(host, "刷新状态").click());
+    await flushUntil(() => host.textContent.includes("刷新失败，请稍后重试"), "refresh transport failure");
+    assert.equal(host.querySelectorAll("[data-testid=membership-policy-feedback]").length, 1);
+    assert.ok(buttonByText(host, "查看原申请"));
+    await act(async () => buttonByText(host, "刷新状态").click());
+    await flushUntil(() => host.textContent.includes("暂时无法查看申请"), "forbidden ID-only fallback");
+    assert.doesNotMatch(host.textContent, /运营丙|金卡 · 押金权益|待审批/);
+    assert.equal(buttonByText(host, "提交审批").disabled, true);
+    await act(async () => buttonByText(host, "查看原申请").click());
+    assert.deepEqual(opened.at(-1), { path: "/approvals/server-read-only-request?from=membership-growth&fromTab=policy", title: "审批详情" });
+    assert.equal(requests.filter((request) => request.method === "POST").length, 0);
+    await act(async () => root.unmount());
+  } finally { await closeUI(vite, browser); }
+});
+
+test("R1 an incomplete refreshed request cannot release the unknown submit gate", async () => {
+  const browser = installBrowser();
+  const { vite, MembershipGrowthAdminHost } = await loadHost();
+  try {
+    let policyGets = 0;
+    const requests = [], opened = [];
+    const initial = policyResponse({ policyChange: undefined });
+    const refreshed = policyResponse({ policyChange: serverChange({
+      draftReference: null,
+      request: { ...serverChange().request, id: "rejected-without-reference", approvalStatus: "REJECTED", executionStatus: null },
+    }) });
+    globalThis.fetch = async (url, init = {}) => {
+      const path = String(url), method = (init.method ?? "GET").toUpperCase();
+      requests.push({ path, method });
+      if (method === "GET") { const shared = workspaceRead(path); if (shared) return shared; }
+      if (method === "GET" && path.endsWith("/membership-growth/policy")) {
+        policyGets += 1;
+        return respond(policyGets === 1 ? initial : refreshed);
+      }
+      throw new Error(`unexpected ${method} ${path}`);
+    };
+    const host = browser.document.createElement("div"); browser.document.body.append(host);
+    const { createRoot } = await import("react-dom/client"); const root = createRoot(host); roots.add(root);
+    await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: { query: { userId: "user-a", gameId: "game-1" } }, snapshot: actorSnapshot(), onDirtyChange: () => {}, refreshNonce: 0, onOpenPath: (path, title) => opened.push({ path, title }) })));
+    await openPolicyTab(host);
+    await flushUntil(() => host.textContent.includes("待处理变更 · 申请状态待确认"), "undeployed projection");
+    assert.equal(buttonByText(host, "提交审批").disabled, true);
+    await act(async () => buttonByText(host, "刷新状态").click());
+    await flushUntil(() => host.textContent.includes("申请状态暂未更新"), "incomplete refreshed request");
+    assert.doesNotMatch(host.textContent, /草稿待提交|另一份草稿|已退回/);
+    assert.equal(buttonByText(host, "提交审批").disabled, true);
+    const original = buttonByText(host, "查看原申请"); assert.ok(original);
+    await act(async () => original.click());
+    assert.deepEqual(opened.at(-1), { path: "/approvals/rejected-without-reference?from=membership-growth&fromTab=policy", title: "审批详情" });
+    assert.equal(requests.filter((request) => request.method === "POST").length, 0);
+    await act(async () => root.unmount());
+  } finally { await closeUI(vite, browser); }
+});
+
+test("R1 a verified published policy without a current draft keeps its published state", async () => {
+  const browser = installBrowser();
+  const { vite, MembershipGrowthAdminHost } = await loadHost();
+  try {
+    const opened = [];
+    const noDraftResponse = (status) => policyResponse({
+      meta: { ...metaFixture(), id: "approved-1", version: "1", status: "APPROVED" },
+      policy: { ...policyPayload(), status: "APPROVED", version: "1" },
+      policyChange: serverChange({
+        draftReference: { id: "published-original-draft", version: "3", payloadHash: "a".repeat(64) },
+        request: { id: "published-original-request", operationCode: "membership.benefit.policy.publish", approvalStatus: "APPROVED", executionStatus: "SUCCEEDED", submittedBy: { id: "ops-c", name: "运营丙" }, submittedAtUtc: "2026-10-25T01:00:00.000Z", plannedEffectiveAtUtc: status === "EFFECTIVE" ? "2026-10-20T00:00:00.000Z" : "2099-01-01T00:00:00.000Z" },
+        immutableDiff: [{ label: "钻石 · 押金权益", baseline: "0", requested: "20000", format: "CENTS" }],
+        effectiveState: { status, executed: true },
+      }),
+    });
+    for (const [status, label] of [["PENDING_EFFECTIVE", "已发布待生效"], ["EFFECTIVE", "已生效"]]) {
+      const host = browser.document.createElement("div"); browser.document.body.append(host);
+      const { createRoot } = await import("react-dom/client"); const root = createRoot(host); roots.add(root);
+      const response = noDraftResponse(status);
+      globalThis.fetch = async (url, init = {}) => {
+        const path = String(url), method = (init.method ?? "GET").toUpperCase();
+        if (method === "GET") { const shared = workspaceRead(path); if (shared) return shared; }
+        if (method === "GET" && path.endsWith("/membership-growth/policy")) return respond(response);
+        throw new Error(`unexpected ${method} ${path}`);
+      };
+      await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: { query: { userId: "user-a", gameId: "game-1" } }, snapshot: actorSnapshot(), onDirtyChange: () => {}, refreshNonce: 0, onOpenPath: (path, title) => opened.push({ path, title }) })));
+      await openPolicyTab(host);
+      await flushUntil(() => host.textContent.includes(`${status === "EFFECTIVE" ? "最近变更" : "待处理变更"} · ${label}`), `${status} without a draft`);
+      assert.doesNotMatch(host.textContent, /另一份草稿|暂无待处理变更/);
+      assert.equal(buttonByText(host, "提交审批"), undefined);
+      if (status === "EFFECTIVE") assert.match(host.textContent, /生效时间/);
+      const original = buttonByText(host, "查看原申请"); assert.ok(original);
+      await act(async () => original.click());
+      assert.deepEqual(opened.at(-1), { path: "/approvals/published-original-request?from=membership-growth&fromTab=policy", title: "审批详情" });
+      await act(async () => root.unmount()); roots.delete(root); host.remove();
+    }
+  } finally { await closeUI(vite, browser); }
+});
+
+
+async function openRootPolicyReloadFixture(t, sequence) {
+  const browser = installBrowser();
+  const { vite, MembershipGrowthAdminHost } = await loadHost();
+  const requests = [], opened = []; let policyGets = 0;
+  globalThis.fetch = async (url, init = {}) => {
+    const path = String(url), method = (init.method ?? "GET").toUpperCase();
+    requests.push({ path, method });
+    if (method === "GET") { const shared = workspaceRead(path); if (shared) return shared; }
+    if (method === "GET" && path.endsWith("/membership-growth/policy")) {
+      const policyChange = sequence[Math.min(policyGets++, sequence.length - 1)];
+      return respond(policyResponse({ policyChange }));
+    }
+    throw new Error(`unexpected ${method} ${path}`);
+  };
+  const host = browser.document.createElement("div"); browser.document.body.append(host);
+  const { createRoot } = await import("react-dom/client"); const root = createRoot(host); roots.add(root);
+  let props = { tab: { query: { userId: "user-a", gameId: "game-1" } }, snapshot: actorSnapshot(), onDirtyChange: () => {}, refreshNonce: 0, onOpenPath: (path, title) => opened.push({ path, title }) };
+  const render = async (patch = {}) => { props = { ...props, ...patch }; await act(async () => root.render(createElement(MembershipGrowthAdminHost, props))); await openPolicyTab(host); };
+  t.after(async () => { await closeUI(vite, browser); host.remove(); });
+  await render();
+  return { browser, host, root, render, snapshot: () => props.snapshot, requests, opened, policyGets: () => policyGets };
+}
+
+for (const mode of ["refreshNonce", "snapshot"]) test(`Root F1 same identity workspace ${mode} retains a server-only original request after forbidden read`, async t => {
+  const h = await openRootPolicyReloadFixture(t, [serverChange(), { knowledge: "FORBIDDEN", request: null }]);
+  await flushUntil(() => h.host.textContent.includes("待处理变更 · 待审批"), "first server-linked request");
+  assert.match(h.host.textContent, /运营乙/);
+  const snapshot = h.snapshot();
+  await h.render(mode === "refreshNonce" ? { refreshNonce: 1 } : { snapshot: { ...snapshot, session: { ...snapshot.session }, security: { ...snapshot.security }, permissions: [...snapshot.permissions] } });
+  await flushUntil(() => h.host.textContent.includes("无权读取变更状态"), "same identity forbidden reload");
+  assert.doesNotMatch(h.host.textContent, /运营乙/);
+  assert.doesNotMatch(h.host.textContent, /调整1项权益/);
+  const original = buttonByText(h.host, "查看原申请"); assert.ok(original, "server-only original request stays reachable");
+  await act(async () => original.click());
+  assert.deepEqual(h.opened.at(-1), { path: "/approvals/server-context-1?from=membership-growth&fromTab=policy", title: "审批详情" });
+  assert.equal(h.policyGets(), 2); assert(h.requests.every(request => request.method === "GET"));
+});
+
+test("Root F1 a locally refreshed server ID survives the next workspace reload", async t => {
+  const h = await openRootPolicyReloadFixture(t, [{ knowledge: "UNKNOWN", request: null }, serverChange(), { knowledge: "FORBIDDEN", request: null }]);
+  await flushUntil(() => h.host.textContent.includes("待处理变更 · 申请状态待确认"), "initial unknown");
+  await act(async () => buttonByText(h.host, "刷新状态").click());
+  await flushUntil(() => h.host.textContent.includes("待处理变更 · 待审批"), "local refresh discovers original");
+  await h.render({ refreshNonce: 1 });
+  await flushUntil(() => h.host.textContent.includes("无权读取变更状态"), "workspace reload forbidden");
+  const original = buttonByText(h.host, "查看原申请"); assert.ok(original);
+  await act(async () => original.click());
+  assert.equal(h.opened.at(-1).path, "/approvals/server-context-1?from=membership-growth&fromTab=policy");
+  assert.equal(h.policyGets(), 3); assert(h.requests.every(request => request.method === "GET"));
+});
+
+test("Root F1 changing the administrator or session clears the original server ID", async t => {
+  const h = await openRootPolicyReloadFixture(t, [serverChange(), { knowledge: "FORBIDDEN", request: null }]);
+  await flushUntil(() => h.host.textContent.includes("待处理变更 · 待审批"), "old identity request");
+  const snapshot = h.snapshot();
+  await h.render({ snapshot: { ...snapshot, adminUserId: "other-root-f1-admin", session: { ...snapshot.session, id: "other-root-f1-session" } } });
+  await flushUntil(() => h.host.textContent.includes("无权读取变更状态"), "new identity forbidden");
+  assert.equal(buttonByText(h.host, "查看原申请"), undefined);
+  assert.doesNotMatch(h.host.textContent, /server-context-1|运营乙|调整1项权益/);
+  assert.equal(h.policyGets(), 2); assert(h.requests.every(request => request.method === "GET"));
+});
+
+
+test("Root F1 explicit known no-request clears the remembered read-only ID", async t => {
+  const h = await openRootPolicyReloadFixture(t, [serverChange(), { knowledge: "KNOWN", request: null }, { knowledge: "FORBIDDEN", request: null }]);
+  await flushUntil(() => h.host.textContent.includes("待处理变更 · 待审批"), "known original before clear");
+  await h.render({ refreshNonce: 1 });
+  await flushUntil(() => h.host.textContent.includes("待处理变更 · 草稿待提交"), "explicit no request");
+  assert.equal(buttonByText(h.host, "查看原申请"), undefined);
+  await h.render({ refreshNonce: 2 });
+  await flushUntil(() => h.host.textContent.includes("无权读取变更状态"), "no cached ID after clear");
+  assert.equal(buttonByText(h.host, "查看原申请"), undefined);
+  assert.doesNotMatch(h.host.textContent, /server-context-1|运营乙/);
+  assert.equal(h.policyGets(), 3); assert(h.requests.every(request => request.method === "GET"));
+});
+
+test('closeout requested values parser keeps exact safe strings and drops unbound or malformed values', async () => {
+  const { vite } = await loadHost();
+  try {
+    const { normalizePolicyChange } = await vite.ssrLoadModule('/src/views/membership-growth-admin-host.tsx');
+    const requestedValues = [{ label: '普通 · 应付比例', value: '0.95000000', format: 'DISCOUNT' }, { label: '普通 · 每单押金减免额度', value: '0', format: 'CENTS' }];
+    const good = serverChange({ requestedValues, immutableDiff: null });
+    assert.deepEqual(normalizePolicyChange(good).change.requestedValues, requestedValues);
+    for (const patch of [
+      { knowledge: 'FORBIDDEN' }, { knowledge: 'UNKNOWN' }, { request: null }, { draftReference: null },
+      { request: { ...good.request, operationCode: 'membership.entitlement.grant' } },
+      { requestedValues: [{ label: '比例', value: 0.95, format: 'DISCOUNT' }] },
+      { requestedValues: [{ label: '比例', value: '0.95', format: 'HTML' }] },
+      { requestedValues: Array.from({ length: 20 }, () => requestedValues[0]) },
+    ]) assert.equal(normalizePolicyChange({ ...good, ...patch }).change.requestedValues, null);
+    assert.equal(normalizePolicyChange(good).change.immutableDiff, null, 'requested values never invent an immutable baseline');
+  } finally { await vite.close(); }
+});
+
+for (const terminal of ['EXPIRED', 'CANCELLED', 'EFFECTIVE']) test(`closeout Host ${terminal} history cannot relock a new draft after known no-request refresh`, async t => {
+  const browser = installBrowser(), { vite, MembershipGrowthAdminHost } = await loadHost();
+  t.after(async () => { await closeUI(vite, browser); });
+  const snapshot = actorSnapshot(), requests = [], opened = [];
+  const { savePendingWrite, inspectPending, pendingWriteSubject } = await vite.ssrLoadModule('/src/views/approval/pending-writes.ts');
+  const subject = pendingWriteSubject(snapshot.adminUserId, snapshot.session.id, '', 'approval.request.create');
+  const originalBody = { operationCode: 'membership.benefit.policy.publish', payload: { policyDraftId: 'draft-1', policyDraftVersion: 1, policyDraftHash: 'a'.repeat(64) } };
+  assert.equal(savePendingWrite({ actorId: snapshot.adminUserId, sessionId: snapshot.session.id, target: '', operation: 'approval.request.create', path: '/security/approvals/requests', idempotencyKey: 'idem_' + 'd'.repeat(32), body: originalBody, readback: { kind: 'lists', keys: ['mine'] }, successMessage: 'fixture', kind: 'readback' }).ok, true);
+  const request = { ...serverChange().request, id: 'closed-history', approvalStatus: terminal === 'EFFECTIVE' ? 'APPROVED' : terminal, executionStatus: terminal === 'EFFECTIVE' ? 'SUCCEEDED' : null };
+  const original = policyResponse({ policyChange: serverChange({ request, immutableDiff: null, effectiveState: { status: terminal === 'EFFECTIVE' ? 'EFFECTIVE' : 'NOT_EFFECTIVE', executed: terminal === 'EFFECTIVE' } }) });
+  if (terminal === 'EFFECTIVE') { original.policy = { ...original.policy, status: 'APPROVED' }; original.meta = { ...original.meta, status: 'APPROVED' }; original.approvedPolicy = original.policy; original.approvedUnifiedPricing = unifiedFixture(); original.approvedMeta = original.meta; }
+  let current = original;
+  globalThis.fetch = async (url, init = {}) => {
+    const path = String(url), method = (init.method ?? 'GET').toUpperCase(), body = init.body ? JSON.parse(String(init.body)) : undefined;
+    requests.push({ path, method, body });
+    if (method === 'GET') { const shared = workspaceRead(path); if (shared) return shared; }
+    if (method === 'GET' && path.endsWith('/membership-growth/policy')) return respond(current);
+    if (method === 'GET' && path.includes('/security/approvals/recovery')) return respond({ knowledge: 'KNOWN', key: 'idem_' + 'd'.repeat(32), operation: 'approval.request.create', targetRequestId: null, originalResponseStatus: 200, outcome: 'ACCEPTED', receipt: { approvalRequestId: 'closed-history', status: 'PENDING' } });
+    if (method === 'GET' && path.includes('/security/approvals/requests/detail')) { const id = new URL(path, 'http://test').searchParams.get('requestId'); return respond({ requestId: id, status: id === 'closed-history' ? terminal === 'EFFECTIVE' ? 'EXECUTED' : terminal : 'PENDING', operation: { code: 'membership.benefit.policy.publish' } }); }
+    if (method === 'POST' && path.endsWith('/membership-growth/policy-drafts')) return respond({ id: 'draft-2', version: '2', payloadHash: 'b'.repeat(64), publishable: true, warnings: [], unifiedPricing: unifiedFixture() });
+    if (method === 'POST' && path.endsWith('/security/approvals/requests')) return respond({ requestId: 'new-draft-request' });
+    throw new Error(`unexpected ${method} ${path}`);
+  };
+  const host = browser.document.createElement('div'); browser.document.body.append(host);
+  const { createRoot } = await import('react-dom/client'), root = createRoot(host); roots.add(root);
+  const props = { tab: { query: { userId: 'user-a', gameId: 'game-1' } }, snapshot, onDirtyChange: () => {}, refreshNonce: 0, onOpenPath: path => opened.push(path) };
+  const until = async (predicate, label) => { try { await flushUntil(predicate, label); } catch (error) { error.message += '\n' + JSON.stringify({ feedback: host.querySelector('[data-testid=membership-policy-feedback]')?.textContent, buttons: [...host.querySelectorAll('button')].map(button => ({ text: button.textContent, disabled: button.disabled })), pending: inspectPending(subject).state }); throw error; } };
+  await act(async () => root.render(createElement(MembershipGrowthAdminHost, props))); await openPolicyTab(host);
+  await until(() => inspectPending(subject).state === 'absent' && !buttonByText(host, '调整会员政策').disabled, 'closed original allows a new edit');
+  assert.equal(host.querySelectorAll('[data-testid=membership-policy-feedback]').length, 1);
+  if (terminal === 'EFFECTIVE') { assert.match(host.textContent, /最近变更 · 已生效/); assert.doesNotMatch(host.textContent, /待处理变更 · 已生效/); }
+  await setInput(browser, host.querySelector('input[aria-label="银卡 统一应付折扣"]'), '0.91');
+  await act(async () => buttonByText(host, '保存草稿').click());
+  await until(() => requests.some(item => item.method === 'POST' && item.path.endsWith('/policy-drafts')), 'new draft saved');
+  current = policyResponse({ meta: { ...metaFixture(), id: 'draft-2', version: '2', payloadHash: 'b'.repeat(64) }, policyChange: { knowledge: 'KNOWN', request: null, requestedValues: null, immutableDiff: null } });
+  await act(async () => root.render(createElement(MembershipGrowthAdminHost, { ...props, refreshNonce: 1 }))); await openPolicyTab(host);
+  await until(() => { const button = buttonByText(host, '提交审批'); return button && !button.disabled; }, 'no-request proof releases the new draft');
+  assert.doesNotMatch(host.querySelector('[data-testid=membership-policy-feedback]').textContent, /UNKNOWN|待核对|状态待确认|另一份草稿/);
+  assert.equal(inspectPending(subject).state, 'absent');
+  const audit = buttonByText(host, '查看上次申请'); assert.ok(audit); await act(async () => audit.click());
+  assert.equal(opened.at(-1), '/approvals/closed-history?from=membership-growth&fromTab=policy');
+  await act(async () => buttonByText(host, '提交审批').click());
+  const post = requests.find(item => item.method === 'POST' && item.path.endsWith('/security/approvals/requests')); assert.ok(post);
+  assert.deepEqual(post.body.payload, { policyDraftId: 'draft-2', policyDraftVersion: 2, policyDraftHash: 'b'.repeat(64), ruleReleaseId: 'release-1', priceVersionId: 'price-v1', sourceRef: 'fixture', effectiveAtUtc: '2026-11-01T00:00:00.000Z' });
+  assert.equal(Object.hasOwn(post.body, 'supersedesRequestId'), false);
+});
+
+test('closeout Host unresolved original key blocks edit and save without dropping its body', async t => {
+  const browser = installBrowser(), { vite, MembershipGrowthAdminHost } = await loadHost();
+  t.after(async () => { await closeUI(vite, browser); });
+  const snapshot = actorSnapshot(), requests = [];
+  const { savePendingWrite, inspectPending, pendingWriteSubject } = await vite.ssrLoadModule('/src/views/approval/pending-writes.ts');
+  const key = 'idem_' + 'e'.repeat(32), body = { operationCode: 'membership.benefit.policy.publish', payload: { policyDraftId: 'draft-1', policyDraftVersion: 1, policyDraftHash: 'a'.repeat(64) } };
+  const subject = pendingWriteSubject(snapshot.adminUserId, snapshot.session.id, '', 'approval.request.create');
+  assert.equal(savePendingWrite({ actorId: snapshot.adminUserId, sessionId: snapshot.session.id, target: '', operation: 'approval.request.create', path: '/security/approvals/requests', idempotencyKey: key, body, readback: { kind: 'lists', keys: ['mine'] }, successMessage: 'fixture', kind: 'unknown' }).ok, true);
+  globalThis.fetch = async (url, init = {}) => {
+    const path = String(url), method = (init.method ?? 'GET').toUpperCase(); requests.push({ path, method });
+    const shared = workspaceRead(path); if (shared) return shared;
+    if (method === 'GET' && path.endsWith('/membership-growth/policy')) return respond(policyResponse());
+    if (method === 'GET' && path.includes('/security/approvals/recovery')) return respond({ knowledge: 'UNKNOWN' });
+    throw new Error(`unexpected ${method} ${path}`);
+  };
+  const host = browser.document.createElement('div'); browser.document.body.append(host);
+  const { createRoot } = await import('react-dom/client'), root = createRoot(host); roots.add(root);
+  await act(async () => root.render(createElement(MembershipGrowthAdminHost, { tab: { query: { userId: 'user-a', gameId: 'game-1' } }, snapshot, onDirtyChange: () => {}, refreshNonce: 0 })));
+  await openPolicyTab(host);
+  await flushUntil(() => buttonByText(host, '查询原结果') && !buttonByText(host, '查询原结果').disabled, 'unknown recovery settled');
+  assert.equal(host.querySelectorAll('[data-testid=membership-policy-feedback]').length, 1);
+  assert.equal(buttonByText(host, '调整会员政策').disabled, true);
+  assert.equal(buttonByText(host, '保存草稿').disabled, true);
+  assert.ok(!buttonByText(host, '提交审批') || buttonByText(host, '提交审批').disabled);
+  await act(async () => buttonByText(host, '保存草稿').click());
+  const pending = inspectPending(subject); assert.equal(pending.state, 'valid');
+  assert.equal(pending.record.idempotencyKey, key); assert.deepEqual(pending.record.body, body);
+  assert.equal(requests.some(item => item.method !== 'GET'), false);
 });

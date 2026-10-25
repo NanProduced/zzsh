@@ -1,18 +1,25 @@
 import { useEffect, useRef, useState } from "react";
 import { AdminApiError, adminRequest, friendlyError, hasPermission, type SessionSnapshot } from "../api";
 import type { WorkspaceTab } from "../workspace/tab-model";
-import { Alert, AlertDescription } from "../components/ui/alert";
-import { Button } from "../components/ui/button";
-import { MembershipBenefitsWorkspace, membershipPendingLabel, useMembershipApprovalRequest } from "./membership-benefits-workspace";
+import { MembershipBenefitsWorkspace, useMembershipApprovalRequest } from "./membership-benefits-workspace";
 import {
   bootstrapGrowthPolicy,
   MembershipGrowthAdminView,
+  requestKind,
   unifiedDraftFromProjection,
   unifiedPricingInputFromDraft,
   type AdminGrowthCatalog,
   type AdminGrowthPolicy,
   type AdminGrowthSubject,
   type AdminApproval,
+  type AdminPolicyChangeDiff,
+  type AdminPolicyRequestedValue,
+  type AdminPolicyNotice,
+  type AdminPolicyChangeProjection,
+  type AdminPolicyChangePerson,
+  type AdminPolicyChangeRead,
+  type AdminPolicyChangeRequest,
+  type AdminPolicyChangeStep,
   type AdminPricingMode,
   type MembershipGrowthAdminState,
 } from "./membership-growth-view";
@@ -56,7 +63,116 @@ type PolicyResponse = {
   catalog: AdminGrowthCatalog;
   thresholds: Record<string, string>;
   bootstrap?: PolicyBootstrap | null;
+  policyChange?: unknown;
 };
+
+function recordOf(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function textOf(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function personOf(value: unknown): AdminPolicyChangePerson | null {
+  const record = recordOf(value);
+  const id = textOf(record?.id);
+  return id ? { id, name: textOf(record?.name) } : null;
+}
+
+function stepOf(value: unknown): AdminPolicyChangeStep | null {
+  const record = recordOf(value);
+  const key = textOf(record?.key)?.toUpperCase();
+  const label = textOf(record?.label);
+  const state = textOf(record?.state)?.toUpperCase();
+  if (!key || !label || !["SUBMITTED", "APPROVAL", "EXECUTION", "EFFECTIVE"].includes(key)) return null;
+  if (!state || !["COMPLETED", "CURRENT", "PENDING", "FAILED", "UNKNOWN"].includes(state)) return null;
+  return {
+    key: key as AdminPolicyChangeStep["key"],
+    label,
+    state: state as AdminPolicyChangeStep["state"],
+    actor: personOf(record?.actor),
+    atUtc: textOf(record?.atUtc),
+    note: textOf(record?.note),
+  };
+}
+
+function diffOf(value: unknown): AdminPolicyChangeDiff | null {
+  const record = recordOf(value);
+  const label = textOf(record?.label);
+  if (!label) return null;
+  const format = textOf(record?.format)?.toUpperCase();
+  const risk = textOf(record?.risk)?.toUpperCase();
+  return {
+    label,
+    baseline: textOf(record?.baseline),
+    requested: textOf(record?.requested),
+    format: format === "DISCOUNT" || format === "CENTS" ? format : "TEXT",
+    risk: risk === "REVIEW_REQUIRED" ? "REVIEW_REQUIRED" : "LOW",
+  };
+}
+
+function requestedValuesOf(value: unknown): AdminPolicyRequestedValue[] | null {
+  if (!Array.isArray(value) || value.length > 19) return null;
+  const values: AdminPolicyRequestedValue[] = [];
+  for (const item of value) {
+    const row = recordOf(item), label = textOf(row?.label), format = row?.format;
+    if (!label || typeof format !== "string" || !["TEXT", "DISCOUNT", "CENTS"].includes(format) || row?.value !== null && typeof row?.value !== "string") return null;
+    values.push({ label, value: row!.value as string | null, format: format as AdminPolicyRequestedValue["format"] });
+  }
+  return values;
+}
+
+/** Optional read projection; absence or an incomplete shape never means there is no request. */
+export function normalizePolicyChange(raw: unknown): AdminPolicyChangeRead {
+  if (raw === undefined) return { status: "UNAVAILABLE", message: "暂时无法读取申请状态，请稍后刷新。" };
+  if (raw === null) return { status: "UNAVAILABLE", message: "暂时无法读取申请状态，请稍后刷新。" };
+  const record = recordOf(raw);
+  const knowledge = textOf(record?.knowledge)?.toUpperCase();
+  if (!record || !knowledge || !["KNOWN", "UNKNOWN", "FORBIDDEN"].includes(knowledge)) {
+    return { status: "UNAVAILABLE", message: "申请信息暂不完整，请刷新或查看原申请。" };
+  }
+  if (knowledge === "KNOWN" && record.request === undefined) {
+    return { status: "UNAVAILABLE", message: "申请信息暂不完整，请刷新或查看原申请。" };
+  }
+  const requestRecord = record.request === null || record.request === undefined ? null : recordOf(record.request);
+  if (record.request !== null && record.request !== undefined && (!requestRecord || !textOf(requestRecord.id))) {
+    return { status: "UNAVAILABLE", message: "申请信息暂不完整，请刷新或查看原申请。" };
+  }
+  const reference = recordOf(record.draftReference);
+  const request: AdminPolicyChangeRequest | null = requestRecord ? {
+    id: textOf(requestRecord.id)!,
+    operationCode: textOf(requestRecord.operationCode),
+    approvalStatus: textOf(requestRecord.approvalStatus) ?? "UNKNOWN",
+    executionStatus: textOf(requestRecord.executionStatus),
+    reason: textOf(requestRecord.reason),
+    submittedBy: personOf(requestRecord.submittedBy),
+    submittedAtUtc: textOf(requestRecord.submittedAtUtc),
+    plannedEffectiveAtUtc: textOf(requestRecord.plannedEffectiveAtUtc),
+    steps: Array.isArray(requestRecord.steps) ? requestRecord.steps.map(stepOf).filter((step): step is AdminPolicyChangeStep => step !== null) : null,
+  } : null;
+  const diffSource = Array.isArray(record.immutableDiff) ? record.immutableDiff.map(diffOf).filter((diff): diff is AdminPolicyChangeDiff => diff !== null) : null;
+  const effective = recordOf(record.effectiveState);
+  return {
+    status: "READY",
+    knownRequestId: request?.id ?? null,
+    change: {
+      knowledge: knowledge as AdminPolicyChangeProjection["knowledge"],
+      draftReference: reference && textOf(reference.id) && textOf(reference.version) && textOf(reference.payloadHash)
+        ? { id: textOf(reference.id)!, version: textOf(reference.version)!, payloadHash: textOf(reference.payloadHash)! }
+        : null,
+      request,
+      requestedValues: knowledge === "KNOWN" && request?.operationCode === "membership.benefit.policy.publish" && reference && textOf(reference.id) && textOf(reference.version) && textOf(reference.payloadHash) ? requestedValuesOf(record.requestedValues) : null,
+      immutableDiff: diffSource !== null && record.immutableDiff && Array.isArray(record.immutableDiff) && record.immutableDiff.length > 0 && diffSource.length === 0 ? null : diffSource,
+      effectiveState: effective && textOf(effective.status) ? {
+        status: textOf(effective.status)!,
+        effectiveAtUtc: textOf(effective.effectiveAtUtc),
+        executed: typeof effective.executed === "boolean" ? effective.executed : null,
+      } : null,
+      message: textOf(record.message),
+    },
+  };
+}
 
 type DraftResponse = {
   id: string;
@@ -151,7 +267,7 @@ function subjectOf(response: SubjectResponse | null, subjectId: string | undefin
 function policyFailure(error: unknown, response: PolicyResponse | null): string {
   if (error instanceof AdminApiError && error.status === 403) return "当前管理员没有会员成长读取权限";
   if (error instanceof AdminApiError && error.status === 404) return "会员成长功能尚未启用";
-  if (response && !response.policy && !response.bootstrap) return "当前没有可绑定的 SEALED 价格版本，首版草稿暂不能建立";
+  if (response && !response.policy && !response.bootstrap) return "当前没有可用的价格配置，暂时不能建立草稿";
   if (error instanceof AdminApiError) return "会员成长政策暂时无法读取";
   return "尚未读取到会员政策；功能保持未启用或等待首个草稿";
 }
@@ -188,10 +304,27 @@ function MembershipGrowthPolicyHost({ tab, snapshot, onDirtyChange, refreshNonce
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [policyResetNonce, setPolicyResetNonce] = useState(0);
+  const [policyReadRetry, setPolicyReadRetry] = useState(0);
+  const [changeRefreshError, setChangeRefreshError] = useState<string | null>(null);
+  const [changeRefreshing, setChangeRefreshing] = useState(false);
   const approvalWrite = useMembershipApprovalRequest(snapshot, "policy");
   const editRevisionRef = useRef(0);
   const generationRef = useRef(0);
   const savingRef = useRef(false);
+  const changeRefreshRef = useRef(false);
+  const policyIdentity = JSON.stringify([snapshot.adminUserId, snapshot.session.id]);
+  const knownPolicyRequestRef = useRef<{ identity: string; requestId: string | null }>({ identity: policyIdentity, requestId: null });
+  if (knownPolicyRequestRef.current.identity !== policyIdentity) knownPolicyRequestRef.current = { identity: policyIdentity, requestId: null };
+  const rememberPolicyChange = (read: AdminPolicyChangeRead): AdminPolicyChangeRead => {
+    const change = read.status === "READY" ? read.change : null;
+    const explicitNoRequest = change?.knowledge === "KNOWN" && change.request === null;
+    const observedId = read.knownRequestId ?? change?.request?.id ?? null;
+    knownPolicyRequestRef.current.requestId = explicitNoRequest ? null : observedId ?? knownPolicyRequestRef.current.requestId;
+    const knownRequestId = knownPolicyRequestRef.current.requestId;
+    return change?.knowledge === "FORBIDDEN"
+      ? { status: "READY", knownRequestId, change: { knowledge: "FORBIDDEN", request: null, draftReference: null, immutableDiff: null, effectiveState: null, message: change.message ?? null } }
+      : { ...read, knownRequestId };
+  };
   const draftRef = useRef<{ policy: AdminGrowthPolicy; unified: UnifiedDraft } | null>(null);
   const savedBaselineRef = useRef<{
     policy: AdminGrowthPolicy;
@@ -213,6 +346,9 @@ function MembershipGrowthPolicyHost({ tab, snapshot, onDirtyChange, refreshNonce
     setState({ status: "loading" });
     setSaving(false);
     setSaveError(null);
+    setChangeRefreshError(null);
+    setChangeRefreshing(false);
+    changeRefreshRef.current = false;
     setSavedDraft(null);
     setSavedDraftInfo(null);
     setSubmittedHash(null);
@@ -221,7 +357,7 @@ function MembershipGrowthPolicyHost({ tab, snapshot, onDirtyChange, refreshNonce
       settle(adminRequest<PolicyResponse>("/membership-growth/policy", undefined, "GET", {}, controller.signal)),
       subjectId ? settle(adminRequest<SubjectResponse>(`/users/${encodeURIComponent(subjectId)}/membership-growth`, undefined, "GET", {}, controller.signal)) : Promise.resolve({ value: null, error: null as unknown }),
     ]).then(([policyResult, subjectResult]) => {
-      if (controller.signal.aborted || generation !== generationRef.current) return;
+      if (controller.signal.aborted || generation !== generationRef.current || knownPolicyRequestRef.current.identity !== policyIdentity) return;
       const policy = policyResult.value ? asPolicy(policyResult.value) : null;
       const nextSubject = subjectOf(subjectResult.value, subjectId, subjectResult.error);
       setMeta(policyResult.value?.meta ?? null);
@@ -238,6 +374,8 @@ function MembershipGrowthPolicyHost({ tab, snapshot, onDirtyChange, refreshNonce
       const unified = unifiedDraftFromProjection(unifiedPricing);
       const loadedMeta = response.meta ?? null;
       const loadedSavedDraft = loadedMeta?.status === "DRAFT" ? loadedMeta : null;
+      const initialPolicyChange = rememberPolicyChange(normalizePolicyChange(response.policyChange));
+      const serverExplicitNoRequest = initialPolicyChange.status === "READY" && initialPolicyChange.change?.knowledge === "KNOWN" && initialPolicyChange.change.request === null;
       draftRef.current = { policy, unified };
       savedBaselineRef.current = {
         policy,
@@ -256,14 +394,16 @@ function MembershipGrowthPolicyHost({ tab, snapshot, onDirtyChange, refreshNonce
         capability: response.capability ?? {},
         preview: { status: "NOT_RUN", reason: "真实报价预览需在正式quote与主体快照接线后执行" },
         subject: nextSubject,
-        approval: loadedSavedDraft ? { status: "UNKNOWN", message: "关联申请暂未读到；本次页面内存为空不代表从未申请，请到审批中心核对。" } : { status: "NOT_REQUESTED" },
+        approval: loadedSavedDraft && !serverExplicitNoRequest ? { status: "UNKNOWN", message: "申请状态待确认，请刷新或查看原申请。" } : { status: "NOT_REQUESTED" },
+        policyChange: initialPolicyChange,
+        draftReference: loadedSavedDraft ? { id: loadedSavedDraft.id, version: loadedSavedDraft.version, payloadHash: loadedSavedDraft.payloadHash } : null,
       });
     });
     return () => {
       controller.abort();
       generationRef.current += 1;
     };
-  }, [refreshNonce, subjectId, snapshot]);
+  }, [refreshNonce, policyReadRetry, subjectId, snapshot]);
 
   const currentDraft = state.status === "ready" ? savedDraft ?? (meta?.status === "DRAFT" ? meta : null) : null;
   const currentDraftKey = currentDraft ? `${currentDraft.id}|${currentDraft.version}|${currentDraft.payloadHash}` : "";
@@ -272,6 +412,17 @@ function MembershipGrowthPolicyHost({ tab, snapshot, onDirtyChange, refreshNonce
     && verifiedReference.policyDraftId === currentDraft.id
     && verifiedReference.policyDraftVersion === currentDraft.version
     && verifiedReference.policyDraftHash === currentDraft.payloadHash);
+  const closedDetailStatus = ["REJECTED", "EXPIRED", "CANCELLED"].includes(approvalWrite.detailStatus ?? "") ? approvalWrite.detailStatus as "REJECTED" | "EXPIRED" | "CANCELLED" : null;
+  const serverNoRequest = state.status === "ready" && state.policyChange.status === "READY" && state.policyChange.change?.knowledge === "KNOWN" && state.policyChange.change.request === null;
+  const serverChange = state.status === "ready" && state.policyChange.status === "READY" ? state.policyChange.change : null;
+  const serverClosedHook = Boolean(serverChange?.knowledge === "KNOWN" && serverChange.request?.id === approvalWrite.requestId
+    && serverChange.request?.operationCode === "membership.benefit.policy.publish" && verifiedReference
+    && serverChange.draftReference?.id === verifiedReference.policyDraftId
+    && serverChange.draftReference?.version === verifiedReference.policyDraftVersion
+    && serverChange.draftReference?.payloadHash === verifiedReference.policyDraftHash
+    && ["rejected", "expired", "cancelled", "effective"].includes(requestKind(serverChange.request!, serverChange)));
+  const historyReadbackOnly = Boolean(serverNoRequest && verifiedReference && !referencedDraftMatches
+    && approvalWrite.pending.state === "absent" && (closedDetailStatus || approvalWrite.detailStatus === "EXECUTED"));
   const verifiedMessage = approvalWrite.detailStatus === "REJECTED"
     ? "审批已驳回；请核对原因后决定是否重新提交。"
     : approvalWrite.detailStatus === "APPROVED"
@@ -286,6 +437,12 @@ function MembershipGrowthPolicyHost({ tab, snapshot, onDirtyChange, refreshNonce
     if (state.status !== "ready" || !approvalWrite.requestId) return;
     setState((current) => {
       if (current.status !== "ready") return current;
+      if (closedDetailStatus && verifiedReference && approvalWrite.pending.state === "absent") {
+        return { ...current, approval: { status: closedDetailStatus, requestId: approvalWrite.requestId ?? undefined } };
+      }
+      if (historyReadbackOnly) {
+        return { ...current, approval: { status: "NOT_REQUESTED" } };
+      }
       if (referencedDraftMatches) {
         const next = {
           status: approvalWrite.detailStatus === "REJECTED" ? "REJECTED" as const : "REQUESTED" as const,
@@ -309,9 +466,12 @@ function MembershipGrowthPolicyHost({ tab, snapshot, onDirtyChange, refreshNonce
     });
     // Scalar dependencies only: the whole state object changes on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [approvalWrite.requestId, approvalWrite.detailStatus, verifiedReference?.policyDraftId, verifiedReference?.policyDraftVersion, verifiedReference?.policyDraftHash, state.status, currentDraftKey, refreshNonce]);
+  }, [approvalWrite.requestId, approvalWrite.detailStatus, verifiedReference?.policyDraftId, verifiedReference?.policyDraftVersion, verifiedReference?.policyDraftHash, state.status, currentDraftKey, refreshNonce, approvalWrite.pending.state, historyReadbackOnly]);
 
-  if (state.status !== "ready") return <MembershipGrowthAdminView state={state} />;
+  if (state.status !== "ready") return <MembershipGrowthAdminView state={state}
+    policyReadbackId={knownPolicyRequestRef.current.requestId} onOpenPath={onOpenPath}
+    onRefreshPolicyChange={() => setPolicyReadRetry(value => value + 1)} />;
+
   const access = membershipGrowthAccess(snapshot);
   const ready = state;
   const binding = meta
@@ -359,6 +519,7 @@ function MembershipGrowthPolicyHost({ tab, snapshot, onDirtyChange, refreshNonce
           ...current,
           policy: savedPolicy,
           unifiedPricing: savedUnifiedPricing,
+          draftReference: { id: saved.id, version: saved.version, payloadHash: saved.payloadHash },
           approval: current.approval.status === "REJECTED"
             ? { status: "NOT_REQUESTED", message: "新草稿已保存，可重新提交审批。" }
             : current.approval.status === "REQUESTED"
@@ -404,45 +565,107 @@ function MembershipGrowthPolicyHost({ tab, snapshot, onDirtyChange, refreshNonce
     setMeta(baseline.meta);
     setSavedDraft(baseline.savedDraft);
     setSavedDraftInfo(baseline.savedDraftInfo);
-    setState((current) => current.status === "ready" ? { ...current, policy: baseline.policy, unifiedPricing: baseline.unifiedPricing } : current);
+    setState((current) => current.status === "ready" ? {
+      ...current,
+      policy: baseline.policy,
+      unifiedPricing: baseline.unifiedPricing,
+      draftReference: baseline.meta?.status === "DRAFT" ? { id: baseline.meta.id, version: baseline.meta.version, payloadHash: baseline.meta.payloadHash } : null,
+    } : current);
     setPolicyResetNonce((value) => value + 1);
     onDirtyChange(false);
   };
 
+  const refreshPolicyChange = async () => {
+    if (changeRefreshRef.current || approvalWrite.busy) return;
+    changeRefreshRef.current = true;
+    setChangeRefreshing(true);
+    setChangeRefreshError(null);
+    const generation = generationRef.current;
+    const classify = (
+      previousRead: AdminPolicyChangeRead,
+      currentDraftRef: { id: string; version: string; payloadHash: string } | null,
+      responseRead: AdminPolicyChangeRead,
+    ) => {
+      const previousId = previousRead.knownRequestId ?? (previousRead.status === "READY" ? previousRead.change?.request?.id ?? null : null);
+      const knownId = previousId ?? approvalWrite.requestId ?? null;
+      const change = responseRead.status === "READY" ? responseRead.change : null;
+      const request = change?.request ?? null;
+      const reference = change?.draftReference ?? null;
+      const completeReference = Boolean(reference && reference.id && reference.version && reference.payloadHash);
+      const exactOperation = request?.operationCode === "membership.benefit.policy.publish";
+      const kind = request && completeReference && exactOperation ? requestKind(request, change!) : null;
+      const matchesCurrent = Boolean(completeReference && currentDraftRef && reference!.id === currentDraftRef.id && reference!.version === currentDraftRef.version && reference!.payloadHash === currentDraftRef.payloadHash);
+      const terminalDifferent = Boolean(kind && (["rejected", "expired", "cancelled", "effective"].includes(kind)) && !matchesCurrent);
+      const publishedWithoutDraft = Boolean(!currentDraftRef && request && completeReference && exactOperation && (kind === "pending-effective" || kind === "effective"));
+      const explicitNoRequest = responseRead.status === "READY" && change?.knowledge === "KNOWN" && change.request === null;
+      const verifiedNext = explicitNoRequest || Boolean(request && exactOperation && completeReference && (matchesCurrent || terminalDifferent || publishedWithoutDraft));
+      const forbidden = responseRead.status === "READY" && change?.knowledge === "FORBIDDEN";
+      const knownRequestId = request?.id ?? knownId;
+      const nextWithId = responseRead.status === "READY"
+        ? { ...responseRead, knownRequestId: explicitNoRequest ? null : knownRequestId }
+        : { ...responseRead, knownRequestId };
+      const sanitizedForbidden = forbidden ? {
+        status: "READY" as const,
+        knownRequestId,
+        change: { knowledge: "FORBIDDEN" as const, request: null, draftReference: null, immutableDiff: null, effectiveState: null, message: change?.message ?? null },
+      } : null;
+      const retained = !verifiedNext && !forbidden && Boolean(knownId);
+      return { forbidden, verifiedNext, policyChange: sanitizedForbidden ?? (retained ? previousRead : nextWithId) };
+    };
+    try {
+      const response = await adminRequest<PolicyResponse>("/membership-growth/policy", undefined, "GET");
+      if (generation !== generationRef.current || knownPolicyRequestRef.current.identity !== policyIdentity) return;
+      const nextRead = rememberPolicyChange(normalizePolicyChange(response.policyChange));
+      setApprovedMeta(response.approvedMeta ?? null);
+      setState((current) => {
+        if (current.status !== "ready") return current;
+        const classified = classify(current.policyChange, current.draftReference, nextRead);
+        const clearPlaceholder = classified.verifiedNext && !approvalWrite.requestId && approvalWrite.pending.state === "absent" && current.approval.status === "UNKNOWN" && !current.approval.requestId;
+        return {
+          ...current,
+          policyChange: classified.policyChange,
+          approval: clearPlaceholder ? { status: "NOT_REQUESTED" } : current.approval,
+          approvedPolicy: asApprovedPolicy(response) ?? current.approvedPolicy,
+          approvedUnifiedPricing: response.approvedUnifiedPricing ?? current.approvedUnifiedPricing,
+          capability: response.capability ?? current.capability,
+        };
+      });
+      const responseChange = nextRead.status === "READY" ? nextRead.change : null;
+      const responseForbidden = responseChange?.knowledge === "FORBIDDEN";
+      const responseReference = responseChange?.draftReference ?? null;
+      const responseComplete = Boolean(responseReference && responseReference.id && responseReference.version && responseReference.payloadHash);
+      const responseExact = responseChange?.request?.operationCode === "membership.benefit.policy.publish";
+      const responseVerified = responseChange?.knowledge === "KNOWN" && (responseChange.request === null || Boolean(responseComplete && responseExact));
+      if (responseForbidden) setChangeRefreshError("暂时无法查看申请，请联系有权限的管理员。");
+      else if (!responseVerified) setChangeRefreshError("申请状态暂未确认，请刷新后再操作。");
+    } catch {
+      if (generation === generationRef.current) setChangeRefreshError("刷新失败，请稍后重试。");
+    } finally {
+      changeRefreshRef.current = false;
+      if (generation === generationRef.current) setChangeRefreshing(false);
+    }
+  };
+
   const ownPendingRecord = approvalWrite.pending.state === "valid" ? approvalWrite.pending.record : null;
   const foreignPendingRecord = approvalWrite.foreignPending?.state === "valid" ? approvalWrite.foreignPending.record : null;
+  const unresolvedPending = approvalWrite.pending.state !== "absent" || Boolean(foreignPendingRecord) || approvalWrite.legacyPending;
+  const readback = { requestId: approvalWrite.requestId, onRecover: ownPendingRecord ? () => void approvalWrite.recover() : undefined, recovering: approvalWrite.busy };
+  const policyNotice: AdminPolicyNotice | undefined = saveError
+    ? { tone: "error", title: "草稿保存失败", description: saveError, ...readback }
+    : foreignPendingRecord
+      ? { tone: "warning", blocking: true, title: "有一份礼遇申请待核对", description: "请先到礼遇管理查询原结果，再处理新的申请。" }
+      : approvalWrite.legacyPending
+        ? { tone: "warning", blocking: true, title: "上次申请记录待核对", description: "申请记录暂不完整，请到审批中心核对。", ...readback, onRecover: undefined }
+        : ownPendingRecord
+          ? { tone: approvalWrite.busy ? "info" : "warning", blocking: true, title: approvalWrite.busy ? "正在确认提交结果" : "上次提交结果待核对", description: approvalWrite.busy ? "请稍候，暂不要再次提交。" : "请查询原结果，核清前暂不能提交新的申请。", ...readback }
+          : approvalWrite.error
+            ? { tone: "warning", title: "申请操作未完成", description: "请核对原申请后再操作。", ...readback }
+            : changeRefreshError
+              ? { tone: "warning", blocking: true, title: "申请状态暂未更新", description: changeRefreshError, ...readback }
+              : approvalWrite.requestId && !referencedDraftMatches && !closedDetailStatus && !serverClosedHook && !historyReadbackOnly
+                ? { tone: "warning", blocking: true, title: "原申请需核对", description: "请先查看原申请，确认对应的政策草稿。", ...readback }
+                : undefined;
   return <>
-    {saveError || approvalWrite.error ? <Alert variant={saveError ? "destructive" : "warning"}><AlertDescription>{saveError ?? approvalWrite.error}</AlertDescription></Alert> : null}
-    {foreignPendingRecord ? (
-      <Alert variant="warning">
-        <AlertDescription>
-          另有礼遇申请待核对：{membershipPendingLabel(foreignPendingRecord)}。请到「礼遇管理」子页处理，政策责任不会当作礼遇记录。
-        </AlertDescription>
-      </Alert>
-    ) : approvalWrite.legacyPending ? (
-      <Alert variant="warning"><AlertDescription>原请求记录缺少业务类型，无法自动解除；原记录保留，请到审批中心核对。</AlertDescription></Alert>
-    ) : ownPendingRecord ? (
-      <Alert variant="warning">
-        <AlertDescription>
-          <span className="font-medium">会员政策申请待核对：{membershipPendingLabel(ownPendingRecord)}</span>
-          <span className="mt-1 block text-xs">原请求记录保留，核清前不会新建政策申请。</span>
-          <span className="mt-2 flex flex-wrap gap-2">
-            <Button size="sm" variant="outline" disabled={approvalWrite.busy} onClick={() => void approvalWrite.recover()}>查询原结果</Button>
-            {approvalWrite.requestId && onOpenPath ? <Button size="sm" variant="ghost" onClick={() => onOpenPath(`/approvals/${encodeURIComponent(approvalWrite.requestId!)}?from=membership-growth&fromTab=policy`)}>查看原申请</Button> : null}
-          </span>
-        </AlertDescription>
-      </Alert>
-    ) : null}
-    {approvalWrite.requestId && state.status === "ready" && !referencedDraftMatches ? (
-      <Alert variant="warning">
-        <AlertDescription>
-          {verifiedReference
-            ? `原申请已核对，但引用的是另一份草稿（${verifiedReference.policyDraftId} v${verifiedReference.policyDraftVersion}）；它不是当前草稿（${currentDraft ? `${currentDraft.id} v${currentDraft.version}` : "无可用草稿"}）的申请。当前草稿关联仍未知。`
-            : "原申请号已保留，但原草稿引用或详情尚未核清；当前草稿关联仍未知。"}
-          {onOpenPath ? <Button size="sm" variant="ghost" onClick={() => onOpenPath(`/approvals/${encodeURIComponent(approvalWrite.requestId!)}?from=membership-growth&fromTab=policy`, "审批详情")}>查看原申请</Button> : null}
-        </AlertDescription>
-      </Alert>
-    ) : null}
     <MembershipGrowthAdminView
       key={`${gameId ?? ""}:${subjectId ?? ""}`}
       state={ready}
@@ -456,6 +679,11 @@ function MembershipGrowthPolicyHost({ tab, snapshot, onDirtyChange, refreshNonce
       binding={binding}
       canEditEntitlementRanges={ready.capability.canChangeEntitlementRanges ?? (snapshot.security.isBoss || hasPermission(snapshot, "membership.policy.draft"))}
       canSimulateProfit={(snapshot.security.status === "ACTIVE" && snapshot.security.isBoss) || (hasPermission(snapshot, "supply.quote.internal.read") && (hasPermission(snapshot, "membership.policy.draft") || hasPermission(snapshot, "membership.policy.publish")))}
+      localPending={unresolvedPending}
+      policyNotice={policyNotice}
+      policyReadbackId={approvalWrite.requestId}
+      policyChangeRefreshing={changeRefreshing}
+      onRefreshPolicyChange={() => void refreshPolicyChange()}
       onOpenPath={onOpenPath}
       onOpenApproval={ready.approval.requestId && onOpenPath ? () => onOpenPath(`/approvals/${encodeURIComponent(ready.approval.requestId!)}?from=membership-growth&fromTab=policy`, "审批详情") : undefined}
       onPolicyChange={access.canDraft && unifiedSupported ? handlePolicyChange : undefined}

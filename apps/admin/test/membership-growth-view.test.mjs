@@ -49,8 +49,26 @@ function readyState(){
   const legacyRanges={FRIEND:{byMode:{ordinary:legacyRange('ordinary'),custom:legacyRange('custom')}},PRESTIGE:{byMode:{ordinary:legacyRange('ordinary','0.5'),custom:legacyRange('custom','0.5')}}};
   const policy={version:'b1',status:'DRAFT',effectiveAt:'2026-11-01T00:00:00.000Z',catalog,tiers:TIERS.map((tier,index)=>({tier,threshold:String(index*5000),tenantDeposit:index<2?'ACCOUNT_BASE':'WAIVED',depositAllowanceCents:'0'})),entitlementRanges:legacyRanges};
   const approvedPolicy={...policy,version:'b0',status:'APPROVED'};
-  return{status:'ready',policy,unifiedPricing:unifiedProjection(),approvedPolicy,approvedUnifiedPricing:unifiedProjection(),capability:{unifiedPricingSupported:true,canDraft:true,canChangeEntitlementRanges:true,canRequestEntitlement:true,canSimulateProfit:true},preview:{status:'NOT_RUN'},subject:{subjectId:'u',status:'UNKNOWN'},entitlement:{kind:'FRIEND',scopeKey:'game:delta',startsAtUtc:'',endsAtUtc:'',pricingMode:'ordinary',priceVersionId:'',payableRatio:'',costBasisRef:'',depositWaived:false,reason:''},approval:{status:'NOT_REQUESTED'}};
+  return{status:'ready',policy,unifiedPricing:unifiedProjection(),approvedPolicy,approvedUnifiedPricing:unifiedProjection(),capability:{unifiedPricingSupported:true,canDraft:true,canChangeEntitlementRanges:true,canRequestEntitlement:true,canSimulateProfit:true},preview:{status:'NOT_RUN'},subject:{subjectId:'u',status:'UNKNOWN'},entitlement:{kind:'FRIEND',scopeKey:'game:delta',startsAtUtc:'',endsAtUtc:'',pricingMode:'ordinary',priceVersionId:'',payableRatio:'',costBasisRef:'',depositWaived:false,reason:''},approval:{status:'NOT_REQUESTED'},policyChange:{status:'READY',change:{knowledge:'KNOWN',request:null,immutableDiff:[]}},draftReference:{id:'draft-1',version:'b1',payloadHash:'a'.repeat(64)}};
 }
+
+const contextDraftRef=(overrides={})=>({id:'draft-1',version:'b1',payloadHash:'a'.repeat(64),...overrides});
+const contextRequest=(overrides={})=>({id:'approval-context-1',operationCode:'membership.benefit.policy.publish',approvalStatus:'PENDING',executionStatus:null,submittedBy:{id:'admin-2',name:'运营乙'},submittedAtUtc:'2026-10-20T02:30:00.000Z',plannedEffectiveAtUtc:'2026-11-01T00:00:00.000Z',steps:null,...overrides});
+const contextSteps=status=>{
+  const steps=[{key:'SUBMITTED',label:'已提交',state:'COMPLETED',actor:{id:'admin-2',name:'运营乙'},atUtc:'2026-10-20T02:30:00.000Z'}];
+  if(status==='PENDING')steps.push({key:'APPROVAL',label:'审批处理',state:'CURRENT'});
+  if(status==='REJECTED')steps.push({key:'APPROVAL',label:'审批处理',state:'FAILED',actor:{id:'boss-1',name:'Boss甲'},atUtc:'2026-10-21T03:00:00.000Z'});
+  if(['APPROVED','EXECUTION_FAILED','PENDING_EFFECTIVE','EFFECTIVE'].includes(status))steps.push({key:'APPROVAL',label:'审批处理',state:'COMPLETED',actor:{id:'boss-1',name:'Boss甲'},atUtc:'2026-10-21T03:00:00.000Z'});
+  if(status==='APPROVED')steps.push({key:'EXECUTION',label:'执行发布',state:'CURRENT'});
+  if(status==='EXECUTION_FAILED')steps.push({key:'EXECUTION',label:'执行发布',state:'FAILED',note:'执行渠道未确认'});
+  if(['PENDING_EFFECTIVE','EFFECTIVE'].includes(status))steps.push({key:'EXECUTION',label:'执行发布',state:'COMPLETED',actor:{id:'ops-1',name:'运营丙'},atUtc:'2026-10-22T03:00:00.000Z'});
+  if(status==='PENDING_EFFECTIVE')steps.push({key:'EFFECTIVE',label:'生效',state:'CURRENT'});
+  if(status==='EFFECTIVE')steps.push({key:'EFFECTIVE',label:'生效',state:'COMPLETED',atUtc:'2026-10-23T00:00:00.000Z'});
+  return steps;
+};
+const contextChange=(changeOverrides={})=>({status:'READY',change:{knowledge:'KNOWN',draftReference:contextDraftRef(),request:contextRequest(),immutableDiff:[{label:'金卡 · 统一应付折扣',baseline:'1',requested:'0.9',format:'DISCOUNT'},{label:'金卡 · 押金权益',baseline:'0',requested:'20000',format:'CENTS'}],effectiveState:{status:'NOT_EFFECTIVE'},...changeOverrides}});
+const changeSection=h=>h.host.querySelector('section[aria-labelledby="membership-change-heading"]');
+const rowText=(h,label)=>[...h.host.querySelectorAll('tr')].find(row=>row.textContent.includes(label))?.textContent??'';
 
 test('policy view shows only effective unified values and edits a mode-free unified draft',async t=>{
   const h=await ui(t),state=readyState(),changed=[],saves=[],submitted=[];
@@ -286,24 +304,187 @@ test('tier monotonicity errors are visible and associated in the current step, n
 
 test('policy page keeps one pending card, one edit entry and an honest unknown linked-request state',async t=>{
   const h=await ui(t),base=readyState(),opened=[];
-  const pendingState={...base,approval:{status:'UNKNOWN',message:'关联申请暂未读到；本次页面内存为空不代表从未申请，请到审批中心核对。'}};
+  const pendingState={...base,policyChange:{status:'UNAVAILABLE',message:'读取失败'},approval:{status:'UNKNOWN',message:'关联申请暂未读到；本次页面内存为空不代表从未申请，请到审批中心核对。'}};
   const props={state:pendingState,canEditEntitlementRanges:true,onPolicyChange:()=>{},onSavePolicyDraft:()=>{},onOpenApproval:()=>opened.push('approval')};
   await h.render(h.view.MembershipGrowthAdminView,props);
   assert.match(h.host.textContent,/待处理变更/);
-  assert.match(h.host.textContent,/关联申请暂未读到/);
-  assert.match(h.host.textContent,/不代表从未申请/);
+  assert.match(h.host.textContent,/申请状态暂未确认/);
+  assert.doesNotMatch(h.host.textContent,/本次页面内存|不代表从未申请/);
   assert.doesNotMatch(h.host.textContent,/草稿 v\d|生效 v\d/);
   assert.equal([...h.host.querySelectorAll('button')].filter(button=>button.textContent.includes('调整会员政策')).length,1,'one primary edit entry');
   assert.equal([...h.host.querySelectorAll('button')].filter(button=>button.textContent.includes('编辑草稿')||button.textContent.includes('继续编辑')).length,0);
   assert.match(h.host.textContent,/当前生效/);
   const requested={...base,approval:{status:'REQUESTED',requestId:'approval-real',message:'服务端审批状态：PENDING。'}};
   await h.render(h.view.MembershipGrowthAdminView,{...props,state:requested});
-  assert.match(h.host.textContent,/已提交审批/);assert.match(h.host.textContent,/PENDING/);
-  await h.click(h.button('查看审批'));
+  assert.match(h.host.textContent,/已提交审批/);assert.match(changeSection(h).textContent,/等待审批/);
+  await h.click(h.button('到审批中心处理'));
   assert.deepEqual(opened,['approval']);
   const legacy={...base,approval:{status:'NOT_REQUESTED'}};
   await h.render(h.view.MembershipGrowthAdminView,{...props,state:legacy});
   assert.doesNotMatch(h.host.textContent,/关联申请暂未读到/,'no draft means no pending card');
+});
+
+test('policy change card shows the server-linked request, frozen diff and a compact basic-info dialog',async t=>{
+  const h=await ui(t),state=readyState(),opened=[],submitted=[];
+  let current={...state,approval:{status:'UNKNOWN',message:'关联申请暂未读到；本次页面内存为空不代表从未申请，请到审批中心核对。'},policyChange:contextChange({request:contextRequest({steps:contextSteps('PENDING')})})};
+  const props={state:current,canEditEntitlementRanges:true,onPolicyChange:()=>{},onSavePolicyDraft:()=>{},onSubmitPolicy:()=>submitted.push(true),onOpenPath:(path,title)=>opened.push({path,title})};
+  await h.render(h.view.MembershipGrowthAdminView,props);
+  assert.match(h.host.textContent,/待处理变更 · 待审批/);assert.equal(h.host.querySelectorAll("[data-testid=membership-policy-feedback]").length,1);
+  assert.doesNotMatch(changeSection(h).textContent,/金卡 · 统一应付折扣/,"configuration detail lives in the dialog");
+  assert.match(h.host.textContent,/运营乙/);assert.match(h.host.textContent,/2026年10月20日/);assert.match(h.host.textContent,/计划生效/);
+  const card=changeSection(h);assert.ok(card);
+  assert.equal([...card.querySelectorAll('button')].some(button=>button.textContent.trim()==='提交审批'),false,'a server-linked pending request offers no new submit');
+  const approvalAction=[...card.querySelectorAll('button')].find(button=>button.textContent.trim()==='到审批中心处理');assert.ok(approvalAction);
+  await h.click(approvalAction);
+  assert.deepEqual(opened.at(-1),{path:'/approvals/approval-context-1?from=membership-growth&fromTab=policy',title:'审批详情'});
+  current={...current,policy:{...current.policy,version:'b9'},unifiedPricing:{...current.unifiedPricing,tiers:{...current.unifiedPricing.tiers,DIAMOND:{knowledge:'KNOWN',payableRatio:'0.5',reasonCodes:[]}}}};
+  await h.render(h.view.MembershipGrowthAdminView,{...props,state:current});
+  assert.doesNotMatch(changeSection(h).textContent,/5折/,'the request summary never follows the current draft');
+  await h.click([...changeSection(h).querySelectorAll('button')].find(button=>button.textContent.trim()==='查看变更详情'));
+  const dialog=()=>h.browser.document.querySelector('[data-slot=dialog-content]');
+  assert.ok(dialog());assert.match(dialog().textContent,/变更基本信息/);
+  assert.match(dialog().textContent,/申请对应基线/);assert.match(dialog().textContent,/本次申请值/);
+  assert.match(dialog().textContent,/金卡 · 统一应付折扣/);assert.match(dialog().textContent,/原价/);assert.match(dialog().textContent,/9折/);assert.match(dialog().textContent,/¥200\.00/);
+  assert.match(dialog().textContent,/已提交/);assert.match(dialog().textContent,/审批处理/);assert.match(dialog().textContent,/当前/);
+  assert.doesNotMatch(dialog().textContent,/Boss甲/,'a pending approval has no handler yet');
+  assert.match(dialog().className,/sm:max-w-\[900px\]/);
+  assert.match(dialog().querySelector('[data-testid=policy-change-diff-scroll] [data-slot=table-container]').className,/overflow-x-auto/);
+  const detailButton=[...dialog().querySelectorAll('button')].find(button=>button.textContent.trim()==='打开审批详情');assert.ok(detailButton);
+  await h.click(detailButton);
+  assert.deepEqual(opened.at(-1),{path:'/approvals/approval-context-1?from=membership-growth&fromTab=policy',title:'审批详情'});
+  assert.equal(submitted.length,0);
+});
+
+test('policy change status fixtures keep approval, execution and effective facts separate',async t=>{
+  const h=await ui(t),base=readyState();
+  const model=(request,effectiveState={status:'NOT_EFFECTIVE'},extra={})=>h.view.policyChangeCardModel({read:contextChange({request,effectiveState,...extra}),approval:{status:'NOT_REQUESTED'},hasDraft:true,currentDraft:contextDraftRef(),draftDiffs:[],submitReady:true,localPending:false});
+  const pending=model(contextRequest({steps:contextSteps('PENDING')}));
+  assert.equal(pending.kind,'pending');assert.equal(pending.label,'待审批');assert.equal(pending.canSubmit,false);assert.equal(pending.steps.find(step=>step.key==='APPROVAL').state,'CURRENT');
+  const rejected=model(contextRequest({approvalStatus:'REJECTED',steps:contextSteps('REJECTED')}));
+  assert.equal(rejected.kind,'rejected');assert.equal(rejected.label,'已退回');assert.equal(rejected.steps.find(step=>step.key==='APPROVAL').state,'FAILED');
+  const approved=model(contextRequest({approvalStatus:'APPROVED',executionStatus:'NOT_STARTED',steps:contextSteps('APPROVED')}));
+  assert.equal(approved.kind,'approved');assert.equal(approved.label,'审批已过待发布');assert.match(approved.effectiveNote,/执行/);assert.doesNotMatch(approved.effectiveNote,/已生效/);
+  const failed=model(contextRequest({approvalStatus:'APPROVED',executionStatus:'FAILED',steps:contextSteps('EXECUTION_FAILED')}));
+  assert.equal(failed.kind,'execution-unknown');assert.match(failed.label,/执行状态待核对/);assert.match(failed.effectiveNote,/不能称为已生效/);
+  assert.equal(model(contextRequest({approvalStatus:'APPROVED',executionStatus:'UNKNOWN'})).kind,'execution-unknown');
+  const scheduled=model(contextRequest({approvalStatus:'APPROVED',executionStatus:'EXECUTED',steps:contextSteps('PENDING_EFFECTIVE')}),{status:'PENDING_EFFECTIVE',effectiveAtUtc:'2026-11-01T00:00:00.000Z'});
+  assert.equal(scheduled.kind,'pending-effective');assert.equal(scheduled.label,'已发布待生效');assert.match(scheduled.effectiveNote,/尚未到生效时点/);assert.equal(scheduled.steps.find(step=>step.key==='EFFECTIVE').state,'CURRENT');
+  const effective=model(contextRequest({approvalStatus:'APPROVED',executionStatus:'EXECUTED',steps:contextSteps('EFFECTIVE')}),{status:'EFFECTIVE',effectiveAtUtc:'2026-10-23T00:00:00.000Z'});
+  assert.equal(effective.kind,'effective');assert.equal(effective.label,'已生效');assert.equal(effective.steps.every(step=>step.state==='COMPLETED'),true);
+  for(const value of [pending,rejected,approved,failed,scheduled,effective]){assert.equal(value.canSubmit,false);assert.equal(value.canOpenDetail,true);}
+  const state={...base,policyChange:contextChange({request:contextRequest({approvalStatus:'APPROVED',executionStatus:'EXECUTED',steps:contextSteps('EFFECTIVE')}),effectiveState:{status:'EFFECTIVE',effectiveAtUtc:'2026-10-23T00:00:00.000Z'}})};
+  await h.render(h.view.MembershipGrowthAdminView,{state,onOpenPath:()=>{}});
+  assert.match(h.host.textContent,/最近变更 · 已生效/);
+  await h.click([...changeSection(h).querySelectorAll('button')].find(button=>button.textContent.trim()==='查看变更详情'));
+  const text=h.browser.document.querySelector('[data-slot=dialog-content]').textContent;
+  assert.match(text,/Boss甲/);assert.match(text,/运营丙/);assert.match(text,/经手人未取得/);
+});
+
+test('policy change projection never attaches another draft or another business and separates unavailable states',async t=>{
+  const h=await ui(t);
+  const model=(read,approval={status:'NOT_REQUESTED'},extra={})=>h.view.policyChangeCardModel({read,approval,hasDraft:true,currentDraft:contextDraftRef(),draftDiffs:[],submitReady:true,localPending:false,...extra});
+  const wrongVersion=model(contextChange({draftReference:contextDraftRef({version:'b0'})}));
+  assert.equal(wrongVersion.kind,'foreign');assert.match(wrongVersion.label,/另一份草稿/);assert.equal(wrongVersion.canSubmit,false);assert.match(wrongVersion.sourceNote,/id\/version\/hash/);
+  assert.equal(model(contextChange({draftReference:contextDraftRef({payloadHash:'b'.repeat(64)})})).kind,'foreign');
+  const wrongOperation=model(contextChange({request:contextRequest({operationCode:'membership.entitlement.grant'})}));
+  assert.equal(wrongOperation.kind,'unknown');assert.match(wrongOperation.label,/业务类型/);assert.equal(wrongOperation.canSubmit,false);
+  const noReference=model(contextChange({draftReference:null}));
+  assert.equal(noReference.kind,'unknown');assert.match(noReference.label,/暂未取得/);assert.equal(noReference.canSubmit,false);
+  assert.equal(model({status:'READY',change:{knowledge:'UNKNOWN',message:'投影暂不可用'}}).kind,'unknown');
+  assert.equal(model({status:'READY',change:{knowledge:'FORBIDDEN'}}).kind,'forbidden');
+  assert.equal(model({status:'UNAVAILABLE',message:'字段未部署'}).kind,'unavailable');
+  const absent=model(contextChange({request:null,immutableDiff:[]}));
+  assert.equal(absent.kind,'draft');assert.equal(absent.canSubmit,true);
+  const pendingLocal=model(contextChange({request:null,immutableDiff:[]}),{status:'UNKNOWN',message:'原请求记录待核对'},{localPending:true});
+  assert.equal(pendingLocal.kind,'unknown');assert.equal(pendingLocal.canSubmit,false);
+  const oldTerminal=model(contextChange({draftReference:contextDraftRef({id:'draft-old'}),request:contextRequest({approvalStatus:'REJECTED'})}));
+  assert.equal(oldTerminal.kind,'draft');assert.match(oldTerminal.summary,/上次申请/);assert.equal(oldTerminal.priorRequest,true);assert.equal(oldTerminal.canSubmit,true);
+});
+
+test('policy change unknown states disable submission and expose refresh or original entry',async t=>{
+  const h=await ui(t),base=readyState();let refreshed=0;
+  const props={canEditEntitlementRanges:true,onPolicyChange:()=>{},onSavePolicyDraft:()=>{},onSubmitPolicy:()=>{},onRefreshPolicyChange:()=>{refreshed+=1;},onOpenPath:()=>{}};
+  await h.render(h.view.MembershipGrowthAdminView,{...props,state:{...base,policyChange:{status:'UNAVAILABLE',message:'字段未部署'}}});
+  assert.match(h.host.textContent,/待处理变更 · 申请状态待确认/);assert.doesNotMatch(h.host.textContent,/字段未部署/);assert.match(h.host.textContent,/请刷新后再操作/);
+  assert.ok(changeSection(h).textContent.includes('刷新状态'));
+  assert.equal([...changeSection(h).querySelectorAll('button')].some(button=>button.textContent.trim()==='提交审批'),false);
+  await h.click([...changeSection(h).querySelectorAll('button')].find(button=>button.textContent.trim()==='刷新状态'));
+  assert.equal(refreshed,1);
+  await h.render(h.view.MembershipGrowthAdminView,{...props,state:{...base,policyChange:{status:'READY',change:{knowledge:'UNKNOWN',message:'服务端暂未取得变更状态'}}}});
+  assert.match(h.host.textContent,/待处理变更 · 申请状态待确认/);assert.match(h.host.textContent,/申请状态暂未确认/);
+  await h.render(h.view.MembershipGrowthAdminView,{...props,state:{...base,policyChange:{status:'READY',change:{knowledge:'FORBIDDEN'}}}});
+  assert.match(h.host.textContent,/待处理变更 · 无权读取变更状态/);
+  assert.equal([...changeSection(h).querySelectorAll('button')].some(button=>button.textContent.trim()==='提交审批'),false);
+  await h.render(h.view.MembershipGrowthAdminView,{...props,state:base});
+  assert.match(h.host.textContent,/待处理变更 · 草稿待提交/);
+  assert.equal(h.button('提交审批').disabled,false);
+  await h.render(h.view.MembershipGrowthAdminView,{...props,state:{...base,policy:{...base.policy,status:'APPROVED'},policyChange:{status:'READY',change:{knowledge:'KNOWN',request:null,immutableDiff:[]}}}});
+  assert.match(h.host.textContent,/政策变更 · 暂无待处理变更/);assert.match(h.host.textContent,/当前没有待处理的政策申请/);
+  assert.equal([...changeSection(h).querySelectorAll('button')].some(button=>button.textContent.trim()==='查看变更详情'),false);
+});
+
+test('R1 a missing operation code cannot attach a request to the current draft',async t=>{
+  const h=await ui(t),state=readyState(),opened=[];
+  const read=contextChange({request:contextRequest({operationCode:null,approvalStatus:'PENDING',executionStatus:null})});
+  await h.render(h.view.MembershipGrowthAdminView,{state:{...state,policyChange:read},canEditEntitlementRanges:true,onPolicyChange:()=>{},onSavePolicyDraft:()=>{},onSubmitPolicy:()=>{},onOpenPath:(path,title)=>opened.push({path,title})});
+  const card=changeSection(h);assert.ok(card);
+  assert.match(h.host.textContent,/待处理变更 · 申请状态待确认/);
+  assert.doesNotMatch(card.textContent,/待审批/);
+  assert.match(card.textContent,/申请状态暂未确认/);
+  assert.equal([...card.querySelectorAll('button')].some(button=>button.textContent.trim()==='提交审批'),false);
+  assert.equal(h.button('提交审批').disabled,true);
+  const link=[...card.querySelectorAll('button')].find(button=>button.textContent.trim()==='查看原申请');assert.ok(link);
+  await h.click(link);
+  assert.deepEqual(opened.at(-1),{path:'/approvals/approval-context-1?from=membership-growth&fromTab=policy',title:'审批详情'});
+});
+
+test('R1 FORBIDDEN keeps a local original ID while clearing restricted details',async t=>{
+  const h=await ui(t),state=readyState(),opened=[];
+  const read={status:'READY',change:{knowledge:'FORBIDDEN'},knownRequestId:'server-known-id'};
+  await h.render(h.view.MembershipGrowthAdminView,{state:{...state,approval:{status:'UNKNOWN',requestId:'local-known-id'},policyChange:read},canEditEntitlementRanges:true,onPolicyChange:()=>{},onSavePolicyDraft:()=>{},onSubmitPolicy:()=>{},onOpenPath:(path,title)=>opened.push({path,title})});
+  const card=changeSection(h);assert.ok(card);
+  assert.match(h.host.textContent,/待处理变更 · 无权读取变更状态/);
+  assert.match(card.textContent,/查看原申请/);assert.doesNotMatch(card.textContent,/金卡 ·|运营乙|¥|提交审批/);
+  const link=[...card.querySelectorAll('button')].find(button=>button.textContent.trim()==='查看原申请');assert.ok(link);
+  await h.click(link);
+  assert.deepEqual(opened.at(-1),{path:'/approvals/local-known-id?from=membership-growth&fromTab=policy',title:'审批详情'});
+  await h.click([...changeSection(h).querySelectorAll('button')].find(button=>button.textContent.trim()==='查看变更详情'));
+  const dialog=h.browser.document.querySelector('[data-slot=dialog-content]');assert.ok(dialog);
+  assert.match(dialog.textContent,/原申请详情受限/);assert.doesNotMatch(dialog.textContent,/金卡 ·|运营乙|¥200/);
+});
+
+test('black gold permanent row mirrors diamond and never becomes an editable sixth tier',async t=>{
+  const h=await ui(t),state=readyState();
+  const render=async overrides=>h.render(h.view.MembershipGrowthAdminView,{state:{...state,...overrides},canEditEntitlementRanges:true,onPolicyChange:()=>{},onSavePolicyDraft:()=>{}});
+  await render({});
+  const row=rowText(h,'黑金（永久）');
+  assert.match(row,/累计有效成长积分 50,000/);assert.match(row,/永久/);assert.match(row,/权益随钻石档调整/);assert.match(row,/8\.5折（实付 85%）/);assert.match(row,/完全免除押金/);
+  assert.match(h.host.textContent,/普通档按近90天成长积分/);assert.doesNotMatch(row,/近90天/,'the black gold condition is never written as a rolling 90-day threshold');
+  const limitedPolicy={...state.approvedPolicy,tiers:state.approvedPolicy.tiers.map(tier=>tier.tier==='DIAMOND'?{...tier,tenantDeposit:'ACCOUNT_BASE',depositAllowanceCents:'20000'}:tier)};
+  await render({approvedPolicy:limitedPolicy});
+  assert.match(rowText(h,'黑金（永久）'),/减免押金 ¥200 元/);
+  const unknownPolicy={...state.approvedPolicy,tiers:state.approvedPolicy.tiers.filter(tier=>tier.tier!=='DIAMOND')};
+  const unknownUnified={...state.approvedUnifiedPricing,tiers:{...state.approvedUnifiedPricing.tiers,DIAMOND:{knowledge:'UNKNOWN',payableRatio:null,reasonCodes:['FIXTURE']}}};
+  await render({approvedPolicy:unknownPolicy,approvedUnifiedPricing:unknownUnified});
+  const unknownRow=rowText(h,'黑金（永久）');
+  assert.match(unknownRow,/待核/);assert.match(unknownRow,/未取得/);assert.doesNotMatch(unknownRow,/原价|完全免除押金/);
+  await render({});
+  await h.click(h.button('调整会员政策'));
+  const dialog=()=>h.browser.document.querySelector('[data-slot=dialog-content]');
+  assert.equal(dialog().querySelector("input[aria-label*='黑金']"),null);
+  assert.match(dialog().textContent,/累计有效成长积分 50,000/);assert.match(dialog().textContent,/8\.5折（实付 85%）/);
+  const diamondInput=dialog().querySelector("input[aria-label='钻石 统一应付折扣']");assert.ok(diamondInput);
+  await h.type(diamondInput,'0.80');
+  assert.match(dialog().textContent,/8折（实付 80%）/);
+  await h.click(dialog().querySelector('[role=combobox][aria-label="钻石 押金权益"]'));
+  const allowance=[...h.browser.document.querySelectorAll('[role=option]')].find(option=>option.textContent.includes('按额度减免'));assert.ok(allowance);
+  await h.click(allowance);
+  assert.match(dialog().textContent,/减免押金 ¥200 元/);
+  await h.click(dialog().querySelector('button[aria-label="第 2 步，共 3 步：变更核对"]'));
+  assert.match(dialog().textContent,/黑金（永久） · 统一应付折扣（随钻石）/);assert.match(dialog().textContent,/黑金（永久） · 押金权益（随钻石）/);
+  const input=h.view.unifiedPricingInputFromDraft(h.view.unifiedDraftFromProjection(state.unifiedPricing));
+  assert.deepEqual(Object.keys(input.tiers),TIERS);
+  assert.equal(Object.hasOwn(input.tiers,'BLACK_GOLD'),false);
 });
 
 test('policy publish approval summary hides entitlement target fields and does not invent policy values',async t=>{
@@ -325,7 +506,7 @@ test('policy view renders legacy/unknown unified projections without inventing v
   assert.equal(h.input('银卡 统一应付折扣').value,'','a legacy conflict never defaults to the first mode');
   assert.equal(h.input('挚友礼遇 最小应付比例').value,'','a legacy range never defaults to the first mode');
   await h.render(h.view.MembershipGrowthAdminView,{state:{...state,capability:{...state.capability,unifiedPricingSupported:false}}});
-  assert.match(h.host.textContent,/API_DEPENDENCY_PENDING/);assert.doesNotMatch(h.host.textContent,/编辑政策/);
+  assert.match(h.host.textContent,/会员配置暂时只读/);assert.doesNotMatch(h.host.textContent,/API_DEPENDENCY_PENDING/);assert.doesNotMatch(h.host.textContent,/编辑政策/);
 });
 
 test('entitlement form validates independent ranges, dates, automatic references and unknown growth without network',async t=>{
@@ -482,4 +663,92 @@ test("diffGrowthPolicies lists only decision-relevant unified tier, deposit, ran
   assert.ok(labels.includes('计划生效时间'), labels.join(' | '));
   assert.equal(changes.find((change) => change.label.includes('应付折扣')).risk, 'REVIEW_REQUIRED');
   assert.equal(changes.find((change) => change.label === '普通 · 押金权益').risk, 'REVIEW_REQUIRED');
+});
+
+test('closeout pending is one progress alert and locks policy edits, saves and duplicate submit', async t => {
+  const h = await ui(t), state = readyState(), calls = [];
+  await h.render(h.view.MembershipGrowthAdminView, {
+    state: { ...state, policyChange: contextChange({ immutableDiff: null }) },
+    canEditEntitlementRanges: true, onPolicyChange: () => calls.push('edit'),
+    onSavePolicyDraft: () => calls.push('save'), onSubmitPolicy: () => calls.push('submit'), onOpenPath: () => {},
+  });
+  const feedback = h.host.querySelector('[data-testid=membership-policy-feedback]');
+  assert.equal(h.host.querySelectorAll('[data-testid=membership-policy-feedback]').length, 1);
+  assert.equal(feedback.getAttribute('role'), 'status');
+  assert.equal(h.button('调整会员政策').disabled, true);
+  assert.equal(h.button('保存草稿').disabled, true);
+  assert.equal(h.button('提交审批').disabled, true);
+  assert.equal(h.input('银卡 统一应付折扣').disabled, true);
+  await h.click(h.button('保存草稿')); await h.click(h.button('提交审批'));
+  assert.deepEqual(calls, []);
+  assert.doesNotMatch(feedback.textContent, /投影|字段未部署|本次内存|未知关联|差异未取得/);
+});
+
+test('closeout unknown feedback has one explanation, a refresh and the known original entry', async t => {
+  const h = await ui(t), state = readyState(), opened = []; let refreshes = 0;
+  await h.render(h.view.MembershipGrowthAdminView, {
+    state: { ...state, policyChange: { status: 'UNAVAILABLE', knownRequestId: 'retained-original', message: '字段未部署' } },
+    policyNotice: { tone: 'warning', blocking: true, title: '申请状态暂未更新', description: '刷新失败，请稍后重试。', requestId: 'retained-original' },
+    onPolicyChange: () => {}, onSavePolicyDraft: () => {}, onSubmitPolicy: () => {},
+    onRefreshPolicyChange: () => refreshes++, onOpenPath: path => opened.push(path),
+  });
+  const feedback = h.host.querySelector('[data-testid=membership-policy-feedback]');
+  assert.equal(h.host.querySelectorAll('[role=alert]').length, 1);
+  assert.equal(feedback.querySelectorAll('p').length, 1);
+  assert.doesNotMatch(feedback.textContent, /字段未部署|投影|内存|暂无待处理/);
+  assert.equal(h.button('提交审批').disabled, true);
+  await h.click(h.button('刷新状态')); await h.click(h.button('查看原申请'));
+  assert.equal(refreshes, 1);
+  assert.deepEqual(opened, ['/approvals/retained-original?from=membership-growth&fromTab=policy']);
+});
+
+test('closeout basic info renders only the bound original requested values and clears them on lost access', async t => {
+  const h = await ui(t), state = readyState();
+  const requestedValues = [
+    { label: '银卡 · 应付比例', value: '0.87', format: 'DISCOUNT' },
+    { label: '银卡 · 每单押金减免额度', value: '20000', format: 'CENTS' },
+    { label: '挚友礼遇 · 最低应付比例', value: null, format: 'DISCOUNT' },
+  ];
+  const props = { canEditEntitlementRanges: true, onPolicyChange: () => {}, onSavePolicyDraft: () => {}, onSubmitPolicy: () => {}, onOpenPath: () => {} };
+  await h.render(h.view.MembershipGrowthAdminView, { ...props, state: {
+    ...state, draftReference: contextDraftRef({ id: 'new-draft', version: 'b3', payloadHash: 'c'.repeat(64) }),
+    policy: { ...state.policy, version: 'b3' },
+    policyChange: contextChange({ requestedValues, immutableDiff: null }),
+  } });
+  await h.click(h.button('查看变更详情'));
+  let dialog = h.browser.document.querySelector('[data-slot=dialog-content]');
+  assert.match(dialog.textContent, /申请配置（不是当前生效权益）/);
+  const values = dialog.querySelector('[data-testid=policy-requested-values]'); assert.ok(values);
+  assert.equal(values.querySelectorAll('tbody tr').length, 3);
+  assert.match(values.textContent, /8\.7折/); assert.match(values.textContent, /¥200\.00/);
+  assert.match(values.textContent, /未取得/);
+  assert.doesNotMatch(values.textContent, /9\.2折|9\.5折|原价/);
+  assert.equal(dialog.querySelector('[data-testid=policy-change-diff-scroll]'), null);
+  assert.doesNotMatch(dialog.textContent, /冻结差异|申请对应基线/);
+  assert.match(dialog.textContent, /运营乙/); assert.match(dialog.textContent, /2026年10月20日/);
+  await h.render(h.view.MembershipGrowthAdminView, { ...props, state: { ...state, policyChange: {
+    status: 'READY', knownRequestId: 'approval-context-1', change: { knowledge: 'FORBIDDEN', request: null, requestedValues, immutableDiff: null },
+  } } });
+  dialog = h.browser.document.querySelector('[data-slot=dialog-content]');
+  assert.equal(dialog.querySelector('[data-testid=policy-requested-values]'), null);
+  assert.doesNotMatch(dialog.textContent, /8\.7折|¥200\.00|运营乙/);
+});
+
+test('closeout expired and cancelled are closed requests, preserve audit links and require a new saved draft', async t => {
+  const h = await ui(t), state = readyState();
+  for (const [status, label] of [['EXPIRED', '已过期'], ['CANCELLED', '已撤销']]) {
+    const read = contextChange({ immutableDiff: null, request: contextRequest({ approvalStatus: status }) });
+    const props = { onPolicyChange: () => {}, onSavePolicyDraft: () => {}, onSubmitPolicy: () => {}, onOpenPath: () => {} };
+    await h.render(h.view.MembershipGrowthAdminView, { ...props, state: { ...state, policyChange: read } });
+    assert.match(changeSection(h).textContent, new RegExp(label));
+    assert.match(changeSection(h).textContent, /调整并保存草稿/);
+    assert.ok(h.button('查看原申请')); assert.equal(h.button('提交审批').disabled, true);
+    assert.equal(h.button('调整会员政策').disabled, false);
+    const next = { ...state, policy: { ...state.policy, version: 'b2' }, draftReference: contextDraftRef({ id: 'draft-2', version: 'b2', payloadHash: 'b'.repeat(64) }), policyChange: read };
+    await h.render(h.view.MembershipGrowthAdminView, { ...props, state: next });
+    assert.equal(h.button('提交审批').disabled, false);
+    await h.render(h.view.MembershipGrowthAdminView, { ...props, state: next, localPending: true });
+    assert.equal(h.button('提交审批').disabled, true);
+    assert.equal(h.button('调整会员政策').disabled, true);
+  }
 });
