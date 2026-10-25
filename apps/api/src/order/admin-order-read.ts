@@ -2,7 +2,7 @@ import { readOrderPaymentSummary, type ChannelPaymentReadOptions } from "./chann
 import { readAdminOrderRefundSummary } from '../finance/channel-finance-read';
 import type { PoolClient } from "pg";
 import { gameScopeSql } from "../auth/admin-scope";
-import { projectOrder, centsToYuan, type OrderRow } from "./order";
+import { projectOrder, centsToYuan, yuanToCents, type OrderRow } from "./order";
 import { orderAccountTitleFact } from "../supply/publishing";
 import { conflict, invalid, notFound } from "../supply/supply-util";
 import { escapeLike } from "../supply/catalog";
@@ -74,6 +74,42 @@ export function orderReadKeyRelation(continuationReady: boolean, restrict?: Orde
  return orderReadSql(continuationReady, NATIVE_HEAD + "," + NATIVE_FILTER, LEGACY_HEAD + "," + LEGACY_ORDER_STATUS_SQL + "," + LEGACY_FILTER,restrict);
 }
 function money(value:unknown){return typeof value==='string'?centsToYuan(value):null;}
+type PrepaymentBreakdown = {
+ basis:'NATIVE_FROZEN_ORDER_QUOTE'|'LEGACY_ORIGINAL_ORDER';completeness:'COMPLETE'|'PARTIAL'|'UNKNOWN';
+ haffRental:ReturnType<typeof centsToYuan>|null;materialsPrepay:ReturnType<typeof centsToYuan>|null;
+};
+function prepaymentCents(value:unknown):bigint{
+ if(!value||typeof value!=='object'||Array.isArray(value)||!('amount' in value)||typeof value.amount!=='string')throw invalid('Frozen prepayment amount is invalid');
+ return yuanToCents(value as ReturnType<typeof centsToYuan>,'Frozen prepayment amount');
+}
+function nativePrepaymentBreakdown(r:Record<string,any>,amounts:any):PrepaymentBreakdown{
+ const unknown:PrepaymentBreakdown={basis:'NATIVE_FROZEN_ORDER_QUOTE',completeness:'UNKNOWN',haffRental:null,materialsPrepay:null},quote=r.quote_snapshot;
+ if(r.currency!=='CNY'||quote?.currency!=='CNY'||!Array.isArray(quote.lines)||!quote.lines.length)return unknown;
+ try{
+  const ids=new Set<string>();let haff:bigint|null=null,materials=0n;
+  for(const line of quote.lines){
+   if(!line||typeof line.itemId!=='string'||!line.itemId.trim()||ids.has(line.itemId))return unknown;
+   ids.add(line.itemId);
+   const isHaff=line.pricingKind==='HAFF_RATIO'&&line.unit==='HAFF_BASE';
+   if(!isHaff&&!(line.pricingKind==='FIXED_UNIT'&&['ROUND','PIECE','DAY'].includes(line.unit)))return unknown;
+   const amount=prepaymentCents(line.buyerAmount);
+   if(isHaff){if(haff!==null)return unknown;haff=amount;}else materials+=amount;
+  }
+  const resource=prepaymentCents(quote.resourceTotal),deposit=prepaymentCents(quote.tenantDeposit);
+  if(haff===null||haff+materials!==resource||resource!==prepaymentCents(amounts.rental)
+   ||deposit!==prepaymentCents(amounts.deposit)||resource+deposit!==prepaymentCents(amounts.totalDue))return unknown;
+  return {...unknown,completeness:'COMPLETE',haffRental:centsToYuan(haff),materialsPrepay:centsToYuan(materials)};
+ }catch{return unknown;}
+}
+function legacyPrepaymentPart(value:unknown):{cents:string|null;invalid:boolean}{
+ try{return {cents:legacyMoneyCents(value),invalid:false};}catch{return {cents:null,invalid:true};}
+}
+function legacyPrepaymentBreakdown(goods:ReturnType<typeof legacyPrepaymentPart>,items:ReturnType<typeof legacyPrepaymentPart>):PrepaymentBreakdown{
+ const unknown:PrepaymentBreakdown={basis:'LEGACY_ORIGINAL_ORDER',completeness:'UNKNOWN',haffRental:null,materialsPrepay:null};
+ if(goods.invalid||items.invalid||(goods.cents!==null&&BigInt(goods.cents)<0n)||(items.cents!==null&&BigInt(items.cents)<0n))return unknown;
+ return {...unknown,completeness:goods.cents!==null&&items.cents!==null?'COMPLETE':goods.cents!==null||items.cents!==null?'PARTIAL':'UNKNOWN',
+  haffRental:goods.cents===null?null:centsToYuan(goods.cents),materialsPrepay:items.cents===null?null:centsToYuan(items.cents)};
+}
 function legacyResourceSummary(raw: unknown): string | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const row = raw as Record<string, unknown>;
@@ -111,14 +147,15 @@ export function projectAdminReadOrder(origin:string,r:Record<string,any>,viewer:
   const row:OrderRow={id:r.id,displayNo:r.display_no,accountId:r.account_id,versionId:r.listing_version_id,ownerUserId:r.owner_user_id,renterUserId:r.renter_user_id,gameId:r.game_id,releaseId:r.rule_release_id,contentHash:r.content_hash,termOptionCode:r.term_option_code,status:r.status,rentalAmountCents:r.rental_amount_cents,depositAmountCents:r.deposit_amount_cents,currency:r.currency,termSeconds:r.term_seconds,quoteSnapshot:r.quote_snapshot,title:r.title,holdUntil:r.hold_until,paidAt:r.paid_at,dispatchState:r.dispatch_state,dispatchWaitReason:r.wait_reason,assignedAt:r.assigned_at,teamState:r.team_state,firstResponseAt:r.first_response_at??null,remindDueAt:r.remind_due_at??null,addRound:r.add_round??0,escalationState:r.escalation_state??'NOT_STARTED',cancelReason:r.cancel_reason,cancelledAt:r.cancelled_at,createdAt:r.created_at,revision:r.revision,expiredAwaitingCancel:r.expired,ownerName:r.owner_name,renterName:r.renter_name};
   const result=projectOrder(row,'admin',{internalQuote:viewer.internalQuote});const paid=['PAID','COMPLETED'].includes(r.status);
   const titles = accountTitleFact(r.title, r.current_account_title, frozenQuoteSummary(r.quote_snapshot));
-  return {...result,...titles,source:{origin:'NATIVE',ruleOrigin:'NATIVE_ORDER'},accountDisplayNo:r.account_no,payment:{state:paid?'RECORDED_PAID':'RECORDED_UNPAID',recordedAt:r.paid_at,recordedAmount:nativeRecordedAmount(r,viewer)}};
+  return {...result,...titles,prepaymentBreakdown:nativePrepaymentBreakdown(r,result.amounts),source:{origin:'NATIVE',ruleOrigin:'NATIVE_ORDER'},accountDisplayNo:r.account_no,payment:{state:paid?'RECORDED_PAID':'RECORDED_UNPAID',recordedAt:r.paid_at,recordedAmount:nativeRecordedAmount(r,viewer)}};
  }
  const raw=r.source_snapshot,paid=r.source_pay_status===1,unpaid=r.source_pay_status===0;
  const state=legacyOrderReadState(r.continuation_stage??r.source_order_status,r.source_pay_status),status=state.status;
- const goods=legacyMoneyCents(raw.goods_money),items=legacyMoneyCents(raw.expend_pay_money);
+ const goodsRead=legacyPrepaymentPart(raw.goods_money),itemsRead=legacyPrepaymentPart(raw.expend_pay_money),goods=goodsRead.cents,items=itemsRead.cents;
  const titles = accountTitleFact(undefined, r.current_account_title, legacyResourceSummary(raw));
  return {id:r.id,displayNo:r.original_order_no,status,title:titles.title,accountTitle:titles.accountTitle,accountId:r.account_id,accountDisplayNo:r.legacy_account_no,gameId:r.game_id,versionId:null,releaseId:null,contentHash:null,revision:'1',termOptionCode:null,termSeconds:null,
   amounts:{rental:goods!==null&&items!==null?centsToYuan(BigInt(goods)+BigInt(items)):null,deposit:money(r.deposit_amount_cents),totalDue:money(r.due_amount_cents),currency:'CNY'},
+  prepaymentBreakdown:legacyPrepaymentBreakdown(goodsRead,itemsRead),
   createdAt:r.source_created_at,paidAt:r.source_paid_at,cancelledAt:r.source_cancelled_at,completedAt:r.source_completed_at,holdUntil:null,expiredAwaitingCancel:false,paymentOpen:false,cancelOpen:false,
   ownerUserId:r.owner_user_id,renterUserId:r.renter_user_id,ownerName:r.owner_name,renterName:r.renter_name,ownerBusinessNo:r.legacy_owner_no,renterBusinessNo:r.legacy_renter_no,
   payment:{state:paid?'RECORDED_PAID':unpaid?'RECORDED_UNPAID':'UNKNOWN',recordedAt:r.source_paid_at,recordedAmount:paid?money(r.recorded_paid_amount_cents):null},

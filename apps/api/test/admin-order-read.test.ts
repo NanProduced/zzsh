@@ -268,3 +268,89 @@ test("原生付款记录只在已选页面记录投影中按主键读取；不�
  assert.match(full,/'amount_cents',p.amount_cents::text/);assert.doesNotMatch(keys,/native_payment_record|payment_confirmation/);
  assert.doesNotMatch(summary,/native_payment_record|payment_confirmation/);
 });
+
+
+const prepaymentMoney=(amount:string)=>({currency:'CNY',unit:'yuan',amount,scale:2});
+function prepaymentNative():Record<string,any>{
+ const line=(itemId:string,pricingKind:string,unit:string,buyer:string,owner:string,quantity='1',unitQuantity='1')=>({itemId,pricingKind,unit,quantity,unitQuantity,
+  buyerAmount:prepaymentMoney(buyer),ownerAmount:prepaymentMoney(owner),buyerUnitAmount:{...prepaymentMoney(buyer),scale:8},ownerUnitAmount:{...prepaymentMoney(owner),scale:8},platformAmount:prepaymentMoney('0.00')});
+ return {...native,status:'PENDING_PAYMENT',rental_amount_cents:'10000',deposit_amount_cents:'500',quote_snapshot:{...native.quote_snapshot,priceVersionId:'original-price-only',
+  lines:[line('frozen-haff','HAFF_RATIO','HAFF_BASE','99.00','50.00','100000000','1000000'),line('frozen-item','FIXED_UNIT','PIECE','1.00','0.50'),line('frozen-zero-day','FIXED_UNIT','DAY','0.00','0.00','0')],
+  resourceTotal:prepaymentMoney('100.00'),tenantDeposit:prepaymentMoney('5.00'),ownerTotal:prepaymentMoney('50.50'),platformFullProfit:prepaymentMoney('49.50')}};
+}
+const unknownPrepayment=(basis:string)=>({basis,completeness:'UNKNOWN',haffRental:null,materialsPrepay:null});
+
+test('prepayment: 原冻结买家行已折后分列，原金额与财务裁剪及输入均不变',()=>{
+ const original=prepaymentNative(),saved=JSON.stringify(original);
+ for(const financeReadable of [undefined,false,true])for(const internalQuote of [false,true]){
+  const row=projectAdminReadOrder('NATIVE',original,{...viewer,financeReadable,internalQuote});
+  assert.deepEqual(row.prepaymentBreakdown,{basis:'NATIVE_FROZEN_ORDER_QUOTE',completeness:'COMPLETE',haffRental:prepaymentMoney('99.00'),materialsPrepay:prepaymentMoney('1.00')});
+  assert.deepEqual(row.amounts,{rental:prepaymentMoney('100.00'),deposit:prepaymentMoney('5.00'),totalDue:prepaymentMoney('105.00'),currency:'CNY'});
+  assert.equal(row.payment.recordedAmount,null);assert.equal(row.quote.platformFullProfit===undefined,!internalQuote);
+  assert.deepEqual(Object.keys(row.prepaymentBreakdown).sort(),['basis','completeness','haffRental','materialsPrepay']);
+  assert.doesNotMatch(JSON.stringify(row.prepaymentBreakdown),/owner|platform|sourceRef|priceVersionId/);
+ }
+ assert.equal(JSON.stringify(original),saved,'reading the split never rewrites the frozen quote');
+});
+
+test('prepayment: 原生币种精度行身份与闭合异常只使新增拆分未知',()=>{
+ const changes:Array<(row:Record<string,any>)=>void>=[
+  r=>{r.currency='USD';},r=>{r.quote_snapshot.currency='USD';},
+  r=>{r.quote_snapshot.lines[0].buyerAmount.currency='USD';},r=>{r.quote_snapshot.lines[0].buyerAmount.scale=8;},
+  r=>{r.quote_snapshot.lines[0].buyerAmount.unit='cent';},r=>{r.quote_snapshot.lines[0].buyerAmount.amount='99.0';},
+  r=>{r.quote_snapshot.lines[0].buyerAmount.amount=99.00;},r=>{r.quote_snapshot.lines[0].buyerAmount.amount='9.9e1';},
+  r=>{r.quote_snapshot.lines[0].buyerAmount=null;},r=>{r.quote_snapshot.lines[1].pricingKind='UNRECOGNIZED';},
+  r=>{r.quote_snapshot.lines[0].unit='PIECE';},r=>{r.quote_snapshot.lines[1].unit='HAFF_BASE';},
+  r=>{r.quote_snapshot.lines[1].pricingKind='HAFF_RATIO';r.quote_snapshot.lines[1].unit='HAFF_BASE';},
+  r=>{r.quote_snapshot.lines[1].itemId='frozen-haff';},r=>{r.quote_snapshot.lines[0].itemId='';},
+  r=>{r.quote_snapshot.lines[0].buyerAmount.amount='98.99';},r=>{r.rental_amount_cents='10001';},
+  r=>{r.quote_snapshot.tenantDeposit=prepaymentMoney('4.99');},r=>{r.quote_snapshot.tenantDeposit=null;},
+  r=>{r.quote_snapshot.resourceTotal={...prepaymentMoney('100.00'),scale:8};},
+ ];
+ for(const change of changes){const input=prepaymentNative();change(input);const row=projectAdminReadOrder('NATIVE',input,viewer);assert.deepEqual(row.prepaymentBreakdown,unknownPrepayment('NATIVE_FROZEN_ORDER_QUOTE'));assert.equal(row.id,input.id);}
+ assert.deepEqual(projectAdminReadOrder('NATIVE',native,viewer).prepaymentBreakdown,unknownPrepayment('NATIVE_FROZEN_ORDER_QUOTE'),'old empty-line snapshots keep their existing total without inventing a haff amount');
+});
+
+test('prepayment: 原生一分与超Number安全整数金额沿BigInt精确相加',()=>{
+ const input=prepaymentNative();input.rental_amount_cents='9007199254740993123456';input.deposit_amount_cents='0';
+ input.quote_snapshot.resourceTotal=prepaymentMoney('90071992547409931234.56');input.quote_snapshot.tenantDeposit=prepaymentMoney('0.00');
+ input.quote_snapshot.lines[0].buyerAmount=prepaymentMoney('90071992547409931234.55');input.quote_snapshot.lines[1].buyerAmount=prepaymentMoney('0.01');
+ const row=projectAdminReadOrder('NATIVE',input,viewer);
+ assert.deepEqual(row.prepaymentBreakdown,{basis:'NATIVE_FROZEN_ORDER_QUOTE',completeness:'COMPLETE',haffRental:prepaymentMoney('90071992547409931234.55'),materialsPrepay:prepaymentMoney('0.01')});
+ assert.equal(row.amounts.totalDue.amount,'90071992547409931234.56');
+});
+
+test('prepayment: 旧单只用原goods与expend，合法零与缺源分开且不重算原due',()=>{
+ for(const [parts,expected]of [
+  [{goods_money:'36.00',expend_pay_money:'0.00'},{basis:'LEGACY_ORIGINAL_ORDER',completeness:'COMPLETE',haffRental:prepaymentMoney('36.00'),materialsPrepay:prepaymentMoney('0.00')}],
+  [{goods_money:null,expend_pay_money:'0.00'},{basis:'LEGACY_ORIGINAL_ORDER',completeness:'PARTIAL',haffRental:null,materialsPrepay:prepaymentMoney('0.00')}],
+  [{goods_money:'0.00',expend_pay_money:undefined},{basis:'LEGACY_ORIGINAL_ORDER',completeness:'PARTIAL',haffRental:prepaymentMoney('0.00'),materialsPrepay:null}],
+  [{goods_money:'0.00',expend_pay_money:'0.00'},{basis:'LEGACY_ORIGINAL_ORDER',completeness:'COMPLETE',haffRental:prepaymentMoney('0.00'),materialsPrepay:prepaymentMoney('0.00')}],
+  [{goods_money:undefined,expend_pay_money:null},unknownPrepayment('LEGACY_ORIGINAL_ORDER')],
+ ] as const){const row=projectAdminReadOrder('LEGACY',{...record,source_snapshot:{...record.source_snapshot,...parts}},viewer);assert.deepEqual(row.prepaymentBreakdown,expected);assert.equal(row.amounts.totalDue.amount,'66.00');assert.equal(row.payment.recordedAmount.amount,'66.00','the existing historical paid projection is unchanged');}
+});
+
+test('prepayment: 旧原金额格式异常不再使整行抛错，负数不粉饰为正常预付',()=>{
+ for(const value of ['broken','36.0','3.6e1',36]){
+  const input={...record,source_snapshot:{...record.source_snapshot,goods_money:value}},saved=JSON.stringify(input);
+  const row=projectAdminReadOrder('LEGACY',input,viewer);
+  assert.deepEqual(row.prepaymentBreakdown,unknownPrepayment('LEGACY_ORIGINAL_ORDER'));assert.equal(row.amounts.rental,null);assert.equal(row.amounts.totalDue.amount,'66.00');assert.equal(JSON.stringify(input),saved);
+ }
+ const negative=projectAdminReadOrder('LEGACY',{...record,source_snapshot:{...record.source_snapshot,goods_money:'-0.01',expend_pay_money:'1.00'}},viewer);
+ assert.deepEqual(negative.prepaymentBreakdown,unknownPrepayment('LEGACY_ORIGINAL_ORDER'));assert.equal(negative.amounts.rental.amount,'0.99','valid signed historical arithmetic remains the old formula');
+});
+
+test('prepayment: 混源同ID页与详情按各自原件拆分，不增加SQL或扩展权限',async()=>{
+ const fresh=prepaymentNative(),old={...record,id:fresh.id},options={keys:[{origin:'NATIVE',id:fresh.id},{origin:'LEGACY',id:fresh.id}],total:'2',records:[{origin:'NATIVE',id:fresh.id,record:fresh},{origin:'LEGACY',id:fresh.id,record:old}]};
+ const pageClient=orderClient(options),page=await queryAdminReadOrders(pageClient.client,viewer,{page:1,pageSize:20});
+ assert.equal(page.items[0]!.prepaymentBreakdown.basis,'NATIVE_FROZEN_ORDER_QUOTE');assert.equal(page.items[0]!.prepaymentBreakdown.haffRental.amount,'99.00');
+ assert.equal(page.items[1]!.prepaymentBreakdown.basis,'LEGACY_ORIGINAL_ORDER');assert.equal(page.items[1]!.prepaymentBreakdown.haffRental.amount,'36.00');assert.equal(pageClient.statements.length,3);
+ const detailClient=orderClient({records:[options.records[0]!]}),detail=await getAdminReadOrder(detailClient.client,viewer,fresh.id);assert.deepEqual(detail.order.prepaymentBreakdown,page.items[0]!.prepaymentBreakdown);
+ for(const {sql}of [...pageClient.statements,...detailClient.statements]){assert.match(sql.trimStart(),/^(SELECT|WITH)\b/);assert.doesNotMatch(sql,/\b(?:INSERT|UPDATE|DELETE|FOR UPDATE|pg_advisory)\b/i);}
+});
+
+test('prepayment: 金额局部fail-soft不吞查询或范围异常',async()=>{
+ const denied=Object.assign(new Error('synthetic query denied'),{code:'42501'}),client={query:async()=>{throw denied;}} as unknown as PoolClient;
+ await assert.rejects(queryAdminReadOrders(client,viewer,{page:1,pageSize:20}),error=>error===denied);
+ await assert.rejects(getAdminReadOrder(orderClient().client,viewer,'missing'),(error:any)=>error.status===404);
+});
