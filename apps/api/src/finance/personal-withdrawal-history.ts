@@ -45,7 +45,7 @@ async function ready(c: PoolClient) {
     && typeof r.database_oid === "string" && /^[1-9][0-9]*$/.test(r.database_oid)
     ? { database: r.database as string, runtimeUser: r.runtime_user as string, databaseOid: r.database_oid as string } : null;
 }
-function nativeProjection(row: Record<string, any>, userId: string) {
+export function nativeProjection(row: Record<string, any>, userId: string) {
   try {
     if (row.user_id !== userId || !token(row.id) || row.currency !== "CNY" || !timestamp(row.accepted_at) || !token(row.destination_id)
       || typeof row.destination_revision !== "string" || !/^[1-9][0-9]{0,18}$/.test(row.destination_revision)
