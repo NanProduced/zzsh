@@ -379,7 +379,7 @@ export type CatalogSkin = {
   id: string;
   code: string;
   name: string;
-  categoryId: string;
+  categoryId: string | null;
   rarityCode: string | null;
   enabled: boolean;
   formVisible: boolean;
@@ -416,6 +416,7 @@ export type CatalogEntitlement = {
 
 export type AdminCatalogResponse = {
   game: SupplyGame;
+  skinCategoryModel?: { mode: "RETIRED" | "LEGACY"; categorylessWriteReady: boolean; legacyReferencesReadOnly: boolean };
   items: CatalogItem[];
   rarities: CatalogRarity[];
   categories: CatalogSkinCategory[];

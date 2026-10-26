@@ -182,10 +182,11 @@ function exactFinanceSourceKeys(ready: FinanceVersionReady, scope: FinanceLoadSc
   const from = scope.filters?.period ? bind(scope.filters.from + "T00:00:00+08:00") : null;
   const until = scope.filters?.period ? bind(new Date(Date.parse(scope.filters.to + "T00:00:00+08:00") + 86400_000).toISOString()) : null;
   const during = (column: string) => from && until ? ` AND ${column}>=${from}::timestamptz AND ${column}<${until}::timestamptz` : "";
+  const utcAt = (column: string) => `to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
   const keys: string[] = [];
-  if (wantsPayment) keys.push(`SELECT 'payment:'||p.id AS id,'PAYMENT_REQUEST:'||p.id AS ref,p.created_at AS at,2 AS priority FROM zzsh_order.payment_request p WHERE (p.channel_order_no=${number} OR p.platform_order_no=${number})${party("p.order_id")}${during("p.created_at")}`);
-  if (wantsRefund) keys.push(`SELECT 'refund:'||i.id,'REFUND_INTENT:'||i.id,i.created_at,2 FROM zzsh_order.channel_refund_intent i WHERE (i.refund_order_no=${number} OR i.provider_refund_trx_no=${number} OR i.original_payment_order_no=${number})${subjectParam ? ` AND i.renter_user_id=${subjectParam}` : ""}${during("i.created_at")}`);
-  if (wantsWithdrawal) keys.push(`SELECT 'joinpay:'||w.id,'JOINPAY_WITHDRAWAL:'||w.id,w.accepted_at,2 FROM zzsh_order.joinpay_withdrawal_intent w WHERE (w.merchant_order_no=${number} OR w.platform_serial_no=${number})${subjectParam ? ` AND w.user_id=${subjectParam}` : ""}${during("w.accepted_at")}`);
+  if (wantsPayment) keys.push(`SELECT 'payment:'||p.id AS id,'PAYMENT_REQUEST:'||p.id AS ref,${utcAt("p.created_at")} AS at,2 AS priority FROM zzsh_order.payment_request p WHERE (p.channel_order_no=${number} OR p.platform_order_no=${number})${party("p.order_id")}${during("p.created_at")}`);
+  if (wantsRefund) keys.push(`SELECT 'refund:'||i.id,'REFUND_INTENT:'||i.id,${utcAt("i.created_at")},2 FROM zzsh_order.channel_refund_intent i WHERE (i.refund_order_no=${number} OR i.provider_refund_trx_no=${number} OR i.original_payment_order_no=${number})${subjectParam ? ` AND i.renter_user_id=${subjectParam}` : ""}${during("i.created_at")}`);
+  if (wantsWithdrawal) keys.push(`SELECT 'joinpay:'||w.id,'JOINPAY_WITHDRAWAL:'||w.id,${utcAt("w.accepted_at")},2 FROM zzsh_order.joinpay_withdrawal_intent w WHERE (w.merchant_order_no=${number} OR w.platform_serial_no=${number})${subjectParam ? ` AND w.user_id=${subjectParam}` : ""}${during("w.accepted_at")}`);
   return keys;
 }
 /** Select document keys before loading payloads; ledger documents override their order-only counterpart. */

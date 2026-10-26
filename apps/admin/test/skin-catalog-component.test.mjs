@@ -25,13 +25,13 @@ test("catalog row editor: identity, conflicts and fixed request recovery", async
   const dirty = [];
   const actor = (id = "admin-a", gunsmith = false) => ({ authenticated: true, adminUserId: id, security: { status: "ACTIVE", isBoss: false }, session: { id: "session-" + id, locked: false }, permissions: ["supply.catalog.manage", ...(gunsmith ? ["supply.gunsmith.manage"] : [])] });
   const skin = (id, namingState) => ({ id, code: "code_" + id, name: namingState === "VERIFIED" ? "Agent-Old" : "旧名 " + id, categoryId: "category", rarityCode: null, enabled: namingState !== "PENDING", formVisible: namingState !== "PENDING", mediaId: null, sortOrder: 0, sourceNamespace: null, sourceField: "agent_skin", sourceToken: " raw " + id + " ", aliases: [], baseName: namingState === "VERIFIED" ? "Old" : null, ownerRef: namingState === "VERIFIED" ? { kind: "AGENT", id: "agent" } : null, namingState });
-  const fresh = () => ({ game: { id: "game", code: "delta", name: "Fixture game", enabled: true, catalogRevision: "10" }, items: [{ id: "item", code: "item_code", name: "Existing item", unit: "PIECE", quantityScale: 0, required: false, sortOrder: 0, enabled: true, mediaId: null }], rarities: [], categories: [{ id: "category", code: "category", name: "Display category", parentId: null, enabled: true, formVisible: true, sortOrder: 0 }], skins: [skin("legacy", "LEGACY"), skin("verified", "VERIFIED"), skin("pending", "PENDING")], entitlements: [], owners: [{ id: "agent", kind: "AGENT", code: "agent_code", name: "Agent", enabled: true }, { id: "melee", kind: "MELEE_TYPE", code: "melee_code", name: "Blade", enabled: true }], firearmOwners: [{ id: "gun", code: "gun_code", name: "Gun", enabled: true }] });
+  const fresh = () => ({ skinCategoryModel:{mode:"RETIRED",categorylessWriteReady:true,legacyReferencesReadOnly:true}, game: { id: "game", code: "delta", name: "Fixture game", enabled: true, catalogRevision: "10" }, items: [{ id: "item", code: "item_code", name: "Existing item", unit: "PIECE", quantityScale: 0, required: false, sortOrder: 0, enabled: true, mediaId: null }], rarities: [], categories: [{ id: "category", code: "category", name: "Display category", parentId: null, enabled: true, formVisible: true, sortOrder: 0 }], skins: [skin("legacy", "LEGACY"), skin("verified", "VERIFIED"), skin("pending", "PENDING")], entitlements: [], owners: [{ id: "agent", kind: "AGENT", code: "agent_code", name: "Agent", enabled: true }, { id: "melee", kind: "MELEE_TYPE", code: "melee_code", name: "Blade", enabled: true }], firearmOwners: [{ id: "gun", code: "gun_code", name: "Gun", enabled: true }] });
   const NL = String.fromCharCode(10);
   const buttons = (scope = document) => [...scope.querySelectorAll("button")];
   const byText = (text, scope = document) => buttons(scope).find(b => b.textContent.trim() === text) ?? [...scope.querySelectorAll('[role="tab"]')].find(tab => tab.textContent.replace(/\s+/g, " ").trim().replace(/(?:已加载)?待核\s*\d+/g, "").replace(/\s*\d+$/, "").trim() === text);
   const row = id => [...document.querySelectorAll("tbody tr")].find(r => r.textContent.includes("code_" + id));
   const field = label => document.querySelector(`[aria-label="${label}"]`) ?? (() => { const node = [...document.querySelectorAll("label")].find(l => l.querySelector("span")?.textContent === label); assert.ok(node, "field " + label); return node.querySelector("input,select,textarea,button"); })();
-  const click = async (text, scope = document) => { const b = byText(text, scope); assert.ok(b, "button " + text); await act(async () => b.click()); };
+  const click = async (text, scope = document) => { if(text === "保存") { const reason = [...document.querySelectorAll("label")].find(l => l.querySelector("span")?.textContent === "操作原因")?.querySelector("input"); if(reason && !reason.value.trim()) await fill("操作原因", "Synthetic catalog edit reason"); } const b = byText(text, scope); assert.ok(b, "button " + text); await act(async () => b.click()); };
   const fill = async (label, value) => act(async () => {
     const node = field(label);
     if (node.tagName === "BUTTON") {
@@ -47,7 +47,7 @@ test("catalog row editor: identity, conflicts and fixed request recovery", async
     Object.getOwnPropertyDescriptor(prototype, "value").set.call(node, value);
     node.dispatchEvent(new Event("input", { bubbles: true })); node.dispatchEvent(new Event("change", { bubbles: true }));
   });
-  const saveRow = async () => click("保存");
+  const saveRow = async () => click(byText("保存") ? "保存" : "保存中…");
   const flush = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
   const review = async () => { await fill("操作原因", "Reviewed mapping"); await fill("证据链接（每行一条，最多8条）", "https://example.org/one" + NL + "https://example.org/two"); await fill("证据核对日期", "2026-09-26"); await fill("适用地区", "CN"); await fill("证据说明", "Synthetic relation and exact legacy token reviewed"); };
   function apply(path, body) {
@@ -114,17 +114,28 @@ test("catalog row editor: identity, conflicts and fixed request recovery", async
   }
   try {
     ({ SupplyCatalogView: View } = await vite.ssrLoadModule("/src/views/supply-catalog-view.tsx"));
+    await t.test("category retirement: Delta nav and new form have no legacy category control",async()=>{await mount();assert.ok(!byText("皮肤分类"));assert.ok(!document.querySelector('[data-catalog-list-title="categories"]'));await click("新增皮肤");assert.ok(!document.querySelector('[aria-label="分类"]'));assert.ok(!document.body.textContent.includes("先维护至少一个皮肤分类"));});
     await t.test("row create writes disabled draft; aliases and identity confirm are separate writes", async () => {
-      await mount(); await click("新增皮肤"); await fill("稳定 code", "new_skin"); await fill("名称", "New raw"); await fill("分类", "Display category");
+      await mount(); await click("新增皮肤"); await fill("稳定 code", "new_skin"); await fill("名称", "New raw");
       await saveRow(); assert.equal(writes.length, 1); assert.equal(writes[0].body.enabled, false); assert.equal(writes[0].body.formVisible, false); assert.equal(writes[0].body.expectedCatalogRevision, "10"); assert.ok(!("ownerRef" in writes[0].body));
       assert.match(document.body.textContent, /待核实/);
       await click("详情", row("created")); await fill("别名（每行一个）", "Alias A" + NL + "Alias B"); await click("保存", document.querySelector('[role="dialog"]')); assert.equal(writes.length, 2); assert.deepEqual(writes[1].body.aliases, ["Alias A", "Alias B"]);
       await click("确认身份", row("created")); await fill("所属对象", "Agent"); await fill("皮肤本名", "Canonical"); await click("保存", document.querySelector('[role="dialog"]')); assert.equal(writes.length, 2, "missing evidence never submits");
       await review(); await click("保存", document.querySelector('[role="dialog"]'));
     });
-    await t.test("LEGACY rename omits untouched source; VERIFIED name cell is locked", async () => {
+    await t.test("LEGACY rename omits untouched source; VERIFIED exposes base name without editable owner", async () => {
       await mount(); await click("编辑", row("legacy")); await fill("名称", "Renamed"); await fill("操作原因", "Row reason"); await saveRow(); assert.equal(writes[0].body.name, "Renamed"); for (const key of ["sourceNamespace", "sourceField", "sourceToken", "enabled", "namingState", "id", "code"]) assert.ok(!(key in writes[0].body), key);
-      await click("编辑", row("verified")); assert.equal(field("名称").disabled, true); await click("详情", row("verified")); await fill("别名（每行一个）", "Verified alias"); await click("保存", document.querySelector('[role="dialog"]')); assert.ok(!("name" in writes[1].body)); assert.deepEqual(writes[1].body.aliases, ["Verified alias"]);
+      await click("编辑", row("verified")); assert.equal(field("皮肤本名").disabled, false); assert.equal(document.querySelector('[aria-label="所属对象"]'),null); await click("详情", row("verified")); await fill("别名（每行一个）", "Verified alias"); await click("保存", document.querySelector('[role="dialog"]')); assert.ok(!("name" in writes[1].body)); assert.deepEqual(writes[1].body.aliases, ["Verified alias"]);
+    });
+    await t.test("skin edit Dialog corrects a verified name only with original identity and evidence", async () => {
+      await mount(); await click("编辑", row("verified")); assert.match(document.querySelector('[role="dialog"]').textContent,/编辑皮肤词条/);
+      await fill("皮肤本名","New"); await saveRow(); assert.equal(writes.length,0,"evidence is still required"); assert.match(document.body.textContent,/证据/);
+      await review(); await saveRow(); assert.equal(writes.length,1);const body=writes[0].body;assert.equal(body.confirmIdentity,true);assert.equal(body.baseName,"New");assert.deepEqual(body.ownerRef,{kind:"AGENT",id:"agent"});assert.equal(body.expectedCatalogRevision,"10");assert.ok(!("sourceNamespace" in body));
+    });
+    await t.test("skin edit Dialog cancel discards only unsaved edits; missing reason stays local", async () => {
+      await mount(); await click("编辑",row("legacy"));await fill("名称","Unsaved display");
+      await act(async()=>byText("保存").click());assert.equal(writes.length,0);assert.match(document.body.textContent,/改名原因|修改原因/);
+      await click("取消");await click("放弃修改");await click("编辑",row("legacy"));assert.notEqual(field("名称").value,"Unsaved display");assert.equal(writes.length,0);
     });
     await t.test("both source-name inputs expose the server's 100-character limit", async () => {
       await mount(); await click("详情", row("legacy"));
@@ -266,13 +277,13 @@ test("catalog row editor: identity, conflicts and fixed request recovery", async
     });
     await t.test("dirty row edit blocks object switch until discarded or kept", async () => {
       await mount(); await click("编辑", row("legacy")); await fill("名称", "Guarded draft");
-      await click("皮肤分类");
+      await click("品质");
       assert.match(document.body.textContent, /切换将放弃未保存修改/);
       await click("保留编辑");
       assert.equal(field("名称").value, "Guarded draft");
-      await click("皮肤分类"); await click("放弃修改并切换");
+      await click("品质"); await click("放弃修改并切换");
       assert.equal(writes.length, 0);
-      assert.match(document.body.textContent, /Display category/);
+      assert.match(document.body.textContent, /品质/);
     });
     await t.test("Sheet close protects aliases together with row input", async () => {
       await mount(); await click("编辑", row("legacy")); await fill("名称", "Kept row"); await click("详情", row("legacy")); await fill("别名（每行一个）", "Kept alias");
@@ -341,7 +352,7 @@ test("catalog row editor: identity, conflicts and fixed request recovery", async
     });
     await t.test("conflicted input still guards object switch and new editors", async () => {
       await mount(); await click("编辑", row("legacy")); await fill("名称", "Conflicted draft"); await fill("操作原因", "Row reason"); policy = "conflict"; await saveRow();
-      assert.equal(byText("新增皮肤").disabled, true); await click("皮肤分类"); assert.match(document.body.textContent, /切换将放弃未保存修改/); await click("保留编辑"); assert.equal(field("名称").value, "Conflicted draft"); assert.equal(writes.length, 1);
+      assert.equal(byText("新增皮肤").disabled, true); await click("品质"); assert.match(document.body.textContent, /切换将放弃未保存修改/); await click("保留编辑"); assert.equal(field("名称").value, "Conflicted draft"); assert.equal(writes.length, 1);
     });
     await t.test("initial game preference uses returned stable code and keeps an existing choice", async () => {
       const { preferredCatalogGame } = await vite.ssrLoadModule("/src/views/supply-catalog/model.ts");
@@ -400,29 +411,30 @@ test("catalog row editor: identity, conflicts and fixed request recovery", async
         assert.equal(reads.filter(path => path.includes("operation-result")).length, recoveryCount); assert.equal(writes.length, 1); assert.equal(browser.localStorage.getItem(key), rawOther); assert.match(document.body.textContent, /另一窗口已保存其它原提交/);
       } finally { releaseReadback?.(); globalThis.fetch = baseFetch; }
     });
-    await t.test("Sheet closure restores a live row action or the list heading", async () => {
+    await t.test("skin Dialog closure restores a live row action or the list heading", async () => {
       const settleFocus = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 35)); });
       await mount(); let opener = byText("详情", row("legacy")); opener.focus(); await click("详情", row("legacy"));
-      assert.equal(opener.isConnected, false, "opening details replaces the original row trigger");
-      await click("取消", document.querySelector('[data-slot="sheet-content"]')); await settleFocus();
+      assert.equal(opener.isConnected, true, "Dialog keeps its original row trigger live");
+      await click("取消", document.querySelector('[data-slot="dialog-content"]')); await settleFocus();
       assert.equal(document.activeElement === byText("详情", row("legacy")), true, "cancel returns to the recreated live detail entry");
-      opener = byText("详情", row("legacy")); opener.focus(); await click("详情", row("legacy")); await click("返回行内编辑", document.querySelector('[data-slot="sheet-content"]')); await settleFocus();
-      assert.ok(document.querySelector('[data-editing="true"]')); assert.equal(document.activeElement === byText("详情", row("legacy")), true, "return-to-row editing keeps its available detail entry focused");
+      opener = byText("详情", row("legacy")); opener.focus(); await click("详情", row("legacy"));
+      assert.equal(document.querySelector('[data-editing="true"]'), null, "skin editing stays in one Dialog, not duplicate row inputs");
+      await click("取消", document.querySelector('[data-slot="dialog-content"]')); await settleFocus(); assert.equal(document.activeElement === opener, true);
       await click("详情", row("legacy")); model.skins = model.skins.filter(skin => skin.id !== "legacy");
       await act(async () => root.render(createElement(View, { snapshot: identity, refreshNonce: 1, onDirtyChange: value => dirty.push(value) })));
-      await click("取消", document.querySelector('[data-slot="sheet-content"]')); await settleFocus();
+      await click("取消", document.querySelector('[data-slot="dialog-content"]')); await settleFocus();
       const heading = [...document.querySelectorAll("h4")].find(node => node.textContent.trim() === "皮肤"); assert.ok(heading); assert.equal(document.activeElement === heading, true, "missing source row falls back to the stable list heading");
       assert.equal(writes.length, 0);
     });
-    await t.test("dirty keep preserves Sheet focus; unresolved close returns to a safe heading", async () => {
+    await t.test("dirty keep preserves Dialog focus; unresolved close returns to a safe heading", async () => {
       const settleFocus = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 35)); });
       await mount(); await click("详情", row("legacy")); await fill("别名（每行一个）", "Unsubmitted alias");
-      await click("取消", document.querySelector('[data-slot="sheet-content"]')); await click("继续编辑"); await settleFocus();
-      assert.equal(document.querySelector('[data-slot="sheet-content"]').contains(document.activeElement), true); assert.equal(field("别名（每行一个）").value, "Unsubmitted alias");
-      await click("取消", document.querySelector('[data-slot="sheet-content"]')); await click("放弃修改"); await settleFocus();
+      await click("取消", document.querySelector('[data-slot="dialog-content"]')); await click("继续编辑"); await settleFocus();
+      assert.equal(document.querySelector('[data-slot="dialog-content"]').contains(document.activeElement), true); assert.equal(field("别名（每行一个）").value, "Unsubmitted alias");
+      await click("取消", document.querySelector('[data-slot="dialog-content"]')); await click("放弃修改"); await settleFocus();
       assert.equal(document.activeElement === byText("详情", row("legacy")), true); assert.equal(writes.length, 0);
-      await click("详情", row("legacy")); await fill("别名（每行一个）", "Unknown alias"); policy = "network"; await click("保存", document.querySelector('[data-slot="sheet-content"]'));
-      const original = browser.localStorage.getItem("zzsh.admin.catalog.pending.v1:admin-a"); assert.ok(original); await click("关闭编辑（稍后核对原结果）", document.querySelector('[data-slot="sheet-content"]')); await settleFocus();
+      await click("详情", row("legacy")); await fill("别名（每行一个）", "Unknown alias"); policy = "network"; await click("保存", document.querySelector('[data-slot="dialog-content"]'));
+      const original = browser.localStorage.getItem("zzsh.admin.catalog.pending.v1:admin-a"); assert.ok(original); await click("关闭编辑（稍后核对原结果）", document.querySelector('[data-slot="dialog-content"]')); await settleFocus();
       const heading = [...document.querySelectorAll("h4")].find(node => node.textContent.trim() === "皮肤"); assert.equal(document.activeElement === heading, true);
       assert.equal(byText("详情", row("legacy")).disabled, true); assert.ok(byText("核对原提交")); assert.equal(browser.localStorage.getItem("zzsh.admin.catalog.pending.v1:admin-a"), original); assert.equal(writes.length, 1);
     });
@@ -431,7 +443,7 @@ test("catalog row editor: identity, conflicts and fixed request recovery", async
       try {
         await act(async () => browser.happyDOM.setWindowSize({ width: 390, height: 844 })); await mount();
         const opener = row("legacy").querySelector('[aria-label="查看详情 旧名 legacy"]'); assert.ok(opener); await act(async () => opener.click());
-        assert.equal(opener.isConnected, false); await click("取消", document.querySelector('[data-slot="sheet-content"]'));
+        assert.equal(opener.isConnected, true); await click("取消", document.querySelector('[data-slot="dialog-content"]'));
         await act(async () => { await new Promise(resolve => setTimeout(resolve, 35)); });
         const replacement = row("legacy").querySelector('[aria-label="查看详情 旧名 legacy"]'); assert.equal(document.activeElement === replacement, true, "mobile details keeps focus in the main column rather than the offscreen action column"); assert.equal(writes.length, 0);
       } finally { await act(async () => browser.happyDOM.setWindowSize(previousSize)); }

@@ -1,3 +1,4 @@
+import { BEIJING_TIME_ZONE } from "../../workspace/beijing-time";
 import type { ReactNode } from "react";
 import { CircleHelp, Lock } from "lucide-react";
 
@@ -10,6 +11,14 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "../../components/ui/too
  * （见交付 brief 的共享 hunk 建议），本轮不复制第三份、也不改他人文件。
  * TooltipProvider 按既有约定只在页面根挂一次（ApprovalAuditView）。
  */
+
+const approvalDateFormatter = new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short", timeZone: BEIJING_TIME_ZONE });
+
+export function formatApprovalDate(value: string | null): string {
+  if (!value) return "未提供";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "时间未知" : approvalDateFormatter.format(date);
+}
 
 export function InfoHint({ label, children }: { label: string; children: ReactNode }) {
   return (

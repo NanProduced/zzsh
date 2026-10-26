@@ -102,7 +102,7 @@ const LIST_TABS: Record<string, Omit<WorkspaceTab, "query">> = {
   [WORKBENCH_TAB_ID]: { id: WORKBENCH_TAB_ID, title: "工作台", path: "/workbench", closable: false, kind: "workbench" },
   support: { id: "support", title: "客服工作台", path: "/support", closable: true, kind: "support" },
   "membership-growth": { id: "membership-growth", title: "会员与礼遇", path: "/membership-growth", closable: true, kind: "membership-growth" },
-  "distribution-policy": { id: "distribution-policy", title: "分销政策", path: "/distribution-policy", closable: true, kind: "distribution-policy" },
+  "distribution-policy": { id: "distribution-policy", title: "分销管理", path: "/distribution-policy", closable: true, kind: "distribution-policy" },
   account: { id: "account", title: "账号安全", path: "/account", closable: true, kind: "account" },
   settings: { id: "settings", title: "设置", path: "/settings", closable: true, kind: "settings" },
   admins: { id: "admins", title: "管理员管理", path: "/admins", closable: true, kind: "admins" },
@@ -164,7 +164,7 @@ export function parseWorkspacePath(pathname: string): { kind: WorkspaceRouteKind
   if (path === "/account") return { kind: "account", tabId: "account", path: "/account", title: "账号安全" };
   if (path === "/support") return { kind: "support", tabId: "support", path: "/support", title: "客服工作台" };
   if (path === "/membership-growth") return { kind: "membership-growth", tabId: "membership-growth", path: "/membership-growth", title: "会员与礼遇" };
-  if (path === "/distribution-policy") return { kind: "distribution-policy", tabId: "distribution-policy", path: "/distribution-policy", title: "分销政策" };
+  if (path === "/distribution-policy") return { kind: "distribution-policy", tabId: "distribution-policy", path: "/distribution-policy", title: "分销管理" };
   if (path === "/admins") return { kind: "admins", tabId: "admins", path: "/admins", title: "管理员" };
   const adminObject = path.match(/^\/admins\/([^/]+)$/);
   if (adminObject) {
@@ -254,7 +254,7 @@ export function canOpenKind(kind: WorkspaceRouteKind, nav: NavPermission): boole
   if(kind==="finance-period"||kind==="finance-user")return has("finance.read");
   if(kind==="finance-document")return has("finance.document.read");
   if (kind === "support") return has("im.support.read") || nav.isBoss;
-  if (kind === "distribution-policy") return nav.isBoss || ["personal.distribution.policy.read", "personal.distribution.policy.manage"].some(has);
+  if (kind === "distribution-policy") return nav.isBoss || ["order.read", "personal.distribution.policy.read", "personal.distribution.policy.manage"].some(has);
   if (kind === "membership-growth") return nav.isBoss || ["membership.policy.draft", "membership.policy.publish", "membership.growth.read.summary"].some(has) || has("approval.request.create") && has("membership.entitlement.request");
   if (kind === "admins" || kind === "admin-object") return has("admin.account.read") || nav.isBoss;
   if (kind === "roles" || kind === "role-object") return has("admin.role.read") || has("admin.permission.read");

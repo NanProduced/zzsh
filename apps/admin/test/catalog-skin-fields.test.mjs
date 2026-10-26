@@ -56,7 +56,8 @@ const valuesFor = skin => ({ ...Object.fromEntries(Object.entries(skin).filter((
 test("skin metadata preserves unknown and historic quality during unrelated edits", () => {
   const skin = oldSkin(), values = valuesFor(skin);
   values.aliases = "旧名别名";
-  assert.deepEqual(skinPayload(values, "1235", skin), { expectedCatalogRevision: "1235", aliases: ["旧名别名"] });
+  values.reason = "补充别名并保留未知字段";
+  assert.deepEqual(skinPayload(values, "1235", skin), { expectedCatalogRevision: "1235", aliases: ["旧名别名"], reason: values.reason });
   values.isCollectible = "false"; values.defaultState = "NON_DEFAULT"; values.reason = "按平台资料核实";
   const body = skinPayload(values, "1235", skin);
   assert.equal(body.isCollectible, false); assert.equal(body.defaultState, "NON_DEFAULT");
@@ -117,4 +118,42 @@ test("selectable state includes category ancestors and does not equate identity 
   catalog.categories[1].formVisible = true; catalog.categories[1].parentId = "cat_fixture"; assert.equal(skinIsSelectable(skin, catalog), false);
   assert.equal(skinRarityBasisText(skin), "品质依据待补");
   assert.equal(skinRarityBasisText({ ...skin, rarityEvidence: { basis: "PLATFORM_REFERENCE" } }), "平台参考");
+});
+
+const verifiedEditSkin = { id: "skin_edit", code: "stable", name: "Agent-Old", baseName: "Old", ownerKind: "AGENT", ownerRef: { kind: "AGENT", id: "agent" }, namingState: "VERIFIED", aliases: ["existing"], categoryId: "category", sortOrder: 0, formVisible: true, enabled: true, mediaId: null, rarityCode: null };
+const editValues = (over = {}) => ({ name: verifiedEditSkin.name, categoryId: "category", rarityCode: "", sortOrder: "0", enabled: "true", formVisible: "true", ...skinValues(verifiedEditSkin), ...evidence({reason:"修正同一词条展示名称"}), ...over });
+test("entry edit: verified display correction reuses identity confirmation and retains original relation", () => {
+ const body = skinPayload(editValues({baseName:"New"}), "10", verifiedEditSkin, false, "delta");
+ assert.equal(body.confirmIdentity,true);assert.equal(body.baseName,"New");assert.deepEqual(body.ownerRef,{kind:"AGENT",id:"agent"});assert.equal(body.ownerKind,"AGENT");assert.equal(body.reason,"修正同一词条展示名称");assert.equal(body.evidenceRefs.length,1);assert.equal(body.name,undefined);assert.equal(body.code,undefined);assert.equal(body.sourceNamespace,undefined);
+});
+test("entry edit: display correction cannot smuggle a different owner or discard evidence", () => {
+ assert.throws(()=>skinPayload(editValues({baseName:"New",ownerKind:"FIREARM",ownerId:"other"}),"10",verifiedEditSkin,false,"delta"),/所属|身份/);
+ assert.throws(()=>skinPayload(editValues({baseName:"New",evidenceUrls:""}),"10",verifiedEditSkin,false,"delta"),/证据/);
+});
+test("entry edit: aliases order and visibility carry the human reason", () => {
+ const body=skinPayload(editValues({aliases:"existing\n新别名",sortOrder:"4",formVisible:"false"}),"10",verifiedEditSkin,false,"delta");
+ assert.deepEqual(body.aliases,["existing","新别名"]);assert.equal(body.sortOrder,4);assert.equal(body.formVisible,false);assert.equal(body.confirmIdentity,undefined);assert.equal(body.reason,"修正同一词条展示名称");
+ assert.throws(()=>skinPayload(editValues({sortOrder:"2",reason:""}),"10",verifiedEditSkin,false,"delta"),/原因/);
+});
+test("entry edit: unchanged fields do not become a fake identity command", () => {
+ assert.throws(()=>skinPayload(editValues(),"10",verifiedEditSkin,false,"delta"),/没有需要/);
+ const body=skinPayload(editValues({isCollectible:"false",defaultState:"NON_DEFAULT"}),"10",verifiedEditSkin,false,"delta");
+ assert.equal(body.isCollectible,false);assert.equal(body.defaultState,"NON_DEFAULT");assert.equal(body.ownerRef,undefined);
+});
+test("entry edit: independent melee preserves null relation on a display correction", () => {
+ const original={...verifiedEditSkin,name:"Old",ownerKind:"MELEE_TYPE",ownerRef:null};
+ const body=skinPayload({...editValues(),...skinValues(original),baseName:"New",...evidence()},"10",original,false,"delta");
+ assert.equal(body.confirmIdentity,true);assert.equal(body.ownerKind,"MELEE_TYPE");assert.equal(body.ownerRef,null);
+});
+
+test("entry edit: a missing original base name does not fabricate a rename or block other metadata", () => {
+ const original={...verifiedEditSkin,baseName:null};const values={...editValues(),...skinValues(original),sortOrder:"3",reason:"只改排序"};const body=skinPayload(values,"10",original,false,"delta");assert.equal(body.sortOrder,3);assert.equal(body.confirmIdentity,undefined);assert.equal(body.baseName,undefined);
+ assert.throws(()=>skinPayload({...values,baseName:"New"},"10",original,false,"delta"),/身份尚未完整/);
+});
+
+test("category retirement: Delta creates and edits without a legacy category while other games retain compatibility", () => {
+ const values={...skinValues(),code:"new_skin",name:"New",categoryId:"",rarityCode:"",sortOrder:"0",enabled:"false",formVisible:"false"};const body=skinPayload(values,"10",undefined,false,"delta");assert.equal(body.name,"New");assert.ok(!("categoryId" in body));assert.throws(()=>skinPayload(values,"10",undefined,false,"other"),/分类/);
+});
+test("category retirement: Delta selectability follows skin facts rather than retired group visibility", () => {
+ const skin={id:"skin",code:"skin",name:"New",namingState:"VERIFIED",categoryId:null,enabled:true,formVisible:true,ownerKind:"MELEE_TYPE",ownerRef:null};const catalog={game:{code:"delta",enabled:true},categories:[{id:"old_cat",enabled:false,formVisible:false,parentId:null}]};assert.equal(skinIsSelectable(skin,catalog),true);assert.equal(skinIsSelectable({...skin,categoryId:"old_cat"},catalog),true);assert.equal(skinIsSelectable({...skin,enabled:false},catalog),false);assert.equal(skinIsSelectable({...skin,namingState:"PENDING"},catalog),false);
 });

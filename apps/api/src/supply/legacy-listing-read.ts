@@ -257,12 +257,12 @@ export async function readLegacyListing(client: PoolClient, accountId: string, a
   const rows=(await client.query(`SELECT i.id,i.code,i.name,i.unit,l.quantity::text quantity FROM zzsh_supply.inventory_line l JOIN zzsh_supply.billable_item i ON i.id=l.item_id WHERE l.version_id=$1 ORDER BY i.sort_order,i.id`,[r.version_id])).rows;
   // Same public summary as catalog/publish snapshots, and the same effective
   // visibility as the public catalog: same game, skin enabled and form-visible,
-  // category and every ancestor public. Any other declared reference (pending
-  // identity, disabled, hidden category) is withheld by count only; its name, id
+  // Delta uses individual skin visibility; other games retain legacy ancestor visibility.
+  // Other unavailable declared references are withheld by count only; their name, id
   // and image never leave the server.
   const declaredSkins=(await client.query<{id:string;name:string;baseName:string|null;ownerName:string|null;ownerKind:string|null;rarityCode:string|null;rarityName:string|null;rarityBasis:string|null;isCollectible:boolean|null;defaultState:string;mediaKind:"PORTRAIT_CARD"|"MODEL_IMAGE"|"PROMO_POSTER"|null;mediaId:string|null;categoryCode:string|null;categoryName:string|null;isPublic:boolean}>(`WITH RECURSIVE ${publicSkinCategoryCteSql("$2")}
     SELECT s.id,s.name,s.base_name AS "baseName",${publicSkinOwnerNameSql("s")} AS "ownerName",s.owner_kind AS "ownerKind",s.rarity_code AS "rarityCode",${publicSkinRarityNameSql("s")} AS "rarityName",${publicSkinMetadataSql("s")},${publicSkinMediaIdSql("s")} AS "mediaId",
-    c.code AS "categoryCode",c.name AS "categoryName",(s.game_id=$2 AND s.enabled AND s.form_visible AND s.category_id IN (SELECT "id" FROM visible)) AS "isPublic"
+    c.code AS "categoryCode",c.name AS "categoryName",(s.game_id=$2 AND s.enabled AND s.form_visible AND ((SELECT code FROM zzsh_supply.game WHERE id=$2)='delta' OR s.category_id IN (SELECT "id" FROM visible))) AS "isPublic"
     FROM (
       SELECT unnest(h.skin_ids) AS skin_id
       FROM zzsh_supply.legacy_skin_holding h

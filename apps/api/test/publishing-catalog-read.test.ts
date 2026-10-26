@@ -55,7 +55,7 @@ test('public owners and category kinds cover the whole visible tree regardless o
   const client={query:async(sql:string,args:unknown[]=[])=>{
     queries.push({sql,args});
     if(sql.includes('catalog-reference-check'))return{rows:[{categoryOk:true,rarityOk:true,ownerOk:true,classificationOk:true}]};
-    if(sql.includes('FROM "zzsh_supply"."game"'))return{rows:[{id:'game_delta',catalogRevision:'129',currentReleaseId:null}]};
+    if(sql.includes('FROM "zzsh_supply"."game"'))return{rows:[{id:'game_delta',code:'compat',catalogRevision:'129',currentReleaseId:null}]};
     if(sql.startsWith('WITH RECURSIVE'))return{rows:categories};
     if(sql.startsWith('SELECT DISTINCT s.category_id'))return{rows:refs};
     if(sql.includes('s."owner_kind" AS "ownerKind"'))return{rows:page};
@@ -69,7 +69,7 @@ test('public owners and category kinds cover the whole visible tree regardless o
   assert.equal(body.owners.some((owner:any)=>owner.id===null),false,'an unclassified melee is not a fake owner option');
   assert.deepEqual(Object.fromEntries(body.categories.map((category:any)=>[category.id,category.ownerKind])),{root:null,agents:'AGENT',firearms:'FIREARM',melee:'MELEE_TYPE',mixed:null,empty:null});
   const allRefs=queries.find(query=>query.sql.startsWith('SELECT DISTINCT s.category_id'))!;
-  assert.deepEqual(allRefs.args,['game_delta',categories.map(category=>category.id)]);
+  assert.deepEqual(allRefs.args,['game_delta',categories.map(category=>category.id),false]);
   assert.match(allRefs.sql,/s\.game_id=\$1 AND s\.enabled=true AND s\.form_visible=true/);
   assert.equal(allRefs.sql.includes('LIMIT'),false);
   assert.match(allRefs.sql,/f\.game_id=s\.game_id/);

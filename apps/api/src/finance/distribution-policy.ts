@@ -2,12 +2,14 @@ import {createHash} from 'node:crypto';import {canonicalize} from '../supply/con
 export type ReferralRatio={numerator:string;denominator:string};
 export type LevelCondition={metric:'LAST_PAID_AMOUNT'|'TOTAL_PAID_AMOUNT'|'PAID_COUNT'|'SETTLED_REFERRAL';value:string};
 export type DistributionLevelPolicy={code:string;rank:number;default:boolean;renterPercent:string;ownerPercent:string;upgrade:null|{match:'ANY'|'ALL';conditions:LevelCondition[]}};
-export type DistributionPolicyConfig={schema:'distribution-policy.v1';scope:'LOCAL_CONTROLLED'|'NATIVE';enabled:boolean;participation:'AUTO_AT_REGISTRATION';depth:1;selfRebate:false;accountModes:('ordinary'|'custom')[];minimumAccrualCents:string;settlementDelayDays:number;levels:DistributionLevelPolicy[]};
+type DistributionPolicyBase={scope:'LOCAL_CONTROLLED'|'NATIVE';enabled:boolean;participation:'AUTO_AT_REGISTRATION';depth:1;selfRebate:false;accountModes:('ordinary'|'custom')[];minimumAccrualCents:string;settlementDelayDays:number};
+export type DistributionPolicyConfig=DistributionPolicyBase&({schema:'distribution-policy.v1';levels:DistributionLevelPolicy[]}|{schema:'distribution-policy.v2';rateMode:'UNIFORM';renterPercent:string;ownerPercent:string;levels:[]});
 const unsigned=(v:unknown)=>{const text=exactCents(v);if(BigInt(text)<0n)throw invalid('Nonnegative policy amount required');return text;};
 export function referralPercent(value:unknown):{percent:string;ratio:ReferralRatio}{if(typeof value!=='string'||!/^(0|[1-9]\d{0,2})(?:\.\d{1,8})?$/.test(value))throw invalid('Exact percent string required');const n=parseNonNegativeDecimal(value,8,'referral percent'),den=100n*10n**BigInt(n.scale);if(n.value>den)throw invalid('Referral percent exceeds 100');return{percent:formatDecimalExact(n),ratio:{numerator:n.value.toString(),denominator:den.toString()}};}
 const compare=(a:ReferralRatio,b:ReferralRatio)=>BigInt(a.numerator)*BigInt(b.denominator)-BigInt(b.numerator)*BigInt(a.denominator);
 function boundedPair(a:ReferralRatio,b:ReferralRatio){if(BigInt(a.numerator)*BigInt(b.denominator)+BigInt(b.numerator)*BigInt(a.denominator)>BigInt(a.denominator)*BigInt(b.denominator))throw invalid('Cross-level referral total exceeds the same base');}
 export function validateDistributionPolicy(value:Record<string,unknown>,expectedScope:'LOCAL_CONTROLLED'|'NATIVE'='LOCAL_CONTROLLED'):DistributionPolicyConfig{
+ if(value.schema==='distribution-policy.v2')return validateUniformDistributionPolicy(value,expectedScope);
  ensureOnlyFields(value,['schema','scope','enabled','participation','depth','selfRebate','accountModes','minimumAccrualCents','settlementDelayDays','levels']);
  if(!['LOCAL_CONTROLLED','NATIVE'].includes(expectedScope)||value.schema!=='distribution-policy.v1'||value.scope!==expectedScope||typeof value.enabled!=='boolean'||value.participation!=='AUTO_AT_REGISTRATION'||value.depth!==1||value.selfRebate!==false)throw invalid('Unsupported rental distribution policy mode');
  if(!Array.isArray(value.accountModes)||!value.accountModes.length||value.accountModes.length>2||new Set(value.accountModes).size!==value.accountModes.length||value.accountModes.some(m=>m!=='ordinary'&&m!=='custom'))throw invalid('Unreviewed account mode');
@@ -24,6 +26,20 @@ export function validateDistributionPolicy(value:Record<string,unknown>,expected
  if(new Set(levels.map(l=>l.code)).size!==levels.length||new Set(levels.map(l=>l.rank)).size!==levels.length||levels.filter(l=>l.default).length!==1)throw invalid('Exactly one default and unique stable levels required');
  let maxR=referralPercent(levels[0]!.renterPercent).ratio,maxO=referralPercent(levels[0]!.ownerPercent).ratio;for(const l of levels){const r=referralPercent(l.renterPercent).ratio,o=referralPercent(l.ownerPercent).ratio;if(compare(r,maxR)>0n)maxR=r;if(compare(o,maxO)>0n)maxO=o;}boundedPair(maxR,maxO);
  return{schema:'distribution-policy.v1',scope:expectedScope,enabled:value.enabled,participation:'AUTO_AT_REGISTRATION',depth:1,selfRebate:false,accountModes:value.accountModes as ('ordinary'|'custom')[],minimumAccrualCents:unsigned(value.minimumAccrualCents),settlementDelayDays:value.settlementDelayDays,levels};
+}
+/** New policies carry explicit global rates; historical grades never choose either rate. */
+function validateUniformDistributionPolicy(value:Record<string,unknown>,expectedScope:'LOCAL_CONTROLLED'|'NATIVE'):DistributionPolicyConfig{
+ ensureOnlyFields(value,['schema','scope','enabled','participation','depth','selfRebate','accountModes','minimumAccrualCents','settlementDelayDays','rateMode','renterPercent','ownerPercent','levels']);
+ if(!['LOCAL_CONTROLLED','NATIVE'].includes(expectedScope)||value.scope!==expectedScope||typeof value.enabled!=='boolean'||value.participation!=='AUTO_AT_REGISTRATION'||value.depth!==1||value.selfRebate!==false||value.rateMode!=='UNIFORM')throw invalid('Unsupported uniform distribution policy');
+ if(value.levels!==undefined&&(!Array.isArray(value.levels)||value.levels.length))throw invalid('Uniform policy cannot configure grades');
+ if(!Array.isArray(value.accountModes)||!value.accountModes.length||value.accountModes.length>2||new Set(value.accountModes).size!==value.accountModes.length||value.accountModes.some(m=>m!=='ordinary'&&m!=='custom'))throw invalid('Unreviewed account mode');
+ if(typeof value.settlementDelayDays!=='number'||!Number.isInteger(value.settlementDelayDays)||value.settlementDelayDays<0||value.settlementDelayDays>999999)throw invalid('Whole settlement delay days required');
+ const renter=referralPercent(value.renterPercent),owner=referralPercent(value.ownerPercent);boundedPair(renter.ratio,owner.ratio);
+ return{schema:'distribution-policy.v2',scope:expectedScope,enabled:value.enabled,participation:'AUTO_AT_REGISTRATION',depth:1,selfRebate:false,accountModes:value.accountModes as ('ordinary'|'custom')[],minimumAccrualCents:unsigned(value.minimumAccrualCents),settlementDelayDays:value.settlementDelayDays,rateMode:'UNIFORM',renterPercent:renter.percent,ownerPercent:owner.percent,levels:[]};
+}
+export function distributionPolicyRates(policy:DistributionPolicyConfig,levelCode:string|null){
+ if(policy.schema==='distribution-policy.v2')return{mode:'UNIFORM' as const,levelCode:null,renterPercent:policy.renterPercent,ownerPercent:policy.ownerPercent};
+ const level=policy.levels.find(l=>l.code===levelCode);return level?{mode:'LEVEL' as const,levelCode:level.code,renterPercent:level.renterPercent,ownerPercent:level.ownerPercent}:null;
 }
 /** Pair applies the actual payment-frozen ratios; no rebalance or silent subsidy. */
 export function allocateFrozenReferralPair(baseCents:string,renter:ReferralRatio|null,owner:ReferralRatio|null,minimumAccrualCents:string){

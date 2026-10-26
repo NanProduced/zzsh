@@ -17,6 +17,8 @@ import { mountPersonalWithdrawalHistory } from "../finance/withdrawal-history-ro
 import type { WithdrawalBankBindingOptions } from "../finance/withdrawal-bank-binding";
 import { mountMembershipGrowthRoutes } from "./membership-growth-routes";
 import { executeMembershipGrowthOperation } from "./membership-growth-approval";
+import { createDistributionPolicyApprovalExecutor } from "../finance/distribution-policy-approval";
+import { mountAdminDistributionReadRoutes } from "../finance/admin-distribution-routes";
 import { membershipGrowthEnabled, readMembershipGrowthQuoteCandidates } from "./membership-growth-integration";
 import { mountUserDirectory } from "./user-directory-routes";
 import { mountPersonalConfirmations } from "../order/confirmation-routes";
@@ -1036,7 +1038,10 @@ export async function mountAuthHandlers(
       return options.userObligationReader ? options.userObligationReader(userId,client) : "UNKNOWN";
     },
     testOperationsEnabled: options.testOperationsEnabled,
-    approvalOperationExecutor: executeMembershipGrowthOperation,
+    distributionPolicyWriteScope: options.distributionScope,
+    approvalOperationExecutor: (client, input, actor, requestId) => input.operationCode === "distribution.policy.publish"
+      ? createDistributionPolicyApprovalExecutor(options.distributionScope)(client, input, actor, requestId)
+      : executeMembershipGrowthOperation(client, input, actor, requestId),
     ...(yunxinRuntime ? {
       imProvisioner: yunxinRuntime.provisioner,
       imIdentityRepository: yunxinRuntime.repository,
@@ -1158,6 +1163,7 @@ export async function mountAuthHandlers(
   mountUserDirectory(app,{...securityOptions,supplyGateReader});
   mountInvitationRoutes(app,{...securityOptions,listingCursorKey:options.listingCursorKey,distributionScope:options.distributionScope,distributionReadScope:options.distributionReadScope});
   mountDistributionPolicyRoutes(app,{...securityOptions,distributionScope:options.distributionScope,distributionReadScope:options.distributionReadScope});
+  mountAdminDistributionReadRoutes(app, securityOptions);
   const payout=options.joinpayWithdrawal;
   const payoutReady=Boolean(payout?.execution&&payout.notifications===true&&payout.execution.scope===payout.routes.scope);
   if(options.joinpayRefund)mountJoinpayRefundNotifications(app,{...options.joinpayRefund,pool:options.pool});

@@ -110,12 +110,12 @@ function skinMetadata(body: Record<string, unknown>): void {
 }
 
 /** Transport-independent validation, shared by the actual catalog writers. */
-export function parseSkinWrite(input: Record<string, unknown>, editing: boolean): Record<string, unknown> {
+export function parseSkinWrite(input: Record<string, unknown>, editing: boolean, retiredCategories = false): Record<string, unknown> {
   ensureOnlyFields(input, [...SKIN_FIELDS, ...(editing ? ["mediaId", "ownerKind", "ownerRef", "baseName", "confirmIdentity", "reason", "evidenceRefs"] : ["code"])]);
   const body = { ...input };
   parseExpectedRevision({ expectedRevision: body.expectedCatalogRevision });
   for (const field of ["name", "baseName"] as const) if (field in body) body[field] = skinText(body[field], field, 120);
-  for (const field of ["categoryId", "mediaId"] as const) if (field in body && !(field === "mediaId" && body[field] === null)) body[field] = skinText(body[field], field, 128);
+  for (const field of ["categoryId", "mediaId"] as const) if (field in body && !((field === "mediaId" || field === "categoryId" && retiredCategories) && body[field] === null)) body[field] = skinText(body[field], field, 128);
   if ("rarityCode" in body && body.rarityCode !== null) body.rarityCode = skinText(body.rarityCode, "rarityCode", 64);
   skinMetadata(body);
   if ("ownerKind" in body && (typeof body.ownerKind !== "string" || !["AGENT", "FIREARM", "MELEE_TYPE"].includes(body.ownerKind))) throw invalid("Invalid owner kind", "ownerKind");
@@ -155,7 +155,7 @@ export function parseSkinWrite(input: Record<string, unknown>, editing: boolean)
   if ("evidenceRefs" in body) identityEvidence(body);
   if (!editing) {
     requireCode(body);
-    if (!body.name || !body.categoryId) throw invalid("Name and category required");
+    if (!body.name || !retiredCategories && !body.categoryId) throw invalid("Name and category required");
     if (body.enabled === true || body.formVisible === true) throw invalid("Create a disabled draft first");
   } else if (![...SKIN_FIELDS.filter(field => field !== "expectedCatalogRevision"), "mediaId", "ownerKind", "ownerRef", "baseName"].some(field => field in body) && body.confirmIdentity !== true) {
     throw invalid("No catalog change requested");
@@ -180,6 +180,19 @@ async function assertSkinSource(client: PoolClient, gameId: string, id: string, 
   if (namespace === null) return;
   const result = await client.query(`SELECT id FROM zzsh_supply.skin WHERE game_id=$1 AND source_namespace COLLATE "C"=$2 AND source_field COLLATE "C"=$3 AND source_token COLLATE "C"=$4 AND id<>$5`, [gameId, namespace, field, token, id]);
   if (result.rowCount) throw conflict("Primary source is already attached to another skin");
+}
+
+async function skinCategoriesRetired(client: PoolClient, gameId: string): Promise<boolean> {
+  const game = (await client.query<{ code: string }>(`SELECT code FROM zzsh_supply.game WHERE id=$1`, [gameId])).rows[0];
+  if (!game) throw notFound();
+  return game.code === "delta";
+}
+
+export async function categorylessSkinStorageReady(client: PoolClient): Promise<boolean> {
+  const row = (await client.query<{ ready: boolean }>(`SELECT /* categoryless-skin-storage */ NOT a.attnotnull
+    AND EXISTS (SELECT 1 FROM pg_trigger t WHERE t.tgrelid=a.attrelid AND t.tgname='skin_category_retirement_guard' AND NOT t.tgisinternal AND t.tgenabled='O') AS ready
+    FROM pg_attribute a WHERE a.attrelid=to_regclass('zzsh_supply.skin') AND a.attname='category_id' AND a.attnum>0 AND NOT a.attisdropped`)).rows[0];
+  return row?.ready === true;
 }
 
 async function assertSpecificMeleeOwnerAllowed(client: PoolClient, gameId: string): Promise<void> {
@@ -324,21 +337,26 @@ export async function confirmLegacySkinIdentity(
 }
 
 async function createSkin(client: PoolClient, gameId: string, id: string, input: Record<string, unknown>): Promise<CatalogRow> {
-  const body = parseSkinWrite(input, false);
+  const retired = await skinCategoriesRetired(client, gameId);
+  const body = parseSkinWrite(input, false, retired);
+  if (retired && body.categoryId !== undefined) throw invalid("三角洲旧皮肤分类已退役，新词条不接受分类绑定", "categoryId");
+  if (retired && !await categorylessSkinStorageReady(client)) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "皮肤无分类创建的结构尚未就绪");
   if (body.mediaSource) throw invalid("Bind an image before recording its source", "mediaSource");
   await checkCatalogRevision(client, gameId, body);
   await assertUnique(client, "skin", gameId, body.code as string);
-  await assertCategoryParent(client, gameId, body.categoryId as string);
+  if (!retired) await assertCategoryParent(client, gameId, body.categoryId as string);
   if (body.rarityCode) await assertRarity(client, gameId, body.rarityCode as string, true);
   if (body.rarityCode && !body.rarityEvidence) throw invalid("Quality source required for a new binding", "rarityEvidence");
   await assertSkinSource(client, gameId, id, body.sourceNamespace ?? null, body.sourceField ?? null, body.sourceToken ?? null);
   await client.query(`INSERT INTO zzsh_supply.skin (id,game_id,code,name,category_id,rarity_code,enabled,form_visible,sort_order,source_namespace,source_field,source_token,aliases,rarity_evidence,is_collectible,default_state,media_source)
-    VALUES ($1,$2,$3,$4,$5,$6,false,false,$7,$8,$9,$10,$11,$12,$13,$14,$15)`, [id, gameId, body.code, body.name, body.categoryId, body.rarityCode ?? null, body.sortOrder ?? 0, body.sourceNamespace ?? null, body.sourceField ?? null, body.sourceToken ?? null, body.aliases ?? [], body.rarityEvidence ?? null, body.isCollectible ?? null, body.defaultState ?? "UNKNOWN", body.mediaSource ?? null]);
+    VALUES ($1,$2,$3,$4,$5,$6,false,false,$7,$8,$9,$10,$11,$12,$13,$14,$15)`, [id, gameId, body.code, body.name, retired ? null : body.categoryId, body.rarityCode ?? null, body.sortOrder ?? 0, body.sourceNamespace ?? null, body.sourceField ?? null, body.sourceToken ?? null, body.aliases ?? [], body.rarityEvidence ?? null, body.isCollectible ?? null, body.defaultState ?? "UNKNOWN", body.mediaSource ?? null]);
   return { id, code: body.code as string, namingState: "PENDING", catalogRevision: await finishCatalogWrite(client, gameId, body) };
 }
 
 async function updateSkin(client: PoolClient, gameId: string, row: Record<string, unknown>, input: Record<string, unknown>): Promise<{ gameId: string; code: string; namingState: string; catalogRevision: string }> {
-  const body = parseSkinWrite(input, true);
+  const retired = await skinCategoriesRetired(client, gameId);
+  const body = parseSkinWrite(input, true, retired);
+  if (retired && Object.hasOwn(body, "categoryId") && body.categoryId !== row.category_id) throw conflict("旧分类引用只读，不能通过词条编辑改写");
   await checkCatalogRevision(client, gameId, body);
   let name = body.name ?? row.name;
   let ownerKind = row.owner_kind ?? null, ownerId = row.owner_id ?? null, firearmId = row.firearm_id ?? null, baseName = row.base_name ?? null;
@@ -378,7 +396,7 @@ async function updateSkin(client: PoolClient, gameId: string, row: Record<string
   if (namingState !== "LEGACY" && source[0] === null && (source[1] !== null || source[2] !== null)) throw invalid("Review legacy source namespace before confirming identity");
   await assertSkinSource(client, gameId, String(row.id), source[0], source[1], source[2]);
   const categoryId = body.categoryId ?? row.category_id;
-  await assertCategoryParent(client, gameId, categoryId as string);
+  if (!retired) await assertCategoryParent(client, gameId, categoryId as string);
   const rarityCode = "rarityCode" in body ? body.rarityCode : row.rarity_code;
   if (rarityCode) await assertRarity(client, gameId, rarityCode as string, rarityCode !== row.rarity_code);
   const rarityEvidence = rarityCode === null ? null : "rarityEvidence" in body ? body.rarityEvidence : rarityCode === row.rarity_code ? row.rarity_evidence ?? null : null;
@@ -581,6 +599,7 @@ export async function createCatalogEntry(
       [id, gameId, code, requiredString(body, "name", 120), optionalInteger(body, "sortOrder", -100000, 100000) ?? 0, optionalBoolean(body, "enabled") ?? true],
     );
   } else if (kind === "categories") {
+    if (await skinCategoriesRetired(client, gameId)) throw invalid("三角洲旧皮肤分类只保留历史读取，不再维护", "categoryId");
     const code = requireCode(body);
     await assertUnique(client, "skin_category", gameId, code);
     const parentId = optionalNullableString(body, "parentId", 128);
@@ -685,6 +704,7 @@ export async function updateCatalogEntry(
       [name ?? null, enabled ?? null, sortOrder ?? null, entryId],
     );
   } else if (kind === "categories") {
+    if (await skinCategoriesRetired(client, gameId)) throw invalid("三角洲旧皮肤分类只保留历史读取，不再维护", "categoryId");
     const name = optionalString(body, "name", 120);
     const enabled = optionalBoolean(body, "enabled");
     const formVisible = optionalBoolean(body, "formVisible");
@@ -839,10 +859,8 @@ export function publicSkinOwnerNameSql(alias: string): string {
              ELSE (SELECT o.name FROM zzsh_supply.skin_owner o WHERE o.game_id=${alias}.game_id AND o.kind=${alias}.owner_kind AND o.id=${alias}.owner_id) END`;
 }
 /**
- * Effective public category visibility as a recursive CTE named `visible`: a
- * category is public only when it and every ancestor are enabled and
- * form-visible in the given game. The public catalog and legacy account reads
- * share this one definition.
+ * Legacy category visibility, retained for non-Delta and historical query compatibility.
+ * Delta skin eligibility follows its own enabled/form-visible facts, not this tree.
  */
 export function publicSkinCategoryCteSql(gameParam: string): string {
   return `visible AS (
@@ -978,8 +996,8 @@ export async function readPublicCatalog(
        FROM "zzsh_supply"."skin" s
        LEFT JOIN zzsh_supply.firearm f ON s.owner_kind='FIREARM' AND f.id=s.firearm_id AND f.game_id=s.game_id
        LEFT JOIN zzsh_supply.firearm_classification fc ON fc.id=f.classification_id AND fc.game_id=f.game_id
-      WHERE s.game_id=$1 AND s.enabled=true AND s.form_visible=true AND s.category_id=ANY($2::text[])`,
-    [gameId, categories.rows.map(category => category.id)],
+      WHERE s.game_id=$1 AND s.enabled=true AND s.form_visible=true AND ($3::boolean OR s.category_id=ANY($2::text[]))`,
+    [gameId, categories.rows.map(category => category.id), gameRow.code === "delta"],
   );
   const categoriesById = new Map(categories.rows.map(category => [category.id, category]));
   const categoryKinds = new Map<string, Set<SkinOwnerRef["kind"] | null>>();
@@ -1014,8 +1032,10 @@ export async function readPublicCatalog(
 
   const parameters: unknown[] = [gameId];
   const conditions: string[] = [`s."game_id" = $1`, `s."enabled" = true`, `s."form_visible" = true`];
-  parameters.push(categories.rows.map(c=>c.id));
-  conditions.push(`s."category_id" = ANY($${parameters.length}::text[])`);
+  if (gameRow.code !== "delta") {
+    parameters.push(categories.rows.map(c=>c.id));
+    conditions.push(`s."category_id" = ANY(${parameters.length}::text[])`);
+  }
   if (filters.categoryId) {
     parameters.push(filters.categoryId);
     conditions.push(`s."category_id" IN (
@@ -1082,6 +1102,7 @@ export async function readPublicCatalog(
   return {
     ...(scope === "publishing" ? {ready: Boolean(gameRow.currentReleaseId) && missing.length===0, blockers: !gameRow.currentReleaseId ? [{code:"RULE_UNCONFIGURED",path:"rules"}] : missing.map(i=>({code:"REQUIRED_ITEM_UNPRICED",path:"inventory",itemId:i.id,name:i.name})), inputScale:0} : {}),
     game: gameRow,
+    skinCategoryModel: { mode: gameRow.code === "delta" ? "RETIRED" : "LEGACY", legacyReferencesReadOnly: gameRow.code === "delta" },
     items: items.rows.filter(item => !isRetiredDeltaInsurance(String(item.code))),
     categories: categories.rows.map(category => {
       const kinds = categoryKinds.get(category.id);
@@ -1149,8 +1170,11 @@ export async function readAdminCatalog(
     client.query(`SELECT id,kind,code,name,enabled FROM zzsh_supply.skin_owner WHERE game_id=$1 ORDER BY kind,code,id`, [gameId]),
     client.query(`SELECT id,code,name,enabled FROM zzsh_supply.firearm WHERE game_id=$1 ORDER BY sort_order,code,id`, [gameId]),
   ]);
+  const retired = game.rows[0]!.code === "delta";
+  const categorylessWriteReady = retired ? await categorylessSkinStorageReady(client) : false;
   return {
     game: game.rows[0],
+    skinCategoryModel: { mode: retired ? "RETIRED" : "LEGACY", categorylessWriteReady, legacyReferencesReadOnly: retired },
     items: items.rows,
     rarities: rarities.rows,
     categories: categories.rows,

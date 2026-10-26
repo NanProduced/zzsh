@@ -1,7 +1,7 @@
 import { hasLegacyReadSnapshots, legacyListingSortLabel } from "./legacy-listing-read";
 import type { PoolClient } from "pg";
 import { SecurityApiError } from "../auth/security-core";
-import { checkedId,parseFilterConfig,type FilterConfig,type ListingQueryV2 } from "./listing-filter-contract";
+import { checkedId,parseFilterConfig,type FilterConfig,type FilterField,type ListingQueryV2 } from "./listing-filter-contract";
 import { invalid,notFound } from "./supply-util";
 import { publicGradingOptions,publicGradingRankOptions,publicLoginMethodOptions,publicSafeBoxCodes } from "./listing-query";
 import { GAME_SERVICE,requirePublicGameService } from "./game-services";
@@ -27,8 +27,9 @@ function allowedCodes(c:Catalog,field:CodeField,legacy=false):string[] {
   return (field.key==="gradingCodes"?publicGradingOptions():field.key==="gradingRanks"?publicGradingRankOptions():publicLoginMethodOptions()).map(o=>o.code);
 }
 function allowedLevels(c:Catalog,key:string):number[]{return Object.keys(c.game.rule?.[key==="vitality"?"vitalityDeltaByLevel":"bearDeltaByLevel"]??{}).map(Number);}
-export function validateConfigCatalog(config:FilterConfig,c:Catalog,legacy=false) {
+export function validateConfigCatalog(config:FilterConfig,c:Catalog,legacy=false,purpose:"READ"|"WRITE"="READ") {
   for(const f of config.fields) {
+    if(purpose==="WRITE"&&c.game.code==="delta"&&f.key==="skinGroups"&&f.categoryIds!==undefined)throw invalid("旧皮肤分类只保留历史读取，新配置请使用皮肤类型","config.fields.categoryIds");
     if(f.items?.some(r=>!c.items.some(i=>i.id===r.itemId)))throw invalid("Unknown, disabled or foreign item","config.fields.items");
     if(f.categoryIds?.some(id=>!c.categories.some(c=>c.id===id)))throw invalid("Unknown, hidden or foreign category","config.fields.categoryIds");
     if(f.options?.some(o=>!allowedCodes(c,f,legacy).includes(o.value)))throw invalid("Unknown option code","config.fields.options");
@@ -68,14 +69,16 @@ export async function validateListingQuery(client:PoolClient,q:ListingQueryV2,st
     if(key==="regions")if(q.filters.regions!.some(r=>!f.regions?.some(a=>a.province===r.province&&a.city===r.city)))throw invalid("Unavailable region pair","filters.regions");
     if(key==="skinGroups") {
       const all=q.filters.skinGroups!.flatMap(g=>g.ids);
-      const skins=(await client.query<{id:string;categoryId:string}>(`SELECT id,category_id AS "categoryId" FROM zzsh_supply.skin WHERE game_id=$1 AND enabled AND form_visible AND id=ANY($2::text[])`,[q.gameId,all])).rows;
+      const skins=(await client.query<{id:string;categoryId:string|null;ownerKind:string|null}>(`SELECT id,category_id AS "categoryId",owner_kind AS "ownerKind" FROM zzsh_supply.skin WHERE game_id=$1 AND enabled AND form_visible AND id=ANY($2::text[])`,[q.gameId,all])).rows;
       const parents=new Map(c.categories.map(r=>[r.id,r.parentId]));
-      for(const g of q.filters.skinGroups!){if(!f.categoryIds?.includes(g.categoryId)||!parents.has(g.categoryId))throw invalid("Unavailable category","filters.skinGroups.categoryId");
+      for(const g of q.filters.skinGroups!){
+        if(g.ownerKind!==undefined){const allowed=f.ownerKinds??["AGENT","MELEE_TYPE","FIREARM"];if(!allowed.includes(g.ownerKind))throw invalid("Unavailable skin type","filters.skinGroups.ownerKind");for(const id of g.ids)if(!skins.some(s=>s.id===id&&s.ownerKind===g.ownerKind))throw invalid("Unknown, hidden, disabled or foreign skin","filters.skinGroups.ids");continue;}
+        if(!g.categoryId||!f.categoryIds?.includes(g.categoryId)||!parents.has(g.categoryId))throw invalid("Unavailable category","filters.skinGroups.categoryId");
         for(const id of g.ids){const s=skins.find(s=>s.id===id);let cat=s?.categoryId;while(cat && parents.has(cat)&&cat!==g.categoryId)cat=parents.get(cat)??undefined;if(!s||cat!==g.categoryId)throw invalid("Unknown, hidden, disabled or foreign skin","filters.skinGroups.ids");}}
     }
   }
 }
-export function publicFilterMetadata(state:Awaited<ReturnType<typeof readListingState>>,signingReady:boolean) {
+export function publicFilterMetadata(state:Awaited<ReturnType<typeof readListingState>>,signingReady:boolean,skinGrouping:"LEGACY"|"TYPE"="LEGACY") {
   const {catalog:c,config,legacyReadOnly:legacy}=state;
   const legacyOptions=state.allowLegacyOptions;
   const fields=config?.fields.filter(f=>f.enabled).map(f=>({...f,
@@ -83,9 +86,9 @@ export function publicFilterMetadata(state:Awaited<ReturnType<typeof readListing
     ...(f.options?{options:f.options.filter(o=>allowedCodes(c,f,legacyOptions).includes(o.value))}:{}),
     ...(f.levels?{levels:legacyOptions?f.levels:f.levels.filter(n=>allowedLevels(c,f.key).includes(n))}:{}),
     ...(f.categoryIds?{categoryIds:f.categoryIds.filter(id=>c.categories.some(a=>a.id===id))}:{}),
-  })).sort((a,b)=>a.order-b.order)||[];
+  })).map((field):FilterField=>{if(skinGrouping!=="TYPE"||c.game.code!=="delta"||field.key!=="skinGroups")return field;const {categoryIds,...rest}=field;return {...rest,ownerKinds:field.ownerKinds??["AGENT","MELEE_TYPE","FIREARM"]};}).sort((a,b)=>a.order-b.order)||[];
   const sorts=config?.sorts.filter(s=>s.enabled).map(s=>({...s,...(legacy?{label:legacyListingSortLabel(s.key,s.label)}:{}),...(s.itemIds?{itemIds:s.itemIds.filter(id=>c.items.some(i=>i.id===id&&i.unit==="HAFF_BASE"))}:{})})).sort((a,b)=>a.order-b.order)||[];
-  const shared={gameId:c.game.id,queryVersion:2 as const,filterRevision:state.filterRevision,catalogRevision:state.catalogRevision,fields,sorts,directions:["ASC","DESC"] as Array<"ASC"|"DESC">,items:c.items.filter(i=>fields.some(f=>f.items?.some(r=>r.itemId===i.id))||config?.sorts.some(s=>s.itemIds?.includes(i.id))),categories:c.categories.filter(a=>fields.some(f=>f.categoryIds?.includes(a.id))),skinCatalogUrl:`/api/v1/supply/games/${checkedId(c.game.id,"gameId")}/catalog`,limits:{urlBytes:8192,resources:16,skinGroups:8,skinIds:50,enumValues:50,regions:20,limit:50,scanBudget:200},livePages:true};
+  const shared={gameId:c.game.id,queryVersion:2 as const,...(skinGrouping==="TYPE"?{skinGrouping:"TYPE" as const}:{}),filterRevision:state.filterRevision,catalogRevision:state.catalogRevision,fields,sorts,directions:["ASC","DESC"] as Array<"ASC"|"DESC">,items:c.items.filter(i=>fields.some(f=>f.items?.some(r=>r.itemId===i.id))||config?.sorts.some(s=>s.itemIds?.includes(i.id))),categories:c.categories.filter(a=>fields.some(f=>f.categoryIds?.includes(a.id))),skinCatalogUrl:`/api/v1/supply/games/${checkedId(c.game.id,"gameId")}/catalog`,limits:{urlBytes:8192,resources:16,skinGroups:8,skinIds:50,enumValues:50,regions:20,limit:50,scanBudget:200},livePages:true};
   if(legacy)return {...shared,available:Boolean(config&&signingReady),readMode:"LEGACY_READ_ONLY" as const,reasonCode:!config?"FILTERS_UNCONFIGURED":!signingReady?"SIGNING_UNCONFIGURED":null,resourceQuantityRange:true,ruleReleaseId:null,defaultSort:{sort:"latest",direction:"DESC" as const,label:"更新时间"}};
   return {...shared,available:Boolean(config&&state.ruleReleaseId&&signingReady),reasonCode:!config?"FILTERS_UNCONFIGURED":!state.ruleReleaseId?"RULES_UNCONFIGURED":!signingReady?"SIGNING_UNCONFIGURED":null,resourceQuantityRange:true,ruleReleaseId:state.ruleReleaseId,defaultSort:{sort:"latest",direction:"DESC" as const,label:"最新发布"}};
 }

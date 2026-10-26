@@ -63,6 +63,10 @@ export function evidenceFields(values: Record<string, string>) {
   return { reason: text(values.reason, "原因", 500), evidenceRefs };
 }
 
+export function skinDisplayNameChanged(values: Record<string, string>, original?: CatalogSkin): boolean {
+  return original?.namingState === "VERIFIED" && values.baseName !== undefined && clean(values.baseName) !== (original.baseName ?? "");
+}
+
 export function skinPayload(values: Record<string, string>, revision: string, original?: CatalogSkin, confirm = false, gameCode?: string): Record<string, unknown> {
   if (!/^[1-9]\d*$/.test(revision)) throw new Error("目录版本未就绪，请重新读取目录。");
   const body: Record<string, unknown> = { expectedCatalogRevision: revision };
@@ -74,14 +78,15 @@ export function skinPayload(values: Record<string, string>, revision: string, or
     if (original.mediaSource && values.changeMediaSource !== "true") body.mediaSource = null;
   }
   if (!original) {
-    body.code = values.code; body.name = text(values.name, "名称", 120); body.categoryId = text(values.categoryId, "分类", 128);
+    body.code = values.code; body.name = text(values.name, "名称", 120);
+    if (gameCode !== "delta") body.categoryId = text(values.categoryId, "分类", 128);
     body.rarityCode = values.rarityCode || null; body.enabled = false; body.formVisible = false;
     body.sortOrder = Number(values.sortOrder || "0");
   } else if (!confirm) {
     if (original.namingState !== "VERIFIED" && values.name !== original.name) { body.name = text(values.name, "名称", 120); body.reason = text(values.reason, "改名原因", 500); }
     for (const field of ["categoryId", "rarityCode", "sortOrder", "enabled", "formVisible"] as const) {
       const value = field === "sortOrder" ? Number(values[field]) : field === "enabled" || field === "formVisible" ? values[field] === "true" : field === "rarityCode" ? values[field] || null : values[field];
-      if (value !== original[field]) body[field] = value;
+      if (field !== "categoryId" || gameCode !== "delta") if (value !== original[field]) body[field] = value;
     }
   }
   if ("sortOrder" in body && (!Number.isInteger(body.sortOrder) || Math.abs(body.sortOrder as number) > 100000)) throw new Error("排序须为-100000至100000的整数。");
@@ -116,7 +121,14 @@ export function skinPayload(values: Record<string, string>, revision: string, or
     body.sourceToken = original?.sourceToken ?? text(values.sourceToken, "原始来源值", 200, false);
     if (original) Object.assign(body, evidenceFields(values));
   }
-  if (confirm) {
+  const sameIdentityRename = !confirm && skinDisplayNameChanged(values, original);
+  if (sameIdentityRename) {
+    const kind = original!.ownerKind ?? original!.ownerRef?.kind;
+    if (!original!.baseName || !kind || (kind !== "MELEE_TYPE" && !original!.ownerRef)) throw new Error("原词条身份尚未完整读到，请先核对身份后再修正名称。");
+    if (values.ownerKind !== kind || (values.ownerId ?? "") !== (original!.ownerRef?.id ?? "")) throw new Error("普通名称修正不能改变所属身份。");
+    values = { ...values, ownerKind: kind, ownerId: original!.ownerRef?.id ?? "" };
+  }
+  if (confirm || sameIdentityRename) {
     if (!original) throw new Error("请先创建草稿，再单独确认身份。");
     if (!["AGENT", "MELEE_TYPE", "FIREARM"].includes(values.ownerKind ?? "")) throw new Error("请选择所属对象类型。");
     body.ownerKind = values.ownerKind;
@@ -124,6 +136,7 @@ export function skinPayload(values: Record<string, string>, revision: string, or
     body.baseName = text(values.baseName, "皮肤本名", 120); body.confirmIdentity = true; Object.assign(body, evidenceFields(values));
   }
   if (original && !confirm && Object.keys(body).length === 1) throw new Error("没有需要保存的改动。");
+  if (original) body.reason = text(values.reason, "修改原因", 500);
   return body;
 }
 

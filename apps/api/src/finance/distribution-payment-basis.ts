@@ -1,7 +1,7 @@
 import {createHash} from 'node:crypto';
 import {canonicalize,normalizeTime} from '../supply/content-hash';
 import {conflict,invalid} from '../supply/supply-util';
-import {allocateFrozenReferralPair,referralPercent,validateDistributionPolicy,type DistributionPolicyConfig,type ReferralRatio} from './distribution-policy';
+import {allocateFrozenReferralPair,distributionPolicyRates,referralPercent,validateDistributionPolicy,type DistributionPolicyConfig,type ReferralRatio} from './distribution-policy';
 import type {RentalReferralRole} from './distribution-mechanism';
 
 export type PaymentReferralParticipant={userId:string;active:boolean|null;eligibility:'ELIGIBLE'|'INELIGIBLE'|'UNKNOWN';commissionFrozen:boolean|null;levelCode:string|null};
@@ -21,7 +21,7 @@ export function freezePaymentDistributionBasis(input:{orderId:string;gameId:stri
  let policy:DistributionPolicyConfig|null=null;if(input.policy){id(input.policy.versionId);digest(input.policy.digest);policy=validateDistributionPolicy(structuredClone(input.policy.config),input.policy.config.scope);if(sha(canonicalize(policy))!==input.policy.digest)throw conflict('Immutable policy digest changed');}
  if(input.estimate){if(!/^(0|[1-9]\d{0,23})$/.test(input.estimate.baseCents))throw invalid('Exact nonnegative source estimate required');digest(input.estimate.sourceDigest);}
  const roles:FrozenReferralRole[]=input.facts.map(f=>{
-  id(f.partyUserId);const r=f.relation,b=f.beneficiary,row:FrozenReferralRole={role:f.role,partyUserId:f.partyUserId,status:'UNKNOWN_POLICY',beneficiaryUserId:b?.userId??null,relationId:r.id,relationDigest:r.sourceDigest,levelCode:b?.levelCode??null,percent:null,ratio:null,estimatedCents:null};
+  id(f.partyUserId);const r=f.relation,b=f.beneficiary,row:FrozenReferralRole={role:f.role,partyUserId:f.partyUserId,status:'UNKNOWN_POLICY',beneficiaryUserId:b?.userId??null,relationId:r.id,relationDigest:r.sourceDigest,levelCode:policy?.schema==='distribution-policy.v2'?null:b?.levelCode??null,percent:null,ratio:null,estimatedCents:null};
   if(!policy)return row;
   if(!policy.enabled)return{...row,status:'SKIPPED_DISABLED'};
   if(input.accountMode===null)return{...row,status:'UNKNOWN_MODE'};
@@ -33,9 +33,9 @@ export function freezePaymentDistributionBasis(input:{orderId:string;gameId:stri
   id(r.id);id(r.parentUserId);digest(r.sourceDigest);
   if(!b||b.userId!==r.parentUserId||b.active===null||b.eligibility==='UNKNOWN'||b.commissionFrozen===null)return{...row,status:'UNKNOWN_PARTICIPANT'};
   id(b.userId);if(!b.active||b.eligibility==='INELIGIBLE'||b.commissionFrozen)return{...row,status:'SKIPPED_INELIGIBLE'};
-  const level=policy.levels.find(l=>l.code===b.levelCode);if(!level)return{...row,status:'UNKNOWN_LEVEL'};
-  const percent=referralPercent(f.role==='RENTER_REFERRAL'?level.renterPercent:level.ownerPercent);
-  return{...row,percent:percent.percent,ratio:percent.ratio,status:input.estimate?'ELIGIBLE':'UNKNOWN_ESTIMATE'};
+  const rates=distributionPolicyRates(policy,b.levelCode);if(!rates)return{...row,status:'UNKNOWN_LEVEL'};
+  const percent=referralPercent(f.role==='RENTER_REFERRAL'?rates.renterPercent:rates.ownerPercent);
+  return{...row,levelCode:rates.levelCode,percent:percent.percent,ratio:percent.ratio,status:input.estimate?'ELIGIBLE':'UNKNOWN_ESTIMATE'};
  });
  if(policy&&input.estimate){const renter=roles.find(r=>r.role==='RENTER_REFERRAL')!,owner=roles.find(r=>r.role==='OWNER_REFERRAL')!;
   // Unknown counterpart ratios do not authorize a partial pair or an implicit subsidy.

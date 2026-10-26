@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { ClipboardCheck, TriangleAlert } from "lucide-react";
 
 import { Icons } from "../components/icons";
+import { ListPagination } from "../components/admin-list";
+import { formatApprovalDate as formatDate } from "./approval/atoms";
 import { Button, StatusMessage } from "../components/ui-elements";
 import { Badge, InlineStatus } from "../components/ui/badge";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
@@ -13,7 +15,7 @@ import {
   Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogTitle,
 } from "../components/ui/dialog";
 import {
-  AdminApiError, adminRequest, formatDate, friendlyError, hasPermission,
+  AdminApiError, adminRequest, friendlyError, hasPermission,
   type SessionSnapshot,
 } from "../api";
 import {
@@ -115,13 +117,11 @@ function auditFilterKey(filter: AuditFilter): string {
   return JSON.stringify([filter.action, filter.objectType, filter.actorUsername.trim(), filter.requestId.trim()]);
 }
 
-function PagePager({ page, busy, onPrev, onNext, onFirst }: { page: ListPage; busy: boolean; onPrev: () => void; onNext: () => void; onFirst: () => void }) {
+function PagePager({ page, loadedCount, busy, onPrev, onNext, onFirst }: { page: ListPage; loadedCount: number; busy: boolean; onPrev: () => void; onNext: () => void; onFirst: () => void }) {
   return (
-    <div className="mt-3 flex items-center justify-end gap-2">
-      <span className="text-[11px] text-muted-foreground">第 {page.index + 1} 页</span>
-      <Button type="button" size="sm" variant="secondary" disabled={busy || page.index === 0} onClick={onPrev}>上一页</Button>
-      {page.index > 0 ? <Button type="button" size="sm" variant="secondary" disabled={busy} onClick={onFirst}>回到首页</Button> : null}
-      <Button type="button" size="sm" variant="secondary" disabled={busy || !page.nextCursor} onClick={onNext}>下一页</Button>
+    <div className="mt-3 space-y-2">
+      <div className="flex items-center justify-end gap-2 text-xs text-muted-foreground"><span>第 {page.index + 1} 页</span>{page.index > 0 ? <Button type="button" size="sm" variant="secondary" disabled={busy} onClick={onFirst}>回到首页</Button> : null}</div>
+      <ListPagination mode="cursor" pageSize={50} pageSizeOptions={[50]} loadedCount={loadedCount} itemLabel="条申请或记录" loading={busy} hasPrevious={page.index > 0} hasNext={Boolean(page.nextCursor)} onPrevious={onPrev} onNext={onNext} onPageSizeChange={() => undefined} />
     </div>
   );
 }
@@ -1046,7 +1046,7 @@ export function ApprovalAuditView({
                 onOpen={selectRequest}
               />
             </div>
-            <PagePager page={pageMeta[listKey]} busy={Boolean(reading[listKey])} onPrev={() => navigate(listKey, "prev")} onNext={() => navigate(listKey, "next")} onFirst={() => navigate(listKey, "first")} />
+            <PagePager loadedCount={listItems.length} page={pageMeta[listKey]} busy={Boolean(reading[listKey])} onPrev={() => navigate(listKey, "prev")} onNext={() => navigate(listKey, "next")} onFirst={() => navigate(listKey, "first")} />
           </section>
         ) : null}
 
@@ -1401,7 +1401,7 @@ export function ApprovalAuditView({
               </table>
             </div>
             {!reading.audit && !error && audit.length === 0 ? <p className="mt-4 text-xs text-muted-foreground">暂无符合条件的授权审批审计。</p> : null}
-            <PagePager page={pageMeta.audit} busy={Boolean(reading.audit)} onPrev={() => navigate("audit", "prev")} onNext={() => navigate("audit", "next")} onFirst={() => navigate("audit", "first")} />
+            <PagePager loadedCount={audit.length} page={pageMeta.audit} busy={Boolean(reading.audit)} onPrev={() => navigate("audit", "prev")} onNext={() => navigate("audit", "next")} onFirst={() => navigate("audit", "first")} />
           </section>
         ) : null}
 

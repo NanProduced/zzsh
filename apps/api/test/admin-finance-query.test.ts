@@ -225,3 +225,25 @@ test('exact payment refund and payout keys honor Beijing half-open dates without
   assert.equal(refs(false).length,12);assert.deepEqual(refs(true,'M-WIN'),[]);
  }finally{f.close();}
 });
+
+
+test('exact source clocks are UTC text before joining ledger and order lookup keys',()=>{
+ const filters=parseAdminFinanceFilters(new URLSearchParams('period=0&q=M-CLOCK'),new Date(),false);
+ const q=financeLookupPageSql('SELECT * FROM fixture_ledger','SELECT * FROM fixture_history',{payment_requests:true,refund_intents:true,joinpay_withdrawals:true},{filters,lookup:{exact:false},page:1,pageSize:20});
+ // Ledger/history/native-order clocks use to_char(text); raw timestamptz UNION fails in PostgreSQL.
+ for(const field of ['p.created_at','i.created_at','w.accepted_at'])assert.ok(q.text.includes("to_char("+field+" AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')"),field+' must share the existing UTC text clock');
+ assert.ok(q.values.includes('M-CLOCK'));
+});
+
+test('exact source key pagination preserves all three families and a null occurrence clock',()=>{
+ const fixture=new FinanceSqlFixture();
+ try{
+  fixture.db.exec("CREATE TABLE zzsh_order.payment_request(id TEXT,order_id TEXT,channel_order_no TEXT,platform_order_no TEXT,created_at TEXT)");
+  fixture.db.exec("CREATE TABLE zzsh_order.channel_refund_intent(id TEXT,refund_order_no TEXT,provider_refund_trx_no TEXT,original_payment_order_no TEXT,created_at TEXT)");
+  fixture.db.exec("CREATE TABLE zzsh_order.joinpay_withdrawal_intent(id TEXT,merchant_order_no TEXT,platform_serial_no TEXT,accepted_at TEXT)");
+  fixture.db.exec("INSERT INTO zzsh_order.payment_request VALUES('pc','o','M-CLOCK','P','2026-10-26T10:00:00Z'); INSERT INTO zzsh_order.channel_refund_intent VALUES('rc','R',NULL,'M-CLOCK','2026-10-26T09:00:00Z'); INSERT INTO zzsh_order.joinpay_withdrawal_intent VALUES('wc','M-CLOCK',NULL,NULL)");
+  const filters=parseAdminFinanceFilters(new URLSearchParams('period=0&q=M-CLOCK'),new Date(),false),page=(n:number)=>financeLookupPageSql('SELECT * FROM fixture_ledger','SELECT * FROM fixture_history',{payment_requests:true,refund_intents:true,joinpay_withdrawals:true},{filters,lookup:{exact:false},page:n,pageSize:2});
+  const one=page(1),two=page(2),first=fixture.query(one.text,one.values).rows,next=fixture.query(two.text,two.values).rows;
+  assert.deepEqual(first.map(r=>r.ref),['PAYMENT_REQUEST:pc','REFUND_INTENT:rc']);assert.deepEqual(next.map(r=>r.ref),['JOINPAY_WITHDRAWAL:wc']);assert.equal(Number(first[0]!.document_count),3);assert.equal(Number(next[0]!.entry_count),0);
+ }finally{fixture.close();}
+});

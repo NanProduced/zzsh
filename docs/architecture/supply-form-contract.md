@@ -123,3 +123,9 @@ Web需精确白名单接该叶路径；沿原身份/输入代际、AbortControll
 `info_source` 继续是可选私有归因文本，仅号主/受权运营读取，不在公开账号attributes返回，不建邀请或奖励。publishing-options提供declarationOptions，标明新布尔必填、归因可选；本版已接纳info_source的4项name/value快照（抖音、朋友介绍、马叉虫、苏醒），publishing-options返回optionsState=CONFIGURED及sourceSnapshot观察时间/摘要，源服务无revision则为null。旧归因字符串仍可回显/保存，不将未知旧文本自动改成空或新选项。
 
 新authoring链的custom仅允许服务端选中term_option.daily_consumption为10000000，代码名不作为判断。共同校验覆盖未保存号主预览、正式核价、规则接受、发布、审核批准及Admin报价预览；旧草稿可读，新核价不兼容则拒绝，旧冻结报价/订单不重算。publishing-options.rentalTermOptions按当前规则列出可选code，无合法10M项则关闭custom投影；ordinary/fast仍沿原映射/开关。termOptions.ownerRatioAdjustmentWanPerYuan为当前日耗映射的精确有符号号主基础比例调整或null，不含平台P/V，不用旧正文或归档值填默认。
+
+### Delta旧皮肤分类退役
+
+Delta新目录与申报以皮肤自身类型、品质/典藏、身份与可用状态为准；旧分类不再作为新建、表单或可见性的前置。原分类ID与历史快照保持只读兼容，不通过批量清空或改写旧contentHash退役。新生成投影以categoryModel=RETIRED区分旧快照，缺值不补旧类。
+
+新建无分类词条需要可空列和配套精确约束已安装；结构未就绪时返回EVIDENCE_UNAVAILABLE且不创建词条，既有词条编辑仍复用同ID/CAS/原因/审计。用户筛选采用显式skinGrouping=TYPE；旧LEGACY配置维持兼容。用户TYPE消费者未接纳前，不发布只有ownerKinds的新筛选配置，不伪造历史类别映射。

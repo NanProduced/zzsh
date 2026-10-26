@@ -407,6 +407,8 @@ test("approval, execution and domain results stay in three separate blocks", asy
     assert.ok(text(view).includes("执行状态"), "执行状态独立成列");
     assert.ok(text(view).includes("业务进度"), "业务进度独立成列");
     assert.ok(text(view).includes("执行失败"), "执行失败按事实显示");
+    const people=[...view.rootNode.querySelectorAll("section")].find(node=>node.querySelector("h4")?.textContent.trim()==="执行经手记录");
+    assert.ok(people && people.textContent.includes("陈琳"), "the actual executor remains directly visible when the diagram is closed");
     assert.ok(text(view).includes("目标窗口与既有权益冲突"), "受权失败原因可见");
     assert.ok(text(view).includes("已执行，未到生效时间"), "未来生效权益不得写成已启用");
     assert.equal(text(view).includes("已生效"), false, "不得把 EXECUTED_PENDING_START 说成已生效");
@@ -1376,6 +1378,7 @@ test("general eligibility is never presented as per-request eligibility", async 
   });
   const view = await renderDetail(blocked);
   try {
+    await click(buttonByText("展开审批流程", view.rootNode));
     await waitFor(() => text(view).includes("候选 1 人，无人可处理"));
     assert.equal(reviewFact(view, "本单可处理"), "0 人", "流程记录使用本单资格，不反推通用候选人数");
     assert.equal(text(view).includes("1 人当前合格"), false, "不得由通用名单反推本单合格人数");
@@ -1394,6 +1397,7 @@ test("general eligibility is never presented as per-request eligibility", async 
   });
   const second = await renderDetail(self);
   try {
+    await click(buttonByText("展开审批流程", second.rootNode));
     await waitFor(() => text(second).includes("候选 2 人，其中 1 人当前合格"));
     assert.equal(reviewFact(second, "本单可处理"), "1 人", "流程记录与服务端本单汇总一致");
     assert.ok(text(second).includes("不能审批自己发起的申请"), "自审批禁令就地说明");
@@ -1407,6 +1411,7 @@ test("general eligibility is never presented as per-request eligibility", async 
   delete missing.candidateAvailability;
   const third = await renderDetail(missing);
   try {
+    await click(buttonByText("展开审批流程", third.rootNode));
     await waitFor(() => reviewFact(third, "本单可处理") === "未提供");
     assert.equal(reviewFact(third, "本单可处理"), "未提供", "缺少本单汇总不能按候选快照补人数");
     assert.equal(text(third).includes("当前合格"), false, "汇总缺失时不给出合格人数");
@@ -1556,11 +1561,14 @@ test("usability first package: self-blocker is visible before the flow and techn
     assert.ok(current, "the original server blocker and action entry must be visible first");
     assert.match(current.textContent, /不能审批自己发起的申请/);
     const flow = view.rootNode.querySelector('[aria-label="审批流程"]');
-    const details = view.rootNode.querySelector("[data-approval-business-details]");
-    assert.ok(flow && details);
+    const details = view.rootNode.querySelector("[data-approval-snapshot-technical]");
+    const review = view.rootNode.querySelector("[data-approval-business-details]");
+    assert.ok(flow && details && review);
     assert.equal(details.open, false, "snapshot hashes are available on demand");
+    assert.ok(details.textContent.includes(detail.operation.payloadHash), "the original snapshot hash is still inspectable");
+    assert.equal(review.open, true, "the business review is now directly visible");
+    assert.ok(review.compareDocumentPosition(current) & Node.DOCUMENT_POSITION_FOLLOWING);
     assert.ok(current.compareDocumentPosition(flow) & Node.DOCUMENT_POSITION_FOLLOWING);
-    assert.ok(flow.compareDocumentPosition(details) & Node.DOCUMENT_POSITION_FOLLOWING);
     assert.equal(buttonByText("批准", current).disabled, true);
     assert.equal(writes.length, 0);
   } finally { await view.cleanup(); }
@@ -1660,4 +1668,104 @@ test("usability r1: primary refusal reasons stay visible beside an allowed navig
       assert.equal(writes.length, 0, "navigation and presentation do not issue a POST");
     } finally { await view.cleanup(); }
   }
+});
+
+
+test("OPS02: frozen business content is visible before the current action area", async () => {
+  const view = await renderDetail(baseDetail({ business: membershipBusiness() }));
+  try {
+    const details = view.rootNode.querySelector('[data-approval-business-details]');
+    const actions = view.rootNode.querySelector('[aria-label="当前办理"]');
+    assert.ok(details && actions);
+    assert.equal(details.open, true, 'the frozen payload must not require discovery after action buttons');
+    assert.ok(details.compareDocumentPosition(actions) & browser.Node.DOCUMENT_POSITION_FOLLOWING, 'review content comes before the action area');
+    await click(buttonByText('查看当前办理', view.rootNode));
+    assert.equal(document.activeElement, actions, 'the first-screen entry focuses the real current action area');
+    assert.equal(writes.length, 0);
+  } finally { await view.cleanup(); }
+});
+
+test("OPS02: workflow canvas is on demand while actual decision person and time stay readable", async () => {
+  const oldTz=process.env.TZ; process.env.TZ='UTC';
+  const view = await renderDetail(baseDetail({ status: 'APPROVED', business: membershipBusiness(), decision: { decision: 'APPROVED', approver: { username: 'zz00004', displayUsername: 'ZZ00004', name: '林青' }, reason: '核对完成', createdAt: '2026-10-12T10:00:00.000Z' } }));
+  try {
+    const toggle = buttonByText('展开审批流程', view.rootNode);
+    assert.ok(toggle, 'the workflow remains a discoverable supplementary view');
+    assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+    assert.equal(view.rootNode.querySelector('[data-approval-workflow-canvas]'), null);
+    assert.match(text(view), /林青/);
+    assert.match(text(view), /2026年10月12日 18:00/);
+    await click(toggle);
+    assert.equal(buttonByText('收起审批流程', view.rootNode)?.getAttribute('aria-expanded'), 'true');
+    assert.ok(view.rootNode.querySelector('[data-approval-workflow-canvas]'));
+    assert.equal(writes.length, 0);
+  } finally { await view.cleanup(); if(oldTz===undefined)delete process.env.TZ;else process.env.TZ=oldTz; }
+});
+
+test("OPS02: list names allowed actions and keeps missing eligibility distinct from a known denial", async () => {
+  const a = baseDetail({ requestId:'ops-allowed',business:membershipBusiness() });
+  const b = baseDetail({ requestId:'ops-unknown',business:membershipBusiness(),actions:undefined });
+  const c = baseDetail({ requestId:'ops-denied',business:membershipBusiness(),actions:[] });
+  const view = await renderList({requests:[a,b,c]});
+  try {
+    const rows=[...view.rootNode.querySelectorAll('tbody tr')];
+    assert.equal(rows.length,3);
+    assert.match(rows[0].textContent,/可办理：批准、驳回/);
+    assert.match(rows[1].textContent,/办理资格待读取/);
+    assert.match(rows[2].textContent,/暂无已确认的可办动作/);
+    assert.equal(writes.length,0);
+  } finally { await view.cleanup(); }
+});
+
+test("OPS02: existing cursor navigation uses shared pagination without inventing a total", async () => {
+  const view=await renderList();
+  try {
+    const pager=view.rootNode.querySelector('[data-slot="admin-list-pagination"]');
+    assert.ok(pager);
+    assert.match(pager.textContent,/总数待更新/);
+    assert.equal(pager.querySelector('[aria-label="下一页"]')?.disabled,true);
+    assert.equal(writes.length,0);
+  } finally { await view.cleanup(); }
+});
+
+test("OPS02: policy date remains a proposed date and rule identifiers are secondary", async()=>{
+  const business=membershipBusiness({operationCode:'membership.benefit.policy.publish',businessTitle:'发布会员权益政策',summary:{policyDraft:{id:'draft-ops-02',version:3,hash:'a'.repeat(64),effectiveAtUtc:'2026-10-31T04:07:00.000Z',ruleReleaseId:'release-ops',priceVersionId:'price-ops'},reason:'优化统一权益'}});
+  const view=await renderDetail(baseDetail({operation:{code:'membership.benefit.policy.publish',payloadVersion:1,payloadHash:'b'.repeat(64)},business}));
+  try {
+    assert.match(text(view),/拟定生效时间/);
+    assert.match(text(view),/批准不代表已生效/);
+    const technical=[...view.rootNode.querySelectorAll('details')].find(x=>x.querySelector('summary')?.textContent==='政策版本与计价依据');
+    assert.ok(technical);
+    assert.equal(technical.open,false);
+    assert.match(technical.textContent,/release-ops/);
+    assert.equal(writes.length,0);
+  } finally { await view.cleanup(); }
+});
+
+
+test("OPS02: unsupported operation summaries never become member or entitlement field walls", async()=>{
+  for(const [code,type] of [['distribution.policy.publish','distribution'],['approval.future.operation','unknown']]){
+    const business={requestId:'approval_req_fixt_1',businessType:type,businessTitle:'其他业务调整',operationCode:code,executionMode:'GENERIC_TRANSACTION',summaryAvailable:true,detailsAvailable:true,changeSummary:'已取得的申请说明',summary:{reason:'调整现有配置',enabled:true,renterPercent:'0.05',ownerPercent:'0.05'},resultAvailability:'NOT_APPLICABLE'};
+    const view=await renderDetail(baseDetail({operation:{code,triggerCondition:'MANUAL',payloadVersion:1,payloadHash:'f'.repeat(64)},business,actions:[]}));
+    try{
+      assert.match(text(view),/已取得的申请说明/);
+      if(code==='distribution.policy.publish') assert.match(text(view),/分销变更快照未提供/);
+      else assert.match(text(view),/专用业务摘要尚未接入/);
+      for(const field of ['礼遇类型','目标用户','押金权益','生效开始（快照）'])assert.equal(text(view).includes(field),false,code+': '+field);
+      assert.equal(writes.length,0);
+    }finally{await view.cleanup();}
+  }
+});
+
+
+test('distribution approval consumes the frozen top-level change, preserving false and zero',async()=>{
+ const business={requestId:'approval_req_fixt_1',businessType:'distribution',businessTitle:'调整分销政策',operationCode:'distribution.policy.publish',executionMode:'GENERIC_TRANSACTION',summaryAvailable:true,detailsAvailable:true,policyChange:{schema:'distribution-policy-change.v1',expectedPolicyId:'original-policy',expectedRevision:'7',expectedPolicyDigest:'a'.repeat(64),changes:{enabled:false,renterPercent:'0',ownerPercent:'2.5'},reason:'保留原关系调整新计佣'},result:{knowledge:'KNOWN',policyVersionId:'executed-policy'}};
+ const view=await renderDetail(baseDetail({operation:{code:'distribution.policy.publish',payloadVersion:1,payloadHash:'b'.repeat(64)},business,actions:[]}));
+ try{assert.match(text(view),/分销政策变更快照/);assert.match(text(view),/暂停/);assert.match(text(view),/0%/);assert.match(text(view),/2\.5%/);assert.match(text(view),/executed-policy/);assert.match(text(view),/当前全局政策是否仍使用该版本需另行核对/);assert.equal(text(view).includes('礼遇类型'),false);assert.equal(writes.length,0);}finally{await view.cleanup();}
+});
+
+test('distribution approval does not reveal frozen change fields when the projection is forbidden',async()=>{
+ const business={requestId:'approval_req_fixt_1',businessType:'distribution',operationCode:'distribution.policy.publish',executionMode:'GENERIC_TRANSACTION',summaryAvailable:false,detailsAvailable:false,restrictedReasonCodes:['FORBIDDEN'],policyChange:{schema:'distribution-policy-change.v1',expectedPolicyId:'hidden-original',changes:{enabled:false,renterPercent:'0'},reason:'hidden-policy-reason'}};
+ const view=await renderDetail(baseDetail({operation:{code:'distribution.policy.publish',payloadVersion:1,payloadHash:'c'.repeat(64)},business,actions:[]}));
+ try{assert.equal(text(view).includes('hidden-policy-reason'),false);assert.equal(text(view).includes('hidden-original'),false);assert.equal(text(view).includes('分销政策变更快照'),false);assert.match(text(view),/无权查看本次申请的业务摘要/);assert.equal(writes.length,0);}finally{await view.cleanup();}
 });

@@ -17,7 +17,7 @@ export async function handleListingFilters(request:SupplyNodeRequest,response:Su
   const match=/^\/games\/([^/]+)\/listing-filters(?:\/(restore))?$/.exec(path);
   if(!match)return false;
   const gameId=checkedId(match[1],"gameId"),method=request.method??"GET";
-  if(!admin){if(method!=="GET"||match[2])throw notFound();const result=await withPublicListingSnapshot(options.pool,async client=>publicFilterMetadata(await readListingState(client,gameId),Boolean(options.listingCursorKey)));sendJson(response,200,result,requestId);return true;}
+  if(!admin){if(method!=="GET"||match[2])throw notFound();const grouping=query.get("skinGrouping")??"LEGACY";if(query.getAll("skinGrouping").length>1||!["LEGACY","TYPE"].includes(grouping))throw invalid("Invalid skin grouping","skinGrouping");const result=await withPublicListingSnapshot(options.pool,async client=>publicFilterMetadata(await readListingState(client,gameId),Boolean(options.listingCursorKey),grouping as "LEGACY"|"TYPE"));sendJson(response,200,result,requestId);return true;}
   const context=await readAdminContext(request,options);
   const authorize=async(client:Parameters<typeof readListingState>[0])=>{await assertAdminContextInTransaction(client,context);const access=await loadEffectiveAdminAccess(client,context.userId);if(!access)throw notFound();requirePermission(access,ADMIN_PERMISSION.supplyListingFiltersManage);await assertGameScope(client,context.userId,access.isBoss,gameId);};
   if(method==="GET"&&!match[2]) {
@@ -41,7 +41,7 @@ export async function handleListingFilters(request:SupplyNodeRequest,response:Su
       // a configured game without a current release keeps offering its filters on an empty list.
       // Mixed games (release plus legacy snapshots) may keep configured historical
       // display codes next to the current rule codes; native-only games may not.
-      validateConfigCatalog(config,catalog,!catalog.game.ruleReleaseId||await hasLegacyReadSnapshots(client,gameId));
+      validateConfigCatalog(config,catalog,!catalog.game.ruleReleaseId||await hasLegacyReadSnapshots(client,gameId),"WRITE");
       const next=(BigInt(expected)+1n).toString();
       await client.query(`INSERT INTO zzsh_supply.listing_filter_config(game_id,revision,config,restore_from_revision,created_by_admin_id) VALUES($1,$2,$3,$4,$5)`,[gameId,next,config,restore,context.userId]);
       await recordAudit(client,{actorType:"admin",actorId:context.userId,sessionId:context.sessionId,requestId,action:operation,objectType:"listing_filter_config",objectId:gameId,outcome:"SUCCESS",reason,details:{before:previous??null,after:{revision:next,config,restoreFromRevision:restore},result:"SAVED"}});

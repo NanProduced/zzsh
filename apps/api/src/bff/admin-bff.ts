@@ -17,6 +17,7 @@ import { handleContentAdminRoute } from "../content/content-routes";
 import { handleOrderAdminRoute, type OrderRuntimeOptions } from "../order/order-routes";
 import { handleRentalMembershipAdmin } from "../auth/rental-membership-routes";
 import { handleMembershipGrowthAdmin, handleMembershipGrowthPolicyAdmin } from "../auth/membership-growth-routes";
+import { handleAdminDistributionRead } from "../finance/admin-distribution-routes";
 import { handleDistributionPolicyAdmin } from "../finance/distribution-policy-routes";
 import type { LocalDistributionScope } from "../finance/distribution-policy-store";
 import { handleUserDirectoryAdmin } from "../auth/user-directory-routes";
@@ -449,6 +450,14 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
       if (error instanceof SecurityApiError) sendError(response, error.status, error.code, error.message, requestId);
       else sendError(response, 500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);
     }
+    return;
+  }
+  if (new RegExp("^/distribution/(orders/(NATIVE|LEGACY)|relations)/[A-Za-z0-9._:-]+$").test(path)) {
+    if (method !== "GET") { sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId); return; }
+    const targetPath = "/api/v1/admin" + path + requestQuery(request);
+    request.url = targetPath; request.originalUrl = targetPath;
+    request.headers = { ...request.headers, "x-request-id": requestId };
+    await handleAdminDistributionRead(request as Parameters<typeof handleAdminDistributionRead>[0], response as Parameters<typeof handleAdminDistributionRead>[1], options.adminSecurityOptions);
     return;
   }
   if (path === "/distribution/policy") {

@@ -15,7 +15,7 @@ import { SupplyWriteLockError, withSupplyWriteLock } from "@/lib/supply-write-lo
 
 import { adminRequest, AdminApiError, friendlyError, hasPermission, type AdminCatalogResponse, type CatalogSkin, type CatalogSkinOwner, type CatalogMediaOption, type MediaOptionsResponse, type SessionSnapshot, type SupplyGame } from "../api";
 import { StatusMessage } from "../components/ui-elements";
-import { skinContractReady, skinValues, skinPayload, ownerPayload, catalogReceipt, ownerKinds, rarityOptions, defaultStates } from "./catalog-skin-fields";
+import { skinContractReady, skinValues, skinDisplayNameChanged, skinPayload, ownerPayload, catalogReceipt, ownerKinds, rarityOptions, defaultStates } from "./catalog-skin-fields";
 import { SkinMetadataFields } from "./supply-catalog/skin-metadata-fields";
 import { unitText } from "./supply-review/model";
 import { CatalogObjectTable, CellSelect } from "./supply-catalog/catalog-table";
@@ -23,6 +23,7 @@ import { CatalogObjectNav } from "./supply-catalog/object-nav";
 import {
   applyIdentityFilter,
   categoryPath,
+  catalogKindsForGame,
   catalogFirearmOwners,
   catalogFingerprint,
   catalogOperation,
@@ -152,7 +153,6 @@ function validateEditor(kind: CatalogKind, values: Record<string, string>, editi
   if (!editing && !CODE_PATTERN.test(values.code ?? "")) return "稳定 code 需以小写字母开头，仅含小写字母、数字、下划线、冒号或连字符。";
   if (!values.name || values.name.trim().length === 0) return "名称不能为空。";
   if (kind === "items" && !["HAFF_BASE", "ROUND", "PIECE", "DAY"].includes(values.unit ?? "")) return "单位无效。";
-  if (kind === "skins" && !values.categoryId) return "皮肤必须选择所属分类。";
   return undefined;
 }
 
@@ -173,6 +173,7 @@ export function SupplyCatalogView({
   const [loadedCatalog, setCatalog] = useState<AdminCatalogResponse | null>(null);
   const [tab, setTab] = useState<CatalogKind>("items");
   const [query, setQuery] = useState("");
+  useEffect(() => { if (loadedCatalog?.game.code === "delta" && tab === "categories") setTab("skins"); }, [loadedCatalog?.game.code, tab]);
   const [identityFilter, setIdentityFilter] = useState<IdentityFilter>("all");
   const [mediaFilter, setMediaFilter] = useState<"all" | "with-media" | "without-media">("all");
   const [typeFilter, setTypeFilter] = useState("all");
@@ -214,11 +215,12 @@ export function SupplyCatalogView({
 
   const [pendingSwitch, setPendingSwitch] = useState<null | { type: "tab" | "game"; value: string }>(null);
   const [detailOpen, setDetailOpen] = useState(false);
+  const [detailSurfaceKind, setDetailSurfaceKind] = useState<CatalogKind | null>(null);
   const catalogRoot = useRef<HTMLDivElement>(null);
   const detailOrigin = useRef<{ scope: string; kind: CatalogKind; id?: string; action: "detail-mobile" | "detail" | "edit" } | null>(null);
   const showDetail = (kind: CatalogKind, id?: string, sourceAction?: "detail-mobile") => {
     const action = sourceAction ?? document.activeElement?.getAttribute("data-catalog-action");
-    detailOrigin.current = { scope, kind, id, action: action === "detail-mobile" || action === "edit" ? action : "detail" }; setDetailOpen(true);
+    detailOrigin.current = { scope, kind, id, action: action === "detail-mobile" || action === "edit" ? action : "detail" }; setDetailSurfaceKind(kind); setDetailOpen(true);
   };
   const detailFocusTarget = () => {
     const origin = detailOrigin.current, root = catalogRoot.current;
@@ -518,7 +520,8 @@ export function SupplyCatalogView({
   const openCreate = (kind: CatalogKind) => {
     if (storageBlocked || editor) return;
     if ((kind === "skins" || kind === "skin-owners") && !contractReady) { setError("当前环境尚未提供完整皮肤身份合同，维护暂不可用。"); return; }
-    if (kind === "skins" && !catalog?.categories.length) { setError("请先维护至少一个皮肤分类，再创建皮肤。"); return; }
+    if (kind === "skins" && catalog?.game.code !== "delta" && !catalog?.categories.length) { setError("请先维护至少一个皮肤分类，再创建皮肤。"); return; }
+    if (kind === "skins" && catalog?.game.code === "delta" && !catalog.skinCategoryModel?.categorylessWriteReady) { setError("无分类词条创建尚未就绪，请先由维护者更新目录结构。"); return; }
     const created = editorValuesFor(kind);
     changeEditor({ kind, values: created, revision: catalog?.game.catalogRevision, baseline: JSON.stringify(created) });
   };
@@ -779,11 +782,23 @@ export function SupplyCatalogView({
     : storageBlocked ? "目录恢复记录未就绪，暂不能提交新修改。"
     : (tab === "skins" || tab === "skin-owners") && !contractReady
       ? "当前环境尚未提供完整皮肤身份合同，维护暂不可用；请协调后端环境，不将缺失字段视为空目录。"
-      : tab === "skins" && !(catalog?.categories.length)
+      : tab === "skins" && catalog?.game.code === "delta" && !catalog.skinCategoryModel?.categorylessWriteReady
+        ? "无分类词条创建尚未就绪，请先由维护者更新目录结构。"
+      : tab === "skins" && catalog?.game.code !== "delta" && !(catalog?.categories.length)
         ? "请先维护至少一个皮肤分类，再创建皮肤。"
         : undefined;
 
+  const visibleCatalogKinds = catalogKindsForGame(catalog?.game.code);
   const editorKindLabel = editor ? OBJECT_LABEL[editor.kind] : "";
+  const skinEditing = editor?.kind === "skins";
+  const displayNameChanged = skinEditing && !editor.confirm && skinDisplayNameChanged(editor.values, editor.original as CatalogSkin | undefined);
+  const skinSurface = detailSurfaceKind === "skins";
+  const EditorSurface = skinSurface ? Dialog : Sheet;
+  const EditorContent = skinSurface ? DialogContent : SheetContent;
+  const EditorHeader = skinSurface ? DialogHeader : SheetHeader;
+  const EditorTitle = skinSurface ? DialogTitle : SheetTitle;
+  const EditorDescription = skinSurface ? DialogDescription : SheetDescription;
+  const EditorFooter = skinSurface ? DialogFooter : SheetFooter;
   const toggleLabel = toggleDraft ? toggleDraft.field === "enabled" ? toggleDraft.row.enabled ? "停用" : "启用" : toggleDraft.row.formVisible ? "隐藏" : "展示" : "修改";
 
 
@@ -858,9 +873,9 @@ export function SupplyCatalogView({
 
       {catalog ? (
         <Tabs value={tab} orientation="horizontal" onValueChange={(value) => requestSwitch("tab", String(value))} className="w-full space-y-4">
-          <CatalogObjectNav kind={tab} counts={counts} pending={pending} loaded={Boolean(catalog)} />
+          <CatalogObjectNav kind={tab} counts={counts} pending={pending} loaded={Boolean(catalog)} kinds={visibleCatalogKinds} />
           <div className="space-y-4 min-w-0">
-            {OBJECT_ORDER.map((kind) => (
+            {visibleCatalogKinds.map((kind) => (
               <TabsContent key={kind} value={kind} className="space-y-3.5">
                 <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/40 pb-2">
                   <div>
@@ -916,7 +931,7 @@ export function SupplyCatalogView({
                 </div>
                 {query.trim() ? <p className="text-[11px] text-muted-foreground">搜索仅覆盖当前已加载目录；空结果不代表全库不存在。</p> : null}
                 <CatalogObjectTable
-                  editingId={editor && editor.id && editor.kind === kind ? editor.id : undefined}
+                  editingId={kind !== "skins" && editor && editor.id && editor.kind === kind ? editor.id : undefined}
                   editingIsNew={Boolean(editor && !editor.id && editor.kind === kind)}
                   editValues={editor && editor.kind === kind ? editor.values : undefined}
                   onEditValue={(key, value) => setEditor(current => (current ? { ...current, values: { ...current.values, [key]: value } } : current))}
@@ -928,18 +943,19 @@ export function SupplyCatalogView({
                   onDetail={(row, sourceAction) => { openEdit(kind, row); showDetail(kind, row.id, sourceAction); }}
                   editOptions={editOptions}
                   kind={kind}
+                  retiredCategories={catalog.game.code === "delta"}
                   rows={visibleRows}
                   query={query}
                   filterActive={kind === "skins" && (identityFilter !== "all" || mediaFilter !== "all" || typeFilter !== "all" || rarityFilter !== "all" || selectableFilter !== "all")}
                   busy={writePhase !== "idle" || storageBlocked}
                   contractReady={kind === "skins" || kind === "skin-owners" ? contractReady : true}
-                  onEdit={(row) => openEdit(kind, row)}
+                  onEdit={(row) => { openEdit(kind, row); if (kind === "skins") showDetail(kind, row.id); }}
                   onConfirm={kind === "skins" ? (row) => { openEdit(kind, row, true); showDetail(kind, row.id); } : undefined}
                   onToggle={(row, field) => requestToggle(kind, row, field)}
                   toggleReason={kind === "skins" ? toggleReason : undefined}
                   onCreate={() => openCreate(kind)}
                   createReason={createReason}
-                  prerequisiteAction={kind === "skins" && contractReady && !catalog.categories.length ? { label: "去维护皮肤分类", onClick: () => requestSwitch("tab", "categories") } : undefined}
+                  prerequisiteAction={kind === "skins" && catalog.game.code !== "delta" && contractReady && !catalog.categories.length ? { label: "去维护皮肤分类", onClick: () => requestSwitch("tab", "categories") } : undefined}
                   onClearQuery={() => { setQuery(""); setIdentityFilter("all"); setMediaFilter("all"); setTypeFilter("all"); setRarityFilter("all"); setSelectableFilter("all"); }}
                   renderCell={(row, key) => renderCell(kind, row, key)}
                 />
@@ -950,18 +966,35 @@ export function SupplyCatalogView({
         </Tabs>
       ) : null}
 
-    <Sheet open={detailOpen && Boolean(editor)} onOpenChange={(open) => { if (!open) requestClose(); }}>
-      <SheetContent className="w-full! sm:max-w-[560px]! gap-0" showCloseButton={false} finalFocus={detailFocusTarget}>
-        <SheetHeader className="shrink-0 border-b border-border pr-14">
-          <SheetTitle>{editor?.confirm ? `确认${editorKindLabel}身份` : editor?.kind === "items" ? "计费物品图片" : editor?.kind === "skins" ? "皮肤别名、品质与图片" : editor?.kind === "skin-owners" ? "所属对象身份与证据" : `${editorKindLabel}维护说明`}</SheetTitle>
-          <SheetDescription>{editor?.kind === "skins" ? "核实身份、启用和表单展示分别处理；本次修改与行内输入一并保存。" : editor?.kind === "items" ? "选择已审核且可公开的物品图片；保存后才更新绑定。" : editor?.kind === "skin-owners" ? "按证据核实稳定归属，既有身份不能通过改名替换。" : "名称、状态和排序在表格内维护；稳定编号保持不变。"}</SheetDescription>
+    <EditorSurface open={detailOpen && Boolean(editor)} onOpenChange={(open) => { if (!open) requestClose(); }}>
+      <EditorContent className={skinSurface ? "flex max-h-[90dvh] flex-col gap-0 p-0 sm:max-w-3xl" : "w-full! sm:max-w-[560px]! gap-0"} showCloseButton={false} finalFocus={detailFocusTarget}>
+        <EditorHeader className={skinSurface ? "shrink-0 border-b border-border p-4 pr-14" : "shrink-0 border-b border-border pr-14"}>
+          <EditorTitle>{editor?.confirm ? `确认${editorKindLabel}身份` : editor?.kind === "items" ? "计费物品图片" : editor?.kind === "skins" ? "编辑皮肤词条" : editor?.kind === "skin-owners" ? "所属对象身份与证据" : `${editorKindLabel}维护说明`}</EditorTitle>
+          <EditorDescription>{editor?.kind === "skins" ? "修改展示资料；稳定编号与所属身份保持不变，保存后更新目录。" : editor?.kind === "items" ? "选择已审核且可公开的物品图片；保存后才更新绑定。" : editor?.kind === "skin-owners" ? "按证据核实稳定归属，既有身份不能通过改名替换。" : "名称、状态和排序在表格内维护；稳定编号保持不变。"}</EditorDescription>
           <Button type="button" variant="ghost" size="icon" aria-label="关闭详细信息" className="absolute right-3 top-3" onClick={requestClose}><XIcon /></Button>
           {editor?.values.name ? <p className="pt-2 text-sm font-medium break-words">{editor.values.name}</p> : null}
-        </SheetHeader>
+        </EditorHeader>
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
         <StatusMessage themeAware error={error} success={success} />
         {editor ? (
           <fieldset disabled={["saving", "unknown", "readback"].includes(writePhase)} className="min-w-0 space-y-4">
+            {editor.kind === "skins" && !editor.confirm ? (
+              <section className="space-y-3" aria-label="皮肤展示资料">
+                <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-border pb-2">
+                  <h3 className="text-sm font-semibold">展示资料</h3>
+                  <span className="text-xs text-muted-foreground">稳定编号：{editor.values.code}</span>
+                </div>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  {(editor.original as CatalogSkin | undefined)?.namingState === "VERIFIED" ? <Field label="皮肤本名" hint="填写外观名称，所属对象前缀保持不变；改名需补充证据。"><Input aria-label="皮肤本名" disabled={writePhase !== "idle"} value={editor.values.baseName ?? ""} onChange={event => setEditor({ ...editor, values: { ...editor.values, baseName: event.target.value } })} /></Field> : <Field label="展示名称"><Input aria-label="名称" disabled={writePhase !== "idle"} value={editor.values.name ?? ""} onChange={event => setEditor({ ...editor, values: { ...editor.values, name: event.target.value } })} /></Field>}
+                  <Field label="排序" hint="数值越小越靠前。"><Input aria-label="排序" disabled={writePhase !== "idle"} inputMode="numeric" value={editor.values.sortOrder ?? "0"} onChange={event => setEditor({ ...editor, values: { ...editor.values, sortOrder: event.target.value } })} /></Field>
+                  <Field label="表单展示"><CellSelect label="表单展示" disabled={writePhase !== "idle"} value={editor.values.formVisible ?? "false"} items={editOptions.boolItems} onValueChange={value => setEditor({ ...editor, values: { ...editor.values, formVisible: value } })} /></Field>
+                  <Field label="词条状态"><CellSelect label="词条状态" disabled={writePhase !== "idle"} value={editor.values.enabled ?? "false"} items={editOptions.boolItems.map(item => ({...item,label:item.value === "true" ? "启用" : "停用"}))} onValueChange={value => setEditor({ ...editor, values: { ...editor.values, enabled: value } })} /></Field>
+                </div>
+                {(editor.original as CatalogSkin | undefined)?.namingState === "VERIFIED" ? <p className="text-xs text-muted-foreground">当前展示：{(editor.original as CatalogSkin).name} · 所属：{ownerText((editor.original as CatalogSkin).ownerRef ?? null, catalog?.owners ?? [], firearms)}。本次不修改所属关系。</p> : null}
+                {displayNameChanged ? <div className="rounded-md bg-muted p-3 text-xs"><strong>同一词条名称修正</strong><p className="mt-1">本名：{(editor.original as CatalogSkin).baseName} → {editor.values.baseName || "未填写"}。保存时核实原身份，旧展示名称保留为别名。</p></div> : null}
+              </section>
+            ) : null}
+
             {editor.confirm || (editor.kind === "skin-owners" && !editor.id) ? (
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <Field label={editor.kind === "skins" ? "皮肤类型" : "所属对象类型"}>
@@ -1013,7 +1046,7 @@ export function SupplyCatalogView({
             {editor.kind === "skins" || editor.kind === "skin-owners" ? (
               <Field label="操作原因"><Input value={editor.values.reason ?? ""} onChange={(event) => setEditor({ ...editor, values: { ...editor.values, reason: event.target.value } })} className="h-9 text-xs" /></Field>
             ) : null}
-            {editor.confirm || (editor.kind === "skins" && editor.id && editor.values.changeSource === "true") || (editor.kind === "skin-owners" && !editor.id) ? (
+            {editor.confirm || displayNameChanged || (editor.kind === "skins" && editor.id && editor.values.changeSource === "true") || (editor.kind === "skin-owners" && !editor.id) ? (
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div className="sm:col-span-2"><Field label="证据链接（每行一条，最多8条）"><Textarea value={editor.values.evidenceUrls ?? ""} onChange={(event) => setEditor({ ...editor, values: { ...editor.values, evidenceUrls: event.target.value } })} className="min-h-20 text-xs" /></Field></div>
                 <div className="sm:col-span-2"><Field label="证据核对日期" hint="已自动填充今日日期"><Input type="date" value={editor.values.observedAt ?? ""} onChange={(event) => setEditor({ ...editor, values: { ...editor.values, observedAt: event.target.value } })} className="h-9 text-xs" /></Field></div>
@@ -1085,13 +1118,13 @@ export function SupplyCatalogView({
           </fieldset>
         ) : null}
         </div>
-        <SheetFooter className="shrink-0 flex-row flex-wrap justify-end gap-2 border-t border-border">
-          <Button type="button" size="sm" variant="ghost" onClick={() => setDetailOpen(false)}>返回行内编辑</Button>
+        <EditorFooter className={skinEditing ? "shrink-0 flex-row flex-wrap justify-end gap-2 border-t border-border p-4" : "shrink-0 flex-row flex-wrap justify-end gap-2 border-t border-border"}>
+          {!skinSurface ? <Button type="button" size="sm" variant="ghost" onClick={() => setDetailOpen(false)}>返回行内编辑</Button> : null}
           <Button type="button" size="sm" disabled={writePhase !== "idle" || storageBlocked} onClick={() => saveEditor()}>{writePhase === "saving" ? "保存中…" : "保存"}</Button>
           <Button type="button" size="sm" variant="outline" onClick={requestClose}>{["saving", "unknown", "readback"].includes(writePhase) ? "关闭编辑（稍后核对原结果）" : "取消"}</Button>
-        </SheetFooter>
-      </SheetContent>
-    </Sheet>
+        </EditorFooter>
+      </EditorContent>
+    </EditorSurface>
     <Dialog open={Boolean(toggleDraft)} onOpenChange={(open) => { if (!open) setToggleDraft(null); }}>
       <DialogContent className="sm:max-w-md" closeLabel="关闭状态确认">
         <DialogHeader>
@@ -1103,7 +1136,7 @@ export function SupplyCatalogView({
     </Dialog>
     <Dialog open={closeAsked} onOpenChange={setCloseAsked}>
       <DialogContent className="sm:max-w-md" closeLabel="继续编辑" finalFocus={() => editor ? true : detailFocusTarget()}>
-        <DialogHeader><DialogTitle>放弃未保存修改？</DialogTitle><DialogDescription>行内输入和详细信息属于同一次修改。取消编辑会一并丢弃；返回编辑可继续保存。</DialogDescription></DialogHeader>
+        <DialogHeader><DialogTitle>放弃未保存修改？</DialogTitle><DialogDescription>{skinEditing ? "取消编辑将放弃尚未保存的词条修改；已提交的原请求仍会保留。" : "行内输入和详细信息属于同一次修改。取消编辑会一并丢弃；返回编辑可继续保存。"}</DialogDescription></DialogHeader>
         <DialogFooter><Button type="button" variant="outline" onClick={() => setCloseAsked(false)}>继续编辑</Button><Button type="button" variant="destructive" onClick={() => changeEditor(null)}>放弃修改</Button></DialogFooter>
       </DialogContent>
     </Dialog>

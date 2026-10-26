@@ -160,6 +160,7 @@ export function CatalogObjectTable({
   pendingWrite = false,
   showReason = false,
   editOptions,
+  retiredCategories = false,
 }: {
   kind: CatalogKind;
   rows: CatalogRow[];
@@ -187,8 +188,9 @@ export function CatalogObjectTable({
   pendingWrite?: boolean;
   showReason?: boolean;
   editOptions?: EditOptions;
+  retiredCategories?: boolean;
 }) {
-  const columns = COLUMN_SETS[kind];
+  const columns = retiredCategories && kind === "skins" ? COLUMN_SETS[kind].filter(column => column.key !== "categoryPath") : COLUMN_SETS[kind];
   const searching = query.trim().length > 0 || filterActive;
   const editing = Boolean(editValues);
 
@@ -338,7 +340,7 @@ export function CatalogObjectTable({
       <TableCell colSpan={columns.length + 2} className="py-8">
         <div className="space-y-2 text-xs text-muted-foreground">
           <p className="text-sm font-medium text-foreground">{!contractReady ? "目录合同未接入" : searching ? "没有匹配的条目" : `暂无${OBJECT_LABEL[kind]}`}</p>
-          {contractReady ? <p>{searching ? query.trim() ? `已加载内容中无匹配：${query.trim()}。搜索只覆盖当前已加载目录，不代表全库不存在。` : "当前身份筛选下没有匹配条目；筛选仅覆盖已加载目录。" : OBJECT_EMPTY_HINT[kind]}</p> : null}
+          {contractReady ? <p>{searching ? query.trim() ? `已加载内容中无匹配：${query.trim()}。搜索只覆盖当前已加载目录，不代表全库不存在。` : "当前身份筛选下没有匹配条目；筛选仅覆盖已加载目录。" : retiredCategories && kind === "skins" ? "新词条不再选择旧分类；保存草稿后核实实际皮肤类型与身份。" : OBJECT_EMPTY_HINT[kind]}</p> : null}
           {searching ? <Button type="button" size="sm" variant="outline" onClick={onClearQuery}>{filterActive ? "清除筛选" : "清除搜索"}</Button> : (
             createReason ? (
               <div className="space-y-2"><p>{createReason}</p>{prerequisiteAction ? <Button type="button" size="sm" variant="outline" disabled={busy} onClick={prerequisiteAction.onClick}>{prerequisiteAction.label}</Button> : null}</div>

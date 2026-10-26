@@ -4,12 +4,11 @@ import { Button } from "../../components/ui-elements";
 import { InlineStatus } from "../../components/ui/badge";
 import { Input } from "../../components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/select";
-import { formatDate } from "../../api";
 import {
-  actionFor, APPROVAL_ACTION_NAMES, businessProgress, businessTitleOf, candidateAvailabilityLabel,
+  actionFor, ACTION_LABELS, APPROVAL_ACTION_NAMES, businessProgress, businessTitleOf, candidateAvailabilityLabel,
   personLabel, statusView, type RequestSummary,
 } from "./contract";
-import { FieldLabel } from "./atoms";
+import { FieldLabel, formatApprovalDate as formatDate } from "./atoms";
 
 const ALL = "all";
 
@@ -94,7 +93,7 @@ export function RequestList({
         {filterActive
           ? `仅筛选当前页：命中 ${filtered.length} / 当前页 ${items.length} 行。`
           : `当前页 ${items.length} 行。`}
-        按条件查全集与统计暂未接入，需要时联系管理员。
+        按条件查全集与统计暂未接入；当前只过滤本页。
       </p>
 
       {busy ? <p className="text-xs text-muted-foreground">正在读取…</p> : null}
@@ -106,8 +105,8 @@ export function RequestList({
             <tr>
               <th scope="col">业务事项</th>
               <th scope="col">申请人</th>
-              <th scope="col">审批状态</th>
-              <th scope="col">业务进度</th>
+              <th scope="col">当前状态</th>
+              <th scope="col">下一步</th>
               <th scope="col">申请时间</th>
               <th scope="col" className="w-32">操作</th>
             </tr>
@@ -116,7 +115,9 @@ export function RequestList({
             {filtered.map((item) => {
               const status = statusView(item.status);
               const progress = businessProgress(item.business);
-              const actionable = APPROVAL_ACTION_NAMES.some((name) => actionFor(item.actions, name)?.allowed === true);
+              const permitted = APPROVAL_ACTION_NAMES.filter((name) => actionFor(item.actions, name)?.allowed === true);
+              const actionable = permitted.length > 0;
+              const next = !Array.isArray(item.actions) ? "办理资格待读取" : actionable ? `可办理：${permitted.map(name => ACTION_LABELS[name] ?? name).join("、")}` : "暂无已确认的可办动作";
               const availability = candidateAvailabilityLabel(item.candidateAvailability);
               return (
                 <tr key={item.requestId}>
@@ -124,16 +125,17 @@ export function RequestList({
                     <span className="block text-sm font-medium break-words">{businessTitleOf(item)}</span>
                     <span className="mt-0.5 block text-xs leading-relaxed break-words text-muted-foreground">{item.summary}</span>
                     <span className="mt-0.5 block font-mono text-[11px] break-all text-muted-foreground">{item.requestId}</span>
-                    {availability ? <span className="mt-0.5 block text-[11px] text-muted-foreground">{availability}</span> : null}
                   </td>
                   <td className="whitespace-nowrap">{personLabel(item.requester)}</td>
                   <td>
                     <InlineStatus tone={status.tone}>{status.label}</InlineStatus>
                     {item.statusReason ? <span className="mt-0.5 block text-[11px] text-muted-foreground">{item.statusReason}</span> : null}
-                  </td>
-                  <td>
-                    <InlineStatus tone={progress.tone}>{progress.label}</InlineStatus>
+                    <span className="mt-1 block text-xs text-muted-foreground">业务：{progress.label}</span>
                     {progress.detail ? <span className="mt-0.5 block text-[11px] leading-relaxed text-muted-foreground">{progress.detail}</span> : null}
+                  </td>
+                  <td className="max-w-52">
+                    <span className="block text-xs leading-relaxed">{next}</span>
+                    {availability ? <span className="mt-1 block text-[11px] leading-relaxed text-muted-foreground">{availability}</span> : null}
                   </td>
                   <td className="whitespace-nowrap">
                     {formatDate(item.createdAt)}

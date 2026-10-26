@@ -5,7 +5,7 @@ import { InlineStatus } from "../../components/ui/badge";
 import { useIsMobile } from "../../hooks/use-mobile";
 import { requestPolicy } from "../../lib/approvals-ui/request-policy";
 import { statusTone } from "../../components/approvals-ui/approval-node";
-import { formatDate } from "../../api";
+import { formatApprovalDate as formatDate } from "./atoms";
 import { personLabel, type RequestDetail } from "./contract";
 
 // Display selection only. Action eligibility still comes from the original server actions.
@@ -20,6 +20,7 @@ function RequestFlowContent({ detail, onLocateActions }: { detail: RequestDetail
   const currentId = currentRecord(detail);
   const [selectedId, setSelectedId] = useState<string | null>(currentId);
   const mobile = useIsMobile();
+  const [expanded, setExpanded] = useState(false);
   const selected = policy.steps.find(step => step.id === selectedId) ?? policy.steps.find(step => step.id === currentId);
   const facts = selected ? [...selected.facts] : [];
   if (selected?.id === "execution" && detail.execution) {
@@ -39,11 +40,14 @@ function RequestFlowContent({ detail, onLocateActions }: { detail: RequestDetail
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h3 className="text-sm font-semibold">审批流程</h3>
-          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">选择步骤查看已记录的人员与时间，再到当前办理区操作。候选组内首个有效决定生效；批准与业务执行分别记录。</p>
+          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">当前办理位于上方。展开流程可核对各环节的已记录人员与时间；审批决定、执行结果与业务状态分别确认。</p>
         </div>
-        {onLocateActions ? <Button type="button" size="sm" variant="secondary" onClick={onLocateActions}>定位当前办理</Button> : null}
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" size="sm" variant="secondary" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{expanded ? "收起审批流程" : "展开审批流程"}</Button>
+          {onLocateActions ? <Button type="button" size="sm" variant="secondary" onClick={onLocateActions}>定位当前办理</Button> : null}
+        </div>
       </div>
-      <div className="h-[420px] overflow-hidden rounded-lg border border-border">
+      {expanded ? <><div data-approval-workflow-canvas className="h-[360px] overflow-hidden rounded-lg border border-border sm:h-[320px]">
         <WorkflowCanvas policy={policy} direction={mobile ? "TB" : "LR"} selectedId={selected?.id} onSelectStep={setSelectedId} />
       </div>
       <div aria-live="polite" className="min-h-24 border-t border-border pt-3">
@@ -56,7 +60,7 @@ function RequestFlowContent({ detail, onLocateActions }: { detail: RequestDetail
             {selected.kind === "approval" && selected.approvers.length > 0 ? <div className="mt-3 text-xs"><p className="text-muted-foreground">候选名单；通用资格不代表本单操作授权，也不代表已作出决定。</p><ul className="mt-2 flex flex-wrap gap-x-4 gap-y-2">{selected.approvers.map((approver, index) => <li key={approver.name + "-" + index}><span>{approver.name}</span><span className="ml-1 text-muted-foreground">{approver.title}</span></li>)}</ul></div> : null}
           </>
         ) : <p className="text-xs text-muted-foreground">步骤记录未提供；当前可办理动作以服务端资格为准。</p>}
-      </div>
+      </div></> : null}
     </section>
   );
 }

@@ -1,7 +1,6 @@
 import { Info, TriangleAlert } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
-import { formatDate } from "../../api";
 import { formatDiscountLabel } from "../membership-entitlement-form";
 import {
   BUSINESS_NOT_CONNECTED,
@@ -13,7 +12,7 @@ import {
   reasonLabel,
   type BusinessView,
 } from "./contract";
-import { Fact, FactGrid, NotApplicable, Section } from "./atoms";
+import { Fact, FactGrid, NotApplicable, Section, formatApprovalDate as formatDate } from "./atoms";
 
 /** 摘要来自申请或最终批准快照，当前业务状态另列。 */
 function text(summary: Record<string, unknown>, key: string): string | null {
@@ -63,20 +62,12 @@ function MembershipSummary({ summary }: { summary: Record<string, unknown> }) {
       <Fact label="游戏" value={text(summary, "gameName")} />
       <Fact label="礼遇类型" value={text(summary, "entitlementKindTitle") ?? text(summary, "entitlementKind")} />
       {pricing ? <Fact label="实际折扣" value={pricing.knowledge === "LEGACY" ? "旧版计价合同" : formatDiscountLabel(text(pricing, "payableRatio") ?? undefined)} /> : null}
-      {pricing ? <Fact label="适用范围" value={pricingScopeLabel(pricing)} /> : null}
       {summary.payloadSource === "APPROVED_FINAL" ? <Fact label="内容来源" value="最终批准内容（原申请保留）" /> : null}
       {originalPricing ? <Fact label="原申请折扣" value={originalPricing.knowledge === "LEGACY" ? "旧版计价合同" : formatDiscountLabel(text(originalPricing, "payableRatio") ?? undefined)} /> : null}
       <Fact label="目标用户" value={text(summary, "targetUserId")} mono />
-      <Fact label="作用范围标识" value={text(summary, "scopeKey")} mono />
-      <Fact label="生效开始（快照）" value={formatDate(text(summary, "startsAt"))} />
-      <Fact label="生效结束（快照）" value={formatDate(text(summary, "endsAt"))} />
+      <Fact label="权益期限（申请快照）" value={text(summary, "startsAt") || text(summary, "endsAt") ? `${formatDate(text(summary, "startsAt"))} → ${formatDate(text(summary, "endsAt"))}` : null} />
       <Fact label="押金权益" value={depositBenefitSummary(summary) ?? bool(summary, "depositWaived")} />
       {original && depositBenefitSummary(original) ? <Fact label="原申请押金权益" value={depositBenefitSummary(original)} /> : null}
-      <Fact label="关联政策" value={
-        text(summary, "policyId")
-          ? `${text(summary, "policyId")}${typeof summary.policyVersion === "number" ? ` · v${summary.policyVersion}` : ""}${text(summary, "policyStatus") ? ` · ${policyStatusLabel(text(summary, "policyStatus"))}` : ""}`
-          : null
-      } mono />
       {draft ? (
         <>
           <Fact label="政策草稿" value={`${String(draft.id)}${typeof draft.version === "number" ? ` · v${draft.version}` : ""}`} mono />
@@ -96,20 +87,46 @@ function MembershipSummary({ summary }: { summary: Record<string, unknown> }) {
 }
 
 /** Policy publish has no entitlement target/user fields; only the frozen draft metadata is available today. */
+function DistributionSummary({ business }: { business: BusinessView }) {
+  const change = business.policyChange;
+  if (!change || change.schema !== "distribution-policy-change.v1") return <NotApplicable reason="分销变更快照未提供，不能用当前政策替代本次申请。" />;
+  const changes = change.changes && typeof change.changes === "object" && !Array.isArray(change.changes) ? change.changes : {};
+  const changed = (key: string) => Object.prototype.hasOwnProperty.call(changes, key);
+  const percent = (key: string) => changed(key) ? text(changes, key) === null ? null : `${text(changes, key)}%` : "本次未变更";
+  const version = business.result?.knowledge === "KNOWN" && typeof business.result.policyVersionId === "string" && business.result.policyVersionId.trim() ? business.result.policyVersionId : null;
+  return <Section title="分销政策变更快照">
+    <FactGrid>
+      <Fact label="新增计佣" value={changed("enabled") ? typeof changes.enabled === "boolean" ? changes.enabled ? "启用" : "暂停" : null : "本次未变更"} />
+      <Fact label="租客来源佣金比例" value={percent("renterPercent")} />
+      <Fact label="号主来源佣金比例" value={percent("ownerPercent")} />
+      <Fact label="申请理由" value={change.reason} />
+    </FactGrid>
+    <p className="text-xs leading-relaxed text-muted-foreground">仅展示本次申请的改动项；未列项目沿用原政策。新开关不清除既有关系或已冻结订单，批准也不代表已执行。</p>
+    <details className="rounded-md border border-border/60 px-3 py-2 text-xs">
+      <summary className="cursor-pointer select-none text-muted-foreground">原政策基准</summary>
+      <div className="mt-3"><FactGrid><Fact label="原政策编号" value={change.expectedPolicyId} mono /><Fact label="原修订" value={change.expectedRevision} mono /><Fact label="原政策摘要" value={change.expectedPolicyDigest} mono /></FactGrid></div>
+    </details>
+    <Fact label="本次执行结果版本" value={version} mono />
+    <p className="text-xs leading-relaxed text-muted-foreground">{version ? "已读到本次执行的结果引用；当前全局政策是否仍使用该版本需另行核对。" : "尚未读到可核对的执行结果，不按已生效显示。"}</p>
+  </Section>;
+}
+
 function PolicySummary({ summary }: { summary: Record<string, unknown> }) {
   const draft = summary.policyDraft as Record<string, unknown> | undefined;
   return (
     <div className="space-y-3">
-      <FactGrid>
-        <Fact label="政策草稿" value={draft ? `${String(draft.id)}${typeof draft.version === "number" ? ` · v${draft.version}` : ""}` : null} mono />
-        <Fact label="草稿生效时间" value={formatDate(text(draft ?? {}, "effectiveAtUtc"))} />
-        <Fact label="规则发布" value={text(draft ?? {}, "ruleReleaseId")} mono />
-        <Fact label="价格版本" value={text(draft ?? {}, "priceVersionId")} mono />
-        <Fact label="申请理由" value={text(summary, "reason")} />
-      </FactGrid>
-      <p className="text-xs leading-relaxed text-muted-foreground">
-        政策各等级折扣、押金权益和两类礼遇范围的实际差异，需要服务端按申请引用的不可变草稿投影；当前摘要未提供这些经营字段，本页不以当前最新草稿替代申请快照，也不推断审批人或生效结果。
-      </p>
+      <FactGrid><Fact label="拟定生效时间（北京时间）" value={formatDate(text(draft ?? {}, "effectiveAtUtc"))} /></FactGrid>
+      <p className="text-xs leading-relaxed text-muted-foreground">这是申请计划，批准不代表已生效；还需按业务流程完成执行，并核对实际业务状态。</p>
+      <p className="text-xs leading-relaxed text-muted-foreground">逐档权益的冻结差异尚未提供，本页只展示已取得的申请快照，不用当前最新草稿替代。</p>
+      <details className="rounded-md border border-border/60 px-3 py-2 text-xs">
+        <summary className="cursor-pointer select-none text-muted-foreground">政策版本与计价依据</summary>
+        <div className="mt-3"><FactGrid>
+          <Fact label="政策草稿" value={draft ? text(draft, "id") : null} mono />
+          <Fact label="草稿版本" value={draft && typeof draft.version === "number" ? "v" + draft.version : null} />
+          <Fact label="规则发布" value={text(draft ?? {}, "ruleReleaseId")} mono />
+          <Fact label="价格版本" value={text(draft ?? {}, "priceVersionId")} mono />
+        </FactGrid></div>
+      </details>
     </div>
   );
 }
@@ -333,6 +350,11 @@ export function BusinessSummary({ business, operationCode }: { business: Busines
   const changeSummary = business.changeSummary ?? text(summary ?? {}, "changeSummary");
   const pricing = business.pricingReference as Record<string, unknown> | undefined;
   const costBasis = business.costBasis as Record<string, unknown> | undefined;
+  const policyOperation = operationCode === "membership.benefit.policy.publish";
+  const distributionOperation = operationCode === "distribution.policy.publish";
+  const entitlementOperation = ["membership.entitlement.grant", "membership.entitlement.replace", "membership.entitlement.revoke"].includes(operationCode);
+  const settlementOperation = operationCode === "order.settlement.adjust";
+  const structuredOperation = policyOperation || entitlementOperation || settlementOperation;
 
   return (
     <>
@@ -348,19 +370,29 @@ export function BusinessSummary({ business, operationCode }: { business: Busines
         ) : null}
       </Section>
 
-      {business.summaryAvailable !== false && summary ? (
+      {distributionOperation && business.summaryAvailable !== false ? <DistributionSummary business={business} /> : null}
+
+      {!distributionOperation && business.summaryAvailable !== false && summary ? (
         <Section title="申请时快照">
-          {business.businessType === "settlement" ? <SettlementSummary summary={summary} /> : operationCode === "membership.benefit.policy.publish" ? <PolicySummary summary={summary} /> : <MembershipSummary summary={summary} />}
+          {settlementOperation ? <SettlementSummary summary={summary} /> : policyOperation ? <PolicySummary summary={summary} /> : entitlementOperation ? <MembershipSummary summary={summary} /> : <NotApplicable reason="专用业务摘要尚未接入；保留申请说明，办理资格仍以服务端动作为准。" />}
           <FactGrid>
-            {operationCode !== "membership.benefit.policy.publish" && business.game ? <Fact label="游戏" value={business.game.name ?? business.game.id} /> : null}
-            <Fact label="载荷版本" value={typeof summary.payloadVersion === "number" ? `v${summary.payloadVersion}` : null} />
-            <Fact label="载荷哈希" value={text(summary, "payloadHash")} mono />
+            {(entitlementOperation || settlementOperation) && business.game ? <Fact label="游戏" value={business.game.name ?? business.game.id} /> : null}
             <Fact label="申请理由" value={text(summary, "reason")} />
-            {pricing && operationCode !== "membership.benefit.policy.publish" ? <Fact label="定价口径引用" value={[pricingScopeLabel(pricing), text(pricing, "priceVersionId"), text(pricing, "costBasisRef"), text(pricing, "schema")].filter(Boolean).join(" · ") || null} mono /> : null}
-            {costBasis ? <Fact label="成本依据" value={[text(costBasis, "priceVersionId"), text(costBasis, "ruleReleaseId")].filter(Boolean).join(" · ") || null} mono /> : null}
           </FactGrid>
-          {business.businessType === "settlement" ? <SettlementCompare summary={summary} /> : null}
-          {business.businessType === "membership" && operationCode !== "membership.benefit.policy.publish" ? <FrozenTargets summary={summary} /> : null}
+          <details data-approval-snapshot-technical className="rounded-md border border-border/60 px-3 py-2 text-xs">
+            <summary className="cursor-pointer select-none text-muted-foreground">申请技术依据</summary>
+            <div className="mt-3"><FactGrid>
+              <Fact label="载荷版本" value={typeof summary.payloadVersion === "number" ? "v" + summary.payloadVersion : null} />
+              <Fact label="载荷哈希" value={text(summary, "payloadHash")} mono />
+              {entitlementOperation ? <Fact label="作用范围标识" value={text(summary, "scopeKey")} mono /> : null}
+              {pricing && entitlementOperation ? <Fact label="适用范围" value={pricingScopeLabel(pricing)} /> : null}
+              {entitlementOperation ? <Fact label="关联政策" value={text(summary, "policyId") ? [text(summary, "policyId"), typeof summary.policyVersion === "number" ? "v" + summary.policyVersion : null, text(summary, "policyStatus") ? policyStatusLabel(text(summary, "policyStatus")) : null].filter(Boolean).join(" · ") : null} mono /> : null}
+              {pricing && entitlementOperation ? <Fact label="定价口径引用" value={[pricingScopeLabel(pricing), text(pricing, "priceVersionId"), text(pricing, "costBasisRef"), text(pricing, "schema")].filter(Boolean).join(" · ") || null} mono /> : null}
+              {costBasis ? <Fact label="成本依据" value={[text(costBasis, "priceVersionId"), text(costBasis, "ruleReleaseId")].filter(Boolean).join(" · ") || null} mono /> : null}
+            </FactGrid></div>
+          </details>
+          {settlementOperation ? <SettlementCompare summary={summary} /> : null}
+          {entitlementOperation ? <FrozenTargets summary={summary} /> : null}
         </Section>
       ) : null}
 
@@ -370,7 +402,7 @@ export function BusinessSummary({ business, operationCode }: { business: Busines
         </p>
       ) : null}
 
-      {business.summaryAvailable === false ? null : <DomainResult business={business} />}
+      {!structuredOperation || business.summaryAvailable === false || business.resultAvailability === "NOT_APPLICABLE" ? null : <DomainResult business={business} />}
     </>
   );
 }

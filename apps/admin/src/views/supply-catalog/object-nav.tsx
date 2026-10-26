@@ -8,15 +8,17 @@ export function CatalogObjectNav({
   counts,
   pending,
   loaded,
+  kinds = OBJECT_ORDER,
 }: {
   kind: CatalogKind;
   counts: Record<CatalogKind, number>;
   pending: number;
   loaded: boolean;
+  kinds?: CatalogKind[];
 }) {
   return (
     <TabsList aria-label="目录对象（当前已加载范围）" className="flex w-full flex-wrap items-center justify-start gap-1 rounded-lg border border-border/60 bg-muted/30 p-1.5 h-auto">
-      {OBJECT_ORDER.map((entry) => (
+      {kinds.map((entry) => (
         <TabsTrigger
           key={entry}
           value={entry}

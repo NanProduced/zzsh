@@ -16,7 +16,7 @@ export const APPROVAL_EXECUTION_MODE = {
 } as const;
 
 export type ApprovalExecutionMode = (typeof APPROVAL_EXECUTION_MODE)[keyof typeof APPROVAL_EXECUTION_MODE];
-export type ApprovalBusinessType = "membership" | "settlement" | "test";
+export type ApprovalBusinessType = "membership" | "distribution" | "settlement" | "test";
 
 export type ApprovalOperationRegistration = {
   operationCode: string;
@@ -33,6 +33,7 @@ const GENERIC = APPROVAL_EXECUTION_MODE.genericTransaction;
 const SOURCE = APPROVAL_EXECUTION_MODE.sourceBusiness;
 
 const REGISTRATIONS: readonly ApprovalOperationRegistration[] = [
+  { operationCode: "distribution.policy.publish", businessType: "distribution", title: "调整分销政策", executionMode: GENERIC, testOnly: false, permissionStage: "EXECUTE" },
   { operationCode: "membership.benefit.policy.publish", businessType: "membership", title: "发布会员权益政策", executionMode: GENERIC, testOnly: false, permissionStage: "EXECUTE" },
   { operationCode: "membership.entitlement.grant", businessType: "membership", title: "发放会员礼遇权益", executionMode: GENERIC, testOnly: false, permissionStage: "EXECUTE" },
   { operationCode: "membership.entitlement.replace", businessType: "membership", title: "替换会员礼遇权益", executionMode: GENERIC, testOnly: false, permissionStage: "EXECUTE" },
@@ -55,6 +56,7 @@ export function approvalRegistration(operationCode: string): ApprovalOperationRe
  * 避免预检与实际执行各写一份而漂移。
  */
 export function membershipBusinessPermission(operationCode: string, stage: "REQUEST" | "DECIDE" | "EXECUTE"): string | null {
+  if (operationCode === "distribution.policy.publish") return "personal.distribution.policy.manage";
   if (!operationCode.startsWith("membership.")) return null;
   if (operationCode === "membership.benefit.policy.publish") return ADMIN_PERMISSION.membershipPolicyPublish;
   if (operationCode === "membership.entitlement.revoke") return ADMIN_PERMISSION.membershipEntitlementRevoke;
@@ -66,12 +68,12 @@ export function membershipBusinessPermission(operationCode: string, stage: "REQU
 }
 
 export function membershipDecisionRequiresBoss(operationCode: string): boolean {
-  return operationCode === "membership.benefit.policy.publish";
+  return operationCode === "membership.benefit.policy.publish" || operationCode === "distribution.policy.publish";
 }
 
 /** 执行侧是否要求游戏对象范围：与会员执行器实际校验保持一致，不机械加严审批前置。 */
 export function membershipOperationRequiresGameScope(operationCode: string): boolean {
-  return operationCode !== "membership.benefit.policy.publish";
+  return operationCode !== "membership.benefit.policy.publish" && operationCode !== "distribution.policy.publish";
 }
 
 export type ApprovalRequestFacts = {
@@ -590,7 +592,7 @@ export async function projectApprovalBusinesses(
     loadEntitlements(client, membership),
     loadPolicies(client, membership),
     loadSettlements(client, settlements),
-    loadExecutionReceipts(client, membership),
+    loadExecutionReceipts(client, rows.filter(row => ["membership", "distribution"].includes(approvalRegistration(row.operationCode)?.businessType ?? ""))),
   ]);
   const gameIds = new Set<string>();
   for (const row of membership) {
@@ -619,6 +621,16 @@ export async function projectApprovalBusinesses(
       operationCode: row.operationCode,
       executionMode: registration?.executionMode ?? APPROVAL_EXECUTION_MODE.unsupported,
     };
+    if (registration?.businessType === "distribution") {
+      const readable = viewer.access.isBoss || hasPermission(viewer.access, "personal.distribution.policy.read") || hasPermission(viewer.access, "personal.distribution.policy.manage");
+      if (!readable) { views.set(row.id, restricted(base, "BUSINESS_PERMISSION_REQUIRED")); continue; }
+      const payload = row.finalPayload ?? row.operationPayload;
+      const receipt = executions.get(row.id);
+      views.set(row.id, { ...base, summaryAvailable: true, detailsAvailable: true, changeSummary: row.summary,
+        policyChange: { schema: payload.schema, expectedPolicyId: textField(payload, "expectedPolicyId"), expectedRevision: textField(payload, "expectedRevision"), expectedPolicyDigest: textField(payload, "expectedPolicyDigest"), changes: payload.changes, reason: textField(payload, "reason") },
+        result: receipt?.status === "SUCCEEDED" && receipt.resultCode === "DISTRIBUTION_POLICY_APPLIED" ? { knowledge: "KNOWN", policyVersionId: receipt.resultDetail } : { knowledge: "UNKNOWN" }, restrictedReasonCodes: [] });
+      continue;
+    }
     if (registration?.businessType === "test") {
       views.set(row.id, { ...base, summaryAvailable: false, detailsAvailable: true, changeSummary: row.summary, restrictedReasonCodes: ["TEST_OPERATION_PAYLOAD_WITHHELD"] });
       continue;

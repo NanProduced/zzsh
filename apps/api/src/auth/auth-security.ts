@@ -155,6 +155,8 @@ export type AuthSecurityOptions = {
   userObligationReader: UserObligationReader;
   testOperationsEnabled: boolean;
   approvalOperationExecutor?: ApprovalOperationExecutor;
+  /** Same explicit write capability as the distribution executor; never the read-only scope. */
+  distributionPolicyWriteScope?: import('../finance/distribution-policy-store').LocalDistributionScope;
   imProvisioner?: ImIdentityProvisioner;
   imIdentityRepository?: ImIdentityIntentRepository;
   imAppId?: string;

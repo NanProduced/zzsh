@@ -1103,11 +1103,11 @@ export async function quoteListing(
     throw invalid("权益值与目录类型不符", "entitlements");
   const skins = (
     await client.query(
-      `WITH RECURSIVE visible AS (SELECT id FROM zzsh_supply.skin_category WHERE parent_id IS NULL AND enabled AND form_visible UNION ALL SELECT c.id FROM zzsh_supply.skin_category c JOIN visible p ON c.parent_id=p.id WHERE c.enabled AND c.form_visible) SELECT s.id,s.name,s.base_name,s.category_id AS category_id,c.code AS category_code,c.name AS category_name,s.enabled,s.form_visible,(s.category_id IN (SELECT id FROM visible)) AS category_visible,
+      `WITH RECURSIVE visible AS (SELECT id FROM zzsh_supply.skin_category WHERE parent_id IS NULL AND enabled AND form_visible UNION ALL SELECT c.id FROM zzsh_supply.skin_category c JOIN visible p ON c.parent_id=p.id WHERE c.enabled AND c.form_visible) SELECT s.id,s.name,s.base_name,s.category_id AS category_id,c.code AS category_code,c.name AS category_name,s.enabled,s.form_visible,(g.code='delta' OR s.category_id IN (SELECT id FROM visible)) AS category_visible,(g.code='delta') AS category_retired,
         ${publicSkinOwnerNameSql("s")} AS owner_name,
         s.owner_kind,s.rarity_code,${publicSkinRarityNameSql("s")} AS rarity_name,${publicSkinMetadataSql("s")},
         ${publicSkinMediaIdSql("s")} AS media_id
-        FROM zzsh_supply.listing_skin l JOIN zzsh_supply.skin s ON s.id=l.skin_id JOIN zzsh_supply.skin_category c ON c.id=s.category_id WHERE version_id=$1`,
+        FROM zzsh_supply.listing_skin l JOIN zzsh_supply.skin s ON s.id=l.skin_id JOIN zzsh_supply.game g ON g.id=s.game_id LEFT JOIN zzsh_supply.skin_category c ON c.id=s.category_id WHERE version_id=$1`,
       [v.id],
     )
   ).rows;
@@ -1203,6 +1203,7 @@ export async function quoteListing(
  */
 export function freezePresentationSkin(s: Record<string, unknown>): Record<string, unknown> {
   return {
+    ...(s.category_retired === true ? { categoryModel: "RETIRED" } : {}),
     id: s.id,
     name: s.name,
     baseName: s.base_name,
@@ -1242,7 +1243,7 @@ export async function readPresentation(
     ? v.presentation.skins
     : [];
   const skins = rawSkins.filter(
-    (skin): skin is { id: string; name: string; categoryCode?: string; categoryName?: string } =>
+    (skin): skin is { id: string; name: string; categoryCode?: string | null; categoryName?: string | null; categoryModel?: unknown } =>
       typeof skin === "object" &&
       skin !== null &&
       typeof (skin as { id?: unknown }).id === "string" &&
@@ -1250,8 +1251,7 @@ export async function readPresentation(
   );
   const needsSkins = skins.some(
     (skin) =>
-      typeof skin.categoryCode !== "string" ||
-      typeof skin.categoryName !== "string",
+      skin.categoryModel !== "RETIRED" && (typeof skin.categoryCode !== "string" || typeof skin.categoryName !== "string"),
   );
   if (!needsItems && !needsSkins)
     return v.presentation;
@@ -1266,7 +1266,7 @@ export async function readPresentation(
   const rows = needsSkins
     ? (
     await client.query<{ id: string; categoryCode: string; categoryName: string }>(
-      `SELECT s.id,c.code AS "categoryCode",c.name AS "categoryName" FROM zzsh_supply.skin s JOIN zzsh_supply.skin_category c ON c.id=s.category_id WHERE s.id=ANY($1::text[])`,
+      `SELECT s.id,c.code AS "categoryCode",c.name AS "categoryName" FROM zzsh_supply.skin s LEFT JOIN zzsh_supply.skin_category c ON c.id=s.category_id WHERE s.id=ANY($1::text[])`,
       [skins.map((skin) => skin.id)],
     )
   ).rows
@@ -1301,6 +1301,7 @@ export async function readPresentation(
       )
         return skin;
       const current = skin as Record<string, unknown>;
+      if (current.categoryModel === "RETIRED") return current;
       const category = categories.get((current as { id: string }).id);
       return category
         ? {
@@ -1741,12 +1742,12 @@ export async function readDraftSkinSummary(client: PoolClient, gameId: string, s
     `WITH RECURSIVE ${publicSkinCategoryCteSql("$1")}
      SELECT g.catalog_revision::text AS revision, COALESCE((
        SELECT jsonb_agg(entry) FROM (
-         SELECT s.id,s.name,s.base_name,${publicSkinOwnerNameSql("s")} AS owner_name,s.owner_kind,
+         SELECT s.id,s.name,s.base_name,(g.code='delta') AS category_retired,${publicSkinOwnerNameSql("s")} AS owner_name,s.owner_kind,
                 s.rarity_code,${publicSkinRarityNameSql("s")} AS rarity_name,${publicSkinMetadataSql("s")},
                 ${publicSkinMediaIdSql("s")} AS media_id,c.code AS category_code,c.name AS category_name
-           FROM zzsh_supply.skin s JOIN zzsh_supply.skin_category c ON c.id=s.category_id
+           FROM zzsh_supply.skin s LEFT JOIN zzsh_supply.skin_category c ON c.id=s.category_id
           WHERE s.game_id=$1 AND s.id=ANY($2::text[]) AND s.naming_state='VERIFIED'
-            AND s.enabled=true AND s.form_visible=true AND s.category_id IN (SELECT id FROM visible)
+            AND s.enabled=true AND s.form_visible=true AND (g.code='delta' OR s.category_id IN (SELECT id FROM visible))
           ORDER BY s.sort_order,s.name COLLATE "C",s.id
        ) entry
      ),'[]'::jsonb) AS items FROM zzsh_supply.game g WHERE g.id=$1`,

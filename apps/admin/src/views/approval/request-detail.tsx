@@ -18,7 +18,7 @@ import {
   Timeline, TimelineContent, TimelineDate, TimelineHeader, TimelineIndicator,
   TimelineItem, TimelineSeparator, TimelineTitle,
 } from "../../components/reui/timeline";
-import { adminRequest, formatDate, friendlyError } from "../../api";
+import { adminRequest, friendlyError } from "../../api";
 import {
   ACTION_LABELS, APPROVAL_ACTION_NAMES, actionBlockReason, actionFor, auditActionLabel, auditNarrative,
   auditOutcomeView, businessProgress, canAct, candidateAvailabilityLabel, executionModeLabel,
@@ -28,7 +28,7 @@ import {
 } from "./contract";
 import { BusinessSummary } from "./business-summary";
 import { RequestFlow } from "./request-flow";
-import { Fact, FactGrid, FieldLabel, NotApplicable, Section, SectionTitle, StatusFact, UnknownFact } from "./atoms";
+import { Fact, FactGrid, FieldLabel, NotApplicable, Section, SectionTitle, StatusFact, UnknownFact, formatApprovalDate as formatDate } from "./atoms";
 
 const REASON_MAX = 500;
 
@@ -441,14 +441,13 @@ export function RequestDetail({
             <h3 className="text-base font-semibold break-words text-foreground">{detail.business?.businessTitle ?? "业务摘要未接入"}</h3>
             <p className="mt-1 text-sm leading-relaxed break-words text-muted-foreground">{detail.business?.changeSummary || detail.summary}</p>
           </div>
-          <Badge variant="outline" className="font-mono">{executionModeLabel(detail.operation.executionMode ?? detail.business?.executionMode)}</Badge>
+          <div className="flex flex-wrap items-center gap-2"><Badge variant="outline">{executionModeLabel(detail.operation.executionMode ?? detail.business?.executionMode)}</Badge><Button type="button" size="sm" variant="secondary" onClick={locateActions}>查看当前办理</Button></div>
         </div>
-        <p className="text-xs text-muted-foreground">
-          申请编号 <span className="font-mono break-all">{detail.requestId}</span>
-          <span className="mx-1.5">·</span>申请人 {personLabel(detail.requester)}
-          <span className="mx-1.5">·</span>申请时间 {formatDate(detail.createdAt)}
-          <span className="mx-1.5">·</span>有效期至 {formatDate(detail.expiresAt)}
-        </p>
+        <dl aria-label="申请基本信息" className="grid grid-cols-1 gap-x-6 gap-y-3 text-xs sm:grid-cols-3">
+          <div><dt className="text-muted-foreground">申请人</dt><dd className="mt-1">{personLabel(detail.requester)}</dd></div>
+          <div><dt className="text-muted-foreground">申请时间（北京时间）</dt><dd className="mt-1">{formatDate(detail.createdAt)}</dd></div>
+          <div><dt className="text-muted-foreground">申请有效期至（北京时间）</dt><dd className="mt-1">{formatDate(detail.expiresAt)}</dd></div>
+        </dl>
       </div>
 
       {/* 审批状态 / 执行状态 / 业务进度分列，不用连续 Stepper 暗示必然成功。 */}
@@ -467,6 +466,22 @@ export function RequestDetail({
         </StatusFact>
       </div>
 
+      <details data-approval-business-details open className="rounded-md border border-border/60 p-3">
+        <summary className="cursor-pointer text-sm font-medium">申请明细与业务结果</summary>
+        <div className="mt-4 space-y-5"><BusinessSummary business={detail.business} operationCode={detail.operation.code} /></div>
+      </details>
+
+      {detail.decision ? (
+        <Section title="决定">
+          <FactGrid>
+            <Fact label="结果" value={detail.decision.decision === "APPROVED" ? "批准" : detail.decision.decision === "REJECTED" ? "驳回" : detail.decision.decision} />
+            <Fact label="决定人" value={personLabel(detail.decision.approver)} />
+            <Fact label="决定时间" value={formatDate(detail.decision.createdAt)} />
+            <Fact label="意见" value={detail.decision.reason} />
+          </FactGrid>
+        </Section>
+      ) : null}
+
       {detail.supersedesRequestId || detail.supersededByRequestId ? (
         <div className="flex flex-wrap items-center gap-2 rounded-md border border-border/60 p-3 text-xs">
           {detail.supersededByRequestId ? <span className="text-foreground">本申请已被另一申请替代，不再推进。</span> : null}
@@ -479,30 +494,7 @@ export function RequestDetail({
         </div>
       ) : null}
 
-      {refs.length > 0 ? (
-        <Section title="作用对象与去向" hint="链接只指向平台内已有对象页；没有对应页面的类型只列标识，不拼技术 ID 造入口。">
-          <ul className="flex flex-wrap gap-1.5">
-            {refs.filter((ref) => ref.id).map((ref) => {
-              const path = objectRefPath(ref);
-              return (
-                <li key={`${ref.type}-${ref.id}`}>
-                  {path && onOpenPath
-                    ? <Button type="button" size="sm" variant="secondary" onClick={() => onOpenPath(path, objectRefLabel(ref.type))}>{objectRefLabel(ref.type)}<span className="font-mono text-[11px] opacity-70">{ref.id}</span></Button>
-                    : <Badge variant="outline">{objectRefLabel(ref.type)}<span className="font-mono text-[11px] opacity-70">{ref.id}</span></Badge>}
-                </li>
-              );
-            })}
-          </ul>
-          {sourcePath === null || !onOpenPath ? (
-            <p className="text-xs text-muted-foreground">
-              {detail.business?.executionMode === "SOURCE_BUSINESS"
-                ? "结算调整的结果由来源订单流程消费；请从上方订单对象进入完成双方确认、客服复核与过账，审批页不提供通用执行。"
-                : "这些对象类型当前没有可跳转的平台页面，只列出标识供核对。"}
-              {sourcePath !== null && !onOpenPath ? " 工作区尚未提供跨对象导航，请从左侧导航进入对应页面。" : ""}
-            </p>
-          ) : null}
-        </Section>
-      ) : null}
+      {detail.execution ? <Section title="执行经手记录"><FactGrid><Fact label="执行人" value={personLabel(detail.execution.executor)} /><Fact label="执行记录时间" value={formatDate(detail.execution.createdAt)} /><Fact label="执行完成记录时间" value={formatDate(detail.execution.completedAt)} /></FactGrid></Section> : null}
 
       <section ref={actionsElement} tabIndex={-1} aria-label="当前办理" className="space-y-3 rounded-lg border border-border bg-foreground/[0.02] p-4 outline-none focus-visible:ring-2 focus-visible:ring-ring">
         <h4 className="text-sm font-semibold">当前卡点与下一步</h4>
@@ -571,21 +563,32 @@ export function RequestDetail({
 
       <RequestFlow detail={detail} onLocateActions={locateActions} />
 
-      {detail.decision ? (
-        <Section title="决定">
-          <FactGrid>
-            <Fact label="结果" value={detail.decision.decision === "APPROVED" ? "批准" : detail.decision.decision === "REJECTED" ? "驳回" : detail.decision.decision} />
-            <Fact label="决定人" value={personLabel(detail.decision.approver)} />
-            <Fact label="决定时间" value={formatDate(detail.decision.createdAt)} />
-            <Fact label="意见" value={detail.decision.reason} />
-          </FactGrid>
+      {refs.length > 0 ? (
+        <Section title="作用对象与去向" hint="链接只指向平台内已有对象页；没有对应页面的类型只列标识，不拼技术 ID 造入口。">
+          <ul className="flex flex-wrap gap-1.5">
+            {refs.filter((ref) => ref.id).map((ref) => {
+              const path = objectRefPath(ref);
+              return (
+                <li key={`${ref.type}-${ref.id}`}>
+                  {path && onOpenPath
+                    ? <Button type="button" size="sm" variant="secondary" onClick={() => onOpenPath(path, objectRefLabel(ref.type))}>{objectRefLabel(ref.type)}<span className="font-mono text-[11px] opacity-70">{ref.id}</span></Button>
+                    : <Badge variant="outline">{objectRefLabel(ref.type)}<span className="font-mono text-[11px] opacity-70">{ref.id}</span></Badge>}
+                </li>
+              );
+            })}
+          </ul>
+          {sourcePath === null || !onOpenPath ? (
+            <p className="text-xs text-muted-foreground">
+              {detail.business?.executionMode === "SOURCE_BUSINESS"
+                ? "结算调整的结果由来源订单流程消费；请从上方订单对象进入完成双方确认、客服复核与过账，审批页不提供通用执行。"
+                : "这些对象类型当前没有可跳转的平台页面，只列出标识供核对。"}
+              {sourcePath !== null && !onOpenPath ? " 工作区尚未提供跨对象导航，请从左侧导航进入对应页面。" : ""}
+            </p>
+          ) : null}
         </Section>
       ) : null}
 
-      <details data-approval-business-details className="rounded-md border border-border/60 p-3">
-        <summary className="cursor-pointer text-sm font-medium">申请明细与业务结果</summary>
-        <div className="mt-4 space-y-5"><BusinessSummary business={detail.business} operationCode={detail.operation.code} /></div>
-      </details>
+
       <details className="rounded-md border border-border/60 p-3">
         <summary className="cursor-pointer text-sm font-medium">候选名单与资格说明</summary>
         <div className="mt-3"><Candidates candidates={detail.candidates} availability={detail.candidateAvailability} /></div>
@@ -600,6 +603,7 @@ export function RequestDetail({
           <summary className="cursor-pointer select-none text-muted-foreground">载荷快照与模板标识</summary>
           <div className="mt-2">
             <FactGrid>
+              <Fact label="申请编号" value={detail.requestId} mono />
               <Fact label="操作标识" value={detail.operation.code} mono />
               <Fact label="触发条件" value={detail.operation.triggerCondition} mono />
               <Fact label="载荷版本" value={`v${detail.operation.payloadVersion}`} />

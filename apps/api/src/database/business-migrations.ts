@@ -276,6 +276,9 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   await configureAdminSecurityCommandPrivileges(pool, runtimeRole);
   await configureMembershipGrowthPrivileges(pool, runtimeRole);
   await configureLegacyGrowthCoveragePrivileges(pool, runtimeRole);
+  // The marker is present only after the separately approved uniform-policy schema installation.
+  if ((await pool.query("SELECT to_regprocedure('zzsh_order.distribution_policy_contract_version()') IS NOT NULL AS present")).rows[0]?.present === true)
+    await pool.query(`GRANT EXECUTE ON FUNCTION zzsh_order.distribution_policy_contract_version() TO ${runtimeUser};`);
   await configureDistributionFinancialPrivileges(pool, runtimeRole);
   await configureCreditGuaranteePrivileges(pool, runtimeRole);
   await configureContinuityFinancePrivileges(pool, runtimeRole);

@@ -9,23 +9,23 @@ import {exactCents,sourceYuanToCents,encodeFinanceCursor,decodeFinanceCursor,OPE
 import {hasProvedNativeHistoryAbsence,readObservationCoverage} from './personal-finance-coverage';
 import {readLegacyCommissionFinance,readLegacyCommissionFinanceVersion,type LegacyCommissionFinance} from './legacy-duty-finance-store';
 import {readOriginalPaymentDistributionBasis,type PaymentDistributionBasis} from './distribution-payment-basis';
-import {referralPercent,validateDistributionPolicy} from './distribution-policy';
+import {distributionPolicyRates,referralPercent,validateDistributionPolicy} from './distribution-policy';
 import {prepareAccrualFromFrozenPayment} from './distribution-accrual';
 
 const states=['ALL','PENDING','SETTLED','REVOKED','RECOVERY_REQUIRED','EXPIRED'] as const;
-export type EarningsQuery={state:typeof states[number];limit:number;cursor:string|null;projectionVersion?:2};
+export type EarningsQuery={state:typeof states[number];limit:number;cursor:string|null;projectionVersion?:2;calculationVersion?:2};
 export function parseEarningsQuery(q:URLSearchParams):EarningsQuery{
  for(const k of q.keys())if(!['state','limit','cursor','projectionVersion'].includes(k)||q.getAll(k).length!==1)throw invalid('Unsupported earnings query');
  const state=q.get('state')??'ALL',limit=q.get('limit')??'20';
  if(!states.includes(state as EarningsQuery['state'])||!/^[1-9]\d?$/.test(limit)||Number(limit)>50)throw invalid('Invalid earnings query');
  return{state:state as EarningsQuery['state'],limit:Number(limit),cursor:q.get('cursor'),...(parseFinanceProjectionVersion(q)===2?{projectionVersion:2 as const}:{})};
 }
-export function parseEarningsDetailQuery(q:URLSearchParams):EarningsQuery{for(const k of q.keys())if(k!=='projectionVersion')throw invalid('Unsupported earning detail query');return parseEarningsQuery(q);}
+export function parseEarningsDetailQuery(q:URLSearchParams):EarningsQuery{for(const k of q.keys())if(!['projectionVersion','calculationVersion'].includes(k)||q.getAll(k).length!==1)throw invalid('Unsupported earning detail query');const calculation=q.get('calculationVersion');if(calculation!==null&&calculation!=='2')throw invalid('Unsupported earning calculation version');const base=new URLSearchParams(q);base.delete('calculationVersion');return{...parseEarningsQuery(base),...(calculation==='2'?{calculationVersion:2 as const}:{})};}
 export function decodeEarningDetailId(raw:string){let id:string;try{id=decodeURIComponent(raw);}catch{throw notFound();}if(!/^(native|history):[A-Za-z0-9_-]{1,180}$/.test(id))throw notFound();return id;}
 const hash=(s:string)=>createHash('sha256').update(s).digest('hex');
 const unavailable=()=>new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Original earning evidence is inconsistent');
 export type EarningCalculation={knowledge:'NOT_RECORDED'|'UNKNOWN';reason:string}|{
- knowledge:'KNOWN';policyVersion:string;beneficiaryLevelCode:string;percent:string;basis:'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE';
+ knowledge:'KNOWN';policyVersion:string;beneficiaryLevelCode:string|null;rateMode?:'UNIFORM';percent:string;basis:'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE';
  baseDisclosure:'INTERNAL_SETTLEMENT_ONLY';rounding:'HALF_UP_CENT';cap:'COMBINED_ROLES_NOT_ABOVE_BASE';scope:'LOCAL_CONTROLLED';orderNumber:string|null;
 };
 function verifiedFrozenCalculation(f:Record<string,any>){
@@ -38,13 +38,13 @@ function verifiedFrozenCalculation(f:Record<string,any>){
  const policy=validateDistributionPolicy(basis.policyConfig as unknown as Record<string,unknown>);
  const roles=basis.roles.filter(r=>r.role===f.beneficiary_role&&r.beneficiaryUserId===f.beneficiary_user_id);
  if(roles.length!==1)throw unavailable();const role=roles[0]!;
- const level=policy.levels.find(l=>l.code===role.levelCode),percent=referralPercent(role.percent);
- if(role.status!=='ELIGIBLE'||!level||!role.ratio||canonicalize(role.ratio)!==canonicalize(percent.ratio)||seed.relationDigest!==role.relationDigest
-  ||referralPercent(role.role==='RENTER_REFERRAL'?level.renterPercent:level.ownerPercent).percent!==percent.percent)throw unavailable();
- return{seed,basis,level,percent,policyVersion:basis.policyVersion};
+ const rates=distributionPolicyRates(policy,role.levelCode),level=policy.schema==='distribution-policy.v2'?{code:null}:policy.levels.find(l=>l.code===role.levelCode),percent=referralPercent(role.percent);
+ if(role.status!=='ELIGIBLE'||!level||!rates||role.levelCode!==rates.levelCode||!role.ratio||canonicalize(role.ratio)!==canonicalize(percent.ratio)||seed.relationDigest!==role.relationDigest
+  ||referralPercent(role.role==='RENTER_REFERRAL'?rates.renterPercent:rates.ownerPercent).percent!==percent.percent)throw unavailable();
+ return{seed,basis,level,percent,policyVersion:basis.policyVersion,...(policy.schema==='distribution-policy.v2'?{rateMode:'UNIFORM' as const}:{})};
 }
 /** Only the beneficiary's frozen terms; the private posting/base and other parties never leave this reader. */
-export async function readEarningCalculation(c:PoolClient,actor:UserContext,row:Record<string,any>,installed:boolean):Promise<EarningCalculation>{
+export async function readEarningCalculation(c:PoolClient,actor:UserContext,row:Record<string,any>,installed:boolean,calculationVersion:1|2=1):Promise<EarningCalculation>{
  if(row.origin==='LEGACY_MYSQL')return{knowledge:'NOT_RECORDED',reason:'HISTORICAL_CALCULATION_NOT_RECORDED'};
  if(!installed)return{knowledge:'UNKNOWN',reason:'ORIGINAL_BASIS_UNAVAILABLE'};
  const f=(await c.query(`SELECT e.id,e.order_id,e.payment_confirmation_id,e.beneficiary_user_id,e.beneficiary_role,e.amount_cents::text,
@@ -58,13 +58,14 @@ export async function readEarningCalculation(c:PoolClient,actor:UserContext,row:
  try{
   if(f.beneficiary_user_id!==actor.userId||`native:${f.id}`!==row.id||f.order_id!==row.order_id||f.beneficiary_role!==row.role||exactCents(f.amount_cents)!==exactCents(row.source_amount)
    )throw unavailable();
-  const {policyVersion,level,percent}=verifiedFrozenCalculation(f);
-  return{knowledge:'KNOWN',policyVersion,beneficiaryLevelCode:level.code,percent:percent.percent,
+  const {policyVersion,level,percent,rateMode}=verifiedFrozenCalculation(f);
+  if(rateMode==='UNIFORM'&&calculationVersion!==2)return{knowledge:'UNKNOWN',reason:'UNIFORM_CALCULATION_REQUIRES_VERSION_2'};
+  return{knowledge:'KNOWN',policyVersion,beneficiaryLevelCode:level.code,...(rateMode?{rateMode}:{}),percent:percent.percent,
    basis:'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE',baseDisclosure:'INTERNAL_SETTLEMENT_ONLY',rounding:'HALF_UP_CENT',
    cap:'COMBINED_ROLES_NOT_ABOVE_BASE',scope:'LOCAL_CONTROLLED',orderNumber:typeof f.order_number==='string'&&f.order_number.length<=80?f.order_number:null};
  }catch{return{knowledge:'UNKNOWN',reason:'FROZEN_CALCULATION_NOT_VERIFIED'};}
 }
-export type AdminEarningCalculation={knowledge:'KNOWN'|'UNKNOWN';policyVersion:string|null;levelCode:string|null;percent:string|null;baseCents:string|null;formula:string|null;reasonCodes:string[]};
+export type AdminEarningCalculation={knowledge:'KNOWN'|'UNKNOWN';policyVersion:string|null;levelCode:string|null;percent:string|null;baseCents:string|null;formula:string|null;rateMode?:'UNIFORM';reasonCodes:string[]};
 export type AdminEarningEventAction={knowledge:'KNOWN'|'UNKNOWN';action:'ACCRUE'|'SETTLE'|'REVOKE'|'RECOVER'|null;reasonCodes:string[]};
 const unknownCalculation=(reason:string):AdminEarningCalculation=>({knowledge:'UNKNOWN',policyVersion:null,levelCode:null,percent:null,baseCents:null,formula:null,reasonCodes:[reason]});
 function readKeys(ids:string[]){
@@ -90,7 +91,7 @@ export async function readAdminEarningCalculations(c:PoolClient,earningRootIds:s
   if(seen.has(f.id)){result.set(f.id,unknownCalculation('AMBIGUOUS_ORIGINAL_BASIS'));continue;}seen.add(f.id);
   if(!f.canonical_basis||!f.posting)continue;
   try{
-   const {seed,basis,level,percent}=verifiedFrozenCalculation(f),p=f.posting;
+   const {seed,basis,level,percent,rateMode}=verifiedFrozenCalculation(f),p=f.posting;
    if(p.id!==f.posting_id||p.order_id!==f.order_id||p.payment_confirmation_id!==f.payment_confirmation_id||hash(canonicalize(p))!==f.posting_digest
     ||typeof p.early!=='boolean'||p.manual_reason!==null&&typeof p.manual_reason!=='string')throw unavailable();
    const allocation=prepareAccrualFromFrozenPayment(basis,{origin:'NATIVE',orderId:f.order_id,confirmationId:f.payment_confirmation_id,postingId:p.id,
@@ -100,7 +101,7 @@ export async function readAdminEarningCalculations(c:PoolClient,earningRootIds:s
    const items=allocation.items.filter(item=>item.beneficiaryUserId===f.beneficiary_user_id&&item.role===f.beneficiary_role);
    if(items.length!==1)throw unavailable();const item=items[0]!;
    if(item.amountCents!==exactCents(f.amount_cents)||item.economicKey!==f.economic_key||seed.economicKey!==item.economicKey||seed.dueAt!==item.dueAt)throw unavailable();
-   result.set(f.id,{knowledge:'KNOWN',policyVersion:basis.policyVersion,levelCode:level.code,percent:percent.percent,baseCents:allocation.baseCents,
+   result.set(f.id,{knowledge:'KNOWN',policyVersion:basis.policyVersion,levelCode:level.code,...(rateMode?{rateMode}:{}),percent:percent.percent,baseCents:allocation.baseCents,
     formula:'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE',reasonCodes:[]});
   }catch{result.set(f.id,unknownCalculation('FROZEN_CALCULATION_NOT_VERIFIED'));}
  }
@@ -201,7 +202,7 @@ export async function readMyDistributionEarnings(pool:Pool,actor:UserContext,q:E
   const asOf=after?.asOf??(await c.query(`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`)).rows[0].at;
   const projection=`SELECT *,to_char(occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS occurred_at,
    to_char(due_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS due_at FROM earnings`;
-  if(detailId){const row=(await c.query(sql+projection+' WHERE id=$2',[actor.userId,detailId])).rows[0];if(!row)throw notFound();const finance=projectionVersion===2&&installed.legacy_finance===true&&row.origin==='LEGACY_MYSQL'?await readLegacyCommissionFinance(c,actor.userId,[row.source_id]):null;return{contractVersion:'distribution-earnings.read.v1',...(projectionVersion===2?{projectionVersion:2 as const}:{}),subjectId:actor.userId,snapshotVersion,asOf,item:{...earningProjection(row,finance?.get(row.source_id),projectionVersion),...(projectionVersion===2?{calculation:await readEarningCalculation(c,actor,row,installed.earning_basis===true)}:{})}};}
+  if(detailId){const row=(await c.query(sql+projection+' WHERE id=$2',[actor.userId,detailId])).rows[0];if(!row)throw notFound();const finance=projectionVersion===2&&installed.legacy_finance===true&&row.origin==='LEGACY_MYSQL'?await readLegacyCommissionFinance(c,actor.userId,[row.source_id]):null;return{contractVersion:'distribution-earnings.read.v1',...(projectionVersion===2?{projectionVersion:2 as const}:{}),subjectId:actor.userId,snapshotVersion,asOf,item:{...earningProjection(row,finance?.get(row.source_id),projectionVersion),...(projectionVersion===2?{calculation:await readEarningCalculation(c,actor,row,installed.earning_basis===true,q.calculationVersion??1)}:{})}};}
   const rows=(await c.query(sql+projection+` WHERE imported_at<=$2::timestamptz AND($3='ALL' OR state=$3)
    AND($4::timestamptz IS NULL OR (earnings.occurred_at,id COLLATE "C")<($4::timestamptz,$5 COLLATE "C"))
    ORDER BY earnings.occurred_at DESC,id COLLATE "C" DESC LIMIT $6`,[actor.userId,asOf,q.state,after?.position.at??null,after?.position.id??null,q.limit+1])).rows;

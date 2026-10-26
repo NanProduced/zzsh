@@ -358,6 +358,7 @@ test("Delta admin owner options omit legacy melee parents without changing anoth
       if (sql.includes('FROM "zzsh_supply"."game" WHERE "id" = $1')) return { rows: [{ id: "game_fixture", code }], rowCount: 1 };
       if (sql.includes("FROM zzsh_supply.skin_owner")) return { rows: owners, rowCount: owners.length };
       if (/FROM (?:"zzsh_supply"\."(?:billable_item|skin_rarity|skin_category|skin|entitlement)"|zzsh_supply\.firearm)/.test(sql)) return { rows: [], rowCount: 0 };
+      if(sql.includes("categoryless-skin-storage"))return {rows:[{ready:false}],rowCount:1};
       throw new Error("UNMODELLED_OWNER_DIRECTORY_QUERY");
     } } as unknown as PoolClient;
     const result = await readAdminCatalog(client, "admin", true, "game_fixture");
@@ -508,4 +509,23 @@ test("skin audit preserves ordinary OSS image processing parameters and source o
     assert.deepEqual(snapshot.media_source, row.media_source);
     assert.equal(JSON.stringify(row), before);
   }
+});
+
+// Same-identity operator display corrections reuse the existing protected writer.
+const displayEdit = { expectedCatalogRevision:"10", ownerKind:"AGENT", ownerRef:{kind:"AGENT",id:"owner_fixture"}, baseName:"New", confirmIdentity:true, ...evidence };
+test("operator display edit preserves stable/source identity, disabled state and prior display alias exactly once", async () => {
+ for(const aliases of [["earlier"],["earlier","露娜-Old"]]) {
+  const row={...legacy,name:"露娜-Old",naming_state:"VERIFIED",owner_kind:"AGENT",owner_id:"owner_fixture",base_name:"Old",enabled:false,form_visible:false,aliases,source_namespace:"legacy.mysql",source_field:"skin",source_token:"raw-token"};
+  const f=clientFixture(row);const result=await updateCatalogEntry(f.client,"a",true,"skins","skin_fixture",{...displayEdit,isCollectible:false,defaultState:"UNKNOWN"});
+  assert.equal(result.code,"stable_code");assert.equal(result.namingState,"VERIFIED");assert.equal(result.catalogRevision,"11");
+  const update=f.calls.find(c=>c.sql.startsWith("UPDATE zzsh_supply.skin SET"))!;assert.equal(update.args[0],"露娜-New");assert.equal(update.args[1],false);assert.equal(update.args[2],false);assert.equal((update.args[7] as string[]).filter((x:string)=>x==="露娜-Old").length,1);assert.deepEqual(update.args.slice(8,14),["legacy.mysql","skin","raw-token","AGENT","owner_fixture",null]);assert.equal(update.args[15],"skin_fixture");assert.equal(update.args[17],false);assert.equal(update.args[18],"UNKNOWN");
+ }
+});
+test("operator display edit does not bypass evidence, derived name or immutable source constraints", async () => {
+ const row={...legacy,name:"露娜-Old",naming_state:"VERIFIED",owner_kind:"AGENT",owner_id:"owner_fixture",base_name:"Old",source_namespace:"legacy.mysql",source_field:"skin",source_token:"raw"};
+ for(const body of [{...displayEdit,evidenceRefs:[]},{...displayEdit,name:"Other-New"},{...displayEdit,code:"another"},{...displayEdit,sourceNamespace:"other.namespace",sourceField:"skin",sourceToken:"raw"}]) {
+  const f=clientFixture(row);await assert.rejects(updateCatalogEntry(f.client,"a",true,"skins","skin_fixture",body));assert.ok(!f.calls.some(c=>c.sql.startsWith("UPDATE zzsh_supply.skin SET")));
+ }
+ const f=clientFixture(row,{revision:"11"});await assert.rejects(updateCatalogEntry(f.client,"a",true,"skins","skin_fixture",displayEdit),/Catalog changed/);assert.ok(!f.calls.some(c=>c.sql.startsWith("UPDATE zzsh_supply.skin SET")));
+ await assert.rejects(updateCatalogEntry(clientFixture(row,{cas:false}).client,"a",true,"skins","skin_fixture",displayEdit),/Catalog changed/);
 });

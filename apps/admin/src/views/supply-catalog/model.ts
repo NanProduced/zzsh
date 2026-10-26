@@ -13,6 +13,7 @@ export function preferredCatalogGame(games: SupplyGame[], current: string, prefe
 }
 
 export const OBJECT_ORDER: CatalogKind[] = ["items", "categories", "skins", "skin-owners", "rarities", "entitlements"];
+export const catalogKindsForGame = (code?: string): CatalogKind[] => code === "delta" ? OBJECT_ORDER.filter(kind => kind !== "categories") : OBJECT_ORDER;
 
 export const OBJECT_LABEL: Record<CatalogKind, string> = {
   items: "计费物品",
@@ -161,6 +162,7 @@ export function ownerText(
 export const skinOwnerKind = (skin: Pick<CatalogSkin, "ownerKind" | "ownerRef">) => skin.ownerKind ?? skin.ownerRef?.kind ?? null;
 export function skinIsSelectable(skin: CatalogSkin, catalog: AdminCatalogResponse): boolean {
   if (!catalog.game.enabled || !skin.enabled || !skin.formVisible || skin.namingState !== "VERIFIED") return false;
+  if (catalog.game.code === "delta") return true;
   const seen = new Set<string>();
   let categoryId: string | null = skin.categoryId;
   while (categoryId !== null) {
