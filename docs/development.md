@@ -98,7 +98,7 @@ collection `recovery` 显式配置workerId、每批1–10、最小间隔30–864
 
 ## 银行资料、提现历史与商户账户
 
-`WITHDRAWAL_BANK_BINDING_ENABLED`、`JOINPAY_PAYOUT_ENABLED`、`JOINPAY_ACCOUNTS_ENABLED` 缺省均为false；关闭时不读取各自配置/密钥或启动任务。显式开启使用同名 `_CONFIG`/`_CONFIG_FILE`，继续由原 `readSecret` 限定文件位置及准确runtime资源。银行卡保护钥引用为 `WITHDRAWAL_BANK_KEY_`，只在受权存取时按版本读取；新银行卡测试表尚未转为正式迁移，不能因源码已接线就启用。
+`WITHDRAWAL_BANK_BINDING_ENABLED`、`JOINPAY_PAYOUT_ENABLED`、`JOINPAY_ACCOUNTS_ENABLED` 缺省均为false；关闭时不读取各自配置/密钥或启动任务。显式开启使用同名 `_CONFIG`/`_CONFIG_FILE`；`_FILE` 必须是相对 API 工作目录、指向 `.secrets` 内的路径，绝对路径会被 `readSecret` 拒绝。配置还须匹配实际数据库与runtime角色。银行卡保护钥引用为 `WITHDRAWAL_BANK_KEY_`，专用本地保护钥只创建一次、重启复用，只在受权存取时按版本读取。银行卡结构已登记于正式迁移0101；实际迁移、窄权限及运行配置仍分别核验，不能因源码已接线就启用。资料存储不代表银行实名验证或代付能力。
 
 银行卡保存/修改由本人会话、Origin、原key和版本约束，公开结果只给掩码。绑定表以AES-GCM保护资料；`USER_AUTHORIZED_BANK_BINDING`只证明用户声明，不能显示成银行要素验证。显式 `LEGACY_CODE_PASSTHROUGH` 供给原S104字段原值，既有私有提现意图及canonical可能保留该目标原值，`Enc`字段名不代表本地密文；不得把完整目标放入DTO、审计或日志。正式启用仍需真实受信身份及商户资料、目标存储保护和产品要求专项核验，当前fake身份不能取得新提现资格。
 
