@@ -156,14 +156,17 @@ export function OrderStages({
       : o.status === 'COMPLETED' ? '开租待核 · 已完成' : '开租待核';
 
   if (variant === 'compact') {
+    // 列表只保留关键阶段：创建、支付与最远已发生/待处理节点；完整节点留在详情。
+    const furthest = [...facts].reverse().find(f => f.state !== 'none') ?? facts[facts.length - 1];
+    const compactFacts = facts.length > 3 ? [facts[0]!, facts[1]!, furthest!].filter((f, index, all) => all.indexOf(f) === index) : facts;
     return <div className={`oc-stages oc-stages-compact ${className ?? ''}`.trim()}>
       <div className="oc-compact-meta"><strong className="oc-stage-label">{ORDER_STATUS_LABELS[o.status] ?? '状态待核'}</strong><small>{compactText ? `${compactText} · ` : ''}{paymentText}{refundText}{cancelText}</small></div>
       <ol aria-label="订单进度">
-        {facts.map((f, i) => (
+        {compactFacts.map((f, i) => (
           <li key={f.name} className={f.state}>
             <span className="oc-stage-node"><f.Icon size={12} /></span>
             <span className="oc-stage-name">{f.name}</span>
-            {i < facts.length - 1 ? <span className="oc-stage-line" /> : null}
+            {i < compactFacts.length - 1 ? <span className="oc-stage-line" /> : null}
           </li>
         ))}
       </ol>

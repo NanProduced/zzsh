@@ -190,3 +190,33 @@ test('native payout evidence uses API fee serial and original target names witho
  await until(()=>ui.node.querySelector('[data-withdrawal-evidence]'));const card=ui.node.querySelector('[data-withdrawal-evidence]');
  assert.match(card.textContent,/4\.00 元/);assert.match(card.textContent,/0\.00 元/);assert.match(card.textContent,/\*\*\*\*1234/);assert.match(card.textContent,/JOINPAY-T-1/);assert.match(card.textContent,/PAYOUT-1/);assert.match(card.textContent,/汇聚原生记录/);assert.doesNotMatch(ui.node.textContent,/本地受控成功/);
 });
+
+test('object header names the business type and localizes the raw original order status', async t => {
+  const known = cents => ({ knowledge: 'KNOWN', cents, reasonCodes: [] });
+  const unknown = () => ({ knowledge: 'UNKNOWN', cents: null, reasonCodes: ['ORIGINAL_BASIS_UNAVAILABLE'] });
+  const settlement = { schema: 'admin-order-settlement-evidence.v1', documentRef: 'ORDER:o1', readiness: 'READY', posting: { state: 'POSTED', ref: 'posting-1', postedAt: '2026-10-19T19:51:09Z' }, captured: known('15908'), ownerNet: known('9000'), refundPayable: known('5000'), refunded: unknown(), historicalRefund: unknown(), refundDueAt: null, channel: { state: 'UNKNOWN', reference: null }, platformContribution: known('1908'), dutyRefs: [], reasonCodes: [] };
+  const entry = { id: 'e1', documentRef: 'ORDER:o1', documentNumber: 'ORDER-1', subjectId: 'u1', subjectName: '用户一', bucket: 'AVAILABLE', direction: 'IN', deltaCents: '9000', knowledge: 'KNOWN', kind: 'SETTLEMENT', state: 'POSTED', classification: 'POSTED', occurredAt: '2026-10-19T19:51:09Z', evidence: {}, reasonCodes: [], sourceType: 'NATIVE', sourceSystem: 'zzsh', sourceEntity: 'ledger_entry', sourceId: 'e1' };
+  const documentValue = { ...document, ref: 'ORDER:o1', number: 'ORDER-1', kind: 'SETTLEMENT', state: 'POSTED', entryCount: 1, subjects: [{ id: 'u1', name: '用户一' }] };
+  globalThis.fetch = async url => response(payload(url, { document: documentValue, entries: [entry], evidence: { originalOrderStatus: 'COMPLETED', postedPlatformContributionCents: '1908' }, orderSettlement: settlement, related: [], reasonCodes: [] }));
+  const ui = await setup(t, 'object-header', '/finance/documents/ORDER%3Ao1'); await ui.render();
+  await until(() => ui.node.textContent.includes('本单已记平台结算贡献'));
+  const applied = ui.node.querySelector('.finance-applied').textContent;
+  assert.match(applied, /订单结算/);
+  assert.match(applied, /已入账/);
+  assert.match(applied, /1 条分录/);
+  assert.match(applied, /用户一/);
+  assert.equal(applied.includes('当前对象'), false);
+  const facts = ui.node.querySelector('.finance-fact-list');
+  assert.match(facts.textContent, /已完成/);
+  assert.equal(facts.textContent.includes('COMPLETED'), false);
+  assert.equal(facts.textContent.includes('原账平台分项'), false, 'settlement evidence already owns the platform contribution row');
+});
+
+test('unposted cancelled original is named as an original and its order state is localized', async t => {
+  const cancelled = { ...document, ref: 'ORDER:order_cancelled', number: 'ORDER-CANCELLED', kind: 'SETTLEMENT', state: 'CANCELLED', subjects: [{ id: 'u1', name: '用户一' }], entryCount: 0, amounts: [] };
+  globalThis.fetch = async url => response(payload(url, { documents: [cancelled], documentCount: 1, entryCount: 0 }));
+  const ui = await setup(t, 'cancelled-original'); await ui.render();
+  await until(() => ui.node.textContent.includes('订单原单（未结算）'));
+  assert.match(ui.node.textContent, /已取消/);
+  assert.equal(ui.node.textContent.includes('订单结算'), false);
+});

@@ -32,7 +32,7 @@ import {
   depositCentsFromYuan,
   depositYuanFromCents,
   rowDisplaySourceText,
-  rowRentalTerms,
+  rowTermsLines,
   parseSavedViews,
   primaryReason,
   savedKey,
@@ -239,11 +239,12 @@ export function useSavedViews(adminId: string) {
 }
 
 export function AccountCards({ items, onView }: { items: SupplyWorkItem[]; onView: (row: SupplyWorkItem, trigger?: HTMLElement) => void }) {
-  return <div className="grid gap-2">{items.map(row => { const rule = row.facts.reasons.includes("CONFIRMATION_OR_MEDIA_REQUIRED") || row.facts.reasons.includes("RULE_CHANGED"), terms = rowRentalTerms(row), fees = rowBaseFeeRows(row);
+  return <div className="grid gap-2">{items.map(row => { const rule = row.facts.reasons.includes("CONFIRMATION_OR_MEDIA_REQUIRED") || row.facts.reasons.includes("RULE_CHANGED"), terms = rowTermsLines(row), fees = rowBaseFeeRows(row);
     return <Card size="sm" key={row.id} id={"supply-card-" + row.id} role="button" tabIndex={0} aria-label={"快速查看 " + supplyObjectLabel(row)} onClick={e => onView(row, e.currentTarget)} onKeyDown={e => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onView(row, e.currentTarget); } }} className="cursor-pointer gap-0 p-4 outline-none transition-colors hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/50"><div className="flex items-start justify-between gap-2"><div className="min-w-0"><AccountIdentity row={row}/></div><ChevronRight className="mt-1 size-4 shrink-0 text-muted-foreground" aria-hidden="true"/></div>
       <div className="mt-2 space-y-0.5 text-xs tabular-nums">
         <p>{rowCoreAssetsText(row)}</p>
-        <p>{terms.term} · {terms.daily} · 登录 {terms.login} · 包赔 {terms.payout}</p>
+        <p>{terms.conditions}</p>
+        <p>{terms.loginPayout}</p>
         <p>哈夫币租金 {fees.haff} · 物资费 {fees.materials} · 租客基础押金 {fees.deposit} · 资源费合计 {fees.total}</p>
       </div>
       <div className="mt-2 flex items-start gap-2"><StatusBadge facts={row.facts}/><ReasonCell facts={row.facts} onMore={() => onView(row, document.getElementById("supply-card-" + row.id) ?? undefined)}/></div>
@@ -265,13 +266,13 @@ export function QuickView({ row, canRead, onClose, onOpenFull }: QuickProps) {
   const historical = detail?.supervision.facts.historicalRead ?? row.facts.historicalRead;
   const attrs = v ? attributeFacts(v) : [], inventory = v ? inventoryRows(v, null) : [], lines = v ? quoteLineFacts(v) : [];
   const verdict = facts.newOrders === null ? "新单资格待核" : facts.newOrders ? "可接新单" : "不可接新单";
+  const declaredAttribute = v ? Object.values(v.declaration.attributes).some(value => value !== null && value !== undefined && value !== "" && !(Array.isArray(value) && value.length === 0)) : false;
+  const emptyDraft = Boolean(v && !declaredAttribute && !v.declaration.inventory.length && !v.declaration.entitlements.length && !v.declaration.skins.length && !v.termOption?.displayName);
   const releaseId = v?.releaseId ?? null;
   const ratio = v?.quote?.baseRenterHaffRatioWanPerYuan ?? null;
   const feeSource = v?.feeSummary ?? (publicDefault ? row.summary?.feeSummary : null);
   let fees = feeSource ? feeSummaryRows(feeSource) : feeSummaryRows(null);
   if (!feeSource?.resourceTotal && v?.quote?.resourceTotal?.amount) fees = { ...fees, total: `¥${formatAmount(v.quote.resourceTotal.amount)}` };
-  const termName = publicDefault ? publicDefault.termOption?.displayName ?? null : v?.termOption?.displayName ?? null;
-  const daily = publicDefault ? publicDefault.termOption?.dailyConsumption?.quantity ?? null : v?.termOption?.dailyConsumption?.quantity ?? null;
   const termSeconds = publicDefault ? publicDefault.quote?.termSeconds ?? null : v?.quote?.termSeconds ?? null;
   const declared = v?.declaration.attributes ?? {};
   const deposit = declared.owner_deposit_declaration as Record<string, unknown> | undefined;
@@ -301,7 +302,7 @@ export function QuickView({ row, canRead, onClose, onOpenFull }: QuickProps) {
         <IdLine row={row}/>
         <span className="text-xs text-muted-foreground">·</span>
         <StatusBadge facts={facts}/>
-        <span className="text-xs text-muted-foreground">· {publicDefault ? "对外版" : showDraft && publicBasis ? "当前草稿" : facts.publicVisible === false ? "当前草稿" : "当前资料"} · {verdict}{g.blocked.length ? ` · ${g.blocked.length} 项已确认阻塞` : ""}{g.pending.length ? `、${g.pending.length} 项待核` : ""}</span>
+        <span className="text-xs text-muted-foreground">· {publicDefault ? "对外版" : showDraft && publicBasis ? "当前草稿" : facts.publicVisible === false ? "当前草稿" : facts.publicVisible === true ? "对外展示资料" : "当前资料"} · {verdict}{g.blocked.length ? ` · ${g.blocked.length} 项已确认阻塞` : ""}{g.pending.length ? `、${g.pending.length} 项待核` : ""}</span>
       </div>
     </header>
     <div className="max-h-[calc(100dvh-14rem)] overflow-y-auto px-5 py-4">
@@ -310,7 +311,7 @@ export function QuickView({ row, canRead, onClose, onOpenFull }: QuickProps) {
 
       <section className="border-t pt-3 first:border-t-0 first:pt-0">
         <h3 className="mb-2 text-sm font-semibold">基本属性与使用条件</h3>
-        {v ? <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm sm:grid-cols-3">{attrs.map(fact => <div key={fact.label}><dt className="text-xs text-muted-foreground">{fact.label}</dt><dd className={fact.unconfirmed ? "text-amber-700 dark:text-amber-400" : ""}>{fact.value}</dd></div>)}<div><dt className="text-xs text-muted-foreground">全额包赔</dt><dd>{payoutLabel}</dd></div></dl> : <p className="text-sm text-muted-foreground">{error ? "详情未读到，属性暂不可核对。" : "正在读取属性…"}</p>}
+        {v ? (emptyDraft ? <p className="text-sm text-muted-foreground">本版尚未填写申报属性；完整字段可在档案中逐项核对，未申报不按否处理。</p> : <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm sm:grid-cols-3">{attrs.map(fact => <div key={fact.label}><dt className="text-xs text-muted-foreground">{fact.label}</dt><dd className={fact.unconfirmed ? "text-amber-700 dark:text-amber-400" : ""}>{fact.value}</dd></div>)}<div><dt className="text-xs text-muted-foreground">全额包赔</dt><dd>{payoutLabel}</dd></div></dl>) : <p className="text-sm text-muted-foreground">{error ? "详情未读到，属性暂不可核对。" : "正在读取属性…"}</p>}
       </section>
 
       <section className="mt-4 border-t pt-3">
@@ -326,8 +327,6 @@ export function QuickView({ row, canRead, onClose, onOpenFull }: QuickProps) {
           <div><dt className="text-xs text-muted-foreground">物资费</dt><dd className="tabular-nums">{fees.materials}</dd></div>
           <div><dt className="text-xs text-muted-foreground">资源费合计（资料版冻结参考）</dt><dd className="tabular-nums">{fees.total}</dd></div>
           <div><dt className="text-xs text-muted-foreground">租客基础押金（号主申报）</dt><dd className="tabular-nums">{depositText}</dd></div>
-          <div><dt className="text-xs text-muted-foreground">租期规则</dt><dd>{termName ?? "未提供"}</dd></div>
-          <div><dt className="text-xs text-muted-foreground">每日消耗</dt><dd className="tabular-nums">{daily ? quantityText(daily) : "未提供"}</dd></div>
           <div><dt className="text-xs text-muted-foreground">资料租期（冻结原值）</dt><dd>{termSeconds ? formatTermDays(termSeconds) : "未提供"}</dd></div>
           <div><dt className="text-xs text-muted-foreground">全额包赔</dt><dd>{payoutLabel}</dd></div>
           <div><dt className="text-xs text-muted-foreground">规则版本</dt><dd className="break-all">{releaseId ?? "未提供"}</dd></div>

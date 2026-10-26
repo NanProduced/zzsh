@@ -262,7 +262,7 @@ export function rowBaseFeeRows(row: SupplyWorkItem): { haff: string; materials: 
 export function rowDisplaySourceText(row: SupplyWorkItem): string {
   if (row.summary?.displaySource === "PUBLIC_VERSION") return "对外版";
   if (!row.summary) return row.facts.historicalRead ? "历史资料" : "资料未装配";
-  return row.facts.publicVisible === false ? "当前草稿" : "当前资料";
+  return row.facts.publicVisible === false ? "当前草稿" : row.facts.publicVisible === true ? "对外版" : "当前资料";
 }
 
 /** 列表核心资源：哈夫币与已申报的关键物资；未装配摘要时明确未提供，不拿标题猜。 */
@@ -293,6 +293,16 @@ export function rowRentalTerms(row: SupplyWorkItem): { term: string; daily: stri
     login: login?.displayName ?? (login?.code ? `未确认（代码 ${login.code}）` : "登录未提供"),
     payout: rowFullPayout(row).label,
   };
+}
+
+/** 列表出租条件两行：同版摘要缺失时只说明一次，不把同一占位重复三遍。 */
+export function rowTermsLines(row: SupplyWorkItem): { conditions: string; loginPayout: string } {
+  const terms = rowRentalTerms(row);
+  if (!row.summary) return { conditions: "租期与日耗摘要未装配", loginPayout: "登录与包赔摘要未装配" };
+  if (!row.summary.versionId) return { conditions: "资料版本未提供，租期、日耗与登录方式待核对", loginPayout: `包赔 ${terms.payout}` };
+  const conditions = [terms.term, terms.daily].filter((value, index, all) => value && all.indexOf(value) === index).join(" · ");
+  const login = terms.login.startsWith("登录") ? terms.login : `登录 ${terms.login}`;
+  return { conditions, loginPayout: `${login} · 包赔 ${terms.payout}` };
 }
 
 /** 当前冻结报价优先，历史租金与物资费分开，均不称下单应付。 */

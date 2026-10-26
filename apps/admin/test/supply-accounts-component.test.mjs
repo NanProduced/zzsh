@@ -314,6 +314,20 @@ test('quick view reuses loaded attributes and marks quote provenance without fet
 });
 
 
+test('empty draft quick view states that the version has no declaration instead of repeating twelve unprovided fields', async (t) => {
+  const value = workDetail();
+  value.version.declaration.attributes = {}; value.version.declaration.inventory = []; value.version.declaration.entitlements = []; value.version.declaration.skins = []; value.version.declaration.title = '';
+  value.version.presentation = { items: [], skins: [], entitlements: [] };
+  value.version.termOption = { code: 'legacy_daily_10m' };
+  const h = await mountHarness(t, { permissions, fetchImpl: async url => url.pathname.endsWith('/listing-reviews') ? json(page) : json(value) });
+  await tick(h); await h.click(h.el.querySelector('#supply-open-a')); await tick(h);
+  const text = h.el.querySelector('[data-slot="dialog-content"]').textContent;
+  assert.match(text, /本版尚未填写申报属性/);
+  assert.equal(text.includes('体力等级'), false, 'missing attributes are not repeated as a wall');
+  assert.match(text, /本版未申报物资/);
+  assert.equal(h.writes.length, 0);
+});
+
 test('F2 public v1 stays the single basis across list, quick view and complete detail until the draft is explicitly chosen', async (t) => {
   const publicBasis = {
     id: 'v-public', releaseId: 'rel-public', contentHash: 'hash-public', accountId: 'a', title: null, description: '对外说明',

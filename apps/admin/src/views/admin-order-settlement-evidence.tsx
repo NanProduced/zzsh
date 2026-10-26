@@ -7,7 +7,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { financeMoney, financeTime, reasonLabels, type OrderSettlementEvidence, type OrderSettlementMoney } from './admin-finance-api';
 
 export type OrderSettlementReadState = 'loading' | 'ready' | 'forbidden' | 'missing' | 'unavailable' | 'conflict';
-export const ORDER_SETTLEMENT_FLAT_KEYS = new Set(['postingCapturedCents', 'refundPayableCents', 'refundPaidCents', 'refundDueAt', 'postedAt', 'channelState', 'channelReference', 'refundPaymentReference']);
+export const ORDER_SETTLEMENT_FLAT_KEYS = new Set(['postingCapturedCents', 'refundPayableCents', 'refundPaidCents', 'refundDueAt', 'postedAt', 'channelState', 'channelReference', 'refundPaymentReference', 'postedPlatformContributionCents']);
 const money = (value: OrderSettlementMoney | undefined) => financeMoney(value?.knowledge === 'KNOWN' ? value.cents : null);
 const dutyKinds: Record<string, string> = { RENTER_REFUND: '租客退款责任', OWNER_CREDIT: '号主收益责任', COMMISSION: '分销责任', DEPOSIT_COMPENSATION: '押金补偿责任' };
 const dutyStates: Record<string, string> = { PENDING: '原责任待处理', MATURED: '原责任已成熟', SETTLED: '原责任已终定', VOID: '原责任已作废' };
@@ -22,12 +22,13 @@ export function orderSettlementSummary(evidence: OrderSettlementEvidence): strin
   return [(evidence.posting.state === 'FINALIZED_ZERO' ? '责任终定：' : '结算过账：') + postingLabel(evidence), ...moneyRows(evidence).map(([label, value]) => `${label}：${money(value)}`), '渠道到账：未核定'];
 }
 
-export function AdminOrderSettlementEvidence({ state = 'ready', evidence, requestId, paymentState, onRetry, onOpenDocument }: {
+export function AdminOrderSettlementEvidence({ state = 'ready', evidence, requestId, paymentState, onRetry, onOpenDocument, embedded = false }: {
   state?: OrderSettlementReadState; evidence?: OrderSettlementEvidence; requestId?: string; paymentState?: string;
-  onRetry?: () => void; onOpenDocument?: (documentRef: string, title?: string) => void;
+  onRetry?: () => void; onOpenDocument?: (documentRef: string, title?: string) => void; embedded?: boolean;
 }) {
   const title = '结算与退款依据';
-  if (state === 'loading') return <section data-order-settlement-evidence aria-busy="true" className="space-y-3 rounded-lg border border-border bg-card p-4"><h2 className="text-base font-semibold">{title}</h2><p className="text-sm text-muted-foreground">正在读取资金依据…</p><Skeleton className="h-20 w-full" /></section>;
+  const shell = embedded ? 'space-y-4' : 'space-y-4 rounded-lg border border-border bg-card p-4 text-card-foreground';
+  if (state === 'loading') return <section data-order-settlement-evidence aria-busy="true" className={shell}><h2 className="text-base font-semibold">{title}</h2><p className="text-sm text-muted-foreground">正在读取资金依据…</p><Skeleton className="h-20 w-full" /></section>;
   if (state !== 'ready' || !evidence) {
     const message = state === 'forbidden' ? '当前无权读取本单资金依据' : state === 'missing' ? '未找到当前范围内可读的资金单据' : state === 'conflict' ? '资金依据已变化，请重新读取' : state === 'ready' ? '尚未提供受权订单资金依据' : '资金依据暂不可用';
     const warning = state === 'forbidden' || state === 'missing' || state === 'conflict';
@@ -36,7 +37,7 @@ export function AdminOrderSettlementEvidence({ state = 'ready', evidence, reques
   const rows = moneyRows(evidence), reasons = [...new Set([...(evidence.reasonCodes ?? []), ...rows.flatMap(([, value]) => value?.reasonCodes ?? [])])];
   const visibleRows = evidence.posting.state === 'NOT_POSTED' ? rows.filter(([, value]) => value?.knowledge === 'KNOWN') : rows;
   const noPosting = evidence.posting.state === 'NOT_POSTED';
-  return <section data-order-settlement-evidence className="space-y-4 rounded-lg border border-border bg-card p-4 text-card-foreground">
+  return <section data-order-settlement-evidence className={shell}>
     <div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-base font-semibold">{title}</h2><Badge variant={evidence.posting.state === 'UNKNOWN' ? 'warning' : 'outline'}>{postingLabel(evidence)}</Badge></div>
     {evidence.readiness !== 'READY' ? <p className="text-sm text-muted-foreground">部分资金依据暂未就绪，以下只展示已取得的独立事实。</p> : null}
     {visibleRows.length ? <dl className="space-y-3 text-sm">{visibleRows.map(([label, value]) => <div key={label} className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1"><dt className="text-muted-foreground">{label}</dt><dd className="font-medium tabular-nums">{money(value)}</dd></div>)}</dl> : <p className="text-sm text-muted-foreground">当前未查到过账记录，没有已证实的实际结算金额；不以 0 或预付金额替代。</p>}

@@ -82,7 +82,7 @@ test('row reason: primary + others, concrete next steps, compact time', () => {
 /* ---------- F2：列表事实只来自正式摘要，缺值保持未提供 ---------- */
 import {
   alignedQuickRow, rowHaffText, rowQuoteText, rowDepositText, rowGuaranteeRequirementText,
-  rowGuaranteeEligibilityText, rowGuaranteeProofText, rowFullPayout, rowCoreAssetsText, rowRentalTerms,
+  rowGuaranteeEligibilityText, rowGuaranteeProofText, rowFullPayout, rowCoreAssetsText, rowRentalTerms, rowTermsLines,
 } from '../src/views/supply-accounts/account-list-model.ts';
 
 const rowOf = (over = {}) => ({ id: 'a', accountId: 'a', displayNo: 'A-1', ownerId: 'u-1', ownerName: '阿洛', revision: '3', gameName: 'g', versionId: 'v-1', sequence: '2', title: '100M 不包赔账号 3x3箱', reviewState: 'PUBLISHED', sortAt: '2026-10-03T00:00:00.000000Z', facts: facts(), ...over });
@@ -98,6 +98,13 @@ test('list core assets and rental terms come from the same-version summary, with
   const bare = rowOf();
   assert.equal(rowCoreAssetsText(bare), '未提供 · 物资摘要未装配');
   assert.deepEqual(rowRentalTerms(bare), { term: '租期摘要未装配', daily: '日耗摘要未装配', login: '登录摘要未装配', payout: '未提供' });
+});
+
+test('list rental terms render one compact line per missing basis instead of repeating the same placeholder', () => {
+  const summary = { versionId: 'v-1', sequence: '2', refs: {}, timing: {}, term: { code: 'daily', name: '日耗 10M', dailyConsumption: '10000000', termSeconds: '86400' }, login: { code: 'login_qq_qr', displayName: 'QQ扫码' }, fullPayout: 'SELECTED' };
+  assert.deepEqual(rowTermsLines(rowOf({ summary })), { conditions: '1 天 · 10 M 哈夫币', loginPayout: '登录 QQ扫码 · 包赔 已选' });
+  assert.deepEqual(rowTermsLines(rowOf()), { conditions: '租期与日耗摘要未装配', loginPayout: '登录与包赔摘要未装配' });
+  assert.deepEqual(rowTermsLines(rowOf({ summary: { ...summary, versionId: null } })), { conditions: '资料版本未提供，租期、日耗与登录方式待核对', loginPayout: '包赔 未提供' });
 });
 
 test('missing summary never becomes 免保证金、未交、已包赔 or 已下架', () => {
@@ -266,4 +273,11 @@ test('F3 the frozen term keeps 172800 as 2 days and a missing/null value is neve
   assert.equal(formatTermDays(publicBasisVersion(basis(undefined)).quote.termSeconds), '未确认');
   assert.equal(formatTermDays(publicBasisVersion(basis(null)).quote.termSeconds), '未确认');
   assert.notEqual(formatTermDays(publicBasisVersion(basis(null)).quote.termSeconds), '0 天');
+});
+
+test('a current version that renters can see is labelled 对外版, not 当前资料', () => {
+  const value = { versionId: 'v-1', sequence: '1', refs: {}, timing: {}, haff: null, materials: [], term: null, login: null, config: null, feeSummary: null, quote: null, baseDeposit: null, fullPayout: 'NOT_DECLARED', guarantee: { requirement: null, requirementSource: 'UNAVAILABLE', eligibility: null, recordedProof: null } };
+  assert.equal(rowDisplaySourceText(rowOf({ summary: value, facts: facts({ publicVisible: true }) })), '对外版');
+  assert.equal(rowDisplaySourceText(rowOf({ summary: value, facts: facts({ publicVisible: false }) })), '当前草稿');
+  assert.equal(rowDisplaySourceText(rowOf({ summary: { ...value, displaySource: 'PUBLIC_VERSION' }, facts: facts({ publicVisible: true }) })), '对外版');
 });

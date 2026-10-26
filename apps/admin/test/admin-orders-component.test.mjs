@@ -663,3 +663,60 @@ test('order account hover includes frozen quantities term and correctly labelled
  const button=node.querySelector('button[aria-label^="预览账号"]');assert(button);await act(async()=>button.click());await until(()=>document.querySelector('[aria-label="账号预览：A-001"]'));const card=document.querySelector('[aria-label="账号预览：A-001"]');
  assert.match(card.textContent,/AWM子弹 61 发/);assert.match(card.textContent,/六级甲 0 件/);assert.match(card.textContent,/2\s*天/);assert.match(card.textContent,/微信扫码/);assert.match(card.textContent,/本单租客押金/);assert.match(card.textContent,/¥0\.00/);assert.match(card.textContent,/本单冻结版本/);assert.equal(calls.length,initial);
 });
+
+test('order list renders the frozen source label once and keeps missing party numbers explicit', async t => {
+ const {root,node,AdminOrderChainView}=await setup(t);
+ const frozen={source:'ORDER_VERSION',haff:{code:'haff',quantity:'98080000',unit:'HAFF_BASE'},materials:[{code:'barrett',name:'巴雷特子弹',quantity:'2',unit:'ROUND'}],termDays:'1',termSeconds:'86400',loginMethodText:'QQ扫码'};
+ const item={...chainOrder,id:'render-order',displayNo:'RENDER-ORDER',source:{origin:'NATIVE'},frozenAccount:frozen,ownerBusinessNo:null,renterBusinessNo:'RENTER-BIZ'};
+ globalThis.fetch=async()=>response(chainPage([item]));
+ await act(async()=>root.render(createElement(AdminOrderChainView,chainProps('render-order'))));
+ await until(()=>node.textContent.includes('RENDER-ORDER'));
+ const row=node.querySelector('.oc-table tbody tr');
+ assert.equal(row.textContent.includes('本单冻结：本单冻结：'),false);
+ assert.match(row.textContent,/本单冻结：98\.08 M/);
+ assert.match(row.textContent,/编号未提供/);
+ assert.match(row.textContent,/编号 RENTER-BIZ/);
+});
+
+test('order detail separates unformed payment from missing time and sums refund duty from evidence', async t => {
+ const {root,node,AdminOrderChainView}=await setup(t);
+ const value={...chainOrder,id:'refund-duty',displayNo:'REFUND-DUTY',status:'CANCELLED',source:{origin:'NATIVE'},payment:{state:'RECORDED_UNPAID',recordedAt:null,recordedAmount:null}};
+ const money=cents=>({knowledge:'KNOWN',cents,reasonCodes:[]}),unknown=()=>({knowledge:'UNKNOWN',cents:null,reasonCodes:['ORIGINAL_BASIS_UNAVAILABLE']});
+ const evidence={schema:'admin-order-settlement-evidence.v1',documentRef:'ORDER:refund-duty',readiness:'READY',posting:{state:'NOT_POSTED',ref:null,postedAt:null},captured:unknown(),ownerNet:unknown(),refundPayable:money('5000'),refunded:unknown(),historicalRefund:unknown(),refundDueAt:null,channel:{state:'UNKNOWN',reference:null},dutyRefs:[],reasonCodes:[]};
+ const refundSummary={contractVersion:'admin-order-refund-summary.v1',integration:'INTEGRATED',intents:[],bankArrival:'UNKNOWN',reasonCodes:[]};
+ globalThis.fetch=async url=>String(url).includes('readMode=combined')?response({order:value,refundSummary}):String(url).includes('/finance/')?response({document:{ref:'ORDER:refund-duty'},orderSettlement:evidence}):response({});
+ await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('refund-duty'),snapshot:{...snapshotFor('refund-duty'),permissions:['order.read','finance.document.read']},objectOnly:true,initialOrderId:value.id})));
+ await until(()=>node.textContent.includes('退款记录')&&node.textContent.includes('本单应退责任'));
+ const text=node.textContent;
+ assert.match(text,/本单应退责任：¥50\.00/);
+ assert.match(text,/逐笔退款申请：0 笔/);
+ assert.match(text,/银行到账：未核定/);
+ const record=node.querySelector('.oc-records').textContent;
+ assert.match(record,/未支付/);
+ assert.match(record,/未形成支付/);
+ assert.equal(record.includes('未支付未支付'),false);
+});
+
+test('compact order progress keeps only the furthest key stage while detail keeps the full sequence', async t => {
+ const {root,node,AdminOrderChainView}=await setup(t);
+ const value={...chainOrder,id:'compact-progress',displayNo:'COMPACT-PROGRESS',status:'COMPLETED',source:{origin:'NATIVE'},payment:{state:'RECORDED_PAID',recordedAt:null,recordedAmount:null},progress:{asOfUtc:'2026-10-25T00:00:00.000000Z',opening:{state:'CONFIRMED',confirmedAtUtc:'2026-10-25T01:00:00.000000Z'},ending:{state:'POSTED',currentVersionNo:1,postedAtUtc:'2026-10-25T02:00:00.000000Z'}}};
+ globalThis.fetch=async url=>String(url).includes('readMode=combined')?response({order:value}):response(chainPage([value]));
+ await act(async()=>root.render(createElement(AdminOrderChainView,chainProps('compact-progress'))));await until(()=>node.querySelector('.oc-stages-compact'));
+ const compact=[...node.querySelectorAll('.oc-table .oc-stages-compact li .oc-stage-name')].map(item=>item.textContent);
+ assert.deepEqual(compact,['创建','支付','已过账']);
+ assert.match(node.querySelector('.oc-compact-meta').textContent,/已开租 · 已过账/);
+ await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('compact-progress-detail'),objectOnly:true,initialOrderId:value.id})));await until(()=>node.textContent.includes('关键费用'));
+ const detail=[...node.querySelectorAll('.oc-main-facts>.oc-section:first-child .oc-stage-name')].map(item=>item.textContent);
+ assert.deepEqual(detail,['创建','支付','已开租','已过账']);
+});
+
+
+test('unknown payment time does not imply an observed payment occurred', async t => {
+ const {root,node,AdminOrderChainView}=await setup(t);
+ const value={...chainOrder,id:'unknown-payment-time',displayNo:'UNKNOWN-PAYMENT-TIME',status:'PAID',source:{origin:'NATIVE'},payment:{state:'UNKNOWN',recordedAt:null,recordedAmount:null}};
+ globalThis.fetch=async url=>String(url).includes('readMode=combined')?response({order:value}):response({});
+ await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('unknown-payment-time'),objectOnly:true,initialOrderId:value.id})));
+ await until(()=>node.querySelector('.oc-records'));
+ const record=node.querySelector('.oc-records').textContent;
+ assert.match(record,/支付事实与时间待核/);assert.equal(record.includes('支付发生时间未记录'),false);
+});

@@ -1,0 +1,18 @@
+/* Order chain readability only; shared workspace, table and dialog styles stay untouched. */
+.oc-design .oc-table-compact td{vertical-align:top}
+.oc-design .oc-mobile-list footer{flex-wrap:wrap}
+.oc-design .oc-mobile-list footer>button{flex-shrink:0;white-space:nowrap}
+.oc-design .oc-table-compact .oc-stages-compact .oc-stage-name{font-size:11px;color:var(--foreground);white-space:normal}
+.oc-design .oc-table-compact .oc-account-title{-webkit-line-clamp:2}
+.oc-design .oc-main-facts>.oc-section:first-child .oc-stages{padding-top:4px}
+.oc-design .oc-main-facts>.oc-section:first-child .oc-stages ol{gap:24px}
+.oc-design .oc-main-facts>.oc-section:first-child .oc-stages .oc-stage-node{width:30px;height:30px}
+.oc-design .oc-main-facts>.oc-section:first-child .oc-stages .oc-stage-line{left:36px;top:15px;width:18px}
+.oc-design .oc-main-facts>.oc-section:first-child .oc-stages .oc-stage-name{font-size:12px;color:var(--foreground)}
+.oc-design details.oc-section{border:0;border-top:1px solid var(--border);border-radius:0;background:transparent;padding:14px 0 0;margin:16px 0 0}
+.oc-design .oc-refund-summary{margin-top:8px}
+@media(max-width:760px){
+ .oc-design .oc-mobile-list footer{flex-wrap:wrap}
+ .oc-design .oc-mobile-list footer>span{flex:1 1 100%}
+ .oc-design .oc-main-facts>.oc-section:first-child .oc-stages ol{gap:18px}
+}
