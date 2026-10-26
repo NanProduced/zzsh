@@ -1,3 +1,4 @@
+import { fullPayoutServiceFeeCents } from '../src/supply/full-payout-fee';
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { computeQuote } from "../src/supply/pricing";
@@ -560,4 +561,12 @@ test("haff identity and zero-opening value must agree with the frozen inventory"
   assert.equal(undefinedRatio.early, null);
   assert.equal(undefinedRatio.amounts, null);
   assert.ok(undefinedRatio.reasons.includes("HAFF_CONSUMPTION_RATIO_UNDEFINED"));
+});
+
+
+test('shared full-payout fee rounds the merged cents base once and preserves zero and large values',()=>{
+  assert.equal(fullPayoutServiceFeeCents(5n)+fullPayoutServiceFeeCents(5n),0n);
+  assert.equal(fullPayoutServiceFeeCents(10n),1n);assert.equal(fullPayoutServiceFeeCents(0n),0n);
+  assert.equal(fullPayoutServiceFeeCents(9007199254740993n),720575940379279n);
+  assert.throws(()=>fullPayoutServiceFeeCents(-1n));
 });

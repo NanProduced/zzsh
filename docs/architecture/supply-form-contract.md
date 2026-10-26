@@ -107,6 +107,17 @@ publishing-catalog.ready仅表示目录与生效价目配置齐备，不代表�
 
 `READY`仅收入输入完整，总预计收入取原ownerTotal；`PARTIAL/INCOMPLETE/UNAVAILABLE`保留可核行、已知物资小计及缺项，完整总额为null，不将缺价或未知补0。哈夫币收入/物资收入/总收入和基础租客押金分列；押金有独立depositState。收入为扣费前预计，不是最终到手、发布资格或条款接受。绑定同一game/release/price/term/catalog；30秒只提示刷新，不是可提交凭据。
 
+可选追加`normalEndEstimate`（owner-normal-end-estimate.v1），独立READY/INCOMPLETE/UNAVAILABLE，固定全申报库存耗尽且正常结束。保留旧incomeBasis及三个毛额字段；selected=true且完整毛额/封存资金政策可核时，按号主哈夫币与物资毛额分合计一次收8%并HALF_UP到分，由号主承担，分别返回ownerGross、serviceFee的base/rate/amount/payer、ownerNet和policy/rounding依据。未选包赔为已知0费；选择未知、收入不完整、选包赔但政策缺失时净额不补0。押金/保证金/价差/赔款不计费基。数学估算不表示条款定稿、接受、最终结算或到账。正式quote仍用原毛额比较；只有同身份/输入/绑定且毛额匹配的新服务端估算才补净额展示，缺新字段保待核。
+
 Cookie/Origin沿用户边界、响应private/no-store；可选账号缺失/他人/跨游戏统一404，绑定变化409，非法输入400，未知依赖错误安全返回。业务使用RR READ ONLY及显式READ身份复核，普通SELECT不取显式行锁，不保存草稿/报价/hash/版本、初始化资格或签接受记录；SDK会话生命周期在此承诺之外。现物资resource-income-preview GET同样使用READ路径，原物资小计合同保持。
 
 Web需精确白名单接该叶路径；沿原身份/输入代际、AbortController和跨标签身份失效处理，不建轮询/跨用户缓存，不将旧预览替换UNKNOWN正式请求。新预览不是MySupply或正式quote对象；最终仍显式save→quote→核对并接受条款→submit，金额/规则变化重新核对。
+
+
+### 补充申报与自定义日耗
+
+`attributes.next_season_pass` 是下赛季购买通行证/续费6格保险箱的计划，`demulan_unlocked` 是德穆兰解锁声明；均为 boolean/null。草稿可缺省或未知，新核价、规则接受、发布及原生审核批准须明确是或否。缺省键不注入null，不改变旧内容hash；新值沿原hash和接受失效保护。服务端已验证的旧号接管可保留来源未知，客户端不能申请豁免。旧isSayyid不等价德穆兰。公开只读投影缺值为null，不据当前安全箱推断未来计划；它们不作为计价参数。
+
+`info_source` 继续是可选私有归因文本，仅号主/受权运营读取，不在公开账号attributes返回，不建邀请或奖励。publishing-options提供declarationOptions，标明新布尔必填、归因可选；本版已接纳info_source的4项name/value快照（抖音、朋友介绍、马叉虫、苏醒），publishing-options返回optionsState=CONFIGURED及sourceSnapshot观察时间/摘要，源服务无revision则为null。旧归因字符串仍可回显/保存，不将未知旧文本自动改成空或新选项。
+
+新authoring链的custom仅允许服务端选中term_option.daily_consumption为10000000，代码名不作为判断。共同校验覆盖未保存号主预览、正式核价、规则接受、发布、审核批准及Admin报价预览；旧草稿可读，新核价不兼容则拒绝，旧冻结报价/订单不重算。publishing-options.rentalTermOptions按当前规则列出可选code，无合法10M项则关闭custom投影；ordinary/fast仍沿原映射/开关。termOptions.ownerRatioAdjustmentWanPerYuan为当前日耗映射的精确有符号号主基础比例调整或null，不含平台P/V，不用旧正文或归档值填默认。

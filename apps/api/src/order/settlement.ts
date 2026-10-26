@@ -9,8 +9,9 @@ import {
 import { centsToYuan } from "./order";
 import type { QuoteAmount } from "../supply/pricing";
 
-export const SETTLEMENT_ROUNDING_POLICY = "HALF_UP_CENT_V1_SETTLEMENT_TOTAL_V1";
-export const FULL_PAYOUT_RATE = { numerator: 8n, denominator: 100n };
+import { FULL_PAYOUT_FEE_ROUNDING_POLICY, fullPayoutServiceFeeCents } from '../supply/full-payout-fee';
+export { FULL_PAYOUT_RATE } from '../supply/full-payout-fee';
+export const SETTLEMENT_ROUNDING_POLICY = FULL_PAYOUT_FEE_ROUNDING_POLICY;
 
 export type SettlementEndReason =
   | "NORMAL"
@@ -386,7 +387,7 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
       feeBase = ownerConsumed;
       feePayer = "OWNER";
     }
-    fee = divideToScale({ value: feeBase * FULL_PAYOUT_RATE.numerator, scale: 0 }, { value: FULL_PAYOUT_RATE.denominator, scale: 0 }, 0).value;
+    fee = fullPayoutServiceFeeCents(feeBase);
   }
 
   const ownerGross = ownerConsumed;

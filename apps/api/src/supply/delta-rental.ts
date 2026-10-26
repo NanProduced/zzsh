@@ -47,6 +47,19 @@ export const DELTA_GRADING_DIVISIONS: Readonly<Record<string, readonly number[]>
   "5": [4, 3, 2, 1], "6": [5, 4, 3, 2, 1], "7": [5, 4, 3, 2, 1], "8": [],
 };
 export const DELTA_LOGIN_METHOD_CODES = ["legacy_login_qq", "login_qq_qr", "legacy_login_wechat", "legacy_login_steam_cn", "legacy_login_steam_global"] as const;
+export const DELTA_CUSTOM_DAILY_CONSUMPTION = "10000000";
+// Accepted legacy dictionary snapshot; attribution stays private and never drives pricing or invitations.
+export const DELTA_INFO_SOURCE_DICTIONARY = {
+  options: [{ name: "抖音", value: "抖音" }, { name: "朋友介绍", value: "朋友介绍" }, { name: "马叉虫", value: "马叉虫" }, { name: "苏醒", value: "苏醒" }],
+  sourceSnapshot: { observedAtUtc: "2026-10-26T05:25:18.391Z", sha256: "ce39fba7869c90ab72541691fe92f5d1d32861278a834b58503cb03e5578786a", revision: null },
+} as const;
+
+/** Authoring only: historical quotes and orders retain their frozen pricing inputs. */
+export function validateDeltaRentalTerm(rentalPricing: RentalPricingSelection | null | undefined, term: { code: string; dailyConsumption: string } | null | undefined, termOptionCode: string): void {
+  if (rentalPricing?.rentalMode !== "custom") return;
+  if (term?.code !== termOptionCode || term.dailyConsumption !== DELTA_CUSTOM_DAILY_CONSUMPTION)
+    throw invalid("自定义比例仅支持日耗10M，请重新选择出租条件并核价", "termOptionCode");
+}
 
 export function isDeltaGradingDivision(code: unknown, division: unknown): division is number {
   return typeof code === "string" && typeof division === "number" && Number.isSafeInteger(division)
@@ -68,7 +81,7 @@ export function deltaPublicationLevels(map: Record<string, unknown> | undefined)
 }
 
 // New quote/publication validation is separate from historical normalization.
-export function validateDeltaPublicationAttributes(attributes: Record<string, unknown>, options: { requireGradingDivision?: boolean } = {}): void {
+export function validateDeltaPublicationAttributes(attributes: Record<string, unknown>, options: { requireGradingDivision?: boolean; requireSupplementalDeclarations?: boolean } = {}): void {
   validateDeltaGradingAttributes(attributes, options.requireGradingDivision !== false);
   if (!(DELTA_LOGIN_METHOD_CODES as readonly unknown[]).includes(attributes.login_method_code))
     throw invalid("请选择有效登录方式", "attributes.login_method_code");
@@ -86,6 +99,10 @@ export function validateDeltaPublicationAttributes(attributes: Record<string, un
     throw invalid("请确认上号结束时间，起止不能相同", "attributes.service_window_end_minute");
   if (attributes.service_window_timezone !== "Asia/Shanghai" || attributes.service_window_cross_midnight !== (Number(end) < Number(start)))
     throw invalid("请确认上号时段及跨日状态", "attributes.service_window_timezone");
+  for (const field of DELTA_OPTIONAL_BOOLEAN_FIELDS) {
+    if (typeof attributes[field] !== "boolean" && (options.requireSupplementalDeclarations !== false || attributes[field] != null))
+      throw invalid(field === "next_season_pass" ? "请明确选择下赛季是否计划购买通行证" : "请明确选择是否已解锁德穆兰", `attributes.${field}`);
+  }
 }
 
 export type DeltaQuoteReasonCode =
@@ -417,6 +434,7 @@ const DELTA_TEXT_FIELDS = ["safe_box_code", "grading_code", "login_method_code",
 // byte contract of previously accepted declarations is preserved.
 const DELTA_OPTIONAL_TEXT_FIELDS = ["legacy_resource_no"] as const;
 const DELTA_OPTIONAL_INTEGER_FIELDS = ["grading_division"] as const;
+const DELTA_OPTIONAL_BOOLEAN_FIELDS = ["next_season_pass", "demulan_unlocked"] as const;
 const DELTA_BOOLEAN_FIELDS = ["ban_record", "face_is_self", "service_window_cross_midnight"] as const;
 
 function deltaFields(value: object, allowed: readonly string[]): void {
@@ -439,15 +457,15 @@ function deltaDecimalText(value: unknown): string {
 }
 
 export function normalizeDeltaAttributes(value: Record<string, unknown>): Record<string, unknown> {
-  const allowed = [...DELTA_LEVEL_FIELDS, ...DELTA_TEXT_FIELDS, ...DELTA_OPTIONAL_TEXT_FIELDS, ...DELTA_OPTIONAL_INTEGER_FIELDS, ...DELTA_BOOLEAN_FIELDS, "secret_kd", "full_payout_declaration", "owner_deposit_declaration", "media_categories"];
+  const allowed = [...DELTA_LEVEL_FIELDS, ...DELTA_TEXT_FIELDS, ...DELTA_OPTIONAL_TEXT_FIELDS, ...DELTA_OPTIONAL_INTEGER_FIELDS, ...DELTA_OPTIONAL_BOOLEAN_FIELDS, ...DELTA_BOOLEAN_FIELDS, "secret_kd", "full_payout_declaration", "owner_deposit_declaration", "media_categories"];
   deltaFields(value, allowed);
   const normalized = Object.fromEntries(allowed.filter((key) => key !== "full_payout_declaration" && key !== "owner_deposit_declaration" && key !== "media_categories"
-    && !((([...DELTA_OPTIONAL_TEXT_FIELDS, ...DELTA_OPTIONAL_INTEGER_FIELDS]) as readonly string[]).includes(key) && !Object.hasOwn(value, key))).map((key) => {
+    && !((([...DELTA_OPTIONAL_TEXT_FIELDS, ...DELTA_OPTIONAL_INTEGER_FIELDS, ...DELTA_OPTIONAL_BOOLEAN_FIELDS]) as readonly string[]).includes(key) && !Object.hasOwn(value, key))).map((key) => {
     const child = value[key] ?? null;
     if (child === null) return [key, null];
     if (key === "grading_division" && !isDeltaGradingDivision(value.grading_code, child)) throw new DeltaDeclarationError("Invalid Delta grading division");
     if ((DELTA_LEVEL_FIELDS as readonly string[]).includes(key) && (!Number.isSafeInteger(child) || Number(child) < 0 || Number(child) > 2147483647)) throw new DeltaDeclarationError("Invalid Delta level");
-    if ((DELTA_BOOLEAN_FIELDS as readonly string[]).includes(key) && typeof child !== "boolean") throw new DeltaDeclarationError("Invalid Delta flag");
+    if (([...DELTA_BOOLEAN_FIELDS, ...DELTA_OPTIONAL_BOOLEAN_FIELDS] as readonly string[]).includes(key) && typeof child !== "boolean") throw new DeltaDeclarationError("Invalid Delta flag");
     if (key === "secret_kd") return [key, deltaDecimalText(child)];
     if ((DELTA_TEXT_FIELDS as readonly string[]).includes(key) || (DELTA_OPTIONAL_TEXT_FIELDS as readonly string[]).includes(key)) return [key, deltaHumanText(child)];
     return [key, child];

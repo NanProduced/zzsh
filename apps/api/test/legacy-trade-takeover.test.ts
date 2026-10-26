@@ -868,7 +868,7 @@ test("submit and review stop on a placeholder title before any publication write
   const plan = prepareLegacyTradeIntake(input, catalog());
   assert(plan.draft);
   const baseDeclaration = plan.draft as unknown as ContentDeclaration;
-  const declaration: ContentDeclaration = { ...baseDeclaration, title: "历史资料待核实", attributes: { ...baseDeclaration.attributes, grading_division: 3 }, mediaBindings: plan.expectedMedia };
+  const declaration: ContentDeclaration = { ...baseDeclaration, title: "历史资料待核实", attributes: { ...baseDeclaration.attributes, grading_division: 3, next_season_pass: false, demulan_unlocked: false }, mediaBindings: plan.expectedMedia };
   const priced = computeDeltaQuote({ priceVersionId: "fixture_price", mode: "SPREAD", roundingPolicy: "HALF_UP_CENT_V1", customerTier: "STANDARD", haffRule: compatRule(), lines: [{ itemId: "fixture_item_0", quantity: "3000000", pricingKind: "HAFF_RATIO", unit: "HAFF_BASE", customerTier: "STANDARD" }], conditions: { safeBoxCode: "box-a", vitLevel: 6, bearLevel: 6, termOptionCode: "daily-10m", rentalPricing: { rentalMode: "ordinary" } }, termOption: { code: "daily-10m", dailyConsumption: "10000000", durationRounding: "CEIL_DAY" } });
   assert(priced.quotable);
   const payload = normalizeContentPayload({ schemaVersion: 2, accountId: input.accountId, gameId: input.source.expectedGameId, declaration, ruleRefs: { releaseId: "fixture_release", catalogRevision: "1", priceVersionId: "fixture_price", termVersionId: "fixture_term", agreementVersionId: "fixture_agreement", agreementDigest: "d".repeat(64) }, quoteValues: priced.quote });

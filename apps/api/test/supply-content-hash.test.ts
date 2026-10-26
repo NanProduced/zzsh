@@ -7,7 +7,7 @@ import { publicMediaCategory } from "../src/supply/publishing";
 import { deltaPublicationLevels, normalizeDeltaAttributes, validateDeltaPublicationAttributes } from "../src/supply/delta-rental";
 
 test("new declarations validate abilities and Beijing intervals while historical normalization stays unchanged", () => {
-  const attrs = {grading_code:"4",grading_division:3,login_method_code:"login_qq_qr",vit_level:4,bear_level:7,dive_level:0,service_window_start_minute:0,service_window_end_minute:1440,service_window_cross_midnight:false,service_window_timezone:"Asia/Shanghai"};
+  const attrs = {next_season_pass:false,demulan_unlocked:false,grading_code:"4",grading_division:3,login_method_code:"login_qq_qr",vit_level:4,bear_level:7,dive_level:0,service_window_start_minute:0,service_window_end_minute:1440,service_window_cross_midnight:false,service_window_timezone:"Asia/Shanghai"};
   assert.doesNotThrow(() => validateDeltaPublicationAttributes(attrs));
   assert.deepEqual(deltaPublicationLevels({1:"0",3:"0",4:"0",6:"0",8:"0"}),[4,6]);
   for (const changes of [{vit_level:3},{vit_level:null},{bear_level:8},{dive_level:null},{dive_level:4},{service_window_start_minute:1440},{service_window_end_minute:0},{service_window_timezone:null},{service_window_cross_midnight:true}]) assert.throws(() => validateDeltaPublicationAttributes({...attrs,...changes}));

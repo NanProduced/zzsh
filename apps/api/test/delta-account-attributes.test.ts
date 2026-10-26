@@ -8,12 +8,56 @@ import { parseFilterConfig, parseListingFilters, parseListingQueryV2 } from "../
 import { validateConfigCatalog, validateListingQuery, publicFilterMetadata } from "../src/supply/listing-filter-config";
 import { buildListingCandidates } from "../src/supply/listing-candidates";
 import { buildMixedListingCandidates } from "../src/supply/legacy-listing-read";
-import { quoteListing, reviewListing, saveListingDraft, type LegacyTakeoverGradingContext } from "../src/supply/publishing";
+import { acceptListingRules, quoteListing, reviewListing, saveListingDraft, submitListing, type LegacyTakeoverGradingContext } from "../src/supply/publishing";
+import { publicListingAttributes } from "../src/supply/publishing";
+import * as deltaRental from "../src/supply/delta-rental";
 
-const publicationAttributes = { grading_code: "4", grading_division: 3, login_method_code: "login_qq_qr", vit_level: 4, bear_level: 7, dive_level: 0,
+const publicationAttributes = { next_season_pass: false, demulan_unlocked: false, grading_code: "4", grading_division: 3, login_method_code: "login_qq_qr", vit_level: 4, bear_level: 7, dive_level: 0,
   service_window_start_minute: 540, service_window_end_minute: 1380, service_window_cross_midnight: false, service_window_timezone: "Asia/Shanghai" };
 const legacyAttributes = { ...publicationAttributes, grading_division: null, login_method_code: "legacy_login_qq" };
 const query = (filters: unknown) => parseListingQueryV2(new URLSearchParams({ queryVersion: "2", gameId: "game", filters: JSON.stringify(filters) }), "/listings");
+
+test("supplements: new declarations preserve omission, strict three-state flags and private attribution", () => {
+  const old = normalizeDeltaAttributes({ grading_code: "4", info_source: "old free text" });
+  const digest = (value: unknown) => createHash("sha256").update(canonicalize(value)).digest("hex");
+  assert.equal(Object.hasOwn(old, "next_season_pass"), false);
+  assert.equal(Object.hasOwn(old, "demulan_unlocked"), false);
+  for (const field of ["next_season_pass", "demulan_unlocked"] as const) {
+    for (const value of [null, false, true]) {
+      const normalized = normalizeDeltaAttributes({ ...old, [field]: value });
+      assert.equal(normalized[field], value);
+      assert.notEqual(digest(normalized), digest(old));
+      const publicAttrs = publicListingAttributes(normalized);
+      assert.equal(publicAttrs[field], value);
+      assert.equal(Object.hasOwn(publicAttrs, "info_source"), false);
+    }
+    for (const value of [0, 1, "false", "true", [], {}]) assert.throws(() => normalizeDeltaAttributes({ [field]: value }));
+  }
+  assert.equal(publicListingAttributes({ isSayyid: true }).demulan_unlocked, null);
+  for (const field of ["isSayyid", "isDemulan", "isNextSeasonPass"]) assert.throws(() => normalizeDeltaAttributes({ [field]: true }));
+  assert.equal(old.info_source, "old free text");
+});
+
+test("supplements: new publication needs both explicit answers while verified legacy validation may retain unknown", () => {
+  const complete = { ...publicationAttributes, next_season_pass: false, demulan_unlocked: true };
+  assert.doesNotThrow(() => validateDeltaPublicationAttributes(complete));
+  for (const field of ["next_season_pass", "demulan_unlocked"] as const) {
+    for (const value of [undefined, null, "false", 0]) assert.throws(() => validateDeltaPublicationAttributes({ ...complete, [field]: value }), (error: any) => error.status === 400 && error.details?.[0]?.path === `attributes.${field}`);
+  }
+  const old = { ...complete } as Record<string, unknown>; delete old.next_season_pass; delete old.demulan_unlocked;
+  assert.doesNotThrow(() => validateDeltaPublicationAttributes(old, { requireSupplementalDeclarations: false } as never));
+});
+
+test("supplements: authoring term guard trusts bound daily consumption, not option names or client hints", () => {
+  const validate = (deltaRental as any).validateDeltaRentalTerm;
+  assert.equal(typeof validate, "function");
+  const custom = { rentalMode: "custom", ownerRatioB: "44" };
+  assert.doesNotThrow(() => validate(custom, { code: "unrelated-name", dailyConsumption: "10000000" }, "unrelated-name"));
+  for (const dailyConsumption of ["20000000", "30000000", "10000000.0", null]) assert.throws(() => validate(custom, { code: "daily-10m", dailyConsumption }, "daily-10m"), (error: any) => error.status === 400 && error.details?.[0]?.path === "termOptionCode");
+  assert.throws(() => validate(custom, null, "daily-10m"));
+  assert.throws(() => validate(custom, { code: "different", dailyConsumption: "10000000" }, "selected"));
+  for (const rentalMode of ["ordinary", "fast"]) assert.doesNotThrow(() => validate({ rentalMode, ...(rentalMode === "fast" ? { ownerRatioB: "55" } : {}) }, { code: "daily-20m", dailyConsumption: "20000000" }, "daily-20m"));
+});
 
 test("the new turtle backpack has a fixed PIECE base unit and no fractional stock scale", () => {
   assert.equal(DELTA_RESOURCE_UNITS.df_billable_turtle_backpack_45, "PIECE");
@@ -149,4 +193,31 @@ test("old clients cannot silently remove a previously explicit valid division", 
   delete (body.attributes as Record<string, unknown>).grading_division;
   await assert.rejects(saveListingDraft(f.client, f.account, body, async () => ({ occupancy: "FREE" } as any)), { status: 409 });
   assert.equal(f.calls.some(sql => /^\s*(INSERT|UPDATE|DELETE)/.test(sql)), false);
+});
+
+test("supplements: old clients cannot silently erase previously answered supplemental flags", async () => {
+  for (const field of ["next_season_pass", "demulan_unlocked"] as const) {
+    const f = publishingFixture(publicationAttributes);
+    const attributes = { ...publicationAttributes } as Record<string, unknown>; delete attributes[field];
+    await assert.rejects(saveListingDraft(f.client, f.account, { expectedRevision: "1", attributes }, async () => ({ occupancy: "FREE" } as any)), { status: 409 });
+    assert.equal(f.calls.some(sql => /^\s*(INSERT|UPDATE|DELETE)/.test(sql)), false);
+  }
+});
+
+test("supplements: quote, acceptance, direct submit and review reject custom20/30 before authoring writes", async () => {
+  for (const dailyConsumption of ["20000000", "30000000"]) for (const action of ["quote", "accept", "submit", "review"] as const) {
+    const f = publishingFixture({ ...publicationAttributes, rentalPricing: { rentalMode: "custom", ownerRatioB: "44" } }, action === "review");
+    f.version.term_option_code = "daily-10m";
+    const read = f.client.query;
+    f.client.query = async (sql: string) => {
+      if (sql.includes("FROM zzsh_supply.term_option") || sql.includes("JOIN zzsh_supply.term_option")) { f.calls.push(sql); return { rows: [{ code: "daily-10m", dailyConsumption }], rowCount: 1 }; }
+      if (sql.includes("SELECT 1 FROM zzsh_supply.billable_item")) { f.calls.push(sql); return { rows: [], rowCount: 0 }; }
+      if (sql.includes("SELECT r.*,g.catalog_revision")) { f.calls.push(sql); return { rows: [{ id: "release", term_version_id: "term" }], rowCount: 1 }; }
+      return read(sql);
+    };
+    const body = { expectedRevision: "1", versionId: "version", releaseId: "release", contentHash: f.version.content_hash, decision: "APPROVE", reason: "reviewed" };
+    const result = action === "quote" ? quoteListing(f.client, f.account, "1") : action === "accept" ? acceptListingRules(f.client, f.account, body) : action === "submit" ? submitListing(f.client, f.account, "owner", body, async () => ({} as any)) : reviewListing(f.client, f.account, "admin", body, async () => ({} as any));
+    await assert.rejects(result, (error: any) => error.status === 400 && error.details?.[0]?.path === "termOptionCode");
+    assert.equal(f.calls.some(sql => /^\s*(INSERT|UPDATE|DELETE)/.test(sql)), false);
+  }
 });

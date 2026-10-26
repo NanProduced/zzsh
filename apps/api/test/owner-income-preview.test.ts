@@ -1,3 +1,5 @@
+import { fullPayoutServiceFeeCents } from '../src/supply/full-payout-fee';
+import { computeSettlement, SETTLEMENT_ROUNDING_POLICY } from '../src/order/settlement';
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { Pool, PoolClient } from "pg";
@@ -11,6 +13,34 @@ import { fundingPolicyFixture } from "./funding-authority-fixtures";
 
 const origin = "http://preview.invalid", path = "/games/fixture_game/owner-income-preview";
 const forbiddenSql = /^\s*(INSERT|UPDATE|DELETE|MERGE|CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE)\b|\bFOR\s+(UPDATE|SHARE|KEY\s+SHARE|NO\s+KEY\s+UPDATE)\b|pg_(?:try_)?advisory(?:_xact)?_lock/i;
+
+test("supplements: custom preview rejects configured 20/30M terms before offering income", async () => {
+  for (const dailyConsumption of ["20000000", "30000000"]) {
+    const f = fixture(), input = body();
+    f.term.dailyConsumption = dailyConsumption;
+    input.attributes.rentalPricing = { rentalMode: "custom", ownerRatioB: "46" };
+    const response = await f.run(input);
+    assert.equal(response.statusCode, 400);
+    assert.equal(response.body.error.code, "INVALID_ARGUMENT");
+    assert.equal(response.body.error.details?.[0]?.path, "termOptionCode");
+    assert.equal(f.queries.at(-1), "ROLLBACK");
+    assert(f.queries.every(sql => !forbiddenSql.test(sql)));
+  }
+});
+
+test("supplements: ordinary and fast preview keep their published 20/30M mappings", async () => {
+  for (const [dailyConsumption, delta] of [["20000000", "2"], ["30000000", "3"]]) {
+    for (const rentalMode of ["ordinary", "fast"] as const) {
+      const f = fixture(), input = body();
+      f.term.dailyConsumption = dailyConsumption!;
+      f.release.haffRule!.dailyDeltaByTermOption[f.term.code] = delta!;
+      input.attributes.rentalPricing = { rentalMode, ...(rentalMode === "fast" ? { ownerRatioB: "56" } : {}) };
+      const response = await f.run(input), expected = computeDeltaQuote(f.formalInput(input));
+      assert(expected.quotable); assert.equal(response.body.state, "READY");
+      assert.deepEqual(response.body.totalExpectedIncome, expected.quote.ownerTotal);
+    }
+  }
+});
 
 test("Master: preview enum fields reject arrays instead of coercing them to valid strings", () => {
   for (const value of [["ordinary"], ["custom"], ["fast"]]) {
@@ -185,4 +215,42 @@ test("old fixed-resource GET keeps its body contract but now uses READ-only iden
   const result = await f.run({}, { method: "GET" }, query, "/games/fixture_game/resource-income-preview");
   assert.equal(result.statusCode, 200); assert.equal(result.body.ownerTotal.amount, "17.00"); assert.equal(result.body.informationalOnly, true); assert.equal(result.body.schema, undefined);
   assert(f.queries.includes("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")); assert(f.queries.every(sql => !forbiddenSql.test(sql)));
+});
+
+
+test('normal-end estimate keeps gross quote semantics and independently projects the server fee/net',async()=>{
+ for(const selected of [false,true]){const f=fixture(),input=body();input.attributes.full_payout_declaration={schema:'full-payout-declaration-v1',selected};const result=await f.run(input),p=result.body as OwnerIncomePreview;
+  assert.equal(p.state,'READY');assert.equal(p.totalExpectedIncome!.amount,'229.77');assert.equal(p.normalEndEstimate.state,'READY');assert.deepEqual(p.normalEndEstimate.ownerGross,p.totalExpectedIncome);
+  assert.equal(p.normalEndEstimate.serviceFee.amount!.amount,selected?'18.38':'0.00');assert.equal(p.normalEndEstimate.ownerNet!.amount,selected?'211.39':'229.77');assert.equal(p.normalEndEstimate.serviceFee.payer,selected?'OWNER':'NONE');
+  assert.equal(p.normalEndEstimate.serviceFee.base!.amount,selected?'229.77':'0.00');assert.equal(p.incomeBasis,'OWNER_RESOURCE_INCOME_BEFORE_FEES');assert.equal(p.normalEndEstimate.scenario,'ALL_DECLARED_INVENTORY_CONSUMED_NORMAL_END');
+  assert.equal(f.queries.filter(q=>q.includes('funding_policy AS policy')).length,selected?1:0);assert(f.queries.every(q=>!forbiddenSql.test(q)));}
+});
+
+test('fee state does not turn unknown selection partial income or missing policy into a complete net',async()=>{
+ const f=fixture();let result=await f.run();assert.equal(result.body.state,'READY');assert.equal(result.body.normalEndEstimate.state,'INCOMPLETE');assert.equal(result.body.normalEndEstimate.selected,null);assert.equal(result.body.normalEndEstimate.ownerNet,null);
+ const input=body();input.attributes.full_payout_declaration={schema:'full-payout-declaration-v1',selected:true};input.inventory[1]!.quantity=null;result=await f.run(input);assert.equal(result.body.state,'PARTIAL');assert.equal(result.body.normalEndEstimate.ownerNet,null);assert.equal(result.body.normalEndEstimate.serviceFee.amount,null);
+ input.inventory[1]!.quantity='120';f.state.policyExists=false;result=await f.run(input);assert.equal(result.body.state,'READY');assert.equal(result.body.normalEndEstimate.state,'UNAVAILABLE');assert.equal(result.body.normalEndEstimate.ownerNet,null);assert.equal(result.body.normalEndEstimate.serviceFee.amount,null);
+ input.attributes.full_payout_declaration.selected=false;result=await f.run(input);assert.equal(result.body.normalEndEstimate.state,'READY');assert.deepEqual(result.body.normalEndEstimate.ownerNet,result.body.totalExpectedIncome);
+});
+
+test('all rental modes and PERCENT use already computed owner gross for the fee without another ratio',async()=>{
+ for(const rentalPricing of [{rentalMode:'ordinary' as const},{rentalMode:'custom' as const,ownerRatioB:'44'},{rentalMode:'fast' as const,ownerRatioB:'53'}]){const f=fixture(),input=body();input.attributes.rentalPricing=rentalPricing;input.attributes.full_payout_declaration={schema:'full-payout-declaration-v1',selected:true};const result=await f.run(input);assert.equal(result.body.normalEndEstimate.state,'READY');assert.equal(result.body.normalEndEstimate.serviceFee.rate,'0.08');}
+ const f=fixture(),input=body();f.release.mode='PERCENT';f.release.commissionRate='0.2';f.release.haffRule={schema:'haff-ratio-v1',baseBySafeBox:{'box-a':'47'},vitalityDeltaByLevel:{'6':'0'},bearDeltaByLevel:{'6':'0'},dailyDeltaByTermOption:{'daily-10m':'0'},options:{normal:{enabled:true,delta:'0'}}};delete input.attributes.rentalPricing;input.pricingOptionCode='normal';input.attributes.full_payout_declaration={schema:'full-payout-declaration-v1',selected:true};for(const item of f.items)item.ownerUnitAmount=null;
+ const result=await f.run(input);assert.equal(result.body.normalEndEstimate.state,'READY');const gross=BigInt(result.body.totalExpectedIncome.amount.replace('.',''));assert.equal(BigInt(result.body.normalEndEstimate.serviceFee.amount.amount.replace('.','')),fullPayoutServiceFeeCents(gross));
+});
+
+
+test('preview NORMAL full-consumption fee and net equal the actual settlement engine on the same quote',async()=>{
+ const f=fixture(),input=body();input.attributes.full_payout_declaration={schema:'full-payout-declaration-v1',selected:true};const result=await f.run(input),preview=result.body as OwnerIncomePreview,formal=computeDeltaQuote(f.formalInput(input));assert(formal.quotable);
+ const h=formal.quote.lines.find(line=>line.unit==='HAFF_BASE')!,items=formal.quote.lines.filter(line=>line.unit!=='HAFF_BASE');
+ const settlement=computeSettlement({orderId:'synthetic-order',settlementVersionId:'synthetic-settlement',openingVersionId:'synthetic-opening',quoteDigest:'synthetic-quote',paymentDigest:'synthetic-payment',roundingPolicy:SETTLEMENT_ROUNDING_POLICY,feePolicyVersion:'fixture-policy',renterUserId:'synthetic-renter',ownerUserId:'synthetic-owner',rentalStarted:true,endReason:'NORMAL',depositAmount:'0.00',capturedAmount:formal.quote.resourceTotal.amount,fullPayout:'SELECTED',fullPayoutPolicyRef:'fixture-policy',
+  haff:{itemId:h.itemId,unit:'HAFF_BASE',pricingKind:'HAFF_RATIO',openingQuantity:h.quantity,remainingQuantity:'0',unitQuantity:h.unitQuantity??'1000000',buyerUnitAmount:h.buyerUnitAmount.amount,ownerUnitAmount:h.ownerUnitAmount.amount,prepaidBuyerAmount:h.buyerAmount.amount,prepaidOwnerAmount:h.ownerAmount.amount,exactRatio:{buyerNumerator:h.buyerAmount.amount,buyerDenominator:'1',ownerNumerator:h.ownerAmount.amount,ownerDenominator:'1'}},
+  items:items.map(line=>({itemId:line.itemId,unit:line.unit as 'ROUND'|'PIECE'|'DAY',pricingKind:'FIXED_UNIT',openingQuantity:line.quantity,remainingQuantity:'0',unitQuantity:line.unitQuantity!,buyerUnitAmount:line.buyerUnitAmount.amount,ownerUnitAmount:line.ownerUnitAmount.amount,prepaidBuyerAmount:line.buyerAmount.amount,prepaidOwnerAmount:line.ownerAmount.amount}))});
+ assert.equal(settlement.ok,true,settlement.reasons.join(','));assert.deepEqual(preview.normalEndEstimate.ownerGross,settlement.amounts!.ownerGross);assert.deepEqual(preview.normalEndEstimate.serviceFee.base,settlement.amounts!.feeBase);assert.deepEqual(preview.normalEndEstimate.serviceFee.amount,settlement.amounts!.feeAmount);assert.deepEqual(preview.normalEndEstimate.ownerNet,settlement.amounts!.ownerNet);assert.equal(preview.normalEndEstimate.serviceFee.payer,settlement.amounts!.feePayer);
+});
+
+
+test('known zero owner income remains a real zero fee and net, with no new transaction effect',async()=>{
+ const f=fixture(),input=body();input.inventory[0]!.quantity='1';input.inventory[1]!.quantity='0';input.inventory[2]!.quantity='0';input.attributes.full_payout_declaration={schema:'full-payout-declaration-v1',selected:true};
+ const result=await f.run(input);assert.equal(result.statusCode,200);assert.equal(result.body.state,'READY');assert.equal(result.body.normalEndEstimate.state,'READY');assert.equal(result.body.totalExpectedIncome.amount,'0.00');assert.equal(result.body.normalEndEstimate.serviceFee.amount.amount,'0.00');assert.equal(result.body.normalEndEstimate.ownerNet.amount,'0.00');assert(f.queries.every(q=>!forbiddenSql.test(q)));assert(!f.queries.some(q=>/rule_acceptance|idempotency|audit_event|terms_version/.test(q)));assert.doesNotThrow(()=>JSON.stringify(result.body));
 });

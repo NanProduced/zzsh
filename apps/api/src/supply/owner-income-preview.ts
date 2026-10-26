@@ -1,8 +1,10 @@
 import type { PoolClient } from "pg";
 import type { UserContext } from "../auth/user-identity";
 import { normalizeTime } from "./content-hash";
-import { DELTA_PUBLISH_LEVELS, assertDeltaResourceUnit, calculateDeltaTermSeconds, isRetiredDeltaInsurance, normalizeDeltaAttributes, normalizeRentalPricing, resolveDeltaHaffContext, type RentalPricingSelection } from "./delta-rental";
-import { formatDecimalExact, parseNonNegativeDecimal, yuanAmountObject } from "./decimal";
+import { DELTA_PUBLISH_LEVELS, assertDeltaResourceUnit, calculateDeltaTermSeconds, isRetiredDeltaInsurance, normalizeDeltaAttributes, normalizeRentalPricing, resolveDeltaHaffContext, validateDeltaRentalTerm, type RentalPricingSelection } from "./delta-rental";
+import { decimalToBigInt, formatDecimalExact, parseNonNegativeDecimal, yuanAmountObject } from "./decimal";
+import { FULL_PAYOUT_FEE_ROUNDING_POLICY, fullPayoutServiceFeeCents } from './full-payout-fee';
+import type { FundingPolicy } from './funding-policy';
 import { readFundingPolicyForRelease } from "./funding-authority";
 import { validateOwnerDepositAmount, validateOwnerDepositDeclaration, type OwnerDepositDeclaration } from "./funding-policy";
 import { computeDeltaQuote, projectDeltaQuote, type QuoteAmount, type QuoteInput } from "./pricing";
@@ -28,6 +30,13 @@ type PreviewLine = {
   itemId: string; code: string; name: string; quantity: string | null; unit: IncomePreviewItem["unit"]; unitQuantity: string | null;
   ownerUnitAmount: { currency: "CNY"; unit: "yuan"; amount: string; scale: number } | null; ownerAmount: QuoteAmount | null;
 };
+export type OwnerNormalEndEstimate = {
+  schema: 'owner-normal-end-estimate.v1'; state: 'READY' | 'INCOMPLETE' | 'UNAVAILABLE';
+  scenario: 'ALL_DECLARED_INVENTORY_CONSUMED_NORMAL_END'; selected: boolean | null;
+  ownerGross: QuoteAmount | null; serviceFee: { base: QuoteAmount | null; rate: string | null; amount: QuoteAmount | null; payer: 'OWNER' | 'NONE' | null };
+  ownerNet: QuoteAmount | null; policy: Pick<FundingPolicy,'fullPayoutPolicyRef'|'fullPayoutPolicyVersion'|'disclosureVersion'> | null;
+  roundingPolicy: typeof FULL_PAYOUT_FEE_ROUNDING_POLICY; reasonCodes: string[];
+};
 export type OwnerIncomePreview = {
   schema: "owner-income-preview.v1"; state: "READY" | "PARTIAL" | "INCOMPLETE" | "UNAVAILABLE";
   binding: { gameId: string; releaseId: string; releaseGeneration: string; priceVersionId: string; termVersionId: string; catalogRevision: string } | null;
@@ -37,6 +46,7 @@ export type OwnerIncomePreview = {
   baseTenantDeposit: QuoteAmount | null; depositState: "KNOWN" | "INCOMPLETE" | "UNAVAILABLE";
   missingFields: string[]; reasonCodes: string[]; unitAmountsInformational: boolean;
   estimateOnly: true; incomeBasis: "OWNER_RESOURCE_INCOME_BEFORE_FEES";
+  normalEndEstimate: OwnerNormalEndEstimate;
 };
 
 function record(value: unknown, allowed: readonly string[], field: string): Record<string, unknown> {
@@ -104,6 +114,19 @@ function sumKnown(amounts: Array<QuoteAmount | null>): QuoteAmount | null {
   return known.length ? yuanAmountObject(known.reduce((sum, amount) => sum + parseNonNegativeDecimal(amount.amount, 2, "owner income").value, 0n)) : null;
 }
 
+function normalEndEstimate(income: Pick<OwnerIncomePreview,'state'|'totalExpectedIncome'>, selected: boolean | null, policy: FundingPolicy | null): OwnerNormalEndEstimate {
+  const result: OwnerNormalEndEstimate = { schema:'owner-normal-end-estimate.v1',state:income.state==='UNAVAILABLE'?'UNAVAILABLE':'INCOMPLETE',scenario:'ALL_DECLARED_INVENTORY_CONSUMED_NORMAL_END',selected,ownerGross:income.totalExpectedIncome,
+    serviceFee:{base:null,rate:null,amount:null,payer:null},ownerNet:null,policy:null,roundingPolicy:FULL_PAYOUT_FEE_ROUNDING_POLICY,reasonCodes:[] };
+  if(income.state!=='READY'||!income.totalExpectedIncome){result.reasonCodes=['OWNER_GROSS_INCOME_INCOMPLETE'];return result;}
+  if(selected===null){result.reasonCodes=['FULL_PAYOUT_SELECTION_UNKNOWN'];return result;}
+  if(selected&&!policy){result.state='UNAVAILABLE';result.reasonCodes=['FULL_PAYOUT_FUNDING_POLICY_UNAVAILABLE'];return result;}
+  const gross=decimalToBigInt(parseNonNegativeDecimal(income.totalExpectedIncome.amount,2,'owner gross income'),2);
+  const fee=selected?fullPayoutServiceFeeCents(gross):0n;
+  result.state='READY';result.serviceFee={base:yuanAmountObject(selected?gross:0n),rate:selected?'0.08':'0',amount:yuanAmountObject(fee),payer:selected?'OWNER':'NONE'};result.ownerNet=yuanAmountObject(gross-fee);
+  if(selected&&policy)result.policy={fullPayoutPolicyRef:policy.fullPayoutPolicyRef,fullPayoutPolicyVersion:policy.fullPayoutPolicyVersion,disclosureVersion:policy.disclosureVersion};
+  return result;
+}
+
 /** Called only inside the owner's authenticated RR READ ONLY snapshot. */
 export async function readOwnerIncomePreview(client: PoolClient, context: UserContext, gameId: string, input: OwnerIncomePreviewInput): Promise<OwnerIncomePreview> {
   if (input.accountId) {
@@ -115,6 +138,7 @@ export async function readOwnerIncomePreview(client: PoolClient, context: UserCo
     schema: "owner-income-preview.v1", state: "UNAVAILABLE", binding: null, evaluatedAt, refreshAfter: new Date(Date.parse(evaluatedAt) + 30_000).toISOString(),
     rentalMode: input.attributes.rentalPricing?.rentalMode ?? null, ownerHaffRatioWanPerYuan: null, termSeconds: null, lines: [], ownerHaffIncome: null,
     ownerResourceIncome: null, knownResourceSubtotal: null, totalExpectedIncome: null, baseTenantDeposit: null, depositState: "INCOMPLETE",
+    normalEndEstimate: normalEndEstimate({state:'UNAVAILABLE',totalExpectedIncome:null},input.attributes.full_payout_declaration?.selected??null,null),
     missingFields: [], reasonCodes: [], unitAmountsInformational: true, estimateOnly: true, incomeBasis: "OWNER_RESOURCE_INCOME_BEFORE_FEES",
   };
   const pricing = await readIncomePreviewContext(client, gameId, input, true);
@@ -141,6 +165,7 @@ export async function readOwnerIncomePreview(client: PoolClient, context: UserCo
   type Term = QuoteInput["termOption"];
   const term = input.termOptionCode ? (await client.query<Term>(`SELECT code,daily_consumption::text AS "dailyConsumption",duration_rounding AS "durationRounding" FROM zzsh_supply.term_option WHERE version_id=$1 AND code=$2`, [release.termVersionId, input.termOptionCode])).rows[0] : undefined;
   if (input.termOptionCode && !term) throw invalid("请选择当前租期选项", "termOptionCode");
+  if (input.termOptionCode) validateDeltaRentalTerm(input.attributes.rentalPricing, term, input.termOptionCode);
   const knownEntitlements: NonNullable<QuoteInput["entitlements"]>[number][] = [];
   if (input.entitlements.length) {
     const entries = (await client.query<{ entitlementId: string; expiryKind: "TIMED" | "PERMANENT"; valueKind: "FLAG" | "LEVEL" | "CAPACITY"; enabled: boolean }>(`SELECT id AS "entitlementId",expiry_kind AS "expiryKind",value_kind AS "valueKind",enabled FROM zzsh_supply.entitlement WHERE game_id=$1 AND id=ANY($2::text[])`, [gameId, input.entitlements.map(row => row.entitlementId)])).rows;
@@ -180,14 +205,15 @@ export async function readOwnerIncomePreview(client: PoolClient, context: UserCo
   response.state = owner && missing.length === 0 && reasons.size === 0 ? "READY" : response.lines.some(row => row.ownerAmount !== null) ? "PARTIAL" : missing.length ? "INCOMPLETE" : "UNAVAILABLE";
   response.totalExpectedIncome = response.state === "READY" ? owner!.ownerTotal! : null;
   const deposit = input.attributes.owner_deposit_declaration, fullPayout = input.attributes.full_payout_declaration;
+  const policy = fullPayout && (fullPayout.selected || deposit) ? await readFundingPolicyForRelease(client, release.releaseId) : null;
   if (deposit && fullPayout) {
-    const policy = await readFundingPolicyForRelease(client, release.releaseId);
     response.depositState = "UNAVAILABLE";
     if (policy) {
       validateOwnerDepositAmount(policy, deposit.amountCents, fullPayout.selected);
       response.baseTenantDeposit = yuanAmountObject(BigInt(deposit.amountCents)); response.depositState = "KNOWN";
     }
   }
+  response.normalEndEstimate = normalEndEstimate(response, fullPayout?.selected ?? null, policy);
   response.reasonCodes = [...reasons].sort();
   return response;
 }

@@ -5,7 +5,7 @@ import { SecurityApiError } from "../auth/security-core";
 import { API_V1_ERROR_CODES } from "../contracts/api-v1";
 import { assertGameScope, conflict, ensureOnlyFields, invalid, newSupplyId, notFound } from "./supply-util";
 import { computeDeltaQuote, projectDeltaQuote, type HaffRatioRule, type PricingLineInput, type QuoteResult } from "./pricing";
-import { assertDeltaResourceUnit, DELTA_RESOURCE_UNITS, DELTA_ROUNDING_POLICY, normalizeRentalPricing, parseDeltaPriceLines, validateDeltaHaffRule, type DeltaHaffRule, type DeltaPriceLineInputBody } from "./delta-rental";
+import { assertDeltaResourceUnit, DELTA_RESOURCE_UNITS, DELTA_ROUNDING_POLICY, normalizeRentalPricing, parseDeltaPriceLines, validateDeltaHaffRule, validateDeltaRentalTerm, type DeltaHaffRule, type DeltaPriceLineInputBody } from "./delta-rental";
 import { computeContentHash, humanText, normalizeContentPayload, normalizeTime, withoutContentHash, type ContentDeclaration, type ContentPayloadInput } from "./content-hash";
 import { validateFundingPolicy, validateFundingPolicyDraft } from "./funding-policy";
 import { fullPayoutDraftFields, readFullPayoutTerms, verifyFullPayoutTermsRow } from "./full-payout-terms";
@@ -467,6 +467,7 @@ export async function quotePreview(
   );
   const termOption = termOptionRow.rows[0];
   if (!termOption) throw invalid("Term option is not defined in the selected term version");
+  validateDeltaRentalTerm(conditions.rentalPricing == null ? undefined : normalizeRentalPricing(conditions.rentalPricing), termOption, termOptionCode);
 
   const inventory = Array.isArray(body.inventory) ? body.inventory : [];
   const inventoryById = new Map<string, string>();

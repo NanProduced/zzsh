@@ -1,5 +1,6 @@
 import { projectDeltaQuote, type ProjectedQuote } from "./pricing";
-import { DELTA_PUBLISH_LEVELS, deltaPublicationLevels } from "./delta-rental";
+import { DELTA_CUSTOM_DAILY_CONSUMPTION, DELTA_INFO_SOURCE_DICTIONARY, DELTA_PUBLISH_LEVELS, deltaPublicationLevels } from "./delta-rental";
+import { formatDecimalExact, parseSignedDecimal } from "./decimal";
 import { listSupervision, parseSupervisionQuery, readSupervision, supervisionViewer } from "./admin-supervision-read";
 import { loadLegacyHistoricalRead, loadLegacyHistoricalReads, withoutLegacyResourceNo } from "./legacy-listing-read";
 import { publicAccountNumber } from "./account-number";
@@ -179,14 +180,29 @@ export async function handlePublishingRoute(
       options?: Record<string, { enabled: boolean }>;
       vitalityDeltaByLevel?: Record<string,string>;
       bearDeltaByLevel?: Record<string,string>;
+      dailyDeltaByTermOption?: Record<string,string>;
     } | null;
+    const mappedTerms = terms.filter(term => Object.hasOwn(rule?.dailyDeltaByTermOption ?? {}, term.code));
+    const customTerms = mappedTerms.filter(term => term.dailyConsumption === DELTA_CUSTOM_DAILY_CONSUMPTION);
+    const customEnabled = rule?.compatibility?.modes?.custom?.enabled === true && customTerms.length > 0;
+    const termOptions = terms.map(term => {
+      let adjustment: string | null = null;
+      const value = rule?.dailyDeltaByTermOption?.[term.code];
+      if (typeof value === "string") try { adjustment = formatDecimalExact(parseSignedDecimal(value, 8, "daily ratio adjustment")); } catch { /* An unproved adjustment stays unknown. */ }
+      return { ...term, ownerRatioAdjustmentWanPerYuan: adjustment };
+    });
     sendJson(
       response,
       200,
       {
         releaseId: release.id,
         generation: release.generation,
-        termOptions: terms,
+        termOptions,
+        declarationOptions: {
+          next_season_pass: { enabled: true, required: true, requiredAt: "QUOTE_AND_PUBLICATION", label: "下赛季通行证计划", type: "BOOLEAN", public: true },
+          demulan_unlocked: { enabled: true, required: true, requiredAt: "QUOTE_AND_PUBLICATION", label: "是否已解锁德穆兰", type: "BOOLEAN", public: true },
+          info_source: { enabled: true, required: false, label: "通过哪个渠道了解洲洲商行", public: false, options: DELTA_INFO_SOURCE_DICTIONARY.options, optionsState: "CONFIGURED", sourceSnapshot: DELTA_INFO_SOURCE_DICTIONARY.sourceSnapshot, acceptsLegacyText: true },
+        },
         vitalityLevels:[...DELTA_PUBLISH_LEVELS],
         bearLevels:[...DELTA_PUBLISH_LEVELS],
         diveLevels:[0,1,2,3],
@@ -203,7 +219,15 @@ export async function handlePublishingRoute(
           .filter(([, v]) => v.enabled)
           .map(([key]) => key)
           .sort(),
-        ...(rule?.schema === "haff-ratio-v2" ? { pricingSchema: "haff-ratio-v2", rentalModes: rule.compatibility?.modes } : {}),
+        ...(rule?.schema === "haff-ratio-v2" ? {
+          pricingSchema: "haff-ratio-v2",
+          rentalModes: rule.compatibility?.modes ? { ...rule.compatibility.modes, custom: { ...rule.compatibility.modes.custom, enabled: customEnabled } } : undefined,
+          rentalTermOptions: {
+            ordinary: { termOptionCodes: mappedTerms.map(term => term.code) },
+            custom: { termOptionCodes: customTerms.map(term => term.code), requiredDailyConsumption: DELTA_CUSTOM_DAILY_CONSUMPTION, reasonCodes: !customTerms.length ? ["CUSTOM_10M_TERM_UNAVAILABLE"] : [] },
+            fast: { termOptionCodes: mappedTerms.map(term => term.code) },
+          },
+        } : {}),
         agreement: {
           id: release.agreement_id,
           title: release.title,

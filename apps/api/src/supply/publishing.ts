@@ -42,7 +42,7 @@ import {
   notFound,
 } from "./supply-util";
 import { GAME_SERVICE, readGameService, requireWritableGameService, type GameServiceState } from "./game-services";
-import { assertDeltaResourceUnit, isDeltaGradingDivision, isRetiredDeltaInsurance, normalizeRentalPricing, validateDeltaPublicationAttributes } from "./delta-rental";
+import { assertDeltaResourceUnit, isDeltaGradingDivision, isRetiredDeltaInsurance, normalizeRentalPricing, validateDeltaPublicationAttributes, validateDeltaRentalTerm } from "./delta-rental";
 import { readFundingPolicyForRelease } from "./funding-authority";
 import { computeDepositRecommendation, validateOwnerDepositAmount, validateOwnerDepositDeclaration } from "./funding-policy";
 import type { DepositSkinFacts } from "./deposit-recommendation";
@@ -745,6 +745,10 @@ export async function saveListingDraft(
   if (isDeltaGradingDivision(v.attributes.grading_code, v.attributes.grading_division)
     && (!body.attributes || typeof body.attributes !== "object" || !Object.hasOwn(body.attributes, "grading_division")))
     throw conflict("客户端未保留已申报的小段位，请更新客户端后重试");
+  for (const field of ["next_season_pass", "demulan_unlocked"] as const) {
+    if (typeof v.attributes[field] === "boolean" && (!body.attributes || typeof body.attributes !== "object" || !Object.hasOwn(body.attributes, field)))
+      throw conflict("客户端未保留已申报的通行证计划或德穆兰状态，请更新客户端后重试");
+  }
   let normalized: ContentDeclaration;
   try {
     normalized = normalizeDeclaration({
@@ -1034,7 +1038,7 @@ function validatePublicationAttributes(a: PublishingAccount, attributes: Record<
     || !/^[a-f0-9]{64}$/.test(legacy.sourceDigest) || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(legacy.observationVersionId)
     || legacy.gradingCode !== (attributes.grading_code ?? null) || legacy.gradingDivision !== (attributes.grading_division ?? null)))
     throw conflict("旧账号段位来源与当前申报不一致");
-  validateDeltaPublicationAttributes(attributes, { requireGradingDivision: legacy === undefined });
+  validateDeltaPublicationAttributes(attributes, { requireGradingDivision: legacy === undefined, requireSupplementalDeclarations: legacy === undefined });
 }
 export async function quoteListing(
   client: PoolClient,
@@ -1071,6 +1075,7 @@ export async function quoteListing(
     )
   ).rows[0];
   if (!term) throw invalid("请选择当前租期选项", "termOptionCode");
+  validateDeltaRentalTerm(d.attributes.rentalPricing == null ? undefined : normalizeRentalPricing(d.attributes.rentalPricing), term, d.termOptionCode);
   const rows = (
     await client.query(
       `SELECT l.item_id AS "itemId", i.code, l.quantity::text,i.unit,i.name,i.enabled,p.pricing_kind AS "pricingKind",p.unit_quantity::text AS "unitQuantity",p.buyer_unit_amount::text AS "buyerUnitAmount",p.owner_unit_amount::text AS "ownerUnitAmount" FROM zzsh_supply.inventory_line l JOIN zzsh_supply.billable_item i ON i.id=l.item_id LEFT JOIN zzsh_supply.price_line p ON p.item_id=i.id AND p.price_version_id=$2 AND p.customer_tier='STANDARD' WHERE l.version_id=$1 ORDER BY l.item_id`,
@@ -1345,6 +1350,8 @@ export async function acceptListingRules(
   await assertCurrentRelease(client, a, v);
   if (v.review_state !== "DRAFT" || v.origin !== "NATIVE")
     throw conflict("仅可确认新申报草稿");
+  validateDeltaPublicationAttributes(v.payload!.declaration.attributes);
+  await assertPublicationRentalTerm(client, v);
   const selected=v.payload?.declaration.attributes.full_payout_declaration as {selected?:boolean}|undefined;
   const policy=selected?.selected?await readFundingPolicyForRelease(client,v.rule_release_id!):null;
   if(selected?.selected && !policy)throw conflict("包赔资金政策未提供");
@@ -1443,6 +1450,7 @@ export async function submitListing(
   if (v.review_state !== "DRAFT") throw conflict("当前资料不能重复提交");
   await assertCurrentRelease(client, a, v);
   validateDeltaPublicationAttributes(v.payload!.declaration.attributes);
+  await assertPublicationRentalTerm(client, v);
   const blockers = await publicationBlockers(client, a, v, gate);
   if (blockers.length) throw conflict(blockers.join(","));
   await assertAccepted(client, a, v);
@@ -1495,6 +1503,7 @@ export async function reviewListing(
     throw invalid("请填写具体审核理由");
   if (body.decision === "APPROVE") {
     validatePublicationAttributes(a, v.payload!.declaration.attributes, legacyGrading);
+    await assertPublicationRentalTerm(client, v);
     const blockers = await publicationBlockers(client, a, v, gate);
     if (blockers.length) throw conflict(blockers.join(","));
     await assertAccepted(client, a, v);
@@ -1689,6 +1698,12 @@ async function readBoundTermOption(
   return row ?? null;
 }
 
+async function assertPublicationRentalTerm(client: PoolClient, v: ListingVersion): Promise<void> {
+  const pricing = v.payload?.declaration.attributes.rentalPricing;
+  if (pricing == null || normalizeRentalPricing(pricing).rentalMode !== "custom") return;
+  validateDeltaRentalTerm(normalizeRentalPricing(pricing), await readBoundTermOption(client, v), v.term_option_code ?? "");
+}
+
 async function readOwnerDeclaration(
   client: PoolClient,
   v: ListingVersion,
@@ -1750,6 +1765,8 @@ export function publicListingAttributes(attrs: Record<string, unknown>): Record<
     ...Object.fromEntries([...PUBLIC_LISTING_ATTRIBUTE_KEYS, ...(Object.hasOwn(attrs, "grading_division") ? ["grading_division"] as const : [])].map((key) => [key, attrs[key] ?? null])),
     face_is_self: declared("face_is_self"),
     ban_record: declared("ban_record"),
+    next_season_pass: declared("next_season_pass"),
+    demulan_unlocked: declared("demulan_unlocked"),
   };
 }
 

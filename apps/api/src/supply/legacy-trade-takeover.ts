@@ -75,7 +75,7 @@ export function buildLegacyTradeDeclaration(input: LegacyTradeIntake, catalog: r
     rentalPricing: { rentalMode, ...(rentalMode === "ordinary" ? {} : { ownerRatioB: input.ownerRatioB }) },
     owner_deposit_declaration: { schema: "owner-deposit-declaration-v1", amountCents: depositCents, declarationVersion: "legacy-trade-intake-v1" },
     full_payout_declaration: { schema: "full-payout-declaration-v1", selected: input.isFullPayout === "1" } };
-  try { validateDeltaPublicationAttributes(attributes, { requireGradingDivision: false }); } catch { blockers.push("LEVEL_OR_WINDOW_MISSING"); }
+  try { validateDeltaPublicationAttributes(attributes, { requireGradingDivision: false, requireSupplementalDeclarations: false }); } catch { blockers.push("LEVEL_OR_WINDOW_MISSING"); }
   let body: Record<string, unknown> = { title: input.title, description: input.description, attributes, inventory: inventory.sort((a, b) => a.itemId.localeCompare(b.itemId)), skins: input.skins, entitlements: input.entitlements,
     mediaBindings: input.media.map(m => ({ assetId: m.assetId, position: m.position })), termOptionCode: input.termOptionCode, pricingOptionCode: input.pricingOptionCode };
   let expectedMedia: ContentDeclaration["mediaBindings"] = [];
