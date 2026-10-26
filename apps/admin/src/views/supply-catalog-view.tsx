@@ -174,7 +174,6 @@ export function SupplyCatalogView({
   const [tab, setTab] = useState<CatalogKind>("items");
   const [query, setQuery] = useState("");
   const [identityFilter, setIdentityFilter] = useState<IdentityFilter>("all");
-  const [categoryFilter, setCategoryFilter] = useState("all");
   const [mediaFilter, setMediaFilter] = useState<"all" | "with-media" | "without-media">("all");
   const [typeFilter, setTypeFilter] = useState("all");
   const [rarityFilter, setRarityFilter] = useState("all");
@@ -241,8 +240,8 @@ export function SupplyCatalogView({
   const applySwitch = (type: "tab" | "game", value: string) => {
     setPendingSwitch(null);
     setTypeFilter("all"); setRarityFilter("all"); setSelectableFilter("all");
-    if (type === "game") { changeEditor(null); setCatalog(null); setGameId(value); setCategoryFilter("all"); setMediaFilter("all"); return; }
-    changeEditor(null); setTab(value as CatalogKind); setQuery(""); setIdentityFilter("all"); setCategoryFilter("all"); setMediaFilter("all");
+    if (type === "game") { changeEditor(null); setCatalog(null); setGameId(value); setMediaFilter("all"); return; }
+    changeEditor(null); setTab(value as CatalogKind); setQuery(""); setIdentityFilter("all"); setMediaFilter("all");
   };
   const requestSwitch = (type: "tab" | "game", value: string) => {
     if (editorDirty) { setPendingSwitch({ type, value }); return; }
@@ -294,7 +293,7 @@ export function SupplyCatalogView({
       } catch { setStorageBlocked(true); setError("无法读取目录恢复记录，新提交已停用。请恢复浏览器存储或联系维护者核对原回执。"); }
     }
     setCatalog(null);
-    setQuery(""); setIdentityFilter("all"); setCategoryFilter("all"); setMediaFilter("all"); setTypeFilter("all"); setRarityFilter("all"); setSelectableFilter("all"); setCloseAsked(false); setToggleDraft(null);
+    setQuery(""); setIdentityFilter("all"); setMediaFilter("all"); setTypeFilter("all"); setRarityFilter("all"); setSelectableFilter("all"); setCloseAsked(false); setToggleDraft(null);
     return () => { writeSeq.current += 1; writeIntent.current = null; writeBusy.current = false; catalogSeq.current += 1; mediaPickSeq.current += 1; };
   }, [scope]);
 
@@ -678,9 +677,6 @@ export function SupplyCatalogView({
       if (typeFilter !== "all") filtered = filtered.filter(row => (skinOwnerKind(row as CatalogSkin) ?? "unknown") === typeFilter);
       if (rarityFilter !== "all") filtered = filtered.filter(row => (row.rarityCode ?? "unknown") === rarityFilter);
       if (selectableFilter !== "all") filtered = filtered.filter(row => Boolean(catalog && skinIsSelectable(row as CatalogSkin, catalog)) === (selectableFilter === "selectable"));
-      if (categoryFilter !== "all") {
-        filtered = filtered.filter((row) => (row as CatalogSkin).categoryId === categoryFilter);
-      }
       if (mediaFilter === "with-media") {
         filtered = filtered.filter((row) => Boolean(row.mediaId));
       } else if (mediaFilter === "without-media") {
@@ -688,7 +684,7 @@ export function SupplyCatalogView({
       }
     }
     return filtered.filter((row) => matchesQuery(row, query));
-  }, [catalog, tab, identityFilter, categoryFilter, mediaFilter, typeFilter, rarityFilter, selectableFilter, query]);
+  }, [catalog, tab, identityFilter, mediaFilter, typeFilter, rarityFilter, selectableFilter, query]);
 
   const descendantsOf = useMemo(() => {
     if (!editor || editor.kind !== "categories" || !editor.id) return new Set<string>();
@@ -896,18 +892,6 @@ export function SupplyCatalogView({
                       <div className="w-36">
                         <LabeledSelect label="身份状态" value={identityFilter} disabled={Boolean(editor)} items={IDENTITY_FILTER_ITEMS.map((entry) => ({ value: entry.value, label: entry.label }))} onValueChange={(value) => setIdentityFilter(value as IdentityFilter)} />
                       </div>
-                      <div className="w-44">
-                        <LabeledSelect
-                          label="分类筛选"
-                          value={categoryFilter}
-                          disabled={Boolean(editor)}
-                          items={[
-                            { value: "all", label: "全部分类" },
-                            ...(catalog?.categories ?? []).map((c) => ({ value: c.id, label: categoryPath(c.id, catalog?.categories ?? []) })),
-                          ]}
-                          onValueChange={(value) => setCategoryFilter(value)}
-                        />
-                      </div>
                       <div className="w-32">
                         <LabeledSelect
                           label="图片状态"
@@ -945,7 +929,7 @@ export function SupplyCatalogView({
                   kind={kind}
                   rows={visibleRows}
                   query={query}
-                  filterActive={kind === "skins" && (identityFilter !== "all" || categoryFilter !== "all" || mediaFilter !== "all" || typeFilter !== "all" || rarityFilter !== "all" || selectableFilter !== "all")}
+                  filterActive={kind === "skins" && (identityFilter !== "all" || mediaFilter !== "all" || typeFilter !== "all" || rarityFilter !== "all" || selectableFilter !== "all")}
                   busy={writePhase !== "idle" || storageBlocked}
                   contractReady={kind === "skins" || kind === "skin-owners" ? contractReady : true}
                   onEdit={(row) => openEdit(kind, row)}
@@ -955,10 +939,10 @@ export function SupplyCatalogView({
                   onCreate={() => openCreate(kind)}
                   createReason={createReason}
                   prerequisiteAction={kind === "skins" && contractReady && !catalog.categories.length ? { label: "去维护皮肤分类", onClick: () => requestSwitch("tab", "categories") } : undefined}
-                  onClearQuery={() => { setQuery(""); setIdentityFilter("all"); setCategoryFilter("all"); setMediaFilter("all"); setTypeFilter("all"); setRarityFilter("all"); setSelectableFilter("all"); }}
+                  onClearQuery={() => { setQuery(""); setIdentityFilter("all"); setMediaFilter("all"); setTypeFilter("all"); setRarityFilter("all"); setSelectableFilter("all"); }}
                   renderCell={(row, key) => renderCell(kind, row, key)}
                 />
-                <p className="text-xs text-muted-foreground">当前已加载 {counts[kind]} 条{query.trim() || (kind === "skins" && (identityFilter !== "all" || categoryFilter !== "all" || mediaFilter !== "all" || typeFilter !== "all" || rarityFilter !== "all" || selectableFilter !== "all")) ? `，匹配 ${visibleRows.length} 条` : ""}。计数仅覆盖本次目录读取。</p>
+                <p className="text-xs text-muted-foreground">当前已加载 {counts[kind]} 条{query.trim() || (kind === "skins" && (identityFilter !== "all" || mediaFilter !== "all" || typeFilter !== "all" || rarityFilter !== "all" || selectableFilter !== "all")) ? `，匹配 ${visibleRows.length} 条` : ""}。计数仅覆盖本次目录读取。</p>
               </TabsContent>
             ))}
           </div>
