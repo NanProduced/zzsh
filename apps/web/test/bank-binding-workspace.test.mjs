@@ -188,3 +188,14 @@ test('readonly recovery uses the selected original key after marker replacement 
   const p=await probe({pendingBank:original,bank:{recoverBankBinding:async(userId,opts)=>{seen.push({userId,expectedPending:opts.expectedPending});return {knowledge:'KNOWN',receipt:bank('1'),current:bank('2','0023')};}}});
   try{await p.render();await p.click('重新输入原资料');p.setPendingBank(replacement);await p.submit('.bank-binding-form');await p.click('查询原保存结果');assert.deepEqual(seen,[{userId:'user_A',expectedPending:original}]);assert.deepEqual(p.bankApi.pendingBankBinding(),replacement);assert.equal(p.calls.filter(x=>x.method==='saveBank').length,0);assert.match(p.host.querySelector('.bank-binding-panel').textContent,/原保存结果待确认/);}finally{await p.close();}
 });
+
+test('formal admission quota/age blockers use their exact server reason copy, not a generic failure', async () => {
+  const p = await probe({ channel: { readChannelWithdrawalOptions: async () => ({ ...options(bank(), false),
+    reasonCodes: ['ADULT_STATUS_REQUIRED', 'WITHDRAWAL_QUOTA_EXHAUSTED'] }) } });
+  try {
+    await p.render();
+    assert.match(p.host.textContent, /当前年龄资料不符合提现要求/);
+    assert.match(p.host.textContent, /今日提现申请次数已用完/);
+    assert.doesNotMatch(p.host.textContent, /暂未满足服务端提现条件/);
+  } finally { await p.close(); }
+});

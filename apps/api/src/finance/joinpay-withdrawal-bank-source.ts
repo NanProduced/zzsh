@@ -94,10 +94,25 @@ export function createBankBoundWithdrawalOptions(input: SourceOptions): NativeWi
   const readContext = async (c: PoolClient, actor: NativeWithdrawalActor) => {
     const bank = await readWithdrawalBankBinding(c, actor, input.bankBinding), row = await identity(c, actor.userId), reason = identityReason(row, p, input.identityProvider);
     let policy: WithdrawalPolicy | null = null; try { if (row) policy = currentPolicy(p, row.now); } catch { /* 只读表达不可用，不伪造有效政策。 */ }
+    // 与quote同一业务日界核算已用次数；读不到次数时不能声称仍可报价。
+    let used: string | null = null, remaining: number | null = null;
+    if (policy) {
+      const counted = (await c.query<{ count: string }>(`SELECT count(*)::text AS count FROM zzsh_order.joinpay_withdrawal_intent
+        WHERE user_id=$1 AND accepted_at>=$2::timestamptz AND accepted_at<$3::timestamptz AND ($4='ACCEPTED_INTENT' OR state<>'FAILED')`,
+        [actor.userId, policy.quotaStart, policy.quotaEnd, policy.frequencyBasis])).rows[0]?.count;
+      if (typeof counted === "string" && /^(0|[1-9][0-9]*)$/.test(counted)) {
+        used = counted;
+        remaining = BigInt(policy.maxIntents) > BigInt(counted) ? Number(BigInt(policy.maxIntents) - BigInt(counted)) : 0;
+      }
+    }
     const reasons = [...(bank.integration !== "INTEGRATED" ? ["BANK_BINDING_NOT_INTEGRATED"] : !bank.binding ? ["BANK_BINDING_REQUIRED"] : []),
-      ...(reason ? [reason] : []), ...(!policy ? ["WITHDRAWAL_POLICY_UNAVAILABLE"] : [])];
-    return { contractVersion: "withdrawal-request-context.v1", bankBinding: bank, policy: policy ? { version: policy.version, minCents: policy.minCents,
+      ...(reason ? [reason] : []), ...(!policy ? ["WITHDRAWAL_POLICY_UNAVAILABLE"] : []),
+      ...(policy && used === null ? ["WITHDRAWAL_QUOTA_UNKNOWN"] : []), ...(remaining === 0 ? ["WITHDRAWAL_QUOTA_EXHAUSTED"] : [])];
+    return { contractVersion: "withdrawal-request-context.v1", bankBinding: bank,
+      identity: row ? { identityStatus: row.identityStatus, ageStatus: row.ageStatus, verifiedAt: row.verifiedAt } : null,
+      policy: policy ? { version: policy.version, minCents: policy.minCents,
       maxCents: policy.maxCents, fee: policy.fee, maxIntents: policy.maxIntents, quotaStart: policy.quotaStart, quotaEnd: policy.quotaEnd } : null,
+      quota: policy && used !== null && remaining !== null ? { used, maxIntents: policy.maxIntents, remaining, windowStart: policy.quotaStart, windowEnd: policy.quotaEnd } : null,
       canQuote: reasons.length === 0, reasonCodes: reasons, bankOwnershipVerification: "NOT_VERIFIED", bankArrival: "UNKNOWN" };
   };
   return { scope: input.scope, initialProfile: input.profile, loadAdmission, readContext };

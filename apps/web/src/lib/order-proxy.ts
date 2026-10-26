@@ -15,7 +15,7 @@ const webOrigin =
   process.env.ZZSH_WEB_ORIGIN ?? (local ? "http://127.0.0.1:3100" : "");
 const id = "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}";
 const getPath = new RegExp(`^/(?:legacy(?:/${id}(?:/continuation(?:/receipt)?)?)?|${id}(?:/(?:im|settlement|payment-requests|channel-payment-requests))?)?$`);
-const postPath = new RegExp(`^/(?:legacy/${id}/continuation/(?:preview|propose|confirm|reject)|${id}/(?:cancel|payment-requests|channel-payment-requests|settlement-preview|settlements(?:/${id}/decision)?|openings/${id}/confirm))?$`);
+const postPath = new RegExp(`^/(?:legacy/${id}/continuation/(?:preview|propose|confirm|reject)|${id}/(?:cancel|payment-requests|channel-payment-requests(?:/query)?|settlement-preview|settlements(?:/${id}/decision)?|openings/${id}/confirm))?$`);
 const error = (status: number, code: string, requestId: string) =>
   Response.json(
     { error: { code, message: "订单请求未完成", requestId } },
@@ -50,7 +50,7 @@ export async function forwardOrderRequest(
     (method !== "GET" && request.headers.get("origin") !== webOrigin)
   )
     return error(403, "FORBIDDEN", requestId);
-  const channelPayment = resource === "orders" && path.endsWith("/channel-payment-requests");
+  const channelPayment = resource === "orders" && path.includes("/channel-payment-requests");
   const expectedUserId = request.headers.get("x-zzsh-expected-user-id");
   if (channelPayment && (!expectedUserId || !new RegExp(`^${id}$`).test(expectedUserId)))
     return error(400, "INVALID_ARGUMENT", requestId);

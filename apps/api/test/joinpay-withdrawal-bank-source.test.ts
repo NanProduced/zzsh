@@ -119,3 +119,20 @@ test("原单GET展示冻结的卡掩码；改卡不替换历史目标，旧格�
   row.admission_sha256 = "f".repeat(64);
   const unknown: any = await withTransaction(f.pool, c => readNativeWithdrawalRecovery(c, actor, o.scope, { intentId: row.id })); assert.equal(unknown.intent.originalDestination.cardMask, null);
 });
+
+test("上下文按PG业务日界返回身份与剩余次数；配额耗尽/未知时不得声称可报价", async () => {
+  const { f } = await bound(); verified(f); const o = createBankBoundWithdrawalOptions(configuration(f));
+  f.state.quotaUsed = "1";
+  const context: any = await withTransaction(f.pool, c => o.readContext!(c, actor));
+  assert.equal(context.canQuote, true);
+  assert.deepEqual(context.quota, { used: "1", maxIntents: 2, remaining: 1,
+    windowStart: "2026-10-24T16:00:00.000Z", windowEnd: "2026-10-25T16:00:00.000Z" });
+  assert.deepEqual(context.identity, { identityStatus: "VERIFIED", ageStatus: "ADULT", verifiedAt: "2026-10-25T00:00:00.000Z" });
+  assert(!JSON.stringify(context).includes(f.state.identityRow.providerReference));
+  f.state.quotaUsed = "2";
+  const exhausted: any = await withTransaction(f.pool, c => o.readContext!(c, actor));
+  assert.equal(exhausted.canQuote, false); assert(exhausted.reasonCodes.includes("WITHDRAWAL_QUOTA_EXHAUSTED")); assert.equal(exhausted.quota.remaining, 0);
+  f.state.quotaUsed = "invalid";
+  const unknown: any = await withTransaction(f.pool, c => o.readContext!(c, actor));
+  assert.equal(unknown.canQuote, false); assert(unknown.reasonCodes.includes("WITHDRAWAL_QUOTA_UNKNOWN")); assert.equal(unknown.quota, null);
+});

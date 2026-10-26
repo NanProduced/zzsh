@@ -1783,3 +1783,64 @@ test("legacy detail exposes the complete frozen resource record after the short 
     try{await probe.render();const section=[...probe.host.querySelectorAll('section')].find(node=>node.querySelector(':scope > h3')?.textContent==='本单资源记录');assert.ok(section,'the detail has a full resource section');assert.deepEqual([...section.querySelectorAll('dt')].map(node=>node.textContent),['哈夫币','AWM子弹','6级头盔','6级护甲','顶级保险卡']);assert.deepEqual([...section.querySelectorAll('dd')].map(node=>node.textContent),['64.00','46','4','7','0 天']);assert.match(probe.host.textContent,/\+1项/);assert.ok(methods.every(method=>method==='GET'));}finally{await probe.dispose();}
   });
 });
+
+test("Native UI queries the original channel number without creating a new request",async()=>{
+ await withDom(async window=>{
+  let reads=0,queries=0;
+  const view=()=>channelView("order_A",{dataOrigin:"JOINPAY_CANDIDATE",request:channelRequest("UNKNOWN"),
+    projection:{displayState:"CONFIRMING",actionBlockedReason:"CHANNEL_RESULT_UNKNOWN"}});
+  const Component=loadComponent("apps/web/src/components/order/order-trade-actions.tsx",session("user_A")).OrderTradeActions;
+  const probe=createProbe(window,Component,{order:channelOrder,party:"renter",onChanged(){}},async(url,init={})=>{
+    const method=(init.method??"GET").toUpperCase();
+    if(method==="POST"){
+      assert.match(String(url),/\/channel-payment-requests\/query$/);
+      queries++;assert.equal(new Headers(init.headers).get("idempotency-key"),null);
+      return json({contractVersion:"order-payment-request.v1",request:{id:"payreq_component",orderId:"order_A",state:"UNKNOWN"},query:{kind:"OBSERVED",event:"E4",result:"QUERY_SUCCEEDED"}});
+    }
+    reads++;return json(view());
+  });
+  try{
+    await probe.render();
+    assert.ok(probe.buttons().some(t=>t.includes("查询渠道结果")));
+    await probe.click("查询渠道结果");await tick();
+    assert.equal(queries,1);assert.equal(reads,2);
+    assert.match(probe.host.textContent,/已按原商户号查询渠道结果/);
+    assert.doesNotMatch(probe.host.textContent,/渠道付款已接纳/);
+    assert.ok(probe.host.querySelector('a.order-channel-payment')===null);
+  }finally{await probe.dispose(()=>{});}
+ });
+});
+
+test("Native UI shows unknown query commit as unresolved without claiming a channel result",async()=>{
+ await withDom(async window=>{
+  const view=()=>channelView("order_A",{dataOrigin:"JOINPAY_CANDIDATE",request:channelRequest("UNKNOWN"),
+    projection:{displayState:"CONFIRMING",actionBlockedReason:"CHANNEL_RESULT_UNKNOWN"}});
+  const Component=loadComponent("apps/web/src/components/order/order-trade-actions.tsx",session("user_A")).OrderTradeActions;
+  const probe=createProbe(window,Component,{order:channelOrder,party:"renter",onChanged(){}},async(url,init={})=>{
+    if((init.method??"GET").toUpperCase()==="POST")return json({contractVersion:"order-payment-request.v1",request:{id:"payreq_component",orderId:"order_A",state:"UNKNOWN"},query:{kind:"UNKNOWN_COMMIT"}},202);
+    assert.match(String(url),/channel-payment-requests$/);return json(view());
+  });
+  try{
+    await probe.render();await probe.click("查询渠道结果");await tick();
+    assert.match(probe.host.textContent,/查询结果提交尚未确认/);
+    assert.doesNotMatch(probe.host.textContent,/已按原商户号查询渠道结果|渠道付款已接纳/);
+  }finally{await probe.dispose(()=>{});}
+ });
+});
+
+test("Native UI leaves an already-successful observation to acceptance recovery",async()=>{
+ await withDom(async window=>{
+  const view=()=>channelView("order_A",{dataOrigin:"JOINPAY_CANDIDATE",request:channelRequest("UNKNOWN"),
+    projection:{displayState:"CONFIRMING",actionBlockedReason:"CHANNEL_RESULT_UNKNOWN"}});
+  const Component=loadComponent("apps/web/src/components/order/order-trade-actions.tsx",session("user_A")).OrderTradeActions;
+  const probe=createProbe(window,Component,{order:channelOrder,party:"renter",onChanged(){}},async(url,init={})=>{
+    if((init.method??"GET").toUpperCase()==="POST")return json({contractVersion:"order-payment-request.v1",request:{id:"payreq_component",orderId:"order_A",state:"CHANNEL_SUCCEEDED_PENDING_ACCEPTANCE"},query:{kind:"PENDING_ACCEPTANCE"}});
+    assert.match(String(url),/channel-payment-requests$/);return json(view());
+  });
+  try{
+    await probe.render();await probe.click("查询渠道结果");await tick();
+    assert.match(probe.host.textContent,/正在走既有接纳\/恢复/);
+    assert.doesNotMatch(probe.host.textContent,/渠道付款已接纳/);
+  }finally{await probe.dispose(()=>{});}
+ });
+});

@@ -238,6 +238,32 @@ function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendi
     else if (outcome.status === "unauthorized") { setNotice(AUTH_MESSAGE); void session.confirm(); }
     else setNotice(outcome.status === "recovery-unresolved" ? "原请求仍待确认，恢复记录已保留；请刷新状态或联系平台核对。" : panelError(outcome.error).message);
   };
+  const queryChannel = async () => {
+    const queryingRequestId = view?.request?.id;
+    if (!userId || busy || blocked || !queryingRequestId) return;
+    const acting = userId;
+    setBusy(true); setNotice(null);
+    try {
+      const receipt = await orderApi.queryChannelPayment(acting, order.id);
+      if (!mounted.current || !isCurrent(acting) || latest.current.orderId !== order.id) return;
+      if (receipt?.contractVersion !== "order-payment-request.v1" || receipt.request?.id !== queryingRequestId || receipt.request?.orderId !== order.id || typeof receipt.query?.kind !== "string") throw new OrderRequestError(502, null);
+      if (receipt.query.kind === "NOT_DISPATCHED") setNotice("原支付请求尚未向渠道派发；请恢复原请求，系统不会自动重新下单。");
+      else if (receipt.query.kind === "THROTTLED") setNotice("最近已查询过渠道，请稍后再试；原请求仍按原号保留。");
+      else if (receipt.query.kind === "TERMINAL") setNotice("该支付请求已到终态；请以本地付款记录为准。");
+      else if (receipt.query.kind === "PENDING_ACCEPTANCE") setNotice("渠道已返回付款依据，正在走既有接纳/恢复；请刷新支付状态。");
+      else if (receipt.query.kind === "UNKNOWN_COMMIT") setNotice("查询结果提交尚未确认；原请求保留，请刷新支付状态后再试。");
+      else setNotice("已按原商户号查询渠道结果；付款状态以最新本地记录为准。");
+      await refresh(acting, undefined, receipt.query.kind === "OBSERVED");
+    } catch (error) {
+      if (mounted.current && isCurrent(acting) && latest.current.orderId === order.id) {
+        const typed = error instanceof OrderRequestError ? error : new OrderRequestError(0, null);
+        setNotice(typed.status === 0 ? "渠道查询回执尚未确认；原请求保留，请稍后重试。" : panelError(typed).message);
+        if (typed.status === 401 || typed.code === "UNAUTHENTICATED") void session.confirm();
+      }
+    } finally {
+      if (mounted.current && isCurrent(acting) && latest.current.orderId === order.id) setBusy(false);
+    }
+  };
   if (!active) return <>{reading ? <p className="order-muted" role="status">正在读取支付方式…</p> : children}</>;
   const methods = (view?.capability?.methods ?? []).filter(m => m === "ALIPAY_NATIVE" || m === "WEIXIN_NATIVE");
   const selected = view?.request?.method ?? pending.intent?.body?.method ?? method;
@@ -248,6 +274,8 @@ function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendi
   const url = !applied && payable && view?.payment === null && view.dataOrigin === "JOINPAY_CANDIDATE" && view.capability.channelEnabled === true && view.capability.productionPaymentCapability === true
     && amountKnown && ["ACTION_READY", "PROCESSING_UNCONFIRMED"].includes(view.request?.state ?? "") && view.projection?.actionBlockedReason === null
     && view.paymentAction?.kind === "QR_URL" ? channelPaymentUrl(view.paymentAction.url) : null;
+  const queryOpen = !!view?.request && !applied && view.dataOrigin === "JOINPAY_CANDIDATE"
+    && ["SUBMITTING", "UNKNOWN", "PROCESSING_UNCONFIRMED", "ACTION_READY"].includes(view.request.state);
   const mayStart = payable && view?.capability.channelEnabled === true && view.capability.productionPaymentCapability === true
     && view.payment === null && view.request === null && pending.state === "NONE" && methods.includes(method) && !blocked;
   return <div className="order-channel-payment" aria-busy={busy || reading}>
@@ -260,6 +288,7 @@ function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendi
     {pending.state === "UNREADABLE" || notice || readError ? <p className="order-inline-notice" role="alert">{pending.state === "UNREADABLE" ? "原支付请求恢复记录无法读取，已停止提交；请刷新状态或联系平台核对。" : notice ?? readError}</p> : null}
     <div className="order-trade-actions">
       {mayStart ? <button type="button" className="button" disabled={busy || reading} onClick={() => void submit()}>获取支付参数</button> : null}
+    {queryOpen ? <button type="button" className="button secondary button--sm" disabled={busy || reading || blocked} onClick={() => void queryChannel()}>{busy ? "查询渠道结果…" : "查询渠道结果"}</button> : null}
       {url ? <a className="button" href={url} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">打开支付页面</a> : null}
       <button type="button" className="button secondary button--sm" disabled={busy || reading || !userId} onClick={() => userId && void refresh(userId, undefined, true)}>刷新支付状态</button>
       {pending.state === "VALID" && !applied ? <button type="button" className="button secondary button--sm" disabled={busy || reading || blocked} onClick={() => void submit(true)}>恢复原请求回执</button> : null}

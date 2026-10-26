@@ -287,6 +287,13 @@ ORIGINAL 列表通过 `user_registration_fact` 读取最新成功迁移审计的
 ### 渠道退款、提现与商户余额的源码接缝
 
 - 新提现命名空间 `/api/v1/users/me/channel-withdrawals`（用户BFF同名）提供 quote、预留、原key回执和意图读取，复用 `native-withdrawal.v1`；旧 `/withdrawals` 的 LOCAL 行为保留。新请求要求完整受信执行/通知装配，原key恢复先于当前新请求配置。默认没有正式资料时返回不可用，不根据客户端profile、银行目标或finance读权限开放出款。
-- 管理订单详情可带 `admin-order-refund-summary.v1` 本地记录摘要，必须先通过订单/游戏对象授权并有资金读权限；缺新关系保持未知。存储终态只标本地状态，不替代终态原件重验、退款核销或银行到账；本包不增加管理退款命令。
+- 管理订单详情可带 `admin-order-refund-summary.v1` 本地记录摘要，必须先通过订单/游戏对象授权并有资金读权限；缺新关系保持未知。存储终态只标本地状态，不替代终态原件重验、退款核销或银行到账；该摘要不授予退款命令权限。
 - 管理GET `/api/{v1/admin|bff/admin}/finance/merchant-accounts/{id}` 需要现有完整资金读权限、显式逐管理员商户范围和准确资源绑定。仅复用本地 AVAILABLE/COLLECTION 摘要，两产品、最近观察与已验快照分别展示；不汇总为总资产、钱包或到账，不取钥或刷新商户。未配置商户范围返回503。
 - 退款GET原URI、提现POST原始JSON字节的通知装配均需服务端显式提供受信执行对象；普通配置保持关闭。收妥ACK、本地接纳/记账与银行到账分列。渠道基础与银行资料已登记正式迁移源码，实际目标采用、安装权限及真实渠道运行仍须分别核验；源码存在不表示任一运行库已完成升级。
+
+### 原单查询、管理租赁退款与提现上下文
+
+- 用户 `POST /api/v1/orders/{orderId}/channel-payment-requests/query`（Nest BFF `/api/bff/user/orders/...`，Web `/api/orders/...`）正文为空对象。仅本人原单，按订单定位独立 payreq；`order-payment-request.v1` 回执含 `request:{id,orderId,state}` 与 `query.kind`，不首次派发、换商户号或返回支付参数，沿用查询间隔、预算和租约。此 POST 可在可信 E4 后调用正式付款接纳，产生本地账务、分佣、订单及群效果；普通 GET 仍仅读本地。提交未知返回 `202`、`request.state=UNKNOWN`、`query.kind=UNKNOWN_COMMIT` 并保留实际 payreq ID，按原请求恢复。Web BFF 用同一捕获 Cookie 核对期望主体；客户端核对两种 ID 后再读本地状态，不能据渠道查询文字判定到账。
+- 管理 `GET/POST /api/v1/admin/orders/{orderId}/refunds`（BFF `/api/bff/admin/orders/{orderId}/refunds`）均需现有 `order.settlement.write`、管理员事务复检、游戏范围和 `readOrderTeamAccess` 的 `READY/canRead` 订单对象授权；`finance.read` 或同游戏权限均不单独授权退款。POST 要求 `Idempotency-Key` 与 `{amountCents:string,reason?:string,postingId?:string}`：金额为 CNY 正整数字符串分，只从可信 `JOINPAY/APPLIED` 原款和已到期冻结责任分配，歧义时须指定 postingId。返回 `admin-native-refund.v1` 的意图/原退款号、金额、状态、预算及责任，创建与审计同事务；GET 返回 `admin-native-refunds.v1` 的本地意图、冻结/已分配/剩余责任及最近观察。接口不直接提交渠道，本批未交付管理退款页面。
+- 关闭新退款或当前 initialProfile 缺失时，既有 store 仍先处理安全的原键重放，新意图继续拒绝。首次创建的 `channel.result=NOT_SUBMITTED` 仅描述创建时；重放为 `UNKNOWN`，当前状态另由 GET 读取，银行到账保持 `UNKNOWN`。COMMIT ACK 未知返回 `503/EVIDENCE_UNAVAILABLE`，保留同键同体恢复，不换键重建。
+- 用户 `GET /api/v1/users/me/channel-withdrawals/options`（Nest BFF `/api/bff/user/channel-withdrawals/options`）的 `withdrawal-request-context.v1` 兼容增加 `identity` 和 `quota`；后者含 `used/maxIntents/remaining/windowStart/windowEnd`，缺证据为 null。`canQuote/reasonCodes` 明示身份、成年、政策及 `WITHDRAWAL_QUOTA_UNKNOWN/EXHAUSTED` 等原因；报价/创建仍重核身份、次数、原目标、政策和余额，不补造证明或为消除 503 开启 PAYOUT。旧 CONTROLLED、SYNTHETIC_PROTOCOL、LOCAL_CONTROLLED、本地接纳、渠道成功与银行到账分别表达；源码接入不等于部署、PG 或真实渠道验收。

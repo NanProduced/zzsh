@@ -9,6 +9,7 @@ export function fixture() {
   let data: Data = { banks: new Map(), receipts: new Map(), audits: [] }, staged: Data | null = null, keys = 0;
   const state = { integrated: true, database: "unit_bank_database", runtimeUser: "unit_bank_r", authenticated: true,
     identityRow: { accountStatus: "ACTIVE", identityStatus: "UNVERIFIED", ageStatus: "UNKNOWN", provider: "fake", providerReference: "unit_ref", version: 1, verifiedAt: "2026-10-25T00:00:00.000Z", now: "2026-10-25T02:00:00.000Z" },
+    quotaUsed: "0",
     failAudit: false, commitUnknown: false, casFailure: false, queries: [] as { sql: string; values: any[] }[], releases: [] as unknown[] };
   const current = () => staged ?? data;
   const client = { release(value?: unknown) { state.releases.push(value); }, async query(sql: string, values: any[] = []) {
@@ -20,6 +21,7 @@ export function fixture() {
     if (sql.startsWith('SELECT "suspended"')) return { rows: state.authenticated ? [{ suspended: false }] : [] };
     if (sql.includes('FROM "zzsh_iam"."user_identity_state"')) return { rows: [{ ...state.identityRow }] };
     if (sql.includes('FROM "zzsh_auth_user"."session"')) return { rows: [], rowCount: state.authenticated ? 1 : 0 };
+    if (sql.includes("SELECT count(*)::text AS count FROM zzsh_order.joinpay_withdrawal_intent")) return { rows: [{ count: state.quotaUsed }] };
     if (sql.includes('SELECT "request_fingerprint" AS "requestFingerprint"')) {
       const r = current().receipts.get(JSON.stringify(values)); return { rows: r ? [structuredClone(r)] : [] };
     }

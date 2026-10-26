@@ -25,6 +25,12 @@ export type ChannelPaymentCommandReceipt = {
   request: { id: string; orderId: string; state: string; method: string; amount: ChannelPaymentMoney; createdAt: string; updatedAt: string };
   paymentAction: null; payment: null;
 };
+/** Queries the original request and may reconcile verified payment; never returns a payment action. */
+export type ChannelPaymentQueryReceipt = {
+  contractVersion: "order-payment-request.v1";
+  request: { id: string; orderId: string; state: string };
+  query: { kind: "OBSERVED"; event: string; result: string } | { kind: "TERMINAL" | "NOT_DISPATCHED" | "THROTTLED" | "PENDING_ACCEPTANCE" | "UNKNOWN_COMMIT" };
+};
 
 export type OrderLine = {
   itemId?: string;
@@ -363,6 +369,8 @@ export const orderApi = {
     requestWrite<ChannelPaymentCommandReceipt>(`/api/orders/${encodeURIComponent(orderId)}/channel-payment-requests`, { body: { method }, key, signal, expectedUserId: userId }),
   channelPaymentStatus: (userId: string, orderId: string, signal?: AbortSignal) =>
     requestJson<ChannelPaymentView>(`/api/orders/${encodeURIComponent(orderId)}/channel-payment-requests`, { signal, expectedUserId: userId }),
+  queryChannelPayment: (userId: string, orderId: string, signal?: AbortSignal) =>
+    requestWrite<ChannelPaymentQueryReceipt>(`/api/orders/${encodeURIComponent(orderId)}/channel-payment-requests/query`, { body: {}, signal, expectedUserId: userId }),
   settlement: (orderId: string, signal?: AbortSignal) =>
     requestJson<OrderSettlement>(`/api/orders/${encodeURIComponent(orderId)}/settlement`, { signal }),
   settlementPreview: (orderId: string, body: { lines: Array<{ itemId: string; remainingQuantity: string }>; endReason?: string }, signal?: AbortSignal) =>

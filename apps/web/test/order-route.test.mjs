@@ -144,3 +144,33 @@ test('channel local GET checks the captured session subject before exposing a pr
 test('missing expected subject is rejected before any upstream fetch',async()=>{const old=globalThis.fetch;let calls=0;globalThis.fetch=async()=>{calls++;return Response.json({});};try{assert.equal((await POST(channelSubjectRequest('POST',null),channelSubjectCtx)).status,400);assert.equal(calls,0);}finally{globalThis.fetch=old;}});
 test('matched subject preserves captured user cookie and original key/body, stripping internal header',async()=>{const old=globalThis.fetch,calls=[];globalThis.fetch=async(url,options)=>{calls.push({url:String(url),options});return String(url).endsWith('/get-session')?Response.json({user:{id:'user_a'}}):Response.json({request:{id:'synthetic_request'}},{status:202});};try{const r=await POST(channelSubjectRequest(),channelSubjectCtx);assert.equal(r.status,202);assert.equal(calls.length,2);for(const c of calls)assert.equal(c.options.headers.get('cookie'),'zzsh_user.session_token=synthetic_user_b');const c=calls[1];assert.equal(c.options.headers.get('idempotency-key'),'original_subject_key');assert.equal(c.options.headers.has('x-zzsh-expected-user-id'),false);assert.equal(new TextDecoder().decode(c.options.body),'{"method":"WEIXIN_NATIVE"}');}finally{globalThis.fetch=old;}});
 test('failed or malformed session evidence cannot cause a channel command',async()=>{const old=globalThis.fetch;try{for(const response of [()=>Response.json(null),()=>Response.json({user:null}),()=>Response.json({user:{id:7}}),()=>new Response('not-json'),()=>Response.json({error:{code:'UNAUTHENTICATED'}},{status:401})]){const commands=[];globalThis.fetch=async(url)=>{if(!String(url).endsWith('/get-session'))commands.push(String(url));return response();};const r=await POST(channelSubjectRequest(),channelSubjectCtx);assert(r.status>=400);assert.equal(commands.length,0);}}finally{globalThis.fetch=old;}});
+
+test('channel query forwards only the original-number command with captured subject and no idempotency key',async()=>{
+  const old=globalThis.fetch;let calls=[];
+  const receipt={contractVersion:'order-payment-request.v1',request:{id:'payreq_q',orderId:'order_q',state:'UNKNOWN'},query:{kind:'OBSERVED',event:'E4',result:'QUERY_SUCCEEDED'}};
+  globalThis.fetch=async(url,options)=>{calls.push({url:String(url),options});return String(url).endsWith('/get-session')?Response.json({user:{id:'user_a'}}):Response.json(receipt);};
+  try{
+    const path=['order_q','channel-payment-requests','query'];
+    const response=await POST(input(path,{method:'POST',headers:{'content-type':'application/json','x-zzsh-expected-user-id':'user_a',cookie:'zzsh_user.session_token=user; zzsh_admin.session_token=admin'},body:'{}'}),ctx(path));
+    assert.equal(response.status,200);assert.deepEqual(await response.json(),receipt);assert.equal(calls.length,2);
+    const upstream=calls[1];
+    assert.equal(upstream.url,'http://127.0.0.1:3102/api/bff/user/orders/order_q/channel-payment-requests/query');
+    assert.equal(upstream.options.method,'POST');assert.equal(upstream.options.headers.has('idempotency-key'),false);
+    assert.equal(upstream.options.headers.has('x-zzsh-expected-user-id'),false);
+    assert.equal(upstream.options.headers.get('cookie'),'zzsh_user.session_token=user');
+    assert.equal(new TextDecoder().decode(upstream.options.body),'{}');
+  }finally{globalThis.fetch=old;}
+});
+
+test('channel query rejects legacy/nested paths and identity changes before any upstream command',async()=>{
+  const old=globalThis.fetch;let calls=0;globalThis.fetch=async()=>{calls++;return Response.json({user:{id:'user_b'}});};
+  try{
+    for(const path of [['legacy','old_order','channel-payment-requests','query'],['order_q','channel-payment-requests','query','extra']]){
+      assert.equal((await POST(input(path,{method:'POST',headers:{'content-type':'application/json'},body:'{}'}),ctx(path))).status,404);
+    }
+    const path=['order_q','channel-payment-requests','query'];
+    const response=await POST(input(path,{method:'POST',headers:{'content-type':'application/json','x-zzsh-expected-user-id':'user_a'},body:'{}'}),ctx(path));
+    assert.equal(response.status,401);assert.equal((await response.json()).error.code,'IDENTITY_CHANGED');
+    assert.equal(calls,1);
+  }finally{globalThis.fetch=old;}
+});

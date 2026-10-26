@@ -310,3 +310,49 @@ test("G2 新请求仅在受信reader能力严格true后创建，原创建COMMIT�
   assert.equal(f.s.status, 202); assert.equal(creates, 1); assert.equal(executions, 1);
   assert.equal(f.s.formalReadCalls, 1); assert.equal(f.s.formalReadOptions, options);
 });
+
+function queryAssembly(): ChannelPaymentCollectionAssembly {
+  return { execution: { formal: {} as never, profileFor() { throw Error("Unexpected profile access"); }, keyFor() { throw Error("Unexpected key access"); } } };
+}
+const QUERY_URL = "/api/v1/orders/order_1/channel-payment-requests/query";
+
+test("手动原单查询：仅新命名空间POST、需正式执行装配、空body与新鲜授权", async t => {
+  const f = fixture(t); let queries = 0;
+  t.mock.method(collection, "queryJoinpayCollectionForUser", async () => { queries++; return null; });
+  const invoke = (patch: Partial<SupplyNodeRequest> = {}, assembly?: ChannelPaymentCollectionAssembly) => handleChannelPaymentRoute(
+    { method: "POST", originalUrl: QUERY_URL, headers: { origin: ORIGIN }, body: {}, ...patch } as SupplyNodeRequest, f.response, f.security, "/api/v1/orders", assembly);
+  await invoke({}, undefined); assert.equal(f.s.status, 503); assert.equal(f.s.result.error.code, "EVIDENCE_UNAVAILABLE");
+  await invoke({ originalUrl: "/api/v1/orders/order_1/payment-requests/query" }, queryAssembly()); assert.equal(f.s.status, 404);
+  await invoke({ method: "GET" }, queryAssembly()); assert.equal(f.s.status, 404);
+  await invoke({ body: { amountCents: "125" } }, queryAssembly()); assert.equal(f.s.status, 400);
+  await invoke({ headers: { origin: "https://other.invalid" } }, queryAssembly()); assert.equal(f.s.status, 403);
+  assert.equal(queries, 0);
+  await invoke({}, queryAssembly()); assert.equal(f.s.status, 404);
+  assert.equal(queries, 1);
+  assert(f.s.calls.includes("fresh-authorization"));
+});
+
+test("手动原单查询只回状态与观察摘要，不返回支付参数/金额或伪造接纳", async t => {
+  const f = fixture(t);
+  const invoke = (patch: Partial<SupplyNodeRequest> = {}) => handleChannelPaymentRoute(
+    { method: "POST", originalUrl: QUERY_URL, headers: { origin: ORIGIN }, body: {}, ...patch } as SupplyNodeRequest, f.response, f.security, "/api/v1/orders", queryAssembly());
+  t.mock.method(collection, "queryJoinpayCollectionForUser", async () => ({ requestId: "payreq_1", kind: "OBSERVED", state: "CHANNEL_SUCCEEDED_PENDING_ACCEPTANCE", event: "E4", result: "QUERY_SUCCEEDED" }));
+  await invoke();
+  assert.equal(f.s.status, 200); assert.equal(f.s.result.contractVersion, "order-payment-request.v1");
+  assert.deepEqual(f.s.result.request, { id: "payreq_1", orderId: "order_1", state: "CHANNEL_SUCCEEDED_PENDING_ACCEPTANCE" });
+  assert.deepEqual(f.s.result.query, { kind: "OBSERVED", event: "E4", result: "QUERY_SUCCEEDED" });
+  assert.equal(f.s.result.payment, undefined); assert.equal(f.s.result.paymentAction, undefined); assert.equal(f.s.result.amountCents, undefined);
+  for (const outcome of [{ kind: "TERMINAL", state: "ACCEPTED" }, { kind: "NOT_DISPATCHED", state: "SUBMITTING" }, { kind: "THROTTLED", state: "UNKNOWN" }, { kind: "PENDING_ACCEPTANCE", state: "CHANNEL_SUCCEEDED_PENDING_ACCEPTANCE" }]) {
+    t.mock.method(collection, "queryJoinpayCollectionForUser", async () => ({ ...outcome, requestId: "payreq_1" }) as never);
+    await invoke(); assert.equal(f.s.status, 200); assert.deepEqual(f.s.result.query, { kind: outcome.kind });
+  }
+});
+
+test("查询结果COMMIT未确认返回202未知，不宣称查询成功或换号", async t => {
+  const f = fixture(t);
+  t.mock.method(collection, "queryJoinpayCollectionForUser", async () => { throw new collection.CollectionAttemptCommitUnknown("payreq_1", "RESULT"); });
+  const response = await handleChannelPaymentRoute({ method: "POST", originalUrl: QUERY_URL, headers: { origin: ORIGIN }, body: {} } as SupplyNodeRequest,
+    f.response, f.security, "/api/v1/orders", queryAssembly());
+  assert.equal(response, true); assert.equal(f.s.status, 202);
+  assert.deepEqual(f.s.result, { contractVersion: "order-payment-request.v1", request: { id: "payreq_1", orderId: "order_1", state: "UNKNOWN" }, query: { kind: "UNKNOWN_COMMIT" } });
+});

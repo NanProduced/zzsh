@@ -150,7 +150,7 @@ async function prepare(options: JoinpayCollectionExecution, id: string, workerId
 }
 
 type Exchange = Awaited<ReturnType<typeof exchangeJoinpayCollection>>;
-type Recorded = { attemptId: string; observationId: string; event: JoinpayEvent; state: RequestState; formalAcceptance: false };
+type Recorded = { attemptId: string; observationId: string; event: JoinpayEvent; result: string; state: RequestState; formalAcceptance: false };
 async function record(options: JoinpayCollectionExecution, attempt: Prepared, response: Exchange): Promise<Recorded> {
   return confirmed(options.pool, attempt.request.requestId, "RESULT", async client => {
     const found = (await client.query<OriginalRow>(`${ORIGINAL_SQL} FOR UPDATE OF r`, [attempt.request.requestId])).rows[0];
@@ -204,7 +204,7 @@ async function record(options: JoinpayCollectionExecution, attempt: Prepared, re
     await recordAudit(client, { actorType: "system", action: "order.payment.collection.observed", objectType: "payment_request", objectId: request.requestId,
       outcome: "SUCCESS", requestId: observationId, details: { attemptId: attempt.attemptId, event, result, verified,
         evidenceMode: attempt.snapshot.evidenceMode, formalAcceptance: false } });
-    return { attemptId: attempt.attemptId, observationId, event, state: next, formalAcceptance: false };
+    return { attemptId: attempt.attemptId, observationId, event, result, state: next, formalAcceptance: false };
     };
     await client.query("SAVEPOINT collection_result_effect");
     try {
@@ -224,6 +224,56 @@ async function record(options: JoinpayCollectionExecution, attempt: Prepared, re
       const stale = await persist(); await client.query("RELEASE SAVEPOINT collection_result_effect"); return stale;
     }
   });
+}
+
+export type ManualCollectionQueryOutcome = { requestId: string } & (
+  | { kind: "TERMINAL"; state: RequestState }
+  | { kind: "NOT_DISPATCHED"; state: RequestState }
+  | { kind: "THROTTLED"; state: RequestState }
+  | { kind: "PENDING_ACCEPTANCE"; state: RequestState }
+  | { kind: "OBSERVED"; state: RequestState; event: string; result: string });
+
+/**
+ * 用户触发的原单查询：只查已存在的正式请求，永不首次下单。
+ * 所有权检查在独立短事务内完成；外呼不持该事务，频次/租约由执行器原逻辑约束。
+ */
+export async function queryJoinpayCollectionForUser(pool: Pool, options: JoinpayCollectionExecution & { formal: FormalCollectionSourceOptions }, input: {
+  actorUserId: string; orderId: string; workerId: string; minimumIntervalSeconds: number;
+}, execute: typeof executeJoinpayCollectionAttempt = executeJoinpayCollectionAttempt): Promise<ManualCollectionQueryOutcome | null> {
+  if (!ID.test(input.actorUserId) || !ID.test(input.orderId) || !ID.test(input.workerId)
+    || !Number.isSafeInteger(input.minimumIntervalSeconds) || input.minimumIntervalSeconds < 30 || input.minimumIntervalSeconds > 86400) throw invalid();
+  const owned = await withTransaction(pool, async client => {
+    const row = (await client.query<{ request_id: string; state: RequestState; lease_version: string }>(
+      `SELECT r.id AS request_id,r.state,r.lease_version::text FROM zzsh_order.payment_request r
+         JOIN zzsh_order.rental_order o ON o.id=r.order_id
+        WHERE r.order_id=$1 AND r.channel='JOINPAY' AND r.evidence_level='JOINPAY_CANDIDATE' AND o.renter_user_id=$2`,
+      [input.orderId, input.actorUserId])).rows[0];
+    return row ?? null;
+  });
+  if (!owned) return null;
+  const requestId = owned.request_id;
+  if (owned.state === "ACCEPTED" || owned.state === "REVIEW_REQUIRED") return { requestId, kind: "TERMINAL", state: owned.state };
+  // 已有可信成功观察时，下一步是既有接纳恢复，而不是再发一次查询。
+  if (owned.state === "CHANNEL_SUCCEEDED_PENDING_ACCEPTANCE") return { requestId, kind: "PENDING_ACCEPTANCE", state: owned.state };
+  if (owned.state === "SUBMITTING" && owned.lease_version === "0") return { requestId, kind: "NOT_DISPATCHED", state: owned.state };
+  let observed: Awaited<ReturnType<typeof execute>>;
+  try {
+    observed = await execute(options, { requestId, workerId: input.workerId,
+      recoveryMinimumIntervalSeconds: input.minimumIntervalSeconds, allowFirstDispatch: false });
+  } catch (error) {
+    // 既有接纳事务可能用observationId作commandId；对用户仍返回确切payreq ID。
+    if (error instanceof CollectionAttemptCommitUnknown) {
+      const unknown = new CollectionAttemptCommitUnknown(requestId, error.phase);
+      unknown.cause = error; throw unknown;
+    }
+    throw error;
+  }
+  if (observed.kind === "SKIPPED") {
+    const current = (await pool.query<{ state: RequestState }>(`SELECT state FROM zzsh_order.payment_request WHERE id=$1 AND evidence_level='JOINPAY_CANDIDATE'`, [requestId])).rows[0];
+    return { requestId, kind: "THROTTLED", state: current?.state ?? owned.state };
+  }
+  if (observed.operation !== "QUERY") throw conflict("Manual query attempted a new dispatch");
+  return { requestId, kind: "OBSERVED", state: observed.observation.state, event: observed.observation.event, result: observed.observation.result };
 }
 
 /** 已提交attempt之后才发送一次；领取提交未知不发请求，结果提交未知不重发SUBMIT。 */

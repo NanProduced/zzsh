@@ -10,7 +10,7 @@ import { assertReplayAuthorization } from "./order";
 import { readChannelPaymentRequest, type ChannelPaymentReadOptions } from "./channel-payment-read";
 import { createPaymentRequest, type PaymentRequestView } from "./channel-payment-store";
 import { readFormalPaymentEvidence } from "./channel-payment-formal-read";
-import { createJoinpayCollectionRequestInTransaction, executeJoinpayCollectionAttempt,
+import { CollectionAttemptCommitUnknown, createJoinpayCollectionRequestInTransaction, executeJoinpayCollectionAttempt, queryJoinpayCollectionForUser,
   type JoinpayCollectionRequestInput, type JoinpayCollectionExecution } from "./joinpay-collection-attempt";
 
 export type ChannelPaymentCollectionAssembly = {
@@ -29,7 +29,9 @@ export function channelPaymentReadOptions(collection?: ChannelPaymentCollectionA
 }
 
 const PREFIXES = ["/api/v1/orders", "/api/bff/user/orders"] as const;
-const PATH = /^\/([A-Za-z0-9._:-]+)\/(channel-payment-requests|payment-requests)$/;
+const PATH = /^\/([A-Za-z0-9._:-]+)\/(channel-payment-requests|payment-requests)(\/query)?$/;
+// 手动查询与自动补查共用同一最小间隔和十次预算；重复点击不能形成密集外呼。
+const MANUAL_QUERY_MINIMUM_INTERVAL_SECONDS = 30;
 
 /** 只投影存下的回执，不重新读取当前状态或改写同键重放结果。 */
 export function channelPaymentCommandReceipt(request: PaymentRequestView) {
@@ -58,6 +60,34 @@ export async function handleChannelPaymentRoute(request: SupplyNodeRequest, resp
     if (match[1]!.length > 128) throw notFound();
     if (request.headers.authorization || request.headers.origin !== security.userOrigin) throw forbidden();
     const actor = await readUserContext(request, security), orderId = match[1]!, channel = match[2] === "channel-payment-requests";
+    if (match[3] === "/query") {
+      if (!channel || method !== "POST") throw notFound();
+      ensureOnlyFields(bodyOf(request), []);
+      await withTransaction(security.pool, async client => { await assertReplayAuthorization(client, actor); });
+      const execution = collection?.execution, formal = execution?.formal;
+      if (!execution || !formal) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Channel query is not integrated");
+      let outcome;
+      try {
+        outcome = await queryJoinpayCollectionForUser(security.pool, { ...execution, pool: security.pool, formal }, {
+          actorUserId: actor.userId, orderId, workerId: `payquery_${randomUUID().replaceAll("-", "")}`,
+          minimumIntervalSeconds: MANUAL_QUERY_MINIMUM_INTERVAL_SECONDS });
+      } catch (error) {
+        // 查询结果提交未确认：原请求/租约保留，客户端只能按本地状态恢复，不能宣称成功或换号。
+        if (error instanceof CollectionAttemptCommitUnknown) {
+          sendJson(response, 202, { contractVersion: "order-payment-request.v1", request: { id: error.requestId, orderId, state: "UNKNOWN" },
+            query: { kind: "UNKNOWN_COMMIT" } }, requestId);
+          return;
+        }
+        throw error;
+      }
+      if (!outcome) throw notFound();
+      sendJson(response, 200, {
+        contractVersion: "order-payment-request.v1",
+        request: { id: outcome.requestId, orderId, state: outcome.state },
+        query: outcome.kind === "OBSERVED" ? { kind: outcome.kind, event: outcome.event, result: outcome.result } : { kind: outcome.kind },
+      }, requestId);
+      return;
+    }
     if (!channel) {
       const legacy = await withTransaction(security.pool, async client => {
         await assertReplayAuthorization(client, actor);

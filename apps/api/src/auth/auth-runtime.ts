@@ -70,6 +70,7 @@ import { initializeNewDistributionRegistration } from "../finance/distribution-r
 import { initializeNativeWalletOrigin, type NativeOriginResource } from "../finance/native-wallet-origin";
 import { assertLocalControlledPaymentAssembly, mountLocalControlledPayments, type LocalControlledPaymentOptions } from "../order/local-payment-routes";
 import { mountChannelPayments, channelPaymentReadOptions, type ChannelPaymentCollectionAssembly } from "../order/channel-payment-routes";
+import { mountAdminNativeRefunds } from "../order/native-refund-routes";
 import { mountJoinpayCollectionNotifications } from "../order/joinpay-collection-notification-routes";
 import { JoinpayFundsRecoveryLifecycle, type JoinpayFundsRecoverySettings } from "../finance/joinpay-funds-recovery";
 import { JoinpayAccountObservationLifecycle, type JoinpayAccountObservationOptions } from "../finance/joinpay-account-observer";
@@ -1110,6 +1111,8 @@ export async function mountAuthHandlers(
   // Credit routes own both BFF prefixes and must be registered before the
   // generic BFF fallbacks, which otherwise turn unknown credit paths into 404.
   mountCreditGuaranteeRoutes(app, { ...securityOptions, listingCursorKey: options.listingCursorKey }, options.creditGuaranteeEnabled === true);
+  // 退款路径先于通用Admin BFF挂载：只接管/refunds，其余请求仍交给BFF。
+  mountAdminNativeRefunds(app, securityOptions, { pool: options.pool, ...(options.joinpayRefund ? { refund: options.joinpayRefund } : {}) });
   mountAdminBffHandlers(app, {
     apiOrigin: options.apiOrigin,
     adminOrigin: options.adminOrigin,
