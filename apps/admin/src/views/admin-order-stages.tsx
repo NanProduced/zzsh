@@ -1,5 +1,7 @@
 import { CreditCard, FileText, Flag, KeyRound, X } from 'lucide-react';
-import { formatDate } from '../api';
+import { BEIJING_TIME_ZONE } from '../workspace/beijing-time';
+
+const orderTime = (value: string | null | undefined) => !value || !Number.isFinite(Date.parse(value)) ? "时间未提供" : new Intl.DateTimeFormat("zh-CN", { timeZone: BEIJING_TIME_ZONE, dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
 
 export interface OrderStagesPayment {
   state: 'RECORDED_PAID' | 'RECORDED_UNPAID' | 'UNKNOWN' | string;
@@ -155,8 +157,16 @@ export function OrderStages({
 
   if (variant === 'compact') {
     return <div className={`oc-stages oc-stages-compact ${className ?? ''}`.trim()}>
-      <strong className="oc-stage-label">{ORDER_STATUS_LABELS[o.status] ?? '状态待核'}</strong>
-      <small>{compactText ? `${compactText} · ` : ''}{paymentText}{refundText}{cancelText}</small>
+      <div className="oc-compact-meta"><strong className="oc-stage-label">{ORDER_STATUS_LABELS[o.status] ?? '状态待核'}</strong><small>{compactText ? `${compactText} · ` : ''}{paymentText}{refundText}{cancelText}</small></div>
+      <ol aria-label="订单进度">
+        {facts.map((f, i) => (
+          <li key={f.name} className={f.state}>
+            <span className="oc-stage-node"><f.Icon size={12} /></span>
+            <span className="oc-stage-name">{f.name}</span>
+            {i < facts.length - 1 ? <span className="oc-stage-line" /> : null}
+          </li>
+        ))}
+      </ol>
     </div>;
   }
 
@@ -180,8 +190,8 @@ export function OrderStages({
         {paymentText}
         {refundText}
         {cancelText}
-        {progress?.ending.postedAtUtc ? ` · 过账时间 ${formatDate(progress.ending.postedAtUtc)}` : ''}
-        {progress?.opening.confirmedAtUtc ? ` · 开租时间 ${formatDate(progress.opening.confirmedAtUtc)}` : ''}
+        {progress?.ending.postedAtUtc ? ` · 过账时间 ${orderTime(progress.ending.postedAtUtc)}` : ''}
+        {progress?.opening.confirmedAtUtc ? ` · 开租时间 ${orderTime(progress.opening.confirmedAtUtc)}` : ''}
       </small>
     </div>
   );

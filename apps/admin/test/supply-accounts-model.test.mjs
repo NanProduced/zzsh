@@ -1,8 +1,19 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { suggestKind, kindHint, groupConditions, liftSummary, conditionHeadline, newOrdersReasonText, independentFacts, parseSavedViews, serializeSavedViews, rowListingStatus, nextStep, primaryReason } from '../src/views/supply-accounts/account-list-model.ts';
+import { suggestKind, kindHint, lookupNeedsDirectory, groupConditions, liftSummary, conditionHeadline, newOrdersReasonText, independentFacts, parseSavedViews, serializeSavedViews, rowListingStatus, nextStep, primaryReason, haffBaseFromM, haffMFromBase, depositCentsFromYuan, depositYuanFromCents, rowBaseFeeRows, rowAccountTitle, rowDisplaySourceText } from '../src/views/supply-accounts/account-list-model.ts';
+import { feeSummaryRows, formatTermDays, publicBasisVersion } from '../src/views/supply-review/model.ts';
 
 const facts = (o = {}) => ({ publicVisible: true, publicSource: null, newOrders: true, reasons: [], ownerPaused: false, staffRestricted: false, occupancy: 'FREE', sources: [], legacyNumbers: [], ...o });
+
+test('a 20-digit order number is an exact business clue, not a phone lookup', () => {
+  const orderNo = '20260913125844629986';
+  for (const kind of ['order', 'account', 'legacy', 'link']) assert.equal(lookupNeedsDirectory(kind, orderNo), false, kind);
+  assert.equal(lookupNeedsDirectory('owner', '13800138000'), true);
+  assert.equal(lookupNeedsDirectory('nickname', '138-0013-8000'), true);
+  assert.equal(lookupNeedsDirectory('owner', orderNo), false, 'a business number is not a phone even under owner lookup');
+  assert.equal(kindHint(orderNo, 'order'), null);
+  assert.equal(kindHint('OLD-42', 'legacy'), null);
+});
 
 test('search type is only a suggestion; pure digits never become nickname', () => {
   assert.equal(suggestKind('88213'), null);
@@ -71,10 +82,23 @@ test('row reason: primary + others, concrete next steps, compact time', () => {
 /* ---------- F2：列表事实只来自正式摘要，缺值保持未提供 ---------- */
 import {
   alignedQuickRow, rowHaffText, rowQuoteText, rowDepositText, rowGuaranteeRequirementText,
-  rowGuaranteeEligibilityText, rowGuaranteeProofText, rowFullPayout,
+  rowGuaranteeEligibilityText, rowGuaranteeProofText, rowFullPayout, rowCoreAssetsText, rowRentalTerms,
 } from '../src/views/supply-accounts/account-list-model.ts';
 
 const rowOf = (over = {}) => ({ id: 'a', accountId: 'a', displayNo: 'A-1', ownerId: 'u-1', ownerName: '阿洛', revision: '3', gameName: 'g', versionId: 'v-1', sequence: '2', title: '100M 不包赔账号 3x3箱', reviewState: 'PUBLISHED', sortAt: '2026-10-03T00:00:00.000000Z', facts: facts(), ...over });
+
+test('list core assets and rental terms come from the same-version summary, with unknown kept unknown', () => {
+  const summary = { versionId: 'v-1', sequence: '2', refs: {}, timing: { accountCreatedAt: 'x' }, haff: { itemId: 'haff', quantity: '98080000' }, materials: [{ itemId: 'b', name: '巴雷特子弹', code: 'barrett', quantity: '2', unit: 'ROUND' }], materialsTotal: 1, term: { code: 'daily', name: '日耗 10M', dailyConsumption: '10000000', termSeconds: '86400' }, login: { code: 'login_qq_qr', displayName: 'QQ扫码' }, config: { safeBox: '顶级安全箱(3*3)', characterLevel: '60', grading: '巅峰', gradingDivision: '3' }, quote: null, baseDeposit: null, fullPayout: 'SELECTED', guarantee: { requirement: null, requirementSource: 'UNAVAILABLE', eligibility: null, recordedProof: null } };
+  const row = rowOf({ summary });
+  assert.match(rowCoreAssetsText(row), /98\.08 M 哈夫币/);
+  assert.match(rowCoreAssetsText(row), /顶级安全箱\(3\*3\) · 60 级 · 巅峰 · 小段位 3/);
+  assert.match(rowCoreAssetsText(row), /巴雷特子弹 2 发/);
+  assert.deepEqual(rowRentalTerms(row), { term: '1 天', daily: '10 M 哈夫币', login: 'QQ扫码', payout: '已选' });
+  assert.equal(rowRentalTerms(row).term.includes('保证金'), false, 'guarantee is not folded into rental terms');
+  const bare = rowOf();
+  assert.equal(rowCoreAssetsText(bare), '未提供 · 物资摘要未装配');
+  assert.deepEqual(rowRentalTerms(bare), { term: '租期摘要未装配', daily: '日耗摘要未装配', login: '登录摘要未装配', payout: '未提供' });
+});
 
 test('missing summary never becomes 免保证金、未交、已包赔 or 已下架', () => {
   const bare = rowOf();
@@ -197,4 +221,49 @@ test('cross-version quickview keeps the loaded declaration and separates zero, a
     assert.equal(rowDepositText(read(value)), '未提供');
   }
   assert.equal(rowDepositText(alignedQuickRow(row)), '¥111.00');
+});
+
+test('money and M inputs convert exactly, keeping empty, zero and bad precision separate', () => {
+  assert.equal(haffBaseFromM('').value, '');
+  assert.equal(haffBaseFromM('97').value, '97000000');
+  assert.equal(haffBaseFromM('1.5').value, '1500000');
+  assert.equal(haffBaseFromM('0.000001').value, '1');
+  assert.equal(haffBaseFromM('0').value, '0');
+  assert.match(haffBaseFromM('1.0000001').error, /6 位/);
+  assert.match(haffBaseFromM('-1').error, /6 位/);
+  assert.equal(haffMFromBase('97000000'), '97');
+  assert.equal(haffMFromBase('1500000'), '1.5');
+  assert.equal(haffMFromBase('1'), '0.000001');
+  assert.equal(depositCentsFromYuan('125.3').value, '12530');
+  assert.equal(depositCentsFromYuan('0').value, '0');
+  assert.equal(depositCentsFromYuan('').value, '');
+  assert.match(depositCentsFromYuan('1.234').error, /2 位/);
+  assert.equal(depositYuanFromCents('12530'), '125.30');
+  assert.equal(depositYuanFromCents('0'), '0.00');
+});
+
+test('fee rows keep an explicit zero, mark a partial split and never infer the missing side from the total', () => {
+  const complete = feeSummaryRows({ completeness: 'COMPLETE', haffRental: { amount: '100.00' }, materials: { amount: '0.00' }, resourceTotal: { amount: '100.00' } });
+  assert.deepEqual([complete.haff, complete.materials, complete.total], ['¥100.00', '¥0.00', '¥100.00']);
+  const partial = feeSummaryRows({ completeness: 'PARTIAL', haffRental: { amount: '100.00' }, materials: null, resourceTotal: { amount: '100.00' } });
+  assert.deepEqual([partial.haff, partial.materials, partial.total], ['¥100.00', '分项待核', '¥100.00']);
+  assert.match(partial.note, /不以合计反推/);
+  assert.deepEqual(feeSummaryRows(null), { haff: '未提供', materials: '未提供', total: '未提供', note: '费用汇总未提供' });
+});
+
+test('historical-only rows keep old fees separately and never show the old number in the first column', () => {
+  const historicalRead = { resourceNo: 'OLD-7', display: { state: 'KNOWN', facts: { attributeDisplay: { safeBox: { displayName: '基础安全箱' }, grading: null, loginMethod: null, serviceWindow: null }, resources: [{ code: 'haff', name: '哈夫币', quantity: '97000000', unit: 'HAFF_BASE' }] } }, historicalQuote: { haffRentYuan: '125.30', goodsYuan: '0.00', depositYuan: '0.00', termDays: '10' } };
+  const row = rowOf({ versionId: null, sequence: null, summary: null, displayNo: 'ZZ-NEW', facts: { ...facts(), historicalRead } });
+  assert.deepEqual(rowBaseFeeRows(row), { haff: '历史 ¥125.30', materials: '历史 ¥0.00', deposit: '历史 ¥0.00', total: '未提供', note: '历史记录，非当前资料' });
+  assert.match(rowCoreAssetsText(row), /历史 97 M 哈夫币 · 基础安全箱/);
+  assert.equal(rowDisplaySourceText(row), '历史资料');
+  assert.equal(rowAccountTitle(row), 'g账号');
+});
+
+test('F3 the frozen term keeps 172800 as 2 days and a missing/null value is never 0 days', () => {
+  const basis = (termSeconds) => ({ id: 'v-public', releaseId: 'r', contentHash: 'h', accountId: 'a', title: 't', description: null, attributes: {}, presentation: null, media: [], quote: { resourceTotal: { amount: '10.00' }, ...(termSeconds === undefined ? {} : { termSeconds }) }, termOption: null, fullPayoutSelected: null, publishedAt: null });
+  assert.equal(formatTermDays(publicBasisVersion(basis('172800')).quote.termSeconds), '2 天');
+  assert.equal(formatTermDays(publicBasisVersion(basis(undefined)).quote.termSeconds), '未确认');
+  assert.equal(formatTermDays(publicBasisVersion(basis(null)).quote.termSeconds), '未确认');
+  assert.notEqual(formatTermDays(publicBasisVersion(basis(null)).quote.termSeconds), '0 天');
 });

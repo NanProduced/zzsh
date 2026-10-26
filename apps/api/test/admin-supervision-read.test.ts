@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseSupervisionQuery, encodeSupervisionCursor, decodeSupervisionCursor, supervisionFacts, listSupervision, readSupervision } from "../src/supply/admin-supervision-read";
+import { parseSupervisionQuery, encodeSupervisionCursor, decodeSupervisionCursor, supervisionQueryBinding, matchesCheapFilters, matchesSupervisionFilters, quoteFeeSummary, FILTER_SCAN_MAX_CANDIDATES, supervisionFacts, listSupervision, readSupervision } from "../src/supply/admin-supervision-read";
 import { readFileSync } from "node:fs";
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 import { listingDetail, publicationBlockers, type PublishingAccount, type SupplyGateReader } from "../src/supply/publishing";
 import { parseMediaReviewBinding, assertMediaReviewBinding } from "../src/supply/media";
 import { fundingPolicyFixture } from "./funding-authority-fixtures";
@@ -122,9 +122,171 @@ for (const occupancy of ["FREE", "OCCUPIED", "UNKNOWN"] as const) {
 }
 test("supervision query preserves distinct business clues and rejects unsafe/ambiguous input", () => {
     assert.equal(parseSupervisionQuery(new URLSearchParams("queryVersion=3&queryKind=nickname&q=阿洛&limit=5")).q, "阿洛");
-    for (const query of ["q=13800138000", "view=risk", "state=PUBLISHED", "limit=51", "limit=5&limit=10", "queryKind=phone", "gameId=../x"])
+    for (const query of ["queryKind=owner&q=13800138000", "queryKind=nickname&q=138-0013-8000", "view=risk", "state=PUBLISHED", "limit=51", "limit=5&limit=10", "queryKind=phone", "gameId=../x"])
         assert.throws(() => parseSupervisionQuery(new URLSearchParams(query)));
+    assert.equal(parseSupervisionQuery(new URLSearchParams("queryKind=order&q=20260913125844629986")).q, "20260913125844629986", "a 20-digit business number is not a phone lookup");
+    assert.equal(parseSupervisionQuery(new URLSearchParams("queryKind=account&q=20260913125844629986")).queryKind, "account");
     assert.equal(parseSupervisionQuery(new URLSearchParams("queryKind=legacy&q=OLD-42")).queryKind, "legacy");
+});
+test("account filters parse exact bounds and keep empty, zero, precision and inverted ranges distinct", () => {
+    const parsed = parseSupervisionQuery(new URLSearchParams("eligibility=UNKNOWN&source=LEGACY&haffMin=0&haffMax=100000000&depositMin=0&depositMax=0&loginMethod=login_qq_qr"));
+    assert.equal(parsed.eligibility, "UNKNOWN");
+    assert.equal(parsed.source, "LEGACY");
+    assert.equal(parsed.haffMin, "0");
+    assert.equal(parsed.haffMax, "100000000");
+    assert.equal(parsed.depositMin, "0");
+    assert.equal(parsed.depositMax, "0");
+    assert.equal(parsed.loginMethod, "login_qq_qr");
+    for (const query of ["haffMin=1.5", "depositMin=12.345", "haffMin=2&haffMax=1", "depositMin=10&depositMax=9", "eligibility=ALL", "source=ALL", "loginMethod=unknown_login", "haffMin=", "haffMin=0&haffMin=1"])
+        assert.throws(() => parseSupervisionQuery(new URLSearchParams(query)), (error: any) => error.status === 400, query);
+});
+test("fee summary keeps a valid total when lines are absent or unreadable and never invents zero or foreign money", () => {
+    const total111 = quoteFeeSummary({ currency: "CNY", lines: [], resourceTotal: yuan("111.00") });
+    assert.equal(total111.resourceTotal?.amount, "111.00");
+    assert.equal(total111.haffRental, null);
+    assert.equal(total111.materials, null);
+    assert.equal(total111.completeness, "PARTIAL", "a known total with no split is partial, not complete");
+    const missing = quoteFeeSummary({ currency: "CNY", resourceTotal: yuan("111.00") });
+    assert.equal(missing.resourceTotal?.amount, "111.00");
+    assert.equal(missing.materials, null);
+    assert.equal(missing.completeness, "PARTIAL");
+    const empty = quoteFeeSummary({ currency: "CNY", lines: [], resourceTotal: yuan("111.00") });
+    assert.equal(empty.materials, null, "empty lines are not a proven zero material fee");
+    const haffOnlyClosed = quoteFeeSummary({ currency: "CNY", lines: [{ unit: "HAFF_BASE", buyerAmount: yuan("100.00") }], resourceTotal: yuan("100.00") });
+    assert.equal(haffOnlyClosed.materials?.amount, "0.00", "a closed HAFF-only quote proves zero materials");
+    assert.equal(haffOnlyClosed.completeness, "COMPLETE");
+    const haffOnlyOpen = quoteFeeSummary({ currency: "CNY", lines: [{ unit: "HAFF_BASE", buyerAmount: yuan("100.00") }], resourceTotal: yuan("111.00") });
+    assert.equal(haffOnlyOpen.materials, null, "the missing 11.00 is not invented as a material fee");
+    assert.equal(haffOnlyOpen.completeness, "PARTIAL");
+    const foreign = quoteFeeSummary({ currency: "CNY", lines: [{ unit: "HAFF_BASE", buyerAmount: { currency: "USD", unit: "yuan", amount: "100.00", scale: 2 } }], resourceTotal: yuan("111.00") });
+    assert.equal(foreign.haffRental, null);
+    assert.notEqual(foreign.completeness, "COMPLETE");
+    const cents = quoteFeeSummary({ currency: "CNY", lines: [{ unit: "HAFF_BASE", buyerAmount: { currency: "CNY", unit: "cent", amount: "100.00", scale: 2 } }], resourceTotal: yuan("111.00") });
+    assert.equal(cents.haffRental, null);
+    assert.notEqual(cents.completeness, "COMPLETE");
+    const duplicate = quoteFeeSummary({ currency: "CNY", lines: [{ unit: "HAFF_BASE", buyerAmount: yuan("100.00") }, { unit: "HAFF_BASE", buyerAmount: yuan("1.00") }], resourceTotal: yuan("111.00") });
+    assert.equal(duplicate.resourceTotal?.amount, "111.00");
+    assert.equal(duplicate.haffRental, null);
+    assert.notEqual(duplicate.completeness, "COMPLETE");
+    assert.equal(quoteFeeSummary({ currency: "USD", lines: [], resourceTotal: { currency: "USD", unit: "yuan", amount: "111.00", scale: 2 } }).resourceTotal, null);
+});
+test("cheap filter rows are checked by the selected tuple before any gate projection", () => {
+    const base = parseSupervisionQuery(new URLSearchParams("source=LEGACY&haffMin=97000000&haffMax=100000000&depositMin=0&depositMax=0&loginMethod=login_qq_qr"));
+    const row = { filterLegacy: true, filterHaff: "97000000", filterDeposit: "0", filterLogin: "login_qq_qr" };
+    assert.equal(matchesCheapFilters(base, row), true);
+    assert.equal(matchesCheapFilters(base, { ...row, filterLegacy: false }), false);
+    assert.equal(matchesCheapFilters(base, { ...row, filterHaff: null }), false);
+    assert.equal(matchesCheapFilters(base, { ...row, filterDeposit: "1" }), false);
+    assert.equal(matchesCheapFilters(base, { ...row, filterLogin: "legacy_login_qq" }), false);
+    assert.equal(matchesCheapFilters(parseSupervisionQuery(new URLSearchParams("source=NEW&haffMax=0")), { filterLegacy: false, filterHaff: "0" }), true);
+});
+test("account filters match the displayed summary without treating unknown as unavailable", () => {
+    const base = parseSupervisionQuery(new URLSearchParams());
+    const facts = { sources: [], newOrders: true };
+    const summary = { haff: { quantity: "97000000" }, baseDeposit: { amountCents: "0" }, login: { code: "login_qq_qr" } };
+    assert.equal(matchesSupervisionFilters(base, facts, summary), true);
+    assert.equal(matchesSupervisionFilters({ ...base, source: "NEW" }, facts, summary), true);
+    assert.equal(matchesSupervisionFilters({ ...base, source: "LEGACY" }, facts, summary), false);
+    assert.equal(matchesSupervisionFilters({ ...base, source: "LEGACY" }, { ...facts, sources: [{ sourceId: "old" }] }, summary), true);
+    assert.equal(matchesSupervisionFilters({ ...base, haffMin: "97000000", haffMax: "97000000" }, facts, summary), true);
+    assert.equal(matchesSupervisionFilters({ ...base, haffMin: "97000001" }, facts, summary), false);
+    assert.equal(matchesSupervisionFilters({ ...base, depositMin: "0", depositMax: "0" }, facts, summary), true, "an explicit zero deposit is a real bound");
+    assert.equal(matchesSupervisionFilters({ ...base, depositMin: "1" }, facts, summary), false);
+    assert.equal(matchesSupervisionFilters({ ...base, depositMin: "0" }, facts, { ...summary, baseDeposit: null }), false, "missing deposit is not zero");
+    assert.equal(matchesSupervisionFilters({ ...base, loginMethod: "login_qq_qr" }, facts, summary), true);
+    assert.equal(matchesSupervisionFilters({ ...base, loginMethod: "legacy_login_qq" }, facts, summary), false);
+    assert.equal(matchesSupervisionFilters({ ...base, eligibility: "ELIGIBLE" }, { ...facts, newOrders: true }, summary), true);
+    assert.equal(matchesSupervisionFilters({ ...base, eligibility: "BLOCKED" }, { ...facts, newOrders: false }, summary), true);
+    assert.equal(matchesSupervisionFilters({ ...base, eligibility: "UNKNOWN" }, { ...facts, newOrders: null }, summary), true);
+    assert.equal(matchesSupervisionFilters({ ...base, eligibility: "UNKNOWN" }, { ...facts, newOrders: false }, summary), false);
+    assert.equal(matchesSupervisionFilters({ ...base, haffMin: "0" }, facts, null), false, "no summary cannot satisfy a range");
+});
+test("bounded filtering never gates a whole no-match source range and stops residual eligibility at the fixed budget", async t => {
+    const legacy = require("../src/supply/legacy-listing-read"), directory = require("../src/auth/user-directory-summary");
+    let rows: Array<Record<string, any>> = [], gateCalls = 0, selected = 0, filterWithQ: any = null, lateEligibleFrom = Number.POSITIVE_INFINITY;
+    const accounts = new Map<string, any>(), versions = new Map<string, any>();
+    const make = (n: number, laterHaff = false, eligibleLast = false) => {
+        lateEligibleFrom = eligibleLast ? n - 20 : Number.POSITIVE_INFINITY;
+        rows = Array.from({ length: n }, (_, index) => ({ id: `model-${String(n - index).padStart(5, "0")}`, accountId: `model-${index}`, ownerId: "model-owner", sortAt: "2026-10-01T00:00:00.000000Z", accountCreatedAt: "2026-10-01T00:00:00.000000Z", accountUpdatedAt: null, versionId: `version-${index}`, sequence: "2", title: "model", reviewState: "PUBLISHED", versionCreatedAt: null, ruleReleaseId: null, termOptionCode: null, priceVersionId: null, ownerName: "model", gameName: "model", filterLegacy: false, filterHaff: laterHaff && index >= n - 20 ? "12500000" : "1000000", filterDeposit: "0", filterLogin: "login_qq_qr" }));
+        accounts.clear(); versions.clear();
+        for (const row of rows) {
+            accounts.set(row.id, { id: row.id, game_id: "game", owner_user_id: row.ownerId, current_version_id: row.versionId, staff_restricted: false, owner_paused: false, revision: "1", display_no: row.id, lateEligible: eligibleLast && rows.findIndex(candidate => candidate.id === row.id) >= lateEligibleFrom });
+            versions.set(row.id, { id: row.versionId, account_id: row.id, origin: "NATIVE", review_state: "PUBLISHED", attributes: { login_method_code: "login_qq_qr", owner_deposit_declaration: { schema: "owner-deposit-declaration-v1", amountCents: "0" } }, presentation: { items: [{ id: "haff", name: "哈夫币", unit: "HAFF_BASE" }] }, payload: { declaration: { inventory: [{ itemId: "haff", quantity: "12500000" }], attributes: {} }, quoteValues: { currency: "CNY", lines: [], resourceTotal: { currency: "CNY", unit: "yuan", amount: "0.00", scale: 2 } }, ruleRefs: {} } });
+        }
+    };
+    t.mock.method(publishing, "listingCandidatePage", () => ({ load: async () => {}, account: (id: string) => accounts.get(id), version: (id: string) => versions.get(id), hasPublication: () => false, shared: {} }));
+    t.mock.method(publishing, "publicListingMemo", () => ({ read: async () => null }));
+    t.mock.method(publishing, "readPublicListing", async () => { throw Object.assign(new Error("model public missing"), { status: 404 }); });
+    t.mock.method(publishing, "evaluatePublication", async (_client: any, _account: any, _version: any, gate: any) => { gateCalls++; await gate(_client, _account, "READ"); return _account.lateEligible ? [] : ["QUOTE_REQUIRED"]; });
+    t.mock.method(legacy, "loadLegacyHistoricalReads", async () => new Map());
+    t.mock.method(directory, "readDirectoryUserSummaries", async () => new Map());
+    const client = { query: async (sql: string, values: any[] = []) => {
+        if (sql.startsWith("SELECT a.id,")) {
+            const after = sql.includes("::timestamptz,") ? values.at(-2) : null, limit = Number(values.at(-1));
+            const start = after === null ? 0 : rows.findIndex(row => row.id === after) + 1;
+            const candidates = filterWithQ ? rows.filter(row => matchesCheapFilters(filterWithQ, row)) : rows;
+            const page = candidates.slice(start, start + limit); selected += page.length;
+            return { rows: page, rowCount: page.length };
+        }
+        return { rows: [], rowCount: 0 };
+    } };
+    const viewer = { ...queryViewer, access: { ...queryViewer.access, isBoss: true, permissions: new Set<string>() } };
+    const gate = async () => ({ publisherBail: "NOT_REQUIRED" as const, occupancy: "FREE" as const, reference: "model" });
+    make(2100);
+    const sourceQuery = parseSupervisionQuery(new URLSearchParams("queryVersion=3&limit=20&source=LEGACY"));
+    filterWithQ = sourceQuery;
+    const source = await listSupervision(client as never, viewer, sourceQuery, gate, queryKey);
+    filterWithQ = null;
+    assert.equal(source.items.length, 0);
+    assert.equal(gateCalls, 0, "a cheap source predicate must not gate every candidate");
+    assert.equal(selected, 0, "the model applies the SQL source predicate before keys");
+    make(2100, true);
+    gateCalls = 0; selected = 0;
+    const haffQuery = parseSupervisionQuery(new URLSearchParams("queryVersion=3&limit=20&haffMin=12500000&haffMax=12500000"));
+    filterWithQ = haffQuery;
+    const later = await listSupervision(client as never, viewer, haffQuery, gate, queryKey);
+    filterWithQ = null;
+    assert.equal(later.items.length, 20);
+    assert.equal(gateCalls, 20, "only the matching later batch is projected");
+    make(2100);
+    gateCalls = 0; selected = 0;
+    await assert.rejects(
+        () => listSupervision(client as never, viewer, parseSupervisionQuery(new URLSearchParams("queryVersion=3&limit=20&eligibility=ELIGIBLE")), gate, queryKey),
+        (error: any) => error.status === 503 && error.code === "EVIDENCE_UNAVAILABLE",
+    );
+    assert.equal(gateCalls, 500, "residual eligibility stops at the fixed candidate budget");
+    assert.equal(selected, 500);
+    assert.equal(FILTER_SCAN_MAX_CANDIDATES, 500);
+    make(500, false, true);
+    gateCalls = 0; selected = 0;
+    const boundary = await listSupervision(client as never, viewer, parseSupervisionQuery(new URLSearchParams("queryVersion=3&limit=20&eligibility=ELIGIBLE")), gate, queryKey);
+    assert.equal(boundary.items.length, 20, "matching exactly at the fixed boundary still returns a page");
+    assert.ok(boundary.nextCursor, "a boundary page keeps a verifiable next cursor");
+    assert.equal(gateCalls, 500);
+    make(2100);
+    gateCalls = 0;
+    const control = await listSupervision(client as never, viewer, parseSupervisionQuery(new URLSearchParams("queryVersion=3&limit=20")), gate, queryKey);
+    assert.equal(control.items.length, 20);
+    assert.equal(gateCalls, 21, "an unfiltered page still projects only one page plus lookahead");
+});
+test("filter SQL selects the same display version and pushes source, haff, deposit and login before the limit", async () => {
+    const { sql } = await captureListQuery(new URLSearchParams("source=LEGACY&haffMin=0&haffMax=100000000&depositMin=0&depositMax=0&loginMethod=login_qq_qr"));
+    assert.match(sql, /zzsh_supply\.legacy_supply_map/);
+    assert.match(sql, /zzsh_supply\.listing_publication/);
+    assert.match(sql, /zzsh_supply\.rule_acceptance/);
+    assert.match(sql, /AS "filterHaff"/);
+    assert.match(sql, /AS "filterDeposit"/);
+    assert.match(sql, /AS "filterLogin"/);
+    assert.match(sql, /FROM .*listing_publication/s);
+    assert.match(sql, /WHERE .*legacy_supply_map/s);
+    assert.match(sql, /LIMIT \$/);
+});
+test("private cursor binds the complete normalized account filter set", () => {
+    const key = { keyId: "fixture", secret: "fixture-only-private-cursor-key-000001" }, position = { at: "2026-10-03T00:00:00.000000Z", id: "account_fixture" };
+    const base = parseSupervisionQuery(new URLSearchParams("queryVersion=3&limit=5")), filtered = parseSupervisionQuery(new URLSearchParams("queryVersion=3&limit=5&source=LEGACY&haffMin=0"));
+    const cursor = encodeSupervisionCursor(position, supervisionQueryBinding(queryViewer, base), key);
+    assert.notEqual(supervisionQueryBinding(queryViewer, base), supervisionQueryBinding(queryViewer, filtered));
+    assert.throws(() => decodeSupervisionCursor(cursor, supervisionQueryBinding(queryViewer, filtered), key), (error: any) => error.status === 409);
 });
 test("private cursor refuses the old ID cursor and a changed identity, scope or filter", () => {
     const key = { keyId: "fixture", secret: "fixture-only-private-cursor-key-000001" }, position = { at: "2026-10-03T00:00:00.000000Z", id: "account_fixture" };
@@ -225,12 +387,12 @@ test("account route lets the owner read history and stops another user first", a
 
 /* ---------- API A：列表最小受权摘要 ---------- */
 
-const summaryRow = { id: "a-1", accountId: "a-1", displayNo: "A-1", ownerId: "u-1", revision: "3", sortAt: "2026-10-03T00:00:00.000000Z", accountCreatedAt: "2026-01-02T03:04:05.000000Z", accountUpdatedAt: null, versionId: "v-1", sequence: "2", title: "100M 不包赔账号", reviewState: "PUBLISHED", versionCreatedAt: "2026-02-02T02:02:02.000000Z", ruleReleaseId: "release-1", priceVersionId: "price-1", ownerName: "阿洛", gameName: "三角洲" };
+const summaryRow = { id: "a-1", accountId: "a-1", displayNo: "A-1", ownerId: "u-1", revision: "3", sortAt: "2026-10-03T00:00:00.000000Z", accountCreatedAt: "2026-01-02T03:04:05.000000Z", accountUpdatedAt: null, versionId: "v-1", sequence: "2", title: "100M 不包赔账号", reviewState: "PUBLISHED", versionCreatedAt: "2026-02-02T02:02:02.000000Z", ruleReleaseId: "release-1", termOptionCode: "daily", priceVersionId: "price-1", ownerName: "阿洛", gameName: "三角洲", filterLegacy: false, filterHaff: "12500000", filterDeposit: null, filterLogin: "login_qq_qr" };
 const yuan = (amount: string) => ({ currency: "CNY" as const, unit: "yuan" as const, amount, scale: 2 as const });
 function summaryVersion(id: string) {
     const unit = (amount: string) => ({ currency: "CNY" as const, unit: "yuan" as const, amount, scale: 8 as const });
     const line = (itemId: string, quantity: string, itemUnit: "HAFF_BASE" | "ROUND", buyer: string) => ({ itemId, quantity, unit: itemUnit, unitQuantity: "1", pricingKind: "FIXED_UNIT" as const, buyerUnitAmount: unit(buyer), ownerUnitAmount: unit("0.10000000"), buyerAmount: yuan(buyer), ownerAmount: yuan("1.00"), platformAmount: yuan("0.10") });
-    return { id, account_id: id.replace(/^version-/, ""), sequence: "2", origin: "NATIVE", review_state: "PUBLISHED", title: "100M", description: null, attributes: {}, term_option_code: "daily", pricing_option_code: "standard", rule_release_id: "release-1", content_hash: "hash-1", schema_version: 1, revision: "1", submitted_at: null, presentation: {}, payload: { schemaVersion: 1, accountId: id.replace(/^version-/, ""), gameId: "fixture-game", declaration: { title: "100M", description: null, attributes: {}, inventory: [{ itemId: "haff-unit-1", quantity: "12500000" }, { itemId: "bullets", quantity: "120" }], skins: [], entitlements: [], termOptionCode: "daily", pricingOptionCode: "standard", mediaBindings: [] }, ruleRefs: { releaseId: "release-1", priceVersionId: "price-1", termVersionId: "term", agreementVersionId: "ag", agreementDigest: "d".repeat(64), catalogRevision: "9" }, quoteValues: { schemaVersion: 1, currency: "CNY", priceVersionId: "price-1", ruleReleaseId: "release-1", mode: "SPREAD", lines: [line("haff-unit-1", "12500000", "HAFF_BASE", "200.00"), line("bullets", "120", "ROUND", "12.77")], resourceTotal: yuan("212.77"), ownerTotal: yuan("190.00"), platformFullProfit: yuan("22.77"), tenantDeposit: yuan("50.00"), publisherBailRequirement: yuan("300.00"), termSeconds: "86400", expiryDisclosures: [], unitAmountsInformational: true, roundingPolicy: "HALF_UP_CENT_V1", pricingInputs: { haffRatioSchema: null } } } };
+    return { id, account_id: id.replace(/^version-/, ""), sequence: "2", origin: "NATIVE", review_state: "PUBLISHED", title: "100M", description: null, attributes: { login_method_code: "login_qq_qr", safe_box_code: "safe_box_3x3", character_level: 60, grading_code: "8", grading_division: "3" }, term_option_code: "daily", pricing_option_code: "standard", rule_release_id: "release-1", content_hash: "hash-1", schema_version: 1, revision: "1", submitted_at: null, presentation: { items: [{ id: "haff-unit-1", name: "哈夫币", unit: "HAFF_BASE" }, { id: "bullets", name: "巴雷特子弹", unit: "ROUND" }] }, payload: { schemaVersion: 1, accountId: id.replace(/^version-/, ""), gameId: "fixture-game", declaration: { title: "100M", description: null, attributes: {}, inventory: [{ itemId: "haff-unit-1", quantity: "12500000" }, { itemId: "bullets", quantity: "120" }], skins: [], entitlements: [], termOptionCode: "daily", pricingOptionCode: "standard", mediaBindings: [] }, ruleRefs: { releaseId: "release-1", priceVersionId: "price-1", termVersionId: "term", agreementVersionId: "ag", agreementDigest: "d".repeat(64), catalogRevision: "9" }, quoteValues: { schemaVersion: 1, currency: "CNY", priceVersionId: "price-1", ruleReleaseId: "release-1", mode: "SPREAD", lines: [line("haff-unit-1", "12500000", "HAFF_BASE", "200.00"), line("bullets", "120", "ROUND", "12.77")], resourceTotal: yuan("212.77"), ownerTotal: yuan("190.00"), platformFullProfit: yuan("22.77"), tenantDeposit: yuan("50.00"), publisherBailRequirement: yuan("300.00"), termSeconds: "86400", expiryDisclosures: [], unitAmountsInformational: true, roundingPolicy: "HALF_UP_CENT_V1", pricingInputs: { haffRatioSchema: null } } } };
 }
 function summaryHarness(viewerPermissions: string[], options: { policy?: unknown | null; proof?: unknown | null; users?: boolean } = {}) {
     const sql: string[] = [], ownerRequests: unknown[][] = [];
@@ -247,7 +409,11 @@ function summaryHarness(viewerPermissions: string[], options: { policy?: unknown
             return { rows: [{ accountId: "a-1", status: "SEALED", policy: options.policy }] };
         }
         if (text.includes("account_guarantee_proof")) return { rows: options.proof === undefined ? [] : [options.proof] };
-        if (text.includes('FROM zzsh_auth_user."user" WHERE id=ANY')) {
+        if (text.includes("unnest($1::text[],$2::text[])")) {
+            const releases = (values?.[0] ?? []) as string[], codes = (values?.[1] ?? []) as string[];
+            return { rows: releases.map((releaseId, index) => ({ releaseId, code: codes[index], name: "日耗 10M", dailyConsumption: "10000000" })) };
+        }
+        if (text.includes('directory-user-summaries') || text.includes('FROM zzsh_auth_user."user" WHERE id=ANY')) {
             if (!options.users) throw Error("owner summary must not be read without user.directory.read");
             ownerRequests.push(values ?? []);
             return { rows: [{ id: "u-1", name: "阿洛", image: "https://cdn.example/avatar.png", phone: "13800138000" }, { id: "u-2", name: "阿洛乙", image: null, phone: null }] };
@@ -277,6 +443,17 @@ test("list summary reports only authoritative facts and keeps every missing fact
     assert.equal(item.summary.timing.accountCreatedAt, summaryRow.accountCreatedAt);
     assert.equal(item.summary.timing.accountUpdatedAt, null, "absent update time stays absent, never the sort time");
     assert.equal(item.summary.timing.versionCreatedAt, summaryRow.versionCreatedAt);
+    assert.equal(item.summary.term.termSeconds, "86400");
+    assert.equal(item.summary.term.dailyConsumption, "10000000");
+    assert.equal(item.summary.term.name, "日耗 10M");
+    assert.equal(item.summary.login.code, "login_qq_qr");
+    assert.equal(item.summary.login.displayName, "QQ扫码");
+    assert.equal(item.summary.config.safeBox, "顶级安全箱(3*3)");
+    assert.equal(item.summary.config.characterLevel, "60");
+    assert.equal(item.summary.config.grading, "巅峰");
+    assert.equal(item.summary.config.gradingDivision, "3");
+    assert.deepEqual(item.summary.materials.map((row: any) => [row.name, row.quantity, row.unit]), [["巴雷特子弹", "120", "ROUND"]]);
+    assert.equal(item.summary.materialsTotal, 1);
     assert.equal(item.ownerLink.state, "DENIED");
     assert.equal("ownerSummary" in item, false, "no owner contact projection without directory read");
     assert.equal(item.summary.quote.ownerTotal, null, "internal owner amount stays outside a public quote viewer");
@@ -286,6 +463,78 @@ test("list summary reports only authoritative facts and keeps every missing fact
     assert.equal(sql.filter(s => s.includes("p.funding_policy AS policy,p.status AS status")).length, 1);
     assert.equal(sql.filter(s => s.includes("agreement_version") || s.includes("review_decision")).length, 0, "list does not load agreement or review history");
     assert.equal(sql.filter(s => s.includes("FROM zzsh_supply.game WHERE id=$1")).length, 1, "the page shares one game read");
+});
+
+test("list summary uses the real public version, never the current draft v3", async t => {
+    const publicBasis = {
+        source: "NATIVE_PUBLICATION", versionId: "public-v1", releaseId: "public-release", contentHash: "public-hash", id: "a-1", title: "公开标题", description: "公开说明",
+        attributes: { safe_box_code: "safe_box_3x3", character_level: 60, grading_code: "8", grading_division: "3", login_method_code: "login_qq_qr" },
+        attributeDisplay: { safeBox: { displayName: "顶级安全箱(3*3)" }, grading: { displayName: "巅峰" }, loginMethod: { displayName: "QQ扫码" }, serviceWindow: null },
+        presentation: { items: [{ id: "haff", name: "哈夫币", unit: "HAFF_BASE" }, { id: "bullets", name: "巴雷特子弹", unit: "ROUND" }] },
+        quote: { currency: "CNY", ruleReleaseId: "public-release", termSeconds: "172800", baseRenterHaffRatioWanPerYuan: "10.00",
+            lines: [{ itemId: "haff", quantity: "10000000", unit: "HAFF_BASE", buyerAmount: yuan("100.00") }, { itemId: "bullets", quantity: "1", unit: "ROUND", buyerAmount: yuan("11.00") }],
+            resourceTotal: yuan("111.00"), tenantDeposit: yuan("50.00"), tenantPayableTotal: yuan("161.00"), expiryDisclosures: [], unitAmountsInformational: true },
+        termOption: { code: "daily", displayName: "2天", dailyConsumption: { quantity: "5000000", unit: "HAFF_BASE" } },
+        fullPayoutSelected: true, publishedAt: "2026-10-01T00:00:00.000000Z", media: [], baseDeposit: { amountCents: "12530" },
+    };
+    t.mock.method(publishing, "readPublicListing", async () => publicBasis);
+    const { client, viewer } = summaryHarness(["supply.review.read"]);
+    const page = await listSupervision(client, viewer, parseSupervisionQuery(new URLSearchParams("queryVersion=3&limit=5")), async () => ({ publisherBail: "UNKNOWN", occupancy: "FREE", reference: null }), queryKey);
+    const summary = (page.items[0] as Record<string, any>).summary;
+    assert.equal(summary.displaySource, "PUBLIC_VERSION");
+    assert.equal(summary.versionId, "public-v1");
+    assert.equal(summary.contentHash, "public-hash");
+    assert.equal((page.items[0] as Record<string, any>).facts.publicBasis.id, "public-v1");
+    assert.equal((page.items[0] as Record<string, any>).facts.publicBasis.contentHash, "public-hash", "dialog/detail default binds the same public id and hash");
+    assert.equal(summary.baseDeposit.amountCents, "12530", "the public basis carries its own deposit declaration");
+    assert.equal(summary.title, "公开标题");
+    assert.equal(summary.haff.quantity, "10000000");
+    assert.deepEqual(summary.materials.map((row: any) => [row.name, row.quantity, row.unit]), [["巴雷特子弹", "1", "ROUND"]]);
+    assert.equal(summary.quote.resourceTotal.amount, "111.00");
+    assert.equal(summary.feeSummary.haffRental.amount, "100.00");
+    assert.equal(summary.feeSummary.materials.amount, "11.00");
+    assert.equal(summary.feeSummary.completeness, "COMPLETE");
+    assert.equal(summary.term.termSeconds, "172800");
+    assert.equal(summary.config.safeBox, "顶级安全箱(3*3)");
+    assert.equal(summary.login.displayName, "QQ扫码");
+    assert.equal(summary.fullPayout, "SELECTED");
+    assert.equal(summary.refs.ruleReleaseId, "public-release");
+    assert.equal(summary.refs.priceVersionId, null, "the public contract does not expose a price version; never reuse the current one");
+    assert.equal(JSON.stringify(summary).includes("212.77"), false, "the current draft quote is not mixed into the public summary");
+    assert.equal(JSON.stringify(summary).includes("12500000"), false, "the current draft inventory is not mixed into the public summary");
+});
+
+test("U1 account filters run on the displayed summary before the returned page is sliced", async t => {
+    t.mock.method(publishing, "readPublicListing", async () => { throw Object.assign(new Error("fixture 404"), { status: 404 }); });
+    const { client, viewer } = summaryHarness(["supply.review.read"]);
+    const gate = async () => ({ publisherBail: "UNKNOWN" as const, occupancy: "FREE" as const, reference: null });
+    const matching = await listSupervision(client, viewer, parseSupervisionQuery(new URLSearchParams("queryVersion=3&limit=1&haffMin=12500000&haffMax=12500000&loginMethod=login_qq_qr")), gate, queryKey);
+    assert.equal(matching.items.length, 1, "the returned page is limited after filtering");
+    assert.equal((matching.items[0] as any).id, "a-1");
+    assert.ok(matching.nextCursor, "a second matching row is still reachable");
+    const outside = await listSupervision(client, viewer, parseSupervisionQuery(new URLSearchParams("queryVersion=3&limit=5&haffMax=12499999")), gate, queryKey);
+    assert.equal(outside.items.length, 0, "an upper bound below the stored quantity excludes every row");
+    const missingDeposit = await listSupervision(client, viewer, parseSupervisionQuery(new URLSearchParams("queryVersion=3&limit=5&depositMin=0")), gate, queryKey);
+    assert.equal(missingDeposit.items.length, 0, "missing deposit is not an explicit zero");
+    const wrongLogin = await listSupervision(client, viewer, parseSupervisionQuery(new URLSearchParams("queryVersion=3&limit=5&loginMethod=legacy_login_qq")), gate, queryKey);
+    assert.equal(wrongLogin.items.length, 0);
+    const legacy = await listSupervision(client, viewer, parseSupervisionQuery(new URLSearchParams("queryVersion=3&limit=5&source=LEGACY")), gate, queryKey);
+    assert.equal(legacy.items.length, 0, "no legacy source mapping means the legacy source filter excludes the row");
+    const fresh = await listSupervision(client, viewer, parseSupervisionQuery(new URLSearchParams("queryVersion=3&limit=5&source=NEW")), gate, queryKey);
+    assert.equal(fresh.items.length, 2);
+});
+test("a public version missing quote fields stays unknown instead of borrowing the current draft", async t => {
+    t.mock.method(publishing, "readPublicListing", async () => ({ source: "NATIVE_PUBLICATION", versionId: "public-v1", releaseId: "public-release", id: "a-1", title: "公开标题", attributes: {}, presentation: { items: [] }, quote: null, termOption: null, fullPayoutSelected: null, publishedAt: null, media: [] }));
+    const { client, viewer } = summaryHarness(["supply.review.read"]);
+    const page = await listSupervision(client, viewer, parseSupervisionQuery(new URLSearchParams("queryVersion=3&limit=5")), async () => ({ publisherBail: "UNKNOWN", occupancy: "FREE", reference: null }), queryKey);
+    const summary = (page.items[0] as Record<string, any>).summary;
+    assert.equal(summary.displaySource, "PUBLIC_VERSION");
+    assert.equal(summary.quote, null);
+    assert.equal(summary.haff, null);
+    assert.deepEqual(summary.materials, []);
+    assert.equal(summary.feeSummary.completeness, "UNKNOWN");
+    assert.equal(summary.fullPayout, "NOT_DECLARED");
+    assert.equal(JSON.stringify(summary).includes("212.77"), false);
 });
 
 test("list summary gates internal amounts and owner contact projection behind their own permissions", async t => {
@@ -307,7 +556,7 @@ test("list summary gates internal amounts and owner contact projection behind th
     assert.equal(first.ownerSummary.maskedPhone, "138****8000", "only the existing masked projection leaves the server");
     assert.equal(second.ownerSummary.maskedPhone, null);
     assert.deepEqual(internal.ownerRequests, [[['u-1','u-2']]], "the shared user reader is one batch for visible owners");
-    assert.deepEqual(Object.keys(first.ownerSummary).sort(), ['image','maskedPhone','name']);
+    assert.deepEqual(Object.keys(first.ownerSummary).sort(), ['image','maskedPhone','name','riskFlag']);
     assert.equal(second.summary.guarantee.requirement, null, "no policy row means 未提供, not 0");
     assert.equal(second.summary.guarantee.requirementSource, "UNAVAILABLE");
 });
@@ -520,4 +769,18 @@ test("a DETAIL memo cannot satisfy a RENTABLE or strict public read", async () =
     await assert.rejects(() => publishing.readPublicListing(client, detailAccount, gate, undefined, false, "RENTABLE", undefined, prefetch), (error: { status?: number }) => error.status === 404);
     await assert.rejects(() => publishing.readPublicListing(client, detailAccount, gate, undefined, true, "DETAIL", undefined, prefetch), (error: { status?: number }) => error.status === 404);
     assert.equal(memoReads, 1, "only the non-strict DETAIL read may reuse the DETAIL projection");
+});
+
+
+test('owner hover summaries: supply page forwards actor and exact summary permissions once',async t=>{
+ const summaryModule=require('../src/auth/user-directory-summary');
+ let calls=0;let context:unknown;let selected:readonly string[]=[];
+ t.mock.method(summaryModule,'readDirectoryUserSummaries',async(_client:PoolClient,ids:readonly string[],_permissions:ReadonlySet<string>,input:unknown)=>{
+  calls++;context=input;selected=ids;return new Map([...new Set(ids)].map(id=>[id,{name:id,image:null,maskedPhone:null,riskFlag:true}]));
+ });
+ const f=summaryHarness(['supply.review.read','user.directory.read','membership.growth.read.summary','credit.read']);
+ const page=await listSupervision(f.client,f.viewer,parseSupervisionQuery(new URLSearchParams('queryVersion=3&limit=5')),async()=>({publisherBail:'UNKNOWN',occupancy:'FREE',reference:null}),queryKey);
+ assert.equal(calls,1);assert.deepEqual(context,{adminId:f.viewer.adminId,isBoss:f.viewer.access.isBoss,membershipSummaryRead:true,creditRead:true});
+ assert.equal(selected.length,page.items.length,'only visible page owners');
+ assert.equal((page.items[0] as Record<string,any>).ownerSummary.riskFlag,true);
 });

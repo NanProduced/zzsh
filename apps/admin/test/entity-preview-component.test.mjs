@@ -339,6 +339,78 @@ test('AccountPreviewCard displays haff, materials, term and login method neutral
   assert.equal(text.includes('本单账号'), false, 'Default tag 本单账号 must be removed');
 });
 
+test('user preview shows the authorized public number, permanent tier, zero credit and Beijing login time without a request', async t => {
+  const container = browser.document.createElement('div'); browser.document.body.append(container); const root = createRoot(container);
+  t.after(async () => { await act(async () => root.unmount()); container.remove(); });
+  let requests = 0;
+  t.mock.method(globalThis, 'fetch', async () => { requests++; throw new Error('Preview must not fetch'); });
+  await act(async () => root.render(createElement(UserPreviewCard, {
+    name: '合成已核用户', userId: 'synthetic-user-private-id', businessNo: '202610260001',
+    accountStatus: '正常', realNameStatus: '已实名', lastLoginAt: '2026-10-25T23:58:00.000Z', riskFlag: true,
+    membershipSummary: { state: 'ready', growth: { knowledge: 'KNOWN', effectiveTier: 'BLACK_GOLD' } },
+    creditSummary: { state: 'ready', knowledge: 'KNOWN', score: 0, revision: '1' },
+  })));
+  const text = container.textContent;
+  assert.match(text, /202610260001/); assert.match(text, /黑金（永久）/); assert.match(text, /信用分：0/);
+  assert.match(text, /正常/); assert.match(text, /已实名/); assert.match(text, /内部高危/);
+  assert.match(text, /最后登录/); assert.match(text, /2026[/-]10[/-]26/); assert.match(text, /07:58/);
+  assert.doesNotMatch(text, /synthetic-user-private-id|安全|租客|号主/);
+  assert.equal(requests, 0);
+  const copy = container.querySelector('[aria-label="复制用户编号"]'); assert.ok(copy);
+  await act(async () => copy.dispatchEvent(new browser.MouseEvent('click', { bubbles: true, cancelable: true })));
+  assert.equal(globalThis.__lastCopied, '202610260001');
+});
+
+test('denied and unknown summaries override stale scalar membership and credit values', async t => {
+  const container = browser.document.createElement('div'); browser.document.body.append(container); const root = createRoot(container);
+  t.after(async () => { await act(async () => root.unmount()); container.remove(); });
+  for (const props of [
+    { membershipSummary: { state: 'denied', permission: 'membership.growth.read.summary' }, creditSummary: { state: 'denied', permission: 'credit.read' } },
+    { membershipSummary: { state: 'ready', growth: { knowledge: 'UNKNOWN', effectiveTier: 'GOLD' } }, creditSummary: { state: 'ready', knowledge: 'NOT_INITIALIZED', score: null } },
+    { creditState: 'DENIED' }, { creditState: 'OUT_OF_SCOPE' }, { creditState: 'UNKNOWN' },
+  ]) {
+    await act(async () => root.render(createElement(UserPreviewCard, { name: '合成用户', membershipTier: props.membershipSummary ? '秘密旧等级' : undefined, creditState: 'KNOWN', creditScore: 99, ...props })));
+    assert.doesNotMatch(container.textContent, /秘密旧等级|信用分：99/);
+  }
+});
+
+test('preview usefulness recognizes authorized public facts while absent login data stays absent', async t => {
+  const base = { name: '同名', image: null, maskedPhone: null };
+  for (const facts of [{ businessNo: '202610260001' }, { accountStatus: '正常' }, { realNameStatus: '已实名' }, { lastLoginAt: '2026-10-26T00:00:00Z' }]) {
+    assert.equal(hasUsefulUserPreview({ ...base, ...facts }, '同名'), true);
+  }
+  assert.equal(hasUsefulUserPreview({ ...base, lastLoginAt: 'NOT_A_DATE' }, '同名'), false);
+  const container = browser.document.createElement('div'); browser.document.body.append(container); const root = createRoot(container);
+  t.after(async () => { await act(async () => root.unmount()); container.remove(); });
+  await act(async () => root.render(createElement(UserPreviewCard, { name: '同名', lastLoginAt: null, riskFlag: false })));
+  assert.doesNotMatch(container.textContent, /最后登录|普通会员|信用分：0|安全/);
+});
+
+test('account preview presents same-version conditions and labels a frozen deposit without implying availability', async t => {
+  const container = browser.document.createElement('div'); browser.document.body.append(container); const root = createRoot(container);
+  t.after(async () => { await act(async () => root.unmount()); container.remove(); });
+  let requests = 0;
+  t.mock.method(globalThis, 'fetch', async () => { requests++; throw new Error('Preview must not fetch'); });
+  await act(async () => root.render(createElement(AccountPreviewCard, {
+    displayNo: 'ZZ202610260001', gameName: '三角洲行动', safeBoxText: '顶级安全箱（3×3）', rankText: '钻石 I',
+    haffText: '160 M', materialsText: 'AWM子弹 65发 · 六级甲 9件', termText: '2天', loginMethodText: '微信扫码',
+    depositText: '¥0.00', depositLabel: '本单冻结押金', sourceText: '本单冻结版本',
+  })));
+  const text = container.textContent;
+  assert.match(text, /顶级安全箱/); assert.match(text, /钻石 I/); assert.match(text, /160 M/); assert.match(text, /AWM子弹 65发/);
+  assert.match(text, /2天/); assert.match(text, /微信扫码/); assert.match(text, /本单冻结押金/); assert.match(text, /¥0\.00/);
+  assert.doesNotMatch(text, /基础押金|可租|可接单|租入|租出/); assert.equal(requests, 0);
+});
+
+test('account preview keeps meaningful historical provenance but suppresses an order-origin-only line', async t => {
+  const container = browser.document.createElement('div'); browser.document.body.append(container); const root = createRoot(container);
+  t.after(async () => { await act(async () => root.unmount()); container.remove(); });
+  await act(async () => root.render(createElement(AccountPreviewCard, { displayNo: 'SYNTHETIC', sourceText: '新平台订单' })));
+  assert.doesNotMatch(container.textContent, /资料来源|新平台订单|基础押金/);
+  await act(async () => root.render(createElement(AccountPreviewCard, { displayNo: 'SYNTHETIC', sourceText: '历史账号参考' })));
+  assert.match(container.textContent, /历史账号参考/); assert.doesNotMatch(container.textContent, /本单冻结版本/);
+});
+
 test('OwnerHoverCard in supply view prevents event bubbling to row drawer', async (t) => {
   const container = browser.document.createElement('div');
   browser.document.body.appendChild(container);

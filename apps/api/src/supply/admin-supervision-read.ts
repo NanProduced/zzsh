@@ -10,9 +10,14 @@ import { canonicalize } from "./content-hash";
 import { requireListingCursorKey, type ListingCursorKey } from "./listing-cursor";
 import { loadLegacyHistoricalRead, loadLegacyHistoricalReads, type LegacyHistoricalRead } from "./legacy-listing-read";
 import { validateFundingPolicy } from "./funding-policy";
+import { decimalToBigInt, parseNonNegativeDecimal, yuanAmountObject } from "./decimal";
 import { projectDeltaQuote } from "./delta-rental";
+import { projectTenantMoney } from "./tenant-price-projection";
 import { evaluatePublication, listingCandidatePage, listingDetail, listingPageShared, publicListingBasis, publicListingMemo, readPublicListing, type ListingDetailPrefetch, type ListingPageShared, type ListingPublication, type ListingVersion, type PublishingAccount, type SupplyGate, type SupplyGateReader } from "./publishing";
+import { projectPublicAttributeDisplay, publicLoginMethodOptions } from "./listing-query";
 import { conflict, forbidden, invalid, notFound, sha256Hex } from "./supply-util";
+import { SecurityApiError } from "../auth/security-core";
+import { API_V1_ERROR_CODES } from "../contracts/api-v1";
 export const SUPERVISION_READ_VERSION = "admin-supervision.read.v1";
 export type SupervisionViewer = {
     adminId: string;
@@ -26,19 +31,56 @@ export type SupervisionQuery = {
     queryKind: "account" | "legacy" | "owner" | "nickname" | "order";
     q: string;
     gameId: string;
+    eligibility?: "ELIGIBLE" | "BLOCKED" | "UNKNOWN";
+    source?: "NEW" | "LEGACY";
+    haffMin?: string;
+    haffMax?: string;
+    depositMin?: string;
+    depositMax?: string;
+    loginMethod?: string;
     limit: number;
     cursor: string | null;
 };
 const idPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const timePattern = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z$/;
+const QUERY_KEYS = ["queryVersion", "view", "queryKind", "q", "gameId", "limit", "cursor", "eligibility", "source", "haffMin", "haffMax", "depositMin", "depositMax", "loginMethod"];
+/** Omitted means no bound. A present value must be a non-negative integer string; min>max is a separate error. */
+function integerFilter(params: URLSearchParams, name: string, label: string): string | undefined {
+    if (!params.has(name)) return undefined;
+    const value = params.get(name)!;
+    if (!/^(0|[1-9]\d{0,29})$/.test(value)) throw invalid(label + " must be a non-negative integer", name);
+    return value;
+}
+function orderedRange(min: string | undefined, max: string | undefined, minName: string) {
+    if (min !== undefined && max !== undefined && BigInt(min) > BigInt(max)) throw invalid("Range minimum is greater than maximum", minName);
+    return { ...(min !== undefined ? { min } : {}), ...(max !== undefined ? { max } : {}) };
+}
 export function parseSupervisionQuery(params: URLSearchParams): SupervisionQuery {
     for (const key of params.keys())
-        if (!["queryVersion", "view", "queryKind", "q", "gameId", "limit", "cursor"].includes(key) || params.getAll(key).length !== 1)
+        if (!QUERY_KEYS.includes(key) || params.getAll(key).length !== 1)
             throw invalid("Unsupported supervision query", key);
     const view = params.get("view") ?? "all", queryKind = params.get("queryKind") ?? "account", q = (params.get("q") ?? "").trim(), gameId = params.get("gameId") ?? "", limit = params.get("limit") ?? "20";
-    if (!["all", "changes", "restricted", "paused", "orders"].includes(view) || !["account", "legacy", "owner", "nickname", "order"].includes(queryKind) || q.length > 128 || /[\u0000-\u001f]/.test(q) || /(?:\+?86[\s-]*)?1[3-9](?:[\s-]*\d){9}/.test(q) || gameId && !idPattern.test(gameId) || !/^[1-9]\d?$/.test(limit) || Number(limit) > 50)
+    // Phone-like input is only a user-directory lookup for the user clue kinds;
+    // a 20-digit order/legacy number is an exact business identifier.
+    const userLookup = queryKind === "owner" || queryKind === "nickname";
+    if (!["all", "changes", "restricted", "paused", "orders"].includes(view) || !["account", "legacy", "owner", "nickname", "order"].includes(queryKind) || q.length > 128 || /[\u0000-\u001f]/.test(q) || userLookup && /^(?:\+?86[\s-]*)?1[3-9](?:[\s-]*\d){9}$/.test(q) || gameId && !idPattern.test(gameId) || !/^[1-9]\d?$/.test(limit) || Number(limit) > 50)
         throw invalid("Invalid supervision query");
-    return { view: view as SupervisionQuery["view"], queryKind: queryKind as SupervisionQuery["queryKind"], q, gameId, limit: Number(limit), cursor: params.get("cursor") };
+    const eligibility = params.has("eligibility") ? params.get("eligibility")! : undefined;
+    if (eligibility !== undefined && !["ELIGIBLE", "BLOCKED", "UNKNOWN"].includes(eligibility)) throw invalid("Eligibility filter is invalid", "eligibility");
+    const source = params.has("source") ? params.get("source")! : undefined;
+    if (source !== undefined && !["NEW", "LEGACY"].includes(source)) throw invalid("Source filter is invalid", "source");
+    const loginMethod = params.has("loginMethod") ? params.get("loginMethod")! : undefined;
+    if (loginMethod !== undefined && !publicLoginMethodOptions().some(option => option.code === loginMethod)) throw invalid("Login method filter is invalid", "loginMethod");
+    const haff = orderedRange(integerFilter(params, "haffMin", "haffMin"), integerFilter(params, "haffMax", "haffMax"), "haffMin");
+    const deposit = orderedRange(integerFilter(params, "depositMin", "depositMin"), integerFilter(params, "depositMax", "depositMax"), "depositMin");
+    return {
+        view: view as SupervisionQuery["view"], queryKind: queryKind as SupervisionQuery["queryKind"], q, gameId, limit: Number(limit), cursor: params.get("cursor"),
+        ...(eligibility ? { eligibility: eligibility as SupervisionQuery["eligibility"] } : {}),
+        ...(source ? { source: source as SupervisionQuery["source"] } : {}),
+        ...(haff.min !== undefined ? { haffMin: haff.min } : {}), ...(haff.max !== undefined ? { haffMax: haff.max } : {}),
+        ...(deposit.min !== undefined ? { depositMin: deposit.min } : {}), ...(deposit.max !== undefined ? { depositMax: deposit.max } : {}),
+        ...(loginMethod !== undefined ? { loginMethod } : {}),
+    };
 }
 export async function supervisionViewer(client: PoolClient, actor: {
     userId: string;
@@ -51,6 +93,9 @@ export async function supervisionViewer(client: PoolClient, actor: {
 }
 // Public listing cursors have a fixed public audience. Reuse their key validation,
 // while binding this private cursor to the actor, authorization and whole query.
+export function supervisionQueryBinding(viewer: SupervisionViewer, q: SupervisionQuery): string {
+    return sha256Hex(JSON.stringify({ actor: viewer.contextKey, ...q, cursor: undefined }));
+}
 export function encodeSupervisionCursor(position: {
     at: string;
     id: string;
@@ -142,6 +187,7 @@ export async function supervisionFacts(client: PoolClient, a: PublishingAccount,
     const historicalRead = context?.page ? (context.page.historical.get(a.id) ?? null) : await loadLegacyHistoricalRead(client, a.id);
     const occupancyKind = detail.occupancyKind === "PENDING_PAYMENT" || detail.occupancyKind === "RENTED" || detail.occupancyKind === "OCCUPIED" ? detail.occupancyKind : null;
     const publicBasis = publicVisible ? publicListingBasis(publicRead ?? {}) : null;
+    if (publicBasis) (publicBasis as Record<string, unknown>).feeSummary = quoteFeeSummary((publicRead as { quote?: Record<string, any> } | null)?.quote);
     return { publicVisible, publicSource, publicVersionId: publicBasis?.id ?? null, publicBasis, newOrders, reasons: blockers, primaryReasonCode, ownerPaused: a.owner_paused, staffRestricted: a.staff_restricted, occupancy: !detail.version ? "UNKNOWN" : blockers.includes("OCCUPIED") ? "OCCUPIED" : blockers.includes("OCCUPANCY_UNKNOWN") ? "UNKNOWN" : "FREE", occupancyKind, sources, legacyNumbers: [...new Set([...sources.map(r => r.businessNo).filter(Boolean), ...oldNumbers])], historicalRead };
 }
 const timestamp = (value: string) => `to_char(${value} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
@@ -226,8 +272,140 @@ function guaranteeRequirement(gate: SupplyGate | undefined, policyRequirement: P
     return { requirement: policyRequirement, requirementSource: policyRequirement ? "FIXED_FUNDING_POLICY" as const : "UNAVAILABLE" as const };
 }
 
+type ListFeeSummary = { completeness: "COMPLETE" | "PARTIAL" | "UNKNOWN"; haffRental: ReturnType<typeof yuanAmountObject> | null; materials: ReturnType<typeof yuanAmountObject> | null; resourceTotal: ReturnType<typeof yuanAmountObject> | null };
+const unknownFeeSummary = (): ListFeeSummary => ({ completeness: "UNKNOWN", haffRental: null, materials: null, resourceTotal: null });
+/** Strict CNY/yuan/scale-2 money; an invalid side is unknown, never re-labelled or coerced. */
+function centsOfAmount(value: unknown): bigint | null {
+    try {
+        const amount = projectTenantMoney(value).amount;
+        return decimalToBigInt(parseNonNegativeDecimal(amount, 2, "list fee amount"), 2);
+    } catch { return null; }
+}
+/** The known total survives unknown components; missing lines never become zero and components are never derived by subtraction. */
+export function quoteFeeSummary(quote: Record<string, any> | null | undefined): ListFeeSummary {
+    if (!quote || quote.currency !== "CNY") return unknownFeeSummary();
+    const resource = centsOfAmount(quote.resourceTotal);
+    const partial = (): ListFeeSummary => ({ completeness: "PARTIAL", haffRental: null, materials: null, resourceTotal: resource === null ? null : yuanAmountObject(resource) });
+    if (!Array.isArray(quote.lines)) return partial();
+    let haff: bigint | null = null, materials: bigint | null = null, haffSeen = false, invalid = false;
+    for (const line of quote.lines) {
+        if (!line || typeof line !== "object") { invalid = true; continue; }
+        const cents = centsOfAmount(line.buyerAmount);
+        if (cents === null) { invalid = true; continue; }
+        if (line.unit === "HAFF_BASE") {
+            if (haffSeen) { haff = null; invalid = true; } else { haffSeen = true; haff = cents; }
+        } else if (line.unit === "ROUND" || line.unit === "PIECE" || line.unit === "DAY") materials = (materials ?? 0n) + cents;
+        else invalid = true;
+    }
+    // A HAFF-only quote is a proven zero materials fee only when the total closes exactly.
+    if (!invalid && haff !== null && materials === null && resource !== null && haff === resource) materials = 0n;
+    const complete = !invalid && haff !== null && materials !== null && resource !== null && haff + materials === resource;
+    const knownComponent = haff !== null || materials !== null;
+    return {
+        completeness: complete ? "COMPLETE" : knownComponent || resource !== null ? "PARTIAL" : "UNKNOWN",
+        haffRental: haff === null ? null : yuanAmountObject(haff),
+        materials: materials === null ? null : yuanAmountObject(materials),
+        resourceTotal: resource === null ? null : yuanAmountObject(resource),
+    };
+}
+/** Cheap predicates are already in SQL; these selected aliases keep the same tuple visible to the bounded sampler. */
+export function matchesCheapFilters(q: SupervisionQuery, row: Record<string, any>): boolean {
+    const legacy = row.filterLegacy === true;
+    if (q.source === "LEGACY" && !legacy) return false;
+    if (q.source === "NEW" && legacy) return false;
+    const range = (raw: unknown, min: string | undefined, max: string | undefined) => {
+        if (min === undefined && max === undefined) return true;
+        if (typeof raw !== "string" || !/^\d+$/.test(raw)) return false;
+        const value = BigInt(raw);
+        return (min === undefined || value >= BigInt(min)) && (max === undefined || value <= BigInt(max));
+    };
+    if (!range(row.filterHaff, q.haffMin, q.haffMax)) return false;
+    if (!range(row.filterDeposit, q.depositMin, q.depositMax)) return false;
+    if (q.loginMethod !== undefined && row.filterLogin !== q.loginMethod) return false;
+    return true;
+}
+/** Filters run against the same displayed summary and facts the row shows, before the returned page is sliced. */
+export function matchesSupervisionFilters(q: SupervisionQuery, facts: Record<string, any>, summary: Record<string, any> | null): boolean {
+    const legacySource = Boolean((Array.isArray(facts.sources) && facts.sources.length) || facts.historicalRead);
+    if (q.source === "LEGACY" && !legacySource) return false;
+    if (q.source === "NEW" && legacySource) return false;
+    if (q.eligibility === "ELIGIBLE" && facts.newOrders !== true) return false;
+    if (q.eligibility === "BLOCKED" && facts.newOrders !== false) return false;
+    if (q.eligibility === "UNKNOWN" && facts.newOrders !== null) return false;
+    if (q.haffMin !== undefined || q.haffMax !== undefined) {
+        const raw = summary?.haff?.quantity;
+        if (typeof raw !== "string" || !/^\d+$/.test(raw)) return false;
+        const value = BigInt(raw);
+        if (q.haffMin !== undefined && value < BigInt(q.haffMin)) return false;
+        if (q.haffMax !== undefined && value > BigInt(q.haffMax)) return false;
+    }
+    if (q.depositMin !== undefined || q.depositMax !== undefined) {
+        const raw = summary?.baseDeposit?.amountCents;
+        if (typeof raw !== "string" || !/^\d+$/.test(raw)) return false;
+        const value = BigInt(raw);
+        if (q.depositMin !== undefined && value < BigInt(q.depositMin)) return false;
+        if (q.depositMax !== undefined && value > BigInt(q.depositMax)) return false;
+    }
+    if (q.loginMethod !== undefined && summary?.login?.code !== q.loginMethod) return false;
+    return true;
+}
 /** 本页真实需要的最小受权摘要；只读已经取得的 detail/facts，缺字段保持 null。 */
-function listingSummary(detail: Record<string, any>, facts: Record<string, any>, guarantee: { policyRequirement: PolicyRequirement; proof: Record<string, string | boolean | null> | null } | undefined, gate: SupplyGate | undefined, rowFacts: {
+/** Same fields, but only the public version's own declaration/quote; never filled from the current draft. */
+function publicBasisListingSummary(publicBasis: Record<string, any>, facts: Record<string, any>, guarantee: { policyRequirement: PolicyRequirement; proof: Record<string, string | boolean | null> | null } | undefined, gate: SupplyGate | undefined, rowFacts: {
+    accountCreatedAt: string;
+    accountUpdatedAt: string | null;
+    versionCreatedAt: string | null;
+}) {
+    const quote = publicBasis.quote ?? null, attributes: Record<string, unknown> = publicBasis.attributes ?? {};
+    const lines: Array<Record<string, any>> = Array.isArray(quote?.lines) ? quote.lines : [];
+    const presentationItems: Array<Record<string, any>> = Array.isArray(publicBasis.presentation?.items) ? publicBasis.presentation.items : [];
+    const named = new Map<string, Record<string, any>>();
+    for (const item of presentationItems) if (typeof item?.id === "string") named.set(item.id, item);
+    const haffLine = lines.find(line => line.unit === "HAFF_BASE") ?? null;
+    const materials = lines.filter(line => line !== haffLine).slice(0, 6).map(line => {
+        const item = typeof line.itemId === "string" ? named.get(line.itemId) : undefined;
+        return { itemId: typeof line.itemId === "string" ? line.itemId : "", name: typeof item?.name === "string" ? item.name : null, code: typeof item?.code === "string" ? item.code : null, quantity: typeof line.quantity === "string" ? line.quantity : null, unit: typeof line.unit === "string" ? line.unit : null };
+    });
+    const declared = attributes.owner_deposit_declaration as Record<string, unknown> | undefined;
+    const declaredCents = typeof publicBasis.baseDeposit?.amountCents === "string" ? publicBasis.baseDeposit.amountCents
+      : declared?.schema === "owner-deposit-declaration-v1" && typeof declared.amountCents === "string" ? declared.amountCents : null;
+    const payout = publicBasis.fullPayoutSelected;
+    const display = publicBasis.attributeDisplay;
+    const readiness = !publicBasis ? null : (facts.reasons as string[]).includes("PUBLISHER_BAIL_UNCONFIRMED") ? "UNCONFIRMED" : "CONFIRMED";
+    const amount = (value: unknown) => value && typeof value === "object" && typeof (value as { amount?: unknown }).amount === "string"
+        ? { amount: (value as { amount: string }).amount, currency: (value as { currency?: string }).currency ?? null, unit: (value as { unit?: string }).unit ?? null, scale: (value as { scale?: string }).scale ?? null }
+        : null;
+    const termOption = publicBasis.termOption;
+    const login = { code: typeof attributes.login_method_code === "string" ? attributes.login_method_code : null, displayName: display?.loginMethod?.displayName ?? null };
+    const config = {
+        safeBox: display?.safeBox?.displayName ?? (typeof attributes.safe_box_code === "string" ? `未确认（代码 ${attributes.safe_box_code}）` : null),
+        characterLevel: attributes.character_level === null || attributes.character_level === undefined ? null : String(attributes.character_level),
+        grading: display?.grading?.displayName ?? (typeof attributes.grading_code === "string" ? `未确认（代码 ${attributes.grading_code}）` : null),
+        gradingDivision: Object.hasOwn(attributes, "grading_division") && attributes.grading_division !== null && attributes.grading_division !== "" ? String(attributes.grading_division) : null,
+    };
+    return {
+        displaySource: "PUBLIC_VERSION",
+        versionId: publicBasis.id,
+        sequence: null,
+        contentHash: typeof publicBasis.contentHash === "string" ? publicBasis.contentHash : null,
+        title: typeof publicBasis.title === "string" ? publicBasis.title : null,
+        description: typeof publicBasis.description === "string" ? publicBasis.description : null,
+        refs: { ruleReleaseId: typeof publicBasis.releaseId === "string" ? publicBasis.releaseId : null, priceVersionId: null, contentHash: typeof publicBasis.contentHash === "string" ? publicBasis.contentHash : null, catalogRevision: null, publicationSource: "PUBLIC", publishedAt: typeof publicBasis.publishedAt === "string" ? publicBasis.publishedAt : null },
+        timing: { accountCreatedAt: rowFacts.accountCreatedAt, accountUpdatedAt: rowFacts.accountUpdatedAt, versionCreatedAt: rowFacts.versionCreatedAt },
+        haff: haffLine ? { itemId: haffLine.itemId, quantity: typeof haffLine.quantity === "string" ? haffLine.quantity : null, unit: "HAFF_BASE" } : null,
+        materials,
+        materialsTotal: lines.filter(line => line !== haffLine).length,
+        term: { code: typeof termOption?.code === "string" ? termOption.code : null, name: typeof termOption?.displayName === "string" ? termOption.displayName : null, dailyConsumption: typeof termOption?.dailyConsumption?.quantity === "string" ? termOption.dailyConsumption.quantity : null, termSeconds: typeof quote?.termSeconds === "string" ? quote.termSeconds : null },
+        login,
+        config,
+        feeSummary: quoteFeeSummary(quote),
+        quote: quote ? { currency: quote.currency ?? null, resourceTotal: amount(quote.resourceTotal), tenantDeposit: amount(quote.tenantDeposit), tenantPayableTotal: amount(quote.tenantPayableTotal), frozen: true, personalised: false } : null,
+        baseDeposit: declaredCents ? { amountCents: declaredCents } : null,
+        fullPayout: payout === true ? "SELECTED" : payout === false ? "NOT_SELECTED" : "NOT_DECLARED",
+        guarantee: { ...guaranteeRequirement(gate, guarantee?.policyRequirement ?? null), recordedProof: guarantee?.proof ?? null, eligibility: readiness },
+    };
+}
+function listingSummary(detail: Record<string, any>, facts: Record<string, any>, guarantee: { policyRequirement: PolicyRequirement; proof: Record<string, string | boolean | null> | null } | undefined, gate: SupplyGate | undefined, termOption: { code: string; name: string; dailyConsumption: string | null } | null, rowFacts: {
     accountCreatedAt: string;
     accountUpdatedAt: string | null;
     versionCreatedAt: string | null;
@@ -245,8 +423,26 @@ function listingSummary(detail: Record<string, any>, facts: Record<string, any>,
     const catalog: Array<{
         id: string;
         unit: string;
+        code?: string;
+        name?: string;
     }> = version?.catalogItems ?? [];
-    const haffLine = inventory.find(line => catalog.find(item => item.id === line.itemId)?.unit === "HAFF_BASE") ?? null;
+    const named = new Map<string, { code?: string; name?: string; unit?: string }>();
+    for (const item of Array.isArray(version?.presentationItems) ? version.presentationItems : [])
+        if (item && typeof item === "object" && typeof item.id === "string") named.set(item.id, item);
+    const haffLine = inventory.find(line => (named.get(line.itemId)?.unit ?? catalog.find(item => item.id === line.itemId)?.unit) === "HAFF_BASE") ?? null;
+    const materials = inventory.filter(line => line !== haffLine).slice(0, 6).map(line => {
+        const frozen = named.get(line.itemId), item = catalog.find(entry => entry.id === line.itemId);
+        return { itemId: line.itemId, name: frozen?.name ?? item?.name ?? null, code: frozen?.code ?? item?.code ?? null, quantity: line.quantity, unit: frozen?.unit ?? item?.unit ?? null };
+    });
+    const materialsTotal = inventory.filter(line => line !== haffLine).length;
+    const attributeDisplay = version ? projectPublicAttributeDisplay(attributes) : null;
+    const login = version ? { code: typeof attributes.login_method_code === "string" ? attributes.login_method_code : null, displayName: attributeDisplay?.loginMethod?.displayName ?? null } : null;
+    const config = version ? {
+        safeBox: attributeDisplay?.safeBox?.displayName ?? (typeof attributes.safe_box_code === "string" ? `未确认（代码 ${attributes.safe_box_code}）` : null),
+        characterLevel: attributes.character_level === null || attributes.character_level === undefined ? null : String(attributes.character_level),
+        grading: attributeDisplay?.grading?.displayName ?? (typeof attributes.grading_code === "string" ? `未确认（代码 ${attributes.grading_code}）` : null),
+        gradingDivision: Object.hasOwn(attributes, "grading_division") && attributes.grading_division !== null && attributes.grading_division !== "" ? String(attributes.grading_division) : null,
+    } : null;
     const payout = attributes.full_payout_declaration;
     const fullPayout = payout && typeof payout === "object" && !Array.isArray(payout) && typeof (payout as {
         selected?: unknown;
@@ -271,11 +467,21 @@ function listingSummary(detail: Record<string, any>, facts: Record<string, any>,
     // 资格沿用权威 gate 已给出的阻塞码，不在列表里重算保证金规则。
     const eligibility = !version ? null : (facts.reasons as string[]).includes("PUBLISHER_BAIL_UNCONFIRMED") ? "UNCONFIRMED" : "CONFIRMED";
     return {
+        displaySource: "CURRENT_VERSION",
         versionId: version?.id ?? null,
         sequence: version?.sequence ?? null,
+        contentHash: version?.contentHash ?? null,
         refs: { ruleReleaseId: rowFacts.refs.ruleReleaseId, priceVersionId: rowFacts.refs.priceVersionId, contentHash: version?.contentHash ?? null, catalogRevision: quote?.catalogRevision ?? null, publicationSource: version?.publication?.source ?? null, publishedAt: version?.publication?.publishedAt ?? null },
+        title: version?.declaration?.title ?? null,
+        description: version?.declaration?.description ?? null,
         timing: { accountCreatedAt: rowFacts.accountCreatedAt, accountUpdatedAt: rowFacts.accountUpdatedAt, versionCreatedAt: rowFacts.versionCreatedAt },
         haff: haffLine ? { itemId: haffLine.itemId, quantity: haffLine.quantity, unit: "HAFF_BASE" } : null,
+        materials,
+        materialsTotal,
+        term: version ? { code: termOption?.code ?? null, name: termOption?.name ?? null, dailyConsumption: termOption?.dailyConsumption ?? null, termSeconds: typeof quote?.termSeconds === "string" ? quote.termSeconds : null } : null,
+        login,
+        config,
+        feeSummary: quoteFeeSummary(quote),
         quote: quote ? { currency: quote.currency ?? null, resourceTotal: amount(quote.resourceTotal), tenantDeposit: amount(quote.tenantDeposit), tenantPayableTotal: amount(quote.tenantPayableTotal), ownerTotal: amount(quote.ownerTotal), publisherBailRequirement: amount(quote.publisherBailRequirement), frozen: true, personalised: false } : null,
         baseDeposit: typeof declaredCents === "string" ? { amountCents: declaredCents } : null,
         fullPayout,
@@ -302,6 +508,21 @@ async function loadPageInventory(client: PoolClient, versionIds: string[], accou
     }
     return stock;
 }
+/** Page-batched bound term option: one query for the page, keyed by release+code. */
+async function loadPageTermOptions(client: PoolClient, wanted: Array<{ releaseId: string | null; code: string | null }>) {
+    const pairs = [...new Map(wanted.filter(row => row.releaseId && row.code).map(row => [`${row.releaseId}\u0000${row.code}`, row])).values()];
+    const result = new Map<string, { code: string; name: string; dailyConsumption: string | null }>();
+    if (!pairs.length) return result;
+    const rows = (await client.query<{ releaseId: string; code: string; name: string; dailyConsumption: string | null }>(
+        `SELECT x.release_id AS "releaseId",o.code,o.name,o.daily_consumption::text AS "dailyConsumption"
+           FROM unnest($1::text[],$2::text[]) AS x(release_id,code)
+           JOIN zzsh_supply.rule_release r ON r.id=x.release_id
+           JOIN zzsh_supply.term_option o ON o.version_id=r.term_version_id AND o.code=x.code`,
+        [pairs.map(row => row.releaseId), pairs.map(row => row.code)],
+    )).rows;
+    for (const row of rows) result.set(`${row.releaseId}\u0000${row.code}`, { code: row.code, name: row.name, dailyConsumption: row.dailyConsumption ?? null });
+    return result;
+}
 async function listVersionProjection(client: PoolClient, account: PublishingAccount, version: ListingVersion, gate: SupplyGateReader, quoteViewer: "admin" | "public", shared: ListingPageShared, pageStock?: Map<string, PageStockLine[]>) {
     const observed: { publication?: ListingPublication | null } = {};
     const seen: { gate: SupplyGate | null } = { gate: null };
@@ -325,87 +546,170 @@ async function listVersionProjection(client: PoolClient, account: PublishingAcco
             contentHash: version.content_hash,
             publication: observed.publication ? { source: observed.publication.source, publishedAt: observed.publication.published_at.toISOString() } : null,
             declaration: { attributes: version.attributes ?? {}, inventory: stock.map(line => ({ itemId: line.itemId, quantity: line.quantity ?? null })) },
+            presentationItems: Array.isArray(version.presentation?.items) ? version.presentation.items : [],
             catalogItems: savedInventory ? lines.flatMap(line => typeof line.itemId === "string" ? [{ id: line.itemId, unit: typeof line.unit === "string" ? line.unit : "" }] : []) : stock.filter(line => line.itemId).map(line => ({ id: line.itemId, unit: line.unit ?? "", code: line.code ?? undefined, name: line.name ?? undefined })),
             quote,
+            feeSummary: quoteFeeSummary(quote),
         },
     };
 }
+/** Eligibility still needs the authoritative gate, so residual filtering has a fixed per-request budget. */
+export const FILTER_SCAN_MAX_CANDIDATES = 500;
+const filterScopeTooLarge = () => new SecurityApiError(503, API_V1_ERROR_CODES.EVIDENCE_UNAVAILABLE, "筛选范围过大，暂不能完整核对；请缩小筛选条件后重试。");
 export async function listSupervision(client: PoolClient, viewer: SupervisionViewer, q: SupervisionQuery, gate: SupplyGateReader, key: ListingCursorKey | undefined, admission?: LegacyPublicAdmission, detailIndex?: LegacyPublicAdmissionDetailIndex) {
     const canOrder = viewer.access.permissions.has("order.read");
     if ((q.view === "orders" || q.queryKind === "order" && q.q) && !canOrder)
         throw forbidden();
-    const binding = sha256Hex(JSON.stringify({ actor: viewer.contextKey, ...q, cursor: undefined })), after = q.cursor ? decodeSupervisionCursor(q.cursor, binding, key) : null;
+    const binding = supervisionQueryBinding(viewer, q), initialAfter = q.cursor ? decodeSupervisionCursor(q.cursor, binding, key) : null;
     requireListingCursorKey(key);
-    const values: unknown[] = [viewer.access.isBoss, viewer.adminId], p = (value: unknown) => "$" + values.push(value);
-    const where = [gameScopeSql("a.game_id","$2","$1")];
-    if (q.gameId)
-        where.push(`a.game_id=${p(q.gameId)}`);
-    if (q.view === "restricted")
-        where.push("a.staff_restricted");
-    if (q.view === "paused")
-        where.push("a.owner_paused");
-    if (q.view === "changes")
-        where.push("EXISTS(SELECT 1 FROM zzsh_supply.listing_version previous WHERE previous.account_id=a.id AND previous.sequence<v.sequence)");
-    const orderExists = (predicate = "") => `(EXISTS(SELECT 1 FROM zzsh_order.rental_order o WHERE o.account_id=a.id${predicate}) OR EXISTS(SELECT 1 FROM zzsh_order.legacy_order_read_snapshot o WHERE o.account_id=a.id${predicate.replaceAll("o.display_no", "o.original_order_no")}))`;
-    if (q.view === "orders")
-        where.push(orderExists());
-    if (q.q) {
-        const value = p(q.queryKind === "nickname" ? "%" + escapeLike(q.q) + "%" : q.q);
-        if (q.queryKind === "account")
-            where.push(`(a.id=${value} OR a.display_no=${value})`);
-        if (q.queryKind === "owner")
-            where.push(`(a.owner_user_id=${value} OR EXISTS(SELECT 1 FROM zzsh_iam.audit_event e WHERE e.object_id=a.owner_user_id AND e.object_type='user' AND e.action='user.legacy_owner.migrated' AND e.outcome='SUCCESS' AND e.details->>'legacyId'=${value}))`);
-        if (q.queryKind === "nickname")
-            where.push(`u.name ILIKE ${value} ESCAPE '\\'`);
-        if (q.queryKind === "legacy")
-            where.push(`(EXISTS(SELECT 1 FROM zzsh_supply.legacy_supply_map m WHERE m.account_id=a.id AND m.legacy_id=${value}) OR EXISTS(SELECT 1 FROM zzsh_supply.legacy_listing_read_snapshot h WHERE h.account_id=a.id AND h.snapshot->>'resourceNo'=${value}) OR EXISTS(SELECT 1 FROM zzsh_order.legacy_order_read_snapshot o WHERE o.account_id=a.id AND o.legacy_account_no=${value}))`);
-        if (q.queryKind === "order")
-            where.push(orderExists(` AND (o.id=${value} OR o.display_no=${value})`));
-    }
-    const sort = "COALESCE(v.created_at,a.created_at)", sortAt = `to_char(${sort} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
-    if (after)
-        where.push(`(${sort},a.id COLLATE "C")<(${p(after.at)}::timestamptz,${p(after.id)} COLLATE "C")`);
     const quoteViewer = viewer.access.permissions.has("supply.quote.internal.read") ? "admin" : "public";
-    const rows = (await client.query(`SELECT a.id,a.id AS "accountId",a.display_no AS "displayNo",a.owner_user_id AS "ownerId",a.revision::text AS "revision",${sortAt} AS "sortAt",${timestamp("a.created_at")} AS "accountCreatedAt",${timestamp("a.updated_at")} AS "accountUpdatedAt",v.id AS "versionId",v.sequence::text AS sequence,v.title,v.review_state AS "reviewState",${timestamp("v.created_at")} AS "versionCreatedAt",v.rule_release_id AS "ruleReleaseId",v.payload#>>'{ruleRefs,priceVersionId}' AS "priceVersionId",u.name AS "ownerName",g.name AS "gameName" FROM zzsh_supply.rental_account a LEFT JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id JOIN zzsh_auth_user."user" u ON u.id=a.owner_user_id JOIN zzsh_supply.game g ON g.id=a.game_id WHERE ${where.join(" AND ")} ORDER BY ${sort} DESC,a.id COLLATE "C" DESC LIMIT ${p(q.limit + 1)}`, values)).rows;
-    const visible = rows.slice(0, q.limit), items = [];
-    // Bounded pages reuse the authoritative publication/legacy read instead of
-    // inventing a cheaper, divergent eligibility rule in a SQL list projection.
-    const guarantees = await guaranteeFactsBatch(client, visible.map(row => row.id));
     const canDirectory = viewer.access.permissions.has("user.directory.read");
-    const owners = await readDirectoryUserSummaries(client, visible.map(row => row.ownerId), viewer.access.permissions);
-    // publicationBlockers already invokes the gate for every row with a current
-    // version, so recording its result costs no extra read.
-    const gates = new Map<string, SupplyGate>();
-    const recordGate: SupplyGateReader = async (client, account, purpose) => {
-        const snapshot = await gate(client, account, purpose);
-        gates.set(account.id, snapshot);
-        return snapshot;
+    const hasResidualFilters = Boolean(q.eligibility);
+    const needsDisplayVersion = q.haffMin !== undefined || q.haffMax !== undefined || q.depositMin !== undefined || q.depositMax !== undefined || q.loginMethod !== undefined;
+    const hasCheapFilters = Boolean(q.source || needsDisplayVersion);
+    const sort = "COALESCE(v.created_at,a.created_at)", sortAt = `to_char(${sort} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+    const orderExists = (predicate = "") => `(EXISTS(SELECT 1 FROM zzsh_order.rental_order o WHERE o.account_id=a.id${predicate}) OR EXISTS(SELECT 1 FROM zzsh_order.legacy_order_read_snapshot o WHERE o.account_id=a.id${predicate.replaceAll("o.display_no", "o.original_order_no")}))`;
+    const legacySourceSql = `(EXISTS(SELECT 1 FROM zzsh_supply.legacy_supply_map m WHERE m.account_id=a.id) OR EXISTS(SELECT 1 FROM zzsh_supply.legacy_listing_read_snapshot h WHERE h.account_id=a.id))`;
+    // The displayed version is the public publication selected by readPublicListing; otherwise the current version.
+    const displayJoin = `LEFT JOIN LATERAL (
+ SELECT pv.*
+ FROM zzsh_supply.listing_version pv
+ JOIN zzsh_supply.listing_publication p ON p.version_id=pv.id AND p.account_id=a.id
+  AND p.owner_user_id=a.owner_user_id AND p.game_id=a.game_id
+  AND p.rule_release_id=pv.rule_release_id AND p.content_hash=pv.content_hash
+ WHERE pv.account_id=a.id
+  AND ((pv.review_state='PUBLISHED' AND p.source='OWNER_DIRECT') OR (pv.review_state='APPROVED' AND p.source='LEGACY_APPROVED'))
+  AND EXISTS(SELECT 1 FROM zzsh_supply.rule_acceptance ra WHERE ra.account_id=a.id AND ra.listing_version_id=pv.id
+   AND ra.rule_release_id=pv.rule_release_id AND ra.accepted_content_hash=pv.content_hash AND ra.owner_user_id=a.owner_user_id)
+ ORDER BY (pv.id=a.current_version_id) DESC,p.published_at DESC,pv.sequence DESC,pv.id LIMIT 1
+) dv ON true`;
+    const displayIsPublic = "(dv.id IS NOT NULL AND v.id IS DISTINCT FROM dv.id)";
+    const displayAttributes = "COALESCE(dv.attributes,v.attributes)";
+    const haffSql = `CASE WHEN ${displayIsPublic} THEN (
+ SELECT CASE WHEN line.item->>'quantity' ~ '^[0-9]+$' THEN (line.item->>'quantity')::numeric END
+ FROM jsonb_array_elements(COALESCE(dv.payload->'quoteValues'->'lines','[]'::jsonb)) AS line(item)
+ WHERE line.item->>'unit'='HAFF_BASE' LIMIT 1
+) ELSE COALESCE(
+ (SELECT CASE WHEN inv.item->>'quantity' ~ '^[0-9]+$' THEN (inv.item->>'quantity')::numeric END
+  FROM jsonb_array_elements(COALESCE(v.payload->'declaration'->'inventory','[]'::jsonb)) AS inv(item)
+  WHERE (inv.item->>'itemId') IN (
+   SELECT line.item->>'itemId' FROM jsonb_array_elements(COALESCE(v.payload->'quoteValues'->'lines','[]'::jsonb)) AS line(item) WHERE line.item->>'unit'='HAFF_BASE'
+   UNION SELECT item.value->>'id' FROM jsonb_array_elements(COALESCE(v.presentation->'items','[]'::jsonb)) AS item(value) WHERE item.value->>'unit'='HAFF_BASE'
+  ) LIMIT 1),
+ (SELECT CASE WHEN l.quantity IS NOT NULL AND l.quantity::text ~ '^[0-9]+$' THEN l.quantity::numeric END
+  FROM zzsh_supply.inventory_line l JOIN zzsh_supply.billable_item i ON i.id=l.item_id AND i.game_id=a.game_id AND i.unit='HAFF_BASE'
+  WHERE l.version_id=v.id LIMIT 1)
+) END`;
+    const depositSql = `CASE WHEN ${displayAttributes}#>>'{owner_deposit_declaration,schema}'='owner-deposit-declaration-v1'
+ AND (${displayAttributes}#>>'{owner_deposit_declaration,amountCents}') ~ '^[0-9]+$'
+ THEN (${displayAttributes}#>>'{owner_deposit_declaration,amountCents}')::numeric END`;
+    // Projection is the same authoritative read as a single row; cheap predicates
+    // use the displayed tuple in SQL and only residual eligibility uses the gate.
+    const project = async (rows: Array<Record<string, any>>) => {
+        const ids = rows.map(row => row.id);
+        const guarantees = await guaranteeFactsBatch(client, ids);
+        const gates = new Map<string, SupplyGate>();
+        const recordGate: SupplyGateReader = async (client, account, purpose) => {
+            const snapshot = await gate(client, account, purpose);
+            gates.set(account.id, snapshot);
+            return snapshot;
+        };
+        const page = listingCandidatePage(client);
+        await page.load(ids, true);
+        const publicMemo = publicListingMemo(client, recordGate);
+        const pageFacts = await loadSupervisionPageFacts(client, ids);
+        const unfrozenIds = rows.map(row => page.version(row.id)).filter((version): version is ListingVersion => Boolean(version && !(version.payload?.declaration && Array.isArray(version.payload.declaration.inventory)))).map(version => version.id);
+        const pageStock = await loadPageInventory(client, unfrozenIds, ids);
+        const termOptions = await loadPageTermOptions(client, rows.map(row => ({ releaseId: row.ruleReleaseId ?? null, code: row.termOptionCode ?? null })));
+        const result: Array<Record<string, any>> = [];
+        for (const row of rows) {
+            const a = page.account(row.id);
+            if (!a) throw notFound();
+            const version = page.version(row.id);
+            // A current version that the batch read did not resolve is a missing
+            // object, exactly as the single read reported it.
+            if (a.current_version_id && !version) throw notFound();
+            const prefetch: ListingDetailPrefetch = { version, shared: page.shared, hasPublication: page.hasPublication(row.id), publicListing: (account) => publicMemo.read(account, prefetch) };
+            const detail = version ? await listVersionProjection(client, a, version, recordGate, quoteViewer, page.shared, pageStock) : { version: null, blockers: ["CURRENT_VERSION_MISSING"], available: false, occupancyKind: null };
+            const facts = await supervisionFacts(client, a, detail, recordGate, admission, detailIndex, { page: pageFacts, prefetch });
+            const rowFacts = { accountCreatedAt: row.accountCreatedAt, accountUpdatedAt: row.accountUpdatedAt, versionCreatedAt: row.versionCreatedAt, refs: { ruleReleaseId: row.ruleReleaseId ?? null, priceVersionId: row.priceVersionId ?? null } };
+            // Default list/Dialog/detail show the real public version; the current draft is not mixed into it.
+            const summary = facts.publicBasis && (!version || facts.publicBasis.id !== version.id)
+                ? publicBasisListingSummary(facts.publicBasis, facts, guarantees.get(row.id), gates.get(row.id), rowFacts)
+                : listingSummary(detail, facts, guarantees.get(row.id), gates.get(row.id), termOptions.get(`${row.ruleReleaseId}\u0000${row.termOptionCode}`) ?? null, rowFacts);
+            if (hasResidualFilters && !matchesSupervisionFilters(q, facts, summary)) continue;
+            result.push({ ...row, facts, summary, ownerLink: canDirectory ? { state: "READY" as const } : { state: "DENIED" as const } });
+        }
+        return result;
     };
-    // One page of candidates shares its accounts, their current versions, the
-    // publication probe, the page-level game/release reads and the public
-    // projection: every one of them was read once per row before.
-    const page = listingCandidatePage(client);
-    await page.load(visible.map(row => row.id), true);
-    const publicMemo = publicListingMemo(client, recordGate);
-    const pageFacts = await loadSupervisionPageFacts(client, visible.map(row => row.id));
-    const unfrozenIds = visible.map(row => page.version(row.id)).filter((version): version is ListingVersion => Boolean(version && !(version.payload?.declaration && Array.isArray(version.payload.declaration.inventory)))).map(version => version.id);
-    const pageStock = await loadPageInventory(client, unfrozenIds, visible.map(row => row.id));
-    for (const row of visible) {
-        const a = page.account(row.id);
-        if (!a) throw notFound();
-        const version = page.version(row.id);
-        // A current version that the batch read did not resolve is a missing
-        // object, exactly as the single read reported it.
-        if (a.current_version_id && !version) throw notFound();
-        const prefetch: ListingDetailPrefetch = { version, shared: page.shared, hasPublication: page.hasPublication(row.id), publicListing: (account) => publicMemo.read(account, prefetch) };
-        const detail = version ? await listVersionProjection(client, a, version, recordGate, quoteViewer, page.shared, pageStock) : { version: null, blockers: ["CURRENT_VERSION_MISSING"], available: false, occupancyKind: null };
-        const facts = await supervisionFacts(client, a, detail, recordGate, admission, detailIndex, { page: pageFacts, prefetch });
-        const ownerSummary = owners.get(row.ownerId);
-        items.push({ ...row, facts, summary: listingSummary(detail, facts, guarantees.get(row.id), gates.get(row.id), { accountCreatedAt: row.accountCreatedAt, accountUpdatedAt: row.accountUpdatedAt, versionCreatedAt: row.versionCreatedAt, refs: { ruleReleaseId: row.ruleReleaseId ?? null, priceVersionId: row.priceVersionId ?? null } }), ownerLink: canDirectory ? { state: "READY" as const } : { state: "DENIED" as const }, ...(ownerSummary ? { ownerSummary } : {}) });
+    const items: Array<Record<string, any>> = [];
+    let scanAfter = initialAfter, nextCursor: string | null = null, scanned = 0;
+    const batchLimit = hasResidualFilters ? Math.max(q.limit + 1, 20) : q.limit + 1;
+    for (;;) {
+        const fetchLimit = hasResidualFilters ? Math.min(batchLimit, FILTER_SCAN_MAX_CANDIDATES - scanned) : batchLimit;
+        if (fetchLimit <= 0) throw filterScopeTooLarge();
+        const values: unknown[] = [viewer.access.isBoss, viewer.adminId], p = (value: unknown) => "$" + values.push(value);
+        const where = [gameScopeSql("a.game_id","$2","$1")];
+        if (q.gameId)
+            where.push(`a.game_id=${p(q.gameId)}`);
+        if (q.view === "restricted")
+            where.push("a.staff_restricted");
+        if (q.view === "paused")
+            where.push("a.owner_paused");
+        if (q.view === "changes")
+            where.push("EXISTS(SELECT 1 FROM zzsh_supply.listing_version previous WHERE previous.account_id=a.id AND previous.sequence<v.sequence)");
+        if (q.view === "orders")
+            where.push(orderExists());
+        if (q.q) {
+            const value = p(q.queryKind === "nickname" ? "%" + escapeLike(q.q) + "%" : q.q);
+            if (q.queryKind === "account")
+                where.push(`(a.id=${value} OR a.display_no=${value})`);
+            if (q.queryKind === "owner")
+                where.push(`(a.owner_user_id=${value} OR EXISTS(SELECT 1 FROM zzsh_iam.audit_event e WHERE e.object_id=a.owner_user_id AND e.object_type='user' AND e.action='user.legacy_owner.migrated' AND e.outcome='SUCCESS' AND e.details->>'legacyId'=${value}))`);
+            if (q.queryKind === "nickname")
+                where.push(`u.name ILIKE ${value} ESCAPE '\\'`);
+            if (q.queryKind === "legacy")
+                where.push(`(EXISTS(SELECT 1 FROM zzsh_supply.legacy_supply_map m WHERE m.account_id=a.id AND m.legacy_id=${value}) OR EXISTS(SELECT 1 FROM zzsh_supply.legacy_listing_read_snapshot h WHERE h.account_id=a.id AND h.snapshot->>'resourceNo'=${value}) OR EXISTS(SELECT 1 FROM zzsh_order.legacy_order_read_snapshot o WHERE o.account_id=a.id AND o.legacy_account_no=${value}))`);
+            if (q.queryKind === "order")
+                where.push(orderExists(` AND (o.id=${value} OR o.display_no=${value})`));
+        }
+        if (q.source === "LEGACY") where.push(legacySourceSql);
+        if (q.source === "NEW") where.push(`NOT ${legacySourceSql}`);
+        if (q.haffMin !== undefined) where.push(`(${haffSql})>=${p(q.haffMin)}::numeric`);
+        if (q.haffMax !== undefined) where.push(`(${haffSql})<=${p(q.haffMax)}::numeric`);
+        if (q.depositMin !== undefined) where.push(`(${depositSql})>=${p(q.depositMin)}::numeric`);
+        if (q.depositMax !== undefined) where.push(`(${depositSql})<=${p(q.depositMax)}::numeric`);
+        if (q.loginMethod !== undefined) where.push(`(${displayAttributes}->>'login_method_code')=${p(q.loginMethod)}`);
+        if (scanAfter)
+            where.push(`(${sort},a.id COLLATE "C")<(${p(scanAfter.at)}::timestamptz,${p(scanAfter.id)} COLLATE "C")`);
+        const rows = (await client.query(`SELECT a.id,a.id AS "accountId",a.display_no AS "displayNo",a.owner_user_id AS "ownerId",a.revision::text AS "revision",${sortAt} AS "sortAt",${timestamp("a.created_at")} AS "accountCreatedAt",${timestamp("a.updated_at")} AS "accountUpdatedAt",v.id AS "versionId",v.sequence::text AS sequence,v.title,v.review_state AS "reviewState",${timestamp("v.created_at")} AS "versionCreatedAt",v.rule_release_id AS "ruleReleaseId",v.term_option_code AS "termOptionCode",v.payload#>>'{ruleRefs,priceVersionId}' AS "priceVersionId",u.name AS "ownerName",g.name AS "gameName"${hasCheapFilters ? `,(${legacySourceSql}) AS "filterLegacy"${needsDisplayVersion ? `,(${haffSql})::text AS "filterHaff",(${depositSql})::text AS "filterDeposit",(${displayAttributes}->>'login_method_code') AS "filterLogin"` : ""}` : ""} FROM zzsh_supply.rental_account a LEFT JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id ${needsDisplayVersion ? displayJoin : ""} JOIN zzsh_auth_user."user" u ON u.id=a.owner_user_id JOIN zzsh_supply.game g ON g.id=a.game_id WHERE ${where.join(" AND ")} ORDER BY ${sort} DESC,a.id COLLATE "C" DESC LIMIT ${p(fetchLimit)}`, values)).rows;
+        if (!rows.length) break;
+        scanned += rows.length;
+        const matchingRows = hasCheapFilters ? rows.filter(row => matchesCheapFilters(q, row)) : rows;
+        if (matchingRows.length) items.push(...await project(matchingRows));
+        else if (!hasResidualFilters) break;
+        if (items.length > q.limit) {
+            const returned = items.slice(0, q.limit), last = returned.at(-1)!;
+            nextCursor = encodeSupervisionCursor({ at: last.sortAt, id: last.id }, binding, key);
+            items.splice(q.limit);
+            break;
+        }
+        if (hasResidualFilters && items.length === q.limit && scanned >= FILTER_SCAN_MAX_CANDIDATES && rows.length === fetchLimit) {
+            const last = items.at(-1)!;
+            nextCursor = encodeSupervisionCursor({ at: last.sortAt, id: last.id }, binding, key);
+            break;
+        }
+        if (rows.length < fetchLimit) break;
+        // Eligibility needs the authoritative gate; exceed the fixed candidate budget explicitly.
+        if (hasResidualFilters && scanned >= FILTER_SCAN_MAX_CANDIDATES) throw filterScopeTooLarge();
+        const last = rows.at(-1)!;
+        scanAfter = { at: last.sortAt, id: last.id };
     }
-    const last = visible.at(-1);
+    // Load cross-domain profiles only for the final page, never the scanned eligibility candidates.
+    const owners = await readDirectoryUserSummaries(client, items.map(row => row.ownerId), viewer.access.permissions, {adminId:viewer.adminId,isBoss:viewer.access.isBoss,membershipSummaryRead:viewer.access.permissions.has('membership.growth.read.summary'),creditRead:viewer.access.permissions.has('credit.read')});
+    for (const item of items) { const owner = owners.get(item.ownerId); if (owner) item.ownerSummary = owner; }
     const games = (await client.query(`SELECT g.id,g.name FROM zzsh_supply.game g ORDER BY g.name,g.id`)).rows;
-    return { contractVersion: SUPERVISION_READ_VERSION, contextKey: viewer.contextKey, query: { ...q, cursor: undefined }, games, items, nextCursor: rows.length > q.limit && last ? encodeSupervisionCursor({ at: last.sortAt, id: last.id }, binding, key) : null };
+    return { contractVersion: SUPERVISION_READ_VERSION, contextKey: viewer.contextKey, query: { ...q, cursor: undefined }, games, filterOptions: { loginMethods: publicLoginMethodOptions().map(option => ({ code: option.code, name: option.displayName })) }, items, nextCursor };
 }
 export async function readSupervision(client: PoolClient, a: PublishingAccount, viewer: SupervisionViewer, gate: SupplyGateReader, versionId: string | null, admission?: LegacyPublicAdmission, detailIndex?: LegacyPublicAdmissionDetailIndex) {
     if (versionId && !idPattern.test(versionId))
@@ -419,6 +723,7 @@ export async function readSupervision(client: PoolClient, a: PublishingAccount, 
     const publicMemo = publicListingMemo(client, gate);
     const prefetch: ListingDetailPrefetch = { shared: listingPageShared(client), publicListing: (account) => publicMemo.read(account, prefetch) };
     const detail: Record<string, any> = await listingDetail(client, versionId ? { ...a, current_version_id: versionId } : a, "admin", gate, quoteViewer, a, false, "RENTABLE", prefetch);
+    if (detail.version) detail.version.feeSummary = quoteFeeSummary(detail.version.quote);
     const live = historical ? await listingDetail(client, a, "admin", gate, quoteViewer, a, false, "RENTABLE", prefetch) : detail;
     const history = (await client.query("SELECT id,sequence::text,origin,review_state,title,content_hash,rule_release_id,created_at FROM zzsh_supply.listing_version WHERE account_id=$1 ORDER BY sequence DESC", [a.id])).rows;
     const viewed = versionId ?? a.current_version_id, previousId = history[history.findIndex(r => r.id === viewed) + 1]?.id;

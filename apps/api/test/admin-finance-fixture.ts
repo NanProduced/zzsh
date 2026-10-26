@@ -50,7 +50,7 @@ export class FinanceSqlFixture {
     for (const row of rows) insert.run(...names.map(name => row[name] == null ? null : typeof row[name] === "boolean" ? row[name] ? 1 : 0 : typeof row[name]==='object'?JSON.stringify(row[name]):String(row[name])));
   }
   query(sql: string, values: unknown[]):{rows:Record<string,any>[];rowCount:number} {
-    if(sql.includes("AS finance_version"))return {rows:[{finance_version:this.sourceVersion(sql)}],rowCount:1};
+    if(sql.includes("AS finance_version"))return {rows:[{finance_version:this.sourceVersion(sql, values)}],rowCount:1};
     const base = (source: string) => source.replace(/\s+ORDER BY [lo]\.id COLLATE "C" LIMIT \$1\s*$/, "");
     const text = sql.replaceAll(base(ADMIN_FINANCE_LEDGER_SQL), "SELECT * FROM fixture_ledger").replaceAll(base(adminFinanceLedgerSql(false)),"SELECT * FROM fixture_ledger")
       .replaceAll(base(ADMIN_FINANCE_OBSERVATION_SQL), "SELECT * FROM fixture_history")
@@ -72,14 +72,17 @@ export class FinanceSqlFixture {
     this.reads.push({ family: sql.startsWith("WITH finance_lookup") ? "keys" : sql.startsWith("WITH finance_order") ? "orders" : "entries", rows: rows.length });
     return { rows, rowCount: rows.length };
   }
-  private sourceVersion(sql: string): string {
+  private sourceVersion(sql: string, values: unknown[] = []): string {
     const md5=(value:string)=>createHash("md5").update(value).digest("hex");
     if(sql.includes("pg_current_snapshot()"))return "pg-snapshot-v2:"+md5("fixture-db:"+this.clusterSnapshot);
     const relations=[...sql.matchAll(/FROM \((SELECT[\s\S]*?)\) v/g)].map(match=>match[1]!);
     if(!relations.length)throw Error("Unrecognized source-version SQL");
+    const bindings = Object.fromEntries(values.map((value, index) => ["$" + (index + 1), Array.isArray(value) ? JSON.stringify(value) : value as string | number]));
     // The real generated SELECTs determine membership and fields; PG JSONB serialization/cost remain NOT_RUN.
     return md5(relations.map(relation=>{
-      const rows=this.db.prepare(relation.replace(/::text\b/g,"")+" ORDER BY id").all();
+      const text=relation.replace(/::text\b/g,"");
+      const used=Object.fromEntries(Object.entries(bindings).filter(([name])=>text.includes(name)));
+      const rows=this.db.prepare(text+" ORDER BY id").all(used);
       return md5(rows.map(row=>md5(JSON.stringify(Object.fromEntries(Object.entries(row).sort(([a],[b])=>a<b?-1:a>b?1:0))))).join(""));
     }).join("|"));
   }

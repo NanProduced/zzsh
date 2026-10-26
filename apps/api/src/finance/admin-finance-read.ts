@@ -6,13 +6,14 @@ import { invalid, notFound } from "../supply/supply-util";
 import { requireListingCursorKey, type ListingCursorKey } from "../supply/listing-cursor";
 import { exactCents, sourceYuanToCents, sourceSignedYuanToCents, readPersonalWallet,OPENING_OBSERVATION_JOIN,FINANCE_LEDGER_POSTED_AT_SQL } from "./personal-finance-read";
 import { loadFinanceOrderFacts, type FinanceOrderFact } from "./admin-finance-order-read";
-import { scopedFinanceSql, financeVersionSql, financeLookupPageSql,FINANCE_LEDGER_BUCKET_SQL, type FinanceLoadScope } from "./admin-finance-query";
+import { scopedFinanceSql, financeVersionSql, financeScopedVersionSql, financeLookupPageSql,FINANCE_LEDGER_BUCKET_SQL, type FinanceLoadScope, type FinanceVersionScope } from "./admin-finance-query";
 import {prepareOwnerGuaranteeHistory} from './owner-guarantee-history';
 import { historicalObservationDisplay,enrichHistoricalObservations,resolveHistoricalReverseLinks,type HistoricalFinanceDisplay,type HistoricalRelationAccess } from './legacy-observation-display';
 import type {FinancePeriodBasis} from './admin-finance-period-basis';
 import {readAdminEarningCalculations,readAdminEarningEventActions,type AdminEarningCalculation} from './distribution-earning-read';
 import {readAdminLegacyDutyFinances,type AdminLegacyDutyFinance} from './legacy-duty-finance-store';
 import {projectAdminOrderSettlementEvidence,type OrderSettlementFacts} from './admin-order-settlement-evidence';
+import { projectOriginalWithdrawalBankDestination } from './native-withdrawal-store';
 export {readAdminFinancePeriodBasis} from './admin-finance-period-basis';
 export type { HistoricalFinanceDisplay,HistoricalRelationAccess } from './legacy-observation-display';
 
@@ -31,7 +32,7 @@ export type FinanceEntry = {
   related: { ref: string; label: string; path?: string }[];
   historical?: HistoricalFinanceDisplay;
 };
-export type FinanceFacts = { historicalLinks?:Record<string,ReturnType<typeof resolveHistoricalReverseLinks>>;distributionCalculation?:AdminEarningCalculation;orderSettlementFacts?:OrderSettlementFacts;entries: FinanceEntry[]; subjects: { id: string; name: string }[]; revisions: unknown[]; withdrawalsReady: boolean; nativeDistributionReady?:boolean; orders?: FinanceOrderFact[]; subjectCandidates?: {items:{id:string;name:string}[];total:number}; lookupPage?: {refs: string[]; documentCount: number; entryCount: number}; asOf: string; version: string };
+export type FinanceFacts = { historicalLinks?:Record<string,ReturnType<typeof resolveHistoricalReverseLinks>>;distributionCalculation?:AdminEarningCalculation;orderSettlementFacts?:OrderSettlementFacts;entries: FinanceEntry[]; subjects: { id: string; name: string }[]; revisions: unknown[]; withdrawalsReady: boolean; nativeDistributionReady?:boolean; orders?: FinanceOrderFact[]; subjectCandidates?: {items:{id:string;name:string}[];total:number}; lookupPage?: {refs: string[]; documentCount: number; entryCount: number}; localSourceLimits?: string[]; asOf: string; version: string };
 const MAX_FACTS = 20_000;
 const digest = (value: unknown) => createHash("sha256").update(canonicalize(value)).digest("hex");
 const singleText=(values:(string|null|undefined)[])=>{const unique=[...new Set(values.filter((v):v is string=>typeof v==='string'))];return unique.length===1?unique[0]!:null;};
@@ -147,9 +148,9 @@ export function adminFinanceObservationSql(ready:{native_distribution?:boolean;e
 }
 type Raw = Record<string, any>;
 export function projectAdminFinanceLedger(row: Raw): FinanceEntry {
-  const opening = row.event_kind === "OPENING", withdrawal = row.source_entity === "withdrawal_intent",earning=row.source_kind==='NATIVE_RENTAL_REFERRAL',duty=row.source_kind==='LEGACY_CONTINUATION_DUTY',guarantee=row.source_kind==='NATIVE_GUARANTEE';
-  const ref = opening ? `OPENING:${row.basis_id}` : withdrawal ? `WITHDRAWAL:${row.source_id}` : earning?`DISTRIBUTION:${row.economic_root_id}`:duty?`LEGACY_DUTY:${row.source_id}`:guarantee?`${row.source_entity==='owner_guarantee_payment'?'GUARANTEE_PAYMENT':'GUARANTEE_REFUND'}:${row.source_id}`:row.order_id ? `ORDER:${row.order_id}` : `POSTING:${row.posting_id ?? row.id}`;
-  const amount = cents(row.delta), type = opening ? "OPENING" : withdrawal ? "WITHDRAWAL" : earning||duty&&row.beneficiary_role==='COMMISSION'?'DISTRIBUTION':guarantee?'GUARANTEE':bucketOf(row.account_code) === "REFUND_PAYABLE" ? "REFUND" : "SETTLEMENT";
+  const opening = row.event_kind === "OPENING", withdrawal = row.source_entity === "withdrawal_intent", joinpayWithdrawal = row.source_entity === "joinpay_withdrawal_intent",earning=row.source_kind==='NATIVE_RENTAL_REFERRAL',duty=row.source_kind==='LEGACY_CONTINUATION_DUTY',guarantee=row.source_kind==='NATIVE_GUARANTEE';
+  const ref = opening ? `OPENING:${row.basis_id}` : joinpayWithdrawal ? `JOINPAY_WITHDRAWAL:${row.source_id}` : withdrawal ? `WITHDRAWAL:${row.source_id}` : earning?`DISTRIBUTION:${row.economic_root_id}`:duty?`LEGACY_DUTY:${row.source_id}`:guarantee?`${row.source_entity==='owner_guarantee_payment'?'GUARANTEE_PAYMENT':'GUARANTEE_REFUND'}:${row.source_id}`:row.order_id ? `ORDER:${row.order_id}` : `POSTING:${row.posting_id ?? row.id}`;
+  const amount = cents(row.delta), type = opening ? "OPENING" : withdrawal || joinpayWithdrawal ? "WITHDRAWAL" : earning||duty&&row.beneficiary_role==='COMMISSION'?'DISTRIBUTION':guarantee?'GUARANTEE':bucketOf(row.account_code) === "REFUND_PAYABLE" ? "REFUND" : "SETTLEMENT";
   return { id: `ledger:${row.id}`, documentRef: ref, documentNumber: row.display_no ?? (opening ? row.basis_id : row.source_id) ?? row.posting_id ?? row.id,
     subjectId: row.subject_id ?? (bucketOf(row.account_code) === "PLATFORM" ? "PLATFORM" : "SYSTEM"), subjectName: row.subject_id ? displayName(row.subject_name, row.subject_id) : bucketOf(row.account_code) === "PLATFORM" ? "平台" : "对照科目", bucket: bucketOf(row.account_code), direction: amount === null ? "UNKNOWN" : BigInt(amount) < 0n ? "OUT" : "IN",
     deltaCents: amount, knowledge: amount === null ? "UNKNOWN" : "KNOWN", kind: type, state: earning?row.earning_state??'UNKNOWN':type === "REFUND" ? "REFUND_PAYABLE_RECORDED" : "POSTED", classification: opening ? "OPENING" : "CURRENT_POSTED", affectsCurrentWallet: row.subject_id !== null && row.subject_id !== undefined, affectsCurrentLedger: true,
@@ -195,14 +196,59 @@ export function projectAdminFinanceObservation(row: Raw): FinanceEntry {
     evidence: { originalReference: row.reference_id ?? null, originalNumber: row.reference_no ?? null, originalStatus: row.source_status ?? null,
       originalNetCents: signedSourceCents(row.net), originalFeeCents: signedSourceCents(row.fee), historicalBalanceAfterCents: signedSourceCents(row.balance_after), dueAt: null, policyVersion: null }, related: [],historical };
 }
-export async function readFinanceSourceVersion(client: PoolClient) {
+const LOCAL_SOURCE_LIMIT = 64;
+export function projectUnpostedFinanceSource(row: Raw, family: "PAYMENT_REQUEST" | "REFUND_INTENT" | "JOINPAY_WITHDRAWAL"): FinanceEntry {
+  const amount = cents(row.amount_cents ?? row.gross_cents), userFee = row.fee_cents == null ? null : cents(row.fee_cents), providerFee = row.provider_fee_cents == null ? null : cents(row.provider_fee_cents), net = row.net_cents == null ? null : cents(row.net_cents);
+  const originalNumber = row.channel_order_no ?? row.refund_order_no ?? row.merchant_order_no ?? null, id = String(row.id);
+  const reasons = ["NO_LEDGER_POSTING", "LOCAL_RECORD_NOT_CHANNEL_ARRIVAL"];
+  if (family === "JOINPAY_WITHDRAWAL" && amount && net && userFee && BigInt(amount) !== BigInt(net) + BigInt(userFee)) reasons.push("USER_FEE_DOES_NOT_CLOSE");
+  let cardMask: string | null = null;
+  if (family === "JOINPAY_WITHDRAWAL" && typeof row.admission_canonical === "string") { try { cardMask = projectOriginalWithdrawalBankDestination(row as never).cardMask; } catch { cardMask = null; } }
+  const subjectId = String(row.user_id ?? row.renter_user_id ?? row.subject_id ?? "UNKNOWN");
+  return { id: `${family === "PAYMENT_REQUEST" ? "payment" : family === "REFUND_INTENT" ? "refund" : "joinpay"}:${id}`, documentRef: `${family}:${id}`, documentNumber: originalNumber ?? id,
+    subjectId, subjectName: displayName(row.subject_name, subjectId), bucket: "CLEARING", direction: "UNKNOWN", deltaCents: null, knowledge: amount ? "KNOWN" : "UNKNOWN",
+    kind: family === "JOINPAY_WITHDRAWAL" ? "WITHDRAWAL" : family === "REFUND_INTENT" ? "REFUND" : "PAYMENT", state: typeof row.state === "string" ? row.state : "UNKNOWN", classification: "LOCAL_SOURCE_WITHOUT_POSTING",
+    affectsCurrentWallet: false, affectsCurrentLedger: false, occurredAt: row.at ?? null, importedAt: row.at ?? row.accepted_at ?? "1970-01-01T00:00:00.000000Z", sourceType: "NATIVE", sourceSystem: "zzsh",
+    sourceEntity: family === "PAYMENT_REQUEST" ? "payment_request" : family === "REFUND_INTENT" ? "channel_refund_intent" : "joinpay_withdrawal_intent", sourceId: id, sourceDigest: null, basisId: null, reasonCodes: reasons, accountCode: null,
+    evidence: { requestedAmountCents: amount, merchantIdentityId: row.merchant_identity_id ?? null, productFamily: row.channel ?? row.payment_source ?? (family === "JOINPAY_WITHDRAWAL" ? "JOINPAY" : null), originalNumber, platformOrderNo: family === "PAYMENT_REQUEST" ? row.platform_order_no ?? null : null, channelSerial: family === "PAYMENT_REQUEST" ? null : row.platform_serial_no ?? row.provider_refund_trx_no ?? null, channelArrival: "UNKNOWN", grossCents: family === "JOINPAY_WITHDRAWAL" ? amount : null, netCents: net, userFeeCents: userFee, providerFeeCents: providerFee, originalDestinationMask: cardMask, bankArrival: "UNKNOWN" },
+    related: typeof row.order_id === "string" ? [{ ref: `ORDER:${row.order_id}`, label: "原订单", path: `/orders/${encodeURIComponent(row.order_id)}` }] : [] };
+}
+async function appendUnpostedFinanceSources(client: PoolClient, ready: Raw, scope: FinanceLoadScope, refs: string[] | undefined, entries: FinanceEntry[], limits: string[]) {
+  const present = new Set(entries.map(entry => entry.documentRef));
+  const wanted = (prefix: string) => [...new Set([scope.documentRef, ...(refs ?? [])].filter((ref): ref is string => typeof ref === "string" && ref.startsWith(prefix + ":")).map(ref => ref.slice(prefix.length + 1)).filter(id => !present.has(prefix + ":" + id)))];
+  const add = (family: "PAYMENT_REQUEST" | "REFUND_INTENT" | "JOINPAY_WITHDRAWAL", rows: Raw[], limitCode: string) => {
+    if (rows.length > LOCAL_SOURCE_LIMIT) { limits.push(limitCode); return; }
+    for (const row of rows) if (!present.has(`${family}:${row.id}`)) { entries.push(projectUnpostedFinanceSource(row, family)); present.add(`${family}:${row.id}`); }
+  };
+  if (ready.payment_requests === true) {
+    const orderId = scope.documentRef?.startsWith("ORDER:") ? scope.documentRef.slice(6) : null;
+    const ids = wanted("PAYMENT_REQUEST");
+    if (!ready.native_orders) { if (orderId || ids.length) limits.push("LOCAL_PAYMENT_ORDER_SOURCE_UNAVAILABLE"); }
+    else if (orderId) add("PAYMENT_REQUEST", (await client.query(`SELECT p.id,p.order_id,p.channel,p.merchant_identity_id,p.channel_order_no,p.platform_order_no,p.state,p.amount_cents::text AS amount_cents,${utc("p.created_at")} AS at,o.renter_user_id,u.name AS subject_name FROM zzsh_order.payment_request p JOIN zzsh_order.rental_order o ON o.id=p.order_id LEFT JOIN zzsh_auth_user."user" u ON u.id=o.renter_user_id WHERE p.order_id=$1 ORDER BY p.id COLLATE "C" LIMIT 65`, [orderId])).rows, "LOCAL_PAYMENT_READ_LIMIT");
+    else if (ids.length) add("PAYMENT_REQUEST", (await client.query(`SELECT p.id,p.order_id,p.channel,p.merchant_identity_id,p.channel_order_no,p.platform_order_no,p.state,p.amount_cents::text AS amount_cents,${utc("p.created_at")} AS at,o.renter_user_id,u.name AS subject_name FROM zzsh_order.payment_request p JOIN zzsh_order.rental_order o ON o.id=p.order_id LEFT JOIN zzsh_auth_user."user" u ON u.id=o.renter_user_id WHERE p.id=ANY($1::text[]) ORDER BY p.id COLLATE "C"`, [ids])).rows, "LOCAL_PAYMENT_READ_LIMIT");
+  }
+  if (ready.refund_intents === true) {
+    const orderId = scope.documentRef?.startsWith("ORDER:") ? scope.documentRef.slice(6) : null;
+    const ids = wanted("REFUND_INTENT");
+    const columns = `id,order_id,renter_user_id,merchant_identity_id,payment_source,refund_order_no,provider_refund_trx_no,state,amount_cents::text AS amount_cents,${utc("created_at")} AS at`;
+    if (orderId) add("REFUND_INTENT", (await client.query(`SELECT ${columns} FROM zzsh_order.channel_refund_intent WHERE order_id=$1 ORDER BY id COLLATE "C" LIMIT 65`, [orderId])).rows, "LOCAL_REFUND_READ_LIMIT");
+    else if (ids.length) add("REFUND_INTENT", (await client.query(`SELECT ${columns} FROM zzsh_order.channel_refund_intent WHERE id=ANY($1::text[]) ORDER BY id COLLATE "C"`, [ids])).rows, "LOCAL_REFUND_READ_LIMIT");
+  }
+  if (ready.joinpay_withdrawals === true) {
+    const ids = wanted("JOINPAY_WITHDRAWAL");
+    if (ids.length) add("JOINPAY_WITHDRAWAL", (await client.query(`SELECT id,user_id,merchant_identity_id,merchant_order_no,platform_serial_no,state,gross_cents::text AS gross_cents,net_cents::text AS net_cents,fee_cents::text AS fee_cents,provider_fee_cents::text AS provider_fee_cents,destination_id,destination_revision,admission_canonical::text AS admission_canonical,admission_sha256,${utc("accepted_at")} AS at FROM zzsh_order.joinpay_withdrawal_intent WHERE id=ANY($1::text[]) ORDER BY id COLLATE "C"`, [ids])).rows, "LOCAL_WITHDRAWAL_READ_LIMIT");
+  }
+}
+export async function readFinanceSourceVersion(client: PoolClient, scope?: FinanceVersionScope) {
   const ready = (await client.query(`SELECT to_regclass('zzsh_order.wallet_coverage') IS NOT NULL AND to_regclass('zzsh_order.personal_finance_observation') IS NOT NULL AND to_regclass('zzsh_order.wallet_revision') IS NOT NULL AND to_regclass('zzsh_order.finance_economic_root') IS NOT NULL AND to_regclass('zzsh_order.finance_event') IS NOT NULL AND to_regclass('zzsh_order.finance_opening_basis') IS NOT NULL AS ready,
     to_regclass('zzsh_order.withdrawal_intent') IS NOT NULL AND to_regclass('zzsh_order.withdrawal_provider_fact') IS NOT NULL AND to_regclass('zzsh_order.controlled_payout_operation') IS NOT NULL AS withdrawals,
     to_regclass('zzsh_order.rental_order') IS NOT NULL AS native_orders,to_regclass('zzsh_order.legacy_order_read_snapshot') IS NOT NULL AS legacy_orders,
     to_regclass('zzsh_order.rental_referral_earning') IS NOT NULL AS native_distribution,to_regclass('zzsh_order.payment_distribution_basis') IS NOT NULL AS earning_basis,to_regclass('zzsh_order.rental_referral_transition') IS NOT NULL AS earning_transitions,to_regclass('zzsh_order.personal_finance_observation_coverage') IS NOT NULL AS history_coverage,
-    to_regclass('zzsh_order.legacy_duty_finance_fact') IS NOT NULL AND to_regclass('zzsh_order.legacy_order_duty') IS NOT NULL AS legacy_duty_finance,to_regclass('zzsh_order.legacy_owner_guarantee_coverage') IS NOT NULL AND to_regclass('zzsh_order.legacy_owner_guarantee_observation') IS NOT NULL AS guarantee_history`)).rows[0];
+    to_regclass('zzsh_order.legacy_duty_finance_fact') IS NOT NULL AND to_regclass('zzsh_order.legacy_order_duty') IS NOT NULL AS legacy_duty_finance,to_regclass('zzsh_order.legacy_owner_guarantee_coverage') IS NOT NULL AND to_regclass('zzsh_order.legacy_owner_guarantee_observation') IS NOT NULL AS guarantee_history,
+    to_regclass('zzsh_order.payment_request') IS NOT NULL AS payment_requests,to_regclass('zzsh_order.channel_refund_intent') IS NOT NULL AS refund_intents,to_regclass('zzsh_order.joinpay_withdrawal_intent') IS NOT NULL AS joinpay_withdrawals`)).rows[0];
   if (!ready?.ready) throw unavailable("Finance read foundation is not available");
-  const version=(await client.query(financeVersionSql(ready))).rows[0]?.finance_version;
+  const scoped = scope ? financeScopedVersionSql(ready, scope) : null;
+  const version=(await client.query(scoped?.text ?? financeVersionSql(ready), scoped?.values ?? [])).rows[0]?.finance_version;
   if(typeof version!=="string")throw unavailable("Finance version evidence unavailable");
   const asOf=(await client.query(`SELECT ${utc("clock_timestamp()")} AS at`)).rows[0].at;
   return {ready,version,asOf};
@@ -246,7 +292,8 @@ async function loadHistoricalReverseRows(client:PoolClient,documentRef:string|un
 }
 
 export async function loadAdminFinanceFacts(client: PoolClient, scope: FinanceLoadScope = {},relations?:HistoricalRelationAccess): Promise<FinanceFacts> {
-  const {ready,version,asOf}=await readFinanceSourceVersion(client);
+  const versionScope: FinanceVersionScope | undefined = scope.lookup ? undefined : scope.documentRef ? { mode: "document", documentRef: scope.documentRef } : scope.subjectId ? { mode: "subject", subjectId: scope.subjectId } : undefined;
+  const {ready,version,asOf}=await readFinanceSourceVersion(client, versionScope);
   let lookupPage: FinanceFacts["lookupPage"], entryScope = scope;const ledgerSource=adminFinanceLedgerSql(ready.native_distribution===true),historySource=adminFinanceObservationSql(ready);
   if(scope.lookup){
     const query=financeLookupPageSql(ledgerSource,historySource,ready,scope), rows=(await client.query(query.text,query.values)).rows, row=rows[0];
@@ -254,7 +301,7 @@ export async function loadAdminFinanceFacts(client: PoolClient, scope: FinanceLo
     lookupPage={refs:rows.flatMap(row=>row.ref===null?[]:[String(row.ref)]),documentCount:Number(row.document_count),entryCount:Number(row.entry_count)};
     entryScope={...scope,filters:undefined,documentRefs:lookupPage.refs};
   }
-  const ledgerQuery=scopedFinanceSql(ledgerSource,"ledger",entryScope,MAX_FACTS+1,ready.withdrawals);
+  const ledgerQuery=scopedFinanceSql(ledgerSource,"ledger",entryScope,MAX_FACTS+1,ready.withdrawals,ready.joinpay_withdrawals===true);
   const historyQuery=scopedFinanceSql(historySource,"history",entryScope,MAX_FACTS+1,ready.withdrawals);
   const ledger=(await client.query(ledgerQuery.text,ledgerQuery.values)).rows,history=(await client.query(historyQuery.text,historyQuery.values)).rows;
   if(ledger.length+history.length>MAX_FACTS)throw new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","Matching finance result exceeds 20000; apply a narrower subject, period or query",[{path:"finance.matchingLimit.20000",code:"INVALID_FIELD"}]);
@@ -285,7 +332,8 @@ export async function loadAdminFinanceFacts(client: PoolClient, scope: FinanceLo
     ${utc("i.accepted_at")} AS accepted_at,i.terminal->>'state' AS terminal_state,i.terminal->>'reference' AS terminal_reference,
     f.id AS query_ref,${utc("f.observed_at")} AS queried_at FROM zzsh_order.withdrawal_intent i LEFT JOIN zzsh_order.withdrawal_provider_fact f ON f.id=i.last_provider_fact_id WHERE i.id=ANY($1::text[]) ORDER BY i.id COLLATE "C"`,[intentIds])).rows:[];
   const operations=ready.withdrawals&&intentIds.length?(await client.query(`SELECT id,intent_id,final_evidence_digest,${utc("recorded_at")} AS at,final_evidence_canonical::jsonb->>'outcome' AS outcome,final_evidence_canonical::jsonb->>'reference' AS reference FROM zzsh_order.controlled_payout_operation WHERE intent_id=ANY($1::text[]) ORDER BY id COLLATE "C"`,[intentIds])).rows:[];
-  const entries=[...ledger.map(projectAdminFinanceLedger),...history.map(projectAdminFinanceObservation)];
+  const entries=[...ledger.map(projectAdminFinanceLedger),...history.map(projectAdminFinanceObservation)], localSourceLimits: string[] = [];
+  await appendUnpostedFinanceSources(client, ready, scope, lookupPage?.refs, entries, localSourceLimits);
   for(const duty of selectedLegacyDuties){
     const order=orders.find(order=>order.ref===`LEGACY_ORDER:${duty.orderId}`),party=duty.kind==='RENTER_REFUND'?order?.renterId:duty.kind==='OWNER_CREDIT'||duty.kind==='DEPOSIT_COMPENSATION'?order?.ownerId:null;
     const binding=order?.objectReadable===true&&duty.parentSourceId===order.sourceId&&duty.parentSourceDigest===order.sourceDigest&&(!party||party===duty.subjectId);
@@ -330,7 +378,22 @@ export async function loadAdminFinanceFacts(client: PoolClient, scope: FinanceLo
         if (intent.state !== operation.outcome) entry.reasonCodes.push("LOCAL_OPERATION_NOT_APPLIED"); }
     } else entry.reasonCodes.push("WITHDRAWAL_SOURCE_UNAVAILABLE");
   }
-  return {entries,subjects,revisions:[],orders,subjectCandidates,lookupPage,historicalLinks,distributionCalculation,orderSettlementFacts,withdrawalsReady:ready.withdrawals,nativeDistributionReady:ready.native_distribution===true,asOf,version};
+  const joinpayIds = [...new Set(entries.filter(entry => entry.documentRef.startsWith("JOINPAY_WITHDRAWAL:") && entry.classification !== "LOCAL_SOURCE_WITHOUT_POSTING").map(entry => entry.documentRef.slice("JOINPAY_WITHDRAWAL:".length)))];
+  if (ready.joinpay_withdrawals === true && joinpayIds.length) {
+    const rows = (await client.query(`SELECT id,user_id,merchant_identity_id,merchant_order_no,platform_serial_no,state,funds_disposition,gross_cents::text AS gross_cents,net_cents::text AS net_cents,fee_cents::text AS fee_cents,provider_fee_cents::text AS provider_fee_cents,destination_id,destination_revision,admission_canonical::text AS admission_canonical,admission_sha256,${utc("accepted_at")} AS accepted_at FROM zzsh_order.joinpay_withdrawal_intent WHERE id=ANY($1::text[])`, [joinpayIds])).rows;
+    const byId = new Map(rows.map(row => [String(row.id), row]));
+    for (const entry of entries) if (entry.documentRef.startsWith("JOINPAY_WITHDRAWAL:") && entry.classification !== "LOCAL_SOURCE_WITHOUT_POSTING") {
+      const row = byId.get(entry.documentRef.slice("JOINPAY_WITHDRAWAL:".length));
+      if (!row) { entry.reasonCodes.push("JOINPAY_WITHDRAWAL_SOURCE_UNAVAILABLE"); continue; }
+      const gross = cents(row.gross_cents), net = cents(row.net_cents), userFee = cents(row.fee_cents), providerFee = row.provider_fee_cents == null ? null : cents(row.provider_fee_cents);
+      let cardMask: string | null = null;
+      if (typeof row.admission_canonical === "string") { try { cardMask = projectOriginalWithdrawalBankDestination(row as never).cardMask; } catch { cardMask = null; } }
+      entry.state = typeof row.state === "string" ? row.state : entry.state;
+      entry.evidence = { ...entry.evidence, mode: "JOINPAY", merchantIdentityId: row.merchant_identity_id ?? null, productFamily: "JOINPAY", originalNumber: row.merchant_order_no ?? null, channelSerial: row.platform_serial_no ?? null, grossCents: gross, netCents: net, userFeeCents: userFee, providerFeeCents: providerFee, fundsDisposition: row.funds_disposition ?? null, originalDestinationMask: cardMask, bankArrival: "UNKNOWN", channelArrival: "UNKNOWN" };
+      entry.reasonCodes.push("LOCAL_RECORDS_NOT_REVALIDATED", ...(gross && net && userFee && BigInt(gross) !== BigInt(net) + BigInt(userFee) ? ["USER_FEE_DOES_NOT_CLOSE"] : []));
+    }
+  } else for (const entry of entries) if (entry.documentRef.startsWith("JOINPAY_WITHDRAWAL:") && entry.classification !== "LOCAL_SOURCE_WITHOUT_POSTING") entry.reasonCodes.push("JOINPAY_WITHDRAWAL_SOURCE_UNAVAILABLE");
+  return {entries,subjects,revisions:[],orders,subjectCandidates,lookupPage,historicalLinks,distributionCalculation,orderSettlementFacts,withdrawalsReady:ready.withdrawals,nativeDistributionReady:ready.native_distribution===true,...(localSourceLimits.length?{localSourceLimits}:{}),asOf,version};
 }
 
 export function filterAdminFinanceEntries(facts: FinanceFacts, filter: FinanceFilters, period: boolean): FinanceEntry[] {
@@ -367,11 +430,11 @@ export function financeDocuments(entries: FinanceEntry[],summaryScope:'DOCUMENT'
   const single=singleText;
   return [...groups].sort(([a],[b])=>a.localeCompare(b)).map(([ref,raw])=>{
     const lines=[...raw].sort((a,b)=>a.id.localeCompare(b.id)),family=ref.slice(0,ref.indexOf(':'));
-    const kind=family==='ORDER'?'SETTLEMENT':family==='DISTRIBUTION'?'DISTRIBUTION':family==='WITHDRAWAL'?'WITHDRAWAL':family==='OPENING'?'OPENING':single(lines.map(e=>e.kind))??'UNKNOWN';
+    const kind=family==='ORDER'?'SETTLEMENT':family==='DISTRIBUTION'?'DISTRIBUTION':family==='WITHDRAWAL'||family==='JOINPAY_WITHDRAWAL'?'WITHDRAWAL':family==='PAYMENT_REQUEST'?'PAYMENT':family==='REFUND_INTENT'?'REFUND':family==='OPENING'?'OPENING':single(lines.map(e=>e.kind))??'UNKNOWN';
     const state=family==='ORDER'||family==='OPENING'?'POSTED':single(lines.map(e=>e.state))??'UNKNOWN';
     return{ref,number:single(lines.map(e=>e.documentNumber))??ref,kind,state,occurredAt:lines.map(e=>e.occurredAt).filter((v):v is string=>typeof v==='string').sort().at(-1)??null,
-      requestedAmountCents:single(lines.map(e=>e.evidence.grossCents??(e.historical?.purposeCode==='WITHDRAWAL_APPLICATION'?e.historical.recordedAmountCents:null))),
-      subjects:[...new Map(lines.map(e=>[e.subjectId,{id:e.subjectId,name:e.subjectName}])).values()].sort((a,b)=>a.id.localeCompare(b.id)),entryCount:lines.length,summaryScope,
+      requestedAmountCents:single(lines.map(e=>e.evidence.requestedAmountCents??e.evidence.grossCents??(e.historical?.purposeCode==='WITHDRAWAL_APPLICATION'?e.historical.recordedAmountCents:null))),
+      subjects:[...new Map(lines.map(e=>[e.subjectId,{id:e.subjectId,name:e.subjectName}])).values()].sort((a,b)=>a.id.localeCompare(b.id)),entryCount:lines.length,ledgerEntryCount:lines.filter(entry=>entry.affectsCurrentLedger).length,summaryScope,
       subjectEntryCount:summaryScope==='SUBJECT'?lines.length:null,documentEntryCount:summaryScope==='SUBJECT'?null:lines.length,
       amounts:[...new Set(lines.map(e=>e.bucket))].sort().map(bucket=>({bucket,knownNetCents:lines.filter(e=>e.bucket===bucket&&e.deltaCents!==null).reduce((n,e)=>n+BigInt(e.deltaCents!),0n).toString(),unknownCount:lines.filter(e=>e.bucket===bucket&&e.deltaCents===null).length})),
       ...(lines.length===1&&lines[0]!.historical?{historical:lines[0]!.historical}:{})};
@@ -383,14 +446,14 @@ export function financeOrderDocuments(facts: FinanceFacts, filter: FinanceFilter
     && (!filter.period || !order.occurredAt || Date.parse(order.occurredAt) >= from && Date.parse(order.occurredAt) < end)
     && (filter.q.startsWith("ORDER_LINK:") ? order.id === filter.q.slice(11) : !query || [order.ref, order.number, order.id, order.sourceId, order.ownerId, order.renterId, ...facts.subjects.filter(subject => subject.id === order.ownerId || subject.id === order.renterId).map(subject => subject.name)].some(value => value.toLocaleLowerCase("zh-CN").includes(query))))
     .map(order => ({ ref: order.ref, number: order.number, kind: order.kind, state: order.state, occurredAt: order.occurredAt, requestedAmountCents: null,
-      subjects: [order.ownerId, order.renterId].map(id => ({ id, name: facts.subjects.find(subject => subject.id === id)?.name ?? id })), entryCount: 0,summaryScope:'DOCUMENT' as const,subjectEntryCount:null,documentEntryCount:0, amounts: [] }));
+      subjects: [order.ownerId, order.renterId].map(id => ({ id, name: facts.subjects.find(subject => subject.id === id)?.name ?? id })), entryCount: 0,ledgerEntryCount:0,summaryScope:'DOCUMENT' as const,subjectEntryCount:null,documentEntryCount:0, amounts: [] }));
 }
 export type FinancePeriodBalance={bucket:FinanceBucket;opening:string;closing:string;movement:string};
 /** Complete DB-side ledger aggregates, scoped like the rows. These are book balances, not source/channel completeness. */
 export async function readAdminFinancePeriodBalances(client:PoolClient,filters:FinanceFilters){
  const ready=(await client.query(`/* finance period optional sources */ SELECT to_regclass('zzsh_order.rental_referral_earning') IS NOT NULL AS native_distribution,to_regclass('zzsh_order.withdrawal_intent') IS NOT NULL AS withdrawals`)).rows[0];
  if(typeof ready?.native_distribution!=='boolean'||typeof ready?.withdrawals!=='boolean')throw unavailable('Finance period source metadata unavailable');
- const source=scopedFinanceSql(adminFinanceLedgerSql(ready.native_distribution),'ledger',{filters:{...filters,period:false}},null,ready.withdrawals),start=`${filters.from}T00:00:00+08:00`,end=new Date(Date.parse(`${filters.to}T00:00:00+08:00`)+86400000).toISOString();
+ const source=scopedFinanceSql(adminFinanceLedgerSql(ready.native_distribution),'ledger',{filters:{...filters,period:false}},null,ready.withdrawals,ready.joinpay_withdrawals===true),start=`${filters.from}T00:00:00+08:00`,end=new Date(Date.parse(`${filters.to}T00:00:00+08:00`)+86400000).toISOString();
  const values=[...source.values,start,end],a='$'+(values.length-1),b='$'+values.length;
  const rows=(await client.query(`/* finance period complete ledger balances */ WITH period_rows AS (${source.text}) SELECT ${FINANCE_LEDGER_BUCKET_SQL} AS bucket,
   COALESCE(sum(r.delta::numeric) FILTER(WHERE r.at::timestamptz<${a}::timestamptz),0)::text AS opening,
@@ -427,7 +490,7 @@ export function readAdminFinanceDocument(facts: FinanceFacts, ref: string, entry
   const entries = facts.entries.filter(entry => entry.documentRef === ref);
   const order = facts.orders?.find(row => row.ref === ref);
   if (!entries.length && !order || entryId && !entries.some(entry => entry.id === entryId)) throw notFound();
-  const document = financeDocuments(entries)[0] ?? { ref, number: order!.number, kind: order!.kind, state: order!.state, occurredAt: order!.occurredAt, requestedAmountCents: null, subjects: [order!.ownerId, order!.renterId].map(id => ({ id, name: facts.subjects.find(subject => subject.id === id)?.name ?? id })), entryCount: 0,summaryScope:'DOCUMENT' as const,subjectEntryCount:null,documentEntryCount:0, amounts: [] };
+  const document = financeDocuments(entries)[0] ?? { ref, number: order!.number, kind: order!.kind, state: order!.state, occurredAt: order!.occurredAt, requestedAmountCents: null, subjects: [order!.ownerId, order!.renterId].map(id => ({ id, name: facts.subjects.find(subject => subject.id === id)?.name ?? id })), entryCount: 0,ledgerEntryCount:0,summaryScope:'DOCUMENT' as const,subjectEntryCount:null,documentEntryCount:0, amounts: [] };
   const evidence=Object.fromEntries([...new Set(entries.flatMap(entry=>Object.keys(entry.evidence)))].map(name=>[name,singleText(entries.map(entry=>entry.evidence[name]))]));
   const reverse=facts.historicalLinks?.[ref];
   const related = [...new Map([...entries.flatMap(entry => entry.related),...(reverse?.related??[])].map(link => [link.ref, link])).values()].filter(link => link.ref !== ref || link.path);
@@ -439,7 +502,7 @@ export function readAdminFinanceDocument(facts: FinanceFacts, ref: string, entry
   }
   const orderSettlement=order?.objectReadable===true?projectAdminOrderSettlementEvidence(order,entries,facts.orderSettlementFacts):undefined;
   if(orderSettlement)related.push(...orderSettlement.dutyRefs.filter((duty):duty is typeof duty&{documentRef:string}=>duty.documentRef!==null).map(duty=>({ref:duty.documentRef,label:duty.kind==='RENTER_REFUND'?'已记退款责任':'已记旧单责任'})));
-  return { document, entries, evidence, related: [...new Map(related.map(link => [link.ref + (link.path ?? ""), link])).values()], reasonCodes: [...new Set([...entries.flatMap(entry => entry.reasonCodes),...(reverse?.reasonCodes??[]), ...(order ? ["ORDER_RECORD_NOT_CHANNEL_RESULT", ...(!entries.length ? ["ORDER_NO_CURRENT_POSTING"] : [])] : [])])],
+  return { document, entries, evidence, related: [...new Map(related.map(link => [link.ref + (link.path ?? ""), link])).values()], reasonCodes: [...new Set([...entries.flatMap(entry => entry.reasonCodes),...(reverse?.reasonCodes??[]),...(facts.localSourceLimits??[]), ...(order ? ["ORDER_RECORD_NOT_CHANNEL_RESULT", ...(!entries.length ? ["ORDER_NO_CURRENT_POSTING"] : [])] : [])])],
     ...(orderSettlement?{orderSettlement}:{}),
     ...(facts.distributionCalculation?{distributionCalculation:facts.distributionCalculation}:{}),
     platform: { postedComponents: entries.filter(entry => entry.bucket === "PLATFORM").map(entry => ({ accountCode: entry.accountCode, deltaCents: entry.deltaCents })), beforeDistributionCents: null, distributionExpenseCents: null, retainedCents: null, channelCostCents: null, netProfitCents: null, reasonCodes: ["DISTRIBUTION_AND_CHANNEL_COST_NOT_ADMITTED"] } };

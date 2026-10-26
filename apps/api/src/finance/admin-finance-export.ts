@@ -41,6 +41,7 @@ export async function prepareAdminFinanceExport(options: AdminFinanceOptions, ac
   return withTransaction(options.pool, async client => {
     await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
     const current = await authorizeAdminFinance(client, actor, "complete");
+    // Export stays on the global r2 digest. A document or subject r3 token cannot satisfy this comparison.
     const source = await readFinanceSourceVersion(client), facts = { ...source, entries:[],subjects:[],revisions:[],withdrawalsReady:source.ready.withdrawals };
     const snapshot = financeSnapshot(facts, filters, current, options.listingCursorKey, token);
     await recordAudit(client, { actorType: "admin", actorId: actor.userId, sessionId: actor.sessionId, action: "finance.export.prepared", objectType: "finance_export", outcome: "SUCCESS", requestId,

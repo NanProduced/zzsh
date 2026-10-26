@@ -3,8 +3,9 @@
  * 原则：查找类型以用户选择为准，识别只作建议；待核条件单独计数；
  * 公开、占用、运营限制、号主暂停、新单资格各自读取，不由单一状态推导。
  */
-import { formatAmount, formatFundingCents, historicalResourceText, operationalReasons, quantityText, type SupplyFacts, type SupplyListSummary, type SupplyQueryKind, type SupplyWorkDetail, type SupplyWorkItem, type SupplyWorkView } from "../supply-review/model.ts";
+import { formatAmount, formatFundingCents, formatTermDays, historicalResourceText, operationalReasons, quantityText, unitText, type SupplyFacts, type SupplyListSummary, type SupplyQueryKind, type SupplyWorkDetail, type SupplyWorkItem, type SupplyWorkView } from "../supply-review/model.ts";
 
+export const LOGIN_METHOD_OPTIONS = [{ code: "legacy_login_qq", name: "QQ账密" }, { code: "login_qq_qr", name: "QQ扫码" }, { code: "legacy_login_wechat", name: "微信扫码" }, { code: "legacy_login_steam_cn", name: "Steam国服" }, { code: "legacy_login_steam_global", name: "Steam国际服" }];
 export const KIND_LABELS: Record<SupplyQueryKind, string> = { account: "编号", legacy: "旧编号", order: "订单号", owner: "号主", nickname: "昵称", link: "本站链接" };
 
 /** 只给建议，不改变当前查找类型。返回 null 表示无法可靠识别，需要用户自己选。 */
@@ -20,10 +21,18 @@ export function suggestKind(raw: string): SupplyQueryKind | null {
   return null;
 }
 
+/** 手机号形态只影响用户线索；订单/账号/旧编号是精确业务号，不能因子串像手机号被拒。 */
+const PHONE_LOOKUP = /^(?:\+?86[\s-]*)?1[3-9](?:[\s-]*\d){9}$/;
+export function lookupNeedsDirectory(kind: SupplyQueryKind, raw: string): boolean {
+  return (kind === "owner" || kind === "nickname") && PHONE_LOOKUP.test(raw.trim());
+}
+
 /** 当前选择与输入明显不符时给出提示文案。 */
 export function kindHint(raw: string, kind: SupplyQueryKind): string | null {
   const q = raw.trim();
   if (!q) return null;
+  // 精确业务号（编号/旧编号/订单号）不靠输入形态猜类型；用户线索才提示。
+  if (kind === "account" || kind === "legacy" || kind === "order") return null;
   if (/^\d+$/.test(q) && kind === "nickname") return "纯数字更可能是旧编号、订单号或旧用户 ID，请确认查找类型。";
   if (/^\d+$/.test(q)) return "纯数字无法可靠判断类型，请确认按「" + KIND_LABELS[kind] + "」查找。";
   const s = suggestKind(q);
@@ -183,6 +192,107 @@ export function rowHaffText(row: SupplyWorkItem): string {
   const display = row.facts.historicalRead?.display;
   const historical = display?.state === "KNOWN" && Array.isArray(display.facts?.resources) ? display.facts.resources.find(item => item.unit === "HAFF_BASE") : null;
   return historical ? "历史 " + historicalResourceText(historical) : "未提供";
+}
+
+/** 账号第一列中性标题：只用当前展示版本的确定属性，不展示夹带旧号的历史标题。 */
+export function rowAccountTitle(row: SupplyWorkItem): string {
+  const summary = row.summary;
+  if (summary) {
+    const parts: string[] = [];
+    if (summary.haff) parts.push(quantityText(summary.haff.quantity));
+    if (summary.config?.safeBox) parts.push(summary.config.safeBox);
+    if (summary.config?.grading) parts.push(summary.config.grading + (summary.config.gradingDivision ? ` ${summary.config.gradingDivision}` : ""));
+    if (parts.length) return parts.join(" · ");
+  }
+  return row.gameName ? `${row.gameName}账号` : "账号资料";
+}
+
+/** 列表基础费用三项：哈夫租金、物资费、租客基础押金；分项缺失不拿合计反推。 */
+/** Exact M↔HAFF_BASE conversion: the server compares integer base units. */
+export function haffBaseFromM(text: string): { value?: string; error?: string } {
+  const value = text.trim();
+  if (!value) return { value: "" };
+  if (!/^\d+(?:\.\d{1,6})?$/.test(value)) return { error: "哈夫币应为最多 6 位小数的 M 数" };
+  const [whole = "", fraction = ""] = value.split(".");
+  return { value: (BigInt(whole) * 1_000_000n + BigInt((fraction + "000000").slice(0, 6))).toString() };
+}
+export function haffMFromBase(base: string): string {
+  if (!/^\d+$/.test(base)) return "";
+  const amount = BigInt(base), fraction = (amount % 1_000_000n).toString().padStart(6, "0").replace(/0+$/, "");
+  return fraction ? `${amount / 1_000_000n}.${fraction}` : `${amount / 1_000_000n}`;
+}
+/** Exact yuan↔cent conversion; deposit declarations are stored in cents. */
+export function depositCentsFromYuan(text: string): { value?: string; error?: string } {
+  const value = text.trim();
+  if (!value) return { value: "" };
+  if (!/^\d+(?:\.\d{1,2})?$/.test(value)) return { error: "基础押金应为最多 2 位小数的元数" };
+  const [whole = "", fraction = ""] = value.split(".");
+  return { value: (BigInt(whole) * 100n + BigInt((fraction + "00").slice(0, 2))).toString() };
+}
+export function depositYuanFromCents(cents: string): string {
+  if (!/^\d+$/.test(cents)) return "";
+  const amount = BigInt(cents), whole = amount / 100n, fraction = (amount % 100n).toString().padStart(2, "0");
+  return `${whole}.${fraction}`;
+}
+
+export function rowBaseFeeRows(row: SupplyWorkItem): { haff: string; materials: string; deposit: string; total: string; note: string } {
+  const deposit = rowDepositText(row), fee = row.summary?.feeSummary;
+  const total = fee?.resourceTotal ? `¥${formatAmount(fee.resourceTotal.amount)}` : row.summary?.quote?.resourceTotal ? `¥${formatAmount(row.summary.quote.resourceTotal.amount)}` : "未提供";
+  if (!row.summary) {
+    const historical = row.facts.historicalRead?.historicalQuote;
+    if (historical) return {
+      haff: `历史 ¥${formatAmount(historical.haffRentYuan)}`,
+      materials: `历史 ¥${formatAmount(historical.goodsYuan)}`,
+      deposit,
+      total: "未提供",
+      note: "历史记录，非当前资料",
+    };
+    return { haff: "摘要未装配", materials: "摘要未装配", deposit, total, note: "资料摘要未装配" };
+  }
+  if (!fee) return { haff: "分项待核", materials: "分项待核", deposit, total, note: "基础分项未提供" };
+  return {
+    haff: fee.haffRental ? `¥${formatAmount(fee.haffRental.amount)}` : "分项待核",
+    materials: fee.materials ? `¥${formatAmount(fee.materials.amount)}` : "分项待核",
+    deposit,
+    total,
+    note: fee.completeness === "COMPLETE" ? "原预付三项已闭合" : "分项待核，不以合计反推",
+  };
+}
+
+export function rowDisplaySourceText(row: SupplyWorkItem): string {
+  if (row.summary?.displaySource === "PUBLIC_VERSION") return "对外版";
+  if (!row.summary) return row.facts.historicalRead ? "历史资料" : "资料未装配";
+  return row.facts.publicVisible === false ? "当前草稿" : "当前资料";
+}
+
+/** 列表核心资源：哈夫币与已申报的关键物资；未装配摘要时明确未提供，不拿标题猜。 */
+export function rowCoreAssetsText(row: SupplyWorkItem): string {
+  const haff = rowHaffText(row), materials = row.summary?.materials ?? [], config = row.summary?.config;
+  if (!row.summary) {
+    const display = row.facts.historicalRead?.display;
+    const facts = display?.state === "KNOWN" ? display.facts : null;
+    const historicalConfig = [facts?.attributeDisplay?.safeBox?.displayName, facts?.attributeDisplay?.grading?.displayName].filter(Boolean).join(" · ");
+    return `${haff}${historicalConfig ? " · " + historicalConfig : ""} · 物资摘要未装配`;
+  }
+  if (!row.summary.versionId) return `${haff} · 资料版本未提供`;
+  const configText = config ? [config.safeBox, config.characterLevel ? config.characterLevel + " 级" : null, config.grading, config.gradingDivision ? "小段位 " + config.gradingDivision : null].filter(Boolean).join(" · ") : "";
+  if (!materials.length) return `${haff}${configText ? " · " + configText : ""} · 本版未申报物资`;
+  const shown = materials.slice(0, 3).map(item => `${item.name ?? "名称待核"} ${item.quantity ?? "数量未知"} ${unitText(item.unit, item.code ?? undefined)}`).join("、");
+  const total = row.summary.materialsTotal ?? materials.length;
+  return `${haff}${configText ? " · " + configText : ""} · ${shown}${total > 3 ? ` 等 ${total} 项` : ""}`;
+}
+
+/** 列表出租条件：租期/日耗、登录方式与包赔申报；保证金要求不属于这里。 */
+export function rowRentalTerms(row: SupplyWorkItem): { term: string; daily: string; login: string; payout: string } {
+  if (!row.summary) return { term: "租期摘要未装配", daily: "日耗摘要未装配", login: "登录摘要未装配", payout: "未提供" };
+  if (!row.summary.versionId) return { term: "资料版本未提供", daily: "资料版本未提供", login: "资料版本未提供", payout: "未提供" };
+  const term = row.summary.term, login = row.summary.login;
+  return {
+    term: term?.termSeconds ? formatTermDays(term.termSeconds) : term?.name ?? "租期未提供",
+    daily: term?.dailyConsumption ? quantityText(term.dailyConsumption) : "日耗未提供",
+    login: login?.displayName ?? (login?.code ? `未确认（代码 ${login.code}）` : "登录未提供"),
+    payout: rowFullPayout(row).label,
+  };
 }
 
 /** 当前冻结报价优先，历史租金与物资费分开，均不称下单应付。 */

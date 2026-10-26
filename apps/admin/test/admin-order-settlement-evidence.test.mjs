@@ -68,6 +68,19 @@ test('partial and absent projections preserve unknown, and a response bound to a
 test('finance to order to user retains a safe reloadable finance source alongside the order origin',async t=>{
  globalThis.fetch=async url=>response(String(url).includes('/finance/')?finance(url):{order:native});const ui=await setup(t,['order.read','finance.document.read','user.directory.read']);const source='/finance?scope=renter&from=2026-10-01&to=2026-10-02&period=1';const token=ui.funds.registerFinanceOrigin(source,ui.funds.financeContextIdentity(ui.props.snapshot));ui.props.initialQuery={financeOrigin:token,financeReturn:source};await ui.render();await until(()=>ui.node.textContent.includes('159.08 元'));await act(async()=>button(ui.node,'租客').click());const target=new URL(ui.opened.at(-1)[0],'http://localhost');assert.equal(target.pathname,'/users/renter');assert.equal(target.searchParams.get('fromOrderId'),native.id);assert.equal(target.searchParams.get('financeReturn'),source);ui.funds.clearFinanceContexts();assert.equal(ui.funds.financeOriginPath(target.searchParams.get('financeOrigin'),ui.props.snapshot,target.searchParams.get('financeReturn')),source);
 });
+test('CHAIN unpaid cancelled order does not grow an unknown settlement wall and keeps channel not applicable',async t=>{
+ const cancelled={...native,status:'CANCELLED',payment:{state:'RECORDED_UNPAID',recordedAt:null,recordedAmount:null}};
+ const unknownFacts=facts(undefined,{posting:{state:'NOT_POSTED',ref:null,postedAt:null},captured:unknown(),ownerNet:unknown(),refundPayable:unknown(),refunded:unknown(),refundDueAt:null});
+ globalThis.fetch=async url=>response(String(url).includes('/finance/')?finance(url,unknownFacts):{order:cancelled});
+ const ui=await setup(t);ui.props.initialOrderId=cancelled.id;await ui.render();await until(()=>ui.node.textContent.includes('当前未查到过账记录'));
+ const card=ui.node.querySelector('[data-order-settlement-evidence]');
+ assert.match(card.textContent,/当前未查到过账记录/);
+ assert.match(card.textContent,/本站未记录付款，渠道另核/);
+ assert.doesNotMatch(card.textContent,/渠道到账[^]*不适用/);
+ assert.equal(card.textContent.includes('退款责任到期'),false);
+ assert.equal(card.textContent.includes('原入账基数'),false);
+ assert.doesNotMatch(card.textContent,/0\.00 元/);
+});
 test('FINALIZED_ZERO is a zero responsibility finalization without ledger posting or channel payment',async t=>{
  const legacy={...native,id:'legacy_zero',displayNo:'LEGACY-ZERO',source:{origin:'LEGACY'}};
  const zero=facts('LEGACY_ORDER:legacy_zero',{posting:{state:'FINALIZED_ZERO',ref:'LEGACY_DUTY:duty_zero',postedAt:'2026-10-01T02:00:00Z'},captured:unknown(),ownerNet:known('0'),refundPayable:known('0'),refunded:unknown(),historicalRefund:known('0'),dutyRefs:[{documentRef:'LEGACY_DUTY:duty_zero',kind:'RENTER_REFUND',state:'SETTLED',amount:known('0')},{documentRef:'LEGACY_DUTY:owner_zero',kind:'OWNER_CREDIT',state:'SETTLED',amount:known('0')},{documentRef:'LEGACY_DUTY:compensation_zero',kind:'DEPOSIT_COMPENSATION',state:'SETTLED',amount:known('0')}]});

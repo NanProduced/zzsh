@@ -44,6 +44,7 @@ export async function handleAdminFinanceRead(request: SupplyNodeRequest, respons
     const token = url.searchParams.get("snapshot");
     if ((page > 1 || route === "export") && !token) throw invalid("Finance snapshot is required");
     const result = await withTransaction(options.pool, async client => {
+      // Wallet subject reads still take FOR SHARE inside readPersonalWallet, so this stays repeatable read.
       await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
       const actor = await authorizeAdminFinance(client, context, operation);
       if(merchant)return{actor,body:{contextKey:actor.authorizationKey,...await readAdminJoinpayMerchantAccounts(client,{adminId:context.userId,merchantIdentityId:reference(route.slice('merchant-accounts/'.length))},options.joinpayAccountRead)}};

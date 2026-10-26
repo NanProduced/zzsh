@@ -2,8 +2,8 @@ import {test} from "node:test";
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import {Pool} from "pg";
-import {scopedFinanceSql,financeVersionSql,financeLookupPageSql} from "../src/finance/admin-finance-query";
-import {parseAdminFinanceFilters,adminFinanceObservationSql,ADMIN_FINANCE_LEDGER_SQL,projectAdminFinanceObservation,readAdminFinanceSubject} from "../src/finance/admin-finance-read";
+import {scopedFinanceSql,financeVersionSql,financeScopedVersionSql,financeLookupPageSql,FINANCE_GLOBAL_VERSION_DOMAIN} from "../src/finance/admin-finance-query";
+import {parseAdminFinanceFilters,adminFinanceObservationSql,ADMIN_FINANCE_LEDGER_SQL,projectAdminFinanceObservation,projectAdminFinanceLedger,projectUnpostedFinanceSource,financeDocuments,readAdminFinanceSubject,financeSnapshot,financePeriodProjection} from "../src/finance/admin-finance-read";
 import {FinanceSqlFixture} from './admin-finance-fixture';
 import {prepareOwnerGuaranteeHistory} from '../src/finance/owner-guarantee-history';
 
@@ -127,4 +127,101 @@ test("actual PostgreSQL CTE: 6001 unrelated users and 25001 unrelated entries do
  const all=scopedFinanceSql(base,"ledger",{filters:parseAdminFinanceFilters(new URLSearchParams("from=2026-10-03&to=2026-10-03"))},20001,false);assert.equal((await client.query(all.text,all.values)).rows.length,20001);
  // This is a synthetic SELECT-only SQL branch check, not real finance-data acceptance.
  }finally{await client.query("ROLLBACK").catch(()=>undefined);client.release();await pool.end();}
+});
+test("document and subject digests ignore unrelated rows and still change when their own dependency changes",()=>{
+ const fixture=new FinanceSqlFixture({ledger:[
+  {id:"mine",subject_id:"u1",account_code:"WALLET_AVAILABLE",delta:"100",posting_id:"post-1",at:"2026-10-03T00:00:00Z"},
+  {id:"other",subject_id:"u2",account_code:"WALLET_AVAILABLE",delta:"900",posting_id:"post-2",at:"2026-01-01T00:00:00Z"},
+  {id:"platform",subject_id:null,account_code:"PLATFORM_FEE",delta:"10",posting_id:"post-1",at:"2026-10-03T00:00:00Z"},
+ ],native:[{id:"order-1",owner_user_id:"u1",renter_user_id:"u2",status:"PAID",revision:"3"},{id:"order-2",owner_user_id:"u2",renter_user_id:"u1",status:"PAID",revision:"1"}]});
+ try{
+  fixture.db.exec("INSERT INTO zzsh_order.settlement_posting(id,order_id,version_hash,captured_cents) VALUES('post-1','order-1','hash-1','100'),('post-2','order-2','hash-2','900')");
+  const ready={native_orders:true},global=()=>financeVersionSql(ready),scoped=()=>financeScopedVersionSql(ready,{mode:"document",documentRef:"ORDER:order-1"}),subject=()=>financeScopedVersionSql(ready,{mode:"subject",subjectId:"u1"});
+  assert.equal(financeScopedVersionSql(ready,{mode:"document",documentRef:"POSTING:post-1"}),null);
+  assert.match(global(),/admin-finance-proof\.r2/);assert.doesNotMatch(global(),/\$1|pg_current_snapshot|count\(|max\(/i);
+  const digest=(query:{text:string;values:string[]}|null)=>fixture.query(query!.text,query!.values).rows[0]!.finance_version;
+  const beforeGlobal=digest({text:global(),values:[]}),beforeDoc=digest(scoped()),beforeSubject=digest(subject());
+  const ledgerRows=(query:{text:string;values:string[]}|null)=>[...query!.text.matchAll(/FROM \((SELECT[\s\S]*?)\) v/g)].map(match=>match[1]!).filter(sql=>sql.startsWith("SELECT id,account_code")).map(sql=>fixture.query(sql,query!.values).rows.length);
+  assert.deepEqual(ledgerRows({text:global(),values:[]}),[3]);assert.deepEqual(ledgerRows(scoped()),[2]);assert.deepEqual(ledgerRows(subject()),[1]);
+  fixture.db.exec("UPDATE zzsh_order.fixture_ledger SET credit_cents='901' WHERE id='other'");
+  assert.notEqual(digest({text:global(),values:[]}),beforeGlobal);assert.equal(digest(scoped()),beforeDoc);assert.equal(digest(subject()),beforeSubject);
+  fixture.db.exec("INSERT INTO \"zzsh_auth_user\".\"user\"(id,name) VALUES('u3','外人')");
+  assert.equal(digest(scoped()),beforeDoc);assert.equal(digest(subject()),beforeSubject);
+  fixture.db.prepare("UPDATE \"zzsh_auth_user\".\"user\" SET name=? WHERE id='u2'").run("租客");
+  const renterNamed=digest(scoped());assert.notEqual(renterNamed,beforeDoc);assert.equal(digest(subject()),beforeSubject);
+  fixture.db.prepare("UPDATE \"zzsh_auth_user\".\"user\" SET name=? WHERE id='u1'").run("号主");
+  assert.notEqual(digest(scoped()),renterNamed);assert.notEqual(digest(subject()),beforeSubject);
+  const next=digest(scoped());
+  fixture.db.exec("UPDATE zzsh_order.settlement_posting SET version_hash='hash-3' WHERE id='post-1'");
+  assert.notEqual(digest(scoped()),next);
+  const subjectBeforeOrder=digest(subject());
+  fixture.db.exec("UPDATE zzsh_order.rental_order SET status='COMPLETED' WHERE id='order-1'");
+  assert.notEqual(digest(subject()),subjectBeforeOrder);
+  const docBeforePlatform=digest(scoped()),subjectBeforePlatform=digest(subject());
+  fixture.db.exec("UPDATE zzsh_order.fixture_ledger SET credit_cents='11' WHERE id='platform'");
+  const docAfterPlatform=digest(scoped());assert.notEqual(docAfterPlatform,docBeforePlatform);assert.equal(digest(subject()),subjectBeforePlatform);
+  fixture.db.exec("INSERT INTO zzsh_order.wallet_revision(user_id,ledger_revision,read_revision) VALUES('u1','4','4')");
+  assert.equal(digest(scoped()),docAfterPlatform);assert.notEqual(digest(subject()),subjectBeforePlatform);
+  const key={keyId:"read1",secret:"x".repeat(64)},filters=parseAdminFinanceFilters(new URLSearchParams("from=2026-10-03&to=2026-10-03")),actor={userId:"admin1",sessionId:"session1",authorizationKey:"access1"};
+  const token=financeSnapshot({entries:[],subjects:[],revisions:[],withdrawalsReady:false,asOf:"2026-10-03T00:00:00.000000Z",version:String(beforeDoc)},filters,actor,key).token;
+  assert.throws(()=>financeSnapshot({entries:[],subjects:[],revisions:[],withdrawalsReady:false,asOf:"2026-10-03T00:00:00.000000Z",version:String(beforeGlobal)},filters,actor,key,token),(error:any)=>error.status===409);
+  assert.equal(FINANCE_GLOBAL_VERSION_DOMAIN,"admin-finance-proof.r2");
+  assert.doesNotMatch(readFileSync("src/finance/admin-finance-export.ts","utf8"),/financeScopedVersionSql/);
+  assert.match(readFileSync("src/finance/admin-finance-export.ts","utf8"),/readFinanceSourceVersion\(client\)/);
+  assert.doesNotMatch(readFileSync("src/finance/admin-finance-routes.ts","utf8"),/SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY/);
+  const full={withdrawals:true,native_orders:true,legacy_orders:true,native_distribution:true,history_coverage:true,legacy_duty_finance:true,guarantee_history:true,payment_requests:true,refund_intents:true,joinpay_withdrawals:true};
+  assert.ok(financeScopedVersionSql(full,{mode:"document",documentRef:"ORDER:order-1"}));
+  assert.ok(financeScopedVersionSql(full,{mode:"subject",subjectId:"u1"}));
+  assert.match(financeVersionSql(full),/payment_request/);assert.match(financeVersionSql(full),/channel_refund_intent/);assert.match(financeVersionSql(full),/joinpay_withdrawal_intent/);
+  assert.doesNotMatch(financeVersionSql(full),/receiver_account_no_enc|admission_canonical|key_version_ref|count\(|max\(|pg_current_snapshot/i);
+ }finally{fixture.close();}
+});
+test("exact local source numbers stay separate per merchant and are not ledger income",()=>{
+ const fixture=new FinanceSqlFixture();
+ try{
+  fixture.db.exec(`CREATE TABLE zzsh_order.payment_request(id TEXT,order_id TEXT,channel TEXT,merchant_identity_id TEXT,platform_order_no TEXT,channel_order_no TEXT,state TEXT,amount_cents TEXT,currency TEXT,evidence_level TEXT,created_at TEXT,updated_at TEXT)`);
+  fixture.db.exec(`INSERT INTO zzsh_order.payment_request VALUES('p1','o1','JOINPAY','merchant_a','P-1','M-100','READY','100','CNY','LOCAL','2026-10-03T00:00:00Z','2026-10-03T00:00:00Z'),('p2','o2','JOINPAY','merchant_b','P-2','M-100','READY','200','CNY','LOCAL','2026-10-03T00:00:00Z','2026-10-03T00:00:00Z'),('p3','o3','JOINPAY','merchant_a','P-3','M-1000','READY','300','CNY','LOCAL','2026-10-03T00:00:00Z','2026-10-03T00:00:00Z')`);
+  const page=(q:string)=>financeLookupPageSql("SELECT * FROM fixture_ledger","SELECT * FROM fixture_history",{payment_requests:true},{filters:parseAdminFinanceFilters(new URLSearchParams(`period=0&q=${q}`),new Date(),false),lookup:{exact:false},page:1,pageSize:20});
+  const refs=(q:string)=>fixture.query(page(q).text,page(q).values).rows.map(row=>row.ref).filter(Boolean).sort();
+  assert.deepEqual(refs("M-100"),["PAYMENT_REQUEST:p1","PAYMENT_REQUEST:p2"]);
+  assert.deepEqual(refs("M-1000"),["PAYMENT_REQUEST:p3"]);
+  assert.deepEqual(refs("M-10"),[]);
+  const posted=projectAdminFinanceLedger({id:"j1",account_code:"WALLET_AVAILABLE",subject_id:"u1",delta:"-100",source_entity:"joinpay_withdrawal_intent",source_id:"intent1",event_kind:"PAYOUT"});
+  assert.equal(posted.documentRef,"JOINPAY_WITHDRAWAL:intent1");assert.equal(posted.kind,"WITHDRAWAL");assert.equal(posted.affectsCurrentLedger,true);
+  const open=projectUnpostedFinanceSource({id:"p1",order_id:"o1",channel:"JOINPAY",merchant_identity_id:"merchant_a",channel_order_no:"M-100",platform_order_no:"P-1",state:"READY",amount_cents:"100",at:"2026-10-03T00:00:00.000000Z"},"PAYMENT_REQUEST");
+  const other=projectUnpostedFinanceSource({id:"p2",order_id:"o2",channel:"JOINPAY",merchant_identity_id:"merchant_b",channel_order_no:"M-100",platform_order_no:"P-2",state:"READY",amount_cents:"200",at:"2026-10-03T00:00:00.000000Z"},"PAYMENT_REQUEST");
+  assert.notEqual(open.documentRef,other.documentRef);assert.equal(open.deltaCents,null);assert.equal(open.affectsCurrentLedger,false);assert.equal(open.evidence.merchantIdentityId,"merchant_a");assert.equal(other.evidence.merchantIdentityId,"merchant_b");
+  assert.equal(financePeriodProjection([open,other]).find(row=>row.bucket==="CLEARING")!.knownInflows,"0");
+ }finally{fixture.close();}
+});
+
+
+test('unposted business amount and platform reference never become ledger income or channel serial',()=>{
+ const payment=projectUnpostedFinanceSource({id:'p',order_id:'o',renter_user_id:'u1',subject_name:'原租客',channel_order_no:'M-1',platform_order_no:'P-1',amount_cents:'100',state:'READY'},'PAYMENT_REQUEST');
+ assert.equal(payment.subjectId,'u1');assert.equal(payment.subjectName,'原租客');assert.equal(payment.evidence.platformOrderNo,'P-1');assert.equal(payment.evidence.channelSerial,null);
+ const refund=projectUnpostedFinanceSource({id:'r',order_id:'o',renter_user_id:'u1',refund_order_no:'R-1',amount_cents:'50',state:'READY'},'REFUND_INTENT');
+ assert.equal(financeDocuments([payment])[0]!.requestedAmountCents,'100');assert.equal(financeDocuments([refund])[0]!.requestedAmountCents,'50');
+ for(const entry of [payment,refund]){assert.equal(entry.deltaCents,null);assert.equal(entry.affectsCurrentLedger,false);}
+ assert.equal(financePeriodProjection([payment,refund]).find(row=>row.bucket==='CLEARING')!.knownInflows,'0');
+});
+
+test('legacy order keeps global history admission proof instead of an incomplete r3 dependency set',()=>{
+ const ready={native_orders:true,legacy_orders:true,history_coverage:true};
+ assert.equal(financeScopedVersionSql(ready,{mode:'document',documentRef:'LEGACY_ORDER:old-1'}),null);
+ assert.match(financeVersionSql(ready),/wallet_coverage/);assert.match(financeVersionSql(ready),/finance_opening_basis/);
+ assert.ok(financeScopedVersionSql(ready,{mode:'document',documentRef:'ORDER:native-1'}),'native scope stays narrow');
+});
+
+test('exact payment refund and payout keys honor Beijing half-open dates without prefix matches',()=>{
+ const f=new FinanceSqlFixture();
+ try{
+  f.db.exec("CREATE TABLE zzsh_order.payment_request(id TEXT,order_id TEXT,channel_order_no TEXT,platform_order_no TEXT,created_at TEXT); CREATE TABLE zzsh_order.channel_refund_intent(id TEXT,renter_user_id TEXT,refund_order_no TEXT,provider_refund_trx_no TEXT,original_payment_order_no TEXT,created_at TEXT); CREATE TABLE zzsh_order.joinpay_withdrawal_intent(id TEXT,user_id TEXT,merchant_order_no TEXT,platform_serial_no TEXT,state TEXT,accepted_at TEXT)");
+  const times:Array<[string,string]>=[['old','2026-10-24T00:00:00Z'],['left','2026-10-25T16:00:00Z'],['mid','2026-10-26T00:00:00Z'],['right','2026-10-26T16:00:00Z']];
+  for(const[id,at]of times){f.db.prepare("INSERT INTO zzsh_order.payment_request VALUES(?,?,?,?,?)").run(id,'o-'+id,'M-WINDOW','P-'+id,at);f.db.prepare("INSERT INTO zzsh_order.channel_refund_intent VALUES(?,?,?,?,?,?)").run(id,'u1','M-WINDOW','T-'+id,'P-'+id,at);f.db.prepare("INSERT INTO zzsh_order.joinpay_withdrawal_intent VALUES(?,?,?,?,?,?)").run(id,'u1','M-WINDOW','W-'+id,'RESERVED',at);}
+  const refs=(period:boolean,q='M-WINDOW')=>{const filters=parseAdminFinanceFilters(new URLSearchParams('period='+(period?'1':'0')+'&from=2026-10-26&to=2026-10-26&q='+q),new Date('2026-10-26T00:00:00Z'),false),query=financeLookupPageSql('SELECT * FROM fixture_ledger','SELECT * FROM fixture_history',{payment_requests:true,refund_intents:true,joinpay_withdrawals:true},{filters,lookup:{exact:false},page:1,pageSize:20});
+   // SQLite uses TEXT for PG timestamp columns; adapt only these named columns to its same timestamp comparison type.
+   const text=query.text.replace(/\b([piw]\.(?:created_at|accepted_at))(?=\s*[<>])/g,'julianday($1)');return f.query(text,query.values).rows.map(row=>row.ref).filter(Boolean).sort();};
+  assert.deepEqual(refs(true),['JOINPAY_WITHDRAWAL:left','JOINPAY_WITHDRAWAL:mid','PAYMENT_REQUEST:left','PAYMENT_REQUEST:mid','REFUND_INTENT:left','REFUND_INTENT:mid']);
+  assert.equal(refs(false).length,12);assert.deepEqual(refs(true,'M-WIN'),[]);
+ }finally{f.close();}
 });

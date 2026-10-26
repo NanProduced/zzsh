@@ -1762,6 +1762,7 @@ export function publicListingBasis(listing: Record<string, unknown>) {
   return {
     id,
     releaseId: typeof listing.releaseId === "string" ? listing.releaseId : null,
+    contentHash: typeof listing.contentHash === "string" ? listing.contentHash : null,
     accountId: typeof listing.id === "string" ? listing.id : null,
     title: typeof listing.title === "string" ? listing.title : null,
     description: typeof listing.description === "string" ? listing.description : null,
@@ -1770,6 +1771,7 @@ export function publicListingBasis(listing: Record<string, unknown>) {
     presentation: listing.presentation && typeof listing.presentation === "object" ? listing.presentation : null,
     media: Array.isArray(listing.media) ? listing.media : [],
     quote: listing.quote && typeof listing.quote === "object" ? listing.quote : null,
+    baseDeposit: listing.baseDeposit && typeof listing.baseDeposit === "object" ? listing.baseDeposit : null,
     termOption: listing.termOption && typeof listing.termOption === "object" ? listing.termOption : null,
     fullPayoutSelected: listing.fullPayoutSelected === true ? true : listing.fullPayoutSelected === false ? false : null,
     publishedAt: typeof listing.publishedAt === "string" ? listing.publishedAt : null,
@@ -1932,11 +1934,16 @@ export async function listingDetail(
       `SELECT id AS "assetId",source_note AS category FROM zzsh_supply.media_asset WHERE id=ANY($1::text[])`,
       [publicMedia.map(m => m.assetId)],
     )).rows;
+    const depositDeclaration = attrs.owner_deposit_declaration as { schema?: unknown; amountCents?: unknown } | undefined;
+    const baseDeposit = depositDeclaration?.schema === "owner-deposit-declaration-v1" && typeof depositDeclaration.amountCents === "string"
+      ? { amountCents: depositDeclaration.amountCents } : null;
     return {
+      baseDeposit,
       id: a.id,
       displayNo: publicAccountNumber(a.display_no),
       versionId: v.id,
       releaseId: v.rule_release_id,
+      contentHash: v.content_hash,
       title: v.title,
       description: v.description,
       game: projectPublicListingGame(game),

@@ -1,8 +1,9 @@
 import {test} from "node:test";
 import assert from "node:assert/strict";
 import type {PoolClient} from "pg";
-import {getAdminReadOrder,projectAdminReadOrder,queryAdminReadOrders,orderReadRelation,orderReadKeyRelation} from "../src/order/admin-order-read";
+import {getAdminReadOrder,projectAdminReadOrder,queryAdminReadOrders,orderReadRelation,orderReadKeyRelation,parseOrderOrigin,readNativeFrozenAccounts,NATIVE_FROZEN_ACCOUNT_SQL} from "../src/order/admin-order-read";
 import {LEGACY_ORDER_STATUS_SQL} from "../src/order/legacy-order-read";
+import {parseAdminOrderPageQuery} from "../src/order/order-routes";
 const viewer={adminId:"test-reader",isBoss:false,internalQuote:false,authorizationKey:"a".repeat(64)};
 test('participant restriction combines with origin-bound page keys before either source expands',()=>{
  for(const ready of [false,true]){
@@ -53,7 +54,7 @@ type Key={origin:string;id:string};
 type Statement={sql:string;values:unknown[]};
 /** The admin list reads its keys first and their records second; the harness
  *  answers both statements and records what was asked. */
-function orderClient(options:{keys?:Key[];total?:string;records?:Array<{origin:string;id:string;record:Record<string,any>}>;ready?:boolean;channelReady?:boolean;paymentSnapshot?:Record<string,unknown>;paymentReadyError?:Error;paymentReadError?:Error;progressRows?:Record<string,any>[];progressError?:Error;directoryRows?:Record<string,any>[]}={}){
+function orderClient(options:{keys?:Key[];total?:string;records?:Array<{origin:string;id:string;record:Record<string,any>}>;ready?:boolean;channelReady?:boolean;paymentSnapshot?:Record<string,unknown>;paymentReadyError?:Error;paymentReadError?:Error;progressRows?:Record<string,any>[];progressError?:Error;directoryRows?:Record<string,any>[];frozenRows?:Record<string,any>[]}={}){
  const statements:Statement[]=[];
  const client={query:async(sql:string,values:unknown[]=[])=>{
   statements.push({sql,values:[...values]});
@@ -74,6 +75,7 @@ function orderClient(options:{keys?:Key[];total?:string;records?:Array<{origin:s
    return {rows:options.progressRows??[]};
   }
   if(sql.includes('"phoneNumber" AS phone'))return {rows:options.directoryRows??[]};
+  if(sql.includes('admin-order-frozen-account'))return {rows:options.frozenRows??[]};
   return {rows:[]};
  }} as unknown as PoolClient;
  return {client,statements};
@@ -84,6 +86,36 @@ test("legacy cancellation, payment and missing time remain separate facts",()=>{
  const unknown=projectAdminReadOrder("LEGACY",{...record,source_pay_status:9},viewer);assert.equal(unknown.payment.state,"UNKNOWN");assert.equal(unknown.payment.recordedAmount,null);
  const completed=projectAdminReadOrder("LEGACY",{...record,source_order_status:4},viewer);assert.equal(completed.status,"COMPLETED");assert.equal(completed.payment.state,"RECORDED_PAID");assert.equal(completed.paidAt,null);
 });
+test('a 20-digit business number is not rejected as a phone when used as a party clue',async()=>{
+ const {client}=orderClient({keys:[],total:'0'});
+ const result=await queryAdminReadOrders(client,viewer,{page:1,pageSize:20,qKind:'party',qValue:'20260913125844629986'});
+ assert.equal(result.items.length,0);
+ await assert.rejects(()=>queryAdminReadOrders(orderClient().client,viewer,{page:1,pageSize:20,qKind:'party',qValue:'13800138000'}),(error:any)=>error.status===400);
+});
+
+test('order origin is an exact optional source predicate; repeated or unknown values are rejected',async()=>{
+ assert.equal(parseOrderOrigin(new URLSearchParams()),undefined);
+ assert.equal(parseOrderOrigin(new URLSearchParams('origin=NATIVE')),'NATIVE');
+ assert.equal(parseOrderOrigin(new URLSearchParams('origin=LEGACY')),'LEGACY');
+ for(const query of ['origin=NATIVE&origin=LEGACY','origin=native','origin=','origin=ALL'])assert.throws(()=>parseOrderOrigin(new URLSearchParams(query)));
+ for(const origin of ['NATIVE','LEGACY'] as const){
+  const {client,statements}=orderClient({keys:[{origin,id:origin==='NATIVE'?'native-1':'legacy-1'}],total:'1',records:[{origin,id:origin==='NATIVE'?'native-1':'legacy-1',record:origin==='NATIVE'?native:record}]});
+  const result=await queryAdminReadOrders(client,viewer,{page:1,pageSize:20,origin});
+  assert.equal(result.items.length,1);
+  const key=statements.find(s=>s.sql.includes('AS keys'))!;
+  assert.match(key.sql,/x\.origin=\$\d+/,'the origin predicate runs inside the same filtered relation before count/page');
+  assert(key.values.includes(origin));
+ }
+});
+test('numbered page parser keeps source, status, date and lookup in the same filter object',()=>{
+ const parsed=parseAdminOrderPageQuery(new URLSearchParams('page=2&pageSize=3&status=CANCELLED&origin=LEGACY&createdFrom=2026-10-01T00:00:00%2B08:00&createdTo=2026-10-03T00:00:00%2B08:00&qKind=party&qValue=20260913125844629986'));
+ assert.equal(parsed.page,2);assert.equal(parsed.pageSize,3);assert.equal(parsed.status,'CANCELLED');assert.equal(parsed.origin,'LEGACY');
+ assert.equal(parsed.qKind,'party');assert.equal(parsed.qValue,'20260913125844629986');
+ assert(parsed.createdFrom?.startsWith('2026-10-01T00:00:00'));assert(parsed.createdTo?.startsWith('2026-10-03T00:00:00'));
+ for(const query of ['page=1&origin=native','page=1&origin=NATIVE&origin=LEGACY','page=1&unexpected=x','page=1&createdFrom=2026-10-03T00:00:00%2B08:00&createdTo=2026-10-01T00:00:00%2B08:00'])
+  assert.throws(()=>parseAdminOrderPageQuery(new URLSearchParams(query)),(error:any)=>error.status===400,query);
+});
+
 test("numbered pagination filters both sources before count and page; restore scope is bound",async()=>{
  const {client,statements}=orderClient({keys:[{origin:"LEGACY",id:"legacy-1"}],total:"1",records:[{origin:"LEGACY",id:"legacy-1",record}]});
  const result=await queryAdminReadOrders(client,viewer,{page:2,pageSize:3,qKind:"party",qValue:"%name_"});
@@ -456,6 +488,48 @@ test('progress: 缺表/无权后回滚保存点，事务恢复并继续后续双
  }
 });
 
+test('frozen account SQL uses real relations, not a comment-driven mock',()=>{
+ const relations=[...new Set([...NATIVE_FROZEN_ACCOUNT_SQL.matchAll(/\bzzsh_[a-z_]+\.[a-z_]+\b/g)].map(match=>match[0]))];
+ assert(relations.includes('zzsh_order.rental_order'));
+ assert(!relations.includes('zzsh_supply.rental_order'),'the order table is not in the supply schema');
+ const allowed=new Set(['zzsh_order.rental_order','zzsh_supply.rental_account','zzsh_supply.listing_version','zzsh_supply.inventory_line','zzsh_supply.billable_item']);
+ for(const relation of relations)assert(allowed.has(relation),`unexpected relation ${relation}`);
+ assert.match(NATIVE_FROZEN_ACCOUNT_SQL,/v\.content_hash=wanted\."contentHash"/);
+});
+
+test('frozen account read checks real relations and never turns a relation error into an empty map',async()=>{
+ const item={id:native.id,accountId:native.account_id,versionId:native.listing_version_id,contentHash:native.content_hash,source:{origin:"NATIVE"}};
+ const row={orderId:native.id,versionId:native.listing_version_id,attributes:{login_method_code:"login_qq_qr"},presentationItems:[{id:"haff",code:"haff",name:"哈夫币",unit:"HAFF_BASE"}],resources:[{itemId:"haff",code:"haff",quantity:"98080000",unit:"HAFF_BASE"}],termSeconds:"86400"};
+ const allowed=new Set(["zzsh_order.rental_order","zzsh_supply.rental_account","zzsh_supply.listing_version","zzsh_supply.inventory_line","zzsh_supply.billable_item"]);
+ const reader=async(sql:string)=>{
+  for(const relation of new Set([...sql.matchAll(/\bzzsh_[a-z_]+\.[a-z_]+\b/g)].map(match=>match[0])))if(!allowed.has(relation))throw Object.assign(new Error("relation does not exist"),{code:"42P01"});
+  return {rows:[row]};
+ };
+ const result=await readNativeFrozenAccounts({query:reader} as unknown as PoolClient,viewer,[item]);
+ assert.equal(result.get(native.id)?.source,"ORDER_VERSION",'the real relation must return frozen facts, not an empty map');
+ assert.equal(result.get(native.id)?.haff?.quantity,"98080000");
+ await assert.rejects(()=>readNativeFrozenAccounts({query:async()=>{throw Object.assign(new Error("permission denied"),{code:"42501"})}} as unknown as PoolClient,viewer,[item]),/permission denied/,'relation errors must be reported, not swallowed');
+});
+
+test('frozen account summary: 原生只用本单版本原件，无资源权限不查',async()=>{
+ const frozen={orderId:native.id,versionId:native.listing_version_id,attributes:{login_method_code:'login_qq_qr'},presentationItems:[{id:'haff',code:'haff',name:'哈夫币',unit:'HAFF_BASE'},{id:'bullet',code:'barrett',name:'巴雷特子弹',unit:'ROUND'}],
+  resources:[{itemId:'haff',code:'haff',quantity:'98080000',unit:'HAFF_BASE'},{itemId:'bullet',code:'barrett',quantity:'2',unit:'ROUND'}],termSeconds:'86400'};
+ const allowed=orderClient({keys:[{origin:'NATIVE',id:native.id}],total:'1',records:[{origin:'NATIVE',id:native.id,record:native}],frozenRows:[frozen]});
+ const page=await queryAdminReadOrders(allowed.client,{...viewer,permissions:new Set(['supply.rental_account.read'])},{page:1,pageSize:20});
+ const summary=page.items[0]!.frozenAccount;
+ assert.equal(summary.source,'ORDER_VERSION');
+ assert.deepEqual([summary.haff.code,summary.haff.quantity,summary.haff.unit],['haff','98080000','HAFF_BASE']);
+ assert.deepEqual(summary.materials.map((row:any)=>[row.name,row.quantity,row.unit]),[['巴雷特子弹','2','ROUND']]);
+ assert.equal(summary.termDays,'1');assert.equal(summary.termSeconds,'86400');assert.equal(summary.loginMethodText,'QQ扫码');
+ const frozenStatement=allowed.statements.find(s=>s.sql.includes('admin-order-frozen-account'))!;
+ assert.deepEqual(frozenStatement.values,[JSON.stringify([{orderId:native.id,accountId:native.account_id,versionId:native.listing_version_id,contentHash:native.content_hash}]),false,viewer.adminId]);
+ assert.doesNotMatch(frozenStatement.sql,/FROM zzsh_supply\.rental_account a JOIN[^]*current_version/);
+ const denied=orderClient({keys:[{origin:'NATIVE',id:native.id}],total:'1',records:[{origin:'NATIVE',id:native.id,record:native}],frozenRows:[frozen]});
+ const without=await queryAdminReadOrders(denied.client,viewer,{page:1,pageSize:20});
+ assert.equal('frozenAccount' in without.items[0]!,false);
+ assert.equal(denied.statements.some(s=>s.sql.includes('admin-order-frozen-account')),false);
+});
+
 test('party summaries: 仅真实目录权限、整页去重一次批读，无权限不查',async()=>{
  const keys=[{origin:'NATIVE',id:'native-1'},{origin:'LEGACY',id:'legacy-1'}];
  const records=[{origin:'NATIVE',id:'native-1',record:native},{origin:'LEGACY',id:'legacy-1',record}];
@@ -522,4 +596,30 @@ test('progress: 提前结算先完成双方决定再客服复核，人工调整�
  assert.equal((await progressOf({...early,ownerConfirmed:true})).ending.state,'PENDING_SUPPORT_REVIEW');
  assert.equal((await progressOf({...early,ownerConfirmed:true,supportReviewed:true})).ending.state,'READY');
  assert.equal((await progressOf({...early,kind:'MANUAL_ADJUSTMENT',renterConfirmed:false,approvalStatus:'PENDING',approvalRequestedBy:'admin-a',approvalPayloadHash:'a'.repeat(64)})).ending.state,'PENDING_APPROVAL');
+});
+
+
+test('related hover summaries: one page passes actor and exact capabilities once for both parties',async t=>{
+ const summaryModule=require('../src/auth/user-directory-summary');
+ const seen:Array<{ids:readonly string[];context:unknown}>=[];
+ t.mock.method(summaryModule,'readDirectoryUserSummaries',async(_client:PoolClient,ids:readonly string[],permissions:ReadonlySet<string>,context:unknown)=>{
+  seen.push({ids,context});
+  if(!permissions?.has('user.directory.read'))return new Map();
+  return new Map([...new Set(ids)].map(id=>[id,{name:id,image:null,maskedPhone:null,riskFlag:true,creditSummary:{state:'ready',knowledge:'KNOWN',score:0,revision:'1'}}]));
+ });
+ for(const size of [1,50]){
+  const records=Array.from({length:size},(_,n)=>({origin:'NATIVE',id:'hover-order-'+n,record:{...native,id:'hover-order-'+n}}));
+  const page=orderClient({keys:records.map(({origin,id})=>({origin,id})),total:String(size),records});
+  seen.length=0;
+  const permissions=new Set(['user.directory.read','membership.growth.read.summary','credit.read']);
+  const result=await queryAdminReadOrders(page.client,{...viewer,permissions},{page:1,pageSize:50});
+  assert.equal(seen.length,1,'no per-order profile or hover read');
+  assert.deepEqual(seen[0]!.context,{adminId:viewer.adminId,isBoss:viewer.isBoss,membershipSummaryRead:true,creditRead:true});
+  assert.equal(new Set(seen[0]!.ids).size,2,'only the selected page parties');
+  assert.equal(result.items[0]!.ownerSummary.creditSummary.score,0);
+  assert.equal(result.items[0]!.renterSummary.riskFlag,true);
+ }
+ const page=orderClient({records:[{origin:'NATIVE',id:native.id,record:native}]});seen.length=0;
+ await queryAdminReadOrders(page.client,{...viewer,permissions:new Set(['user.directory.read'])},{page:1,pageSize:20});
+ assert.deepEqual(seen[0]!.context,{adminId:viewer.adminId,isBoss:viewer.isBoss,membershipSummaryRead:false,creditRead:false});
 });

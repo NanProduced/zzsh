@@ -181,11 +181,15 @@ test("ADM-R1-03b：UI 每页 3 条与 URL 往返一致", async (t) => {
     initialQuery: {}, onQueryChange: (query) => queries.push(query),
   });
   await h.until(() => view.element.textContent.includes("ORDER_R1"));
-  await h.change(view.element, "每页条数", "3");
+  await h.click(view.element, "每页容量", true);
+  await h.until(() => h.browser.document.querySelector('[role="option"]'));
+  const sizeOption = [...h.browser.document.querySelectorAll('[role="option"]')].find(option => option.textContent.includes("3 条/页"));
+  assert.ok(sizeOption, "共享分页提供 3 条/页");
+  await act(async () => sizeOption.click());
   await h.until(() => h.requests.at(-1)?.includes("pageSize=3"));
   await h.until(() => queries.some((query) => query.size === "3"), `queries=${JSON.stringify(queries)}`);
   assert.deepEqual(queries.at(-1), { size: "3" }, "选 3 回写 size=3");
-  assert.equal(view.element.querySelector('[aria-label="每页条数"]').value, "3");
+  assert.ok(view.element.querySelector('[aria-label="每页容量"]').textContent.includes("3"));
   await view.close();
   // 全新挂载 size=3：必须恢复成 3，而不是 20
   const reloaded = await h.mount(h.AdminOrderChainView, {
@@ -193,7 +197,7 @@ test("ADM-R1-03b：UI 每页 3 条与 URL 往返一致", async (t) => {
     initialQuery: { size: "3" }, onQueryChange: noop,
   });
   await h.until(() => reloaded.element.textContent.includes("ORDER_R1"));
-  assert.equal(reloaded.element.querySelector('[aria-label="每页条数"]').value, "3", "按 URL 恢复每页 3 条");
+  assert.ok(reloaded.element.querySelector('[aria-label="每页容量"]').textContent.includes("3"), "按 URL 恢复每页 3 条");
   assert.ok(h.requests.at(-1).includes("pageSize=3"), "恢复后请求按 3 条");
   await reloaded.close();
 });
@@ -215,7 +219,7 @@ test("ADM-R1-03c：显式 CANCELLED 地址优先于旧 PAID/page2 缓存", async
   });
   await h.until(() => second.element.textContent.includes("ORDER_R1"));
   await h.settle();
-  assert.equal(second.element.querySelector('[aria-label="主状态"]').value, "CANCELLED", "显式地址覆盖旧缓存");
+  assert.match(second.element.querySelector('[aria-label="主状态"]').textContent, /已取消/, "显式地址覆盖旧缓存");
   assert.ok(h.requests.at(-1).includes("status=CANCELLED"), `请求按 CANCELLED：${h.requests.at(-1)}`);
   assert.equal(h.requests.at(-1).includes("status=PAID"), false, "不得回到旧 PAID");
   assert.equal(queries.some((query) => query.status === "PAID"), false, "不得把旧缓存写回地址");

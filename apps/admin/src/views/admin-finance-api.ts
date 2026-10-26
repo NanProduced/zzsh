@@ -6,7 +6,7 @@ export const FINANCE_ACCESS_FAILURE_EVENT = "zzsh-admin-finance-access-failure";
 export const bucketLabels: Record<string, string> = { AVAILABLE: "用户可用", RESERVED: "提现预留", GUARANTEE_HELD: "号主上架保证金", REFUND_PAYABLE: "退款应付", PENDING_EARNINGS: "待结算收益", PLATFORM: "平台分项", CLEARING: "对照科目" };
 export const kindLabels: Record<string, string> = { OPENING: "迁移期初", SETTLEMENT: "订单结算", WITHDRAWAL: "提现", EARNINGS: "历史流水", DISTRIBUTION: "分销", GUARANTEE: "上架保证金" };
 kindLabels.REFUND = "退款责任";
-export const stateLabels: Record<string, string> = { POSTED: "已入账", RESERVED: "已预留", SUBMITTING: "提交中", PROCESSING: "处理中", UNKNOWN: "结果未知", SUCCEEDED: "本地受控成功", FAILED: "失败", RECONCILIATION_REQUIRED: "结果冲突待核", HISTORICAL_OBSERVED: "历史观察" };
+export const stateLabels: Record<string, string> = { POSTED: "已入账", RESERVED: "已预留", SUBMITTING: "提交中", PROCESSING: "处理中", UNKNOWN: "结果未知", SUCCEEDED: "本地成功记录", FAILED: "失败", RECONCILIATION_REQUIRED: "结果冲突待核", HISTORICAL_OBSERVED: "历史观察" };
 Object.assign(stateLabels, { ORDER_RECORDED: "订单记录", HISTORICAL_ORDER_RECORDED: "历史订单记录" });
 Object.assign(stateLabels,{PENDING:'待结算',SETTLED:'已结算',REVOKED:'已撤销',RECOVERY_REQUIRED:'待追回'});
 stateLabels.REFUND_PAYABLE_RECORDED = "应退责任已记录";
@@ -60,13 +60,15 @@ export type HistoricalFinanceDisplay = {
   originalStatus: string | null; originalStatusLabel: string | null; channelState: 'UNVERIFIED';
   association: { state: 'MATCHED' | 'UNRESOLVED' | 'AMBIGUOUS' | 'DENIED'; kind: 'ORDER' | 'WITHDRAWAL' | 'DISTRIBUTION' | 'TASK' | 'UNKNOWN'; documentRef: string | null; number: string | null; path: string | null; role: 'OWNER' | 'BENEFICIARY' | 'WITHDRAWER' | null; originalStatus: string | null; originalStatusLabel: string | null };
 };
-type FinanceRecord = { kind: string; state: string; historical?: HistoricalFinanceDisplay };
+type FinanceRecord = { kind: string; state: string; ref?: string; documentRef?: string; sourceEntity?: string; historical?: HistoricalFinanceDisplay };
+const sourceFamily = (record: FinanceRecord) => (record.ref ?? record.documentRef ?? "").split(":")[0] ?? "";
 export function financeIsHistorical(record: FinanceRecord): boolean { return !!record.historical || record.state.startsWith('HISTORICAL_'); }
-export function financeBusinessLabel(record: FinanceRecord): string { return record.historical?.purposeLabel?.trim() || kindLabels[record.kind] || '资金记录'; }
+export function financeBusinessLabel(record: FinanceRecord): string { const family=sourceFamily(record); return record.historical?.purposeLabel?.trim() || (family==='PAYMENT_REQUEST'?'付款请求':family==='REFUND_INTENT'?'退款申请':kindLabels[record.kind]) || '资金记录'; }
 export function financeRecordNumber(record: FinanceRecord, fallback: string): string {
   return record.historical?.originalLogNumber ? `原流水号 ${record.historical.originalLogNumber}` : financeIsHistorical(record) ? `记录编号 ${fallback}` : fallback;
 }
 export function financeRecordState(record: FinanceRecord): string {
+  if (!financeIsHistorical(record) && record.state === "SUCCEEDED") return sourceFamily(record) === "WITHDRAWAL" || record.sourceEntity === "withdrawal_intent" ? "本地受控成功" : "本地成功记录，渠道另核";
   const original = record.historical?.originalStatusLabel;
   return financeIsHistorical(record) ? original ? original.startsWith('旧平台') ? original : `旧平台状态：${original}` : '旧平台记录' : stateLabels[record.state] ?? '状态待核';
 }
@@ -84,8 +86,10 @@ export function historicalFinanceFacts(historical: HistoricalFinanceDisplay): [s
     ['手续费', financeMoney(historical.feeCents)], ['净额', financeMoney(historical.netCents)], ['原用途码', historical.changeType ?? '未取得'], ['原状态码', historical.originalStatus ?? '未取得']];
 }
 export type FinanceEntry = { id: string; documentRef: string; documentNumber: string; subjectId: string; subjectName: string; bucket: string; direction: string; deltaCents: string | null; knowledge: string; kind: string; state: string; classification: string; affectsCurrentWallet: boolean; affectsCurrentLedger: boolean; occurredAt: string | null; importedAt: string; sourceType: string; sourceEntity: string; sourceSystem: string; sourceId: string; sourceDigest: string | null; basisId: string | null; reasonCodes: string[]; accountCode: string | null; evidence: Record<string, string | null>; historical?: HistoricalFinanceDisplay };
-export type FinanceDocument = { ref: string; number: string; kind: string; state: string; occurredAt: string | null; requestedAmountCents: string | null; subjects: { id: string; name: string }[]; entryCount: number; summaryScope?: 'DOCUMENT' | 'SUBJECT'; subjectEntryCount?: number; documentEntryCount?: number | null; amounts: { bucket: string; knownNetCents: string; unknownCount: number }[]; historical?: HistoricalFinanceDisplay };
+export type FinanceDocument = { ref: string; number: string; kind: string; state: string; occurredAt: string | null; requestedAmountCents: string | null; subjects: { id: string; name: string }[]; entryCount: number; ledgerEntryCount?: number; summaryScope?: 'DOCUMENT' | 'SUBJECT'; subjectEntryCount?: number; documentEntryCount?: number | null; amounts: { bucket: string; knownNetCents: string; unknownCount: number }[]; historical?: HistoricalFinanceDisplay };
 export function financeEntryScope(document: FinanceDocument): string {
+  if (["PAYMENT_REQUEST","REFUND_INTENT"].includes(sourceFamily(document)) || sourceFamily(document)==="JOINPAY_WITHDRAWAL" && document.ledgerEntryCount===0) return "业务记录 · 不计账内收支";
+  if (sourceFamily(document)==="JOINPAY_WITHDRAWAL" && document.ledgerEntryCount===undefined) return `${document.entryCount} 条记录 · 过账依据待核`;
   return document.summaryScope === 'SUBJECT' ? `本人相关 ${document.subjectEntryCount ?? document.entryCount} 条${document.documentEntryCount == null ? ' · 全单条数未读取' : ` / 全单 ${document.documentEntryCount} 条`}` : `${document.entryCount} 条${financeIsHistorical(document) ? '历史记录' : '分录'}`;
 }
 export function financeEntryEvent(entry: FinanceEntry): string {

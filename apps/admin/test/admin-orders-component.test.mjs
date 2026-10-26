@@ -258,9 +258,17 @@ const chainPage = (items = [chainOrder], overrides = {}) => ({ items, page: 1, p
 const chainProps = id => ({ snapshot: snapshotFor(id), onOpenPath: () => {}, onQueryChange: () => {}, refreshNonce: 0 });
 async function changeField(browser, node, label, value) {
   const field = node.querySelector(`[aria-label="${label}"]`);
+  if (field.tagName === 'BUTTON' || field.getAttribute('role') === 'combobox') {
+    await act(async () => field.click());
+    await until(() => browser.document.querySelector('[role="option"]'));
+    const option = [...browser.document.querySelectorAll('[role="option"]')].find(item => item.textContent.trim() === value);
+    assert(option, `missing option ${value} for ${label}`);
+    await act(async () => option.click());
+    return;
+  }
   await act(async () => {
-    if(field.tagName === 'SELECT') { field.value = value; field.dispatchEvent(new Event('change', { bubbles: true })); }
-    else { Object.getOwnPropertyDescriptor(browser.HTMLInputElement.prototype, 'value').set.call(field, value); field.dispatchEvent(new Event('input', { bubbles: true })); }
+    Object.getOwnPropertyDescriptor(browser.HTMLInputElement.prototype, 'value').set.call(field, value);
+    field.dispatchEvent(new Event('input', { bubbles: true }));
   });
 }
 const buttonNamed = (node, name) => [...node.querySelectorAll('button')].find(b => b.textContent === name);
@@ -272,7 +280,7 @@ test('numbered chain survives StrictMode cancellation and separates paid cancell
   await until(() => node.textContent.includes(chainOrder.displayNo));
   assert(signals.length >= 2); assert.equal(signals[0].aborted, true);
   assert(node.textContent.includes('已取消')); assert(node.textContent.includes('支付已记录')); assert(node.textContent.includes('退款待核'));
-  assert(node.textContent.includes('押 ¥0.00')); assert(!node.textContent.includes('加载更多'));
+  assert(node.textContent.includes('押金 ¥0.00')); assert(!node.textContent.includes('加载更多'));
   assert(node.textContent.includes('当前进度') && node.textContent.includes('费用'));
   assert(!node.textContent.includes('需付金额') && !node.textContent.includes('订单状态 / 已知事实'), 'cancelled rows no longer look like a payment request');
   globalThis.fetch = async () => response({ order:chainOrder });
@@ -281,29 +289,92 @@ test('numbered chain survives StrictMode cancellation and separates paid cancell
   assert(node.textContent.includes('支付时间待确认')); assert(node.textContent.includes('未知')); assert(node.textContent.includes('¥0.00'));
 });
 
+
+test('U1 order filters use shared controls, send exact server predicates and reset without native fields', async t => {
+  const {browser,root,node,AdminOrderChainView}=await setup(t); const calls=[];
+  globalThis.fetch=async url=>{calls.push(new URL(String(url),'http://localhost'));return response(chainPage([chainOrder],{total:45}));};
+  await act(async()=>root.render(createElement(AdminOrderChainView,chainProps('order-filters'))));
+  await until(()=>node.textContent.includes(chainOrder.displayNo));
+  assert.equal(node.querySelectorAll('.oc-search select').length,0,'filters use the project Select, not native selects');
+  assert.equal(node.querySelectorAll('.oc-search input[type="datetime-local"]').length,0,'dates use the shared DateSelector');
+  assert.equal(node.textContent.includes('共 45 条'),true,'count and page share the server result');
+
+  await changeField(browser,node,'主状态','已取消');
+  await changeField(browser,node,'来源','旧平台订单');
+  await act(async()=>buttonNamed(node,'查询').click());
+  await until(()=>calls.at(-1).searchParams.get('origin')==='LEGACY');
+  assert.equal(calls.at(-1).searchParams.get('status'),'CANCELLED');
+  assert.equal(calls.at(-1).searchParams.get('page'),'1');
+
+  const dateTrigger=node.querySelector('[aria-label="下单日期"]');
+  await act(async()=>dateTrigger.click());
+  await until(()=>browser.document.querySelector('[aria-label="快捷日期范围"]'));
+  const preset=[...browser.document.querySelectorAll('button')].find(button=>button.textContent.includes('近 7 天'));
+  await act(async()=>preset.click());
+  await act(async()=>buttonNamed(node,'查询').click());
+  await until(()=>calls.at(-1).searchParams.has('createdFrom'));
+  assert.match(calls.at(-1).searchParams.get('createdFrom'),/T00:00:00\+08:00$/);
+  assert.match(calls.at(-1).searchParams.get('createdTo'),/T00:00:00\+08:00$/);
+  assert.equal(calls.at(-1).searchParams.get('status'),'CANCELLED');
+  assert.equal(calls.at(-1).searchParams.get('origin'),'LEGACY');
+
+  await changeField(browser,node,'查找方式','交易双方');
+  await changeField(browser,node,'查找线索','20260913125844629986');
+  await act(async()=>buttonNamed(node,'查询').click());
+  await until(()=>calls.at(-1).searchParams.get('qValue')==='20260913125844629986');
+  assert.equal(calls.at(-1).searchParams.get('qKind'),'party','a 20-digit order number is allowed as a party clue');
+
+  await act(async()=>buttonNamed(node,'重置').click());
+  await until(()=>!calls.at(-1).searchParams.has('status')&&!calls.at(-1).searchParams.has('origin')&&!calls.at(-1).searchParams.has('createdFrom'));
+  assert.equal(calls.at(-1).searchParams.has('qValue'),false);
+  assert.equal(node.textContent.includes('共 45 条'),true);
+});
 test('numbered lookup, later pages and invalid dates retain the executed query and expose a correct current page', async t => {
   const {browser,root,node,AdminOrderChainView} = await setup(t); const calls=[],changed=[];
   globalThis.fetch = async url => { calls.push(new URL(String(url),browser.location.href)); return response(chainPage([chainOrder],{total:200})); };
   await act(async () => root.render(createElement(AdminOrderChainView,{...chainProps('chain-pages'),onQueryChange:q=>changed.push(q)})));
   await until(() => node.textContent.includes(chainOrder.displayNo));
-  await changeField(browser,node,'查找方式','party'); await changeField(browser,node,'查找线索','测试用户线索');
+  await changeField(browser,node,'查找方式','交易双方'); await changeField(browser,node,'查找线索','测试用户线索');
   await act(async () => node.querySelector('.oc-search').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
   await until(() => calls.at(-1).searchParams.get('qValue')==='测试用户线索' && node.textContent.includes(chainOrder.displayNo));
   assert.equal(calls.at(-1).searchParams.get('qKind'),'party'); assert.deepEqual(changed,[]); assert.equal(browser.location.search,'');
-  await changeField(browser,node,'跳至页码','9');
-  await act(async () => node.querySelector('.oc-pagination form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
-  await until(() => calls.at(-1).searchParams.get('page')==='9' && node.querySelector('[aria-label="第 9 页"][aria-current="page"]'));
+  await changeField(browser,node,'跳转页码','9');
+  await act(async () => node.querySelector('.admin-list-pagination-jump-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
+  await until(() => calls.at(-1).searchParams.get('page')==='9');
   const count=calls.length;
-  await changeField(browser,node,'下单起始','2026-10-02T00:00');await changeField(browser,node,'下单截止','2026-10-01T00:00');
-  await act(async () => node.querySelector('.oc-search').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
-  assert.equal(calls.length,count);assert(node.textContent.includes('请修正后查询'));assert.equal(node.querySelector('[aria-label="下单截止"]').getAttribute('aria-invalid'),'true');
-  assert.equal(buttonNamed(node,'重试'),undefined);assert(node.textContent.includes(chainOrder.displayNo));
-  await changeField(browser,node,'下单起始','2026-09-30T00:00');
+  const dateTrigger = node.querySelector('[aria-label="下单日期"]');
+  await act(async () => dateTrigger.click());
+  await until(() => browser.document.querySelector('[aria-label="快捷日期范围"]'));
+  const preset = [...browser.document.querySelectorAll('button')].find(button => button.textContent.includes('近 7 天'));
+  await act(async () => preset.click());
   await act(async () => node.querySelector('.oc-search').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
   await until(() => calls.length>count&&node.textContent.includes(chainOrder.displayNo));
-  assert.equal(calls.at(-1).searchParams.get('page'),'1');assert.equal(node.querySelector('#oc-date-error'),null);
+  assert.equal(calls.at(-1).searchParams.get('page'),'1');
+  assert(calls.at(-1).searchParams.get('createdFrom').endsWith('T00:00:00+08:00'));
+  assert(calls.at(-1).searchParams.get('createdTo').endsWith('T00:00:00+08:00'));
+  assert.equal(node.querySelector('#oc-date-error'),null);
 });
 
+
+test('U3 order fee label follows the stage while the split stays visible and payment stays separate', async t => {
+  const {root,node,AdminOrderChainView}=await setup(t); let current;
+  globalThis.fetch=async()=>response({items:[current],page:1,pageSize:20,total:1,contextKey:'fee-root'});
+  const cases=[
+    {status:'PENDING_PAYMENT',label:'本次预付',payment:'RECORDED_UNPAID',breakdown:{basis:'NATIVE_FROZEN_ORDER_QUOTE',completeness:'COMPLETE',haffRental:{amount:'98.08'},materialsPrepay:{amount:'11.00'}},expect:['哈夫租金 ¥98.08','物资预付 ¥11.00','押金 ¥50.00']},
+    {status:'COMPLETED',label:'原预付',payment:'RECORDED_PAID',breakdown:{basis:'NATIVE_FROZEN_ORDER_QUOTE',completeness:'PARTIAL',haffRental:{amount:'98.08'},materialsPrepay:null},expect:['哈夫租金 ¥98.08','物资预付 分项待核','押金 ¥50.00']},
+    {status:'CANCELLED',label:'原单金额',payment:'UNKNOWN',breakdown:null,expect:['哈夫租金/物资预付分项待核','押金 ¥50.00','支付事实待核']},
+  ];
+  for(const [index,item] of cases.entries()){
+    current={...order,id:'fee-'+index,displayNo:'FEE-'+index,status:item.status,payment:{state:item.payment,recordedAt:null,recordedAmount:null},prepaymentBreakdown:item.breakdown,amounts:{...order.amounts,deposit:{currency:'CNY',unit:'yuan',amount:'50.00',scale:2},totalDue:{currency:'CNY',unit:'yuan',amount:'159.08',scale:2}},source:{origin:'NATIVE'}};
+    await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('fee-'+index),refreshNonce:index})));
+    await until(()=>node.textContent.includes(current.displayNo));
+    const fee=node.querySelector('.oc-table td.oc-amount').textContent;
+    assert.match(fee,new RegExp(item.label));
+    for(const text of item.expect) assert.ok(fee.includes(text),`${item.status}: ${text} from ${fee}`);
+    assert.match(fee,/¥159\.08/,'the original amount stays exact');
+    if(item.status!=='CANCELLED')assert.equal(fee.includes('未形成支付')||fee.includes('支付事实待核'),false,'payment state is not folded into a normal fee cell');
+  }
+});
 test('first, refresh and page read errors remain failures; expired restore context rereads page one', async t => {
   const {root,node,AdminOrderChainView} = await setup(t);const calls=[];let mode='first-failure';
   globalThis.fetch = async url => {const parsed=new URL(String(url),'http://localhost');calls.push(parsed);return mode.endsWith('failure')?response({error:{code:'INTERNAL_ERROR'}},500):mode==='conflict'&&parsed.searchParams.has('restoreKey')?response({error:{code:'CONFLICT'}},409):response(chainPage([chainOrder],{total:50}));};
@@ -331,6 +402,23 @@ test('session change and permission revocation discard private lookup state and 
   assert.equal(node.querySelector('[aria-label="查找线索"]').value,'');assert(!new URL(calls.at(-1),'http://localhost').searchParams.has('qValue'));
 });
 
+
+test('CHAIN refund intents keep their own coverage, budget and review facts apart from bank arrival', async t => {
+  const {root,node,AdminOrderChainView}=await setup(t);
+  const value={...chainOrder,id:'refund-intents',displayNo:'REFUND-INTENTS',status:'PAID',source:{origin:'NATIVE'}};
+  const refundSummary={contractVersion:'admin-order-refund-summary.v1',integration:'INTEGRATED',bankArrival:'UNKNOWN',reasonCodes:[],intents:[
+    {intentId:'i1',refundOrderNo:'RF-1',amount:{cents:'1000',currency:'CNY'},localState:'SUCCEEDED',budgetDisposition:'CONSUMED',requiresReview:false,mayResubmit:false,bankArrival:'UNKNOWN'},
+    {intentId:'i2',refundOrderNo:'RF-2',amount:{cents:'2500',currency:'CNY'},localState:'REVIEW_REQUIRED',budgetDisposition:'RELEASED',requiresReview:true,mayResubmit:false,bankArrival:'UNKNOWN'},
+  ]};
+  globalThis.fetch=async url=>String(url).includes('readMode=combined')?response({order:value,refundSummary}):response({error:{code:'NOT_FOUND'}},404);
+  await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('refund-intents'),objectOnly:true,initialOrderId:value.id})));
+  await until(()=>node.textContent.includes('REFUND-INTENTS'));
+  const text=node.textContent;
+  assert.match(text,/RF-1[\s\S]*10\.00/);assert.match(text,/RF-2[\s\S]*25\.00/);
+  assert.match(text,/本地退款成功记录/);assert.doesNotMatch(text,/本地受控成功/);assert.match(text,/需人工复核/);
+  assert.match(text,/预算已用/);assert.match(text,/预算释放/);
+  assert.match(text,/渠道到账未核定/);assert.equal(text.includes('银行已到账'),false);
+});
 test('optional finance/group reads are independent and never call controlled settlement or infer rental start', async t => {
   const {root,node,AdminOrderChainView}=await setup(t);const calls=[];let finishFinance,mode='slow';
   const native={...chainOrder,id:'native-old',displayNo:'NATIVE-OLD',status:'PAID',source:{origin:'NATIVE'}};
@@ -347,6 +435,58 @@ test('optional finance/group reads are independent and never call controlled set
   await act(async () => stale(response(proof('/finance/documents/ORDER:native-old'))));assert(node.textContent.includes('NATIVE-CURRENT'));assert(!node.textContent.includes('NATIVE-OLD'));assert(node.textContent.includes('开租待核'));assert(!calls.some(p=>p.includes('/settlement')));
 });
 
+test('frozen account summary is displayed from the existing order payload without another business request', async t => {
+  const {root,node,AdminOrderChainView}=await setup(t); let calls=0;
+  const frozen={source:'ORDER_VERSION',haff:{code:'haff',name:'哈夫币',quantity:'98080000',unit:'HAFF_BASE'},materials:[{code:'barrett',name:'巴雷特子弹',quantity:'2',unit:'ROUND'}],termDays:'1',termSeconds:'86400',loginMethodText:'QQ扫码'};
+  const item={...chainOrder,id:'frozen-order',displayNo:'FROZEN-ORDER',source:{origin:'NATIVE'},frozenAccount:frozen};
+  globalThis.fetch=async()=>{calls++;return response(chainPage([item]));};
+  await act(async()=>root.render(createElement(AdminOrderChainView,chainProps('frozen'))));
+  await until(()=>node.textContent.includes('FROZEN-ORDER'));
+  assert(node.textContent.includes('本单冻结'));
+  assert(node.textContent.includes('98.08 M 哈夫币'));
+  assert(node.textContent.includes('巴雷特子弹'));
+  assert(node.textContent.includes('1 天'));
+  assert(node.textContent.includes('QQ扫码'));
+  assert.equal(calls,1,'the frozen summary reuses the list payload');
+});
+
+
+test('legacy frozen account is a historical reference, not an order-frozen inventory or actual term', async t => {
+  const {root,node,AdminOrderChainView}=await setup(t);
+  const value={...chainOrder,frozenAccount:{source:'LEGACY_ACCOUNT',haff:{code:'haff',name:'哈夫币',quantity:'97000000',unit:'HAFF_BASE'},materials:[],termDays:'10',termSeconds:null,loginMethodText:'微信扫码'}};
+  globalThis.fetch=async()=>response(chainPage([value]));
+  await act(async()=>root.render(createElement(AdminOrderChainView,chainProps('legacy-frozen'))));
+  await until(()=>node.textContent.includes(value.displayNo));
+  assert.match(node.textContent,/历史账号参考：/);
+  assert.match(node.textContent,/历史账号租期 10 天/);
+  assert.equal(node.textContent.includes('本单冻结：'),false,'legacy account facts are not called the order-frozen inventory');
+  globalThis.fetch=async()=>response({order:value});
+  await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('legacy-frozen-detail'),objectOnly:true,initialOrderId:value.id})));
+  await until(()=>node.textContent.includes('关键费用'));
+  assert.match(node.textContent,/历史账号参考（非本单冻结）/);
+  assert.match(node.textContent,/历史账号租期 10 天/);
+});
+
+test('CHAIN order detail orders identity, frozen parties, prepay/channel, fulfillment, settlement and funds evidence once', async t => {
+  const {root,node,AdminOrderChainView}=await setup(t);
+  const value={...chainOrder,id:'chain-order-detail',displayNo:'CHAIN-DETAIL',source:{origin:'NATIVE'}};
+  const paymentSummary={contractVersion:'admin-order-payment-summary.v1',integration:'CONTROLLED_LOCAL',productionPaymentCapability:false,originalRequest:{id:'req',channelOrderNo:'MERCHANT-1',method:'ALIPAY_NATIVE',amount:{cents:'15908',currency:'CNY'},merchantIdentityId:'m',protocolVersion:'1',keyVersionRef:'k',createdAt:value.createdAt},latestTrustedObservation:null,acceptance:{state:'APPLIED',confirmationId:'c',reasonCode:null},conflicts:null,recovery:null,settlement:'NOT_INTEGRATED',unknowns:null,updatedAt:null};
+  globalThis.fetch=async url=>String(url).includes('readMode=combined')?response({order:value,paymentSummary}):String(url).includes('/finance/')?response({error:{code:'NOT_FOUND'}},404):response({items:[value],page:1,pageSize:20,total:1,contextKey:'c'});
+  await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('chain-order-detail'),objectOnly:true,initialOrderId:value.id})));await until(()=>node.textContent.includes('本单账号和双方'));
+  const text=node.textContent;
+  const headings=[...node.querySelectorAll('main h2')].map(item=>item.textContent);
+  assert(headings.indexOf('当前情况')<headings.indexOf('本单账号和双方'));
+  assert(headings.indexOf('本单账号和双方')<headings.indexOf('关键费用'));
+  assert(headings.indexOf('关键费用')<headings.indexOf('履约与处理记录'));
+  assert(headings.indexOf('履约与处理记录')<headings.indexOf('结算与退款'));
+  assert(headings.indexOf('结算与退款')<headings.indexOf('资金凭证与来源记录'));
+  assert.equal((text.match(/本单账号和双方/g)??[]).length,1,'account/parties are not duplicated in the aside');
+  const toggle=[...node.querySelectorAll('button')].find(button=>button.textContent.includes('查看付款依据'));
+  await act(async()=>toggle.click());await settle();
+  const payment=node.textContent;
+  assert.match(payment,/渠道观察/);assert.match(payment,/本站接纳/);assert.match(payment,/商户订单号/);assert.match(payment,/MERCHANT-1/);
+  assert.match(payment,/本站已接纳/);assert.equal(payment.includes('已到账'),false);
+});
 test('server progress drives opening/ending without inferring them from PAID or a cancelled status', async t => {
   const {root,node,AdminOrderChainView}=await setup(t);
   const base={...chainOrder,id:'progress-order',displayNo:'PROGRESS-ORDER',source:{origin:'NATIVE'},payment:{state:'RECORDED_PAID',recordedAt:null,recordedAmount:null}};
@@ -453,7 +593,9 @@ test('FLOW02 Root F1: cancelled payment remains paid, known unpaid, or unknown',
  for(const [index,state]of ['RECORDED_PAID','RECORDED_UNPAID','UNKNOWN'].entries()){
   current={...order,id:'cancel-'+state,displayNo:'CANCEL-'+state,status:'CANCELLED',source:{origin:'LEGACY',statusLabel:'已取消'},payment:{state,recordedAt:null,recordedAmount:null}};
   await act(async()=>root.render(createElement(AdminOrderChainView,{snapshot:snapshotFor('root-f1-'+state),onOpenPath:()=>{},onQueryChange:()=>{},refreshNonce:index})));await until(()=>node.textContent.includes(current.displayNo));
-  const fee=node.querySelector('.oc-table td.oc-amount small').textContent;
+  const fee=node.querySelector('.oc-table td.oc-amount').textContent;
+  assert.match(fee,/原单金额/,'a cancelled order keeps the original amount label, not the advance label');
+  assert.match(fee,/哈夫租金/);assert.match(fee,/物资预付/);assert.match(fee,/押金/);
   if(state==='RECORDED_PAID')assert.match(fee,/退款待核/);
   else if(state==='RECORDED_UNPAID')assert.match(fee,/未形成支付/);
   else{assert.match(fee,/支付.*待核|支付.*未知/);assert.doesNotMatch(fee,/未形成支付/);}
@@ -469,6 +611,12 @@ test('FLOW02 visual: cancelled compact progress omits inapplicable stages and ke
   const text=node.querySelector('.oc-stages-compact').textContent;
   assert(text.includes('已取消')&&text.includes('支付事实待核'));
   assert(!text.includes('开租不适用')&&!text.includes('结算不适用'));
+  const timeline=node.querySelector('.oc-stages-compact ol[aria-label="订单进度"]');
+  assert.ok(timeline,'compact mode is an icon timeline, not two text lines');
+  assert.deepEqual([...timeline.querySelectorAll('li .oc-stage-name')].map(item=>item.textContent),['创建','支付待核','取消']);
+  assert.equal(timeline.querySelectorAll('li svg').length,3,'each stage keeps its icon');
+  assert.equal(timeline.querySelectorAll('li .oc-stage-line').length,2,'connectors are rendered between stages');
+  assert.ok(timeline.querySelector('li.cancel'),'the cancelled stage is named and not color-only');
 });
 
 test('FLOW02 hover: account and party links preserve Base UI trigger properties on their real buttons', async t => {
@@ -489,8 +637,29 @@ test('FLOW02 visual: progress timestamps use the same display formatter as order
   globalThis.fetch=async()=>response({order:value});
   await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('visual-dates'),objectOnly:true,initialOrderId:value.id})));
   await until(()=>node.textContent.includes('过账时间'));
-  const expected=new Intl.DateTimeFormat('zh-CN',{dateStyle:'medium',timeStyle:'short'}).format(new Date(instant));
+  const expected=new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',dateStyle:'medium',timeStyle:'short'}).format(new Date(instant));
   assert(node.querySelector('.oc-stages').textContent.includes('过账时间 '+expected));
   assert(node.querySelector('.oc-stages').textContent.includes('开租时间 '+expected));
   assert(!node.querySelector('.oc-stages').textContent.includes(instant));
+});
+
+
+test('order user hover receives real row business summary with zero added fetch',async t=>{
+ const {root,node,AdminOrderChainView}=await setup(t);const calls=[];
+ const row={...chainOrder,renterSummary:{name:'当前昵称',image:null,maskedPhone:'138****8000',riskFlag:true,membershipSummary:{state:'ready',growth:{knowledge:'KNOWN',effectiveTier:'BLACK_GOLD'}},creditSummary:{state:'ready',knowledge:'KNOWN',score:0,revision:'1'}}};
+ globalThis.fetch=async(url,init)=>{calls.push({url:String(url),method:init?.method??'GET'});return response(chainPage([row]));};
+ const props={...chainProps('hover-summary'),snapshot:{...snapshotFor('hover-summary'),permissions:['order.read','user.directory.read']}};
+ await act(async()=>root.render(createElement(AdminOrderChainView,props)));await until(()=>node.textContent.includes(row.displayNo));
+ const initial=calls.length,button=node.querySelector('button[aria-label="预览租客 租客"]');assert(button);await act(async()=>button.click());
+ await until(()=>document.querySelector('[aria-label="用户预览：租客"]'));const card=document.querySelector('[aria-label="用户预览：租客"]');
+ assert.match(card.textContent,/黑金（永久）/);assert.match(card.textContent,/信用分：0/);assert.match(card.textContent,/内部高危/);assert.match(card.textContent,/U-RENTER/);assert.match(card.textContent,/当前昵称/);assert.doesNotMatch(card.textContent,/最后登录/);assert.equal(calls.length,initial);
+});
+
+test('order account hover includes frozen quantities term and correctly labelled zero deposit',async t=>{
+ const {root,node,AdminOrderChainView}=await setup(t);const calls=[];
+ const row={...chainOrder,source:{origin:'NATIVE'},frozenAccount:{source:'ORDER_VERSION',haff:{code:'haff',quantity:'9000000',unit:'HAFF_BASE'},materials:[{code:'awm',name:'AWM子弹',quantity:'61',unit:'ROUND'},{code:'armor',name:'六级甲',quantity:'0',unit:'PIECE'}],termDays:null,termSeconds:'172800',loginMethodText:'微信扫码'}};
+ globalThis.fetch=async url=>{calls.push(String(url));return response(chainPage([row]));};const props={...chainProps('hover-account'),snapshot:{...snapshotFor('hover-account'),permissions:['order.read','user.directory.read','supply.rental_account.read']}};
+ await act(async()=>root.render(createElement(AdminOrderChainView,props)));await until(()=>node.textContent.includes(row.displayNo));const initial=calls.length;
+ const button=node.querySelector('button[aria-label^="预览账号"]');assert(button);await act(async()=>button.click());await until(()=>document.querySelector('[aria-label="账号预览：A-001"]'));const card=document.querySelector('[aria-label="账号预览：A-001"]');
+ assert.match(card.textContent,/AWM子弹 61 发/);assert.match(card.textContent,/六级甲 0 件/);assert.match(card.textContent,/2\s*天/);assert.match(card.textContent,/微信扫码/);assert.match(card.textContent,/本单租客押金/);assert.match(card.textContent,/¥0\.00/);assert.match(card.textContent,/本单冻结版本/);assert.equal(calls.length,initial);
 });

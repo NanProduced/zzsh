@@ -3,6 +3,8 @@ import { ChevronDown, ChevronRight, CircleAlert, Copy, Eye, MoreHorizontal, X } 
 import { adminRequest, friendlyError } from "../../api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Field } from "@/components/ui/field";
+import { ListToolbarEnumSelect } from "@/components/admin-list";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { InlineStatus } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -13,7 +15,7 @@ import { DropdownMenu, DropdownMenuGroup, DropdownMenuContent, DropdownMenuItem,
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { SupplySelect } from "@/components/supply/supply-select";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
-import { newOrdersStatus, supplyObjectLabel, attributeFacts, historicalReadSummary, historicalResourceText, inventoryRows, formatAmount, formatFundingCents, quantityText, quoteLineFacts, type SupplyQueryKind, type SupplyWorkDetail, type SupplyWorkItem } from "../supply-review/model";
+import { newOrdersStatus, supplyObjectLabel, attributeFacts, feeSummaryRows, historicalReadSummary, historicalResourceText, inventoryRows, formatAmount, formatFundingCents, formatTermDays, publicBasisVersion, quantityText, quoteLineFacts, type SupplyQueryKind, type SupplyWorkDetail, type SupplyWorkItem } from "../supply-review/model";
 import {
   fullShanghaiTime,
   KIND_LABELS,
@@ -22,6 +24,15 @@ import {
   groupConditions,
   kindHint,
   newOrdersReasonText,
+  rowAccountTitle,
+  rowBaseFeeRows,
+  rowCoreAssetsText,
+  haffBaseFromM,
+  haffMFromBase,
+  depositCentsFromYuan,
+  depositYuanFromCents,
+  rowDisplaySourceText,
+  rowRentalTerms,
   parseSavedViews,
   primaryReason,
   savedKey,
@@ -49,8 +60,69 @@ export function KindHint({ q, kind, onKind }: { q: string; kind: SupplyQueryKind
   if (!hint) return null;
   return <p className="mt-1 text-xs text-amber-700 dark:text-amber-400" role="status">{hint}{s && s !== kind && <Button type="button" variant="link" size="xs" className="ml-1" onClick={() => onKind(s)}>改按{KIND_LABELS[s]}</Button>}</p>;
 }
-export function MoreFilters() {
-  return null;
+type RangeProps = {
+  label: string;
+  min: string;
+  max: string;
+  unit: string;
+  parse: (text: string) => { value?: string; error?: string };
+  display: (value: string) => string;
+  onChange: (min: string, max: string) => void;
+};
+/** Exact numeric range; empty is unset, zero is a real bound, min>max is its own error. */
+function ExactRangeFilter({ label, min, max, unit, parse, display, onChange }: RangeProps) {
+  const [open, setOpen] = useState(false);
+  const [draftMin, setDraftMin] = useState(min ? display(min) : "");
+  const [draftMax, setDraftMax] = useState(max ? display(max) : "");
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    setDraftMin(min ? display(min) : "");
+    setDraftMax(max ? display(max) : "");
+    setError(null);
+  }, [open, min, max]);
+  const text = min && max ? `${display(min)}–${display(max)}${unit}` : min ? `≥${display(min)}${unit}` : max ? `≤${display(max)}${unit}` : "全部";
+  const apply = () => {
+    const low = parse(draftMin), high = parse(draftMax);
+    if (low.error || high.error) { setError(low.error ?? high.error!); return; }
+    if (low.value && high.value && BigInt(low.value) > BigInt(high.value)) { setError("下限不能大于上限"); return; }
+    setError(null);
+    onChange(low.value ?? "", high.value ?? "");
+    setOpen(false);
+  };
+  return <Field label={label} composite className="ud-field">
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger render={<Button type="button" variant="outline" className="ud-credit-trigger" aria-label={label} />}><span className="truncate">{text}</span><ChevronDown size={14} className="ml-auto shrink-0 opacity-50" aria-hidden /></PopoverTrigger>
+      <PopoverContent className="ud-credit-popover" align="start">
+        <div className="space-y-3">
+          <p className="text-xs text-muted-foreground">按精确数值筛选；留空表示不限制。</p>
+          <div className="flex items-center gap-2">
+            <Input aria-label={label + "下限"} inputMode="decimal" autoComplete="off" placeholder="最低" value={draftMin} onChange={e => { setDraftMin(e.target.value); setError(null); }} className="h-8 text-xs tabular-nums" />
+            <span className="text-muted-foreground" aria-hidden>–</span>
+            <Input aria-label={label + "上限"} inputMode="decimal" autoComplete="off" placeholder="最高" value={draftMax} onChange={e => { setDraftMax(e.target.value); setError(null); }} className="h-8 text-xs tabular-nums" />
+            <span className="shrink-0 text-xs text-muted-foreground">{unit}</span>
+          </div>
+          {error ? <p className="text-[11px] text-destructive" role="alert">{error}</p> : null}
+          <div className="flex items-center justify-between border-t border-border pt-2">
+            <Button type="button" variant="ghost" size="xs" className="h-7 text-xs" onClick={() => { setDraftMin(""); setDraftMax(""); setError(null); onChange("", ""); setOpen(false); }}>清空</Button>
+            <Button type="button" size="xs" className="h-7 text-xs" onClick={apply}>确定</Button>
+          </div>
+        </div>
+      </PopoverContent>
+    </Popover>
+  </Field>;
+}
+
+export function MoreFilters({ values, loginOptions, onChange }: {
+  values: { haffMin: string; haffMax: string; depositMin: string; depositMax: string; loginMethod: string };
+  loginOptions: Array<{ code: string; name: string }>;
+  onChange: (patch: Partial<typeof values>) => void;
+}) {
+  return <>
+    <ListToolbarEnumSelect label="登录方式" value={values.loginMethod} onChange={loginMethod => onChange({ loginMethod })} options={loginOptions.map(option => [option.code, option.name] as [string, string])} />
+    <ExactRangeFilter label="哈夫币" unit="M" min={values.haffMin} max={values.haffMax} parse={haffBaseFromM} display={haffMFromBase} onChange={(haffMin, haffMax) => onChange({ haffMin, haffMax })} />
+    <ExactRangeFilter label="基础押金" unit="元" min={values.depositMin} max={values.depositMax} parse={depositCentsFromYuan} display={depositYuanFromCents} onChange={(depositMin, depositMax) => onChange({ depositMin, depositMax })} />
+  </>;
 }
 
 export function StatusBadge({ facts }: { facts: SupplyWorkItem["facts"] }) {
@@ -68,14 +140,28 @@ export function TimeText({ iso, label = "更新时间" }: { iso: string; label?:
 }
 /** 号主入口：只用当前行的受权投影；ownerLink 未 READY 时不可点并说明原因。 */
 export function IdLine({ row, onOpenOwner }: { row: SupplyWorkItem; onOpenOwner?: (row: SupplyWorkItem) => void }) {
-  const label = supplyObjectLabel(row);
   const canOpen = row.ownerLink?.state === "READY" && Boolean(onOpenOwner);
   return (
     <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-      <span>编号：{row.displayNo ?? (label.startsWith("旧来源号") ? "未登记（" + label + "）" : "编号待核")}</span>
+      <span>编号：{row.displayNo ?? "编号未分配"}</span>
       <span aria-hidden="true">|</span>
       <span>号主：</span>
       <OwnerHoverCard ownerName={row.ownerName} ownerId={row.ownerId} summary={row.ownerSummary ?? null} canOpen={canOpen} onOpenOwner={canOpen ? () => onOpenOwner?.(row) : undefined} />
+    </div>
+  );
+}
+
+/** 账号固定三层：中性标题、新平台编号（无则明确未分配）、号主入口；旧来源只在详情溯源。 */
+export function AccountIdentity({ row, onOpenOwner }: { row: SupplyWorkItem; onOpenOwner?: (row: SupplyWorkItem) => void }) {
+  const canOpen = row.ownerLink?.state === "READY" && Boolean(onOpenOwner), legacy = row.facts.sources.length > 0 || Boolean(row.facts.historicalRead);
+  return (
+    <div className="space-y-0.5 text-xs text-muted-foreground">
+      <div className="break-words text-sm font-semibold text-foreground">{rowAccountTitle(row)} <span className="ml-1 rounded border px-1 text-[10px] font-normal text-muted-foreground">{rowDisplaySourceText(row)}</span></div>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span>编号：{row.displayNo ?? "编号未分配"}</span>
+        {legacy ? <Tooltip><TooltipTrigger render={<span tabIndex={0} className="rounded border px-1 text-[10px] text-muted-foreground">旧平台</span>}/><TooltipContent>旧平台迁入账号；旧号、来源与摘要保留在详情溯源区</TooltipContent></Tooltip> : null}
+      </div>
+      <div>号主：<OwnerHoverCard ownerName={row.ownerName} ownerId={row.ownerId} summary={row.ownerSummary ?? null} canOpen={canOpen} onOpenOwner={canOpen ? () => onOpenOwner?.(row) : undefined} /></div>
     </div>
   );
 }
@@ -153,49 +239,69 @@ export function useSavedViews(adminId: string) {
 }
 
 export function AccountCards({ items, onView }: { items: SupplyWorkItem[]; onView: (row: SupplyWorkItem, trigger?: HTMLElement) => void }) {
-  return <div className="grid gap-2">{items.map(row => { const rule = row.facts.reasons.includes("CONFIRMATION_OR_MEDIA_REQUIRED") || row.facts.reasons.includes("RULE_CHANGED");
-    const quote = rowQuoteText(row);
-    return <Card size="sm" key={row.id} id={"supply-card-" + row.id} role="button" tabIndex={0} aria-label={"快速查看 " + supplyObjectLabel(row)} onClick={e => onView(row, e.currentTarget)} onKeyDown={e => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onView(row, e.currentTarget); } }} className="cursor-pointer gap-0 p-4 outline-none transition-colors hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/50"><div className="flex items-start justify-between gap-2"><div className="min-w-0"><div className="break-words font-semibold">{row.title ?? "资料未提供"}</div><IdLine row={row}/></div><ChevronRight className="mt-1 size-4 shrink-0 text-muted-foreground" aria-hidden="true"/></div>
-      {row.facts.historicalRead ? <p className="mt-1 text-xs text-muted-foreground">{historicalReadSummary(row.facts.historicalRead)}</p> : null}
-      {row.facts.historicalRead ? <div className="mt-2 space-y-0.5 text-xs tabular-nums"><p>{rowHaffText(row)} · 押金 {rowDepositText(row)}</p><p>{quote.total}</p><p className="text-muted-foreground">{quote.note}</p></div> : null}
+  return <div className="grid gap-2">{items.map(row => { const rule = row.facts.reasons.includes("CONFIRMATION_OR_MEDIA_REQUIRED") || row.facts.reasons.includes("RULE_CHANGED"), terms = rowRentalTerms(row), fees = rowBaseFeeRows(row);
+    return <Card size="sm" key={row.id} id={"supply-card-" + row.id} role="button" tabIndex={0} aria-label={"快速查看 " + supplyObjectLabel(row)} onClick={e => onView(row, e.currentTarget)} onKeyDown={e => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onView(row, e.currentTarget); } }} className="cursor-pointer gap-0 p-4 outline-none transition-colors hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/50"><div className="flex items-start justify-between gap-2"><div className="min-w-0"><AccountIdentity row={row}/></div><ChevronRight className="mt-1 size-4 shrink-0 text-muted-foreground" aria-hidden="true"/></div>
+      <div className="mt-2 space-y-0.5 text-xs tabular-nums">
+        <p>{rowCoreAssetsText(row)}</p>
+        <p>{terms.term} · {terms.daily} · 登录 {terms.login} · 包赔 {terms.payout}</p>
+        <p>哈夫币租金 {fees.haff} · 物资费 {fees.materials} · 租客基础押金 {fees.deposit} · 资源费合计 {fees.total}</p>
+      </div>
       <div className="mt-2 flex items-start gap-2"><StatusBadge facts={row.facts}/><ReasonCell facts={row.facts} onMore={() => onView(row, document.getElementById("supply-card-" + row.id) ?? undefined)}/></div>
       {rule && <p className="mt-2 text-xs text-muted-foreground">规则确认或展示图片仍需核对，详情中逐项查看。</p>}
-      <div className="mt-1 text-xs text-muted-foreground">{versionText(row.sequence)} · 资料排序 <TimeText iso={row.sortAt} label="资料排序时间"/></div></Card>; })}</div>;
+      <div className="mt-1 text-xs text-muted-foreground">{rowDisplaySourceText(row)} · 更新 {row.accountUpdatedAt ? <TimeText iso={row.accountUpdatedAt} label="账号更新时间"/> : "未提供"}</div></Card>; })}</div>;
 }
 
 type QuickProps = { row: SupplyWorkItem; canRead: boolean; onClose: () => void; onOpenFull: (context: string) => void };
 /** 快速核对：身份/状态、基本属性与使用条件、全部申报资源、同版基础费用；历史折叠，完整处置在对象页。 */
 export function QuickView({ row, canRead, onClose, onOpenFull }: QuickProps) {
-  const [detail, setDetail] = useState<SupplyWorkDetail>(), [error, setError] = useState<string>();
-  useEffect(() => { if (!canRead) { onClose(); return; } const c = new AbortController(); setDetail(undefined); setError(undefined);
+  const [detail, setDetail] = useState<SupplyWorkDetail>(), [error, setError] = useState<string>(), [showDraft, setShowDraft] = useState(false);
+  useEffect(() => { if (!canRead) { onClose(); return; } const c = new AbortController(); setDetail(undefined); setError(undefined); setShowDraft(false);
     adminRequest<SupplyWorkDetail>("/supply/listing-reviews/" + encodeURIComponent(row.id) + "?queryVersion=3", undefined, "GET", {}, c.signal).then(d => { if (!c.signal.aborted) setDetail(d); }).catch(e => { if (!c.signal.aborted) setError(friendlyError(e)); });
     return () => c.abort(); }, [row.id, canRead]);
   if (!canRead) return null;
-  const facts = detail?.supervision.facts ?? row.facts, g = groupConditions(facts), v = detail?.version, viewed = alignedQuickRow(row, detail);
+  const facts = detail?.supervision.facts ?? row.facts, g = groupConditions(facts);
+  const publicBasis = facts.publicBasis ?? null, publicDefault = !showDraft && publicBasis && detail?.version && publicBasis.id !== detail.version.id ? publicBasis : null;
+  const v = publicDefault ? publicBasisVersion(publicDefault) : detail?.version, viewed = publicDefault ? row : alignedQuickRow(row, detail);
   const historical = detail?.supervision.facts.historicalRead ?? row.facts.historicalRead;
   const attrs = v ? attributeFacts(v) : [], inventory = v ? inventoryRows(v, null) : [], lines = v ? quoteLineFacts(v) : [];
   const verdict = facts.newOrders === null ? "新单资格待核" : facts.newOrders ? "可接新单" : "不可接新单";
-  const guarantee = rowGuaranteeCondensed(row);
   const releaseId = v?.releaseId ?? null;
   const ratio = v?.quote?.baseRenterHaffRatioWanPerYuan ?? null;
+  const feeSource = v?.feeSummary ?? (publicDefault ? row.summary?.feeSummary : null);
+  let fees = feeSource ? feeSummaryRows(feeSource) : feeSummaryRows(null);
+  if (!feeSource?.resourceTotal && v?.quote?.resourceTotal?.amount) fees = { ...fees, total: `¥${formatAmount(v.quote.resourceTotal.amount)}` };
+  const termName = publicDefault ? publicDefault.termOption?.displayName ?? null : v?.termOption?.displayName ?? null;
+  const daily = publicDefault ? publicDefault.termOption?.dailyConsumption?.quantity ?? null : v?.termOption?.dailyConsumption?.quantity ?? null;
+  const termSeconds = publicDefault ? publicDefault.quote?.termSeconds ?? null : v?.quote?.termSeconds ?? null;
   const declared = v?.declaration.attributes ?? {};
   const deposit = declared.owner_deposit_declaration as Record<string, unknown> | undefined;
-  const depositText = v && deposit?.schema === "owner-deposit-declaration-v1" && typeof deposit.amountCents === "string" && /^(0|[1-9]\d*)$/.test(deposit.amountCents)
-    ? formatFundingCents(deposit.amountCents) : rowDepositText(viewed);
+  const depositText = publicDefault?.baseDeposit ? formatFundingCents(publicDefault.baseDeposit.amountCents)
+    : v && deposit?.schema === "owner-deposit-declaration-v1" && typeof deposit.amountCents === "string" && /^(0|[1-9]\d*)$/.test(deposit.amountCents)
+      ? formatFundingCents(deposit.amountCents) : rowDepositText(viewed);
   const payout = declared.full_payout_declaration as Record<string, unknown> | undefined;
   const payoutLabel = v ? (payout?.selected === true ? "已选" : payout?.selected === false ? "未选" : "未申报") : rowFullPayout(viewed).label;
   const haffLine = v ? v.declaration.inventory.find(item => item.itemId === "haff" || v.presentation.items?.find(entry => entry.id === item.itemId)?.unit === "HAFF_BASE") : null;
   const haffText = haffLine ? quantityText(haffLine.quantity) : rowHaffText(viewed);
+  const titleConfig = v ? {
+    safeBox: v.attributeDisplay?.safeBox?.displayName ?? (typeof v.declaration.attributes.safe_box_code === "string" ? `未确认（代码 ${v.declaration.attributes.safe_box_code}）` : null),
+    grading: v.attributeDisplay?.grading?.displayName ?? (typeof v.declaration.attributes.grading_code === "string" ? `未确认（代码 ${v.declaration.attributes.grading_code}）` : null),
+    gradingDivision: Object.hasOwn(v.declaration.attributes, "grading_division") && v.declaration.attributes.grading_division !== null && v.declaration.attributes.grading_division !== "" ? String(v.declaration.attributes.grading_division) : null,
+    characterLevel: v.declaration.attributes.character_level === null || v.declaration.attributes.character_level === undefined ? null : String(v.declaration.attributes.character_level),
+  } : row.summary?.config ?? null;
+  const quickTitle = rowAccountTitle({
+    ...row,
+    summary: v ? { ...(row.summary ?? {}), haff: haffLine ? { itemId: haffLine.itemId, quantity: haffLine.quantity, unit: "HAFF_BASE" } : null, config: titleConfig } : row.summary,
+  } as SupplyWorkItem);
   return <Dialog open onOpenChange={open => { if (!open) onClose(); }}>
   <DialogContent showCloseButton={false} aria-labelledby="qv-title" data-quick-view="" className="max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] gap-0 overflow-hidden p-0 sm:max-w-3xl">
     <header className="border-b px-5 pb-3 pt-4">
-      <DialogTitle id="qv-title" className="text-lg font-semibold">{row.title ?? "资料未提供"}</DialogTitle>
+      <DialogTitle id="qv-title" className="text-lg font-semibold">{quickTitle}</DialogTitle>
       <DialogDescription className="sr-only">账号基本信息、申报资源与同版基础费用速览</DialogDescription>
       <div className="mt-1 flex flex-wrap items-center gap-2">
         <IdLine row={row}/>
         <span className="text-xs text-muted-foreground">·</span>
         <StatusBadge facts={facts}/>
-        <span className="text-xs text-muted-foreground">· {verdict}{g.blocked.length ? ` · ${g.blocked.length} 项已确认阻塞` : ""}{g.pending.length ? `、${g.pending.length} 项待核` : ""}</span>
+        <span className="text-xs text-muted-foreground">· {publicDefault ? "对外版" : showDraft && publicBasis ? "当前草稿" : facts.publicVisible === false ? "当前草稿" : "当前资料"} · {verdict}{g.blocked.length ? ` · ${g.blocked.length} 项已确认阻塞` : ""}{g.pending.length ? `、${g.pending.length} 项待核` : ""}</span>
       </div>
     </header>
     <div className="max-h-[calc(100dvh-14rem)] overflow-y-auto px-5 py-4">
@@ -208,7 +314,7 @@ export function QuickView({ row, canRead, onClose, onOpenFull }: QuickProps) {
       </section>
 
       <section className="mt-4 border-t pt-3">
-        <h3 className="mb-2 text-sm font-semibold">哈夫币与已申报物资 <span className="ml-1 text-xs font-normal text-muted-foreground">{v ? `第 ${v.sequence} 版全部申报` : "列表摘要"}</span></h3>
+        <h3 className="mb-2 text-sm font-semibold">哈夫币与已申报物资 <span className="ml-1 text-xs font-normal text-muted-foreground">{v ? (v.sequence ? `第 ${v.sequence} 版全部申报` : "对外版全部申报") : "列表摘要"}</span></h3>
         <p className="mb-2 text-sm">哈夫币：<span className="font-mono font-semibold tabular-nums text-amber-900 dark:text-amber-300">{haffText}</span></p>
         {v ? (inventory.length ? <Table className="text-sm"><TableHeader><TableRow><TableHead>物品</TableHead><TableHead className="text-right">申报数量</TableHead></TableRow></TableHeader><TableBody>{inventory.map(item => <TableRow key={item.itemId}><TableCell className="whitespace-normal">{item.name}</TableCell><TableCell className="text-right tabular-nums">{item.current} {item.unit}</TableCell></TableRow>)}</TableBody></Table> : <p className="text-sm text-muted-foreground">本版未申报物资；不代表没有该物品。</p>) : <p className="text-sm text-muted-foreground">{error ? "详情未读到，完整物资表暂不可核对。" : "正在读取完整物资表…"}</p>}
       </section>
@@ -216,13 +322,18 @@ export function QuickView({ row, canRead, onClose, onOpenFull }: QuickProps) {
       <section className="mt-4 border-t pt-3">
         <h3 className="mb-2 text-sm font-semibold">同版基础费用</h3>
         <dl className="grid gap-2 text-sm sm:grid-cols-2">
-          <div><dt className="text-xs text-muted-foreground">资源费（资料版冻结参考）</dt><dd className="tabular-nums">{v?.quote ? `¥${formatAmount(v.quote.resourceTotal.amount)}` : rowQuoteText(viewed).total}</dd></div>
+          <div><dt className="text-xs text-muted-foreground">哈夫币租金</dt><dd className="tabular-nums">{fees.haff}</dd></div>
+          <div><dt className="text-xs text-muted-foreground">物资费</dt><dd className="tabular-nums">{fees.materials}</dd></div>
+          <div><dt className="text-xs text-muted-foreground">资源费合计（资料版冻结参考）</dt><dd className="tabular-nums">{fees.total}</dd></div>
           <div><dt className="text-xs text-muted-foreground">租客基础押金（号主申报）</dt><dd className="tabular-nums">{depositText}</dd></div>
+          <div><dt className="text-xs text-muted-foreground">租期规则</dt><dd>{termName ?? "未提供"}</dd></div>
+          <div><dt className="text-xs text-muted-foreground">每日消耗</dt><dd className="tabular-nums">{daily ? quantityText(daily) : "未提供"}</dd></div>
+          <div><dt className="text-xs text-muted-foreground">资料租期（冻结原值）</dt><dd>{termSeconds ? formatTermDays(termSeconds) : "未提供"}</dd></div>
           <div><dt className="text-xs text-muted-foreground">全额包赔</dt><dd>{payoutLabel}</dd></div>
-          {guarantee ? <div><dt className="text-xs text-muted-foreground">号主保证金</dt><dd>{guarantee}</dd></div> : null}
           <div><dt className="text-xs text-muted-foreground">规则版本</dt><dd className="break-all">{releaseId ?? "未提供"}</dd></div>
           <div><dt className="text-xs text-muted-foreground">基础客价比例</dt><dd>{ratio ? `${ratio} 万哈夫币/元` : "未提供"}</dd></div>
         </dl>
+        <p className="mt-2 break-all text-xs text-muted-foreground">{fees.note} · 资料版本 {v?.id ?? "未提供"} · 摘要 {v?.contentHash ?? "未提供"}</p>
         {lines.length ? <div className="mt-2 overflow-x-auto"><Table className="text-xs"><TableHeader><TableRow><TableHead>参考行</TableHead><TableHead>计价基数</TableHead><TableHead>参考单价</TableHead><TableHead className="text-right">原行金额</TableHead></TableRow></TableHeader><TableBody>{lines.map(line => <TableRow key={line.itemId}><TableCell className="whitespace-normal">{line.name} · {line.quantity}</TableCell><TableCell className="tabular-nums">{line.unitQuantity ?? "未提供"}</TableCell><TableCell className="tabular-nums">{line.buyerUnitAmount ? `¥${formatAmount(line.buyerUnitAmount)}` : "未提供"}</TableCell><TableCell className="text-right tabular-nums">{line.amount ? `¥${formatAmount(line.amount)}` : "未提供"}</TableCell></TableRow>)}</TableBody></Table></div> : null}
         <p className="mt-2 text-xs text-muted-foreground">资料版本保存值，非按当前规则重新试算，也不是下单应付；租客档位口径未提供，会员个性化金额不在列表推断。</p>
       </section>
@@ -243,7 +354,8 @@ export function QuickView({ row, canRead, onClose, onOpenFull }: QuickProps) {
         </CollapsibleContent>
       </Collapsible> : null}
     </div>
-    <footer className="flex items-center justify-end gap-2 border-t bg-background px-5 py-3">
+    <footer className="flex flex-wrap items-center justify-end gap-2 border-t bg-background px-5 py-3">
+      {publicDefault ? <Button size="lg" variant="outline" onClick={() => setShowDraft(true)}>查看当前草稿</Button> : showDraft && publicBasis ? <Button size="lg" variant="outline" onClick={() => setShowDraft(false)}>回到对外版</Button> : null}
       <Button size="lg" variant="outline" onClick={onClose}>关闭</Button>
       <Button size="lg" onClick={() => onOpenFull("situation")}>查看完整档案</Button>
     </footer>

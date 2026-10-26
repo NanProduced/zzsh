@@ -6,7 +6,7 @@ import { getUserLegacyOrder, listUserLegacyOrders, parseLegacyUserOrderQuery } f
 import type { OrderImSdkRouteBindings } from "../config/config";
 import { readOrderTeamAccess, listJoinedOrderTeams } from "../im/order-team-access";
 import { parseRfc3339Timestamp } from "../content/content";
-import { queryAdminReadOrders, getAdminReadOrder, type OrderReadFilters } from "./admin-order-read";
+import { queryAdminReadOrders, getAdminReadOrder, parseOrderOrigin, type OrderReadFilters } from "./admin-order-read";
 
 import { ADMIN_PERMISSION, requirePermission } from "../auth/admin-authorization";
 import { assertGameScopeUsable, gameScopeSignature, readAdminGameScope } from "../auth/admin-scope";
@@ -84,6 +84,17 @@ function parseLimit(raw: string | null): number {
   return limit;
 }
 
+const ORDER_PAGE_QUERY_KEYS = ["page","pageSize","status","origin","createdFrom","createdTo","qKind","qValue","restoreKey"] as const;
+/** The numbered list is the admin read contract: every filter is parsed before the count/page query. */
+export function parseAdminOrderPageQuery(query: URLSearchParams): OrderReadFilters {
+  for (const key of query.keys()) if (!ORDER_PAGE_QUERY_KEYS.includes(key as typeof ORDER_PAGE_QUERY_KEYS[number]) || query.getAll(key).length !== 1) throw invalid("Unsupported order page query", key);
+  const positive=(name:string,fallback:number,max:number)=>{const text=query.get(name);if(text===null)return fallback;if(!/^[1-9]\d{0,6}$/.test(text)||Number(text)>max)throw invalid("Page argument is invalid",name);return Number(text);};
+  const qKind=query.get("qKind")??"order";
+  if(!["order","account","party","renter","owner"].includes(qKind))throw invalid("Lookup kind is invalid");
+  const qValue=query.get("qValue");if(qValue!==null&&(!qValue.trim()||qValue.length>255||/[\x00-\x1f\x7f]/.test(qValue)))throw invalid("Lookup value is invalid");
+  const restoreKey=query.get("restoreKey");if(restoreKey!==null&&!/^[a-f0-9]{64}$/.test(restoreKey))throw invalid("Restore key is invalid");
+  return {page:positive("page",1,1000000),pageSize:positive("pageSize",20,100),qKind:qKind as OrderReadFilters["qKind"],...(qValue!==null?{qValue:qValue.trim()}:{}),...parseCreatedRange(query),...(query.has("status")?{status:parseStatus(query.get("status"))}:{}),...(query.has("origin")?{origin:parseOrderOrigin(query)}:{}) ,...(restoreKey?{restoreKey}:{})};
+}
 function parseCreatedRange(query: URLSearchParams): { createdFrom?: string; createdTo?: string } {
   const fromRaw = query.get("createdFrom");
   const toRaw = query.get("createdTo");
@@ -293,13 +304,7 @@ export async function handleOrderAdminRoute(
       };
       if (path === "/") {
         if (query.has("page")) {
-          const positive=(name:string,fallback:number,max:number)=>{const text=query.get(name);if(text===null)return fallback;if(!/^[1-9]\d{0,6}$/.test(text)||Number(text)>max)throw invalid("Page argument is invalid",name);return Number(text);};
-          const qKind=query.get("qKind")??"order";
-          if(!["order","account","party","renter","owner"].includes(qKind))throw invalid("Lookup kind is invalid");
-          const qValue=query.get("qValue");if(qValue!==null&&(!qValue.trim()||qValue.length>255||/[\x00-\x1f\x7f]/.test(qValue)))throw invalid("Lookup value is invalid");
-          const restoreKey=query.get("restoreKey");if(restoreKey!==null&&!/^[a-f0-9]{64}$/.test(restoreKey))throw invalid("Restore key is invalid");
-          const filter:OrderReadFilters={page:positive("page",1,1000000),pageSize:positive("pageSize",20,100),qKind:qKind as OrderReadFilters["qKind"],...(qValue!==null?{qValue:qValue.trim()}:{}),...parseCreatedRange(query),...(query.has("status")?{status:parseStatus(query.get("status"))}:{}),...(restoreKey?{restoreKey}:{})};
-          sendJson(response,200,await queryAdminReadOrders(client,admin,filter),requestId);return;
+          sendJson(response,200,await queryAdminReadOrders(client,admin,parseAdminOrderPageQuery(query)),requestId);return;
         }
         const status = parseStatus(query.get("status"));
         const accountIdRaw = query.get("accountId");

@@ -90,7 +90,14 @@ const until = async (predicate, detail = "") => {
 };
 const buttonNamed = (node, name) => [...node.querySelectorAll("button")].find((button) => button.textContent.trim() === name);
 const buttonLabeled = (node, label) => [...node.querySelectorAll("button")].find((button) => button.getAttribute("aria-label") === label);
-const selectNamed = (node, label) => [...node.querySelectorAll("select")].find((select) => select.getAttribute("aria-label") === label);
+const selectNamed = (node, label) => node.querySelector(`[aria-label="${label}"]`);
+const chooseOption = async (browser, trigger, label) => {
+  await act(async () => trigger.click());
+  await until(() => browser.document.querySelector('[role="option"]'));
+  const option = [...browser.document.querySelectorAll('[role="option"]')].find((item) => item.textContent.trim() === label);
+  assert.ok(option, `missing option ${label}`);
+  await act(async () => option.click());
+};
 
 test("订单列表把状态/时间/页码写入地址栏，查找线索不落 URL，刷新按地址栏恢复", async (t) => {
   const { browser, root, node, AdminOrderChainView } = await setup(t);
@@ -124,15 +131,18 @@ test("订单列表把状态/时间/页码写入地址栏，查找线索不落 UR
 
   // 状态筛选 → 写入 URL 并随请求发出
   const statusSelect = selectNamed(node, "主状态");
-  await act(async () => {
-    const setValue = Object.getOwnPropertyDescriptor(browser.HTMLSelectElement.prototype, "value").set;
-    setValue.call(statusSelect, "PAID");
-    statusSelect.dispatchEvent(new browser.Event("change", { bubbles: true }));
-  });
+  await chooseOption(browser, statusSelect, "已支付");
   await act(async () => buttonNamed(node, "查询").click());
   await until(() => queries.at(-1)?.status === "PAID");
   assert.deepEqual(queries.at(-1), { status: "PAID" }, "状态筛选写入地址栏");
   await until(() => urls.at(-1).includes("status=PAID"));
+
+  // 来源筛选 → 写入 URL、随请求发出并在翻页时保留
+  const originSelect = selectNamed(node, "来源");
+  await chooseOption(browser, originSelect, "旧平台订单");
+  await act(async () => buttonNamed(node, "查询").click());
+  await until(() => queries.at(-1)?.origin === "LEGACY" && urls.at(-1).includes("origin=LEGACY"));
+  assert.deepEqual(queries.at(-1), { status: "PAID", origin: "LEGACY" }, "来源筛选写入地址栏");
 
   // 查找线索 → 不写入 URL
   const clue = [...node.querySelectorAll("input")].find((input) => input.getAttribute("aria-label") === "查找线索");
@@ -145,11 +155,13 @@ test("订单列表把状态/时间/页码写入地址栏，查找线索不落 UR
   await until(() => urls.at(-1).includes("qValue="));
   assert.equal(queries.at(-1).qValue, undefined, "查找线索不写入地址栏");
   assert.equal(queries.at(-1).status, "PAID", "线索查询保留已选状态");
+  assert.equal(queries.at(-1).origin, "LEGACY", "线索查询保留已选来源");
 
-  // 刷新/重开：按地址栏恢复状态，线索需重输且如实提示
-  await mount({ status: "CANCELLED" });
+  // 刷新/重开：按地址栏恢复状态、来源，线索需重输且如实提示
+  await mount({ status: "CANCELLED", origin: "LEGACY" });
   await until(() => node.textContent.includes("查找线索需重新输入"));
-  assert.equal(selectNamed(node, "主状态").value, "CANCELLED", "按地址栏恢复状态筛选");
+  assert.match(selectNamed(node, "主状态").textContent, /已取消/, "按地址栏恢复状态筛选");
+  assert.match(selectNamed(node, "来源").textContent, /旧平台订单/, "按地址栏恢复来源筛选");
   assert.equal(clue.value, "", "查找线索不按地址栏恢复");
 
   // 页码写入地址栏（分页按钮以 aria-label 标识）
@@ -157,4 +169,24 @@ test("订单列表把状态/时间/页码写入地址栏，查找线索不落 UR
   await act(async () => nextButton?.click());
   await until(() => queries.at(-1)?.page === "2", `nextExists=${Boolean(nextButton)} lastQuery=${JSON.stringify(queries.at(-1))}`);
   assert.equal(queries.at(-1).status, "CANCELLED", "翻页保留筛选");
+  assert.equal(queries.at(-1).origin, "LEGACY", "翻页保留来源筛选");
+});
+
+test("订单页默认20条，旧合法 size=3 仍按地址栏恢复", async (t) => {
+  const { root, node, AdminOrderChainView } = await setup(t);
+  const urls = [];
+  globalThis.fetch = async (url) => {
+    const value = String(url);
+    if (value.includes("/orders?")) { urls.push(value); return response(page(undefined, { total: 45 })); }
+    return response({ order });
+  };
+  const mount = async (initialQuery) => act(async () => {
+    root.render(createElement(AdminOrderChainView, { snapshot, objectOnly: false, initialQuery, onOpenPath: () => undefined, onQueryChange: () => {}, refreshNonce: 0 }));
+  });
+  await mount(undefined);
+  await until(() => node.textContent.includes(order.displayNo));
+  assert.equal(new URL(urls.at(-1), "http://localhost").searchParams.get("pageSize"), "20");
+  await mount({ size: "3" });
+  await until(() => new URL(urls.at(-1), "http://localhost").searchParams.get("pageSize") === "3");
+  assert.equal(new URL(urls.at(-1), "http://localhost").searchParams.get("page"), "1");
 });

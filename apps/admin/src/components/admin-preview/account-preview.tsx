@@ -13,6 +13,10 @@ export interface AccountPreviewProps {
   materialsText?: string | null;
   termText?: string | null;
   loginMethodText?: string | null;
+  safeBoxText?: string | null;
+  rankText?: string | null;
+  depositText?: string | null;
+  depositLabel?: string;
   sourceText?: string | null;
   facts?: {
     ownerPaused?: boolean;
@@ -40,6 +44,10 @@ export function AccountPreviewCard({
   materialsText,
   termText,
   loginMethodText,
+  safeBoxText,
+  rankText,
+  depositText,
+  depositLabel = '租客基础押金',
   sourceText,
   facts,
   canOpen,
@@ -48,28 +56,28 @@ export function AccountPreviewCard({
   deniedReason = '无查看权限',
 }: AccountPreviewProps) {
   const numberText = displayNo?.trim() || '账号编号待核';
+  const provenance = sourceText?.trim();
+  const showProvenance = provenance && !['新平台订单', '旧平台订单'].includes(provenance);
+  const conditions = [['安全箱', safeBoxText], ['段位', rankText], ['租期', termText], ['登录', loginMethodText]];
 
   const header = (
     <>
       <div className="size-9 rounded-lg border border-border bg-muted/40 flex items-center justify-center shrink-0 text-muted-foreground">
         <Gamepad2 className="size-4.5" />
       </div>
-      <div className="min-w-0 flex-1 space-y-0.5">
+      <div className="min-w-0 flex-1 space-y-1">
         <div className="flex items-center justify-between gap-1.5">
-          <span className="font-semibold text-sm font-mono text-foreground truncate" title={numberText}>
+          <span className="font-semibold text-sm font-mono text-foreground break-all" title={numberText}>
             {numberText}
           </span>
+          {(displayNo || accountId) && <PreviewCopyButton value={displayNo || accountId || ''} tooltip={displayNo ? '复制账号编号' : '复制账号 ID'} />}
           {tag && (
             <Badge variant="secondary" className="text-[10px] h-4.5 px-1.5 py-0 font-normal shrink-0">
               {tag}
             </Badge>
           )}
         </div>
-        {(displayNo || accountId) && (
-          <div className="flex items-center gap-1 text-[11px] text-muted-foreground font-mono">
-            <PreviewCopyButton value={displayNo || accountId || ''} tooltip={displayNo ? '复制账号编号' : '复制账号 ID'} />
-          </div>
-        )}
+        {gameName && <p className="text-xs text-muted-foreground">{gameName}</p>}
       </div>
     </>
   );
@@ -77,6 +85,7 @@ export function AccountPreviewCard({
   return (
     <PreviewCardShell
       ariaLabel={`账号预览：${numberText}`}
+      className="w-80"
       header={header}
       footer={
         <PreviewFooterAction
@@ -87,42 +96,31 @@ export function AccountPreviewCard({
         />
       }
     >
-      {gameName && (
-        <div className="text-[11px] text-foreground font-medium truncate">
-          游戏：{gameName}
-        </div>
-      )}
-
       {title && (
-        <div className="text-[11px] text-muted-foreground line-clamp-2 leading-relaxed" title={title}>
+        <div className="text-sm text-foreground line-clamp-2 leading-relaxed break-words" title={title}>
           {title}
         </div>
       )}
 
-      {(haffText || materialsText) && (
-        <div className="flex items-center gap-2 text-[11px] text-foreground font-medium">
-          {haffText && <span>哈夫币：{haffText}</span>}
-          {haffText && materialsText && <span aria-hidden="true" className="text-muted-foreground">·</span>}
-          {materialsText && <span>{materialsText}</span>}
-        </div>
-      )}
+      {(haffText || materialsText) && <div className="space-y-1.5 py-1 text-sm leading-relaxed">
+        {haffText && <p className="font-medium text-foreground tabular-nums">哈夫币：{haffText}</p>}
+        {materialsText && <p className="text-foreground break-words"><span className="text-muted-foreground">物资：</span>{materialsText}</p>}
+      </div>}
 
-      {(termText || loginMethodText) && (
-        <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-          {termText && <span>租期：{termText}</span>}
-          {termText && loginMethodText && <span aria-hidden="true">·</span>}
-          {loginMethodText && <span>登录：{loginMethodText}</span>}
-        </div>
-      )}
+      {conditions.some(([, value]) => value) && <dl className="grid grid-cols-2 gap-x-4 gap-y-2 border-t border-border pt-2 text-xs">
+        {conditions.filter(([, value]) => value).map(([label, value]) => <div key={label} className="min-w-0">
+          <dt className="text-muted-foreground">{label}：</dt><dd className="mt-0.5 text-sm font-medium text-foreground break-words">{value}</dd>
+        </div>)}
+      </dl>}
 
-      {sourceText && (
-        <div className="text-[10px] text-muted-foreground font-mono">
-          资料来源：{sourceText}
-        </div>
-      )}
+      {depositText && <p className="flex items-baseline justify-between gap-3 border-t border-border pt-2 text-xs">
+        <span>{depositLabel}</span><span className="font-medium text-foreground tabular-nums">{depositText}</span>
+      </p>}
+
+      {showProvenance && <p className="text-xs leading-relaxed text-muted-foreground">资料来源：{provenance}</p>}
 
       {facts && (
-        <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+        <div className="flex flex-wrap items-center gap-1.5 pt-0.5 text-xs">
           {facts.staffRestricted && (
             <Badge variant="destructive" className="text-[10px] h-4 px-1 py-0">
               平台限制

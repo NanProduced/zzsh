@@ -93,6 +93,33 @@ test('historical balance proof stays unknown beside known ledger flow and proved
   const rows=[...ui.node.querySelectorAll('tbody tr')];assert.match(rows[0].textContent,/余额未核定/);assert.equal(rows[0].children[1].textContent,'未核定');assert.match(rows[0].children[2].textContent,/180\.00/);assert.equal(rows[0].children[4].textContent,'未核定');assert.equal(rows[0].children[5].textContent,'未核定');
   assert.equal(rows[1].children[1].textContent,'0.00 元');assert.equal(rows[1].children[5].textContent,'0.00 元');assert.match(ui.node.textContent,/单次最多367天/);
 });
+test('withdrawal document shows only application, fee, payable, target/source and never upgrades local success to bank arrival', async t => {
+  const entry = { id: 'w-entry', documentRef: 'WITHDRAWAL:w1', documentNumber: '申请一', subjectId: 'u1', subjectName: '用户一', bucket: 'RESERVED', direction: 'OUT', deltaCents: '-20000', knowledge: 'KNOWN', kind: 'WITHDRAWAL', state: 'SUCCEEDED', classification: 'POSTED', occurredAt: '2026-10-03T01:00:00Z', evidence: {}, reasonCodes: [], sourceType: 'LOCAL_CONTROLLED', sourceSystem: 'zzsh_order', sourceEntity: 'withdrawal_intent', sourceId: 'internal-intent-id' };
+  const evidence = { grossCents: '20000', feeCents: '400', netCents: '19600', channelState: 'SUCCEEDED', channelReference: 'LOCAL-REF-1', fundsDisposition: 'PAYOUT_POSTED', acceptedAt: '2026-10-03T01:00:00Z', queriedAt: '2026-10-03T02:00:00Z', refundDueAt: '2026-10-09T00:00:00Z', settlementVersionId: 'internal-settlement-id' };
+  globalThis.fetch = async url => response(payload(url, { document: { ...document, state: 'SUCCEEDED' }, entries: [entry], evidence, related: [], reasonCodes: [] }));
+  const ui = await setup(t, 'withdrawal-detail', '/finance/documents/WITHDRAWAL%3Aw1'); await ui.render();
+  await until(() => ui.node.querySelector('[data-withdrawal-evidence]'));
+  const card = ui.node.querySelector('[data-withdrawal-evidence]');
+  assert.match(card.textContent, /申请扣减额[\s\S]*200\.00 元/);
+  assert.match(card.textContent, /用户政策费[\s\S]*4\.00 元/);
+  assert.match(card.textContent, /应出款额[\s\S]*196\.00 元/);
+  assert.match(card.textContent, /渠道费[\s\S]*未取得/);
+  assert.match(card.textContent, /原出款目标[\s\S]*未取得/);
+  assert.match(card.textContent, /渠道结果[\s\S]*本地受控成功（非银行到账）/);
+  assert.match(card.textContent, /LOCAL_CONTROLLED\/zzsh_order\/withdrawal_intent/);
+  assert.equal(card.textContent.includes('退款责任到期'), false);
+  assert.equal(card.textContent.includes('原入账基数'), false);
+  assert.equal(card.textContent.includes('internal-settlement-id'), false);
+  assert.match(card.textContent, /本地受控成功、SUCCEEDED 或出款已记录都不是银行到账/);
+});
+test('CHAIN a cancelled unpaid order document is named as an unsettled original, not an order settlement', async t => {
+  const cancelled = { ...document, ref: 'ORDER:order_cancelled', number: 'ORDER-CANCELLED', kind: 'SETTLEMENT', state: 'CANCELLED', subjects: [{ id: 'u1', name: '用户一' }] };
+  globalThis.fetch = async url => response(payload(url, { document: cancelled, entries: [], evidence: {}, related: [], reasonCodes: [] }));
+  const ui = await setup(t, 'cancelled-order', '/finance/documents/ORDER%3Aorder_cancelled'); await ui.render();
+  await until(() => ui.node.textContent.includes('订单原单（未结算）'));
+  assert.equal(ui.node.textContent.includes('订单结算'), false);
+  assert.match(ui.node.textContent, /ORDER-CANCELLED/);
+});
 test('business candidates show server bucket facts and subject scope without computing a grand total',async t=>{
   globalThis.fetch=async url=>response(payload(url,{documents:[{...document,kind:'SETTLEMENT',state:'POSTED',requestedAmountCents:null,summaryScope:'SUBJECT',subjectEntryCount:1,documentEntryCount:null,amounts:[{bucket:'AVAILABLE',knownNetCents:'9000',unknownCount:0},{bucket:'REFUND_PAYABLE',knownNetCents:'0',unknownCount:1}]}]}));
   const ui=await setup(t,'candidate-facts');await ui.render();await until(()=>ui.node.textContent.includes('本人相关 1 条'));assert.match(ui.node.textContent,/全单条数未读取/);assert.match(ui.node.textContent,/用户可用 90\.00 元/);assert.match(ui.node.textContent,/退款应付 未核定/);assert.doesNotMatch(ui.node.textContent,/总资金|净利润/);
@@ -152,4 +179,14 @@ test('R1 authorized formatted and NFKC phone tokens normalize into POST only',as
   const calls=[];globalThis.fetch=async(url,init={})=>{calls.push({url:String(url),method:init.method??'GET',body:init.body});return String(url).endsWith('/users/lookup')?response({items:[{userId:'user_match',name:'对应用户',accountStatus:'ACTIVE',source:{kind:'LOCAL'},identityStatus:'UNKNOWN',ageStatus:'UNKNOWN'}],nextCursor:null,limit:20}):response(payload(url));};const ui=await setup(t,'r1-phone-formats','/finance',['finance.read','finance.document.read','user.directory.read','user.phone.lookup']);await ui.render();await until(()=>ui.node.textContent.includes('申请一'));
   for(const [index,value] of ['+86 (138) 1234-5678','138.1234.5678','＋８６（１３８）１２３４－５６７８','1 3 8 1 2 3 4 5 6 7 8'].entries()){await typeSearch(ui,value);await until(()=>ui.queries.length===index+1);assert.equal(ui.queries.at(-1).scope,'user_match');}
   const posts=calls.filter(call=>call.method==='POST');assert.equal(posts.length,4);assert(posts.every(call=>JSON.parse(call.body).phone==='13812345678'));assert(calls.every(call=>!call.url.includes('138')&&!call.url.includes('%EF')));
+});
+
+
+test('native payout evidence uses API fee serial and original target names without a controlled label',async t=>{
+ const ui=await setup(t,'native-payout','/finance/documents/JOINPAY_WITHDRAWAL%3An1'),entry={id:'native-line',documentRef:'JOINPAY_WITHDRAWAL:n1',documentNumber:'PAYOUT-1',subjectId:'u1',subjectName:'用户一',bucket:'RESERVED',direction:'OUT',deltaCents:'-20000',knowledge:'KNOWN',kind:'WITHDRAWAL',state:'SUCCEEDED',classification:'CURRENT_POSTED',occurredAt:null,evidence:{},reasonCodes:[],sourceType:'NATIVE',sourceSystem:'zzsh',sourceEntity:'joinpay_withdrawal_intent',sourceId:'n1'};
+ const evidence={grossCents:'20000',userFeeCents:'400',netCents:'19600',providerFeeCents:'0',originalDestinationMask:'****1234',originalNumber:'PAYOUT-1',channelSerial:'JOINPAY-T-1',fundsDisposition:'PAYOUT_POSTED'};
+ globalThis.fetch=async url=>response(payload(url,{document:{...document,ref:'JOINPAY_WITHDRAWAL:n1',number:'PAYOUT-1',state:'SUCCEEDED'},entries:[entry],evidence,related:[],reasonCodes:[]}));
+ await ui.render();
+ await until(()=>ui.node.querySelector('[data-withdrawal-evidence]'));const card=ui.node.querySelector('[data-withdrawal-evidence]');
+ assert.match(card.textContent,/4\.00 元/);assert.match(card.textContent,/0\.00 元/);assert.match(card.textContent,/\*\*\*\*1234/);assert.match(card.textContent,/JOINPAY-T-1/);assert.match(card.textContent,/PAYOUT-1/);assert.match(card.textContent,/汇聚原生记录/);assert.doesNotMatch(ui.node.textContent,/本地受控成功/);
 });

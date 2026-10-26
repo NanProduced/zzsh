@@ -53,6 +53,7 @@ export type SupplyQueryKind = "account" | "legacy" | "owner" | "nickname" | "ord
 export type PublicBasis = {
   id: string;
   releaseId?: string | null;
+  contentHash?: string | null;
   accountId: string | null;
   title: string | null;
   description: string | null;
@@ -71,6 +72,8 @@ export type PublicBasis = {
   termOption: { code?: string; displayName?: string | null; dailyConsumption?: { quantity: string; unit: "HAFF_BASE" } | null } | null;
   fullPayoutSelected?: boolean | null;
   publishedAt: string | null;
+  baseDeposit?: { amountCents: string } | null;
+  feeSummary?: SupplyListSummary["feeSummary"];
 };
 /** The renter version, shaped for the existing detail renderer. It is not a second field list and not the writable current version. */
 export function publicBasisVersion(basis: PublicBasis): Version {
@@ -83,7 +86,8 @@ export function publicBasisVersion(basis: PublicBasis): Version {
     sequence: "",
     reviewState: "PUBLISHED",
     releaseId: basis.releaseId ?? null,
-    contentHash: null,
+    contentHash: basis.contentHash ?? null,
+    feeSummary: basis.feeSummary ?? null,
     publication: basis.publishedAt ? { source: "PUBLIC", publishedAt: basis.publishedAt } : null,
     termOption: basis.termOption ? { code: basis.termOption.code ?? "", displayName: basis.termOption.displayName ?? null, dailyConsumption: basis.termOption.dailyConsumption ?? null } : null,
     attributeDisplay: basis.attributeDisplay ?? undefined,
@@ -103,7 +107,7 @@ export function publicBasisVersion(basis: PublicBasis): Version {
     catalogItems: (presentation.items ?? []).map(item => ({ id: item.id, code: item.code, name: item.name, unit: item.unit })),
     quote: typeof basis.quote?.resourceTotal?.amount === "string" ? {
       resourceTotal: { amount: basis.quote.resourceTotal.amount },
-      termSeconds: basis.quote.termSeconds ?? "0",
+      termSeconds: basis.quote.termSeconds ?? "",
       baseRenterHaffRatioWanPerYuan: basis.quote.baseRenterHaffRatioWanPerYuan ?? null,
       unitAmountsInformational: basis.quote.unitAmountsInformational === true,
       lines: lines.flatMap(line => typeof line.itemId === "string" ? [{
@@ -119,11 +123,21 @@ export type SupplyFacts = { publicVisible: boolean | null; publicSource: string 
 /** 列表最小受权摘要：金额保持接口原始十进制字符串，缺字段一律 null（未提供），不由前端补齐。 */
 export type SupplyQuoteAmount = { amount: string; currency: string | null; unit: string | null; scale: string | null } | null;
 export type SupplyListSummary = {
+  displaySource?: "PUBLIC_VERSION" | "CURRENT_VERSION";
   versionId: string | null;
   sequence: string | null;
+  title?: string | null;
+  description?: string | null;
+  contentHash?: string | null;
   refs: { ruleReleaseId: string | null; priceVersionId: string | null; contentHash: string | null; catalogRevision: string | null; publicationSource: string | null; publishedAt: string | null };
   timing: { accountCreatedAt: string; accountUpdatedAt: string | null; versionCreatedAt: string | null };
   haff: { itemId: string; quantity: string | null; unit: "HAFF_BASE" } | null;
+  materials?: Array<{ itemId: string; name: string | null; code: string | null; quantity: string | null; unit: string | null }>;
+  materialsTotal?: number;
+  term?: { code: string | null; name: string | null; dailyConsumption: string | null; termSeconds: string | null } | null;
+  login?: { code: string | null; displayName: string | null } | null;
+  config?: { safeBox: string | null; characterLevel: string | null; grading: string | null; gradingDivision: string | null } | null;
+  feeSummary?: { completeness: "COMPLETE" | "PARTIAL" | "UNKNOWN"; haffRental: SupplyQuoteAmount; materials: SupplyQuoteAmount; resourceTotal: SupplyQuoteAmount } | null;
   quote: { currency: string | null; resourceTotal: SupplyQuoteAmount; tenantDeposit: SupplyQuoteAmount; tenantPayableTotal: SupplyQuoteAmount; ownerTotal?: SupplyQuoteAmount; publisherBailRequirement?: SupplyQuoteAmount; frozen: boolean; personalised: boolean } | null;
   baseDeposit: { amountCents: string } | null;
   fullPayout: "SELECTED" | "NOT_SELECTED" | "NOT_DECLARED";
@@ -137,7 +151,7 @@ export type SupplyListSummary = {
 };
 export type SupplyOwnerSummary = import('../../api').DirectoryUserPreview;
 export type SupplyWorkItem = { id: string; accountId: string; displayNo: string | null; ownerId: string; ownerName: string; revision: string; gameName: string; versionId: string | null; sequence: string | null; title: string | null; reviewState: string | null; sortAt: string; facts: SupplyFacts; accountCreatedAt?: string; accountUpdatedAt?: string | null; versionCreatedAt?: string | null; summary?: SupplyListSummary | null; ownerLink?: { state: "READY" | "DENIED" }; ownerSummary?: SupplyOwnerSummary | null };
-export type SupplyWorkPage = { contractVersion: string; contextKey: string; items: SupplyWorkItem[]; nextCursor: string | null; stationOrigins: { admin: string; user: string }; games?: Array<{ id: string; name: string }> };
+export type SupplyWorkPage = { contractVersion: string; contextKey: string; items: SupplyWorkItem[]; nextCursor: string | null; stationOrigins: { admin: string; user: string }; games?: Array<{ id: string; name: string }>; filterOptions?: { loginMethods: Array<{ code: string; name: string }> } };
 export type RestrictionEvent = { id: string; reason: string | null; occurredAt: string; actorName: string | null; beforeRevision: string | null; afterRevision: string | null; versionId: string | null; restricted: boolean | null };
 export type SupplyWorkDetail = Omit<Detail, "version"> & {
   contractVersion: string; contextKey: string; version: Version | null;
@@ -260,6 +274,7 @@ export type Version = {
     unitAmountsInformational?: boolean;
     lines?: Array<{ itemId: string; quantity: string; unit: string; unitQuantity?: string; buyerUnitAmount?: { amount: string }; buyerAmount?: { amount: string }; ownerAmount?: { amount: string } }>;
   } | null;
+  feeSummary?: SupplyListSummary["feeSummary"];
 };
 
 export type VersionHistoryEntry = {
@@ -493,6 +508,19 @@ export function formatFundingCents(cents: string | null | undefined): string {
 export function formatTermDays(termSeconds: string): string {
   if (!/^\d+$/.test(termSeconds)) return "未确认";
   return `${BigInt(termSeconds) / 86400n} 天`;
+}
+
+/** Exact fee split from the API summary; a missing side is not inferred from the total. */
+export function feeSummaryRows(fee?: SupplyListSummary["feeSummary"] | null): { haff: string; materials: string; total: string; note: string } {
+  const amount = (value: SupplyQuoteAmount) => value ? `¥${formatAmount(value.amount)}` : null;
+  if (!fee) return { haff: "未提供", materials: "未提供", total: "未提供", note: "费用汇总未提供" };
+  const missing = fee.completeness === "COMPLETE" ? "未提供" : "分项待核";
+  return {
+    haff: amount(fee.haffRental) ?? missing,
+    materials: amount(fee.materials) ?? missing,
+    total: amount(fee.resourceTotal) ?? missing,
+    note: fee.completeness === "COMPLETE" ? "资源费分项已闭合" : "分项待核，不以合计反推",
+  };
 }
 
 export function quantityText(value: string | null | undefined): string {

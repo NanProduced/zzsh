@@ -27,6 +27,7 @@ export async function readAdminJoinpayMerchantAccounts(c: PoolClient, input: { a
 export async function readAdminOrderRefundSummary(c: PoolClient, input: { orderId: string; origin: 'NATIVE' | 'LEGACY'; financeReadable: boolean }) {
   const absent = (integration: 'FORBIDDEN' | 'NOT_APPLICABLE' | 'NOT_INTEGRATED' | 'UNAVAILABLE', reason: string) => ({
     contractVersion: 'admin-order-refund-summary.v1' as const, integration, intents: null, bankArrival: 'UNKNOWN' as const, reasonCodes: [reason],
+    limit: null as number | null, truncated: false, maySubmit: false as const, coverage: null as 'COMPLETE_WITHIN_LIMIT' | 'TRUNCATED' | null, budget: null as { allocatedCents: string; consumedCents: string; releasedCents: string } | null,
   });
   if (!input.financeReadable) return absent('FORBIDDEN', 'FINANCE_PERMISSION_REQUIRED');
   if (input.origin !== 'NATIVE') return absent('NOT_APPLICABLE', 'LEGACY_REFUND_SOURCE_NOT_INTEGRATED');
@@ -39,27 +40,35 @@ export async function readAdminOrderRefundSummary(c: PoolClient, input: { orderI
     [['id','refund_order_no','amount_cents','currency','state','budget_disposition','requires_review','terminal_evidence_id','terminal_root_id','terminal_event_id','posting_id','order_id','payment_source','renter_user_id','payment_confirmation_id','responsibility_version_hash'],16])).rows[0];
   if (ready?.ready !== true) return absent('NOT_INTEGRATED', 'FORMAL_REFUND_SCHEMA_UNAVAILABLE');
   const rows = (await c.query(`SELECT i.id,i.refund_order_no,i.amount_cents::text AS amount_cents,i.currency,i.state,i.budget_disposition,
-    i.requires_review,i.terminal_evidence_id,i.terminal_root_id,i.terminal_event_id,
+    i.requires_review,i.terminal_evidence_id,i.terminal_root_id,i.terminal_event_id,i.merchant_identity_id,i.payment_source,i.provider_refund_trx_no,
+    p.renter_refund_cents::text AS responsibility_cents,
     (i.renter_user_id=o.renter_user_id AND p.order_id=i.order_id AND p.payment_confirmation_id=i.payment_confirmation_id
       AND p.version_hash=i.responsibility_version_hash) AS binding_matches
     FROM zzsh_order.channel_refund_intent i
     LEFT JOIN zzsh_order.settlement_posting p ON p.id=i.posting_id
     LEFT JOIN zzsh_order.rental_order o ON o.id=i.order_id
     WHERE i.order_id=$1 AND i.payment_source='JOINPAY' ORDER BY i.id COLLATE "C" LIMIT 65`, [input.orderId])).rows;
-  if (rows.length > 64 || rows.some(r => r.binding_matches !== true)) return absent('UNAVAILABLE', 'REFUND_BINDING_OR_READ_BOUND_EXCEEDED');
+  if (rows.length > 64) return { ...absent('UNAVAILABLE', 'REFUND_BINDING_OR_READ_BOUND_EXCEEDED'), limit: 64, truncated: true, coverage: 'TRUNCATED' as const };
+  if (rows.some(r => r.binding_matches !== true)) return absent('UNAVAILABLE', 'REFUND_BINDING_OR_READ_BOUND_EXCEEDED');
   try {
     const intents = rows.map(r => {
       const amountCents = exactCents(r.amount_cents);
       if (BigInt(amountCents) <= 0n || r.currency !== 'CNY' || typeof r.requires_review !== 'boolean'
         || typeof r.id !== 'string' || typeof r.refund_order_no !== 'string'
         || [r.terminal_evidence_id,r.terminal_root_id,r.terminal_event_id].some(v=>v!==null&&typeof v!=='string')) throw new Error('Invalid refund projection');
+      const responsibilityCents = r.responsibility_cents == null ? null : exactCents(r.responsibility_cents);
       return { intentId: r.id as string, refundOrderNo: r.refund_order_no as string, amount: { cents: amountCents, currency: 'CNY' as const },
         localState: ['READY','SUBMITTING','UNKNOWN','PROCESSING','REVIEW_REQUIRED','SUCCEEDED','FAILED'].includes(r.state) ? r.state as string : 'UNKNOWN',
         budgetDisposition: ['ALLOCATED','CONSUMED','RELEASED'].includes(r.budget_disposition) ? r.budget_disposition as string : 'UNKNOWN',
         requiresReview: r.requires_review as boolean, evidenceId: r.terminal_evidence_id ?? null, rootId: r.terminal_root_id ?? null,
-        eventId: r.terminal_event_id ?? null, mayResubmit: false, bankArrival: 'UNKNOWN' as const };
+        eventId: r.terminal_event_id ?? null, responsibilityCents, merchantIdentityId: typeof r.merchant_identity_id === 'string' ? r.merchant_identity_id : null,
+        productFamily: r.payment_source === 'JOINPAY' ? 'JOINPAY' as const : null, providerRefundTrxNo: typeof r.provider_refund_trx_no === 'string' ? r.provider_refund_trx_no : null,
+        safeTarget: 'ORIGINAL_CHANNEL' as const, mayResubmit: false, maySubmit: false as const, bankArrival: 'UNKNOWN' as const };
     });
+    const sum = (disposition: string) => intents.filter(intent => intent.budgetDisposition === disposition).reduce((total, intent) => total + BigInt(intent.amount.cents), 0n).toString();
     return { contractVersion: 'admin-order-refund-summary.v1' as const, integration: 'INTEGRATED' as const, intents,
+      limit: 64, truncated: false, maySubmit: false as const, coverage: 'COMPLETE_WITHIN_LIMIT' as const,
+      budget: { allocatedCents: sum('ALLOCATED'), consumedCents: sum('CONSUMED'), releasedCents: sum('RELEASED') },
       bankArrival: 'UNKNOWN' as const, reasonCodes: ['LOCAL_RECORDS_ONLY_TERMINAL_EVIDENCE_NOT_REVALIDATED'] };
   } catch { return absent('UNAVAILABLE', 'REFUND_RECORD_PROJECTION_INVALID'); }
 }

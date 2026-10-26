@@ -4,6 +4,8 @@ import type { PoolClient } from "pg";
 import { gameScopeSql } from "../auth/admin-scope";
 import { projectOrder, centsToYuan, yuanToCents, type OrderRow } from "./order";
 import { orderAccountTitleFact } from "../supply/publishing";
+import { projectPublicAttributeDisplay } from "../supply/listing-query";
+import { loadLegacyHistoricalReads } from "../supply/legacy-listing-read";
 import { conflict, invalid, notFound } from "../supply/supply-util";
 import { escapeLike } from "../supply/catalog";
 import { legacyContinuationReady, legacyMoneyCents, legacyOrderReadState, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
@@ -11,7 +13,15 @@ import { settlementConfirmationReady, type SettlementConfirmationFacts } from ".
 import { readDirectoryUserSummaries, type DirectoryUserSummary } from "../auth/user-directory-summary";
 
 export type OrderReadViewer = { adminId: string; isBoss: boolean; internalQuote: boolean; authorizationKey: string; financeReadable?: boolean; permissions?: ReadonlySet<string> };
-export type OrderReadFilters = { page: number; pageSize: number; status?: string; displayNo?: string; accountId?: string; renterUserId?: string; ownerUserId?: string; createdFrom?: string; createdTo?: string; qKind?: "order" | "account" | "party" | "renter" | "owner"; qValue?: string; restoreKey?: string };
+export type OrderReadFilters = { page: number; pageSize: number; status?: string; origin?: "NATIVE" | "LEGACY"; displayNo?: string; accountId?: string; renterUserId?: string; ownerUserId?: string; createdFrom?: string; createdTo?: string; qKind?: "order" | "account" | "party" | "renter" | "owner"; qValue?: string; restoreKey?: string };
+/** Strict source filter: omitted means both; repeated or unknown values are rejected, never coerced. */
+export function parseOrderOrigin(query: URLSearchParams): "NATIVE" | "LEGACY" | undefined {
+ const values = query.getAll("origin");
+ if (values.length > 1) throw invalid("Origin is repeated", "origin");
+ if (!values.length) return undefined;
+ if (values[0] !== "NATIVE" && values[0] !== "LEGACY") throw invalid("Origin is invalid", "origin");
+ return values[0];
+}
 const utc=(column:string)=>`to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 const CONTINUATION_JOIN = `LEFT JOIN zzsh_order.legacy_continuation_version h ON h.order_id=l.id AND h.superseded_at IS NULL`;
 /** Pre-0074 shape: same output columns, no continuation source (see api-change-request.md). */
@@ -246,25 +256,83 @@ async function readNativeOrderProgress(client:PoolClient,ids:string[]):Promise<M
  for(const row of rows)result.set(row.id,orderProgress(row));
  return result;
 }
+export type AdminOrderFrozenAccount={
+ source:'ORDER_VERSION'|'LEGACY_ACCOUNT';
+ haff:{itemId:string;code:string;name:string|null;quantity:string|null;unit:string}|null;
+ materials:Array<{itemId:string;code:string;name:string|null;quantity:string|null;unit:string}>;
+ termDays:string|null;termSeconds:string|null;loginMethodText:string|null;
+};
+type FrozenNativeRow={orderId:string;versionId:string|null;attributes:Record<string,unknown>|null;presentationItems:unknown;resources:Array<{itemId:string;code:string;quantity:string|null;unit:string}>;termSeconds:string|null};
+/** Native frozen account facts: the order table lives in zzsh_order, never zzsh_supply. */
+export const NATIVE_FROZEN_ACCOUNT_SQL=`SELECT /* admin-order-frozen-account */ wanted."orderId",v.id AS "versionId",v.attributes,v.presentation->'items' AS "presentationItems",
+   o.term_seconds::text AS "termSeconds",
+   COALESCE(jsonb_agg(jsonb_build_object('itemId',l.item_id,'code',i.code,'quantity',l.quantity::text,'unit',i.unit) ORDER BY i.sort_order,i.id) FILTER(WHERE i.id IS NOT NULL),'[]'::jsonb) AS resources
+  FROM jsonb_to_recordset($1::jsonb) AS wanted("orderId" text,"accountId" text,"versionId" text,"contentHash" text)
+  JOIN zzsh_supply.rental_account a ON a.id=wanted."accountId"
+  LEFT JOIN zzsh_order.rental_order o ON o.id=wanted."orderId"
+  LEFT JOIN zzsh_supply.listing_version v ON v.id=wanted."versionId" AND v.account_id=wanted."accountId" AND v.content_hash=wanted."contentHash"
+  LEFT JOIN zzsh_supply.inventory_line l ON l.version_id=v.id
+  LEFT JOIN zzsh_supply.billable_item i ON i.id=l.item_id
+  WHERE ${gameScopeSql('a.game_id','$3','$2')}
+  GROUP BY wanted."orderId",v.id,v.attributes,v.presentation,o.term_seconds`;
+/** One bounded read for this page's native frozen order versions; no current account/catalog substitution. */
+export async function readNativeFrozenAccounts(client:PoolClient,viewer:OrderReadViewer,items:Record<string,any>[]):Promise<Map<string,AdminOrderFrozenAccount>>{
+ const result=new Map<string,AdminOrderFrozenAccount>();
+ const wanted=items.filter(item=>item.source?.origin==='NATIVE'&&typeof item.id==='string'&&typeof item.accountId==='string'&&typeof item.versionId==='string'&&typeof item.contentHash==='string')
+  .map(item=>({orderId:item.id,accountId:item.accountId,versionId:item.versionId,contentHash:item.contentHash}));
+ if(!wanted.length)return result;
+ const rows=(await client.query<FrozenNativeRow>(NATIVE_FROZEN_ACCOUNT_SQL,[JSON.stringify(wanted),viewer.isBoss,viewer.adminId])).rows;
+ for(const row of rows){
+  if(!row.versionId)continue;
+  const frozen=new Map<string,Record<string,unknown>|null>();
+  for(const item of Array.isArray(row.presentationItems)?row.presentationItems:[])if(item&&typeof item==='object'&&typeof item.id==='string')frozen.set(item.id,frozen.has(item.id)?null:item);
+  const resources=row.resources.map(item=>{const original=frozen.get(item.itemId);const name=typeof original?.name==='string'&&original.name.trim()?original.name:null;return {itemId:item.itemId,code:typeof original?.code==='string'?original.code:item.code,name,quantity:item.quantity,unit:typeof original?.unit==='string'?original.unit:item.unit};});
+  const haff=resources.find(item=>item.unit==='HAFF_BASE')??null;
+  const termSeconds=row.termSeconds;
+  const termDays=termSeconds&&/^\d+$/.test(termSeconds)&&BigInt(termSeconds)%86400n===0n?(BigInt(termSeconds)/86400n).toString():null;
+  result.set(row.orderId,{source:'ORDER_VERSION',haff,materials:resources.filter(item=>item!==haff),termDays,termSeconds,loginMethodText:projectPublicAttributeDisplay(row.attributes??{}).loginMethod?.displayName??null});
+ }
+ return result;
+}
+async function readLegacyFrozenAccounts(client:PoolClient,items:Record<string,any>[]):Promise<Map<string,AdminOrderFrozenAccount>>{
+ const result=new Map<string,AdminOrderFrozenAccount>();
+ const wanted=items.filter(item=>item.source?.origin==='LEGACY'&&typeof item.id==='string'&&typeof item.accountId==='string');
+ if(!wanted.length)return result;
+ const historical=await loadLegacyHistoricalReads(client,[...new Set(wanted.map(item=>item.accountId))]);
+ for(const item of wanted){
+  const read=historical.get(item.accountId);
+  if(read?.display?.state!=='KNOWN'||!read.display.facts)continue;
+  const resources=read.display.facts.resources.map(resource=>({itemId:resource.code,code:resource.code,name:resource.name??null,quantity:resource.quantity??null,unit:resource.unit}));
+  const haff=resources.find(resource=>resource.unit==='HAFF_BASE')??null;
+  result.set(item.id,{source:'LEGACY_ACCOUNT',haff,materials:resources.filter(resource=>resource!==haff),termDays:read.historicalQuote.termDays??null,termSeconds:null,loginMethodText:read.display.facts.attributeDisplay.loginMethod?.displayName??null});
+ }
+ return result;
+}
+async function attachFrozenAccounts(client:PoolClient,viewer:OrderReadViewer,items:Record<string,any>[]){
+ if(!(viewer.isBoss||viewer.permissions?.has("supply.rental_account.read")))return;
+ const native=await readNativeFrozenAccounts(client,viewer,items),legacy=await readLegacyFrozenAccounts(client,items);
+ for(const item of items){const summary=item.source?.origin==='NATIVE'?native.get(item.id):legacy.get(item.id);if(summary)item.frozenAccount=summary;}
+}
 function summaryOf(summaries:Map<string,DirectoryUserSummary>,id:unknown){return typeof id==='string'?summaries.get(id):undefined;}
 /** Page-selected ids only: one progress read for native rows and one directory summary read for both parties. */
 async function attachAdminOrderExtras(client:PoolClient,items:Record<string,any>[],viewer:OrderReadViewer){
  const progress=await readNativeOrderProgress(client,items.filter(item=>item.source?.origin==='NATIVE').map(item=>item.id));
- const summaries=await readDirectoryUserSummaries(client,items.flatMap(item=>[item.ownerUserId,item.renterUserId]).filter((id):id is string=>typeof id==='string'),viewer.permissions);
+ const summaries=await readDirectoryUserSummaries(client,items.flatMap(item=>[item.ownerUserId,item.renterUserId]).filter((id):id is string=>typeof id==='string'),viewer.permissions,viewer.permissions?{adminId:viewer.adminId,isBoss:viewer.isBoss,membershipSummaryRead:viewer.permissions.has('membership.growth.read.summary'),creditRead:viewer.permissions.has('credit.read')}:undefined);
  for(const item of items){
   if(item.source?.origin==='NATIVE')item.progress=progress.get(item.id)??unknownProgress();
   const owner=summaryOf(summaries,item.ownerUserId),renter=summaryOf(summaries,item.renterUserId);
   if(owner)item.ownerSummary=owner;if(renter)item.renterSummary=renter;
  }
+ await attachFrozenAccounts(client,viewer,items);
 }
 export async function queryAdminReadOrders(client:PoolClient,viewer:OrderReadViewer,filter:OrderReadFilters){
  if(filter.restoreKey&&filter.restoreKey!==viewer.authorizationKey)throw conflict('Authorization context changed');
  const values:unknown[]=[viewer.isBoss,viewer.adminId],where=[gameScopeSql("x.game_id","$2","$1")];
  const exact=(field:string,value:string|undefined)=>{if(value!==undefined)where.push(`${field}=$${values.push(value)}`);};
- exact('x.status',filter.status);exact('x.display_no',filter.displayNo);exact('x.account_id',filter.accountId);exact('x.renter_user_id',filter.renterUserId);exact('x.owner_user_id',filter.ownerUserId);
+ exact('x.status',filter.status);exact('x.origin',filter.origin);exact('x.display_no',filter.displayNo);exact('x.account_id',filter.accountId);exact('x.renter_user_id',filter.renterUserId);exact('x.owner_user_id',filter.ownerUserId);
  if(filter.createdFrom)where.push(`x.created_at>=$${values.push(filter.createdFrom)}::timestamptz`);if(filter.createdTo)where.push(`x.created_at<$${values.push(filter.createdTo)}::timestamptz`);
  if(filter.qValue){const q=filter.qValue,p='$'+values.push(q);if(filter.qKind==='order')where.push(`x.display_no=${p}`);else if(filter.qKind==='account')where.push(`x.account_no=${p} OR x.account_id=${p}`);else{
-  if(/(?:\+?86[\s-]*)?1[3-9](?:[\s-]*\d){9}/.test(q))throw invalid('Phone lookup must use the user lookup contract');
+  if(/^(?:\+?86[\s-]*)?1[3-9](?:[\s-]*\d){9}$/.test(q))throw invalid('Phone lookup must use the user lookup contract');
   const pattern='$'+values.push('%'+escapeLike(q)+'%'),party=(role:string)=>`(x.${role}_user_id=${p} OR x.${role}_no=${p} OR x.${role}_name ILIKE ${pattern} ESCAPE '\\' OR x.${role}_username ILIKE ${pattern} ESCAPE '\\')`;
   where.push(filter.qKind==='renter'?party('renter'):filter.qKind==='owner'?party('owner'):`(${party('renter')} OR ${party('owner')})`);
  }}

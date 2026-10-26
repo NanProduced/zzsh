@@ -707,7 +707,35 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .oc-table-compact .oc-account-title{margin-top:3px;-webkit-line-clamp:1}
 .oc-table-compact .oc-party-line+.oc-party-line{margin-top:4px}
 .oc-table-compact .oc-stages small{margin-top:4px}
-.oc-stages-compact{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px}
+.oc-stages-compact{display:block}
+.oc-stages-compact .oc-compact-meta{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px}
 .oc-stages-compact .oc-stage-label{margin:0;font-size:12px}
 .oc-stages-compact small{margin:0;font-size:11px}
+.oc-stages-compact ol{display:flex;gap:10px;margin:7px 0 0;padding:0;list-style:none}
+.oc-stages-compact li{flex-direction:row;align-items:center;gap:3px;min-width:0}
+.oc-stages-compact .oc-stage-node{width:20px;height:20px;flex:none}
+.oc-stages-compact .oc-stage-name{font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:7.5em}
+.oc-stages-compact .oc-stage-line{position:static;width:8px;height:1px;flex:none}
+.oc-stages-compact .done .oc-stage-node{color:#6ee7b7;border-color:#10b98180;background:#064e3b22}
+.oc-stages-compact .active .oc-stage-node{color:#fcd34d;border-color:#d9770670;background:#78350f22}
+.oc-stages-compact .unknown .oc-stage-node{border-style:dashed}
+.oc-stages-compact .none .oc-stage-node{opacity:.55}
+[data-theme=light] .oc-stages-compact .done .oc-stage-node{color:#047857;background:#d1fae555}
+[data-theme=light] .oc-stages-compact .active .oc-stage-node{color:#92400e;background:#fef3c755}
 .oc-next-step{margin:0 0 12px;color:var(--foreground);font-size:13px;line-height:1.6}
+
+/* AO03: order list readability for long numbers and frozen account summaries; scoped to the order page. */
+.oc-table-compact th:first-child{width:20%}
+.oc-table-compact th:nth-child(2){width:24%}
+.oc-table-compact th:nth-child(3){width:20%}
+.oc-table-compact th:nth-child(4){width:20%}
+.oc-table-compact th:last-child{width:16%}
+.oc-table-compact .oc-order-no{white-space:normal;overflow-wrap:anywhere;line-height:1.35;text-align:left}
+.oc-table-compact .oc-account-title{-webkit-line-clamp:2}
+
+/* AO03 R1 shared account/order filters and compact order fees */
+.sa-search .ud-field,.oc-search .ud-field{width:150px;flex:none}
+.sa-search .ud-field:has(.ud-date-trigger),.oc-search .ud-field:has(.ud-date-trigger){width:240px}
+.sa-search .ud-credit-trigger,.sa-search .ud-date-trigger,.oc-search .ud-credit-trigger,.oc-search .ud-date-trigger{width:100%;height:36px;font-size:12px;justify-content:space-between;padding-inline:10px}
+.oc-table .oc-fee-line{font-size:10px;line-height:1.3;margin-top:1px}
+@media(max-width:760px){.sa-search .ud-field,.oc-search .ud-field{width:100%}.sa-search .ud-field:has(.ud-date-trigger),.oc-search .ud-field:has(.ud-date-trigger){width:100%}}
