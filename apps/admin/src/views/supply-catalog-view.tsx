@@ -545,10 +545,10 @@ export function SupplyCatalogView({
           if (!source) throw new Error("当前目录的枪械归属未接入，不能确认枪械所属关系。");
           const chosen = source.find(o => o.id === editor.values.ownerId);
           const old = (editor.original as CatalogSkin)?.ownerRef;
-          const broadMelee = editor.values.ownerKind === "MELEE_TYPE" && !editor.values.ownerId;
-          if ((!chosen && !broadMelee) || (chosen && !chosen.enabled && !(old?.id === chosen.id && old.kind === editor.values.ownerKind && (editor.original as CatalogSkin).namingState === "VERIFIED"))) throw new Error("请选择已读取且可挂接的所属对象。");
+          const standaloneMelee = editor.values.ownerKind === "MELEE_TYPE" && (catalog!.game.code === "delta" || !editor.values.ownerId);
+          if (!standaloneMelee && (!chosen || (!chosen.enabled && !(old?.id === chosen.id && old.kind === editor.values.ownerKind && (editor.original as CatalogSkin).namingState === "VERIFIED")))) throw new Error("请选择已读取且可挂接的所属对象。");
         }
-        const body = editor.kind === "skins" ? skinPayload(editor.values, editor.revision ?? "", editor.original as CatalogSkin | undefined, editor.confirm) : ownerPayload(editor.values, editor.revision ?? "", editor.original as CatalogSkinOwner | undefined);
+        const body = editor.kind === "skins" ? skinPayload(editor.values, editor.revision ?? "", editor.original as CatalogSkin | undefined, editor.confirm, catalog!.game.code) : ownerPayload(editor.values, editor.revision ?? "", editor.original as CatalogSkinOwner | undefined, catalog!.game.code);
         beginWrite(editor.kind, body, editor.id, continueAdd ? carryValuesFor(editor.kind, editor.values) : undefined);
       } else {
         const validation = validateEditor(editor.kind, editor.values, Boolean(editor.id)); if (validation) throw new Error(validation);
@@ -755,7 +755,8 @@ export function SupplyCatalogView({
     if (key === "categoryPath") return <span className="text-xs">{categoryPath(row.categoryId as string | null, catalog?.categories ?? [])}</span>;
     if (key === "ownerRef") {
       const kind = skinOwnerKind(row as CatalogSkin);
-      return <div className="space-y-1 text-xs"><p>{kind ? ownerKinds[kind] : "类型待核"}</p><p className="text-muted-foreground">{kind === "MELEE_TYPE" && !row.ownerRef ? "具体刀型待核" : ownerText((row.ownerRef as CatalogSkin["ownerRef"]) ?? null, catalog?.owners ?? [], firearms)}</p></div>;
+      if (kind === "MELEE_TYPE" && catalog?.game.code === "delta") return <span className="text-xs">近战外观</span>;
+      return <div className="space-y-1 text-xs"><p>{kind ? ownerKinds[kind] : "类型待核"}</p><p className="text-muted-foreground">{ownerText((row.ownerRef as CatalogSkin["ownerRef"]) ?? null, catalog?.owners ?? [], firearms)}</p></div>;
     }
     if (key === "kind") return <span className="text-xs">{ownerKinds[row.kind as keyof typeof ownerKinds] ?? "未提供"}</span>;
     if (key === "rarityCode") {
@@ -791,7 +792,7 @@ export function SupplyCatalogView({
     rarityItems: rarityOptions(catalog?.rarities ?? [], editor?.kind === "skins" ? (editor.original as CatalogSkin | undefined)?.rarityCode ?? null : null),
     kindItems: editor?.kind === "skins"
       ? [{ value: "AGENT", label: "干员" }, { value: "MELEE_TYPE", label: "近战外观" }, { value: "FIREARM", label: "枪械" }]
-      : [{ value: "AGENT", label: "干员" }, { value: "MELEE_TYPE", label: "刀型" }],
+      : [{ value: "AGENT", label: "干员" }, ...(catalog?.game.code === "delta" ? [] : [{ value: "MELEE_TYPE", label: "近战所属对象" }])],
     unitItems: [
       { value: "HAFF_BASE", label: "哈夫币基础单位" },
       { value: "ROUND", label: "发" },
@@ -963,20 +964,20 @@ export function SupplyCatalogView({
           <fieldset disabled={["saving", "unknown", "readback"].includes(writePhase)} className="min-w-0 space-y-4">
             {editor.confirm || (editor.kind === "skin-owners" && !editor.id) ? (
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <Field label="所属对象类型">
-                  <CellSelect label="所属对象类型" value={editor.values.ownerKind ?? "AGENT"} items={editOptions.kindItems} onValueChange={(value) => setEditor({ ...editor, values: { ...editor.values, ownerKind: value, ownerId: "" } })} />
+                <Field label={editor.kind === "skins" ? "皮肤类型" : "所属对象类型"}>
+                  <CellSelect label={editor.kind === "skins" ? "皮肤类型" : "所属对象类型"} value={editor.values.ownerKind ?? "AGENT"} items={editOptions.kindItems} onValueChange={(value) => setEditor({ ...editor, values: { ...editor.values, ownerKind: value, ownerId: "" } })} />
                 </Field>
                 {editor.kind === "skins" ? (
                   <>
-                    <Field label="所属对象" hint={editor.values.ownerKind === "MELEE_TYPE" ? "已确认近战大类时可保留具体刀型未知，不新建虚构刀型。" : "按稳定ID选择；分类不是所属对象。"}>
+                    {catalog?.game.code === "delta" && editor.values.ownerKind === "MELEE_TYPE" ? <p className="self-center text-xs text-muted-foreground">近战外观独立维护，无需选择所属对象。</p> : <Field label="所属对象" hint="按稳定ID选择；分类不是所属对象。">
                       <CellSelect
                         label="所属对象"
                         disabled={editor.values.ownerKind === "FIREARM" && firearms === null}
                         value={editor.values.ownerId ?? ""}
-                        items={[{ value: "", label: editor.values.ownerKind === "MELEE_TYPE" ? "具体刀型待核（仅确认近战）" : "请选择已读取对象" }, ...(editor.values.ownerKind === "FIREARM" ? firearms ?? [] : (catalog?.owners ?? []).filter(o => o.kind === editor.values.ownerKind)).map(o => ({ value: o.id, label: `${o.name}${o.enabled ? "" : "（停用）"}` }))]}
+                        items={[{ value: "", label: editor.values.ownerKind === "MELEE_TYPE" ? "不指定所属对象" : "请选择已读取对象" }, ...(editor.values.ownerKind === "FIREARM" ? firearms ?? [] : (catalog?.owners ?? []).filter(o => o.kind === editor.values.ownerKind)).map(o => ({ value: o.id, label: `${o.name}${o.enabled ? "" : "（停用）"}` }))]}
                         onValueChange={(value) => setEditor({ ...editor, values: { ...editor.values, ownerId: value } })}
                       />
-                    </Field>
+                    </Field>}
                     <Field label="皮肤本名"><Input value={editor.values.baseName ?? ""} onChange={(event) => setEditor({ ...editor, values: { ...editor.values, baseName: event.target.value } })} className="h-9 text-xs" /></Field>
                     {editor.values.ownerKind === "FIREARM" ? (
                       <div className="sm:col-span-2">

@@ -63,7 +63,7 @@ export function evidenceFields(values: Record<string, string>) {
   return { reason: text(values.reason, "原因", 500), evidenceRefs };
 }
 
-export function skinPayload(values: Record<string, string>, revision: string, original?: CatalogSkin, confirm = false): Record<string, unknown> {
+export function skinPayload(values: Record<string, string>, revision: string, original?: CatalogSkin, confirm = false, gameCode?: string): Record<string, unknown> {
   if (!/^[1-9]\d*$/.test(revision)) throw new Error("目录版本未就绪，请重新读取目录。");
   const body: Record<string, unknown> = { expectedCatalogRevision: revision };
   const aliases = lines(values.aliases).map(v => text(v, "别名", 200));
@@ -120,16 +120,18 @@ export function skinPayload(values: Record<string, string>, revision: string, or
     if (!original) throw new Error("请先创建草稿，再单独确认身份。");
     if (!["AGENT", "MELEE_TYPE", "FIREARM"].includes(values.ownerKind ?? "")) throw new Error("请选择所属对象类型。");
     body.ownerKind = values.ownerKind;
-    body.ownerRef = values.ownerKind === "MELEE_TYPE" && !clean(values.ownerId ?? "") ? null : { kind: values.ownerKind, id: text(values.ownerId, "所属对象", 128) };
+    body.ownerRef = values.ownerKind === "MELEE_TYPE" && (gameCode === "delta" || !clean(values.ownerId ?? "")) ? null : { kind: values.ownerKind, id: text(values.ownerId, "所属对象", 128) };
     body.baseName = text(values.baseName, "皮肤本名", 120); body.confirmIdentity = true; Object.assign(body, evidenceFields(values));
   }
   if (original && !confirm && Object.keys(body).length === 1) throw new Error("没有需要保存的改动。");
   return body;
 }
 
-export function ownerPayload(values: Record<string, string>, revision: string, original?: CatalogSkinOwner): Record<string, unknown> {
+export function ownerPayload(values: Record<string, string>, revision: string, original?: CatalogSkinOwner, gameCode?: string): Record<string, unknown> {
+  if (original?.kind === "MELEE_TYPE" && gameCode === "delta" && values.enabled === "true") throw new Error("近战外观无需所属对象，历史记录不能重新启用。");
   if (original) return { expectedCatalogRevision: revision, enabled: values.enabled === "true", reason: text(values.reason, "原因", 500) };
-  if (!["AGENT", "MELEE_TYPE"].includes(values.ownerKind ?? "")) throw new Error("只支持维护干员或刀型。");
+  if (gameCode === "delta" && values.ownerKind === "MELEE_TYPE") throw new Error("近战外观无需所属对象，请在皮肤目录维护。");
+  if (!["AGENT", "MELEE_TYPE"].includes(values.ownerKind ?? "")) throw new Error("请选择支持的所属对象类型。");
   return { expectedCatalogRevision: revision, kind: values.ownerKind, code: values.code, name: text(values.name, "名称", 120), ...evidenceFields(values) };
 }
 

@@ -182,6 +182,12 @@ async function assertSkinSource(client: PoolClient, gameId: string, id: string, 
   if (result.rowCount) throw conflict("Primary source is already attached to another skin");
 }
 
+async function assertSpecificMeleeOwnerAllowed(client: PoolClient, gameId: string): Promise<void> {
+  const game = (await client.query<{ code: string }>(`SELECT code FROM zzsh_supply.game WHERE id=$1`, [gameId])).rows[0];
+  if (!game) throw notFound();
+  if (game.code === "delta") throw invalid("三角洲近战外观独立维护，不使用刀型所属对象");
+}
+
 /**
  * Controlled migration seam for skin owners imported from the frozen crosswalk.
  * Human catalog maintenance records public HTTPS evidence; migration rows carry
@@ -343,14 +349,15 @@ async function updateSkin(client: PoolClient, gameId: string, row: Record<string
     firearmId = body.ownerRef === null ? null : ref ? (ref.kind === "FIREARM" ? ref.id : null) : firearmId;
     baseName = body.baseName ?? baseName;
     if (!ownerKind || !baseName) throw invalid("Complete owner and base name required");
-    const unclassifiedMelee = ownerKind === "MELEE_TYPE" && ownerId === null && firearmId === null;
-    const owner = unclassifiedMelee ? { name: "", enabled: true } : ownerKind === "FIREARM"
+    const standaloneMelee = ownerKind === "MELEE_TYPE" && ownerId === null && firearmId === null;
+    if (ownerKind === "MELEE_TYPE" && !standaloneMelee) await assertSpecificMeleeOwnerAllowed(client, gameId);
+    const owner = standaloneMelee ? { name: "", enabled: true } : ownerKind === "FIREARM"
       ? (await client.query<{ name: string; enabled: boolean }>(`SELECT name,enabled FROM zzsh_supply.firearm WHERE game_id=$1 AND id=$2`, [gameId, firearmId])).rows[0]
       : (await client.query<{ name: string; enabled: boolean }>(`SELECT name,enabled FROM zzsh_supply.skin_owner WHERE game_id=$1 AND kind=$2 AND id=$3`, [gameId, ownerKind, ownerId])).rows[0];
     if (!owner) throw invalid("Owner does not belong to this game", "ownerRef");
     const newBinding = row.naming_state !== "VERIFIED" || ownerKind !== row.owner_kind || ownerId !== row.owner_id || firearmId !== row.firearm_id;
     if (newBinding && !owner.enabled) throw invalid("Owner is disabled", "ownerRef");
-    name = skinText(unclassifiedMelee ? baseName : `${owner.name}-${baseName}`, "name", 120);
+    name = skinText(standaloneMelee ? baseName : `${owner.name}-${baseName}`, "name", 120);
     if (body.name !== undefined && body.name !== name) throw invalid("Display name must match owner and base name", "name");
   } else if (name !== row.name) {
     if (row.naming_state === "VERIFIED") throw invalid("Confirm structured identity to rename this skin", "name");
@@ -391,6 +398,7 @@ export async function createSkinOwner(client: PoolClient, adminUserId: string, i
   ensureOnlyFields(input, ["expectedCatalogRevision", "kind", "code", "name", "reason", "evidenceRefs"]);
   const body = { ...input }; identityEvidence(body);
   if (body.kind !== "AGENT" && body.kind !== "MELEE_TYPE") throw invalid("Unsupported owner kind");
+  if (body.kind === "MELEE_TYPE") await assertSpecificMeleeOwnerAllowed(client, gameId);
   const code = requireCode(body), name = skinText(body.name, "name", 120);
   await checkCatalogRevision(client, gameId, body);
   const id = newSupplyId("skin_owner");
@@ -406,6 +414,7 @@ export async function updateSkinOwner(client: PoolClient, adminUserId: string, i
   const row = (await client.query<{ gameId: string; kind: string; code: string }>(`SELECT game_id AS "gameId",kind,code FROM zzsh_supply.skin_owner WHERE id=$1 FOR UPDATE`, [id])).rows[0];
   if (!row) throw notFound();
   await assertGameScope(client, adminUserId, isBoss, row.gameId);
+  if (enabled && row.kind === "MELEE_TYPE") await assertSpecificMeleeOwnerAllowed(client, row.gameId);
   await checkCatalogRevision(client, row.gameId, input);
   await client.query(`UPDATE zzsh_supply.skin_owner SET enabled=$1,updated_at=clock_timestamp() WHERE id=$2`, [enabled, id]);
   return { id, kind: row.kind, code: row.code, enabled, catalogRevision: await finishCatalogWrite(client, row.gameId, input) };
@@ -983,7 +992,7 @@ export async function readPublicCatalog(
       categoryId = categoriesById.get(categoryId)!.parentId;
     }
   }
-  const owners = [...new Map(visibleRefs.rows.filter(reference => reference.id && reference.kind && reference.name)
+  const owners = [...new Map(visibleRefs.rows.filter(reference => reference.id && reference.kind && reference.name && (gameRow.code !== "delta" || reference.kind !== "MELEE_TYPE"))
     .map(({ id, kind, name, firearmClassificationId, firearmClassificationName }) => [`${kind}:${id}`, { id, kind, name, ...(kind === "FIREARM" ? { firearmClassificationId: firearmClassificationId ?? null, firearmClassificationName: firearmClassificationName ?? null } : {}) }])).values()]
     .sort((a, b) => a.kind!.localeCompare(b.kind!) || a.name!.localeCompare(b.name!, "zh-CN") || a.id!.localeCompare(b.id!));
 
@@ -1082,7 +1091,9 @@ export async function readPublicCatalog(
     skinFilters: { version: 1, ownerKinds: [...CATALOG_OWNER_KINDS], firearmClassifications: classifications.map(({ id, code, name, sortOrder }) => ({ id, code, name, sortOrder })), collectibleValues: ["true", "false", "null"], rarityStates: ["UNKNOWN"] },
     rarities: rarities.rows,
     entitlements: entitlements.rows,
-    skins: page,
+    skins: page.map(skin => gameRow.code === "delta" && skin.ownerKind === "MELEE_TYPE"
+      ? { ...skin, ownerId: null, ownerName: null }
+      : skin),
     nextCursor,
     limit,
   };
@@ -1145,7 +1156,7 @@ export async function readAdminCatalog(
     categories: categories.rows,
     skins: skins.rows,
     entitlements: entitlements.rows,
-    owners: owners.rows,
+    owners: owners.rows.filter(owner => game.rows[0]!.code !== "delta" || owner.kind === "AGENT"),
     firearmOwners: firearmOwners.rows,
   };
 }

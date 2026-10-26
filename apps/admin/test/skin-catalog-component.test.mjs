@@ -37,7 +37,7 @@ test("catalog row editor: identity, conflicts and fixed request recovery", async
     if (node.tagName === "BUTTON") {
       await act(async () => node.click());
       await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
-      const LABEL_FOR = { FIREARM: "枪械", MELEE_TYPE: "刀型", AGENT: "干员" };
+      const LABEL_FOR = { FIREARM: "枪械", MELEE_TYPE: "近战外观", AGENT: "干员" };
       const option = [...document.querySelectorAll('[role="option"]')].find(o => o.textContent.includes(LABEL_FOR[value] ?? value) || (value === "MELEE_TYPE" && o.textContent.includes("近战外观")));
       assert.ok(option, "option " + value);
       await act(async () => option.click());
@@ -139,11 +139,11 @@ test("catalog row editor: identity, conflicts and fixed request recovery", async
     await t.test("missing identity or firearm-owner contract never invents options or writes", async () => {
       await mount({ missing: true }); assert.match(document.body.textContent, /完整皮肤身份/); const createBtn = byText("新增皮肤"); assert.ok(createBtn === undefined || createBtn.disabled === true); assert.equal(writes.length, 0);
       for (const option of [{ missingFirearms: true }, { badFirearms: true }]) {
-        await mount(option); await click("确认身份", row("pending")); await fill("所属对象类型", "FIREARM"); assert.match(document.body.textContent, /枪械归属未接入/); assert.equal(field("所属对象").disabled, true); await review(); await fill("皮肤本名", "Name"); await click("保存", document.querySelector('[role="dialog"]')); assert.equal(writes.length, 0); assert.ok(!reads.some(p => p.endsWith('/firearms')));
+        await mount(option); await click("确认身份", row("pending")); await fill("皮肤类型", "FIREARM"); assert.match(document.body.textContent, /枪械归属未接入/); assert.equal(field("所属对象").disabled, true); await review(); await fill("皮肤本名", "Name"); await click("保存", document.querySelector('[role="dialog"]')); assert.equal(writes.length, 0); assert.ok(!reads.some(p => p.endsWith('/firearms')));
       }
     });
     await t.test("catalog-only administrator confirms FIREARM through returned catalog ids", async () => {
-      await mount(); await click("确认身份", row("pending")); await fill("所属对象类型", "FIREARM"); await fill("所属对象", "Gun"); await fill("皮肤本名", "Gun base"); await review(); await click("保存", document.querySelector('[role="dialog"]'));
+      await mount(); await click("确认身份", row("pending")); await fill("皮肤类型", "FIREARM"); await fill("所属对象", "Gun"); await fill("皮肤本名", "Gun base"); await review(); await click("保存", document.querySelector('[role="dialog"]'));
       assert.deepEqual(writes[0].body.ownerRef, { kind: "FIREARM", id: "gun" }); assert.ok(!("name" in writes[0].body)); assert.match(document.body.textContent, /Gun-Gun base/);
       assert.ok(!identity.permissions.includes("supply.gunsmith.manage")); assert.ok(!reads.some(path => path.endsWith("/firearms")));
     });
@@ -168,9 +168,20 @@ test("catalog row editor: identity, conflicts and fixed request recovery", async
       assert.equal(writes[1].body.name, "Alias-only editing");
       assert.equal(Object.hasOwn(writes[1].body, "isCollectible"), false); assert.equal(Object.hasOwn(writes[1].body, "defaultState"), false);
     });
-    await t.test("melee identity can confirm its type and keep concrete knife identity unknown", async () => {
-      await mount(); await click("确认身份", row("pending")); await fill("所属对象类型", "MELEE_TYPE"); await fill("皮肤本名", "Synthetic melee"); await review(); await click("保存", document.querySelector('[role="dialog"]'));
+    await t.test("Delta melee confirms a standalone appearance without a parent selector or pending-parent warning", async () => {
+      await mount(); await click("确认身份", row("pending")); await fill("皮肤类型", "MELEE_TYPE");
+      const dialog = document.querySelector('[role="dialog"]');
+      assert.equal(dialog.querySelector('[aria-label="所属对象"]'), null); assert.match(dialog.textContent, /近战外观独立维护/); assert.doesNotMatch(dialog.textContent, /刀型|具体.*待核/);
+      await fill("皮肤本名", "Synthetic melee"); await review(); await click("保存", dialog);
       assert.equal(writes.length, 1); assert.equal(writes[0].body.ownerKind, "MELEE_TYPE"); assert.equal(writes[0].body.ownerRef, null);
+    });
+
+    await t.test("Delta owner maintenance hides legacy melee rows and offers only agent creation", async () => {
+      await mount(); await click("所属对象");
+      assert.match(document.querySelector('tbody').textContent, /agent_code/); assert.doesNotMatch(document.querySelector('tbody').textContent, /melee_code|Blade/);
+      await click("新增所属对象"); await act(async () => field("所属对象类型").click()); await flush();
+      const options = [...document.querySelectorAll('[role="option"]')]; assert.equal(options.length, 1); assert.match(options[0].textContent, /干员/);
+      assert.equal(writes.length, 0);
     });
     for (const mode of ["network", "invalid-receipt"]) await t.test(`${mode} restores the original method/body/key even after catalog refresh`, async () => {
       await mount(); await click("编辑", row("legacy")); await fill("名称", "Unknown result"); await fill("操作原因", "Row reason"); policy = mode; await saveRow(); assert.equal(field("名称").disabled, true); assert.ok(byText("核对原提交")); model.game.catalogRevision = "99";
@@ -239,7 +250,7 @@ test("catalog row editor: identity, conflicts and fixed request recovery", async
       }
     });
     await t.test("owner create is narrow and item media binding only writes on save", async () => {
-      await mount(); await click("所属对象"); await click("新增所属对象"); await fill("稳定 code", "new_owner"); await fill("名称", "New owner"); await fill("所属对象类型", "MELEE_TYPE"); await fill("操作原因", "Owner create"); await click("详情"); await review(); await click("保存", document.querySelector('[role="dialog"]') ); assert.match(writes[0].path, /skin-owners$/); assert.equal(writes[0].body.kind, "MELEE_TYPE"); assert.ok(!("sourceField" in writes[0].body));
+      await mount(); await click("所属对象"); await click("新增所属对象"); await fill("稳定 code", "new_owner"); await fill("名称", "New owner"); await fill("所属对象类型", "AGENT"); await fill("操作原因", "Owner create"); await click("详情"); await review(); await click("保存", document.querySelector('[role="dialog"]') ); assert.match(writes[0].path, /skin-owners$/); assert.equal(writes[0].body.kind, "AGENT"); assert.ok(!("sourceField" in writes[0].body));
       await click("计费物品"); const itemRow = [...document.querySelectorAll('tbody tr')][0]; await click("编辑", itemRow); await click("详情", itemRow); await click("绑定图片"); assert.ok(reads.some(p => p.includes('media-options'))); assert.match(document.body.textContent, /没有可绑定图片/); await click("取消");
     });
     await t.test("skin row reuses the public SKIN_MEDIA picker and sends a binding only on save", async () => {

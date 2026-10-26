@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import type { PoolClient } from "pg";
-import { createCatalogEntry, updateCatalogEntry, parseSkinWrite, createSkinOwner, readPublicCatalog } from "../src/supply/catalog";
+import { createCatalogEntry, updateCatalogEntry, parseSkinWrite, createSkinOwner, updateSkinOwner, readAdminCatalog, readPublicCatalog } from "../src/supply/catalog";
 import { configureSkinIdentityPrivileges } from "../src/database/business-migrations";
 import { withIdempotency } from "../src/supply/supply-util";
 import { changeMediaVisibility, reviewMediaAsset } from "../src/supply/media";
@@ -14,12 +14,15 @@ const draft = { code: "skin_fixture", name: "旧名", categoryId: "category_fixt
 const legacy = { id: "skin_fixture", game_id: "game_fixture", code: "stable_code", name: "旧名", category_id: "category_fixture", rarity_code: null, media_id: null, sort_order: 0, enabled: true, form_visible: true, naming_state: "LEGACY", aliases: [], owner_kind: null, owner_id: null, firearm_id: null, base_name: null, source_namespace: null, source_field: null, source_token: null };
 
 // Records calls from the real writer; does not implement PostgreSQL constraints/locks.
-function clientFixture(row: Record<string, unknown> = legacy, options: { revision?: string; cas?: boolean; sourceOccupied?: boolean; ownerGameMismatch?: boolean; ownerEnabled?: boolean; mediaGameId?: string } = {}) {
+function clientFixture(row: Record<string, unknown> = legacy, options: { revision?: string; cas?: boolean; sourceOccupied?: boolean; ownerGameMismatch?: boolean; ownerEnabled?: boolean; mediaGameId?: string; gameCode?: string } = {}) {
   const calls: Array<{ sql: string; args: unknown[] }> = [];
   const client = { query: async (sql: string, args: unknown[] = []) => {
     calls.push({ sql, args });
     let rows: unknown[] = [];
-    if (sql.startsWith('SELECT "id", "catalog_revision"')) rows = [{ id: "game_fixture", catalogRevision: options.revision ?? "10" }];
+    if (sql.startsWith('SELECT code FROM zzsh_supply.game')) rows = [{ code: options.gameCode ?? "fixture" }];
+    else if (sql.startsWith('SELECT game_id AS "gameId",kind,code FROM zzsh_supply.skin_owner')) rows = [{ gameId: row.game_id, kind: row.kind ?? "MELEE_TYPE", code: row.code }];
+    else if (sql.startsWith('UPDATE zzsh_supply.skin_owner SET')) rows = [];
+    else if (sql.startsWith('SELECT "id", "catalog_revision"')) rows = [{ id: "game_fixture", catalogRevision: options.revision ?? "10" }];
     else if (sql.startsWith('SELECT * FROM "zzsh_supply"."skin"')) rows = [row];
     else if (sql.includes('SELECT catalog_revision::text')) rows = [{ revision: options.revision ?? "10" }];
     else if (sql.startsWith('UPDATE zzsh_supply.game')) rows = options.cas === false ? [] : [{ revision: "11" }];
@@ -309,14 +312,57 @@ test("editing an unbound skin rejects image provenance instead of silently disca
   assert.equal(sk7Update(f.calls), undefined);
 });
 
-test("confirmed unclassified melee keeps its real entity without inventing a specific knife owner", async () => {
-  const f = clientFixture({ ...legacy, enabled: false, form_visible: false });
+test("Delta melee is a complete standalone appearance without a parent owner", async () => {
+  const f = clientFixture({ ...legacy, enabled: false, form_visible: false }, { gameCode: "delta" });
   await updateCatalogEntry(f.client, "a", true, "skins", "skin_fixture", { expectedCatalogRevision: "10", ownerKind: "MELEE_TYPE", ownerRef: null, baseName: "赤枭", confirmIdentity: true, ...evidence });
   const update = sk7Update(f.calls)!;
   assert.deepEqual(update.args.slice(11, 15), ["MELEE_TYPE", null, null, "赤枭"]);
   assert.equal(update.args[0], "赤枭");
   assert.equal(f.calls.some(call => call.sql.startsWith('SELECT name,enabled FROM')), false);
   for (const ownerKind of ["AGENT", "FIREARM"]) assert.throws(() => parseSkinWrite({ expectedCatalogRevision: "10", ownerKind, ownerRef: null, baseName: "外观", confirmIdentity: true, ...evidence }, true));
+});
+
+test("Delta rejects creating a melee parent but preserves agents and other-game compatibility", async () => {
+  const body = { expectedCatalogRevision: "10", kind: "MELEE_TYPE", code: "fake_parent", name: "转刀", ...evidence };
+  const delta = clientFixture(legacy, { gameCode: "delta" });
+  await assert.rejects(createSkinOwner(delta.client, "admin", true, "game_fixture", body), (error: any) => error.status === 400);
+  assert.equal(delta.calls.some(c => c.sql.startsWith("INSERT")), false);
+  const agent = clientFixture(legacy, { gameCode: "delta" });
+  assert.equal((await createSkinOwner(agent.client, "admin", true, "game_fixture", { ...body, kind: "AGENT", name: "干员" })).kind, "AGENT");
+  const other = clientFixture(legacy, { gameCode: "other_game" });
+  assert.equal((await createSkinOwner(other.client, "admin", true, "game_fixture", body)).kind, "MELEE_TYPE");
+});
+
+test("Delta rejects a specific melee rebind before owner lookup or skin mutation", async () => {
+  const f = clientFixture({ ...legacy, naming_state: "VERIFIED", owner_kind: "MELEE_TYPE", base_name: "赤枭", name: "赤枭" }, { gameCode: "delta" });
+  await assert.rejects(updateCatalogEntry(f.client, "admin", true, "skins", "skin_fixture", {
+    expectedCatalogRevision: "10", ownerRef: { kind: "MELEE_TYPE", id: "fake_parent" }, baseName: "赤枭", confirmIdentity: true, ...evidence,
+  }), (error: any) => error.status === 400);
+  assert.equal(f.calls.some(c => c.sql.startsWith("SELECT name,enabled FROM")), false);
+  assert.equal(f.calls.some(c => c.sql.startsWith("UPDATE zzsh_supply.skin SET")), false);
+});
+
+test("Delta historical melee owners may be retired but not re-enabled", async () => {
+  const reenable = clientFixture(legacy, { gameCode: "delta" });
+  await assert.rejects(updateSkinOwner(reenable.client, "admin", true, "owner_fixture", { expectedCatalogRevision: "10", enabled: true, reason: "History only" }), (error: any) => error.status === 400);
+  assert.equal(reenable.calls.some(c => c.sql.startsWith("UPDATE zzsh_supply.skin_owner")), false);
+  const retire = clientFixture(legacy, { gameCode: "delta" });
+  assert.equal((await updateSkinOwner(retire.client, "admin", true, "owner_fixture", { expectedCatalogRevision: "10", enabled: false, reason: "Retire invalid parent" })).enabled, false);
+  assert.deepEqual(retire.calls.find(c => c.sql.startsWith("UPDATE zzsh_supply.skin_owner"))!.args, [false, "owner_fixture"]);
+});
+
+test("Delta admin owner options omit legacy melee parents without changing another game", async () => {
+  const owners = [{ id: "agent", kind: "AGENT", code: "agent", name: "干员", enabled: true }, { id: "old_melee", kind: "MELEE_TYPE", code: "retired", name: "旧描述", enabled: false }];
+  for (const code of ["delta", "other_game"]) {
+    const client = { query: async (sql: string) => {
+      if (sql.includes('FROM "zzsh_supply"."game" WHERE "id" = $1')) return { rows: [{ id: "game_fixture", code }], rowCount: 1 };
+      if (sql.includes("FROM zzsh_supply.skin_owner")) return { rows: owners, rowCount: owners.length };
+      if (/FROM (?:"zzsh_supply"\."(?:billable_item|skin_rarity|skin_category|skin|entitlement)"|zzsh_supply\.firearm)/.test(sql)) return { rows: [], rowCount: 0 };
+      throw new Error("UNMODELLED_OWNER_DIRECTORY_QUERY");
+    } } as unknown as PoolClient;
+    const result = await readAdminCatalog(client, "admin", true, "game_fixture");
+    assert.deepEqual((result.owners as Array<{ id: string }>).map(o => o.id), code === "delta" ? ["agent"] : ["agent", "old_melee"]);
+  }
 });
 
 // The fixture returns only columns selected by the real audit reader, like pg.

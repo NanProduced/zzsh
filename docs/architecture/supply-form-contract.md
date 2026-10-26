@@ -51,6 +51,8 @@ Delta `attributes.full_payout_declaration` 可随号主声明保存为 `{schema:
 
 `skinFilters.version=1`提供ownerKinds、完整同游戏启用firearmClassifications、collectibleValues及rarityStates；客户端只在能力与部署准入均就绪时发新参数。空枪种字典返回[]，不猜分组或阻断按所属对象筛选。owners继续使用id/kind/name，FIREARM可带分类ID/名称；字典停用不抹去旧绑定名称，不允许借筛选重新绑定。元数据不由当前页或q推断，不公开完整来源证据/URL。目录过滤只决定可选择skinId，市场账号仍用原ANY/ALL组合；不据分类改金额政策或旧冻结快照。
 
+三角洲近战是独立外观，不使用ownerId父级，正常ownerRef为空，不标为“所属待核”；不提供或展示刀型所属选项。当前目录owners不含近战，近战行ownerId/ownerName为空；skinFilters.ownerKinds是兼容的皮肤类型枚举，不要求每个类型都有所属对象。干员和枪械继续按各自所属过滤。MELEE_TYPE技术枚举及旧参数格式保留兼容，历史owner字段只供历史理解，不重建当前父级或回写冻结快照。
+
 上架/编辑、市场皮肤筛选及公开/本人账号详情可显示经平台媒体门禁的皮肤图片；干员竖卡、枪械/近战横图等比显示，缺图或失败保持明确状态。账号列表/卡片、首页和收藏仅显示名称、品质等文字摘要及余量，不显示皮肤图片。目录有图不证明持有；新报价冻结本次皮肤摘要，旧冻结快照缺失的新增字段继续缺省，不补写历史。
 
 本人私有详情对origin=NATIVE、DRAFT且contentHash=null的版本可附`draftSkinSummary={source:"CURRENT_DRAFT_SELECTION",catalogRevision,items,withheld}`，优先展示当前已选目录摘要（含合法空集合），不可展示项只记数量。它不改写旧presentation、不代表已冻结展示或公开上架；已确认/冻结版本仍使用原presentation，缺新字段的旧服务保持兼容并提示进入编辑核对。

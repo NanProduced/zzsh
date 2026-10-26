@@ -27,7 +27,7 @@ export const OBJECT_PURPOSE: Record<CatalogKind, string> = {
   items: "报价资源定义：计价单位与数量精度来自这里；发布表单按该物品自身的必填配置校验。",
   categories: "发布表单皮肤选择的分组树；表单展示开关决定该分类是否出现在发布表单。",
   skins: "维护可选外观及其身份、归属和展示信息；此处不直接维护价格。",
-  "skin-owners": "皮肤归属的稳定本体（干员、刀型）；枪械归属复用枪械目录，不在此维护。",
+  "skin-owners": "维护皮肤所属干员；枪械归属复用枪械目录。三角洲近战外观独立维护，不需要所属对象。",
   rarities: "维护展示使用的受控词表；不按俗称自动推导价格或押金分组。",
   entitlements: "账号属性的类型词表；值类型与有效类型供账号供给与展示读取。",
 };
@@ -45,7 +45,7 @@ export const OBJECT_EMPTY_HINT: Record<CatalogKind, string> = {
   items: "创建第一个计费物品后，规则与价目才能按物品定价。",
   categories: "创建第一个分类后，皮肤才有可挂接的分组。",
   skins: "皮肤需要先有至少一个皮肤分类；创建后为停用待核草稿，身份确认与启用是独立动作。",
-  "skin-owners": "创建干员或刀型本体后，皮肤才能挂接归属；枪械归属在改枪码目录维护。",
+  "skin-owners": "创建所属干员后，干员皮肤可挂接归属；枪械归属复用枪械目录，三角洲近战外观无需所属对象。",
   rarities: "创建受控品质词表后，皮肤可按明确的官方或平台来源标注品质；停用的品质不能再新选。",
   entitlements: "创建权益词表后，账号属性才有可读取的类型。",
 };
@@ -106,7 +106,7 @@ export function objectRows(catalog: AdminCatalogResponse | null, kind: CatalogKi
   if (kind === "items") return catalog.items as CatalogRow[];
   if (kind === "categories") return catalog.categories as CatalogRow[];
   if (kind === "skins") return catalog.skins as CatalogRow[];
-  if (kind === "skin-owners") return (catalog.owners ?? []) as CatalogRow[];
+  if (kind === "skin-owners") return (catalog.owners ?? []).filter(owner => catalog.game.code !== "delta" || owner.kind === "AGENT") as CatalogRow[];
   if (kind === "rarities") return catalog.rarities as CatalogRow[];
   return catalog.entitlements as CatalogRow[];
 }
@@ -154,8 +154,8 @@ export function ownerText(
     return firearms ? "枪械归属未在当前目录中" : "枪械归属未接入";
   }
   const owner = owners.find((entry) => entry.id === ownerRef.id);
-  if (!owner) return `${ownerRef.kind === "AGENT" ? "干员" : "刀型"}归属未提供`;
-  return `${owner.name}（${ownerRef.kind === "AGENT" ? "干员" : "刀型"}）${owner.enabled ? "" : " · 已停用"}`;
+  if (!owner) return `${ownerRef.kind === "AGENT" ? "干员" : "近战"}归属未提供`;
+  return `${owner.name}（${ownerRef.kind === "AGENT" ? "干员" : "近战"}）${owner.enabled ? "" : " · 已停用"}`;
 }
 
 export const skinOwnerKind = (skin: Pick<CatalogSkin, "ownerKind" | "ownerRef">) => skin.ownerKind ?? skin.ownerRef?.kind ?? null;

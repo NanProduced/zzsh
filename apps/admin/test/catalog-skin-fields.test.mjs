@@ -1,11 +1,29 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { evidenceFields, rarityOptions, skinValues, skinPayload } from "../src/views/catalog-skin-fields.ts";
-import { skinIsSelectable, skinRarityBasisText } from "../src/views/supply-catalog/model.ts";
+import { evidenceFields, rarityOptions, skinValues, skinPayload, ownerPayload } from "../src/views/catalog-skin-fields.ts";
+import { skinIsSelectable, skinRarityBasisText, objectRows } from "../src/views/supply-catalog/model.ts";
 
 // 北京时间 2026-10-14 00:30 = UTC 2026-10-13 16:30：UTC 切片会把“今日”填成前一天。
 const beijingMidnight = Date.UTC(2026, 9, 13, 16, 30);
 const evidence = (over = {}) => ({ reason: "核对隐藏皮肤身份", evidenceUrls: "https://example.com/a", region: "中国大陆", note: "官方页面截图", ...over });
+
+test("Delta melee ignores a stale parent input while agents and firearms still require an owner", () => {
+  const values = { ...skinValues(), ...evidence(), ownerKind: "MELEE_TYPE", ownerId: "stale_parent", baseName: "赤枭" };
+  const body = skinPayload(values, "10", { id: "skin" }, true, "delta");
+  assert.equal(body.ownerRef, null); assert.equal(body.baseName, "赤枭");
+  for (const ownerKind of ["AGENT", "FIREARM"]) assert.throws(() => skinPayload({ ...values, ownerKind, ownerId: "" }, "10", { id: "skin" }, true, "delta"), /所属对象/);
+});
+
+test("Delta rejects a melee parent draft and omits historical parent rows", () => {
+  const values = { ...skinValues(), ...evidence(), ownerKind: "MELEE_TYPE", code: "parent", name: "错误父级" };
+  assert.throws(() => ownerPayload(values, "10", undefined, "delta"), /无需所属对象/);
+  assert.throws(() => ownerPayload({ ...values, enabled: "true" }, "10", { kind: "MELEE_TYPE" }, "delta"), /不能重新启用/);
+  assert.equal(ownerPayload({ ...values, enabled: "false" }, "10", { kind: "MELEE_TYPE" }, "delta").enabled, false);
+  assert.equal(ownerPayload({ ...values, ownerKind: "AGENT" }, "10", undefined, "delta").kind, "AGENT");
+  const owners = [{ id: "agent", kind: "AGENT" }, { id: "old_parent", kind: "MELEE_TYPE", enabled: false }];
+  assert.deepEqual(objectRows({ game: { code: "delta" }, owners }, "skin-owners").map(o => o.id), ["agent"]);
+  assert.equal(objectRows({ game: { code: "other_game" }, owners }, "skin-owners").length, 2);
+});
 
 test("F5 evidence date defaults to the Beijing calendar day, not the UTC one", t => {
   t.mock.timers.enable({ apis: ["Date"], now: beijingMidnight });

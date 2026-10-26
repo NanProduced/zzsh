@@ -89,7 +89,7 @@ test('public owners and category kinds cover the whole visible tree regardless o
 
 /** A bounded relational fixture executes the actual reader's predicates/parameters;
  *  it never substitutes the reader, parser, codec, route or BFF. It is not PostgreSQL. */
-function filterFixture(emptyClasses=false) {
+function filterFixture(emptyClasses=false, gameCode='delta') {
   const categories=[{id:'root',parentId:null},{id:'agents',parentId:'root'},{id:'firearms',parentId:'root'},{id:'melee',parentId:'root'}];
   const owners=[{id:'agent_A',kind:'AGENT',name:'Agent Alpha'},{id:'knife_A',kind:'MELEE_TYPE',name:'Knife Alpha'}];
   const classes=emptyClasses?[]:[{id:'class_A',code:'rifle',name:'Rifle',sortOrder:1,enabled:true},{id:'class_retired',code:'retired',name:'Retired class',sortOrder:2,enabled:false},{id:'class_unused',code:'unused',name:'No current skin',sortOrder:3,enabled:true}];
@@ -112,7 +112,7 @@ function filterFixture(emptyClasses=false) {
     if(/^(BEGIN|COMMIT|ROLLBACK|SET TRANSACTION)/.test(sql))return{rows:[],rowCount:0};
     if(sql.includes('game_service_operation'))return{rows:[{id:'service',gameCode:'delta',gameEnabled:true,enabled:true}]};
     if(sql.includes('catalog-reference-check'))return{rows:[{categoryOk:args[1]===null||categories.some(c=>c.id===args[1]),rarityOk:args[2]===null||rarities.some(r=>r.code===args[2]),ownerOk:args[3]===null||[...owners,...firearms].some(o=>o.id===args[3]),classificationOk:args[4]===null||classes.some(c=>c.id===args[4])}]};
-    if(sql.includes('FROM "zzsh_supply"."game"'))return{rows:args[0]==='game_delta'?[{id:'game_delta',code:'delta',catalogRevision:revision,currentReleaseId:null}]:[]};
+    if(sql.includes('FROM "zzsh_supply"."game"'))return{rows:args[0]==='game_delta'?[{id:'game_delta',code:gameCode,catalogRevision:revision,currentReleaseId:null}]:[]};
     if(sql.startsWith('WITH RECURSIVE'))return{rows:categories};
     if(sql.startsWith('SELECT DISTINCT s.category_id'))return{rows:skins.map(s=>{const owner=named(s),f=firearms.find(f=>f.id===s.ownerId);return{categoryId:s.categoryId,kind:s.ownerKind,id:s.ownerId,name:owner?.name??null,firearmClassificationId:f?.classificationId??null,firearmClassificationName:classes.find(c=>c.id===f?.classificationId)?.name??null};})};
     if(sql.includes('FROM "zzsh_supply"."skin_rarity"'))return{rows:rarities.filter(r=>r.enabled)};
@@ -158,6 +158,19 @@ test('actual catalog reader applies AND predicates and real false/null/unknown p
 test('catalog reference validation is game-scoped and independent of result filters or page',async()=>{
   for(const filters of [{categoryId:'foreign_category'},{rarityCode:'foreign_quality'},{ownerId:'foreign_owner'},{firearmClassificationId:'foreign_class'}]){const f=filterFixture();await assert.rejects(()=>readPublicCatalog(f.client,'game_delta',filters,20),(e:any)=>e.status===400);assert.equal(f.queries.some(q=>q.sql.includes('s."owner_kind" AS "ownerKind"')),false);}
   const f=filterFixture(),body=await readPublicCatalog(f.client,'game_delta',{q:'no matching skin',ownerId:'firearm_A'},1) as any;assert.deepEqual(body.skins,[]);assert(body.owners.some((o:any)=>o.id==='firearm_A'));assert(body.skinFilters.firearmClassifications.some((c:any)=>c.id==='class_unused'));assert(body.rarities.some((r:any)=>r.code==='quality_unused'));assert.equal(f.queries.filter(q=>q.sql.includes('catalog-reference-check')).length,1);
+});
+
+test('Delta public catalog never offers or projects a legacy melee parent; other games retain compatibility',async()=>{
+  for(const scope of ['browse','publishing'] as const){
+    const f=filterFixture(),body=await readPublicCatalog(f.client,'game_delta',{ownerKind:'MELEE_TYPE'},20,undefined,scope) as any;
+    assert.deepEqual(body.skins.map((s:any)=>s.id),['s6','s7']);
+    assert(body.skins.every((s:any)=>s.ownerId===null&&s.ownerName===null));
+    assert(body.owners.every((o:any)=>o.kind!=='MELEE_TYPE'));
+    assert.equal(body.categories.find((c:any)=>c.id==='melee').ownerKind,'MELEE_TYPE');
+  }
+  const f=filterFixture(false,'other'),body=await readPublicCatalog(f.client,'game_delta',{ownerKind:'MELEE_TYPE'},20) as any;
+  assert.equal(body.skins[0].ownerId,'knife_A');assert.equal(body.skins[0].ownerName,'Knife Alpha');
+  assert(body.owners.some((o:any)=>o.id==='knife_A'));
 });
 
 test('full options, empty class dictionary and pagination stay bounded without exposing private metadata',async()=>{
