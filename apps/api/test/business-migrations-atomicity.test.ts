@@ -183,3 +183,17 @@ test('dated numbering ACL repair removes stale runtime table and column rights a
  assert(f.seen.some(q=>q.sql.includes('GRANT EXECUTE ON FUNCTION zzsh_supply.next_dated_account_display_no()')));
  assert(!f.seen.some(q=>q.sql.includes('GRANT USAGE, SELECT ON SEQUENCE zzsh_supply.account_display_no_seq')));
 });
+
+test('0102 只替换兼容规则校验函数，使启用模式的上限可省略、下限仍必填',()=>{
+ const directory=resolve('migrations/business');
+ const journal=JSON.parse(readFileSync(resolve(directory,'meta/_journal.json'),'utf8'));
+ const entry=journal.entries[102],prior=journal.entries[101];
+ assert.equal(entry.idx,102);assert.equal(entry.tag,'0102_supply_pricing_compat_optional_max');assert(entry.when>prior.when);assert.equal(prior.tag,'0101_withdrawal_bank_binding');
+ const migration=readMigrationFiles({migrationsFolder:directory}).find(item=>item.folderMillis===entry.when);assert(migration);
+ const sql=readFileSync(resolve(directory,entry.tag+'.sql'),'utf8');
+ assert.equal(migration.hash,createHash('sha256').update(readFileSync(resolve(directory,entry.tag+'.sql'))).digest('hex'));
+ assert.match(sql,/CREATE OR REPLACE FUNCTION zzsh_supply\.valid_compat_haff_rule\(rule jsonb\)/);
+ assert.match(sql,/NOT \(\(cfg->'modes'->mode_name\) \? 'min'\)/);
+ assert.match(sql,/map_name='max' AND NOT \(\(cfg->'modes'->mode_name\) \? 'max'\)/);
+ assert.doesNotMatch(sql,/\b(ALTER TABLE|DROP|UPDATE|INSERT|DELETE)\b/);
+});

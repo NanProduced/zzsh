@@ -157,7 +157,7 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
 
   const boxes = haff ? Object.entries(haff.baseBySafeBox) : [];
   const p = haff ? num(haff.compatibility.ordinary.spreadDelta) : null;
-  const pf = haff ? num(haff.compatibility.fast.spreadDelta) : null;
+  const pf = haff?.compatibility.fast ? num(haff.compatibility.fast.spreadDelta) : null;
   const standardDelta = haff ? num(haff.compatibility.ordinary.discounts.STANDARD) : null;
   const itemRows = curPrice ? standardItemRows(rules, curPrice.id) : [];
   const compatTiers = curPrice ? compatTierCount(rules, curPrice.id) : 0;
@@ -212,7 +212,7 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
                         <div className="flex items-center gap-2">
                           <span className="text-sm font-semibold">核心参数：平台比例差</span>
                           <Badge variant="outline">普通/自定义模式适用</Badge>
-                          {haff.compatibility.modes.fast.enabled ? <Badge variant="secondary">快速模式: {val("haff.spread.fast") || haff.compatibility.fast.spreadDelta}</Badge> : null}
+                          {haff.compatibility.modes.fast.enabled && haff.compatibility.fast ? <Badge variant="secondary">快速模式: {val("haff.spread.fast") || haff.compatibility.fast.spreadDelta}</Badge> : null}
                         </div>
                         <p className="mt-1 text-xs text-muted-foreground">
                           租客比例 ＝ 号主比例 − 平台比例差{standardDelta ? ` + 普通档调整(${standardDelta})` : ""}；调大比例差，租客支付增加、平台留存收益扩大。

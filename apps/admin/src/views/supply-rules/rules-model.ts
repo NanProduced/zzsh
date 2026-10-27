@@ -11,8 +11,10 @@ export type HaffV2 = {
   dailyDeltaByTermOption: Record<string, string>;
   compatibility: {
     ordinary: { spreadDelta: string; discounts: Record<string, string> };
-    fast: { spreadDelta: string; discounts: Record<string, string> };
-    modes: { ordinary: { enabled: boolean }; custom: { enabled: boolean; min: RatioBound; max: RatioBound }; fast: { enabled: boolean; min: RatioBound; max: RatioBound } };
+    /** 极速 lane 仅在极速启用时必备；关闭时可缺省。 */
+    fast?: { spreadDelta: string; discounts: Record<string, string> };
+    /** 关闭的模式可不带界值；启用时 min 必填，max 可省略＝仅下限。 */
+    modes: { ordinary: { enabled: boolean }; custom: { enabled: boolean; min?: RatioBound; max?: RatioBound }; fast: { enabled: boolean; min?: RatioBound; max?: RatioBound } };
   };
 };
 
@@ -24,7 +26,9 @@ export type HaffV2 = {
 export function asHaffV2(rule: PriceVersionRecord["haffRule"] | undefined): HaffV2 | null {
   if (rule?.schema !== "haff-ratio-v2") return null;
   const r = rule as Partial<HaffV2>;
-  if (!r.baseBySafeBox || !r.vitalityDeltaByLevel || !r.bearDeltaByLevel || !r.dailyDeltaByTermOption || !r.compatibility?.ordinary?.discounts || !r.compatibility.fast?.discounts || !r.compatibility.modes?.ordinary || !r.compatibility.modes.custom || !r.compatibility.modes.fast) return null;
+  if (!r.baseBySafeBox || !r.vitalityDeltaByLevel || !r.bearDeltaByLevel || !r.dailyDeltaByTermOption || !r.compatibility?.ordinary?.discounts || !r.compatibility.modes?.ordinary || !r.compatibility.modes.custom || !r.compatibility.modes.fast) return null;
+  // 合法的“极速关闭”规则可以没有 fast lane；只有极速启用而缺 lane 才视为不完整。
+  if (r.compatibility.modes.fast.enabled === true && !r.compatibility.fast?.discounts) return null;
   return rule as unknown as HaffV2;
 }
 

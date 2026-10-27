@@ -178,7 +178,8 @@ export function validateDeltaHaffRule(value: unknown, mode: "SPREAD" | "PERCENT"
       if (typeof config.enabled !== "boolean") throw invalid("Mode enabled is required");
       // A disabled mode is not forced to carry bounds: partial or malformed
       // min/max on a disabled mode is treated as omitted (G3-ext fast stays off).
-      if (name !== "ordinary" && config.enabled) for (const bound of [config.min, config.max]) {
+      // 启用的自定义/极速模式必须有下限；上限可省略，表示“仅下限”（不用 9999 之类伪装无上限）。
+      if (name !== "ordinary" && config.enabled) for (const bound of config.max === undefined ? [config.min] : [config.min, config.max]) {
         compatFields(bound, ["base", "value"]);
         if (!bound || !["C", "ABSOLUTE"].includes(bound.base)) throw invalid("Invalid ratio bound");
         compatDecimal(bound.value, true);
@@ -397,8 +398,9 @@ function resolveCompatHaffContext(input: Parameters<typeof resolveDeltaHaffConte
     const owner = selection.rentalMode === "ordinary" ? base : parseNonNegativeDecimal(selection.ownerRatioB!, 8, "B");
     if (selection.rentalMode !== "ordinary") {
       const bound = (value: RatioBound) => addDecimal(value.base === "C" ? base : { value: 0n, scale: 0 }, parseSignedDecimal(value.value, 8, "bound"));
-      const min = bound(mode.min!); const max = bound(mode.max!);
-      if (subtractDecimal(max, min).value < 0n || subtractDecimal(owner, min).value < 0n || subtractDecimal(max, owner).value < 0n) return failed;
+      const min = bound(mode.min!); const max = mode.max === undefined ? null : bound(mode.max);
+      // 无上限时只校验 B ≥ 下限；有上限时保持原有 max ≥ min 且 min ≤ B ≤ max。
+      if (subtractDecimal(owner, min).value < 0n || (max !== null && (subtractDecimal(max, min).value < 0n || subtractDecimal(max, owner).value < 0n))) return failed;
     }
     const lane = config[selection.rentalMode === "fast" ? "fast" : "ordinary"];
     const spread = parseNonNegativeDecimal(lane.spreadDelta, 8, "P");

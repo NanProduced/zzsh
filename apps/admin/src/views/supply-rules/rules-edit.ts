@@ -35,7 +35,8 @@ export function baseline(rules: RulesResponse): { fields: EditField[]; values: E
   if (haff) {
     for (const [code, b] of Object.entries(haff.baseBySafeBox)) add({ key: `haff.base.${code}`, group: "哈夫币价格", label: `${safeBoxLabel(code)} 号主比例` }, b);
     add({ key: "haff.spread.ordinary", group: "哈夫币价格", label: "比例差（普通/自定义）" }, haff.compatibility.ordinary.spreadDelta);
-    add({ key: "haff.spread.fast", group: "哈夫币价格", label: "比例差（快速）" }, haff.compatibility.fast.spreadDelta);
+    // 极速 lane 缺省（极速关闭）时不生成该字段；极速参数在“租赁模式配置”中单独维护。
+    if (haff.compatibility.fast) add({ key: "haff.spread.fast", group: "哈夫币价格", label: "比例差（快速）" }, haff.compatibility.fast.spreadDelta);
     for (const [l, d] of Object.entries(haff.vitalityDeltaByLevel)) add({ key: `haff.vit.${l}`, group: "哈夫币价格", label: `体力 ${l} 级比例调整` }, d);
     for (const [l, d] of Object.entries(haff.bearDeltaByLevel)) add({ key: `haff.bear.${l}`, group: "哈夫币价格", label: `负重 ${l} 级比例调整` }, d);
     for (const [c, d] of Object.entries(haff.dailyDeltaByTermOption)) add({ key: `haff.daily.${c}`, group: "租期与每日消耗", label: `${rules.termOptions.find((o) => o.code === c && o.versionId === ctx.termVersionId)?.name ?? c} 号主比例调整` }, d);

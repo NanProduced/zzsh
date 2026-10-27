@@ -715,6 +715,13 @@
       "when": 1792925740528,
       "tag": "0101_withdrawal_bank_binding",
       "breakpoints": true
+    },
+    {
+      "idx": 102,
+      "version": "7",
+      "when": 1792925800528,
+      "tag": "0102_supply_pricing_compat_optional_max",
+      "breakpoints": true
     }
   ]
 }

@@ -571,7 +571,7 @@ test("haff-ratio-v2 disabled modes treat partial or malformed bounds as omitted"
 
 test("haff-ratio-v2 enabled modes still require lanes, bounds and all four discounts", () => {
   assertCompatRejected(dropCompatLane(compatRule(), "fast"), "an enabled fast mode requires its lane");
-  assertCompatRejected(patchCompatModes({ fast: { enabled: true, min: { base: "C", value: "6" } } }), "an enabled fast mode requires max");
+  // FAST-RULES-ADMIN-1：启用的极速模式允许只给下限（上限可省略），仅下限的正反例见“极速仅下限 C+6”用例。
   assertCompatRejected(patchCompatModes({ custom: { enabled: true, max: { base: "C", value: "-1" } } }), "an enabled custom mode requires min");
   const missingTier = compatRule();
   missingTier.compatibility!.fast.discounts.SVIP = undefined as unknown as string;
@@ -631,4 +631,29 @@ test("the G3 S1 price draft haffRule (fast disabled, no fast lane) validates and
     lines: [{ itemId: "haff", pricingKind: "HAFF_RATIO", customerTier: "STANDARD", quantity: "100000000" }],
     termOption: { code: "legacy_daily_10m", dailyConsumption: "10000000", durationRounding: "CEIL_DAY" } });
   assert.equal(quote.quotable, true, JSON.stringify(quote));
+});
+
+test("FAST-RULES-ADMIN-1：极速仅下限 C+6、无上限且不造大值；禁用极速可省略 lane/界值", () => {
+  const zero = { STANDARD: "0", VIP: "0", SVIP: "0", DISCOUNT_USER: "0" };
+  const open = compatRule("47");
+  open.compatibility!.fast = { spreadDelta: "12", discounts: zero };
+  delete open.compatibility!.modes.fast.max;
+  assert.equal(validateDeltaHaffRule(open, "SPREAD").compatibility!.modes.fast.max, undefined);
+  const q = (b: string) => computeQuote({ ...compatInput("47", { rentalMode: "fast", ownerRatioB: b }), haffRule: open });
+  // C=47，下限 C+6=53：53 通过，52 拒绝；无上限时大比例同样按下限规则通过，不需要 9999 之类伪上限。
+  assert.equal(q("53").quotable, true);
+  assert.equal(q("52.99999999").quotable, false);
+  assert.equal(q("5000").quotable, true);
+  const missingMin = compatRule("47"); delete missingMin.compatibility!.modes.fast.min;
+  assert.throws(() => validateDeltaHaffRule(missingMin, "SPREAD"));
+  const nullMax = compatRule("47"); (nullMax.compatibility!.modes.fast as { max?: unknown }).max = null;
+  assert.throws(() => validateDeltaHaffRule(nullMax, "SPREAD"));
+  // 有界旧规则仍按原上限拒绝。
+  assert.equal(computeQuote(compatInput("47", { rentalMode: "fast", ownerRatioB: "100" })).quotable, false);
+  const off = compatRule("47");
+  delete (off.compatibility as { fast?: unknown }).fast;
+  off.compatibility!.modes.fast = { enabled: false };
+  assert.doesNotThrow(() => validateDeltaHaffRule(off, "SPREAD"));
+  assert.equal(computeQuote({ ...compatInput("47", { rentalMode: "fast", ownerRatioB: "53" }), haffRule: off }).quotable, false);
+  assert.equal(computeQuote({ ...compatInput("47", { rentalMode: "ordinary" }), haffRule: off }).quotable, true);
 });
