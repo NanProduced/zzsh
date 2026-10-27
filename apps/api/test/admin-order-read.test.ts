@@ -1,7 +1,7 @@
 import {test} from "node:test";
 import assert from "node:assert/strict";
 import type {PoolClient} from "pg";
-import {getAdminReadOrder,projectAdminReadOrder,queryAdminReadOrders,orderReadRelation,orderReadKeyRelation,parseOrderOrigin,readNativeFrozenAccounts,NATIVE_FROZEN_ACCOUNT_SQL,legacyOrderResources,LIST_MATERIALS_LIMIT} from "../src/order/admin-order-read";
+import {getAdminReadOrder,projectAdminReadOrder,queryAdminReadOrders,orderReadRelation,orderReadKeyRelation,parseOrderOrigin,readNativeFrozenAccounts,NATIVE_FROZEN_ACCOUNT_SQL,legacyOrderResources,orderHaffRatio,LIST_MATERIALS_LIMIT} from "../src/order/admin-order-read";
 import {LEGACY_ORDER_STATUS_SQL} from "../src/order/legacy-order-read";
 import {parseAdminOrderPageQuery} from "../src/order/order-routes";
 const viewer={adminId:"test-reader",isBoss:false,internalQuote:false,authorizationKey:"a".repeat(64)};
@@ -655,14 +655,14 @@ test('clarity: 无 finance.read 时原生实付金额为 null，不写 0',()=>{
  assert.equal(projectAdminReadOrder('NATIVE',paid,viewer).payment.recordedAmount,null);
  assert.equal(projectAdminReadOrder('NATIVE',paid,{...viewer,financeReadable:true}).payment.recordedAmount.amount,'1.00');
 });
-test('clarity: 旧单原单资源复用旧用户资源校验，单位未记录不猜 M，零值保留但列表摘要折叠',()=>{
+test('clarity: 旧单原单资源复用旧用户资源校验，单位未记录不猜 M，零值保留；账号摘要不再写“原单资源记录”',()=>{
  const raw={expend_haff:'98.08',awm_bullet_num:'61',level6_armor_num:'0',top_insure_card_num:'2',coffee_num:null};
  const resources=legacyOrderResources(raw);
  assert.equal(resources.state,'KNOWN');
  assert.deepEqual(resources.items.map(i=>[i.name,i.quantity,i.unit,i.zero]),[['哈夫币','98.08',null,false],['AWM子弹','61',null,false],['6级护甲','0',null,true],['顶级保险','2','DAY',false]]);
  const row=projectAdminReadOrder('LEGACY',{...record,source_snapshot:{...record.source_snapshot,...raw}},viewer);
- assert.equal(row.accountTitle.neutralSummary,'原单资源记录：哈夫币 98.08、AWM子弹 61、顶级保险 2 天');
- assert.doesNotMatch(row.accountTitle.neutralSummary,/ M|6级护甲/);
+ assert.equal(row.accountTitle.neutralSummary,null,'原单资源只留在 legacyResources 结构');
+ assert.deepEqual(row.haffRatio,{source:'LEGACY_ORIGINAL_ORDER',state:'NOT_RECORDED',wanPerYuan:null,customerTier:null},'旧单无比例字段，不推算');
  assert.equal(row.legacyResources.items.length,4,'零值项在详情可见');
  assert.equal(legacyOrderResources({awm_bullet_num:'abc'}).state,'INVALID');
  assert.equal(legacyOrderResources({awm_bullet_num:61}).state,'INVALID','非字符串不强转');
@@ -698,4 +698,15 @@ test('clarity: 成本边界 1/20/100 行查询数恒定（无 N+1），记录字
  }
  assert.equal(new Set(out.map(o=>o.queriesDefault)).size,1,'查询数不随行数增长');
  console.log('COST_BOUNDARY '+JSON.stringify(out));
+});
+
+test('clarity-02: 本单兑换比例只取冻结报价 denominators.buyer，缺失/非法/零为 UNKNOWN',()=>{
+ const lines=[{itemId:'h',unit:'HAFF_BASE'}];
+ assert.deepEqual(orderHaffRatio({lines,pricingInputs:{denominators:{owner:'1',buyer:'0.8500'},compatibility:{customerTier:'VIP'}}}),{source:'ORDER_QUOTE_SNAPSHOT',state:'KNOWN',wanPerYuan:'0.85',customerTier:'VIP'});
+ assert.equal(orderHaffRatio({lines,pricingInputs:{denominators:{buyer:'0'}}}).state,'UNKNOWN');
+ assert.equal(orderHaffRatio({lines,pricingInputs:{denominators:{buyer:'abc'}}}).state,'UNKNOWN');
+ assert.equal(orderHaffRatio({lines,pricingInputs:{denominators:{buyer:0.85}}}).state,'UNKNOWN','非字符串不强转');
+ assert.equal(orderHaffRatio({lines:[{unit:'PIECE'}],pricingInputs:{denominators:{buyer:'1'}}}).state,'UNKNOWN','无哈夫行不给比例');
+ assert.deepEqual(orderHaffRatio(null),{source:'ORDER_QUOTE_SNAPSHOT',state:'UNKNOWN',wanPerYuan:null,customerTier:null},'档位缺失不默认 STANDARD');
+ assert.equal(orderHaffRatio({lines,personal:{membership:{tier:'SVIP'}},pricingInputs:{denominators:{buyer:'1'}}}).customerTier,'SVIP');
 });

@@ -19,3 +19,24 @@
 
 /* 未形成支付：保留文字，降低视觉权重 */
 .oc-fee-muted{opacity:.6}
+
+/* CLARITY-02：列表信息层级——主编号/名称 > 关键比例/金额 > 次要说明 */
+.oc-design .oc-table-compact td{vertical-align:top}
+.oc-design .oc-account-head{display:flex;align-items:center;gap:6px;min-width:0}
+.oc-design .oc-badge-legacy{flex:none;font-size:10px;line-height:16px;padding:0 6px;border-radius:999px;border:1px solid var(--border);color:var(--muted-foreground);background:var(--surface-raised)}
+.oc-design .oc-ratio{display:inline-flex;align-items:baseline;gap:6px;margin-top:6px;font-size:12px;font-weight:600;color:var(--foreground);font-variant-numeric:tabular-nums}
+.oc-design .oc-ratio em{font-style:normal;font-weight:400;font-size:11px;color:var(--muted-foreground)}
+.oc-design .oc-account-sub{display:block;margin-top:4px;font-size:11px;line-height:1.45;color:var(--muted-foreground);overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2}
+.oc-design .oc-table-compact .oc-account-title{font-size:12px;color:var(--foreground)}
+.oc-design .oc-fee-stage{color:var(--muted-foreground);font-size:11px}
+/* 进度：文字置于图标下方 */
+.oc-design .oc-table-compact .oc-stages-compact ol{gap:0;align-items:flex-start}
+.oc-design .oc-table-compact .oc-stages-compact li{position:relative;flex-direction:column;align-items:center;gap:4px;flex:1 1 0;min-width:0;text-align:center}
+.oc-design .oc-table-compact .oc-stages-compact .oc-stage-name{max-width:100%;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.oc-design .oc-table-compact .oc-stages-compact .oc-stage-line{position:absolute;top:10px;left:calc(50% + 14px);width:calc(100% - 28px);height:1px}
+/* 关键字查询：字段选择与输入框合并为一个输入组 */
+.oc-design .oc-search-group{display:flex;align-items:stretch;flex:1 1 auto;min-width:0;max-width:560px}
+.oc-design .oc-search-group .oc-search-kind{border-top-right-radius:0;border-bottom-right-radius:0;border-right-width:0;background:var(--surface-raised)}
+.oc-design .oc-search-group>:last-child{flex:1 1 auto;min-width:0}
+.oc-design .oc-search-group>:last-child input{border-top-left-radius:0;border-bottom-left-radius:0}
+.oc-design .oc-search-main{align-items:center}

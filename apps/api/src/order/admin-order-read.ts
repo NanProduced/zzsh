@@ -9,6 +9,7 @@ import { loadLegacyHistoricalReads } from "../supply/legacy-listing-read";
 import { conflict, invalid, notFound } from "../supply/supply-util";
 import { escapeLike } from "../supply/catalog";
 import { legacyContinuationReady, legacyMoneyCents, legacyOrderReadState, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
+import { formatDecimalExact, parseNonNegativeDecimal } from "../supply/decimal";
 import { settlementConfirmationReady, type SettlementConfirmationFacts } from "./settlement";
 import { readDirectoryUserSummaries, type DirectoryUserSummary } from "../auth/user-directory-summary";
 import { legacyUserOrderResources } from "./legacy-user-order-read";
@@ -166,11 +167,19 @@ export function legacyOrderResources(raw:unknown):LegacyOrderResources{
   return items.length?{...none,state:'KNOWN',items}:none;
  }catch{return {...none,state:'INVALID'};}
 }
-function legacyResourceSummary(resources:LegacyOrderResources): string | null {
-  // 列表摘要折叠零值项；零值仍保留在 legacyResources 供详情查看。
-  const parts=resources.items.filter(item=>!item.zero).map(item=>`${item.name} ${item.quantity}${item.unit==='DAY'?' 天':''}`);
-  return parts.length ? `原单资源记录：${parts.join("、")}` : null;
+/** 本单哈夫币兑换比例：只读下单冻结报价 pricingInputs.denominators.buyer（万哈夫币/元，已含会员/礼遇后的成交口径）；缺失或非法即 UNKNOWN，不回退上架价、不推算。 */
+export type AdminOrderHaffRatio={source:'ORDER_QUOTE_SNAPSHOT'|'LEGACY_ORIGINAL_ORDER';state:'KNOWN'|'UNKNOWN'|'NOT_RECORDED';wanPerYuan:string|null;customerTier:string|null};
+export function orderHaffRatio(quote:unknown):AdminOrderHaffRatio{
+ const unknown:AdminOrderHaffRatio={source:'ORDER_QUOTE_SNAPSHOT',state:'UNKNOWN',wanPerYuan:null,customerTier:null};
+ const rec=(v:unknown)=>v&&typeof v==='object'&&!Array.isArray(v)?v as Record<string,any>:null;
+ const q=rec(quote),inputs=rec(q?.pricingInputs),den=rec(inputs?.denominators);
+ // 客户档位只取冻结报价自身记录；缺失保持 null，不默认为 STANDARD。
+ const tierRaw=rec(inputs?.compatibility)?.customerTier??rec(rec(q?.personal)?.membership)?.tier;
+ const customerTier=typeof tierRaw==='string'&&/^[A-Z_]{1,32}$/.test(tierRaw)?tierRaw:null;
+ if(!q||!Array.isArray(q.lines)||!q.lines.some((line:any)=>rec(line)?.unit==='HAFF_BASE')||typeof den?.buyer!=='string')return {...unknown,customerTier};
+ try{const ratio=parseNonNegativeDecimal(den.buyer,8,'order buyer ratio');return ratio.value>0n?{...unknown,state:'KNOWN',wanPerYuan:formatDecimalExact(ratio),customerTier}:{...unknown,customerTier};}catch{return {...unknown,customerTier};}
 }
+const LEGACY_HAFF_RATIO:AdminOrderHaffRatio={source:'LEGACY_ORIGINAL_ORDER',state:'NOT_RECORDED',wanPerYuan:null,customerTier:null};
 function frozenQuoteSummary(quote: unknown): string | null {
   if (!quote || typeof quote !== "object" || Array.isArray(quote)) return null;
   const lines = (quote as { lines?: unknown }).lines;
@@ -202,15 +211,15 @@ export function projectAdminReadOrder(origin:string,r:Record<string,any>,viewer:
   const result=projectOrder(row,'admin',{internalQuote:viewer.internalQuote});const paid=['PAID','COMPLETED'].includes(r.status);
   const titles = accountTitleFact(r.title, r.current_account_title, frozenQuoteSummary(r.quote_snapshot));
   const breakdown=nativePrepaymentBreakdown(r,result.amounts);
-  return {...result,...titles,prepaymentBreakdown:breakdown,prepaymentReconciliation:nativeReconciliation(breakdown),source:{origin:'NATIVE',ruleOrigin:'NATIVE_ORDER'},accountDisplayNo:r.account_no,payment:{state:paid?'RECORDED_PAID':'RECORDED_UNPAID',recordedAt:r.paid_at,recordedAmount:nativeRecordedAmount(r,viewer)}};
+  return {...result,...titles,haffRatio:orderHaffRatio(r.quote_snapshot),prepaymentBreakdown:breakdown,prepaymentReconciliation:nativeReconciliation(breakdown),source:{origin:'NATIVE',ruleOrigin:'NATIVE_ORDER'},accountDisplayNo:r.account_no,payment:{state:paid?'RECORDED_PAID':'RECORDED_UNPAID',recordedAt:r.paid_at,recordedAmount:nativeRecordedAmount(r,viewer)}};
  }
  const raw=r.source_snapshot,paid=r.source_pay_status===1,unpaid=r.source_pay_status===0;
  const state=legacyOrderReadState(r.continuation_stage??r.source_order_status,r.source_pay_status),status=state.status;
  const goodsRead=legacyPrepaymentPart(raw.goods_money),itemsRead=legacyPrepaymentPart(raw.expend_pay_money),goods=goodsRead.cents,items=itemsRead.cents;
- const resources=legacyOrderResources(raw),titles = accountTitleFact(undefined, r.current_account_title, legacyResourceSummary(resources));
+ const resources=legacyOrderResources(raw),titles = accountTitleFact(undefined, r.current_account_title, null);
  return {id:r.id,displayNo:r.original_order_no,status,title:titles.title,accountTitle:titles.accountTitle,accountId:r.account_id,accountDisplayNo:r.legacy_account_no,gameId:r.game_id,versionId:null,releaseId:null,contentHash:null,revision:'1',termOptionCode:null,termSeconds:null,
   amounts:{rental:goods!==null&&items!==null?centsToYuan(BigInt(goods)+BigInt(items)):null,deposit:money(r.deposit_amount_cents),totalDue:money(r.due_amount_cents),currency:'CNY'},
-  prepaymentBreakdown:legacyPrepaymentBreakdown(goodsRead,itemsRead),prepaymentReconciliation:legacyReconciliation(goodsRead,itemsRead,r.deposit_amount_cents,r.due_amount_cents),legacyResources:resources,
+  haffRatio:LEGACY_HAFF_RATIO,prepaymentBreakdown:legacyPrepaymentBreakdown(goodsRead,itemsRead),prepaymentReconciliation:legacyReconciliation(goodsRead,itemsRead,r.deposit_amount_cents,r.due_amount_cents),legacyResources:resources,
   createdAt:r.source_created_at,paidAt:r.source_paid_at,cancelledAt:r.source_cancelled_at,completedAt:r.source_completed_at,holdUntil:null,expiredAwaitingCancel:false,paymentOpen:false,cancelOpen:false,
   ownerUserId:r.owner_user_id,renterUserId:r.renter_user_id,ownerName:r.owner_name,renterName:r.renter_name,ownerBusinessNo:r.legacy_owner_no,renterBusinessNo:r.legacy_renter_no,
   payment:{state:paid?'RECORDED_PAID':unpaid?'RECORDED_UNPAID':'UNKNOWN',recordedAt:r.source_paid_at,recordedAmount:paid?money(r.recorded_paid_amount_cents):null},
@@ -303,7 +312,7 @@ export type AdminOrderFrozenAccount={
  source:'ORDER_VERSION'|'LEGACY_ACCOUNT';
  haff:{itemId:string;code:string;name:string|null;quantity:string|null;unit:string}|null;
  materials:Array<{itemId:string;code:string;name:string|null;quantity:string|null;unit:string}>;
- termDays:string|null;termSeconds:string|null;loginMethodText:string|null;
+ termDays:string|null;termSeconds:string|null;loginMethodText:string|null;safeBoxText?:string|null;
 };
 type FrozenNativeRow={orderId:string;versionId:string|null;attributes:Record<string,unknown>|null;presentationItems:unknown;resources:Array<{itemId:string;code:string;quantity:string|null;unit:string}>;termSeconds:string|null};
 /** Native frozen account facts: the order table lives in zzsh_order, never zzsh_supply. */
@@ -333,7 +342,7 @@ export async function readNativeFrozenAccounts(client:PoolClient,viewer:OrderRea
   const haff=resources.find(item=>item.unit==='HAFF_BASE')??null;
   const termSeconds=row.termSeconds;
   const termDays=termSeconds&&/^\d+$/.test(termSeconds)&&BigInt(termSeconds)%86400n===0n?(BigInt(termSeconds)/86400n).toString():null;
-  result.set(row.orderId,{source:'ORDER_VERSION',haff,materials:resources.filter(item=>item!==haff),termDays,termSeconds,loginMethodText:projectPublicAttributeDisplay(row.attributes??{}).loginMethod?.displayName??null});
+  result.set(row.orderId,{source:'ORDER_VERSION',haff,materials:resources.filter(item=>item!==haff),termDays,termSeconds,loginMethodText:projectPublicAttributeDisplay(row.attributes??{}).loginMethod?.displayName??null,safeBoxText:projectPublicAttributeDisplay(row.attributes??{}).safeBox?.displayName??null});
  }
  return result;
 }
@@ -347,7 +356,7 @@ async function readLegacyFrozenAccounts(client:PoolClient,items:Record<string,an
   if(read?.display?.state!=='KNOWN'||!read.display.facts)continue;
   const resources=read.display.facts.resources.map(resource=>({itemId:resource.code,code:resource.code,name:resource.name??null,quantity:resource.quantity??null,unit:resource.unit}));
   const haff=resources.find(resource=>resource.unit==='HAFF_BASE')??null;
-  result.set(item.id,{source:'LEGACY_ACCOUNT',haff,materials:resources.filter(resource=>resource!==haff),termDays:read.historicalQuote.termDays??null,termSeconds:null,loginMethodText:read.display.facts.attributeDisplay.loginMethod?.displayName??null});
+  result.set(item.id,{source:'LEGACY_ACCOUNT',haff,materials:resources.filter(resource=>resource!==haff),termDays:read.historicalQuote.termDays??null,termSeconds:null,loginMethodText:read.display.facts.attributeDisplay.loginMethod?.displayName??null,safeBoxText:read.display.facts.attributeDisplay.safeBox?.displayName??null});
  }
  return result;
 }

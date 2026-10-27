@@ -299,10 +299,14 @@ test('U1 order filters use shared controls, send exact server predicates and res
   assert.equal(node.querySelectorAll('.oc-search input[type="datetime-local"]').length,0,'dates use the shared DateSelector');
   assert.equal(node.textContent.includes('共 45 条'),true,'count and page share the server result');
 
+  // CLARITY-02：状态/来源选择即生效，无需点击“查询”；关键字草稿不随之提交
+  await act(async()=>{const input=node.querySelector('[aria-label="查找线索"]');const setter=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input),'value').set;setter.call(input,'草稿线索');input.dispatchEvent(new browser.Event('input',{bubbles:true}));});
   await changeField(browser,node,'主状态','已取消');
+  await until(()=>calls.at(-1).searchParams.get('status')==='CANCELLED');
   await changeField(browser,node,'来源','旧平台订单');
-  await act(async()=>buttonNamed(node,'查询').click());
   await until(()=>calls.at(-1).searchParams.get('origin')==='LEGACY');
+  assert.equal(calls.at(-1).searchParams.get('qValue'),null,'未提交的关键字不随筛选生效');
+  assert(node.querySelector('.oc-search-group [aria-label="查找方式"]')&&node.querySelector('.oc-search-group [aria-label="查找线索"]'),'字段选择与输入框为一个输入组');
   assert.equal(calls.at(-1).searchParams.get('status'),'CANCELLED');
   assert.equal(calls.at(-1).searchParams.get('page'),'1');
 
@@ -554,11 +558,15 @@ test('order account labels distinguish legacy source numbers in lists, detail an
   const props={...chainProps('number-list'),snapshot:{...snapshotFor('number-list'),permissions:['order.read','user.directory.read','supply.rental_account.read']},onOpenPath:(path,title)=>opened.push({path,title})};
   globalThis.fetch=async()=>response(chainPage(items,{total:items.length}));
   await act(async()=>root.render(createElement(AdminOrderChainView,props)));await until(()=>node.querySelectorAll('.oc-table tbody tr').length===items.length);
-  cases.forEach((c,i)=>assert(node.querySelectorAll('.oc-table tbody tr')[i].textContent.includes(c.expected.replace(/^账号 /, '')),c.expected));
+  // CLARITY-02：列表不展示旧平台编号，改为“旧平台账号”+“旧平台”标记；详情/标签页仍保留旧来源号
+  const listText=c=>c.expected.startsWith('旧来源号')?'旧平台账号':c.expected.replace(/^账号 /, '');
+  cases.forEach((c,i)=>assert(node.querySelectorAll('.oc-table tbody tr')[i].textContent.includes(listText(c)),c.expected));
+  assert.equal(node.querySelector('.oc-table tbody tr').textContent.includes('0000123'),false,'列表行不出现旧编号');
+  assert(node.querySelector('.oc-table tbody tr .oc-badge-legacy'),'旧平台标记');
   assert.deepEqual([...node.querySelectorAll('.oc-table tbody tr')[0].querySelectorAll('.oc-party-role')].map(e=>e.textContent),['历史租客','历史号主']);
   assert.deepEqual([...node.querySelectorAll('.oc-table tbody tr')[1].querySelectorAll('.oc-party-role')].map(e=>e.textContent),['租客','号主']);
   assert.equal(node.querySelector('.oc-table').textContent.includes('账号 0000123'),false);
-  await act(async()=>[...node.querySelectorAll('.oc-table tbody tr button')].find(b=>b.textContent===cases[0].expected).click());
+  await act(async()=>[...node.querySelectorAll('.oc-table tbody tr button')].find(b=>b.textContent==='旧平台账号').click());
   assert.equal(opened.at(-1).title,cases[0].expected);assert.equal(opened.at(-1).path,`/supply/reviews/${items[0].accountId}?fromOrderId=${items[0].id}`);
   globalThis.fetch=async()=>response({order:items[0]});
   await act(async()=>root.render(createElement(AdminOrderChainView,{...props,objectOnly:true,initialOrderId:items[0].id})));await until(()=>node.textContent.includes('本单账号和双方'));

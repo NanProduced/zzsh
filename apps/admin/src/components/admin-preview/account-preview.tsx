@@ -18,6 +18,11 @@ export interface AccountPreviewProps {
   depositText?: string | null;
   depositLabel?: string;
   sourceText?: string | null;
+  /** 旧平台账号：不展示旧编号，只显示“旧平台”标记 */
+  legacy?: boolean;
+  /** 价格块（置于基础信息之前）；值由调用方给出，未知须写明，不得补 0 */
+  priceTitle?: string;
+  priceRows?: Array<[string, string]> | null;
   facts?: {
     ownerPaused?: boolean;
     staffRestricted?: boolean;
@@ -49,16 +54,20 @@ export function AccountPreviewCard({
   depositText,
   depositLabel = '租客基础押金',
   sourceText,
+  legacy = false,
+  priceTitle = '价格',
+  priceRows,
   facts,
   canOpen,
   onOpen,
   openLabel = '查看账号详情',
   deniedReason = '无查看权限',
 }: AccountPreviewProps) {
-  const numberText = displayNo?.trim() || '账号编号待核';
+  const numberText = legacy ? '旧平台账号' : displayNo?.trim() || '账号编号待核';
   const provenance = sourceText?.trim();
   const showProvenance = provenance && !['新平台订单', '旧平台订单'].includes(provenance);
-  const conditions = [['安全箱', safeBoxText], ['段位', rankText], ['租期', termText], ['登录', loginMethodText]];
+  // 基础信息顺序：上号方式、安全箱优先
+  const conditions = [['上号方式', loginMethodText], ['安全箱', safeBoxText], ['租期', termText], ['段位', rankText]];
 
   const header = (
     <>
@@ -70,7 +79,8 @@ export function AccountPreviewCard({
           <span className="font-semibold text-sm font-mono text-foreground break-all" title={numberText}>
             {numberText}
           </span>
-          {(displayNo || accountId) && <PreviewCopyButton value={displayNo || accountId || ''} tooltip={displayNo ? '复制账号编号' : '复制账号 ID'} />}
+          {!legacy && (displayNo || accountId) && <PreviewCopyButton value={displayNo || accountId || ''} tooltip={displayNo ? '复制账号编号' : '复制账号 ID'} />}
+          {legacy && <Badge variant="outline" className="text-[10px] h-4.5 px-1.5 py-0 font-normal shrink-0">旧平台</Badge>}
           {tag && (
             <Badge variant="secondary" className="text-[10px] h-4.5 px-1.5 py-0 font-normal shrink-0">
               {tag}
@@ -101,6 +111,13 @@ export function AccountPreviewCard({
           {title}
         </div>
       )}
+
+      {priceRows && priceRows.length > 0 && <div className="rounded-md border border-border bg-muted/30 px-2.5 py-2">
+        <p className="text-[11px] text-muted-foreground mb-1">{priceTitle}</p>
+        <dl className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+          {priceRows.map(([label, value]) => <div key={label} className="min-w-0 flex items-baseline justify-between gap-2"><dt className="text-muted-foreground shrink-0">{label}</dt><dd className="font-medium text-foreground tabular-nums text-right break-words">{value}</dd></div>)}
+        </dl>
+      </div>}
 
       {(haffText || materialsText) && <div className="space-y-1.5 py-1 text-sm leading-relaxed">
         {haffText && <p className="font-medium text-foreground tabular-nums">哈夫币：{haffText}</p>}

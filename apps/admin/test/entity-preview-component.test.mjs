@@ -334,7 +334,7 @@ test('AccountPreviewCard displays haff, materials, term and login method neutral
   assert.ok(text.includes('哈夫币：1500万'));
   assert.ok(text.includes('6级甲×2'));
   assert.ok(text.includes('租期：2天'));
-  assert.ok(text.includes('登录：扫码登录'));
+  assert.ok(text.includes('上号方式：扫码登录'));
   assert.ok(text.includes('资料来源：本单快照'));
   assert.equal(text.includes('本单账号'), false, 'Default tag 本单账号 must be removed');
 });
@@ -559,4 +559,16 @@ test('the real supply session boundary unmounts previews without changing the bu
     assert.equal(input.value, '尚未提交');
   }
   assert.equal(requests, 0);
+});
+
+test('CLARITY-02 AccountPreviewCard: legacy badge hides old number; price block precedes basic info', async (t) => {
+  const container = document.createElement('div'); document.body.appendChild(container);
+  const root = createRoot(container); t.after(() => { act(() => root.unmount()); container.remove(); });
+  await act(async () => root.render(createElement(AccountPreviewCard, { displayNo: null, legacy: true, priceTitle: '旧单原单金额', priceRows: [['哈夫币比例', '旧单未记录比例'], ['押金', '未知']], loginMethodText: '微信扫码', safeBoxText: '6格' })));
+  const text = container.textContent;
+  assert.match(text, /旧平台账号/); assert.match(text, /旧平台/);
+  assert.doesNotMatch(text, /账号编号待核/);
+  assert.ok(text.indexOf('哈夫币比例') < text.indexOf('上号方式'), '价格块在基础信息前');
+  assert.ok(text.indexOf('上号方式') < text.indexOf('安全箱'));
+  assert.match(text, /押金未知/, '未知不补 0');
 });
