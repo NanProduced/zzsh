@@ -57,6 +57,8 @@ Delta `attributes.full_payout_declaration` 可随号主声明保存为 `{schema:
 
 本人私有详情对origin=NATIVE、DRAFT且contentHash=null的版本可附`draftSkinSummary={source:"CURRENT_DRAFT_SELECTION",catalogRevision,items,withheld}`，优先展示当前已选目录摘要（含合法空集合），不可展示项只记数量。它不改写旧presentation、不代表已冻结展示或公开上架；已确认/冻结版本仍使用原presentation，缺新字段的旧服务保持兼容并提示进入编辑核对。
 
+公开账号报价的 `quote.tenantDeposit` 和 `quote.tenantPayableTotal` 为基础展示金额，个人会员/礼遇后的实付仍由个人价格预览和正式确认核定。原报价押金为null时，仅可从同一已验证封存payload的押金声明投影基础押金，并用合法同币种资源合计按整数分派生总价；声明缺失、无效或金额冲突保持相应未知。读取不修改原payload、报价或内容hash，不公开号主保证金/成本字段。
+
 草稿创建/复制、保存、报价、接受/提交、撤回、暂停/恢复、我的账号和收藏已提供用户API调用封装。草稿允许不完整，提交后正文不可改；退回/撤回后新草稿。我的账号包含历史/审核原因与逐资产媒体状态；权限或资格不满足由blockers解释，公开收藏失效只显示通用不可用状态。公开列表`q`只搜标题，由服务端过滤全量结果；公开详情的安全箱/租期/每日消耗来自当前有效发布版本快照，缺值为null，不能写成“号主未申报”。
 
 错误按稳定HTTP/code处理，不匹配服务端中文：400/413保留输入并按error.details[].path定位分组；401接登录并保留任务上下文；404显示不可用；403不绕过权限；409必须读取最新状态并重新确认，不能换key自动覆盖。网络结果未知的重试复用原key/body；supply-client不自动重试。未定位到字段的错误落在form层。

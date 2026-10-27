@@ -1,4 +1,4 @@
-import { projectTenantPriceQuote } from "./tenant-price-projection";
+import { projectTenantMoney, projectTenantPriceQuote } from "./tenant-price-projection";
 import { assertFullPayoutTermsAccepted, readFullPayoutTerms } from "./full-payout-terms";
 import type { LegacyPublicAdmission, LegacyPublicAdmissionDetailIndex } from "../legacy-load/legacy-public-admission";
 import type { Pool, PoolClient } from "pg";
@@ -23,7 +23,7 @@ import {
   type QuoteInput,
   type QuoteViewer,
 } from "./pricing";
-import { formatDecimalExact, parseNonNegativeDecimal, yuanAmountObject } from "./decimal";
+import { decimalToBigInt, formatDecimalExact, parseNonNegativeDecimal, yuanAmountObject } from "./decimal";
 import {
   projectOwnerMediaBinding,
   projectPublicAttributeDisplay,
@@ -1854,6 +1854,32 @@ export async function readPublicListing(
   if (mode === "RENTABLE") throw notFound();
   return readLegacyListing(client, a.id, admission, detailIndex);
 }
+/** Display-only fallback from the same sealed declaration; never changes the stored quote or its hash. */
+export function publicDepositProjection(quote: unknown, declaration: unknown): { tenantDeposit: ReturnType<typeof yuanAmountObject>; tenantPayableTotal: ReturnType<typeof yuanAmountObject> | null } | null {
+  if (!quote || typeof quote !== "object" || Array.isArray(quote)) return null;
+  const projected = quote as Record<string, unknown>;
+  if (projected.currency !== "CNY" || projected.tenantDeposit !== null) return null;
+  let declared;
+  try { declared = validateOwnerDepositDeclaration(declaration); } catch { return null; }
+  if (!declared) return null;
+  const tenantDeposit = yuanAmountObject(BigInt(declared.amountCents));
+  let tenantPayableTotal: ReturnType<typeof yuanAmountObject> | null = null;
+  try {
+    const resource = projectTenantMoney(projected.resourceTotal);
+    const resourceCents = decimalToBigInt(parseNonNegativeDecimal(resource.amount, 2, "resource total"), 2);
+    const lines = Array.isArray(projected.lines) ? projected.lines : [];
+    let lineCents = 0n, complete = lines.length > 0;
+    for (const line of lines) {
+      if (!line || typeof line !== "object" || Array.isArray(line)) throw invalid("Public quote line is invalid");
+      if (line.buyerAmount == null) { complete = false; continue; }
+      const amount = projectTenantMoney(line.buyerAmount);
+      lineCents += decimalToBigInt(parseNonNegativeDecimal(amount.amount, 2, "resource line"), 2);
+    }
+    if (lineCents <= resourceCents && (!complete || lineCents === resourceCents)) tenantPayableTotal = yuanAmountObject(resourceCents + BigInt(declared.amountCents));
+  } catch { /* A known deposit does not turn unavailable or conflicting resource money into a total. */ }
+  return { tenantDeposit, tenantPayableTotal };
+}
+
 export async function listingDetail(
   client: PoolClient,
   a: PublishingAccount,
@@ -1921,6 +1947,8 @@ export async function listingDetail(
     const availability = publicAvailability(blockers, publicAccount.current_version_id === v.id, observed.gate);
     if (mode === "RENTABLE" && availability !== "RENTABLE") throw notFound();
     const attrs = v.payload!.declaration.attributes;
+    const depositProjection = publicDepositProjection(quote, attrs.owner_deposit_declaration);
+    if (depositProjection && quote) Object.assign(quote, depositProjection);
     const offer = projectPublicOffer({
       attributes: attrs,
       termOptionCode: v.term_option_code,
