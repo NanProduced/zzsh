@@ -44,11 +44,19 @@ export type MediaBinding = {
   publicDisplayEligible?: boolean;
   /** 服务端投影:当前公开路由可读(账号公开+资格+当前版本绑定) */
   publiclyReadable?: boolean;
+  publicUrl?: string;
   category?: "SHOWCASE" | "PENALTY" | null;
 };
 
 export type SupplyWorkView = "all" | "changes" | "restricted" | "paused" | "orders";
 export type SupplyQueryKind = "account" | "legacy" | "owner" | "nickname" | "order" | "link";
+export const ACCOUNT_BUSINESS_STATES = [
+  { value: "LISTED", label: "上架中", tone: "success" },
+  { value: "IN_PROGRESS", label: "订单进行中", tone: "info" },
+  { value: "OFFLINE", label: "下架", tone: "neutral" },
+  { value: "COMPLETED", label: "完成租用", tone: "neutral" },
+] as const;
+export type AccountBusinessState = typeof ACCOUNT_BUSINESS_STATES[number]["value"];
 /** The renter's already-returned version. It is not the admin current/draft version. */
 export type PublicBasis = {
   management?: { infoSource: { value: string; name: string } | null };
@@ -121,7 +129,7 @@ export function publicBasisVersion(basis: PublicBasis): Version {
     } : null,
   };
 }
-export type SupplyFacts = { publicVisible: boolean | null; publicSource: string | null; publicVersionId?: string | null; publicBasis?: PublicBasis | null; newOrders: boolean | null; reasons: string[]; primaryReasonCode?: string | null; ownerPaused: boolean; staffRestricted: boolean; occupancy: "FREE" | "OCCUPIED" | "UNKNOWN"; occupancyKind?: "PENDING_PAYMENT" | "RENTED" | "OCCUPIED" | null; sources: Array<{ sourceSystem: string; sourceEntity: string; sourceId: string; businessNo: string | null }>; legacyNumbers: string[]; historicalRead?: LegacyHistoricalRead | null };
+export type SupplyFacts = { businessState?: AccountBusinessState | null; lifecycle?: string | null; publicVisible: boolean | null; publicSource: string | null; publicVersionId?: string | null; publicBasis?: PublicBasis | null; newOrders: boolean | null; reasons: string[]; primaryReasonCode?: string | null; ownerPaused: boolean; staffRestricted: boolean; occupancy: "FREE" | "OCCUPIED" | "UNKNOWN"; occupancyKind?: "PENDING_PAYMENT" | "RENTED" | "OCCUPIED" | null; sources: Array<{ sourceSystem: string; sourceEntity: string; sourceId: string; businessNo: string | null }>; legacyNumbers: string[]; historicalRead?: LegacyHistoricalRead | null };
 /** 列表最小受权摘要：金额保持接口原始十进制字符串，缺字段一律 null（未提供），不由前端补齐。 */
 export type SupplyQuoteAmount = { amount: string; currency: string | null; unit: string | null; scale: string | null } | null;
 export type SupplyListSummary = {
@@ -159,7 +167,7 @@ export type RestrictionEvent = { id: string; reason: string | null; occurredAt: 
 export type SupplyWorkDetail = Omit<Detail, "version"> & {
   contractVersion: string; contextKey: string; version: Version | null;
   account: Detail["account"] & { display_no: string | null; owner_user_id: string };
-  supervision: { historical: boolean; facts: SupplyFacts; changes: { previousVersionId: string; previousSequence: string; changed: boolean } | null; previousVersion: Version | null; originalRestrictionVersion?: Version | null; restrictionHistory: { state: "KNOWN" | "NOT_RECORDED"; items: RestrictionEvent[]; limit: number }; ownerLink: { state: "READY" | "DENIED"; userId?: string }; orders: { state: "READY" | "DENIED"; total?: number; items?: SupplyLinkedOrder[] } };
+  supervision: { managementAccess?: "READY" | "DENIED"; historical: boolean; facts: SupplyFacts; changes: { previousVersionId: string; previousSequence: string; changed: boolean } | null; previousVersion: Version | null; originalRestrictionVersion?: Version | null; restrictionHistory: { state: "KNOWN" | "NOT_RECORDED" | "DENIED"; items: RestrictionEvent[]; limit: number }; ownerLink: { state: "READY" | "DENIED"; userId?: string }; orders: { state: "READY" | "DENIED"; total?: number; items?: SupplyLinkedOrder[] } };
 };
 export type SupplyLinkedOrder = { id: string; displayNo: string; ownerName: string | null; ownerUserId: string; renterName: string | null; renterUserId?: string | null; status: string; versionId: string | null; payment: { state: string }; source: { origin: string; statusLabel?: string } };
 export function orderPaymentText(state: string): string {
@@ -352,6 +360,21 @@ export function newOrdersStatus(facts: Pick<SupplyFacts, "newOrders">): { label:
   return facts.newOrders ? { label: "可接单", tone: "success" } : { label: "不可接单", tone: "warning" };
 }
 
+/** Server business state wins; an absent legacy field may fall back to known independent facts, never order history. */
+export function accountBusinessStatus(facts: SupplyFacts, reviewState?: string | null): { label: string; tone: InlineStatusTone; detail?: string } {
+  const authoritative = ACCOUNT_BUSINESS_STATES.find(state => state.value === facts.businessState);
+  const occupancy = facts.occupancyKind === "PENDING_PAYMENT" ? "待付款" : facts.occupancyKind === "RENTED" ? "租用中" : undefined;
+  if (authoritative) return { label: authoritative.label, tone: authoritative.tone, ...(authoritative.value === "IN_PROGRESS" && occupancy ? { detail: occupancy } : {}) };
+  if (facts.businessState === undefined) {
+    if (facts.occupancy === "OCCUPIED") return { label: "订单进行中", tone: "info", ...(occupancy ? { detail: occupancy } : {}) };
+    if (facts.staffRestricted === true) return { label: "运营限制", tone: "warning" };
+    if (facts.ownerPaused === true) return { label: "号主暂停", tone: "neutral" };
+    if (facts.newOrders === true) return { label: "上架中", tone: "success" };
+  }
+  if (reviewState === "DRAFT" && facts.publicVisible === false && facts.newOrders !== true && facts.occupancy === "FREE" && !facts.staffRestricted && !facts.ownerPaused) return { label: "未上架", tone: "neutral" };
+  return { label: "状态待核", tone: "unknown" };
+}
+
 export function reviewStateLabel(state: string): string {
   return STATE_LABELS[state] ?? state;
 }
@@ -527,6 +550,31 @@ export function feeSummaryRows(fee?: SupplyListSummary["feeSummary"] | null): { 
   };
 }
 
+/** Base total uses this version's resource quote plus its declared deposit; never a renter's personalised quote. */
+export function baseFeeRows(fee: SupplyListSummary["feeSummary"], resourceTotal: { amount: string } | null | undefined, depositCents: string | null | undefined) {
+  const rows = feeSummaryRows(fee);
+  const cents = (amount: string | undefined) => {
+    if (!amount || !/^(0|[1-9]\d*)(?:\.\d{1,2})?$/.test(amount)) return null;
+    const [whole = "0", fraction = ""] = amount.split(".");
+    return BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0"));
+  };
+  const haff = cents(fee?.haffRental?.amount), materials = cents(fee?.materials?.amount);
+  const resources = cents(fee?.resourceTotal?.amount ?? resourceTotal?.amount) ?? (haff !== null && materials !== null ? haff + materials : null);
+  const deposit = formatFundingCents(depositCents);
+  return {
+    haff: rows.haff, materials: rows.materials, deposit,
+    resources: resources === null ? "未提供" : formatFundingCents(resources.toString()),
+    total: resources !== null && deposit !== "未提供" ? formatFundingCents((resources + BigInt(depositCents!)).toString()) : "未提供",
+    note: [rows.note, deposit === "未提供" ? "基础押金未提供，总价待核" : resources === null ? "资源费未提供，总价待核" : ""].filter(Boolean).join("；"),
+  };
+}
+
+export function versionBaseFeeRows(version: Version, depositCents?: string | null) {
+  const declaration = version.declaration.attributes.owner_deposit_declaration as Record<string, unknown> | null | undefined;
+  const declared = declaration?.schema === "owner-deposit-declaration-v1" && typeof declaration.amountCents === "string" ? declaration.amountCents : null;
+  return baseFeeRows(version.feeSummary, version.quote?.resourceTotal, depositCents ?? declared);
+}
+
 export function quantityText(value: string | null | undefined): string {
   if (!value || !/^\d+$/.test(value)) return "未确认";
   const amount = BigInt(value);
@@ -683,6 +731,25 @@ export function inventoryRows(
       previous: quantityOrLabel(previousQuantity, "未申报"),
       current: item ? quantityOrLabel(item.quantity, "数量未知") : "本次未申报",
       changed: previousQuantity !== undefined && previousQuantity !== item?.quantity,
+    };
+  });
+}
+
+/** Join declaration and frozen quote by item ID, retaining unknown, zero and quote-only rows. */
+export function resourceBillingRows(version: Version) {
+  const inventory = version.declaration.inventory, lines = version.quote?.lines ?? [];
+  return [...new Set([...inventory.map(item => item.itemId), ...lines.map(line => line.itemId)])].map(itemId => {
+    const item = inventory.find(entry => entry.itemId === itemId), line = lines.find(entry => entry.itemId === itemId);
+    const named = version.presentation.items?.find(entry => entry.id === itemId) ?? version.catalogItems?.find(entry => entry.id === itemId);
+    const quantity = item ? item.quantity : line?.quantity;
+    const unit = unitText(line?.unit ?? named?.unit, named?.code);
+    const amount = line?.buyerAmount?.amount ?? null;
+    return {
+      itemId, name: named?.name || "名称待核", quantity: quantityOrLabel(quantity, "数量未知"), unit,
+      unitQuantity: line?.unitQuantity ? quantityOrLabel(line.unitQuantity, "未提供") : "未提供",
+      unitAmount: line?.buyerUnitAmount?.amount ?? null, amount,
+      quantityNote: item && line && item.quantity !== line.quantity ? `报价数量 ${quantityOrLabel(line.quantity, "未提供")} ${unit}` : !item && line ? "数量来自本版报价" : null,
+      zero: typeof quantity === "string" && /^0+(?:\.0+)?$/.test(quantity) && (!line || /^0+(?:\.0+)?$/.test(line.quantity)) && (amount === null || /^0+(?:\.0+)?$/.test(amount)),
     };
   });
 }

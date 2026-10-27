@@ -264,7 +264,7 @@ test('workspace original links and card actions preserve the same user filters a
   assert.equal(h.calls.find(call => call.path.endsWith('/orders')).params.status, 'PAID');
   for (const entry of [
     { original: 'SYNTHETIC-ORDER-1', pathname: '/orders/synthetic-preview-order-1', userOrigin: true },
-    { original: '账号 SYNTHETIC-ACCOUNT-1', pathname: '/supply/accounts/synthetic-preview-account-1', userOrigin: true },
+    { original: '账号 SYNTHETIC-ACCOUNT-1', pathname: '/supply/reviews/synthetic-preview-account-1', userOrigin: true },
     { label: '预览用户 下单时昵称', region: '用户预览：下单时昵称', footer: '查看用户资料', original: '下单时昵称', pathname: '/users/synthetic-preview-owner-1' },
   ]) {
     const before = h.opened.length;
@@ -309,7 +309,7 @@ test('explicit counterpart origin B wins over inherited order A while unspecifie
 
   for (const [name, pathname] of [
     ['SYNTHETIC-ORDER-1', '/orders/' + knownOrder.orderId],
-    ['账号 SYNTHETIC-ACCOUNT-1', '/supply/accounts/' + knownOrder.accountId],
+    ['账号 SYNTHETIC-ACCOUNT-1', '/supply/reviews/' + knownOrder.accountId],
   ]) {
     await click(namedButton(name, h.host));
     const target = new URL(h.opened.at(-1).target, browser.location.href);

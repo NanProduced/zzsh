@@ -1,14 +1,17 @@
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { accountManagement } from "../src/supply/admin-supervision-read";
+import { accountManagement, accountBusinessState } from "../src/supply/admin-supervision-read";
 import { parseSupervisionQuery, encodeSupervisionCursor, decodeSupervisionCursor, supervisionQueryBinding, matchesCheapFilters, matchesSupervisionFilters, quoteFeeSummary, FILTER_SCAN_MAX_CANDIDATES, supervisionFacts, listSupervision, readSupervision } from "../src/supply/admin-supervision-read";
 import { readFileSync } from "node:fs";
 import { Pool, type PoolClient } from "pg";
 import { listingDetail, publicationBlockers, type PublishingAccount, type SupplyGateReader } from "../src/supply/publishing";
 import { parseMediaReviewBinding, assertMediaReviewBinding } from "../src/supply/media";
 import { fundingPolicyFixture } from "./funding-authority-fixtures";
+import { handlePublishingRoute } from "../src/supply/publishing-routes";
 
 const publishing = require("../src/supply/publishing");
+const authSecurity = require("../src/auth/auth-security");
+const authorization = require("../src/auth/admin-authorization");
 const fixtureAccount: PublishingAccount = { id: "fixture-account", owner_user_id: "fixture-owner", game_id: "fixture-game", current_version_id: null, owner_paused: false, staff_restricted: false, restriction_reason: null, legacy_hold: "NONE", lifecycle: "ACTIVE", revision: "1", display_no: null };
 /** The page reads its accounts, current versions and publication probe in one
  *  batch, so the harness answers the batch reads instead of one read per row. */
@@ -25,6 +28,201 @@ const fixtureClient = { query: async (sql: string) => {
 
 const queryViewer = { adminId: "fixture-admin", sessionId: "fixture-session", access: { status: "ACTIVE" as const, isBoss: true, passwordChangeRequired: false, permissions: new Set(["order.read"]) }, scope: [], contextKey: "fixture-context" };
 const queryKey = { keyId: "fixture", secret: "fixture-only-private-cursor-key-000001" };
+
+test('business states keep occupied, completed, offline and listed separate from incomplete evidence',()=>{
+ const facts={occupied:false,completed:false,ownerPaused:false,staffRestricted:false,newOrders:true,publicVisible:true,lifecycle:'ACTIVE'};
+ assert.equal(accountBusinessState(facts),'LISTED');
+ assert.equal(accountBusinessState({...facts,occupied:true}),'IN_PROGRESS');
+ assert.equal(accountBusinessState({...facts,occupied:true,completed:true}),'IN_PROGRESS','an existing occupying order must still be handled');
+ assert.equal(accountBusinessState({...facts,completed:true}),'COMPLETED');
+ assert.equal(accountBusinessState({...facts,ownerPaused:true}),'OFFLINE');
+ assert.equal(accountBusinessState({...facts,staffRestricted:true}),'OFFLINE');
+ assert.equal(accountBusinessState({...facts,newOrders:null}),null);
+ assert.equal(accountBusinessState({...facts,lifecycle:'ARCHIVED',newOrders:false}),null,'archive without a completion fact is not invented as a completed rental');
+ for(const value of ['LISTED','IN_PROGRESS','OFFLINE','COMPLETED'])assert.equal(parseSupervisionQuery(new URLSearchParams({status:value})).status,value);
+ for(const value of ['','PAID','COMPLETED,LISTED'])assert.throws(()=>parseSupervisionQuery(new URLSearchParams({status:value})));
+ assert.throws(()=>parseSupervisionQuery(new URLSearchParams('status=LISTED&status=OFFLINE')));
+ const binding=supervisionQueryBinding(queryViewer,parseSupervisionQuery(new URLSearchParams('status=LISTED')));
+ assert.notEqual(binding,supervisionQueryBinding(queryViewer,parseSupervisionQuery(new URLSearchParams('status=OFFLINE'))));
+});
+
+function rentalDetailFixture() {
+    const account = { ...fixtureAccount, id: "account-1", current_version_id: "version-1", restriction_reason: "PRIVATE_RESTRICTION" };
+    const attributes: Record<string, unknown> = {
+        vit_level: 6, face_is_self: false, ban_record: true, info_source: "PRIVATE_ATTRIBUTION", publisher_bail: "PRIVATE_BAIL", funding: "PRIVATE_FUNDING",
+        owner_deposit_declaration: { schema: "owner-deposit-declaration-v1", amountCents: "12300", declarationVersion: "1" },
+        full_payout_declaration: { schema: "full-payout-declaration-v1", selected: false },
+    };
+    const version = { schema_version: 1, id: "version-1", account_id: account.id, sequence: "2", origin: "NATIVE", review_state: "SUBMITTED", title: "Synthetic current account", description: null, attributes,
+        term_option_code: "", pricing_option_code: "", rule_release_id: null, content_hash: "a".repeat(64), revision: "1", submitted_at: null,
+        presentation: { items: [{ id: "haff", code: "haff", name: "哈夫币", unit: "HAFF_BASE" }], skins: [], entitlements: [] },
+        payload: { ruleRefs: {}, declaration: { attributes }, quoteValues: { schemaVersion: 1, currency: "CNY", termSeconds: "86400", expiryDisclosures: [],
+            lines: [{ itemId: "haff", quantity: "12345678", unit: "HAFF_BASE", unitQuantity: "1", buyerUnitAmount: yuan("10.00"), buyerAmount: yuan("10.00"), ownerUnitAmount: yuan("7.00"), ownerAmount: yuan("7.00"), platformAmount: yuan("3.00") }],
+            resourceTotal: yuan("10.00"), tenantDeposit: yuan("123.00"), ownerTotal: yuan("7.00"), platformFullProfit: yuan("3.00"), pricingInputs: { private: "PRIVATE_PRICE_INPUT" } } },
+    };
+    const media = [
+        { assetId: "public-photo", position: 0, purpose: "ACCOUNT_DISPLAY", byteHash: "PRIVATE_BYTE_HASH", reviewState: "APPROVED", accessClass: "PUBLIC_DISPLAY", publicStorageKey: "PRIVATE_STORAGE_KEY", technicalState: "READY", ownerUserId: account.owner_user_id, category: "SHOWCASE" },
+        { assetId: "private-evidence", position: 1, purpose: "ACCOUNT_EVIDENCE", byteHash: "PRIVATE_EVIDENCE_HASH", reviewState: "APPROVED", accessClass: "PRIVATE_REVIEW", publicStorageKey: null, technicalState: "READY", ownerUserId: account.owner_user_id, category: "PRIVATE_EVIDENCE" },
+        { assetId: "unmatched-photo", position: 2, purpose: "ACCOUNT_DISPLAY", byteHash: "PRIVATE_UNMATCHED_HASH", reviewState: "APPROVED", accessClass: "PUBLIC_DISPLAY", publicStorageKey: "PRIVATE_UNMATCHED_KEY", technicalState: "READY", ownerUserId: account.owner_user_id, category: "SHOWCASE" },
+    ];
+    const publicRead = { id: account.id, versionId: "public-version", attributes: { face_is_self: false }, media: [{ assetId: "public-photo", url: "/existing-public-route/photo", category: "SHOWCASE" }], quote: null };
+    const queries: Array<{ sql: string; values: unknown[] }> = [];
+    const state = { scope: [account.game_id], includePublicMedia: true };
+    const client = { query: async (sql: string, values: unknown[] = []) => {
+        queries.push({ sql, values });
+        let rows: any[] = [];
+        if (sql.includes('s."game_scope_mode" AS "mode"')) rows = [{ mode: "SELECTED_GAMES", gameIds: state.scope }];
+        else if (/SELECT \* FROM zzsh_supply.rental_account WHERE id=\$1/.test(sql)) rows = values[0] === account.id ? [account] : [];
+        else if (sql.startsWith("SELECT 1 FROM zzsh_supply.listing_version WHERE id=$1 AND account_id=$2")) rows = ["version-1", "version-old"].includes(String(values[0])) && values[1] === account.id ? [{}] : [];
+        else if (sql.includes("FROM zzsh_supply.listing_version WHERE id=$1 AND account_id=$2")) rows = values[1] === account.id ? [{ ...version, id: values[0] }] : [];
+        else if (sql.includes("FROM zzsh_supply.listing_version WHERE account_id=$1 ORDER BY sequence DESC")) rows = [{ id: "version-1", sequence: "2" }, { id: "version-old", sequence: "1" }];
+        else if (sql.includes("SELECT u.suspended")) rows = [{ suspended: false, account_status: "ACTIVE", identity_status: "VERIFIED", age_status: "ADULT" }];
+        else if (sql.includes('"game_service_operation"')) rows = [{ id: "service-1", gameCode: "delta", gameEnabled: true, enabled: true }];
+        else if (sql.includes("FROM zzsh_supply.game WHERE id=")) rows = [{ id: account.game_id, enabled: true }];
+        else if (sql.includes("FROM zzsh_supply.inventory_line")) rows = [{ itemId: "haff", quantity: "12345678" }];
+        else if (sql.includes('a.public_storage_key AS "publicStorageKey"')) rows = media;
+        else if (sql.includes("FROM zzsh_supply.review_decision")) rows = [{ reason: "PRIVATE_REVIEW_RECORD" }];
+        else if (sql.includes("FROM zzsh_iam.audit_event")) rows = [{ id: "restriction-event", reason: "PRIVATE_AUDIT_RECORD", actorName: "PRIVATE_ACTOR", restricted: true, versionId: "version-old" }];
+        else if (sql.includes("FROM zzsh_supply.duplicate_hint")) rows = [{ reason: "PRIVATE_DUPLICATE_HINT" }];
+        else if (sql.startsWith("SELECT name FROM")) rows = [{ name: "Synthetic owner" }];
+        return { rows, rowCount: rows.length };
+    }, release() {} } as unknown as PoolClient;
+    return { account, version, publicRead, queries, client, state };
+}
+
+function mockRentalPublicProjection(t: TestContext, fixture: ReturnType<typeof rentalDetailFixture>) {
+    t.mock.method(publishing, "publicListingMemo", () => ({ read: async () => ({ ...fixture.publicRead, media: [...fixture.publicRead.media, { assetId: "unmatched-photo", url: "/not-confirmed-by-facts" }] }) }));
+    t.mock.method(publishing, "readPublicListing", async () => ({ ...fixture.publicRead, media: fixture.state.includePublicMedia ? fixture.publicRead.media : [] }));
+}
+
+const rentalViewer = (permissions: string[]) => ({ ...queryViewer, access: { ...queryViewer.access, isBoss: false, permissions: new Set(permissions) } });
+
+test("rental account detail reuses listingDetail while denying management fields and every management query", async t => {
+    const f = rentalDetailFixture(); mockRentalPublicProjection(t, f);
+    const data: any = await readSupervision(f.client, f.account, rentalViewer(["supply.rental_account.read"]), async () => ({ publisherBail: "NOT_REQUIRED", occupancy: "FREE", reference: null }), null);
+    assert.equal(data.supervision.managementAccess, "DENIED");
+    assert.equal(data.supervision.restrictionHistory.state, "DENIED");
+    for (const key of ["previousDeclaration", "previousPresentation"]) assert.equal(data[key], null);
+    for (const key of ["changes", "previousVersion", "originalRestrictionVersion"]) assert.equal(data.supervision[key], null);
+    assert.deepEqual(data.decisions, []); assert.deepEqual(data.duplicateHints, []); assert.deepEqual(data.supervision.restrictionHistory.items, []);
+    assert.equal(data.account.restriction_reason, null);
+    assert.equal(data.account.current_version_id, "version-1");
+    assert.equal(data.supervision.facts.lifecycle, "ACTIVE");
+    assert.equal(data.ownerName, "Synthetic owner");
+    assert.equal(data.version.declaration.attributes.face_is_self, false);
+    assert.equal(data.version.declaration.attributes.ban_record, true);
+    assert.equal(data.version.declaration.attributes.owner_deposit_declaration.amountCents, "12300");
+    assert.equal(data.version.declaration.attributes.full_payout_declaration.selected, false);
+    assert.deepEqual(data.version.declaration.inventory, [{ itemId: "haff", quantity: "12345678" }]);
+    assert.equal(data.version.quote.resourceTotal.amount, "10.00");
+    assert.equal(data.version.feeSummary.resourceTotal.amount, "10.00");
+    for (const key of ["ownerTotal", "ownerHaffRatio", "publisherBailRequirement", "platformFullProfit", "pricingInputs"]) assert.equal(Object.hasOwn(data.version.quote, key), false, key);
+    assert.equal(Object.hasOwn(data.version.quote.lines[0], "ownerAmount"), false);
+    assert.equal(Object.hasOwn(data.version, "management"), false);
+    assert.equal(Object.hasOwn(data.supervision.facts.publicBasis, "management"), false);
+    assert.deepEqual(data.version.declaration.mediaBindings, [{ assetId: "public-photo", purpose: "ACCOUNT_DISPLAY", position: 0, category: "SHOWCASE", publiclyReadable: true, publicUrl: "/existing-public-route/photo" }]);
+    assert.equal(data.supervision.ownerLink.state, "DENIED"); assert.equal(data.supervision.orders.state, "DENIED");
+    assert.doesNotMatch(JSON.stringify(data), /PRIVATE_|private-evidence|unmatched-photo/);
+    assert.equal(f.queries.filter(q => q.sql.includes("FROM zzsh_supply.listing_version WHERE id=$1 AND account_id=$2")).length, 1, "no previous or restriction version read");
+    for (const q of f.queries) assert.doesNotMatch(q.sql, /review_decision|zzsh_iam\.audit_event|duplicate_hint|SELECT id,revision::text|SELECT attributes->'info_source'|FOR UPDATE|\b(?:INSERT|UPDATE|DELETE)\b/);
+    assert.equal(f.account.restriction_reason, "PRIVATE_RESTRICTION", "redaction does not mutate the shared account row");
+});
+
+test("a rental reader cannot fabricate missing declarations or an unconfirmed public image", async t => {
+    const f = rentalDetailFixture(); mockRentalPublicProjection(t, f); f.state.includePublicMedia = false;
+    f.version.attributes.owner_deposit_declaration = { schema: "owner-deposit-declaration-v1", amountCents: "bad" };
+    f.version.attributes.full_payout_declaration = { schema: "full-payout-declaration-v1", selected: "false" };
+    const data: any = await readSupervision(f.client, f.account, rentalViewer(["supply.rental_account.read"]), async () => ({ publisherBail: "UNKNOWN", occupancy: "UNKNOWN", reference: null }), null);
+    assert.equal(Object.hasOwn(data.version.declaration.attributes, "owner_deposit_declaration"), false);
+    assert.equal(Object.hasOwn(data.version.declaration.attributes, "full_payout_declaration"), false);
+    assert.deepEqual(data.version.declaration.mediaBindings, []);
+    assert.equal(data.supervision.managementAccess, "DENIED");
+});
+
+test("reviewers retain management records and independent directory, order and quote permissions", async t => {
+    const f = rentalDetailFixture(); mockRentalPublicProjection(t, f);
+    const viewer = rentalViewer(["supply.review.read", "supply.quote.internal.read", "user.directory.read"]);
+    const data: any = await readSupervision(f.client, f.account, viewer, async () => ({ publisherBail: "NOT_REQUIRED", occupancy: "FREE", reference: null }), null);
+    assert.equal(data.supervision.managementAccess, "READY");
+    assert.equal(data.supervision.restrictionHistory.state, "KNOWN");
+    assert.equal(data.account.restriction_reason, "PRIVATE_RESTRICTION");
+    assert.equal(data.decisions[0].reason, "PRIVATE_REVIEW_RECORD");
+    assert.equal(data.duplicateHints[0].reason, "PRIVATE_DUPLICATE_HINT");
+    assert.equal(data.version.declaration.attributes.info_source, "PRIVATE_ATTRIBUTION");
+    assert.equal(data.version.declaration.mediaBindings.length, 3);
+    assert.equal(data.version.quote.ownerTotal.amount, "7.00");
+    assert.deepEqual(data.supervision.ownerLink, { state: "READY", userId: f.account.owner_user_id });
+    assert.equal(data.supervision.orders.state, "DENIED", "review permission never grants order reading");
+    assert.ok(f.queries.some(q => q.sql.includes("FROM zzsh_supply.review_decision")));
+    assert.ok(f.queries.some(q => q.sql.includes("FROM zzsh_iam.audit_event")));
+    assert.ok(f.queries.some(q => q.sql.includes("SELECT id,revision::text")));
+});
+
+test("listingDetail skips review queries only when explicitly disabled and keeps existing defaults", async () => {
+    for (const includeReviewRecords of [false, undefined, true]) {
+        const calls: string[] = [], client = detailClient(sql => calls.push(sql));
+        const detail = await listingDetail(client, detailAccount, "admin", async () => ({ publisherBail: "UNKNOWN", occupancy: "FREE", reference: null }), "public", detailAccount, false, "RENTABLE", { includeReviewRecords, publicListing: async () => null });
+        assert.deepEqual(detail.decisions, []);
+        assert.equal(calls.some(sql => sql.includes("FROM zzsh_supply.review_decision")), includeReviewRecords !== false);
+    }
+});
+
+test("rental detail versions stay bound to their account before any detail or management read", async t => {
+    const f = rentalDetailFixture(); mockRentalPublicProjection(t, f);
+    await assert.rejects(readSupervision(f.client, f.account, rentalViewer(["supply.rental_account.read"]), async () => { throw Error("wrong version never reaches gate"); }, "foreign-version"), (error: any) => error.status === 404);
+    assert.equal(f.queries.length, 1);
+    assert.deepEqual(f.queries[0]!.values, ["foreign-version", f.account.id]);
+    assert.match(f.queries[0]!.sql, /id=\$1 AND account_id=\$2/);
+});
+
+test("a rental reader may read a bound historical version and only its separately authorized order relation", async t => {
+    const f = rentalDetailFixture(); mockRentalPublicProjection(t, f);
+    const viewer = rentalViewer(["supply.rental_account.read", "order.read", "user.directory.read"]), calls: any[] = [];
+    t.mock.method(require("../src/order/admin-order-read"), "queryAdminReadOrders", async (_client: PoolClient, access: unknown, filter: unknown) => {
+        calls.push({ access, filter });
+        return { total: 1, items: [{ id: "original-order", versionId: "frozen-order-version", ownerUserId: "original-order-owner" }] };
+    });
+    const data: any = await readSupervision(f.client, f.account, viewer, async () => ({ publisherBail: "UNKNOWN", occupancy: "FREE", reference: null }), "version-old");
+    assert.equal(data.version.id, "version-old"); assert.equal(data.supervision.historical, true);
+    assert.equal(data.account.current_version_id, "version-1"); assert.equal(data.available, false);
+    assert.equal(data.supervision.managementAccess, "DENIED");
+    assert.equal(data.supervision.ownerLink.state, "READY");
+    assert.equal(data.supervision.orders.state, "READY");
+    assert.equal(data.supervision.orders.items[0].versionId, "frozen-order-version");
+    assert.equal(data.supervision.orders.items[0].ownerUserId, "original-order-owner");
+    assert.deepEqual(calls, [{ access: { adminId: viewer.adminId, isBoss: false, internalQuote: false, authorizationKey: viewer.contextKey }, filter: { accountId: f.account.id, page: 1, pageSize: 5 } }]);
+    assert.equal(Object.hasOwn(data.version.quote, "ownerTotal"), false);
+    assert.equal(f.queries.some(q => /review_decision|zzsh_iam\.audit_event|duplicate_hint|SELECT id,revision::text/.test(q.sql)), false);
+});
+
+test("only the v3 single-account GET accepts rental reading and keeps active identity plus usable object scope", async t => {
+    const f = rentalDetailFixture(); mockRentalPublicProjection(t, f);
+    let access = rentalViewer(["supply.rental_account.read"]).access, authenticatedChecks = 0;
+    t.mock.method(authSecurity, "readAdminContext", async () => ({ userId: "fixture-admin", sessionId: "fixture-session" }));
+    t.mock.method(authSecurity, "assertAdminContextInTransaction", async () => { authenticatedChecks++; });
+    t.mock.method(authorization, "loadEffectiveAdminAccess", async () => access);
+    const options = { pool: { connect: async () => f.client }, supplyGateReader: async () => ({ publisherBail: "NOT_REQUIRED", occupancy: "FREE", reference: null }), listingCursorKey: queryKey, adminOrigin: "http://synthetic-admin", apiOrigin: "http://synthetic-api" };
+    const read = async (path: string, query = "queryVersion=3", method = "GET") => {
+        let body: any, status = 0;
+        const response = { status(value: number) { status = value; return this; }, setHeader() { return this; }, json(value: unknown) { body = value; } };
+        await handlePublishingRoute({ method, headers: { origin: options.adminOrigin, "idempotency-key": "rental-read-cannot-write" }, body: {} } as never, response as never, options as never, "req-rental-read", path, new URLSearchParams(query), true);
+        return { status, body };
+    };
+    const detail = await read("/listing-reviews/account-1");
+    assert.equal(detail.status, 200); assert.equal(detail.body.supervision.managementAccess, "DENIED");
+    assert.ok(authenticatedChecks >= 2, "both authorization boundaries still assert the admin session");
+    assert.ok(f.queries.some(q => q.sql === "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"));
+    assert.equal(f.queries.some(q => /FOR UPDATE|\b(?:INSERT|UPDATE|DELETE)\b/.test(q.sql)), false);
+    for (const [path, query, method] of [["/listing-reviews", "queryVersion=3", "GET"], ["/listing-reviews/account-1", "", "GET"], ["/listing-reviews/account-1/restriction", "queryVersion=3", "POST"], ["/listing-reviews/account-1/decide", "queryVersion=3", "POST"], ["/listing-reviews/account-1/duplicates", "queryVersion=3", "POST"]]) {
+        await assert.rejects(read(path!, query!, method!), (error: any) => error.status === 403, path);
+    }
+    f.state.scope = []; await assert.rejects(read("/listing-reviews/account-1"), (error: any) => error.status === 403 && error.code === "NO_GAME_SCOPE");
+    f.state.scope = ["another-game"]; await assert.rejects(read("/listing-reviews/account-1"), (error: any) => error.status === 404);
+    f.state.scope = [f.account.game_id]; await assert.rejects(read("/listing-reviews/missing-account"), (error: any) => error.status === 404);
+    await assert.rejects(read("/listing-reviews/account-1", "queryVersion=3&versionId=foreign-version"), (error: any) => error.status === 404);
+    access = { ...access, permissions: new Set(["order.read"]) }; await assert.rejects(read("/listing-reviews/account-1"), (error: any) => error.status === 403);
+    access = { ...access, status: "FROZEN" as never, permissions: new Set(["supply.rental_account.read"]) }; await assert.rejects(read("/listing-reviews/account-1"), (error: any) => error.status === 403);
+});
 async function captureListQuery(params: URLSearchParams) {
     let captured: { sql: string; values: unknown[] } | undefined;
     await listSupervision({ query: async (sql: string, values: unknown[]) => {
@@ -34,6 +232,17 @@ async function captureListQuery(params: URLSearchParams) {
     assert.ok(captured);
     return captured;
 }
+
+test('business status predicates are shared occupancy facts and run in SQL before LIMIT and count',async()=>{
+ for(const status of ['IN_PROGRESS','OFFLINE','COMPLETED']){
+  const calls:Array<{sql:string;values:unknown[]}>=[];
+  await listSupervision({query:async(sql:string,values:unknown[])=>{calls.push({sql,values});return{rows:[]};}} as never,queryViewer,parseSupervisionQuery(new URLSearchParams({status,limit:'5'})),async()=>{throw new Error('empty query has no gate work');},queryKey);
+  const page=calls.find(x=>x.sql.startsWith('SELECT a.id,'))!,count=calls.find(x=>x.sql.startsWith('SELECT count(*)::text AS total'))!;
+  assert(page&&count);assert.match(page.sql,/LIMIT/);assert.match(page.sql,/'COMPLETED'/);assert.match(count.sql,/'COMPLETED'|'PENDING_PAYMENT'/);
+  if(status==='OFFLINE')assert.match(count.sql,/a.owner_paused OR a.staff_restricted/);
+  if(status==='IN_PROGRESS')assert.match(count.sql,/ISOLATED_PARTY/,'legacy occupancy uses the same authoritative SQL');
+ }
+});
 test("every location branch allocates only referenced SQL parameters", async () => {
     for (const kind of ["account", "legacy", "owner", "nickname", "order"]) {
         const { sql, values } = await captureListQuery(new URLSearchParams({ queryKind: kind, q: "fixture", gameId: "game-1", view: "restricted" }));
@@ -740,7 +949,7 @@ test("the supervision page reads its accounts, versions, publication probe and l
     assert.equal(sql.filter(s => s.includes("FROM zzsh_supply.listing_version WHERE id = ANY")).length, 1, "the current versions are one batch");
     assert.equal(sql.filter(s => s.includes("SELECT DISTINCT account_id FROM zzsh_supply.listing_publication")).length, 1, "the publication probe is one batch");
     assert.equal(sql.filter(s => s.includes("legacy_supply_map")).length, 1, "the legacy source rows are one batch");
-    assert.equal(sql.filter(s => s.includes("legacy_order_read_snapshot")).length, 1, "the old account numbers are one batch");
+    assert.equal(sql.filter(s => s.includes("legacy_order_read_snapshot") && !s.startsWith("SELECT a.id,")).length, 1, "the old account numbers are one batch; the same page SELECT also projects shared occupancy predicates");
     assert.equal(sql.filter(s => s.includes("source_status::int")).length, 1, "the historical reads are one batch");
     assert.equal(sql.filter(s => s.includes("FROM zzsh_supply.listing_version WHERE id=$1")).length, 0, "the list keeps the batched version and does not re-read a moved current");
     assert.equal(sql.filter(s => s.includes("agreement_version") || s.includes("review_decision") || s.includes("draftSkin")).length, 0, "complete detail text stays off the list");

@@ -15,7 +15,8 @@ import { DropdownMenu, DropdownMenuGroup, DropdownMenuContent, DropdownMenuItem,
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { SupplySelect } from "@/components/supply/supply-select";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
-import { newOrdersStatus, supplyObjectLabel, attributeFacts, feeSummaryRows, historicalReadSummary, historicalResourceText, inventoryRows, formatAmount, formatFundingCents, formatTermDays, publicBasisVersion, quantityText, quoteLineFacts, type SupplyQueryKind, type SupplyWorkDetail, type SupplyWorkItem } from "../supply-review/model";
+import { accountBusinessStatus, supplyObjectLabel, attributeFacts, historicalReadSummary, historicalResourceText, formatAmount, formatTermDays, publicBasisVersion, quantityText, versionBaseFeeRows, type SupplyQueryKind, type SupplyWorkDetail, type SupplyWorkItem } from "../supply-review/model";
+import { ImportedAccountView, ResourceBillingTable } from "../supply-review/detail-pane";
 import {
   fullShanghaiTime,
   KIND_LABELS,
@@ -128,14 +129,13 @@ export function MoreFilters({ values, loginOptions, onChange }: {
   </>;
 }
 
-export function StatusBadge({ facts }: { facts: SupplyWorkItem["facts"] }) {
-  const status = newOrdersStatus(facts);
-  const label = status.label === "可接单" ? "可接新单" : status.label === "不可接单" ? "不可接新单" : status.label;
-  return <InlineStatus tone={status.tone}>{label}</InlineStatus>;
+export function StatusBadge({ facts, reviewState }: { facts: SupplyWorkItem["facts"]; reviewState?: string | null }) {
+  const status = accountBusinessStatus(facts, reviewState);
+  return <span data-account-status className="inline-flex flex-wrap items-center gap-x-2 gap-y-1"><InlineStatus tone={status.tone}>{status.label}</InlineStatus>{status.detail ? <span className="text-xs text-muted-foreground">{status.detail}</span> : null}</span>;
 }
 export function ReasonCell({ facts, onMore }: { facts: SupplyWorkItem["facts"]; onMore: () => void }) {
   const { code, others } = primaryReason(facts);
-  if (!code) return facts.newOrders === true ? null : <span className="text-sm text-muted-foreground">{newOrdersReasonText(facts.newOrders)}</span>;
+  if (!code) return facts.newOrders === true || facts.businessState === "IN_PROGRESS" || facts.businessState === "COMPLETED" ? null : <span className="text-sm text-muted-foreground">{newOrdersReasonText(facts.newOrders)}</span>;
   if (code === "OCCUPIED" && facts.occupancy === "OCCUPIED" && !facts.staffRestricted && !facts.ownerPaused && others === 0) return null;
   return <div className="text-sm"><div>{condText(code)}</div>{others > 0 && <Button type="button" variant="link" size="xs" className="h-auto px-0 text-xs text-muted-foreground" onClick={e => { e.stopPropagation(); onMore(); }} aria-label={"查看全部 " + (others + 1) + " 项原因"}>另 {others} 项</Button>}</div>;
 }
@@ -179,7 +179,7 @@ export function AccountResources({ row }: { row: SupplyWorkItem }) {
   const total = row.summary?.materialsVisibleTotal ?? materials.length;
   const unit = (item: typeof materials[number]) => item.unit === "ROUND" ? "发" : item.unit === "DAY" ? "天" : item.unit === "PIECE" ? "件" : "";
   return <div className="space-y-1 text-xs" data-account-resources>
-    <p className="font-semibold tabular-nums text-foreground">{rowHaffText(row).replace(/^历史\s+/, "")}</p>
+    <p className="font-semibold tabular-nums text-amber-900 dark:text-amber-300">{rowHaffText(row)}</p>
     {config && [config.safeBox, config.grading].some(value => readableConfigName(value)) ? <p className="text-muted-foreground">{[config.safeBox, config.grading].map(value => readableConfigName(value)).filter(Boolean).join(" · ")}</p> : null}
     <p className="max-w-[310px] break-words leading-relaxed text-muted-foreground">{materials.length ? materials.slice(0, 3).map(item => `${item.name ?? "物资"} ${item.quantity ?? "数量未知"}${unit(item)}`).join(" · ") : row.summary?.materialsVisibleTotal === 0 && row.summary.materialsTotal ? "物资数量均为 0" : row.summary?.versionId ? "暂无物资申报" : "资源待完善"}{total > 3 ? ` · 另 ${total - 3} 项` : ""}</p>
   </div>;
@@ -198,11 +198,11 @@ export function AccountTerms({ row }: { row: SupplyWorkItem }) {
 }
 
 export function AccountFees({ row }: { row: SupplyWorkItem }) {
-  const original = rowBaseFeeRows(row), readable = (value: string) => value.replace(/^历史\s+/, "");
-  const fees = { ...original, haff: readable(original.haff), materials: readable(original.materials), deposit: readable(original.deposit) }, hasQuote = [fees.total, fees.haff, fees.materials].some(value => value.includes("¥"));
+  const fees = rowBaseFeeRows(row), hasQuote = [fees.total, fees.haff, fees.materials, fees.resources ?? ""].some(value => value.includes("¥"));
   return <div className="min-w-[150px] space-y-1 text-xs tabular-nums" data-account-fees>
-    {hasQuote ? <><div className="flex items-baseline justify-between gap-3"><span className="text-muted-foreground">资源费</span><strong className="text-base font-semibold text-foreground">{fees.total}</strong></div><div className="flex justify-between gap-3 text-muted-foreground"><span>哈夫币租金</span><span>{fees.haff}</span></div><div className="flex justify-between gap-3 text-muted-foreground"><span>物资预付</span><span>{fees.materials}</span></div></> : <p className="font-medium text-muted-foreground">报价待完善</p>}
+    {hasQuote ? <><div className="flex items-baseline justify-between gap-3"><span className="text-muted-foreground">基础总价</span><strong className="text-base font-semibold text-sky-900 dark:text-sky-300">{fees.total}</strong></div><div className="flex justify-between gap-3 text-muted-foreground"><span>哈夫币租金</span><span>{fees.haff}</span></div><div className="flex justify-between gap-3 text-muted-foreground"><span>物资预付</span><span>{fees.materials}</span></div></> : <p className="font-medium text-muted-foreground">报价待完善</p>}
     <div className="flex justify-between gap-3 pt-1.5 text-muted-foreground"><span>租客基础押金</span><span className="font-medium text-foreground">{fees.deposit}</span></div>
+    {fees.resources && fees.resources !== "未提供" && (fees.total === "未提供" || !fees.haff.startsWith("¥") || !fees.materials.startsWith("¥")) ? <div className="flex justify-between gap-3 text-muted-foreground"><span>资源费合计</span><span>{fees.resources}</span></div> : null}
     {!row.summary && row.facts.historicalRead ? <span className="text-[11px] text-muted-foreground">迁入时记录</span> : null}
   </div>;
 }
@@ -283,7 +283,7 @@ export function AccountCards({ items, onView, onOpenOwner }: { items: SupplyWork
   return <div className="grid gap-2">{items.map(row => { const rule = row.facts.reasons.includes("CONFIRMATION_OR_MEDIA_REQUIRED") || row.facts.reasons.includes("RULE_CHANGED"), terms = rowTermsLines(row), fees = rowBaseFeeRows(row);
     return <Card size="sm" key={row.id} id={"supply-card-" + row.id} role="button" tabIndex={0} aria-label={"快速查看 " + supplyObjectLabel(row)} onClick={e => onView(row, e.currentTarget)} onKeyDown={e => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onView(row, e.currentTarget); } }} className="cursor-pointer gap-0 p-4 outline-none transition-colors hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/50"><div className="flex items-start justify-between gap-2"><div className="min-w-0"><AccountIdentity row={row} onOpenOwner={onOpenOwner}/></div><ChevronRight className="mt-1 size-4 shrink-0 text-muted-foreground" aria-hidden="true"/></div>
       <div className="mt-3 grid gap-3"><AccountResources row={row}/><AccountTerms row={row}/><AccountFees row={row}/></div>
-      <div className="mt-2 flex items-start gap-2"><StatusBadge facts={row.facts}/><ReasonCell facts={row.facts} onMore={() => onView(row, document.getElementById("supply-card-" + row.id) ?? undefined)}/></div>
+      <div className="mt-2 flex items-start gap-2"><StatusBadge facts={row.facts} reviewState={row.reviewState}/><ReasonCell facts={row.facts} onMore={() => onView(row, document.getElementById("supply-card-" + row.id) ?? undefined)}/></div>
       {rule && <p className="mt-2 text-xs text-muted-foreground">规则确认或展示图片仍需核对，详情中逐项查看。</p>}
       <div className="mt-1 text-xs text-muted-foreground">更新 {row.accountUpdatedAt ? <TimeText iso={row.accountUpdatedAt} label="账号更新时间"/> : "未提供"}</div></Card>; })}</div>;
 }
@@ -300,21 +300,15 @@ export function QuickView({ row, canRead, onClose, onOpenFull }: QuickProps) {
   const publicBasis = facts.publicBasis ?? null, publicDefault = !showDraft && publicBasis && detail?.version && publicBasis.id !== detail.version.id ? publicBasis : null;
   const v = publicDefault ? publicBasisVersion(publicDefault) : detail?.version, viewed = publicDefault ? row : alignedQuickRow(row, detail);
   const historical = detail?.supervision.facts.historicalRead ?? row.facts.historicalRead;
-  const attrs = v ? attributeFacts(v) : [], inventory = v ? inventoryRows(v, null) : [], lines = v ? quoteLineFacts(v) : [];
+  const attrs = v ? attributeFacts(v) : [];
   const verdict = facts.newOrders === null ? "新单资格待核" : facts.newOrders ? "可接新单" : "不可接新单";
   const declaredAttribute = v ? Object.values(v.declaration.attributes).some(value => value !== null && value !== undefined && value !== "" && !(Array.isArray(value) && value.length === 0)) : false;
   const emptyDraft = Boolean(v && !declaredAttribute && !v.declaration.inventory.length && !v.declaration.entitlements.length && !v.declaration.skins.length && !v.termOption?.displayName);
   const releaseId = v?.releaseId ?? null;
   const ratio = v?.quote?.baseRenterHaffRatioWanPerYuan ?? null;
-  const feeSource = v?.feeSummary ?? (publicDefault ? row.summary?.feeSummary : null);
-  let fees = feeSource ? feeSummaryRows(feeSource) : feeSummaryRows(null);
-  if (!feeSource?.resourceTotal && v?.quote?.resourceTotal?.amount) fees = { ...fees, total: `¥${formatAmount(v.quote.resourceTotal.amount)}` };
+  const fees = v ? versionBaseFeeRows(v, publicDefault?.baseDeposit?.amountCents) : rowBaseFeeRows(viewed);
   const termSeconds = publicDefault ? publicDefault.quote?.termSeconds ?? null : v?.quote?.termSeconds ?? null;
   const declared = v?.declaration.attributes ?? {};
-  const deposit = declared.owner_deposit_declaration as Record<string, unknown> | undefined;
-  const depositText = publicDefault?.baseDeposit ? formatFundingCents(publicDefault.baseDeposit.amountCents)
-    : v && deposit?.schema === "owner-deposit-declaration-v1" && typeof deposit.amountCents === "string" && /^(0|[1-9]\d*)$/.test(deposit.amountCents)
-      ? formatFundingCents(deposit.amountCents) : rowDepositText(viewed);
   const payout = declared.full_payout_declaration as Record<string, unknown> | undefined;
   const payoutLabel = v ? (payout?.selected === true ? "已选" : payout?.selected === false ? "未选" : "未申报") : rowFullPayout(viewed).label;
   const haffLine = v ? v.declaration.inventory.find(item => item.itemId === "haff" || v.presentation.items?.find(entry => entry.id === item.itemId)?.unit === "HAFF_BASE") : null;
@@ -337,7 +331,7 @@ export function QuickView({ row, canRead, onClose, onOpenFull }: QuickProps) {
       <div className="mt-1 flex flex-wrap items-center gap-2">
         <IdLine row={row}/>
         <span className="text-xs text-muted-foreground">·</span>
-        <StatusBadge facts={facts}/>
+        <StatusBadge facts={facts} reviewState={detail?.supervision.historical ? null : v?.reviewState ?? row.reviewState}/>
         <span className="text-xs text-muted-foreground">{publicDefault ? "对外资料" : showDraft && publicBasis ? "编辑草稿" : "当前资料"}</span>
         {g.blocked.length || g.pending.length ? <span className="text-xs text-muted-foreground">{g.blocked.length ? g.blocked.length + " 项需处理" : ""}{g.blocked.length && g.pending.length ? " · " : ""}{g.pending.length ? "待核 " + g.pending.length + " 项" : ""}</span> : null}
       </div>
@@ -346,38 +340,36 @@ export function QuickView({ row, canRead, onClose, onOpenFull }: QuickProps) {
       {error && <Alert variant="warning" role="status" className="mb-3"><CircleAlert aria-hidden="true" /><AlertTitle>详情未读到</AlertTitle><AlertDescription><p>{error}</p><p>以下仍为列表已读取的事实。</p></AlertDescription></Alert>}
       {!detail && !error ? <p className="mb-3 text-sm text-muted-foreground" aria-busy="true">正在读取当前资料…</p> : null}
 
+      {!v && detail && historical ? <ImportedAccountView read={historical}/> : <>
       <section className="border-b border-border pb-4" aria-label="基础报价速览">
-        <div className="mb-3 flex flex-wrap items-baseline justify-between gap-3"><h3 className="text-sm font-semibold">基础报价</h3><strong className="text-xl font-semibold tabular-nums"><span className="mr-2 text-xs font-normal text-muted-foreground">资源费</span>{fees.total}</strong></div>
+        <div className="mb-3 flex flex-wrap items-baseline justify-between gap-3"><h3 className="text-sm font-semibold">基础报价</h3><strong className="text-xl font-semibold tabular-nums text-sky-900 dark:text-sky-300"><span className="mr-2 text-xs font-normal text-muted-foreground">基础总价</span>{fees.total}</strong></div>
         <dl className="grid grid-cols-2 gap-x-5 gap-y-3 text-sm sm:grid-cols-3">
           <div><dt className="text-xs text-muted-foreground">哈夫币租金</dt><dd className="mt-1 tabular-nums">{fees.haff}</dd></div>
           <div><dt className="text-xs text-muted-foreground">物资预付</dt><dd className="mt-1 tabular-nums">{fees.materials}</dd></div>
-          <div><dt className="text-xs text-muted-foreground">租客基础押金</dt><dd className="mt-1 font-medium tabular-nums">{depositText}</dd></div>
+          <div><dt className="text-xs text-muted-foreground">租客基础押金</dt><dd className="mt-1 font-medium tabular-nums">{fees.deposit}</dd></div>
+          {fees.resources && fees.resources !== "未提供" && (fees.total === "未提供" || !fees.haff.startsWith("¥") || !fees.materials.startsWith("¥")) ? <div><dt className="text-xs text-muted-foreground">资源费合计</dt><dd className="mt-1 tabular-nums">{fees.resources}</dd></div> : null}
           <div><dt className="text-xs text-muted-foreground">预计租期</dt><dd className="mt-1">{termSeconds ? formatTermDays(termSeconds) : "未提供"}</dd></div>
           <div><dt className="text-xs text-muted-foreground">全额包赔</dt><dd className="mt-1">{payoutLabel}</dd></div>
           <div><dt className="text-xs text-muted-foreground">基础客价比例</dt><dd className="mt-1">{ratio ? ratio + " 万/元" : "未提供"}</dd></div>
         </dl>
-        <p className="mt-3 text-xs text-muted-foreground">押金独立收取，租客实际费用按本人报价核定。</p>
-        <Collapsible className="mt-3"><CollapsibleTrigger className="group flex w-full items-center justify-between text-xs text-muted-foreground">费用明细与版本<ChevronDown className="size-3.5"/></CollapsibleTrigger><CollapsibleContent keepMounted className="pt-2 data-[closed]:hidden">
-          <p className="break-all text-xs text-muted-foreground">版本 {v?.id ?? "未提供"} · 摘要 {v?.contentHash ?? "未提供"} · 规则 {releaseId ?? "未提供"}</p>
-          {fees.note ? <p className="mt-1 text-xs text-muted-foreground">{fees.note}</p> : null}
-          {lines.length ? <div className="mt-2 overflow-x-auto"><Table className="text-xs"><TableHeader><TableRow><TableHead>项目</TableHead><TableHead>计价基数</TableHead><TableHead>单价</TableHead><TableHead className="text-right">金额</TableHead></TableRow></TableHeader><TableBody>{lines.map(line => <TableRow key={line.itemId}><TableCell className="whitespace-normal">{line.name} · {line.quantity}</TableCell><TableCell>{line.unitQuantity ?? "未提供"}</TableCell><TableCell>{line.buyerUnitAmount ? "¥" + formatAmount(line.buyerUnitAmount) : "未提供"}</TableCell><TableCell className="text-right tabular-nums">{line.amount ? "¥" + formatAmount(line.amount) : "未提供"}</TableCell></TableRow>)}</TableBody></Table></div> : null}
-        </CollapsibleContent></Collapsible>
+        <p className="mt-3 text-xs text-muted-foreground">基础总价含哈夫币租金、物资预付和基础押金；租客实际费用按本人报价核定。</p>
+        {fees.note ? <p className="mt-1 text-xs text-muted-foreground">{fees.note}</p> : null}
       </section>
 
-      <section className="mt-4 border-t pt-3">
-        <h3 className="mb-2 text-sm font-semibold">哈夫币与已申报物资 <span className="ml-1 text-xs font-normal text-muted-foreground">{v ? (v.sequence ? `第 ${v.sequence} 版全部申报` : "对外版全部申报") : "列表摘要"}</span></h3>
-        <p className="mb-2 text-sm">哈夫币：<span className="font-mono font-semibold tabular-nums text-amber-900 dark:text-amber-300">{haffText}</span></p>
-        {v ? (inventory.length ? <Table className="text-sm"><TableHeader><TableRow><TableHead>物品</TableHead><TableHead className="text-right">申报数量</TableHead></TableRow></TableHeader><TableBody>{inventory.map(item => <TableRow key={item.itemId}><TableCell className="whitespace-normal">{item.name}</TableCell><TableCell className="text-right tabular-nums">{item.current} {item.unit}</TableCell></TableRow>)}</TableBody></Table> : <p className="text-sm text-muted-foreground">本版未申报物资；不代表没有该物品。</p>) : <p className="text-sm text-muted-foreground">{error ? "详情未读到，完整物资表暂不可核对。" : "正在读取完整物资表…"}</p>}
-      </section>
+      <div className="mt-4 space-y-3">
+        <p className="text-sm">哈夫币：<span className="font-semibold tabular-nums text-amber-900 dark:text-amber-300">{haffText}</span></p>
+        {v ? <ResourceBillingTable key={v.id} version={v}/> : <p className="text-sm text-muted-foreground">{error ? "详情未读到，完整物资表暂不可核对。" : "正在读取完整物资表…"}</p>}
+      </div>
 
       <section className="border-t pt-3 first:border-t-0 first:pt-0">
         <h3 className="mb-2 text-sm font-semibold">账号资料</h3>
         {v ? (emptyDraft ? <p className="text-sm text-muted-foreground">本版尚未填写申报属性；完整字段可在档案中逐项核对，未申报不按否处理。</p> : <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm sm:grid-cols-3">{attrs.map(fact => <div key={fact.label}><dt className="text-xs text-muted-foreground">{fact.label}</dt><dd className={fact.unconfirmed ? "text-muted-foreground" : "font-medium"}>{fact.value}</dd></div>)}<div><dt className="text-xs text-muted-foreground">了解渠道（内部）</dt><dd>{v.management?.infoSource?.name ?? (typeof v.declaration.attributes.info_source === "string" ? v.declaration.attributes.info_source : "未提供")}</dd></div></dl>) : <p className="text-sm text-muted-foreground">{error ? "详情未读到，属性暂不可核对。" : "正在读取属性…"}</p>}
       </section>
+      </>}
 
+      {v ? <Collapsible className="mt-4 border-t pt-3"><CollapsibleTrigger className="group flex w-full items-center justify-between rounded-sm text-left text-xs text-muted-foreground outline-none focus-visible:ring-3 focus-visible:ring-ring/50">版本追溯<ChevronDown className="size-3.5"/></CollapsibleTrigger><CollapsibleContent className="pt-2"><dl className="grid gap-2 break-all text-xs text-muted-foreground"><div><dt>资料版本</dt><dd>{v.id}</dd></div><div><dt>内容摘要</dt><dd>{v.contentHash ?? "未提供"}</dd></div><div><dt>规则版本</dt><dd>{releaseId ?? "未提供"}</dd></div></dl></CollapsibleContent></Collapsible> : null}
 
-
-      {historical ? <Collapsible className="mt-4 border-t pt-3">
+      {v && historical ? <Collapsible className="mt-4 border-t pt-3">
         <CollapsibleTrigger className="group flex w-full items-center justify-between rounded-sm text-left text-sm font-semibold outline-none focus-visible:ring-3 focus-visible:ring-ring/50">迁入前记录<ChevronDown className="size-3.5 transition-transform group-data-[panel-open]:rotate-180"/></CollapsibleTrigger>
         <CollapsibleContent keepMounted data-historical-summary="" className="pt-2 data-[closed]:hidden">
           <p className="text-xs text-muted-foreground">{historicalReadSummary(historical)}</p>

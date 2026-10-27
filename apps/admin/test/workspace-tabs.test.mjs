@@ -12,6 +12,7 @@ import {
   sanitizeFinanceReturn,
   tabFromKeyboard,
   tabFromLocation,
+  tabHref,
   tabPresentation,
   upsertTab,
 } from "../src/workspace/tab-model.ts";
@@ -154,6 +155,29 @@ test("admin list query is stored on the tab and restored from the URL", () => {
   assert.equal(tab.query.status, "ACTIVE");
   assert.equal(tab.query.page, "2");
   assert.equal(tab.query.password, undefined);
+});
+
+test("restoring legacy and supply account tabs keeps one canonical object and the active source context", () => {
+  const memory = new Map();
+  globalThis.sessionStorage = { getItem: key => memory.get(key) ?? null, setItem: (key, value) => memory.set(key, value) };
+  const reader = { isBoss: false, permissions: ["supply.rental_account.read"] };
+  const legacy = { id: "resource:account-one", kind: "resource-object", objectType: "resource", objectId: "account-one", title: "旧来源号 000123", path: "/supply/accounts/account-one", query: { fromOrderId: "order-one", fromUserId: "user-one", fromUserSection: "resources", fromUserPublication: "published" }, closable: true };
+  const review = tabFromLocation("/supply/reviews/account-one", "?context=changes&versionId=version-old");
+  memory.set("zzsh-admin-workspace-tabs:restore-account", JSON.stringify({ adminUserId: "restore-account", activeId: legacy.id, tabs: [legacy, review] }));
+  const restored = restoreTabs("restore-account", reader);
+  assert.equal(restored.activeId, "supply:account-one");
+  assert.equal(restored.tabs.length, 2, "one account plus workbench");
+  const account = restored.tabs.find(tab => tab.id === restored.activeId);
+  assert.equal(account.kind, "listing-object");
+  assert.equal(account.path, "/supply/reviews/account-one");
+  assert.deepEqual(account.query, legacy.query);
+  assert.equal(account.title, legacy.title);
+  assert.equal(tabHref(legacy).startsWith("/supply/reviews/account-one?"), true);
+  const reopened = upsertTab([legacy, review], tabFromLocation("/supply/accounts/account-one", "?fromOrderId=order-two"));
+  assert.equal(reopened.length, 1);
+  assert.equal(reopened[0].id, restored.activeId);
+  assert.deepEqual(reopened[0].query, { fromOrderId: "order-two" });
+  assert.equal(restoreTabs("restore-account", { isBoss: false, permissions: ["order.read"] }).tabs.length, 1, "lost supply reading removes the restored account");
 });
 
 test("tab keyboard moves across the list and closes the closable tab", () => {

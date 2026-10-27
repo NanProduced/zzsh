@@ -713,8 +713,8 @@ export function composeSupplyGateWithOrderOccupancy(base: SupplyGateReader): Sup
   return async (client, account, purpose) => {
     const gate = await base(client, account, purpose);
     const occupancy = await readAccountOccupancyFacts(client, account.id);
-    const { occupancyKind: _previousKind, ...fundingGate } = gate;
-    return { ...fundingGate, occupancy: occupancy.state, ...(occupancy.kind ? { occupancyKind: occupancy.kind } : {}) };
+    const { occupancyKind: _previousKind, rentalCompleted: _previousCompletion, ...fundingGate } = gate;
+    return { ...fundingGate, occupancy: occupancy.state, ...(occupancy.kind ? { occupancyKind: occupancy.kind } : {}), ...(occupancy.rentalCompleted ? { rentalCompleted: true } : {}) };
   };
 }
 

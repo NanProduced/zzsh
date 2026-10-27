@@ -20,7 +20,7 @@ import { DistributionWorkspace } from "../views/distribution-workspace";
 
 import { AdminOrderChainView, AdminResourceReadView } from "../views/admin-order-chain-view";
 
-import type { WorkspaceTab } from "./tab-model";
+import { parseWorkspacePath, type WorkspaceTab } from "./tab-model";
 import { WorkbenchPage } from "./workbench";
 import { Button } from "../components/ui-elements";
 
@@ -65,8 +65,10 @@ export function WorkspacePageContent({
   urlTheme?: Theme | null;
   onExitPreview?: () => void;
 }) {
-  const fromSupply = tab.query.fromSupplyId && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(tab.query.fromSupplyId) && snapshot.permissions.includes("supply.review.read") ? tab.query.fromSupplyId : null;
-  const supplyReturn = fromSupply ? <div className="wf-source-context"><Button variant="secondary" onClick={() => onOpenPath(`/supply/reviews/${encodeURIComponent(fromSupply)}?${new URLSearchParams({context:tab.query.fromSupplyContext??"situation",...(tab.query.fromSupplyVersionId?{versionId:tab.query.fromSupplyVersionId}:{})})}`)}>返回来源账号供给</Button></div> : null;
+  const fromSupply = tab.query.fromSupplyId && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(tab.query.fromSupplyId) && (snapshot.security.isBoss || snapshot.permissions.includes("supply.review.read") || snapshot.permissions.includes("supply.rental_account.read")) ? tab.query.fromSupplyId : null;
+  const supplyReturnQuery = new URLSearchParams({ context: tab.query.fromSupplyContext ?? "situation", ...(tab.query.fromSupplyVersionId ? { versionId: tab.query.fromSupplyVersionId } : {}) });
+  for (const key of ["fromOrderId", "fromUserId", "fromUserSection", "fromUserPublication", "fromUserRole", "fromUserStatus"]) if (tab.query[key]) supplyReturnQuery.set(key, tab.query[key]!);
+  const supplyReturn = fromSupply ? <div className="wf-source-context"><Button variant="secondary" onClick={() => onOpenPath(`/supply/reviews/${encodeURIComponent(fromSupply)}?${supplyReturnQuery}`)}>返回来源账号供给</Button></div> : null;
   const withSupplyOrigin = (path: string, title?: string) => {
     if (!fromSupply) return onOpenPath(path,title);
     const [pathname,search=""] = path.split("?"), params = new URLSearchParams(search);
@@ -159,8 +161,8 @@ export function WorkspacePageContent({
   if (tab.kind === "audit") {
     return <AdminAuditView key={tab.id} snapshot={snapshot} initialQuery={tab.query} onQueryChange={onQueryChange} refreshNonce={refreshNonce} />;
   }
-  if (tab.kind === "users" || tab.kind === "user-object") return <>{supplyReturn}{tab.query.fromOrderId&&/^[A-Za-z0-9._:-]{1,128}$/.test(tab.query.fromOrderId)&&(snapshot.security.isBoss||snapshot.permissions.includes("order.read"))?<button className="oc-back" onClick={()=>onOpenPath(`/orders/${tab.query.fromOrderId}`)}>返回来源订单</button>:null}<UserDirectoryView key={tab.id} tab={tab} snapshot={snapshot} onOpenPath={(path,title)=>{const [pathname="",query=""]=path.split("?");const params=new URLSearchParams(query);if(tab.query.fromOrderId&&!params.has("fromOrderId"))params.set("fromOrderId",tab.query.fromOrderId);if(pathname.startsWith("/supply/accounts/")){params.set("fromUserId",tab.objectId??"");params.set("fromUserSection",tab.query.section??"resources");if((tab.query.section??"resources")==="resources"&&tab.query.publication==="published")params.set("fromUserPublication","published");}if(pathname.startsWith("/orders/")&&tab.objectId){params.set("fromUserId",tab.objectId);params.set("fromUserSection",tab.query.section??"orders");if(tab.query.role)params.set("fromUserRole",tab.query.role);if(tab.query.status)params.set("fromUserStatus",tab.query.status);}withSupplyOrigin(pathname+(params.size?`?${params}`:""),title);}} onQueryChange={query=>onQueryChange(tab.kind==="users"?query:{...tab.query,...query})} refreshNonce={refreshNonce}/></>;
-  if(tab.kind==="resource-object")return <AdminResourceReadView snapshot={snapshot} accountId={tab.objectId!} fromOrderId={tab.query.fromOrderId} fromUserId={tab.query.fromUserId} fromUserSection={tab.query.fromUserSection} fromUserPublication={tab.query.fromUserPublication} onOpenPath={onOpenPath} refreshNonce={refreshNonce}/>;
+  if (tab.kind === "users" || tab.kind === "user-object") return <>{supplyReturn}{tab.query.fromOrderId&&/^[A-Za-z0-9._:-]{1,128}$/.test(tab.query.fromOrderId)&&(snapshot.security.isBoss||snapshot.permissions.includes("order.read"))?<button className="oc-back" onClick={()=>onOpenPath(`/orders/${tab.query.fromOrderId}`)}>返回来源订单</button>:null}<UserDirectoryView key={tab.id} tab={tab} snapshot={snapshot} onOpenPath={(path,title)=>{const [pathname="",query=""]=path.split("?");const params=new URLSearchParams(query);if(tab.query.fromOrderId&&!params.has("fromOrderId"))params.set("fromOrderId",tab.query.fromOrderId);const route=parseWorkspacePath(pathname);if(route.kind==="listing-object"){const section=params.get("fromUserSection")??tab.query.section??"orders";if(!params.has("fromUserId")&&tab.objectId)params.set("fromUserId",tab.objectId);params.set("fromUserSection",section);if(!params.has("fromUserPublication")&&section==="resources"&&tab.query.publication==="published")params.set("fromUserPublication","published");if(!params.has("fromUserRole")&&section==="orders"&&tab.query.role)params.set("fromUserRole",tab.query.role);if(!params.has("fromUserStatus")&&section==="orders"&&tab.query.status)params.set("fromUserStatus",tab.query.status);}if(pathname.startsWith("/orders/")&&tab.objectId){params.set("fromUserId",tab.objectId);params.set("fromUserSection",tab.query.section??"orders");if(tab.query.role)params.set("fromUserRole",tab.query.role);if(tab.query.status)params.set("fromUserStatus",tab.query.status);}withSupplyOrigin((route.kind==="listing-object"?route.path:pathname)+(params.size?`?${params}`:""),title);}} onQueryChange={query=>onQueryChange(tab.kind==="users"?query:{...tab.query,...query})} refreshNonce={refreshNonce}/></>;
+  if (tab.kind === "resource-object" || tab.kind === "listing-object") return <AdminResourceReadView key={tab.id} snapshot={snapshot} accountId={tab.objectId!} initialQuery={tab.query} onOpenPath={onOpenPath} onQueryChange={onQueryChange} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce}/>;
   if (tab.kind === "catalog") {
     return <SupplyCatalogView key={tab.id} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
   }
@@ -170,7 +172,7 @@ export function WorkspacePageContent({
   if (tab.kind === "rules") {
     return <SupplyRulesView key={tab.id} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
   }
-  if (tab.kind === "listing-review" || tab.kind === "listing-object") return <SupplyListingReviewView key={tab.id} snapshot={snapshot} initialAccountId={tab.objectId} initialQuery={tab.query} onOpenPath={onOpenPath} onQueryChange={onQueryChange} refreshNonce={refreshNonce} onDirtyChange={onDirtyChange}/>;
+  if (tab.kind === "listing-review") return <SupplyListingReviewView key={tab.id} snapshot={snapshot} initialQuery={tab.query} onOpenPath={onOpenPath} onQueryChange={onQueryChange} refreshNonce={refreshNonce} onDirtyChange={onDirtyChange}/>;
   if (tab.kind === "media-review") {
     return <SupplyMediaReviewView key={[tab.id,snapshot.adminUserId,snapshot.session.id,snapshot.permissions.slice().sort().join(",")].join("|")} snapshot={snapshot} refreshNonce={refreshNonce} onOpenPath={onOpenPath} />;
   }
@@ -179,15 +181,17 @@ export function WorkspacePageContent({
   }
   if (tab.kind === "orders" || tab.kind === "order-object") {
     const fromUser = tab.kind === "order-object" && tab.query.fromUserId && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(tab.query.fromUserId) && (snapshot.security.isBoss || snapshot.permissions.includes("user.directory.read")) ? tab.query.fromUserId : null;
-    const userReturn = fromUser ? <button className="oc-back" onClick={() => onOpenPath(`/users/${fromUser}?${new URLSearchParams({ section: tab.query.fromUserSection ?? "orders", ...(tab.query.fromUserRole ? { role: tab.query.fromUserRole } : {}), ...(tab.query.fromUserStatus ? { status: tab.query.fromUserStatus } : {}) })}`)}>返回来源用户</button> : null;
+    const userReturn = fromUser ? <button className="oc-back" onClick={() => onOpenPath(`/users/${fromUser}?${new URLSearchParams({ section: tab.query.fromUserSection ?? "orders", ...(tab.query.fromUserRole ? { role: tab.query.fromUserRole } : {}), ...(tab.query.fromUserStatus ? { status: tab.query.fromUserStatus } : {}), ...(tab.query.fromUserSection === "resources" && tab.query.fromUserPublication === "published" ? { publication: "published" } : {}) })}`)}>返回来源用户</button> : null;
     const withUserOrigin = (path: string, title?: string) => {
       const [pathname = "", search = ""] = path.split("?"), params = new URLSearchParams(search);
-      if (!fromUser || (pathname !== tab.path && !pathname.startsWith("/supply/accounts/"))) return withSupplyOrigin(path, title);
+      const route = parseWorkspacePath(pathname);
+      if (!fromUser || (pathname !== tab.path && route.kind !== "listing-object")) return withSupplyOrigin(path, title);
       params.set("fromUserId", fromUser);
       params.set("fromUserSection", tab.query.fromUserSection ?? "orders");
       if (tab.query.fromUserRole) params.set("fromUserRole", tab.query.fromUserRole);
       if (tab.query.fromUserStatus) params.set("fromUserStatus", tab.query.fromUserStatus);
-      withSupplyOrigin(pathname + "?" + params, title);
+      if (tab.query.fromUserPublication) params.set("fromUserPublication", tab.query.fromUserPublication);
+      withSupplyOrigin((route.kind === "listing-object" ? route.path : pathname) + "?" + params, title);
     };
     return (
       <>{supplyReturn}{userReturn}

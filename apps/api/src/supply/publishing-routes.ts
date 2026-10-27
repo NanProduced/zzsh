@@ -12,6 +12,7 @@ import { assertGameScopeUsable, gameScopeSql, readAdminGameScope } from "../auth
 import { readAdminContext, assertAdminContextInTransaction } from "../auth/auth-security";
 import {
   loadEffectiveAdminAccess,
+  hasPermission,
   requirePermission,
 } from "../auth/admin-authorization";
 import {
@@ -452,8 +453,12 @@ export async function handlePublishingRoute(
     if (admin) {
       await assertAdminContextInTransaction(client, context);
       const access = await loadEffectiveAdminAccess(client, actorId);
-      requirePermission(access, "supply.review.read");
-      requirePermission(access, permission);
+      if (method === "GET" && accountMatch && !action && query.get("queryVersion") === "3" && !hasPermission(access, "supply.review.read")) {
+        requirePermission(access, "supply.rental_account.read");
+      } else {
+        requirePermission(access, "supply.review.read");
+        requirePermission(access, permission);
+      }
       if (a) await assertGameScope(client, actorId, access!.isBoss, a.game_id);
       return access;
     }

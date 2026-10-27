@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { workspaceMenuItems, titleForPath } from "../src/workspace/nav-config.ts";
-import { canOpenKind, parseWorkspacePath, tabFromLocation, sanitizeTabQuery, upsertTab } from "../src/workspace/tab-model.ts";
+import { canOpenKind, parseWorkspacePath, tabFromLocation, tabHref, sanitizeTabQuery, upsertTab } from "../src/workspace/tab-model.ts";
 
 test("supply routes parse into dedicated workspace tabs", () => {
   const account = tabFromLocation("/supply/reviews/account-a", "?context=review");
@@ -31,6 +31,31 @@ test("supply cursor history persists bounded metadata while secret and phone que
   assert.equal(value.password,undefined);
   assert.equal(value.phone,undefined);
   assert.equal(sanitizeTabQuery({supplyCursorHistory:"x".repeat(8193)}).supplyCursorHistory,undefined);
+});
+
+test("legacy resource URLs and review URLs share one canonical account tab and keep return/version context", () => {
+  const review = tabFromLocation("/supply/reviews/account:a", "?context=situation&versionId=version-2");
+  const resource = tabFromLocation("/supply/accounts/account%3Aa", "?fromOrderId=order-1&fromUserId=user-1&fromUserSection=orders&fromUserRole=owner&fromUserStatus=current");
+  assert.equal(resource.id, review.id);
+  assert.equal(resource.kind, "listing-object");
+  assert.equal(resource.path, "/supply/reviews/account%3Aa");
+  assert.equal(tabHref(resource), "/supply/reviews/account%3Aa?fromOrderId=order-1&fromUserId=user-1&fromUserSection=orders&fromUserRole=owner&fromUserStatus=current");
+  const original = { ...review, title: "账号 AC9000000000002" };
+  const tabs = upsertTab([original], resource);
+  assert.equal(tabs.length, 1);
+  assert.equal(tabs[0].title, original.title);
+  assert.deepEqual(tabs[0].query, resource.query, "opening current account clears a previously selected historical version");
+  for (const path of ["/supply/accounts/%", "/supply/accounts/a%2Fb", "/supply/accounts/" + "a".repeat(129), "/supply/reviews/%"]) assert.equal(parseWorkspacePath(path).kind, "unknown", path);
+});
+
+test("account details accept independent rental reading without opening the review list or management pages", () => {
+  const reader = { isBoss: false, permissions: ["supply.rental_account.read"] };
+  const orders = { isBoss: false, permissions: ["order.read"] };
+  assert.equal(canOpenKind("listing-object", reader), true);
+  assert.equal(canOpenKind("resource-object", reader), true);
+  for (const kind of ["listing-review", "media-review", "rules", "catalog"]) assert.equal(canOpenKind(kind, reader), false, kind);
+  assert.equal(canOpenKind("listing-object", orders), false);
+  assert.equal(canOpenKind("resource-object", orders), false);
 });
 
 test("supply tabs require their own permissions instead of a generic admin role", () => {

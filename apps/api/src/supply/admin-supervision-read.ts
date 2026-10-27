@@ -4,16 +4,17 @@ import type { PoolClient } from "pg";
 import type { EffectiveAdminAccess } from "../auth/admin-authorization";
 import { assertGameScopeUsable, gameScopeSignature, gameScopeSql, readAdminGameScope } from "../auth/admin-scope";
 import { queryAdminReadOrders } from "../order/admin-order-read";
+import { accountOccupancySql } from "../order/legacy-order-occupancy";
 import { readDirectoryUserSummaries } from "../auth/user-directory-summary";
 import { escapeLike } from "./catalog";
 import { canonicalize } from "./content-hash";
 import { requireListingCursorKey, type ListingCursorKey } from "./listing-cursor";
 import { loadLegacyHistoricalRead, loadLegacyHistoricalReads, type LegacyHistoricalRead } from "./legacy-listing-read";
-import { validateFundingPolicy } from "./funding-policy";
+import { validateFundingPolicy, validateOwnerDepositDeclaration } from "./funding-policy";
 import { decimalToBigInt, parseNonNegativeDecimal, yuanAmountObject } from "./decimal";
 import { DELTA_INFO_SOURCE_DICTIONARY, projectDeltaQuote } from "./delta-rental";
 import { projectTenantMoney } from "./tenant-price-projection";
-import { evaluatePublication, listingCandidatePage, listingDetail, listingPageShared, publicListingBasis, publicListingMemo, readPublicListing, type ListingDetailPrefetch, type ListingPageShared, type ListingPublication, type ListingVersion, type PublishingAccount, type SupplyGate, type SupplyGateReader } from "./publishing";
+import { evaluatePublication, listingCandidatePage, listingDetail, listingPageShared, publicListingAttributes, publicListingBasis, publicListingMemo, readPublicListing, type ListingDetailPrefetch, type ListingPageShared, type ListingPublication, type ListingVersion, type PublishingAccount, type SupplyGate, type SupplyGateReader } from "./publishing";
 import { projectPublicAttributeDisplay, publicLoginMethodOptions } from "./listing-query";
 import { conflict, forbidden, invalid, notFound, sha256Hex } from "./supply-util";
 import { SecurityApiError } from "../auth/security-core";
@@ -32,6 +33,7 @@ export type SupervisionQuery = {
     q: string;
     gameId: string;
     eligibility?: "ELIGIBLE" | "BLOCKED" | "UNKNOWN";
+    status?: "LISTED" | "IN_PROGRESS" | "OFFLINE" | "COMPLETED";
     source?: "NEW" | "LEGACY";
     haffMin?: string;
     haffMax?: string;
@@ -43,7 +45,7 @@ export type SupervisionQuery = {
 };
 const idPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const timePattern = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z$/;
-const QUERY_KEYS = ["queryVersion", "view", "queryKind", "q", "gameId", "limit", "cursor", "eligibility", "source", "haffMin", "haffMax", "depositMin", "depositMax", "loginMethod"];
+const QUERY_KEYS = ["queryVersion", "view", "queryKind", "q", "gameId", "limit", "cursor", "eligibility", "status", "source", "haffMin", "haffMax", "depositMin", "depositMax", "loginMethod"];
 /** Omitted means no bound. A present value must be a non-negative integer string; min>max is a separate error. */
 function integerFilter(params: URLSearchParams, name: string, label: string): string | undefined {
     if (!params.has(name)) return undefined;
@@ -67,6 +69,8 @@ export function parseSupervisionQuery(params: URLSearchParams): SupervisionQuery
         throw invalid("Invalid supervision query");
     const eligibility = params.has("eligibility") ? params.get("eligibility")! : undefined;
     if (eligibility !== undefined && !["ELIGIBLE", "BLOCKED", "UNKNOWN"].includes(eligibility)) throw invalid("Eligibility filter is invalid", "eligibility");
+    const status = params.has("status") ? params.get("status")! : undefined;
+    if (status !== undefined && !["LISTED", "IN_PROGRESS", "OFFLINE", "COMPLETED"].includes(status)) throw invalid("Account status filter is invalid", "status");
     const source = params.has("source") ? params.get("source")! : undefined;
     if (source !== undefined && !["NEW", "LEGACY"].includes(source)) throw invalid("Source filter is invalid", "source");
     const loginMethod = params.has("loginMethod") ? params.get("loginMethod")! : undefined;
@@ -76,6 +80,7 @@ export function parseSupervisionQuery(params: URLSearchParams): SupervisionQuery
     return {
         view: view as SupervisionQuery["view"], queryKind: queryKind as SupervisionQuery["queryKind"], q, gameId, limit: Number(limit), cursor: params.get("cursor"),
         ...(eligibility ? { eligibility: eligibility as SupervisionQuery["eligibility"] } : {}),
+        ...(status ? { status: status as SupervisionQuery["status"] } : {}),
         ...(source ? { source: source as SupervisionQuery["source"] } : {}),
         ...(haff.min !== undefined ? { haffMin: haff.min } : {}), ...(haff.max !== undefined ? { haffMax: haff.max } : {}),
         ...(deposit.min !== undefined ? { depositMin: deposit.min } : {}), ...(deposit.max !== undefined ? { depositMax: deposit.max } : {}),
@@ -160,7 +165,15 @@ async function loadSupervisionPageFacts(client: PoolClient, accountIds: string[]
     return { sources, oldNumbers, historical };
 }
 
-export async function supervisionFacts(client: PoolClient, a: PublishingAccount, detail: Record<string, any>, gate: SupplyGateReader, admission?: LegacyPublicAdmission, detailIndex?: LegacyPublicAdmissionDetailIndex, context?: { page?: SupervisionPageFacts; prefetch?: ListingDetailPrefetch }) {
+export function accountBusinessState(facts: { occupied: boolean; completed: boolean; ownerPaused: boolean; staffRestricted: boolean; newOrders: boolean | null; publicVisible: boolean | null; lifecycle: string | null }): SupervisionQuery["status"] | null {
+    if (facts.occupied) return "IN_PROGRESS";
+    if (facts.completed) return "COMPLETED";
+    if (facts.lifecycle !== "ACTIVE") return null;
+    if (facts.ownerPaused || facts.staffRestricted) return "OFFLINE";
+    return facts.newOrders === true && facts.publicVisible === true ? "LISTED" : null;
+}
+
+export async function supervisionFacts(client: PoolClient, a: PublishingAccount, detail: Record<string, any>, gate: SupplyGateReader, admission?: LegacyPublicAdmission, detailIndex?: LegacyPublicAdmissionDetailIndex, context?: { page?: SupervisionPageFacts; prefetch?: ListingDetailPrefetch; state?: { occupied?: boolean; completed?: boolean } }) {
     const sources = context?.page ? (context.page.sources.get(a.id) ?? []) : (await client.query(sourceSql, [a.id])).rows;
     const oldNumbers = context?.page ? (context.page.oldNumbers.get(a.id) ?? []) : (await client.query<{
         value: string;
@@ -188,7 +201,7 @@ export async function supervisionFacts(client: PoolClient, a: PublishingAccount,
     const occupancyKind = detail.occupancyKind === "PENDING_PAYMENT" || detail.occupancyKind === "RENTED" || detail.occupancyKind === "OCCUPIED" ? detail.occupancyKind : null;
     const publicBasis = publicVisible ? publicListingBasis(publicRead ?? {}) : null;
     if (publicBasis) (publicBasis as Record<string, unknown>).feeSummary = quoteFeeSummary((publicRead as { quote?: Record<string, any> } | null)?.quote);
-    return { publicVisible, publicSource, publicVersionId: publicBasis?.id ?? null, publicBasis, newOrders, reasons: blockers, primaryReasonCode, ownerPaused: a.owner_paused, staffRestricted: a.staff_restricted, occupancy: !detail.version ? "UNKNOWN" : blockers.includes("OCCUPIED") ? "OCCUPIED" : blockers.includes("OCCUPANCY_UNKNOWN") ? "UNKNOWN" : "FREE", occupancyKind, sources, legacyNumbers: [...new Set([...sources.map(r => r.businessNo).filter(Boolean), ...oldNumbers])], historicalRead };
+    return { businessState: accountBusinessState({ occupied: context?.state?.occupied === true || blockers.includes("OCCUPIED"), completed: context?.state?.completed === true || blockers.includes("RENTAL_COMPLETED"), ownerPaused: a.owner_paused, staffRestricted: a.staff_restricted, newOrders, publicVisible, lifecycle: a.lifecycle ?? null }), lifecycle: a.lifecycle ?? null, publicVisible, publicSource, publicVersionId: publicBasis?.id ?? null, publicBasis, newOrders, reasons: blockers, primaryReasonCode, ownerPaused: a.owner_paused, staffRestricted: a.staff_restricted, occupancy: !detail.version ? "UNKNOWN" : blockers.includes("OCCUPIED") ? "OCCUPIED" : blockers.includes("OCCUPANCY_UNKNOWN") ? "UNKNOWN" : "FREE", occupancyKind, sources, legacyNumbers: [...new Set([...sources.map(r => r.businessNo).filter(Boolean), ...oldNumbers])], historicalRead };
 }
 const timestamp = (value: string) => `to_char(${value} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 
@@ -329,6 +342,7 @@ export function matchesSupervisionFilters(q: SupervisionQuery, facts: Record<str
     const legacySource = Boolean((Array.isArray(facts.sources) && facts.sources.length) || facts.historicalRead);
     if (q.source === "LEGACY" && !legacySource) return false;
     if (q.source === "NEW" && legacySource) return false;
+    if (q.status && facts.businessState !== q.status) return false;
     if (q.eligibility === "ELIGIBLE" && facts.newOrders !== true) return false;
     if (q.eligibility === "BLOCKED" && facts.newOrders !== false) return false;
     if (q.eligibility === "UNKNOWN" && facts.newOrders !== null) return false;
@@ -573,7 +587,8 @@ export async function listSupervision(client: PoolClient, viewer: SupervisionVie
     requireListingCursorKey(key);
     const quoteViewer = viewer.access.permissions.has("supply.quote.internal.read") ? "admin" : "public";
     const canDirectory = viewer.access.permissions.has("user.directory.read");
-    const hasResidualFilters = Boolean(q.eligibility);
+    const hasResidualFilters = Boolean(q.eligibility || q.status === "LISTED");
+    const stateSql = accountOccupancySql("a.id");
     const needsDisplayVersion = q.haffMin !== undefined || q.haffMax !== undefined || q.depositMin !== undefined || q.depositMax !== undefined || q.loginMethod !== undefined;
     const hasCheapFilters = Boolean(q.source || needsDisplayVersion);
     const sort = "COALESCE(v.created_at,a.created_at)", sortAt = `to_char(${sort} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
@@ -640,7 +655,7 @@ export async function listSupervision(client: PoolClient, viewer: SupervisionVie
             if (a.current_version_id && !version) throw notFound();
             const prefetch: ListingDetailPrefetch = { version, shared: page.shared, hasPublication: page.hasPublication(row.id), publicListing: (account) => publicMemo.read(account, prefetch) };
             const detail = version ? await listVersionProjection(client, a, version, recordGate, quoteViewer, page.shared, pageStock) : { version: null, blockers: ["CURRENT_VERSION_MISSING"], available: false, occupancyKind: null };
-            const facts = await supervisionFacts(client, a, detail, recordGate, admission, detailIndex, { page: pageFacts, prefetch });
+            const facts = await supervisionFacts(client, a, detail, recordGate, admission, detailIndex, { page: pageFacts, prefetch, state: { occupied: row.statusOccupied, completed: row.statusCompleted } });
             const rowFacts = { accountCreatedAt: row.accountCreatedAt, accountUpdatedAt: row.accountUpdatedAt, versionCreatedAt: row.versionCreatedAt, refs: { ruleReleaseId: row.ruleReleaseId ?? null, priceVersionId: row.priceVersionId ?? null } };
             // Default list/Dialog/detail show the real public version; the current draft is not mixed into it.
             const summary = facts.publicBasis && (!version || facts.publicBasis.id !== version.id)
@@ -654,6 +669,10 @@ export async function listSupervision(client: PoolClient, viewer: SupervisionVie
     const candidateWhere = (after: typeof initialAfter) => {
         const values: unknown[] = [viewer.access.isBoss, viewer.adminId], p = (value: unknown) => "$" + values.push(value);
         const where = [gameScopeSql("a.game_id","$2","$1")];
+        if (q.status === "IN_PROGRESS") where.push(stateSql.occupied);
+        if (q.status === "COMPLETED") where.push(stateSql.completed, "NOT " + stateSql.occupied);
+        if (q.status === "OFFLINE") where.push("a.lifecycle='ACTIVE'", "(a.owner_paused OR a.staff_restricted)", "NOT " + stateSql.occupied, "NOT " + stateSql.completed);
+        if (q.status === "LISTED") where.push("a.lifecycle='ACTIVE'", "NOT a.owner_paused", "NOT a.staff_restricted", "NOT " + stateSql.occupied, "NOT " + stateSql.unknown, "NOT " + stateSql.completed, "dv.id=a.current_version_id");
         if (q.gameId)
             where.push(`a.game_id=${p(q.gameId)}`);
         if (q.view === "restricted")
@@ -687,7 +706,7 @@ export async function listSupervision(client: PoolClient, viewer: SupervisionVie
         if (after) where.push(`(${sort},a.id COLLATE "C")<(${p(after.at)}::timestamptz,${p(after.id)} COLLATE "C")`);
         return { values, where };
     };
-    const from = `FROM zzsh_supply.rental_account a LEFT JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id ${needsDisplayVersion ? displayJoin : ""} JOIN zzsh_auth_user."user" u ON u.id=a.owner_user_id JOIN zzsh_supply.game g ON g.id=a.game_id`;
+    const from = `FROM zzsh_supply.rental_account a LEFT JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id ${needsDisplayVersion || q.status === "LISTED" ? displayJoin : ""} JOIN zzsh_auth_user."user" u ON u.id=a.owner_user_id JOIN zzsh_supply.game g ON g.id=a.game_id`;
     let total: number | null = null;
     if (!hasResidualFilters) {
         const count = candidateWhere(null);
@@ -701,7 +720,7 @@ export async function listSupervision(client: PoolClient, viewer: SupervisionVie
         const fetchLimit = hasResidualFilters ? Math.min(batchLimit, FILTER_SCAN_MAX_CANDIDATES - scanned) : batchLimit;
         if (fetchLimit <= 0) throw filterScopeTooLarge();
         const { values, where } = candidateWhere(scanAfter), p = (value: unknown) => "$" + values.push(value);
-        const rows = (await client.query(`SELECT a.id,a.id AS "accountId",a.display_no AS "displayNo",a.owner_user_id AS "ownerId",a.revision::text AS "revision",${sortAt} AS "sortAt",${timestamp("a.created_at")} AS "accountCreatedAt",${timestamp("a.updated_at")} AS "accountUpdatedAt",v.id AS "versionId",v.sequence::text AS sequence,v.title,v.review_state AS "reviewState",${timestamp("v.created_at")} AS "versionCreatedAt",v.rule_release_id AS "ruleReleaseId",v.term_option_code AS "termOptionCode",v.payload#>>'{ruleRefs,priceVersionId}' AS "priceVersionId",u.name AS "ownerName",g.name AS "gameName"${hasCheapFilters ? `,(${legacySourceSql}) AS "filterLegacy"${needsDisplayVersion ? `,(${haffSql})::text AS "filterHaff",(${depositSql})::text AS "filterDeposit",(${displayAttributes}->>'login_method_code') AS "filterLogin"` : ""}` : ""} ${from} WHERE ${where.join(" AND ")} ORDER BY ${sort} DESC,a.id COLLATE "C" DESC LIMIT ${p(fetchLimit)}`, values)).rows;
+        const rows = (await client.query(`SELECT a.id,a.id AS "accountId",a.display_no AS "displayNo",a.owner_user_id AS "ownerId",a.revision::text AS "revision",${sortAt} AS "sortAt",${timestamp("a.created_at")} AS "accountCreatedAt",${timestamp("a.updated_at")} AS "accountUpdatedAt",v.id AS "versionId",v.sequence::text AS sequence,v.title,v.review_state AS "reviewState",${timestamp("v.created_at")} AS "versionCreatedAt",v.rule_release_id AS "ruleReleaseId",v.term_option_code AS "termOptionCode",v.payload#>>'{ruleRefs,priceVersionId}' AS "priceVersionId",u.name AS "ownerName",g.name AS "gameName",(${stateSql.occupied}) AS "statusOccupied",(${stateSql.completed}) AS "statusCompleted"${hasCheapFilters ? `,(${legacySourceSql}) AS "filterLegacy"${needsDisplayVersion ? `,(${haffSql})::text AS "filterHaff",(${depositSql})::text AS "filterDeposit",(${displayAttributes}->>'login_method_code') AS "filterLogin"` : ""}` : ""} ${from} WHERE ${where.join(" AND ")} ORDER BY ${sort} DESC,a.id COLLATE "C" DESC LIMIT ${p(fetchLimit)}`, values)).rows;
         if (!rows.length) break;
         scanned += rows.length;
         const matchingRows = hasCheapFilters ? rows.filter(row => matchesCheapFilters(q, row)) : rows;
@@ -736,25 +755,26 @@ export async function readSupervision(client: PoolClient, a: PublishingAccount, 
         throw invalid("Invalid version ID");
     if (versionId && !(await client.query("SELECT 1 FROM zzsh_supply.listing_version WHERE id=$1 AND account_id=$2", [versionId, a.id])).rowCount)
         throw notFound();
+    const managementAccess = viewer.access.isBoss || viewer.access.permissions.has("supply.review.read");
     const historical = Boolean(versionId && versionId !== a.current_version_id), quoteViewer = viewer.access.permissions.has("supply.quote.internal.read") ? "admin" : "public";
     // The viewed, current, previous and originally restricted versions all
     // project the same account's public listing; one request-scoped projection
     // serves them, and the page-level game/release reads are shared.
     const publicMemo = publicListingMemo(client, gate);
-    const prefetch: ListingDetailPrefetch = { shared: listingPageShared(client), publicListing: (account) => publicMemo.read(account, prefetch) };
+    const prefetch: ListingDetailPrefetch = { includeReviewRecords: managementAccess, shared: listingPageShared(client), publicListing: (account) => publicMemo.read(account, prefetch) };
     const detail: Record<string, any> = await listingDetail(client, versionId ? { ...a, current_version_id: versionId } : a, "admin", gate, quoteViewer, a, false, "RENTABLE", prefetch);
     if (detail.version) detail.version.feeSummary = quoteFeeSummary(detail.version.quote);
     const live = historical ? await listingDetail(client, a, "admin", gate, quoteViewer, a, false, "RENTABLE", prefetch) : detail;
     const history = (await client.query("SELECT id,sequence::text,origin,review_state,title,content_hash,rule_release_id,created_at FROM zzsh_supply.listing_version WHERE account_id=$1 ORDER BY sequence DESC", [a.id])).rows;
     const viewed = versionId ?? a.current_version_id, previousId = history[history.findIndex(r => r.id === viewed) + 1]?.id;
-    const previous: Record<string, any> | null = previousId ? await listingDetail(client, { ...a, current_version_id: previousId }, "admin", gate, quoteViewer, a, false, "RENTABLE", prefetch) : null;
-    const events = (await client.query(`SELECT e.id,e.action,e.reason,e.occurred_at AS "occurredAt",u.name AS "actorName",e.details->'before'->>'revision' AS "beforeRevision",e.details->'after'->>'revision' AS "afterRevision",e.details->'before'->>'currentVersionId' AS "versionId",e.details->'after'->'staffRestricted' AS restricted FROM zzsh_iam.audit_event e LEFT JOIN zzsh_auth_admin."user" u ON u.id=e.actor_id WHERE e.object_type='rental_account' AND e.object_id=$1 AND e.action='supply.publication.restriction' AND e.outcome='SUCCESS' ORDER BY e.occurred_at DESC,e.id DESC LIMIT 20`, [a.id])).rows;
+    const previous: Record<string, any> | null = managementAccess && previousId ? await listingDetail(client, { ...a, current_version_id: previousId }, "admin", gate, quoteViewer, a, false, "RENTABLE", prefetch) : null;
+    const events = managementAccess ? (await client.query(`SELECT e.id,e.action,e.reason,e.occurred_at AS "occurredAt",u.name AS "actorName",e.details->'before'->>'revision' AS "beforeRevision",e.details->'after'->>'revision' AS "afterRevision",e.details->'before'->>'currentVersionId' AS "versionId",e.details->'after'->'staffRestricted' AS restricted FROM zzsh_iam.audit_event e LEFT JOIN zzsh_auth_admin."user" u ON u.id=e.actor_id WHERE e.object_type='rental_account' AND e.object_id=$1 AND e.action='supply.publication.restriction' AND e.outcome='SUCCESS' ORDER BY e.occurred_at DESC,e.id DESC LIMIT 20`, [a.id])).rows : [];
     const originalRestrictionId = events.find(e => e.restricted === true)?.versionId;
     const originalRestriction: Record<string, any> | null = originalRestrictionId && history.some(h => h.id === originalRestrictionId) ? await listingDetail(client, { ...a, current_version_id: originalRestrictionId }, "admin", gate, quoteViewer, a, false, "RENTABLE", prefetch) : null;
     const canOrder = viewer.access.permissions.has("order.read"), orders = canOrder ? await queryAdminReadOrders(client, { adminId: viewer.adminId, isBoss: viewer.access.isBoss, internalQuote: false, authorizationKey: viewer.contextKey }, { accountId: a.id, page: 1, pageSize: 5 }) : null;
-    const duplicateHints = (await client.query(`SELECT h.id,h.related_account_id,h.evidence_ref,h.result,h.reason FROM zzsh_supply.duplicate_hint h JOIN zzsh_supply.rental_account related ON related.id=h.related_account_id WHERE h.account_id=$1 AND ${gameScopeSql("related.game_id","$3","$2")}`, [a.id, viewer.access.isBoss, viewer.adminId])).rows;
+    const duplicateHints = managementAccess ? (await client.query(`SELECT h.id,h.related_account_id,h.evidence_ref,h.result,h.reason FROM zzsh_supply.duplicate_hint h JOIN zzsh_supply.rental_account related ON related.id=h.related_account_id WHERE h.account_id=$1 AND ${gameScopeSql("related.game_id","$3","$2")}`, [a.id, viewer.access.isBoss, viewer.adminId])).rows : [];
     const changes = previous?.version && detail.version ? { previousVersionId: previous.version.id, previousSequence: previous.version.sequence, changed: canonicalize(previous.version.declaration) !== canonicalize(detail.version.declaration) } : null;
-    if (detail.version) {
+    if (managementAccess && detail.version) {
         const media = detail.version.declaration.mediaBindings;
         const revisions = (await client.query<{
             id: string;
@@ -770,13 +790,32 @@ export async function readSupervision(client: PoolClient, a: PublishingAccount, 
         detail.available = false;
         detail.blockers = [...((detail.blockers as string[]) ?? []), "HISTORICAL_VERSION"];
     }
-    if (detail.version) detail.version.management = accountManagement(detail.version.declaration.attributes.info_source);
+    if (managementAccess && detail.version) detail.version.management = accountManagement(detail.version.declaration.attributes.info_source);
     const facts = await supervisionFacts(client, a, live, gate, admission, detailIndex, { prefetch });
-    if (facts.publicBasis) {
+    if (managementAccess && facts.publicBasis) {
         const basis = facts.publicBasis, same = detail.version?.id === basis.id && detail.version?.contentHash === basis.contentHash;
         const source = same ? detail.version.declaration.attributes.info_source : (await client.query(`SELECT attributes->'info_source' AS source FROM zzsh_supply.listing_version WHERE id=$1 AND account_id=$2 AND content_hash=$3`, [basis.id, a.id, basis.contentHash])).rows[0]?.source;
         const managedBasis = { ...basis, management: accountManagement(source) };
         facts.publicBasis = managedBasis;
     }
-    return { ...detail, contractVersion: SUPERVISION_READ_VERSION, contextKey: viewer.contextKey, history, previousDeclaration: previous?.version?.declaration ?? null, previousPresentation: previous?.version?.presentation ?? null, duplicateHints, supervision: { historical, facts, changes, previousVersion: previous?.version ?? null, originalRestrictionVersion: originalRestriction?.version ?? null, restrictionHistory: { state: events.length ? "KNOWN" : "NOT_RECORDED", items: events, limit: 20 }, ownerLink: viewer.access.permissions.has("user.directory.read") ? { state: "READY", userId: a.owner_user_id } : { state: "DENIED" }, orders: orders ? { state: "READY", ...orders } : { state: "DENIED", permission: "order.read" } } };
+    if (!managementAccess) {
+        detail.account = { ...detail.account, restriction_reason: null };
+        if (detail.version) {
+            const declaration = detail.version.declaration, attributes = publicListingAttributes(declaration.attributes);
+            try {
+                const deposit = validateOwnerDepositDeclaration(declaration.attributes.owner_deposit_declaration);
+                if (deposit) attributes.owner_deposit_declaration = deposit;
+            } catch { /* Invalid historical declarations stay unavailable, never zero. */ }
+            const payout = declaration.attributes.full_payout_declaration;
+            if (payout && typeof payout === "object" && !Array.isArray(payout) && payout.schema === "full-payout-declaration-v1" && typeof payout.selected === "boolean") attributes.full_payout_declaration = { schema: payout.schema, selected: payout.selected };
+            const publicMedia = new Map((facts.publicBasis?.media ?? []).filter(media => typeof media.assetId === "string" && typeof media.url === "string").map(media => [media.assetId, media]));
+            const mediaBindings = declaration.mediaBindings.flatMap((binding: Record<string, unknown>) => {
+                const media = typeof binding.assetId === "string" ? publicMedia.get(binding.assetId) : undefined;
+                return binding.purpose === "ACCOUNT_DISPLAY" && binding.publiclyReadable === true && media ? [{ assetId: binding.assetId, purpose: "ACCOUNT_DISPLAY", position: binding.position, category: media.category, publiclyReadable: true, publicUrl: media.url }] : [];
+            });
+            detail.version = { ...detail.version, declaration: { ...declaration, attributes, mediaBindings } };
+            delete detail.version.management;
+        }
+    }
+    return { ...detail, decisions: managementAccess ? detail.decisions : [], contractVersion: SUPERVISION_READ_VERSION, contextKey: viewer.contextKey, history, previousDeclaration: previous?.version?.declaration ?? null, previousPresentation: previous?.version?.presentation ?? null, duplicateHints, supervision: { managementAccess: managementAccess ? "READY" : "DENIED", historical, facts, changes, previousVersion: previous?.version ?? null, originalRestrictionVersion: originalRestriction?.version ?? null, restrictionHistory: { state: !managementAccess ? "DENIED" : events.length ? "KNOWN" : "NOT_RECORDED", items: events, limit: 20 }, ownerLink: viewer.access.permissions.has("user.directory.read") ? { state: "READY", userId: a.owner_user_id } : { state: "DENIED" }, orders: orders ? { state: "READY", ...orders } : { state: "DENIED", permission: "order.read" } } };
 }

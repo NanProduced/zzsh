@@ -52,6 +52,7 @@ export default WorkbenchPage;`;
   server: { middlewareMode: true, hmr: false, ws: false, watch: null },
 });
 const { WorkspacePageContent } = await vite.ssrLoadModule('/src/workspace/page-content.tsx');
+const { AdminResourceReadView } = await vite.ssrLoadModule('/src/views/admin-order-chain-view.tsx');
 const { tabFromLocation, tabHref, upsertTab } = await vite.ssrLoadModule('/src/workspace/tab-model.ts');
 after(async () => { await vite.close(); await browser.happyDOM.abort(); });
 
@@ -361,6 +362,7 @@ test('order origin wiring is limited to its own title and related resource', () 
   for (const [target, expectedUser] of [
     ['/orders/order_cancel', 'user_normal'],
     ['/supply/accounts/account_1?fromOrderId=order_cancel', 'user_normal'],
+    ['/supply/reviews/account_1?fromOrderId=order_cancel', 'user_normal'],
     ['/orders', null],
     ['/orders/order_other', null],
     ['/orders/order_other?fromUserId=user_other&fromUserSection=resources', 'user_other'],
@@ -369,6 +371,7 @@ test('order origin wiring is limited to its own title and related resource', () 
     const url = new URL(opened.at(-1), browser.location.href);
     assert.equal(url.searchParams.get('fromUserId'), expectedUser, target);
     if (target.includes('fromOrderId=')) assert.equal(url.searchParams.get('fromOrderId'), 'order_cancel');
+    if (target.startsWith('/supply/')) assert.equal(url.pathname, '/supply/reviews/account_1');
   }
 });
 
@@ -446,6 +449,7 @@ test('MASTER: published account origin survives the resource detail return', asy
   const userView = surface.props.children.find((child) => child?.props?.tab?.kind === 'user-object');
   userView.props.onOpenPath('/supply/accounts/account_1', '账号');
   const target = new URL(opened.at(-1), browser.location.href);
+  assert.equal(target.pathname, '/supply/reviews/account_1');
   assert.equal(target.searchParams.get('fromUserPublication'), 'published');
   const h = await mount(t, tabFromLocation(target.pathname, target.search), snap);
   await waitFor(() => namedButton('返回来源用户'));
@@ -454,4 +458,85 @@ test('MASTER: published account origin survives the resource detail return', asy
   assert.equal(returned.pathname, '/users/user_normal');
   assert.equal(returned.searchParams.get('section'), 'resources');
   assert.equal(returned.searchParams.get('publication'), 'published');
+});
+
+test('resource aliases and supply detail routes mount the same detail host with unchanged permissions', () => {
+  const actor = snapshot(['supply.rental_account.read']);
+  const props = { snapshot: actor, onOpenPath: () => {}, onQueryChange: () => {}, onDirtyChange: () => {}, refreshNonce: 3 };
+  const legacy = WorkspacePageContent({ ...props, tab: tabFromLocation('/supply/accounts/account_1', 'fromOrderId=order_cancel&context=situation&versionId=version_1') });
+  const canonical = WorkspacePageContent({ ...props, tab: tabFromLocation('/supply/reviews/account_1', 'fromOrderId=order_cancel&context=situation&versionId=version_1') });
+  assert.equal(legacy.type, canonical.type);
+  assert.equal(legacy.type, AdminResourceReadView);
+  assert.deepEqual(legacy.props, canonical.props);
+  const detail = AdminResourceReadView(legacy.props).props.children[1];
+  assert.equal(detail.type.name, 'SupplyListingReviewView');
+  assert.equal(detail.props.snapshot, actor);
+  assert.equal(detail.props.initialQuery.versionId, 'version_1');
+});
+
+test('both user account link variants retain order filters and canonicalize their destination', () => {
+  const opened = [], actor = snapshot(['user.directory.read', 'supply.rental_account.read', 'supply.review.read']);
+  const tab = { ...userTab, query: { section: 'orders', role: 'owner', status: 'current' } };
+  const surface = WorkspacePageContent({ tab, snapshot: actor, onOpenPath: path => opened.push(path), onQueryChange: () => {}, refreshNonce: 0 });
+  const user = surface.props.children.find(child => child?.props?.tab?.kind === 'user-object');
+  for (const path of ['/supply/accounts/account_1', '/supply/reviews/account_1']) {
+    user.props.onOpenPath(path);
+    const target = new URL(opened.at(-1), browser.location.href);
+    assert.equal(target.pathname, '/supply/reviews/account_1');
+    assert.equal(target.searchParams.get('fromUserId'), 'user_normal');
+    assert.equal(target.searchParams.get('fromUserSection'), 'orders');
+    assert.equal(target.searchParams.get('fromUserRole'), 'owner');
+    assert.equal(target.searchParams.get('fromUserStatus'), 'current');
+  }
+});
+
+test('an account opened from the user list quick-check keeps its explicit source user and published scope', () => {
+  const opened = [], actor = snapshot(['user.directory.read', 'supply.rental_account.read']);
+  const props = { snapshot: actor, onOpenPath: path => opened.push(path), onQueryChange: () => {}, refreshNonce: 0 };
+  for (const tab of [tabFromLocation('/users'), { ...userTab, query: { section: 'security' } }]) {
+    const surface = WorkspacePageContent({ ...props, tab });
+    const user = surface.props.children.find(child => child?.props?.tab);
+    user.props.onOpenPath('/supply/accounts/account_1?fromUserId=user_normal&fromUserSection=resources&fromUserPublication=published');
+    const target = new URL(opened.at(-1), browser.location.href);
+    assert.equal(target.pathname, '/supply/reviews/account_1');
+    assert.equal(target.searchParams.get('fromUserId'), 'user_normal');
+    assert.equal(target.searchParams.get('fromUserSection'), 'resources');
+    assert.equal(target.searchParams.get('fromUserPublication'), 'published');
+  }
+});
+
+test('an account related-order roundtrip keeps version and the original user/order return chain', () => {
+  const opened = [], actor = snapshot(['order.read', 'user.directory.read', 'supply.rental_account.read']);
+  const props = { snapshot: actor, onOpenPath: path => opened.push(path), onQueryChange: () => {}, onDirtyChange: () => {}, refreshNonce: 0 };
+  const tab = tabFromLocation('/supply/accounts/account_1', 'fromOrderId=order_source&fromUserId=user_normal&fromUserSection=orders&fromUserRole=owner&fromUserStatus=current&versionId=version_1');
+  const host = WorkspacePageContent({ ...props, tab });
+  const [returns, detail] = AdminResourceReadView(host.props).props.children;
+  returns.props.children[0].props.onClick();
+  assert.equal(opened.at(-1), '/users/user_normal?section=orders&role=owner&status=current&fromOrderId=order_source');
+  returns.props.children[1].props.onClick();
+  assert.equal(opened.at(-1), '/orders/order_source?fromUserId=user_normal&fromUserSection=orders&fromUserRole=owner&fromUserStatus=current');
+  detail.props.onOpenPath('/orders/order_related?fromSupplyId=account_1&fromSupplyContext=orders&fromSupplyVersionId=version_1');
+  const linked = new URL(opened.at(-1), browser.location.href);
+  assert.equal(linked.searchParams.get('fromOrderId'), 'order_source');
+  const order = WorkspacePageContent({ ...props, tab: tabFromLocation(linked.pathname, linked.search) });
+  const supplyReturn = order.props.children[0];
+  supplyReturn.props.children.props.onClick();
+  const returned = new URL(opened.at(-1), browser.location.href);
+  assert.equal(returned.pathname, '/supply/reviews/account_1');
+  assert.equal(returned.searchParams.get('versionId'), 'version_1');
+  assert.equal(returned.searchParams.get('context'), 'orders');
+  for (const key of ['fromOrderId', 'fromUserId', 'fromUserSection', 'fromUserRole', 'fromUserStatus']) assert.equal(returned.searchParams.get(key), tab.query[key], key);
+  assert.equal(tabFromLocation(returned.pathname, returned.search).id, tab.id);
+});
+
+test('returning from an account through its source order keeps the originating published user filter', () => {
+  const opened = [], actor = snapshot(['order.read', 'user.directory.read', 'supply.rental_account.read']);
+  const props = { snapshot: actor, onOpenPath: path => opened.push(path), onQueryChange: () => {}, onDirtyChange: () => {}, refreshNonce: 0 };
+  const tab = tabFromLocation('/supply/reviews/account_1', 'fromOrderId=order_source&fromUserId=user_normal&fromUserSection=resources&fromUserPublication=published');
+  const account = WorkspacePageContent({ ...props, tab });
+  AdminResourceReadView(account.props).props.children[0].props.children[1].props.onClick();
+  const target = new URL(opened.at(-1), browser.location.href);
+  const order = WorkspacePageContent({ ...props, tab: tabFromLocation(target.pathname, target.search) });
+  order.props.children[1].props.onClick();
+  assert.equal(opened.at(-1), '/users/user_normal?section=resources&publication=published');
 });

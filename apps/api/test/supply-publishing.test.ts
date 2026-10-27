@@ -243,6 +243,21 @@ function nativeGateClient(acceptance = false) {
 }
 const nativeAccount = { id: "a", owner_user_id: "o", game_id: "g", current_version_id: "v", lifecycle: "ACTIVE", legacy_hold: "NONE", revision: "1", owner_paused: false, staff_restricted: false, display_no: null };
 
+test("an authoritative completed rental blocks publication even when the old account lifecycle remains active and free", async () => {
+  const draft = { id: "v", account_id: "a", origin: "NATIVE", review_state: "DRAFT", rule_release_id: null, content_hash: null, payload: null, attributes: {}, title: "" };
+  for (const purpose of ["READ", "WRITE"] as const) {
+    const base = await publicationBlockers(nativeGateClient() as never, nativeAccount as never, draft as never, nativeGate, purpose);
+    const completed = await publicationBlockers(nativeGateClient() as never, nativeAccount as never, draft as never, async (_client, _account, readPurpose) => {
+      assert.equal(readPurpose, purpose);
+      return { ...await nativeGate(), rentalCompleted: true };
+    }, purpose);
+    assert.equal(completed.includes("RENTAL_COMPLETED"), true);
+    assert.deepEqual(completed.filter(reason => reason !== "RENTAL_COMPLETED"), base, "existing blockers are unchanged");
+    const absent = await publicationBlockers(nativeGateClient() as never, nativeAccount as never, draft as never, async () => ({ ...await nativeGate(), rentalCompleted: false }), purpose);
+    assert.equal(absent.includes("RENTAL_COMPLETED"), false, "free occupancy or a missing completion fact never invents a terminal result");
+  }
+});
+
 test("native empty title is not a write blocker; a legacy placeholder still is", async () => {
   const draft = { id: "v", account_id: "a", origin: "NATIVE", review_state: "DRAFT", rule_release_id: null, content_hash: null, payload: null, attributes: {}, title: "" };
   const write = await publicationBlockers(nativeGateClient() as never, nativeAccount as never, draft as never, nativeGate, "WRITE");

@@ -1270,6 +1270,30 @@ function addPostingEntry(entries: Array<Record<string, unknown>>, accountCode: s
   });
 }
 
+/** Caller already holds the account lock; this transition shares the posting transaction. */
+async function archiveCompletedSupply(client: PoolClient, order: LockedOrder, actor: Actor, requestId: string, postingId: string, settlementVersionId: string, endReason: unknown): Promise<void> {
+  if (typeof endReason !== "string" || !["NORMAL", "TENANT_VOLUNTARY_EARLY", "OWNER_OR_ACCOUNT_EARLY"].includes(endReason)) throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
+  const before = (await client.query<{ lifecycle: string; revision: string }>(
+    `SELECT lifecycle,revision::text AS revision FROM zzsh_supply.rental_account WHERE id=$1`, [order.accountId],
+  )).rows[0];
+  if (!before || !["ACTIVE", "ARCHIVED"].includes(before.lifecycle)) throw conflict("SUPPLY_STATE_CHANGED");
+  let revision = before.revision;
+  if (before.lifecycle === "ACTIVE") {
+    const updated = await client.query<{ revision: string }>(
+      `UPDATE zzsh_supply.rental_account SET lifecycle='ARCHIVED',revision=revision+1,updated_at=clock_timestamp()
+        WHERE id=$1 AND lifecycle='ACTIVE' AND revision=$2::bigint RETURNING revision::text AS revision`, [order.accountId, before.revision],
+    );
+    if (updated.rowCount !== 1) throw conflict("SUPPLY_STATE_CHANGED");
+    revision = updated.rows[0]!.revision;
+  }
+  await recordAudit(client, {
+    actorType: actor.realm, actorId: actor.userId, sessionId: actor.sessionId, action: "supply.account.rental_completed",
+    objectType: "rental_account", objectId: order.accountId, outcome: "SUCCESS", requestId,
+    details: { before, after: { lifecycle: "ARCHIVED", revision }, orderId: order.id, listingVersionId: order.listingVersionId,
+      contentHash: order.contentHash, postingId, settlementVersionId, endReason },
+  });
+}
+
 /** Posts only the immutable, currently accepted version; caller owns the order transaction and lock sequence. */
 async function postReadySettlement(
   client: PoolClient,
@@ -1466,6 +1490,7 @@ async function postReadySettlement(
     [order.id],
   );
   if (completed.rowCount !== 1) throw conflict("ORDER_NOT_SETTLEABLE");
+  await archiveCompletedSupply(client, order, actor, requestId, postingId, version.id, snapshot.endReason);
   order.status = "COMPLETED";
   order.revision = (BigInt(order.revision) + 1n).toString();
   await audit(client, actor, "order.settlement.posted", order.id, requestId, {

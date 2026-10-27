@@ -160,17 +160,29 @@ test('R2 only a delivered summary can confirm absence of a declaration or proof'
 
 test('unknown axes stay unknown instead of collapsing into 已下架', () => {
   const unknown = rowOf({ facts: facts({ publicVisible: null, newOrders: null, occupancy: 'UNKNOWN', ownerPaused: undefined, staffRestricted: undefined, reasons: ['OCCUPANCY_UNKNOWN'] }) });
-  assert.equal(rowListingStatus(unknown).label, '公开状态待核');
+  assert.equal(rowListingStatus(unknown).label, '状态待核');
   for (const state of [rowOf({ facts: facts({ publicVisible: false }) }), rowOf({ facts: facts({ publicVisible: true }) })]) {
     assert.notEqual(rowListingStatus(state).label, '已下架');
   }
   assert.equal(rowListingStatus(rowOf({ facts: facts({ staffRestricted: true, reasons: ['STAFF_RESTRICTED'] }) })).label, '运营限制');
-  assert.equal(rowListingStatus(rowOf({ facts: facts({ occupancy: 'OCCUPIED', publicVisible: true }) })).label, '占用中');
-  assert.equal(rowListingStatus(rowOf({ facts: facts({ occupancy: 'OCCUPIED', occupancyKind: 'PENDING_PAYMENT', publicVisible: true, newOrders: false }) })).label, '待付款预留');
-  assert.equal(rowListingStatus(rowOf({ facts: facts({ occupancy: 'OCCUPIED', occupancyKind: 'RENTED', publicVisible: true, newOrders: false }) })).label, '租用中');
-  assert.equal(rowListingStatus(rowOf({ facts: facts({ publicVisible: true, newOrders: false, occupancy: 'FREE' }) })).label, '可查看');
+  assert.equal(rowListingStatus(rowOf({ facts: facts({ occupancy: 'OCCUPIED', publicVisible: true }) })).label, '订单进行中');
+  assert.equal(rowListingStatus(rowOf({ facts: facts({ occupancy: 'OCCUPIED', occupancyKind: 'PENDING_PAYMENT', publicVisible: true, newOrders: false }) })).detail, '待付款');
+  assert.equal(rowListingStatus(rowOf({ facts: facts({ occupancy: 'OCCUPIED', occupancyKind: 'RENTED', publicVisible: true, newOrders: false }) })).detail, '租用中');
+  assert.equal(rowListingStatus(rowOf({ facts: facts({ publicVisible: true, newOrders: false, occupancy: 'FREE' }) })).label, '状态待核');
   assert.notEqual(rowListingStatus(rowOf({ facts: facts({ publicVisible: true, newOrders: false }) })).label, '上架中');
-  assert.equal(rowListingStatus(rowOf({ facts: facts({ publicVisible: true, newOrders: true, occupancy: 'FREE' }) })).label, '可接新单');
+  assert.equal(rowListingStatus(rowOf({ facts: facts({ publicVisible: true, newOrders: true, occupancy: 'FREE' }) })).label, '上架中');
+});
+
+test('saved status and legacy eligibility round trip while old views remain valid and invalid new states are rejected', () => {
+  const base = { name: '旧视图', view: 'all', kind: 'account', q: '', gameId: '' };
+  const views = [base, ...['', 'LISTED', 'IN_PROGRESS', 'OFFLINE', 'COMPLETED'].map(status => ({ ...base, name: status || '全部', status, eligibility: 'BLOCKED' }))];
+  assert.deepEqual(parseSavedViews(serializeSavedViews(views, 'me'), 'me').views, views);
+  for (const status of ['BLOCKED', 'ARCHIVED', 'bad', null, 1]) {
+    const parsed = parseSavedViews(serializeSavedViews([base, { ...base, status }], 'me'), 'me');
+    assert.deepEqual(parsed.views, [base]); assert.match(parsed.notice, /跳过 1/);
+  }
+  assert.deepEqual(parseSavedViews(serializeSavedViews([{ ...base, eligibility: 'bad' }], 'me'), 'me').views, []);
+  assert.equal(rowListingStatus(rowOf({ facts: facts({ businessState: 'COMPLETED', newOrders: true, occupancy: 'OCCUPIED' }) })).label, '完成租用');
 });
 
 test('an unfinished draft is one step, not three operational faults', () => {
@@ -238,7 +250,7 @@ test('current list facts stay authoritative when separate historical facts also 
 });
 
 test('cross-version quickview keeps the loaded declaration and separates zero, absent and unknown deposits', () => {
-  const row = rowOf({ summary: { versionId: 'v-1', baseDeposit: { amountCents: '11100' } } });
+  const row = rowOf({ summary: { versionId: 'v-1', baseDeposit: { amountCents: '11100' }, feeSummary: { completeness: 'COMPLETE', haffRental: { amount: '111.00' }, materials: { amount: '0.00' }, resourceTotal: { amount: '111.00' } } } });
   const read = (declaration) => alignedQuickRow(row, { version: { id: 'v-3', quote: null, presentation: { items: [] }, catalogItems: [], declaration: { inventory: [], attributes: { owner_deposit_declaration: declaration } } } });
   const declaration = (amountCents) => ({ schema: 'owner-deposit-declaration-v1', declarationVersion: 'v-3', amountCents });
   assert.equal(rowDepositText(read(declaration('9900'))), '¥99.00');
@@ -248,6 +260,7 @@ test('cross-version quickview keeps the loaded declaration and separates zero, a
     assert.equal(rowDepositText(read(value)), '未提供');
   }
   assert.equal(rowDepositText(alignedQuickRow(row)), '¥111.00');
+  assert.equal(rowBaseFeeRows(read(declaration('9900'))).total, '未提供', 'a new version cannot inherit the list version fee summary');
 });
 
 test('money and M inputs convert exactly, keeping empty, zero and bad precision separate', () => {
@@ -286,6 +299,14 @@ test('historical-only rows keep old fees separately and never show the old numbe
   assert.match(rowCoreAssetsText(row), /历史 97 M 哈夫币 · 基础安全箱/);
   assert.equal(rowDisplaySourceText(row), '历史资料');
   assert.equal(rowAccountTitle(row), 'g账号');
+});
+
+test('list base fees include the declared deposit and do not use a personalised payable amount', () => {
+  const summary = { versionId: 'v-1', feeSummary: { completeness: 'PARTIAL', haffRental: null, materials: null, resourceTotal: { amount: '761.97' } }, baseDeposit: { amountCents: '85000' }, quote: { resourceTotal: { amount: '761.97' }, tenantPayableTotal: { amount: '999.00' }, personalised: true } };
+  const fees = rowBaseFeeRows(rowOf({ summary }));
+  assert.equal(fees.total, '¥1,611.97'); assert.equal(fees.haff, '分项待核'); assert.equal(fees.materials, '分项待核');
+  assert.equal(rowBaseFeeRows(rowOf({ summary: { ...summary, baseDeposit: null } })).total, '未提供');
+  assert.equal(rowBaseFeeRows(rowOf({ summary: { ...summary, feeSummary: null } })).total, '未提供', 'personal quote total does not become a base quote');
 });
 
 test('F3 the frozen term keeps 172800 as 2 days and a missing/null value is never 0 days', () => {

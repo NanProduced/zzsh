@@ -192,15 +192,13 @@ export function parseWorkspacePath(pathname: string): { kind: WorkspaceRouteKind
     if (/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(objectId)) return { kind: "user-object", objectType: "user", objectId, tabId: `user:${objectId}`, path, title: objectId };
   }
   if (path === "/supply/catalog") return { kind: "catalog", tabId: "catalog", path: "/supply/catalog", title: "目录维护" };
-  const resourceObject=path.match(/^\/supply\/accounts\/([A-Za-z0-9._:-]+)$/);
-  if(resourceObject)return {kind:"resource-object",objectType:"resource",objectId:resourceObject[1]!,tabId:`resource:${resourceObject[1]}`,path,title:"资源账号"};
   if (path === "/supply/gunsmith") return { kind: "gunsmith", tabId: "gunsmith", path: "/supply/gunsmith", title: "改枪码目录" };
   if (path === "/supply/rules") return { kind: "rules", tabId: "rules", path: "/supply/rules", title: "规则与价目" };
   if (path === "/supply/reviews") return { kind: "listing-review", tabId: "listing-review", path: "/supply/reviews", title: "账号供给" };
-  const listingObject = path.match(/^\/supply\/reviews\/([^/]+)$/);
+  const listingObject = path.match(/^\/supply\/(?:reviews|accounts)\/([^/]+)$/);
   if (listingObject) {
     let objectId = ""; try { objectId = decodeURIComponent(listingObject[1]!); } catch { /* Follow the existing unknown-route path. */ }
-    if (/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(objectId)) return { kind: "listing-object", objectType: "supply", objectId, tabId: `supply:${objectId}`, path, title: "账号供给详情" };
+    if (/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(objectId)) return { kind: "listing-object", objectType: "supply", objectId, tabId: `supply:${objectId}`, path: `/supply/reviews/${encodeURIComponent(objectId)}`, title: "账号供给详情" };
   }
   if (path === "/supply/media") return { kind: "media-review", tabId: "media-review", path: "/supply/media", title: "平台素材审核" };
   if (path === "/orders") return { kind: "orders", tabId: "orders", path, title: "订单" };
@@ -237,7 +235,9 @@ export function tabFromLocation(pathname: string, search = ""): WorkspaceTab {
 export function tabHref(tab: WorkspaceTab): string {
   const params = new URLSearchParams(sanitizeTabQuery(tab.query));
   const query = params.toString();
-  return query ? `${tab.path}?${query}` : tab.path;
+  const account = tab.kind === "listing-object" || tab.kind === "resource-object" ? parseWorkspacePath(tab.path) : null;
+  const path = account?.kind === "listing-object" ? account.path : tab.path;
+  return query ? `${path}?${query}` : path;
 }
 
 /** 设置分区和示例模式切换会卸载表单，即使仍是同一个工作区标签也须守护未保存输入。 */
@@ -267,15 +267,24 @@ export function canOpenKind(kind: WorkspaceRouteKind, nav: NavPermission): boole
   if (kind === "catalog") return has("supply.catalog.manage") || nav.isBoss;
   if (kind === "gunsmith") return has("supply.gunsmith.manage") || nav.isBoss;
   if (kind === "rules") return has("supply.rules.edit") || nav.isBoss;
-  if (kind === "listing-review" || kind === "listing-object") return has("supply.review.read") || nav.isBoss;
+  if (kind === "listing-review") return has("supply.review.read") || nav.isBoss;
+  if (kind === "listing-object" || kind === "resource-object") return nav.isBoss || has("supply.review.read") || has("supply.rental_account.read");
   if (kind === "media-review") return has("supply.review.read") || nav.isBoss;
   if (kind === "orders" || kind === "order-object") return true;
-  if (kind === "resource-object") return nav.isBoss || has("supply.rental_account.read");
   if (kind === "content") return has("content.platform.read") || has("content.read") || nav.isBoss;
   return false;
 }
 
 export function upsertTab(tabs: WorkspaceTab[], next: WorkspaceTab): WorkspaceTab[] {
+  if (next.kind === "listing-object" || next.kind === "resource-object") {
+    const route = parseWorkspacePath(next.path);
+    if (route.kind === "listing-object") next = { ...next, id: route.tabId, kind: route.kind, path: route.path, objectType: route.objectType, objectId: route.objectId };
+    const sameAccount = (tab: WorkspaceTab) => (tab.kind === "listing-object" || tab.kind === "resource-object") && tab.objectId === next.objectId;
+    const existing = tabs.find(sameAccount);
+    if (!existing) return [...tabs, next];
+    const merged = { ...existing, ...next, ...(GENERIC_DETAIL_TITLES.has(next.title) ? { title: existing.title } : {}) };
+    return tabs.flatMap(tab => sameAccount(tab) ? tab === existing ? [merged] : [] : [tab]);
+  }
   if (next.kind === "approval-object" && next.query.from === "membership-growth" && (next.query.fromTab === "policy" || next.query.fromTab === "entitlements")) {
     const fromTab = next.query.fromTab;
     tabs = tabs.map(tab => tab.kind === "membership-growth" ? { ...tab, query: { ...tab.query, tab: fromTab } } : tab);
@@ -288,7 +297,7 @@ export function upsertTab(tabs: WorkspaceTab[], next: WorkspaceTab): WorkspaceTa
     return [...tabs, next];
   }
   const existing = tabs.find((tab) => tab.id === next.id);
-  if (existing) return tabs.map((tab) => (tab.id === next.id ? { ...existing, ...next, ...(next.kind === "listing-object" && next.title === "账号供给详情" ? { title: existing.title } : {}) } : tab));
+  if (existing) return tabs.map((tab) => (tab.id === next.id ? { ...existing, ...next } : tab));
   return [...tabs, next];
 }
 
@@ -342,13 +351,17 @@ export function restoreTabs(adminUserId: string, nav: NavPermission): { tabs: Wo
   try {
     const parsed = JSON.parse(raw) as PersistedWorkspaceTabs;
     if (parsed.adminUserId !== adminUserId || !Array.isArray(parsed.tabs)) return null;
-    const tabs = filterTabsByPermission(
-      parsed.tabs
-        .filter((tab) => tab && typeof tab.id === "string" && typeof tab.path === "string")
-        .map((tab) => ({ ...tab, query: sanitizePersistedTabQuery(tab.query ?? {}) })),
-      nav,
-    );
-    const activeId = tabs.some((tab) => tab.id === parsed.activeId) ? parsed.activeId : WORKBENCH_TAB_ID;
+    const stored = parsed.tabs.filter((tab) => tab && typeof tab.id === "string" && typeof tab.path === "string");
+    let normalized: WorkspaceTab[] = [];
+    for (const tab of stored) {
+      const clean = { ...tab, query: sanitizePersistedTabQuery(tab.query ?? {}) };
+      normalized = clean.kind === "listing-object" || clean.kind === "resource-object" ? upsertTab(normalized, clean) : [...normalized, clean];
+    }
+    const active = stored.find(tab => tab.id === parsed.activeId);
+    if (active && (active.kind === "listing-object" || active.kind === "resource-object")) normalized = upsertTab(normalized, { ...active, query: sanitizePersistedTabQuery(active.query ?? {}) });
+    const tabs = filterTabsByPermission(normalized, nav);
+    const activeRoute = active && (active.kind === "listing-object" || active.kind === "resource-object") ? parseWorkspacePath(active.path).tabId : parsed.activeId;
+    const activeId = tabs.some((tab) => tab.id === activeRoute) ? activeRoute : WORKBENCH_TAB_ID;
     return { tabs, activeId };
   } catch {
     return null;

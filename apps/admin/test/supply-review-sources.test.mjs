@@ -36,7 +36,7 @@ const row = (id) => ({
 const page = (items) => ({ contractVersion: 'admin-supervision.read.v1', contextKey: 'fixture-context', items, nextCursor: null, stationOrigins: { admin: 'http://127.0.0.1:4291', user: 'http://127.0.0.1:4290' }, games: [] });
 const tick = async (h) => { for (let i = 0; i < 6; i++) await h.settle(); };
 
-test('detail situation section shows per-source legacy numbers and honest pending labels', async (t) => {
+test('detail keeps source numbers in one secondary record entry with honest pending labels', async (t) => {
   const h = await mountHarness(t, {
     permissions,
     initialAccountId: 'a',
@@ -44,6 +44,11 @@ test('detail situation section shows per-source legacy numbers and honest pendin
     fetchImpl: async () => json(workDetailWithSources()),
   });
   await tick(h);
+  assert.ok(!h.el.textContent.includes('RA-10086'), 'the current profile does not repeat historical source numbers');
+  await h.click(h.btn('操作记录')); await tick(h);
+  const trigger = h.btn('来源与迁入前记录');
+  assert.equal(trigger.getAttribute('aria-expanded'), 'false');
+  await h.click(trigger); await tick(h);
   const text = h.el.textContent;
   assert.ok(text.includes('RA-10086'), 'known legacy business number visible');
   assert.ok(text.includes('旧编号：待核'), 'missing businessNo shown as pending, not blank or zero');

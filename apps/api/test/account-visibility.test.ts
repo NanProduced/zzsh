@@ -3,7 +3,7 @@ import { test } from "node:test";
 import type { PoolClient } from "pg";
 import { computeContentHash, normalizeContentPayload } from "../src/supply/content-hash";
 import { computeQuote } from "../src/supply/pricing";
-import { evaluatePublication, listingDetail, readPublicListing, type ListingVersion, type PublishingAccount, type SupplyGateReader } from "../src/supply/publishing";
+import { evaluatePublication, listingDetail, readPublicListing, quoteListing, assertEditable, type ListingVersion, type PublishingAccount, type SupplyGateReader } from "../src/supply/publishing";
 import { lookupPublicListing } from "../src/supply/public-listing-lookup";
 import { handleFavorites } from "../src/supply/favorites";
 import { handlePublishingRoute } from "../src/supply/publishing-routes";
@@ -241,4 +241,14 @@ test("restricted, suspended and archived still hide the public object", async ()
     if (kind === "suspended") f.facts.suspended = true; if (kind === "archived") f.account.lifecycle = "ARCHIVED";
     await assert.rejects(readPublicListing(f.client, f.account, f.gate), (error: any) => error.status === 404);
   }
+});
+
+test('completed supply cannot create a fresh draft or quote even if an old account row remains ACTIVE',async()=>{
+ const f=nativeFixture();
+ const editableClient={query:async(sql:string,values:unknown[])=>sql.startsWith('SELECT "suspended"')?{rows:[{suspended:false}],rowCount:1}:f.client.query(sql,values)} as unknown as PoolClient;
+ await assert.rejects(assertEditable(editableClient,f.account,async()=>({publisherBail:'NOT_REQUIRED',reference:'proof',occupancy:'FREE',rentalCompleted:true})),/RENTAL_COMPLETED/);
+ let calls=0;
+ const ended={query:async(sql:string,values:unknown[])=>{calls++;assert.match(sql,/FROM zzsh_order.rental_order/);assert.match(sql,/status='COMPLETED'/);assert.deepEqual(values,[f.account.id]);return{rows:[{'1':1}],rowCount:1};}} as unknown as PoolClient;
+ await assert.rejects(quoteListing(ended,f.account,'1'),/RENTAL_COMPLETED/);assert.equal(calls,1,'reject before reading or writing any quote inputs');
+ f.account.lifecycle='ARCHIVED';calls=0;await assert.rejects(quoteListing(ended,f.account,'1'),/归档/);assert.equal(calls,0);
 });

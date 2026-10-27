@@ -505,13 +505,20 @@ test('server progress drives opening/ending without inferring them from PAID or 
   }
 });
 
-test('resource read uses human labels and returns to the exact originating user section and order', async t => {
-  const {root,node,AdminResourceReadView}=await setup(t);const opened=[];
-  globalThis.fetch=async()=>response({account:{accountId:'account-1',displayNo:'A-001',gameName:'测试游戏',ownerUserId:'current-owner',ownerName:'当前号主',lifecycle:'ACTIVE',legacyHold:'NONE',versionState:'DRAFT',ownerPaused:false,staffRestricted:false}});
-  await act(async()=>root.render(createElement(AdminResourceReadView,{snapshot:snapshotFor('chain-resource'),accountId:'account-1',fromUserId:'source-user',fromUserSection:'resources',fromOrderId:'source-order',onOpenPath:(p)=>opened.push(p),refreshNonce:0})));
-  await until(()=>node.textContent.includes('资源核对'));assert(node.textContent.includes('有效'));assert(node.textContent.includes('未发布'));assert(!node.textContent.includes('ACTIVE'));assert(!node.textContent.includes('DRAFT'));
-  await act(async()=>buttonNamed(node,'返回来源用户').click());assert.equal(opened.at(-1),'/users/source-user?section=resources&fromOrderId=source-order');
-  await act(async()=>buttonNamed(node,'返回来源订单').click());assert.equal(opened.at(-1),'/orders/source-order');
+test('legacy resource export reuses the canonical detail and preserves exact user and order returns', async t => {
+  const {AdminResourceReadView}=await setup(t),opened=[];
+  const actor={...snapshotFor('chain-resource'),permissions:['order.read','user.directory.read','supply.rental_account.read']};
+  const surface=AdminResourceReadView({snapshot:actor,accountId:'account-1',fromUserId:'source-user',fromUserSection:'resources',fromUserPublication:'published',fromOrderId:'source-order',onOpenPath:path=>opened.push(path),refreshNonce:0});
+  const [returns,detail]=surface.props.children;
+  assert.equal(detail.type.name,'SupplyListingReviewView');
+  assert.equal(detail.props.initialAccountId,'account-1');
+  assert.equal(detail.props.snapshot,actor,'resource permission is never replaced by review permission');
+  returns.props.children[0].props.onClick();
+  assert.equal(opened.at(-1),'/users/source-user?section=resources&publication=published&fromOrderId=source-order');
+  returns.props.children[1].props.onClick();
+  assert.equal(opened.at(-1),'/orders/source-order?fromUserId=source-user&fromUserSection=resources&fromUserPublication=published');
+  const denied=AdminResourceReadView({snapshot:snapshotFor('resource-denied'),accountId:'account-1',fromUserId:'source-user',fromUserSection:'resources',onOpenPath:()=>{},refreshNonce:0});
+  assert.equal(denied.props.children[0],null,'return links obey their independent user and order permissions');
 });
 
 test('order account labels distinguish legacy source numbers in lists, detail and related resource tabs', async t => {
@@ -532,14 +539,32 @@ test('order account labels distinguish legacy source numbers in lists, detail an
   assert.deepEqual([...node.querySelectorAll('.oc-table tbody tr')[1].querySelectorAll('.oc-party-role')].map(e=>e.textContent),['租客','号主']);
   assert.equal(node.querySelector('.oc-table').textContent.includes('账号 0000123'),false);
   await act(async()=>[...node.querySelectorAll('.oc-table tbody tr button')].find(b=>b.textContent===cases[0].expected).click());
-  assert.equal(opened.at(-1).title,cases[0].expected);assert(opened.at(-1).path.includes('/supply/accounts/'));
+  assert.equal(opened.at(-1).title,cases[0].expected);assert.equal(opened.at(-1).path,`/supply/reviews/${items[0].accountId}?fromOrderId=${items[0].id}`);
   globalThis.fetch=async()=>response({order:items[0]});
   await act(async()=>root.render(createElement(AdminOrderChainView,{...props,objectOnly:true,initialOrderId:items[0].id})));await until(()=>node.textContent.includes('本单账号和双方'));
   assert(node.querySelector('.oc-heading p').textContent.includes(cases[0].expected));
   const resourceLink=[...node.querySelectorAll('.oc-related button')].find(b=>b.textContent===cases[0].expected);assert(resourceLink);
   await act(async()=>resourceLink.click());assert.equal(opened.at(-1).title,cases[0].expected);
-  globalThis.fetch=async()=>response({account:{accountId:'account-1',displayNo:cases[0].value,ownerName:'当前号主',lifecycle:'ACTIVE',legacyHold:'NONE',versionState:'DRAFT'}});
-  await act(async()=>root.render(createElement(AdminResourceReadView,{snapshot:props.snapshot,accountId:'account-1',onOpenPath:()=>{},refreshNonce:0})));await until(()=>node.querySelector('h1')?.textContent===cases[0].expected);
+  assert.match(node.querySelector('.oc-related').textContent,/查看当前账号/);
+  const resource=AdminResourceReadView({snapshot:props.snapshot,accountId:'account-1',onOpenPath:()=>{},refreshNonce:0});
+  assert.equal(resource.props.children[1].props.initialAccountId,'account-1');
+});
+
+test('current account links require supply reading and keep the order frozen version separate', async t => {
+  const {root,node,AdminOrderChainView}=await setup(t),opened=[],requests=[];
+  const frozen={source:'ORDER_VERSION',haff:{code:'haff',quantity:'98080000',unit:'HAFF_BASE'},materials:[],termDays:'1',termSeconds:'86400',loginMethodText:'QQ扫码'};
+  const value={...chainOrder,id:'frozen-canonical',accountId:'account-current',versionId:'order-frozen-version',contentHash:'f'.repeat(64),frozenAccount:frozen};
+  globalThis.fetch=async url=>{requests.push(String(url));return response({order:value});};
+  const props={...chainProps('canonical-only-order'),objectOnly:true,initialOrderId:value.id,onOpenPath:(path,title)=>opened.push({path,title})};
+  await act(async()=>root.render(createElement(AdminOrderChainView,props)));await until(()=>node.textContent.includes('本单账号和双方'));
+  assert.equal([...node.querySelectorAll('.oc-related button')].some(button=>button.textContent.includes('账号')),false);
+  await act(async()=>root.render(createElement(AdminOrderChainView,{...props,snapshot:{...props.snapshot,permissions:['order.read','supply.rental_account.read']}})));await until(()=>node.querySelector('.oc-related button'));
+  await act(async()=>node.querySelector('.oc-related button').click());
+  assert.equal(opened.at(-1).path,'/supply/reviews/account-current?fromOrderId=frozen-canonical');
+  assert.match(node.querySelector('.oc-related').textContent,/本单冻结账号摘要/);
+  assert.match(node.querySelector('.oc-related').textContent,/98\.08 M 哈夫币/);
+  assert.equal(value.versionId,'order-frozen-version');assert.equal(value.contentHash,'f'.repeat(64));
+  assert.equal(requests.every(url=>!url.includes('/supply/')),true,'opening a current account never rereads or replaces frozen order facts');
 });
 
 test('order party history labels follow order origin for both renter and owner', async t => {

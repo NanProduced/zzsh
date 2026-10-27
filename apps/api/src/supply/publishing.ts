@@ -53,6 +53,7 @@ export type SupplyGate = {
   publisherBail: "SATISFIED" | "NOT_REQUIRED" | "PENDING" | "UNKNOWN";
   occupancy: "FREE" | "OCCUPIED" | "UNKNOWN";
   occupancyKind?: "PENDING_PAYMENT" | "RENTED" | "OCCUPIED";
+  rentalCompleted?: boolean;
   reference: string | null;
   creditGuarantee?: CreditGuaranteeGateSnapshot;
 };
@@ -305,6 +306,8 @@ export type ListingMediaAssetRow = {
 };
 
 export type ListingDetailPrefetch = {
+  /** Restricted account readers never fetch administrator review records. */
+  includeReviewRecords?: boolean;
   /** Current version already loaded for the account; absent means "not loaded". */
   version?: ListingVersion | null;
   /** Answer to the publication probe, already resolved for this page. */
@@ -559,6 +562,7 @@ export async function publicationBlockers(
     if (strictReadErrors && !(error instanceof SecurityApiError)) throw error;
     external = await unknownSupplyGate(client, a);
   }
+  if (external.rentalCompleted === true) reasons.push("RENTAL_COMPLETED");
   if (
     !external.reference ||
     !["SATISFIED", "NOT_REQUIRED"].includes(external.publisherBail)
@@ -585,6 +589,7 @@ export async function assertEditable(
   if (a.lifecycle !== "ACTIVE" || (!allowLegacyResolution && a.legacy_hold !== "NONE"))
     throw conflict("历史异常或归档账号不能发布");
   const external = await gate(client, a);
+  if (external.rentalCompleted === true) throw conflict("RENTAL_COMPLETED");
   if (external.occupancy !== "FREE")
     throw conflict("暂不能确认账号空闲，请先处理占用状态");
 }
@@ -1047,6 +1052,8 @@ export async function quoteListing(
   legacyGrading?: LegacyTakeoverGradingContext,
 ): Promise<void> {
   checkAccountRevision(a, expected);
+  if (a.lifecycle !== "ACTIVE") throw conflict("账号已归档，不能重新核价或上架");
+  if ((await client.query(`SELECT 1 FROM zzsh_order.rental_order WHERE account_id=$1 AND status='COMPLETED' LIMIT 1`, [a.id])).rowCount) throw conflict("RENTAL_COMPLETED");
   await requireWritableGameService(client, a.game_id, GAME_SERVICE.ACCOUNT_RENTAL);
   const v = await currentVersion(client, a);
   if (v.review_state !== "DRAFT" || v.origin !== "NATIVE")
@@ -2017,7 +2024,7 @@ export async function listingDetail(
     gate,
     prefetch,
   );
-  const decisions = (
+  const decisions = prefetch?.includeReviewRecords === false ? [] : (
     await client.query(
       `SELECT d.id,d.version_id,d.decision,d.reason,d.decided_at,u.name AS reviewer_name FROM zzsh_supply.review_decision d JOIN zzsh_auth_admin."user" u ON u.id=d.reviewer_admin_id JOIN zzsh_supply.listing_version v ON v.id=d.version_id WHERE v.account_id=$1 ORDER BY d.decided_at`,
       [a.id],

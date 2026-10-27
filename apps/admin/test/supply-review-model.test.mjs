@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  accountBusinessStatus,
+  ACCOUNT_BUSINESS_STATES,
+  baseFeeRows,
+  versionBaseFeeRows,
+  resourceBillingRows,
   attributeFacts,
   accountNumberLabel,
   historicalAttributeFacts,
@@ -36,6 +41,57 @@ import {
   supplyObjectLabel,
   unitText,
 } from "../src/views/supply-review/model.ts";
+
+test("account business state is authoritative; pending payment is a substate and null never becomes offline or completed", () => {
+  const facts = { publicVisible: true, newOrders: false, occupancy: "FREE", ownerPaused: false, staffRestricted: false, reasons: [], sources: [], legacyNumbers: [], lifecycle: "ARCHIVED" };
+  assert.deepEqual(ACCOUNT_BUSINESS_STATES.map(state => state.label), ["上架中", "订单进行中", "下架", "完成租用"]);
+  for (const state of ACCOUNT_BUSINESS_STATES) assert.equal(accountBusinessStatus({ ...facts, businessState: state.value, newOrders: true, staffRestricted: true }).label, state.label, "authoritative state wins independent flags");
+  assert.deepEqual(accountBusinessStatus({ ...facts, businessState: "IN_PROGRESS", occupancyKind: "PENDING_PAYMENT" }), { label: "订单进行中", tone: "info", detail: "待付款" });
+  assert.equal(accountBusinessStatus({ ...facts, businessState: "IN_PROGRESS", occupancyKind: "RENTED" }).detail, "租用中");
+  assert.equal(accountBusinessStatus({ ...facts, businessState: "COMPLETED", occupancyKind: "PENDING_PAYMENT" }).detail, undefined);
+  for (const businessState of [null, "bad-state"]) assert.equal(accountBusinessStatus({ ...facts, businessState, newOrders: true, occupancy: "OCCUPIED", occupancyKind: "RENTED" }).label, "状态待核");
+  assert.equal(accountBusinessStatus({ ...facts, businessState: null, publicVisible: false }, "DRAFT").label, "未上架");
+  assert.equal(accountBusinessStatus({ ...facts, businessState: null, publicVisible: false }, "IMPORTED_UNVERIFIED").label, "状态待核");
+  assert.equal(accountBusinessStatus({ ...facts, newOrders: true }).label, "上架中");
+  assert.equal(accountBusinessStatus({ ...facts, occupancy: "OCCUPIED", occupancyKind: "PENDING_PAYMENT" }).detail, "待付款");
+  assert.equal(accountBusinessStatus({ ...facts, ownerPaused: true }).label, "号主暂停");
+  assert.equal(accountBusinessStatus({ ...facts, staffRestricted: true }).label, "运营限制");
+  assert.equal(accountBusinessStatus(facts).label, "状态待核", "lifecycle or unrelated order history cannot create a completed state");
+});
+
+test("base total adds only the same version's exact resource amount and base deposit", () => {
+  const fee = { completeness: "COMPLETE", haffRental: { amount: "494.87" }, materials: { amount: "267.10" }, resourceTotal: { amount: "761.97" } };
+  assert.equal(baseFeeRows(fee, null, "85000").total, "¥1,611.97");
+  assert.equal(baseFeeRows({ ...fee, haffRental: null, materials: null, completeness: "UNKNOWN" }, null, "85000").total, "¥1,611.97", "known aggregate survives unknown components");
+  assert.equal(baseFeeRows(null, { amount: "9007199254740993.99" }, "2").total, "¥9,007,199,254,740,994.01");
+  assert.equal(baseFeeRows({ ...fee, resourceTotal: null }, null, "0").total, "¥761.97");
+  assert.equal(baseFeeRows(fee, null, "0").deposit, "¥0.00");
+  for (const missing of [null, undefined, "1e2", "-1", "1.5"]) assert.equal(baseFeeRows(fee, null, missing).total, "未提供");
+  assert.equal(baseFeeRows(null, { amount: "1.234" }, "0").total, "未提供");
+  const version = { feeSummary: fee, quote: null, declaration: { attributes: { owner_deposit_declaration: { schema: "owner-deposit-declaration-v1", amountCents: "85000" } } } };
+  assert.equal(versionBaseFeeRows(version).total, "¥1,611.97");
+  assert.equal(versionBaseFeeRows(version, "0").total, "¥761.97", "public basis deposit is its own authoritative fact");
+});
+
+test("one resource row retains zero, unknown, free, quote-only and quantity mismatches without calculating money", () => {
+  const version = {
+    declaration: { inventory: [{ itemId: "zero", quantity: "0" }, { itemId: "free", quantity: "2" }, { itemId: "unknown", quantity: null }, { itemId: "mismatch", quantity: "0" }] },
+    presentation: { items: [{ id: "zero", name: "零库存", unit: "ROUND" }, { id: "free", name: "免费物资", unit: "PIECE" }, { id: "unknown", name: "未知物资", unit: "PIECE" }, { id: "mismatch", name: "需核对物资", unit: "ROUND" }] },
+    quote: { lines: [
+      { itemId: "zero", quantity: "0", unit: "ROUND", buyerAmount: { amount: "0.00" } },
+      { itemId: "free", quantity: "2", unit: "PIECE", unitQuantity: "1", buyerUnitAmount: { amount: "0.00000000" }, buyerAmount: { amount: "0.00" } },
+      { itemId: "mismatch", quantity: "3", unit: "ROUND", buyerAmount: { amount: "1.50" } },
+      { itemId: "quote-only", quantity: "4", unit: "PIECE", buyerAmount: { amount: "2.00" } },
+    ] },
+  };
+  const before = JSON.stringify(version), rows = resourceBillingRows(version);
+  assert.deepEqual(rows.map(row => row.zero), [true, false, false, false, false]);
+  assert.equal(rows[1].amount, "0.00"); assert.equal(rows[1].unitAmount, "0.00000000");
+  assert.equal(rows[2].quantity, "数量未知"); assert.equal(rows[2].amount, null);
+  assert.match(rows[3].quantityNote, /报价数量 3 发/); assert.equal(rows[3].amount, "1.50");
+  assert.equal(rows[4].quantityNote, "数量来自本版报价"); assert.equal(rows[4].name, "名称待核");
+  assert.equal(JSON.stringify(version), before);
+});
 
 test("same public basis keeps its own release, ratio and line pricing metadata", () => {
   const basis = { id: "v-public", releaseId: "rel-public", accountId: "a", title: "对外版", description: null, attributes: {}, presentation: { items: [{ id: "barrett", name: "巴雷特", unit: "ROUND" }] }, media: [], termOption: null, fullPayoutSelected: true, publishedAt: null,

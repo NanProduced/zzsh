@@ -9,7 +9,7 @@ import {ModuleKind,ScriptTarget,transpileModule} from 'typescript';
 import {canonicalize} from '../src/supply/content-hash';
 const tree=execFileSync('git',['--no-optional-locks','rev-parse','--show-toplevel'],{cwd:process.cwd(),encoding:'utf8'}).trim(),path='apps/api/src/order/settlement-record.ts',requireHere=createRequire(resolve(__dirname,'../src/order/settlement-record.js'));
 // Exercise the real private frozen-basis function without adding test-only exports to the product module.
-function load(source:string){const exports:Record<string,any>={};runInNewContext(transpileModule(source+'\nexport const offlineFrozenBasis = basisOrReasons;\n',{compilerOptions:{module:ModuleKind.CommonJS,target:ScriptTarget.ES2022}}).outputText,{exports,require:requireHere});return exports.offlineFrozenBasis as (order:any,payment:any,opening:any)=>any;}
+function load(source:string,name='basisOrReasons'){const exports:Record<string,any>={};runInNewContext(transpileModule(source+'\nexport const offlineFrozenBasis = '+name+';\n',{compilerOptions:{module:ModuleKind.CommonJS,target:ScriptTarget.ES2022}}).outputText,{exports,require:requireHere});return exports.offlineFrozenBasis as (...args:any[])=>any;}
 const current=load(readFileSync(resolve(tree,path),'utf8')),baseline=load(execFileSync('git',['--no-optional-locks','show','b14238156b340c870812e0fba44c74eb452691f9:'+path],{cwd:tree,encoding:'utf8'}));
 const money=(amount:string,scale:number)=>({currency:'CNY',unit:'yuan',amount,scale});
 function fixture(schema:'personal-quote-v1'|'personal-quote-v2'|'personal-quote-v3'|'personal-quote-v4'){
@@ -39,4 +39,50 @@ test('all v1/v2/v3 compatibility results and failure cases match the original co
   const scenarios=[()=>{},(f:any)=>delete f.order.quote.personal.membership,(f:any)=>delete f.order.quote.personal.funding.vipWaiver,(f:any)=>f.order.quote.personal.guarantee.status='UNKNOWN',(f:any)=>f.order.quote.personal.listingHash='other',(f:any)=>f.opening[0].quantity='1'];
   for(const change of scenarios){const f=fixture(schema);change(f);assert.equal(canonicalize(current(f.order,f.payment,f.opening)),canonicalize(baseline(f.order,f.payment,f.opening)),schema);}
  }
+});
+
+const archiveCompletedSupply=load(readFileSync(resolve(tree,path),'utf8'),'archiveCompletedSupply');
+const transactionCore=requireHere('../auth/security-core') as typeof import('../src/auth/security-core');
+const completedOrder={id:'settled-order',accountId:'once-supply',listingVersionId:'frozen-version',contentHash:'b'.repeat(64)};
+const completingActor={realm:'admin',userId:'service-operator',sessionId:'normal-session'};
+function archiveHarness(failure?:'CAS'|'AUDIT'){
+ let state={lifecycle:'ACTIVE',revision:'7'},before={...state};const events:Array<{sql:string;values:any[]}>=[];let released=0;
+ const denied=Object.assign(new Error('synthetic audit denial'),{code:'42501'});
+ const client={release(){released++;},async query(sql:string,values:any[]=[]){
+  events.push({sql,values});
+  if(sql==='BEGIN'){before={...state};return{rows:[],rowCount:0};}
+  if(sql==='COMMIT')return{rows:[],rowCount:0};
+  if(sql==='ROLLBACK'){state={...before};return{rows:[],rowCount:0};}
+  if(sql.startsWith('SELECT lifecycle'))return{rows:[{...state}],rowCount:1};
+  if(sql.startsWith('UPDATE zzsh_supply.rental_account')){
+   assert.deepEqual(Array.from(values),['once-supply',state.revision]);assert.match(sql,/lifecycle='ACTIVE' AND revision=\$2::bigint/);
+   if(failure==='CAS')return{rows:[],rowCount:0};
+   state={lifecycle:'ARCHIVED',revision:(BigInt(state.revision)+1n).toString()};return{rows:[{revision:state.revision}],rowCount:1};
+  }
+  if(sql.includes('INSERT INTO "zzsh_iam"."audit_event"')){if(failure==='AUDIT')throw denied;return{rows:[],rowCount:1};}
+  throw new Error('unexpected offline archive query');
+ }};
+ return{pool:{connect:async()=>client} as any,events,state:()=>state,released:()=>released,denied};
+}
+
+test('a successfully completed rental permanently archives the original supply and audits the frozen order binding',async()=>{
+ for(const reason of ['NORMAL','TENANT_VOLUNTARY_EARLY','OWNER_OR_ACCOUNT_EARLY']){
+  const h=archiveHarness();
+  await transactionCore.withTransaction(h.pool,client=>archiveCompletedSupply(client,completedOrder,completingActor,'original-request','original-posting','settlement-version',reason));
+  assert.deepEqual(h.state(),{lifecycle:'ARCHIVED',revision:'8'});assert.equal(h.released(),1);
+  const event=h.events.find(e=>e.sql.includes('audit_event'))!;assert.equal(event.values[4],'supply.account.rental_completed');assert.equal(event.values[6],'once-supply');
+  const detail=JSON.parse(event.values[10]);assert.equal(detail.orderId,'settled-order');assert.equal(detail.listingVersionId,'frozen-version');assert.equal(detail.contentHash,completedOrder.contentHash);assert.equal(detail.postingId,'original-posting');assert.equal(detail.endReason,reason);
+  assert.equal(h.events.at(-1)?.sql,'COMMIT');
+ }
+});
+
+test('archive CAS and audit failures propagate through the existing transaction; unstarted cancellation cannot archive supply',async()=>{
+ for(const failure of ['CAS','AUDIT'] as const){
+  const h=archiveHarness(failure);
+  await assert.rejects(transactionCore.withTransaction(h.pool,client=>archiveCompletedSupply(client,completedOrder,completingActor,'original-request','original-posting','settlement-version','NORMAL')),e=>failure==='AUDIT'?e===h.denied:(e as Error).message==='SUPPLY_STATE_CHANGED');
+  assert.deepEqual(h.state(),{lifecycle:'ACTIVE',revision:'7'});assert.equal(h.events.at(-1)?.sql,'ROLLBACK');assert.equal(h.released(),1);
+ }
+ const h=archiveHarness();
+ await assert.rejects(transactionCore.withTransaction(h.pool,client=>archiveCompletedSupply(client,completedOrder,completingActor,'original-request','original-posting','settlement-version','CANCELLED_BEFORE_START')),/SETTLEMENT_SNAPSHOT_INVALID/);
+ assert.deepEqual(h.events.map(e=>e.sql),['BEGIN','ROLLBACK']);
 });

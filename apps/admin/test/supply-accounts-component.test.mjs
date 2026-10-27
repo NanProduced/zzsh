@@ -14,6 +14,46 @@ function workDetail() {
   d.contextKey = 'ctx'; return d;
 }
 const tick = async (h) => { for (let i = 0; i < 6; i++) await h.settle(); };
+async function pickAccountStatus(h, label) {
+  await h.click(h.el.querySelector('[aria-label="账号状态"]')); await tick(h);
+  const option = [...h.browser.document.querySelectorAll('[role="option"]')].find(node => node.textContent.trim() === label); assert(option, label);
+  await act(async () => { option.focus(); option.dispatchEvent(new h.browser.KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })); }); await tick(h);
+}
+
+test('authoritative business states agree across list, mobile cards, quick view and full account detail', async t => {
+  const cases = [['LISTED', '上架中'], ['IN_PROGRESS', '订单进行中待付款'], ['OFFLINE', '下架'], ['COMPLETED', '完成租用'], [null, '状态待核']];
+  const rows = cases.map(([businessState], index) => ({ ...row, id: 'state-' + index, accountId: 'state-' + index, displayNo: 'STATE-' + index, facts: { ...facts, businessState, publicVisible: true, newOrders: true, staffRestricted: false, ownerPaused: false, reasons: [], primaryReasonCode: null, occupancy: 'FREE', occupancyKind: businessState === 'IN_PROGRESS' ? 'PENDING_PAYMENT' : null } }));
+  const values = new Map(rows.map(item => { const value = workDetail(); value.account.id = item.id; value.account.display_no = item.displayNo; value.version.id = 'v-' + item.id; value.supervision.facts = item.facts; return [item.id, value]; }));
+  const h = await mountHarness(t, { permissions, fetchImpl: async url => url.pathname.endsWith('/listing-reviews') ? json({ ...page, items: rows }) : json(values.get(url.pathname.split('/').at(-1))) }); await tick(h);
+  for (let index = 0; index < rows.length; index++) for (const prefix of ['#supply-open-', '#supply-card-']) assert.equal(h.el.querySelector(prefix + rows[index].id + ' [data-account-status]').textContent, cases[index][1]);
+  const pending = h.el.querySelector('#supply-open-state-1 [data-account-status]'); assert.doesNotMatch(pending.textContent, /已租|租用中/);
+  await h.click(h.el.querySelector('#supply-open-state-1')); await tick(h);
+  assert.equal(h.el.querySelector('[data-slot="dialog-content"] [data-account-status]').textContent, '订单进行中待付款');
+  h.browser.document.dispatchEvent(new h.browser.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await tick(h);
+  await h.render('admin', permissions, 'state-3', { context: 'situation' }); await tick(h);
+  assert.equal(h.el.querySelector('header [data-account-status]').textContent, '完成租用'); assert.equal(h.writes.length, 0);
+});
+
+test('saved views restore status and an explicit legacy condition while a new status clears the old condition and cursor', async t => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'localStorage'), store = new Map(), calls = [];
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: key => store.get(key) ?? null, setItem: (key, value) => store.set(key, value) } });
+  t.after(() => { if (original) Object.defineProperty(globalThis, 'localStorage', original); else delete globalThis.localStorage; });
+  const h = await mountHarness(t, { permissions, initialQuery: { status: 'IN_PROGRESS', eligibility: 'BLOCKED', cursor: 'old-cursor' }, fetchImpl: async url => { calls.push(url); return json(page); } }); await tick(h);
+  assert.equal(calls.at(-1).searchParams.get('status'), 'IN_PROGRESS'); assert.equal(calls.at(-1).searchParams.get('eligibility'), 'BLOCKED');
+  await h.click(h.btn('保存视图')); await tick(h);
+  const input = h.browser.document.querySelector('[aria-label="视图名称"]'); assert(input);
+  await act(async () => { Object.getOwnPropertyDescriptor(h.browser.HTMLInputElement.prototype, 'value').set.call(input, '进行中旧资格'); input.dispatchEvent(new h.browser.Event('input', { bubbles: true })); });
+  await h.click([...h.browser.document.querySelectorAll('button')].find(button => button.textContent.trim() === '保存')); await tick(h);
+  const saved = JSON.parse([...store.values()][0]).views[0]; assert.equal(saved.status, 'IN_PROGRESS'); assert.equal(saved.eligibility, 'BLOCKED');
+  await act(async () => h.browser.document.dispatchEvent(new h.browser.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))); await tick(h);
+  await pickAccountStatus(h, '完成租用');
+  let query = calls.at(-1).searchParams; assert.equal(query.get('status'), 'COMPLETED'); assert.equal(query.has('eligibility'), false); assert.equal(query.has('cursor'), false);
+  await h.click([...h.el.querySelectorAll('button')].find(button => button.textContent.startsWith('保存视图'))); await tick(h);
+  await h.click([...h.browser.document.querySelectorAll('button')].find(button => button.textContent.trim() === '进行中旧资格')); await tick(h);
+  query = calls.at(-1).searchParams; assert.equal(query.get('status'), 'IN_PROGRESS'); assert.equal(query.get('eligibility'), 'BLOCKED'); assert.equal(query.has('cursor'), false);
+  assert.match(h.el.textContent, /沿用旧接单资格条件：不可接新单/); await h.click(h.btn('清除旧资格条件')); await tick(h);
+  assert.equal(calls.at(-1).searchParams.has('eligibility'), false); assert.equal(calls.at(-1).searchParams.get('status'), 'IN_PROGRESS'); assert.equal(h.writes.length, 0);
+});
 
 test('account list has readable fees, hides zero stock and reports verified total pages', async t => {
   const current = { ...row, title: 'old platform imported title', facts: { ...facts, reasons: [], staffRestricted: false, newOrders: true }, summary: {
@@ -26,7 +66,7 @@ test('account list has readable fees, hides zero stock and reports verified tota
   const first = h.el.querySelector('tbody td'), resources = h.el.querySelector('[data-account-resources]'), fees = h.el.querySelector('[data-account-fees]');
   assert.match(first.textContent, /TEST-A/); assert.doesNotMatch(first.textContent, /old platform imported title|当前草稿|对外版/);
   assert.match(resources.textContent, /正库存探针 2件/); assert.match(resources.textContent, /数量未知探针 数量未知/); assert.doesNotMatch(resources.textContent, /零库存探针/);
-  assert.match(fees.querySelector('strong').textContent, /111\.00/); assert.match(fees.textContent, /哈夫币租金.*100\.00/); assert.match(fees.textContent, /基础押金.*50\.00/); assert.doesNotMatch(fees.textContent, /闭合/);
+  assert.match(fees.querySelector('strong').textContent, /161\.00/); assert.match(fees.textContent, /哈夫币租金.*100\.00/); assert.match(fees.textContent, /基础押金.*50\.00/); assert.doesNotMatch(fees.textContent, /闭合/);
   assert.equal(h.el.querySelector('[data-account-terms]').querySelectorAll('svg').length, 4);
   assert.match(h.el.querySelector('[data-slot="admin-list-pagination"]').textContent, /共 41 个账号/); assert.match(h.el.textContent, /第 1 页 \/ 共 3 页/);
   await h.click(h.el.querySelector('[aria-label="下一页"]')); await tick(h); assert.match(h.el.textContent, /第 2 页 \/ 共 3 页/);
@@ -152,8 +192,8 @@ test('U1 account filters are real server parameters, exact, resettable and recov
   assert.equal(new URL(calls.at(-1)).searchParams.get('q'), '', 're-query cannot revive the reset clue');
   await choose('游戏', '三角洲');
   let params = await waitParam('gameId', 'game-1');
-  await choose('接单资格', '可接新单');
-  params = await waitParam('eligibility', 'ELIGIBLE');
+  await choose('账号状态', '上架中');
+  params = await waitParam('status', 'LISTED');
   assert.equal(params.has('cursor'), false);
   await choose('账号来源', '旧平台迁入');
   params = await waitParam('source', 'LEGACY');
@@ -173,7 +213,7 @@ test('U1 account filters are real server parameters, exact, resettable and recov
   assert.equal(params.get('depositMax'), '12530');
 
   // An exact bound without a summary match still sends the filter; the page only shows what the server returned.
-  assert.equal(new URL(calls.at(-1)).searchParams.get('eligibility'), 'ELIGIBLE');
+  assert.equal(new URL(calls.at(-1)).searchParams.get('status'), 'LISTED');
 
   // Stale cursor → recover first page while keeping every filter.
   mode = 'conflict';
@@ -181,7 +221,7 @@ test('U1 account filters are real server parameters, exact, resettable and recov
   assert.ok(h.el.textContent.includes('查询上下文已变化，已重新从第1页读取；筛选条件已保留。'));
   params = new URL(calls.at(-1)).searchParams;
   assert.equal(params.has('cursor'), false);
-  assert.equal(params.get('eligibility'), 'ELIGIBLE');
+  assert.equal(params.get('status'), 'LISTED');
   assert.equal(params.get('source'), 'LEGACY');
   mode = 'ok';
 
@@ -199,7 +239,7 @@ test('U1 account filters are real server parameters, exact, resettable and recov
 
   await h.click([...h.el.querySelectorAll('button')].find(button => button.textContent.includes('重置筛选'))); await tick(h);
   params = new URL(calls.at(-1)).searchParams;
-  for (const key of ['eligibility','source','loginMethod','haffMin','haffMax','depositMin','depositMax','cursor']) assert.equal(params.has(key), false, key);
+  for (const key of ['status','eligibility','source','loginMethod','haffMin','haffMax','depositMin','depositMax','cursor']) assert.equal(params.has(key), false, key);
   assert.equal(h.writes.length, 0);
 
   const restored = [];
@@ -210,7 +250,8 @@ test('U1 account filters are real server parameters, exact, resettable and recov
   await tick(h2);
   const initial = restored.at(-1).searchParams;
   for (const [key, value] of Object.entries({ eligibility: 'BLOCKED', source: 'LEGACY', haffMin: '97000000', haffMax: '100000000', depositMin: '0', depositMax: '12530', loginMethod: 'login_qq_qr' })) assert.equal(initial.get(key), value, key);
-  assert.equal(h2.el.querySelector('[aria-label="接单资格"]').textContent.includes('不可接新单'), true);
+  assert.match(h2.el.querySelector('[aria-label="账号状态"]').textContent, /全部状态/);
+  assert.match(h2.el.textContent, /沿用旧接单资格条件：不可接新单/); assert.equal(initial.has('status'), false, 'BLOCKED is not converted to OFFLINE');
 });
 
 test('U2 the first column has three business layers, a new number only, and one lightweight legacy marker', async t => {
@@ -250,7 +291,7 @@ test('R2 an over-budget filter fails explicitly and keeps the submitted conditio
   } });
   await tick(h);
   assert.match(h.el.textContent, /筛选范围过大，暂不能完整核对；已保留筛选条件，请缩小条件后重试。/);
-  assert.match(h.el.querySelector('[aria-label="接单资格"]').textContent, /资格待核/);
+  assert.match(h.el.querySelector('[aria-label="账号状态"]').textContent, /全部状态/); assert.match(h.el.textContent, /沿用旧接单资格条件：资格待核/);
   assert.match(h.el.querySelector('[aria-label="账号来源"]').textContent, /旧平台/);
   assert.equal(calls.at(-1).searchParams.get('eligibility'), 'UNKNOWN');
   assert.equal(calls.at(-1).searchParams.get('source'), 'LEGACY');
@@ -265,7 +306,7 @@ test('row click opens quick view; pending counted; removing permission clears th
   const aside = h.el.querySelector('[data-slot="dialog-content"]');
   assert.ok(aside, 'drawer opened from row click');
   assert.ok(aside.textContent.includes('1 项需处理 · 待核 1 项'), 'pending counted in banner');
-  assert.ok(aside.textContent.includes('不可接新单'));
+  assert.ok(aside.textContent.includes('运营限制'));
   assert.ok(!aside.textContent.includes('全部满足'));
   h.browser.document.dispatchEvent(new h.browser.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   await tick(h); await new Promise(r => setTimeout(r, 50)); await tick(h);
@@ -319,7 +360,8 @@ test('U3 account base fees show the exact same-version split in list, quick view
   assert.match(dialog, /哈夫币租金\s*¥100\.00/);
   assert.match(dialog, /物资预付\s*¥0\.00/);
   assert.match(dialog, /(?:租客)?基础押金\s*¥50\.00/);
-  assert.match(dialog, /资源费(?:合计)?\s*¥100\.00/);
+  assert.match(dialog, /基础总价\s*¥150\.00/);
+  assert.equal(h.el.querySelectorAll('[data-slot="dialog-content"] [data-resource-billing] table').length, 1, 'quantity and pricing share one table');
   h.browser.document.dispatchEvent(new h.browser.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   await tick(h); await new Promise(r => setTimeout(r, 50)); await tick(h);
   await h.render('admin', permissions, 'a', { context: 'situation' }); await tick(h);
@@ -327,7 +369,7 @@ test('U3 account base fees show the exact same-version split in list, quick view
   assert.match(complete, /哈夫币租金\s*¥100\.00/);
   assert.match(complete, /物资预付\s*¥0\.00/);
   assert.match(complete, /(?:租客)?基础押金\s*¥50\.00/);
-  assert.match(complete, /资源费(?:合计)?\s*¥100\.00/);
+  assert.match(complete, /基础总价\s*¥150\.00/);
   assert.equal(h.writes.length, 0);
 });
 test('quick view reuses loaded attributes and marks quote provenance without fetching every row', async (t) => {
@@ -346,8 +388,9 @@ test('quick view reuses loaded attributes and marks quote provenance without fet
   assert.match(text, /体力等级.*7 级/);
   assert.match(text, /全额包赔.*已选/);
   assert.match(text, /212.77/);
-  assert.match(text, /fixture-release-7/);
-  assert.match(text, /规则 fixture-release-7/);
+  assert.doesNotMatch(text, /fixture-release-7/, 'technical trace is closed by default');
+  await h.click(h.btn('版本追溯')); await tick(h);
+  assert.match(h.el.querySelector('[data-slot="dialog-content"]').textContent, /规则版本fixture-release-7/);
   assert.match(text, /租客实际费用按本人报价核定/);
   assert.equal(h.writes.length, 0);
 });
@@ -363,7 +406,7 @@ test('empty draft quick view states that the version has no declaration instead 
   const text = h.el.querySelector('[data-slot="dialog-content"]').textContent;
   assert.match(text, /本版尚未填写申报属性/);
   assert.equal(text.includes('体力等级'), false, 'missing attributes are not repeated as a wall');
-  assert.match(text, /本版未申报物资/);
+  assert.match(text, /本版未提供物资数量与计费明细/);
   assert.equal(h.writes.length, 0);
 });
 
@@ -404,8 +447,10 @@ test('F2 public v1 stays the single basis across list, quick view and complete d
   await h.click(h.el.querySelector('#supply-open-a')); await tick(h);
   let dialog = h.el.querySelector('[data-slot="dialog-content"]');
   assert.match(dialog.textContent, /10 M 哈夫币[\s\S]*顶级安全箱 · 巅峰/);
-  assert.match(dialog.textContent, /版本 v-public/);
-  assert.match(dialog.textContent, /摘要 hash-public/);
+  assert.doesNotMatch(dialog.textContent, /资料版本v-public/);
+  await h.click(h.btn('版本追溯')); await tick(h);
+  assert.match(dialog.textContent, /资料版本v-public/);
+  assert.match(dialog.textContent, /内容摘要hash-public/);
   assert.match(dialog.textContent, /哈夫币租金\s*¥100\.00/);
   assert.match(dialog.textContent, /物资预付\s*¥11\.00/);
   assert.match(dialog.textContent, /预计租期\s*2 天/);
@@ -417,11 +462,11 @@ test('F2 public v1 stays the single basis across list, quick view and complete d
   assert.match(dialog.querySelector('[data-slot="dialog-title"]').textContent, /12 M 哈夫币/);
   assert.doesNotMatch(dialog.querySelector('[data-slot="dialog-title"]').textContent, /代码 box-a/);
   assert.equal(dialog.textContent.includes('旧号 OLD-7'), false, 'the old original title never becomes the neutral heading');
-  assert.match(dialog.textContent, /摘要 hash-current/);
+  assert.match(dialog.textContent, /内容摘要hash-current/);
   assert.match(dialog.textContent, /预计租期\s*3 天/);
   assert.match(dialog.textContent, /212\.77/);
   await h.click([...dialog.querySelectorAll('button')].find(button => button.textContent === '回到对外版')); await tick(h);
-  assert.match(h.el.querySelector('[data-slot="dialog-content"]').textContent, /版本 v-public/);
+  assert.match(h.el.querySelector('[data-slot="dialog-content"]').textContent, /资料版本v-public/);
   await h.render('admin', permissions, 'a', { context: 'situation' }); await tick(h);
   const complete = h.el.textContent;
   assert.ok(h.el.querySelector('[aria-label="租客当前看到的版本"]'));
@@ -465,14 +510,16 @@ test('quick resource chips use loaded frozen names and code-aware units without 
   } });
   await tick(h); await h.click(h.el.querySelector('#supply-open-a')); await tick(h);
   const text = h.el.querySelector('[data-slot="dialog-content"]').textContent;
-  assert.match(text, /45格乌龟包.*2 个/); assert.match(text, /顶级保险卡.*0 天/);
+  assert.match(text, /45格乌龟包.*2个/); assert.doesNotMatch(text, /顶级保险卡/);
   assert.match(text, /名称待核.*数量未知/); assert.doesNotMatch(text, /dynamic-backpack-probe|old-insurance-probe|九格保险体验卡/);
-  assert.match(text, /其他动态资源.*1\.50 件/);
+  assert.match(text, /其他动态资源.*1\.50件/);
+  await h.click(h.btn('显示零数量项')); await tick(h);
+  assert.match(h.el.querySelector('[data-slot="dialog-content"]').textContent, /顶级保险卡.*0天/);
   assert.equal(detailReads, 1); assert.equal(h.writes.length, 0);
 });
 
 
-test('R2 a known 111.00 total survives unknown components in list, quick view and complete detail', async t => {
+test('R2 known resource 111.00 plus base deposit remains 161.00 despite unknown components in all three views', async t => {
   const unknown = { completeness: 'UNKNOWN', haffRental: null, materials: null, resourceTotal: null };
   const rowWithUnknown = { ...row, facts: { ...facts, staffRestricted: false, reasons: [], newOrders: true, primaryReasonCode: null }, summary: {
     displaySource: 'CURRENT_VERSION', versionId: 'v-a', sequence: '1', refs: {}, timing: { accountCreatedAt: row.sortAt },
@@ -488,11 +535,11 @@ test('R2 a known 111.00 total survives unknown components in list, quick view an
   await tick(h);
   const cell = h.el.querySelector('#supply-open-a td:nth-child(4)').textContent;
   assert.match(cell, /资源费合计|哈夫币租金/);
-  assert.match(cell, /¥111\.00/);
+  assert.match(cell, /基础总价\s*¥161\.00/); assert.match(cell, /资源费合计\s*¥111\.00/);
   assert.match(cell, /哈夫币租金\s*分项待核/);
   await h.click(h.el.querySelector('#supply-open-a')); await tick(h);
   let dialog = h.el.querySelector('[data-slot="dialog-content"]').textContent;
-  assert.match(dialog, /资源费(?:合计)?\s*¥111\.00/);
+  assert.match(dialog, /基础总价\s*¥161\.00/);
   assert.match(dialog, /哈夫币租金\s*分项待核/);
   assert.match(dialog, /物资预付\s*分项待核/);
   assert.equal(dialog.includes('资源费(?:合计)?\s*未提供'), false);
@@ -500,7 +547,7 @@ test('R2 a known 111.00 total survives unknown components in list, quick view an
   await tick(h); await new Promise(r => setTimeout(r, 50)); await tick(h);
   await h.render('admin', permissions, 'a', { context: 'situation' }); await tick(h);
   const complete = h.el.textContent;
-  assert.match(complete, /资源费(?:合计)?\s*¥111\.00/);
+  assert.match(complete, /基础总价\s*¥161\.00/);
   assert.match(complete, /哈夫币租金\s*分项待核/);
   assert.match(complete, /物资预付\s*分项待核/);
   assert.equal(h.writes.length, 0);
@@ -528,9 +575,9 @@ test('historical list, mobile card and quick view expose existing source facts w
   await tick(h);
   for (const selector of ['#supply-open-a', '#supply-card-a']) {
     const text = h.el.querySelector(selector).textContent;
-    assert.match(text, /哈夫币租金\s*¥125.30/);
-    assert.match(text, /物资预付\s*¥0.00/);
-    assert.match(text, /基础押金\s*¥0.00/);
+    assert.match(text, /哈夫币租金\s*历史 ¥125.30/);
+    assert.match(text, /物资预付\s*历史 ¥0.00/);
+    assert.match(text, /基础押金\s*历史 ¥0.00/);
     assert.match(text, /97 M 哈夫币/);
     assert.match(text, /基础安全箱/);
     assert.equal(text.includes('OLD-7'), false, 'the old source number stays in the detail trace, not the first column');
@@ -538,7 +585,7 @@ test('historical list, mobile card and quick view expose existing source facts w
   }
   assert.equal(detailReads, 0, 'existing row projection is enough for both list layouts');
   await h.click(h.el.querySelector('#supply-open-a')); await tick(h);
-  const section = h.el.querySelector('[data-historical-summary]');
+  const section = h.el.querySelector('[data-imported-account]');
   assert.ok(section, 'historical details are separate from current declarations');
   assert.match(section.textContent, /租金.*¥125.30/);
   assert.match(section.textContent, /物资费.*¥0.00/);
@@ -546,11 +593,7 @@ test('historical list, mobile card and quick view expose existing source facts w
   assert.match(section.textContent, /租期.*10 天/);
   assert.match(section.textContent, /历史编号 OLD-7/);
   assert.match(section.textContent, /来源更新：/);
-  const toggle = [...h.el.querySelectorAll('button')].find(button => button.textContent.trim() === '迁入前记录');
-  assert.ok(toggle);
-  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
-  await h.click(toggle); await tick(h);
-  assert.equal(toggle.getAttribute('aria-expanded'), 'true');
+  assert.equal(h.el.querySelectorAll('[data-imported-account]').length, 1, 'the sole historical record is shown without duplication');
   assert.match(section.textContent, /弹药.*数量待核/);
   assert.ok(!section.textContent.includes('冻结报价'));
   assert.equal(detailReads, 1, 'only the existing quick-view detail read is used');

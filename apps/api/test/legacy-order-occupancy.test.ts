@@ -33,3 +33,17 @@ test("public occupancy labels only use authoritative native states and never car
   const gate = composeSupplyGateWithOrderOccupancy(async () => ({ publisherBail: "NOT_REQUIRED", reference: "fixture", occupancy: "OCCUPIED", occupancyKind: "RENTED" }));
   assert.deepEqual(await gate(free, { id: "fixture" } as never), { publisherBail: "NOT_REQUIRED", reference: "fixture", occupancy: "FREE" });
 });
+
+test("completed native rental remains terminal even when it no longer occupies; cancelled attempts are not terminal", async () => {
+  let calls = 0;
+  const client = { query: async (sql: string, values: unknown[]) => {
+    calls++; assert.match(sql, /status='COMPLETED'/); assert.deepEqual(values, ['supply-once']);
+    return { rows: [{ state: 'FREE', kind: null, rentalCompleted: true }] };
+  } } as unknown as PoolClient;
+  const gate = composeSupplyGateWithOrderOccupancy(async () => ({ publisherBail:'NOT_REQUIRED',occupancy:'FREE',reference:'proof' }));
+  assert.equal((await gate(client, {id:'supply-once'} as never)).rentalCompleted, true);
+  assert.equal(calls, 1, 'terminal and occupancy facts share the existing query');
+  const cancelled = { query: async () => ({ rows: [{ state:'FREE',kind:null,rentalCompleted:false }] }) } as unknown as PoolClient;
+  const stale = composeSupplyGateWithOrderOccupancy(async () => ({publisherBail:'NOT_REQUIRED',occupancy:'FREE',reference:'proof',rentalCompleted:true}));
+  assert.equal((await stale(cancelled,{id:'supply-once'} as never)).rentalCompleted, undefined, 'only fresh order facts establish terminal rental');
+});

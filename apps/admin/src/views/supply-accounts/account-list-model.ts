@@ -3,7 +3,7 @@
  * 原则：查找类型以用户选择为准，识别只作建议；待核条件单独计数；
  * 公开、占用、运营限制、号主暂停、新单资格各自读取，不由单一状态推导。
  */
-import { formatAmount, formatFundingCents, formatTermDays, historicalResourceText, operationalReasons, quantityText, unitText, type SupplyFacts, type SupplyListSummary, type SupplyQueryKind, type SupplyWorkDetail, type SupplyWorkItem, type SupplyWorkView } from "../supply-review/model.ts";
+import { ACCOUNT_BUSINESS_STATES, accountBusinessStatus, baseFeeRows, formatAmount, formatFundingCents, formatTermDays, historicalResourceText, operationalReasons, quantityText, unitText, type AccountBusinessState, type SupplyFacts, type SupplyListSummary, type SupplyQueryKind, type SupplyWorkDetail, type SupplyWorkItem, type SupplyWorkView } from "../supply-review/model.ts";
 
 export const LOGIN_METHOD_OPTIONS = [{ code: "legacy_login_qq", name: "QQ账密" }, { code: "login_qq_qr", name: "QQ扫码" }, { code: "legacy_login_wechat", name: "微信扫码" }, { code: "legacy_login_steam_cn", name: "Steam国服" }, { code: "legacy_login_steam_global", name: "Steam国际服" }];
 export const KIND_LABELS: Record<SupplyQueryKind, string> = { account: "编号", legacy: "旧编号", order: "订单号", owner: "号主", nickname: "昵称", link: "本站链接" };
@@ -104,7 +104,7 @@ export function independentFacts(f: SupplyFacts): Array<{ label: string; value: 
 
 /* ---------- 个人保存的视图（仅本浏览器） ---------- */
 export const SAVED_VERSION = 1;
-export type SavedView = { name: string; view: SupplyWorkView; kind: SupplyQueryKind; q: string; gameId: string };
+export type SavedView = { name: string; view: SupplyWorkView; kind: SupplyQueryKind; q: string; gameId: string; status?: AccountBusinessState | ""; eligibility?: string };
 const VIEWS: SupplyWorkView[] = ["all", "changes", "restricted", "paused", "orders"];
 const KINDS: SupplyQueryKind[] = ["account", "legacy", "owner", "nickname", "order", "link"];
 export const savedKey = (adminId: string) => "zzsh.admin.supply-accounts.saved-views:" + adminId;
@@ -117,7 +117,7 @@ export function parseSavedViews(raw: string | null, adminId: string): { views: S
   const d = data as { version?: unknown; adminId?: unknown; views?: unknown };
   if (!d || typeof d !== "object" || d.version !== SAVED_VERSION || !Array.isArray(d.views)) return { views: [], notice: "本地保存的视图格式已过期，已忽略；请重新保存。" };
   if (d.adminId !== adminId) return { views: [], notice: "本地保存的视图不属于当前账号，已忽略。" };
-  const ok = d.views.filter((v): v is SavedView => !!v && typeof v === "object" && typeof (v as SavedView).name === "string" && (v as SavedView).name.trim().length > 0 && (v as SavedView).name.length <= 40 && VIEWS.includes((v as SavedView).view) && KINDS.includes((v as SavedView).kind) && typeof (v as SavedView).q === "string" && (v as SavedView).q.length <= 128 && typeof (v as SavedView).gameId === "string").slice(0, 20);
+  const ok = d.views.filter((v): v is SavedView => !!v && typeof v === "object" && typeof (v as SavedView).name === "string" && (v as SavedView).name.trim().length > 0 && (v as SavedView).name.length <= 40 && VIEWS.includes((v as SavedView).view) && KINDS.includes((v as SavedView).kind) && typeof (v as SavedView).q === "string" && (v as SavedView).q.length <= 128 && typeof (v as SavedView).gameId === "string" && ((v as SavedView).status === undefined || (v as SavedView).status === "" || ACCOUNT_BUSINESS_STATES.some(state => state.value === (v as SavedView).status)) && ((v as SavedView).eligibility === undefined || ["", "ELIGIBLE", "BLOCKED", "UNKNOWN"].includes((v as SavedView).eligibility!))).slice(0, 20);
   return ok.length === d.views.length ? { views: ok } : { views: ok, notice: "部分保存的视图已失效，已跳过 " + (d.views.length - ok.length) + " 条。" };
 }
 export function serializeSavedViews(views: SavedView[], adminId: string): string {
@@ -182,7 +182,7 @@ export function alignedQuickRow(row: SupplyWorkItem, detail?: SupplyWorkDetail):
   const deposit = rawDeposit && typeof rawDeposit === "object" && !Array.isArray(rawDeposit) ? rawDeposit as Record<string, unknown> : null;
   const amount = deposit?.amountCents;
   const baseDeposit = deposit?.schema === "owner-deposit-declaration-v1" && typeof deposit.declarationVersion === "string" && deposit.declarationVersion.trim() && typeof amount === "string" && amount.length <= 24 && formatFundingCents(amount) !== "未提供" ? { amountCents: amount } : null;
-  return { ...row, depositDeclarationUnknown: rawDeposit !== null && !baseDeposit, summary: { ...row.summary, versionId: version.id, haff: haff ? { itemId: haff.itemId, quantity: haff.quantity, unit: "HAFF_BASE" } : null, quote: version.quote?.resourceTotal?.amount ? { currency: null, resourceTotal: { amount: version.quote.resourceTotal.amount, currency: null, unit: null, scale: null }, tenantDeposit: null, tenantPayableTotal: null, frozen: true, personalised: false } : null, baseDeposit, fullPayout: selected === null ? "NOT_DECLARED" : selected ? "SELECTED" : "NOT_SELECTED" } };
+  return { ...row, depositDeclarationUnknown: rawDeposit !== null && !baseDeposit, summary: { ...row.summary, versionId: version.id, feeSummary: version.feeSummary ?? null, haff: haff ? { itemId: haff.itemId, quantity: haff.quantity, unit: "HAFF_BASE" } : null, quote: version.quote?.resourceTotal?.amount ? { currency: null, resourceTotal: { amount: version.quote.resourceTotal.amount, currency: null, unit: null, scale: null }, tenantDeposit: null, tenantPayableTotal: null, frozen: true, personalised: false } : null, baseDeposit, fullPayout: selected === null ? "NOT_DECLARED" : selected ? "SELECTED" : "NOT_SELECTED" } };
 }
 
 /** 当前库存优先；缺当前记录才补历史显示量，不把每日消耗当库存。 */
@@ -242,9 +242,8 @@ export function depositYuanFromCents(cents: string): string {
   return `${whole}.${fraction}`;
 }
 
-export function rowBaseFeeRows(row: SupplyWorkItem): { haff: string; materials: string; deposit: string; total: string; note: string } {
-  const deposit = rowDepositText(row), fee = row.summary?.feeSummary;
-  const total = fee?.resourceTotal ? `¥${formatAmount(fee.resourceTotal.amount)}` : row.summary?.quote?.resourceTotal ? `¥${formatAmount(row.summary.quote.resourceTotal.amount)}` : "未提供";
+export function rowBaseFeeRows(row: SupplyWorkItem): { haff: string; materials: string; deposit: string; total: string; note: string; resources?: string } {
+  const deposit = rowDepositText(row);
   if (!row.summary) {
     const historical = row.facts.historicalRead?.historicalQuote;
     if (historical) return {
@@ -254,16 +253,9 @@ export function rowBaseFeeRows(row: SupplyWorkItem): { haff: string; materials: 
       total: "未提供",
       note: "历史记录，非当前资料",
     };
-    return { haff: "摘要未装配", materials: "摘要未装配", deposit, total, note: "资料摘要未装配" };
+    return { haff: "摘要未装配", materials: "摘要未装配", deposit, total: "未提供", note: "资料摘要未装配" };
   }
-  if (!fee) return { haff: "分项待核", materials: "分项待核", deposit, total, note: "基础分项未提供" };
-  return {
-    haff: fee.haffRental ? `¥${formatAmount(fee.haffRental.amount)}` : "分项待核",
-    materials: fee.materials ? `¥${formatAmount(fee.materials.amount)}` : "分项待核",
-    deposit,
-    total,
-    note: fee.completeness === "COMPLETE" ? "" : "部分费用明细未提供",
-  };
+  return baseFeeRows(row.summary.feeSummary, row.summary.quote?.personalised ? null : row.summary.quote?.resourceTotal, row.summary.baseDeposit?.amountCents);
 }
 
 export function rowDisplaySourceText(row: SupplyWorkItem): string {
@@ -385,17 +377,6 @@ export function rowInfoSource(row: SupplyWorkItem): string {
 }
 
 /** 业务状态：公开、占用、限制、暂停、新单资格各自独立，UNKNOWN 不压成“已下架”。 */
-export function rowListingStatus(row: SupplyWorkItem): { label: string; tone: "success" | "info" | "neutral" | "warning" } {
-  const f = row.facts;
-  if (f.staffRestricted === true) return { label: "运营限制", tone: "warning" };
-  if (f.ownerPaused === true) return { label: "号主暂停", tone: "neutral" };
-  if (f.occupancy === "OCCUPIED") {
-    if (f.occupancyKind === "PENDING_PAYMENT") return { label: "待付款预留", tone: "info" };
-    if (f.occupancyKind === "RENTED") return { label: "租用中", tone: "info" };
-    return { label: "占用中", tone: "info" };
-  }
-  if (f.newOrders === true) return { label: "可接新单", tone: "success" };
-  if (f.publicVisible === true) return { label: f.newOrders === null ? "可查看 · 接单待核" : "可查看", tone: "neutral" };
-  if (f.publicVisible === false) return { label: "未公开", tone: "neutral" };
-  return { label: "公开状态待核", tone: "neutral" };
+export function rowListingStatus(row: SupplyWorkItem) {
+  return accountBusinessStatus(row.facts, row.reviewState);
 }

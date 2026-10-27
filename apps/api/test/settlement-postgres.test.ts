@@ -579,6 +579,8 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
          FROM zzsh_order.rental_order o JOIN zzsh_order.settlement_posting p ON p.order_id=o.id
          JOIN zzsh_order.settlement_version v ON v.id=p.settlement_version_id WHERE o.id=$1`, [orderId])).rows[0]!;
     assert.equal(posted.status, "COMPLETED");
+    const completedSupply = (await pool.query(`SELECT a.lifecycle FROM zzsh_supply.rental_account a JOIN zzsh_order.rental_order o ON o.account_id=a.id WHERE o.id=$1`, [orderId])).rows[0];
+    assert.equal(completedSupply?.lifecycle, "ARCHIVED", "settlement and the original supply terminal state commit together");
     assert.equal(posted.paymentId, posted.paidPaymentId);
     assert.equal(posted.rate, "0.08");
     assert.equal((await pool.query(`SELECT count(*)::int AS n FROM zzsh_order.settlement_posting WHERE order_id=$1`, [orderId])).rows[0].n, 1);
