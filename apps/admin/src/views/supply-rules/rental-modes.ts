@@ -12,7 +12,11 @@ export const FAST_DEFAULT_MIN: RatioBound = { base: "C", value: "6" };
 
 export type BoundDraft = { base: "C" | "ABSOLUTE"; value: string };
 export type ModeDraft = { enabled: boolean; min: BoundDraft; max: BoundDraft };
-export type RentalModeDraft = { custom: ModeDraft; fast: ModeDraft & { spreadDelta: string; discounts: Record<string, string> } };
+/**
+ * legacyDiscounts 只读：旧 VIP/SVIP/优惠用户档位增量仅为历史/接口兼容保留，日常表单不提供编辑。
+ * 已有草稿/历史版本原值原样带回；只有“新建极速草稿”把新 fast 基础增量置 0。
+ */
+export type RentalModeDraft = { custom: ModeDraft; fast: ModeDraft & { spreadDelta: string; legacyDiscounts: Readonly<Record<string, string>> | null } };
 
 const boundDraft = (b: RatioBound | undefined): BoundDraft => ({ base: b?.base ?? "C", value: b?.value ?? "" });
 
@@ -22,14 +26,21 @@ export function rentalModeDraft(haff: HaffV2): RentalModeDraft {
     custom: { enabled: m.custom.enabled, min: boundDraft(m.custom.min), max: boundDraft(m.custom.max) },
     fast: {
       enabled: m.fast.enabled, min: boundDraft(m.fast.min), max: boundDraft(m.fast.max), spreadDelta: lane?.spreadDelta ?? "",
-      discounts: Object.fromEntries(CUSTOMER_TIERS.map((t) => [t, lane?.discounts[t] ?? ""])),
+      legacyDiscounts: lane ? Object.freeze({ ...lane.discounts }) : null,
     },
   };
 }
 
+const zeroDiscounts = () => Object.freeze(Object.fromEntries(CUSTOMER_TIERS.map((t) => [t, "0"])));
+
+/** 非零旧档位增量（只读核对用）；空表示全部为 0 或无 fast lane。 */
+export function legacyNonZero(d: RentalModeDraft): string[] {
+  return Object.entries(d.fast.legacyDiscounts ?? {}).filter(([, v]) => !/^0(\.0+)?$/.test(String(v).trim())).map(([t, v]) => `${t}=${v}`);
+}
+
 /** 仅用于“新建极速草稿”：开启极速并填入 Owner 已定的 P=12、下限 C+6、无上限；新会员按统一总价折扣，档位增量全部为 0。 */
 export function withFastDefaults(draft: RentalModeDraft): RentalModeDraft {
-  return { ...draft, fast: { enabled: true, spreadDelta: FAST_DEFAULT_SPREAD, min: { ...FAST_DEFAULT_MIN }, max: { base: "C", value: "" }, discounts: Object.fromEntries(CUSTOMER_TIERS.map((t) => [t, "0"])) } };
+  return { ...draft, fast: { enabled: true, spreadDelta: FAST_DEFAULT_SPREAD, min: { ...FAST_DEFAULT_MIN }, max: { base: "C", value: "" }, legacyDiscounts: zeroDiscounts() } };
 }
 
 const SIGNED8 = /^-?(0|[1-9]\d*)(\.\d{1,8})?$/, UNSIGNED8 = /^(0|[1-9]\d*)(\.\d{1,8})?$/;
@@ -49,12 +60,7 @@ export function rentalModeIssues(d: RentalModeDraft): Record<string, string> {
   if (d.fast.enabled) {
     const p = d.fast.spreadDelta.trim();
     if (!UNSIGNED8.test(p)) e["fast.spreadDelta"] = "利润点须为非负数，最多八位小数";
-    for (const t of CUSTOMER_TIERS) {
-      const v = (d.fast.discounts[t] ?? "").trim();
-      if (!UNSIGNED8.test(v)) e[`fast.discounts.${t}`] = "须为非负数";
-      else if (t === "STANDARD" && Number(v) !== 0) e[`fast.discounts.${t}`] = "普通档须为 0";
-      else if (!e["fast.spreadDelta"] && Number(v) > Number(p)) e[`fast.discounts.${t}`] = "不能大于利润点";
-    }
+    // 旧档位增量不可编辑，此处不校验其数值；保留原值由服务端规则校验兜底。
   }
   return e;
 }
@@ -69,7 +75,8 @@ export function buildRentalModeRule(base: HaffV2, d: RentalModeDraft): HaffV2 {
     // 关闭时保留原界值内容（若有），只翻转启停，避免丢失可追溯的旧参数。
     : { ...orig, enabled: false };
   const fastLane = d.fast.enabled
-    ? { spreadDelta: d.fast.spreadDelta.trim(), discounts: Object.fromEntries(CUSTOMER_TIERS.map((t) => [t, d.fast.discounts[t]!.trim()])) }
+    // 原有 lane 增量原样保留（不静默清零）；无原 lane 时新 fast 基础增量全部为 0。
+    ? { spreadDelta: d.fast.spreadDelta.trim(), discounts: { ...(d.fast.legacyDiscounts ?? c.fast?.discounts ?? zeroDiscounts()) } }
     : c.fast;
   const { fast: _omit, ...rest } = c;
   return { ...base, compatibility: { ...rest, ...(fastLane ? { fast: fastLane } : {}), modes: { ordinary: c.modes.ordinary, custom: mode(c.modes.custom, d.custom), fast: mode(c.modes.fast, d.fast) } } };
