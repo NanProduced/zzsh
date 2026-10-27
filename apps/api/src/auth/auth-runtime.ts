@@ -1110,6 +1110,8 @@ export async function mountAuthHandlers(
     orderHoldSeconds,
     legacyDutyFinalizationReader: readLegacyDutyFinalization,
     supplyGateReader,
+    legacyPublicAdmission,
+    legacyPublicAdmissionDetail,
     settlementRecordingEnabled: options.testOperationsEnabled === true && process.env.ZZSH_SETTLEMENT_RECORDING === "controlled" && process.env.NODE_ENV !== "production",
     ...(orderImSdkRouteBindings ? { orderImSdkRouteBindings } : {}),
   };

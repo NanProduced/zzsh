@@ -3,7 +3,7 @@ import type { LegacyPublicAdmission, LegacyPublicAdmissionDetailIndex } from "..
 import type { PoolClient } from "pg";
 import type { EffectiveAdminAccess } from "../auth/admin-authorization";
 import { assertGameScopeUsable, gameScopeSignature, gameScopeSql, readAdminGameScope } from "../auth/admin-scope";
-import { queryAdminReadOrders } from "../order/admin-order-read";
+import { queryAdminReadOrders, type OrderAccountView } from "../order/admin-order-read";
 import { accountOccupancySql } from "../order/legacy-order-occupancy";
 import { readDirectoryUserSummaries } from "../auth/user-directory-summary";
 import { escapeLike } from "./catalog";
@@ -14,7 +14,7 @@ import { validateFundingPolicy, validateOwnerDepositDeclaration } from "./fundin
 import { decimalToBigInt, parseNonNegativeDecimal, yuanAmountObject } from "./decimal";
 import { DELTA_INFO_SOURCE_DICTIONARY, projectDeltaQuote } from "./delta-rental";
 import { projectTenantMoney } from "./tenant-price-projection";
-import { boundBaseRenterRatio, evaluatePublication, listingCandidatePage, listingDetail, listingPageShared, publicListingAttributes, publicListingBasis, publicListingMemo, readPublicListing, type ListingDetailPrefetch, type ListingPageShared, type ListingPublication, type ListingVersion, type PublishingAccount, type SupplyGate, type SupplyGateReader } from "./publishing";
+import { boundBaseRenterRatio, evaluatePublication, listingCandidatePage, listingDetail, listingPageShared, publicListingAttributes, readPublishingAccounts, publicListingBasis, publicListingMemo, readPublicListing, type ListingDetailPrefetch, type ListingPageShared, type ListingPublication, type ListingVersion, type PublishingAccount, type SupplyGate, type SupplyGateReader } from "./publishing";
 import { projectPublicAttributeDisplay, publicLoginMethodOptions } from "./listing-query";
 import { conflict, forbidden, invalid, notFound, sha256Hex } from "./supply-util";
 import { SecurityApiError } from "../auth/security-core";
@@ -420,6 +420,30 @@ function publicBasisListingSummary(publicBasis: Record<string, any>, facts: Reco
         fullPayout: payout === true ? "SELECTED" : payout === false ? "NOT_SELECTED" : "NOT_DECLARED",
         guarantee: { ...guaranteeRequirement(gate, guarantee?.policyRequirement ?? null), recordedProof: guarantee?.proof ?? null, eligibility: readiness },
     };
+}
+/** 订单页关联账号：与账号供给页默认展示同一公开版本；没有公开版本即不提供，不回退当前草稿或历史参考。 */
+export async function readOrderAccountViews(client: PoolClient, accountIds: string[], gate: SupplyGateReader, admission?: LegacyPublicAdmission, detailIndex?: LegacyPublicAdmissionDetailIndex): Promise<Map<string, OrderAccountView>> {
+    const result = new Map<string, OrderAccountView>();
+    const accounts = await readPublishingAccounts(client, accountIds);
+    for (const account of accounts.values()) {
+        let listing: Record<string, unknown>;
+        try { listing = await readPublicListing(client, account, gate, admission, false, "DETAIL", detailIndex); }
+        catch (error) { if ((error as { status?: number })?.status === 404) continue; throw error; }
+        const basis = publicListingBasis(listing) as Record<string, any> | null;
+        if (!basis || typeof basis.id !== "string") continue;
+        const s = publicBasisListingSummary(basis, { reasons: [] }, undefined, undefined, { accountCreatedAt: "", accountUpdatedAt: null, versionCreatedAt: null });
+        result.set(account.id, {
+            source: "ACCOUNT_PUBLIC_VERSION", versionId: basis.id,
+            haff: s.haff ? { itemId: String(s.haff.itemId ?? ""), quantity: s.haff.quantity } : null,
+            materials: s.materials, materialsVisibleTotal: s.materialsVisibleTotal,
+            safeBoxText: s.config.safeBox, gradingText: s.config.grading, loginMethodText: s.login.displayName,
+            term: { name: s.term.name, termSeconds: s.term.termSeconds, dailyConsumption: s.term.dailyConsumption },
+            fullPayout: s.fullPayout as OrderAccountView["fullPayout"],
+            haffRatioWanPerYuan: typeof s.quote?.baseRenterHaffRatioWanPerYuan === "string" ? s.quote.baseRenterHaffRatioWanPerYuan : null,
+            fees: { completeness: s.feeSummary.completeness, haffRental: s.feeSummary.haffRental, materials: s.feeSummary.materials, resourceTotal: s.feeSummary.resourceTotal, tenantDeposit: s.quote?.tenantDeposit ?? null, tenantPayableTotal: s.quote?.tenantPayableTotal ?? null, baseDepositCents: s.baseDeposit?.amountCents ?? null },
+        });
+    }
+    return result;
 }
 function listingSummary(detail: Record<string, any>, facts: Record<string, any>, guarantee: { policyRequirement: PolicyRequirement; proof: Record<string, string | boolean | null> | null } | undefined, gate: SupplyGate | undefined, termOption: { code: string; name: string; dailyConsumption: string | null } | null, rowFacts: {
     accountCreatedAt: string;

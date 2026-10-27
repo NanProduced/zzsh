@@ -5,7 +5,6 @@ import { gameScopeSql } from "../auth/admin-scope";
 import { projectOrder, centsToYuan, yuanToCents, type OrderRow } from "./order";
 import { orderAccountTitleFact } from "../supply/publishing";
 import { projectPublicAttributeDisplay } from "../supply/listing-query";
-import { loadLegacyHistoricalReads } from "../supply/legacy-listing-read";
 import { conflict, invalid, notFound } from "../supply/supply-util";
 import { escapeLike } from "../supply/catalog";
 import { legacyContinuationReady, legacyMoneyCents, legacyOrderReadState, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
@@ -36,8 +35,9 @@ const CONTINUATION_COMPLETED_AT = `COALESCE((SELECT created_at FROM zzsh_order.l
  *  numbers) and the record (the JSON projection the admin list returns). */
 const NATIVE_HEAD = `o.id,o.created_at,o.game_id,o.owner_user_id,o.renter_user_id,o.account_id,o.display_no,o.status`;
 const LEGACY_HEAD = `l.id,l.source_created_at,l.game_id,l.owner_user_id,l.renter_user_id,l.account_id,l.original_order_no`;
-const NATIVE_FILTER = `a.display_no AS account_no,NULL::text AS renter_no,NULL::text AS owner_no,ou.name AS owner_name,ru.name AS renter_name,ou.username AS owner_username,ru.username AS renter_username,'NATIVE'::text AS origin`;
-const LEGACY_FILTER = `l.legacy_account_no,l.legacy_renter_no,l.legacy_owner_no,ou.name,ru.name,ou.username,ru.username,'LEGACY'::text`;
+const NATIVE_FILTER = `a.display_no AS account_no,NULL::text AS renter_no,NULL::text AS owner_no,ou.name AS owner_name,ru.name AS renter_name,ou.username AS owner_username,ru.username AS renter_username,'NATIVE'::text AS origin,NULL::text AS legacy_account_no`;
+// 旧单迁入后账号即新平台账号：账号检索列用 ZZ 编号，旧编号单列仅供检索
+const LEGACY_FILTER = `a.display_no,l.legacy_renter_no,l.legacy_owner_no,ou.name,ru.name,ou.username,ru.username,'LEGACY'::text,l.legacy_account_no`;
 const NATIVE_RECORD = `to_jsonb(o)||jsonb_build_object('rental_amount_cents',o.rental_amount_cents::text,'deposit_amount_cents',o.deposit_amount_cents::text,
     'term_seconds',o.term_seconds::text,'revision',o.revision::text,'created_at',${utc('o.created_at')},'hold_until',${utc('o.hold_until')},'paid_at',${utc('o.paid_at')},'cancelled_at',${utc('o.cancelled_at')},
     'native_payment_record',(SELECT jsonb_build_object('id',p.id,'order_id',p.order_id,'source',p.source,'disposition',p.disposition,
@@ -46,12 +46,11 @@ const NATIVE_RECORD = `to_jsonb(o)||jsonb_build_object('rental_amount_cents',o.r
     'owner_name',ou.name,'renter_name',ru.name,'account_no',a.display_no,'expired',o.status='PENDING_PAYMENT' AND o.hold_until<=clock_timestamp(),
     'dispatch_state',g.provision_state,'wait_reason',g.wait_reason,'assigned_at',${utc('g.assigned_at')},'team_state',g.team_state,
     'first_response_at',to_jsonb(g)->>'first_response_at','remind_due_at',to_jsonb(g)->>'remind_due_at',
-    'add_round',COALESCE((to_jsonb(g)->>'add_round')::int,0),'escalation_state',COALESCE(to_jsonb(g)->>'escalation_state','NOT_STARTED'),
-    'current_account_title',(SELECT cv.title FROM zzsh_supply.listing_version cv WHERE cv.id=a.current_version_id AND cv.account_id=a.id))`;
+    'add_round',COALESCE((to_jsonb(g)->>'add_round')::int,0),'escalation_state',COALESCE(to_jsonb(g)->>'escalation_state','NOT_STARTED'))`;
 const LEGACY_RECORD = (continuationReady: boolean) => `to_jsonb(l)||jsonb_build_object('due_amount_cents',l.due_amount_cents::text,'recorded_paid_amount_cents',l.recorded_paid_amount_cents::text,'deposit_amount_cents',l.deposit_amount_cents::text,
     'source_created_at',${utc('l.source_created_at')},'source_paid_at',${utc('l.source_paid_at')},'source_cancelled_at',${utc('l.source_cancelled_at')},'source_completed_at',${utc(continuationReady ? CONTINUATION_COMPLETED_AT : "l.source_completed_at")},
     'continuation_stage',h.stage,
-    'owner_name',ou.name,'renter_name',ru.name,'current_account_title',v.title)`;
+    'owner_name',ou.name,'renter_name',ru.name,'account_no',a.display_no)`;
 
 /** Restricts one source branch to its own ids; the values are the caller's
  *  parameter placeholders, so the same relation serves the page read and the
@@ -209,15 +208,15 @@ export function projectAdminReadOrder(origin:string,r:Record<string,any>,viewer:
  if(origin==='NATIVE'){
   const row:OrderRow={id:r.id,displayNo:r.display_no,accountId:r.account_id,versionId:r.listing_version_id,ownerUserId:r.owner_user_id,renterUserId:r.renter_user_id,gameId:r.game_id,releaseId:r.rule_release_id,contentHash:r.content_hash,termOptionCode:r.term_option_code,status:r.status,rentalAmountCents:r.rental_amount_cents,depositAmountCents:r.deposit_amount_cents,currency:r.currency,termSeconds:r.term_seconds,quoteSnapshot:r.quote_snapshot,title:r.title,holdUntil:r.hold_until,paidAt:r.paid_at,dispatchState:r.dispatch_state,dispatchWaitReason:r.wait_reason,assignedAt:r.assigned_at,teamState:r.team_state,firstResponseAt:r.first_response_at??null,remindDueAt:r.remind_due_at??null,addRound:r.add_round??0,escalationState:r.escalation_state??'NOT_STARTED',cancelReason:r.cancel_reason,cancelledAt:r.cancelled_at,createdAt:r.created_at,revision:r.revision,expiredAwaitingCancel:r.expired,ownerName:r.owner_name,renterName:r.renter_name};
   const result=projectOrder(row,'admin',{internalQuote:viewer.internalQuote});const paid=['PAID','COMPLETED'].includes(r.status);
-  const titles = accountTitleFact(r.title, r.current_account_title, frozenQuoteSummary(r.quote_snapshot));
+  const titles = accountTitleFact(r.title, null, frozenQuoteSummary(r.quote_snapshot));
   const breakdown=nativePrepaymentBreakdown(r,result.amounts);
   return {...result,...titles,haffRatio:orderHaffRatio(r.quote_snapshot),prepaymentBreakdown:breakdown,prepaymentReconciliation:nativeReconciliation(breakdown),source:{origin:'NATIVE',ruleOrigin:'NATIVE_ORDER'},accountDisplayNo:r.account_no,payment:{state:paid?'RECORDED_PAID':'RECORDED_UNPAID',recordedAt:r.paid_at,recordedAmount:nativeRecordedAmount(r,viewer)}};
  }
  const raw=r.source_snapshot,paid=r.source_pay_status===1,unpaid=r.source_pay_status===0;
  const state=legacyOrderReadState(r.continuation_stage??r.source_order_status,r.source_pay_status),status=state.status;
  const goodsRead=legacyPrepaymentPart(raw.goods_money),itemsRead=legacyPrepaymentPart(raw.expend_pay_money),goods=goodsRead.cents,items=itemsRead.cents;
- const resources=legacyOrderResources(raw),titles = accountTitleFact(undefined, r.current_account_title, null);
- return {id:r.id,displayNo:r.original_order_no,status,title:titles.title,accountTitle:titles.accountTitle,accountId:r.account_id,accountDisplayNo:r.legacy_account_no,gameId:r.game_id,versionId:null,releaseId:null,contentHash:null,revision:'1',termOptionCode:null,termSeconds:null,
+ const resources=legacyOrderResources(raw),titles = accountTitleFact(undefined, null, null);
+ return {id:r.id,displayNo:r.original_order_no,status,title:titles.title,accountTitle:titles.accountTitle,accountId:r.account_id,accountDisplayNo:r.account_no??null,legacyAccountNo:r.legacy_account_no??null,gameId:r.game_id,versionId:null,releaseId:null,contentHash:null,revision:'1',termOptionCode:null,termSeconds:null,
   amounts:{rental:goods!==null&&items!==null?centsToYuan(BigInt(goods)+BigInt(items)):null,deposit:money(r.deposit_amount_cents),totalDue:money(r.due_amount_cents),currency:'CNY'},
   haffRatio:LEGACY_HAFF_RATIO,prepaymentBreakdown:legacyPrepaymentBreakdown(goodsRead,itemsRead),prepaymentReconciliation:legacyReconciliation(goodsRead,itemsRead,r.deposit_amount_cents,r.due_amount_cents),legacyResources:resources,
   createdAt:r.source_created_at,paidAt:r.source_paid_at,cancelledAt:r.source_cancelled_at,completedAt:r.source_completed_at,holdUntil:null,expiredAwaitingCancel:false,paymentOpen:false,cancelOpen:false,
@@ -309,11 +308,18 @@ async function readNativeOrderProgress(client:PoolClient,ids:string[]):Promise<M
  return result;
 }
 export type AdminOrderFrozenAccount={
- source:'ORDER_VERSION'|'LEGACY_ACCOUNT';
+ source:'ORDER_VERSION'|'ACCOUNT_PUBLIC_VERSION';
  haff:{itemId:string;code:string;name:string|null;quantity:string|null;unit:string}|null;
  materials:Array<{itemId:string;code:string;name:string|null;quantity:string|null;unit:string}>;
- termDays:string|null;termSeconds:string|null;loginMethodText:string|null;safeBoxText?:string|null;
+ termDays:string|null;termSeconds:string|null;loginMethodText:string|null;safeBoxText?:string|null;gradingText?:string|null;
 };
+/** 订单关联账号视图：与账号供给页同一公开版本口径（不读当前草稿、不读历史参考）；由路由注入，避免订单读与供给读循环依赖。 */
+export type OrderAccountView={source:'ACCOUNT_PUBLIC_VERSION';versionId:string;haff:{itemId:string;quantity:string|null}|null;
+ materials:Array<{itemId:string;code:string|null;name:string|null;quantity:string|null;unit:string|null}>;materialsVisibleTotal:number;
+ safeBoxText:string|null;gradingText:string|null;loginMethodText:string|null;term:{name:string|null;termSeconds:string|null;dailyConsumption:string|null};
+ fullPayout:'SELECTED'|'NOT_SELECTED'|'NOT_DECLARED';haffRatioWanPerYuan:string|null;
+ fees:{completeness:string;haffRental:unknown;materials:unknown;resourceTotal:unknown;tenantDeposit:unknown;tenantPayableTotal:unknown;baseDepositCents:string|null}};
+export type OrderAccountViewReader=(client:PoolClient,accountIds:string[])=>Promise<Map<string,OrderAccountView>>;
 type FrozenNativeRow={orderId:string;versionId:string|null;attributes:Record<string,unknown>|null;presentationItems:unknown;resources:Array<{itemId:string;code:string;quantity:string|null;unit:string}>;termSeconds:string|null};
 /** Native frozen account facts: the order table lives in zzsh_order, never zzsh_supply. */
 export const NATIVE_FROZEN_ACCOUNT_SQL=`SELECT /* admin-order-frozen-account */ wanted."orderId",v.id AS "versionId",v.attributes,v.presentation->'items' AS "presentationItems",
@@ -342,32 +348,33 @@ export async function readNativeFrozenAccounts(client:PoolClient,viewer:OrderRea
   const haff=resources.find(item=>item.unit==='HAFF_BASE')??null;
   const termSeconds=row.termSeconds;
   const termDays=termSeconds&&/^\d+$/.test(termSeconds)&&BigInt(termSeconds)%86400n===0n?(BigInt(termSeconds)/86400n).toString():null;
-  result.set(row.orderId,{source:'ORDER_VERSION',haff,materials:resources.filter(item=>item!==haff),termDays,termSeconds,loginMethodText:projectPublicAttributeDisplay(row.attributes??{}).loginMethod?.displayName??null,safeBoxText:projectPublicAttributeDisplay(row.attributes??{}).safeBox?.displayName??null});
+  result.set(row.orderId,{source:'ORDER_VERSION',haff,materials:resources.filter(item=>item!==haff),termDays,termSeconds,loginMethodText:projectPublicAttributeDisplay(row.attributes??{}).loginMethod?.displayName??null,safeBoxText:projectPublicAttributeDisplay(row.attributes??{}).safeBox?.displayName??null,gradingText:projectPublicAttributeDisplay(row.attributes??{}).grading?.displayName??null});
  }
  return result;
 }
-async function readLegacyFrozenAccounts(client:PoolClient,items:Record<string,any>[]):Promise<Map<string,AdminOrderFrozenAccount>>{
- const result=new Map<string,AdminOrderFrozenAccount>();
- const wanted=items.filter(item=>item.source?.origin==='LEGACY'&&typeof item.id==='string'&&typeof item.accountId==='string');
- if(!wanted.length)return result;
- const historical=await loadLegacyHistoricalReads(client,[...new Set(wanted.map(item=>item.accountId))]);
- for(const item of wanted){
-  const read=historical.get(item.accountId);
-  if(read?.display?.state!=='KNOWN'||!read.display.facts)continue;
-  const resources=read.display.facts.resources.map(resource=>({itemId:resource.code,code:resource.code,name:resource.name??null,quantity:resource.quantity??null,unit:resource.unit}));
-  const haff=resources.find(resource=>resource.unit==='HAFF_BASE')??null;
-  result.set(item.id,{source:'LEGACY_ACCOUNT',haff,materials:resources.filter(resource=>resource!==haff),termDays:read.historicalQuote.termDays??null,termSeconds:null,loginMethodText:read.display.facts.attributeDisplay.loginMethod?.displayName??null,safeBoxText:read.display.facts.attributeDisplay.safeBox?.displayName??null});
- }
- return result;
+/** 迁入单：账号即账号，账号资料取公开版本（与账号页一致）；租期用账号当前租期，不再读历史快照。 */
+export function accountViewFrozen(view:OrderAccountView):AdminOrderFrozenAccount{
+ const seconds=view.term.termSeconds,termDays=seconds&&/^\d+$/.test(seconds)&&BigInt(seconds)%86400n===0n?(BigInt(seconds)/86400n).toString():null;
+ return {source:'ACCOUNT_PUBLIC_VERSION',haff:view.haff?{itemId:view.haff.itemId,code:view.haff.itemId,name:'哈夫币',quantity:view.haff.quantity,unit:'HAFF_BASE'}:null,
+  materials:view.materials.map(m=>({itemId:m.itemId,code:m.code??m.itemId,name:m.name,quantity:m.quantity,unit:m.unit??''})),termDays,termSeconds:seconds,loginMethodText:view.loginMethodText,safeBoxText:view.safeBoxText,gradingText:view.gradingText};
 }
-async function attachFrozenAccounts(client:PoolClient,viewer:OrderReadViewer,items:Record<string,any>[]){
+async function attachFrozenAccounts(client:PoolClient,viewer:OrderReadViewer,items:Record<string,any>[],accountViews?:OrderAccountViewReader){
  if(!(viewer.isBoss||viewer.permissions?.has("supply.rental_account.read")))return;
- const native=await readNativeFrozenAccounts(client,viewer,items),legacy=await readLegacyFrozenAccounts(client,items);
- for(const item of items){const summary=item.source?.origin==='NATIVE'?native.get(item.id):legacy.get(item.id);if(summary)item.frozenAccount=summary;}
+ const native=await readNativeFrozenAccounts(client,viewer,items);
+ const ids=[...new Set(items.map(item=>item.accountId).filter((id):id is string=>typeof id==='string'))];
+ const views=accountViews&&ids.length?await accountViews(client,ids):new Map<string,OrderAccountView>();
+ for(const item of items){
+  const view=views.get(item.accountId);if(view)item.accountView=view;
+  if(item.source?.origin==='NATIVE'){const summary=native.get(item.id);if(summary)item.frozenAccount=summary;continue;}
+  if(!view)continue;
+  item.frozenAccount=accountViewFrozen(view);
+  // 旧单原单无比例：用账号公开比例并标明来源；账号也无则保持未知
+  if(item.haffRatio?.state!=='KNOWN'&&view.haffRatioWanPerYuan)item.haffRatio={source:'ACCOUNT_PUBLIC_VERSION',state:'KNOWN',wanPerYuan:view.haffRatioWanPerYuan,customerTier:null};
+ }
 }
 function summaryOf(summaries:Map<string,DirectoryUserSummary>,id:unknown){return typeof id==='string'?summaries.get(id):undefined;}
 /** Page-selected ids only: one progress read for native rows and one directory summary read for both parties. */
-async function attachAdminOrderExtras(client:PoolClient,items:Record<string,any>[],viewer:OrderReadViewer){
+async function attachAdminOrderExtras(client:PoolClient,items:Record<string,any>[],viewer:OrderReadViewer,accountViews?:OrderAccountViewReader){
  const progress=await readNativeOrderProgress(client,items.filter(item=>item.source?.origin==='NATIVE').map(item=>item.id));
  const summaries=await readDirectoryUserSummaries(client,items.flatMap(item=>[item.ownerUserId,item.renterUserId]).filter((id):id is string=>typeof id==='string'),viewer.permissions,viewer.permissions?{adminId:viewer.adminId,isBoss:viewer.isBoss,membershipSummaryRead:viewer.permissions.has('membership.growth.read.summary'),creditRead:viewer.permissions.has('credit.read')}:undefined);
  for(const item of items){
@@ -375,7 +382,7 @@ async function attachAdminOrderExtras(client:PoolClient,items:Record<string,any>
   const owner=summaryOf(summaries,item.ownerUserId),renter=summaryOf(summaries,item.renterUserId);
   if(owner)item.ownerSummary=owner;if(renter)item.renterSummary=renter;
  }
- await attachFrozenAccounts(client,viewer,items);
+ await attachFrozenAccounts(client,viewer,items,accountViews);
 }
 /** 列表轻量视图：仅在显式 view=list 时截断冻结物资数组并给出精确总数；默认形状不变，详情始终完整。 */
 export const LIST_MATERIALS_LIMIT=3;
@@ -385,13 +392,13 @@ function slimListItem(item:Record<string,any>){
  const total=frozen.materials.length;
  item.frozenAccount={...frozen,materials:frozen.materials.slice(0,LIST_MATERIALS_LIMIT),materialsTotal:total,materialsTruncated:total>LIST_MATERIALS_LIMIT};
 }
-export async function queryAdminReadOrders(client:PoolClient,viewer:OrderReadViewer,filter:OrderReadFilters){
+export async function queryAdminReadOrders(client:PoolClient,viewer:OrderReadViewer,filter:OrderReadFilters,accountViews?:OrderAccountViewReader){
  if(filter.restoreKey&&filter.restoreKey!==viewer.authorizationKey)throw conflict('Authorization context changed');
  const values:unknown[]=[viewer.isBoss,viewer.adminId],where=[gameScopeSql("x.game_id","$2","$1")];
  const exact=(field:string,value:string|undefined)=>{if(value!==undefined)where.push(`${field}=$${values.push(value)}`);};
  exact('x.status',filter.status);exact('x.origin',filter.origin);exact('x.display_no',filter.displayNo);exact('x.account_id',filter.accountId);exact('x.renter_user_id',filter.renterUserId);exact('x.owner_user_id',filter.ownerUserId);
  if(filter.createdFrom)where.push(`x.created_at>=$${values.push(filter.createdFrom)}::timestamptz`);if(filter.createdTo)where.push(`x.created_at<$${values.push(filter.createdTo)}::timestamptz`);
- if(filter.qValue){const q=filter.qValue,p='$'+values.push(q);if(filter.qKind==='order')where.push(`x.display_no=${p}`);else if(filter.qKind==='account')where.push(`x.account_no=${p} OR x.account_id=${p}`);else{
+ if(filter.qValue){const q=filter.qValue,p='$'+values.push(q);if(filter.qKind==='order')where.push(`x.display_no=${p}`);else if(filter.qKind==='account')where.push(`x.account_no=${p} OR x.account_id=${p} OR x.legacy_account_no=${p}`);else{
   if(/^(?:\+?86[\s-]*)?1[3-9](?:[\s-]*\d){9}$/.test(q))throw invalid('Phone lookup must use the user lookup contract');
   const pattern='$'+values.push('%'+escapeLike(q)+'%'),party=(role:string)=>`(x.${role}_user_id=${p} OR x.${role}_no=${p} OR x.${role}_name ILIKE ${pattern} ESCAPE '\\' OR x.${role}_username ILIKE ${pattern} ESCAPE '\\')`;
   where.push(filter.qKind==='renter'?party('renter'):filter.qKind==='owner'?party('owner'):`(${party('renter')} OR ${party('owner')})`);
@@ -414,16 +421,16 @@ export async function queryAdminReadOrders(client:PoolClient,viewer:OrderReadVie
    items.push(projectAdminReadOrder(key.origin,record,viewer));
   }
  }
- await attachAdminOrderExtras(client,items,viewer);
+ await attachAdminOrderExtras(client,items,viewer,accountViews);
  if(filter.view==='list')for(const item of items)slimListItem(item);
  return {items,page:filter.page,pageSize:filter.pageSize,total:Number(page.total),contextKey:viewer.authorizationKey};
 }
-export async function getAdminReadOrder(client:PoolClient,viewer:OrderReadViewer,id:string,paymentReadOptions?:ChannelPaymentReadOptions){
+export async function getAdminReadOrder(client:PoolClient,viewer:OrderReadViewer,id:string,paymentReadOptions?:ChannelPaymentReadOptions,accountViews?:OrderAccountViewReader){
  const relation=orderReadRelation(await legacyContinuationReady(client),false,{nativeIds:'$1',legacyIds:'$1'});
  const row=(await client.query<{origin:string;record:Record<string,any>}>(`WITH all_orders AS(${relation}) SELECT x.origin,x.record FROM all_orders x WHERE x.id=ANY($1::text[]) AND ${gameScopeSql("x.game_id","$3","$2")}`,[[id],viewer.isBoss,viewer.adminId])).rows[0];
  if(!row)throw notFound();
  const order=projectAdminReadOrder(row.origin,row.record,viewer);
- await attachAdminOrderExtras(client,[order],viewer);
+ await attachAdminOrderExtras(client,[order],viewer,accountViews);
  const paymentSummary=await readOrderPaymentSummary(client,{orderId:id,origin:row.origin==="NATIVE"?"NATIVE":"LEGACY",financeReadable:viewer.financeReadable===true},paymentReadOptions);
  const refundSummary=await readAdminOrderRefundSummary(client,{orderId:id,origin:row.origin==='NATIVE'?'NATIVE':'LEGACY',financeReadable:viewer.financeReadable===true});
  return {order,contextKey:viewer.authorizationKey,paymentSummary,refundSummary};

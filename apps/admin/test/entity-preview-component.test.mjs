@@ -407,8 +407,8 @@ test('account preview keeps meaningful historical provenance but suppresses an o
   t.after(async () => { await act(async () => root.unmount()); container.remove(); });
   await act(async () => root.render(createElement(AccountPreviewCard, { displayNo: 'SYNTHETIC', sourceText: '新平台订单' })));
   assert.doesNotMatch(container.textContent, /资料来源|新平台订单|基础押金/);
-  await act(async () => root.render(createElement(AccountPreviewCard, { displayNo: 'SYNTHETIC', sourceText: '历史账号参考' })));
-  assert.match(container.textContent, /历史账号参考/); assert.doesNotMatch(container.textContent, /本单冻结版本/);
+  await act(async () => root.render(createElement(AccountPreviewCard, { displayNo: 'SYNTHETIC', sourceText: '账号资料' })));
+  assert.match(container.textContent, /账号资料/); assert.doesNotMatch(container.textContent, /本单冻结版本/);
 });
 
 test('OwnerHoverCard in supply view prevents event bubbling to row drawer', async (t) => {
@@ -564,9 +564,9 @@ test('the real supply session boundary unmounts previews without changing the bu
 test('CLARITY-02 AccountPreviewCard: legacy badge hides old number; price block precedes basic info', async (t) => {
   const container = document.createElement('div'); document.body.appendChild(container);
   const root = createRoot(container); t.after(() => { act(() => root.unmount()); container.remove(); });
-  await act(async () => root.render(createElement(AccountPreviewCard, { displayNo: null, legacy: true, priceTitle: '旧单原单金额', priceRows: [['哈夫币比例', '旧单未记录比例'], ['押金', '未知']], loginMethodText: '微信扫码', safeBoxText: '6格' })));
+  await act(async () => root.render(createElement(AccountPreviewCard, { displayNo: 'ZZ20261018000116', legacy: true, priceTitle: '原单金额', priceRows: [['哈夫币比例', '账号比例 1元=52万哈夫币'], ['押金', '未知']], loginMethodText: '微信扫码', safeBoxText: '6格' })));
   const text = container.textContent;
-  assert.match(text, /旧平台账号/); assert.match(text, /旧平台/);
+  assert.match(text, /ZZ20261018000116/); assert.match(text, /旧平台迁入/); assert.doesNotMatch(text, /旧平台账号/);
   assert.doesNotMatch(text, /账号编号待核/);
   assert.ok(text.indexOf('哈夫币比例') < text.indexOf('上号方式'), '价格块在基础信息前');
   assert.ok(text.indexOf('上号方式') < text.indexOf('安全箱'));

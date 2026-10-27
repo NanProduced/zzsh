@@ -394,9 +394,9 @@ test('master: order detail separates lack of permission, unknown parts and verif
   const props={...chainProps('clarity-native'),objectOnly:true,initialOrderId:value.id};
   await act(async()=>root.render(createElement(AdminOrderChainView,props)));await until(()=>node.textContent.includes('CLARITY-NATIVE'));
   assert.match(node.textContent,/无权查看/);assert.match(node.textContent,/哈夫租金未知（依据未提供）/);assert.match(node.textContent,/物资预付未知（依据未提供）/);
-  value={...value,id:'clarity-legacy',displayNo:'CLARITY-LEGACY',source:{origin:'LEGACY',statusLabel:'已取消'},payment:{state:'RECORDED_UNPAID',recordedAt:null,recordedAmount:null},prepaymentReconciliation:{state:'MISMATCH',arithmetic:'MISMATCH',closed:false},legacyResources:{state:'KNOWN',source:'LEGACY_ORIGINAL_ORDER',items:[{code:'x',name:'原单物资',quantity:'4',unit:null,zero:false}]},frozenAccount:{source:'LEGACY_ACCOUNT',haff:null,materials:[],termDays:null,termSeconds:null,loginMethodText:null}};
+  value={...value,id:'clarity-legacy',displayNo:'CLARITY-LEGACY',source:{origin:'LEGACY',statusLabel:'已取消'},payment:{state:'RECORDED_UNPAID',recordedAt:null,recordedAmount:null},prepaymentReconciliation:{state:'MISMATCH',arithmetic:'MISMATCH',closed:false},legacyResources:{state:'KNOWN',source:'LEGACY_ORIGINAL_ORDER',items:[{code:'x',name:'原单物资',quantity:'4',unit:null,zero:false}]},frozenAccount:{source:'ACCOUNT_PUBLIC_VERSION',haff:null,materials:[],termDays:null,termSeconds:null,loginMethodText:null}};
   await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('clarity-legacy'),objectOnly:true,initialOrderId:value.id})));await until(()=>node.textContent.includes('CLARITY-LEGACY'));
-  assert.match(node.textContent,/历史账号参考（非本单冻结）/);assert.match(node.textContent,/原单物资 4（单位未记录）/);
+  assert.match(node.textContent,/账号资料（与账号页一致）/);assert.doesNotMatch(node.textContent,/历史账号|旧单资源数量/);
   assert.match(node.textContent,/原单记录，合计尚未核对/);assert.match(node.textContent,/完整构成仍待核对/);assert.match(node.textContent,/未记录付款/);assert.doesNotMatch(node.textContent,/本单冻结账号摘要 · 历史/);
 });
 test('first, refresh and page read errors remain failures; expired restore context rereads page one', async t => {
@@ -477,18 +477,21 @@ test('frozen account summary is displayed from the existing order payload withou
 
 test('legacy frozen account is a historical reference, not an order-frozen inventory or actual term', async t => {
   const {root,node,AdminOrderChainView}=await setup(t);
-  const value={...chainOrder,frozenAccount:{source:'LEGACY_ACCOUNT',haff:{code:'haff',name:'哈夫币',quantity:'97000000',unit:'HAFF_BASE'},materials:[],termDays:'10',termSeconds:null,loginMethodText:'微信扫码'}};
+  const value={...chainOrder,haffRatio:{source:'ACCOUNT_PUBLIC_VERSION',state:'KNOWN',wanPerYuan:'52',customerTier:null},frozenAccount:{source:'ACCOUNT_PUBLIC_VERSION',haff:{code:'haff',name:'哈夫币',quantity:'51000000',unit:'HAFF_BASE'},materials:[],termDays:'6',termSeconds:'518400',loginMethodText:'QQ账密',safeBoxText:'基础安全箱(1*2)',gradingText:'黄金'}};
   globalThis.fetch=async()=>response(chainPage([value]));
   await act(async()=>root.render(createElement(AdminOrderChainView,chainProps('legacy-frozen'))));
   await until(()=>node.textContent.includes(value.displayNo));
-  assert.match(node.textContent,/历史账号参考：/);
-  assert.match(node.textContent,/历史账号租期 10 天/);
+  // 迁入单：账号即账号，标题由基础信息拼接，比例标明来自账号，不出现历史/草稿字样
+  assert.match(node.textContent,/51 M 哈夫币 · 基础安全箱\(1\*2\) · 黄金/);
+  assert.match(node.textContent,/账号资料：/);assert.match(node.textContent,/6 天/);
+  assert.match(node.textContent,/账号比例 1元=52万哈夫币/);
+  assert.doesNotMatch(node.textContent,/历史账号|旧单未记录比例|草稿|不是本单原标题|未留名用户/);
   assert.equal(node.textContent.includes('本单冻结：'),false,'legacy account facts are not called the order-frozen inventory');
   globalThis.fetch=async()=>response({order:value});
   await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('legacy-frozen-detail'),objectOnly:true,initialOrderId:value.id})));
   await until(()=>node.textContent.includes('关键费用'));
-  assert.match(node.textContent,/历史账号参考（非本单冻结）/);
-  assert.match(node.textContent,/历史账号租期 10 天/);
+  assert.match(node.textContent,/账号资料（与账号页一致）/);
+  assert.match(node.textContent,/6 天/);
 });
 
 test('CHAIN order detail orders identity, frozen parties, prepay/channel, fulfillment, settlement and funds evidence once', async t => {
@@ -548,7 +551,7 @@ test('legacy resource export reuses the canonical detail and preserves exact use
 test('order account labels distinguish legacy source numbers in lists, detail and related resource tabs', async t => {
   const {root,node,AdminOrderChainView,AdminResourceReadView}=await setup(t),opened=[];
   const cases=[
-    {value:'0000123',expected:'旧来源号 0000123'},
+    {value:'ZZ20261018000116',expected:'账号 ZZ20261018000116'},
     {value:'ZZ20261018000001',expected:'账号 ZZ20261018000001',origin:'NATIVE'},
     {value:'AC9000000000002',expected:'账号 AC9000000000002'},
     {value:null,expected:'账号编号待核'},
@@ -558,15 +561,15 @@ test('order account labels distinguish legacy source numbers in lists, detail an
   const props={...chainProps('number-list'),snapshot:{...snapshotFor('number-list'),permissions:['order.read','user.directory.read','supply.rental_account.read']},onOpenPath:(path,title)=>opened.push({path,title})};
   globalThis.fetch=async()=>response(chainPage(items,{total:items.length}));
   await act(async()=>root.render(createElement(AdminOrderChainView,props)));await until(()=>node.querySelectorAll('.oc-table tbody tr').length===items.length);
-  // CLARITY-02：列表不展示旧平台编号，改为“旧平台账号”+“旧平台”标记；详情/标签页仍保留旧来源号
-  const listText=c=>c.expected.startsWith('旧来源号')?'旧平台账号':c.expected.replace(/^账号 /, '');
+  // 迁入账号即新平台账号：列表展示 ZZ 编号 +“旧平台迁入”小标记
+  const listText=c=>c.expected.replace(/^账号 /, '');
   cases.forEach((c,i)=>assert(node.querySelectorAll('.oc-table tbody tr')[i].textContent.includes(listText(c)),c.expected));
   assert.equal(node.querySelector('.oc-table tbody tr').textContent.includes('0000123'),false,'列表行不出现旧编号');
-  assert(node.querySelector('.oc-table tbody tr .oc-badge-legacy'),'旧平台标记');
-  assert.deepEqual([...node.querySelectorAll('.oc-table tbody tr')[0].querySelectorAll('.oc-party-role')].map(e=>e.textContent),['历史租客','历史号主']);
+  assert.equal(node.querySelector('.oc-table tbody tr .oc-badge-legacy').textContent,'旧平台迁入');
+  assert.deepEqual([...node.querySelectorAll('.oc-table tbody tr')[0].querySelectorAll('.oc-party-role')].map(e=>e.textContent),['租客','号主']);
   assert.deepEqual([...node.querySelectorAll('.oc-table tbody tr')[1].querySelectorAll('.oc-party-role')].map(e=>e.textContent),['租客','号主']);
   assert.equal(node.querySelector('.oc-table').textContent.includes('账号 0000123'),false);
-  await act(async()=>[...node.querySelectorAll('.oc-table tbody tr button')].find(b=>b.textContent==='旧平台账号').click());
+  await act(async()=>[...node.querySelectorAll('.oc-table tbody tr button')].find(b=>b.textContent==='ZZ20261018000116').click());
   assert.equal(opened.at(-1).title,cases[0].expected);assert.equal(opened.at(-1).path,`/supply/reviews/${items[0].accountId}?fromOrderId=${items[0].id}`);
   globalThis.fetch=async()=>response({order:items[0]});
   await act(async()=>root.render(createElement(AdminOrderChainView,{...props,objectOnly:true,initialOrderId:items[0].id})));await until(()=>node.textContent.includes('本单账号和双方'));
@@ -595,15 +598,16 @@ test('current account links require supply reading and keep the order frozen ver
   assert.equal(requests.every(url=>!url.includes('/supply/')),true,'opening a current account never rereads or replaces frozen order facts');
 });
 
-test('order party history labels follow order origin for both renter and owner', async t => {
+test('order party labels and real names are identical for migrated and native orders', async t => {
   const {root,node,AdminOrderChainView}=await setup(t);
   for(const origin of ['LEGACY','NATIVE']){
     const item={...chainOrder,id:'party-'+origin,displayNo:'ORDER-PARTY-'+origin,source:{origin}};
     globalThis.fetch=async url=>String(url).includes('readMode=combined')?response({order:item}):response({error:{code:'NOT_FOUND'}},404);
     await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('party-'+origin),objectOnly:true,initialOrderId:item.id})));await until(()=>node.textContent.includes(item.displayNo)&&node.textContent.includes('本单账号和双方'));
-    const labels=[...node.querySelectorAll('.oc-related-person small')].map(e=>e.textContent),prefix=origin==='LEGACY'?'历史':'';
+    const labels=[...node.querySelectorAll('.oc-related-person small')].map(e=>e.textContent),prefix='';
     assert(labels.includes(prefix+'租客 · 编号 U-RENTER'));assert(labels.includes(prefix+'号主 · 编号 U-OWNER'));
-    if(origin==='NATIVE')assert(labels.every(label=>!label.includes('历史租客')&&!label.includes('历史号主')));
+    assert(labels.every(label=>!label.includes('历史租客')&&!label.includes('历史号主')));
+    assert.doesNotMatch(node.querySelector('.oc-related').textContent,/未留名用户/);
   }
 });
 

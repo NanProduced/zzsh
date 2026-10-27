@@ -1,7 +1,7 @@
 import {test} from "node:test";
 import assert from "node:assert/strict";
 import type {PoolClient} from "pg";
-import {getAdminReadOrder,projectAdminReadOrder,queryAdminReadOrders,orderReadRelation,orderReadKeyRelation,parseOrderOrigin,readNativeFrozenAccounts,NATIVE_FROZEN_ACCOUNT_SQL,legacyOrderResources,orderHaffRatio,LIST_MATERIALS_LIMIT} from "../src/order/admin-order-read";
+import {getAdminReadOrder,projectAdminReadOrder,queryAdminReadOrders,orderReadRelation,orderReadKeyRelation,parseOrderOrigin,readNativeFrozenAccounts,NATIVE_FROZEN_ACCOUNT_SQL,legacyOrderResources,orderHaffRatio,LIST_MATERIALS_LIMIT,accountViewFrozen} from "../src/order/admin-order-read";
 import {LEGACY_ORDER_STATUS_SQL} from "../src/order/legacy-order-read";
 import {parseAdminOrderPageQuery} from "../src/order/order-routes";
 const viewer={adminId:"test-reader",isBoss:false,internalQuote:false,authorizationKey:"a".repeat(64)};
@@ -709,4 +709,13 @@ test('clarity-02: 本单兑换比例只取冻结报价 denominators.buyer，缺�
  assert.equal(orderHaffRatio({lines:[{unit:'PIECE'}],pricingInputs:{denominators:{buyer:'1'}}}).state,'UNKNOWN','无哈夫行不给比例');
  assert.deepEqual(orderHaffRatio(null),{source:'ORDER_QUOTE_SNAPSHOT',state:'UNKNOWN',wanPerYuan:null,customerTier:null},'档位缺失不默认 STANDARD');
  assert.equal(orderHaffRatio({lines,personal:{membership:{tier:'SVIP'}},pricingInputs:{denominators:{buyer:'1'}}}).customerTier,'SVIP');
+});
+
+test('迁入单以账号为准：ZZ 编号、真实名称、无草稿标题；账号视图按公开版本投影', () => {
+ const row=projectAdminReadOrder('LEGACY',{...record,account_no:'ZZ20261018000116',current_account_title:'本地联验草稿'},viewer);
+ assert.equal(row.accountDisplayNo,'ZZ20261018000116');assert.equal(row.legacyAccountNo,'A1');
+ assert.equal(row.ownerName,'Owner');assert.equal(row.title,null,'旧单不借用账号当前版本标题');
+ assert.equal(JSON.stringify(row).includes('本地联验草稿'),false);
+ const frozen=accountViewFrozen({source:'ACCOUNT_PUBLIC_VERSION',versionId:'v1',haff:{itemId:'haff',quantity:'51000000'},materials:[{itemId:'m',code:'awm',name:'AWM子弹',quantity:'10',unit:'ROUND'}],materialsVisibleTotal:1,safeBoxText:'基础安全箱(1*2)',gradingText:'黄金',loginMethodText:'QQ账密',term:{name:'6天',termSeconds:'518400',dailyConsumption:'10000000'},fullPayout:'NOT_SELECTED',haffRatioWanPerYuan:'52',fees:{completeness:'COMPLETE',haffRental:null,materials:null,resourceTotal:null,tenantDeposit:null,tenantPayableTotal:null,baseDepositCents:null}});
+ assert.equal(frozen.source,'ACCOUNT_PUBLIC_VERSION');assert.equal(frozen.termDays,'6');assert.equal(frozen.haff?.quantity,'51000000');assert.equal(frozen.gradingText,'黄金');assert.equal(frozen.materials[0]!.name,'AWM子弹');
 });

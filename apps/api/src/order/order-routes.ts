@@ -16,6 +16,9 @@ import { withTransaction } from "../auth/security-core";
 import { ensureApiV1RequestId } from "../contracts/api-v1";
 import { humanText } from "../supply/content-hash";
 import { unknownSupplyGate, type SupplyGateReader } from "../supply/publishing";
+import { readOrderAccountViews } from "../supply/admin-supervision-read";
+import type { LegacyPublicAdmission, LegacyPublicAdmissionDetailIndex } from "../legacy-load/legacy-public-admission";
+import type { OrderAccountViewReader } from "./admin-order-read";
 import {
   assertGameScope,
   bodyOf,
@@ -52,12 +55,17 @@ import {
   type OrderStatus,
 } from "./order";
 
+/** 订单读注入账号视图读取：同一事务快照内按账号页口径读公开版本 */
+const orderAccountViews=(options:OrderRuntimeOptions):OrderAccountViewReader=>(client,ids)=>readOrderAccountViews(client,ids,options.supplyGateReader??unknownSupplyGate,options.legacyPublicAdmission,options.legacyPublicAdmissionDetail);
 export type OrderRuntimeOptions = AuthSecurityOptions & {
   channelPaymentReadOptions?: ChannelPaymentReadOptions;
   distributionEarnings?: DistributionEarningStore;
   legacyDutyFinalizationReader?: LegacyDutyFinalizationReader;
   orderHoldSeconds?: number;
   supplyGateReader?: SupplyGateReader;
+  /** 订单关联账号与账号页同一公开口径所需的旧平台准入（可缺省） */
+  legacyPublicAdmission?: LegacyPublicAdmission;
+  legacyPublicAdmissionDetail?: LegacyPublicAdmissionDetailIndex;
   orderImSdkRouteBindings?: OrderImSdkRouteBindings;
   /** Explicit controlled-test switch. Production leaves it unset. */
   settlementRecordingEnabled?: boolean;
@@ -305,7 +313,7 @@ export async function handleOrderAdminRoute(
       };
       if (path === "/") {
         if (query.has("page")) {
-          sendJson(response,200,await queryAdminReadOrders(client,admin,parseAdminOrderPageQuery(query)),requestId);return;
+          sendJson(response,200,await queryAdminReadOrders(client,admin,parseAdminOrderPageQuery(query),orderAccountViews(options)),requestId);return;
         }
         const status = parseStatus(query.get("status"));
         const accountIdRaw = query.get("accountId");
@@ -335,7 +343,7 @@ export async function handleOrderAdminRoute(
       }
       const detailMatch = /^\/([A-Za-z0-9._:-]+)$/.exec(path);
       if (!detailMatch) throw notFound();
-      if(detailMatch[1]!.startsWith("legacy_order_")||query.get("readMode")==="combined") {sendJson(response,200,await getAdminReadOrder(client,admin,decodeId(detailMatch[1]!),options.channelPaymentReadOptions),requestId);return;}
+      if(detailMatch[1]!.startsWith("legacy_order_")||query.get("readMode")==="combined") {sendJson(response,200,await getAdminReadOrder(client,admin,decodeId(detailMatch[1]!),options.channelPaymentReadOptions,orderAccountViews(options)),requestId);return;}
       const orderId=decodeId(detailMatch[1]!);
       const data = await getAdminOrder(client, admin, orderId, assertGameScope);
       const paymentSummary=await readOrderPaymentSummary(client,{orderId,origin:"NATIVE",financeReadable:admin.financeReadable},options.channelPaymentReadOptions);

@@ -18,7 +18,7 @@ export interface AccountPreviewProps {
   depositText?: string | null;
   depositLabel?: string;
   sourceText?: string | null;
-  /** 旧平台账号：不展示旧编号，只显示“旧平台”标记 */
+  /** 旧平台迁入账号：照常展示 ZZ 账号编号，仅加“旧平台迁入”小标记 */
   legacy?: boolean;
   /** 价格块（置于基础信息之前）；值由调用方给出，未知须写明，不得补 0 */
   priceTitle?: string;
@@ -63,7 +63,7 @@ export function AccountPreviewCard({
   openLabel = '查看账号详情',
   deniedReason = '无查看权限',
 }: AccountPreviewProps) {
-  const numberText = legacy ? '旧平台账号' : displayNo?.trim() || '账号编号待核';
+  const numberText = displayNo?.trim() || '账号编号待核';
   const provenance = sourceText?.trim();
   const showProvenance = provenance && !['新平台订单', '旧平台订单'].includes(provenance);
   // 基础信息顺序：上号方式、安全箱优先
@@ -79,8 +79,8 @@ export function AccountPreviewCard({
           <span className="font-semibold text-sm font-mono text-foreground break-all" title={numberText}>
             {numberText}
           </span>
-          {!legacy && (displayNo || accountId) && <PreviewCopyButton value={displayNo || accountId || ''} tooltip={displayNo ? '复制账号编号' : '复制账号 ID'} />}
-          {legacy && <Badge variant="outline" className="text-[10px] h-4.5 px-1.5 py-0 font-normal shrink-0">旧平台</Badge>}
+          {(displayNo || accountId) && <PreviewCopyButton value={displayNo || accountId || ''} tooltip={displayNo ? '复制账号编号' : '复制账号 ID'} />}
+          {legacy && <Badge variant="outline" className="text-[10px] h-4.5 px-1.5 py-0 font-normal shrink-0">旧平台迁入</Badge>}
           {tag && (
             <Badge variant="secondary" className="text-[10px] h-4.5 px-1.5 py-0 font-normal shrink-0">
               {tag}
