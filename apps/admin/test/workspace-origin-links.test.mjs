@@ -408,7 +408,7 @@ test('finance to order and title refresh retain original business filters and re
   const button=[...h.container.querySelectorAll('button')].find(button=>button.textContent.trim()==='返回来源资金');await click(button);assert.equal(h.opened.at(-1).path,source);
 });
 test('order funds entry uses source-qualified root and returns to the same order',async t=>{
-  const {financeOriginPath}=await vite.ssrLoadModule('/src/views/admin-finance-view.tsx');const snap=snapshot(['order.read','finance.document.read']);
+  const {financeOriginPath}=await vite.ssrLoadModule('/src/views/admin-finance-view.tsx');const snap=snapshot(['order.read','finance.read']);
   const h=await mount(t,orderTab({}),snap);await waitFor(()=>h.container.textContent.includes('TEST-1003'));
   await click([...h.container.querySelectorAll('button')].find(button=>button.textContent.includes('查看资金凭证')));
   const target=new URL(h.opened.at(-1).path,browser.location.href);assert.equal(decodeURIComponent(target.pathname),'/finance/documents/LEGACY_ORDER:order_cancel');assert.equal(financeOriginPath(target.searchParams.get('origin'),snap),'/orders/order_cancel');

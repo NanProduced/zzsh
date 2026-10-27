@@ -221,9 +221,9 @@ export function projectAdminReadOrder(origin:string,r:Record<string,any>,viewer:
   haffRatio:LEGACY_HAFF_RATIO,prepaymentBreakdown:legacyPrepaymentBreakdown(goodsRead,itemsRead),prepaymentReconciliation:legacyReconciliation(goodsRead,itemsRead,r.deposit_amount_cents,r.due_amount_cents),legacyResources:resources,
   createdAt:r.source_created_at,paidAt:r.source_paid_at,cancelledAt:r.source_cancelled_at,completedAt:r.source_completed_at,holdUntil:null,expiredAwaitingCancel:false,paymentOpen:false,cancelOpen:false,
   ownerUserId:r.owner_user_id,renterUserId:r.renter_user_id,ownerName:r.owner_name,renterName:r.renter_name,ownerBusinessNo:r.legacy_owner_no,renterBusinessNo:r.legacy_renter_no,
-  payment:{state:paid?'RECORDED_PAID':unpaid?'RECORDED_UNPAID':'UNKNOWN',recordedAt:r.source_paid_at,recordedAmount:paid?money(r.recorded_paid_amount_cents):null},
+  payment:{state:paid?'RECORDED_PAID':unpaid?'RECORDED_UNPAID':'UNKNOWN',recordedAt:r.source_paid_at,recordedAmount:paid&&viewer.financeReadable===true?money(r.recorded_paid_amount_cents):null},
   source:{origin:'LEGACY',ruleOrigin:'LEGACY_ORDER',originalStatus:r.source_order_status,statusLabel:state.statusLabel,originalPayStatus:r.source_pay_status},
-  legacyAmounts:{required:money(r.due_amount_cents),paid:paid?money(r.recorded_paid_amount_cents):null,deposit:money(r.deposit_amount_cents),refund:money(legacyMoneyCents(raw.return_order_money)),refundChannelState:'UNKNOWN'},quote:null};
+  legacyAmounts:{required:money(r.due_amount_cents),paid:paid&&viewer.financeReadable===true?money(r.recorded_paid_amount_cents):null,deposit:money(r.deposit_amount_cents),refund:money(legacyMoneyCents(raw.return_order_money)),refundChannelState:'UNKNOWN'},quote:null};
 }
 export type AdminOrderProgress={
  asOfUtc:string|null;
@@ -392,6 +392,18 @@ function slimListItem(item:Record<string,any>){
  const total=frozen.materials.length;
  item.frozenAccount={...frozen,materials:frozen.materials.slice(0,LIST_MATERIALS_LIMIT),materialsTotal:total,materialsTruncated:total>LIST_MATERIALS_LIMIT};
 }
+/** 列表金额权限：无财务读权限（finance.read）时列表不下发订单金额及其分项，前端按权限受限显示「—」；详情另行按原口径处理。 */
+export function restrictListMoney(item:Record<string,any>){
+ item.amounts={...(item.amounts??{}),rental:null,deposit:null,totalDue:null};
+ if(item.prepaymentBreakdown)item.prepaymentBreakdown={...item.prepaymentBreakdown,haffRental:null,materialsPrepay:null};
+ if(item.legacyAmounts)item.legacyAmounts=null;
+ if(item.payment)item.payment={...item.payment,recordedAmount:null};
+ item.prepaymentReconciliation=null;
+ // 兜底：列表项内任何金额对象（含报价、冻结物资等）一律置空，确保无权限时列表不泄露金额
+ const sweep=(v:any):any=>{if(Array.isArray(v))return v.map(sweep);if(v&&typeof v==='object'){if('amount' in v&&'currency' in v)return null;for(const k of Object.keys(v))v[k]=sweep(v[k]);}return v;};
+ for(const k of Object.keys(item))item[k]=sweep(item[k]);
+ item.amountsRestricted='FINANCE_PERMISSION_REQUIRED';
+}
 export async function queryAdminReadOrders(client:PoolClient,viewer:OrderReadViewer,filter:OrderReadFilters,accountViews?:OrderAccountViewReader){
  if(filter.restoreKey&&filter.restoreKey!==viewer.authorizationKey)throw conflict('Authorization context changed');
  const values:unknown[]=[viewer.isBoss,viewer.adminId],where=[gameScopeSql("x.game_id","$2","$1")];
@@ -422,7 +434,7 @@ export async function queryAdminReadOrders(client:PoolClient,viewer:OrderReadVie
   }
  }
  await attachAdminOrderExtras(client,items,viewer,accountViews);
- if(filter.view==='list')for(const item of items)slimListItem(item);
+ if(filter.view==='list')for(const item of items){slimListItem(item);if(viewer.financeReadable!==true)restrictListMoney(item);}
  return {items,page:filter.page,pageSize:filter.pageSize,total:Number(page.total),contextKey:viewer.authorizationKey};
 }
 export async function getAdminReadOrder(client:PoolClient,viewer:OrderReadViewer,id:string,paymentReadOptions?:ChannelPaymentReadOptions,accountViews?:OrderAccountViewReader){

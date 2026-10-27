@@ -279,8 +279,8 @@ test('numbered chain survives StrictMode cancellation and separates paid cancell
   await act(async () => root.render(createElement(StrictMode, null, createElement(AdminOrderChainView, chainProps('chain-strict')))));
   await until(() => node.textContent.includes(chainOrder.displayNo));
   assert(signals.length >= 2); assert.equal(signals[0].aborted, true);
-  assert(node.textContent.includes('已取消')); assert(node.textContent.includes('支付已记录')); assert(node.textContent.includes('退款待核'));
-  assert(node.textContent.includes('押金 ¥0.00')); assert(!node.textContent.includes('加载更多'));
+  assert(node.textContent.includes('已取消')); assert(node.textContent.includes('支付已记录'));
+  assert(node.textContent.includes('订单金额')); assert(!node.textContent.includes('加载更多'));
   assert(node.textContent.includes('当前进度') && node.textContent.includes('费用'));
   assert(!node.textContent.includes('需付金额') && !node.textContent.includes('订单状态 / 已知事实'), 'cancelled rows no longer look like a payment request');
   globalThis.fetch = async () => response({ order:chainOrder });
@@ -373,11 +373,53 @@ test('U3 order fee label follows the stage while the split stays visible and pay
     await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('fee-'+index),refreshNonce:index})));
     await until(()=>node.textContent.includes(current.displayNo));
     const fee=node.querySelector('.oc-table td.oc-amount').textContent;
-    assert.match(fee,new RegExp(item.label));
-    for(const text of item.expect) assert.ok(fee.includes(text),`${item.status}: ${text} from ${fee}`);
-    assert.match(fee,/¥159\.08/,'the original amount stays exact');
-    if(item.status!=='CANCELLED')assert.equal(fee.includes('未形成支付')||fee.includes('支付事实待核'),false,'payment state is not folded into a normal fee cell');
+    // 列表只显示订单金额；分项、付款与退款事实只在详情
+    assert.match(fee,/^订单金额¥159\.08(见详情)?$/);
+    assert.equal(fee.includes('见详情'),item.status==='COMPLETED');
+    for(const text of [...item.expect,item.label,'哈夫租金','押金','未形成支付','退款待核','分项待核']) assert.equal(fee.includes(text),false,`${item.status}: ${text} from ${fee}`);
   }
+  // 金额缺失显示未知（不当作 0）；无财务权限显示「—」
+  current={...order,id:'fee-missing',displayNo:'FEE-MISSING',status:'PAID',amounts:{...order.amounts,totalDue:null},source:{origin:'NATIVE'}};
+  await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('fee-missing'),refreshNonce:10})));
+  await until(()=>node.textContent.includes('FEE-MISSING'));
+  assert.equal(node.querySelector('.oc-table td.oc-amount').textContent,'订单金额未知');
+  current={...order,id:'fee-restricted',displayNo:'FEE-RESTRICTED',status:'COMPLETED',amounts:{...order.amounts,totalDue:null,rental:null,deposit:null},amountsRestricted:'FINANCE_PERMISSION_REQUIRED',source:{origin:'NATIVE'}};
+  await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('fee-restricted'),refreshNonce:11})));
+  await until(()=>node.textContent.includes('FEE-RESTRICTED'));
+  assert.equal(node.querySelector('.oc-table td.oc-amount').textContent,'订单金额—见详情');
+});
+
+// 订单页资金依据统一按 finance.read 判定：仅有 finance.document.read 不再请求；finance.read 请求，后端 403 显示无权
+test('order page funds evidence is gated by finance.read only', async t => {
+  const {root,node,AdminOrderChainView}=await setup(t);
+  const value={...order,id:'fin-gate',displayNo:'FIN-GATE',status:'PAID',payment:{state:'RECORDED_PAID',recordedAt:null,recordedAmount:null},source:{origin:'NATIVE'}};
+  const evidence={schema:'admin-order-settlement-evidence.v1',documentRef:'ORDER:fin-gate',readiness:'READY',posting:{state:'NOT_POSTED',ref:null,postedAt:null},captured:{knowledge:'UNKNOWN',cents:null,reasonCodes:[]},ownerNet:{knowledge:'UNKNOWN',cents:null,reasonCodes:[]},refundPayable:{knowledge:'KNOWN',cents:'0',reasonCodes:[]},refunded:{knowledge:'UNKNOWN',cents:null,reasonCodes:[]},historicalRefund:{knowledge:'UNKNOWN',cents:null,reasonCodes:[]},refundDueAt:null,channel:{state:'UNKNOWN',reference:null},dutyRefs:[],reasonCodes:[]};
+  let calls=[],deny=false;
+  globalThis.fetch=async url=>{const p=String(url);calls.push(p);if(p.includes('/finance/'))return deny?response({error:{code:'FORBIDDEN'}},403):response({document:{ref:'ORDER:fin-gate'},orderSettlement:evidence});return response({order:value});};
+  const run=async(id,permissions,nonce)=>{calls=[];await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps(id),snapshot:{...snapshotFor(id),permissions},objectOnly:true,initialOrderId:value.id,refreshNonce:nonce})));await until(()=>node.textContent.includes('FIN-GATE'));};
+  await run('fg-doc',['order.read','finance.document.read'],1);
+  await until(()=>node.textContent.includes('当前无权读取本单资金依据'));
+  assert.equal(calls.some(p=>p.includes('/finance/')),false);
+  await run('fg-read',['order.read','finance.read'],2);
+  await until(()=>calls.some(p=>p.includes('/finance/documents/'))&&!node.textContent.includes('当前无权读取本单资金依据'));
+  deny=true;await run('fg-403',['order.read','finance.read'],3);
+  await until(()=>calls.some(p=>p.includes('/finance/documents/'))&&node.textContent.includes('当前无权读取本单资金依据'));
+});
+
+test('progress nodes expose Beijing times by keyboard/aria and never mark unevidenced completion done', async t => {
+  const {root,node,AdminOrderChainView}=await setup(t);let current;
+  globalThis.fetch=async()=>response({items:[current],page:1,pageSize:20,total:1,contextKey:'stage-time'});
+  current={...order,id:'stage-1',displayNo:'STAGE-1',status:'COMPLETED',createdAt:'2026-10-20T02:00:00.000Z',completedAt:null,progress:null,payment:{state:'RECORDED_PAID',recordedAt:'2026-10-20T03:30:00.000Z',recordedAmount:null},source:{origin:'NATIVE'}};
+  await act(async()=>root.render(createElement(AdminOrderChainView,chainProps('stage-time'))));
+  await until(()=>node.textContent.includes('STAGE-1'));
+  const triggers=[...node.querySelectorAll('.oc-table .oc-stage-trigger')];
+  assert.equal(triggers.length,3,'compact view keeps three nodes');
+  assert.match(triggers[0].getAttribute('aria-label'),/创建：.*10:00.*北京时间/);
+  assert.match(triggers[1].getAttribute('aria-label'),/支付：.*11:30/);
+  const last=triggers[2].getAttribute('aria-label');
+  assert.match(last,/时间未记录/);assert.match(last,/开租待核/,'omitted middle node is listed in the tooltip');
+  assert.equal(triggers[2].closest('li').className,'unknown','completion without evidence is not shown as done');
+  assert.equal(triggers[0].tagName,'BUTTON');
 });
 
 test('master: list requests the bounded projection and keeps the true material count', async t => {
@@ -448,7 +490,7 @@ test('optional finance/group reads are independent and never call controlled set
   const native={...chainOrder,id:'native-old',displayNo:'NATIVE-OLD',status:'PAID',source:{origin:'NATIVE'}};
   const proof=p=>({document:{ref:'ORDER:'+decodeURIComponent(p).match(/ORDER:([^?]+)/)[1]},orderSettlement:undefined});
   globalThis.fetch=async url=>{const p=String(url);calls.push(p);if(p.includes('/finance/'))return mode==='slow'?new Promise(resolve=>{finishFinance=resolve;}):response(proof(p));if(p.includes('/im?'))return response({error:{code:'FORBIDDEN'}},403);return response({order:p.includes('native-current')?{...native,id:'native-current',displayNo:'NATIVE-CURRENT'}:native});};
-  const props={...chainProps('chain-optional'),snapshot:{...snapshotFor('chain-optional'),permissions:['order.read','finance.document.read','im.support.read']},objectOnly:true,initialOrderId:native.id};
+  const props={...chainProps('chain-optional'),snapshot:{...snapshotFor('chain-optional'),permissions:['order.read','finance.read','im.support.read']},objectOnly:true,initialOrderId:native.id};
   await act(async () => root.render(createElement(AdminOrderChainView,props)));await until(()=>node.textContent.includes('关键费用')&&node.textContent.includes('当前身份无权读取本单群'));
   assert(node.textContent.includes(native.displayNo));assert.equal(node.querySelectorAll('[aria-busy="true"]').length,1);
   await act(async () => finishFinance(response({error:{code:'NOT_FOUND'}},404)));await until(()=>node.textContent.includes('未找到当前范围内可读的资金单据'));
@@ -651,11 +693,9 @@ test('FLOW02 Root F1: cancelled payment remains paid, known unpaid, or unknown',
   current={...order,id:'cancel-'+state,displayNo:'CANCEL-'+state,status:'CANCELLED',source:{origin:'LEGACY',statusLabel:'已取消'},payment:{state,recordedAt:null,recordedAmount:null}};
   await act(async()=>root.render(createElement(AdminOrderChainView,{snapshot:snapshotFor('root-f1-'+state),onOpenPath:()=>{},onQueryChange:()=>{},refreshNonce:index})));await until(()=>node.textContent.includes(current.displayNo));
   const fee=node.querySelector('.oc-table td.oc-amount').textContent;
-  assert.match(fee,/原单金额/,'a cancelled order keeps the original amount label, not the advance label');
-  assert.match(fee,/哈夫租金/);assert.match(fee,/物资预付/);assert.match(fee,/押金/);
-  if(state==='RECORDED_PAID')assert.match(fee,/退款待核/);
-  else if(state==='RECORDED_UNPAID')assert.match(fee,/未形成支付/);
-  else{assert.match(fee,/支付.*待核|支付.*未知/);assert.doesNotMatch(fee,/未形成支付/);}
+  // 取消单列表同样只显示订单金额，支付/退款事实不进列表费用栏
+  assert.match(fee,/^订单金额/);
+  for(const text of ['原单金额','哈夫租金','物资预付','押金','退款待核','未形成支付','待核'])assert.equal(fee.includes(text),false,text);
  }
 });
 
@@ -742,7 +782,7 @@ test('order detail separates unformed payment from missing time and sums refund 
  const evidence={schema:'admin-order-settlement-evidence.v1',documentRef:'ORDER:refund-duty',readiness:'READY',posting:{state:'NOT_POSTED',ref:null,postedAt:null},captured:unknown(),ownerNet:unknown(),refundPayable:money('5000'),refunded:unknown(),historicalRefund:unknown(),refundDueAt:null,channel:{state:'UNKNOWN',reference:null},dutyRefs:[],reasonCodes:[]};
  const refundSummary={contractVersion:'admin-order-refund-summary.v1',integration:'INTEGRATED',intents:[],bankArrival:'UNKNOWN',reasonCodes:[]};
  globalThis.fetch=async url=>String(url).includes('readMode=combined')?response({order:value,refundSummary}):String(url).includes('/finance/')?response({document:{ref:'ORDER:refund-duty'},orderSettlement:evidence}):response({});
- await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('refund-duty'),snapshot:{...snapshotFor('refund-duty'),permissions:['order.read','finance.document.read']},objectOnly:true,initialOrderId:value.id})));
+ await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('refund-duty'),snapshot:{...snapshotFor('refund-duty'),permissions:['order.read','finance.read']},objectOnly:true,initialOrderId:value.id})));
  await until(()=>node.textContent.includes('退款记录')&&node.textContent.includes('本单应退责任'));
  const text=node.textContent;
  assert.match(text,/本单应退责任：¥50\.00/);

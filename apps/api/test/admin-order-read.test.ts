@@ -1,7 +1,7 @@
 import {test} from "node:test";
 import assert from "node:assert/strict";
 import type {PoolClient} from "pg";
-import {getAdminReadOrder,projectAdminReadOrder,queryAdminReadOrders,orderReadRelation,orderReadKeyRelation,parseOrderOrigin,readNativeFrozenAccounts,NATIVE_FROZEN_ACCOUNT_SQL,legacyOrderResources,orderHaffRatio,LIST_MATERIALS_LIMIT,accountViewFrozen} from "../src/order/admin-order-read";
+import {getAdminReadOrder,projectAdminReadOrder,queryAdminReadOrders,orderReadRelation,orderReadKeyRelation,parseOrderOrigin,readNativeFrozenAccounts,NATIVE_FROZEN_ACCOUNT_SQL,legacyOrderResources,orderHaffRatio,LIST_MATERIALS_LIMIT,restrictListMoney,accountViewFrozen} from "../src/order/admin-order-read";
 import {LEGACY_ORDER_STATUS_SQL} from "../src/order/legacy-order-read";
 import {parseAdminOrderPageQuery} from "../src/order/order-routes";
 const viewer={adminId:"test-reader",isBoss:false,internalQuote:false,authorizationKey:"a".repeat(64)};
@@ -80,8 +80,19 @@ function orderClient(options:{keys?:Key[];total?:string;records?:Array<{origin:s
  }} as unknown as PoolClient;
  return {client,statements};
 }
+test("legacy recorded paid amount requires finance read like native",()=>{
+ for(const financeReadable of [undefined,false]){const row=projectAdminReadOrder("LEGACY",record,{...viewer,financeReadable});assert.equal(row.payment.state,"RECORDED_PAID");assert.equal(row.payment.recordedAmount,null);assert.equal(row.legacyAmounts.paid,null);}
+ const ok=projectAdminReadOrder("LEGACY",record,{...viewer,financeReadable:true});assert.equal(ok.payment.recordedAmount.amount,"66.00");assert.equal(ok.legacyAmounts.paid.amount,"66.00");
+});
+test("list money is fully withheld without finance read",()=>{
+ const row:any=projectAdminReadOrder("LEGACY",record,{...viewer,financeReadable:true});row.extra={nested:[{price:{currency:"CNY",unit:"yuan",amount:"1.00",scale:2}}]};
+ restrictListMoney(row);
+ assert.equal(row.amountsRestricted,"FINANCE_PERMISSION_REQUIRED");assert.equal(row.amounts.totalDue,null);assert.equal(row.amounts.rental,null);assert.equal(row.amounts.deposit,null);
+ assert.equal(row.legacyAmounts,null);assert.equal(row.payment.recordedAmount,null);assert.equal(row.prepaymentReconciliation,null);assert.equal(row.extra.nested[0].price,null);
+ assert.equal(JSON.stringify(row).includes('"amount":'),false,"no money object remains");
+});
 test("legacy cancellation, payment and missing time remain separate facts",()=>{
- const paid=projectAdminReadOrder("LEGACY",record,viewer);assert.equal(paid.status,"CANCELLED");assert.equal(paid.payment.state,"RECORDED_PAID");assert.equal(paid.payment.recordedAt,null);assert.equal(paid.payment.recordedAmount.amount,"66.00");assert.equal(paid.amounts.deposit.amount,"0.00");assert.equal(paid.legacyAmounts.refund,null);assert.equal(paid.legacyAmounts.refundChannelState,"UNKNOWN");
+ const paid=projectAdminReadOrder("LEGACY",record,{...viewer,financeReadable:true});assert.equal(paid.status,"CANCELLED");assert.equal(paid.payment.state,"RECORDED_PAID");assert.equal(paid.payment.recordedAt,null);assert.equal(paid.payment.recordedAmount.amount,"66.00");assert.equal(paid.amounts.deposit.amount,"0.00");assert.equal(paid.legacyAmounts.refund,null);assert.equal(paid.legacyAmounts.refundChannelState,"UNKNOWN");
  const unpaid=projectAdminReadOrder("LEGACY",{...record,source_pay_status:0},viewer);assert.equal(unpaid.payment.state,"RECORDED_UNPAID");assert.equal(unpaid.payment.recordedAmount,null);
  const unknown=projectAdminReadOrder("LEGACY",{...record,source_pay_status:9},viewer);assert.equal(unknown.payment.state,"UNKNOWN");assert.equal(unknown.payment.recordedAmount,null);
  const completed=projectAdminReadOrder("LEGACY",{...record,source_order_status:4},viewer);assert.equal(completed.status,"COMPLETED");assert.equal(completed.payment.state,"RECORDED_PAID");assert.equal(completed.paidAt,null);
@@ -364,7 +375,7 @@ test('prepayment: 旧单只用原goods与expend，合法零与缺源分开且不
   [{goods_money:'0.00',expend_pay_money:undefined},{basis:'LEGACY_ORIGINAL_ORDER',completeness:'PARTIAL',haffRental:prepaymentMoney('0.00'),materialsPrepay:null}],
   [{goods_money:'0.00',expend_pay_money:'0.00'},{basis:'LEGACY_ORIGINAL_ORDER',completeness:'COMPLETE',haffRental:prepaymentMoney('0.00'),materialsPrepay:prepaymentMoney('0.00')}],
   [{goods_money:undefined,expend_pay_money:null},unknownPrepayment('LEGACY_ORIGINAL_ORDER')],
- ] as const){const row=projectAdminReadOrder('LEGACY',{...record,source_snapshot:{...record.source_snapshot,...parts}},viewer);assert.deepEqual(row.prepaymentBreakdown,expected);assert.equal(row.amounts.totalDue.amount,'66.00');assert.equal(row.payment.recordedAmount.amount,'66.00','the existing historical paid projection is unchanged');}
+ ] as const){const row=projectAdminReadOrder('LEGACY',{...record,source_snapshot:{...record.source_snapshot,...parts}},{...viewer,financeReadable:true});assert.deepEqual(row.prepaymentBreakdown,expected);assert.equal(row.amounts.totalDue.amount,'66.00');assert.equal(row.payment.recordedAmount.amount,'66.00','the existing historical paid projection is unchanged');}
 });
 
 test('prepayment: 旧原金额格式异常不再使整行抛错，负数不粉饰为正常预付',()=>{

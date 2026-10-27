@@ -81,25 +81,9 @@ const frozenHaff=(f?:FrozenAccount|null)=>f?.haff?quantityText(f.haff.quantity):
 const frozenMaterials=(f?:FrozenAccount|null)=>f?.materials.length?f.materials.slice(0,3).map(item=>`${item.name??"名称待核"} ${item.quantity??"数量未知"} ${unitText(item.unit,item.code)}`).join(" · ")+((f.materialsTotal??f.materials.length)>3?`（另${(f.materialsTotal??f.materials.length)-3}项）`:""):null;
 const frozenTerm=(f?:FrozenAccount|null)=>f?.termDays?`${f.termDays} 天`:f?.termSeconds?formatTermDays(f.termSeconds):null;
 /** 列表只显示本单原金额与构成；支付状态独立，不用“未支付”替代费用分项。 */
-const feeAmountText=(o:Order)=>money(o.amounts.totalDue);
-const feeLabel=(o:Order)=>o.status==="PENDING_PAYMENT"?"本次预付":o.status==="CANCELLED"?"原单金额":"原预付";
-/** 金额阶段提示：下单冻结价已含会员/礼遇档位，原价与折扣额本单未记录；已付只认精确付款记录；完成后结算/物资退款以详情凭证为准，退款负债不等于渠道到账 */
-const feeStageLines=(o:Order)=>{
- const lines:string[]=[],tier=tierText(o);
- if(!isLegacy(o)&&o.status!=="CANCELLED"&&tier&&tier!=="标准价")lines.push(`按${tier}冻结 · 原价/折扣额未记录`);
- if(o.status==="PAID"||o.status==="COMPLETED")lines.push(o.payment.recordedAmount?`已付记录 ${money(o.payment.recordedAmount)}`:o.payment.state==="RECORDED_PAID"?"已付金额待核":"支付事实待核");
- if(o.status==="COMPLETED")lines.push(isLegacy(o)?(o.legacyAmounts?.refund?`原单退款记录 ${money(o.legacyAmounts.refund)} · 到账未知`:"原单退款记录未知"):"结算/物资退款见详情凭证");
- return lines;
-};
-const feeSplitLines=(o:Order)=>{
- const p=o.prepaymentBreakdown, deposit=money(o.amounts.deposit);
- const lines=p?.completeness==="COMPLETE"?[`哈夫租金 ${money(p.haffRental)}`,`物资预付 ${money(p.materialsPrepay)}`,`押金 ${deposit}`]
-  :p?[`哈夫租金 ${p.haffRental?money(p.haffRental):"分项待核"}`,`物资预付 ${p.materialsPrepay?money(p.materialsPrepay):"分项待核"}`,`押金 ${deposit}`]
-  :["哈夫租金/物资预付分项待核",`押金 ${deposit}`];
- if(o.status==="CANCELLED")lines.push(o.payment.state==="RECORDED_UNPAID"?"未形成支付":o.payment.state==="RECORDED_PAID"?"已支付 · 退款待核":"支付事实待核");
- return lines;
-};
-const feeNoteText=(o:Order)=>feeSplitLines(o).join(" · ");
+/** 列表金额：只显示订单金额（totalDue）；无财务权限显示「—」；缺失显示「未知」，不当作 0；分项与付款/退款事实只在详情页。 */
+const feeAmountText=(o:Order)=>(o as any).amountsRestricted?"—":o.amounts?.totalDue?money(o.amounts.totalDue):"未知";
+const feeDetailChip=(o:Order)=>o.status==="COMPLETED"?<span className="oc-fee-chip">见详情</span>:null;
 /** 当前下一步只从已取得的同单事实推导；不把 PAID、群或更新时间当成开租/完成。 */
 // 详情三项费用槽位：缺值显示未知，不写 0
 const slotMoney=(v:AdminOrderMoney|null|undefined)=>v?money(v):"未知（依据未提供）";
@@ -232,8 +216,8 @@ function OrderList({snapshot,onOpenPath,refreshNonce,initialQuery,onQueryChange}
  <td className="oc-account-cell"><div className="oc-account-head"><EntityPreviewTrigger touchLabel={"预览账号 " + accountCellText(o)} trigger={canResource?<Link onClick={()=>resource(o)}>{accountCellText(o)}</Link>:<span>{accountCellText(o)}</span>} content={<AccountPreviewCard displayNo={o.accountDisplayNo} legacy={legacyAccount(o)} accountId={o.accountId} title={accountBasic(o)||null} priceTitle={isLegacy(o)?"原单金额":"本单成交价（下单冻结）"} priceRows={[["哈夫币数量",frozenHaff(o.frozenAccount)??"未提供"],["哈夫币比例",ratioText(o)],["哈夫币租金",o.prepaymentBreakdown?.haffRental?money(o.prepaymentBreakdown.haffRental):"分项待核"],["物品资源费",o.prepaymentBreakdown?.materialsPrepay?money(o.prepaymentBreakdown.materialsPrepay):"分项待核"],[isLegacy(o)?"押金":"本单租客押金",money(o.amounts.deposit)],...(tierText(o)?[["价格档位",tierText(o)!] as [string,string]]:[])]} haffText={null} materialsText={frozenMaterials(o.frozenAccount)} termText={frozenTerm(o.frozenAccount)} loginMethodText={o.frozenAccount?.loginMethodText??null} safeBoxText={o.frozenAccount?.safeBoxText??null} rankText={o.frozenAccount?.gradingText??null} sourceText={o.frozenAccount?o.frozenAccount.source==="ORDER_VERSION"?"本单冻结版本":"账号资料":o.source.origin==="LEGACY"?"旧平台订单":"新平台订单"} canOpen={canResource} onOpen={()=>resource(o)} deniedReason="关联资源需要独立读取权限"/>}/>{legacyAccount(o)?<span className="oc-badge-legacy">旧平台迁入</span>:null}</div><span className="oc-account-title">{accountTitle(o)}</span><span className="oc-ratio"><em>哈夫比例</em>{ratioText(o)}</span>{o.frozenAccount?<span className="oc-account-sub">{frozenSourceText(o.frozenAccount)}：{frozenCompact(o.frozenAccount)}</span>:null}</td>
  <td>{(["renter","owner"] as const).map(role=>{const summary=role==="renter"?o.renterSummary:o.ownerSummary,name=role==="renter"?o.renterName:o.ownerName;return <div className="oc-party-line" key={role}><span className="oc-party-role">{partyLabel(o,role)}</span><EntityPreviewTrigger touchLabel={"预览"+(role==="renter"?"租客":"号主")+" "+name} trigger={canUser?<Link onClick={()=>related(o,role)}>{partyName(o,role)}</Link>:<span>{partyName(o,role)}</span>} content={<UserPreviewCard name={name} userId={role==="renter"?o.renterUserId:o.ownerUserId} image={summary?.image} maskedPhone={summary?.maskedPhone} currentName={summary?.name} businessNo={role==="renter"?o.renterBusinessNo:o.ownerBusinessNo} membershipSummary={summary?.membershipSummary} creditSummary={summary?.creditSummary} riskFlag={summary?.riskFlag} canOpen={canUser} onOpen={()=>related(o,role)} deniedReason="无用户目录权限"/>}/>{partyNo(o,role)?<small>{partyNo(o,role)}</small>:null}</div>;})}</td>
  <td><Stages order={o} progress={o.progress} variant="compact"/></td>
- <td className="oc-amount"><small className="text-muted-foreground">{feeLabel(o)}</small><strong>{feeAmountText(o)}</strong>{feeSplitLines(o).map((line,index)=><small key={index} className={line==="未形成支付"?"oc-fee-line oc-fee-muted":"oc-fee-line"}>{line}</small>)}{feeStageLines(o).map((line,index)=><small key={"s"+index} className="oc-fee-line oc-fee-stage">{line}</small>)}</td>
-</tr>)}</tbody></table></div><div className="oc-mobile-list">{data.items.map(o=><article key={o.id}><div><button data-order-focus={o.id} className="oc-order-no" onClick={()=>open(o)}>{o.displayNo}</button><span>{statusLabel[o.status]??"待核"}</span></div><h2>{accountTitle(o)}</h2><p>{partyName(o,"renter")} → {partyName(o,"owner")} · 比例 {ratioText(o)}</p><Stages order={o} progress={o.progress} variant="compact"/>{o.frozenAccount?<p className="text-xs text-muted-foreground">{frozenSourceText(o.frozenAccount)}：{frozenCompact(o.frozenAccount)}</p>:null}<footer><span>{feeLabel(o)} {feeAmountText(o)} · {feeNoteText(o)}</span><Button size="sm" onClick={()=>open(o)}>查看详情</Button></footer></article>)}</div></>}
+ <td className="oc-amount"><small className="text-muted-foreground">订单金额</small><strong>{feeAmountText(o)}</strong>{feeDetailChip(o)}</td>
+</tr>)}</tbody></table></div><div className="oc-mobile-list">{data.items.map(o=><article key={o.id}><div><button data-order-focus={o.id} className="oc-order-no" onClick={()=>open(o)}>{o.displayNo}</button><span>{statusLabel[o.status]??"待核"}</span></div><h2>{accountTitle(o)}</h2><p>{partyName(o,"renter")} → {partyName(o,"owner")} · 比例 {ratioText(o)}</p><Stages order={o} progress={o.progress} variant="compact"/>{o.frozenAccount?<p className="text-xs text-muted-foreground">{frozenSourceText(o.frozenAccount)}：{frozenCompact(o.frozenAccount)}</p>:null}<footer><span>订单金额 {feeAmountText(o)}{feeDetailChip(o)}</span><Button size="sm" onClick={()=>open(o)}>查看详情</Button></footer></article>)}</div></>}
  <ListPagination mode="page" page={page} pageSize={size} total={data.total} loadedCount={data.items.length} loading={false} pageSizeOptions={ORDER_PAGE_SIZES} itemLabel="条订单" onPageChange={changePage} onPageSizeChange={changeSize}/>
  </>}
  </div>;
@@ -257,7 +241,8 @@ function Detail({snapshot,id,onOpenPath,refreshNonce,financeOrigin,financeReturn
  },[id,keyOf(snapshot),refreshNonce,nonce]);
  useEffect(()=>{
   const controller=new AbortController();setFunds({state:'loading'});
-  if(!snapshot.permissions.includes('finance.document.read')){setFunds({state:'forbidden'});return()=>controller.abort();}
+  // 订单页统一以 finance.read 作为资金可读权限；后端单据接口若仍拒绝(403)则显示无权
+  if(!snapshot.permissions.includes('finance.read')){setFunds({state:'forbidden'});return()=>controller.abort();}
   if(!order)return()=>controller.abort();
   const ref=(order.source.origin==='LEGACY'?'LEGACY_ORDER:':'ORDER:')+order.id;
   void financeRead(`documents/${encodeURIComponent(ref)}`,defaultFinanceFilters(false),controller.signal).then(data=>{
@@ -278,10 +263,10 @@ function Detail({snapshot,id,onOpenPath,refreshNonce,financeOrigin,financeReturn
   return()=>controller.abort();
  },[order?.id,id,keyOf(snapshot),refreshNonce,teamNonce]);
  const returnFinance=financeOriginPath(financeOrigin,snapshot,financeReturn);
- const back=<div className="flex flex-wrap gap-3">{returnFinance&&(snapshot.permissions.includes('finance.read')||snapshot.permissions.includes('finance.document.read'))?<Button variant="secondary" onClick={()=>onOpenPath(returnFinance)}>返回来源资金</Button>:null}<Button variant="secondary" onClick={()=>onOpenPath("/orders")}><ArrowLeft size={15}/>返回订单列表</Button></div>;
+ const back=<div className="flex flex-wrap gap-3">{returnFinance&&snapshot.permissions.includes('finance.read')?<Button variant="secondary" onClick={()=>onOpenPath(returnFinance)}>返回来源资金</Button>:null}<Button variant="secondary" onClick={()=>onOpenPath("/orders")}><ArrowLeft size={15}/>返回订单列表</Button></div>;
  if(error)return <>{back}<ErrorState error={error} retry={()=>setNonce(n=>n+1)}/></>;if(!order)return <>{back}<div className="oc-empty" aria-busy="true">正在读取订单主体…</div></>;
  function openFundsDocument(ref:string,title='资金凭证'){
-  if(!snapshot.permissions.includes('finance.document.read')||!order)return;
+  if(!snapshot.permissions.includes('finance.read')||!order)return;
   const source=`/orders/${encodeURIComponent(order.id)}`,origin=registerFinanceOrigin(source+(financeOrigin?`?financeOrigin=${encodeURIComponent(financeOrigin)}`:''),financeContextIdentity(snapshot));
   const fallback=sanitizeFinanceReturn(financeReturn)??sanitizeFinanceReturn(source);
   onOpenPath(`/finance/documents/${encodeURIComponent(ref)}?origin=${encodeURIComponent(origin)}${fallback?`&financeReturn=${encodeURIComponent(fallback)}`:''}`,title);
@@ -314,7 +299,7 @@ function Detail({snapshot,id,onOpenPath,refreshNonce,financeOrigin,financeReturn
 <section className="oc-section"><h2>结算与退款</h2><p className="oc-fact-note">最终号主结算与平台贡献只来自已核财务凭证；未过账不填 0，渠道到账仍未知。</p><AdminOrderSettlementEvidence embedded state={funds.state} evidence={funds.evidence} requestId={funds.requestId} paymentState={o.payment.state} onRetry={()=>retryFunds(n=>n+1)} onOpenDocument={openFundsDocument}/>
    <div className="oc-refund-summary"><h3 className="mt-3 text-sm font-semibold">退款记录</h3>{funds.state==='ready'&&funds.evidence?<p className="oc-fact-note">本单应退责任：{funds.evidence.refundPayable.knowledge==='KNOWN'?formatFundingCents(funds.evidence.refundPayable.cents):"未知"} · 逐笔退款申请：{refundSummary?.integration==='INTEGRATED'?refundSummary.intents?`${refundSummary.intents.length} 笔`:"未读取":"未读取"} · 银行到账：未核定。</p>:null}{refundList}</div>
   </section>
-<section className="oc-section"><h2>资金凭证与来源记录</h2><p className="oc-fact-note">资金凭证读取沿用独立权限；未取得渠道到账、退款出款或结算依据时保持未知。普通刷新只重读本地记录，未来渠道查询同步命令另行接入。</p><div className="flex flex-wrap gap-2">{snapshot.permissions.includes('finance.document.read')?<Button size="sm" variant="secondary" onClick={()=>openFundsDocument((o.source.origin==='LEGACY'?'LEGACY_ORDER:':'ORDER:')+o.id,`${o.displayNo} · 资金凭证`)}>查看资金凭证<ArrowUpRight size={14}/></Button>:null}</div><details className="oc-section oc-trace"><summary>来源与技术追溯</summary><p>订单ID：{o.id}</p><p>来源：{o.source.origin} · 游戏：{o.gameId}</p></details>
+<section className="oc-section"><h2>资金凭证与来源记录</h2><p className="oc-fact-note">资金凭证读取沿用独立权限；未取得渠道到账、退款出款或结算依据时保持未知。普通刷新只重读本地记录，未来渠道查询同步命令另行接入。</p><div className="flex flex-wrap gap-2">{snapshot.permissions.includes('finance.read')?<Button size="sm" variant="secondary" onClick={()=>openFundsDocument((o.source.origin==='LEGACY'?'LEGACY_ORDER:':'ORDER:')+o.id,`${o.displayNo} · 资金凭证`)}>查看资金凭证<ArrowUpRight size={14}/></Button>:null}</div><details className="oc-section oc-trace"><summary>来源与技术追溯</summary><p>订单ID：{o.id}</p><p>来源：{o.source.origin} · 游戏：{o.gameId}</p></details>
  </section>
 </main><aside className="oc-related"><section className="oc-section"><h2>订单群</h2><p className="oc-fact-note">{team.state==="legacy"?"旧单没有新平台订单群映射。":team.state==="loading"?"正在独立核对本单群授权…":team.state==="forbidden"?"当前身份无权读取本单群；订单读取权限不包含群消息权限。":team.state==="missing"?"未找到可读取的本单群记录。":team.state==="ready"?team.data?.teamState==="READY"?team.data.canRead?"本单群已就绪，当前身份可进入核对。":"本单群已就绪，当前身份无消息访问权。":"本单群尚未就绪；群就绪不证明开租成功。":"本单群读取暂不可用，订单主体已读取。"}</p>
  {team.state==="unavailable"?<Button size="sm" variant="secondary" onClick={()=>retryTeam(n=>n+1)}>重试群读取</Button>:null}
