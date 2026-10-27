@@ -1695,7 +1695,9 @@ test("OPS02: workflow canvas is visible by default while the actual decision per
     assert.ok(toggle, 'the flow is visible by default and can still be collapsed');
     assert.equal(toggle.getAttribute('aria-expanded'), 'true');
     assert.ok(view.rootNode.querySelector('[data-approval-workflow-canvas]'), 'the canvas is on the first screen by default');
-    // 已决定（含驳回）默认选中审批环节节点，决定人/时间在该节点工作区直接可见。
+    assert.equal(view.rootNode.querySelector('h4')?.textContent, '业务执行', '已批准时先定位执行待办');
+    await click(buttons(view.rootNode).find(button => button.getAttribute('aria-label')?.startsWith('候选审批组：')));
+    // 查看审批节点仍可核对真实决定人和北京时间。
     assert.match(text(view), /林青/);
     assert.match(text(view), /2026年10月12日 18:00/);
     assert.equal(writes.length, 0);
@@ -1796,6 +1798,8 @@ test('master integration: flow refresh and request changes select the actual cur
   try {
     await render(baseDetail());
     assert.equal(host.querySelector('h4')?.textContent, '候选审批组');
+    await render(baseDetail({status: 'APPROVED', decision: {decision: 'APPROVED', approver: {username:'reviewer',name:'审批员'}, reason: null, createdAt: null}}));
+    assert.equal(host.querySelector('h4')?.textContent, '业务执行', '批准后待办在执行环节，决定人仍可点击审批节点查看');
     await render(baseDetail({status: 'EXECUTED', decision: {decision: 'APPROVED', approver: {username:'reviewer',name:'审批员'}, reason: null, createdAt: null}, execution: {status:'SUCCEEDED',resultCode:'APPLIED',resultDetail:null,executor:{username:'executor',name:'执行员'},createdAt:null,completedAt:null}}));
     assert.equal(host.querySelector('h4')?.textContent, '业务执行');
     await render(baseDetail({requestId: 'request-second'}));

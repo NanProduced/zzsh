@@ -8,10 +8,10 @@ import { formatApprovalDate as formatDate } from "./atoms";
 import { personLabel, type RequestDetail } from "./contract";
 
 // Display selection only. Action eligibility still comes from the original server actions.
-// 已执行落执行结果节点；已决定（含驳回）落审批环节节点（决定人/时间/意见在此）；
+// 已执行或批准后待执行落执行节点；驳回落审批环节节点（决定人/时间/意见在此）；
 // 待审、过期、取消同样停在审批环节以标明在哪一环停止；其余停在提交节点。
 function currentRecord(detail: RequestDetail): string {
-  if (detail.execution) return "execution";
+  if (detail.execution || detail.decision?.decision === "APPROVED") return "execution";
   if (detail.decision) return "review";
   return detail.status === "PENDING" || detail.status === "EXPIRED" || detail.status === "CANCELLED" ? "review" : "request";
 }
