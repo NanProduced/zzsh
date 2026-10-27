@@ -89,7 +89,7 @@ test('old DTOs and non-eligible actions do not expose an amendment entry',async 
   await click(button('批准',h.host));assert.equal(dialog().textContent.includes('调整礼遇后批准'),false);
   await click(button('确认批准',dialog()));assert.equal(h.decisions[0][0],'APPROVE');assert.equal(h.decisions[0][2],undefined);
   const denied=detail('request-denied');denied.actions[0]={...denied.actions[0],allowed:false,reasonCode:'BUSINESS_PERMISSION_REQUIRED'};
-  await h.render(denied);assert.equal(button('批准',h.host).disabled,true);await click(button('批准',h.host));assert.equal(dialog(),null);
+  await h.render(denied);assert.equal(button('批准',h.host),undefined,'批准被禁用时不渲染为按钮，也就没有调整入口');assert.equal(dialog(),null);
 });
 
 test('switching requests clears old edits and approval opinions before the next decision',async t=>{

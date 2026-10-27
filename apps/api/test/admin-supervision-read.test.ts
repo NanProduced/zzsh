@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { accountManagement } from "../src/supply/admin-supervision-read";
 import { parseSupervisionQuery, encodeSupervisionCursor, decodeSupervisionCursor, supervisionQueryBinding, matchesCheapFilters, matchesSupervisionFilters, quoteFeeSummary, FILTER_SCAN_MAX_CANDIDATES, supervisionFacts, listSupervision, readSupervision } from "../src/supply/admin-supervision-read";
 import { readFileSync } from "node:fs";
 import { Pool, type PoolClient } from "pg";
@@ -423,6 +424,65 @@ function summaryHarness(viewerPermissions: string[], options: { policy?: unknown
     const viewer = { ...queryViewer, access: { ...queryViewer.access, permissions: new Set(viewerPermissions) } };
     return { sql, client, viewer, ownerRequests };
 }
+
+test("pagination total uses the same SQL filters and scope, excludes cursor and never counts raw eligibility candidates", async t => {
+    t.mock.method(publishing, "readPublicListing", async () => { throw Object.assign(new Error("fixture 404"), { status: 404 }); });
+    const fixture = summaryHarness(["supply.review.read"]), seen: Array<{ sql: string; values: unknown[] }> = [];
+    const original = (fixture.client as any).query;
+    const client = { query: async (sql: string, values: unknown[] = []) => {
+        if (sql.startsWith("SELECT count(*)::text AS total")) { seen.push({ sql, values }); return { rows: [{ total: "41" }] }; }
+        return original(sql, values);
+    } } as never;
+    const query = parseSupervisionQuery(new URLSearchParams("gameId=fixture-game&source=NEW&haffMin=0&loginMethod=login_qq_qr&limit=5"));
+    const page = await listSupervision(client, fixture.viewer, query, async () => ({ publisherBail: "UNKNOWN", occupancy: "FREE", reference: null }), queryKey);
+    assert.equal(page.total, 41); assert.equal(seen.length, 1);
+    assert.match(seen[0]!.sql, /a\.game_id=\$/); assert.match(seen[0]!.sql, /NOT \(EXISTS/); assert.match(seen[0]!.sql, /login_method_code/);
+    assert.doesNotMatch(seen[0]!.sql, /ORDER BY COALESCE|LIMIT \$|COALESCE\(v\.created_at,a\.created_at\),a\.id/);
+    assert.deepEqual(seen[0]!.values.slice(0, 3), [fixture.viewer.access.isBoss, fixture.viewer.adminId, 'fixture-game']);
+    const countBefore = seen.length;
+    const eligible = await listSupervision(client, fixture.viewer, { ...query, eligibility: 'UNKNOWN' }, async () => ({ publisherBail: "UNKNOWN", occupancy: "FREE", reference: null }), queryKey);
+    assert.equal(seen.length, countBefore, 'qualification does not trigger an all-account gate traversal or a raw candidate total');
+    assert.ok(eligible.total === null || eligible.total === eligible.items.length);
+});
+
+test("private attribution preserves configured names and old text without deriving it from origin", () => {
+    assert.deepEqual(accountManagement('朋友介绍'), { infoSource: { value: '朋友介绍', name: '朋友介绍' } });
+    assert.deepEqual(accountManagement('原渠道文本'), { infoSource: { value: '原渠道文本', name: '原渠道文本' } });
+    for (const value of [null, undefined, false, 0, '', '  ']) assert.deepEqual(accountManagement(value), { infoSource: null });
+});
+
+test("public material summaries omit zero stock before the six-item display cap without changing declarations", async t => {
+    const materials = Array.from({ length: 9 }, (_, index) => ({ itemId: 'material-' + index, unit: 'PIECE', quantity: index < 7 ? '0' : String(index - 6), buyerAmount: yuan(index < 7 ? '0.00' : (index - 6) + '.00') }));
+    const publicRead = { id: summaryRow.id, source: 'NATIVE_PUBLICATION', versionId: 'public-materials', contentHash: 'public-hash', releaseId: 'release-public', attributes: {}, presentation: { items: materials.map(item => ({ id: item.itemId, name: item.itemId, unit: item.unit })) },
+        quote: { currency: 'CNY', resourceTotal: yuan('103.00'), lines: [{ itemId: 'haff', unit: 'HAFF_BASE', quantity: '1000000', buyerAmount: yuan('100.00') }, ...materials] } };
+    t.mock.method(publishing, 'readPublicListing', async () => publicRead);
+    const fixture = summaryHarness(['supply.review.read']), original = (fixture.client as any).query;
+    const client = { query: async (sql: string, values: unknown[] = []) => sql.startsWith('SELECT a.id,') ? { rows: [summaryRow] } : original(sql, values) } as never;
+    const result = await listSupervision(client, fixture.viewer, parseSupervisionQuery(new URLSearchParams('limit=5')), async () => ({ publisherBail: 'UNKNOWN', occupancy: 'FREE', reference: null }), queryKey);
+    const summary = result.items[0]!.summary;
+    assert.equal(summary.materialsTotal, 9); assert.equal(summary.materialsVisibleTotal, 2);
+    assert.deepEqual(summary.materials.map((item: any) => item.itemId), ['material-7', 'material-8']);
+    assert.equal(publicRead.quote.lines.length, 10); assert.equal(publicRead.quote.lines[1]!.quantity, '0', 'the original quote is untouched');
+});
+
+test("admin attribution binds the displayed public version and hash without mutating the public projection", async t => {
+    const account = { ...detailAccount, current_version_id: 'draft-3' };
+    const publicRead = { id: account.id, source: 'NATIVE_PUBLICATION', versionId: 'public-1', contentHash: 'public-hash', releaseId: 'release-public', attributes: { next_season_pass: false, demulan_unlocked: true }, media: [] };
+    t.mock.method(publishing, 'readPublicListing', async () => publicRead);
+    t.mock.method(publishing, 'listingDetail', async () => ({ account, available: true, blockers: [], decisions: [], version: { id: 'draft-3', contentHash: 'draft-hash', declaration: { attributes: { info_source: '抖音' }, mediaBindings: [] }, quote: null } } as never));
+    const captured: unknown[][] = []; let found = true;
+    const client = { query: async (sql: string, values: unknown[] = []) => {
+        if (sql.startsWith("SELECT attributes->'info_source'")) { captured.push(values); return { rows: found ? [{ source: '朋友介绍' }] : [] }; }
+        return { rows: [], rowCount: 0 };
+    } } as never;
+    const viewer = { ...queryViewer, access: { ...queryViewer.access, permissions: new Set(['supply.review.read']) } };
+    const read = () => readSupervision(client, account, viewer, async () => ({ publisherBail: 'NOT_REQUIRED', occupancy: 'FREE', reference: 'fixture' }), null);
+    const first: any = await read();
+    assert.deepEqual(captured[0], ['public-1', account.id, 'public-hash']);
+    assert.equal(first.version.management.infoSource.name, '抖音'); assert.equal(first.supervision.facts.publicBasis.management.infoSource.name, '朋友介绍');
+    assert.equal(first.supervision.facts.publicBasis.attributes.next_season_pass, false); assert.equal(Object.hasOwn(publicRead, 'management'), false);
+    found = false; const missing: any = await read(); assert.equal(missing.supervision.facts.publicBasis.management.infoSource, null, 'missing same-version source never falls back to the private draft');
+});
 
 test("list summary reports only authoritative facts and keeps every missing fact unprovided", async t => {
     t.mock.method(publishing, "readPublicListing", async () => { throw Object.assign(new Error("fixture 404"), { status: 404 }); });

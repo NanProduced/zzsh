@@ -8,7 +8,7 @@ import { attributeFacts, blockerLabel, formatAmount, formatFundingCents, formatT
 import { conditionHeadline, groupConditions } from "./account-list-model";
 
 const PENDING_TEXT: Record<string, string> = { PUBLIC_UNKNOWN: "公开状态待核", NEW_ORDERS_UNKNOWN: "新单资格待核", RESTRICTION_UNKNOWN: "运营限制待核", PAUSE_UNKNOWN: "号主暂停待核" };
-export const condText = (code: string) => PENDING_TEXT[code] ?? (code === "OCCUPIED" ? "占用中" : blockerLabel(code));
+export const condText = (code: string) => PENDING_TEXT[code] ?? (code === "OCCUPIED" ? "占用中" : code === "RULE_CHANGED" ? "需按新规则核价" : blockerLabel(code));
 
 /** 抽屉与完整详情共用的接单原因摘要：已确认阻塞 / 待核 / 已满足，每项写明下一步。 */
 export function ReasonSummary({ facts, heading = "能不能接新单" }: { facts: SupplyFacts; heading?: string }) {

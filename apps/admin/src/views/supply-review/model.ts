@@ -51,6 +51,7 @@ export type SupplyWorkView = "all" | "changes" | "restricted" | "paused" | "orde
 export type SupplyQueryKind = "account" | "legacy" | "owner" | "nickname" | "order" | "link";
 /** The renter's already-returned version. It is not the admin current/draft version. */
 export type PublicBasis = {
+  management?: { infoSource: { value: string; name: string } | null };
   id: string;
   releaseId?: string | null;
   contentHash?: string | null;
@@ -88,6 +89,7 @@ export function publicBasisVersion(basis: PublicBasis): Version {
     releaseId: basis.releaseId ?? null,
     contentHash: basis.contentHash ?? null,
     feeSummary: basis.feeSummary ?? null,
+    management: basis.management,
     publication: basis.publishedAt ? { source: "PUBLIC", publishedAt: basis.publishedAt } : null,
     termOption: basis.termOption ? { code: basis.termOption.code ?? "", displayName: basis.termOption.displayName ?? null, dailyConsumption: basis.termOption.dailyConsumption ?? null } : null,
     attributeDisplay: basis.attributeDisplay ?? undefined,
@@ -134,6 +136,7 @@ export type SupplyListSummary = {
   haff: { itemId: string; quantity: string | null; unit: "HAFF_BASE" } | null;
   materials?: Array<{ itemId: string; name: string | null; code: string | null; quantity: string | null; unit: string | null }>;
   materialsTotal?: number;
+  materialsVisibleTotal?: number;
   term?: { code: string | null; name: string | null; dailyConsumption: string | null; termSeconds: string | null } | null;
   login?: { code: string | null; displayName: string | null } | null;
   config?: { safeBox: string | null; characterLevel: string | null; grading: string | null; gradingDivision: string | null } | null;
@@ -151,7 +154,7 @@ export type SupplyListSummary = {
 };
 export type SupplyOwnerSummary = import('../../api').DirectoryUserPreview;
 export type SupplyWorkItem = { id: string; accountId: string; displayNo: string | null; ownerId: string; ownerName: string; revision: string; gameName: string; versionId: string | null; sequence: string | null; title: string | null; reviewState: string | null; sortAt: string; facts: SupplyFacts; accountCreatedAt?: string; accountUpdatedAt?: string | null; versionCreatedAt?: string | null; summary?: SupplyListSummary | null; ownerLink?: { state: "READY" | "DENIED" }; ownerSummary?: SupplyOwnerSummary | null };
-export type SupplyWorkPage = { contractVersion: string; contextKey: string; items: SupplyWorkItem[]; nextCursor: string | null; stationOrigins: { admin: string; user: string }; games?: Array<{ id: string; name: string }>; filterOptions?: { loginMethods: Array<{ code: string; name: string }> } };
+export type SupplyWorkPage = { contractVersion: string; contextKey: string; items: SupplyWorkItem[]; nextCursor: string | null; total?: number | null; stationOrigins: { admin: string; user: string }; games?: Array<{ id: string; name: string }>; filterOptions?: { loginMethods: Array<{ code: string; name: string }> } };
 export type RestrictionEvent = { id: string; reason: string | null; occurredAt: string; actorName: string | null; beforeRevision: string | null; afterRevision: string | null; versionId: string | null; restricted: boolean | null };
 export type SupplyWorkDetail = Omit<Detail, "version"> & {
   contractVersion: string; contextKey: string; version: Version | null;
@@ -251,6 +254,7 @@ export type PublicationFact = {
 };
 
 export type Version = {
+  management?: { infoSource: { value: string; name: string } | null };
   id: string;
   sequence: string;
   reviewState: string;
@@ -519,7 +523,7 @@ export function feeSummaryRows(fee?: SupplyListSummary["feeSummary"] | null): { 
     haff: amount(fee.haffRental) ?? missing,
     materials: amount(fee.materials) ?? missing,
     total: amount(fee.resourceTotal) ?? missing,
-    note: fee.completeness === "COMPLETE" ? "资源费分项已闭合" : "分项待核，不以合计反推",
+    note: fee.completeness === "COMPLETE" ? "" : "部分费用明细未提供",
   };
 }
 
@@ -600,6 +604,8 @@ function attributeFactsFrom(attributes: Record<string, unknown>, display: Attrib
     { label: "小段位", value: !Object.hasOwn(attributes, "grading_division") ? "未申报" : attributes.grading_division === null || attributes.grading_division === "" ? "未知" : String(attributes.grading_division), unconfirmed: attributes.grading_division === null },
     declaredFact("本人脸声明", attributes.face_is_self, "号主声明本人脸", "号主声明非本人脸"),
     declaredFact("封禁记录声明", attributes.ban_record, "号主声明有封禁记录", "号主声明无封禁记录"),
+    declaredFact("下赛季通行证", attributes.next_season_pass, "计划购买", "不计划购买"),
+    declaredFact("德穆兰", attributes.demulan_unlocked, "已解锁", "未解锁"),
     codeFact("登录方式", display?.loginMethod, attributes.login_method_code),
     { label: "绝密 KD", value: attributes.secret_kd === null || attributes.secret_kd === undefined || attributes.secret_kd === "" ? "未申报" : String(attributes.secret_kd), unconfirmed: false },
     { label: "地区", value: region || "未申报", unconfirmed: false },
@@ -688,7 +694,7 @@ export function entitlementTermText(item: { expiresAt?: string | null; expiryKno
   return "期限未提供";
 }
 
-export function skinFacts(version: Pick<Version, "draftSkinSummary" | "presentation" | "declaration">): { source: "CURRENT_DRAFT_SELECTION" | "PRESENTATION"; withheld: number | null; rows: Array<{ id: string; text: string; mediaId: string | null }> } {
+export function skinFacts(version: Pick<Version, "draftSkinSummary" | "presentation" | "declaration">): { source: "CURRENT_DRAFT_SELECTION" | "PRESENTATION"; withheld: number | null; rows: Array<{ id: string; name: string; category: string; rarity: string; collectible: string; state: string; text: string; mediaId: string | null }> } {
   const draft = version.draftSkinSummary;
   const source = draft && Array.isArray(draft.items) ? draft.items : version.presentation.skins ?? [];
   const map = (skin: PresentationSkin) => {
@@ -697,7 +703,7 @@ export function skinFacts(version: Pick<Version, "draftSkinSummary" | "presentat
     const collectible = skin.isCollectible === true ? "典藏" : skin.isCollectible === false ? "非典藏" : "典藏未知";
     const state = skin.defaultState === "DEFAULT" ? "默认外观" : skin.defaultState === "NON_DEFAULT" ? "非默认" : "默认状态未知";
     const mediaId = typeof skin.mediaId === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(skin.mediaId) ? skin.mediaId : null;
-    return { id: skin.id, text: [category, skin.name || "名称未知", rarity, collectible, state].join(" · "), mediaId };
+    return { id: skin.id, name: skin.name || "名称未知", category, rarity, collectible, state, text: [category, skin.name || "名称未知", rarity, collectible, state].join(" · "), mediaId };
   };
   return { source: draft && Array.isArray(draft.items) ? "CURRENT_DRAFT_SELECTION" : "PRESENTATION", withheld: draft && Array.isArray(draft.items) && typeof draft.withheld === "number" ? draft.withheld : null, rows: source.map(map) };
 }

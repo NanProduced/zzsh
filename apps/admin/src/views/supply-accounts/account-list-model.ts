@@ -189,6 +189,7 @@ export function alignedQuickRow(row: SupplyWorkItem, detail?: SupplyWorkDetail):
 export function rowHaffText(row: SupplyWorkItem): string {
   const haff = row.summary?.haff;
   if (haff) return quantityText(haff.quantity);
+  if (row.summary) return "未提供";
   const display = row.facts.historicalRead?.display;
   const historical = display?.state === "KNOWN" && Array.isArray(display.facts?.resources) ? display.facts.resources.find(item => item.unit === "HAFF_BASE") : null;
   return historical ? "历史 " + historicalResourceText(historical) : "未提供";
@@ -200,11 +201,17 @@ export function rowAccountTitle(row: SupplyWorkItem): string {
   if (summary) {
     const parts: string[] = [];
     if (summary.haff) parts.push(quantityText(summary.haff.quantity));
-    if (summary.config?.safeBox) parts.push(summary.config.safeBox);
-    if (summary.config?.grading) parts.push(summary.config.grading + (summary.config.gradingDivision ? ` ${summary.config.gradingDivision}` : ""));
+    const safeBox = readableConfigName(summary.config?.safeBox), grading = readableConfigName(summary.config?.grading);
+    if (safeBox) parts.push(safeBox);
+    if (grading) parts.push(grading + (summary.config?.gradingDivision ? ` ${summary.config.gradingDivision}` : ""));
     if (parts.length) return parts.join(" · ");
   }
   return row.gameName ? `${row.gameName}账号` : "账号资料";
+}
+
+/** Raw unmapped codes remain in the full record, not in the daily scan title. */
+export function readableConfigName(value: string | null | undefined): string | null {
+  return typeof value === "string" && value.trim() && !/^未确认[（(]代码/.test(value) ? value : null;
 }
 
 /** 列表基础费用三项：哈夫租金、物资费、租客基础押金；分项缺失不拿合计反推。 */
@@ -255,7 +262,7 @@ export function rowBaseFeeRows(row: SupplyWorkItem): { haff: string; materials: 
     materials: fee.materials ? `¥${formatAmount(fee.materials.amount)}` : "分项待核",
     deposit,
     total,
-    note: fee.completeness === "COMPLETE" ? "原预付三项已闭合" : "分项待核，不以合计反推",
+    note: fee.completeness === "COMPLETE" ? "" : "部分费用明细未提供",
   };
 }
 
@@ -265,9 +272,13 @@ export function rowDisplaySourceText(row: SupplyWorkItem): string {
   return row.facts.publicVisible === false ? "当前草稿" : row.facts.publicVisible === true ? "对外版" : "当前资料";
 }
 
+export function rowVisibleMaterials(row: SupplyWorkItem) {
+  return (row.summary?.materials ?? []).filter(item => !(typeof item.quantity === "string" && /^0+$/.test(item.quantity)));
+}
+
 /** 列表核心资源：哈夫币与已申报的关键物资；未装配摘要时明确未提供，不拿标题猜。 */
 export function rowCoreAssetsText(row: SupplyWorkItem): string {
-  const haff = rowHaffText(row), materials = row.summary?.materials ?? [], config = row.summary?.config;
+  const haff = rowHaffText(row), materials = rowVisibleMaterials(row), config = row.summary?.config;
   if (!row.summary) {
     const display = row.facts.historicalRead?.display;
     const facts = display?.state === "KNOWN" ? display.facts : null;
@@ -278,7 +289,7 @@ export function rowCoreAssetsText(row: SupplyWorkItem): string {
   const configText = config ? [config.safeBox, config.characterLevel ? config.characterLevel + " 级" : null, config.grading, config.gradingDivision ? "小段位 " + config.gradingDivision : null].filter(Boolean).join(" · ") : "";
   if (!materials.length) return `${haff}${configText ? " · " + configText : ""} · 本版未申报物资`;
   const shown = materials.slice(0, 3).map(item => `${item.name ?? "名称待核"} ${item.quantity ?? "数量未知"} ${unitText(item.unit, item.code ?? undefined)}`).join("、");
-  const total = row.summary.materialsTotal ?? materials.length;
+  const total = row.summary.materialsVisibleTotal ?? materials.length;
   return `${haff}${configText ? " · " + configText : ""} · ${shown}${total > 3 ? ` 等 ${total} 项` : ""}`;
 }
 

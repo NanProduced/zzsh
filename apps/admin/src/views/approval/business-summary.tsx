@@ -52,8 +52,6 @@ function pricingScopeLabel(pricing: Record<string, unknown>): string {
 }
 
 function MembershipSummary({ summary }: { summary: Record<string, unknown> }) {
-  const draft = summary.policyDraft as Record<string, unknown> | undefined;
-  const inline = summary.inlinePolicy as Record<string, unknown> | undefined;
   const pricing = summary.pricingSummary as Record<string, unknown> | undefined;
   const original = summary.originalRequest as Record<string, unknown> | undefined;
   const originalPricing = original?.pricingSummary as Record<string, unknown> | undefined;
@@ -68,20 +66,6 @@ function MembershipSummary({ summary }: { summary: Record<string, unknown> }) {
       <Fact label="权益期限（申请快照）" value={text(summary, "startsAt") || text(summary, "endsAt") ? `${formatDate(text(summary, "startsAt"))} → ${formatDate(text(summary, "endsAt"))}` : null} />
       <Fact label="押金权益" value={depositBenefitSummary(summary) ?? bool(summary, "depositWaived")} />
       {original && depositBenefitSummary(original) ? <Fact label="原申请押金权益" value={depositBenefitSummary(original)} /> : null}
-      {draft ? (
-        <>
-          <Fact label="政策草稿" value={`${String(draft.id)}${typeof draft.version === "number" ? ` · v${draft.version}` : ""}`} mono />
-          <Fact label="草稿哈希" value={text(draft, "hash")} mono />
-          <Fact label="草稿生效时间" value={formatDate(text(draft, "effectiveAtUtc"))} />
-          <Fact label="规则发布 / 价格版本" value={[text(draft, "ruleReleaseId"), text(draft, "priceVersionId")].filter(Boolean).join(" · ") || null} mono />
-        </>
-      ) : null}
-      {inline ? (
-        <>
-          <Fact label="内联政策版本" value={typeof inline.versionNo === "number" ? `v${inline.versionNo}` : null} />
-          <Fact label="内联政策层级" value={Array.isArray(inline.tierCodes) && inline.tierCodes.length > 0 ? inline.tierCodes.join("、") : null} />
-        </>
-      ) : null}
     </FactGrid>
   );
 }
@@ -102,10 +86,6 @@ function DistributionSummary({ business }: { business: BusinessView }) {
       <Fact label="申请理由" value={change.reason} />
     </FactGrid>
     <p className="text-xs leading-relaxed text-muted-foreground">仅展示本次申请的改动项；未列项目沿用原政策。新开关不清除既有关系或已冻结订单，批准也不代表已执行。</p>
-    <details className="rounded-md border border-border/60 px-3 py-2 text-xs">
-      <summary className="cursor-pointer select-none text-muted-foreground">原政策基准</summary>
-      <div className="mt-3"><FactGrid><Fact label="原政策编号" value={change.expectedPolicyId} mono /><Fact label="原修订" value={change.expectedRevision} mono /><Fact label="原政策摘要" value={change.expectedPolicyDigest} mono /></FactGrid></div>
-    </details>
     <Fact label="本次执行结果版本" value={version} mono />
     <p className="text-xs leading-relaxed text-muted-foreground">{version ? "已读到本次执行的结果引用；当前全局政策是否仍使用该版本需另行核对。" : "尚未读到可核对的执行结果，不按已生效显示。"}</p>
   </Section>;
@@ -118,15 +98,6 @@ function PolicySummary({ summary }: { summary: Record<string, unknown> }) {
       <FactGrid><Fact label="拟定生效时间（北京时间）" value={formatDate(text(draft ?? {}, "effectiveAtUtc"))} /></FactGrid>
       <p className="text-xs leading-relaxed text-muted-foreground">这是申请计划，批准不代表已生效；还需按业务流程完成执行，并核对实际业务状态。</p>
       <p className="text-xs leading-relaxed text-muted-foreground">逐档权益的冻结差异尚未提供，本页只展示已取得的申请快照，不用当前最新草稿替代。</p>
-      <details className="rounded-md border border-border/60 px-3 py-2 text-xs">
-        <summary className="cursor-pointer select-none text-muted-foreground">政策版本与计价依据</summary>
-        <div className="mt-3"><FactGrid>
-          <Fact label="政策草稿" value={draft ? text(draft, "id") : null} mono />
-          <Fact label="草稿版本" value={draft && typeof draft.version === "number" ? "v" + draft.version : null} />
-          <Fact label="规则发布" value={text(draft ?? {}, "ruleReleaseId")} mono />
-          <Fact label="价格版本" value={text(draft ?? {}, "priceVersionId")} mono />
-        </FactGrid></div>
-      </details>
     </div>
   );
 }
@@ -181,25 +152,10 @@ function SettlementSummary({ summary }: { summary: Record<string, unknown> }) {
   return (
     <>
       <FactGrid>
-        <Fact label="结算口径" value={text(summary, "settlementSchema")} mono />
         <Fact label="结束原因" value={text(summary, "endReason")} />
         <Fact label="是否提前结束" value={bool(summary, "early")} />
-        <Fact label="基准结算版本" value={[text(summary, "baseSettlementVersionNo"), text(summary, "baseSettlementVersionId")].filter(Boolean).join(" · ") || null} mono />
-        <Fact label="开账版本" value={[text(summary, "openingVersion"), text(summary, "openingId")].filter(Boolean).join(" · ") || null} mono />
-        <Fact label="支付确认" value={text(summary, "paymentConfirmationId")} mono />
         {amounts.map(([label, key]) => <MoneyRow key={key} label={label} value={summary[key]} />)}
       </FactGrid>
-      <details className="rounded-md border border-border/60 px-3 py-2 text-xs">
-        <summary className="cursor-pointer select-none text-muted-foreground">绑定依据摘要（决定 / 报价 / 支付 / 房源）</summary>
-        <div className="mt-2">
-          <FactGrid>
-            <Fact label="决定摘要" value={text(summary, "decisionDigest")} mono />
-            <Fact label="报价摘要" value={text(summary, "quoteDigest")} mono />
-            <Fact label="支付摘要" value={text(summary, "paymentDigest")} mono />
-            <Fact label="房源哈希" value={text(summary, "listingHash")} mono />
-          </FactGrid>
-        </div>
-      </details>
     </>
   );
 }

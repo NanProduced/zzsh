@@ -124,22 +124,22 @@ export function RequestList({
                   <td className="min-w-0">
                     <span className="block text-sm font-medium break-words">{businessTitleOf(item)}</span>
                     <span className="mt-0.5 block text-xs leading-relaxed break-words text-muted-foreground">{item.summary}</span>
-                    <span className="mt-0.5 block font-mono text-[11px] break-all text-muted-foreground">{item.requestId}</span>
+                    <span className="mt-0.5 block font-mono text-xs break-all text-muted-foreground">{item.requestId}</span>
                   </td>
                   <td className="whitespace-nowrap">{personLabel(item.requester)}</td>
                   <td>
                     <InlineStatus tone={status.tone}>{status.label}</InlineStatus>
-                    {item.statusReason ? <span className="mt-0.5 block text-[11px] text-muted-foreground">{item.statusReason}</span> : null}
+                    {item.statusReason ? <span className="mt-0.5 block text-xs text-muted-foreground">{item.statusReason}</span> : null}
                     <span className="mt-1 block text-xs text-muted-foreground">业务：{progress.label}</span>
                     {progress.detail ? <span className="mt-0.5 block text-[11px] leading-relaxed text-muted-foreground">{progress.detail}</span> : null}
                   </td>
                   <td className="max-w-52">
                     <span className="block text-xs leading-relaxed">{next}</span>
-                    {availability ? <span className="mt-1 block text-[11px] leading-relaxed text-muted-foreground">{availability}</span> : null}
+                    {availability ? <span className="mt-1 block text-xs leading-relaxed text-muted-foreground">{availability}</span> : null}
                   </td>
                   <td className="whitespace-nowrap">
                     {formatDate(item.createdAt)}
-                    <span className="mt-0.5 block text-[11px] text-muted-foreground">有效期至 {formatDate(item.expiresAt)}</span>
+                    <span className="mt-0.5 block text-xs text-muted-foreground">有效期至 {formatDate(item.expiresAt)}</span>
                   </td>
                   <td>
                     <Button type="button" size="sm" variant="secondary" className="whitespace-nowrap" onClick={() => onOpen(item.requestId, businessTitleOf(item))}>

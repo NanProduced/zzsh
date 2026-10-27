@@ -2,6 +2,26 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { suggestKind, kindHint, lookupNeedsDirectory, groupConditions, liftSummary, conditionHeadline, newOrdersReasonText, independentFacts, parseSavedViews, serializeSavedViews, rowListingStatus, nextStep, primaryReason, haffBaseFromM, haffMFromBase, depositCentsFromYuan, depositYuanFromCents, rowBaseFeeRows, rowAccountTitle, rowDisplaySourceText } from '../src/views/supply-accounts/account-list-model.ts';
 import { feeSummaryRows, formatTermDays, publicBasisVersion } from '../src/views/supply-review/model.ts';
+import { rowVisibleMaterials } from '../src/views/supply-accounts/account-list-model.ts';
+
+test('neutral account titles do not promote an unmapped code into the visible name', () => {
+  const row = { gameName: '三角洲', summary: { haff: { quantity: '1000000' }, config: { safeBox: '未确认（代码 box-a）', grading: '钻石', gradingDivision: null } } };
+  assert.equal(rowAccountTitle(row), '1 M 哈夫币 · 钻石');
+  assert.equal(row.summary.config.safeBox, '未确认（代码 box-a）', 'the original lookup evidence is retained');
+});
+
+test('compact resources omit only confirmed zero quantities and keep unknown and free stock', () => {
+  const row = { summary: { materials: [{ itemId: 'zero', quantity: '0' }, { itemId: 'unknown', quantity: null }, { itemId: 'free-stock', quantity: '2' }] } };
+  assert.deepEqual(rowVisibleMaterials(row).map(item => item.itemId), ['unknown', 'free-stock']);
+  assert.deepEqual(row.summary.materials.map(item => item.quantity), ['0', null, '2'], 'source declaration is unchanged');
+});
+
+test('a current missing haff quantity never borrows an older imported quantity', () => {
+  const historicalRead = { display: { state: 'KNOWN', facts: { resources: [{ name: '哈夫币', quantity: '97000000', unit: 'HAFF_BASE' }] } } };
+  const row = { summary: { haff: null }, facts: { historicalRead } };
+  assert.equal(rowHaffText(row), '未提供');
+  assert.match(rowHaffText({ ...row, summary: null }), /97 M/);
+});
 
 const facts = (o = {}) => ({ publicVisible: true, publicSource: null, newOrders: true, reasons: [], ownerPaused: false, staffRestricted: false, occupancy: 'FREE', sources: [], legacyNumbers: [], ...o });
 
@@ -254,7 +274,8 @@ test('fee rows keep an explicit zero, mark a partial split and never infer the m
   assert.deepEqual([complete.haff, complete.materials, complete.total], ['¥100.00', '¥0.00', '¥100.00']);
   const partial = feeSummaryRows({ completeness: 'PARTIAL', haffRental: { amount: '100.00' }, materials: null, resourceTotal: { amount: '100.00' } });
   assert.deepEqual([partial.haff, partial.materials, partial.total], ['¥100.00', '分项待核', '¥100.00']);
-  assert.match(partial.note, /不以合计反推/);
+  assert.equal(complete.note, '');
+  assert.match(partial.note, /部分费用明细未提供/);
   assert.deepEqual(feeSummaryRows(null), { haff: '未提供', materials: '未提供', total: '未提供', note: '费用汇总未提供' });
 });
 

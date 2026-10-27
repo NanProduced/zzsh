@@ -33,6 +33,7 @@ export type PagePagination = {
 
 export type CursorPagination = {
   mode: "cursor";
+  page?: number;
   pageSize: number;
   loadedCount: number;
   total?: number;
@@ -89,7 +90,7 @@ export function ListPagination(props: ListPaginationProps) {
   };
 
   if (mode === "cursor") {
-    const { loadedCount, total, hasPrevious, hasNext, onPrevious, onNext } = props;
+    const { loadedCount, total, page, hasPrevious, hasNext, onPrevious, onNext } = props;
     const isTrustedTotal =
       typeof total === "number" && Number.isSafeInteger(total) && total >= 0;
 
@@ -103,8 +104,8 @@ export function ListPagination(props: ListPaginationProps) {
         <div className="admin-list-pagination-left">
           <span>
             {isTrustedTotal
-              ? `共 ${total} ${itemLabel} · 已加载 ${loadedCount} 条`
-              : `已加载 ${loadedCount} 条 · 总数待更新`}
+              ? `共 ${total} ${itemLabel} · ${page ? "本页" : "已加载"} ${loadedCount} 条`
+              : `${page ? "本页" : "已加载"} ${loadedCount} 条 · 总数待更新`}
             {loading ? " · 正在翻页" : ""}
           </span>
           <Select
@@ -128,11 +129,10 @@ export function ListPagination(props: ListPaginationProps) {
               ))}
             </SelectContent>
           </Select>
-          <span className="admin-list-pagination-notice">
-            当前服务暂未提供跳页能力
-          </span>
+          {!page ? <span className="admin-list-pagination-notice">当前服务暂未提供跳页能力</span> : null}
         </div>
         <div className="admin-list-pagination-right">
+          {page ? <span className="text-xs text-muted-foreground">第 {page} 页{isTrustedTotal ? ` / 共 ${Math.max(1, Math.ceil(total! / pageSize))} 页` : " · 总页数待核"}</span> : null}
           <Button
             variant="outline"
             size="sm"

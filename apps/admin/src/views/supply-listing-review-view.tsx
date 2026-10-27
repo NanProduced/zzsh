@@ -12,11 +12,14 @@ import { Card } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
-import { InlineStatus } from "@/components/ui/badge";
+import { Badge, InlineStatus } from "@/components/ui/badge";
 import { EntityPreviewEnabledContext } from "@/components/admin-preview/entity-preview-trigger";
+import { useIsMobile } from "../hooks/use-mobile";
+import { primaryReason } from "./supply-accounts/account-list-model";
+import { condText } from "./supply-accounts/reason-summary";
 import { SupplyActionDialog, type ActionFeedback } from "./supply-review/action-bar";
-import { AccountCompleteView, PublicBasisView } from "./supply-review/detail-pane";
-import { AccountCards, AccountIdentity, IdLine, KindHint, KindSelect, MoreFilters, QuickView, ReasonCell, RowActions, RowMenu, SavedViewsMenu, StatusBadge, TimeText, useSavedViews } from "./supply-accounts/account-list-parts";
+import { AccountCompleteView, ImportedAccountView, PublicBasisView } from "./supply-review/detail-pane";
+import { AccountCards, AccountFees, AccountIdentity, AccountResources, AccountTerms, IdLine, KindHint, KindSelect, MoreFilters, QuickView, ReasonCell, RowActions, RowMenu, SavedViewsMenu, StatusBadge, TimeText, useSavedViews } from "./supply-accounts/account-list-parts";
 import { KIND_LABELS, LOGIN_METHOD_OPTIONS, fullShanghaiTime, groupConditions, versionText, rowHaffText, rowQuoteText, rowDepositText, rowFullPayout, rowListingStatus, lookupNeedsDirectory, rowBaseFeeRows, rowCoreAssetsText, rowTermsLines } from "./supply-accounts/account-list-model";
 import { ListPagination, ListToolbar, ListToolbarSearch, ListToolbarEnumSelect } from "@/components/admin-list";
 import { ConditionCheck, ReasonSummary, type CheckTarget } from "./supply-accounts/reason-summary";
@@ -129,6 +132,8 @@ export function SupplyListingReviewView(props: Props) {
     return <EntityPreviewEnabledContext.Provider value={previewEnabled}><SupplyWork key={[props.snapshot.adminUserId, props.snapshot.session.id, props.snapshot.security.isBoss, [...props.snapshot.permissions].sort().join(","), props.initialAccountId ?? "list"].join("|")} {...props}/></EntityPreviewEnabledContext.Provider>;
 }
 function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, initialQuery, onOpenPath, onQueryChange }: Props) {
+    const mobile = useIsMobile();
+    const [filtersOpen, setFiltersOpen] = useState(false);
     const identity = snapshot.adminUserId + "|" + snapshot.session.id, can = (permission: string) => hasPermission(snapshot, permission), saved = positions.get(identity);
     const [filter, setFilter] = useState<Filter>(() => saved?.filter ? { ...emptyFilter, ...saved.filter } : initialFilter(initialQuery));
     const [draftKind, setDraftKind] = useState<SupplyQueryKind>(saved?.filter.kind ?? filter.kind), [draftQ, setDraftQ] = useState(saved?.filter.q ?? filter.q);
@@ -190,7 +195,15 @@ function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, i
     }, [filter]);
     useEffect(() => { if (initialAccountId)
         return; const controller = new AbortController(); setListBusy(true); setListError(undefined); setPage(undefined); void loadList(controller.signal).then(value => { if (!value || controller.signal.aborted)
-        return; const prior = positions.get(identity); if (prior?.contextKey && prior.contextKey !== value.contextKey) {
+        return;
+        if (filter.cursor && typeof value.total === "number" && Number.isSafeInteger(value.total) && value.total >= 0 && !value.items.length && stack.length * Number(filter.limit) >= value.total) {
+        positions.delete(identity);
+        setListNotice("账号列表已变化，已回到第1页；筛选条件已保留。");
+        setStack([]);
+        setFilter(current => ({ ...current, cursor: "" }));
+        return;
+    }
+        const prior = positions.get(identity); if (prior?.contextKey && prior.contextKey !== value.contextKey) {
         positions.delete(identity);
         setStack([]);
         setFilter({ ...emptyFilter });
@@ -410,13 +423,13 @@ function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, i
      <SavedViewsMenu saved={savedViews} current={{ view: filter.view, kind: draftKind, q: draftQ.trim(), gameId: filter.gameId }} onLoad={v => { positions.delete(identity); setStack([]); setDraftKind(v.kind); setDraftQ(v.q); setFilter({ ...filter, view: v.view, kind: v.kind, q: v.q, gameId: v.gameId, cursor: "" }); }}/>
      {draftQ && <Button variant="ghost" type="button" size="lg" className="text-xs text-muted-foreground" onClick={() => { positions.delete(identity); setDraftQ(""); setStack([]); setFilter({ ...filter, q: "", cursor: "" }); setQueryError(undefined); }}>清除线索</Button>}
    </div>
-   <div className="flex flex-wrap items-center gap-2">
+   <Collapsible open={!mobile || filtersOpen} onOpenChange={setFiltersOpen} className="w-full"><CollapsibleTrigger render={<Button type="button" variant="outline" className="md:hidden"/>}>筛选{[filter.gameId,filter.eligibility,filter.source,filter.loginMethod,filter.haffMin||filter.haffMax,filter.depositMin||filter.depositMax].filter(Boolean).length ? "（"+[filter.gameId,filter.eligibility,filter.source,filter.loginMethod,filter.haffMin||filter.haffMax,filter.depositMin||filter.depositMax].filter(Boolean).length+"）" : ""}</CollapsibleTrigger><CollapsibleContent className="pt-3 md:pt-0"><div className="flex flex-wrap items-center gap-2">
      {page?.games?.length ? <ListToolbarEnumSelect label="游戏" value={filter.gameId} onChange={gameId => applyFilter({ gameId })} options={page.games.map(g => [g.id, g.name] as [string, string])} allLabel="当前范围全部游戏" /> : null}
      <ListToolbarEnumSelect label="接单资格" value={filter.eligibility} onChange={eligibility => applyFilter({ eligibility })} options={[["ELIGIBLE", "可接新单"], ["BLOCKED", "不可接新单"], ["UNKNOWN", "资格待核"]]} allLabel="全部资格" />
-     <ListToolbarEnumSelect label="账号来源" value={filter.source} onChange={source => applyFilter({ source })} options={[["NEW", "新平台"], ["LEGACY", "旧平台"]]} allLabel="全部来源" />
+     <ListToolbarEnumSelect label="账号来源" value={filter.source} onChange={source => applyFilter({ source })} options={[["NEW", "新平台"], ["LEGACY", "旧平台迁入"]]} allLabel="全部来源" />
      <MoreFilters values={filter} loginOptions={page?.filterOptions?.loginMethods?.length ? page.filterOptions.loginMethods : LOGIN_METHOD_OPTIONS} onChange={patch => applyFilter(patch)} />
      <Button type="button" variant="ghost" size="lg" className="text-xs text-muted-foreground" disabled={listBusy} onClick={resetFilters}>重置筛选</Button>
-   </div>
+   </div></CollapsibleContent></Collapsible>
  </ListToolbar>
  <KindHint q={draftQ} kind={draftKind} onKind={setDraftKind}/>
  {savedViews.notice && <p role="status" className="mt-1 text-xs text-amber-700 dark:text-amber-400">{savedViews.notice} <Button variant="link" type="button" className="underline" onClick={savedViews.dismiss}>知道了</Button></p>}
@@ -437,14 +450,14 @@ function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, i
      </div>
    ) : (
      <>
-       <div className="hidden overflow-x-auto rounded-xl border md:block">
+       <div className="hidden overflow-x-auto rounded-xl border border-border md:block">
          <Table className="sa-table w-full min-w-[1040px] text-sm">
            <TableHeader>
-             <TableRow className="border-b text-left text-xs text-muted-foreground">
+             <TableRow className="border-b border-border text-left text-xs text-muted-foreground">
                <TableHead className="min-w-[240px] px-3 py-2 text-xs font-normal text-muted-foreground">账号 / 号主</TableHead>
                <TableHead className="px-3 py-2 text-xs font-normal text-muted-foreground">核心资源</TableHead>
                <TableHead className="px-3 py-2 text-xs font-normal text-muted-foreground">出租条件</TableHead>
-               <TableHead className="px-3 py-2 text-xs font-normal text-muted-foreground" title="资料版本的参考资源费与基础押金；租客实际费用以本人报价为准">基础费用 / 租客押金</TableHead>
+               <TableHead className="px-3 py-2 text-xs font-normal text-muted-foreground" title="哈夫币租金与物资预付组成资源费，押金另列；租客实际费用以本人报价为准">基础报价</TableHead>
                <TableHead className="px-3 py-2 text-xs font-normal text-muted-foreground">业务状态</TableHead>
                <TableHead className="px-3 py-2 text-xs font-normal text-muted-foreground">更新时间</TableHead>
                <TableHead className="w-24 px-3 py-2 text-xs font-normal text-muted-foreground">操作</TableHead>
@@ -470,22 +483,15 @@ function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, i
                        viewRow(row, e.currentTarget);
                      }
                    }}
-                   className={"cursor-pointer border-b align-middle outline-none transition-colors hover:bg-muted/50 focus-visible:bg-muted/50 focus-visible:shadow-[inset_3px_0_0_var(--ring)] " + (quick === row.id ? "bg-muted/60 " : "")}
+                   className={"cursor-pointer border-b border-border align-middle outline-none transition-colors hover:bg-muted/50 focus-visible:bg-muted/50 focus-visible:shadow-[inset_3px_0_0_var(--ring)] " + (quick === row.id ? "bg-muted/60 " : "")}
                  >
                    <TableCell className="max-w-[300px] px-3 py-2.5 whitespace-normal"><AccountIdentity row={row} onOpenOwner={rowOwnerTarget}/></TableCell>
-                   <TableCell className="px-3 py-2.5 whitespace-normal text-xs">
-                     <div className="font-mono font-medium tabular-nums text-amber-900 dark:text-amber-300">{rowCoreAssetsText(row)}</div>
-                   </TableCell>
+                   <TableCell className="max-w-[310px] px-3 py-3 whitespace-normal text-xs"><AccountResources row={row}/></TableCell>
                    <TableCell className="px-3 py-2.5 whitespace-normal text-xs text-muted-foreground">
-                     <div>{terms.conditions}</div>
-                     <div>{terms.loginPayout}</div>
+                     <AccountTerms row={row}/>
                    </TableCell>
                    <TableCell className="px-3 py-2.5 whitespace-normal text-xs tabular-nums">
-                     <div><span className="text-muted-foreground">哈夫币租金</span> {fees.haff}</div>
-                     <div><span className="text-muted-foreground">物资费</span> {fees.materials}</div>
-                     <div><span className="text-muted-foreground">租客基础押金</span> {fees.deposit}</div>
-                     <div><span className="text-muted-foreground">资源费合计</span> {fees.total}</div>
-                     <div className="text-[10px] text-muted-foreground">{fees.note}</div>
+                     <AccountFees row={row}/>
                    </TableCell>
                    <TableCell className="px-3 py-2.5 whitespace-normal">
                      <InlineStatus tone={status.tone}>{status.label}</InlineStatus>
@@ -509,13 +515,13 @@ function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, i
          </Table>
        </div>
        <div className="md:hidden">
-         {page?.items.length ? <AccountCards items={page.items} onView={viewRow}/> : emptyState}
+         {page?.items.length ? <AccountCards items={page.items} onView={viewRow} onOpenOwner={rowOwnerTarget}/> : emptyState}
        </div>
      </>
    )}
  </div>
  <footer className="mt-3">
-   <ListPagination mode="cursor" pageSize={Number(filter.limit)} loadedCount={page?.items.length ?? 0} loading={listBusy} pageSizeOptions={[5, 20, 50]} itemLabel="个账号"
+   <ListPagination mode="cursor" page={stack.length + 1} total={page?.total ?? undefined} pageSize={Number(filter.limit)} loadedCount={page?.items.length ?? 0} loading={listBusy} pageSizeOptions={[5, 20, 50]} itemLabel="个账号"
      hasPrevious={stack.length > 0} hasNext={Boolean(page?.nextCursor)}
      onPageSizeChange={v => { positions.delete(identity); setStack([]); setFilter({ ...filter, limit: String(v), cursor: "" }); }}
      onPrevious={() => { positions.delete(identity); const prior = [...stack], cursor = prior.pop()!; setStack(prior); setFilter({ ...filter, cursor }); }}
@@ -540,28 +546,28 @@ function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, i
     return <section className="wf-detail" ref={viewport}><div className="mb-3"><Button variant="ghost" className="-ml-2.5" onClick={back} disabled={busy || intent?.unknown}><ArrowLeft size={15}/>返回账号供给</Button></div>
  {feedback && !intent && <Alert tabIndex={-1} variant={feedback.kind === "error" ? "destructive" : "success"} role={feedback.kind === "error" ? "alert" : "status"}>{feedback.kind === "error" ? <TriangleAlert aria-hidden /> : <CheckCircle2 aria-hidden />}<AlertTitle>{feedback.message}</AlertTitle>{readFailed ? <AlertDescription>当前详情未读到，只重读本次结果。</AlertDescription> : null}{readFailed ? <AlertAction><Button variant="outline" disabled={detailBusy} onClick={() => void reread()}>只重读本次结果</Button></AlertAction> : null}</Alert>}
  {detailBusy && !detail ? <div className="wf-empty" aria-busy="true">正在读取账号详情…</div> : detailError && !detail ? <Alert variant="destructive"><TriangleAlert aria-hidden /><AlertTitle>本次详情未读到</AlertTitle><AlertDescription>{detailError}</AlertDescription><AlertAction><Button onClick={() => void reread()} disabled={busy}>重读当前账号</Button></AlertAction></Alert> : detail && <>
- <header className="mb-3 flex flex-wrap items-start justify-between gap-3 text-sm"><div className="min-w-0"><h1 id="supply-detail-title" tabIndex={-1} className="text-xl font-semibold outline-none">{(publicDefault ? publicDefault.title : version?.declaration.title) || accountNeutralTitle(publicDefault ? publicBasisVersion(publicDefault) : version)}<span className="mx-1 font-normal text-muted-foreground">/</span><span className="font-semibold">{objectLabel}</span></h1><p className="mt-1 text-muted-foreground">号主：{detail.ownerName}<span className="mx-1.5">·</span>{publicDefault ? "对外版本" : version ? "第" + version.sequence + "版 · " + reviewStateLabel(version.reviewState) : "版本未提供"}<span className="mx-1.5">·</span>修订 {detail.account.revision}</p></div><div className="flex flex-wrap gap-2">{detail.supervision.ownerLink.state === "READY" && <Button variant="outline" onClick={userTarget}>查看号主资料</Button>}<Button variant="outline" onClick={() => void copy()}>复制核对摘要</Button></div></header>
+ <header className="mb-4 flex flex-wrap items-start justify-between gap-4 text-sm"><div className="min-w-0"><div className="flex flex-wrap items-center gap-3"><h1 id="supply-detail-title" data-version-id={publicDefault?.id ?? version?.id} tabIndex={-1} className="text-xl font-semibold tabular-nums outline-none">{objectLabel}</h1><StatusBadge facts={detail.supervision.facts}/>{detail.supervision.facts.sources.length || detail.supervision.facts.historicalRead ? <Badge variant="outline">旧平台迁入</Badge> : null}</div><p className="mt-2 text-sm text-muted-foreground">{accountNeutralTitle(publicDefault ? publicBasisVersion(publicDefault) : version)}<span className="mx-2">·</span>号主：{detail.ownerName}</p></div><div className="flex flex-wrap gap-2">{can("order.read") ? <Button variant="outline" onClick={() => goSection("orders")}>查看关联订单</Button> : null}{detail.supervision.ownerLink.state === "READY" && <Button variant="outline" onClick={userTarget}>查看号主资料</Button>}<Button variant="ghost" size="icon-sm" aria-label="刷新详情" disabled={detailBusy || busy} onClick={() => void reread()}><RefreshCw className="size-4"/></Button></div></header>
  {historical && <div className="wf-notice" role="status"><p>正在查看历史版本，所有处置关闭。业务情况仍指当前账号。</p><Button variant="outline" onClick={() => { setVersionId(null); setChecked(false); setReason(""); const query: Record<string, string> = { ...initialQuery, context: section }; delete query.versionId; onQueryChange(query); }}>回到当前资料</Button></div>}
- {(() => { const g = groupConditions(detail.supervision.facts), f = detail.supervision.facts; const abnormal = g.blocked.length > 0 || g.pending.length > 0 || f.newOrders !== true; return abnormal ? <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-amber-500/10 px-4 py-2.5 text-sm" role="status"><div className="flex flex-wrap items-center gap-x-4 gap-y-1 font-semibold"><span>{f.newOrders === null ? "新单资格待核" : f.newOrders ? "可接新单" : "不可接新单"}</span><span>{g.blocked.length} 项阻塞{g.pending.length ? "、" + g.pending.length + " 项待核" : ""}</span><span className="font-medium">{f.publicVisible === null ? "公开状态待核" : f.publicVisible ? "当前公开展示" : "当前未公开"}</span></div><span className="text-xs text-muted-foreground">各项独立读取，解除一项不代表可接单</span></div> : <p className="mb-3 text-xs text-muted-foreground" role="status">当前无接新单阻塞 · {f.publicVisible ? "公开展示中" : "当前未公开"} · 资料与资源如下</p>; })()}
+
  {section === "review" ? <div className="mb-4 flex items-center justify-between border-b pb-2 text-sm"><span className="font-semibold">风险操作 · {restricted ? "复核已有限制" : "新增运营限制"}</span><Button variant="ghost" size="sm" disabled={busy || intent?.unknown} onClick={() => goSection("situation")}>返回账号资料</Button></div> : <Tabs value={section} onValueChange={v => goSection(String(v))} className="mb-4"><TabsList aria-label="账号核对分区" className="overflow-x-auto gap-5 [&>button]:shrink-0 [&>button]:px-1">{sections.filter(([key]) => key !== "review").map(([key, label]) => <TabsTrigger key={key} value={key}>{label}</TabsTrigger>)}</TabsList></Tabs>}
  {section === "situation" && <div className="grid gap-4 text-sm">
-   {groupConditions(detail.supervision.facts).blocked.length ? <ConditionCheck facts={detail.supervision.facts} target={checkTarget}/> : null}
+   {(() => { const groups = groupConditions(detail.supervision.facts), count = groups.blocked.length + groups.pending.length, code = primaryReason(detail.supervision.facts).code; return count ? <Collapsible className="border-b border-border pb-3"><CollapsibleTrigger render={<Button variant="ghost" className="h-auto w-full justify-between gap-4 px-0 py-1 text-left"/>}><span className="text-sm font-medium">{code ? condText(code) : "接单条件待核对"}</span><span className="shrink-0 text-xs text-muted-foreground">查看 {count} 项核对内容</span></CollapsibleTrigger><CollapsibleContent keepMounted className="pt-3 data-[closed]:hidden"><ConditionCheck facts={detail.supervision.facts} target={checkTarget}/></CollapsibleContent></Collapsible> : null; })()}
    {publicDefault ? <div className="space-y-3">
      <PublicBasisView basis={publicDefault}/>
-     <div className="flex flex-wrap gap-2"><Button variant="outline" disabled={contextSwitchBlocked} onClick={() => switchVersionContext(true)}>查看当前草稿</Button>{detail.supervision.ownerLink.state === "READY" && <Button variant="outline" onClick={userTarget}>查看号主资料</Button>}<Button variant="outline" onClick={() => goSection("orders")}>查看关联订单</Button></div>
+     <div className="flex flex-wrap gap-2"><Button variant="outline" disabled={contextSwitchBlocked} onClick={() => switchVersionContext(true)}>查看当前草稿</Button></div>
    </div> : version ? <div className="space-y-3">
-     <div className="flex flex-wrap gap-2">{publicDraftAccount === detail.account.id && detail.supervision.facts.publicBasis ? <Button variant="outline" disabled={contextSwitchBlocked} onClick={() => switchVersionContext(false)}>回到对外版本</Button> : null}{detail.supervision.ownerLink.state === "READY" && <Button variant="outline" onClick={userTarget}>查看号主资料</Button>}<Button variant="outline" onClick={() => goSection("orders")}>查看关联订单</Button>{can("supply.restrict") && !historical ? <Button variant="outline" onClick={() => goSection("review")}>{restricted ? "复核已有限制" : "新增运营限制"}</Button> : null}</div>
-     {!publicDraftAccount && detail.supervision.facts.publicVisible === false ? <p className="text-xs text-muted-foreground" role="status">当前没有对外版本。下面是当前资料，不是租客页面。</p> : null}
-     {!publicDraftAccount && detail.supervision.facts.publicVisible === true && !detail.supervision.facts.publicVersionId ? <p className="text-xs text-muted-foreground" role="status">这次公开读取没有版本号；下面的当前资料不能当作租客看到的版本。</p> : null}
-     {!publicDraftAccount && detail.supervision.facts.publicVersionId && version.id === detail.supervision.facts.publicVersionId ? <p className="text-xs text-muted-foreground" role="status">当前资料与租客页面一致。</p> : null}
+     <div className="flex flex-wrap gap-2">{publicDraftAccount === detail.account.id && detail.supervision.facts.publicBasis ? <Button variant="outline" disabled={contextSwitchBlocked} onClick={() => switchVersionContext(false)}>回到对外版本</Button> : null}{can("supply.restrict") && !historical ? <Button variant="outline" onClick={() => goSection("review")}>{restricted ? "复核已有限制" : "新增运营限制"}</Button> : null}</div>
+     {!publicDraftAccount && detail.supervision.facts.publicVisible === false ? <p className="text-xs text-muted-foreground" role="status">当前资料尚未发布。</p> : null}
+     {!publicDraftAccount && detail.supervision.facts.publicVisible === true && !detail.supervision.facts.publicVersionId ? <p className="text-xs text-muted-foreground" role="status">对外资料暂未核对，以下为当前资料。</p> : null}
+     {!publicDraftAccount && detail.supervision.facts.publicVersionId && version.id === detail.supervision.facts.publicVersionId ? <p className="text-xs text-muted-foreground" role="status">正在查看对外资料。</p> : null}
      <AccountCompleteView detail={detail} version={version} historicalRead={detail.supervision.facts.historicalRead}
        canReviewMedia={!historical && can("supply.review.decide")} busy={busy || readFailed} reasonReady={reason.trim().length >= 2}
        onZoom={openZoom} onQuarantine={id => begin("media", id, "QUARANTINE")} onRestore={id => begin("media", id, "APPROVE")}
        onSelectVersion={id => { if (busy || intent?.unknown) return; if (reasonIsDirty(reason)) { setVersionChoice({ id }); return; } changeArchiveVersion(id); }}
-       versionId={versionId} onRefresh={() => void reread()} refreshing={detailBusy}
+       versionId={versionId}
        actions={!historical && version.reviewState === "SUBMITTED" && can("supply.review.decide") ? <><Button variant="outline" disabled={busy || readFailed} onClick={() => begin("APPROVE")}>通过历史审核</Button><Button variant="outline" disabled={busy || readFailed} onClick={() => begin("REJECT")}>退回历史审核</Button></> : undefined}/>
-     <Collapsible className="text-xs text-muted-foreground"><CollapsibleTrigger className="group flex w-full items-center justify-between rounded-sm border-t pt-2 text-left font-medium outline-none focus-visible:ring-3 focus-visible:ring-ring/50">数据来源与旧编号<span aria-hidden="true" className="transition-transform group-data-[panel-open]:rotate-90">›</span></CollapsibleTrigger><CollapsibleContent keepMounted className="mt-2 data-[closed]:hidden"><dl className="grid gap-1.5"><div><dt>已知来源</dt><dd>{detail.supervision.facts.sources.length ? detail.supervision.facts.sources.map(s => s.sourceSystem + "/" + s.sourceEntity + " · " + s.sourceId + "（旧编号：" + (s.businessNo ?? "待核") + "）").join("；") : "未记录旧来源"}</dd></div><div><dt>旧业务编号</dt><dd>{detail.supervision.facts.legacyNumbers.length ? detail.supervision.facts.legacyNumbers.join("、") : "未记录旧业务编号"}</dd></div></dl></CollapsibleContent></Collapsible>
-   </div> : <p className="wf-empty">本账号尚无资料版本，其他对象事实仍可核对。</p>}
+     {(detail.supervision.facts.sources.length > 0 || detail.supervision.facts.legacyNumbers.length > 0) ? <Collapsible className="text-xs text-muted-foreground"><CollapsibleTrigger className="group flex w-full items-center justify-between rounded-sm border-t pt-2 text-left font-medium outline-none focus-visible:ring-3 focus-visible:ring-ring/50">来源记录<span aria-hidden="true" className="transition-transform group-data-[panel-open]:rotate-90">›</span></CollapsibleTrigger><CollapsibleContent keepMounted className="mt-2 data-[closed]:hidden"><dl className="grid gap-1.5"><div><dt>迁入来源</dt><dd>{detail.supervision.facts.sources.length ? detail.supervision.facts.sources.map(s => s.sourceSystem + "/" + s.sourceEntity + " · " + s.sourceId + "（旧编号：" + (s.businessNo ?? "待核") + "）").join("；") : "未记录旧来源"}</dd></div><div><dt>旧业务编号</dt><dd>{detail.supervision.facts.legacyNumbers.length ? detail.supervision.facts.legacyNumbers.join("、") : "未记录旧业务编号"}</dd></div></dl></CollapsibleContent></Collapsible> : null}
+   </div> : detail.supervision.facts.historicalRead ? <ImportedAccountView read={detail.supervision.facts.historicalRead}/> : <p className="wf-empty">本账号尚无资料版本，其他对象事实仍可核对。</p>}
  </div>}
  {section === "records" && <div className="grid gap-4 text-sm"><section><h2 className="mb-2 text-base font-semibold">运营限制记录</h2>{detail.supervision.restrictionHistory.state === "NOT_RECORDED" ? <p className="text-muted-foreground">限制历史未提供</p> : detail.supervision.restrictionHistory.items.length ? <ul className="divide-y">{detail.supervision.restrictionHistory.items.map(e => <li key={e.id} className="flex flex-wrap justify-between gap-2 py-2"><span>{e.restricted === true ? "施加限制" : e.restricted === false ? "解除限制" : "处置状态未记录"} · {e.reason ?? "原因未记录"}</span><span className="text-xs text-muted-foreground">{e.actorName ?? "处理人未记录"} · {fullShanghaiTime(e.occurredAt)}</span></li>)}</ul> : <p className="text-muted-foreground">最近 {detail.supervision.restrictionHistory.limit} 条已记录事件中没有限制事件。</p>}</section><section><h2 className="mb-2 text-base font-semibold">资料版本</h2>{detail.supervision.changes ? <p>相对第{detail.supervision.changes.previousSequence}版{detail.supervision.changes.changed ? "有资料变化" : "无资料变化"}。<Button variant="link" type="button" className="ml-2 hover:underline" onClick={() => goSection("changes")}>查看差异 ›</Button></p> : <p className="text-muted-foreground">没有更早的资料版本记录。</p>}</section></div>}
  {section === "changes" && <div className="grid gap-4 text-sm lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]"><Card size="sm" className="min-w-0 px-4"><h2 className="text-base font-semibold">本版申报与对应图片</h2>{publicDefault ? <PublicBasisView basis={publicDefault}/> : version ? <><Table className="text-sm"><TableHeader><TableRow><TableHead>申报项</TableHead><TableHead>{previous ? "前版 " + previous.sequence : "前版未提供"}</TableHead><TableHead>当前第{version.sequence}版</TableHead></TableRow></TableHeader><TableBody>{inventoryRows(version, detail.previousDeclaration, detail.previousPresentation?.items).map(row => <TableRow key={row.itemId}><TableHead>{row.name} · {row.unit}</TableHead><TableCell>{row.previous}</TableCell><TableCell>{row.current}</TableCell></TableRow>)}</TableBody></Table>{image(currentMedia, "本版相关展示图")}<p className="wf-hint">前版差异来自记录的资料版本，不作自动风险判断；完整字段在档案中核对。</p></> : <p>当前没有资料版本，不能编造库存或图片。</p>}</Card><Card size="sm" className="min-w-0 px-4"><h2 className="text-base font-semibold">核对结论与处理</h2>{publicDefault ? <Alert role="status"><AlertTitle>对外版本只读</AlertTitle><AlertDescription><p>正在查看对外版本 {publicDefault.id}。审核和图片处置属于当前草稿，请先明确切换后核对。</p><Button variant="outline" disabled={contextSwitchBlocked} onClick={() => switchVersionContext(true)}>查看当前草稿</Button></AlertDescription></Alert> : currentMedia && can("supply.review.decide") ? <><label className="grid gap-1.5 text-sm font-medium">本次图片核对说明<Textarea aria-label="本次图片核对说明" value={reason} disabled={historical || readFailed || busy} onChange={e => setReason(e.target.value)} maxLength={500}/></label><Button variant="destructive" disabled={historical || readFailed || busy || reason.trim().length < 2 || !currentMedia.mediaRevision || !currentMedia.byteHash} onClick={() => begin("media", currentMedia.assetId, currentMedia.reviewState === "QUARANTINED" ? "APPROVE" : "QUARANTINE")}>{currentMedia.reviewState === "QUARANTINED" ? "核对后恢复本图" : "确认前核对并隔离本图"}</Button><p className="wf-hint">确认绑定当前账号修订、资料版、图片修订与字节摘要；其他阻断仍独立核对。</p></> : <p>{currentMedia ? "当前没有图片处置权限，可核对并交受权人员处理。" : initialQuery.assetId ? "所选图片未绑定当前版本，只能核对历史/未绑定来源；合法后续处理合同尚待补齐。" : "没有可处置的当前展示图。"}来源缺失不认定图文正确。</p>}<div className="wf-task-actions">{detail.supervision.ownerLink.state === "READY" && <Button variant="outline" onClick={userTarget}>查看当前号主资料</Button>}<Button variant="outline" onClick={() => void copy()}>复制修订核对摘要</Button></div></Card>{can("supply.duplicate.review") && !historical ? <Card size="sm" className="min-w-0 px-4"><h2 className="text-base font-semibold">疑似重复线索</h2><p className="text-xs text-muted-foreground">仅记录人工判断，不自动合并账号或改变归属。</p>{detail.duplicateHints.map(hint => <p key={hint.id} className="text-sm">{hint.result === "DISTINCT" ? "已判断为不同账号" : hint.result === "POSSIBLE_SAME" ? "可能为同一账号" : "待核对"}：{hint.reason}</p>)}<label className="mt-2 grid gap-1 text-sm font-medium">关联队列中的另一个账号<SupplySelect label="关联队列中的另一个账号" value={related} onValueChange={setRelated} disabled={busy} options={[{ value: "", label: "请选择同游戏账号" }, ...relatedItems.filter(item => item.id !== detail.account.id && item.game_id === detail.account.game_id).map(item => ({ value: item.id, label: (item.title || "未命名资料") + " · " + item.owner_name }))]}/></label>{!currentMedia ? <p className="text-xs text-muted-foreground">记录线索需要至少一张账号图片作为证据。</p> : null}<Button variant="outline" size="sm" disabled={busy || !related || !currentMedia} onClick={() => begin("duplicate")}>记录关联线索</Button></Card> : null}</div>}

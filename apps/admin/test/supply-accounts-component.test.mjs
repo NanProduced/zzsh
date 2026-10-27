@@ -15,6 +15,45 @@ function workDetail() {
 }
 const tick = async (h) => { for (let i = 0; i < 6; i++) await h.settle(); };
 
+test('account list has readable fees, hides zero stock and reports verified total pages', async t => {
+  const current = { ...row, title: 'old platform imported title', facts: { ...facts, reasons: [], staffRestricted: false, newOrders: true }, summary: {
+    versionId: 'v-a', materials: [{ itemId: 'zero', name: '零库存探针', quantity: '0', unit: 'PIECE' }, { itemId: 'stock', name: '正库存探针', quantity: '2', unit: 'PIECE' }, { itemId: 'unknown', name: '数量未知探针', quantity: null, unit: 'PIECE' }],
+    haff: { quantity: '1000000' }, term: { termSeconds: '172800', dailyConsumption: '10000000' }, login: { displayName: 'QQ扫码' }, fullPayout: 'NOT_SELECTED', baseDeposit: { amountCents: '5000' },
+    feeSummary: { completeness: 'COMPLETE', haffRental: { amount: '100.00' }, materials: { amount: '11.00' }, resourceTotal: { amount: '111.00' } },
+  } };
+  const h = await mountHarness(t, { permissions, fetchImpl: async () => json({ ...page, items: [current], total: 41, nextCursor: 'next' }) });
+  await tick(h);
+  const first = h.el.querySelector('tbody td'), resources = h.el.querySelector('[data-account-resources]'), fees = h.el.querySelector('[data-account-fees]');
+  assert.match(first.textContent, /TEST-A/); assert.doesNotMatch(first.textContent, /old platform imported title|当前草稿|对外版/);
+  assert.match(resources.textContent, /正库存探针 2件/); assert.match(resources.textContent, /数量未知探针 数量未知/); assert.doesNotMatch(resources.textContent, /零库存探针/);
+  assert.match(fees.querySelector('strong').textContent, /111\.00/); assert.match(fees.textContent, /哈夫币租金.*100\.00/); assert.match(fees.textContent, /基础押金.*50\.00/); assert.doesNotMatch(fees.textContent, /闭合/);
+  assert.equal(h.el.querySelector('[data-account-terms]').querySelectorAll('svg').length, 4);
+  assert.match(h.el.querySelector('[data-slot="admin-list-pagination"]').textContent, /共 41 个账号/); assert.match(h.el.textContent, /第 1 页 \/ 共 3 页/);
+  await h.click(h.el.querySelector('[aria-label="下一页"]')); await tick(h); assert.match(h.el.textContent, /第 2 页 \/ 共 3 页/);
+  assert.equal(h.writes.length, 0);
+});
+
+test('a shrunken total returns an empty stale cursor page to page one without losing the query', async t => {
+  const calls = []; let first = true;
+  const h = await mountHarness(t, { permissions, initialQuery: { queryKind: 'account', q: 'TEST-A' }, fetchImpl: async url => {
+    calls.push(new URL(url));
+    if (url.searchParams.has('cursor')) return json({ ...page, items: [], total: 1, nextCursor: null });
+    const result = { ...page, total: first ? 41 : 1, nextCursor: first ? 'older-page' : null }; first = false; return json(result);
+  } });
+  await tick(h); await h.click(h.el.querySelector('[aria-label="下一页"]')); await tick(h); await tick(h);
+  assert.equal(calls.length, 3); assert.equal(calls.at(-1).searchParams.has('cursor'), false); assert.equal(calls.at(-1).searchParams.get('q'), 'TEST-A');
+  assert.match(h.el.textContent, /第 1 页 \/ 共 1 页/); assert.equal(h.writes.length, 0);
+});
+
+test('the mobile owner link uses the same authorized route without also opening quick view', async t => {
+  const current = { ...row, ownerLink: { state: 'READY' } };
+  const h = await mountHarness(t, { permissions: [...permissions, 'user.directory.read'], fetchImpl: async url => url.pathname.endsWith('/listing-reviews') ? json({ ...page, items: [current] }) : json(workDetail()) });
+  await tick(h);
+  const owner = h.el.querySelector('#supply-card-a [data-account-identity] button'); assert(owner && !owner.disabled);
+  await h.click(owner); await tick(h);
+  assert.match(h.routes.at(-1).path, /users\/owner-a/); assert.equal(h.el.querySelector('[data-slot="dialog-content"]'), null); assert.equal(h.writes.length, 0);
+});
+
 test('a 20-digit business number is submitted as an exact clue instead of being rejected as a phone', async (t) => {
   const orderNo = '20260913125844629986', calls = [];
   const h = await mountHarness(t, { permissions, fetchImpl: async url => { if (url.pathname.endsWith('/listing-reviews')) { calls.push(url); return json(page); } return json(workDetail()); } });
@@ -41,7 +80,7 @@ test('daily list uses seven columns, 20 rows and shared cursor pagination withou
     return json(workDetail());
   } });
   await tick(h);
-  assert.deepEqual([...h.el.querySelectorAll('thead th')].map(th => th.textContent.trim()), ['账号 / 号主', '核心资源', '出租条件', '基础费用 / 租客押金', '业务状态', '更新时间', '操作']);
+  assert.deepEqual([...h.el.querySelectorAll('thead th')].map(th => th.textContent.trim()), ['账号 / 号主', '核心资源', '出租条件', '基础报价', '业务状态', '更新时间', '操作']);
   assert.equal(new URL(calls[0], 'http://localhost').searchParams.get('limit'), '20');
   assert.ok(!h.el.querySelector('tbody').textContent.includes('当前无接新单阻塞'), 'ready status is not repeated as a reason');
   assert.ok(h.el.textContent.includes('不可接新单，原因未提供'));
@@ -116,7 +155,7 @@ test('U1 account filters are real server parameters, exact, resettable and recov
   await choose('接单资格', '可接新单');
   params = await waitParam('eligibility', 'ELIGIBLE');
   assert.equal(params.has('cursor'), false);
-  await choose('账号来源', '旧平台');
+  await choose('账号来源', '旧平台迁入');
   params = await waitParam('source', 'LEGACY');
   await choose('登录方式', 'QQ扫码');
   params = await waitParam('loginMethod', 'login_qq_qr');
@@ -187,8 +226,8 @@ test('U2 the first column has three business layers, a new number only, and one 
   await tick(h);
   for (const selector of ['#supply-open-a', '#supply-card-a']) {
     const text = h.el.querySelector(selector).textContent;
-    assert.match(text, /10 M 哈夫币 · 顶级安全箱 · 巅峰 3/);
-    assert.match(text, /编号：ZZ-2026-000001/);
+    assert.match(text, /10 M 哈夫币[\s\S]*顶级安全箱 · 巅峰/);
+    assert.match(text, /ZZ-2026-000001/);
     assert.equal(text.includes('OLD-9'), false, 'the old number stays out of the first column');
     assert.match(text, /旧平台/);
     assert.match(text, /这是一位名字很长的号主用于核对换行/);
@@ -197,7 +236,7 @@ test('U2 the first column has three business layers, a new number only, and one 
   const unassigned = { ...identityRow, displayNo: null, facts: { ...identityFacts, sources: [] }, summary: null };
   const h2 = await mountHarness(t, { permissions, fetchImpl: async url => url.pathname.endsWith('/listing-reviews') ? json({ ...page, items: [unassigned] }) : json(workDetail()) });
   await tick(h2);
-  assert.match(h2.el.querySelector('#supply-open-a').textContent, /编号未分配/);
+  assert.match(h2.el.querySelector('#supply-open-a').textContent, /编号待分配/);
   assert.equal(h2.el.querySelector('#supply-open-a').textContent.includes('OLD-9'), false);
   assert.equal(h2.writes.length, 0);
   assert.equal(h.writes.length, 0);
@@ -225,7 +264,7 @@ test('row click opens quick view; pending counted; removing permission clears th
   await h.click(tr); await tick(h);
   const aside = h.el.querySelector('[data-slot="dialog-content"]');
   assert.ok(aside, 'drawer opened from row click');
-  assert.ok(aside.textContent.includes('1 项已确认阻塞、1 项待核'), 'pending counted in banner');
+  assert.ok(aside.textContent.includes('1 项需处理 · 待核 1 项'), 'pending counted in banner');
   assert.ok(aside.textContent.includes('不可接新单'));
   assert.ok(!aside.textContent.includes('全部满足'));
   h.browser.document.dispatchEvent(new h.browser.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
@@ -272,23 +311,23 @@ test('U3 account base fees show the exact same-version split in list, quick view
   await tick(h);
   const cell = h.el.querySelector('#supply-open-a td:nth-child(4)').textContent;
   assert.match(cell, /哈夫币租金\s*¥100\.00/);
-  assert.match(cell, /物资费\s*¥0\.00/);
+  assert.match(cell, /物资预付\s*¥0\.00/);
   assert.match(cell, /租客基础押金\s*¥50\.00/);
-  assert.match(cell, /原预付三项已闭合/);
+  assert.doesNotMatch(cell, /原预付三项已闭合/);
   await h.click(h.el.querySelector('#supply-open-a')); await tick(h);
   let dialog = h.el.querySelector('[data-slot="dialog-content"]').textContent;
   assert.match(dialog, /哈夫币租金\s*¥100\.00/);
-  assert.match(dialog, /物资费\s*¥0\.00/);
-  assert.match(dialog, /租客基础押金（号主申报）\s*¥50\.00/);
-  assert.match(dialog, /资源费合计（资料版冻结参考）\s*¥100\.00/);
+  assert.match(dialog, /物资预付\s*¥0\.00/);
+  assert.match(dialog, /(?:租客)?基础押金\s*¥50\.00/);
+  assert.match(dialog, /资源费(?:合计)?\s*¥100\.00/);
   h.browser.document.dispatchEvent(new h.browser.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   await tick(h); await new Promise(r => setTimeout(r, 50)); await tick(h);
   await h.render('admin', permissions, 'a', { context: 'situation' }); await tick(h);
   const complete = h.el.textContent;
   assert.match(complete, /哈夫币租金\s*¥100\.00/);
-  assert.match(complete, /物资费\s*¥0\.00/);
-  assert.match(complete, /租客基础押金（号主申报）\s*¥50\.00/);
-  assert.match(complete, /资源费合计（资料版冻结参考）\s*¥100\.00/);
+  assert.match(complete, /物资预付\s*¥0\.00/);
+  assert.match(complete, /(?:租客)?基础押金\s*¥50\.00/);
+  assert.match(complete, /资源费(?:合计)?\s*¥100\.00/);
   assert.equal(h.writes.length, 0);
 });
 test('quick view reuses loaded attributes and marks quote provenance without fetching every row', async (t) => {
@@ -308,8 +347,8 @@ test('quick view reuses loaded attributes and marks quote provenance without fet
   assert.match(text, /全额包赔.*已选/);
   assert.match(text, /212.77/);
   assert.match(text, /fixture-release-7/);
-  assert.match(text, /非按当前规则重新试算/);
-  assert.match(text, /租客档位口径未提供/);
+  assert.match(text, /规则 fixture-release-7/);
+  assert.match(text, /租客实际费用按本人报价核定/);
   assert.equal(h.writes.length, 0);
 });
 
@@ -360,38 +399,40 @@ test('F2 public v1 stays the single basis across list, quick view and complete d
   current.supervision.facts = publicFacts;
   const h = await mountHarness(t, { permissions, fetchImpl: async url => url.pathname.endsWith('/listing-reviews') ? json({ ...page, items: [publicRow] }) : json(current) });
   await tick(h);
-  assert.match(h.el.querySelector('#supply-open-a').textContent, /10 M 哈夫币 · 顶级安全箱 · 巅峰/);
-  assert.ok(h.el.querySelector('#supply-open-a').textContent.includes('对外版'));
+  assert.match(h.el.querySelector('#supply-open-a').textContent, /10 M 哈夫币[\s\S]*顶级安全箱 · 巅峰/);
+  assert.equal(h.el.querySelector('#supply-open-a [data-account-identity]').textContent.includes('对外版'), false, 'display version is not an account origin');
   await h.click(h.el.querySelector('#supply-open-a')); await tick(h);
   let dialog = h.el.querySelector('[data-slot="dialog-content"]');
-  assert.match(dialog.textContent, /10 M 哈夫币 · 顶级安全箱 · 巅峰/);
+  assert.match(dialog.textContent, /10 M 哈夫币[\s\S]*顶级安全箱 · 巅峰/);
   assert.match(dialog.textContent, /版本 v-public/);
   assert.match(dialog.textContent, /摘要 hash-public/);
   assert.match(dialog.textContent, /哈夫币租金\s*¥100\.00/);
-  assert.match(dialog.textContent, /物资费\s*¥11\.00/);
-  assert.match(dialog.textContent, /资料租期（冻结原值）\s*2 天/);
+  assert.match(dialog.textContent, /物资预付\s*¥11\.00/);
+  assert.match(dialog.textContent, /预计租期\s*2 天/);
   assert.equal(dialog.textContent.includes('旧号 OLD-7'), false);
   assert.equal(dialog.textContent.includes('对外标题'), false, 'the original public title is not the neutral heading');
   assert.equal(dialog.textContent.includes('212.77'), false);
   await h.click([...dialog.querySelectorAll('button')].find(button => button.textContent === '查看当前草稿')); await tick(h);
   dialog = h.el.querySelector('[data-slot="dialog-content"]');
-  assert.match(dialog.textContent, /12 M 哈夫币 · 未确认（代码 box-a）/);
+  assert.match(dialog.querySelector('[data-slot="dialog-title"]').textContent, /12 M 哈夫币/);
+  assert.doesNotMatch(dialog.querySelector('[data-slot="dialog-title"]').textContent, /代码 box-a/);
   assert.equal(dialog.textContent.includes('旧号 OLD-7'), false, 'the old original title never becomes the neutral heading');
   assert.match(dialog.textContent, /摘要 hash-current/);
-  assert.match(dialog.textContent, /资料租期（冻结原值）\s*3 天/);
+  assert.match(dialog.textContent, /预计租期\s*3 天/);
   assert.match(dialog.textContent, /212\.77/);
   await h.click([...dialog.querySelectorAll('button')].find(button => button.textContent === '回到对外版')); await tick(h);
   assert.match(h.el.querySelector('[data-slot="dialog-content"]').textContent, /版本 v-public/);
   await h.render('admin', permissions, 'a', { context: 'situation' }); await tick(h);
   const complete = h.el.textContent;
-  assert.match(complete, /租客当前看到的版本/);
-  assert.match(complete, /版本 v-public · 摘要 hash-public/);
+  assert.ok(h.el.querySelector('[aria-label="租客当前看到的版本"]'));
+  assert.match(complete, /版本v-public/); assert.match(complete, /内容摘要hash-public/);
   assert.match(complete, /哈夫币租金\s*¥100\.00/);
-  assert.match(complete, /资料租期（冻结原值）\s*2 天/);
+  assert.match(complete, /预计租期\s*2 天/);
   assert.equal(complete.includes('212.77'), false, 'the complete detail starts from the same public basis');
   const draftButton = [...h.el.querySelectorAll('button')].find(button => button.textContent === '查看当前草稿');
   assert.ok(draftButton, 'the draft is reachable only through the explicit switch');
   await h.click(draftButton); await tick(h);
+  await h.click(h.btn('版本与审核记录')); await tick(h);
   assert.match(h.el.textContent, /旧号 OLD-7 原题/);
   assert.equal(h.writes.length, 0);
 });
@@ -451,17 +492,17 @@ test('R2 a known 111.00 total survives unknown components in list, quick view an
   assert.match(cell, /哈夫币租金\s*分项待核/);
   await h.click(h.el.querySelector('#supply-open-a')); await tick(h);
   let dialog = h.el.querySelector('[data-slot="dialog-content"]').textContent;
-  assert.match(dialog, /资源费合计（资料版冻结参考）\s*¥111\.00/);
+  assert.match(dialog, /资源费(?:合计)?\s*¥111\.00/);
   assert.match(dialog, /哈夫币租金\s*分项待核/);
-  assert.match(dialog, /物资费\s*分项待核/);
-  assert.equal(dialog.includes('资源费合计（资料版冻结参考）\s*未提供'), false);
+  assert.match(dialog, /物资预付\s*分项待核/);
+  assert.equal(dialog.includes('资源费(?:合计)?\s*未提供'), false);
   h.browser.document.dispatchEvent(new h.browser.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   await tick(h); await new Promise(r => setTimeout(r, 50)); await tick(h);
   await h.render('admin', permissions, 'a', { context: 'situation' }); await tick(h);
   const complete = h.el.textContent;
-  assert.match(complete, /资源费合计（资料版冻结参考）\s*¥111\.00/);
+  assert.match(complete, /资源费(?:合计)?\s*¥111\.00/);
   assert.match(complete, /哈夫币租金\s*分项待核/);
-  assert.match(complete, /物资费\s*分项待核/);
+  assert.match(complete, /物资预付\s*分项待核/);
   assert.equal(h.writes.length, 0);
 });
 test('historical list, mobile card and quick view expose existing source facts without new queries or current-quote claims', async (t) => {
@@ -487,10 +528,10 @@ test('historical list, mobile card and quick view expose existing source facts w
   await tick(h);
   for (const selector of ['#supply-open-a', '#supply-card-a']) {
     const text = h.el.querySelector(selector).textContent;
-    assert.match(text, /哈夫币租金 历史 ¥125.30/);
-    assert.match(text, /物资费 历史 ¥0.00/);
-    assert.match(text, /租客基础押金 历史 ¥0.00/);
-    assert.match(text, /历史 97 M 哈夫币/);
+    assert.match(text, /哈夫币租金\s*¥125.30/);
+    assert.match(text, /物资预付\s*¥0.00/);
+    assert.match(text, /基础押金\s*¥0.00/);
+    assert.match(text, /97 M 哈夫币/);
     assert.match(text, /基础安全箱/);
     assert.equal(text.includes('OLD-7'), false, 'the old source number stays in the detail trace, not the first column');
     assert.match(text, /旧平台/);
@@ -499,13 +540,13 @@ test('historical list, mobile card and quick view expose existing source facts w
   await h.click(h.el.querySelector('#supply-open-a')); await tick(h);
   const section = h.el.querySelector('[data-historical-summary]');
   assert.ok(section, 'historical details are separate from current declarations');
-  assert.match(section.textContent, /历史租金.*¥125.30/);
-  assert.match(section.textContent, /历史物资费.*¥0.00/);
-  assert.match(section.textContent, /历史押金.*¥0.00/);
-  assert.match(section.textContent, /历史租期.*10 天/);
+  assert.match(section.textContent, /租金.*¥125.30/);
+  assert.match(section.textContent, /物资费.*¥0.00/);
+  assert.match(section.textContent, /押金.*¥0.00/);
+  assert.match(section.textContent, /租期.*10 天/);
   assert.match(section.textContent, /历史编号 OLD-7/);
   assert.match(section.textContent, /来源更新：/);
-  const toggle = [...h.el.querySelectorAll('button')].find(button => button.textContent.trim() === '历史来源记录（仅参考）');
+  const toggle = [...h.el.querySelectorAll('button')].find(button => button.textContent.trim() === '迁入前记录');
   assert.ok(toggle);
   assert.equal(toggle.getAttribute('aria-expanded'), 'false');
   await h.click(toggle); await tick(h);
@@ -513,6 +554,12 @@ test('historical list, mobile card and quick view expose existing source facts w
   assert.match(section.textContent, /弹药.*数量待核/);
   assert.ok(!section.textContent.includes('冻结报价'));
   assert.equal(detailReads, 1, 'only the existing quick-view detail read is used');
+  h.browser.document.dispatchEvent(new h.browser.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await tick(h);
+  await h.render('admin', permissions, 'a', { context: 'situation' }); await tick(h);
+  const imported = h.el.querySelector('[data-imported-account]');
+  assert.ok(imported, 'an imported account without a native version still has a complete readable record');
+  assert.match(imported.textContent, /97 M 哈夫币/); assert.match(imported.textContent, /迁入时金额/); assert.match(imported.textContent, /125\.30/);
+  assert.equal(detailReads, 2, 'the full page uses its one existing detail read');
   assert.equal(h.writes.length, 0);
 });
 
@@ -563,7 +610,7 @@ test('complete account detail preserves dirty reason when version-switch confirm
   const h = await mountHarness(t, { permissions, initialAccountId: 'a', initialQuery: { context: 'review' }, fetchImpl: async () => { reads++; return json(value); } });
   await tick(h); await h.fillReason('fixture unsaved version check');
   await h.click(h.btn('返回账号资料')); await tick(h);
-  await h.click(h.btn('历史版本与审核记录')); await tick(h);
+  await h.click(h.btn('版本与审核记录')); await tick(h);
   await h.click(h.btn('第 0 版 · 已发布(直发)')); await tick(h);
   assert.ok(h.el.querySelector('[data-slot="dialog-content"]'));
   await h.click(h.btn('保留说明')); await tick(h);
@@ -657,10 +704,10 @@ test('FLOW02 Root F3: public image review is read-only, explicit draft remains u
  const d=detail({...accountA,display_no:'PUBLIC-CONTEXT',owner_user_id:'owner-a',staff_restricted:false},'SUBMITTED');d.version.id='draft-v3';d.version.sequence='3';d.version.declaration.title='Private draft v3';d.version.declaration.mediaBindings[0].byteHash='a'.repeat(64);d.version.declaration.mediaBindings[0].mediaRevision='2';
  d.contextKey='root-f3';d.supervision={historical:false,facts:{...facts,publicVisible:true,newOrders:true,reasons:[],staffRestricted:false,publicVersionId:'public-v1',publicBasis:{id:'public-v1',accountId:'a',releaseId:'release-v1',title:'Original public v1',description:null,attributes:{},presentation:{items:[],skins:[],entitlements:[]},media:[],quote:null,termOption:null,fullPayoutSelected:null,publishedAt:'2026-10-21T01:02:03Z'}},changes:null,previousVersion:null,restrictionHistory:{state:'NOT_RECORDED',items:[],limit:20},ownerLink:{state:'READY',userId:'owner-a'},orders:{state:'READY',items:[],total:0}};
  let resolveFirst,attempts=0;const h=await mountHarness(t,{permissions:all,initialAccountId:'a',initialQuery:{context:'situation'},strict:true,fetchImpl:async(url,init)=>{if(init.method==='POST'){if(++attempts===1)return await new Promise(resolve=>{resolveFirst=()=>resolve(json({error:{code:'INTERNAL_ERROR'}},500));});return json({error:{code:'INTERNAL_ERROR'}},500);}if(url.pathname.endsWith('/listing-reviews'))return json({items:[]});return json(d);}});t.after(()=>resolveFirst?.());await tick(h);
- assert.match(h.el.querySelector('#supply-detail-title').textContent,/Original public v1/);await h.click(h.btn('审核与图片'));await tick(h);assert.equal(h.el.querySelector('textarea[aria-label="本次图片核对说明"]'),null);assert(!h.btn('确认前核对并隔离本图'));assert.match(h.el.textContent,/疑似重复线索/);assert.equal(h.writes.length,0);
- await h.click(h.btn('查看当前草稿'));await tick(h);assert.match(h.el.querySelector('#supply-detail-title').textContent,/Private draft v3/);await h.fillReason('source-bound current draft review');assert.equal(h.btn('确认前核对并隔离本图').disabled,false);
+ assert.equal(h.el.querySelector('#supply-detail-title').dataset.versionId,'public-v1');await h.click(h.btn('审核与图片'));await tick(h);assert.equal(h.el.querySelector('textarea[aria-label="本次图片核对说明"]'),null);assert(!h.btn('确认前核对并隔离本图'));assert.match(h.el.textContent,/疑似重复线索/);assert.equal(h.writes.length,0);
+ await h.click(h.btn('查看当前草稿'));await tick(h);assert.equal(h.el.querySelector('#supply-detail-title').dataset.versionId,'draft-v3');await h.fillReason('source-bound current draft review');assert.equal(h.btn('确认前核对并隔离本图').disabled,false);
  await h.click(h.btn('账号资料'));await tick(h);const back=h.btn('回到对外版本');assert(back&&!back.disabled);await h.click(h.btn('通过历史审核'));await tick(h);assert.equal(back.disabled,true,'an open version-bound confirmation cannot change context');
- await h.click(h.btn('确认通过历史审核'));await tick(h);assert.equal(h.writes.length,1);assert(resolveFirst);assert.equal(back.disabled,true,'in-flight request keeps the selected version');await h.click(back);assert.match(h.el.querySelector('#supply-detail-title').textContent,/Private draft v3/);
+ await h.click(h.btn('确认通过历史审核'));await tick(h);assert.equal(h.writes.length,1);assert(resolveFirst);assert.equal(back.disabled,true,'in-flight request keeps the selected version');await h.click(back);assert.equal(h.el.querySelector('#supply-detail-title').dataset.versionId,'draft-v3');
  resolveFirst();await tick(h);assert.match(h.el.textContent,/结果未确认/);assert.equal(back.disabled,true,'UNKNOWN cannot return to a writable alternate context');
  await h.click(h.btn('确认通过历史审核'));await tick(h);assert.equal(h.writes.length,2);assert.equal(h.writes[0].key,h.writes[1].key);assert.equal(h.writes[0].rawBody,h.writes[1].rawBody);
 });

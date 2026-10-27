@@ -51,6 +51,18 @@ test("same public basis keeps its own release, ratio and line pricing metadata",
   assert.equal(publicBasisVersion({ ...basis, releaseId: null }).releaseId, null);
 });
 
+test("new account declarations preserve true false and unknown without inferring an answer", () => {
+  const version = { declaration: { attributes: {} } };
+  const values = attributes => new Map(attributeFacts({ ...version, declaration: { attributes } }).map(item => [item.label, item.value]));
+  assert.equal(values({ next_season_pass: true, demulan_unlocked: false }).get('下赛季通行证'), '计划购买');
+  assert.equal(values({ next_season_pass: true, demulan_unlocked: false }).get('德穆兰'), '未解锁');
+  assert.equal(values({ next_season_pass: false, demulan_unlocked: true }).get('下赛季通行证'), '不计划购买');
+  for (const value of [undefined, null, 'false', 0]) {
+    assert.equal(values({ next_season_pass: value, demulan_unlocked: value }).get('下赛季通行证'), '未提供');
+    assert.equal(values({ next_season_pass: value, demulan_unlocked: value }).get('德穆兰'), '未提供');
+  }
+});
+
 test("mixed account numbers keep canonical ZZ/AC separate from numeric legacy sources", () => {
   assert.equal(accountNumberLabel("ZZ20261018000001"), "账号 ZZ20261018000001");
   assert.equal(accountNumberLabel("AC9000000000002"), "账号 AC9000000000002");
@@ -170,7 +182,7 @@ test("attribute facts mirror the API fields and flag unconfirmed codes", () => {
   };
   const facts = attributeFacts(version);
   const byLabel = Object.fromEntries(facts.map((fact) => [fact.label, fact]));
-  assert.equal(facts.length, 15);
+  assert.equal(facts.length, 17);
   assert.equal(byLabel["小段位"].value, "未申报");
   assert.equal(byLabel["本人脸声明"].value, "未提供");
   assert.equal(byLabel["封禁记录声明"].value, "未提供");

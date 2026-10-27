@@ -10,6 +10,30 @@ const page=items=>({contractVersion:'admin-supervision.read.v1',contextKey:'fixt
 const tick=async h=>{for(let i=0;i<5;i++)await h.settle();};
 async function prepare(t,fetchImpl,options={}){const h=await mountHarness(t,{permissions,initialAccountId:'a',initialQuery:{context:'review'},fetchImpl,strict:true,...options});await tick(h);await h.fillReason('fixture: verify account/version and retain independent blockers');await h.click(h.btn('核对后确认运营限制'));await tick(h);return h;}
 const confirm=h=>h.click(h.btn('确认'+ '施加运营限制'));
+
+test('a blank account profile summarizes missing groups without pretending they are zero or false', async t => {
+  const value = workDetail(); value.version.declaration.attributes = {}; value.version.declaration.inventory = []; value.version.quote = null; value.version.termOption = null;
+  const h = await mountHarness(t, { permissions, initialAccountId: 'a', initialQuery: { context: 'situation' }, fetchImpl: async () => json(value) }); await tick(h);
+  const body = h.el.querySelector('[data-account-profile]');
+  assert.match(body.textContent, /下赛季通行证、德穆兰：尚未提供|本人脸声明、封禁记录声明、下赛季通行证、德穆兰：尚未提供/);
+  assert.doesNotMatch(body.textContent, /不计划购买|未解锁|无封禁记录/);
+  assert.equal(h.writes.length, 0);
+});
+
+test('account profile groups declarations, preserves private attribution and lets zero stock be inspected', async t => {
+  const value = workDetail();
+  value.version.declaration.attributes = { next_season_pass: false, demulan_unlocked: true, face_is_self: false, ban_record: true };
+  value.version.management = { infoSource: { value: '朋友介绍', name: '朋友介绍' } };
+  value.version.declaration.inventory = [{ itemId: 'zero', quantity: '0' }, { itemId: 'stock', quantity: '2' }, { itemId: 'unknown', quantity: null }];
+  value.version.presentation.items = [{ id: 'zero', name: '零库存探针', unit: 'PIECE' }, { id: 'stock', name: '正库存探针', unit: 'PIECE' }, { id: 'unknown', name: '未知库存探针', unit: 'PIECE' }];
+  const h = await mountHarness(t, { permissions, initialAccountId: 'a', initialQuery: { context: 'situation' }, fetchImpl: async () => json(value) }); await tick(h);
+  const body = h.el.querySelector('.supervision-detail-body');
+  assert.match(body.textContent, /下赛季通行证不计划购买/); assert.match(body.textContent, /德穆兰已解锁/); assert.match(body.textContent, /了解渠道（内部）朋友介绍/);
+  assert.match(body.textContent, /正库存探针/); assert.match(body.textContent, /未知库存探针/); assert.doesNotMatch(body.textContent, /零库存探针/);
+  assert.match(body.querySelector('[aria-label="基础报价"]').textContent, /资源费合计/);
+  await h.click(h.el.querySelector('[aria-label="显示零数量项"]')); assert.match(body.textContent, /零库存探针/);
+  assert.deepEqual(value.version.declaration.inventory.map(item => item.quantity), ['0', '2', null]); assert.equal(h.writes.length, 0);
+});
 test('detail pane renders declaration, catalog resources and quote lines', async t => {
   const value = detail({ ...accountA, display_no: 'TEST-A', owner_user_id: 'owner-a' }, 'PUBLISHED');
   value.version.declaration.attributes = { ...value.version.declaration.attributes, face_is_self: false, ban_record: true };

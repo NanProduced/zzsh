@@ -491,9 +491,10 @@ test('policy publish approval summary hides entitlement target fields and does n
   const h=await ui(t);
   const business={businessType:'membership',summaryAvailable:true,summary:{gameName:'不应显示的游戏',targetUserId:'不应显示的用户',entitlementKind:'FRIEND',startsAt:'2026-11-01T00:00:00Z',endsAt:'2026-11-20T00:00:00Z',policyDraft:{id:'draft-policy-1',version:3,effectiveAtUtc:'2026-10-31T04:07:00Z',ruleReleaseId:'release-1',priceVersionId:'price-1',hash:'a'.repeat(64)},reason:'发布会员政策'}};
   const html=renderToString(createElement(h.businessSummary.BusinessSummary,{business,operationCode:'membership.benefit.policy.publish'}));
-  assert.match(html,/政策草稿/);assert.match(html,/draft-policy-1/);assert.match(html,/v3/);assert.match(html,/2026年10月31日/);
+  assert.match(html,/2026年10月31日/);
+  assert.doesNotMatch(html,/draft-policy-1|规则发布|价格版本|政策草稿/,'政策 dev 依据已下沉技术追溯，不在业务摘要显示');
   assert.doesNotMatch(html,/不应显示的游戏|不应显示的用户|礼遇类型/);
-  assert.match(html,/需要服务端按申请引用/);
+  assert.match(html,/逐档权益的冻结差异尚未提供/,'缺少冻结差异时保持未知，不借当前草稿生成审批内容');
 });
 
 test('policy view renders legacy/unknown unified projections without inventing values and disables unsupported contracts',async t=>{

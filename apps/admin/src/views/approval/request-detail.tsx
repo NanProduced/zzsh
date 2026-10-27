@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import {
   Ban, Check, Clock, FilePlus2, Settings2, UserPlus, X, Play, TriangleAlert,
 } from "lucide-react";
@@ -14,6 +14,7 @@ import { MembershipDateTimeField, parsePayableRatio, entitlementWindowError, for
 import { Textarea } from "../../components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../components/ui/tooltip";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/select";
+import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
 import {
   Timeline, TimelineContent, TimelineDate, TimelineHeader, TimelineIndicator,
   TimelineItem, TimelineSeparator, TimelineTitle,
@@ -31,6 +32,11 @@ import { RequestFlow } from "./request-flow";
 import { Fact, FactGrid, FieldLabel, NotApplicable, Section, SectionTitle, StatusFact, UnknownFact, formatApprovalDate as formatDate } from "./atoms";
 
 const REASON_MAX = 500;
+
+/** 对象标识对管理员只需短前缀辨认；完整值放 title 供核对。 */
+function shortId(id: string): string {
+  return id.length > 12 ? `${id.slice(0, 8)}…` : id;
+}
 
 function eventIcon(event: AuditEvent) {
   if (event.outcome === "FAILURE") return <TriangleAlert size={13} aria-hidden />;
@@ -317,10 +323,16 @@ function DecisionDialog({
             </label>
           ) : null}
           {kind === "execute" ? (
-            <label className="block space-y-1.5">
-              <FieldLabel>复述申请摘要前 8 字以确认：{recallTarget}</FieldLabel>
-              <Input value={recall} onChange={(event) => setRecall(event.target.value)} className="font-mono" placeholder="复述摘要前 8 字" />
-            </label>
+            <>
+              <div className="space-y-1 rounded-md border border-border bg-foreground/[0.02] p-2.5">
+                <p className="text-[11px] text-muted-foreground">申请摘要原文（复述前 8 字以确认本次执行对象）</p>
+                <p className="leading-relaxed"><span className="font-medium text-foreground">{detail.summary.slice(0, 8)}</span>{detail.summary.slice(8)}</p>
+              </div>
+              <label className="block space-y-1.5">
+                <FieldLabel>复述申请摘要前 8 字以确认：{recallTarget}</FieldLabel>
+                <Input value={recall} onChange={(event) => setRecall(event.target.value)} className="font-mono" placeholder="复述摘要前 8 字" />
+              </label>
+            </>
           ) : null}
         </div>
         <DialogFooter>
@@ -399,7 +411,8 @@ export function RequestDetail({
   onAppend: (username: string, reason: string) => void;
 }) {
   const [dialog, setDialog] = useState<"approve" | "reject" | "execute" | null>(null);
-  const actionsElement = useRef<HTMLElement>(null);
+  const [flowView, setFlowView] = useState<"flow" | "timeline">("flow");
+  const [flowExpanded, setFlowExpanded] = useState(true);
   const status = statusView(detail.status);
   const execution = executionProgress(detail);
   const progress = businessProgress(detail.business);
@@ -410,16 +423,44 @@ export function RequestDetail({
   // 来源业务回链：结算调整由来源订单流程消费，替代申请也必须由来源业务重新发起。
   const sourcePath = refs.map((ref) => objectRefPath(ref)).find((path): path is string => path !== null) ?? null;
   const sourceBusiness = (detail.operation.executionMode ?? detail.business?.executionMode) === "SOURCE_BUSINESS";
-  const allBlocked = listed.length > 0 && listed.every(name => !canAct(actions, name));
-  const notes = new Map<string, { labels: string[]; reason: string }>();
-  for (const name of listed) {
-    const action = actionFor(actions, name)!;
-    if (action.allowed || (!["approve", "reject", "execute"].includes(name) && !allBlocked)) continue;
-    const key = JSON.stringify([action.reasonCode, action.requiredPermission ?? null, action.nextStepCode ?? null]);
-    const previous = notes.get(key);
-    if (previous) previous.labels.push(ACTION_LABELS[name] ?? name);
-    else notes.set(key, { labels: [ACTION_LABELS[name] ?? name], reason: actionBlockReason(actions, name) ?? "原因未提供" });
+  // 只显示真能办的动作；其余不可用原因按原因文案合并进「查看限制」，不摆一排灰按钮。
+  const actionable = listed.filter((name) => name !== "addCandidate" && canAct(actions, name));
+  const blockedNames = listed.filter((name) => !canAct(actions, name));
+  const blockedReasonGroups = new Map<string, string[]>();
+  for (const name of blockedNames) {
+    const reason = actionBlockReason(actions, name) ?? "原因未提供";
+    const group = blockedReasonGroups.get(reason) ?? [];
+    group.push(ACTION_LABELS[name] ?? name);
+    blockedReasonGroups.set(reason, group);
   }
+  const isTerminal = detail.status === "EXPIRED" || detail.status === "CANCELLED" || detail.status === "REJECTED";
+  const blockedTitle = detail.statusReason
+    || (detail.status === "EXPIRED" ? "申请已过期，未作出审批决定"
+      : detail.status === "CANCELLED" ? "申请已被替代或取消"
+        : detail.status === "REJECTED" ? "申请已驳回"
+          : "当前不能批准、驳回或执行");
+  const executeNext = nextStepLabel(actionFor(actions, "execute")?.nextStepCode);
+  const blockedNext = executeNext
+    || (isTerminal ? (sourceBusiness ? "如需再次办理，请回到来源业务重新发起。" : "如需再次办理，请由来源业务重新发起。") : "当前不能办理；具体原因见下方限制说明。");
+  const reasonList = (
+    <ul aria-label="操作限制" className="mt-1 space-y-0.5 text-xs leading-relaxed text-muted-foreground">
+      {[...blockedReasonGroups].map(([reason, labels]) => <li key={reason}>{labels.join("、")}：{reason}</li>)}
+    </ul>
+  );
+  const renderActionButton = (name: string) => {
+    const eligibility = actionFor(actions, name)!;
+    if (name === "replace") {
+      // 没有 cancel/withdraw 接口：撤销只能由来源业务重新发起并带 supersedesRequestId。
+      return (
+        <Button key={name} type="button" size="sm" variant="secondary" disabled={busy || blocked || sourcePath === null || !onOpenPath}
+          onClick={() => { if (sourcePath && onOpenPath) onOpenPath(sourcePath, "重新发起（替代本申请）"); }}>返回来源业务</Button>
+      );
+    }
+    return (
+      <ActionButton key={name} eligibility={eligibility} busy={busy} blocked={blocked}
+        onClick={() => setDialog(name === "approve" ? "approve" : name === "reject" ? "reject" : "execute")} />
+    );
+  };
   const guide = blocked ? "这次办理的原结果尚待核对，请先查询原结果，再决定是否继续。"
     : busy ? "正在办理或核对这次请求，请稍候。"
       : canAct(actions, "approve") || canAct(actions, "reject") ? "请先核对本次事项，再选择批准或驳回。"
@@ -427,10 +468,6 @@ export function RequestDetail({
           : sourceBusiness ? nextStepLabel(actionFor(actions, "execute")?.nextStepCode) ?? "后续由来源业务办理，请前往来源对象核对。"
             : actions === undefined ? "本次操作资格暂未确认，当前只能查看。"
               : "当前不能批准、驳回或执行；请按下方具体原因核对。";
-  const locateActions = () => {
-    actionsElement.current?.scrollIntoView?.({ block: "nearest" });
-    actionsElement.current?.focus();
-  };
 
 
   return (
@@ -441,7 +478,7 @@ export function RequestDetail({
             <h3 className="text-base font-semibold break-words text-foreground">{detail.business?.businessTitle ?? "业务摘要未接入"}</h3>
             <p className="mt-1 text-sm leading-relaxed break-words text-muted-foreground">{detail.business?.changeSummary || detail.summary}</p>
           </div>
-          <div className="flex flex-wrap items-center gap-2"><Badge variant="outline">{executionModeLabel(detail.operation.executionMode ?? detail.business?.executionMode)}</Badge><Button type="button" size="sm" variant="secondary" onClick={locateActions}>查看当前办理</Button></div>
+          <div className="flex flex-wrap items-center gap-2"><Badge variant="outline">{executionModeLabel(detail.operation.executionMode ?? detail.business?.executionMode)}</Badge></div>
         </div>
         <dl aria-label="申请基本信息" className="grid grid-cols-1 gap-x-6 gap-y-3 text-xs sm:grid-cols-3">
           <div><dt className="text-muted-foreground">申请人</dt><dd className="mt-1">{personLabel(detail.requester)}</dd></div>
@@ -466,21 +503,80 @@ export function RequestDetail({
         </StatusFact>
       </div>
 
-      <details data-approval-business-details open className="rounded-md border border-border/60 p-3">
-        <summary className="cursor-pointer text-sm font-medium">申请明细与业务结果</summary>
-        <div className="mt-4 space-y-5"><BusinessSummary business={detail.business} operationCode={detail.operation.code} /></div>
-      </details>
-
-      {detail.decision ? (
-        <Section title="决定">
-          <FactGrid>
-            <Fact label="结果" value={detail.decision.decision === "APPROVED" ? "批准" : detail.decision.decision === "REJECTED" ? "驳回" : detail.decision.decision} />
-            <Fact label="决定人" value={personLabel(detail.decision.approver)} />
-            <Fact label="决定时间" value={formatDate(detail.decision.createdAt)} />
-            <Fact label="意见" value={detail.decision.reason} />
-          </FactGrid>
-        </Section>
-      ) : null}
+      <section aria-label="审批流程" className="space-y-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold">审批流程</h3>
+            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">默认选中当前环节；点击节点在下方核对该步事实与办理动作。时间线是同一过程的审计视图。</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <div role="group" aria-label="流程视图" className="flex overflow-hidden rounded-md border border-border">
+              <Button type="button" size="sm" variant={flowView === "flow" ? "secondary" : "ghost"} aria-pressed={flowView === "flow"} onClick={() => setFlowView("flow")} className="rounded-none">流程图</Button>
+              <Button type="button" size="sm" variant={flowView === "timeline" ? "secondary" : "ghost"} aria-pressed={flowView === "timeline"} onClick={() => setFlowView("timeline")} className="rounded-none">时间线</Button>
+            </div>
+            <Button type="button" size="sm" variant="secondary" aria-expanded={flowExpanded} onClick={() => setFlowExpanded(value => !value)}>{flowExpanded ? "收起" : "展开"}</Button>
+          </div>
+        </div>
+        {flowExpanded ? (
+          flowView === "timeline" ? (
+            <div className="border-t border-border pt-3"><HistoryTimeline history={detail.history} /></div>
+          ) : (
+            <>
+              <RequestFlow detail={detail} />
+              <section aria-label="当前办理" className="rounded-lg border border-border bg-foreground/[0.02] p-4">
+                {blocked && onLocateRecovery ? (
+                  <div className="mb-3"><Button type="button" size="sm" variant="secondary" onClick={onLocateRecovery}>查看原结果核对</Button></div>
+                ) : null}
+                {actions === undefined ? (
+                  <NotApplicable reason="本次操作资格暂未确认，当前只能查看；可刷新后再次核对。" />
+                ) : actionable.length > 0 ? (
+                  <div className="space-y-3">
+                    <p className="text-sm leading-relaxed">{guide}</p>
+                    <div className="flex flex-wrap gap-2">{actionable.map(renderActionButton)}</div>
+                    {blockedNames.length > 0 ? (
+                      <details className="text-xs text-muted-foreground">
+                        <summary className="cursor-pointer">查看部分动作的限制</summary>
+                        {reasonList}
+                      </details>
+                    ) : null}
+                    {unknownActions.length > 0 ? (
+                      <p className="text-xs leading-relaxed text-muted-foreground">这张申请包含本页暂不支持的动作，当前不能办理该项；具体标识可在技术追溯中核对。</p>
+                    ) : null}
+                  </div>
+                ) : (
+                  <Alert variant="warning" role="status">
+                    <TriangleAlert aria-hidden="true" />
+                    <AlertTitle>{blockedTitle}</AlertTitle>
+                    <AlertDescription>
+                      <p className="leading-relaxed">{blockedNext}</p>
+                      {blockedReasonGroups.size > 0 ? (
+                        <details className="mt-2">
+                          <summary className="cursor-pointer text-xs">查看限制</summary>
+                          {reasonList}
+                        </details>
+                      ) : null}
+                      {unknownActions.length > 0 ? (
+                        <p className="mt-2 text-xs leading-relaxed">这张申请包含本页暂不支持的动作，具体标识可在技术追溯中核对。</p>
+                      ) : null}
+                    </AlertDescription>
+                  </Alert>
+                )}
+                {canAct(actions, "addCandidate") ? (
+                  <div className="mt-3">
+                    <AddCandidateForm requestId={detail.requestId} busy={busy} blocked={blocked} onAppend={onAppend} />
+                  </div>
+                ) : null}
+                {sourceBusiness ? (
+                  <div className="mt-3">
+                    <Button type="button" size="sm" variant="secondary" disabled={busy || blocked || sourcePath === null || !onOpenPath}
+                      onClick={() => { if (sourcePath && onOpenPath) onOpenPath(sourcePath, "来源业务"); }}>前往来源业务</Button>
+                  </div>
+                ) : null}
+              </section>
+            </>
+          )
+        ) : null}
+      </section>
 
       {detail.supersedesRequestId || detail.supersededByRequestId ? (
         <div className="flex flex-wrap items-center gap-2 rounded-md border border-border/60 p-3 text-xs">
@@ -494,74 +590,10 @@ export function RequestDetail({
         </div>
       ) : null}
 
-      {detail.execution ? <Section title="执行经手记录"><FactGrid><Fact label="执行人" value={personLabel(detail.execution.executor)} /><Fact label="执行记录时间" value={formatDate(detail.execution.createdAt)} /><Fact label="执行完成记录时间" value={formatDate(detail.execution.completedAt)} /></FactGrid></Section> : null}
-
-      <section ref={actionsElement} tabIndex={-1} aria-label="当前办理" className="space-y-3 rounded-lg border border-border bg-foreground/[0.02] p-4 outline-none focus-visible:ring-2 focus-visible:ring-ring">
-        <h4 className="text-sm font-semibold">当前卡点与下一步</h4>
-        <p className="text-sm leading-relaxed">{guide}</p>
-        {candidateAvailabilityLabel(detail.candidateAvailability) ? <p className="text-xs text-muted-foreground">{candidateAvailabilityLabel(detail.candidateAvailability)}</p> : null}
-        {blocked && onLocateRecovery ? <Button type="button" size="sm" variant="secondary" onClick={onLocateRecovery}>查看原结果核对</Button> : null}
-      <Section
-        title="可办理的动作"
-        hint="按钮依据本申请当前提供的逐项资格显示。没有资格信息时保留只读，确认办理时还会再次核对。"
-      >
-        {actions === undefined ? (
-          <NotApplicable reason="本次操作资格暂未确认，当前只能查看；可刷新后再次核对。" />
-        ) : listed.length === 0 && unknownActions.length === 0 ? (
-          <p className="text-xs text-muted-foreground">当前没有可办理动作。</p>
-        ) : (
-          <>
-            <div className="flex flex-wrap gap-2">
-              {listed.map((name) => {
-                const eligibility = actionFor(actions, name)!;
-                if (name === "addCandidate") return null;
-                if (name === "replace") {
-                  // 没有 cancel/withdraw 接口：撤销只能由来源业务重新发起并带 supersedesRequestId。
-                  return eligibility.allowed ? (
-                    <Button
-                      type="button" size="sm" variant="secondary" key={name}
-                      disabled={busy || blocked || sourcePath === null || !onOpenPath}
-                      onClick={() => { if (sourcePath && onOpenPath) onOpenPath(sourcePath, "重新发起（替代本申请）"); }}
-                    >
-                      返回来源业务
-                    </Button>
-                  ) : <ActionButton key={name} eligibility={eligibility} busy={busy} blocked={blocked} onClick={() => undefined} />;
-                }
-                return (
-                  <ActionButton
-                    key={name} eligibility={eligibility} busy={busy} blocked={blocked}
-                    onClick={() => setDialog(name === "approve" ? "approve" : name === "reject" ? "reject" : "execute")}
-                  />
-                );
-              })}
-            </div>
-            {unknownActions.length > 0 ? (
-              <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                这张申请包含本页暂不支持的动作，当前不能办理该项；具体标识可在技术追溯中核对。
-              </p>
-            ) : null}
-            {notes.size > 0 ? <ul aria-label="操作不可用原因" className="mt-2 space-y-1 text-xs leading-relaxed text-muted-foreground">{[...notes].map(([key, note]) => <li key={key}>{note.labels.join("、")}：{note.reason}</li>)}</ul> : null}
-            {detail.business?.executionMode === "SOURCE_BUSINESS" ? (
-              <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                {nextStepLabel(actionFor(actions, "execute")?.nextStepCode) ?? "本业务由来源流程完成，审批页不执行、也不显示“执行后到账”。"}
-              </p>
-            ) : null}
-          </>
-        )}
-        {canAct(actions, "addCandidate") ? (
-          <div className="mt-3">
-            <AddCandidateForm requestId={detail.requestId} busy={busy} blocked={blocked} onAppend={onAppend} />
-          </div>
-        ) : actionFor(actions, "addCandidate") && !allBlocked ? (
-          <p className="mt-3 text-xs text-muted-foreground">
-            追加审批人不可用：{actionBlockReason(actions, "addCandidate")}。
-          </p>
-        ) : null}
-      </Section>
-      {sourceBusiness ? <Button type="button" size="sm" variant="secondary" disabled={busy || blocked || sourcePath === null || !onOpenPath} onClick={() => { if (sourcePath && onOpenPath) onOpenPath(sourcePath, "来源业务"); }}>前往来源业务</Button> : null}
-      </section>
-
-      <RequestFlow detail={detail} onLocateActions={locateActions} />
+      <details data-approval-business-details className="rounded-md border border-border/60 p-3">
+        <summary className="cursor-pointer text-sm font-medium">申请明细与业务结果</summary>
+        <div className="mt-4 space-y-5"><BusinessSummary business={detail.business} operationCode={detail.operation.code} /></div>
+      </details>
 
       {refs.length > 0 ? (
         <Section title="作用对象与去向" hint="链接只指向平台内已有对象页；没有对应页面的类型只列标识，不拼技术 ID 造入口。">
@@ -571,8 +603,8 @@ export function RequestDetail({
               return (
                 <li key={`${ref.type}-${ref.id}`}>
                   {path && onOpenPath
-                    ? <Button type="button" size="sm" variant="secondary" onClick={() => onOpenPath(path, objectRefLabel(ref.type))}>{objectRefLabel(ref.type)}<span className="font-mono text-[11px] opacity-70">{ref.id}</span></Button>
-                    : <Badge variant="outline">{objectRefLabel(ref.type)}<span className="font-mono text-[11px] opacity-70">{ref.id}</span></Badge>}
+                    ? <Button type="button" size="sm" variant="secondary" title={ref.id ?? undefined} onClick={() => onOpenPath(path, objectRefLabel(ref.type))}>{objectRefLabel(ref.type)}<span className="font-mono text-xs opacity-70">{shortId(ref.id ?? "")}</span></Button>
+                    : <Badge variant="outline" title={ref.id ?? undefined}>{objectRefLabel(ref.type)}<span className="font-mono text-xs opacity-70">{shortId(ref.id ?? "")}</span></Badge>}
                 </li>
               );
             })}
@@ -593,10 +625,6 @@ export function RequestDetail({
         <summary className="cursor-pointer text-sm font-medium">候选名单与资格说明</summary>
         <div className="mt-3"><Candidates candidates={detail.candidates} availability={detail.candidateAvailability} /></div>
       </details>
-
-      <Section title="事件记录" hint="按真实结果逐项显示；时间靠前不等于执行成功，驳回、失败、过期与取消分别呈现。">
-        <HistoryTimeline history={detail.history} />
-      </Section>
 
       <Section title="技术追溯">
         <details className="rounded-md border border-border/60 px-3 py-2 text-xs">

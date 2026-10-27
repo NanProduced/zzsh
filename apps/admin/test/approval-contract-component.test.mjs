@@ -55,6 +55,7 @@ const vite = await createServer({
 const { ApprovalAuditView } = await vite.ssrLoadModule("/src/views/approval-audit-view.tsx");
 const pendingWrites = await vite.ssrLoadModule("/src/views/approval/pending-writes.ts");
 const approvalContract = await vite.ssrLoadModule("/src/views/approval/contract.ts");
+const { RequestFlow } = await vite.ssrLoadModule("/src/views/approval/request-flow.tsx");
 
 after(async () => {
   await vite.close();
@@ -370,10 +371,8 @@ test("settlement is consumed by the source business: no generic execute, no arri
   const view = await renderDetail(detail);
   try {
     await waitFor(() => text(view).includes("人工调整订单结算"));
-    const executeButton = buttonByText("执行");
-    assert.ok(executeButton, "执行动作仍然列出，但资格由服务端决定");
-    assert.equal(executeButton.disabled, true, "SOURCE_BUSINESS 不可在审批页执行");
-    assert.ok(text(view).includes("由来源业务流程完成"), "解释执行方式");
+    assert.equal(buttonByText("执行"), undefined, "全不可办时不摆灰按钮，改为一条合并说明");
+    assert.ok(text(view).includes("由来源业务流程完成"), "执行限制在「查看限制」里说明");
     assert.ok(text(view).includes("回到来源业务完成双方确认、客服复核与过账"), "给出下一步");
     for (const label of ["待号主确认", "待客服复核", "尚未过账"]) {
       assert.ok(text(view).includes(label), `未完成条件具名：${label}`);
@@ -407,8 +406,8 @@ test("approval, execution and domain results stay in three separate blocks", asy
     assert.ok(text(view).includes("执行状态"), "执行状态独立成列");
     assert.ok(text(view).includes("业务进度"), "业务进度独立成列");
     assert.ok(text(view).includes("执行失败"), "执行失败按事实显示");
-    const people=[...view.rootNode.querySelectorAll("section")].find(node=>node.querySelector("h4")?.textContent.trim()==="执行经手记录");
-    assert.ok(people && people.textContent.includes("陈琳"), "the actual executor remains directly visible when the diagram is closed");
+    const flow = view.rootNode.querySelector('section[aria-label="审批流程"]');
+    assert.ok(flow && flow.textContent.includes("执行人") && flow.textContent.includes("陈琳"), "the actual executor remains directly visible in the default-expanded node workspace");
     assert.ok(text(view).includes("目标窗口与既有权益冲突"), "受权失败原因可见");
     assert.ok(text(view).includes("已执行，未到生效时间"), "未来生效权益不得写成已启用");
     assert.equal(text(view).includes("已生效"), false, "不得把 EXECUTED_PENDING_START 说成已生效");
@@ -437,17 +436,18 @@ test("expired requests keep their history and never read as an operable pending 
   const view = await renderDetail(detail);
   try {
     await waitFor(() => text(view).includes("已过期"));
-    assert.ok(text(view).includes("申请已超过有效期"), "到期原因可见");
+    assert.ok(text(view).includes("申请已超过有效期"), "到期原因可见（三轴卡状态原因）");
+    // 全不可办：不摆灰按钮，改为一条合并说明（过期）+「查看限制」里的原因。
     for (const label of ["批准", "驳回", "执行"]) {
-      const button = buttonByText(label);
-      assert.ok(button, `${label} 仍然列出以便解释为何不可办理`);
-      assert.equal(button.disabled, true, `${label} 在过期申请上不可办理`);
+      assert.equal(buttonByText(label), undefined, `${label} 不再以灰按钮堆叠`);
     }
-    assert.ok(text(view).includes("当前不能批准、驳回或执行"), "一行汇总说明，不逐条堆噪音");
-    assert.ok(text(view).includes("申请已过期，不再推进"), "原因码翻译成业务语言");
-    // 事件记录用时间线且保持中性：过期不是「流程成功走完」。
+    assert.ok(text(view).includes("申请已超过有效期"), "过期作为一条合并主说明（Alert 标题）");
+    assert.ok(text(view).includes("如需再次办理，请由来源业务重新发起"), "给出唯一下一步");
+    assert.ok(text(view).includes("申请已过期，不再推进"), "原因码翻译成业务语言（查看限制内）");
+    // 切到时间线视图核对事件记录：过期不是「流程成功走完」。
+    await click(buttonByText("时间线", view.rootNode));
     const timeline = view.rootNode.querySelector('[data-slot="timeline"]');
-    assert.ok(timeline, "事件记录使用既有 Timeline 组件");
+    assert.ok(timeline, "时间线视图使用既有 Timeline 组件");
     const items = [...timeline.querySelectorAll('[data-slot="timeline-item"]')];
     assert.equal(items.length, 2, "两个事件都渲染");
     assert.equal(items.filter((item) => item.hasAttribute("data-completed")).length, 0, "任何事件都不得被标记为已完成步骤");
@@ -503,9 +503,10 @@ test("self-approval stays forbidden and a later eligibility change is re-explain
   const view = await renderDetail(selfRequest);
   try {
     await waitFor(() => text(view).includes("不能审批自己发起的申请"));
-    assert.equal(buttonByText("批准").disabled, true, "申请人不能自批");
-    assert.equal(buttonByText("驳回").disabled, true, "自批禁令同时覆盖驳回");
-    assert.ok(text(view).includes("需要先有批准决定才能执行"), "执行侧给出下一步");
+    // 全不可办（自批 + 待批准）：一条合并说明，不摆灰按钮。
+    assert.equal(buttonByText("批准"), undefined, "申请人不能自批，不摆灰按钮");
+    assert.equal(buttonByText("驳回"), undefined, "自批禁令同时覆盖驳回");
+    assert.ok(text(view).includes("需要先有批准决定才能执行"), "执行侧下一步在查看限制内");
     assert.equal(writes.length, 0);
 
     // 资格变化：会话刷新后服务端改口「不在候选内」，解释必须跟着变，不能留旧文案。
@@ -522,7 +523,7 @@ test("self-approval stays forbidden and a later eligibility change is re-explain
     const currentAction = view.rootNode.querySelector('[aria-label="当前办理"]');
     assert.ok(currentAction.textContent.includes("批准、驳回：你不在这张申请的候选审批人内"), "合并后的解释跟着服务端资格变");
     assert.equal(currentAction.textContent.includes("不能审批自己发起的申请"), false, "旧的动作解释不得残留");
-    assert.equal(buttonByText("批准").disabled, true);
+    assert.equal(buttonByText("批准"), undefined, "仍不摆灰按钮");
   } finally {
     await view.cleanup();
   }
@@ -550,11 +551,11 @@ test("unregistered operations stay readable but every request-level action fails
   try {
     await waitFor(() => text(view).includes("未登记的业务操作"));
     assert.ok(text(view).includes("该业务操作未登记，只读且不可办理"), "未登记原因可读");
-    assert.ok(text(view).includes("不支持执行"), "执行方式按事实显示");
+    assert.ok(text(view).includes("不支持执行"), "执行方式按事实显示（头部徽标）");
     for (const label of ["批准", "驳回", "执行"]) {
-      assert.equal(buttonByText(label).disabled, true, `${label} 对未登记操作 fail closed`);
+      assert.equal(buttonByText(label), undefined, `${label} 对未登记操作不摆灰按钮`);
     }
-    assert.equal(text(view).includes("追加审批人"), true, "追加候选同样不可用并被说明");
+    assert.ok(text(view).includes("该业务操作未登记，只读且不可办理"), "未登记原因在合并说明/查看限制内");
     assert.equal(writes.length, 0, "未登记操作没有任何写入入口被触发");
   } finally {
     await view.cleanup();
@@ -1163,7 +1164,7 @@ test("the workbench lists registered businesses with real initiation entries and
       { operationCode: "order.settlement.adjust", businessType: "settlement", title: "人工调整订单结算", executionMode: "SOURCE_BUSINESS", testOnly: false, initiation: { allowed: false, reasonCode: "INITIATED_FROM_SOURCE_BUSINESS", requiredPermission: "approval.request.create" }, triggers: [] },
       { operationCode: "approval.test.execute", businessType: "test", title: "本地非资金测试动作", executionMode: "GENERIC_TRANSACTION", testOnly: true, initiation: { allowed: false, reasonCode: "TEST_OPERATION_DISABLED", requiredPermission: "approval.request.create" }, triggers: [] },
     ],
-    view: { initialTab: "operations" },
+    view: { initialTab: "settings" },
   });
   try {
     await waitFor(() => text(view).includes("审批业务与发起入口"));
@@ -1378,7 +1379,6 @@ test("general eligibility is never presented as per-request eligibility", async 
   });
   const view = await renderDetail(blocked);
   try {
-    await click(buttonByText("展开审批流程", view.rootNode));
     await waitFor(() => text(view).includes("候选 1 人，无人可处理"));
     assert.equal(reviewFact(view, "本单可处理"), "0 人", "流程记录使用本单资格，不反推通用候选人数");
     assert.equal(text(view).includes("1 人当前合格"), false, "不得由通用名单反推本单合格人数");
@@ -1397,7 +1397,6 @@ test("general eligibility is never presented as per-request eligibility", async 
   });
   const second = await renderDetail(self);
   try {
-    await click(buttonByText("展开审批流程", second.rootNode));
     await waitFor(() => text(second).includes("候选 2 人，其中 1 人当前合格"));
     assert.equal(reviewFact(second, "本单可处理"), "1 人", "流程记录与服务端本单汇总一致");
     assert.ok(text(second).includes("不能审批自己发起的申请"), "自审批禁令就地说明");
@@ -1411,7 +1410,6 @@ test("general eligibility is never presented as per-request eligibility", async 
   delete missing.candidateAvailability;
   const third = await renderDetail(missing);
   try {
-    await click(buttonByText("展开审批流程", third.rootNode));
     await waitFor(() => reviewFact(third, "本单可处理") === "未提供");
     assert.equal(reviewFact(third, "本单可处理"), "未提供", "缺少本单汇总不能按候选快照补人数");
     assert.equal(text(third).includes("当前合格"), false, "汇总缺失时不给出合格人数");
@@ -1439,7 +1437,7 @@ test("a template-only role attempts the registry read and gets a permission expl
     await act(async () => {
       root.render(createElement(ApprovalAuditView, {
         snapshot: snapshot(["approval.template.read", "approval.template.configure"]),
-        initialTab: "templates",
+        initialTab: "settings",
         initialQuery: {},
       }));
     });
@@ -1566,15 +1564,16 @@ test("usability first package: self-blocker is visible before the flow and techn
     assert.ok(flow && details && review);
     assert.equal(details.open, false, "snapshot hashes are available on demand");
     assert.ok(details.textContent.includes(detail.operation.payloadHash), "the original snapshot hash is still inspectable");
-    assert.equal(review.open, true, "the business review is now directly visible");
-    assert.ok(review.compareDocumentPosition(current) & Node.DOCUMENT_POSITION_FOLLOWING);
-    assert.ok(current.compareDocumentPosition(flow) & Node.DOCUMENT_POSITION_FOLLOWING);
-    assert.equal(buttonByText("批准", current).disabled, true);
+    assert.equal(review.open, false, "the full business review stays folded on demand; the one-line change summary stays in the header");
+    // 当前办理已并入「审批流程」区（current 是 flow 的后代），只断言它在折叠的业务摘要之前。
+    assert.ok(current.compareDocumentPosition(review) & Node.DOCUMENT_POSITION_FOLLOWING, "the folded business details follow the action area");
+    assert.equal(buttonByText("批准", current), undefined, "全不可办时不摆灰按钮，改为合并说明");
+    assert.ok(current.textContent.includes("不能审批自己发起的申请"), "阻塞原因在查看限制内");
     assert.equal(writes.length, 0);
   } finally { await view.cleanup(); }
 });
 
-test("usability first package: flow locates the original execute confirmation and never posts by itself", async () => {
+test("usability first package: execute confirmation stays gated and never posts by itself", async () => {
   freshSession("usability-flow");
   const detail = baseDetail({
     status: "APPROVED", business: membershipBusiness(),
@@ -1584,9 +1583,8 @@ test("usability first package: flow locates the original execute confirmation an
   const view = await renderDetail(detail);
   try {
     await waitFor(() => text(view).includes("发放会员礼遇权益"));
-    await click(buttonByText("定位当前办理", view.rootNode));
     const current = view.rootNode.querySelector('[aria-label="当前办理"]');
-    assert.equal(document.activeElement, current);
+    assert.ok(current);
     assert.equal(writes.length, 0);
     await click(buttonByText("执行", current));
     const confirm = buttonByText("确认执行");
@@ -1598,17 +1596,18 @@ test("usability first package: flow locates the original execute confirmation an
   } finally { await view.cleanup(); }
 });
 
-test("usability first package: daily actions and configuration have separate entry groups", async () => {
+test("usability: approval center uses flat task-named tabs without group labels", async () => {
   freshSession("usability-navigation");
   const view = await renderList({ requests: [] });
   try {
-    const daily = view.rootNode.querySelector('[aria-label="日常处理"]');
-    const config = view.rootNode.querySelector('[aria-label="审批配置"]');
-    assert.ok(daily && config);
-    assert.ok(buttonByText("待我处理", daily));
-    assert.ok(buttonByText("我的申请", daily));
-    assert.equal(buttonByText("模板与规则", daily), undefined);
-    assert.ok(buttonByText("模板与规则", config));
+    const tablist = view.rootNode.querySelector('[aria-label="审批工作区"]');
+    assert.ok(tablist);
+    for (const label of ["待我处理", "我的申请", "审计记录", "审批设置"]) assert.ok(buttonByText(label, tablist), label + " tab present");
+    // 无二级分组标签；两个配置面板已并入「审批设置」。
+    assert.equal(view.rootNode.querySelector('[aria-label="日常处理"]'), null, "no group labels");
+    assert.equal(view.rootNode.querySelector('[aria-label="审批配置"]'), null, "no group labels");
+    assert.equal(buttonByText("模板与规则"), undefined, "merged into 审批设置");
+    assert.equal(buttonByText("审批业务"), undefined, "merged into 审批设置");
     assert.equal(writes.length, 0);
   } finally { await view.cleanup(); }
 });
@@ -1626,7 +1625,8 @@ test("usability first package: source-business next step navigates the existing 
     await waitFor(() => text(view).includes("人工调整订单结算"));
     const current = view.rootNode.querySelector('[aria-label="当前办理"]');
     assert.ok(current);
-    assert.equal(buttonByText("执行", current).disabled, true);
+    assert.equal(buttonByText("执行", current), undefined, "SOURCE_BUSINESS 全不可办，不摆灰按钮");
+    assert.ok(current.textContent.includes("回到来源业务完成双方确认"), "下一步在合并说明里");
     await click(buttonByText("前往来源业务", current));
     const order = business.objectRefs.find(ref => ref.type === "rental_order");
     assert.equal(opened.at(-1).path, "/orders/" + encodeURIComponent(order.id));
@@ -1658,7 +1658,7 @@ test("usability r1: primary refusal reasons stay visible beside an allowed navig
       assert.match(current.textContent, /不能审批自己发起的申请/, auxiliary);
       assert.match(current.textContent, /需要先有批准决定才能执行/, auxiliary);
       assert.doesNotMatch(current.textContent, /服务端/, "ordinary guidance uses the actual human-readable reasons");
-      for (const label of ["批准", "驳回", "执行"]) assert.equal(buttonByText(label, current).disabled, true, label);
+      for (const label of ["批准", "驳回", "执行"]) assert.equal(buttonByText(label, current), undefined, label + " 不摆灰按钮，原因在查看限制内");
       if (auxiliary === "replace") {
         assert.equal(buttonByText("回到来源业务重新发起", current), undefined);
         await click(buttonByText("返回来源业务", current));
@@ -1671,33 +1671,33 @@ test("usability r1: primary refusal reasons stay visible beside an allowed navig
 });
 
 
-test("OPS02: frozen business content is visible before the current action area", async () => {
+test("OPS02: the action area sits on the first screen while the frozen payload stays reachable", async () => {
   const view = await renderDetail(baseDetail({ business: membershipBusiness() }));
   try {
+    await waitFor(() => text(view).includes("发放会员礼遇权益"));
     const details = view.rootNode.querySelector('[data-approval-business-details]');
     const actions = view.rootNode.querySelector('[aria-label="当前办理"]');
     assert.ok(details && actions);
-    assert.equal(details.open, true, 'the frozen payload must not require discovery after action buttons');
-    assert.ok(details.compareDocumentPosition(actions) & browser.Node.DOCUMENT_POSITION_FOLLOWING, 'review content comes before the action area');
-    await click(buttonByText('查看当前办理', view.rootNode));
-    assert.equal(document.activeElement, actions, 'the first-screen entry focuses the real current action area');
+    assert.equal(details.open, false, 'the full frozen payload is folded but reachable below the action area');
+    assert.ok(actions.compareDocumentPosition(details) & browser.Node.DOCUMENT_POSITION_FOLLOWING, 'the action area precedes the folded business details');
+    assert.ok(text(view).includes("为租客 user_fixt_7c2 发放尊享礼遇 90 天"), 'the one-line change summary stays visible in the header');
+    assert.equal(buttonByText('查看当前办理', view.rootNode), undefined, 'no scroll-patch button is needed when the action area is on the first screen');
     assert.equal(writes.length, 0);
   } finally { await view.cleanup(); }
 });
 
-test("OPS02: workflow canvas is on demand while actual decision person and time stay readable", async () => {
+test("OPS02: workflow canvas is visible by default while the actual decision person and time stay readable", async () => {
   const oldTz=process.env.TZ; process.env.TZ='UTC';
   const view = await renderDetail(baseDetail({ status: 'APPROVED', business: membershipBusiness(), decision: { decision: 'APPROVED', approver: { username: 'zz00004', displayUsername: 'ZZ00004', name: '林青' }, reason: '核对完成', createdAt: '2026-10-12T10:00:00.000Z' } }));
   try {
-    const toggle = buttonByText('展开审批流程', view.rootNode);
-    assert.ok(toggle, 'the workflow remains a discoverable supplementary view');
-    assert.equal(toggle.getAttribute('aria-expanded'), 'false');
-    assert.equal(view.rootNode.querySelector('[data-approval-workflow-canvas]'), null);
+    await waitFor(() => text(view).includes("发放会员礼遇权益"));
+    const toggle = buttonByText('收起', view.rootNode);
+    assert.ok(toggle, 'the flow is visible by default and can still be collapsed');
+    assert.equal(toggle.getAttribute('aria-expanded'), 'true');
+    assert.ok(view.rootNode.querySelector('[data-approval-workflow-canvas]'), 'the canvas is on the first screen by default');
+    // 已决定（含驳回）默认选中审批环节节点，决定人/时间在该节点工作区直接可见。
     assert.match(text(view), /林青/);
     assert.match(text(view), /2026年10月12日 18:00/);
-    await click(toggle);
-    assert.equal(buttonByText('收起审批流程', view.rootNode)?.getAttribute('aria-expanded'), 'true');
-    assert.ok(view.rootNode.querySelector('[data-approval-workflow-canvas]'));
     assert.equal(writes.length, 0);
   } finally { await view.cleanup(); if(oldTz===undefined)delete process.env.TZ;else process.env.TZ=oldTz; }
 });
@@ -1728,16 +1728,15 @@ test("OPS02: existing cursor navigation uses shared pagination without inventing
   } finally { await view.cleanup(); }
 });
 
-test("OPS02: policy date remains a proposed date and rule identifiers are secondary", async()=>{
+test("OPS02: policy date remains a proposed date and dev rule identifiers are not surfaced", async()=>{
   const business=membershipBusiness({operationCode:'membership.benefit.policy.publish',businessTitle:'发布会员权益政策',summary:{policyDraft:{id:'draft-ops-02',version:3,hash:'a'.repeat(64),effectiveAtUtc:'2026-10-31T04:07:00.000Z',ruleReleaseId:'release-ops',priceVersionId:'price-ops'},reason:'优化统一权益'}});
   const view=await renderDetail(baseDetail({operation:{code:'membership.benefit.policy.publish',payloadVersion:1,payloadHash:'b'.repeat(64)},business}));
   try {
     assert.match(text(view),/拟定生效时间/);
     assert.match(text(view),/批准不代表已生效/);
-    const technical=[...view.rootNode.querySelectorAll('details')].find(x=>x.querySelector('summary')?.textContent==='政策版本与计价依据');
-    assert.ok(technical);
-    assert.equal(technical.open,false);
-    assert.match(technical.textContent,/release-ops/);
+    // 政策 dev 依据（规则发布/价格版本/草稿哈希）已下沉技术追溯，不在业务摘要显示。
+    assert.equal([...view.rootNode.querySelectorAll('details')].find(x=>x.querySelector('summary')?.textContent==='政策版本与计价依据'),undefined);
+    assert.equal(text(view).includes('release-ops'),false,'规则发布等 dev 依据不再在摘要显示');
     assert.equal(writes.length,0);
   } finally { await view.cleanup(); }
 });
@@ -1768,4 +1767,38 @@ test('distribution approval does not reveal frozen change fields when the projec
  const business={requestId:'approval_req_fixt_1',businessType:'distribution',operationCode:'distribution.policy.publish',executionMode:'GENERIC_TRANSACTION',summaryAvailable:false,detailsAvailable:false,restrictedReasonCodes:['FORBIDDEN'],policyChange:{schema:'distribution-policy-change.v1',expectedPolicyId:'hidden-original',changes:{enabled:false,renterPercent:'0'},reason:'hidden-policy-reason'}};
  const view=await renderDetail(baseDetail({operation:{code:'distribution.policy.publish',payloadVersion:1,payloadHash:'c'.repeat(64)},business,actions:[]}));
  try{assert.equal(text(view).includes('hidden-policy-reason'),false);assert.equal(text(view).includes('hidden-original'),false);assert.equal(text(view).includes('分销政策变更快照'),false);assert.match(text(view),/无权查看本次申请的业务摘要/);assert.equal(writes.length,0);}finally{await view.cleanup();}
+});
+
+test('master integration: legacy settings links retain their exact section', async () => {
+  for (const legacy of ['templates', 'operations']) {
+    const view = await renderList({view: {initialQuery: {tab: legacy}}});
+    try {
+      assert.equal(view.rootNode.querySelector('[role="tab"][aria-selected="true"]')?.textContent, '审批设置');
+      assert.match(text(view), legacy === 'templates' ? /暂无模板配置/ : /审批业务与发起入口/);
+      assert.equal(writes.length, 0);
+    } finally { await view.cleanup(); }
+  }
+});
+
+test('master integration: template-only readers start in the authorized template section', async () => {
+  const view = await renderList({permissions: ['approval.template.read']});
+  try {
+    assert.match(text(view), /暂无模板配置/);
+    assert.doesNotMatch(text(view), /审批业务与发起入口/);
+    assert.equal(writes.length, 0);
+  } finally { await view.cleanup(); }
+});
+
+test('master integration: flow refresh and request changes select the actual current record', async () => {
+  const host = browser.document.createElement('div'); browser.document.body.appendChild(host);
+  const root = createRoot(host);
+  const render = async detail => { await act(async () => root.render(createElement(RequestFlow, {detail}))); await settle(); };
+  try {
+    await render(baseDetail());
+    assert.equal(host.querySelector('h4')?.textContent, '候选审批组');
+    await render(baseDetail({status: 'EXECUTED', decision: {decision: 'APPROVED', approver: {username:'reviewer',name:'审批员'}, reason: null, createdAt: null}, execution: {status:'SUCCEEDED',resultCode:'APPLIED',resultDetail:null,executor:{username:'executor',name:'执行员'},createdAt:null,completedAt:null}}));
+    assert.equal(host.querySelector('h4')?.textContent, '业务执行');
+    await render(baseDetail({requestId: 'request-second'}));
+    assert.equal(host.querySelector('h4')?.textContent, '候选审批组');
+  } finally { await act(async () => root.unmount()); host.remove(); }
 });

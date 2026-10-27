@@ -34,7 +34,7 @@ import { RequestList } from "./approval/request-list";
 import { RecoveryPanel, type RecoveryLookup } from "./approval/recovery-panel";
 import { Fact, FactGrid, FieldLabel, NotApplicable } from "./approval/atoms";
 
-type Tab = "pending" | "mine" | "operations" | "templates" | "audit";
+type Tab = "pending" | "mine" | "audit" | "settings";
 type ListKey = "mine" | "pending" | "audit";
 type ListPage = { cursors: (string | null)[]; index: number; nextCursor: string | null };
 type AuditFilter = { action: string; objectType: string; actorUsername: string; requestId: string };
@@ -60,7 +60,8 @@ type WriteIntent = {
 };
 type RecoveryState = { kind: "unknown" | "readback" | "resolved"; intent: WriteIntent; persisted: boolean; receipt?: RecoveryResult };
 
-const TABS: Tab[] = ["pending", "mine", "operations", "templates", "audit"];
+const TABS: Tab[] = ["pending", "mine", "audit", "settings"];
+const TAB_LABELS: Record<Tab, string> = { pending: "待我处理", mine: "我的申请", audit: "审计记录", settings: "审批设置" };
 const ALL = "all";
 
 /** 恢复合同的操作白名单（approval-audit.ts:95-104）。target 型操作必须带申请号，非 target 型不能带。 */
@@ -140,7 +141,7 @@ export function ApprovalAuditView({
 }: {
   snapshot: Extract<SessionSnapshot, { authenticated: true }>;
   initialRequestId?: string;
-  initialTab?: Tab;
+  initialTab?: Tab | "operations" | "templates";
   initialQuery?: Record<string, string>;
   objectOnly?: boolean;
   onOpenObject?: (requestId: string, title: string) => void;
@@ -170,16 +171,14 @@ export function ApprovalAuditView({
   const contextEpoch = contextEpochRef.current;
 
   // 默认页：有审批权限的人进「待我处理」，只有读取权限的人进「我的申请」。
-  // 注意壳侧 page-content.tsx 在 URL 没带 tab 时会把 initialTab 落成 "mine"，无法表达「未指定」，
-  // 因此该默认页要等壳改成透传原始 query.tab 才在浏览器里生效（见交付 brief 的壳 hunk）。
-  const urlTab = initialQuery?.tab;
-  const defaultTab: Tab = canApprove ? "pending" : canRead ? "mine" : canTemplateRead || canTemplateConfigure ? "templates" : canAudit ? "audit" : "operations";
+  const urlTab = initialQuery?.tab ?? initialTab;
+  const defaultTab: Tab = canApprove ? "pending" : canRead ? "mine" : canTemplateRead || canTemplateConfigure ? "settings" : canAudit ? "audit" : "settings";
   const [tab, setTab] = useState<Tab>(
-    urlTab && (TABS as string[]).includes(urlTab)
-      ? (urlTab as Tab)
-      : initialTab && (TABS as string[]).includes(initialTab)
-        ? initialTab
-        : defaultTab,
+    urlTab === "operations" || urlTab === "templates" ? "settings"
+      : urlTab && (TABS as string[]).includes(urlTab) ? (urlTab as Tab) : defaultTab,
+  );
+  const [settingsSection, setSettingsSection] = useState<"registry" | "templates">(
+    urlTab === "templates" || (!canRead && (canTemplateRead || canTemplateConfigure)) ? "templates" : "registry",
   );
   const [templates, setTemplates] = useState<Template[]>([]);
   const [operations, setOperations] = useState<OperationEntry[]>();
@@ -549,11 +548,11 @@ export function ApprovalAuditView({
   }, [rehydrateRecovery, contextKey, initialRequestId]);
 
   useEffect(() => {
-    if (objectOnly || tab !== "templates" || !canTemplateConfigure) return;
+    if (objectOnly || tab !== "settings" || settingsSection !== "templates" || !canTemplateConfigure) return;
     if (candidatesTriedRef.current || reading.candidates) return;
     candidatesTriedRef.current = true;
     void loadCandidateOptions();
-  }, [tab, objectOnly, canTemplateConfigure, reading.candidates, loadCandidateOptions]);
+  }, [tab, settingsSection, objectOnly, canTemplateConfigure, reading.candidates, loadCandidateOptions]);
 
   const navigate = (key: ListKey, action: "prev" | "next" | "first") => {
     const meta = pageMetaRef.current[key];
@@ -942,9 +941,8 @@ export function ApprovalAuditView({
   const availableTabs = useMemo(() => TABS.filter((item) => (
     item === "pending" ? canApprove
       : item === "mine" ? canRead
-        : item === "operations" ? canRead
-          : item === "templates" ? canTemplateRead || canTemplateConfigure
-            : canAudit
+        : item === "audit" ? canAudit
+          : canRead || canTemplateRead || canTemplateConfigure
   )), [canApprove, canAudit, canRead, canTemplateConfigure, canTemplateRead]);
 
   if (availableTabs.length === 0) {
@@ -997,12 +995,6 @@ export function ApprovalAuditView({
     : [{ value: "", label: "新建触发条件标识" }];
   const eligibleCandidates = candidateOptions?.candidates ?? [];
   const excludedEntries = Object.entries(candidateOptions?.excludedByReason ?? {});
-  const tabGroups = [
-    { label: "日常处理", items: availableTabs.filter(item => item === "pending" || item === "mine") },
-    { label: "发起与记录", items: availableTabs.filter(item => item === "operations" || item === "audit") },
-    { label: "审批配置", items: availableTabs.filter(item => item === "templates") },
-  ].filter(group => group.items.length > 0);
-
   return (
     <TooltipProvider>
       <div className="space-y-6">
@@ -1014,15 +1006,12 @@ export function ApprovalAuditView({
             </div>
             <Icons.ShieldCheck size={20} className="text-muted-foreground" />
           </div>
-          <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-3" role="tablist" aria-label="审批工作区">
-            {tabGroups.map(group => <div key={group.label} role="group" aria-label={group.label} className="flex flex-wrap items-center gap-2">
-              <span className="mr-1 text-xs text-muted-foreground">{group.label}</span>
-              {group.items.map(item => <Button key={item} type="button" size="sm" role="tab" aria-selected={tab === item}
-                variant={tab === item ? "primary" : group.label === "日常处理" ? "secondary" : "ghost"}
-                onClick={() => { setTab(item); onTabChange?.(item); }}>
-                {item === "pending" ? "待我处理" : item === "mine" ? "我的申请" : item === "operations" ? "审批业务" : item === "templates" ? "模板与规则" : "审计记录"}
-              </Button>)}
-            </div>)}
+          <div className="mt-4 flex flex-wrap items-center gap-2" role="tablist" aria-label="审批工作区">
+            {availableTabs.map(item => <Button key={item} type="button" size="sm" role="tab" aria-selected={tab === item}
+              variant={tab === item ? "primary" : item === "pending" || item === "mine" ? "secondary" : "ghost"}
+              onClick={() => { setTab(item); onTabChange?.(item); }}>
+              {TAB_LABELS[item]}
+            </Button>)}
           </div>
           <StatusMessage error={error} success={message} tone={error ? undefined : messageTone} className="mt-4" />
           {recoveryPanel}
@@ -1068,7 +1057,15 @@ export function ApprovalAuditView({
           ) : null
         ) : null}
 
-        {tab === "operations" ? (
+        {tab === "settings" ? (
+          <div className="flex flex-wrap items-center gap-2" role="group" aria-label="审批设置分区">
+            <Button type="button" size="sm" variant={settingsSection === "registry" ? "primary" : "ghost"} onClick={() => setSettingsSection("registry")}>业务登记</Button>
+            {(canTemplateRead || canTemplateConfigure) ? (
+              <Button type="button" size="sm" variant={settingsSection === "templates" ? "primary" : "ghost"} onClick={() => setSettingsSection("templates")}>模板规则</Button>
+            ) : null}
+          </div>
+        ) : null}
+        {tab === "settings" && settingsSection === "registry" ? (
           <section className="section-panel">
             <div className="panel-heading">
               <div>
@@ -1144,7 +1141,7 @@ export function ApprovalAuditView({
           </section>
         ) : null}
 
-        {tab === "templates" ? (
+        {tab === "settings" && settingsSection === "templates" && (canTemplateRead || canTemplateConfigure) ? (
           <>
             {canTemplateConfigure ? (
               <section className="section-panel">
