@@ -426,18 +426,24 @@ export async function readOrderAccountViews(client: PoolClient, accountIds: stri
     const result = new Map<string, OrderAccountView>();
     const accounts = await readPublishingAccounts(client, accountIds);
     for (const account of accounts.values()) {
-        let listing: Record<string, unknown>;
-        try { listing = await readPublicListing(client, account, gate, admission, false, "DETAIL", detailIndex); }
-        catch (error) { if ((error as { status?: number })?.status === 404) continue; throw error; }
-        const basis = publicListingBasis(listing) as Record<string, any> | null;
-        if (!basis || typeof basis.id !== "string") continue;
-        const s = publicBasisListingSummary(basis, { reasons: [] }, undefined, undefined, { accountCreatedAt: "", accountUpdatedAt: null, versionCreatedAt: null });
+        // 与账号页同一口径：存在且不同于当前版本的公开版本时取公开版本，否则取当前版本详情（账号页即如此展示）
+        const detail: Record<string, any> = await listingDetail(client, account, "admin", gate, "public", account, false, "RENTABLE");
+        if (!detail.version) continue;
+        const facts = await supervisionFacts(client, account, detail, gate, admission, detailIndex);
+        const rowFacts = { accountCreatedAt: "", accountUpdatedAt: null, versionCreatedAt: null, refs: { ruleReleaseId: null, priceVersionId: null } };
+        const usePublic = Boolean(facts.publicBasis && facts.publicBasis.id !== detail.version.id);
+        const t = detail.version.termOption as { code?: string; displayName?: string; dailyConsumption?: { quantity?: string } } | null;
+        const termOption = t ? { code: t.code ?? "", name: t.displayName ?? "", dailyConsumption: t.dailyConsumption?.quantity ?? null } : null;
+        const s = usePublic
+            ? publicBasisListingSummary(facts.publicBasis as Record<string, any>, facts, undefined, undefined, rowFacts)
+            : listingSummary(detail, facts, undefined, undefined, termOption, rowFacts);
+        const versionId = usePublic ? String((facts.publicBasis as Record<string, any>).id) : String(detail.version.id);
         result.set(account.id, {
-            source: "ACCOUNT_PUBLIC_VERSION", versionId: basis.id,
+            source: "ACCOUNT_PUBLIC_VERSION", versionId,
             haff: s.haff ? { itemId: String(s.haff.itemId ?? ""), quantity: s.haff.quantity } : null,
             materials: s.materials, materialsVisibleTotal: s.materialsVisibleTotal,
-            safeBoxText: s.config.safeBox, gradingText: s.config.grading, loginMethodText: s.login.displayName,
-            term: { name: s.term.name, termSeconds: s.term.termSeconds, dailyConsumption: s.term.dailyConsumption },
+            safeBoxText: s.config?.safeBox ?? null, gradingText: s.config?.grading ?? null, loginMethodText: s.login?.displayName ?? null,
+            term: s.term ? { name: s.term.name, termSeconds: s.term.termSeconds, dailyConsumption: s.term.dailyConsumption } : { name: null, termSeconds: null, dailyConsumption: null },
             fullPayout: s.fullPayout as OrderAccountView["fullPayout"],
             haffRatioWanPerYuan: typeof s.quote?.baseRenterHaffRatioWanPerYuan === "string" ? s.quote.baseRenterHaffRatioWanPerYuan : null,
             fees: { completeness: s.feeSummary.completeness, haffRental: s.feeSummary.haffRental, materials: s.feeSummary.materials, resourceTotal: s.feeSummary.resourceTotal, tenantDeposit: s.quote?.tenantDeposit ?? null, tenantPayableTotal: s.quote?.tenantPayableTotal ?? null, baseDepositCents: s.baseDeposit?.amountCents ?? null },
