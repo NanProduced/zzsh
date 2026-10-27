@@ -30,11 +30,13 @@ const SECTIONS: Record<string,string> = {orders:'订单记录',resources:'当前
 
 function accountResourceSummary(order: Order): string | null {
   const legacyNames: Record<string,string> = {df_billable_haff:'哈夫币',df_billable_awm_bullet:'AWM子弹',df_billable_level6_bullet:'6级子弹',df_billable_level6_helmet:'6级头盔',df_billable_level6_armor:'6级护甲',df_billable_top_insure_card:'顶级保险卡',df_billable_barrett_bullet:'巴雷特子弹',df_billable_coffee:'咖啡豆'};
-  const frozen = order.orderFacts?.resources;
+  // 迁入单账号即账号：有账号资料（与账号页同一版本口径）时优先展示，原单资源仅在账号资料缺失时作为本单事实
+  const accountResources = order.accountFacts?.resources ?? [];
+  const frozen = accountResources.length ? undefined : order.orderFacts?.resources;
   const legacyOriginal = order.source?.origin === 'LEGACY' && Boolean(frozen?.length);
-  const resources=(frozen?.length ? frozen : order.accountFacts?.resources ?? []).filter(resource=>resource.quantity!==null && !/^0+(?:\.0+)?$/.test(resource.quantity));
+  const resources=(frozen?.length ? frozen : accountResources).filter(resource=>resource.quantity!==null && !/^0+(?:\.0+)?$/.test(resource.quantity));
   if (!resources.length) return null;
-  const label=frozen?.length?'原单资源':order.accountFacts?.source==='ORDER_VERSION'?'下单账号资料':'历史账号资料';
+  const label=frozen?.length?'原单资源':order.accountFacts?.source==='ORDER_VERSION'?'下单账号资料':'账号资料';
   const items=resources.slice(0,3).map(resource=>resource.unit==='HAFF_BASE'?historicalResourceText({quantity:resource.quantity,unit:resource.unit,code:resource.code}):`${resource.name??(legacyOriginal?legacyNames[resource.code]:undefined)??'物资名称未提供'} ${resource.unit ? historicalResourceText({quantity:resource.quantity,unit:resource.unit,code:resource.code}) : resource.quantity}`);
   return `${label}：${items.join(' · ')}${resources.length>3?` 另${resources.length-3}项`:''}`;
 }
@@ -45,13 +47,21 @@ function accountTermSummary(order: Order): string | null {
   if (seconds && /^[1-9]\d*$/.test(seconds)) {
     const duration=BigInt(seconds);
     parts.push(`租期：${duration%86400n===0n?`${duration/86400n}天`:duration%3600n===0n?`${duration/3600n}小时`:`${duration}秒`}`);
-  } else if (order.accountFacts?.source==='LEGACY_ACCOUNT' && order.accountFacts.termDays) {
-    parts.push(`历史账号租期规则：${order.accountFacts.termDays}天`);
+  } else if (order.accountFacts?.termDays) {
+    parts.push(`租期：${order.accountFacts.termDays}天`);
   }
   if (order.accountFacts?.loginMethodText) {
-    parts.push(`${order.accountFacts.source==='ORDER_VERSION'?'登录':'历史账号登录'}：${order.accountFacts.loginMethodText}`);
+    parts.push(`登录：${order.accountFacts.loginMethodText}`);
   }
   return parts.length > 0 ? parts.join(' · ') : null;
+}
+
+/** 账号标题：由账号基础信息（哈夫币·安全箱·段位）组成，缺失时用 ZZ 账号编号，迁入账号同样处理 */
+function accountTitleText(order: Order): string {
+  const facts=order.accountFacts;
+  const haff=facts?.resources.find(resource=>resource.unit==='HAFF_BASE');
+  const basic=[haff&&haff.quantity!==null?historicalResourceText({quantity:haff.quantity,unit:'HAFF_BASE',code:haff.code}):null,facts?.safeBoxText,facts?.gradingText].filter((value):value is string=>!!value).join(' · ');
+  return basic||(order.accountDisplayNo?`账号 ${order.accountDisplayNo}`:'')||order.title||'标题待核';
 }
 const ORDER_STATES: Record<string,string> = {current:'进行中',PENDING_PAYMENT:'待付款',PAID:'已付款',COMPLETED:'已完成',CANCELLED:'已取消'};
 const auditLabels:Record<string,string> = {'user.account.restored':'恢复账号','user.account.deactivated':'停用账号','user.account.cancelled':'注销账号','user.identity.verification':'实名验证','user.legacy_owner.migrated':'旧平台迁入','user.note.create':'添加备注','user.note.delete':'删除备注','user.risk.flag.changed':'修改高危标记','user.identity.sensitive.read':'查看敏感资料'};
@@ -133,10 +143,10 @@ function Orders({adapter,user,tab,refreshNonce,onOpenPath,onQueryChange,preview=
             </TableCell>
             <TableCell>
               <div className="udv-order-account">
-                <div className="font-medium text-sm line-clamp-1" title={order.title}>
-                  {order.title || '标题待核'}
+                <div className="font-medium text-sm line-clamp-1 flex items-center gap-1.5" title={accountTitleText(order)}>
+                  <span className="line-clamp-1">{accountTitleText(order)}</span>
+                  {order.source?.origin==='LEGACY'?<Badge variant="outline" className="px-1.5 py-0 text-[10px] font-normal shrink-0">旧平台迁入</Badge>:null}
                 </div>
-                {order.source?.origin==='LEGACY'&&order.title?<small>当前账号资料</small>:null}
                 {accountResourceSummary(order) ? (
                   <small className="line-clamp-1">{accountResourceSummary(order)}</small>
                 ) : null}

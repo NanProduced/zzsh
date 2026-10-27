@@ -219,7 +219,7 @@ test('native resource names stay frozen across catalog rename; missing or ambigu
   }
 });
 
-test('historical account facts retain their source binding and require the current account game scope',async()=>{
+test('migrated order account facts follow the account page version rule and require the current account game scope',async()=>{
   const accountId='old-account',stamp='2026-10-01T00:00:00.000Z',sourceDigest='b'.repeat(64),extract='c'.repeat(64),observation='old-observation';
   const snapshot=convertLegacyDisplayFields({haff:'97',coffee_num:'0',login_way:'2'}),evidenceRef=`legacy-display-v1:${extract}:old-1`;
   const displayDigest=legacyDisplayDigest(accountId,{observationVersionId:observation,baseSourceDigest:sourceDigest,extractSha256:extract,sourceUpdatedAt:stamp,evidenceRef,snapshot});
@@ -236,12 +236,16 @@ test('historical account facts retain their source binding and require the curre
     if(sql.includes('FROM zzsh_supply.legacy_listing_read_snapshot h'))return {rows:[historical]};
     return {rows:[{origin:'LEGACY',id:'old-order',role:'owner',sortAt:stamp}]};
   }} as unknown as PoolClient;
-  const page:any=await listUserOrders(c,{...viewer,legacyRead:true},'user_normal',{limit:1});
-  assert.equal(page.items[0].orderFacts.resources[0].quantity,'12.50');
-  assert.equal(page.items[0].accountFacts.source,'LEGACY_ACCOUNT');assert.equal(page.items[0].accountFacts.termDays,'10');assert.equal(page.items[0].accountFacts.loginMethodText,'微信扫码');
+  // 账号视图由路由注入：与账号页同一公开版本口径，不读历史快照
+  const viewCalls:string[][]=[];
+  const accountViews=async(_c:PoolClient,ids:string[])=>{viewCalls.push(ids);return new Map([[accountId,{source:'ACCOUNT_PUBLIC_VERSION' as const,versionId:'public-v',haff:{itemId:'haff_base',quantity:'97000000'},materials:[],materialsVisibleTotal:0,safeBoxText:'6格',gradingText:null,loginMethodText:'微信扫码',term:{name:null,termSeconds:'864000',dailyConsumption:null},fullPayout:'NOT_DECLARED' as const,haffRatioWanPerYuan:null,fees:{completeness:'UNKNOWN',haffRental:null,materials:null,resourceTotal:null,tenantDeposit:null,tenantPayableTotal:null,baseDepositCents:null}}]]);};
+  const page:any=await listUserOrders(c,{...viewer,legacyRead:true},'user_normal',{limit:1},accountViews);
+  assert.equal(page.items[0].orderFacts.resources[0].quantity,'12.50');assert.deepEqual(viewCalls,[[accountId]]);
+  assert.equal(page.items[0].accountFacts.source,'ACCOUNT_PUBLIC_VERSION');assert.equal(page.items[0].accountFacts.termDays,'10');assert.equal(page.items[0].accountFacts.loginMethodText,'微信扫码');assert.equal(page.items[0].accountFacts.safeBoxText,'6格');
+  assert.equal(queries.some(sql=>sql.includes('FROM zzsh_supply.legacy_listing_read_snapshot h')),false,'migrated account facts never read the historical snapshot');
   assert.deepEqual(page.items[0].accountFacts.resources.find((row:{code:string})=>row.code==='haff_base'),{code:'haff_base',name:'哈夫币',quantity:'97000000',unit:'HAFF_BASE'});
   inScope=false;queries.length=0;
-  const denied:any=await listUserOrders(c,{...viewer,legacyRead:true},'user_normal',{limit:1});
+  const denied:any=await listUserOrders(c,{...viewer,legacyRead:true},'user_normal',{limit:1},accountViews);assert.equal(viewCalls.length,1,'out-of-scope accounts are never read');
   assert.equal('accountFacts' in denied.items[0],false);assert.equal(denied.items[0].orderFacts.resources[0].quantity,'12.50');
   assert.equal(queries.some(sql=>sql.includes('FROM zzsh_supply.legacy_listing_read_snapshot h')),false,'a past order never grants current account scope');
 });

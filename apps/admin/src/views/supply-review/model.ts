@@ -216,16 +216,6 @@ export function supplyObjectLabel(item: { id?: string; displayNo?: string | null
   if (item.facts?.legacyNumbers.length === 1) return `旧来源号 ${item.facts.legacyNumbers[0]}`;
   return `账号 ${shortId(item.accountId ?? item.id ?? "")}`;
 }
-/** Old responses may still put a current-account or placeholder string in title. That is not the order snapshot. */
-export function orderTitleText(order: { title?: string | null; accountTitle?: { source?: string; title?: string | null; neutralSummary?: string | null } | null }): string {
-  const raw = typeof order.title === "string" ? order.title.trim() : "";
-  if (raw && !raw.includes("历史资料待核实") && raw !== "资源资料待核") return raw;
-  if (order.accountTitle?.title && order.accountTitle.source === "CURRENT_ACCOUNT") return `当前账号资料：${order.accountTitle.title}（不是本单原标题）`;
-  if (order.accountTitle?.neutralSummary) return order.accountTitle.neutralSummary;
-  if (raw.includes("历史资料待核实")) return "导入占位，不是本单原标题";
-  return "本单原标题未提供";
-}
-
 export function supplyFactText(facts: SupplyFacts) {
   return { display: facts.publicVisible === null ? "公开状态待核" : facts.publicVisible ? "当前公开展示" : "当前未公开", newOrders: facts.newOrders === null ? "新单资格待核" : facts.newOrders ? "可接新订单" : "不能接新订单", reason: facts.primaryReasonCode ? blockerLabel(facts.primaryReasonCode) : facts.staffRestricted ? "运营限制尚未解除" : facts.ownerPaused ? "号主暂停公开" : facts.reasons.map(blockerLabel).join("；") || "当前读取依据完整" };
 }

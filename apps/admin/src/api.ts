@@ -288,7 +288,7 @@ export type UserOrderItem = {
   counterpartyUserId?: string;
   counterpartySummary?: DirectoryUserPreview;
   orderFacts?: {termSeconds: string | null; resources: UserOrderResource[]};
-  accountFacts?: {source: 'ORDER_VERSION' | 'LEGACY_ACCOUNT'; resources: UserOrderResource[]; loginMethodText: string | null; termDays?: string};
+  accountFacts?: {source: 'ORDER_VERSION' | 'ACCOUNT_PUBLIC_VERSION'; resources: UserOrderResource[]; loginMethodText: string | null; termDays?: string; safeBoxText?: string | null; gradingText?: string | null};
   amounts: { rental: UserOrderAmount | null; deposit: UserOrderAmount | null; totalDue: UserOrderAmount | null };
   createdAt: string | null;
   holdUntil: string | null;

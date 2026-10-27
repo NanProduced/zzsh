@@ -503,7 +503,8 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     request.originalUrl = targetPath;
     request.headers = { ...request.headers, "x-request-id": requestId };
     try {
-      await handleUserDirectoryAdmin(request, response as AuthSecurityNodeResponse & { send?: (body: Buffer | string) => void }, options.adminSecurityOptions);
+      // 用户目录订单预览：与订单读同一账号视图注入（供给门禁与迁入公开准入），账号资料与账号页同口径
+      await handleUserDirectoryAdmin(request, response as AuthSecurityNodeResponse & { send?: (body: Buffer | string) => void }, { ...options.adminSecurityOptions, supplyGateReader: options.supply?.supplyGateReader, legacyPublicAdmission: options.supply?.legacyPublicAdmission, legacyPublicAdmissionDetail: options.supply?.legacyPublicAdmissionDetail });
     } catch (error) {
       if (error instanceof SecurityApiError) sendError(response, error.status, error.code, error.message, requestId);
       else sendError(response, 500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);

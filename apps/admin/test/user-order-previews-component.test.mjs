@@ -143,24 +143,26 @@ test('inline order amounts preserve due/deposit and distinguish unknown from a l
   assert.equal(/0\.00|实付|到账/.test(unknown.textContent), false); assert.match(unknown.textContent, /资源 待核 · 押金 待核/);
 });
 
-test('inline native title is frozen, legacy title is current account data and missing resource fields are not invented', async t => {
+test('account title falls back to the ZZ account number, migrated rows only add a small tag and missing resource fields are not invented', async t => {
   const h = await mount(t);
   const cell = h.host.querySelector('[data-order-id="synthetic-preview-order-1"]').children[1];
-  assert.match(cell.textContent, /本单冻结账号快照/); assert.equal(cell.textContent.includes('当前账号资料'), false);
+  assert.equal(cell.querySelector('[title]').getAttribute('title'), '账号 SYNTHETIC-ACCOUNT-1'); assert.equal(/当前账号资料|旧平台迁入/.test(cell.textContent), false);
   assert.equal(/已上架|可租|报价|号主暂停|平台限制|皮肤|哈夫币|租期：|登录：/.test(cell.textContent), false);
   assert.equal(cell.querySelector('img'), null, 'order rows never supply a skin or current listing image');
-  assert.match(h.host.querySelector('[data-order-id="synthetic-preview-order-2"]').children[1].textContent, /当前账号资料/);
+  const migrated = h.host.querySelector('[data-order-id="synthetic-preview-order-2"]').children[1].textContent;
+  assert.match(migrated, /旧平台迁入/); assert.equal(/当前账号资料|历史/.test(migrated), false);
   await click(namedButton('账号 SYNTHETIC-ACCOUNT-1', h.host));
   assert.equal(h.opened.at(-1).target, '/supply/accounts/synthetic-preview-account-1');
   assert.equal(h.calls.length, 2);
 });
 
-test('formal order facts keep original resource units and distinguish historical account rules from an order term',async t=>{
-  const original={...unknownOrder,accountDisplayNo:null,orderFacts:{termSeconds:null,resources:[{code:'df_billable_haff',quantity:'12.50',unit:null},{code:'df_billable_coffee',quantity:'0',unit:null}]},accountFacts:{source:'LEGACY_ACCOUNT',resources:[{code:'haff_base',name:'哈夫币',quantity:'97000000',unit:'HAFF_BASE'}],loginMethodText:'微信扫码',termDays:'10'}};
+test('migrated rows show the real account data under the account page version rule without a historical split',async t=>{
+  const original={...unknownOrder,accountDisplayNo:'ZZ-SYNTHETIC-2',orderFacts:{termSeconds:null,resources:[{code:'df_billable_haff',quantity:'12.50',unit:null},{code:'df_billable_coffee',quantity:'0',unit:null}]},accountFacts:{source:'ACCOUNT_PUBLIC_VERSION',resources:[{code:'haff_base',name:'哈夫币',quantity:'97000000',unit:'HAFF_BASE'}],loginMethodText:'微信扫码',termDays:'10',safeBoxText:'6格',gradingText:null}};
   const native={...knownOrder,orderFacts:{termSeconds:'86401',resources:[]},accountFacts:{source:'ORDER_VERSION',resources:[{code:'haff_base',name:'哈夫币',quantity:'50000000',unit:'HAFF_BASE'}],loginMethodText:'QQ扫码'}};
   const h=await mount(t,{rows:[original,native]}),old=h.host.querySelector('[data-order-id="synthetic-preview-order-2"]').children[1],current=h.host.querySelector('[data-order-id="synthetic-preview-order-1"]').children[1];
-  assert.match(old.textContent,/原单资源：哈夫币 12\.50/);assert.doesNotMatch(old.textContent,/97 M|12\.50 M|咖啡豆 0/,'current inventory never replaces frozen order quantities or invents a unit');
-  assert.match(old.textContent,/历史账号租期规则：10天/);assert.match(old.textContent,/历史账号登录：微信扫码/);
+  assert.match(old.textContent,/账号资料：97 M 哈夫币/);assert.doesNotMatch(old.textContent,/历史|原单资源|12\.50 M|咖啡豆 0/);
+  assert.equal(old.querySelector('[title]').getAttribute('title'),'97 M 哈夫币 · 6格');assert.match(old.textContent,/旧平台迁入/);
+  assert.match(old.textContent,/租期：10天/);assert.match(old.textContent,/登录：微信扫码/);
   assert.match(current.textContent,/下单账号资料：50 M 哈夫币/);assert.match(current.textContent,/租期：86401秒/,'fractional hours are never rounded into a false duration');assert.match(current.textContent,/登录：QQ扫码/);
   assert.equal(h.calls.length,2);
 });
@@ -244,7 +246,7 @@ test('without account read permission the inline title remains readable but the 
   const h = await mount(t, { permissions: ['user.directory.read', 'order.read'] });
   const link = namedButton('账号 SYNTHETIC-ACCOUNT-1', h.host);
   assert.equal(link.getAttribute('aria-disabled'), 'true'); await click(link); assert.equal(h.opened.length, 0);
-  assert.match(h.host.querySelector('tbody tr').children[1].textContent, /本单冻结账号快照/);
+  assert.match(h.host.querySelector('tbody tr').children[1].textContent, /账号 SYNTHETIC-ACCOUNT-1/);
   assert.equal(h.host.querySelector('[aria-label^="预览账号"]'), null);
   assert.equal(h.opened.length, 0); assert.equal(h.calls.length, 2);
 });

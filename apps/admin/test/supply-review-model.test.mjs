@@ -36,7 +36,6 @@ import {
   reasonIsDirty,
   reviewStateLabel,
   skinsText,
-  orderTitleText,
   publicBasisVersion,
   supplyObjectLabel,
   unitText,
@@ -372,7 +371,4 @@ test("declarations stay tri-state and an empty draft skin selection does not rev
   const line = quoteLineFacts(version)[0];
   assert.equal(line.name, "巴雷特");
   assert.equal(line.ownerAmount, "0.40");
-  assert.equal(orderTitleText({ title: "历史资料待核实", accountTitle: { source: "CURRENT_ACCOUNT", title: "当前号" } }), "当前账号资料：当前号（不是本单原标题）");
-  assert.equal(orderTitleText({ title: "本单原题" }), "本单原题");
-  assert.equal(orderTitleText({ title: null }), "本单原标题未提供");
 });

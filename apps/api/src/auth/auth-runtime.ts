@@ -1162,7 +1162,7 @@ export async function mountAuthHandlers(
   if (collection?.notifications) mountJoinpayCollectionNotifications(app, { pool: options.pool, source: collection.notifications });
   mountOrderHandlers(app, orderOptions);
   mountUserOrderBff(app, orderOptions);
-  mountUserDirectory(app,{...securityOptions,supplyGateReader});
+  mountUserDirectory(app,{...securityOptions,supplyGateReader,legacyPublicAdmission,legacyPublicAdmissionDetail});
   mountInvitationRoutes(app,{...securityOptions,listingCursorKey:options.listingCursorKey,distributionScope:options.distributionScope,distributionReadScope:options.distributionReadScope});
   mountDistributionPolicyRoutes(app,{...securityOptions,distributionScope:options.distributionScope,distributionReadScope:options.distributionReadScope});
   mountAdminDistributionReadRoutes(app, securityOptions);

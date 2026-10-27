@@ -13,6 +13,10 @@ import { readUserSensitiveProfile } from "./user-directory-sensitive";
 import { readAdminUserConsumption } from "../finance/admin-user-consumption-read";
 import { ensureApiV1RequestId } from "../contracts/api-v1";
 import { validateIdempotencyKey } from "../contracts/api-v1";
+import { readOrderAccountViews } from "../supply/admin-supervision-read";
+import { unknownSupplyGate } from "../supply/publishing";
+import type { LegacyPublicAdmission, LegacyPublicAdmissionDetailIndex } from "../legacy-load/legacy-public-admission";
+import type { OrderAccountViewReader } from "../order/admin-order-read";
 import { decodeId, requireAdminAccess, safely, type SupplyResponse } from "../supply/supply-routes";
 import { invalid, notFound, forbidden, sendJson, sha256Hex, type SupplyNodeRequest } from "../supply/supply-util";
 import {
@@ -106,10 +110,14 @@ function parseTrimmed(raw: string | null, max: number, label: string): string | 
   return value;
 }
 
+/** 用户目录路由选项：注入迁入公开准入，订单预览账号资料与账号页同一口径 */
+export type UserDirectoryOptions = AuthSecurityOptions & { legacyPublicAdmission?: LegacyPublicAdmission; legacyPublicAdmissionDetail?: LegacyPublicAdmissionDetailIndex };
+const directoryAccountViews=(options:UserDirectoryOptions):OrderAccountViewReader=>(client,ids)=>readOrderAccountViews(client,ids,options.supplyGateReader??unknownSupplyGate,options.legacyPublicAdmission,options.legacyPublicAdmissionDetail);
+
 export async function handleUserDirectoryAdmin(
   request: SupplyNodeRequest,
   response: SupplyResponse,
-  options: AuthSecurityOptions,
+  options: UserDirectoryOptions,
   next?: () => void,
 ): Promise<void> {
   const requestId = ensureApiV1RequestId(request);
@@ -339,7 +347,7 @@ export async function handleUserDirectoryAdmin(
           ...(statusRaw !== null ? { status: statusRaw as "PENDING_PAYMENT" | "PAID" | "COMPLETED" | "CANCELLED" | "current" } : {}),
           limit,
           ...(cursor !== undefined ? { cursor } : {}),
-        });
+        }, directoryAccountViews(options));
         return;
       }
       requirePermission(access, ADMIN_PERMISSION.auditRead);
@@ -351,7 +359,7 @@ export async function handleUserDirectoryAdmin(
   });
 }
 
-export function mountUserDirectory(app: INestApplication, options: AuthSecurityOptions): void {
+export function mountUserDirectory(app: INestApplication, options: UserDirectoryOptions): void {
   const expressApp = app.getHttpAdapter().getInstance() as {
     use: (path: string, middleware: (request: SupplyNodeRequest, response: SupplyResponse, next: () => void) => Promise<void>) => void;
   };

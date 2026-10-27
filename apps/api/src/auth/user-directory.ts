@@ -5,7 +5,7 @@ import { conflict, forbidden, invalid, sha256Hex } from "../supply/supply-util";
 import { escapeLike } from "../supply/catalog";
 import { effectivePublicationStateSql, isEffectivePublicationState, projectPublicAttributeDisplay } from "../supply/listing-query";
 import { notFound } from "../supply/supply-util";
-import { orderReadKeyRelation, orderReadRelation, projectAdminReadOrder } from "../order/admin-order-read";
+import { accountViewFrozen, orderReadKeyRelation, orderReadRelation, projectAdminReadOrder, type OrderAccountViewReader } from "../order/admin-order-read";
 import { legacyContinuationReady } from "../order/legacy-order-read";
 import { legacyUserOrderResources } from "../order/legacy-user-order-read";
 import { loadLegacyHistoricalRead, loadLegacyHistoricalReads } from "../supply/legacy-listing-read";
@@ -877,10 +877,10 @@ type UserOrderRow = {
 };
 
 type OrderAccountBinding = { origin: 'NATIVE' | 'LEGACY'; orderId: string; accountId: string; versionId?: string | null; contentHash?: string | null };
-type OrderAccountFacts = { source: 'ORDER_VERSION' | 'LEGACY_ACCOUNT'; resources: Array<{code: string; name?: string; quantity: string | null; unit: string}>; loginMethodText: string | null; termDays?: string };
+type OrderAccountFacts = { source: 'ORDER_VERSION' | 'ACCOUNT_PUBLIC_VERSION'; resources: Array<{code: string; name?: string; quantity: string | null; unit: string}>; loginMethodText: string | null; termDays?: string; safeBoxText?: string | null; gradingText?: string | null };
 
 /** Page-selected accounts only: never substitute current inventory for the frozen native version. */
-async function readOrderAccountFacts(client: PoolClient, viewer: AdminDirectoryViewer, bindings: OrderAccountBinding[]) {
+async function readOrderAccountFacts(client: PoolClient, viewer: AdminDirectoryViewer, bindings: OrderAccountBinding[], accountViews?: OrderAccountViewReader) {
   const facts = new Map<string, OrderAccountFacts>();
   if (!viewer.resourceRead || viewer.businessScopeUsable === false || !bindings.length) return facts;
   const selected = bindings.filter(row=>row.origin==='LEGACY' || row.versionId && row.contentHash);
@@ -908,14 +908,18 @@ async function readOrderAccountFacts(client: PoolClient, viewer: AdminDirectoryV
         ...(typeof original?.name==='string' && original.name.trim()?{name:original.name}:{}),
         quantity:item.quantity,unit:typeof original?.unit==='string'?original.unit:item.unit};
     });
-    facts.set(`NATIVE\u0000${row.orderId}`, {source:'ORDER_VERSION',resources,loginMethodText:projectPublicAttributeDisplay(row.attributes).loginMethod?.displayName ?? null});
+    const display = projectPublicAttributeDisplay(row.attributes);
+    facts.set(`NATIVE\u0000${row.orderId}`, {source:'ORDER_VERSION',resources,loginMethodText:display.loginMethod?.displayName ?? null,safeBoxText:display.safeBox?.displayName ?? null,gradingText:display.grading?.displayName ?? null});
   }
   const legacy = rows.filter(row => row.origin==='LEGACY');
-  const historical = await loadLegacyHistoricalReads(client, legacy.map(row => row.accountId));
+  // 迁入单：账号即账号，资料与账号页同一版本口径（公开版本存在且不同于当前时取公开版，否则取当前），不再读历史快照
+  const views = accountViews && legacy.length ? await accountViews(client, [...new Set(legacy.map(row => row.accountId))]) : new Map();
   for (const row of legacy) {
-    const read = historical.get(row.accountId);
-    if (read?.display.state !== 'KNOWN' || !read.display.facts) continue;
-    facts.set(`LEGACY\u0000${row.orderId}`, {source:'LEGACY_ACCOUNT',resources:read.display.facts.resources,loginMethodText:read.display.facts.attributeDisplay.loginMethod?.displayName ?? null,termDays:read.historicalQuote.termDays});
+    const view = views.get(row.accountId);
+    if (!view) continue;
+    const account = accountViewFrozen(view);
+    const resources = [...(account.haff ? [account.haff] : []), ...account.materials].map(item => ({code:item.code,...(item.name ? {name:item.name} : {}),quantity:item.quantity,unit:item.unit}));
+    facts.set(`LEGACY\u0000${row.orderId}`, {source:'ACCOUNT_PUBLIC_VERSION',resources,loginMethodText:account.loginMethodText,...(account.termDays ? {termDays:account.termDays} : {}),safeBoxText:account.safeBoxText ?? null,gradingText:account.gradingText ?? null});
   }
   return facts;
 }
@@ -925,9 +929,10 @@ export async function listUserOrders(
   viewer: AdminDirectoryViewer,
   userId: string,
   filter: UserOrderFilter,
+  accountViews?: OrderAccountViewReader,
 ): Promise<Record<string, unknown>> {
   if (!viewer.orderRead) throw forbidden("Order reading requires order.read");
-  if (viewer.legacyRead) return listUserReadOrders(client,viewer,userId,filter);
+  if (viewer.legacyRead) return listUserReadOrders(client,viewer,userId,filter,accountViews);
   const filterKey = sha256Hex(
     JSON.stringify({
       scope: "admin-user-orders",
@@ -1026,7 +1031,7 @@ export async function listUserOrders(
   };
 }
 
-async function listUserReadOrders(client:PoolClient,viewer:AdminDirectoryViewer,userId:string,filter:UserOrderFilter) {
+async function listUserReadOrders(client:PoolClient,viewer:AdminDirectoryViewer,userId:string,filter:UserOrderFilter,accountViews?:OrderAccountViewReader) {
   const key=sha256Hex(JSON.stringify({scope:'admin-user-read-orders',principal:viewer.adminId,authorizationKey:viewer.authorizationKey??null,userId,role:filter.role??'any',status:filter.status??null,limit:filter.limit}));
   const cursor=parseKeysetCursor(filter.cursor,key),values:unknown[]=[userId,viewer.isBoss,viewer.adminId],where=[`(x.owner_user_id=$1 OR x.renter_user_id=$1)`,gameScopeSql("x.game_id","$3","$2")];
   if(filter.role==='owner')where.push('x.owner_user_id=$1');if(filter.role==='renter')where.push('x.renter_user_id=$1');
@@ -1067,7 +1072,7 @@ async function listUserReadOrders(client:PoolClient,viewer:AdminDirectoryViewer,
   const accountFacts=await readOrderAccountFacts(client,viewer,items.map(row=>{
     const record=recordsByKey.get(`${row.origin}\u0000${row.id}`)!;
     return {origin:row.origin as 'NATIVE'|'LEGACY',orderId:row.id,accountId:String(record.account_id),versionId:row.origin==='NATIVE'?record.listing_version_id as string:null,contentHash:row.origin==='NATIVE'?record.content_hash as string:null};
-  }));
+  }),accountViews);
   return {
     items:projected.map((row,index)=>({...row,...(counterparties.has(row.counterpartyUserId)?{counterpartySummary:counterparties.get(row.counterpartyUserId)!}:{}),...(accountFacts.has(`${items[index]!.origin}\u0000${row.orderId}`)?{accountFacts:accountFacts.get(`${items[index]!.origin}\u0000${row.orderId}`)!}:{})})),
     nextCursor:rows.length>filter.limit&&last?encodeKeysetCursor(key,{sortAt:last.sortAt,id:last.id}):null,limit:filter.limit,
