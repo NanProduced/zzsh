@@ -84,7 +84,7 @@ function parseLimit(raw: string | null): number {
   return limit;
 }
 
-const ORDER_PAGE_QUERY_KEYS = ["page","pageSize","status","origin","createdFrom","createdTo","qKind","qValue","restoreKey"] as const;
+const ORDER_PAGE_QUERY_KEYS = ["page","pageSize","status","origin","createdFrom","createdTo","qKind","qValue","restoreKey","view"] as const;
 /** The numbered list is the admin read contract: every filter is parsed before the count/page query. */
 export function parseAdminOrderPageQuery(query: URLSearchParams): OrderReadFilters {
   for (const key of query.keys()) if (!ORDER_PAGE_QUERY_KEYS.includes(key as typeof ORDER_PAGE_QUERY_KEYS[number]) || query.getAll(key).length !== 1) throw invalid("Unsupported order page query", key);
@@ -92,8 +92,9 @@ export function parseAdminOrderPageQuery(query: URLSearchParams): OrderReadFilte
   const qKind=query.get("qKind")??"order";
   if(!["order","account","party","renter","owner"].includes(qKind))throw invalid("Lookup kind is invalid");
   const qValue=query.get("qValue");if(qValue!==null&&(!qValue.trim()||qValue.length>255||/[\x00-\x1f\x7f]/.test(qValue)))throw invalid("Lookup value is invalid");
+  const view=query.get("view");if(view!==null&&view!=="list")throw invalid("View is invalid","view");
   const restoreKey=query.get("restoreKey");if(restoreKey!==null&&!/^[a-f0-9]{64}$/.test(restoreKey))throw invalid("Restore key is invalid");
-  return {page:positive("page",1,1000000),pageSize:positive("pageSize",20,100),qKind:qKind as OrderReadFilters["qKind"],...(qValue!==null?{qValue:qValue.trim()}:{}),...parseCreatedRange(query),...(query.has("status")?{status:parseStatus(query.get("status"))}:{}),...(query.has("origin")?{origin:parseOrderOrigin(query)}:{}) ,...(restoreKey?{restoreKey}:{})};
+  return {page:positive("page",1,1000000),pageSize:positive("pageSize",20,100),qKind:qKind as OrderReadFilters["qKind"],...(qValue!==null?{qValue:qValue.trim()}:{}),...parseCreatedRange(query),...(query.has("status")?{status:parseStatus(query.get("status"))}:{}),...(query.has("origin")?{origin:parseOrderOrigin(query)}:{}) ,...(restoreKey?{restoreKey}:{}),...(view==="list"?{view:"list" as const}:{})};
 }
 function parseCreatedRange(query: URLSearchParams): { createdFrom?: string; createdTo?: string } {
   const fromRaw = query.get("createdFrom");

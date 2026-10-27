@@ -375,6 +375,26 @@ test('U3 order fee label follows the stage while the split stays visible and pay
     if(item.status!=='CANCELLED')assert.equal(fee.includes('未形成支付')||fee.includes('支付事实待核'),false,'payment state is not folded into a normal fee cell');
   }
 });
+
+test('master: list requests the bounded projection and keeps the true material count', async t => {
+  const {root,node,AdminOrderChainView}=await setup(t),calls=[];
+  const item={...chainOrder,id:'bounded-materials',displayNo:'BOUNDED-MATERIALS',frozenAccount:{source:'ORDER_VERSION',haff:null,materials:[{code:'one',name:'物资甲',quantity:'1',unit:'PIECE'},{code:'two',name:'物资乙',quantity:'2',unit:'PIECE'},{code:'three',name:'物资丙',quantity:'3',unit:'PIECE'}],materialsTotal:6,materialsTruncated:true,termDays:null,termSeconds:null,loginMethodText:null}};
+  globalThis.fetch=async url=>{calls.push(new URL(String(url),'http://localhost'));return response(chainPage([item]));};
+  await act(async()=>root.render(createElement(AdminOrderChainView,chainProps('bounded-materials'))));await until(()=>node.textContent.includes('BOUNDED-MATERIALS'));
+  assert.equal(calls[0].searchParams.get('view'),'list');assert.match(node.textContent,/等 6 项/);assert.equal(calls.length,1);
+});
+
+test('master: order detail separates lack of permission, unknown parts and verified legacy arithmetic', async t => {
+  const {root,node,AdminOrderChainView}=await setup(t);let value={...chainOrder,id:'clarity-native',displayNo:'CLARITY-NATIVE',status:'PAID',payment:{state:'RECORDED_PAID',recordedAt:null,recordedAmount:null},prepaymentBreakdown:{basis:'NATIVE_FROZEN_ORDER_QUOTE',completeness:'UNKNOWN',haffRental:null,materialsPrepay:null},source:{origin:'NATIVE'}};
+  globalThis.fetch=async url=>String(url).includes('readMode=combined')?response({order:value}):response({error:{code:'NOT_FOUND'}},404);
+  const props={...chainProps('clarity-native'),objectOnly:true,initialOrderId:value.id};
+  await act(async()=>root.render(createElement(AdminOrderChainView,props)));await until(()=>node.textContent.includes('CLARITY-NATIVE'));
+  assert.match(node.textContent,/无权查看/);assert.match(node.textContent,/哈夫租金未知（依据未提供）/);assert.match(node.textContent,/物资预付未知（依据未提供）/);
+  value={...value,id:'clarity-legacy',displayNo:'CLARITY-LEGACY',source:{origin:'LEGACY',statusLabel:'已取消'},payment:{state:'RECORDED_UNPAID',recordedAt:null,recordedAmount:null},prepaymentReconciliation:{state:'MISMATCH',arithmetic:'MISMATCH',closed:false},legacyResources:{state:'KNOWN',source:'LEGACY_ORIGINAL_ORDER',items:[{code:'x',name:'原单物资',quantity:'4',unit:null,zero:false}]},frozenAccount:{source:'LEGACY_ACCOUNT',haff:null,materials:[],termDays:null,termSeconds:null,loginMethodText:null}};
+  await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('clarity-legacy'),objectOnly:true,initialOrderId:value.id})));await until(()=>node.textContent.includes('CLARITY-LEGACY'));
+  assert.match(node.textContent,/历史账号参考（非本单冻结）/);assert.match(node.textContent,/原单物资 4（单位未记录）/);
+  assert.match(node.textContent,/原单记录，合计尚未核对/);assert.match(node.textContent,/完整构成仍待核对/);assert.match(node.textContent,/未记录付款/);assert.doesNotMatch(node.textContent,/本单冻结账号摘要 · 历史/);
+});
 test('first, refresh and page read errors remain failures; expired restore context rereads page one', async t => {
   const {root,node,AdminOrderChainView} = await setup(t);const calls=[];let mode='first-failure';
   globalThis.fetch = async url => {const parsed=new URL(String(url),'http://localhost');calls.push(parsed);return mode.endsWith('failure')?response({error:{code:'INTERNAL_ERROR'}},500):mode==='conflict'&&parsed.searchParams.has('restoreKey')?response({error:{code:'CONFLICT'}},409):response(chainPage([chainOrder],{total:50}));};
@@ -699,7 +719,7 @@ test('order list renders the frozen source label once and keeps missing party nu
  const row=node.querySelector('.oc-table tbody tr');
  assert.equal(row.textContent.includes('本单冻结：本单冻结：'),false);
  assert.match(row.textContent,/本单冻结：98\.08 M/);
- assert.match(row.textContent,/编号未提供/);
+ assert.doesNotMatch(row.textContent,/编号未提供/);
  assert.match(row.textContent,/编号 RENTER-BIZ/);
 });
 

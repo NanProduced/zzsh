@@ -6,6 +6,8 @@ import { readFileSync } from "node:fs";
 import { Pool, type PoolClient } from "pg";
 import { listingDetail, publicationBlockers, type PublishingAccount, type SupplyGateReader } from "../src/supply/publishing";
 import { parseMediaReviewBinding, assertMediaReviewBinding } from "../src/supply/media";
+import { computeContentHash, normalizeContentPayload } from "../src/supply/content-hash";
+import { computeQuote } from "../src/supply/pricing";
 import { fundingPolicyFixture } from "./funding-authority-fixtures";
 import { handlePublishingRoute } from "../src/supply/publishing-routes";
 
@@ -96,6 +98,30 @@ function mockRentalPublicProjection(t: TestContext, fixture: ReturnType<typeof r
 }
 
 const rentalViewer = (permissions: string[]) => ({ ...queryViewer, access: { ...queryViewer.access, isBoss: false, permissions: new Set(permissions) } });
+
+test('account-only detail exposes the bound buyer ratio without leaking pricing inputs or inventing missing ratios', async t => {
+    const f = rentalDetailFixture(); mockRentalPublicProjection(t, f);
+    const priced = computeQuote({ priceVersionId:'price-a',mode:'PERCENT',commissionRate:'0.2',roundingPolicy:'HALF_UP_CENT_V1',
+        haffRule:{schema:'haff-ratio-v1',baseBySafeBox:{'box-a':'40'},vitalityDeltaByLevel:{6:'0'},bearDeltaByLevel:{6:'0'},dailyDeltaByTermOption:{daily:'0'},options:{standard:{delta:'0',enabled:true}}},
+        lines:[{itemId:'haff',quantity:'1000000',pricingKind:'HAFF_RATIO'}],conditions:{safeBoxCode:'box-a',vitLevel:6,bearLevel:6,termOptionCode:'daily',pricingOptionCode:'standard'},termOption:{code:'daily',dailyConsumption:'10000000',durationRounding:'CEIL_DAY'} });
+    assert(priced.quotable); priced.quote.pricingInputs.denominators!.buyer = '39.12345678';
+    const payload = normalizeContentPayload({schemaVersion:1,accountId:f.account.id,gameId:f.account.game_id,declaration:{title:'test',description:null,attributes:{},inventory:[{itemId:'haff',quantity:'1000000'}],skins:[],entitlements:[],termOptionCode:'daily',pricingOptionCode:'standard',mediaBindings:[]},ruleRefs:{releaseId:'release-a',priceVersionId:'price-a',termVersionId:'term-a',agreementVersionId:'agreement-a',agreementDigest:'d'.repeat(64)},quoteValues:priced.quote});
+    Object.assign(f.version,{payload,content_hash:computeContentHash(payload),rule_release_id:'release-a'});
+    const values = payload.quoteValues as any;
+    const viewer = rentalViewer(['supply.rental_account.read']), gate: SupplyGateReader = async () => ({ publisherBail: 'NOT_REQUIRED', occupancy: 'FREE', reference: null });
+    const before = JSON.stringify(values);
+    const detail: any = await readSupervision(f.client, f.account, viewer, gate, null);
+    assert.equal(detail.version.quote.baseRenterHaffRatioWanPerYuan, '39.12345678');
+    assert.equal(detail.version.quote.pricingInputs, undefined); assert.equal(detail.version.quote.ownerTotal, undefined);
+    assert.equal(JSON.stringify(values), before);
+    values.pricingInputs.denominators.buyer = '38';
+    const stale: any = await readSupervision(f.client, f.account, viewer, gate, null);
+    assert.equal(stale.version.quote.baseRenterHaffRatioWanPerYuan, null, 'changed quote cannot retain the old version binding');
+    values.pricingInputs.denominators = null;
+    f.version.content_hash = computeContentHash(payload);
+    const unknown: any = await readSupervision(f.client, f.account, viewer, gate, null);
+    assert.equal(unknown.version.quote.baseRenterHaffRatioWanPerYuan, null);
+});
 
 test("rental account detail reuses listingDetail while denying management fields and every management query", async t => {
     const f = rentalDetailFixture(); mockRentalPublicProjection(t, f);

@@ -14,7 +14,7 @@ import { validateFundingPolicy, validateOwnerDepositDeclaration } from "./fundin
 import { decimalToBigInt, parseNonNegativeDecimal, yuanAmountObject } from "./decimal";
 import { DELTA_INFO_SOURCE_DICTIONARY, projectDeltaQuote } from "./delta-rental";
 import { projectTenantMoney } from "./tenant-price-projection";
-import { evaluatePublication, listingCandidatePage, listingDetail, listingPageShared, publicListingAttributes, publicListingBasis, publicListingMemo, readPublicListing, type ListingDetailPrefetch, type ListingPageShared, type ListingPublication, type ListingVersion, type PublishingAccount, type SupplyGate, type SupplyGateReader } from "./publishing";
+import { boundBaseRenterRatio, evaluatePublication, listingCandidatePage, listingDetail, listingPageShared, publicListingAttributes, publicListingBasis, publicListingMemo, readPublicListing, type ListingDetailPrefetch, type ListingPageShared, type ListingPublication, type ListingVersion, type PublishingAccount, type SupplyGate, type SupplyGateReader } from "./publishing";
 import { projectPublicAttributeDisplay, publicLoginMethodOptions } from "./listing-query";
 import { conflict, forbidden, invalid, notFound, sha256Hex } from "./supply-util";
 import { SecurityApiError } from "../auth/security-core";
@@ -415,7 +415,7 @@ function publicBasisListingSummary(publicBasis: Record<string, any>, facts: Reco
         login,
         config,
         feeSummary: quoteFeeSummary(quote),
-        quote: quote ? { currency: quote.currency ?? null, resourceTotal: amount(quote.resourceTotal), tenantDeposit: amount(quote.tenantDeposit), tenantPayableTotal: amount(quote.tenantPayableTotal), frozen: true, personalised: false } : null,
+        quote: quote ? { currency: quote.currency ?? null, resourceTotal: amount(quote.resourceTotal), tenantDeposit: amount(quote.tenantDeposit), tenantPayableTotal: amount(quote.tenantPayableTotal), baseRenterHaffRatioWanPerYuan: quote.baseRenterHaffRatioWanPerYuan ?? null, frozen: true, personalised: false } : null,
         baseDeposit: declaredCents ? { amountCents: declaredCents } : null,
         fullPayout: payout === true ? "SELECTED" : payout === false ? "NOT_SELECTED" : "NOT_DECLARED",
         guarantee: { ...guaranteeRequirement(gate, guarantee?.policyRequirement ?? null), recordedProof: guarantee?.proof ?? null, eligibility: readiness },
@@ -500,7 +500,7 @@ function listingSummary(detail: Record<string, any>, facts: Record<string, any>,
         login,
         config,
         feeSummary: quoteFeeSummary(quote),
-        quote: quote ? { currency: quote.currency ?? null, resourceTotal: amount(quote.resourceTotal), tenantDeposit: amount(quote.tenantDeposit), tenantPayableTotal: amount(quote.tenantPayableTotal), ownerTotal: amount(quote.ownerTotal), publisherBailRequirement: amount(quote.publisherBailRequirement), frozen: true, personalised: false } : null,
+        quote: quote ? { currency: quote.currency ?? null, resourceTotal: amount(quote.resourceTotal), tenantDeposit: amount(quote.tenantDeposit), tenantPayableTotal: amount(quote.tenantPayableTotal), baseRenterHaffRatioWanPerYuan: quote.baseRenterHaffRatioWanPerYuan ?? null, ownerTotal: amount(quote.ownerTotal), publisherBailRequirement: amount(quote.publisherBailRequirement), frozen: true, personalised: false } : null,
         baseDeposit: typeof declaredCents === "string" ? { amountCents: declaredCents } : null,
         fullPayout,
         guarantee: { ...guaranteeRequirement(gate, guarantee?.policyRequirement ?? null), recordedProof: guarantee?.proof ?? null, eligibility },
@@ -550,7 +550,7 @@ async function listVersionProjection(client: PoolClient, account: PublishingAcco
     }, "READ", false, shared, undefined, observed);
     const payload = version.payload;
     const quoteValues = payload?.quoteValues as { lines?: Array<{ itemId?: unknown; unit?: unknown }> } | undefined;
-    const quote = quoteValues ? { ...projectDeltaQuote({ ...quoteValues, contentHash: version.content_hash } as never, quoteViewer), ...(payload?.ruleRefs.catalogRevision === undefined ? {} : { catalogRevision: payload.ruleRefs.catalogRevision }) } : null;
+    const quote = quoteValues ? { ...projectDeltaQuote({ ...quoteValues, contentHash: version.content_hash } as never, quoteViewer), baseRenterHaffRatioWanPerYuan: boundBaseRenterRatio(account, version), ...(payload?.ruleRefs.catalogRevision === undefined ? {} : { catalogRevision: payload.ruleRefs.catalogRevision }) } : null;
     const lines = Array.isArray(quoteValues?.lines) ? quoteValues.lines : [];
     const savedInventory = payload?.declaration && Array.isArray(payload.declaration.inventory) ? payload.declaration.inventory : null;
     const stock = savedInventory ?? pageStock?.get(version.id) ?? [];

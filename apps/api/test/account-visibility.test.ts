@@ -3,13 +3,25 @@ import { test } from "node:test";
 import type { PoolClient } from "pg";
 import { computeContentHash, normalizeContentPayload } from "../src/supply/content-hash";
 import { computeQuote } from "../src/supply/pricing";
-import { evaluatePublication, listingDetail, readPublicListing, quoteListing, assertEditable, type ListingVersion, type PublishingAccount, type SupplyGateReader } from "../src/supply/publishing";
+import { boundBaseRenterRatio, evaluatePublication, listingDetail, readPublicListing, quoteListing, assertEditable, type ListingVersion, type PublishingAccount, type SupplyGateReader } from "../src/supply/publishing";
 import { lookupPublicListing } from "../src/supply/public-listing-lookup";
 import { handleFavorites } from "../src/supply/favorites";
 import { handlePublishingRoute } from "../src/supply/publishing-routes";
 import { listV2 } from "../src/supply/listing-filter-routes";
 import * as filterConfig from "../src/supply/listing-filter-config";
 import * as legacyRead from "../src/supply/legacy-listing-read";
+
+test("buyer ratio belongs to the same verified account, game, release and payload hash", () => {
+  const f = nativeFixture(), payload = f.version.payload!;
+  const expected = (payload.quoteValues as { pricingInputs: { denominators: { buyer: string } } }).pricingInputs.denominators.buyer;
+  assert.equal(boundBaseRenterRatio(f.account, f.version), expected);
+  assert.equal(boundBaseRenterRatio({ ...f.account, id: "other" }, f.version), null);
+  assert.equal(boundBaseRenterRatio({ ...f.account, game_id: "other" }, f.version), null);
+  assert.equal(boundBaseRenterRatio(f.account, { ...f.version, rule_release_id: "other" }), null);
+  assert.equal(boundBaseRenterRatio(f.account, { ...f.version, content_hash: "0".repeat(64) }), null);
+  (payload.quoteValues as { pricingInputs: { denominators: { buyer: string } } }).pricingInputs.denominators.buyer = "11";
+  assert.equal(boundBaseRenterRatio(f.account, f.version), null);
+});
 
 function nativeFixture(id = "account-a", game = "game-a") {
   const priced = computeQuote({ priceVersionId: "price-a", mode: "PERCENT", commissionRate: "0.2", roundingPolicy: "HALF_UP_CENT_V1",

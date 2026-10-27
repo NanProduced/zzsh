@@ -11,6 +11,32 @@ const tick=async h=>{for(let i=0;i<5;i++)await h.settle();};
 async function prepare(t,fetchImpl,options={}){const h=await mountHarness(t,{permissions,initialAccountId:'a',initialQuery:{context:'review'},fetchImpl,strict:true,...options});await tick(h);await h.fillReason('fixture: verify account/version and retain independent blockers');await h.click(h.btn('核对后确认运营限制'));await tick(h);return h;}
 const confirm=h=>h.click(h.btn('确认'+ '施加运营限制'));
 
+test('owner review: one account profile contains image blocking; legacy changes deep links lead to records', async t => {
+  const value=workDetail();
+  value.version.quote.baseRenterHaffRatioWanPerYuan='39';
+  const h=await mountHarness(t,{permissions,initialAccountId:'a',fetchImpl:async()=>json(value)});await tick(h);
+  assert.equal(h.btn('审核与图片'),undefined);assert(h.el.querySelector('[data-haff-pricing]'));assert.match(h.el.textContent,/1元=39万哈夫币/);
+  assert(h.btn('屏蔽图片…'));await h.click(h.btn('屏蔽图片…'));await tick(h);
+  assert(h.el.querySelector('[data-supply-action]'));assert(h.btn('确认屏蔽当前图片').disabled);assert.equal(h.writes.length,0);
+  await h.click(h.btn('取消'));await tick(h);
+  await h.render('admin',permissions,'a',{context:'changes'});await tick(h);
+  assert(h.el.querySelector('[data-account-version-records]'));assert.equal(h.writes.length,0);
+});
+
+test('owner review: associated orders use one list and localized state without repeating the current owner', async t => {
+  const value=workDetail();value.supervision.orders={state:'READY',total:2,items:[{id:'cancel',displayNo:'CANCEL-1',ownerUserId:'owner-a',ownerName:'fixture owner',renterName:'fixture renter',status:'CANCELLED',versionId:'v-old',payment:{state:'RECORDED_UNPAID'},source:{origin:'NATIVE'},amounts:{totalDue:{amount:'100.00'}}},{id:'done',displayNo:'DONE-1',ownerUserId:'owner-a',ownerName:'fixture owner',renterName:'fixture renter',status:'COMPLETED',versionId:'v-old',payment:{state:'RECORDED_PAID'},source:{origin:'NATIVE'}}]};
+  const h=await mountHarness(t,{permissions,initialAccountId:'a',initialQuery:{context:'orders'},fetchImpl:async()=>json(value)});await tick(h);
+  const area=h.el.querySelector('[data-account-linked-orders]');assert(area);assert.equal(area.querySelectorAll('tbody tr').length,2);
+  assert.match(area.textContent,/已取消/);assert.match(area.textContent,/已完成/);assert.match(area.textContent,/¥100.00/);
+  assert.doesNotMatch(area.textContent,/CANCELLED|COMPLETED|当前账号与号主|原号主相同|当前资料/);assert.equal(h.writes.length,0);
+});
+
+test('owner review: blocking an image is unavailable until its bound revision and digest are present', async t => {
+  const value=workDetail();value.version.declaration.mediaBindings[0].byteHash=null;
+  const h=await mountHarness(t,{permissions,initialAccountId:'a',fetchImpl:async()=>json(value)});await tick(h);
+  assert(h.btn('屏蔽图片…').disabled);assert.match(h.el.textContent,/图片信息未完整读取/);assert.equal(h.writes.length,0);
+});
+
 test('unrelated completed order history and archived metadata never turn an unknown account business state into completion', async t => {
   const value = workDetail(); value.supervision.facts.businessState = null; value.supervision.facts.lifecycle = 'ARCHIVED';
   value.supervision.orders.items = [{ id: 'unrelated-completed-order', displayNo: 'OLD-DONE', status: 'COMPLETED', ownerUserId: 'owner-a', ownerName: 'fixture owner', renterName: 'fixture renter', versionId: 'old-v', payment: { state: 'PAID' }, source: { origin: 'LEGACY' } }]; value.supervision.orders.total = 1;
@@ -67,7 +93,10 @@ test('skin grid shows only image, name and factual quality badges without repeat
   const original = JSON.stringify(value.version.presentation.skins);
   const h = await mountHarness(t, { permissions, initialAccountId: 'a', initialQuery: { context: 'situation' }, fetchImpl: async () => json(value) }); await tick(h);
   const list = h.el.querySelector('[data-skin-list]'); assert(list);
-  assert.match(list.textContent, /可读外观传说（平台参考）/); assert.match(list.textContent, /未定品质外观品质未知/);
+  assert.match(list.textContent, /可读外观传说/); assert.match(list.textContent, /未定品质外观品质未知/);
+  assert.doesNotMatch(list.textContent, /平台参考/);
+  assert.equal(list.querySelectorAll('[data-skin-image="portrait"]').length, 1);
+  assert.equal(list.querySelectorAll('[data-skin-image="landscape"]').length, 1);
   assert.doesNotMatch(list.textContent, /干员|近战外观|典藏|默认/);
   assert.equal(list.querySelectorAll('[data-slot="badge"]').length, 2);
   assert.equal(JSON.stringify(value.version.presentation.skins), original); assert.equal(h.writes.length, 0);
@@ -94,11 +123,12 @@ test('same account follows an external version and section selection while dirty
     reads.push(url.searchParams.get('versionId')); const value = workDetail(); value.version.id = url.searchParams.get('versionId') ?? 'current-version'; return json(value);
   } }); await tick(h);
   await h.render('admin', permissions, 'a', { context: 'changes', versionId: 'selected-version', fromUserId: 'source-user' }); await tick(h);
-  assert.equal(h.el.querySelector('#supply-detail-title').dataset.versionId, 'selected-version'); assert(h.el.querySelector('[data-account-media-review]'));
+  assert.equal(h.el.querySelector('#supply-detail-title').dataset.versionId, 'selected-version'); assert(h.el.querySelector('[data-account-version-records]'));
+  await h.click(h.btn('账号资料')); await tick(h); await h.click(h.btn('屏蔽图片…')); await tick(h);
   await h.fillReason('保留这次图片核对说明'); const count = reads.length;
   await h.render('admin', permissions, 'a', { context: 'orders', versionId: 'different-version', fromOrderId: 'source-order' }); await tick(h);
   assert.equal(reads.length, count); assert.equal(h.el.querySelector('#supply-detail-title').dataset.versionId, 'selected-version');
-  assert.equal(h.el.querySelector('textarea').value, '保留这次图片核对说明'); assert(h.el.querySelector('[data-account-media-review]')); assert.equal(h.writes.length, 0);
+  assert.equal(h.el.querySelector('textarea').value, '保留这次图片核对说明'); assert(h.el.querySelector('[data-supply-action]')); assert.equal(h.writes.length, 0);
 });
 
 test('image review keeps one owner action and the duplicate form opens only on request', async t => {
@@ -108,7 +138,7 @@ test('image review keeps one owner action and the duplicate form opens only on r
   assert.equal(h.el.querySelector('[aria-label="关联队列中的另一个账号"]'), null);
   const trigger = h.btn('疑似重复线索'); assert.equal(trigger.getAttribute('aria-expanded'), 'false');
   await h.click(trigger); await tick(h); assert(h.el.querySelector('[aria-label="关联队列中的另一个账号"]'));
-  assert.equal(h.el.querySelector('textarea').getAttribute('rows'), '4'); assert(h.btn('记录关联线索').disabled); assert.equal(h.writes.length, 0);
+  assert.equal(h.el.querySelector('textarea'), null); assert(h.btn('记录关联线索').disabled); assert.equal(h.writes.length, 0);
 });
 
 for (const [label, readPermissions, access] of [

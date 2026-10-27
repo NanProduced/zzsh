@@ -1,4 +1,4 @@
-import { projectTenantMoney, projectTenantPriceQuote } from "./tenant-price-projection";
+import { projectTenantMoney, projectTenantPriceQuote, publishedBaseRenterHaffRatioWanPerYuan } from "./tenant-price-projection";
 import { assertFullPayoutTermsAccepted, readFullPayoutTerms } from "./full-payout-terms";
 import type { LegacyPublicAdmission, LegacyPublicAdmissionDetailIndex } from "../legacy-load/legacy-public-admission";
 import type { Pool, PoolClient } from "pg";
@@ -112,6 +112,14 @@ export type ListingVersion = {
   revision: string;
   submitted_at: Date | null;
 };
+
+/** A ratio is useful only when its account, game, release and frozen payload agree. */
+export function boundBaseRenterRatio(account: PublishingAccount, version: ListingVersion): string | null {
+  const payload = version.payload;
+  if (!payload || !version.content_hash || version.account_id !== account.id || payload.accountId !== account.id || payload.gameId !== account.game_id || payload.ruleRefs?.releaseId !== version.rule_release_id) return null;
+  try { return computeContentHash(payload) === version.content_hash ? publishedBaseRenterHaffRatioWanPerYuan(payload.quoteValues) : null; }
+  catch { return null; }
+}
 export type ListingPublication = {
   id: string;
   version_id: string;
@@ -1941,7 +1949,7 @@ export async function listingDetail(
   const quote = v.payload
     ? { ...(viewer === "public" ? projectTenantPriceQuote({ ...v.payload.quoteValues, contentHash: v.content_hash } as unknown as InternalQuote, v.payload.quoteValues) : projectDeltaQuote(
         { ...v.payload.quoteValues, contentHash: v.content_hash } as unknown as InternalQuote, quoteViewer,
-      )), ...(v.payload.ruleRefs.catalogRevision === undefined ? {} : { catalogRevision: v.payload.ruleRefs.catalogRevision }) }
+      )), ...(viewer === "public" ? {} : { baseRenterHaffRatioWanPerYuan: boundBaseRenterRatio(a, v) }), ...(v.payload.ruleRefs.catalogRevision === undefined ? {} : { catalogRevision: v.payload.ruleRefs.catalogRevision }) }
     : null;
   if (viewer === "public") {
     if (!v.payload || v.payload.accountId !== a.id || v.payload.gameId !== a.game_id || computeContentHash(v.payload) !== v.content_hash) throw notFound();

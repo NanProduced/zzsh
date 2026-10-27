@@ -16,3 +16,6 @@
  .oc-design .oc-mobile-list footer>span{flex:1 1 100%}
  .oc-design .oc-main-facts>.oc-section:first-child .oc-stages ol{gap:18px}
 }
+
+/* 未形成支付：保留文字，降低视觉权重 */
+.oc-fee-muted{opacity:.6}

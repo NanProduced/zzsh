@@ -180,6 +180,15 @@ test('ListPagination page mode: jump input rejects invalid inputs and accepts va
   assert.equal(container.querySelector('.admin-list-pagination-error'), null);
 });
 
+test('ListPagination known cursor pages share the page controls and never invent a total', async (t) => {
+  let first=0;
+  const { container }=mountComponent(t,createElement(ListPagination,{mode:'cursor',page:3,pageSize:20,loadedCount:20,total:81,loading:false,pageSizeOptions:[20,50],itemLabel:'个账号',hasPrevious:true,hasNext:true,onPrevious:()=>{},onNext:()=>{},onFirst:()=>{first++;},onPageSizeChange:()=>{}}));await settle();
+  assert.equal(container.querySelectorAll('[data-slot="admin-list-pagination"]').length,1);assert.match(container.textContent,/共 5 页/);assert(container.querySelector('[aria-current="page"]'));
+  await act(async()=>container.querySelector('[aria-label="首页"]').click());assert.equal(first,1);
+  const unknown=mountComponent(t,createElement(ListPagination,{mode:"cursor",page:3,pageSize:20,loadedCount:20,loading:false,pageSizeOptions:[20,50],hasPrevious:true,hasNext:true,onPrevious:()=>{},onNext:()=>{},onPageSizeChange:()=>{}})).container;await settle();
+  assert.doesNotMatch(unknown.textContent,/共 5 页|共 0/);assert.match(unknown.textContent,/按顺序翻页/);
+});
+
 test('ListPagination cursor mode: displays notice and handles prev/next cursor events', async (t) => {
   let prevCount = 0;
   let nextCount = 0;

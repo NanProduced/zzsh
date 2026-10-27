@@ -149,7 +149,7 @@ export type SupplyListSummary = {
   login?: { code: string | null; displayName: string | null } | null;
   config?: { safeBox: string | null; characterLevel: string | null; grading: string | null; gradingDivision: string | null } | null;
   feeSummary?: { completeness: "COMPLETE" | "PARTIAL" | "UNKNOWN"; haffRental: SupplyQuoteAmount; materials: SupplyQuoteAmount; resourceTotal: SupplyQuoteAmount } | null;
-  quote: { currency: string | null; resourceTotal: SupplyQuoteAmount; tenantDeposit: SupplyQuoteAmount; tenantPayableTotal: SupplyQuoteAmount; ownerTotal?: SupplyQuoteAmount; publisherBailRequirement?: SupplyQuoteAmount; frozen: boolean; personalised: boolean } | null;
+  quote: { currency: string | null; resourceTotal: SupplyQuoteAmount; tenantDeposit: SupplyQuoteAmount; tenantPayableTotal: SupplyQuoteAmount; baseRenterHaffRatioWanPerYuan?: string | null; ownerTotal?: SupplyQuoteAmount; publisherBailRequirement?: SupplyQuoteAmount; frozen: boolean; personalised: boolean } | null;
   baseDeposit: { amountCents: string } | null;
   fullPayout: "SELECTED" | "NOT_SELECTED" | "NOT_DECLARED";
   guarantee: {
@@ -169,7 +169,12 @@ export type SupplyWorkDetail = Omit<Detail, "version"> & {
   account: Detail["account"] & { display_no: string | null; owner_user_id: string };
   supervision: { managementAccess?: "READY" | "DENIED"; historical: boolean; facts: SupplyFacts; changes: { previousVersionId: string; previousSequence: string; changed: boolean } | null; previousVersion: Version | null; originalRestrictionVersion?: Version | null; restrictionHistory: { state: "KNOWN" | "NOT_RECORDED" | "DENIED"; items: RestrictionEvent[]; limit: number }; ownerLink: { state: "READY" | "DENIED"; userId?: string }; orders: { state: "READY" | "DENIED"; total?: number; items?: SupplyLinkedOrder[] } };
 };
-export type SupplyLinkedOrder = { id: string; displayNo: string; ownerName: string | null; ownerUserId: string; renterName: string | null; renterUserId?: string | null; status: string; versionId: string | null; payment: { state: string }; source: { origin: string; statusLabel?: string } };
+export type SupplyLinkedOrder = { id: string; displayNo: string; ownerName: string | null; ownerUserId: string; renterName: string | null; renterUserId?: string | null; createdAt?: string | null; amounts?: { totalDue?: { amount: string } | null }; status: string; versionId: string | null; payment: { state: string }; source: { origin: string; statusLabel?: string } };
+export function linkedOrderStatus(order: Pick<SupplyLinkedOrder, "status" | "source">): string {
+  const label = order.source.statusLabel;
+  if (label && !/^[A-Za-z][A-Za-z0-9_]*$/.test(label)) return label;
+  return ({ PENDING_PAYMENT: "待付款", PAID: "已付款", COMPLETED: "已完成", CANCELLED: "已取消" } as Record<string, string>)[order.status] ?? "状态待核";
+}
 export function orderPaymentText(state: string): string {
   return state === "RECORDED_PAID" ? "支付已记录" : state === "RECORDED_UNPAID" ? "未记录付款" : "付款事实待核";
 }
@@ -446,7 +451,7 @@ export function mediaPurposeLabel(binding: MediaBinding): string {
 export function mediaReviewLabel(binding: MediaBinding): string {
   const state = binding.reviewState;
   if (state === "NOT_REQUIRED") return "免人工预审";
-  if (state === "QUARANTINED") return "已隔离";
+  if (state === "QUARANTINED") return "已屏蔽";
   if (state === "APPROVED") return "已通过(受权)";
   if (state === "REJECTED") return "已驳回";
   if (state === "PENDING") return binding.purpose === "ACCOUNT_DISPLAY" ? "状态未确认" : "已上传(私有)";
@@ -736,21 +741,40 @@ export function inventoryRows(
 }
 
 /** Join declaration and frozen quote by item ID, retaining unknown, zero and quote-only rows. */
+export function haffRateText(value: string | null | undefined): string {
+  if (typeof value !== "string" || !/^\d{1,24}(?:\.\d{1,8})?$/.test(value) || BigInt(value.replace(".", "")) === 0n) return "兑换比例未提供";
+  const [whole, fraction = ""] = value.split(".");
+  const tail = fraction.replace(/0+$/, "");
+  return `1元=${BigInt(whole!)}${tail ? "." + tail : ""}万哈夫币`;
+}
+
+function displayedUnitAmount(value: string | null): string | null {
+  if (typeof value !== "string" || !/^\d{1,24}(?:\.\d{1,8})?$/.test(value)) return null;
+  const [whole, fraction = ""] = value.split("."), padded = fraction.padEnd(8, "0");
+  const cents = BigInt(whole!) * 100n + BigInt(padded.slice(0, 2)) + (padded[2]! >= "5" ? 1n : 0n);
+  return `${cents / 100n}.${String(cents % 100n).padStart(2, "0")}`;
+}
+
 export function resourceBillingRows(version: Version) {
   const inventory = version.declaration.inventory, lines = version.quote?.lines ?? [];
-  return [...new Set([...inventory.map(item => item.itemId), ...lines.map(line => line.itemId)])].map(itemId => {
+  return [...new Set([...inventory.map(item => item.itemId), ...lines.map(line => line.itemId)])].flatMap(itemId => {
     const item = inventory.find(entry => entry.itemId === itemId), line = lines.find(entry => entry.itemId === itemId);
     const named = version.presentation.items?.find(entry => entry.id === itemId) ?? version.catalogItems?.find(entry => entry.id === itemId);
     const quantity = item ? item.quantity : line?.quantity;
-    const unit = unitText(line?.unit ?? named?.unit, named?.code);
+    if ((line?.unit ?? named?.unit) === "HAFF_BASE") return [];
+    const grouped = (line?.unit ?? named?.unit) === "ROUND" && line?.unitQuantity === "60";
+    const unit = grouped ? "组（60发）" : unitText(line?.unit ?? named?.unit, named?.code);
+    const quantityText = grouped && typeof quantity === "string" && /^\d+$/.test(quantity)
+      ? BigInt(quantity) % 60n === 0n ? String(BigInt(quantity) / 60n) : `${BigInt(quantity) / 60n}组余${BigInt(quantity) % 60n}发`
+      : quantityOrLabel(quantity, "数量未知");
     const amount = line?.buyerAmount?.amount ?? null;
-    return {
-      itemId, name: named?.name || "名称待核", quantity: quantityOrLabel(quantity, "数量未知"), unit,
-      unitQuantity: line?.unitQuantity ? quantityOrLabel(line.unitQuantity, "未提供") : "未提供",
-      unitAmount: line?.buyerUnitAmount?.amount ?? null, amount,
-      quantityNote: item && line && item.quantity !== line.quantity ? `报价数量 ${quantityOrLabel(line.quantity, "未提供")} ${unit}` : !item && line ? "数量来自本版报价" : null,
+    return [{
+      itemId, name: named?.name || "名称待核", quantity: quantityText, unit,
+      unitQuantity: grouped ? "1" : line?.unitQuantity ? quantityOrLabel(line.unitQuantity, "未提供") : "未提供",
+      unitAmount: displayedUnitAmount(line?.buyerUnitAmount?.amount ?? null), amount,
+      quantityNote: item && line && item.quantity !== line.quantity ? `报价数量 ${quantityOrLabel(line.quantity, "未提供")} ${unitText(line.unit, named?.code)}` : !item && line ? "数量来自本版报价" : null,
       zero: typeof quantity === "string" && /^0+(?:\.0+)?$/.test(quantity) && (!line || /^0+(?:\.0+)?$/.test(line.quantity)) && (amount === null || /^0+(?:\.0+)?$/.test(amount)),
-    };
+    }];
   });
 }
 
@@ -761,7 +785,7 @@ export function entitlementTermText(item: { expiresAt?: string | null; expiryKno
   return "期限未提供";
 }
 
-export function skinFacts(version: Pick<Version, "draftSkinSummary" | "presentation" | "declaration">): { source: "CURRENT_DRAFT_SELECTION" | "PRESENTATION"; withheld: number | null; rows: Array<{ id: string; name: string; category: string; rarity: string; collectible: string; state: string; text: string; mediaId: string | null }> } {
+export function skinFacts(version: Pick<Version, "draftSkinSummary" | "presentation" | "declaration">): { source: "CURRENT_DRAFT_SELECTION" | "PRESENTATION"; withheld: number | null; rows: Array<{ id: string; name: string; category: string; portrait: boolean; rarity: string; rarityLabel: string; collectible: string; state: string; text: string; mediaId: string | null }> } {
   const draft = version.draftSkinSummary;
   const source = draft && Array.isArray(draft.items) ? draft.items : version.presentation.skins ?? [];
   const map = (skin: PresentationSkin) => {
@@ -770,7 +794,7 @@ export function skinFacts(version: Pick<Version, "draftSkinSummary" | "presentat
     const collectible = skin.isCollectible === true ? "典藏" : skin.isCollectible === false ? "非典藏" : "典藏未知";
     const state = skin.defaultState === "DEFAULT" ? "默认外观" : skin.defaultState === "NON_DEFAULT" ? "非默认" : "默认状态未知";
     const mediaId = typeof skin.mediaId === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(skin.mediaId) ? skin.mediaId : null;
-    return { id: skin.id, name: skin.name || "名称未知", category, rarity, collectible, state, text: [category, skin.name || "名称未知", rarity, collectible, state].join(" · "), mediaId };
+    return { id: skin.id, name: skin.name || "名称未知", category, portrait: skin.ownerKind === "AGENT", rarity, rarityLabel: skin.rarityName || "品质未知", collectible, state, text: [category, skin.name || "名称未知", rarity, collectible, state].join(" · "), mediaId };
   };
   return { source: draft && Array.isArray(draft.items) ? "CURRENT_DRAFT_SELECTION" : "PRESENTATION", withheld: draft && Array.isArray(draft.items) && typeof draft.withheld === "number" ? draft.withheld : null, rows: source.map(map) };
 }

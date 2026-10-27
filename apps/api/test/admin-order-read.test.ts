@@ -1,7 +1,7 @@
 import {test} from "node:test";
 import assert from "node:assert/strict";
 import type {PoolClient} from "pg";
-import {getAdminReadOrder,projectAdminReadOrder,queryAdminReadOrders,orderReadRelation,orderReadKeyRelation,parseOrderOrigin,readNativeFrozenAccounts,NATIVE_FROZEN_ACCOUNT_SQL} from "../src/order/admin-order-read";
+import {getAdminReadOrder,projectAdminReadOrder,queryAdminReadOrders,orderReadRelation,orderReadKeyRelation,parseOrderOrigin,readNativeFrozenAccounts,NATIVE_FROZEN_ACCOUNT_SQL,legacyOrderResources,LIST_MATERIALS_LIMIT} from "../src/order/admin-order-read";
 import {LEGACY_ORDER_STATUS_SQL} from "../src/order/legacy-order-read";
 import {parseAdminOrderPageQuery} from "../src/order/order-routes";
 const viewer={adminId:"test-reader",isBoss:false,internalQuote:false,authorizationKey:"a".repeat(64)};
@@ -622,4 +622,80 @@ test('related hover summaries: one page passes actor and exact capabilities once
  const page=orderClient({records:[{origin:'NATIVE',id:native.id,record:native}]});seen.length=0;
  await queryAdminReadOrders(page.client,{...viewer,permissions:new Set(['user.directory.read'])},{page:1,pageSize:20});
  assert.deepEqual(seen[0]!.context,{adminId:viewer.adminId,isBoss:viewer.isBoss,membershipSummaryRead:false,creditRead:false});
+});
+
+// ORDER-READ-CLARITY-01：金额口径、旧单资源、列表减重与成本边界。
+test('clarity: 旧单 36+0、押金0、合计66 只是分项齐全，合计算术不一致且永不标为闭合',()=>{
+ const row=projectAdminReadOrder('LEGACY',record,viewer);
+ assert.equal(row.prepaymentBreakdown.completeness,'COMPLETE','旧 completeness 含义不变：两项都在');
+ assert.deepEqual(row.prepaymentReconciliation,{state:'MISMATCH',basis:'LEGACY_RECORD_ARITHMETIC',arithmetic:'MISMATCH',closed:false});
+ assert.equal(row.amounts.totalDue.amount,'66.00');assert.equal(row.amounts.rental.amount,'36.00','列表主金额语义不变');
+ const match=projectAdminReadOrder('LEGACY',{...record,source_snapshot:{...record.source_snapshot,goods_money:'60.00',expend_pay_money:'6.00'}},viewer);
+ assert.deepEqual(match.prepaymentReconciliation,{state:'NOT_VERIFIED',basis:'LEGACY_RECORD_ARITHMETIC',arithmetic:'MATCH',closed:false},'旧单算术一致也只是原单记录，不升级为已核对');
+ for(const input of [{...record,source_snapshot:{...record.source_snapshot,expend_pay_money:null}},{...record,deposit_amount_cents:null},{...record,due_amount_cents:null},{...record,source_snapshot:{...record.source_snapshot,goods_money:'broken'}}]){
+  const unknown=projectAdminReadOrder('LEGACY',input,viewer);
+  assert.deepEqual(unknown.prepaymentReconciliation,{state:'NOT_VERIFIED',basis:'INSUFFICIENT_FACTS',arithmetic:'UNKNOWN',closed:false},'缺项不当 0、不倒推');
+ }
+ const negative=projectAdminReadOrder('LEGACY',{...record,source_snapshot:{...record.source_snapshot,goods_money:'-1.00'}},viewer);
+ assert.equal(negative.prepaymentReconciliation.state,'NOT_VERIFIED');assert.equal(negative.prepaymentReconciliation.closed,false);
+});
+
+test('order page accepts only the bounded list view; default clients keep their existing contract',()=>{
+ assert.equal(parseAdminOrderPageQuery(new URLSearchParams('view=list')).view,'list');
+ assert.equal('view' in parseAdminOrderPageQuery(new URLSearchParams()),false);
+ for(const query of ['view=detail','view=list&view=list','view='])assert.throws(()=>parseAdminOrderPageQuery(new URLSearchParams(query)));
+});
+test('clarity: 原生冻结报价闭合才 RECONCILED；未知拆分不闭合',()=>{
+ assert.deepEqual(projectAdminReadOrder('NATIVE',prepaymentNative(),viewer).prepaymentReconciliation,{state:'RECONCILED',basis:'NATIVE_FROZEN_QUOTE_CLOSURE',arithmetic:'MATCH',closed:true});
+ const broken=prepaymentNative();broken.rental_amount_cents='10001';
+ assert.deepEqual(projectAdminReadOrder('NATIVE',broken,viewer).prepaymentReconciliation,{state:'NOT_VERIFIED',basis:'INSUFFICIENT_FACTS',arithmetic:'UNKNOWN',closed:false});
+});
+test('clarity: 无 finance.read 时原生实付金额为 null，不写 0',()=>{
+ const paid={...native,status:'PAID',paid_at:native.created_at,paid_confirmation_id:'pc-1',native_payment_record:{id:'pc-1',order_id:native.id,source:'CONTROLLED',disposition:'APPLIED',amount_cents:'100',currency:'CNY'}};
+ assert.equal(projectAdminReadOrder('NATIVE',paid,viewer).payment.recordedAmount,null);
+ assert.equal(projectAdminReadOrder('NATIVE',paid,{...viewer,financeReadable:true}).payment.recordedAmount.amount,'1.00');
+});
+test('clarity: 旧单原单资源复用旧用户资源校验，单位未记录不猜 M，零值保留但列表摘要折叠',()=>{
+ const raw={expend_haff:'98.08',awm_bullet_num:'61',level6_armor_num:'0',top_insure_card_num:'2',coffee_num:null};
+ const resources=legacyOrderResources(raw);
+ assert.equal(resources.state,'KNOWN');
+ assert.deepEqual(resources.items.map(i=>[i.name,i.quantity,i.unit,i.zero]),[['哈夫币','98.08',null,false],['AWM子弹','61',null,false],['6级护甲','0',null,true],['顶级保险','2','DAY',false]]);
+ const row=projectAdminReadOrder('LEGACY',{...record,source_snapshot:{...record.source_snapshot,...raw}},viewer);
+ assert.equal(row.accountTitle.neutralSummary,'原单资源记录：哈夫币 98.08、AWM子弹 61、顶级保险 2 天');
+ assert.doesNotMatch(row.accountTitle.neutralSummary,/ M|6级护甲/);
+ assert.equal(row.legacyResources.items.length,4,'零值项在详情可见');
+ assert.equal(legacyOrderResources({awm_bullet_num:'abc'}).state,'INVALID');
+ assert.equal(legacyOrderResources({awm_bullet_num:61}).state,'INVALID','非字符串不强转');
+ assert.equal(legacyOrderResources({}).state,'NONE');
+ assert.equal(projectAdminReadOrder('LEGACY',{...record,source_snapshot:{...record.source_snapshot,awm_bullet_num:'abc'}},viewer).accountTitle.neutralSummary,null);
+});
+function costFixture(n:number){
+ const ids=Array.from({length:n},(_,i)=>'native-c'+i);
+ const records=ids.map(id=>({origin:'NATIVE',id,record:{...native,id}}));
+ const frozenRows=ids.map(orderId=>({orderId,versionId:native.listing_version_id,attributes:{},presentationItems:[],resources:[{itemId:'haff',code:'haff',quantity:'98080000',unit:'HAFF_BASE'},...Array.from({length:6},(_,k)=>({itemId:'m'+k,code:'m'+k,quantity:String(k),unit:'ROUND'}))],termSeconds:'86400'}));
+ return {keys:ids.map(id=>({origin:'NATIVE',id})),total:String(n),records,frozenRows,directoryRows:[{id:'owner',name:'Owner',image:null,phone:'13800138000'},{id:'renter',name:'Renter',image:null,phone:'13900139000'}]};
+}
+test('clarity: view=list 真正截断物资数组并给精确总数；默认形状与查询数不变',async()=>{
+ const reader={...viewer,permissions:new Set(['supply.rental_account.read','user.directory.read'])};
+ const full=orderClient(costFixture(2)),slim=orderClient(costFixture(2));
+ const fullPage=await queryAdminReadOrders(full.client,reader,{page:1,pageSize:20});
+ const slimPage=await queryAdminReadOrders(slim.client,reader,{page:1,pageSize:20,view:'list'});
+ assert.equal(fullPage.items[0]!.frozenAccount.materials.length,6);assert.equal('materialsTotal' in fullPage.items[0]!.frozenAccount,false,'默认形状不加字段');
+ assert.equal(slimPage.items[0]!.frozenAccount.materials.length,LIST_MATERIALS_LIMIT);
+ assert.equal(slimPage.items[0]!.frozenAccount.materialsTotal,6);assert.equal(slimPage.items[0]!.frozenAccount.materialsTruncated,true);
+ assert.equal(full.statements.length,slim.statements.length,'轻量视图不增加查询');
+});
+test('clarity: 成本边界 1/20/100 行查询数恒定（无 N+1），记录字节与数组上限',async()=>{
+ const reader={...viewer,permissions:new Set(['supply.rental_account.read','user.directory.read'])},out:Record<string,unknown>[]=[];
+ for(const n of [1,20,100]){
+  const full=orderClient(costFixture(n)),slim=orderClient(costFixture(n));
+  const fullPage=await queryAdminReadOrders(full.client,reader,{page:1,pageSize:100});
+  const slimPage=await queryAdminReadOrders(slim.client,reader,{page:1,pageSize:100,view:'list'});
+  out.push({rows:n,queriesDefault:full.statements.length,queriesList:slim.statements.length,
+   statementKinds:full.statements.map(s=>s.sql.trimStart().slice(0,40).replace(/\s+/g,' ')),
+   bytesDefault:Buffer.byteLength(JSON.stringify(fullPage)),bytesList:Buffer.byteLength(JSON.stringify(slimPage)),
+   maxMaterialsDefault:Math.max(...fullPage.items.map((i:any)=>i.frozenAccount.materials.length)),maxMaterialsList:Math.max(...slimPage.items.map((i:any)=>i.frozenAccount.materials.length))});
+ }
+ assert.equal(new Set(out.map(o=>o.queriesDefault)).size,1,'查询数不随行数增长');
+ console.log('COST_BOUNDARY '+JSON.stringify(out));
 });

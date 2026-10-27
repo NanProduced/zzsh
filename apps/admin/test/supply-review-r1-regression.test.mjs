@@ -14,8 +14,8 @@ test('R1 port: changed account revision invalidates an open confirmation after r
  assert.ok(h.btn('确认施加运营限制').disabled);await h.click(h.btn('确认施加运营限制'));assert.equal(h.writes.length,0);assert.match(h.el.textContent,/原账号版本已失效/);
 });
 test('R1 port: image revision change cannot reuse an old image confirmation',async t=>{
- let mediaRevision='2';const h=await mountHarness(t,{permissions,strict:true,initialAccountId:'a',initialQuery:{context:'changes'},fetchImpl:async()=>response(data('a','7',mediaRevision))});await settle(h);await h.fillReason('fixture verify bound image');await h.click(h.btn('确认前核对并隔离本图'));await settle(h);mediaRevision='3';await h.render('admin',permissions,'a',{context:'changes'},1);await settle(h);
- assert.ok(h.btn('确认隔离当前展示图').disabled);await h.click(h.btn('确认隔离当前展示图'));assert.equal(h.writes.length,0);
+ let mediaRevision='2';const h=await mountHarness(t,{permissions,strict:true,initialAccountId:'a',initialQuery:{context:'situation'},fetchImpl:async()=>response(data('a','7',mediaRevision))});await settle(h);await h.click(h.btn('屏蔽图片…'));await settle(h);await h.fillReason('fixture verify bound image');await settle(h);mediaRevision='3';await h.render('admin',permissions,'a',{context:'situation'},1);await settle(h);
+ assert.ok(h.btn('确认屏蔽当前图片').disabled);await h.click(h.btn('确认屏蔽当前图片'));assert.equal(h.writes.length,0);
 });
 
 test('finish F1: restricted paused account confirmation preserves actual independent conditions and UNKNOWN snapshot',async t=>{

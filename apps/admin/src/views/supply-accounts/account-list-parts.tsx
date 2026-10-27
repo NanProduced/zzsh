@@ -15,7 +15,7 @@ import { DropdownMenu, DropdownMenuGroup, DropdownMenuContent, DropdownMenuItem,
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { SupplySelect } from "@/components/supply/supply-select";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
-import { accountBusinessStatus, supplyObjectLabel, attributeFacts, historicalReadSummary, historicalResourceText, formatAmount, formatTermDays, publicBasisVersion, quantityText, versionBaseFeeRows, type SupplyQueryKind, type SupplyWorkDetail, type SupplyWorkItem } from "../supply-review/model";
+import { accountBusinessStatus, haffRateText, supplyObjectLabel, attributeFacts, historicalReadSummary, historicalResourceText, formatAmount, formatTermDays, publicBasisVersion, quantityText, versionBaseFeeRows, type SupplyQueryKind, type SupplyWorkDetail, type SupplyWorkItem } from "../supply-review/model";
 import { ImportedAccountView, ResourceBillingTable } from "../supply-review/detail-pane";
 import {
   fullShanghaiTime,
@@ -179,7 +179,7 @@ export function AccountResources({ row }: { row: SupplyWorkItem }) {
   const total = row.summary?.materialsVisibleTotal ?? materials.length;
   const unit = (item: typeof materials[number]) => item.unit === "ROUND" ? "发" : item.unit === "DAY" ? "天" : item.unit === "PIECE" ? "件" : "";
   return <div className="space-y-1 text-xs" data-account-resources>
-    <p className="font-semibold tabular-nums text-amber-900 dark:text-amber-300">{rowHaffText(row)}</p>
+    <p className="flex flex-wrap items-baseline gap-x-2 gap-y-1"><span className="font-semibold tabular-nums text-amber-900 dark:text-amber-300">{rowHaffText(row)}</span><span className="text-xs text-muted-foreground" title="本版基础租客比例，会员优惠前；不是最终结算金额">{haffRateText(row.summary?.quote?.baseRenterHaffRatioWanPerYuan)}</span></p>
     {config && [config.safeBox, config.grading].some(value => readableConfigName(value)) ? <p className="text-muted-foreground">{[config.safeBox, config.grading].map(value => readableConfigName(value)).filter(Boolean).join(" · ")}</p> : null}
     <p className="max-w-[310px] break-words leading-relaxed text-muted-foreground">{materials.length ? materials.slice(0, 3).map(item => `${item.name ?? "物资"} ${item.quantity ?? "数量未知"}${unit(item)}`).join(" · ") : row.summary?.materialsVisibleTotal === 0 && row.summary.materialsTotal ? "物资数量均为 0" : row.summary?.versionId ? "暂无物资申报" : "资源待完善"}{total > 3 ? ` · 另 ${total - 3} 项` : ""}</p>
   </div>;
@@ -350,7 +350,7 @@ export function QuickView({ row, canRead, onClose, onOpenFull }: QuickProps) {
           {fees.resources && fees.resources !== "未提供" && (fees.total === "未提供" || !fees.haff.startsWith("¥") || !fees.materials.startsWith("¥")) ? <div><dt className="text-xs text-muted-foreground">资源费合计</dt><dd className="mt-1 tabular-nums">{fees.resources}</dd></div> : null}
           <div><dt className="text-xs text-muted-foreground">预计租期</dt><dd className="mt-1">{termSeconds ? formatTermDays(termSeconds) : "未提供"}</dd></div>
           <div><dt className="text-xs text-muted-foreground">全额包赔</dt><dd className="mt-1">{payoutLabel}</dd></div>
-          <div><dt className="text-xs text-muted-foreground">基础客价比例</dt><dd className="mt-1">{ratio ? ratio + " 万/元" : "未提供"}</dd></div>
+          <div><dt className="text-xs text-muted-foreground">基础租客兑换比例</dt><dd className="mt-1">{haffRateText(ratio)}</dd></div>
         </dl>
         <p className="mt-3 text-xs text-muted-foreground">基础总价含哈夫币租金、物资预付和基础押金；租客实际费用按本人报价核定。</p>
         {fees.note ? <p className="mt-1 text-xs text-muted-foreground">{fees.note}</p> : null}

@@ -42,6 +42,22 @@ import {
   unitText,
 } from "../src/views/supply-review/model.ts";
 
+test("owner review: materials exclude haff, show sixty-round groups and round only the displayed unit price", () => {
+  const v = { declaration: { inventory: [{ itemId: "h", quantity: "193000000" }, { itemId: "six", quantity: "300" }, { itemId: "awm", quantity: "61" }] }, presentation: { items: [{ id: "h", unit: "HAFF_BASE" }, { id: "six", code: "df_billable_level6_bullet", unit: "ROUND" }, { id: "awm", unit: "ROUND" }] }, quote: { lines: [
+    { itemId: "h", quantity: "193000000", unit: "HAFF_BASE", unitQuantity: "1000000", buyerUnitAmount: { amount: "2.56410256" }, buyerAmount: { amount: "494.87" } },
+    { itemId: "six", quantity: "300", unit: "ROUND", unitQuantity: "60", buyerUnitAmount: { amount: "10.00000000" }, buyerAmount: { amount: "50.00" } },
+    { itemId: "awm", quantity: "61", unit: "ROUND", unitQuantity: "1", buyerUnitAmount: { amount: "1.10500000" }, buyerAmount: { amount: "67.10" } },
+  ] } };
+  const before = JSON.stringify(v), rows = resourceBillingRows(v);
+  assert.deepEqual(rows.map(row => row.itemId), ["six", "awm"]);
+  assert.equal(rows[0].quantity, "5"); assert.equal(rows[0].unit, "组（60发）"); assert.equal(rows[0].unitQuantity, "1");
+  assert.equal(rows[0].unitAmount, "10.00"); assert.equal(rows[1].unitAmount, "1.11"); assert.equal(rows[1].amount, "67.10");
+  v.declaration.inventory[1].quantity = "61"; v.quote.lines[1].quantity = "61";
+  assert.equal(resourceBillingRows(v)[0].quantity, "1组余1发");
+  v.declaration.inventory[1].quantity = "300"; v.quote.lines[1].quantity = "300";
+  assert.equal(JSON.stringify(v), before);
+});
+
 test("account business state is authoritative; pending payment is a substate and null never becomes offline or completed", () => {
   const facts = { publicVisible: true, newOrders: false, occupancy: "FREE", ownerPaused: false, staffRestricted: false, reasons: [], sources: [], legacyNumbers: [], lifecycle: "ARCHIVED" };
   assert.deepEqual(ACCOUNT_BUSINESS_STATES.map(state => state.label), ["上架中", "订单进行中", "下架", "完成租用"]);
@@ -86,7 +102,7 @@ test("one resource row retains zero, unknown, free, quote-only and quantity mism
   };
   const before = JSON.stringify(version), rows = resourceBillingRows(version);
   assert.deepEqual(rows.map(row => row.zero), [true, false, false, false, false]);
-  assert.equal(rows[1].amount, "0.00"); assert.equal(rows[1].unitAmount, "0.00000000");
+  assert.equal(rows[1].amount, "0.00"); assert.equal(rows[1].unitAmount, "0.00");
   assert.equal(rows[2].quantity, "数量未知"); assert.equal(rows[2].amount, null);
   assert.match(rows[3].quantityNote, /报价数量 3 发/); assert.equal(rows[3].amount, "1.50");
   assert.equal(rows[4].quantityNote, "数量来自本版报价"); assert.equal(rows[4].name, "名称待核");

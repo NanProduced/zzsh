@@ -44,6 +44,7 @@ export type CursorPagination = {
   itemLabel?: string;
   onPrevious(): void;
   onNext(): void;
+  onFirst?(): void;
   onPageSizeChange(size: number): void;
 };
 
@@ -131,8 +132,8 @@ export function ListPagination(props: ListPaginationProps) {
           </Select>
           {!page ? <span className="admin-list-pagination-notice">当前服务暂未提供跳页能力</span> : null}
         </div>
-        <div className="admin-list-pagination-right">
-          {page ? <span className="text-xs text-muted-foreground">第 {page} 页{isTrustedTotal ? ` / 共 ${Math.max(1, Math.ceil(total! / pageSize))} 页` : " · 总页数待核"}</span> : null}
+        <div className="admin-list-pagination-center">
+          {props.onFirst ? <Button variant="outline" size="icon-sm" aria-label="首页" disabled={loading || !hasPrevious} onClick={props.onFirst}><ChevronsLeftIcon className="size-4" /></Button> : null}
           <Button
             variant="outline"
             size="sm"
@@ -143,6 +144,7 @@ export function ListPagination(props: ListPaginationProps) {
             <ChevronLeftIcon className="size-4 mr-1" />
             上一页
           </Button>
+          {page ? <Button variant="default" size="sm" aria-label={`第 ${page} 页`} aria-current="page" disabled className="h-8 min-w-8 px-2 tabular-nums">{page}</Button> : null}
           <Button
             variant="outline"
             size="sm"
@@ -154,6 +156,7 @@ export function ListPagination(props: ListPaginationProps) {
             <ChevronRightIcon className="size-4 ml-1" />
           </Button>
         </div>
+        <div className="admin-list-pagination-right text-xs text-muted-foreground">{page ? `第 ${page} 页` : ""}{isTrustedTotal ? ` / 共 ${Math.max(1, Math.ceil(total! / pageSize))} 页` : " · 按顺序翻页"}</div>
       </div>
     );
   }

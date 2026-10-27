@@ -11,9 +11,10 @@ import { escapeLike } from "../supply/catalog";
 import { legacyContinuationReady, legacyMoneyCents, legacyOrderReadState, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
 import { settlementConfirmationReady, type SettlementConfirmationFacts } from "./settlement";
 import { readDirectoryUserSummaries, type DirectoryUserSummary } from "../auth/user-directory-summary";
+import { legacyUserOrderResources } from "./legacy-user-order-read";
 
 export type OrderReadViewer = { adminId: string; isBoss: boolean; internalQuote: boolean; authorizationKey: string; financeReadable?: boolean; permissions?: ReadonlySet<string> };
-export type OrderReadFilters = { page: number; pageSize: number; status?: string; origin?: "NATIVE" | "LEGACY"; displayNo?: string; accountId?: string; renterUserId?: string; ownerUserId?: string; createdFrom?: string; createdTo?: string; qKind?: "order" | "account" | "party" | "renter" | "owner"; qValue?: string; restoreKey?: string };
+export type OrderReadFilters = { page: number; pageSize: number; status?: string; origin?: "NATIVE" | "LEGACY"; displayNo?: string; accountId?: string; renterUserId?: string; ownerUserId?: string; createdFrom?: string; createdTo?: string; qKind?: "order" | "account" | "party" | "renter" | "owner"; qValue?: string; restoreKey?: string; view?: "list" };
 /** Strict source filter: omitted means both; repeated or unknown values are rejected, never coerced. */
 export function parseOrderOrigin(query: URLSearchParams): "NATIVE" | "LEGACY" | undefined {
  const values = query.getAll("origin");
@@ -122,12 +123,53 @@ function legacyPrepaymentBreakdown(goods:ReturnType<typeof legacyPrepaymentPart>
  return {...unknown,completeness:goods.cents!==null&&items.cents!==null?'COMPLETE':goods.cents!==null||items.cents!==null?'PARTIAL':'UNKNOWN',
   haffRental:goods.cents===null?null:centsToYuan(goods.cents),materialsPrepay:items.cents===null?null:centsToYuan(items.cents)};
 }
-function legacyResourceSummary(raw: unknown): string | null {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-  const row = raw as Record<string, unknown>;
-  const named: Array<[string, string]> = [["expend_haff", "哈夫币"], ["awm_bullet_num", "AWM子弹"], ["level6_bullet_num", "6级子弹"], ["level6_helmet_num", "6级头盔"], ["level6_armor_num", "6级护甲"], ["top_insure_card_num", "顶级保险"], ["barrett_bullet_num", "巴雷特子弹"], ["coffee_num", "咖啡豆"]];
-  const parts = named.flatMap(([key, name]) => typeof row[key] === "string" && row[key].trim() ? [`${name} ${row[key].trim()}`] : []);
-  return parts.length ? `本单资源：${parts.join("、")}` : null;
+/** 合计核对投影（附加字段）：completeness 仍只表示分项是否齐全，不代表合计闭合。
+ *  原生：冻结报价行逐项相加与本单合计/押金一致才为 RECONCILED。
+ *  旧单：只做原单记录的整数分算术比对，结果仅 MATCH/MISMATCH/UNKNOWN，永不标为已闭合。 */
+export type PrepaymentReconciliation={
+ state:'RECONCILED'|'MISMATCH'|'NOT_VERIFIED';
+ basis:'NATIVE_FROZEN_QUOTE_CLOSURE'|'LEGACY_RECORD_ARITHMETIC'|'INSUFFICIENT_FACTS';
+ arithmetic:'MATCH'|'MISMATCH'|'UNKNOWN';closed:boolean;
+};
+function nativeReconciliation(breakdown:PrepaymentBreakdown):PrepaymentReconciliation{
+ return breakdown.completeness==='COMPLETE'
+  ?{state:'RECONCILED',basis:'NATIVE_FROZEN_QUOTE_CLOSURE',arithmetic:'MATCH',closed:true}
+  :{state:'NOT_VERIFIED',basis:'INSUFFICIENT_FACTS',arithmetic:'UNKNOWN',closed:false};
+}
+const CENTS=/^-?(0|[1-9]\d{0,30})$/;
+function legacyReconciliation(goods:ReturnType<typeof legacyPrepaymentPart>,items:ReturnType<typeof legacyPrepaymentPart>,depositCents:unknown,dueCents:unknown):PrepaymentReconciliation{
+ const unknown:PrepaymentReconciliation={state:'NOT_VERIFIED',basis:'INSUFFICIENT_FACTS',arithmetic:'UNKNOWN',closed:false};
+ // 任一项缺失或格式异常都保持未知，不把缺项当 0，也不从合计倒推分项。
+ if(goods.invalid||items.invalid||goods.cents===null||items.cents===null||BigInt(goods.cents)<0n||BigInt(items.cents)<0n)return unknown;
+ if(typeof depositCents!=='string'||!CENTS.test(depositCents)||typeof dueCents!=='string'||!CENTS.test(dueCents))return unknown;
+ const match=BigInt(goods.cents)+BigInt(items.cents)+BigInt(depositCents)===BigInt(dueCents);
+ return {state:match?'NOT_VERIFIED':'MISMATCH',basis:'LEGACY_RECORD_ARITHMETIC',arithmetic:match?'MATCH':'MISMATCH',closed:false};
+}
+/** 旧单原单资源：复用 legacyUserOrderResources 的字段与校验；单位未记录时保持 null，不猜测 M。 */
+const LEGACY_RESOURCE_RAW_KEYS=[["expend_haff","expendHaff"],["awm_bullet_num","awmBulletNum"],["level6_bullet_num","level6BulletNum"],["level6_helmet_num","level6HelmetNum"],["level6_armor_num","level6ArmorNum"],["top_insure_card_num","topInsureCardNum"],["barrett_bullet_num","barrettBulletNum"],["coffee_num","coffeeNum"]] as const;
+const LEGACY_RESOURCE_NAMES:Record<string,string>={df_billable_haff:"哈夫币",df_billable_awm_bullet:"AWM子弹",df_billable_level6_bullet:"6级子弹",df_billable_level6_helmet:"6级头盔",df_billable_level6_armor:"6级护甲",df_billable_top_insure_card:"顶级保险",df_billable_barrett_bullet:"巴雷特子弹",df_billable_coffee:"咖啡豆"};
+export type LegacyOrderResources={source:'LEGACY_ORIGINAL_ORDER';state:'KNOWN'|'NONE'|'INVALID';items:Array<{code:string;name:string;quantity:string;unit:string|null;zero:boolean}>};
+export function legacyOrderResources(raw:unknown):LegacyOrderResources{
+ const none:LegacyOrderResources={source:'LEGACY_ORIGINAL_ORDER',state:'NONE',items:[]};
+ if(!raw||typeof raw!=='object'||Array.isArray(raw))return none;
+ const row=raw as Record<string,unknown>,input:Record<string,string|null>={};
+ for(const [key,field] of LEGACY_RESOURCE_RAW_KEYS){
+  const value=row[key];
+  if(value===null||value===undefined||(typeof value==='string'&&!value.trim()))continue;
+  // 非字符串的原值不强转，整组标为异常而不是 0。
+  if(typeof value!=='string')return {...none,state:'INVALID'};
+  input[field]=value.trim();
+ }
+ try{
+  const items=legacyUserOrderResources(input).map(item=>({code:item.code,name:LEGACY_RESOURCE_NAMES[item.code]??item.code,quantity:item.quantity as string,unit:item.unit,
+   zero:item.code==='df_billable_haff'?legacyMoneyCents(item.quantity)==='0':item.quantity==='0'}));
+  return items.length?{...none,state:'KNOWN',items}:none;
+ }catch{return {...none,state:'INVALID'};}
+}
+function legacyResourceSummary(resources:LegacyOrderResources): string | null {
+  // 列表摘要折叠零值项；零值仍保留在 legacyResources 供详情查看。
+  const parts=resources.items.filter(item=>!item.zero).map(item=>`${item.name} ${item.quantity}${item.unit==='DAY'?' 天':''}`);
+  return parts.length ? `原单资源记录：${parts.join("、")}` : null;
 }
 function frozenQuoteSummary(quote: unknown): string | null {
   if (!quote || typeof quote !== "object" || Array.isArray(quote)) return null;
@@ -159,15 +201,16 @@ export function projectAdminReadOrder(origin:string,r:Record<string,any>,viewer:
   const row:OrderRow={id:r.id,displayNo:r.display_no,accountId:r.account_id,versionId:r.listing_version_id,ownerUserId:r.owner_user_id,renterUserId:r.renter_user_id,gameId:r.game_id,releaseId:r.rule_release_id,contentHash:r.content_hash,termOptionCode:r.term_option_code,status:r.status,rentalAmountCents:r.rental_amount_cents,depositAmountCents:r.deposit_amount_cents,currency:r.currency,termSeconds:r.term_seconds,quoteSnapshot:r.quote_snapshot,title:r.title,holdUntil:r.hold_until,paidAt:r.paid_at,dispatchState:r.dispatch_state,dispatchWaitReason:r.wait_reason,assignedAt:r.assigned_at,teamState:r.team_state,firstResponseAt:r.first_response_at??null,remindDueAt:r.remind_due_at??null,addRound:r.add_round??0,escalationState:r.escalation_state??'NOT_STARTED',cancelReason:r.cancel_reason,cancelledAt:r.cancelled_at,createdAt:r.created_at,revision:r.revision,expiredAwaitingCancel:r.expired,ownerName:r.owner_name,renterName:r.renter_name};
   const result=projectOrder(row,'admin',{internalQuote:viewer.internalQuote});const paid=['PAID','COMPLETED'].includes(r.status);
   const titles = accountTitleFact(r.title, r.current_account_title, frozenQuoteSummary(r.quote_snapshot));
-  return {...result,...titles,prepaymentBreakdown:nativePrepaymentBreakdown(r,result.amounts),source:{origin:'NATIVE',ruleOrigin:'NATIVE_ORDER'},accountDisplayNo:r.account_no,payment:{state:paid?'RECORDED_PAID':'RECORDED_UNPAID',recordedAt:r.paid_at,recordedAmount:nativeRecordedAmount(r,viewer)}};
+  const breakdown=nativePrepaymentBreakdown(r,result.amounts);
+  return {...result,...titles,prepaymentBreakdown:breakdown,prepaymentReconciliation:nativeReconciliation(breakdown),source:{origin:'NATIVE',ruleOrigin:'NATIVE_ORDER'},accountDisplayNo:r.account_no,payment:{state:paid?'RECORDED_PAID':'RECORDED_UNPAID',recordedAt:r.paid_at,recordedAmount:nativeRecordedAmount(r,viewer)}};
  }
  const raw=r.source_snapshot,paid=r.source_pay_status===1,unpaid=r.source_pay_status===0;
  const state=legacyOrderReadState(r.continuation_stage??r.source_order_status,r.source_pay_status),status=state.status;
  const goodsRead=legacyPrepaymentPart(raw.goods_money),itemsRead=legacyPrepaymentPart(raw.expend_pay_money),goods=goodsRead.cents,items=itemsRead.cents;
- const titles = accountTitleFact(undefined, r.current_account_title, legacyResourceSummary(raw));
+ const resources=legacyOrderResources(raw),titles = accountTitleFact(undefined, r.current_account_title, legacyResourceSummary(resources));
  return {id:r.id,displayNo:r.original_order_no,status,title:titles.title,accountTitle:titles.accountTitle,accountId:r.account_id,accountDisplayNo:r.legacy_account_no,gameId:r.game_id,versionId:null,releaseId:null,contentHash:null,revision:'1',termOptionCode:null,termSeconds:null,
   amounts:{rental:goods!==null&&items!==null?centsToYuan(BigInt(goods)+BigInt(items)):null,deposit:money(r.deposit_amount_cents),totalDue:money(r.due_amount_cents),currency:'CNY'},
-  prepaymentBreakdown:legacyPrepaymentBreakdown(goodsRead,itemsRead),
+  prepaymentBreakdown:legacyPrepaymentBreakdown(goodsRead,itemsRead),prepaymentReconciliation:legacyReconciliation(goodsRead,itemsRead,r.deposit_amount_cents,r.due_amount_cents),legacyResources:resources,
   createdAt:r.source_created_at,paidAt:r.source_paid_at,cancelledAt:r.source_cancelled_at,completedAt:r.source_completed_at,holdUntil:null,expiredAwaitingCancel:false,paymentOpen:false,cancelOpen:false,
   ownerUserId:r.owner_user_id,renterUserId:r.renter_user_id,ownerName:r.owner_name,renterName:r.renter_name,ownerBusinessNo:r.legacy_owner_no,renterBusinessNo:r.legacy_renter_no,
   payment:{state:paid?'RECORDED_PAID':unpaid?'RECORDED_UNPAID':'UNKNOWN',recordedAt:r.source_paid_at,recordedAmount:paid?money(r.recorded_paid_amount_cents):null},
@@ -325,6 +368,14 @@ async function attachAdminOrderExtras(client:PoolClient,items:Record<string,any>
  }
  await attachFrozenAccounts(client,viewer,items);
 }
+/** 列表轻量视图：仅在显式 view=list 时截断冻结物资数组并给出精确总数；默认形状不变，详情始终完整。 */
+export const LIST_MATERIALS_LIMIT=3;
+function slimListItem(item:Record<string,any>){
+ const frozen=item.frozenAccount as AdminOrderFrozenAccount|undefined;
+ if(!frozen)return;
+ const total=frozen.materials.length;
+ item.frozenAccount={...frozen,materials:frozen.materials.slice(0,LIST_MATERIALS_LIMIT),materialsTotal:total,materialsTruncated:total>LIST_MATERIALS_LIMIT};
+}
 export async function queryAdminReadOrders(client:PoolClient,viewer:OrderReadViewer,filter:OrderReadFilters){
  if(filter.restoreKey&&filter.restoreKey!==viewer.authorizationKey)throw conflict('Authorization context changed');
  const values:unknown[]=[viewer.isBoss,viewer.adminId],where=[gameScopeSql("x.game_id","$2","$1")];
@@ -355,6 +406,7 @@ export async function queryAdminReadOrders(client:PoolClient,viewer:OrderReadVie
   }
  }
  await attachAdminOrderExtras(client,items,viewer);
+ if(filter.view==='list')for(const item of items)slimListItem(item);
  return {items,page:filter.page,pageSize:filter.pageSize,total:Number(page.total),contextKey:viewer.authorizationKey};
 }
 export async function getAdminReadOrder(client:PoolClient,viewer:OrderReadViewer,id:string,paymentReadOptions?:ChannelPaymentReadOptions){

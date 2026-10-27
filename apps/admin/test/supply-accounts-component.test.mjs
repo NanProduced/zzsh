@@ -361,7 +361,7 @@ test('U3 account base fees show the exact same-version split in list, quick view
   assert.match(dialog, /物资预付\s*¥0\.00/);
   assert.match(dialog, /(?:租客)?基础押金\s*¥50\.00/);
   assert.match(dialog, /基础总价\s*¥150\.00/);
-  assert.equal(h.el.querySelectorAll('[data-slot="dialog-content"] [data-resource-billing] table').length, 1, 'quantity and pricing share one table');
+  assert.equal(h.el.querySelectorAll('[data-slot="dialog-content"] [data-resource-billing] table').length, 0, 'haff is not an item-material row');
   h.browser.document.dispatchEvent(new h.browser.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   await tick(h); await new Promise(r => setTimeout(r, 50)); await tick(h);
   await h.render('admin', permissions, 'a', { context: 'situation' }); await tick(h);
@@ -470,14 +470,14 @@ test('F2 public v1 stays the single basis across list, quick view and complete d
   await h.render('admin', permissions, 'a', { context: 'situation' }); await tick(h);
   const complete = h.el.textContent;
   assert.ok(h.el.querySelector('[aria-label="租客当前看到的版本"]'));
-  assert.match(complete, /版本v-public/); assert.match(complete, /内容摘要hash-public/);
+  assert.equal(h.el.querySelector("#supply-detail-title").dataset.versionId, "v-public"); assert.doesNotMatch(complete, /内容摘要hash-public/);
   assert.match(complete, /哈夫币租金\s*¥100\.00/);
   assert.match(complete, /预计租期\s*2 天/);
   assert.equal(complete.includes('212.77'), false, 'the complete detail starts from the same public basis');
   const draftButton = [...h.el.querySelectorAll('button')].find(button => button.textContent === '查看当前草稿');
   assert.ok(draftButton, 'the draft is reachable only through the explicit switch');
   await h.click(draftButton); await tick(h);
-  await h.click(h.btn('版本与审核记录')); await tick(h);
+  await h.click(h.btn('操作记录')); await tick(h); await h.click(h.btn('资料版本与变更记录')); await tick(h);
   assert.match(h.el.textContent, /旧号 OLD-7 原题/);
   assert.equal(h.writes.length, 0);
 });
@@ -653,12 +653,12 @@ test('complete account detail preserves dirty reason when version-switch confirm
   const h = await mountHarness(t, { permissions, initialAccountId: 'a', initialQuery: { context: 'review' }, fetchImpl: async () => { reads++; return json(value); } });
   await tick(h); await h.fillReason('fixture unsaved version check');
   await h.click(h.btn('返回账号资料')); await tick(h);
-  await h.click(h.btn('版本与审核记录')); await tick(h);
-  await h.click(h.btn('第 0 版 · 已发布(直发)')); await tick(h);
+  await h.click(h.btn('操作记录')); await tick(h); await h.click(h.btn('资料版本与变更记录')); await tick(h);
+  await h.click(h.btn('第0版 · 已发布(直发)')); await tick(h);
   assert.ok(h.el.querySelector('[data-slot="dialog-content"]'));
   await h.click(h.btn('保留说明')); await tick(h);
   assert.equal(reads, 1, 'cancel did not fetch another version');
-  await h.click(h.btn('新增运营限制')); await tick(h);
+  await h.click(h.btn('账号资料')); await tick(h); await h.click(h.btn('新增运营限制')); await tick(h);
   assert.equal(h.el.querySelector('textarea').value, 'fixture unsaved version check');
   assert.equal(h.writes.length, 0);
 });
@@ -681,6 +681,7 @@ for (const context of ['changes', 'archive']) {
   test(`account image Dialog preserves authorized source and returns focus (${context})`, async (t) => {
     const h = await mountHarness(t, { permissions, initialAccountId: 'a', initialQuery: { context }, fetchImpl: async () => json(workDetail()) });
     await tick(h);
+    if (context === 'changes') { await h.click(h.btn('账号资料')); await tick(h); }
     const trigger = [...h.el.querySelectorAll('button')].find(x => x.getAttribute('aria-label')?.startsWith('放大核对'));
     assert.ok(trigger);
     const src = trigger.querySelector('img').getAttribute('src');
@@ -747,8 +748,8 @@ test('FLOW02 Root F3: public image review is read-only, explicit draft remains u
  const d=detail({...accountA,display_no:'PUBLIC-CONTEXT',owner_user_id:'owner-a',staff_restricted:false},'SUBMITTED');d.version.id='draft-v3';d.version.sequence='3';d.version.declaration.title='Private draft v3';d.version.declaration.mediaBindings[0].byteHash='a'.repeat(64);d.version.declaration.mediaBindings[0].mediaRevision='2';
  d.contextKey='root-f3';d.supervision={historical:false,facts:{...facts,publicVisible:true,newOrders:true,reasons:[],staffRestricted:false,publicVersionId:'public-v1',publicBasis:{id:'public-v1',accountId:'a',releaseId:'release-v1',title:'Original public v1',description:null,attributes:{},presentation:{items:[],skins:[],entitlements:[]},media:[],quote:null,termOption:null,fullPayoutSelected:null,publishedAt:'2026-10-21T01:02:03Z'}},changes:null,previousVersion:null,restrictionHistory:{state:'NOT_RECORDED',items:[],limit:20},ownerLink:{state:'READY',userId:'owner-a'},orders:{state:'READY',items:[],total:0}};
  let resolveFirst,attempts=0;const h=await mountHarness(t,{permissions:all,initialAccountId:'a',initialQuery:{context:'situation'},strict:true,fetchImpl:async(url,init)=>{if(init.method==='POST'){if(++attempts===1)return await new Promise(resolve=>{resolveFirst=()=>resolve(json({error:{code:'INTERNAL_ERROR'}},500));});return json({error:{code:'INTERNAL_ERROR'}},500);}if(url.pathname.endsWith('/listing-reviews'))return json({items:[]});return json(d);}});t.after(()=>resolveFirst?.());await tick(h);
- assert.equal(h.el.querySelector('#supply-detail-title').dataset.versionId,'public-v1');await h.click(h.btn('审核与图片'));await tick(h);assert.equal(h.el.querySelector('textarea[aria-label="本次图片核对说明"]'),null);assert(!h.btn('确认前核对并隔离本图'));assert.match(h.el.textContent,/疑似重复线索/);assert.equal(h.writes.length,0);
- await h.click(h.btn('查看当前草稿'));await tick(h);assert.equal(h.el.querySelector('#supply-detail-title').dataset.versionId,'draft-v3');await h.fillReason('source-bound current draft review');assert.equal(h.btn('确认前核对并隔离本图').disabled,false);
+ assert.equal(h.el.querySelector('#supply-detail-title').dataset.versionId,'public-v1');assert(!h.btn('审核与图片'));assert(!h.btn('屏蔽图片…'));assert.equal(h.writes.length,0);
+ await h.click(h.btn('查看当前草稿'));await tick(h);assert.equal(h.el.querySelector('#supply-detail-title').dataset.versionId,'draft-v3');assert(h.btn('屏蔽图片…'));await h.click(h.btn('屏蔽图片…'));await tick(h);await h.fillReason('source-bound current draft review');await h.click(h.btn('取消'));await tick(h);
  await h.click(h.btn('账号资料'));await tick(h);const back=h.btn('回到对外版本');assert(back&&!back.disabled);await h.click(h.btn('通过历史审核'));await tick(h);assert.equal(back.disabled,true,'an open version-bound confirmation cannot change context');
  await h.click(h.btn('确认通过历史审核'));await tick(h);assert.equal(h.writes.length,1);assert(resolveFirst);assert.equal(back.disabled,true,'in-flight request keeps the selected version');await h.click(back);assert.equal(h.el.querySelector('#supply-detail-title').dataset.versionId,'draft-v3');
  resolveFirst();await tick(h);assert.match(h.el.textContent,/结果未确认/);assert.equal(back.disabled,true,'UNKNOWN cannot return to a writable alternate context');
