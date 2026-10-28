@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { UserObligationFinding, UserObligationKind } from "./user-obligation-reader";
 import type { Pool, PoolClient } from "pg";
 
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
@@ -39,6 +40,8 @@ export type RealNameProvider = {
 };
 
 export type UserObligationStatus = "NONE" | "PENDING" | "UNKNOWN";
+/** 仅用于注销：返回带分类的发现项，以便给出逐项拒绝码。 */
+export type AccountCancelObligationReader = (userId: string, client: PoolClient) => Promise<UserObligationStatus | UserObligationFinding>;
 export type UserObligationReader = (userId: string, client: PoolClient) => Promise<UserObligationStatus>;
 
 export type UserIdentityState = {
@@ -392,6 +395,15 @@ async function revokeUserCredentials(client: PoolClient, userId: string): Promis
   return { sessions: sessions.rowCount ?? 0, verifications: verification.rowCount ?? 0 };
 }
 
+const CANCEL_BLOCK: Record<UserObligationKind, [(typeof API_V1_ERROR_CODES)[keyof typeof API_V1_ERROR_CODES], string]> = {
+  LISTING: [API_V1_ERROR_CODES.ACCOUNT_CANCEL_LISTING_ACTIVE, "仍有审核中或在架的出租账号"],
+  ORDER: [API_V1_ERROR_CODES.ACCOUNT_CANCEL_ORDER_ACTIVE, "仍有待支付或进行中的订单"],
+  WALLET_BALANCE: [API_V1_ERROR_CODES.ACCOUNT_CANCEL_WALLET_BALANCE, "钱包仍有余额、冻结金额或待入账金额"],
+  WITHDRAWAL: [API_V1_ERROR_CODES.ACCOUNT_CANCEL_WITHDRAWAL_IN_FLIGHT, "仍有处理中的提现"],
+  DEPOSIT: [API_V1_ERROR_CODES.ACCOUNT_CANCEL_DEPOSIT_HELD, "仍有未退还或处理中的保证金"],
+  COMMISSION: [API_V1_ERROR_CODES.ACCOUNT_CANCEL_COMMISSION_PENDING, "仍有未结算或待追回的佣金"],
+};
+
 async function changeAccountState(
   request: AuthSecurityNodeRequest,
   response: AuthSecurityNodeResponse,
@@ -407,9 +419,17 @@ async function changeAccountState(
     if (nextStatus === "CANCELLED") {
       let obligations: unknown;
       try {
-        obligations = await options.userObligationReader(context.userId, client);
+        obligations = await options.accountCancelObligationReader(context.userId, client);
       } catch {
         throw new SecurityApiError(503, API_V1_ERROR_CODES.INTERNAL_ERROR, "注销暂不能办理：当前无法确认未完成事项，请稍后重试");
+      }
+      if (obligations && typeof obligations === "object") {
+        const finding = obligations as UserObligationFinding;
+        if (finding.status === "PENDING" && finding.obligation in CANCEL_BLOCK) {
+          const [code, label] = CANCEL_BLOCK[finding.obligation];
+          throw new SecurityApiError(409, code, `注销暂不能办理：${label}，请先处理后重试`);
+        }
+        throw new SecurityApiError(503, API_V1_ERROR_CODES.ACCOUNT_CANCEL_OBLIGATION_UNKNOWN, "注销暂不能办理：当前无法确认未完成事项，请稍后重试");
       }
       if (obligations === "PENDING") {
         throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "注销暂不能办理：仍有未完成事项，请先处理后重试");

@@ -36,6 +36,7 @@ import { handleAdminAuditRoute } from "./admin-audit";
 import {
   changeUserFreezeState,
   type RealNameProvider,
+  type AccountCancelObligationReader,
   type UserObligationReader,
 } from "./user-identity";
 import type { ImIdentityIntentRepository, ImIdentityProvisioner } from "../im/identity-lifecycle";
@@ -152,6 +153,7 @@ export type AuthSecurityOptions = {
   securityVerificationBudget: { inFlight: number };
   realNameProvider: RealNameProvider;
   userObligationReader: UserObligationReader;
+  accountCancelObligationReader: AccountCancelObligationReader;
   testOperationsEnabled: boolean;
   approvalOperationExecutor?: ApprovalOperationExecutor;
   /** Same explicit write capability as the distribution executor; never the read-only scope. */

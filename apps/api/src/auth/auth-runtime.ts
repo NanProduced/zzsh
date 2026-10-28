@@ -1,4 +1,5 @@
 import type {NativeWithdrawalScope} from '../finance/native-withdrawal-resource';
+import { readUserObligations } from "./user-obligation-reader";
 import type {NativeWithdrawalOptions} from '../finance/native-withdrawal-store';
 import type {PayoutExecution} from '../finance/joinpay-payout-attempt';
 import {mountJoinpayPayoutNotifications} from '../finance/joinpay-payout-notification-routes';
@@ -1038,6 +1039,13 @@ export async function mountAuthHandlers(
       const orderPending=await client.query("SELECT 1 FROM zzsh_order.rental_order WHERE status IN ('PENDING_PAYMENT','PAID') AND (renter_user_id=$1 OR owner_user_id=$1) LIMIT 1",[userId]);
       if(orderPending.rowCount) return "PENDING";
       return options.userObligationReader ? options.userObligationReader(userId,client) : "UNKNOWN";
+    },
+    // 注销专用生产检查：出租账号、订单、钱包余额、在途提现、保证金、佣金；任一来源不可读即拒绝（fail closed）。
+    // 测试注入的 options.userObligationReader 只能追加检查，不能跳过生产检查。
+    accountCancelObligationReader: async (userId,client) => {
+      const production=await readUserObligations(userId,client);
+      if(production!=="NONE") return production;
+      return options.userObligationReader ? options.userObligationReader(userId,client) : "NONE";
     },
     testOperationsEnabled: options.testOperationsEnabled,
     distributionPolicyWriteScope: options.distributionScope,
