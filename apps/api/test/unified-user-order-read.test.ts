@@ -13,7 +13,7 @@ test("unified query validates subject-independent bounded filters",()=>{
 test("unified keyset binds subject, filters and source while retaining nullable dates",async()=>{
  let sql="",params:unknown[]=[];
  const row={origin:"LEGACY",id:"same-id",createdAt:null,record};
- const client={query:async(s:string,p:unknown[])=>{sql=s;params=p;return {rows:[row,row]};}} as unknown as PoolClient;
+ const client={query:async(s:string,p:unknown[])=>{if(s.includes("visible_orders")){sql=s;params=p;}return {rows:[row,row]};}} as unknown as PoolClient;
  const result=await listUnifiedUserOrders(client,"renter",{party:"renter",limit:1});
  assert.equal(result.items.length,1);assert.equal(result.items[0]!.readOnly,true);
  assert.equal((result.items[0]!.source as {origin:string}).origin,"LEGACY");

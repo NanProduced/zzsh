@@ -1,3 +1,4 @@
+import { applyOrderUserFacts, readOrderUserFacts } from "./frozen-listing-read";
 import type { PoolClient } from "pg";
 import { invalid, notFound } from "../supply/supply-util";
 import { centsToYuan } from "./order";
@@ -115,5 +116,8 @@ export async function getUserLegacyOrder(client: PoolClient, userId: string, id:
   const continuationReady = await legacyContinuationReady(client);
   const row = (await client.query<LegacyUserOrderRow>(`SELECT ${legacyUserOrderFields(continuationReady)} ${legacyUserOrderFrom(continuationReady)} WHERE l.id=$2 AND (l.owner_user_id=$1 OR l.renter_user_id=$1)`, [userId, id])).rows[0];
   if (!row) throw notFound();
-  return { order: projectUserLegacyOrder(row, userId) };
+  const order: Record<string, unknown> = projectUserLegacyOrder(row, userId);
+  const facts = await readOrderUserFacts(client, userId, [{ origin: "LEGACY", orderId: row.id, accountId: row.accountId ?? null, ownerUserId: row.ownerUserId }]);
+  applyOrderUserFacts(order, facts.get(`LEGACY:${row.id}`));
+  return { order };
 }

@@ -5,6 +5,7 @@ import { gameScopeSql } from "../auth/admin-scope";
 import { projectOrder, centsToYuan, yuanToCents, type OrderRow } from "./order";
 import { orderAccountTitleFact } from "../supply/publishing";
 import { projectPublicAttributeDisplay } from "../supply/listing-query";
+import { frozenResourceLines } from "./frozen-listing-read";
 import { conflict, invalid, notFound } from "../supply/supply-util";
 import { escapeLike } from "../supply/catalog";
 import { legacyContinuationReady, legacyMoneyCents, legacyOrderReadState, LEGACY_ORDER_STATUS_SQL } from "./legacy-order-read";
@@ -342,9 +343,7 @@ export async function readNativeFrozenAccounts(client:PoolClient,viewer:OrderRea
  const rows=(await client.query<FrozenNativeRow>(NATIVE_FROZEN_ACCOUNT_SQL,[JSON.stringify(wanted),viewer.isBoss,viewer.adminId])).rows;
  for(const row of rows){
   if(!row.versionId)continue;
-  const frozen=new Map<string,Record<string,unknown>|null>();
-  for(const item of Array.isArray(row.presentationItems)?row.presentationItems:[])if(item&&typeof item==='object'&&typeof item.id==='string')frozen.set(item.id,frozen.has(item.id)?null:item);
-  const resources=row.resources.map(item=>{const original=frozen.get(item.itemId);const name=typeof original?.name==='string'&&original.name.trim()?original.name:null;return {itemId:item.itemId,code:typeof original?.code==='string'?original.code:item.code,name,quantity:item.quantity,unit:typeof original?.unit==='string'?original.unit:item.unit};});
+  const resources=frozenResourceLines(row.presentationItems,row.resources);
   const haff=resources.find(item=>item.unit==='HAFF_BASE')??null;
   const termSeconds=row.termSeconds;
   const termDays=termSeconds&&/^\d+$/.test(termSeconds)&&BigInt(termSeconds)%86400n===0n?(BigInt(termSeconds)/86400n).toString():null;

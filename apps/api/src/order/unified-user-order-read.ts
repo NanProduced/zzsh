@@ -1,3 +1,4 @@
+import { applyOrderUserFacts, readOrderUserFacts } from "./frozen-listing-read";
 import type { PoolClient } from "pg";
 import { conflict, invalid, sha256Hex } from "../supply/supply-util";
 import { ORDER_FIELDS, ORDER_FROM, projectOrder, type OrderRow } from "./order";
@@ -62,10 +63,17 @@ export async function listUnifiedUserOrders(client: PoolClient, userId: string, 
   `, [userId, filter.status ?? null, filter.accountId ?? null, cursor !== null, cursor?.c ?? null, cursor?.o ?? null, cursor?.i ?? null, filter.limit + 1])).rows;
   const page = rows.slice(0, filter.limit);
   const last = page[page.length - 1];
+  const items: Record<string, unknown>[] = page.map(row => row.origin === "NATIVE"
+    ? { ...projectOrder(row.record as OrderRow, filter.party), source: { origin: "NATIVE" as const }, readOnly: false }
+    : projectUserLegacyOrder(row.record as LegacyUserOrderRow, userId));
+  // B2: page-batched frozen listing facts (raw rows carry accountId even when the projection hides it).
+  const facts = await readOrderUserFacts(client, userId, page.map(row => {
+    const r = row.record as { accountId?: string | null; versionId?: string | null; contentHash?: string | null; ownerUserId?: string | null };
+    return { origin: row.origin as "NATIVE" | "LEGACY", orderId: row.id, accountId: r.accountId ?? null, versionId: r.versionId ?? null, contentHash: r.contentHash ?? null, ownerUserId: r.ownerUserId ?? null };
+  }));
+  page.forEach((row, index) => applyOrderUserFacts(items[index]!, facts.get(`${row.origin}:${row.id}`)));
   return {
-    items: page.map(row => row.origin === "NATIVE"
-      ? { ...projectOrder(row.record as OrderRow, filter.party), source: { origin: "NATIVE" as const }, readOnly: false }
-      : projectUserLegacyOrder(row.record as LegacyUserOrderRow, userId)),
+    items,
     nextCursor: rows.length > filter.limit && last
       ? Buffer.from(JSON.stringify({ f: fingerprint, c: last.createdAt, o: last.origin, i: last.id })).toString("base64url") : null,
     limit: filter.limit,

@@ -1,3 +1,4 @@
+import { applyOrderUserFacts, readOrderUserFacts } from "./frozen-listing-read";
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 
@@ -526,6 +527,8 @@ export async function getMyOrder(
   if (!party) throw notFound();
   const projected = projectOrder(row, party);
   await attachLineNames(client, projected);
+  const facts = await readOrderUserFacts(client, userId, [{ origin: "NATIVE", orderId: row.id, accountId: row.accountId, versionId: row.versionId, contentHash: row.contentHash, ownerUserId: row.ownerUserId }]);
+  applyOrderUserFacts(projected, facts.get(`NATIVE:${row.id}`));
   return { order: projected };
 }
 
