@@ -457,8 +457,11 @@ export async function quotePreview(
   await assertGameScope(client, adminUserId, isBoss, priceRow.gameId);
   // 草稿试算须绑定调用方看到的修订；草稿被改后旧试算作废（409），不静默按新内容出价。
   if (body.expectedRevision !== undefined && (typeof body.expectedRevision !== "string" || body.expectedRevision !== priceRow.revision)) throw conflict("Version changed; refresh and retry");
-  const term = await client.query<{ id: string; gameId: string; status: string }>(
-    `SELECT "id", "game_id" AS "gameId", "status" FROM "zzsh_supply"."term_version" WHERE "id" = $1`,
+  // 不加行锁：会员利润模拟在 READ ONLY 事务内调用（membership-growth-routes），PG 拒绝只读事务中的 FOR SHARE。
+  // 一致性改由读后修订复核保证：草稿行的唯一写入者 updatePriceDraft/updateTermDraft 在同一事务内
+  // FOR UPDATE 父行 + 替换 price_line/term_option + revision+1；SEALED 版本不可编辑，复核恒等。
+  const term = await client.query<{ id: string; gameId: string; status: string; revision?: string }>(
+    `SELECT "id", "game_id" AS "gameId", "status", "revision"::text AS "revision" FROM "zzsh_supply"."term_version" WHERE "id" = $1`,
     [termVersionId],
   );
   const termRow = term.rows[0];
@@ -521,6 +524,10 @@ export async function quotePreview(
     });
   }
   if (lines.length === 0) throw invalid("No declared inventory matches the selected price version");
+  // 读后复核：锁不可用（如调用方不在事务内）时也不让多表读取混入另一修订；binding 只回执已复核的修订。
+  const priceAfter = await client.query<{ revision: string }>(`SELECT "revision"::text AS "revision" FROM "zzsh_supply"."price_version" WHERE "id" = $1`, [priceVersionId]);
+  const termAfter = await client.query<{ revision?: string }>(`SELECT "revision"::text AS "revision" FROM "zzsh_supply"."term_version" WHERE "id" = $1`, [termVersionId]);
+  if (priceAfter.rows[0]?.revision !== priceRow.revision || termAfter.rows[0]?.revision !== termRow.revision) throw conflict("Version changed; refresh and retry");
   const rentalSelection = conditions.rentalPricing == null ? null : normalizeRentalPricing(conditions.rentalPricing);
   const binding: QuotePreviewBinding = {
     priceVersionId, priceVersionStatus: priceRow.status, priceVersionRevision: priceRow.revision, termVersionId,
