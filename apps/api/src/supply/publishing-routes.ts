@@ -4,6 +4,7 @@ import { formatDecimalExact, parseSignedDecimal } from "./decimal";
 import { listSupervision, parseSupervisionQuery, readSupervision, supervisionViewer } from "./admin-supervision-read";
 import { loadLegacyHistoricalRead, loadLegacyHistoricalReads, withoutLegacyResourceNo } from "./legacy-listing-read";
 import { publicAccountNumber } from "./account-number";
+import { listOwnerAccounts, parseOwnerAccountQuery, projectOwnerAccount } from "./owner-account-list";
 import { listV2 } from "./listing-filter-routes";
 import { lookupPublicListing, parseNumberLookupQuery } from "./public-listing-lookup";
 import { candidatePredicates,PUBLIC_CANDIDATE_FROM,PUBLIC_CANDIDATE_WHERE } from "./listing-candidates";
@@ -557,6 +558,16 @@ export async function handlePublishingRoute(
             admin && old ? await readDeclaration(client, old) : null,
           previousPresentation: admin && old ? old.presentation : null,
           duplicateHints,
+        };
+      }
+      if (!admin) {
+        // B1: owner list with rentalState / accountDisplay / activeOrder; legacy row fields and `after`/`nextCursor` unchanged.
+        const owned = await listOwnerAccounts(client, actorId, parseOwnerAccountQuery(query), options.listingCursorKey);
+        const historical = await loadLegacyHistoricalReads(client, owned.page.map(row => row.id));
+        return {
+          items: owned.page.map(row => ({ ...projectOwnerAccount(row), historicalRead: withoutLegacyResourceNo(historical.get(row.id) ?? null) })),
+          nextCursor: owned.hasMore ? owned.last : null,
+          nextPageCursor: owned.nextPageCursor,
         };
       }
       const state = query.get("state") ?? "SUBMITTED";
