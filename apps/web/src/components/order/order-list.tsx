@@ -3,8 +3,8 @@
 import Link from "next/link";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { AlertCircle, ChevronRight, Info, RefreshCw } from "lucide-react";
-import { orderItemKey, formatOrderTime as timeText, type FulfillmentAssignment, type Order, type OrderPage, type OrderParty, type OrderRequestError, type OrderStatusFilter } from "@/lib/order-client";
-import { groupedInteger, orderAccountTitle, orderAmountFacts, paymentEntryOpen, unitLabel } from "@/lib/order-display";
+import { orderItemKey, formatOrderTime as timeText, type FulfillmentAssignment, type Order, type OrderLine, type OrderPage, type OrderParty, type OrderRequestError, type OrderStatusFilter } from "@/lib/order-client";
+import { groupedInteger, orderAccountTitle, orderAmountFacts, orderRentalModeLabel, paymentEntryOpen } from "@/lib/order-display";
 import { OrderError, OrderStatusBadge, orderTermLabel, orderUrl, STATUS_LABELS } from "@/components/order/order-presentation";
 import "./order.css";
 
@@ -49,22 +49,45 @@ function shortTime(value: string | null | undefined): string {
  * it is built only from what the order read actually returned, and a line with neither name nor known
  * unit is left as "资源" rather than guessed at.
  */
-function resourceSummary(order: Order): string | null {
+function resourceSummary(order: Order, includeHaff = true): string | null {
   const lines = order.quote?.lines ?? [];
   if (lines.length === 0) return null;
-  return lines.map((line) => {
-    const name = line.name?.trim() || unitLabel(line.unit) || "资源";
-    const raw = line.quantity ?? line.unitQuantity;
+  const quantity = (line: OrderLine) => line.quantity ?? line.unitQuantity;
+  const isZero = (line: OrderLine) => {
+    const raw = quantity(line);
+    return typeof raw === "string" && /^\d+$/.test(raw) && BigInt(raw) === 0n;
+  };
+  const haffText = (line: OrderLine): string | null => {
+    const raw = quantity(line);
+    if (line.unit !== "HAFF_BASE" || raw === null || raw === undefined || !/^\d+$/.test(raw)) return null;
+    const value = BigInt(raw), whole = value / 1_000_000n;
+    const fraction = (value % 1_000_000n).toString().padStart(6, "0").replace(/0+$/, "");
+    return `哈夫币 ${fraction ? `${whole}.${fraction}` : whole.toString()} M`;
+  };
+  const lineText = (line: OrderLine): string => {
+    const name = line.name!.trim();
+    const raw = quantity(line);
     if (raw === null || raw === undefined || raw === "") return name;
     if (!/^\d+$/.test(raw)) return `${name} ${raw}`;
-    if (line.unit === "HAFF_BASE") {
-      const value = BigInt(raw);
-      const whole = value / 1_000_000n;
-      const fraction = (value % 1_000_000n).toString().padStart(6, "0").replace(/0+$/, "");
-      return `${name} ${fraction ? `${whole}.${fraction}` : whole.toString()} M`;
-    }
     return `${name} ×${groupedInteger(raw)}`;
-  }).join(" · ");
+  };
+  const isHaffLine = (line: OrderLine) => line.unit === "HAFF_BASE" || line.name?.trim() === "哈夫币";
+  const allUnnamed = lines.filter((line) => !line.name?.trim() && !isZero(line));
+  const haff = allUnnamed.find(isHaffLine);
+  const named = lines.filter((line) => Boolean(line.name?.trim()) && !isZero(line) && (includeHaff || !isHaffLine(line)));
+  const unnamed = allUnnamed.filter((line) => includeHaff || !isHaffLine(line));
+  if (named.length === 0) {
+    const otherUnnamed = unnamed.filter((line) => line !== haff);
+    if (!includeHaff) return otherUnnamed.length ? `物资 ${otherUnnamed.length} 项` : null;
+    const haffValue = haff ? haffText(haff) : null;
+    if (haffValue) return [haffValue, ...(otherUnnamed.length ? [`物资 ${otherUnnamed.length} 项`] : [])].join(" · ");
+    return otherUnnamed.length ? `物资 ${otherUnnamed.length} 项` : null;
+  }
+  const parts = named.map((line) => lineText(line));
+  if (includeHaff && haff) parts.push(haffText(haff)!);
+  const otherUnnamed = unnamed.filter((line) => line !== haff).length;
+  if (otherUnnamed) parts.push(`物资 ${otherUnnamed} 项`);
+  return parts.join(" · ");
 }
 
 /**
@@ -73,6 +96,9 @@ function resourceSummary(order: Order): string | null {
  */
 function statusHint(order: Order): string | null {
   if (order.readOnly) return order.status === "PAID" ? "进度以订单记录为准" : null;
+  if (order.stage?.label && order.stage.code !== "NONE") {
+    return order.stage.viewerActionRequired ? `${order.stage.label} · 需要你处理` : order.stage.label;
+  }
   if (order.status === "PENDING_PAYMENT") {
     if (order.expiredAwaitingCancel) return "已到期，取消处理中";
     return `占用截止 · ${timeText(order.holdUntil)}`;
@@ -86,15 +112,22 @@ function statusHint(order: Order): string | null {
 function ListRow({ party, order, status, accountId, onOpen }: { party: OrderParty; order: Order; status: OrderStatusFilter; accountId?: string; onOpen: (orderId: string, event: ReactMouseEvent<HTMLAnchorElement>) => void }) {
   const facts = orderAmountFacts(order, party);
   const hint = statusHint(order);
-  const resources = order.source?.origin === "LEGACY" ? null : resourceSummary(order);
+  const title = orderAccountTitle(order);
+  const resources = order.source?.origin === "LEGACY" ? null : resourceSummary(order, !title.includes("哈夫币"));
+  const modeLabel = orderRentalModeLabel(order);
   // Only the renter, and only while the server still offers the payment entry, is invited to pay.
   const pending = party === "renter" && paymentEntryOpen(order);
   return <li className="order-row" data-order-status={order.status}>
     <div className="order-row-account">
       {/* The title link is the row's single focusable target; its click surface covers the whole row. */}
-      <Link className="order-row-title" href={orderUrl(party, status, accountId, order.id, order.source?.origin)} scroll={false} data-order-id={order.id} data-order-key={orderItemKey(order)} onClick={(event) => onOpen(orderItemKey(order), event)}>{orderAccountTitle(order)}</Link>
+      <div className="order-row-title-line">
+        <Link className="order-row-title" href={orderUrl(party, status, accountId, order.id, order.source?.origin)} scroll={false} data-order-id={order.id} data-order-key={orderItemKey(order)} onClick={(event) => onOpen(orderItemKey(order), event)}>{title}</Link>
+        {modeLabel ? <span className="order-row-tag" data-mode={order.quote?.rentalMode}>{modeLabel}</span> : null}
+        {!order.listingFacts && order.listingFactsUnknownReason ? <span className="order-row-tag">资料待核实</span> : null}
+      </div>
       {resources ? <p className="order-row-resources">{resources}</p> : null}
       <p className="order-row-meta">
+        {order.accountDisplayNo ? <><span className="order-row-account-no">账号 {order.accountDisplayNo}</span><span aria-hidden="true">·</span></> : null}
         <span className="order-row-no">订单 {order.displayNo ?? "暂不可用"}</span>
         <span aria-hidden="true">·</span>
         <span>{shortTime(order.createdAt)}</span>
@@ -127,13 +160,13 @@ function emptyCopy(party: OrderParty, status: OrderStatusFilter, accountId?: str
   if (status) return { title: "没有符合筛选条件的订单", body: "可以切换订单状态，或清除当前状态筛选。" };
   if (accountId) return { title: "该账号暂无订单记录", body: "这里仅展示当前账号对应的交易记录。" };
   if (party === "renter") return { title: "还没有租入订单", body: "选好账号并创建订单后，交易进展会显示在这里。", art: EMPTY_ART.renter };
-  return { title: "还没有收到出租订单", body: "租客创建订单后，交易记录会显示在这里；账号资料与上架状态在出租账号管理中处理。", art: EMPTY_ART.owner };
+  return { title: "还没有收到出租订单", body: "租客创建订单后，交易记录会显示在这里；账号资料与上架状态在上架账号中处理。", art: EMPTY_ART.owner };
 }
 
 function emptyAction(party: OrderParty, status: OrderStatusFilter, accountId: string | undefined, className: string) {
   if (status) return <Link className={className} href={orderUrl(party, "", accountId)} scroll={false} replace>清除状态筛选</Link>;
   if (party === "renter") return <Link className={className} href="/accounts">浏览可租账号</Link>;
-  return <Link className={className} href={accountId ? `/account?view=accounts&accountId=${encodeURIComponent(accountId)}` : "/account?view=accounts"} scroll={false}>管理出租账号</Link>;
+  return <Link className={className} href={accountId ? `/account?view=accounts&accountId=${encodeURIComponent(accountId)}` : "/account?view=accounts"} scroll={false}>管理上架账号</Link>;
 }
 
 export function OrderListPanel({ party, status, accountId, state, onRefresh, onRetryList, onLoadMore, onLogin, onReauthorize, onOpen }: {
@@ -161,7 +194,7 @@ export function OrderListPanel({ party, status, accountId, state, onRefresh, onR
         <p>{party === "renter" ? "查看订单进展，处理当前事项。" : "查看租客订单与当前进展。"}</p>
       </div>
       <div className="order-workspace-actions">
-        {party === "owner" ? <Link className="account-inline-link" href="/account?view=accounts" scroll={false}>管理出租账号</Link> : null}
+        {party === "owner" ? <Link className="account-inline-link" href="/account?view=accounts" scroll={false}>管理上架账号</Link> : null}
         <button type="button" className="button quiet" onClick={onRefresh} disabled={state.refreshing}><RefreshCw size={15} aria-hidden="true" />{state.refreshing ? "刷新中…" : "刷新"}</button>
       </div>
     </div>

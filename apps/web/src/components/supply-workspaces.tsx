@@ -6,6 +6,8 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertCircle, ArrowLeft, Box, Check, ChevronDown, ChevronRight, ClipboardList, Clock3, Copy, CreditCard, Crosshair, Dumbbell, FileText, Gem, House, ImageOff, Images, LockKeyhole, LogIn, Package, Pause, Pencil, Play, ReceiptText, RefreshCw, Shield, ShieldCheck, Shirt, SlidersHorizontal, Sparkles, Undo2, UserRound, Waves } from "lucide-react";
 import { ServiceShell } from "./layout/service-shell";
+import { SessionLoading } from "./auth/session-loading";
+import { RecoveryAlert } from "./ui/information";
 import { WebAuthError, webAuthRequest } from "./auth/auth-form";
 import { StatusPage } from "@/components/status/status-page";
 import { accountStatusLabel, cancellationFailureMessage, identityStatusLabel, type UserIdentitySnapshot } from "@/app/user-account-status";
@@ -20,11 +22,12 @@ import { PersonalInvitations } from "./account/personal-invitations";
 import { CreditCenter } from "./account/credit-center";
 import { AccountSecurityControls, type SecurityNicknameDraft, type SecurityPendingWrite } from "./account/account-security-controls";
 import { ConfirmAlertDialog } from "./ui/alert-dialog";
-import { CONDITION_LABELS, conditionLines, haffMillionsLabel, skinTypeLabel, termLabel, unitLabel } from "../lib/listing-view";
+import { CONDITION_LABELS, booleanDeclarationText, conditionLines, haffMillionsLabel, skinTypeLabel, termLabel, unitLabel, type ResourceLine } from "../lib/listing-view";
+import { deriveAccountTitle } from "../lib/account-title";
 import { supplyApi, SupplyRequestError, uncertainSupplyWriteFailure } from "../lib/supply-client";
 import { loadSupplyIntent, prepareSupplyIntent, acceptSupplyIntent, retainUncertainSupplyIntent, clearSupplyIntent, sameSupplyIntent, SupplyIntentStorageError, type SupplyWriteIntent } from "../lib/supply-write-intent";
 import { IdentityPauseGate, isCurrentQuery, mergePageById } from "../lib/supply-workspace-guards";
-import type { MySupply } from "../lib/supply-types";
+import type { MyAccountRow, MySupply, RentalState } from "../lib/supply-types";
 // 出租账号列表的 A2 收敛样式（状态分列 · 已加载筛选 chips · 往返恢复）；详情继续沿用 supply-* 规则。
 import "./account/my-rental-accounts.css";
 
@@ -56,16 +59,36 @@ function stateLabel(state: string | null | undefined): string {
 const LIST_PAGE_SIZE = 50;
 
 /** 已加载记录筛选 chips：只作用于本地已加载行，切换不发请求、不改游标（R1 落地后同一接缝改服务端筛选）。 */
-const ACCOUNT_FILTERS: ReadonlyArray<{ value: string; label: string }> = [
-  { value: "ALL", label: "全部" },
+const LISTED_STATE_FILTERS: ReadonlyArray<{ value: RentalState; label: string }> = [
+  { value: "LISTED", label: "待租" },
+  { value: "PAUSED", label: "已暂停" },
+  { value: "REVIEWING", label: "审核中" },
   { value: "DRAFT", label: "草稿" },
-  { value: "SUBMITTED", label: "审核中" },
   { value: "REJECTED", label: "已退回" },
-  { value: "APPROVED", label: "已通过" },
-  { value: "PUBLISHED", label: "已上架" },
-  { value: "IMPORTED_UNVERIFIED", label: "待复核" },
-  { value: "WITHDRAWN", label: "已撤回" },
+  { value: "RESTRICTED", label: "已限制" },
+  { value: "UNKNOWN", label: "待核实" },
 ];
+const RENTAL_STATE_LABELS: Record<RentalState, string> = {
+  RENTED: "出租中",
+  LISTED: "待租",
+  PAUSED: "已暂停",
+  REVIEWING: "审核中",
+  DRAFT: "草稿",
+  REJECTED: "已退回",
+  RESTRICTED: "已限制",
+  UNKNOWN: "待核实",
+};
+const ACCOUNT_MODE_LABELS: Record<string, string> = { ordinary: "普通出租", custom: "自定义出租", fast: "极速出租" };
+const RENTAL_STATE_TONE: Record<RentalState, string> = {
+  RENTED: "success",
+  LISTED: "info",
+  PAUSED: "warning",
+  REVIEWING: "info",
+  DRAFT: "unknown",
+  REJECTED: "error",
+  RESTRICTED: "error",
+  UNKNOWN: "unknown",
+};
 
 /** 资料状态徽章语义色：未知枚举一律「未确认」灰态，不靠颜色单独表意（徽章始终带文字）。 */
 const REVIEW_BADGE_TONE: Record<string, string | undefined> = {
@@ -81,7 +104,7 @@ function blockerText(code: string): string {
     GAME_UNAVAILABLE: "游戏暂不可发布",
     GAME_SERVICE_UNAVAILABLE: "该游戏暂未开放出租服务",
     RULE_CHANGED: "规则已更新，请重新预览并确认",
-    ACCOUNT_NOT_PUBLISHABLE: "历史异常或归档资料需先处理",
+    ACCOUNT_NOT_PUBLISHABLE: "账号资料需先处理",
     PUBLISHER_BAIL_UNCONFIRMED: "发布保证金资格尚未确认",
     FUNDING_UNKNOWN: "押金与赔付依据尚未确认",
     OCCUPIED: "账号当前被占用",
@@ -91,11 +114,55 @@ function blockerText(code: string): string {
     STAFF_RESTRICTED: "客服限制尚未解除",
     CONFIRMATION_OR_MEDIA_REQUIRED: "需完成规则确认或图片技术校验",
     PUBLICATION_REQUIRED: "公开发布事实尚未形成",
-    HISTORICAL_VERSION: "这是历史版本",
+    HISTORICAL_VERSION: "这是较早版本",
   } as Record<string, string>)[code] ?? "当前资料暂不能继续，请读取最新状态或稍后重试。";
 }
 
-type AccountRow = { id: string; display_no?: string | null; title: string | null; game_name: string; review_state: string | null; sequence: string | null; owner_paused: boolean; staff_restricted: boolean; historicalRead?: MySupply["historicalRead"] };
+type AccountRow = MyAccountRow;
+function haffArchiveLabel(raw: string | null | undefined): string | null {
+  if (!raw || !/^\d+$/.test(raw)) return null;
+  const value = BigInt(raw);
+  if (value === 0n) return null;
+  const whole = value / 1_000_000n;
+  const fraction = (value % 1_000_000n).toString().padStart(6, "0").replace(/0+$/, "");
+  return `${fraction ? `${whole}.${fraction}` : whole.toString()} M 哈夫币`;
+}
+/** Only historical display facts become this read-only summary; title/price/availability are never inferred from it. */
+function accountTitleFromFacts(row: AccountRow): string | null {
+  const facts = row.accountDisplay?.titleFacts;
+  if (!facts) return null;
+  const resourceLines: ResourceLine[] = facts.haffBase ? [{
+    itemId: "haff", code: "df_billable_haff", name: "哈夫币", quantity: facts.haffBase, quantityLabel: facts.haffBase, unitLabel: "哈夫币", costAmount: null, costLabel: null, unitPriceLabel: null,
+  }] : [];
+  const conditionLines = [
+    facts.safeBox?.displayName ? { key: "safe_box_code", label: "安全箱", value: facts.safeBox.displayName } : null,
+    facts.rank?.displayName ? { key: "grading_code", label: "段位", value: facts.rank.displayName } : null,
+    facts.level !== null ? { key: "character_level", label: "角色等级", value: `${facts.level} 级` } : null,
+    facts.vitLevel !== null ? { key: "vit_level", label: "体力", value: `${facts.vitLevel} 级` } : null,
+    facts.bearLevel !== null ? { key: "bear_level", label: "负重", value: `${facts.bearLevel} 级` } : null,
+  ].filter((line): line is { key: string; label: string; value: string } => Boolean(line));
+  const derived = deriveAccountTitle({ resourceLines, conditionLines });
+  return derived.primary && derived.primary !== "游戏账号" ? derived.primary : null;
+}
+
+function accountActiveOrderText(row: AccountRow): string | null {
+  const order = row.activeOrder;
+  if (!order) return null;
+  if (order.status === "PENDING_PAYMENT") return `订单 ${order.displayNo} 待付款`;
+  const deadline = order.rentalDeadlineAt ? displayTime(order.rentalDeadlineAt) : null;
+  const amount = order.ownerAmount ? `号主金额 ${moneyText(order.ownerAmount)}` : "号主金额待确认";
+  return [`租客 ${order.renterName ?? "待确认"}`, deadline ? `至 ${deadline}` : null, amount].filter(Boolean).join(" · ");
+}
+
+function historicalAccountSummary(row: AccountRow): { title: string; sub: string } | null {
+  const display = row.historicalRead?.display;
+  if (display?.state !== "KNOWN") return null;
+  const facts = display.facts;
+  const haff = facts.resources?.find((resource) => resource.unit === "HAFF_BASE");
+  const headline = [haffArchiveLabel(haff?.quantity), facts.attributeDisplay?.grading?.displayName, facts.attributeDisplay?.safeBox?.displayName].filter((part): part is string => Boolean(part));
+  const meta = [row.display_no ? `账号 ${row.display_no}` : null, facts.attributeDisplay?.serviceWindow?.displayName, facts.attributeDisplay?.loginMethod?.displayName].filter((part): part is string => Boolean(part));
+  return { title: headline.length ? headline.join(" · ") : "出租账号", sub: meta.join(" · ") };
+}
 /** 读取失败的归属作用域：决定顶部提示文案，避免把局部详情失败写成「账号不存在」。写动作仍回显服务端原文。 */
 type AccountErrorScope = "list" | "detail" | "action";
 function AccountActionError({ error, scope, onRetry }: { error: SupplyRequestError | null; scope: AccountErrorScope; onRetry?: () => void }) {
@@ -121,7 +188,7 @@ export function AccountWorkspace({ view, accountId, orderId, status, source, pag
   const active = resolveAccountView(view);
   // F6 面包屑：首页 / 个人中心 / 当前页面（详情视图用详情页名，不暴露内部参数）。
   // 由 AccountCenterFrame 渲染在右侧内容列顶部；loading/error/guest 分支仍走 shell 级面包屑。
-  const currentTrail = (active === "accounts" && accountId) ? "账号详情"
+  const currentTrail = ((active === "accounts" || active === "rented") && accountId) ? "账号详情"
     : ((active === "rentals" || active === "leased") && orderId) ? "订单详情"
     : accountViewTitle(active);
   const accountTrail = [{ label: "首页", href: "/" }, { label: "个人中心", href: "/account" }, { label: currentTrail }];
@@ -144,16 +211,16 @@ export function AccountWorkspace({ view, accountId, orderId, status, source, pag
     const timer = window.setTimeout(() => session.revalidate(), 700);
     return () => window.clearTimeout(timer);
   }, [session.status, session.revalidate]);
-  if (session.status === "loading") return <ServiceShell {...accountShell} title={title}><section className="account-guest" aria-busy="true"><h2>正在准备个人中心…</h2><p>请稍候。</p></section></ServiceShell>;
+  if (session.status === "loading") return <ServiceShell {...accountShell} title={title}><SessionLoading label="正在加载个人中心…" /></ServiceShell>;
   if (session.status === "error") return <StatusPage kind="unavailable" onRetry={session.revalidate} />;
-  if (session.status === "guest") return <ServiceShell {...accountShell} title={title}><section className="account-guest" aria-busy="true"><LockKeyhole size={30} /><h2>正在打开登录窗口</h2></section></ServiceShell>;
+  if (session.status === "guest") return <ServiceShell {...accountShell} title={title}><RecoveryAlert className="session-recovery" tone="info" title="登录后查看个人中心" problem="登录后继续查看账号、订单和个人资料。" action={<Link className="button primary" href={`/login?next=${encodeURIComponent(typeof window === "undefined" ? "/account" : window.location.pathname + window.location.search)}`}>登录并继续</Link>} /></ServiceShell>;
   const identityScope = `${session.userId}:${session.identityVersion}`;
   // The two detail views render the account or order name as the page's own h1; the shell must not add
   // a second, unrelated one above it.
-  const detailOpen = (active === "accounts" && Boolean(accountId)) || ((active === "rentals" || active === "leased") && Boolean(orderId));
+  const detailOpen = ((active === "accounts" || active === "rented") && Boolean(accountId)) || ((active === "rentals" || active === "leased") && Boolean(orderId));
   return <ServiceShell {...accountShell} breadcrumbs={[]} title={title} headingInContent={detailOpen}>
     <AccountCenterFrame active={active} accountId={accountId} orderId={orderId} status={status} scope={identityScope} breadcrumbs={accountTrail}>
-      {!isKnownAccountView(view) ? <AccountUnsupported view={view} /> : active === "overview" ? <AccountOverview scope={identityScope} userId={session.userId ?? undefined} nicknameDraft={nicknameDraft} pendingWrite={pendingSecurityWrite} /> : active === "membership" ? <AccountMembershipCenter scope={identityScope} /> : active === "credit" ? <CreditCenter scope={identityScope} /> : active === "wallet" ? <PersonalWallet scope={identityScope} /> : active === "invite" ? <PersonalInvitations scope={identityScope} /> : active === "accounts" ? <MyAccountsPanel accountId={accountId} /> : active === "security" ? <AccountSecurityPanel pendingWrite={pendingSecurityWrite} /> : active === "identity" ? <AccountIdentityPanel /> : active === "favorites" ? <FavoritesProvider><FavoritesPanel /></FavoritesProvider> : active === "rentals" || active === "leased" ? <OrderWorkspace party={active === "rentals" ? "renter" : "owner"} orderId={orderId} status={status} accountId={accountId} source={source} /> : null}
+      {!isKnownAccountView(view) ? <AccountUnsupported view={view} /> : active === "overview" ? <AccountOverview scope={identityScope} userId={session.userId ?? undefined} nicknameDraft={nicknameDraft} pendingWrite={pendingSecurityWrite} /> : active === "membership" ? <AccountMembershipCenter scope={identityScope} /> : active === "credit" ? <CreditCenter scope={identityScope} /> : active === "wallet" ? <PersonalWallet scope={identityScope} /> : active === "invite" ? <PersonalInvitations scope={identityScope} /> : active === "accounts" ? <MyAccountsPanel key="listed" mode="listed" accountId={accountId} /> : active === "rented" ? <MyAccountsPanel key="rented" mode="rented" accountId={accountId} /> : active === "security" ? <AccountSecurityPanel pendingWrite={pendingSecurityWrite} /> : active === "identity" ? <AccountIdentityPanel /> : active === "favorites" ? <FavoritesProvider><FavoritesPanel /></FavoritesProvider> : active === "rentals" || active === "leased" ? <OrderWorkspace party={active === "rentals" ? "renter" : "owner"} orderId={orderId} status={status} accountId={accountId} source={source} /> : null}
     </AccountCenterFrame>
   </ServiceShell>;
 }
@@ -301,8 +368,8 @@ function AccountIdentityPanel() {
           <div className="sec-row-side" />
         </div>
 
-        {/* shortcut: 已核验姓名/证件号两行依赖 /identity/status 返回 realNameMasked/idCardMasked；当前 API 未提供时该两行不渲染，API 补齐后自动生效。 */}
-        {identity?.realNameMasked ? (
+        {(() => { const display = identity?.identityDisplay; return <>
+          {display?.realNameMasked ? (
           <div className="sec-row">
             <div className="sec-row-icon-cell">
               <UserRound className="sec-row-icon" size={20} strokeWidth={1.5} aria-hidden="true" />
@@ -312,14 +379,14 @@ function AccountIdentityPanel() {
               <span className="sec-row-desc">已核验的实名信息。</span>
             </div>
             <div className="sec-row-state-col">
-              <strong className="sec-row-value">{identity.realNameMasked}</strong>
+              <strong className="sec-row-value">{display.realNameMasked}</strong>
               <span className="sec-badge sec-badge--success">已核验</span>
             </div>
             <div className="sec-row-side" />
           </div>
         ) : null}
 
-        {identity?.idCardMasked ? (
+        {display?.idCardMasked ? (
           <div className="sec-row">
             <div className="sec-row-icon-cell">
               <CreditCard className="sec-row-icon" size={20} strokeWidth={1.5} aria-hidden="true" />
@@ -329,15 +396,19 @@ function AccountIdentityPanel() {
               <span className="sec-row-desc">二代居民身份证。</span>
             </div>
             <div className="sec-row-state-col">
-              <strong className="sec-row-value">{identity.idCardMasked}</strong>
+              <strong className="sec-row-value">{display.idCardMasked}</strong>
               <span className="sec-badge sec-badge--success">已核验</span>
             </div>
             <div className="sec-row-side" />
           </div>
         ) : null}
+        </>; })()}
       </div>
       <div className="sec-identity-notes">
         <p className="account-module-note">本页展示已有状态，暂不提供证件提交或认证资料修改。</p>
+        {isVerified && !identity?.identityDisplay && identity?.identityDisplayReason === "NOT_RECORDED" ? <p className="account-module-note">实名已验证；证件信息暂未记录。</p> : null}
+        {isVerified && !identity?.identityDisplay && identity?.identityDisplayReason === "STORE_UNAVAILABLE" ? <p className="account-module-note">实名已验证；证件信息暂不可用。</p> : null}
+        {isVerified && !identity?.identityDisplay && !identity?.identityDisplayReason ? <p className="account-module-note">实名已验证；证件信息暂未记录。</p> : null}
         {identity?.provider === "fake" ? <p className="account-module-note">当前为本地测试结果，不代表真实身份核验。</p> : null}
       </div>
     </section>}
@@ -450,7 +521,7 @@ function AccountSecurityPanel({ pendingWrite }: { pendingWrite?: SecurityPending
   </section>;
 }
 
-function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
+function MyAccountsPanel({ mode, accountId: accountIdProp }: { mode: "listed" | "rented"; accountId?: string }) {
   const router = useRouter();
   const sharedSession = useUserSessionStore();
   const [rows, setRows] = useState<AccountRow[]>([]);
@@ -460,8 +531,10 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [nextPageCursor, setNextPageCursor] = useState<string | null>(null);
   const [lastPageSize, setLastPageSize] = useState<number | null>(null);
-  const [filter, setFilter] = useState("ALL");
+  const defaultState: RentalState = mode === "rented" ? "RENTED" : "LISTED";
+  const [stateFilter, setStateFilter] = useState<RentalState>(defaultState);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState<SupplyRequestError | null>(null);
   const [errorScope, setErrorScope] = useState<AccountErrorScope>("list");
@@ -481,6 +554,7 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
   const routeAccountRef = useRef(accountIdProp);
   const listRequestRef = useRef(0);
   const nextCursorRef = useRef<string | null>(null);
+  const nextPageCursorRef = useRef<string | null>(null);
   // F2：列表与详情生命周期分离。列表首页是否已读、详情往返的来源位置都独立于详情状态。
   const listReadyRef = useRef(false);
   const listPositionRef = useRef<{ accountId: string; scrollY: number } | null>(null);
@@ -529,8 +603,10 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
     setLatest(null);
     setNextCursor(null);
     nextCursorRef.current = null;
+    setNextPageCursor(null);
+    nextPageCursorRef.current = null;
     setLastPageSize(null);
-    setFilter("ALL");
+    setStateFilter(defaultState);
     setLoading(false);
     setLoadingMore(false);
     setBusy("");
@@ -538,7 +614,7 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
     setErrorScope("list");
     setNotice(message);
     setAuthRequired(requireAuth);
-  }, []);
+  }, [defaultState]);
   const syncIdentity = useCallback(async (): Promise<boolean> => {
     const snapshot = sharedSession.getSnapshot();
     if (snapshot.status === "loading" || snapshot.status === "error") {
@@ -552,7 +628,7 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
     identity.current = next;
     if (previous !== undefined && previous !== next) {
       invalidateContext("登录身份已变化，旧账号资料已清除。", !next);
-      if (accountIdProp) router.replace("/account?view=accounts");
+      if (accountIdProp) router.replace(mode === "rented" ? "/account?view=rented" : "/account?view=accounts");
     }
     identityPauseGate.current.markConfirmed();
     if (next) restoreStoredIntent(next);
@@ -582,11 +658,13 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
     setRows([]);
     setNextCursor(null);
     nextCursorRef.current = null;
+    setNextPageCursor(null);
+    nextPageCursorRef.current = null;
     listReadyRef.current = false;
     setLastPageSize(null);
-    setFilter("ALL");
-  }, []);
-  const load = useCallback(async (requestedId?: string, append = false, cursor?: string) => {
+    setStateFilter(defaultState);
+  }, [defaultState]);
+  const load = useCallback(async (requestedId?: string, append = false, page?: { cursor?: string; after?: string }, stateOverride?: RentalState) => {
     if (identityStatusRef.current !== "confirmed") return;
     if (!identity.current) {
       setAuthRequired(true);
@@ -601,8 +679,9 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
     }
     const requestEpoch = epoch.current;
     const requestId = ++listRequestRef.current;
-    const requestCursor = append ? cursor ?? nextCursorRef.current ?? undefined : undefined;
-    const request = { id: requestId, key: JSON.stringify({ accountId: id ?? "", append, cursor: requestCursor ?? "" }) };
+    const requestState = stateOverride ?? stateFilter;
+    const pageToken = append ? (page?.cursor ? { cursor: page.cursor } : page?.after ? { after: page.after } : nextPageCursorRef.current ? { cursor: nextPageCursorRef.current } : nextCursorRef.current ? { after: nextCursorRef.current } : undefined) : undefined;
+    const request = { id: requestId, key: JSON.stringify({ accountId: id ?? "", append, state: requestState, cursor: pageToken?.cursor ?? pageToken?.after ?? "" }) };
     const isCurrent = () => isCurrentQuery(request, listRequestRef.current, request.key);
     const context = captureContext(id);
     const controller = beginRequest();
@@ -617,10 +696,9 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
       if (!(await waitForIdentity(context))) return;
       if (needListPage) {
         phase = "list";
-        const params = new URLSearchParams({ limit: String(LIST_PAGE_SIZE) });
-        // `/me/accounts` pages by `after` (the previous page's last id); a wrong name silently
-        // repeats the first page. The shared client keeps the same normalization for other callers.
-        if (requestCursor) params.set("after", requestCursor);
+        const params = new URLSearchParams({ limit: String(LIST_PAGE_SIZE), rentalState: requestState });
+        if (pageToken?.cursor) params.set("cursor", pageToken.cursor);
+        else if (pageToken?.after) params.set("after", pageToken.after);
         const page = await supplyApi.myAccounts(params, controller.signal);
         if (!currentContext({ ...context, epoch: requestEpoch }, controller.signal) || !isCurrent()) return;
         lastRetry.current = null;
@@ -630,6 +708,8 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
         });
         setNextCursor(page.nextCursor);
         nextCursorRef.current = page.nextCursor;
+        setNextPageCursor(page.nextPageCursor ?? null);
+        nextPageCursorRef.current = page.nextPageCursor ?? null;
         // 短页是「已加载全部」的唯一依据：服务端本页未给满条数即无下一页。
         setLastPageSize(page.items.length);
         listReadyRef.current = true;
@@ -646,12 +726,18 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
     } catch (failure) {
       if (!currentContext({ ...context, epoch: requestEpoch }, controller.signal) || !isCurrent()) return;
       const nextError = failure instanceof SupplyRequestError ? failure : new SupplyRequestError(0, null);
+      if (append && nextError.status === 409) {
+        listReadyRef.current = false;
+        lastRetry.current = null;
+        void load(id, false, undefined, requestState);
+        return;
+      }
       setError(nextError);
       setErrorScope(phase);
       // 身份失效撤全部旧私有事实；403/404：详情读取只撤详情，列表读取才撤列表（F2 往返不清列表）。
       if (nextError.status === 401) { setAuthRequired(true); revokeList(); revokeDetail(); }
       else if (nextError.status === 403 || nextError.status === 404) { if (phase === "detail") revokeDetail(); else revokeList(); }
-      if (nextError.status === 0) lastRetry.current = { context, busy: append ? "accounts-more" : "accounts", run: () => load(id, append, requestCursor) };
+      if (nextError.status === 0) lastRetry.current = { context, busy: append ? "accounts-more" : "accounts", run: () => load(id, append, page, requestState) };
     } finally {
       if (currentContext({ ...context, epoch: requestEpoch }, controller.signal) && isCurrent()) {
         if (append) setLoadingMore(false);
@@ -659,7 +745,7 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
       }
       finishRequest(controller);
     }
-  }, [currentContext, waitForIdentity, revokeList, revokeDetail, updateListFromDetail]);
+  }, [currentContext, waitForIdentity, revokeList, revokeDetail, updateListFromDetail, stateFilter]);
   useEffect(() => {
     mounted.current = true;
     // F2：列表 ↔ 详情生命周期分离。详情路由（?accountId= 增删，含点击与前进/后退）只切换详情作用域：
@@ -858,13 +944,33 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
 
   // DTO 缺 account 子对象或路由已切走时，一律不成立：宁可「账号资料暂不可用」，也不显示上一次缓存的私有详情。
   const visibleDetail = detail && detail.account && (!accountIdProp || detail.account.id === accountIdProp) ? detail : null;
-  const heading = <header className="account-module-heading"><div><h2>出租账号管理</h2><p>管理账号资料、审核进度与接单状态。租客交易记录在出租订单中查看。</p></div>{rows.length > 0 && !accountIdProp ? <Link href="/publish" className="button primary">发布新账号</Link> : null}</header>;
+  const pageTitle = mode === "rented" ? "出租账号" : "上架账号";
+  const pageDescription = mode === "rented"
+    ? "查看当前正在出租的账号与租约；上架管理在「上架账号」。"
+    : "管理已上架账号的资料、审核与接单状态；出租中的账号在「出租账号」。";
+  const pageHref = mode === "rented" ? "/account?view=rented" : "/account?view=accounts";
+  const heading = <header className="account-module-heading"><div><h2>{pageTitle}</h2><p>{pageDescription}</p></div><div className="mra-heading-actions"><button type="button" className="button quiet" disabled={loading || busy !== ""} onClick={() => { listReadyRef.current = false; void load(accountIdProp); }}><RefreshCw size={15} aria-hidden="true" />{loading ? "刷新中…" : "刷新"}</button>{mode === "listed" && rows.length > 0 && !accountIdProp ? <Link href="/publish" className="button primary">发布新账号</Link> : null}</div></header>;
   if (identityState === "checking") return <section className="account-module">{heading}<div className="account-module-card account-empty-state" aria-busy="true" role="status"><LockKeyhole size={28} aria-hidden="true" /><h3>正在确认登录身份</h3><p>请稍候，确认后读取出租账号。</p></div></section>;
   if (identityState === "failed") return <section className="account-module">{heading}<div className="account-module-card account-empty-state" role="alert"><LockKeyhole size={28} aria-hidden="true" /><h3>登录身份暂时无法确认</h3><p>重新确认后可以继续查看账号资料。</p><button type="button" className="button secondary" onClick={() => void syncIdentity().then((confirmed) => { if (confirmed && mounted.current) void load(accountIdProp); })}>重试</button></div></section>;
-  // 已加载记录筛选：只过滤本地行，不发请求、不动游标（R1 落地后同一接缝改服务端筛选）。
-  const visibleRows = filter === "ALL" ? rows : rows.filter((row) => row.review_state === filter);
-  // 短页（< limit 且无游标）才敢说「已加载全部」；无 total 合同，绝不写「共 N 个」。
-  const allLoaded = nextCursor === null && lastPageSize !== null && lastPageSize < LIST_PAGE_SIZE;
+  const visibleRows = rows;
+  const hasMore = Boolean(nextPageCursor ?? nextCursor);
+  // 短页且两种游标都为空才敢说「已加载全部」；无 total 合同，绝不写「共 N 个」。
+  const allLoaded = !hasMore && lastPageSize !== null && lastPageSize < LIST_PAGE_SIZE;
+  const defaultStateLabel = mode === "rented" ? "出租中" : "待租";
+  const changeStateFilter = (next: RentalState) => {
+    if (next === stateFilter) return;
+    listReadyRef.current = false;
+    lastRetry.current = null;
+    setStateFilter(next);
+    setRows([]);
+    setNextCursor(null);
+    nextCursorRef.current = null;
+    setNextPageCursor(null);
+    nextPageCursorRef.current = null;
+    setLastPageSize(null);
+    setError(null);
+    void load(accountIdProp, false, undefined, next);
+  };
   return <section className="my-accounts-panel account-module">
     {accountIdProp ? null : heading}
     <AccountActionError error={error} scope={errorScope} onRetry={error?.status === 0 && !storedIntent ? () => void retryLast() : undefined} />
@@ -873,55 +979,64 @@ function MyAccountsPanel({ accountId: accountIdProp }: { accountId?: string }) {
       ? <button type="button" className="button secondary button--sm" disabled={Boolean(busy)} onClick={() => void recoverAction()}>{busy === "recover" ? "查询中…" : "查询原操作结果"}</button>
       : <Link className="button secondary button--sm" href="/publish">前往上架页面恢复</Link>}</div> : null}
     {notice ? <div className="supply-notice" role="status"><Check size={17} />{notice}</div> : null}
-    {authRequired ? <div className="supply-auth-block"><LockKeyhole size={18} /><span>登录后才能查看你的出租账号。</span><Link className="button secondary" href={`/login?next=${encodeURIComponent("/account?view=accounts")}`}>登录 / 注册</Link></div> : accountIdProp ? <>
-      <Link className="account-detail-back" href="/account?view=accounts" scroll={false}><ArrowLeft size={16} aria-hidden="true" />返回出租账号</Link>
+    {authRequired ? <div className="supply-auth-block"><LockKeyhole size={18} /><span>登录后才能查看你的{pageTitle}。</span><Link className="button secondary" href={`/login?next=${encodeURIComponent(pageHref)}`}>登录 / 注册</Link></div> : accountIdProp ? <>
+      <Link className="account-detail-back" href={pageHref} scroll={false}><ArrowLeft size={16} aria-hidden="true" />返回{pageTitle}</Link>
       {visibleDetail ? <AccountDetail detail={visibleDetail} gameName={rows.find((row) => row.id === visibleDetail.account.id)?.game_name ?? null} latest={latest} busy={busy} identityReady={identityState === "confirmed" && Boolean(identity.current) && !storedIntent && !intentStorageIssue} onAction={runAction} onRefresh={() => void reloadDetail(false)} onAdopt={() => void reloadDetail(true)} /> : <div className="account-module-card account-empty-state" aria-busy={loading ? true : undefined} role="status"><House size={28} aria-hidden="true" /><h3>{loading ? "正在读取账号资料" : "账号资料暂不可用"}</h3><p>{loading ? "请稍候。" : "请返回账号列表，或重试读取当前账号。"}</p></div>}
-    </> : rows.length === 0 ? (!loading && !error
-      ? <div className="account-module-card account-empty-art-state" role="status">
-        <img className="account-empty-art" src="/art/empty/account-prepare-r1.webp" alt="" width={240} height={180} loading="lazy" onError={(event) => { event.currentTarget.style.display = "none"; }} />
-        <h3>还没有发布出租账号</h3>
-        <p>填写账号资料即可发布，发布与上架进度都会显示在这里。</p>
-        <div className="account-empty-actions"><Link href="/publish" className="button primary">发布出租账号</Link></div>
-      </div>
-      : <div className="account-module-card account-empty-state" aria-busy={loading ? true : undefined} role={loading ? "status" : "alert"}>
-        <House size={30} aria-hidden="true" />
-        <h3>{loading ? "正在读取出租账号" : "出租账号暂时无法读取"}</h3>
-        <p>{loading ? "请稍候。" : "请查看上方提示并重试。"}</p>
-      </div>) : <div className="supply-account-list account-module-card" aria-busy={loading || loadingMore}>
-      {/* 工具条：已加载计数 + 已加载记录筛选 chips + 作用域小字（无 total 合同，不显示全站总数）。 */}
+    </> : <>
       <div className="mra-toolbar">
         <span className="mra-count">已加载 {rows.length} 个</span>
-        <div className="mra-chips" role="group" aria-label="按资料状态筛选已加载记录">
-          {ACCOUNT_FILTERS.map((chip) => <button key={chip.value} type="button" className="mra-chip" aria-pressed={filter === chip.value} onClick={() => setFilter(chip.value)}>{chip.label}</button>)}
+        {mode === "listed" ? <div className="mra-filter-rail" role="group" aria-label="按上架状态筛选账号">
+          {LISTED_STATE_FILTERS.map((chip) => <button key={chip.value} type="button" className="mra-chip" aria-pressed={stateFilter === chip.value} onClick={() => changeStateFilter(chip.value)}>{chip.label}</button>)}
+        </div> : null}
+        <span className="mra-scope-hint">{mode === "rented" ? "当前显示：出租中" : "状态由服务端筛选"}</span>
+      </div>
+      {loading && rows.length === 0 ? <div className="account-module-card account-empty-state" aria-busy="true" role="status"><House size={28} aria-hidden="true" /><h3>正在读取{pageTitle}</h3><p>请稍候。</p></div> : error && rows.length === 0 ? <div className="account-module-card account-empty-state" role="alert"><House size={28} aria-hidden="true" /><h3>{pageTitle}暂时无法读取</h3><p>{error.message || "请稍后重试。"}</p><button type="button" className="button secondary" onClick={() => void load(accountIdProp, false, undefined, stateFilter)}>重试读取</button></div> : rows.length === 0 ? (!loading && !error
+        ? <div className="account-module-card account-empty-art-state" role="status">
+          <img className="account-empty-art" src="/art/empty/account-prepare-r1.webp" alt="" width={240} height={180} loading="lazy" onError={(event) => { event.currentTarget.style.display = "none"; }} />
+          <h3>{mode === "rented" ? "还没有正在出租的账号" : stateFilter === "LISTED" ? "还没有待租账号" : `当前没有${RENTAL_STATE_LABELS[stateFilter]}账号`}</h3>
+          <p>{mode === "rented" ? "订单支付后会出现在这里；可以先去上架账号管理和查看已发布账号。" : stateFilter === "LISTED" ? "填写账号资料并上架后，可在这里查看待租状态。" : "可以切换到其他上架状态，查看已加载的账号。"}</p>
+          <div className="account-empty-actions">{mode === "rented" ? <Link href="/account?view=accounts" className="button primary">查看上架账号</Link> : stateFilter === "LISTED" ? <Link href="/publish" className="button primary">发布出租账号</Link> : <button type="button" className="button primary" onClick={() => changeStateFilter("LISTED")}>查看待租账号</button>}</div>
         </div>
-        <span className="mra-scope-hint">仅筛选已加载的 {rows.length} 个账号</span>
-      </div>
-      {/* 行 DOM：div 行容器 ＋ 唯一主导航标题链（标题＋副行整体）＋（仅 REJECTED）独立锚链，互不嵌套。 */}
-      <div className="mra-rows" role="list" aria-label="出租账号列表">
-        {visibleRows.map((row) => <div className="mra-row" role="listitem" key={row.id} data-account-row={row.id}>
-          <Link className="mra-row-main" id={`account-row-title-${row.id}`} href={`/account?view=accounts&accountId=${encodeURIComponent(row.id)}`} scroll={false}>
-            <strong className="mra-row-title">{row.title ?? "未命名草稿"}</strong>
-            <span className="mra-row-sub">{row.display_no ? `账号 ${row.display_no}` : "编号待分配"}{row.historicalRead ? ` · ${row.historicalRead.display?.state === "KNOWN" ? "历史资料已读取" : "扩展资料尚待接入"}` : ""}</span>
-            <span className="mra-row-sub">{row.game_name} · {row.sequence ? `版本 ${row.sequence}` : "尚无版本"}</span>
-          </Link>
-          <div className="mra-row-state">
-            <span className="mra-badge" data-tone={row.review_state ? REVIEW_BADGE_TONE[row.review_state] ?? "unknown" : undefined}>{row.review_state ? stateLabel(row.review_state) : "未创建草稿"}</span>
-            {row.review_state === "REJECTED" ? <Link className="mra-row-anchor" href={`/account?view=accounts&accountId=${encodeURIComponent(row.id)}#blockers`} scroll={false}>查看退回原因</Link> : null}
+        : <div className="account-module-card account-empty-state" aria-busy="true" role="status"><House size={30} aria-hidden="true" /><h3>正在读取{pageTitle}</h3><p>请稍候。</p></div>) : <>
+        <div className="supply-account-list account-module-card" aria-busy={loading || loadingMore}>
+          <div className="mra-rows" role="list" aria-label={`${pageTitle}列表`}>
+            {visibleRows.map((row) => {
+              const historical = historicalAccountSummary(row);
+              const factsTitle = accountTitleFromFacts(row);
+              const displayNo = row.accountDisplay?.displayNo ?? row.display_no ?? null;
+              const title = factsTitle ?? historical?.title ?? (displayNo ? `账号 ${displayNo}` : pageTitle);
+              const activeText = accountActiveOrderText(row);
+              const state = row.rentalState;
+              return <div className="mra-row" role="listitem" key={row.id} data-account-row={row.id}>
+                <Link className="mra-row-main" id={`account-row-title-${row.id}`} href={`/account?view=${mode}&accountId=${encodeURIComponent(row.id)}`} scroll={false}>
+                  <strong className="mra-row-title">{title}</strong>
+                  {historical?.sub ? <span className="mra-row-sub">{historical.sub}</span> : null}
+                  {activeText ? <span className="mra-row-sub mra-row-order">{activeText}</span> : null}
+                  {row.accountDisplay?.titleFacts && mode === "listed" ? <span className="mra-row-sub">{[
+                    row.accountDisplay.titleFacts.rentalMode ? ACCOUNT_MODE_LABELS[row.accountDisplay.titleFacts.rentalMode] ?? "出租模式待确认" : null,
+                    row.accountDisplay.titleFacts.ownerQuoteTotal ? `发布报价 ${moneyText(row.accountDisplay.titleFacts.ownerQuoteTotal)}` : "发布报价待确认",
+                  ].filter(Boolean).join(" · ")}</span> : null}
+                  <span className="mra-row-sub">{row.game_name} · {row.sequence ? `版本 ${row.sequence}` : "尚无版本"}</span>
+                </Link>
+                <div className="mra-row-state">
+                  {state ? <span className="mra-badge" data-tone={RENTAL_STATE_TONE[state]}>{RENTAL_STATE_LABELS[state]}</span> : <span className="mra-badge" data-tone={row.review_state ? REVIEW_BADGE_TONE[row.review_state] ?? "unknown" : undefined}>{row.review_state ? stateLabel(row.review_state) : "未创建草稿"}</span>}
+                  {!state && row.owner_paused ? <span className="mra-badge" data-tone="warning">已暂停接单</span> : null}
+                  {!state && row.staff_restricted ? <span className="mra-badge" data-tone="warning">客服限制</span> : null}
+                  {state === "LISTED" && row.available === false ? <span className="mra-badge" data-tone="warning">暂不可接单</span> : null}
+                  {row.accountDisplay?.titleFacts === null && row.accountDisplay?.unknownReason ? <span className="mra-badge" data-tone="unknown">资料待核实</span> : null}
+                  {row.review_state === "REJECTED" ? <Link className="mra-row-anchor" href={`/account?view=${mode}&accountId=${encodeURIComponent(row.id)}#blockers`} scroll={false}>查看退回原因</Link> : null}
+                </div>
+                <span className="mra-row-action" aria-hidden="true">查看账号<ChevronRight size={15} /></span>
+              </div>;
+            })}
           </div>
-          {/* 接单提示只显示服务端给出的确定异常；正常行留空，不声称可接单。 */}
-          <div className="mra-row-avail">
-            {row.owner_paused ? <span className="mra-badge" data-tone="warning">已暂停接单</span> : null}
-            {row.staff_restricted ? <span className="mra-badge" data-tone="warning">客服限制</span> : null}
+          <div className="mra-list-foot">
+            {hasMore ? <button type="button" className="button secondary" disabled={loadingMore || identityState !== "confirmed"} onClick={() => void load(undefined, true, nextPageCursor ? { cursor: nextPageCursor } : nextCursor ? { after: nextCursor } : undefined, stateFilter)}>{loadingMore ? "正在读取更多…" : "加载更多账号"}</button> : null}
+            {allLoaded ? <span className="mra-meta">已加载全部 {rows.length} 个</span> : null}
           </div>
-          <span className="mra-row-hint" aria-hidden="true">查看详情 ›</span>
-        </div>)}
-      </div>
-      {visibleRows.length === 0 ? <div className="mra-empty" role="status"><p>当前筛选没有匹配的已加载账号</p><button type="button" className="button quiet" onClick={() => setFilter("ALL")}>清除筛选</button></div> : null}
-      <div className="mra-list-foot">
-        {nextCursor ? <button type="button" className="button secondary" disabled={loadingMore || identityState !== "confirmed"} onClick={() => void load(undefined, true, nextCursor)}>{loadingMore ? "正在读取更多…" : "加载更多账号"}</button> : null}
-        {allLoaded ? <span className="mra-meta">已加载全部 {rows.length} 个</span> : null}
-      </div>
-    </div>}
+        </div>
+      </>}
+    </>}
   </section>;
 }
 
@@ -965,10 +1080,12 @@ function conditionRows(version: MySupply["version"]): Array<{ key: string; label
     if (key === "safe_box_code") rows.push({ key, label, value: codeValue(display?.safeBox, label) });
     else if (key === "grading_code") rows.push({ key, label, value: codeValue(display?.grading, label) });
     else if (key === "login_method_code") rows.push({ key, label, value: codeValue(display?.loginMethod, label) });
+    else if (key === "next_season_pass" || key === "demulan_unlocked") rows.push({ key, label, value: booleanDeclarationText(key, raw) });
     else if (CONDITION_LEVELS.has(key)) rows.push({ key, label, value: `${raw} 级` });
     else rows.push({ key, label, value: String(raw) });
   }
   if (display?.serviceWindow) rows.push({ key: "service_window", label: "上号时间", value: display.serviceWindow.displayName });
+  if (typeof attributes.info_source === "string" && attributes.info_source.trim()) rows.push({ key: "info_source", label: "信息来源", value: attributes.info_source });
   return rows;
 }
 
@@ -1053,6 +1170,18 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
   const availability = availabilityView(detail);
   const conditions = conditionRows(version);
   const resources = resourceRows(version);
+  const titleResources: ResourceLine[] = version
+    ? (version.quote?.lines ?? []).map((line, index) => {
+        const known = version.catalogItems?.find((entry) => entry.id === line.itemId) ?? version.presentation?.items?.find((entry) => entry.id === line.itemId);
+        const quantity = line.quantity ?? line.unitQuantity ?? "";
+        return { itemId: line.itemId || `account_line_${index}`, code: known?.code ?? null, name: known?.name ?? "资源", quantity, quantityLabel: quantity, unitLabel: unitLabel(line.unit ?? known?.unit ?? ""), costAmount: null, costLabel: null, unitPriceLabel: null };
+      })
+    : (historicalDisplay?.resources ?? []).map((resource, index) => ({
+        itemId: resource.code || `historical_line_${index}`, code: resource.code, name: resource.name || "资源", quantity: resource.quantity ?? "", quantityLabel: resource.quantity ?? "", unitLabel: unitLabel(resource.unit), costAmount: null, costLabel: null, unitPriceLabel: null,
+      }));
+  const titleConditions = version ? conditions : historicalConditions;
+  const accountTitle = deriveAccountTitle({ resourceLines: titleResources, conditionLines: titleConditions });
+  const displayTitle = accountTitle.primary && accountTitle.primary !== "游戏账号" ? accountTitle.primary : account.display_no ? `账号 ${account.display_no}` : "出租账号";
   const displayMedia = (declaration?.mediaBindings ?? []).filter((item) => item.purpose === "ACCOUNT_DISPLAY" && item.publicDisplayEligible !== false);
   const evidenceMedia = (declaration?.mediaBindings ?? []).filter((item) => item.purpose === "ACCOUNT_EVIDENCE");
   const penaltyMedia = displayMedia.filter((item) => item.category === "PENALTY");
@@ -1079,7 +1208,7 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
     <div className="supply-detail-hero">
       {cover ? <img className="supply-detail-cover" src={mediaAccessUrl(cover.assetId)} alt="" width={176} height={99} onError={(event) => { event.currentTarget.style.display = "none"; }} /> : null}
       <div className="supply-detail-hero-copy">
-        <h1 className="supply-detail-title">{declaration?.title || "未命名出租账号"}</h1>
+        <h1 className="supply-detail-title">{displayTitle}</h1>
         <p className="supply-detail-meta">
           {account.display_no ? <span className="supply-detail-no">账号 {account.display_no}<button type="button" className="account-copy" onClick={() => void navigator.clipboard.writeText(account.display_no ?? "")} aria-label="复制账号编号"><Copy size={13} aria-hidden="true" />复制</button></span> : <span className="supply-detail-no">编号待分配</span>}
           {gameName ? <span>{gameName}</span> : null}
@@ -1105,15 +1234,15 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
       </div>
     </div>
 
-    {historical ? <section className="supply-block account-module-card"><h2>账号资料记录</h2><p>这些记录不代表当前可接新单。</p><dl className="order-facts"><div><dt>账号编号</dt><dd>{account.display_no ?? "编号待分配"}</dd></div><div><dt>租期记录</dt><dd>{historical.historicalQuote.termDays} 天</dd></div><div><dt>哈夫币租金记录</dt><dd>{historical.historicalQuote.haffRentYuan} 元</dd></div><div><dt>物资金额记录</dt><dd>{historical.historicalQuote.goodsYuan} 元</dd></div><div><dt>押金记录</dt><dd>{historical.historicalQuote.depositYuan} 元</dd></div></dl><Link href={`/account?view=leased&source=legacy&accountId=${encodeURIComponent(account.id)}`}>查看该账号的出租订单</Link></section> : null}
-    {historical ? <section className="supply-block"><h2>属性与资源记录</h2>
+    {historical ? <section className="supply-block account-module-card"><h2>账号资料</h2><p>当前状态以下方资格与限制为准。</p><dl className="order-facts"><div><dt>账号编号</dt><dd>{account.display_no ?? "编号待分配"}</dd></div><div><dt>租期记录</dt><dd>{historical.historicalQuote.termDays} 天</dd></div><div><dt>哈夫币租金记录</dt><dd>{historical.historicalQuote.haffRentYuan} 元</dd></div><div><dt>物资金额记录</dt><dd>{historical.historicalQuote.goodsYuan} 元</dd></div><div><dt>押金记录</dt><dd>{historical.historicalQuote.depositYuan} 元</dd></div></dl><Link href={`/account?view=leased&source=legacy&accountId=${encodeURIComponent(account.id)}`}>查看该账号的出租订单</Link></section> : null}
+    {historical ? <section className="supply-block"><h2>属性与资源</h2>
       {historicalDisplay ? <>
         <p>资料更新于 {displayTime(historicalDisplay.sourceUpdatedAt) ?? "时间待核"} · 租赁模式：{({ ordinary: "普通", custom: "定制", fast: "极速" } as Record<string, string>)[historicalDisplay.rentalMode ?? ""] ?? "待核"}</p>
         <dl className="order-facts">{historicalConditions.map(item => <div key={item.key}><dt>{item.label}</dt><dd>{item.value}</dd></div>)}</dl>
         {Object.values(historicalDisplay.attributes).some(value => value === null) ? <p role="status">部分属性未提供或尚待核实。</p> : null}
         <ul>{historicalDisplay.resources.map(item => <li key={item.code}>{item.name}：{historicalQuantityText(item.quantity, item.unit)}</li>)}</ul>
-        <p>以上为历史显示记录，不替代当前资料申报、报价或可租资格。</p>
-      </> : <p role={historical.display?.state === "KNOWN" ? "alert" : "status"}>{historical.display?.state === "KNOWN" ? "历史扩展资料返回不完整，请重试读取。" : "历史扩展资料尚未接入，不能据此认定资源数量为零。"}</p>}
+        <p>以上为账号资料记录，不替代当前资料申报、报价或可租资格。</p>
+      </> : <p role={historical.display?.state === "KNOWN" ? "alert" : "status"}>{historical.display?.state === "KNOWN" ? "扩展资料返回不完整，请重试读取。" : "扩展资料尚未接入，不能据此认定资源数量为零。"}</p>}
     </section> : null}
     {/* 冲突/阻塞/退回：有则显示，无则不占位；#blockers 是列表「查看退回原因」的唯一锚点。 */}
     {latest || blockers.length || reasons.length ? <div className="supply-blockers-group" id="blockers" tabIndex={-1} ref={blockersRef}>

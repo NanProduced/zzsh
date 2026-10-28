@@ -24,6 +24,7 @@ test('real skin preview restores its clicked trigger after Escape and close, alo
   for (const name of ['HTMLInputElement', 'HTMLTextAreaElement', 'HTMLButtonElement', 'KeyboardEvent', 'PointerEvent', 'FocusEvent']) globalThis[name] = window[name];
   let requests = 0;
   globalThis.fetch = window.fetch = async () => { requests++; throw new Error('NETWORK_REFUSED_OFFLINE_TEST'); };
+  const heroToast = await import('@heroui/react/toast');
 
   const empty = () => null, cache = new Map();
   function load(file) {
@@ -31,6 +32,7 @@ test('real skin preview restores its clicked trigger after Escape and close, alo
     const absolute = path.join(tree, file), m = new Module(absolute);
     m.filename = absolute; m.paths = Module._nodeModulePaths(tree);
     m.require = (name) => {
+      if (name === '@heroui/react/toast') return heroToast;
       if (name.endsWith('.css')) return {};
       if (name === 'next/link') return ({ children, ...props }) => React.createElement('a', props, children);
       if (name === 'next/image') return { getImageProps: (props) => ({ props }) };
@@ -45,6 +47,7 @@ test('real skin preview restores its clicked trigger after Escape and close, alo
       if (name === '@/components/supply/skin-media-thumb') return load('apps/web/src/components/supply/skin-media-thumb.tsx');
       if (name === '@/lib/listing-view') return load('apps/web/src/lib/listing-view.ts');
       if (name === '@/lib/listing-filters') return load('apps/web/src/lib/listing-filters.ts');
+      if (name === '@/lib/account-title') return load('apps/web/src/lib/account-title.ts');
       if (name.startsWith('./') || name.startsWith('../')) {
         const relative = path.posix.normalize(path.posix.join(path.posix.dirname(file), name));
         return load(/\.tsx?$/.test(relative) ? relative : relative + '.ts');
@@ -178,4 +181,25 @@ test('real skin preview restores its clicked trigger after Escape and close, alo
     await React.act(async () => root.unmount());
     await window.happyDOM.abort();
   }
+});
+
+test('picker metadata renders quality as a tag and hides unconfirmed quality', () => {
+  const file = 'apps/web/src/components/supply/skin-media-thumb.tsx';
+  const absolute = path.join(tree, file);
+  const m = new Module(absolute);
+  m.filename = absolute;
+  m.paths = Module._nodeModulePaths(tree);
+  m.require = (name) => (name.endsWith('.css') ? {} : rq(name));
+  m._compile(ts.transpileModule(fs.readFileSync(absolute, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, m.filename);
+  const { renderToStaticMarkup } = rq('react-dom/server');
+  const render = (skin, props = {}) => renderToStaticMarkup(React.createElement(m.exports.SkinMetadata, { skin, ...props }));
+  const known = render({ name: 'M4A1-棱镜攻势', rarityName: '传说', rarityBasis: 'PLATFORM_REFERENCE', isCollectible: true }, { qualityTag: true });
+  assert.match(known, /skin-quality-tag/);
+  assert.match(known, /传说/);
+  assert.match(known, /典藏/);
+  assert.ok(!known.includes('品质待核') && !known.includes('平台资料'), known);
+  assert.equal(render({ name: 'X', rarityName: null, isCollectible: null }, { qualityTag: true }), '');
+  assert.equal(render({ name: 'X', rarityName: '  ', isCollectible: false }, { qualityTag: true }), '');
+  assert.match(render({ name: 'X', rarityName: null, defaultState: 'DEFAULT' }, { qualityTag: true }), /默认外观/);
+  assert.match(render({ name: 'X', rarityName: null }), /品质待核/);
 });

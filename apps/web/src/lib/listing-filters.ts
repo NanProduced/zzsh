@@ -342,6 +342,15 @@ export function toggleSkinId(filters: ListingFilters, categoryId: string, skinId
   return withFilterChange(filters, { filters: { ...filters.filters, skinGroups: groups.length ? groups : undefined } });
 }
 
+export function resolveSkinOwner(
+  owners: Array<{ id: string; kind: string }> | null | undefined,
+  ownerId: string,
+  categoryKind: string | null | undefined,
+): string {
+  if (!ownerId) return "";
+  return owners?.some((owner) => owner.id === ownerId && (!categoryKind || owner.kind === categoryKind)) ? ownerId : "";
+}
+
 export function activeListingFilterCount(filters: ListingFilters): number {
   const conditions = normalizeListingConditions(filters.filters);
   return (conditions.resources?.length ?? 0) +
@@ -606,6 +615,7 @@ export function canonicalResourceCode(code: string | null): string | null {
 
 export function resourceUnitLabel(unit: string, code?: string | null): string {
   if (unit === "PIECE" && (code === "top_insure_card_piece" || code === "df_billable_top_insure_card_piece")) return "张";
+  if (unit === "PIECE" && canonicalResourceCode(code ?? null) === "df_billable_turtle_backpack_45") return "个";
   return ({ HAFF_BASE: "哈夫币", ROUND: "发", PIECE: "件", DAY: "天" } as Record<string, string>)[unit] ?? unit;
 }
 

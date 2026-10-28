@@ -7,6 +7,7 @@ import { AlertCircle, CheckCircle2, CircleSlash, Clock3, RefreshCw, WalletCards 
 import { useUserSession } from "@/components/session/user-session-provider";
 import { useIdentityReset } from "@/components/session/identity-reset";
 import {
+  formatOrderTime,
   orderApi,
   orderIntentKey,
   OrderRequestError,
@@ -408,6 +409,7 @@ function PaymentAction({ order, party, onChanged }: { order: Order; party: Order
   return <section className="order-detail-section order-trade-panel" aria-label="支付与取消">
     <div className="order-trade-heading"><h2 className="order-section-title">支付与取消</h2></div>
     {receipt?.disposition === "APPLIED" ? <div className="order-notice is-success" role="status"><CheckCircle2 size={17} aria-hidden="true" /><div><strong>支付已接纳{receipt.replay ? "（原回执重放）" : ""}</strong><span>订单状态以服务端记录为准；支付不等于交付、建群或开租。</span></div></div> : null}
+    {order.status === "PENDING_PAYMENT" && order.holdUntil ? <p className="order-trade-deadline">{expired ? "原支付保留截止" : "支付保留至"} {formatOrderTime(order.holdUntil)}；到期后是否取消以服务端订单状态为准。</p> : null}
     {expired ? <div className="order-notice is-warning" role="status"><Clock3 size={17} aria-hidden="true" /><div><strong>已到期，取消处理中</strong><span>占用时间以订单记录为准；系统正在按序释放该账号，不再接受新的支付。</span></div></div> : null}
     {party === "renter" ? <p className="order-muted">订单的支付与取消都会冻结原请求：结果未知时只能查询原请求，不会重复提交；两个动作互斥，未决期间同时锁定。</p> : null}
     {receipt?.disposition === "REVIEW_REQUIRED" ? <div className="order-notice is-warning" role="status"><AlertCircle size={17} aria-hidden="true" /><div><strong>支付结果需要人工核对</strong><span>原因：{receipt.reasonCode ?? "待确认"}。未重复扣款；不再新发起支付，等待平台核对。</span></div></div> : null}
@@ -1001,9 +1003,9 @@ export function OrderTradeActions({ order, party, onChanged, onStageFacts }: { o
   if (order.status === "PAID" || order.status === "COMPLETED") return <SettlementAction order={order} party={party} onChanged={onChanged} onStageFacts={onStageFacts} />;
   if (order.status === "CANCELLED") return <section className="order-detail-section order-trade-panel" aria-label="交易动作">
     <h2 className="order-section-title">交易动作</h2>
-    <p className="order-muted"><CircleSlash size={14} aria-hidden="true" /> 本单已取消。{party === "renter" ? "可重新选择账号下单。" : "可前往出租账号管理查看接单状态。"}</p>
+    <p className="order-muted"><CircleSlash size={14} aria-hidden="true" /> 本单已取消。{party === "renter" ? "可重新选择账号下单。" : "可前往上架账号查看接单状态。"}</p>
     <div className="order-trade-actions">
-      <Link className="button secondary" href={party === "renter" ? "/accounts" : "/account?view=accounts"} scroll={false}>{party === "renter" ? "浏览可租账号" : "管理出租账号"}</Link>
+      <Link className="button secondary" href={party === "renter" ? "/accounts" : "/account?view=accounts"} scroll={false}>{party === "renter" ? "浏览可租账号" : "管理上架账号"}</Link>
     </div>
   </section>;
   return null;

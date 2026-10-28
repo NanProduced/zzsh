@@ -502,15 +502,24 @@ export async function cancelReservation(
   return { status: 200, body: { order: projectOrder(row, "renter") } };
 }
 
+type ProjectedQuoteLine = { itemId?: unknown; name?: unknown };
+function projectedQuoteLines(projected: Record<string, unknown>): ProjectedQuoteLine[] {
+  return (projected.quote as { lines?: ProjectedQuoteLine[] } | null | undefined)?.lines ?? [];
+}
+
 /** Catalog names for the frozen quote lines; the snapshot keeps ids/units, the label is a read projection. */
 async function attachLineNames(client: PoolClient, projected: Record<string, unknown>): Promise<void> {
-  const quote = projected.quote as { lines?: Array<{ itemId?: unknown; name?: unknown }> } | null | undefined;
-  const lines = quote?.lines ?? [];
-  const ids = [...new Set(lines.map((line) => line.itemId).filter((id): id is string => typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id)))];
+  await attachLineNamesToOrders(client, [projected]);
+}
+
+/** One catalog read for a whole list page; the per-order detail keeps the single-item wrapper above. */
+async function attachLineNamesToOrders(client: PoolClient, projectedOrders: Record<string, unknown>[]): Promise<void> {
+  const orders = projectedOrders.map(projectedQuoteLines);
+  const ids = [...new Set(orders.flat().map((line) => line.itemId).filter((id): id is string => typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id)))];
   if (ids.length === 0) return;
   const names = (await client.query<{ id: string; name: string }>(`SELECT id,name FROM zzsh_supply.billable_item WHERE id=ANY($1)`, [ids])).rows;
   const byId = new Map(names.map((item) => [item.id, item.name]));
-  for (const line of lines) {
+  for (const lines of orders) for (const line of lines) {
     if ((line.name === undefined || line.name === null || line.name === "") && typeof line.itemId === "string" && byId.has(line.itemId)) line.name = byId.get(line.itemId);
   }
 }
@@ -612,11 +621,13 @@ export async function listMyOrders(
       ],
     )
   ).rows;
-  const items = rows.slice(0, filter.limit);
+  const pageRows = rows.slice(0, filter.limit);
+  const items = pageRows.map((row) => projectOrder(row, filter.party));
+  await attachLineNamesToOrders(client, items);
   const hasMore = rows.length > filter.limit;
   return {
-    items: items.map((row) => projectOrder(row, filter.party)),
-    nextCursor: hasMore ? encodeOrderCursor(filterKey, items[items.length - 1]!) : null,
+    items,
+    nextCursor: hasMore ? encodeOrderCursor(filterKey, pageRows[pageRows.length - 1]!) : null,
     limit: filter.limit,
   };
 }

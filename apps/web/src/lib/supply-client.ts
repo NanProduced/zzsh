@@ -3,6 +3,9 @@ import type {
   DraftInput,
   Favorite,
   MySupply,
+  MyAccountRow,
+  OwnerIncomePreview,
+  OwnerIncomePreviewInput,
   Page,
   PublicListingFilterMetadata,
   PublicListingPageV2,
@@ -231,7 +234,7 @@ type ReadOptions = { method?: "GET"; signal?: AbortSignal; idempotencyKey?: stri
 type WriteOptions = {
   method: "POST" | "PUT";
   body: unknown;
-  idempotencyKey: string;
+  idempotencyKey?: string;
   signal?: AbortSignal;
 };
 export async function supplyRequest<T>(
@@ -253,7 +256,7 @@ export async function supplyRequest<T>(
         ? {
             headers: {
               "content-type": "application/json",
-              "idempotency-key": key!,
+              ...(key ? { "idempotency-key": key } : {}),
             },
             body: JSON.stringify(options.body),
           }
@@ -279,12 +282,9 @@ const id = (value: string) => encodeURIComponent(value);
  * The name is normalized at this shared boundary so every caller (account list, credit summary)
  * pages correctly; other cursor-based endpoints (favorites, market) keep their own contracts.
  */
+/** `/me/accounts` uses the signed `cursor`; `after` remains the legacy id cursor. */
 export function myAccountsQuery(query: URLSearchParams): URLSearchParams {
-  const params = new URLSearchParams(query);
-  const cursor = params.get("cursor");
-  if (cursor !== null && !params.has("after")) params.set("after", cursor);
-  params.delete("cursor");
-  return params;
+  return new URLSearchParams(query);
 }
 export const supplyApi = {
   games: (signal?: AbortSignal) =>
@@ -334,6 +334,11 @@ export const supplyApi = {
       "/games/" + id(gameId) + "/full-payout-terms?" + new URLSearchParams({ releaseId }),
       { signal },
     ),
+  ownerIncomePreview: (gameId: string, input: OwnerIncomePreviewInput, signal?: AbortSignal) =>
+    supplyRequest<OwnerIncomePreview>(
+      "/games/" + id(gameId) + "/owner-income-preview",
+      { method: "POST", body: input, signal },
+    ),
   resourceIncomePreview: (gameId: string, inventory: DraftInput["inventory"], binding: {catalogRevision:string;releaseId:string}, signal?:AbortSignal) =>
     supplyRequest<ResourceIncomePreview>("/games/"+id(gameId)+"/resource-income-preview?"+new URLSearchParams({inventory:JSON.stringify(inventory),...binding}),{signal}),
   browseCatalog: (
@@ -373,18 +378,7 @@ export const supplyApi = {
     query: URLSearchParams = new URLSearchParams(),
     signal?: AbortSignal,
   ) =>
-    supplyRequest<
-      Page<{
-        id: string;
-        title: string | null;
-        game_name: string;
-        review_state: string | null;
-        sequence: string | null;
-        owner_paused: boolean;
-        staff_restricted: boolean;
-        historicalRead?: MySupply["historicalRead"];
-      }>
-    >("/me/accounts?" + myAccountsQuery(query), { signal }),
+    supplyRequest<Page<MyAccountRow>>("/me/accounts?" + myAccountsQuery(query), { signal }),
   createAccount: (gameId: string, key: string, signal?: AbortSignal) =>
     supplyRequest<{ accountId: string; gameId: string }>("/accounts", {
       method: "POST",

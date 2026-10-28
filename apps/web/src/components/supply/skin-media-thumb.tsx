@@ -58,9 +58,20 @@ export function skinCardTitle(tag: { name: string; ownerName?: string | null; ba
   return tag.name;
 }
 
-export function SkinMetadata({ skin, className = "" }: { skin: SkinDisplay; className?: string }) {
+export function SkinMetadata({ skin, className = "", qualityTag = false }: { skin: SkinDisplay; className?: string; qualityTag?: boolean }) {
+  const quality = skin.rarityName?.trim() || "";
+  if (qualityTag) {
+    // Picker mode: quality is a tag and an unconfirmed quality shows no tag at all;
+    // the source basis stays in the preview dialog instead of repeating per tile.
+    if (!quality && skin.isCollectible !== true && skin.defaultState !== "DEFAULT") return null;
+    return <span className={`skin-metadata skin-metadata--tags ${className}`.trim()}>
+      {quality ? <span className="skin-quality-tag" title={skin.rarityBasis === "PLATFORM_REFERENCE" ? "品质来自平台参考资料，以官方确认为准" : undefined}>{quality}</span> : null}
+      {skin.isCollectible === true ? <span className="skin-quality-tag skin-quality-tag--collectible">典藏</span> : null}
+      {skin.defaultState === "DEFAULT" ? <span className="skin-quality-tag">默认外观</span> : null}
+    </span>;
+  }
   return <span className={`skin-metadata ${className}`.trim()}>
-    <span>{skin.rarityName?.trim() || "品质待核"}{skin.rarityBasis === "PLATFORM_REFERENCE" ? " · 平台资料" : ""}</span>
+    <span>{quality || "品质待核"}{skin.rarityBasis === "PLATFORM_REFERENCE" ? " · 平台资料" : ""}</span>
     {skin.isCollectible === true ? <span>典藏</span> : null}
     {skin.defaultState === "DEFAULT" ? <span>默认外观</span> : null}
   </span>;

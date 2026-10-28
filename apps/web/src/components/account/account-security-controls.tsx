@@ -413,6 +413,8 @@ export function AccountSecurityControls({ userId, canAct, pendingWrite }: Props)
   if (!canAct()) return <p role="status">正在确认登录身份…</p>;
   const current = sessions?.find(item => item.isCurrent) ?? null;
   const others = sessions?.filter(item => !item.isCurrent) ?? [];
+  const knownOthers = others.filter(item => describeClient(item.userAgent).record !== "unrecognized");
+  const unknownOthers = others.filter(item => describeClient(item.userAgent).record === "unrecognized");
   const passwordState = visibleOverview?.passwordState;
 
   const feedback = <>
@@ -583,7 +585,7 @@ export function AccountSecurityControls({ userId, canAct, pendingWrite }: Props)
               <p className="sec-card-note">有效会话不代表设备当前在线。</p>
             </div>
 
-            {others.length ? (
+            {knownOthers.length ? (
               <div className="sec-session-table">
                 <div className="sec-session-columns" aria-hidden="true">
                   <span>设备与浏览器</span>
@@ -591,14 +593,23 @@ export function AccountSecurityControls({ userId, canAct, pendingWrite }: Props)
                   <span>操作</span>
                 </div>
                 <div className="sec-session-list">
-                  {others.map(item => (
+                  {knownOthers.map(item => (
                     <SessionRow key={item.id} item={item} locked={locked} onAsk={askRevoke} />
                   ))}
                 </div>
               </div>
-            ) : (
-              <p className="sec-session-empty">暂无其他有效会话。</p>
-            )}
+            ) : null}
+            {unknownOthers.length ? (
+              <details className="sec-unknown-sessions">
+                <summary><span>无法识别的设备（{unknownOthers.length}）</span><small>客户端信息未提供，仍可按登录时间区分并单独退出</small></summary>
+                <div className="sec-session-list">
+                  {unknownOthers.map(item => (
+                    <SessionRow key={item.id} item={item} locked={locked} onAsk={askRevoke} />
+                  ))}
+                </div>
+              </details>
+            ) : null}
+            {others.length === 0 ? <p className="sec-session-empty">暂无其他有效会话。</p> : null}
           </section>
         </> : null}
       </section>
@@ -750,7 +761,7 @@ function SessionRow({ item, locked, onAsk }: { item: Session; locked: boolean; o
   }, [menuOpen]);
 
   return (
-    <div className="sec-session" data-record={client.record}>
+    <div className="sec-session" data-record={client.record} data-session-id={item.id}>
       <div className="sec-session-client">
         <Icon className="sec-session-icon" size={18} strokeWidth={1.5} aria-hidden="true" />
         <div className="sec-session-title">

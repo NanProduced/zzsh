@@ -16,7 +16,7 @@ function EarningBasis({item}:{item:EarningItem}){
  const c=item.calculation;
  return <section className="earning-calculation" aria-label="收益计算依据"><h5>计算依据</h5>{item.origin==='LEGACY_MYSQL'
   ? <p>历史来源未记录这笔收益的计佣基数、适用比例及等级，不采用当前政策倒算。{item.state==='EXPIRED'?'原记录标为已失效，但未记录失效原因；这不表示记录被删除。':''}</p>
-  : c?.knowledge==='KNOWN'?<><dl><div><dt>本笔适用比例</dt><dd>{c.percent}%</dd></div><div><dt>付款时分销等级</dt><dd>{c.beneficiaryLevelCode}</dd></div><div><dt>本笔冻结政策</dt><dd>{c.policyVersion}</dd></div><div><dt>金额舍入</dt><dd>按冻结比例计算，四舍五入到分</dd></div><div><dt>计佣口径</dt><dd>本笔结算的平台贡献扣除补偿费后的基数</dd></div><div><dt>总额约束</dt><dd>双角色佣金合计不超过同一计佣基数</dd></div><div><dt>来源订单号</dt><dd>{c.orderNumber??'当前身份没有可展示的来源单号'}</dd></div></dl><p>计佣基数金额属于来源订单的内部结算信息，不在本人收益明细中公开。佣金不是订单实付金额的固定比例，也不是会员折扣。本记录使用本地联验政策，不代表正式经营比例。</p></>
+  : c?.knowledge==='KNOWN'?<><dl><div><dt>本笔适用比例</dt><dd>{c.percent}%</dd></div><div><dt>{c.rateMode==='UNIFORM'?'计佣方式':'付款时分销等级'}</dt><dd>{c.rateMode==='UNIFORM'?'统一比例':c.beneficiaryLevelCode}</dd></div><div><dt>本笔冻结政策</dt><dd>{c.policyVersion}</dd></div><div><dt>金额舍入</dt><dd>按冻结比例计算，四舍五入到分</dd></div><div><dt>计佣口径</dt><dd>本笔结算的平台贡献扣除补偿费后的基数</dd></div><div><dt>总额约束</dt><dd>双角色佣金合计不超过同一计佣基数</dd></div><div><dt>来源订单号</dt><dd>{c.orderNumber??'当前身份没有可展示的来源单号'}</dd></div></dl><p>计佣基数金额属于来源订单的内部结算信息，不在本人收益明细中公开。佣金不是订单实付金额的固定比例，也不是会员折扣。{c.scope==='LOCAL_CONTROLLED'?'本记录使用本地联验政策，不代表正式经营比例。':'本笔比例来自原付款冻结政策，不随当前政策变化。'}</p></>
   : <p>这笔收益的原始冻结计佣依据尚未核实，适用比例及等级待确认；不采用当前政策补算。</p>}</section>;
 }
 type View={scope:string;filter:EarningFilter;reload:number;page:EarningsPage|null;selectedId:string|null;detail:EarningItem|null;busy:boolean;error:WalletRequestError|null};

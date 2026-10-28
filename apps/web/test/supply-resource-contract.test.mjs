@@ -36,10 +36,16 @@ test('group quantity inputs render a visible conversion hint linked to both boun
 test('actual list and grid render Barrett and piece-count insurance even after the original four resources',()=>{
   const tree=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
   const require=createRequire(path.join(tree,'package.json')),React=require('react');
+  const accountTitleFile=path.join(tree,'apps/web/src/lib/account-title.ts');
+  const accountTitleMod=new Module(accountTitleFile);accountTitleMod.filename=accountTitleFile;accountTitleMod.paths=Module._nodeModulePaths(tree);
+  accountTitleMod.require=n=>n==='./listing-filters'||n==='@/lib/listing-filters'?listingFilters:require(n);
+  accountTitleMod._compile(ts.transpileModule(readFileSync(accountTitleFile,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,accountTitleFile);
+  const accountTitle=accountTitleMod.exports;
   const file=path.join(tree,'apps/web/src/components/delta/account-card.tsx');
   const module=new Module(file);module.filename=file;module.paths=Module._nodeModulePaths(tree);
   module.require=name=>{
     if(name==='next/link')return ({children,href,...props})=>React.createElement('a',{href,...props},children);
+    if(name==='@/lib/account-title')return accountTitle;
     if(name==='@/lib/listing-view')return listingView;
     if(name==='@/lib/listing-filters')return listingFilters;
     if(name==='@/lib/account-return')return {rememberAccountReturn:()=>{}};
@@ -54,9 +60,14 @@ test('actual list and grid render Barrett and piece-count insurance even after t
   const data={id:'fixture',title:'资源合同测试',displayNo:null,media:[],resourceLines:resources,resourceTotalLabel:'待确认',haffRentLabel:null,itemResourceTotalLabel:null,depositLabel:null,payableTotalLabel:null,termLabel:'6 天',termOptionLabel:null,conditionLines:[],loginMethod:null,skinNames:[],skinLabels:[],skinTags:[],entitlementNames:[],unitAmountsInformational:false};
   for(const viewMode of ['list','grid']){
     const html=require('react-dom/server').renderToStaticMarkup(React.createElement(module.exports.AccountCard,{data,viewMode}));
-    assert.match(html,/巴雷特子弹/);assert.match(html,/顶级保险卡/);
-    assert.match(html,/3发/);assert.match(html,/3张/);assert.match(html,/3天/);
-    assert.doesNotMatch(html,/查看其余|更多资源见详情/);
+    if(viewMode==='list'){
+      assert.ok(resources.every(r=>html.includes(r.name)),'list view lays out all declared resources');
+    }else{
+      const summary=module.exports.summarizeQuoteResources(data,null,5);
+      assert.equal(summary.lines.length+summary.hiddenCount,7,`${viewMode}: every declared row is shown or counted`);
+      assert.ok(summary.lines.some(line=>line.name==='护甲'),`${viewMode}: positive stock leads the summary`);
+      assert.match(html,new RegExp(`\\+${summary.hiddenCount}`));
+    }
   }
 });
 

@@ -217,18 +217,18 @@ test("F2: switching order or identity renders loading before old detail can comm
   });
   try {
     await probe.render({ orderId: "order_A" }, "A");
-    assert.match(probe.host.textContent, /PRIVATE_ORDER_A/);
+    assert.match(probe.host.textContent, /A-001/);
     const commitsBeforeB = probe.commits.length;
     await probe.render({ orderId: "order_B" }, "B");
-    assert.doesNotMatch(probe.host.textContent, /PRIVATE_ORDER_A/);
-    assert.equal(probe.commits.slice(commitsBeforeB).some((commit) => commit.phase === "B" && commit.detail?.includes("PRIVATE_ORDER_A")), false);
+    assert.doesNotMatch(probe.host.textContent, /A-001/);
+    assert.equal(probe.commits.slice(commitsBeforeB).some((commit) => commit.phase === "B" && commit.detail?.includes("A-001")), false);
 
     probe.session.userId = "user_B";
     probe.session.identityVersion = 2;
     await probe.render({ orderId: "order_B" }, "identity-B");
-    assert.doesNotMatch(probe.host.textContent, /PRIVATE_ORDER_A/);
+    assert.doesNotMatch(probe.host.textContent, /A-001/);
     await probe.render({ party: "owner", orderId: "order_B" }, "party-owner");
-    assert.doesNotMatch(probe.host.textContent, /PRIVATE_ORDER_A/);
+    assert.doesNotMatch(probe.host.textContent, /A-001/);
   } finally {
     pendingB.resolve(Response.json({ order: orderB }));
     await probe.dispose();
@@ -243,12 +243,12 @@ test("F1: detail 401 clears the cached list and revalidates before returning", a
   });
   try {
     await probe.render({}, "list");
-    assert.match(probe.host.textContent, /PRIVATE_ORDER_A/);
+    assert.match(probe.host.textContent, /A-001/);
     await probe.render({ orderId: "order_A" }, "401");
     assert.match(probe.host.textContent, /登录状态已变化/);
     assert.equal(probe.session.revalidations, 1);
     await probe.render({}, "back");
-    assert.doesNotMatch(probe.host.textContent, /PRIVATE_ORDER_A/);
+    assert.doesNotMatch(probe.host.textContent, /A-001/);
   } finally {
     await probe.dispose();
   }
@@ -272,12 +272,12 @@ test("refresh failure keeps rows and more failure keeps the cursor for an in-pla
     await probe.render({}, "ready");
     await probe.clickButton("刷新");
     assert.match(probe.host.textContent, /刷新失败/);
-    assert.match(probe.host.textContent, /PRIVATE_ORDER_A/);
+    assert.match(probe.host.textContent, /A-001/);
     await probe.clickButton("加载更多订单");
     assert.match(probe.host.textContent, /重试加载/);
-    assert.match(probe.host.textContent, /PRIVATE_ORDER_A/);
+    assert.match(probe.host.textContent, /A-001/);
     await probe.clickButton("重试加载");
-    assert.match(probe.host.textContent, /PRIVATE_ORDER_B/);
+    assert.match(probe.host.textContent, /B-001/);
   } finally {
     await probe.dispose();
   }
@@ -346,13 +346,50 @@ test("a row names the account and its resources so two orders are told apart by 
   try {
     await probe.render({ party: "renter" }, "identity");
     const row = probe.host.querySelector(".order-row");
-    assert.match(row.querySelector(".order-row-title").textContent, /三角洲/);
+    assert.match(row.querySelector(".order-row-title").textContent, /1\.5 M 哈夫币/);
     // The resource signature does the work the account list's structured title does: it is built from
     // the fields the order read returned, never from an opaque item id.
-    assert.match(row.querySelector(".order-row-resources").textContent, /哈夫币 1\.5 M/);
-    assert.match(row.querySelector(".order-row-resources").textContent, /保险卡 ×10/);
+    assert.match(row.querySelector(".order-row-title").textContent, /1\.5 M 哈夫币/);
+    assert.equal(row.querySelector(".order-row-resources").textContent, "保险卡 ×10");
     // The order number is labelled, so it is not read as the account's own number.
     assert.equal(row.querySelector(".order-row-no").textContent, "订单 ZZ-9");
+  } finally {
+    await probe.dispose();
+  }
+});
+
+test("an unnamed list projection stays readable and never repeats zero-unit fragments", async () => {
+  const unnamed = {
+    ...pricedOrder,
+    id: "order_unnamed",
+    quote: {
+      lines: [
+        { itemId: "barrett", unit: "ROUND", quantity: "0" },
+        { itemId: "awm", unit: "ROUND", quantity: "600" },
+        { itemId: "haff", unit: "HAFF_BASE", quantity: "90000000" },
+        { itemId: "insurance", unit: "DAY", quantity: "0" },
+      ],
+    },
+  };
+  const probe = await createProbe(async () => Response.json({ items: [unnamed], nextCursor: null, limit: 20 }));
+  try {
+    await probe.render({ party: "renter" }, "unnamed");
+    const summary = probe.host.querySelector(".order-row-resources").textContent;
+    assert.equal(summary, "物资 1 项");
+    assert.doesNotMatch(summary, /发 ×0|件 ×0|天 ×0/);
+    const named = { ...unnamed, id: "order_named", quote: { lines: [
+      { itemId: "awm", name: "AWM子弹", unit: "ROUND", quantity: "600" },
+      { itemId: "insurance", name: "九格保险体验卡", unit: "DAY", quantity: "0" },
+    ] } };
+    const next = await createProbe(async () => Response.json({ items: [named], nextCursor: null, limit: 20 }));
+    try {
+      await next.render({ party: "renter" }, "named");
+      const text = next.host.querySelector(".order-row-resources").textContent;
+      assert.equal(text, "AWM子弹 ×600");
+      assert.doesNotMatch(text, /保险|×0/);
+    } finally {
+      await next.dispose();
+    }
   } finally {
     await probe.dispose();
   }
@@ -419,7 +456,7 @@ test("the detail keeps the base order visible when the settlement read is not as
     await tick();
     const detail = probe.host.querySelector("[data-testid=order-detail]");
     assert.ok(detail, "the detail view renders");
-    assert.match(detail.textContent, /计价样本/);
+    assert.match(detail.textContent, /租赁账号/);
     assert.match(detail.textContent, /ZZ-9/);
     // The order's own outcome is stated once, in the identity band.
     assert.match(detail.querySelector(".order-detail-status").textContent, /已完成/);
@@ -454,7 +491,7 @@ test("one list includes both sources and old deep links return to the same filte
     await probe.render({status:"PAID",accountId:"acct_9"});
     assert.equal(probe.host.querySelectorAll(".order-row").length,2);
     assert.doesNotMatch(probe.host.textContent,/历史订单|当前订单|旧平台|新平台|统一入口尚未完成/);
-    assert.match(probe.host.textContent,/订单资源：6级子弹 60 · 顶级保险卡 7 天/);
+    assert.match(probe.host.textContent,/6级子弹 60 · 顶级保险卡 7 天/);
     assert.match(probe.host.textContent,/租赁截止/);
     // U5-R1-02: the historical refund figure is labelled as the original record in the list row.
     assert.match(probe.host.textContent,/原退款金额记录/);
@@ -505,4 +542,108 @@ test("a closed order detail drops the payment prompt and names the figure as a s
   } finally {
     await probe.dispose();
   }
+});
+
+test("ORDER-A: list shows the frozen mode and never asks the reader to distinguish platform origin", async () => {
+  const fast = { ...pricedOrder, id: "fast_order", title: "极速快照账号", quote: { rentalMode: "fast", lines: [] } };
+  const v1 = { ...pricedOrder, id: "v1_order", title: "旧版快照账号", quote: { lines: [] } };
+  const legacy = { ...legacyOrder, id: "legacy_order" };
+  const probe = await createProbe(async () => Response.json({ items: [fast, v1, legacy], nextCursor: null, limit: 20 }));
+  try {
+    await probe.render({ party: "renter" }, "order-a-tags");
+    const row = (id) => probe.host.querySelector(`[data-order-id="${id}"]`)?.closest(".order-row");
+    assert.match(row("fast_order").querySelector(".order-row-tag[data-mode=fast]").textContent, /极速出租/);
+    assert.equal(row("v1_order").querySelector(".order-row-tag"), null, "a missing v1 mode is not guessed as ordinary");
+    assert.equal(row("legacy_order").querySelector(".order-row-tag"), null, "legacy rows carry no platform-origin label");
+    assert.doesNotMatch(probe.host.textContent, /历史订单|旧平台|新平台/);
+    assert.ok(row("legacy_order").querySelector("a[data-order-id='legacy_order']"), "the record remains openable for supported continuation");
+  } finally {
+    await probe.dispose();
+  }
+});
+
+test("ORDER-A: detail names the frozen mode, both parties' unit prices and the real fee-total basis", async () => {
+  const detailOrder = {
+    ...pricedOrder,
+    id: "order_a_detail",
+    status: "PAID",
+    paidAt: "2026-10-12T00:21:00Z",
+    quote: {
+      rentalMode: "fast",
+      ownerTotal: { amount: "100.00", currency: "CNY" },
+      lines: [
+        { itemId: "haff", name: "哈夫币", unit: "HAFF_BASE", quantity: "3000000", unitQuantity: "1000000",
+          buyerUnitAmount: { amount: "0.12345678", currency: "CNY", scale: 8 }, buyerAmount: { amount: "0.37", currency: "CNY" },
+          ownerUnitAmount: { amount: "0.10000000", currency: "CNY", scale: 8 }, ownerAmount: { amount: "0.30", currency: "CNY" } },
+        { itemId: "ammo", name: "AWM子弹", unit: "ROUND", quantity: "120", unitQuantity: "60",
+          buyerUnitAmount: { amount: "0.00000012", currency: "CNY", scale: 8 }, buyerAmount: { amount: "0.00", currency: "CNY" },
+          ownerUnitAmount: { amount: "0.00000010", currency: "CNY", scale: 8 }, ownerAmount: { amount: "0.00", currency: "CNY" } },
+      ],
+    },
+    fulfillmentAssignment: { state: "ASSIGNED", teamReady: true, teamState: "READY", assignedAt: "2026-10-12T00:22:00Z" },
+  };
+  const probe = await createProbe(async (input) => {
+    const url = String(input);
+    if (url.endsWith("/order_a_detail")) return Response.json({ order: detailOrder });
+    if (url.includes("/refunds")) return Response.json({ error: { code: "NOT_FOUND", message: "Resource not found" } }, 404);
+    return Response.json({ items: [detailOrder], nextCursor: null, limit: 20 });
+  });
+  try {
+    await probe.render({ party: "renter", status: "PAID", orderId: "order_a_detail" }, "order-a-detail-renter");
+    await tick(); await tick();
+    const renter = probe.host.querySelector("[data-testid=order-detail]");
+    assert.ok(renter, "detail renders");
+    assert.match(renter.querySelector(".order-detail-mode").textContent, /极速出租/);
+    assert.ok([...renter.querySelectorAll(".order-table-wrap td")].every((td) => td.hasAttribute("data-label")), "mobile stacking keeps a label for every cell");
+    assert.match(renter.querySelector(".order-line-unit").textContent, /¥0\.12345678 \/ 1,000,000 哈夫币（1 M）/);
+    assert.match(renter.textContent, /¥0\.00000012 \/ 60 发/);
+    assert.match(renter.querySelector(".order-lines-total").textContent, /资源合计（不含押金） 328\.00 元/);
+    assert.match(renter.querySelector(".order-contact-facts").textContent, /客服分配/);
+    assert.match(renter.querySelector(".order-contact-facts").textContent, /已就绪/);
+    await probe.render({ party: "owner", status: "PAID", orderId: "order_a_detail" }, "order-a-detail-owner");
+    await tick(); await tick();
+    const owner = probe.host.querySelector("[data-testid=order-detail]");
+    assert.match(owner.textContent, /¥0\.10000000 \/ 1,000,000 哈夫币（1 M）/);
+    assert.doesNotMatch(owner.textContent, /¥0\.12345678/);
+    assert.match(owner.querySelector(".order-lines-total").textContent, /号主报价合计 100\.00 元/);
+  } finally {
+    await probe.dispose();
+  }
+});
+
+test("API facts feed the order title, account number, stage and entitlements", async () => {
+  const factsOrder = {
+    ...pricedOrder,
+    id: "order_facts",
+    status: "PAID",
+    paidAt: "2026-10-12T00:21:00Z",
+    accountDisplayNo: "A20261028001",
+    listingFacts: {
+      source: "ORDER_VERSION", versionId: "ver_1", rentalMode: "ordinary", termSeconds: "86400",
+      attributeDisplay: { safeBox: "6格", grading: "钻石", loginMethod: "QQ" },
+      resourceLines: [{ itemId: "haff", code: "HAFF", name: "哈夫币", quantity: "1200000", unit: "HAFF_BASE" }],
+    },
+    stage: { code: "DECISION_PENDING", label: "待你确认结算", viewerActionRequired: true, settlementVersionNo: 2 },
+    entitlements: [{ id: "ent_1", name: "九格保险体验卡", nameSource: "ORDER_VERSION", expiresAt: "2026-11-01T00:00:00.000Z", expiryKind: "TIMED", fullTermGuaranteed: false }],
+  };
+  const probe = await createProbe(async (input) => {
+    const url = String(input);
+    if (url.endsWith("/order_facts")) return Response.json({ order: factsOrder });
+    return Response.json({ items: [factsOrder], nextCursor: null, limit: 20 });
+  });
+  try {
+    await probe.render({ party: "renter" }, "facts-list");
+    const row = probe.host.querySelector('[data-order-id="order_facts"]').closest(".order-row");
+    assert.match(row.querySelector(".order-row-title").textContent, /1\.2 M 哈夫币 · 6格 · 钻石/);
+    assert.match(row.querySelector(".order-row-meta").textContent, /账号 A20261028001/);
+    assert.match(row.querySelector(".order-row-hint").textContent, /待你确认结算 · 需要你处理/);
+    assert.doesNotMatch(row.querySelector(".order-row-resources")?.textContent ?? "", /哈夫币/);
+    await probe.render({ party: "renter", status: "PAID", orderId: "order_facts" }, "facts-detail");
+    await tick(); await tick();
+    const detail = probe.host.querySelector("[data-testid=order-detail]");
+    assert.match(detail.textContent, /账号 A20261028001/);
+    assert.match(detail.textContent, /待你确认结算/);
+    assert.match(detail.textContent, /九格保险体验卡/);
+    assert.match(detail.textContent, /不保证覆盖完整租期/);
+  } finally { await probe.dispose(); }
 });

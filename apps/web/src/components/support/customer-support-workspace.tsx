@@ -1,4 +1,5 @@
 "use client";
+import { SessionLoading } from "../auth/session-loading";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent as ReactClipboardEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { ArrowDown, Check, ChevronLeft, CircleAlert, Clock3, Headphones, ImagePlus, Info, Paperclip, ReceiptText, SendHorizontal, ShieldCheck, UserRound, Wifi, WifiOff, X } from "lucide-react";
@@ -1358,8 +1359,9 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   if (!preview && session.status !== "authenticated") {
     const sessionError = session.status === "error";
     return <section className={`support-gate${embedded ? " support-gate-embedded" : ""}`} aria-busy={session.status === "loading"}>
-      {sessionError ? <CircleAlert size={28} aria-hidden="true" /> : <Headphones size={28} aria-hidden="true" />}
-      <div className="support-gate-heading"><div><h2>{sessionError ? "暂时无法确认登录状态" : session.status === "loading" ? "正在确认登录身份" : "选择客服类型"}</h2><p>{sessionError ? "客服窗口暂未打开，确认恢复后可以继续。" : "先选择需要的帮助类型，登录后会自动恢复这次咨询意图。"}</p></div>{embedded ? <button type="button" className="support-icon-button" onClick={onClose} aria-label="关闭客服窗口"><X size={18} /></button> : null}</div>
+      {session.status !== "loading" ? sessionError ? <CircleAlert size={28} aria-hidden="true" /> : <Headphones size={28} aria-hidden="true" /> : null}
+      <div className="support-gate-heading"><div><h2>{sessionError ? "暂时无法打开客服" : "联系客服"}</h2>{session.status !== "loading" ? <p>{sessionError ? "登录状态读取失败，请重试。" : "选择需要的帮助类型，登录后继续。"}</p> : null}</div>{embedded ? <button type="button" className="support-icon-button" onClick={onClose} aria-label="关闭客服窗口"><X size={18} /></button> : null}</div>
+      {session.status === "loading" ? <SessionLoading layout="compact" label="正在加载客服…" /> : null}
       {!sessionError && session.status !== "loading" ? <SupportTypePicker value={selectedType} onChange={setSelectedType} /> : null}
       {sessionError ? <button type="button" className="button secondary" onClick={session.revalidate}>重试身份确认</button> : session.status === "guest" ? <button type="button" className="button primary" onClick={() => void startConsultation()}><Headphones size={15} />登录并联系客服</button> : null}
     </section>;

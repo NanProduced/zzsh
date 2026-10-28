@@ -69,6 +69,30 @@ const coordinator = 'apps/web/src/components/auth/auth-overlay-provider.tsx';
 const loginPage = 'apps/web/src/app/login/page.tsx';
 const dialog = p => p.host.querySelector('[role="dialog"]');
 
+test('protected pages own session recovery without a second floating alert', async () => {
+  for (const route of ['/publish', '/publish?mode=fast', '/account?view=wallet', '/support']) {
+    const p = await mountAuthComponent(coordinator, 'AuthOverlayProvider', {
+      children: React.createElement('section', { role: 'alert' }, '本页的重试入口'),
+    }, { url: 'http://127.0.0.1:4200' + route, pathname: route.split('?')[0], initialStatus: 'error' });
+    try {
+      assert.equal(p.host.querySelector('.auth-session-pending'), null, route);
+      assert.equal(p.host.querySelectorAll('[role="alert"]').length, 1, route);
+      assert.equal(dialog(p), null, 'a read failure is not a confirmed guest');
+    } finally { await p.close(); }
+  }
+});
+
+test('public browsing remains visible during a session outage', async () => {
+  const p = await mountAuthComponent(coordinator, 'AuthOverlayProvider', {
+    children: React.createElement('main', null, '公开账号列表'),
+  }, { url: 'http://127.0.0.1:4200/accounts?game=delta', pathname: '/accounts', initialStatus: 'error' });
+  try {
+    assert.match(p.host.textContent, /公开账号列表/);
+    assert.equal(dialog(p), null);
+    assert.equal(p.host.querySelector('.auth-session-pending'), null);
+  } finally { await p.close(); }
+});
+
 // Compose the real route coordinator, AccountWorkspace session gate and StatusPage.
 // Private leaf workspaces are sentinels: this suite must not fetch business or external data.
 const privateAccountView = ({ userId }) => React.createElement('p', { 'data-private-account-view': true }, `PRIVATE_${userId ?? 'account'}`);
@@ -125,10 +149,11 @@ test('public browsing stays quiet and a protected arrival opens exactly one coor
   } finally { await p.close(); }
 });
 
-test('a session read failure is a retryable notice, never a guess that the visitor signed out', async () => {
-  const p = await mountAuthComponent(coordinator, 'AuthOverlayProvider', { children: null }, { url: 'http://127.0.0.1:4200/support', pathname: '/support', initialStatus: 'loading' });
+test('a public-page protected action offers read retry without guessing that the visitor signed out', async () => {
+  const p = await mountAuthComponent(coordinator, 'AuthOverlayProvider', { children: React.createElement('a', { href: '/support' }, '联系客服') }, { url: 'http://127.0.0.1:4200/', pathname: '/', initialStatus: 'loading' });
   try {
     assert.equal(dialog(p), null);
+    await React.act(async () => p.host.querySelector('a[href="/support"]').dispatchEvent(new p.window.MouseEvent('click', { bubbles: true, cancelable: true })));
     await setSession(p, 'error');
     assert.equal(dialog(p), null, 'error must not open the dialog');
     assert.ok(p.host.querySelector('.auth-session-pending'), 'error shows a retryable session notice');

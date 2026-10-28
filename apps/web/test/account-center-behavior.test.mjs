@@ -225,8 +225,8 @@ async function createProbe(fetchImpl, options = {}) {
 }
 
 const emptyPage = { items: [], nextCursor: null, limit: 100 };
-const orderA = { id: "order_A", displayNo: "A-001", title: "PRIVATE_ORDER_A", status: "PENDING_PAYMENT" };
-const orderB = { id: "order_B", displayNo: "B-001", title: "PRIVATE_ORDER_B", status: "PAID" };
+const orderA = { id: "order_A", displayNo: "A-001", title: "A-001", status: "PENDING_PAYMENT" };
+const orderB = { id: "order_B", displayNo: "B-001", title: "B-001", status: "PAID" };
 
 for (const mode of ["legacy", "native", "mixed"]) test(`overview unified read shows ${mode} records with safe detail links and native-only tasks`, async () => {
   const old = { ...orderA, id: "same-id", title: "SYNTHETIC_OLD", source: { origin: "LEGACY", statusLabel: "历史待支付" }, readOnly: true, paymentOpen: false, cancelOpen: false,
@@ -248,7 +248,7 @@ for (const mode of ["legacy", "native", "mixed"]) test(`overview unified read sh
     assert.deepEqual(reads.map(url => url.searchParams.get("party")).sort(), ["owner", "renter"]);
     const card = probe.host.querySelector("[data-testid=order-summary-renter]");
     assert.equal(card.querySelectorAll(".account-order-row").length, items.length);assert.doesNotMatch(card.textContent, /暂无租入记录/);
-    assert.deepEqual([...card.querySelectorAll(".account-order-row-title")].map(node => node.textContent), items.map(item => item.source?.origin === "LEGACY" ? "订单资源：6级子弹 60 · 顶级保险卡 7 天" : item.title));
+    assert.deepEqual([...card.querySelectorAll(".account-order-row-title")].map(node => node.textContent), items.map(item => item.source?.origin === "LEGACY" ? "6级子弹 60 · 顶级保险卡 7 天" : "租赁账号"));
     const links = [...card.querySelectorAll(".account-order-row")].map(node => new URL(node.href));
     assert.deepEqual(links.map(url => url.searchParams.get("source")), items.map(item => item.readOnly ? "legacy" : null));
     assert.ok(links.every(url => url.searchParams.get("orderId") === "same-id" && url.searchParams.get("view") === "rentals"));
@@ -257,7 +257,7 @@ for (const mode of ["legacy", "native", "mixed"]) test(`overview unified read sh
     if (mode !== "native") {
       assert.match(card.textContent, /历史待支付/);
       assert.match(card.textContent, /租赁截止/);
-      assert.match(card.textContent, /订单应付 66.00 元/);
+      assert.match(card.textContent, /订单应付\s*66\.00 元/);
       assert.match(card.textContent, /押金 0.00 元/);
       // U5-R1-02: the overview shows the historical refund figure as an original record, never as a live duty.
       assert.match(card.textContent, /原退款金额记录 87.00 元/);
@@ -369,10 +369,10 @@ test("a loading summary does not show the previous identity's order", async () =
     const rental = probe.host.querySelector("[data-testid=order-summary-renter]");
     assert.equal(rental.getAttribute("aria-busy"), "true");
     assert.match(rental.textContent, /正在读取订单/);
-    assert.doesNotMatch(rental.textContent, /PRIVATE_ORDER_A/);
+    assert.doesNotMatch(rental.textContent, /A-001/);
     pending.resolve(json({ items: [orderA], nextCursor: null, limit: 3 }));
     await probe.render(React.createElement(AccountOverview, { scope: "user_A:1" }));
-    assert.match(probe.host.textContent, /PRIVATE_ORDER_A/);
+    assert.match(probe.host.textContent, /A-001/);
     assert.equal(probe.host.querySelector("[data-testid=order-status-renter]").textContent, "待支付");
     assert.equal(probe.host.querySelector("[data-testid=order-count-renter]"), null);
   } finally {
@@ -391,12 +391,12 @@ test("one order card can fail and retry without clearing the other card", async 
     const { AccountOverview } = probe.center;
     await probe.render(React.createElement(AccountOverview, { scope: "user_A:1" }));
     assert.match(probe.host.querySelector("[data-testid=order-summary-renter]").textContent, /租入订单暂时无法读取/);
-    assert.match(probe.host.querySelector("[data-testid=order-summary-owner]").textContent, /PRIVATE_ORDER_B/);
+    assert.match(probe.host.querySelector("[data-testid=order-summary-owner]").textContent, /B-001/);
     assert.equal(probe.host.querySelector("[data-testid=order-status-owner]").textContent, "已支付");
     renterFails = false;
     await probe.click("[data-testid=retry-renter]");
-    assert.match(probe.host.querySelector("[data-testid=order-summary-renter]").textContent, /PRIVATE_ORDER_A/);
-    assert.match(probe.host.querySelector("[data-testid=order-summary-owner]").textContent, /PRIVATE_ORDER_B/);
+    assert.match(probe.host.querySelector("[data-testid=order-summary-renter]").textContent, /A-001/);
+    assert.match(probe.host.querySelector("[data-testid=order-summary-owner]").textContent, /B-001/);
   } finally {
     await probe.dispose();
   }
@@ -464,7 +464,7 @@ test("membership card uses the confirmed tier and a missing field is not invente
     assert.equal(probe.host.querySelector("[data-testid=membership-card]").getAttribute("data-tier"), null);
 
     const nav = [...probe.host.querySelectorAll(".account-nav a")];
-    assert.equal(nav.length, 11);
+    assert.equal(nav.length, 12);
     assert.ok(nav.every((link) => link.tagName === "A" && link.getAttribute("href")?.startsWith("/account?view=")));
     assert.equal(probe.host.querySelector(".account-nav a[aria-current=page]").textContent.includes("总览"), true);
     const membershipNav = nav.find((link) => link.getAttribute("href") === "/account?view=membership");
@@ -568,13 +568,13 @@ test("a membership read failure can retry and does not remove the order summarie
     const { AccountCenterFrame, AccountOverview } = probe.center;
     await probe.render(React.createElement(AccountCenterFrame, { active: "rentals", scope: "user_A:1", orderId: "order_A", status: "PAID", accountId: "acc_1" }, React.createElement(AccountOverview, { scope: "user_A:1" })));
     assert.match(probe.host.textContent, /会员成长暂时无法读取/);
-    assert.match(probe.host.textContent, /PRIVATE_ORDER_B/);
+    assert.match(probe.host.textContent, /B-001/);
     assert.equal(probe.host.querySelector(".account-nav a[aria-current=page]").getAttribute("href"), "/account?view=rentals&accountId=acc_1&status=PAID&orderId=order_A");
     fail = false;
     await probe.click("[data-testid=retry-membership]");
     assert.equal(probe.host.querySelector("[data-testid=membership-tier]").textContent, "银卡会员");
     assert.equal(probe.host.querySelector("[data-testid=membership-card]").getAttribute("data-tier"), "SILVER");
-    assert.match(probe.host.textContent, /PRIVATE_ORDER_B/);
+    assert.match(probe.host.textContent, /B-001/);
   } finally {
     await probe.dispose();
   }
@@ -635,9 +635,9 @@ test("a late response from the previous identity cannot replace the current one"
     pendingOrders.resolve(json({ items: [orderA], nextCursor: null, limit: 100 }));
     await probe.render(React.createElement(AccountCenterFrame, { active: "overview", scope: "user_B:2" }, React.createElement(AccountOverview, { scope: "user_B:2" })));
     assert.match(probe.host.textContent, /用户乙/);
-    assert.doesNotMatch(probe.host.textContent, /用户甲|PRIVATE_ORDER_A|钻石会员/);
+    assert.doesNotMatch(probe.host.textContent, /用户甲|A-001|钻石会员/);
     assert.equal(probe.host.querySelector("[data-testid=membership-tier]").textContent, "普通会员");
-    assert.match(probe.host.textContent, /PRIVATE_ORDER_B/);
+    assert.match(probe.host.textContent, /B-001/);
   } finally {
     await probe.dispose();
   }
@@ -1445,7 +1445,8 @@ test("M1C: navigation grouping, labels, and independent membership view route", 
     // Route resolution
     assert.equal(resolveAccountView("membership"), "membership");
     assert.equal(accountSectionLabels.membership, "会员中心");
-    assert.equal(accountSectionLabels.accounts, "出租账号");
+    assert.equal(accountSectionLabels.accounts, "上架账号");
+    assert.equal(accountSectionLabels.rented, "出租账号");
     assert.equal(accountSectionLabels.invite, "邀请与佣金");
 
     // 4 groups
@@ -1455,7 +1456,7 @@ test("M1C: navigation grouping, labels, and independent membership view route", 
     assert.equal(NAV_GROUPS[1].title, "租赁管理");
     assert.equal(NAV_GROUPS[2].title, "资产与收益");
     assert.equal(NAV_GROUPS[3].title, "账号设置");
-    assert.equal(NAV_ITEMS.length, 11);
+    assert.equal(NAV_ITEMS.length, 12);
 
     // Sidebar renders group titles
     await probe.render(React.createElement(AccountCenterFrame, { active: "membership", scope: "user_nav_test:1" }, React.createElement("div", null, "content")));

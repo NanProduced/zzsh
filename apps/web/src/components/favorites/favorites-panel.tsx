@@ -77,7 +77,7 @@ export function FavoritesPanel() {
     return () => { readSequenceRef.current += 1; };
   }, [identity, userId, generation, attempt, load]);
 
-  if (identity === "loading") return <section className="account-guest" aria-busy="true"><h2>正在读取登录状态…</h2><p>请稍候，个人收藏准备中。</p></section>;
+  if (identity === "loading") return <section aria-busy="true" aria-label="正在加载收藏"><p className="session-loading-label" role="status">正在加载收藏…</p><div className="account-grid" aria-hidden="true">{Array.from({ length: 3 }, (_, index) => <AccountCardSkeleton key={index} />)}</div></section>;
   if (identity === "guest")
     return <section className="account-guest">
       <HeartOff size={30} />
@@ -114,7 +114,7 @@ export function FavoritesPanel() {
   const shown = visible.filter((item) => matchesFilter(item) && matchesSearch(item));
   const empty = visible.length === 0;
   return <section className="favorites-panel account-module" aria-busy={panel.status === "loading"}>
-    <header className="account-module-heading"><div><h2>我的收藏</h2><p>保存感兴趣的账号，随时回来查看最新资料。</p></div></header>
+    <header className="account-module-heading"><div><h2>我的收藏</h2><p>保存感兴趣的账号，随时回来查看最新资料。收藏不代表账号仍可租，价格与租赁条件以详情实时读取为准。</p></div></header>
     <FavoriteNotice />
     {empty ? null : <div className="favorites-toolbar">
       <span className="favorites-count">已加载 {visible.length} 个</span>
@@ -173,7 +173,6 @@ export function FavoritesPanel() {
       <p>有 {faultCount} 个收藏的账号摘要暂时无法读取；收藏记录仍在，可重新读取。</p>
       <button type="button" className="button secondary button--sm" onClick={() => setAttempt((value) => value + 1)}><RotateCw size={15} />重新读取</button>
     </div> : null}
-    <p className="favorites-footnote">收藏不代表账号仍可租；价格与租赁条件以详情实时读取为准。</p>
     {panel.moreError ? <div className="favorites-more-error" role="alert"><span>更多收藏暂未加载，已显示的账号仍保留。</span><button type="button" className="button secondary" onClick={() => void load(panel.nextCursor, true, generationRef.current)}>重试加载</button></div> : null}
     {panel.nextCursor && !panel.moreError ? <div className="market-pagination"><button type="button" className="button secondary" disabled={panel.status === "loading"} onClick={() => void load(panel.nextCursor, true, generationRef.current)}>{panel.status === "loading" ? "正在读取…" : "加载更多收藏"}</button></div> : null}
   </section>;

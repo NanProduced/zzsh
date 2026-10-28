@@ -35,7 +35,9 @@ test('publish retries replay the frozen step and preserve input/media review bou
   assert.match(publishSource, /bindingSaved: false/);
   assert.match(publishSource, /已保存.*已上传，待保存/);
   assert.doesNotMatch(publishSource, /<td>\{item\.unit\}<\/td>/);
-  assert.match(publishSource, /beforeunload/);
+  assert.doesNotMatch(publishSource, /beforeunload/);
+  assert.match(publishSource, /guardNavigation/);
+  assert.match(publishSource, /ConfirmAlertDialog/);
   assert.match(publishSource, /function nextMediaPosition/);
   assert.match(publishSource, /remaining\.map\(\(binding, position\) => \(\{ \.\.\.binding, position \}\)\)/);
 });
@@ -47,11 +49,14 @@ test('publish shows a server quote, separates owner income from deposits and req
   assert.match(publishSource, /租客押金/);
   assert.match(publishSource, /发布保证金/);
   assert.match(publishSource, /ownerQuoteBreakdown/);
-  assert.match(publishSource, /我已阅读并同意本次出租条款与条件/);
+  assert.match(publishSource, /我已阅读并同意/);
+  assert.match(publishSource, /publish-terms-inline-link/);
+  assert.match(publishSource, /出租协议/);
   assert.match(publishSource, /条款已按当前版本确认/);
   assert.match(publishSource, /核对报价/);
   assert.match(publishSource, /确认上架/);
-  assert.match(publishSource, /尚未核价/);
+  assert.match(publishSource, /待重新核算/);
+  assert.match(publishSource, /重新核对报价/);
   assert.doesNotMatch(publishSource, /可继续提交/);
   assert.doesNotMatch(publishSource, /服务端报价/);
 });

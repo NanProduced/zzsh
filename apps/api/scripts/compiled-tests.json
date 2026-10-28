@@ -217,5 +217,6 @@
   "dist/test/frozen-listing-read.test.js",
   "dist/test/owner-account-list.test.js",
   "dist/test/membership-profit-readonly-chain.test.js",
-  "dist/test/supply-quote-preview-consistency.test.js"
+  "dist/test/supply-quote-preview-consistency.test.js",
+  "dist/test/order-list-line-names.test.js"
 ]

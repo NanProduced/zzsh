@@ -1,17 +1,25 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode, type RefObject } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactNode, type RefObject } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
+import * as Popover from "@radix-ui/react-popover";
 import { Check, ChevronRight, Clock, Copy, Image as ImageIcon, ImageOff, PackageOpen, X } from "lucide-react";
 import { FavoriteButton } from "@/components/favorites/favorite-button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ThumbnailCarousel } from "@/components/ui/thumbnail-carousel";
 import { rememberAccountReturn, type AccountReturnSnapshot } from "@/lib/account-return";
-import { haffRatioLabel, resourceQuantityLabel, skinQualityLabel, skinTypeLabel, type ListingCardData, type ResourceLine, type SkinTag } from "@/lib/listing-view";
+import { resourceQuantityLabel, skinQualityLabel, skinTypeLabel, type ListingCardData, type ResourceLine, type SkinTag } from "@/lib/listing-view";
 import { LoginMethodIcon } from "./login-method-icon";
 import { canonicalResourceCode } from "@/lib/listing-filters";
 export { canonicalResourceCode } from "@/lib/listing-filters";
+import {
+  deriveAccountTitle,
+  formatSupplyItem,
+  isHaff,
+  orderedQuoteResources,
+} from "@/lib/account-title";
+export { isHaff, orderedQuoteResources } from "@/lib/account-title";
 
 export type AccountCardData = ListingCardData;
 export type AccountCardViewMode = "list" | "grid";
@@ -39,29 +47,97 @@ function compactLevel(value: string | null, fallback: string | null = null): str
   return compact ? `${compact}级` : fallback;
 }
 
-export function isHaff(line: ResourceLine): boolean {
-  return line.unitLabel === "哈夫币";
+/** Published base ratio exactly as the server delivered it; never re-derived from quantities or amounts. */
+export function authoritativeRatioLabel(raw: string | null | undefined): string | null {
+  const trimmed = raw?.trim();
+  if (!trimmed || !/^\d+(?:\.\d+)?$/.test(trimmed)) return null;
+  return `${trimmed.replace(/(\.\d*?[1-9])0+$|\.0+$/, "$1")}万/元`;
 }
 
-const RESOURCE_DISPLAY_ORDER = [
-  "df_billable_level6_armor",
-  "df_billable_level6_helmet",
-  "df_billable_level6_bullet",
-  "df_billable_awm_bullet",
-  "df_billable_barrett_bullet",
-  "df_billable_coffee",
-  "df_billable_top_insure_card",
-  "top_insure_card_piece",
-];
-
-function resourceDisplayOrder(line: ResourceLine): number {
-  const index = RESOURCE_DISPLAY_ORDER.indexOf(canonicalResourceCode(line.code) ?? "");
-  return index === -1 ? RESOURCE_DISPLAY_ORDER.length : index;
+function isZeroQuantity(line: ResourceLine): boolean {
+  const quantity = line.quantity.trim();
+  return /^\d+$/.test(quantity) && BigInt(quantity) === 0n;
 }
 
-export function orderedQuoteResources(data: AccountCardData): ResourceLine[] {
-  const nonHaff = data.resourceLines.filter((line) => !isHaff(line));
-  return [...nonHaff].sort((left, right) => resourceDisplayOrder(left) - resourceDisplayOrder(right));
+export type ResourceSummary = { lines: ResourceLine[]; hiddenCount: number };
+
+/**
+ * Explicit comparison summary: current filter hits first, then declared stock that is not a
+ * known zero. hiddenCount counts every real row left out, so "还有 N 项" never hides a row
+ * silently and never invents stock from the visible cells.
+ */
+function compactResourceQty(line: ResourceLine): string {
+  const ql = (line.quantityLabel || line.quantity || "").replace(/\s+/g, "");
+  if (ql.includes("（")) {
+    return ql.split("（")[0] || ql;
+  }
+  return resourceQuantityLabel(line);
+}
+
+function resourceVisualPriority(line: ResourceLine): number {
+  const code = line.code ?? "";
+  const name = line.name;
+  if (code.includes("armor") || name.includes("甲")) return 1;
+  if (code.includes("helmet") || name.includes("头")) return 2;
+  if (code.includes("bullet") || name.includes("子弹")) return 3;
+  return 10;
+}
+
+export function summarizeQuoteResources(
+  data: Pick<AccountCardData, "resourceLines">,
+  matchedItemIds: ReadonlySet<string> | null | undefined,
+  slots: number
+): ResourceSummary {
+  const ordered = orderedQuoteResources(data);
+  const eligible = ordered.filter((line) => matchedItemIds?.has(line.itemId) || !isZeroQuantity(line));
+  const ranked = [...eligible].sort((left, right) => {
+    const leftMatch = matchedItemIds?.has(left.itemId) ? 1 : 0;
+    const rightMatch = matchedItemIds?.has(right.itemId) ? 1 : 0;
+    if (leftMatch !== rightMatch) return rightMatch - leftMatch;
+
+    const leftTier = resourceVisualPriority(left);
+    const rightTier = resourceVisualPriority(right);
+    if (leftTier !== rightTier) return leftTier - rightTier;
+
+    const leftLen = left.name.length;
+    const rightLen = right.name.length;
+    if (leftLen !== rightLen) return leftLen - rightLen;
+
+    return 0;
+  });
+  const lines = ranked.slice(0, ranked.length > slots ? slots - 1 : slots);
+  return { lines, hiddenCount: ranked.length - lines.length };
+}
+
+function financeFacts(data: AccountCardData) {
+  const historical = Boolean(data.historicalReadOnly);
+  const depositKnown = !isUnknownMoney(data.depositLabel);
+  const payableKnown = !isUnknownMoney(data.payableTotalLabel);
+  const depositZero = depositKnown && isZeroMoney(data.depositLabel ?? "");
+  const totalIsPayable = !historical && payableKnown;
+  const totalValue = historical
+    ? moneyValue(data.resourceTotalLabel, "无资源费用")
+    : moneyValue(totalIsPayable ? data.payableTotalLabel : data.resourceTotalLabel, "无资源费用");
+  const totalCaption = historical ? "不含押金" : totalIsPayable ? (depositZero ? "" : "含押金") : "押金待核";
+  return {
+    historical,
+    totalLabel: historical ? "资源费用记录" : "总价",
+    totalValue,
+    totalCaption,
+    totalAria: historical
+      ? `资源费用记录 ${totalValue}，不含押金`
+      : totalIsPayable
+        ? `总价 ${totalValue}${depositZero ? "" : "，含押金"}`
+        : `资源费用 ${totalValue}，押金待核`,
+    haffLabel: historical ? "哈夫币租金记录" : "哈夫币租金",
+    haffValue: moneyValue(data.haffRentLabel, "无租金"),
+    itemsLabel: historical ? "物资预付记录" : "物资预付",
+    itemsValue: moneyValue(data.itemResourceTotalLabel, "无物品费用"),
+    depositLabel: historical ? "押金记录" : "押金",
+    depositValue: depositKnown ? moneyValue(data.depositLabel, "无需押金") : historical ? "未提供" : "详情核定",
+    depositUnknown: !historical && !depositKnown,
+    ratio: authoritativeRatioLabel(data.baseRenterHaffRatioWanPerYuan),
+  };
 }
 
 function isUnknownMoney(value: string | null | undefined): boolean {
@@ -73,24 +149,44 @@ function isZeroMoney(value: string): boolean {
   return /^￥?¥?\s*0(?:\.0+)?$/.test(value.replace(/\s+/g, ""));
 }
 
+const COPY_ACTION_TEXT = { idle: "复制", ok: "已复制", error: "复制失败" } as const;
+type CopyStatus = keyof typeof COPY_ACTION_TEXT;
+
 function CopyableAccountNumber({ displayNo, compact = false }: { displayNo: string | null; compact?: boolean }) {
-  const [status, setStatus] = useState<"idle" | "ok" | "error">("idle");
+  const [status, setStatus] = useState<CopyStatus>("idle");
+  const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (resetTimer.current !== null) clearTimeout(resetTimer.current);
+  }, []);
   const number = displayNo?.trim() || null;
   if (!number) return <span className={`account-card-number account-card-number--missing${compact ? " account-card-number--compact" : ""}`}>账号编号待分配</span>;
   const copy = async (event: ReactMouseEvent<HTMLButtonElement>) => {
     event.preventDefault();
     event.stopPropagation();
+    let ok = false;
     try {
       await navigator.clipboard.writeText(number);
-      setStatus("ok");
+      ok = true;
     } catch {
-      setStatus("error");
+      ok = false;
     }
+    setStatus(ok ? "ok" : "error");
+    if (resetTimer.current !== null) clearTimeout(resetTimer.current);
+    resetTimer.current = setTimeout(() => {
+      setStatus("idle");
+      resetTimer.current = null;
+    }, 2000);
   };
   return <button type="button" className={`account-card-number${compact ? " account-card-number--compact" : ""}`} onClick={copy} aria-label={`复制账号编号 ${number}`}>
-    {status === "ok" ? <Check size={12} aria-hidden="true" /> : <Copy size={12} aria-hidden="true" />}
+    {status === "ok" ? <Check size={12} aria-hidden="true" /> : status === "error" ? <X size={12} aria-hidden="true" /> : <Copy size={12} aria-hidden="true" />}
     <span>账号 {number}</span>
-    <span className="account-card-number-action">{status === "ok" ? "已复制" : status === "error" ? "复制失败" : "复制"}</span>
+    {/* Stacked labels keep the button width fixed while the transient result shows. */}
+    <span className="account-card-number-action" aria-hidden="true" style={{ display: "inline-grid" }}>
+      {(Object.keys(COPY_ACTION_TEXT) as CopyStatus[]).map((key) => (
+        <span key={key} style={{ gridArea: "1 / 1", visibility: status === key ? "visible" : "hidden" }}>{COPY_ACTION_TEXT[key]}</span>
+      ))}
+    </span>
+    <span className="sr-only" role="status">{status === "ok" ? "账号编号已复制" : status === "error" ? "复制失败，请选中编号手动复制" : ""}</span>
   </button>;
 }
 
@@ -99,6 +195,42 @@ function ResourceEmpty({ compact = false }: { compact?: boolean }) {
     <PackageOpen size={compact ? 13 : 15} aria-hidden="true" />
     <span>{compact ? "物资未申报" : "库存尚未申报"}</span>
   </span>;
+}
+
+const RESOURCE_POPOVER_SURFACE: CSSProperties = {
+  width: 300,
+  padding: 6,
+  border: "1px solid var(--color-border-default)",
+  borderRadius: 8,
+  background: "var(--color-bg-card)",
+  color: "var(--color-text-primary)",
+  boxShadow: "var(--shadow-lg)",
+};
+
+/** Complete declared stock on demand: the comparison summary stays short, nothing is clipped silently. */
+function FullResourcesPopover({ data, hiddenCount, className, children }: {
+  data: AccountCardData;
+  hiddenCount: number;
+  className: string;
+  children: ReactNode;
+}) {
+  return <Popover.Root>
+    <Popover.Trigger asChild>
+      <button type="button" className={className} aria-label={`还有 ${hiddenCount} 项物资，展开完整清单`}>{children}</button>
+    </Popover.Trigger>
+    <Popover.Portal>
+      <Popover.Content side="bottom" align="start" sideOffset={6} collisionPadding={12} style={RESOURCE_POPOVER_SURFACE} aria-label="该账号申报的全部物资">
+        <div className="resources-grid-2x2" style={{ minHeight: 0 }}>
+          {orderedQuoteResources(data).map((line) => (
+            <div key={line.itemId} className="resources-cell">
+              <span className="resources-cell-name" title={line.name}>{line.name}</span>
+              <strong className="resources-cell-qty" title={resourceQuantityLabel(line)}>{resourceQuantityLabel(line)}</strong>
+            </div>
+          ))}
+        </div>
+      </Popover.Content>
+    </Popover.Portal>
+  </Popover.Root>;
 }
 
 export function moneyValue(value: string | null | undefined, zeroLabel = "¥0.00"): string {
@@ -118,91 +250,26 @@ export function listTermRuleLabel(termOptionLabel: string | null | undefined): s
 }
 
 export function composeGridTitle(
-  data: AccountCardData,
-  haffQuantityText: string | null
+  data: Parameters<typeof deriveAccountTitle>[0],
+  haffQuantityText?: string | null
 ): { haff: string | null; rest: string } {
-  const parts: string[] = [];
-  const safeBox = safeBoxSizeText(conditionValue(data, "safe_box_code"));
-  if (safeBox) parts.push(`${safeBox}安全箱`);
-  const grading = conditionValue(data, "grading_code");
-  const level = compactLevel(conditionValue(data, "character_level"), null);
-  const rank = [grading, level].filter(Boolean).join(" ");
-  if (rank) parts.push(rank);
-
-  const haff = haffQuantityText ? `${haffQuantityText} 哈夫币` : null;
-
-  if (parts.length > 0) {
-    return { haff, rest: parts.join(" · ") };
-  }
-
-  const rawTitle = data.historicalReadOnly ? (data.title?.trim() || "账号资料待补充") : (data.title?.trim() || (data.displayNo ? `账号 ${data.displayNo}` : "游戏账号"));
-  if (!haffQuantityText) {
-    return { haff: null, rest: rawTitle };
-  }
-
-  const escapedHaff = haffQuantityText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const haffPrefixPattern = new RegExp(`^\\s*${escapedHaff}\\s*(?:哈夫币)?\\s*[·\\-\\s]*`, "i");
-  const cleaned = rawTitle.replace(haffPrefixPattern, "").trim();
-
-  return { haff, rest: cleaned.length > 0 ? cleaned : "" };
+  const title = deriveAccountTitle(data, haffQuantityText);
+  return {
+    haff: title.haff,
+    rest: title.rest,
+  };
 }
 
 export function composeListTitle(
-  data: Pick<AccountCardData, "title" | "displayNo" | "conditionLines" | "historicalReadOnly">,
-  haffQuantityText: string | null
+  data: Parameters<typeof deriveAccountTitle>[0],
+  haffQuantityText?: string | null
 ): { identity: string; haff: string | null; rest: string } {
-  const haff = haffQuantityText ? `${haffQuantityText} 哈夫币` : null;
-  const parts: string[] = [];
-  const safeBoxRaw = conditionValue(data, "safe_box_code");
-  const safeBox = safeBoxSizeText(conditionValue(data, "safe_box_code"));
-  if (safeBox) parts.push(`${safeBox}安全箱`);
-  const grading = conditionValue(data, "grading_code");
-  const level = compactLevel(conditionValue(data, "character_level"), null);
-  const rank = [grading, level].filter(Boolean).join(" ");
-  if (rank) parts.push(rank);
-
-  let identity = "";
-  if (!data.historicalReadOnly && data.displayNo?.trim()) {
-    identity = `账号 ${data.displayNo.trim()}`;
-  } else if (data.title?.trim()) {
-    let t = data.title.trim();
-    t = t.replace(/(?:微信扫码|QQ账密|手机号|支持\s*QQ上号|支持\s*微信上号)/g, "").trim();
-    if (haffQuantityText) {
-      const match = haffQuantityText.match(/^(\d+(?:\.\d+)?)M$/i);
-      if (match) {
-        const haffPattern = new RegExp(`(^|[·|｜\\s])${match[1]}\\s*M\\s*(?:哈夫币)?(?=$|[·|｜\\s])`, "gi");
-        t = t.replace(haffPattern, "$1");
-      }
-    }
-    if (safeBoxRaw) {
-      const safeBoxPattern = new RegExp(`(^|[·|｜\\s])${safeBoxRaw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?=$|[·|｜\\s])`, "gi");
-      t = t.replace(safeBoxPattern, "$1");
-    }
-    if (level) {
-      const levelMatch = level.match(/^(\d+)级$/);
-      if (levelMatch) {
-        const levelPattern = new RegExp(`(^|[·|｜\\s])${levelMatch[1]}\\s*级(?=$|[·|｜\\s])`, "gi");
-        t = t.replace(levelPattern, "$1");
-      }
-    }
-    const duplicateTokens = [
-      safeBox ? `${safeBox}安全箱` : null,
-      grading ? `${grading}段位` : null,
-      grading,
-      level,
-    ].filter((token): token is string => Boolean(token));
-    for (const token of duplicateTokens) {
-      const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      t = t.replace(new RegExp(`(^|[·|｜\\s])${escaped}(?=$|[·|｜\\s])`, "gi"), "$1");
-    }
-    t = t.replace(/\s*[·|｜]\s*/g, " · ").replace(/^[·\-|｜\s]+|[·\-|｜\s]+$/g, "").replace(/(?:\s*·\s*){2,}/g, " · ").trim();
-    identity = t.length > 0 ? t : parts.length ? "账号资料" : "游戏账号";
-  } else {
-    identity = "游戏账号";
-  }
-
-  const rest = parts.join(" · ");
-  return { identity, haff, rest };
+  const title = deriveAccountTitle(data, haffQuantityText);
+  return {
+    identity: "",
+    haff: title.haff,
+    rest: title.rest,
+  };
 }
 
 export function skinChipTone(tag: SkinTag): "teal" | "purple" | "blue" | "default" {
@@ -237,21 +304,17 @@ function isArmorResource(line: ResourceLine): boolean {
   return (line.code ?? "").includes("armor") || (line.code ?? "").includes("helmet") || line.name.includes("甲") || line.name.includes("头盔");
 }
 
-function compactResourceQty(line: ResourceLine): string {
-  const ql = (line.quantityLabel || line.quantity || "").replace(/\s+/g, "");
-  if (ql.includes("（")) {
-    return ql.split("（")[0] || ql;
-  }
-  return resourceQuantityLabel(line);
-}
+
 
 function AccountGallery({
   data,
+  visibleTitle,
   open,
   onOpenChange,
   returnFocusRef,
 }: {
   data: AccountCardData;
+  visibleTitle: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   returnFocusRef: RefObject<HTMLButtonElement | null>;
@@ -275,7 +338,7 @@ function AccountGallery({
   const carouselItems = media.map((item, index) => ({
     id: item.assetId,
     src: item.url,
-    alt: `${data.title}公开图片，第${index + 1}张`,
+    alt: `${visibleTitle}公开图片，第${index + 1}张`,
   }));
   const handleImageError = (itemId: string) => {
     setFailedItemIds((current) => new Set(current).add(itemId));
@@ -306,7 +369,7 @@ function AccountGallery({
             }
           }}
         >
-          <Dialog.Title className="account-gallery-title">{data.title} · 图片预览</Dialog.Title>
+          <Dialog.Title className="account-gallery-title">{visibleTitle} · 图片预览</Dialog.Title>
           <Dialog.Description id={descriptionId} className="sr-only">
             使用左右按钮切换该账号的公开展示图片，按 Esc 关闭预览。
           </Dialog.Description>
@@ -332,6 +395,7 @@ export function AccountCard({
   viewMode = "grid",
   imageLoading = "lazy",
   coverRetry = false,
+  matchedResourceItemIds = null,
 }: {
   data: AccountCardData;
   getReturnState?: () => AccountReturnSnapshot;
@@ -339,6 +403,8 @@ export function AccountCard({
   imageLoading?: "eager" | "lazy";
   /** 收藏页需要封面失败后可重试；市场页默认保持原降级，不新增控件。 */
   coverRetry?: boolean;
+  /** Committed filter hits; listed first in the resource summary so a matched row is always checkable. */
+  matchedResourceItemIds?: ReadonlySet<string> | null;
 }) {
   const [failedSrc, setFailedSrc] = useState<string>();
   const [retryToken, setRetryToken] = useState(0);
@@ -355,8 +421,7 @@ export function AccountCard({
   const haffQuantityText = haffLine
     ? (haffLine.quantityLabel || haffLine.quantity).replace(/\s+/g, "")
     : null;
-  const ratioText = haffLine ? haffRatioLabel(haffLine.quantity, haffLine.costAmount) : "待确认";
-  const showRatioNote = ratioText !== "待确认";
+  const facts = financeFacts(data);
 
 
   const vitValue = compactLevel(conditionValue(data, "vit_level"), null);
@@ -365,19 +430,21 @@ export function AccountCard({
   const termValue = data.termLabel?.replace(/\s+/g, "") || null;
   const serviceWindowValue = conditionValue(data, "service_window");
 
-  const gridTitle = composeGridTitle(data, haffQuantityText);
+  const accountTitle = deriveAccountTitle(data, haffQuantityText);
+  const accountVisibleTitle = [accountTitle.primary, accountTitle.secondary].filter(Boolean).join(" · ");
   const readOnly = data.historicalReadOnly || data.canCreateOrder === false;
-  const isPayableConfirmed = !isUnknownMoney(data.payableTotalLabel);
   const isFastMode = !readOnly && (data.rentalMode === "fast" || conditionValue(data, "rental_mode") === "fast");
   const mediaCount = data.media.length;
 
-  const favorite = <FavoriteButton accountId={data.id} title={data.title} />;
+  const favoriteFor = (title: string) => <FavoriteButton accountId={data.id} title={title} />;
+
+  const [expandedSupplies, setExpandedSupplies] = useState(false);
+  const [expandedFees, setExpandedFees] = useState(false);
 
   if (viewMode === "list") {
-    const listTitle = composeListTitle(data, haffQuantityText);
-    const listIdentity = listTitle.identity === "账号资料" ? "" : listTitle.identity;
-    const listAccessibleTitle = [listIdentity, listTitle.haff, listTitle.rest].filter(Boolean).join(" · ") || "游戏账号";
-
+    const quoteResources = matchedResourceItemIds && matchedResourceItemIds.size > 0
+      ? [...orderedQuoteResources(data)].sort((left, right) => Number(matchedResourceItemIds.has(right.itemId)) - Number(matchedResourceItemIds.has(left.itemId)))
+      : orderedQuoteResources(data);
     const regionProvince = conditionValue(data, "region_province");
     const regionCity = conditionValue(data, "region_city");
     const regionText = [regionProvince, regionCity].filter(Boolean).join(" · ") || "-";
@@ -410,9 +477,70 @@ export function AccountCard({
       { label: "每日消耗", value: dailyVal },
     ];
 
-    const listResources = orderedQuoteResources(data);
+    // Mobile 3x2 core attributes: 账号等级/体力/负重, 6级护甲/6级头盔/6级子弹
+    const armorLine = data.resourceLines.find((l) => {
+      const code = canonicalResourceCode(l.code);
+      return code === "df_billable_level6_armor" || l.name.includes("6级护甲") || l.name.includes("六级甲") || l.name.includes("六级护甲");
+    });
+    const armor6Display = armorLine ? formatSupplyItem(armorLine).quantityText : "-";
 
-    const extraSkinCount = Math.max(0, data.skinTags.length - 3);
+    const helmetLine = data.resourceLines.find((l) => {
+      const code = canonicalResourceCode(l.code);
+      return code === "df_billable_level6_helmet" || l.name.includes("6级头盔") || l.name.includes("六级头") || l.name.includes("六级头盔");
+    });
+    const helmet6Display = helmetLine ? formatSupplyItem(helmetLine).quantityText : "-";
+
+    const bulletLine = data.resourceLines.find((l) => {
+      const code = canonicalResourceCode(l.code);
+      return code === "df_billable_level6_bullet" || l.name.includes("6级子弹") || l.name.includes("六级子弹");
+    });
+    const bullet6Display = bulletLine ? (() => {
+      const raw = bulletLine.quantity?.trim() ?? "";
+      if (/^\d+$/.test(raw)) {
+        const rounds = BigInt(raw);
+        const stacks = rounds / 60n;
+        const rem = rounds % 60n;
+        if (stacks > 0n && rem === 0n) return `${stacks}组`;
+        if (stacks === 0n) return `${rounds}发`;
+        return `${stacks}组（${rounds}发）`;
+      }
+      return formatSupplyItem(bulletLine).quantityText;
+    })() : "-";
+
+    const safeBoxRaw = conditionValue(data, "safe_box_code");
+    const safeBoxText = safeBoxSizeText(safeBoxRaw) ? `${safeBoxSizeText(safeBoxRaw)}安全箱` : null;
+    const gradingDisplay = conditionValue(data, "grading_code") && conditionValue(data, "grading_code") !== "-"
+      ? conditionValue(data, "grading_code")
+      : null;
+
+    const extraSkinCount = Math.max(0, data.skinTags.length - 6);
+
+    const mobileResourceItems = [
+      { label: "6级甲", value: armor6Display },
+      { label: "6级头盔", value: helmet6Display },
+      { label: "6级子弹", value: bullet6Display },
+    ];
+    const hasMobileResourceFacts = mobileResourceItems.some((item) => item.value !== "-");
+    const positiveResourceCount = quoteResources.filter((line) => !formatSupplyItem(line).isZero).length;
+    const accountSummaryItems = [
+      { label: "等级", value: charVal ? compactLevel(charVal, "-") : "-" },
+      { label: "体力", value: vitValue || "-" },
+      { label: "负重", value: bearValue || "-" },
+      ...(gradingDisplay ? [] : [{ label: "段位", value: gradingValue }]),
+    ];
+    const conditionSummaryItems = [
+      serviceWindowValue ? { label: "可上号", value: serviceWindowValue } : null,
+      termValue ? { label: "租期", value: termValue } : null,
+      dailyVal && dailyVal !== "-" ? { label: "每日", value: dailyVal } : null,
+    ].filter((item): item is { label: string; value: string } => item !== null);
+    const resourceSummaryItems = mobileResourceItems.filter((item) => item.value !== "-").slice(0, 2);
+    const depositSummaryText = facts.historical
+      ? "记录不含押金"
+      : facts.depositUnknown
+      ? "押金待核"
+      : facts.depositValue === "无需押金"
+      ? "无押金"
+      : `含押金 ${facts.depositValue.replace(/\.00$/, "")}`;
 
     let sublineContent: ReactNode = null;
     if (serviceWindowValue) {
@@ -434,7 +562,7 @@ export function AccountCard({
               type="button"
               ref={galleryTriggerRef}
               className="account-card-thumb account-list-thumb"
-              aria-label={missing && mediaCount === 0 ? "公开图片不可用" : `查看${data.title}公开图片`}
+              aria-label={missing && mediaCount === 0 ? "公开图片不可用" : `查看${accountVisibleTitle}公开图片`}
               disabled={missing && mediaCount === 0}
               onClick={(e) => {
                 e.stopPropagation();
@@ -449,7 +577,7 @@ export function AccountCard({
               ) : (
                 <img
                   src={data.imageUrl}
-                  alt={`${data.title}公开图片`}
+                  alt={`${accountVisibleTitle}公开图片`}
                   onError={() => setFailedSrc(data.imageUrl)}
                   width={220}
                   height={100}
@@ -480,17 +608,32 @@ export function AccountCard({
               <Link
                 className="account-list-title-link"
                 href={accountHref(data.id)}
-                aria-label={`查看账号 ${listAccessibleTitle}`}
+                aria-label={`查看账号 ${accountVisibleTitle}`}
                 onClick={rememberDetail}
               >
-                {listIdentity ? <span className="account-list-title-identity">{listIdentity}</span> : null}
-                {listTitle.haff ? (
-                  <span className="account-list-haff-lead">{listIdentity ? " · " : ""}{listTitle.haff}</span>
+                {accountTitle.haff ? <span className="account-list-haff-lead">{accountTitle.haff}</span> : null}
+                {accountTitle.rest ? (
+                  <span className="account-list-title-rest">{accountTitle.haff ? " · " : ""}{accountTitle.rest}</span>
                 ) : null}
-                {listTitle.rest ? (
-                  <span className="account-list-title-rest">{listIdentity || listTitle.haff ? " · " : ""}{listTitle.rest}</span>
+                {accountTitle.secondary ? (
+                  <span className="account-list-title-secondary">
+                    <span className="sr-only"> · </span>
+                    <span className="account-title-supplies-badge">{accountTitle.secondary}</span>
+                  </span>
                 ) : null}
               </Link>
+              {facts.ratio ? (
+                <span
+                  className="account-tag-pill account-tag-pill--ratio"
+                  title="哈夫币兑换比例（万哈夫币/元），不含会员礼遇与个人优惠"
+                >
+                  {facts.ratio}
+                </span>
+              ) : null}
+              <div className="account-mobile-badges" aria-label="关键属性标签">
+                {safeBoxText ? <span className="account-tag-pill account-tag-pill--safebox">{safeBoxText}</span> : null}
+                {gradingDisplay ? <span className="account-tag-pill account-tag-pill--grading">{gradingDisplay}</span> : null}
+              </div>
             </div>
             <div className="account-list-subline-row">{data.availabilityLabel || data.historicalReadOnly ? <span className="account-history-badge" data-public-availability={data.availabilityState}>{data.availabilityLabel ?? "暂不可租"}</span> : null}
               {isFastMode ? <span className="account-list-deal-tag">特惠</span> : null}
@@ -500,21 +643,87 @@ export function AccountCard({
           </div>
 
           <section className="account-list-matrix" aria-label="账号属性条件">
-            <div className="matrix-row">
-              {row1Cells.map((cell) => (
-                <div key={cell.label} className="matrix-col">
-                  <span className="matrix-label">{cell.label}</span>
-                  <strong className="matrix-value" title={cell.value}>{cell.value}</strong>
-                </div>
-              ))}
+            <div className="account-matrix-desktop">
+              <div className="matrix-row">
+                {row1Cells.map((cell) => (
+                  <div key={cell.label} className="matrix-col">
+                    <span className="matrix-label">{cell.label}</span>
+                    <strong className="matrix-value" title={cell.value}>{cell.value}</strong>
+                  </div>
+                ))}
+              </div>
+              <div className="matrix-row">
+                {row2Cells.map((cell) => (
+                  <div key={cell.label} className="matrix-col">
+                    <span className="matrix-label">{cell.label}</span>
+                    <strong className="matrix-value" title={cell.value}>{cell.value}</strong>
+                  </div>
+                ))}
+              </div>
             </div>
-            <div className="matrix-row">
-              {row2Cells.map((cell) => (
-                <div key={cell.label} className="matrix-col">
-                  <span className="matrix-label">{cell.label}</span>
-                  <strong className="matrix-value" title={cell.value}>{cell.value}</strong>
+            <div className="account-mobile-summary" aria-label="账号摘要">
+              <div className="account-mobile-summary-line">
+                {accountSummaryItems.map((item, index) => (
+                  <span className="account-mobile-summary-item" key={item.label}>
+                    {index > 0 ? <span className="account-mobile-summary-sep">｜</span> : null}
+                    <span className="account-mobile-summary-label">{item.label}</span>
+                    <strong title={item.value}>{item.value}</strong>
+                  </span>
+                ))}
+              </div>
+              {conditionSummaryItems.length > 0 ? (
+                <div className="account-mobile-summary-line">
+                  {conditionSummaryItems.map((item, index) => (
+                    <span className="account-mobile-summary-item" key={item.label}>
+                      {index > 0 ? <span className="account-mobile-summary-sep">·</span> : null}
+                      <span className="account-mobile-summary-label">{item.label}</span>
+                      <strong title={item.value}>{item.value}</strong>
+                    </span>
+                  ))}
                 </div>
-              ))}
+              ) : null}
+              <div className="account-mobile-summary-line account-mobile-summary-resources">
+                {hasMobileResourceFacts ? (
+                  <>
+                    {resourceSummaryItems.map((item, index) => (
+                      <span className="account-mobile-summary-item" key={item.label}>
+                        {index > 0 ? <span className="account-mobile-summary-sep">·</span> : null}
+                        <span className="account-mobile-summary-label">{item.label}</span>
+                        <strong title={item.value}>{item.value}</strong>
+                      </span>
+                    ))}
+                    {positiveResourceCount > 0 ? (
+                      <button
+                        type="button"
+                        className="account-mobile-resource-toggle"
+                        data-with-sep={resourceSummaryItems.length > 0 ? "true" : undefined}
+                        aria-expanded={expandedSupplies}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setExpandedSupplies((v) => !v);
+                        }}
+                      >
+                        <span>{expandedSupplies ? "收起" : `全部 ${positiveResourceCount} 项`}</span>
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={expandedSupplies ? "account-toggle-icon--open" : ""} aria-hidden="true"><polyline points="6 9 12 15 18 9" /></svg>
+                      </button>
+                    ) : null}
+                  </>
+                ) : <ResourceEmpty compact />}
+              </div>
+              {expandedSupplies ? (
+                <div className="account-mobile-expanded-supplies" aria-label="全部物资明细">
+                  {quoteResources.map((line) => {
+                    const formatted = formatSupplyItem(line);
+                    return (
+                      <div key={`${line.itemId}-${line.code ?? ""}`} className={`expanded-supply-row ${formatted.isZero ? "expanded-supply-row--zero" : ""}`}>
+                        <span className="expanded-supply-name">{line.name}</span>
+                        <strong className="expanded-supply-qty">{formatted.quantityText}</strong>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
             </div>
           </section>
 
@@ -538,37 +747,53 @@ export function AccountCard({
                 </Tooltip>
               </div>
 
-              {listResources.length > 0 ? <div className="resources-grid-2x2">
-                {listResources.map((line) => (
-                  <div
-                    key={line.itemId}
-                    className="resources-cell"
-                  >
-                    <span className="resources-cell-name" title={line.name}>{line.name}</span>
-                    <strong className="resources-cell-qty" title={resourceQuantityLabel(line)}>
-                      {resourceQuantityLabel(line)}
-                    </strong>
+              {(() => {
+                const positiveResources = quoteResources.filter((line) => {
+                  const formatted = formatSupplyItem(line);
+                  return !formatted.isZero;
+                }).sort((left, right) => {
+                  const matched = Number(matchedResourceItemIds?.has(right.itemId) ?? false) - Number(matchedResourceItemIds?.has(left.itemId) ?? false);
+                  return matched || Number(canonicalResourceCode(right.code) === "df_billable_level6_bullet") - Number(canonicalResourceCode(left.code) === "df_billable_level6_bullet");
+                });
+                return positiveResources.length > 0 ? (
+                  <div className="resources-grid-2x2">
+                    {positiveResources.map((line) => {
+                      const formatted = formatSupplyItem(line);
+                      return (
+                        <div
+                          key={`${line.itemId}-${line.code ?? ""}`}
+                          className={`resources-cell ${formatted.isUnknown ? "resources-cell--unknown" : ""}`}
+                        >
+                          <span className="resources-cell-name" title={line.name}>{canonicalResourceCode(line.code) === "df_billable_level6_bullet" ? "六级子弹" : line.name}</span>
+                          <strong className="resources-cell-qty" title={formatted.quantityText}>
+                            {formatted.quantityText}
+                          </strong>
+                        </div>
+                      );
+                    })}
                   </div>
-                ))}
-              </div> : <ResourceEmpty />}
+                ) : <ResourceEmpty />;
+              })()}
             </div>
           </section>
 
           <section className="account-list-skins" aria-label="皮肤外观">
             {data.skinTags && data.skinTags.length > 0 ? (
               <>
-                {data.skinTags.slice(0, 3).map((tag, idx) => {
+                {data.skinTags.slice(0, 6).map((tag, idx) => {
                   const tone = skinChipTone(tag);
                   const typeLabel = skinTypeLabel(tag.ownerKind);
+                  const qualityLabel = skinQualityLabel(tag);
+                  const tooltipText = [tag.name, typeLabel, qualityLabel].filter(Boolean).join(" · ");
                   return (
-                    <span key={`${tag.id}-${idx}`} className={`account-skin-chip account-skin-chip--${tone}`} data-skin-id={tag.id}>
-                      {typeLabel ? (
-                        <span className="skin-chip-cat" style={{ opacity: 0.85, marginRight: "3px" }}>
-                          [{typeLabel}]
-                        </span>
-                      ) : null}
-                      <span className="skin-chip-name" title={tag.name}>{tag.name}</span>
-                      {skinQualityLabel(tag) ? <span className="skin-chip-quality" style={{ opacity: 0.85, marginLeft: "3px" }}>· {skinQualityLabel(tag)}</span> : null}
+                    <span
+                      key={`${tag.id}-${idx}`}
+                      className={`account-skin-chip account-skin-chip--${tone}`}
+                      data-skin-id={tag.id}
+                      title={tooltipText}
+                      aria-label={`${tag.name}${typeLabel ? ` (${typeLabel})` : ""}`}
+                    >
+                      <span className="skin-chip-name">{tag.name}</span>
                     </span>
                   );
                 })}
@@ -584,33 +809,66 @@ export function AccountCard({
           </section>
 
           <div className="account-list-rail">
-            <div className="account-list-finance">
-              <div className="finance-row">
-                <span className="finance-label">{data.historicalReadOnly ? "租金记录" : readOnly ? "公开租金参考" : "租金"}</span>
-                <span className={`finance-val ${moneyValue(data.haffRentLabel, "无租金") === "待确认" ? "finance-val--unconfirmed" : ""}`}>
-                  {moneyValue(data.haffRentLabel, "无租金")}
-                </span>
+            <div className="account-mobile-price-summary">
+              <div className="account-mobile-price-main" aria-label={facts.totalAria}>
+                <span className="account-mobile-price-main-label">{facts.totalLabel}</span>
+                <strong className={`account-mobile-price-main-val ${facts.totalValue === "待确认" ? "account-mobile-price-main-val--unconfirmed" : ""}`}>{facts.totalValue}</strong>
               </div>
-              <div className="finance-row">
-                <span className="finance-label">资源费用</span>
-                <span className={`finance-val ${moneyValue(data.itemResourceTotalLabel, "无物品费用") === "待确认" ? "finance-val--unconfirmed" : ""}`}>
-                  {moneyValue(data.itemResourceTotalLabel, "无物品费用")}
-                </span>
-              </div>
-              <div className="finance-row">
-                <span className="finance-label">押金</span>
-                <span className={`finance-val ${moneyValue(data.depositLabel, "无需押金") === "待确认" ? "finance-val--unconfirmed" : ""}`}>
-                  {moneyValue(data.depositLabel, "无需押金")}
-                </span>
-              </div>
-              <div className="finance-total-row">
-                <span className="finance-total-label">{data.historicalReadOnly ? "资源费用记录" : readOnly ? "公开资源费用参考" : "总价"}</span>
-                <strong
-                  className={`finance-total-val ${
-                    !readOnly && !isPayableConfirmed ? "finance-total-val--unconfirmed" : ""
-                  }`}
+              <div className="account-mobile-price-sub">
+                <span
+                  className={`account-mobile-price-deposit-text ${facts.depositUnknown ? "account-price-unknown" : ""}`}
+                  title={facts.historical ? undefined : "基础押金；会员实付以下单时个人报价为准"}
+                  data-deposit-state={facts.depositUnknown ? "unknown" : facts.depositValue === "无需押金" ? "zero" : "known"}
                 >
-                  {moneyValue(readOnly ? data.resourceTotalLabel : data.payableTotalLabel, "无需支付")}
+                  {depositSummaryText}
+                </span>
+                <button
+                  type="button"
+                  className="account-mobile-fee-toggle"
+                  aria-expanded={expandedFees}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setExpandedFees((v) => !v);
+                  }}
+                >
+                  <span>{expandedFees ? "收起明细" : "费用明细"}</span>
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={expandedFees ? "account-toggle-icon--open" : ""} aria-hidden="true"><polyline points="6 9 12 15 18 9" /></svg>
+                </button>
+              </div>
+            </div>
+            <div className="account-list-finance">
+              {facts.ratio ? (
+                <div className="finance-row finance-row--ratio">
+                  <span className="finance-label">基准比例</span>
+                  <span className="finance-val" title="公开基准比例（万哈夫币/元），不含会员礼遇与个人优惠">{facts.ratio}</span>
+                </div>
+              ) : null}
+              <div className="finance-row">
+                <span className="finance-label">{facts.haffLabel}</span>
+                <span className={`finance-val ${facts.haffValue === "待确认" ? "finance-val--unconfirmed" : ""}`}>{facts.haffValue}</span>
+              </div>
+              <div className="finance-row">
+                <span className="finance-label">{facts.itemsLabel}</span>
+                <span className={`finance-val ${facts.itemsValue === "待确认" ? "finance-val--unconfirmed" : ""}`}>{facts.itemsValue}</span>
+              </div>
+              <div className="finance-row finance-row--deposit">
+                <span className="finance-label">{facts.depositLabel}</span>
+                <span
+                  className={`finance-val ${facts.depositValue === "详情核定" || facts.depositValue === "未提供" ? "finance-val--unconfirmed" : ""}`}
+                  title={facts.historical ? undefined : "基础押金；会员实付以下单时个人报价为准"}
+                  data-deposit-state={facts.depositUnknown ? "unknown" : facts.depositValue === "无需押金" ? "zero" : "known"}
+                >
+                  {facts.depositValue}
+                </span>
+              </div>
+              <div className="finance-total-row" aria-label={facts.totalAria}>
+                <span className="finance-total-meta">
+                  <span className="finance-total-title">{facts.totalLabel}</span>
+                  {facts.totalCaption ? <span className="finance-total-caption">{facts.totalCaption}</span> : null}
+                </span>
+                <strong className={`finance-total-val ${facts.totalValue === "待确认" ? "finance-total-val--unconfirmed" : ""}`}>
+                  {facts.totalValue}
                 </strong>
               </div>
             </div>
@@ -623,11 +881,33 @@ export function AccountCard({
                 <span>查看详情</span>
                 <ChevronRight size={14} aria-hidden="true" />
               </Link>
-              <div className="account-list-fav">{favorite}</div>
+              <div className="account-list-fav">{favoriteFor(accountVisibleTitle)}</div>
             </div>
+            {expandedFees ? (
+              <dl className="account-mobile-price-lines">
+                {facts.ratio ? (
+                  <div>
+                    <dt>哈夫币比例</dt>
+                    <dd title="公开基准比例（万哈夫币/元），不含会员礼遇与个人优惠">{facts.ratio}</dd>
+                  </div>
+                ) : null}
+                <div>
+                  <dt>{facts.haffLabel}</dt>
+                  <dd>{facts.haffValue}</dd>
+                </div>
+                <div>
+                  <dt>{facts.itemsLabel}</dt>
+                  <dd>{facts.itemsValue}</dd>
+                </div>
+                <div className="account-mobile-price-deposit">
+                  <dt>{facts.depositLabel}</dt>
+                  <dd className={facts.depositUnknown ? "account-price-unknown" : ""}>{facts.depositValue}</dd>
+                </div>
+              </dl>
+            ) : null}
           </div>
         </div>
-        <AccountGallery data={data} open={galleryOpen} onOpenChange={setGalleryOpen} returnFocusRef={galleryTriggerRef} />
+        <AccountGallery data={data} visibleTitle={accountVisibleTitle} open={galleryOpen} onOpenChange={setGalleryOpen} returnFocusRef={galleryTriggerRef} />
       </article>
     );
   }
@@ -639,11 +919,10 @@ export function AccountCard({
   if (serviceWindowValue) gridAttrs.push(`可用 ${serviceWindowValue}`);
   else if (data.termOptionLabel) gridAttrs.push(`规则 ${data.termOptionLabel}`);
 
-  const visibleSkins = data.skinTags.length > 4 ? data.skinTags.slice(0, 3) : data.skinTags.slice(0, 4);
+  const visibleSkins = data.skinTags.slice(0, 4);
   const extraSkinCount = Math.max(0, data.skinTags.length - visibleSkins.length);
 
-  const gridQuoteResources = orderedQuoteResources(data);
-  const visibleResourcePills = gridQuoteResources;
+  const gridSummary = summarizeQuoteResources(data, matchedResourceItemIds, 5);
 
 
   // 封面失败只降级封面区：收藏页（coverRetry）给重试入口，其余页面保持原有降级，不新增控件。
@@ -669,7 +948,7 @@ export function AccountCard({
       type="button"
       ref={galleryTriggerRef}
       className="account-card-thumb"
-      aria-label={missing && data.media.length === 0 ? "公开图片不可用" : `查看${data.title}公开图片`}
+      aria-label={missing && data.media.length === 0 ? "公开图片不可用" : `查看${accountVisibleTitle}公开图片`}
       disabled={missing && data.media.length === 0}
       onClick={(e) => {
         e.stopPropagation();
@@ -685,7 +964,7 @@ export function AccountCard({
         <img
           key={retryToken}
           src={data.imageUrl}
-          alt={`${data.title}公开图片`}
+          alt={`${accountVisibleTitle}公开图片`}
           onError={() => setFailedSrc(data.imageUrl)}
           width={320}
           height={190}
@@ -715,7 +994,7 @@ export function AccountCard({
               </div>
             ) : null}
             <div className="account-card-fav-wrap" onClick={(e) => e.stopPropagation()}>
-              {favorite}
+              {favoriteFor(accountVisibleTitle)}
             </div>
           </div>
           <div className="account-card-body">
@@ -723,19 +1002,25 @@ export function AccountCard({
               <Link
                 className="account-card-cover-link"
                 href={accountHref(data.id)}
-                aria-label={`查看账号 ${data.title}`}
+                aria-label={`查看账号 ${accountVisibleTitle}`}
                 onClick={rememberDetail}
               >
                 <strong
                   className="account-grid-title"
-                  title={`${gridTitle.haff ? gridTitle.haff + " · " : ""}${gridTitle.rest}`}
+                  title={[accountTitle.primary, accountTitle.secondary].filter(Boolean).join(" · ")}
                 >
-                  {gridTitle.haff ? (
-                    <span className="account-grid-haff">{gridTitle.haff}</span>
+                  {accountTitle.haff ? (
+                    <span className="account-grid-haff">{accountTitle.haff}</span>
                   ) : null}
-                  {gridTitle.rest ? (
+                  {accountTitle.rest ? (
                     <span className="account-grid-title-rest">
-                      {gridTitle.haff ? ` · ${gridTitle.rest}` : gridTitle.rest}
+                      {accountTitle.haff ? ` · ${accountTitle.rest}` : accountTitle.rest}
+                    </span>
+                  ) : null}
+                  {accountTitle.secondary ? (
+                    <span className="account-grid-title-secondary">
+                      {accountTitle.haff || accountTitle.rest ? " · " : ""}
+                      <span className="account-title-supplies-badge">{accountTitle.secondary}</span>
                     </span>
                   ) : null}
                 </strong>
@@ -757,17 +1042,22 @@ export function AccountCard({
             <section className="account-skin-tags" aria-label="皮肤标签">
               {visibleSkins.length > 0 ? (
                 <>
-                  {visibleSkins.map((skin, idx) => (
-                    <span
-                      key={`${skin.id}-${idx}`}
-                      className={`account-skin-chip account-skin-chip--${skinChipTone(skin)}`}
-                      data-skin-id={skin.id}
-                      title={[skin.name, skinQualityLabel(skin)].filter(Boolean).join(" · ")}
-                    >
-                      {skin.name}
-                      {skinQualityLabel(skin) ? <span className="skin-chip-quality"> · {skinQualityLabel(skin)}</span> : null}
-                    </span>
-                  ))}
+                  {visibleSkins.map((skin, idx) => {
+                    const typeLabel = skinTypeLabel(skin.ownerKind);
+                    const qualityLabel = skinQualityLabel(skin);
+                    const tooltipText = [skin.name, typeLabel, qualityLabel].filter(Boolean).join(" · ");
+                    return (
+                      <span
+                        key={`${skin.id}-${idx}`}
+                        className={`account-skin-chip account-skin-chip--${skinChipTone(skin)}`}
+                        data-skin-id={skin.id}
+                        title={tooltipText}
+                        aria-label={`${skin.name}${typeLabel ? ` (${typeLabel})` : ""}`}
+                      >
+                        <span className="skin-chip-name">{skin.name}</span>
+                      </span>
+                    );
+                  })}
                   {extraSkinCount > 0 ? (
                     <span className="account-skin-chip account-skin-chip--more" title="更多皮肤见详情">
                       +{extraSkinCount}
@@ -778,9 +1068,9 @@ export function AccountCard({
             </section>
 
             <section className="account-resource-pills" aria-label="资源标签">
-              {visibleResourcePills.length > 0 ? (
+              {gridSummary.lines.length > 0 ? (
                 <>
-                  {visibleResourcePills.map((line) => {
+                  {gridSummary.lines.map((line) => {
                     const isBullet = isBulletResource(line);
                     const isArmor = isArmorResource(line);
                     return (
@@ -802,6 +1092,11 @@ export function AccountCard({
                       </span>
                     );
                   })}
+                  {gridSummary.hiddenCount > 0 ? (
+                    <FullResourcesPopover data={data} hiddenCount={gridSummary.hiddenCount} className="account-resource-pill account-resource-pill--more">
+                      +{gridSummary.hiddenCount}
+                    </FullResourcesPopover>
+                  ) : null}
                 </>
               ) : <ResourceEmpty compact />}
             </section>
@@ -809,36 +1104,45 @@ export function AccountCard({
             <div className="account-card-breakdown">
               <div className="breakdown-header">
                 <span className="breakdown-title">金额构成</span>
-                {showRatioNote ? (
-                  <span className="breakdown-note" title="辅助换算 · 非报价">
-                    {ratioText} · 辅助换算 · 非报价
+                {facts.ratio ? (
+                  <span className="breakdown-note" title="公开基准比例（万哈夫币/元），不含会员礼遇与个人优惠">
+                    {facts.ratio} · 基准比例
                   </span>
                 ) : null}
               </div>
               <div className="breakdown-rows">
                 <div className="breakdown-row">
-                  <span className="breakdown-label">资源费</span>
-                  <span className="breakdown-val">{moneyValue(data.resourceTotalLabel, "无资源费用")}</span>
+                  <span className="breakdown-label">{facts.haffLabel}</span>
+                  <span className="breakdown-val">{facts.haffValue}</span>
                 </div>
                 <div className="breakdown-row">
-                  <span className="breakdown-label">押金</span>
-                  <span className="breakdown-val">{moneyValue(data.depositLabel, "无需押金")}</span>
+                  <span className="breakdown-label">{facts.itemsLabel}</span>
+                  <span className="breakdown-val">{facts.itemsValue}</span>
+                </div>
+                <div className="breakdown-row breakdown-row--deposit">
+                  <span className="breakdown-label">{facts.depositLabel}</span>
+                  <span
+                    className="breakdown-val"
+                    title={facts.historical ? undefined : "基础押金；会员实付以下单时个人报价为准"}
+                    data-deposit-state={facts.depositUnknown ? "unknown" : facts.depositValue === "无需押金" ? "zero" : "known"}
+                  >
+                    {facts.depositValue}
+                  </span>
                 </div>
               </div>
-              <div className="breakdown-total-row">
-                <span className="breakdown-total-label">{data.historicalReadOnly ? "资源费用记录" : readOnly ? "公开资源费用参考" : "合计"}</span>
-                <strong
-                  className={`breakdown-total-val ${
-                    !readOnly && !isPayableConfirmed ? "breakdown-total-val--unconfirmed" : ""
-                  }`}
-                >
-                  {moneyValue(readOnly ? data.resourceTotalLabel : data.payableTotalLabel, "无需支付")}
+              <div className="breakdown-total-row" aria-label={facts.totalAria}>
+                <span className="finance-total-meta">
+                  <span className="finance-total-title">{facts.totalLabel}</span>
+                  {facts.totalCaption ? <span className="finance-total-caption">{facts.totalCaption}</span> : null}
+                </span>
+                <strong className={`breakdown-total-val ${facts.totalValue === "待确认" ? "breakdown-total-val--unconfirmed" : ""}`}>
+                  {facts.totalValue}
                 </strong>
               </div>
             </div>
           </div>
         </div>
-        <AccountGallery data={data} open={galleryOpen} onOpenChange={setGalleryOpen} returnFocusRef={galleryTriggerRef} />
+        <AccountGallery data={data} visibleTitle={accountVisibleTitle} open={galleryOpen} onOpenChange={setGalleryOpen} returnFocusRef={galleryTriggerRef} />
       </article>
     </>
   );

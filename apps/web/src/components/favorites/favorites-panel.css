@@ -79,11 +79,16 @@ html[data-theme="light"] .favorites-chip[aria-pressed="true"], html:not(.dark) .
 }
 .favorite-entry .account-card { flex: 1 1 auto; }
 .favorite-saved-at {
+  align-self: flex-end;
   margin: 0;
-  font-family: var(--font-sans);
-  font-size: var(--type-meta-size);
-  line-height: var(--type-meta-leading);
+  padding: 3px 9px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 999px;
+  background: var(--color-bg-surface);
   color: var(--color-text-muted);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 /* 业务不可用（服务端明确）与摘要故障（读取异常）分卡型、分文案，不得合并。 */
@@ -157,16 +162,27 @@ html[data-theme="light"] .favorite-summary-fault .account-unavailable-body > svg
 html:not(.dark) .favorite-summary-fault .account-unavailable-body > svg {
   color: color-mix(in srgb, var(--color-status-warning) 55%, var(--color-text-primary));
 }
-.favorites-footnote {
-  margin: 18px 0 0;
-  font-family: var(--font-sans);
-  font-size: var(--type-meta-size);
-  line-height: var(--type-meta-leading);
-  color: var(--color-text-muted);
+@media (max-width: 760px) {
+  .favorites-panel .account-grid { grid-template-columns: minmax(0, 1fr); }
+  .favorite-entry .favorite-saved-at { display: none; }
 }
 
 @media (max-width: 640px) {
   .favorites-scope-hint { margin-left: 0; width: 100%; }
   .favorites-search { width: 100%; }
   .favorites-search input { flex: 1 1 auto; width: auto; }
+}
+
+/* Mobile favorites stay a summary: keep the cover, title, availability and total; details live on the card page. */
+@media (max-width: 760px) {
+  .favorites-panel .account-card--grid .account-card-media-wrap { height: 118px; }
+  .favorites-panel .account-card--grid .account-card-thumb,
+  .favorites-panel .account-card--grid .account-card-thumb img { height: 118px; }
+  .favorites-panel .account-card--grid .account-card-thumb img { object-fit: cover; }
+  .favorites-panel .account-card--grid .account-card-body { gap: 8px; padding: 12px 14px; }
+  .favorites-panel .account-card--grid .account-grid-subattrs,
+  .favorites-panel .account-card--grid .account-skin-tags,
+  .favorites-panel .account-card--grid .account-resource-pills,
+  .favorites-panel .account-card--grid .breakdown-rows { display: none; }
+  .favorites-panel .account-card--grid .account-card-breakdown { margin-top: 0; }
 }

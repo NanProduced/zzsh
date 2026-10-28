@@ -7,7 +7,9 @@ test('policy enabled is distinct from binding admission; old responses fail clos
  const ready={...unknown,policyKnowledge:'KNOWN',policyVersion:'policy',policyEnabled:true,participant:{knowledge:'KNOWN',eligibility:'INELIGIBLE',levelCode:null,revision:'1'},leader:{knowledge:'KNOWN_NONE',relation:null}};
  assert.equal(invitationRead(ready,user).canBindLeader,false);assert.equal(invitationRead({...ready,canBindLeader:false},user).canBindLeader,false);assert.equal(invitationRead({...ready,canBindLeader:true},user).canBindLeader,true);
  for(const canBindLeader of [null,'true',1])assert.throws(()=>invitationRead({...ready,canBindLeader},user));
- for(const patch of [{policyEnabled:false},{participant:unknown.participant},{leader:unknown.leader}])assert.throws(()=>invitationRead({...ready,canBindLeader:true,...patch},user));
+ assert.equal(invitationRead({...ready,policyEnabled:false,canBindLeader:true},user).canBindLeader,true);
+ assert.equal(invitationRead({...ready,policyEnabled:false,canBindLeader:false},user).canBindLeader,false);
+ for(const patch of [{participant:unknown.participant},{leader:unknown.leader}])assert.throws(()=>invitationRead({...ready,canBindLeader:true,...patch},user));
 });
 test('legacy parent DTO keeps original binding time unknown even when an older response supplies migration time',()=>{const r=invitationRead({...linked,leader:{...linked.leader,relation:{...linked.leader.relation,sourceType:'LEGACY_MYSQL'}}},user);assert.equal(r.leader.relation.boundAt,null);assert.equal(r.leader.relation.boundAtKnowledge,'UNKNOWN');});
 test('partial list contract retains mapped counts and hides legacy import timestamps; inconsistent partial sources reject',()=>{

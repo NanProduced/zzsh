@@ -223,14 +223,14 @@ test("无法识别的 UA 不声称桌面端，iOS 第三方内核不误报 Safar
     ["Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/120.0 Mobile/15E148 Safari/604.1", "iPhone · Chrome", "移动端网页"],
     ["Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) FxiOS/120.0 Mobile/15E148 Safari/605.1.15", "iPad · Firefox", "移动端网页"],
   ];
-  let index = 0;
   const p = await mount({ sessions: () => response({ sessions: [session("s_current", true, chrome), ...cases.map(([ua], i) => session(`s_${i}`, false, ua))] }) });
   try {
     await p.settle();
-    const rows = [...p.host.querySelectorAll(".sec-session")].map(n => n.textContent.replace(/\s+/g, " "));
-    assert.equal(rows.length, 3, "其他会话列表只放非当前会话");
-    for (const [ua, label, kind] of cases) {
-      const row = rows[index++];
+    assert.equal(p.host.querySelectorAll(".sec-session").length, 3, "其他会话列表只放非当前会话");
+    for (const [index, [ua, label, kind]] of cases.entries()) {
+      const rowNode = p.host.querySelector(`[data-session-id="s_${index}"]`);
+      assert.ok(rowNode, `missing session s_${index}`);
+      const row = rowNode.textContent.replace(/\s+/g, " ");
       assert.ok(row.includes(label), `${ua} → ${label}, got ${row}`);
       if (kind) assert.ok(row.includes(kind), `${ua} → ${kind}, got ${row}`);
       else assert.ok(!/桌面端网页|移动端网页/.test(row), `无法识别的 UA 不声称设备类型，got ${row}`);

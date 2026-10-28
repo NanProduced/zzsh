@@ -1,10 +1,22 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { collectFastAccounts } from '../src/lib/home-fast-accounts.ts';
+import { collectFastAccounts, isHomeFastAccount } from '../src/lib/home-fast-accounts.ts';
 
-const project = listing => ({ id: listing.id, rentalMode: listing.rentalMode });
+const project = listing => ({ id: listing.id, rentalMode: listing.rentalMode, canCreateOrder: listing.canCreateOrder });
 const page = (items, nextCursor = null) => ({ items, nextCursor });
-const listing = (id, rentalMode = 'ordinary') => ({ id, rentalMode });
+const listing = (id, rentalMode = 'ordinary') => ({ id, rentalMode, canCreateOrder: true });
+
+test('the homepage only accepts native fast accounts with current order eligibility', async () => {
+  const valid = listing('native-fast', 'fast');
+  for (const account of [listing('ordinary'), { ...valid, historicalReadOnly: true }, { ...valid, canCreateOrder: false }, { ...valid, canCreateOrder: undefined }, { ...valid, rentalMode: null }]) {
+    assert.equal(isHomeFastAccount(account), false);
+  }
+  assert.equal(isHomeFastAccount(valid), true);
+  const result = await collectFastAccounts(async () => page([valid, { ...listing('not-rentable', 'fast'), canCreateOrder: false }, listing('ordinary')]), project);
+  assert.deepEqual(result.accounts.map(account => account.id), ['native-fast']);
+  const inferred = await collectFastAccounts(async () => page([{ id: 'missing-server-eligibility', rentalMode: 'fast' }]), value => ({ ...value, canCreateOrder: true }));
+  assert.deepEqual(inferred.accounts, [], 'a projection must not invent current server order eligibility');
+});
 
 test('home fast shelf follows cursor pages until a fast account is found', async () => {
   const seen = [];
@@ -48,7 +60,7 @@ test('a full historical shelf does not hide native fast accounts on the next pag
     cursors.push(cursor);
     return cursor===null
       ? page(Array.from({length:8},(_,i)=>({id:`history-${i}`,historicalReadOnly:true,rentalMode:null})), 'page-2')
-      : page([{id:'native-fast',rentalMode:'fast'}]);
+      : page([listing('native-fast','fast')]);
   }, value=>value);
   assert.deepEqual(cursors,[null,'page-2']);
   assert.equal(result.historicalAccounts.length,8);
@@ -84,7 +96,7 @@ test('one full shelf still respects the page budget while the other remains empt
 
 test('one server cursor stream supplies read-only history and native fast shelves without a guessed mode or duplicate ids',async()=>{
   const calls=[];
-  const projectHistory=l=>({id:l.id,rentalMode:l.rentalMode??null,historicalReadOnly:l.source==='LEGACY_READ_ONLY'});
+  const projectHistory=l=>({id:l.id,rentalMode:l.rentalMode??null,canCreateOrder:l.canCreateOrder,historicalReadOnly:l.source==='LEGACY_READ_ONLY'});
   const result=await collectFastAccounts(async cursor=>{
     calls.push(cursor);
     if(cursor===null) return page([{id:'legacy-unknown',source:'LEGACY_READ_ONLY'},listing('ordinary'),listing('fast','fast')],'p2');

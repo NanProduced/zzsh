@@ -1,15 +1,54 @@
 import { formatOrderMoney } from "./order-client.ts";
 import type { Order, OrderParty, PersonalRentalQuote, SettlementOpening, SettlementPosting, SettlementPreview, SettlementVersion } from "./order-client";
 
-export function personalMembershipLabel(quote:PersonalRentalQuote):string {
-  const b=quote.membershipBenefits;
-  if(b?.schema==="membership-benefits-v1")return ({STANDARD:"普通会员",SILVER:"银卡会员",GOLD:"金卡会员",PLATINUM:"铂金会员",DIAMOND:"钻石会员",BLACK_GOLD:"黑金会员·终身"} as Record<string,string>)[b.effectiveTier]??"会员权益待核";
+/** The frozen order snapshot's rental mode; older v1 orders carry no mode and stay unlabeled. */
+export function orderRentalModeLabel(order: Pick<Order, "quote">): string | null {
+  const mode = order.quote?.rentalMode;
+  return mode === "ordinary" ? "普通出租" : mode === "custom" ? "自定义出租" : mode === "fast" ? "极速出租" : null;
+}
+
+/** Renter and owner see their own frozen unit amount, paired with the snapshot's real unit quantity. */
+export function orderUnitPriceText(
+  amount: { amount?: unknown } | null | undefined,
+  unitQuantity: string | null | undefined,
+  unit: string | null | undefined,
+): string | null {
+  if (!amount || typeof amount.amount !== "string" || !/^-?\d+(?:\.\d{1,8})?$/.test(amount.amount)) return null;
+  const price = `¥${amount.amount}`;
+  const quantity = unitQuantity?.trim();
+  return quantity ? `${price} / ${quantityText(unit, quantity)}` : price;
+}
+
+/** The fee table total is the resource total, which excludes the tenant deposit. */
+export function orderLinesTotalLabel(party: OrderParty): string {
+  return party === "owner" ? "号主报价合计" : "资源合计（不含押金）";
+}
+
+export function personalMembershipLabel(quote: {
+  membershipBenefits?: { schema?: string; effectiveTier?: string } | null;
+  customerTier?: string | null;
+}): string {
+  const b = quote.membershipBenefits;
+  if (b?.schema === "membership-benefits-v1" && b.effectiveTier)
+    return (
+      {
+        STANDARD: "普通会员",
+        SILVER: "银卡会员",
+        GOLD: "金卡会员",
+        PLATINUM: "铂金会员",
+        DIAMOND: "钻石会员",
+        BLACK_GOLD: "黑金会员·终身",
+      } as Record<string, string>
+    )[b.effectiveTier] ?? "会员权益待核";
   return quote.customerTier ? "既有确认方案" : "会员权益待核";
 }
-export function personalBenefitSources(quote:PersonalRentalQuote):string|null {
-  const b=quote.membershipBenefits;if(!b)return null;
-  const names={GROWTH:"成长权益",FRIEND:"挚友礼遇",PRESTIGE:"尊享礼遇"};
-  return `价格：${names[b.priceSource]??"待核"}；押金：${names[b.depositSource]??"待核"}`;
+export function personalBenefitSources(quote: {
+  membershipBenefits?: { priceSource?: string; depositSource?: string } | null;
+}): string | null {
+  const b = quote.membershipBenefits;
+  if (!b) return null;
+  const names = { GROWTH: "成长权益", FRIEND: "挚友礼遇", PRESTIGE: "尊享礼遇" } as Record<string, string>;
+  return `价格：${names[b.priceSource ?? ""] ?? "待核"}；押金：${names[b.depositSource ?? ""] ?? "待核"}`;
 }
 
 /**
@@ -48,27 +87,48 @@ export function orderResourceSummary(order: Pick<Order, "orderFacts">, limit = 3
   return [...visible, ...(labels.length > visible.length ? [`+${labels.length - visible.length}项`] : [])].join(" · ");
 }
 
-/** System placeholder text is not a real current title and must never block the frozen resource summary. */
-const SYSTEM_ACCOUNT_TITLE_DEFAULTS = new Set(["账号资料暂未提供", "账号信息暂不可用"]);
-
-function realAccountTitle(title: string | null | undefined): string | null {
-  const trimmed = title?.trim();
-  return trimmed && !SYSTEM_ACCOUNT_TITLE_DEFAULTS.has(trimmed) ? trimmed : null;
+/** A frozen order has no user-authored title; its identity is rebuilt from server facts. */
+function haffTitleFromBase(raw: string | null | undefined): string | null {
+  const valueText = raw?.trim();
+  if (!valueText || !/^\d+$/.test(valueText)) return null;
+  const value = BigInt(valueText);
+  if (value === 0n) return null;
+  if (value < 1_000_000n) return `${groupedInteger(valueText)} 哈夫币`;
+  const whole = value / 1_000_000n;
+  const fraction = (value % 1_000_000n).toString().padStart(6, "0").replace(/0+$/, "");
+  return `${whole}${fraction ? `.${fraction}` : ""} M 哈夫币`;
 }
 
-export function orderUsesResourceSummary(order: Pick<Order, "source" | "title" | "account" | "orderFacts">): boolean {
-  return order.source?.origin === "LEGACY" && !(order.account?.readable && realAccountTitle(order.title)) && orderResourceSummary(order) !== null;
+function orderFactsTitle(order: Pick<Order, "listingFacts">): string | null {
+  const facts = order.listingFacts;
+  if (!facts) return null;
+  const haff = facts.resourceLines.find((line) => line.unit === "HAFF_BASE");
+  const parts = [
+    haffTitleFromBase(haff?.quantity),
+    facts.attributeDisplay.safeBox,
+    facts.attributeDisplay.grading,
+  ].filter((part): part is string => Boolean(part && part.trim()));
+  return parts.length ? parts.join(" · ") : null;
+}
+
+function orderHaffTitle(order: Pick<Order, "quote">): string | null {
+  const line = order.quote?.lines?.find((candidate) => candidate.unit === "HAFF_BASE");
+  return haffTitleFromBase(line?.quantity);
+}
+
+export function orderUsesResourceSummary(order: Pick<Order, "source" | "orderFacts">): boolean {
+  return order.source?.origin === "LEGACY" && orderResourceSummary(order) !== null;
 }
 
 /** Historical participation is not permission to view the account's current private facts. */
-export function orderAccountTitle(order: Pick<Order, "source" | "title" | "account" | "orderFacts">): string {
-  if (order.source?.origin === "LEGACY") {
-    const title = order.account?.readable ? realAccountTitle(order.title) : null;
-    if (title) return title;
-    const summary = orderResourceSummary(order);
-    return summary ? `订单资源：${summary}` : "账号资料暂未提供";
-  }
-  return order.title?.trim() || "账号信息暂不可用";
+export function orderAccountTitle(order: Pick<Order, "source" | "orderFacts" | "quote" | "listingFacts">): string {
+  const facts = orderFactsTitle(order);
+  if (facts) return facts;
+  if (order.source?.origin === "LEGACY") return orderResourceSummary(order) ?? "租赁账号";
+  const haff = orderHaffTitle(order);
+  if (haff) return haff;
+  const named = (order.quote?.lines ?? []).find((line) => line.name?.trim() && line.quantity && !/^0+(?:\.0+)?$/.test(line.quantity));
+  return named?.name?.trim() || "租赁账号";
 }
 
 export type OrderAmountFacts = { main: string; caption: string; secondary: string[] };

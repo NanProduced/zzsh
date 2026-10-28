@@ -27,7 +27,7 @@ const error = (status: number, code: string, requestId: string) =>
 export async function forwardOrderRequest(
   request: Request,
   context: { params: Promise<{ path?: string[] }> },
-  resource: "orders" | "order-confirmations" | "orders-v2" = "orders",
+  resource: "orders" | "order-confirmations" | "orders-v2" | "rental-price-preview" = "orders",
 ): Promise<Response> {
   const supplied = request.headers.get("x-request-id"),
     requestId =
@@ -40,7 +40,7 @@ export async function forwardOrderRequest(
     path = "/" + (segments ?? []).join("/"),
     method = request.method;
   if (
-    (resource !== "orders" && (method !== "POST" || path !== "/")) ||
+    (resource === "rental-price-preview" ? method !== "GET" || path !== "/" : resource !== "orders" && (method !== "POST" || path !== "/")) ||
     !(method === "GET" ? getPath : postPath).test(path) ||
     !["GET", "POST"].includes(method)
   )
@@ -56,6 +56,15 @@ export async function forwardOrderRequest(
   const expectedUserId = request.headers.get("x-zzsh-expected-user-id");
   if ((channelPayment || refundRead) && (!expectedUserId || !new RegExp(`^${id}$`).test(expectedUserId)))
     return error(400, "INVALID_ARGUMENT", requestId);
+  if (resource === "rental-price-preview") {
+    const url = new URL(request.url), refs = ["accountId", "versionId", "releaseId"];
+    if (url.pathname !== "/api/rental-price-preview") return error(404, "NOT_FOUND", requestId);
+    if (request.headers.has("origin") && request.headers.get("origin") !== webOrigin) return error(403, "FORBIDDEN", requestId);
+    if (request.body || request.headers.has("transfer-encoding") || (request.headers.has("content-length") && request.headers.get("content-length") !== "0")
+      || [...url.searchParams.keys()].some(key => !refs.includes(key))
+      || refs.some(key => url.searchParams.getAll(key).length !== 1 || !new RegExp(`^${id}$`).test(url.searchParams.get(key) ?? "")))
+      return error(400, "INVALID_ARGUMENT", requestId);
+  }
   const headers = new Headers({ origin: webOrigin, "x-request-id": requestId }),
     cookies = userCookies(request.headers.get("cookie"));
   if (cookies) headers.set("cookie", cookies);

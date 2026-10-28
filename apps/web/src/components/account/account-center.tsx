@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   ChevronRight,
   CreditCard,
+  ClipboardList,
   Crown,
   FileText,
   House,
@@ -35,7 +36,8 @@ export const accountSectionLabels = {
   membership: "会员中心",
   rentals: "租入订单",
   leased: "出租订单",
-  accounts: "出租账号",
+  rented: "出租账号",
+  accounts: "上架账号",
   credit: "信用与保证金",
   identity: "实名认证",
   favorites: "我的收藏",
@@ -77,7 +79,8 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { section: "rentals", label: "租入订单", icon: FileText },
       { section: "leased", label: "出租订单", icon: House },
-      { section: "accounts", label: "出租账号", icon: UserRound },
+      { section: "rented", label: "出租账号", icon: House },
+      { section: "accounts", label: "上架账号", icon: ClipboardList },
     ],
   },
   {
@@ -120,14 +123,15 @@ export function accountSectionHref(section: AccountView, current: AccountLocatio
   const query = new URLSearchParams();
   query.set("view", section);
   const sameOrder = (section === "rentals" || section === "leased") && current.view === section;
-  if ((section === "accounts" || sameOrder) && current.accountId) query.set("accountId", current.accountId);
+  const sameAccountSection = (section === "accounts" || section === "rented") && current.view === section;
+  if ((sameAccountSection || sameOrder) && current.accountId) query.set("accountId", current.accountId);
   if (sameOrder && current.status) query.set("status", current.status);
   if (sameOrder && current.orderId) query.set("orderId", current.orderId);
   return `/account?${query.toString()}`;
 }
 
 function coreStatus(order: Order): string {
-  if (order.source?.origin === "LEGACY") return order.source.statusLabel ?? "历史状态待确认";
+  if (order.source?.origin === "LEGACY") return order.source.statusLabel ?? "状态待确认";
   if (order.status === "PENDING_PAYMENT" && order.expiredAwaitingCancel) return "已到期 · 取消处理中";
   if (order.status === "CANCELLED" && order.cancelReason === "TIMEOUT") return "已取消 · 到期未支付";
   if (order.status === "CANCELLED" && order.cancelReason === "USER") return "已取消 · 租客取消";
@@ -810,9 +814,12 @@ export function OrderSummaryCard({
                       {order.displayNo ? <span>单号 {order.displayNo}</span> : null}
                       {order.createdAt ? <time dateTime={order.createdAt} title={formatOrderTime(order.createdAt)} aria-label={formatOrderTime(order.createdAt)}>{summaryOrderTime(order.createdAt)}</time> : null}
                       <span>{orderTermLabel(order)}</span>
-                      <span>{facts.caption} {facts.main}</span>
-                      {facts.secondary.map((line) => <span key={line}>{line}</span>)}
                     </div>
+                  </div>
+                  <div className="account-order-row-money">
+                    <span className="account-order-row-money-caption">{facts.caption}</span>
+                    <strong className="account-order-row-money-value">{facts.main}</strong>
+                    {facts.secondary.length ? <span className="account-order-row-money-sub">{facts.secondary.join(" · ")}</span> : null}
                   </div>
                   <div className="account-order-row-end">
                     <span className="account-order-row-status" data-status={order.expiredAwaitingCancel ? "EXPIRING" : order.status} data-testid={`order-status-${party}`}>{coreStatus(order)}</span>

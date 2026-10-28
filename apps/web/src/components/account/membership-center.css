@@ -1006,5 +1006,20 @@
 
 .mc-node:focus-visible { outline: none; }
 
-.mc-detail-scopes { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.mc-consumption-details { display: grid; gap: 14px; }
+.mc-detail-scopes { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 0; }
 .mc-detail-scopes .mc-button[aria-pressed="true"] { border-color: currentColor; font-weight: 600; }
+.mc-consumption-note { max-width: 72ch; margin: 0; color: var(--color-text-secondary); font-size: 12px; line-height: 1.7; }
+.mc-consumption-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); overflow: hidden; border: 1px solid var(--color-border-subtle); border-radius: 12px; background: var(--color-bg-surface); }
+.mc-consumption-metric { display: grid; align-content: start; gap: 5px; min-width: 0; padding: 14px 16px; background: var(--color-bg-card); }
+.mc-consumption-metric + .mc-consumption-metric { border-left: 1px solid var(--color-border-subtle); }
+.mc-consumption-metric span { color: var(--color-text-muted); font-size: 12px; line-height: 1.5; }
+.mc-consumption-metric strong { color: var(--color-text-primary); font-size: 18px; line-height: 1.4; font-weight: 650; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.mc-consumption-empty { display: grid; justify-items: center; gap: 5px; padding: 22px 16px; border: 1px dashed var(--color-border-default); border-radius: 12px; background: var(--color-bg-surface); text-align: center; }
+.mc-consumption-empty p { margin: 0; color: var(--color-text-primary); font-size: 14px; font-weight: 600; }
+.mc-consumption-empty span { color: var(--color-text-secondary); font-size: 12px; line-height: 1.6; }
+.mc-consumption-foot { margin: 0; color: var(--color-text-muted); font-size: 11px; line-height: 1.7; }
+@media (max-width: 600px) {
+  .mc-consumption-summary { grid-template-columns: minmax(0, 1fr); }
+  .mc-consumption-metric + .mc-consumption-metric { border-top: 1px solid var(--color-border-subtle); border-left: 0; }
+}

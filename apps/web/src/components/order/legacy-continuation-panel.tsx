@@ -110,7 +110,7 @@ export function LegacyContinuationPanel({ orderId, party }: { orderId: string; p
   }
   const confirm = confirmation.scope === scope ? confirmation.value : null, proposed = preview.scope === scope ? preview.value : null, recovery = resolved.scope === scope ? resolved.value : null;
   if (session.status !== "authenticated") return null;
-  return <section className="account-module-card legacy-continuation" aria-label="旧单续办" aria-busy={loading}>
+  return <section className="account-module-card legacy-continuation" aria-label="订单续办" aria-busy={loading}>
     <header className="account-module-heading"><div><h3>订单办理</h3><p>{data?.stage ? stageName[data.stage] : "核对可办理事项"}</p></div><button className="button secondary" type="button" disabled={loading} onClick={() => setNonce(n => n + 1)}>刷新</button></header>
     {error.scope === scope && error.value ? <p role="alert" className="order-feedback">{error.value}</p> : null}
     {!data ? <p className="order-muted">{error.scope === scope && error.value ? "续办资料暂不可用，原订单信息保留。" : "正在核对续办资料。原订单信息保留。"}</p> : data.availability !== "KNOWN" ? <p className="order-muted">{data.availability === "NOT_IMPORTED" ? reasons.NOT_IMPORTED : "该订单有待核来源资料，暂不能办理。"}</p> : <>

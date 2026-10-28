@@ -8,6 +8,8 @@ export type UnitAmount = {
 };
 export type PublicQuote = {
   catalogRevision?: string;
+  /** Published STANDARD buyer ratio in 万哈夫币/元, before renter benefits; older APIs may omit it. */
+  baseRenterHaffRatioWanPerYuan?: string | null;
   schemaVersion: 1 | 2;
   rentalMode?: "ordinary" | "custom" | "fast";
   currency: "CNY";
@@ -101,7 +103,7 @@ export type Favorite = {
   message: string | null;
   listing: PublicListing | null;
 };
-export type Page<T> = { items: T[]; nextCursor: string | null };
+export type Page<T> = { items: T[]; nextCursor: string | null; nextPageCursor?: string | null };
 export type ListingFilterConditions = {
   resources?: Array<{ itemId: string; minQuantity?: string; maxQuantity?: string }>;
   safeBoxCodes?: string[];
@@ -323,11 +325,18 @@ export type PublishingCatalog = {
 export type PublishingOptions = {
   releaseId: string;
   generation: string;
+  declarationOptions?: {
+    next_season_pass?: { enabled: boolean; required: boolean; requiredAt: "QUOTE_AND_PUBLICATION"; label: string; type: "BOOLEAN"; public: true };
+    demulan_unlocked?: { enabled: boolean; required: boolean; requiredAt: "QUOTE_AND_PUBLICATION"; label: string; type: "BOOLEAN"; public: true };
+    info_source?: { enabled: boolean; required: false; label: string; public: false; options: Array<{ name: string; value: string }>; optionsState: "CONFIGURED" | "NOT_CONFIGURED"; acceptsLegacyText: boolean; sourceSnapshot?: { observedAtUtc: string; sha256: string; revision: null } };
+  };
+  rentalTermOptions?: Partial<Record<RentalMode, { termOptionCodes: string[]; requiredDailyConsumption?: "10000000"; reasonCodes?: string[] }>>;
   termOptions: Array<{
     code: string;
     name: string;
     dailyConsumption: string;
     durationRounding: "CEIL_DAY";
+    ownerRatioAdjustmentWanPerYuan?: string | null;
   }>;
   safeBoxCodes: string[];
   safeBoxOptions?: PublicCodeLabel[];
@@ -353,6 +362,85 @@ export type ResourceIncomePreview = {available:false;reason:string} | {
   available:true;informationalOnly:true;binding:{gameId:string;catalogRevision:string;releaseId:string;releaseGeneration:string;priceVersionId:string};
   lines:Array<{itemId:string;code:string;name:string;unit:string;unitQuantity:string;ownerUnitAmount:{currency:"CNY";unit:"yuan";amount:string;scale:number};quantity:string|null;ownerAmount:{currency:"CNY";unit:"yuan";amount:string;scale:2}|null}>;
   ownerTotal:{currency:"CNY";unit:"yuan";amount:string;scale:2}|null;unreportedItemIds:string[];unpricedItemIds:string[];
+};
+export type OwnerDepositDeclaration = {
+  schema: "owner-deposit-declaration-v1";
+  amountCents: string;
+  declarationVersion: string;
+};
+export type OwnerIncomePreviewLine = {
+  itemId: string;
+  code: string;
+  name: string;
+  quantity: string | null;
+  unit: string;
+  unitQuantity: string | null;
+  ownerUnitAmount: { currency: "CNY"; unit: "yuan"; amount: string; scale: number } | null;
+  ownerAmount: Money | null;
+};
+export type OwnerIncomePreviewInput = {
+  releaseId: string;
+  catalogRevision: string;
+  accountId?: string;
+  attributes: {
+    safe_box_code?: string | null;
+    vit_level?: number | null;
+    bear_level?: number | null;
+    rentalPricing?: RentalPricingSelection | null;
+    owner_deposit_declaration?: OwnerDepositDeclaration | null;
+    full_payout_declaration?: { schema: "full-payout-declaration-v1"; selected: boolean } | null;
+  };
+  termOptionCode: string | null;
+  pricingOptionCode?: string | null;
+  inventory: Array<{ itemId: string; quantity: string | null }>;
+  entitlements: Array<{
+    entitlementId: string;
+    value: boolean | number | string | null;
+    expiresAt: string | null;
+    expiryKnowledge: "KNOWN" | "UNKNOWN";
+  }>;
+};
+export type OwnerIncomePreview = {
+  schema: "owner-income-preview.v1";
+  state: "READY" | "PARTIAL" | "INCOMPLETE" | "UNAVAILABLE";
+  binding: {
+    gameId: string;
+    releaseId: string;
+    releaseGeneration: string;
+    priceVersionId: string;
+    termVersionId: string;
+    catalogRevision: string;
+  } | null;
+  evaluatedAt: string;
+  refreshAfter: string;
+  rentalMode: RentalMode | null;
+  ownerHaffRatioWanPerYuan: string | null;
+  termSeconds: string | null;
+  lines: OwnerIncomePreviewLine[];
+  ownerHaffIncome: Money | null;
+  ownerResourceIncome: Money | null;
+  knownResourceSubtotal: Money | null;
+  totalExpectedIncome: Money | null;
+  baseTenantDeposit: Money | null;
+  depositState: "KNOWN" | "INCOMPLETE" | "UNAVAILABLE";
+  missingFields: string[];
+  reasonCodes: string[];
+  unitAmountsInformational: boolean;
+  estimateOnly: true;
+  incomeBasis: "OWNER_RESOURCE_INCOME_BEFORE_FEES";
+  normalEndEstimate?: OwnerNormalEndEstimate;
+};
+export type OwnerNormalEndEstimate = {
+  schema: "owner-normal-end-estimate.v1";
+  state: "READY" | "INCOMPLETE" | "UNAVAILABLE";
+  scenario: "ALL_DECLARED_INVENTORY_CONSUMED_NORMAL_END";
+  selected: boolean | null;
+  ownerGross: Money | null;
+  serviceFee: { base: Money | null; rate: string | null; amount: Money | null; payer: "OWNER" | "NONE" | null };
+  ownerNet: Money | null;
+  policy: { fullPayoutPolicyRef: string; fullPayoutPolicyVersion: string; disclosureVersion: string } | null;
+  roundingPolicy: string;
+  reasonCodes: string[];
 };
 export type RentalMode = "ordinary" | "custom" | "fast";
 export type DepositSkinFacts = {
@@ -447,6 +535,49 @@ export type LegacyHistoricalRead = {
     attributeDisplay: PublicAttributeDisplay;
     sourceUpdatedAt: string;
   } };
+};
+export type RentalState = "RENTED" | "LISTED" | "PAUSED" | "REVIEWING" | "DRAFT" | "REJECTED" | "RESTRICTED" | "UNKNOWN";
+export type AccountTitleFacts = {
+  haffBase: string | null;
+  safeBox: { code: string; displayName: string | null } | null;
+  rank: { code: string; displayName: string | null } | null;
+  level: number | null;
+  vitLevel: number | null;
+  bearLevel: number | null;
+  rentalMode: string | null;
+  ownerQuoteTotal: Money | null;
+};
+export type AccountDisplay = {
+  displayNo: string | null;
+  gameId: string;
+  titleFacts: AccountTitleFacts | null;
+  unknownReason: "VERSION_MISSING" | "DECLARATION_UNREADABLE" | "NOT_QUOTED" | null;
+};
+export type AccountActiveOrder = {
+  id: string;
+  displayNo: string;
+  status: "PENDING_PAYMENT" | "PAID";
+  renterName: string | null;
+  termSeconds: string | null;
+  startedAt: string | null;
+  rentalDeadlineAt: string | null;
+  ownerAmount: Money | null;
+};
+export type MyAccountRow = {
+  id: string;
+  display_no?: string | null;
+  title: string | null;
+  game_name: string;
+  review_state: string | null;
+  sequence: string | null;
+  owner_paused: boolean;
+  staff_restricted: boolean;
+  historicalRead?: MySupply["historicalRead"];
+  rentalState?: RentalState;
+  accountDisplay?: AccountDisplay | null;
+  activeOrder?: AccountActiveOrder | null;
+  available?: boolean;
+  blockers?: string[];
 };
 export type MySupply = {
   historicalRead?: LegacyHistoricalRead | null;

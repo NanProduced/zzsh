@@ -1,0 +1,90 @@
+.portal-home .home-fast-mobile { display:none; }
+
+@media (max-width:899px) {
+  .portal-home main { display:flex; flex-direction:column; }
+  .portal-home .hero-section { order:1; padding-top:8px; padding-bottom:12px; }
+  .portal-home .service-benefits { display:none; }
+  .portal-home .activity-shell { order:2; margin-top:16px; }
+  .portal-home .delta-section { order:3; margin-top:0; }
+  .portal-home .game-row--upcoming { order:4; }
+  .portal-home .hero-grid { display:grid; grid-template-columns:minmax(0,1fr); gap:8px; }
+  .portal-home .hero-services { grid-column:1; grid-row:1; order:0; }
+  .portal-home .hero-main { grid-column:1; grid-row:2; order:1; }
+  .portal-home .hero-personal { grid-column:1; grid-row:3; order:2; }
+  .portal-home .od3-service-stack { grid-template-columns:repeat(4,minmax(0,1fr)); padding:0; gap:0; }
+  .portal-home .od3-item { flex-direction:column; justify-content:center; min-height:72px; padding:6px 2px; gap:2px; }
+  .portal-home .od3-icon-badge,.portal-home .service-relief-icon { width:32px; height:32px; }
+  .portal-home .od3-text { flex:0; }
+  .portal-home .od3-title { font-size:14px; line-height:22px; white-space:nowrap; }
+  .portal-home .od3-desc,.portal-home .od3-arrow { display:none; }
+  .portal-home .hero-carousel { height:auto; aspect-ratio:2.3; }
+  .portal-home .personal-panel.b1-panel { display:grid; grid-template-columns:64px minmax(0,1fr); padding:0 4px; gap:4px; }
+  .portal-home .b1-visitor { display:contents; }
+  .portal-home .b1-avatar-wrap,.portal-home .b1-visitor-title,.portal-home .b1-actions,.portal-home .b1-guides { display:none; }
+  .portal-home .b1-account-link { grid-column:auto; justify-self:stretch; justify-content:center; min-height:44px; font-size:12px; white-space:nowrap; }
+  .portal-home .b1-account-link svg { display:none; }
+  .portal-home .b1-shortcuts { grid-template-columns:repeat(4,minmax(0,1fr)); gap:0; padding:0; margin:0; border:0; }
+  .portal-home .b1-shortcut { flex-direction:column; gap:0; min-height:44px; font-size:12px; line-height:18px; white-space:nowrap; }
+  .portal-home .b1-shortcut svg { width:16px; height:16px; }
+  .portal-home .game-row { grid-template-columns:minmax(0,1fr); }
+  .portal-home .game-identity,.portal-home .game-row--upcoming .game-identity { min-height:76px; }
+  .portal-home .game-identity-heading { padding:12px 16px; }
+  .portal-home .game-identity-heading h2 { font-size:25px; }
+  .portal-home .game-identity-heading p { margin-top:4px; font-size:12px; }
+  .portal-home .game-identity-actions { left:auto; right:12px; top:16px; bottom:auto; }
+  .portal-home .game-identity-actions .button { min-height:44px; padding:8px 12px; }
+  .portal-home .game-portrait { left:auto; right:0; top:-18px; width:240px; background-size:240px auto; background-position:center 22%; }
+  .portal-home .game-identity--delta { min-height:120px; }
+  .portal-home .game-identity--delta .game-identity-heading { padding-bottom:0; }
+  .portal-home .game-identity--delta .game-portrait { top:0; bottom:0; width:206px; background-size:cover; background-position:65% 20%; }
+  .portal-home .game-identity--delta .game-identity-actions { left:16px; right:auto; top:auto; bottom:12px; }
+  .portal-home .game-identity--delta .game-identity-actions .button { width:auto; min-width:96px; padding:8px 14px; }
+  .portal-home .game-section .delta-supply { padding:0 12px 4px; }
+  .portal-home .supply-heading { min-height:44px; margin:0; padding:0; }
+  .portal-home .supply-heading h3 { font-size:16px; }
+  .portal-home .supply-heading a { min-height:44px; }
+  .portal-home .account-carousel-controls,.portal-home .home-fast-desktop { display:none; }
+  .portal-home .home-fast-mobile { display:block; }
+  .portal-home .home-fast-row { padding:12px 0 4px; border-bottom:1px solid var(--color-border-default); }
+  .portal-home .home-fast-row:last-child { border-bottom:0; }
+  .portal-home .home-fast-row-heading { display:flex; align-items:start; gap:8px; }
+  .portal-home .home-fast-row-heading > a { display:flex; align-items:center; min-height:44px; min-width:0; flex:1; }
+  .portal-home .home-fast-row h4 { font-size:16px; line-height:24px; font-weight:650; overflow-wrap:anywhere; }
+  .portal-home .home-fast-row-heading .favorite { position:static; flex-shrink:0; min-width:44px; min-height:44px; }
+  .portal-home .home-fast-resources { margin-top:2px; color:var(--color-text-secondary); font-size:13px; line-height:20px; overflow-wrap:anywhere; }
+  .portal-home .home-fast-conditions { display:flex; flex-wrap:wrap; gap:2px 12px; margin:4px 0 10px; color:var(--color-text-secondary); font-size:12px; line-height:20px; }
+  .portal-home .home-fast-fees { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
+  .portal-home .home-fast-fees dt { color:var(--color-text-secondary); font-size:12px; line-height:20px; }
+  .portal-home .home-fast-fees dd { margin:0; font-size:16px; line-height:24px; font-weight:650; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+  .portal-home .home-fast-fees > div:last-child dd { color:var(--color-accent-brand); }
+  .portal-home .home-fast-row-footer { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+  .portal-home .home-fast-row-footer > span { min-width:0; color:var(--color-text-secondary); font-size:11px; line-height:18px; overflow-wrap:anywhere; }
+  .portal-home .home-fast-row-footer > a { display:inline-flex; align-items:center; justify-content:center; gap:4px; flex-shrink:0; min-height:44px; padding-left:12px; color:var(--color-accent-brand); font-size:14px; }
+  .portal-home .home-fast-row a:focus-visible { outline:2px solid var(--color-accent-brand); outline-offset:2px; border-radius:4px; }
+  .portal-home .home-fast-row a:active { color:var(--color-text-primary); }
+  .portal-home .home-fast-row-skeleton { display:grid; gap:12px; padding:18px 0; border-bottom:1px solid var(--color-border-default); }
+  .portal-home .home-fast-row-skeleton span { height:24px; background:var(--color-bg-elevated); border-radius:4px; }
+  .portal-home .home-fast-row-skeleton span:first-child { width:78%; }
+  .portal-home .home-fast-row-skeleton span:last-child { height:44px; }
+  .portal-home .account-empty { min-height:150px; padding:20px 12px; }
+  .portal-home .account-empty a { min-height:44px; }
+  .portal-home .account-empty > a[href="/help#rental-guide"] { display:none; }
+  .portal-home .delta-section .account-empty { min-height:0; padding:10px 12px 2px; gap:4px; }
+  .portal-home .delta-section .account-empty svg { display:none; }
+  .portal-home .delta-section .account-empty h3 { font-size:14px; }
+  .portal-home .delta-section .account-empty p { font-size:12px; line-height:18px; }
+  .portal-home .game-coming-soon { min-height:96px; padding:12px 16px 20px; }
+  .portal-home .game-coming-soon > p { display:none; }
+  .portal-home .game-coming-soon h3 { margin-top:0; font-size:15px; }
+}
+
+@media (min-width:600px) and (max-width:899px) {
+  .portal-home .hero-grid { grid-template-columns:minmax(0,1fr) minmax(0,1fr); }
+  .portal-home .hero-services { grid-column:1; grid-row:1; }
+  .portal-home .hero-personal { grid-column:2; grid-row:1; }
+  .portal-home .hero-main { grid-column:1 / -1; grid-row:2; }
+  .portal-home .od3-item { min-height:76px; }
+  .portal-home .personal-panel.b1-panel { grid-template-columns:64px minmax(0,1fr); height:100%; }
+  .portal-home .home-fast-mobile { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); column-gap:20px; }
+  .portal-home .home-fast-row { border-bottom:0; }
+}

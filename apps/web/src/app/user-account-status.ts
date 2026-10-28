@@ -4,6 +4,9 @@ export type UserIdentitySnapshot = {
   ageStatus: "UNKNOWN" | "ADULT" | "MINOR";
   provider: string;
   eligibleForProtectedTrade: boolean;
+  /** Masked display fields are optional for older APIs; never log or cache these values. */
+  identityDisplay?: { realNameMasked: string; idCardMasked: string; maskingVersion: string } | null;
+  identityDisplayReason?: "NOT_RECORDED" | "NOT_VERIFIED" | "STORE_UNAVAILABLE" | null;
   realNameMasked?: string | null;
   idCardMasked?: string | null;
 };

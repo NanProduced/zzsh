@@ -2,7 +2,7 @@ import {WalletRequestError} from './personal-wallet-client.ts';
 export const earningStates=['ALL','PENDING','SETTLED','REVOKED','RECOVERY_REQUIRED','EXPIRED'] as const;
 export type EarningFilter=typeof earningStates[number];
 export type CurrentLegacyFinance={knowledge:'UNKNOWN';reason:string}|{knowledge:'KNOWN';state:'SETTLED';amountCents:string;zeroFinalization:boolean;reference:{type:'LEDGER_ENTRY'|'FINANCE_EVENT';id:string;digest:string}};
-export type EarningCalculation={knowledge:'NOT_RECORDED'|'UNKNOWN';reason:string}|{knowledge:'KNOWN';policyVersion:string;beneficiaryLevelCode:string;percent:string;basis:'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE';baseDisclosure:'INTERNAL_SETTLEMENT_ONLY';rounding:'HALF_UP_CENT';cap:'COMBINED_ROLES_NOT_ABOVE_BASE';scope:'LOCAL_CONTROLLED';orderNumber:string|null};
+export type EarningCalculation={knowledge:'NOT_RECORDED'|'UNKNOWN';reason:string}|{knowledge:'KNOWN';policyVersion:string;beneficiaryLevelCode:string|null;rateMode?:'UNIFORM';percent:string;basis:'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE';baseDisclosure:'INTERNAL_SETTLEMENT_ONLY';rounding:'HALF_UP_CENT';cap:'COMBINED_ROLES_NOT_ABOVE_BASE';scope:'LOCAL_CONTROLLED'|'NATIVE';orderNumber:string|null};
 export type EarningItem={id:string;origin:'NATIVE'|'LEGACY_MYSQL';state:Exclude<EarningFilter,'ALL'>;role:string;amount:{currency:'CNY';unit:'cent';amountCents:string};occurredAt:string;dueAt:string|null;dueAtKnowledge:'KNOWN'|'UNKNOWN';fundsDisposition:string;recoveryRequiredCents:string|null;includedInOpening:boolean;version:string|null;accountingEffect:string;businessReference:{type:string;id:string|null};channelArrivalKnowledge:'UNKNOWN';currentFinance?:CurrentLegacyFinance|null;calculation?:EarningCalculation};
 export type EarningsContext={contractVersion:'distribution-earnings.read.v1';subjectId:string;snapshotVersion:string;asOf:string;projectionVersion?:2};
 type SourceAmount={knowledge:'KNOWN'|'UNKNOWN';amountCents:string|null};
@@ -17,10 +17,11 @@ function context(v:any,userId:string,expectedVersion?:1|2):EarningsContext{if(v.
 function calculation(value:any,legacy:boolean):EarningCalculation{
  const c=obj(value);
  if(c.knowledge==='NOT_RECORDED'&&legacy&&c.reason==='HISTORICAL_CALCULATION_NOT_RECORDED')return{knowledge:'NOT_RECORDED',reason:c.reason};
- if(c.knowledge==='UNKNOWN'&&!legacy&&['ORIGINAL_BASIS_UNAVAILABLE','FROZEN_CALCULATION_NOT_VERIFIED'].includes(c.reason))return{knowledge:'UNKNOWN',reason:c.reason};
+ if(c.knowledge==='UNKNOWN'&&!legacy&&['ORIGINAL_BASIS_UNAVAILABLE','FROZEN_CALCULATION_NOT_VERIFIED','UNIFORM_CALCULATION_REQUIRES_VERSION_2'].includes(c.reason))return{knowledge:'UNKNOWN',reason:c.reason};
  if(c.knowledge!=='KNOWN'||legacy||typeof c.percent!=='string'||!/^(0|[1-9]\d{0,2})(?:\.\d{1,8})?$/.test(c.percent)||Number(c.percent)>100
-  ||c.basis!=='FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE'||c.baseDisclosure!=='INTERNAL_SETTLEMENT_ONLY'||c.rounding!=='HALF_UP_CENT'||c.cap!=='COMBINED_ROLES_NOT_ABOVE_BASE'||c.scope!=='LOCAL_CONTROLLED')throw bad();
- return{knowledge:'KNOWN',policyVersion:text(c.policyVersion,128),beneficiaryLevelCode:text(c.beneficiaryLevelCode,64),percent:c.percent,basis:c.basis,baseDisclosure:c.baseDisclosure,rounding:c.rounding,cap:c.cap,scope:c.scope,orderNumber:c.orderNumber===null?null:text(c.orderNumber,80)};
+  ||c.basis!=='FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE'||c.baseDisclosure!=='INTERNAL_SETTLEMENT_ONLY'||c.rounding!=='HALF_UP_CENT'||c.cap!=='COMBINED_ROLES_NOT_ABOVE_BASE'||!['LOCAL_CONTROLLED','NATIVE'].includes(c.scope))throw bad();
+ if(c.rateMode!==undefined&&c.rateMode!=='UNIFORM'||c.rateMode==='UNIFORM'&&c.beneficiaryLevelCode!==null)throw bad();
+ return{knowledge:'KNOWN',policyVersion:text(c.policyVersion,128),beneficiaryLevelCode:c.rateMode==='UNIFORM'?null:text(c.beneficiaryLevelCode,64),...(c.rateMode==='UNIFORM'?{rateMode:'UNIFORM' as const}:{}),percent:c.percent,basis:c.basis,baseDisclosure:c.baseDisclosure,rounding:c.rounding,cap:c.cap,scope:c.scope,orderNumber:c.orderNumber===null?null:text(c.orderNumber,80)};
 }
 function item(value:any,projectionVersion:1|2=1):EarningItem{
  const r=obj(value),a=obj(r.amount),reference=obj(r.businessReference),legacy=r.origin==='LEGACY_MYSQL';
@@ -47,4 +48,4 @@ export function earningsPage(value:unknown,userId:string,state:EarningFilter,exp
 export function earningsDetail(value:unknown,userId:string,id:string,expectedVersion?:1|2):EarningsDetail{const r=obj(value),base=context(r,userId,expectedVersion),entry=item(r.item,base.projectionVersion??1);if(entry.id!==id)throw bad();return{...base,item:entry};}
 async function get(path:string,signal?:AbortSignal){let response:Response;try{response=await fetch('/api/account/earnings'+path,{credentials:'same-origin',cache:'no-store',signal});}catch(e){if(signal?.aborted)throw e;throw new WalletRequestError(0,'NETWORK_ERROR');}const body=await response.json().catch(()=>null);if(!response.ok)throw new WalletRequestError(response.status,body?.error?.code??'EARNINGS_UNAVAILABLE');return body;}
 export async function readEarnings(userId:string,state:EarningFilter,cursor:string|null=null,signal?:AbortSignal){const q=new URLSearchParams({state,limit:'20',projectionVersion:'2'});if(cursor)q.set('cursor',cursor);return earningsPage(await get('?'+q,signal),userId,state,2);}
-export async function readEarningDetail(userId:string,id:string,signal?:AbortSignal){return earningsDetail(await get('/'+encodeURIComponent(id)+'?projectionVersion=2',signal),userId,id,2);}
+export async function readEarningDetail(userId:string,id:string,signal?:AbortSignal){return earningsDetail(await get('/'+encodeURIComponent(id)+'?projectionVersion=2&calculationVersion=2',signal),userId,id,2);}

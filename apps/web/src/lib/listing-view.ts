@@ -40,6 +40,8 @@ export type ListingCardData = {
   sourceUpdatedAt?: string;
   /** Owner's full-payout declaration; null = not declared. Never inferred from the quote. */
   fullPayoutSelected?: boolean | null;
+  /** Published base ratio, not an equivalent member rate or rental eligibility. */
+  baseRenterHaffRatioWanPerYuan?: string | null;
   id: string;
   gameId?: string;
   versionId?: string;
@@ -78,6 +80,9 @@ export type ListingDetailData = ListingCardData & {
     expiresAt: string | null;
     expiryState: "MISSING" | "PERMANENT" | "TIMED";
   }>;
+  faceIsSelf: boolean | null;
+  banRecord: boolean | null;
+  autoPreview?: boolean;
 };
 
 const UNIT_LABELS: Record<string, string> = { HAFF_BASE: "哈夫币", ROUND: "发", PIECE: "件", DAY: "天" };
@@ -92,7 +97,13 @@ export const CONDITION_LABELS: Record<string, string> = {
   region_province: "省份",
   region_city: "城市",
   secret_kd: "绝密 KD",
+  next_season_pass: "下赛季通行证",
+  demulan_unlocked: "解锁德穆兰",
 };
+export function booleanDeclarationText(key: "next_season_pass" | "demulan_unlocked", value: unknown): string {
+  if (typeof value !== "boolean") return "未提供";
+  return key === "next_season_pass" ? (value ? "计划购买" : "不计划购买") : (value ? "已解锁" : "未解锁");
+}
 const CONDITION_LEVELS = new Set(["vit_level", "bear_level", "dive_level", "character_level"]);
 
 export function unitLabel(unit: string): string {
@@ -189,6 +200,8 @@ export function conditionLines(
       value = mappedCodeValue(context.attributeDisplay?.grading, raw);
     } else if (key === "login_method_code") {
       value = mappedCodeValue(context.attributeDisplay?.loginMethod, raw);
+    } else if (key === "next_season_pass" || key === "demulan_unlocked") {
+      value = booleanDeclarationText(key, raw);
     } else if (CONDITION_LEVELS.has(key)) {
       value = `${raw} 级`;
     } else {
@@ -229,8 +242,10 @@ export function publicAvailabilityLabel(state: PublicAvailabilityState): string 
 }
 function listingVisibility(listing: PublicListing) {
   const historical = listing.source === "LEGACY_READ_ONLY";
-  const state = listing.availability?.state ?? (historical ? "LEGACY_READ_ONLY" : listing.canCreateOrder === false ? "UNKNOWN" : "RENTABLE");
-  const canCreateOrder = !historical && state === "RENTABLE" && listing.canCreateOrder !== false;
+  // An older or incomplete DTO must not become rentable by omission: only an explicit
+  // RENTABLE state plus an explicit server grant opens the order entry.
+  const state = listing.availability?.state ?? (historical ? "LEGACY_READ_ONLY" : "UNKNOWN");
+  const canCreateOrder = !historical && state === "RENTABLE" && listing.canCreateOrder === true;
   if (listing.canCreateOrder === true && !canCreateOrder) throw new Error("Inconsistent public availability");
   const source = listing.sourceAvailability?.state;
   return { canCreateOrder, availabilityState: state, availabilityLabel: publicAvailabilityLabel(state),
@@ -269,6 +284,7 @@ export function toListingCard(listing: PublicListing): ListingCardData {
     releaseId: listing.releaseId,
     displayNo: listing.displayNo ?? null,
     fullPayoutSelected: listing.fullPayoutSelected ?? null,
+    baseRenterHaffRatioWanPerYuan: listing.quote.baseRenterHaffRatioWanPerYuan ?? null,
     title: listing.title?.trim() || structuredTitle || (listing.displayNo ? `账号 ${listing.displayNo}` : "账号资料待补充"),
     imageUrl: firstMedia?.url,
     media,
@@ -358,6 +374,7 @@ function toHistoricalListingCard(listing: PublicListing): ListingCardData {
     ...listingVisibility(listing),
     historicalReadOnly: true, sourceUpdatedAt:listing.sourceUpdatedAt, id: listing.id, displayNo: listing.displayNo ?? null, title: listing.title?.trim() || structuredTitle || "账号资料待补充",
     fullPayoutSelected: null,
+    baseRenterHaffRatioWanPerYuan: null,
     imageUrl: media[0]?.url,
     media, resourceLines,
     resourceTotalLabel: `¥${subtotal / 100n}.${(subtotal % 100n).toString().padStart(2, "0")}`,
@@ -376,6 +393,9 @@ export function toListingDetail(listing: PublicListing): ListingDetailData {
     gameName: listing.game?.name ?? null,
     publicTitle: listing.title?.trim() || null,
     publishedAt: listing.publishedAt ?? null,
+    faceIsSelf: listing.attributes?.face_is_self === true ? true : listing.attributes?.face_is_self === false ? false : null,
+    banRecord: listing.attributes?.ban_record === true ? true : listing.attributes?.ban_record === false ? false : null,
+    autoPreview: listing.availability?.state === "RENTABLE" && listing.canCreateOrder === true && !listing.source && Boolean(listing.versionId && listing.releaseId),
     entitlementDetails: listing.presentation.entitlements.map(item => {
       const disclosure = listing.quote?.expiryDisclosures?.find(entry => entry.entitlementId === item.id);
       return {

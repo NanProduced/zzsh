@@ -20,7 +20,7 @@ const getPath = new RegExp(
   `^/(?:operation-result|games|games/${id}/(?:catalog|publishing-catalog|publishing-options|listing-filters|resource-income-preview|full-payout-terms)|gunsmith/games|gunsmith/games/${id}/firearms|gunsmith/firearms/${id}/codes|listings/lookup|listings(?:/${id}(?:/media/${id})?)?|me/(?:accounts|favorites)|accounts/${id}(?:/deposit-recommendation)?|media/${id}/(?:access|content))$`,
 );
 const postPath = new RegExp(
-  `^/(?:accounts|accounts/${id}/(?:drafts|quote|accept-rules|submit|withdraw|pause|resume)|media/upload-intents)$`,
+  `^/(?:accounts|accounts/${id}/(?:drafts|quote|accept-rules|submit|withdraw|pause|resume)|media/upload-intents|games/${id}/owner-income-preview)$`,
 );
 const putPath = new RegExp(
   `^/(?:accounts/${id}/draft|favorites/${id}|media/uploads/${id})$`,

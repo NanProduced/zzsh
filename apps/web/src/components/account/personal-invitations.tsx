@@ -48,13 +48,13 @@ export function DistributionTermsCard({scope}:{scope:string}){
  useEffect(()=>{if(!userId)return;const abort=new AbortController();const owner=scope;setState(null);
   readMyDistributionTerms(userId,abort.signal).then(value=>{const s=store.getSnapshot();if(!abort.signal.aborted&&s.status==='authenticated'&&s.userId===userId)setState({scope:owner,value,error:''});},e=>{if(abort.signal.aborted)return;if(e instanceof WalletRequestError&&e.status===401)session.revalidate();setState({scope:owner,value:null,error:e instanceof WalletRequestError&&e.status===403?'当前账号无法读取分佣条款。':'适用条款暂时无法读取，请稍后重试。'});});
   return()=>abort.abort();},[scope,userId]);
- const v=state?.scope===scope?state.value:null,error=state?.scope===scope?state.error:'';
+ const v=state?.scope===scope?state.value:null,error=state?.scope===scope?state.error:'',rates=v?.schema==='distribution-terms.self.v2'?v.rates:v?.level;
  return <section className="account-module-card invitation-terms" aria-labelledby="invitation-terms-heading"><h3 id="invitation-terms-heading">我的分佣条款</h3>
   {error?<p role="alert">{error}</p>:!state||state.scope!==scope?<p>正在读取适用条款…</p>:!v||v.knowledge==='UNKNOWN'?<><strong>适用条款待核定</strong><p>{TERMS_REASON[v?.reason??'']??'适用条款尚未核定'}，不按默认等级或 0 显示。</p></>:<>
-   <strong>{v.level?`等级 ${v.level.code}`:'无适用等级'}</strong>
+   <strong>{v.rateMode==='UNIFORM'?'统一分佣比例':v.level?`等级 ${v.level.code}`:'暂无适用比例'}</strong>
    {v.applicable?null:<p>{TERMS_REASON[v.reason??'']??'当前不适用'}</p>}
-   {v.level?<dl className="invitation-terms-list"><div><dt>邀请租客下单</dt><dd>{v.level.renterPercent}%</dd></div><div><dt>邀请号主出租</dt><dd>{v.level.ownerPercent}%</dd></div><div><dt>适用出租方式</dt><dd>{(v.accountModes??[]).map(m=>modeLabel[m]).join('、')}</dd></div><div><dt>结算后到账</dt><dd>{v.settlementDelayDays} 天</dd></div><div><dt>单笔最低</dt><dd>{centsText(v.minimumAccrualCents??'0')}</dd></div></dl>:null}
+   {rates?<dl className="invitation-terms-list"><div><dt>邀请租客下单</dt><dd>{rates.renterPercent}%</dd></div><div><dt>邀请号主出租</dt><dd>{rates.ownerPercent}%</dd></div><div><dt>适用出租方式</dt><dd>{(v.accountModes??[]).map(m=>modeLabel[m]).join('、')}</dd></div><div><dt>结算后转入可用余额</dt><dd>{v.settlementDelayDays} 天</dd></div><div><dt>单笔最低</dt><dd>{v.minimumAccrualCents===null?'未核定':centsText(v.minimumAccrualCents)}</dd></div></dl>:null}
   </>}
-  {v?.policyVersion?<p className="invitation-source">政策版本 {v.policyVersion}{v.participantPolicyVersion&&v.participantPolicyVersion!==v.policyVersion?`（等级登记于版本 ${v.participantPolicyVersion}）`:''} · 本地受控政策，不代表正式全量政策。比例仅说明规则，不代表已产生的收益。</p>:null}
+  {v?.policyVersion?<p className="invitation-source">政策版本 {v.policyVersion}{v.level&&v.participantPolicyVersion&&v.participantPolicyVersion!==v.policyVersion?`（等级登记于版本 ${v.participantPolicyVersion}）`:''} · 本地受控政策，不代表正式全量政策。比例仅说明规则，不代表已产生的收益。</p>:null}
  </section>;
 }

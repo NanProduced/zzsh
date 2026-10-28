@@ -665,20 +665,24 @@ function ConsumptionDetails({ data }: { data: MembershipGrowthData }) {
       <button type="button" className="mc-button" aria-pressed={scope === "LIFETIME"} onClick={() => setScope("LIFETIME")}>累计有效消费</button>
       <button type="button" className="mc-button" aria-pressed={scope === "ROLLING"} onClick={() => setScope("ROLLING")}>近90天有效消费</button>
     </div>
-    <p className="mc-quiet-note">按已确认更正合并消费来源，金额合计后统一折算积分；这里展示消费依据，不是历史积分发放流水。</p>
+    <p className="mc-consumption-note">按已确认更正合并消费来源，金额合计后统一折算积分；这里展示消费依据，不是历史积分发放流水。</p>
     {shown.loading && !page ? <p className="mc-quiet-note" role="status">正在读取消费明细…</p> : null}
     {shown.error ? <p className="mc-quiet-note" role="alert">{shown.error}<button type="button" className="mc-button" onClick={() => setRetry((value) => value + 1)}>重新读取明细</button></p> : null}
-    {page?.knowledge === "UNKNOWN" ? <p className="mc-quiet-note">消费来源尚未完成核验，暂不展示完整明细。</p> : null}
+    {page?.knowledge === "UNKNOWN" ? <div className="mc-consumption-empty" role="status"><p>消费来源尚未完成核验</p><span>暂不展示完整明细，稍后重新读取。</span></div> : null}
     {page?.knowledge === "KNOWN" ? <>
-      <p className="mc-quiet-note">{scope === "LIFETIME" ? "累计" : "近90天"}有效消费 {yuanFromCents(page.amountCents!)}，合计 {page.points} 积分。统计截至 {formatBeijingDateTime(page.asOf)}。</p>
-      {page.total === 0 ? <p className="mc-quiet-note">{scope === "LIFETIME" ? "累计" : "当前窗口"}没有有效消费记录。</p> : <ul className="mc-contributions">
+      <div className="mc-consumption-summary" aria-label="有效消费摘要">
+        <div className="mc-consumption-metric"><span>{scope === "LIFETIME" ? "累计有效消费" : "近90天有效消费"}</span><strong>{yuanFromCents(page.amountCents!)}</strong></div>
+        <div className="mc-consumption-metric"><span>合计</span><strong> {page.points} 积分</strong></div>
+        <div className="mc-consumption-metric"><span>统计截至</span><strong>{formatBeijingDateTime(page.asOf)}</strong></div>
+      </div>
+      {page.total === 0 ? <div className="mc-consumption-empty" role="status"><p>{scope === "LIFETIME" ? "累计没有有效消费记录" : "当前窗口没有有效消费记录"}</p><span>完成结算的有效消费会出现在这里。</span></div> : <ul className="mc-contributions">
         {page.items.map((item) => <li key={item.id} className="mc-contribution-row">
           <span className="mc-contribution-label">{item.label}<em>{item.withinWindow ? "计入近90天" : "仅计入累计"}{item.corrected ? ` · 已更正至第${item.revision}版` : ""}</em></span>
           <span className="mc-contribution-time">{formatBeijingDateTime(item.effectiveAt)} · 退出窗口 {formatBeijingDate(item.expiresAt)}</span>
           <strong className="mc-contribution-amount">{yuanFromCents(item.amountCents)}</strong>
         </li>)}
       </ul>}
-      <p className="mc-quiet-note">已加载 {page.items.length} / {page.total} 条有效消费依据；源事实 {page.sourceSummary.contributionCount} 版，未结算 {page.sourceSummary.pendingCount} 条、已排除 {page.sourceSummary.excludedCount} 条均不计入。</p>
+      <p className="mc-consumption-foot">已加载 {page.items.length} / {page.total} 条有效消费依据；源事实 {page.sourceSummary.contributionCount} 版，未结算 {page.sourceSummary.pendingCount} 条、已排除 {page.sourceSummary.excludedCount} 条均不计入。</p>
       {page.nextCursor ? <button type="button" className="mc-button" disabled={shown.loading} onClick={() => { void loadMore(); }}>{shown.loading ? "正在读取…" : "加载更多消费依据"}</button> : null}
     </> : null}
   </div>;

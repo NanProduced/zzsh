@@ -1,0 +1,58 @@
+/* Compact desktop list; phone layout remains with the mobile pass. */
+@media (min-width:768px) {
+  .functional-shell.functional-shell--browse .market-section .account-grid--list .account-card--list {
+    container-type:inline-size;
+    .account-list-item { grid-template-columns:clamp(176px,17.5cqi,220px) minmax(272px,.95fr) minmax(354px,1.1fr) 198px; grid-template-rows:auto auto auto; column-gap:14px; row-gap:8px; padding:14px; align-items:start; }
+    .account-list-media { grid-column:1; grid-row:1 / span 3; align-self:center; }
+    .account-list-thumb { width:100%; height:auto; min-height:0; max-height:none; aspect-ratio:16 / 10; }
+    .account-list-header { grid-column:2 / 4; grid-row:1; gap:5px; }
+    .account-list-title-link { font-size:14px; line-height:1.5; white-space:normal; overflow:visible; text-overflow:clip; }
+    .account-list-haff-lead { font-size:15px; }
+    .account-list-title-secondary { display:block; flex-basis:100%; width:100%; }
+    .account-title-supplies-badge { margin-left:0; font-size:11.5px; line-height:1.5; white-space:normal; }
+    .account-list-subline-row { flex-wrap:wrap; gap:4px 10px; }
+    .account-list-subline { font-size:11.5px; white-space:normal; overflow:visible; }
+    .account-list-matrix { grid-column:2; grid-row:2; display:block; height:auto; min-height:0; max-height:none; padding:0; border:1px solid var(--color-border-subtle); border-radius:6px; background:var(--color-bg-elevated); overflow:visible; }
+    .account-matrix-desktop { display:block; height:auto; min-height:0; }
+    .matrix-row { display:grid; grid-template-columns:.9fr .9fr .9fr 1.7fr; height:auto; min-height:0; max-height:none; border:0; }
+    .matrix-row + .matrix-row { border-top:1px solid var(--color-border-subtle); }
+    .matrix-col { display:flex; flex-direction:column; align-items:flex-start; justify-content:center; gap:2px; padding:4px; height:auto; min-height:0; max-height:none; min-width:0; border:0; }
+    .matrix-col:not(:last-child) { border-right:1px solid var(--color-border-subtle); }
+    :is(.matrix-label,.matrix-value) { display:block; max-width:100%; line-height:1.4; white-space:normal; overflow:visible; text-overflow:clip; overflow-wrap:anywhere; }
+    .matrix-label { font-size:11.5px; color:var(--color-text-secondary); }
+    .matrix-value { font-size:12.5px; font-weight:600; }
+    .account-list-resources-panel { grid-column:3; grid-row:2; height:auto; min-height:0; max-height:none; }
+    .resources-table-wrap { display:grid; grid-template-columns:40px minmax(0,1fr); width:100%; height:auto; min-height:0; padding:0; border:1px solid var(--color-border-subtle); border-radius:6px; background:var(--color-border-subtle); overflow:hidden; }
+    .resources-table-side { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; width:40px; min-width:40px; padding:6px 0; border:0; border-right:1px solid var(--color-border-subtle); border-radius:0; background:color-mix(in srgb,#0284c7 6%,var(--color-bg-elevated)); }
+    .resources-side-title { writing-mode:vertical-rl; text-orientation:upright; font-size:11px; line-height:1; letter-spacing:2px; white-space:nowrap; font-weight:600; }
+    .resources-grid-2x2 { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); grid-template-rows:none; grid-auto-rows:auto; gap:1px; width:auto; height:auto; min-height:0; max-height:none; padding:0; }
+    .resources-cell { display:flex; flex-direction:row; align-items:baseline; justify-content:space-between; gap:6px; height:auto; min-height:32px; padding:5px 8px; border:0; background:var(--color-bg-elevated); }
+    .resources-grid-2x2:has(.resources-cell:last-child:nth-child(odd))::after { content:""; background:var(--color-bg-elevated); }
+    .resources-cell-name { flex:0 1 auto; min-width:0; max-width:100%; font-size:11.5px; line-height:1.5; white-space:normal; overflow:visible; text-overflow:clip; overflow-wrap:anywhere; color:var(--color-text-secondary); }
+    .resources-cell-qty { flex:0 0 auto; font-size:12.5px; line-height:1.5; font-weight:600; text-align:right; white-space:nowrap; color:var(--color-text-primary); }
+    .resources-cell--unknown { opacity:1; }
+    .resources-cell--unknown .resources-cell-qty { color:var(--color-text-secondary); font-weight:500; }
+    .account-list-skins .account-skin-chip { max-width:180px; }
+    .account-list-skins .skin-chip-name { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .account-list-skins { grid-column:2 / 4; grid-row:3; display:flex; flex-wrap:wrap; align-items:center; gap:6px; height:auto; min-height:0; max-height:none; overflow:visible; }
+    .account-skin-chip { flex:0 1 auto; max-width:100%; height:auto; min-height:22px; font-size:11.5px; line-height:1.5; white-space:normal; overflow:visible; overflow-wrap:anywhere; }
+    .skin-chip-name { white-space:normal; overflow:visible; text-overflow:clip; }
+    .account-list-skins:has(.account-list-skins-empty) { display:none; }
+    .account-list-rail { grid-column:4; grid-row:1 / span 3; height:auto; align-self:stretch; gap:12px; padding:0 0 0 14px; }
+    .finance-row { gap:8px; font-size:12px; line-height:1.65; }
+    .finance-total-caption { font-size:11px; font-weight:400; color:var(--color-text-secondary); }
+    .finance-total-row { gap:7px; flex-wrap:wrap; margin-top:8px; padding-top:8px; border-top:1px solid var(--color-border-subtle); }
+    .account-list-cta-btn { min-height:40px; font-size:13px; }
+    :is(.account-mobile-summary,.account-mobile-expanded-supplies,.account-mobile-badges,.account-mobile-price-summary,.account-mobile-price-lines,.account-mobile-fee-toggle) { display:none; }
+    @container (max-width:1040px) {
+      .account-list-item { grid-template-columns:160px minmax(0,1fr) 190px; }
+      .account-list-media { grid-row:1 / span 4; }
+      .account-list-header { grid-column:2; }
+      .account-list-matrix { grid-column:2; grid-row:2; }
+      .account-list-resources-panel { grid-column:2; grid-row:3; }
+      .account-list-skins { grid-column:2; grid-row:4; }
+      .account-list-rail { grid-column:3; grid-row:1 / span 4; }
+    }
+  }
+  .finance-total-caption { font-size:11px; font-weight:400; color:var(--color-text-secondary); }
+}

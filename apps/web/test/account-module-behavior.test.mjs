@@ -20,6 +20,17 @@ const profileReply = (userId) => ({ user: { id: userId, username: `PRIVATE_${use
 const identityReply = (identityStatus = "VERIFIED") => ({ accountStatus: "ACTIVE", identityStatus, ageStatus: "ADULT", provider: "none", eligibleForProtectedTrade: false });
 function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 
+function loadAccountTitle() {
+  const file = path.join(tree, "apps/web/src/lib/account-title.ts");
+  const module = new Module(file);
+  module.filename = file;
+  module.paths = Module._nodeModulePaths(tree);
+  module.require = (name) => name === "./listing-filters" ? { canonicalResourceCode: (code) => code } : require(name);
+  module._compile(ts.transpileModule(fs.readFileSync(file, "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, file);
+  return module.exports;
+}
+const accountTitle = loadAccountTitle();
+
 async function probe({ rows = [], detail = null, identityStatus = "UNVERIFIED", authRead, confirm = () => false, writeReply, pages = null, mine = null, viaFetch = null, initialStorage = {} } = {}) {
   const window = new Window({ url: "http://127.0.0.1:3100/account" });
   for (const [key, value] of Object.entries(initialStorage)) window.sessionStorage.setItem(key, value);
@@ -51,6 +62,9 @@ async function probe({ rows = [], detail = null, identityStatus = "UNVERIFIED", 
     if (name === "next/link") return ({ scroll: _scroll, ...props }) => React.createElement("a", props);
     if (name === "next/navigation") return { useRouter: () => router };
     if (name === "./auth/auth-overlay-provider") return { useAuthOverlay: () => ({ open() {} }) };
+    // This suite tests the parent's identity/data boundary; shared state visuals have separate coverage.
+    if (name === "./auth/session-loading") return { SessionLoading: ({ label, layout }) => React.createElement("section", { className: "session-loading", "data-layout": layout, "aria-busy": true }, React.createElement("p", { role: "status" }, label)) };
+    if (name === "./ui/information") return { RecoveryAlert: ({ title, problem, impact, action, className }) => React.createElement("section", { className, role: "alert" }, React.createElement("h2", null, title), React.createElement("p", null, problem), impact ? React.createElement("p", null, impact) : null, action) };
     // This suite probes the parent's read permission; the real security control has its own React suite.
     if (name === "./account/account-security-controls") return { AccountSecurityControls: ({ userId, canAct }) => canAct() ? React.createElement("p", null, `PRIVATE_${userId} 138****8000`) : null };
     if (name === "./account/personal-wallet") return { PersonalWallet: () => null };
@@ -60,6 +74,7 @@ async function probe({ rows = [], detail = null, identityStatus = "UNVERIFIED", 
     if (name === "./session/user-session-provider") return { useUserSession: () => session, useUserSessionStore: () => store, publishUserSessionChange() {} };
     if (name === "./layout/service-shell") return { ServiceShell: ({ children }) => React.createElement("main", null, children) };
     if (name === "@/components/status/status-page") return { StatusPage: () => null }; // The real shared state page is composed in auth-entry-behavior.
+    if (name === "../lib/account-title") return accountTitle;
     if (name === "./auth/auth-form") return {
       AuthForm: () => null,
       WebAuthError: ProbeWebAuthError,
@@ -80,10 +95,10 @@ async function probe({ rows = [], detail = null, identityStatus = "UNVERIFIED", 
       AccountCenterFrame: ({ children }) => children,
       AccountOverview: () => null,
       resolveAccountView: (view) => view || "overview",
-      isKnownAccountView: (view) => ["", "overview", "membership", "rentals", "leased", "accounts", "credit", "identity", "favorites", "security", "wallet", "invite"].includes(view),
+      isKnownAccountView: (view) => ["", "overview", "membership", "rentals", "leased", "rented", "accounts", "credit", "identity", "favorites", "security", "wallet", "invite"].includes(view),
       accountSectionHref: (section) => `/account?view=${section}`,
       accountSectionLabels: { wallet: "我的钱包", invite: "分销中心", credit: "信用与保证金" },
-      accountViewTitle: (view) => ({ overview: "总览", membership: "会员中心", favorites: "我的收藏", rentals: "租入订单", leased: "出租订单", accounts: "出租账号", wallet: "我的钱包", credit: "信用与保证金", invite: "邀请与佣金", identity: "实名认证", security: "账号安全" }[view] ?? "总览"),
+      accountViewTitle: (view) => ({ overview: "总览", membership: "会员中心", favorites: "我的收藏", rentals: "租入订单", leased: "出租订单", accounts: "上架账号", rented: "出租账号", wallet: "我的钱包", credit: "信用与保证金", invite: "邀请与佣金", identity: "实名认证", security: "账号安全" }[view] ?? "总览"),
     };
     // 当前网络信息卡有专属用例（network-info），本套只桩掉渲染。
     if (name === "./account/network-info") return { NetworkInfoPanel: () => null, CurrentNetworkFields: () => null };
@@ -166,7 +181,7 @@ test("empty account management has one publishing action and no duplicate detail
     await p.render("accounts");
     assert.equal(p.host.querySelectorAll("a[href='/publish']").length, 1);
     assert.equal(p.host.querySelector(".supply-account-detail"), null);
-    assert.match(p.host.textContent, /审核进度与接单状态/);
+    assert.match(p.host.textContent, /资料、审核与接单状态/);
     assert.doesNotMatch(p.host.textContent, /安全收取租金/);
   } finally { await p.close(); }
 });
@@ -472,8 +487,8 @@ test("unknown cancellation survives tab navigation without resubmission", async 
 
 // ══ t4（2026-10-14）F1-t / F2 / 身份防线补测：真实请求 URL 带 after、第二页追加新记录、末页终止、错误重试、
 //    往返恢复（滚动/焦点/游标/筛选）与迟到响应/401/403/404 撤销。所有请求均被 fixture/传输层拦截，不达真实 API。 ══
-const accountRow = (id, extra = {}) => ({ id, title: `账号 ${id}`, game_name: "三角洲行动", review_state: "PUBLISHED", sequence: "1", owner_paused: false, staff_restricted: false, ...extra });
-const detailOf = (id) => ({ account: { id, revision: "1", owner_paused: false, staff_restricted: false }, version: { reviewState: "PUBLISHED", declaration: { title: `账号 ${id}`, mediaBindings: [] } }, decisions: [], blockers: [] });
+const accountRow = (id, extra = {}) => ({ id, display_no: id, title: `账号 ${id}`, game_name: "三角洲行动", review_state: "PUBLISHED", sequence: "1", owner_paused: false, staff_restricted: false, ...extra });
+const detailOf = (id) => ({ account: { id, display_no: id, revision: "1", owner_paused: false, staff_restricted: false }, version: { reviewState: "PUBLISHED", declaration: { title: `账号 ${id}`, mediaBindings: [] } }, decisions: [], blockers: [] });
 
 test("R03: unknown pause/resume/withdraw survives remount and recovers only the original receipt", async () => {
   for (const action of ["pause", "resume", "withdraw"]) {
@@ -604,14 +619,18 @@ test("F1-t: 续页失败保留已加载记录，错误重试仍用同一个 afte
   } finally { await p.close(); }
 });
 
-test("F2: 开详情不清已加载列表/游标/筛选，返回恢复滚动与来源行焦点", async () => {
-  const pages = [{ items: [accountRow("acc-A", { review_state: "DRAFT" }), accountRow("acc-B")], nextCursor: "acc-B" }, { items: [accountRow("acc-C")], nextCursor: null }];
+test("F2: 开详情不清已加载列表与筛选，返回恢复滚动与来源行焦点", async () => {
+  const pages = (params) => {
+    const state = new URLSearchParams(params).get("rentalState");
+    if (state === "REJECTED") return { items: [accountRow("acc-B", { rentalState: "REJECTED" })], nextCursor: null };
+    return { items: [accountRow("acc-A"), accountRow("acc-B")], nextCursor: null };
+  };
   const p = await probe({ pages, detail: detailOf("acc-B") });
   try {
     await p.render("accounts");
     Object.defineProperty(p.window, "scrollY", { configurable: true, get: () => 320 });
     p.window.dispatchEvent(new p.window.Event("scroll"));
-    await p.click(".mra-chip:nth-child(6)"); // 已上架：只筛已加载记录
+    await p.click(".mra-chip:nth-child(5)"); // 已退回：服务端筛选
     assert.deepEqual(rowIds(p), ["acc-B"]);
     const listReads = p.calls.myAccounts.length;
     await p.render("accounts", "acc-B");
@@ -621,12 +640,9 @@ test("F2: 开详情不清已加载列表/游标/筛选，返回恢复滚动与�
     await p.frames();
     assert.equal(p.calls.myAccounts.length, listReads, "往返不重拉列表（F2 生命周期分离）");
     assert.deepEqual(rowIds(p), ["acc-B"], "已加载记录与筛选保留");
-    assert.match(p.host.querySelector(".mra-chip[aria-pressed='true']").textContent, /已上架/);
+    assert.match(p.host.querySelector(".mra-chip[aria-pressed='true']").textContent, /已退回/);
     assert.ok(p.scrollToCalls.some((args) => args[1] === 320), `返回恢复滚动位置 320，实际 ${JSON.stringify(p.scrollToCalls)}`);
     assert.equal(p.host.ownerDocument.activeElement?.id, "account-row-title-acc-B", "焦点回到来源行标题链");
-    await p.click(".mra-list-foot button");
-    assert.match(p.calls.myAccounts.at(-1), /after=acc-B/, "游标在往返后仍保留");
-    assert.deepEqual(rowIds(p), ["acc-B", "acc-C"], "翻页继续追加新记录");
   } finally { await p.close(); }
 });
 
@@ -660,7 +676,7 @@ test("身份切换撤销旧私有列表，迟到响应不回填", async () => {
 });
 
 test("列表读取 401 要求登录并撤全部，403 撤列表如实表达无权", async () => {
-  for (const [status, expected] of [[401, /登录后才能查看你的出租账号/], [403, /没有权限查看/]]) {
+  for (const [status, expected] of [[401, /登录后才能查看你的上架账号/], [403, /没有权限查看/]]) {
     const p = await probe({ pages: () => { throw new SupplyRequestError(status, { error: { code: "DENIED", message: "denied" } }); } });
     try {
       await p.render("accounts");
@@ -703,7 +719,7 @@ test("confirmed account detail refreshes the cached row without losing paginatio
     const row = p.host.querySelector('[data-account-row="acc-A"]');
     assert.match(row.textContent, /已暂停接单/);
     assert.match(row.textContent, /客服限制/);
-    assert.match(row.textContent, /更新后的账号/);
+    assert.doesNotMatch(row.textContent, /更新后的账号/);
     assert.match(row.textContent, /版本 2/);
     assert.deepEqual(rowIds(p), ["acc-A", "acc-B"]);
     assert.ok(p.host.querySelector(".mra-list-foot button"), "next page remains available");
@@ -732,7 +748,7 @@ test("adopting an account detail refresh updates cached review and availability 
     assert.match(row.textContent, /已撤回/);
     assert.match(row.textContent, /已暂停接单/);
     assert.match(row.textContent, /客服限制/);
-    assert.match(row.textContent, /权威新标题/);
+    assert.doesNotMatch(row.textContent, /权威新标题/);
     assert.match(row.textContent, /版本 3/);
     assert.equal(p.calls.myAccounts.length, 1);
   } finally { await p.close(); }
@@ -755,17 +771,17 @@ test("historical account detail renders saved display facts and refreshes its li
   const p = await probe({ rows: [accountRow("history-1", { historicalRead: historicalAccount(false) })], detail: next });
   try {
     await p.render("accounts");
-    assert.match(p.host.textContent, /编号待分配.*扩展资料尚待接入/);
-    assert.doesNotMatch(p.host.textContent, /SOURCE-9/);
+    assert.match(p.host.textContent, /出租账号/);
+    assert.doesNotMatch(p.host.textContent, /SOURCE-9|历史资料已读取|扩展资料尚待接入/);
     await p.render("accounts", "history-1");
-    assert.match(p.host.textContent, /属性与资源记录/);
+    assert.match(p.host.textContent, /属性与资源/);
     assert.match(p.host.textContent, /微信扫码/);
     assert.match(p.host.textContent, /0 M 哈夫币/);
     assert.match(p.host.textContent, /咖啡豆：数量待核/);
     assert.match(p.host.textContent, /不替代当前资料申报、报价或可租资格/);
     assert.match(p.host.textContent, /部分属性未提供或尚待核实/);
     await p.render("accounts");
-    assert.match(p.host.textContent, /历史资料已读取/);
+    assert.doesNotMatch(p.host.textContent, /历史资料已读取|历史记录|编号待分配/);
     assert.match(p.host.textContent, /AC0000000019/);
     assert.doesNotMatch(p.host.textContent, /SOURCE-9/);
     assert.equal(p.calls.myAccounts.length, 1);
@@ -779,7 +795,7 @@ test("missing base, missing display and a corrupt-source response never become z
     const p = await probe({ rows: [accountRow("history-1")], detail: { ...detailOf("history-1"), historicalRead } });
     try {
       await p.render("accounts", "history-1");
-      if (historicalRead) assert.match(p.host.textContent, /历史扩展资料尚未接入/);
+      if (historicalRead) assert.match(p.host.textContent, /扩展资料尚未接入/);
       else assert.doesNotMatch(p.host.textContent, /历史属性与资源/);
       assert.doesNotMatch(p.host.textContent, /0 M 哈夫币/);
       assert.equal(p.writes, 0);
@@ -804,4 +820,127 @@ test("web.account.unsupported: an unknown view states it is missing and does not
     assert.equal(node.querySelector("a").getAttribute("href"), "/account?view=overview");
     assert.doesNotMatch(p.host.textContent, /待接入|暂未开放/);
   } finally { await p.close(); }
+});
+
+
+test('private account reads preserve explicit false declarations and private source text', async () => {
+  const detail = { account: { id: 'account_A', revision: '1', owner_paused: false, staff_restricted: false }, version: { reviewState: 'DRAFT', declaration: { title: '账号A', attributes: { next_season_pass: false, demulan_unlocked: false, info_source: '私有历史渠道' }, mediaBindings: [] } }, decisions: [], blockers: [] };
+  const p = await probe({ detail });
+  try {
+    await p.render('accounts', 'account_A');
+    await p.waitFor(() => p.host.textContent.includes('不计划购买'));
+    assert.match(p.host.textContent, /未解锁/);
+    assert.match(p.host.textContent, /私有历史渠道/);
+    assert.equal(p.writes, 0);
+  } finally { await p.close(); }
+});
+
+test("account detail builds its title from account facts, never from a stored listing title", async () => {
+  const rich = detailOf("acc-title");
+  rich.account.display_no = "AC20261028000001";
+  rich.version.declaration = {
+    title: "本地联验草稿（迁移数据核对，非对外发布）",
+    mediaBindings: [],
+    attributes: { safe_box_code: "safe_box_3x3", grading_code: "gold", character_level: 40, vit_level: 4, bear_level: 4 },
+  };
+  rich.version.attributeDisplay = {
+    safeBox: { displayName: "顶级安全箱", mappingStatus: "CONFIRMED" }, grading: { displayName: "黄金", mappingStatus: "CONFIRMED" }, loginMethod: null,
+  };
+  rich.version.catalogItems = [{ id: "haff", code: "df_billable_haff", name: "哈夫币", unit: "HAFF_BASE" }];
+  rich.version.presentation = { items: [{ id: "haff", code: "df_billable_haff", name: "哈夫币", unit: "HAFF_BASE" }], skins: [], entitlements: [] };
+  rich.version.quote = { lines: [{ itemId: "haff", quantity: "50000000", unit: "HAFF_BASE" }], ownerTotal: null };
+  const p = await probe({ rows: [accountRow("acc-title")], detail: rich });
+  try {
+    await p.render("accounts", "acc-title");
+    const title = p.host.querySelector(".supply-detail-title").textContent;
+    assert.match(title, /50M 哈夫币/);
+    assert.match(title, /顶级安全箱/);
+    assert.match(title, /黄金/);
+    assert.match(title, /40级/);
+    assert.doesNotMatch(title, /本地联验草稿|未命名出租账号/);
+  } finally { await p.close(); }
+});
+
+test("account heading refresh re-reads the list without opening a detail or writing", async () => {
+  const p = await probe({ rows: [accountRow("acc-refresh")] });
+  try {
+    await p.render("accounts");
+    assert.ok(p.host.querySelector(".mra-filter-rail"), "the account filter rail is present");
+    assert.ok(p.host.querySelector(".mra-row-action"), "the account row has one visible action");
+    assert.equal(p.host.querySelector(".mra-row-avail"), null, "state badges no longer leave an empty availability column");
+    const before = p.calls.myAccounts.length;
+    await p.clickDocButton("刷新");
+    assert.equal(p.calls.myAccounts.length, before + 1, "refresh really re-reads the list");
+    assert.equal(p.calls.mine.length, 0, "list refresh does not open a detail");
+    assert.equal(p.writes, 0);
+  } finally { await p.close(); }
+});
+
+test("account list consumes rentalState, title facts, active order and signed pagination", async () => {
+  const seen = [];
+  const facts = {
+    haffBase: "1200000",
+    safeBox: { code: "SB_6", displayName: "6格" },
+    rank: { code: "R_DIAMOND", displayName: "钻石" },
+    level: 60, vitLevel: null, bearLevel: null, rentalMode: "DAILY",
+    ownerQuoteTotal: { currency: "CNY", unit: "yuan", amount: "88.00", scale: 2 },
+  };
+  const pages = (params) => {
+    const query = new URLSearchParams(params); seen.push(query);
+    if (query.get("cursor") === "signed-2") return { items: [accountRow("acc-r2", { rentalState: "RENTED", available: false, blockers: ["RENTED"] })], nextCursor: null, nextPageCursor: null };
+    return { items: [accountRow("acc-r", {
+      rentalState: "RENTED", available: false, blockers: ["RENTED"],
+      accountDisplay: { displayNo: "A20261028001", gameId: "delta", titleFacts: facts, unknownReason: null },
+      activeOrder: { id: "ord-r", displayNo: "O20261028001", status: "PAID", renterName: "租客甲", termSeconds: "86400", startedAt: "2026-10-28T02:00:00.000000Z", rentalDeadlineAt: "2026-10-29T02:00:00.000000Z", ownerAmount: { currency: "CNY", unit: "yuan", amount: "80.00", scale: 2 } },
+    })], nextCursor: null, nextPageCursor: "signed-2" };
+  };
+  const p = await probe({ pages });
+  try {
+    await p.render("rented");
+    await p.waitFor(() => p.calls.myAccounts.length === 1);
+    assert.equal(seen[0].get("rentalState"), "RENTED");
+    const row = p.host.querySelector('[data-account-row="acc-r"]');
+    assert.match(row.querySelector(".mra-row-title").textContent, /1\.2M 哈夫币 · 6格 · 钻石 · 60级/);
+    assert.match(row.textContent, /租客甲/);
+    assert.match(row.textContent, /号主金额 80\.00 元/);
+    assert.match(row.textContent, /出租中/);
+    await p.click(".mra-list-foot button");
+    assert.equal(seen.at(-1).get("cursor"), "signed-2", "the signed cursor is used for the next page");
+    assert.equal(seen.at(-1).has("after"), false);
+    assert.deepEqual(rowIds(p), ["acc-r", "acc-r2"]);
+  } finally { await p.close(); }
+});
+
+test("listed account filters use server rentalState and keep paused separate", async () => {
+  const seen = [];
+  const pages = (params) => { const q = new URLSearchParams(params); seen.push(q); return { items: [accountRow("acc-l", { rentalState: q.get("rentalState") ?? "LISTED" })], nextCursor: null, nextPageCursor: null }; };
+  const p = await probe({ pages });
+  try {
+    await p.render("accounts");
+    await p.waitFor(() => p.calls.myAccounts.length === 1);
+    assert.equal(seen[0].get("rentalState"), "LISTED");
+    await p.click(".mra-chip:nth-child(2)");
+    assert.equal(seen.at(-1).get("rentalState"), "PAUSED");
+    assert.match(p.host.querySelector(".mra-chip[aria-pressed='true']").textContent, /已暂停/);
+    assert.match(p.host.querySelector('[data-account-row="acc-l"]').textContent, /已暂停/);
+  } finally { await p.close(); }
+});
+
+test("identity page shows only server-masked name and document, and explains missing source", async () => {
+  const make = (identity) => probe({ authRead: async (route, session) => route === "/get-session" ? profileReply(session.userId) : identity });
+  const shown = await make({ ...identityReply("VERIFIED"), identityDisplay: { realNameMasked: "张*", idCardMasked: "110101********1234", maskingVersion: "identity-mask-v1" }, identityDisplayReason: null });
+  try {
+    await shown.render("identity");
+    await shown.waitFor(() => shown.host.textContent.includes("张*"));
+    assert.match(shown.host.textContent, /张\*/);
+    assert.match(shown.host.textContent, /110101\*{8}1234/);
+    assert.doesNotMatch(shown.host.textContent, /110101\d{10}/);
+  } finally { await shown.close(); }
+  const missing = await make({ ...identityReply("VERIFIED"), identityDisplay: null, identityDisplayReason: "NOT_RECORDED" });
+  try {
+    await missing.render("identity");
+    await missing.waitFor(() => missing.host.textContent.includes("证件信息暂未记录"));
+    assert.match(missing.host.textContent, /实名已验证；证件信息暂未记录/);
+    assert.doesNotMatch(missing.host.textContent, /张\*|110101/);
+  } finally { await missing.close(); }
 });

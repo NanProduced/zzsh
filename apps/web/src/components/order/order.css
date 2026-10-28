@@ -11,8 +11,8 @@
    the actions floating in mid-content. Order headings own their widths, so they win here. */
 .account-center-main .order-workspace-heading > div:first-child { flex: 1 1 auto; }
 .account-center-main .order-workspace-heading > .order-workspace-actions { flex: 0 0 auto; }
-.order-workspace-heading h2 { margin: 0; font-size: 24px; }
-.order-workspace-heading p { margin: 6px 0 0; color: var(--color-text-secondary); font-size: 13px; line-height: 1.6; }
+.order-workspace-heading h2 { margin: 0; color: var(--color-text-primary); font-size: var(--type-page-title-size); font-weight: var(--type-page-title-weight); line-height: var(--type-page-title-leading); }
+.order-workspace-heading p { max-width: 64ch; margin: 8px 0 0; color: var(--color-text-secondary); font-size: var(--type-helper-size); line-height: var(--type-helper-leading); }
 .order-workspace-actions { display: flex; align-items: center; gap: 12px; flex: 0 0 auto; }
 .order-workspace .button:focus-visible,
 .order-detail-view .button:focus-visible,
@@ -30,7 +30,7 @@
 .account-filter-context a { color: var(--account-accent, var(--color-accent-brand)); font-weight: 600; }
 
 /* ---------- 清单 ---------- */
-.order-list-panel { padding: 20px; }
+.order-list-panel { padding: 24px; }
 .order-list-heading { align-items: center; margin-bottom: 6px; }
 .order-list-heading h3 { margin: 0; font-size: 16px; }
 .order-list-heading span { color: var(--color-text-muted); font-size: 12px; }
@@ -223,6 +223,11 @@
 .order-table-wrap td:nth-child(n+3) { color: var(--color-text-primary); font-variant-numeric: tabular-nums; text-align: right; }
 .order-table-wrap tr:last-child td { border-bottom: 0; }
 .order-lines-note { margin: 10px 0 0; color: var(--color-text-muted); font-size: 12px; line-height: 1.6; }
+.order-lines-total { display: flex; justify-content: space-between; gap: 16px; margin: 10px 0 0; color: var(--color-text-secondary); font-size: 13px; }
+.order-lines-total strong { color: var(--color-text-primary); font-variant-numeric: tabular-nums; }
+.order-refund-diagnostic { margin-top: 6px; color: var(--color-text-muted); font-size: 11px; line-height: 1.6; }
+.order-refund-diagnostic summary { width: fit-content; cursor: pointer; }
+.order-refund-diagnostic span { display: block; margin-top: 4px; overflow-wrap: anywhere; }
 .order-notice { display: flex; align-items: flex-start; gap: 9px; padding: 12px 13px; border: 1px solid var(--color-border-default); border-radius: 9px; font-size: 12px; line-height: 1.65; }
 .order-notice svg { flex: 0 0 auto; margin-top: 2px; }
 .order-notice div { display: grid; gap: 3px; }
@@ -313,7 +318,7 @@
 
 @media (max-width: 599px) {
   .order-workspace-heading { align-items: flex-start; flex-wrap: wrap; }
-  .order-workspace-heading h2 { font-size: 21px; }
+
   .order-workspace-actions { width: 100%; justify-content: space-between; }
   .order-list-panel, .order-detail-card, .order-trade-panel, .order-side-card { padding: 16px; }
   /* Phone: the account block spans the full width so no metadata line is squeezed by the status pill. */
@@ -360,3 +365,37 @@
 .legacy-order-list time { color: var(--color-text-secondary); font-size: 13px; }
 @media(max-width:1100px) { .legacy-order-list a { grid-template-columns: 1fr 1fr; gap: 8px; } }
 .legacy-continuation{min-width:0}.legacy-continuation .account-module-heading{align-items:flex-start}.legacy-consumption{margin-top:1.5rem}.legacy-consumption h4,.legacy-proposal h4{font-weight:600;margin-bottom:.75rem}.legacy-consumption-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.75rem 1rem;margin-bottom:1rem}.legacy-consumption-grid label{display:grid;gap:.375rem;min-width:0;font-size:.875rem}.legacy-consumption-grid input{min-width:0;min-height:44px;width:100%;border:1px solid var(--color-border,currentColor);border-radius:.5rem;padding:.625rem .75rem;background:transparent;font-variant-numeric:tabular-nums}.legacy-consumption-grid input:focus-visible{outline:2px solid currentColor;outline-offset:2px}.legacy-consumption-grid input:disabled{opacity:.6}.legacy-proposal{margin-top:1.25rem}.legacy-duty-list{list-style:none;margin:1rem 0;padding:0}.legacy-duty-list li{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.25rem 1rem;padding:.75rem 0;border-bottom:1px solid var(--color-border,currentColor)}.legacy-duty-list li>span:last-child{grid-column:1/-1;font-size:.8rem;opacity:.75}.legacy-duty-list strong{font-variant-numeric:tabular-nums}@media(max-width:600px){.legacy-consumption-grid{grid-template-columns:1fr}.legacy-continuation .order-trade-actions{flex-wrap:wrap}.legacy-continuation .button{min-height:44px}}
+
+/* ---------- 订单 A：快照标签、截止与移动端明细 ---------- */
+.order-row-title-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.order-row-title-line .order-row-title { min-width: 0; }
+.order-row-tag { flex: 0 0 auto; padding: 2px 7px; border: 1px solid var(--color-border-default); border-radius: 999px; color: var(--color-text-secondary); background: var(--color-bg-elevated); font-size: 11px; font-weight: 500; line-height: 1.6; white-space: nowrap; }
+.order-row-tag[data-mode="fast"] { border-color: color-mix(in srgb, var(--color-accent-brand) 45%, var(--color-border-default)); color: var(--color-accent-brand); }
+.order-detail-mode { color: var(--color-text-primary); font-weight: 600; }
+.order-contact-facts { margin-top: 2px; }
+.order-trade-deadline { margin: 0; padding: 9px 11px; border: 1px solid var(--color-border-subtle); border-radius: 9px; color: var(--color-text-secondary); background: var(--color-bg-surface); font-size: 12px; line-height: 1.6; font-variant-numeric: tabular-nums; }
+
+@media (max-width: 599px) {
+  .order-table-wrap { overflow-x: visible; }
+  .order-table-wrap table { min-width: 0; }
+  .order-table-wrap thead { display: none; }
+  .order-table-wrap tbody { display: grid; }
+  .order-table-wrap tr { display: grid; gap: 3px; padding: 10px 0; border-bottom: 1px solid var(--color-border-subtle); }
+  .order-table-wrap tr:last-child { border-bottom: 0; }
+  .order-table-wrap td { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 8px; padding: 0; border: 0; text-align: left; }
+  .order-table-wrap td:nth-child(n+3) { text-align: left; }
+  .order-table-wrap td::before { content: attr(data-label); color: var(--color-text-muted); font-size: 11px; }
+  .order-table-wrap td:first-child { font-size: 13px; font-weight: 600; }
+  .order-table-wrap td:first-child::before { content: none; }
+}
+.order-line-unit { display: block; margin-top: 3px; color: var(--color-text-muted); font-size: 11px; font-weight: 400; font-variant-numeric: tabular-nums; }
+@media (max-width: 599px) {
+  .order-table-wrap td:first-child { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Server-projected account identity and settlement stage. */
+.order-row-account-no { color: var(--color-text-secondary); font-variant-numeric: tabular-nums; }
+.order-detail-account-no { color: var(--color-text-primary); font-weight: 600; }
+.order-stage-label { display: inline-flex; align-items: center; min-height: 26px; padding: 4px 10px; border: 1px solid var(--color-border-default); border-radius: 999px; color: var(--color-text-secondary); font-size: 12px; font-weight: 600; }
+.order-stage-label.is-action { color: var(--color-accent-brand); border-color: color-mix(in srgb, var(--color-accent-brand) 45%, var(--color-border-default)); background: color-mix(in srgb, var(--color-accent-brand) 8%, transparent); }
+.order-entitlements { padding: 0 2px; }

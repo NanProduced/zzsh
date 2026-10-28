@@ -27,7 +27,7 @@ export function FavoriteButton({ accountId, title, variant = "card" }: { account
       }
       void favorites?.toggle(accountId, !pressed).catch(() => undefined);
     }}>
-    <Heart size={17} fill={pressed ? "currentColor" : "none"} aria-hidden="true" />
+    <Heart size={17} strokeWidth={1.8} fill={pressed ? "currentColor" : "none"} aria-hidden="true" />
     {variant === "inline" && <span>{busy ? "处理中…" : pressed ? "已收藏" : needsConfirmation ? "确认收藏状态" : "收藏"}</span>}
   </button>;
   return needsConfirmation ? (

@@ -24,6 +24,7 @@ import {
   resourceInputFromBase,
   resourceItemDisplayName,
   resourceUnitShort,
+  resolveSkinOwner,
   toggleSkinId,
   withFilterChange,
   normalizeListingQuery,
@@ -64,14 +65,14 @@ function DeltaBanner() {
     </div>
     <div className="market-contact-templates" aria-label="联系二维码">
       <div className="market-contact-card">
-        <img src="/art/zhouzhou/group-qr-card-v3@810.webp" srcSet="/art/zhouzhou/group-qr-card-v3@810.webp 810w, /art/zhouzhou/group-qr-card-v3.png 1862w" sizes="(max-width: 799px) 46vw, 300px" alt="玩家交流群二维码暂未配置" loading="lazy" decoding="async" />
+        <img src="/art/zhouzhou/group-qr-card-v3@810.webp" srcSet="/art/zhouzhou/group-qr-card-v3@810.webp 810w, /art/zhouzhou/group-qr-card-v3.png 1862w" sizes="(max-width: 767px) 46vw, 300px" alt="玩家交流群二维码暂未配置" loading="lazy" decoding="async" />
         <div className="market-qr-placeholder" aria-hidden="true">
           <QrCode size={16} className="market-qr-placeholder-icon" />
           <span>待配置</span>
         </div>
       </div>
       <div className="market-contact-card">
-        <img src="/art/zhouzhou/cooperation-qr-card-v3@810.webp" srcSet="/art/zhouzhou/cooperation-qr-card-v3@810.webp 810w, /art/zhouzhou/cooperation-qr-card-v3.png 1842w" sizes="(max-width: 799px) 46vw, 300px" alt="合作咨询二维码暂未配置" loading="lazy" decoding="async" />
+        <img src="/art/zhouzhou/cooperation-qr-card-v3@810.webp" srcSet="/art/zhouzhou/cooperation-qr-card-v3@810.webp 810w, /art/zhouzhou/cooperation-qr-card-v3.png 1842w" sizes="(max-width: 767px) 46vw, 300px" alt="合作咨询二维码暂未配置" loading="lazy" decoding="async" />
         <div className="market-qr-placeholder" aria-hidden="true">
           <QrCode size={16} className="market-qr-placeholder-icon" />
           <span>待配置</span>
@@ -86,8 +87,7 @@ export function AccountMarket({ searchParams }: { searchParams: Record<string, s
   return <FavoritesProvider><MarketView initialFilters={initialFilters} /></FavoritesProvider>;
 }
 
-function errorForPath(details: SupplyFieldError[], metadata: PublicListingFilterMetadata | null): string[] {
-  return details.map((detail) => {
+function errorForPath(details: SupplyFieldError[], metadata: PublicListingFilterMetadata | null): string[] {  return details.map((detail) => {
     const label = metadata?.fields.find((entry) => detail.path.toLowerCase().includes(entry.key.toLowerCase()))?.label;
     return `${label ?? "筛选条件"}：请检查或移除该条件后重试。`;
   }).filter((message, index, all) => all.indexOf(message) === index);
@@ -97,7 +97,7 @@ function resultError(error: { status: number; code: string; details: SupplyField
   if (!error) return null;
   if (exactLookup) {
     if ([401, 403, 404].includes(error.status)) return { title: "未找到可公开查看的账号", description: "请核对完整编号；也可以清空编号后改用关键词搜索。", kind: "adjust" };
-    if (error.status === 400) return { title: "编号格式未被接受", description: "请输入完整的新平台账号编号；旧编号不会转为关键词继续查询。", kind: "adjust" };
+    if (error.status === 400) return { title: "编号格式未被接受", description: "请输入完整账号编号后重试。", kind: "adjust" };
     if (error.status === 409) return { title: "该编号暂无法唯一核定", description: "请确认游戏范围与完整编号后重试。", kind: "retry" };
     if (error.status >= 500) return { title: "编号查询暂不可用", description: "服务暂时无法处理查询，请稍后重试；这不代表账号不存在。", kind: "retry" };
     return { title: "编号查找未完成", description: "请检查连接后重试；这不代表账号不存在。", kind: "retry" };
@@ -107,6 +107,19 @@ function resultError(error: { status: number; code: string; details: SupplyField
   if (error.status === 409) return { title: "筛选规则刚刚更新", description: "已尝试刷新可用条件；如仍无法读取，请重试。", kind: "retry" };
   if (error.status === 503) return { title: "账号目录暂不可用", description: "服务恢复后可继续浏览，当前筛选条件会保留。", kind: "retry" };
   return { title: "账号列表加载失败", description: "请检查网络连接后重试。", kind: "retry" };
+}
+
+/** Mobile gets one compact list; the URL keeps view so a shared desktop link still restores. */
+function useCompactViewport(): boolean {
+  const [compact, setCompact] = useState(false);
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 799px)");
+    const update = () => setCompact(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+  return compact;
 }
 
 function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
@@ -125,6 +138,60 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
   const [skinSearchAttempt, setSkinSearchAttempt] = useState(0);
   const [loadingMoreSkinSearch, setLoadingMoreSkinSearch] = useState(false);
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
+  const [draftFilters, setDraftFilters] = useState<ListingFilters | null>(null);
+  const draftRef = useRef<ListingFilters | null>(null);
+  const [draftResetToken, setDraftResetToken] = useState(0);
+  const draftFlushers = useRef(new Set<() => boolean>());
+  const registerDraftFlusher = useCallback((fn: () => boolean) => {
+    draftFlushers.current.add(fn);
+    return () => { draftFlushers.current.delete(fn); };
+  }, []);
+  const onDraftChange = useCallback((next: ListingFilters) => {
+    draftRef.current = next;
+    setDraftFilters(next);
+  }, []);
+  const compact = useCompactViewport();
+  useEffect(() => {
+    if (!compact && mobileFiltersOpen) {
+      draftRef.current = null;
+      setDraftFilters(null);
+      setMobileFiltersOpen(false);
+    }
+  }, [compact, mobileFiltersOpen]);
+  const openMobileFilters = () => {
+    draftRef.current = filters;
+    setDraftFilters(filters);
+    setMobileFiltersOpen(true);
+  };
+  const discardMobileDraft = () => {
+    draftRef.current = null;
+    setDraftFilters(null);
+    setMobileFiltersOpen(false);
+  };
+  const applyMobileDraft = () => {
+    let valid = true;
+    draftFlushers.current.forEach((flush) => { if (!flush()) valid = false; });
+    if (!valid) {
+      document.querySelector<HTMLElement>(".market-filter-drawer-dialog [aria-invalid=true]")?.focus();
+      return;
+    }
+    const next = draftRef.current ?? filters;
+    draftRef.current = null;
+    setDraftFilters(null);
+    setMobileFiltersOpen(false);
+    navigate(next);
+  };
+  const clearMobileDraft = () => {
+    const base = draftRef.current ?? filters;
+    const cleared = { ...base, filters: {}, q: null, cursor: null };
+    draftRef.current = cleared;
+    setDraftFilters(cleared);
+    setDraftResetToken((value) => value + 1);
+  };
+  const [filtersOpen, setFiltersOpen] = useState(true);
+  const [chipsExpanded, setChipsExpanded] = useState(false);
+  const [resetToken, setResetToken] = useState(0);
+  const filtersOpenTouched = useRef(false);
   const [restoreReady, setRestoreReady] = useState(false);
   const [returnSnapshot, setReturnSnapshot] = useState<AccountReturnSnapshot | null>(null);
   const [recoveryNotice, setRecoveryNotice] = useState<string | null>(null);
@@ -147,7 +214,10 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
     ? activeSkinCategoryId
     : skinCategories[0]?.id ?? "";
   const normalizedSkinSearch = skinSearch.normalize("NFKC").trim().slice(0, 80);
-  const resolvedSkinOwner = catalog.data?.game.id === filters.game && catalog.data.owners?.some((owner) => owner.id === skinOwner) ? skinOwner : "";
+  // Owner options follow the active category's kind; a category re-resolved on catalog re-read (melee has no
+  // owner after 2108) must not keep sending an ownerId that the current type cannot use.
+  const resolvedSkinCategory = skinCategories.find((category) => category.id === resolvedSkinCategoryId);
+  const resolvedSkinOwner = catalog.data?.game.id === filters.game ? resolveSkinOwner(catalog.data.owners, skinOwner, resolvedSkinCategory?.ownerKind) : "";
   const resolvedSkinRarity = catalog.data?.game.id === filters.game && catalog.data.rarities.some((rarity) => rarity.code === skinRarity) ? skinRarity : "";
   const lookupNumber = exactAccountLookupQuery(filters.q);
   const feed = useListingFeed(filters, metadata.data, {
@@ -336,7 +406,6 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
     const changed = listingFiltersUrl(reconciled) !== listingFiltersUrl(filters);
     if (changed) {
       rejectedSharePathRef.current = null;
-      setRecoveryNotice("已按当前服务端规则保留仍有效的筛选条件。");
       setFilters(reconciled);
     }
     if (!initialRestoreDone.current) {
@@ -455,6 +524,19 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
 
   const game = catalog.data?.game ?? games.data?.find((entry) => entry.id === filters.game) ?? null;
   const filterCount = activeListingFilterCount(filters);
+  const matchedResourceItemIds = useMemo(
+    () => new Set((filters.filters.resources ?? []).map((resource) => resource.itemId)),
+    [filters.filters.resources]
+  );
+  useEffect(() => {
+    if (!filtersOpenTouched.current && filterCount > 0) setFiltersOpen(true);
+  }, [filterCount]);
+  // Growing back to desktop closes the sheet and drops the uncommitted draft; the feed, cursor and URL stay.
+  useEffect(() => {
+    if (!compact && mobileFiltersOpen) discardMobileDraft();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [compact, mobileFiltersOpen]);
+  const effectiveViewMode = compact ? "list" : filters.viewMode;
   const resultCount = feed.items.length;
   const sortOptions = useMemo(() => activeMetadata?.sorts.filter((sort) => sort.enabled).sort((a, b) => a.order - b.order) ?? [], [activeMetadata]);
   const selectedSort = activeMetadata?.sorts.find((sort) => sort.key === filters.sort);
@@ -464,7 +546,10 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
     : [{ label: "首页", href: "/" }, { label: "三角洲行动" }, { label: "租号" }];
   const available = activeMetadata?.available ?? false;
   const readyToBrowse = lookupNumber ? filterSourceReady : metadata.status === "ready" && available && restoreReady;
-  const resetFilters = () => navigate({ ...filters, filters: {}, q: null, cursor: null });
+  const resetFilters = () => {
+    setResetToken((value) => value + 1);
+    navigate({ ...filters, filters: {}, q: null, cursor: null });
+  };
   const clearSearch = () => navigate(withFilterChange(filters, { q: null }), { push: true });
   const onFilterChange = useCallback((next: ListingFilters) => navigate(next), [navigate]);
   const refreshResults = useCallback(() => {
@@ -605,36 +690,108 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
         {!lookupNumber && metadata.status === "ready" && !available ? <div className="market-inline-state" role="status"><h3>当前游戏暂不可筛选</h3><p>{activeMetadata?.reasonCode === "FILTERS_UNCONFIGURED" ? "公开展示配置尚未完成，暂时无法读取账号。" : "此游戏的账号目录暂不可用，请稍后重试。"}</p></div> : null}
 
         {activeMetadata && available && !lookupNumber && <>
-          <div className="market-filter-mobile-row">
+          {compact && <div className="market-filter-mobile-row">
             <span>{filterCount ? `已选 ${filterCount} 项条件` : "按资源、属性和皮肤筛选"}</span>
-            <Drawer isOpen={mobileFiltersOpen} onOpenChange={setMobileFiltersOpen}>
+            <Drawer isOpen={mobileFiltersOpen} onOpenChange={(next) => { if (next) openMobileFilters(); else discardMobileDraft(); }}>
               <Drawer.Trigger className="market-mobile-filter-trigger"><SlidersHorizontal size={16} aria-hidden="true" />筛选{filterCount > 0 ? ` · ${filterCount}` : ""}</Drawer.Trigger>
               <Drawer.Backdrop variant="opaque"><Drawer.Content placement="bottom"><Drawer.Dialog className="market-filter-drawer-dialog">
-                <Drawer.Handle />
-                <Drawer.CloseTrigger className="market-filter-drawer-close" aria-label="关闭筛选"><X size={18} aria-hidden="true" /></Drawer.CloseTrigger>
-                <Drawer.Header><Drawer.Heading>筛选账号</Drawer.Heading></Drawer.Header>
-              <Drawer.Body><MarketFilterControls filters={filters} metadata={activeMetadata} gameCode={game?.code} catalog={catalog.data} catalogStatus={catalog.status} skinSearch={skinSearch} skinOwner={resolvedSkinOwner} skinRarity={resolvedSkinRarity} onSkinOwnerChange={setSkinOwner} onSkinRarityChange={setSkinRarity} activeSkinCategoryId={resolvedSkinCategoryId} skinSearchCatalog={skinSearchCatalog.data} skinSearchStatus={skinSearchCatalog.status} onChange={onFilterChange} onRetryCatalog={() => setCatalogAttempt((value) => value + 1)} onRetrySkinSearch={() => setSkinSearchAttempt((value) => value + 1)} onSkinSearchChange={setSkinSearch} onSkinCategoryChange={(categoryId) => { setActiveSkinCategoryId(categoryId); setSkinOwner(""); }} onLoadMoreSkins={() => void loadMoreSkinSearch()} loadingMoreSkins={loadingMoreSkinSearch} /></Drawer.Body>
-                <Drawer.Footer className="market-filter-drawer-footer"><div className="market-filter-drawer-actions">
-                  <button type="button" className="market-clear-filters" disabled={filterCount === 0} onClick={resetFilters}>清空筛选</button>
-                  <Button className="market-filter-drawer-apply" variant="primary" onPress={() => setMobileFiltersOpen(false)}>返回结果</Button>
-                </div></Drawer.Footer>
+                <div className="market-filter-drawer-header">
+                  <button type="button" className="market-drawer-icon-btn" onClick={discardMobileDraft} aria-label="关闭筛选">
+                    <X size={18} aria-hidden="true" />
+                  </button>
+                  <h2 className="market-drawer-title">筛选账号</h2>
+                  <div className="market-drawer-header-actions">
+                    {activeListingFilterCount(draftFilters ?? filters) > 0 ? (
+                      <>
+                        <span className="market-drawer-count-badge">已选 {activeListingFilterCount(draftFilters ?? filters)} 项</span>
+                        <button type="button" className="market-drawer-clear-btn" onClick={clearMobileDraft}>清空</button>
+                      </>
+                    ) : (
+                      <span className="market-drawer-count-placeholder">未选条件</span>
+                    )}
+                  </div>
+                </div>
+                <Drawer.Body className="market-filter-drawer-body">
+                  <MarketFilterControls
+                    mobile={true}
+                    resetToken={draftResetToken}
+                    flushDrafts={registerDraftFlusher}
+                    filters={draftFilters ?? filters}
+                    metadata={activeMetadata}
+                    gameCode={game?.code}
+                    catalog={catalog.data}
+                    catalogStatus={catalog.status}
+                    skinSearch={skinSearch}
+                    skinOwner={resolvedSkinOwner}
+                    skinRarity={resolvedSkinRarity}
+                    onSkinOwnerChange={setSkinOwner}
+                    onSkinRarityChange={setSkinRarity}
+                    activeSkinCategoryId={resolvedSkinCategoryId}
+                    skinSearchCatalog={skinSearchCatalog.data}
+                    skinSearchStatus={skinSearchCatalog.status}
+                    onChange={onDraftChange}
+                    onRetryCatalog={() => setCatalogAttempt((value) => value + 1)}
+                    onRetrySkinSearch={() => setSkinSearchAttempt((value) => value + 1)}
+                    onSkinSearchChange={setSkinSearch}
+                    onSkinCategoryChange={(categoryId) => { setActiveSkinCategoryId(categoryId); setSkinOwner(""); }}
+                    onLoadMoreSkins={() => void loadMoreSkinSearch()}
+                    loadingMoreSkins={loadingMoreSkinSearch}
+                  />
+                </Drawer.Body>
+                <Drawer.Footer className="market-filter-drawer-footer">
+                  <div className="market-filter-drawer-actions">
+                    <button type="button" className="market-clear-filters" onClick={clearMobileDraft}>重置全部</button>
+                    <Button className="market-filter-drawer-apply" variant="primary" onPress={applyMobileDraft}>应用筛选</Button>
+                  </div>
+                </Drawer.Footer>
               </Drawer.Dialog></Drawer.Content></Drawer.Backdrop>
             </Drawer>
-          </div>
-          <details className="market-filter-details" open>
-            <summary><span>筛选条件</span>{filterCount > 0 ? <span className="market-filter-summary-count">已选 {filterCount} 项</span> : <span className="market-filter-summary-count">展开选择资源、属性与皮肤</span>}</summary>
-            <MarketFilterControls filters={filters} metadata={activeMetadata} gameCode={game?.code} catalog={catalog.data} catalogStatus={catalog.status} skinSearch={skinSearch} skinOwner={resolvedSkinOwner} skinRarity={resolvedSkinRarity} onSkinOwnerChange={setSkinOwner} onSkinRarityChange={setSkinRarity} activeSkinCategoryId={resolvedSkinCategoryId} skinSearchCatalog={skinSearchCatalog.data} skinSearchStatus={skinSearchCatalog.status} onChange={onFilterChange} onRetryCatalog={() => setCatalogAttempt((value) => value + 1)} onRetrySkinSearch={() => setSkinSearchAttempt((value) => value + 1)} onSkinSearchChange={setSkinSearch} onSkinCategoryChange={(categoryId) => { setActiveSkinCategoryId(categoryId); setSkinOwner(""); }} onLoadMoreSkins={() => void loadMoreSkinSearch()} loadingMoreSkins={loadingMoreSkinSearch} />
-            <button type="button" className="market-clear-filters market-clear-top" disabled={filterCount === 0} onClick={resetFilters}>清空筛选</button>
-          </details>
+          </div>}
+          {!compact && <details
+            className="market-filter-details"
+            open={filtersOpen}
+            onToggle={(event) => {
+              filtersOpenTouched.current = true;
+              setFiltersOpen(event.currentTarget.open);
+            }}
+          >
+            <summary><span>筛选条件</span>{filterCount > 0
+              ? <span className="market-filter-summary-count">已选 {filterCount} 项{filtersOpen ? " · 点击收起" : " · 展开调整"}</span>
+              : <span className="market-filter-summary-count">{filtersOpen ? "点击收起筛选条件" : "展开选择资源、属性与皮肤"}</span>}</summary>
+            <MarketFilterControls resetToken={resetToken} filters={filters} metadata={activeMetadata} gameCode={game?.code} catalog={catalog.data} catalogStatus={catalog.status} skinSearch={skinSearch} skinOwner={resolvedSkinOwner} skinRarity={resolvedSkinRarity} onSkinOwnerChange={setSkinOwner} onSkinRarityChange={setSkinRarity} activeSkinCategoryId={resolvedSkinCategoryId} skinSearchCatalog={skinSearchCatalog.data} skinSearchStatus={skinSearchCatalog.status} onChange={onFilterChange} onRetryCatalog={() => setCatalogAttempt((value) => value + 1)} onRetrySkinSearch={() => setSkinSearchAttempt((value) => value + 1)} onSkinSearchChange={setSkinSearch} onSkinCategoryChange={(categoryId) => { setActiveSkinCategoryId(categoryId); setSkinOwner(""); }} onLoadMoreSkins={() => void loadMoreSkinSearch()} loadingMoreSkins={loadingMoreSkinSearch} />
+            <button type="button" className="market-clear-filters market-clear-top" onClick={resetFilters}>清空筛选</button>
+          </details>}
         </>}
 
         {recoveryNotice && <p className="market-recovery-note" role="status">{recoveryNotice}</p>}
         {catalog.status === "error" && activeMetadata && !lookupNumber ? <p className="market-catalog-note" role="status">皮肤目录暂不可用；已选条件和其他筛选仍可继续使用。</p> : null}
         <FavoriteNotice />
         <div className="market-results-toolbar">
-          <div><h2>{lookupNumber ? "编号查询结果" : "账号列表"}</h2><p aria-live="polite" aria-atomic="true">{feed.status === "ready" ? `已加载 ${resultCount} 条` : feed.status === "error" ? currentError?.title ?? "结果读取失败" : "正在读取结果"}{feed.nextCursor ? " · 还有更多可继续加载" : ""}</p></div>
+          <div><h2>{lookupNumber ? "编号查询结果" : "账号列表"}</h2><p className="sr-only" aria-live="polite" aria-atomic="true">{feed.status === "ready" ? `已加载 ${resultCount} 条` : feed.status === "error" ? currentError?.title ?? "结果读取失败" : "正在读取结果"}{feed.nextCursor ? " · 还有更多可继续加载" : ""}</p></div>
           <div className="market-results-controls">
-            {activeMetadata && !lookupNumber && <div className="market-sort-controls" aria-label="账号排序">
+            {activeMetadata && !lookupNumber && compact && <div className="market-sort-controls" aria-label="账号排序">
+              <MarketSelect
+                className="market-ui-select--toolbar"
+                label="排序方式"
+                value={`${filters.sort}|${filters.direction}`}
+                placeholder="排序方式"
+                options={sortOptions.flatMap((sort) => activeMetadata.directions.map((direction) => ({
+                  value: `${sort.key}|${direction}`,
+                  label: activeMetadata.directions.length > 1 ? `${sort.label} ${direction === "ASC" ? "升序" : "降序"}` : sort.label,
+                })))}
+                onChange={(next) => {
+                  if (!next) return;
+                  const [key, direction] = next.split("|");
+                  const config = activeMetadata.sorts.find((entry) => entry.key === key);
+                  navigate(withFilterChange(filters, {
+                    sort: key ?? filters.sort,
+                    direction: (direction as ListingFilters["direction"]) ?? filters.direction,
+                    coreItemId: key === "coreQuantity" ? config?.itemIds?.[0] ?? null : null,
+                  }));
+                }}
+              />
+            </div>}
+            {activeMetadata && !lookupNumber && !compact && <div className="market-sort-controls" aria-label="账号排序">
               <div className="market-sort-field"><span>排序</span><MarketSelect
                 className="market-ui-select--toolbar"
                 label="排序"
@@ -665,26 +822,40 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
               /></div>}
             </div>}
             <div className="market-results-actions">
-              <button type="button" className="market-toolbar-action" onClick={refreshResults} disabled={!readyToBrowse || refreshing} aria-busy={refreshing || undefined}><RotateCw size={15} aria-hidden="true" />{refreshing ? "刷新中…" : "刷新结果"}</button>
+              <button type="button" className="market-toolbar-action" onClick={refreshResults} disabled={!readyToBrowse || refreshing} aria-busy={refreshing || undefined} aria-label={refreshing ? "正在刷新结果" : "刷新结果"} title={refreshing ? "正在刷新结果" : "刷新结果"}><RotateCw size={15} aria-hidden="true" /><span className="market-toolbar-action-label">{refreshing ? "刷新中…" : "刷新结果"}</span></button>
             </div>
-            <div className="market-view-toggle" role="group" aria-label="账号展示方式">
+            {!compact && <div className="market-view-toggle" role="group" aria-label="账号展示方式">
               <button type="button" aria-pressed={filters.viewMode === "list"} onClick={() => navigate({ ...filters, viewMode: "list" })}><List size={16} aria-hidden="true" /><span>列表</span></button>
               <button type="button" aria-pressed={filters.viewMode === "grid"} onClick={() => navigate({ ...filters, viewMode: "grid" })}><LayoutGrid size={16} aria-hidden="true" /><span>卡片</span></button>
-            </div>
+            </div>}
           </div>
         </div>
 
 
+        {activeTags.length > 0 && feed.items.length > 0 ? (
+          <div className="market-active-chips" role="group" aria-label="当前已选筛选条件，可单项移除">
+            {(chipsExpanded ? activeTags : activeTags.slice(0, 6)).map((tag) => (
+              <button key={tag.id} type="button" className="market-filter-chip" onClick={tag.onRemove} aria-label={`移除筛选：${tag.label}`}>
+                <span>{tag.label}</span><X size={12} aria-hidden="true" />
+              </button>
+            ))}
+            {activeTags.length > 6 ? (
+              <button type="button" className="market-filter-chip market-filter-chip--toggle" aria-expanded={chipsExpanded} onClick={() => setChipsExpanded((value) => !value)}>
+                {chipsExpanded ? "收起" : `还有 ${activeTags.length - 6} 项`}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
         {filters.q && <div className="market-search-summary" role="status">搜索“{filters.q}” · {lookupNumber ? "按完整编号精确查找" : "按账号标题关键词筛选"}<button type="button" onClick={clearSearch}>清除搜索</button></div>}
         <div className="market-results" aria-busy={feed.status === "loading" || feed.isLoadingMore}>
-          {feed.status === "loading" ? <div className={`account-grid account-grid--${filters.viewMode}`}>{Array.from({ length: 5 }, (_, index) => <AccountCardSkeleton key={index} />)}</div> : null}
+          {feed.status === "loading" ? <div className={`account-grid account-grid--${effectiveViewMode}`}>{Array.from({ length: 5 }, (_, index) => <AccountCardSkeleton key={index} />)}</div> : null}
           {feed.status === "error" && feed.items.length === 0 && currentError ? <div className="market-inline-state" role={currentError.kind === "adjust" ? "alert" : "status"}>
             <h3>{currentError.title}</h3><p>{currentError.description}</p>
             {currentError.kind === "retry" ? <button type="button" className="button secondary" onClick={feed.reload}><RotateCw size={15} />重试</button> : <button type="button" className="button secondary" onClick={lookupNumber ? clearSearch : resetFilters}>{lookupNumber ? "清除编号" : "清空筛选条件"}</button>}
           </div> : null}
           {feed.items.length > 0 && currentError ? <p className="market-inline-state market-inline-state--compact" role="alert"><strong>{currentError.title}</strong> {currentError.description}{currentError.kind === "retry" ? <button type="button" onClick={feed.loadMoreError ? feed.loadMore : feed.reload}>{feed.loadMoreError ? "重试加载" : "重试读取"}</button> : currentError.kind === "adjust" ? <button type="button" onClick={lookupNumber ? clearSearch : resetFilters}>{lookupNumber ? "清除编号" : "清空筛选条件"}</button> : null}</p> : null}
-          {feed.items.length > 0 ? <div className={`account-grid account-grid--${filters.viewMode}`}>
-            {feed.items.map((listing, index) => <AccountCard key={listing.id} data={toListingCard(listing)} viewMode={filters.viewMode} imageLoading={index < (filters.viewMode === "grid" ? 8 : 4) ? "eager" : "lazy"} getReturnState={() => ({ scrollY: window.scrollY, pageCursors: feed.requestedCursors.length ? feed.requestedCursors : [null], filterKey, viewMode: filters.viewMode })} />)}
+          {feed.items.length > 0 ? <div className={`account-grid account-grid--${effectiveViewMode}`}>
+            {feed.items.map((listing, index) => <AccountCard key={listing.id} data={toListingCard(listing)} viewMode={effectiveViewMode} matchedResourceItemIds={matchedResourceItemIds} imageLoading={index < (effectiveViewMode === "grid" ? 8 : 4) ? "eager" : "lazy"} getReturnState={() => ({ scrollY: window.scrollY, pageCursors: feed.requestedCursors.length ? feed.requestedCursors : [null], filterKey, viewMode: effectiveViewMode })} />)}
           </div> : feed.status === "ready" && !feed.nextCursor ? <AccountCardEmpty message={filterCount > 0 ? "没有符合条件的账号" : "暂无可展示账号"} description={filterCount > 0 ? "可以单项移除条件以逐步放宽范围，或重置全部条件：" : "当前没有可展示的号源，请稍后再来。"} onReset={filterCount > 0 ? resetFilters : undefined} onRetry={filterCount === 0 ? feed.reload : undefined}>
             {activeTags.length > 0 && <div className="account-empty-filters" role="group" aria-label="当前已选筛选条件">
               <div className="account-empty-chips">
@@ -692,7 +863,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
               </div>
             </div>}
           </AccountCardEmpty> : null}
-          {feed.status === "ready" && feed.items.length === 0 && feed.nextCursor ? <div className="market-empty-continuation" role="status"><p>当前批次没有匹配项，服务端仍提供后续 cursor。</p><button type="button" className="button secondary" onClick={feed.loadMore} disabled={feed.isLoadingMore}>{feed.isLoadingMore ? "正在加载…" : "继续查找"}</button></div> : null}
+          {feed.status === "ready" && feed.items.length === 0 && feed.nextCursor ? <div className="market-empty-continuation" role="status"><p>这一批没有符合条件的账号，后面还有尚未读取的账号。</p><button type="button" className="button secondary" onClick={feed.loadMore} disabled={feed.isLoadingMore}>{feed.isLoadingMore ? "正在加载…" : "继续查找"}</button></div> : null}
         </div>
 
         {feed.resumeIncomplete && <p className="market-recovery-note" role="status">列表数据已有更新，已尽量恢复原浏览位置。</p>}

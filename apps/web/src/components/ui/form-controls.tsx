@@ -20,8 +20,8 @@ export function Textarea({ className = "", ...props }: ComponentProps<"textarea"
   return <textarea data-slot="textarea" className={`form-input ${className}`} {...props} />;
 }
 
-export function IntegerStepper({ label, value, onChange, disabled = false, max = "999999999999999999999999", unit, id, invalid = false }: {
-  label: string; value: string; onChange: (value: string) => void; disabled?: boolean; max?: string; unit?: string; id?: string; invalid?: boolean;
+export function IntegerStepper({ label, value, onChange, disabled = false, max = "999999999999999999999999", unit, id, invalid = false, describedBy, className = "" }: {
+  label: string; value: string; onChange: (value: string) => void; disabled?: boolean; max?: string; unit?: string; id?: string; invalid?: boolean; describedBy?: string; className?: string;
 }) {
   const valid = /^(0|[1-9]\d*)$/.test(value), limit = BigInt(max);
   const change = (raw: string) => {
@@ -30,28 +30,28 @@ export function IntegerStepper({ label, value, onChange, disabled = false, max =
     if (!/^\d+$/.test(raw) || BigInt(raw) > limit) return;
     onChange(BigInt(raw).toString());
   };
-  return <div className="form-integer-stepper">
+  return <div className={`form-integer-stepper${className ? ` ${className}` : ""}${invalid ? " is-invalid" : ""}`} data-invalid={invalid || undefined}>
     <button type="button" aria-label={`减少${label}`} disabled={disabled || !valid || BigInt(value) === 0n || BigInt(value)>limit} onClick={() => change((BigInt(value) - 1n).toString())}><Minus size={16} aria-hidden="true" /></button>
-    <Input id={id} inputMode="numeric" pattern="[0-9]*" maxLength={24} aria-label={label} aria-invalid={invalid || undefined} value={value} disabled={disabled} onChange={event => change(event.target.value)} />
+    <Input id={id} inputMode="numeric" pattern="[0-9]*" maxLength={24} aria-label={label} aria-invalid={invalid || undefined} aria-describedby={describedBy} value={value} disabled={disabled} onChange={event => change(event.target.value)} />
     {unit ? <span className="form-integer-unit">{unit}</span> : null}
     <button type="button" aria-label={`增加${label}`} disabled={disabled || (value !== "" && !valid) || (valid && BigInt(value) >= limit)} onClick={() => change((BigInt(value || "0") + 1n).toString())}><Plus size={16} aria-hidden="true" /></button>
   </div>;
 }
 
 export type SelectOption = { value: string; label: string; hint?: string; disabled?: boolean };
-export function FormSelect({ label, value, options, placeholder = "请选择", disabled = false, hasError = false, onChange, className = "", id, firstField = false }: {
+export function FormSelect({ label, value, options, placeholder = "请选择", disabled = false, hasError = false, onChange, className = "", id, firstField = false, popupClassName = "", describedBy }: {
   label: string; value: string; options: SelectOption[]; placeholder?: string; disabled?: boolean; hasError?: boolean;
-  onChange: (value: string) => void; className?: string; id?: string; firstField?: boolean;
+  onChange: (value: string) => void; className?: string; id?: string; firstField?: boolean; popupClassName?: string; describedBy?: string;
 }) {
   const generatedId = useId();
   const items = options.filter(option => option.value !== "");
   return <Select.Root value={value || null} onValueChange={next => onChange(next ?? "")} disabled={disabled} items={items}>
-    <Select.Trigger id={id ?? generatedId} aria-label={label} aria-invalid={hasError || undefined} data-first-field={firstField || undefined} className={`form-select-trigger ${className}`}>
+    <Select.Trigger id={id ?? generatedId} aria-label={label} aria-invalid={hasError || undefined} aria-describedby={describedBy} data-first-field={firstField || undefined} className={`form-select-trigger ${className}`}>
       <Select.Value placeholder={placeholder}>{items.find(option => option.value === value)?.label ?? placeholder}</Select.Value>
       <Select.Icon><ChevronDown size={16} aria-hidden="true" /></Select.Icon>
     </Select.Trigger>
     <Select.Portal><Select.Positioner sideOffset={6} align="start" alignItemWithTrigger={false} className="form-select-positioner">
-      <Select.Popup className="form-select-popup"><Select.List>
+      <Select.Popup className={`form-select-popup${popupClassName ? ` ${popupClassName}` : ""}`}><Select.List>
         {items.map(option => <Select.Item key={option.value} value={option.value} disabled={option.disabled} className="form-select-option">
           <Select.ItemText>{option.label}</Select.ItemText>
           {option.hint ? <small>{option.hint}</small> : null}
@@ -62,10 +62,11 @@ export function FormSelect({ label, value, options, placeholder = "请选择", d
   </Select.Root>;
 }
 
-export function FormRadioGroup<T extends string | number | boolean | null>({ name, label, error, value, options, disabled = false, onChange, className = "", variant = "default" }: {
-  name: string; label: string; error?: string; value: T; options: { value: T; label: string; icon?: ReactNode; description?: string; badge?: string; disabled?: boolean }[]; disabled?: boolean; onChange: (value: T) => void; className?: string; variant?: "default" | "segmented";
+export function FormRadioGroup<T extends string | number | boolean | null>({ name, label, error, errorId: externalErrorId, value, options, disabled = false, onChange, className = "", variant = "default" }: {
+  name: string; label: string; error?: string; errorId?: string; value: T; options: { value: T; label: string; icon?: ReactNode; description?: string; badge?: string; disabled?: boolean }[]; disabled?: boolean; onChange: (value: T) => void; className?: string; variant?: "default" | "segmented";
 }) {
-  const errorId=useId();
+  const autoErrorId = useId();
+  const errorId = externalErrorId ?? autoErrorId;
   return <RadioGroup name={name} aria-label={label} aria-invalid={Boolean(error) || undefined} aria-describedby={error ? errorId : undefined} tabIndex={error ? -1 : undefined} value={value === null ? null : String(value)} disabled={disabled} onValueChange={next => {
     const option = options.find(item => String(item.value) === next);
     if (option) onChange(option.value);
@@ -81,20 +82,20 @@ export function FormRadioGroup<T extends string | number | boolean | null>({ nam
   </RadioGroup>;
 }
 
-export function TimeSelect({ label, value, onChange, disabled = false, allowEndOfDay = false, minuteStep = 1 }: {
-  label: string; value: string; onChange: (value: string) => void; disabled?: boolean; allowEndOfDay?: boolean; minuteStep?: number;
+export function TimeSelect({ label, value, onChange, disabled = false, allowEndOfDay = false, minuteStep = 1, popupClassName = "" }: {
+  label: string; value: string; onChange: (value: string) => void; disabled?: boolean; allowEndOfDay?: boolean; minuteStep?: number; popupClassName?: string;
 }) {
   const [hour = "", minute = "00"] = value.split(":");
   const minuteValues = Array.from({ length: Math.ceil(60 / Math.max(1, minuteStep)) }, (_, index) => String(index * Math.max(1, minuteStep)).padStart(2, "0")).filter((entry) => Number(entry) < 60);
   const minuteOptions = minute && !minuteValues.includes(minute) ? [{ value: minute, label: `${minute}（保留）` }, ...minuteValues.map((entry) => ({ value: entry, label: entry }))] : minuteValues.map((entry) => ({ value: entry, label: entry }));
   return <span className="form-time-select" role="group" aria-label={label}>
-    <FormSelect label={`${label}小时`} value={hour} disabled={disabled} placeholder="时" options={Array.from({ length: allowEndOfDay ? 25 : 24 }, (_, index) => ({ value: String(index).padStart(2, "0"), label: String(index).padStart(2, "0") }))} onChange={next => onChange(`${next}:${next === "24" ? "00" : minute}`)} />
+    <FormSelect label={`${label}小时`} value={hour} disabled={disabled} placeholder="时" options={Array.from({ length: allowEndOfDay ? 25 : 24 }, (_, index) => ({ value: String(index).padStart(2, "0"), label: String(index).padStart(2, "0") }))} popupClassName={popupClassName} onChange={next => onChange(`${next}:${next === "24" ? "00" : minute}`)} />
     <span aria-hidden="true">:</span>
-    <FormSelect label={`${label}分钟`} value={value ? minute : ""} disabled={disabled || !hour || hour === "24"} placeholder="分" options={minuteOptions} onChange={next => onChange(`${hour}:${next}`)} />
+    <FormSelect label={`${label}分钟`} value={value ? minute : ""} disabled={disabled || !hour || hour === "24"} placeholder="分" options={minuteOptions} popupClassName={popupClassName} onChange={next => onChange(`${hour}:${next}`)} />
   </span>;
 }
 
-export function DateTimePicker({ label, value, disabled, onChange }: { label: string; value: string; disabled?: boolean; onChange: (value: string) => void }) {
+export function DateTimePicker({ label, value, disabled, onChange, popupClassName = "" }: { label: string; value: string; disabled?: boolean; onChange: (value: string) => void; popupClassName?: string }) {
   const [open, setOpen] = useState(false);
   const [day = "", time = "00:00"] = value.split("T");
   const [year, month, date] = day.split("-").map(Number);
@@ -104,7 +105,7 @@ export function DateTimePicker({ label, value, disabled, onChange }: { label: st
       <Popover.Trigger asChild><button type="button" className="form-select-trigger" disabled={disabled} aria-label={`${label}日期`}>
         <span>{day ? day.replaceAll("-", "/") : "选择日期"}</span><CalendarDays size={16} aria-hidden="true" />
       </button></Popover.Trigger>
-      <Popover.Portal><Popover.Content sideOffset={6} align="start" className="form-calendar" aria-label={`${label}日历`}>
+      <Popover.Portal><Popover.Content sideOffset={6} align="start" className={`form-calendar${popupClassName ? ` ${popupClassName}` : ""}`} aria-label={`${label}日历`}>
         <DayPicker mode="single" locale={zhCN} selected={selected} defaultMonth={selected} autoFocus showOutsideDays onSelect={next => {
           if (!next) return;
           const isoDay = `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, "0")}-${String(next.getDate()).padStart(2, "0")}`;
@@ -112,6 +113,6 @@ export function DateTimePicker({ label, value, disabled, onChange }: { label: st
         }} />
       </Popover.Content></Popover.Portal>
     </Popover.Root>
-    <TimeSelect label={`${label}时间`} value={day ? time : ""} disabled={disabled || !day} onChange={next => onChange(`${day}T${next}`)} />
+    <TimeSelect label={`${label}时间`} value={day ? time : ""} disabled={disabled || !day} popupClassName={popupClassName} onChange={next => onChange(`${day}T${next}`)} />
   </span>;
 }

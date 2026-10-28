@@ -1,4 +1,21 @@
-import type { OwnerQuote, RentalMode } from "./supply-types.ts";
+import type { Money, OwnerIncomePreview, OwnerQuote, PublishingOptions, RentalMode } from "./supply-types.ts";
+
+export function customTermOptions(options: Pick<PublishingOptions, "termOptions" | "rentalTermOptions"> | null | undefined) {
+  const allowed = options?.rentalTermOptions?.custom?.termOptionCodes;
+  return (options?.termOptions ?? []).filter(term => term.dailyConsumption === "10000000" && (!allowed || allowed.includes(term.code)));
+}
+
+/** Validate the server's estimate; never calculate a fee or reuse a stale selection. */
+export function matchedOwnerNetEstimate(preview: OwnerIncomePreview | null, selected: boolean | null, quote: OwnerQuote | null = null) {
+  const estimate = preview?.normalEndEstimate;
+  if (preview?.state !== "READY" || !preview.binding || estimate?.state !== "READY" || !estimate.serviceFee || estimate.schema !== "owner-normal-end-estimate.v1" || estimate.scenario !== "ALL_DECLARED_INVENTORY_CONSUMED_NORMAL_END" || typeof selected !== "boolean" || estimate.selected !== selected) return null;
+  const validMoney = (value: Money | null | undefined) => value?.currency === "CNY" && value.unit === "yuan" && value.scale === 2 && typeof value.amount === "string" ? centsOfMoney(value) : null;
+  const gross = validMoney(estimate.ownerGross), fee = validMoney(estimate.serviceFee.amount), net = validMoney(estimate.ownerNet), base = validMoney(estimate.serviceFee.base);
+  if (gross === null || fee === null || net === null || base === null || gross !== validMoney(preview.totalExpectedIncome) || fee + net !== gross) return null;
+  if (selected ? estimate.serviceFee.payer !== "OWNER" || estimate.serviceFee.rate !== "0.08" || base !== gross || !estimate.policy?.fullPayoutPolicyRef || !estimate.policy.fullPayoutPolicyVersion || !estimate.policy.disclosureVersion : estimate.serviceFee.payer !== "NONE" || estimate.serviceFee.rate !== "0" || fee !== 0n || base !== 0n) return null;
+  if (quote && (quote.ruleReleaseId !== preview.binding.releaseId || validMoney(quote.ownerTotal) !== gross || (quote.catalogRevision && quote.catalogRevision !== preview.binding.catalogRevision))) return null;
+  return { ...estimate, ownerGross: estimate.ownerGross!, ownerNet: estimate.ownerNet!, serviceFee: { ...estimate.serviceFee, base: estimate.serviceFee.base!, amount: estimate.serviceFee.amount! } };
+}
 
 export function centsOfMoney(money: { amount: string } | null | undefined): bigint | null {
   if (!money || !/^\d+(\.\d{1,2})?$/.test(money.amount)) return null;
@@ -155,7 +172,9 @@ export function ratioBoundText(bound: { base: "C" | "ABSOLUTE"; value: string } 
 export function ratioRangeText(
   mode: { min?: { base: "C" | "ABSOLUTE"; value: string }; max?: { base: "C" | "ABSOLUTE"; value: string } } | null | undefined,
 ): string | null {
-  if (!mode?.min || !mode?.max) return null;
+  if (!mode?.min && !mode?.max) return null;
+  if (!mode?.max) return `最低 ${ratioBoundText(mode.min)}`;
+  if (!mode?.min) return `最高 ${ratioBoundText(mode.max)}`;
   return `${ratioBoundText(mode.min)} ~ ${ratioBoundText(mode.max)}`;
 }
 

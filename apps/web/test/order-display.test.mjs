@@ -11,11 +11,13 @@ const display = requireFromTree(path.join(tree, "apps/web/src/lib/order-display.
 
 const yuan = (amount) => ({ currency: "CNY", unit: "yuan", scale: 2, amount });
 
-test("legacy list and detail share the same account-read authorization title",()=>{
- const order={source:{origin:'LEGACY'},account:{readable:false},title:'PRIVATE ACCOUNT TITLE'};
- assert.equal(display.orderAccountTitle(order),'账号资料暂未提供');
- assert.equal(display.orderAccountTitle({...order,account:{readable:true}}),'PRIVATE ACCOUNT TITLE');
- assert.equal(display.orderAccountTitle({title:'原生标题',source:{origin:'NATIVE'}}),'原生标题');
+test("order titles come from frozen facts, never from a stored listing title",()=>{
+ const legacy={source:{origin:'LEGACY'},account:{readable:true},title:'PRIVATE ACCOUNT TITLE'};
+ assert.equal(display.orderAccountTitle(legacy),'租赁账号');
+ const native={source:{origin:'NATIVE'},title:'本地联验草稿（迁移数据核对，非对外发布）',quote:{lines:[{itemId:'haff',name:'哈夫币',unit:'HAFF_BASE',quantity:'51000000'}]}};
+ assert.equal(display.orderAccountTitle(native),'51 M 哈夫币');
+ assert.doesNotMatch(display.orderAccountTitle(native),/本地联验草稿/);
+ assert.equal(display.orderAccountTitle({source:{origin:'NATIVE'},title:'任意标题',quote:{lines:[]}}),'租赁账号');
 });
 
 test("resource names resolve through the order projection and never invent a name", () => {
@@ -129,10 +131,10 @@ test("frozen legacy order resources form a labelled summary without a private ti
     ], rentalDeadlineAt: "2025-10-09T08:53:20.000Z" },
   };
   assert.equal(display.orderResourceSummary(order), "哈夫币 12.50 · 6级子弹 60 · 顶级保险卡 7 天 · +1项");
-  assert.equal(display.orderAccountTitle(order), "订单资源：哈夫币 12.50 · 6级子弹 60 · 顶级保险卡 7 天 · +1项");
+  assert.equal(display.orderAccountTitle(order), "哈夫币 12.50 · 6级子弹 60 · 顶级保险卡 7 天 · +1项");
   assert.equal(display.orderUsesResourceSummary(order), true);
   assert.ok(!display.orderAccountTitle(order).includes("PRIVATE_CURRENT_ACCOUNT_TITLE"));
-  assert.equal(display.orderAccountTitle({ ...order, account: { readable: true } }), "PRIVATE_CURRENT_ACCOUNT_TITLE");
+  assert.equal(display.orderAccountTitle({ ...order, account: { readable: true } }), "哈夫币 12.50 · 6级子弹 60 · 顶级保险卡 7 天 · +1项");
 });
 
 test("a short order summary names omitted nonzero resources and detail retains every frozen quantity", () => {
@@ -200,19 +202,42 @@ test("a reader placeholder never blocks the frozen resource summary", () => {
     ], rentalDeadlineAt: null },
   };
   assert.equal(display.orderResourceSummary(order), "哈夫币 12.50 · 顶级保险卡 7 天");
-  assert.equal(display.orderAccountTitle(order), "订单资源：哈夫币 12.50 · 顶级保险卡 7 天");
+  assert.equal(display.orderAccountTitle(order), "哈夫币 12.50 · 顶级保险卡 7 天");
   assert.equal(display.orderUsesResourceSummary(order), true);
   // an empty/null current title behaves the same way
-  assert.equal(display.orderAccountTitle({ ...order, title: null }), "订单资源：哈夫币 12.50 · 顶级保险卡 7 天");
-  assert.equal(display.orderAccountTitle({ ...order, title: "   " }), "订单资源：哈夫币 12.50 · 顶级保险卡 7 天");
-  // a real current title keeps priority over the resource summary
-  assert.equal(display.orderAccountTitle({ ...order, title: "真实当前标题" }), "真实当前标题");
-  assert.equal(display.orderUsesResourceSummary({ ...order, title: "真实当前标题" }), false);
-  // the tenant guard stays: without the account read authorization no current title is shown
-  assert.equal(display.orderAccountTitle({ ...order, account: { readable: false }, title: "PRIVATE_CURRENT_ACCOUNT_TITLE" }), "订单资源：哈夫币 12.50 · 顶级保险卡 7 天");
+  assert.equal(display.orderAccountTitle({ ...order, title: null }), "哈夫币 12.50 · 顶级保险卡 7 天");
+  assert.equal(display.orderAccountTitle({ ...order, title: "   " }), "哈夫币 12.50 · 顶级保险卡 7 天");
+  // a stored title never overrides the frozen resource facts
+  assert.equal(display.orderAccountTitle({ ...order, title: "真实当前标题" }), "哈夫币 12.50 · 顶级保险卡 7 天");
+  assert.equal(display.orderUsesResourceSummary({ ...order, title: "真实当前标题" }), true);
+  assert.equal(display.orderAccountTitle({ ...order, account: { readable: false }, title: "PRIVATE_CURRENT_ACCOUNT_TITLE" }), "哈夫币 12.50 · 顶级保险卡 7 天");
   assert.ok(!JSON.stringify(display.orderAccountTitle({ ...order, account: { readable: false } })).includes("PRIVATE"));
   // without any frozen fact the display stays honestly empty
   const bare = { source: { origin: "LEGACY" }, account: { readable: true }, title: null, orderFacts: { resources: [], rentalDeadlineAt: null } };
-  assert.equal(display.orderAccountTitle(bare), "账号资料暂未提供");
+  assert.equal(display.orderAccountTitle(bare), "租赁账号");
   assert.equal(display.orderUsesResourceSummary(bare), false);
+});
+
+test("ORDER-A: frozen rental mode labels are read only from the order quote", () => {
+  assert.equal(display.orderRentalModeLabel({ quote: { rentalMode: "ordinary" } }), "普通出租");
+  assert.equal(display.orderRentalModeLabel({ quote: { rentalMode: "custom" } }), "自定义出租");
+  assert.equal(display.orderRentalModeLabel({ quote: { rentalMode: "fast" } }), "极速出租");
+  assert.equal(display.orderRentalModeLabel({ quote: {} }), null);
+  assert.equal(display.orderRentalModeLabel({ quote: null }), null);
+  assert.equal(display.orderRentalModeLabel({}), null);
+});
+
+test("ORDER-A: unit price keeps eight decimals and the snapshot's real unit pair", () => {
+  const amount = (value) => ({ currency: "CNY", unit: "yuan", amount: value, scale: 8 });
+  assert.equal(display.orderUnitPriceText(amount("0.12345678"), "1000000", "HAFF_BASE"), "¥0.12345678 / 1,000,000 哈夫币（1 M）");
+  assert.equal(display.orderUnitPriceText(amount("0.00000012"), "60", "ROUND"), "¥0.00000012 / 60 发");
+  assert.equal(display.orderUnitPriceText(amount("1.00000000"), "1", "PIECE"), "¥1.00000000 / 1 件");
+  assert.equal(display.orderUnitPriceText(amount("2.00000000"), null, "DAY"), "¥2.00000000");
+  assert.equal(display.orderUnitPriceText(amount("0.123456789"), "1", "PIECE"), null);
+  assert.equal(display.orderUnitPriceText(null, "1", "PIECE"), null);
+});
+
+test("ORDER-A: the fee total names the resource subtotal, never the deposit or owner income", () => {
+  assert.equal(display.orderLinesTotalLabel("renter"), "资源合计（不含押金）");
+  assert.equal(display.orderLinesTotalLabel("owner"), "号主报价合计");
 });

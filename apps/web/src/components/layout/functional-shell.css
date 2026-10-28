@@ -1801,3 +1801,12 @@ html[data-theme="light"] .functional-shell .publish-rail-kicker-badge { backgrou
   color: var(--color-text-primary);
   background: var(--color-bg-elevated);
 }
+
+/* Mobile bottom bars: remove the old 116px dead reserve; reserve exactly the fixed bar on its pages. */
+@media (max-width: 800px) {
+  .functional-shell .functional-main { padding-bottom: 72px; }
+  body:has(.rental-confirm-primary-action) .functional-main,
+  body:has(.publish-page-layout) .functional-main { padding-bottom: 0; }
+  body:has(.rental-confirm-primary-action) .site-footer { padding-bottom: calc(84px + env(safe-area-inset-bottom)); }
+  body:has(.publish-page-layout) .site-footer { padding-bottom: calc(94px + env(safe-area-inset-bottom)); }
+}

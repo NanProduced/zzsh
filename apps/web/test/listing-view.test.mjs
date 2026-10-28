@@ -207,6 +207,16 @@ test('unmapped resource IDs stay explicit instead of becoming display names', ()
   assert.equal(card.resourceLines[0].name, '未确认（代码 item_haff）');
 });
 
+const accountTitleCode = ts.transpileModule(
+  readFileSync(new URL('../src/lib/account-title.ts', import.meta.url), 'utf8'),
+  { compilerOptions: { module: ts.ModuleKind.CommonJS } }
+).outputText;
+const accountTitleExports = {};
+new Function('require', 'exports', accountTitleCode)((name) => {
+  if (name === './listing-filters' || name === '@/lib/listing-filters') return listingFilters;
+  return {};
+}, accountTitleExports);
+
 const accountCardCode = ts.transpileModule(
   readFileSync(new URL('../src/components/delta/account-card.tsx', import.meta.url), 'utf8'),
   { compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS } }
@@ -214,6 +224,7 @@ const accountCardCode = ts.transpileModule(
 
 const accountCardExports = {};
 new Function('require', 'exports', accountCardCode)((name) => {
+  if (name === '@/lib/account-title') return accountTitleExports;
   if (name === '@/lib/listing-filters') return listingFilters;
   if (name === '@/lib/listing-view') return { haffRatioLabel, resourceQuantityLabel, skinQualityLabel: listingViewSk7.skinQualityLabel };
   if (name === '@/lib/account-return') return {};
@@ -248,13 +259,13 @@ test('composeGridTitle handles haff, composite parts, fallback titles and prefix
   // Case 1: Haff + composite parts (safeBox + rank)
   assert.deepEqual(composeGridTitle(cardWithSafeBoxAndRank, '60M'), {
     haff: '60M 哈夫币',
-    rest: '3×3安全箱 · 钻石 50级',
+    rest: '3×3安全箱 · 钻石 · 50级',
   });
 
   // Case 2: No haff + composite parts
   assert.deepEqual(composeGridTitle(cardWithSafeBoxAndRank, null), {
     haff: null,
-    rest: '3×3安全箱 · 钻石 50级',
+    rest: '3×3安全箱 · 钻石 · 50级',
   });
 
   // Case 3: Haff only, missing composite parts -> fallback to title with deduplication
@@ -296,7 +307,7 @@ test('composeGridTitle handles haff, composite parts, fallback titles and prefix
     rest: '三角洲顶级传家宝账号',
   });
 
-  // Case 7: All missing -> fallback to displayNo or generic
+  // Case 7: All missing -> generic identity; the number stays in the copy control only
   const cardEmpty = {
     title: '',
     displayNo: 'A-005',
@@ -304,7 +315,7 @@ test('composeGridTitle handles haff, composite parts, fallback titles and prefix
   };
   assert.deepEqual(composeGridTitle(cardEmpty, null), {
     haff: null,
-    rest: '账号 A-005',
+    rest: '游戏账号',
   });
 });
 
@@ -319,14 +330,14 @@ test('composeListTitle prioritizes real identity, highlights haff, and leaves se
     ],
   };
 
-  // Case 1: Real displayNo identity + haff highlight + safe box and rank secondary
+  // Case 1: unified presentation title; raw identity is not leaked, composite parts ordered consistently
   assert.deepEqual(composeListTitle(cardWithSafeBoxAndRank, '120M'), {
-    identity: '账号 A-101',
+    identity: '',
     haff: '120M 哈夫币',
-    rest: '1×2安全箱 · 白银 30级',
+    rest: '1×2安全箱 · 白银 · 30级',
   });
 
-  // Case 2: DisplayNo identity without safe box
+  // Case 2: Without safe box
   const cardWithoutSafeBox = {
     title: '120M 哈夫币 极品全装号',
     displayNo: 'A-102',
@@ -335,10 +346,11 @@ test('composeListTitle prioritizes real identity, highlights haff, and leaves se
     ],
   };
   assert.deepEqual(composeListTitle(cardWithoutSafeBox, '120M'), {
-    identity: '账号 A-102',
+    identity: '',
     haff: '120M 哈夫币',
     rest: '白银',
   });
+  assert.equal(composeListTitle({ title: '', displayNo: 'A-103', conditionLines: [] }, null).identity, '');
 
   assert.deepEqual(composeListTitle({
     title: '120M 哈夫币 · 3×3安全箱 · 钻石段位 60级',
@@ -349,30 +361,22 @@ test('composeListTitle prioritizes real identity, highlights haff, and leaves se
       { key: 'character_level', value: '60级' },
     ],
   }, '120M'), {
-    identity: '账号资料',
+    identity: '',
     haff: '120M 哈夫币',
-    rest: '3×3安全箱 · 钻石 60级',
+    rest: '3×3安全箱 · 钻石 · 60级',
   });
-  assert.equal(composeListTitle({ title: '微信扫码', displayNo: null, conditionLines: [] }, null).identity, '游戏账号');
-  assert.equal(composeListTitle({ title: '1.5M 哈夫币 · 精选账号', displayNo: null, conditionLines: [] }, '1.5M').identity, '精选账号');
 
-  // Case 3: Custom title identity when displayNo is absent
+  // Case 3: Title without attributes fallbacks to cleaned title
   const cardCustomTitle = {
     title: '三角洲行动 · 顶配战术号',
     displayNo: null,
     conditionLines: [],
   };
   assert.deepEqual(composeListTitle(cardCustomTitle, '120M'), {
-    identity: '三角洲行动 · 顶配战术号',
+    identity: '',
     haff: '120M 哈夫币',
-    rest: '',
+    rest: '三角洲行动 · 顶配战术号',
   });
-
-  assert.equal(composeListTitle({
-    title: '铂金段位·377M哈夫币·多资源配置',
-    displayNo: null,
-    conditionLines: [],
-  }, '377M').identity, '铂金段位 · 多资源配置');
 
   // Case 4: Missing identity and title fallback
   const cardEmpty = {
@@ -381,9 +385,9 @@ test('composeListTitle prioritizes real identity, highlights haff, and leaves se
     conditionLines: [],
   };
   assert.deepEqual(composeListTitle(cardEmpty, null), {
-    identity: '游戏账号',
+    identity: '',
     haff: null,
-    rest: '',
+    rest: '游戏账号',
   });
 });
 
@@ -597,6 +601,42 @@ test('I03 rentable cards and details omit the unavailable badge while other stat
   for (const state of [undefined, null, 'FUTURE_STATE']) assert.equal(publicAvailabilityLabel(state), '暂不可租');
 });
 
+test('AVAILABILITY-ABSENT: missing fields stay unknown and only an explicit RENTABLE grant opens orders', () => {
+  // An older or incomplete DTO with neither field must never default to rentable.
+  const missing = toListingCard({ ...listing, availability: undefined, canCreateOrder: undefined });
+  assert.equal(missing.availabilityState, 'UNKNOWN');
+  assert.equal(missing.availabilityLabel, '暂不可租');
+  assert.equal(missing.canCreateOrder, false);
+
+  // Explicit RENTABLE without the server grant is still not orderable. The delivered state stays
+  // RENTABLE (no unavailable badge), but the order gate and the automatic preview stay closed.
+  const noGrant = toListingDetail({ ...listing, releaseId: 'release_1', availability: { state: 'RENTABLE' }, canCreateOrder: undefined });
+  assert.equal(noGrant.availabilityState, 'RENTABLE');
+  assert.equal(noGrant.availabilityLabel, null);
+  assert.equal(noGrant.canCreateOrder, false);
+  assert.equal(noGrant.autoPreview, false);
+
+  // Explicit RENTABLE + true keeps the existing rentable contract, including auto preview.
+  const granted = toListingDetail({ ...listing, releaseId: 'release_1', availability: { state: 'RENTABLE' }, canCreateOrder: true });
+  assert.equal(granted.availabilityState, 'RENTABLE');
+  assert.equal(granted.availabilityLabel, null);
+  assert.equal(granted.canCreateOrder, true);
+  assert.equal(granted.autoPreview, true);
+
+  // Historical records stay read-only with their own state even when availability is absent.
+  const money = amount => ({ currency: 'CNY', unit: 'yuan', amount, scale: 2 });
+  const historical = toListingCard({ ...listing, source: 'LEGACY_READ_ONLY', canCreateOrder: false, quote: null,
+    historicalQuote: { haffRent: money('1.00'), goods: money('0.00'), deposit: money('0.00'), termDays: '1' }, inventory: [] });
+  assert.equal(historical.availabilityState, 'LEGACY_READ_ONLY');
+  assert.equal(historical.canCreateOrder, false);
+
+  // An explicit positive grant without a RENTABLE state stays contradictory, including when
+  // the availability field itself is absent.
+  for (const availability of [undefined, { state: 'UNKNOWN' }, { state: 'OFFLINE' }]) {
+    assert.throws(() => toListingCard({ ...listing, availability, canCreateOrder: true }), /Inconsistent public availability/);
+  }
+});
+
 
 test('registered migration catalog codes use the existing card resource roles without name guessing', () => {
   assert.equal(accountCardExports.canonicalResourceCode('level6_round'), 'df_billable_level6_bullet');
@@ -607,7 +647,11 @@ test('registered migration catalog codes use the existing card resource roles wi
 
 test('detail adds public title/time/expiry consumption without inventing missing declarations',()=>{
  const listing={id:'a',displayNo:null,title:'',description:'public',publishedAt:'2026-10-08T07:33:16Z',attributes:{},media:[],presentation:{items:[],skins:[],entitlements:[{id:'e',name:'体验权益'}]},quote:{schemaVersion:2,lines:[],resourceTotal:{currency:'CNY',unit:'yuan',amount:'0.00',scale:2},tenantDeposit:null,tenantPayableTotal:null,termSeconds:'86400',expiryDisclosures:[{entitlementId:'e',expiresAt:'2026-10-09T07:00:00Z',fullTermGuaranteed:false}]}};
-  const detail=toListingDetail(listing);assert.equal(detail.publicTitle,null);assert.equal(detail.publishedAt,listing.publishedAt);assert.equal(detail.depositLabel,null);assert.deepEqual(detail.entitlementDetails,[{id:'e',name:'体验权益',expiresAt:'2026-10-09T07:00:00Z',expiryState:'TIMED'}]);assert.ok(!Object.hasOwn(detail,'faceIsSelf'));assert.ok(!Object.hasOwn(detail,'banRecord'));
+  const detail=toListingDetail(listing);assert.equal(detail.publicTitle,null);assert.equal(detail.publishedAt,listing.publishedAt);assert.equal(detail.depositLabel,null);assert.deepEqual(detail.entitlementDetails,[{id:'e',name:'体验权益',expiresAt:'2026-10-09T07:00:00Z',expiryState:'TIMED'}]);assert.equal(detail.faceIsSelf, null); assert.equal(detail.banRecord, null);
+  assert.equal(toListingDetail({ ...listing, attributes: { face_is_self: false, ban_record: true } }).faceIsSelf, false);
+  assert.equal(toListingDetail({ ...listing, attributes: { face_is_self: false, ban_record: true } }).banRecord, true);
+  assert.equal(toListingDetail({ ...listing, attributes: { face_is_self: true, ban_record: false } }).faceIsSelf, true);
+  assert.equal(toListingDetail({ ...listing, attributes: { face_is_self: true, ban_record: false } }).banRecord, false);
   delete listing.publishedAt;listing.quote.expiryDisclosures=[];assert.equal(toListingDetail(listing).publishedAt,null);assert.equal(toListingDetail(listing).entitlementDetails[0].expiresAt,null);assert.equal(toListingDetail(listing).entitlementDetails[0].expiryState,'MISSING');
   listing.quote.expiryDisclosures=[{entitlementId:'e',expiresAt:null,fullTermGuaranteed:false}];assert.equal(toListingDetail(listing).entitlementDetails[0].expiryState,'PERMANENT');
 });
@@ -656,4 +700,13 @@ test('SK7 chip tone prefers the verified owner kind over category text', () => {
   assert.equal(skinChipTone({ name: 'x', ownerKind: 'AGENT', categoryCode: 'weapon', categoryName: '枪械外观' }), 'purple');
   assert.equal(skinChipTone({ name: 'x', ownerKind: 'FIREARM', categoryCode: 'df_skin_category_knife', categoryName: '近战相关待核词条' }), 'blue');
   assert.equal(skinChipTone({ name: 'x', categoryCode: 'df_skin_category_agent_gold', categoryName: '干员金皮（旧分组）' }), 'purple', 'without a verified owner kind the existing category fallback is unchanged');
+});
+
+
+test('public declarations keep false distinct and never expose private source', () => {
+  const rows = conditionLines({ next_season_pass: false, demulan_unlocked: true, info_source: 'private-campaign' });
+  assert.equal(rows.find(r => r.key === 'next_season_pass').value, '不计划购买');
+  assert.equal(rows.find(r => r.key === 'demulan_unlocked').value, '已解锁');
+  assert.equal(rows.some(r => r.key === 'info_source'), false);
+  assert.equal(conditionLines({ next_season_pass: null }).some(r => r.key === 'next_season_pass'), false);
 });

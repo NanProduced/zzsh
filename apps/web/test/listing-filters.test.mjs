@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   activeListingFilterCount,
+  resolveSkinOwner,
   buildServiceWindow,
   describeServiceWindow,
   formatServiceWindowMinute,
@@ -40,6 +41,8 @@ test('both registered six-round aliases convert once while other ammunition and 
   assert.equal(resourceUnitLabel('PIECE','top_insure_card_piece'),'张');
   assert.equal(resourceUnitLabel('DAY','top_insure_card_piece'),'天');
   assert.equal(resourceUnitLabel('PIECE','coffee'),'件');
+  assert.equal(resourceUnitLabel('PIECE','df_billable_turtle_backpack_45'),'个');
+  assert.equal(resourceInputToBase('3',{code:'df_billable_turtle_backpack_45',unit:'PIECE'}),'3');
 });
 
 const metadata = {
@@ -393,4 +396,14 @@ test('normalizing a URL only warns when a recognizable value was actually reject
   assert.deepEqual(listingUrlRejectedValues({ filters: 'not-json' }, parseListingFilters({ filters: 'not-json' })), ['filters']);
   assert.deepEqual(listingUrlRejectedValues({ filters: '{"regions":[]}' }, parseListingFilters({ filters: '{"regions":[]}' })), ['filters']);
   assert.deepEqual(listingUrlRejectedValues({ sort: '!!', direction: 'sideways' }, parseListingFilters({ sort: '!!', direction: 'sideways' })), ['sort', 'direction']);
+});
+
+test('skin owner stays scoped to the active category kind', () => {
+  const owners = [{ id: 'owner_agent', kind: 'AGENT' }, { id: 'owner_firearm', kind: 'FIREARM' }];
+  assert.equal(resolveSkinOwner(owners, 'owner_agent', 'AGENT'), 'owner_agent');
+  assert.equal(resolveSkinOwner(owners, 'owner_agent', 'MELEE_TYPE'), '', '近战类别在 2108 后没有 owner，重读回落时不得继续带旧 ownerId');
+  assert.equal(resolveSkinOwner(owners, 'owner_agent', 'FIREARM'), '');
+  assert.equal(resolveSkinOwner(owners, 'owner_agent', null), 'owner_agent', '旧类别无 ownerKind 时保持原行为');
+  assert.equal(resolveSkinOwner(owners, '', 'AGENT'), '');
+  assert.equal(resolveSkinOwner(undefined, 'owner_agent', 'AGENT'), '');
 });

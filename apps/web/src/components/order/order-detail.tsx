@@ -6,7 +6,7 @@ import { ArrowLeft, Check, CheckCircle2, CircleSlash, Clock3, Copy, Gamepad2, Me
 import { formatOrderMoney, formatOrderTime as timeText, orderApi, OrderRequestError, type Order, type OrderParty, type OrderStatusFilter, type PersonalAbnormalResponsibility, type PersonalFirstSubmit, type PersonalRefundBasis, type PersonalRefundIntent, type PersonalRefundRead } from "@/lib/order-client";
 import { useUserSession } from "@/components/session/user-session-provider";
 import { useIdentityReset } from "@/components/session/identity-reset";
-import { unitHint, unitLabel, orderAccountTitle } from "@/lib/order-display";
+import { orderLinesTotalLabel, orderRentalModeLabel, orderUnitPriceText, unitHint, unitLabel, orderAccountTitle } from "@/lib/order-display";
 import { OrderTradeActions, type OrderStageFacts } from "@/components/order/order-trade-actions";
 import { OrderError, OrderStatusBadge, orderTermLabel, orderUrl, statusLabel } from "@/components/order/order-presentation";
 import "./order.css";
@@ -67,7 +67,7 @@ function AttentionBlock({ attention, party, orderId, onRetry }: { attention: Att
     <div className="order-attention-actions">
       {attention.actions.includes("group") ? <button type="button" className="button primary button--sm" data-support-trigger onClick={() => window.dispatchEvent(new CustomEvent("zzsh:order-groups", { detail: { party, orderId } }))}><MessageCircle size={15} aria-hidden="true" />打开订单群列表</button> : null}
       {attention.actions.includes("browse") ? <Link href="/accounts" className="button primary button--sm">浏览可租账号</Link> : null}
-      {attention.actions.includes("manage") ? <Link href="/account?view=accounts" className="button primary button--sm">管理出租账号</Link> : null}
+      {attention.actions.includes("manage") ? <Link href="/account?view=accounts" className="button primary button--sm">管理上架账号</Link> : null}
       {attention.actions.includes("retry") ? <button type="button" className="order-attention-link" onClick={onRetry}>重试读取</button> : null}
     </div>
   </section>;
@@ -122,27 +122,30 @@ function CopyOrderNo({ value }: { value: string | null | undefined }) {
 function OrderLines({ order, party }: { order: Order; party: OrderParty }) {
   const lines = order.quote?.lines ?? [];
   if (lines.length === 0) return <p className="order-muted">费用明细暂时无法读取。</p>;
+  const total = party === "owner" ? order.quote?.ownerTotal : order.amounts?.rental;
   return <>
     <div className="order-table-wrap">
       <table><thead><tr><th scope="col">资源</th><th scope="col">数量</th><th scope="col">{party === "owner" ? "号主报价" : "金额"}</th></tr></thead>
-        <tbody>{lines.map((line, index) => <tr key={`${line.itemId ?? line.name ?? line.unit ?? "line"}-${index}`}>
-          <td>{line.name ?? unitLabel(line.unit) ?? "资源待确认"}</td>
-          <td>{line.quantity ?? line.unitQuantity ?? "数量待确认"}{unitHint(line.name ?? "", line.unit) ? ` ${unitHint(line.name ?? "", line.unit)}` : ""}</td>
-          <td>{formatOrderMoney(party === "owner" ? line.ownerAmount : line.buyerAmount)}</td>
-        </tr>)}</tbody>
+        <tbody>{lines.map((line, index) => {
+          const unitPrice = orderUnitPriceText(party === "owner" ? line.ownerUnitAmount : line.buyerUnitAmount, line.unitQuantity, line.unit);
+          return <tr key={`${line.itemId ?? line.name ?? line.unit ?? "line"}-${index}`}>
+            <td data-label="资源"><span>{line.name ?? unitLabel(line.unit) ?? "资源待确认"}</span>{unitPrice ? <small className="order-line-unit">{unitPrice}</small> : null}</td>
+            <td data-label="数量">{line.quantity ?? line.unitQuantity ?? "数量待确认"}{unitHint(line.name ?? "", line.unit) ? ` ${unitHint(line.name ?? "", line.unit)}` : ""}</td>
+            <td data-label={party === "owner" ? "号主报价" : "金额"}>{formatOrderMoney(party === "owner" ? line.ownerAmount : line.buyerAmount)}</td>
+          </tr>;
+        })}</tbody>
       </table>
     </div>
+    <p className="order-lines-total">{orderLinesTotalLabel(party)} <strong>{formatOrderMoney(total)}</strong></p>
     {order.quote?.unitAmountsInformational ? <p className="order-lines-note">明细为下单时的费用记录，最终金额请查看结算明细。</p> : null}
   </>;
 }
 
 /** Each party sees its own quoted amounts; a missing owner total stays unknown instead of borrowing the renter's. */
 function linesSummary(order: Order, party: OrderParty): string {
-  const lines = order.quote?.lines ?? [];
-  const parts = lines.map((line) => `${line.name ?? unitLabel(line.unit) ?? "资源"} ${formatOrderMoney(party === "owner" ? line.ownerAmount : line.buyerAmount)}`);
-  if (party === "owner") parts.push(order.quote?.ownerTotal ? `合计 ${formatOrderMoney(order.quote.ownerTotal)}` : "合计待确认");
-  else parts.push(`合计 ${formatOrderMoney(order.amounts?.rental)}`);
-  return parts.join(" · ");
+  if (party === "owner") return order.quote?.ownerTotal ? `号主报价合计 ${formatOrderMoney(order.quote.ownerTotal)}` : "号主报价 · 合计待确认";
+  const count = order.quote?.lines?.length ?? 0;
+  return count ? `费用 ${count} 项 · ${orderLinesTotalLabel(party)} ${formatOrderMoney(order.amounts?.rental)}` : "合计待确认";
 }
 
 /**
@@ -210,6 +213,10 @@ function ContactCard({ order, party, onChanged, quiet }: { order: Order; party: 
   return <section className="order-side-card">
     <h2 className="order-section-title">履约与沟通</h2>
     <p className="order-contact-copy"><MessageCircle size={16} aria-hidden="true" />{copy}</p>
+    {value.state === "ASSIGNED" ? <dl className="order-facts order-contact-facts">
+      <div><dt>客服分配</dt><dd>{value.assignedAt ? timeText(value.assignedAt, { timeZoneName: false }) : "时间待确认"}</dd></div>
+      <div><dt>订单群</dt><dd>{value.teamReady ? "已就绪" : value.teamState ? "尚未就绪" : "状态待确认"}</dd></div>
+    </dl> : null}
     {quiet ? null : <div className="order-contact-actions">
       <button type="button" className="button secondary" data-support-trigger onClick={() => window.dispatchEvent(new CustomEvent("zzsh:order-groups", { detail: { party, orderId: order.id } }))}><MessageCircle size={15} aria-hidden="true" />打开订单群</button>
       <button type="button" className="button quiet" onClick={onChanged}><RefreshCw size={15} aria-hidden="true" />刷新订单</button>
@@ -368,7 +375,7 @@ function OrderRefundSection({ order }: { order: Order }) {
       : error.status === 503 ? "退款依据暂时不可用；这不代表没有退款，也不代表渠道未收款。"
         : error.status === 404 ? "退款责任与本地记录暂时无法读取；这不代表没有退款，也不代表渠道未收款。"
           : "退款责任与本地记录暂时无法读取；这不代表没有退款。";
-    return <section className="order-detail-section order-refund-block" aria-label="退款责任与本地退款记录"><div className="order-refund-heading"><h2 className="order-section-title">退款责任</h2>{refresh}</div><div className="order-notice is-warning" role="alert"><CircleSlash size={17} aria-hidden="true" /><div><strong>{copy}</strong><span>错误代码：{error.code}{error.requestId ? <><br />查询编号：{error.requestId}</> : null}</span></div></div></section>;
+    return <section className="order-detail-section order-refund-block" aria-label="退款责任与本地退款记录"><div className="order-refund-heading"><h2 className="order-section-title">退款责任</h2>{refresh}</div><div className="order-notice is-warning" role="alert"><CircleSlash size={17} aria-hidden="true" /><div><strong>{copy}</strong><details className="order-refund-diagnostic"><summary>查看查询信息</summary><span>错误代码：{error.code}{error.requestId ? <><br />查询编号：{error.requestId}</> : null}</span></details></div></div></section>;
   }
   const read = visible.read;
   if (!read) return null;
@@ -406,6 +413,25 @@ function OrderRefundSection({ order }: { order: Order }) {
   </section>;
 }
 
+function OrderEntitlements({ order }: { order: Order }) {
+  const list = order.entitlements;
+  if (!list?.length) {
+    if (order.entitlementsUnknownReason && order.entitlementsUnknownReason !== "NOT_DISCLOSED") {
+      return <section className="order-detail-section"><h2 className="order-section-title">订单权益</h2><p className="order-muted">该订单权益记录暂不可用。</p></section>;
+    }
+    return null;
+  }
+  return <section className="order-detail-section">
+    <h2 className="order-section-title">订单权益</h2>
+    <dl className="order-facts order-entitlements">
+      {list.map((item) => <div key={item.id}>
+        <dt>{item.name?.trim() || "权益名称待确认"}</dt>
+        <dd>{item.expiryKind === "PERMANENT" ? "长期有效" : item.expiresAt ? `至 ${timeText(item.expiresAt, { timeZoneName: false })}` : "期限待确认"}{item.fullTermGuaranteed === false ? " · 不保证覆盖完整租期" : ""}</dd>
+      </div>)}
+    </dl>
+  </section>;
+}
+
 export function OrderDetail({ party, status, accountId, orderId, state, onRetry, onLogin, onChanged }: {
   party: OrderParty;
   status: OrderStatusFilter;
@@ -425,6 +451,7 @@ export function OrderDetail({ party, status, accountId, orderId, state, onRetry,
   if (state.status === "error" && state.error) return <section className="order-detail-view">{back}<OrderError error={state.error} first={false} onRetry={onRetry} onLogin={onLogin} label="订单详情暂时无法读取" /></section>;
   if (state.status !== "ready" || !state.order) return <section className="order-detail-view">{back}<section className="order-error-block" role="status"><XCircle size={24} aria-hidden="true" /><h3>订单不可用</h3><p>当前身份没有这笔订单的可用详情，未展示另一方私人资料。</p></section></section>;
   const order = state.order;
+  const modeLabel = orderRentalModeLabel(order);
   const attention = attentionFor(order, facts, read.failed, party);
   return <section className="order-detail-view" data-testid="order-detail">
     {back}
@@ -434,13 +461,17 @@ export function OrderDetail({ party, status, accountId, orderId, state, onRetry,
       <div className="order-detail-hero-copy">
         <h1 className="order-detail-title">{orderAccountTitle(order)}</h1>
         <p className="order-detail-meta">
+          {order.accountDisplayNo ? <span className="order-detail-account-no">账号 {order.accountDisplayNo}</span> : null}
           <span className="order-detail-no">订单 {order.displayNo ?? "待确认"}<CopyOrderNo value={order.displayNo} /></span>
           {party === "owner" ? <span>租客：{order.renterName ?? "暂不显示"}</span> : null}
           <span>下单 {timeText(order.createdAt)}</span>
           <span>{orderTermLabel(order)}</span>
+          {!order.listingFacts && order.listingFactsUnknownReason ? <span>账号资料待核实</span> : null}
+          {modeLabel ? <span className="order-detail-mode" data-mode={order.quote?.rentalMode}>{modeLabel}</span> : null}
         </p>
         <div className="order-detail-status">
           <OrderStatusBadge order={order} />
+          {order.stage?.label && order.stage.code !== "NONE" ? <span className={`order-stage-label${order.stage.viewerActionRequired ? " is-action" : ""}`}>{order.stage.label}</span> : null}
         </div>
       </div>
     </header>
@@ -455,6 +486,7 @@ export function OrderDetail({ party, status, accountId, orderId, state, onRetry,
             <OrderLines order={order} party={party} />
           </details>
         </section>
+        <OrderEntitlements order={order} />
         <OrderTimeline order={order} facts={facts} party={party} />
       </div>
       <aside className="order-detail-aside">

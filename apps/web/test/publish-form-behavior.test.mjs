@@ -15,6 +15,50 @@ const compiled = ts.transpileModule(fs.readFileSync(path.join(tree, "apps/web/sr
   compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
 }).outputText;
 
+test("session feedback: pending identity uses the form skeleton without private data or writes", async () => {
+  const p = await probe();
+  p.session.status = "loading";
+  try {
+    await p.render();
+    assert.ok(p.host.querySelector('.session-loading[data-layout="form"]'));
+    assert.equal(p.host.querySelector('.publish-groups'), null);
+    assert.equal(p.host.querySelector('.account-guest'), null);
+    assert.equal(p.host.querySelector('[role="alert"]'), null);
+    assert.equal(p.calls.length, 0);
+  } finally { await p.close(); }
+});
+
+test("session feedback: a confirmed guest never stays in the loading skeleton", async () => {
+  const p = await probe({ userId: null });
+  p.session.status = "guest";
+  try {
+    await p.render();
+    assert.match(p.text(), /登录后即可出租账号/);
+    assert.equal(p.host.querySelector('.session-loading'), null);
+    assert.equal(p.host.querySelector('.publish-groups'), null);
+    assert.ok(p.host.querySelector('.session-recovery a[href^="/login?next="]'));
+    assert.equal(p.calls.length, 0);
+  } finally { await p.close(); }
+});
+
+test("session feedback: a failed read offers read-only retry and returns to loading", async () => {
+  const p = await probe();
+  p.session.status = "error";
+  try {
+    await p.render();
+    assert.match(p.text(), /暂时无法加载上架资料/);
+    assert.equal(p.host.querySelector('.session-loading'), null);
+    assert.equal(p.host.querySelectorAll('[role="alert"]').length, 1);
+    assert.doesNotMatch(p.text(), /刚才填写的内容仍保留/);
+    await p.click('.session-recovery button');
+    assert.equal(p.session.revalidations, 1);
+    assert.equal(p.calls.length, 0, "retry never saves, quotes, accepts or submits");
+    await React.act(async () => { p.session.status = "loading"; p.notifyIdentity(); });
+    assert.ok(p.host.querySelector('.session-loading'));
+    assert.equal(p.host.querySelector('.session-recovery'), null);
+  } finally { await p.close(); }
+});
+
 const games = [{ id: "game_1", code: "delta", name: "三角洲行动", description: null }];
 const catalog = {
   game: { id: "game_1", code: "delta", name: "三角洲行动", catalogRevision: "1", currentReleaseId: "release_1" },
@@ -44,6 +88,11 @@ const optionsV2 = {
   },
 };
 const optionsV2NoFast = { ...optionsV2, rentalModes: { ...optionsV2.rentalModes, fast: { enabled: false } } };
+const options03C = { ...optionsV2, declarationOptions: {
+  next_season_pass: { enabled: true, required: true, label: '下赛季通行证计划' },
+  demulan_unlocked: { enabled: true, required: true, label: '是否已解锁德穆兰' },
+  info_source: { enabled: true, required: false, optionsState: 'CONFIGURED', acceptsLegacyText: true, options: [{ name: '合成渠道A', value: 'a' }, { name: '合成渠道B', value: 'b' }] },
+} };
 const ownerQuote = {
   schemaVersion: 1, currency: "CNY", ruleReleaseId: "release_1",
   lines: [{
@@ -102,7 +151,7 @@ function resourceEstimate({ quantity = "60", amount = "12.34", total = amount, u
 }
 const previewTick = () => React.act(async () => { await new Promise(resolve => setTimeout(resolve, 220)); });
 
-async function probe({ mode = "standard", accountId, editRequested = false, gameCode = "delta", options = optionsV1, catalogValue = catalog, mine, saveDraft, quote, confirm, fullPayoutTerms, depositRecommendation, resourceIncomePreview, readNotice = true, createAccount, createDraft, uploadMedia, userId = 'user_A', storageSeed, storageUnavailable = false } = {}) {
+async function probe({ mode = "standard", accountId, editRequested = false, gameCode = "delta", options = optionsV1, catalogValue = catalog, mine, saveDraft, quote, confirm, fullPayoutTerms, depositRecommendation, resourceIncomePreview, ownerIncomePreview, readNotice = true, createAccount, createDraft, uploadMedia, userId = 'user_A', storageSeed, storageUnavailable = false } = {}) {
   const window = new Window({ url: "http://127.0.0.1:3100/publish" });
   Object.assign(globalThis, {
     window, document: window.document, HTMLElement: window.HTMLElement, Element: window.Element, Node: window.Node,
@@ -136,6 +185,85 @@ async function probe({ mode = "standard", accountId, editRequested = false, game
     games: async () => ({ games }),
     publishingOptions: async () => options,
     resourceIncomePreview: async (...args) => resourceIncomePreview ? resourceIncomePreview(...args) : ({available:false,reason:"PREVIEW_UNAVAILABLE"}),
+    ownerIncomePreview: async (gameId, input, signal) => {
+      if (typeof ownerIncomePreview === "function") return ownerIncomePreview(gameId, input, signal);
+      if (typeof resourceIncomePreview === "function") {
+        const legacy = await resourceIncomePreview(gameId, input.inventory, { catalogRevision: input.catalogRevision, releaseId: input.releaseId }, signal);
+        if (!legacy || !legacy.available) {
+          return {
+            schema: "owner-income-preview.v1",
+            state: "UNAVAILABLE",
+            binding: null,
+            evaluatedAt: new Date().toISOString(),
+            refreshAfter: new Date().toISOString(),
+            rentalMode: null,
+            ownerHaffRatioWanPerYuan: null,
+            termSeconds: null,
+            lines: [],
+            ownerHaffIncome: null,
+            ownerResourceIncome: null,
+            knownResourceSubtotal: null,
+            totalExpectedIncome: null,
+            baseTenantDeposit: null,
+            depositState: "UNAVAILABLE",
+            missingFields: [],
+            reasonCodes: [legacy?.reason ?? "PREVIEW_UNAVAILABLE"],
+            unitAmountsInformational: true,
+            estimateOnly: true,
+            incomeBasis: "OWNER_RESOURCE_INCOME_BEFORE_FEES",
+          };
+        }
+        return {
+          schema: "owner-income-preview.v1",
+          state: legacy.ownerTotal ? "READY" : "PARTIAL",
+          binding: legacy.binding ? { ...legacy.binding, termVersionId: "term_1" } : null,
+          evaluatedAt: new Date().toISOString(),
+          refreshAfter: new Date().toISOString(),
+          rentalMode: "ordinary",
+          ownerHaffRatioWanPerYuan: "60",
+          termSeconds: "864000",
+          lines: (legacy.lines || []).map((l) => ({
+            ...l,
+            unitQuantity: l.unitQuantity ?? "1",
+          })),
+          ownerHaffIncome: { currency: "CNY", unit: "yuan", amount: "60.00", scale: 2 },
+          ownerResourceIncome: legacy.ownerTotal,
+          knownResourceSubtotal: legacy.ownerTotal,
+          totalExpectedIncome: legacy.ownerTotal
+            ? { currency: "CNY", unit: "yuan", amount: legacy.ownerTotal.amount, scale: 2 }
+            : null,
+          baseTenantDeposit: null,
+          depositState: "INCOMPLETE",
+          missingFields: [],
+          reasonCodes: [],
+          unitAmountsInformational: true,
+          estimateOnly: true,
+          incomeBasis: "OWNER_RESOURCE_INCOME_BEFORE_FEES",
+        };
+      }
+      return {
+        schema: "owner-income-preview.v1",
+        state: "UNAVAILABLE",
+        binding: null,
+        evaluatedAt: new Date().toISOString(),
+        refreshAfter: new Date().toISOString(),
+        rentalMode: null,
+        ownerHaffRatioWanPerYuan: null,
+        termSeconds: null,
+        lines: [],
+        ownerHaffIncome: null,
+        ownerResourceIncome: null,
+        knownResourceSubtotal: null,
+        totalExpectedIncome: null,
+        baseTenantDeposit: null,
+        depositState: "UNAVAILABLE",
+        missingFields: [],
+        reasonCodes: ["PREVIEW_UNAVAILABLE"],
+        unitAmountsInformational: true,
+        estimateOnly: true,
+        incomeBasis: "OWNER_RESOURCE_INCOME_BEFORE_FEES",
+      };
+    },
     catalog: async (...args) => typeof catalogValue === "function" ? catalogValue(...args) : catalogValue,
     mine: async (...args) => (typeof mine === "function" ? mine(...args) : mine),
     createAccount: async (...args) => createAccount ? createAccount(...args) : ({ accountId: "account_1", gameId: "game_1" }),
@@ -170,6 +298,17 @@ async function probe({ mode = "standard", accountId, editRequested = false, game
   module.paths = Module._nodeModulePaths(tree);
   module.require = (name) => {
     if (name.endsWith(".css")) return {};
+    if (name === "../ui/information" || name === "../auth/session-loading") {
+      const loadPresentation = (relative) => {
+        const filename = path.join(tree, "apps/web/src/components", relative + ".tsx");
+        const view = new Module(filename);
+        view.filename = filename; view.paths = Module._nodeModulePaths(tree);
+        view.require = dependency => dependency.endsWith(".css") ? {} : dependency === "../ui/information" ? loadPresentation("ui/information") : require(dependency);
+        view._compile(ts.transpileModule(fs.readFileSync(filename, "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, filename);
+        return view.exports;
+      };
+      return loadPresentation(name === "../ui/information" ? "ui/information" : "auth/session-loading");
+    }
     if (name === "../ui/form-controls") {
       const controlPath = path.join(tree, "apps/web/src/components/ui/form-controls.tsx");
       const controlModule = new Module(controlPath);
@@ -177,6 +316,14 @@ async function probe({ mode = "standard", accountId, editRequested = false, game
       controlModule.require = dependency => dependency.endsWith(".css") ? {} : require(dependency);
       controlModule._compile(ts.transpileModule(fs.readFileSync(controlPath, "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, controlPath);
       return controlModule.exports;
+    }
+    if (name === "../ui/alert-dialog") {
+      const dialogPath = path.join(tree, "apps/web/src/components/ui/alert-dialog.tsx");
+      const dialogModule = new Module(dialogPath);
+      dialogModule.filename = dialogPath; dialogModule.paths = Module._nodeModulePaths(tree);
+      dialogModule.require = dependency => dependency.endsWith(".css") ? {} : require(dependency);
+      dialogModule._compile(ts.transpileModule(fs.readFileSync(dialogPath, "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, dialogPath);
+      return dialogModule.exports;
     }
     if (name === "./skin-media-thumb") {
       const media = loadThumbModule();
@@ -254,7 +401,7 @@ async function probe({ mode = "standard", accountId, editRequested = false, game
       });
       await settle();
     },
-    async close() { await React.act(async () => root.unmount()); await window.happyDOM.abort(); },
+    async close() { await React.act(async () => root.unmount()); await window.happyDOM.abort(); await window.happyDOM.close(); },
   };
 }
 
@@ -277,6 +424,183 @@ test("availability stays undeclared until chosen, and help opens by click", asyn
     assert.equal(attrs.service_window_end_minute,null);
     assert.equal(attrs.ban_record,null);
     assert.equal(attrs.face_is_self,null);
+  } finally { await p.close(); }
+});
+
+test("large ammo counts require one explicit check before saving and preserve base rounds", async () => {
+  const p = await probe({ accountId: "account_1", mine: () => supplyOf(declaration({ inventory: [{ itemId: "item_round", quantity: "1200" }] })) });
+  const dialog = () => p.window.document.querySelector('[role="alertdialog"]');
+  const clickDialog = async (label) => {
+    const button = [...dialog().querySelectorAll('button')].find(node => node.textContent.includes(label));
+    assert.ok(button, label);
+    await React.act(async () => button.click());
+    await p.waitFor(() => !dialog());
+  };
+  try {
+    await p.render();
+    await p.clickButton("保存草稿");
+    assert.equal(dialog(), null, "20 groups do not need confirmation");
+    assert.equal(p.calls.filter(call => call.op === "saveDraft").length, 1);
+    await p.type('#quantity-item_round', '21');
+    assert.match(p.host.querySelector('[data-resource-code="level6_round"]').textContent, /21组.*1260发/);
+    await p.clickButton("保存草稿");
+    assert.ok(await p.waitFor(dialog));
+    assert.match(dialog().textContent, /21组.*1260发/s);
+    assert.equal(p.calls.filter(call => call.op === "saveDraft").length, 1);
+    await clickDialog("返回修改");
+    assert.equal(p.calls.filter(call => call.op === "saveDraft").length, 1, "cancelling never writes");
+    await p.clickButton("保存草稿");
+    assert.ok(await p.waitFor(dialog));
+    await clickDialog("确认数量");
+    assert.ok(await p.waitFor(() => p.calls.filter(call => call.op === "saveDraft").length === 2));
+    assert.equal(p.calls.at(-1).body.inventory.find(row => row.itemId === "item_round").quantity, "1260");
+    await p.clickButton("保存草稿");
+    assert.equal(dialog(), null, "an unchanged quantity is not repeatedly interrupted");
+    await p.type('#quantity-item_round', '22');
+    await p.type('#quantity-item_round', '21');
+    await p.clickButton("保存草稿");
+    assert.ok(await p.waitFor(dialog), "editing away and back invalidates the previous check");
+  } finally { await p.close(); }
+});
+
+test("ammo check preserves historical remainder and is lost on remount", async () => {
+  const p = await probe({ accountId: "account_1", mine: () => supplyOf(declaration({ inventory: [{ itemId: "item_round", quantity: "1201" }] })) });
+  try {
+    await p.render();
+    await p.clickButton("保存草稿");
+    const dialog = () => p.window.document.querySelector('[role="alertdialog"]');
+    assert.ok(await p.waitFor(dialog));
+    assert.match(dialog().textContent, /20组.*1发.*1201发/s);
+    await React.act(async () => [...dialog().querySelectorAll('button')].find(node => node.textContent.includes('确认数量')).click());
+    assert.ok(await p.waitFor(() => p.calls.some(call => call.op === "saveDraft")));
+    assert.equal(p.calls.find(call => call.op === "saveDraft").body.inventory[0].quantity, "1201");
+    await p.remount();
+    await p.clickButton("保存草稿");
+    assert.ok(await p.waitFor(dialog), "restored drafts have no persisted confirmation");
+  } finally { await p.close(); }
+});
+
+test("removing and readding an unpriced ammo row invalidates its confirmation", async () => {
+  const p = await probe({ accountId: 'account_1',
+    catalogValue: { ...catalog, items: catalog.items.map(item => item.id === 'item_round' ? { ...item, priced: false } : item) },
+    mine: () => supplyOf(declaration({ inventory: [{ itemId: 'item_round', quantity: '1260' }] })) });
+  const dialog = () => p.window.document.querySelector('.publish-ammo-dialog');
+  try {
+    await p.render(); await p.clickButton('保存草稿');
+    assert.ok(await p.waitFor(dialog));
+    await React.act(async () => [...dialog().querySelectorAll('button')].find(button => button.textContent.includes('确认数量')).click());
+    assert.ok(await p.waitFor(() => p.calls.filter(call => call.op === 'saveDraft').length === 1));
+    await p.clickButton('不纳入本次申报');
+    assert.equal(p.host.querySelector('#quantity-item_round').value, '');
+    await p.type('#quantity-item_round', '21'); await p.clickButton('保存草稿');
+    assert.ok(await p.waitFor(dialog));
+    assert.equal(p.calls.filter(call => call.op === 'saveDraft').length, 1);
+  } finally { await p.close(); }
+});
+
+test("only level-six head and body armor receive the exact durability reminder", async () => {
+  const items = [...catalog.items, ...['df_billable_level6_helmet', 'df_billable_level6_armor', 'df_billable_coffee'].map(code => ({ id: code, code, name: code, unit: 'PIECE', quantityScale: 0, required: false }))];
+  const p = await probe({ accountId: 'account_1', catalogValue: { ...catalog, items }, mine: () => supplyOf(declaration()) });
+  try {
+    await p.render();
+    for (const code of ['df_billable_level6_helmet', 'df_billable_level6_armor']) {
+      assert.match(p.host.querySelector(`[data-resource-code="${code}"]`).textContent, /磨损不超过5耐久/);
+    }
+    assert.doesNotMatch(p.host.querySelector('[data-resource-code="df_billable_coffee"]').textContent, /耐久/);
+    assert.equal(p.calls.some(call => call.op === 'saveDraft'), false);
+  } finally { await p.close(); }
+});
+
+test("ammo blur stays quiet inside its stepper and never survives an identity switch", async () => {
+  const p = await probe({ accountId: "account_1", mine: () => supplyOf(declaration({ inventory: [{ itemId: "item_round", quantity: "1260" }] })) });
+  try {
+    await p.render();
+    const closedSupport = p.window.document.createElement('div');
+    closedSupport.setAttribute('role', 'dialog'); closedSupport.setAttribute('data-state', 'closed');
+    p.window.document.body.append(closedSupport);
+    const input = p.host.querySelector('#quantity-item_round');
+    const plus = input.parentElement.querySelector('button:last-child');
+    await React.act(async () => input.dispatchEvent(new p.window.FocusEvent('focusout', { bubbles: true, relatedTarget: plus })));
+    assert.equal(p.window.document.querySelector('[role="alertdialog"]'), null);
+    await React.act(async () => input.dispatchEvent(new p.window.FocusEvent('focusout', { bubbles: true, relatedTarget: p.host.querySelector('#publish-description') })));
+    assert.ok(await p.waitFor(() => p.window.document.querySelector('[role="alertdialog"]')));
+    assert.equal(p.calls.length, 0, "checking an input does not save or quote");
+    p.session.userId = 'user_B'; p.session.identityVersion += 1;
+    await React.act(async () => p.notifyIdentity());
+    assert.ok(await p.waitFor(() => !p.window.document.querySelector('[role="alertdialog"]')));
+    assert.equal(p.calls.length, 0);
+  } finally { await p.close(); }
+});
+
+test("ammo review resumes quote once despite duplicate confirmation clicks", async () => {
+  const declared = declaration({ inventory: [{ itemId: "item_haff", quantity: "60000000" }, { itemId: "item_round", quantity: "3600" }] });
+  const p = await probe({ accountId: "account_1", mine: () => supplyOf(declared), quote: () => supplyOf(declared, { quote: ownerQuote }) });
+  try {
+    await p.render();
+    await p.click('.publish-rail-actions input[type="checkbox"]');
+    await p.clickButton('确认上架');
+    const dialog = () => p.window.document.querySelector('[role="alertdialog"]');
+    assert.ok(await p.waitFor(dialog));
+    assert.match(dialog().textContent, /60组.*3600发/s);
+    assert.equal(p.calls.length, 0);
+    const confirm = [...dialog().querySelectorAll('button')].find(button => button.textContent.includes('确认数量'));
+    await React.act(async () => { confirm.click(); confirm.click(); });
+    assert.ok(await p.waitFor(() => p.calls.some(call => call.op === 'quote')));
+    assert.equal(p.calls.filter(call => call.op === 'saveDraft').length, 1);
+    assert.equal(p.calls.filter(call => call.op === 'quote').length, 1);
+    assert.equal(p.calls.find(call => call.op === 'saveDraft').body.inventory.find(row => row.itemId === 'item_round').quantity, '3600');
+  } finally { await p.close(); }
+});
+
+test("ammo blur does not stack its alert over the existing unsaved-navigation dialog", async () => {
+  const p = await probe({ accountId: 'account_1', mine: () => supplyOf(declaration()) });
+  try {
+    await p.render();
+    await p.type('#quantity-item_round', '21');
+    const input = p.host.querySelector('#quantity-item_round');
+    const link = p.window.document.createElement('a'); link.href = '/accounts'; link.textContent = '账号市场'; p.host.append(link);
+    await React.act(async () => {
+      input.dispatchEvent(new p.window.FocusEvent('focusout', { bubbles: true, relatedTarget: link }));
+      link.dispatchEvent(new p.window.MouseEvent('click', { bubbles: true, cancelable: true }));
+    });
+    assert.ok(await p.waitFor(() => p.window.document.querySelector('.publish-leave-dialog')));
+    assert.equal(p.window.document.querySelector('.publish-ammo-dialog'), null);
+    assert.equal(p.window.document.querySelectorAll('[role="alertdialog"]').length, 1);
+    assert.equal(p.calls.length, 0);
+  } finally { await p.close(); }
+});
+
+test("a restored quote still checks its large ammo quantity before publication", async () => {
+  const declared = declaration({ inventory: [{ itemId: 'item_round', quantity: '1260' }] });
+  const p = await probe({ accountId: 'account_1', mine: () => supplyOf(declared, { quote: ownerQuote }),
+    confirm: action => supplyOf(declared, { quote: ownerQuote, reviewState: action === 'submit' ? 'PUBLISHED' : 'DRAFT' }) });
+  try {
+    await p.render();
+    await p.click('.publish-agreement-acceptance input');
+    await p.clickButton('确认上架');
+    const dialog = () => p.window.document.querySelector('[role="alertdialog"]');
+    assert.ok(await p.waitFor(dialog));
+    assert.equal(p.calls.filter(call => call.op === 'confirm').length, 0);
+    await React.act(async () => [...dialog().querySelectorAll('button')].find(button => button.textContent.includes('确认数量')).click());
+    assert.ok(await p.waitFor(() => p.calls.filter(call => call.op === 'confirm').length === 2));
+    assert.deepEqual(p.calls.filter(call => call.op === 'confirm').map(call => call.action), ['accept-rules', 'submit']);
+  } finally { await p.close(); }
+});
+
+test("deposit recommendation cannot save a newly edited large ammo count without review", async () => {
+  const p = await probe({ accountId: 'account_1', mine: () => supplyOf(declaration()) });
+  try {
+    await p.render();
+    await p.type('#quantity-item_round', '21');
+    await p.clickButton('查看推荐押金');
+    const dialog = () => p.window.document.querySelector('[role="alertdialog"]');
+    assert.ok(await p.waitFor(dialog));
+    assert.equal(p.calls.length, 0);
+    await React.act(async () => [...dialog().querySelectorAll('button')].find(button => button.textContent.includes('确认数量')).click());
+    assert.ok(await p.waitFor(() => p.calls.some(call => call.op === 'depositRecommendation')));
+    assert.equal(p.calls.filter(call => call.op === 'saveDraft').length, 1);
+    assert.equal(p.calls.find(call => call.op === 'saveDraft').body.inventory.find(row => row.itemId === 'item_round').quantity, '1260');
+    assert.equal(p.calls.filter(call => call.op === 'depositRecommendation').length, 1);
   } finally { await p.close(); }
 });
 
@@ -410,7 +734,7 @@ test('R03: publishing cannot resolve pause/resume/withdraw by reading current ac
     try{
       await p.render();assert.ok(p.findButton('重试当前步骤'));const before=reads;
       await p.clickButton('重试当前步骤');
-      assert.match(p.text(),/返回出租账号管理查询原操作结果/);
+      assert.match(p.text(),/返回上架账号查询原操作结果/);
       assert.equal(reads,before,'recovery never substitutes a current-account read for the original receipt');
       assert.equal(p.calls.length,0);assert.equal(p.window.sessionStorage.getItem(slot),raw);
       assert.equal(p.host.querySelector('#publish-description').disabled,true);
@@ -556,8 +880,8 @@ test("entry notice requires five seconds, cannot escape early, and never accepts
     await p.waitFor(() => !p.window.document.querySelector('[data-slot="dialog-content"]'));
     assert.equal(p.calls.length,0,'reading does not save, quote or accept a contract');
     assert.doesNotMatch(popup.textContent,/180%|10%的结算|保险卡按张|卡片库存/);
-    assert.match(popup.textContent,/顶级保险卡按天/);
-    assert.match(popup.textContent,/保险卡另填可用天数/);
+    assert.match(popup.textContent,/九格保险体验卡按天/);
+    assert.match(popup.textContent,/体验卡另填可用天数/);
   } finally { await p.close(); }
 });
 
@@ -579,7 +903,7 @@ test("unsaved and pending-catalog inputs use a cancellable app navigation dialog
     assert.equal(p.navigationCalls.length,0);
     const unload=new p.window.Event('beforeunload',{cancelable:true});
     p.window.dispatchEvent(unload);
-    assert.equal(unload.defaultPrevented,true,'reload retains browser protection');
+    assert.equal(unload.defaultPrevented,false,'no native beforeunload prompt; in-app links use the unified dialog');
     await React.act(async () => link.click());
     await p.waitFor(() => p.window.document.querySelector('[role="alertdialog"]'));
     popup=p.window.document.querySelector('[role="alertdialog"]');
@@ -664,12 +988,11 @@ test("PUBLISH-UX-2 legal zero and partial server totals survive an unrelated unm
   }
 });
 
-test("PUBLISH-UX-2 CSS keeps the rail bounded and sticky through 1024 without measuring its height", () => {
+test("PUBLISH-03 CSS keeps desktop columns and lets a tall rail flow without internal scrolling", () => {
   const source = fs.readFileSync(path.join(tree, "apps/web/src/components/supply/publish-form.tsx"), "utf8");
   const css = fs.readFileSync(path.join(tree, "apps/web/src/components/supply/publish-refinement.css"), "utf8");
-  assert.equal(/rail\.dataset\.sticky|observer\.observe\(rail\)/.test(source), false, "rail height cannot select static positioning");
-  assert.equal(/max-height:\s*calc\(100dvh\s*-\s*var\(--publish-header-offset/.test(css), true, "quote height is viewport bounded");
-  assert.equal(/overflow-y:\s*auto/.test(css), true, "all rail children including the actions can scroll");
+  assert.match(css, /\.publish-rail\[data-tall="true"\]\s*\{\s*position:static/, "a rail taller than the viewport must remain reachable by document scrolling");
+  assert.doesNotMatch(css, /\.functional-shell\.functional-shell--editor\s+\.publish-rail\s*\{[^}]*overflow-y:\s*auto/, "no internal scrolling in rail");
   assert.equal(/@media\s*\(max-width:\s*1023px\)/.test(css), true, "1024 retains the collaborative two columns");
   assert.equal(/@media\s*\(max-width:\s*1279px\)\s*\{\s*\.functional-shell--editor \.publish-page-layout/.test(css), false);
 });
@@ -684,7 +1007,7 @@ test("PUBLISH-UX-2 fast edits abort the previous read and refuse its late amount
     await p.type('[aria-label="六级子弹数量"]', "3"); await previewTick();
     assert.equal(pending.length, 2);
     assert.equal(pending[0].signal.aborted, true);
-    assert.deepEqual(pending[1].inventory, [{ itemId: "item_round", quantity: "180" }]);
+    assert.equal(pending[1].inventory.find((r) => r.itemId === "item_round")?.quantity, "180");
     await React.act(async () => pending[1].resolve(resourceEstimate({ quantity: "180", amount: "37.02" })));
     await React.act(async () => pending[0].resolve(resourceEstimate({ quantity: "120", amount: "24.68" })));
     assert.equal(p.host.querySelector('[aria-label="物品预估收入"]').textContent, "37.02 元");
@@ -770,7 +1093,7 @@ test("notice trade link reads the supplied agreement without saving or accepting
   } finally {await p.close();}
 });
 
-test("a saved quote with UNKNOWN confirmation still blocks leaving and unload", async () => {
+test("a saved quote with UNKNOWN confirmation still blocks in-app leaving without a native unload prompt", async () => {
   const p=await probe({accountId:'account_1',mine:()=>supplyOf(declaration({title:'quoted'}),{quote:ownerQuote}),confirm:()=>{throw new actualSupply.SupplyRequestError(0,{error:{code:'NETWORK_ERROR',message:'结果未知',requestId:'unknown-confirm'}})}});
   try {
     await p.render();
@@ -778,14 +1101,14 @@ test("a saved quote with UNKNOWN confirmation still blocks leaving and unload", 
     await p.click('.publish-confirm button.button.primary');
     await p.waitFor(()=>p.text().includes('结果未知'));
     const unload=new p.window.Event('beforeunload',{cancelable:true});p.window.dispatchEvent(unload);
-    assert.equal(unload.defaultPrevented,true,'saved declaration must not disable an unresolved-write guard');
+    assert.equal(unload.defaultPrevented,false,'no native beforeunload prompt; the unresolved-write guard stays in the unified dialog');
     const link=p.window.document.createElement('a');link.href='/accounts';link.textContent='leave';p.host.append(link);
     p.window.document.addEventListener('click',e=>e.preventDefault(),{once:true});
     await React.act(async()=>link.click());
     await p.waitFor(()=>p.window.document.querySelector('[role="alertdialog"]'));
     const dialog=p.window.document.querySelector('[role="alertdialog"]');assert.ok(dialog);
     assert.match(dialog.textContent,/上次操作结果仍待确认/);
-    assert.equal(dialog.querySelector('button.button.primary').disabled,true);
+    assert.equal(dialog.querySelector('.ui-alert-dialog-confirm, button.button.primary').disabled,true);
     assert.equal(p.calls.filter(c=>c.op==='confirm').length,1);
   } finally {await p.close();}
 });
@@ -801,8 +1124,8 @@ test("pending confirmation cannot leave before its result, without a dirty decla
     p.window.document.addEventListener('click',e=>e.preventDefault(),{once:true});await React.act(async()=>link.click());
     await p.waitFor(()=>p.window.document.querySelector('[role="alertdialog"]'));
     const dialog=p.window.document.querySelector('[role="alertdialog"]');assert.ok(dialog);
-    assert.match(dialog.textContent,/当前操作尚未完成/);assert.equal(dialog.querySelector('button.button.primary').disabled,true);
-    const unload=new p.window.Event('beforeunload',{cancelable:true});p.window.dispatchEvent(unload);assert.equal(unload.defaultPrevented,true);
+    assert.match(dialog.textContent,/当前操作尚未完成/);assert.equal(dialog.querySelector('.ui-alert-dialog-confirm, button.button.primary').disabled,true);
+    const unload=new p.window.Event('beforeunload',{cancelable:true});p.window.dispatchEvent(unload);assert.equal(unload.defaultPrevented,false,'no native beforeunload prompt');
   } finally {
     await React.act(async()=>rejectPending(new actualSupply.SupplyRequestError(0,{error:{code:'NETWORK_ERROR',message:'结果未知',requestId:'pending-confirm'}})));
     await p.close();
@@ -820,7 +1143,7 @@ test("UNKNOWN navigation guard remains visible while private fields are hidden f
     p.window.document.addEventListener('click',e=>e.preventDefault(),{once:true});await React.act(async()=>link.click());
     await p.waitFor(()=>p.window.document.querySelector('[role="alertdialog"]'));
     const dialog=p.window.document.querySelector('[role="alertdialog"]');assert.ok(dialog,'identity gate must retain the generic recovery guard');
-    assert.match(dialog.textContent,/上次操作结果仍待确认/);assert.equal(dialog.querySelector('button.button.primary').disabled,true);
+    assert.match(dialog.textContent,/上次操作结果仍待确认/);assert.equal(dialog.querySelector('.ui-alert-dialog-confirm, button.button.primary').disabled,true);
     assert.equal(p.calls.filter(c=>c.op==='confirm').length,1);
   } finally {await p.close();}
 });
@@ -882,7 +1205,7 @@ test("an unknown save keeps the frozen intent, blocks edits and replays the same
   });
   try {
     await p.render();
-    assert.match(p.text(), /账号能力/);
+    assert.ok(p.host.querySelector('[aria-label="体力等级"]'), 'editable account fields are present before the uncertain save');
     await p.type('textarea[placeholder*="使用说明"]', "edited-after-unknown");
     await p.clickButton("保存草稿");
     await p.waitFor(() => p.text().includes("结果未知"));
@@ -987,7 +1310,8 @@ test("a disabled fast mode and a v1 rule both refuse to pretend fast pricing", a
     await disabledFast.render();
     assert.match(disabledFast.text(), /极速比例当前未启用/);
     await disabledFast.type('input[aria-label$="（M）"]', "60");
-    await disabledFast.clickButton("核对报价");
+    await disabledFast.click('.publish-rail-actions input[type="checkbox"]');
+    await disabledFast.clickButton("确认上架");
     assert.match(disabledFast.text(), /当前规则未启用极速比例/);
     assert.equal(disabledFast.calls.some((call) => call.op === "quote"), false);
   } finally {
@@ -1001,7 +1325,8 @@ test("a disabled fast mode and a v1 rule both refuse to pretend fast pricing", a
     await v1Fast.render();
     assert.match(v1Fast.text(), /极速入口当前不可用/);
     await v1Fast.type('input[aria-label$="（M）"]', "60");
-    await v1Fast.clickButton("核对报价");
+    await v1Fast.click('.publish-rail-actions input[type="checkbox"]');
+    await v1Fast.clickButton("确认上架");
     assert.match(v1Fast.text(), /当前规则未开放极速比例合同/);
     assert.equal(v1Fast.calls.some((call) => call.op === "quote"), false);
   } finally {
@@ -1054,9 +1379,9 @@ test("the haff M input converts exactly and only the six-level bullet shows the 
     await p.render();
     const haff = p.inputByLabel("哈夫币数量");
     assert.ok(haff, "haff uses an M input");
-    await p.type('input[aria-label$="（M）"]', "60.5");
-    await p.waitFor(() => p.text().includes("= 60,500,000 哈夫币"));
-    assert.match(p.text(), /= 60,500,000 哈夫币/);
+    await p.type('input[aria-label$="（M）"]', "60");
+    await p.waitFor(() => p.text().includes("= 60,000,000 哈夫币"));
+    assert.match(p.text(), /= 60,000,000 哈夫币/);
     await p.type('input[aria-label$="六级子弹数量"]', "2");
     await p.waitFor(() => p.text().includes("1组 = 60发"));
     assert.match(p.text(), /1组 = 60发/);
@@ -1066,6 +1391,104 @@ test("the haff M input converts exactly and only the six-level bullet shows the 
   } finally {
     await p.close();
   }
+});
+
+test("haff balance sits in terms, stays a single input, and invalid input locates its field", async () => {
+  const p = await probe({ accountId: "account_1", mine: () => supplyOf(declaration()) });
+  try {
+    await p.render();
+    const haff = p.host.querySelector('#publish-haff-balance');
+    assert.ok(haff);
+    assert.equal(p.host.querySelectorAll('input[aria-label="哈夫币数量（M）"]').length, 1);
+    assert.ok(p.host.querySelector('#publish-group-terms #publish-haff-balance'));
+    assert.equal(p.host.querySelector('#publish-group-account #publish-haff-balance'), null);
+    assert.match(p.host.querySelector('#publish-group-terms').textContent, /哈夫币余额/);
+    await p.type('#publish-haff-balance', '-5');
+    assert.equal(haff.getAttribute('aria-invalid'), 'true');
+    assert.equal(haff.getAttribute('aria-describedby'), 'publish-haff-balance-hint publish-haff-balance-error');
+    assert.match(p.host.querySelector('#publish-haff-balance-error').textContent, /不支持小数/);
+    await p.clickButton('保存草稿');
+    assert.equal(p.calls.length, 0);
+    assert.equal(p.window.document.activeElement, haff);
+    assert.match(p.text(), /不支持小数/);
+  } finally { await p.close(); }
+});
+
+test("KD invalid input shows an in-place message linked to the field", async () => {
+  const p = await probe({ accountId: "account_1", mine: () => supplyOf(declaration()) });
+  try {
+    await p.render();
+    const kd = p.host.querySelector('#publish-secret-kd');
+    assert.equal(kd.getAttribute('aria-describedby'), null);
+    await p.type('#publish-secret-kd', 'abc');
+    assert.equal(kd.getAttribute('aria-invalid'), 'true');
+    assert.equal(kd.getAttribute('aria-describedby'), 'publish-secret-kd-error');
+    assert.match(p.host.querySelector('#publish-secret-kd-error').textContent, /0–100/);
+    await p.clickButton('保存草稿');
+    assert.equal(p.calls.length, 0);
+    assert.equal(p.window.document.activeElement, kd);
+  } finally { await p.close(); }
+});
+
+test("region popover exposes an accessible name and keeps its search focused", async () => {
+  const p = await probe({ accountId: "account_1", mine: () => supplyOf(declaration()) });
+  try {
+    await p.render();
+    await p.click('button[aria-label="地区选择"]');
+    const popover = p.window.document.querySelector('.publish-region-popover');
+    assert.ok(popover);
+    assert.equal(popover.getAttribute('role'), 'dialog');
+    assert.equal(popover.getAttribute('aria-label'), '选择地区');
+    assert.equal(p.window.document.activeElement, popover.querySelector('input[type="search"]'));
+  } finally { await p.close(); }
+});
+
+test("notice returns focus to the first entry field and to its trigger when reopened", async () => {
+  const p = await probe({ readNotice: false });
+  try {
+    await p.render();
+    await p.advanceReading(5000);
+    const confirm = p.window.document.querySelector('.publish-reading-footer > button');
+    assert.equal(confirm.disabled, false);
+    await React.act(async () => confirm.click());
+    assert.ok(await p.waitFor(() => !p.window.document.querySelector('[data-slot="dialog-content"]')));
+    assert.equal(p.window.document.activeElement, p.host.querySelector('#publish-secret-kd'));
+    const trigger = [...p.host.querySelectorAll('button')].find(button => button.textContent.includes('上架须知'));
+    assert.ok(trigger);
+    await React.act(async () => trigger.click());
+    assert.ok(await p.waitFor(() => p.window.document.querySelector('[data-slot="dialog-content"]')));
+    const close = p.window.document.querySelector('button[aria-label="关闭上架须知"]');
+    assert.equal(close.disabled, false);
+    await React.act(async () => close.click());
+    assert.ok(await p.waitFor(() => !p.window.document.querySelector('[data-slot="dialog-content"]')));
+    assert.equal(p.window.document.activeElement, trigger);
+  } finally { await p.close(); }
+});
+
+test("resource art uses the approved delta materials and keeps the insurance day identity", async () => {
+  const resources = [
+    ['df_billable_level6_bullet', 'ROUND', 'level6-ammo.png'],
+    ['df_billable_level6_helmet', 'PIECE', 'level6-helmet-dich9.png'],
+    ['df_billable_level6_armor', 'PIECE', 'level6-armor-mas2.png'],
+    ['df_billable_awm_bullet', 'ROUND', 'awm-ammo.png'],
+    ['df_billable_barrett_bullet', 'ROUND', 'barrett-ammo.png'],
+    ['df_billable_coffee', 'PIECE', 'coffee-beans.png'],
+    ['df_billable_top_insure_card', 'DAY', 'insurance-experience-card-thumb.png'],
+    ['df_billable_turtle_backpack_45', 'PIECE', 'turtle-backpack-45.png'],
+  ];
+  const items = [catalog.items[0], ...resources.map(([code, unit], index) => ({ id: `item_art_${index}`, code, name: `材料${index}`, unit, quantityScale: 0, required: false, priced: true }))];
+  const p = await probe({ accountId: 'account_1', catalogValue: { ...catalog, items }, mine: () => supplyOf(declaration()) });
+  try {
+    await p.render();
+    for (const [code, , file] of resources) {
+      const image = p.host.querySelector(`[data-resource-code="${code}"] img`);
+      assert.ok(image, code);
+      assert.equal(image.getAttribute('src'), `/art/delta/items/${file}`);
+    }
+    assert.doesNotMatch(p.host.querySelector('#publish-group-assets').innerHTML, /inventory-polished/);
+    assert.match(p.host.querySelector('[data-resource-code="df_billable_top_insure_card"]').textContent, /九格保险体验卡/);
+    assert.doesNotMatch(p.text(), /顶级保险卡/);
+  } finally { await p.close(); }
 });
 
 test("a generic old-state GET cannot resolve or overwrite an unknown write", async () => {
@@ -1279,7 +1702,8 @@ test("quote help explains gross income without opening terms or consenting", asy
     await p.click('button[aria-label="查看出租报价说明"]');
     await p.waitFor(() => p.window.document.querySelector('[role="tooltip"]'));
     assert.match(p.window.document.querySelector('[role="tooltip"]').textContent,/押金不计入收入/);
-    assert.equal(p.host.querySelector(".publish-terms").open,false);
+    assert.equal(p.window.document.querySelector('.publish-agreement-dialog'), null);
+    assert.equal(p.host.querySelector('[aria-hidden="true"] summary'), null);
     assert.equal(p.host.querySelector(".publish-confirm input").checked,false);
     assert.equal(p.calls.some(c=>c.op==="confirm"),false);
     assert.equal(p.host.querySelectorAll("h2.publish-group-title").length,4);
@@ -1295,7 +1719,8 @@ test("unsupplied title does not block quote and missing inventory locates the in
   });
   try {
     await p.render();
-    await p.clickButton("核对报价");
+    await p.click('.publish-rail-actions input[type="checkbox"]');
+    await p.clickButton("确认上架");
     assert.match(p.text(), /请先填写必填资源数量/);
     assert.equal(p.calls.some((c) => c.op === "quote"), false);
   } finally {
@@ -1310,9 +1735,10 @@ test("unsupplied title successfully quotes when declaration is complete", async 
   });
   try {
     await p.render();
-    await p.clickButton("核对报价");
+    await p.click('.publish-rail-actions input[type="checkbox"]');
+    await p.clickButton("确认上架");
     assert.equal(p.calls.some((c) => c.op === "quote"), true);
-    assert.match(p.text(), /报价已更新/);
+    assert.match(p.text(), /报价已取得|报价已更新|已成功上架/);
   } finally {
     await p.close();
   }
@@ -1346,7 +1772,7 @@ test("legacy agreement markup renders readable inert text while retaining the or
   const body='<h3>真实条款</h3><p>请阅读<strong>条件</strong>。</p><table><tr><td>物品</td><td>金额</td></tr></table><script>bad()</script>';
   const data={...supplyOf(declaration({title:"agreement"}),{quote:ownerQuote}),agreement:{...optionsV1.agreement,body}};
   const p=await probe({accountId:"account_1",mine:()=>data});
-  try {await p.render();const node=p.host.querySelector('.publish-terms-body');assert.match(node.textContent,/真实条款\n请阅读条件/);assert.match(node.textContent,/物品\t金额/);assert.doesNotMatch(node.textContent,/<h3>|bad/);assert.equal(node.querySelector('script'),null);assert.equal(data.agreement.body,body);}finally{await p.close();}
+   try {await p.render();await p.clickButton('出租协议');assert.equal(p.host.querySelector('.publish-agreement-acceptance input').checked,false,'opening the agreement does not grant consent');const node=p.window.document.querySelector('.publish-agreement-dialog .publish-terms-body');assert.match(node.textContent,/真实条款\n请阅读条件/);assert.match(node.textContent,/物品\t金额/);assert.doesNotMatch(node.textContent,/<h3>|bad/);assert.equal(node.querySelector('script'),null);assert.equal(data.agreement.body,body);}finally{await p.close();}
 });
 
 const selectedPayoutDeclaration = () => declaration({ title: "包赔声明", inventory: [{ itemId: "item_haff", quantity: "60000000" }], attributes: { full_payout_declaration: { schema: "full-payout-declaration-v1", selected: true }, owner_deposit_declaration: { schema: "owner-deposit-declaration-v1", amountCents: "30000", declarationVersion: "test" } } });
@@ -1357,11 +1783,13 @@ test("owner selected payout requires its separate acceptance and sends exact sea
   const p = await probe({ accountId: "account_1", mine: () => supplyOf(selectedPayoutDeclaration(), { quote: ownerQuote }), fullPayoutTerms: () => new Promise(resolve => { complete = resolve; }),
     confirm: action => supplyOf(selectedPayoutDeclaration(), { quote: ownerQuote, revision: action === "accept-rules" ? "6" : "7", reviewState: action === "accept-rules" ? "DRAFT" : "PUBLISHED" }) });
   try {
-    await p.render(); await p.click(".publish-confirm > label input");
+    await p.render(); await p.click(".publish-agreement-acceptance input");
     assert.equal(p.host.querySelector(".publish-confirm button.button.primary").disabled, true);
     assert.equal(p.host.querySelector(".publish-payout-acceptance input").disabled, true);
     await React.act(async () => complete({ releaseId: "release_1", fullPayoutTerms: ownerPayoutTerms })); await p.waitFor(() => !p.host.querySelector(".publish-payout-acceptance input").disabled);
-    assert.match(p.host.querySelector(".publish-payout-terms").textContent, /本次保障条件与责任/);
+    await p.clickButton('包赔条款');
+    assert.match(p.window.document.querySelector('.publish-agreement-dialog').textContent, /本次保障条件与责任/);
+    await React.act(async () => p.window.document.querySelector('[aria-label="关闭包赔条款"]').click());
     assert.equal(p.host.querySelector(".publish-confirm button.button.primary").disabled, true);
     await p.click(".publish-payout-acceptance input"); await p.clickButton("确认上架");
     assert.ok(await p.waitFor(() => p.calls.filter(c => c.op === "confirm").length === 2));
@@ -1374,7 +1802,7 @@ test("owner selected payout requires its separate acceptance and sends exact sea
 test("owner unreadable or wrong-release payout terms never permit publishing", async () => {
   for (const fullPayoutTerms of [async () => { throw Error("offline"); }, async () => ({ releaseId: "old_release", fullPayoutTerms: ownerPayoutTerms })]) {
     const p = await probe({ accountId: "account_1", mine: () => supplyOf(selectedPayoutDeclaration(), { quote: ownerQuote }), fullPayoutTerms });
-    try { await p.render(); await p.click(".publish-confirm > label input"); assert.match(p.text(), /全额包赔条款暂时无法读取或版本已变化/); assert.equal(p.host.querySelector(".publish-confirm button.button.primary").disabled, true); assert.equal(p.calls.some(c => c.op === "confirm"), false); } finally { await p.close(); }
+    try { await p.render(); await p.click(".publish-agreement-acceptance input"); assert.match(p.text(), /全额包赔条款暂时无法读取或版本已变化/); assert.equal(p.host.querySelector(".publish-confirm button.button.primary").disabled, true); assert.equal(p.calls.some(c => c.op === "confirm"), false); } finally { await p.close(); }
   }
 });
 
@@ -1382,7 +1810,7 @@ test("owner quote revision change reloads payout terms and clears the earlier ac
   let reads = 0;
   const next = supplyOf(selectedPayoutDeclaration(), { quote: ownerQuote, revision: "6", versionRevision: "2" });
   const p = await probe({ accountId: "account_1", mine: () => supplyOf(selectedPayoutDeclaration(), { quote: ownerQuote }), fullPayoutTerms: async () => ({ releaseId: "release_1", fullPayoutTerms: { ...ownerPayoutTerms, termsDigest: (++reads === 1 ? "a" : "b").repeat(64) } }), saveDraft: () => next, quote: () => next });
-  try { await p.render(); await p.click(".publish-confirm > label input"); await p.click(".publish-payout-acceptance input"); assert.equal(p.host.querySelector(".publish-confirm button.button.primary").disabled, false); await p.clickButton("重新核对报价"); assert.ok(await p.waitFor(() => reads === 2)); assert.equal(p.host.querySelector(".publish-payout-acceptance input").checked, false); assert.equal(p.host.querySelector(".publish-confirm button.button.primary").disabled, true); assert.equal(p.calls.some(c => c.op === "confirm"), false); } finally { await p.close(); }
+  try { await p.render(); await p.click(".publish-agreement-acceptance input"); await p.click(".publish-payout-acceptance input"); assert.equal(p.host.querySelector(".publish-confirm button.button.primary").disabled, false); await p.clickButton("重新核对报价"); assert.ok(await p.waitFor(() => reads === 2)); assert.equal(p.host.querySelector(".publish-payout-acceptance input").checked, false); assert.equal(p.host.querySelector(".publish-confirm button.button.primary").disabled, true); assert.equal(p.calls.some(c => c.op === "confirm"), false); } finally { await p.close(); }
 });
 
 test("inventory stepper rejects fractional or negative input, maps groups once, and haff invalid input cannot save",async()=>{
@@ -1408,7 +1836,7 @@ test("new inventory fields hold unresolved code quantities without fabricating I
   try{await p.render();
     for(const raw of ['abc','1.5','61']){await p.type('input[aria-label="账号等级"]',raw);assert.equal(p.host.querySelector('input[aria-label="账号等级"]').value,'');}
     await p.type('input[aria-label="账号等级"]','60');assert.equal(p.host.querySelector('input[aria-label="账号等级"]').value,'60');
-    await p.type('input[aria-label="巴雷特子弹数量"]','2');await p.type('input[aria-label="顶级保险卡数量"]','3');
+    await p.type('input[aria-label="巴雷特子弹数量"]','2');await p.type('input[aria-label="九格保险体验卡数量"]','3');
     await p.clickButton('保存草稿');assert.equal(p.calls.some(c=>c.op==='saveDraft'),false);assert.match(p.text(),/数量已保留在本页/);
     assert.doesNotMatch(p.text(),/暂不可填写/);
   }finally{await p.close();}
@@ -1416,7 +1844,7 @@ test("new inventory fields hold unresolved code quantities without fabricating I
 
 test("payout rules are readable before quote and reading does not consent or send a write",async()=>{
   const p=await probe({accountId:"account_1",mine:()=>supplyOf(declaration())});
-  try{await p.render();await p.clickButton('查看赔付规则');assert.equal(p.host.querySelector('#publish-payout-rules').open,true);assert.equal(p.window.document.activeElement,p.host.querySelector('#publish-payout-rules summary'));assert.equal(p.calls.length,0);assert.match(p.text(),/8%/);}finally{await p.close();}
+  try{await p.render();const rules=p.host.querySelector('#publish-payout-rules');rules.open=true;rules.querySelector('summary').focus();assert.equal(rules.open,true);assert.equal(p.window.document.activeElement,rules.querySelector('summary'));assert.equal(p.calls.length,0);assert.match(p.text(),/8%/);}finally{await p.close();}
 });
 
 test('UX22-U06 optional payout information never impersonates the current payout selection',async()=>{
@@ -1438,14 +1866,14 @@ test('UX22-U06 optional payout information never impersonates the current payout
     assert.equal(title(),'全额包赔');assert.equal(selected(),'true');
     assert.match(p.host.querySelector('.publish-payout-feature-heading span').textContent,/已选择此方案/);
     assert.equal(parseFloat(p.host.querySelector('#publish-deposit').value),50,'selecting optional cover must not replace the declared deposit');
-    assert.equal(JSON.stringify(original),frozen);assert.equal(p.calls.length,0);
+    assert.equal(JSON.stringify(original),frozen);assert.ok(p.calls.every(call=>call.op==='fullPayoutTerms'),'only current terms may be read; selection never writes');
   }finally{await p.close();}
 });
 
 test("catalog changes invalidate a quote and consent without overwriting the declaration",async()=>{
   let revision='1';
   const p=await probe({accountId:"account_1",catalogValue:()=>({...catalog,game:{...catalog.game,catalogRevision:revision}}),mine:()=>supplyOf(declaration({description:'keep me'}),{quote:{...ownerQuote,catalogRevision:'1'}})});
-  try{await p.render();assert.match(p.text(),/报价已取得/);revision='2';await p.type('.skin-search-input','skin');const input=p.host.querySelector('.skin-search-input');await React.act(async()=>input.dispatchEvent(new p.window.KeyboardEvent('keydown',{key:'Enter',bubbles:true})));await p.waitFor(()=>p.text().includes('报价已过期'));assert.match(p.text(),/报价已过期/);assert.equal(p.host.querySelector('#publish-description').value,'keep me');assert.equal(p.calls.length,0);}finally{await p.close();}
+  try{await p.render();assert.match(p.text(),/报价已取得/);revision='2';await p.type('.skin-search-input','skin');const input=p.host.querySelector('.skin-search-input');await React.act(async()=>input.dispatchEvent(new p.window.KeyboardEvent('keydown',{key:'Enter',bubbles:true})));await p.waitFor(()=>p.text().includes('待重新核算'));assert.match(p.text(),/待重新核算/);assert.match(p.text(),/条件已修改，重新核对报价后更新收入/);assert.ok(p.host.querySelector('.publish-requote-link'));assert.equal(p.host.querySelector('#publish-description').value,'keep me');assert.equal(p.calls.length,0);}finally{await p.close();}
 });
 
 test("insurance uses the existing DAY identity once and saves unchanged base day quantities",async()=>{
@@ -1457,8 +1885,8 @@ test("insurance uses the existing DAY identity once and saves unchanged base day
   try{
     await p.render();
     const card=p.host.querySelector('[data-resource-code="df_billable_top_insure_card"]');
-    assert.ok(card);assert.match(card.textContent,/顶级保险卡/);assert.match(card.textContent,/天/);assert.doesNotMatch(card.textContent,/旧保险|张数/);
-    assert.match(card.querySelector('img').getAttribute('src'),/insurance-card\.webp$/);
+    assert.ok(card);assert.match(card.textContent,/九格保险体验卡/);assert.match(card.textContent,/天/);assert.doesNotMatch(card.textContent,/旧保险|张数/);
+    assert.match(card.querySelector('img').getAttribute('src'),/insurance-experience-card-thumb\.png$/);
     assert.equal(p.host.querySelector('#quantity-'+pieceId),null);
     assert.equal(p.host.querySelectorAll('[data-resource-code="df_billable_top_insure_card"]').length,1);
     assert.equal(p.host.querySelector('#quantity-'+dayId).value,'3');
@@ -1486,7 +1914,7 @@ test("a previously referenced wrong PIECE insurance row is retained read-only wi
 test("gross owner income excludes declared deposits and never pre-deducts a flat payout fee",async()=>{
   const attrs={...declaration().attributes,rentalPricing:{rentalMode:'ordinary'},owner_deposit_declaration:{schema:'owner-deposit-declaration-v1',amountCents:'30000',declarationVersion:'1'},full_payout_declaration:{schema:'full-payout-declaration-v1',selected:true}};
   const p=await probe({accountId:'account_1',options:optionsV2,mine:()=>supplyOf(declaration({attributes:attrs}),{schemaVersion:2,quote:{...ownerQuote,schemaVersion:2,rentalMode:'ordinary',ownerHaffRatio:'50',publisherBailRequirement:{currency:'CNY',unit:'yuan',amount:'0.00',scale:2}}})});
-  try{await p.render();assert.equal(p.host.querySelector('[aria-label="预计收入合计"]').textContent,'120.00 元');assert.match(p.host.querySelector('.publish-rail-deposits').textContent,/300.00 元/);assert.doesNotMatch(p.host.querySelector('.publish-rail-deposits').textContent,/发布保证金/);assert.match(p.host.querySelector('[aria-label="普通兑换比例"]').textContent,/50 万哈夫币/);assert.equal(p.host.querySelector('.publish-confirm input').checked,false);assert.deepEqual(p.calls.map(c=>c.op),["fullPayoutTerms"]);}finally{await p.close();}
+  try{await p.render();assert.equal(p.host.querySelector('[aria-label="预计收入合计"]').textContent,'120.00 元');assert.match(p.host.querySelector('.publish-rail-deposits').textContent,/300.00 元/);assert.doesNotMatch(p.host.querySelector('.publish-rail-deposits').textContent,/发布保证金/);assert.match(p.host.querySelector('[aria-label="测算出租比例"]').textContent,/50 万哈夫币/);assert.equal(p.host.querySelector('.publish-confirm input').checked,false);assert.deepEqual(p.calls.map(c=>c.op),["fullPayoutTerms"]);}finally{await p.close();}
 });
 
 test("an explicit positive server publisher requirement remains separate from income",async()=>{
@@ -1750,4 +2178,526 @@ test('skin append failure preserves loaded rows and selections, retry keeps the 
     assert.equal(requests.at(-1).q, undefined, 'unapplied input never changes an existing cursor binding');
     assert.equal(p.host.querySelector('input[aria-label="选择 category_agent 第一页"]').checked, true);
   } finally { await p.close(); }
+});
+
+
+test('PUBLISH-02A: grading options with divisions render paired select and preserve state', async () => {
+  const gradingOptionsWithDivisions = [
+    { code: '4', displayName: '钻石', mappingStatus: 'CONFIRMED', issueCode: null, divisions: [4, 3, 2, 1] },
+    { code: '8', displayName: '巅峰', mappingStatus: 'CONFIRMED', issueCode: null, divisions: [] },
+  ];
+  const p = await probe({
+    accountId: 'account_1',
+    editRequested: true,
+    options: { ...optionsV1, gradingOptions: gradingOptionsWithDivisions },
+    mine: () => supplyOf(declaration({ attributes: { ...declaration().attributes, grading_code: '4', grading_division: 2 } })),
+  });
+  try {
+    await p.render();
+    assert.ok(p.host.querySelector('[aria-label="账号段位"]'));
+    const divisionSelect = p.host.querySelector('[aria-label="小段位"]');
+    assert.ok(divisionSelect, '小段位选择器应该成对渲染');
+    assert.match(divisionSelect.textContent ?? '', /2 级/);
+  } finally { await p.close(); }
+});
+
+test('PUBLISH-02A: inventory stepper forwards describedBy and the required badge is removed', async () => {
+  const p = await probe({
+    mine: () => supplyOf(declaration()),
+  });
+  try {
+    await p.render();
+    const ammoInput = p.host.querySelector('input[aria-label="六级子弹数量"]');
+    assert.ok(ammoInput);
+    assert.match(ammoInput.getAttribute('aria-describedby') ?? '', /measure-/);
+
+    assert.equal(p.host.querySelectorAll('.publish-required-note').length, 0, '核价必填标签已移除');
+    assert.equal(p.host.querySelector('#publish-haff-balance')?.getAttribute('aria-required'), 'true', '余额仍保留必填语义');
+  } finally { await p.close(); }
+});
+
+test('owner-income-preview: consumes real server response directly without client recalculation (READY, complete, zero, lines, haff, total)', async () => {
+  let previewCalled = 0;
+  const mockPreview = {
+    schema: "owner-income-preview.v1",
+    state: "READY",
+    binding: {
+      gameId: "game_1",
+      releaseId: "release_1",
+      releaseGeneration: "3",
+      priceVersionId: "price_1",
+      termVersionId: "term_1",
+      catalogRevision: "1",
+    },
+    evaluatedAt: "2026-10-25T17:22:22.348Z",
+    refreshAfter: "2026-10-25T17:22:52.348Z",
+    rentalMode: "ordinary",
+    ownerHaffRatioWanPerYuan: "60",
+    termSeconds: "864000",
+    lines: [
+      {
+        itemId: "item_round",
+        code: "df_billable_level6_bullet",
+        name: "六级子弹",
+        quantity: "60",
+        unit: "ROUND",
+        unitQuantity: "60",
+        ownerUnitAmount: { currency: "CNY", unit: "yuan", amount: "4.00000000", scale: 8 },
+        ownerAmount: { currency: "CNY", unit: "yuan", amount: "4.00", scale: 2 },
+      },
+      {
+        itemId: "item_haff",
+        code: "df_billable_haff",
+        name: "哈夫币",
+        quantity: "100000000",
+        unit: "HAFF_BASE",
+        unitQuantity: "1000000",
+        ownerUnitAmount: { currency: "CNY", unit: "yuan", amount: "1.66666667", scale: 8 },
+        ownerAmount: { currency: "CNY", unit: "yuan", amount: "166.67", scale: 2 },
+      },
+      {
+        itemId: "item_zero",
+        code: "df_billable_coffee",
+        name: "咖啡",
+        quantity: "0",
+        unit: "PIECE",
+        unitQuantity: "1",
+        ownerUnitAmount: { currency: "CNY", unit: "yuan", amount: "2.00000000", scale: 8 },
+        ownerAmount: { currency: "CNY", unit: "yuan", amount: "0.00", scale: 2 },
+      },
+    ],
+    ownerHaffIncome: { currency: "CNY", unit: "yuan", amount: "166.67", scale: 2 },
+    ownerResourceIncome: { currency: "CNY", unit: "yuan", amount: "49.00", scale: 2 },
+    knownResourceSubtotal: { currency: "CNY", unit: "yuan", amount: "49.00", scale: 2 },
+    totalExpectedIncome: { currency: "CNY", unit: "yuan", amount: "215.67", scale: 2 },
+    baseTenantDeposit: { currency: "CNY", unit: "yuan", amount: "300.00", scale: 2 },
+    depositState: "KNOWN",
+    missingFields: [],
+    reasonCodes: [],
+    unitAmountsInformational: true,
+    estimateOnly: true,
+    incomeBasis: "OWNER_RESOURCE_INCOME_BEFORE_FEES",
+  };
+
+  const declared = declaration({
+    inventory: [
+      { itemId: "item_haff", quantity: "100000000" },
+      { itemId: "item_round", quantity: "60" },
+    ],
+  });
+
+  const p = await probe({
+    accountId: "account_1",
+    mine: () => supplyOf(declared),
+    ownerIncomePreview: async () => {
+      previewCalled += 1;
+      return mockPreview;
+    },
+  });
+
+  try {
+    await p.render();
+    await previewTick();
+    assert.ok(previewCalled >= 1, "ownerIncomePreview was called");
+    assert.equal(p.calls.length, 0, "preview call does not produce persistent business writes");
+
+    // Rail check
+    const rail = p.host.querySelector("#publish-quote");
+    assert.ok(rail);
+    assert.match(rail.textContent, /215\.67 元/, "total expected income directly consumed");
+    assert.match(rail.textContent, /166\.67/, "haff income directly consumed");
+    assert.match(rail.textContent, /49\.00 元/, "resource income directly consumed");
+    assert.match(rail.textContent, /60 万哈夫币\/元/, "nominal ratio directly consumed");
+    assert.match(rail.textContent, /10 天/, "duration directly consumed");
+    assert.match(rail.querySelector('.publish-rail-deposits').textContent, /300\.00/, "base tenant deposit directly consumed");
+    assert.match(rail.textContent, /符合押金要求/);
+
+    // Item line check
+    const roundSubtotal = p.host.querySelector('[data-resource-code="df_billable_level6_bullet"] .publish-resource-subtotal output');
+    if (roundSubtotal) assert.equal(roundSubtotal.textContent, "¥ 4.00");
+  } finally {
+    await p.close();
+  }
+});
+
+test('owner-income-preview: PARTIAL state displays partial subtotal and does not claim full income', async () => {
+  const partialPreview = {
+    schema: "owner-income-preview.v1",
+    state: "PARTIAL",
+    binding: { gameId: "game_1", releaseId: "release_1", releaseGeneration: "3", priceVersionId: "price_1", termVersionId: "term_1", catalogRevision: "1" },
+    evaluatedAt: "2026-10-25T17:22:22.348Z",
+    refreshAfter: "2026-10-25T17:22:52.348Z",
+    rentalMode: "ordinary",
+    ownerHaffRatioWanPerYuan: null,
+    termSeconds: null,
+    lines: [],
+    ownerHaffIncome: null,
+    ownerResourceIncome: null,
+    knownResourceSubtotal: { currency: "CNY", unit: "yuan", amount: "49.00", scale: 2 },
+    totalExpectedIncome: null,
+    baseTenantDeposit: null,
+    depositState: "INCOMPLETE",
+    missingFields: ["attributes.safe_box_code"],
+    reasonCodes: [],
+    unitAmountsInformational: true,
+    estimateOnly: true,
+    incomeBasis: "OWNER_RESOURCE_INCOME_BEFORE_FEES",
+  };
+
+  const p = await probe({
+    accountId: "account_1",
+    mine: () => supplyOf(declaration()),
+    ownerIncomePreview: async () => partialPreview,
+  });
+
+  try {
+    await p.render();
+    await previewTick();
+    const rail = p.host.querySelector("#publish-quote");
+    assert.ok(rail);
+    assert.doesNotMatch(rail.textContent, /预计总收入（权威核准）/);
+    const resourceTotal = p.host.querySelector('[aria-label="物品预估收入"]');
+    assert.ok(resourceTotal);
+    assert.match(resourceTotal.textContent, /49\.00/);
+    assert.equal(p.calls.length, 0);
+  } finally {
+    await p.close();
+  }
+});
+
+test('owner-income-preview: primary submission pipeline runs save -> quote -> accept -> submit on unquoted draft', async () => {
+  const declared = declaration({
+    inventory: [
+      { itemId: "item_haff", quantity: "60000000" },
+      { itemId: "item_round", quantity: "60" },
+    ],
+    termOptionCode: "legacy_daily_10m",
+  });
+
+  const p = await probe({
+    accountId: "account_1",
+    mine: () => supplyOf(declared),
+    saveDraft: (body, key, calls) => supplyOf(body),
+    quote: (calls) => supplyOf(declared, { quote: ownerQuote }),
+    confirm: (action, body, calls) => supplyOf(declared, { quote: ownerQuote, reviewState: action === 'submit' ? 'PUBLISHED' : 'DRAFT' }),
+  });
+
+  try {
+    await p.render();
+    await previewTick();
+
+    // Check agreement
+    await p.click('.publish-rail-footer input[type="checkbox"]');
+    // Click primary submit button
+    await p.clickButton('确认上架');
+
+    assert.ok(await p.waitFor(() => p.calls.some(c => c.op === 'confirm' && c.action === 'submit')));
+    assert.equal(p.calls.filter(c => c.op === 'saveDraft').length, 1);
+    assert.equal(p.calls.filter(c => c.op === 'quote').length, 1);
+    assert.equal(p.calls.filter(c => c.op === 'confirm').length, 2);
+    assert.deepEqual(p.calls.filter(c => c.op === 'confirm').map(c => c.action), ['accept-rules', 'submit']);
+  } finally {
+    await p.close();
+  }
+});
+
+test('owner-income-preview: proxy route whitelist regex accepts owner-income-preview and enforces 64KiB bound', async () => {
+  const routeSource = fs.readFileSync(path.join(tree, "apps/web/src/app/api/supply/[...path]/route.ts"), "utf8");
+  assert.match(routeSource, /games\/\$\{id\}\/owner-income-preview/, "postPath whitelist includes owner-income-preview");
+  assert.match(routeSource, /64 \* 1024/, "readBoundedBody enforces 64KiB bound");
+});
+
+test('PUBLISH-03A: pricing and deposits follow resources and screenshots, with matching anchors', async () => {
+  const p = await probe({ accountId: "account_1", mine: () => supplyOf(declaration()) });
+  try {
+    await p.render();
+    const groups = Array.from(p.host.querySelectorAll('.publish-groups > section')).map(s => s.getAttribute('data-publish-group'));
+    assert.deepEqual(groups, ['account', 'assets', 'media', 'terms'], 'pricing and deposits belong at the end');
+    const outlineAnchors = Array.from(p.host.querySelectorAll('.publish-outline-groups a')).map(a => a.getAttribute('href'));
+    assert.deepEqual(outlineAnchors, ['#publish-group-account', '#publish-group-assets', '#publish-group-media', '#publish-group-terms']);
+  } finally {
+    await p.close();
+  }
+});
+
+test('PUBLISH-03A: rail formatting, title, units and agreement modal reading', async () => {
+  const p = await probe({
+    accountId: "account_1",
+    mine: () => supplyOf(declaration({ inventory: [{ itemId: "item_haff", quantity: "60000000" }] }), { quote: { ...ownerQuote, ownerHaffRatio: "50" } }),
+  });
+  try {
+    await p.render();
+    const rail = p.host.querySelector("#publish-quote");
+    assert.ok(rail);
+    assert.match(rail.querySelector("h2").textContent, /预计出租收入/);
+    assert.match(rail.textContent, /哈夫币计价比例/);
+    assert.match(rail.textContent, /50 万哈夫币\/元/);
+    assert.match(rail.textContent, /基础租客押金.*不计入收入/);
+    assert.doesNotMatch(rail.textContent, /名义号主比例/);
+    assert.doesNotMatch(rail.textContent, /边填边计价/);
+    assert.doesNotMatch(rail.textContent, /完成左侧条件/);
+    const trigger = rail.querySelector(".publish-terms-inline-link");
+    assert.ok(trigger, "modal reading button exists");
+    assert.match(trigger.textContent, /出租协议/);
+    const checkbox = rail.querySelector(".publish-confirm label.supply-check input");
+    assert.equal(checkbox.checked, false, "terms must be explicitly accepted by user");
+  } finally {
+    await p.close();
+  }
+});
+
+test('PUBLISH-03A: custom mode restricts daily consumption to 10M and checks range without clamping', async () => {
+  const customOptions = {
+    ...optionsV2,
+    termOptions: [
+      { code: "daily-10m", name: "10M/天", dailyConsumption: "10000000", durationRounding: "CEIL_DAY" },
+      { code: "daily-20m", name: "20M/天", dailyConsumption: "20000000", durationRounding: "CEIL_DAY" },
+    ],
+  };
+  const p = await probe({
+    accountId: "account_1",
+    options: customOptions,
+    mine: () => supplyOf(declaration({ termOptionCode: "daily-20m" })),
+  });
+  try {
+    await p.render();
+    const customChoice = [...p.host.querySelectorAll('[aria-label="出租比例"] .form-radio-choice')].find(el => el.textContent.includes('自定义'));
+    assert.ok(customChoice, "custom choice label must exist");
+    const customControl = customChoice.querySelector('.form-radio-control');
+    assert.ok(customControl, "custom radio control must exist");
+    await React.act(async () => { customControl.click(); });
+
+    const term10m = [...p.host.querySelectorAll('[aria-label="每日消耗"] .form-radio-choice')].find(el => el.textContent.includes('10 M'));
+    const term20m = [...p.host.querySelectorAll('[aria-label="每日消耗"] .form-radio-choice')].find(el => el.textContent.includes('20 M'));
+    assert.ok(term10m, "10M choice must exist");
+    assert.ok(term20m, "20M choice must exist");
+    assert.equal(term10m.classList.contains('is-selected'), true, "10M must be selected");
+    const control20m = term20m.querySelector('.form-radio-control');
+    const is20mDisabled = Boolean(control20m?.hasAttribute('disabled') || control20m?.hasAttribute('data-disabled') || control20m?.getAttribute('aria-disabled') === 'true');
+    assert.equal(is20mDisabled, true, "20M must be disabled");
+
+    // Out of range check
+    await p.type('input[aria-label="兑换比例"]', '50');
+    assert.match(p.text(), /不在当前允许范围/);
+  } finally {
+    await p.close();
+  }
+});
+
+test('PUBLISH-03A return: a new payout selection can read current terms before quoting without writing', async () => {
+  const p = await probe({ accountId: 'account_1', mine: () => supplyOf(selectedPayoutDeclaration()),
+    fullPayoutTerms: async () => ({ releaseId: 'release_1', fullPayoutTerms: ownerPayoutTerms }) });
+  try {
+    await p.render();
+    assert.ok(await p.waitFor(() => p.calls.some(call => call.op === 'fullPayoutTerms')));
+    assert.equal(p.host.querySelector('.publish-payout-acceptance input').disabled, false);
+    assert.equal(p.host.querySelector('.publish-payout-acceptance input').checked, false);
+    assert.deepEqual(p.calls.map(call => call.op), ['fullPayoutTerms']);
+  } finally { await p.close(); }
+});
+
+test('PUBLISH-03A return: payout quote requires fresh sealed consent before acceptance or publication', async () => {
+  const selected = selectedPayoutDeclaration();
+  const quoted = supplyOf(selected, { quote: ownerQuote, revision: '6' });
+  const p = await probe({ accountId: 'account_1', mine: () => supplyOf(selected),
+    fullPayoutTerms: async () => ({ releaseId: 'release_1', fullPayoutTerms: ownerPayoutTerms }),
+    saveDraft: () => supplyOf(selected), quote: () => quoted });
+  try {
+    await p.render();
+    assert.ok(await p.waitFor(() => !p.host.querySelector('.publish-payout-acceptance input').disabled));
+    await p.click('.publish-agreement-acceptance input');
+    await p.click('.publish-payout-acceptance input');
+    await p.clickButton('确认上架');
+    assert.ok(await p.waitFor(() => p.calls.some(call => call.op === 'quote')));
+    assert.equal(p.calls.some(call => call.op === 'confirm'), false, 'a pre-quote reading cannot accept the frozen quote');
+    assert.equal(p.host.querySelector('.publish-payout-acceptance input').checked, false);
+  } finally { await p.close(); }
+});
+
+test('PUBLISH-03A return: a misleading term name never substitutes for the actual 10M consumption', async () => {
+  const p = await probe({ accountId: 'account_1', mine: () => supplyOf(declaration()), options: {
+    ...optionsV2, termOptions: [
+      { code: 'misleading-10m', name: '10M/天', dailyConsumption: '20000000', durationRounding: 'CEIL_DAY' },
+      { code: 'opaque-real-term', name: '当前低日耗', dailyConsumption: '10000000', durationRounding: 'CEIL_DAY' },
+    ],
+  } });
+  try {
+    await p.render();
+    const custom = [...p.host.querySelectorAll('[aria-label="出租比例"] .form-radio-choice')].find(el => el.textContent.includes('自定义'));
+    await p.click('[aria-label="出租比例"] .form-radio-choice:nth-child(2) .form-radio-control');
+    assert.ok(custom);
+    assert.match(p.host.querySelector('[aria-label="每日消耗"] .is-selected').textContent, /10 M/);
+    assert.doesNotMatch(p.host.querySelector('[aria-label="每日消耗"] .is-selected').textContent, /20 M/);
+  } finally { await p.close(); }
+});
+
+test('PUBLISH-03C: declarations start unanswered and saving a draft does not inject false or clear legacy source', async () => {
+  const original = declaration({ attributes: { ...declaration().attributes, info_source: '历史渠道原文' } });
+  const p = await probe({ accountId: 'account_1', options: options03C, mine: () => supplyOf(original) });
+  try {
+    await p.render();
+    for (const label of ['下赛季通行证', '解锁德穆兰']) assert.equal(p.host.querySelectorAll(`[aria-label="${label}"] [role="radio"][aria-checked="true"]`).length, 0);
+    assert.match(p.text(), /历史渠道原文/);
+    await p.clickButton('保存草稿');
+    const saved = p.calls.find(c => c.op === 'saveDraft');
+    assert.ok(saved);
+    assert.equal(Object.hasOwn(saved.body.attributes, 'next_season_pass'), false);
+    assert.equal(Object.hasOwn(saved.body.attributes, 'demulan_unlocked'), false);
+    assert.equal(saved.body.attributes.info_source, '历史渠道原文');
+  } finally { await p.close(); }
+});
+
+test('PUBLISH-03C: explicit false is valid JSON boolean and survives editing and draft saving', async () => {
+  const p = await probe({ accountId: 'account_1', options: options03C, mine: () => supplyOf(declaration()) });
+  try {
+    await p.render();
+    for (const label of ['下赛季通行证', '解锁德穆兰']) await p.click(`[aria-label="${label}"] .form-radio-choice:nth-child(2) [role="radio"]`);
+    await p.clickButton('保存草稿');
+    const saved = p.calls.find(c => c.op === 'saveDraft');
+    assert.equal(saved.body.attributes.next_season_pass, false);
+    assert.equal(saved.body.attributes.demulan_unlocked, false);
+  } finally { await p.close(); }
+});
+
+test('PUBLISH-03C: an existing quote cannot accept or publish while a required new declaration is unanswered', async () => {
+  const p = await probe({ accountId: 'account_1', options: options03C, mine: () => supplyOf(declaration(), { quote: ownerQuote }) });
+  try {
+    await p.render();
+    await p.click('.publish-agreement-acceptance input');
+    await p.clickButton('确认上架');
+    assert.match(p.text(), /请明确选择下赛季通行证计划/);
+    assert.equal(p.calls.some(c => c.op === 'confirm'), false);
+  } finally { await p.close(); }
+});
+
+function completeNetPreview(selected = true) {
+  const amount = amount => ({ currency: 'CNY', unit: 'yuan', amount, scale: 2 });
+  return { schema: 'owner-income-preview.v1', state: 'READY', binding: { gameId: 'game_1', releaseId: 'release_1', releaseGeneration: '1', priceVersionId: 'p1', termVersionId: 't1', catalogRevision: '1' },
+    totalExpectedIncome: amount('215.67'), ownerHaffIncome: amount('166.67'), ownerResourceIncome: amount('49.00'), knownResourceSubtotal: amount('49.00'), lines: [], termSeconds: '864000', ownerHaffRatioWanPerYuan: '60', depositState: 'KNOWN', baseTenantDeposit: amount('300.00'), reasonCodes: [], missingFields: [],
+    normalEndEstimate: { schema: 'owner-normal-end-estimate.v1', state: 'READY', scenario: 'ALL_DECLARED_INVENTORY_CONSUMED_NORMAL_END', selected, ownerGross: amount('215.67'),
+      serviceFee: { base: amount(selected ? '215.67' : '0.00'), rate: selected ? '0.08' : '0', amount: amount(selected ? '17.25' : '0.00'), payer: selected ? 'OWNER' : 'NONE' }, ownerNet: amount(selected ? '198.42' : '215.67'), policy: selected ? { fullPayoutPolicyRef: 'p', fullPayoutPolicyVersion: '1', disclosureVersion: 'd' } : null },
+  };
+}
+
+test('PUBLISH fee read: net is a current server field, and non-pricing declarations never enter the preview body', async () => {
+  const inputs = [];
+  const declared = declaration({ inventory: [{ itemId: 'item_haff', quantity: '100000000' }], attributes: { ...declaration().attributes, next_season_pass: false, demulan_unlocked: true, info_source: 'a', full_payout_declaration: { schema: 'full-payout-declaration-v1', selected: true } } });
+  const p = await probe({ accountId: 'account_1', options: options03C, mine: () => supplyOf(declared), ownerIncomePreview: async (_game, input) => { inputs.push(input); return completeNetPreview(); } });
+  try {
+    await p.render(); await previewTick();
+    assert.equal(p.host.querySelector('[aria-label="预计净所得"]').textContent, '198.42 元');
+    assert.match(p.host.querySelector('.publish-fee-pending').textContent, /215\.67.*17\.25/);
+    for (const key of ['next_season_pass', 'demulan_unlocked', 'info_source']) assert.equal(Object.hasOwn(inputs.at(-1).attributes, key), false);
+    await p.type('#publish-haff-balance', '101');
+    await React.act(async () => { await new Promise(r => setTimeout(r, 5)); });
+    assert.equal(p.host.querySelector('[aria-label="预计净所得"]'), null, 'editing pricing input invalidates the old net immediately');
+    assert.equal(p.calls.some(c => ['saveDraft', 'quote', 'confirm'].includes(c.op)), false);
+  } finally { await p.close(); }
+});
+
+test("FAST-WEB-CONSUME-1 only-min fast range is shown without inventing an upper bound", async () => {
+  const options = {
+    ...optionsV2,
+    rentalModes: { ...optionsV2.rentalModes, fast: { enabled: true, min: { base: "C", value: "6" } } },
+  };
+  const p = await probe({ mode: "fast", accountId: "account_1", options, mine: () => supplyOf(declaration({ title: "fast only-min" })) });
+  try {
+    await p.render();
+    await p.waitFor(() => p.text().includes("最低 普通比例+6"));
+    assert.match(p.text(), /允许范围（万哈夫币\/元）：最低 普通比例\+6/);
+    assert.doesNotMatch(p.text(), /允许范围需读取当前规则后确认/);
+    assert.match(p.text(), /当前使用极速出租/);
+  } finally { await p.close(); }
+});
+
+test("FAST-WEB-CONSUME-1 missing fast config refuses the fast entry instead of assuming enabled", async () => {
+  const options = { ...optionsV2, rentalModes: { ordinary: { enabled: true }, custom: optionsV2.rentalModes.custom } };
+  const p = await probe({ mode: "fast", accountId: "account_1", options, mine: () => supplyOf(declaration({ title: "fast missing" })) });
+  try {
+    await p.render();
+    assert.match(p.text(), /极速比例当前未启用/);
+    assert.match(p.text(), /当前规则未提供极速比例范围，不能以极速入口上架/);
+    assert.doesNotMatch(p.text(), /已按极速入口切换为极速比例/);
+    assert.equal(p.calls.some((call) => call.op === "quote"), false);
+  } finally { await p.close(); }
+});
+
+test("FAST-WEB-CONSUME-1 absolute only-min rejects a value below the server lower bound", async () => {
+  const options = {
+    ...optionsV2,
+    rentalModes: { ...optionsV2.rentalModes, fast: { enabled: true, min: { base: "ABSOLUTE", value: "48" } } },
+  };
+  const p = await probe({ mode: "fast", accountId: "account_1", options, mine: () => supplyOf(declaration({ title: "fast bound" })) });
+  try {
+    await p.render();
+    await p.type('input[aria-label="兑换比例"]', "40");
+    await p.type('input[aria-label$="（M）"]', "60");
+    await p.click('.publish-rail-actions input[type="checkbox"]');
+    await p.clickButton("确认上架");
+    assert.match(p.text(), /已不在当前允许范围（最低 48，万哈夫币\/元）/);
+    assert.equal(p.calls.some((call) => call.op === "quote"), false);
+  } finally { await p.close(); }
+});
+
+test("FAST-REPAIR F1 fast 48-99 accepts 50 in the inline hint and on submit", async () => {
+  const p = await probe({ mode: "fast", accountId: "account_1", options: optionsV2, mine: () => supplyOf(declaration({ title: "fast inline legal" })) });
+  try {
+    await p.render();
+    await p.waitFor(() => p.text().includes("当前使用极速出租"));
+    await p.type('input[aria-label="兑换比例"]', "50");
+    assert.doesNotMatch(p.text(), /自定义比例（50）/);
+    assert.doesNotMatch(p.text(), /极速比例（50）已不在当前允许范围/);
+    await p.type('input[aria-label$="（M）"]', "60");
+    await p.clickButton("保存草稿");
+    await p.waitFor(() => p.calls.some((call) => call.op === "saveDraft"));
+    const save = p.calls.filter((call) => call.op === "saveDraft").at(-1);
+    assert.deepEqual(save.body.attributes.rentalPricing, { rentalMode: "fast", ownerRatioB: "50" });
+    assert.doesNotMatch(p.text(), /已不在当前允许范围/);
+  } finally {
+    await p.close();
+  }
+});
+
+test("FAST-REPAIR F1 only-min C+6 leaves the client bound to the server", async () => {
+  const options = { ...optionsV2, rentalModes: { ...optionsV2.rentalModes, fast: { enabled: true, min: { base: "C", value: "6" } } } };
+  const p = await probe({ mode: "fast", accountId: "account_1", options, mine: () => supplyOf(declaration({ title: "fast C only-min" })) });
+  try {
+    await p.render();
+    await p.waitFor(() => p.text().includes("最低 普通比例+6"));
+    await p.type('input[aria-label="兑换比例"]', "50");
+    assert.doesNotMatch(p.text(), /已不在当前允许范围/);
+    assert.doesNotMatch(p.text(), /自定义比例（50）/);
+  } finally {
+    await p.close();
+  }
+});
+
+test("FAST-REPAIR F1 only-max fast rejects above the upper bound and accepts inside it", async () => {
+  const options = { ...optionsV2, rentalModes: { ...optionsV2.rentalModes, fast: { enabled: true, max: { base: "ABSOLUTE", value: "99" } } } };
+  const p = await probe({ mode: "fast", accountId: "account_1", options, mine: () => supplyOf(declaration({ title: "fast only-max" })) });
+  try {
+    await p.render();
+    await p.waitFor(() => p.text().includes("最高 99"));
+    await p.type('input[aria-label="兑换比例"]', "50");
+    assert.doesNotMatch(p.text(), /已不在当前允许范围/);
+    await p.type('input[aria-label="兑换比例"]', "120");
+    assert.match(p.text(), /极速比例（120）已不在当前允许范围（最高 99，万哈夫币\/元）/);
+  } finally {
+    await p.close();
+  }
+});
+
+test("FAST-REPAIR F1 custom 39-41 keeps its own inline bound", async () => {
+  const custom = declaration({ title: "custom regression", attributes: { ...declaration().attributes, rentalPricing: { rentalMode: "custom", ownerRatioB: "40" } } });
+  const p = await probe({ accountId: "account_1", options: optionsV2, mine: () => supplyOf(custom) });
+  try {
+    await p.render();
+    await p.waitFor(() => p.text().includes("自定义比例"));
+    await p.type('input[aria-label="兑换比例"]', "50");
+    assert.match(p.text(), /自定义比例（50）已不在当前允许范围（39 ~ 41，万哈夫币\/元）/);
+    await p.type('input[aria-label="兑换比例"]', "40");
+    assert.doesNotMatch(p.text(), /自定义比例（40）已不在当前允许范围/);
+  } finally {
+    await p.close();
+  }
 });

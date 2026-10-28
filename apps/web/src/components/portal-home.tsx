@@ -11,10 +11,12 @@ import { PortalFooter } from "./layout/portal-footer";
 import { FavoritesProvider } from "./favorites/favorites-context";
 import { accountSearchHref } from "@/lib/account-search";
 import { UpcomingGames } from "./delta/game-identity";
-export function PortalHome({ accounts, historicalAccounts, supplyState, supplyMayHaveMore, stats, deals, statsAreDemo=false, onRetrySupply }: { accounts?: AccountCardData[]; historicalAccounts?: AccountCardData[]; supplyState?: SupplyState; supplyMayHaveMore?: boolean; stats?: PlatformStatsData; deals?: PublicDeal[]; statsAreDemo?:boolean; onRetrySupply?:()=>void }) {
+import { isHomeFastAccount } from "@/lib/home-fast-accounts";
+import "./home/home-mobile.css";
+export function PortalHome({ accounts, supplyState, supplyMayHaveMore, fastEnabled, stats, deals, statsAreDemo=false, onRetrySupply }: { accounts?: AccountCardData[]; historicalAccounts?: AccountCardData[]; supplyState?: SupplyState; supplyMayHaveMore?: boolean; fastEnabled?: boolean | null; stats?: PlatformStatsData; deals?: PublicDeal[]; statsAreDemo?:boolean; onRetrySupply?:()=>void }) {
   const [query, setQuery] = useState("");
   const router = useRouter();
-  const displayedAccounts = [...accounts ?? [], ...historicalAccounts ?? []];
+  const displayedAccounts = (accounts ?? []).filter(isHomeFastAccount);
   return <FavoritesProvider><div className="portal-home">
     <div className="brand-backdrop" aria-hidden="true"><div className="brand-landscape"/></div>
     <a href="#main-content" className="skip-link">跳到主要内容</a>
@@ -25,7 +27,7 @@ export function PortalHome({ accounts, historicalAccounts, supplyState, supplyMa
       <ServiceBenefits />
       <div className="portal-width activity-shell"><PlatformStats data={stats} deals={deals} isDemo={statsAreDemo}/></div>
 
-      <DeltaSection accounts={displayedAccounts} supplyState={supplyState} supplyMayHaveMore={supplyMayHaveMore} onRetry={onRetrySupply} />
+      <DeltaSection accounts={displayedAccounts} supplyState={supplyState} supplyMayHaveMore={supplyMayHaveMore} fastEnabled={fastEnabled} onRetry={onRetrySupply} />
       <UpcomingGames />
     </main>
     <PortalFooter />

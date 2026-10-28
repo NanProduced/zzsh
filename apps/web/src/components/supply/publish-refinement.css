@@ -371,28 +371,56 @@
 .publish-policy-disclosure p { max-width:70ch; }
 .functional-shell--editor .supply-recommend-btn { color:var(--color-text-primary); }
 .functional-shell--editor .publish-rail { display:flex; flex-direction:column; gap:12px; padding:20px; box-shadow:none; }
-.functional-shell--editor .publish-rail-head h2 { margin:0; font-size:18px; }
-.functional-shell--editor .publish-quote-status { flex-shrink:0; padding:10px 12px; margin:0; }
-.functional-shell--editor .publish-quote-status-title { font-size:15px; font-weight:600; }
+.functional-shell--editor .publish-rail-head h2 { margin:0; font-size:18px; font-weight:650; line-height:1.35; letter-spacing:.01em; }
+.publish-rail-heading-group { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.publish-quote-badge { font-size:11px; padding:2px 7px; border-radius:999px; font-weight:600; }
+.publish-quote-badge[data-status="ready"] { background:color-mix(in srgb, #2e7d32 12%, var(--color-bg-surface)); color:#2e7d32; }
+.publish-quote-badge[data-status="expired"] { background:color-mix(in srgb, #d32f2f 12%, var(--color-bg-surface)); color:#d32f2f; }
 .publish-rail-scroll { min-width:0; overflow:visible; }
-.publish-rail-footer { flex-shrink:0; padding-top:12px; border-top:1px solid var(--color-border-subtle); }
-.functional-shell--editor .publish-rail-lines { margin:0; gap:10px; }
-.functional-shell--editor .publish-rail-lines>div { padding:5px 0; }
-.functional-shell--editor .publish-rail-lines dt { font-size:13px; }
-.functional-shell--editor .publish-rail-lines dt small { display:inline; margin-left:5px; }
+.publish-rail-footer { flex-shrink:0; padding-top:10px; border-top:1px solid var(--color-border-subtle); }
+.publish-rail-actions { display:flex; flex-direction:column; gap:8px; }
+.publish-rail-actions .supply-check { margin:4px 0 6px; font-size:13px; }
+.functional-shell--editor .publish-rail-lines { margin:0; gap:7px; }
+.functional-shell--editor .publish-rail-lines>div { padding:2px 0; }
+.functional-shell--editor .publish-rail-lines dt { font-size:12px; font-weight:500; line-height:1.5; color:var(--color-text-primary); }
+.functional-shell--editor .publish-rail-lines dd { font-size:14px; font-weight:650; line-height:1.4; color:var(--color-text-primary); font-variant-numeric:tabular-nums; }
+.functional-shell--editor .publish-rail-lines dt small { display:block; margin:2px 0 0; font-size:10.5px; font-weight:400; line-height:1.4; }
 .functional-shell--editor .publish-rail-lines .is-total dd { font-size:20px; color:var(--color-text-primary); }
-.functional-shell--editor .publish-rail-note { margin:10px 0; font-size:12px; line-height:1.6; }
+.functional-shell--editor .publish-rail-note { margin:6px 0; font-size:11px; font-weight:400; line-height:1.55; }
+.functional-shell--editor .publish-rail-lines + .publish-rail-note { margin-top:10px; padding-top:10px; border-top:1px solid var(--color-border-subtle); }
 .functional-shell--editor .publish-confirm { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
 .publish-confirm > .supply-check,.publish-confirm > .button.primary,.publish-confirm > p { grid-column:1 / -1; }
-.functional-shell--editor .publish-confirm .supply-check { flex-direction:row; align-items:flex-start; gap:8px; font-size:13px; }
-.publish-rail-footer .button { width:100%; min-height:44px; }
+.functional-shell--editor .publish-confirm .supply-check { flex-direction:row; align-items:flex-start; gap:8px; font-size:13px; margin:4px 0 6px; }
+.publish-consent-row { display:flex; align-items:center; flex-wrap:wrap; gap:4px; margin:4px 0 6px; }
+.publish-consent-row .supply-check { margin:0; align-items:center; color:var(--color-text-primary); font-size:13px; font-weight:500; line-height:1.5; }
+.publish-confirm > .publish-consent-row { grid-column:1 / -1; }
+.publish-terms-inline-link { padding:0; border:0; background:none; color:var(--color-text-primary); font:inherit; font-size:13px; font-weight:600; line-height:1.5; text-decoration:underline; text-decoration-color:var(--color-accent-brand); text-decoration-thickness:1.5px; text-underline-offset:3px; cursor:pointer; }
+.publish-terms-inline-link:hover { text-decoration-thickness:2px; }
+.publish-terms-inline-link:focus-visible { outline:2px solid var(--color-accent-brand); outline-offset:2px; border-radius:2px; }
+.publish-rail-footer .button { width:100%; min-height:42px; }
 .resources-more { display:inline-block; padding:8px 0; font-size:12px; color:var(--color-text-primary); text-decoration:underline; text-underline-offset:3px; }
-.functional-shell.functional-shell--editor .publish-rail { position:sticky; top:var(--publish-header-offset,108px); max-height:calc(100vh - var(--publish-header-offset,108px) - 16px); max-height:calc(100dvh - var(--publish-header-offset,108px) - 16px); overflow-y:auto; scrollbar-gutter:stable; scroll-padding-block:16px; }
+.functional-shell.functional-shell--editor .publish-rail { position:sticky; top:var(--publish-header-offset,108px); max-height:none; overflow:visible; padding:14px 16px; gap:8px; }
+.functional-shell.functional-shell--editor .publish-rail[data-tall="true"] { position:static; }
 .functional-shell--editor .publish-rail > * { flex-shrink:0; }
 .publish-preview-updating { margin-left:auto; color:var(--color-text-secondary); font-size:12px; }
 .publish-preview-updating[data-updating="false"] { visibility:hidden; }
 .publish-resource-preview-status { min-height:2.8em; }
-.publish-live-resource-total { min-height:44px; }
+.publish-live-resource-total { min-height:auto; }
+@media(max-height:720px){
+  .functional-shell.functional-shell--editor .publish-rail { padding:10px 14px; gap:6px; }
+  .publish-income-total { margin-bottom:4px; gap:2px; }
+  .publish-income-total output { font-size:20px; }
+  .functional-shell--editor .publish-rail-lines { gap:4px; }
+  .functional-shell--editor .publish-rail-lines>div { padding:1px 0; }
+  .functional-shell--editor .publish-rail-lines dt { font-size:12px; }
+  .functional-shell--editor .publish-rail-lines dd { font-size:12px; }
+  .functional-shell--editor .publish-rail-note { margin:4px 0; font-size:11px; }
+  .functional-shell--editor .publish-rail-deposits { padding-top:6px; }
+  .publish-rail-footer { padding-top:6px; }
+  .publish-rail-actions { gap:6px; }
+  .publish-rail-footer .supply-check { margin:2px 0 4px; font-size:12px; }
+  .publish-rail-footer .button { min-height:44px; padding:6px 12px; font-size:13px; }
+}
 @media(min-width:1024px) and (max-width:1279px){
   .functional-shell.functional-shell--editor .publish-page-layout { grid-template-columns:minmax(0,1fr) 280px; }
   #publish-group-account .form-radio-group--segmented .form-radio-choice { padding-inline:8px; }
@@ -430,7 +458,9 @@
 #publish-group-account .form-radio-group--segmented .form-radio-choice:first-of-type { margin-left:0; border-radius:8px 0 0 8px; }
 #publish-group-account .form-radio-group--segmented .form-radio-choice:last-of-type { border-radius:0 8px 8px 0; }
 #publish-group-account .form-radio-group--segmented .form-radio-choice.is-selected { z-index:1; border-color:var(--color-accent-brand); background:color-mix(in srgb,var(--color-accent-brand) 12%,var(--color-bg-surface)); font-weight:600!important; }
-#publish-group-account .form-radio-group--segmented .form-radio-choice:focus-within { z-index:2; }
+#publish-group-account .form-radio-group--segmented .form-radio-choice:focus-within { z-index:2; outline:none!important; }
+#publish-group-account .form-radio-group--segmented .form-radio-choice:has(:focus-visible),
+#publish-group-account .form-radio-group--segmented .form-radio-control:focus-visible { outline:2px solid var(--color-accent-brand)!important; outline-offset:2px; z-index:3; }
 #publish-group-account .form-radio-group--segmented .form-radio-control { position:absolute; inset:0; width:100%; height:100%; opacity:0; cursor:pointer; }
 #publish-group-account .form-segment-check { position:absolute; right:7px; top:50%; transform:translateY(-50%); opacity:0; color:var(--color-text-primary); pointer-events:none; }
 #publish-group-account .is-selected .form-segment-check { opacity:1; }
@@ -468,6 +498,25 @@ html[data-theme="dark"] #publish-group-account .publish-login-platform-icon { fi
 .publish-resource-subtotal { display:flex; align-items:center; justify-content:space-between; gap:12px; font-size:12px; color:var(--color-text-secondary); }
 .publish-resource-subtotal output { font-size:13px; font-weight:500; color:var(--color-text-primary); font-variant-numeric:tabular-nums; }
 .publish-resource-measure,.publish-resource-state { display:block; font-size:12px; line-height:1.55; color:var(--color-text-secondary); }
+.publish-resource-input { min-width:0; }
+.publish-ammo-unit { margin:0 0 8px; color:var(--color-text-primary); font-size:14px; font-weight:550; line-height:1.5; }
+.publish-ammo-conversion { margin:8px 0 0; color:var(--color-text-primary); font-size:14px; line-height:1.6; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+.publish-resource-durability { display:flex; align-items:center; gap:6px; margin:0 0 8px; color:var(--color-text-secondary); font-size:14px; line-height:1.5; }
+.publish-resource-durability svg { flex:none; }
+.publish-ammo-dialog { width:min(480px,calc(100vw - 32px)); border:0; }
+.publish-ammo-dialog-body { min-height:0; padding:28px 28px 0; overflow-y:auto; overscroll-behavior:contain; scrollbar-width:thin; scrollbar-color:var(--color-border-default) transparent; }
+.publish-ammo-dialog-body > p { margin:14px 0 0; font-size:16px; line-height:1.75; color:var(--color-text-secondary); }
+.publish-ammo-dialog-body > p strong { color:var(--color-text-primary); font-weight:600; }
+.publish-ammo-dialog-body .publish-ammo-review-count { margin-top:16px; color:var(--color-text-secondary); }
+.publish-ammo-review-count strong { display:block; margin-top:4px; font-size:20px; line-height:1.5; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+.publish-ammo-dialog-actions { display:flex; justify-content:flex-end; gap:12px; padding:24px 28px 28px; flex:none; }
+.publish-ammo-dialog-actions .button { min-width:112px; font-size:15px; }
+@media(max-width:599px) {
+  .publish-ammo-dialog-body { padding:24px 20px 0; }
+  .publish-ammo-dialog-actions { display:grid; grid-template-columns:1fr; padding:20px 20px max(20px,env(safe-area-inset-bottom)); }
+  .publish-ammo-dialog-actions .button.primary { grid-row:1; }
+  .publish-ammo-dialog-actions .button { width:100%; min-height:46px; font-size:16px; }
+}
 #publish-group-assets p.publish-resource-state { margin:16px 0 0; }
 .publish-live-resource-total output { font-variant-numeric:tabular-nums; }
 @media(max-width:600px){#publish-group-assets .supply-resource-grid{grid-template-columns:1fr;gap:24px;}#publish-group-assets .publish-assets-heading{margin-bottom:16px;}}
@@ -524,12 +573,24 @@ html[data-theme="dark"] #publish-group-account .publish-login-platform-icon { fi
 .publish-payout-scenes { display:grid; gap:12px; margin-top:12px; }
 .publish-payout-scenes strong { font-size:13px; font-weight:600; color:var(--color-text-primary); }
 .publish-payout-scenes p { margin:4px 0 0; }
-.publish-income-total { display:grid; gap:8px; margin-bottom:16px; }
-.publish-income-total > span { font-size:13px; color:var(--color-text-secondary); }
-.publish-income-total output { color:var(--color-text-primary); font-size:28px; font-weight:650; line-height:1.3; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+.publish-income-total { display:grid; gap:4px; margin-bottom:10px; }
+.publish-income-total > span { font-size:12px; font-weight:600; letter-spacing:.02em; color:var(--color-text-primary); }
+.publish-income-total output { color:var(--color-text-primary); font-size:24px; font-weight:700; line-height:1.15; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+.publish-income-total .publish-stale-tag { font-size:11px; color:var(--color-text-secondary); font-weight:normal; }
+.publish-income-total--pending output { font-size:20px; font-weight:500; color:var(--color-text-secondary); letter-spacing:.04em; }
+.publish-pending-hint { color:var(--color-text-secondary); font-size:11.5px; font-weight:400; line-height:1.5; }
+.publish-pending-value { color:var(--color-text-secondary); font-weight:500; letter-spacing:.06em; }
+.publish-fee-pending { margin:8px 0; padding-block:8px; border-block:1px solid var(--color-border-subtle); font-size:12px; }
+.publish-fee-pending > div { display:flex; justify-content:space-between; gap:12px; }
+.publish-fee-pending strong { color:var(--color-text-primary); font-weight:600; }
+.publish-fee-pending p { margin:4px 0 0; color:var(--color-text-secondary); line-height:1.5; }
+.publish-fee-pending > div + div { margin-top:5px; }
+.publish-info-source { display:grid; gap:6px; margin-top:14px; }
+.publish-info-source > small { color:var(--color-text-secondary); font-size:12px; line-height:1.5; }
+.functional-shell--editor .publish-rail-lines .publish-deposit-verified dt { display:flex; align-items:center; gap:4px; font-size:11px; color:var(--color-text-secondary); }
 .functional-shell--editor .publish-rail-lines dd { overflow-wrap:anywhere; min-width:0; }
-.functional-shell--editor .publish-rail-deposits { padding-top:12px; border-top:1px solid var(--color-border-subtle); }
-.publish-rail-deposit-note { display:block; margin-top:8px; font-size:12px; line-height:1.6; color:var(--color-text-secondary); }
+.functional-shell--editor .publish-rail-deposits { padding-top:10px; border-top:1px solid var(--color-border-subtle); }
+.publish-rail-deposit-note { display:block; margin-top:6px; font-size:11px; line-height:1.5; color:var(--color-text-secondary); }
 @media(max-width:600px){
   #publish-group-terms .publish-term-row { grid-template-columns:1fr; gap:10px; margin-top:16px; }
   #publish-group-terms .publish-term-label { padding-top:0; }
@@ -541,6 +602,78 @@ html[data-theme="dark"] #publish-group-account .publish-login-platform-icon { fi
   #publish-group-terms .publish-payout-group { grid-template-columns:repeat(2,minmax(0,1fr)); }
   .publish-payout-feature { padding:16px; }
   .publish-payout-facts { gap:24px; }
+}
+
+/* PUBLISH-04: terms form hierarchy — grouped rows, label/control columns, read-only results. */
+#publish-group-terms .publish-terms-flow { gap:0; }
+#publish-group-terms .publish-term-section { padding:0; }
+#publish-group-terms .publish-term-section + .publish-term-section { margin-top:26px; padding-top:26px; border-top:1px solid var(--color-border-subtle); }
+#publish-group-terms .publish-term-section:first-child { padding-top:0; }
+#publish-group-terms .publish-term-section:last-child { padding-bottom:0; }
+#publish-group-terms .publish-term-section-heading { margin-bottom:16px; }
+#publish-group-terms .publish-term-row { grid-template-columns:140px minmax(0,1fr); gap:24px; padding:10px 0; margin-top:0; }
+#publish-group-terms .publish-term-label { display:flex; align-items:center; flex-wrap:wrap; gap:6px; padding-top:10px; color:var(--color-text-primary); font-size:13px; font-weight:600; line-height:1.5; }
+#publish-group-terms .publish-term-label > label { cursor:pointer; }
+#publish-group-terms .publish-required-mark { display:inline-flex; align-items:center; padding:1px 6px; border:1px solid rgba(217,119,6,.28); border-radius:999px; background:rgba(217,119,6,.12); color:#854d0e; font-size:10px; font-weight:600; line-height:1.6; white-space:nowrap; }
+html[data-theme="dark"] #publish-group-terms .publish-required-mark, .dark #publish-group-terms .publish-required-mark { border-color:rgba(243,182,74,.38); background:rgba(243,182,74,.18); color:#fbd38d; }
+#publish-group-terms .publish-auto-tag { color:var(--color-text-secondary); font-size:10.5px; font-weight:500; }
+#publish-group-terms .publish-visibility-tag { display:inline-flex; align-items:center; padding:1px 6px; border:1px solid var(--color-border-subtle); border-radius:999px; background:var(--color-bg-canvas); color:var(--color-text-secondary); font-size:10px; font-weight:500; line-height:1.6; white-space:nowrap; }
+
+/* One radio-card style for daily consumption, rental mode and payout. */
+#publish-group-terms .publish-term-section .form-radio-group { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(0,1fr); gap:8px; }
+#publish-group-terms .publish-term-section .form-radio-choice { position:relative; justify-content:flex-start; min-height:48px; padding:10px 12px; border:1px solid var(--color-border-default); border-radius:8px; background:var(--color-bg-surface); font-size:14px; }
+#publish-group-terms .publish-term-section .form-radio-choice.is-selected { border-color:var(--color-accent-brand); background:color-mix(in srgb,var(--color-accent-brand) 10%,var(--color-bg-surface)); }
+#publish-group-terms .publish-term-options-row .form-radio-choice > span { white-space:nowrap; }
+#publish-group-terms .publish-payout-group .form-radio-badge { position:static; margin-left:auto; padding:2px 6px; font-size:10px; line-height:1.6; }
+
+/* Input widths and read-only calculation results. */
+#publish-group-terms .publish-haff-input-wrap { width:min(100%,240px); }
+#publish-group-terms .supply-deposit-input-wrap { width:min(100%,240px); }
+#publish-group-terms .publish-calc-results { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px 16px; }
+#publish-group-terms .publish-calc-item { display:grid; gap:6px; min-width:0; }
+#publish-group-terms .publish-calc-label { display:flex; align-items:center; gap:6px; color:var(--color-text-secondary); font-size:12px; font-weight:500; line-height:1.5; }
+#publish-group-terms .publish-calc-value { display:flex; align-items:center; min-height:44px; padding:10px 12px; border:1px solid var(--color-border-subtle); border-radius:8px; background:var(--color-bg-canvas); color:var(--color-text-primary); font-size:14px; font-weight:650; font-variant-numeric:tabular-nums; line-height:1.4; }
+#publish-group-terms .publish-calc-note { grid-column:1/-1; color:var(--color-text-secondary); font-size:11.5px; line-height:1.5; }
+
+/* Payout summary is a plain block, not a nested card. */
+#publish-group-terms .publish-payout-feature { gap:10px; padding:12px 0 0; border:0; border-top:1px solid var(--color-border-subtle); border-radius:0; background:none; }
+#publish-group-terms .publish-payout-feature[data-selected="true"] { border-color:var(--color-border-subtle); background:none; }
+#publish-group-terms .publish-payout-feature-heading { gap:10px; }
+#publish-group-terms .publish-payout-art, #publish-group-terms .publish-payout-feature-heading > svg { width:44px; height:44px; }
+#publish-group-terms .publish-payout-feature-heading strong { font-size:14px; font-weight:650; }
+#publish-group-terms .publish-payout-feature-heading span { color:var(--color-text-secondary); font-size:12px; }
+#publish-group-terms .publish-payout-facts { gap:24px; }
+#publish-group-terms .publish-payout-facts dt { font-size:11px; }
+#publish-group-terms .publish-payout-facts dd { font-size:14px; font-weight:650; }
+#publish-group-terms .publish-payout-feature > p { font-size:12px; line-height:1.6; }
+#publish-group-terms .supply-terms-link { justify-self:start; min-height:0; padding:0; border:0; background:none; color:var(--color-text-primary); font-size:12px; font-weight:600; text-decoration:underline; text-decoration-color:var(--color-accent-brand); text-underline-offset:3px; }
+#publish-group-terms .publish-term-risk { display:flex; align-items:flex-start; gap:6px; color:var(--color-text-secondary); font-size:12px; line-height:1.5; }
+#publish-group-terms .publish-term-risk > svg { flex:none; margin-top:2px; }
+#publish-group-terms .publish-deposit-guidance { padding:0; border:0; background:none; font-size:12px; line-height:1.55; }
+#publish-group-terms .publish-deposit-guidance > svg { color:var(--color-text-secondary); }
+#publish-group-terms .publish-term-note-section textarea.form-input { min-height:112px; }
+@media(max-width:800px){
+  #publish-group-terms .publish-term-row { grid-template-columns:1fr; gap:8px; padding:10px 0; }
+  #publish-group-terms .publish-term-label { padding-top:0; }
+  #publish-group-terms .publish-term-section .form-radio-group { grid-auto-flow:row; grid-template-columns:repeat(2,minmax(0,1fr)); }
+  #publish-group-terms .publish-calc-results { grid-template-columns:1fr; }
+  #publish-group-terms .publish-term-section + .publish-term-section { margin-top:22px; padding-top:22px; }
+}
+
+
+/* PUBLISH-04 final: keep the payout summary readable and the deposit input bounded above older rules. */
+#publish-group-terms .publish-payout-feature[data-selected="false"],
+#publish-group-terms .publish-payout-feature[data-selected="true"] { display:grid; gap:10px; padding:12px 0 0; border:0; border-top:1px solid var(--color-border-subtle); border-radius:0; background:none; }
+#publish-group-terms .publish-payout-feature[data-selected="false"] .publish-payout-facts,
+#publish-group-terms .publish-payout-feature[data-selected="true"] .publish-payout-facts { display:flex; }
+#publish-group-terms .publish-payout-feature[data-selected="false"] > p,
+#publish-group-terms .publish-payout-feature[data-selected="true"] > p { display:block; }
+#publish-group-terms .publish-payout-feature[data-selected="false"] .supply-terms-link,
+#publish-group-terms .publish-payout-feature[data-selected="true"] .supply-terms-link { display:inline-flex; }
+#publish-group-terms .supply-deposit-input-wrap { flex:0 1 240px; width:240px; max-width:240px; }
+#publish-group-terms .publish-calc-value[data-state="pending"] { color:var(--color-text-secondary); font-weight:500; }
+@media(max-width:800px){
+  #publish-group-terms .supply-deposit-input-wrap { flex:1 1 auto; width:100%; max-width:none; }
 }
 
 /* Media: neutral upload affordance, conditional penalty disclosure. */
@@ -578,4 +711,1171 @@ html[data-theme="dark"] #publish-group-account .publish-login-platform-icon { fi
   #publish-group-media .supply-media-row { grid-template-columns:64px minmax(0,1fr); }
   #publish-group-media .supply-media-preview { width:64px; height:52px; }
   #publish-group-media .supply-media-actions { grid-column:2; }
+}
+
+/* PUBLISH-01: core balance first, an outline that stays reachable, compact resource rows. */
+.publish-form-guidance { display:flex; align-items:flex-start; gap:7px; margin:-6px 0 18px; color:var(--color-text-secondary); font-size:13px; line-height:1.6; }
+.publish-form-guidance svg { flex:none; margin-top:3px; }
+#publish-group-account .publish-account-haff { display:grid; gap:8px; min-width:0; padding-bottom:18px; border-bottom:1px solid var(--color-border-subtle); }
+#publish-group-account .publish-account-haff > .publish-account-label { flex-direction:row; flex-wrap:wrap; align-items:center; min-height:0; line-height:1.5; }
+#publish-group-account .publish-haff-control { display:grid; gap:8px; min-width:0; max-width:720px; }
+#publish-group-account .publish-haff-control .publish-input-with-unit .form-input { min-height:48px; height:48px; font-size:18px; font-weight:600; font-variant-numeric:tabular-nums; }
+#publish-group-account .publish-haff-control .publish-input-with-unit > span { font-size:15px; font-weight:600; }
+.publish-haff-meta { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 12px; }
+.publish-haff-meta .publish-inline-hint { margin:0; }
+.publish-haff-meta .publish-quantity-conversion { margin:0; color:var(--color-text-primary); font-size:13px; font-variant-numeric:tabular-nums; }
+@media(min-width:1100px){
+  #publish-group-account .publish-account-haff { grid-template-columns:132px minmax(0,1fr); align-items:start; gap:22px; }
+  #publish-group-account .publish-account-haff > .publish-account-label { padding-top:11px; }
+}
+@media(min-width:1280px){
+  .publish-outline { position:sticky; top:var(--publish-header-offset,108px); z-index:20; width:calc(100% - 330px); box-sizing:border-box; padding:8px 10px; border:1px solid var(--color-border-subtle); border-radius:12px; background:var(--color-bg-surface); }
+  [data-publish-group] { scroll-margin-top:calc(var(--publish-header-offset,132px) + 76px); }
+}
+@media(min-width:601px) and (max-width:1099px){
+  #publish-group-assets .supply-resource-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+}
+@media(max-width:600px){
+  #publish-group-assets .supply-resource-grid { gap:18px; }
+  #publish-group-assets .supply-resource-card { grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:6px 14px; }
+  #publish-group-assets .supply-resource-card-head { grid-column:1 / -1; }
+  #publish-group-assets .publish-resource-input { grid-column:1 / -1; order:2; }
+  #publish-group-assets .publish-owner-rate { grid-column:1; order:3; display:grid; grid-template-columns:auto auto 1fr; align-items:center; gap:2px 4px; align-content:start; }
+  #publish-group-assets .publish-owner-rate > span { grid-column:1; grid-row:1; }
+  #publish-group-assets .publish-owner-rate > strong { grid-column:1 / -1; grid-row:2; margin-left:0; font-size:13px; }
+  #publish-group-assets .publish-owner-rate > .publish-field-help { grid-column:2; grid-row:1; width:24px; height:24px; flex-basis:24px; margin:0; }
+  #publish-group-assets .publish-resource-subtotal { grid-column:2; order:3; display:grid; gap:2px; justify-items:end; text-align:right; }
+  #publish-group-assets .publish-resource-subtotal output { font-size:13px; }
+  #publish-group-assets .supply-resource-card > .publish-resource-state,
+  #publish-group-assets .supply-resource-card > .supply-field-error,
+  #publish-group-assets .supply-resource-card > .button { grid-column:1 / -1; order:4; }
+}
+
+
+/* ==========================================================================
+   PUBLISH-02A: 控件统一、焦点级联收敛与无障碍强化
+   ========================================================================== */
+
+/* 1. 普通输入与选择触发器：单层明确焦点，消除 outline + 3px 光晕 + border 三重叠加 */
+.functional-shell--editor .form-input,
+.functional-shell--editor .form-select-trigger {
+  min-height: 44px;
+  height: 44px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border-default);
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
+  font-size: 14px;
+  line-height: 22px;
+  box-sizing: border-box;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.functional-shell--editor .form-input:hover:not(:disabled):not(:focus),
+.functional-shell--editor .form-select-trigger:hover:not(:disabled):not(:focus) {
+  border-color: var(--color-text-secondary);
+}
+
+/* 键盘焦点：保留一层单层约 2px 的清晰轮廓，消除 3px 模糊光晕叠加 */
+.functional-shell--editor .form-input:focus-visible,
+.functional-shell--editor .form-select-trigger:focus-visible {
+  border-color: var(--color-accent-brand);
+  box-shadow: none !important;
+  outline: 2px solid var(--color-accent-brand);
+  outline-offset: 2px;
+}
+
+/* 鼠标点击编辑态：克制高亮细边框，无额外 2px 轮廓或扩散光晕 */
+.functional-shell--editor .form-input:focus:not(:focus-visible),
+.functional-shell--editor .form-select-trigger:focus:not(:focus-visible) {
+  border-color: var(--color-accent-brand);
+  box-shadow: none !important;
+  outline: none;
+}
+
+/* 错误与无效状态 */
+.functional-shell--editor .form-input[aria-invalid="true"],
+.functional-shell--editor .form-select-trigger[aria-invalid="true"] {
+  border-color: var(--color-status-danger, #c73e37);
+}
+
+.functional-shell--editor .form-input[aria-invalid="true"]:focus-visible,
+.functional-shell--editor .form-select-trigger[aria-invalid="true"]:focus-visible {
+  border-color: var(--color-status-danger, #c73e37);
+  box-shadow: none !important;
+  outline: 2px solid var(--color-status-danger, #c73e37);
+  outline-offset: 2px;
+}
+
+.functional-shell--editor .form-input[aria-invalid="true"]:focus:not(:focus-visible),
+.functional-shell--editor .form-select-trigger[aria-invalid="true"]:focus:not(:focus-visible) {
+  border-color: var(--color-status-danger, #c73e37);
+  box-shadow: none !important;
+  outline: none;
+}
+
+/* 禁用状态 */
+.functional-shell--editor .form-input:disabled,
+.functional-shell--editor .form-select-trigger:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  background: var(--color-bg-elevated);
+  border-color: var(--color-border-subtle);
+  color: var(--color-text-secondary);
+}
+
+/* 2. 单选项与分段单选：区分鼠标已选与键盘焦点，去除鼠标点击时的粗外框 */
+.functional-shell--editor .form-radio-choice {
+  border: 1px solid var(--color-border-default);
+  border-radius: 8px;
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
+  min-height: 44px;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.functional-shell--editor .form-radio-choice:hover:not(:has(:disabled)) {
+  border-color: var(--color-text-secondary);
+}
+
+/* 鼠标选中态：薄边界 + 轻底色 + 标记，消除 :focus-within 触发的粗 outline */
+.functional-shell--editor .form-radio-choice:focus-within {
+  outline: none !important;
+}
+
+.functional-shell--editor .form-radio-choice.is-selected {
+  border-color: var(--color-accent-brand);
+  background: color-mix(in srgb, var(--color-accent-brand) 12%, var(--color-bg-surface));
+  font-weight: 600 !important;
+}
+
+/* 键盘焦点态：仅在键盘导航 (:focus-visible) 时呈现清晰单层 2px 轮廓 */
+.functional-shell--editor .form-radio-choice:has(:focus-visible),
+.functional-shell--editor .form-radio-control:focus-visible {
+  outline: 2px solid var(--color-accent-brand) !important;
+  outline-offset: 2px;
+  z-index: 2;
+}
+
+/* 禁用与错误单选 */
+.functional-shell--editor .form-radio-choice:has([data-disabled]) {
+  opacity: 0.5;
+  cursor: not-allowed;
+  border-color: var(--color-border-subtle);
+}
+
+.functional-shell--editor .form-radio-group[aria-invalid="true"] {
+  border-radius: 8px;
+}
+.functional-shell--editor .form-radio-group[aria-invalid="true"] .form-radio-choice {
+  border-color: var(--color-status-danger, #c73e37);
+}
+
+/* 3. 数字步进器：内层输入聚焦时只强调整体边界，消除内外双框；加减按钮键盘聚焦时精准高亮按钮自身 */
+.functional-shell--editor .form-integer-stepper {
+  border: 1px solid var(--color-border-default);
+  border-radius: 8px;
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
+  min-height: 44px;
+  height: 44px;
+  box-sizing: border-box;
+  overflow: hidden;
+  transition: border-color 0.15s ease;
+}
+
+.functional-shell--editor .form-integer-stepper:hover:not(:has(:disabled)) {
+  border-color: var(--color-text-secondary);
+}
+
+/* 清除父容器在普通 focus-within 时的粗 outline */
+.functional-shell--editor .form-integer-stepper:focus-within {
+  outline: none;
+}
+
+/* 清除内层 Input 内部 outline，避免在父容器内再画一层框 */
+.functional-shell--editor .form-integer-stepper > .form-input,
+.functional-shell--editor .form-integer-stepper > .form-input:focus,
+.functional-shell--editor .form-integer-stepper > .form-input:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+  border: 0 !important;
+  height: 100%;
+}
+
+/* 当内层文本框键盘聚焦时，仅在步进器整体外层画单层 2px 轮廓 */
+.functional-shell--editor .form-integer-stepper:has(> .form-input:focus-visible) {
+  border-color: var(--color-accent-brand);
+  outline: 2px solid var(--color-accent-brand);
+  outline-offset: 2px;
+}
+
+/* 当内层文本框鼠标聚焦时，仅高亮边框，不高亮粗轮廓 */
+.functional-shell--editor .form-integer-stepper:has(> .form-input:focus:not(:focus-visible)) {
+  border-color: var(--color-accent-brand);
+  outline: none;
+}
+
+/* 加减按钮的键盘焦点：清晰聚焦在具体按钮上，外层容器不画大框 */
+.functional-shell--editor .form-integer-stepper > button:focus-visible {
+  outline: 2px solid var(--color-accent-brand);
+  outline-offset: -2px;
+  border-radius: 6px;
+  background: var(--color-bg-elevated);
+  z-index: 2;
+}
+
+.functional-shell--editor .form-integer-stepper:has(> button:focus-visible) {
+  outline: none;
+  border-color: var(--color-border-default);
+}
+
+/* 步进器非法值与错误状态 */
+.functional-shell--editor .form-integer-stepper:has([aria-invalid="true"]),
+.functional-shell--editor .form-integer-stepper.is-invalid,
+.functional-shell--editor .form-integer-stepper[data-invalid="true"] {
+  border-color: var(--color-status-danger, #c73e37);
+}
+
+.functional-shell--editor .form-integer-stepper:has(.form-input[aria-invalid="true"]:focus-visible) {
+  outline-color: var(--color-status-danger, #c73e37);
+}
+
+/* 4. Portal 下拉弹层统一设计（Base UI Select.Popup / publish-select-popup） */
+.publish-select-popup {
+  width: var(--anchor-width);
+  min-width: 140px;
+  max-height: min(var(--available-height), 320px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 10px;
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.16);
+  z-index: 1000;
+}
+
+.publish-select-popup .form-select-option {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 9px 32px 9px 12px;
+  border-radius: 6px;
+  font-size: 14px;
+  line-height: 22px;
+  cursor: pointer;
+  outline: none;
+  color: var(--color-text-primary);
+  transition: background-color 0.12s ease;
+}
+
+.publish-select-popup .form-select-option[data-highlighted] {
+  background: var(--color-bg-elevated);
+}
+
+.publish-select-popup .form-select-option[data-selected] {
+  background: color-mix(in srgb, var(--color-accent-brand) 14%, var(--color-bg-surface));
+  font-weight: 600;
+}
+
+.publish-select-popup .form-select-option[data-disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.publish-select-popup .form-select-check {
+  position: absolute;
+  right: 10px;
+  color: var(--color-accent-brand);
+}
+
+html[data-theme="dark"] .publish-select-popup,
+.dark .publish-select-popup {
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
+  border-color: var(--color-border-subtle);
+}
+
+/* 5. 段位成对选择器与字段排齐 */
+.publish-grading-group {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+}
+.publish-grading-group > .form-select-trigger {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.publish-grading-group > input {
+  display: none;
+}
+
+/* 6. 说明文字与错误信息高对比度保障 */
+.functional-shell--editor .supply-field-error {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--color-status-danger, #ef4444);
+  font-size: 13px;
+  line-height: 1.5;
+  font-weight: 500;
+  margin-top: 4px;
+}
+html[data-theme="dark"] .functional-shell--editor .supply-field-error,
+.dark .functional-shell--editor .supply-field-error {
+  color: #f87171;
+}
+
+/* 7. 安全箱与单选分段在平板及移动端的响应式自适应 */
+@media (min-width: 601px) and (max-width: 1099px) {
+  #publish-group-account .publish-safe-box-field .form-radio-group--segmented {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+  #publish-group-account .publish-safe-box-field .form-radio-group--segmented .form-radio-choice {
+    margin-left: 0;
+    border-radius: 8px !important;
+  }
+}
+
+@media (max-width: 600px) {
+  .publish-grading-group {
+    flex-direction: column;
+    gap: 8px;
+  }
+  .functional-shell--editor .form-input,
+  .functional-shell--editor .form-select-trigger {
+    font-size: 16px;
+  }
+  .publish-select-popup .form-select-option {
+    font-size: 16px;
+    min-height: 44px;
+  }
+  .functional-shell .supply-deposit-input-group {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+/* ==========================================================================
+   PUBLISH-02: 布局收敛与排版深度优化
+   ========================================================================== */
+
+/* 1. 账号规格与战绩（等级、段位、KD 并排紧凑网格） */
+.publish-performance-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr) minmax(0, 0.75fr);
+  gap: 16px;
+  align-items: start;
+  width: 100%;
+}
+.publish-account-integer-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.publish-grading-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.publish-kd-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.publish-kd-field input {
+  max-width: none;
+  width: 100%;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 两项申报与地区/时间成对排列时，选项填满各自半栏，避免 4 列网格留下空档。 */
+#publish-group-account .publish-safety-row .publish-choice-field .form-radio-group--segmented {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.publish-service-row .publish-region-field {
+  grid-column: auto;
+}
+.publish-service-row .publish-region-trigger {
+  width: 100%;
+}
+
+/* 2. 角色体能矩阵（体力、负重、潜水 3 列并排，高度收敛至 32px，隐藏数字选项内多余 check 图标） */
+.publish-vitality-matrix {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
+  width: 100%;
+}
+.publish-compact-level-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.publish-compact-level-field > legend {
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--color-text-secondary);
+  margin-bottom: 2px;
+}
+#publish-group-account .publish-compact-level-field .form-radio-group--segmented .form-radio-choice {
+  min-height: 32px;
+  height: 32px;
+  padding: 4px 6px;
+  font-size: 13px;
+  justify-content: center;
+  text-align: center;
+}
+#publish-group-account .publish-compact-level-field .form-segment-check {
+  display: none;
+}
+
+/* 3. 安全箱选项尺寸收敛至 36px，微调内边距与字号 */
+#publish-group-account .publish-safe-box-field .form-radio-group--segmented .form-radio-choice {
+  min-height: 36px;
+  height: 36px;
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
+/* 4. 上号方式 5 项在桌面端排成一行，高度收敛至 38px */
+@media (min-width: 900px) {
+  #publish-group-account .publish-login-field .form-radio-group {
+    grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
+    gap: 8px !important;
+  }
+  #publish-group-account .publish-login-field .form-radio-choice {
+    min-height: 38px !important;
+    padding: 6px 8px !important;
+    font-size: 13px !important;
+  }
+  #publish-group-account .publish-login-field .publish-login-platform-icon {
+    width: 16px;
+    height: 16px;
+  }
+}
+
+/* 5. 出租条件：哈夫币余额紧凑输入框与单位内嵌 */
+#publish-group-terms .publish-term-haff-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  margin-top: 14px;
+}
+#publish-group-terms .publish-term-haff-row .publish-term-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 550;
+  color: var(--color-text-primary);
+}
+#publish-group-terms .publish-haff-balance-control {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 440px;
+}
+#publish-group-terms .publish-haff-input-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 100%;
+  max-width: 220px;
+}
+#publish-group-terms .publish-haff-input-wrap .form-input {
+  width: 100%;
+  padding-right: 32px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  font-size: 16px;
+  height: 40px;
+  border-radius: 8px;
+}
+#publish-group-terms .publish-haff-unit {
+  position: absolute;
+  right: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  pointer-events: none;
+}
+#publish-group-terms .publish-haff-balance-control .publish-inline-hint {
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+#publish-group-terms .publish-haff-balance-control .publish-quantity-conversion {
+  color: var(--color-accent-brand);
+  font-size: 13px;
+  font-weight: 550;
+  line-height: 1.4;
+}
+
+/* 6. 响应式降级（<= 800px） */
+@media (max-width: 800px) {
+  .publish-performance-row {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+  .publish-kd-field input {
+    max-width: 100%;
+  }
+  .publish-vitality-matrix {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+}
+
+/* 7. 顶部指引与须知入口统一工具条 */
+.publish-header-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 0 20px;
+  padding: 12px 18px;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 12px;
+}
+.publish-header-bar .publish-form-guidance {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.publish-header-bar .publish-form-guidance svg {
+  flex: none;
+  color: var(--color-accent-brand);
+}
+.publish-header-bar .publish-header-notice-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--color-text-primary);
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border-default);
+  background: var(--color-bg-canvas);
+  cursor: pointer;
+  transition: all .15s ease;
+}
+.publish-header-bar .publish-header-notice-btn:hover {
+  background: var(--color-bg-elevated);
+  border-color: var(--color-accent-brand);
+}
+.publish-header-bar .publish-header-notice-btn:focus-visible {
+  outline: 2px solid var(--color-accent-brand);
+  outline-offset: 2px;
+}
+@media (max-width: 600px) {
+  .publish-header-bar {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px 14px;
+  }
+  .publish-header-bar .publish-header-notice-btn {
+    align-self: flex-end;
+  }
+}
+
+/* 8. 账号资料留白紧凑化 */
+#publish-group-account .publish-specs-grid {
+  gap: 16px 20px;
+}
+#publish-group-account .publish-subgroup + .publish-subgroup {
+  padding-top: 18px;
+  margin-top: 6px;
+  border-top: 1px solid var(--color-border-subtle);
+}
+#publish-group-account .publish-subgroup-title {
+  margin-bottom: 12px;
+}
+
+/* 9. 物品资源卡片与垂直基线排齐 */
+#publish-group-assets .supply-resource-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+#publish-group-assets .supply-resource-card {
+  display: flex !important;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px 16px !important;
+  min-width: 0;
+  border: 1px solid var(--color-border-subtle) !important;
+  border-radius: 12px !important;
+  background: var(--color-bg-canvas) !important;
+  transition: border-color .15s ease, background-color .15s ease;
+}
+#publish-group-assets .supply-resource-card:hover {
+  border-color: var(--color-border-default) !important;
+  background: color-mix(in srgb, var(--color-bg-surface) 60%, var(--color-bg-canvas)) !important;
+}
+#publish-group-assets .supply-resource-card:focus-within {
+  border-color: var(--color-accent-brand) !important;
+}
+#publish-group-assets .supply-resource-card-head {
+  display: flex !important;
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  width: 100%;
+}
+#publish-group-assets .supply-resource-art {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-subtle);
+  flex: none;
+  overflow: hidden;
+}
+#publish-group-assets .supply-resource-art svg,
+#publish-group-assets .supply-resource-art img {
+  width: 32px;
+  height: 32px;
+  object-fit: contain;
+}
+#publish-group-assets .supply-resource-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+#publish-group-assets .supply-resource-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+#publish-group-assets .publish-owner-rate {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+#publish-group-assets .publish-owner-rate strong {
+  color: var(--color-accent-brand);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+#publish-group-assets .supply-resource-required {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-accent-brand);
+  padding: 2px 6px;
+  background: color-mix(in srgb, var(--color-accent-brand) 12%, transparent);
+  border-radius: 4px;
+  flex: none;
+}
+#publish-group-assets .publish-resource-spec-bar {
+  min-height: 20px;
+  display: flex;
+  align-items: center;
+  margin-bottom: 6px;
+}
+#publish-group-assets .publish-ammo-unit,
+#publish-group-assets .publish-resource-durability {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--color-text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+#publish-group-assets .publish-resource-subtotal {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 10px;
+  margin-top: 4px;
+  border-top: 1px dashed var(--color-border-subtle);
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+#publish-group-assets .publish-resource-subtotal output {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  font-variant-numeric: tabular-nums;
+}
+@media (max-width: 960px) {
+  #publish-group-assets .supply-resource-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 600px) {
+  #publish-group-assets .supply-resource-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* 10. 皮肤紧凑网格与品质 Tag 纯净卡片 */
+.functional-shell--editor .skin-choices-grid {
+  gap: 10px !important;
+  max-height: 480px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  align-items: start;
+}
+/* 干员外观：竖版 3:4，网格自适应 132px 起 */
+.functional-shell--editor .skin-choices-grid[data-orientation="vertical"],
+.functional-shell--editor .skin-choices-grid:not([data-orientation="horizontal"]) {
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)) !important;
+}
+/* 枪械与近战外观：横版 16:9，网格自适应 180px 起，保证武器尺寸完整适配 */
+.functional-shell--editor .skin-choices-grid[data-orientation="horizontal"] {
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)) !important;
+}
+
+.functional-shell--editor .skin-card {
+  position: relative;
+  display: flex !important;
+  flex-direction: column;
+  padding: 6px !important;
+  border-radius: 10px !important;
+  background: var(--color-bg-canvas) !important;
+  border: 1.5px solid var(--color-border-subtle) !important;
+  transition: border-color .15s ease, background-color .15s ease, transform .15s ease;
+  cursor: pointer;
+  min-height: 0 !important;
+  user-select: none;
+}
+.functional-shell--editor .skin-card:hover {
+  border-color: var(--color-border-default) !important;
+  background: var(--color-bg-surface) !important;
+  transform: translateY(-1px);
+}
+.functional-shell--editor .skin-card.is-selected {
+  border-color: var(--color-accent-brand) !important;
+  background: color-mix(in srgb, var(--color-accent-brand) 6%, var(--color-bg-canvas)) !important;
+}
+.functional-shell--editor .skin-card-choice {
+  position: relative;
+  display: flex !important;
+  flex-direction: column;
+  gap: 6px;
+  cursor: pointer;
+  width: 100%;
+}
+
+/* 干员皮肤：竖版 3:4，人物立绘完整覆盖 */
+.functional-shell--editor .skin-card-thumb-wrap--vertical,
+.functional-shell--editor .skin-card[data-orientation="vertical"] .skin-card-thumb-wrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--color-bg-surface);
+}
+.functional-shell--editor .skin-card-thumb-wrap--vertical .skin-card-media,
+.functional-shell--editor .skin-card-thumb-wrap--vertical img {
+  width: 100%;
+  height: 100%;
+  aspect-ratio: auto !important;
+  object-fit: cover !important;
+}
+
+/* 枪械与近战武器：横版 16:9，武器完整显示不截断、居中无多余留黑 */
+.functional-shell--editor .skin-card-thumb-wrap--horizontal,
+.functional-shell--editor .skin-card[data-orientation="horizontal"] .skin-card-thumb-wrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 6px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--color-bg-elevated) 80%, var(--color-bg-surface));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.functional-shell--editor .skin-card-thumb-wrap--horizontal .skin-card-media,
+.functional-shell--editor .skin-card-thumb-wrap--horizontal img {
+  width: 100%;
+  height: 100%;
+  aspect-ratio: auto !important;
+  object-fit: contain !important;
+  padding: 4px;
+}
+
+/* 品质 Tag：仅在有品质字段时显示，无品质时不留空位 */
+.functional-shell--editor .skin-card-tag {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  backdrop-filter: blur(4px);
+  z-index: 2;
+  pointer-events: none;
+  line-height: 1.3;
+}
+.functional-shell--editor .skin-card-check {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1.5px solid rgba(255, 255, 255, 0.45);
+  display: grid;
+  place-items: center;
+  color: transparent;
+  z-index: 2;
+  transition: all .15s ease;
+  pointer-events: none;
+}
+.functional-shell--editor .skin-card.is-selected .skin-card-check {
+  background: var(--color-accent-brand);
+  border-color: var(--color-accent-brand);
+  color: #000;
+  font-weight: 700;
+}
+.functional-shell--editor .skin-card-choice input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+  width: 1px;
+  height: 1px;
+}
+.functional-shell--editor .skin-card-copy {
+  padding: 2px 2px 0;
+  width: 100%;
+}
+.functional-shell--editor .skin-card-name {
+  display: block;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.4;
+}
+
+/* 放大预览按钮完全隐去，卡片整体即选按目标 */
+.functional-shell--editor .skin-card-preview {
+  display: none !important;
+}
+
+.functional-shell--editor .skin-load-more-wrap {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 14px 0 8px;
+  width: 100%;
+}
+
+/* ==========================================================================
+   PUBLISH-03: 体验与视觉深度精细化（上号须知、账号资料流、出租条件去噪、收敛展开）
+   ========================================================================== */
+
+/* 1. 上号须知弹窗卡片化组织 */
+.publish-reading-dialog {
+  max-width: 620px !important;
+  width: 92vw !important;
+}
+.publish-reading-cards {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  margin-top: 14px;
+}
+.publish-reading-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--color-border-subtle);
+  transition: border-color 0.15s ease;
+}
+.publish-reading-card.is-highlight {
+  background: color-mix(in srgb, var(--color-accent-brand) 7%, var(--color-bg-surface));
+  border-color: color-mix(in srgb, var(--color-accent-brand) 28%, var(--color-border-subtle));
+}
+.publish-reading-card-icon {
+  flex: none;
+  margin-top: 2px;
+  color: var(--color-accent-brand);
+}
+.publish-reading-card-text {
+  flex: 1;
+  min-width: 0;
+}
+.publish-reading-card-text h3 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin: 0 0 4px;
+}
+.publish-reading-card-text p {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--color-text-secondary);
+  margin: 0;
+}
+.publish-reading-tip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0 0;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+.publish-reading-tip svg {
+  flex: none;
+  color: var(--color-accent-brand);
+}
+
+/* 2. 账号资料去层级与紧凑排版 */
+.publish-account-flow {
+  display: grid;
+  gap: 18px;
+}
+#publish-group-account .form-radio-group--segmented .form-radio-choice {
+  min-height: 36px !important;
+  padding: 6px 14px !important;
+  font-size: 14px !important;
+  line-height: 20px !important;
+}
+.publish-service-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+.publish-safety-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+/* 3. 出租条件去噪与微提示 */
+.publish-haff-hint-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  flex-wrap: wrap;
+}
+.publish-haff-conversion {
+  color: var(--color-accent-brand);
+  font-variant-numeric: tabular-nums;
+}
+.publish-ratio-explainer,
+.publish-deposit-guidance {
+  background: transparent !important;
+  border: 0 !important;
+  padding: 6px 0 0 !important;
+  color: var(--color-text-secondary) !important;
+  font-size: 12px !important;
+  line-height: 1.5 !important;
+}
+.publish-ratio-explainer > svg,
+.publish-deposit-guidance > svg {
+  color: var(--color-text-tertiary) !important;
+  margin-top: 2px !important;
+  width: 15px !important;
+  height: 15px !important;
+}
+.publish-ratio-explainer strong {
+  display: inline !important;
+  color: inherit !important;
+  font-weight: 500 !important;
+}
+
+/* 4. 规则展开收敛与防页面挤压卡片 */
+.publish-rule-disclosure,
+.publish-policy-disclosure {
+  margin-top: 14px !important;
+  border: 1px solid var(--color-border-subtle) !important;
+  border-radius: 8px !important;
+  background: var(--color-bg-canvas) !important;
+  overflow: hidden !important;
+  transition: border-color 0.2s ease;
+}
+.publish-rule-disclosure:hover,
+.publish-policy-disclosure:hover {
+  border-color: var(--color-border-default) !important;
+}
+.publish-rule-disclosure > summary,
+.publish-policy-disclosure > summary {
+  padding: 8px 12px !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  color: var(--color-text-secondary) !important;
+  cursor: pointer !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  user-select: none !important;
+  list-style: none !important;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.publish-rule-disclosure > summary::-webkit-details-marker,
+.publish-policy-disclosure > summary::-webkit-details-marker {
+  display: none !important;
+}
+.publish-rule-disclosure[open] > summary,
+.publish-policy-disclosure[open] > summary {
+  border-bottom: 1px solid var(--color-border-subtle);
+  color: var(--color-text-primary) !important;
+  background: rgba(255, 255, 255, 0.02);
+}
+.publish-disclosure-panel {
+  padding: 12px 14px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+  max-height: 240px;
+  overflow-y: auto;
+}
+.publish-payout-scenes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.publish-payout-scene-card {
+  padding: 10px 12px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.publish-payout-scene-card strong {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin-bottom: 4px;
+}
+.publish-payout-scene-card p {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+}
+.publish-payout-subnote {
+  margin: 4px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--color-text-tertiary);
+}
+
+/* 5. 移动端与折叠屏适配 (390px) */
+@media (max-width: 600px) {
+  .publish-service-row,
+  .publish-safety-row {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  .publish-payout-scenes {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+  .publish-reading-dialog {
+    width: 95vw !important;
+    max-height: 85vh !important;
+  }
+  .publish-reading-cards {
+    gap: 8px;
+  }
+}
+
+/* PUBLISH-04: payout rules fold inside the payout control; plain scene rows, no nested cards. */
+#publish-group-terms .publish-policy-disclosure { margin:0; border-top:1px solid var(--color-border-subtle); padding-top:10px; }
+#publish-group-terms .publish-policy-disclosure summary { padding:4px 0; color:var(--color-text-secondary); font-size:12px; cursor:pointer; }
+#publish-group-terms .publish-policy-disclosure summary span { font-weight:500; }
+#publish-group-terms .publish-payout-scene-card { padding:0; border:0; border-radius:0; background:none; }
+@media(max-width:600px){
+  #publish-group-terms .publish-payout-scenes { grid-template-columns:1fr; }
+}
+
+/* PUBLISH-04: terms disclosures are plain folds, not nested cards. */
+#publish-group-terms .publish-rule-disclosure,
+#publish-group-terms .publish-policy-disclosure { border:0 !important; border-top:1px solid var(--color-border-subtle) !important; border-radius:0 !important; background:none !important; overflow:visible !important; margin:0 !important; padding:10px 0 0 !important; }
+#publish-group-terms .publish-rule-disclosure > summary,
+#publish-group-terms .publish-policy-disclosure > summary { padding:4px 0 !important; background:none !important; border-bottom:0 !important; color:var(--color-text-secondary) !important; }
+#publish-group-terms .publish-rule-disclosure[open] > summary,
+#publish-group-terms .publish-policy-disclosure[open] > summary { background:none !important; border-bottom:0 !important; color:var(--color-text-primary) !important; }
+#publish-group-terms .publish-rule-disclosure .publish-disclosure-panel,
+#publish-group-terms .publish-policy-disclosure .publish-disclosure-panel { padding:8px 0 0 !important; max-height:none !important; overflow:visible !important; }
+#publish-group-terms .publish-rule-disclosure > summary::after,
+#publish-group-terms .publish-policy-disclosure > summary::after { content:"›"; margin-left:auto; color:var(--color-text-secondary); font-size:14px; line-height:1; transition:transform .15s ease; }
+#publish-group-terms .publish-rule-disclosure[open] > summary::after,
+#publish-group-terms .publish-policy-disclosure[open] > summary::after { transform:rotate(90deg); }
+
+/* Quote invalidation after an edit is a normal state, not an error. */
+.publish-quote-badge[data-status="stale"] { background:color-mix(in srgb, #b45309 12%, var(--color-bg-surface)); color:#8a5a00; }
+html[data-theme="dark"] .publish-quote-badge[data-status="stale"], .dark .publish-quote-badge[data-status="stale"] { background:color-mix(in srgb, #f3b64a 18%, var(--color-bg-surface)); color:#fbd38d; }
+.publish-requote-link { justify-self:start; padding:0; border:0; background:none; color:var(--color-text-primary); font:inherit; font-size:12px; font-weight:600; text-decoration:underline; text-decoration-color:var(--color-accent-brand); text-underline-offset:3px; cursor:pointer; }
+.publish-requote-link:disabled { opacity:.5; cursor:default; }
+
+/* PUBLISH-04: mobile price summary bar + expandable rail sheet. */
+.publish-rail-mobile-summary, .publish-rail-mobile-toggle, .publish-rail-backdrop { display:none; }
+@media(max-width:800px){
+  .functional-shell.functional-shell--editor .publish-rail { position:fixed; left:0; right:0; bottom:0; top:auto; z-index:80; max-height:84dvh; margin:0; padding:10px 16px calc(10px + env(safe-area-inset-bottom)); border-radius:16px 16px 0 0; border:1px solid var(--color-border-subtle); box-shadow:0 -12px 32px rgb(15 35 55 / 18%); background:var(--color-bg-surface); }
+  .functional-shell.functional-shell--editor .publish-rail[data-expanded="false"] { max-height:calc(86px + env(safe-area-inset-bottom)); overflow:hidden; }
+  .functional-shell.functional-shell--editor .publish-rail[data-expanded="false"] .publish-rail-scroll,
+  .functional-shell.functional-shell--editor .publish-rail[data-expanded="false"] .publish-rail-footer { display:none; }
+  .functional-shell.functional-shell--editor .publish-rail[data-expanded="true"] .publish-rail-scroll { max-height:calc(84dvh - 150px); overflow-y:auto; overscroll-behavior:contain; }
+  .publish-rail-head { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:2px 10px; align-items:center; }
+  .publish-rail-heading-group { min-width:0; gap:6px; }
+  .publish-rail-head h2 { font-size:13px; font-weight:600; color:var(--color-text-secondary); line-height:1.3; }
+  .publish-rail-head .publish-field-help { display:none; }
+  .publish-quote-badge { font-size:10px; padding:1px 6px; }
+  .publish-rail-mobile-summary { display:grid; grid-column:1; gap:1px; }
+  .publish-rail-mobile-summary span { color:var(--color-text-secondary); font-size:10.5px; }
+  .publish-rail-mobile-summary strong { color:var(--color-text-primary); font-size:19px; font-weight:700; line-height:1.15; font-variant-numeric:tabular-nums; }
+  .publish-rail-mobile-summary strong[data-pending="true"] { color:var(--color-text-secondary); font-size:15px; font-weight:500; }
+  .publish-rail-mobile-toggle { display:inline-flex; align-items:center; justify-content:center; gap:4px; grid-column:2; grid-row:1 / span 2; min-width:64px; min-height:44px; padding:6px 8px; border:1px solid var(--color-border-default); border-radius:10px; background:var(--color-bg-surface); color:var(--color-text-primary); font:inherit; font-size:12px; font-weight:600; cursor:pointer; }
+  .publish-rail-mobile-toggle svg { transition:transform .15s ease; }
+  .publish-rail[data-expanded="true"] .publish-rail-mobile-toggle svg { transform:rotate(180deg); }
+  .publish-rail-backdrop { display:block; position:fixed; inset:0; z-index:79; background:rgb(9 15 25 / 42%); }
+  body:has(.publish-rail[data-expanded="true"]) { overflow:hidden; }
+  body:has(.publish-page-layout) .functional-main { padding-bottom:0; }
+  body:has(.publish-page-layout) .site-footer { padding-bottom:calc(94px + env(safe-area-inset-bottom)); }
 }

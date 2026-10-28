@@ -219,10 +219,17 @@
   .site-header .site-publish, .site-header .site-login, .site-header .site-session { display:none; }
   .site-search input { font-size:16px; }
   .site-search-clear { width:44px; }
-  .site-footer { margin-top:32px; }
-  .site-footer-inner { padding-block:32px 24px; }
-  .site-footer-links { grid-template-columns:1fr; gap:24px; }
-  .site-footer .site-footer-links h2 { margin-bottom:8px; }
-  .site-footer-links ul { display:flex; flex-wrap:wrap; column-gap:24px; }
+  .site-footer { margin-top:16px; }
+  .site-footer-inner { padding-block:20px 16px; }
+  .site-footer-grid { grid-template-columns:1fr; gap:20px; }
+  .site-footer-brand p { margin-top:12px; font-size:13px; }
+  .site-footer-brand > span { display:none; }
+  .site-footer-links { grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px 20px; }
+  .site-footer .site-footer-links h2 { margin-bottom:6px; font-size:13px; }
+  .site-footer-links ul { display:grid; gap:0; }
+  .site-footer-links a { min-height:44px; font-size:13px; }
+  .site-footer-links > nav:last-child { grid-column:1 / -1; }
+  .site-footer-links > nav:last-child ul { display:flex; flex-wrap:wrap; column-gap:24px; }
+  .site-footer-bottom { margin-top:16px; padding-top:12px; font-size:11px; }
 }
 @media(prefers-reduced-motion:reduce) { .site-header-bar { transition:none; } }

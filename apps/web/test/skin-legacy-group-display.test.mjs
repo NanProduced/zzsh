@@ -15,18 +15,21 @@ const web = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(path.join(web, 'package.json'));
 const React = require('react');
 const { renderToStaticMarkup } = require('react-dom/server');
+const heroToast = await import('@heroui/react/toast');
 let previewObserver;
 
 function load(file, extra = {}) {
   const m = new Module(file); m.filename = file; m.paths = Module._nodeModulePaths(web);
   const Pass = (p) => React.createElement(React.Fragment, null, p.children), Empty = () => null;
   m.require = (n) => {
+    if (n === '@heroui/react/toast') return heroToast;
     if (Object.hasOwn(extra, n)) return extra[n];
     if (n.endsWith('.css')) return {};
     if (n === 'next/link') return ({ children, href, ...props }) => React.createElement('a', { href, ...props }, children);
     if (n === 'next/image') return { getImageProps: (p) => ({ props: p }) };
     if (n.endsWith('listing-view')) return listingView;
     if (n.endsWith('listing-filters')) return listingFilters;
+    if (n.endsWith('account-title')) return load(path.join(web, 'src/lib/account-title.ts'));
     if (n.endsWith('supply-games')) return { DELTA_GAME_CODE: 'df' };
     if (n.endsWith('skin-media-thumb')) {
       const media = load(path.join(web, 'src/components/supply/skin-media-thumb.tsx'));
@@ -202,7 +205,8 @@ test('SKIN-ASSETS-UI-9 account card list chip never renders retired category, us
 
   const agentHtml = renderCard(fixtures.verifiedAgent);
   assert.equal(agentHtml.includes(OLD), false);
-  assert.ok(agentHtml.includes('[干员外观]'), 'verified agent skin renders verified type label in list card chip');
+  assert.equal(agentHtml.includes('[干员外观]'), false, 'visible chip stays name-only per the skin tag rule');
+  assert.ok(agentHtml.includes('aria-label="露娜-黑·天际线 (干员外观)"'), 'verified agent skin exposes the verified type as its accessible label');
   for (const viewMode of ['list', 'grid']) {
     const skin = { ...fixtures.verifiedAgent, rarityName: '测试品质', mediaId: 'TEXT_ONLY_MEDIA' };
     const more = Array.from({ length: 5 }, (_, i) => ({ ...skin, id: `SKIN_${i}`, name: `其他外观${i}` }));

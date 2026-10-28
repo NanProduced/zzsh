@@ -110,7 +110,6 @@ export function AuthOverlayProvider({ children }: { children: ReactNode }) {
   const [inviteCode, setInviteCode] = useState<string>();
   const [sessionReadFailed, setSessionReadFailed] = useState(false);
   const [route, setRoute] = useState(() => typeof window === "undefined" ? pathname : currentPath());
-  const accountRoute = pathOnly(route) === "/account" || pathOnly(route).startsWith("/account/");
   const intentRef = useRef<AuthIntent | null>(null);
   const pendingRef = useRef<AuthIntent | null>(null);
   const generationRef = useRef(0);
@@ -315,9 +314,9 @@ export function AuthOverlayProvider({ children }: { children: ReactNode }) {
   return <AuthOverlayContext.Provider value={{ open: openAuth }}>
     <Suspense fallback={null}><AuthRouteObserver onChange={setRoute} /></Suspense>
     {children}
-    {/* AccountWorkspace owns the full unavailable page; do not duplicate its recovery notice. */}
-    {sessionReadFailed && !accountRoute ? <div className="auth-session-pending" role="alert">
-      <span>暂时无法打开该入口，请重试。</span>
+    {/* Protected pages own their recovery state; public-page entry failures stay next to navigation. */}
+    {sessionReadFailed && session.status === "error" && !protectedPath(route) ? <div className="auth-session-pending" role="alert">
+      <span>登录状态读取失败，暂时无法继续此操作。</span>
       <button type="button" className="button quiet" onClick={() => {
         setSessionReadFailed(false);
         session.revalidate();

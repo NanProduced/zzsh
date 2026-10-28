@@ -5,6 +5,10 @@ export const HOME_FAST_PAGE_LIMIT = 50;
 export const HOME_FAST_DISPLAY_LIMIT = 8;
 export const HOME_FAST_MAX_PAGES = 4;
 
+export function isHomeFastAccount(account: Pick<ListingCardData, "historicalReadOnly" | "rentalMode" | "canCreateOrder">): boolean {
+  return !account.historicalReadOnly && account.rentalMode === "fast" && account.canCreateOrder === true;
+}
+
 type PublicPage = {
   items: PublicListing[];
   nextCursor: string | null;
@@ -36,7 +40,7 @@ export async function collectFastAccounts(
       seenAccounts.add(account.id);
       if (account.historicalReadOnly) {
         if(historicalAccounts.length<displayLimit) historicalAccounts.push(account); else truncated=true;
-      } else if(account.rentalMode === "fast") {
+      } else if(listing.canCreateOrder === true && isHomeFastAccount(account)) {
         if(accounts.length<displayLimit) accounts.push(account); else truncated=true;
       }
     }

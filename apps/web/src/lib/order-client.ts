@@ -1,4 +1,4 @@
-import type { Money, UnitAmount, FullPayoutTerms, FullPayoutTermsAcceptance } from "./supply-types";
+import type { Money, UnitAmount, PublicQuote, FullPayoutTerms, FullPayoutTermsAcceptance, RentalMode } from "./supply-types";
 export type { FullPayoutTerms, FullPayoutTermsAcceptance } from "./supply-types";
 
 export type OrderParty = "renter" | "owner";
@@ -159,6 +159,7 @@ export type OrderLine = {
 };
 
 export type OrderQuote = {
+  rentalMode?: RentalMode;
   lines?: OrderLine[];
   unitAmountsInformational?: boolean;
   ownerTotal?: Money | null;
@@ -182,6 +183,28 @@ export type FulfillmentAssignment = {
   teamState?: string | null;
 };
 
+export type OrderListingFacts = {
+  source: "ORDER_VERSION" | "ACCOUNT_CURRENT";
+  versionId: string | null;
+  rentalMode: string | null;
+  attributeDisplay: { safeBox: string | null; grading: string | null; loginMethod: string | null };
+  resourceLines: Array<{ itemId: string; code: string; name: string | null; quantity: string | null; unit: string }>;
+  termSeconds: string | null;
+};
+export type OrderEntitlement = {
+  id: string;
+  name: string | null;
+  nameSource: "ORDER_VERSION" | "CURRENT_CATALOG" | "UNKNOWN";
+  expiresAt: string | null;
+  expiryKind: "PERMANENT" | "TIMED" | null;
+  fullTermGuaranteed: boolean | null;
+};
+export type OrderStage = {
+  code: "NONE" | "RENTING" | "INTAKE_PENDING" | "DECISION_PENDING" | "DECISION_WAITING" | "POSTED" | "UNKNOWN";
+  label: string | null;
+  viewerActionRequired: boolean;
+  settlementVersionNo: number | null;
+};
 export type Order = {
   source?: { origin: "NATIVE" | "LEGACY"; statusLabel?: string };
   readOnly?: boolean;
@@ -209,6 +232,12 @@ export type Order = {
   fulfillmentAssignment?: FulfillmentAssignment | null;
   quote?: OrderQuote | null;
   renterName?: string | null;
+  accountDisplayNo?: string | null;
+  listingFacts?: OrderListingFacts | null;
+  listingFactsUnknownReason?: "ORDER_VERSION_UNREADABLE" | "ACCOUNT_PUBLIC_VERSION_MISSING" | "UNREADABLE" | "ACCOUNT_UNLINKED" | null;
+  entitlements?: OrderEntitlement[] | null;
+  entitlementsUnknownReason?: "NOT_DISCLOSED" | "NOT_FROZEN" | "UNREADABLE" | null;
+  stage?: OrderStage | null;
 };
 
 export type LegacyOrder = {
@@ -225,6 +254,20 @@ export type LegacyOrder = {
 export type LegacyOrderPage = { items: LegacyOrder[]; page: number; pageSize: number; total: number };
 
 export type OrderPage = { items: Order[]; nextCursor: string | null; limit: number };
+
+export type RentalPricePreviewInput = { accountId: string; versionId: string; releaseId: string };
+/** Read-only price view. It is not a transaction confirmation or an order credential. */
+export type RentalPricePreview = {
+  schema: "rental-price-preview.v1";
+  binding: RentalPricePreviewInput & { listingHash: string };
+  asOfUtc: string;
+  refreshAfterUtc: string;
+  quote: PublicQuote & { tenantDeposit: Money; tenantPayableTotal: Money; baseRenterHaffRatioWanPerYuan: string | null };
+  baseTenantDeposit: Money;
+  customerTier?: "STANDARD" | "VIP" | "SVIP" | "DISCOUNT_USER";
+  membershipBenefits?: {schema:"membership-benefits-v1";effectiveTier:"STANDARD"|"SILVER"|"GOLD"|"PLATINUM"|"DIAMOND"|"BLACK_GOLD";policyTier:"STANDARD"|"SILVER"|"GOLD"|"PLATINUM"|"DIAMOND";priceSource:"GROWTH"|"FRIEND"|"PRESTIGE";depositSource:"GROWTH"|"FRIEND"|"PRESTIGE";policyVersion:string};
+  compensationDisclosure?: { selected: boolean; disclosureVersion: string; terms?: FullPayoutTerms };
+};
 
 export type PersonalRentalQuote = {
   quote: OrderQuote & { resourceTotal?: Money | null; tenantDeposit?: Money | null; tenantPayableTotal?: Money | null };
@@ -670,6 +713,8 @@ export const orderApi = {
     requestJson<{ order: Order }>(`/api/orders/${encodeURIComponent(orderId)}`, { signal }).then(unwrapOrder),
   personalRefunds: async (userId: string, orderId: string, signal?: AbortSignal) =>
     parsePersonalRefunds(await requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/refunds`, { signal, expectedUserId: userId }), userId, orderId),
+  previewRentalPrice: (input: RentalPricePreviewInput, signal?: AbortSignal) =>
+    requestJson<RentalPricePreview>(`/api/rental-price-preview?${new URLSearchParams({ accountId: input.accountId, versionId: input.versionId, releaseId: input.releaseId }).toString()}`, { signal }),
   confirmRental: (input: { accountId: string; versionId: string; releaseId: string; fullPayoutTermsAcceptance?: FullPayoutTermsAcceptance }, signal?: AbortSignal) =>
     requestWrite<PersonalRentalQuote>("/api/order-confirmations", { body: input, signal }),
   createOrder: (confirmationToken: string, key: string, fullPayoutTermsAcceptance?: FullPayoutTermsAcceptance, signal?: AbortSignal) =>

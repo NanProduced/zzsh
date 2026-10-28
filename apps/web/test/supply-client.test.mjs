@@ -113,21 +113,20 @@ test('publish reads use the current catalog and rule-release endpoints with canc
 // ══ t4（2026-10-14）F1-t：/me/accounts 的真实请求 URL 带 after（不是 cursor）；legacy cursor 仅在共同边界归一一次。 ══
 import { myAccountsQuery } from "../src/lib/supply-client.ts";
 
-test('my accounts requests carry after and never a cursor parameter', async () => {
+test('my accounts requests keep the signed cursor and legacy after distinct', async () => {
   const old = globalThis.fetch; const calls = [];
-  globalThis.fetch = async (url) => { calls.push(String(url)); return Response.json({ items: [], nextCursor: null }); };
+  globalThis.fetch = async (url) => { calls.push(String(url)); return Response.json({ items: [], nextCursor: null, nextPageCursor: null }); };
   try {
     await supplyApi.myAccounts(new URLSearchParams({ limit: '50' }));
     await supplyApi.myAccounts(new URLSearchParams({ limit: '50', after: 'acc_9' }));
-    await supplyApi.myAccounts(new URLSearchParams({ limit: '50', cursor: 'legacy_9' }));
+    await supplyApi.myAccounts(new URLSearchParams({ limit: '50', cursor: 'signed_9' }));
   } finally { globalThis.fetch = old; }
-  assert.deepEqual(calls, ['/api/supply/me/accounts?limit=50', '/api/supply/me/accounts?limit=50&after=acc_9', '/api/supply/me/accounts?limit=50&after=legacy_9']);
-  for (const url of calls) assert.equal(new URL(url, 'http://local').searchParams.has('cursor'), false, url);
+  assert.deepEqual(calls, ['/api/supply/me/accounts?limit=50', '/api/supply/me/accounts?limit=50&after=acc_9', '/api/supply/me/accounts?limit=50&cursor=signed_9']);
 });
 
-test('myAccountsQuery normalizes the legacy cursor name exactly once and never overwrites after', () => {
+test('myAccountsQuery preserves the signed cursor and the legacy after cursor', () => {
   assert.equal(String(myAccountsQuery(new URLSearchParams({ limit: '50' }))), 'limit=50');
-  assert.equal(String(myAccountsQuery(new URLSearchParams({ cursor: 'a1' }))), 'after=a1');
-  assert.equal(myAccountsQuery(new URLSearchParams({ cursor: 'a1' })).has('cursor'), false);
-  assert.equal(String(myAccountsQuery(new URLSearchParams({ after: 'a2', cursor: 'ignored' }))), 'after=a2', 'after 已存在时不被 legacy cursor 覆盖');
+  assert.equal(String(myAccountsQuery(new URLSearchParams({ cursor: 'signed-1' }))), 'cursor=signed-1');
+  assert.equal(String(myAccountsQuery(new URLSearchParams({ after: 'a2' }))), 'after=a2');
+  assert.equal(String(myAccountsQuery(new URLSearchParams({ cursor: 'signed-1', rentalState: 'RENTED' }))), 'cursor=signed-1&rentalState=RENTED');
 });

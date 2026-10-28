@@ -1135,6 +1135,16 @@ export async function quoteListing(
   const attrs = d.attributes;
   const vitality = attrs.vit_level ?? attrs.vitLevel;
   const bear = attrs.bear_level ?? attrs.bearLevel;
+  const depositDeclaration = validateOwnerDepositDeclaration(attrs.owner_deposit_declaration);
+  const fundingPolicy = depositDeclaration ? await readFundingPolicyForRelease(client, release.id) : null;
+  // Pricing keeps deposits null unless both sides are configured; the owner's
+  // sealed declaration is what the renter sees as the base deposit.
+  const deposits = fundingPolicy && depositDeclaration
+    ? {
+        tenantDepositCents: depositDeclaration.amountCents,
+        publisherBailRequirementCents: fundingPolicy.guaranteeRequirement.mode === "NOT_REQUIRED" ? "0" : fundingPolicy.guaranteeRequirement.requiredCents,
+      }
+    : undefined;
   const result = computeDeltaQuote({
     customerTier: "STANDARD",
     priceVersionId: release.price_version_id,
@@ -1172,6 +1182,7 @@ export async function quoteListing(
       expiryKind: e.expiryKind,
       ...(e.expiresAt ? { expiresAt: e.expiresAt } : {}),
     })),
+    ...(deposits ? { deposits } : {}),
   } as QuoteInput);
   if (!result.quotable)
     throw invalid(

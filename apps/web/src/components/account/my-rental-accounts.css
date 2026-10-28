@@ -1,13 +1,15 @@
 /* 出租账号列表：状态优先连续行、单一主导航链、已加载记录筛选；详情增量（资料修改记录 / 保证金两时点）
    在文件末尾补少量规则，其余详情样式沿用现有 supply-* 规则。 */
 
+.mra-heading-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; flex: 0 0 auto; }
+.account-center-main .account-module-heading > .mra-heading-actions { flex: 0 0 auto; }
 .mra-toolbar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 10px 16px;
-  padding: 12px 0 14px;
-  border-bottom: 1px solid var(--color-border-subtle);
+  min-width: 0;
+  padding: 0 2px;
 }
 .mra-count {
   font-family: var(--font-sans);
@@ -16,33 +18,43 @@
   line-height: var(--type-label-leading);
   color: var(--color-text-primary);
 }
-.mra-chips {
+.mra-filter-rail {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  align-items: center;
+  gap: 4px;
+  flex: 1 1 360px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 5px;
+  overflow-x: auto;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 11px;
+  background: var(--color-bg-surface);
+  scrollbar-width: thin;
+  overscroll-behavior-x: contain;
 }
 .mra-chip {
-  min-height: 32px;
-  padding: 4px 13px;
-  border: 1px solid var(--color-border-default);
-  border-radius: 999px;
-  background: var(--color-bg-surface);
+  flex: 0 0 auto;
+  min-height: 38px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
   color: var(--color-text-secondary);
   font-family: var(--font-sans);
   font-size: var(--type-meta-size);
   line-height: var(--type-meta-leading);
+  white-space: nowrap;
   cursor: pointer;
 }
-.mra-chip:hover { color: var(--color-text-primary); border-color: var(--color-border-strong); }
+.mra-chip:hover { color: var(--color-text-primary); background: var(--color-bg-elevated); }
 /* t5 对比度修正：选中 chip 在深色底用金墨（原 --color-accent-brand-text 深墨对深底仅 1.41:1）；
    浅色底保留深墨（品牌金底纹上仍达 AA）。 */
 .mra-chip[aria-pressed="true"] {
-  border-color: var(--color-accent-brand);
-  background: var(--color-accent-brand-muted);
-  color: var(--color-accent-brand);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-primary);
   font-weight: 600;
 }
-html[data-theme="light"] .mra-chip[aria-pressed="true"], html:not(.dark) .mra-chip[aria-pressed="true"] { color: var(--color-accent-brand-text); }
 .mra-scope-hint {
   margin-left: auto;
   font-family: var(--font-sans);
@@ -58,12 +70,14 @@ html[data-theme="light"] .mra-chip[aria-pressed="true"], html:not(.dark) .mra-ch
 }
 .mra-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 160px 170px 96px;
+  grid-template-columns: minmax(0, 1fr) auto 118px;
   align-items: start;
   gap: 12px 16px;
   padding: 15px 0;
   border-bottom: 1px solid var(--color-border-subtle);
 }
+.mra-row:hover { background: var(--color-bg-card-hover); }
+.mra-row:focus-within { outline: 2px solid var(--color-accent-brand); outline-offset: -2px; }
 /* 行结构：div 行容器 ＋ 标题区唯一主导航链（标题＋副行整体可点、单一焦点）＋ 装饰「查看详情 ›」。 */
 .mra-row-main {
   display: block;
@@ -99,14 +113,8 @@ html[data-theme="light"] .mra-chip[aria-pressed="true"], html:not(.dark) .mra-ch
   align-items: center;
   min-width: 0;
 }
-/* 接单提示列：只承接服务端确定异常；正常行留空（不声称可接单）。 */
-.mra-row-avail {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-  min-width: 0;
-}
+/* 状态列承接资料状态与接单异常；正常行不保留空列。 */
+.mra-row-state { align-content: start; }
 .mra-badge {
   display: inline-flex;
   align-items: center;
@@ -149,14 +157,25 @@ html[data-theme="light"] .mra-badge[data-tone="info"], html:not(.dark) .mra-badg
   text-decoration: underline;
 }
 html[data-theme="light"] .mra-row-anchor, html:not(.dark) .mra-row-anchor { color: var(--color-accent-brand-text); }
-.mra-row-hint {
+.mra-row-action {
   justify-self: end;
-  color: var(--color-text-muted);
+  align-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 10px;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-elevated);
   font-family: var(--font-sans);
   font-size: var(--type-meta-size);
+  font-weight: 600;
   line-height: var(--type-meta-leading);
   white-space: nowrap;
 }
+.mra-row:hover .mra-row-action { color: var(--color-text-primary); border-color: var(--color-accent-brand); }
 /* 筛选后无匹配：不用插图，也不声称全量为空（S5）。 */
 .mra-empty {
   display: flex;
@@ -187,19 +206,23 @@ html[data-theme="light"] .mra-row-anchor, html:not(.dark) .mra-row-anchor { colo
   color: var(--color-text-muted);
 }
 
-/* 1440/1024：稳定数据列（标题 / 资料状态 / 接单提示），只收起装饰性「查看详情 ›」。 */
+/* 1440/1024：标题 / 资料状态 / 查看账号；正常行不留空列。 */
+@media (max-width: 1080px) { .mra-chip { min-height: 44px; } }
 @media (max-width: 1024px) {
-  .mra-row { grid-template-columns: minmax(0, 1fr) 150px 160px; }
-  .mra-row-hint { display: none; }
+  .mra-row { grid-template-columns: minmax(0, 1fr) auto 96px; }
+  .mra-row-action { min-height: 32px; padding: 0 10px; font-size: 11px; }
 }
-/* 390：两段式堆叠——标题区＋资料状态在第一段，接单提示另起一段；不缩放、不横向滚动。 */
+/* 390：标题独占一行，状态与动作在第二行；不缩放、不横向滚动。 */
 @media (max-width: 640px) {
   .mra-toolbar { gap: 8px 12px; }
+  .mra-filter-rail { order: 3; width: 100%; }
   .mra-scope-hint { margin-left: 0; width: 100%; }
-  .mra-row { grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; }
-  .mra-row-state { justify-self: end; }
-  .mra-row-avail { grid-column: 1 / -1; }
-  .mra-row-hint { display: none; }
+  .mra-row { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "main main" "state action"; gap: 8px 12px; }
+  .mra-row-main { grid-area: main; }
+  .mra-row-state { grid-area: state; justify-self: start; }
+  .mra-row-action { grid-area: action; justify-self: end; min-height: 44px; padding: 0 12px; }
+  .mra-heading-actions { width: 100%; justify-content: space-between; }
+  .mra-heading-actions .button { flex: 1 1 auto; }
 }
 
 /* ---- 详情增量 ---------------------------------------------------------- */
@@ -284,3 +307,4 @@ html[data-theme="light"] .mra-row-anchor, html:not(.dark) .mra-row-anchor { colo
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+.mra-row-order { color: var(--color-text-secondary); }

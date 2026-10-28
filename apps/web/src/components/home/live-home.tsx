@@ -35,8 +35,12 @@ function readActivity(payload: unknown): { stats: PlatformStatsData; deals: Publ
   });
   return { stats, deals };
 }
+export function fastEnabledFromOptions(options: unknown): boolean | null {
+  const enabled = (options as { rentalModes?: { fast?: { enabled?: unknown } } } | null | undefined)?.rentalModes?.fast?.enabled;
+  return typeof enabled === "boolean" ? enabled : null;
+}
 export function LiveHome() {
-  const [supply, setSupply] = useState<{ state: SupplyState; accounts: AccountCardData[]; historicalAccounts: AccountCardData[]; supplyMayHaveMore: boolean }>({ state: "loading", accounts: [], historicalAccounts: [], supplyMayHaveMore: false });
+  const [supply, setSupply] = useState<{ state: SupplyState; accounts: AccountCardData[]; historicalAccounts: AccountCardData[]; supplyMayHaveMore: boolean; fastEnabled: boolean | null }>({ state: "loading", accounts: [], historicalAccounts: [], supplyMayHaveMore: false, fastEnabled: null });
   const [activity, setActivity] = useState<{ stats: PlatformStatsData; deals: PublicDeal[] }>({ stats: EMPTY_STATS, deals: [] });
   useEffect(() => {
     const controller = new AbortController();
@@ -50,17 +54,21 @@ export function LiveHome() {
     return () => controller.abort();
   }, []);
   const load = useCallback(async () => {
-    setSupply({ state: "loading", accounts: [], historicalAccounts: [], supplyMayHaveMore: false });
+    setSupply({ state: "loading", accounts: [], historicalAccounts: [], supplyMayHaveMore: false, fastEnabled: null });
     try {
       const games = await supplyApi.games();
       const delta = selectDeltaGame(games.games);
       // The delta shelf never falls back to another game or to an unscoped listing query.
       if (!delta) {
-        setSupply({ state: "ready", accounts: [], historicalAccounts: [], supplyMayHaveMore: false });
+        setSupply({ state: "ready", accounts: [], historicalAccounts: [], supplyMayHaveMore: false, fastEnabled: null });
         return;
       }
       const metadata = await supplyApi.listingFilters(delta.id);
-      if(!metadata.available){ setSupply({state:"unavailable",accounts:[],historicalAccounts:[],supplyMayHaveMore:false}); return; }
+      if(!metadata.available){ setSupply({state:"unavailable",accounts:[],historicalAccounts:[],supplyMayHaveMore:false,fastEnabled:null}); return; }
+      // Listing pages do not carry the global fast switch. Read the public options so an
+      // unavailable/failed rule read is not presented as "no accounts".
+      let fastEnabled: boolean | null = null;
+      try { fastEnabled = fastEnabledFromOptions(await supplyApi.publishingOptions(delta.id)); } catch { /* Missing or failed options stay unknown. */ }
       const result = await collectFastAccounts(
         async (cursor) => {
           const query = listingQuery({game:delta.id,filters:{},q:null,sort:"latest",direction:"DESC",coreItemId:null,cursor,limit:HOME_FAST_PAGE_LIMIT,viewMode:"grid"},metadata);
@@ -70,13 +78,13 @@ export function LiveHome() {
         HOME_FAST_MAX_PAGES,
         HOME_FAST_DISPLAY_LIMIT,
       );
-      setSupply({ state: "ready", accounts: result.accounts, historicalAccounts: result.historicalAccounts, supplyMayHaveMore: result.hasMore });
+      setSupply({ state: "ready", accounts: result.accounts, historicalAccounts: result.historicalAccounts, supplyMayHaveMore: result.hasMore, fastEnabled });
     } catch {
-      setSupply({ state: "error", accounts: [], historicalAccounts: [], supplyMayHaveMore: false });
+      setSupply({ state: "error", accounts: [], historicalAccounts: [], supplyMayHaveMore: false, fastEnabled: null });
     }
   }, []);
   useEffect(() => {
     void load();
   }, [load]);
-  return <PortalHome accounts={supply.accounts} historicalAccounts={supply.historicalAccounts} supplyState={supply.state} supplyMayHaveMore={supply.supplyMayHaveMore} stats={activity.stats} deals={activity.deals} onRetrySupply={() => void load()} />;
+  return <PortalHome accounts={supply.accounts} historicalAccounts={supply.historicalAccounts} supplyState={supply.state} supplyMayHaveMore={supply.supplyMayHaveMore} fastEnabled={supply.fastEnabled} stats={activity.stats} deals={activity.deals} onRetrySupply={() => void load()} />;
 }

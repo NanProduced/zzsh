@@ -12,6 +12,7 @@ const typescript = requireFromTree("typescript");
 const React = requireFromTree("react");
 const { Window } = requireFromTree("happy-dom");
 const intents = requireFromTree(path.join(tree, "apps/web/src/lib/order-intents.ts"));
+const heroToast = await import("@heroui/react/toast");
 
 function compile(relativePath) {
   const source = fs.readFileSync(path.join(tree, relativePath), "utf8").replace("function ReadyDetail(", "export function ReadyDetail(");
@@ -25,6 +26,7 @@ function loadComponent(relativePath, session, extra) {
   module.filename = path.join(tree, "order-trade-component-probe.cjs");
   module.paths = Module._nodeModulePaths(tree);
   module.require = (name) => {
+    if (name === "@heroui/react/toast") return heroToast;
     if (name === "next/link") return function Link({ scroll: _scroll, ...props }) { return React.createElement("a", props); };
     if (name === "@/components/session/user-session-provider") return { useUserSession: () => session };
     if (name === "@/lib/order-client") return requireFromTree(path.join(tree, "apps/web/src/lib/order-client.ts"));
@@ -39,6 +41,9 @@ function loadComponent(relativePath, session, extra) {
     if (name === "./legacy-continuation-panel") return {LegacyContinuationPanel:()=>null};
     if (name === "@/components/ui/tooltip") return { Tooltip: props => React.createElement(React.Fragment, null, props.children), TooltipTrigger: props => React.createElement(React.Fragment, null, props.children), TooltipContent: () => null };
     if (extra && Object.hasOwn(extra, name)) return extra[name];
+    if (name === "@/lib/account-title") return loadComponent("apps/web/src/lib/account-title.ts", session);
+    if (name === "@/lib/listing-filters" || name === "./listing-filters") return loadComponent("apps/web/src/lib/listing-filters.ts", session);
+    if (name === "@/lib/supply-games" || name === "./supply-games.ts") return loadComponent("apps/web/src/lib/supply-games.ts", session);
     if (name.endsWith(".css")) return {};
     return requireFromTree(name);
   };
@@ -52,8 +57,10 @@ function deferred() { let resolve; const promise = new Promise((next) => { resol
 async function withDom(run) {
   const window = new Window({ url: "http://127.0.0.1/accounts" });
   Object.assign(globalThis, {
-    window, document: window.document, HTMLElement: window.HTMLElement, Element: window.Element, Node: window.Node,
-    Event: window.Event, MouseEvent: window.MouseEvent, CustomEvent: window.CustomEvent, DOMException: window.DOMException,
+    window, document: window.document, HTMLElement: window.HTMLElement, HTMLInputElement: window.HTMLInputElement, Element: window.Element, Node: window.Node,
+    NodeFilter: window.NodeFilter, DocumentFragment: window.DocumentFragment, MutationObserver: window.MutationObserver,
+    Event: window.Event, MouseEvent: window.MouseEvent, KeyboardEvent: window.KeyboardEvent, CustomEvent: window.CustomEvent, DOMException: window.DOMException,
+    getComputedStyle: window.getComputedStyle.bind(window),
     IS_REACT_ACT_ENVIRONMENT: true,
     requestAnimationFrame: window.requestAnimationFrame.bind(window), cancelAnimationFrame: window.cancelAnimationFrame.bind(window),
   });
@@ -479,6 +486,22 @@ async function acceptPayout(window, probe) {
   assert.equal(checkbox.checked, true);
 }
 
+async function clickPayoutControl(control) {
+  assert.ok(control, "payout dialog control exists");
+  await React.act(async () => { control.click(); await tick(); });
+  await React.act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+}
+
+async function openPayoutDialog(probe) {
+  const trigger = probe.host.querySelector(".rental-terms-modal-trigger");
+  assert.ok(trigger);
+  trigger.focus();
+  await clickPayoutControl(trigger);
+  const dialog = probe.host.ownerDocument.querySelector(".rental-terms-dialog");
+  assert.ok(dialog, "the visible trigger opens the real Radix portal");
+  return { trigger, dialog };
+}
+
 test("detail fees display API buyer amounts with exact cents; missing/mismatched lines never use public fees", () => {
   const { personalFeeLines } = loadComponent("apps/web/src/components/order/rental-price-summary.tsx", session("user_A"));
   assert.deepEqual(personalFeeLines(confirmation), { haff: "¥150.00", items: "¥20.00" });
@@ -830,9 +853,12 @@ test("D8-R1: StrictMode replaces an aborted terms read without accepting or post
       assert.ok(checkbox);
       assert.equal(checkbox.checked, false, "reading the replacement terms never accepts them");
       const terms = probe.host.querySelector('[aria-label="全额包赔条款"]');
-      assert.match(terms.textContent, /包赔条款正文/);
+      assert.doesNotMatch(terms.textContent, /包赔条款正文/, "the body is not retained in hidden test-only DOM");
+      const { dialog } = await openPayoutDialog(probe);
+      assert.match(dialog.textContent, /包赔条款正文/);
+      await clickPayoutControl(dialog.querySelector('[aria-label="关闭条款窗口"]'));
       assert.doesNotMatch(terms.textContent, /条款版本|摘要/);
-      assert.ok([...probe.host.querySelectorAll("button")].find((button) => button.textContent.includes("请先同意包赔条款"))?.disabled);
+      assert.ok(![...probe.host.querySelectorAll("button")].find((button) => button.textContent.includes("查看并同意包赔条款"))?.disabled);
       assert.equal(log.length, 0, "no confirmation or order is posted before consent");
     } finally { await probe.dispose(); }
   });
@@ -852,10 +878,14 @@ test("D1: a declared full-payout listing reads the sealed terms and binds the sa
     await first.render();
     await tick();
     assert.ok(first.host.textContent.includes("全额包赔条款"), first.host.textContent.slice(0, 400));
-    const payoutDetails = [...first.host.querySelectorAll("details")].find((node) => node.textContent.includes("全额包赔条款"));
-    assert.ok(payoutDetails && !payoutDetails.open, "the sealed body stays behind the collapsed details");
-    const gated = [...first.host.querySelectorAll("button")].find((button) => button.textContent.includes("请先同意包赔条款"));
-    assert.ok(gated?.disabled, "quote must stay blocked until the terms are accepted");
+    const payoutSection = first.host.querySelector('[aria-label="全额包赔条款"]');
+    assert.equal(payoutSection.querySelector("details"), null, "no hidden compatibility details remains");
+    assert.doesNotMatch(payoutSection.textContent, /包赔条款正文/);
+    const { dialog } = await openPayoutDialog(first);
+    assert.match(dialog.textContent, /包赔条款正文/);
+    await clickPayoutControl(dialog.querySelector('[aria-label="关闭条款窗口"]'));
+    const gated = [...first.host.querySelectorAll("button")].find((button) => button.textContent.includes("查看并同意包赔条款"));
+    assert.ok(gated && !gated.disabled, "blocked CTA opens the terms dialog instead of staying disabled");
     assert.equal(log.filter((entry) => entry.url.includes("order-confirmations")).length, 0);
     await acceptPayout(window, first);
     assert.equal(log.length, 0, "agreeing to terms does not implicitly request a quote");
@@ -893,7 +923,7 @@ test("D1: unreadable full-payout terms block ordering instead of confirming blin
       await tick();
       assert.ok(probe.host.textContent.includes("全额包赔条款暂时无法读取"), probe.host.textContent.slice(0, 300));
       assert.equal(log.filter((entry) => entry.url.includes("order-confirmations")).length, 0);
-      const gated = [...probe.host.querySelectorAll("button")].find((button) => button.textContent.includes("请先同意包赔条款"));
+      const gated = [...probe.host.querySelectorAll("button")].find((button) => button.textContent.includes("包赔条款暂不可用"));
       assert.ok(gated?.disabled);
     } finally { await probe.dispose(); }
   });
@@ -913,6 +943,135 @@ test("D1: authoritative terms that differ from the accepted version stop creatio
       await probe.click("查看我的报价");
       assert.ok(probe.host.textContent.includes("包赔条款版本与已同意的版本不一致"), probe.host.textContent.slice(0, 300));
       assert.equal(log.filter((entry) => entry.url.endsWith("/api/v2/orders")).length, 0);
+    } finally { await probe.dispose(); }
+  });
+});
+
+test("D-terms: only explicit modal confirmation commits its draft; dismissal restores parent consent and focus", async () => {
+  await withDom(async window => {
+    const log = [];
+    const Panel = loadPanelForSession(session("user_A"), async () => publishingOptions, payoutSupply);
+    const probe = createProbe(window, Panel, { ...detailPanelProps, accountId: "payout_modal_draft", fullPayoutSelected: true }, router([], log));
+    const outside = () => probe.host.querySelector('[aria-label="我已阅读并同意全额包赔条款"]');
+    try {
+      await probe.render();
+      assert.equal(outside().checked, false);
+      assert.match(probe.host.textContent, /本账号采用全额包赔方案/);
+      assert.doesNotMatch(probe.host.textContent, /已投保/);
+      let { trigger, dialog } = await openPayoutDialog(probe);
+      let draft = dialog.querySelector(".rental-terms-dialog-accept input");
+      let confirm = dialog.querySelector(".rental-terms-dialog-confirm");
+      assert.equal(draft.checked, false);
+      assert.equal(confirm.disabled, true, "unchecked draft cannot be confirmed");
+      await clickPayoutControl(confirm);
+      assert.equal(outside().checked, false);
+      assert.ok(window.document.querySelector(".rental-terms-dialog"));
+      await clickPayoutControl(draft);
+      assert.equal(draft.checked, true);
+      assert.equal(outside().checked, false, "editing a draft does not accept the terms");
+      await clickPayoutControl(dialog.querySelector('[aria-label="关闭条款窗口"]'));
+      assert.equal(outside().checked, false);
+      assert.ok(window.document.activeElement === trigger, "X returns focus to the visible trigger");
+
+      ({ trigger, dialog } = await openPayoutDialog(probe));
+      draft = dialog.querySelector(".rental-terms-dialog-accept input");
+      assert.equal(draft.checked, false, "reopening discards the unconfirmed draft");
+      await clickPayoutControl(draft);
+      confirm = dialog.querySelector(".rental-terms-dialog-confirm");
+      assert.equal(confirm.disabled, false);
+      assert.equal(confirm.textContent.trim(), "同意条款并返回");
+      await clickPayoutControl(confirm);
+      assert.equal(outside().checked, true);
+      assert.equal(window.document.querySelector(".rental-terms-dialog"), null);
+      assert.ok(window.document.activeElement === trigger, "confirmation also returns focus");
+
+      ({ trigger, dialog } = await openPayoutDialog(probe));
+      draft = dialog.querySelector(".rental-terms-dialog-accept input");
+      assert.equal(draft.checked, true, "the next draft reflects the accepted parent value");
+      await clickPayoutControl(draft);
+      assert.equal(dialog.querySelector(".rental-terms-dialog-confirm").disabled, true);
+      await React.act(async () => { window.document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true })); await tick(); });
+      await React.act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+      assert.equal(window.document.querySelector(".rental-terms-dialog"), null);
+      assert.equal(outside().checked, true, "Escape does not revoke existing acceptance");
+      assert.ok(window.document.activeElement === trigger);
+      ({ dialog } = await openPayoutDialog(probe));
+      assert.equal(dialog.querySelector(".rental-terms-dialog-accept input").checked, true);
+      await clickPayoutControl(dialog.querySelector('[aria-label="关闭条款窗口"]'));
+      await clickPayoutControl(outside());
+      assert.equal(outside().checked, false, "the external checkbox still supports direct withdrawal");
+      await clickPayoutControl(outside());
+      assert.equal(outside().checked, true, "the external checkbox still supports direct acceptance");
+      assert.equal(log.length, 0, "reading and editing consent never requests a quote or order");
+    } finally { await probe.dispose(); }
+  });
+});
+
+test("D-terms: a quoted locked panel permits reading and closing without changing consent", async () => {
+  await withDom(async window => {
+    const log = [];
+    const Panel = loadPanelForSession(session("user_A"), async () => publishingOptions, payoutSupply);
+    const probe = createProbe(window, Panel, { ...detailPanelProps, accountId: "payout_modal_locked", fullPayoutSelected: true }, router([
+      { match: "/api/order-confirmations", method: "POST", respond: () => json(payoutConfirmation) },
+    ], log));
+    try {
+      await probe.render();
+      await acceptPayout(window, probe);
+      await probe.click("查看我的报价");
+      const outside = probe.host.querySelector('[aria-label="我已阅读并同意全额包赔条款"]');
+      assert.equal(outside.checked, true);
+      assert.equal(outside.disabled, true);
+      const { dialog } = await openPayoutDialog(probe);
+      const draft = dialog.querySelector(".rental-terms-dialog-accept input");
+      const confirm = dialog.querySelector(".rental-terms-dialog-confirm");
+      assert.equal(draft.checked, true);
+      assert.equal(draft.disabled, true);
+      assert.equal(confirm.disabled, true);
+      await clickPayoutControl(draft);
+      await clickPayoutControl(confirm);
+      assert.equal(draft.checked, true);
+      assert.equal(outside.checked, true);
+      assert.ok(window.document.querySelector(".rental-terms-dialog"), "locked confirmation cannot close by committing");
+      await clickPayoutControl(dialog.querySelector('[aria-label="关闭条款窗口"]'));
+      assert.equal(outside.checked, true);
+      assert.equal(log.length, 1, "locked reading creates no additional request");
+      assert.equal(log[0].url, "/api/order-confirmations");
+    } finally { await probe.dispose(); }
+  });
+});
+
+test("D-terms: a changed terms tuple or unavailable state clears an open draft", async () => {
+  await withDom(async window => {
+    const log = [];
+    const nextTerms = { ...fullPayoutTerms, termsVersionId: "terms_2", termsDigest: "f".repeat(64), disclosureVersion: "disclosure_2", title: "新版包赔条款", body: "新版条款正文（TEST_ONLY）" };
+    const Panel = loadPanelForSession(session("user_A"), async () => publishingOptions, {
+      fullPayoutTerms: async (_gameId, releaseId) => ({ releaseId, fullPayoutTerms: releaseId === "release_1" ? fullPayoutTerms : nextTerms }),
+    });
+    const props = { ...detailPanelProps, accountId: "payout_modal_scope", fullPayoutSelected: true };
+    const nextProps = { ...props, versionId: "listing_2", releaseId: "release_2" };
+    const probe = createProbe(window, Panel, props, router([], log));
+    const outside = () => probe.host.querySelector('[aria-label="我已阅读并同意全额包赔条款"]');
+    try {
+      await probe.render();
+      let { dialog } = await openPayoutDialog(probe);
+      await clickPayoutControl(dialog.querySelector(".rental-terms-dialog-accept input"));
+      await probe.render(nextProps);
+      assert.equal(window.document.querySelector(".rental-terms-dialog"), null);
+      assert.equal(outside().checked, false);
+      ({ dialog } = await openPayoutDialog(probe));
+      assert.match(dialog.textContent, /新版条款正文/);
+      assert.equal(dialog.querySelector(".rental-terms-dialog-accept input").checked, false);
+      await clickPayoutControl(dialog.querySelector(".rental-terms-dialog-accept input"));
+      await probe.render({ ...nextProps, fullPayoutSelected: false });
+      assert.equal(window.document.querySelector(".rental-terms-dialog"), null);
+      assert.equal(outside(), null);
+      await probe.render(nextProps);
+      assert.equal(window.document.querySelector(".rental-terms-dialog"), null, "making terms readable again never reopens an old draft");
+      assert.equal(outside().checked, false);
+      ({ dialog } = await openPayoutDialog(probe));
+      assert.equal(dialog.querySelector(".rental-terms-dialog-accept input").checked, false);
+      await clickPayoutControl(dialog.querySelector('[aria-label="关闭条款窗口"]'));
+      assert.equal(log.length, 0);
     } finally { await probe.dispose(); }
   });
 });
@@ -1606,7 +1765,7 @@ test("M3-F6: a missing owner total stays unknown in the fee summary", async () =
     assert.ok(!summary.includes("合计 170.00 元"), `the owner summary must not borrow the renter rental: ${summary}`);
     assert.match(summary, /合计待确认/);
     const renter = await detailProbe(window, { ...paidOrder, status: "CANCELLED" }, "renter");
-    assert.match(renter.host.querySelector(".order-lines-summary").textContent, /合计 170.00 元/, "the renter keeps its own total");
+    assert.match(renter.host.querySelector(".order-lines-summary").textContent, /资源合计（不含押金） 170\.00 元/, "the renter keeps its own total");
     await probe.dispose();
     await renter.dispose();
   });
@@ -1777,7 +1936,7 @@ test("polish: expanded quote shows only own amounts and cancellation has one nex
         assert.ok(!table.textContent.includes(party === "owner" ? "257.53 元" : "134.65 元"));
         assert.equal(probe.host.querySelectorAll(".order-trade-panel").length, 0);
         assert.doesNotMatch(probe.host.textContent, /继续租用|服务端派生/);
-        assert.equal([...probe.host.querySelectorAll("a")].filter(a => a.textContent === (party === "owner" ? "管理出租账号" : "浏览可租账号")).length, 1);
+        assert.equal([...probe.host.querySelectorAll("a")].filter(a => a.textContent === (party === "owner" ? "管理上架账号" : "浏览可租账号")).length, 1);
       } finally { await probe.dispose(); }
     }
   });
