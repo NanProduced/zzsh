@@ -1605,6 +1605,24 @@ SELECT o.id, o.status AS "orderStatus",
   LEFT JOIN LATERAL (SELECT v.id, v.version_no FROM zzsh_order.settlement_version v
                       WHERE v.order_id = o.id AND v.superseded_at IS NULL ORDER BY v.version_no DESC LIMIT 1) cv ON true
  WHERE o.id::text = ANY($1::text[]) AND (o.renter_user_id = $2 OR o.owner_user_id = $2)`;
+/** Single-order path: derive the same SettlementStageFacts from the /settlement view body (response itself unchanged). */
+export function settlementStageFactsFromView(body: Record<string, unknown>, viewerParty: "RENTER" | "OWNER" | null): SettlementStageFacts {
+  const intakes = (body.intakes ?? []) as Array<{ status: string }>;
+  const versions = (body.versions ?? []) as Array<{ versionNo: number; supersededAt: string | null; decisions: Array<{ party: string; action: string }> }>;
+  const current = versions.filter((v) => v.supersededAt === null).sort((a, b) => b.versionNo - a.versionNo)[0] ?? null;
+  const action = (party: string) => current?.decisions.find((d) => d.party === party)?.action ?? null;
+  return {
+    orderStatus: String(body.orderStatus ?? ""), viewerParty, posted: body.posting !== null && body.posting !== undefined,
+    intakeOpen: intakes.at(-1)?.status === "OPEN", currentVersionNo: current ? Number(current.versionNo) : null,
+    renterAction: action("RENTER"), ownerAction: action("OWNER"),
+  };
+}
+/** Single-order stage via the same settlementStageOf used by readSettlementStages. */
+export async function readSettlementStage(client: PoolClient, orderId: string, actor: Actor): Promise<SettlementStage> {
+  const order = await lockSettlement(client, orderId, actor, false);
+  const viewerParty = order.renterUserId === actor.userId ? "RENTER" : order.ownerUserId === actor.userId ? "OWNER" : null;
+  return settlementStageOf(settlementStageFactsFromView((await view(client, order)).body, viewerParty));
+}
 /** One query per page; missing/denied relations (42P01/42501) degrade to UNKNOWN via savepoint. */
 export async function readSettlementStages(client: PoolClient, orderIds: string[], viewerUserId: string): Promise<Map<string, SettlementStage>> {
   const ids = [...new Set(orderIds)], out = new Map<string, SettlementStage>(), sp = "user_settlement_stage_read";

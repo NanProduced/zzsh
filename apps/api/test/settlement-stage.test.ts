@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { PoolClient } from "pg";
-import { readSettlementStages, settlementStageOf, type SettlementStageFacts } from "../src/order/settlement-record";
+import { readSettlementStages, settlementStageFactsFromView, settlementStageOf, type SettlementStageFacts } from "../src/order/settlement-record";
 
 const base: SettlementStageFacts = { orderStatus: "PAID", viewerParty: "RENTER", posted: false, intakeOpen: false, currentVersionNo: null, renterAction: null, ownerAction: null };
 
@@ -28,4 +28,22 @@ test("batch read is one scoped query and degrades to UNKNOWN on missing relation
   assert.equal((await readSettlementStages(bad, ["o2"], "u1")).get("o2")?.code, "UNKNOWN");
   const worse = { query: async (s: string) => { if (s.includes("user-settlement-stage-batch")) throw Object.assign(new Error("y"), { code: "XX000" }); return { rows: [] }; } } as unknown as PoolClient;
   await assert.rejects(readSettlementStages(worse, ["o3"], "u1"));
+});
+
+test("single /settlement view derives the same stage facts as the list batch row", () => {
+  const v = (versionNo: number, supersededAt: string | null, decisions: Array<{ party: string; action: string }>) => ({ versionNo, supersededAt, decisions });
+  const cases: Array<[Record<string, unknown>, "RENTER" | "OWNER" | null, SettlementStageFacts]> = [
+    [{ orderStatus: "PAID", intakes: [], versions: [], posting: null }, "RENTER", base],
+    [{ orderStatus: "PAID", intakes: [{ status: "CLASSIFIED" }, { status: "OPEN" }], versions: [v(1, null, [])], posting: null }, "OWNER",
+      { ...base, viewerParty: "OWNER", intakeOpen: true, currentVersionNo: 1 }],
+    [{ orderStatus: "PAID", intakes: [{ status: "CLASSIFIED" }], versions: [v(1, "t", [{ party: "RENTER", action: "REJECT" }]), v(2, null, [{ party: "RENTER", action: "CONFIRM" }])], posting: null }, "OWNER",
+      { ...base, viewerParty: "OWNER", currentVersionNo: 2, renterAction: "CONFIRM" }],
+    [{ orderStatus: "COMPLETED", intakes: [], versions: [v(3, null, [{ party: "RENTER", action: "CONFIRM" }, { party: "OWNER", action: "CONFIRM" }])], posting: { compensationFeeCents: "0" } }, "RENTER",
+      { ...base, orderStatus: "COMPLETED", posted: true, currentVersionNo: 3, renterAction: "CONFIRM", ownerAction: "CONFIRM" }],
+  ];
+  for (const [body, party, listRow] of cases) {
+    const facts = settlementStageFactsFromView(body, party);
+    assert.deepEqual(facts, listRow);
+    assert.deepEqual(settlementStageOf(facts), settlementStageOf(listRow));
+  }
 });
