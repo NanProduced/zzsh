@@ -743,6 +743,20 @@
       "when": 1793170120000,
       "tag": "0105_identity_display_source",
       "breakpoints": true
+    },
+    {
+      "idx": 106,
+      "version": "7",
+      "when": 1793170180000,
+      "tag": "0106_joinpay_abnormal_refund_basis",
+      "breakpoints": true
+    },
+    {
+      "idx": 107,
+      "version": "7",
+      "when": 1793170240000,
+      "tag": "0107_prestart_termination",
+      "breakpoints": true
     }
   ]
 }

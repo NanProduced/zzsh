@@ -2,7 +2,7 @@ import { readOrderPaymentSummary, type ChannelPaymentReadOptions } from "./chann
 import { readAdminOrderRefundSummary } from '../finance/channel-finance-read';
 import type { PoolClient } from "pg";
 import { gameScopeSql } from "../auth/admin-scope";
-import { projectOrder, centsToYuan, yuanToCents, type OrderRow } from "./order";
+import { projectOrder, orderHasPaidState, centsToYuan, yuanToCents, type OrderRow } from "./order";
 import { orderAccountTitleFact } from "../supply/publishing";
 import { projectPublicAttributeDisplay } from "../supply/listing-query";
 import { frozenResourceLines } from "./frozen-listing-read";
@@ -201,14 +201,14 @@ function accountTitleFact(snapshotTitle: unknown, currentTitle: unknown, resourc
 // 只投影精确绑定的原APPLIED付款；报价不能补出实收，确认也不代表结算或到账。
 function nativeRecordedAmount(r:Record<string,any>,viewer:OrderReadViewer){
  const p=r.native_payment_record;
- return viewer.financeReadable===true&&['PAID','COMPLETED'].includes(r.status)&&p&&p.id===r.paid_confirmation_id&&p.order_id===r.id
+ return viewer.financeReadable===true&&orderHasPaidState(r.status,r.cancel_reason)&&p&&p.id===r.paid_confirmation_id&&p.order_id===r.id
   &&p.disposition==='APPLIED'&&['CONTROLLED','JOINPAY'].includes(p.source)&&p.currency==='CNY'&&p.currency===r.currency
   &&typeof p.amount_cents==='string'&&/^(0|[1-9]\d{0,24})$/.test(p.amount_cents)?centsToYuan(p.amount_cents):null;
 }
 export function projectAdminReadOrder(origin:string,r:Record<string,any>,viewer:OrderReadViewer):Record<string,any>{
  if(origin==='NATIVE'){
   const row:OrderRow={id:r.id,displayNo:r.display_no,accountId:r.account_id,versionId:r.listing_version_id,ownerUserId:r.owner_user_id,renterUserId:r.renter_user_id,gameId:r.game_id,releaseId:r.rule_release_id,contentHash:r.content_hash,termOptionCode:r.term_option_code,status:r.status,rentalAmountCents:r.rental_amount_cents,depositAmountCents:r.deposit_amount_cents,currency:r.currency,termSeconds:r.term_seconds,quoteSnapshot:r.quote_snapshot,title:r.title,holdUntil:r.hold_until,paidAt:r.paid_at,dispatchState:r.dispatch_state,dispatchWaitReason:r.wait_reason,assignedAt:r.assigned_at,teamState:r.team_state,firstResponseAt:r.first_response_at??null,remindDueAt:r.remind_due_at??null,addRound:r.add_round??0,escalationState:r.escalation_state??'NOT_STARTED',cancelReason:r.cancel_reason,cancelledAt:r.cancelled_at,createdAt:r.created_at,revision:r.revision,expiredAwaitingCancel:r.expired,ownerName:r.owner_name,renterName:r.renter_name};
-  const result=projectOrder(row,'admin',{internalQuote:viewer.internalQuote});const paid=['PAID','COMPLETED'].includes(r.status);
+  const result=projectOrder(row,'admin',{internalQuote:viewer.internalQuote});const paid=orderHasPaidState(r.status,r.cancel_reason);
   const titles = accountTitleFact(r.title, null, frozenQuoteSummary(r.quote_snapshot));
   const breakdown=nativePrepaymentBreakdown(r,result.amounts);
   return {...result,...titles,haffRatio:orderHaffRatio(r.quote_snapshot),prepaymentBreakdown:breakdown,prepaymentReconciliation:nativeReconciliation(breakdown),source:{origin:'NATIVE',ruleOrigin:'NATIVE_ORDER'},accountDisplayNo:r.account_no,payment:{state:paid?'RECORDED_PAID':'RECORDED_UNPAID',recordedAt:r.paid_at,recordedAmount:nativeRecordedAmount(r,viewer)}};

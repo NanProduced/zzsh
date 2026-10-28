@@ -162,3 +162,39 @@ test('bank addition does not change the four existing groups effective privilege
 test('first bank-only authorization error propagates without retries',async()=>{
  const f=fixture(['BANK']),error=Error('MODEL_BANK_ACL_FAILURE');f.state.permissionError=error;await assert.rejects(configure(f.pool),e=>e===error);assert.equal(mutations(f).length,1);
 });
+
+function prestartCatalog(){
+ const f=fixture(['REFUND']);const ddl=readFileSync(resolve('migrations/business/0107_prestart_termination.sql'),'utf8');
+ f.state.catalog.get(intent)!.push('basis_kind','liability_root_id','liability_event_id');
+ for(const name of ['zzsh_order.prestart_termination','zzsh_order.prestart_termination_decision']){
+  const cols=columns(ddl,name);f.state.present.add(name);f.state.catalog.set(name,cols);
+  for(const principal of ['runtime_role','PUBLIC'])f.rights.set(principal+':'+name,{table:new Set(['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']),
+   columns:new Map(ops.map(op=>[op,new Set(cols)])),grantOption:true});
+ }
+ for(const name of ['prestart_payment_basis_valid(jsonb)','prestart_liability_complete(text)','native_prestart_refund_liability_complete(text)',
+  'native_prestart_refund_terminal_complete(text)','native_abnormal_refund_liability_complete(text)','native_abnormal_refund_terminal_complete(text)'])f.state.functions.add('zzsh_order.'+name);
+ return f;
+}
+test('未开租与异常basis扩展保持精确列权；不授予approved_xid或删除/篡改原款的权',async()=>{
+ const f=prestartCatalog();await configure(f.pool);
+ for(const col of ['basis_kind','liability_root_id','liability_event_id']){assert(f.can(intent,'INSERT',col));assert.equal(f.can(intent,'UPDATE',col),false);}
+ const head='zzsh_order.prestart_termination',decision='zzsh_order.prestart_termination_decision';
+ assert(f.can(head,'INSERT','payment_basis'));assert.equal(f.can(head,'UPDATE','payment_basis'),false);assert(f.can(head,'UPDATE','state'));
+ assert.equal(f.can(head,'INSERT','approved_xid'),false);assert.equal(f.can(head,'UPDATE','approved_xid'),false);
+ assert(f.can(decision,'INSERT','decision'));assert.equal(f.can(decision,'UPDATE','decision'),false);
+ for(const name of [head,decision]){assert.equal(f.can(name,'DELETE'),false);assert.equal(f.can(name,'TRUNCATE'),false);assert.equal(f.can(name,'INSERT','created_at'),false);}
+ assert(f.seen.some(r=>r.sql.includes('GRANT EXECUTE')&&r.sql.includes('native_prestart_refund_terminal_complete')));
+});
+test('未开租单表/三扩展列缺一/缺完整性函数时在任何GRANT前拒绝',async()=>{
+ const partial=prestartCatalog();partial.state.present.delete('zzsh_order.prestart_termination_decision');await assert.rejects(configure(partial.pool),/partially deployed/);assert.equal(mutations(partial).length,0);
+ const col=prestartCatalog();col.state.catalog.get(intent)!.splice(col.state.catalog.get(intent)!.indexOf('basis_kind'),1);await assert.rejects(configure(col.pool),/partially deployed/);assert.equal(mutations(col).length,0);
+ const fn=prestartCatalog();fn.state.functions.delete('zzsh_order.native_prestart_refund_terminal_complete(text)');await assert.rejects(configure(fn.pool),/function inventory/);assert.equal(mutations(fn).length,0);
+});
+
+test('退款前向迁移按0106后0107登记，未验旧来源证明不自动安装',()=>{
+ const j=JSON.parse(readFileSync(resolve('migrations/business/meta/_journal.json'),'utf8'));
+ const a=j.entries.findIndex((e:any)=>e.tag==='0106_joinpay_abnormal_refund_basis'),b=j.entries.findIndex((e:any)=>e.tag==='0107_prestart_termination');
+ assert(a>=0);assert.equal(b,a+1);assert(j.entries[b].when>j.entries[a].when);
+ assert(!j.entries.some((e:any)=>e.tag.includes('legacy_finance_source_proof')));
+ assert(readFileSync(resolve('migrations/business/0106_joinpay_abnormal_refund_basis.sql'),'utf8').includes('ADD COLUMN basis_kind'));
+});

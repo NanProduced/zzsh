@@ -2,6 +2,7 @@ import type { PoolClient } from 'pg';
 import { SecurityApiError } from '../auth/security-core';
 import { exactCents } from './finance-money';
 import { readJoinpayAccountSummary } from './joinpay-account-store';
+import { readPrestartFinanceProjection } from '../order/prestart-termination';
 
 /** Explicit server grants; neither a finance permission nor a URL supplies merchant scope. */
 export type JoinpayAccountReadAccess = Readonly<{
@@ -239,7 +240,9 @@ export async function readAdminOrderRefundSummary(c: PoolClient, input: { orderI
   });
   if (!input.financeReadable) return absent('FORBIDDEN', 'FINANCE_PERMISSION_REQUIRED');
   if (input.origin !== 'NATIVE') return absent('NOT_APPLICABLE', 'LEGACY_REFUND_SOURCE_NOT_INTEGRATED');
-  const ready = (await c.query(`SELECT to_regclass('zzsh_order.channel_refund_intent') IS NOT NULL
+  const ready = (await c.query(`SELECT to_regclass('zzsh_order.prestart_termination') IS NOT NULL
+    AND has_table_privilege(current_user,to_regclass('zzsh_order.prestart_termination'),'SELECT') AS has_prestart,
+    to_regclass('zzsh_order.channel_refund_intent') IS NOT NULL
     AND to_regclass('zzsh_order.joinpay_refund_attempt') IS NOT NULL
     AND to_regclass('zzsh_order.joinpay_refund_observation') IS NOT NULL
     AND to_regclass('zzsh_order.joinpay_refund_evidence') IS NOT NULL
@@ -285,7 +288,6 @@ export async function readAdminOrderRefundSummary(c: PoolClient, input: { orderI
         productFamily: r.payment_source === 'JOINPAY' ? 'JOINPAY' as const : null, providerRefundTrxNo: typeof r.provider_refund_trx_no === 'string' ? r.provider_refund_trx_no : null,
         safeTarget: 'ORIGINAL_CHANNEL' as const, mayResubmit: false, maySubmit: false as const, bankArrival: 'UNKNOWN' as const };
     });
-    const intents = [...normalIntents, ...abnormal.intents];
     const sum = (disposition: string) => normalIntents.filter(intent => intent.budgetDisposition === disposition)
       .reduce((total, intent) => total + BigInt(intent.amount.cents), 0n);
     const normalActive = sum('ALLOCATED') + sum('CONSUMED'), normalAllocatedPartition = sum('ALLOCATED'),
@@ -297,25 +299,41 @@ export async function readAdminOrderRefundSummary(c: PoolClient, input: { orderI
     const abnormalConsumed = abnormalKnown ? abnormal.responsibilities.reduce((total, r) => total + BigInt(r.consumedCents!), 0n) : null;
     const abnormalReleased = abnormalKnown ? abnormal.responsibilities.reduce((total, r) => total + BigInt(r.releasedCents!), 0n) : null;
     const postingOriginal = postingRows[0]?.renter_refund_cents ?? null;
+    const prestart=ready.has_prestart===true?await readPrestartFinanceProjection(c,input.orderId):null;
+    const ps=prestart?.refund.totals;
+    const psComplete=!prestart||prestart.refund.integration==='INTEGRATED'&&ps?.totalsComplete===true;
+    const psAllocated=psComplete?BigInt(ps?.allocatedCents??'0'):null,psConsumed=psComplete?BigInt(ps?.consumedCents??'0'):null,
+      psReleased=psComplete?BigInt(ps?.releasedCents??'0'):null;
+    const prestartIntents=prestart?.refund.integration==='INTEGRATED'?(prestart.refund.intents??[]).filter(r=>r.intentId&&r.refundOrderNo&&r.amountCents).map(r=>({
+      intentId:r.intentId!,refundOrderNo:r.refundOrderNo!,amount:{cents:r.amountCents!,currency:'CNY' as const},
+      localState:r.state,budgetDisposition:r.budgetDisposition,requiresReview:r.requiresReview,merchantIdentityId:prestart.merchantIdentityId,
+      basisKind:'PRESTART_TERMINATION' as const,paymentConfirmationId:prestart.paymentConfirmationId,liabilityRootId:prestart.liabilityRootId,
+      liabilityEventId:prestart.liabilityEventId,firstSubmit:null,responsibilityCents:prestart.originalCents,
+      evidenceId:r.terminalEvidenceId,rootId:r.terminalRootId,eventId:r.terminalEventId,
+      productFamily:'JOINPAY' as const,providerRefundTrxNo:r.savedChannelEvidence?.channelRefundTrxNo??null,
+      safeTarget:'ORIGINAL_CHANNEL' as const,mayResubmit:false,maySubmit:false as const,bankArrival:'UNKNOWN' as const
+    })):[];
+    const intents=[...normalIntents,...abnormal.intents,...prestartIntents];
+    if(intents.length>64)return {...absent('UNAVAILABLE','REFUND_BINDING_OR_READ_BOUND_EXCEEDED'),limit:64,truncated:true,coverage:'TRUNCATED' as const};
     const originalCents = abnormalOriginal === null ? null
-      : (postingOriginal === null ? 0n : BigInt(postingOriginal)) + abnormalOriginal;
+      : (postingOriginal === null ? 0n : BigInt(postingOriginal)) + abnormalOriginal + BigInt(prestart?.originalCents??'0');
     const responsibilityTotalsComplete = originalCents !== null && abnormalAllocated !== null
       && abnormalConsumed !== null && abnormalReleased !== null
-      && originalCents >= normalActive + abnormalAllocated;
+      && psAllocated!==null && psConsumed!==null && psReleased!==null && originalCents >= normalActive + abnormalAllocated+psAllocated;
     return { contractVersion: 'admin-order-refund-summary.v1' as const, integration: 'INTEGRATED' as const, intents,
-      abnormalResponsibilities: abnormal.responsibilities, limit: 64, truncated: false, maySubmit: false as const,
+      abnormalResponsibilities: abnormal.responsibilities,...(prestart?{prestartTermination:prestart}:{}), limit: 64, truncated: false, maySubmit: false as const,
       coverage: 'COMPLETE_WITHIN_LIMIT' as const,
-      budget: abnormalAllocated !== null && abnormalConsumed !== null && abnormalReleased !== null ? {
-        allocatedCents: (normalAllocatedPartition + abnormalAllocated - abnormalConsumed).toString(),
-        consumedCents: (normalConsumed + abnormalConsumed).toString(), releasedCents: (normalReleased + abnormalReleased).toString() } : null,
+      budget: abnormalAllocated !== null && abnormalConsumed !== null && abnormalReleased !== null&&psAllocated!==null&&psConsumed!==null&&psReleased!==null ? {
+        allocatedCents: (normalAllocatedPartition + abnormalAllocated - abnormalConsumed+psAllocated-psConsumed).toString(),
+        consumedCents: (normalConsumed + abnormalConsumed+psConsumed).toString(), releasedCents: (normalReleased + abnormalReleased+psReleased).toString() } : null,
       responsibilityBudget: { originalCents: originalCents?.toString() ?? null,
-        allocatedCents: abnormalAllocated === null ? null : (normalActive + abnormalAllocated).toString(),
-        consumedCents: abnormalConsumed === null ? null : (normalConsumed + abnormalConsumed).toString(),
-        releasedCents: abnormalReleased === null ? null : (normalReleased + abnormalReleased).toString(),
+        allocatedCents: abnormalAllocated === null||psAllocated===null ? null : (normalActive + abnormalAllocated+psAllocated).toString(),
+        consumedCents: abnormalConsumed === null||psConsumed===null ? null : (normalConsumed + abnormalConsumed+psConsumed).toString(),
+        releasedCents: abnormalReleased === null||psReleased===null ? null : (normalReleased + abnormalReleased+psReleased).toString(),
         remainingCents: responsibilityTotalsComplete && originalCents !== null && abnormalAllocated !== null
-          ? (originalCents - normalActive - abnormalAllocated).toString() : null,
+          ? (originalCents - normalActive - abnormalAllocated-psAllocated!).toString() : null,
         totalsComplete: responsibilityTotalsComplete, postingOriginalCents: postingOriginal,
-        abnormalOriginalCents: abnormalOriginal?.toString() ?? null },
+        abnormalOriginalCents: abnormalOriginal?.toString() ?? null,...(prestart?{prestartOriginalCents:prestart.originalCents}:{}) },
       bankArrival: 'UNKNOWN' as const, reasonCodes: ['LOCAL_RECORDS_ONLY_TERMINAL_EVIDENCE_NOT_REVALIDATED',
         ...(abnormal.responsibilities.length > 0 ? ['ABNORMAL_REVIEW_CONFIRMATION_RESPONSIBILITY_PRESENT'] : []),
         ...abnormal.responsibilities.flatMap(r => r.reasonCodes)] };

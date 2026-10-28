@@ -219,5 +219,11 @@
   "dist/test/membership-profit-readonly-chain.test.js",
   "dist/test/supply-quote-preview-consistency.test.js",
   "dist/test/order-list-line-names.test.js",
-  "dist/test/listing-quote-deposits.test.js"
+  "dist/test/listing-quote-deposits.test.js",
+  "dist/test/channel-refund-postgres-preflight.test.js",
+  "dist/test/prestart-termination-model.test.js",
+  "dist/test/prestart-termination.test.js",
+  "dist/test/prestart-refund-liability.test.js",
+  "dist/test/prestart-refund-store.test.js",
+  "dist/test/prestart-termination-routes.test.js"
 ]

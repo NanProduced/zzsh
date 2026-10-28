@@ -744,7 +744,7 @@ export type AdminOrder = {
   paymentOpen: boolean;
   cancelOpen: boolean;
   paidAt?: string | null;
-  cancelReason?: "USER" | "TIMEOUT" | null;
+  cancelReason?: "USER" | "TIMEOUT" | "PRESTART_TERMINATED" | null;
   cancelledAt?: string | null;
   ownerUserId: string;
   renterUserId: string;

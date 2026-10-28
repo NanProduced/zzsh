@@ -7,6 +7,20 @@ const {POST:CREATE_V2}=await import('../src/app/api/v2/orders/route.ts');
 const ctx=path=>({params:Promise.resolve({path})});
 const input=(path,init={},query='')=>new Request('http://127.0.0.1:3100/api/orders/'+path.join('/')+query,{...init,headers:{origin:'http://127.0.0.1:3100',...init.headers}});
 
+test('未开租结束GET/申请保持本人Cookie身份预检；不代理Admin审核或隐式渠道query',async()=>{
+ const old=globalThis.fetch,calls=[];globalThis.fetch=async(url,options)=>{calls.push({url:String(url),options});
+  return Response.json(String(url).includes('get-session')?{user:{id:'renter_1'},session:{id:'session_1'}}:{orderId:'order_1'});};
+ try{const headers={cookie:'zzsh_user.session_token=user; zzsh_admin.session_token=admin','x-zzsh-expected-user-id':'renter_1'};
+  const r=await GET(input(['order_1','prestart-termination'],{headers}),ctx(['order_1','prestart-termination']));assert.equal(r.status,200);
+  const forwarded=calls.at(-1);assert.match(forwarded.url,/order_1\/prestart-termination$/);assert.equal(forwarded.options.headers.get('cookie'),'zzsh_user.session_token=user');
+  const body=JSON.stringify({expectedOrderRevision:'1',reason:'申请尚未开租结束'});
+  const p=await POST(input(['order_1','prestart-termination','requests'],{method:'POST',headers:{...headers,'idempotency-key':'original_1','content-type':'application/json'},body}),ctx(['order_1','prestart-termination','requests']));
+  assert.equal(p.status,200);assert.equal(calls.at(-1).options.headers.get('idempotency-key'),'original_1');
+  const count=calls.length;assert.equal((await POST(input(['order_1','prestart-termination','term_1','review'],{method:'POST',headers,body:'{}'}),ctx(['order_1','prestart-termination','term_1','review']))).status,404);
+  assert.equal((await GET(input(['order_1','prestart-termination'],{headers},'?query=channel'),ctx(['order_1','prestart-termination']))).status,400);assert.equal(calls.length,count);
+ }finally{globalThis.fetch=old;}
+});
+
 test('v2 creation has an explicit path and preserves credential/body/key without changing v1',async()=>{
   const old=globalThis.fetch;let seen;
   globalThis.fetch=async(url,options)=>{seen={url:String(url),options};return Response.json({order:{id:'order-v2'}});};

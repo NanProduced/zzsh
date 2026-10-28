@@ -41,6 +41,7 @@ import {
   type SupplyResponse,
 } from "../supply/supply-routes";
 import { handleSettlementAdminRoute, handleSettlementUserRoute } from "./settlement-routes";
+import { handlePrestartTerminationRoute } from "./prestart-termination-routes";
 import { handleLegacyContinuationRoute } from "./legacy-continuation-routes";
 import type { LegacyDutyFinalizationReader } from "./legacy-continuation-model";
 import {
@@ -156,6 +157,7 @@ export async function handleOrderUserRoute(
       sendJson(response, 200, data, requestId);
       return;
     }
+    if (await handlePrestartTerminationRoute(request, response, options, "user")) return;
     if (await handleSettlementUserRoute(request, response, options)) return;
     if (method === "POST" && path === "/") {
       if (!requireOrigin(request, response, options, requestId)) return;
@@ -298,6 +300,7 @@ export async function handleOrderAdminRoute(
 
   await safely(response, requestId, async () => {
     if (await handleLegacyContinuationRoute(request, response, options, "admin")) return;
+    if (await handlePrestartTerminationRoute(request, response, options, "admin")) return;
     if (await handleSettlementAdminRoute(request, response, options)) return;
     if (method !== "GET") throw notFound();
     const context = await readAdminContext(request, options);

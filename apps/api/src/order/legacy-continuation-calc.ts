@@ -168,7 +168,14 @@ function advance(goods: Decimal, ratio: string, probe: Decimal): boolean {
 function poolOf(pay: Decimal, sale: Decimal, returned: Decimal) { return subtractDecimal(subtractDecimal(pay, sale), returned); }
 function payoutFields(kind: "preview" | "propose", sale: Decimal, assigned: Decimal | null, stored: Text): { fullPayoutMoney: string | null; ownerNet: string | null } {
   if (kind === "preview") return { fullPayoutMoney: null, ownerNet: null };
-  if (assigned) return { fullPayoutMoney: text(assigned), ownerNet: text(subtractDecimal(sale, assigned)) };
+  if (assigned) {
+    const exactCents = (value: Decimal) => value.scale <= 2 || value.value % (10n ** BigInt(value.scale - 2)) === 0n;
+    if (!exactCents(sale)) throw new DecimalError("legacy payout sale has sub-cent precision");
+    // Preserve accepted text; only a sub-cent assigned fee crosses the old DECIMAL(10,2) boundary.
+    const fee = exactCents(assigned) ? assigned : divideToScale(assigned, dec("1", "one"), 2);
+    if (fee.value < 0n || gt(fee, sale) || gt(fee, dec("99999999.99", "legacy payout maximum"))) throw new DecimalError("legacy payout is out of range");
+    return { fullPayoutMoney: text(fee), ownerNet: text(subtractDecimal(sale, fee)) };
+  }
   if (stored === null) return { fullPayoutMoney: null, ownerNet: null };
   return { fullPayoutMoney: null, ownerNet: text(subtractDecimal(sale, dec(stored, "stored payout"))) };
 }

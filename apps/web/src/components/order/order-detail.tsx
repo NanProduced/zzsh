@@ -8,6 +8,7 @@ import { useUserSession } from "@/components/session/user-session-provider";
 import { useIdentityReset } from "@/components/session/identity-reset";
 import { orderLinesTotalLabel, orderRentalModeLabel, orderUnitPriceText, unitHint, unitLabel, orderAccountTitle } from "@/lib/order-display";
 import { OrderTradeActions, type OrderStageFacts } from "@/components/order/order-trade-actions";
+import { PrestartTerminationPanel } from "@/components/order/prestart-termination-panel";
 import { OrderError, OrderStatusBadge, orderTermLabel, orderUrl, statusLabel } from "@/components/order/order-presentation";
 import "./order.css";
 
@@ -37,8 +38,8 @@ function attentionFor(order: Order, facts: OrderStageFacts | null, readFailed: b
   if (order.status === "CANCELLED") {
     return {
       tone: "info",
-      title: "账号占用已解除",
-      note: "本单不再产生新的交易动作；已确认的订单信息仍可查看。",
+      title: order.cancelReason === "PRESTART_TERMINATED" ? "未开租订单已终止" : "账号占用已解除",
+      note: order.cancelReason === "PRESTART_TERMINATED" ? "账号占用已解除，退款处理进度见下方记录。终止订单不代表退款已到账。" : "本单不再产生新的交易动作；已确认的订单信息仍可查看。",
       actions: [party === "renter" ? "browse" : "manage"],
     };
   }
@@ -87,7 +88,7 @@ function OrderTimeline({ order, facts, party }: { order: Order; facts: OrderStag
   if (order.cancelledAt) {
     events.push({
       key: "cancelled",
-      label: `取消${order.cancelReason === "USER" ? "（租客取消）" : order.cancelReason === "TIMEOUT" ? "（到期未支付）" : ""}`,
+      label: `取消${order.cancelReason === "USER" ? "（租客取消）" : order.cancelReason === "TIMEOUT" ? "（到期未支付）" : order.cancelReason === "PRESTART_TERMINATED" ? "（未开租终止）" : ""}`,
       time: order.cancelledAt ?? null,
       state: "closed",
     });
@@ -157,7 +158,7 @@ function linesSummary(order: Order, party: OrderParty): string {
  */
 /** The renter-side figure's name for the reading party, never implying a charge that did not happen. */
 function renterFigureLabel(order: Order): string {
-  if (order.status === "CANCELLED") return "下单时租客金额";
+  if (order.status === "CANCELLED" && order.cancelReason !== "PRESTART_TERMINATED") return "下单时租客金额";
   return order.paidAt ? "租客已付" : "租客应付";
 }
 
@@ -184,7 +185,7 @@ function AmountCard({ order, party, facts, readFailed }: { order: Order; party: 
   }
 
   const lead = settledUnread ? null : posted ?? {
-    label: closed ? "下单金额" : order.status === "PENDING_PAYMENT" ? "待支付" : "租客已付",
+    label: closed && !(order.cancelReason === "PRESTART_TERMINATED" && paid) ? "下单金额" : order.status === "PENDING_PAYMENT" ? "待支付" : "租客已付",
     text: formatOrderMoney(amounts?.totalDue),
   };
   return <section className="order-side-card order-amount-block">
@@ -198,7 +199,7 @@ function AmountCard({ order, party, facts, readFailed }: { order: Order; party: 
       <div><dt>{paid && !closed ? "租赁预付" : "租赁费用"}</dt><dd>{formatOrderMoney(amounts?.rental)}</dd></div>
       <div><dt>租客押金</dt><dd>{formatOrderMoney(amounts?.deposit)}</dd></div>
     </dl>
-    {closed ? <p className="order-muted">本金额为下单时的订单快照，不代表已扣款或应退款。</p> : null}
+    {closed ? <p className="order-muted">{order.cancelReason === "PRESTART_TERMINATED" && paid ? "原付款记录保留；退款处理以本单记录为准，不代表已到账。" : "本金额为下单时的订单快照，不代表已扣款或应退款。"}</p> : null}
     {paid || order.status === "COMPLETED" ? <p className="order-side-link"><WalletCards size={14} aria-hidden="true" />退款到账结果待确认时，可在<Link href="/account?view=wallet" scroll={false}>我的钱包</Link>查看实际记录。</p> : null}
   </section>;
 }
@@ -479,6 +480,7 @@ export function OrderDetail({ party, status, accountId, orderId, state, onRetry,
     <div className="order-detail-body">
       <div className="order-detail-main">
         {order.status !== "CANCELLED" ? <OrderTradeActions order={order} party={party} onChanged={onChanged} onStageFacts={(next, failed) => setRead({ facts: next, failed })} /> : null}
+        <PrestartTerminationPanel key={`prestart:${order.id}:${order.status}`} order={order} party={party} onChanged={onChanged}/>
         {party === "renter" && order.source?.origin !== "LEGACY" && !order.readOnly ? <OrderRefundSection key={`${order.id}:${order.status}:${facts?.phase ?? "NONE"}`} order={order} /> : null}
         <section className="order-detail-section order-lines">
           <details open={order.status === "PENDING_PAYMENT" || order.status === "PAID"}>

@@ -356,7 +356,7 @@ export async function readAdminChannelPaymentEvidence(client: Client, scope: Cha
 
 export type ChannelRefundIntentEvidence = Readonly<{
   intentId: string; refundOrderNo: string; amount: ChannelMoney; localState: string; budgetDisposition: string;
-  requiresReview: boolean; basisKind: "POSTING" | "REVIEW_CONFIRMATION"; paymentConfirmationId: string | null;
+  requiresReview: boolean; basisKind: "POSTING" | "REVIEW_CONFIRMATION" | "PRESTART_TERMINATION"; paymentConfirmationId: string | null;
   liabilityRootId: string | null; liabilityEventId: string | null;
   firstSubmit: Readonly<{ dispatch: "NEVER_DISPATCHED" | "DISPATCHED" | "UNKNOWN";
     blockedReason: "ORIGINAL_ORDER_NO_AMBIGUOUS" | "ABNORMAL_BASIS_REVIEW" | null; blockedAt: string | null;
@@ -483,6 +483,8 @@ export async function readAdminChannelRefundEvidence(client: Client, scope: Chan
   const summary = await readAdminOrderRefundSummary(client, { orderId: input.orderId, origin: "NATIVE", financeReadable: true });
   const abnormalResponsibilities = (summary as { abnormalResponsibilities?: readonly { intentIds?: readonly string[]; merchantIdentityId?: unknown; totalsComplete?: unknown }[] }).abnormalResponsibilities ?? [];
   if (summary.integration === "INTEGRATED" && summary.intents) await assertRefundMerchants(client, data, input.orderId, summary.intents);
+  const prestart=(summary as {prestartTermination?:{merchantIdentityId:string;refund:{integration:string;truncated:boolean}}}).prestartTermination;
+  if(prestart)requireStoredMerchant(data,prestart.merchantIdentityId);
   if (summary.integration === "INTEGRATED") {
     for (const responsibility of abnormalResponsibilities) {
       if (responsibility.totalsComplete === true) for (const intentId of responsibility.intentIds ?? []) {
@@ -520,7 +522,7 @@ export async function readAdminChannelRefundEvidence(client: Client, scope: Chan
       if (intent.evidenceId !== null && evidenceId === null || intent.rootId !== null && rootId === null
         || intent.eventId !== null && eventId === null) add(reasons, "LOCAL_TERMINAL_REFERENCE_UNREADABLE");
       const rawBasis = (intent as { basisKind?: unknown }).basisKind;
-      const basisKind = rawBasis === "REVIEW_CONFIRMATION" ? "REVIEW_CONFIRMATION" as const : rawBasis === undefined ? "POSTING" as const : "POSTING" as const;
+      const basisKind = rawBasis === "REVIEW_CONFIRMATION" ? "REVIEW_CONFIRMATION" as const : rawBasis === "PRESTART_TERMINATION"?"PRESTART_TERMINATION" as const:"POSTING" as const;
       const firstSubmit = (intent as { firstSubmit?: ChannelRefundIntentEvidence["firstSubmit"] }).firstSubmit ?? null;
       const liabilityRootId = (intent as { liabilityRootId?: unknown }).liabilityRootId;
       const liabilityEventId = (intent as { liabilityEventId?: unknown }).liabilityEventId;

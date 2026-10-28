@@ -7,6 +7,16 @@ import {FinanceSqlFixture,legacyFinanceOrder} from './admin-finance-fixture';
 
 const line=(overrides:Record<string,unknown>={})=>projectAdminFinanceLedger({id:'refund',account_code:'RENTER_REFUND_PAYABLE',subject_id:'renter',subject_name:'租客',delta:'5000',at:'2026-10-19T11:51:00.000000Z',recorded_at:'2026-10-19T11:51:00.002000Z',posting_id:'posting',order_id:'order',display_no:'ZZ-1',source_entity:'settlement_posting',...overrides});
 
+test('未开租责任两侧都归原订单退款，不伪造posting或可提现余额',()=>{
+ for(const [account,delta,subject]of [['CAPTURED_PAYMENT_SOURCE','-15908',null],['RENTER_REFUND_PAYABLE','15908','renter']]){
+  const p=line({account_code:account,delta,subject_id:subject,source_kind:'NATIVE_PRESTART_REFUND',source_entity:'prestart_termination',source_id:'term_1',posting_id:null,
+   prestart_termination_id:'term_1',prestart_confirmation_id:'pc_1',prestart_amount_cents:'15908',prestart_approved_at:'2026-10-29T00:00:00.000000Z'});
+  assert.equal(p.documentRef,'ORDER:order');assert.equal(p.kind,'REFUND');assert.equal(p.state,'REFUND_PAYABLE_RECORDED');assert.equal(p.affectsCurrentWallet,false);
+  assert.equal(p.evidence.postingId,null);assert.equal(p.evidence.prestartOriginalCents,'15908');assert.equal(p.evidence.prestartBankArrival,'UNKNOWN');
+ }
+ assert.throws(()=>line({source_kind:'NATIVE_PRESTART_REFUND',order_id:null}),(e:any)=>e.status===503);
+});
+
 test('order document root is stable across refund-first and owner-first slices',()=>{
  const a=line(),b=line({id:'owner',account_code:'OWNER_AVAILABLE',subject_id:'owner',delta:'9000'});
  for(const entries of [[a,b],[b,a],[a],[b]]){

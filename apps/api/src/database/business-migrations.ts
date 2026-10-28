@@ -458,9 +458,15 @@ export async function configureContinuityFinancePrivileges(pool: Pick<Pool, "que
   )).rows;
   if (found.length !== profiles.length || new Set(found.map(r => r.name)).size !== profiles.length
     || found.some(r => typeof r.present !== "boolean" || !profiles.some(p => p.name === r.name))) throw new Error("Continuity schema inventory is incomplete");
-  const v4 = (await pool.query("SELECT to_regprocedure('zzsh_order.assert_personal_growth_order_v4(zzsh_order.rental_order)') IS NOT NULL AS present")).rows[0];
+  const v4 = (await pool.query(`SELECT to_regprocedure('zzsh_order.assert_personal_growth_order_v4(zzsh_order.rental_order)') IS NOT NULL AS present,
+    to_regprocedure('zzsh_order.legacy_opening_source_proof(text)') IS NOT NULL AS proof_present,
+    EXISTS(SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid=to_regclass('zzsh_order.finance_stored_opening_review')
+      WHERE p.oid=to_regprocedure('zzsh_order.legacy_opening_source_proof(text)') AND p.proowner=c.relowner AND p.prosecdef
+       AND p.proconfig=ARRAY['search_path=pg_catalog'] AND EXISTS(SELECT 1 FROM pg_trigger t WHERE t.tgrelid=c.oid
+        AND t.tgname='stored_opening_source_proof_guard' AND t.tgenabled='O' AND NOT t.tgisinternal)) AS proof_ready`)).rows[0];
   if (typeof v4?.present !== "boolean") throw new Error("Continuity helper inventory is incomplete");
-  if (found.every(r => !r.present) && !v4.present) return;
+  if(v4.proof_present===true&&v4.proof_ready!==true)throw new Error('Legacy source proof helper is partially deployed');
+  if (found.every(r => !r.present) && !v4.present&&v4.proof_present!==true) return;
   const identity = (await pool.query<{ roleOid: string; superuser: boolean; ownerRights: boolean }>(`
     /* continuity runtime role ownership */
     SELECT r.oid::text AS "roleOid",r.rolsuper AS superuser,
@@ -468,7 +474,7 @@ export async function configureContinuityFinancePrivileges(pool: Pick<Pool, "que
         SELECT c.relowner AS owner_id FROM pg_class c
          WHERE c.oid IN(SELECT to_regclass(name) FROM unnest($2::text[]) AS t(name))
         UNION SELECT p.proowner FROM pg_proc p
-         WHERE p.oid=to_regprocedure('zzsh_order.assert_personal_growth_order_v4(zzsh_order.rental_order)')
+         WHERE p.oid IN(to_regprocedure('zzsh_order.assert_personal_growth_order_v4(zzsh_order.rental_order)'),to_regprocedure('zzsh_order.legacy_opening_source_proof(text)'))
       ) owners WHERE owners.owner_id=r.oid OR pg_has_role(r.oid,owners.owner_id,'MEMBER')) AS "ownerRights"
     FROM pg_roles r WHERE r.rolname=$1
   `, [runtimeRole, profiles.map(p => p.name)])).rows[0];
@@ -495,6 +501,8 @@ export async function configureContinuityFinancePrivileges(pool: Pick<Pool, "que
   if (v4.present) {
     await pool.query(`GRANT EXECUTE ON FUNCTION zzsh_order.assert_personal_growth_order_v4(zzsh_order.rental_order) TO ${role}`);
   }
+  if(v4.proof_present===true)await pool.query(`REVOKE ALL ON FUNCTION zzsh_order.legacy_opening_source_proof(text) FROM PUBLIC;
+    GRANT EXECUTE ON FUNCTION zzsh_order.legacy_opening_source_proof(text) TO ${role}`);
 }
 
 /** 退款可选表在宽授权之后重新收窄；调用方保有原ACL事务，不在旧前缀创建对象。 */
@@ -549,14 +557,20 @@ export async function configureJoinpayFinancialPrivileges(pool: Pick<Pool, "quer
   ];
   const account: Table[] = [{ name: "zzsh_order.joinpay_account_observation", insert: "attempt_id merchant_identity_id operation profile_id profile_sha256 rules_sha256 key_version_ref review_ref review_sha256 request_sha256 requested_at received_at http_status response_complete received_bytes transport_failure raw_body raw_sha256 evidence_level decision schema_status signature_status binding_status reason status_code error_code amounts", metadata: "recorded_at", select: "attempt_id merchant_identity_id operation evidence_level decision reason requested_at received_at recorded_at response_complete http_status status_code error_code amounts" }];
   const bank: Table[] = [{ name: "zzsh_order.withdrawal_bank_binding", insert: "id user_id revision sealed_details card_mask holder_mask", update: "revision sealed_details card_mask holder_mask", metadata: "created_at updated_at", select: "id user_id revision sealed_details card_mask holder_mask created_at updated_at" }];
-  const optional = [...collection.slice(0,7), ...refund.slice(1), ...payout, ...account, ...bank].map(t => t.name);
+  const prestart:Table[]=[
+    {name:'zzsh_order.prestart_termination',insert:'id order_id requested_by_user_id requested_by_party reason basis_digest payment_basis request_id',
+      update:'state revision last_reason approved_at updated_at liability_root_id liability_event_id',metadata:'created_at approved_xid'},
+    {name:'zzsh_order.prestart_termination_decision',insert:'id termination_id result_revision decision assessment reason admin_user_id session_id request_id',metadata:'created_xid created_at'},
+  ];
+  const optional = [...collection.slice(0,7), ...refund.slice(1), ...payout, ...account, ...bank,...prestart].map(t => t.name);
   const found = (await pool.query<{ name: string; present: boolean }>("SELECT name,to_regclass(name) IS NOT NULL AS present FROM unnest($1::text[]) AS t(name) /* joinpay financial optional tables */", [optional])).rows;
   const validInventory = (rows: typeof found, names: string[]) => rows.length === names.length && new Set(rows.map(r => r.name)).size === names.length && rows.every(r => names.includes(r.name) && typeof r.present === "boolean");
   if (!validInventory(found, optional)) throw new Error("JoinPay financial inventory is incomplete");
   const complete = (tables: Table[]) => { const rows = tables.map(t => found.find(r => r.name === t.name)!); if (rows.every(r => !r.present)) return false; if (rows.some(r => !r.present)) throw new Error("JoinPay financial group is partially deployed"); return true; };
-  const hasCollection = complete(collection.slice(0,7)), hasRefund = complete(refund.slice(1)), hasPayout = complete(payout), hasAccount = complete(account), hasBank = complete(bank);
-  if (!hasCollection && !hasRefund && !hasPayout && !hasAccount && !hasBank) return;
+  const hasCollection = complete(collection.slice(0,7)), hasRefund = complete(refund.slice(1)), hasPayout = complete(payout), hasAccount = complete(account), hasBank = complete(bank),hasPrestart=complete(prestart);
+  if (!hasCollection && !hasRefund && !hasPayout && !hasAccount && !hasBank&&!hasPrestart) return;
   if (hasPayout && !hasRefund) throw new Error("JoinPay payout requires the complete formal refund parent");
+  if(hasPrestart&&!hasRefund)throw new Error('Prestart termination requires the complete refund parent');
   if (hasCollection) {
     const parentNames = [collection[7]!.name];
     const parent = (await pool.query<{name:string;present:boolean}>("SELECT name,to_regclass(name) IS NOT NULL AS present FROM unnest($1::text[]) AS t(name)", [parentNames])).rows;
@@ -566,22 +580,28 @@ export async function configureJoinpayFinancialPrivileges(pool: Pick<Pool, "quer
     const parent = (await pool.query<{ name: string; present: boolean }>("SELECT name,to_regclass(name) IS NOT NULL AS present FROM unnest($1::text[]) AS t(name)", [[refund[0]!.name]])).rows;
     if (!validInventory(parent, [refund[0]!.name]) || parent[0]!.present !== true) throw new Error("JoinPay refund intent parent is incomplete");
   }
-  const tables = [...(hasCollection ? collection : []), ...(hasRefund ? refund : []), ...(hasPayout ? payout : []), ...(hasAccount ? account : []), ...(hasBank ? bank : [])];
+  const tables = [...(hasCollection ? collection : []), ...(hasRefund ? refund : []), ...(hasPayout ? payout : []), ...(hasAccount ? account : []), ...(hasBank ? bank : []),...(hasPrestart?prestart:[])];
   const functions = [
     ...(hasCollection ? ["zzsh_order.joinpay_formal_request_effect(text,text)"] : []),
     ...(hasRefund ? ["zzsh_order.assert_joinpay_refund_profile(text,text,text,text,zzsh_order.channel_refund_intent)", "zzsh_order.native_refund_terminal_complete(text)"] : []),
     ...(hasPayout ? ["zzsh_order.assert_joinpay_payout_scope(text,text,text,text,text,text,zzsh_order.joinpay_withdrawal_intent)", "zzsh_order.assert_joinpay_payout_profile(text,text,text,text,zzsh_order.joinpay_withdrawal_intent)", "zzsh_order.assert_joinpay_withdrawal_admission(zzsh_order.joinpay_withdrawal_intent,boolean)", "zzsh_order.joinpay_payout_raw_data(zzsh_order.joinpay_payout_observation)", "zzsh_order.joinpay_withdrawal_expected_lines(text)", "zzsh_order.joinpay_withdrawal_complete(text)"] : []),
     ...(hasBank ? ["zzsh_order.withdrawal_bank_binding_guard()"] : []),
+    ...(hasPrestart?['zzsh_order.prestart_payment_basis_valid(jsonb)','zzsh_order.prestart_liability_complete(text)',
+      'zzsh_order.native_prestart_refund_liability_complete(text)','zzsh_order.native_prestart_refund_terminal_complete(text)']:[]),
   ];
+  const columns = (await pool.query<{ name: string; attname: string }>(`/* joinpay financial columns */ SELECT t.name,a.attname FROM unnest($1::text[]) AS t(name)
+    JOIN pg_attribute a ON a.attrelid=to_regclass(t.name) AND a.attnum>0 AND NOT a.attisdropped ORDER BY t.name,a.attnum`, [tables.map(t => t.name)])).rows;
+  if (columns.some(c => !tables.some(t => t.name === c.name) || typeof c.attname !== "string")) throw new Error("JoinPay financial column inventory differs");
+  const basisColumns=['basis_kind','liability_root_id','liability_event_id'];
+  const basisCount=columns.filter(c=>c.name===refund[0]!.name&&basisColumns.includes(c.attname)).length;
+  if(basisCount!==0&&basisCount!==3||hasPrestart&&basisCount!==3)throw new Error('Refund liability extension is partially deployed');
+  if(basisCount===3){refund[0]!.insert+=' '+basisColumns.join(' ');functions.push('zzsh_order.native_abnormal_refund_liability_complete(text)','zzsh_order.native_abnormal_refund_terminal_complete(text)');}
   const identity = (await pool.query(`/* joinpay financial runtime role */ SELECT r.oid::text AS "roleOid",r.rolsuper AS superuser,r.rolbypassrls AS "bypassRls",r.rolcreaterole AS "createRole",r.rolcreatedb AS "createDb",r.rolreplication AS replication,
     EXISTS(SELECT 1 FROM pg_auth_members m WHERE m.member=r.oid) AS "memberRights",
     EXISTS(SELECT 1 FROM (SELECT c.relowner AS owner_id FROM pg_class c WHERE c.oid IN(SELECT to_regclass(name) FROM unnest($2::text[]) AS t(name))
       UNION SELECT p.proowner FROM pg_proc p WHERE p.oid IN(SELECT to_regprocedure(name) FROM unnest($3::text[]) AS t(name))) owners
       WHERE owners.owner_id=r.oid OR pg_has_role(r.oid,owners.owner_id,'MEMBER')) AS "ownerRights" FROM pg_roles r WHERE r.rolname=$1`, [runtimeRole, tables.map(t => t.name), functions])).rows[0];
   if (!identity || typeof identity.roleOid !== "string" || !/^[1-9]\d*$/.test(identity.roleOid) || ["superuser", "bypassRls", "createRole", "createDb", "replication", "memberRights", "ownerRights"].some(k => identity[k] !== false)) throw new Error("JoinPay financial runtime role must be known, unprivileged and not an owner or member");
-  const columns = (await pool.query<{ name: string; attname: string }>(`/* joinpay financial columns */ SELECT t.name,a.attname FROM unnest($1::text[]) AS t(name)
-    JOIN pg_attribute a ON a.attrelid=to_regclass(t.name) AND a.attnum>0 AND NOT a.attisdropped ORDER BY t.name,a.attnum`, [tables.map(t => t.name)])).rows;
-  if (columns.some(c => !tables.some(t => t.name === c.name) || typeof c.attname !== "string")) throw new Error("JoinPay financial column inventory differs");
   const inventory = new Map<string, string[]>();
   for (const table of tables) {
     const actual = columns.filter(c => c.name === table.name).map(c => c.attname), expected = [...new Set(words(`${table.insert} ${table.update ?? ""} ${table.metadata}`))];

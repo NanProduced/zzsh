@@ -39,6 +39,7 @@ function loadWorkspace(session, router) {
       if (name === "@/lib/order-display") return requireFromTree(path.join(tree, "apps/web/src/lib/order-display.ts"));
       const local = name.match(/(?:^\.\/|@\/components\/order\/)([a-z-]+)$/)?.[1];
       if (local === "legacy-continuation-panel") return { LegacyContinuationPanel: () => null };
+      if (local === "prestart-termination-panel") return { PrestartTerminationPanel: () => null };
       if (local && (ORDER_COMPONENTS.has(local) || local === "legacy-order-workspace")) {
         if (local === "order-trade-actions") return { OrderTradeActions: () => null };
         return loadOrderComponent(`${local}.tsx`);

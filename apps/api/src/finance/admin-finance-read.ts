@@ -108,11 +108,21 @@ export const ADMIN_FINANCE_LEDGER_SQL = `SELECT l.id,l.account_code,l.counterpar
   LEFT JOIN zzsh_order.rental_referral_earning re ON re.economic_root_id=r.id AND r.source_kind='NATIVE_RENTAL_REFERRAL'
   LEFT JOIN zzsh_order.settlement_posting p ON p.id=l.posting_id LEFT JOIN zzsh_order.rental_order o ON o.id=COALESCE(p.order_id,re.order_id)
   ORDER BY l.id COLLATE "C" LIMIT $1`;
-export function adminFinanceLedgerSql(nativeDistribution:boolean){return nativeDistribution?ADMIN_FINANCE_LEDGER_SQL:ADMIN_FINANCE_LEDGER_SQL
+export function adminFinanceLedgerSql(nativeDistribution:boolean,prestart=false){let sql=nativeDistribution?ADMIN_FINANCE_LEDGER_SQL:ADMIN_FINANCE_LEDGER_SQL
  .replace('COALESCE(p.order_id,re.order_id) AS order_id','p.order_id AS order_id')
  .replace(/re\.state AS earning_state,[\s\S]+?re\.version::text AS earning_version,/,"NULL::text AS earning_state,NULL::text AS earning_role,NULL::text AS earning_amount,NULL::text AS earning_disposition,NULL::text AS earning_recovery,NULL::text AS earning_due_at,NULL::text AS earning_version,")
  .replace(/\s+LEFT JOIN zzsh_order\.rental_referral_earning re[^\n]+/,'')
- .replace('o.id=COALESCE(p.order_id,re.order_id)','o.id=p.order_id');}
+ .replace('o.id=COALESCE(p.order_id,re.order_id)','o.id=p.order_id');
+ if(prestart){const order=nativeDistribution?'COALESCE(p.order_id,re.order_id)':'p.order_id';
+  const linked=nativeDistribution?'COALESCE(p.order_id,re.order_id,pt.order_id)':'COALESCE(p.order_id,pt.order_id)';
+  sql=sql.replace(`${order} AS order_id`,`${linked} AS order_id`).replace(`o.id=${order}`,`o.id=${linked}`).replace('LEFT JOIN zzsh_order.settlement_posting p',
+   `LEFT JOIN zzsh_order.prestart_termination pt ON r.source_kind='NATIVE_PRESTART_REFUND' AND r.source_entity='prestart_termination'
+     AND pt.id=r.source_id AND pt.state='APPROVED' AND pt.basis_digest=r.source_digest AND zzsh_order.prestart_liability_complete(pt.id)
+    LEFT JOIN zzsh_order.settlement_posting p`);
+  sql=sql.replace('r.basis_id,r.id AS economic_root_id',`pt.id AS prestart_termination_id,pt.payment_basis->>'paymentConfirmationId' AS prestart_confirmation_id,
+    pt.payment_basis->>'amountCents' AS prestart_amount_cents,${utc('pt.approved_at')} AS prestart_approved_at,r.basis_id,r.id AS economic_root_id`);
+ }
+ return sql;}
 export const ADMIN_FINANCE_OBSERVATION_SQL = `SELECT o.id,o.user_id AS subject_id,COALESCE(u.name,o.user_id) AS subject_name,o.source_kind,o.source_type,o.source_system,o.source_entity,o.source_id,o.source_digest,COALESCE(oa.basis_id,o.basis_id) AS basis_id,COALESCE(oa.included_in_opening,o.included_in_opening) AS included_in_opening,
   ${utc("o.source_event_at")} AS at,${utc("o.imported_at")} AS imported_at,
   o.snapshot->>'amount' AS amount,o.snapshot->>'action' AS action,o.snapshot->>'sourceStatus' AS source_status,
@@ -148,16 +158,20 @@ export function adminFinanceObservationSql(ready:{native_distribution?:boolean;e
 }
 type Raw = Record<string, any>;
 export function projectAdminFinanceLedger(row: Raw): FinanceEntry {
+  if(row.source_kind==='NATIVE_PRESTART_REFUND'&&typeof row.order_id!=='string')throw unavailable('Prestart refund order linkage unavailable');
   const opening = row.event_kind === "OPENING", withdrawal = row.source_entity === "withdrawal_intent", joinpayWithdrawal = row.source_entity === "joinpay_withdrawal_intent",earning=row.source_kind==='NATIVE_RENTAL_REFERRAL',duty=row.source_kind==='LEGACY_CONTINUATION_DUTY',guarantee=row.source_kind==='NATIVE_GUARANTEE';
   const ref = opening ? `OPENING:${row.basis_id}` : joinpayWithdrawal ? `JOINPAY_WITHDRAWAL:${row.source_id}` : withdrawal ? `WITHDRAWAL:${row.source_id}` : earning?`DISTRIBUTION:${row.economic_root_id}`:duty?`LEGACY_DUTY:${row.source_id}`:guarantee?`${row.source_entity==='owner_guarantee_payment'?'GUARANTEE_PAYMENT':'GUARANTEE_REFUND'}:${row.source_id}`:row.order_id ? `ORDER:${row.order_id}` : `POSTING:${row.posting_id ?? row.id}`;
-  const amount = cents(row.delta), type = opening ? "OPENING" : withdrawal || joinpayWithdrawal ? "WITHDRAWAL" : earning||duty&&row.beneficiary_role==='COMMISSION'?'DISTRIBUTION':guarantee?'GUARANTEE':bucketOf(row.account_code) === "REFUND_PAYABLE" ? "REFUND" : "SETTLEMENT";
+  const amount = cents(row.delta), type = opening ? "OPENING" : withdrawal || joinpayWithdrawal ? "WITHDRAWAL" : earning||duty&&row.beneficiary_role==='COMMISSION'?'DISTRIBUTION':guarantee?'GUARANTEE':row.source_kind==='NATIVE_PRESTART_REFUND'||bucketOf(row.account_code) === "REFUND_PAYABLE" ? "REFUND" : "SETTLEMENT";
   return { id: `ledger:${row.id}`, documentRef: ref, documentNumber: row.display_no ?? (opening ? row.basis_id : row.source_id) ?? row.posting_id ?? row.id,
     subjectId: row.subject_id ?? (bucketOf(row.account_code) === "PLATFORM" ? "PLATFORM" : "SYSTEM"), subjectName: row.subject_id ? displayName(row.subject_name, row.subject_id) : bucketOf(row.account_code) === "PLATFORM" ? "平台" : "对照科目", bucket: bucketOf(row.account_code), direction: amount === null ? "UNKNOWN" : BigInt(amount) < 0n ? "OUT" : "IN",
-    deltaCents: amount, knowledge: amount === null ? "UNKNOWN" : "KNOWN", kind: type, state: earning?row.earning_state??'UNKNOWN':type === "REFUND" ? "REFUND_PAYABLE_RECORDED" : "POSTED", classification: opening ? "OPENING" : "CURRENT_POSTED", affectsCurrentWallet: row.subject_id !== null && row.subject_id !== undefined, affectsCurrentLedger: true,
+    deltaCents: amount, knowledge: amount === null ? "UNKNOWN" : "KNOWN", kind: type, state: earning?row.earning_state??'UNKNOWN':type === "REFUND" ? "REFUND_PAYABLE_RECORDED" : "POSTED", classification: opening ? "OPENING" : "CURRENT_POSTED", affectsCurrentWallet: row.source_kind!=='NATIVE_PRESTART_REFUND'&&row.subject_id !== null && row.subject_id !== undefined, affectsCurrentLedger: true,
     occurredAt: row.at, importedAt: row.recorded_at ?? row.at, sourceType: row.source_type ?? "NATIVE", sourceSystem: row.source_system ?? "zzsh", sourceEntity: row.source_entity ?? "settlement_posting", sourceId: row.source_id ?? row.posting_id ?? row.id,
     sourceDigest: row.source_digest ?? null, basisId: row.basis_id ?? null, reasonCodes: [...(amount === null ? ["INVALID_EXACT_AMOUNT"] : []), ...(type === "REFUND" ? ["REFUND_PAYMENT_SOURCE_NOT_AVAILABLE"] : [])], accountCode: row.account_code,
     evidence: { postedAt:row.at??null,recordedAt:row.recorded_at??row.at??null,eventId:row.finance_event_id??null,eventKind: row.event_kind ?? null, openingCutoff: row.opening_cutoff ?? null, coveredCount: row.covered_count ?? null, postingId: row.posting_id ?? null,
       paymentConfirmationId: row.payment_confirmation_id ?? null, settlementVersionId: row.settlement_version_id ?? null, settlementVersionHash: row.version_hash ?? null,
+      ...(row.source_kind==='NATIVE_PRESTART_REFUND'?{prestartTerminationId:row.prestart_termination_id??row.source_id,prestartPaymentConfirmationId:row.prestart_confirmation_id??null,
+        prestartOriginalCents:cents(row.prestart_amount_cents),prestartApprovedAt:row.prestart_approved_at??null,prestartSourceDigest:row.source_digest??null,
+        localFundsEffect:'REFUND_LIABILITY_RECOGNIZED',prestartBankArrival:'UNKNOWN'}:{}),
       postingCapturedCents: cents(row.captured_cents), postingOwnerNetCents:cents(row.owner_net_cents),
       refundPayableCents: cents(row.renter_refund_cents), refundDueAt: row.refund_due_at ?? null, ...(type === "REFUND" ? { refundPaidCents: null, refundPaymentReference: null } : {}), ...(earning?{earningRole:row.earning_role??null,earningAmountCents:cents(row.earning_amount),earningFundsDisposition:row.earning_disposition??null,recoveryRequiredCents:cents(row.earning_recovery),dueAt:row.earning_due_at??null,earningVersion:row.earning_version??null}:{}),postedPlatformContributionCents: cents(row.platform_contribution_cents) },
     related: [...(row.order_id ? [{ ref: `ORDER:${row.order_id}`, label: "原订单", path: `/orders/${encodeURIComponent(row.order_id)}` }] : []), ...(row.account_id ? [{ ref: row.account_id, label: "资源账号", path: `/supply/accounts/${encodeURIComponent(row.account_id)}` }] : [])] };
@@ -251,7 +265,8 @@ export async function readFinanceSourceVersion(client: PoolClient, scope?: Finan
       AND COALESCE(has_table_privilege(to_regclass('zzsh_order.joinpay_refund_attempt'),'SELECT'),false)
       AND COALESCE(has_table_privilege(to_regclass('zzsh_iam.audit_event'),'SELECT'),false)
       AND COALESCE(has_table_privilege(to_regclass('zzsh_order.payment_confirmation'),'SELECT'),false)) AS refund_read_dependencies,
-    to_regclass('zzsh_order.joinpay_withdrawal_intent') IS NOT NULL AS joinpay_withdrawals`)).rows[0];
+    to_regclass('zzsh_order.joinpay_withdrawal_intent') IS NOT NULL AS joinpay_withdrawals,
+    to_regclass('zzsh_order.prestart_termination') IS NOT NULL AND to_regprocedure('zzsh_order.prestart_liability_complete(text)') IS NOT NULL AS prestart_termination`)).rows[0];
   if (!ready?.ready) throw unavailable("Finance read foundation is not available");
   const scoped = scope ? financeScopedVersionSql(ready, scope) : null;
   const version=(await client.query(scoped?.text ?? financeVersionSql(ready), scoped?.values ?? [])).rows[0]?.finance_version;
@@ -300,7 +315,7 @@ async function loadHistoricalReverseRows(client:PoolClient,documentRef:string|un
 export async function loadAdminFinanceFacts(client: PoolClient, scope: FinanceLoadScope = {},relations?:HistoricalRelationAccess): Promise<FinanceFacts> {
   const versionScope: FinanceVersionScope | undefined = scope.lookup ? undefined : scope.documentRef ? { mode: "document", documentRef: scope.documentRef } : scope.subjectId ? { mode: "subject", subjectId: scope.subjectId } : undefined;
   const {ready,version,asOf}=await readFinanceSourceVersion(client, versionScope);
-  let lookupPage: FinanceFacts["lookupPage"], entryScope = scope;const ledgerSource=adminFinanceLedgerSql(ready.native_distribution===true),historySource=adminFinanceObservationSql(ready);
+  let lookupPage: FinanceFacts["lookupPage"], entryScope = scope;const ledgerSource=adminFinanceLedgerSql(ready.native_distribution===true,ready.prestart_termination===true),historySource=adminFinanceObservationSql(ready);
   if(scope.lookup){
     const query=financeLookupPageSql(ledgerSource,historySource,ready,scope), rows=(await client.query(query.text,query.values)).rows, row=rows[0];
     if(!row||![row.document_count,row.entry_count].every(value=>Number.isSafeInteger(Number(value))&&Number(value)>=0))throw unavailable("Finance page evidence unavailable");

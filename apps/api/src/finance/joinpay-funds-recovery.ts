@@ -4,6 +4,7 @@ import { executeJoinpayRefund, allocatePostedJoinpayRefunds, RefundAllocationCom
 import { readFormalRefundAdmission, assertFormalRefundProfile, assertRefundStart } from "../order/joinpay-refund-profile";
 import { executeJoinpayPayout, PayoutCommitUnknown, JOINPAY_PAYOUT_MAX_AUTOMATIC_QUERIES, type PayoutExecution } from "./joinpay-payout-attempt";
 import { readPayoutScope } from "./joinpay-payout-profile";
+import { allocatePrestartJoinpayRefunds,PrestartRefundAllocationUnknown } from "../order/prestart-refund-store";
 
 export type JoinpayFundsRecoverySettings = { workerId: string; batchLimit: number; minimumIntervalSeconds: number };
 type RefundOptions = JoinpayFundsRecoverySettings & { execution: RefundExecution };
@@ -47,6 +48,7 @@ async function scan(pool: Pool, resource: { database: string; runtimeUser: strin
 export async function recoverJoinpayRefundBatch(input: RefundOptions, signal?: AbortSignal) {
   const o = refundOptions(input), a = readFormalRefundAdmission(o.execution.admission);
   const allocation = o.execution.initialProfile ? await allocatePostedJoinpayRefunds(o.execution, o.batchLimit, signal) : undefined;
+  const prestartAllocation=o.execution.initialProfile?await allocatePrestartJoinpayRefunds(o.execution,o.batchLimit,signal):undefined;
   const accepted = [{ reference: a.reference, sha256: a.sha256 }, ...a.historicalInitialAdmissions];
   const canSubmit = a.acceptedProfiles.some(profile => profile.operation === "SUBMIT");
   const rows = await scan(o.execution.pool, a, `SELECT i.id,i.state FROM zzsh_order.channel_refund_intent i
@@ -64,9 +66,13 @@ export async function recoverJoinpayRefundBatch(input: RefundOptions, signal?: A
         SELECT 1 FROM zzsh_iam.audit_event blocked WHERE blocked.action='order.refund.abnormal.first_submit.blocked'
           AND blocked.object_type='channel_refund_intent' AND blocked.object_id=i.id AND blocked.outcome='FAILURE'
           AND blocked.occurred_at>clock_timestamp()-make_interval(secs=>${ABNORMAL_BLOCK_RETRY_SECONDS})))
+      AND (NOT(i.basis_kind='PRESTART_TERMINATION' AND i.state='READY') OR NOT EXISTS(
+        SELECT 1 FROM zzsh_iam.audit_event blocked WHERE blocked.action='order.refund.prestart.first_submit.blocked'
+          AND blocked.object_type='channel_refund_intent' AND blocked.object_id=i.id AND blocked.outcome='FAILURE'
+          AND blocked.occurred_at>clock_timestamp()-make_interval(secs=>${ABNORMAL_BLOCK_RETRY_SECONDS})))
     ORDER BY i.due_at,i.id LIMIT $6`, [a.merchantIdentityId, a.merchantNo, JSON.stringify(accepted), REFUND_STATES,
     o.minimumIntervalSeconds, o.batchLimit, JOINPAY_REFUND_MAX_AUTOMATIC_QUERIES, canSubmit], REFUND_STATES, o.batchLimit, "REFUND", signal);
-  const result = { selected: rows.length, recorded: 0, skipped: 0, ...(allocation ? { allocation } : {}) };
+  const result = { selected: rows.length, recorded: 0, skipped: 0, ...(allocation ? { allocation } : {}),...(prestartAllocation?{prestartAllocation}:{}) };
   for (const row of rows) {
     if (signal?.aborted) break;
     const observed = await executeJoinpayRefund(o.execution, row.id, o.workerId, o.minimumIntervalSeconds);
@@ -103,7 +109,7 @@ export async function recoverJoinpayPayoutBatch(input: PayoutOptions, signal?: A
 
 function start(run: (signal: AbortSignal) => Promise<unknown>, interval: number) {
   const controller = new AbortController(); let timer: ReturnType<typeof setTimeout> | undefined, active: Promise<void> | undefined;
-  let failure: { code: string; intentId?: string; postingId?: string; idempotencyKey?: string; phase?: "CLAIM" | "RESULT" | "ALLOCATION" } | null = null;
+  let failure: { code: string; intentId?: string; postingId?: string; terminationId?:string; idempotencyKey?: string; phase?: "CLAIM" | "RESULT" | "ALLOCATION" } | null = null;
   const tick = () => {
     if (controller.signal.aborted) return;
     active = run(controller.signal).then(() => {
@@ -111,6 +117,8 @@ function start(run: (signal: AbortSignal) => Promise<unknown>, interval: number)
     }, error => {
       failure = error instanceof RefundAllocationCommitUnknown
         ? { code: error.code, postingId: error.postingId, idempotencyKey: error.idempotencyKey, phase: "ALLOCATION" }
+        : error instanceof PrestartRefundAllocationUnknown
+          ? {code:error.code,terminationId:error.terminationId,idempotencyKey:error.idempotencyKey,phase:"ALLOCATION"}
         : error instanceof RefundAttemptCommitUnknown || error instanceof PayoutCommitUnknown
           ? { code: error.code, intentId: error.intentId, phase: error.phase } : { code: "FUNDS_RECOVERY_FAILED" };
       controller.abort();

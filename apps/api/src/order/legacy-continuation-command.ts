@@ -69,6 +69,44 @@ async function reviseCommission(client: PoolClient, actor: LegacyContinuationAct
     VALUES($1,$2,$3,$4::jsonb,$5::jsonb,$6::jsonb,$7,'CONFIRM_FINAL_AMOUNT')`,
     [newSupplyId("legacy_duty_revision"), existing.id, updated.rows[0]!.revision, JSON.stringify({ amountCents: existing.amountCents, maturityAt: existing.maturityAt }), JSON.stringify({ amountCents, maturityAt }), JSON.stringify(actor), versionId]);
 }
+type ReviewedVoidCommission = { dutyId: string; sourceRecordId: string; revision: string; sourceFactAuditId: string };
+type StoredAudit = { id: string; actorType: string; actorId: string; sessionId: string; requestId: string; action: string; objectType: string; objectId: string; outcome: string; details: Record<string, unknown> };
+function canonicalSource(value: unknown, limit: number): Record<string, unknown> | null {
+  if (!value || typeof value !== "object") return null;
+  const proof = value as { canonical?: unknown; digest?: unknown };
+  if (typeof proof.canonical !== "string" || proof.canonical.length > limit || typeof proof.digest !== "string" || sha256Hex(proof.canonical) !== proof.digest) return null;
+  try { const row = JSON.parse(proof.canonical); return row && typeof row === "object" && !Array.isArray(row) && canonicalize(row) === proof.canonical ? row : null; } catch { return null; }
+}
+/** The original calculation stays sealed. A separately reviewed terminal disposal only removes its payable effect. */
+async function readReviewedCommissionVoid(client: PoolClient, binding: LegacyOrderBinding, duty: LegacyDutyRow, source: { id: string; beneficiaryId: string; level: string; ratio: string }): Promise<ReviewedVoidCommission> {
+  if (duty.settledBy !== null || duty.settledRefType !== null || duty.settledRefId !== null || duty.settledRefDigest !== null) throw conflict("DUTY_REVISION_CONFLICT");
+  const rows = (await client.query<{ sourceDigest: string; decisionEvidenceRef: string | null; decidedBy: LegacyContinuationActor | null; decisionReason: string | null; factAudit: StoredAudit | null; voidAudit: StoredAudit | null }>(`SELECT d.source_digest AS "sourceDigest",d.decision_evidence_ref AS "decisionEvidenceRef",d.decided_by AS "decidedBy",d.decision_reason AS "decisionReason",
+    jsonb_build_object('id',f.id,'actorType',f.actor_type,'actorId',f.actor_id,'sessionId',f.session_id,'requestId',f.request_id,'action',f.action,'objectType',f.object_type,'objectId',f.object_id,'outcome',f.outcome,'details',f.details) AS "factAudit",
+    jsonb_build_object('id',v.id,'actorType',v.actor_type,'actorId',v.actor_id,'sessionId',v.session_id,'requestId',v.request_id,'action',v.action,'objectType',v.object_type,'objectId',v.object_id,'outcome',v.outcome,'details',v.details) AS "voidAudit"
+    FROM zzsh_order.legacy_order_duty d JOIN zzsh_iam.audit_event f ON f.id=d.decision_evidence_ref
+    JOIN zzsh_iam.audit_event v ON v.object_id=d.order_id AND v.action='order.legacy.duty.void' AND v.details->>'dutyId'=d.id AND v.details->>'afterRevision'=d.revision::text
+    WHERE d.id=$1 AND d.order_id=$2 AND d.revision=$3 AND d.status='VOID'`, [duty.id, binding.id, duty.revision])).rows;
+  if (rows.length !== 1) throw conflict("VOID_SOURCE_FACT_REQUIRED");
+  const row = rows[0]!, fact = row.factAudit, disposed = row.voidAudit, decided = row.decidedBy;
+  const auditBound = (audit: StoredAudit | null, action: string) => !!audit && audit.actorType === "admin" && !!audit.actorId && !!audit.sessionId && !!audit.requestId && audit.action === action && audit.objectType === "rental_order" && audit.objectId === binding.id && audit.outcome === "SUCCESS" && !!audit.details && typeof audit.details === "object" && !Array.isArray(audit.details);
+  if (row.sourceDigest !== binding.sourceDigest || !auditBound(fact, "order.legacy.duty.source_fact_reviewed") || !auditBound(disposed, "order.legacy.duty.void") || !fact || !disposed || !decided || decided.realm !== "admin"
+    || disposed.actorId !== decided.userId || disposed.sessionId !== decided.sessionId || disposed.requestId !== decided.requestId
+    || row.decisionEvidenceRef !== fact.id || disposed.details.sourceFactAuditId !== fact.id || disposed.details.dutyId !== duty.id
+    || disposed.details.afterRevision !== duty.revision || disposed.details.beforeRevision !== (BigInt(duty.revision) - 1n).toString()
+    || typeof row.decisionReason !== "string" || !row.decisionReason.trim() || row.decisionReason.length > 500 || disposed.details.reason !== row.decisionReason
+    || fact.details.sourceRecordId !== source.id || fact.details.parentSourceDigest !== binding.sourceDigest || typeof fact.details.evidenceRef !== "string" || !fact.details.evidenceRef || fact.details.evidenceRef.length > 512) throw conflict("VOID_SOURCE_FACT_REQUIRED");
+  const reviewed = canonicalSource(fact.details.sourceRecord, 32768);
+  if (!reviewed || reviewed.id !== source.id || reviewed.order_id !== binding.legacyId || reviewed.user_id !== source.beneficiaryId || String(reviewed.level) !== source.level || typeof reviewed.ratio !== "string" || !legacyDecimalEquals(reviewed.ratio, source.ratio) || reviewed.status !== fact.details.sourceStatus) throw conflict("VOID_SOURCE_FACT_REQUIRED");
+  if (reviewed.status === "3") {
+    if (fact.details.parentCancelledNotPayable !== false || fact.details.parentCancellation != null) throw conflict("VOID_SOURCE_FACT_REQUIRED");
+  } else {
+    const cancellation = fact.details.parentCancellation as { canonical?: unknown; digest?: unknown; notPayableCanonical?: unknown; notPayableDigest?: unknown } | null;
+    const parent = canonicalSource(cancellation, 65536), decision = canonicalSource({ canonical: cancellation?.notPayableCanonical, digest: cancellation?.notPayableDigest }, 65536);
+    if (fact.details.parentCancelledNotPayable !== true || !parent || !decision || parent.id !== binding.legacyId || parent.order_status !== "5" || parent.user_id !== binding.legacyRenterId || parent.sale_user_id !== binding.legacyOwnerId || parent.accounts_id !== binding.legacyAccountId
+      || decision.parentCancellationDigest !== cancellation?.digest || decision.sourceRecordDigest !== (fact.details.sourceRecord as { digest: string }).digest || decision.decision !== "NOT_PAYABLE" || typeof decision.sourceRuleEvidenceRef !== "string" || !decision.sourceRuleEvidenceRef) throw conflict("VOID_SOURCE_FACT_REQUIRED");
+  }
+  return { dutyId: duty.id, sourceRecordId: source.id, revision: duty.revision, sourceFactAuditId: fact.id };
+}
 /** Caller owns transaction and wraps this action with the existing withIdempotency/runIdempotentWrite. */
 export async function applyLegacyContinuationCommand(client: PoolClient, actor: LegacyContinuationActor, orderId: string, input: LegacyMutationInput, finance?: LegacyDutyFinalizationReader,authority?:LegacyMutationAuthority) {
   const a=authority??await authorizeLegacyMutation(client,actor,orderId),binding=a.binding,locked=await lockLegacyContinuationOrder(client,orderId);
@@ -91,6 +129,17 @@ export async function applyLegacyContinuationCommand(client: PoolClient, actor: 
   const plan = planLegacyContinuation(facts.evidence, command);
   if (!plan.ok) throw conflict(plan.code);
   if (plan.fingerprint !== input.planFingerprint) throw conflict("PLAN_FINGERPRINT_MISMATCH");
+  const reviewedVoidCommissions: ReviewedVoidCommission[] = [];
+  if (input.kind === "confirm") for (const commission of plan.commissionRevisions) {
+    const matches = locked.duties.filter(d => d.kind === "COMMISSION" && d.sourceRecordId === commission.id);
+    if (!commission.recalculable || !matches.some(d => d.status === "VOID")) continue;
+    const sources = facts.evidence.source.commissions.filter(c => c.id === commission.id), existing = matches[0]!;
+    if (matches.length !== 1 || sources.length !== 1) throw conflict("VOID_SOURCE_FACT_REQUIRED");
+    const source = sources[0]!, beneficiary = await legacyBeneficiaryUserId(client, commission.beneficiaryId);
+    if (!beneficiary || existing.counterpartyUserId !== beneficiary || existing.level !== source.level || !legacyDecimalEquals(existing.ratio, source.ratio)) throw conflict("DUTY_SOURCE_BINDING_MISMATCH");
+    if (!a.userIds.includes(beneficiary)) throw conflict("CONTINUATION_BENEFICIARIES_CHANGED");
+    reviewedVoidCommissions.push(await readReviewedCommissionVoid(client, binding, existing, source));
+  }
   const versionId = newSupplyId("legacy_continuation"), resultId = newSupplyId("legacy_evidence"), revision = (BigInt(locked.head?.revision ?? "0") + 1n).toString();
   const resultFacts = deriveLegacyFacts(facts, plan, command, row.id, versionId), sealed = sealLegacyFacts(resultFacts);
   const clock = (await client.query<{ at: string; maturityAt: string }>(`WITH c AS(SELECT clock_timestamp() AS at) SELECT to_char(at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at,to_char((at+interval '7 days') AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "maturityAt" FROM c`)).rows[0];
@@ -112,6 +161,7 @@ export async function applyLegacyContinuationCommand(client: PoolClient, actor: 
     const now = clock.maturityAt;
     for (const commission of plan.commissionRevisions) {
       if (!commission.recalculable) continue;
+      if (reviewedVoidCommissions.some(d => d.sourceRecordId === commission.id)) continue;
       const source = facts.evidence.source.commissions.find(c => c.id === commission.id)!;
       const beneficiary = await legacyBeneficiaryUserId(client, commission.beneficiaryId);
       if (!beneficiary) { isolated.push({ sourceRecordId: commission.id, reason: "PARTY_UNMAPPED" }); continue; }
@@ -124,7 +174,7 @@ export async function applyLegacyContinuationCommand(client: PoolClient, actor: 
     }
   }
   if (input.kind === "confiscate") dutyIds.push(await createDuty(client, binding, versionId, "DEPOSIT_COMPENSATION", versionId, binding.ownerUserId, plan.amounts.depositCompensation!));
-  await recordAudit(client, { actorType: actor.realm, actorId: actor.userId, sessionId: actor.sessionId, requestId: actor.requestId, action: "order.legacy.continuation." + input.kind, objectType: "rental_order", objectId: orderId, outcome: "SUCCESS", details: { inputEvidenceId: row.id, resultEvidenceId: resultId, versionId, before: { revision: locked.head?.revision ?? null, stage: facts.evidence.source.orderStatus }, after: { revision, stage: resultFacts.evidence.source.orderStatus }, dutyIds, isolated, amountsDigest: sha256Hex(canonicalize(resultFacts.amounts)) } });
+  await recordAudit(client, { actorType: actor.realm, actorId: actor.userId, sessionId: actor.sessionId, requestId: actor.requestId, action: "order.legacy.continuation." + input.kind, objectType: "rental_order", objectId: orderId, outcome: "SUCCESS", details: { inputEvidenceId: row.id, resultEvidenceId: resultId, versionId, before: { revision: locked.head?.revision ?? null, stage: facts.evidence.source.orderStatus }, after: { revision, stage: resultFacts.evidence.source.orderStatus }, dutyIds, isolated, amountsDigest: sha256Hex(canonicalize(resultFacts.amounts)), ...(reviewedVoidCommissions.length ? { reviewedVoidCommissions } : {}) } });
   await client.query("SET CONSTRAINTS ALL IMMEDIATE");
   return { status: 200, body: { orderId, command: input.kind, revision, versionId, inputEvidenceId: row.id, resultEvidenceId: resultId, stage: resultFacts.evidence.source.orderStatus, channelState: "UNKNOWN" } };
 }
