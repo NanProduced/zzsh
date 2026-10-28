@@ -729,6 +729,13 @@
       "when": 1793170000000,
       "tag": "0103_user_account_freeze",
       "breakpoints": true
+    },
+    {
+      "idx": 105,
+      "version": "7",
+      "when": 1793170120000,
+      "tag": "0105_identity_display_source",
+      "breakpoints": true
     }
   ]
 }
