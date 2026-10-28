@@ -1,4 +1,5 @@
 import { applyOrderUserFacts, readOrderUserFacts } from "./frozen-listing-read";
+import { readSettlementStages } from "./settlement-record";
 import type { PoolClient } from "pg";
 import { conflict, invalid, sha256Hex } from "../supply/supply-util";
 import { ORDER_FIELDS, ORDER_FROM, projectOrder, type OrderRow } from "./order";
@@ -72,6 +73,9 @@ export async function listUnifiedUserOrders(client: PoolClient, userId: string, 
     return { origin: row.origin as "NATIVE" | "LEGACY", orderId: row.id, accountId: r.accountId ?? null, versionId: r.versionId ?? null, contentHash: r.contentHash ?? null, ownerUserId: r.ownerUserId ?? null };
   }));
   page.forEach((row, index) => applyOrderUserFacts(items[index]!, facts.get(`${row.origin}:${row.id}`)));
+  // B3: per-page settlement stage; legacy orders have no settlement model -> stage null.
+  const stages = await readSettlementStages(client, page.filter(row => row.origin === "NATIVE").map(row => row.id), userId);
+  page.forEach((row, index) => { items[index]!.stage = row.origin === "NATIVE" ? stages.get(row.id) ?? null : null; });
   return {
     items,
     nextCursor: rows.length > filter.limit && last

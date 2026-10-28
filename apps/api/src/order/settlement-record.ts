@@ -1563,3 +1563,62 @@ export async function reviewSettlement(client: PoolClient, orderId: string, vers
   await postReadySettlement(client, order, version.id, actor, requestId, true);
   return view(client, order);
 }
+
+
+/* ---- B3: per-page settlement stage summary (no amounts). Shared by list + single detail. ---- */
+export type SettlementStageCode = "NONE" | "RENTING" | "INTAKE_PENDING" | "DECISION_PENDING" | "DECISION_WAITING" | "POSTED" | "UNKNOWN";
+export interface SettlementStage { code: SettlementStageCode; label: string | null; viewerActionRequired: boolean; settlementVersionNo: number | null }
+export interface SettlementStageFacts {
+  orderStatus: string; viewerParty: "RENTER" | "OWNER" | null; posted: boolean; intakeOpen: boolean;
+  currentVersionNo: number | null; renterAction: string | null; ownerAction: string | null;
+}
+const STAGE_LABELS: Record<SettlementStageCode, string | null> = {
+  NONE: null, RENTING: "租赁中", INTAKE_PENDING: "结算受理中", DECISION_PENDING: "待你确认结算",
+  DECISION_WAITING: "等待对方或平台确认", POSTED: "已结算", UNKNOWN: "状态待核实",
+};
+function stage(code: SettlementStageCode, versionNo: number | null, viewerActionRequired = false): SettlementStage {
+  return { code, label: STAGE_LABELS[code], viewerActionRequired, settlementVersionNo: versionNo };
+}
+export function unknownSettlementStage(): SettlementStage { return stage("UNKNOWN", null); }
+export function settlementStageOf(f: SettlementStageFacts): SettlementStage {
+  if (f.orderStatus !== "PAID" && f.orderStatus !== "COMPLETED") return stage("NONE", null);
+  const v = f.currentVersionNo;
+  if (f.posted) return stage("POSTED", v);
+  if (f.intakeOpen) return stage("INTAKE_PENDING", v);
+  if (v !== null) {
+    const mine = f.viewerParty === "RENTER" ? f.renterAction : f.viewerParty === "OWNER" ? f.ownerAction : "N/A";
+    const rejected = f.renterAction === "REJECT" || f.ownerAction === "REJECT";
+    if (f.viewerParty && mine === null && !rejected) return stage("DECISION_PENDING", v, true);
+    return stage("DECISION_WAITING", v);
+  }
+  return f.orderStatus === "PAID" ? stage("RENTING", null) : stage("UNKNOWN", null);
+}
+export const SETTLEMENT_STAGES_SQL = `/* user-settlement-stage-batch */
+SELECT o.id, o.status AS "orderStatus",
+       CASE WHEN o.renter_user_id = $2 THEN 'RENTER' WHEN o.owner_user_id = $2 THEN 'OWNER' END AS "viewerParty",
+       EXISTS (SELECT 1 FROM zzsh_order.settlement_posting p WHERE p.order_id = o.id) AS posted,
+       COALESCE((SELECT i.status = 'OPEN' FROM zzsh_order.settlement_intake i WHERE i.order_id = o.id ORDER BY i.version_no DESC LIMIT 1), false) AS "intakeOpen",
+       cv.version_no AS "currentVersionNo",
+       (SELECT d.action FROM zzsh_order.settlement_decision d WHERE d.settlement_version_id = cv.id AND d.party = 'RENTER' LIMIT 1) AS "renterAction",
+       (SELECT d.action FROM zzsh_order.settlement_decision d WHERE d.settlement_version_id = cv.id AND d.party = 'OWNER' LIMIT 1) AS "ownerAction"
+  FROM zzsh_order.rental_order o
+  LEFT JOIN LATERAL (SELECT v.id, v.version_no FROM zzsh_order.settlement_version v
+                      WHERE v.order_id = o.id AND v.superseded_at IS NULL ORDER BY v.version_no DESC LIMIT 1) cv ON true
+ WHERE o.id::text = ANY($1::text[]) AND (o.renter_user_id = $2 OR o.owner_user_id = $2)`;
+/** One query per page; missing/denied relations (42P01/42501) degrade to UNKNOWN via savepoint. */
+export async function readSettlementStages(client: PoolClient, orderIds: string[], viewerUserId: string): Promise<Map<string, SettlementStage>> {
+  const ids = [...new Set(orderIds)], out = new Map<string, SettlementStage>(), sp = "user_settlement_stage_read";
+  if (!ids.length) return out;
+  await client.query(`SAVEPOINT ${sp}`);
+  try {
+    const rows = (await client.query<SettlementStageFacts & { id: string; currentVersionNo: number | string | null }>(SETTLEMENT_STAGES_SQL, [ids, viewerUserId])).rows;
+    await client.query(`RELEASE SAVEPOINT ${sp}`);
+    for (const r of rows) out.set(r.id, settlementStageOf({ ...r, currentVersionNo: r.currentVersionNo === null ? null : Number(r.currentVersionNo) }));
+  } catch (error) {
+    const code = (error as { code?: string }).code;
+    await client.query(`ROLLBACK TO SAVEPOINT ${sp}`); await client.query(`RELEASE SAVEPOINT ${sp}`);
+    if (code !== "42P01" && code !== "42501") throw error;
+    for (const id of ids) out.set(id, unknownSettlementStage());
+  }
+  return out;
+}
