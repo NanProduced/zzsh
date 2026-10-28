@@ -806,7 +806,7 @@ function projectSettlementBody(value: unknown): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
   const body = pickFields(value, [
     "error", "orderId", "revision", "rentalStarted", "openings", "intakes", "versions", "currentRequest", "settlement", "posting",
-    "ready", "reasons", "postingAuthorized", "feeDeducted", "orderStatus", "accepted", "early", "amounts", "versionHash",
+    "ready", "reasons", "stage", "postingAuthorized", "feeDeducted", "orderStatus", "accepted", "early", "amounts", "versionHash",
     "baseVersionId", "consumed", "systemOwnerNet", "systemRenterRefund", "proposedOwnerNet", "proposedRenterRefund", "reason",
   ]);
   if (Array.isArray(body.openings)) body.openings = body.openings.map((opening) => {
@@ -854,7 +854,14 @@ async function audit(client: PoolClient, actor: Actor, action: string, orderId: 
 }
 
 export async function readSettlement(client: PoolClient, orderId: string, actor: Actor): Promise<Command> {
-  return view(client, await lockSettlement(client, orderId, actor, false));
+  const order = await lockSettlement(client, orderId, actor, false);
+  const result = await view(client, order);
+  // B3 (Owner t274u): optional additive stage, same settlementStageOf as the list batch read.
+  return { ...result, body: { ...result.body, stage: settlementStageOf(settlementStageFactsFromView(result.body, viewerPartyOf(order, actor))) } };
+}
+function viewerPartyOf(order: LockedOrder, actor: Actor): "RENTER" | "OWNER" | null {
+  if (actor.realm !== "user") return null;
+  return order.renterUserId === actor.userId ? "RENTER" : order.ownerUserId === actor.userId ? "OWNER" : null;
 }
 
 export async function recheckSettlement(client: PoolClient, orderId: string, actor: Actor, allowCompletedReplay = false): Promise<void> {
@@ -1619,9 +1626,7 @@ export function settlementStageFactsFromView(body: Record<string, unknown>, view
 }
 /** Single-order stage via the same settlementStageOf used by readSettlementStages. */
 export async function readSettlementStage(client: PoolClient, orderId: string, actor: Actor): Promise<SettlementStage> {
-  const order = await lockSettlement(client, orderId, actor, false);
-  const viewerParty = order.renterUserId === actor.userId ? "RENTER" : order.ownerUserId === actor.userId ? "OWNER" : null;
-  return settlementStageOf(settlementStageFactsFromView((await view(client, order)).body, viewerParty));
+  return (await readSettlement(client, orderId, actor)).body.stage as SettlementStage;
 }
 /** One query per page; missing/denied relations (42P01/42501) degrade to UNKNOWN via savepoint. */
 export async function readSettlementStages(client: PoolClient, orderIds: string[], viewerUserId: string): Promise<Map<string, SettlementStage>> {

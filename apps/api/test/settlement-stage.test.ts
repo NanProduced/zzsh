@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { PoolClient } from "pg";
-import { readSettlementStages, settlementStageFactsFromView, settlementStageOf, type SettlementStageFacts } from "../src/order/settlement-record";
+import { projectSettlementResponse, readSettlementStages, settlementStageFactsFromView, settlementStageOf, type SettlementStageFacts } from "../src/order/settlement-record";
 
 const base: SettlementStageFacts = { orderStatus: "PAID", viewerParty: "RENTER", posted: false, intakeOpen: false, currentVersionNo: null, renterAction: null, ownerAction: null };
 
@@ -46,4 +46,14 @@ test("single /settlement view derives the same stage facts as the list batch row
     assert.deepEqual(facts, listRow);
     assert.deepEqual(settlementStageOf(facts), settlementStageOf(listRow));
   }
+});
+
+test("GET /settlement user projection keeps the optional additive stage field", async () => {
+  const stage = settlementStageOf({ ...base, currentVersionNo: 2 });
+  const out = await projectSettlementResponse({} as PoolClient, { realm: "user", userId: "u1", sessionId: "s1" },
+    { status: 200, body: { orderId: "o1", orderStatus: "PAID", stage, secretInternal: "x" } });
+  const body = out.body as Record<string, unknown>;
+  assert.deepEqual(body.stage, stage);
+  assert.equal(stage.code, "DECISION_PENDING");
+  assert.equal(body.secretInternal, undefined);
 });
