@@ -731,6 +731,13 @@
       "breakpoints": true
     },
     {
+      "idx": 104,
+      "version": "7",
+      "when": 1793170060000,
+      "tag": "0104_finance_withdrawal_query_permission",
+      "breakpoints": true
+    },
+    {
       "idx": 105,
       "version": "7",
       "when": 1793170120000,
