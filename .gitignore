@@ -41,6 +41,8 @@ playwright-report/
 .rtk/
 .idea/
 .vscode/
+.VSCodeCounter/
+
 # Machine-local skills, installer metadata and Windows junctions
 /skills-lock.json
 .DS_Store

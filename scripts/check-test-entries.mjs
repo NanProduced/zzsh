@@ -59,7 +59,7 @@ function readPackage(root, dir) {
 
 // shortcut: only current literal commands and && chains are supported; report
 // UNKNOWN before extending this grammar for a new runner or shell construct.
-function parseScript(script) {
+function parseScript(script, packageDir) {
   const tokens = [];
   const token = /"([^"]*)"|'([^']*)'|(&&)|([^\s"'&|;<>`$()]+)/y;
   for (let offset = 0; offset < script.length;) {
@@ -91,6 +91,15 @@ function parseScript(script) {
       if (supported && !(all && workspace)) calls.push({ script: name, workspace, all, ifPresent });
       else errors.push("unsupported npm invocation");
     } else if (program === "node") {
+      if (args.length === 1 && args[0] === "scripts/run-compiled-tests.mjs") {
+        try {
+          const manifest = JSON.parse(readFileSync(join(packageDir, "scripts/compiled-tests.json"), "utf8"));
+          if (!Array.isArray(manifest) || !manifest.length || new Set(manifest).size !== manifest.length ||
+              manifest.some(file => typeof file !== "string" || !/^dist\/test\/[\w.-]+\.js$/.test(file))) throw new Error("invalid manifest");
+          files.push(...manifest);
+        } catch { errors.push("invalid compiled test manifest"); }
+        continue;
+      }
       const testFiles = [];
       const runner = args.includes("--test");
       let supported = true;
@@ -117,9 +126,9 @@ function parseScript(script) {
 }
 
 /** Only explicit runner arguments count; text inside echo/eval/wrappers does not. */
-export function collectEntries(pkg) {
+export function collectEntries(pkg, packageDir) {
   return Object.entries(pkg.scripts ?? {}).flatMap(([script, command]) => {
-    const parsed = parseScript(command);
+    const parsed = parseScript(command, packageDir);
     return parsed.files.length ? [{ script, ...parsed,
       pgOptIn: parsed.switches.length > 0, switch: parsed.switches[0] ?? null,
       guarded: parsed.switches.length > 0,
@@ -142,7 +151,7 @@ export async function analyze({ root = defaultRoot, workspaces = WORKSPACES } = 
   const packages = [{ dir: "", pkgName: "root", pkg: readPackage(root, "") },
     ...workspaces.map(ws => ({ ...ws, pkg: readPackage(root, ws.dir) }))].filter(ws => ws.pkg);
   const scripts = packages.flatMap(ws => Object.entries(ws.pkg.scripts ?? {}).map(([script, command]) => ({
-    id: `${ws.pkgName}:${script}`, workspace: ws.pkgName, script, ...parseScript(command),
+    id: `${ws.pkgName}:${script}`, workspace: ws.pkgName, script, ...parseScript(command, join(root, ws.dir)),
   })));
   const scriptEdges = {};
   for (const entry of scripts) {
@@ -166,7 +175,7 @@ export async function analyze({ root = defaultRoot, workspaces = WORKSPACES } = 
   }));
   const result = [];
   for (const ws of packages.filter(ws => ws.testDir)) {
-    const entries = collectEntries(ws.pkg).map(e => ({ ...e, id: `${ws.pkgName}:${e.script}` }));
+    const entries = collectEntries(ws.pkg, join(root, ws.dir)).map(e => ({ ...e, id: `${ws.pkgName}:${e.script}` }));
     const absolute = join(root, ws.testDir);
     const names = existsSync(absolute) ? (await readdir(absolute)).filter(n => /\.(ts|mjs)$/.test(n) && !n.endsWith(".d.ts")) : [];
     const edges = {};

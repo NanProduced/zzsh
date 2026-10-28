@@ -4,7 +4,9 @@
 
 ## 迁移基线与结构事实
 
-业务迁移位于 `apps/api/migrations/business/`，源码共 **102 份 SQL**，`meta/_journal.json` **102 条**登记（idx 0…101，tag 与文件名一一对应）。源码登记不表示数据库已经执行；实际链与权限须分别核验。另有一条独立正式迁移线 `apps/api/migrations/0000_fnd004_test_metadata.sql`（`zzsh_meta.database_marker`，journal 1 条）。两条线分别由 `apps/api/src/database/migrations.ts` 与 `business-migrations.ts` 执行，记账 schema 分别为 `zzsh_meta` 与 `zzsh_business_meta`（后者不在任何 SQL 中 CREATE，由 migrator 自建）。
+业务迁移位于 `apps/api/migrations/business/`，源码共 **106 份 SQL**，`meta/_journal.json` **106 条**登记（idx 0…105，tag 与文件名一一对应）。源码登记不表示数据库已经执行；实际链与权限须分别核验。另有一条独立正式迁移线 `apps/api/migrations/0000_fnd004_test_metadata.sql`（`zzsh_meta.database_marker`，journal 1 条）。两条线分别由 `apps/api/src/database/migrations.ts` 与 `business-migrations.ts` 执行，记账 schema 分别为 `zzsh_meta` 与 `zzsh_business_meta`（后者不在任何 SQL 中 CREATE，由 migrator 自建）。
+
+0102 支持极速比例仅设下限；0103 增加用户冻结状态及权限；0104 增加提现查单权限；0105 保存本人实名展示来源。0105 的 runtime 权限由正式 `migrate:business` 后置 ACL 收敛为仅 SELECT，不能把 `GRANT SELECT` 当作撤销 schema 默认写权限。升级保留已执行 SQL 字节与 journal 时间；新的迁移须使用未占用编号和晚于现有链的时间。
 
 下列计数仅为 0000–0090 的历史静态扫描基线，不含 0091–0101，**不是真实 PostgreSQL 目录核验**：`CREATE TABLE` 146 条（全部当前存在，含 5 张 `LIKE … INCLUDING ALL` 克隆表，全部在 `zzsh_auth_admin`）、`CREATE SEQUENCE` 3 条、函数定义事件 222 次对应 **182 个输入类型签名身份**（76 次 `CREATE OR REPLACE`，0 个同名重载）、触发器创建事件 256 次（211 条 `CREATE TRIGGER` + 45 条 `CREATE CONSTRAINT TRIGGER`）对应 **233 个（目标表+名称）身份**（当前存在 232、已删除 1），`DROP TRIGGER` 49 条、`DROP COLUMN` 2 条、`CREATE INDEX` 128 条（36 UNIQUE + 92 非唯一）对应 **126 个不同索引身份**（当前存在 123、已删除 3、删除后重建 3；其中 39 个 partial、2 个表达式索引）、隐式索引身份 277（当前存在 275）、约束身份 1348（当前存在 1332）。无 `DROP TABLE`/`DROP FUNCTION`、无 `RENAME`、无 `CREATE VIEW`、无 `CREATE POLICY`、无 `ROW LEVEL SECURITY`、无 `COMMENT ON`。
 

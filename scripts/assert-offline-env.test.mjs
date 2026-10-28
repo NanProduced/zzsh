@@ -78,6 +78,24 @@ test("an unregistered executable suite is detected without importing any invento
   }
 });
 
+test("compiled runner inventory reads its explicit manifest without executing suites", async () => {
+  const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { collectEntries } = await import("./check-test-entries.mjs");
+  const root = await mkdtemp(join(tmpdir(), "zzsh-compiled-manifest-"));
+  try {
+    await mkdir(join(root, "scripts"));
+    const pkg = { scripts: { "test:compiled": "node scripts/run-compiled-tests.mjs" } };
+    for (const value of [[], ["../outside.js"], ["dist/test/a.test.js", "dist/test/a.test.js"], { files: [] }]) {
+      await writeFile(join(root, "scripts/compiled-tests.json"), JSON.stringify(value));
+      assert.deepEqual(collectEntries(pkg, root), []);
+    }
+    await writeFile(join(root, "scripts/compiled-tests.json"), '["dist/test/a.test.js"]');
+    assert.deepEqual(collectEntries(pkg, root)[0].files, ["dist/test/a.test.js"]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("runner bindings distinguish value aliases and namespaces from type-only imports", async () => {
   const { isExecutableSuite } = await import("./check-test-entries.mjs");
   const cases = [

@@ -209,11 +209,11 @@ test('SKIN-ASSETS-UI-9 account card list chip never renders retired category, us
   assert.ok(agentHtml.includes('aria-label="露娜-黑·天际线 (干员外观)"'), 'verified agent skin exposes the verified type as its accessible label');
   for (const viewMode of ['list', 'grid']) {
     const skin = { ...fixtures.verifiedAgent, rarityName: '测试品质', mediaId: 'TEXT_ONLY_MEDIA' };
-    const more = Array.from({ length: 5 }, (_, i) => ({ ...skin, id: `SKIN_${i}`, name: `其他外观${i}` }));
+    const more = Array.from({ length: 8 }, (_, i) => ({ ...skin, id: `SKIN_${i}`, name: `其他外观${i}` }));
     const html = renderCard(skin, viewMode, more);
     assert.equal(html.includes('/api/supply/media/'), false, `${viewMode}: list/home/favorites cards request no skin images`);
     assert.equal(html.includes('TEXT_ONLY_MEDIA'), false);
     assert.ok(html.includes('测试品质'), `${viewMode}: quality remains a text summary`);
-    assert.ok(html.includes('+3'), `${viewMode}: the remaining count stays visible`);
+    assert.ok(html.includes(viewMode === 'list' ? '+3' : '+5'), `${viewMode}: the remaining count stays visible`);
   }
 });

@@ -23,6 +23,7 @@ function probe(options:{identity?:Record<string,unknown>;shape?:Record<string,un
  const seen:{sql:string;args:any[]}[]=[],participants=new Map<string,any>();let row:any=options.policy===false?null:{id:'policy_test',revision:'1',canonical_config:canonicalize(policyConfig),config_digest:sha(canonicalize(policyConfig)),created_at:'2026-10-08T00:00:00Z'};
  const c={release(){},async query(sql:string,args:any[]=[]):Promise<any>{
   seen.push({sql,args});const result=(data:any[]=[])=>({rows:data,rowCount:data.length});
+  if(sql === 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')return result();
   if(['BEGIN','COMMIT','ROLLBACK','SET CONSTRAINTS ALL IMMEDIATE'].includes(sql)||sql.startsWith('SELECT pg_advisory'))return result();
   if(sql.startsWith('SELECT d.oid'))return result([{oid:receipt.resourceOid,name:receipt.database,role:receipt.runtimeRole,marker:receipt.marker,complete:true,...options.identity}]);
   if(sql.startsWith('SELECT pg_get_userbyid'))return result([{owner:'zzsh',rolsuper:false,rolbypassrls:false,complete:true,...options.shape}]);
@@ -94,7 +95,7 @@ test('GET-only route assembly keeps PUT and bind on their original unadmitted sc
  const session=async()=>({user:{id:'self',twoFactorEnabled:true},session:{id:'test-session'}}),options={...milestoneAssembly,testOperationsEnabled:false,pool:p.pool,adminAuth:{api:{getSession:session}},userAuth:{api:{getSession:session}},distributionReadScope:milestoneReadBinding()} as unknown as AuthSecurityOptions&{distributionReadScope:LocalDistributionScope};mountDistributionPolicyRoutes(app,options);mountInvitationRoutes(app,options);
  const call=async(prefix:string,method:string,url:string,origin:string,body?:unknown)=>{let status=0,result:any;const response:any={setHeader(){return this;},status(n:number){status=n;return this;},json(b:unknown){result=b;}};await handlers.get(prefix)!({method,originalUrl:url,headers:{origin,'x-request-id':'req_route_read_scope','idempotency-key':'read_route_key'},body},response);return{status,result};};
  for(const [prefix,url,origin]of [['/api/v1/admin/distribution/policy','/api/v1/admin/distribution/policy',milestoneAssembly.adminOrigin],['/api/v1/users/me/distribution','/api/v1/users/me/distribution',milestoneAssembly.userOrigin],['/api/v1/users/me/distribution','/api/v1/users/me/distribution/terms',milestoneAssembly.userOrigin]])assert.equal((await call(prefix!,'GET',url!,origin!)).status,200);
- assert.equal((await call('/api/v1/admin/distribution/policy','PUT','/api/v1/admin/distribution/policy',milestoneAssembly.adminOrigin,{expectedRevision:'1',config:policyConfig,reason:'Write not admitted'})).status,503);
+ assert.equal((await call('/api/v1/admin/distribution/policy','PUT','/api/v1/admin/distribution/policy',milestoneAssembly.adminOrigin,{expectedRevision:'1',config:policyConfig,reason:'Write not admitted'})).status,403);
  assert.equal((await call('/api/v1/users/me/distribution','POST','/api/v1/users/me/distribution/bind',milestoneAssembly.userOrigin,{code:'FX_PARENT',policyVersion:'policy_test',expectedParticipantRevision:'1'})).status,503);assert(!p.seen.some(q=>/^(INSERT|UPDATE|DELETE)/.test(q.sql)));
 });
 

@@ -231,8 +231,13 @@ test('useful existing counterparty summary opens a zero-request preview', async 
   assert.match(useful.host.querySelector('[aria-label="用户预览：交易另一方"]').textContent, /188\*\*\*\*2202/); assert.equal(useful.calls.length, reads);
 });
 
-test('legacy account title is identified as current account data while native frozen title keeps its meaning', async t => {
-  const h = await mount(t, { orderCount: 1, orderOverrides: { source: { origin: 'LEGACY' }, title: '合成当前账号标题' } });
-  await waitFor(() => h.host.querySelector('tbody tr'));
-  const cell = h.host.querySelector('tbody tr').children[1]; assert.match(cell.textContent, /合成当前账号标题/); assert.match(cell.textContent, /当前账号资料/);
+test('native and migrated order account titles prefer the public account number over a bare title', async t => {
+  for (const origin of ['LEGACY', 'NATIVE']) await t.test(origin, async t => {
+    const h = await mount(t, { orderCount: 1, orderOverrides: { source: { origin }, title: '不应抢占编号的裸标题' } });
+    await waitFor(() => h.host.querySelector('tbody tr'));
+    const cell = h.host.querySelector('tbody tr').children[1];
+    assert.match(cell.textContent, /账号 SYNTHETIC-ACCOUNT-001/);
+    assert.doesNotMatch(cell.textContent, /不应抢占编号的裸标题/);
+    assert.equal(cell.textContent.includes('旧平台迁入'), origin === 'LEGACY');
+  });
 });

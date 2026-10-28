@@ -156,6 +156,7 @@ function publishingFixture(attributes: Record<string, unknown>, submitted = fals
   const version: any = { id: "version", account_id: "account", origin: "NATIVE", review_state: submitted ? "SUBMITTED" : "DRAFT", attributes, rule_release_id: "release", content_hash: "f".repeat(64), payload: { declaration: { attributes }, ruleRefs: { catalogRevision: "1" } } };
   const client: any = { query: async (sql: string) => {
     calls.push(sql);
+    if (sql === "SELECT 1 FROM zzsh_order.rental_order WHERE account_id=$1 AND status='COMPLETED' LIMIT 1") return { rows: [], rowCount: 0 };
     if (sql.includes('SELECT "suspended"')) return { rows: [{ suspended: false }] };
     if (sql.includes('user_identity_state')) return { rows: [] };
     if (sql.includes('"game_service_operation"')) return { rows: [{ id: "service", gameCode: "delta", gameEnabled: true, enabled: true }] };

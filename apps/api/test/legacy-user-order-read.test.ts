@@ -116,7 +116,7 @@ test("API projection feeds the shared web display with honest titles and record-
   const projection = projectUserLegacyOrder(chainRow, "owner");
   assert.equal(projection.title, null);
   assert.equal(display.orderResourceSummary(projection), "哈夫币 12.50 · 顶级保险卡 7 天");
-  assert.equal(display.orderAccountTitle(projection), "订单资源：哈夫币 12.50 · 顶级保险卡 7 天");
+  assert.equal(display.orderAccountTitle(projection), "哈夫币 12.50 · 顶级保险卡 7 天");
   assert.equal(display.orderUsesResourceSummary(projection), true);
   // U5-R1-02 counterexample: gross 87 / detain 5 / verified net 82 — only the source record exists here.
   for (const party of ["renter", "owner"] as const) {
@@ -128,13 +128,13 @@ test("API projection feeds the shared web display with honest titles and record-
   // REFUND_RECORD_EXISTS: the record stays a record and the projection gains no accounting model.
   assert.equal(Object.hasOwn(projection, "duty"), false);
   assert.ok(!JSON.stringify(projection).includes("82.00"));
-  // A real current title keeps priority.
-  assert.equal(display.orderAccountTitle(projectUserLegacyOrder({ ...chainRow, title: "真实当前标题" }, "owner")), "真实当前标题");
+  // A bare title is not the new account-display contract; use authorized listingFacts.
+  assert.equal(display.orderAccountTitle(projectUserLegacyOrder({ ...chainRow, title: "不应回退的裸标题" }, "owner")), "哈夫币 12.50 · 顶级保险卡 7 天");
   // Cross-subject guard: without account read authorization the current title never reaches the display.
   const hidden = projectUserLegacyOrder({ ...chainRow, title: "真实当前标题", accountReadable: false }, "renter");
   assert.equal(hidden.title, null);
   assert.ok(!JSON.stringify(hidden).includes("真实当前标题"));
-  assert.equal(display.orderAccountTitle(hidden), "订单资源：哈夫币 12.50 · 顶级保险卡 7 天");
+  assert.equal(display.orderAccountTitle(hidden), "哈夫币 12.50 · 顶级保险卡 7 天");
   // No frozen facts at all: the display stays honestly empty instead of inventing a title.
-  assert.equal(display.orderAccountTitle(projectUserLegacyOrder({ ...row, accountReadable: true, title: null }, "owner")), "账号资料暂未提供");
+  assert.equal(display.orderAccountTitle(projectUserLegacyOrder({ ...row, accountReadable: true, title: null }, "owner")), "租赁账号");
 });

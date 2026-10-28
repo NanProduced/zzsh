@@ -10,7 +10,9 @@ function fixture({ initialized=false,migrated=false,authenticated=true,active=tr
   const queries:Array<{sql:string;args:unknown[]}> = [];
   const state=Object.freeze({userId:"synthetic-user",score:70,revision:"1",initializedAt:"2026-01-01T00:00:00.000Z"});
   const query=async(sql:string,args:unknown[]=[])=>{
-    queries.push({sql,args});assert.match(sql.trimStart(),/^(SELECT|BEGIN|COMMIT|ROLLBACK)\b/,"a read must not initialize business facts");
+    queries.push({sql,args});
+    if(sql === "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")return {rows:[],rowCount:0};
+    assert.match(sql.trimStart(),/^(SELECT|BEGIN|COMMIT|ROLLBACK)\b/,"a read must not initialize business facts");
     const rows=(values:unknown[])=>({rows:values,rowCount:values.length});
     if(sql.includes("legacy-growth-schema"))return rows([{coverage:false,sources:false}]);
     if(["BEGIN","COMMIT","ROLLBACK"].includes(sql))return rows([]);
