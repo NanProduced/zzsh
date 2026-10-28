@@ -92,6 +92,16 @@ test("坏枚举/重复ID/超批量/终态不交执行器；不把本地查询结
   assert.equal(called, 0);
 });
 
+test("C04B-02 仅未首派READY异常按阻断小时退避，其他原单保持到期顺序", async t => {
+  const f = fixture(t); await recoverJoinpayRefundBatch(f.refund);
+  const scan = f.trace[1]!;
+  assert.match(scan.sql, /order\.refund\.abnormal\.first_submit\.blocked/);
+  assert.match(scan.sql, /occurred_at>clock_timestamp\(\)-make_interval\(secs=>3600\)/);
+  assert.match(scan.sql, /NOT \(i\.basis_kind='REVIEW_CONFIRMATION' AND i\.state='READY'\) OR NOT EXISTS/);
+  assert.match(scan.sql, /ORDER BY i\.due_at,i\.id LIMIT/);
+  assert.equal(scan.values!.at(-1), false);
+});
+
 test("仅查询scope以绑定参数排除lease0首派；明确SUBMIT配置才给扫描开关", async t => {
   const f = fixture(t, []);
   await recoverJoinpayPayoutBatch(f.payout);
@@ -187,4 +197,9 @@ test("真实Nest生命周期：先排空资金任务再结束原池，未配置�
     t.mock.timers.tick(0); await flush(); let closed = false; const closing = app.close().then(() => { closed = true; }); await flush();
     assert.equal(poolClosed, false); assert.equal(closed, false); finish(); await closing; assert.equal(poolClosed, true);
   } finally { await app.close(); }
+});
+
+test("Master R1: old first-submit blocked audit must not pause an already-dispatched query",async t=>{
+ const f=fixture(t);await recoverJoinpayRefundBatch(f.refund);
+ assert.match(f.trace[1]!.sql,/NOT \(i\.basis_kind='REVIEW_CONFIRMATION' AND i\.state='READY'\) OR NOT EXISTS/);
 });

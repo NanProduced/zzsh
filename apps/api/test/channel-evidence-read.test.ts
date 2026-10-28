@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import type { PoolClient } from "pg";
 import * as paymentRead from "../src/order/channel-payment-read";
-import type { AdminOrderPaymentSummary } from "../src/order/channel-payment-read";
+import type { AdminOrderPaymentSummary, AdminPaymentAnomalySection } from "../src/order/channel-payment-read";
 import * as refundRead from "../src/finance/channel-finance-read";
 import {
   createChannelEvidenceReadScope, readAdminChannelPaymentEvidence, readAdminChannelRefundEvidence,
@@ -207,6 +207,37 @@ test("payment evidence exposes separate order/request/merchant numbers, trusted 
   } finally { restore(); }
 });
 
+test("C04A 异常区沿既有安全证据读取透传，不重解 raw", async () => {
+  const anomalies: AdminPaymentAnomalySection = {
+    contractVersion: "admin-order-payment-anomalies.v1", status: "AVAILABLE", limit: 50, truncated: false,
+    items: [{ kind: "DUPLICATE_PAYMENT", source: "CONFIRMATION", evidenceLevel: "JOINPAY_CONFIRMATION", trusted: true,
+      observedAt: ISO_1, disposition: "REVIEW_REQUIRED", reasonCode: "DUPLICATE_PAYMENT",
+      amount: { cents: "20000", currency: "CNY" }, currency: "CNY", confirmationId: "pc_2", requestId: "preq_1",
+      merchantIdentityId: MERCHANT,
+      merchantOrderNo: "ORDER_1", providerTransactionId: "TRX_2", anchorOwnership: "MATCH", evidenceRef: `sha256:${DIGEST_B}` }],
+  };
+  const restore = stub(paymentRead, "readOrderPaymentSummary", async () => paymentSummary({ anomalies }));
+  const client = paymentClient();
+  try {
+    const result = await readAdminChannelPaymentEvidence(pool(client), scope(), { orderId: "ord_1", origin: "NATIVE" });
+    assert.deepEqual(result.anomalies, anomalies);
+    assert.equal(result.anomalies?.items?.[0]?.kind, "DUPLICATE_PAYMENT");
+    assert.equal(JSON.stringify(result).includes("raw_body"), false);
+    noWrites(client.calls);
+  } finally { restore(); }
+});
+
+test("Master：首笔商户获准也不能透传另一商户的异常确认金额和流水",async()=>{
+  const anomalies={contractVersion:"admin-order-payment-anomalies.v1",status:"AVAILABLE",limit:50,truncated:false,
+    items:[{kind:"DUPLICATE_PAYMENT",source:"CONFIRMATION",evidenceLevel:"JOINPAY_CONFIRMATION",trusted:true,
+      observedAt:ISO_1,disposition:"REVIEW_REQUIRED",reasonCode:"DUPLICATE_PAYMENT",merchantIdentityId:"mi_not_authorized",
+      amount:{cents:"4321",currency:"CNY"},currency:"CNY",confirmationId:"private_confirmation",requestId:"preq_1",
+      merchantOrderNo:"PRIVATE_ORDER",providerTransactionId:"PRIVATE_TRX",anchorOwnership:"MATCH",evidenceRef:null}]} as unknown as AdminPaymentAnomalySection;
+  const restore=stub(paymentRead,"readOrderPaymentSummary",async()=>paymentSummary({anomalies}));
+  try{await assert.rejects(readAdminChannelPaymentEvidence(pool(paymentClient()),scope(),{orderId:"ord_1",origin:"NATIVE"}),e=>statusOf(e,404,"NOT_FOUND"));}
+  finally{restore();}
+});
+
 test("payment evidence redacts nested finance fields without dropping acceptance state", async () => {
   const base = paymentSummary();
   const restore = stub(paymentRead, "readOrderPaymentSummary", async () => paymentSummary({
@@ -296,6 +327,64 @@ test("refund evidence separates responsibility, allocation, consumption and rele
     assert.equal(result.posting?.captured?.cents, "10000");
     assert.equal(result.bankArrival, "UNKNOWN"); assert.equal(result.safeTarget, null);
     assert.ok(client.calls.length <= 5); noWrites(client.calls);
+  } finally { restore(); }
+});
+
+
+test("C04B-02 abnormal refund basis keeps unique responsibility totals and blocked facts", async () => {
+  const abnormalIntent = { ...refundIntent("rfi_abn", "RF" + "a".repeat(28), "5000", "ALLOCATED", "READY"),
+    basisKind: "REVIEW_CONFIRMATION", paymentConfirmationId: "pc_abn", liabilityRootId: "root_abn",
+    liabilityEventId: "event_abn", firstSubmit: { dispatch: "NEVER_DISPATCHED", blockedReason: "ORIGINAL_ORDER_NO_AMBIGUOUS",
+      blockedAt: ISO_1, blockedAuditCount: 1, trust: "LOCAL_AUDIT_AND_ATTEMPT" } };
+  const summary = { ...refundSummary([abnormalIntent]), abnormalResponsibilities: [{
+    confirmationId: "pc_abn", reasonCode: "LATE_PAYMENT", originalCents: "5000", allocatedCents: "5000",
+    consumedCents: "0", releasedCents: "0", remainingCents: "0", totalsComplete: true, state: "REVIEW_REQUIRED",
+    intentIds: ["rfi_abn"], liabilityRootId: "root_abn", liabilityEventId: "event_abn",
+    merchantIdentityId: MERCHANT, firstSubmit: abnormalIntent.firstSubmit }],
+    responsibilityBudget: { originalCents: "5000", allocatedCents: "5000", consumedCents: "0", releasedCents: "0",
+      remainingCents: "0", totalsComplete: true } } as unknown as RefundSummary;
+  const restore = stub(refundRead, "readAdminOrderRefundSummary", async () => summary);
+  const client = refundClient({ posting: [] });
+  try {
+    const result = await readAdminChannelRefundEvidence(pool(client), scope(), { orderId: "ord_1", origin: "NATIVE" });
+    assert.equal(result.status, "INTEGRATED");
+    assert.equal(result.posting, null);
+    assert.equal(result.intents![0]!.basisKind, "REVIEW_CONFIRMATION");
+    assert.equal(result.intents![0]!.firstSubmit!.blockedReason, "ORIGINAL_ORDER_NO_AMBIGUOUS");
+    assert.equal(result.abnormalResponsibilities![0]!.originalCents, "5000");
+    assert.equal(result.responsibilityTotals!.originalCents, "5000");
+    assert.equal(result.responsibilityTotals!.totalsComplete, true);
+    assert.ok(result.reasonCodes.includes("INTENT_TOTALS_ARE_NOT_UNIQUE_RESPONSIBILITY"));
+    assert.ok(result.reasonCodes.includes("BANK_ARRIVAL_UNKNOWN"));
+    noWrites(client.calls);
+  } finally { restore(); }
+});
+
+test("C04B-02-R1 abnormal conflict responsibility stays visible without fake amounts", async () => {
+  const summary = { ...refundSummary([]), abnormalResponsibilities: [{
+    confirmationId: "pc_bad", reasonCode: "LATE_PAYMENT", originalCents: null, allocatedCents: null,
+    consumedCents: null, releasedCents: null, remainingCents: null, totalsComplete: false, state: "CONFLICT",
+    intentIds: ["rfi_bad"], liabilityRootId: null, liabilityEventId: null, merchantIdentityId: null,
+    firstSubmit: null, reasonCodes: ["ABNORMAL_LIABILITY_MISMATCH"] }],
+    responsibilityBudget: { originalCents: null, allocatedCents: null, consumedCents: null,
+      releasedCents: null, remainingCents: null, totalsComplete: false } } as unknown as RefundSummary;
+  const restore = stub(refundRead, "readAdminOrderRefundSummary", async () => summary);
+  const client = refundClient({ posting: [] });
+  try {
+    const result = await readAdminChannelRefundEvidence(pool(client), scope(), { orderId: "ord_1", origin: "NATIVE" });
+    assert.equal(result.status, "INTEGRATED");
+    assert.equal(result.abnormalResponsibilities!.length, 1);
+    assert.equal(result.abnormalResponsibilities![0]!.state, "CONFLICT");
+    assert.equal(result.abnormalResponsibilities![0]!.originalCents, null);
+    assert.equal(result.abnormalResponsibilities![0]!.totalsComplete, false);
+    assert.equal(result.responsibilityTotals!.totalsComplete, false);
+    assert.equal(result.intentTotalsComplete, false);
+    assert.equal(result.totals.requestedCents, null);
+    assert.equal(result.intentTotals.allocatedCents, null);
+    assert(result.abnormalResponsibilities![0]!.reasonCodes.includes("ABNORMAL_LIABILITY_MISMATCH"));
+    assert(result.reasonCodes.includes("REFUND_INTENT_TOTALS_INCOMPLETE"));
+    assert(!result.reasonCodes.includes("NO_LOCAL_REFUND_INTENTS"));
+    noWrites(client.calls);
   } finally { restore(); }
 });
 

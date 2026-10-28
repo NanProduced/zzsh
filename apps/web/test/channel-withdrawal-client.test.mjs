@@ -20,6 +20,25 @@ test('Native quote sends three references; reserve freezes token/body/key and un
  globalThis.fetch=async url=>String(url).includes('/receipt?')?json({source:'JOINPAY',knowledge:'KNOWN',receipt:{intent:nativeIntent()},mayResubmit:false}):json({source:'JOINPAY',intent:{...nativeIntent(),state:'PROCESSING',operationVersion:'2'},mayResubmit:false});
  const found=await recoverChannelWithdrawal(userId);assert.equal(found.receipt.originalDestination.cardMask,'**** **** 0000');assert.equal(found.receipt.bankArrival,'UNKNOWN');assert.equal(found.receipt.state,'RESERVED');assert.equal(found.current.state,'PROCESSING');assert.equal(pendingChannelWithdrawal(userId),null);
 }));
+test('withdrawal options parse server identity/quota without inventing eligibility or counts',()=>{
+ const identity={identityStatus:'VERIFIED',ageStatus:'ADULT',verifiedAt:'2026-10-25T00:00:00.000000Z'};
+ const quota={used:'1',maxIntents:3,remaining:2,windowStart:'2026-10-24T16:00:00.000000Z',windowEnd:'2026-10-25T16:00:00.000000Z'};
+ let o=parseWithdrawalOptions({...options(),identity,quota});
+ assert.deepEqual(o.identity,identity);assert.deepEqual(o.quota,quota);
+ o=parseWithdrawalOptions({...options(),identity:null,quota:null});assert.equal(o.identity,null);assert.equal(o.quota,null);
+ o=parseWithdrawalOptions({...options(),identity:{identityStatus:'VERIFIED_NEXT',ageStatus:'UNKNOWN_NEXT',verifiedAt:null},quota:{...quota,used:'4',remaining:0}});
+ assert.equal(o.identity.identityStatus,'VERIFIED_NEXT');assert.equal(o.identity.ageStatus,'UNKNOWN_NEXT');assert.equal(o.quota.used,'4');assert.equal(o.quota.remaining,0);
+ for(const bad of [
+  {identity:{identityStatus:'VERIFIED',ageStatus:'ADULT'}},
+  {identity:{identityStatus:'VERIFIED',ageStatus:'ADULT',verifiedAt:'yesterday'}},
+  {quota:{...quota,used:'01'}},
+  {quota:{...quota,maxIntents:0}},
+  {quota:{...quota,remaining:-1}},
+  {quota:{...quota,remaining:4}},
+  {quota:{...quota,windowEnd:quota.windowStart}},
+  {quota:{...quota,used:1}},
+ ]) assert.throws(()=>parseWithdrawalOptions({...options(),...bad}),e=>e.code==='WITHDRAWAL_CONTRACT_REQUIRED');
+});
 test('a failed quote is not reported as an unknown withdrawal command',()=>withStorage(async()=>{
  globalThis.fetch=async()=>{throw Error('offline');};await assert.rejects(()=>quoteChannelWithdrawal(userId,{amountCents:'10000',destinationId:channelQuote().destination.id,policyVersion:'policy1'}),e=>e.code==='NETWORK_ERROR'&&!e.uncertain);assert.equal(pendingChannelWithdrawal(userId),null);
 }));
@@ -35,3 +54,12 @@ test('a mismatched native recovery receipt keeps the original unresolved marker'
  globalThis.fetch=async()=>json({source:'JOINPAY',knowledge:'KNOWN',receipt:{intent:{...nativeIntent(),amountCents:'20000',netCents:'19900'}},mayResubmit:false});
  await assert.rejects(()=>recoverChannelWithdrawal(userId));assert.equal(pendingChannelWithdrawal(userId).key,original.key);
 }));
+
+test('additive identity and quota fields are ignored rather than exposed or treated as authority',()=>{
+ const identity={identityStatus:'VERIFIED_NEXT',ageStatus:'UNKNOWN_NEXT',verifiedAt:null,provider:'future_field'};
+ const quota={used:'4',maxIntents:3,remaining:0,windowStart:'2026-10-24T16:00:00Z',windowEnd:'2026-10-25T16:00:00Z',frequencyBasis:'future_field'};
+ const parsed=parseWithdrawalOptions({...options(),canQuote:false,reasonCodes:['WITHDRAWAL_QUOTA_EXHAUSTED'],identity,quota});
+ assert.equal(parsed.canQuote,false);assert.equal(parsed.identity.identityStatus,'VERIFIED_NEXT');
+ assert.equal(parsed.quota.remaining,0);assert.equal(Object.hasOwn(parsed.identity,'provider'),false);
+ assert.equal(Object.hasOwn(parsed.quota,'frequencyBasis'),false);
+});

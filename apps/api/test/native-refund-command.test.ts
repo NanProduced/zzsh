@@ -46,6 +46,17 @@ function mocks(t: any, options: { access?: unknown; scope?: unknown; receipt?: u
 const execution = { admission: {} as never, initialProfile: {} as never };
 const input = { actor: ACTOR, orderId: "order_1", amountCents: "1200", reason: "部分退款", idempotencyKey: "refund_key_1", requestId: "request_1" };
 
+test("MasterReader：异常意图没有posting时，不把posting分配额填成0",async t=>{
+  mocks(t);const m=model(),c=await m.pool.connect(),query=c.query.bind(c);
+  (c as any).query=async(sql:string,p:unknown[]=[])=>sql.includes("FROM zzsh_order.channel_refund_intent i")
+    ?{rows:[{id:"refund_review",posting_id:null,refund_order_no:"RF_REVIEW",amount_cents:"1000",state:"READY",budget_disposition:"ALLOCATED",
+      requires_review:false,provider_refund_trx_no:null,completed_at:null,frozen_cents:null,allocated_cents:"0",
+      latest_event:null,latest_evidence_level:null,latest_observed_at:null}]}:query(sql,p);
+  const result=await readAdminNativeRefunds(m.pool,{actor:ACTOR,orderId:"order_1"});
+  assert.equal(result.items[0]?.amountCents,"1000");assert.equal(result.items[0]?.budgetDisposition,"ALLOCATED");
+  assert.deepEqual(result.items[0]?.postingResponsibility,{frozenCents:null,allocatedCents:null,remainingCents:null});
+});
+
 test("正式退款命令要求命令权限与对象范围；finance.read等无写权限不通过", async t => {
   const denied = mocks(t, { access: { ...ACCESS, permissions: new Set(["finance.read"]) } });
   const m = model(); await assert.rejects(requestAdminNativeRefund(m.pool, execution, input), /Access denied|Permission required|FORBIDDEN/i);

@@ -150,6 +150,20 @@ const channelView=(id="order_A",over={})=>({contractVersion:"order-payment-reque
 const channelRequest=(state="ACTION_READY",method="WEIXIN_NATIVE")=>({id:"payreq_component",state,method,amount:{cents:"125",currency:"CNY"},updatedAt:"2026-10-24T10:00:00.000Z",recovery:null});
 const channelReceipt=(method,replay=false,state="SUBMITTING")=>({contractVersion:"order-payment-request.v1",dataOrigin:"JOINPAY_CANDIDATE",replay,
   request:{...channelRequest(state,method),orderId:"order_A",createdAt:"2026-10-24T10:00:00.000Z"},paymentAction:null,payment:null});
+const refundRead=(orderId="order_A",over={})=>({contractVersion:"personal-native-refunds.v1",subjectId:"user_A",
+  order:{orderId,displayNo:"ZZ-1",status:"PAID"},status:"NOT_APPLICABLE",outcome:"RESPONSIBILITY_NOT_POSTED",
+  coverage:{scope:"LOCAL_REGISTERED_ONLY",intentLimit:50,intentsComplete:true,channelRecordsChecked:false},asOf:"2026-10-27T02:30:17.490161Z",
+  responsibility:{state:"NOT_POSTED",postingId:null,originalCents:null,allocatedCents:null,consumedCents:null,releasedCents:null,remainingCents:null,totalsComplete:false,dueAt:null,dueState:"UNKNOWN"},
+  intents:[],returnedIntentCount:0,intentsTruncated:false,
+  actualChannelRefund:{amountCents:null,channelRefundTrxNo:null,completedAt:null,destination:null,bankArrival:"UNKNOWN",reasonCodes:[]},
+  localFundsEffect:{basis:"LOCAL_REGISTERED_ACCOUNTING",writtenOffCents:null,releasedCents:null,bankArrival:"UNKNOWN"},
+  reasonCodes:[],unknowns:["CHANNEL_REFUND_RECORD_NOT_CHECKED","BANK_ARRIVAL_UNKNOWN","REFUND_DESTINATION_NOT_PROJECTED"],...over});
+const refundIntent=(over={})=>({intentId:"intent_refund_1",refundOrderNo:"RF"+"a".repeat(28),source:"JOINPAY_FORMAL",evidenceLevel:"JOINPAY_FORMAL",
+  amount:{cents:"28000",currency:"CNY"},state:"SUCCEEDED",budgetDisposition:"CONSUMED",requiresReview:false,dueAt:"2026-10-19T04:30:00Z",createdAt:"2026-10-18T04:30:00Z",updatedAt:"2026-10-18T05:30:00Z",
+  latestObservation:null,latestFailure:null,
+  savedChannelEvidence:{terminal:"SUCCEEDED",evidenceLevel:"JOINPAY_FORMAL",providerRefundTrxNo:"RF-TRX-1",completedAt:"2026-10-18T05:30:00Z",trust:"SAVED_EVIDENCE_NOT_REVALIDATED"},
+  localAccounting:{disposition:"CONSUMED",writeOff:{eventId:"event_refund",amountCents:"28000",postedAt:"2026-10-18T05:30:00Z",trust:"LOCAL_LEDGER"},release:null,reasonCodes:[]},
+  channelFacts:{actualAmountCents:null,channelRefundTrxNo:null,completedAt:null,destination:null,bankArrival:"UNKNOWN",reasonCodes:[]},reasonCodes:[],...over});
 async function chooseChannel(window,probe,value){const select=probe.host.querySelector('select[aria-label="支付方式"]');assert.ok(select);await React.act(async()=>{select.value=value;select.dispatchEvent(new window.Event("change",{bubbles:true}));await tick();});}
 
 test("Native UI selects method, persists a request, reads its action and waits for an actual APPLIED projection",async()=>{
@@ -214,11 +228,21 @@ test("Native UI never turns accepted request state, unsafe action URLs or unknow
   const probe=createProbe(window,Component,{order:channelOrder,party:"renter",onChanged(){}},async()=>json(current));
   try{
    await probe.render();assert.match(probe.host.textContent,/付款依据待确认/);assert.doesNotMatch(probe.host.textContent,/渠道付款已接纳/);assert.equal(Boolean(probe.host.querySelector('.order-channel-payment a')),false);
-   for(const url of ["http://example.invalid/pay","https://user:password@example.invalid/pay","javascript:alert(1)","https://example.invalid/pay#secret","https://example.invalid/pay\n?request=changed","https://example.invalid/pay path"]){current={...current,request:channelRequest(),paymentAction:{kind:"QR_URL",url,expiresAt:null,expiryKnown:false}};await probe.click("刷新支付状态");assert.equal(Boolean(probe.host.querySelector('.order-channel-payment a')),false);assert.equal(Boolean(probe.host.querySelector('svg[aria-label="本单支付二维码"]')),false);}
-   current={...current,request:{...channelRequest(),amount:null},paymentAction:{kind:"QR_URL",url:"https://example.invalid/synthetic-pay",expiresAt:null,expiryKnown:false}};await probe.click("刷新支付状态");assert.equal(Boolean(probe.host.querySelector('.order-channel-payment a')),false);assert.match(probe.host.textContent,/金额：待确认/);
+   for(const url of ["http://example.invalid/pay","https://user:password@example.invalid/pay","javascript:alert(1)","https://example.invalid/pay#secret","https://example.invalid/pay\n?request=changed","https://example.invalid/pay path"]){current={...current,request:channelRequest(),paymentAction:{kind:"QR_URL",url,expiresAt:null,expiryKnown:false}};await probe.click("刷新支付状态");assert.equal(Boolean(probe.host.querySelector('.order-channel-payment a')),false);assert.equal(Boolean(probe.host.querySelector('svg[aria-label="本单支付二维码"]')),false);assert.match(probe.host.textContent,/支付参数暂时不可用/);}
+   current={...current,request:{...channelRequest(),amount:null},paymentAction:{kind:"QR_URL",url:"https://example.invalid/synthetic-pay",expiresAt:null,expiryKnown:false}};await probe.click("刷新支付状态");assert.equal(Boolean(probe.host.querySelector('.order-channel-payment a')),false);assert.match(probe.host.textContent,/金额：待确认/);assert.match(probe.host.textContent,/支付金额暂时无法确认/);
    current={...current,dataOrigin:"SYNTHETIC_PROTOCOL",request:channelRequest(),paymentAction:{kind:"QR_URL",url:"https://example.invalid/pay",expiresAt:null,expiryKnown:false}};await probe.click("刷新支付状态");assert.equal(Boolean(probe.host.querySelector('.order-channel-payment a')),false);
    current={...current,dataOrigin:"JOINPAY_CANDIDATE",payment:{confirmationId:"review_fact",disposition:"REVIEW_REQUIRED",amount:{cents:"125",currency:"CNY"}}};await probe.click("刷新支付状态");assert.equal(Boolean(probe.host.querySelector('.order-channel-payment a')),false);assert.match(probe.host.textContent,/支付需要人工核对/);
    current={...current,dataOrigin:"JOINPAY_PROVIDER",payment:{confirmationId:"",disposition:"APPLIED",amount:{cents:"125",currency:"CNY"}}};await probe.click("刷新支付状态");assert.doesNotMatch(probe.host.textContent,/渠道付款已接纳/);assert.match(probe.host.textContent,/付款依据待确认/);
+  }finally{await probe.dispose();}
+ });
+});
+
+test("Native UI explains a closed channel capability instead of opening another payable path",async()=>{
+ await withDom(async window=>{
+  const Component=loadComponent("apps/web/src/components/order/order-trade-actions.tsx",session("user_A")).OrderTradeActions;
+  const probe=createProbe(window,Component,{order:channelOrder,party:"renter",onChanged(){}},async()=>json(channelView("order_A",{dataOrigin:"JOINPAY_CANDIDATE",capability:{channelEnabled:false,productionPaymentCapability:false,methods:["ALIPAY_NATIVE","WEIXIN_NATIVE"]},projection:{displayState:"DISABLED",actionBlockedReason:"CHANNEL_DISABLED"}})));
+  try{
+    await probe.render();assert.match(probe.host.textContent,/当前环境未开放真实渠道支付/);assert.equal(probe.buttons().some(text=>text.includes("获取支付参数")),false);assert.equal(Boolean(probe.host.querySelector('svg[aria-label="本单支付二维码"]')),false);assert.doesNotMatch(probe.host.textContent,/渠道付款已接纳/);
   }finally{await probe.dispose();}
  });
 });
@@ -1283,7 +1307,8 @@ test("a failed settlement read surfaces one recovery cluster, and nothing while 
     let answerSettlement;
     const held = new Promise((resolve) => { answerSettlement = resolve; });
     const probe = createProbe(window, OrderDetail, { orderId: "order_paid", party: "renter", status: "", accountId: undefined, state: { status: "ready", order: { ...paidOrder, status: "COMPLETED" }, error: null }, onRetry() {}, onLogin() {}, onChanged() {} },
-      (input) => String(input).includes("/settlement") ? held.then(() => json({ error: { code: "NOT_FOUND", message: "Resource not found" } }, 404)) : json({ order: paidOrder }));
+      (input) => String(input).includes("/settlement") ? held.then(() => json({ error: { code: "NOT_FOUND", message: "Resource not found" } }, 404))
+        : String(input).includes("/refunds") ? json(refundRead("order_paid")) : json({ order: paidOrder }));
     await probe.render();
     // Nothing is missing until the read has actually failed.
     assert.equal(probe.host.querySelector(".order-attention"), null, "no gap is claimed while the read is still in flight");
@@ -1430,9 +1455,12 @@ async function tradeProbe(window, data, party = "owner") {
   return probe;
 }
 
-async function detailProbe(window, order, party, data = settlementBody) {
+async function detailProbe(window, order, party, data = settlementBody, refund = refundRead(order.id)) {
   const OrderDetail = loadComponent("apps/web/src/components/order/order-detail.tsx", session("user_A")).OrderDetail;
-  const probe = createProbe(window, OrderDetail, { orderId: order.id, party, status: "", accountId: undefined, state: { status: "ready", order, error: null }, onRetry() {}, onLogin() {}, onChanged() {} }, router([{ match: "/settlement", method: "GET", respond: () => json(data) }], []));
+  const probe = createProbe(window, OrderDetail, { orderId: order.id, party, status: "", accountId: undefined, state: { status: "ready", order, error: null }, onRetry() {}, onLogin() {}, onChanged() {} }, router([
+    { match: "/settlement", method: "GET", respond: () => json(data) },
+    { match: "/refunds", method: "GET", respond: () => json(refund) },
+  ], []));
   await probe.render();
   return probe;
 }
@@ -1737,7 +1765,10 @@ test("polish: expanded quote shows only own amounts and cancellation has one nex
     for (const party of ["owner", "renter"]) {
       const money = (amount) => ({ amount, currency: "CNY" });
       const order = { ...paidOrder, status: "CANCELLED", quote: { lines: [{ name: "保险卡", quantity: "10", unit: "DAY", buyerAmount: money("257.53"), ownerAmount: money("134.65") }], ownerTotal: money("134.65"), unitAmountsInformational: true } };
-      const probe = createProbe(window, OrderDetail, { orderId: order.id, party, status: "", state: { status: "ready", order, error: null }, onRetry() {}, onLogin() {}, onChanged() {} }, async () => { throw new Error("cancelled detail must not fetch settlement"); });
+      const probe = createProbe(window, OrderDetail, { orderId: order.id, party, status: "", state: { status: "ready", order, error: null }, onRetry() {}, onLogin() {}, onChanged() {} }, async (input) => {
+        if (String(input).includes("/refunds")) return json(refundRead(order.id));
+        throw new Error("cancelled detail must not fetch settlement");
+      });
       try {
         await probe.render();
         const table = probe.host.querySelector(".order-lines table");
@@ -1843,4 +1874,255 @@ test("Native UI leaves an already-successful observation to acceptance recovery"
     assert.doesNotMatch(probe.host.textContent,/渠道付款已接纳/);
   }finally{await probe.dispose(()=>{});}
  });
+});
+
+test("C02: renter refund section separates frozen responsibility, local write-off, saved evidence and arrival", async () => {
+  await withDom(async (window) => {
+    const read = refundRead("order_A", {
+      status: "AVAILABLE", outcome: "FULLY_CONSUMED",
+      responsibility: { state: "POSTED", postingId: "posting_1", originalCents: "28000", allocatedCents: "28000", consumedCents: "28000", releasedCents: "0", remainingCents: "0", totalsComplete: true, dueAt: "2026-10-19T04:30:00Z", dueState: "DUE" },
+      intents: [refundIntent()], returnedIntentCount: 1,
+    });
+    const probe = await detailProbe(window, { ...paidOrder, status: "COMPLETED" }, "renter", postedSettlement, read);
+    try {
+      const section = probe.host.querySelector(".order-refund-block");
+      assert.ok(section, "the refund section renders for a renter native order");
+      assert.match(section.textContent, /本地已全部核销/);
+      assert.match(section.textContent, /过账退款责任/);
+      assert.match(section.textContent, /¥280\.00/);
+      assert.match(section.textContent, /本地核销/);
+      assert.match(section.textContent, /本地保存的渠道回执（未重验）/);
+      assert.match(section.textContent, /渠道成功/);
+      assert.match(section.textContent, /实际渠道退款、退款去向与银行到账均未核验/);
+      assert.doesNotMatch(section.textContent, /退款成功|退款已到账|银行已到账/);
+      assert.deepEqual([...section.querySelectorAll("button")].map((button) => button.textContent.trim()), ["重新读取"], "refund area is read-only");
+    } finally { await probe.dispose(); }
+  });
+});
+
+test("C02: cancelled and pending renter orders still read local responsibility, while owners are excluded", async () => {
+  await withDom(async (window) => {
+    for (const status of ["CANCELLED", "PENDING_PAYMENT"]) {
+      const probe = await detailProbe(window, { ...paidOrder, status, paidAt: null }, "renter");
+      try {
+        const section = probe.host.querySelector(".order-refund-block");
+        assert.ok(section, `refund section renders for ${status}`);
+        assert.match(section.textContent, /本地尚无过账退款责任/);
+        assert.match(section.textContent, /不代表渠道未收款/);
+        assert.doesNotMatch(section.textContent, /没有退款记录/);
+      } finally { await probe.dispose(); }
+    }
+    const owner = await detailProbe(window, { ...paidOrder, status: "CANCELLED" }, "owner");
+    try { assert.equal(owner.host.querySelector(".order-refund-block"), null, "owner detail never shows the renter refund projection"); } finally { await owner.dispose(); }
+  });
+});
+
+test("C02: a legitimate renter's unexpected 404/503 is unavailable with its request ID, never 'no refund'", async () => {
+  await withDom(async (window) => {
+    for (const [status, code, requestId] of [[404, "NOT_FOUND", "req_refund_404"], [503, "EVIDENCE_UNAVAILABLE", "req_refund_503"]]) {
+      const OrderDetail = loadComponent("apps/web/src/components/order/order-detail.tsx", session("user_A")).OrderDetail;
+      const probe = createProbe(window, OrderDetail, { orderId: "order_A", party: "renter", status: "", state: { status: "ready", order: { ...paidOrder, status: "COMPLETED" }, error: null }, onRetry() {}, onLogin() {}, onChanged() {} }, async (input) => {
+        if (String(input).includes("/refunds")) return json({ error: { code, message: "synthetic unavailable", requestId } }, status);
+        if (String(input).includes("/settlement")) return json(settlementBody);
+        return json({ order: paidOrder });
+      });
+      try {
+        await probe.render();
+        const section = probe.host.querySelector(".order-refund-block");
+        assert.ok(section);
+        assert.match(section.textContent, /暂时无法读取|暂时不可用/);
+        assert.match(section.textContent, new RegExp(`查询编号：${requestId}`));
+        assert.match(section.textContent, /不代表没有退款/);
+        assert.doesNotMatch(section.textContent, /本地尚无过账退款责任|没有退款记录/);
+      } finally { await probe.dispose(); }
+    }
+  });
+});
+
+test("C02: truncated or conflicting refund reads never present a complete total", async () => {
+  await withDom(async (window) => {
+    for (const [outcome, reason] of [["TRUNCATED", "INTENT_LIMIT_EXCEEDED"], ["CONFLICT", "LEDGER_BINDING_MISMATCH"]]) {
+      const intents = outcome === "TRUNCATED" ? Array.from({ length: 50 }, (_, index) => refundIntent({ intentId: `intent_refund_${index}` })) : [refundIntent()];
+      const read = refundRead("order_A", {
+        status: "AVAILABLE", outcome,
+        coverage: { scope: "LOCAL_REGISTERED_ONLY", intentLimit: 50, intentsComplete: false, channelRecordsChecked: false },
+        responsibility: { state: "POSTED", postingId: "posting_1", originalCents: null, allocatedCents: null, consumedCents: null, releasedCents: null, remainingCents: null, totalsComplete: false, dueAt: null, dueState: "UNKNOWN" },
+        intents, returnedIntentCount: intents.length, intentsTruncated: outcome === "TRUNCATED", reasonCodes: [reason],
+      });
+      const probe = await detailProbe(window, { ...paidOrder, status: "COMPLETED" }, "renter", postedSettlement, read);
+      try {
+        const section = probe.host.querySelector(".order-refund-block");
+        assert.match(section.textContent, /不完整/);
+        assert.match(section.textContent, /缺失项不会按 0 计算/);
+        assert.match(section.textContent, outcome === "TRUNCATED" ? /仅列出已返回的部分/ : /存在冲突/);
+        assert.doesNotMatch(section.querySelector(".order-refund-amounts").textContent, /¥280\.00/, "intent amounts never become a responsibility total");
+        assert.match(section.querySelector(".order-refund-amounts").textContent, /待确认/);
+      } finally { await probe.dispose(); }
+    }
+  });
+});
+
+test("C02: switching users discards a late refund response from the previous subject", async () => {
+  await withDom(async (window) => {
+    const mutable = session("user_A");
+    const first = deferred(), second = deferred();
+    const OrderDetail = loadComponent("apps/web/src/components/order/order-detail.tsx", mutable).OrderDetail;
+    const props = { orderId: "order_A", party: "renter", status: "", state: { status: "ready", order: { ...paidOrder, status: "COMPLETED" }, error: null }, onRetry() {}, onLogin() {}, onChanged() {} };
+    const probe = createProbe(window, OrderDetail, props, async (input, init = {}) => {
+      if (String(input).includes("/refunds")) {
+        const who = new Headers(init.headers).get("x-zzsh-expected-user-id");
+        return who === "user_A" ? first.promise : second.promise;
+      }
+      if (String(input).includes("/settlement")) return json(settlementBody);
+      return json({ order: paidOrder });
+    });
+    try {
+      await probe.render();
+      mutable.userId = "user_B"; mutable.identityVersion = 2;
+      await probe.render(props);
+      const oldBody = refundRead("order_A", { subjectId: "user_A", status: "AVAILABLE", outcome: "FULLY_CONSUMED", responsibility: { state: "POSTED", postingId: "posting_1", originalCents: "99900", allocatedCents: "99900", consumedCents: "99900", releasedCents: "0", remainingCents: "0", totalsComplete: true, dueAt: "2026-10-19T04:30:00Z", dueState: "DUE" }, intents: [refundIntent({ amount: { cents: "99900", currency: "CNY" } })], returnedIntentCount: 1 });
+      const newBody = refundRead("order_A", { subjectId: "user_B", status: "AVAILABLE", outcome: "FULLY_ALLOCATED", responsibility: { state: "POSTED", postingId: "posting_2", originalCents: "22200", allocatedCents: "22200", consumedCents: "0", releasedCents: "0", remainingCents: "0", totalsComplete: true, dueAt: "2026-10-19T04:30:00Z", dueState: "DUE" }, intents: [refundIntent({ amount: { cents: "22200", currency: "CNY" } })], returnedIntentCount: 1 });
+      await React.act(async () => {
+        first.resolve(json(oldBody));
+        second.resolve(json(newBody));
+        await new Promise(setImmediate);
+      });
+      await new Promise(setImmediate);
+      const section = probe.host.querySelector(".order-refund-block");
+      assert.match(section.textContent, /¥222\.00/);
+      assert.doesNotMatch(section.textContent, /¥999\.00/);
+      assert.doesNotMatch(section.textContent, /本地已全部核销/);
+    } finally { await probe.dispose(() => {}); }
+  });
+});
+
+// SYNTHETIC_READER_COMPONENT: accepted C04B DTO shape only; no real PG, channel or bank fact.
+const abnormalFirstSubmit=(over={})=>({dispatch:"NEVER_DISPATCHED",blockedReason:"ABNORMAL_BASIS_REVIEW",blockedAt:"2026-10-27T02:00:00Z",blockedAuditCount:1,trust:"LOCAL_AUDIT_AND_ATTEMPT",...over});
+const abnormalResponsibility=(over={})=>({confirmationId:"confirm_1",reasonCode:"LATE_PAYMENT",originalCents:"5000",currency:"CNY",liabilityRootId:"root_1",liabilityEventId:"event_1",intentIds:["intent_refund_1"],allocatedCents:"5000",consumedCents:"0",releasedCents:"0",remainingCents:"0",totalsComplete:true,state:"REVIEW_REQUIRED",firstSubmit:abnormalFirstSubmit(),reasonCodes:[],...over});
+const responsibilityTotals=(over={})=>({originalCents:"5000",allocatedCents:"5000",consumedCents:"0",releasedCents:"0",remainingCents:"0",totalsComplete:true,postingOriginalCents:null,abnormalOriginalCents:"5000",abnormalConfirmationCount:1,...over});
+
+test("C04B: a cancelled order with no posting still shows abnormal responsibility without a payment claim", async () => {
+  await withDom(async (window) => {
+    const read = refundRead("order_A", {
+      status: "AVAILABLE", outcome: "REVIEW_REQUIRED",
+      responsibility: { state: "NOT_POSTED", postingId: null, originalCents: null, allocatedCents: null, consumedCents: null, releasedCents: null, remainingCents: null, totalsComplete: false, dueAt: null, dueState: "UNKNOWN" },
+      abnormalResponsibilities: [abnormalResponsibility()], responsibilitiesTruncated: false,
+      responsibilityTotals: responsibilityTotals(),
+      intents: [refundIntent({ intentId: "intent_refund_1", basisKind: "REVIEW_CONFIRMATION", paymentConfirmationId: "confirm_1", firstSubmit: abnormalFirstSubmit(), amount: { cents: "5000", currency: "CNY" }, state: "READY", budgetDisposition: "ALLOCATED", savedChannelEvidence: null, localAccounting: { disposition: "ALLOCATED", writeOff: null, release: null, reasonCodes: [] } })],
+      returnedIntentCount: 1,
+    });
+    const probe = await detailProbe(window, { ...paidOrder, status: "CANCELLED", paidAt: null }, "renter", settlementBody, read);
+    try {
+      const section = probe.host.querySelector(".order-refund-block");
+      assert.match(section.textContent, /异常收款责任/);
+      assert.match(section.textContent, /迟到的支付/);
+      assert.match(section.textContent, /原款责任/);
+      assert.match(section.textContent, /¥50\.00/);
+      assert.match(section.textContent, /尚未分配/);
+      assert.match(section.textContent, /本地复核：异常原款复核，从未派发/);
+      assert.match(section.textContent, /唯一责任合计/);
+      assert.match(section.textContent, /正常过账责任/);
+      assert.doesNotMatch(section.textContent, /没有退款记录|渠道已收到|银行已到账|退款已到账/);
+      assert.deepEqual([...section.querySelectorAll("button")].map((button) => button.textContent.trim()), ["重新读取"]);
+    } finally { await probe.dispose(); }
+  });
+});
+
+test("C04B: one conflicting original does not hide the valid posting or the other abnormal original", async () => {
+  await withDom(async (window) => {
+    const read = refundRead("order_A", {
+      status: "AVAILABLE", outcome: "CONFLICT",
+      responsibility: { state: "POSTED", postingId: "posting_1", originalCents: "28000", allocatedCents: "28000", consumedCents: "28000", releasedCents: "0", remainingCents: "0", totalsComplete: true, dueAt: "2026-10-19T04:30:00Z", dueState: "DUE" },
+      abnormalResponsibilities: [
+        abnormalResponsibility(),
+        abnormalResponsibility({ confirmationId: "confirm_bad", reasonCode: "DUPLICATE_PAYMENT", originalCents: null, currency: null, liabilityRootId: null, liabilityEventId: null, intentIds: [], allocatedCents: null, consumedCents: null, releasedCents: null, remainingCents: null, totalsComplete: false, state: "CONFLICT", firstSubmit: null }),
+      ],
+      responsibilitiesTruncated: false,
+      responsibilityTotals: responsibilityTotals({ originalCents: null, allocatedCents: null, consumedCents: null, releasedCents: null, remainingCents: null, totalsComplete: false, postingOriginalCents: "28000", abnormalOriginalCents: null, abnormalConfirmationCount: 2 }),
+      intents: [refundIntent({ intentId: "intent_refund_1", basisKind: "REVIEW_CONFIRMATION", paymentConfirmationId: "confirm_1", firstSubmit: abnormalFirstSubmit(), amount: { cents: "5000", currency: "CNY" }, state: "READY", budgetDisposition: "ALLOCATED", savedChannelEvidence: null, localAccounting: { disposition: "ALLOCATED", writeOff: null, release: null, reasonCodes: [] } })],
+      returnedIntentCount: 1,
+    });
+    const probe = await detailProbe(window, { ...paidOrder, status: "COMPLETED" }, "renter", settlementBody, read);
+    try {
+      const section = probe.host.querySelector(".order-refund-block");
+      assert.equal(section.querySelectorAll(".order-refund-abnormal-item").length, 2);
+      assert.match(section.textContent, /该原款关联异常或合计不完整，金额\/合计不可用/);
+      assert.match(section.textContent, /唯一责任合计不完整/);
+      assert.match(section.querySelector(".order-refund-amounts").textContent, /¥280\.00/, "the valid posting responsibility remains readable");
+      assert.match(section.textContent, /异常原款复核|本地复核/);
+    } finally { await probe.dispose(); }
+  });
+});
+
+test("C04B: released retries keep one original responsibility and never sum intent amounts", async () => {
+  await withDom(async (window) => {
+    const read = refundRead("order_A", {
+      status: "AVAILABLE", outcome: "RELEASED",
+      responsibility: { state: "NOT_POSTED", postingId: null, originalCents: null, allocatedCents: null, consumedCents: null, releasedCents: null, remainingCents: null, totalsComplete: false, dueAt: null, dueState: "UNKNOWN" },
+      abnormalResponsibilities: [abnormalResponsibility({ state: "RELEASED", allocatedCents: "5000", consumedCents: "0", releasedCents: "5000", remainingCents: "0", totalsComplete: true, intentIds: ["intent_refund_1", "intent_refund_2"] })],
+      responsibilitiesTruncated: false,
+      responsibilityTotals: responsibilityTotals({ allocatedCents: "5000", consumedCents: "0", releasedCents: "5000", remainingCents: "0", totalsComplete: true }),
+      intents: [
+        refundIntent({ intentId: "intent_refund_1", basisKind: "REVIEW_CONFIRMATION", paymentConfirmationId: "confirm_1", amount: { cents: "5000", currency: "CNY" }, state: "FAILED", budgetDisposition: "RELEASED", savedChannelEvidence: null, localAccounting: { disposition: "RELEASED", writeOff: null, release: { intentUpdatedAt: "2026-10-27T02:00:00Z", ledgerEventId: null, trust: "LOCAL_INTENT_ONLY" }, reasonCodes: [] } }),
+        refundIntent({ intentId: "intent_refund_2", basisKind: "REVIEW_CONFIRMATION", paymentConfirmationId: "confirm_1", amount: { cents: "5000", currency: "CNY" }, state: "READY", budgetDisposition: "ALLOCATED", savedChannelEvidence: null, localAccounting: { disposition: "ALLOCATED", writeOff: null, release: null, reasonCodes: [] } }),
+      ],
+      returnedIntentCount: 2,
+    });
+    const probe = await detailProbe(window, { ...paidOrder, status: "CANCELLED", paidAt: null }, "renter", settlementBody, read);
+    try {
+      const section = probe.host.querySelector(".order-refund-block");
+      assert.equal(section.querySelectorAll(".order-refund-abnormal-item").length, 1, "one original responsibility, not one per retry");
+      assert.equal(section.querySelectorAll(".order-refund-intent").length, 3, "one abnormal responsibility plus two intent records");
+      assert.match(section.querySelector(".order-refund-abnormal-item").textContent, /原款责任/);
+      assert.doesNotMatch(section.textContent, /¥100\.00|100\.00/, "intent amounts are not summed into a responsibility");
+      assert.match(section.textContent, /本地已释放/);
+    } finally { await probe.dispose(); }
+  });
+});
+
+test("C04B: merged truncation marks both lists incomplete but leaves valid posting responsibility readable", async () => {
+  await withDom(async (window) => {
+    const read = refundRead("order_A", {
+      status: "AVAILABLE", outcome: "TRUNCATED",
+      responsibility: { state: "POSTED", postingId: "posting_1", originalCents: "28000", allocatedCents: "28000", consumedCents: "28000", releasedCents: "0", remainingCents: "0", totalsComplete: true, dueAt: "2026-10-19T04:30:00Z", dueState: "DUE" },
+      abnormalResponsibilities: [abnormalResponsibility(), abnormalResponsibility({ confirmationId: "confirm_2", reasonCode: "DUPLICATE_PAYMENT" })],
+      responsibilitiesTruncated: true,
+      responsibilityTotals: responsibilityTotals({ originalCents: null, allocatedCents: null, consumedCents: null, releasedCents: null, remainingCents: null, totalsComplete: false, postingOriginalCents: "28000", abnormalOriginalCents: null, abnormalConfirmationCount: 2 }),
+      coverage: { scope: "LOCAL_REGISTERED_ONLY", intentLimit: 50, intentsComplete: false, channelRecordsChecked: false },
+      intents: [refundIntent({ basisKind: "REVIEW_CONFIRMATION", paymentConfirmationId: "confirm_1", firstSubmit: abnormalFirstSubmit() })],
+      returnedIntentCount: 1, intentsTruncated: true,
+    });
+    const probe = await detailProbe(window, { ...paidOrder, status: "COMPLETED" }, "renter", settlementBody, read);
+    try {
+      const section = probe.host.querySelector(".order-refund-block");
+      assert.match(section.textContent, /异常原款记录不完整/);
+      assert.match(section.textContent, /唯一责任合计不完整/);
+      assert.match(section.textContent, /退款申请记录范围不完整/);
+      assert.match(section.querySelector(".order-refund-amounts").textContent, /¥280\.00/, "the posting basis can remain complete");
+      assert.equal(section.querySelectorAll(".order-refund-abnormal-item").length, 2);
+    } finally { await probe.dispose(); }
+  });
+});
+
+test("C04B: dispatched and unknown first-submit facts are stated without claiming delivery", async () => {
+  await withDom(async (window) => {
+    const read = refundRead("order_A", {
+      status: "AVAILABLE", outcome: "UNKNOWN",
+      responsibility: { state: "NOT_POSTED", postingId: null, originalCents: null, allocatedCents: null, consumedCents: null, releasedCents: null, remainingCents: null, totalsComplete: false, dueAt: null, dueState: "UNKNOWN" },
+      abnormalResponsibilities: [
+        abnormalResponsibility({ confirmationId: "confirm_dispatched", state: "UNKNOWN", firstSubmit: abnormalFirstSubmit({ dispatch: "DISPATCHED", blockedReason: null, blockedAt: null, blockedAuditCount: null }) }),
+        abnormalResponsibility({ confirmationId: "confirm_unknown", state: "UNKNOWN", firstSubmit: abnormalFirstSubmit({ dispatch: "UNKNOWN", blockedReason: null, blockedAt: null, blockedAuditCount: null }) }),
+      ],
+      responsibilitiesTruncated: false,
+      responsibilityTotals: responsibilityTotals({ originalCents: "10000", allocatedCents: "10000", consumedCents: "0", releasedCents: "0", remainingCents: "0", totalsComplete: true, abnormalOriginalCents: "10000", abnormalConfirmationCount: 2 }),
+      intents: [], returnedIntentCount: 0,
+    });
+    const probe = await detailProbe(window, { ...paidOrder, status: "COMPLETED" }, "renter", settlementBody, read);
+    try {
+      const section = probe.host.querySelector(".order-refund-block");
+      assert.match(section.textContent, /已有提交尝试，是否送达\/到账未核实/);
+      assert.match(section.textContent, /提交状态未知/);
+      assert.doesNotMatch(section.textContent, /渠道已收到|渠道处理中|银行已到账|退款已到账/);
+    } finally { await probe.dispose(); }
+  });
 });

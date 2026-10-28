@@ -116,8 +116,14 @@ export function permissionByCode(permissions: AdminPermissionCatalogEntry[]): Ma
 }
 
 /** 服务端每项能力都带中文说明；缺省时返回空串，由调用方决定不渲染副行。 */
+/** 有账务副作用的查询类能力：展示时补充提示，不能误标为普通只读。只影响展示，不参与授权判断。 */
+const SIDE_EFFECT_NOTES: Record<string, string> = {
+  "finance.withdrawal.query": "注意：查询可能触发账务处理（按可信终态推进扣账或释放），不是普通只读。",
+};
+
 export function permissionDescription(permission: AdminPermissionCatalogEntry): string {
-  return permission.description?.trim() ?? "";
+  const base = permission.description?.trim() ?? "", note = SIDE_EFFECT_NOTES[permission.code];
+  return note ? (base ? `${base}。${note}` : note) : base;
 }
 
 export type AdminPermissionGroupCount = { id: string; label: string; count: number };

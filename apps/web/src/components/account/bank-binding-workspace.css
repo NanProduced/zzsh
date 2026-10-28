@@ -29,6 +29,9 @@
 .bank-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .bank-feedback { margin: 14px 0 0; padding: 10px 0 0; border-top: 1px solid var(--color-border-subtle); color: var(--color-text-secondary); font-size: 13px; line-height: 1.65; }
 .bank-form-error { margin: 0; color: var(--color-status-error); font-size: 13px; line-height: 1.6; }
+.bank-eligibility { margin: 15px 0 0; }
+.bank-eligibility .bank-help { margin: 8px 0 0; }
+.bank-quote-note { margin: 0; }
 .bank-policy { display: grid; gap: 7px; margin: 15px 0 0; padding: 12px 0; border-block: 1px solid var(--color-border-subtle); color: var(--color-text-secondary); font-size: 13px; line-height: 1.6; }
 .bank-quote { display: grid; gap: 16px; margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--color-border-subtle); }
 .bank-quote>.bank-primary { width: 100%; }

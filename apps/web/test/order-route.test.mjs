@@ -174,3 +174,46 @@ test('channel query rejects legacy/nested paths and identity changes before any 
     assert.equal(calls,1);
   }finally{globalThis.fetch=old;}
 });
+
+test('refund read forwards GET with the captured user cookie and strips the identity header',async()=>{
+  const old=globalThis.fetch,calls=[];
+  const projection={contractVersion:'personal-native-refunds.v1',subjectId:'user_a',order:{orderId:'order_r',displayNo:'ZZ-R',status:'PAID'},outcome:'RESPONSIBILITY_NOT_POSTED'};
+  globalThis.fetch=async(url,options)=>{calls.push({url:String(url),options});return String(url).endsWith('/get-session')?Response.json({user:{id:'user_a'}}):Response.json({...projection,extra:'kept'});};
+  try{
+    const path=['order_r','refunds'];
+    const response=await GET(input(path,{headers:{cookie:'zzsh_user.session_token=user; zzsh_admin.session_token=admin','x-zzsh-expected-user-id':'user_a'}}),ctx(path));
+    assert.equal(response.status,200);assert.deepEqual(await response.json(),{...projection,extra:'kept'});assert.equal(calls.length,2);
+    assert.equal(calls[1].url,'http://127.0.0.1:3102/api/bff/user/orders/order_r/refunds');
+    assert.equal(calls[1].options.method,'GET');assert.equal(calls[1].options.headers.get('cookie'),'zzsh_user.session_token=user');
+    assert.equal(calls[1].options.headers.has('x-zzsh-expected-user-id'),false);
+  }finally{globalThis.fetch=old;}
+});
+
+test('refund read requires the expected subject, no query and the captured session subject',async()=>{
+  const old=globalThis.fetch;let calls=0;globalThis.fetch=async()=>{calls++;return Response.json({user:{id:'user_b'}});};
+  try{
+    const path=['order_r','refunds'];
+    assert.equal((await GET(input(path,{headers:{}}),ctx(path))).status,400);
+    assert.equal((await GET(input(path,{headers:{'x-zzsh-expected-user-id':'user_a'}}, '?any=1'),ctx(path))).status,400);
+    assert.equal((await POST(input(path,{method:'POST',headers:{'content-type':'application/json','x-zzsh-expected-user-id':'user_a'},body:'{}'}),ctx(path))).status,404);
+    assert.equal(calls,0);
+    const changed=await GET(input(path,{headers:{'x-zzsh-expected-user-id':'user_a'}}),ctx(path));
+    assert.equal(changed.status,401);assert.equal((await changed.json()).error.code,'IDENTITY_CHANGED');assert.equal(calls,1);
+  }finally{globalThis.fetch=old;}
+});
+
+test('a refund projection with the wrong contract, subject or order never reaches the page',async()=>{
+  const old=globalThis.fetch;
+  const valid={contractVersion:'personal-native-refunds.v1',subjectId:'user_a',order:{orderId:'order_r'}};
+  try{
+    for(const mutation of [{contractVersion:'personal-native-refunds.v0'},{subjectId:'user_b'},{order:{orderId:'order_other'}}]){
+      globalThis.fetch=async(url)=>String(url).endsWith('/get-session')?Response.json({user:{id:'user_a'}}):Response.json({...valid,...mutation});
+      const path=['order_r','refunds'];
+      const response=await GET(input(path,{headers:{'x-zzsh-expected-user-id':'user_a'}}),ctx(path));
+      assert.equal(response.status,502);assert.equal((await response.json()).error.code,'INTERNAL_ERROR');
+    }
+    globalThis.fetch=async(url)=>String(url).endsWith('/get-session')?Response.json({user:{id:'user_a'}}):new Response('not-json',{status:200});
+    const path=['order_r','refunds'];
+    assert.equal((await GET(input(path,{headers:{'x-zzsh-expected-user-id':'user_a'}}),ctx(path))).status,502);
+  }finally{globalThis.fetch=old;}
+});

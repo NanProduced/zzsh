@@ -74,6 +74,7 @@ import { initializeNativeWalletOrigin, type NativeOriginResource } from "../fina
 import { assertLocalControlledPaymentAssembly, mountLocalControlledPayments, type LocalControlledPaymentOptions } from "../order/local-payment-routes";
 import { mountChannelPayments, channelPaymentReadOptions, type ChannelPaymentCollectionAssembly } from "../order/channel-payment-routes";
 import { mountAdminNativeRefunds } from "../order/native-refund-routes";
+import { mountAdminJoinpayQuery } from "../order/admin-joinpay-query-routes";
 import { mountJoinpayCollectionNotifications } from "../order/joinpay-collection-notification-routes";
 import { JoinpayFundsRecoveryLifecycle, type JoinpayFundsRecoverySettings } from "../finance/joinpay-funds-recovery";
 import { JoinpayAccountObservationLifecycle, type JoinpayAccountObservationOptions } from "../finance/joinpay-account-observer";
@@ -1130,6 +1131,11 @@ export async function mountAuthHandlers(
   mountCreditGuaranteeRoutes(app, { ...securityOptions, listingCursorKey: options.listingCursorKey }, options.creditGuaranteeEnabled === true);
   // 退款路径先于通用Admin BFF挂载：只接管/refunds，其余请求仍交给BFF。
   mountAdminNativeRefunds(app, securityOptions, { pool: options.pool, ...(options.joinpayRefund ? { refund: options.joinpayRefund } : {}) });
+  // QUERY-only仅显式装配可用，提现仍须finance.withdrawal.query；状态不把默认空生命周期当成已装配。
+  { const queryCollection = collection?.routes?.execution?.formal && collection.notifications?.admission === collection.routes.execution.formal.admission ? collection.routes.execution : undefined;
+    mountAdminJoinpayQuery(app, securityOptions, { ...(options.joinpayRefund ? { refund: options.joinpayRefund } : {}), ...(queryCollection ? { collection: queryCollection } : {}), ...(options.joinpayWithdrawal?.execution ? { payout: options.joinpayWithdrawal.execution } : {}),
+      workerStatus: () => { const funds = app.get(JoinpayFundsRecoveryLifecycle).status(); return { ...(options.joinpayRefund ? { refund: funds.refund } : {}),
+        ...(options.joinpayWithdrawal?.execution ? { payout: funds.payout } : {}), ...(queryCollection ? { collection: app.get(JoinpayCollectionRecoveryLifecycle).status() } : {}) }; } }); }
   mountAdminBffHandlers(app, {
     apiOrigin: options.apiOrigin,
     adminOrigin: options.adminOrigin,

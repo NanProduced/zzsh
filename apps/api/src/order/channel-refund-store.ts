@@ -186,31 +186,39 @@ export async function recordRefundTransportFailure(client: PoolClient, input: {
 }
 
 export type NativeRefundState = RefundIntentState | "PROCESSING" | "REVIEW_REQUIRED" | "SUCCEEDED" | "FAILED";
-export type FormalRefundRow = Omit<RefundRow, "payment_source" | "state"> & {
-  payment_source: "JOINPAY"; state: NativeRefundState; evidence_level: string; budget_disposition: "ALLOCATED" | "CONSUMED" | "RELEASED";
+export type RefundBasisKind = "POSTING" | "REVIEW_CONFIRMATION";
+export type FormalRefundRow = Omit<RefundRow, "payment_source" | "state" | "posting_id"> & {
+  payment_source: "JOINPAY"; state: NativeRefundState; posting_id: string | null; basis_kind: RefundBasisKind;
+  evidence_level: string; budget_disposition: "ALLOCATED" | "CONSUMED" | "RELEASED";
   initial_admission_ref: string; initial_admission_sha256: string; initial_admission_canonical: string; wire_merchant_no: string;
   initial_profile_id: string; initial_profile_sha256: string; initial_key_version_ref: string; notify_url: string;
   funds_account: "SETTLED" | "ADVANCE" | null; refund_reason: string | null; terminal_evidence_id: string | null;
-  terminal_root_id: string | null; terminal_event_id: string | null; provider_refund_trx_no: string | null; completed_at: string | null; requires_review: boolean;
+  terminal_root_id: string | null; terminal_event_id: string | null; provider_refund_trx_no: string | null; completed_at: string | null;
+  requires_review: boolean; liability_root_id: string | null; liability_event_id: string | null;
 };
 export const FORMAL_REFUND_COLUMNS = `${COLUMNS},evidence_level,budget_disposition,initial_admission_ref,initial_admission_sha256,initial_admission_canonical,
  wire_merchant_no,initial_profile_id,initial_profile_sha256,initial_key_version_ref,notify_url,funds_account,refund_reason,
- terminal_evidence_id,terminal_root_id,terminal_event_id,provider_refund_trx_no,completed_at::text,requires_review`;
+ terminal_evidence_id,terminal_root_id,terminal_event_id,provider_refund_trx_no,completed_at::text,requires_review,
+ basis_kind,liability_root_id,liability_event_id`;
 export async function assertRefundResource(client: PoolClient, admission: FormalRefundAdmission): Promise<string> {
   const a = readFormalRefundAdmission(admission), r = (await client.query(`SELECT current_database() AS db,current_user AS actor,pg_current_xact_id()::text AS xid,
     current_setting('transaction_isolation') AS isolation`)).rows[0];
   if (r?.db !== a.database || r?.actor !== a.runtimeUser || r?.isolation !== "read committed" || !/^[1-9][0-9]*$/.test(r?.xid ?? "")) throw conflict("Native refund resource or transaction differs"); return r.xid;
 }
 export function formalRefundBinding(r: FormalRefundRow, admission: FormalRefundAdmission): RefundBinding {
-  const a = readFormalRefundAdmission(admission);
+  const a = readFormalRefundAdmission(admission), basisKind: RefundBasisKind = r.basis_kind ?? "POSTING";
   if (r.payment_source !== "JOINPAY" || r.evidence_level !== "JOINPAY_FORMAL" || r.currency !== "CNY" || r.merchant_identity_id !== a.merchantIdentityId
-    || r.wire_merchant_no !== a.merchantNo || !r.initial_admission_canonical || createHash("sha256").update(r.initial_admission_canonical).digest("hex") !== r.initial_admission_sha256) throw conflict("Original native refund admission unavailable");
+    || r.wire_merchant_no !== a.merchantNo || !r.initial_admission_canonical || createHash("sha256").update(r.initial_admission_canonical).digest("hex") !== r.initial_admission_sha256
+    || basisKind === "POSTING" && r.posting_id === null
+    || basisKind === "REVIEW_CONFIRMATION" && (r.posting_id !== null || !r.liability_root_id || !r.liability_event_id)) throw conflict("Original native refund admission unavailable");
   assertInitialRefundAdmission(admission, r.initial_admission_ref, r.initial_admission_sha256);
   let initial: any; try { initial = JSON.parse(r.initial_admission_canonical); } catch { throw conflict("Original refund admission malformed"); }
   if (initial.kind !== "FORMAL_NATIVE_REFUND_SERVER_REVIEW" || initial.reference !== r.initial_admission_ref || initial.database !== a.database || initial.runtimeUser !== a.runtimeUser
     || initial.merchantIdentityId !== r.merchant_identity_id || initial.merchantNo !== r.wire_merchant_no || !Array.isArray(initial.acceptedProfiles)
     || !initial.acceptedProfiles.some((p: any) => p.operation === "SUBMIT" && p.profileId === r.initial_profile_id && p.profileSha256 === r.initial_profile_sha256 && p.keyVersionRef === r.initial_key_version_ref)) throw conflict("Original refund merchant binding differs");
-  return Object.freeze({ intentId: r.id, postingId: r.posting_id, orderId: r.order_id, paymentConfirmationId: r.payment_confirmation_id, renterUserId: r.renter_user_id,
+  return Object.freeze({ intentId: r.id, postingId: r.posting_id, basisKind,
+    ...(basisKind === "REVIEW_CONFIRMATION" ? { abnormalConfirmationId: r.payment_confirmation_id } : {}),
+    orderId: r.order_id, paymentConfirmationId: r.payment_confirmation_id, renterUserId: r.renter_user_id,
     merchantNo: r.wire_merchant_no, merchantIdentityId: r.merchant_identity_id, originalPaymentTrxNo: r.original_payment_trx_no, originalPaymentOrderNo: r.original_payment_order_no,
     responsibilityVersionHash: r.responsibility_version_hash, refundOrderNo: r.refund_order_no, amountCents: r.amount_cents, currency: "CNY",
     notifyUrl: r.notify_url, ...(r.funds_account === null ? {} : { fundsAccount: r.funds_account }), ...(r.refund_reason === null ? {} : { reason: r.refund_reason }),
@@ -226,6 +234,11 @@ export async function readFormalRefundRow(client: PoolClient, admission: FormalR
 export async function lockFormalRefundContext(client: PoolClient, admission: FormalRefundAdmission, id: string): Promise<FormalRefundRow> {
   const original = await readFormalRefundRow(client, admission, id);
   await lockRefundFunds(client, "JOINPAY", original.merchant_identity_id, original.original_payment_trx_no);
+  // 与异常创建共用 funds → order-no → user → intent 顺序；只对REVIEW basis取原号锁。
+  if (original.basis_kind === "REVIEW_CONFIRMATION") {
+    await client.query(`SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array(
+      'zzsh:refund-order-no:v1',$1::text,$2::text)::text,0))`, [original.merchant_identity_id, original.original_payment_order_no]);
+  }
   if (!(await client.query(`SELECT id FROM zzsh_auth_user."user" WHERE id=$1 FOR UPDATE`, [original.renter_user_id])).rows[0]) throw notFound();
   if (!(await client.query(`SELECT ledger_revision FROM zzsh_order.wallet_revision WHERE user_id=$1`, [original.renter_user_id])).rows[0]) throw conflict("Original refund wallet revision unavailable");
   const row = (await client.query<FormalRefundRow>(`SELECT ${FORMAL_REFUND_COLUMNS} FROM zzsh_order.channel_refund_intent WHERE id=$1 AND payment_source='JOINPAY' FOR UPDATE`, [id])).rows[0];

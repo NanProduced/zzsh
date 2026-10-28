@@ -48,7 +48,7 @@ export function scopedFinanceSql(source: string, family: "ledger" | "history", s
 export const FINANCE_GLOBAL_VERSION_DOMAIN = "admin-finance-proof.r2";
 export const FINANCE_DOCUMENT_VERSION_DOMAIN = "admin-finance-proof.r3.document";
 export const FINANCE_SUBJECT_VERSION_DOMAIN = "admin-finance-proof.r3.subject";
-export type FinanceVersionReady = { withdrawals?: boolean; native_orders?: boolean; legacy_orders?: boolean; native_distribution?: boolean; earning_basis?: boolean; earning_transitions?: boolean; history_coverage?: boolean; legacy_duty_finance?: boolean; guarantee_history?: boolean; payment_requests?: boolean; refund_intents?: boolean; joinpay_withdrawals?: boolean };
+export type FinanceVersionReady = { withdrawals?: boolean; native_orders?: boolean; legacy_orders?: boolean; native_distribution?: boolean; earning_basis?: boolean; earning_transitions?: boolean; history_coverage?: boolean; legacy_duty_finance?: boolean; guarantee_history?: boolean; payment_requests?: boolean; refund_intents?: boolean; refund_read_dependencies?: boolean; joinpay_withdrawals?: boolean };
 export type FinanceVersionScope = { mode: "document"; documentRef: string } | { mode: "subject"; subjectId: string };
 const VERSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,200}$/;
 
@@ -84,7 +84,15 @@ function versionRelations(ready: FinanceVersionReady): { name: string; sql: stri
     { name: "withdrawal_fact", sql: `SELECT id,evidence_digest FROM zzsh_order.withdrawal_provider_fact` },
     { name: "payout_operation", sql: `SELECT id,final_evidence_digest FROM zzsh_order.controlled_payout_operation` });
   if (ready.payment_requests) relations.push({ name: "payment_request", sql: `SELECT id,order_id,channel,merchant_identity_id,platform_order_no,channel_order_no,state,amount_cents::text,currency,evidence_level,updated_at FROM zzsh_order.payment_request` });
-  if (ready.refund_intents) relations.push({ name: "refund_intent", sql: `SELECT id,order_id,posting_id,renter_user_id,merchant_identity_id,payment_source,refund_order_no,provider_refund_trx_no,amount_cents::text,currency,state,budget_disposition FROM zzsh_order.channel_refund_intent` });
+  if (ready.refund_intents) {
+    relations.push({ name: "refund_intent", sql: `SELECT i.id,i.order_id,i.renter_user_id,i.posting_id,i.payment_confirmation_id,i.payment_source,i.state,i.budget_disposition,to_jsonb(i) AS doc FROM zzsh_order.channel_refund_intent i` });
+    if (ready.refund_read_dependencies === true) {
+      relations.push(
+        { name: "refund_confirmation", sql: `SELECT id,order_id,source,disposition,reason_code,currency,amount_cents::text,merchant_scope_id,provider_transaction_id,merchant_order_no,joinpay_request_id,joinpay_evidence_id,joinpay_anchor_id FROM zzsh_order.payment_confirmation WHERE source='JOINPAY'` },
+        { name: "refund_attempt", sql: `SELECT a.id,a.intent_id,a.operation,a.lease_version::text,a.created_at FROM zzsh_order.joinpay_refund_attempt a JOIN zzsh_order.channel_refund_intent i ON i.id=a.intent_id WHERE i.posting_id IS NULL` },
+        { name: "refund_block", sql: `SELECT a.id,a.action,a.object_id,a.occurred_at,a.details FROM zzsh_iam.audit_event a WHERE a.action='order.refund.abnormal.first_submit.blocked'` });
+    }
+  }
   if (ready.joinpay_withdrawals) relations.push({ name: "joinpay_withdrawal", sql: `SELECT id,user_id,merchant_identity_id,merchant_order_no,platform_serial_no,state,funds_disposition,gross_cents::text,net_cents::text,fee_cents::text,provider_fee_cents::text,operation_version::text,destination_id,destination_revision FROM zzsh_order.joinpay_withdrawal_intent` });
   return relations;
 }
@@ -104,21 +112,35 @@ export function financeScopedVersionSql(ready: FinanceVersionReady, scope: Finan
   const id = scope.mode === "subject" ? scope.subjectId : parsed?.[2];
   if (!kind || !id || !VERSION_ID.test(id)) return null;
   const none = "1=0";
-  const orderLedger = `posting_id IN (${orderPostings})${ready.native_distribution ? " OR finance_event_id IN (SELECT e.id FROM zzsh_order.finance_event e JOIN zzsh_order.rental_referral_earning g ON g.economic_root_id=e.economic_root_id WHERE g.order_id=$1)" : ""}`;
+  const orderRefundIntents = `SELECT id FROM zzsh_order.channel_refund_intent WHERE order_id=$1`;
+  const relatedRefundIntents = kind === "REFUND_INTENT"
+    ? "SELECT id FROM zzsh_order.channel_refund_intent WHERE id=$1"
+    : kind === "PAYMENT_REQUEST"
+      ? "SELECT id FROM zzsh_order.channel_refund_intent WHERE order_id IN (SELECT order_id FROM zzsh_order.payment_request WHERE id=$1)"
+      : orderRefundIntents;
+  const relatedRefundConfirmations = `SELECT payment_confirmation_id FROM zzsh_order.channel_refund_intent WHERE id IN (${relatedRefundIntents}) AND payment_confirmation_id IS NOT NULL`;
+  const relatedRefundRoots = `SELECT id FROM zzsh_order.finance_economic_root WHERE (source_kind='NATIVE_ABNORMAL_REFUND' AND source_id IN (${relatedRefundConfirmations})) OR (source_kind='NATIVE_RENTAL_REFUND' AND source_id IN (${relatedRefundIntents}))`;
+  const relatedRefundEvents = `SELECT id FROM zzsh_order.finance_event WHERE economic_root_id IN (${relatedRefundRoots})`;
+  const abnormalRootPart = ready.refund_intents === true ? ` OR id IN (${relatedRefundRoots})` : "";
+  const abnormalEventPart = ready.refund_intents === true ? ` OR id IN (${relatedRefundEvents})` : "";
+  const abnormalLedgerPart = ready.refund_intents === true ? ` OR finance_event_id IN (${relatedRefundEvents})` : "";
+  const orderLedger = `posting_id IN (${orderPostings})${ready.native_distribution ? " OR finance_event_id IN (SELECT e.id FROM zzsh_order.finance_event e JOIN zzsh_order.rental_referral_earning g ON g.economic_root_id=e.economic_root_id WHERE g.order_id=$1)" : ""}${abnormalLedgerPart}`;
   const orderUsers = `id IN (SELECT owner_user_id FROM zzsh_order.rental_order WHERE id=$1 UNION SELECT renter_user_id FROM zzsh_order.rental_order WHERE id=$1 UNION SELECT counterparty_user_id FROM zzsh_order.settlement_ledger_entry WHERE posting_id IN (${orderPostings})${ready.legacy_orders ? " UNION SELECT owner_user_id FROM zzsh_order.legacy_order_read_snapshot WHERE id=$1 UNION SELECT renter_user_id FROM zzsh_order.legacy_order_read_snapshot WHERE id=$1" : ""})`;
   const subjectOrders = `SELECT id FROM zzsh_order.rental_order WHERE owner_user_id=$1 OR renter_user_id=$1`;
   let clause: Record<string, string> | null = null;
   if (kind === "ORDER" && ready.native_orders) clause = {
     user: orderUsers, ledger: orderLedger, observation: none, wallet_revision: none, wallet_coverage: none, opening: none,
-    root: `id IN (SELECT e.economic_root_id FROM zzsh_order.finance_event e WHERE e.id IN (${orderEvents}))${ready.native_distribution ? " OR id IN (SELECT economic_root_id FROM zzsh_order.rental_referral_earning WHERE order_id=$1)" : ""}`,
-    event: `id IN (${orderEvents})${ready.native_distribution ? " OR economic_root_id IN (SELECT economic_root_id FROM zzsh_order.rental_referral_earning WHERE order_id=$1)" : ""}`,
+    root: `id IN (SELECT e.economic_root_id FROM zzsh_order.finance_event e WHERE e.id IN (${orderEvents}))${ready.native_distribution ? " OR id IN (SELECT economic_root_id FROM zzsh_order.rental_referral_earning WHERE order_id=$1)" : ""}${abnormalRootPart}`,
+    event: `id IN (${orderEvents})${ready.native_distribution ? " OR economic_root_id IN (SELECT economic_root_id FROM zzsh_order.rental_referral_earning WHERE order_id=$1)" : ""}${abnormalEventPart}`,
     posting: "order_id=$1", native_order: "id=$1", legacy_order: "id=$1", earning: "order_id=$1", basis: "order_id=$1",
     transition: "earning_id IN (SELECT id FROM zzsh_order.rental_referral_earning WHERE order_id=$1)", history_coverage: none,
     duty_fact: "order_id=$1", duty: "order_id=$1", guarantee_coverage: none, guarantee_observation: none, withdrawal: none, withdrawal_fact: none, payout_operation: none,
-    payment_request: "order_id=$1", refund_intent: "order_id=$1", joinpay_withdrawal: none,
+    payment_request: "order_id=$1", refund_intent: "order_id=$1", refund_confirmation: "order_id=$1",
+    refund_attempt: "intent_id IN (" + orderRefundIntents + ")", refund_block: "object_id IN (" + orderRefundIntents + ")", joinpay_withdrawal: none,
   };
   else if (kind === "SUBJECT") clause = {
-    user: "id=$1", ledger: "counterparty_user_id=$1", observation: "user_id=$1", wallet_revision: "user_id=$1", wallet_coverage: "user_id=$1", opening: "user_id=$1",
+    user: "id=$1", ledger: "counterparty_user_id=$1 OR finance_event_id IN (SELECT id FROM zzsh_order.finance_event WHERE subject_user_id=$1)",
+    observation: "user_id=$1", wallet_revision: "user_id=$1", wallet_coverage: "user_id=$1", opening: "user_id=$1",
     root: "subject_user_id=$1", event: "subject_user_id=$1", posting: "id IN (SELECT posting_id FROM zzsh_order.settlement_ledger_entry WHERE counterparty_user_id=$1)",
     native_order: "owner_user_id=$1 OR renter_user_id=$1", legacy_order: "owner_user_id=$1 OR renter_user_id=$1", earning: "beneficiary_user_id=$1",
     basis: `order_id IN (SELECT order_id FROM zzsh_order.rental_referral_earning WHERE beneficiary_user_id=$1)`,
@@ -126,7 +148,11 @@ export function financeScopedVersionSql(ready: FinanceVersionReady, scope: Finan
     duty_fact: "subject_user_id=$1", duty: "counterparty_user_id=$1", guarantee_coverage: none, guarantee_observation: "user_id=$1",
     withdrawal: "user_id=$1", withdrawal_fact: "id IN (SELECT last_provider_fact_id FROM zzsh_order.withdrawal_intent WHERE user_id=$1)",
     payout_operation: "intent_id IN (SELECT id FROM zzsh_order.withdrawal_intent WHERE user_id=$1)",
-    payment_request: ready.native_orders ? `order_id IN (${subjectOrders})` : none, refund_intent: "renter_user_id=$1", joinpay_withdrawal: "user_id=$1",
+    payment_request: ready.native_orders ? `order_id IN (${subjectOrders})` : none, refund_intent: "renter_user_id=$1",
+    refund_confirmation: ready.native_orders ? `order_id IN (${subjectOrders})`
+      : "id IN (SELECT payment_confirmation_id FROM zzsh_order.channel_refund_intent WHERE renter_user_id=$1)",
+    refund_attempt: "intent_id IN (SELECT id FROM zzsh_order.channel_refund_intent WHERE renter_user_id=$1)",
+    refund_block: "object_id IN (SELECT id FROM zzsh_order.channel_refund_intent WHERE renter_user_id=$1)", joinpay_withdrawal: "user_id=$1",
   };
   else if (kind === "JOINPAY_WITHDRAWAL" && ready.joinpay_withdrawals) clause = {
     user: "id IN (SELECT user_id FROM zzsh_order.joinpay_withdrawal_intent WHERE id=$1)",
@@ -135,22 +161,31 @@ export function financeScopedVersionSql(ready: FinanceVersionReady, scope: Finan
     opening: "user_id IN (SELECT user_id FROM zzsh_order.joinpay_withdrawal_intent WHERE id=$1)", root: "source_id=$1 AND source_entity='joinpay_withdrawal_intent'",
     event: "economic_root_id IN (SELECT id FROM zzsh_order.finance_economic_root WHERE source_id=$1 AND source_entity='joinpay_withdrawal_intent')", posting: none, native_order: none, legacy_order: none,
     earning: none, basis: none, transition: none, history_coverage: none, duty_fact: none, duty: none, guarantee_coverage: none, guarantee_observation: none,
-    withdrawal: none, withdrawal_fact: none, payout_operation: none, payment_request: none, refund_intent: none, joinpay_withdrawal: "id=$1",
+    withdrawal: none, withdrawal_fact: none, payout_operation: none, payment_request: none, refund_intent: none,
+    refund_confirmation: none, refund_attempt: none, refund_block: none, joinpay_withdrawal: "id=$1",
   };
   else if (kind === "PAYMENT_REQUEST" && ready.payment_requests) clause = {
     user: `id IN (SELECT owner_user_id FROM zzsh_order.rental_order WHERE id IN (SELECT order_id FROM zzsh_order.payment_request WHERE id=$1) UNION SELECT renter_user_id FROM zzsh_order.rental_order WHERE id IN (SELECT order_id FROM zzsh_order.payment_request WHERE id=$1))`,
-    ledger: `posting_id IN (SELECT id FROM zzsh_order.settlement_posting WHERE order_id IN (SELECT order_id FROM zzsh_order.payment_request WHERE id=$1))`,
-    observation: none, wallet_revision: none, wallet_coverage: none, opening: none, root: none, event: none,
+    ledger: `posting_id IN (SELECT id FROM zzsh_order.settlement_posting WHERE order_id IN (SELECT order_id FROM zzsh_order.payment_request WHERE id=$1))${abnormalLedgerPart}`,
+    observation: none, wallet_revision: none, wallet_coverage: none, opening: none, root: ready.refund_intents ? `id IN (${relatedRefundRoots})` : none, event: ready.refund_intents ? `id IN (${relatedRefundEvents})` : none,
     posting: "order_id IN (SELECT order_id FROM zzsh_order.payment_request WHERE id=$1)", native_order: "id IN (SELECT order_id FROM zzsh_order.payment_request WHERE id=$1)", legacy_order: none,
     earning: none, basis: none, transition: none, history_coverage: none, duty_fact: none, duty: none, guarantee_coverage: none, guarantee_observation: none,
-    withdrawal: none, withdrawal_fact: none, payout_operation: none, payment_request: "id=$1", refund_intent: "order_id IN (SELECT order_id FROM zzsh_order.payment_request WHERE id=$1)", joinpay_withdrawal: none,
+    withdrawal: none, withdrawal_fact: none, payout_operation: none, payment_request: "id=$1",
+    refund_intent: "order_id IN (SELECT order_id FROM zzsh_order.payment_request WHERE id=$1)",
+    refund_confirmation: "order_id IN (SELECT order_id FROM zzsh_order.payment_request WHERE id=$1)",
+    refund_attempt: "intent_id IN (SELECT id FROM zzsh_order.channel_refund_intent WHERE order_id IN (SELECT order_id FROM zzsh_order.payment_request WHERE id=$1))",
+    refund_block: "object_id IN (SELECT id FROM zzsh_order.channel_refund_intent WHERE order_id IN (SELECT order_id FROM zzsh_order.payment_request WHERE id=$1))",
+    joinpay_withdrawal: none,
   };
   else if (kind === "REFUND_INTENT" && ready.refund_intents) clause = {
     user: "id IN (SELECT renter_user_id FROM zzsh_order.channel_refund_intent WHERE id=$1)",
-    ledger: "posting_id IN (SELECT posting_id FROM zzsh_order.channel_refund_intent WHERE id=$1)", observation: none, wallet_revision: none, wallet_coverage: none, opening: none, root: none, event: none,
+    ledger: `posting_id IN (SELECT posting_id FROM zzsh_order.channel_refund_intent WHERE id=$1)${abnormalLedgerPart}`, observation: none, wallet_revision: none, wallet_coverage: none, opening: none, root: `id IN (${relatedRefundRoots})`, event: `id IN (${relatedRefundEvents})`,
     posting: "id IN (SELECT posting_id FROM zzsh_order.channel_refund_intent WHERE id=$1)", native_order: "id IN (SELECT order_id FROM zzsh_order.channel_refund_intent WHERE id=$1)", legacy_order: none,
     earning: none, basis: none, transition: none, history_coverage: none, duty_fact: none, duty: none, guarantee_coverage: none, guarantee_observation: none,
-    withdrawal: none, withdrawal_fact: none, payout_operation: none, payment_request: "order_id IN (SELECT order_id FROM zzsh_order.channel_refund_intent WHERE id=$1)", refund_intent: "id=$1", joinpay_withdrawal: none,
+    withdrawal: none, withdrawal_fact: none, payout_operation: none,
+    payment_request: "order_id IN (SELECT order_id FROM zzsh_order.channel_refund_intent WHERE id=$1)", refund_intent: "id=$1",
+    refund_confirmation: "id IN (SELECT payment_confirmation_id FROM zzsh_order.channel_refund_intent WHERE id=$1)",
+    refund_attempt: "intent_id=$1", refund_block: "object_id=$1", joinpay_withdrawal: none,
   };
   // Legacy history can be admitted by a later opening; keep its complete global proof.
   if (!clause) return null;
@@ -162,7 +197,9 @@ export function financeScopedVersionSql(ready: FinanceVersionReady, scope: Finan
     }
     const where = clause[relation.name];
     if (!where) return null;
-    selected.push(`${relation.sql} WHERE ${where}`);
+    selected.push(/\bWHERE\b/.test(relation.sql)
+      ? `SELECT * FROM (${relation.sql}) rel WHERE ${where}`
+      : `${relation.sql} WHERE ${where}`);
   }
   return { text: versionDigest(selected), values: [id] };
 }

@@ -278,10 +278,19 @@ function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendi
     && ["SUBMITTING", "UNKNOWN", "PROCESSING_UNCONFIRMED", "ACTION_READY"].includes(view.request.state);
   const mayStart = payable && view?.capability.channelEnabled === true && view.capability.productionPaymentCapability === true
     && view.payment === null && view.request === null && pending.state === "NONE" && methods.includes(method) && !blocked;
+  const capabilityOff = Boolean(view?.dataOrigin === "JOINPAY_CANDIDATE" && view.payment === null && !view.request
+    && (view.capability.channelEnabled !== true || view.capability.productionPaymentCapability !== true));
+  const missingAmount = Boolean(view?.request && view.payment === null && !amountKnown && !capabilityOff);
+  const actionUnavailable = Boolean(view?.request && view.payment === null && !applied && amountKnown && !capabilityOff && !missingAmount
+    && view.dataOrigin === "JOINPAY_CANDIDATE" && view.capability.channelEnabled === true && view.capability.productionPaymentCapability === true
+    && ["ACTION_READY", "PROCESSING_UNCONFIRMED"].includes(view.request.state) && view.projection?.actionBlockedReason === null && !url);
   return <div className="order-channel-payment" aria-busy={busy || reading}>
     <p role="status">{applied ? "渠道付款已接纳" : view?.dataOrigin === "LOCAL_CONTROLLED" ? "当前付款记录属于本地受控测试" : view?.request && view.dataOrigin === "SYNTHETIC_PROTOCOL" ? "协议测试记录，不代表真实付款" : view?.payment?.disposition === "REVIEW_REQUIRED" ? "支付需要人工核对" : view?.payment?.disposition === "APPLIED" ? "付款依据待确认" : view?.request ? channelStateLabels[view.request.state] ?? "支付状态待确认" : "请选择支付方式"}</p>
     {view?.request ? <p className="order-muted">本次请求金额：{channelMoneyText(view.request.amount)}。支付方式与原请求保持一致。</p> : null}
     {url ? <figure className="order-channel-code"><QRCodeSVG value={url} size={176} level="M" marginSize={4} role="img" aria-label="本单支付二维码" /><figcaption className="order-muted">请使用{view?.request?.method === "WEIXIN_NATIVE" ? "微信" : "支付宝"}扫描本单二维码。二维码有效期未确认，请以渠道提示为准。</figcaption></figure> : null}
+    {capabilityOff ? <p className="order-inline-notice" role="status">当前环境未开放真实渠道支付；本页不会生成支付参数，也不会自动改用其他收款方式。</p> : null}
+    {missingAmount ? <p className="order-inline-notice" role="status">支付金额暂时无法确认；本页不会生成支付二维码或跳转。</p> : null}
+    {actionUnavailable ? <p className="order-inline-notice" role="status">支付参数暂时不可用，本页不会生成二维码或跳转；请刷新支付状态。</p> : null}
     {!applied && !view?.request ? <label>支付方式<select aria-label="支付方式" value={typeof selected === "string" ? selected : method} disabled={busy || reading || pending.state !== "NONE" || blocked} onChange={e => setMethod(e.currentTarget.value as ChannelPaymentMethod)}>
       {methods.map(value => <option key={value} value={value}>{value === "ALIPAY_NATIVE" ? "支付宝" : "微信支付"}</option>)}
     </select></label> : null}

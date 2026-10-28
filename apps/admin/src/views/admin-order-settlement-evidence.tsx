@@ -14,7 +14,7 @@ const dutyStates: Record<string, string> = { PENDING: '原责任待处理', MATU
 function moneyRows(evidence: OrderSettlementEvidence): [string, OrderSettlementMoney][] {
   const platform = (evidence as OrderSettlementEvidence & { platformContribution?: OrderSettlementMoney }).platformContribution;
   return [[evidence.posting.state === 'FINALIZED_ZERO' ? '原收款依据金额' : '原入账基数', evidence.captured], [evidence.documentRef.startsWith('LEGACY_ORDER:') ? '号主租赁收益责任' : '号主结算净额', evidence.ownerNet], ['租客应退责任', evidence.refundPayable], ['退款出款记录', evidence.refunded],
-    ...(platform ? [['本单已记平台结算贡献', platform] as [string, OrderSettlementMoney]] : []),
+    ...(platform ? [['本单已记平台结算贡献（非净利润）', platform] as [string, OrderSettlementMoney]] : []),
     ...(evidence.documentRef.startsWith('LEGACY_ORDER:') ? [['历史应退记录', evidence.historicalRefund] as [string, OrderSettlementMoney]] : [])];
 }
 const postingLabel = (evidence: OrderSettlementEvidence) => evidence.posting.state === 'FINALIZED_ZERO' ? '零额责任已终定' : evidence.posting.state === 'POSTED' ? '原过账已证实' : evidence.posting.state === 'NOT_POSTED' ? '当前未查到过账记录' : '过账待核';

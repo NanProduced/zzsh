@@ -1,6 +1,6 @@
 import type { PoolClient } from "pg";
 import { SecurityApiError } from "../auth/security-core";
-import { readOrderPaymentSummary, type AdminOrderPaymentSummary, type ChannelPaymentReadOptions } from "../order/channel-payment-read";
+import { readOrderPaymentSummary, type AdminOrderPaymentSummary, type AdminPaymentAnomalySection, type ChannelPaymentReadOptions } from "../order/channel-payment-read";
 import { exactCents } from "./finance-money";
 import { readAdminOrderRefundSummary } from "./channel-finance-read";
 import { nativeProjection } from "./personal-withdrawal-history";
@@ -143,6 +143,7 @@ export type ChannelPaymentEvidence = Readonly<{
     trust: "EXISTING_READER_PROJECTION" }> | null;
   acceptance: Readonly<{ state: "APPLIED" | "REVIEW_REQUIRED" | "PENDING" | "NONE"; confirmationId: string | null;
     reasonCode: string | null; acceptedAmount: ChannelMoney | null; acceptedAt: string | null }>;
+  anomalies: AdminPaymentAnomalySection | null;
   lastFailure: Readonly<{ kind: "TRANSPORT_FAILURE" | "REJECTED_BY_CHANNEL" | "CHANNEL_REPORTED_FAILED" | "SCHEMA_INVALID"
     | "SIGNATURE_MISMATCH" | "BINDING_MISMATCH" | "INCOMPLETE_RESPONSE" | "HTTP_ERROR"; observedAt: string; ageSeconds: number | null;
     evidenceRef: string | null; httpStatus: number | null; event: string | null; failureCode: string | null;
@@ -222,7 +223,7 @@ function notIntegratedPayment(orderId: string, asOf: string, status: "NOT_INTEGR
     orderId, requestId: null, merchantIdentityId: null, merchantOrderNo: null, productFamily: "UNKNOWN", dataOrigin: "UNKNOWN",
     request: null, trustedObservation: null,
     acceptance: { state: "NONE", confirmationId: null, reasonCode: null, acceptedAmount: null, acceptedAt: null },
-    lastFailure: null, lastConflict: null, conflictCount: 0, conflictsTruncated: false,
+    anomalies: null, lastFailure: null, lastConflict: null, conflictCount: 0, conflictsTruncated: false,
     amounts: { requested: null, trustedChannel: null, accepted: null },
     fees: { paymentFee: null, bankTrxNo: null, settleAmount: null, settleDerivation: "NOT_COMPUTED", reasons: [reasonCode] },
     settlementIntegration: "NOT_INTEGRATED", providerTimeSeparated: true, bankArrival: "UNKNOWN",
@@ -256,6 +257,10 @@ export async function readAdminChannelPaymentEvidence(client: Client, scope: Cha
       authorizedMerchant = rows.length === 1 && typeof rows[0]!.merchant_scope_id === "string" ? rows[0]!.merchant_scope_id : null;
     }
     requireStoredMerchant(data, authorizedMerchant);
+  }
+  const anomalies = summary.anomalies ?? null;
+  if (finance) for (const item of anomalies?.items ?? []) {
+    if (item.source === "CONFIRMATION" && item.evidenceLevel === "JOINPAY_CONFIRMATION") requireStoredMerchant(data, item.merchantIdentityId);
   }
   const method = request?.method ?? null;
   const productFamily: ChannelProductFamily | "UNKNOWN" = method === "ALIPAY_NATIVE" || method === "WEIXIN_NATIVE" ? method : "UNKNOWN";
@@ -337,6 +342,7 @@ export async function readAdminChannelPaymentEvidence(client: Client, scope: Cha
       createdAt: iso(request.createdAt), updatedAt: localRequest?.updatedAt ?? null } : null,
     trustedObservation, acceptance: { state: acceptance?.state ?? "NONE", confirmationId: acceptance?.confirmationId ?? null,
       reasonCode: acceptance?.reasonCode ?? null, acceptedAmount, acceptedAt },
+    anomalies,
     lastFailure, lastConflict, conflictCount: conflicts.length, conflictsTruncated,
     amounts: { requested: requestAmount, trustedChannel: null, accepted: acceptedAmount },
     fees: { paymentFee: null, bankTrxNo: null, settleAmount: null, settleDerivation: "NOT_COMPUTED",
@@ -350,8 +356,21 @@ export async function readAdminChannelPaymentEvidence(client: Client, scope: Cha
 
 export type ChannelRefundIntentEvidence = Readonly<{
   intentId: string; refundOrderNo: string; amount: ChannelMoney; localState: string; budgetDisposition: string;
-  requiresReview: boolean; localTerminal: Readonly<{ evidenceId: string | null; rootId: string | null; eventId: string | null }> | null;
+  requiresReview: boolean; basisKind: "POSTING" | "REVIEW_CONFIRMATION"; paymentConfirmationId: string | null;
+  liabilityRootId: string | null; liabilityEventId: string | null;
+  firstSubmit: Readonly<{ dispatch: "NEVER_DISPATCHED" | "DISPATCHED" | "UNKNOWN";
+    blockedReason: "ORIGINAL_ORDER_NO_AMBIGUOUS" | "ABNORMAL_BASIS_REVIEW" | null; blockedAt: string | null;
+    blockedAuditCount: number | null; trust: "LOCAL_AUDIT_AND_ATTEMPT" }> | null;
+  localTerminal: Readonly<{ evidenceId: string | null; rootId: string | null; eventId: string | null }> | null;
   trustedActualCents: null; trustedRefundTrxNo: null; trustedCompletedAt: null; mayResubmit: false; bankArrival: "UNKNOWN";
+}>;
+export type ChannelAbnormalResponsibilityEvidence = Readonly<{
+  confirmationId: string; reasonCode: string; originalCents: string | null; allocatedCents: string | null;
+  consumedCents: string | null; releasedCents: string | null; remainingCents: string | null;
+  totalsComplete: boolean; state: string; intentIds: readonly string[];
+  liabilityRootId: string | null; liabilityEventId: string | null;
+  firstSubmit: ChannelRefundIntentEvidence["firstSubmit"];
+  reasonCodes: readonly string[];
 }>;
 export type ChannelRefundEvidence = Readonly<{
   contractVersion: "admin-channel-refund-evidence.v1";
@@ -368,6 +387,11 @@ export type ChannelRefundEvidence = Readonly<{
   trustedRefundTrxNo: null;
   trustedCompletedAt: null;
   intents: readonly ChannelRefundIntentEvidence[] | null;
+  abnormalResponsibilities: readonly ChannelAbnormalResponsibilityEvidence[] | null;
+  intentTotals: Readonly<{ requestedCents: string | null; allocatedCents: string | null; consumedCents: string | null; releasedCents: string | null }>;
+  intentTotalsComplete: boolean | null;
+  responsibilityTotals: Readonly<{ originalCents: string | null; allocatedCents: string | null; consumedCents: string | null;
+    releasedCents: string | null; remainingCents: string | null; totalsComplete: boolean }> | null;
   bankArrival: "UNKNOWN";
   safeTarget: null;
   reasonCodes: readonly string[];
@@ -380,6 +404,9 @@ function emptyRefund(orderId: string, asOf: string, status: ChannelRefundEvidenc
     refundSourceFamily: "JOINPAY", posting: null,
     totals: { requestedCents: null, allocatedCents: null, consumedCents: null, releasedCents: null },
     residualCents: null, trustedActualRefundCents: null, trustedRefundTrxNo: null, trustedCompletedAt: null, intents: null,
+    abnormalResponsibilities: null,
+    intentTotals: { requestedCents: null, allocatedCents: null, consumedCents: null, releasedCents: null },
+    responsibilityTotals: null, intentTotalsComplete: null,
     bankArrival: "UNKNOWN", safeTarget: null,
     reasonCodes: [reasonCode, "BANK_ARRIVAL_UNKNOWN"], asOf };
 }
@@ -454,7 +481,17 @@ export async function readAdminChannelRefundEvidence(client: Client, scope: Chan
   if (!data.financeReadable) return emptyRefund(input.orderId, asOf, "FORBIDDEN", "FINANCE_PERMISSION_REQUIRED");
   if (input.origin !== "NATIVE") return emptyRefund(input.orderId, asOf, "NOT_APPLICABLE", "LEGACY_REFUND_SOURCE_NOT_INTEGRATED");
   const summary = await readAdminOrderRefundSummary(client, { orderId: input.orderId, origin: "NATIVE", financeReadable: true });
+  const abnormalResponsibilities = (summary as { abnormalResponsibilities?: readonly { intentIds?: readonly string[]; merchantIdentityId?: unknown; totalsComplete?: unknown }[] }).abnormalResponsibilities ?? [];
   if (summary.integration === "INTEGRATED" && summary.intents) await assertRefundMerchants(client, data, input.orderId, summary.intents);
+  if (summary.integration === "INTEGRATED") {
+    for (const responsibility of abnormalResponsibilities) {
+      if (responsibility.totalsComplete === true) for (const intentId of responsibility.intentIds ?? []) {
+        if (!summary.intents?.some(intent => intent.intentId === intentId)) throw unavailable("Abnormal refund responsibility intent is unavailable");
+      }
+      if (responsibility.merchantIdentityId !== undefined && responsibility.merchantIdentityId !== null) requireStoredMerchant(data, responsibility.merchantIdentityId);
+    }
+  }
+  const incompleteAbnormal = abnormalResponsibilities.some(row => row.totalsComplete !== true);
   const reasons: string[] = (summary.reasonCodes ?? []).filter((value): value is string => typeof value === "string" && CODE.test(value));
   const posting = await readSettlementPosting(client, input.orderId, reasons);
   const status: ChannelRefundEvidence["status"] = summary.integration === "INTEGRATED" ? "INTEGRATED"
@@ -482,19 +519,33 @@ export async function readAdminChannelRefundEvidence(client: Client, scope: Chan
       const eventId = intent.eventId === null ? null : id(intent.eventId);
       if (intent.evidenceId !== null && evidenceId === null || intent.rootId !== null && rootId === null
         || intent.eventId !== null && eventId === null) add(reasons, "LOCAL_TERMINAL_REFERENCE_UNREADABLE");
+      const rawBasis = (intent as { basisKind?: unknown }).basisKind;
+      const basisKind = rawBasis === "REVIEW_CONFIRMATION" ? "REVIEW_CONFIRMATION" as const : rawBasis === undefined ? "POSTING" as const : "POSTING" as const;
+      const firstSubmit = (intent as { firstSubmit?: ChannelRefundIntentEvidence["firstSubmit"] }).firstSubmit ?? null;
+      const liabilityRootId = (intent as { liabilityRootId?: unknown }).liabilityRootId;
+      const liabilityEventId = (intent as { liabilityEventId?: unknown }).liabilityEventId;
       mapped.push({ intentId, refundOrderNo, amount, localState: code(intent.localState) ?? "UNKNOWN",
-        budgetDisposition: disposition, requiresReview: intent.requiresReview,
+        budgetDisposition: disposition, requiresReview: intent.requiresReview, basisKind,
+        paymentConfirmationId: id((intent as { paymentConfirmationId?: unknown }).paymentConfirmationId),
+        liabilityRootId: id(liabilityRootId), liabilityEventId: id(liabilityEventId), firstSubmit,
         localTerminal: evidenceId || rootId || eventId ? { evidenceId, rootId, eventId } : null,
         trustedActualCents: null, trustedRefundTrxNo: null, trustedCompletedAt: null, mayResubmit: false, bankArrival: "UNKNOWN" });
     }
     if (valid) {
       intents = mapped;
       if (truncated) add(reasons, "REFUND_COVERAGE_TRUNCATED");
+      else if (incompleteAbnormal) add(reasons, "REFUND_INTENT_TOTALS_INCOMPLETE");
       else {
         totals = { requestedCents: sumCents(requested), allocatedCents: sumCents(allocated),
           consumedCents: sumCents(consumed), releasedCents: sumCents(released) };
         if (mapped.length === 0) add(reasons, "NO_LOCAL_REFUND_INTENTS");
-        if (posting?.responsibility && BigInt(totals.allocatedCents!) + BigInt(totals.consumedCents!) > BigInt(posting.responsibility.cents)) {
+        const uniqueBudget = (summary as { responsibilityBudget?: { originalCents?: unknown; allocatedCents?: unknown } }).responsibilityBudget;
+        const uniqueOriginal = typeof uniqueBudget?.originalCents === "string" ? uniqueBudget.originalCents
+          : posting?.responsibility?.cents ?? null;
+        const uniqueAllocated = typeof uniqueBudget?.allocatedCents === "string" ? uniqueBudget.allocatedCents
+          : totals.allocatedCents === null || totals.consumedCents === null ? null
+            : (BigInt(totals.allocatedCents) + BigInt(totals.consumedCents)).toString();
+        if (uniqueOriginal !== null && uniqueAllocated !== null && BigInt(uniqueAllocated) > BigInt(uniqueOriginal)) {
           add(reasons, "LOCAL_REFUND_ALLOCATION_EXCEEDS_RESPONSIBILITY");
         }
       }
@@ -507,14 +558,47 @@ export async function readAdminChannelRefundEvidence(client: Client, scope: Chan
   add(reasons, "RESIDUAL_NOT_DERIVED_FROM_REQUESTS");
   add(reasons, "REFUND_TARGET_NOT_REVALIDATED");
   add(reasons, "BANK_ARRIVAL_UNKNOWN");
+  add(reasons, "INTENT_TOTALS_ARE_NOT_UNIQUE_RESPONSIBILITY");
   if (status === "NOT_INTEGRATED") add(reasons, "REFUND_SCHEMA_NOT_INTEGRATED");
   if (status === "UNAVAILABLE") add(reasons, "REFUND_READ_UNAVAILABLE");
   if (status === "FORBIDDEN") add(reasons, "FINANCE_PERMISSION_REQUIRED");
   if (status === "INTEGRATED" && sourceIntents === null) add(reasons, "REFUND_INTENTS_UNAVAILABLE");
   const projectedStatus = status === "INTEGRATED" && intents === null ? "UNAVAILABLE" : status;
+  const responsibilityBudget = (summary as { responsibilityBudget?: { originalCents: string | null; allocatedCents: string | null;
+    consumedCents: string | null; releasedCents: string | null; remainingCents: string | null; totalsComplete: boolean } }).responsibilityBudget;
+  const responsibilityEvidence = abnormalResponsibilities.map(responsibility => ({
+    confirmationId: id((responsibility as { confirmationId?: unknown }).confirmationId) ?? "",
+    reasonCode: code((responsibility as { reasonCode?: unknown }).reasonCode) ?? "UNKNOWN_REASON",
+    originalCents: typeof (responsibility as { originalCents?: unknown }).originalCents === "string"
+      ? (responsibility as { originalCents: string }).originalCents : null,
+    allocatedCents: typeof (responsibility as { allocatedCents?: unknown }).allocatedCents === "string"
+      ? (responsibility as { allocatedCents: string }).allocatedCents : null,
+    consumedCents: typeof (responsibility as { consumedCents?: unknown }).consumedCents === "string"
+      ? (responsibility as { consumedCents: string }).consumedCents : null,
+    releasedCents: typeof (responsibility as { releasedCents?: unknown }).releasedCents === "string"
+      ? (responsibility as { releasedCents: string }).releasedCents : null,
+    remainingCents: typeof (responsibility as { remainingCents?: unknown }).remainingCents === "string"
+      ? (responsibility as { remainingCents: string }).remainingCents : null,
+    totalsComplete: (responsibility as { totalsComplete?: unknown }).totalsComplete === true,
+    state: code((responsibility as { state?: unknown }).state) ?? "UNKNOWN",
+    intentIds: ((responsibility as { intentIds?: unknown }).intentIds as readonly string[] | undefined) ?? [],
+    liabilityRootId: id((responsibility as { liabilityRootId?: unknown }).liabilityRootId),
+    liabilityEventId: id((responsibility as { liabilityEventId?: unknown }).liabilityEventId),
+    firstSubmit: (responsibility as { firstSubmit?: ChannelRefundIntentEvidence["firstSubmit"] }).firstSubmit ?? null,
+    reasonCodes: Array.isArray((responsibility as { reasonCodes?: unknown }).reasonCodes)
+      ? ((responsibility as { reasonCodes: unknown[] }).reasonCodes).filter((value): value is string => typeof value === "string" && CODE.test(value)) : [],
+  }));
   return { contractVersion: "admin-channel-refund-evidence.v1", status: projectedStatus,
     coverage: projectedStatus !== "INTEGRATED" || sourceIntents === null ? "INTENTS_UNAVAILABLE" : truncated ? "TRUNCATED" : "LOCAL_REGISTERED_ONLY",
     orderId: input.orderId, refundSourceFamily: "JOINPAY", posting, totals, residualCents: null,
+    abnormalResponsibilities: projectedStatus === "INTEGRATED" ? responsibilityEvidence : null,
+    intentTotals: totals,
+    intentTotalsComplete: projectedStatus === "INTEGRATED" && intents !== null ? !truncated && !incompleteAbnormal : null,
+    responsibilityTotals: projectedStatus === "INTEGRATED" && responsibilityBudget ? {
+      originalCents: responsibilityBudget.originalCents, allocatedCents: responsibilityBudget.allocatedCents,
+      consumedCents: responsibilityBudget.consumedCents, releasedCents: responsibilityBudget.releasedCents,
+      remainingCents: responsibilityBudget.remainingCents, totalsComplete: responsibilityBudget.totalsComplete === true,
+    } : null,
     trustedActualRefundCents: null, trustedRefundTrxNo: null, trustedCompletedAt: null, intents,
     bankArrival: "UNKNOWN", safeTarget: null, reasonCodes: reasons, asOf };
 }

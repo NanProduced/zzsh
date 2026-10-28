@@ -11,6 +11,7 @@ import { ListTable, Table, TableBody, TableCell, TableHead, TableHeader, TableRo
 import { bucketLabels, defaultFinanceFilters, financeMoney, financeTime, financeBusinessLabel, financeIsHistorical, financeRecordNumber, financeRecordState, financeEntryScope, type FinanceFilters } from "../admin-finance-api";
 import { HistoricalFinanceDetail, financeContextIdentity, registerFinanceOrigin } from "../admin-finance-view";
 import { PERMISSION, type User } from "./user-directory-data";
+import { ChannelEvidenceLookup } from "../admin-channel-evidence-panel";
 import { errorText, Message, useDirectoryRequest, type PageProps, type UserDirectoryData } from "./user-directory-shared";
 import { sanitizeFinanceReturn, type WorkspaceTab } from '@/workspace/tab-model';
 
@@ -122,8 +123,9 @@ export function UserDetailFinance(props:Props) {
   const allowed=canConsume||adapter.has(PERMISSION.walletRead);
   if(!allowed)return <Message kind="denied" title="当前账号没有用户资金查看权限"/>;
   return <div className="space-y-6" data-user-detail-finance>
-    <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1"><h2 className="text-base font-semibold">可用余额</h2><strong className="text-xl font-semibold tabular-nums">{user.walletSummary?.state==="ready"?money(user.walletSummary.amountCents):user.walletSummary?.state==="denied"?"无查看权限":"待核"}</strong><span className="text-xs text-muted-foreground">已申请提现的金额不计入</span></div>
+    <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1"><h2 className="text-base font-semibold">可用余额</h2><strong className="text-xl font-semibold tabular-nums">{user.walletSummary?.state==="ready"?money(user.walletSummary.amountCents):user.walletSummary?.state==="denied"?"无查看权限":"待核"}</strong><span className="text-xs text-muted-foreground">已申请提现的金额不计入；可用余额不是资产总额，保证金、押金与在途资金另行核对</span></div>
     {canConsume?<Consumption {...props}/>:null}
     {full?<FinanceDocuments {...props}/>:null}
+    {full?<ChannelEvidenceLookup canRead canSearch/>:null}
   </div>;
 }

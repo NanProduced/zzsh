@@ -7,6 +7,7 @@ import { assertRefundResource, createFormalRefundIntent, createPostedNativeRefun
   type FormalRefundCreateInput, type FormalRefundRow, type NativeRefundState } from "./channel-refund-store";
 import { assertFormalRefundProfile, assertRefundStart, describeRefundProfile, inspectRefundProfile, produceRefundRequest, readFormalRefundAdmission,
   readRefundOutbound, readRefundProfileEvidence, refundCompleteTimeToUtc, refundFailureMayRelease, refundWayAccepted, RefundProfileError, type BoundRefundProfile, type RefundBinding, type RefundOperation, type RefundOutbound } from "./joinpay-refund-profile";
+import { readAbnormalRefundGate } from "./joinpay-abnormal-refund-store";
 import { captureRefundTerminalFact, refundTerminalConflicts, type RefundSourceOptions } from "./joinpay-refund-source";
 import { preflightJoinpayRefundResponse } from "./joinpay-refund-protocol";
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/, sha = (v: string | Uint8Array) => createHash("sha256").update(v).digest("hex"), fresh = (p: string) => `${p}_${randomUUID().replaceAll("-", "")}`;
@@ -19,7 +20,16 @@ async function confirmed<T>(pool: Pool, id: string, phase: "CLAIM" | "RESULT", c
 }
 export const createJoinpayNativeRefund = (pool: Pool, input: FormalRefundCreateInput) => withTransaction(pool, c => createFormalRefundIntent(c, input));
 export type RefundExecution = RefundSourceOptions & { pool: Pool; fetch?: typeof globalThis.fetch; initialProfile?: BoundRefundProfile };
+export type RefundQuerySkipReason = "TERMINAL" | "REVIEW_REQUIRED" | "ACTIVE_LEASE" | "NOT_DUE" | "THROTTLED" | "BUDGET_EXHAUSTED" | "INELIGIBLE" | "ABNORMAL_BASIS_REVIEW";
+export type RefundQueryOptions = Readonly<{ minimumIntervalSeconds: number; authorize?: (client: PoolClient, intentId: string) => Promise<void> }>;
+export type RefundQueryOutcome =
+  | Readonly<{ kind: "NOT_DISPATCHED"; intentId: string; state: NativeRefundState }>
+  | Readonly<{ kind: "SKIPPED"; intentId: string; state: NativeRefundState; reason: RefundQuerySkipReason }>
+  | Readonly<{ kind: "OBSERVED"; intentId: string; observationId: string; event: string;
+      terminal: Awaited<ReturnType<typeof consumeNativeRentalRefundTerminal>> | null; ack: "success" | "fail" }>;
 type Prepared = { row: FormalRefundRow; binding: RefundBinding; profile: BoundRefundProfile; operation: "SUBMIT" | "QUERY"; attemptId: string; key: string; request: RefundOutbound; owner: string; version: string };
+type PrepareResult = { kind: "READY"; prepared: Prepared } | { kind: "NOT_DISPATCHED"; state: NativeRefundState }
+  | { kind: "SKIPPED"; state: NativeRefundState; reason: RefundQuerySkipReason };
 export type RefundExchange = Readonly<{ body: Uint8Array | null; responseComplete: boolean; receivedBytes: number; httpStatus: number | null;
   failure: "TIMEOUT" | "ABORTED" | "BODY_TOO_LARGE" | "HTTP_STATUS" | "NETWORK_ERROR" | null; evidenceLevel: "SYNTHETIC_PROTOCOL" | "PROVIDER_RESPONSE" }>;
 /** 本退款产品的单次有界标准fetch；不伪造收款请求品牌、不自动retry。 */
@@ -51,32 +61,73 @@ export async function exchangeRefundRequest(request: RefundOutbound, dependencie
   return Object.freeze({ body: complete || kept ? Buffer.concat(chunks) : null, responseComplete: complete, receivedBytes: bytes, httpStatus: status, failure,
     evidenceLevel: suppliedFetch === undefined ? "PROVIDER_RESPONSE" : "SYNTHETIC_PROTOCOL" });
 }
-async function prepare(o: RefundExecution, intentId: string, owner: string, minimumIntervalSeconds?: number): Promise<Prepared | null> {
+async function prepare(o: RefundExecution, intentId: string, owner: string, minimumIntervalSeconds?: number, queryOnly = false,
+  authorize?: (client: PoolClient, intentId: string) => Promise<void>): Promise<PrepareResult> {
   return confirmed(o.pool, intentId, "CLAIM", async c => {
-    const row = await lockFormalRefundContext(c, o.admission, intentId); if (["SUCCEEDED", "FAILED"].includes(row.state)) return null;
+    // Admin命令的同一事务授权复核必须先于资金/主体/原intent锁，拒绝时无lease/attempt/出网。
+    if (authorize) await authorize(c, intentId);
+    const row = await lockFormalRefundContext(c, o.admission, intentId), state = row.state;
+    if (["SUCCEEDED", "FAILED"].includes(state)) return { kind: "SKIPPED", state, reason: "TERMINAL" };
+    if (queryOnly && (row.requires_review || state === "REVIEW_REQUIRED")) return { kind: "SKIPPED", state, reason: "REVIEW_REQUIRED" };
     const tables = (await c.query(`SELECT to_regclass('zzsh_order.joinpay_refund_attempt') IS NOT NULL AND to_regclass('zzsh_order.joinpay_refund_observation') IS NOT NULL AND to_regclass('zzsh_order.joinpay_refund_evidence') IS NOT NULL AS ready`)).rows[0];
     if (tables?.ready !== true) throw conflict("Native refund schema is not integrated");
+    let responsibilityDue = true;
+    if (queryOnly) {
+      const timing = (await c.query(`SELECT COALESCE(lease_until>clock_timestamp(),false) AS active,due_at<=clock_timestamp() AS due
+        FROM zzsh_order.channel_refund_intent WHERE id=$1`, [intentId])).rows[0];
+      if (typeof timing?.active !== "boolean" || typeof timing?.due !== "boolean") throw conflict("Refund timing evidence unavailable");
+      if (timing.active) return { kind: "SKIPPED", state, reason: "ACTIVE_LEASE" };
+      responsibilityDue = timing.due;
+    }
+    // 首派判定必须看真实持久SUBMIT attempt，不能只看READY枚举。
+    const dispatched = queryOnly ? (await c.query(`SELECT EXISTS(SELECT 1 FROM zzsh_order.joinpay_refund_attempt WHERE intent_id=$1 AND operation='SUBMIT') AS dispatched`, [intentId])).rows[0]?.dispatched : false;
+    if (typeof dispatched !== "boolean") throw conflict("Refund attempt evidence unavailable");
+    const operation = row.state === "READY" && row.lease_version === "0" && !dispatched ? "SUBMIT" : "QUERY";
+    if (queryOnly && !dispatched) return { kind: "NOT_DISPATCHED", state };
+    if (queryOnly && !responsibilityDue) return { kind: "SKIPPED", state, reason: "NOT_DUE" };
+    if (queryOnly && row.budget_disposition !== "ALLOCATED") return { kind: "SKIPPED", state, reason: "INELIGIBLE" };
     // 与原请求行锁同事务重核，两个worker不能靠扫描时的旧快照绕过补查间隔/预算。
     if (minimumIntervalSeconds !== undefined) {
-      const due = (await c.query(`SELECT count(*) FILTER(WHERE operation='QUERY')<$3::integer
-        AND COALESCE(max(created_at)<=clock_timestamp()-make_interval(secs=>$2::integer),true) AS allowed
-        FROM zzsh_order.joinpay_refund_attempt WHERE intent_id=$1`, [intentId, minimumIntervalSeconds, JOINPAY_REFUND_MAX_AUTOMATIC_QUERIES])).rows[0]?.allowed;
-      if (typeof due !== "boolean") throw conflict("Refund recovery timing evidence unavailable");
-      if (!due) return null;
+      if (!queryOnly) {
+        const due = (await c.query(`SELECT count(*) FILTER(WHERE operation='QUERY')<$3::integer
+          AND COALESCE(max(created_at)<=clock_timestamp()-make_interval(secs=>$2::integer),true) AS allowed
+          FROM zzsh_order.joinpay_refund_attempt WHERE intent_id=$1`, [intentId, minimumIntervalSeconds, JOINPAY_REFUND_MAX_AUTOMATIC_QUERIES])).rows[0]?.allowed;
+        if (typeof due !== "boolean") throw conflict("Refund recovery timing evidence unavailable");
+        if (!due) return { kind: "SKIPPED", state, reason: "THROTTLED" };
+      } else {
+        const recovery = (await c.query(`SELECT count(*) FILTER(WHERE operation='QUERY')::text AS queries,
+          COALESCE(max(created_at)<=clock_timestamp()-make_interval(secs=>$2::integer),true) AS interval_ok
+          FROM zzsh_order.joinpay_refund_attempt WHERE intent_id=$1`, [intentId, minimumIntervalSeconds])).rows[0];
+        if (typeof recovery?.queries !== "string" || !/^\d+$/.test(recovery.queries) || typeof recovery?.interval_ok !== "boolean") throw conflict("Refund recovery timing evidence unavailable");
+        if (BigInt(recovery.queries) >= BigInt(JOINPAY_REFUND_MAX_AUTOMATIC_QUERIES)) return { kind: "SKIPPED", state, reason: "BUDGET_EXHAUSTED" };
+        if (!recovery.interval_ok) return { kind: "SKIPPED", state, reason: "THROTTLED" };
+      }
     }
-    const operation = row.state === "READY" && row.lease_version === "0" ? "SUBMIT" : "QUERY", binding = formalRefundBinding(row, o.admission);
-    if (operation === "SUBMIT") { const review = (await c.query(`SELECT EXISTS(SELECT 1 FROM zzsh_order.channel_refund_intent WHERE payment_source='JOINPAY' AND merchant_identity_id=$1 AND original_payment_trx_no=$2 AND requires_review) AS blocked`, [row.merchant_identity_id, row.original_payment_trx_no])).rows[0]; if (review?.blocked !== false) return null; }
+    const binding = formalRefundBinding(row, o.admission);
+    if (operation === "SUBMIT") {
+      const review = (await c.query(`SELECT EXISTS(SELECT 1 FROM zzsh_order.channel_refund_intent WHERE payment_source='JOINPAY' AND merchant_identity_id=$1 AND original_payment_trx_no=$2 AND requires_review) AS blocked`, [row.merchant_identity_id, row.original_payment_trx_no])).rows[0];
+      if (review?.blocked !== false) return { kind: "SKIPPED", state, reason: "REVIEW_REQUIRED" };
+      if (row.basis_kind === "REVIEW_CONFIRMATION") {
+        const gate = await readAbnormalRefundGate(c, intentId);
+        if (!gate.valid) {
+          await recordAudit(c, { actorType: "system", action: "order.refund.abnormal.first_submit.blocked",
+            objectType: "channel_refund_intent", objectId: intentId, outcome: "FAILURE", requestId: intentId, reason: gate.reason,
+            details: { gateReason: gate.reason, orderNoTrxCount: gate.orderNoTrxCount } });
+          return { kind: "SKIPPED", state, reason: "ABNORMAL_BASIS_REVIEW" };
+        }
+      }
+    }
     const profile = o.profileFor(operation, Object.freeze({ ...binding })), p = describeRefundProfile(profile, operation); assertFormalRefundProfile(o.admission, profile, operation);
     const updated = (await c.query<FormalRefundRow>(`UPDATE zzsh_order.channel_refund_intent SET state=CASE WHEN state='READY' THEN 'SUBMITTING' ELSE 'UNKNOWN' END,
       lease_version=lease_version+1,lease_owner=$2,lease_until=clock_timestamp()+interval '30 seconds',revision=revision+1
       WHERE id=$1 AND payment_source='JOINPAY' AND state IN ('READY','SUBMITTING','UNKNOWN','PROCESSING','REVIEW_REQUIRED') AND due_at<=clock_timestamp()
-        AND (lease_until IS NULL OR lease_until<=clock_timestamp()) RETURNING ${FORMAL_REFUND_COLUMNS}`, [intentId, owner])).rows[0]; if (!updated) return null;
+        AND (lease_until IS NULL OR lease_until<=clock_timestamp()) RETURNING ${FORMAL_REFUND_COLUMNS}`, [intentId, owner])).rows[0]; if (!updated) return { kind: "SKIPPED", state, reason: "INELIGIBLE" };
     let key: string; try { key = o.keyFor(p.keyVersionRef); } catch { throw new RefundProfileError("REFUND_KEY_UNAVAILABLE"); }
     const request = produceRefundRequest(profile, operation, binding, key), wire = readRefundOutbound(request), attemptId = fresh("rfa");
     await c.query(`INSERT INTO zzsh_order.joinpay_refund_attempt(id,intent_id,operation,lease_version,lease_owner,profile_id,profile_canonical,profile_sha256,key_version_ref,admission_sha256,request_body,request_sha256)
       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, [attemptId, intentId, operation, updated.lease_version, owner, p.profileId, readRefundProfileEvidence(profile), p.profileSha256, p.keyVersionRef, readFormalRefundAdmission(o.admission).sha256, Buffer.from(wire.body), request.requestSha256]);
     await recordAudit(c, { actorType: "system", action: "order.refund.native.claimed", objectType: "channel_refund_intent", objectId: intentId, outcome: "SUCCESS", requestId: attemptId, details: { operation, leaseVersion: updated.lease_version, requestSha256: request.requestSha256 } });
-    return { row: updated, binding, profile, operation, attemptId, key, request, owner, version: updated.lease_version };
+    return { kind: "READY", prepared: { row: updated, binding, profile, operation, attemptId, key, request, owner, version: updated.lease_version } };
   });
 }
 type Received = { operation: RefundOperation; profile: BoundRefundProfile; key: string | null; attemptId: string | null; version: string | null; owner: string | null; exchange: RefundExchange };
@@ -142,9 +193,22 @@ async function recordReceived(c: PoolClient, o: RefundSourceOptions, intentId: s
 }
 export async function executeJoinpayRefund(o: RefundExecution, intentId: string, owner: string, minimumIntervalSeconds?: number) {
   if (!ID.test(intentId) || !ID.test(owner) || minimumIntervalSeconds !== undefined && (!Number.isSafeInteger(minimumIntervalSeconds) || minimumIntervalSeconds < 30 || minimumIntervalSeconds > 86400)) throw invalid();
-  readFormalRefundAdmission(o.admission); const a = await prepare(o, intentId, owner, minimumIntervalSeconds); if (!a) return null;
-  const exchange = await exchangeRefundRequest(a.request, { fetch: o.fetch });
-  return confirmed(o.pool, intentId, "RESULT", c => recordReceived(c, o, intentId, { operation: a.operation, profile: a.profile, key: a.key, attemptId: a.attemptId, version: a.version, owner: a.owner, exchange }, a.attemptId));
+  readFormalRefundAdmission(o.admission); const a = await prepare(o, intentId, owner, minimumIntervalSeconds); if (a.kind !== "READY") return null;
+  const p = a.prepared, exchange = await exchangeRefundRequest(p.request, { fetch: o.fetch });
+  return confirmed(o.pool, intentId, "RESULT", c => recordReceived(c, o, intentId, { operation: p.operation, profile: p.profile, key: p.key, attemptId: p.attemptId, version: p.version, owner: p.owner, exchange }, p.attemptId));
+}
+/** 窄QUERY-only入口：绝不首派，仅对已持久SUBMIT attempt的原单沿原号补查；不依赖新单准入/初始profile。 */
+export async function queryJoinpayRefund(o: RefundExecution, intentId: string, owner: string, options: RefundQueryOptions): Promise<RefundQueryOutcome> {
+  if (!options || !Number.isSafeInteger(options.minimumIntervalSeconds) || options.minimumIntervalSeconds < 30 || options.minimumIntervalSeconds > 86400
+    || options.authorize !== undefined && typeof options.authorize !== "function") throw invalid();
+  if (!ID.test(intentId) || !ID.test(owner)) throw invalid();
+  readFormalRefundAdmission(o.admission);
+  const a = await prepare(o, intentId, owner, options.minimumIntervalSeconds, true, options.authorize);
+  if (a.kind === "NOT_DISPATCHED") return { kind: "NOT_DISPATCHED", intentId, state: a.state };
+  if (a.kind === "SKIPPED") return { kind: "SKIPPED", intentId, state: a.state, reason: a.reason };
+  const p = a.prepared, exchange = await exchangeRefundRequest(p.request, { fetch: o.fetch });
+  const observed = await confirmed(o.pool, intentId, "RESULT", c => recordReceived(c, o, intentId, { operation: p.operation, profile: p.profile, key: p.key, attemptId: p.attemptId, version: p.version, owner: p.owner, exchange }, p.attemptId));
+  return { kind: "OBSERVED", intentId, observationId: observed.observationId, event: observed.event, terminal: observed.terminal, ack: observed.ack };
 }
 /** 通知只定位已知原号后取唯一key；原件/终态同一事务提交，异常不回成功。 */
 export async function receiveJoinpayRefundNotification(o: RefundExecution, intentId: string, raw: string, requestId: string) {

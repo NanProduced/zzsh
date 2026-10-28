@@ -74,6 +74,7 @@ export const ADMIN_PERMISSION = {
   orderSettlementWrite: "order.settlement.write",
   financeDocumentRead: "finance.document.read",
   financeRead: "finance.read",
+  financeWithdrawalQuery: "finance.withdrawal.query",
   imSupportRead: "im.support.read",
   imSupportAccept: "im.support.accept",
   imSupportComplaint: "im.support.complaint",

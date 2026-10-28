@@ -181,6 +181,31 @@
 .order-facts dt { color: var(--color-text-secondary); font-size: 12px; }
 .order-facts dd { max-width: 62%; margin: 0; color: var(--color-text-primary); font-size: 13px; text-align: right; overflow-wrap: anywhere; }
 .order-detail-section { display: grid; gap: 12px; }
+/* ---------- 退款责任（只读本地登记） ---------- */
+.order-refund-block { padding: 18px; border: 1px solid var(--color-border-subtle); border-radius: var(--functional-radius); background: var(--color-bg-card); }
+.order-refund-heading, .order-refund-intents-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; }
+.order-refund-summary { display: grid; gap: 4px; padding: 12px 14px; border: 1px solid var(--color-border-subtle); border-radius: 10px; background: var(--color-bg-surface); }
+.order-refund-summary strong { color: var(--color-text-primary); font-size: 14px; }
+.order-refund-summary p { margin: 0; color: var(--color-text-secondary); font-size: 13px; line-height: 1.7; }
+.order-refund-amounts { padding: 4px 14px; border: 1px solid var(--color-border-subtle); border-radius: 10px; }
+.order-refund-amounts dd { font-variant-numeric: tabular-nums; }
+.order-refund-funds { margin: 0; color: var(--color-text-muted); font-size: 12px; line-height: 1.7; }
+.order-refund-totals { display: grid; gap: 10px; padding: 14px; border: 1px solid var(--color-border-subtle); border-radius: 10px; background: var(--color-bg-surface); }
+.order-refund-totals .order-refund-amounts { border: 0; padding: 0; background: none; }
+.order-refund-abnormal { display: grid; gap: 10px; padding: 14px; border: 1px solid color-mix(in srgb, var(--color-status-warning) 30%, var(--color-border-subtle)); border-radius: 10px; background: color-mix(in srgb, var(--color-status-warning) 5%, var(--color-bg-surface)); }
+.order-refund-abnormal .order-refund-intents { gap: 8px; }
+.order-refund-submit { margin: 0; color: var(--color-text-secondary); font-size: 12px; line-height: 1.6; }
+.order-refund-intents-heading h3 { margin: 0; color: var(--color-text-primary); font-size: 14px; }
+.order-refund-intents-heading span { color: var(--color-text-muted); font-size: 12px; }
+.order-refund-intents { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.order-refund-intent { display: grid; gap: 8px; padding: 12px 14px; border: 1px solid var(--color-border-subtle); border-radius: 10px; background: var(--color-bg-surface); }
+.order-refund-intent-head { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 4px 12px; }
+.order-refund-intent-head strong { color: var(--color-text-primary); font-size: 13px; overflow-wrap: anywhere; }
+.order-refund-state { padding: 3px 9px; border: 1px solid var(--color-border-default); border-radius: 999px; color: var(--color-text-secondary); font-size: 11px; }
+.order-refund-intent-facts > div { padding: 7px 0; }
+.order-refund-reasons { color: var(--color-text-muted); font-size: 12px; }
+.order-refund-reasons summary { width: fit-content; cursor: pointer; }
+.order-refund-reasons p { margin: 6px 0 0; line-height: 1.7; overflow-wrap: anywhere; }
 .order-lines > details > summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 4px 16px; padding: 13px 18px; border: 1px solid var(--color-border-subtle); border-radius: var(--functional-radius); background: var(--color-bg-card); cursor: pointer; list-style: none; }
 .order-lines > details > summary::-webkit-details-marker { display: none; }
 /* Title and the toggle share one line; the long money summary wraps beneath them instead of squeezing
@@ -306,6 +331,9 @@
   .order-trade-lines input, .order-trade-reject input { max-width: none; min-width: 0; }
   .order-trade-actions .button { flex: 1 1 auto; }
   .order-contact-actions .button { flex: 1 1 auto; }
+  .order-refund-block { padding: 14px; }
+  .order-refund-amounts { padding: 2px 12px; }
+  .order-refund-intent { padding: 11px 12px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

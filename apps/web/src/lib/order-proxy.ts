@@ -14,7 +14,7 @@ const apiOrigin =
 const webOrigin =
   process.env.ZZSH_WEB_ORIGIN ?? (local ? "http://127.0.0.1:3100" : "");
 const id = "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}";
-const getPath = new RegExp(`^/(?:legacy(?:/${id}(?:/continuation(?:/receipt)?)?)?|${id}(?:/(?:im|settlement|payment-requests|channel-payment-requests))?)?$`);
+const getPath = new RegExp(`^/(?:legacy(?:/${id}(?:/continuation(?:/receipt)?)?)?|${id}(?:/(?:im|settlement|payment-requests|channel-payment-requests|refunds))?)?$`);
 const postPath = new RegExp(`^/(?:legacy/${id}/continuation/(?:preview|propose|confirm|reject)|${id}/(?:cancel|payment-requests|channel-payment-requests(?:/query)?|settlement-preview|settlements(?:/${id}/decision)?|openings/${id}/confirm))?$`);
 const error = (status: number, code: string, requestId: string) =>
   Response.json(
@@ -51,8 +51,10 @@ export async function forwardOrderRequest(
   )
     return error(403, "FORBIDDEN", requestId);
   const channelPayment = resource === "orders" && path.includes("/channel-payment-requests");
+  const refundRead = resource === "orders" && method === "GET" && path.endsWith("/refunds");
+  if (refundRead && new URL(request.url).search) return error(400, "INVALID_ARGUMENT", requestId);
   const expectedUserId = request.headers.get("x-zzsh-expected-user-id");
-  if (channelPayment && (!expectedUserId || !new RegExp(`^${id}$`).test(expectedUserId)))
+  if ((channelPayment || refundRead) && (!expectedUserId || !new RegExp(`^${id}$`).test(expectedUserId)))
     return error(400, "INVALID_ARGUMENT", requestId);
   const headers = new Headers({ origin: webOrigin, "x-request-id": requestId }),
     cookies = userCookies(request.headers.get("cookie"));
@@ -78,7 +80,7 @@ export async function forwardOrderRequest(
   }
   let upstream: Response;
   try {
-    if (channelPayment) {
+    if (channelPayment || refundRead) {
       const authHeaders = new Headers({ origin: webOrigin, "x-request-id": requestId });
       if (cookies) authHeaders.set("cookie", cookies);
       // 同一份捕获Cookie核身份，旧标签页不能借新账号会话提交或读取渠道请求。
@@ -119,6 +121,7 @@ export async function forwardOrderRequest(
   try {
     const bytes = await readBoundedBody(upstream, 2 * 1024 * 1024, deadline);
     const payload = JSON.parse(new TextDecoder().decode(bytes));
+    if (refundRead && upstream.ok && (payload?.contractVersion !== "personal-native-refunds.v1" || payload?.subjectId !== expectedUserId || payload?.order?.orderId !== segments?.[0])) return error(502, "INTERNAL_ERROR", requestId);
     return Response.json(sanitizeResponse(payload), {
       status: upstream.status,
       headers: responseHeaders,

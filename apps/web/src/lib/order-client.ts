@@ -32,6 +32,120 @@ export type ChannelPaymentQueryReceipt = {
   query: { kind: "OBSERVED"; event: string; result: string } | { kind: "TERMINAL" | "NOT_DISPATCHED" | "THROTTLED" | "PENDING_ACCEPTANCE" | "UNKNOWN_COMMIT" };
 };
 
+export type PersonalRefundOutcome =
+  | "RESPONSIBILITY_NOT_POSTED" | "ZERO_RESPONSIBILITY" | "NOT_DUE" | "NO_INTENT" | "PARTIALLY_ALLOCATED" | "FULLY_ALLOCATED"
+  | "PARTIALLY_CONSUMED" | "FULLY_CONSUMED" | "RELEASED" | "PROCESSING" | "UNKNOWN" | "REVIEW_REQUIRED" | "TRUNCATED" | "CONFLICT";
+export type PersonalRefundObservation = {
+  source: "JOINPAY" | "CONTROLLED";
+  event: string;
+  failureReason: string | null;
+  evidenceLevel: string | null;
+  observedAt: string;
+  ageSeconds: number | null;
+  trust: "LOCAL_OBSERVATION_NOT_REVALIDATED";
+};
+export type PersonalRefundBasis = "POSTING" | "REVIEW_CONFIRMATION";
+export type PersonalFirstSubmit = {
+  dispatch: "NEVER_DISPATCHED" | "DISPATCHED" | "UNKNOWN";
+  blockedReason: "ORIGINAL_ORDER_NO_AMBIGUOUS" | "ABNORMAL_BASIS_REVIEW" | null;
+  blockedAt: string | null;
+  blockedAuditCount: number | null;
+  trust: "LOCAL_AUDIT_AND_ATTEMPT";
+};
+export type PersonalAbnormalResponsibility = {
+  confirmationId: string;
+  reasonCode: "DUPLICATE_PAYMENT" | "LATE_PAYMENT" | "UNKNOWN_REASON";
+  originalCents: string | null;
+  currency: "CNY" | null;
+  liabilityRootId: string | null;
+  liabilityEventId: string | null;
+  intentIds: string[];
+  allocatedCents: string | null;
+  consumedCents: string | null;
+  releasedCents: string | null;
+  remainingCents: string | null;
+  totalsComplete: boolean;
+  state: "NO_INTENT" | "READY" | "PROCESSING" | "UNKNOWN" | "CONSUMED" | "RELEASED" | "REVIEW_REQUIRED" | "CONFLICT";
+  firstSubmit: PersonalFirstSubmit | null;
+  reasonCodes: string[];
+};
+export type PersonalResponsibilityTotals = {
+  originalCents: string | null;
+  allocatedCents: string | null;
+  consumedCents: string | null;
+  releasedCents: string | null;
+  remainingCents: string | null;
+  totalsComplete: boolean;
+  postingOriginalCents: string | null;
+  abnormalOriginalCents: string | null;
+  abnormalConfirmationCount: number;
+};
+export type PersonalRefundIntent = {
+  intentId: string;
+  refundOrderNo: string | null;
+  source: "LOCAL_CONTROLLED" | "JOINPAY_FORMAL" | "UNRECOGNIZED";
+  evidenceLevel: string | null;
+  basisKind?: PersonalRefundBasis;
+  paymentConfirmationId?: string | null;
+  firstSubmit?: PersonalFirstSubmit | null;
+  amount: { cents: string; currency: "CNY" } | null;
+  state: "READY" | "SUBMITTING" | "UNKNOWN" | "PROCESSING" | "REVIEW_REQUIRED" | "SUCCEEDED" | "FAILED" | "UNRECOGNIZED";
+  budgetDisposition: "ALLOCATED" | "CONSUMED" | "RELEASED" | "UNRECOGNIZED";
+  requiresReview: boolean;
+  dueAt: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+  latestObservation: PersonalRefundObservation | null;
+  latestFailure: PersonalRefundObservation | null;
+  savedChannelEvidence: {
+    terminal: "SUCCEEDED" | "FAILED_NO_EXECUTION";
+    evidenceLevel: string | null;
+    providerRefundTrxNo: string | null;
+    completedAt: string | null;
+    trust: "SAVED_EVIDENCE_NOT_REVALIDATED";
+  } | null;
+  localAccounting: {
+    disposition: "ALLOCATED" | "CONSUMED" | "RELEASED" | "UNRECOGNIZED";
+    writeOff: { eventId: string; amountCents: string; postedAt: string | null; trust: "LOCAL_LEDGER" } | null;
+    release: { intentUpdatedAt: string | null; ledgerEventId: null; trust: "LOCAL_INTENT_ONLY" } | null;
+    reasonCodes: string[];
+  };
+  channelFacts: { actualAmountCents: null; channelRefundTrxNo: null; completedAt: null; destination: null; bankArrival: "UNKNOWN"; reasonCodes: string[] };
+  reasonCodes: string[];
+};
+export type PersonalRefundRead = {
+  contractVersion: "personal-native-refunds.v1";
+  subjectId: string;
+  order: { orderId: string; displayNo: string | null; status: string };
+  status: "AVAILABLE" | "NOT_APPLICABLE";
+  outcome: PersonalRefundOutcome;
+  coverage: { scope: "LOCAL_REGISTERED_ONLY"; intentLimit: number; intentsComplete: boolean; channelRecordsChecked: false };
+  asOf: string;
+  responsibility: {
+    state: "POSTED" | "NOT_POSTED";
+    postingId: string | null;
+    originalCents: string | null;
+    allocatedCents: string | null;
+    consumedCents: string | null;
+    releasedCents: string | null;
+    remainingCents: string | null;
+    totalsComplete: boolean;
+    dueAt: string | null;
+    dueState: "DUE" | "NOT_DUE" | "UNKNOWN";
+  };
+  intents: PersonalRefundIntent[];
+  returnedIntentCount: number;
+  intentsTruncated: boolean;
+  /** Additive C04B fields. Old C02 responses omit all three and stay readable. */
+  abnormalResponsibilities?: PersonalAbnormalResponsibility[];
+  responsibilitiesTruncated?: boolean;
+  responsibilityTotals?: PersonalResponsibilityTotals;
+  actualChannelRefund: { amountCents: null; channelRefundTrxNo: null; completedAt: null; destination: null; bankArrival: "UNKNOWN"; reasonCodes: string[] };
+  localFundsEffect: { basis: "LOCAL_REGISTERED_ACCOUNTING"; writtenOffCents: string | null; releasedCents: string | null; bankArrival: "UNKNOWN" } | null;
+  reasonCodes: string[];
+  unknowns: string[];
+};
+
 export type OrderLine = {
   itemId?: string;
   name?: string;
@@ -232,6 +346,207 @@ export function formatOrderMoney(value: { amount?: unknown; currency?: unknown }
   return `${whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${fraction} 元`;
 }
 
+const refundOutcomes: readonly PersonalRefundOutcome[] = ["RESPONSIBILITY_NOT_POSTED", "ZERO_RESPONSIBILITY", "NOT_DUE", "NO_INTENT", "PARTIALLY_ALLOCATED", "FULLY_ALLOCATED", "PARTIALLY_CONSUMED", "FULLY_CONSUMED", "RELEASED", "PROCESSING", "UNKNOWN", "REVIEW_REQUIRED", "TRUNCATED", "CONFLICT"];
+const refundIntentStates = ["READY", "SUBMITTING", "UNKNOWN", "PROCESSING", "REVIEW_REQUIRED", "SUCCEEDED", "FAILED", "UNRECOGNIZED"] as const;
+const refundDispositions = ["ALLOCATED", "CONSUMED", "RELEASED", "UNRECOGNIZED"] as const;
+const invalidRefund = () => new OrderRequestError(502, null);
+const refundRecord = (value: unknown): Record<string, unknown> => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw invalidRefund();
+  return value as Record<string, unknown>;
+};
+const refundText = (value: unknown, max = 256): string => {
+  if (typeof value !== "string" || !value || value.length > max || /[\u0000-\u001f]/.test(value)) throw invalidRefund();
+  return value;
+};
+const refundNullableText = (value: unknown, max = 256): string | null => value === null ? null : refundText(value, max);
+const refundTime = (value: unknown): string | null => {
+  if (value === null) return null;
+  if (typeof value !== "string" || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?(?:Z|[+-]\d\d:\d\d)$/.test(value) || !Number.isFinite(Date.parse(value))) throw invalidRefund();
+  return value;
+};
+const refundCents = (value: unknown): string | null => {
+  if (value === null) return null;
+  if (typeof value !== "string" || !/^(0|[1-9][0-9]{0,23})$/.test(value)) throw invalidRefund();
+  return value;
+};
+const refundStrings = (value: unknown): string[] => {
+  if (!Array.isArray(value) || value.length > 100) throw invalidRefund();
+  return value.map((item) => refundText(item, 160));
+};
+const refundFirstSubmit = (value: unknown): PersonalFirstSubmit | null => {
+  if (value === null) return null;
+  const v = refundRecord(value);
+  if (!["NEVER_DISPATCHED", "DISPATCHED", "UNKNOWN"].includes(String(v.dispatch))
+    || !(v.blockedReason === null || ["ORIGINAL_ORDER_NO_AMBIGUOUS", "ABNORMAL_BASIS_REVIEW"].includes(String(v.blockedReason)))
+    || (v.blockedAuditCount !== null && (!Number.isSafeInteger(v.blockedAuditCount) || (v.blockedAuditCount as number) < 0))
+    || v.trust !== "LOCAL_AUDIT_AND_ATTEMPT") throw invalidRefund();
+  return {
+    dispatch: v.dispatch as PersonalFirstSubmit["dispatch"],
+    blockedReason: v.blockedReason as PersonalFirstSubmit["blockedReason"],
+    blockedAt: refundTime(v.blockedAt),
+    blockedAuditCount: v.blockedAuditCount as number | null,
+    trust: "LOCAL_AUDIT_AND_ATTEMPT",
+  };
+};
+const refundAbnormalResponsibility = (value: unknown): PersonalAbnormalResponsibility => {
+  const v = refundRecord(value), originalCents = refundCents(v.originalCents);
+  if (!["DUPLICATE_PAYMENT", "LATE_PAYMENT", "UNKNOWN_REASON"].includes(String(v.reasonCode))
+    || !(v.currency === null || v.currency === "CNY") || (originalCents !== null && v.currency !== "CNY")
+    || !["NO_INTENT", "READY", "PROCESSING", "UNKNOWN", "CONSUMED", "RELEASED", "REVIEW_REQUIRED", "CONFLICT"].includes(String(v.state))
+    || typeof v.totalsComplete !== "boolean") throw invalidRefund();
+  const allocatedCents = refundCents(v.allocatedCents), consumedCents = refundCents(v.consumedCents);
+  const releasedCents = refundCents(v.releasedCents), remainingCents = refundCents(v.remainingCents);
+  if (v.state === "CONFLICT" && (v.totalsComplete || [allocatedCents, consumedCents, releasedCents, remainingCents].some((amount) => amount !== null))) throw invalidRefund();
+  if (v.totalsComplete && (originalCents === null || v.currency !== "CNY"
+    || [allocatedCents, consumedCents, releasedCents, remainingCents].some((amount) => amount === null))) throw invalidRefund();
+  return {
+    confirmationId: refundText(v.confirmationId, 180),
+    reasonCode: v.reasonCode as PersonalAbnormalResponsibility["reasonCode"],
+    originalCents, currency: v.currency as "CNY" | null,
+    liabilityRootId: refundNullableText(v.liabilityRootId, 180), liabilityEventId: refundNullableText(v.liabilityEventId, 180),
+    intentIds: refundStrings(v.intentIds),
+    allocatedCents, consumedCents, releasedCents, remainingCents, totalsComplete: v.totalsComplete,
+    state: v.state as PersonalAbnormalResponsibility["state"],
+    firstSubmit: v.firstSubmit === undefined ? null : refundFirstSubmit(v.firstSubmit),
+    reasonCodes: refundStrings(v.reasonCodes),
+  };
+};
+const refundResponsibilityTotals = (value: unknown): PersonalResponsibilityTotals => {
+  const v = refundRecord(value);
+  if (typeof v.totalsComplete !== "boolean" || !Number.isSafeInteger(v.abnormalConfirmationCount) || (v.abnormalConfirmationCount as number) < 0) throw invalidRefund();
+  return {
+    originalCents: refundCents(v.originalCents), allocatedCents: refundCents(v.allocatedCents),
+    consumedCents: refundCents(v.consumedCents), releasedCents: refundCents(v.releasedCents),
+    remainingCents: refundCents(v.remainingCents), totalsComplete: v.totalsComplete,
+    postingOriginalCents: refundCents(v.postingOriginalCents), abnormalOriginalCents: refundCents(v.abnormalOriginalCents),
+    abnormalConfirmationCount: v.abnormalConfirmationCount as number,
+  };
+};
+const refundObservation = (value: unknown): PersonalRefundObservation | null => {
+  if (value === null) return null;
+  const v = refundRecord(value);
+  if (v.source !== "JOINPAY" && v.source !== "CONTROLLED") throw invalidRefund();
+  const event = refundText(v.event, 64), observedAt = refundTime(v.observedAt);
+  if (!/^[A-Z][A-Z_]{0,63}$/.test(event) || observedAt === null || (v.ageSeconds !== null && (!Number.isSafeInteger(v.ageSeconds) || (v.ageSeconds as number) < 0))
+    || v.trust !== "LOCAL_OBSERVATION_NOT_REVALIDATED") throw invalidRefund();
+  return {
+    source: v.source, event, failureReason: refundNullableText(v.failureReason, 160),
+    evidenceLevel: refundNullableText(v.evidenceLevel, 64), observedAt,
+    ageSeconds: v.ageSeconds as number | null, trust: v.trust,
+  };
+};
+const refundIntent = (value: unknown): PersonalRefundIntent => {
+  const v = refundRecord(value), amount = v.amount === null ? null : refundRecord(v.amount);
+  const accounting = refundRecord(v.localAccounting), channelFacts = refundRecord(v.channelFacts);
+  const evidence = v.savedChannelEvidence === null ? null : refundRecord(v.savedChannelEvidence);
+  const writeOff = accounting.writeOff === null ? null : refundRecord(accounting.writeOff);
+  const release = accounting.release === null ? null : refundRecord(accounting.release);
+  if (amount && (amount.currency !== "CNY" || refundCents(amount.cents) === null)) throw invalidRefund();
+  if (!refundIntentStates.includes(v.state as typeof refundIntentStates[number]) || !refundDispositions.includes(v.budgetDisposition as typeof refundDispositions[number])
+    || typeof v.requiresReview !== "boolean" || !refundDispositions.includes(accounting.disposition as typeof refundDispositions[number])
+    || channelFacts.actualAmountCents !== null || channelFacts.channelRefundTrxNo !== null || channelFacts.completedAt !== null || channelFacts.destination !== null || channelFacts.bankArrival !== "UNKNOWN") throw invalidRefund();
+  if (evidence && (!["SUCCEEDED", "FAILED_NO_EXECUTION"].includes(String(evidence.terminal)) || evidence.trust !== "SAVED_EVIDENCE_NOT_REVALIDATED")) throw invalidRefund();
+  if (writeOff && (writeOff.trust !== "LOCAL_LEDGER" || refundCents(writeOff.amountCents) === null)) throw invalidRefund();
+  if (release && (release.ledgerEventId !== null || release.trust !== "LOCAL_INTENT_ONLY")) throw invalidRefund();
+  if (v.basisKind !== undefined && !["POSTING", "REVIEW_CONFIRMATION"].includes(String(v.basisKind))) throw invalidRefund();
+  const basisKind = v.basisKind === undefined ? undefined : v.basisKind as PersonalRefundBasis;
+  const paymentConfirmationId = v.paymentConfirmationId === undefined ? undefined : refundNullableText(v.paymentConfirmationId, 180);
+  const firstSubmit = v.firstSubmit === undefined ? undefined : refundFirstSubmit(v.firstSubmit);
+  return {
+    intentId: refundText(v.intentId, 180),
+    refundOrderNo: v.refundOrderNo === null ? null : (() => { const text = refundText(v.refundOrderNo, 32); if (!/^RF[0-9a-f]{28}$/.test(text)) throw invalidRefund(); return text; })(),
+    source: v.source === "LOCAL_CONTROLLED" || v.source === "JOINPAY_FORMAL" || v.source === "UNRECOGNIZED" ? v.source : (() => { throw invalidRefund(); })(),
+    evidenceLevel: refundNullableText(v.evidenceLevel, 64),
+    ...(basisKind === undefined ? {} : { basisKind }),
+    ...(paymentConfirmationId === undefined ? {} : { paymentConfirmationId }),
+    ...(firstSubmit === undefined ? {} : { firstSubmit }),
+    amount: amount ? { cents: amount.cents as string, currency: "CNY" as const } : null,
+    state: v.state as PersonalRefundIntent["state"],
+    budgetDisposition: v.budgetDisposition as PersonalRefundIntent["budgetDisposition"],
+    requiresReview: v.requiresReview,
+    dueAt: refundTime(v.dueAt), createdAt: refundTime(v.createdAt), updatedAt: refundTime(v.updatedAt),
+    latestObservation: refundObservation(v.latestObservation), latestFailure: refundObservation(v.latestFailure),
+    savedChannelEvidence: evidence ? {
+      terminal: evidence.terminal as "SUCCEEDED" | "FAILED_NO_EXECUTION", evidenceLevel: refundNullableText(evidence.evidenceLevel, 64),
+      providerRefundTrxNo: refundNullableText(evidence.providerRefundTrxNo, 128), completedAt: refundTime(evidence.completedAt),
+      trust: "SAVED_EVIDENCE_NOT_REVALIDATED",
+    } : null,
+    localAccounting: {
+      disposition: accounting.disposition as PersonalRefundIntent["localAccounting"]["disposition"],
+      writeOff: writeOff ? { eventId: refundText(writeOff.eventId, 180), amountCents: refundCents(writeOff.amountCents)!, postedAt: refundTime(writeOff.postedAt), trust: "LOCAL_LEDGER" } : null,
+      release: release ? { intentUpdatedAt: refundTime(release.intentUpdatedAt), ledgerEventId: null, trust: "LOCAL_INTENT_ONLY" } : null,
+      reasonCodes: refundStrings(accounting.reasonCodes),
+    },
+    channelFacts: { actualAmountCents: null, channelRefundTrxNo: null, completedAt: null, destination: null, bankArrival: "UNKNOWN", reasonCodes: refundStrings(channelFacts.reasonCodes) },
+    reasonCodes: refundStrings(v.reasonCodes),
+  };
+};
+
+/** Validates the whole accepted projection so no unverified refund figure reaches the page. */
+export function parsePersonalRefunds(value: unknown, expectedUserId: string, expectedOrderId: string): PersonalRefundRead {
+  const root = refundRecord(value), order = refundRecord(root.order), coverage = refundRecord(root.coverage);
+  const responsibility = refundRecord(root.responsibility), actual = refundRecord(root.actualChannelRefund);
+  const funds = root.localFundsEffect === null ? null : refundRecord(root.localFundsEffect);
+  const intents = Array.isArray(root.intents) ? root.intents.map(refundIntent) : (() => { throw invalidRefund(); })();
+  const noResponsibilityTotals = ["allocatedCents", "consumedCents", "releasedCents", "remainingCents"].every((name) => responsibility[name] === null);
+  const hasAbnormalFields = ["abnormalResponsibilities", "responsibilitiesTruncated", "responsibilityTotals"].some((name) => root[name] !== undefined);
+  const abnormalResponsibilities = hasAbnormalFields
+    ? (Array.isArray(root.abnormalResponsibilities) ? root.abnormalResponsibilities.map(refundAbnormalResponsibility) : (() => { throw invalidRefund(); })())
+    : undefined;
+  if (abnormalResponsibilities && abnormalResponsibilities.length > 50) throw invalidRefund();
+  const responsibilitiesTruncated = hasAbnormalFields
+    ? (typeof root.responsibilitiesTruncated === "boolean" ? root.responsibilitiesTruncated : (() => { throw invalidRefund(); })())
+    : undefined;
+  const responsibilityTotals = hasAbnormalFields ? refundResponsibilityTotals(root.responsibilityTotals) : undefined;
+  if (responsibilitiesTruncated && responsibilityTotals && (responsibilityTotals.totalsComplete
+    || [responsibilityTotals.originalCents, responsibilityTotals.allocatedCents, responsibilityTotals.consumedCents, responsibilityTotals.releasedCents, responsibilityTotals.remainingCents].some((amount) => amount !== null))) throw invalidRefund();
+  if (responsibilityTotals && responsibilitiesTruncated !== true && responsibilityTotals.abnormalConfirmationCount !== abnormalResponsibilities!.length) throw invalidRefund();
+  if (responsibility.state === "NOT_POSTED" && (responsibility.totalsComplete || responsibility.postingId !== null
+    || responsibility.originalCents !== null || !noResponsibilityTotals)) throw invalidRefund();
+  if (responsibilityTotals?.totalsComplete && (
+    [responsibilityTotals.originalCents, responsibilityTotals.allocatedCents, responsibilityTotals.consumedCents, responsibilityTotals.releasedCents, responsibilityTotals.remainingCents].some((amount) => amount === null)
+    || responsibilitiesTruncated || root.intentsTruncated || !coverage.intentsComplete
+    || (responsibility.state === "POSTED" && !responsibility.totalsComplete)
+    || abnormalResponsibilities!.some((item) => item.state === "CONFLICT" || !item.totalsComplete))) throw invalidRefund();
+  const legacyProjection = !hasAbnormalFields;
+  if (root.contractVersion !== "personal-native-refunds.v1" || root.subjectId !== expectedUserId || order.orderId !== expectedOrderId
+    || !["AVAILABLE", "NOT_APPLICABLE"].includes(String(root.status)) || !refundOutcomes.includes(root.outcome as PersonalRefundOutcome)
+    || coverage.scope !== "LOCAL_REGISTERED_ONLY" || coverage.intentLimit !== 50 || typeof coverage.intentsComplete !== "boolean" || coverage.channelRecordsChecked !== false
+    || !refundTime(root.asOf) || !["POSTED", "NOT_POSTED"].includes(String(responsibility.state))
+    || !["DUE", "NOT_DUE", "UNKNOWN"].includes(String(responsibility.dueState)) || typeof responsibility.totalsComplete !== "boolean"
+    || typeof root.returnedIntentCount !== "number" || root.returnedIntentCount !== intents.length || intents.length > 50
+    || (legacyProjection && !coverage.intentsComplete && (!noResponsibilityTotals || responsibility.totalsComplete))
+    || (root.status === "NOT_APPLICABLE" && responsibility.state !== "NOT_POSTED")
+    || typeof root.intentsTruncated !== "boolean"
+    || (legacyProjection && root.intentsTruncated && (responsibility.totalsComplete || coverage.intentsComplete || !noResponsibilityTotals
+      || funds !== null && (funds.writtenOffCents !== null || funds.releasedCents !== null)))
+    || (legacyProjection && root.outcome === "CONFLICT" && (responsibility.totalsComplete || !noResponsibilityTotals
+      || funds !== null && (funds.writtenOffCents !== null || funds.releasedCents !== null)))
+    || actual.amountCents !== null || actual.channelRefundTrxNo !== null || actual.completedAt !== null || actual.destination !== null || actual.bankArrival !== "UNKNOWN"
+    || typeof order.displayNo !== "string" && order.displayNo !== null) throw invalidRefund();
+  if (funds && (funds.basis !== "LOCAL_REGISTERED_ACCOUNTING" || funds.bankArrival !== "UNKNOWN")) throw invalidRefund();
+  return {
+    contractVersion: root.contractVersion, subjectId: expectedUserId,
+    order: { orderId: order.orderId, displayNo: order.displayNo as string | null, status: refundText(order.status, 32) },
+    status: root.status as PersonalRefundRead["status"], outcome: root.outcome as PersonalRefundOutcome,
+    coverage: { scope: "LOCAL_REGISTERED_ONLY", intentLimit: 50, intentsComplete: coverage.intentsComplete, channelRecordsChecked: false },
+    asOf: root.asOf as string,
+    responsibility: {
+      state: responsibility.state as PersonalRefundRead["responsibility"]["state"],
+      postingId: refundNullableText(responsibility.postingId, 180),
+      originalCents: refundCents(responsibility.originalCents), allocatedCents: refundCents(responsibility.allocatedCents),
+      consumedCents: refundCents(responsibility.consumedCents), releasedCents: refundCents(responsibility.releasedCents),
+      remainingCents: refundCents(responsibility.remainingCents), totalsComplete: responsibility.totalsComplete,
+      dueAt: refundTime(responsibility.dueAt), dueState: responsibility.dueState as PersonalRefundRead["responsibility"]["dueState"],
+    },
+    intents, returnedIntentCount: intents.length, intentsTruncated: root.intentsTruncated,
+    ...(hasAbnormalFields ? { abnormalResponsibilities: abnormalResponsibilities!, responsibilitiesTruncated: responsibilitiesTruncated!, responsibilityTotals: responsibilityTotals! } : {}),
+    actualChannelRefund: { amountCents: null, channelRefundTrxNo: null, completedAt: null, destination: null, bankArrival: "UNKNOWN", reasonCodes: refundStrings(actual.reasonCodes) },
+    localFundsEffect: funds ? { basis: "LOCAL_REGISTERED_ACCOUNTING", writtenOffCents: refundCents(funds.writtenOffCents), releasedCents: refundCents(funds.releasedCents), bankArrival: "UNKNOWN" } : null,
+    reasonCodes: refundStrings(root.reasonCodes), unknowns: refundStrings(root.unknowns),
+  };
+}
+
 export function orderItemKey(order: Order): string { return JSON.stringify([order.source?.origin ?? "NATIVE", order.id]); }
 
 export function mergeOrderItems(previous: Order[], incoming: Order[]): Order[] {
@@ -353,6 +668,8 @@ export const orderApi = {
     requestJson<OrderPage>(`/api/orders/unified?${orderListQuery(input)}`, { signal }),
   detail: (orderId: string, signal?: AbortSignal) =>
     requestJson<{ order: Order }>(`/api/orders/${encodeURIComponent(orderId)}`, { signal }).then(unwrapOrder),
+  personalRefunds: async (userId: string, orderId: string, signal?: AbortSignal) =>
+    parsePersonalRefunds(await requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/refunds`, { signal, expectedUserId: userId }), userId, orderId),
   confirmRental: (input: { accountId: string; versionId: string; releaseId: string; fullPayoutTermsAcceptance?: FullPayoutTermsAcceptance }, signal?: AbortSignal) =>
     requestWrite<PersonalRentalQuote>("/api/order-confirmations", { body: input, signal }),
   createOrder: (confirmationToken: string, key: string, fullPayoutTermsAcceptance?: FullPayoutTermsAcceptance, signal?: AbortSignal) =>

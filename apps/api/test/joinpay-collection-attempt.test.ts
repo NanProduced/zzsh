@@ -45,6 +45,7 @@ function db() {
       if (sql === "COMMIT") { const now = state.now; if (local) Object.assign(state, local); state.now = now; local = null;
         if (nextCommitLoss === txPhase) { nextCommitLoss = null; throw Object.assign(Error("SYNTHETIC_ACK_LOSS"), { code: "ECONNRESET" }); } return one(); }
       if (sql.includes("pg_advisory_xact_lock")) return one();
+      if (sql === "SELECT 'authorize' AS marker") return one({ marker: "authorize" });
       if (sql.includes('FROM "zzsh_supply"."idempotency_record"')) return one(s.idem.get(p[0] + p[1]));
       if (sql.includes('INSERT INTO "zzsh_supply"."idempotency_record"')) { s.idem.set(p[0] + p[1], { requestFingerprint: p[2], responseStatus: p[3], responseBody: JSON.parse(p[4]), publishRequired: false }); return one(); }
       if (sql.startsWith("SELECT renter_user_id FROM zzsh_order.rental_order")) return one({ renter_user_id: "renter" });
@@ -344,4 +345,20 @@ test("钥提供方异常不携带钥内容且0发送、不提交attempt", async 
       assert.equal(String(error).includes(KEY), false); return true;
     });
   assert.equal(sent, 0); assert.equal(model.state.attempts.length, 0);
+});
+
+
+test("QUERY-only Admin授权接缝在同一领取事务内先于原行锁；拒绝0尝试0钥0外呼", async () => {
+  const model = db(), first = await created(model); let keys = 0, sent = 0, seen: any = null;
+  const authorize = async (client: any, requestId: string) => { seen = client; assert.equal(requestId, first.id); await client.query("SELECT 'authorize' AS marker"); };
+  const options = { ...execution(model, first.profile, fakeFetch(response(), () => sent++)), keyFor: () => { keys++; return KEY; } };
+  const result = await executeJoinpayCollectionAttempt(options, { requestId: first.id, workerId: "admin_q", recoveryMinimumIntervalSeconds: 60, authorize });
+  assert.equal(result.kind, "SKIPPED"); assert.equal(keys, 0); assert.equal(sent, 0); assert.equal(model.state.attempts.length, 0);
+  assert.equal(model.state.requests.get(first.id)!.lease_version, "0"); assert.equal(typeof seen.query, "function");
+  const marker = model.trace.indexOf("SELECT 'authorize' AS marker");
+  const lock = model.trace.findIndex(sql => sql.includes("FOR UPDATE OF r"));
+  assert.ok(marker > 0 && lock > marker);
+  await assert.rejects(executeJoinpayCollectionAttempt(options,
+    { requestId: first.id, workerId: "admin_q2", recoveryMinimumIntervalSeconds: 60, authorize: async () => { throw Object.assign(Error("DENIED"), { code: "FORBIDDEN" }); } }), (error: any) => error.code === "FORBIDDEN");
+  assert.equal(model.state.attempts.length, 0); assert.equal(keys, 0); assert.equal(sent, 0);
 });

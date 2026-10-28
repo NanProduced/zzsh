@@ -1,5 +1,6 @@
 import { authorizeAdminFinance } from "./admin-finance-access";
 import { readAdminJoinpayMerchantAccounts, type JoinpayAccountReadAccess } from './channel-finance-read';
+import { readAdminChannelEvidenceRoute } from './admin-channel-evidence-read';
 export { authorizeAdminFinance } from "./admin-finance-access";
 import type { INestApplication } from "@nestjs/common";
 
@@ -30,23 +31,24 @@ export async function handleAdminFinanceRead(request: SupplyNodeRequest, respons
   const requestId = ensureApiV1RequestId(request);
   await safely(response, requestId, async () => {
     const url = new URL(request.originalUrl ?? request.url ?? "", options.apiOrigin);
-    const match = /^\/api\/(?:v1\/admin|bff\/admin)\/finance\/(lookup|period|export|subjects\/[^/]+|documents\/[^/]+|merchant-accounts\/[^/]+)$/.exec(url.pathname);
+    const match = /^\/api\/(?:v1\/admin|bff\/admin)\/finance\/(lookup|period|export|subjects\/[^/]+|documents\/[^/]+|merchant-accounts\/[^/]+|channel-evidence\/orders\/[^/]+|channel-evidence\/withdrawals\/[^/]+\/[^/]+|channel-evidence\/originals\/[^/]+)$/.exec(url.pathname);
     if ((request.method ?? "GET") !== "GET" || !match) throw notFound();
     const origin = request.headers.origin;
     if (origin !== undefined && origin !== options.adminOrigin && origin !== options.apiOrigin || request.headers["sec-fetch-site"] === "cross-site") throw forbidden();
-    const route = match[1]!, merchant = route.startsWith('merchant-accounts/'), complete = merchant || route === "period" || route === "export" || route.startsWith("subjects/");
+    const route = match[1]!, merchant = route.startsWith('merchant-accounts/'), channel = route.startsWith('channel-evidence/'), complete = merchant || route === "period" || route === "export" || route.startsWith("subjects/");
     if(merchant&&url.searchParams.size)throw invalid('Merchant account reads do not accept query parameters');
     const operation = complete ? "complete" : route.startsWith("documents/") ? "document" : "lookup";
-    const filters = parseAdminFinanceFilters(url.searchParams, new Date(), route === "period" || route === "export");
+    const filters = parseAdminFinanceFilters(channel ? new URLSearchParams() : url.searchParams, new Date(), route === "period" || route === "export");
     filters.q = resolveFinanceLookup(filters.q, [options.adminOrigin, options.userOrigin, options.apiOrigin]);
     const context = await readAdminContext(request, options);
-    const page = pageNumber(url.searchParams, "page", 1, 100_000), pageSize = pageNumber(url.searchParams, "pageSize", 20, 100);
-    const token = url.searchParams.get("snapshot");
+    const pageQuery = channel ? new URLSearchParams() : url.searchParams, page = pageNumber(pageQuery, "page", 1, 100_000), pageSize = pageNumber(pageQuery, "pageSize", 20, 100);
+    const token = channel ? null : url.searchParams.get("snapshot");
     if ((page > 1 || route === "export") && !token) throw invalid("Finance snapshot is required");
     const result = await withTransaction(options.pool, async client => {
       // Wallet subject reads still take FOR SHARE inside readPersonalWallet, so this stays repeatable read.
       await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
       const actor = await authorizeAdminFinance(client, context, operation);
+      if(channel)return{actor,body:{contextKey:actor.authorizationKey,...await readAdminChannelEvidenceRoute(client,actor,route,url.searchParams,options.joinpayAccountRead)}};
       if(merchant)return{actor,body:{contextKey:actor.authorizationKey,...await readAdminJoinpayMerchantAccounts(client,{adminId:context.userId,merchantIdentityId:reference(route.slice('merchant-accounts/'.length))},options.joinpayAccountRead)}};
       if (route === "lookup" && !actor.complete && !filters.q) throw invalid("A document lookup reference is required");
       const facts = await loadAdminFinanceFacts(client,{filters,...(route==="lookup"?{lookup:{exact:!actor.complete}}:{}),...(route.startsWith("subjects/")?{subjectId:reference(route.slice(9))}:{}),...(route.startsWith("documents/")?{documentRef:reference(route.slice(10))}:{}),page,pageSize},actor.relations), snapshot = financeSnapshot(facts, filters, actor, options.listingCursorKey, token);

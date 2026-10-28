@@ -13,6 +13,12 @@ export const JOINPAY_PAYOUT_MAX_AUTOMATIC_QUERIES=10;
 export class PayoutCommitUnknown extends Error{readonly code="PAYOUT_EXECUTION_UNKNOWN";constructor(readonly intentId:string,readonly phase:"CLAIM"|"RESULT"){super("Recover the original payout; do not resubmit");}}
 async function confirmed<T>(pool:Pool,id:string,phase:"CLAIM"|"RESULT",callback:(c:PoolClient)=>Promise<T>){let done=false;try{return await withTransaction(pool,async c=>{const v=await callback(c);done=true;return v;});}catch(e){if(done)throw new PayoutCommitUnknown(id,phase);throw e;}}
 export type PayoutExecution=PayoutSourceOptions&NativeWithdrawalOptions&{pool:Pool;fetch?:typeof globalThis.fetch};
+export type PayoutQuerySkipReason="TERMINAL"|"PENDING_ACCEPTANCE"|"REVIEW_REQUIRED"|"ACTIVE_LEASE"|"THROTTLED"|"BUDGET_EXHAUSTED"|"OUTSIDE_QUERY_WINDOW"|"INELIGIBLE";
+export type PayoutQueryOptions=Readonly<{minimumIntervalSeconds:number;authorize?:(client:PoolClient,intentId:string)=>Promise<void>}>;
+export type PayoutQueryOutcome=
+ |Readonly<{kind:"NOT_DISPATCHED";intentId:string;state:NativeWithdrawalRow["state"]}>
+ |Readonly<{kind:"SKIPPED";intentId:string;state:NativeWithdrawalRow["state"];reason:PayoutQuerySkipReason}>
+ |Readonly<{kind:"OBSERVED";intentId:string;observationId:string;event:string;terminal:Awaited<ReturnType<typeof acceptNativeWithdrawalTerminalInTransaction>>|null;accepted:boolean;receiptAccepted:boolean}>;
 export type PayoutExchange=Readonly<{body:Uint8Array|null;responseComplete:boolean;receivedBytes:number;httpStatus:number|null;failure:"TIMEOUT"|"ABORTED"|"BODY_TOO_LARGE"|"HTTP_STATUS"|"NETWORK_ERROR"|null;evidenceLevel:"PROVIDER_RESPONSE"|"SYNTHETIC_PROTOCOL"}>;
 /** 本代付产品单次标准fetch；合成目的永不发送，有界原件不重编码/重试。 */
 export async function exchangePayoutRequest(request:PayoutOutbound,dependencies:{fetch?:typeof globalThis.fetch;signal?:AbortSignal}={}):Promise<PayoutExchange>{
@@ -33,26 +39,53 @@ export async function exchangePayoutRequest(request:PayoutOutbound,dependencies:
  return Object.freeze({body:complete||kept?Buffer.concat(chunks):null,responseComplete:complete,receivedBytes:bytes,httpStatus:status,failure,evidenceLevel:supplied===undefined?"PROVIDER_RESPONSE":"SYNTHETIC_PROTOCOL"});
 }
 type Prepared={row:NativeWithdrawalRow;binding:PayoutBinding;profile:BoundPayoutProfile;operation:"SUBMIT"|"QUERY";attemptId:string;key:string;request:PayoutOutbound;owner:string;version:string};
-async function prepare(o:PayoutExecution,id:string,owner:string,minimumIntervalSeconds?:number):Promise<Prepared|null>{return confirmed(o.pool,id,"CLAIM",async c=>{
- const{row}=await lockNativeWithdrawal(c,o.scope,id);if(["SUCCEEDED","FAILED"].includes(row.state))return null;
+type PrepareResult={kind:"READY";prepared:Prepared}|{kind:"NOT_DISPATCHED";state:NativeWithdrawalRow["state"]}|{kind:"SKIPPED";state:NativeWithdrawalRow["state"];reason:PayoutQuerySkipReason};
+async function prepare(o:PayoutExecution,id:string,owner:string,minimumIntervalSeconds?:number,queryOnly=false,
+ authorize?:(client:PoolClient,intentId:string)=>Promise<void>):Promise<PrepareResult>{return confirmed(o.pool,id,"CLAIM",async c=>{
+ if(authorize)await authorize(c,id);
+ const{row}=await lockNativeWithdrawal(c,o.scope,id),state=row.state;
+ if(["SUCCEEDED","FAILED"].includes(state))return{kind:"SKIPPED",state,reason:"TERMINAL"};
+ if(queryOnly&&row.requires_review)return{kind:"SKIPPED",state,reason:"REVIEW_REQUIRED"};
+ if(queryOnly&&state==="CHANNEL_SUCCEEDED_PENDING_ACCEPTANCE")return{kind:"SKIPPED",state,reason:"PENDING_ACCEPTANCE"};
  await assertNativePayoutExecutionReady(c);
+ let withinQueryWindow=true;
+ if(queryOnly){const timing=(await c.query(`SELECT COALESCE(lease_until>clock_timestamp(),false) AS active,
+   COALESCE((SELECT min(a.created_at) FROM zzsh_order.joinpay_payout_attempt a WHERE a.intent_id=$1 AND a.operation='SUBMIT'),accepted_at)
+     >clock_timestamp()-interval '15 days' AS within_window
+   FROM zzsh_order.joinpay_withdrawal_intent WHERE id=$1`,[id])).rows[0];
+  if(typeof timing?.active!=="boolean"||typeof timing?.within_window!=="boolean")throw conflict("Payout timing evidence unavailable");
+  if(timing.active)return{kind:"SKIPPED",state,reason:"ACTIVE_LEASE"};withinQueryWindow=timing.within_window;}
+ const dispatched=queryOnly?(await c.query(`SELECT EXISTS(SELECT 1 FROM zzsh_order.joinpay_payout_attempt WHERE intent_id=$1 AND operation='SUBMIT') AS dispatched`,[id])).rows[0]?.dispatched:false;
+ if(typeof dispatched!=="boolean")throw conflict("Payout attempt evidence unavailable");
+ const operation=state==="RESERVED"&&row.lease_version==="0"&&!dispatched?"SUBMIT":"QUERY";
+ if(queryOnly&&row.funds_disposition!=="RESERVED")return{kind:"SKIPPED",state,reason:"INELIGIBLE"};
+ if(queryOnly&&!dispatched)return{kind:"NOT_DISPATCHED",state};
+ if(queryOnly&&!withinQueryWindow)return{kind:"SKIPPED",state,reason:"OUTSIDE_QUERY_WINDOW"};
  // 原意图行锁内重核；到达本地补查预算只保留未知，不核销/释放或换号重发。
- if(minimumIntervalSeconds!==undefined){const due=(await c.query(`SELECT count(*) FILTER(WHERE operation='QUERY')<$3::integer
-   AND COALESCE(max(created_at)<=clock_timestamp()-make_interval(secs=>$2::integer),true) AS allowed
-   FROM zzsh_order.joinpay_payout_attempt WHERE intent_id=$1`,[id,minimumIntervalSeconds,JOINPAY_PAYOUT_MAX_AUTOMATIC_QUERIES])).rows[0]?.allowed;
-   if(typeof due!=="boolean")throw conflict("Payout recovery timing evidence unavailable");if(!due)return null;}
- const operation=row.state==="RESERVED"&&row.lease_version==="0"?"SUBMIT":"QUERY",binding=nativePayoutBinding(row,o.scope),profile=o.profileFor(operation,Object.freeze({...binding})),p=describePayoutProfile(profile,operation);assertPayoutProfile(o.scope,profile,operation);
- if(operation==="SUBMIT"){if(row.requires_review)return null;await assertNativeWithdrawalExecution(c,row,{...o,initialProfile:profile});}
+ if(minimumIntervalSeconds!==undefined){
+  if(!queryOnly){const due=(await c.query(`SELECT count(*) FILTER(WHERE operation='QUERY')<$3::integer
+    AND COALESCE(max(created_at)<=clock_timestamp()-make_interval(secs=>$2::integer),true) AS allowed
+    FROM zzsh_order.joinpay_payout_attempt WHERE intent_id=$1`,[id,minimumIntervalSeconds,JOINPAY_PAYOUT_MAX_AUTOMATIC_QUERIES])).rows[0]?.allowed;
+   if(typeof due!=="boolean")throw conflict("Payout recovery timing evidence unavailable");if(!due)return{kind:"SKIPPED",state,reason:"THROTTLED"};}
+  else{const recovery=(await c.query(`SELECT count(*) FILTER(WHERE operation='QUERY')::text AS queries,
+    COALESCE(max(created_at)<=clock_timestamp()-make_interval(secs=>$2::integer),true) AS interval_ok
+    FROM zzsh_order.joinpay_payout_attempt WHERE intent_id=$1`,[id,minimumIntervalSeconds])).rows[0];
+   if(typeof recovery?.queries!=="string"||!/^\d+$/.test(recovery.queries)||typeof recovery?.interval_ok!=="boolean")throw conflict("Payout recovery timing evidence unavailable");
+   if(BigInt(recovery.queries)>=BigInt(JOINPAY_PAYOUT_MAX_AUTOMATIC_QUERIES))return{kind:"SKIPPED",state,reason:"BUDGET_EXHAUSTED"};
+   if(!recovery.interval_ok)return{kind:"SKIPPED",state,reason:"THROTTLED"};}
+ }
+ const binding=nativePayoutBinding(row,o.scope),profile=o.profileFor(operation,Object.freeze({...binding})),p=describePayoutProfile(profile,operation);assertPayoutProfile(o.scope,profile,operation);
+ if(operation==="SUBMIT"){if(row.requires_review)return{kind:"SKIPPED",state,reason:"REVIEW_REQUIRED"};await assertNativeWithdrawalExecution(c,row,{...o,initialProfile:profile});}
  const updated=(await c.query<NativeWithdrawalRow>(`UPDATE zzsh_order.joinpay_withdrawal_intent SET state=CASE WHEN state='RESERVED' THEN 'SUBMITTING' WHEN state='SUBMITTING' THEN 'UNKNOWN' ELSE state END,
   lease_version=lease_version+1,lease_owner=$2,lease_until=clock_timestamp()+interval '30 seconds',operation_version=operation_version+1
-  WHERE id=$1 AND funds_disposition='RESERVED' AND state NOT IN ('SUCCEEDED','FAILED') AND (lease_until IS NULL OR lease_until<=clock_timestamp()) AND ($3='QUERY' OR NOT requires_review) RETURNING ${NATIVE_WITHDRAWAL_COLUMNS}`,[id,owner,operation])).rows[0];if(!updated)return null;
+  WHERE id=$1 AND funds_disposition='RESERVED' AND state NOT IN ('SUCCEEDED','FAILED') AND (lease_until IS NULL OR lease_until<=clock_timestamp()) AND ($3='QUERY' OR NOT requires_review) RETURNING ${NATIVE_WITHDRAWAL_COLUMNS}`,[id,owner,operation])).rows[0];if(!updated)return{kind:"SKIPPED",state,reason:"INELIGIBLE"};
  const clock=(await c.query(`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS now`)).rows[0]?.now;
  if(operation==="SUBMIT")assertPayoutSubmitBinding(profile,binding,clock);
  let key:string;try{key=o.keyFor(p.keyVersionRef);}catch{throw new PayoutProfileError("PAYOUT_KEY_UNAVAILABLE");}
  const request=producePayoutRequest(profile,operation,binding,key,clock),wire=readPayoutOutbound(request),attemptId=fresh("pwa"),scope=readPayoutScope(o.scope);
  await c.query(`INSERT INTO zzsh_order.joinpay_payout_attempt(id,intent_id,operation,lease_version,lease_owner,profile_id,profile_canonical,profile_sha256,key_version_ref,scope_sha256,scope_canonical,request_body,request_sha256) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,[attemptId,id,operation,updated.lease_version,owner,p.profileId,readPayoutProfileEvidence(profile),p.profileSha256,p.keyVersionRef,scope.sha256,scope.canonical,Buffer.from(wire.body),request.requestSha256]);
  await recordAudit(c,{actorType:"system",action:"joinpay.payout.claimed",objectType:"joinpay_withdrawal_intent",objectId:id,outcome:"SUCCESS",requestId:attemptId,details:{attemptId,leaseVersion:updated.lease_version,operation,profileSha256:p.profileSha256,requestSha256:request.requestSha256}});
- return{row:updated,binding,profile,operation,attemptId,key,request,owner,version:updated.lease_version};
+ return{kind:"READY",prepared:{row:updated,binding,profile,operation,attemptId,key,request,owner,version:updated.lease_version}};
 });}
 type Received={operation:PayoutProfileOperation;profile:BoundPayoutProfile;key:string|null;attemptId:string|null;version:string|null;owner:string|null;exchange:PayoutExchange};
 async function recordReceived(c:PoolClient,o:PayoutSourceOptions,id:string,r:Received,requestId:string){
@@ -91,7 +124,19 @@ async function recordReceived(c:PoolClient,o:PayoutSourceOptions,id:string,r:Rec
  catch(error){const e=error as{code?:string;constraint?:string;[expiredLease]?:boolean};if(r.operation==="NOTIFY"||!(e[expiredLease]===true||e.code==="23514"&&e.constraint==="joinpay_payout_live_lease"))throw error;
   await c.query("ROLLBACK TO SAVEPOINT native_payout_result");if((await c.query(liveSql,args)).rows[0]?.current!==false)throw error;const v=await persist(true);await c.query("RELEASE SAVEPOINT native_payout_result");return v;}
 }
-export async function executeJoinpayPayout(o:PayoutExecution,intentId:string,owner:string,minimumIntervalSeconds?:number){if(!ID.test(intentId)||!ID.test(owner)||minimumIntervalSeconds!==undefined&&(!Number.isSafeInteger(minimumIntervalSeconds)||minimumIntervalSeconds<30||minimumIntervalSeconds>86400))throw invalid();readPayoutScope(o.scope);const fetch=o.fetch,a=await prepare(o,intentId,owner,minimumIntervalSeconds);if(!a)return null;const exchange=await exchangePayoutRequest(a.request,{fetch});return confirmed(o.pool,intentId,"RESULT",c=>recordReceived(c,o,intentId,{operation:a.operation,profile:a.profile,key:a.key,attemptId:a.attemptId,version:a.version,owner:a.owner,exchange},a.attemptId));}
+export async function executeJoinpayPayout(o:PayoutExecution,intentId:string,owner:string,minimumIntervalSeconds?:number){if(!ID.test(intentId)||!ID.test(owner)||minimumIntervalSeconds!==undefined&&(!Number.isSafeInteger(minimumIntervalSeconds)||minimumIntervalSeconds<30||minimumIntervalSeconds>86400))throw invalid();readPayoutScope(o.scope);const fetch=o.fetch,a=await prepare(o,intentId,owner,minimumIntervalSeconds);if(a.kind!=="READY")return null;const p=a.prepared,exchange=await exchangePayoutRequest(p.request,{fetch});return confirmed(o.pool,intentId,"RESULT",c=>recordReceived(c,o,intentId,{operation:p.operation,profile:p.profile,key:p.key,attemptId:p.attemptId,version:p.version,owner:p.owner,exchange},p.attemptId));}
+/** 窄QUERY-only入口：绝不首派，仅对已持久SUBMIT attempt的原单沿原号补查；不依赖新单KYC/初始profile。 */
+export async function queryJoinpayPayout(o:PayoutExecution,intentId:string,owner:string,options:PayoutQueryOptions):Promise<PayoutQueryOutcome>{
+ if(!options||!Number.isSafeInteger(options.minimumIntervalSeconds)||options.minimumIntervalSeconds<30||options.minimumIntervalSeconds>86400
+  ||options.authorize!==undefined&&typeof options.authorize!=="function")throw invalid();
+ if(!ID.test(intentId)||!ID.test(owner))throw invalid();readPayoutScope(o.scope);
+ const a=await prepare(o,intentId,owner,options.minimumIntervalSeconds,true,options.authorize);
+ if(a.kind==="NOT_DISPATCHED")return{kind:"NOT_DISPATCHED",intentId,state:a.state};
+ if(a.kind==="SKIPPED")return{kind:"SKIPPED",intentId,state:a.state,reason:a.reason};
+ const p=a.prepared,exchange=await exchangePayoutRequest(p.request,{fetch:o.fetch});
+ const observed=await confirmed(o.pool,intentId,"RESULT",c=>recordReceived(c,o,intentId,{operation:p.operation,profile:p.profile,key:p.key,attemptId:p.attemptId,version:p.version,owner:p.owner,exchange},p.attemptId));
+ return{kind:"OBSERVED",intentId,observationId:observed.observationId,event:observed.event,terminal:observed.terminal,accepted:observed.accepted,receiptAccepted:observed.receiptAccepted};
+}
 /** 仅POST原始字节；定位已知对象由薄adapter先做，不重建JSON也不盲试key。 */
 export async function receiveJoinpayPayoutNotification(o:PayoutExecution,intentId:string,raw:Uint8Array,requestId:string){if(!ID.test(intentId)||!ID.test(requestId)||!(raw instanceof Uint8Array)||!raw.length||raw.length>65536)throw invalid();const bytes=new Uint8Array(raw);
  return confirmed(o.pool,intentId,"RESULT",async c=>{const{row}=await lockNativeWithdrawal(c,o.scope,intentId);await assertNativePayoutExecutionReady(c);const binding=nativePayoutBinding(row,o.scope),profile=o.profileFor("NOTIFY",Object.freeze({...binding})),p=describePayoutProfile(profile,"NOTIFY");assertPayoutProfile(o.scope,profile,"NOTIFY");let key:string|null=null;if(preflightPayoutProfile(profile,"NOTIFY",bytes,binding).ok){try{key=o.keyFor(p.keyVersionRef);}catch{throw new PayoutProfileError("PAYOUT_KEY_UNAVAILABLE");}}

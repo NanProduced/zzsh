@@ -6,7 +6,8 @@ import { assertFormalRefundProfile, describeRefundProfile, inspectRefundProfile,
   refundWayAccepted, RefundProfileError, type BoundRefundProfile, type FormalRefundAdmission, type RefundBinding, type RefundOperation } from "./joinpay-refund-profile";
 const sha = (v: string | Uint8Array) => createHash("sha256").update(v).digest("hex"), ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 export type RefundSourceOptions = { admission: FormalRefundAdmission; profileFor: (operation: RefundOperation, binding: Readonly<RefundBinding>, pinned?: Readonly<{ profileId: string; profileSha256: string; keyVersionRef: string }>) => BoundRefundProfile; keyFor: (ref: string) => string };
-export type NativeRefundTerminalFact = Readonly<{ evidenceId: string; intentId: string; postingId: string; orderId: string; paymentConfirmationId: string;
+export type NativeRefundTerminalFact = Readonly<{ evidenceId: string; intentId: string; postingId: string | null; orderId: string; paymentConfirmationId: string;
+  basisKind?: "POSTING" | "REVIEW_CONFIRMATION"; abnormalConfirmationId?: string | null;
   renterUserId: string; merchantIdentityId: string; originalPaymentTrxNo: string; originalPaymentOrderNo: string; responsibilityVersionHash: string;
   refundOrderNo: string; amountCents: string; currency: "CNY"; terminal: "SUCCEEDED" | "FAILED_NO_EXECUTION"; refundTransactionNo: string | null;
   completedAt: string | null; sourceObservationId: string; factsDigest: string }>;
@@ -44,10 +45,13 @@ async function inspectOriginal(client: PoolClient, options: RefundSourceOptions,
   return null;
 }
 function bodyFor(r: FormalRefundRow, observationId: string, terminal: "SUCCEEDED" | "FAILED_NO_EXECUTION", trx: string | null, at: string | null): FactBody {
-  return { evidenceId: `rfe_${sha(JSON.stringify([r.id, observationId, terminal])).slice(0, 40)}`, intentId: r.id, postingId: r.posting_id, orderId: r.order_id,
+  const base: FactBody = { evidenceId: `rfe_${sha(JSON.stringify([r.id, observationId, terminal])).slice(0, 40)}`, intentId: r.id, postingId: r.posting_id, orderId: r.order_id,
     paymentConfirmationId: r.payment_confirmation_id, renterUserId: r.renter_user_id, merchantIdentityId: r.merchant_identity_id,
     originalPaymentTrxNo: r.original_payment_trx_no, originalPaymentOrderNo: r.original_payment_order_no, responsibilityVersionHash: r.responsibility_version_hash,
     refundOrderNo: r.refund_order_no, amountCents: r.amount_cents, currency: "CNY", terminal, refundTransactionNo: trx, completedAt: at, sourceObservationId: observationId };
+  return r.basis_kind === "REVIEW_CONFIRMATION"
+    ? { ...base, postingId: null, basisKind: "REVIEW_CONFIRMATION", abnormalConfirmationId: r.payment_confirmation_id }
+    : base;
 }
 /** 只读原件再验；数据库cached status/verified/canonical均不能单独产事实。 */
 export async function readVerifiedRefundTerminalFact(client: PoolClient, options: RefundSourceOptions, evidenceId: string): Promise<NativeRefundTerminalFact> {

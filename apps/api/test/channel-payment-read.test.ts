@@ -36,10 +36,13 @@ const snapshot = (patch: Record<string, unknown> = {}) => ({
 });
 
 // 替身仅提供单语句结果，不模拟 SQL 执行、PG 权限或事务。
-function fixture(row: ReturnType<typeof snapshot> | null = snapshot(), deployment = true, owner = USER.userId) {
+type AnomalyFixture = { ready?: boolean; rows?: Record<string, unknown>[] };
+function fixture(row: ReturnType<typeof snapshot> | null = snapshot(), deployment = true, owner = USER.userId, anomaly: AnomalyFixture = {}) {
   const calls: { sql: string; values: unknown[] }[] = [];
   const client = { async query(sql: string, values: unknown[] = []) {
     calls.push({ sql, values });
+    if (sql.includes("AS anomaly_ready")) return { rows: [{ anomaly_ready: anomaly.ready !== false }] };
+    if (sql.startsWith("WITH anomaly_confirmation AS")) return { rows: [{ items: anomaly.rows ?? [] }] };
     if (sql.includes("to_regclass")) return { rows: [{ ready: deployment }] };
     if (sql.startsWith("SELECT id FROM zzsh_order.rental_order")) return { rows: values[1] === owner ? [{ id: "ord_1" }] : [] };
     assert.ok(sql.startsWith("WITH scoped AS"));
@@ -47,6 +50,14 @@ function fixture(row: ReturnType<typeof snapshot> | null = snapshot(), deploymen
   } } as unknown as Pick<PoolClient, "query">;
   return { client, calls };
 }
+const anomalyRow = (patch: Record<string, unknown> = {}) => ({
+  stable_id: "CONFIRMATION:payment_2", observed_at: AT, confirmation_id: "payment_2", request_id: "payreq_1",
+  disposition: "REVIEW_REQUIRED", reason_code: "DUPLICATE_PAYMENT", amount_cents: "20000", currency: "CNY",
+  merchant_order_no: "ZZ261022_000123", provider_transaction_id: "trx_second", source: "JOINPAY", source_kind: "CONFIRMATION",
+  merchant_identity_id: "mid_synthetic",
+  evidence_raw_sha256: "b".repeat(64), event: null, result: null, schema_outcome: null, signature_outcome: null,
+  binding_outcome: null, anchor_ownership: "MATCH", ...patch,
+});
 async function user(row = snapshot()) {
   const f = fixture(row), result = await readChannelPaymentRequest(f.client, { orderId: "ord_1", origin: "NATIVE", actor: USER });
   assert.equal(result.available, true);
@@ -190,6 +201,249 @@ test("冲突只来自明确标志，排序稳定；有界范围与缺恢复计�
   assert.ok(summary.unknowns?.includes("CONFLICTS_TRUNCATED_TO_LATEST_100"));
   assert.deepEqual(summary.recovery, { mode: "ORIGINAL_NUMBER_QUERY", manualQueryOpen: false, lastAttemptAt: null, attempts: null });
   assert.equal(summary.updatedAt, AT);
+});
+
+test("C04A 首笔 APPLIED 保留，第二笔 REVIEW 并列且不覆盖首笔金额", async () => {
+  const row = snapshot({ confirmation: confirmation({ amount_cents: "10000" }), request: request({ amount_cents: "10000" }) });
+  const summary = await admin(fixture(row, true, USER.userId, { rows: [anomalyRow()] }));
+  assert.equal(summary.acceptance?.state, "APPLIED");
+  assert.equal(summary.acceptance?.confirmationId, "payment_1");
+  assert.equal(summary.originalRequest?.amount?.cents, "10000");
+  assert.equal(summary.anomalies?.status, "AVAILABLE");
+  assert.equal(summary.anomalies?.truncated, false);
+  const item = summary.anomalies?.items?.[0];
+  assert.ok(item);
+  assert.deepEqual({ kind: item.kind, source: item.source, level: item.evidenceLevel, trusted: item.trusted,
+    disposition: item.disposition, reason: item.reasonCode, amount: item.amount?.cents, currency: item.currency,
+    confirmation: item.confirmationId, trx: item.providerTransactionId, anchor: item.anchorOwnership },
+  { kind: "DUPLICATE_PAYMENT", source: "CONFIRMATION", level: "JOINPAY_CONFIRMATION", trusted: true,
+    disposition: "REVIEW_REQUIRED", reason: "DUPLICATE_PAYMENT", amount: "20000", currency: "CNY",
+    confirmation: "payment_2", trx: "trx_second", anchor: "MATCH" });
+  assert.deepEqual(summary.conflicts, []);
+  assert.doesNotMatch(JSON.stringify(item), /refund|bankArrival|refundAction|actionAllowed/i);
+});
+
+test("C04A 迟到款只列异常，不把已取消订单复活为 PAID", async () => {
+  const late = anomalyRow({ stable_id: "CONFIRMATION:payment_late", confirmation_id: "payment_late",
+    disposition: "REVIEW_REQUIRED", reason_code: "LATE_PAYMENT", amount_cents: "10000", provider_transaction_id: "trx_late" });
+  const row = snapshot({ order: { ...snapshot().order, status: "CANCELLED", hold_expired: true, paid_confirmation_id: null },
+    request: request({ state: "REVIEW_REQUIRED" }),
+    confirmation: confirmation({ id: "payment_late", source: "JOINPAY", disposition: "REVIEW_REQUIRED", reason_code: "LATE_PAYMENT", amount_cents: "10000" }),
+    observations: [] });
+  const view = await user(row), summary = await admin(fixture(row, true, USER.userId, { rows: [late] }));
+  assert.equal(view.order.status, "CANCELLED");
+  assert.equal(view.projection.displayState, "UNDER_REVIEW");
+  assert.equal(view.payment?.disposition, "REVIEW_REQUIRED");
+  assert.equal(summary.acceptance?.state, "REVIEW_REQUIRED");
+  assert.equal(summary.anomalies?.items?.[0]?.kind, "LATE_PAYMENT");
+  assert.equal(summary.anomalies?.items?.[0]?.amount?.cents, "10000");
+});
+
+test("C04A CONTROLLED 异常原款保持本地标签，不升级为 JOINPAY", async () => {
+  const row = snapshot({ request: request({ channel: "CONTROLLED", evidence_level: "CONTROLLED_TEST" }),
+    confirmation: confirmation({ source: "CONTROLLED", disposition: "REVIEW_REQUIRED", reason_code: "LATE_PAYMENT" }) });
+  const summary = await admin(fixture(row, true, USER.userId, { rows: [anomalyRow({ source: "CONTROLLED", source_kind: "CONFIRMATION",
+    reason_code: "LATE_PAYMENT" })] }));
+  assert.equal(summary.integration, "CONTROLLED_LOCAL");
+  const item = summary.anomalies?.items?.[0];
+  assert.ok(item);
+  assert.equal(item.source, "CONFIRMATION"); assert.equal(item.evidenceLevel, "CONTROLLED_CONFIRMATION");
+  assert.equal(item.trusted, true); assert.equal(item.kind, "LATE_PAYMENT");
+});
+
+test("C04A 坏绑定观察无可信 confirmation 时金额、币种和流水保持 null", async () => {
+  const bad = anomalyRow({ stable_id: "OBSERVATION:jpobs_bad", source_kind: "OBSERVATION", source: "JOINPAY",
+    confirmation_id: null, request_id: "payreq_1", disposition: null, reason_code: null, amount_cents: null, currency: null,
+    merchant_order_no: null, provider_transaction_id: null, evidence_raw_sha256: "c".repeat(64), event: "E5",
+    result: "CHANNEL_REPORTED_FAILED", schema_outcome: "VALID", signature_outcome: "MATCH", binding_outcome: "MISMATCH",
+    anchor_ownership: "UNKNOWN" });
+  const row = snapshot({ confirmation: null, request: request({ state: "REVIEW_REQUIRED" }), observations: [] });
+  const summary = await admin(fixture(row, true, USER.userId, { rows: [bad] }));
+  const item = summary.anomalies?.items?.[0];
+  assert.ok(item);
+  assert.equal(item.kind, "BINDING_MISMATCH"); assert.equal(item.source, "OBSERVATION");
+  assert.equal(item.evidenceLevel, "JOINPAY_OBSERVATION"); assert.equal(item.trusted, false);
+  for (const field of ["amount", "currency", "confirmationId", "merchantOrderNo", "providerTransactionId"] as const) assert.equal(item[field], null);
+  assert.equal(item.requestId, "payreq_1");
+  assert.equal(item.anchorOwnership, "UNKNOWN");
+  assert.equal(JSON.stringify(item).includes("bankArrival"), false);
+});
+
+test("C04A 首笔 APPLIED 的锚点缺失/错绑也列异常，但不改写 APPLIED 事实", async () => {
+  const row = snapshot({ confirmation: confirmation({ source: "JOINPAY", amount_cents: "10000" }) });
+  const mismatched = await admin(fixture(row, true, USER.userId, { rows: [anomalyRow({ confirmation_id: "payment_1", disposition: "APPLIED",
+    reason_code: null, amount_cents: "10000", anchor_ownership: "OTHER_ORDER" })] }));
+  assert.equal(mismatched.acceptance?.state, "APPLIED");
+  assert.equal(mismatched.anomalies?.items?.[0]?.kind, "ANCHOR_OWNED_ELSEWHERE");
+  assert.equal(mismatched.anomalies?.items?.[0]?.anchorOwnership, "OTHER_ORDER");
+  assert.equal(mismatched.anomalies?.items?.[0]?.trusted, true);
+  const missing = await admin(fixture(row, true, USER.userId, { rows: [anomalyRow({ confirmation_id: "payment_1", disposition: "APPLIED",
+    reason_code: null, amount_cents: "10000", anchor_ownership: "MISSING" })] }));
+  assert.equal(missing.acceptance?.state, "APPLIED");
+  assert.equal(missing.anomalies?.items?.[0]?.kind, "UNKNOWN_REASON");
+  assert.equal(missing.anomalies?.items?.[0]?.anchorOwnership, "MISSING");
+});
+
+test("C04A 审计冲突按动作分型：绑定冲突 vs 原流水归属冲突", async () => {
+  const binding = await admin(fixture(snapshot({ confirmation: confirmation() }), true, USER.userId, { rows: [
+    anomalyRow({ stable_id: "AUDIT:a1", source_kind: "AUDIT", source: "JOINPAY", confirmation_id: null, amount_cents: null,
+      currency: null, merchant_order_no: null, provider_transaction_id: null, evidence_raw_sha256: null, disposition: null,
+      reason_code: null, anchor_ownership: "UNKNOWN", audit_action: "order.payment.conflict" }),
+  ] }));
+  assert.equal(binding.anomalies?.items?.[0]?.kind, "BINDING_MISMATCH");
+  assert.equal(binding.anomalies?.items?.[0]?.source, "AUDIT");
+  assert.equal(binding.anomalies?.items?.[0]?.anchorOwnership, "UNKNOWN");
+  const ownership = await admin(fixture(snapshot({ confirmation: confirmation() }), true, USER.userId, { rows: [
+    anomalyRow({ stable_id: "AUDIT:a2", source_kind: "AUDIT", source: "JOINPAY", confirmation_id: null, amount_cents: null,
+      currency: null, merchant_order_no: null, provider_transaction_id: null, evidence_raw_sha256: null, disposition: null,
+      reason_code: null, anchor_ownership: "OTHER_ORDER", audit_action: "order.payment.collection.transaction.conflict" }),
+  ] }));
+  assert.equal(ownership.anomalies?.items?.[0]?.kind, "ANCHOR_OWNED_ELSEWHERE");
+  assert.equal(ownership.anomalies?.items?.[0]?.anchorOwnership, "OTHER_ORDER");
+});
+
+test("C04A 同 trx 归属另单只给脱敏冲突，不泄露另单 ID/主体/金额", async () => {
+  const other = anomalyRow({ stable_id: "EVIDENCE:jpe_other", source_kind: "EVIDENCE", source: "JOINPAY",
+    confirmation_id: null, amount_cents: null, currency: null, merchant_order_no: null, provider_transaction_id: null,
+    event: "E4", result: "E4", schema_outcome: "VALID", signature_outcome: "MATCH", binding_outcome: "MATCH", anchor_ownership: "OTHER_ORDER" });
+  const summary = await admin(fixture(snapshot({ confirmation: null, request: request({ state: "REVIEW_REQUIRED" }), observations: [] }),
+    true, USER.userId, { rows: [other] }));
+  const item = summary.anomalies?.items?.[0];
+  assert.ok(item);
+  assert.equal(item.kind, "ANCHOR_OWNED_ELSEWHERE"); assert.equal(item.anchorOwnership, "OTHER_ORDER");
+  assert.equal(item.requestId, "payreq_1"); assert.equal(Object.hasOwn(item, "anchorId"), false);
+  const json = JSON.stringify(item);
+  for (const secret of ["other_order", "other_user", "paytrx_", "999999", "other_amount"]) assert.equal(json.includes(secret), false);
+  const hidden = await admin(fixture(snapshot({ confirmation: null, request: request({ state: "REVIEW_REQUIRED" }), observations: [] }),
+    true, USER.userId, { rows: [other] }), false);
+  assert.equal(hidden.anomalies?.items?.[0]?.requestId, null);
+  assert.equal(hidden.anomalies?.items?.[0]?.evidenceRef, null);
+});
+
+test("C04A finance.read 不足只保留状态/理由/时间，裁掉金额与财务标识", async () => {
+  const summary = await admin(fixture(snapshot({ confirmation: confirmation() }), true, USER.userId, { rows: [anomalyRow()] }), false);
+  const item = summary.anomalies?.items?.[0];
+  assert.ok(item);
+  assert.equal(item.kind, "DUPLICATE_PAYMENT"); assert.equal(item.reasonCode, "DUPLICATE_PAYMENT");
+  assert.equal(item.observedAt, AT); assert.equal(item.anchorOwnership, "MATCH");
+  for (const field of ["amount", "currency", "confirmationId", "requestId", "merchantIdentityId", "merchantOrderNo", "providerTransactionId", "evidenceRef"] as const) assert.equal(item[field], null);
+  const json = JSON.stringify(item);
+  for (const secret of ["20000", "trx_second", "payment_2", "ZZ261022_000123", "b".repeat(64)]) assert.equal(json.includes(secret), false);
+});
+
+test("C04A 50/51 条上限、稳定排序和截断状态准确", async () => {
+  const rows = Array.from({ length: 51 }, (_, index) => anomalyRow({
+    stable_id: `CONFIRMATION:payment_${String(index).padStart(2, "0")}`,
+    confirmation_id: `payment_${String(index).padStart(2, "0")}`,
+  }));
+  const summary = await admin(fixture(snapshot({ confirmation: confirmation({ amount_cents: "10000" }) }), true, USER.userId, { rows }));
+  assert.equal(summary.anomalies?.truncated, true);
+  assert.equal(summary.anomalies?.items?.length, 50);
+  assert.equal(summary.anomalies?.items?.[0]?.confirmationId, "payment_50");
+  assert.equal(summary.anomalies?.items?.[49]?.confirmationId, "payment_01");
+  assert.ok(summary.unknowns?.includes("ANOMALIES_TRUNCATED_TO_LATEST_50"));
+  assert.equal(Object.hasOwn(summary.anomalies!, "total"), false);
+  const fifty = await admin(fixture(snapshot({ confirmation: confirmation() }), true, USER.userId, { rows: rows.slice(0, 50) }));
+  assert.equal(fifty.anomalies?.truncated, false); assert.equal(fifty.anomalies?.items?.length, 50);
+  const none = await admin(fixture(snapshot({ confirmation: confirmation() }), true, USER.userId, { rows: [] }));
+  assert.equal(none.anomalies?.status, "AVAILABLE"); assert.deepEqual(none.anomalies?.items, []);
+  assert.equal(none.anomalies?.truncated, false); assert.equal(none.unknowns?.includes("ANOMALIES_TRUNCATED_TO_LATEST_50"), false);
+});
+
+test("C04A 结构缺失与确实无异常分开；NOT_INTEGRATED 保持 null", async () => {
+  const missing = await admin(fixture(snapshot({ confirmation: confirmation() }), true, USER.userId, { ready: false }));
+  assert.deepEqual(missing.anomalies, { contractVersion: "admin-order-payment-anomalies.v1", status: "SCHEMA_NOT_DEPLOYED", limit: 50, truncated: null, items: null });
+  assert.ok(missing.unknowns?.includes("ANOMALY_SCHEMA_NOT_DEPLOYED"));
+  const notIntegrated = await admin(fixture(snapshot(), false));
+  assert.equal(notIntegrated.integration, "NOT_INTEGRATED"); assert.equal(notIntegrated.anomalies, undefined);
+});
+
+test("C04A 未知原因/未知来源不丢行、不回显原值、不补 0", async () => {
+  const future = await admin(fixture(snapshot({ confirmation: confirmation() }), true, USER.userId, { rows: [
+    anomalyRow({ confirmation_id: "payment_future", reason_code: "FUTURE_REASON", amount_cents: "not-a-number" }),
+  ] }));
+  const futureItem = future.anomalies?.items?.[0];
+  assert.ok(futureItem);
+  assert.equal(futureItem.kind, "UNKNOWN_REASON"); assert.equal(futureItem.reasonCode, "UNKNOWN_REASON");
+  assert.equal(futureItem.amount, null); assert.equal(JSON.stringify(futureItem).includes("FUTURE_REASON"), false);
+  const unknownSource = await admin(fixture(snapshot({ confirmation: confirmation() }), true, USER.userId, { rows: [
+    anomalyRow({ source_kind: "FUTURE_SOURCE", source: "FUTURE_SOURCE", confirmation_id: null, amount_cents: null, currency: null,
+      disposition: null, reason_code: null, provider_transaction_id: null, merchant_order_no: null, evidence_raw_sha256: null, anchor_ownership: "FUTURE" }),
+  ] }));
+  const unknownItem = unknownSource.anomalies?.items?.[0];
+  assert.ok(unknownItem);
+  assert.equal(unknownItem.source, "UNKNOWN"); assert.equal(unknownItem.kind, "UNKNOWN_REASON");
+  assert.equal(unknownItem.trusted, false); assert.equal(unknownItem.anchorOwnership, "UNKNOWN");
+  const unconfirmed = await admin(fixture(snapshot({ confirmation: confirmation() }), true, USER.userId, { rows: [
+    anomalyRow({ stable_id: "EVIDENCE:jpe_unconfirmed", source_kind: "EVIDENCE", source: "JOINPAY", confirmation_id: null,
+      amount_cents: null, currency: null, merchant_order_no: null, provider_transaction_id: null, event: "E4", result: "E4",
+      schema_outcome: "VALID", signature_outcome: "MATCH", binding_outcome: "MATCH", anchor_ownership: "MISSING" }),
+  ] }));
+  const unconfirmedItem = unconfirmed.anomalies?.items?.[0];
+  assert.ok(unconfirmedItem);
+  assert.equal(unconfirmedItem.kind, "UNKNOWN_REASON"); assert.equal(unconfirmedItem.reasonCode, "UNCONFIRMED_SUCCESS");
+  assert.equal(unconfirmedItem.trusted, false); assert.equal(unconfirmedItem.anchorOwnership, "MISSING");
+  assert.equal(unconfirmedItem.amount, null);
+});
+
+test("C04A 异常投影 SQL 错误原样传播，不吞成空异常", async () => {
+  const error = Object.assign(new Error("anomaly_sql_denied"), { code: "42501" });
+  const client = { async query(sql: string) {
+    if (sql.includes("AS anomaly_ready")) return { rows: [{ anomaly_ready: true }] };
+    if (sql.startsWith("WITH anomaly_confirmation AS")) throw error;
+    if (sql.includes("to_regclass")) return { rows: [{ ready: true }] };
+    if (sql.startsWith("WITH scoped AS")) return { rows: [snapshot({ confirmation: confirmation() })] };
+    throw new Error("unexpected_sql");
+  } } as unknown as Pick<PoolClient, "query">;
+  await assert.rejects(readOrderPaymentSummary(client, { orderId: "ord_1", origin: "NATIVE", financeReadable: true }), value => value === error);
+});
+
+test("C04A 异常 SQL 只读、有界、按原锚点关联；用户 GET 不执行扫描", async () => {
+  const f = fixture(snapshot({ confirmation: confirmation() }), true, USER.userId, { rows: [anomalyRow()] });
+  await admin(f);
+  const calls = f.calls.filter(call => call.sql.startsWith("WITH anomaly_confirmation AS"));
+  assert.equal(calls.length, 1);
+  const sql = calls[0]!.sql;
+  assert.match(sql, /LIMIT 51/); assert.match(sql, /ORDER BY observed_at DESC,stable_id COLLATE "C" DESC/);
+  assert.match(sql, /p\.joinpay_anchor_id/); assert.doesNotMatch(sql, /a\.confirmation_id/);
+  for (const table of ["joinpay_collection_evidence", "joinpay_collection_observation", "payment_channel_transaction", "audit_event", "occurred_at"]) assert.match(sql, new RegExp(table));
+  assert.doesNotMatch(sql, /\b(INSERT|UPDATE|DELETE|TRUNCATE|LOCK|BEGIN|COMMIT)\b|FOR UPDATE|FOR SHARE|advisory|raw_body|raw_query|profile_canonical|admission_canonical|key_version_ref|key_ref|hmac|merchant_key/i);
+  const userFixture = fixture(snapshot({ confirmation: confirmation() }));
+  await readChannelPaymentRequest(userFixture.client, { orderId: "ord_1", origin: "NATIVE", actor: USER });
+  assert.equal(userFixture.calls.length, 2);
+  assert.equal(userFixture.calls.some(call => call.sql.startsWith("WITH anomaly_confirmation AS")), false);
+});
+
+test("Master：未校验绑定不等于绑定不符，先区分schema与签名结果",async()=>{
+  for(const [schema,signature,binding,expected] of [
+    ["INVALID","NOT_CHECKED","NOT_CHECKED","SCHEMA_INVALID"],
+    ["VALID","MISMATCH","NOT_CHECKED","SIGNATURE_MISMATCH"],
+    ["NOT_CHECKED","NOT_CHECKED","NOT_CHECKED","UNKNOWN_REASON"],
+  ]){
+    const s=await admin(fixture(snapshot({confirmation:confirmation()}),true,USER.userId,{rows:[anomalyRow({
+      source_kind:"OBSERVATION",disposition:null,reason_code:null,schema_outcome:schema,
+      signature_outcome:signature,binding_outcome:binding,event:"E6X",anchor_ownership:"UNKNOWN",
+    })]}));
+    assert.equal(s.anomalies?.items?.[0]?.reasonCode,expected);
+    assert.equal(s.anomalies?.items?.[0]?.amount,null);
+  }
+});
+
+test("Master SQL契约：首笔确认或历史审计不应遮住随后坏签名/绑定观察",async()=>{
+  const f=fixture(snapshot({confirmation:confirmation()}));await admin(f);
+  const sql=f.calls.find(c=>c.sql.startsWith("WITH anomaly_confirmation AS"))!.sql;
+  assert.doesNotMatch(sql,/p\.joinpay_request_id=o\.request_id\)/);
+  assert.doesNotMatch(sql,/ad\.object_id=e\.request_id\)/);
+  assert.match(sql,/e\.signature_outcome IS DISTINCT FROM 'MATCH'/);
+  assert.match(sql,/stable_id COLLATE "C" DESC/);
+});
+
+test("Master SQL契约：绑定冲突按既有confirmation对象和attempted.orderId定位，不拿命令号当payreq",async()=>{
+  const f=fixture(snapshot({confirmation:confirmation()}));await admin(f);
+  const sql=f.calls.find(c=>c.sql.startsWith("WITH anomaly_confirmation AS"))!.sql;
+  assert.match(sql,/a\.object_type='payment_confirmation'/);
+  assert.match(sql,/a\.details->'attempted'->>'orderId'=\$1/);
+  assert.match(sql,/THEN a\.object_id ELSE NULL::text END AS request_id/);
 });
 
 test("汇聚合成请求与受控确认并存：按本地付款来源标记，并暴露请求/付款来源差异", async () => {

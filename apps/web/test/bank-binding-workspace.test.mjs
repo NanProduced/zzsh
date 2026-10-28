@@ -16,7 +16,7 @@ const at = '2026-10-25T00:00:00.000Z';
 const bank = (revision = '1', tail = '0015') => ({ contractVersion: 'withdrawal-bank-binding.v1', integration: 'INTEGRATED', expectedRevision: revision, binding: { id: 'bank-1', revision, cardMask: '**** **** ' + tail, holderNameMask: '测**', updatedAt: at, ownershipVerification: 'NOT_VERIFIED' } });
 const emptyBank = { contractVersion: 'withdrawal-bank-binding.v1', integration: 'INTEGRATED', expectedRevision: '0', binding: null };
 const unavailableBank = { contractVersion: 'withdrawal-bank-binding.v1', integration: 'NOT_INTEGRATED', expectedRevision: null, binding: null };
-const options = (binding = bank(), allowed = true) => ({ contractVersion: 'withdrawal-request-context.v1', bankBinding: binding, canQuote: allowed, policy: { version: 'policy-1', minCents: '100', maxCents: '100000', fee: { kind: 'FIXED', cents: '100' }, maxIntents: 3, quotaStart: at, quotaEnd: '2026-10-26T00:00:00.000Z' }, reasonCodes: allowed ? [] : ['BANK_BINDING_REQUIRED'], bankOwnershipVerification: 'NOT_VERIFIED', bankArrival: 'UNKNOWN' });
+const options = (binding = bank(), allowed = true, extra = {}) => ({ contractVersion: 'withdrawal-request-context.v1', bankBinding: binding, canQuote: allowed, policy: { version: 'policy-1', minCents: '100', maxCents: '100000', fee: { kind: 'FIXED', cents: '100' }, maxIntents: 3, quotaStart: at, quotaEnd: '2026-10-26T00:00:00.000Z' }, reasonCodes: allowed ? [] : ['BANK_BINDING_REQUIRED'], bankOwnershipVerification: 'NOT_VERIFIED', bankArrival: 'UNKNOWN', ...extra });
 const quote = { contractVersion: 'native-withdrawal.v1', source: 'JOINPAY', grossCents: '10000', netCents: '9900', feeCents: '100', policyVersion: 'policy-1', destination: { id: 'bank-1', revision: '1', mask: '**** **** 0015' }, expectedWalletVersion: 'jwdq1:' + 'a'.repeat(64), ledgerRevision: '1', globalWithdrawable: 'UNKNOWN' };
 const intent = { contractVersion: 'native-withdrawal.v1', source: 'JOINPAY', userId: 'user_A', id: 'intent-1', amountCents: '10000', netCents: '9900', feeCents: '100', currency: 'CNY', state: 'RESERVED', operationVersion: '1', fundsDisposition: 'RESERVED', requiresReview: false, merchantOrderNo: 'OFFLINE-ORDER-1', policyVersion: 'policy-1', destinationId: 'bank-1', acceptedAt: at, bankArrival: 'UNKNOWN', globalWithdrawable: 'UNKNOWN', originalDestination: { id: 'bank-1', revision: '1', cardMask: '**** **** 0015', basis: 'ORIGINAL_INTENT', bankOwnershipVerification: 'UNKNOWN' } };
 const historyItem = (id = 'history:h1') => ({ id, source: 'HISTORICAL_WITHDRAWAL', sourceStatus: 2, amountCents: '10000', netCents: '9900', feeCents: '100', occurredAt: at });
@@ -114,7 +114,32 @@ test('known bank save with failed current read never substitutes its old ACK', a
 
 test('server quote values require explicit confirmation before withdrawal submission', async () => {
   const p = await probe();
-  try { await p.render(); await p.fill('.bank-withdraw-form input', '100'); await p.submit('.bank-withdraw-form'); assert.deepEqual(p.calls.find(x => x.method === 'quote').input, { amountCents: '10000', destinationId: 'bank-1', policyVersion: 'policy-1' }); assert.match(p.host.querySelector('.bank-quote').textContent, /¥99\.00/); assert.equal(p.calls.filter(x => x.method === 'submit').length, 0); await p.click('确认提现申请'); assert.ok(p.host.querySelector('[role="alertdialog"]')); assert.equal(p.calls.filter(x => x.method === 'submit').length, 0); await p.click('确认提交申请'); assert.equal(p.calls.filter(x => x.method === 'submit').length, 1); assert.match(p.host.querySelector('[aria-label="原提现申请记录"]').textContent, /尚未核验/); } finally { await p.close(); }
+  try { await p.render(); await p.fill('.bank-withdraw-form input', '100'); await p.submit('.bank-withdraw-form'); assert.deepEqual(p.calls.find(x => x.method === 'quote').input, { amountCents: '10000', destinationId: 'bank-1', policyVersion: 'policy-1' }); assert.match(p.host.querySelector('.bank-quote').textContent, /¥99\.00/); assert.match(p.host.querySelector('.bank-quote').textContent, /手续费由你承担，报价净额为申请金额减手续费；报价不代表已扣款或银行到账/); assert.equal(p.calls.filter(x => x.method === 'submit').length, 0); await p.click('确认提现申请'); assert.ok(p.host.querySelector('[role="alertdialog"]')); assert.equal(p.calls.filter(x => x.method === 'submit').length, 0); await p.click('确认提交申请'); assert.equal(p.calls.filter(x => x.method === 'submit').length, 1); assert.match(p.host.querySelector('[aria-label="原提现申请记录"]').textContent, /尚未核验/); } finally { await p.close(); }
+});
+
+test('identity and quota show only server facts; missing or unknown values stay unknown', async () => {
+  const identity = { identityStatus: 'VERIFIED', ageStatus: 'ADULT', verifiedAt: at };
+  const quota = { used: '1', maxIntents: 3, remaining: 2, windowStart: at, windowEnd: '2026-10-26T00:00:00.000Z' };
+  const known = await probe({ channel: { readChannelWithdrawalOptions: async () => options(bank(), true, { identity, quota }) } });
+  try {
+    await known.render();
+    const box = known.host.querySelector('[aria-label="提现资格与次数"]');
+    const values = [...box.querySelectorAll('dd')].map(node => node.textContent);
+    assert.ok(values.includes('已实名')); assert.ok(values.includes('已成年')); assert.ok(values.includes('1 / 3 笔')); assert.ok(values.includes('2 笔'));
+    assert.equal(values.filter(value => value.includes('至')).length, 1, 'the server window is displayed once');
+  } finally { await known.close(); }
+  for (const extra of [{ identity: null, quota: null }, { identity: { identityStatus: 'VERIFIED_NEXT', ageStatus: 'ADULT_NEXT', verifiedAt: null }, quota: null }]) {
+    const p = await probe({ channel: { readChannelWithdrawalOptions: async () => options(bank(), true, extra) } });
+    try {
+      await p.render();
+      const box = p.host.querySelector('[aria-label="提现资格与次数"]');
+      const values = [...box.querySelectorAll('dd')].map(node => node.textContent);
+      assert.ok(values.includes('实名状态待确认')); assert.ok(values.includes('年龄状态待确认'));
+      assert.equal(values.includes('已实名') || values.includes('已成年'), false);
+      assert.match(box.textContent, /本时段提现次数未提供，不能据此认定仍有剩余额度/);
+      assert.doesNotMatch(box.textContent, /剩余 0 笔/);
+    } finally { await p.close(); }
+  }
 });
 
 test('invalid or zero amount is explained without issuing a quote', async () => {

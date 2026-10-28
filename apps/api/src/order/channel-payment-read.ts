@@ -44,6 +44,40 @@ export type OrderPaymentRequestView = {
   payment: { confirmationId: string; disposition: "APPLIED" | "REVIEW_REQUIRED"; reasonCode: string | null; amount: Money | null; acceptedAt: string } | null;
 };
 
+export type AdminPaymentAnomalySource = "CONFIRMATION" | "EVIDENCE" | "OBSERVATION" | "AUDIT" | "UNKNOWN";
+export type AdminPaymentAnomalyKind = "LATE_PAYMENT" | "DUPLICATE_PAYMENT" | "BINDING_MISMATCH"
+  | "ANCHOR_OWNED_ELSEWHERE" | "UNKNOWN_REASON";
+export type AdminPaymentAnomalyReason = "LATE_PAYMENT" | "DUPLICATE_PAYMENT" | "BINDING_MISMATCH"
+  | "ANCHOR_OWNED_ELSEWHERE" | "SIGNATURE_MISMATCH" | "SCHEMA_INVALID" | "UNCONFIRMED_SUCCESS" | "UNKNOWN_REASON";
+export type AdminPaymentAnchorOwnership = "MATCH" | "MISSING" | "OTHER_ORDER" | "OTHER_REQUEST"
+  | "MISMATCH" | "NOT_APPLICABLE" | "UNKNOWN";
+export type AdminPaymentAnomaly = Readonly<{
+  kind: AdminPaymentAnomalyKind;
+  source: AdminPaymentAnomalySource;
+  evidenceLevel: "JOINPAY_CONFIRMATION" | "CONTROLLED_CONFIRMATION" | "JOINPAY_EVIDENCE"
+    | "JOINPAY_OBSERVATION" | "AUDIT_ONLY" | "UNKNOWN";
+  trusted: boolean;
+  observedAt: string | null;
+  disposition: "APPLIED" | "REVIEW_REQUIRED" | null;
+  reasonCode: AdminPaymentAnomalyReason | null;
+  amount: Money | null;
+  currency: string | null;
+  confirmationId: string | null;
+  requestId: string | null;
+  merchantIdentityId: string | null;
+  merchantOrderNo: string | null;
+  providerTransactionId: string | null;
+  anchorOwnership: AdminPaymentAnchorOwnership;
+  evidenceRef: string | null;
+}>;
+export type AdminPaymentAnomalySection = Readonly<{
+  contractVersion: "admin-order-payment-anomalies.v1";
+  status: "AVAILABLE" | "SCHEMA_NOT_DEPLOYED";
+  limit: 50;
+  truncated: boolean | null;
+  items: AdminPaymentAnomaly[] | null;
+}>;
+
 export type AdminOrderPaymentSummary = {
   contractVersion: "admin-order-payment-summary.v1"; integration: "NOT_INTEGRATED" | "CONTROLLED_LOCAL" | "JOINPAY";
   productionPaymentCapability: boolean;
@@ -57,6 +91,7 @@ export type AdminOrderPaymentSummary = {
   conflicts: { kind: "CHANNEL_STATUS_CONFLICT" | "STALE" | "LATE" | "DUPLICATE"; observedAt: string; evidenceRef: string | null }[] | null;
   recovery: { mode: "NONE" | "ORIGINAL_NUMBER_QUERY"; manualQueryOpen: false; lastAttemptAt: null; attempts: null } | null;
   settlement: "NOT_INTEGRATED"; unknowns: string[] | null; updatedAt: string | null;
+  anomalies?: AdminPaymentAnomalySection | null;
 };
 
 const utc = (column: string) => `to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
@@ -202,6 +237,207 @@ function qualified(o: Observation, r: Request): boolean {
     ((o.event === "E4" && o.result === "QUERY_SUCCEEDED") || (o.event === "E5" && o.result === "CHANNEL_REPORTED_FAILED") || (o.event === "E6" && o.result === "CHANNEL_CREATED_UNPAID"));
 }
 
+const ANOMALY_LIMIT = 50;
+const anomalySchemaSql = `SELECT
+  to_regclass('zzsh_order.joinpay_collection_evidence') IS NOT NULL
+  AND (SELECT count(*)=11 FROM pg_attribute WHERE attrelid=to_regclass('zzsh_order.joinpay_collection_evidence')
+    AND attname IN ('id','request_id','origin_observation_id','event','result','schema_outcome','signature_outcome','binding_outcome','channel_trx_no','raw_sha256','created_at') AND NOT attisdropped)
+  AND to_regclass('zzsh_order.joinpay_collection_observation') IS NOT NULL
+  AND (SELECT count(*)=9 FROM pg_attribute WHERE attrelid=to_regclass('zzsh_order.joinpay_collection_observation')
+    AND attname IN ('id','request_id','event','result','schema_outcome','signature_outcome','binding_outcome','raw_sha256','created_at') AND NOT attisdropped)
+  AND (SELECT count(*)=3 FROM pg_attribute WHERE attrelid=to_regclass('zzsh_order.payment_confirmation')
+    AND attname IN ('joinpay_request_id','joinpay_evidence_id','joinpay_anchor_id') AND NOT attisdropped)
+  AND (SELECT count(*)=6 FROM pg_attribute WHERE attrelid=to_regclass('zzsh_order.payment_channel_transaction')
+    AND attname IN ('native_order_id','request_id','merchant_identity_id','channel_trx_no','channel','evidence_level') AND NOT attisdropped)
+  AND to_regclass('zzsh_iam.audit_event') IS NOT NULL
+  AND (SELECT count(*)=7 FROM pg_attribute WHERE attrelid=to_regclass('zzsh_iam.audit_event')
+    AND attname IN ('action','object_type','object_id','request_id','outcome','occurred_at','details') AND NOT attisdropped) AS anomaly_ready`;
+
+// 只读、限 51 行探针；raw/原件/密钥/完整审计 details 均不进入投影。
+const anomalySql = `WITH anomaly_confirmation AS (
+  SELECT 'CONFIRMATION:'||p.id AS stable_id, ${utc("p.accepted_at")} AS observed_at,
+    p.id AS confirmation_id,p.joinpay_request_id AS request_id,p.disposition,p.reason_code,
+    p.amount_cents::text AS amount_cents,p.currency,p.merchant_order_no,p.provider_transaction_id,
+    p.source,p.merchant_scope_id AS merchant_identity_id,'CONFIRMATION'::text AS source_kind,e.raw_sha256 AS evidence_raw_sha256,NULL::text AS event,NULL::text AS result,
+    NULL::text AS schema_outcome,NULL::text AS signature_outcome,NULL::text AS binding_outcome,
+    CASE WHEN p.source<>'JOINPAY' THEN 'NOT_APPLICABLE'
+      WHEN p.joinpay_anchor_id IS NULL THEN 'MISSING'
+      WHEN a.id IS NULL THEN 'MISSING'
+      WHEN a.native_order_id IS DISTINCT FROM p.order_id THEN 'OTHER_ORDER'
+      WHEN a.request_id IS DISTINCT FROM p.joinpay_request_id THEN 'OTHER_REQUEST'
+      WHEN a.channel IS DISTINCT FROM 'JOINPAY' OR a.evidence_level IS DISTINCT FROM 'JOINPAY_VERIFIED'
+        OR a.merchant_identity_id IS DISTINCT FROM p.merchant_scope_id OR a.channel_trx_no IS DISTINCT FROM p.provider_transaction_id THEN 'MISMATCH'
+      ELSE 'MATCH' END AS anchor_ownership,NULL::text AS audit_action
+  FROM zzsh_order.payment_confirmation p
+  LEFT JOIN zzsh_order.payment_channel_transaction a ON a.id=p.joinpay_anchor_id
+  LEFT JOIN zzsh_order.joinpay_collection_evidence e ON e.id=p.joinpay_evidence_id
+  WHERE p.order_id=$1
+    AND (p.disposition='REVIEW_REQUIRED' OR p.id IS DISTINCT FROM (SELECT paid_confirmation_id FROM zzsh_order.rental_order WHERE id=$1)
+      OR (p.source='JOINPAY' AND (p.joinpay_anchor_id IS NULL OR a.id IS NULL
+        OR a.native_order_id IS DISTINCT FROM p.order_id OR a.request_id IS DISTINCT FROM p.joinpay_request_id
+        OR a.channel IS DISTINCT FROM 'JOINPAY' OR a.evidence_level IS DISTINCT FROM 'JOINPAY_VERIFIED'
+        OR a.merchant_identity_id IS DISTINCT FROM p.merchant_scope_id OR a.channel_trx_no IS DISTINCT FROM p.provider_transaction_id)))
+), anomaly_evidence AS (
+  SELECT 'EVIDENCE:'||e.id AS stable_id, ${utc("e.created_at")} AS observed_at,
+    NULL::text AS confirmation_id,e.request_id,NULL::text AS disposition,NULL::text AS reason_code,
+    NULL::text AS amount_cents,NULL::text AS currency,NULL::text AS merchant_order_no,NULL::text AS provider_transaction_id,
+    'JOINPAY'::text AS source,r.merchant_identity_id,'EVIDENCE'::text AS source_kind,e.raw_sha256 AS evidence_raw_sha256,e.event,e.result,e.schema_outcome,e.signature_outcome,e.binding_outcome,
+    CASE WHEN a.id IS NULL THEN 'MISSING'
+      WHEN a.native_order_id IS DISTINCT FROM r.order_id THEN 'OTHER_ORDER'
+      WHEN a.request_id IS DISTINCT FROM e.request_id THEN 'OTHER_REQUEST'
+      WHEN a.channel IS DISTINCT FROM 'JOINPAY' OR a.evidence_level IS DISTINCT FROM 'JOINPAY_VERIFIED'
+        OR a.merchant_identity_id IS DISTINCT FROM r.merchant_identity_id OR a.channel_trx_no IS DISTINCT FROM e.channel_trx_no THEN 'MISMATCH'
+      ELSE 'MATCH' END AS anchor_ownership,NULL::text AS audit_action
+  FROM zzsh_order.joinpay_collection_evidence e
+  JOIN zzsh_order.payment_request r ON r.id=e.request_id
+  LEFT JOIN zzsh_order.payment_channel_transaction a ON a.channel='JOINPAY' AND a.merchant_identity_id=r.merchant_identity_id AND a.channel_trx_no=e.channel_trx_no
+  WHERE r.order_id=$1
+    AND (e.event='E4' OR e.binding_outcome IS DISTINCT FROM 'MATCH' OR e.signature_outcome IS DISTINCT FROM 'MATCH' OR e.schema_outcome IS DISTINCT FROM 'VALID')
+    AND (e.binding_outcome IS DISTINCT FROM 'MATCH' OR e.signature_outcome IS DISTINCT FROM 'MATCH' OR e.schema_outcome IS DISTINCT FROM 'VALID'
+      OR NOT EXISTS (SELECT 1 FROM zzsh_order.payment_confirmation p WHERE p.source='JOINPAY' AND p.joinpay_request_id=e.request_id AND p.provider_transaction_id=e.channel_trx_no))
+), anomaly_observation AS (
+  SELECT 'OBSERVATION:'||o.id AS stable_id, ${utc("o.created_at")} AS observed_at,
+    NULL::text AS confirmation_id,o.request_id,NULL::text AS disposition,NULL::text AS reason_code,
+    NULL::text AS amount_cents,NULL::text AS currency,NULL::text AS merchant_order_no,NULL::text AS provider_transaction_id,
+    'JOINPAY'::text AS source,r.merchant_identity_id,'OBSERVATION'::text AS source_kind,o.raw_sha256 AS evidence_raw_sha256,o.event,o.result,o.schema_outcome,o.signature_outcome,o.binding_outcome,
+    'UNKNOWN'::text AS anchor_ownership,NULL::text AS audit_action
+  FROM zzsh_order.joinpay_collection_observation o
+  JOIN zzsh_order.payment_request r ON r.id=o.request_id
+  WHERE r.order_id=$1
+    AND (o.event='E4' OR o.binding_outcome IS DISTINCT FROM 'MATCH' OR o.signature_outcome IS DISTINCT FROM 'MATCH' OR o.schema_outcome IS DISTINCT FROM 'VALID')
+    AND NOT EXISTS (SELECT 1 FROM zzsh_order.joinpay_collection_evidence e WHERE e.origin_observation_id=o.id)
+), anomaly_audit AS (
+  SELECT 'AUDIT:'||a.id AS stable_id, ${utc("a.occurred_at")} AS observed_at,
+    NULL::text AS confirmation_id,
+    CASE WHEN a.action='order.payment.collection.transaction.conflict' THEN a.object_id ELSE NULL::text END AS request_id,
+    NULL::text AS disposition,NULL::text AS reason_code,
+    NULL::text AS amount_cents,NULL::text AS currency,NULL::text AS merchant_order_no,NULL::text AS provider_transaction_id,
+    NULL::text AS source,NULL::text AS merchant_identity_id,'AUDIT'::text AS source_kind,NULL::text AS evidence_raw_sha256,NULL::text AS event,NULL::text AS result,
+    NULL::text AS schema_outcome,NULL::text AS signature_outcome,NULL::text AS binding_outcome,
+    CASE WHEN a.action='order.payment.collection.transaction.conflict' THEN 'OTHER_ORDER' ELSE 'UNKNOWN' END AS anchor_ownership,
+    a.action AS audit_action
+  FROM zzsh_iam.audit_event a
+  WHERE a.outcome='FAILURE' AND (
+    (a.action='order.payment.collection.transaction.conflict' AND a.object_type='payment_request'
+      AND a.object_id IN (SELECT id FROM zzsh_order.payment_request WHERE order_id=$1))
+    OR (a.action='order.payment.conflict' AND a.object_type='payment_confirmation'
+      AND (a.object_id IN (SELECT id FROM zzsh_order.payment_confirmation WHERE order_id=$1)
+        OR a.details->'attempted'->>'orderId'=$1))
+  )
+)
+SELECT COALESCE(jsonb_agg(v ORDER BY v.observed_at DESC,v.stable_id COLLATE "C" DESC),'[]'::jsonb) AS items
+FROM (
+  SELECT * FROM (
+    SELECT * FROM anomaly_confirmation UNION ALL
+    SELECT * FROM anomaly_evidence UNION ALL
+    SELECT * FROM anomaly_observation UNION ALL
+    SELECT * FROM anomaly_audit
+  ) all_rows ORDER BY observed_at DESC,stable_id COLLATE "C" DESC LIMIT 51
+) v`;
+
+type AnomalyRow = {
+  stable_id: string; observed_at: string | null; confirmation_id: string | null; request_id: string | null;
+  disposition: string | null; reason_code: string | null; amount_cents: string | null; currency: string | null;
+  merchant_order_no: string | null; provider_transaction_id: string | null; merchant_identity_id?: string | null; source: string | null; source_kind: string | null;
+  evidence_raw_sha256: string | null; event: string | null; result: string | null;
+  schema_outcome: string | null; signature_outcome: string | null; binding_outcome: string | null;
+  anchor_ownership: string | null; audit_action: string | null;
+};
+const anomalySources = ["CONFIRMATION", "EVIDENCE", "OBSERVATION", "AUDIT"] as const;
+const anchorOwnerships = ["MATCH", "MISSING", "OTHER_ORDER", "OTHER_REQUEST", "MISMATCH", "NOT_APPLICABLE", "UNKNOWN"] as const;
+const anomalySource = (value: unknown): AdminPaymentAnomalySource =>
+  typeof value === "string" && (anomalySources as readonly string[]).includes(value) ? value as AdminPaymentAnomalySource : "UNKNOWN";
+const anomalyOwnership = (value: unknown): AdminPaymentAnchorOwnership =>
+  typeof value === "string" && (anchorOwnerships as readonly string[]).includes(value) ? value as AdminPaymentAnchorOwnership : "UNKNOWN";
+const anomalyRef = (value: unknown): string | null =>
+  typeof value === "string" && /^[a-f0-9]{64}$/.test(value) ? `sha256:${value}` : null;
+const anomalyMoney = (cents: unknown, currency: string | null): Money | null =>
+  currency !== null && typeof cents === "string" && /^(0|[1-9][0-9]*)$/.test(cents) ? { cents, currency } : null;
+function anomalyCategory(row: AnomalyRow, source: AdminPaymentAnomalySource) {
+  if (source === "CONFIRMATION") {
+    const disposition: "APPLIED" | "REVIEW_REQUIRED" | null = row.disposition === "APPLIED" ? "APPLIED"
+      : row.disposition === "REVIEW_REQUIRED" ? "REVIEW_REQUIRED" : null;
+    const trusted = disposition !== null && (row.source === "JOINPAY" || row.source === "CONTROLLED");
+    if (disposition === "REVIEW_REQUIRED") {
+      const code = row.reason_code === "LATE_PAYMENT" || row.reason_code === "DUPLICATE_PAYMENT" || row.reason_code === "BINDING_MISMATCH"
+        ? row.reason_code : "UNKNOWN_REASON";
+      return { kind: code as AdminPaymentAnomalyKind, reasonCode: code as AdminPaymentAnomalyReason, trusted, disposition };
+    }
+    if (disposition === "APPLIED") {
+      if (["OTHER_ORDER", "OTHER_REQUEST", "MISMATCH"].includes(row.anchor_ownership ?? "")) {
+        return { kind: "ANCHOR_OWNED_ELSEWHERE" as const, reasonCode: "ANCHOR_OWNED_ELSEWHERE" as const, trusted, disposition };
+      }
+      if (row.anchor_ownership === "MISSING") {
+        return { kind: "UNKNOWN_REASON" as const, reasonCode: "UNKNOWN_REASON" as const, trusted, disposition };
+      }
+      return { kind: "DUPLICATE_PAYMENT" as const, reasonCode: "DUPLICATE_PAYMENT" as const, trusted, disposition };
+    }
+    return { kind: "UNKNOWN_REASON" as const, reasonCode: "UNKNOWN_REASON" as const, trusted: false, disposition };
+  }
+  if (source === "AUDIT") {
+    if (row.audit_action === "order.payment.collection.transaction.conflict") {
+      return { kind: "ANCHOR_OWNED_ELSEWHERE" as const, reasonCode: "ANCHOR_OWNED_ELSEWHERE" as const, trusted: false, disposition: null };
+    }
+    if (row.audit_action === "order.payment.conflict") {
+      return { kind: "BINDING_MISMATCH" as const, reasonCode: "BINDING_MISMATCH" as const, trusted: false, disposition: null };
+    }
+    return { kind: "UNKNOWN_REASON" as const, reasonCode: "UNKNOWN_REASON" as const, trusted: false, disposition: null };
+  }
+  if (source === "EVIDENCE" || source === "OBSERVATION") {
+    if (row.schema_outcome === "INVALID") return { kind: "UNKNOWN_REASON" as const, reasonCode: "SCHEMA_INVALID" as const, trusted: false, disposition: null };
+    if (row.signature_outcome === "MISMATCH") return { kind: "UNKNOWN_REASON" as const, reasonCode: "SIGNATURE_MISMATCH" as const, trusted: false, disposition: null };
+    if (row.schema_outcome !== "VALID" || row.signature_outcome !== "MATCH") return { kind: "UNKNOWN_REASON" as const, reasonCode: "UNKNOWN_REASON" as const, trusted: false, disposition: null };
+    if (["OTHER_ORDER", "OTHER_REQUEST", "MISMATCH"].includes(row.anchor_ownership ?? "")) {
+      return { kind: "ANCHOR_OWNED_ELSEWHERE" as const, reasonCode: "ANCHOR_OWNED_ELSEWHERE" as const, trusted: false, disposition: null };
+    }
+    if (row.binding_outcome === "MISMATCH") return { kind: "BINDING_MISMATCH" as const, reasonCode: "BINDING_MISMATCH" as const, trusted: false, disposition: null };
+    if (row.binding_outcome !== "MATCH") return { kind: "UNKNOWN_REASON" as const, reasonCode: "UNKNOWN_REASON" as const, trusted: false, disposition: null };
+    if (row.event === "E4") return { kind: "UNKNOWN_REASON" as const, reasonCode: "UNCONFIRMED_SUCCESS" as const, trusted: false, disposition: null };
+  }
+  return { kind: "UNKNOWN_REASON" as const, reasonCode: "UNKNOWN_REASON" as const, trusted: false, disposition: null };
+}
+function toAnomaly(row: AnomalyRow, financeReadable: boolean): AdminPaymentAnomaly {
+  const source = anomalySource(row.source_kind);
+  const category = anomalyCategory(row, source);
+  const currency = financeReadable && category.trusted && typeof row.currency === "string" && /^[A-Z]{3}$/.test(row.currency) ? row.currency : null;
+  const confirmation = source === "CONFIRMATION" && category.trusted;
+  const providerTransactionId = financeReadable && confirmation && typeof row.provider_transaction_id === "string"
+    && /^[A-Za-z0-9_-]{1,128}$/.test(row.provider_transaction_id) ? row.provider_transaction_id : null;
+  const merchantOrderNo = financeReadable && confirmation && typeof row.merchant_order_no === "string"
+    && row.merchant_order_no.length >= 1 && row.merchant_order_no.length <= 128 ? row.merchant_order_no : null;
+  const observedAt = typeof row.observed_at === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(row.observed_at) ? row.observed_at : null;
+  return { kind: category.kind, source,
+    evidenceLevel: source === "CONFIRMATION" ? row.source === "JOINPAY" ? "JOINPAY_CONFIRMATION" : row.source === "CONTROLLED" ? "CONTROLLED_CONFIRMATION" : "UNKNOWN"
+      : source === "EVIDENCE" ? "JOINPAY_EVIDENCE" : source === "OBSERVATION" ? "JOINPAY_OBSERVATION" : source === "AUDIT" ? "AUDIT_ONLY" : "UNKNOWN",
+    trusted: category.trusted, observedAt, disposition: category.disposition, reasonCode: category.reasonCode,
+    amount: financeReadable && category.trusted ? anomalyMoney(row.amount_cents, currency) : null, currency,
+    confirmationId: financeReadable && source === "CONFIRMATION" ? row.confirmation_id : null,
+    requestId: financeReadable ? row.request_id : null,
+    merchantIdentityId: financeReadable && confirmation && typeof row.merchant_identity_id === "string"
+      && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(row.merchant_identity_id) ? row.merchant_identity_id : null,
+    merchantOrderNo, providerTransactionId,
+    anchorOwnership: anomalyOwnership(row.anchor_ownership),
+    evidenceRef: financeReadable ? anomalyRef(row.evidence_raw_sha256) : null };
+}
+async function readAdminPaymentAnomalies(client: Client, orderId: string, financeReadable: boolean): Promise<AdminPaymentAnomalySection> {
+  const readyRow = (await client.query<{ anomaly_ready: boolean }>(anomalySchemaSql)).rows[0];
+  if (readyRow?.anomaly_ready !== true) {
+    return { contractVersion: "admin-order-payment-anomalies.v1", status: "SCHEMA_NOT_DEPLOYED", limit: ANOMALY_LIMIT, truncated: null, items: null };
+  }
+  const result = (await client.query<{ items: unknown }>(anomalySql, [orderId])).rows[0];
+  if (!result || !Array.isArray(result.items) || result.items.some(item => !item || typeof item !== "object")) {
+    throw new Error("Anomaly projection is unavailable");
+  }
+  const rows = (result.items as AnomalyRow[]).slice().sort((a, b) => {
+    const left = typeof a.observed_at === "string" ? a.observed_at : "";
+    const right = typeof b.observed_at === "string" ? b.observed_at : "";
+    if (left === right) return a.stable_id < b.stable_id ? 1 : a.stable_id > b.stable_id ? -1 : 0;
+    return left < right ? 1 : -1;
+  });
+  return { contractVersion: "admin-order-payment-anomalies.v1", status: "AVAILABLE", limit: ANOMALY_LIMIT,
+    truncated: rows.length > ANOMALY_LIMIT, items: rows.slice(0, ANOMALY_LIMIT).map(row => toAnomaly(row, financeReadable)) };
+}
+
 /** 前置：同一服务端上下文已核会话、order.read 和该来源的对象/game scope；financeReadable 也来自该上下文。 */
 export async function readOrderPaymentSummary(client: Client, input: {
   orderId: string; origin: Origin; financeReadable: boolean;
@@ -235,6 +471,9 @@ export async function readOrderPaymentSummary(client: Client, input: {
       const index = unknowns.indexOf(code); if (index >= 0) unknowns.splice(index, 1);
     }
   }
+  const anomalies = await readAdminPaymentAnomalies(client, input.orderId, financeReadable);
+  if (anomalies.status === "SCHEMA_NOT_DEPLOYED") unknowns.push("ANOMALY_SCHEMA_NOT_DEPLOYED");
+  if (anomalies.truncated === true) unknowns.push("ANOMALIES_TRUNCATED_TO_LATEST_50");
   const updatedAt = [row.order.created_at, row.order.paid_at, r?.updated_at, p?.accepted_at, row.latest_observed_at, formalObservation?.observedAt].filter((v): v is string => typeof v === "string").sort().at(-1) ?? null;
   return { contractVersion: "admin-order-payment-summary.v1", integration: r?.channel === "JOINPAY" || origin === "JOINPAY_PROVIDER" ? "JOINPAY" : origin === "LOCAL_CONTROLLED" ? "CONTROLLED_LOCAL" : "NOT_INTEGRATED", productionPaymentCapability: formal.capability, dataOrigin: origin,
     originalRequest: r ? { id: r.id, channelOrderNo: financeReadable ? r.channel_order_no : null, method: r.method,
@@ -246,5 +485,5 @@ export async function readOrderPaymentSummary(client: Client, input: {
       providerTimeZone: "UNCONFIRMED", evidenceRef: digest(o.raw_sha256)!, observedAt: o.observed_at } : null),
     acceptance: { state: origin === "UNKNOWN" ? "NONE" : p?.disposition ?? (r?.state === "CHANNEL_SUCCEEDED_PENDING_ACCEPTANCE" ? "PENDING" : "NONE"), confirmationId: origin === "UNKNOWN" ? null : p?.id ?? null, reasonCode: p?.reason_code ?? null },
     conflicts, recovery: { mode: r?.state === "UNKNOWN" ? "ORIGINAL_NUMBER_QUERY" : "NONE", manualQueryOpen: false, lastAttemptAt: null, attempts: null },
-    settlement: "NOT_INTEGRATED", unknowns, updatedAt };
+    settlement: "NOT_INTEGRATED", unknowns, updatedAt, anomalies };
 }

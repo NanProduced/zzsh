@@ -245,7 +245,13 @@ export async function readFinanceSourceVersion(client: PoolClient, scope?: Finan
     to_regclass('zzsh_order.rental_order') IS NOT NULL AS native_orders,to_regclass('zzsh_order.legacy_order_read_snapshot') IS NOT NULL AS legacy_orders,
     to_regclass('zzsh_order.rental_referral_earning') IS NOT NULL AS native_distribution,to_regclass('zzsh_order.payment_distribution_basis') IS NOT NULL AS earning_basis,to_regclass('zzsh_order.rental_referral_transition') IS NOT NULL AS earning_transitions,to_regclass('zzsh_order.personal_finance_observation_coverage') IS NOT NULL AS history_coverage,
     to_regclass('zzsh_order.legacy_duty_finance_fact') IS NOT NULL AND to_regclass('zzsh_order.legacy_order_duty') IS NOT NULL AS legacy_duty_finance,to_regclass('zzsh_order.legacy_owner_guarantee_coverage') IS NOT NULL AND to_regclass('zzsh_order.legacy_owner_guarantee_observation') IS NOT NULL AS guarantee_history,
-    to_regclass('zzsh_order.payment_request') IS NOT NULL AS payment_requests,to_regclass('zzsh_order.channel_refund_intent') IS NOT NULL AS refund_intents,to_regclass('zzsh_order.joinpay_withdrawal_intent') IS NOT NULL AS joinpay_withdrawals`)).rows[0];
+    to_regclass('zzsh_order.payment_request') IS NOT NULL AS payment_requests,(to_regclass('zzsh_order.channel_refund_intent') IS NOT NULL AND COALESCE(has_table_privilege(to_regclass('zzsh_order.channel_refund_intent'),'SELECT'),false)) AS refund_intents,
+    (to_regclass('zzsh_order.joinpay_refund_attempt') IS NOT NULL AND to_regclass('zzsh_iam.audit_event') IS NOT NULL
+      AND to_regclass('zzsh_order.payment_confirmation') IS NOT NULL
+      AND COALESCE(has_table_privilege(to_regclass('zzsh_order.joinpay_refund_attempt'),'SELECT'),false)
+      AND COALESCE(has_table_privilege(to_regclass('zzsh_iam.audit_event'),'SELECT'),false)
+      AND COALESCE(has_table_privilege(to_regclass('zzsh_order.payment_confirmation'),'SELECT'),false)) AS refund_read_dependencies,
+    to_regclass('zzsh_order.joinpay_withdrawal_intent') IS NOT NULL AS joinpay_withdrawals`)).rows[0];
   if (!ready?.ready) throw unavailable("Finance read foundation is not available");
   const scoped = scope ? financeScopedVersionSql(ready, scope) : null;
   const version=(await client.query(scoped?.text ?? financeVersionSql(ready), scoped?.values ?? [])).rows[0]?.finance_version;

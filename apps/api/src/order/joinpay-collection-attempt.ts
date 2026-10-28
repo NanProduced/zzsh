@@ -99,8 +99,10 @@ type Prepared = { attemptId: string; request: Original; profile: BoundCollection
   binding: CollectionPersistedBinding; key: string; operation: CollectionOperation; lease: { leaseVersion: string; leaseOwner: string };
   outbound: ReturnType<typeof produceJoinpayCollectionRequest> };
 
-async function prepare(options: JoinpayCollectionExecution, id: string, workerId: string, recoveryMinimumIntervalSeconds?: number, allowFirstDispatch?: boolean): Promise<Prepared | null> {
+async function prepare(options: JoinpayCollectionExecution, id: string, workerId: string, recoveryMinimumIntervalSeconds?: number, allowFirstDispatch?: boolean,
+  authorize?: (client: PoolClient, requestId: string) => Promise<void>): Promise<Prepared | null> {
   return confirmed(options.pool, id, "CLAIM", async client => {
+    if (authorize) await authorize(client, id);
     const row = (await client.query<OriginalRow>(`${ORIGINAL_SQL} FOR UPDATE OF r`, [id])).rows[0];
     if (!row) throw notFound();
     if (row.formal_admission_ref != null && !options.formal) throw conflict("Formal request requires explicit source admission");
@@ -277,13 +279,15 @@ export async function queryJoinpayCollectionForUser(pool: Pool, options: Joinpay
 }
 
 /** 已提交attempt之后才发送一次；领取提交未知不发请求，结果提交未知不重发SUBMIT。 */
-export async function executeJoinpayCollectionAttempt(options: JoinpayCollectionExecution, input: { requestId: string; workerId: string; recoveryMinimumIntervalSeconds?: number; allowFirstDispatch?: boolean }): Promise<
+export async function executeJoinpayCollectionAttempt(options: JoinpayCollectionExecution, input: { requestId: string; workerId: string; recoveryMinimumIntervalSeconds?: number; allowFirstDispatch?: boolean;
+  authorize?: (client: PoolClient, requestId: string) => Promise<void> }): Promise<
   { kind: "SKIPPED" } | { kind: "OBSERVED"; operation: CollectionOperation; observation: Recorded }> {
-  if (!ID.test(input.requestId) || !ID.test(input.workerId)) throw invalid();
+  if (!ID.test(input.requestId) || !ID.test(input.workerId)
+    || input.authorize !== undefined && typeof input.authorize !== "function") throw invalid();
   if (input.recoveryMinimumIntervalSeconds !== undefined && (!Number.isSafeInteger(input.recoveryMinimumIntervalSeconds)
     || input.recoveryMinimumIntervalSeconds < 30 || input.recoveryMinimumIntervalSeconds > 86400)) throw invalid();
   if (input.allowFirstDispatch !== undefined && (typeof input.allowFirstDispatch !== "boolean" || input.recoveryMinimumIntervalSeconds === undefined)) throw invalid();
-  const attempt = await prepare(options, input.requestId, input.workerId, input.recoveryMinimumIntervalSeconds, input.allowFirstDispatch);
+  const attempt = await prepare(options, input.requestId, input.workerId, input.recoveryMinimumIntervalSeconds, input.allowFirstDispatch, input.authorize);
   if (!attempt) return { kind: "SKIPPED" };
   const response = await exchangeJoinpayCollection(attempt.outbound, { fetch: options.fetch });
   if (response.requestSha256 !== attempt.outbound.requestSha256) throw conflict("Transport changed the committed request bytes");

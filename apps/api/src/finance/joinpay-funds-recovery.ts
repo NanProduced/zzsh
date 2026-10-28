@@ -12,6 +12,8 @@ export type JoinpayFundsRecoveryOptions = { refund?: RefundOptions; payout?: Pay
 type Row = { id: string; state: string };
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/, PAYOUT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/;
 const REFUND_STATES = ["READY", "SUBMITTING", "UNKNOWN", "PROCESSING", "REVIEW_REQUIRED"];
+// 只有实际存在固定 blocked 审计的意图按小时退避；从未阻断的合法异常保持正常到期顺序，不改状态或预算。
+const ABNORMAL_BLOCK_RETRY_SECONDS = 3600;
 const PAYOUT_STATES = ["RESERVED", "SUBMITTING", "UNKNOWN", "PROCESSING", "CHANNEL_SUCCEEDED_PENDING_ACCEPTANCE"];
 function settings<T extends JoinpayFundsRecoverySettings>(value: T): T {
   if (!value || typeof value.workerId !== "string" || !ID.test(value.workerId) || !Number.isSafeInteger(value.batchLimit) || value.batchLimit < 1 || value.batchLimit > 10
@@ -58,6 +60,10 @@ export async function recoverJoinpayRefundBatch(input: RefundOptions, signal?: A
       AND (SELECT count(*) FROM zzsh_order.joinpay_refund_attempt counted WHERE counted.intent_id=i.id AND counted.operation='QUERY')<$7::integer
       AND NOT EXISTS(SELECT 1 FROM zzsh_order.joinpay_refund_attempt recent WHERE recent.intent_id=i.id
         AND recent.created_at>clock_timestamp()-make_interval(secs=>$5::integer))
+      AND (NOT (i.basis_kind='REVIEW_CONFIRMATION' AND i.state='READY') OR NOT EXISTS(
+        SELECT 1 FROM zzsh_iam.audit_event blocked WHERE blocked.action='order.refund.abnormal.first_submit.blocked'
+          AND blocked.object_type='channel_refund_intent' AND blocked.object_id=i.id AND blocked.outcome='FAILURE'
+          AND blocked.occurred_at>clock_timestamp()-make_interval(secs=>${ABNORMAL_BLOCK_RETRY_SECONDS})))
     ORDER BY i.due_at,i.id LIMIT $6`, [a.merchantIdentityId, a.merchantNo, JSON.stringify(accepted), REFUND_STATES,
     o.minimumIntervalSeconds, o.batchLimit, JOINPAY_REFUND_MAX_AUTOMATIC_QUERIES, canSubmit], REFUND_STATES, o.batchLimit, "REFUND", signal);
   const result = { selected: rows.length, recorded: 0, skipped: 0, ...(allocation ? { allocation } : {}) };

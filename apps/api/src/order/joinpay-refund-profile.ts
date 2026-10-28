@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { computeJoinpayRefundRequest, computeJoinpayRefundQuery, computeJoinpayRefundResponse, validateJoinpayRefundRequestInput, type JoinpayRefundBinding, type RefundNeutralResult } from "./joinpay-refund-protocol";
 export type RefundOperation = "SUBMIT" | "QUERY" | "NOTIFY";
-export type RefundBinding = JoinpayRefundBinding & Readonly<{ intentId: string; postingId: string; orderId: string; paymentConfirmationId: string;
+export type RefundBinding = JoinpayRefundBinding & Readonly<{ intentId: string; postingId: string | null;
+  basisKind?: "POSTING" | "REVIEW_CONFIRMATION"; abnormalConfirmationId?: string | null; orderId: string; paymentConfirmationId: string;
   renterUserId: string; merchantIdentityId: string; originalPaymentTrxNo: string; responsibilityVersionHash: string; notifyUrl: string; reason?: string;
   profileId: string; initialProfileSha256: string; keyVersionRef: string }>;
 const sha = (v: string | Uint8Array) => createHash("sha256").update(v).digest("hex"), ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/, SHA = /^[0-9a-f]{64}$/;

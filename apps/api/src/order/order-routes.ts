@@ -12,6 +12,7 @@ import { ADMIN_PERMISSION, requirePermission } from "../auth/admin-authorization
 import { assertGameScopeUsable, gameScopeSignature, readAdminGameScope } from "../auth/admin-scope";
 import { readAdminContext, assertAdminContextInTransaction, type AuthSecurityOptions } from "../auth/auth-security";
 import { readUserContext } from "../auth/user-identity";
+import { readPersonalNativeRefunds } from "../finance/personal-refund-read";
 import { withTransaction } from "../auth/security-core";
 import { ensureApiV1RequestId } from "../contracts/api-v1";
 import { humanText } from "../supply/content-hash";
@@ -258,6 +259,16 @@ export async function handleOrderUserRoute(
       const operation=query.get("operation")??"read";if(operation!=="read"&&operation!=="send")throw invalid("Operation is invalid");
       const data=await withTransaction(options.pool,c=>readOrderTeamAccess(c,{...context,realm:"user"},decodeId(teamMatch[1]!),operation,options.orderImSdkRouteBindings));
       sendJson(response,200,data,requestId);return;
+    }
+    const refundMatch = /^\/([A-Za-z0-9._:-]+)\/refunds$/.exec(path);
+    if (method === "GET" && refundMatch) {
+      if (query.size) throw invalid("Refund read does not accept query fields");
+      const context = await readUserContext(request, options), orderId = decodeId(refundMatch[1]!);
+      const data = await withTransaction(options.pool, async client => {
+        await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+        return readPersonalNativeRefunds(client, context, { orderId });
+      });
+      sendJson(response, 200, data, requestId); return;
     }
     const detailMatch = /^\/([A-Za-z0-9._:-]+)$/.exec(path);
     if (method === "GET" && detailMatch) {

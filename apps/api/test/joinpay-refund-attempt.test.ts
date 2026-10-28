@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { JOINPAY_REFUND_SIGNATURE_ORDER } from "../src/order/joinpay-refund-protocol";
 import { bindRefundProfile, createFormalRefundAdmission, describeRefundProfile, inspectRefundProfile, produceRefundRequest, readRefundOutbound,
   refundCompleteTimeToUtc, refundFailureMayRelease, refundWayAccepted, readRefundProfileEvidence, type RefundBinding, type RefundOperation, type RefundServerProfile } from "../src/order/joinpay-refund-profile";
-import { exchangeRefundRequest, executeJoinpayRefund, RefundAttemptCommitUnknown } from "../src/order/joinpay-refund-attempt";
+import { exchangeRefundRequest, executeJoinpayRefund, queryJoinpayRefund, RefundAttemptCommitUnknown } from "../src/order/joinpay-refund-attempt";
 import { handleJoinpayRefundNotification, JOINPAY_REFUND_NOTIFICATION_PATH } from "../src/order/joinpay-refund-notification-routes";
 const KEY = "SYNTHETIC_REFUND_KEY", md5 = (s: string) => createHash("md5").update(s).digest("hex"), sha = (s: string) => createHash("sha256").update(s).digest("hex");
 const base = { merchantNo: "999900000000001", originalPaymentOrderNo: "ORDER_MODEL_1", refundOrderNo: "RF" + "a".repeat(28), amountCents: "100", currency: "CNY" as const };
@@ -99,17 +99,24 @@ test("未绑定准入在claim前拒绝，0connect/0key/0transport", async () => 
 function executionModel(t: TestContext) {
   const m=model(),q=model("QUERY"),store=require("../src/order/channel-refund-store"),profiles=require("../src/order/joinpay-refund-profile");
   const state={now:0,row:{id:m.binding.intentId,state:"READY",lease_version:"0",revision:"1",lease_owner:null,lease_until:0,terminal_evidence_id:null,
-    merchant_identity_id:m.binding.merchantIdentityId,original_payment_trx_no:m.binding.originalPaymentTrxNo,requires_review:false} as any,
-    attempts:[] as any[],observations:[] as any[],audits:[] as any[],commit:0,unknownCommit:0,auditFailure:0,auditCalls:0,sends:[] as string[]};
-  const a={sha256:"a".repeat(64)};t.mock.method(profiles,"readFormalRefundAdmission",()=>a);t.mock.method(profiles,"assertFormalRefundProfile",()=>a);
-  t.mock.method(store,"lockFormalRefundContext",async()=>structuredClone(state.row));t.mock.method(store,"formalRefundBinding",()=>Object.freeze({...m.binding}));
+    merchant_identity_id:m.binding.merchantIdentityId,original_payment_trx_no:m.binding.originalPaymentTrxNo,requires_review:false,budget_disposition:"ALLOCATED"} as any,
+    attempts:[] as any[],observations:[] as any[],audits:[] as any[],commit:0,unknownCommit:0,auditFailure:0,auditCalls:0,sends:[] as string[],keys:0,due:true,intervalOk:true};
+  const a={sha256:"a".repeat(64)},order:string[]=[];t.mock.method(profiles,"readFormalRefundAdmission",()=>a);t.mock.method(profiles,"assertFormalRefundProfile",()=>a);
+  t.mock.method(store,"lockFormalRefundContext",async()=>{order.push("lock");return structuredClone(state.row);});t.mock.method(store,"formalRefundBinding",()=>Object.freeze({...m.binding}));
   let snapshot:any;
   const client={release(){},async query(sql:string,p:any[]=[]):Promise<any>{
     if(sql==="BEGIN"){snapshot=structuredClone({row:state.row,attempts:state.attempts,observations:state.observations,audits:state.audits});return{rows:[]};}
     if(sql==="COMMIT"){snapshot=undefined;if(++state.commit===state.unknownCommit)throw Error("MODEL_COMMIT_RESPONSE_LOST");return{rows:[]};}
     if(sql==="ROLLBACK"){if(snapshot)Object.assign(state,snapshot);snapshot=undefined;return{rows:[]};}
     if(sql.startsWith("SAVEPOINT")||sql.startsWith("RELEASE SAVEPOINT"))return{rows:[]};
-    if(sql.startsWith("SELECT to_regclass"))return{rows:[{ready:true}]};if(sql.includes("SELECT EXISTS"))return{rows:[{blocked:false}]};
+    if(sql.startsWith("SELECT to_regclass"))return{rows:[{ready:true}]};
+    if(sql.includes(" AS active")){
+      const active=state.row.lease_until===null?null:state.row.lease_until>state.now;
+      return{rows:[{active:/COALESCE\(lease_until\s*>\s*clock_timestamp\(\),\s*false\)/.test(sql)?active??false:active,due:state.due}]};
+    }
+    if(sql.includes("EXISTS(SELECT 1 FROM zzsh_order.joinpay_refund_attempt"))return{rows:[{dispatched:state.attempts.some((a:any[])=>a[2]==="SUBMIT")}]};
+    if(sql.includes("count(*) FILTER(WHERE operation='QUERY')::text AS queries"))return{rows:[{queries:String(state.attempts.filter((a:any[])=>a[2]==="QUERY").length),interval_ok:state.intervalOk}]};
+    if(sql.includes("SELECT EXISTS"))return{rows:[{blocked:false}]};
     if(sql.includes("SET state=CASE")){if(state.row.lease_until>state.now)return{rows:[]};Object.assign(state.row,{state:state.row.state==="READY"?"SUBMITTING":"UNKNOWN",lease_version:String(BigInt(state.row.lease_version)+1n),lease_owner:p[1],lease_until:state.now+30,revision:String(BigInt(state.row.revision)+1n)});return{rows:[structuredClone(state.row)]};}
     if(sql.includes("AS current FROM"))return{rows:[{current:state.row.lease_version===p[1]&&state.row.lease_owner===p[2]&&state.row.lease_until>state.now}]};
     if(sql.includes("INSERT INTO zzsh_order.joinpay_refund_attempt")){state.attempts.push(p);return{rows:[]};}
@@ -119,9 +126,9 @@ function executionModel(t: TestContext) {
     if(sql.includes('INSERT INTO "zzsh_iam"."audit_event"')){if(++state.auditCalls===state.auditFailure)throw Error("MODEL_AUDIT_FAILED");state.audits.push(p);return{rows:[]};}
     throw Error("UNEXPECTED_COMPONENT_SQL");
   }};
-  const options={pool:{connect:async()=>client} as any,admission:{} as any,profileFor:(op:RefundOperation)=>op==="QUERY"?q.profile:m.profile,keyFor:()=>KEY,
+  const options={pool:{connect:async()=>client} as any,admission:{} as any,profileFor:(op:RefundOperation)=>op==="QUERY"?q.profile:m.profile,keyFor:()=>{state.keys++;return KEY;},
     fetch:async(url:any)=>{state.sends.push(String(url));return new Response(String(url).endsWith("queryRefund")?q.responseBody:m.responseBody);}};
-  return{state,options};
+  return{state,options,order};
 }
 test("SYNTHETIC_COMPONENT_MODEL：CLAIM COMMIT未知0发送，租约后仅QUERY原号",async t=>{
   const m=executionModel(t);m.state.unknownCommit=1;
@@ -153,6 +160,28 @@ test("SYNTHETIC_COMPONENT_MODEL：review只停SUBMIT，原号QUERY保留raw/audi
   assert.equal(m.state.sends[0],"https://trade.joinpay.com/tradeRt/queryRefund");assert.equal(m.state.observations.length,1);assert.ok(m.state.observations[0][10].length>0);
   assert.equal(m.state.audits.length,2);assert.equal(m.state.row.requires_review,true);assert.equal(result?.terminal,null);assert.equal(captured,0);assert.equal(consumed,0);
 });
+
+test("Master门禁模型：意图创建后原商户单号变多trx，首次SUBMIT前必须重核并停止",async t=>{
+  const m=executionModel(t);m.state.row.basis_kind="REVIEW_CONFIRMATION";m.state.row.posting_id=null;
+  let keys=0;m.options.keyFor=()=>{keys++;return KEY;};
+  const c=await m.options.pool.connect(),query=c.query.bind(c);
+  c.query=async(sql:string,p:any[]=[])=>sql.includes("count(DISTINCT")||sql.includes("abnormal refund first submit")
+    ?{rows:[{valid:false,order_no_trx_count:"2",count:"2"}],rowCount:1}:query(sql,p);
+  await executeJoinpayRefund(m.options,"refund_model_1","worker_1");
+  assert.equal(keys,0);assert.equal(m.state.sends.length,0);assert.equal(m.state.attempts.length,0);
+});
+
+test("R1门禁失败只留固定REVIEW结论：不释放预算、不取钥、不发SUBMIT、不改lease",async t=>{
+  const m=executionModel(t);m.state.row.basis_kind="REVIEW_CONFIRMATION";m.state.row.posting_id=null;
+  const c=await m.options.pool.connect(),query=c.query.bind(c);
+  c.query=async(sql:string,p:any[]=[])=>sql.includes("abnormal refund first submit")
+    ?{rows:[{valid:false,order_no_trx_count:"3"}],rowCount:1}:query(sql,p);
+  await executeJoinpayRefund(m.options,"refund_model_1","worker_1");
+  assert.equal(m.state.row.state,"READY");assert.equal(m.state.row.lease_version,"0");
+  assert.equal(m.state.row.lease_owner,null);assert.equal(m.state.row.requires_review,false);
+  assert.equal(m.state.attempts.length,0);assert.equal(m.state.sends.length,0);
+  assert.equal(m.state.audits.length,1);assert.ok(JSON.stringify(m.state.audits[0]).includes("order.refund.abnormal.first_submit.blocked"));
+});
 test("薄通知原URI/GET/精确ACK：坏输入/非GET/未知路径不读钥或出网", async () => {
   let body = "", status = 0, connects = 0;
   const response = { status(v: number) { status = v; }, setHeader() {}, send(v: string) { body = v; } } as any;
@@ -180,4 +209,115 @@ test("SYNTHETIC_COMPONENT_MODEL：known退款号缺必填schema先拒且0key，�
   }
   const badSignature=new URLSearchParams(n.responseBody);badSignature.set("hmac","0".repeat(32));assert.equal(await send(badSignature.toString()),"fail");assert.equal(keys,1);assert.equal(m.state.observations.at(-1)![18],"MISMATCH");
   assert.equal(await send(n.responseBody),"fail");assert.equal(keys,2);assert.equal(m.state.observations.at(-1)![18],"MATCH");assert.equal(m.state.row.terminal_evidence_id,null);assert.equal(m.state.sends.length,0);
+});
+
+
+// ---------- QUERY-only 内核（SYNTHETIC_COMPONENT_MODEL） ----------
+
+test("SYNTHETIC_QUERY_ONLY：READY/0未派发0钥0attempt0外呼，authorize先于资金锁", async t => {
+  const m = executionModel(t); m.state.row.state = "READY"; m.state.row.lease_version = "0"; m.state.row.lease_owner = null; m.state.row.lease_until = 0; m.state.due = true;
+  let authClient: any = null;
+  const r = await queryJoinpayRefund(m.options, "refund_model_1", "worker_q", { minimumIntervalSeconds: 60,
+    authorize: async (client, intentId) => { authClient = client; m.order.push("authorize"); assert.equal(intentId, "refund_model_1"); } });
+  assert.deepEqual(r, { kind: "NOT_DISPATCHED", intentId: "refund_model_1", state: "READY" });
+  assert.equal(typeof authClient.query, "function"); assert.deepEqual(m.order, ["authorize", "lock"]);
+  assert.equal(m.state.keys, 0); assert.equal(m.state.sends.length, 0); assert.equal(m.state.attempts.length, 0);
+  assert.equal(m.state.audits.length, 0); assert.equal(m.state.row.lease_version, "0"); assert.equal(m.state.row.lease_owner, null);
+});
+
+test("SYNTHETIC_QUERY_ONLY：已持久SUBMIT不再次SUBMIT，沿原退款号QUERY", async t => {
+  const m = executionModel(t); m.state.attempts.push(["existing_submit", "refund_model_1", "SUBMIT"]);
+  m.state.row.state = "UNKNOWN"; m.state.row.lease_version = "1"; m.state.row.lease_owner = "old_owner"; m.state.row.lease_until = 1; m.state.now = 31;
+  const r = await queryJoinpayRefund(m.options, "refund_model_1", "worker_q", { minimumIntervalSeconds: 60 });
+  assert.equal(r.kind, "OBSERVED"); assert.equal(m.state.sends.length, 1); assert.equal(m.state.sends[0], "https://trade.joinpay.com/tradeRt/queryRefund");
+  assert.equal(m.state.attempts.length, 2); assert.equal(m.state.attempts[1][2], "QUERY");
+  assert.equal(m.state.attempts.filter((a: any[]) => a[2] === "SUBMIT").length, 1);
+  const body = new URLSearchParams(Buffer.from(m.state.attempts[1][10]).toString());
+  assert.equal(body.get("p2_RefundOrderNo"), "RF" + "a".repeat(28));
+  assert.equal(r.terminal, null);
+});
+
+test("SYNTHETIC_QUERY_ONLY：READY枚举但锁内已有SUBMIT attempt时仍不首派", async t => {
+  const m = executionModel(t); m.state.attempts.push(["existing_submit", "refund_model_1", "SUBMIT"]);
+  m.state.row.state = "READY"; m.state.row.lease_version = "0"; m.state.row.lease_owner = null; m.state.row.lease_until = 0; m.state.due = true;
+  const r = await queryJoinpayRefund(m.options, "refund_model_1", "worker_q", { minimumIntervalSeconds: 60 });
+  assert.equal(r.kind, "OBSERVED"); assert.equal(m.state.sends[0], "https://trade.joinpay.com/tradeRt/queryRefund");
+  assert.equal(m.state.attempts[1][2], "QUERY"); assert.equal(m.state.attempts.filter((a: any[]) => a[2] === "SUBMIT").length, 1);
+});
+
+test("SYNTHETIC_QUERY_ONLY：终态/复核/活跃lease/未到期/节流/预算分别不取钥外呼", async t => {
+  const m = executionModel(t), id = "refund_model_1", call = () => queryJoinpayRefund(m.options, id, "worker_q", { minimumIntervalSeconds: 60 });
+  const reset = () => { m.state.row = { id, state: "UNKNOWN", lease_version: "1", revision: "2", lease_owner: "old_owner", lease_until: 1,
+    terminal_evidence_id: null, merchant_identity_id: m.options.admission.merchantIdentityId, original_payment_trx_no: "PAY_MODEL_TRX", requires_review: false,
+    budget_disposition: "ALLOCATED" } as any; m.state.attempts = []; m.state.now = 31; m.state.due = true; m.state.intervalOk = true; };
+  reset(); m.state.row.state = "SUCCEEDED"; assert.deepEqual(await call(), { kind: "SKIPPED", intentId: id, state: "SUCCEEDED", reason: "TERMINAL" });
+  reset(); m.state.row.state = "REVIEW_REQUIRED"; assert.deepEqual(await call(), { kind: "SKIPPED", intentId: id, state: "REVIEW_REQUIRED", reason: "REVIEW_REQUIRED" });
+  reset(); m.state.row.requires_review = true; assert.deepEqual(await call(), { kind: "SKIPPED", intentId: id, state: "UNKNOWN", reason: "REVIEW_REQUIRED" });
+  reset(); m.state.row.lease_until = 61; assert.deepEqual(await call(), { kind: "SKIPPED", intentId: id, state: "UNKNOWN", reason: "ACTIVE_LEASE" });
+  reset(); m.state.row.state = "READY"; m.state.row.lease_version = "0"; m.state.row.lease_owner = null; m.state.row.lease_until = 0; m.state.due = false;
+  assert.deepEqual(await call(), { kind: "NOT_DISPATCHED", intentId: id, state: "READY" });
+  reset(); m.state.attempts = [["s", id, "SUBMIT"]]; m.state.due = false;
+  assert.deepEqual(await call(), { kind: "SKIPPED", intentId: id, state: "UNKNOWN", reason: "NOT_DUE" });
+  reset(); m.state.attempts = [["s", id, "SUBMIT"], ["q", id, "QUERY"]]; m.state.intervalOk = false;
+  assert.deepEqual(await call(), { kind: "SKIPPED", intentId: id, state: "UNKNOWN", reason: "THROTTLED" });
+  reset(); m.state.attempts = [["s", id, "SUBMIT"], ...Array.from({ length: 10 }, (_, i) => ["q" + i, id, "QUERY"])]; m.state.intervalOk = true;
+  assert.deepEqual(await call(), { kind: "SKIPPED", intentId: id, state: "UNKNOWN", reason: "BUDGET_EXHAUSTED" });
+  assert.equal(m.state.keys, 0); assert.equal(m.state.sends.length, 0); assert.equal(m.state.audits.length, 0);
+});
+
+test("SYNTHETIC_QUERY_ONLY：authorize拒绝在资金锁前回滚，0lease0attempt0钥0外呼", async t => {
+  const m = executionModel(t);
+  await assert.rejects(queryJoinpayRefund(m.options, "refund_model_1", "worker_q", { minimumIntervalSeconds: 60,
+    authorize: async () => { m.order.push("authorize"); throw Object.assign(Error("DENIED"), { code: "FORBIDDEN" }); } }),
+  (e: any) => e.code === "FORBIDDEN");
+  assert.deepEqual(m.order, ["authorize"]); assert.equal(m.state.keys, 0); assert.equal(m.state.sends.length, 0);
+  assert.equal(m.state.attempts.length, 0); assert.equal(m.state.audits.length, 0);
+  assert.equal(m.state.row.lease_version, "0"); assert.equal(m.state.row.lease_owner, null);
+});
+
+test("SYNTHETIC_QUERY_ONLY：错签名不消费/旧lease只STALE；关闭新准入不阻塞QUERY", async t => {
+  const m = executionModel(t), profiles = require("../src/order/joinpay-refund-profile"); let starts = 0;
+  t.mock.method(profiles, "assertRefundStart", () => { starts++; throw Error("NEW_SUBMIT_CLOSED"); });
+  m.state.row.state = "UNKNOWN"; m.state.row.lease_version = "1"; m.state.row.lease_owner = "old_owner"; m.state.row.lease_until = 1; m.state.now = 31;
+  m.state.attempts.push(["s", "refund_model_1", "SUBMIT"]);
+  const q = model("QUERY"), bad = JSON.stringify({ ...JSON.parse(q.responseBody), hmac: "0".repeat(32) });
+  m.options.fetch = async () => new Response(bad);
+  const badResult = await queryJoinpayRefund(m.options, "refund_model_1", "worker_q", { minimumIntervalSeconds: 60 });
+  assert.equal(badResult.kind, "OBSERVED"); assert.equal(badResult.terminal, null); assert.equal(starts, 0);
+  assert.equal(m.state.row.state, "UNKNOWN"); assert.equal(m.state.observations.at(-1)![18], "MISMATCH");
+  m.state.row.lease_until = 1; m.state.now = 31;
+  m.options.fetch = async () => { m.state.now = 200; return new Response(q.responseBody); };
+  const stale = await queryJoinpayRefund(m.options, "refund_model_1", "worker_q", { minimumIntervalSeconds: 60 });
+  assert.equal(stale.kind, "OBSERVED"); assert.equal(stale.event, "STALE"); assert.equal(m.state.observations.at(-1)![16], "STALE");
+});
+
+
+test("SYNTHETIC_QUERY_ONLY：领取COMMIT未知0出网；旧UNKNOWN保留，下次QUERY为新attempt", async t => {
+  const m = executionModel(t); m.state.row.state = "UNKNOWN"; m.state.row.lease_version = "1"; m.state.row.lease_owner = "old";
+  m.state.row.lease_until = 1; m.state.now = 31; m.state.attempts.push(["s", "refund_model_1", "SUBMIT"]); m.state.unknownCommit = 1;
+  await assert.rejects(queryJoinpayRefund(m.options, "refund_model_1", "worker_q", { minimumIntervalSeconds: 60 }),
+    (e: any) => e instanceof RefundAttemptCommitUnknown && e.phase === "CLAIM");
+  assert.equal(m.state.sends.length, 0); assert.equal(m.state.attempts.length, 2);
+  m.state.now = 100; const r = await queryJoinpayRefund(m.options, "refund_model_1", "worker_q", { minimumIntervalSeconds: 60 });
+  assert.equal(r.kind, "OBSERVED"); assert.equal(m.state.attempts.length, 3); assert.equal(m.state.attempts.at(-1)[2], "QUERY");
+});
+
+test("SYNTHETIC_SQL_NULL_MODEL：真实首派空lease映射为不活跃，不误报时序证据缺失", async t => {
+  const m=executionModel(t);m.state.row.lease_until=null;
+  const before=structuredClone(m.state.row);
+  assert.deepEqual(await queryJoinpayRefund(m.options,"refund_model_1","worker_q",{minimumIntervalSeconds:60}),
+    {kind:"NOT_DISPATCHED",intentId:"refund_model_1",state:"READY"});
+  assert.deepEqual(m.state.row,before);assert.equal(m.state.keys,0);assert.equal(m.state.sends.length,0);
+  assert.equal(m.state.attempts.length,0);assert.equal(m.state.audits.length,0);
+});
+
+test("SYNTHETIC_RECOVERY_GAP：非初始枚举或正lease版本也不能替代持久SUBMIT依据", async t => {
+  const m=executionModel(t);m.state.now=31;
+  for(const [state,version] of [["READY","1"],["UNKNOWN","1"],["PROCESSING","2"]]){
+    Object.assign(m.state.row,{state,lease_version:version,lease_until:1});const before=structuredClone(m.state.row);
+    assert.deepEqual(await queryJoinpayRefund(m.options,"refund_model_1","worker_q",{minimumIntervalSeconds:60}),
+      {kind:"NOT_DISPATCHED",intentId:"refund_model_1",state});
+    assert.deepEqual(m.state.row,before);
+  }
+  assert.equal(m.state.keys,0);assert.equal(m.state.sends.length,0);assert.equal(m.state.attempts.length,0);assert.equal(m.state.audits.length,0);
 });

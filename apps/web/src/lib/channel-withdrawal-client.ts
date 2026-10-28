@@ -3,7 +3,11 @@ import { WithdrawalRequestError, assertCurrent, badWithdrawal, cents, id, key, n
 
 export type WithdrawalFee = { kind: "FIXED"; cents: string } | { kind: "RATIO"; numerator: string; denominator: string; rounding: "HALF_UP_CENT" };
 export type WithdrawalPolicy = { version: string; minCents: string; maxCents: string; fee: WithdrawalFee; maxIntents: number; quotaStart: string; quotaEnd: string };
-export type WithdrawalOptions = { contractVersion: "withdrawal-request-context.v1"; bankBinding: BankBindingRead; policy: WithdrawalPolicy | null; canQuote: boolean; reasonCodes: string[]; bankOwnershipVerification: "NOT_VERIFIED"; bankArrival: "UNKNOWN" };
+/** Server-reported identity facts. Values stay open strings: the client never invents eligibility. */
+export type WithdrawalIdentity = { identityStatus: string; ageStatus: string; verifiedAt: string | null };
+/** Server-counted quota for the current window. Null means the server could not determine it. */
+export type WithdrawalQuota = { used: string; maxIntents: number; remaining: number; windowStart: string; windowEnd: string };
+export type WithdrawalOptions = { contractVersion: "withdrawal-request-context.v1"; bankBinding: BankBindingRead; identity: WithdrawalIdentity | null; quota: WithdrawalQuota | null; policy: WithdrawalPolicy | null; canQuote: boolean; reasonCodes: string[]; bankOwnershipVerification: "NOT_VERIFIED"; bankArrival: "UNKNOWN" };
 export type ChannelWithdrawalInput = { amountCents: string; destinationId: string; policyVersion: string };
 export type ChannelWithdrawalQuote = { contractVersion: "native-withdrawal.v1"; source: "JOINPAY"; grossCents: string; netCents: string; feeCents: string; currency?: "CNY"; policyVersion: string; destination: { id: string; revision: string; mask: string }; expectedWalletVersion: string; ledgerRevision: string; globalWithdrawable: "UNKNOWN" };
 export type OriginalWithdrawalDestination = { id: string; revision: string; cardMask: string | null; basis: "ORIGINAL_INTENT"; bankOwnershipVerification: "UNKNOWN" };
@@ -25,10 +29,27 @@ export function parseWithdrawalAmounts(value: Record<string, unknown>, grossFiel
   if (value.currency !== "CNY" || BigInt(gross) <= 0n || BigInt(net) <= 0n || BigInt(gross) !== BigInt(net) + BigInt(fee)) throw badWithdrawal();
   return { amountCents: gross, netCents: net, feeCents: fee, currency: "CNY" as const };
 }
+function parseWithdrawalIdentity(value: unknown): WithdrawalIdentity | null {
+  if (value === undefined || value === null) return null;
+  const v = record(value);
+  return { identityStatus: text(v.identityStatus, 32), ageStatus: text(v.ageStatus, 32), verifiedAt: v.verifiedAt === null ? null : time(v.verifiedAt) };
+}
+
+function parseWithdrawalQuota(value: unknown): WithdrawalQuota | null {
+  if (value === undefined || value === null) return null;
+  const v = record(value);
+  // used may exceed maxIntents on the server; remaining is already clipped and must not be recomputed here.
+  if (typeof v.maxIntents !== "number" || !Number.isSafeInteger(v.maxIntents) || v.maxIntents < 1
+    || typeof v.remaining !== "number" || !Number.isSafeInteger(v.remaining) || v.remaining < 0 || v.remaining > v.maxIntents) throw badWithdrawal();
+  const windowStart = time(v.windowStart), windowEnd = time(v.windowEnd);
+  if (Date.parse(windowStart) >= Date.parse(windowEnd)) throw badWithdrawal();
+  return { used: cents(v.used), maxIntents: v.maxIntents, remaining: v.remaining, windowStart, windowEnd };
+}
+
 export function parseWithdrawalOptions(value: unknown): WithdrawalOptions {
   const b = record(value);
   if (b.contractVersion !== "withdrawal-request-context.v1" || typeof b.canQuote !== "boolean" || b.bankOwnershipVerification !== "NOT_VERIFIED" || b.bankArrival !== "UNKNOWN") throw badWithdrawal();
-  const bankBinding = parseBankBinding(b.bankBinding), reasonCodes = strings(b.reasonCodes);
+  const bankBinding = parseBankBinding(b.bankBinding), identity = parseWithdrawalIdentity(b.identity), quota = parseWithdrawalQuota(b.quota), reasonCodes = strings(b.reasonCodes);
   let policy: WithdrawalPolicy | null = null;
   if (b.policy !== null) {
     const p = record(b.policy), f = record(p.fee);
@@ -42,7 +63,7 @@ export function parseWithdrawalOptions(value: unknown): WithdrawalOptions {
     if (Date.parse(policy.quotaStart) >= Date.parse(policy.quotaEnd)) throw badWithdrawal();
   }
   if (b.canQuote && (!policy || !bankBinding.binding || bankBinding.integration !== "INTEGRATED" || reasonCodes.length)) throw badWithdrawal();
-  return { contractVersion: b.contractVersion, bankBinding, policy, canQuote: b.canQuote, reasonCodes, bankOwnershipVerification: "NOT_VERIFIED", bankArrival: "UNKNOWN" };
+  return { contractVersion: b.contractVersion, bankBinding, identity, quota, policy, canQuote: b.canQuote, reasonCodes, bankOwnershipVerification: "NOT_VERIFIED", bankArrival: "UNKNOWN" };
 }
 export function parseChannelQuote(value: unknown): ChannelWithdrawalQuote {
   const q = record(value), d = record(q.destination);
