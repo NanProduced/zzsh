@@ -1,3 +1,4 @@
+import { pgIdentityDisplayStore, readIdentityDisplay } from "./identity-display";
 import { createHash } from "node:crypto";
 import type { UserObligationFinding, UserObligationKind } from "./user-obligation-reader";
 import type { Pool, PoolClient } from "pg";
@@ -520,7 +521,11 @@ export async function handleUserIdentityRoute(
     const context = await readUserContext(request, options);
     if (readOnlyPath) {
       const state = await readState(options.pool, context.userId);
+      // B5: self-only masked display, derived from the session userId only (no client-supplied id).
+      const display = await readIdentityDisplay(pgIdentityDisplayStore(options.pool), context.userId, state?.identityStatus);
+      response.setHeader("Cache-Control", "no-store");
       sendJson(response, 200, {
+        ...display,
         accountStatus: state?.accountStatus ?? "ACTIVE",
         identityStatus: state?.identityStatus ?? "UNVERIFIED",
         ageStatus: state?.ageStatus ?? "UNKNOWN",
