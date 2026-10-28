@@ -33,7 +33,7 @@ export const CREDIT_INITIALIZATION_MAX_BATCH = 500;
 const BATCH_KEY = /^credit-init:[A-Za-z0-9._-]{8,96}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
 
-export type CreditInitializationCategory = "ACTIVE" | "RESTRICTED" | "CANCELLED" | "DEACTIVATED" | "UNKNOWN";
+export type CreditInitializationCategory = "ACTIVE" | "RESTRICTED" | "CANCELLED" | "FROZEN" | "UNKNOWN";
 export type CreditInitializationCandidate = { userId: string; category: CreditInitializationCategory };
 export type CreditInitializationPlan = { candidates: CreditInitializationCandidate[]; byCategory: Record<CreditInitializationCategory, number>; nextAfter: string | null };
 
@@ -44,7 +44,7 @@ export async function planCreditInitialization(client: PoolClient, input: { afte
     `SELECT u.id,
             CASE WHEN s.user_id IS NULL THEN 'UNKNOWN'
                  WHEN s.account_status='CANCELLED' THEN 'CANCELLED'
-                 WHEN s.account_status='DEACTIVATED' THEN 'DEACTIVATED'
+                 WHEN s.account_status='FROZEN' THEN 'FROZEN'
                  WHEN u.suspended THEN 'RESTRICTED'
                  WHEN s.account_status='ACTIVE' THEN 'ACTIVE' ELSE 'UNKNOWN' END AS category
        FROM zzsh_auth_user."user" u
@@ -54,7 +54,7 @@ export async function planCreditInitialization(client: PoolClient, input: { afte
       ORDER BY u.id LIMIT $2`,
     [input.afterUserId ?? null, input.limit],
   )).rows;
-  const byCategory: Record<CreditInitializationCategory, number> = { ACTIVE: 0, RESTRICTED: 0, CANCELLED: 0, DEACTIVATED: 0, UNKNOWN: 0 };
+  const byCategory: Record<CreditInitializationCategory, number> = { ACTIVE: 0, RESTRICTED: 0, CANCELLED: 0, FROZEN: 0, UNKNOWN: 0 };
   for (const row of rows) byCategory[row.category] += 1;
   return { candidates: rows.map((row) => ({ userId: row.id, category: row.category })), byCategory, nextAfter: rows.length === input.limit ? rows[rows.length - 1]!.id : null };
 }
@@ -189,7 +189,7 @@ async function currentCategories(client: PoolClient, userIds: string[], lock: bo
     `SELECT u.id,
             CASE WHEN s.user_id IS NULL THEN 'UNKNOWN'
                  WHEN s.account_status='CANCELLED' THEN 'CANCELLED'
-                 WHEN s.account_status='DEACTIVATED' THEN 'DEACTIVATED'
+                 WHEN s.account_status='FROZEN' THEN 'FROZEN'
                  WHEN u.suspended THEN 'RESTRICTED'
                  WHEN s.account_status='ACTIVE' THEN 'ACTIVE' ELSE 'UNKNOWN' END AS category
        FROM zzsh_auth_user."user" u

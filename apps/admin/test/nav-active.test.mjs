@@ -18,7 +18,7 @@ const BOSS_PERMISSIONS = [
   "personal.distribution.policy.read", "personal.distribution.policy.manage",
   "supply.catalog.manage", "supply.gunsmith.manage", "supply.review.read", "supply.rules.edit",
   "supply.rental_account.read",
-  "user.account.restore", "user.directory.read",
+  "user.account.freeze", "user.account.unfreeze", "user.directory.read",
 ];
 const boss = { isBoss: true, permissions: BOSS_PERMISSIONS };
 
@@ -38,7 +38,7 @@ test("每条目标路由只有唯一活动入口，不再按前缀点亮父级",
     ["/finance/documents/doc_1", "", ["/finance"]],
     ["/finance/users/user_1", "", ["/finance"]],
     ["/users", "", ["/users"]],
-    ["/users/restore", "", ["/users/restore"]],
+    ["/users/restore", "", ["/users"]],
     ["/users/user_1", "?section=orders", ["/users"]],
     ["/orders", "", ["/orders"]],
     ["/orders/order_1", "", ["/orders"]],
@@ -85,8 +85,9 @@ test("侧栏菜单保留全部既有入口与分组命名一致性", () => {
   }
   assert.equal(items.find((item) => item.path === "/approvals").label, "审批中心", "侧栏与页内审批命名一致");
   const paths = menuPaths(boss);
-  assert.equal(paths.length, 20, "真实 Boss 权限下 20 个入口");
-  for (const path of ["/distribution-policy", "/supply/media", "/finance/period", "/users/restore", "/settings?section=security"]) {
+  assert.equal(paths.length, 19, "真实 Boss 权限下 19 个入口（账号恢复页已退役）");
+  assert.equal(paths.includes("/users/restore"), false, "账号恢复入口已移除");
+  for (const path of ["/distribution-policy", "/supply/media", "/finance/period", "/settings?section=security"]) {
     assert.ok(paths.includes(path), `保留既有入口 ${path}`);
   }
 });
@@ -95,7 +96,7 @@ test("权限裁剪后不误点亮无权限入口", () => {
   const limited = { isBoss: false, permissions: ["user.directory.read"] };
   assert.deepEqual(activeEntries("/audit", "", limited), []);
   assert.deepEqual(activeEntries("/users", "", limited), ["/users"]);
-  assert.deepEqual(activeEntries("/users/restore", "", limited), []);
+  assert.deepEqual(activeEntries("/users/restore", "", limited), ["/users"], "旧恢复地址落到用户管理");
   assert.equal(activeNavPath(menuPaths(limited), { pathname: "/finance/period", search: "" }), null);
   assert.equal(menuPaths(limited).includes("/supply/reviews"), false);
 });
@@ -120,8 +121,7 @@ test("异常地址不抛错也不误点亮", () => {
   assert.deepEqual(activeEntries("/", ""), []);
   assert.deepEqual(activeEntries("/unknown-module", ""), []);
   assert.equal(navEntryIsActive("/settings?section=security", { pathname: "//evil.example", search: "" }), false);
-  assert.deepEqual(activeEntries("/users/restore%2F"), ["/users/restore"], "解码后与显式入口同址");
-  assert.equal(navEntryIsActive("/users/restore", { pathname: "/users/restore/", search: "" }), true, "尾斜杠归一到同一入口");
+  assert.equal(navEntryIsActive("/users", { pathname: "/users/", search: "" }), true, "尾斜杠归一到同一入口");
   assert.equal(navEntryIsActive("/workbench", { pathname: "/workbench/", search: "" }), true, "尾斜杠归一到同一入口");
   assert.equal(navEntryIsActive("/settings?section=security", { pathname: "/settings", search: "?section=%73ecurity" }), true, "query 值按解码后比较");
 });

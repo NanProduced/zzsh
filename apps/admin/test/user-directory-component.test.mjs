@@ -22,7 +22,7 @@ const {UserDetail}=await vite.ssrLoadModule('/src/views/user-directory/user-dire
 const {DateSelector}=await vite.ssrLoadModule('/src/components/reui/date-selector.tsx');
 const {UserDirectoryBff,EMPTY_FILTERS}=await vite.ssrLoadModule('/src/views/user-directory/user-directory-data.ts');
 after(async()=>{await vite.close();await browser.happyDOM.abort();});
-const permissions=['user.directory.read','user.phone.lookup','order.read','supply.rental_account.read','admin.audit.read','user.account.restore','im.support.read'];
+const permissions=['user.directory.read','user.phone.lookup','order.read','supply.rental_account.read','admin.audit.read','user.account.freeze','user.account.unfreeze','im.support.read'];
 let serial=0;
 const user={userId:'user_normal',name:'林舟',image:null,username:null,displayUsername:null,maskedPhone:'188****1101',accountStatus:'ACTIVE',suspended:false,identityStatus:'UNKNOWN',ageStatus:'UNKNOWN',source:{kind:'MIGRATED',legacyId:'88001'},registeredAt:'2026-09-24T04:00:00Z',registeredAtSource:'LOCAL',createdAt:'2026-09-24T04:00:00Z',updatedAt:'2026-09-24T04:00:00Z',localCreatedAt:'2026-09-24T04:00:00Z',resourceSummary:{state:'ready',count:1,publishedCount:1},orderSummary:{state:'ready',currentCount:1},lastBusinessActivity:{state:'not_connected',domains:['ORDER','SUPPLY']}};
 const detail={...user,maskedEmail:null,phoneNumberVerified:false,identity:{status:'UNKNOWN',ageStatus:'UNKNOWN',provider:'legacy_mysql_restore',verifiedAt:null},source:{kind:'MIGRATED',legacyId:'88001',sourceCreatedAt:'2019-01-01T00:00:00Z',sourceUpdatedAt:null},localUpdatedAt:user.updatedAt};
@@ -38,7 +38,7 @@ async function input(element,value){await act(async()=>{Object.getOwnPropertyDes
 async function resize(value){await act(async()=>{width=value;for(const {match,handlers} of media)for(const handler of handlers)handler({matches:match.matches,media:match.media});});await settle();}
 async function mount(t,options={}) {
   width=options.width??1440;media.clear();browser.sessionStorage.clear();browser.localStorage.clear();browser.history.replaceState(null,'',options.path??'/users');
-  const calls=[];let restored=false;let readbackFailures=options.detailErrorAfterRestore?1:0;
+  const calls=[];let restored=false;let writtenStatus='ACTIVE';let readbackFailures=options.detailErrorAfterRestore?1:0;
   const snapshot={authenticated:true,adminUserId:`test-admin-${++serial}`,user:{name:'测试管理员',username:'ZZ00001',twoFactorEnabled:true},security:{status:'ACTIVE',isBoss:false,passwordChangeRequired:false},session:{id:`test-session-${serial}`,locked:false,pinConfigured:true,createdAt:null,expiresAt:null},permissions:options.permissions??permissions};
   globalThis.fetch=async(url,init={})=>{
     const address=new URL(String(url),browser.location.href);calls.push({url:String(url),method:init.method??'GET',body:init.body?JSON.parse(init.body):undefined,signal:init.signal});
@@ -49,10 +49,11 @@ async function mount(t,options={}) {
     if(address.pathname.endsWith('/audit-events'))return json({items:[],nextCursor:null});
     if(address.pathname.endsWith('/membership-growth'))return json({subjectId:address.pathname.split('/')[4]||'user_normal',growth:{knowledge:'KNOWN',sourceState:'COMPLETE',benefitsState:'CONFIGURED',normalTier:'GOLD',effectiveTier:'GOLD',blackGold:'NOT_QUALIFIED',grace:null},entitlements:[{id:'ent-1',kind:'FRIEND',scopeKey:'friend',startsAtUtc:'2026-01-01T00:00:00Z',endsAtUtc:'2026-12-31T23:59:59Z',status:'ACTIVE',label:'密友礼遇',depositWaived:true}]});
     if(address.pathname.includes('/finance/subjects/'))return json({wallet:{buckets:{available:{amountCents:'15000',knowledge:'KNOWN'},reserved:{amountCents:'5000',knowledge:'KNOWN'},restricted:{amountCents:'0',knowledge:'KNOWN'},pendingEarnings:{amountCents:'2000',knowledge:'KNOWN'},refundPayable:{amountCents:'0',knowledge:'KNOWN'}},withdrawable:{amountCents:'15000',reasonCodes:[]},coverage:{knowledge:'KNOWN',cutoff:'2026-10-18T00:00:00Z'}}});
-    if(address.pathname==='/api/bff/admin/security/users/restore'){if(options.restore==='pending')throw new Error('Injected response loss');if(typeof options.restore==='number')return failure(options.restore);restored=true;return json({status:'ACTIVE'});}
+    if(address.pathname==='/api/bff/admin/security/users/restore')return failure(404);
+    if(address.pathname==='/api/bff/admin/security/users/freeze'||address.pathname==='/api/bff/admin/security/users/unfreeze'){if(options.restore==='pending')throw new Error('Injected response loss');if(typeof options.restore==='number')return failure(options.restore);restored=true;writtenStatus=address.pathname.endsWith('/freeze')?'FROZEN':'ACTIVE';return json({status:writtenStatus});}
     if(restored&&readbackFailures>0){readbackFailures-=1;return failure(options.detailErrorAfterRestore);}
     if(options.detailError)return failure(options.detailError);
-    return json({user:{...detail,userId:address.pathname.split('/').at(-1),accountStatus:restored?'ACTIVE':options.status??detail.accountStatus}});
+    return json({user:{...detail,userId:address.pathname.split('/').at(-1),accountStatus:restored?writtenStatus:options.status??detail.accountStatus}});
   };
   const container=browser.document.createElement('div');browser.document.body.appendChild(container);const root=createRoot(container);let switchSnapshot;
   function Harness(){const [tab,setTab]=useState(tabFromLocation(browser.location.pathname,browser.location.search));const [actor,setActor]=useState(snapshot);switchSnapshot=setActor;return createElement(UserDirectoryView,{snapshot:actor,tab,refreshNonce:0,onQueryChange:query=>{const next={...tab,query};persistTabs(actor.adminUserId,{tabs:[tabFromLocation('/users'),next],activeId:next.id});const params=new URLSearchParams(query).toString();browser.history.replaceState(null,'',next.path+(params?'?'+params:''));setTab(next);},onOpenPath:path=>{const target=new URL(path,browser.location.href);browser.history.pushState(null,'',path);setTab(tabFromLocation(target.pathname,target.search));}});}
@@ -147,18 +148,31 @@ test('invalid local date range identifies the filter and never recommends API re
   const text=browser.document.querySelector('.ud-message-error').textContent;assert.ok(text.includes('筛选条件无效'));assert.ok(text.includes('注册起始日期不能晚于结束日期'));assert.equal(text.includes('API'),false);assert.equal(!!namedButton('重试'),false);assert.equal(calls.length,0);
 });
 
-for(const [name,outcome] of [['rejected',401],['conflict',409],['failed',503],['pending','pending']])test(`restore ${name} clears authentication inputs and keeps unknown outcome read-only`,async t=>{
-  const {calls}=await mount(t,{path:'/users/user_restore?section=security',status:'DEACTIVATED',restore:outcome});await waitFor(()=>namedButton('账号恢复'));await click(namedButton('账号恢复'));
-  await input(browser.document.querySelector('[aria-label="操作原因"]'),'仅合成测试原因');await input(browser.document.querySelector('[aria-label="管理员密码"]'),'Synthetic-Only-Password');await input(browser.document.querySelector('[aria-label="管理员 TOTP"]'),'123456');await click(namedButton('提交恢复'));await waitFor(()=>namedButton('重新读取账号状态'));
+for(const [name,outcome] of [['rejected',401],['conflict',409],['failed',503],['pending','pending']])test(`unfreeze ${name} clears authentication inputs and keeps unknown outcome read-only`,async t=>{
+  const {calls}=await mount(t,{path:'/users/user_restore?section=security',status:'FROZEN',restore:outcome});await waitFor(()=>namedButton('解冻账号'));await click(namedButton('解冻账号'));
+  await input(browser.document.querySelector('[aria-label="操作原因"]'),'仅合成测试原因');await input(browser.document.querySelector('[aria-label="管理员密码"]'),'Synthetic-Only-Password');await input(browser.document.querySelector('[aria-label="管理员 TOTP"]'),'123456');await click(namedButton('提交解冻'));await waitFor(()=>namedButton('重新读取账号状态'));
   assert.equal(browser.document.querySelector('[aria-label="管理员密码"]').value,'');assert.equal(browser.document.querySelector('[aria-label="管理员 TOTP"]').value,'');assert.equal(browser.location.href.includes('Synthetic'),false);assert.equal(JSON.stringify(Array.from({length:browser.sessionStorage.length},(_,i)=>browser.sessionStorage.getItem(browser.sessionStorage.key(i)))).includes('Synthetic'),false);
-  assert.equal(calls.filter(call=>call.url.endsWith('/restore')).length,1);if(name==='pending'){assert.equal(namedButton('提交恢复'),undefined);assert.equal(browser.document.querySelector('.ud-restore-dialog').textContent.includes('检查 API 是否'),false);}
+  assert.equal(calls.filter(call=>call.url.endsWith('/unfreeze')).length,1);assert.equal(calls.some(call=>call.url.endsWith('/restore')),false);if(name==='pending'){assert.equal(namedButton('提交解冻'),undefined);assert.equal(browser.document.querySelector('.ud-restore-dialog').textContent.includes('检查 API 是否'),false);}
 });
 
-test('restore write success is not overwritten by readback failure and cannot resubmit',async t=>{
-  const {calls}=await mount(t,{path:'/users/user_restore?section=security',status:'DEACTIVATED',detailErrorAfterRestore:503});await waitFor(()=>namedButton('账号恢复'));await click(namedButton('账号恢复'));
-  await input(browser.document.querySelector('[aria-label="操作原因"]'),'仅合成测试原因');await input(browser.document.querySelector('[aria-label="管理员密码"]'),'Synthetic-Only-Password');await input(browser.document.querySelector('[aria-label="管理员 TOTP"]'),'123456');await click(namedButton('提交恢复'));
-  await waitFor(()=>browser.document.querySelector('.ud-restore-dialog')?.textContent.includes('恢复请求已提交'));const dialog=browser.document.querySelector('.ud-restore-dialog');assert.ok(dialog);assert.equal(dialog.textContent.includes('恢复操作失败'),false);assert.equal(namedButton('提交恢复'),undefined);assert.equal(calls.filter(call=>call.url.endsWith('/restore')).length,1);
-  await click(namedButton('重新读取账号状态'));await waitFor(()=>browser.document.querySelector('.ud-detail')?.textContent.includes('正常'));assert.equal(calls.filter(call=>call.url.endsWith('/restore')).length,1);
+test('unfreeze write success is not overwritten by readback failure and cannot resubmit',async t=>{
+  const {calls}=await mount(t,{path:'/users/user_restore?section=security',status:'FROZEN',detailErrorAfterRestore:503});await waitFor(()=>namedButton('解冻账号'));await click(namedButton('解冻账号'));
+  await input(browser.document.querySelector('[aria-label="操作原因"]'),'仅合成测试原因');await input(browser.document.querySelector('[aria-label="管理员密码"]'),'Synthetic-Only-Password');await input(browser.document.querySelector('[aria-label="管理员 TOTP"]'),'123456');await click(namedButton('提交解冻'));
+  await waitFor(()=>browser.document.querySelector('.ud-restore-dialog')?.textContent.includes('解冻请求已提交'));const dialog=browser.document.querySelector('.ud-restore-dialog');assert.ok(dialog);assert.equal(dialog.textContent.includes('解冻操作失败'),false);assert.equal(namedButton('提交解冻'),undefined);assert.equal(calls.filter(call=>call.url.endsWith('/unfreeze')).length,1);
+  await click(namedButton('重新读取账号状态'));await waitFor(()=>browser.document.querySelector('.ud-detail')?.textContent.includes('正常'));assert.equal(calls.filter(call=>call.url.endsWith('/unfreeze')).length,1);
+});
+
+test('freeze posts reason and reauthentication to the freeze endpoint and reads back FROZEN',async t=>{
+  const {calls}=await mount(t,{path:'/users/user_normal?section=security',status:'ACTIVE'});await waitFor(()=>namedButton('冻结账号'));await click(namedButton('冻结账号'));
+  await input(browser.document.querySelector('[aria-label="操作原因"]'),'仅合成测试原因');await input(browser.document.querySelector('[aria-label="管理员密码"]'),'Synthetic-Only-Password');await input(browser.document.querySelector('[aria-label="管理员 TOTP"]'),'123456');await click(namedButton('提交冻结'));
+  await waitFor(()=>browser.document.querySelector('.ud-restore-dialog')?.textContent.includes('账号冻结已处理'));
+  const write=calls.filter(call=>call.url.endsWith('/security/users/freeze'));assert.equal(write.length,1);assert.equal(write[0].method,'POST');assert.deepEqual(write[0].body,{targetUserId:'user_normal',reason:'仅合成测试原因',password:'Synthetic-Only-Password',totpCode:'123456'});
+  assert.ok(browser.document.querySelector('.ud-restore-dialog').textContent.includes('已冻结'));
+});
+
+test('missing freeze permission hides the freeze action',async t=>{
+  await mount(t,{path:'/users/user_normal?section=security',status:'ACTIVE',permissions:permissions.filter(code=>code!=='user.account.freeze')});await waitFor(()=>browser.document.querySelector('.ud-restore'));
+  assert.equal(namedButton('冻结账号'),undefined);
 });
 
 test('identity/permission changes abort old requests and reject old domain output',async t=>{
@@ -991,7 +1005,7 @@ test('ADM-SUMMARY: the account, identity and credit states use their semantic co
   const users = [
     { ...user, userId: 's_active', name: '正常', accountStatus: 'ACTIVE', identityStatus: 'VERIFIED', creditSummary: { state: 'ready', knowledge: 'KNOWN', score: 85, revision: '3' } },
     { ...user, userId: 's_restricted', name: '受限', accountStatus: 'RESTRICTED', identityStatus: 'UNVERIFIED', creditSummary: { state: 'ready', knowledge: 'KNOWN', score: 65, revision: '4' } },
-    { ...user, userId: 's_frozen', name: '冻结', accountStatus: 'DEACTIVATED', suspended: true, creditSummary: { state: 'ready', knowledge: 'KNOWN', score: 40, revision: '5' } },
+    { ...user, userId: 's_frozen', name: '冻结', accountStatus: 'FROZEN', suspended: true, creditSummary: { state: 'ready', knowledge: 'KNOWN', score: 40, revision: '5' } },
     { ...user, userId: 's_unknown', name: '未知', accountStatus: 'UNKNOWN', identityStatus: 'UNKNOWN', creditSummary: { state: 'ready', knowledge: 'KNOWN', score: 0, revision: '6' } },
   ];
   await mount(t, { fetch: async () => json({ items: users, total: 4, nextCursor: null, limit: 20 }) });

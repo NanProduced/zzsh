@@ -145,7 +145,7 @@ export async function lockPublishingAccount(
     )
   ).rows[0];
   if (!found) throw notFound();
-  // Same user lock as M2 verification/deactivation/cancellation. Rule activation locks game.
+  // Same user lock as M2 verification/freeze/cancellation. Rule activation locks game.
   await client.query(
     `SELECT id FROM zzsh_auth_user."user" WHERE id=$1 FOR UPDATE`,
     [found.owner_user_id],

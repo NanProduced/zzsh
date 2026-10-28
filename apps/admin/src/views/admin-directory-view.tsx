@@ -24,7 +24,6 @@ import {
   type AdminPermissionCatalogEntry,
   type AdminRoleRecord,
   type CreatedAdministrator,
-  type RestorableUserCandidate,
   type SessionSnapshot,
   type SupplyGame,
 } from "../api";
@@ -461,110 +460,6 @@ function PermissionPicker({
         </div>
       ))}
     </fieldset>
-  );
-}
-
-export function UserRestorePanel() {
-  const [search, setSearch] = useState("");
-  const [candidates, setCandidates] = useState<RestorableUserCandidate[]>([]);
-  const [targetUserId, setTargetUserId] = useState("");
-  const [password, setPassword] = useState("");
-  const [totpCode, setTotpCode] = useState("");
-  const [reason, setReason] = useState("");
-  const [error, setError] = useState<string>();
-  const [message, setMessage] = useState<string>();
-  const [loading, setLoading] = useState(false);
-
-  const find = async (event?: FormEvent<HTMLFormElement>) => {
-    event?.preventDefault();
-    setError(undefined);
-    setMessage(undefined);
-    setLoading(true);
-    try {
-      const result = await adminRequest<{ users?: RestorableUserCandidate[] }>(`/security/users/restore-candidates?query=${encodeURIComponent(search.trim())}`);
-      setCandidates(result.users ?? []);
-      setTargetUserId("");
-      if ((result.users ?? []).length === 0) setMessage("没有找到可恢复的停用账号。");
-    } catch (failure) {
-      setError(friendlyError(failure));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const restore = async () => {
-    if (!targetUserId) return;
-    setError(undefined);
-    setMessage(undefined);
-    setLoading(true);
-    try {
-      const result = await adminRequest<{ message?: string }>("/security/users/restore", { targetUserId, password, totpCode, reason });
-      setPassword("");
-      setTotpCode("");
-      setReason("");
-      setMessage(result.message ?? "用户账号已恢复；请让用户重新登录。");
-      await find();
-    } catch (failure) {
-      setError(friendlyError(failure));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <section className="section-panel">
-      <div className="panel-heading">
-        <div>
-          <h3>恢复停用用户账号</h3>
-          <p>仅支持 DEACTIVATED → ACTIVE。不会恢复旧会话或 OTP，不改变实名/年龄结果；CANCELLED 不可恢复。</p>
-        </div>
-        <Icons.Users size={20} className="text-muted-foreground" />
-      </div>
-      <form onSubmit={(event) => void find(event)} className="flex flex-col md:flex-row gap-2 max-w-2xl mt-4" noValidate>
-        <label className="space-y-1 text-xs block">
-          <span className="text-muted-foreground block">搜索用户账号或姓名</span>
-          <input
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            className="flex-1 h-9 px-3 rounded border border-border bg-surface-raised text-xs"
-            placeholder="输入账号或姓名（至少 2 个字符）"
-          />
-        </label>
-        <Button type="submit" size="sm" loading={loading} disabled={search.trim().length < 2}>查询停用账号</Button>
-      </form>
-      {candidates.length > 0 ? (
-        <div className="space-y-3 max-w-2xl mt-4">
-          <label className="space-y-1 text-xs block">
-            <span className="text-muted-foreground">目标账号</span>
-            <select value={targetUserId} onChange={(event) => setTargetUserId(event.target.value)} className="w-full h-9 px-2 rounded border border-border bg-surface-raised text-xs">
-              <option value="">选择用户</option>
-              {candidates.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name} · {candidate.username} · 已停用</option>)}
-            </select>
-          </label>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <PasswordInput
-              autoComplete="current-password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              className="h-9 px-3 rounded border border-border bg-surface-raised text-xs"
-              placeholder="本人密码"
-            />
-            <input
-              type="text"
-              inputMode="numeric"
-              maxLength={6}
-              value={totpCode}
-              onChange={(event) => setTotpCode(event.target.value.replace(/\D/g, "").slice(0, 6))}
-              className="w-full h-9 px-3 rounded border border-border bg-surface-raised text-xs font-mono"
-              placeholder="本人 6 位 TOTP"
-            />
-          </div>
-          <textarea value={reason} onChange={(event) => setReason(event.target.value)} rows={2} className="w-full p-2.5 rounded border border-border bg-surface-raised text-xs" placeholder="恢复原因" />
-          <Button type="button" size="sm" loading={loading} disabled={!targetUserId || password.length < 12 || totpCode.length !== 6 || reason.trim().length < 3} onClick={() => void restore()}>恢复用户账号</Button>
-        </div>
-      ) : null}
-      <StatusMessage error={error} success={message} className="mt-4" />
-    </section>
   );
 }
 

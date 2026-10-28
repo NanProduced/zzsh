@@ -16,7 +16,7 @@
 
 | 规则ID | MySQL源字段及转换 | PostgreSQL目标与双端消费 |
 | --- | --- | --- |
-| IO-ID-01/02 | `la_user.id/mobile/nickname/is_delete/is_disable`；确定性`legacyOwnerUserId`映射，删除优先CANCELLED、停用DEACTIVATED。旧实名事实不冒充新渠道核验，未知年龄不补成年。 | `zzsh_auth_user."user"`、`zzsh_iam.user_identity_state`及迁移审计；本人身份接口→账户/安全页，Admin用户目录。源口令及旧token不进入公开DTO。 |
+| IO-ID-01/02 | `la_user.id/mobile/nickname/is_delete/is_disable`；确定性`legacyOwnerUserId`映射，删除优先CANCELLED、停用→FROZEN（0103 前为DEACTIVATED）。旧实名事实不冒充新渠道核验，未知年龄不补成年。 | `zzsh_auth_user."user"`、`zzsh_iam.user_identity_state`及迁移审计；本人身份接口→账户/安全页，Admin用户目录。源口令及旧token不进入公开DTO。 |
 | IO-ID-04/05 | `la_system_auth_admin/role/perm/menu`的人员、角色、菜单关系保来源；旧菜单ID不直接成为新权限。 | 管理realm独立；`zzsh_iam.admin_user_role/admin_role_permission/admin_user_permission`及`zzsh_supply.admin_supply_scope`按受审映射。Admin导航或按钮可见不构成授权，旧人员提取不等于已建新身份/授权。 |
 | SUP-SOURCE-001/002 | `la_rental_accounts.id/user_id/game_id`核目标关联；同一13列原行重算原12列投影及含`is_full_payout`的摘要，flag只接受原0/1。 | `zzsh_supply.rental_account`、`legacy_supply_map`及不可变read/display snapshot；包赔声明另写`listing_version.attributes`，不伪造号主接受。用户列表/详情/上架与Admin监管复用同源绑定。 |
 | SUP-QTY-004/005 | `haff`的恢复M数量×1000000一次；`level6_bullet_num`原组数×60一次；AWM/Barrett保发数，甲/盔/咖啡保件数。已归一化base输入不能再乘。 | `zzsh_supply.legacy_listing_display_snapshot.snapshot.resources`、正式`inventory_line(version_id,item_id).quantity`绑定`billable_item`单位；卡片/详情/上架与Admin目录/价格。旧订单实际消耗另走订单合同。 |

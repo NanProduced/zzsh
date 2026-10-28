@@ -17,7 +17,7 @@ import {
   upsertTab,
 } from "../src/workspace/tab-model.ts";
 
-const nav = { isBoss: true, permissions: ["admin.account.read", "admin.role.read", "approval.request.read", "admin.audit.read", "user.account.restore"] };
+const nav = { isBoss: true, permissions: ["admin.account.read", "admin.role.read", "approval.request.read", "admin.audit.read", "user.account.freeze"] };
 const limited = { isBoss: false, permissions: [] };
 
 test('finance business numbers retain full digits while phone tokens never enter workspace query storage', () => {

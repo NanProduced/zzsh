@@ -105,7 +105,7 @@ test("public display admission keeps reasons mutually exclusive and ordered", ()
     ["owner paused account is not public", (i) => { i.account.ownerPaused = true; }, "NOT_PUBLIC", "OWNER_PAUSED"],
     ["staff restricted account is not public", (i) => { i.account.staffRestricted = true; }, "NOT_PUBLIC", "STAFF_RESTRICTED"],
     ["suspended owner is not public", (i) => { i.owner.suspended = true; }, "NOT_PUBLIC", "OWNER_SUSPENDED"],
-    ["frozen owner account status is not public", (i) => { i.owner.accountStatus = "DEACTIVATED"; }, "NOT_PUBLIC", "OWNER_ACCOUNT_STATUS_NOT_ACTIVE"],
+    ["frozen owner account status is not public", (i) => { i.owner.accountStatus = "FROZEN"; }, "NOT_PUBLIC", "OWNER_ACCOUNT_STATUS_NOT_ACTIVE"],
     ["native publication takes the account over", (i) => { i.account.hasPublication = true; }, "NOT_PUBLIC", "NATIVE_TAKEOVER"],
     ["disabled game or service is not public", (i) => { i.account.serviceEnabled = false; }, "NOT_PUBLIC", "GAME_OR_SERVICE_DISABLED"],
     ["active legacy hold stays pending", (i) => { i.account.legacyHold = "ACTIVE_LEGACY"; }, "PENDING_REVIEW", "LEGACY_HOLD_ACTIVE_LEGACY"],

@@ -58,7 +58,6 @@ function ShortcutsWidget({ snapshot, onNavigate }: { snapshot: Extract<SessionSn
     { path: "/roles", label: "角色权限", show: hasPermission(snapshot, "admin.role.read") || hasPermission(snapshot, "admin.permission.read") },
     { path: "/approvals", label: "审批", show: ["approval.request.read", "approval.request.approve", "approval.template.read", "approval.audit.read"].some((code) => hasPermission(snapshot, code)) },
     { path: "/audit", label: "账号与权限审计", show: hasPermission(snapshot, "admin.audit.read") },
-    { path: "/users/restore", label: "用户账号恢复", show: hasPermission(snapshot, "user.account.restore") },
   ].filter((item) => item.show);
   return (
     <div className="workbench-shortcuts">
@@ -228,15 +227,6 @@ function AdminDirectoryWidget({
   );
 }
 
-function UserRestoreWidget({ onNavigate }: { onNavigate: (path: string) => void }) {
-  return (
-    <div className="space-y-3 text-sm">
-      <p className="text-muted-foreground">搜索停用账号并恢复为可用。不会恢复旧会话或验证凭据。</p>
-      <Button type="button" size="sm" variant="outline" onClick={() => onNavigate("/users/restore")}>打开账号恢复</Button>
-    </div>
-  );
-}
-
 function WidgetBody({
   id,
   snapshot,
@@ -253,7 +243,6 @@ function WidgetBody({
   if (id === "permission-guide") return <PermissionGuideWidget snapshot={snapshot} />;
   if (id === "pending-approvals") return <ApprovalInboxWidget snapshot={snapshot} onNavigate={onNavigate} refreshNonce={refreshNonce} />;
   if (id === "admin-directory") return <AdminDirectoryWidget snapshot={snapshot} onNavigate={onNavigate} refreshNonce={refreshNonce} />;
-  if (id === "user-restore") return <UserRestoreWidget onNavigate={onNavigate} />;
   return <p className="text-xs text-muted-foreground">未知组件已被过滤。</p>;
 }
 

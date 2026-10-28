@@ -23,7 +23,7 @@ export const USER_DIRECTORY_SOURCE = {
 } as const;
 export type UserDirectorySource = (typeof USER_DIRECTORY_SOURCE)[keyof typeof USER_DIRECTORY_SOURCE];
 
-export const USER_DIRECTORY_STATUS_FILTER = ["ACTIVE", "RESTRICTED", "DEACTIVATED", "CANCELLED", "UNKNOWN"] as const;
+export const USER_DIRECTORY_STATUS_FILTER = ["ACTIVE", "RESTRICTED", "FROZEN", "CANCELLED", "UNKNOWN"] as const;
 export type UserDirectoryStatusFilter = (typeof USER_DIRECTORY_STATUS_FILTER)[number];
 export const USER_DIRECTORY_MAX_PAGE = 1_000_000;
 
@@ -176,14 +176,14 @@ function sourceKindOf(migrationLegacyId: string | null, provider: string | null,
 
 export function projectUserAccountStatus(status: string | null, suspended: boolean): UserDirectoryStatusFilter {
   if (status === null) return "UNKNOWN";
-  if (status === "CANCELLED" || status === "DEACTIVATED") return status;
+  if (status === "CANCELLED" || status === "FROZEN") return status;
   if (suspended) return "RESTRICTED";
   return status === "ACTIVE" ? "ACTIVE" : "UNKNOWN";
 }
 
 const ACCOUNT_STATUS_SQL = `CASE WHEN s.user_id IS NULL THEN 'UNKNOWN'
   WHEN s.account_status='CANCELLED' THEN 'CANCELLED'
-  WHEN s.account_status='DEACTIVATED' THEN 'DEACTIVATED'
+  WHEN s.account_status='FROZEN' THEN 'FROZEN'
   WHEN u.suspended THEN 'RESTRICTED'
   WHEN s.account_status='ACTIVE' THEN 'ACTIVE' ELSE 'UNKNOWN' END`;
 

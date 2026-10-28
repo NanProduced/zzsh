@@ -34,9 +34,8 @@ export function sanitizeLocalHref(href: string): string {
   return value;
 }
 
-/** 同级独立页面不能被父级前缀吞掉：/users/restore 有自己的入口与权限，不算「用户管理」的详情。 */
+/** 同级独立页面不能被父级前缀吞掉：有自己入口与权限的同级页不算父级的详情。 */
 const SIBLING_ROUTES: Record<string, readonly string[]> = {
-  "/users": ["/users/restore"],
   "/settings": ["/settings?section=security"],
   "/finance": ["/finance/period"],
 };

@@ -14,7 +14,6 @@ import {
   ScrollTextIcon,
   ShieldIcon,
   UserRoundCogIcon,
-  UserRoundSearchIcon,
   UsersRoundIcon,
   type LucideIcon,
 } from "lucide-react";
@@ -92,9 +91,6 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
 
   const users: WorkspaceMenuItem[] = [];
   if (has("user.directory.read")) users.push({ label: "用户管理", icon: UsersRoundIcon, path: "/users", kind: "users" });
-  if (has("user.account.restore")) {
-    users.push({ label: "账号恢复", icon: UserRoundSearchIcon, path: "/users/restore", kind: "user-restore" });
-  }
   if (users.length > 0) {
     items.push({ label: "用户与会员", isTitle: true }, ...users);
   }
@@ -122,7 +118,6 @@ export function titleForPath(pathname: string): string {
   if (pathname.startsWith("/approvals/")) return "审批详情";
   if (pathname === "/approvals") return "审批中心";
   if (pathname === "/audit") return "账号与权限审计";
-  if (pathname === "/users/restore") return "账号恢复";
   if (pathname === "/users") return "用户管理";
   if (pathname.startsWith("/users/")) return "用户详情";
   if (pathname === "/supply/catalog") return "目录维护";
@@ -177,7 +172,6 @@ export const PAGE_SEARCH_KEYWORDS: Record<string, string[]> = {
   "/finance/period": ["期间核对", "对账", "核对", "period", "dz"],
   "/orders": ["订单", "交易", "orders", "dd"],
   "/users": ["用户管理", "用户", "users", "yh"],
-  "/users/restore": ["用户账号恢复", "账号恢复", "恢复", "restore", "hf"],
   "/approvals": ["审批与审计", "审批", "待办", "工单", "approvals", "sp"],
   "/audit": ["账号与权限审计", "审计", "操作日志", "安全日志", "audit", "sj", "rz"],
   "/settings?section=security": ["账号安全", "个人中心", "安全", "密码", "pin", "account", "gr", "aq"],

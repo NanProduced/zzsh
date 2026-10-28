@@ -25,7 +25,6 @@ import {
   ShieldIcon,
   ShoppingBagIcon,
   UserRoundCogIcon,
-  UserRoundSearchIcon,
   UsersRoundIcon,
   WalletIcon,
   type LucideIcon,
@@ -85,7 +84,6 @@ function getPageIcon(path: string): LucideIcon {
   if (path === "/content") return NewspaperIcon;
   if (path === "/finance" || path.startsWith("/finance/")) return WalletIcon;
   if (path === "/orders" || path.startsWith("/orders/")) return ShoppingBagIcon;
-  if (path === "/users/restore") return UserRoundSearchIcon;
   if (path === "/users" || path.startsWith("/users/")) return UsersRoundIcon;
   if (path === "/approvals" || path.startsWith("/approvals/")) return ClipboardCheckIcon;
   if (path === "/audit") return ScrollTextIcon;

@@ -124,9 +124,10 @@ test("keyboard move and resize clamp to grid bounds and widget minimums", () => 
 });
 
 test("appendPlacement stacks new widgets below the current bottom with catalog defaults", () => {
-  const next = appendPlacement(normalizeDraft([shortcuts, account]), "user-restore");
-  assert.deepEqual(next, { id: "user-restore", x: 0, y: 4, w: 6, h: 3 });
-  const catalog = widgetCatalogEntry("user-restore");
+  const next = appendPlacement(normalizeDraft([shortcuts, account]), "permission-guide");
+  const catalog = widgetCatalogEntry("permission-guide");
+  assert.deepEqual(next, { id: "permission-guide", x: 0, y: 4, w: catalog?.defW, h: catalog?.defH });
+  assert.equal(widgetCatalogEntry("user-restore"), undefined, "retired restore widget is gone");
   assert.equal(next.w, catalog?.defW);
   assert.equal(next.h, catalog?.defH);
 });

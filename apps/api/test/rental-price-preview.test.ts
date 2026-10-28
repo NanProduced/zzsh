@@ -57,7 +57,7 @@ function fixture() {
     if (/^(BEGIN|COMMIT|ROLLBACK|SET TRANSACTION)/.test(sql) || sql.includes("set_config('statement_timeout'")) rows = [];
     else if (sql.includes('AS "asOfUtc"')) rows = [{ asOfUtc: asOf, refreshAfterUtc: refresh }];
     else if (sql.includes("SELECT owner_user_id AS")) rows = [{ ownerUserId: account.owner_user_id, gameId: account.game_id }];
-    else if (sql.includes("WHERE u.id = ANY")) rows = [{ id: state.userId, suspended: !state.active, accountStatus: state.active ? "ACTIVE" : "DEACTIVATED", identityStatus: state.adult ? "VERIFIED" : "UNKNOWN", ageStatus: state.adult ? "ADULT" : "UNKNOWN" }, { id: account.owner_user_id, suspended: false, accountStatus: "ACTIVE", identityStatus: "VERIFIED", ageStatus: "ADULT" }];
+    else if (sql.includes("WHERE u.id = ANY")) rows = [{ id: state.userId, suspended: !state.active, accountStatus: state.active ? "ACTIVE" : "FROZEN", identityStatus: state.adult ? "VERIFIED" : "UNKNOWN", ageStatus: state.adult ? "ADULT" : "UNKNOWN" }, { id: account.owner_user_id, suspended: false, accountStatus: "ACTIVE", identityStatus: "VERIFIED", ageStatus: "ADULT" }];
     else if (sql.includes('SELECT 1 FROM zzsh_auth_user."session"')) rows = state.sessionValid ? [{}] : [];
     else if (sql.startsWith('SELECT id FROM zzsh_auth_user."user"')) rows = [{ id: state.userId }, { id: account.owner_user_id }];
     else if (sql.includes("SELECT current_release_id,enabled")) rows = [{ current_release_id: input.releaseId, enabled: state.gameEnabled }];

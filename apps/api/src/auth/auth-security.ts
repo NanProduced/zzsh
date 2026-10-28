@@ -34,8 +34,7 @@ import {
 import { handleAdminApprovalRoute } from "./approval-audit";
 import { handleAdminAuditRoute } from "./admin-audit";
 import {
-  listRestorableUsers,
-  restoreDeactivatedUserAccount,
+  changeUserFreezeState,
   type RealNameProvider,
   type UserObligationReader,
 } from "./user-identity";
@@ -1140,27 +1139,20 @@ async function changeAdminFreezeState(request: NodeRequest, response: NodeRespon
   sendSuccess(response, { status: result.status }, requestId);
 }
 
-async function listRestorableUserCandidates(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
+async function changeUserAccountFreezeState(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions, next: "FROZEN" | "ACTIVE"): Promise<void> {
   const context = await readAdminContext(request, options);
-  await requireDirectoryPermission(options.pool, context.userId, ADMIN_PERMISSION.userAccountRestore);
-  const search = queryValue(request, "query");
-  if (!search) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Search text is required");
-  sendSuccess(response, await listRestorableUsers(options.pool, search), requestId);
-}
-
-async function restoreUserAccount(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
-  const context = await readAdminContext(request, options);
+  await requireDirectoryPermission(options.pool, context.userId, next === "FROZEN" ? ADMIN_PERMISSION.userAccountFreeze : ADMIN_PERMISSION.userAccountUnfreeze);
   const body = bodyOf(request);
   const targetUserId = stringField(body, "targetUserId", 128);
   const reason = reasonField(body);
   await verifyAdminReauthentication(request, context, body, options);
-  const result = await restoreDeactivatedUserAccount(context, targetUserId, reason, requestId, options);
+  const result = await changeUserFreezeState(context, targetUserId, next, reason, requestId, options);
   sendSuccess(response, {
     status: result.status,
     target: { id: result.id, username: result.username, name: result.name },
     revokedSessions: result.revokedSessions,
     revokedVerifications: result.revokedVerifications,
-    message: "用户账号已恢复为 ACTIVE；旧会话和验证凭据不会复活，请让用户重新登录。",
+    message: next === "FROZEN" ? "用户账号已冻结，全部会话已下线。" : "用户账号已解冻；旧会话不会复活，请让用户重新登录。",
   }, requestId);
 }
 
@@ -1624,7 +1616,6 @@ export async function handleAdminSecurity(request: AuthSecurityNodeRequest, resp
       if (path === "/admins/scope") return await readAdminGameScopeRoute(request, response, requestId, options);
       if (path === "/roles") return await listAdminRoles(request, response, requestId, options);
       if (path === "/recovery/pending") return await listPendingRecovery(request, response, requestId, options);
-      if (path === "/users/restore-candidates") return await listRestorableUserCandidates(request, response, requestId, options);
       sendError(response, new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found"), requestId);
       return;
     }
@@ -1642,7 +1633,8 @@ export async function handleAdminSecurity(request: AuthSecurityNodeRequest, resp
     if (path === "/freeze") return await changeAdminFreezeState(request, response, requestId, options, "FROZEN");
     if (path === "/unfreeze") return await changeAdminFreezeState(request, response, requestId, options, "ACTIVE");
     if (path === "/admins/force-logout") return await forceLogoutAdmin(request, response, requestId, options);
-    if (path === "/users/restore") return await restoreUserAccount(request, response, requestId, options);
+    if (path === "/users/freeze") return await changeUserAccountFreezeState(request, response, requestId, options, "FROZEN");
+    if (path === "/users/unfreeze") return await changeUserAccountFreezeState(request, response, requestId, options, "ACTIVE");
     if (path === "/admins/create") return await handleCreateAdministrator(request, response, requestId, options);
     if (path === "/admins/update") return await handleUpdateAdministrator(request, response, requestId, options);
     if (path === "/admins/assign") return await handleAssignAdministrator(request, response, requestId, options);

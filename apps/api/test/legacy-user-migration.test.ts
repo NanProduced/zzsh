@@ -262,7 +262,7 @@ test("unknown, minor, disabled and deleted evidence never upgrades", async () =>
   const unprovenResult = await migrateLegacyOwner(asClient(unproven), input({ status: { realNameBound: false, ageAdult: null, disabled: true, deleted: false } }), ACTOR);
   assert.deepEqual(unproven.identities.get(unprovenResult.userId), {
     user_id: unprovenResult.userId,
-    account_status: "DEACTIVATED",
+    account_status: "FROZEN",
     identity_status: "UNVERIFIED",
     age_status: "UNKNOWN",
     provider: "legacy_mysql_restore",

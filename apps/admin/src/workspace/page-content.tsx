@@ -5,7 +5,7 @@ import type { ThemeStorageStatus } from "../lib/theme";
 import { SettingsWorkspace } from "./settings-page";
 import { AccountSecurityPage } from "./account-security-page";
 import { AdminAuditView } from "../views/admin-audit-view";
-import { AdminDirectoryView, UserRestorePanel } from "../views/admin-directory-view";
+import { AdminDirectoryView } from "../views/admin-directory-view";
 import { UserDirectoryView } from "../views/user-directory/user-directory-view";
 import { ApprovalAuditView } from "../views/approval-audit-view";
 import { RoleConfigView } from "../views/role-config-view";
@@ -208,6 +208,5 @@ export function WorkspacePageContent({
       </>
     );
   }
-  if (tab.kind === "user-restore") return <UserRestorePanel key={tab.id} />;
   return <WorkbenchPage key={tab.id} snapshot={snapshot} onNavigate={(path) => onOpenPath(path)} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
 }

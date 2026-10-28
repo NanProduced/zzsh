@@ -8,12 +8,12 @@ import { buildCreditInitializationBatches, creditPackageBytes, nextCreditBatchAc
 const rows = (n: number, category: CreditPreviewRow["category"] = "ACTIVE", extra: Partial<CreditPreviewRow> = {}, p = "u") => Array.from({ length: n }, (_, i) => ({ userId: `${p}${String(i).padStart(5, "0")}`, category, hasCreditState: false, hasInitializedEvent: false, ...extra }));
 
 test("ACTIVE without profile is split into sorted <=500 packages; others retained, totals balance with denominator", () => {
-  const input = [...rows(1001), ...rows(3, "ACTIVE", { hasCreditState: true }, "e"), ...rows(2, "RESTRICTED", {}, "r"), ...rows(1, "CANCELLED", {}, "c"), ...rows(4, "DEACTIVATED", {}, "d"), ...rows(5, "UNKNOWN", {}, "k"), ...rows(1, "ACTIVE", { hasInitializedEvent: true }, "v")];
+  const input = [...rows(1001), ...rows(3, "ACTIVE", { hasCreditState: true }, "e"), ...rows(2, "RESTRICTED", {}, "r"), ...rows(1, "CANCELLED", {}, "c"), ...rows(4, "FROZEN", {}, "d"), ...rows(5, "UNKNOWN", {}, "k"), ...rows(1, "ACTIVE", { hasInitializedEvent: true }, "v")];
   const plan = buildCreditInitializationBatches(input, { batchKeyPrefix: "w1-fixture", reason: "Fixture initial credit 100", denominator: input.length });
   assert.deepEqual(plan.batches.map((b) => b.package.userIds.length), [500, 500, 1]);
   assert.equal(plan.batches[0]!.package.batchKey, "credit-init:w1-fixture-0001");
   const r = plan.reconciliation;
-  assert.deepEqual([r.batched, r.existingProfile, r.restricted, r.cancelled, r.deactivated, r.unknown, r.eventWithoutState, r.notObserved, r.balanced], [1001, 3, 2, 1, 4, 5, 1, 0, true]);
+  assert.deepEqual([r.batched, r.existingProfile, r.restricted, r.cancelled, r.frozen, r.unknown, r.eventWithoutState, r.notObserved, r.balanced], [1001, 3, 2, 1, 4, 5, 1, 0, true]);
   const all = plan.batches.flatMap((b) => b.package.userIds); assert.equal(new Set(all).size, all.length);
 });
 

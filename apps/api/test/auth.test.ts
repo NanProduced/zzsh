@@ -853,15 +853,14 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
       `INSERT INTO "zzsh_auth_user"."verification" ("id", "identifier", "value", "expiresAt", "createdAt", "updatedAt") VALUES ($1, $2, 'fixture', clock_timestamp() + interval '10 minutes', clock_timestamp(), clock_timestamp())`,
       [`verification_${randomUUID().replaceAll("-", "")}`, "m2-deactivate@example.invalid"],
     );
+    // Self-service deactivation is retired (0103): the route is gone and the account stays ACTIVE.
     const deactivated = await request(base, "/api/auth/user/account/deactivate", { reason: "no longer needed" }, deactivateUser, USER_ORIGIN);
-    assert.equal(deactivated.response.status, 200);
-    assert.equal(deactivated.body?.status, "DEACTIVATED");
-    assert.equal((await request(base, "/api/auth/user/get-session", undefined, deactivateUser, USER_ORIGIN)).body, null);
-    const deactivatedRows = await runtimePool.query<{ accountStatus: string; suspended: boolean; verifications: string }>(`
-      SELECT s."account_status" AS "accountStatus", u."suspended",
-        (SELECT count(*)::text FROM "zzsh_auth_user"."verification" WHERE "identifier" = 'm2-deactivate@example.invalid') AS verifications
-      FROM "zzsh_iam"."user_identity_state" s JOIN "zzsh_auth_user"."user" u ON u."id" = s."user_id" WHERE s."user_id" = $1`, [deactivateUserId]);
-    assert.deepEqual(deactivatedRows.rows[0], { accountStatus: "DEACTIVATED", suspended: true, verifications: "0" });
+    assert.notEqual(deactivated.response.status, 200);
+    assert.ok((await request(base, "/api/auth/user/get-session", undefined, deactivateUser, USER_ORIGIN)).body?.user?.id);
+    const deactivatedRows = await runtimePool.query<{ accountStatus: string; suspended: boolean }>(`
+      SELECT COALESCE(s."account_status", 'ACTIVE') AS "accountStatus", u."suspended"
+      FROM "zzsh_auth_user"."user" u LEFT JOIN "zzsh_iam"."user_identity_state" s ON s."user_id" = u."id" WHERE u."id" = $1`, [deactivateUserId]);
+    assert.deepEqual(deactivatedRows.rows[0], { accountStatus: "ACTIVE", suspended: false });
 
     const cancelUser = cookieJar();
     const cancelSignup = await phoneFixture(base, {
@@ -1297,147 +1296,119 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     const freezer = await completeStaffEnrollment(base, freezerCreate.body?.username as string, freezerCreate.body?.temporaryPassword as string);
     const denied = await completeStaffEnrollment(base, deniedCreate.body?.username as string, deniedCreate.body?.temporaryPassword as string);
 
-    const restoreOperatorCreate = await request(base, "/api/v1/admin/security/admins/create", { mode: "ALL_GAMES",
-      name: "用户恢复操作员",
-      allowPermissions: ["user.account.restore"],
+    const freezeOperatorCreate = await request(base, "/api/v1/admin/security/admins/create", { mode: "ALL_GAMES",
+      name: "用户冻结操作员",
+      allowPermissions: ["user.account.freeze", "user.account.unfreeze"],
     }, adminOneActive, ADMIN_ORIGIN);
-    assert.equal(restoreOperatorCreate.response.status, 200);
-    const restoreOperator = await completeStaffEnrollment(base, restoreOperatorCreate.body?.username as string, restoreOperatorCreate.body?.temporaryPassword as string);
-    const restoreOperatorSession = await request(base, "/api/bff/admin/session", undefined, restoreOperator.jar, ADMIN_ORIGIN);
-    assert.equal(restoreOperatorSession.body?.permissions?.includes("user.account.restore"), true);
+    assert.equal(freezeOperatorCreate.response.status, 200);
+    const freezeOperator = await completeStaffEnrollment(base, freezeOperatorCreate.body?.username as string, freezeOperatorCreate.body?.temporaryPassword as string);
+    const freezeOperatorSession = await request(base, "/api/bff/admin/session", undefined, freezeOperator.jar, ADMIN_ORIGIN);
+    assert.equal(freezeOperatorSession.body?.permissions?.includes("user.account.freeze"), true);
+    assert.equal(freezeOperatorSession.body?.permissions?.includes("user.account.unfreeze"), true);
+    assert.equal(freezeOperatorSession.body?.permissions?.includes("user.account.restore"), false);
+    const freezeBody = (targetUserId: string, reason: string) => ({ targetUserId, password: freezeOperator.password, totpCode: totpCode(freezeOperator.secret), reason });
+    const identityRow = async (id: string) => (await runtimePool!.query<{ accountStatus: string; identityStatus: string; ageStatus: string; provider: string; version: number; suspended: boolean }>(
+      `SELECT s."account_status" AS "accountStatus", s."identity_status" AS "identityStatus", s."age_status" AS "ageStatus", s."provider", s."version", u."suspended"
+         FROM "zzsh_iam"."user_identity_state" s JOIN "zzsh_auth_user"."user" u ON u."id" = s."user_id"
+        WHERE s."user_id" = $1`,
+      [id],
+    )).rows[0];
 
-    const restorePhone = "+8613800000001";
+    const freezePhone = "+8613800000001";
     await migrationPool.query(
       `UPDATE "zzsh_auth_user"."user" SET "phoneNumber" = $2, "phoneNumberVerified" = true WHERE "id" = $1`,
-      [userId, restorePhone],
+      [userId, freezePhone],
     );
-    const deactivatedForRestore = await request(base, "/api/auth/user/account/deactivate", { reason: "恢复流程 fixture" }, user, USER_ORIGIN);
-    assert.equal(deactivatedForRestore.response.status, 200);
+    // Controlled pending recovery proof: freezing must revoke it together with sessions.
+    const freezeChallengeId = randomUUID().replaceAll('-', '');
+    const freezeOtp = { code: '123456' };
+    await migrationPool.query(`INSERT INTO zzsh_auth_user.verification (id,identifier,value,"expiresAt","createdAt","updatedAt") VALUES ($1,$2,$3,clock_timestamp()+interval '5 minutes',clock_timestamp(),clock_timestamp())`, [freezeChallengeId, 'user-security:'+freezeChallengeId, JSON.stringify({ version: 1, userId, purpose: 'recovery', verified: false, codeHash: createHash('sha256').update(freezeChallengeId+freezeOtp.code).digest('hex') })]);
+    assert.deepEqual(await identityRow(userId), { accountStatus: "ACTIVE", identityStatus: "VERIFIED", ageStatus: "ADULT", provider: "fake", version: 3, suspended: false });
+
+    assert.equal((await request(base, "/api/v1/admin/security/users/freeze", freezeBody(userId, "未登录不得冻结"), cookieJar(), ADMIN_ORIGIN)).response.status, 401);
+    assert.equal((await request(base, "/api/v1/admin/security/users/restore", freezeBody(userId, "旧恢复接口已移除"), freezeOperator.jar, ADMIN_ORIGIN)).response.status, 404);
+    assert.equal((await request(base, "/api/bff/admin/security/users/restore-candidates?query=m2_user", undefined, freezeOperator.jar, ADMIN_ORIGIN)).response.status, 404);
+    const freezeDenied = await request(base, "/api/v1/admin/security/admins/assign", {
+      username: freezeOperatorCreate.body?.username,
+      roleIds: [],
+      allowPermissions: ["user.account.freeze", "user.account.unfreeze"],
+      denyPermissions: ["user.account.freeze"],
+    }, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(freezeDenied.response.status, 200);
+    assert.equal((await request(base, "/api/v1/admin/security/users/freeze", freezeBody(userId, "个人禁止优先"), freezeOperator.jar, ADMIN_ORIGIN)).response.status, 403);
+    assert.equal((await identityRow(userId))?.accountStatus, "ACTIVE");
+    const freezeReallowed = await request(base, "/api/v1/admin/security/admins/assign", {
+      username: freezeOperatorCreate.body?.username,
+      roleIds: [],
+      allowPermissions: ["user.account.freeze", "user.account.unfreeze"],
+      denyPermissions: [],
+    }, adminOneActive, ADMIN_ORIGIN);
+    assert.equal(freezeReallowed.response.status, 200);
+    assert.equal((await request(base, "/api/v1/admin/security/users/unfreeze", freezeBody(userId, "未冻结不得解冻"), freezeOperator.jar, ADMIN_ORIGIN)).response.status, 409);
+
+    const frozen = await request(base, "/api/bff/admin/security/users/freeze", freezeBody(userId, "风控冻结"), freezeOperator.jar, ADMIN_ORIGIN);
+    assert.equal(frozen.response.status, 200, JSON.stringify(frozen.body));
+    assert.equal(frozen.body?.status, "FROZEN");
     assert.equal((await request(base, "/api/auth/user/get-session", undefined, user, USER_ORIGIN)).body, null);
-    // Controlled old pending recovery proof for the existing Admin restore/revocation contract.
-    const restoreChallengeId = randomUUID().replaceAll('-', '');
-    const restoreOtp = { code: '123456' };
-    await migrationPool.query(`INSERT INTO zzsh_auth_user.verification (id,identifier,value,"expiresAt","createdAt","updatedAt") VALUES ($1,$2,$3,clock_timestamp()+interval '5 minutes',clock_timestamp(),clock_timestamp())`, [restoreChallengeId, 'user-security:'+restoreChallengeId, JSON.stringify({ version: 1, userId, purpose: 'recovery', verified: false, codeHash: createHash('sha256').update(restoreChallengeId+restoreOtp.code).digest('hex') })]);
-    const restoreOtpBefore = await runtimePool.query<{count:string}>('SELECT count(*)::text AS count FROM zzsh_auth_user.verification WHERE identifier=$1', ['user-security:'+restoreChallengeId]);
-    assert.equal(restoreOtpBefore.rows[0]?.count, '1');
-    const identityBeforeRestore = await runtimePool.query<{ accountStatus: string; identityStatus: string; ageStatus: string; provider: string; version: number; suspended: boolean }>(
-      `SELECT s."account_status" AS "accountStatus", s."identity_status" AS "identityStatus", s."age_status" AS "ageStatus", s."provider", s."version", u."suspended"
-         FROM "zzsh_iam"."user_identity_state" s JOIN "zzsh_auth_user"."user" u ON u."id" = s."user_id"
-        WHERE s."user_id" = $1`,
-      [userId],
-    );
-    assert.deepEqual(identityBeforeRestore.rows[0], { accountStatus: "DEACTIVATED", identityStatus: "VERIFIED", ageStatus: "ADULT", provider: "fake", version: 3, suspended: true });
+    assert.deepEqual(await identityRow(userId), { accountStatus: "FROZEN", identityStatus: "VERIFIED", ageStatus: "ADULT", provider: "fake", version: 4, suspended: true });
+    const freezeOtpAfter = await runtimePool.query<{ count: string }>(`SELECT count(*)::text AS count FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1`, ['user-security:'+freezeChallengeId]);
+    assert.equal(freezeOtpAfter.rows[0]?.count, "0");
+    const frozenAudit = await runtimePool.query<{ count: string }>(`SELECT count(*)::text AS count FROM "zzsh_iam"."audit_event" WHERE "action" = 'user.account.frozen' AND "object_id" = $1`, [userId]);
+    assert.equal(frozenAudit.rows[0]?.count, "1");
+    const frozenSignIn = await request(base, "/api/auth/user/sign-in/phone-number", { phoneNumber: freezePhone, password: PASSWORD }, cookieJar(), USER_ORIGIN);
+    assert.equal(frozenSignIn.response.status, 403);
+    assert.match(JSON.stringify(frozenSignIn.body ?? {}), /ACCOUNT_FROZEN/);
+    assert.equal((await request(base, "/api/v1/admin/security/users/freeze", freezeBody(userId, "重复冻结应被拒绝"), freezeOperator.jar, ADMIN_ORIGIN)).response.status, 409);
 
-    const restoreUnauthenticated = await request(base, "/api/v1/admin/security/users/restore-candidates?query=m2_user", undefined, cookieJar(), ADMIN_ORIGIN);
-    assert.equal(restoreUnauthenticated.response.status, 401);
-    const restoreCandidates = await request(base, "/api/bff/admin/security/users/restore-candidates?query=m2_user", undefined, restoreOperator.jar, ADMIN_ORIGIN);
-    assert.equal(restoreCandidates.response.status, 200);
-    assert.equal(restoreCandidates.body?.users?.length, 1);
-    assert.deepEqual(Object.keys(restoreCandidates.body?.users?.[0] ?? {}).sort(), ["accountStatus", "id", "name", "username"]);
-    assert.equal(restoreCandidates.body?.users?.[0]?.accountStatus, "DEACTIVATED");
-
-    const restoreDenied = await request(base, "/api/v1/admin/security/admins/assign", {
-      username: restoreOperatorCreate.body?.username,
+    const freezeRevoked = await request(base, "/api/v1/admin/security/admins/assign", {
+      username: freezeOperatorCreate.body?.username,
       roleIds: [],
-      allowPermissions: ["user.account.restore"],
-      denyPermissions: ["user.account.restore"],
-    }, adminOneActive, ADMIN_ORIGIN);
-    assert.equal(restoreDenied.response.status, 200);
-    assert.equal((await request(base, "/api/v1/admin/security/users/restore-candidates?query=m2_user", undefined, restoreOperator.jar, ADMIN_ORIGIN)).response.status, 403);
-    const restoreReallowed = await request(base, "/api/v1/admin/security/admins/assign", {
-      username: restoreOperatorCreate.body?.username,
-      roleIds: [],
-      allowPermissions: ["user.account.restore"],
+      allowPermissions: ["user.account.freeze"],
       denyPermissions: [],
     }, adminOneActive, ADMIN_ORIGIN);
-    assert.equal(restoreReallowed.response.status, 200);
-    assert.equal((await request(base, "/api/v1/admin/security/users/restore-candidates?query=m2_user", undefined, restoreOperator.jar, ADMIN_ORIGIN)).response.status, 200);
-    const restoreRevoked = await request(base, "/api/v1/admin/security/admins/assign", {
-      username: restoreOperatorCreate.body?.username,
+    assert.equal(freezeRevoked.response.status, 200);
+    assert.equal((await request(base, "/api/v1/admin/security/users/unfreeze", freezeBody(userId, "撤权后不得解冻"), freezeOperator.jar, ADMIN_ORIGIN)).response.status, 403);
+    const freezeReinstated = await request(base, "/api/v1/admin/security/admins/assign", {
+      username: freezeOperatorCreate.body?.username,
       roleIds: [],
-      allowPermissions: [],
+      allowPermissions: ["user.account.freeze", "user.account.unfreeze"],
       denyPermissions: [],
     }, adminOneActive, ADMIN_ORIGIN);
-    assert.equal(restoreRevoked.response.status, 200);
-    const restoreAfterRevoke = await request(base, "/api/v1/admin/security/users/restore", {
-      targetUserId: userId,
-      password: restoreOperator.password,
-      totpCode: totpCode(restoreOperator.secret),
-      reason: "撤权后不得恢复",
-    }, restoreOperator.jar, ADMIN_ORIGIN);
-    assert.equal(restoreAfterRevoke.response.status, 403);
-    const restoreReinstated = await request(base, "/api/v1/admin/security/admins/assign", {
-      username: restoreOperatorCreate.body?.username,
-      roleIds: [],
-      allowPermissions: ["user.account.restore"],
-      denyPermissions: [],
-    }, adminOneActive, ADMIN_ORIGIN);
-    assert.equal(restoreReinstated.response.status, 200);
+    assert.equal(freezeReinstated.response.status, 200);
 
-    const restored = await request(base, "/api/bff/admin/security/users/restore", {
-      targetUserId: userId,
-      password: restoreOperator.password,
-      totpCode: totpCode(restoreOperator.secret),
-      reason: "用户重新使用账号",
-    }, restoreOperator.jar, ADMIN_ORIGIN);
-    assert.equal(restored.response.status, 200);
-    assert.equal(restored.body?.status, "ACTIVE");
-    assert.match(restored.body?.message ?? "", /旧会话和验证凭据不会复活/);
-    const restoredState = await runtimePool.query<{ accountStatus: string; identityStatus: string; ageStatus: string; provider: string; version: number; suspended: boolean }>(
-      `SELECT s."account_status" AS "accountStatus", s."identity_status" AS "identityStatus", s."age_status" AS "ageStatus", s."provider", s."version", u."suspended"
-         FROM "zzsh_iam"."user_identity_state" s JOIN "zzsh_auth_user"."user" u ON u."id" = s."user_id"
-        WHERE s."user_id" = $1`,
-      [userId],
-    );
-    assert.deepEqual(restoredState.rows[0], { accountStatus: "ACTIVE", identityStatus: "VERIFIED", ageStatus: "ADULT", provider: "fake", version: 4, suspended: false });
-    const restoreOtpAfter = await runtimePool.query<{ count: string }>(
-      `SELECT count(*)::text AS count FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1`,
-      ['user-security:'+restoreChallengeId],
-    );
-    assert.equal(restoreOtpAfter.rows[0]?.count, "0");
-    const revokedRestoreOtp = await request(base, '/api/auth/user/security/challenge/verify', { challengeId: restoreChallengeId, code: restoreOtp.code }, cookieJar(), USER_ORIGIN);
-    assert.ok(revokedRestoreOtp.response.status >= 400);
-    const repeatRestore = await request(base, "/api/v1/admin/security/users/restore", {
-      targetUserId: userId,
-      password: restoreOperator.password,
-      totpCode: totpCode(restoreOperator.secret),
-      reason: "重复恢复应被拒绝",
-    }, restoreOperator.jar, ADMIN_ORIGIN);
-    assert.equal(repeatRestore.response.status, 409);
-    const cancelledRestore = await request(base, "/api/v1/admin/security/users/restore", {
-      targetUserId: cancelUserId,
-      password: restoreOperator.password,
-      totpCode: totpCode(restoreOperator.secret),
-      reason: "注销主体不得复活",
-    }, restoreOperator.jar, ADMIN_ORIGIN);
-    assert.equal(cancelledRestore.response.status, 409);
-    const cancelledAfterRestoreAttempt = await runtimePool.query<{ accountStatus: string; suspended: boolean }>(
+    const unfrozen = await request(base, "/api/bff/admin/security/users/unfreeze", freezeBody(userId, "核实后解冻"), freezeOperator.jar, ADMIN_ORIGIN);
+    assert.equal(unfrozen.response.status, 200, JSON.stringify(unfrozen.body));
+    assert.equal(unfrozen.body?.status, "ACTIVE");
+    assert.match(unfrozen.body?.message ?? "", /旧会话不会复活/);
+    assert.deepEqual(await identityRow(userId), { accountStatus: "ACTIVE", identityStatus: "VERIFIED", ageStatus: "ADULT", provider: "fake", version: 5, suspended: false });
+    const revokedFreezeOtp = await request(base, '/api/auth/user/security/challenge/verify', { challengeId: freezeChallengeId, code: freezeOtp.code }, cookieJar(), USER_ORIGIN);
+    assert.ok(revokedFreezeOtp.response.status >= 400);
+    for (const path of ["/api/v1/admin/security/users/freeze", "/api/v1/admin/security/users/unfreeze"]) {
+      assert.equal((await request(base, path, freezeBody(cancelUserId, "注销主体不得变更"), freezeOperator.jar, ADMIN_ORIGIN)).response.status, 409);
+    }
+    const cancelledAfterFreezeAttempt = await runtimePool.query<{ accountStatus: string; suspended: boolean }>(
       `SELECT s."account_status" AS "accountStatus", u."suspended"
          FROM "zzsh_iam"."user_identity_state" s JOIN "zzsh_auth_user"."user" u ON u."id" = s."user_id"
         WHERE s."user_id" = $1`,
       [cancelUserId],
     );
-    assert.deepEqual(cancelledAfterRestoreAttempt.rows[0], { accountStatus: "CANCELLED", suspended: true });
-    const restoredUserLogin = cookieJar();
-    const restoredUserSignIn = await request(base, "/api/auth/user/sign-in/phone-number", { phoneNumber: restorePhone, password: PASSWORD }, restoredUserLogin, USER_ORIGIN);
-    assert.equal(restoredUserSignIn.response.status, 200);
-    assert.ok((await request(base, "/api/auth/user/get-session", undefined, restoredUserLogin, USER_ORIGIN)).body?.user?.id);
+    assert.deepEqual(cancelledAfterFreezeAttempt.rows[0], { accountStatus: "CANCELLED", suspended: true });
+    const unfrozenUserLogin = cookieJar();
+    const unfrozenUserSignIn = await request(base, "/api/auth/user/sign-in/phone-number", { phoneNumber: freezePhone, password: PASSWORD }, unfrozenUserLogin, USER_ORIGIN);
+    assert.equal(unfrozenUserSignIn.response.status, 200);
+    assert.ok((await request(base, "/api/auth/user/get-session", undefined, unfrozenUserLogin, USER_ORIGIN)).body?.user?.id);
 
     await migrationPool.query(`REVOKE INSERT ON TABLE "zzsh_iam"."audit_event" FROM ${quotedIdentifier(resources.runtimeUser, "M2_AUTH_TEST_RUNTIME_USER")}`);
-    const failedRestore = await request(base, "/api/v1/admin/security/users/restore", {
-      targetUserId: deactivateUserId,
-      password: restoreOperator.password,
-      totpCode: totpCode(restoreOperator.secret),
-      reason: "审计失败回滚恢复",
-    }, restoreOperator.jar, ADMIN_ORIGIN);
-    assert.equal(failedRestore.response.status, 500);
-    const failedRestoreState = await runtimePool.query<{ accountStatus: string; suspended: boolean }>(
-      `SELECT s."account_status" AS "accountStatus", u."suspended"
-         FROM "zzsh_iam"."user_identity_state" s JOIN "zzsh_auth_user"."user" u ON u."id" = s."user_id"
-        WHERE s."user_id" = $1`,
+    const failedUserFreeze = await request(base, "/api/v1/admin/security/users/freeze", freezeBody(deactivateUserId, "审计失败回滚冻结"), freezeOperator.jar, ADMIN_ORIGIN);
+    assert.equal(failedUserFreeze.response.status, 500);
+    const failedFreezeState = await runtimePool.query<{ accountStatus: string; suspended: boolean }>(
+      `SELECT COALESCE(s."account_status", 'ACTIVE') AS "accountStatus", u."suspended"
+         FROM "zzsh_auth_user"."user" u LEFT JOIN "zzsh_iam"."user_identity_state" s ON s."user_id" = u."id"
+        WHERE u."id" = $1`,
       [deactivateUserId],
     );
-    assert.deepEqual(failedRestoreState.rows[0], { accountStatus: "DEACTIVATED", suspended: true });
+    assert.deepEqual(failedFreezeState.rows[0], { accountStatus: "ACTIVE", suspended: false });
+    assert.ok((await request(base, "/api/auth/user/get-session", undefined, deactivateUser, USER_ORIGIN)).body?.user?.id, "rolled-back freeze keeps sessions");
     await migrationPool.query(`GRANT INSERT ON TABLE "zzsh_iam"."audit_event" TO ${quotedIdentifier(resources.runtimeUser, "M2_AUTH_TEST_RUNTIME_USER")}`);
 
     const forceTargetCreate = await request(base, "/api/v1/admin/security/admins/create", { mode: "ALL_GAMES", name: "强制登出目标" }, adminOneActive, ADMIN_ORIGIN);

@@ -202,7 +202,7 @@ export function legacyOwnerUserId(sourceSystem: string, sourceEntity: string, le
 
 function derivedStatusValues(status: LegacyOwnerStatusEvidence): { accountStatus: string; identityStatus: string; ageStatus: string } {
   return {
-    accountStatus: status.deleted ? "CANCELLED" : status.disabled ? "DEACTIVATED" : "ACTIVE",
+    accountStatus: status.deleted ? "CANCELLED" : status.disabled ? "FROZEN" : "ACTIVE",
     identityStatus: status.realNameBound ? "VERIFIED" : "UNVERIFIED",
     ageStatus: status.ageAdult === true ? "ADULT" : status.ageAdult === false ? "MINOR" : "UNKNOWN",
   };

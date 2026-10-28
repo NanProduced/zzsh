@@ -208,7 +208,6 @@ const USER_SECURITY_PATHS = new Set([
   "/identity/status",
   "/identity/verify",
   "/trade-eligibility/check",
-  "/account/deactivate",
   "/account/cancel",
 ]);
 
@@ -933,6 +932,9 @@ export async function mountAuthHandlers(
                 WHERE u."id" = $1`,
               [data.userId],
             );
+            if (result.rows[0]?.accountStatus === "FROZEN") {
+              throw new APIError("FORBIDDEN", { code: "ACCOUNT_FROZEN", message: "账号已被冻结，如有疑问请联系客服" });
+            }
             if (result.rows[0]?.suspended || result.rows[0]?.accountStatus && result.rows[0].accountStatus !== "ACTIVE") {
               throw new APIError("FORBIDDEN", { message: "Account unavailable" });
             }

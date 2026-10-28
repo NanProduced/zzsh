@@ -93,13 +93,6 @@ export type AdminDirectoryDetail = AdminDirectoryEntry & {
   security?: AdminSecurityState;
   sessionSummary?: AdminSessionSummary;
 };
-export type RestorableUserCandidate = {
-  id: string;
-  username: string;
-  name: string;
-  accountStatus: "DEACTIVATED";
-};
-
 export type UserDirectorySourceKind = "LOCAL" | "MIGRATED" | "UNKNOWN";
 export type UserDirectoryResourceSummary =
   | { state: "ready"; count: number; publishedCount?: number }
@@ -190,7 +183,7 @@ export type UserDirectoryItem = {
   username: string | null;
   displayUsername: string | null;
   maskedPhone: string | null;
-  accountStatus: "ACTIVE" | "RESTRICTED" | "DEACTIVATED" | "CANCELLED" | "UNKNOWN";
+  accountStatus: "ACTIVE" | "RESTRICTED" | "FROZEN" | "CANCELLED" | "UNKNOWN";
   suspended: boolean;
   identityStatus: "UNVERIFIED" | "VERIFIED" | "REJECTED" | "UNKNOWN";
   ageStatus: string;

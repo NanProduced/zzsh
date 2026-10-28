@@ -722,6 +722,13 @@
       "when": 1792925800528,
       "tag": "0102_supply_pricing_compat_optional_max",
       "breakpoints": true
+    },
+    {
+      "idx": 103,
+      "version": "7",
+      "when": 1793170000000,
+      "tag": "0103_user_account_freeze",
+      "breakpoints": true
     }
   ]
 }

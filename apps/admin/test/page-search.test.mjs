@@ -53,7 +53,7 @@ after(async () => {
 test("page search only lists implemented pages in the current permission set", () => {
   const boss = searchableWorkspacePages({
     isBoss: true,
-    permissions: ["admin.account.read", "admin.role.read", "approval.request.read", "admin.audit.read", "user.account.restore"],
+    permissions: ["admin.account.read", "admin.role.read", "approval.request.read", "admin.audit.read", "user.account.freeze"],
   });
   assert.deepEqual(boss.map((page) => page.path), [
     "/workbench",
@@ -69,7 +69,6 @@ test("page search only lists implemented pages in the current permission set", (
     "/supply/media",
     "/content",
     "/orders",
-    "/users/restore",
     "/approvals",
     "/audit",
     "/settings?section=security",

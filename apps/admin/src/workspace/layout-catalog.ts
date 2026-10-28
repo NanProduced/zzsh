@@ -14,7 +14,6 @@ export const WORKSPACE_WIDGET_CATALOG = [
   { id: "permission-guide", title: "权限说明", description: "说明当前可见范围，不展示无权数据。", permission: null, timeBound: false, minW: 4, minH: 3, defW: 6, defH: 3 },
   { id: "pending-approvals", title: "审批事项", description: "当前账号可见的最近申请摘要。", permission: "approval.request.read", timeBound: false, minW: 5, minH: 5, defW: 6, defH: 6 },
   { id: "admin-directory", title: "管理员目录", description: "当前可见的管理员账号。", permission: "admin.account.read", timeBound: false, minW: 5, minH: 5, defW: 6, defH: 6 },
-  { id: "user-restore", title: "用户账号恢复", description: "搜索并恢复停用用户账号。", permission: "user.account.restore", timeBound: false, minW: 4, minH: 3, defW: 6, defH: 3 },
 ] as const;
 
 export type WorkspaceWidgetId = (typeof WORKSPACE_WIDGET_CATALOG)[number]["id"];

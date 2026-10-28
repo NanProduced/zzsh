@@ -19,9 +19,10 @@ test("users routes parse into list and object tabs", () => {
   assert.equal(object.kind, "user-object");
   assert.equal(object.objectId, "user_abc123");
   assert.equal(object.tabId, "user:user_abc123");
-  // The pre-existing restore route keeps its own tab, never swallowed by the object route.
-  assert.equal(parseWorkspacePath("/users/restore").kind, "user-restore");
-  assert.equal(parseWorkspacePath("/users/restore").tabId, "user-restore");
+  // The retired restore page redirects to the user list; "restore" is never read as a user ID.
+  assert.equal(parseWorkspacePath("/users/restore").kind, "users");
+  assert.equal(parseWorkspacePath("/users/restore").tabId, "users");
+  assert.equal(parseWorkspacePath("/users/restore").path, "/users");
 });
 
 test("users list replaces complete filters; object tabs stay per user", () => {

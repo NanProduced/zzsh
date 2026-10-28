@@ -52,7 +52,7 @@ const nextCalendarDay = (value: string) => {
   return parsed.toISOString().slice(0, 10);
 };
 export const PHONE_LIKE = /(?:\+?86[\s-]*)?1[3-9](?:[\s-]*\d){9}/;
-export const STATUS_LABEL: Record<string,string> = { ACTIVE: '正常', RESTRICTED: '受限', DEACTIVATED: '已停用', CANCELLED: '已注销', UNKNOWN: '未知' };
+export const STATUS_LABEL: Record<string,string> = { ACTIVE: '正常', RESTRICTED: '受限', FROZEN: '已冻结', CANCELLED: '已注销', UNKNOWN: '未知' };
 export const FILTER_VALUE_LABEL:Record<string,string>={VERIFIED:'已实名',UNVERIFIED:'未实名',REJECTED:'未通过',MIGRATED:'旧平台用户',LOCAL:'未关联旧平台来源'};
 export const safeFilters = (filters: Filters) => Object.fromEntries(Object.entries(filters).filter(([key,value])=>value && !(key==='q' && PHONE_LIKE.test(value))));
 export const sourceLabel = (provider?: string) => provider==='legacy_mysql_restore' ? '旧平台用户' : provider==='none' ? '未关联旧平台来源' : '来源未知';
@@ -393,8 +393,8 @@ export class UserDirectoryBff {
     if(!Array.isArray(data.items))throw new Error('关联业务响应格式无效');
     return {state:'ready',data:data.items as Order[]|Resource[]|Audit[],nextCursor:data.nextCursor};
   }
-  async restore(id:string,reason:string,password:string,totpCode:string,signal:AbortSignal) {
-    await this.request('/security/users/restore',signal,{targetUserId:id,reason,password,totpCode});
+  async setFrozen(id:string,frozen:boolean,reason:string,password:string,totpCode:string,signal:AbortSignal) {
+    await this.request(frozen?'/security/users/freeze':'/security/users/unfreeze',signal,{targetUserId:id,reason,password,totpCode});
   }
   async credit(id:string,signal:AbortSignal) {
     if(!this.has(PERMISSION.credit)) throw new AdminApiError(403,'FORBIDDEN');

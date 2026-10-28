@@ -236,7 +236,7 @@ import { applyCreditInitializationBatch, planCreditInitialization, previewCredit
 import { describeCreditInitializationFailure, readCreditInitializationRun } from "../src/credit/credit-initialization-cli";
 import { createHash as nodeHash } from "node:crypto";
 
-type Identity = "ACTIVE" | "CANCELLED" | "DEACTIVATED" | "RESTRICTED" | "MISSING";
+type Identity = "ACTIVE" | "CANCELLED" | "FROZEN" | "RESTRICTED" | "MISSING";
 type World = { users: Map<string, Identity>; scores: Map<string, number>; events: string[]; receipts: Map<string, { fp: string; status: number; body: unknown }>; audits: number; admins: Map<string, { status: string; isBoss: boolean }>; sessions: Map<string, { userId: string; expiresAt: string; locked: boolean; suspended?: boolean; twoFactor?: boolean }>; dbNow: string; live: Record<string, unknown>; failAudit?: boolean; concurrentFor?: string; identityReads: number; writesSeen: string[]; failCommit?: "AFTER_DURABLE"; txStart?: string; clock?: string[]; commits?: number; sql?: string[] };
 const RESOURCE = { databaseName: "zzsh_window", databaseOid: "16384", owner: "zzsh_owner", runtimeRole: "zzsh_runtime", markerKey: "credit-init-window", markerTarget: "credit-init", markerVersion: 1 };
 function world(): World {
@@ -245,7 +245,7 @@ function world(): World {
     sessions: new Map([["sess-boss", { userId: "boss", expiresAt: "2099-01-01T00:00:00.000Z", locked: false }], ["sess-boss2", { userId: "boss2", expiresAt: "2099-01-01T00:00:00.000Z", locked: false }]]),
     dbNow: "2026-10-20T01:00:00.000000Z", live: { databaseName: RESOURCE.databaseName, databaseOid: RESOURCE.databaseOid, owner: RESOURCE.owner, runtimeRole: RESOURCE.runtimeRole, markerTarget: RESOURCE.markerTarget, markerVersion: 1 }, identityReads: 0, writesSeen: [] };
 }
-const CATEGORY: Record<Identity, string> = { ACTIVE: "ACTIVE", CANCELLED: "CANCELLED", DEACTIVATED: "DEACTIVATED", RESTRICTED: "RESTRICTED", MISSING: "UNKNOWN" };
+const CATEGORY: Record<Identity, string> = { ACTIVE: "ACTIVE", CANCELLED: "CANCELLED", FROZEN: "FROZEN", RESTRICTED: "RESTRICTED", MISSING: "UNKNOWN" };
 function client(w: World) {
   return { query: async (sql: string, params: any[] = []) => {
     if (/^(BEGIN|BEGIN READ ONLY|ROLLBACK)$/.test(sql)) return { rows: [] };
@@ -373,7 +373,7 @@ test("credit CLI v2 explicitly binds COMMENT; malformed/version-mixed resources 
 
 test("credit initialization plan classifies missing users and never lists existing states", async () => {
   const plan = await planCreditInitialization(client(world()), { limit: 10 });
-  assert.deepEqual(plan.byCategory, { ACTIVE: 2, RESTRICTED: 1, CANCELLED: 1, DEACTIVATED: 0, UNKNOWN: 0 });
+  assert.deepEqual(plan.byCategory, { ACTIVE: 2, RESTRICTED: 1, CANCELLED: 1, FROZEN: 0, UNKNOWN: 0 });
   await assert.rejects(() => planCreditInitialization(client(world()), { limit: 501 }), /limit/);
 });
 

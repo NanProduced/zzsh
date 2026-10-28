@@ -9,7 +9,7 @@ export type CreditPreviewRow = { userId: string; category: CreditInitializationC
 export type CreditBatchPackage = { schema: "credit-init-package-v1"; batchKey: string; userIds: string[]; approvedCategory: "ACTIVE"; reason: string };
 export type CreditBatchArtifact = { order: number; package: CreditBatchPackage; bytes: string; sha256: string; approvalTemplate: Record<string, unknown> };
 export type CreditDenominatorReconciliation = {
-  denominator: number; observed: number; batched: number; existingProfile: number; restricted: number; cancelled: number; deactivated: number;
+  denominator: number; observed: number; batched: number; existingProfile: number; restricted: number; cancelled: number; frozen: number;
   unknown: number; eventWithoutState: number; notObserved: number | null; balanced: boolean;
 };
 export type CreditBatchPlan = { batches: CreditBatchArtifact[]; reconciliation: CreditDenominatorReconciliation; retainedByReason: Record<string, string[]> };
@@ -26,7 +26,7 @@ export function buildCreditInitializationBatches(rows: readonly CreditPreviewRow
   // Existing runner contract: batchKey = credit-init:<8-96 of [A-Za-z0-9._-]>; prefix + "-NNNN" must fit it.
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{2,90}$/.test(opts.batchKeyPrefix) || opts.reason.trim().length < 8) throw new Error("PACKAGE_INPUT_INVALID");
   const seen = new Set<string>();
-  const retained: Record<string, string[]> = { EXISTING_PROFILE: [], RESTRICTED: [], CANCELLED: [], DEACTIVATED: [], UNKNOWN: [], EVENT_WITHOUT_STATE: [] };
+  const retained: Record<string, string[]> = { EXISTING_PROFILE: [], RESTRICTED: [], CANCELLED: [], FROZEN: [], UNKNOWN: [], EVENT_WITHOUT_STATE: [] };
   const eligible: string[] = [];
   for (const r of rows) {
     if (!ID.test(r.userId)) throw new Error("USER_ID_INVALID");
@@ -55,11 +55,11 @@ export function buildCreditInitializationBatches(rows: readonly CreditPreviewRow
     } });
   }
   const n = (k: string) => retained[k]!.length;
-  const accounted = eligible.length + n("EXISTING_PROFILE") + n("RESTRICTED") + n("CANCELLED") + n("DEACTIVATED") + n("UNKNOWN") + n("EVENT_WITHOUT_STATE");
+  const accounted = eligible.length + n("EXISTING_PROFILE") + n("RESTRICTED") + n("CANCELLED") + n("FROZEN") + n("UNKNOWN") + n("EVENT_WITHOUT_STATE");
   const notObserved = opts.denominator === null ? null : opts.denominator - rows.length;
   return {
     batches, retainedByReason: retained,
-    reconciliation: { denominator: opts.denominator ?? -1, observed: rows.length, batched: eligible.length, existingProfile: n("EXISTING_PROFILE"), restricted: n("RESTRICTED"), cancelled: n("CANCELLED"), deactivated: n("DEACTIVATED"), unknown: n("UNKNOWN"), eventWithoutState: n("EVENT_WITHOUT_STATE"), notObserved,
+    reconciliation: { denominator: opts.denominator ?? -1, observed: rows.length, batched: eligible.length, existingProfile: n("EXISTING_PROFILE"), restricted: n("RESTRICTED"), cancelled: n("CANCELLED"), frozen: n("FROZEN"), unknown: n("UNKNOWN"), eventWithoutState: n("EVENT_WITHOUT_STATE"), notObserved,
       balanced: accounted === rows.length && notObserved === 0 },
   };
 }

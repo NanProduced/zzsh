@@ -70,7 +70,7 @@ test('published drilldown cursors cannot be reused for the full archive collecti
 test('management UNKNOWN and status priority preserve cancelled/deactivated before restriction',()=>{
   assert.equal(projectUserAccountStatus(null,true),'UNKNOWN');
   assert.equal(projectUserAccountStatus('CANCELLED',true),'CANCELLED');
-  assert.equal(projectUserAccountStatus('DEACTIVATED',true),'DEACTIVATED');
+  assert.equal(projectUserAccountStatus('FROZEN',true),'FROZEN');
   assert.equal(projectUserAccountStatus('ACTIVE',true),'RESTRICTED');
   assert.equal(projectUserAccountStatus('ACTIVE',false),'ACTIVE');
   assert.equal(projectUserAccountStatus('UNMAPPED',false),'UNKNOWN');

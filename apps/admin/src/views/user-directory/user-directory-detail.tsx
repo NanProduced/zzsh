@@ -64,7 +64,7 @@ function accountTitleText(order: Order): string {
   return basic||(order.accountDisplayNo?`账号 ${order.accountDisplayNo}`:'')||order.title||'标题待核';
 }
 const ORDER_STATES: Record<string,string> = {current:'进行中',PENDING_PAYMENT:'待付款',PAID:'已付款',COMPLETED:'已完成',CANCELLED:'已取消'};
-const auditLabels:Record<string,string> = {'user.account.restored':'恢复账号','user.account.deactivated':'停用账号','user.account.cancelled':'注销账号','user.identity.verification':'实名验证','user.legacy_owner.migrated':'旧平台迁入','user.note.create':'添加备注','user.note.delete':'删除备注','user.risk.flag.changed':'修改高危标记','user.identity.sensitive.read':'查看敏感资料'};
+const auditLabels:Record<string,string> = {'user.account.frozen':'冻结账号','user.account.unfrozen':'解冻账号','user.account.restored':'恢复账号（历史）','user.account.deactivated':'停用账号（历史）','user.account.cancelled':'注销账号','user.identity.verification':'实名验证','user.legacy_owner.migrated':'旧平台迁入','user.note.create':'添加备注','user.note.delete':'删除备注','user.risk.flag.changed':'修改高危标记','user.identity.sensitive.read':'查看敏感资料'};
 
 function DetailLoading() { return <div className="udv-skeleton" aria-busy="true" role="status" aria-label="正在读取用户信息"><Skeleton className="h-16 w-80"/><Skeleton className="h-24 w-full"/><Skeleton className="h-10 w-full"/><Skeleton className="h-64 w-full"/></div>; }
 
@@ -302,31 +302,39 @@ export function UserDetail({adapter,snapshot,tab,onOpenPath,onQueryChange,refres
     {[...visited].map(view=><div key={view} hidden={view!==section} className="udv-tab" role="region" aria-label={SECTIONS[view]}>
       {view==='orders'?<Orders adapter={adapter} user={user} tab={tab} refreshNonce={refreshNonce} onOpenPath={onOpenPath} onQueryChange={onQueryChange}/>:view==='resources'?<Resources adapter={adapter} user={user} refreshNonce={refreshNonce} onOpenPath={onOpenPath}/>:view==='growth'?<Membership adapter={adapter} user={user} refreshNonce={refreshNonce} onOpenPath={onOpenPath}/>:view==='credit'?<CreditPanel adapter={adapter} user={user} refreshNonce={refreshNonce} active={view===section} changed={changed}/>:view==='finance'?<UserDetailFinance adapter={adapter} user={user} tab={tab} onQueryChange={onQueryChange} refreshNonce={refreshNonce} onOpenPath={onOpenPath}/>:view==='notes'?<UserNotes adapter={adapter} user={user} refreshNonce={refreshNonce}/>:<>
         <section className="udv-block"><div className="udv-toolbar"><span className="text-xs font-semibold text-foreground">账号资料</span><Badge variant="outline">{STATUS_LABEL[user.status]??'状态待核'}</Badge></div><Field label="用户ID"><Input readOnly value={user.id} aria-label="用户ID" onFocus={event=>event.currentTarget.select()}/></Field><dl className="udv-facts"><div><dt>手机号</dt><dd>{user.phoneMasked}</dd></div>{user.legacyId?<div><dt>旧平台ID</dt><dd>{user.legacyId}</dd></div>:null}{user.displayUsername?<div><dt>用户名</dt><dd>{user.displayUsername}</dd></div>:null}{user.emailMasked?<div><dt>邮箱</dt><dd>{user.emailMasked}</dd></div>:null}</dl></section>
-        {user.status==='DEACTIVATED'||user.status==='CANCELLED'?<Restore adapter={adapter} user={user} changed={changed}/>:<p className="udv-muted">{user.status==='ACTIVE'?'账号状态正常，当前无需恢复。':'当前账号状态不支持恢复。'}</p>}
+        {user.status==='ACTIVE'||user.status==='FROZEN'?<FreezeControl adapter={adapter} user={user} changed={changed}/>:<p className="udv-muted">{user.status==='CANCELLED'?'已注销账号不可冻结或解冻。':'当前账号状态不支持冻结或解冻。'}</p>}
         <Collapsible><CollapsibleTrigger render={<Button variant="outline"/>}>查看安全操作记录</CollapsibleTrigger><CollapsibleContent><UserCollection adapter={adapter} user={user} domain="audit" refreshNonce={(sectionRefresh.current[view]??0)+revision}>{rows=><ListTable empty={!rows.length ? "当前授权范围内暂无安全操作记录" : undefined}><Table><TableHeader><TableRow><TableHead>时间</TableHead><TableHead>操作</TableHead><TableHead>管理员</TableHead><TableHead>结果</TableHead></TableRow></TableHeader><TableBody>{(rows as Audit[]).map(event=><TableRow key={event.eventId}><TableCell>{time(event.occurredAt)}</TableCell><TableCell>{auditLabels[event.action]??'其他安全操作'}</TableCell><TableCell>{event.actor.name||'未记录'}</TableCell><TableCell>{event.outcome==='SUCCESS'?'成功':'失败'}</TableCell></TableRow>)}</TableBody></Table></ListTable>}</UserCollection></CollapsibleContent></Collapsible>
       </>}
     </div>)}
   </section>;
 }
 
-type RestoreResult = 'success' | 'rejected' | 'conflict' | 'failed' | 'pending' | 'readback-failed';
-function Restore({ adapter, user, changed }: { adapter: UserDirectoryData; user: User; changed: () => void }) {
+type FreezeResult = 'success' | 'rejected' | 'conflict' | 'failed' | 'pending' | 'readback-failed';
+type FreezeAction = 'freeze' | 'unfreeze';
+const FREEZE_PERMISSION: Record<FreezeAction, string> = { freeze: 'user.account.freeze', unfreeze: 'user.account.unfreeze' };
+const FREEZE_TEXT: Record<FreezeAction, { verb: string; target: User['status'] }> = { freeze: { verb: '冻结', target: 'FROZEN' }, unfreeze: { verb: '解冻', target: 'ACTIVE' } };
+function FreezeControl({ adapter, user, changed }: { adapter: UserDirectoryData; user: User; changed: () => void }) {
   const [open, setOpen] = useState(false);
   const [reason, setReason] = useState('');
   const [password, setPassword] = useState('');
   const [code, setCode] = useState('');
-  const [result, setResult] = useState<RestoreResult>();
+  const [result, setResult] = useState<FreezeResult>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [read, setRead] = useState<User>();
   const [writeAccepted, setWriteAccepted] = useState(false);
+  const [action, setAction] = useState<FreezeAction>(user.status === 'FROZEN' ? 'unfreeze' : 'freeze');
   const controller = useRef<AbortController | null>(null);
 
   useEffect(() => () => controller.current?.abort(), []);
   const clearSecrets = () => { setPassword(''); setCode(''); };
   const current = read ?? user;
-  const hasRestoreAccess = adapter.has('user.account.restore');
-  const eligible = hasRestoreAccess && !writeAccepted && current.status === 'DEACTIVATED';
+  const currentAction: FreezeAction | null = current.status === 'ACTIVE' ? 'freeze' : current.status === 'FROZEN' ? 'unfreeze' : null;
+  const shownAction: FreezeAction = writeAccepted || result ? action : (currentAction ?? action);
+  const verb = FREEZE_TEXT[shownAction].verb;
+  const target = FREEZE_TEXT[shownAction].target;
+  const hasAccess = adapter.has(FREEZE_PERMISSION[shownAction]);
+  const eligible = hasAccess && !writeAccepted && currentAction === shownAction;
 
   const reread = async () => {
     setBusy(true); setError('');
@@ -335,10 +343,10 @@ function Restore({ adapter, user, changed }: { adapter: UserDirectoryData; user:
       const value = await adapter.detail(user.id, request.signal);
       if (request.signal.aborted) return;
       setRead(value);
-      if (value.status === 'ACTIVE') {
+      if (writeAccepted && value.status === target) {
         setResult('success'); setError(''); changed();
       } else if (writeAccepted) {
-        setResult('readback-failed'); setError('恢复请求已被接受，但账号状态仍未显示为正常；不会自动重复提交。');
+        setResult('readback-failed'); setError(`${verb}请求已被接受，但账号状态仍未更新；不会自动重复提交。`);
       }
     } catch (failure) {
       if (!request.signal.aborted) {
@@ -352,20 +360,21 @@ function Restore({ adapter, user, changed }: { adapter: UserDirectoryData; user:
 
   const submit = async () => {
     if (!eligible || result === 'pending' || writeAccepted) return;
+    setAction(shownAction);
     setError(''); setRead(undefined); setBusy(true);
     const request = new AbortController(); controller.current = request;
     try {
-      await adapter.restore(user.id, reason, password, code, request.signal);
+      await adapter.setFrozen(user.id, shownAction === 'freeze', reason, password, code, request.signal);
       if (request.signal.aborted) return;
       setWriteAccepted(true); setResult('success');
       try {
         const value = await adapter.detail(user.id, request.signal);
         if (request.signal.aborted) return;
         setRead(value);
-        if (value.status === 'ACTIVE') {
+        if (value.status === target) {
           setResult('success'); setError(''); changed();
         } else {
-          setResult('readback-failed'); setError('恢复请求已被接受，但账号状态仍未显示为正常；不会自动重复提交。');
+          setResult('readback-failed'); setError(`${verb}请求已被接受，但账号状态仍未更新；不会自动重复提交。`);
         }
       } catch (readbackFailure) {
         if (!request.signal.aborted) {
@@ -392,31 +401,32 @@ function Restore({ adapter, user, changed }: { adapter: UserDirectoryData; user:
     }
   };
 
-  const labels: Record<RestoreResult, string> = {
-    success: '账号恢复已处理',
+  const labels: Record<FreezeResult, string> = {
+    success: `账号${verb}已处理`,
     rejected: '管理员再认证被拒绝',
     conflict: '账号状态已变化',
-    failed: '恢复操作失败',
-    pending: '恢复结果待确认',
-    'readback-failed': '恢复请求已提交，状态待确认',
+    failed: `${verb}操作失败`,
+    pending: `${verb}结果待确认`,
+    'readback-failed': `${verb}请求已提交，状态待确认`,
   };
 
   return (
     <div className="ud-restore">
-      <h2>账号恢复</h2>
-      {!hasRestoreAccess ? (
-        <Denied permission="user.account.restore" />
+      <h2>账号冻结</h2>
+      {!hasAccess ? (
+        <Denied permission={FREEZE_PERMISSION[shownAction]} />
       ) : (
         <>
           <p>
-            {writeAccepted ? '恢复请求已被服务端接受；当前状态需要重读确认。' :
-             eligible ? '已停用，可进入恢复评估。需操作原因与管理员密码/TOTP再认证。' :
-             current.status === 'CANCELLED' ? '已注销账号不可恢复。' : '当前账号状态不符合恢复资格。'}
+            {writeAccepted ? `${verb}请求已被服务端接受；当前状态需要重读确认。` :
+             eligible && shownAction === 'freeze' ? '账号正常。冻结后用户全部会话立即下线且无法登录；需操作原因与管理员密码/TOTP再认证。' :
+             eligible ? '账号已冻结，用户无法登录。解冻需操作原因与管理员密码/TOTP再认证。' :
+             current.status === 'CANCELLED' ? '已注销账号不可冻结或解冻。' : `当前账号状态不符合${verb}条件。`}
           </p>
           {writeAccepted ? (
-            <Button variant="outline" onClick={() => setOpen(true)}>核对恢复结果</Button>
+            <Button variant="outline" onClick={() => setOpen(true)}>核对{verb}结果</Button>
           ) : eligible ? (
-            <Button variant="outline" onClick={() => setOpen(true)}>账号恢复</Button>
+            <Button variant={shownAction === 'freeze' ? 'destructive' : 'outline'} onClick={() => setOpen(true)}>{shownAction === 'freeze' ? '冻结账号' : '解冻账号'}</Button>
           ) : null}
         </>
       )}
@@ -433,9 +443,11 @@ function Restore({ adapter, user, changed }: { adapter: UserDirectoryData; user:
       >
         <DialogContent className="ud-restore-dialog" showCloseButton={false}>
           <DialogHeader>
-            <DialogTitle>账号恢复评估 · {user.name}</DialogTitle>
+            <DialogTitle>{shownAction === 'freeze' ? '冻结账号' : '解冻账号'} · {user.name}</DialogTitle>
             <DialogDescription>
-              恢复只改变账号可用状态，不复活旧会话或验证凭据，不覆盖实名与年龄结果。
+              {shownAction === 'freeze'
+                ? '冻结后用户全部会话与待用验证凭据立即撤销，无法登录用户侧；进行中的订单与资金不做特殊处理，由既有状态校验拦截。'
+                : '解冻只恢复账号可用状态，不复活旧会话或验证凭据，不覆盖实名与年龄结果。'}
             </DialogDescription>
           </DialogHeader>
           <form aria-busy={busy} onSubmit={e => { e.preventDefault(); void submit(); }}>
@@ -479,8 +491,8 @@ function Restore({ adapter, user, changed }: { adapter: UserDirectoryData; user:
                 title={labels[result]}
               >
                 {read ? `重读账号状态：${STATUS_LABEL[read.status]}。` : '账号状态尚未确认。'}
-                {result === 'success' ? '请用户重新登录；旧会话和验证凭据不会复活。' :
-                 result === 'readback-failed' ? '恢复写入已成功，但状态回读未完成；不会自动重复提交。' :
+                {result === 'success' ? (action === 'freeze' ? '用户已全部下线且无法登录。' : '请用户重新登录；旧会话和验证凭据不会复活。') :
+                 result === 'readback-failed' ? `${verb}写入已成功，但状态回读未完成；不会自动重复提交。` :
                  result === 'pending' ? '未收到确认结果，请重新读取账号状态；不自动重复提交。' : '填写新的再认证信息后由管理员决定是否重试。'}
               </Message>
             ) : null}
@@ -509,7 +521,7 @@ function Restore({ adapter, user, changed }: { adapter: UserDirectoryData; user:
                   type="submit"
                   disabled={busy || reason.trim().length < 3 || password.length < 12 || !/^\d{6}$/.test(code)}
                 >
-                  {busy ? '处理中…' : '提交恢复'}
+                  {busy ? '处理中…' : `提交${verb}`}
                 </Button>
               ) : null}
             </div>

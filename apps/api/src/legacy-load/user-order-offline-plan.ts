@@ -23,7 +23,7 @@ export function binaryFlag(value: unknown, name: string): boolean {
 }
 
 export type ProjectedIdentity = {
-  accountStatus: "CANCELLED" | "DEACTIVATED" | "ACTIVE";
+  accountStatus: "CANCELLED" | "FROZEN" | "ACTIVE";
   identityStatus: "VERIFIED" | "UNVERIFIED";
   ageStatus: "ADULT" | "MINOR" | "UNKNOWN";
   phoneNumberVerified: false;
@@ -35,7 +35,7 @@ export type ProjectedIdentity = {
 /** Mirrors derivedStatusValues. Deleted wins. This does not prove a login or a trade. */
 export function projectIdentityStatus(status: { deleted: boolean; disabled: boolean; realNameBound: boolean; ageAdult: boolean | null }): ProjectedIdentity {
   return {
-    accountStatus: status.deleted ? "CANCELLED" : status.disabled ? "DEACTIVATED" : "ACTIVE",
+    accountStatus: status.deleted ? "CANCELLED" : status.disabled ? "FROZEN" : "ACTIVE",
     identityStatus: status.realNameBound ? "VERIFIED" : "UNVERIFIED",
     ageStatus: status.ageAdult === true ? "ADULT" : status.ageAdult === false ? "MINOR" : "UNKNOWN",
     phoneNumberVerified: false,

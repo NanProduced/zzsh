@@ -422,10 +422,11 @@ test("ADM-USER-DIRECTORY-READ-1 admin user directory read API", async (t) => {
     assert.ok(legacyUserId);
 
     const deactivatedJar = cookieJar();
-    const deactivatedSignup = await request(base, "/api/auth/user/sign-up/email", { email: "dir_gone01@example.invalid", password: "Sup3rSecret#Dir", name: "停用用户", username: "dir_gone01" }, deactivatedJar, USER_ORIGIN);
+    const deactivatedSignup = await request(base, "/api/auth/user/sign-up/email", { email: "dir_gone01@example.invalid", password: "Sup3rSecret#Dir", name: "冻结用户", username: "dir_gone01" }, deactivatedJar, USER_ORIGIN);
     assert.equal(deactivatedSignup.response.status, 200);
     const deactivatedUserId = deactivatedSignup.body?.user?.id as string;
-    const deactivated = await request(base, "/api/auth/user/account/deactivate", { reason: "用户目录测试停用样本" }, deactivatedJar, USER_ORIGIN);
+    // Self-service deactivation is retired; the directory sample is frozen through the admin freeze endpoint (Boss holds every code).
+    const deactivated = await request(base, "/api/bff/admin/security/users/freeze", { targetUserId: deactivatedUserId, reason: "用户目录测试冻结样本", password: boss.password, totpCode: totpCode(boss.secret) }, boss.jar, ADMIN_ORIGIN);
     assert.equal(deactivated.response.status, 200, JSON.stringify(deactivated.body));
 
     // A game plus one rental account owned by the local user.
@@ -481,8 +482,8 @@ test("ADM-USER-DIRECTORY-READ-1 admin user directory read API", async (t) => {
       assert.ok(phoneUser, "phone user listed");
       assert.equal(phoneUser.maskedPhone, "+86139****1111");
       const gone = byId.get(deactivatedUserId);
-      assert.ok(gone, "deactivated user listed");
-      assert.equal(gone.accountStatus, "DEACTIVATED");
+      assert.ok(gone, "frozen user listed");
+      assert.equal(gone.accountStatus, "FROZEN");
     });
 
     await t.test("filters select precisely and bind the cursor to identity and filters", async () => {
@@ -492,7 +493,7 @@ test("ADM-USER-DIRECTORY-READ-1 admin user directory read API", async (t) => {
       assert.deepEqual((byLegacy.body?.items as any[]).map((item) => item.userId), [legacyUserId]);
       const byIdentifier = await listUsers(boss.jar, { identifier: "dir_local" });
       assert.deepEqual((byIdentifier.body?.items as any[]).map((item) => item.userId), [localUserId]);
-      const byStatus = await listUsers(boss.jar, { accountStatus: "DEACTIVATED" });
+      const byStatus = await listUsers(boss.jar, { accountStatus: "FROZEN" });
       assert.deepEqual((byStatus.body?.items as any[]).map((item) => item.userId), [deactivatedUserId]);
       const migratedOnly = await listUsers(boss.jar, { source: "MIGRATED" });
       assert.deepEqual((migratedOnly.body?.items as any[]).map((item) => item.userId), [legacyUserId]);
@@ -589,7 +590,7 @@ test("ADM-USER-DIRECTORY-READ-1 admin user directory read API", async (t) => {
       assert.equal(migration.details.sourceDigest, LEGACY_EVIDENCE.sourceDigest);
       assert.equal(migration.details.phoneNumberVerified, undefined, "phone-keyed details are stripped by the audit sanitizer");
       const deactivatedAudit = await request(base, `/api/v1/admin/users/${deactivatedUserId}/audit-events`, undefined, boss.jar, ADMIN_ORIGIN);
-      assert.ok((deactivatedAudit.body?.items as any[]).some((item) => item.action === "user.account.deactivated"));
+      assert.ok((deactivatedAudit.body?.items as any[]).some((item) => item.action === "user.account.frozen"));
       const auditor = await createStaff("审计读取员", ["user.directory.read", "admin.audit.read"]);
       const scopedAudit = await request(base, `/api/v1/admin/users/${legacyUserId}/audit-events`, undefined, auditor.jar, ADMIN_ORIGIN);
       assert.equal(scopedAudit.response.status, 200);

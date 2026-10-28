@@ -59,6 +59,8 @@ const actions = [
   "admin.unfrozen",
   "admin.session.force_logged_out",
   "user.account.restored",
+  "user.account.frozen",
+  "user.account.unfrozen",
 ];
 
 function actorLabel(actor: AuditEvent["actor"]): string {

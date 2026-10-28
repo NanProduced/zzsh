@@ -55,7 +55,6 @@ export const WORKSPACE_WIDGET_CATALOG = [
   { id: "permission-guide", title: "权限说明", permission: null, minW: 4, minH: 3, defW: 6, defH: 3, legacySizes: ["sm", "md", "lg"] as const },
   { id: "pending-approvals", title: "待处理审批", permission: ADMIN_PERMISSION.approvalRequestRead, minW: 5, minH: 5, defW: 6, defH: 6, legacySizes: ["md", "lg"] as const },
   { id: "admin-directory", title: "管理员目录", permission: ADMIN_PERMISSION.accountRead, minW: 5, minH: 5, defW: 6, defH: 6, legacySizes: ["md", "lg"] as const },
-  { id: "user-restore", title: "用户账号恢复", permission: ADMIN_PERMISSION.userAccountRestore, minW: 4, minH: 3, defW: 6, defH: 3, legacySizes: ["sm", "md"] as const },
 ] as const;
 
 const WIDGET_BY_ID = new Map<string, (typeof WORKSPACE_WIDGET_CATALOG)[number]>(WORKSPACE_WIDGET_CATALOG.map((item) => [item.id, item]));
@@ -126,7 +125,7 @@ export function legacyWidgetsToGrid(widgets: LegacyWorkspaceWidgetPlacement[]): 
 export function defaultWorkspaceWidgets(access: EffectiveAdminAccess): WorkspaceWidgetPlacement[] {
   const preferred = access.isBoss
     ? ["shortcuts", "pending-approvals", "admin-directory", "account-security"]
-    : ["shortcuts", "pending-approvals", "user-restore", "admin-directory", "account-security", "permission-guide"];
+    : ["shortcuts", "pending-approvals", "admin-directory", "account-security", "permission-guide"];
   const unique = [...new Set(preferred)].filter((id) => widgetAllowed(access, id));
   if (!unique.includes("account-security")) unique.push("account-security");
   if (!unique.includes("shortcuts")) unique.unshift("shortcuts");

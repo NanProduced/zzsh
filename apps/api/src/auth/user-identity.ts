@@ -18,7 +18,7 @@ export const FAKE_REAL_NAME_SCENARIOS = [
 export type FakeRealNameScenario = (typeof FAKE_REAL_NAME_SCENARIOS)[number];
 export type IdentityStatus = "UNVERIFIED" | "VERIFIED" | "REJECTED" | "UNKNOWN";
 export type AgeStatus = "UNKNOWN" | "ADULT" | "MINOR";
-export type AccountStatus = "ACTIVE" | "DEACTIVATED" | "CANCELLED";
+export type AccountStatus = "ACTIVE" | "FROZEN" | "CANCELLED";
 
 export type RealNameProviderInput = {
   userId: string;
@@ -174,47 +174,27 @@ async function readState(pool: Pool | PoolClient, userId: string): Promise<UserI
   return result.rows[0] ?? null;
 }
 
-export type RestorableUserCandidate = {
-  id: string;
-  username: string;
-  name: string;
-  accountStatus: "DEACTIVATED";
-};
+export type UserFreezeTarget = "FROZEN" | "ACTIVE";
 
-function escapeLike(value: string): string {
-  return value.replace(/[\\%_]/g, "\\$&");
-}
-
-export async function listRestorableUsers(pool: Pool, search: string): Promise<{ users: RestorableUserCandidate[] }> {
-  const normalized = search.trim();
-  if (normalized.length < 2 || normalized.length > 64) {
-    throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Search text must contain 2 to 64 characters");
-  }
-  const result = await pool.query<RestorableUserCandidate>(
-    `SELECT u."id", COALESCE(NULLIF(u."username", ''), u."id") AS "username", u."name",
-            s."account_status" AS "accountStatus"
-       FROM "zzsh_auth_user"."user" u
-       JOIN "zzsh_iam"."user_identity_state" s ON s."user_id" = u."id"
-      WHERE s."account_status" = 'DEACTIVATED'
-        AND (u."username" ILIKE $1 ESCAPE '\\' OR u."name" ILIKE $1 ESCAPE '\\')
-      ORDER BY u."name", u."username", u."id"
-      LIMIT 50`,
-    [`%${escapeLike(normalized)}%`],
-  );
-  return { users: result.rows.map((row) => ({ ...row, accountStatus: "DEACTIVATED" })) };
-}
-
-export async function restoreDeactivatedUserAccount(
+/**
+ * Admin freeze/unfreeze of a C-side user account (replaces the retired self-service DEACTIVATED + admin restore).
+ * Freeze: ACTIVE -> FROZEN, suspended=true, all sessions/pending verifications revoked. Unfreeze: FROZEN -> ACTIVE,
+ * suspended=false; old sessions do not come back. In-flight orders/funds are intentionally not touched: the existing
+ * suspended/account_status guards block login, listing, ordering and withdrawal. CANCELLED is never changed.
+ * Lock order mirrors the retired restore path: actor -> target user + identity state (FOR UPDATE).
+ */
+export async function changeUserFreezeState(
   context: { userId: string; sessionId: string },
   targetUserId: string,
+  next: UserFreezeTarget,
   reason: string,
   requestId: string,
   options: AuthSecurityOptions,
-): Promise<{ id: string; username: string; name: string; status: "ACTIVE"; revokedSessions: number; revokedVerifications: number }> {
+): Promise<{ id: string; username: string; name: string; status: UserFreezeTarget; revokedSessions: number; revokedVerifications: number }> {
   return withTransaction(options.pool, async (client) => {
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
     const actor = await lockActor(client, context.userId);
-    requirePermission(actor, ADMIN_PERMISSION.userAccountRestore);
+    requirePermission(actor, next === "FROZEN" ? ADMIN_PERMISSION.userAccountFreeze : ADMIN_PERMISSION.userAccountUnfreeze);
     const target = await client.query<{
       id: string;
       username: string | null;
@@ -225,60 +205,51 @@ export async function restoreDeactivatedUserAccount(
       `SELECT u."id", u."username", u."name", u."suspended",
               s."account_status" AS "accountStatus"
           FROM "zzsh_auth_user"."user" u
-          JOIN "zzsh_iam"."user_identity_state" s ON s."user_id" = u."id"
+          LEFT JOIN "zzsh_iam"."user_identity_state" s ON s."user_id" = u."id"
          WHERE u."id" = $1
-        FOR UPDATE OF u, s`,
+        FOR UPDATE OF u`,
       [targetUserId],
     );
     const row = target.rows[0];
-    if (!row || row.accountStatus === null) {
-      throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Only a deactivated account can be restored");
-    }
-    if (row.accountStatus === "CANCELLED") {
-      throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Cancelled accounts cannot be restored");
-    }
-    if (row.accountStatus !== "DEACTIVATED") {
-      throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Only a deactivated account can be restored");
-    }
+    if (!row) throw new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "User not found");
+    // Lock the identity row too (a missing row means a never-verified ACTIVE user; it is created below on freeze).
+    await client.query(`SELECT 1 FROM "zzsh_iam"."user_identity_state" WHERE "user_id" = $1 FOR UPDATE`, [row.id]);
+    const before = row.accountStatus ?? "ACTIVE";
+    if (before === "CANCELLED") throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Cancelled accounts cannot be frozen or unfrozen");
+    if (next === "FROZEN" && before !== "ACTIVE") throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Only an active account can be frozen");
+    if (next === "ACTIVE" && before !== "FROZEN") throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Only a frozen account can be unfrozen");
 
-    const revoked = await revokeUserCredentials(client, row.id);
-    const revokedSessions = revoked.sessions;
-    const revokedVerifications = revoked.verifications;
-    await client.query(`UPDATE "zzsh_auth_user"."user" SET "suspended" = false, "updatedAt" = clock_timestamp() WHERE "id" = $1`, [row.id]);
+    const revoked = next === "FROZEN" ? await revokeUserCredentials(client, row.id) : { sessions: 0, verifications: 0 };
+    await client.query(`UPDATE "zzsh_auth_user"."user" SET "suspended" = $2, "updatedAt" = clock_timestamp() WHERE "id" = $1`, [row.id, next === "FROZEN"]);
     const updated = await client.query(
-      `UPDATE "zzsh_iam"."user_identity_state"
-          SET "account_status" = 'ACTIVE', "version" = "version" + 1, "updated_at" = clock_timestamp()
-        WHERE "user_id" = $1 AND "account_status" = 'DEACTIVATED'
-      RETURNING "user_id"`,
-      [row.id],
+      `INSERT INTO "zzsh_iam"."user_identity_state" ("user_id", "account_status", "identity_status", "age_status", "provider", "version", "updated_at")
+       VALUES ($1, $2, 'UNVERIFIED', 'UNKNOWN', 'none', 1, clock_timestamp())
+       ON CONFLICT ("user_id") DO UPDATE SET "account_status" = EXCLUDED."account_status",
+         "version" = "zzsh_iam"."user_identity_state"."version" + 1, "updated_at" = clock_timestamp()
+       WHERE "zzsh_iam"."user_identity_state"."account_status" = $3
+       RETURNING "user_id"`,
+      [row.id, next, before],
     );
     if (updated.rowCount !== 1) throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Account state changed; refresh and retry");
     await recordAudit(client, {
       actorType: "admin",
       actorId: context.userId,
       sessionId: context.sessionId,
-      action: "user.account.restored",
+      action: next === "FROZEN" ? "user.account.frozen" : "user.account.unfrozen",
       objectType: "user_account",
       objectId: row.id,
       outcome: "SUCCESS",
       reason,
       requestId,
       details: {
-        beforeAccountStatus: "DEACTIVATED",
-        afterAccountStatus: "ACTIVE",
-        revokedSessions,
-        revokedVerifications,
+        beforeAccountStatus: before,
+        afterAccountStatus: next,
+        revokedSessions: revoked.sessions,
+        revokedVerifications: revoked.verifications,
         identityAndAgeUnchanged: true,
       },
     });
-    return {
-      id: row.id,
-      username: row.username ?? row.id,
-      name: row.name,
-      status: "ACTIVE",
-      revokedSessions,
-      revokedVerifications,
-    };
+    return { id: row.id, username: row.username ?? row.id, name: row.name, status: next, revokedSessions: revoked.sessions, revokedVerifications: revoked.verifications };
   });
 }
 
@@ -427,7 +398,7 @@ async function changeAccountState(
   requestId: string,
   options: AuthSecurityOptions,
   context: UserContext,
-  nextStatus: "DEACTIVATED" | "CANCELLED",
+  nextStatus: "CANCELLED",
 ): Promise<void> {
   const reason = optionalReason(request);
   const result = await withTransaction(options.pool, async (client) => {
@@ -465,8 +436,6 @@ async function changeAccountState(
           WHERE "id" = $1`,
         [context.userId],
       );
-    } else {
-      await client.query(`UPDATE "zzsh_auth_user"."user" SET "suspended" = true, "updatedAt" = clock_timestamp() WHERE "id" = $1`, [context.userId]);
     }
     await client.query(
       `INSERT INTO "zzsh_iam"."user_identity_state"
@@ -488,7 +457,7 @@ async function changeAccountState(
       actorType: "user",
       actorId: context.userId,
       sessionId: context.sessionId,
-      action: nextStatus === "CANCELLED" ? "user.account.cancelled" : "user.account.deactivated",
+      action: "user.account.cancelled",
       objectType: "user_account",
       objectId: context.userId,
       outcome: "SUCCESS",
@@ -498,7 +467,7 @@ async function changeAccountState(
     });
     return revoked;
   });
-  sendJson(response, 200, { status: nextStatus, revokedSessions: result.sessions, revokedVerifications: result.verifications, message: nextStatus === "CANCELLED" ? "账号已注销，必要历史关联保留。" : "账号已停用，当前会话和待用验证凭据已撤销。" }, requestId);
+  sendJson(response, 200, { status: nextStatus, revokedSessions: result.sessions, revokedVerifications: result.verifications, message: "账号已注销，必要历史关联保留。" }, requestId);
 }
 
 export async function handleUserIdentityRoute(
@@ -512,7 +481,6 @@ export async function handleUserIdentityRoute(
     "/identity/status",
     "/identity/verify",
     "/trade-eligibility/check",
-    "/account/deactivate",
     "/account/cancel",
   ]);
   if (!supported.has(path)) return false;
@@ -523,7 +491,7 @@ export async function handleUserIdentityRoute(
   }
   const method = request.method?.toUpperCase() ?? "";
   const readOnlyPath = path === "/identity/status";
-  const writePath = path === "/identity/verify" || path === "/trade-eligibility/check" || path === "/account/deactivate" || path === "/account/cancel";
+  const writePath = path === "/identity/verify" || path === "/trade-eligibility/check" || path === "/account/cancel";
   if ((readOnlyPath && method !== "GET") || (writePath && method !== "POST")) {
     sendError(response, new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found"), requestId);
     return true;
@@ -543,7 +511,6 @@ export async function handleUserIdentityRoute(
     }
     if (path === "/identity/verify") await verifyIdentity(request, response, requestId, options, context);
     else if (path === "/trade-eligibility/check") await checkProtectedTradeEligibility(request, response, requestId, options, context);
-    else if (path === "/account/deactivate") await changeAccountState(request, response, requestId, options, context, "DEACTIVATED");
     else await changeAccountState(request, response, requestId, options, context, "CANCELLED");
     return true;
   } catch (error) {

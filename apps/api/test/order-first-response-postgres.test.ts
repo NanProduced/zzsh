@@ -1000,8 +1000,8 @@ export async function runOrderFirstResponseAcceptance(t: TestContext, o: Options
     assert.equal((await signedRequest(PRE_SEND_PATH, preSendBody(teamId, buyerAccount), { base: hooks.base })).body?.errCode, 1);
     await pool.query(`UPDATE zzsh_auth_user."user" SET suspended=false WHERE id=$1`, [order.renter]);
     await pool.query(`INSERT INTO zzsh_iam.user_identity_state(user_id,account_status,identity_status,age_status,provider,version,updated_at)
-      VALUES($1,'DEACTIVATED','UNVERIFIED','UNKNOWN','none',1,clock_timestamp())
-      ON CONFLICT (user_id) DO UPDATE SET account_status='DEACTIVATED',version=zzsh_iam.user_identity_state.version+1,updated_at=clock_timestamp()`, [order.renter]);
+      VALUES($1,'FROZEN','UNVERIFIED','UNKNOWN','none',1,clock_timestamp())
+      ON CONFLICT (user_id) DO UPDATE SET account_status='FROZEN',version=zzsh_iam.user_identity_state.version+1,updated_at=clock_timestamp()`, [order.renter]);
     assert.equal((await signedRequest(PRE_SEND_PATH, preSendBody(teamId, buyerAccount), { base: hooks.base })).body?.errCode, 1);
     await pool.query(`UPDATE zzsh_iam.user_identity_state SET account_status='ACTIVE',version=version+1,updated_at=clock_timestamp() WHERE user_id=$1`, [order.renter]);
     assert.equal((await signedRequest(PRE_SEND_PATH, preSendBody(teamId, buyerAccount), { base: hooks.base })).body?.errCode, 0);

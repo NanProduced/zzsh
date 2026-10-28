@@ -34,7 +34,6 @@ export type WorkspaceRouteKind =
   | "approvals"
   | "approval-object"
   | "audit"
-  | "user-restore"
   | "users"
   | "user-object"
   | "catalog"
@@ -109,7 +108,6 @@ const LIST_TABS: Record<string, Omit<WorkspaceTab, "query">> = {
   roles: { id: "roles", title: "角色权限", path: "/roles", closable: true, kind: "roles" },
   approvals: { id: "approvals", title: "审批中心", path: "/approvals", closable: true, kind: "approvals" },
   audit: { id: "audit", title: "账号与权限审计", path: "/audit", closable: true, kind: "audit" },
-  "user-restore": { id: "user-restore", title: "账号恢复", path: "/users/restore", closable: true, kind: "user-restore" },
   users: { id: "users", title: "用户管理", path: "/users", closable: true, kind: "users" },
   catalog: { id: "catalog", title: "目录维护", path: "/supply/catalog", closable: true, kind: "catalog" },
   gunsmith: { id: "gunsmith", title: "改枪码目录", path: "/supply/gunsmith", closable: true, kind: "gunsmith" },
@@ -184,8 +182,8 @@ export function parseWorkspacePath(pathname: string): { kind: WorkspaceRouteKind
     return { kind: "approval-object", objectType: "approval", objectId, tabId: `approval:${objectId}`, path, title: "审批详情" };
   }
   if (path === "/audit") return { kind: "audit", tabId: "audit", path: "/audit", title: "账号与权限审计" };
-  if (path === "/users/restore") return { kind: "user-restore", tabId: "user-restore", path: "/users/restore", title: "用户账号恢复" };
-  if (path === "/users") return { kind: "users", tabId: "users", path, title: "用户管理" };
+  // 账号恢复页已退役（停用状态改为管理员冻结）：旧链接 /users/restore 落到用户管理列表，不当作用户 ID。
+  if (path === "/users" || path === "/users/restore") return { kind: "users", tabId: "users", path: "/users", title: "用户管理" };
   const userObject = path.match(/^\/users\/([^/]+)$/);
   if (userObject) {
     let objectId = ""; try { objectId = decodeURIComponent(userObject[1] ?? ""); } catch { /* Invalid IDs follow the existing unknown-route path. */ }
@@ -262,7 +260,6 @@ export function canOpenKind(kind: WorkspaceRouteKind, nav: NavPermission): boole
     return ["approval.request.read", "approval.request.approve", "approval.template.read", "approval.audit.read"].some(has);
   }
   if (kind === "audit") return has("admin.audit.read");
-  if (kind === "user-restore") return has("user.account.restore");
   if (kind === "users" || kind === "user-object") return has("user.directory.read");
   if (kind === "catalog") return has("supply.catalog.manage") || nav.isBoss;
   if (kind === "gunsmith") return has("supply.gunsmith.manage") || nav.isBoss;
@@ -291,7 +288,7 @@ export function upsertTab(tabs: WorkspaceTab[], next: WorkspaceTab): WorkspaceTa
   }
   if(next.kind.startsWith("finance-"))return tabs.some(tab=>tab.id===next.id)?tabs.map(tab=>tab.id===next.id?next:tab):[...tabs,next];
   if (next.kind === "users" || next.kind === "user-object") return tabs.some(tab => tab.id === next.id) ? tabs.map(tab => tab.id === next.id ? next : tab) : [...tabs, next];
-  if (next.kind === "admins" || next.kind === "roles" || next.kind === "approvals" || next.kind === "audit" || next.kind === "account" || next.kind === "user-restore" || next.kind === "workbench" || next.kind === "support" || next.kind === "membership-growth" || next.kind === "distribution-policy" || next.kind === "catalog" || next.kind === "gunsmith" || next.kind === "rules" || next.kind === "media-review" || next.kind === "listing-review" || next.kind === "content" || next.kind === "orders") {
+  if (next.kind === "admins" || next.kind === "roles" || next.kind === "approvals" || next.kind === "audit" || next.kind === "account" || next.kind === "workbench" || next.kind === "support" || next.kind === "membership-growth" || next.kind === "distribution-policy" || next.kind === "catalog" || next.kind === "gunsmith" || next.kind === "rules" || next.kind === "media-review" || next.kind === "listing-review" || next.kind === "content" || next.kind === "orders") {
     const existing = tabs.find((tab) => tab.id === next.id);
     if (existing) return tabs.map((tab) => (tab.id === next.id ? { ...existing, ...next, query: { ...existing.query, ...next.query } } : tab));
     return [...tabs, next];

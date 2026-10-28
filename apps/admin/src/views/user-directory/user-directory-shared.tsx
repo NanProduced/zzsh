@@ -52,7 +52,7 @@ export function Message({ kind = 'info', title, children, retry }: { kind?: 'inf
   return <div className={`ud-message ud-message-${kind}`} role={kind === 'error' ? 'alert' : 'status'}><Icon size={18} aria-hidden /><div><strong>{title}</strong>{children ? <div className="ud-message-body">{children}</div> : null}</div>{retry ? <Button variant="outline" onClick={retry}><RefreshCwIcon size={14} />重试</Button> : null}</div>;
 }
 export function Denied({ permission }: { permission: string }) {
-  const domain = ({ [PERMISSION.orders]: '订单', [PERMISSION.resources]: '资源账号', [PERMISSION.support]: '客服上下文', [PERMISSION.audit]: '账号安全审计', 'user.account.restore': '账号恢复' } as Record<string, string>)[permission] ?? '此功能';
+  const domain = ({ [PERMISSION.orders]: '订单', [PERMISSION.resources]: '资源账号', [PERMISSION.support]: '客服上下文', [PERMISSION.audit]: '账号安全审计', 'user.account.freeze': '冻结账号', 'user.account.unfreeze': '解冻账号' } as Record<string, string>)[permission] ?? '此功能';
   return <Message kind="denied" title={`${domain}无权限`}>当前管理员无法读取或操作此领域，该分区不参与判断。<details className="ud-permission-code"><summary>查看权限要求</summary><code>{permission}</code></details></Message>;
 }
 export function Loading() { return <div className="ud-loading" role="status" aria-label="正在加载"><Skeleton className="h-6 w-1/3" /><Skeleton className="h-12 w-full" /><Skeleton className="h-12 w-full" /><span className="sr-only">正在读取用户信息</span></div>; }
@@ -88,7 +88,7 @@ export function CopyId({ id, name }: { id: string; name?: string }) {
 export const STATUS_TONE: Record<string, 'success' | 'warning' | 'destructive' | 'outline' | 'unknown'> = {
   ACTIVE: 'success',
   RESTRICTED: 'warning',
-  DEACTIVATED: 'destructive',
+  FROZEN: 'destructive',
   CANCELLED: 'outline',
   UNKNOWN: 'unknown',
 };

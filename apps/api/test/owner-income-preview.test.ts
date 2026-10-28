@@ -86,7 +86,7 @@ function fixture() {
     if (/^(BEGIN|COMMIT|ROLLBACK|SET TRANSACTION)/.test(sql) || sql.includes("set_config('statement_timeout'")) rows = [];
     else if (sql.includes('AS "evaluatedAt"')) rows = [{ evaluatedAt: "2026-10-25T00:00:00.000Z" }];
     else if (sql.includes('SELECT "suspended"')) rows = [{ suspended: !state.active }];
-    else if (sql.includes('FROM "zzsh_iam"."user_identity_state"')) rows = [{ accountStatus: state.active ? "ACTIVE" : "DEACTIVATED" }];
+    else if (sql.includes('FROM "zzsh_iam"."user_identity_state"')) rows = [{ accountStatus: state.active ? "ACTIVE" : "FROZEN" }];
     else if (sql.includes('FROM "zzsh_auth_user"."session"')) rows = state.sessionValid ? [{}] : [];
     else if (sql.includes('game_service_operation')) rows = [{ id: "fixture_service", gameId: "fixture_game", gameCode: "delta", gameEnabled: state.gameEnabled, enabled: state.gameEnabled, revision: "1", serviceCode: "ACCOUNT_RENTAL" }];
     else if (sql.includes('SELECT * FROM zzsh_supply.rental_account')) rows = state.accountExists ? [{ owner_user_id: state.accountOwner, game_id: state.accountGame }] : [];

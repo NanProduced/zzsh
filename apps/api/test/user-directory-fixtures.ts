@@ -9,7 +9,7 @@ export const fixtureUserRows = [
   {id:'user_dual',name:'沈禾',phoneNumber:null,accountStatus:'ACTIVE',provider:'none'},
   {id:'user_legacy',name:'周岚',phoneNumber:null,accountStatus:'ACTIVE',provider:'legacy_mysql_restore',migrationLegacyId:'88001',migrationSourceCreatedAt:'2019-01-01T00:00:00.000000Z'},
   {id:'user_unknown',name:'来源待核',phoneNumber:null,accountStatus:null,provider:null},
-  {id:'user_restore',name:'顾远',phoneNumber:null,accountStatus:'DEACTIVATED',provider:'none',suspended:true},
+  {id:'user_restore',name:'顾远',phoneNumber:null,accountStatus:'FROZEN',provider:'none',suspended:true},
   {id:'user_cancelled',name:'程野',phoneNumber:null,accountStatus:'CANCELLED',provider:'none',suspended:true},
   {id:'user_restricted',name:'陆青',phoneNumber:null,accountStatus:'ACTIVE',provider:'none',suspended:true},
   {id:'user_long',name:'长昵称样本_'+ 'Unicode用户'.repeat(14),phoneNumber:null,accountStatus:'ACTIVE',provider:'none'},
@@ -77,7 +77,7 @@ export class DirectorySqlFixture extends EventEmitter {
       // MIGRATED membership is the provider-only branch, so the service no longer emits the CASE for it.
       if(/(?:WHERE|AND) s\.provider='legacy_mysql_restore'/.test(sql))rows=rows.filter(row=>row.provider==='legacy_mysql_restore');
       const status=parameter(/\(CASE WHEN s.user_id IS NULL[\s\S]*?END\)=\$(\d+)/);
-      if(status)rows=rows.filter(row=>(row.accountStatus===null?'UNKNOWN':['CANCELLED','DEACTIVATED'].includes(row.accountStatus)?row.accountStatus:row.suspended?'RESTRICTED':row.accountStatus)==status);
+      if(status)rows=rows.filter(row=>(row.accountStatus===null?'UNKNOWN':['CANCELLED','FROZEN'].includes(row.accountStatus)?row.accountStatus:row.suspended?'RESTRICTED':row.accountStatus)==status);
       const identity=parameter(/COALESCE\(s.identity_status,'UNKNOWN'\)=\$(\d+)/);if(identity)rows=rows.filter(row=>row.identityStatus===identity);
       const risk=parameter(/COALESCE\(\(SELECT r\.flagged FROM zzsh_iam\.user_risk_flag r WHERE r\.user_id = u\.id\), false\)=\$(\d+)/);if(risk!==undefined)rows=rows.filter(row=>(row.riskFlag===true)===(risk===true));
       const age=parameter(/COALESCE\(s.age_status,'UNKNOWN'\)=\$(\d+)/);if(age)rows=rows.filter(row=>row.ageStatus===age);

@@ -16,7 +16,7 @@ const user = (overrides: Record<string, unknown> = {}) => ({
 
 test("deleted wins, non-binary flags isolate, and inherited verification is not a new channel check", () => {
   assert.equal(projectIdentityStatus({ deleted: true, disabled: true, realNameBound: true, ageAdult: true }).accountStatus, "CANCELLED");
-  assert.equal(projectIdentityStatus({ deleted: false, disabled: true, realNameBound: false, ageAdult: null }).accountStatus, "DEACTIVATED");
+  assert.equal(projectIdentityStatus({ deleted: false, disabled: true, realNameBound: false, ageAdult: null }).accountStatus, "FROZEN");
   assert.equal(projectIdentityStatus({ deleted: false, disabled: false, realNameBound: true, ageAdult: false }).identityStatus, "VERIFIED");
   assert.equal(projectIdentityStatus({ deleted: false, disabled: false, realNameBound: true, ageAdult: false }).ageStatus, "MINOR");
   assert.equal(projectIdentityStatus({ deleted: false, disabled: false, realNameBound: false, ageAdult: null }).ageStatus, "UNKNOWN");
@@ -29,7 +29,7 @@ test("deleted wins, non-binary flags isolate, and inherited verification is not 
   assert.equal(disabled.disposition, "PARAMETER_READY");
   assert.equal(disabled.writeAllowed, false);
   if (disabled.disposition === "PARAMETER_READY") {
-    assert.equal(disabled.projected.accountStatus, "DEACTIVATED");
+    assert.equal(disabled.projected.accountStatus, "FROZEN");
     assert.equal(disabled.projected.identityStatus, "UNVERIFIED");
     assert.equal(disabled.writerInput.evidence.sourceCreatedAt, null);
     assert.equal(disabled.writerInput.evidence.sourceUpdatedAt, "1970-01-01T00:00:01.000Z");

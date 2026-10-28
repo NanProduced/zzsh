@@ -1580,7 +1580,7 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     assert.equal(mutualResultTwo.response.status, 200, JSON.stringify(mutualResultTwo.body));
     assert.notEqual(mutualResultOne.body?.order?.id, mutualResultTwo.body?.order?.id);
 
-    // ---------- S11/V13: 双方身份竞争（注销= /account/cancel，停用= /account/deactivate） ----------
+    // ---------- S11/V13: 双方身份竞争（注销= /account/cancel，冻结= 管理员冻结写入） ----------
     const accObligation = await publishApproved(owner3, "注销竞态账号", "2500");
     const obligationGate = singleArrivalGate();
     probeWatched.add(accObligation.accountId);
@@ -1607,9 +1607,13 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     assert.equal(cancelledFirstCreate.response.status, 401, "cancelled users cannot create orders");
 
     const ownerGoneAccount = await publishApproved(owner3, "号主停用账号", "2500");
-    assert.equal((await request(base, "/api/auth/user/account/deactivate", {}, owner3, USER_ORIGIN, "POST")).response.status, 200);
+    // Self-service deactivation is retired; freeze the owner the way the admin freeze writes it.
+    const owner3Id = (await request(base, "/api/auth/user/get-session", undefined, owner3, USER_ORIGIN)).body?.user?.id as string;
+    assert.ok(owner3Id);
+    await runtimePool.query(`UPDATE zzsh_auth_user."user" SET suspended=true WHERE id=$1`, [owner3Id]);
+    await runtimePool.query(`UPDATE zzsh_iam.user_identity_state SET account_status='FROZEN', version=version+1 WHERE user_id=$1`, [owner3Id]);
     const ownerGoneCreate = await createOrder(renter1, ownerGoneAccount);
-    assert.equal(ownerGoneCreate.response.status, 404, "a deactivated owner fails the publication blockers");
+    assert.equal(ownerGoneCreate.response.status, 404, "a frozen owner fails the publication blockers");
 
     // ---------- S12/V20: 重放范围——后续变化不撤销原响应 ----------
     const accReplay = await publishApproved(owner1, "重放账号", "2500");

@@ -47,7 +47,7 @@ function subjectView(context: ContextView | null, state: ContextState): { label:
 const ACCOUNT_STATUS: Record<string, { label: string; tone: "secondary" | "destructive" | "outline" }> = {
   ACTIVE: { label: "账号正常", tone: "secondary" },
   RESTRICTED: { label: "账号受限", tone: "destructive" },
-  DEACTIVATED: { label: "已停用", tone: "destructive" },
+  FROZEN: { label: "已冻结", tone: "destructive" },
   CANCELLED: { label: "已注销", tone: "destructive" },
   UNKNOWN: { label: "账号状态未知", tone: "outline" },
 };

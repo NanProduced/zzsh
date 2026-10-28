@@ -17,6 +17,8 @@ export const GENERIC_ADMIN_AUDIT_ACTIONS = [
   "admin.unfrozen",
   "admin.session.force_logged_out",
   "user.account.restored",
+  "user.account.frozen",
+  "user.account.unfrozen",
 ] as const;
 
 const GENERIC_ACTIONS = new Set<string>(GENERIC_ADMIN_AUDIT_ACTIONS);

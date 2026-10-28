@@ -714,18 +714,21 @@ export async function runPublishingChecks(o: Options): Promise<void> {
       }
       assert.equal(n, count);
     };
-    const deactivation = call("/api/auth/user/account/deactivate", {
-      reason: "隔离身份并发验证",
-    });
+    // Self-service deactivation is retired; an admin-style freeze waits on the same user row lock.
+    const deactivation = o.maintenance.query(
+      `WITH u AS (UPDATE zzsh_auth_user."user" SET suspended=true WHERE id=$1 RETURNING id)
+       UPDATE zzsh_iam.user_identity_state SET account_status='FROZEN' WHERE user_id IN (SELECT id FROM u)`,
+      [owner],
+    );
     await waitBlocked(1);
     const concurrentSubmit = call(userPrefix + "/submit", token(d));
     await waitBlocked(2);
     await identityGate.query("COMMIT");
-    assert.equal((await deactivation).status, 200);
+    await deactivation;
     assert.equal(
       (await concurrentSubmit).status,
       401,
-      "deactivated user cannot publish after waiting for the user lock",
+      "frozen user cannot publish after waiting for the user lock",
     );
   } finally {
     await identityGate.query("ROLLBACK");
