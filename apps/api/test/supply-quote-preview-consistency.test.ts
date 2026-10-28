@@ -33,11 +33,11 @@ function harness(opts: { drift?: "price" | "term"; expectedRevision?: string | u
   return { run: () => quotePreview(client, "synthetic_boss", true, body as any), queries };
 }
 
-test("quotePreview 父版本读取加 FOR SHARE 与写锁互斥", async () => {
+test("quotePreview 不发出行锁/写语句（只读事务兼容），以读后修订复核代替", async () => {
   const h = harness({ expectedRevision: "4" });
   await h.run();
-  assert.ok(h.queries.some((q) => q.includes('"price_version" WHERE "id" = $1 FOR SHARE')));
-  assert.ok(h.queries.some((q) => q.includes('"term_version" WHERE "id" = $1 FOR SHARE')));
+  assert.ok(h.queries.every((q) => !/\bFOR\s+(SHARE|UPDATE|NO\s+KEY|KEY\s+SHARE)\b|^\s*(INSERT|UPDATE|DELETE)\b/i.test(q)));
+  assert.equal(h.queries.filter((q) => /SELECT "revision"::text AS "revision" FROM "zzsh_supply"\."(price|term)_version"/.test(q)).length, 2);
 });
 
 test("quotePreview 价格版本中途漂移 → 409，不以旧修订回执新行", async () => {
