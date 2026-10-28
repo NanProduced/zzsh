@@ -5,9 +5,9 @@ import { Input } from "../../components/ui/input";
 import { Checkbox } from "../../components/ui/checkbox";
 import { SupplySelect } from "../../components/supply/supply-select";
 import { draftCommand, type useRulesWrite } from "./rules-write";
-import { boundText, buildRentalModeRule, CUSTOMER_TIERS, rentalModeBase, rentalModeDraft, rentalModeIssues, rentalModeSaveBody, withFastDefaults, type BoundDraft, type RentalModeDraft } from "./rental-modes";
+import { DraftFastTrial } from "./rental-mode-trial-panel";
+import { boundText, buildRentalModeRule, legacyNonZero, rentalModeBase, rentalModeDraft, rentalModeIssues, rentalModeSaveBody, withFastDefaults, type BoundDraft, type RentalModeDraft } from "./rental-modes";
 
-const TIER_LABELS: Record<string, string> = { STANDARD: "普通", VIP: "VIP（旧档）", SVIP: "SVIP（旧档）", DISCOUNT_USER: "折扣用户（旧档）" };
 
 /**
  * 租赁模式配置：自定义 / 极速的启停、利润点与号主比例范围。
@@ -99,12 +99,11 @@ export function RentalModeEditor({ rules, command, canEdit, onDirtyChange }: { r
               {boundInput("fast", "min", draft.fast.min, "号主比例下限")}
               {boundInput("fast", "max", draft.fast.max, "号主比例上限（可选）")}
             </div>
-            <div className="text-xs"><p className="text-muted-foreground">旧档位兼容增量（新会员不使用，默认 0）</p>
-              <div className="mt-2 grid gap-2 sm:grid-cols-4">{CUSTOMER_TIERS.map((t) => <label key={t} className="space-y-1"><span className="text-muted-foreground">{TIER_LABELS[t]}</span><Input aria-label={`极速${TIER_LABELS[t]}增量`} inputMode="decimal" value={draft.fast.discounts[t] ?? ""} disabled={locked || t === "STANDARD"} onChange={(e) => set((d) => ({ ...d, fast: { ...d.fast, discounts: { ...d.fast.discounts, [t]: e.target.value } } }))} />{err(`fast.discounts.${t}`)}</label>)}</div>
-            </div>
+            {legacyNonZero(draft).length ? <p role="note" className="text-xs text-muted-foreground">本草稿沿用原有旧档位兼容增量（只读、不在此编辑）：{legacyNonZero(draft).join("，")}。新会员按统一总价折扣，不叠加旧档位。</p> : <p className="text-xs text-muted-foreground">旧 VIP/SVIP 档位增量为 0（只读）；新会员按统一总价折扣另算一次。</p>}
           </> : <p className="text-xs text-muted-foreground">已关闭；号主不能选择极速上架。</p>}
         </fieldset>
       </div>
+      {selected ? <DraftFastTrial key={`${selected.id}:${selected.revision}`} rules={rules} version={selected} dirty={dirty} /> : null}
       {error ? <p role="alert" className="text-xs text-destructive">{error}</p> : null}
       {notice ? <p role="status" className="rounded-md bg-muted px-3 py-2 text-xs">{notice}</p> : null}
       {canEdit ? <div className="flex flex-wrap gap-2">

@@ -422,13 +422,19 @@ export async function activateRelease(
   return { releaseId, generation, affectedCount: Number(affected.rows[0]?.count ?? "0") };
 }
 
+/** 试算回执绑定：调用方据此判定结果是否仍对应当前选择的草稿修订、模式、B 与库存。 */
+export type QuotePreviewBinding = {
+  priceVersionId: string; priceVersionStatus: string; priceVersionRevision: string; termVersionId: string;
+  rentalMode: "ordinary" | "custom" | "fast" | null; ownerRatioB: string | null; inventory: Array<{ itemId: string; quantity: string }>;
+};
+
 export async function quotePreview(
   client: PoolClient,
   adminUserId: string,
   isBoss: boolean,
   body: Record<string, unknown>,
-): Promise<{ gameId: string; quotable: boolean; quote?: unknown; contentPayload?: ContentPayloadInput; contentHash?: string; reasonCodes?: string[] }> {
-  ensureOnlyFields(body, ["priceVersionId", "termVersionId", "accountId", "conditions", "inventory", "entitlements", "deposits", "title", "description", "skins", "mediaBindings", "releaseId", "agreementVersionId", "agreementDigest"]);
+): Promise<{ gameId: string; quotable: boolean; quote?: unknown; contentPayload?: ContentPayloadInput; contentHash?: string; reasonCodes?: string[]; binding: QuotePreviewBinding }> {
+  ensureOnlyFields(body, ["priceVersionId", "termVersionId", "expectedRevision", "accountId", "conditions", "inventory", "entitlements", "deposits", "title", "description", "skins", "mediaBindings", "releaseId", "agreementVersionId", "agreementDigest"]);
   const priceVersionId = String(body.priceVersionId ?? "");
   const termVersionId = String(body.termVersionId ?? "");
   const price = await client.query<{
@@ -439,15 +445,18 @@ export async function quotePreview(
     commissionRate: string | null;
     haffRule: unknown;
     roundingPolicy: string;
+    revision: string;
   }>(
     `SELECT "id", "game_id" AS "gameId", "mode", "status", "commission_rate"::text AS "commissionRate",
-            "haff_rule" AS "haffRule", "rounding_policy" AS "roundingPolicy"
+            "haff_rule" AS "haffRule", "rounding_policy" AS "roundingPolicy", "revision"::text AS "revision"
        FROM "zzsh_supply"."price_version" WHERE "id" = $1`,
     [priceVersionId],
   );
   const priceRow = price.rows[0];
   if (!priceRow) throw notFound();
   await assertGameScope(client, adminUserId, isBoss, priceRow.gameId);
+  // 草稿试算须绑定调用方看到的修订；草稿被改后旧试算作废（409），不静默按新内容出价。
+  if (body.expectedRevision !== undefined && (typeof body.expectedRevision !== "string" || body.expectedRevision !== priceRow.revision)) throw conflict("Version changed; refresh and retry");
   const term = await client.query<{ id: string; gameId: string; status: string }>(
     `SELECT "id", "game_id" AS "gameId", "status" FROM "zzsh_supply"."term_version" WHERE "id" = $1`,
     [termVersionId],
@@ -512,6 +521,12 @@ export async function quotePreview(
     });
   }
   if (lines.length === 0) throw invalid("No declared inventory matches the selected price version");
+  const rentalSelection = conditions.rentalPricing == null ? null : normalizeRentalPricing(conditions.rentalPricing);
+  const binding: QuotePreviewBinding = {
+    priceVersionId, priceVersionStatus: priceRow.status, priceVersionRevision: priceRow.revision, termVersionId,
+    rentalMode: rentalSelection?.rentalMode ?? null, ownerRatioB: rentalSelection?.ownerRatioB ?? null,
+    inventory: [...inventoryById.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([itemId, quantity]) => ({ itemId, quantity })),
+  };
 
   const entitlementInputs: Array<{ entitlementId: string; expiryKind: "PERMANENT" | "TIMED"; expiresAt?: string }> = [];
   if (Array.isArray(body.entitlements)) {
@@ -576,7 +591,7 @@ export async function quotePreview(
       : {}),
   });
 
-  if (!result.quotable) return { gameId: priceRow.gameId, quotable: false, reasonCodes: result.reasonCodes };
+  if (!result.quotable) return { gameId: priceRow.gameId, quotable: false, reasonCodes: result.reasonCodes, binding };
 
   let contentHash: string | undefined;
   let contentPayload: ContentPayloadInput | undefined;
@@ -625,5 +640,5 @@ export async function quotePreview(
   }
 
   const projected = projectDeltaQuote({ ...result.quote, ...(contentHash ? { contentHash } : {}) }, "admin");
-  return { gameId: priceRow.gameId, quotable: true, quote: projected, ...(contentPayload ? { contentPayload } : {}), ...(contentHash ? { contentHash } : {}) };
+  return { gameId: priceRow.gameId, quotable: true, quote: projected, ...(contentPayload ? { contentPayload } : {}), ...(contentHash ? { contentHash } : {}), binding };
 }

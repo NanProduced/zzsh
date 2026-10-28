@@ -658,6 +658,10 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
     assert.equal(quoteA?.quote.tenantDeposit, null, "unconfigured deposits must not be reported as 0.00");
     assert.equal(quoteA?.quote.pricingInputs.depositPolicy, "UNCONFIGURED");
     assert.equal(typeof quoteA?.contentHash, "string");
+    assert.deepEqual(quoteA?.binding, { priceVersionId: priceId, priceVersionStatus: "DRAFT", priceVersionRevision: "2", termVersionId: termId, rentalMode: null, ownerRatioB: null, inventory: [{ itemId: haffItem, quantity: "60000000" }] }, "preview echoes the exact version revision/mode/B/inventory it priced");
+    assert.equal((await preview(quoteInput("A", { expectedRevision: "2" })))?.quotable, true);
+    const staleRevision = await request(base, "/api/bff/admin/supply/quote-preview", quoteInput("A", { expectedRevision: "1" }), operator.jar, ADMIN_ORIGIN, "POST");
+    assert.equal(staleRevision.response.status, 409, JSON.stringify(staleRevision.body));
 
     const quoteB = await preview(quoteInput("B"));
     assert.equal(quoteB?.quote.lines[0].buyerAmount.amount, "120.00");
