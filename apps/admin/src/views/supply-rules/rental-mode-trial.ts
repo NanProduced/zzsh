@@ -40,10 +40,18 @@ export function draftTrialRequest(rules: RulesResponse, version: PriceVersionRec
   return { ok: true, body, signature: JSON.stringify(body), expected };
 }
 
-/** 服务端 binding 须逐项对应（B 按数值比较，服务端会规范化小数位）。 */
+/** B 的十进制规范形（去尾零），纯字符串比较，不经 Number；格式不合法返回 null。 */
+export function canonicalB(value: unknown): string | null {
+  if (typeof value !== "string" || !/^(0|[1-9]\d*)(\.\d+)?$/.test(value)) return null;
+  const [whole, fraction = ""] = value.split(".");
+  const f = fraction.replace(/0+$/, "");
+  return f ? `${whole}.${f}` : whole!;
+}
+
+/** 服务端 binding 须逐项对应（B 按十进制精确比较：仅允许尾零差异）。 */
 export function bindingMatches(actual: Partial<DraftTrialBinding> | undefined, expected: DraftTrialBinding): boolean {
   if (!actual) return false;
   const inv = (x: DraftTrialBinding["inventory"] | undefined) => JSON.stringify([...(x ?? [])].sort((a, b) => (a.itemId < b.itemId ? -1 : 1)));
   return actual.priceVersionId === expected.priceVersionId && actual.priceVersionRevision === expected.priceVersionRevision && actual.rentalMode === expected.rentalMode
-    && actual.ownerRatioB != null && Number(actual.ownerRatioB) === Number(expected.ownerRatioB) && inv(actual.inventory) === inv(expected.inventory);
+    && canonicalB(actual.ownerRatioB) !== null && canonicalB(actual.ownerRatioB) === canonicalB(expected.ownerRatioB) && inv(actual.inventory) === inv(expected.inventory);
 }

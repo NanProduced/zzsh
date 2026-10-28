@@ -449,7 +449,7 @@ export async function quotePreview(
   }>(
     `SELECT "id", "game_id" AS "gameId", "mode", "status", "commission_rate"::text AS "commissionRate",
             "haff_rule" AS "haffRule", "rounding_policy" AS "roundingPolicy", "revision"::text AS "revision"
-       FROM "zzsh_supply"."price_version" WHERE "id" = $1`,
+       FROM "zzsh_supply"."price_version" WHERE "id" = $1 FOR SHARE`,
     [priceVersionId],
   );
   const priceRow = price.rows[0];
@@ -457,8 +457,9 @@ export async function quotePreview(
   await assertGameScope(client, adminUserId, isBoss, priceRow.gameId);
   // 草稿试算须绑定调用方看到的修订；草稿被改后旧试算作废（409），不静默按新内容出价。
   if (body.expectedRevision !== undefined && (typeof body.expectedRevision !== "string" || body.expectedRevision !== priceRow.revision)) throw conflict("Version changed; refresh and retry");
-  const term = await client.query<{ id: string; gameId: string; status: string }>(
-    `SELECT "id", "game_id" AS "gameId", "status" FROM "zzsh_supply"."term_version" WHERE "id" = $1`,
+  // 父版本 FOR SHARE 与 update*Draft 的 FOR UPDATE 互斥：本事务内 price_line/term_option 不会被并发草稿提交改写。
+  const term = await client.query<{ id: string; gameId: string; status: string; revision?: string }>(
+    `SELECT "id", "game_id" AS "gameId", "status", "revision"::text AS "revision" FROM "zzsh_supply"."term_version" WHERE "id" = $1 FOR SHARE`,
     [termVersionId],
   );
   const termRow = term.rows[0];
@@ -521,6 +522,10 @@ export async function quotePreview(
     });
   }
   if (lines.length === 0) throw invalid("No declared inventory matches the selected price version");
+  // 读后复核：锁不可用（如调用方不在事务内）时也不让多表读取混入另一修订；binding 只回执已复核的修订。
+  const priceAfter = await client.query<{ revision: string }>(`SELECT "revision"::text AS "revision" FROM "zzsh_supply"."price_version" WHERE "id" = $1`, [priceVersionId]);
+  const termAfter = await client.query<{ revision?: string }>(`SELECT "revision"::text AS "revision" FROM "zzsh_supply"."term_version" WHERE "id" = $1`, [termVersionId]);
+  if (priceAfter.rows[0]?.revision !== priceRow.revision || termAfter.rows[0]?.revision !== termRow.revision) throw conflict("Version changed; refresh and retry");
   const rentalSelection = conditions.rentalPricing == null ? null : normalizeRentalPricing(conditions.rentalPricing);
   const binding: QuotePreviewBinding = {
     priceVersionId, priceVersionStatus: priceRow.status, priceVersionRevision: priceRow.revision, termVersionId,

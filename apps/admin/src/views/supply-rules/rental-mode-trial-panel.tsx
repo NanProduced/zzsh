@@ -3,12 +3,18 @@ import { adminRequest, friendlyError, type PriceVersionRecord, type RulesRespons
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { SupplySelect } from "../../components/supply/supply-select";
-import { REASON_TEXT, asHaffV2, num, yuan } from "./rules-model";
+import { REASON_TEXT, asHaffV2, num } from "./rules-model";
 import { boundText } from "./rental-modes";
 import { bindingMatches, draftTrialRequest, type DraftTrialBinding, type DraftTrialInput } from "./rental-mode-trial";
 
 type Amount = { amount: string } | null | undefined;
-type Preview = { quotable: boolean; reasonCodes?: string[]; binding?: DraftTrialBinding; quote?: { lines: { itemId: string; buyerAmount: Amount; ownerAmount?: Amount }[]; termSeconds: string; ownerHaffRatio?: string; buyerHaffRatio?: string } };
+type PricingInputs = { compatibility?: { baseRatioC?: string | null; ownerRatioB?: string | null } | null; denominators?: { owner?: string | null; buyer?: string | null } | null; spreadDelta?: string | null } | null;
+type Preview = { quotable: boolean; reasonCodes?: string[]; binding?: DraftTrialBinding; quote?: { termSeconds: string; resourceTotal?: Amount; ownerTotal?: Amount; pricingInputs?: PricingInputs } };
+const NA = "未返回";
+/** 比例原样展示服务端精确字符串（单位 万哈夫币/元），不从取整金额反推。 */
+const ratio = (v: string | null | undefined) => (typeof v === "string" && v ? `${v} 万哈夫币/元` : NA);
+/** 金额原样取服务端汇总字符串，不在前端用 Number 求和。 */
+const money = (a: Amount) => (a && typeof a.amount === "string" ? `¥${a.amount}` : NA);
 type State = { signature: string; status: "busy" } | { signature: string; status: "ok"; result: Preview } | { signature: string; status: "error"; message: string };
 
 /** 选中极速草稿的服务端正式试算；输入或草稿修订变化后旧结果立即失效，须重新试算。 */
@@ -31,7 +37,7 @@ export function DraftFastTrial({ rules, version, dirty }: { rules: RulesResponse
   const ok = current?.status === "ok" ? current.result : undefined;
   const stale = ok && req.ok && !bindingMatches(ok.binding, req.expected);
   const fast = haff?.compatibility.modes.fast;
-  const sum = (k: "buyerAmount" | "ownerAmount") => ok?.quote ? ok.quote.lines.reduce<number | null>((t, l) => { const v = num(l[k]?.amount); return t === null || v === null ? null : t + v; }, 0) : null;
+  const pi = ok?.quote?.pricingInputs;
   const errs = req.ok ? {} : req.errors;
   const sel = (key: "box" | "vit" | "bear", label: string, map: Record<string, string> | undefined) => <label className="min-w-0 space-y-1 text-xs"><span className="text-muted-foreground">{label}</span>
     <SupplySelect label={label} value={input[key]} options={Object.keys(map ?? {}).map((v) => ({ value: v, label: v }))} onValueChange={(v) => setInput((p) => ({ ...p, [key]: v }))} />{errs[key] ? <p className="text-[11px] text-destructive">{errs[key]}</p> : null}</label>;
@@ -51,8 +57,8 @@ export function DraftFastTrial({ rules, version, dirty }: { rules: RulesResponse
     {stale ? <p role="alert" className="text-xs text-destructive">服务端回执与当前草稿修订/模式/B/库存不一致，结果作废；请刷新后重试。</p> : null}
     {ok && !stale && !ok.quotable ? <p role="status" className="text-xs">无法报价：{(ok.reasonCodes ?? []).map((c) => REASON_TEXT[c] ?? c).join("、") || "原因未提供"}（B 低于下限或超出上限时同样不可报价）</p> : null}
     {ok && !stale && ok.quotable && ok.quote ? <div role="status" aria-label="极速试算结果" className="rounded-md bg-muted px-3 py-2 text-xs tabular-nums">
-      <p>号主比例 {ok.quote.ownerHaffRatio ?? "未返回"} · 租客比例 {ok.quote.buyerHaffRatio ?? "未返回"} · 可租 {num(ok.quote.termSeconds) ? Math.ceil(num(ok.quote.termSeconds)! / 86400) : "—"} 天</p>
-      <p>租客资源金额 {sum("buyerAmount") === null ? "未返回" : yuan(sum("buyerAmount")!)} · 号主金额（扣费前） {sum("ownerAmount") === null ? "未返回" : yuan(sum("ownerAmount")!)}</p>
+      <p>基础比例 C {ratio(pi?.compatibility?.baseRatioC)} · 号主比例 B {ratio(pi?.compatibility?.ownerRatioB)} · 租客比例 {ratio(pi?.denominators?.buyer)} · 价差 P {ratio(pi?.spreadDelta)}</p>
+      <p>可租 {num(ok.quote.termSeconds) ? Math.ceil(num(ok.quote.termSeconds)! / 86400) : "—"} 天 · 租客资源金额 {money(ok.quote.resourceTotal)} · 号主金额（扣费前） {money(ok.quote.ownerTotal)}</p>
       <p className="text-muted-foreground">绑定：{ok.binding?.priceVersionId} · 修订 {ok.binding?.priceVersionRevision} · {ok.binding?.rentalMode} · B={ok.binding?.ownerRatioB}；会员统一总价折扣不在此试算。</p>
     </div> : null}
   </fieldset>;
