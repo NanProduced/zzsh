@@ -81,6 +81,7 @@
   "dist/test/membership-growth-integration.test.js",
   "dist/test/membership-growth-legacy.test.js",
   "dist/test/membership-growth-legacy-store.test.js",
+  "dist/test/legacy-growth-live.test.js",
   "dist/test/membership-growth-legacy-maintenance.test.js",
   "dist/test/membership-growth-legacy-cli.test.js",
   "dist/test/credit-initialization-batches.test.js",

@@ -1,4 +1,5 @@
 import type { PoolClient } from "pg";
+import { recordLegacyConfirmGrowth } from "../auth/membership-growth-legacy-live";
 import { recordAudit, SecurityApiError } from "../auth/security-core";
 import { conflict, ensureOnlyFields, invalid, newSupplyId, notFound, sha256Hex } from "../supply/supply-util";
 import { canonicalize } from "../supply/content-hash";
@@ -156,6 +157,10 @@ export async function applyLegacyContinuationCommand(client: PoolClient, actor: 
     [resultId, orderId, (BigInt(row.evidenceVersion) + 1n).toString(), versionId, "continuation:" + versionId, binding.sourceDigest, resultFacts.evidence.parameterDigest, resultFacts.evidence.admission, JSON.stringify(resultFacts.evidence.reasons), JSON.stringify(resultFacts), sealed.canonical, sealed.digest]);
   const dutyIds: string[] = [], isolated: Array<{ sourceRecordId: string; reason: string }> = [];
   if (input.kind === "confirm") {
+    await recordLegacyConfirmGrowth(client, { binding, subjectUserId: binding.renterUserId, recordedAt: clock.at, origin: {
+      kind: "CONTINUATION_CONFIRM", command: { id: versionId, revision, createdAt: clock.at, inputEvidenceId: row.id, resultEvidenceId: resultId, planFingerprint: plan.fingerprint, actor }, input: row,
+      result: { id: resultId, orderId, evidenceVersion: (BigInt(row.evidenceVersion) + 1n).toString(), sourceKind: "DERIVED", sourceDigest: binding.sourceDigest, factsDigest: sealed.digest, factsCanonical: sealed.canonical, facts: resultFacts },
+    } });
     dutyIds.push(await createDuty(client, binding, versionId, "RENTER_REFUND", versionId, binding.renterUserId, plan.amounts.refundNet!));
     dutyIds.push(await createDuty(client, binding, versionId, "OWNER_CREDIT", versionId, binding.ownerUserId, plan.amounts.ownerNet!));
     const now = clock.maturityAt;

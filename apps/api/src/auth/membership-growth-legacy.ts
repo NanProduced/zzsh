@@ -75,6 +75,13 @@ export function legacyGrowthVersionHash(settlementId: string, settlementVersion:
 function rowId(c: Pick<GrowthContribution, "userId" | "sourceKey" | "revision">): string {
   return `growth_contribution_${sha(`${c.userId}\u0000${c.sourceKey}\u0000${c.revision}`).slice(0, 48)}`;
 }
+/** Historical maintenance and formal CONFIRM increments keep the same immutable economic identity. */
+export function prepareLegacyGrowthRow(fact: SettledContributionFact, gameId: string): PreparedLegacyRow | null {
+  const parsed = contributionFromSettlement(fact);
+  if (!parsed.accepted || !gameId) return null;
+  const contribution = { ...parsed.contribution, effectiveAt: normalizeGrowthInstant(parsed.contribution.effectiveAt, "effectiveAt"), recordedAt: normalizeGrowthInstant(parsed.contribution.recordedAt, "recordedAt") };
+  return { id: rowId(contribution), gameId, contribution, sourceDigest: growthContributionSourceDigest(legacyGrowthVersionHash(fact.settlementId, fact.settlementVersion), gameId, contribution) };
+}
 function baseSettlementOf(f: Pick<SettledContributionFact, "settlementId" | "correctionOf">): string {
   return f.correctionOf ? f.correctionOf.slice(f.correctionOf.indexOf(":") + 1) : f.settlementId;
 }
@@ -164,12 +171,12 @@ export function prepareLegacyGrowthBackfill(pkg: LegacyGrowthSourcePackage): Pre
     if (!parsed.accepted) return bad("INPUT_INVALID", `ADAPTER_REJECTED:${parsed.reason}`);
     const gameId = pkg.gameIdBySettlementId[base];
     if (typeof gameId !== "string" || !gameId) return bad("INPUT_INVALID", "GAME_BINDING_MISSING");
-    const c = { ...parsed.contribution, effectiveAt: normalizeGrowthInstant(parsed.contribution.effectiveAt, "effectiveAt"), recordedAt: normalizeGrowthInstant(parsed.contribution.recordedAt, "recordedAt") };
-    const sourceDigest = growthContributionSourceDigest(legacyGrowthVersionHash(fact.settlementId, fact.settlementVersion), gameId, c);
+    const prepared = prepareLegacyGrowthRow(fact, gameId)!;
+    const { contribution: c, sourceDigest } = prepared;
     const k = `${c.sourceKey}\u0000${c.revision}`;
     if (byKey.has(k)) { if (byKey.get(k) !== sourceDigest) return bad("SOURCE_CONFLICT", "DUPLICATE_REVISION_DIVERGES"); continue; }
     byKey.set(k, sourceDigest);
-    rows.push({ id: rowId(c), gameId, contribution: c, sourceDigest });
+    rows.push(prepared);
   }
   rows.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const factKeys = sortKeys(rows.map((r) => ({ sourceKey: r.contribution.sourceKey, revision: r.contribution.revision, sourceDigest: r.sourceDigest })));
@@ -225,8 +232,16 @@ export async function writePreparedLegacyGrowth(client: Pick<PoolClient, "query"
   }
   const byFp = await port.readByFingerprint(client, prepared.subjectUserId, prepared.fingerprint);
   if (byFp) return { inserted: 0, replayed: prepared.rows.length, coverage: "REPLAYED", fingerprint: byFp.fingerprint, executionKey: byFp.executionKey ?? executionKey };
+  const { inserted, replayed } = await writeLegacyGrowthContributionRows(client, prepared.rows);
+  const stored = await port.persist(client, { ...prepared.record, executionKey });
+  if (stored.fingerprint !== prepared.fingerprint) throw new LegacyGrowthConflictError(`version:${prepared.fingerprint}`, -1);
+  return { inserted, replayed, coverage: "INSERTED", fingerprint: prepared.fingerprint, executionKey };
+}
+
+/** Caller owns transaction and source authorization; this never writes owner-only historical coverage. */
+export async function writeLegacyGrowthContributionRows(client: Pick<PoolClient, "query">, rows: readonly PreparedLegacyRow[]): Promise<{ inserted: number; replayed: number }> {
   let inserted = 0, replayed = 0;
-  for (const r of prepared.rows) {
+  for (const r of rows) {
     const c = r.contribution;
     const res = await client.query<{ id: string }>(
       `INSERT INTO zzsh_iam.membership_growth_contribution
@@ -240,9 +255,7 @@ export async function writePreparedLegacyGrowth(client: Pick<PoolClient, "query"
     if (!existing || existing.sourceDigest !== r.sourceDigest) throw new LegacyGrowthConflictError(c.sourceKey, c.revision);
     replayed += 1; // earlier version's rows (e.g. S1 partial) are replayed, not rewritten
   }
-  const stored = await port.persist(client, { ...prepared.record, executionKey });
-  if (stored.fingerprint !== prepared.fingerprint) throw new LegacyGrowthConflictError(`version:${prepared.fingerprint}`, -1);
-  return { inserted, replayed, coverage: "INSERTED", fingerprint: prepared.fingerprint, executionKey };
+  return { inserted, replayed };
 }
 
 /**

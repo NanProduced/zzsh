@@ -130,6 +130,7 @@ export type UserDirectoryMembershipSummary =
         status: "ACTIVE";
         label: string;
         depositWaived: boolean;
+        depositAllowanceCents?: string;
       }>;
     }
   | {
