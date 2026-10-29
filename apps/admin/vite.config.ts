@@ -7,6 +7,8 @@ const apiProxy = process.env.ADMIN_API_PROXY ?? "http://127.0.0.1:3102";
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  optimizeDeps: { include: ["@zzsh/content", "@zzsh/content/updates", "@zzsh/content/markdown", "@zzsh/content/markdown/policy"] },
+  ssr: { external: ["@zzsh/content"] },
   resolve: {
     alias: {
       "@": path.resolve(import.meta.dirname, "./src"),

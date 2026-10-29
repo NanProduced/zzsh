@@ -1,3 +1,4 @@
+import { contentFixtureDependency } from "./content-fixture.mjs";
 import assert from "node:assert/strict";
 import { createRequire, Module } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -48,7 +49,8 @@ function loadWorkspace(session, router) {
       return requireFromTree(name);
     };
     const source = fs.readFileSync(path.join(tree, "apps/web/src/components/order", file), "utf8");
-    module._compile(typescript.transpileModule(source, {
+    module.require = ((original) => (name) => contentFixtureDependency(name) ?? original(name))(module.require.bind(module));
+ module._compile(typescript.transpileModule(source, {
       compilerOptions: {
         module: typescript.ModuleKind.CommonJS,
         jsx: typescript.JsxEmit.ReactJSX,

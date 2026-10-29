@@ -1,5 +1,6 @@
 import type { INestApplication } from "@nestjs/common";
 import type { PoolClient } from "pg";
+import { DEFAULT_RESOURCES, RESOURCE_DEFINITIONS, resourceMediaIds, validateResourceKey, type ContentResource } from "@zzsh/content";
 
 import { ADMIN_PERMISSION, loadEffectiveAdminAccess, requirePermission, type EffectiveAdminAccess } from "../auth/admin-authorization";
 import { assertAdminContextInTransaction, readAdminContext, type AuthSecurityOptions } from "../auth/auth-security";
@@ -8,7 +9,6 @@ import { API_V1_ERROR_CODES, ensureApiV1RequestId, validateIdempotencyKey } from
 import { auditSnapshot } from "../supply/supply-audit";
 import {
   decodeId,
-  mapDatabaseError,
   readRawBody,
   requestPath,
   requireAdminAccess,
@@ -16,6 +16,7 @@ import {
   runIdempotentWrite,
   runMediaUpload,
   sendStoredMedia,
+  safely,
   type SupplyRuntimeOptions,
   type SupplyResponse as BaseSupplyResponse,
   type WriteActor,
@@ -34,8 +35,6 @@ import {
   optionalTrimmedString,
   parseExpectedRevision,
   requiredString,
-  sendError,
-  sendInternalError,
   sendJson,
   type IdempotencyReplay,
   type SupplyNodeRequest,
@@ -44,6 +43,9 @@ import {
   readPublicActivity,
   type PublicActivityProviders,
 } from "./public-activity";
+import { builtinResource, listPublicResources, loadResourceItem, lockManagedResource, managedCarousel, readPublicResource, readResourceDetail, type ResourceScope } from "./managed-content";
+import { listPublicUpdates, readPublicUpdate, checkedUpdateSettings, requireUpdatePromotionPermission } from "./updates";
+import type { UpdateSurface } from "@zzsh/content/updates";
 import {
   CAROUSEL_SLOTS,
   carouselCreateRequiresPublish,
@@ -51,6 +53,8 @@ import {
   createCarouselItem,
   createContentDraftFromLatest,
   createContentItem,
+  checkedResource,
+  isMediaResource,
   getPublicContentItem,
   isCarouselSlot,
   isContentType,
@@ -64,9 +68,12 @@ import {
   loadCarouselItem,
   loadContentItem,
   loadContentVersions,
+  loadContentVersion,
   parseRfc3339Timestamp,
   publishContentVersion,
   saveContentDraft,
+  saveContentMediaDraft,
+  restoreContentDraft,
   updateCarouselItem,
   updateContentItemMeta,
   withdrawContentVersion,
@@ -95,7 +102,7 @@ async function authorizeItem(client: PoolClient, actor: WriteActor, action: Cont
 
 async function authorizeItemId(client: PoolClient, actor: WriteActor, action: ContentAction, itemId: string): Promise<ContentItemRow> {
   const item = await loadContentItem(client, itemId);
-  if (!item) throw notFound();
+  if (!item || item.type === "RESOURCE") throw notFound();
   await authorizeItem(client, actor, action, item);
   return item;
 }
@@ -149,28 +156,11 @@ function readCursorId(record: Record<string, unknown>): string {
   return value;
 }
 
-async function safely(response: ContentResponse, requestId: string, action: () => Promise<void>): Promise<void> {
-  try {
-    await action();
-  } catch (error) {
-    if (error instanceof SecurityApiError) {
-      sendError(response, error, requestId);
-      return;
-    }
-    const mapped = mapDatabaseError(error);
-    if (mapped) {
-      sendError(response, mapped, requestId);
-      return;
-    }
-    sendInternalError(response, requestId);
-  }
-}
-
 function versionSnapshotFields(table: "content_item" | "content_version" | "carousel_item"): string {
   if (table === "content_item") return `"id", "type", "game_id" AS "gameId", "sort_order" AS "sortOrder", "revision"::text AS "revision"`;
   if (table === "content_version") {
     return `"id", "item_id" AS "itemId", "sequence", "state", "title", "summary", "cover_media_id" AS "coverMediaId",
-      octet_length("body") AS "bodyBytes", "revision"::text AS "revision", "published_at" AS "publishedAt"`;
+      octet_length("body") AS "bodyBytes", md5("body") AS "bodyDigest", "update_settings" AS "updateSettings", "revision"::text AS "revision", "published_at" AS "publishedAt"`;
   }
   return `"id", "slot_code" AS "slotCode", "media_id" AS "mediaId", "image_alt" AS "imageAlt", "title", "description",
     "link_url" AS "linkUrl", "enabled", "sort_order" AS "sortOrder", "starts_at" AS "startsAt", "ends_at" AS "endsAt", "revision"::text AS "revision"`;
@@ -216,6 +206,51 @@ function itemScopeLabel(item: ContentItemRow): string {
   return item.gameId === null ? "platform" : item.gameId;
 }
 
+function managedKey(raw: string): string {
+  try { return validateResourceKey(decodeURIComponent(raw)); }
+  catch (error) { throw invalid(error instanceof Error ? error.message : "Resource key is invalid"); }
+}
+
+export function resourcePage(query: URLSearchParams, scope?: ResourceScope): { kind?: "guide" | "placement"; after?: string; limit: number } {
+  const kind = query.get("kind");
+  if (kind !== null && kind !== "guide" && kind !== "placement") throw invalid("Resource kind is invalid");
+  const limit = parseLimit(query, 5);
+  if (limit > 5) throw invalid("Resource pages support at most 5 complete documents");
+  const cursor = query.get("cursor");
+  let after: string | undefined;
+  if (cursor !== null) {
+    const value = decodeCursor(cursor, entry => entry.kind === kind && entry.limit === limit
+      && entry.scope === (scope?.scope ?? null) && entry.gameId === (scope?.gameId ?? null));
+    if (typeof value.after !== "string") throw invalid("Resource cursor is invalid");
+    after = managedKey(value.after);
+  }
+  return { ...(kind ? { kind } : {}), ...(after ? { after } : {}), limit };
+}
+
+function resourceCursor(after: string | null, input: { kind?: string; limit: number }, scope?: ResourceScope): string | null {
+  return after ? Buffer.from(JSON.stringify({ v: 1, after, kind: input.kind ?? null, limit: input.limit, scope: scope?.scope ?? null, gameId: scope?.gameId ?? null })).toString("base64url") : null;
+}
+
+async function authorizeResource(client: PoolClient, actor: WriteActor, action: ContentAction, key: string, creatingGameId?: string | null): Promise<ContentItemRow | null> {
+  const item = await loadResourceItem(client, key);
+  if (item) {
+    if (creatingGameId !== undefined && item.gameId !== creatingGameId) throw conflict("Resource scope cannot change");
+    await authorizeItem(client, actor, action, item);
+  } else {
+    const gameId = DEFAULT_RESOURCES[key] ? null : creatingGameId ?? null;
+    if (creatingGameId && DEFAULT_RESOURCES[key]) throw invalid("Built-in resource scope cannot change");
+    const access = await requireAdminAccess(client, actor.id);
+    requirePermission(access, scopePermission(gameId === null, action));
+    if (gameId !== null) await assertGameScope(client, actor.id, access.isBoss, gameId);
+  }
+  return item;
+}
+
+function resourceVersionSnapshot(key: string, item: ContentItemRow, version: { id: string; sequence: number; state: string; revision: string; payload: ContentResource | null }): Record<string, unknown> {
+  return { key, itemId: item.id, itemRevision: item.revision, versionId: version.id, sequence: version.sequence, state: version.state, revision: version.revision,
+    payloadDigest: fingerprintRequest("content.resource", key, version.payload), mediaIds: version.payload ? resourceMediaIds(version.payload) : [] };
+}
+
 // ---------------------------------------------------------------------------
 // Public routes: /api/v1/content
 // ---------------------------------------------------------------------------
@@ -234,6 +269,34 @@ export async function handleContentPublicRoute(
 
   await safely(response, requestId, async () => {
     if (method !== "GET") throw notFound();
+    if (path === "/updates") {
+      if ([...query.keys()].some(key => !["type", "page", "limit", "surface", "gameId"].includes(key))) throw invalid("Query is invalid");
+      const type = query.get("type"), surface = query.get("surface"), gameId = query.get("gameId");
+      if (type !== null && !isContentType(type)) throw invalid("Type is invalid");
+      if (surface !== null && !["home", "publish", "rental", "orders"].includes(surface)) throw invalid("Surface is invalid");
+      if (gameId !== null) { decodeId(gameId); if (!surface || surface === "home") throw invalid("gameId requires a business surface"); }
+      const number = (key: string, fallback: number, max: number) => { const raw = query.get(key); if (raw !== null && !/^[1-9]\d{0,5}$/.test(raw)) throw invalid(`${key} is invalid`); const n = raw === null ? fallback : Number(raw); if (n > max) throw invalid(`${key} is invalid`); return n; };
+      const result = await withTransaction(options.pool, client => listPublicUpdates(client, { page: number("page", 1, 10000), limit: number("limit", 12, 20), ...(type ? { type } : {}), ...(surface ? { surface: surface as "home" | UpdateSurface } : {}), ...(gameId ? { gameId } : {}) }));
+      sendJson(response, 200, result, requestId, PUBLIC_CACHE); return;
+    }
+    const updateMatch = /^\/updates\/([^/]+)$/.exec(path);
+    if (updateMatch) {
+      const result = await withTransaction(options.pool, client => readPublicUpdate(client, decodeId(updateMatch[1]!)));
+      if (!result) throw notFound(); sendJson(response, 200, result, requestId, PUBLIC_CACHE); return;
+    }
+    if (path === "/resources") {
+      const page = resourcePage(query);
+      const result = await withTransaction(options.pool, client => listPublicResources(client, page));
+      sendJson(response, 200, { items: result.items, nextCursor: resourceCursor(result.nextCursor, page), limit: page.limit }, requestId, PUBLIC_CACHE);
+      return;
+    }
+    const resourceMatch = /^\/resources\/([^/]+)$/.exec(path);
+    if (resourceMatch) {
+      const key = managedKey(resourceMatch[1]!);
+      const result = await withTransaction(options.pool, client => readPublicResource(client, key));
+      sendJson(response, 200, result, requestId, PUBLIC_CACHE);
+      return;
+    }
     if (path === "/items") {
       const type = query.get("type");
       if (type !== null && !isContentType(type)) throw invalid("Type is invalid");
@@ -264,11 +327,13 @@ export async function handleContentPublicRoute(
       const slotRaw = query.get("slot") ?? "HOME_HERO";
       if (!isCarouselSlot(slotRaw)) throw invalid("Slot is invalid");
       const limit = parseLimit(query, 50);
-      const items = (await withTransaction(options.pool, (client) => listPublicCarousel(client, slotRaw, limit))).map((item) => ({
-        ...item,
-        mediaUrl: `/api/v1/content/media/${encodeURIComponent(String(item.mediaId))}/content`,
-      }));
-      sendJson(response, 200, { items, limit }, requestId, PUBLIC_CACHE);
+      const result = await withTransaction(options.pool, async client => {
+        const managed = await managedCarousel(client);
+        if (managed.managed) return { items: managed.items.slice(0, limit), managed: true };
+        const items = (await listPublicCarousel(client, slotRaw, limit)).map(item => ({ ...item, mediaUrl: `/api/v1/content/media/${encodeURIComponent(String(item.mediaId))}/content` }));
+        return { items, managed: false };
+      });
+      sendJson(response, 200, { ...result, limit }, requestId, PUBLIC_CACHE);
       return;
     }
     if (path === "/activity") {
@@ -308,7 +373,7 @@ export async function handleContentAdminRoute(
     const context = await readAdminContext(request, options);
     const actor: WriteActor = { realm: "admin", id: context.userId, sessionId: context.sessionId };
     if (method === "GET") {
-      await handleAdminRead(response, options, requestId, path, query, actor);
+      await handleAdminRead(response, options, requestId, path, query, actor, headerValue(request.headers["idempotency-key"]));
       return;
     }
     if (method !== "POST" && method !== "PUT") throw notFound();
@@ -323,7 +388,110 @@ async function handleAdminRead(
   path: string,
   query: URLSearchParams,
   actor: WriteActor,
+  keyHeader?: string,
 ): Promise<void> {
+  if (path === "/operation-result") {
+    for (const name of query.keys()) if (!["operation", "resourceId", "fingerprint", "gameId"].includes(name) || query.getAll(name).length !== 1) throw invalid("Unsupported content recovery query");
+    const operation = query.get("operation") ?? "";
+    if (!["content.resource.draft.create", "content.resource.draft.save", "content.resource.media-draft.save", "content.resource.draft.restore", "content.resource.publish", "content.resource.withdraw"].includes(operation)) throw invalid("Unsupported content recovery operation");
+    const key = managedKey(query.get("resourceId") ?? "");
+    const fingerprint = query.get("fingerprint") ?? "";
+    if (!/^[0-9a-f]{64}$/.test(fingerprint)) throw invalid("Original content fingerprint is required");
+    const idempotencyKey = validateIdempotencyKey(keyHeader);
+    const gameId = query.has("gameId") ? decodeId(query.get("gameId")!) : undefined;
+    const result = await withTransaction(options.pool, async client => {
+      await authorizeResource(client, actor, operation === "content.resource.publish" || operation === "content.resource.withdraw" ? "publish" : "edit", key, gameId);
+      const row = (await client.query<{ fingerprint: string; status: number; body: Record<string, unknown> }>(
+        `SELECT "request_fingerprint" AS fingerprint, "response_status" AS status, "response_body" AS body
+          FROM "zzsh_supply"."idempotency_record" WHERE "scope_key" = $1 AND "key" = $2`,
+        [JSON.stringify(["admin", actor.id, operation, key]), idempotencyKey],
+      )).rows[0];
+      if (!row) return { receipt: "UNRESOLVED" };
+      if (row.fingerprint !== fingerprint) throw new SecurityApiError(409, API_V1_ERROR_CODES.IDEMPOTENCY_KEY_REUSED, "Original content fingerprint does not match");
+      const original = row.body as { key?: string; item?: ContentItemRow; draft?: { id?: string }; published?: { id?: string } };
+      if (row.status !== 200 || !original || original.key !== key || !original.item?.id || !original.item.revision) throw notFound();
+      return { receipt: "RECORDED", operation, resourceId: key, responseStatus: row.status,
+        result: { itemId: original.item.id, revision: original.item.revision, draftVersionId: original.draft?.id ?? null, publishedVersionId: original.published?.id ?? null } };
+    });
+    sendJson(response, 200, result, requestId);
+    return;
+  }
+  if (path === "/resources") {
+    const scope = query.get("scope") ?? "platform";
+    if (scope !== "platform" && scope !== "game") throw invalid("Resource scope is invalid");
+    const rawGameId = query.get("gameId");
+    if (scope === "game" && !rawGameId) throw invalid("gameId is required");
+    if (scope === "platform" && rawGameId !== null) throw invalid("Platform scope does not accept gameId");
+    const filter: ResourceScope = { scope, ...(rawGameId ? { gameId: decodeId(rawGameId) } : {}) };
+    const page = resourcePage(query, filter);
+    const result = await withTransaction(options.pool, async client => {
+      const access = await requireAdminAccess(client, actor.id);
+      requirePermission(access, scopePermission(scope === "platform", "read"));
+      if (filter.gameId) await assertGameScope(client, actor.id, access.isBoss, filter.gameId);
+      const resources = await listPublicResources(client, { ...page, scope: filter });
+      const keys = resources.items.map(item => item.key);
+      const metadata = keys.length ? (await client.query<{ key: string; itemId: string; revision: string; updatedAt: Date; hasDraft: boolean; title: string | null }>(
+        `SELECT i."resource_key" AS key, i."id" AS "itemId", i."revision"::text AS revision, i."updated_at" AS "updatedAt",
+          EXISTS (SELECT 1 FROM "zzsh_content"."content_version" v WHERE v."item_id" = i."id" AND v."state" = 'DRAFT') AS "hasDraft",
+          (SELECT v."title" FROM "zzsh_content"."content_version" v WHERE v."item_id" = i."id" ORDER BY v."sequence" DESC LIMIT 1) AS title
+          FROM "zzsh_content"."content_item" i WHERE i."resource_key" = ANY($1::text[])`, [keys],
+      )).rows : [];
+      return { items: resources.items.map(current => ({ current, definition: RESOURCE_DEFINITIONS.find(entry => entry.key === current.key) ?? null,
+        metadata: metadata.find(entry => entry.key === current.key) ?? null })), nextCursor: resourceCursor(resources.nextCursor, page, filter), limit: page.limit };
+    });
+    sendJson(response, 200, result, requestId);
+    return;
+  }
+  const resourceMatch = /^\/resources\/([^/]+)$/.exec(path);
+  if (resourceMatch) {
+    const key = managedKey(resourceMatch[1]!);
+    const result = await withTransaction(options.pool, async client => {
+      await authorizeResource(client, actor, "read", key);
+      return readResourceDetail(client, key);
+    });
+    sendJson(response, 200, result, requestId);
+    return;
+  }
+  const resourceVersionMatch = /^\/resources\/([^/]+)\/versions\/([^/]+)$/.exec(path);
+  if (resourceVersionMatch) {
+    const key = managedKey(resourceVersionMatch[1]!);
+    const versionId = decodeId(resourceVersionMatch[2]!);
+    const result = await withTransaction(options.pool, async client => {
+      const item = await authorizeResource(client, actor, "read", key);
+      if (!item) throw notFound();
+      const version = await loadContentVersion(client, versionId);
+      if (!version || version.itemId !== item.id) throw notFound();
+      const ids = version.payload ? resourceMediaIds(checkedResource(key, version.payload)) : [];
+      const eligible = ids.length ? (await client.query<{ id: string }>(
+        `SELECT "id" FROM "zzsh_supply"."media_asset" WHERE "id" = ANY($1::text[]) AND "purpose" = 'CONTENT_MEDIA'
+          AND "ownership_kind" = 'PLATFORM_CONTENT' AND "review_state" = 'APPROVED' AND "access_class" = 'PUBLIC_DISPLAY' AND "public_storage_key" IS NOT NULL`, [ids],
+      )).rows : [];
+      const available = new Set(eligible.map(row => row.id));
+      return { version, media: ids.map(id => ({ id, url: available.has(id) ? `/api/v1/content/media/${encodeURIComponent(id)}/content` : null })) };
+    });
+    sendJson(response, 200, result, requestId);
+    return;
+  }
+  if (path === "/storage" || path === "/storage/check") {
+    const sample = await withTransaction(options.pool, async client => {
+      const access = await requireAdminAccess(client, actor.id);
+      requirePermission(access, ADMIN_PERMISSION.contentPlatformRead);
+      if (path !== "/storage/check") return null;
+      return (await client.query<{ publicStorageKey: string }>(
+        `SELECT "public_storage_key" AS "publicStorageKey" FROM "zzsh_supply"."media_asset"
+          WHERE "purpose" = 'CONTENT_MEDIA' AND "ownership_kind" = 'PLATFORM_CONTENT' AND "review_state" = 'APPROVED'
+            AND "access_class" = 'PUBLIC_DISPLAY' AND "public_storage_key" IS NOT NULL ORDER BY "id" LIMIT 1`,
+      )).rows[0] ?? null;
+    });
+    let readCheck: "NOT_RUN" | "NO_PUBLIC_SAMPLE" | "PASS" | "FAILED" = path === "/storage/check" ? "NO_PUBLIC_SAMPLE" : "NOT_RUN";
+    if (sample) {
+      try { await options.mediaStorage.read(sample.publicStorageKey); readCheck = "PASS"; }
+      catch { readCheck = "FAILED"; }
+    }
+    sendJson(response, 200, { backend: options.mediaStorage.kind, configured: options.mediaStorage.available, readCheck,
+      checkedAt: path === "/storage/check" ? new Date().toISOString() : null }, requestId);
+    return;
+  }
   if (path === "/items") {
     const scope = query.get("scope");
     if (scope !== "platform" && scope !== "game") throw invalid("Scope is required");
@@ -361,7 +529,12 @@ async function handleAdminRead(
       const versions = await loadContentVersions(client, itemId);
       const draft = versions.find((version) => version.state === "DRAFT") ?? null;
       const published = versions.find((version) => version.state === "PUBLISHED") ?? null;
-      return { item: { ...item, draft, published }, versions: versions.slice(0, 20) };
+      const previewIds = new Set([draft?.id, published?.id, versions[0]?.id]);
+      const ids = [...new Set(versions.filter(v => previewIds.has(v.id)).flatMap(v => checkedUpdateSettings(v.updateSettings ?? {}).mediaIds))];
+      const qualified = ids.length ? (await client.query<{ id: string }>(`SELECT "id" FROM "zzsh_supply"."media_asset" WHERE "id"=ANY($1::text[]) AND "purpose"='CONTENT_MEDIA' AND "ownership_kind"='PLATFORM_CONTENT' AND "review_state"='APPROVED' AND "access_class"='PUBLIC_DISPLAY' AND "public_storage_key" IS NOT NULL`, [ids])).rows : [];
+      const available = new Set(qualified.map(x => x.id));
+      const preview = (v: typeof draft) => v && previewIds.has(v.id) ? { ...v, bodyMedia: Object.fromEntries(checkedUpdateSettings(v.updateSettings ?? {}).mediaIds.map(id => [id, available.has(id) ? `/api/v1/content/media/${encodeURIComponent(id)}/content` : null])) } : v;
+      return { item: { ...item, draft: preview(draft), published: preview(published) }, versions: versions.slice(0, 20).map(v => preview(v)) };
     });
     sendJson(response, 200, result, requestId);
     return;
@@ -474,9 +647,122 @@ async function handleAdminWrite(
     );
   };
 
+  const resourceWrite = /^\/resources\/([^/]+)\/(draft|media-draft|restore|publish|withdraw)$/.exec(path);
+  if (resourceWrite) {
+    const key = managedKey(resourceWrite[1]!);
+    const operation = resourceWrite[2]!;
+    const body = bodyOf(request);
+    if (operation === "draft" && method === "POST") {
+      ensureOnlyFields(body, ["gameId", "payload", "sourceVersionId"]);
+      const gameId = body.gameId === undefined ? undefined : body.gameId === null ? null : decodeId(requiredString(body, "gameId", 128));
+      const sourceVersionId = body.sourceVersionId === undefined ? undefined : decodeId(requiredString(body, "sourceVersionId", 128));
+      await write("content.resource.draft.create", key, async client => {
+        await authorizeResource(client, actor, "edit", key, gameId);
+      }, async client => {
+        await lockManagedResource(client, key);
+        await authorizeResource(client, actor, "edit", key, gameId);
+        let item = await loadResourceItem(client, key, true);
+        let version;
+        if (item) {
+          if (body.payload !== undefined) throw invalid("Create a draft first, then save its payload");
+          version = (await createContentDraftFromLatest(client, actor.id, item.id, sourceVersionId)).version;
+        } else {
+          if (sourceVersionId) throw notFound();
+          const payload = checkedResource(key, body.payload ?? await builtinResource(client, key, true));
+          if (body.payload !== undefined && isMediaResource(payload)) throw invalid("Fixed page resources are created from their code template, not a custom payload");
+          const created = await createContentItem(client, actor.id, { type: "RESOURCE", gameId: gameId ?? null, resourceKey: key, payload });
+          item = created.item; version = created.version;
+        }
+        await auditContent(client, { actor, requestId, action: "content.resource.draft_created", objectType: "content_resource", objectId: item.id,
+          scope: itemScopeLabel(item), before: null, after: resourceVersionSnapshot(key, item, version), result: "CREATED" });
+        return { status: 200, body: await readResourceDetail(client, key) };
+      });
+      return;
+    }
+    if (operation === "media-draft" && method === "PUT") {
+      ensureOnlyFields(body, ["versionId", "expectedRevision", "media"]);
+      const versionId = decodeId(requiredString(body, "versionId", 128));
+      const expectedRevision = parseExpectedRevision(body);
+      await write("content.resource.media-draft.save", key, async client => {
+        if (!await authorizeResource(client, actor, "edit", key)) throw notFound();
+      }, async client => {
+        const item = await loadResourceItem(client, key, true);
+        if (!item) throw notFound();
+        const before = await loadContentVersion(client, versionId);
+        const result = await saveContentMediaDraft(client, item.id, versionId, expectedRevision, body.media);
+        await auditContent(client, { actor, requestId, action: "content.resource.media_draft_saved", objectType: "content_resource", objectId: item.id,
+          scope: itemScopeLabel(item), before: before ? resourceVersionSnapshot(key, item, before) : null,
+          after: resourceVersionSnapshot(key, result.item, result.version), result: "APPLIED" });
+        return { status: 200, body: await readResourceDetail(client, key) };
+      });
+      return;
+    }
+    if (operation === "restore" && method === "POST") {
+      ensureOnlyFields(body, ["sourceVersionId", "expectedRevision"]);
+      const sourceVersionId = decodeId(requiredString(body, "sourceVersionId", 128));
+      const expectedRevision = parseExpectedRevision(body);
+      await write("content.resource.draft.restore", key, async client => {
+        if (!await authorizeResource(client, actor, "edit", key)) throw notFound();
+      }, async client => {
+        const item = await loadResourceItem(client, key, true);
+        if (!item) throw notFound();
+        const before = (await loadContentVersions(client, item.id)).find(version => version.state === "DRAFT");
+        const restored = await restoreContentDraft(client, actor.id, item.id, sourceVersionId, expectedRevision);
+        const after = await loadContentItem(client, item.id);
+        if (!after) throw notFound();
+        await auditContent(client, { actor, requestId, action: "content.resource.draft_restored", objectType: "content_resource", objectId: item.id,
+          scope: itemScopeLabel(item), before: before ? resourceVersionSnapshot(key, item, before) : null,
+          after: { ...resourceVersionSnapshot(key, after, restored.version), sourceVersionId }, result: "RESTORED" });
+        return { status: 200, body: await readResourceDetail(client, key) };
+      });
+      return;
+    }
+    if (operation === "draft" && method === "PUT") {
+      ensureOnlyFields(body, ["versionId", "expectedRevision", "payload"]);
+      const versionId = decodeId(requiredString(body, "versionId", 128));
+      const expectedRevision = parseExpectedRevision(body);
+      const payload = checkedResource(key, body.payload);
+      await write("content.resource.draft.save", key, async client => {
+        if (!await authorizeResource(client, actor, "edit", key)) throw notFound();
+      }, async client => {
+        const item = await loadResourceItem(client, key, true);
+        if (!item) throw notFound();
+        const before = (await loadContentVersions(client, item.id)).find(version => version.id === versionId);
+        const result = await saveContentDraft(client, item.id, versionId, expectedRevision, { payload });
+        await auditContent(client, { actor, requestId, action: "content.resource.draft_saved", objectType: "content_resource", objectId: item.id,
+          scope: itemScopeLabel(item), before: before ? resourceVersionSnapshot(key, item, before) : null,
+          after: resourceVersionSnapshot(key, result.item, result.version), result: "APPLIED" });
+        return { status: 200, body: await readResourceDetail(client, key) };
+      });
+      return;
+    }
+    if ((operation === "publish" || operation === "withdraw") && method === "POST") {
+      ensureOnlyFields(body, ["versionId", "expectedRevision"]);
+      const versionId = decodeId(requiredString(body, "versionId", 128));
+      const expectedRevision = parseExpectedRevision(body);
+      await write(`content.resource.${operation}`, key, async client => {
+        if (!await authorizeResource(client, actor, "publish", key)) throw notFound();
+        return true;
+      }, async client => {
+        const item = await loadResourceItem(client, key, true);
+        if (!item) throw notFound();
+        const before = (await loadContentVersions(client, item.id)).find(version => version.id === versionId);
+        const result = operation === "publish"
+          ? await publishContentVersion(client, actor.id, item.id, versionId, expectedRevision)
+          : await withdrawContentVersion(client, item.id, versionId, expectedRevision);
+        await auditContent(client, { actor, requestId, action: `content.resource.${operation}`, objectType: "content_resource", objectId: item.id,
+          scope: itemScopeLabel(item), before: before ? resourceVersionSnapshot(key, item, before) : null,
+          after: resourceVersionSnapshot(key, result.item, result.version), result: operation === "publish" ? "PUBLISHED" : "WITHDRAWN" });
+        return { status: 200, body: await readResourceDetail(client, key) };
+      });
+      return;
+    }
+    throw notFound();
+  }
+
   if (path === "/items" && method === "POST") {
     const body = bodyOf(request);
-    ensureOnlyFields(body, ["type", "gameId", "title", "summary", "body", "coverMediaId"]);
+    ensureOnlyFields(body, ["type", "gameId", "title", "summary", "body", "coverMediaId", "updateSettings"]);
     const type = requiredString(body, "type", 16);
     if (!isContentType(type)) throw invalid("Type is invalid");
     const gameIdRaw = body.gameId === undefined || body.gameId === null ? null : decodeId(requiredString(body, "gameId", 128));
@@ -497,6 +783,7 @@ async function handleAdminWrite(
         ...(summary !== undefined ? { summary } : {}),
         ...(contentBody !== undefined ? { body: contentBody } : {}),
         ...(coverMediaId !== undefined ? { coverMediaId } : {}),
+        ...(body.updateSettings !== undefined ? { updateSettings: checkedUpdateSettings(body.updateSettings) } : {}),
       });
       await auditContent(client, {
         actor, requestId,
@@ -517,13 +804,14 @@ async function handleAdminWrite(
   if (draftMatch && method === "PUT") {
     const itemId = decodeId(draftMatch[1]!);
     const body = bodyOf(request);
-    ensureOnlyFields(body, ["versionId", "expectedRevision", "title", "summary", "body", "coverMediaId"]);
+    ensureOnlyFields(body, ["versionId", "expectedRevision", "title", "summary", "body", "coverMediaId", "updateSettings"]);
     // Version identity is required: the server never picks a draft on its own,
     // so a stale editor cannot overwrite a replacement draft that shares the
     // same per-version revision counter.
     const versionId = decodeId(requiredString(body, "versionId", 128));
     const expectedRevision = parseExpectedRevision(body);
     const draft: DraftInput = {};
+    if (body.updateSettings !== undefined) draft.updateSettings = checkedUpdateSettings(body.updateSettings);
     if (body.title !== undefined) draft.title = optionalText(body, "title", 200)!;
     if (body.summary !== undefined) draft.summary = optionalText(body, "summary", 500)!;
     if (body.body !== undefined) draft.body = optionalText(body, "body", 20_000, 20_000)!;
@@ -583,7 +871,12 @@ async function handleAdminWrite(
     const versionId = decodeId(requiredString(body, "versionId", 128));
     const expectedRevision = parseExpectedRevision(body);
     await write("content.version.publish", itemId, async (client) => {
-      await authorizeItemId(client, actor, "publish", itemId);
+      const item = await loadContentItem(client, itemId, true);
+      if (!item || item.type === "RESOURCE") throw notFound();
+      const access = await authorizeItem(client, actor, "publish", item);
+      const version = await loadContentVersion(client, versionId, true);
+      if (!version || version.itemId !== itemId) throw notFound();
+      requireUpdatePromotionPermission(access, version.updateSettings ?? {});
     }, async (client) => {
       const item = await loadContentItem(client, itemId, true);
       if (!item) throw notFound();

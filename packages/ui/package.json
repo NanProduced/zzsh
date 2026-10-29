@@ -1,1 +1,27 @@
-{"name":"@zzsh/ui","version":"0.0.0","private":true,"exports":{"./styles.css":"./src/styles.css","./order-team-panel":"./src/order-team-panel.tsx","./order-team.css":"./src/order-team.css"},"dependencies":{"@zzsh/im-client":"0.0.0"},"peerDependencies":{"react":"19.2.8"}}
+{
+  "name": "@zzsh/ui",
+  "version": "0.0.0",
+  "private": true,
+  "exports": {
+    "./styles.css": "./src/styles.css",
+    "./order-team-panel": "./src/order-team-panel.tsx",
+    "./order-team.css": "./src/order-team.css",
+    "./content-document": "./src/content-document.tsx",
+    "./content-document.css": "./src/content-document.css",
+    "./content-markdown": "./src/content-markdown.tsx",
+    "./content-markdown.css": "./src/content-markdown.css"
+  },
+  "dependencies": {
+    "@zzsh/im-client": "0.0.0",
+    "@zzsh/content": "0.0.0",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1",
+    "rehype-sanitize": "6.0.0"
+  },
+  "peerDependencies": {
+    "react": "19.2.8"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/content-markdown.test.mjs"
+  }
+}

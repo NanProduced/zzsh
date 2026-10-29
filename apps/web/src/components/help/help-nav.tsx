@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import * as Dialog from "@radix-ui/react-dialog";
@@ -88,13 +88,13 @@ export function HelpNavTree({ data, activeCategory, activeSlug, onNavigate }: Na
   return (
     <nav aria-label="帮助目录">
       <ul className="help-nav-list">
-        {data.categories.map((group) => (
+        {data.categories.filter(group => group.articles.length > 0).map((group) => (
           <NavGroup key={group.id} group={group} activeCategory={activeCategory} activeSlug={activeSlug} onNavigate={onNavigate} />
         ))}
       </ul>
-      <hr className="help-nav-divider" />
+      {data.aux.some(group => group.articles.length > 0) ? <hr className="help-nav-divider" /> : null}
       <ul className="help-nav-list">
-        {data.aux.map((group) => (
+        {data.aux.filter(group => group.articles.length > 0).map((group) => (
           <NavGroup key={group.id} group={group} activeCategory={activeCategory} activeSlug={activeSlug} onNavigate={onNavigate} />
         ))}
       </ul>
@@ -114,22 +114,54 @@ export function HelpNavAside(props: NavProps) {
 export function HelpNavDrawer(props: NavProps) {
   const [open, setOpen] = useState(false);
   const pathname = usePathname();
-  useEffect(() => setOpen(false), [pathname]);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const scrollPosRef = useRef(0);
+  const navigatingRef = useRef(false);
+
+  useEffect(() => { navigatingRef.current = true; setOpen(false); }, [pathname]);
+
+  const handleOpen = () => {
+    navigatingRef.current = false;
+    scrollPosRef.current = window.scrollY;
+    setOpen(true);
+  };
+
+  const handleClose = () => {
+    setOpen(false);
+  };
+
   return (
     <>
-      <button type="button" className="help-nav-trigger" onClick={() => setOpen(true)} aria-haspopup="dialog">
+      <button
+        ref={triggerRef}
+        type="button"
+        className="help-nav-trigger"
+        onClick={handleOpen}
+        aria-haspopup="dialog"
+      >
         <ListTree size={17} aria-hidden="true" />
         <span>帮助目录</span>
       </button>
       <Dialog.Root open={open} onOpenChange={setOpen}>
         <Dialog.Portal>
           <Dialog.Overlay className="help-drawer-overlay" />
-          <Dialog.Content className="help-drawer" aria-describedby={undefined}>
+          <Dialog.Content
+            className="help-drawer"
+            aria-describedby={undefined}
+            onCloseAutoFocus={(e) => {
+              e.preventDefault();
+              if (navigatingRef.current) return;
+              triggerRef.current?.focus({ preventScroll: true });
+              window.scrollTo({ top: scrollPosRef.current, behavior: "instant" });
+            }}
+          >
             <div className="help-drawer-heading">
               <Dialog.Title asChild><h2>帮助目录</h2></Dialog.Title>
-              <Dialog.Close className="help-drawer-close" aria-label="关闭帮助目录"><X size={17} /></Dialog.Close>
+              <Dialog.Close className="help-drawer-close" aria-label="关闭帮助目录" onClick={handleClose}>
+                <X size={17} />
+              </Dialog.Close>
             </div>
-            <HelpNavTree {...props} onNavigate={() => setOpen(false)} />
+            <HelpNavTree {...props} onNavigate={() => { navigatingRef.current = true; handleClose(); }} />
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>

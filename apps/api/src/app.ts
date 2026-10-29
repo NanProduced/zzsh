@@ -45,7 +45,7 @@ type ImBodyRequest = {
 
 type ImBodyResponse = { statusCode?: number; end: () => void };
 
-function installImMessageBodyParser(app: { getHttpAdapter: () => { getInstance: () => { use: (middleware: (request: ImBodyRequest, response: ImBodyResponse, next: () => void) => void) => void } } }): void {
+function installScopedBodyParsers(app: { getHttpAdapter: () => { getInstance: () => { use: (middleware: (request: ImBodyRequest, response: ImBodyResponse, next: () => void) => void) => void } } }): void {
   app.getHttpAdapter().getInstance().use((request, response, next) => {
     const path = (request.originalUrl ?? request.url ?? "/").split("?", 1)[0] ?? "/";
     const contentType = request.headers["content-type"];
@@ -80,7 +80,10 @@ function installImMessageBodyParser(app: { getHttpAdapter: () => { getInstance: 
       });
       return;
     }
-    if (request.method?.toUpperCase() !== "POST" || !LARGE_IM_MESSAGE_PATHS.has(path) || !json) {
+    const method = request.method?.toUpperCase();
+    const resourceBody = json && (method === "POST" || method === "PUT") && ["/api/v1/admin/content/resources", "/api/bff/admin/content/resources"].some(prefix => path === prefix || path.startsWith(`${prefix}/`));
+    const largeMessage = json && method === "POST" && LARGE_IM_MESSAGE_PATHS.has(path);
+    if (!resourceBody && !largeMessage) {
       next();
       return;
     }
@@ -91,7 +94,7 @@ function installImMessageBodyParser(app: { getHttpAdapter: () => { getInstance: 
       if (closed || chunk === undefined) return;
       const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       total += bytes.length;
-      if (total > 15 * 1024 * 1024) {
+      if (total > (resourceBody ? 256 * 1024 : 15 * 1024 * 1024)) {
         closed = true;
         response.statusCode = 413;
         response.end();
@@ -128,7 +131,7 @@ export async function createApp(options: ApiAppOptions) {
     { logger: ["error", "warn"], bodyParser: false, rawBody: true },
   );
   if (options.database) app.get(ReadinessService).observeBusinessPool(options.database.pool);
-  installImMessageBodyParser(app);
+  installScopedBodyParsers(app);
   (app as unknown as { useBodyParser: (parser: "json", options?: { limit?: string }) => void }).useBodyParser("json", { limit: "100kb" });
   installApiInfrastructure(app, options);
   const shutdownGate = new ShutdownGateMiddleware(app.get(ReadinessService));

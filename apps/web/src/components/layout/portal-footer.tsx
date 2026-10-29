@@ -7,7 +7,7 @@ import "./header-footer.css";
 const groups: {title:string;links:[string,string][]}[] = [
   { title: "账号服务", links: [["租账号", "/accounts"], ["上架出租", "/publish"], ["三角洲改枪码", "/gunsmith"]] },
   { title: "租赁指南", links: [["租号流程", "/help#rental-guide"], ["费用与租期", "/help#billing-guide"], ["发布须知", "/help#publish-guide"]] },
-  { title: "规则与支持", links: [["帮助与规则", "/help"], ["平台服务协议", "/legal/terms"], ["用户隐私政策", "/legal/privacy"], ["登录 / 注册", "/login"]] },
+  { title: "规则与支持", links: [["帮助与规则", "/help"], ["平台动态", "/updates"], ["平台服务协议", "/legal/terms"], ["用户隐私政策", "/legal/privacy"], ["登录 / 注册", "/login"]] },
 ];
 export function PortalFooter() {
   return <footer className="site-footer">

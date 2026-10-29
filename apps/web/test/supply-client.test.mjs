@@ -29,7 +29,7 @@ test('current catalog membership overrides an older priced label and keeps unkno
   const stale=[{id:'retained-stock',name:'先前读取的物品',unit:'PIECE',priced:true},{id:'kept',name:'旧名',unit:'ROUND',priced:false}];
   const excluded=inventoryEditorRows({items:[]},[{itemId:'retained-stock',quantity:'5'}],stale);
   assert.equal(excluded.length,1);
-  assert.deepEqual(excluded[0],{itemId:'retained-stock',name:'先前读取的物品',unit:'PIECE',quantity:'5',priced:false,required:false,catalogState:'ready'});
+  assert.deepEqual(excluded[0],{itemId:'retained-stock',name:'先前读取的物品',unit:'PIECE',quantity:'5',priced:false,required:false,catalogState:'ready',mediaId:null});
   assert.equal(inventoryPriceHint(excluded[0]),'未进入当前可用价目，不可报价');
   const inventory=[{itemId:'kept',quantity:'4'},{itemId:'zero',quantity:'0'},{itemId:'missing',quantity:null}];
   const labels=[{id:'zero',name:'六级子弹',unit:'ROUND',priced:true},{id:'missing',name:'六级头盔',unit:'PIECE',priced:true}];

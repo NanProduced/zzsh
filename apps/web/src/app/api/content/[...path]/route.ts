@@ -14,7 +14,7 @@ const webOrigin =
   process.env.ZZSH_WEB_ORIGIN ?? (local ? "http://127.0.0.1:3100" : "");
 const id = "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}";
 const getPath = new RegExp(
-  `^/(?:carousel|activity|items|items/${id}|media/${id}/content)$`,
+  `^/(?:carousel|activity|items|items/${id}|updates|updates/${id}|resources|resources/${id}|media/${id}/content)$`,
 );
 const mediaPath = new RegExp(`^/media/${id}/content$`);
 const error = (status: number, code: string, requestId: string) =>
@@ -31,7 +31,7 @@ function localUrls(value: unknown): unknown {
   return Object.fromEntries(
     Object.entries(value).map(([key, child]) => [
       key,
-      (key === "url" || key === "mediaUrl") &&
+      (key === "url" || key === "mediaUrl" || key === "mobileMediaUrl") &&
       typeof child === "string" &&
       child.startsWith("/api/v1/content/") &&
       getPath.test(child.slice("/api/v1/content".length))

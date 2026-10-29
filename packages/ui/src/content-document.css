@@ -1,0 +1,24 @@
+.content-document { min-width:0; max-width:75ch; line-height:1.8; color:inherit; overflow-wrap:anywhere; }
+.content-document-section { margin-block:2rem 0; scroll-margin-top:104px; }
+.content-document-section:first-child { margin-top:0; }
+.content-document h2 { display:flex; gap:.6rem; align-items:baseline; margin:0 0 .8rem; font-size:1.15em; line-height:1.5; font-weight:650; color:inherit; }
+.content-document p { margin:.7rem 0; white-space:pre-wrap; }
+.content-document ul,.content-document ol { margin:.7rem 0; padding-inline-start:1.6rem; }
+.content-document ul { list-style:disc; }
+.content-document ol { list-style:decimal; }
+.content-document li + li { margin-top:.4rem; }
+.content-document a { color:var(--color-accent-brand,var(--primary,inherit)); text-decoration:underline; text-underline-offset:3px; }
+.content-document-anchor { font-size:.85em; opacity:.7; }
+.content-document a:focus-visible,.content-document-table:focus-visible { outline:2px solid currentColor; outline-offset:3px; }
+.content-document-callout { margin:1rem 0; padding:.8rem 1rem; border:1px solid currentColor; border-radius:10px; }
+.content-document-callout p { margin:.25rem 0 0; }
+.content-document-callout--warning { color:var(--color-text-primary,inherit); background:color-mix(in srgb,currentColor 5%,transparent); }
+.content-document-table { margin:1rem 0; overflow-x:auto; scrollbar-color:currentColor transparent; }
+.content-document table { width:100%; min-width:320px; border-collapse:collapse; font-size:.95em; }
+.content-document th,.content-document td { padding:.65rem .8rem; border:1px solid color-mix(in srgb,currentColor 22%,transparent); text-align:start; vertical-align:top; white-space:pre-wrap; min-width:5rem; }
+.content-document th { font-weight:650; background:color-mix(in srgb,currentColor 5%,transparent); }
+.content-document caption { text-align:start; font-weight:600; margin-bottom:.5rem; }
+.content-document-image { margin:1.2rem 0; }
+.content-document-image img { display:block; max-width:100%; height:auto; margin-inline:auto; }
+.content-document-image figcaption { margin-top:.5rem; font-size:.9em; }
+@media(max-width:599px) { .content-document-section { margin-top:1.6rem; } .content-document th,.content-document td { padding:.5rem .6rem; } }

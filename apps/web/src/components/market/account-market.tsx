@@ -3,7 +3,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Button, Drawer } from "@heroui/react";
 import useEmblaCarousel from "embla-carousel-react";
-import { LayoutGrid, List, QrCode, RotateCw, SlidersHorizontal, X } from "lucide-react";
+import { LayoutGrid, List, RotateCw, SlidersHorizontal, X } from "lucide-react";
+import { ManagedMarketBanner, ManagedMarketContact } from "@/components/content/market-content";
 import { AccountCard } from "@/components/delta/account-card";
 import { AccountCardSkeleton } from "@/components/delta/account-card-skeleton";
 import { AccountCardEmpty } from "@/components/delta/account-card-empty";
@@ -56,28 +57,14 @@ function DeltaBanner() {
       <div className="market-banner-viewport" ref={viewport}>
         <div className="market-banner-track">
           <div className="market-banner-slide" role="group" aria-roledescription="幻灯片" aria-label="三角洲行动资源账号租赁">
-            <Link className="market-poster-link" href="#account-list" aria-label="浏览三角洲资源账号">
-              <img src="/art/zhouzhou/delta-section-banner-poster-v3@1080.webp" srcSet="/art/zhouzhou/delta-section-banner-poster-v3@1080.webp 1080w, /art/zhouzhou/delta-section-banner-poster-v3@1620.webp 1620w, /art/zhouzhou/delta-section-banner-poster-v3.png 2172w" sizes="(max-width: 599px) 92vw, (max-width: 1023px) 96vw, 1056px" alt="" fetchPriority="high" />
-            </Link>
+            <ManagedMarketBanner />
           </div>
         </div>
       </div>
     </div>
     <div className="market-contact-templates" aria-label="联系二维码">
-      <div className="market-contact-card">
-        <img src="/art/zhouzhou/group-qr-card-v3@810.webp" srcSet="/art/zhouzhou/group-qr-card-v3@810.webp 810w, /art/zhouzhou/group-qr-card-v3.png 1862w" sizes="(max-width: 767px) 46vw, 300px" alt="玩家交流群二维码暂未配置" loading="lazy" decoding="async" />
-        <div className="market-qr-placeholder" aria-hidden="true">
-          <QrCode size={16} className="market-qr-placeholder-icon" />
-          <span>待配置</span>
-        </div>
-      </div>
-      <div className="market-contact-card">
-        <img src="/art/zhouzhou/cooperation-qr-card-v3@810.webp" srcSet="/art/zhouzhou/cooperation-qr-card-v3@810.webp 810w, /art/zhouzhou/cooperation-qr-card-v3.png 1842w" sizes="(max-width: 767px) 46vw, 300px" alt="合作咨询二维码暂未配置" loading="lazy" decoding="async" />
-        <div className="market-qr-placeholder" aria-hidden="true">
-          <QrCode size={16} className="market-qr-placeholder-icon" />
-          <span>待配置</span>
-        </div>
-      </div>
+      <ManagedMarketContact channel="MARKET_PLAYER_GROUP" />
+      <ManagedMarketContact channel="MARKET_COOPERATION" />
     </div>
   </div>;
 }

@@ -3,29 +3,39 @@ import { useEffect, useState } from "react";
 import { Check, ChevronRight, Info, Link2, ListTree, TriangleAlert } from "lucide-react";
 
 /** 页内目录：滚动同步选中当前章节；桌面右栏与中屏内联两处复用 */
-export function HelpToc({ sections, variant }: { sections: readonly { id: string; title: string }[]; variant: "aside" | "inline" }) {
+export function HelpToc({ sections, variant }: { sections: readonly { id: string; title: string; depth?: number }[]; variant: "aside" | "inline" }) {
   const [current, setCurrent] = useState<string | null>(null);
+
   useEffect(() => {
-    const targets = sections
-      .map((section) => document.getElementById(section.id))
-      .filter((el): el is HTMLElement => el !== null);
-    if (targets.length === 0) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          if (entry.isIntersecting) setCurrent(entry.target.id);
+    if (sections.length === 0) return;
+    const updateActive = () => {
+      if (window.scrollY < 120) {
+        setCurrent(sections[0]?.id ?? null);
+        return;
+      }
+      let activeId: string | null = sections[0]?.id ?? null;
+      for (const section of sections) {
+        const el = document.getElementById(section.id);
+        if (!el) continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.top <= 140) {
+          activeId = section.id;
+        } else {
+          break;
         }
-      },
-      { rootMargin: "-96px 0px -65% 0px", threshold: 0 },
-    );
-    for (const target of targets) observer.observe(target);
-    return () => observer.disconnect();
+      }
+      setCurrent(activeId);
+    };
+
+    updateActive();
+    window.addEventListener("scroll", updateActive, { passive: true });
+    return () => window.removeEventListener("scroll", updateActive);
   }, [sections]);
 
   const list = (
     <ul className="help-toc-list">
       {sections.map((section) => (
-        <li key={section.id}>
+        <li key={section.id} data-depth={section.depth ?? 2}>
           <a href={`#${section.id}`} aria-current={current === section.id ? "true" : undefined}>
             {section.title}
           </a>
@@ -52,6 +62,25 @@ export function HelpToc({ sections, variant }: { sections: readonly { id: string
       <nav aria-label="本页内容">{list}</nav>
     </aside>
   );
+}
+
+/** 恢复旧文章深链，只在当前正文内查找受控新标题，避免将 alias 注入宿主 DOM。 */
+export function HelpLegacyAnchors({ aliases }: { aliases: Readonly<Record<string, string>> }) {
+  useEffect(() => {
+    const apply = () => {
+      let hash: string;
+      try { hash = decodeURIComponent(window.location.hash.slice(1)); } catch { return; }
+      const targetId = Object.hasOwn(aliases, hash) ? aliases[hash] : null;
+      if (!targetId) return;
+      const target = document.getElementById(targetId);
+      if (!target?.closest(".help-article")) return;
+      target.scrollIntoView({ block: "start", behavior: "instant" });
+    };
+    apply();
+    window.addEventListener("hashchange", apply);
+    return () => window.removeEventListener("hashchange", apply);
+  }, [aliases]);
+  return null;
 }
 
 /** 复制当前文章/章节链接；失败给出可恢复反馈 */

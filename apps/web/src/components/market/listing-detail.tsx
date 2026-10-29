@@ -1,4 +1,7 @@
 "use client";
+import { BusinessUpdateNotices } from "@/components/content/platform-update-notices";
+import { ManagedNoticeSections } from "@/components/content/managed-notice";
+import { CatalogItemArt } from "@/components/supply/catalog-item-art";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import Link from "next/link";
@@ -436,6 +439,7 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
 
   return (
     <article className="listing-detail account-detail">
+      <BusinessUpdateNotices surface="rental" gameId={data.gameId} />
       {typeof document !== "undefined" ? createPortal(
         <Toast.Provider queue={copyQueue} placement="top" width="min(360px, calc(100% - 32px))" className="account-copy-feedback" aria-label="复制反馈">
           {({ toast }) => (
@@ -687,6 +691,8 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
             </ol>
           </section>
 
+          <details className="account-process-panel"><summary>租赁流程说明</summary><ManagedNoticeSections contentKey="placement:RENTAL_PROCESS" /></details>
+
           {/* Section 2: Rental Conditions & Owner Note */}
           <section className="account-detail-conditions account-conditions-card" aria-labelledby="account-conditions-title">
             <div className="account-section-title">
@@ -779,11 +785,11 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
                       data-zero={itemInfo.isZero || undefined}
                     >
                       <div className="account-stock-card-art">
-                        {itemInfo.imageSrc ? (
+                        <CatalogItemArt mediaId={line.mediaId}>{itemInfo.imageSrc ? (
                           <DetailImage src={itemInfo.imageSrc} alt="" className="account-stock-card-img" />
                         ) : (
                           <Box size={24} aria-hidden="true" />
-                        )}
+                        )}</CatalogItemArt>
                       </div>
                       <div className="account-stock-card-info">
                         <dt className="account-stock-card-name" title={line.name}>{line.name}</dt>

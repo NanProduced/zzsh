@@ -50,6 +50,18 @@ test("pixel and size bounds reject oversized images", () => {
   assert.doesNotThrow(() => assertImageWithinBounds({ mime: "image/png", width: 1920, height: 1080 }, 1024));
 });
 
+test("EXIF orientation is applied to the derivative without changing original evidence", async () => {
+  const original = await sharp({ create: { width: 80, height: 40, channels: 3, background: "red" } }).withMetadata({ orientation: 6 }).jpeg().toBuffer();
+  const before = Buffer.from(original);
+  const result = await decodeImage(original);
+  assert.deepEqual(original, before);
+  assert.equal((await sharp(original).metadata()).orientation, 6);
+  assert.deepEqual(result.info, { mime: "image/jpeg", width: 40, height: 80 });
+  const derivative = await sharp(result.publicBytes).metadata();
+  assert.equal(derivative.width, 40); assert.equal(derivative.height, 80);
+  assert.equal(derivative.orientation, undefined); assert.equal(derivative.exif, undefined);
+});
+
 test("local storage is content addressed, repeatable, and rejects invalid keys", async () => {
   const root = await mkdtemp(join(tmpdir(), "zzsh-media-"));
   try {

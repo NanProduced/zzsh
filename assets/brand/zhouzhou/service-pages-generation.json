@@ -1,0 +1,52 @@
+{
+  "reference": "assets/brand/zhouzhou/zhouzhou-character-sheet.png",
+  "mode": "built-in imagegen",
+  "assets": [
+    {
+      "source": "assets/brand/zhouzhou/zhouzhou-service-help-v1.png",
+      "sourceSha256": "1df27b7c601bfe9823415a6e8b334971f511427e2d7d973c221797cc2cbcdb7f",
+      "tool": "built-in imagegen",
+      "alphaPreserved": true,
+      "outputs": [
+        {
+          "file": "apps/web/public/images/help/zhouzhou-service-v1-480.webp",
+          "bytes": 34164,
+          "sha256": "9401bb05407c3a655e7f78df5a40feece21d42926b4a926e06204183abe75f99",
+          "width": 480,
+          "height": 320
+        },
+        {
+          "file": "apps/web/public/images/help/zhouzhou-service-v1-960.webp",
+          "bytes": 86590,
+          "sha256": "1b6d035b4c1d7ae592faa28648f17d689b7c8d7f821b42e76d37969c9674f937",
+          "width": 960,
+          "height": 640
+        }
+      ],
+      "prompt": "Use case: stylized-concept\nAsset type: transparent decorative illustration for the Zhouzhou game account service help-center hero, NOT a screenshot or UI mockup.\nInput images: Image 1 is the approved brand character identity reference (character sheet), not an edit target. Preserve the same single mascot identity: glossy golden-yellow rounded skull-like head with small nose and tiny mouth, large warm orange-red friendly eyes, silver-white crown plate, oversized black-and-gold professional gaming headset with boom microphone, black tactical hoodie and vest with subtle gold hardware. Friendly and trustworthy rather than scary.\nPrimary request: one polished premium 3D illustration of this mascot working as a helpful customer-service companion, seated at a clean small ivory desk, using a silver laptop with a plain minimal triangular brand-like mark, one gloved hand raised in a welcoming wave. Include only a small stack of two books and a pencil cup to one side, a comfortable cream chair behind it. No weapons.\nComposition/framing: landscape 3:2 composition, complete compact desk vignette centered with generous transparent margins on all four sides; mascot head and waving hand fully visible; subject takes roughly 80% width, not cropped. The artwork will be displayed around 520 by 350 CSS pixels on desktop and around 170 by 150 on mobile, so emphasize a clearly readable face and silhouette, few props and no tiny details.\nStyle/medium: exquisite 3D collectible character render matching reference identity, soft realistic material detail, crisp clean edges.\nLighting/mood: warm soft daylight from upper left, gentle golden highlights, reassuring and calm.\nColor palette: brand golden yellow, charcoal black, silver, warm ivory. Genuinely transparent background and clean alpha; no office background, no typography, no UI, no captions, no watermark.\nConstraints: only one character; preserve the reference face/headset/outfit identity, keep entire desk and raised hand inside canvas, no baked shadows outside subject except a subtle grounding shadow."
+    },
+    {
+      "source": "assets/brand/zhouzhou/zhouzhou-platform-updates-v1.png",
+      "sourceSha256": "283de49679602310414ebd7d430673f01ad36c6a602626bb8ba8c9ee64de027c",
+      "tool": "built-in imagegen",
+      "alphaPreserved": true,
+      "outputs": [
+        {
+          "file": "apps/web/public/images/updates/zhouzhou-announcer-v1-400.webp",
+          "bytes": 27996,
+          "sha256": "f1c696f28a6c7eb9e4a46ab4e5c461cd271b86bbe8a92089ff274ae597d93a44",
+          "width": 400,
+          "height": 267
+        },
+        {
+          "file": "apps/web/public/images/updates/zhouzhou-announcer-v1-800.webp",
+          "bytes": 70738,
+          "sha256": "af65d84486fbce5113a173f4c2f204d0b20ecaabea346fbdd1a8089b7d7603a3",
+          "width": 800,
+          "height": 533
+        }
+      ],
+      "prompt": "Use case: stylized-concept\nAsset type: genuinely transparent brand character illustration for the Zhouzhou game service platform updates page header, not a UI mockup.\nInput images: Image 1 is the approved brand character identity reference. Preserve the same golden-yellow friendly skull-like head, big orange-red eyes, white crown plate, black-and-gold over-ear headset with microphone, compact black tactical hoodie/vest, rounded gloved hands, large-head small-body proportions.\nPrimary request: the single Zhouzhou mascot as a friendly platform announcer, waist-up with both hands visible, lightly holding a small clean ivory-and-gold megaphone in one hand and a slim charcoal tablet in the other. Calm confident inviting expression. A small solid-gold notification bell accessory may sit beside the tablet, but no floating UI panels. No weapons.\nComposition: compact landscape 3:2 vignette, centered subject with generous transparent margins, entire headset, head, hands, megaphone and tablet visible. Intended display around 340 by 225 CSS pixels on desktop and 130 by 100 on mobile, clear silhouette and minimal props. No desk, no office room, no background scene, no type.\nStyle: exquisite premium 3D collectible character render consistent with the reference, polished materials, soft daylight and gentle warm golden highlights. Friendly game-service companion, not intimidating.\nPalette: golden yellow, charcoal black, warm ivory, silver. Genuine alpha transparency including corners, clean edges suited to warm-white and dark-charcoal page backgrounds.\nAvoid: typography, captions, watermark, news website collage, photographs, additional characters, cropped head or hands, realistic scary skeleton. Do not redraw a page logo; headset identity marks can remain subtle character decoration."
+    }
+  ]
+}

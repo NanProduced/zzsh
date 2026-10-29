@@ -1,5 +1,7 @@
 # 公开交易统计读取
 
+Web 首页保留累计成交、当前上架与昨日访问的原数据源、单位和未知状态。横栏右侧改为独立内容 API 的「平台动态」轮播；下述 recent 完成事实接口继续保留兼容，其口径不因 UI 调整而改变。
+
 `order/public-trade-activity.ts` 提供 `createTradePublicActivityReaders({pool,gate,bindings})`，供内容聚合入口只读注入。三个方法与内容provider合同一致：count返回`{value,asOf,scope}|null`，recent返回`{items:[{id,game,title,priceLabel}],asOf}|null`，最多20条。来源未核返回null；数据库/schema或绑定错误抛错，不伪装为零或合法空。接线与真实来源验收仍须独立完成。
 
 `TradeActivityBindings`由现有受审导入manifest和测试cohort清单组成，仅供可信启动装配，不接受HTTP输入。资源tuple须实查相等；测试订单/账号/旧ID按明确清单排除，不凭名称判断。旧来源须有完整cutoff、提取SHA、已映射snapshot数量及按`legacy_id:source_digest:binding_digest`的C排序SHA256、隔离数量/集合摘要与原证据引用；实际目标集合不符即未知。它不新增签名、审批、token、导入或逐单授权体系，也不把marker当完整来源证明。

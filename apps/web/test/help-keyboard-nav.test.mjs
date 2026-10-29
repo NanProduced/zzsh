@@ -17,6 +17,74 @@ function transpile(rel) {
   return ts.transpileModule(source, { compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS } }).outputText;
 }
 
+function setupDrawer() {
+  const state = { pathname: "/help/fees-early-end", scrollY: 350, open: false };
+  const refs = [], effectDeps = [], effects = [], focused = [], scrolls = [];
+  let refIndex = 0, effectIndex = 0, tree;
+  const exports = {}, trigger = { focus: options => focused.push(options) };
+  new Function("require", "exports", "window", transpile("../src/components/help/help-nav.tsx"))(name => {
+    if (name.endsWith(".css")) return {};
+    if (name === "react") return {
+      ...React,
+      useState: () => [state.open, value => { state.open = value; }],
+      useRef: value => (refs[refIndex++] ??= { current: value }),
+      useEffect: (fn, deps) => {
+        const index = effectIndex++, previous = effectDeps[index];
+        if (!previous || deps.some((value, at) => value !== previous[at])) { effectDeps[index] = deps; effects.push(fn); }
+      },
+    };
+    if (name === "next/navigation") return { usePathname: () => state.pathname };
+    if (name === "next/link") return ({ children, ...props }) => React.createElement("a", props, children);
+    if (name === "@radix-ui/react-dialog") return Object.fromEntries(["Root", "Portal", "Overlay", "Content", "Title", "Close"].map(key => [key, `test-dialog-${key}`]));
+    return require(name);
+  }, exports, {
+    get scrollY() { return state.scrollY; },
+    scrollTo: options => { scrolls.push(options); state.scrollY = options.top; },
+  });
+  const find = predicate => {
+    const nodes = [];
+    const visit = node => { if (!node || typeof node !== "object") return; nodes.push(node); React.Children.toArray(node.props?.children).forEach(visit); };
+    visit(tree); return nodes.find(predicate);
+  };
+  const render = () => {
+    refIndex = 0; effectIndex = 0;
+    tree = exports.HelpNavDrawer({ data: { categories: [], aux: [] } });
+    find(node => node.type === "button" && node.props.className === "help-nav-trigger").props.ref.current = trigger;
+  };
+  const runEffects = () => { effects.splice(0).forEach(fn => fn()); render(); };
+  const open = () => { find(node => node.type === "button" && node.props.className === "help-nav-trigger").props.onClick(); render(); };
+  const cancel = () => { find(node => node.type === "test-dialog-Close").props.onClick(); render(); };
+  const navigate = () => { find(node => node.type === exports.HelpNavTree).props.onNavigate(); render(); };
+  const closeAutoFocus = () => {
+    let prevented = false;
+    find(node => node.type === "test-dialog-Content").props.onCloseAutoFocus({ preventDefault: () => { prevented = true; } });
+    return prevented;
+  };
+  render(); runEffects();
+  return { state, focused, scrolls, render, runEffects, open, cancel, navigate, closeAutoFocus };
+}
+
+test("drawer cancellation restores position while article navigation leaves the new page untouched", () => {
+  const cancel = setupDrawer();
+  cancel.open(); cancel.state.scrollY = 0; cancel.cancel();
+  assert.equal(cancel.closeAutoFocus(), true);
+  assert.deepEqual(cancel.focused, [{ preventScroll: true }]);
+  assert.deepEqual(cancel.scrolls, [{ top: 350, behavior: "instant" }]);
+
+  const navigation = setupDrawer();
+  navigation.open(); navigation.navigate(); navigation.state.scrollY = 0;
+  assert.equal(navigation.state.open, false); assert.equal(navigation.closeAutoFocus(), true);
+  assert.deepEqual(navigation.focused, []); assert.deepEqual(navigation.scrolls, []); assert.equal(navigation.state.scrollY, 0);
+  navigation.state.scrollY = 240; navigation.open(); navigation.cancel(); navigation.closeAutoFocus();
+  assert.deepEqual(navigation.focused, [{ preventScroll: true }]); assert.equal(navigation.scrolls[0].top, 240);
+
+  const externalNavigation = setupDrawer();
+  externalNavigation.open(); externalNavigation.state.pathname = "/help/anti-fraud-guide";
+  externalNavigation.render(); externalNavigation.runEffects(); externalNavigation.state.scrollY = 0;
+  assert.equal(externalNavigation.state.open, false); assert.equal(externalNavigation.closeAutoFocus(), true);
+  assert.deepEqual(externalNavigation.focused, []); assert.deepEqual(externalNavigation.scrolls, []); assert.equal(externalNavigation.state.scrollY, 0);
+});
+
 test("neighbors follow the flattened help-nav order for all 24 articles", () => {
   const nav = buildHelpNavData(allHelpArticles);
   const order = flattenHelpNavArticles(nav).map((a) => a.slug);
@@ -62,6 +130,7 @@ function setupPager({ prev, next, pathname = "/help/rental-getting-started" } = 
     if (name === "./keyboard-scope") return keyboardScope;
     return require(name);
   }, exports, {
+    get location() { return { hash: state.hash ?? "" }; },
     matchMedia: (query) => ({ matches: state.reducedMotion, media: query }),
     scrollTo: (options) => scrolls.push(options),
   }, {
@@ -97,6 +166,30 @@ test("pager renders prev/next links with correct hrefs and edge placeholders", (
 
   const none = setupPager({ prev: null, next: null });
   assert.equal(none.render(), null, "pager without neighbors renders nothing");
+});
+
+test("article navigation preserves an explicit section deep link instead of scrolling back to the title", () => {
+  const page = setupPager({ prev: null, next: { slug: "b", title: "b" }, pathname: "/help/a" });
+  page.render(); page.runEffects();
+  page.state.pathname = "/help/b"; page.state.hash = "#old-section";
+  page.render(); page.runEffects();
+  assert.equal(page.scrolls.length, 0);
+  assert.equal(page.heading.focusArgs, null);
+});
+
+test("legacy section aliases scroll only to the current article, without injecting alias DOM IDs", () => {
+  const effects = [], events = new Map(), scrolls = [];
+  const location = { hash: "#old-section" };
+  const target = { closest: selector => selector === ".help-article" ? {} : null, scrollIntoView: options => scrolls.push(options) };
+  const exports = {};
+  new Function("require", "exports", "window", "document", transpile("../src/components/help/help-article-extras.tsx"))(name => name === "react" ? { ...React, useEffect: fn => effects.push(fn) } : require(name), exports, {
+    location, addEventListener: (name, fn) => events.set(name, fn), removeEventListener: name => events.delete(name),
+  }, { getElementById: id => id === "content-new-section" ? target : null });
+  assert.equal(exports.HelpLegacyAnchors({ aliases: { "old-section": "content-new-section", external: "outside" } }), null);
+  const cleanup = effects[0](); assert.equal(scrolls.length, 1);
+  location.hash = "#external"; events.get("hashchange")(); assert.equal(scrolls.length, 1);
+  location.hash = "#%FF"; assert.doesNotThrow(() => events.get("hashchange")());
+  cleanup(); assert.equal(events.size, 0);
 });
 
 test("ArrowLeft/ArrowRight navigate between articles and ignore editable targets and modifiers", () => {
