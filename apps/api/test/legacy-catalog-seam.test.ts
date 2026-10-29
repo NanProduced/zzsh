@@ -16,14 +16,21 @@ class Stub {
   audits: Array<{ action: unknown; objectType: unknown; objectId: unknown; details: Record<string, unknown> }> = [];
   ownerRow: { id: string; name: string } | undefined;
   ownerName: string | undefined = "威龙";
+  ownerGameId: string | undefined;
   skinRow: Record<string, unknown> | undefined;
+  gameCode = "game_test";
   catalogRevision = "7";
   terminalCas = true;
+  auditFailure = false;
   query = async (text: string, values: unknown[] = []): Promise<{ rows: unknown[]; rowCount?: number }> => {
     this.queries.push({ text, values });
+    if (text.startsWith("SELECT code FROM zzsh_supply.game")) return { rows: [{ code: this.gameCode }], rowCount: 1 };
     if (text.startsWith("SELECT id,name FROM zzsh_supply.skin_owner")) return { rows: this.ownerRow ? [this.ownerRow] : [], rowCount: this.ownerRow ? 1 : 0 };
     if (text.startsWith(`SELECT id,naming_state AS "namingState"`)) return { rows: this.skinRow ? [this.skinRow] : [], rowCount: this.skinRow ? 1 : 0 };
-    if (text.startsWith("SELECT name,enabled FROM zzsh_supply.skin_owner") || text.startsWith("SELECT name,enabled FROM zzsh_supply.firearm")) return { rows: this.ownerName ? [{ name: this.ownerName, enabled: true }] : [] };
+    if (text.startsWith("SELECT name,enabled FROM zzsh_supply.skin_owner") || text.startsWith("SELECT name,enabled FROM zzsh_supply.firearm")) {
+      const sameGame = this.ownerGameId === undefined || values[0] === this.ownerGameId;
+      return { rows: this.ownerName && sameGame ? [{ name: this.ownerName, enabled: true }] : [] };
+    }
     if (text.startsWith(`SELECT naming_state AS "namingState" FROM zzsh_supply.skin WHERE id=$1`)) return { rows: [{ namingState: "VERIFIED" }] };
     if (text.startsWith(`SELECT catalog_revision::text AS revision FROM zzsh_supply.game`)) return { rows: [{ revision: this.catalogRevision }] };
     if (text.startsWith('UPDATE zzsh_supply.game SET catalog_revision')) {
@@ -31,7 +38,10 @@ class Stub {
       this.catalogRevision = (BigInt(this.catalogRevision) + 1n).toString();
       return { rows: [{ revision: this.catalogRevision }], rowCount: 1 };
     }
-    if (text.startsWith(`UPDATE "zzsh_supply"."game" SET "catalog_revision"`)) return { rows: [], rowCount: 1 };
+    if (text.startsWith(`UPDATE "zzsh_supply"."game" SET "catalog_revision"`)) {
+      this.catalogRevision = (BigInt(this.catalogRevision) + 1n).toString();
+      return { rows: [], rowCount: 1 };
+    }
     if (text.startsWith("INSERT INTO zzsh_supply.skin_owner")) return { rows: [], rowCount: 1 };
     if (text.startsWith("UPDATE zzsh_supply.skin SET owner_kind")) return { rows: [], rowCount: 1 };
     if (text.startsWith('UPDATE zzsh_supply.skin SET name=')) {
@@ -39,6 +49,7 @@ class Stub {
       return { rows: [{ namingState: 'VERIFIED' }], rowCount: 1 };
     }
     if (text.startsWith(`INSERT INTO "zzsh_iam"."audit_event"`)) {
+      if (this.auditFailure) throw new Error("audit failed");
       this.audits.push({ action: values[4], objectType: values[5], objectId: values[6], details: JSON.parse(String(values[10])) });
       return { rows: [], rowCount: 1 };
     }
@@ -84,6 +95,35 @@ test("legacy owner import writes the owner and a bound audit in the same call, t
   assert.equal(stub.audits.length, 2);
 });
 
+test("Delta refuses a new melee parent import while other games and Delta agents keep their contract", async () => {
+  const meleeRecord = { namespace: NAMESPACE, kind: "MELEE_TYPE", code: "fake_melee_parent", name: "转刀" };
+  const meleeInput = { kind: "MELEE_TYPE" as const, code: "fake_melee_parent", name: "转刀", evidence: evidence(meleeRecord), audit: AUDIT, reason: "No parent for Delta melee" };
+  const delta = new Stub(); delta.gameCode = "delta";
+  await assert.rejects(() => importLegacySkinOwner(client(delta), "admin_test", true, "game_test", meleeInput), (error: unknown) => error instanceof SecurityApiError && error.status === 400);
+  assert.deepEqual(writes(delta), []);
+  assert.equal(delta.audits.length, 0);
+  assert.equal(delta.queries.some((query) => query.text.startsWith("SELECT id,name FROM zzsh_supply.skin_owner")), false, "refused before the owner row is read or written");
+
+  const other = new Stub(); other.gameCode = "other_game";
+  const otherCreated = await importLegacySkinOwner(client(other), "admin_test", true, "game_test", meleeInput);
+  assert.equal(otherCreated.kind, "MELEE_TYPE");
+  assert.equal(other.audits[0]!.details.result, "CREATED");
+
+  const agent = new Stub(); agent.gameCode = "delta";
+  const agentRecord = { ...meleeRecord, kind: "AGENT", code: "delta_agent", name: "威龙" };
+  const agentCreated = await importLegacySkinOwner(client(agent), "admin_test", true, "game_test", { ...meleeInput, kind: "AGENT", code: "delta_agent", name: "威龙", evidence: evidence(agentRecord) });
+  assert.equal(agentCreated.kind, "AGENT");
+  assert.equal(agent.audits[0]!.details.result, "CREATED");
+});
+
+test("legacy owner import checks game scope before any owner or audit write", async () => {
+  let scopeQueries = 0;
+  const unscoped = { query: async () => { scopeQueries++; return { rows: [{ mode: "SELECTED_GAMES", gameIds: [] }] }; } } as unknown as PoolClient;
+  const record = { namespace: NAMESPACE, kind: "AGENT", code: "scoped_owner", name: "威龙" };
+  await assert.rejects(() => importLegacySkinOwner(unscoped, "scoped_admin", false, "game_test", { kind: "AGENT", code: "scoped_owner", name: "威龙", evidence: evidence(record), audit: AUDIT, reason: "scope" }), /No game scope/);
+  assert.equal(scopeQueries, 1, "scope is checked before any owner or audit statement");
+});
+
 test("legacy skin identity confirmation records the exact source tuple and rejects mismatched evidence", async () => {
   const stub = new Stub();
   const skinRow = { id: "skin_test", namingState: "PENDING", ownerKind: null, ownerId: null, firearmId: null, baseName: null, sourceNamespace: NAMESPACE, sourceField: "gold_skin", sourceToken: "威龙-壮志凌云" };
@@ -125,6 +165,134 @@ test("legacy skin identity confirmation records the exact source tuple and rejec
   assert.equal(stub.audits.length, 2);
 });
 
+const deltaMeleeRow = () => ({
+  id: "skin_delta_melee", namingState: "PENDING", ownerKind: null, ownerId: null, firearmId: null, baseName: null,
+  sourceNamespace: NAMESPACE, sourceField: "knife_skin", sourceToken: "赤枭", name: "赤枭", aliases: [] as string[],
+});
+const deltaMeleeRecord = { namespace: NAMESPACE, code: "df_skin_delta_melee", sourceField: "knife_skin", sourceToken: "赤枭", ownerKind: "MELEE_TYPE", ownerId: null, baseName: "赤枭" };
+const deltaMeleeInput = () => ({ code: deltaMeleeRecord.code, ownerRef: null, ownerKind: "MELEE_TYPE" as const, baseName: deltaMeleeRecord.baseName, evidence: evidence(deltaMeleeRecord), audit: AUDIT, reason: "Delta standalone melee identity" });
+
+test("Delta legacy melee confirms a standalone identity without a parent owner or lookup", async () => {
+  const stub = new Stub(); stub.gameCode = "delta"; stub.skinRow = deltaMeleeRow();
+  const input = deltaMeleeInput();
+  const confirmed = await confirmLegacySkinIdentity(client(stub), "admin_test", true, "game_test", input);
+  assert.deepEqual(confirmed, { id: "skin_delta_melee", code: deltaMeleeRecord.code, namingState: "VERIFIED", catalogRevision: "8" });
+  const update = stub.queries.find((query) => query.text.startsWith("UPDATE zzsh_supply.skin SET owner_kind"))!;
+  assert.deepEqual(update.values, ["skin_delta_melee", "MELEE_TYPE", null, null, "赤枭", [], "赤枭"]);
+  assert.equal(stub.queries.some((query) => query.text.startsWith("SELECT name,enabled FROM")), false, "standalone melee has no parent owner to look up");
+  assert.equal(stub.queries.some((query) => /source_\w+\s*=/.test(query.text)), false, "the source tuple is bound but never rewritten");
+  assert.equal(stub.audits.length, 1);
+  assert.deepEqual(
+    {
+      ownerKind: stub.audits[0]!.details.ownerKind, ownerId: stub.audits[0]!.details.ownerId,
+      sourceField: stub.audits[0]!.details.sourceField, sourceToken: stub.audits[0]!.details.sourceToken,
+      displayName: stub.audits[0]!.details.displayName, result: stub.audits[0]!.details.result,
+    },
+    { ownerKind: "MELEE_TYPE", ownerId: null, sourceField: "knife_skin", sourceToken: "赤枭", displayName: "赤枭", result: "CREATED" },
+  );
+  assert.notEqual(legacyCatalogRecordDigest(deltaMeleeRecord), legacyCatalogRecordDigest({ ...deltaMeleeRecord, ownerId: "old_parent" }), "new standalone evidence cannot equal an old parent packet");
+  assert.notEqual(legacyCatalogRecordDigest(deltaMeleeRecord), legacyCatalogRecordDigest({ ...deltaMeleeRecord, ownerKind: "AGENT" }), "standalone melee evidence is not an agent packet");
+  const order = ["UPDATE zzsh_supply.skin SET owner_kind", `UPDATE "zzsh_supply"."game" SET "catalog_revision"`, `INSERT INTO "zzsh_iam"."audit_event"`];
+  const indexes = order.map((prefix) => stub.queries.findIndex((query) => query.text.startsWith(prefix)));
+  assert.ok(indexes.every((index) => index >= 0));
+  assert.deepEqual([...indexes].sort((left, right) => left - right), indexes, "owner write, revision bump and audit keep their order");
+  assert.equal(stub.queries.some((query) => /^(BEGIN|COMMIT|ROLLBACK)/.test(query.text)), false, "the caller owns the transaction");
+
+  stub.skinRow = { ...deltaMeleeRow(), namingState: "VERIFIED", ownerKind: "MELEE_TYPE", baseName: "赤枭", name: "赤枭" };
+  stub.queries = []; stub.audits = [];
+  const replay = await confirmLegacySkinIdentity(client(stub), "admin_test", true, "game_test", input);
+  assert.equal(replay.namingState, "VERIFIED");
+  assert.equal(replay.catalogRevision, "8");
+  assert.deepEqual(writes(stub), []);
+  assert.equal(stub.audits[0]!.details.result, "REPLAY_VERIFIED");
+  assert.equal(stub.audits[0]!.details.ownerId, null);
+
+  stub.skinRow = deltaMeleeRow(); stub.queries = []; stub.audits = [];
+  const oldRecord = { ...deltaMeleeRecord, ownerId: "old_parent" };
+  await assert.rejects(() => confirmLegacySkinIdentity(client(stub), "admin_test", true, "game_test", { ...input, ownerRef: { kind: "MELEE_TYPE" as const, id: "old_parent" }, evidence: evidence(oldRecord) }), (error: unknown) => error instanceof SecurityApiError && error.status === 400);
+  assert.deepEqual(writes(stub), []);
+  assert.equal(stub.audits.length, 0);
+  assert.equal(stub.queries.some((query) => query.text.startsWith("SELECT id,naming_state")), false, "old parent packets are refused before the skin row is read");
+});
+
+test("standalone melee is Delta-only and rejects missing or mismatched identity fields", async () => {
+  const otherGame = new Stub(); otherGame.gameCode = "other_game"; otherGame.skinRow = deltaMeleeRow();
+  await assert.rejects(() => confirmLegacySkinIdentity(client(otherGame), "admin_test", true, "game_test", deltaMeleeInput()), /三角洲/);
+  assert.deepEqual(writes(otherGame), []); assert.equal(otherGame.audits.length, 0);
+
+  for (const ownerKind of ["AGENT", "FIREARM"] as const) {
+    const stub = new Stub(); stub.gameCode = "delta"; stub.skinRow = deltaMeleeRow();
+    await assert.rejects(() => confirmLegacySkinIdentity(client(stub), "admin_test", true, "game_test", { ...deltaMeleeInput(), ownerKind }), (error: unknown) => error instanceof SecurityApiError && error.status === 400);
+    assert.deepEqual(writes(stub), []); assert.equal(stub.audits.length, 0);
+  }
+
+  const missingKind = new Stub(); missingKind.gameCode = "delta"; missingKind.skinRow = deltaMeleeRow();
+  const { ownerKind: _omitted, ...withoutKind } = deltaMeleeInput();
+  await assert.rejects(() => confirmLegacySkinIdentity(client(missingKind), "admin_test", true, "game_test", withoutKind), (error: unknown) => error instanceof SecurityApiError && error.status === 400);
+  assert.deepEqual(writes(missingKind), []); assert.equal(missingKind.audits.length, 0);
+
+  const deltaParent = new Stub(); deltaParent.gameCode = "delta"; deltaParent.skinRow = deltaMeleeRow();
+  const parentRecord = { ...deltaMeleeRecord, ownerId: "historical_melee" };
+  await assert.rejects(() => confirmLegacySkinIdentity(client(deltaParent), "admin_test", true, "game_test", { ...deltaMeleeInput(), ownerRef: { kind: "MELEE_TYPE" as const, id: "historical_melee" }, evidence: evidence(parentRecord) }), (error: unknown) => error instanceof SecurityApiError && error.status === 400);
+  assert.deepEqual(writes(deltaParent), []);
+  assert.equal(deltaParent.audits.length, 0);
+  assert.equal(deltaParent.queries.some((query) => query.text.startsWith("SELECT id,naming_state")), false, "a historical parent is refused before the skin row is read, never re-enabled");
+});
+
+test("standalone melee keeps the same-key, source-tuple and owner-model boundaries", async () => {
+  const verified = new Stub(); verified.gameCode = "delta";
+  verified.skinRow = { ...deltaMeleeRow(), namingState: "VERIFIED", ownerKind: "MELEE_TYPE", baseName: "赤枭", name: "赤枭" };
+  const changedBase = { ...deltaMeleeInput(), baseName: "坠星者", evidence: evidence({ ...deltaMeleeRecord, baseName: "坠星者" }) };
+  await assert.rejects(() => confirmLegacySkinIdentity(client(verified), "admin_test", true, "game_test", changedBase), /Legacy identity conflicts/);
+  assert.deepEqual(writes(verified), []); assert.equal(verified.audits.length, 0);
+
+  const pending = new Stub(); pending.gameCode = "delta"; pending.skinRow = deltaMeleeRow();
+  const wrongTuple = { ...deltaMeleeInput(), evidence: evidence({ ...deltaMeleeRecord, sourceToken: "坠星者" }) };
+  await assert.rejects(() => confirmLegacySkinIdentity(client(pending), "admin_test", true, "game_test", wrongTuple), /evidence does not match/);
+  assert.deepEqual(writes(pending), []); assert.equal(pending.audits.length, 0);
+
+  const agentRow = new Stub(); agentRow.gameCode = "delta";
+  agentRow.skinRow = { ...deltaMeleeRow(), namingState: "VERIFIED", ownerKind: "AGENT", ownerId: "owner_1", baseName: "赤枭", name: "威龙-赤枭" };
+  await assert.rejects(() => confirmLegacySkinIdentity(client(agentRow), "admin_test", true, "game_test", deltaMeleeInput()), /Legacy identity conflicts/);
+  assert.deepEqual(writes(agentRow), []); assert.equal(agentRow.audits.length, 0);
+
+  for (const [kind, id] of [["AGENT", "owner_missing"], ["FIREARM", "firearm_missing"]] as const) {
+    const stub = new Stub(); stub.ownerName = undefined;
+    const sourceField = kind === "FIREARM" ? "weapon_skin" : "agent_skin";
+    stub.skinRow = { ...deltaMeleeRow(), sourceField, sourceToken: "外观", name: "外观" };
+    const record = { namespace: NAMESPACE, code: "df_skin_owner_scope", sourceField, sourceToken: "外观", ownerKind: kind, ownerId: id, baseName: "外观" };
+    const input = { code: record.code, ownerRef: { kind, id }, baseName: "外观", evidence: evidence(record), audit: AUDIT, reason: "scope" };
+    await assert.rejects(() => confirmLegacySkinIdentity(client(stub), "admin_test", true, "game_test", input), /owner does not belong/i);
+    assert.deepEqual(writes(stub), []);
+    assert.equal(stub.audits.length, 0);
+    const lookup = stub.queries.find((query) => query.text.startsWith("SELECT name,enabled FROM"))!;
+    assert.deepEqual(lookup.values, kind === "FIREARM" ? ["game_test", id] : ["game_test", kind, id], "owner lookup is scoped by game and exact owner");
+
+    stub.ownerName = "所属"; stub.ownerGameId = "game_other"; stub.queries = []; stub.audits = [];
+    await assert.rejects(() => confirmLegacySkinIdentity(client(stub), "admin_test", true, "game_test", input), /owner does not belong/i);
+    assert.deepEqual(writes(stub), []);
+    assert.equal(stub.audits.length, 0);
+    assert.equal(stub.queries.find((query) => query.text.startsWith("SELECT name,enabled FROM"))!.values[0], "game_test", "another game's owner id cannot satisfy the lookup");
+
+    stub.ownerGameId = "game_test"; stub.queries = []; stub.audits = [];
+    const positive = await confirmLegacySkinIdentity(client(stub), "admin_test", true, "game_test", input);
+    assert.equal(positive.namingState, "VERIFIED");
+    assert.equal(stub.audits[0]!.details.displayName, "所属-外观");
+    assert.equal(stub.audits[0]!.details.ownerKind, kind);
+  }
+});
+
+test("standalone melee confirmation fails closed on audit errors and does not manage the caller transaction", async () => {
+  const stub = new Stub(); stub.gameCode = "delta"; stub.skinRow = deltaMeleeRow(); stub.auditFailure = true;
+  await assert.rejects(() => confirmLegacySkinIdentity(client(stub), "admin_test", true, "game_test", deltaMeleeInput()), /audit failed/);
+  assert.equal(stub.audits.length, 0);
+  assert.equal(stub.queries.some((query) => /^(BEGIN|COMMIT|ROLLBACK)/.test(query.text)), false, "no transaction is started or committed by the seam");
+  const skin = stub.queries.findIndex((query) => query.text.startsWith("UPDATE zzsh_supply.skin SET owner_kind"));
+  const revision = stub.queries.findIndex((query) => query.text.startsWith(`UPDATE "zzsh_supply"."game" SET "catalog_revision"`));
+  const audit = stub.queries.findIndex((query) => query.text.startsWith(`INSERT INTO "zzsh_iam"."audit_event"`));
+  assert.ok(skin >= 0 && skin < revision && revision < audit, "the audit is the final write; the caller must roll the earlier writes back");
+});
+
 test("legacy catalog record digest is canonical across key order", () => {
   const left = legacyCatalogRecordDigest({ namespace: NAMESPACE, kind: "AGENT", code: "c", name: "n" });
   const right = legacyCatalogRecordDigest({ name: "n", code: "c", kind: "AGENT", namespace: NAMESPACE });
@@ -150,6 +318,34 @@ const mechanicalInput = () => ({
 function mechanicalStub() {
   const stub = new Stub(); stub.skinRow = structuredClone(mechanicalRow); stub.ownerName = 'M4A1'; return stub;
 }
+
+test('legacy normalization rejects an overlong combined display name before writing', async () => {
+  const stub = mechanicalStub(); stub.ownerName = 'M'.repeat(120);
+  await assert.rejects(() => confirmLegacySkinIdentity(client(stub), 'admin_test', true, 'game_test', mechanicalInput()),
+    (error: unknown) => error instanceof SecurityApiError && error.status === 400);
+  assert.deepEqual(writes(stub), []);
+  assert.equal(stub.audits.length, 0);
+});
+
+test('standalone melee normalization preserves aliases and uses revision CAS without a parent', async () => {
+  const stub = new Stub(); stub.gameCode = 'delta';
+  stub.skinRow = { ...deltaMeleeRow(), namingState: 'VERIFIED', ownerKind: 'MELEE_TYPE', baseName: '旧外观', name: '旧外观', aliases: ['原别名'] };
+  const input = { ...deltaMeleeInput(), normalization: { previousBaseName: '旧外观', expectedCatalogRevision: '7' },
+    evidence: evidence({ ...deltaMeleeRecord, previousBaseName: '旧外观' }) };
+  const result = await confirmLegacySkinIdentity(client(stub), 'admin_test', true, 'game_test', input);
+  assert.equal(result.catalogRevision, '8');
+  assert.deepEqual(stub.queries.find(query => query.text.startsWith('UPDATE zzsh_supply.skin SET name='))!.values,
+    ['skin_delta_melee', '赤枭', '赤枭', ['原别名', '旧外观']]);
+  assert.equal(stub.queries.some(query => query.text.startsWith('SELECT name,enabled FROM')), false);
+  assert.deepEqual(stub.queries.find(query => query.text.startsWith('UPDATE zzsh_supply.game SET catalog_revision'))!.values, ['game_test', '7']);
+  assert.equal(stub.audits[0]!.action, 'supply.catalog.legacy_identity_normalized');
+
+  const stale = new Stub(); stale.gameCode = 'delta'; stale.skinRow = { ...deltaMeleeRow(), namingState: 'VERIFIED', ownerKind: 'MELEE_TYPE', baseName: '旧外观', name: '旧外观', aliases: [] };
+  stale.catalogRevision = '8';
+  await assert.rejects(() => confirmLegacySkinIdentity(client(stale), 'admin_test', true, 'game_test', input), /Catalog changed/);
+  assert.deepEqual(writes(stale), []);
+  assert.equal(stale.audits.length, 0);
+});
 
 test('reviewed mechanical normalization changes only name/base/aliases, preserves the old name and all aliases, and binds its audit', async () => {
   const stub = mechanicalStub(), input = mechanicalInput();

@@ -42,7 +42,9 @@
 
 既有9项来源歧义（影锋、AUG-气象感应、K416-命运、M4棱镜攻势、M7棱镜攻势、QBZ95-王牌之剑、SCAR-电玩、Vctor-冲锋枪-美杜莎、腾龙-气象感应）继续按`SOURCE_AMBIGUOUS`阻止持有准入。`buildLegacySkinIndex/mapLegacySkinHolding`优先保留该来源规则；目录后来VERIFIED、补图或修名都不能自动解除歧义，跨字段同名仍是不同source tuple。
 
-旧目录机械规范化只经受控`confirmLegacySkinIdentity`服务入口：本地已审artifact引用、SHA和recordDigest绑定code、原source tuple、同owner、旧/新baseName；显式normalization要求VERIFIED、旧base逐字匹配和预期catalogRevision。版本检查/CAS及审计在调用方原事务内完成，仅改目录名称/基础名并保留旧name及全部aliases，不改所属、来源、可见状态、历史观察、持有映射或冻结旧快照。不将本地差集称为官方命名证明，也不将源码支持计为实际迁移完成。
+受控旧目录身份确认经`confirmLegacySkinIdentity`服务入口：本地已审artifact引用、SHA和`legacyCatalogRecordDigest`绑定code、原source tuple及owner/baseName。三角洲独立近战必须显式传`ownerRef:null`、`ownerKind:"MELEE_TYPE"`和纯baseName；record包含`ownerId:null`，displayName即baseName，不查询、创建或重新启用刀型父级。`importLegacySkinOwner`拒绝三角洲MELEE_TYPE父级导入；其他游戏MELEE_TYPE及AGENT/FIREARM同游戏所属约束保持。旧父级封包不得改算、重签或静默解释为独立模型；历史读取、原封包恢复与新写准入分别处理。
+
+机械改名沿同一入口的显式normalization：记录再绑定`previousBaseName`，要求VERIFIED、所属不变、旧base逐字匹配和预期catalogRevision。版本检查/CAS及审计在调用方原事务内完成，仅改名称/基础名/aliases并保留旧name及全部aliases，不改所属、来源、可见状态、历史观察、持有映射或冻结旧快照。审计失败须随调用方事务回滚；源码支持不等于实际转换或真实数据库验收，也不将本地差集称为官方命名证明。
 
 ## 旧公共内容（CONTENT-HISTORY-020）
 

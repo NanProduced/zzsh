@@ -182,10 +182,14 @@ async function assertSkinSource(client: PoolClient, gameId: string, id: string, 
   if (result.rowCount) throw conflict("Primary source is already attached to another skin");
 }
 
-async function skinCategoriesRetired(client: PoolClient, gameId: string): Promise<boolean> {
+async function gameCode(client: PoolClient, gameId: string): Promise<string> {
   const game = (await client.query<{ code: string }>(`SELECT code FROM zzsh_supply.game WHERE id=$1`, [gameId])).rows[0];
   if (!game) throw notFound();
-  return game.code === "delta";
+  return game.code;
+}
+
+async function skinCategoriesRetired(client: PoolClient, gameId: string): Promise<boolean> {
+  return await gameCode(client, gameId) === "delta";
 }
 
 export async function categorylessSkinStorageReady(client: PoolClient): Promise<boolean> {
@@ -196,15 +200,18 @@ export async function categorylessSkinStorageReady(client: PoolClient): Promise<
 }
 
 async function assertSpecificMeleeOwnerAllowed(client: PoolClient, gameId: string): Promise<void> {
-  const game = (await client.query<{ code: string }>(`SELECT code FROM zzsh_supply.game WHERE id=$1`, [gameId])).rows[0];
-  if (!game) throw notFound();
-  if (game.code === "delta") throw invalid("三角洲近战外观独立维护，不使用刀型所属对象");
+  if (await gameCode(client, gameId) === "delta") throw invalid("三角洲近战外观独立维护，不使用刀型所属对象");
+}
+
+async function assertStandaloneMeleeAllowed(client: PoolClient, gameId: string): Promise<void> {
+  if (await gameCode(client, gameId) !== "delta") throw invalid("独立近战外观仅适用于三角洲", "ownerRef");
 }
 
 /**
  * Controlled migration seam for skin owners imported from the frozen crosswalk.
  * Human catalog maintenance records public HTTPS evidence; migration rows carry
  * the frozen research artifact instead, recorded through the caller's audit.
+ * Delta melee appearances are standalone and must not create a melee parent.
  */
 export async function importLegacySkinOwner(
   client: PoolClient,
@@ -216,6 +223,7 @@ export async function importLegacySkinOwner(
   await assertGameScope(client, adminUserId, isBoss, gameId);
   const kind = input.kind;
   if (kind !== "AGENT" && kind !== "MELEE_TYPE") throw invalid("Unsupported owner kind", "kind");
+  if (kind === "MELEE_TYPE") await assertSpecificMeleeOwnerAllowed(client, gameId);
   const code = requireCode(input);
   const name = skinText(input.name, "name", 120);
   const reason = skinText(input.reason, "reason", 500);
@@ -248,23 +256,37 @@ export async function importLegacySkinOwner(
  * Controlled migration seam for imported legacy skin identity. Human review
  * confirms identity with public HTTPS evidence; migration rows cannot provide
  * that, so the frozen crosswalk (source field + dictionary id + raw token +
- * canonical match) is the recorded evidence instead. Creates the draft via the
- * normal catalog service first, then writes the reviewed owner/base tuple; the
- * schema trigger derives VERIFIED and enforces the display-name contract.
+ * canonical match) is the recorded evidence instead. The caller creates the
+ * draft via the normal catalog service first; this seam writes the reviewed
+ * owner/base tuple, and the schema trigger derives VERIFIED and enforces the
+ * display-name contract.
  * Verified imports may opt into a previous-name/revision-bound normalization;
  * that branch preserves their owner, source tuple, visibility and prior names.
+ * Delta melee is a standalone appearance: ownerRef null plus an explicit
+ * MELEE_TYPE/baseName/source tuple records it without creating or reading a
+ * fictional melee parent. Other games and owner kinds keep their previous rules.
  */
 export async function confirmLegacySkinIdentity(
   client: PoolClient,
   adminUserId: string,
   isBoss: boolean,
   gameId: string,
-  input: { code: string; ownerRef: SkinOwnerRef; baseName: string; aliases?: string[]; evidence: LegacyCatalogEvidence; audit: LegacyCatalogAudit; reason: string; normalization?: { previousBaseName: string; expectedCatalogRevision: string } },
+  input: { code: string; ownerRef: SkinOwnerRef | null; ownerKind?: SkinOwnerRef["kind"]; baseName: string; aliases?: string[]; evidence: LegacyCatalogEvidence; audit: LegacyCatalogAudit; reason: string; normalization?: { previousBaseName: string; expectedCatalogRevision: string } },
 ): Promise<{ id: string; code: string; namingState: string; catalogRevision: string }> {
   await assertGameScope(client, adminUserId, isBoss, gameId);
   const code = requireCode(input);
   const ownerRef = input.ownerRef;
-  if (!ownerRef || !["AGENT", "MELEE_TYPE", "FIREARM"].includes(ownerRef.kind) || typeof ownerRef.id !== "string") throw invalid("Invalid owner reference", "ownerRef");
+  const standaloneMelee = ownerRef === null;
+  if (standaloneMelee) {
+    if (input.ownerKind !== "MELEE_TYPE") throw invalid("Only an unclassified melee may omit its owner", "ownerRef");
+    await assertStandaloneMeleeAllowed(client, gameId);
+  } else {
+    if (!ownerRef || !["AGENT", "MELEE_TYPE", "FIREARM"].includes(ownerRef.kind) || typeof ownerRef.id !== "string") throw invalid("Invalid owner reference", "ownerRef");
+    if (input.ownerKind !== undefined && input.ownerKind !== ownerRef.kind) throw invalid("Owner kind does not match its reference", "ownerKind");
+    if (ownerRef.kind === "MELEE_TYPE") await assertSpecificMeleeOwnerAllowed(client, gameId);
+  }
+  const ownerKind: SkinOwnerRef["kind"] = ownerRef === null ? "MELEE_TYPE" : ownerRef.kind;
+  const ownerId = ownerRef === null ? null : ownerRef.id;
   const baseName = skinText(input.baseName, "baseName", 120);
   const reason = skinText(input.reason, "reason", 500);
   const evidence = checkedLegacyEvidence(input.evidence);
@@ -283,16 +305,16 @@ export async function confirmLegacySkinIdentity(
   const row = (await client.query(`SELECT id,naming_state AS "namingState",owner_kind AS "ownerKind",owner_id AS "ownerId",firearm_id AS "firearmId",base_name AS "baseName",source_namespace AS "sourceNamespace",source_field AS "sourceField",source_token AS "sourceToken",name,aliases FROM zzsh_supply.skin WHERE game_id=$1 AND code=$2 FOR UPDATE`, [gameId, code])).rows[0];
   if (!row) throw notFound();
   if (row.sourceNamespace !== LEGACY_CATALOG_NAMESPACE || !row.sourceField || !row.sourceToken) throw conflict("Legacy identity requires the migration source tuple");
-  const record = { namespace: LEGACY_CATALOG_NAMESPACE, code, sourceField: row.sourceField, sourceToken: row.sourceToken, ownerKind: ownerRef.kind, ownerId: ownerRef.id, baseName, ...(normalization ? { previousBaseName: normalization.previousBaseName } : {}) };
+  const record = { namespace: LEGACY_CATALOG_NAMESPACE, code, sourceField: row.sourceField, sourceToken: row.sourceToken, ownerKind, ownerId, baseName, ...(normalization ? { previousBaseName: normalization.previousBaseName } : {}) };
   if (legacyCatalogRecordDigest(record) !== evidence.recordDigest) throw invalid("Legacy evidence does not match the skin identity request", "evidence.recordDigest");
   const recordedId = row.ownerKind === "FIREARM" ? row.firearmId : row.ownerId;
   const details = { ...record, aliases, evidenceArtifact: evidence.artifact, evidenceArtifactSha256: evidence.artifactSha256, recordDigest: evidence.recordDigest };
   if (normalization) {
-    if (row.namingState !== "VERIFIED" || row.ownerKind !== ownerRef.kind || recordedId !== ownerRef.id || row.baseName !== normalization.previousBaseName) throw conflict("Normalization conflicts with the recorded skin identity");
+    if (row.namingState !== "VERIFIED" || row.ownerKind !== ownerKind || recordedId !== ownerId || row.baseName !== normalization.previousBaseName) throw conflict("Normalization conflicts with the recorded skin identity");
     await checkCatalogRevision(client, gameId, normalization);
   }
   if (row.namingState === "VERIFIED" && !normalization) {
-    if (row.ownerKind !== ownerRef.kind || recordedId !== ownerRef.id || row.baseName !== baseName) throw conflict("Legacy identity conflicts with the recorded skin");
+    if (row.ownerKind !== ownerKind || recordedId !== ownerId || row.baseName !== baseName) throw conflict("Legacy identity conflicts with the recorded skin");
     await recordAudit(client, {
       actorType: "admin", actorId: adminUserId, sessionId: audit.sessionId, action: "supply.catalog.legacy_identity_confirmed",
       objectType: "skin", objectId: row.id, outcome: "SUCCESS", requestId: audit.requestId, reason, details: { ...details, result: "REPLAY_VERIFIED" },
@@ -300,15 +322,15 @@ export async function confirmLegacySkinIdentity(
     return { id: row.id, code, namingState: row.namingState, catalogRevision: (await client.query(`SELECT catalog_revision::text AS revision FROM zzsh_supply.game WHERE id=$1`, [gameId])).rows[0].revision };
   }
   if (row.namingState !== "PENDING" && !normalization) throw conflict("Only a pending draft can receive legacy identity");
-  const ownerName = ownerRef.kind === "FIREARM"
-    ? (await client.query<{ name: string; enabled: boolean }>(`SELECT name,enabled FROM zzsh_supply.firearm WHERE game_id=$1 AND id=$2`, [gameId, ownerRef.id])).rows[0]?.name
-    : (await client.query<{ name: string; enabled: boolean }>(`SELECT name,enabled FROM zzsh_supply.skin_owner WHERE game_id=$1 AND kind=$2 AND id=$3`, [gameId, ownerRef.kind, ownerRef.id])).rows[0]?.name;
-  if (!ownerName) throw invalid("Owner does not belong to this game", "ownerRef");
+  const ownerName = standaloneMelee ? "" : ownerKind === "FIREARM"
+    ? (await client.query<{ name: string; enabled: boolean }>(`SELECT name,enabled FROM zzsh_supply.firearm WHERE game_id=$1 AND id=$2`, [gameId, ownerId])).rows[0]?.name
+    : (await client.query<{ name: string; enabled: boolean }>(`SELECT name,enabled FROM zzsh_supply.skin_owner WHERE game_id=$1 AND kind=$2 AND id=$3`, [gameId, ownerKind, ownerId])).rows[0]?.name;
+  if (!standaloneMelee && !ownerName) throw invalid("Owner does not belong to this game", "ownerRef");
+  const displayName = standaloneMelee ? baseName : skinText(`${ownerName}-${baseName}`, "name", 120);
   if (normalization) {
     const preservedAliases = [...row.aliases as string[]];
     for (const alias of [row.name, ...aliases]) if (!preservedAliases.includes(alias)) preservedAliases.push(alias);
     if (preservedAliases.length > 32) throw invalid("Preserving the old name would exceed the alias limit", "aliases");
-    const displayName = skinText(`${ownerName}-${baseName}`, "name", 120);
     const changed = await client.query<{ namingState: string }>(
       `UPDATE zzsh_supply.skin SET name=$2,base_name=$3,aliases=$4 WHERE id=$1 RETURNING naming_state AS "namingState"`,
       [row.id, displayName, baseName, preservedAliases],
@@ -324,13 +346,13 @@ export async function confirmLegacySkinIdentity(
   }
   await client.query(
     `UPDATE zzsh_supply.skin SET owner_kind=$2, owner_id=$3, firearm_id=$4, base_name=$5, aliases=$6, name=$7, enabled=true, form_visible=true WHERE id=$1`,
-    [row.id, ownerRef.kind, ownerRef.kind === "FIREARM" ? null : ownerRef.id, ownerRef.kind === "FIREARM" ? ownerRef.id : null, baseName, aliases, `${ownerName}-${baseName}`],
+    [row.id, ownerKind, ownerKind === "FIREARM" ? null : ownerId, ownerKind === "FIREARM" ? ownerId : null, baseName, aliases, displayName],
   );
   const state = (await client.query<{ namingState: string }>(`SELECT naming_state AS "namingState" FROM zzsh_supply.skin WHERE id=$1`, [row.id])).rows[0]!.namingState;
   await bumpCatalogRevision(client, gameId);
   await recordAudit(client, {
     actorType: "admin", actorId: adminUserId, sessionId: audit.sessionId, action: "supply.catalog.legacy_identity_confirmed",
-    objectType: "skin", objectId: row.id, outcome: "SUCCESS", requestId: audit.requestId, reason, details: { ...details, displayName: `${ownerName}-${baseName}`, result: "CREATED" },
+    objectType: "skin", objectId: row.id, outcome: "SUCCESS", requestId: audit.requestId, reason, details: { ...details, displayName, result: "CREATED" },
   });
   const catalogRevision = (await client.query<{ revision: string }>(`SELECT catalog_revision::text AS revision FROM zzsh_supply.game WHERE id=$1`, [gameId])).rows[0]!.revision;
   return { id: row.id, code, namingState: state, catalogRevision };
