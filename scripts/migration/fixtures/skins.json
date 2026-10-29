@@ -1,0 +1,84 @@
+{
+  "catalogRevision": "fixture-catalog-v1",
+  "catalog": [
+    {
+      "skinId": "skin-knife-m9",
+      "gameId": "game-delta",
+      "sourceField": "knife_skin",
+      "sourceToken": "M9",
+      "namingState": "VERIFIED",
+      "enabled": true,
+      "formVisible": true
+    },
+    {
+      "skinId": "skin-agent-phantom",
+      "gameId": "game-delta",
+      "sourceField": "agent_skin",
+      "sourceToken": "PHANTOM",
+      "namingState": "VERIFIED",
+      "enabled": true,
+      "formVisible": true
+    },
+    {
+      "skinId": "skin-weapon-ak",
+      "gameId": "game-delta",
+      "sourceField": "weapon_skin",
+      "sourceToken": "AK",
+      "namingState": "PENDING",
+      "enabled": true,
+      "formVisible": true
+    }
+  ],
+  "rules": [
+    {
+      "field": "gold_skin",
+      "token": "GOLD-AMBIGUOUS",
+      "decision": "SOURCE_AMBIGUOUS",
+      "sources": [
+        {
+          "dictField": "gold_skin",
+          "dictTypeId": 1,
+          "dictDataId": 1,
+          "state": "CURRENT"
+        },
+        {
+          "dictField": "gold_skin",
+          "dictTypeId": 2,
+          "dictDataId": 2,
+          "state": "HISTORICAL_SOFT_DELETED"
+        }
+      ]
+    }
+  ],
+  "holdings": [
+    {
+      "accountKey": "10",
+      "gameId": "game-delta",
+      "columns": {
+        "knife_skin": "M9",
+        "agent_skin": "PHANTOM",
+        "weapon_skin": "",
+        "gold_skin": ""
+      }
+    },
+    {
+      "accountKey": "11",
+      "gameId": "game-delta",
+      "columns": {
+        "knife_skin": "M9",
+        "agent_skin": "PHANTOM",
+        "weapon_skin": "",
+        "gold_skin": "GOLD-AMBIGUOUS"
+      }
+    },
+    {
+      "accountKey": "12",
+      "gameId": "game-delta",
+      "columns": {
+        "knife_skin": "M9",
+        "agent_skin": "PHANTOM",
+        "weapon_skin": ""
+      }
+    }
+  ]
+}

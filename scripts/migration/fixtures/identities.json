@@ -1,0 +1,61 @@
+{
+  "seenMobiles": [],
+  "users": [
+    {
+      "id": "30",
+      "mobile": "13700137000",
+      "nickname": "fixture-owner-30",
+      "is_delete": 0,
+      "is_disable": 0,
+      "is_bind_id": 0,
+      "is_high_risk": 0,
+      "ageAdult": null,
+      "createTime": "1700000000",
+      "updateTime": "1700000100",
+      "sourceDigest": "2f4e2df64d809be3c811ff60de9cf65565ab3c57887cf068e41a389e964ecfc9",
+      "evidenceRef": "fixture:la_user:30"
+    },
+    {
+      "id": "20",
+      "mobile": "13900139000",
+      "nickname": "fixture-renter-20",
+      "is_delete": 0,
+      "is_disable": 0,
+      "is_bind_id": 0,
+      "is_high_risk": 0,
+      "ageAdult": null,
+      "createTime": "1700000001",
+      "updateTime": "1700000101",
+      "sourceDigest": "5abd6ac64c7241e474ed2c8bcce3f29264052e2501d76961983d3056c804fdd8",
+      "evidenceRef": "fixture:la_user:20"
+    },
+    {
+      "id": "40",
+      "mobile": "13600136000",
+      "nickname": "fixture-owner-40",
+      "is_delete": 0,
+      "is_disable": 1,
+      "is_bind_id": 0,
+      "is_high_risk": 0,
+      "ageAdult": null,
+      "createTime": "1700000002",
+      "updateTime": "1700000102",
+      "sourceDigest": "e51f81e1fee14879f6fd445699b090bd7d9356cb7888a71beafb3d1b31494c0f",
+      "evidenceRef": "fixture:la_user:40"
+    },
+    {
+      "id": "50",
+      "mobile": "+86 137-0013-7000",
+      "nickname": "fixture-duplicate-50",
+      "is_delete": 0,
+      "is_disable": 0,
+      "is_bind_id": 0,
+      "is_high_risk": 0,
+      "ageAdult": null,
+      "createTime": "1700000003",
+      "updateTime": "1700000103",
+      "sourceDigest": "5d4b60ffb12e26e60c09878009a8b01f643bec88fb0cd46bcaba2e804fbfb983",
+      "evidenceRef": "fixture:la_user:50"
+    }
+  ]
+}

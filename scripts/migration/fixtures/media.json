@@ -1,0 +1,34 @@
+{
+  "items": [
+    {
+      "accountKey": "10",
+      "skinId": "skin-knife-m9",
+      "mediaId": "media-1",
+      "storageKey": "legacy/accounts/10/knife-m9.jpg",
+      "sha256": "9740033e1698fce7f0a8fb20a2e46e2fc98109e531042ee6fbeabe7f0c006c4e",
+      "sourceRef": "la_rental_accounts:10:knife_skin",
+      "reviewState": "APPROVED",
+      "visibility": "PUBLIC_DISPLAY"
+    },
+    {
+      "accountKey": "10",
+      "skinId": "skin-agent-phantom",
+      "mediaId": "media-2",
+      "storageKey": "private/accounts/10/phantom.jpg",
+      "sha256": "0bb4341b58bff76562253028f1cec8f961f76760a38da5476adf5f171c73d3bb",
+      "sourceRef": "la_rental_accounts:10:agent_skin",
+      "reviewState": "PENDING",
+      "visibility": "PRIVATE"
+    },
+    {
+      "accountKey": "11",
+      "skinId": "skin-unknown",
+      "mediaId": "media-3",
+      "storageKey": "legacy/accounts/11/unknown.jpg",
+      "sha256": "5fc61f96bed4bc0d7dd9750cd49127994bc53629b318773095c3466ede8c145d",
+      "sourceRef": "la_rental_accounts:11:unknown",
+      "reviewState": "APPROVED",
+      "visibility": "PUBLIC_DISPLAY"
+    }
+  ]
+}

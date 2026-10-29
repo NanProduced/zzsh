@@ -114,7 +114,7 @@ function parseScript(script, packageDir) {
           const code = args[++i] ?? "";
           if (files.length || !/^require\(['"]node:assert\/strict['"]\)\.ok\(/.test(code)) supported = false;
           else for (const match of code.matchAll(/process\.env\.([A-Z][A-Z_0-9]+)/g)) switches.push(match[1]);
-        } else if (/^(?:dist\/test\/|test\/|scripts\/)[\w.-]+\.(?:js|mjs|ts)$/.test(arg)) testFiles.push(arg);
+        } else if (/^(?:dist\/test\/|test\/|scripts\/(?:migration\/)?)[\w.-]+\.(?:js|mjs|ts)$/.test(arg)) testFiles.push(arg);
         else if (!runner && /^[\w./-]+\.(?:js|mjs)$/.test(arg)) continue;
         else supported = false;
       }

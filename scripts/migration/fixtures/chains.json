@@ -1,0 +1,376 @@
+{
+  "chains": [
+    {
+      "label": "FIXTURE-CHAIN-1",
+      "owner": {
+        "sourceSystem": "legacy_mysql_restore",
+        "sourceEntity": "la_user",
+        "legacyId": "30",
+        "sourceDigest": "2f4e2df64d809be3c811ff60de9cf65565ab3c57887cf068e41a389e964ecfc9",
+        "evidenceRef": "fixture:la_user:30",
+        "nickname": "fixture-owner-30",
+        "mobile": "13700137000",
+        "sourceCreatedAt": null,
+        "sourceUpdatedAt": null,
+        "status": {
+          "realNameBound": false,
+          "ageAdult": null,
+          "disabled": false,
+          "deleted": false
+        },
+        "legacyPassword": null
+      },
+      "renter": {
+        "sourceSystem": "legacy_mysql_restore",
+        "sourceEntity": "la_user",
+        "legacyId": "20",
+        "sourceDigest": "5abd6ac64c7241e474ed2c8bcce3f29264052e2501d76961983d3056c804fdd8",
+        "evidenceRef": "fixture:la_user:20",
+        "nickname": "fixture-owner-20",
+        "mobile": "13900139000",
+        "sourceCreatedAt": null,
+        "sourceUpdatedAt": null,
+        "status": {
+          "realNameBound": false,
+          "ageAdult": null,
+          "disabled": false,
+          "deleted": false
+        },
+        "legacyPassword": null
+      },
+      "account": {
+        "sourceDigest": "ad981d07f325be4ec3348f6fe95ae461307264d3132dcfde6e0d07b5f1026a30",
+        "evidenceRef": "fixture:la_rental_accounts:10",
+        "row": {
+          "id": "10",
+          "user_id": "30",
+          "game_id": "1",
+          "status": "3",
+          "is_delete": "0",
+          "no": "FIXTURE-AC-10",
+          "price_tenant": "1.00",
+          "extra_goods_total_price_tenant": "2.00",
+          "deposit_amount": "3.00",
+          "rental_days": "1",
+          "default_consume_type": "1",
+          "update_time": "1700000200"
+        }
+      },
+      "game": {
+        "sourceGameId": "1",
+        "targetGameId": "game-delta",
+        "serviceCode": "ACCOUNT_RENTAL"
+      },
+      "order": {
+        "source": {
+          "legacyId": "1",
+          "digest": "a2dee8a407e64c99b10187846908c69bd6ac16c05fe1f43107cee5a0032d3fa3",
+          "evidenceRef": "fixture:la_order:1",
+          "row": {
+            "id": "1",
+            "order_sn": "FIXTURE-ORDER-1",
+            "accounts_id": "10",
+            "user_id": "20",
+            "sale_user_id": "30",
+            "order_status": "5",
+            "pay_is": "1",
+            "need_pay_money": "66.00",
+            "pay_money": "66.00",
+            "deposit_amount": "0.00",
+            "return_order_money": "0.00",
+            "pay_time": "1700000300",
+            "create_time": "1700000300",
+            "cancel_time": "0",
+            "confirm_time": "0"
+          }
+        },
+        "account": {
+          "legacyId": "10",
+          "businessNo": "FIXTURE-AC-10",
+          "sourceDigest": "ad981d07f325be4ec3348f6fe95ae461307264d3132dcfde6e0d07b5f1026a30"
+        },
+        "owner": {
+          "userId": "user_0d7a7ad2a7322e348f4c270145dbae95e93ab189",
+          "legacyId": "30",
+          "businessNo": "FIXTURE-U-30",
+          "sourceDigest": "2f4e2df64d809be3c811ff60de9cf65565ab3c57887cf068e41a389e964ecfc9"
+        },
+        "renter": {
+          "userId": "user_385733ef29e453459a14f088900433a9f566a14a",
+          "legacyId": "20",
+          "businessNo": "FIXTURE-U-20",
+          "sourceDigest": "5abd6ac64c7241e474ed2c8bcce3f29264052e2501d76961983d3056c804fdd8"
+        }
+      }
+    },
+    {
+      "label": "FIXTURE-CHAIN-2",
+      "owner": {
+        "sourceSystem": "legacy_mysql_restore",
+        "sourceEntity": "la_user",
+        "legacyId": "30",
+        "sourceDigest": "2f4e2df64d809be3c811ff60de9cf65565ab3c57887cf068e41a389e964ecfc9",
+        "evidenceRef": "fixture:la_user:30",
+        "nickname": "fixture-owner-30",
+        "mobile": "13700137000",
+        "sourceCreatedAt": null,
+        "sourceUpdatedAt": null,
+        "status": {
+          "realNameBound": false,
+          "ageAdult": null,
+          "disabled": false,
+          "deleted": false
+        },
+        "legacyPassword": null
+      },
+      "renter": {
+        "sourceSystem": "legacy_mysql_restore",
+        "sourceEntity": "la_user",
+        "legacyId": "20",
+        "sourceDigest": "5abd6ac64c7241e474ed2c8bcce3f29264052e2501d76961983d3056c804fdd8",
+        "evidenceRef": "fixture:la_user:20",
+        "nickname": "fixture-owner-20",
+        "mobile": "13900139000",
+        "sourceCreatedAt": null,
+        "sourceUpdatedAt": null,
+        "status": {
+          "realNameBound": false,
+          "ageAdult": null,
+          "disabled": false,
+          "deleted": false
+        },
+        "legacyPassword": null
+      },
+      "account": {
+        "sourceDigest": "dd093cb704debe9e78ef68b6403afb6c3eaa75802aed06ca38ee3db810845c15",
+        "evidenceRef": "fixture:la_rental_accounts:11",
+        "row": {
+          "id": "11",
+          "user_id": "30",
+          "game_id": "1",
+          "status": "3",
+          "is_delete": "0",
+          "no": "FIXTURE-AC-11",
+          "price_tenant": "1.00",
+          "extra_goods_total_price_tenant": "2.00",
+          "deposit_amount": "3.00",
+          "rental_days": "1",
+          "default_consume_type": "1",
+          "update_time": "1700000200"
+        }
+      },
+      "game": {
+        "sourceGameId": "1",
+        "targetGameId": "game-delta",
+        "serviceCode": "ACCOUNT_RENTAL"
+      },
+      "order": null
+    },
+    {
+      "label": "FIXTURE-CHAIN-3",
+      "owner": {
+        "sourceSystem": "legacy_mysql_restore",
+        "sourceEntity": "la_user",
+        "legacyId": "30",
+        "sourceDigest": "2f4e2df64d809be3c811ff60de9cf65565ab3c57887cf068e41a389e964ecfc9",
+        "evidenceRef": "fixture:la_user:30",
+        "nickname": "fixture-owner-30",
+        "mobile": "13700137000",
+        "sourceCreatedAt": null,
+        "sourceUpdatedAt": null,
+        "status": {
+          "realNameBound": false,
+          "ageAdult": null,
+          "disabled": false,
+          "deleted": false
+        },
+        "legacyPassword": null
+      },
+      "renter": {
+        "sourceSystem": "legacy_mysql_restore",
+        "sourceEntity": "la_user",
+        "legacyId": "20",
+        "sourceDigest": "5abd6ac64c7241e474ed2c8bcce3f29264052e2501d76961983d3056c804fdd8",
+        "evidenceRef": "fixture:la_user:20",
+        "nickname": "fixture-owner-20",
+        "mobile": "13900139000",
+        "sourceCreatedAt": null,
+        "sourceUpdatedAt": null,
+        "status": {
+          "realNameBound": false,
+          "ageAdult": null,
+          "disabled": false,
+          "deleted": false
+        },
+        "legacyPassword": null
+      },
+      "account": {
+        "sourceDigest": "b36b11f2da8b6666abc2e91542ee31b193e0d07ad5d139562f82dfabd00896f9",
+        "evidenceRef": "fixture:la_rental_accounts:12",
+        "row": {
+          "id": "12",
+          "user_id": "99",
+          "game_id": "1",
+          "status": "3",
+          "is_delete": "0",
+          "no": "FIXTURE-AC-12",
+          "price_tenant": "1.00",
+          "extra_goods_total_price_tenant": "2.00",
+          "deposit_amount": "3.00",
+          "rental_days": "1",
+          "default_consume_type": "1",
+          "update_time": "1700000200"
+        }
+      },
+      "game": {
+        "sourceGameId": "1",
+        "targetGameId": "game-delta",
+        "serviceCode": "ACCOUNT_RENTAL"
+      },
+      "order": {
+        "source": {
+          "legacyId": "3",
+          "digest": "63a8b487c5475a93d9907bfdacac804b57eaeea07381ea9cd8082da598e06dfa",
+          "evidenceRef": "fixture:la_order:3",
+          "row": {
+            "id": "3",
+            "order_sn": "FIXTURE-ORDER-3",
+            "accounts_id": "12",
+            "user_id": "20",
+            "sale_user_id": "30",
+            "order_status": "5",
+            "pay_is": "1",
+            "need_pay_money": "66.00",
+            "pay_money": "66.00",
+            "deposit_amount": "0.00",
+            "return_order_money": "0.00",
+            "pay_time": "1700000300",
+            "create_time": "1700000300",
+            "cancel_time": "0",
+            "confirm_time": "0"
+          }
+        },
+        "account": {
+          "legacyId": "12",
+          "businessNo": "FIXTURE-AC-12",
+          "sourceDigest": "b36b11f2da8b6666abc2e91542ee31b193e0d07ad5d139562f82dfabd00896f9"
+        },
+        "owner": {
+          "userId": "user_0d7a7ad2a7322e348f4c270145dbae95e93ab189",
+          "legacyId": "30",
+          "businessNo": "FIXTURE-U-30",
+          "sourceDigest": "2f4e2df64d809be3c811ff60de9cf65565ab3c57887cf068e41a389e964ecfc9"
+        },
+        "renter": {
+          "userId": "user_385733ef29e453459a14f088900433a9f566a14a",
+          "legacyId": "20",
+          "businessNo": "FIXTURE-U-20",
+          "sourceDigest": "5abd6ac64c7241e474ed2c8bcce3f29264052e2501d76961983d3056c804fdd8"
+        }
+      }
+    },
+    {
+      "label": "FIXTURE-CHAIN-4",
+      "owner": {
+        "sourceSystem": "legacy_mysql_restore",
+        "sourceEntity": "la_user",
+        "legacyId": "30",
+        "sourceDigest": "2f4e2df64d809be3c811ff60de9cf65565ab3c57887cf068e41a389e964ecfc9",
+        "evidenceRef": "fixture:la_user:30",
+        "nickname": "fixture-owner-30",
+        "mobile": "13700137000",
+        "sourceCreatedAt": null,
+        "sourceUpdatedAt": null,
+        "status": {
+          "realNameBound": false,
+          "ageAdult": null,
+          "disabled": false,
+          "deleted": false
+        },
+        "legacyPassword": null
+      },
+      "renter": {
+        "sourceSystem": "legacy_mysql_restore",
+        "sourceEntity": "la_user",
+        "legacyId": "20",
+        "sourceDigest": "5abd6ac64c7241e474ed2c8bcce3f29264052e2501d76961983d3056c804fdd8",
+        "evidenceRef": "fixture:la_user:20",
+        "nickname": "fixture-owner-20",
+        "mobile": "13900139000",
+        "sourceCreatedAt": null,
+        "sourceUpdatedAt": null,
+        "status": {
+          "realNameBound": false,
+          "ageAdult": null,
+          "disabled": false,
+          "deleted": false
+        },
+        "legacyPassword": null
+      },
+      "account": {
+        "sourceDigest": "7b5066b2aaf0bf4ca9bd5b6ef828ac63ce96b457239f7cbddac778a72e749381",
+        "evidenceRef": "fixture:la_rental_accounts:13",
+        "row": {
+          "id": "13",
+          "user_id": "30",
+          "game_id": "1",
+          "status": "6",
+          "is_delete": "0",
+          "no": "FIXTURE-AC-13",
+          "price_tenant": "1.00",
+          "extra_goods_total_price_tenant": "2.00",
+          "deposit_amount": "3.00",
+          "rental_days": "1",
+          "default_consume_type": "1",
+          "update_time": "1700000200"
+        }
+      },
+      "game": {
+        "sourceGameId": "1",
+        "targetGameId": "game-delta",
+        "serviceCode": "ACCOUNT_RENTAL"
+      },
+      "order": {
+        "source": {
+          "legacyId": "4",
+          "digest": "db77e37263bd86fbb79d9792cc203829102d5150f135e221d41c808c74d7884d",
+          "evidenceRef": "fixture:la_order:4",
+          "row": {
+            "id": "4",
+            "order_sn": "FIXTURE-ORDER-4",
+            "accounts_id": "13",
+            "user_id": "20",
+            "sale_user_id": "30",
+            "order_status": "5",
+            "pay_is": "1",
+            "need_pay_money": "66.00",
+            "pay_money": "66.00",
+            "deposit_amount": "0.00",
+            "return_order_money": "0.00",
+            "pay_time": "1700000300",
+            "create_time": "1700000300",
+            "cancel_time": "0",
+            "confirm_time": "0"
+          }
+        },
+        "account": {
+          "legacyId": "13",
+          "businessNo": "FIXTURE-AC-13",
+          "sourceDigest": "7b5066b2aaf0bf4ca9bd5b6ef828ac63ce96b457239f7cbddac778a72e749381"
+        },
+        "owner": {
+          "userId": "user_0d7a7ad2a7322e348f4c270145dbae95e93ab189",
+          "legacyId": "30",
+          "businessNo": "FIXTURE-U-30",
+          "sourceDigest": "2f4e2df64d809be3c811ff60de9cf65565ab3c57887cf068e41a389e964ecfc9"
+        },
+        "renter": {
+          "userId": "user_385733ef29e453459a14f088900433a9f566a14a",
+          "legacyId": "20",
+          "businessNo": "FIXTURE-U-20",
+          "sourceDigest": "5abd6ac64c7241e474ed2c8bcce3f29264052e2501d76961983d3056c804fdd8"
+        }
+      }
+    }
+  ]
+}

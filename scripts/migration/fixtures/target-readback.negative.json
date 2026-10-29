@@ -1,0 +1,288 @@
+{
+  "schema": "legacy-target-readback.v1",
+  "fixtureOnly": true,
+  "note": "Negative fixture: explicit amount drift, target-only duty, freed in-flight occupancy, media SHA change, missing identity and opening zero.",
+  "target": {
+    "readRef": "FIXTURE_TARGET_READBACK",
+    "databaseOid": null,
+    "databaseNameRef": "UNBOUND_POSTGRESQL_TARGET",
+    "readAt": "2026-10-29T00:00:00.000Z",
+    "engine": "postgresql"
+  },
+  "identities": [
+    {
+      "legacyId": "30",
+      "userId": "user_0d7a7ad2a7322e348f4c270145dbae95e93ab189",
+      "sourceDigest": "2f4e2df64d809be3c811ff60de9cf65565ab3c57887cf068e41a389e964ecfc9",
+      "accountStatus": "ACTIVE",
+      "identityStatus": "UNVERIFIED"
+    },
+    {
+      "legacyId": "40",
+      "userId": "user_ca84e25e7e433bddb9b76d77db3562b1bb54ae8a",
+      "sourceDigest": "e51f81e1fee14879f6fd445699b090bd7d9356cb7888a71beafb3d1b31494c0f",
+      "accountStatus": "FROZEN",
+      "identityStatus": "UNVERIFIED"
+    }
+  ],
+  "accounts": [
+    {
+      "legacyId": "10",
+      "accountId": "account_621e679be271129687bd7a62452b71260ac0861c",
+      "ownerUserId": "user_0d7a7ad2a7322e348f4c270145dbae95e93ab189",
+      "gameId": "game-delta",
+      "sourceDigest": "ad981d07f325be4ec3348f6fe95ae461307264d3132dcfde6e0d07b5f1026a30",
+      "rentable": true,
+      "quote": null,
+      "ownerAcceptance": null,
+      "occupancy": "FREE",
+      "status": "DRAFT"
+    },
+    {
+      "legacyId": "11",
+      "accountId": "account_d0230266d3aba637d21f0ffd172ffee15682bf89",
+      "ownerUserId": "user_0d7a7ad2a7322e348f4c270145dbae95e93ab189",
+      "gameId": "game-delta",
+      "sourceDigest": "dd093cb704debe9e78ef68b6403afb6c3eaa75802aed06ca38ee3db810845c15",
+      "rentable": false,
+      "quote": null,
+      "ownerAcceptance": null,
+      "occupancy": "FREE",
+      "status": "DRAFT"
+    }
+  ],
+  "orders": [
+    {
+      "legacyId": "1",
+      "orderId": "legacy_order_44ab3c9e27fbeec6537c000c40a78c288879a812",
+      "ownerUserId": "user_0d7a7ad2a7322e348f4c270145dbae95e93ab189",
+      "renterUserId": "user_385733ef29e453459a14f088900433a9f566a14a",
+      "accountId": "account_621e679be271129687bd7a62452b71260ac0861c",
+      "paidCents": "6600",
+      "dueCents": "6600",
+      "depositCents": "0",
+      "refundCents": "0",
+      "refundChannelState": "0",
+      "currency": "CNY",
+      "sourceDigest": "a2dee8a407e64c99b10187846908c69bd6ac16c05fe1f43107cee5a0032d3fa3",
+      "sourceStatus": "5",
+      "originalOrderNo": "FIXTURE-ORDER-1"
+    }
+  ],
+  "duties": [
+    {
+      "id": "legacy_duty_035a99103236f13537a3c31606df83cdc375861a",
+      "orderId": "legacy_order_90e45b8134be95c0af62ab7dbbd9668dfd1305b3",
+      "kind": "RENTER_REFUND",
+      "sourceRecordId": "101",
+      "amountCents": "8300",
+      "status": "PENDING",
+      "counterpartyUserId": "user_aca84121f89ce4061cdc29e59118582beea87c33",
+      "settledBy": null,
+      "maturityAt": null,
+      "admissionId": null,
+      "currency": "CNY"
+    },
+    {
+      "id": "legacy_duty_52004ee9242ccc5d80d1e55d9183fe668c8805da",
+      "orderId": "legacy_order_cea80b98d2e9448fce93466d23e89a97dec22d42",
+      "kind": "RENTER_REFUND",
+      "sourceRecordId": "201",
+      "amountCents": "8200",
+      "status": "PENDING",
+      "counterpartyUserId": "user_aca84121f89ce4061cdc29e59118582beea87c33",
+      "settledBy": null,
+      "maturityAt": null,
+      "admissionId": null,
+      "currency": "CNY"
+    },
+    {
+      "id": "legacy_duty_adb258e8d8ee0184ab6e134fc84253623d1b3476",
+      "orderId": "legacy_order_9297d755645f6748de3bfaead4fb29a63fb36f20",
+      "kind": "DEPOSIT_COMPENSATION",
+      "sourceRecordId": "301",
+      "amountCents": "5700",
+      "status": "SETTLED",
+      "counterpartyUserId": "user_02eae74a611a1e02933d31cf836e91cac8bd2815",
+      "settledBy": "LEGACY_RECORDS",
+      "maturityAt": null,
+      "admissionId": null,
+      "currency": "CNY"
+    },
+    {
+      "id": "legacy_duty_028aca18718ae2128bbeeb8b5009df9c964830a8",
+      "orderId": "legacy_order_2eea3a87c2896da0822d8bc62c66e9be0e2d9ad9",
+      "kind": "COMMISSION",
+      "sourceRecordId": "91",
+      "amountCents": "1000",
+      "status": "PENDING",
+      "counterpartyUserId": "user_968e376a6e0a2e1ce9cba8f5f87e769e6b095961",
+      "settledBy": null,
+      "maturityAt": "2026-10-08T01:02:03.000000Z",
+      "admissionId": null,
+      "currency": "CNY"
+    },
+    {
+      "id": "legacy_duty_64aa0469c669aae9453826b176a064b6ee65d7d4",
+      "orderId": "legacy_order_ab78194957123ced672f2f8b134ea802a73c9a0f",
+      "kind": "COMMISSION",
+      "sourceRecordId": "10000",
+      "amountCents": "100",
+      "status": "PENDING",
+      "counterpartyUserId": "user_d81d573bb1b34a968bfae049e9e0ce588440c009",
+      "settledBy": null,
+      "maturityAt": null,
+      "admissionId": null,
+      "currency": "CNY"
+    },
+    {
+      "id": "legacy_duty_unexpected",
+      "orderId": "legacy_order_90e45b8134be95c0af62ab7dbbd9668dfd1305b3",
+      "kind": "COMMISSION",
+      "sourceRecordId": "99999",
+      "amountCents": "1",
+      "status": "PENDING",
+      "counterpartyUserId": null,
+      "settledBy": null,
+      "admissionId": null,
+      "currency": "CNY"
+    }
+  ],
+  "openings": [
+    {
+      "openingId": "OPENING-FIN-01",
+      "availableCents": "0",
+      "coveredCount": 2,
+      "coveredDigest": "2d6f09cd842c0a171b6b4f9ae1044f7f8b6c68a9a26471a501696a8985e5e15d",
+      "sourceDigest": "b584fb87647335e6ed59bab3b17ba3bfd4de166c97b57de0a222683d97825dd2",
+      "currency": "CNY",
+      "userId": "fixture-user",
+      "legacyUserId": "11"
+    }
+  ],
+  "observations": [
+    {
+      "sourceKey": "la_withdraw_apply:201",
+      "sourceEntity": "la_withdraw_apply",
+      "sourceId": "201",
+      "sourceDigest": "313fb85b828fb5899ea95b9bbc9165362fb2f96f5ee264f94f5e7ca3579f5510"
+    },
+    {
+      "sourceKey": "la_log_earnings:101",
+      "sourceEntity": "la_log_earnings",
+      "sourceId": "101",
+      "sourceDigest": "f2bce9d296277cd4b7dd2435612409eeccace025fadd0cfda865d42fce634697"
+    },
+    {
+      "sourceKey": "la_distribution_order:501",
+      "sourceEntity": "la_distribution_order",
+      "sourceId": "501",
+      "sourceDigest": "130e746eaba2eeffbeb4f117e849a3550a372382bac95253f8642908fb14ac50"
+    }
+  ],
+  "media": [
+    {
+      "mediaId": "media-1",
+      "storageKey": "legacy/accounts/10/knife-m9.jpg",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "skinId": "skin-knife-m9",
+      "reviewState": "APPROVED",
+      "visibility": "PUBLIC_DISPLAY",
+      "accountKey": "10",
+      "sourceRef": "la_rental_accounts:10:knife_skin"
+    },
+    {
+      "mediaId": "media-2",
+      "storageKey": "private/accounts/10/phantom.jpg",
+      "sha256": "0bb4341b58bff76562253028f1cec8f961f76760a38da5476adf5f171c73d3bb",
+      "skinId": "skin-agent-phantom",
+      "reviewState": "PENDING",
+      "visibility": "PRIVATE",
+      "accountKey": "10",
+      "sourceRef": "la_rental_accounts:10:agent_skin"
+    },
+    {
+      "mediaId": "media-3",
+      "storageKey": "legacy/accounts/11/unknown.jpg",
+      "sha256": "5fc61f96bed4bc0d7dd9750cd49127994bc53629b318773095c3466ede8c145d",
+      "skinId": "skin-unknown",
+      "reviewState": "APPROVED",
+      "visibility": "PUBLIC_DISPLAY",
+      "accountKey": "11",
+      "sourceRef": "la_rental_accounts:11:unknown"
+    }
+  ],
+  "occupancy": [
+    {
+      "accountId": "account_3067fa840637f532ae388c59ff7e8820f2236a72",
+      "state": "FREE"
+    },
+    {
+      "accountId": "account_621e679be271129687bd7a62452b71260ac0861c",
+      "state": "FREE"
+    },
+    {
+      "accountId": "account_d0230266d3aba637d21f0ffd172ffee15682bf89",
+      "state": "FREE"
+    },
+    {
+      "accountId": "account_d48610e5d052d6787c4dbb9fb06a1d47e6249fe4",
+      "state": "UNKNOWN"
+    },
+    {
+      "accountId": "account_d7a2a06422b997f46c8311980428e3243f4543b2",
+      "state": "UNKNOWN"
+    },
+    {
+      "accountId": "account_e0ddea7d8ec869cf49d5a46b20eeae15cd74746e",
+      "state": "UNKNOWN"
+    }
+  ],
+  "registers": [
+    {
+      "registerId": "1003",
+      "legacyId": "1003",
+      "accountId": "account_d48610e5d052d6787c4dbb9fb06a1d47e6249fe4",
+      "ownerUserId": "user_02eae74a611a1e02933d31cf836e91cac8bd2815",
+      "renterUserId": null,
+      "disposition": "ISOLATED_PARTY"
+    }
+  ],
+  "sourceCommit": "376760181054ae0a3e12fa99f155d88588a6ca03",
+  "sourceManifestSha256": "c4ffde77bc5ce5e24225f0c6e5922179ee376b9b75e1ae24f8ad8dfa0ab7209f",
+  "holdings": [
+    {
+      "accountKey": "10",
+      "gameId": "game-delta",
+      "digest": "a17521e06c4dd61c54f90ec9c839ae50a0d9c6ee2ad9fbc4c61832edc24099dd",
+      "catalogRevision": "fixture-catalog-v1",
+      "mappedSkinIds": [
+        "skin-agent-phantom",
+        "skin-knife-m9"
+      ]
+    }
+  ],
+  "continuations": [
+    {
+      "orderId": "legacy_order_ab78194957123ced672f2f8b134ea802a73c9a0f",
+      "factsDigest": "236abe1a3f757a7583773dc9ae75b683297c95e487af84bbc69020a1d64dc1b3",
+      "sourceAsOf": "2026-09-13T13:31:22.123456Z",
+      "idempotencyKey": "f467835c1725969602f8d5c917a39767afd39147047f9ce5c055a730130d0a70",
+      "fingerprint": "b2466d8e48112d38b5d3d03f409d1195dd8e0b518bc2609bbee6642b0b3bb076"
+    },
+    {
+      "orderId": "legacy_order_260ac876e972e66dcac4b88b0f272b556f9d30ab",
+      "factsDigest": "82763d58319afcf87e2df19c0176ae02db7ad5c27ce2d5fd9870ff46f0d6d50b",
+      "sourceAsOf": "2026-09-13T13:31:22.123456Z",
+      "idempotencyKey": "77157489980b5d9c68ea3c6c72c7f66d8b0180838e0210ceb0c259c88bc29e53",
+      "fingerprint": "ce8a81622897e7b39693678039e292503f6f06a197ca90ece700ed15ec8356e7"
+    },
+    {
+      "orderId": "legacy_order_4509c64455b0b5a3ef7f1a657286a31254993375",
+      "factsDigest": "587cfa0ab375ec7144238539a03934a77235abd2ec17a78346731bd2127cd9f5",
+      "sourceAsOf": "2026-09-13T13:31:22.123456Z",
+      "idempotencyKey": "263314c4306bdd7ae052b000bb96120abdf6f4036c7a75387001d0eb88ea8c79",
+      "fingerprint": "f5d176c535aceba5820f3044c74afd2d66bd2b64e3477c5a12a4966461018b97"
+    }
+  ]
+}

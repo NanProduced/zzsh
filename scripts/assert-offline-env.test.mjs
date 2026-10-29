@@ -93,6 +93,8 @@ test("compiled runner inventory reads its explicit manifest without executing su
     }
     await writeFile(join(root, "scripts/compiled-tests.json"), '["dist/test/a.test.js"]');
     assert.deepEqual(collectEntries(pkg, root)[0].files, ["dist/test/a.test.js"]);
+    const migration = { scripts: { "test:migration-rehearsal": "node --test scripts/migration/legacy-rehearsal.test.mjs" } };
+    assert.deepEqual(collectEntries(migration, root)[0].files, ["scripts/migration/legacy-rehearsal.test.mjs"]);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

@@ -15,6 +15,8 @@
   "scripts": {
     "local:auth": "node scripts/local-auth.mjs",
     "local:admin": "node scripts/local-auth.mjs",
+    "migration:rehearsal": "node scripts/migration/legacy-rehearsal.mjs",
+    "test:migration-rehearsal": "node --test scripts/migration/legacy-rehearsal.test.mjs",
     "test:local-auth": "node --test scripts/local-auth.test.mjs scripts/assert-offline-env.test.mjs scripts/smoke.test.mjs",
     "dev": "concurrently --kill-others --names api,web,admin \"npm run dev -w @zzsh/api\" \"npm run dev -w @zzsh/web\" \"npm run dev -w @zzsh/admin\"",
     "build": "npm run build --workspaces --if-present",

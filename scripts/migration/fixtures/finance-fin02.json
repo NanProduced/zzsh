@@ -1,0 +1,458 @@
+{
+  "history": [
+    {
+      "label": "FIN-OBS-WITHDRAWAL",
+      "sourceKind": "HISTORICAL_WITHDRAWAL",
+      "subject": {
+        "userId": "fixture-user",
+        "legacyUserId": "11",
+        "identityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "inputSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "cutoff": "2026-09-13T13:31:22.000Z",
+      "sourceCount": 1,
+      "rows": [
+        {
+          "id": 201,
+          "sn": "FIXTURE-WITHDRAWAL",
+          "type": 1,
+          "money": "5.00",
+          "status": 2,
+          "userId": 11,
+          "batch_no": "FIXTURE",
+          "is_delete": 0,
+          "left_money": "4.50",
+          "create_time": 1779469800,
+          "handling_fee": "0.50",
+          "payment_time": 1779469900
+        }
+      ],
+      "isolated": []
+    },
+    {
+      "label": "FIN-OBS-EARNINGS",
+      "sourceKind": "HISTORICAL_EARNINGS_LOG",
+      "subject": {
+        "userId": "fixture-user",
+        "legacyUserId": "11",
+        "identityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "inputSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "cutoff": "2026-09-13T13:31:22.000Z",
+      "sourceCount": 1,
+      "rows": [
+        {
+          "id": 101,
+          "sn": "FIXTURE-LOG-NOT-BUSINESS-NUMBER",
+          "action": 1,
+          "amount": "1.10",
+          "userId": 11,
+          "sourceId": 501,
+          "createdAt": 1779469800,
+          "changeType": 1001,
+          "leftAmount": "1.10"
+        }
+      ],
+      "isolated": []
+    },
+    {
+      "label": "FIN-OBS-DISTRIBUTION",
+      "sourceKind": "HISTORICAL_DISTRIBUTION",
+      "subject": {
+        "userId": "fixture-user",
+        "legacyUserId": "11",
+        "identityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "inputSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "cutoff": "2026-09-13T13:31:22.000Z",
+      "sourceCount": 1,
+      "rows": [
+        {
+          "id": "501",
+          "sn": "FIXTURE-DIST",
+          "user_id": "11",
+          "order_type": "1",
+          "order_id": "71",
+          "earnings": "1.10",
+          "level": "2",
+          "level_id": "1",
+          "ratio": "5.00",
+          "status": "2",
+          "settle_time": "1779469800",
+          "is_delete": "0",
+          "create_time": "1779460000",
+          "update_time": "1779469800"
+        }
+      ],
+      "isolated": []
+    }
+  ],
+  "storedOpenings": [
+    {
+      "subject": {
+        "userId": "fixture-user",
+        "legacyUserId": "11",
+        "identityDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "source": {
+        "id": "11",
+        "earnings": "1.10",
+        "money": "0.00"
+      },
+      "candidate": {
+        "legacyId": "11",
+        "targetUserId": "fixture-user",
+        "storedEarningsCents": "110",
+        "storedMoneyCents": "0",
+        "sourceDigest": "b584fb87647335e6ed59bab3b17ba3bfd4de166c97b57de0a222683d97825dd2",
+        "admission": "MAPPED_PENDING_BATCH_APPROVAL"
+      },
+      "inputSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "cutoff": "2026-09-13T13:31:22.000Z",
+      "covered": [
+        {
+          "sourceKind": "LEGACY_DEPOSIT_COMPENSATION",
+          "sourceEntity": "la_order",
+          "sourceId": "701",
+          "beneficiaryRole": "OWNER",
+          "sourceEventAt": "1779469800",
+          "sourceCanonical": "{\"confirm_time\":\"1779469899\",\"deposit_amount\":\"1.10\",\"id\":\"701\",\"is_settle\":\"3\",\"pay_is\":\"1\",\"sale_user_id\":\"11\"}",
+          "sourceDigest": "4b1c90b59167d7f8bab7421e904781ce66e897c13d31e79ed5e1a337c7d07dc7"
+        }
+      ],
+      "observations": [
+        {
+          "kind": "earningsLog",
+          "sourceId": 401,
+          "sourceUserId": 11,
+          "amount": "1.10",
+          "leftAmount": "1.10",
+          "action": 1,
+          "createdAt": 1779469800,
+          "referenceType": "UNRESOLVED_ECONOMIC_SOURCE",
+          "referenceId": "701",
+          "referenceSn": null,
+          "legacyChangeType": 1008,
+          "legacyLogNumber": "FIXTURE-LOG-NOT-BUSINESS-NUMBER",
+          "rawSource": {
+            "entity": "la_log_earnings",
+            "canonical": "{\"action\":1,\"amount\":\"1.10\",\"changeType\":1008,\"createdAt\":1779469800,\"id\":401,\"leftAmount\":\"1.10\",\"sn\":\"FIXTURE-LOG-NOT-BUSINESS-NUMBER\",\"sourceId\":701,\"userId\":11}",
+            "digest": "f86e25b184c410edfab9631c1b2e7f16611ee1ee519c0557d5c86d7012de6393"
+          }
+        }
+      ],
+      "included": [
+        "la_log_earnings:401"
+      ],
+      "logBindings": [
+        {
+          "observationId": "401",
+          "observationDigest": "827c36c9f887c02606a2863735e37bbf26ca2c0a22953ddc29a1262b87488cec",
+          "sourceKind": "LEGACY_DEPOSIT_COMPENSATION",
+          "sourceEntity": "la_order",
+          "sourceId": "701",
+          "beneficiaryRole": "OWNER",
+          "sourceDigest": "4b1c90b59167d7f8bab7421e904781ce66e897c13d31e79ed5e1a337c7d07dc7"
+        }
+      ],
+      "sourceEvidence": [
+        {
+          "observationId": "401",
+          "originalDigest": "f86e25b184c410edfab9631c1b2e7f16611ee1ee519c0557d5c86d7012de6393",
+          "extractSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "canonical": "{\"action\":1,\"amount\":\"1.10\",\"changeType\":1008,\"createdAt\":1779469800,\"extra\":null,\"id\":401,\"leftAmount\":\"1.10\",\"remark\":\"Fixture original remark\",\"sn\":\"FIXTURE-LOG-NOT-BUSINESS-NUMBER\",\"sourceId\":701,\"source_sn\":\"FIXTURE-ORDER-701\",\"userId\":11}",
+          "digest": "c0d09fc1af5417492c9e1ba4cc062aa31542b21e871a5950d622027b6316cf4d"
+        }
+      ],
+      "openingId": "OPENING-FIN-02"
+    }
+  ],
+  "liabilities": {
+    "batchId": "FIXTURE-LIABILITY-86",
+    "parents": [
+      {
+        "legacyId": "101",
+        "parentOrderId": "legacy_order_90e45b8134be95c0af62ab7dbbd9668dfd1305b3",
+        "sourceDigest": "d5f52d27dc4739e069c053f1050fdb3a50c9c4e9b03a544b9322c15e64d6b8eb",
+        "bindingDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "sourceSnapshot": {
+          "id": "101",
+          "order_status": "4",
+          "pay_is": "1",
+          "is_settle": "0",
+          "return_order_money": "87.00",
+          "deposit_amount": "57.00"
+        },
+        "sourceCompletedAt": null,
+        "ownerUserId": "user_02eae74a611a1e02933d31cf836e91cac8bd2815",
+        "renterUserId": "user_aca84121f89ce4061cdc29e59118582beea87c33",
+        "accountId": "fixture_account"
+      },
+      {
+        "legacyId": "201",
+        "parentOrderId": "legacy_order_cea80b98d2e9448fce93466d23e89a97dec22d42",
+        "sourceDigest": "3385e11359d415d9e1df25286ca55e9f816d5532d319c75eb9169de6b4566f9b",
+        "bindingDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "sourceSnapshot": {
+          "id": "201",
+          "order_status": "4",
+          "pay_is": "1",
+          "is_settle": "2",
+          "return_order_money": "87.00",
+          "deposit_amount": "57.00"
+        },
+        "sourceCompletedAt": null,
+        "ownerUserId": "user_02eae74a611a1e02933d31cf836e91cac8bd2815",
+        "renterUserId": "user_aca84121f89ce4061cdc29e59118582beea87c33",
+        "accountId": "fixture_account"
+      },
+      {
+        "legacyId": "301",
+        "parentOrderId": "legacy_order_9297d755645f6748de3bfaead4fb29a63fb36f20",
+        "sourceDigest": "c07f73f906fe66c6f14f6774a774fd90226b088bd1a98028550d2070f0afbd81",
+        "bindingDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "sourceSnapshot": {
+          "id": "301",
+          "order_status": "4",
+          "pay_is": "1",
+          "is_settle": "3",
+          "return_order_money": "87.00",
+          "deposit_amount": "57.00"
+        },
+        "sourceCompletedAt": null,
+        "ownerUserId": "user_02eae74a611a1e02933d31cf836e91cac8bd2815",
+        "renterUserId": "user_aca84121f89ce4061cdc29e59118582beea87c33",
+        "accountId": "fixture_account"
+      },
+      {
+        "legacyId": "401",
+        "parentOrderId": "legacy_order_e7bf936c9ba26d2d5377941d57bd7d1782be0070",
+        "sourceDigest": "2faf28a08d7c232685c8b7d8a18b648a19aa0fe157336dbdfaafac32dbd98c30",
+        "bindingDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "sourceSnapshot": {
+          "id": "401",
+          "order_status": "5",
+          "pay_is": "1",
+          "is_settle": "0",
+          "return_order_money": "87.00",
+          "deposit_amount": "57.00"
+        },
+        "sourceCompletedAt": null,
+        "ownerUserId": "user_02eae74a611a1e02933d31cf836e91cac8bd2815",
+        "renterUserId": "user_aca84121f89ce4061cdc29e59118582beea87c33",
+        "accountId": "fixture_account"
+      }
+    ],
+    "current": [
+      {
+        "orderId": "legacy_order_90e45b8134be95c0af62ab7dbbd9668dfd1305b3",
+        "readRef": "fixture-current-read",
+        "headRevision": null,
+        "depositAmountCents": null,
+        "duties": [],
+        "admissions": [],
+        "idempotency": {
+          "principalId": "fixture_admin",
+          "records": []
+        }
+      },
+      {
+        "orderId": "legacy_order_cea80b98d2e9448fce93466d23e89a97dec22d42",
+        "readRef": "fixture-current-read",
+        "headRevision": null,
+        "depositAmountCents": null,
+        "duties": [],
+        "admissions": [],
+        "idempotency": {
+          "principalId": "fixture_admin",
+          "records": []
+        }
+      },
+      {
+        "orderId": "legacy_order_9297d755645f6748de3bfaead4fb29a63fb36f20",
+        "readRef": "fixture-current-read",
+        "headRevision": null,
+        "depositAmountCents": "5700",
+        "duties": [],
+        "admissions": [],
+        "idempotency": {
+          "principalId": "fixture_admin",
+          "records": []
+        }
+      },
+      {
+        "orderId": "legacy_order_e7bf936c9ba26d2d5377941d57bd7d1782be0070",
+        "readRef": "fixture-current-read",
+        "headRevision": null,
+        "depositAmountCents": null,
+        "duties": [],
+        "admissions": [],
+        "idempotency": {
+          "principalId": "fixture_admin",
+          "records": []
+        }
+      }
+    ],
+    "rows": [
+      {
+        "classification": "COMPLETED_UNREFUNDED",
+        "legacyOrderId": "101",
+        "mappedOrderId": "legacy_order_90e45b8134be95c0af62ab7dbbd9668dfd1305b3",
+        "originalOrder": {
+          "id": "101",
+          "order_status": "4",
+          "pay_is": "1",
+          "is_settle": "0",
+          "return_order_money": "87.00",
+          "deposit_amount": "57.00",
+          "detain_money": "5.00",
+          "unrelated_column": "x"
+        },
+        "refundRecord": null,
+        "evidenceRef": "FIXTURE_A_LIABILITY"
+      },
+      {
+        "classification": "DETAINED",
+        "legacyOrderId": "201",
+        "mappedOrderId": "legacy_order_cea80b98d2e9448fce93466d23e89a97dec22d42",
+        "originalOrder": {
+          "id": "201",
+          "order_status": "4",
+          "pay_is": "1",
+          "is_settle": "2",
+          "return_order_money": "87.00",
+          "deposit_amount": "57.00",
+          "detain_money": "5.00",
+          "unrelated_column": "x"
+        },
+        "refundRecord": null,
+        "evidenceRef": "FIXTURE_A_LIABILITY"
+      },
+      {
+        "classification": "POSTED_CONFISCATION",
+        "legacyOrderId": "301",
+        "mappedOrderId": "legacy_order_9297d755645f6748de3bfaead4fb29a63fb36f20",
+        "originalOrder": {
+          "id": "301",
+          "order_status": "4",
+          "pay_is": "1",
+          "is_settle": "3",
+          "return_order_money": "87.00",
+          "deposit_amount": "57.00",
+          "detain_money": "5.00",
+          "unrelated_column": "x"
+        },
+        "refundRecord": null,
+        "evidenceRef": "FIXTURE_A_LIABILITY"
+      },
+      {
+        "classification": "REFUND_RECORD_EXISTS",
+        "legacyOrderId": "401",
+        "mappedOrderId": "legacy_order_e7bf936c9ba26d2d5377941d57bd7d1782be0070",
+        "originalOrder": {
+          "id": "401",
+          "order_status": "5",
+          "pay_is": "1",
+          "is_settle": "0",
+          "return_order_money": "87.00",
+          "deposit_amount": "57.00",
+          "detain_money": "5.00",
+          "unrelated_column": "x"
+        },
+        "refundRecord": {
+          "id": "9401",
+          "order_id": "401",
+          "status": "SOURCE_UNKNOWN"
+        },
+        "evidenceRef": "FIXTURE_A_LIABILITY"
+      }
+    ]
+  },
+  "commissions": {
+    "batchId": "FIXTURE-COMMISSION-370",
+    "cutoff": "2026-10-16T00:00:00.000000Z",
+    "parents": [
+      {
+        "legacyId": "7",
+        "parentOrderId": "legacy_order_2eea3a87c2896da0822d8bc62c66e9be0e2d9ad9",
+        "sourceDigest": "7de2065caa7f5d5d6ebedc65a17e5c8bbf9c9840efaad605c67e1afb04b02276",
+        "bindingDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "sourceSnapshot": {
+          "id": "7",
+          "order_status": "4",
+          "pay_is": "1",
+          "is_settle": "0",
+          "confirm_time": "1790816523"
+        },
+        "sourceCompletedAt": "2026-10-01T01:02:03.000000Z",
+        "ownerUserId": "user_02eae74a611a1e02933d31cf836e91cac8bd2815",
+        "renterUserId": "user_aca84121f89ce4061cdc29e59118582beea87c33",
+        "accountId": "fixture_account"
+      }
+    ],
+    "current": [
+      {
+        "orderId": "legacy_order_2eea3a87c2896da0822d8bc62c66e9be0e2d9ad9",
+        "readRef": "fixture-current-read",
+        "headRevision": null,
+        "depositAmountCents": null,
+        "duties": [],
+        "admissions": [],
+        "idempotency": {
+          "principalId": "fixture_admin",
+          "records": []
+        }
+      }
+    ],
+    "verifiedBeneficiaries": [
+      "44"
+    ],
+    "rows": [
+      {
+        "sourceRecord": {
+          "id": "91",
+          "order_id": "7",
+          "user_id": "44",
+          "ratio": "20.00",
+          "level": "2",
+          "status": "1",
+          "earnings": "10.00"
+        },
+        "parentLegacyOrderId": "7",
+        "mappedOrderId": "legacy_order_2eea3a87c2896da0822d8bc62c66e9be0e2d9ad9",
+        "bucket": "COMPLETED_PARENT",
+        "evidenceRef": "FIXTURE_A_COMMISSION"
+      },
+      {
+        "sourceRecord": {
+          "id": "92",
+          "order_id": "7",
+          "user_id": "44",
+          "ratio": "20.00",
+          "level": "2",
+          "status": "1",
+          "earnings": "10.00"
+        },
+        "parentLegacyOrderId": "7",
+        "mappedOrderId": "legacy_order_2eea3a87c2896da0822d8bc62c66e9be0e2d9ad9",
+        "bucket": "INFLIGHT_PARENT",
+        "evidenceRef": "FIXTURE_A_COMMISSION"
+      },
+      {
+        "sourceRecord": {
+          "id": "93",
+          "order_id": "7",
+          "user_id": "44",
+          "ratio": "20.00",
+          "level": "2",
+          "status": "2",
+          "earnings": "10.00"
+        },
+        "parentLegacyOrderId": "7",
+        "mappedOrderId": "legacy_order_2eea3a87c2896da0822d8bc62c66e9be0e2d9ad9",
+        "bucket": "COMPLETED_PARENT",
+        "evidenceRef": "FIXTURE_A_COMMISSION"
+      }
+    ]
+  }
+}
