@@ -1,12 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent as ReactClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
-import { ArrowDown, Check, ChevronLeft, CircleAlert, Headphones, Images, Info, MoreHorizontal, ReceiptText, Search, ShieldCheck, Smile, UserRound, X } from "lucide-react";
+import { ArrowDown, Check, ChevronLeft, CircleAlert, Headphones, Images, MoreHorizontal, ReceiptText, Search, ShieldCheck, Smile, UserRound, X } from "lucide-react";
 import { MessageScroller as MessageScrollerPrimitive } from "@shadcn/react/message-scroller";
-import { ImClientLifecycle } from "@zzsh/im-client/lifecycle";
-import { createLocalFakeNimWebClientFactory, createNimWebClientFactory, NIM_IMAGE_MAX_BYTES, NimImageSendError, NimTextSendError, validateNimImageFile, type NimMessageLike, type NimWebClientLike, type NimWebConnectionState } from "@zzsh/im-client/nim-web-client";
+import { ImClientLifecycle, ImLifecycleSupersededError } from "@zzsh/im-client/lifecycle";
+import { createLocalFakeNimWebClientFactory, createNimWebClientFactory, NIM_IMAGE_MAX_BYTES, NimImageSendError, NimMediaSendError, NimTextSendError, validateNimImageFile, validateNimMediaFile, type NimMessageLike, type NimMessageMedia, type NimWebClientLike, type NimWebConnectionState } from "@zzsh/im-client/nim-web-client";
 import { decodeImSystemNotice, mergeImMessages } from "@zzsh/im-client/message-state";
 import { CHAT_EMOJIS, MessageActionMenu, MessageQuoted, MessageReplyQuote, useMessageLongPress, type MessageActionId, type MessageActionItem } from "@zzsh/ui/message-actions";
+import { MediaDraftBar, MediaMessage, mediaMessageOf, mediaSummaryOf, type MessageMediaDraft } from "@zzsh/ui/message-media";
+import "@zzsh/ui/message-media.css";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 import "@zzsh/ui/message-actions.css";
 import { AdminApiError, adminRequest, friendlyError, hasPermission, type SessionSnapshot } from "../api";
@@ -14,7 +16,8 @@ import { confirmCurrentForbidden, isCurrentImRequest, messageAccessPath, support
 import { canOperateSupportType, createReadClientKey, createSendCapabilityKey } from "./im-support-capabilities";
 import { OrderWorkbenchPane } from "./im-support-orders";
 import { ConsultationUserCard } from "./im-support-user-card";
-import { ConsultationEventsCard } from "./im-support-events";
+import { ComplaintSummaryCard, ConsultationEventsCard, type ConsultationEventSummary } from "./im-support-events";
+import "./im-support-details.css";
 import { formatDuration } from "./im-support-management-model";
 import { dayKeyOf, dayLabelOf, formatBytes, formatTime, initialOf } from "./im-support-format";
 import { Dialog, DialogContent } from "../components/ui/dialog";
@@ -30,6 +33,11 @@ type SupportType = "SERVICE" | "COMPLAINT";
 type ConsultationState = "WAITING" | "ACTIVE" | "CLOSED";
 type Consultation = {
   id: string;
+  /** 持久线程与当前轮次：同一用户+类型的线程跨轮次保留，列表只返回当前未结束的一轮。 */
+  threadId?: string;
+  roundId?: string;
+  roundSeq?: number;
+  threadState?: "IDLE" | "WAITING" | "ACTIVE";
   type: SupportType;
   state: ConsultationState;
   subjectRef: string | null;
@@ -38,6 +46,8 @@ type Consultation = {
   conversationType: "TEAM";
   conversationId: string | null;
   messageScopeState?: string;
+  /** 服务端视角的发送权：只有本轮负责客服为当前账号时才为 true。 */
+  canSend?: boolean;
   version: number;
   lastMessageAt: string | null;
   createdAt: string;
@@ -59,6 +69,7 @@ type SupportMessage = {
   /** Raw channel message kept intact so reply/revoke/delete address the original. */
   source?: NimMessageLike;
   image?: { imageId: string; url?: string; name: string; mimeType: string; size: number };
+  media?: NimMessageMedia;
 };
 type ImToken = { appKey: string; accountId: string; token: string; transport: "nim" | "local-fake" };
 type PresenceToday = { seconds: number; sessions: number; users: number };
@@ -79,14 +90,28 @@ const GROUP_WINDOW_MS = 300_000;
 // 回复没有“按原消息 ID 重放”的接口：结果未知时只能保留草稿与引用，等人工刷新确认，
 // 不能用一条新消息自动重发。
 const REPLY_UNCERTAIN_NOTICE = "回复结果未确认，请刷新确认后再发送；取消引用后可按普通消息发送。";
-// 结束结果未知时的说明。不复述"仍进行中/已结束"这类推断：平台当前没有按咨询读取结果的
-// 接口，目录缺席、分页、转交、失权都证明不了远端到底有没有执行这次关闭。
-const CLOSE_OUTCOME_UNKNOWN_NOTICE = "结束结果未确认：这次关闭可能已生效也可能没有。平台目前没有按咨询读取结果的接口，本页无法确认，也不会重复提交；请由平台侧核对后再处理。";
+// 本轮结束结果未知时的说明。不复述"仍进行中/已结束"这类推断：平台当前没有按咨询读取本轮
+// 结果的接口，目录缺席、分页、转交、失权都证明不了远端到底有没有执行这次结束本轮。
+const CLOSE_OUTCOME_UNKNOWN_NOTICE = "本轮结束结果未确认：这次结束本轮可能已生效也可能没有。平台目前没有按咨询读取本轮结果的接口，本页无法确认，也不会重复提交；请由平台侧核对后再处理。";
 
 // 「案件进度」stepper 与「下一步 / 轮到你回复」已移除：assignedAdmin + messageScopeState
 // 只能证明当前的接待关系与远端就绪状态，证明不了处理轮次，也证明不了历史阶段时间。
 // 处理记录时间线由 ConsultationEventsCard 按真实事件投影渲染，不再从当前状态推断。
 function typeLabel(type: SupportType): string { return type === "COMPLAINT" ? "投诉反馈" : "平台咨询"; }
+function roundSeqOf(consultation: { roundSeq?: number }): number | null {
+  return typeof consultation.roundSeq === "number" && Number.isInteger(consultation.roundSeq) && consultation.roundSeq > 0 ? consultation.roundSeq : null;
+}
+function roundTagOf(consultation: Consultation): string {
+  const seq = roundSeqOf(consultation);
+  return seq === null ? "" : `第 ${seq} 轮`;
+}
+function roundHeadlineOf(consultation: Consultation): string {
+  const seq = roundSeqOf(consultation);
+  const round = seq === null ? "" : `第 ${seq} 轮接待 · `;
+  if (consultation.state === "WAITING") return `${round}等待客服接入`;
+  if (consultation.assignedAdmin) return `${round}${consultation.assignedAdmin.name}`;
+  return `${round}尚未分配接待`;
+}
 function stateLabel(state: ConsultationState): QueueRow["state"] { return state === "ACTIVE" ? "处理中" : state === "WAITING" ? "待接入" : "已结束"; }
 function scopeStateLabel(consultation: Consultation): QueueRow["state"] { return consultation.messageScopeState === "FAILED" ? "待核验" : stateLabel(consultation.state); }
 function connectionForPresence(state: NimWebConnectionState | "idle" | "error"): Presence["connectionState"] {
@@ -122,11 +147,13 @@ export function messageFromNim(message: NimMessageLike, accountId: string, peerA
   // are not rendered as if the customer had written them.
   if (notice) return { ...base, from: "system", text: notice.text };
   const image = imageOf(message);
-  const text = typeof message.text === "string" && message.text.trim() ? message.text : image ? "" : message.messageType === 0 ? "" : "暂不支持展示的消息类型";
+  // Only the client-validated media envelope becomes a media bubble.
+  const media = mediaMessageOf(message);
+  const text = typeof message.text === "string" && message.text.trim() ? message.text : image || media ? "" : message.messageType === 0 ? "" : "暂不支持展示的消息类型";
   // Only the mapped peer is a customer; a colleague staff message stays on the staff
   // side instead of borrowing the current assignee's name or the user's label.
   const from: SupportMessage["from"] = self || (peerAccountId ? message.senderId !== peerAccountId : false) ? "agent" : "customer";
-  return { ...base, from, text, ...(image === undefined ? {} : { image }) };
+  return { ...base, from, text, ...(image === undefined ? {} : { image }), ...(media === undefined ? {} : { media }) };
 }
 function oldestOf(messages: NimMessageLike[]): NimMessageLike | undefined {
   return messages.reduce<NimMessageLike | undefined>((oldest, item) => (!oldest || (item.createTime ?? 0) < (oldest.createTime ?? 0) ? item : oldest), undefined);
@@ -168,6 +195,9 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
 
   const [queue, setQueue] = useState<Consultation[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // 投诉摘要复用处理记录的第一页投影，不为“最近结果”再打一次请求。
+  const [eventSummary, setEventSummary] = useState<ConsultationEventSummary | null>(null);
+  const reportEventSummary = useCallback((summary: ConsultationEventSummary) => { setEventSummary(summary); }, []);
   const [messages, setMessages] = useState<Record<string, SupportMessage[]>>({});
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [emojiOpen, setEmojiOpen] = useState(false);
@@ -189,6 +219,10 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
   const textFlightRef = useRef(new Set<string>());
   const [staged, setStaged] = useState<Record<string, DraftImage[]>>({});
   const [pending, setPending] = useState<Record<string, DraftImage | null>>({});
+  const [mediaDrafts, setMediaDrafts] = useState<Record<string, MessageMediaDraft | null>>({});
+  const mediaDraftsRef = useRef(mediaDrafts);
+  mediaDraftsRef.current = mediaDrafts;
+  const mediaFlights = useRef(new Map<string, MessageMediaDraft>());
   const [viewer, setViewer] = useState<{ url: string; name: string } | null>(null);
   const [historyRetryToken, setHistoryRetryToken] = useState(0);
   const [imageErrors, setImageErrors] = useState<Record<string, number>>({});
@@ -236,6 +270,8 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
   const composingRef = useRef(false);
   const chatHeadingRef = useRef<HTMLElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const consultationVideoInput = useRef<HTMLInputElement | null>(null);
+  const consultationFileInput = useRef<HTMLInputElement | null>(null);
   const detailsTriggerRef = useRef<HTMLButtonElement | null>(null);
   const transferTriggerRef = useRef<HTMLButtonElement | null>(null);
   const closeTriggerRef = useRef<HTMLButtonElement | null>(null);
@@ -622,8 +658,8 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
       : closeOutcomeUnknown[item.id]
         ? "结束结果未确认，待平台核对"
         : last
-        ? `${last.from === "agent" ? (last.self ? "我：" : "客服：") : last.from === "system" ? "" : "用户："}${last.image ? "[图片]" : last.text || "[空消息]"}`
-        : item.state === "WAITING" ? "等待客服接待" : item.state === "CLOSED" ? "咨询已结束" : "会话已建立，等待消息";
+        ? `${last.from === "agent" ? (last.self ? "我：" : "客服：") : last.from === "system" ? "" : "用户："}${last.image ? "[图片]" : last.media ? mediaSummaryOf(last) ?? "[媒体]" : last.text || "[空消息]"}`
+        : item.state === "WAITING" ? "等待客服接待" : item.state === "CLOSED" ? "本轮已结束" : "会话已建立，等待消息";
     return {
       id: item.id,
       type: item.type,
@@ -658,21 +694,34 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
   }, [displayQueue, filter, query]);
 
   const canOperateSelected = selected ? canOperateSupportType(selected.type, canAccept, canComplaint) : false;
-  const canEdit = Boolean(canRead && canOperateSelected && selected?.state === "ACTIVE" && selected.conversationId && selected.messageScopeState === "READY" && !blockedConsultations[selected.id]);
-  const canSend = Boolean(canRead && canOperateSelected && selected?.state === "ACTIVE" && selected.conversationId && selected.messageScopeState === "READY" && !blockedConsultations[selected.id] && clientRef.current && connection === "CONNECTED" && canEdit);
+  const isMine = Boolean(selected?.state === "ACTIVE" && selected.assignedAdmin?.id === snapshot.adminUserId);
+  // 服务端 canSend 只在“本轮 ACTIVE 且负责客服是当前账号且消息范围 READY”时为 true。
+  // 客户端不再用“有接待权限 + 状态 ACTIVE”自行推断发送权：其他管理员转入只读巡视。
+  const serverCanSend = selected?.canSend === true;
+  const canEdit = Boolean(canRead && canOperateSelected && isMine && serverCanSend && selected?.state === "ACTIVE" && selected.conversationId && selected.messageScopeState === "READY" && !blockedConsultations[selected.id]);
+  const canSend = Boolean(canEdit && clientRef.current && connection === "CONNECTED");
   canStartSendRef.current = canSend;
   const claimReady = Boolean(selected?.state === "WAITING" && !selected.assignedAdmin && canOperateSelected);
-  const isMine = Boolean(selected?.state === "ACTIVE" && selected.assignedAdmin?.id === snapshot.adminUserId);
+  const readOnlyReason = selected && selected.state === "ACTIVE" && !isMine
+    ? selected.assignedAdmin
+      ? `只读查看：本轮由 ${selected.assignedAdmin.name} 接待，仅负责客服可发送消息或结束本轮。`
+      : "只读查看：本轮尚未分配负责客服，暂不可发送消息或结束本轮。"
+    : null;
+  const readOnlyPlaceholder = selected && selected.state === "ACTIVE" && !isMine
+    ? selected.assignedAdmin ? `本轮由 ${selected.assignedAdmin.name} 接待，仅可只读查看` : "本轮尚未分配负责客服，暂不可回复"
+    : null;
   const selectedStaged = staged[draftKey] ?? [];
   const selectedPending = pending[draftKey] ?? null;
+  const selectedMedia = mediaDrafts[draftKey] ?? null;
   const selectedFailedText = failedFor(draftKey);
   const imageInFlight = Boolean(selectedPending && (selectedPending.state === "SENDING" || imageFlights.current.has(draftKey)));
   const imageBlocked = selectedStaged.some((item) => item.state === "DECODING" || item.width <= 0 || item.height <= 0);
-  const sendBlocked = sending || imageInFlight || selectedPending?.state === "UNKNOWN" || selectedPending?.state === "SENDING";
+  const mediaInFlight = Boolean(selectedMedia?.state === "SENDING" || mediaFlights.current.has(draftKey));
+  const sendBlocked = sending || imageInFlight || mediaInFlight || selectedPending?.state === "UNKNOWN" || selectedPending?.state === "SENDING" || selectedMedia?.state === "UNKNOWN";
 
   /* ---------- platform message menu: copy / reply / revoke / delete ---------- */
-  const replySummaryOf = (message: SupportMessage): string => message.image ? "[图片]" : message.text.trim() ? message.text.trim().slice(0, 120) : "消息";
-  const copyableTextOf = (message: SupportMessage): string | null => !message.revoked && message.from !== "system" && !message.image
+  const replySummaryOf = (message: SupportMessage): string => message.image ? "[图片]" : mediaSummaryOf(message) ?? (message.text.trim() ? message.text.trim().slice(0, 120) : "消息");
+  const copyableTextOf = (message: SupportMessage): string | null => !message.revoked && message.from !== "system" && !message.image && !message.media
     && (message.messageType === undefined || message.messageType === 0) && message.text.trim() ? message.text : null;
   const clearReplyFor = (key: string) => {
     setReplyTargets((current) => (current[key] ? { ...current, [key]: null } : current));
@@ -860,7 +909,8 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
   };
   const close = async (consultationId: string) => {
     const target = queueRef.current.find((item) => item.id === consultationId);
-    if (!target || target.state !== "ACTIVE" || target.assignedAdmin?.id !== snapshot.adminUserId || blockedConsultations[consultationId] || !canOperateSupportType(target.type, canAccept, canComplaint)) return;
+    // 结束的是“本轮接待”，不是整条线程：必须仍是本轮负责客服且服务端确认可发送。
+    if (!target || target.state !== "ACTIVE" || target.canSend !== true || target.assignedAdmin?.id !== snapshot.adminUserId || blockedConsultations[consultationId] || !canOperateSupportType(target.type, canAccept, canComplaint)) return;
     // 结果未知时不再产生新的 close：结束不可撤销，而当前没有任何权威读接口能证明
     // 上一次到底生效没有，重复提交只会制造第二个无法对账的意图。
     if (closeOutcomeUnknown[consultationId]) return;
@@ -885,7 +935,8 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
       setCloseOutcomeUnknown((value) => { const next = { ...value }; delete next[consultationId]; return next; });
       setCloseOpen(false);
       if (selectedIdRef.current === consultationId) { setSelectedId(null); setMobilePane("queue"); }
-      setNotice("咨询已结束");
+      // 只结束本轮：线程与同一 Team 的聊天记录保留，用户再次咨询会在同一线程开启新一轮。
+      setNotice("本轮已结束，聊天记录保留；用户再次咨询会在同一会话开启新一轮。");
     } catch (cause) {
       await blockCurrentConsultationOnForbidden(cause, requestKey);
       if (!sameOperation()) return;
@@ -1087,6 +1138,91 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
     } catch (error) { settleFlight(key, attempt, { success: false, error }); throw error; }
   };
 
+  /* ---------- one staged video/file per consultation ---------- */
+  const setMediaFor = (key: string, updater: ((current: MessageMediaDraft | null) => MessageMediaDraft | null) | MessageMediaDraft | null) => {
+    const previous = mediaDraftsRef.current[key] ?? null;
+    const next = typeof updater === "function" ? updater(previous) : updater;
+    mediaDraftsRef.current = { ...mediaDraftsRef.current, [key]: next };
+    setMediaDrafts(mediaDraftsRef.current);
+  };
+  const stageMediaFile = (file: File, kind: "video" | "file") => {
+    const key = draftKey;
+    if (!key || !canSend) { setNotice("接入会话后才能添加视频或文件。"); return; }
+    const current = mediaDraftsRef.current[key] ?? null;
+    if (current?.state === "SENDING") { setNotice("媒体正在发送，请稍候"); return; }
+    if (current?.state === "UNKNOWN") { setNotice("上次媒体发送结果未确认，请先按原消息重试"); return; }
+    try { validateNimMediaFile(file, kind); } catch (cause) { setNotice(`${file.name}：${cause instanceof Error ? cause.message : "媒体文件无效"}`); return; }
+    setMediaFor(key, { file, kind, name: file.name, size: file.size, state: "READY", progress: 0 });
+    setNotice(undefined);
+  };
+  const removeSelectedMedia = () => {
+    const current = mediaDraftsRef.current[draftKey] ?? null;
+    if (!current) return;
+    if (current.state === "SENDING" || mediaFlights.current.has(draftKey)) { setNotice("媒体正在发送，暂不能移除"); return; }
+    if (current.state === "UNKNOWN") { setNotice("媒体发送结果未确认，暂不能移除；请先核对历史"); return; }
+    setMediaFor(draftKey, null);
+  };
+  const beginMediaFlight = (key: string, media: MessageMediaDraft): MessageMediaDraft | null => {
+    if (mediaFlights.current.has(key)) return null;
+    const attempt: MessageMediaDraft = { ...media, state: "SENDING", progress: 0 };
+    mediaFlights.current.set(key, attempt);
+    setMediaFor(key, () => attempt);
+    return attempt;
+  };
+  const settleMediaFlight = (key: string, attempt: MessageMediaDraft, result: { success: boolean; error?: unknown }) => {
+    if (mediaFlights.current.get(key) !== attempt) return;
+    mediaFlights.current.delete(key);
+    setMediaFor(key, (previous) => {
+      if (!previous || previous.file !== attempt.file) return previous;
+      if (result.success) return null;
+      const cause = result.error;
+      const mediaError = cause instanceof NimMediaSendError ? cause : null;
+      return { ...previous, state: mediaError?.kind === "UNKNOWN" ? "UNKNOWN" : "FAILED", progress: 0, messageClientId: mediaError?.messageClientId ?? previous.messageClientId };
+    });
+  };
+  const sendOneMedia = async (key: string, media: MessageMediaDraft, conversationId: string, version: number): Promise<NimMessageLike> => {
+    const client = clientRef.current;
+    if (!client) throw new Error("云信连接不可用");
+    if (media.state === "UNKNOWN" && !media.messageClientId) throw new Error("结果未确认，无法重试");
+    const attempt = beginMediaFlight(key, media);
+    if (!attempt) throw new Error("该视频或文件已有发送在途");
+    const progress = (percentage: number) => {
+      if (version === operatorGenerationRef.current) setMediaFor(key, (current) => current?.file === attempt.file ? { ...current, progress: percentage } : current);
+    };
+    try {
+      const sent = media.messageClientId
+        ? await client.retryMedia(conversationId, media.messageClientId, { onProgress: progress })
+        : await client.sendMedia(conversationId, media.file, media.kind, { onProgress: progress });
+      settleMediaFlight(key, attempt, { success: true });
+      return sent;
+    } catch (error) { settleMediaFlight(key, attempt, { success: false, error }); throw error; }
+  };
+  const retryMediaDraft = async () => {
+    const key = draftKey;
+    const media = mediaDraftsRef.current[key] ?? null;
+    if (!media || !canSend || sendingRef.current || imageFlights.current.has(key) || mediaFlights.current.has(key)) return;
+    if (media.state === "UNKNOWN" && !media.messageClientId) { setNotice("原媒体标识不可用，请先刷新历史核验，不能直接重发。"); return; }
+    if (failedFor(selected!.id)) { setNotice("上一条文字的结果还未确认，请先处理文字再发送媒体。"); return; }
+    const conversationId = selected!.conversationId!;
+    const generation = operatorGenerationRef.current;
+    const busyOwner = beginBusy();
+    sendingRef.current = true;
+    setSending(true);
+    setNotice(undefined);
+    try {
+      const sent = await sendOneMedia(key, media, conversationId, generation);
+      if (generation === operatorGenerationRef.current) {
+        const next = messageFromNim(sent, clientRef.current!.accountId, selected?.peerAccountId);
+        if (next) setMessages((current) => ({ ...current, [key]: mergeImMessages(current[key] ?? [], [next]) }));
+      }
+    } catch (cause) {
+      if (cause instanceof NimMediaSendError && cause.kind === "UNSUPPORTED") setNotice("当前云信通道暂不支持发送视频或文件，未发送。");
+      else setNotice(cause instanceof NimMediaSendError && cause.kind === "UNKNOWN" ? "媒体结果仍未确认" : cause instanceof Error ? cause.message : "媒体发送失败，可重试。");
+    } finally {
+      if (generation === operatorGenerationRef.current) { sendingRef.current = false; setSending(false); endBusy(busyOwner); }
+    }
+  };
+
   const retryFailedText = async (consultationId: string) => {
     const failed = failedFor(consultationId);
     const client = clientRef.current;
@@ -1138,6 +1274,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
     const text = (drafts[key] ?? "").trim();
     const stagedList = stagedRef.current[key] ?? [];
     const pendingItem = pendingRef.current[key] ?? null;
+    const mediaItem = mediaDraftsRef.current[key] ?? null;
     if (!key || !canSend) return;
     const consultationId = selected!.id;
     const conversationId = selected!.conversationId!;
@@ -1167,11 +1304,14 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
     if (replyTarget && replyUncertain[key]) { setNotice(REPLY_UNCERTAIN_NOTICE); return; }
     if (replyTarget && !text) { setNotice("回复需要先输入文字；图片回复暂不支持"); return; }
     if (replyTarget && !replyTarget.source) { setNotice("引用消息不可用，请刷新历史后重试"); return; }
-    if (!text && !stagedList.length && !pendingItem) return;
-    if (sendingRef.current || imageFlights.current.has(key) || pendingItem?.state === "SENDING" || pendingItem?.state === "UNKNOWN") {
+    if (!text && !stagedList.length && !pendingItem && !mediaItem) return;
+    if (sendingRef.current || imageFlights.current.has(key) || mediaFlights.current.has(key) || pendingItem?.state === "SENDING" || pendingItem?.state === "UNKNOWN") {
       if (pendingItem?.state === "UNKNOWN") setNotice("图片发送结果未确认，请先刷新历史；确认未发送后再按原图片重试。");
       return;
     }
+    if (mediaItem?.state === "SENDING") { setNotice("媒体正在发送，请稍候"); return; }
+    if (mediaItem?.state === "UNKNOWN") { setNotice("媒体发送结果未确认，请先刷新历史；确认未发送后再按原消息重试。"); return; }
+    if (mediaItem?.state === "FAILED") { setNotice("请先重试或移除发送失败的视频/文件，再发送后续内容"); return; }
     if (stagedList.some((item) => item.state === "DECODING" || item.width <= 0 || item.height <= 0)) { setNotice("图片仍在检查，请稍候"); return; }
     if (pendingItem?.state === "FAILED" && stagedList.length) { setNotice("请先处理失败的图片，再发送后续内容"); return; }
     const client = clientRef.current!;
@@ -1182,7 +1322,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
     sendingRef.current = true;
     setSending(true);
     setNotice(undefined);
-    let stage: "text" | "image" = "text";
+    let stage: "text" | "image" | "media" = "text";
     // 真正提交出去的原文：重试时是原消息文本，不是此刻的草稿。异常要按它记责任。
     let submittedText = text;
     try {
@@ -1224,6 +1364,16 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
           if (next) setMessages((current) => ({ ...current, [consultationId]: mergeImMessages(current[consultationId] ?? [], [next]) }));
         }
       }
+      const mediaToSend = !retryTarget && mediaItem?.state === "READY" ? mediaItem : null;
+      if (mediaToSend) {
+        if (generation !== operatorGenerationRef.current || operatorRef.current !== operator || selectedIdRef.current !== consultationId || sectionRef.current !== "consultation" || clientRef.current !== client || !canStartSendRef.current) throw new ImLifecycleSupersededError();
+        stage = "media";
+        const sent = await sendOneMedia(consultationId, mediaToSend, conversationId, generation);
+        if (generation === operatorGenerationRef.current) {
+          const next = messageFromNim(sent, client.accountId, selected?.peerAccountId);
+          if (next) setMessages((current) => ({ ...current, [consultationId]: mergeImMessages(current[consultationId] ?? [], [next]) }));
+        }
+      }
     } catch (cause) {
       await blockCurrentConsultationOnForbidden(cause, requestKey);
       // 同上：失败/未知的责任也要记回原操作，不能因为发送能力变化而丢弃。
@@ -1244,9 +1394,12 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
             if (textError) setFailedFor(consultationId, { consultationId, conversationId, text: submittedText, ...(textError.messageClientId ? { messageClientId: textError.messageClientId } : {}) });
             setNotice(textError?.kind === "UNKNOWN" ? "结果未确认，草稿已保留" : cause instanceof Error ? cause.message : "消息发送失败，请重试。");
           }
-        } else {
+        } else if (stage === "image") {
           const isUnknown = cause instanceof NimImageSendError && cause.kind === "UNKNOWN";
           setNotice(isUnknown ? "图片结果未确认，原图片已保留" : cause instanceof Error ? cause.message : "图片发送失败，可重试。");
+        } else {
+          const mediaError = cause instanceof NimMediaSendError ? cause : null;
+          setNotice(mediaError?.kind === "UNSUPPORTED" ? "当前云信通道暂不支持发送视频或文件，未发送。" : mediaError?.kind === "UNKNOWN" ? "视频/文件结果未确认，原文件已保留" : cause instanceof Error ? cause.message : "视频/文件发送失败，可重试。");
         }
       }
     } finally {
@@ -1347,7 +1500,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
           <Bubble align={mine ? "end" : "start"} variant={mine ? "default" : "secondary"}>
             <BubbleContent className="im-wb-bub" data-revoked={message.revoked ? "true" : undefined}>
               {message.revoked ? "消息已撤回" : <>
-                {message.image ? (imageUrl
+                {message.media ? <MediaMessage media={message.media} /> : message.image ? (imageUrl
                   ? (imageErrors[message.id]
                     ? <button type="button" className="im-wb-thumb im-wb-thumb-failed" data-action="retry-image" onClick={() => setImageErrors((current) => { const next = { ...current }; delete next[message.id]; return next; })} aria-label={`重新加载图片 ${message.image.name}`}>图片加载失败 · 点击重试</button>
                     : <button type="button" className="im-wb-thumb" onClick={() => setViewer({ url: imageUrl, name: message.image!.name })} aria-label={`查看图片 ${message.image.name}`}><img key={imageErrors[message.id] ?? imageUrl} src={imageUrl} alt={message.image.name} loading="lazy" onError={() => setImageErrors((current) => ({ ...current, [message.id]: Date.now() }))} /></button>)
@@ -1389,16 +1542,17 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
         <span className="im-wb-chat-av" aria-hidden="true">{initialOf(selected?.user?.name || selected?.user?.username || "客")}</span>
         <div className="im-wb-chat-title">
           <h2>{selected ? `${selected.user?.name || selected.user?.username || "平台用户"} · ${typeLabel(selected.type)}` : "选择一条会话"}</h2>
-          <span className="im-wb-chat-sub">{!selected ? "等待用户咨询" : selected.state === "WAITING" ? "等待客服接待" : selected.assignedAdmin ? `当前接待：${selected.assignedAdmin.name}` : "尚未分配接待"}</span>
+          <span className="im-wb-chat-sub">{!selected ? "等待用户咨询" : roundHeadlineOf(selected)}</span>
         </div>
         <div className="im-wb-chat-actions">
           {claimReady ? <button type="button" className="im-wb-btn im-wb-btn-primary" data-action="claim-consultation" onClick={() => void claim()} disabled={busy || connection !== "CONNECTED"}>接入会话</button> : null}
-          {selected && isMine && selected.messageScopeState !== "FAILED" ? <button ref={closeTriggerRef} type="button" data-action="close-consultation" className="im-wb-btn im-wb-btn-outline" onClick={() => { if (!canOperateSelected || closeOutcomeUnknown[selected.id]) return; setCloseTarget(selected); setCloseOpen(true); }} disabled={busy || !canOperateSelected || Boolean(closeOutcomeUnknown[selected.id]) || Boolean(blockedConsultations[selected.id])}>{!canOperateSelected ? "无本类型接待权限" : closeOutcomeUnknown[selected.id] ? "结束结果未确认" : "结束咨询"}</button> : null}
+          {selected && isMine && selected.messageScopeState !== "FAILED" ? <button ref={closeTriggerRef} type="button" data-action="close-consultation" className="im-wb-btn im-wb-btn-outline" title={!serverCanSend && canOperateSelected ? "本轮尚未就绪，暂不可结束" : undefined} onClick={() => { if (!canOperateSelected || !serverCanSend || closeOutcomeUnknown[selected.id]) return; setCloseTarget(selected); setCloseOpen(true); }} disabled={busy || !canOperateSelected || !serverCanSend || Boolean(closeOutcomeUnknown[selected.id]) || Boolean(blockedConsultations[selected.id])}>{!canOperateSelected ? "无本类型接待权限" : closeOutcomeUnknown[selected.id] ? "结束结果未确认" : "结束本轮"}</button> : null}
           <button ref={transferTriggerRef} type="button" data-action="open-transfer" className="im-wb-btn im-wb-btn-outline" onClick={() => void openTransfer()} disabled={!canTransfer || !selected || selected.state !== "ACTIVE" || !isMine || selected.messageScopeState !== "READY" || busy}>{canTransfer ? "转交" : "无转交权限"}</button>
           <button ref={detailsTriggerRef} type="button" className="im-wb-btn im-wb-btn-outline im-wb-btn-icon" aria-label={detailsOpen ? "收起会话详情" : "展开会话详情"} aria-expanded={detailsOpen} aria-controls="im-wb-details" data-action="toggle-details" onClick={() => { const narrow=typeof window!=="undefined"&&window.matchMedia("(max-width: 760px)").matches; if(narrow&&mobilePane!=="details"){openDetails();return;} if (detailsOpen) closeDetails(); else openDetails(); }}><MoreHorizontal size={15} /></button>
         </div>
       </header>
       {selected?.type === "COMPLAINT" ? <p className="im-wb-scope-note"><CircleAlert size={13} />投诉内容不会同步到订单群</p> : null}
+      {readOnlyReason ? <p className="im-wb-scope-note" data-tone="readonly" data-action="support-readonly" role="status"><ShieldCheck size={13} />{readOnlyReason}</p> : null}
       {notice ? <p className="im-wb-notice" role="status"><CircleAlert size={14} />{notice}</p> : null}
       {selected && closeOutcomeUnknown[selected.id] ? <p className="im-wb-notice" data-tone="warn" role="status"><CircleAlert size={14} />{CLOSE_OUTCOME_UNKNOWN_NOTICE}</p> : null}
       <div className="im-wb-stream-wrap">
@@ -1422,6 +1576,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
         <button type="button" onClick={() => void retryPendingImage()} disabled={sending || imageInFlight || !canSend}>{selectedPending.messageClientId ? "原消息重试" : "重试"}</button>
         <button type="button" onClick={removePending} disabled={sendBlocked || !canSend || selectedPending.state === "UNKNOWN"} title={selectedPending.state === "UNKNOWN" ? "结果未确认时不可移除原图片" : undefined}>移除</button>
       </div> : null}
+      {selectedMedia ? <MediaDraftBar draft={selectedMedia} onRetry={() => void retryMediaDraft()} onRemove={removeSelectedMedia} disabled={busy || sending} /> : null}
       {selectedReply ? <MessageReplyQuote label={replySummaryOf(selectedReply)} onCancel={() => clearReplyFor(draftKey)} /> : null}
       <form className="im-wb-composer" onSubmit={(event) => void send(event)} onDragOver={(event) => event.preventDefault()} onDrop={onComposerDrop}>
         {selectedStaged.length ? <AttachmentGroup className="im-wb-tray">{selectedStaged.map((item, idx) => <Attachment key={item.key} className="im-wb-tray-item" data-state={item.state} state={item.state === "DECODING" ? "processing" : "idle"} size="xs">
@@ -1437,7 +1592,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
           <InputGroupTextarea ref={composerRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={onComposerKeyDown} onPaste={onComposerPaste}
             onCompositionStart={() => { composingRef.current = true; }} onCompositionEnd={() => { composingRef.current = false; }}
             aria-label="输入客服消息" rows={3}
-            placeholder={!selected ? "从左侧选择会话" : selected.state === "WAITING" ? "接入会话后可回复" : selected.messageScopeState === "FAILED" ? "云信会话待人工核验，暂不可回复" : connection !== "CONNECTED" ? "云信通道未连接，草稿会保留" : "输入回复…"}
+            placeholder={!selected ? "从左侧选择会话" : selected.state === "WAITING" ? "接入会话后可回复" : selected.state === "ACTIVE" && !isMine ? readOnlyPlaceholder ?? "仅负责客服可发送消息" : selected.messageScopeState === "FAILED" ? "云信会话待人工核验，暂不可回复" : connection !== "CONNECTED" ? "云信通道未连接，草稿会保留" : "输入回复…"}
             disabled={!canEdit} />
           <InputGroupAddon align="block-end" className="im-wb-composer-tools">
             <Popover open={emojiOpen} onOpenChange={setEmojiOpen}>
@@ -1447,8 +1602,12 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
               </div></PopoverContent>
             </Popover>
             <label className="im-wb-tool"><Images size={14} />图片<input type="file" accept="image/jpeg,image/png" multiple onChange={(event: ChangeEvent<HTMLInputElement>) => { const files = event.target.files ? Array.from(event.target.files) : []; event.target.value = ""; stageFiles(files); }} disabled={!canEdit || sendBlocked} /></label>
+            <button type="button" className="im-wb-tool" aria-label="发送视频" onClick={() => consultationVideoInput.current?.click()} disabled={!canEdit || sendBlocked}>视频</button>
+            <input ref={consultationVideoInput} type="file" accept="video/mp4,video/quicktime,video/webm" hidden onChange={(event: ChangeEvent<HTMLInputElement>) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) stageMediaFile(file, "video"); }} disabled={!canEdit || sendBlocked || selectedMedia?.state === "UNKNOWN"} />
+            <button type="button" className="im-wb-tool" aria-label="发送文件" onClick={() => consultationFileInput.current?.click()} disabled={!canEdit || sendBlocked}>文件</button>
+            <input ref={consultationFileInput} type="file" accept="application/pdf,application/zip,text/plain,text/csv,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.presentationml.presentation" hidden onChange={(event: ChangeEvent<HTMLInputElement>) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) stageMediaFile(file, "file"); }} disabled={!canEdit || sendBlocked || selectedMedia?.state === "UNKNOWN"} />
             <span className="im-wb-hint im-wb-hint-right"><Kbd>Enter</Kbd> 发送 · <Kbd>Shift</Kbd>+<Kbd>Enter</Kbd> 换行</span>
-            <button type="submit" className="im-wb-send" disabled={!canSend || busy || sendBlocked || (!draft.trim() && !selectedStaged.length && !(selectedPending?.state === "FAILED"))}>{busy ? "处理中…" : "发送"}</button>
+            <button type="submit" className="im-wb-send" disabled={!canSend || busy || sendBlocked || (!draft.trim() && !selectedStaged.length && !(selectedPending?.state === "FAILED") && selectedMedia?.state !== "READY")}>{busy ? "处理中…" : "发送"}</button>
           </InputGroupAddon>
         </InputGroup>
       </form>
@@ -1457,17 +1616,16 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
     <aside id="im-wb-details" className="im-wb-details" aria-label="会话详情" hidden={!detailsOpen}>
       <div className="im-wb-details-head"><strong>会话详情</strong><button type="button" className="im-wb-btn im-wb-btn-icon im-wb-details-back" data-action="back-to-chat" onClick={closeDetails}>返回会话</button></div>
       {!selected ? <p className="im-wb-details-empty">未选择会话</p> : <>
-        {/* 只陈列可由现有字段证明的当前事实。此前的「案件进度」stepper 与「下一步 /
-            轮到你回复」是从 assignedAdmin + READY 推断出来的，既证明不了轮次也证明不了
-            历史；历史阶段时间一律以处理记录时间线里的真实事件为准。 */}
-        <section className="im-wb-sec"><span><Info size={12} />本次服务</span>
-          <dl><div><dt>{selected.type === "COMPLAINT" ? "沟通类型" : "咨询类型"}</dt><dd>{typeLabel(selected.type)}</dd></div>
-            <div><dt>服务状态</dt><dd>{scopeStateLabel(selected)}</dd></div>
-            <div><dt>{selected.type === "COMPLAINT" ? "当前处理" : "当前接待"}</dt><dd>{selected.assignedAdmin?.name || "尚未分配"}</dd></div>
-            <div><dt>发起时间</dt><dd>{formatTime(selected.createdAt)}</dd></div></dl></section>
+        {/* 会话类型、状态与当前接待已在聊天头部；右栏不再重复「本次服务」，第一屏从用户与
+            风险摘要开始。处理记录只陈列真实事件投影，不按当前状态推断历史；投诉的额外摘要
+            只使用现有投影并逐项标注缺口。 */}
         <ConsultationUserCard key={selected.id} consultationId={selected.id} rowUserId={selected.user?.id ?? ""} fallbackName={selected.user?.name || selected.user?.username || "平台用户"}
-          request={adminRequest} scope={profileScope} onOpenProfile={(id) => onOpenPath?.(`/users/${encodeURIComponent(id)}`, "用户资料")} />
-        <ConsultationEventsCard key={`${selected.id}:events`} consultationId={selected.id} request={adminRequest} />
+          request={adminRequest} scope={profileScope} showSubject={selected.type !== "COMPLAINT"}
+          onOpenProfile={(id) => onOpenPath?.(`/users/${encodeURIComponent(id)}`, "用户资料")} />
+        {selected.type === "COMPLAINT" ? <ComplaintSummaryCard typeLabel={typeLabel(selected.type)} stateLabel={scopeStateLabel(selected)}
+          subjectRef={selected.subjectRef} summary={eventSummary?.consultationId === selected.id ? eventSummary : null} /> : null}
+        <ConsultationEventsCard key={`${selected.id}:events`} consultationId={selected.id} request={adminRequest}
+          onSummary={selected.type === "COMPLAINT" ? reportEventSummary : undefined} />
 
         {blockedConsultations[selected.id] ? <section className="im-wb-sec"><span>授权状态</span><small>发送权限已失效</small>
           <button type="button" className="im-wb-btn" data-action="refresh-consultation-access" onClick={() => void refreshConsultationAccess()} disabled={busy || !selected.conversationId}>重新确认当前授权</button></section> : null}
@@ -1534,19 +1692,19 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
         </div>
       </DialogContent>
     </Dialog>
-    {/* 结束咨询：确认对象与后果再提交。没有后台恢复/撤销合同，所以这里不给「撤销」，
-        也不把结束包装成可逆操作。 */}
+    {/* 结束本轮：只结束当前轮次，不断开整条线程；确认对象与后果再提交。没有后台恢复/撤销合同，
+        所以这里不给「撤销」，也不把结束本轮包装成可逆操作。 */}
     <Dialog open={closeOpen} onOpenChange={setCloseOpen}>
-      <DialogContent className="im-wb-dialog" aria-label="结束咨询" showCloseButton={false} finalFocus={closeTriggerRef}>
-        <div className="im-wb-dialog-head"><div><strong>结束咨询</strong><span>{closeTarget ? `${typeLabel(closeTarget.type)} · ${closeTarget.user?.name || closeTarget.user?.username || "平台用户"}` : "当前咨询"}</span></div><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setCloseOpen(false)} aria-label="关闭结束确认"><X size={14} /></button></div>
+      <DialogContent className="im-wb-dialog" aria-label="结束本轮" showCloseButton={false} finalFocus={closeTriggerRef}>
+        <div className="im-wb-dialog-head"><div><strong>结束本轮</strong><span>{closeTarget ? `${typeLabel(closeTarget.type)} · ${roundTagOf(closeTarget)}${roundTagOf(closeTarget) ? " · " : ""}${closeTarget.user?.name || closeTarget.user?.username || "平台用户"}` : "当前轮次"}</span></div><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setCloseOpen(false)} aria-label="关闭结束本轮确认"><X size={14} /></button></div>
         {closeTarget ? <dl className="im-wb-confirm">
-          <div><dt>{closeTarget.type === "COMPLAINT" ? "当前处理" : "当前接待"}</dt><dd>{closeTarget.assignedAdmin?.name || "尚未分配"}</dd></div>
+          <div><dt>{closeTarget.type === "COMPLAINT" ? "本轮处理" : "本轮接待"}</dt><dd>{closeTarget.assignedAdmin?.name || "尚未分配"}</dd></div>
           <div><dt>关联对象</dt><dd>{closeTarget.subjectRef || "未关联商品或订单"}</dd></div>
         </dl> : null}
-        <p className="im-wb-dialog-hint">结束后本条咨询进入已结束，平台会解除该咨询的客服会话与发送范围；这是不可撤销动作，平台当前没有恢复入口。结束不会删除聊天记录；但按现行授权规则，咨询结束后历史记录的读取随结束关闭，不能在本页恢复。</p>
+        <p className="im-wb-dialog-hint">结束后只结束当前这一轮接待：线程回到空闲，聊天记录保留在同一会话，用户再次咨询会开启新一轮并重新匹配客服。本轮结束不可撤销，平台当前没有恢复本轮接待的入口。</p>
         <div className="im-wb-dialog-actions">
           <button type="button" className="im-wb-btn" onClick={() => setCloseOpen(false)}>取消</button>
-          <button type="button" className="im-wb-btn im-wb-btn-danger" data-action="confirm-close-consultation" onClick={() => { if (closeTarget) void close(closeTarget.id); }} disabled={busy || !closeTarget || !canOperateSelected}>确认结束</button>
+          <button type="button" className="im-wb-btn im-wb-btn-danger" data-action="confirm-close-consultation" onClick={() => { if (closeTarget) void close(closeTarget.id); }} disabled={busy || !closeTarget || !canOperateSelected || !closeTarget.canSend}>确认结束本轮</button>
         </div>
       </DialogContent>
     </Dialog>

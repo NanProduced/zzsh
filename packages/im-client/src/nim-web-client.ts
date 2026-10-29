@@ -10,6 +10,68 @@ type NimListener = (...args: unknown[]) => void;
 
 export type NimMessageReplySummary = { messageId: string; senderId: string; text?: string };
 
+/**
+ * Client-side mirror of the API media limits. Values must stay aligned with
+ * `apps/api/src/im/im-contract.ts`; the server remains authoritative.
+ */
+export const NIM_MEDIA_LIMITS = {
+  video: {
+    maxBytes: 100 * 1024 * 1024,
+    mimeTypes: ["video/mp4", "video/quicktime", "video/webm"],
+  },
+  file: {
+    maxBytes: 50 * 1024 * 1024,
+    mimeTypes: [
+      "application/pdf",
+      "application/zip",
+      "text/plain",
+      "text/csv",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ],
+  },
+  audio: {
+    maxBytes: 20 * 1024 * 1024,
+    mimeTypes: ["audio/mpeg", "audio/mp4", "audio/aac", "audio/ogg", "audio/wav"],
+  },
+} as const satisfies Record<string, { maxBytes: number; mimeTypes: readonly string[] }>;
+
+export type NimMediaKind = keyof typeof NIM_MEDIA_LIMITS;
+
+/** V2 NIM message types of real media messages (verified against the SDK). */
+const NIM_MEDIA_KIND_BY_MESSAGE_TYPE: Record<number, NimMediaKind> = { 2: "audio", 3: "video", 6: "file" };
+/** Incoming NIM attachments carry a name/ext but no MIME type; derive it from the allowlist. */
+const NIM_MEDIA_MIME_BY_EXTENSION: Record<NimMediaKind, Record<string, string>> = {
+  video: { mp4: "video/mp4", mov: "video/quicktime", webm: "video/webm" },
+  file: {
+    pdf: "application/pdf",
+    zip: "application/zip",
+    txt: "text/plain",
+    csv: "text/csv",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  },
+  audio: { mp3: "audio/mpeg", m4a: "audio/mp4", mp4: "audio/mp4", aac: "audio/aac", ogg: "audio/ogg", wav: "audio/wav" },
+};
+const NIM_MEDIA_URL_MAX_LENGTH = 2048;
+const NIM_MEDIA_DIMENSION_MAX = 8192;
+const NIM_MEDIA_DURATION_MS_MAX = 24 * 60 * 60 * 1000;
+
+/** Safe server-owned media metadata; `url` is an authorized download path. */
+export type NimMessageMedia = {
+  mediaId: string;
+  kind: NimMediaKind;
+  name: string;
+  mimeType: string;
+  size: number;
+  width?: number;
+  height?: number;
+  durationMs?: number;
+  url?: string;
+};
+
 export type NimMessageLike = {
   messageClientId: string;
   messageServerId?: string;
@@ -20,6 +82,7 @@ export type NimMessageLike = {
   text?: string;
   messageType?: number;
   attachment?: { raw?: string; url?: string; name?: string; [key: string]: unknown };
+  media?: NimMessageMedia;
   sendingState?: number;
   reply?: NimMessageReplySummary;
   revoked?: boolean;
@@ -38,6 +101,31 @@ export type NimImageSendOptions = {
 export type NimMessageRouteGrant = { appId: string; orderId: string; teamId: string; conversationId: string; routeEnvironment: string };
 type NimV2SendMessageParams = { routeConfig: { routeEnabled: true; routeEnvironment: string } };
 export type NimImageSendErrorKind = "FAILED" | "UNKNOWN";
+export type NimMediaSendErrorKind = "FAILED" | "UNKNOWN" | "UNSUPPORTED";
+
+export type NimMediaSendOptions = {
+  authorize?: NimMessageAuthorization;
+  onProgress?: (percentage: number) => void;
+  width?: number;
+  height?: number;
+  durationMs?: number;
+};
+
+export class NimMediaSendError extends Error {
+  readonly kind: NimMediaSendErrorKind;
+  readonly messageClientId?: string;
+  readonly status?: number;
+  readonly cause?: unknown;
+
+  constructor(kind: NimMediaSendErrorKind, message: string, options: { messageClientId?: string; cause?: unknown } = {}) {
+    super(message);
+    this.name = "NimMediaSendError";
+    this.kind = kind;
+    this.messageClientId = options.messageClientId;
+    this.status = (options.cause as { status?: number } | undefined)?.status;
+    this.cause = options.cause;
+  }
+}
 
 export class NimImageSendError extends Error {
   readonly kind: NimImageSendErrorKind;
@@ -86,6 +174,168 @@ export function validateNimImageFile(file: File): NimImageMimeType {
   return mimeType;
 }
 
+function isNimMediaKind(value: unknown): value is NimMediaKind {
+  return value === "video" || value === "file" || value === "audio";
+}
+
+function nimMediaLabel(kind: NimMediaKind): string {
+  return kind === "video" ? "[视频]" : kind === "file" ? "[文件]" : "[语音]";
+}
+
+export function validateNimMediaFile(file: File, kind: NimMediaKind): string {
+  if (!isNimMediaKind(kind)) throw new TypeError("媒体类型无效");
+  if (!file || typeof file !== "object" || typeof file.name !== "string" || typeof file.type !== "string" || !Number.isInteger(file.size)) {
+    throw new TypeError("媒体文件无效");
+  }
+  const mimeType = file.type.toLowerCase();
+  const limit = NIM_MEDIA_LIMITS[kind];
+  if (!(limit.mimeTypes as readonly string[]).includes(mimeType)) throw new TypeError("不支持该媒体格式");
+  if (file.size <= 0) throw new TypeError("媒体文件不能为空");
+  if (file.size > limit.maxBytes) throw new TypeError(`媒体文件不能超过 ${Math.floor(limit.maxBytes / 1024 / 1024)} MiB`);
+  if (!file.name || file.name.length > 255 || /[\u0000-\u001F\u007F]/.test(file.name)) throw new TypeError("媒体文件名无效");
+  return mimeType;
+}
+
+/** Validate the optional send metadata before any SDK message is created. */
+function validateNimMediaSendOptions(kind: NimMediaKind, options: NimMediaSendOptions): void {
+  if (!options || typeof options !== "object" || Array.isArray(options)) throw new TypeError("媒体发送参数无效");
+  const dimension = (value: unknown, label: string): number | undefined => {
+    if (value === undefined) return undefined;
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > NIM_MEDIA_DIMENSION_MAX) throw new TypeError(`${label}无效`);
+    return value;
+  };
+  const width = dimension(options.width, "视频宽度");
+  const height = dimension(options.height, "视频高度");
+  if ((width === undefined) !== (height === undefined)) throw new TypeError("视频宽高必须同时提供");
+  if (width !== undefined && kind !== "video") throw new TypeError("仅视频消息支持宽高");
+  if (options.durationMs !== undefined) {
+    if (kind === "file") throw new TypeError("文件消息不支持时长");
+    if (!Number.isInteger(options.durationMs) || options.durationMs < 1 || options.durationMs > NIM_MEDIA_DURATION_MS_MAX) throw new TypeError("媒体时长无效");
+  }
+}
+
+/**
+ * A platform media URL is either this site's authorized relative download
+ * path or an absolute https URL uploaded by NIM cloud storage. Everything
+ * else (javascript:, data:, http:, relative non-API paths, whitespace) is
+ * rejected and the URL is omitted from the envelope.
+ */
+function safeNimMediaUrl(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value || value.length > NIM_MEDIA_URL_MAX_LENGTH || /[\u0000-\u0020\u007F]/.test(value)) return undefined;
+  if (/^\/api\/(?:bff\/admin\/)?im\/media\/[A-Za-z0-9._:-]{1,128}$/.test(value)) return value;
+  if (!value.startsWith("https://")) return undefined;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:" && Boolean(parsed.hostname) && !parsed.username && !parsed.password ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function nimMediaExtension(name: string, ext: unknown): string | undefined {
+  // The SDK writes `ext` with a leading dot (".mp4"), other clients may omit it.
+  const candidate = typeof ext === "string" && /^\.?[A-Za-z0-9]{1,10}$/.test(ext) ? ext.replace(/^\./, "") : /\.([A-Za-z0-9]{1,10})$/.exec(name)?.[1];
+  return candidate?.toLowerCase();
+}
+
+function nimMediaMimeType(kind: NimMediaKind, name: string, ext: unknown): string | undefined {
+  const extension = nimMediaExtension(name, ext);
+  return extension ? NIM_MEDIA_MIME_BY_EXTENSION[kind][extension] : undefined;
+}
+
+/** Stable media ID from the attachment md5, upload URL, or message ID. */
+function nimMediaId(...seeds: Array<string | undefined>): string {
+  for (const seed of seeds) if (seed && /^[A-Za-z0-9._:-]{1,120}$/.test(seed)) return seed;
+  const text = seeds.filter((seed): seed is string => Boolean(seed)).join("|");
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index += 1) hash = Math.imul(hash ^ text.charCodeAt(index), 0x01000193);
+  return `nim-${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+function nimMediaAttachmentView(media: NimMessageMedia): NonNullable<NimMessageLike["attachment"]> {
+  return { name: media.name, size: media.size, mimeType: media.mimeType, ...(media.url ? { url: media.url } : {}) };
+}
+
+/**
+ * Map a real NIM audio/video/file attachment (messageType 2/3/6) into the
+ * safe envelope. The NIM storage URL must be https; missing or malformed
+ * metadata drops the whole attachment instead of rendering it.
+ */
+function nimMediaFromAttachment(kind: NimMediaKind, attachment: unknown, messageClientId: string): NimMessageMedia | undefined {
+  if (!attachment || typeof attachment !== "object" || Array.isArray(attachment)) return undefined;
+  const raw = attachment as Record<string, unknown>;
+  const name = typeof raw.name === "string" ? raw.name : "";
+  const mimeType = nimMediaMimeType(kind, name, raw.ext);
+  if (!mimeType) return undefined;
+  if (typeof raw.size !== "number" || !Number.isInteger(raw.size) || raw.size < 1) return undefined;
+  const url = raw.url === undefined ? undefined : safeNimMediaUrl(raw.url);
+  if (raw.url !== undefined && url === undefined) return undefined;
+  const dimension = (value: unknown): number | null | undefined => {
+    if (value === undefined || value === null || value === 0) return undefined;
+    return kind === "video" && typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= NIM_MEDIA_DIMENSION_MAX ? value : null;
+  };
+  const width = dimension(raw.width);
+  const height = dimension(raw.height);
+  // NIM stores audio/video duration in seconds; 0 means unknown.
+  const duration = raw.duration;
+  const durationMs = kind === "file" || duration === undefined || duration === null || duration === 0
+    ? undefined
+    : typeof duration === "number" && Number.isFinite(duration) && duration > 0 && Math.round(duration * 1000) <= NIM_MEDIA_DURATION_MS_MAX ? Math.round(duration * 1000) : null;
+  if (width === null || height === null || durationMs === null) return undefined;
+  return parseNimMessageMedia({
+    mediaId: nimMediaId(typeof raw.md5 === "string" ? `nim-${raw.md5}` : undefined, url, `nim-${messageClientId}`),
+    kind,
+    name,
+    mimeType,
+    size: raw.size,
+    ...(width === undefined ? {} : { width }),
+    ...(height === undefined ? {} : { height }),
+    ...(durationMs === undefined ? {} : { durationMs }),
+    ...(url === undefined ? {} : { url }),
+  });
+}
+
+/**
+ * Keep only the safe metadata envelope. A media URL is accepted only when it
+ * is this platform's authorized relative download path or an https upload
+ * URL; unknown or malformed metadata makes the whole media attachment
+ * unsupported.
+ */
+export function parseNimMessageMedia(value: unknown): NimMessageMedia | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const media = value as Record<string, unknown>;
+  if (typeof media.mediaId !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(media.mediaId)) return undefined;
+  if (!isNimMediaKind(media.kind)) return undefined;
+  if (typeof media.name !== "string" || !media.name || media.name.length > 255 || /[\u0000-\u001F\u007F]/.test(media.name)) return undefined;
+  if (typeof media.mimeType !== "string") return undefined;
+  if (!(NIM_MEDIA_LIMITS[media.kind].mimeTypes as readonly string[]).includes(media.mimeType)) return undefined;
+  if (typeof media.size !== "number" || !Number.isInteger(media.size) || media.size < 1 || media.size > NIM_MEDIA_LIMITS[media.kind].maxBytes) return undefined;
+  const optional = (key: "width" | "height" | "durationMs", max: number): number | null | undefined => {
+    const field = media[key];
+    if (field === undefined) return undefined;
+    return typeof field === "number" && Number.isInteger(field) && field >= 1 && field <= max ? field : null;
+  };
+  const width = optional("width", NIM_MEDIA_DIMENSION_MAX);
+  const height = optional("height", NIM_MEDIA_DIMENSION_MAX);
+  const durationMs = optional("durationMs", NIM_MEDIA_DURATION_MS_MAX);
+  if (width === null || height === null || durationMs === null) return undefined;
+  if ((width === undefined) !== (height === undefined)) return undefined;
+  if (media.kind === "file" && (width !== undefined || durationMs !== undefined)) return undefined;
+  if (media.kind === "audio" && width !== undefined) return undefined;
+  const safeUrl = safeNimMediaUrl(media.url);
+  return {
+    mediaId: media.mediaId,
+    kind: media.kind,
+    name: media.name,
+    mimeType: media.mimeType,
+    size: media.size,
+    ...(width === undefined ? {} : { width }),
+    ...(height === undefined ? {} : { height }),
+    ...(durationMs === undefined ? {} : { durationMs }),
+    ...(safeUrl ? { url: safeUrl } : {}),
+  };
+}
+
 export type NimWebClientLike = {
   readonly accountId: string;
   readonly transport?: "nim" | "local-fake";
@@ -97,6 +347,8 @@ export type NimWebClientLike = {
   retryText(conversationId: string, messageClientId: string, authorize?: NimMessageAuthorization): Promise<NimMessageLike>;
   sendImage(conversationId: string, file: File, options?: NimImageSendOptions): Promise<NimMessageLike>;
   retryImage(conversationId: string, messageClientId: string, options?: NimImageSendOptions): Promise<NimMessageLike>;
+  sendMedia(conversationId: string, file: File, kind: NimMediaKind, options?: NimMediaSendOptions): Promise<NimMessageLike>;
+  retryMedia(conversationId: string, messageClientId: string, options?: NimMediaSendOptions): Promise<NimMessageLike>;
   replyText(conversationId: string, text: string, replyTo: NimMessageLike, authorize?: NimMessageAuthorization): Promise<NimMessageLike>;
   revokeMessage(conversationId: string, message: NimMessageLike, authorize?: NimMessageAuthorization): Promise<NimMessageLike>;
   deleteMessage(conversationId: string, message: NimMessageLike, authorize?: NimMessageAuthorization): Promise<void>;
@@ -111,7 +363,13 @@ type NimMessageServiceLike = {
   revokeMessage?: (message: unknown) => Promise<void>;
   deleteMessage?: (message: unknown) => Promise<void>;
 };
-type NimMessageCreatorLike = { createTextMessage: (text: string) => unknown; createImageMessage?: (image: File, name?: string, sceneName?: string, width?: number, height?: number) => unknown };
+type NimMessageCreatorLike = {
+  createTextMessage: (text: string) => unknown;
+  createImageMessage?: (image: File, name?: string, sceneName?: string, width?: number, height?: number) => unknown;
+  createVideoMessage?: (video: File, name?: string, sceneName?: string, duration?: number, width?: number, height?: number) => unknown;
+  createFileMessage?: (file: File, name?: string, sceneName?: string) => unknown;
+  createAudioMessage?: (audio: File, name?: string, sceneName?: string, duration?: number) => unknown;
+};
 type NimConversationIdUtilLike = {
   p2pConversationId: (accountId: string) => string;
   teamConversationId?: (teamId: string) => string;
@@ -191,6 +449,9 @@ function localImageClientId(): string {
 function localTextClientId(): string {
   return `local-text-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
 }
+function localMediaClientId(): string {
+  return `local-media-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
+}
 
 function localMessageReference(message: NimMessageLike, conversationId: string): { messageServerId?: string; messageClientId: string } {
   if (!message || typeof message !== "object" || typeof message.messageClientId !== "string" || !message.messageClientId) {
@@ -213,6 +474,7 @@ const REPLY_SUMMARY_MAX = 120;
 
 function messageSummary(message: NimMessageLike): string | undefined {
   if (message.messageType === 1) return "[图片]";
+  if (message.media) return nimMediaLabel(message.media.kind);
   const text = typeof message.text === "string" ? message.text.trim().slice(0, REPLY_SUMMARY_MAX) : "";
   return text || undefined;
 }
@@ -237,15 +499,30 @@ function nimMessageView(value: unknown): NimMessageLike | null {
   if (typeof message.messageClientId !== "string" || !message.messageClientId) return null;
   const revoked = message.revoked === true || message.isRevoked === true;
   const reply = replySummary(message.reply) ?? replySummary(message.threadReply);
-  if (!revoked && !reply) return message;
+  // Real NIM audio/video/file messages (2/3/6) are mapped from their raw
+  // attachment; the platform's own `media` envelope is always trusted only
+  // after re-validation. Unsafe raw attachments are stripped from the view.
+  const realKind = typeof message.messageType === "number" ? NIM_MEDIA_KIND_BY_MESSAGE_TYPE[message.messageType] : undefined;
+  const hasEnvelope = message.media !== undefined;
+  const envelope = hasEnvelope ? parseNimMessageMedia(message.media) : undefined;
+  const media = envelope ?? (realKind === undefined ? undefined : nimMediaFromAttachment(realKind, message.attachment, message.messageClientId));
+  const hasMedia = hasEnvelope || media !== undefined;
+  const stripAttachment = realKind !== undefined && media === undefined;
+  if (!revoked && !reply && !hasMedia && !stripAttachment) return message;
   // Keep the SDK message object intact for later SDK calls; only replace the
   // neutral summary fields and strip content from a revoked message.
   const view: NimMessageLike & Record<string, unknown> = { ...message };
   if (reply) view.reply = reply;
+  if (media) {
+    view.media = media;
+    if (realKind !== undefined) view.attachment = nimMediaAttachmentView(media);
+  } else if (hasMedia) delete view.media;
+  if (stripAttachment) delete view.attachment;
   if (revoked) {
     view.text = "";
     view.revoked = true;
     delete view.attachment;
+    delete view.media;
     delete view.reply;
     delete view.threadReply;
     delete view.isRevoked;
@@ -302,6 +579,26 @@ export function resolveNimSdkModule(module: { default?: unknown }): NimSdkLike |
   return hasGetInstance(nested) ? nested : undefined;
 }
 
+type PendingNimMedia = {
+  conversationId: string;
+  message: unknown;
+  media: Omit<NimMessageMedia, "mediaId" | "url">;
+};
+
+/** Build the sent-message view: local metadata plus the uploaded https URL. */
+function nimSentMediaView(message: NimMessageLike, meta: PendingNimMedia["media"]): NimMessageLike {
+  const attachment = message.attachment && typeof message.attachment === "object" && !Array.isArray(message.attachment) ? message.attachment : undefined;
+  const url = safeNimMediaUrl(attachment?.url);
+  const mediaId = nimMediaId(
+    typeof attachment?.md5 === "string" ? `nim-${attachment.md5}` : undefined,
+    url,
+    `nim-${message.messageClientId}`,
+  );
+  const media = parseNimMessageMedia({ ...meta, mediaId, ...(url === undefined ? {} : { url }) });
+  if (!media) return message;
+  return { ...message, media, attachment: nimMediaAttachmentView(media) };
+}
+
 export class NimWebClient implements NimWebClientLike {
   readonly transport = "nim" as const;
   readonly accountId: string;
@@ -319,6 +616,7 @@ export class NimWebClient implements NimWebClientLike {
   private readonly messageEventHandlers: Array<[string, NimListener]> = [];
   private readonly pendingImages = new Map<string, { conversationId: string; message: unknown }>();
   private readonly pendingTexts = new Map<string, { conversationId: string; message: unknown }>();
+  private readonly pendingMedia = new Map<string, PendingNimMedia>();
 
   constructor(context: ImClientContext, nim: NimInstanceLike, accountId: string, messageAuthorization?: NimMessageAuthorization) {
     this.context = context; this.nim = nim; this.accountId = accountId; this.messageAuthorization = messageAuthorization;
@@ -347,7 +645,7 @@ export class NimWebClient implements NimWebClientLike {
   onMessages(listener: (messages: NimMessageLike[]) => void): () => void { this.messageListeners.add(listener); return () => this.messageListeners.delete(listener); }
   conversationIdForPeer(peerAccountId: string): string { const peer = requireNonBlank(peerAccountId, "NIM peer account ID"); if (!this.nim.V2NIMConversationIdUtil) throw new Error("NIM conversation utility is unavailable"); return this.nim.V2NIMConversationIdUtil.p2pConversationId(peer); }
   conversationIdForTeam(teamId: string): string { const id = requireNonBlank(teamId, "NIM team ID"); if (!this.nim.V2NIMConversationIdUtil?.teamConversationId) throw new Error("NIM team conversation utility is unavailable"); return this.nim.V2NIMConversationIdUtil.teamConversationId(id); }
-  async getMessageHistory(conversationId: string, limit = 50, before?: NimMessageLike, authorize?: NimMessageAuthorization): Promise<NimMessageLike[]> { this.assertCurrent(); const id = requireNonBlank(conversationId, "NIM conversation ID"); if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new TypeError("NIM history limit must be between 1 and 100"); if (!this.messageService?.getMessageList) throw new Error("NIM message history is unavailable"); await this.authorizeMessage(id, "read", authorize); const messages = await this.messageService.getMessageList({ conversationId: id, limit, ...(before ? { anchorMessage: before } : {}) }); this.assertCurrent(); return Array.isArray(messages) ? messages : []; }
+  async getMessageHistory(conversationId: string, limit = 50, before?: NimMessageLike, authorize?: NimMessageAuthorization): Promise<NimMessageLike[]> { this.assertCurrent(); const id = requireNonBlank(conversationId, "NIM conversation ID"); if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new TypeError("NIM history limit must be between 1 and 100"); if (!this.messageService?.getMessageList) throw new Error("NIM message history is unavailable"); await this.authorizeMessage(id, "read", authorize); const messages = await this.messageService.getMessageList({ conversationId: id, limit, ...(before ? { anchorMessage: before } : {}) }); this.assertCurrent(); return Array.isArray(messages) ? messages.map(nimMessageView).filter((message): message is NimMessageLike => message !== null) : []; }
   async sendText(conversationId: string, text: string, authorize?: NimMessageAuthorization): Promise<NimMessageLike> {
     this.assertCurrent();
     const id = requireNonBlank(conversationId, "NIM conversation ID");
@@ -460,9 +758,57 @@ export class NimWebClient implements NimWebClientLike {
     this.assertCurrent();
     return this.sendImageMessage(id, messageClientId, pending.message, options, params);
   }
+  /**
+   * Video/file/audio are uploaded by the NIM SDK storage service: the creator
+   * builds the typed message and sendMessage streams the File and returns the
+   * uploaded https URL. Bytes never pass through our Nest API.
+   */
+  async sendMedia(conversationId: string, file: File, kind: NimMediaKind, options: NimMediaSendOptions = {}): Promise<NimMessageLike> {
+    this.assertCurrent();
+    const id = requireNonBlank(conversationId, "NIM conversation ID");
+    const mimeType = validateNimMediaFile(file, kind);
+    validateNimMediaSendOptions(kind, options);
+    const creator = this.nim.V2NIMMessageCreator;
+    if (!this.messageService || !creator || !this.nim.V2NIMStorageService) throw new Error("NIM media sending is unavailable");
+    // NIM attachments store audio/video duration in whole seconds.
+    const durationSeconds = options.durationMs === undefined ? undefined : Math.max(1, Math.round(options.durationMs / 1000));
+    const { createVideoMessage, createAudioMessage, createFileMessage } = creator;
+    const message = kind === "video" && createVideoMessage
+      ? createVideoMessage.call(creator, file, file.name, undefined, durationSeconds, options.width, options.height)
+      : kind === "audio" && createAudioMessage
+        ? createAudioMessage.call(creator, file, file.name, undefined, durationSeconds)
+        : kind === "file" && createFileMessage ? createFileMessage.call(creator, file, file.name, undefined) : undefined;
+    if (!message) throw new Error("NIM media sending is unavailable");
+    const messageClientId = messageClientIdOf(message);
+    const params = await this.authorizeMessage(id, "send", options.authorize);
+    this.assertCurrent();
+    this.pendingMedia.set(messageClientId, {
+      conversationId: id,
+      message,
+      media: {
+        kind,
+        name: file.name,
+        mimeType,
+        size: file.size,
+        ...(options.width === undefined ? {} : { width: options.width }),
+        ...(options.height === undefined ? {} : { height: options.height }),
+        ...(options.durationMs === undefined || kind === "file" ? {} : { durationMs: options.durationMs }),
+      },
+    });
+    return this.sendMediaMessage(id, messageClientId, options, params);
+  }
+  async retryMedia(conversationId: string, messageClientId: string, options: NimMediaSendOptions = {}): Promise<NimMessageLike> {
+    this.assertCurrent();
+    const id = requireNonBlank(conversationId, "NIM conversation ID");
+    const pending = this.pendingMedia.get(requireNonBlank(messageClientId, "NIM media message ID"));
+    if (!pending || pending.conversationId !== id) throw new NimMediaSendError("FAILED", "待重试的媒体消息已不可用", { messageClientId });
+    const params = await this.authorizeMessage(id, "send", options.authorize);
+    this.assertCurrent();
+    return this.sendMediaMessage(id, messageClientId, options, params);
+  }
   async login(options: NimWebClientOptions): Promise<void> { this.assertCurrent(); const loginOptions: Record<string, unknown> = { authType: options.tokenProvider ? 1 : 0, forceMode: options.forceMode ?? false }; if (options.retryCount !== undefined) loginOptions.retryCount = options.retryCount; if (options.timeout !== undefined) loginOptions.timeout = options.timeout; if (options.tokenProvider) loginOptions.tokenProvider = async () => { this.assertCurrent(); const token = await options.tokenProvider?.(this.accountId); this.assertCurrent(); return requireNonBlank(token ?? "", "NIM token provider result"); }; this.setState("CONNECTING"); await this.nim.V2NIMLoginService.login(this.accountId, options.token ?? "", loginOptions); this.assertCurrent(); this.loggedIn = true; this.setState(mapConnectStatus(this.getSdkConnectStatus()) ?? "CONNECTED"); }
   async logout(): Promise<void> { if (!this.loggedIn || this.disposed) return; await this.nim.V2NIMLoginService.logout(); this.loggedIn = false; this.setState("DISCONNECTED"); }
-  async dispose(): Promise<void> { if (this.disposed) return; this.disposed = true; this.pendingImages.clear(); this.pendingTexts.clear(); for (const [eventName, handler] of this.eventHandlers) { try { this.nim.V2NIMLoginService.off(eventName, handler); } catch { /* cleanup continues */ } } this.eventHandlers.length = 0; for (const [eventName, handler] of this.messageEventHandlers) { try { this.messageService?.off(eventName, handler); } catch { /* cleanup continues */ } } this.messageEventHandlers.length = 0; this.messageListeners.clear(); if (this.loggedIn) { try { await this.nim.V2NIMLoginService.logout(); } catch { /* destroy still runs */ } this.loggedIn = false; } try { await this.nim.destroy(); } finally { this.listeners.clear(); } }
+  async dispose(): Promise<void> { if (this.disposed) return; this.disposed = true; this.pendingImages.clear(); this.pendingTexts.clear(); this.pendingMedia.clear(); for (const [eventName, handler] of this.eventHandlers) { try { this.nim.V2NIMLoginService.off(eventName, handler); } catch { /* cleanup continues */ } } this.eventHandlers.length = 0; for (const [eventName, handler] of this.messageEventHandlers) { try { this.messageService?.off(eventName, handler); } catch { /* cleanup continues */ } } this.messageEventHandlers.length = 0; this.messageListeners.clear(); if (this.loggedIn) { try { await this.nim.V2NIMLoginService.logout(); } catch { /* destroy still runs */ } this.loggedIn = false; } try { await this.nim.destroy(); } finally { this.listeners.clear(); } }
   private assertCurrent(): void { if (this.disposed) throw new Error("NIM client is disposed"); if (!this.context.isCurrent()) throw new ImLifecycleSupersededError(); }
   private async authorizeMessage(conversationId: string, operation: "read" | "send", override?: NimMessageAuthorization): Promise<NimV2SendMessageParams|undefined> {
     this.assertCurrent(); const authorize=typeof override==="function"?override:this.messageAuthorization;
@@ -491,6 +837,27 @@ export class NimWebClient implements NimWebClientLike {
     } catch (cause) {
       if (cause instanceof ImLifecycleSupersededError || (cause instanceof Error && /disposed/.test(cause.message))) throw cause;
       throw new NimImageSendError(started ? "UNKNOWN" : "FAILED", started ? "图片发送结果未确认" : "图片发送失败", { messageClientId, cause });
+    }
+  }
+  private async sendMediaMessage(conversationId: string, messageClientId: string, options: NimMediaSendOptions, params?: NimV2SendMessageParams): Promise<NimMessageLike> {
+    const pending = this.pendingMedia.get(messageClientId);
+    if (!pending) throw new NimMediaSendError("FAILED", "待重试的媒体消息已不可用", { messageClientId });
+    let started = false;
+    try {
+      options.onProgress?.(0);
+      started = true;
+      const progress=(percentage:number)=>options.onProgress?.(imageProgress(percentage));
+      const result = params
+        ? await this.messageService!.sendMessage(pending.message, conversationId, params, progress)
+        : await this.messageService!.sendMessage(pending.message, conversationId, undefined, progress);
+      this.assertCurrent();
+      if (!result?.message || typeof result.message !== "object") throw new Error("NIM media response is invalid");
+      this.pendingMedia.delete(messageClientId);
+      options.onProgress?.(100);
+      return nimSentMediaView(result.message, pending.media);
+    } catch (cause) {
+      if (cause instanceof ImLifecycleSupersededError || (cause instanceof Error && /disposed/.test(cause.message))) throw cause;
+      throw new NimMediaSendError(started ? "UNKNOWN" : "FAILED", started ? "媒体发送结果未确认" : "媒体发送失败", { messageClientId, cause });
     }
   }
   private getSdkConnectStatus(): unknown { return (this.nim.V2NIMLoginService as NimLoginServiceLike & { getConnectStatus?: () => unknown }).getConnectStatus?.(); }
@@ -537,6 +904,7 @@ export class LocalFakeNimWebClient implements NimWebClientLike {
   private readonly latestSeen = new Map<string, number>();
   private readonly pendingImages = new Map<string, { conversationId: string; body: Record<string, unknown> }>();
   private readonly pendingTexts = new Map<string, { conversationId: string; text: string }>();
+  private readonly pendingMedia = new Map<string, { conversationId: string; body: Record<string, unknown> }>();
 
   constructor(context: ImClientContext, options: LocalFakeNimWebClientOptions) {
     validateLocalFakeOptions(options);
@@ -710,6 +1078,43 @@ export class LocalFakeNimWebClient implements NimWebClientLike {
     return this.postImage(id, messageClientId, pending.body, options);
   }
 
+  async sendMedia(conversationId: string, file: File, kind: NimMediaKind, options: NimMediaSendOptions = {}): Promise<NimMessageLike> {
+    this.assertCurrent();
+    const id = conversationId.trim();
+    if (!id || id.length > 160) throw new TypeError("Local IM conversation is invalid");
+    const mimeType = validateNimMediaFile(file, kind);
+    const body = {
+      conversationId: id,
+      media: {
+        kind,
+        messageClientId: localMediaClientId(),
+        name: file.name,
+        mimeType,
+        size: file.size,
+        data: await fileBase64(file),
+        ...(options.width === undefined ? {} : { width: options.width }),
+        ...(options.height === undefined ? {} : { height: options.height }),
+        ...(options.durationMs === undefined ? {} : { durationMs: options.durationMs }),
+      },
+    } satisfies Record<string, unknown>;
+    this.assertCurrent();
+    if (typeof options.authorize === "function") await options.authorize({ conversationId: id, operation: "send" });
+    this.assertCurrent();
+    const messageClientId = (body.media as { messageClientId: string }).messageClientId;
+    this.pendingMedia.set(messageClientId, { conversationId: id, body });
+    return this.postMedia(id, messageClientId, body, options);
+  }
+
+  async retryMedia(conversationId: string, messageClientId: string, options: NimMediaSendOptions = {}): Promise<NimMessageLike> {
+    this.assertCurrent();
+    const id = conversationId.trim();
+    const pending = this.pendingMedia.get(messageClientId);
+    if (!pending || pending.conversationId !== id) throw new NimMediaSendError("FAILED", "待重试的媒体消息已不可用", { messageClientId });
+    if (typeof options.authorize === "function") await options.authorize({ conversationId: id, operation: "send" });
+    this.assertCurrent();
+    return this.postMedia(id, messageClientId, pending.body, options);
+  }
+
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
@@ -723,6 +1128,7 @@ export class LocalFakeNimWebClient implements NimWebClientLike {
     this.latestSeen.clear();
     this.pendingImages.clear();
     this.pendingTexts.clear();
+    this.pendingMedia.clear();
   }
 
   private async readHistory(conversationId: string, limit: number, before?: NimMessageLike): Promise<NimMessageLike[]> {
@@ -739,7 +1145,7 @@ export class LocalFakeNimWebClient implements NimWebClientLike {
     const value = await response.json().catch(() => null) as { messages?: unknown } | null;
     if (!Array.isArray(value?.messages)) throw new Error("IM history response is invalid");
     this.setState("CONNECTED");
-    return value.messages.filter((message): message is NimMessageLike => Boolean(message && typeof message === "object"));
+    return value.messages.map(nimMessageView).filter((message): message is NimMessageLike => message !== null);
   }
 
   private async postImage(conversationId: string, messageClientId: string, body: Record<string, unknown>, options: NimImageSendOptions): Promise<NimMessageLike> {
@@ -767,6 +1173,35 @@ export class LocalFakeNimWebClient implements NimWebClientLike {
     options.onProgress?.(100);
     this.remember(conversationId, [value.message]);
     return value.message;
+  }
+
+  private async postMedia(conversationId: string, messageClientId: string, body: Record<string, unknown>, options: NimMediaSendOptions): Promise<NimMessageLike> {
+    let response: Response;
+    try {
+      options.onProgress?.(0);
+      response = await fetch(this.endpoint, {
+        method: "POST",
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    } catch (cause) {
+      throw new NimMediaSendError("UNKNOWN", "媒体发送结果未确认", { messageClientId, cause });
+    }
+    if (!response.ok) {
+      const cause = localTransportError("IM media request failed", response.status);
+      throw new NimMediaSendError(response.status >= 500 ? "UNKNOWN" : "FAILED", response.status >= 500 ? "媒体发送结果未确认" : "媒体发送失败", { messageClientId, cause });
+    }
+    const value = await response.json().catch(() => null) as { message?: NimMessageLike } | null;
+    if (!value?.message || typeof value.message !== "object") throw new NimMediaSendError("UNKNOWN", "媒体发送结果未确认", { messageClientId });
+    const message = nimMessageView(value.message);
+    if (!message) throw new NimMediaSendError("UNKNOWN", "媒体发送结果无效", { messageClientId });
+    this.assertCurrent();
+    this.pendingMedia.delete(messageClientId);
+    options.onProgress?.(100);
+    this.remember(conversationId, [message]);
+    return message;
   }
 
   private startPolling(): void {
@@ -821,6 +1256,7 @@ export class LocalFakeNimWebClient implements NimWebClientLike {
       message.reply ?? null,
       message.card ?? null,
       message.attachment?.imageId ?? message.attachment?.url ?? "",
+      message.media ? [message.media.mediaId, message.media.url ?? ""] : null,
     ]);
   }
 

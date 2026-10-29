@@ -1312,30 +1312,116 @@ test("closing window pauses sequential image queue, returning allows explicit re
   assert.equal(sendSequence[1]?.name, "pic2.png", "pic2 sent after explicit resume");
 });
 
-test("a closed consultation is read-only: it states the end instead of waiting for a first message",async(t)=>{
- const old=globalThis.fetch;const host=document.createElement('div');document.body.append(host);const root=createRoot(host);
- t.after(async()=>{await act(async()=>root.unmount());host.remove();globalThis.fetch=old;});
- globalThis.fetch=async(input)=>{
-  const url=String(input);
-  if(url.includes('/im/token'))return new Response(JSON.stringify({}),{status:503});
-  if(url.includes('/im/consultations'))return new Response(JSON.stringify({consultations:[{id:'closed-1',type:'SERVICE',state:'CLOSED',conversationId:null,assignedAdmin:null,messageScopeState:'READY'}]}),{status:200});
-  if(url.startsWith('/api/orders/'))return new Response(JSON.stringify({items:[],nextCursor:null}),{status:200});
-  return new Response(JSON.stringify({}),{status:200});
- };
- await act(async()=>root.render(renderPreview({preview:false,embedded:true})));
- const until=async predicate=>{for(let index=0;index<150;index+=1){if(predicate())return;await settle();}throw new Error('closed consultation condition timed out');};
- // Opening the window only auto-selects a live consultation; an ended one is entered
- // explicitly from the directory, exactly like a user reviewing past history.
- await until(()=>host.querySelector('.support-directory .support-conversation-item'));
- await act(async()=>host.querySelector('.support-directory .support-conversation-item').click());
- await settle();
- assert.ok(host.querySelector('.support-unified'),'a closed consultation still opens the expanded window');
- assert.doesNotMatch(host.textContent,/等待第一条消息/,'an ended consultation must not look like it awaits a first message');
- assert.match(host.textContent,/本次咨询已结束/);
- assert.equal(host.querySelector('textarea'),null,'an ended consultation offers no waiting-for-reception input');
- assert.doesNotMatch(host.textContent,/等待客服接待后可发送消息/);
- assert.ok(host.querySelector('[data-action="start-new-consultation"]'),'the ended consultation keeps the new-consultation entry');
- assert.ok(host.querySelector('.support-composer-closed'),'the composer area states the session ended');
+/**
+ * Mount the real non-preview workspace over a persistent-thread directory.
+ * The list mock returns one row per thread; a send can swap the same thread to a
+ * reopened WAITING round so the client must read that server fact back.
+ */
+async function mountThreadWorkspace(t, { rows: initialRows, history = {}, reopened = null, initialType = "SERVICE" }) {
+  const originalFetch = globalThis.fetch;
+  let currentRows = initialRows.map((row) => ({ ...row }));
+  const textPosts = [];
+  const creates = [];
+  const historyByConversation = Object.fromEntries(Object.entries(history).map(([key, list]) => [key, list.map((row) => ({ ...row }))]));
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url.startsWith("/api/orders/")) return new Response(JSON.stringify({ items: [], nextCursor: null }));
+    if (url.includes("/im/token")) return new Response(JSON.stringify({ appKey: "synthetic", accountId: "preview-user", token: "synthetic", transport: "local-fake" }));
+    if (url.includes("/im/consultations")) {
+      if ((init.method ?? "GET") === "POST") {
+        creates.push(JSON.parse(String(init.body)));
+        return new Response(JSON.stringify({ consultation: { ...initialRows[0] } }));
+      }
+      return new Response(JSON.stringify({ consultations: currentRows }));
+    }
+    if (url.includes("/im/message-access")) return new Response(JSON.stringify({ authorized: true }));
+    if (url.includes("/im/messages")) {
+      if ((init.method ?? "GET") === "GET") {
+        const conversationId = new URL(url, "http://synthetic.local").searchParams.get("conversationId");
+        return new Response(JSON.stringify({ messages: historyByConversation[conversationId] ?? [] }));
+      }
+      const body = JSON.parse(String(init.body));
+      if (!body.text) return new Response(JSON.stringify({ message: {} }));
+      textPosts.push(body);
+      if (reopened) currentRows = currentRows.map((row) => row.threadId === reopened.threadId ? { ...reopened } : row);
+      const sent = {
+        messageClientId: `srv-${textPosts.length}`, messageServerId: `srv-${textPosts.length}`,
+        conversationId: body.conversationId, senderId: "preview-user", receiverId: body.conversationId,
+        createTime: 1_700_000_000_000 + textPosts.length, text: body.text, messageType: 0,
+      };
+      historyByConversation[body.conversationId] = [...(historyByConversation[body.conversationId] ?? []), sent];
+      return new Response(JSON.stringify({ message: sent }));
+    }
+    throw new Error(`unexpected thread fetch ${url}`);
+  };
+  const host = browser.document.createElement("div"); host.className = "support-dialog-content"; browser.document.body.appendChild(host);
+  const root = createRoot(host);
+  t.after(async () => { await act(async () => root.unmount()); host.remove(); globalThis.fetch = originalFetch; });
+  await act(async () => root.render(renderPreview({ preview: false, embedded: true, visible: true, initialType, onClose: () => {} })));
+  const until = async (predicate, label = "thread condition") => { for (let index = 0; index < 160; index += 1) { if (predicate()) return; await settle(); } throw new Error(`${label} timed out`); };
+  const type = async (value) => { await act(async () => {
+    const element = host.querySelector("textarea");
+    Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype, "value").set.call(element, value);
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+  }); };
+  const submit = async () => { await act(async () => { host.querySelector("form").dispatchEvent(new browser.Event("submit", { bubbles: true, cancelable: true })); }); };
+  const rowsInDirectory = () => [...host.querySelectorAll(".support-directory .support-conversation-item")];
+  return { host, creates, textPosts, until, type, submit, rowsInDirectory };
+}
+
+test("a closed thread keeps its history readable and offers a continued message", async (t) => {
+  const closed = {
+    id: "round-1", threadId: "thread-service-1", roundId: "round-1", roundSeq: 1, threadState: "IDLE",
+    type: "SERVICE", state: "CLOSED", conversationId: "team-thread-1", messageScopeState: "READY", canSend: true,
+    assignedAdmin: null, peerAccountId: "staff-a", updatedAt: "2026-10-29T00:00:00Z",
+  };
+  const history = {
+    "team-thread-1": [{ messageClientId: "old-1", messageServerId: "srv-old-1", conversationId: "team-thread-1", senderId: "staff-a", receiverId: "preview-user", createTime: 1_700_000_000_000, text: "上一轮的记录", messageType: 0 }],
+  };
+  const page = await mountThreadWorkspace(t, { rows: [closed], history });
+  await page.until(() => page.rowsInDirectory().length === 1, "closed thread row");
+  const row = page.rowsInDirectory()[0];
+  assert.match(row.textContent, /本轮已结束（可继续）/, "an ended round is labelled as continuable");
+  assert.equal(row.getAttribute("data-thread-state"), "IDLE");
+  await page.until(() => page.host.querySelector('[data-message-id="srv-old-1"]'), "closed history rendered");
+  assert.match(page.host.querySelector('[data-message-id="srv-old-1"]').textContent, /上一轮的记录/, "selecting a thread opens its full history");
+  const textarea = page.host.querySelector("textarea");
+  assert.ok(textarea, "an ended thread still offers the composer");
+  assert.equal(textarea.disabled, false, "the ended thread stays writable");
+  assert.equal(page.host.querySelector(".support-composer-closed"), null, "no read-only dead state remains");
+  assert.match(page.host.querySelector(".support-waiting-note").textContent, /本轮已结束；可以继续留言，客服接入后会回复/);
+  assert.doesNotMatch(page.host.textContent, /无法继续发送|历史记录的读取已随结束关闭|重新发起一次咨询/);
+  assert.equal(page.host.querySelector('[data-action="start-new-consultation"]'), null, "no separate new-consultation entry");
+  assert.doesNotMatch(page.host.textContent, /发起新咨询|发起新的咨询/);
+});
+
+test("sending on a closed thread reopens the same thread as WAITING without creating another", async (t) => {
+  const closed = {
+    id: "round-1", threadId: "thread-service-1", roundId: "round-1", roundSeq: 1, threadState: "IDLE",
+    type: "SERVICE", state: "CLOSED", conversationId: "team-thread-1", messageScopeState: "READY", canSend: true,
+    assignedAdmin: null, peerAccountId: "staff-a", updatedAt: "2026-10-29T00:00:00Z",
+  };
+  const reopened = {
+    ...closed, id: "round-2", roundId: "round-2", roundSeq: 2, state: "WAITING", threadState: "WAITING", canSend: true,
+  };
+  const page = await mountThreadWorkspace(t, { rows: [closed], reopened });
+  await page.until(() => page.host.querySelector("textarea") && !page.host.querySelector("textarea").disabled, "sendable closed thread");
+  await page.type("关闭后再留言");
+  await page.submit();
+  await page.until(() => page.textPosts.length === 1, "reopen send dispatched");
+  assert.equal(page.textPosts[0].conversationId, "team-thread-1", "the send targets the persistent thread Team");
+  // The directory poll is 5s; a bounded ~1s wait proves the send itself refreshed the round.
+  for (let index = 0; index < 40 && page.rowsInDirectory()[0]?.getAttribute("data-thread-state") !== "WAITING"; index += 1) await settle();
+  assert.equal(page.rowsInDirectory()[0]?.getAttribute("data-thread-state"), "WAITING", "the reopened round is read back right after the send");
+  const rows = page.rowsInDirectory();
+  assert.equal(rows.length, 1, "reopening still shows exactly one row for the thread");
+  assert.equal(rows[0].getAttribute("data-active"), "true", "the reopened round stays the selected thread");
+  assert.match(rows[0].textContent, /等待客服接待/);
+  assert.match(page.host.querySelector(".support-waiting-note").textContent, /等待客服接待/);
+  assert.equal(page.creates.length, 0, "no consultation POST: the backend reopens the same thread");
+  const sent = [...page.host.querySelectorAll('.support-message[data-self="true"]')].filter((node) => node.textContent.includes("关闭后再留言"));
+  assert.equal(sent.length, 1, "no fabricated duplicate sent bubble");
+  assert.doesNotMatch(page.host.textContent, /本轮已结束/);
 });
 
 /** Mount the real non-preview workspace with a fixed directory and count creations. */
@@ -1374,7 +1460,8 @@ test("opening with SERVICE never presents or creates a live COMPLAINT conversati
   await until(() => host.querySelector('.support-start-panel[data-state="initial"]'), "service start panel");
   const panel = host.querySelector(".support-conversation-panel");
   assert.match(panel.textContent, /从这里开始你的咨询/, "the requested type starts from its own panel");
-  assert.match(panel.textContent, /开始平台客服/);
+  assert.doesNotMatch(panel.textContent, /开始平台客服|开始投诉反馈/, "the redundant start CTA is gone");
+  assert.equal(panel.querySelector('[data-action="start-consultation"]'), null, "no second confirm button remains");
   assert.match(panel.querySelector('.support-type-picker [role="radio"][aria-checked="true"]').textContent, /在线客服/, "the picker shows SERVICE");
   assert.doesNotMatch(panel.textContent, /已记录，等待客服接待/, "the complaint conversation is not shown in the chat pane");
   assert.equal(host.querySelector(".support-message-scroller"), null, "no conversation timeline is mounted");
@@ -1389,8 +1476,26 @@ test("opening with COMPLAINT on a live SERVICE directory shows the COMPLAINT sta
   await until(() => host.querySelector('.support-start-panel[data-state="initial"]'), "complaint start panel");
   const panel = host.querySelector(".support-conversation-panel");
   assert.match(panel.querySelector('.support-type-picker [role="radio"][aria-checked="true"]').textContent, /投诉反馈/, "the picker follows the entry type");
-  assert.match(panel.textContent, /开始投诉反馈/);
+  assert.doesNotMatch(panel.textContent, /开始平台客服|开始投诉反馈/, "the redundant start CTA is gone");
   assert.equal(creates.length, 0, "the other type's live consultation is not reused and nothing is created");
+});
+
+test("a type card starts its consultation directly without a start CTA", async (t) => {
+  for (const [type, label] of [["SERVICE", "在线客服"], ["COMPLAINT", "投诉反馈"]]) {
+    const other = type === "SERVICE" ? "COMPLAINT" : "SERVICE";
+    const { host, creates, until } = await mountSupportDirectory(t, [
+      { id: `other-${other}`, type: other, state: "WAITING", conversationId: null, assignedAdmin: null, messageScopeState: "READY" },
+    ], { initialType: type });
+    await until(() => host.querySelector('.support-start-panel[data-state="initial"]'), `${type} start panel`);
+    assert.equal(host.querySelector('.support-start-panel .button.primary'), null, "the start panel has no separate confirm CTA");
+    const card = host.querySelector('.support-start-panel .support-type-option[aria-checked="true"]');
+    assert.match(card.textContent, new RegExp(label), "the requested type is preselected");
+    assert.equal(creates.length, 0, "opening the panel alone creates nothing");
+    await act(async () => { card.click(); });
+    await until(() => creates.length === 1, `${type} type card starts its consultation`);
+    assert.equal(creates[0].type, type, "the picked card is the created type");
+    await until(() => host.querySelector('.support-start-panel[data-state="initial"]') === null, "the created consultation replaces the start panel");
+  }
 });
 
 test("opening selects the live consultation of the requested type", async (t) => {
@@ -1408,26 +1513,29 @@ test("opening selects the live consultation of the requested type", async (t) =>
   }
 });
 
-test("from an ended conversation the new-consultation entry opens the start panel without creating", async (t) => {
-  const { host, creates, until } = await mountSupportDirectory(t, [
-    { id: "complaint-1", type: "COMPLAINT", state: "ACTIVE", conversationId: "team-complaint", messageScopeState: "READY", assignedAdmin: { id: "a-2", name: "专员乙" } },
-    { id: "service-1", type: "SERVICE", state: "CLOSED", conversationId: null, messageScopeState: "READY", assignedAdmin: null },
-  ], { initialType: "COMPLAINT" });
-  await until(() => host.querySelector('.support-directory .support-conversation-item[data-active="true"]'), "complaint selection");
-  const ended = [...host.querySelectorAll(".support-directory .support-conversation-item")].find((item) => item.textContent.includes("平台客服"));
-  assert.ok(ended, "the ended service consultation stays listed");
+test("an ended thread stays selectable from the directory and opens its history", async (t) => {
+  const rows = [
+    { id: "complaint-round-1", threadId: "thread-complaint-1", threadState: "ACTIVE", type: "COMPLAINT", state: "ACTIVE", conversationId: "team-complaint", messageScopeState: "READY", canSend: true, assignedAdmin: { id: "a-2", name: "专员乙" } },
+    { id: "service-round-1", threadId: "thread-service-1", threadState: "IDLE", type: "SERVICE", state: "CLOSED", conversationId: "team-service", messageScopeState: "READY", canSend: true, assignedAdmin: null },
+  ];
+  const history = {
+    "team-service": [{ messageClientId: "service-old", messageServerId: "srv-service-old", conversationId: "team-service", senderId: "staff-a", receiverId: "preview-user", createTime: 1_700_000_000_000, text: "结束前的服务记录", messageType: 0 }],
+  };
+  const page = await mountThreadWorkspace(t, { rows, history, initialType: "COMPLAINT" });
+  await page.until(() => page.rowsInDirectory().length === 2, "one row per thread");
+  await page.until(() => page.rowsInDirectory().some((row) => row.getAttribute("data-active") === "true"), "requested type selected");
+  const ended = page.rowsInDirectory().find((row) => row.textContent.includes("平台客服"));
+  assert.ok(ended, "the ended service thread stays listed");
+  assert.match(ended.textContent, /本轮已结束（可继续）/, "the IDLE/CLOSED row is labelled continuable");
+  assert.match(page.rowsInDirectory().find((row) => row.textContent.includes("投诉反馈")).textContent, /进行中/, "the ACTIVE row is labelled in progress");
   await act(async () => { ended.click(); });
   await settle();
-  const entry = host.querySelector('[data-action="start-new-consultation"]');
-  assert.ok(entry, "the ended conversation offers the new-consultation entry");
-  assert.match(entry.textContent, /发起新咨询/);
-  await act(async () => { entry.click(); });
-  await settle();
-  const panel = host.querySelector('.support-start-panel[data-state="new"]');
-  assert.ok(panel, "the entry shows the start panel instead of creating directly");
-  assert.match(panel.textContent, /发起新的咨询/);
-  assert.match(panel.querySelector('.support-type-picker [role="radio"][aria-checked="true"]').textContent, /在线客服/);
-  assert.equal(creates.length, 0, "nothing is created before the explicit start click");
+  await page.until(() => page.host.querySelector('[data-message-id="srv-service-old"]'), "ended thread history");
+  assert.match(page.host.querySelector('[data-message-id="srv-service-old"]').textContent, /结束前的服务记录/);
+  assert.equal(page.host.querySelector(".support-start-panel"), null, "selecting the ended thread never shows the start panel");
+  assert.equal(page.host.querySelector('[data-action="start-new-consultation"]'), null, "there is no separate new-consultation entry");
+  assert.equal(page.creates.length, 0, "opening a thread never creates another one");
+  assert.equal(page.rowsInDirectory().length, 2, "the directory still shows one row per thread");
 });
 
 test("a definite rejection that never reached the channel leaves the composer usable", async (t) => {
@@ -1586,8 +1694,87 @@ test("the composer names the real blocker instead of blaming 客服接待", asyn
     await settle(); await settle();
     return host.querySelector("textarea").placeholder;
   };
-  assert.match(await render("waiting", { id: "c-1", type: "SERVICE", state: "WAITING", conversationId: null, assignedAdmin: null, messageScopeState: "READY" }), /等待客服接待后可发送消息/, "a queued consultation really is waiting for reception");
+  assert.match(await render("waiting", { id: "c-1", type: "SERVICE", state: "WAITING", conversationId: null, assignedAdmin: null, messageScopeState: "READY" }), /正在连接客服/, "a waiting consultation without a channel team is still provisioning");
+  assert.match(await render("waiting-ready", { id: "c-3", type: "SERVICE", state: "WAITING", conversationId: "team-3", assignedAdmin: null, messageScopeState: "READY" }), /已提交，客服接入后会看到你的留言；现在也可以先发消息/, "a READY waiting team gets the reassuring copy, not the old reception gate");
+  assert.match(await render("server-denied", { id: "c-4", type: "SERVICE", state: "ACTIVE", conversationId: "team-4", assignedAdmin: { id: "a-1", name: "客服甲" }, messageScopeState: "READY", canSend: false }), /当前会话暂不可继续/, "the backend canSend=false is honored even for an ACTIVE round");
   assert.match(await render("link-down", { id: "c-2", type: "SERVICE", state: "ACTIVE", conversationId: "team-2", assignedAdmin: { id: "a-1", name: "客服甲" }, messageScopeState: "READY" }), /云信连接未就绪/, "a missing link is reported as a link problem, not as waiting for reception");
+});
+
+/** Mount a single mutable consultation with a local-fake channel and record text POSTs. */
+async function mountWaitingConsultation(t, initialRow) {
+  const originalFetch = globalThis.fetch;
+  let row = initialRow;
+  const textPosts = [];
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url.startsWith("/api/orders/")) return new Response(JSON.stringify({ items: [], nextCursor: null }));
+    if (url.includes("/im/token")) return new Response(JSON.stringify({ appKey: "synthetic", accountId: "preview-user", token: "synthetic", transport: "local-fake" }));
+    if (url.includes("/im/consultations")) return new Response(JSON.stringify({ consultations: [row] }));
+    if (url.includes("/im/message-access")) return new Response(JSON.stringify({ authorized: true }));
+    if (url.includes("/im/messages")) {
+      if ((init.method ?? "GET") === "POST") {
+        const body = JSON.parse(String(init.body));
+        if (body.text) {
+          textPosts.push(body);
+          return new Response(JSON.stringify({ message: { messageClientId: "srv-wait", messageServerId: "srv-wait", conversationId: body.conversationId, senderId: "preview-user", receiverId: body.conversationId, createTime: 1_700_000_000_000, text: body.text, messageType: 0 } }));
+        }
+        return new Response(JSON.stringify({ message: {} }));
+      }
+      return new Response(JSON.stringify({ messages: [] }));
+    }
+    throw new Error(`unexpected waiting fetch ${url}`);
+  };
+  const host = browser.document.createElement("div"); host.className = "support-dialog-content"; browser.document.body.appendChild(host);
+  const root = createRoot(host);
+  t.after(async () => { await act(async () => root.unmount()); host.remove(); globalThis.fetch = originalFetch; });
+  const render = (visible = true) => root.render(renderPreview({ preview: false, embedded: true, visible, onClose: () => {} }));
+  const until = async (predicate, label = "condition") => { for (let index = 0; index < 160; index += 1) { if (predicate()) return; await settle(); } throw new Error(`${label} timed out`); };
+  const type = async (value) => { await act(async () => {
+    const element = host.querySelector("textarea");
+    Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype, "value").set.call(element, value);
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+  }); };
+  const submit = async () => { await act(async () => { host.querySelector("form").dispatchEvent(new browser.Event("submit", { bubbles: true, cancelable: true })); }); };
+  const setScope = async (messageScopeState) => { row = { ...row, messageScopeState }; await act(async () => render(false)); await act(async () => render(true)); };
+  await act(async () => render(true));
+  return { host, textPosts, until, type, submit, setScope };
+}
+
+test("a WAITING consultation with a READY waiting team sends text and keeps the draft while provisioning", async (t) => {
+  const page = await mountWaitingConsultation(t, { id: "c-wait", type: "SERVICE", state: "WAITING", conversationId: "team-wait", assignedAdmin: null, messageScopeState: "PENDING" });
+  await page.until(() => page.host.querySelector("textarea"), "composer while provisioning");
+  assert.equal(page.host.querySelector("textarea").disabled, false, "a WAITING user may compose before the team is READY");
+  assert.match(page.host.querySelector("textarea").placeholder, /正在连接客服/);
+  assert.match(page.host.querySelector(".support-waiting-note").textContent, /正在连接客服/);
+  await page.type("请先帮我看一下这个订单");
+  assert.equal(page.host.querySelector(".support-send-btn").disabled, true, "sending waits for the READY scope");
+  await page.submit();
+  await settle(); await settle();
+  assert.equal(page.textPosts.length, 0, "a provisioning scope never sends");
+  assert.equal(page.host.querySelector('.support-message[data-self="true"]'), null, "no fake sent bubble appears");
+  assert.doesNotMatch(page.host.textContent, /已发送/, "no fake sent status appears");
+  assert.equal(page.host.querySelector("textarea").value, "请先帮我看一下这个订单", "the draft survives provisioning");
+  await page.setScope("READY");
+  await page.until(() => page.host.querySelector("textarea")?.placeholder === "输入咨询内容…" && page.host.textContent.includes("已提交，客服接入后会看到你的留言"), "READY waiting team");
+  assert.equal(page.host.querySelector("textarea").value, "请先帮我看一下这个订单", "the draft survives the READY switch");
+  assert.equal(page.host.querySelector(".support-send-btn").disabled, false, "WAITING + READY enables sendText");
+  await page.submit();
+  await page.until(() => page.textPosts.length === 1, "WAITING text send");
+  assert.equal(page.textPosts[0].conversationId, "team-wait");
+  assert.equal(page.textPosts[0].text, "请先帮我看一下这个订单");
+});
+
+test("a WAITING consultation without a conversationId never fakes a sent message", async (t) => {
+  const page = await mountWaitingConsultation(t, { id: "c-none", type: "SERVICE", state: "WAITING", conversationId: null, assignedAdmin: null, messageScopeState: "READY" });
+  await page.until(() => page.host.querySelector("textarea"), "waiting composer");
+  assert.match(page.host.querySelector("textarea").placeholder, /正在连接客服/);
+  await page.type("没有会话也不能假发送");
+  await page.submit();
+  await settle(); await settle();
+  assert.equal(page.textPosts.length, 0, "no channel conversation means no send");
+  assert.equal(page.host.querySelector('.support-message[data-self="true"]'), null, "no fake sent bubble appears");
+  assert.doesNotMatch(page.host.textContent, /已发送/, "no fake sent status appears");
+  assert.equal(page.host.querySelector("textarea").value, "没有会话也不能假发送", "the draft stays with the user");
 });
 
 test("an unconfirmed result without its original id is never re-sent under a new id", async () => {
@@ -1621,7 +1808,7 @@ test("an unconfirmed result without its original id is never re-sent under a new
     activeConversationKey: key,
     failedTexts: { [key]: { conversationId: "team-1", text: "原文", unknown: true } },
     clientRef: { current: { accountId: "u-1", retryText: () => { textPosts += 1; return Promise.reject(new Error("mutated: re-sent")); }, sendText: () => { textPosts += 1; return Promise.reject(new Error("mutated: re-sent")); } } },
-    canSend: true, busy: false, imageSending: false, isSubmittingRef: { current: false },
+    canSend: true, busy: false, imageSending: false, mediaSending: false, mediaInFlight: false, isSubmittingRef: { current: false },
     identityGenerationRef: { current: 1 }, currentIdentity: "u-1", identityRef: { current: "u-1" }, readHiddenRef: { current: {} },
     setBusy: noop, setError: (value) => textErrors.push(value), setMessages: noop, setDrafts: noop,
     setUnresolvedTextFor: noop, setFailedTexts: noop, mergeImMessages: (list) => list,
@@ -1934,7 +2121,16 @@ test("support reply calls replyText, clears the quote after success and a plain 
   assert.equal(reply.replyTo.messageClientId, "peer-text", "the original message is addressed");
   assert.equal(page.draft(), "", "a confirmed reply clears the draft");
   assert.equal(page.host.querySelector(".message-reply-quote"), null, "a confirmed reply clears the quote");
-  await page.until(() => page.host.textContent.includes("回复：客服回复内容"), "reply summary rendered");
+  await page.until(() => page.host.querySelector(".message-quoted")?.textContent.includes("客服回复内容"), "reply summary rendered");
+  const quoted = page.host.querySelector(".message-quoted");
+  assert.match(quoted.closest(".support-message-bubble").textContent, /^收到[,，]?客服：客服回复内容$/s, "the quote sits below the reply text with its sender");
+  await act(async () => quoted.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 120, clientY: 90 })));
+  await settle();
+  const jump = [...browser.document.querySelectorAll(".message-action-menu [role=menuitem]")].find((button) => button.textContent.trim() === "定位到原文位置");
+  assert.ok(jump, "the quote offers jump-to-original");
+  await act(async () => jump.click());
+  await settle();
+  assert.ok(page.row("srv-peer").querySelector(".support-message-bubble").classList.contains("message-quote-target"), "the original message is highlighted");
 
   await page.type("普通消息");
   await page.submit();
@@ -2162,6 +2358,216 @@ test("user cards hide the counterparty and platform amounts, and unknown basis s
   const unknownValues = [...unknownCard.querySelectorAll(".order-card-figure dd")].map(node => node.textContent);
   assert.deepEqual(unknownValues, ["金额依据待核对", "金额依据待核对"]);
   assert.doesNotMatch(unknownCard.textContent, /¥0\.00|¥[\d,]+\.00/, "unreadable amounts are never rendered as zero");
+});
+
+const userMediaConsultations = [
+  { id: "c-1", type: "SERVICE", state: "ACTIVE", conversationId: "team-1", messageScopeState: "READY", assignedAdmin: { id: "admin-a", name: "客服甲" }, peerAccountId: "staff-a", updatedAt: "2026-09-26T00:00:00Z" },
+  { id: "c-2", type: "SERVICE", state: "ACTIVE", conversationId: "team-2", messageScopeState: "READY", assignedAdmin: { id: "admin-a", name: "客服甲" }, peerAccountId: "staff-a", updatedAt: "2026-09-25T00:00:00Z" },
+];
+
+function mediaEcho(body, overrides = {}) {
+  return {
+    messageClientId: body.media.messageClientId,
+    messageServerId: `srv-media-${body.media.kind}-${body.media.messageClientId.slice(-8)}`,
+    conversationId: body.conversationId,
+    senderId: "preview-user",
+    receiverId: body.conversationId,
+    createTime: 1_700_000_300_000,
+    messageType: body.media.kind === "video" ? 3 : 6,
+    media: {
+      mediaId: `media-${body.media.kind}`,
+      kind: body.media.kind,
+      name: body.media.name,
+      mimeType: body.media.mimeType,
+      size: body.media.size,
+      url: `/api/im/media/media-${body.media.kind}`,
+      ...overrides,
+    },
+  };
+}
+
+/** A real local-fake user consultation with a controllable media POST. */
+async function mountSupportMedia(t, options = {}) {
+  const originalFetch = globalThis.fetch;
+  const history = (options.history ?? []).map((row) => ({ ...row }));
+  const posts = [];
+  const onMedia = options.onMedia ?? (() => ({}));
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url.startsWith("/api/orders/")) return new Response(JSON.stringify({ items: [], nextCursor: null }));
+    if (url.includes("/im/token")) return new Response(JSON.stringify({ appKey: "synthetic", accountId: "preview-user", token: "synthetic", transport: "local-fake" }));
+    if (url.includes("/im/consultations")) return new Response(JSON.stringify({ consultations: options.consultations ?? userMediaConsultations }));
+    if (url.includes("/im/message-access")) return new Response(JSON.stringify({ authorized: true }));
+    if (url.includes("/im/messages")) {
+      if ((init.method ?? "GET") === "GET") {
+        const conversationId = new URL(url, "http://synthetic.local").searchParams.get("conversationId");
+        return new Response(JSON.stringify({ messages: history.filter((row) => row.conversationId === conversationId) }));
+      }
+      const body = JSON.parse(String(init.body));
+      posts.push(body);
+      if (body.media) {
+        const outcome = await onMedia(body, posts.length - 1);
+        if (outcome instanceof Response) return outcome;
+        const sent = mediaEcho(body, outcome?.overrides);
+        history.push(sent);
+        return new Response(JSON.stringify({ message: sent }));
+      }
+      const sent = { messageClientId: `srv-text-${posts.length}`, messageServerId: `srv-text-${posts.length}`, conversationId: body.conversationId, senderId: "preview-user", receiverId: body.conversationId, createTime: 1_700_000_100_000 + posts.length, text: body.text, messageType: 0 };
+      history.push(sent);
+      return new Response(JSON.stringify({ message: sent }));
+    }
+    throw new Error(`unexpected support media fetch ${url}`);
+  };
+  const host = browser.document.createElement("div"); host.className = "support-dialog-content"; browser.document.body.appendChild(host);
+  const root = createRoot(host);
+  t.after(async () => { await act(async () => root.unmount()); host.remove(); globalThis.fetch = originalFetch; });
+  await act(async () => root.render(renderPreview({ preview: false, embedded: true, visible: true, onClose: () => {} })));
+  const until = async (predicate, label = "support media condition") => { for (let index = 0; index < 150; index += 1) { if (predicate()) return; await settle(); } throw new Error(`${label} timed out`); };
+  await until(() => host.querySelector("textarea") && !host.querySelector("textarea").disabled, "sendable consultation");
+  const choose = async (index) => { await act(async () => { host.querySelectorAll(".support-directory .support-conversation-item")[index].click(); }); await settle(); await settle(); };
+  const type = async (value) => { await act(async () => { const element = host.querySelector("textarea"); Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype, "value").set.call(element, value); element.dispatchEvent(new Event("input", { bubbles: true })); }); };
+  const submit = async () => { await act(async () => { host.querySelector("form").dispatchEvent(new browser.Event("submit", { bubbles: true, cancelable: true })); }); };
+  const stage = async (kind) => {
+    const input = host.querySelector(kind === "video" ? '.support-composer input[accept^="video/"]' : '.support-composer input[accept^="application/pdf"]');
+    assert.ok(input, `${kind} picker exists`);
+    const file = kind === "video"
+      ? new browser.File([new Uint8Array([1, 2, 3])], "clip.mp4", { type: "video/mp4" })
+      : new browser.File([new Uint8Array([4, 5, 6])], "contract.pdf", { type: "application/pdf" });
+    Object.defineProperty(input, "files", { configurable: true, value: [file] });
+    await act(async () => { input.dispatchEvent(new Event("change", { bubbles: true })); });
+    await until(() => host.querySelector(`.message-media-draft[data-kind="${kind}"]`), `${kind} staged`);
+  };
+  const row = (id) => host.querySelector(`[data-message-id="${id}"]`);
+  const draftState = () => host.querySelector(".message-media-draft")?.getAttribute("data-state");
+  const mediaPosts = () => posts.filter((item) => item.media);
+  return { host, posts, history, until, choose, type, submit, stage, row, draftState, mediaPosts, draft: () => host.querySelector("textarea").value };
+}
+
+test("user video and file stage per consultation and dispatch after the text in one submission", async (t) => {
+  const page = await mountSupportMedia(t);
+  const { host } = page;
+  await page.stage("video");
+  assert.match(host.querySelector(".message-media-draft").textContent, /clip\.mp4/);
+  assert.equal(page.mediaPosts().length, 0, "selecting a video only stages it");
+
+  await page.choose(1);
+  assert.equal(host.querySelector(".message-media-draft"), null, "the staged video stays bound to its own consultation");
+  await page.choose(0);
+  await page.until(() => host.querySelector('.message-media-draft[data-kind="video"]'), "staged video restored");
+
+  await page.type("请先看视频");
+  await page.submit();
+  await page.until(() => page.posts.length === 2, "text and video dispatched");
+  assert.equal(page.posts[0].text, "请先看视频", "text is dispatched first");
+  assert.equal(page.posts[1].media?.kind, "video", "the staged video follows the text");
+  assert.ok(page.posts[1].media.messageClientId);
+  assert.equal(host.querySelector(".message-media-draft"), null, "a successful send clears the staged video");
+  await page.until(() => host.querySelector('.support-message .message-media[data-kind="video"] video'), "video bubble rendered");
+  assert.equal(host.querySelector('.support-message .message-media[data-kind="video"] video').getAttribute("src"), "/api/im/media/media-video");
+
+  await page.stage("file");
+  assert.equal(host.querySelector(".support-send-btn").disabled, false, "a READY media draft alone enables send");
+  await page.submit();
+  await page.until(() => page.posts.length === 3, "a staged file sends without text");
+  assert.equal(page.posts[2].media?.kind, "file");
+  assert.equal(host.querySelector(".message-media-draft"), null, "the file draft clears only after success");
+  await page.until(() => host.querySelector('.support-message .message-media[data-kind="file"] .message-media-download'), "file bubble rendered");
+  assert.equal(page.mediaPosts().length, 2, "one video and one file were sent, no duplicates");
+});
+
+test("user media progress, failure and UNKNOWN reconcile through the original message id", async (t) => {
+  let releaseVideo;
+  let videoAttempts = 0;
+  let fileAttempts = 0;
+  const page = await mountSupportMedia(t, {
+    onMedia: async (body) => {
+      if (body.media.kind === "video") {
+        videoAttempts += 1;
+        if (videoAttempts === 1) {
+          await new Promise((resolve) => { releaseVideo = resolve; });
+          return new Response(JSON.stringify({ error: { code: "INTERNAL_ERROR" } }), { status: 500 });
+        }
+        return {};
+      }
+      fileAttempts += 1;
+      if (fileAttempts === 1) return new Response(JSON.stringify({ error: { code: "BAD_REQUEST" } }), { status: 400 });
+      return {};
+    },
+  });
+  const { host } = page;
+  await page.stage("video");
+  await page.submit();
+  await page.until(() => page.draftState() === "SENDING", "video send in flight");
+  assert.match(host.querySelector(".message-media-draft").textContent, /发送中 \d+%/, "upload progress is shown while sending");
+  assert.equal(host.querySelector(".support-send-btn").disabled, true, "the composer is blocked while the media is in flight");
+  const sendingRemove = [...host.querySelectorAll(".message-media-draft button")].find((button) => button.textContent === "移除");
+  assert.equal(sendingRemove.disabled, true, "SENDING media cannot be removed");
+  await act(async () => releaseVideo());
+  await page.until(() => page.draftState() === "UNKNOWN", "video UNKNOWN");
+  const firstVideoId = page.mediaPosts()[0].media.messageClientId;
+  assert.match(host.querySelector(".message-media-draft").textContent, /结果未确认/);
+  await settle(); await settle();
+  assert.equal(page.mediaPosts().length, 1, "an UNKNOWN result is never auto-resent");
+  const remove = [...host.querySelectorAll(".message-media-draft button")].find((button) => button.textContent === "移除");
+  assert.equal(remove.disabled, true, "UNKNOWN media cannot be removed");
+  const retry = [...host.querySelectorAll(".message-media-draft button")].find((button) => button.textContent === "原消息重试");
+  assert.ok(retry, "UNKNOWN media offers the original-id retry");
+  await act(async () => retry.click());
+  await page.until(() => page.mediaPosts().length === 2, "video retried");
+  assert.equal(page.mediaPosts()[1].media.messageClientId, firstVideoId, "video retry reuses the original messageClientId");
+  await page.until(() => host.querySelector('.support-message .message-media[data-kind="video"]'), "retried video rendered");
+  assert.equal(host.querySelector(".message-media-draft"), null);
+
+  await page.stage("file");
+  await page.submit();
+  await page.until(() => page.draftState() === "FAILED", "file FAILED");
+  const firstFileId = page.mediaPosts()[2].media.messageClientId;
+  const fileRetry = [...host.querySelectorAll(".message-media-draft button")].find((button) => button.textContent === "原消息重试");
+  assert.ok(fileRetry, "a definite failure also offers the retry");
+  await act(async () => fileRetry.click());
+  await page.until(() => page.mediaPosts().length === 4, "file retried");
+  assert.equal(page.mediaPosts()[3].media.messageClientId, firstFileId, "a failed file retries its original id, never a new one");
+  await page.until(() => host.querySelector('.support-message .message-media[data-kind="file"]'), "retried file rendered");
+});
+
+function userMediaHistory() {
+  const base = { conversationId: "team-1", receiverId: "preview-user", senderId: "staff-a" };
+  return [
+    { ...base, messageClientId: "media-video", messageServerId: "srv-media-video", createTime: 1_700_000_010_000, messageType: 3, media: { mediaId: "media-video-1", kind: "video", name: "clip.mp4", mimeType: "video/mp4", size: 3, url: "/api/im/media/media-video-1" } },
+    { ...base, messageClientId: "media-file", messageServerId: "srv-media-file", createTime: 1_700_000_011_000, messageType: 6, media: { mediaId: "media-file-1", kind: "file", name: "contract.pdf", mimeType: "application/pdf", size: 3, url: "/api/im/media/media-file-1" } },
+    { ...base, messageClientId: "media-audio", messageServerId: "srv-media-audio", createTime: 1_700_000_012_000, messageType: 2, media: { mediaId: "media-audio-1", kind: "audio", name: "voice.mp3", mimeType: "audio/mpeg", size: 3, url: "/api/im/media/media-audio-1" } },
+    { ...base, messageClientId: "media-missing", messageServerId: "srv-media-missing", createTime: 1_700_000_013_000, messageType: 3, media: { mediaId: "media-missing-1", kind: "video", name: "lost.mp4", mimeType: "video/mp4", size: 3 } },
+  ];
+}
+
+test("media history renders video, file and audio, falls back when the URL is missing, and is not copyable", async (t) => {
+  const page = await mountSupportMedia(t, { history: userMediaHistory() });
+  const { host } = page;
+  await page.until(() => host.querySelectorAll(".support-message .message-media").length === 4, "media history rendered");
+  const video = page.row("srv-media-video");
+  assert.equal(video.querySelector("video").getAttribute("src"), "/api/im/media/media-video-1");
+  assert.match(video.querySelector(".message-media-caption").textContent, /clip\.mp4/);
+  const file = page.row("srv-media-file");
+  assert.equal(file.querySelector(".message-media-download").getAttribute("href"), "/api/im/media/media-file-1");
+  assert.equal(file.querySelector(".message-media-download").textContent, "下载");
+  assert.match(file.querySelector(".message-media-name").textContent, /contract\.pdf/);
+  const audio = page.row("srv-media-audio");
+  assert.equal(audio.querySelector("audio").getAttribute("src"), "/api/im/media/media-audio-1");
+  const missing = page.row("srv-media-missing");
+  assert.equal(missing.querySelector(".message-media-video-player"), null, "a missing URL never becomes a broken player");
+  assert.match(missing.querySelector(".message-media-unavailable").textContent, /媒体暂不可用/);
+
+  await act(async () => video.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 120, clientY: 90 })));
+  await settle();
+  const labels = [...browser.document.querySelectorAll(".message-action-menu [role=menuitem]")].map((item) => item.textContent.trim());
+  assert.ok(!labels.includes("复制"), "media is not copyable text");
+  assert.ok(labels.includes("回复"), "media can still be quoted");
+  const reply = [...browser.document.querySelectorAll(".message-action-menu [role=menuitem]")].find((item) => item.textContent.trim() === "回复");
+  await act(async () => reply.click());
+  await settle();
+  assert.match(host.querySelector(".message-reply-quote").textContent, /\[视频\]/, "the quote names the media kind instead of a filename");
+  await act(async () => host.querySelector(".message-reply-quote button").click());
+  assert.equal(host.querySelector(".message-reply-quote"), null);
 });
 
 test("a long item list folds and a card row still opens the message menu", async (t) => {

@@ -91,9 +91,10 @@ function snapshot(permissions, isBoss = false) {
 }
 
 const activeConsultation = {
-  id: "c-active", type: "SERVICE", state: "ACTIVE", subjectRef: null, version: 1,
+  id: "c-active", threadId: "thread-a", roundId: "c-active", roundSeq: 2, threadState: "ACTIVE",
+  type: "SERVICE", state: "ACTIVE", subjectRef: null, version: 1,
   assignedAdmin: { id: "admin-a", name: "客服 A" }, peerAccountId: "user-a", conversationType: "TEAM",
-  conversationId: "conv-a", messageScopeState: "READY",
+  conversationId: "conv-a", messageScopeState: "READY", canSend: true,
   lastMessageAt: "2026-10-29T02:00:00.000Z", createdAt: "2026-10-29T01:00:00.000Z", updatedAt: "2026-10-29T02:00:00.000Z",
   user: { id: "user-a", name: "用户 A", username: "user-a" },
 };

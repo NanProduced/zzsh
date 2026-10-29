@@ -5,7 +5,7 @@ export type ImMessageStateItem = {
 
 /** Object fields where a later record must not erase values it does not carry
  *  (a sender echo may omit the uploaded URL while history carries it). */
-const MERGED_OBJECT_FIELDS = ["attachment", "image", "reply"] as const;
+const MERGED_OBJECT_FIELDS = ["attachment", "image", "media", "reply"] as const;
 
 function mergeRecord<T extends ImMessageStateItem>(existing: T, message: T): T {
   const existingRecord = existing as Record<string, unknown>;
@@ -21,6 +21,7 @@ function mergeRecord<T extends ImMessageStateItem>(existing: T, message: T): T {
     cleared.revoked = true;
     delete cleared.attachment;
     delete cleared.image;
+    delete cleared.media;
     delete cleared.reply;
     return cleared as T;
   }

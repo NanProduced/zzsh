@@ -48,6 +48,10 @@ function snapshot(permissions) {
 
 const waitingConsultation = {
   id: "consultation-waiting",
+  threadId: "thread-w",
+  roundId: "consultation-waiting",
+  roundSeq: 1,
+  threadState: "WAITING",
   type: "SERVICE",
   state: "WAITING",
   subjectRef: null,
@@ -56,6 +60,7 @@ const waitingConsultation = {
   conversationType: "TEAM",
   conversationId: null,
   messageScopeState: "PENDING",
+  canSend: false,
   version: 1,
   lastMessageAt: null,
   createdAt: "2026-09-17T00:00:00.000Z",
@@ -64,6 +69,10 @@ const waitingConsultation = {
 };
 const activeConsultation = {
   id: "consultation-active",
+  threadId: "thread-a",
+  roundId: "consultation-active",
+  roundSeq: 2,
+  threadState: "ACTIVE",
   type: "SERVICE",
   state: "ACTIVE",
   subjectRef: null,
@@ -72,6 +81,7 @@ const activeConsultation = {
   conversationType: "TEAM",
   conversationId: "team-a",
   messageScopeState: "READY",
+  canSend: true,
   version: 1,
   lastMessageAt: "2026-09-17T00:05:00.000Z",
   createdAt: "2026-09-17T00:00:00.000Z",
@@ -91,7 +101,7 @@ globalThis.fetch = async (input, init = {}) => {
   if (url.pathname.endsWith("/im/messages")) return response({ messages: [] });
   if (url.pathname.endsWith("/im/transfer-targets")) return response({ targets: [{ adminUserId: "admin-b", displayName: "客服 B" }], transferReady: true });
   if (url.pathname.endsWith("/consultations/consultation-active/transfer")) {
-    return response({ consultation: { ...activeConsultation, assignedAdmin: { id: "admin-b", name: "客服 B" } } });
+    return response({ consultation: { ...activeConsultation, assignedAdmin: { id: "admin-b", name: "客服 B" }, canSend: false } });
   }
   throw new Error(`unexpected test request ${url.pathname}${url.search}`);
 };

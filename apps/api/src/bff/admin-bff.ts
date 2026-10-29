@@ -379,7 +379,7 @@ async function forwardYunxin(
   for (const [name, value] of captured.headers) response.setHeader(name, value);
   response.setHeader("X-Request-Id", requestId).setHeader("Cache-Control", "no-store");
   response.status(captured.statusCode);
-  if (targetPath.includes("/images/") && response.send) response.send(captured.body);
+  if ((targetPath.includes("/images/") || targetPath.includes("/media/")) && response.send) response.send(captured.body);
   else response.json(captured.body);
 }
 
@@ -567,12 +567,13 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
   }
   const imAction = /^\/im\/consultations\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/(claim|transfer|close|reconcile)$/.exec(path);
   const imImage = /^\/im\/images\/[A-Za-z0-9._:-]{1,128}$/.test(path);
+  const imMedia = /^\/im\/media\/[A-Za-z0-9._:-]{1,128}$/.test(path);
   const imReadSub = /^\/im\/consultations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(events|context)$/.test(path);
   const imAuditTakeover = /^\/im\/audit\/consultations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/takeover$/.test(path);
   const imGetOrPost = path === "/im/consultations" || path === "/im/messages";
   const imGetOnly = path === "/im/token" || path === "/im/identities" || path === "/im/support-overview"
     || path === "/im/handovers" || path === "/im/audit/conversations" || path === "/im/transfer-targets"
-    || path === "/im/message-access" || imImage || imReadSub;
+    || path === "/im/message-access" || imImage || imMedia || imReadSub;
   const imPostOnly = Boolean(imAction) || path === "/im/presence/heartbeat" || imAuditTakeover;
   const imPathAllowed = imGetOrPost || imGetOnly || imPostOnly || path === "/im/presence";
   const imMethodAllowed = path === "/im/presence"

@@ -57,7 +57,13 @@ import {
 import { inspectImage, MAX_MEDIA_BYTES } from "../supply/media";
 import {
   ImTransportRequestError,
+  IM_TRANSPORT_MEDIA_LIMITS,
+  isImTransportMediaKind,
+  isImTransportMediaMimeType,
   type ImOrderImageScope,
+  type ImOrderMediaScope,
+  type ImTransportMediaFile,
+  type ImTransportMediaKind,
   type ImTransportMessage,
   type ImTransportMessageReference,
 } from "./im-contract";
@@ -251,29 +257,29 @@ function messageConversationId(value: string | null): string {
 type ParsedMessageBody =
   | { conversationId: string; kind: "text"; text: string }
   | { conversationId: string; kind: "image"; image: { messageClientId: string; name: string; mimeType: "image/jpeg" | "image/png"; size: number; body: Buffer; width: number; height: number } }
+  | { conversationId: string; kind: "media"; media: { messageClientId: string; kind: ImTransportMediaKind; name: string; mimeType: string; size: number; body: Buffer; width?: number; height?: number; durationMs?: number } }
   | { conversationId: string; kind: "reply"; text: string; replyTo: ImTransportMessageReference }
   | { conversationId: string; kind: "revoke"; message: ImTransportMessageReference }
   | { conversationId: string; kind: "delete"; message: ImTransportMessageReference };
 
-const MAX_IMAGE_BASE64_LENGTH = Math.ceil(MAX_MEDIA_BYTES / 3) * 4;
 const BASE64_ALPHABET = /^[A-Za-z0-9+/]$/;
 
-function decodeBase64(value: string, size: number): Buffer {
-  if (!value || value.length !== Math.ceil(size / 3) * 4 || value.length > MAX_IMAGE_BASE64_LENGTH || value.length % 4 !== 0) {
-    throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Image data is invalid");
+function decodeBase64(value: string, size: number, maxBytes: number, label: "Image" | "Media"): Buffer {
+  if (!value || value.length !== Math.ceil(size / 3) * 4 || value.length > Math.ceil(maxBytes / 3) * 4 || value.length % 4 !== 0) {
+    throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, `${label} data is invalid`);
   }
   let padding = 0;
   for (let index = 0; index < value.length; index += 1) {
     const character = value[index]!;
     if (character === "=") {
       padding += 1;
-      if (padding > 2 || index < value.length - 2) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Image data is invalid");
+      if (padding > 2 || index < value.length - 2) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, `${label} data is invalid`);
     } else if (padding > 0 || !BASE64_ALPHABET.test(character)) {
-      throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Image data is invalid");
+      throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, `${label} data is invalid`);
     }
   }
   const bytes = Buffer.from(value, "base64");
-  if (bytes.length !== size) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Image bytes are invalid");
+  if (bytes.length !== size) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, `${label} bytes are invalid`);
   return bytes;
 }
 
@@ -303,6 +309,16 @@ function messageText(value: unknown): string {
   return text;
 }
 
+const MAX_MEDIA_DIMENSION = 8192;
+const MAX_MEDIA_DURATION_MS = 24 * 60 * 60 * 1000;
+const MEDIA_KEYS = ["kind", "messageClientId", "name", "mimeType", "size", "data", "width", "height", "durationMs"] as const;
+
+function optionalPositiveInteger(value: unknown, max: number): { ok: true; value?: number } | { ok: false } {
+  if (value === undefined) return { ok: true };
+  if (typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= max) return { ok: true, value };
+  return { ok: false };
+}
+
 export async function parseMessageBody(value: unknown): Promise<ParsedMessageBody> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Message body is invalid");
   const body = value as Record<string, unknown>;
@@ -319,12 +335,59 @@ export async function parseMessageBody(value: unknown): Promise<ParsedMessageBod
     }
     throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Message action is invalid");
   }
-  if ((body.text === undefined && body.image === undefined) || (body.text !== undefined && body.image !== undefined)) {
+  const contentKeys = ["text", "image", "media"].filter((key) => body[key] !== undefined);
+  if (contentKeys.length !== 1) {
     throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Message body is invalid");
   }
   if (body.text !== undefined) {
     if (Object.keys(body).some((key) => key !== "conversationId" && key !== "text")) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Message body is invalid");
     return { conversationId, kind: "text", text: messageText(body.text) };
+  }
+  if (body.media !== undefined) {
+    if (Object.keys(body).some((key) => key !== "conversationId" && key !== "media")
+      || !body.media || typeof body.media !== "object" || Array.isArray(body.media)) {
+      throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Media message is invalid");
+    }
+    const media = body.media as Record<string, unknown>;
+    if (Object.keys(media).some((key) => !(MEDIA_KEYS as readonly string[]).includes(key))
+      || !isImTransportMediaKind(media.kind)
+      || typeof media.messageClientId !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(media.messageClientId)
+      || typeof media.name !== "string" || media.name.length < 1 || media.name.length > 255
+      || /[\u0000-\u001F\u007F]/.test(media.name)
+      || !isImTransportMediaMimeType(media.kind, media.mimeType)
+      || typeof media.size !== "number" || !Number.isInteger(media.size) || media.size < 1
+      || media.size > IM_TRANSPORT_MEDIA_LIMITS[media.kind].maxBytes
+      || typeof media.data !== "string") {
+      throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Media message is invalid");
+    }
+    const kind = media.kind;
+    const width = optionalPositiveInteger(media.width, MAX_MEDIA_DIMENSION);
+    const height = optionalPositiveInteger(media.height, MAX_MEDIA_DIMENSION);
+    const durationMs = optionalPositiveInteger(media.durationMs, MAX_MEDIA_DURATION_MS);
+    const dimensionsPresent = media.width !== undefined || media.height !== undefined;
+    if (!width.ok || !height.ok || !durationMs.ok
+      || (dimensionsPresent && (width.value === undefined || height.value === undefined))
+      || (kind === "file" && (media.width !== undefined || media.height !== undefined || media.durationMs !== undefined))
+      || (kind === "audio" && dimensionsPresent)) {
+      throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Media metadata is invalid");
+    }
+    const size = media.size;
+    const bytes = decodeBase64(media.data, size, IM_TRANSPORT_MEDIA_LIMITS[kind].maxBytes, "Media");
+    return {
+      conversationId,
+      kind: "media",
+      media: {
+        messageClientId: media.messageClientId,
+        kind,
+        name: media.name,
+        mimeType: media.mimeType,
+        size,
+        body: bytes,
+        ...(width.value === undefined ? {} : { width: width.value }),
+        ...(height.value === undefined ? {} : { height: height.value }),
+        ...(durationMs.value === undefined ? {} : { durationMs: durationMs.value }),
+      },
+    };
   }
   if (Object.keys(body).some((key) => key !== "conversationId" && key !== "image") || !body.image || typeof body.image !== "object" || Array.isArray(body.image)) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Image message is invalid");
   const image = body.image as Record<string, unknown>;
@@ -338,7 +401,7 @@ export async function parseMessageBody(value: unknown): Promise<ParsedMessageBod
     throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Image message is invalid");
   }
   const size = image.size as number;
-  const bytes = decodeBase64(image.data as string, size);
+  const bytes = decodeBase64(image.data as string, size, MAX_MEDIA_BYTES, "Image");
   let actual;
   try {
     actual = await inspectImage(bytes);
@@ -358,7 +421,11 @@ export async function parseMessageBody(value: unknown): Promise<ParsedMessageBod
 
 function publicMessage(message: ImTransportMessage, realm: "user" | "admin"): ImTransportMessage {
   const imageId = message.attachment?.imageId;
-  if (message.messageType !== 1 || !imageId) return message;
+  if (message.messageType !== 1 || !imageId) {
+    if (!message.media) return message;
+    const prefix = realm === "user" ? "/api/im/media/" : "/api/bff/admin/im/media/";
+    return { ...message, media: { ...message.media, url: `${prefix}${encodeURIComponent(message.media.mediaId)}` } };
+  }
   const prefix = realm === "user" ? "/api/im/images/" : "/api/bff/admin/im/images/";
   return { ...message, attachment: { ...message.attachment, url: `${prefix}${encodeURIComponent(imageId)}` } } as ImTransportMessage;
 }
@@ -367,6 +434,19 @@ function sendImage(response: NodeResponse, image: { mimeType: string; body: Uint
   if (response.headersSent) return;
   response.status(200).setHeader("X-Request-Id", requestId).setHeader("Cache-Control", "no-store").setHeader("Content-Type", image.mimeType);
   if (response.send) response.send(image.body);
+  else sendInternalError(response, requestId);
+}
+
+function sendMediaFile(response: NodeResponse, media: ImTransportMediaFile, requestId: string): void {
+  if (response.headersSent) return;
+  response.status(200)
+    .setHeader("X-Request-Id", requestId)
+    .setHeader("Cache-Control", "no-store")
+    .setHeader("Content-Type", media.mimeType)
+    .setHeader("X-Content-Type-Options", "nosniff");
+  // File downloads never render inline; video/audio may stream in a player.
+  if (media.kind === "file") response.setHeader("Content-Disposition", "attachment");
+  if (response.send) response.send(media.body);
   else sendInternalError(response, requestId);
 }
 
@@ -391,8 +471,8 @@ async function handleUserMessageAccess(request: NodeRequest, response: NodeRespo
   }
   const context = await readUserContext(request, options.security);
   const query = routeQuery(request);
-  parseMessageOperation(query.get("operation"));
-  await readUserMessageAccess(options.consultation, context, messageConversationId(query.get("conversationId")));
+  const operation = parseMessageOperation(query.get("operation"));
+  await readUserMessageAccess(options.consultation, context, messageConversationId(query.get("conversationId")), operation === "send");
   sendJson(response, 200, { authorized: true }, requestId);
 }
 
@@ -443,7 +523,7 @@ async function readMessageAccess(
     if (access) return access;
   }
   return actor.realm === "user"
-    ? readUserMessageAccess(options.consultation!, actor, conversationId)
+    ? readUserMessageAccess(options.consultation!, actor, conversationId, send)
     : readAdminMessageAccess(options.consultation!, actor, conversationId, send, requestId);
 }
 
@@ -544,6 +624,30 @@ async function handleUserMessages(request: NodeRequest, response: NodeResponse, 
     sendJson(response, 200, { message: publicMessage(await transport.sendText({ conversationId: input.conversationId, senderAccountId: access.viewerAccountId, receiverAccountId: access.peerAccountId, text: input.text }), "user") }, requestId);
     return;
   }
+  if (input.kind === "media") {
+    if (!transport.sendMedia) {
+      sendUnavailable(response, requestId);
+      return;
+    }
+    if (!access.scope) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Order Team media access denied");
+    const media = input.media;
+    sendJson(response, 200, { message: publicMessage(await transport.sendMedia({
+      conversationId: input.conversationId,
+      scope: access.scope,
+      senderAccountId: access.viewerAccountId,
+      receiverAccountId: access.peerAccountId,
+      messageClientId: media.messageClientId,
+      kind: media.kind,
+      name: media.name,
+      mimeType: media.mimeType,
+      size: media.size,
+      body: media.body,
+      ...(media.width === undefined ? {} : { width: media.width }),
+      ...(media.height === undefined ? {} : { height: media.height }),
+      ...(media.durationMs === undefined ? {} : { durationMs: media.durationMs }),
+    }), "user") }, requestId);
+    return;
+  }
   if (!transport.sendImage) {
     sendUnavailable(response, requestId);
     return;
@@ -577,6 +681,30 @@ async function handleAdminMessages(request: NodeRequest, response: NodeResponse,
     sendJson(response, 200, { message: publicMessage(await transport.sendText({ conversationId: input.conversationId, senderAccountId: access.viewerAccountId, receiverAccountId: access.peerAccountId, text: input.text }), "admin") }, requestId);
     return;
   }
+  if (input.kind === "media") {
+    if (!transport.sendMedia) {
+      sendUnavailable(response, requestId);
+      return;
+    }
+    if (!access.scope) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Order Team media access denied");
+    const media = input.media;
+    sendJson(response, 200, { message: publicMessage(await transport.sendMedia({
+      conversationId: input.conversationId,
+      scope: access.scope,
+      senderAccountId: access.viewerAccountId,
+      receiverAccountId: access.peerAccountId,
+      messageClientId: media.messageClientId,
+      kind: media.kind,
+      name: media.name,
+      mimeType: media.mimeType,
+      size: media.size,
+      body: media.body,
+      ...(media.width === undefined ? {} : { width: media.width }),
+      ...(media.height === undefined ? {} : { height: media.height }),
+      ...(media.durationMs === undefined ? {} : { durationMs: media.durationMs }),
+    }), "admin") }, requestId);
+    return;
+  }
   if (!transport.sendImage) {
     sendUnavailable(response, requestId);
     return;
@@ -604,6 +732,32 @@ async function handleImage(request: NodeRequest, response: NodeResponse, request
   const image = await transport.readImage({ imageId, scope: scope.scope, viewerAccountId: access.viewerAccountId });
   if (!image || image.imageId !== imageId || !sameImageScope(image.scope, scope.scope)) throw new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Image not found");
   sendImage(response, image, requestId);
+}
+
+function sameMediaScope(left: ImOrderMediaScope, right: ImOrderMediaScope): boolean {
+  return left.appId === right.appId && left.orderId === right.orderId && left.teamId === right.teamId;
+}
+
+async function handleMedia(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions, realm: "user" | "admin", mediaId: string): Promise<void> {
+  const transport = options.consultation?.messageTransport;
+  if (!options.consultation || !transport?.getMediaScope || !transport.readMedia) {
+    sendUnavailable(response, requestId);
+    return;
+  }
+  const scope = await transport.getMediaScope(mediaId);
+  if (!scope || scope.mediaId !== mediaId) throw new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Media not found");
+  const access = realm === "user"
+    ? await readOrderImageAccess(options, { ...(await readUserContext(request, options.security)), realm: "user" as const }, scope.scope)
+    : await (async () => {
+      const context = await readAdminContext(request, options.security);
+      await requireDirectoryPermission(options.security.pool, context.userId, ADMIN_PERMISSION.imSupportRead);
+      return readOrderImageAccess(options, { ...context, realm: "admin" as const }, scope.scope);
+    })();
+  const media = await transport.readMedia({ mediaId, scope: scope.scope, viewerAccountId: access.viewerAccountId });
+  if (!media || media.mediaId !== mediaId || !sameMediaScope(media.scope, scope.scope) || !isImTransportMediaMimeType(media.kind, media.mimeType)) {
+    throw new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Media not found");
+  }
+  sendMediaFile(response, media, requestId);
 }
 
 async function handleAdminConsultations(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions, action?: { id: string; name: "claim" | "transfer" | "close" | "reconcile" }): Promise<void> {
@@ -811,6 +965,15 @@ export async function handleYunxinRoute(request: NodeRequest, response: NodeResp
       await handleImage(request, response, requestId, options, "user", userImage[1]!);
       return;
     }
+    const userMedia = /^\/user\/media\/([A-Za-z0-9._:-]{1,128})$/.exec(path);
+    if (userMedia) {
+      if (!originAllowed(request, [options.security.apiOrigin, options.security.userOrigin]) || method !== "GET") {
+        sendError(response, new SecurityApiError(method === "GET" ? 403 : 404, method === "GET" ? API_V1_ERROR_CODES.FORBIDDEN : API_V1_ERROR_CODES.NOT_FOUND, method === "GET" ? "Request rejected" : "Resource not found"), requestId);
+        return;
+      }
+      await handleMedia(request, response, requestId, options, "user", userMedia[1]!);
+      return;
+    }
     if (path === "/user/message-access") {
       if (!originAllowed(request, [options.security.apiOrigin, options.security.userOrigin]) || method !== "GET") {
         sendError(response, new SecurityApiError(method === "GET" ? 403 : 404, method === "GET" ? API_V1_ERROR_CODES.FORBIDDEN : API_V1_ERROR_CODES.NOT_FOUND, method === "GET" ? "Request rejected" : "Resource not found"), requestId);
@@ -854,6 +1017,15 @@ export async function handleYunxinRoute(request: NodeRequest, response: NodeResp
         return;
       }
       await handleImage(request, response, requestId, options, "admin", adminImage[1]!);
+      return;
+    }
+    const adminMedia = /^\/admin\/media\/([A-Za-z0-9._:-]{1,128})$/.exec(path);
+    if (adminMedia) {
+      if (!originAllowed(request, [options.security.apiOrigin, options.security.adminOrigin]) || method !== "GET") {
+        sendError(response, new SecurityApiError(method === "GET" ? 403 : 404, method === "GET" ? API_V1_ERROR_CODES.FORBIDDEN : API_V1_ERROR_CODES.NOT_FOUND, method === "GET" ? "Request rejected" : "Resource not found"), requestId);
+        return;
+      }
+      await handleMedia(request, response, requestId, options, "admin", adminMedia[1]!);
       return;
     }
     if (path === "/admin/message-access") {

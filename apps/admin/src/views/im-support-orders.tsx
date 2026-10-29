@@ -1,18 +1,20 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
-import { ArrowDown, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Copy, Headphones, Images, MoreHorizontal, Search, Smile, X } from "lucide-react";
+import { ArrowDown, ChevronLeft, ChevronRight, CircleAlert, Headphones, Images, MoreHorizontal, Search, Smile } from "lucide-react";
 import { MessageScroller as MessageScrollerPrimitive } from "@shadcn/react/message-scroller";
 import { decodeImSystemNotice } from "@zzsh/im-client/message-state";
 import type { NimMessageLike, NimWebClientLike, NimWebConnectionState } from "@zzsh/im-client/nim-web-client";
 import {
-  OrderTeamPanel, escalationReviewReason, escalationStateLabel, orderTeamLabel, orderTeamMemberRole,
+  OrderTeamPanel, escalationStateLabel, orderTeamLabel, orderTeamMemberRole,
   type OrderTeamAccess, type OrderTeamAsideView, type OrderTeamConversationView, type OrderTeamListItem, type OrderTeamListView,
 } from "@zzsh/ui/order-team-panel";
 import { supportedImageUrl } from "./im-support-guards";
 import { dayKeyOf, dayLabelOf, formatBytes, formatDateTime, formatTime, initialOf } from "./im-support-format";
 import { CHAT_EMOJIS, MessageQuoted, MessageReplyQuote } from "@zzsh/ui/message-actions";
 import "@zzsh/ui/message-actions.css";
+import { MediaDraftBar, MediaMessage, mediaMessageOf } from "@zzsh/ui/message-media";
+import "@zzsh/ui/message-media.css";
 import { OrderCardMessage } from "@zzsh/ui/order-card";
 import { OrderFulfillmentSection } from "./im-support-fulfillment";
 import { Bubble, BubbleContent } from "../components/ui/bubble";
@@ -21,23 +23,33 @@ import { Kbd } from "../components/ui/kbd";
 import { Marker, MarkerContent } from "../components/ui/marker";
 import { Message, MessageAvatar, MessageContent, MessageFooter, MessageHeader } from "../components/ui/message";
 import { Attachment, AttachmentAction, AttachmentContent, AttachmentDescription, AttachmentGroup, AttachmentMedia, AttachmentTitle } from "../components/ui/attachment";
-import { Dialog, DialogContent } from "../components/ui/dialog";
-import { Button } from "../components/ui/button";
-import { Card, CardContent, CardDescription, CardFooter } from "../components/ui/card";
-import { Badge } from "../components/ui/badge";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
-import { Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemSeparator, ItemTitle } from "../components/ui/item";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 import "@zzsh/ui/order-team.css";
+import "./im-order-rail.css";
 
 const GROUP_WINDOW_MS = 300_000;
 const MAX_STAGED_IMAGES = 6;
 const UNIT_LABELS: Record<string, string> = { HAFF_BASE: "哈夫币", ROUND: "发", PIECE: "件" };
-const PRICING_LABELS: Record<string, string> = { HAFF_RATIO: "按比例计价", FIXED_UNIT: "按数量计价" };
 
 type Requester = <T>(path: string) => Promise<T>;
+
+/** Exact integer cents only; anything else stays unknown and is never rendered as 0. */
+function centsOf(value: string | null | undefined): bigint | null {
+  return typeof value === "string" && /^(0|[1-9]\d{0,17})$/.test(value) ? BigInt(value) : null;
+}
+
+function quantityOf(value: string): bigint | null {
+  return /^(0|[1-9]\d{0,18})$/.test(value) ? BigInt(value) : null;
+}
+
+function grouped(value: bigint): string {
+  return value.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+function yuanOf(cents: bigint): string {
+  const text = cents.toString().padStart(3, "0");
+  return `¥${grouped(BigInt(text.slice(0, -2)))}.${text.slice(-2)}`;
+}
 
 function imageOf(message: NimMessageLike): { url: string | null; name: string } | null {
   if (message.messageType !== 1) return null;
@@ -71,66 +83,9 @@ function RailSection({ title, children }: { title: string; children: ReactNode }
   </section>;
 }
 
-function CopyRow({ label, value }: { label: string; value: string }) {
-  const [notice, setNotice] = useState("");
-  const currentValue = useRef(value);
-  currentValue.current = value;
-  useEffect(() => setNotice(""), [label, value]);
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(value);
-      if (currentValue.current === value) setNotice(`已复制${label}`);
-    } catch {
-      if (currentValue.current === value) setNotice("复制失败，请选择原文复制");
-    }
-  };
-  return (
-    <><div className="im-rail-copy-row">
-      <span className="im-rail-copy-label">{label}</span>
-      <span className="im-rail-value">{value}</span>
-      <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-sm" className="im-rail-icon" aria-label={`复制${label}`} onClick={() => void copy()} />}>
-        {notice.startsWith("已复制") ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
-      </TooltipTrigger><TooltipContent>{notice || `复制${label}`}</TooltipContent></Tooltip>
-    </div>
-    {notice ? <p className="im-rail-copy-status" data-state={notice.startsWith("已复制") ? "success" : "error"} role="status">{notice}</p> : null}</>
-  );
-}
-
-function FactRow({ label, value }: { label: string; value: string }) {
-  return (
-    <Item size="sm" className="px-4 py-2">
-      <ItemContent><ItemDescription className="text-xs">{label}</ItemDescription></ItemContent>
-      <ItemActions><span className="text-sm font-medium">{value}</span></ItemActions>
-    </Item>
-  );
-}
-
 /** 时间只取服务端值；不可解析时直说，不用本地时钟补一个看起来像事实的时间。 */
 function serverTime(value: string): string {
   return formatDateTime(value);
-}
-
-function OrderInventoryDialog({ info, onClose, triggerRef }: { info: OrderTeamAccess; onClose: () => void; triggerRef: { current: HTMLButtonElement | null } }) {
-  const lines = info.frozenInventory ?? [];
-  return (
-    <Dialog open onOpenChange={(next) => { if (!next) onClose(); }}>
-      <DialogContent className="im-order-inventory-dialog" aria-label="本单冻结库存清单" showCloseButton={false} finalFocus={triggerRef}>
-        <div className="im-wb-dialog-head">
-          <div><strong>冻结库存清单</strong><span>{info.gameName} · 订单 {info.displayNo}</span></div>
-          <Button type="button" variant="ghost" size="icon-sm" className="im-rail-icon" data-action="close-inventory" onClick={onClose} aria-label="关闭清单"><X aria-hidden="true" /></Button>
-        </div>
-        {lines.length ? (
-          <div className="im-order-inventory-scroll" tabIndex={0} role="region" aria-label="冻结库存清单内容"><Table className="im-order-table">
-            <TableHeader><TableRow><TableHead>项目</TableHead><TableHead className="text-right">数量</TableHead><TableHead>计价口径</TableHead></TableRow></TableHeader>
-            <TableBody>{lines.map((line) => (
-              <TableRow key={line.itemId}><TableCell>{line.name ?? line.itemId}</TableCell><TableCell className="text-right tabular-nums">{line.quantity}{line.unit ? ` ${UNIT_LABELS[line.unit] ?? line.unit}` : ""}</TableCell><TableCell>{PRICING_LABELS[line.pricingKind] ?? "计价口径未识别"}</TableCell></TableRow>
-            ))}</TableBody>
-          </Table></div>
-        ) : <p className="im-wb-dialog-empty">本单没有可显示的冻结库存清单，数量以履约核对结果为准。</p>}
-        <p className="im-wb-dialog-hint">这是本单冻结的库存依据，不等于已确认的期初录入；录入与确认在「当前任务」中按阶段进行。</p>
-      </DialogContent>
-    </Dialog>
-  );
 }
 
 /**
@@ -156,13 +111,13 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
   const [detailsOpen, setDetailsOpen] = useState(true);
   const [pane, setPane] = useState<"list" | "chat" | "details">("list");
   const [imageErrors, setImageErrors] = useState<Record<string, number>>({});
-  const [inventoryOrderId, setInventoryOrderId] = useState<string | null>(null);
   const chatHeadingRef = useRef<HTMLElement | null>(null);
   const detailsTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const inventoryTriggerRef = useRef<HTMLButtonElement | null>(null);
   const previousPaneRef = useRef(pane);
   const selectedRef = useRef<string | null>(null);
   const composingRef = useRef(false);
+  const orderVideoInput = useRef<HTMLInputElement | null>(null);
+  const orderFileInput = useRef<HTMLInputElement | null>(null);
   const onComposerKeyDown = useCallback((event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing || composingRef.current) return;
     event.preventDefault();
@@ -173,8 +128,6 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
   }, []);
 
   const isNarrow = () => typeof window !== "undefined" && window.matchMedia("(max-width: 760px)").matches;
-  const closeInventory = () => setInventoryOrderId(null);
-  useEffect(() => setInventoryOrderId(null), [identity, active]);
   useEffect(() => { setPane("list"); setQuery(""); setImageErrors({}); }, [identity]);
   const openDetails = () => { setDetailsOpen(true); if (isNarrow()) setPane("details"); };
   const closeDetails = () => {
@@ -222,7 +175,7 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
             const due = !ended && row.dueAt ? `到期 ${serverTime(row.dueAt)}` : null;
             return (
               <button type="button" key={row.id} className="im-wb-row" data-active={selectedId === row.id} aria-current={selectedId === row.id ? "page" : undefined}
-                onClick={() => { setInventoryOrderId(null); setImageErrors({}); onSelect(row.id); setPane("chat"); }}>
+                onClick={() => { setImageErrors({}); onSelect(row.id); setPane("chat"); }}>
                 <span className="im-wb-row-av" aria-hidden="true">{initialOf(row.title)}</span>
                 <span className="im-wb-row-copy">
                   <span className="im-wb-row-top"><b>{row.title}</b><i className="im-wb-tag">{row.displayNo}</i></span>
@@ -289,11 +242,12 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
       const self = message.senderId === view.accountId;
       const author = authorOf(info, message.senderId, view.accountId, operatorName);
       const card = message.card;
+      const media = mediaMessageOf(message);
       const image = imageOf(message);
       const imageUrl = image?.url ?? null;
       const failed = Boolean(imageUrl && imageErrors[message.id]);
       const revoked = message.revoked === true;
-      const text = typeof message.text === "string" && message.text.trim() ? message.text : message.messageType === 0 || image ? "" : "暂不支持展示的消息类型";
+      const text = typeof message.text === "string" && message.text.trim() ? message.text : message.messageType === 0 || image || media ? "" : "暂不支持展示的消息类型";
       nodes.push(<MessageScrollerPrimitive.Item key={message.id} messageId={message.id} scrollAnchor={!self}>
         <Message align={self ? "end" : "start"} className="im-wb-msg" data-self={self} data-grouped={grouped} data-message-id={message.id} onContextMenu={view.menuHandlers.onContextMenu} {...view.menuHandlers.longPress}>
           <MessageAvatar className="im-wb-av" aria-hidden="true">{initialOf(author.name)}</MessageAvatar>
@@ -303,7 +257,7 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
               <BubbleContent className="im-wb-bub" data-revoked="true">消息已撤回</BubbleContent>
             </Bubble> : card ? <OrderCardMessage message={message} info={info} onOpenOrder={() => { window.location.assign(`/orders/${encodeURIComponent(info.orderId)}`); }} /> : <Bubble align={self ? "end" : "start"} variant={self ? "default" : "secondary"}>
               <BubbleContent className="im-wb-bub">
-                {image ? (imageUrl
+                {media ? <MediaMessage media={media}/> : image ? (imageUrl
                 ? (failed
                   ? <button type="button" className="im-wb-thumb im-wb-thumb-failed" onClick={() => setImageErrors((current) => { const next = { ...current }; delete next[message.id]; return next; })} aria-label={`重新加载图片 ${image.name}`}>图片加载失败 · 点击重试</button>
                   : <button type="button" className="im-wb-thumb" aria-label={`查看图片 ${image.name}`} onClick={(event) => view.openImage(imageUrl, image.name, event.currentTarget)}><img src={imageUrl} alt={image.name} loading="lazy" onError={() => setImageErrors((current) => ({ ...current, [message.id]: Date.now() }))} /></button>)
@@ -356,6 +310,7 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
           <button type="button" onClick={view.onRetryPendingImage} disabled={view.sending || view.isImageSending || !view.canSend}>{view.pendingImage.messageClientId ? "原消息重试" : "重试"}</button>
           <button type="button" onClick={view.onRemovePending} disabled={view.sending || view.isImageSending || view.pendingImage.state === "UNKNOWN" || !view.canSend} title={view.pendingImage.state === "UNKNOWN" ? "结果未确认时不可移除原图片" : undefined}>移除</button>
         </div> : null}
+        {view.mediaDraft ? <MediaDraftBar draft={view.mediaDraft} onRetry={view.onRetryMedia} onRemove={view.onRemoveMedia} disabled={view.sending}/> : null}
         {view.replyLabel ? <MessageReplyQuote label={view.replyLabel} onCancel={view.onCancelReply} /> : null}
         {!view.canSend ? <div className="im-wb-composer im-wb-composer-readonly" role="status"><CircleAlert size={14} aria-hidden="true" />{info.orderStatus === "COMPLETED" || info.orderStatus === "CANCELLED" ? "本单已结束，仅可查看历史消息" : "当前只可阅读本单消息；历史与草稿会保留"}</div> : <form className="im-wb-composer" onSubmit={(event) => { event.preventDefault(); void view.onSubmit(event); }}>
           {view.stagedImages.length ? <AttachmentGroup className="im-wb-tray">{view.stagedImages.map((item, idx) => <Attachment key={item.previewUrl} className="im-wb-tray-item" data-state={item.state} state={item.state === "DECODING" ? "processing" : "idle"} size="xs">
@@ -380,11 +335,15 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
                   {CHAT_EMOJIS.map((item) => <button key={item.emoji} type="button" className="chat-emoji-button" aria-label={item.label} onClick={() => insertEmoji(item.emoji)}>{item.emoji}</button>)}
                 </div></PopoverContent>
               </Popover>
-              <label className="im-wb-tool"><Images size={14} />图片<input type="file" accept="image/jpeg,image/png" multiple onChange={(event: ChangeEvent<HTMLInputElement>) => { const files = event.target.files ? Array.from(event.target.files) : []; event.target.value = ""; view.onStageFiles(files); }} disabled={!view.canSend || view.imageBlocked || view.isImageSending} /></label>
+              <label className="im-wb-tool"><Images size={14} />图片<input type="file" accept="image/jpeg,image/png" multiple onChange={(event: ChangeEvent<HTMLInputElement>) => { const files = event.target.files ? Array.from(event.target.files) : []; event.target.value = ""; view.onStageFiles(files); }} disabled={!view.canSend || view.imageBlocked || view.isImageSending || view.isMediaSending} /></label>
+              <button type="button" className="im-wb-tool" aria-label="发送视频" onClick={() => orderVideoInput.current?.click()} disabled={!view.canSend || view.imageBlocked || view.isImageSending || view.isMediaSending}>视频</button>
+              <input ref={orderVideoInput} type="file" accept="video/mp4,video/quicktime,video/webm" hidden onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) view.onStageMedia(file, "video"); }} disabled={!view.canSend || view.isImageSending || view.isMediaSending || view.mediaDraft?.state === "UNKNOWN"} />
+              <button type="button" className="im-wb-tool" aria-label="发送文件" onClick={() => orderFileInput.current?.click()} disabled={!view.canSend || view.imageBlocked || view.isImageSending || view.isMediaSending}>文件</button>
+              <input ref={orderFileInput} type="file" accept="application/pdf,application/zip,text/plain,text/csv,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.presentationml.presentation" hidden onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) view.onStageMedia(file, "file"); }} disabled={!view.canSend || view.isImageSending || view.isMediaSending || view.mediaDraft?.state === "UNKNOWN"} />
               <button type="button" className="im-wb-tool" data-action="order-insert-summary" disabled={!view.canSend}
                 onClick={() => view.setDraft(`${view.draft ? `${view.draft}\n` : ""}【本单信息】${info.account.title}（订单 ${info.displayNo}）`)}>本单信息</button>
               <span className="im-wb-hint im-wb-hint-right"><Kbd>Enter</Kbd> 发送 · <Kbd>Shift</Kbd>+<Kbd>Enter</Kbd> 换行</span>
-              <button type="submit" className="im-wb-send" disabled={!view.canSend || view.connection !== "CONNECTED" || view.sending || view.isImageSending || view.imageBlocked || (!view.draft.trim() && !view.stagedImages.length && !(view.pendingImage?.state === "FAILED"))}>{view.sending ? "发送中…" : "发送"}</button>
+              <button type="submit" className="im-wb-send" disabled={!view.canSend || view.connection !== "CONNECTED" || view.sending || view.isImageSending || view.isMediaSending || view.imageBlocked || (!view.draft.trim() && !view.stagedImages.length && !(view.pendingImage?.state === "FAILED") && view.mediaDraft?.state !== "READY")}>{view.sending ? "发送中…" : "发送"}</button>
             </InputGroupAddon>
           </InputGroup>
         </form>}
@@ -393,108 +352,113 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
   };
 
   const renderAside = ({ info }: OrderTeamAsideView) => {
-    const lines = info.frozenInventory ?? [];
-    const esc = info.supportEscalation;
-    const review = escalationReviewReason(esc);
-    const tracking = escalationStateLabel(esc.state, esc.firstResponseAt ?? null);
-    const terms = info.terms;
-    const staff = terms?.basis === "QUOTE" ? terms.staff : undefined;
-    const money = (value: string | null | undefined) => {
-      if (typeof value !== "string" || !/^(0|[1-9]\d{0,17})$/.test(value)) return "金额待核对";
-      const digits = value.padStart(3, "0");
-      return `¥${digits.slice(0, -2).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${digits.slice(-2)}`;
+    const frozen = info.frozenInventory ?? [];
+    const quote = info.terms && info.terms.basis === "QUOTE" ? info.terms : null;
+    const termsByItem = new Map((quote?.lines ?? []).map((line) => [line.itemId, line]));
+    const amountOf = (line: { itemId: string }) => centsOf(termsByItem.get(line.itemId)?.buyerAmount);
+    const sumQuantity = (lines: typeof frozen): bigint | null => {
+      let total: bigint | null = 0n;
+      for (const line of lines) {
+        const quantity = quantityOf(line.quantity);
+        if (quantity === null) return null;
+        if (total !== null) total += quantity;
+      }
+      return lines.length ? total : null;
     };
-    const staffMoney = staff ? { buyerTotal: money(staff.buyerTotal), ownerTotal: money(staff.ownerTotal), platformContribution: money(staff.platformContribution) } : null;
+    const sumAmount = (lines: typeof frozen): bigint | null => {
+      let total: bigint | null = 0n;
+      for (const line of lines) {
+        const cents = amountOf(line);
+        if (cents === null) return null;
+        if (total !== null) total += cents;
+      }
+      return lines.length ? total : null;
+    };
+    // 数量 0 只表示没有这一项：不进摘要、不计入合计，也不标异常。
+    const visible = frozen.filter((line) => quantityOf(line.quantity) !== 0n);
+    const coinLines = visible.filter((line) => line.unit === "HAFF_BASE");
+    const itemLines = visible.filter((line) => line.unit !== "HAFF_BASE");
+    const coinQuantity = sumQuantity(coinLines);
+    const coinAmount = sumAmount(coinLines);
+    const itemAmount = sumAmount(itemLines);
+    const buyer = info.members.find((member) => member.party === "BUYER");
+    const owner = info.members.find((member) => member.party === "OWNER");
+    const partyRow = (role: string, member: typeof buyer) => (
+      <div className="im-rail-party" key={role}>
+        <span className="im-rail-party-role">{role}</span>
+        <span className="im-rail-party-name">{member ? member.name?.trim() || "未署名" : "成员表未列"}</span>
+      </div>
+    );
+    const ended = info.orderStatus === "COMPLETED" || info.orderStatus === "CANCELLED";
+    const amountUnknown = quote !== null && (
+      (coinLines.length > 0 && coinAmount === null) || (itemLines.length > 0 && itemAmount === null)
+    );
     return (
       <aside id="im-order-details" className="order-team-aside im-wb-details" aria-label="本单详情" hidden={!detailsOpen}>
         <div className="im-wb-details-head"><strong>本单详情</strong></div>
         <div className="im-order-rail">
-          {/* 右侧需要订单终态：renderFulfillment 槽位不带 orderStatus，故由本栏直接传入。 */}
-          <OrderFulfillmentSection key={info.orderId} orderId={info.orderId} displayNo={info.displayNo} viewerId={adminUserId} orderStatus={info.orderStatus} canManualClose={canManualClose === true && info.members.some((member) => member.party === "STAFF" && member.platformId === adminUserId)} {...(info.frozenInventory ? { frozenInventory: info.frozenInventory } : {})} />
+          <RailSection title="账号价值">
+            {visible.length ? <>
+              <div className="im-rail-value">
+                {coinLines.length ? <div className="im-rail-value-line" data-kind="haff">
+                  <span className="im-rail-value-name">哈夫币</span>
+                  <span className="im-rail-value-figures">
+                    <b>{coinQuantity === null ? "数量待核对" : `${grouped(coinQuantity)} 哈夫币`}</b>
+                    <em data-unknown={coinAmount === null ? "true" : undefined}>{coinAmount === null ? "金额待核对" : yuanOf(coinAmount)}</em>
+                  </span>
+                </div> : null}
+                {itemLines.length ? <>
+                  <div className="im-rail-value-line" data-kind="items">
+                    <span className="im-rail-value-name">物品资源 · {itemLines.length} 项</span>
+                    <span className="im-rail-value-figures">
+                      <em data-unknown={itemAmount === null ? "true" : undefined}>{itemAmount === null ? "总价待核对" : yuanOf(itemAmount)}</em>
+                    </span>
+                  </div>
+                  {itemLines.slice(0, 3).map((line, index) => <div className="im-rail-value-item" key={`${line.itemId}-${index}`}>
+                    <span>{line.name ?? "物资"}</span>
+                    <b>{line.quantity}{line.unit ? ` ${UNIT_LABELS[line.unit] ?? line.unit}` : ""}</b>
+                  </div>)}
+                  {itemLines.length > 3 ? <p className="im-rail-note">另有 {itemLines.length - 3} 项物品资源，未在摘要中展开。</p> : null}
+                </> : null}
+              </div>
+              <div className="im-rail-section-foot">
+                <span>冻结清单 · {visible.length} 项</span>
+                <a className="im-rail-link" data-action="order-open-inventory" href={`/orders/${encodeURIComponent(info.orderId)}`}>查看完整清单<ChevronRight aria-hidden="true" /></a>
+              </div>
+            </> : <div className="im-rail-value-empty">
+              <p className="im-rail-empty">{frozen.length ? "冻结清单中没有数量大于 0 的项目。" : "本单没有返回冻结清单。"}</p>
+              <a className="im-rail-link" data-action="order-open-inventory" href={`/orders/${encodeURIComponent(info.orderId)}`}>查看完整清单<ChevronRight aria-hidden="true" /></a>
+            </div>}
+            <p className="im-rail-note">按本单冻结报价的买家口径展示；不代表结算或到账。</p>
+            {quote === null
+              ? <p className="im-rail-note">订单未返回可用冻结报价，金额保持待核对。</p>
+              : amountUnknown ? <p className="im-rail-note">部分项目缺少冻结报价，金额保持待核对。</p> : null}
+          </RailSection>
 
-          <RailSection title="账号与订单">
+          <RailSection title="账号与双方">
             <div className="im-rail-account">
               <p className="im-rail-account-title">{info.account.title}</p>
               <p className="im-rail-account-sub">{info.gameName} · 成交快照账号</p>
-              <div className="im-rail-copy-list">
-                <CopyRow label="稳定账号ID" value={info.account.id} />
-                <CopyRow label="订单编号" value={info.displayNo} />
+              <div className="im-rail-parties">
+                {partyRow("买家", buyer)}
+                {partyRow("号主", owner)}
               </div>
             </div>
           </RailSection>
 
-          <RailSection title="本单金额">
-            {staffMoney === null
-              ? <p className="im-rail-empty">金额依据待核对；确认前不展示推算值。</p>
-              : <div className="im-rail-money">
-                  <div><span>买家合计</span><strong>{staffMoney.buyerTotal}</strong></div>
-                  <div><span>号主合计</span><strong>{staffMoney.ownerTotal}</strong></div>
-                  <div><span>平台贡献</span><strong>{staffMoney.platformContribution}</strong></div>
-                </div>}
-            <p className="im-rail-note">按订单冻结价展示；不代表已结算或已到账。</p>
-          </RailSection>
-
-          <RailSection title={`期初库存 · ${lines.length}`}>
-            {lines.length ? <>
-              <div className="im-rail-inventory">
-                {lines.slice(0, 4).map((line) => <div key={line.itemId} className="im-rail-inv-row">
-                  <span>{line.name ?? line.itemId}</span>
-                  <strong>{line.quantity}{line.unit ? ` ${UNIT_LABELS[line.unit] ?? line.unit}` : ""}</strong>
-                </div>)}
-              </div>
-              <div className="im-rail-section-foot">
-                {lines.length > 4 ? <span>共 {lines.length} 项</span> : null}
-                <Button variant="link" size="sm" data-action="order-open-inventory" ref={inventoryTriggerRef} onClick={() => setInventoryOrderId(info.orderId)}>查看完整清单<ChevronRight aria-hidden="true" /></Button>
-              </div>
-            </> : <p className="im-rail-empty">本单还没有可显示的库存清单。</p>}
-          </RailSection>
-
-          <RailSection title={`群成员 · ${info.members.length}`}>
-            <ItemGroup role="list" className="im-order-members im-rail-members">
-              {info.members.map((member) => {
-                const name = member.name?.trim() || orderTeamMemberRole(member);
-                return (
-                  <Item key={member.accountId} size="sm" className="im-rail-member">
-                    <ItemContent><ItemTitle className="truncate">{name}</ItemTitle>{member.party !== "STAFF" ? <ItemDescription>用户编号 {member.platformId}</ItemDescription> : null}</ItemContent>
-                    <ItemActions><Badge variant="outline" className="im-order-role" data-role={orderTeamMemberRole(member)}>{orderTeamMemberRole(member)}</Badge></ItemActions>
-                  </Item>
-                );
-              })}
-            </ItemGroup>
-          </RailSection>
-
-          {esc.state !== "NOT_STARTED" || esc.firstResponseAt || review ? <RailSection title="接待跟踪">
-            <Card className="im-order-card">
-              <Collapsible>
-                <CollapsibleTrigger className="flex w-full items-center gap-3 px-4 py-3 text-left outline-none focus-visible:bg-muted/50">
-                  <ItemMedia variant="icon" className="im-order-avatar" aria-hidden="true"><Headphones /></ItemMedia>
-                  <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                    <span className="truncate text-sm font-medium leading-snug">{tracking}</span>
-                    {review ? <span className="text-xs leading-normal text-muted-foreground">{review}</span> : null}
-                  </span>
-                  <ChevronDown className="im-rail-disclosure size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-                </CollapsibleTrigger>
-                <CollapsibleContent className="divide-y divide-border border-t">
-                  <FactRow label="提醒节点" value={esc.state === "RUNNING" && esc.remindDueAt ? serverTime(esc.remindDueAt) : "暂未提供"} />
-                  <FactRow label="首响时间" value={esc.firstResponseAt ? serverTime(esc.firstResponseAt) : "尚无客服回应"} />
-                  <FactRow label="补派轮次" value={String(esc.addRound)} />
-                  {esc.state === "NOT_STARTED" ? <p className="px-4 py-2 text-xs text-muted-foreground">本单群未启用接待跟踪。</p> : null}
-                </CollapsibleContent>
-              </Collapsible>
-            </Card>
-          </RailSection> : null}
-          {inventoryOrderId === info.orderId ? <OrderInventoryDialog info={info} onClose={closeInventory} triggerRef={inventoryTriggerRef} /> : null}
+          {/* 已结束订单的进度与终态只在顶部阶段条呈现；右栏不再重复状态卡。 */}
+          {ended ? null : <OrderFulfillmentSection key={info.orderId} orderId={info.orderId} displayNo={info.displayNo} viewerId={adminUserId} orderStatus={info.orderStatus} canManualClose={canManualClose === true && info.members.some((member) => member.party === "STAFF" && member.platformId === adminUserId)} {...(info.frozenInventory ? { frozenInventory: info.frozenInventory } : {})} />}
         </div>
       </aside>
     );
   };
 
   return (
-    <TooltipProvider delay={250}><OrderTeamPanel
+    <OrderTeamPanel
       key={identity} identity={identity} realm="admin" layout="aside" client={client} connection={connection} active={active}
       sendAllowed={sendAllowed} request={request} onAuthError={onAuthError}
       gridPane={pane} gridDetailsOpen={detailsOpen}
       renderList={renderList} renderAside={renderAside} renderConversation={renderConversation}
-    /></TooltipProvider>
+    />
   );
 }

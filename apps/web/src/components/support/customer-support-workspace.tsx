@@ -2,21 +2,23 @@
 import { SessionLoading } from "../auth/session-loading";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent as ReactClipboardEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
-import { ArrowDown, Check, ChevronLeft, CircleAlert, Clock3, Headphones, ImagePlus, Info, Paperclip, ReceiptText, SendHorizontal, ShieldCheck, Smile, UserRound, Wifi, WifiOff, X } from "lucide-react";
+import { ArrowDown, Check, ChevronLeft, CircleAlert, Clock3, FileText, Headphones, ImagePlus, Info, Paperclip, ReceiptText, ShieldCheck, Smile, UserRound, Video, Wifi, WifiOff, X } from "lucide-react";
 import * as Popover from "@radix-ui/react-popover";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { MessageScroller as MessageScrollerPrimitive } from "@shadcn/react/message-scroller";
 import { useAuthOverlay } from "@/components/auth/auth-overlay-provider";
 import { useUserSession } from "@/components/session/user-session-provider";
 import { ImClientLifecycle } from "@/lib/im-client-lifecycle";
-import { createLocalFakeNimWebClientFactory, createNimWebClientFactory, mergeImMessages, NimImageSendError, NimTextSendError, validateNimImageFile, type NimMessageLike, type NimWebClientLike, type NimWebConnectionState } from "@/lib/nim-web-client";
+import { createLocalFakeNimWebClientFactory, createNimWebClientFactory, mergeImMessages, NimImageSendError, NimMediaSendError, NimTextSendError, validateNimImageFile, validateNimMediaFile, type NimMessageLike, type NimMessageMedia, type NimWebClientLike, type NimWebConnectionState } from "@/lib/nim-web-client";
 import { clearSupportIntent, readSupportIntent, saveSupportIntent, type SupportType } from "@/lib/support-intent";
 import "./customer-support-workspace.css";
 import { readSupportOrders, type SupportOrder } from "@/lib/support-directory";
 import { OrderTeamPanel, orderTeamLabel } from "@zzsh/ui/order-team-panel";
-import { CHAT_EMOJIS, MessageActionMenu, MessageReplyQuote, useMessageLongPress, type MessageActionId, type MessageActionItem } from "@zzsh/ui/message-actions";
+import { CHAT_EMOJIS, MessageActionMenu, MessageQuoted, MessageReplyQuote, useMessageLongPress, type MessageActionId, type MessageActionItem } from "@zzsh/ui/message-actions";
+import { MediaDraftBar, MediaMessage, mediaMessageOf, mediaSummaryOf, type MessageMediaDraft } from "@zzsh/ui/message-media";
 import "@zzsh/ui/order-team.css";
 import "@zzsh/ui/message-actions.css";
+import "@zzsh/ui/message-media.css";
 
 async function orderRequest<T>(path:string, signal?: AbortSignal):Promise<T>{
   const response=await fetch(path,{credentials:"same-origin",cache:"no-store",signal});return readJson<T>(response,"订单请求未完成");
@@ -24,6 +26,12 @@ async function orderRequest<T>(path:string, signal?: AbortSignal):Promise<T>{
 
 type Consultation = {
   id: string;
+  /** 持久线程 id：同一用户 + 类型跨轮次不变；列表一行对应一条线程。 */
+  threadId?: string;
+  /** 本轮 id（与 id 相同）；轮次切换时 threadId 不变。 */
+  roundId?: string;
+  roundSeq?: number;
+  threadState?: "IDLE" | "WAITING" | "ACTIVE";
   type: SupportType;
   state: "WAITING" | "ACTIVE" | "CLOSED";
   subjectRef: string | null;
@@ -32,6 +40,8 @@ type Consultation = {
   conversationType: "TEAM";
   conversationId: string | null;
   messageScopeState?: string;
+  /** 当前视图角色是否可发送；用户侧线程 Team 就绪即为 true（含 IDLE/CLOSED 轮次）。 */
+  canSend?: boolean;
   version: number;
   lastMessageAt: string | null;
   createdAt: string;
@@ -55,6 +65,8 @@ type SupportMessage = {
   /** Raw channel message kept only so reply/revoke/delete can address the original. */
   source?: NimMessageLike;
   image?: { imageId: string; url?: string; name: string; mimeType: string; size: number };
+  /** Client-validated video/file/audio envelope; never assembled from message text. */
+  media?: NimMessageMedia;
 };
 
 const MAX_PENDING_IMAGES = 6;
@@ -124,12 +136,31 @@ const PREVIEW_PRODUCT = {
 
 function typeLabel(type: SupportType): string { return type === "COMPLAINT" ? "投诉反馈" : "平台客服"; }
 
+/** 选择/消息都以持久线程为键：同一 Team 跨轮次保留历史，轮次 id 变化不换行。 */
+function threadKeyOf(conversation: Pick<Consultation, "id" | "threadId">): string {
+  return conversation.threadId || conversation.id;
+}
+
+function threadStateOf(conversation: Pick<Consultation, "state" | "threadState">): "IDLE" | "WAITING" | "ACTIVE" {
+  return conversation.threadState ?? (conversation.state === "ACTIVE" ? "ACTIVE" : conversation.state === "WAITING" ? "WAITING" : "IDLE");
+}
+
+/** 线程状态文案：IDLE/CLOSED 只是本轮结束，线程仍可继续留言。 */
+function threadStateLabel(conversation: Pick<Consultation, "state" | "threadState">): string {
+  const state = threadStateOf(conversation);
+  return state === "ACTIVE" ? "进行中" : state === "WAITING" ? "等待客服接待" : "本轮已结束（可继续）";
+}
+
 /** Names the real blocker instead of always blaming 客服接待 (link down, no conversation yet). */
-function composerBlockReason(conversation: Pick<Consultation, "state" | "messageScopeState"> | null, canSend: boolean): string | null {
-  if (canSend || conversation?.state === "CLOSED") return null;
+function composerBlockReason(conversation: Pick<Consultation, "state" | "messageScopeState" | "conversationId" | "canSend"> | null, canSend: boolean): string | null {
+  if (canSend) return null;
   if (!conversation) return "创建或选择一个会话后可发送消息";
   if (conversation.messageScopeState === "FAILED") return "客服会话待人工核验，暂不可发送";
-  if (conversation.state === "WAITING") return "等待客服接待后可发送消息";
+  if (conversation.canSend === false) return "当前会话暂不可继续，请稍后重试";
+  // WAITING only means "no admin yet"; the team may still be provisioning in the channel.
+  const scopeReady = Boolean(conversation.conversationId) && conversation.messageScopeState === "READY";
+  if (!scopeReady) return conversation.state === "WAITING" ? "正在连接客服…" : conversation.state === "CLOSED" ? "本轮已结束；当前会话暂不可继续，请稍后重试" : "云信会话准备中，请稍候…";
+  if (conversation.state === "WAITING") return "已提交，客服接入后会看到你的留言；现在也可以先发消息";
   return "云信连接未就绪，恢复后可继续发送";
 }
 
@@ -219,9 +250,10 @@ export function messageFromNim(message: NimMessageLike, accountId: string): Supp
   }
 
   const image = imageOf(message);
+  const media = mediaMessageOf(message);
   const text = typeof message.text === "string" && message.text.trim()
     ? message.text
-    : image ? "" : message.messageType === 0 ? "" : "暂不支持展示的消息类型";
+    : image || media ? "" : message.messageType === 0 ? "" : "暂不支持展示的消息类型";
   return {
     ...base,
     from: self ? "customer" : "agent",
@@ -231,6 +263,7 @@ export function messageFromNim(message: NimMessageLike, accountId: string): Supp
     self,
     ...(message.reply ? { reply: message.reply } : {}),
     ...(image === undefined ? {} : { image }),
+    ...(media === undefined ? {} : { media }),
   };
 }
 
@@ -310,14 +343,15 @@ function subjectRefFromLocation(): string | null {
   return value && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value) ? value : null;
 }
 
-function SupportTypePicker({ value, onChange, disabled = false }: { value: SupportType; onChange: (value: SupportType) => void; disabled?: boolean }) {
+function SupportTypePicker({ value, onChange, disabled = false, onSelect }: { value: SupportType; onChange: (value: SupportType) => void; disabled?: boolean; onSelect?: (value: SupportType) => void }) {
+  const pick = (next: SupportType) => { onChange(next); onSelect?.(next); };
   return <div className="support-type-picker" role="radiogroup" aria-label="客服类型">
-    <button type="button" role="radio" aria-checked={value === "SERVICE"} className="support-type-option" data-active={value === "SERVICE"} disabled={disabled} onClick={() => onChange("SERVICE")}><Headphones size={17} /><span><strong>在线客服</strong><small>商品、使用和平台服务咨询</small></span></button>
-    <button type="button" role="radio" aria-checked={value === "COMPLAINT"} className="support-type-option" data-active={value === "COMPLAINT"} disabled={disabled} onClick={() => onChange("COMPLAINT")}><ShieldCheck size={17} /><span><strong>投诉反馈</strong><small>问题反馈与服务体验处理</small></span></button>
+    <button type="button" role="radio" aria-checked={value === "SERVICE"} className="support-type-option" data-active={value === "SERVICE"} disabled={disabled} onClick={() => pick("SERVICE")}><Headphones size={17} /><span><strong>在线客服</strong><small>商品、使用和平台服务咨询</small></span></button>
+    <button type="button" role="radio" aria-checked={value === "COMPLAINT"} className="support-type-option" data-active={value === "COMPLAINT"} disabled={disabled} onClick={() => pick("COMPLAINT")}><ShieldCheck size={17} /><span><strong>投诉反馈</strong><small>问题反馈与服务体验处理</small></span></button>
   </div>;
 }
 
-function MessageRow({ message, agentMeta, peerAccountId, grouped = false, isLastSelf = false }: { message: SupportMessage; grouped?: boolean; agentMeta?: { name: string; role: string }; peerAccountId?: string | null; isLastSelf?: boolean }) {
+function MessageRow({ message, agentMeta, peerAccountId, grouped = false, isLastSelf = false, replySenderName, onJumpToMessage }: { message: SupportMessage; grouped?: boolean; agentMeta?: { name: string; role: string }; peerAccountId?: string | null; isLastSelf?: boolean; replySenderName?: string | null; onJumpToMessage?: (messageId: string) => void }) {
   if (message.from === "system") return <div className="support-message-marker" role="note"><span>{message.text}</span><time>{message.time}</time></div>;
   const outgoing = message.self === true;
   const isAssignedPeer = Boolean(!outgoing && message.from === "agent" && message.senderId && peerAccountId && message.senderId === peerAccountId);
@@ -331,6 +365,9 @@ function MessageRow({ message, agentMeta, peerAccountId, grouped = false, isLast
         ? "客服"
         : "用户";
   const senderRole = isAssignedPeer && agentMeta ? agentMeta.role : undefined;
+  const quoted = message.reply
+    ? <MessageQuoted text={message.reply.text ?? "消息"} senderName={replySenderName} onJump={onJumpToMessage ? () => onJumpToMessage(message.reply!.messageId) : undefined} />
+    : null;
   return <article className="support-message" data-from={message.from} data-self={outgoing} data-grouped={grouped}>
     <div className="support-message-avatar" aria-hidden="true">{message.from === "agent" ? <Headphones size={14} /> : <UserRound size={14} />}</div>
     <div className="support-message-body">
@@ -341,13 +378,18 @@ function MessageRow({ message, agentMeta, peerAccountId, grouped = false, isLast
       <div className="support-message-bubble-row">
         {message.revoked ? (
           <div className="support-message-bubble" data-slot="bubble" data-revoked="true">消息已撤回</div>
+        ) : message.media ? (
+          <>
+            <MediaMessage media={message.media} />
+            {message.text || quoted ? <div className="support-message-bubble" data-slot="bubble">{message.text}{quoted}</div> : null}
+          </>
         ) : message.image ? (() => {
           const raw = message.image.url ?? (message.image.imageId ? `/api/im/images/${encodeURIComponent(message.image.imageId)}` : "");
           const url = raw ? supportedImageUrl(raw) : null;
           return url
             ? <a className="support-message-image" href={url} target="_blank" rel="noreferrer" aria-label={`查看图片 ${message.image.name}`}><img src={url} alt={message.image.name} loading="lazy" /></a>
             : <div className="support-message-bubble" data-slot="bubble">图片暂不可预览</div>;
-        })() : <div className="support-message-bubble" data-slot="bubble">{message.reply ? <span className="support-message-quote">回复：{message.reply.text ?? "消息"}</span> : null}{message.text}</div>}
+        })() : <div className="support-message-bubble" data-slot="bubble">{message.text}{quoted}</div>}
         <time className="support-message-hover-time">{message.time}</time>
       </div>
       {outgoing && isLastSelf && message.status && !message.revoked ? <div className="support-message-status"><Check size={12} />{message.status === "read" ? "已读" : "已发送"}</div> : null}
@@ -386,7 +428,6 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   const session = useUserSession();
   const auth = useAuthOverlay();
   const [selectedType, setSelectedType] = useState<SupportType>("SERVICE");
-  const [isStartingNew, setIsStartingNew] = useState(false);
   const [consultations, setConsultations] = useState<Consultation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(() => preview ? PREVIEW_CONVERSATIONS[0].id : null);
   const [messages, setMessages] = useState<Record<string, SupportMessage[]>>(() => preview ? PREVIEW_MESSAGES : {});
@@ -403,6 +444,14 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   const [historyMore, setHistoryMore] = useState<Record<string, boolean>>({});
   const [historyLoading, setHistoryLoading] = useState(false);
   const [imageSending, setImageSending] = useState(false);
+  // One staged video/file per consultation, mirroring the conversation-keyed
+  // image tray. Flights are tracked outside React so a second click cannot
+  // start a duplicate send before the draft state commits.
+  const [mediaDrafts, setMediaDrafts] = useState<Record<string, MessageMediaDraft | null>>({});
+  const mediaDraftsRef = useRef(mediaDrafts);
+  mediaDraftsRef.current = mediaDrafts;
+  const mediaFlights = useRef(new Map<string, MessageMediaDraft>());
+  const [mediaSending, setMediaSending] = useState(false);
   const activeSendingIntentIdRef = useRef<string | null>(null);
   const canStartSendRef = useRef(false);
   const isSubmittingRef = useRef(false);
@@ -460,6 +509,17 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     void session.confirm();
     return true;
   }, [session.confirm]);
+  /** A send on an IDLE/CLOSED thread reopens a waiting round server-side; read that back instead of inventing local state. */
+  const reloadThreadStates = useCallback(async () => {
+    const generation = identityGenerationRef.current;
+    const identity = currentIdentity;
+    try {
+      const list = await fetchConsultations();
+      if (generation === identityGenerationRef.current && identityRef.current === identity) setConsultations(list);
+    } catch (cause) {
+      revalidateAfterUnauthorized(cause);
+    }
+  }, [currentIdentity, revalidateAfterUnauthorized]);
   if (identityRef.current !== currentIdentity) {
     identityRef.current = currentIdentity;
     identityGenerationRef.current += 1;
@@ -493,17 +553,17 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   const setAttachmentFor = (key: string, value: string | null) => setAttachments((current) => ({ ...current, [key]: value }));
 
   // Opening the window resolves the entry type instead of inheriting whatever
-  // conversation loaded first: a live consultation of that type is selected, and
-  // without one the window stays on this type's start panel. Opening never creates.
+  // conversation loaded first: this user's persistent thread of that type is
+  // selected, including an IDLE/CLOSED one whose history stays readable. Opening
+  // never creates.
   useEffect(() => {
     if (preview) return;
     setSelectedType(initialType);
     if (initialOrderId && initialOrderParty) return;
-    const existing = consultationsRef.current.find((item) => item.type === initialType && (item.state === "ACTIVE" || item.state === "WAITING"));
+    const existing = consultationsRef.current.find((item) => item.type === initialType);
     setSection("consultation");
     setPanelView("chat");
-    setIsStartingNew(false);
-    setActiveId(existing ? existing.id : null);
+    setActiveId(existing ? threadKeyOf(existing) : null);
   }, [initialOrderId, initialOrderParty, initialType, preview, requestSerial]);
 
   useEffect(() => {
@@ -519,9 +579,8 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     void createConsultation(intent.type, subjectRef).then((consultation) => {
       if (generation !== identityGenerationRef.current || identityRef.current !== currentIdentity) return;
       if (consultation.state === "WAITING" || consultation.conversationId) clearSupportIntent(intent);
-      setConsultations((current) => [consultation, ...current.filter((item) => item.id !== consultation.id)]);
-      setIsStartingNew(false);
-      setActiveId(consultation.id);
+      setConsultations((current) => [consultation, ...current.filter((item) => threadKeyOf(item) !== threadKeyOf(consultation))]);
+      setActiveId(threadKeyOf(consultation));
     }).catch((cause) => {
       revalidateAfterUnauthorized(cause);
       if (generation === identityGenerationRef.current && identityRef.current === currentIdentity) {
@@ -543,9 +602,12 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
       setReplyUncertain({});
       setSupportMenu(null);
       setActiveId(PREVIEW_CONVERSATIONS[0].id);
-      setIsStartingNew(false);
       setConnection("idle");
       setImReady(true);
+      setMediaDrafts({});
+      mediaDraftsRef.current = {};
+      mediaFlights.current.clear();
+      setMediaSending(false);
       readyIdentityRef.current = "preview";
       return;
     }
@@ -555,11 +617,14 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     setDrafts({});
     setAttachments({});
     setActiveId(null);
-    setIsStartingNew(false);
     setConnection("idle");
     setError(undefined);
     setBusy(false);
     setImageSending(false);
+    setMediaDrafts({});
+    mediaDraftsRef.current = {};
+    mediaFlights.current.clear();
+    setMediaSending(false);
     activeSendingIntentIdRef.current = null;
     isSubmittingRef.current = false;
     setImReady(false);
@@ -603,10 +668,9 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
             readHiddenRef.current[conversationId] = true;
             const consultation = consultationsRef.current.find(item => item.conversationId === conversationId);
             if (consultation) {
-              setMessages(current => ({...current, [consultation.id]: []}));
-              // 已结束咨询的历史读取随结束关闭是合同设计，不是"权限变化"，交给空态文案说明；
-              // 进行中的会话被 401/403 挡住才提示权限变化。
-              if (activeIdRef.current === consultation.id && consultation.state !== "CLOSED") setError("当前消息读取权限已变化，私有消息已隐藏。");
+              const threadKey = consultation.threadId || consultation.id;
+              setMessages(current => ({...current, [threadKey]: []}));
+              if (activeIdRef.current === threadKey) setError("当前消息读取权限已变化，私有消息已隐藏。");
             }
           }
           const value = await readJson<{ authorized?: unknown }>(response, "当前咨询授权已变化，请刷新后重试。");
@@ -636,9 +700,9 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
           if (cancelled || generation !== identityGenerationRef.current || identityRef.current !== identity || clientRef.current !== client) return;
           for (const raw of incoming) {
             const item = messageFromNim(raw, client.accountId);
-            const consultation = consultationsRef.current.find((candidate) => candidate.state === "ACTIVE" && candidate.conversationId === raw.conversationId);
+            const consultation = consultationsRef.current.find((candidate) => candidate.conversationId === raw.conversationId);
             if (!item || !consultation) continue;
-            setMessages((current) => ({ ...current, [consultation.id]: mergeImMessages(current[consultation.id] ?? [], [item]) }));
+            setMessages((current) => ({ ...current, [threadKeyOf(consultation)]: mergeImMessages(current[threadKeyOf(consultation)] ?? [], [item]) }));
           }
         });
       } catch (cause) {
@@ -708,10 +772,10 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   },[currentIdentity,preview,visible,directoryRevision,revalidateAfterUnauthorized,session.status]);
 
   useEffect(() => {
-    if (preview || isStartingNew || activeId || consultations.length === 0) return;
-    const existing = consultations.find((item) => item.type === selectedType && (item.state === "ACTIVE" || item.state === "WAITING"));
-    if (existing) setActiveId(existing.id);
-  }, [activeId, consultations, isStartingNew, preview, selectedType]);
+    if (preview || activeId || consultations.length === 0) return;
+    const existing = consultations.find((item) => item.type === selectedType);
+    if (existing) setActiveId(threadKeyOf(existing));
+  }, [activeId, consultations, preview, selectedType]);
 
   useEffect(()=>{if(!preview&&!initialOrderId&&!activeId&&!selectedOrder&&!consultations.length&&orders.length){setSelectedOrder({id:orders[0]!.id,party:orders[0]!.party});setSection("orders");}},[preview,initialOrderId,activeId,selectedOrder,consultations,orders]);
   useEffect(() => { setContextOpen(false); }, [activeId]);
@@ -730,21 +794,45 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
 
   const activeConversation = preview
     ? null
-    : consultations.find((item) => item.id === activeId) ?? null;
+    : consultations.find((item) => threadKeyOf(item) === activeId) ?? null;
   const previewConversation = preview ? PREVIEW_CONVERSATIONS.find((item) => item.id === activeId) ?? PREVIEW_CONVERSATIONS[0] : null;
-  const activeConversationKey = preview ? previewConversation?.id ?? "" : activeConversation?.id ?? "";
+  const activeConversationKey = preview ? previewConversation?.id ?? "" : activeConversation ? threadKeyOf(activeConversation) : "";
   const activeMessages = messages[activeConversationKey] ?? [];
-  const canSend = preview || Boolean(activeConversation?.state === "ACTIVE" && activeConversation.conversationId && activeConversation.messageScopeState === "READY" && clientRef.current && connection === "CONNECTED");
+  const activeScopeReady = Boolean(activeConversation?.conversationId) && activeConversation?.messageScopeState === "READY";
+  // User send rights are thread-based: the backend exposes canSend=true whenever
+  // this thread's Team is READY, including an IDLE/CLOSED round whose next send
+  // reopens a waiting round. Keep the channel gates: no Team or a dead link can
+  // still block the send even when the thread grant exists.
+  const threadCanSend = activeConversation ? activeConversation.canSend ?? activeScopeReady : false;
+  const canSend = preview || Boolean(activeConversation && threadCanSend && activeScopeReady && clientRef.current && connection === "CONNECTED");
+  // Composing stays possible while the waiting team provisions; only sending waits for READY.
+  const canCompose = preview || Boolean(activeConversation && activeConversation.messageScopeState !== "FAILED");
+  // The round row is authoritative for whether reception ended; the thread (and its Team) stays.
+  const roundEnded = activeConversation?.state === "CLOSED";
+  const waitingProvisioning = activeConversation?.state === "WAITING" && activeConversation.messageScopeState !== "FAILED" && !activeScopeReady;
   canStartSendRef.current = canSend;
   const activeReply = replyTargets[activeConversationKey] ?? null;
-  const replyLabelOf = (message: SupportMessage): string => message.image ? "[图片]" : message.text.trim() ? message.text.trim().slice(0, 120) : "消息";
-  const copyableSupportText = (message: SupportMessage): string | null => !message.revoked && message.from !== "system" && !message.image
+  const selectedMedia = mediaDrafts[activeConversationKey] ?? null;
+  const mediaInFlight = Boolean(selectedMedia?.state === "SENDING" || mediaFlights.current.has(activeConversationKey) || mediaSending);
+  const replyLabelOf = (message: SupportMessage): string => message.image ? "[图片]" : mediaSummaryOf(message) ?? (message.text.trim() ? message.text.trim().slice(0, 120) : "消息");
+  // Media is a channel attachment, not copyable text: quote it by kind, never copy its name as message text.
+  const copyableSupportText = (message: SupportMessage): string | null => !message.revoked && message.from !== "system" && !message.image && !message.media
     && (message.messageType === undefined || message.messageType === 0) && message.text.trim() ? message.text : null;
   const rowOfMessage = (target: EventTarget | null): HTMLElement | null => {
     const element = target as { closest?: (selector: string) => HTMLElement | null } | null;
     return element && typeof element.closest === "function" ? element.closest("[data-message-id]") : null;
   };
   const findActiveMessage = (id: string | undefined): SupportMessage | null => id ? (messages[activeConversationKey] ?? []).find((item) => item.id === id) ?? null : null;
+  const jumpToSupportMessage = (messageId: string) => {
+    const target = (messages[activeConversationKey] ?? []).find((item) => item.id === messageId || item.messageClientId === messageId || item.messageServerId === messageId);
+    if (!target) return;
+    const node = gridRef.current?.querySelector<HTMLElement>(`[data-message-id="${target.id.replaceAll('"', '\\"')}"]`);
+    if (!node) return;
+    node.scrollIntoView?.({ block: "center", behavior: "smooth" });
+    const bubble = node.querySelector<HTMLElement>(".support-message-bubble") ?? node;
+    bubble.classList.add("message-quote-target");
+    window.setTimeout(() => bubble.classList.remove("message-quote-target"), 1600);
+  };
   const openSupportMenu = (message: SupportMessage | null, x: number, y: number, row: HTMLElement | null) => {
     if (!message || message.from === "system" || message.revoked) return;
     setSupportMenu((current) => current?.key === activeConversationKey && current.id === message.id ? current : { key: activeConversationKey, id: message.id, x, y, row });
@@ -781,7 +869,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   };
   const revokeSupportMessage = async (key: string, message: SupportMessage) => {
     const client = clientRef.current;
-    const conversationId = message.source?.conversationId || consultationsRef.current.find((item) => item.id === key)?.conversationId;
+    const conversationId = message.source?.conversationId || consultationsRef.current.find((item) => threadKeyOf(item) === key)?.conversationId;
     if (!client || !conversationId || !message.source) { setError("撤回失败，请刷新消息后重试"); return; }
     const generation = identityGenerationRef.current;
     const identity = currentIdentity;
@@ -799,7 +887,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   };
   const deleteSupportMessage = async (key: string, message: SupportMessage) => {
     const client = clientRef.current;
-    const conversationId = message.source?.conversationId || consultationsRef.current.find((item) => item.id === key)?.conversationId;
+    const conversationId = message.source?.conversationId || consultationsRef.current.find((item) => threadKeyOf(item) === key)?.conversationId;
     const generation = identityGenerationRef.current;
     const identity = currentIdentity;
     if (!preview && (!client || !conversationId || !message.source)) { setError("删除失败，消息仍保留"); return; }
@@ -854,13 +942,15 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   const timelineItems: ReactNode[] = activeMessages.map((message,index) => {
     const previous=activeMessages[index-1];
     const grouped=Boolean(message.senderId&&previous?.senderId===message.senderId&&message.createTime&&previous.createTime&&message.createTime-previous.createTime<300_000);
+    const replySource = message.reply ? activeMessages.find((item) => item.id === message.reply!.messageId || item.messageClientId === message.reply!.messageId || item.messageServerId === message.reply!.messageId) : undefined;
+    const replySenderName = replySource ? (replySource.self ? "我" : replySource.from === "agent" ? "客服" : "用户") : null;
     const items: ReactNode[] = [];
     const dayKey = dayKeyOf(message.createTime);
     if (dayKey && dayKey !== timelineDay) {
       timelineDay = dayKey;
       items.push(<MessageScrollerPrimitive.Item key={`day-${dayKey}`} messageId={`day-${dayKey}`}><div className="support-day-divider">{dayLabelOf(dayKey)}</div></MessageScrollerPrimitive.Item>);
     }
-    items.push(<MessageScrollerPrimitive.Item key={message.id} messageId={message.id} scrollAnchor={message.from === "customer"} tabIndex={-1} onContextMenu={onSupportContextMenu} {...supportLongPress}><MessageRow message={message} grouped={grouped} agentMeta={message.from === "agent" ? agentMeta : undefined} peerAccountId={activeConversation?.peerAccountId} isLastSelf={index === lastSelfIndex} /></MessageScrollerPrimitive.Item>);
+    items.push(<MessageScrollerPrimitive.Item key={message.id} messageId={message.id} scrollAnchor={message.from === "customer"} tabIndex={-1} onContextMenu={onSupportContextMenu} {...supportLongPress}><MessageRow message={message} grouped={grouped} agentMeta={message.from === "agent" ? agentMeta : undefined} peerAccountId={activeConversation?.peerAccountId} isLastSelf={index === lastSelfIndex} replySenderName={replySenderName} onJumpToMessage={jumpToSupportMessage} /></MessageScrollerPrimitive.Item>);
     return items;
   }).flat();
 
@@ -908,12 +998,12 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     const identity = currentIdentity;
     let cancelled = false;
     void client.getMessageHistory(conversation.conversationId!, 50).then((history) => {
-      if (cancelled || generation !== identityGenerationRef.current || identityRef.current !== identity || clientRef.current !== client || activeIdRef.current !== conversation.id) return;
+      if (cancelled || generation !== identityGenerationRef.current || identityRef.current !== identity || clientRef.current !== client || activeIdRef.current !== threadKeyOf(conversation)) return;
       const rows = history.map((item) => messageFromNim(item, client.accountId)).filter((item): item is SupportMessage => Boolean(item));
-      setMessages((current) => ({ ...current, [conversation.id]: mergeImMessages(current[conversation.id] ?? [], rows) }));
+      setMessages((current) => ({ ...current, [threadKeyOf(conversation)]: mergeImMessages(current[threadKeyOf(conversation)] ?? [], rows) }));
       const oldest = oldestOf(history);
-      if (oldest) historyAnchorRef.current[conversation.id] = oldest;
-      setHistoryMore((current) => ({ ...current, [conversation.id]: history.length === 50 }));
+      if (oldest) historyAnchorRef.current[threadKeyOf(conversation)] = oldest;
+      setHistoryMore((current) => ({ ...current, [threadKeyOf(conversation)]: history.length === 50 }));
     }).catch((cause) => { revalidateAfterUnauthorized(cause); });
     return () => { cancelled = true; };
   }, [activeConversation?.conversationId, activeConversation?.id, connection, currentIdentity, preview, revalidateAfterUnauthorized]);
@@ -924,17 +1014,17 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     const conversation = activeConversation;
     const generation = identityGenerationRef.current;
     const identity = currentIdentity;
-    const anchor = historyAnchorRef.current[conversation.id];
-    if (!anchor) { setHistoryMore((current) => ({ ...current, [conversation.id]: false })); return; }
+    const anchor = historyAnchorRef.current[threadKeyOf(conversation)];
+    if (!anchor) { setHistoryMore((current) => ({ ...current, [threadKeyOf(conversation)]: false })); return; }
     setHistoryLoading(true);
     try {
       const older = await client.getMessageHistory(conversation.conversationId!, 50, anchor);
-      if (generation !== identityGenerationRef.current || identityRef.current !== identity || clientRef.current !== client || activeIdRef.current !== conversation.id) return;
+      if (generation !== identityGenerationRef.current || identityRef.current !== identity || clientRef.current !== client || activeIdRef.current !== threadKeyOf(conversation)) return;
       const rows = older.map((item) => messageFromNim(item, client.accountId)).filter((item): item is SupportMessage => Boolean(item));
-      setMessages((current) => ({ ...current, [conversation.id]: mergeImMessages(current[conversation.id] ?? [], rows) }));
+      setMessages((current) => ({ ...current, [threadKeyOf(conversation)]: mergeImMessages(current[threadKeyOf(conversation)] ?? [], rows) }));
       const oldest = oldestOf(older);
-      if (oldest) historyAnchorRef.current[conversation.id] = oldest;
-      setHistoryMore((current) => ({ ...current, [conversation.id]: older.length === 50 }));
+      if (oldest) historyAnchorRef.current[threadKeyOf(conversation)] = oldest;
+      setHistoryMore((current) => ({ ...current, [threadKeyOf(conversation)]: older.length === 50 }));
     } catch (cause) {
       revalidateAfterUnauthorized(cause);
       if (generation === identityGenerationRef.current && identityRef.current === identity) setError(cause instanceof Error ? cause.message : "更早的消息读取失败。");
@@ -951,14 +1041,14 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
       auth.open(source, () => { void session.confirm(); });
       return;
     }
-    // Check if there is already an active or waiting consultation of this type to reuse
-    const existing = consultations.find((item) => item.type === type && (item.state === "ACTIVE" || item.state === "WAITING"));
+    // One persistent thread per type: an existing thread (even a finished round)
+    // is selected and continued by sending, never duplicated.
+    const existing = consultations.find((item) => item.type === type);
     if (existing) {
       setSection("consultation");
       setPanelView("chat");
       setSelectedType(type);
-      setIsStartingNew(false);
-      setActiveId(existing.id);
+      setActiveId(threadKeyOf(existing));
       return;
     }
     createFlight.current = true;
@@ -970,10 +1060,9 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
       if (generation !== identityGenerationRef.current || identityRef.current !== currentIdentity) return;
       const pendingIntent = readSupportIntent();
       if (pendingIntent) clearSupportIntent(pendingIntent);
-      setConsultations((current) => [consultation, ...current.filter((item) => item.id !== consultation.id)]);
+      setConsultations((current) => [consultation, ...current.filter((item) => threadKeyOf(item) !== threadKeyOf(consultation))]);
       setSection("consultation"); setPanelView("chat"); setSelectedType(type);
-      setIsStartingNew(false);
-      setActiveId(consultation.id);
+      setActiveId(threadKeyOf(consultation));
     } catch (cause) {
       revalidateAfterUnauthorized(cause);
       if (generation === identityGenerationRef.current && identityRef.current === currentIdentity) setError(cause instanceof Error ? cause.message : "暂时无法创建咨询。");
@@ -1098,13 +1187,146 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     }
   };
 
+  /* ---------- one staged video/file per consultation ---------- */
+  const setMediaFor = (
+    key: string,
+    updater: ((current: MessageMediaDraft | null) => MessageMediaDraft | null) | MessageMediaDraft | null
+  ) => {
+    const previous = mediaDraftsRef.current[key] ?? null;
+    const next = typeof updater === "function" ? updater(previous) : updater;
+    mediaDraftsRef.current = { ...mediaDraftsRef.current, [key]: next };
+    setMediaDrafts(mediaDraftsRef.current);
+  };
+
+  const stageMediaFile = (file: File, kind: "video" | "file") => {
+    const key = activeConversationKey;
+    if (!key || !canSend) { setError("接入会话后才能添加视频或文件。"); return; }
+    const current = mediaDraftsRef.current[key] ?? null;
+    if (current?.state === "SENDING") { setError("媒体正在发送，请稍候"); return; }
+    if (current?.state === "UNKNOWN") { setError("上次媒体发送结果未确认，请先按原消息重试"); return; }
+    try { validateNimMediaFile(file, kind); } catch (cause) { setError(`${file.name}：${cause instanceof Error ? cause.message : "媒体文件无效"}`); return; }
+    setMediaFor(key, { file, kind, name: file.name, size: file.size, state: "READY", progress: 0 });
+    setError(undefined);
+  };
+
+  const chooseMedia = (kind: "video" | "file") => (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (file) stageMediaFile(file, kind);
+  };
+
+  const removeSelectedMedia = () => {
+    const key = activeConversationKey;
+    const current = mediaDraftsRef.current[key] ?? null;
+    if (!current) return;
+    if (current.state === "SENDING" || mediaFlights.current.has(key)) { setError("媒体正在发送，暂不能移除"); return; }
+    if (current.state === "UNKNOWN") { setError("媒体发送结果未确认，暂不能移除；请先核对历史。"); return; }
+    setMediaFor(key, null);
+  };
+
+  const beginMediaFlight = (key: string, media: MessageMediaDraft): MessageMediaDraft | null => {
+    if (mediaFlights.current.has(key)) return null;
+    const attempt: MessageMediaDraft = { ...media, state: "SENDING", progress: 0 };
+    mediaFlights.current.set(key, attempt);
+    setMediaFor(key, () => attempt);
+    return attempt;
+  };
+
+  const settleMediaFlight = (
+    key: string,
+    attempt: MessageMediaDraft,
+    result: { success: boolean; error?: unknown },
+    isCurrent: () => boolean
+  ) => {
+    if (mediaFlights.current.get(key) !== attempt) return;
+    mediaFlights.current.delete(key);
+    // A stale identity must not write a result into the next user's drafts;
+    // a client swap with the same identity may still settle the conversation.
+    if (!isCurrent()) return;
+    setMediaFor(key, (previous) => {
+      if (!previous || previous.file !== attempt.file) return previous;
+      if (result.success) return null;
+      const mediaError = result.error instanceof NimMediaSendError ? result.error : null;
+      return {
+        ...previous,
+        state: mediaError?.kind === "UNKNOWN" ? "UNKNOWN" : "FAILED",
+        progress: 0,
+        messageClientId: mediaError?.messageClientId ?? previous.messageClientId,
+      };
+    });
+  };
+
+  const sendOneMedia = async (key: string, media: MessageMediaDraft, conversationId: string): Promise<NimMessageLike> => {
+    const client = clientRef.current;
+    const generation = identityGenerationRef.current;
+    const identity = currentIdentity;
+    if (!client) throw new Error("云信连接不可用");
+    // An unconfirmed result may only be replayed by its original id; a fresh
+    // send would create a second message nobody can account for.
+    if (media.state === "UNKNOWN" && !media.messageClientId) throw new Error("原媒体标识不可用，请先刷新历史核验，不能直接重发。");
+    const attempt = beginMediaFlight(key, media);
+    if (!attempt) throw new Error("该视频或文件已有发送在途");
+    const identityCurrent = () => generation === identityGenerationRef.current && identityRef.current === identity;
+    setMediaSending(true);
+    const progress = (percentage: number) => {
+      if (!identityCurrent()) return;
+      setMediaFor(key, (current) => current?.file === attempt.file ? { ...current, progress: percentage } : current);
+    };
+    try {
+      const sent = media.messageClientId
+        ? await client.retryMedia(conversationId, media.messageClientId, { onProgress: progress })
+        : await client.sendMedia(conversationId, media.file, media.kind, { onProgress: progress });
+      settleMediaFlight(key, attempt, { success: true }, identityCurrent);
+      return sent;
+    } catch (error) {
+      settleMediaFlight(key, attempt, { success: false, error }, identityCurrent);
+      throw error;
+    } finally {
+      if (identityCurrent()) setMediaSending(false);
+    }
+  };
+
+  const retryMediaDraft = async () => {
+    const key = activeConversationKey;
+    const media = mediaDraftsRef.current[key] ?? null;
+    if (!media || !canSend || isSubmittingRef.current || busy || imageSending || mediaSending || mediaFlights.current.has(key)) return;
+    if (media.state === "UNKNOWN" && !media.messageClientId) { setError("原媒体标识不可用，请先刷新历史核验，不能直接重发。"); return; }
+    if (unresolvedTextBlocks(key)) return;
+    const conversationId = activeConversation?.conversationId;
+    const client = clientRef.current;
+    if (!conversationId || !client) return;
+    const generation = identityGenerationRef.current;
+    const identity = currentIdentity;
+    isSubmittingRef.current = true;
+    setError(undefined);
+    try {
+      const sent = await sendOneMedia(key, media, conversationId);
+      if (generation === identityGenerationRef.current && identityRef.current === identity && clientRef.current === client) {
+        const next = messageFromNim(sent, client.accountId);
+        if (next && !readHiddenRef.current[conversationId]) {
+          setMessages((current) => ({ ...current, [key]: mergeImMessages(current[key] ?? [], [next]) }));
+        }
+      }
+    } catch (cause) {
+      revalidateAfterUnauthorized(cause);
+      if (generation === identityGenerationRef.current && identityRef.current === identity) {
+        const mediaError = cause instanceof NimMediaSendError ? cause : null;
+        if (mediaError?.kind === "UNSUPPORTED") setError("当前云信通道暂不支持发送视频或文件，未发送。");
+        else if (mediaError?.kind === "UNKNOWN") setError("视频/文件发送结果仍未确认，请先刷新历史核对；可按原消息重试。");
+        else setError(httpStatus(cause) === 403 ? "发送权限已变化，视频或文件已保留" : cause instanceof Error ? cause.message : "视频或文件发送失败，可重试。");
+      }
+    } finally {
+      if (generation === identityGenerationRef.current && identityRef.current === identity) isSubmittingRef.current = false;
+    }
+  };
+
   const resumeStagedImages = async () => {
     const conversationKey = activeConversationKey;
     const conversationId = activeConversation?.conversationId;
     const client = clientRef.current;
     const generation = identityGenerationRef.current;
     const identity = currentIdentity;
-    if (!conversationId || !client || !canSend || imageSending) return;
+    if (!conversationId || !client || !canSend || imageSending || mediaSending || mediaInFlight) return;
     if (isSubmittingRef.current || busy) return;
     if (unresolvedTextBlocks(conversationKey)) return;
     const queued = stagedImagesRef.current[conversationKey] ?? [];
@@ -1131,7 +1353,8 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
         !canStartSendRef.current ||
         generation !== identityGenerationRef.current ||
         identityRef.current !== identity ||
-        activeIdRef.current !== activeConversation?.id ||
+        !activeConversation ||
+        activeIdRef.current !== threadKeyOf(activeConversation) ||
         clientRef.current !== client
       ) {
         break;
@@ -1160,13 +1383,18 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     const conversationKey = activeConversationKey;
     const currentStaged = stagedImages[conversationKey] ?? [];
     const currentPending = pendingImage[conversationKey];
-    if (!text && !attachment && currentStaged.length === 0) return;
+    const currentMedia = mediaDraftsRef.current[conversationKey] ?? mediaDrafts[conversationKey] ?? null;
+    if (!text && !attachment && currentStaged.length === 0 && !currentMedia) return;
     const currentReply = replyTargets[conversationKey] ?? null;
     if (currentReply && replyUncertain[conversationKey]) { setError("回复结果未确认，请刷新确认后再发送；取消引用后可按普通消息发送。"); return; }
-    if (currentReply && !text) { setError("回复需要先输入文字；图片回复暂不支持"); return; }
+    if (currentReply && !text) { setError("回复需要先输入文字；图片或媒体回复暂不支持"); return; }
     if (!preview && currentReply && !currentReply.source) { setError("引用消息不可用，请刷新历史后重试"); return; }
 
-    if (isSubmittingRef.current || busy || imageSending) return;
+    if (isSubmittingRef.current || busy || imageSending || mediaSending) return;
+
+    if (currentMedia?.state === "SENDING") return;
+    if (currentMedia?.state === "UNKNOWN") { setError("视频/文件发送结果未确认，请先刷新历史；确认未发送后再按原消息重试。"); return; }
+    if (currentMedia?.state === "FAILED") { setError("请先重试或移除发送失败的视频/文件，再发送后续内容"); return; }
 
     if (currentStaged.some((item) => item.state === "DECODING")) {
       setError("图片仍在检查，请稍候");
@@ -1196,6 +1424,9 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     const identity = currentIdentity;
     const conversationId = activeConversation?.conversationId;
     const client = clientRef.current;
+    // A finished round is not a dead end: the first send reopens it server-side,
+    // and the UI reads that WAITING round back instead of faking local state.
+    const endedThreadBeforeSend = Boolean(activeConversation && activeConversation.state === "CLOSED");
     if (preview) {
       const parts: string[] = [];
       if (attachment) parts.push(`[附件] ${attachment}`);
@@ -1203,6 +1434,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
         parts.push(`[图片] ${currentStaged.map((s) => s.name).join(", ")}`);
       }
       if (text) parts.push(text);
+      if (currentMedia) parts.push(`[${currentMedia.kind === "video" ? "视频" : "文件"}] ${currentMedia.name}`);
       const next: SupportMessage = {
         id: `local-${Date.now()}`, from: "customer", text: parts.join("\n"), time: "现在", status: "sent", self: true,
         ...(currentReply ? { reply: { messageId: currentReply.id, senderId: currentReply.senderId ?? "", text: replyLabelOf(currentReply) } } : {}),
@@ -1211,6 +1443,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
       setDrafts((current) => current[conversationKey] === draft ? { ...current, [conversationKey]: "" } : current);
       setAttachmentFor(conversationKey, null);
       setStagedImagesFor(conversationKey, []);
+      if (currentMedia) setMediaFor(conversationKey, null);
       if (currentReply) clearReplyFor(conversationKey);
       isSubmittingRef.current = false;
       return;
@@ -1272,6 +1505,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
       }
 
       // 2. Images are sent sequentially one by one
+      let imagesOk = true;
       const stagedToSend = [...currentStaged];
       for (const stagedItem of stagedToSend) {
         if (
@@ -1280,7 +1514,8 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
           !canStartSendRef.current ||
           generation !== identityGenerationRef.current ||
           identityRef.current !== identity ||
-          activeIdRef.current !== activeConversation?.id ||
+          !activeConversation ||
+          activeIdRef.current !== threadKeyOf(activeConversation) ||
           clientRef.current !== client
         ) {
           break;
@@ -1299,11 +1534,47 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
 
         const result = await sendPendingImage(conversationKey, pending);
         if (!result || !result.success) {
+          imagesOk = false;
           break;
+        }
+      }
+
+      // 3. A staged video/file goes last, after text and images, so the media
+      // envelope never overtakes the text it was composed with.
+      const stagedMedia = mediaDraftsRef.current[conversationKey] ?? null;
+      if (
+        imagesOk &&
+        stagedMedia?.state === "READY" &&
+        visibleRef.current &&
+        sectionRef.current === "consultation" &&
+        canStartSendRef.current &&
+        generation === identityGenerationRef.current &&
+        identityRef.current === identity &&
+        activeConversation !== null &&
+        activeIdRef.current === threadKeyOf(activeConversation) &&
+        clientRef.current === client
+      ) {
+        try {
+          const sent = await sendOneMedia(conversationKey, stagedMedia, conversationId);
+          if (generation === identityGenerationRef.current && identityRef.current === identity && clientRef.current === client) {
+            const next = messageFromNim(sent, client.accountId);
+            if (next && !readHiddenRef.current[conversationId]) {
+              setMessages((current) => ({ ...current, [conversationKey]: mergeImMessages(current[conversationKey] ?? [], [next]) }));
+            }
+          }
+        } catch (cause) {
+          revalidateAfterUnauthorized(cause);
+          if (generation === identityGenerationRef.current && identityRef.current === identity) {
+            const mediaError = cause instanceof NimMediaSendError ? cause : null;
+            if (mediaError?.kind === "UNSUPPORTED") setError("当前云信通道暂不支持发送视频或文件，未发送。");
+            else if (mediaError?.kind === "UNKNOWN") setError("视频/文件发送结果未确认，原文件已保留；可刷新历史或按原消息重试。");
+            else setError(httpStatus(cause) === 403 ? "发送权限已变化，视频或文件已保留" : cause instanceof Error ? cause.message : "视频或文件发送失败，可重试。");
+          }
         }
       }
     } finally {
       if (generation === identityGenerationRef.current && identityRef.current === identity) isSubmittingRef.current = false;
+      if (endedThreadBeforeSend) void reloadThreadStates();
     }
   };
 
@@ -1322,7 +1593,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     const conversationKey = activeConversationKey;
     const failure = failedTexts[conversationKey];
     if (!failure || !clientRef.current || !canSend) return;
-    if (isSubmittingRef.current || busy || imageSending) return;
+    if (isSubmittingRef.current || busy || imageSending || mediaSending || mediaInFlight) return;
     if (failure.unknown && !failure.messageClientId) { setError(NO_ORIGINAL_ID_HINT); return; }
     const { conversationId, text, messageClientId } = failure;
     isSubmittingRef.current = true;
@@ -1434,7 +1705,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   const retryPendingImage = async () => {
     const conversationKey = activeConversationKey;
     const pending = pendingImage[conversationKey];
-    if (!pending || !canSend || imageSending) return;
+    if (!pending || !canSend || imageSending || mediaSending || mediaInFlight) return;
     if (isSubmittingRef.current || busy) return;
     if (unresolvedTextBlocks(conversationKey)) return;
     const generation = identityGenerationRef.current;
@@ -1509,7 +1780,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     event.stopPropagation();
     dragCounterRef.current = 0;
     setIsDragging(false);
-    if (!canSend || busy || imageSending) return;
+    if (!canSend || busy || imageSending || mediaSending) return;
     const files = Array.from(event.dataTransfer.files || []).filter((file) => file.type.startsWith("image/"));
     if (files.length > 0) {
       void stageOrSendFiles(files);
@@ -1523,11 +1794,11 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     setError(undefined);
     try {
       const history = await client.getMessageHistory(conversation.conversationId!, 50);
-      if (clientRef.current !== client || activeIdRef.current !== conversation.id) return;
+      if (clientRef.current !== client || activeIdRef.current !== threadKeyOf(conversation)) return;
       const rows = history.map((item) => messageFromNim(item, client.accountId)).filter((item): item is SupportMessage => Boolean(item));
-      setMessages((current) => ({ ...current, [conversation.id]: mergeImMessages(current[conversation.id] ?? [], rows) }));
+      setMessages((current) => ({ ...current, [threadKeyOf(conversation)]: mergeImMessages(current[threadKeyOf(conversation)] ?? [], rows) }));
       // A fresh read is the confirmation step the UNKNOWN reply prompt asks for.
-      setReplyUncertain((current) => current[conversation.id] ? { ...current, [conversation.id]: false } : current);
+      setReplyUncertain((current) => current[threadKeyOf(conversation)] ? { ...current, [threadKeyOf(conversation)]: false } : current);
     } catch (cause) {
       revalidateAfterUnauthorized(cause);
       setError(cause instanceof Error ? cause.message : "历史刷新失败。");
@@ -1535,24 +1806,6 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   };
 
   const chooseQuickReply = (value: string) => { setDraft(value); requestAnimationFrame(() => draftRef.current?.focus()); };
-  const beginNewConsultation = () => {
-    if (!activeConversation) return;
-    const type = activeConversation.type;
-    setSelectedType(type);
-    setSection("consultation");
-    setPanelView("chat");
-    setError(undefined);
-    // The server reuses a live consultation of the same type; select it instead of
-    // pretending a second one can be created.
-    const existing = consultations.find((item) => item.type === type && (item.state === "ACTIVE" || item.state === "WAITING"));
-    if (existing) {
-      setIsStartingNew(false);
-      setActiveId(existing.id);
-      return;
-    }
-    setIsStartingNew(true);
-    setActiveId(null);
-  };
 
   if (!preview && session.status !== "authenticated") {
     const sessionError = session.status === "error";
@@ -1567,67 +1820,64 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
 
   const currentTitle = preview
     ? previewConversation?.title ?? "客服演示"
-    : isStartingNew
-      ? "发起新的咨询"
-      : activeConversation
-        ? typeLabel(activeConversation.type)
-        : "开始新的咨询";
+    : activeConversation
+      ? typeLabel(activeConversation.type)
+      : "开始新的咨询";
 
   const currentSubtitle = preview
     ? "商品咨询会话"
-    : isStartingNew
-      ? "选择类型后创建独立咨询"
-      : activeConversation
-        ? activeConversation.messageScopeState === "FAILED"
-          ? "云信会话待人工核验，暂不可发送"
-          : activeConversation.state === "WAITING"
-            ? "已提交，等待客服接待"
-            : activeConversation.state === "ACTIVE"
-              ? activeConversation.assignedAdmin
-                ? `当前接待：${activeConversation.assignedAdmin.name}`
-                : `${typeLabel(activeConversation.type)}进行中`
-              : "咨询已结束"
-        : "选择类型后创建独立咨询";
+    : activeConversation
+      ? activeConversation.messageScopeState === "FAILED"
+        ? "云信会话待人工核验，暂不可发送"
+        : activeConversation.state === "WAITING"
+          ? activeScopeReady
+            ? "等待客服接待；已提交，客服接入后会看到你的留言"
+            : "已提交，正在连接客服…"
+          : activeConversation.state === "ACTIVE"
+            ? activeConversation.assignedAdmin
+              ? `当前接待：${activeConversation.assignedAdmin.name}`
+              : `${typeLabel(activeConversation.type)}进行中`
+            : "本轮已结束；可以继续留言，客服接入后会回复"
+      : "选择类型后创建独立咨询";
 
   const consultationView = <section className={`support-workspace${embedded ? " support-workspace-embedded" : ""}`} data-preview={preview} aria-label="客服咨询窗口">
     {error ? <div className="support-inline-error" role="alert"><CircleAlert size={15} />{error}</div> : null}
     <div className="support-workspace-grid" ref={gridRef} data-view={preview ? panelView : "chat"}>
       {preview ? <nav className="support-conversation-list" aria-label="咨询会话">
         <div className="support-list-heading" tabIndex={-1}><div><strong>咨询记录</strong><span>{preview ? "演示" : "平台记录"}</span></div><div className="support-list-heading-actions"><span className="support-list-count">{preview ? PREVIEW_CONVERSATIONS.length : consultations.length}</span><button type="button" className="support-back" data-action="back-to-chat" onClick={() => setPanelView("chat")}><ChevronLeft size={15} />返回</button>{embedded ? <button type="button" className="support-icon-button" onClick={onClose} aria-label="关闭客服窗口"><X size={16} /></button> : null}</div></div>
-        {preview ? PREVIEW_CONVERSATIONS.map((conversation) => <button key={conversation.id} type="button" className="support-conversation-item" data-active={conversation.id === activeId} onClick={() => { setIsStartingNew(false); setActiveId(conversation.id); setPanelView("chat"); }} aria-current={conversation.id === activeId ? "page" : undefined}><span className="support-conversation-avatar" aria-hidden="true"><Headphones size={14} /></span><span className="support-conversation-copy"><strong>{conversation.title}</strong><span>{conversation.preview}</span></span><span className="support-conversation-meta"><time>{conversation.time}</time>{conversation.unread ? <b>{conversation.unread}</b> : null}</span></button>) : consultations.length > 0 ? consultations.map((consultation) => <button key={consultation.id} type="button" className="support-conversation-item" data-active={consultation.id === activeId} onClick={() => { setIsStartingNew(false); setActiveId(consultation.id); setSelectedType(consultation.type); setPanelView("chat"); }} aria-current={consultation.id === activeId ? "page" : undefined}><span className="support-conversation-avatar" aria-hidden="true"><Headphones size={14} /></span><span className="support-conversation-copy"><strong>{typeLabel(consultation.type)}</strong><span>{consultation.messageScopeState === "FAILED" ? "云信会话待人工核验" : consultation.assignedAdmin?.name ? `当前接待：${consultation.assignedAdmin.name}` : consultation.state === "WAITING" ? "等待客服接待" : "咨询已结束"}</span></span><span className="support-conversation-meta"><time>{consultation.messageScopeState === "FAILED" ? "待核验" : consultation.state === "WAITING" ? "等待中" : consultation.state === "ACTIVE" ? "进行中" : "已结束"}</time></span></button>) : <div className="support-list-empty"><Headphones size={22} /><strong>还没有咨询记录</strong><span>选择类型后开始一次站内咨询，登录账号会自动保留记录。</span></div>}
+        {PREVIEW_CONVERSATIONS.map((conversation) => <button key={conversation.id} type="button" className="support-conversation-item" data-active={conversation.id === activeId} onClick={() => { setActiveId(conversation.id); setPanelView("chat"); }} aria-current={conversation.id === activeId ? "page" : undefined}><span className="support-conversation-avatar" aria-hidden="true"><Headphones size={14} /></span><span className="support-conversation-copy"><strong>{conversation.title}</strong><span>{conversation.preview}</span></span><span className="support-conversation-meta"><time>{conversation.time}</time>{conversation.unread ? <b>{conversation.unread}</b> : null}</span></button>)}
       </nav> : null}
       <main className="support-conversation-panel">
         <header className="support-conversation-heading" ref={chatHeadingRef} tabIndex={-1} data-focus-target="chat">
           <button type="button" className="support-back" data-action="back-to-conversations" onClick={() => setPanelView("list")}><ChevronLeft size={15} />会话记录</button>
           <div className="support-conversation-identity"><span className="support-live-dot" data-state={activeConversation?.state === "ACTIVE" ? "active" : "idle"} aria-hidden="true" /><div><h3>{currentTitle}</h3><span>{currentSubtitle}</span></div></div>
           <div className="support-heading-actions">
-            {!preview && activeConversation?.state === "CLOSED" ? <button type="button" className="button secondary" data-action="start-new-consultation" onClick={beginNewConsultation}>发起新咨询</button> : null}
             {preview || subjectRef ? <button type="button" className="support-icon-button" data-action="toggle-product-context" aria-expanded={contextOpen} aria-label="商品上下文" onClick={() => setContextOpen((value) => !value)}><Info size={16} /></button> : null}
             {embedded ? <button type="button" className="support-icon-button" onClick={onClose} aria-label="关闭客服窗口"><X size={18} /></button> : null}
           </div>
         </header>
         <div className="support-facts-bar">
-          <span className="support-fact-chip">{activeConversation ? typeLabel(activeConversation.type) : preview ? "商品咨询" : isStartingNew ? "新咨询" : "客服咨询"}</span>
-          {activeConversation ? <span className="support-fact-chip" data-tone={activeConversation.messageScopeState === "FAILED" ? "warn" : activeConversation.state === "ACTIVE" ? "good" : "neutral"}>{activeConversation.messageScopeState === "FAILED" ? "待人工核验" : activeConversation.state === "WAITING" ? "等待接待" : activeConversation.state === "ACTIVE" ? "进行中" : "已结束"}</span> : null}
+          <span className="support-fact-chip">{activeConversation ? typeLabel(activeConversation.type) : preview ? "商品咨询" : "客服咨询"}</span>
+          {activeConversation ? <span className="support-fact-chip" data-tone={activeConversation.messageScopeState === "FAILED" ? "warn" : threadStateOf(activeConversation) === "ACTIVE" ? "good" : "neutral"}>{activeConversation.messageScopeState === "FAILED" ? "待人工核验" : threadStateLabel(activeConversation)}</span> : null}
           {activeConversation?.assignedAdmin ? <span className="support-fact-chip" data-tone="good">{`客服 · ${activeConversation.assignedAdmin.name}`}</span> : null}
           {subjectRef ? <span className="support-fact-chip">{`对象 ${subjectRef}`}</span> : preview ? <span className="support-fact-chip">演示对象</span> : null}
           <span className="support-facts-spacer" />
         </div>
         <div className="support-message-area">
            {unresolvedText ? <div className="support-send-retry" role="alert"><CircleAlert size={15} /><span>{unresolvedText.unknown ? "发送结果未确认，内容已保留。" : "消息发送失败，内容已保留。"}</span><button type="button" onClick={() => void refreshHistory()}>刷新历史</button><button type="button" onClick={() => void retrySend()} disabled={busy || !canSend}>{unresolvedText.messageClientId ? "原消息重试" : "重试发送"}</button></div> : null}
-           {!preview && !activeConversation ? <div className="support-start-panel" data-state={isStartingNew ? "new" : "initial"}><Headphones size={27} /><strong>{isStartingNew ? "发起新的咨询" : "从这里开始你的咨询"}</strong><span>每种类型会保留独立的咨询记录，客服接待后才能发送消息。</span><SupportTypePicker value={selectedType} onChange={setSelectedType} disabled={busy} /><button type="button" className="button primary" data-action={isStartingNew ? "submit-new-consultation" : "start-consultation"} onClick={() => void startConsultation()} disabled={busy}><SendHorizontal size={15} />{busy ? "创建中…" : `开始${typeLabel(selectedType)}`}</button></div> : !preview && activeConversation?.state === "WAITING" ? <div className="support-start-panel"><Clock3 size={27} /><strong>已记录，等待客服接待</strong><span>平台正在寻找符合接待条件的客服；接待关系建立后会自动恢复消息入口。</span></div> : !preview && activeConversation?.messageScopeState === "FAILED" ? <div className="support-start-panel"><CircleAlert size={27} /><strong>客服会话待人工核验</strong><span>平台暂时无法确认云信远端动作是否完成，已暂停发送和自动重试。请稍后再试或联系平台处理。</span></div> : <MessageScrollerPrimitive.Provider autoScroll defaultScrollPosition="last-anchor"><MessageScrollerPrimitive.Root className="support-message-scroller"><MessageScrollerPrimitive.Viewport className="support-message-viewport" aria-label="消息内容"><MessageScrollerPrimitive.Content className="support-message-content">{activeMessages.length > 0 ? <>{historyMore[activeConversationKey] ? <MessageScrollerPrimitive.Item messageId="load-earlier"><div className="support-history-more"><button type="button" onClick={() => void loadEarlier()} disabled={historyLoading}>{historyLoading ? "正在读取更早消息…" : "更早的消息"}</button></div></MessageScrollerPrimitive.Item> : null}{timelineItems}</> : <MessageScrollerPrimitive.Item messageId="empty"><div className="support-message-empty"><Headphones size={24} /><strong>{activeConversation?.state === "CLOSED" ? "本次咨询已结束" : "等待第一条消息"}</strong><span>{activeConversation?.state === "CLOSED" ? "如需继续，请重新发起一次咨询。咨询结束后，历史记录的读取已随结束关闭，这里不再展示旧记录。" : preview ? "可以从下方快捷回复开始检查交互。" : "建立云信连接后，消息会出现在这里。"}</span></div></MessageScrollerPrimitive.Item>}</MessageScrollerPrimitive.Content></MessageScrollerPrimitive.Viewport><MessageScrollerPrimitive.Button direction="end" className="support-jump-button" render={<button type="button" aria-label="跳到最新消息" />}><ArrowDown size={14} aria-hidden="true" /></MessageScrollerPrimitive.Button></MessageScrollerPrimitive.Root></MessageScrollerPrimitive.Provider>}
+           {!preview && !activeConversation ? <div className="support-start-panel" data-state="initial"><Headphones size={27} /><strong>从这里开始你的咨询</strong><span>每种类型会保留独立的咨询记录；选择后立即提交，无需再次确认。</span><SupportTypePicker value={selectedType} onChange={setSelectedType} disabled={busy} onSelect={(type) => void startConsultation(type)} />{busy ? <span className="support-start-panel-status" role="status">正在创建咨询…</span> : null}</div> : !preview && activeConversation?.messageScopeState === "FAILED" ? <div className="support-start-panel"><CircleAlert size={27} /><strong>客服会话待人工核验</strong><span>平台暂时无法确认云信远端动作是否完成，已暂停发送和自动重试。请稍后再试或联系平台处理。</span></div> : <MessageScrollerPrimitive.Provider autoScroll defaultScrollPosition="last-anchor"><MessageScrollerPrimitive.Root className="support-message-scroller"><MessageScrollerPrimitive.Viewport className="support-message-viewport" aria-label="消息内容"><MessageScrollerPrimitive.Content className="support-message-content">{activeMessages.length > 0 ? <>{historyMore[activeConversationKey] ? <MessageScrollerPrimitive.Item messageId="load-earlier"><div className="support-history-more"><button type="button" onClick={() => void loadEarlier()} disabled={historyLoading}>{historyLoading ? "正在读取更早消息…" : "更早的消息"}</button></div></MessageScrollerPrimitive.Item> : null}{timelineItems}</> : <MessageScrollerPrimitive.Item messageId="empty"><div className="support-message-empty"><Headphones size={24} /><strong>{activeConversation?.state === "CLOSED" ? "本轮已结束" : activeConversation?.state === "WAITING" ? "咨询已提交" : "等待第一条消息"}</strong><span>{activeConversation?.state === "CLOSED" ? "可以继续留言，客服接入后会回复；这次线程的历史会一直保留。" : activeConversation?.state === "WAITING" ? (activeScopeReady ? "客服接入后会看到你的留言；现在也可以先发消息。" : "正在连接客服…已输入的内容会保留。") : preview ? "可以从下方快捷回复开始检查交互。" : "建立云信连接后，消息会出现在这里。"}</span></div></MessageScrollerPrimitive.Item>}</MessageScrollerPrimitive.Content></MessageScrollerPrimitive.Viewport><MessageScrollerPrimitive.Button direction="end" className="support-jump-button" render={<button type="button" aria-label="跳到最新消息" />}><ArrowDown size={14} aria-hidden="true" /></MessageScrollerPrimitive.Button></MessageScrollerPrimitive.Root></MessageScrollerPrimitive.Provider>}
         </div>
         <div className="support-composer-wrap">
           {preview ? <div className="support-quick-replies" aria-label="快捷回复"><span>快捷回复</span>{["我先帮你确认一下", "请稍等，我正在核对"].map((reply) => <button key={reply} type="button" onClick={() => chooseQuickReply(reply)}>{reply}</button>)}</div> : null}
+          {!preview && activeConversation?.state === "WAITING" && activeConversation.messageScopeState !== "FAILED" ? <div className="support-waiting-note" data-state={waitingProvisioning ? "provisioning" : "ready"} role="status"><Clock3 size={14} aria-hidden="true" /><span>{waitingProvisioning ? "正在连接客服…已输入的内容会保留。" : "等待客服接待；已提交，客服接入后会看到你的留言，现在也可以先发消息"}</span></div> : null}
+          {!preview && roundEnded && activeConversation?.messageScopeState !== "FAILED" ? <div className="support-waiting-note" data-state="closed" role="status"><Clock3 size={14} aria-hidden="true" /><span>{threadCanSend ? "本轮已结束；可以继续留言，客服接入后会回复" : "本轮已结束；当前会话暂不可继续，请稍后重试"}</span></div> : null}
           {attachment ? <div className="support-attachment" data-slot="attachment"><Paperclip size={14} /><span>{attachment}</span><button type="button" onClick={() => setAttachment(null)} aria-label="移除附件">×</button></div> : null}
           {!preview && pendingImage[activeConversationKey] ? (() => {
             const pending = pendingImage[activeConversationKey]!;
             return <div className="support-pending-image" data-state={pending.state}><img src={pending.previewUrl} alt={pending.name} /><span>{pending.name} · {pending.state === "UNKNOWN" ? "发送结果未确认" : pending.state === "SENDING" ? `发送中 ${pending.progress ?? 0}%` : "发送失败"}{pending.messageClientId ? "" : "（无原消息标识）"}</span><button type="button" onClick={() => void retryPendingImage()} disabled={imageSending || !canSend}>{pending.messageClientId ? "原消息重试" : "重试"}</button><button type="button" onClick={removePendingImage} disabled={imageSending || pending.state === "UNKNOWN"}>移除</button></div>;
           })() : null}
-          {activeReply && !(!preview && activeConversation?.state === "CLOSED") ? <MessageReplyQuote label={replyLabelOf(activeReply)} onCancel={() => { clearReplyFor(activeConversationKey); requestAnimationFrame(() => draftRef.current?.focus()); }} /> : null}
-          {/* 已结束会话是只读的：不再摆一个"等待接待"的输入框，只说明状态。
-              再次咨询入口保留在会话头，不在这里重复。 */}
-          {!preview && activeConversation?.state === "CLOSED" ? <div className="support-composer-closed" role="status"><Headphones size={15} /><span>本次咨询已结束，无法继续发送消息。</span></div> : <form
+          {activeReply ? <MessageReplyQuote label={replyLabelOf(activeReply)} onCancel={() => { clearReplyFor(activeConversationKey); requestAnimationFrame(() => draftRef.current?.focus()); }} /> : null}
+          <form
             className="support-composer"
             data-dragging={isDragging}
             onSubmit={sendMessage}
@@ -1674,6 +1924,14 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
                 </div>
               </div>
             ) : null}
+            {selectedMedia ? (
+              <MediaDraftBar
+                draft={selectedMedia}
+                onRetry={() => void retryMediaDraft()}
+                onRemove={removeSelectedMedia}
+                disabled={mediaSending || imageSending}
+              />
+            ) : null}
             <textarea
               ref={draftRef}
               value={draft}
@@ -1689,7 +1947,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
               placeholder={preview ? "输入咨询内容…" : composerBlockReason(activeConversation, canSend) ?? "输入咨询内容…"}
               aria-label="输入咨询内容"
               rows={3}
-              disabled={!canSend || busy}
+              disabled={!canCompose || busy}
             />
             <div className="support-composer-footer">
               <div className="support-composer-tools">
@@ -1801,22 +2059,52 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
                     </TooltipTrigger>
                     <TooltipContent side="top">发送图片 (JPG/PNG，最大 10MB，最多 6 张)</TooltipContent>
                   </Tooltip>
+
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <label className="support-tool-btn" aria-label="发送视频">
+                        <Video size={16} />
+                        <input
+                          type="file"
+                          accept="video/mp4,video/quicktime,video/webm"
+                          onChange={chooseMedia("video")}
+                          disabled={preview ? busy : (!canSend || busy || imageSending || mediaSending || selectedMedia?.state === "UNKNOWN")}
+                        />
+                      </label>
+                    </TooltipTrigger>
+                    <TooltipContent side="top">发送视频 (MP4/MOV/WebM，最大 100MB)</TooltipContent>
+                  </Tooltip>
+
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <label className="support-tool-btn" aria-label="发送文件">
+                        <FileText size={16} />
+                        <input
+                          type="file"
+                          accept="application/pdf,application/zip,text/plain,text/csv,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                          onChange={chooseMedia("file")}
+                          disabled={preview ? busy : (!canSend || busy || imageSending || mediaSending || selectedMedia?.state === "UNKNOWN")}
+                        />
+                      </label>
+                    </TooltipTrigger>
+                    <TooltipContent side="top">发送文件 (PDF/ZIP/TXT/CSV/DOCX/XLSX/PPTX，最大 50MB)</TooltipContent>
+                  </Tooltip>
                 </TooltipProvider>
               </div>
               <div className="support-composer-actions">
                 {(!canSend || activeConversation?.messageScopeState === "FAILED") ? (
-                  <span className="support-composer-status">{activeConversation?.messageScopeState === "FAILED" ? "远端状态待人工核验" : "当前不可发送"}</span>
+                  <span className="support-composer-status">{activeConversation?.messageScopeState === "FAILED" ? "远端状态待人工核验" : waitingProvisioning ? "正在连接客服…" : "当前不可发送"}</span>
                 ) : (
                   <span className="support-composer-hint">
                     <kbd className="support-kbd">Enter</kbd> 发送 · <kbd className="support-kbd">Shift</kbd> + <kbd className="support-kbd">Enter</kbd> 换行
                   </span>
                 )}
-                <button type="submit" className="support-send-btn" disabled={!canSend || busy || imageSending || (!draft.trim() && !attachment && (stagedImages[activeConversationKey]?.length ?? 0) === 0)} aria-label="发送消息">
-                  <span>{busy || imageSending ? "发送中" : "发送"}</span>
+                <button type="submit" className="support-send-btn" disabled={!canSend || busy || imageSending || mediaSending || mediaInFlight || (!draft.trim() && !attachment && (stagedImages[activeConversationKey]?.length ?? 0) === 0 && selectedMedia?.state !== "READY")} aria-label="发送消息">
+                  <span>{busy || imageSending || mediaSending ? "发送中" : "发送"}</span>
                 </button>
               </div>
             </div>
-          </form>}
+          </form>
         </div>
       </main>
       {contextOpen ? <aside className="support-context-panel" aria-label="商品上下文"><div className="support-context-heading"><div><strong>商品与订单信息</strong><span>{preview ? "演示快照" : "服务端授权快照"}</span></div><button type="button" className="support-icon-button" data-action="close-product-context" onClick={() => { setContextOpen(false); gridRef.current?.querySelector<HTMLButtonElement>('[data-action="toggle-product-context"]')?.focus(); }} aria-label="关闭商品上下文"><X size={15} /></button></div>{preview ? <><article className="support-product-card" data-slot="attachment"><div className="support-product-card-top"><span>zzsh.im-card</span><span>v1</span></div><h3>{PREVIEW_PRODUCT.title}</h3><p>{PREVIEW_PRODUCT.summary}</p><dl><div><dt>状态</dt><dd>{PREVIEW_PRODUCT.statusText}</dd></div><div><dt>费用</dt><dd>{PREVIEW_PRODUCT.priceText}</dd></div></dl><div className="support-product-card-id">商品 ID · {PREVIEW_PRODUCT.objectId}</div></article><button type="button" className="support-action-btn support-action-primary support-context-send-btn" data-action="send-product-context" onClick={() => { const text = `【咨询订单】${PREVIEW_PRODUCT.title} (ID: ${PREVIEW_PRODUCT.objectId})`; setDraft(draft ? `${draft}\n${text}` : text); setContextOpen(false); requestAnimationFrame(() => draftRef.current?.focus()); }}><ReceiptText size={13} /><span>发送此订单信息</span></button></> : orders.length > 0 ? <div className="support-verified-orders"><span className="support-verified-orders-hint">点击可将你参与的订单信息带入咨询输入框：</span><div className="support-verified-orders-list">{orders.map((ord) => <button key={ord.id} type="button" className="support-verified-order-item" onClick={() => { const text = `【咨询订单】${ord.title} (订单尾号: ${ord.displayNo}) [${ord.party === "owner" ? "出租" : "租入"}]`; setDraft(draft ? `${draft}\n${text}` : text); setContextOpen(false); requestAnimationFrame(() => draftRef.current?.focus()); }}><strong>{ord.title}</strong><span>尾号 {ord.displayNo} · {ord.party === "owner" ? "出租订单" : "租入订单"}</span></button>)}</div></div> : <div className="support-context-empty"><Headphones size={20} /><strong>暂无可关联的订单</strong><span>仅展示你当前已付款或出租中的真实订单。</span></div>}<div className="support-context-note"><ShieldCheck size={15} /><p>订单信息来自当前账号已授权的真实订单，带入后可在发送前补充说明。</p></div></aside> : null}
@@ -1838,22 +2126,24 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
       <div className="support-directory-items">
       {consultations.length===50?<p className="support-directory-limit">咨询目录仅提供最近50条；更早记录待接口支持。</p>:null}
       {consultations.map((item) => {
-        const lastMsg = messages[item.id]?.at(-1);
+        const threadState = threadStateOf(item);
+        const statusLabel = threadStateLabel(item);
+        const lastMsg = messages[threadKeyOf(item)]?.at(-1);
         const snippet = lastMsg
           ? lastMsg.image
             ? "[图片]"
-            : lastMsg.from === "system"
-              ? `[系统] ${lastMsg.text}`
-              : lastMsg.text.includes("【咨询订单】")
-                ? "[订单信息]"
-                : lastMsg.text
-          : item.state === "WAITING"
-            ? "等待客服接待"
-            : item.state === "CLOSED"
-              ? "咨询已结束"
-              : item.assignedAdmin?.name
-                ? `由客服 ${item.assignedAdmin.name} 接待中`
-                : "咨询进行中";
+            : lastMsg.media
+              ? mediaSummaryOf(lastMsg) ?? "[媒体]"
+              : lastMsg.from === "system"
+                ? `[系统] ${lastMsg.text}`
+                : lastMsg.text.includes("【咨询订单】")
+                  ? "[订单信息]"
+                  : lastMsg.text
+          : item.messageScopeState === "FAILED"
+            ? "云信会话待人工核验"
+            : item.assignedAdmin?.name && threadState === "ACTIVE"
+              ? `由客服 ${item.assignedAdmin.name} 接待中`
+              : statusLabel;
 
         const timeDisplay = lastMsg
           ? lastMsg.time
@@ -1865,13 +2155,13 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
           <button
             type="button"
             className="support-conversation-item"
-            key={item.id}
-            data-active={section === "consultation" && activeId === item.id}
+            key={threadKeyOf(item)}
+            data-active={section === "consultation" && activeId === threadKeyOf(item)}
+            data-thread-state={threadState}
             onClick={() => {
               setSection("consultation");
-              setActiveId(item.id);
+              setActiveId(threadKeyOf(item));
               setSelectedType(item.type);
-              setIsStartingNew(false);
               setPanelView("chat");
             }}
           >
@@ -1883,6 +2173,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
               <span>{snippet}</span>
             </span>
             <span className="support-conversation-meta">
+              <span className="support-thread-state" data-thread-state={threadState}>{statusLabel}</span>
               {timeDisplay ? <time>{timeDisplay}</time> : null}
             </span>
           </button>

@@ -1104,7 +1104,7 @@ test('reply sends replyText, shows the quote and clears it after success',async 
   assert.equal(sentText,'收到');
   assert.equal(h.node.querySelector('textarea').value,'','a confirmed reply clears the draft');
   assert.equal(h.node.querySelector('.message-reply-quote'),null,'a confirmed reply clears the quote');
-  assert.match(h.node.querySelector('.order-team-messages').textContent,/回复：买家消息/,'the receipt keeps its own reply summary');
+  assert.match(h.node.querySelector('.order-team-messages .message-quoted').textContent,/买家消息/,'the receipt keeps its own quote summary');
 
   await h.type('普通消息');
   await h.submit();

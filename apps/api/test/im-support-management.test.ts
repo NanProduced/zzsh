@@ -394,6 +394,8 @@ test("audit list and patrol message reads fail closed without management read", 
           lastMessageAt: null, createdAt: new Date(0), updatedAt: new Date(0), userName: "用户甲", userUsername: null,
           adminName: "客服乙", appId: APP_ID, messageScopeType: "TEAM", messageScopeId: "900001",
           messageScopeState: "READY", messageScopeVersion: 1,
+          threadId: "im_thread_1", roundSeq: 1, threadState: "ACTIVE", threadScopeId: "900001",
+          threadScopeState: "READY", threadPeerAccountId: "staff_im_b",
         }] };
       }
       return null;
@@ -415,13 +417,15 @@ test("patrol read allows another admin's consultation and writes a silent audit"
         return { rows: [{ accountId: deriveYunxinAccountId(key), identityMarker: buildYunxinIdentityMarker(key), status: "READY" }] };
       }
       if (sql.includes('FROM "zzsh_iam"."im_consultation" c')) {
-        assert.match(sql, /message_scope_state" = 'READY'/);
+        assert.match(sql, /t\."message_scope_state" = 'READY'/);
         return { rows: [{
           id: "im_consult_1", userId: "user_a", kind: "SERVICE", state: "CLOSED", userAccountId: "user_im_a",
           peerAccountId: "staff_im_b", assignedAdminId: "admin_b", subjectRef: null, version: 2,
           lastMessageAt: null, createdAt: new Date(0), updatedAt: new Date(0), userName: "用户甲", userUsername: null,
           adminName: "客服乙", appId: APP_ID, messageScopeType: "TEAM", messageScopeId: "900001",
           messageScopeState: "READY", messageScopeVersion: 1,
+          threadId: "im_thread_1", roundSeq: 1, threadState: "IDLE", threadScopeId: "900001",
+          threadScopeState: "READY", threadPeerAccountId: null,
         }] };
       }
       if (sql.includes('INSERT INTO "zzsh_iam"."audit_event"')) {

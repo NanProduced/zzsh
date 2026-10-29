@@ -131,22 +131,39 @@ test("consultation views project the authorized team from each account and never
     messageScopeId: "900001",
     messageScopeState: "READY" as const,
     messageScopeVersion: 1,
+    threadId: "thread-1",
+    roundSeq: 2,
+    threadState: "ACTIVE" as const,
+    threadScopeId: "900001",
+    threadScopeState: "READY" as const,
+    threadPeerAccountId: "staff_im_1",
   };
 
   const userView = toView(row, "user_im_1");
   assert.equal(userView.peerAccountId, "staff_im_1");
   assert.equal(userView.conversationId, "user_im_1|2|900001");
+  assert.equal(userView.threadId, "thread-1");
+  assert.equal(userView.roundId, "consult-1");
+  assert.equal(userView.roundSeq, 2);
+  assert.equal(userView.threadState, "ACTIVE");
+  assert.equal(userView.canSend, true);
 
   const adminView = toView(row, "staff_im_1", true, "admin-1");
   assert.equal(adminView.peerAccountId, "user_im_1");
   assert.equal(adminView.conversationId, "staff_im_1|2|900001");
+  assert.equal(adminView.canSend, true);
   assert.notEqual(adminView.peerAccountId, "staff_im_1");
 
   const oldAdminView = toView(row, "old_staff_im", true, "admin-2");
   assert.equal(oldAdminView.peerAccountId, "user_im_1");
   assert.equal(oldAdminView.conversationId, null);
+  assert.equal(oldAdminView.canSend, false);
 
-  assert.equal(toView({ ...row, state: "CLOSED" }, "user_im_1").conversationId, null);
+  // 结束本轮只结束 round：Team 与历史保留，用户仍可读可发，线程回 IDLE。
+  const closedUserView = toView({ ...row, state: "CLOSED", threadState: "IDLE" }, "user_im_1");
+  assert.equal(closedUserView.conversationId, "user_im_1|2|900001");
+  assert.equal(closedUserView.canSend, true);
+  assert.equal(toView({ ...row, state: "CLOSED", threadState: "IDLE" }, "staff_im_1", true, "admin-1").canSend, false);
 });
 
 test("scope recovery shutdown waits for the in-flight batch and prevents later ticks", async () => {

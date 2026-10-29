@@ -1,16 +1,15 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Check, CircleAlert, Copy, Info, RefreshCw } from "lucide-react";
+import { CircleAlert, Info, RefreshCw } from "lucide-react";
 import { AdminApiError, type UserDirectoryDetail } from "../api";
 import { PERMISSION } from "./user-directory/user-directory-data";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardTitle } from "../components/ui/card";
-import { Item, ItemActions, ItemContent, ItemDescription, ItemMedia, ItemSeparator, ItemTitle } from "../components/ui/item";
+import { Item, ItemActions, ItemContent, ItemDescription, ItemMedia, ItemSeparator } from "../components/ui/item";
+import { EntityPreviewTrigger, UserPreviewCard, hasUsefulUserPreview } from "../components/admin-preview";
 import { initialOf } from "./im-support-format";
-import { BEIJING_TIME_ZONE } from "../workspace/beijing-time";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 
 /**
@@ -20,6 +19,10 @@ import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popove
  * it was issued under: revoking one of them clears the facts it produced instead of leaving
  * a stale count or a stale 来源 on screen. UNKNOWN never collapses into a friendlier default,
  * and a `ready` summary without a number is never rendered as zero.
+ *
+ * 第一屏是用户与风险摘要：账号状态、实名/年龄、冻结/限制/高危、名下账号与进行中订单、
+ * 脱敏联系方式。用户 UUID 只用于受权读取与资料入口，不渲染、不复制；昵称/头像接管理端
+ * 现有用户 hoverCard，且只在资料读取仍然持有时出现，卡内不出现 UUID。
  */
 
 type ContextView = {
@@ -39,7 +42,8 @@ function subjectView(context: ContextView | null, state: ContextState): { label:
   }
   if (context.subject.status === "absent") return { label: "关联对象", value: "尚未关联商品或订单" };
   if (context.subject.status === "unresolved") {
-    return { label: "关联引用 · 类型待识别", value: context.subject.reference ? `${context.subject.reference}（类型未识别）` : "引用未提供（类型未识别）" };
+    // subject_ref 没有持久化类型，也没有业务单号；裸引用（可能是 UUID）不直接上屏。
+    return { label: "关联对象 · 类型待识别", value: "已关联引用（类型未识别）" };
   }
   return { label: "关联对象", value: "关联对象类型暂未确认" };
 }
@@ -60,11 +64,6 @@ function denied(error: unknown): boolean {
   const status = error instanceof AdminApiError ? error.status : undefined;
   return status === 401 || status === 403;
 }
-function dayLabel(value: string | null): string {
-  if (!value) return "暂无记录";
-  const date = new Date(value);
-  return Number.isFinite(date.getTime()) ? new Intl.DateTimeFormat("zh-CN", { timeZone: BEIJING_TIME_ZONE, year: "numeric", month: "2-digit", day: "2-digit" }).format(date) : "暂无记录";
-}
 /** Current capability and server state both have to agree; a missing count is not zero. */
 function summaryText(summary: UserDirectoryDetail["orderSummary"] | UserDirectoryDetail["resourceSummary"], unit: string, permitted: boolean, permission: string): string {
   if (!permitted || summary?.state === "denied") return `需「${READ_LABELS[permission] ?? "相应读取"}」权限`;
@@ -84,29 +83,29 @@ function Fact({ label, value, permission }: { label: string; value: string; perm
   );
 }
 
-export function ConsultationUserCard({ consultationId, rowUserId, fallbackName, scope, request, onOpenProfile }: {
+export function ConsultationUserCard({ consultationId, rowUserId, fallbackName, scope, request, onOpenProfile, showSubject = true }: {
   consultationId: string;
   rowUserId: string;
   fallbackName: string;
   scope: UserProfileScope;
   request: <T>(path: string) => Promise<T>;
   onOpenProfile?: (userId: string) => void;
+  /** 投诉摘要自己陈述关联订单/账号，卡片不再重复。 */
+  showSubject?: boolean;
 }) {
   const [context, setContext] = useState<ContextView | null>(null);
   const [profile, setProfile] = useState<UserDirectoryDetail | null>(null);
   const [state, setState] = useState<ContextState>("loading");
   const [profileState, setProfileState] = useState<"idle" | "loading" | "ready" | "denied" | "error">("idle");
-  const [copied, setCopied] = useState("");
   const [attempt, setAttempt] = useState(0);
   // One generation per (conversation, capability set, subject): a response that arrives
   // after any of them changed is dropped rather than painted back.
   const readScopeKey = `${consultationId}|${scope.profile ? 1 : 0}${scope.orders ? 1 : 0}${scope.resources ? 1 : 0}|${attempt}`;
   const profileGeneration = useRef("");
-  const copyScope = useRef("");
 
   useEffect(() => {
     let active = true;
-    setContext(null); setProfile(null); setState("loading"); setProfileState("idle"); setCopied("");
+    setContext(null); setProfile(null); setState("loading"); setProfileState("idle");
     profileGeneration.current = "";
     void request<ContextView>(`/im/consultations/${encodeURIComponent(consultationId)}/context`)
       .then((value) => { if (active) { setContext(value); setState("ready"); } })
@@ -115,7 +114,6 @@ export function ConsultationUserCard({ consultationId, rowUserId, fallbackName, 
   }, [consultationId, readScopeKey, request]);
 
   const userId = context?.user.publicId || rowUserId;
-  copyScope.current = `${readScopeKey}|${userId}`;
   useEffect(() => {
     if (!scope.profile || !userId) { profileGeneration.current = ""; setProfile(null); setProfileState("idle"); return; }
     const generation = `${readScopeKey}|${userId}`;
@@ -137,44 +135,54 @@ export function ConsultationUserCard({ consultationId, rowUserId, fallbackName, 
   const identityStatus = facts?.identity?.status || facts?.identityStatus || "UNKNOWN";
   const ageStatus = facts?.identity?.ageStatus || facts?.ageStatus || "UNKNOWN";
   const account = facts ? ACCOUNT_STATUS[facts.accountStatus] ?? ACCOUNT_STATUS.UNKNOWN : null;
-  const copyUserId = async () => {
-    const expectedScope = copyScope.current;
-    try {
-      await navigator.clipboard.writeText(userId);
-      if (copyScope.current === expectedScope) setCopied("已复制用户ID");
-    } catch {
-      if (copyScope.current === expectedScope) setCopied("复制失败，请选择原文复制");
-    }
-  };
+  const sourceText = facts ? SOURCE_KIND[facts.source.kind] ?? SOURCE_KIND.UNKNOWN : state === "loading" ? "正在读取会话对象…" : "平台用户";
+  const canPreview = Boolean(facts && scope.profile && userId && hasUsefulUserPreview(facts, displayName));
+
+  const identityBody = <>
+    <ItemMedia variant="icon" className="im-wb-avatar" aria-hidden="true">
+      {avatar ? <img src={avatar} alt="" /> : initialOf(displayName)}
+    </ItemMedia>
+    <div className="im-wb-user-copy grid min-w-0 flex-1 gap-1 text-left">
+      <CardTitle className="im-wb-user-identity-name line-clamp-2 text-sm leading-snug font-medium">{displayName}</CardTitle>
+      <CardDescription className="text-xs leading-normal">{sourceText}</CardDescription>
+    </div>
+  </>;
+  const identity = canPreview ? (
+    <EntityPreviewTrigger
+      className="min-w-0 flex-1"
+      touchLabel={`预览用户 ${displayName}`}
+      trigger={
+        <button type="button" className="im-wb-user-identity" onClick={() => onOpenProfile?.(userId)}>
+          {identityBody}
+        </button>
+      }
+      content={
+        <UserPreviewCard
+          name={displayName}
+          currentName={facts?.name && facts.name !== displayName ? facts.name : undefined}
+          image={avatar}
+          maskedPhone={facts?.maskedPhone}
+          accountStatus={account?.label}
+          realNameStatus={IDENTITY_STATUS[identityStatus] ?? IDENTITY_STATUS.UNKNOWN}
+          membershipSummary={facts?.membershipSummary}
+          creditSummary={facts?.creditSummary}
+          riskFlag={facts?.riskFlag}
+          canOpen={Boolean(onOpenProfile)}
+          onOpen={() => onOpenProfile?.(userId)}
+          openLabel="查看用户资料"
+          deniedReason="无查看用户资料权限"
+        />
+      }
+    />
+  ) : <div className="im-wb-user-identity" data-preview="unavailable">{identityBody}</div>;
 
   return (
-    <TooltipProvider delay={250}><Card className="im-wb-card">
+    <Card className="im-wb-card">
       <CardContent className="grid gap-0 p-0">
         <div className="flex items-start gap-3 px-4 py-3">
-          <ItemMedia variant="icon" className="im-wb-avatar" aria-hidden="true">
-            {avatar ? <img src={avatar} alt="" /> : initialOf(displayName)}
-          </ItemMedia>
-          <div className="grid min-w-0 flex-1 gap-1">
-            <CardTitle className="line-clamp-2 text-sm leading-snug font-medium">{displayName}</CardTitle>
-            <CardDescription className="text-xs leading-normal">
-              {facts ? SOURCE_KIND[facts.source.kind] ?? SOURCE_KIND.UNKNOWN : state === "loading" ? "正在读取会话对象…" : "平台用户"}
-            </CardDescription>
-          </div>
+          {identity}
           {scope.profile && userId ? <Button variant="link" size="sm" className="shrink-0" onClick={() => onOpenProfile?.(userId)}>完整资料</Button> : null}
         </div>
-
-        {userId ? <>
-          <ItemSeparator />
-          <Item size="sm" className="im-rail-fact gap-2 px-4 py-2">
-            <ItemContent><ItemDescription className="text-xs">用户ID</ItemDescription></ItemContent>
-            <ItemActions className="im-rail-value-actions">
-              <span className="im-rail-value text-sm font-medium tabular-nums">{userId}</span>
-              <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-sm" className="im-rail-icon" aria-label="复制用户ID" onClick={() => void copyUserId()} />}>
-                {copied.startsWith("已复制") ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
-              </TooltipTrigger><TooltipContent>{copied || "复制用户ID"}</TooltipContent></Tooltip>
-            </ItemActions>
-          </Item>
-        </> : null}
 
         {state === "denied" ? <p className="flex items-start gap-1.5 px-4 py-2 text-xs text-destructive"><CircleAlert className="mt-0.5 size-3.5 shrink-0" />当前账号无权查看该会话的对象资料。</p> : null}
         {state === "error" ? <p className="flex items-start gap-1.5 px-4 py-2 text-xs text-muted-foreground"><CircleAlert aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />部分会话资料暂未读到。</p> : null}
@@ -187,15 +195,16 @@ export function ConsultationUserCard({ consultationId, rowUserId, fallbackName, 
           {facts ? <>
             <div className="flex flex-wrap gap-1.5 px-4 pb-3">
               <Badge variant={account?.tone ?? "outline"}>{account?.label ?? "账号状态未知"}</Badge>
+              {facts.suspended && facts.accountStatus !== "FROZEN" ? <Badge variant="destructive">已冻结</Badge> : null}
               <Badge variant={identityStatus === "VERIFIED" ? "secondary" : "outline"}>{IDENTITY_STATUS[identityStatus] ?? IDENTITY_STATUS.UNKNOWN}</Badge>
               <Badge variant={ageStatus === "MINOR" ? "destructive" : "outline"}>{AGE_STATUS[ageStatus] ?? AGE_STATUS.UNKNOWN}</Badge>
+              {facts.riskFlag === true ? <Badge variant="destructive">内部高危</Badge> : null}
             </div>
             <ItemSeparator />
             <Fact label="脱敏手机号" value={facts.maskedPhone ? `${facts.maskedPhone} · ${facts.phoneNumberVerified ? "已验证" : facts.phoneNumberVerified === false ? "未验证" : "验证状态未知"}` : "未绑定"} />
             <Fact label="脱敏邮箱" value={facts.maskedEmail || "未绑定"} />
             <Fact label="进行中订单" value={summaryText(facts.orderSummary, "单", scope.orders, PERMISSION.orders)} permission={!scope.orders || facts.orderSummary?.state === "denied" ? PERMISSION.orders : undefined} />
             <Fact label="名下资源账号" value={summaryText(facts.resourceSummary, "个", scope.resources, PERMISSION.resources)} permission={!scope.resources || facts.resourceSummary?.state === "denied" ? PERMISSION.resources : undefined} />
-            <Fact label="注册时间" value={dayLabel(facts.registeredAt)} />
           </> : null}
         </> : <div className="im-rail-permission px-4 py-2">
           <p className="text-xs text-muted-foreground">账号状态、实名与名下账号概况需用户目录读取权限。</p>
@@ -203,11 +212,10 @@ export function ConsultationUserCard({ consultationId, rowUserId, fallbackName, 
         </div>}
         {state === "error" || profileState === "error" ? <div className="im-rail-retry"><Button variant="outline" size="sm" onClick={() => setAttempt((value) => value + 1)}><RefreshCw aria-hidden="true" />重读资料</Button></div> : null}
       </CardContent>
-      <CardFooter className="justify-between gap-3 border-t px-4 py-2.5">
+      {showSubject ? <CardFooter className="justify-between gap-3 border-t px-4 py-2.5">
         <span className="shrink-0 text-xs text-muted-foreground">{subject.label}</span>
         <span className="im-rail-value min-w-0 text-sm font-medium">{subject.value}</span>
-      </CardFooter>
-      {copied ? <p className="im-rail-copy-status" data-state={copied.startsWith("已复制") ? "success" : "error"} role="status">{copied}</p> : null}
-    </Card></TooltipProvider>
+      </CardFooter> : null}
+    </Card>
   );
 }

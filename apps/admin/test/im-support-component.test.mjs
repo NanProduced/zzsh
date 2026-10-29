@@ -68,6 +68,10 @@ function snapshot(permissions) {
 
 const serviceConsultation = {
   id: "consultation-a",
+  threadId: "thread-a",
+  roundId: "consultation-a",
+  roundSeq: 2,
+  threadState: "ACTIVE",
   type: "SERVICE",
   state: "ACTIVE",
   subjectRef: null,
@@ -76,6 +80,7 @@ const serviceConsultation = {
   conversationType: "TEAM",
   conversationId: "team-a",
   messageScopeState: "READY",
+  canSend: true,
   version: 1,
   lastMessageAt: null,
   createdAt: "2026-09-17T00:00:00.000Z",

@@ -24,8 +24,11 @@ type ConsultationEvent = {
 type EventPage = { events?: unknown; nextCursor?: unknown };
 
 export type EventsRequest = <T>(path: string) => Promise<T>;
+export type ConsultationEventSummary = { consultationId: string; status: LoadStatus; latest: ConsultationEvent | null };
 
 const EVENT_PAGE_LIMIT = 20;
+// 折叠时只露出最近两条；上屏顺序仍是升序，最近两条就是列表尾部。
+const COLLAPSED_EVENT_COUNT = 2;
 
 // 与 im/consultation.ts 的 EVENT_TYPES 对齐。服务端会把未知类型归一为 UNKNOWN；
 // 前端仍对表外类型按原码兜底显示，任何一端新增类型都不会崩或丢事件。
@@ -51,15 +54,61 @@ function asEvents(value: unknown): ConsultationEvent[] {
   return value as ConsultationEvent[];
 }
 
-export function ConsultationEventsCard({ consultationId, request }: { consultationId: string; request: EventsRequest }) {
+/**
+ * 投诉会话的紧凑摘要。投影里真正有的只有咨询类型、状态、subject_ref 与事件节点：
+ * 没有投诉原因/诉求正文，没有 subject_ref 的类型与业务单号，事件读投影也不含 details
+ * 与处理结论。这里逐项如实标注，不拿时间线或状态去猜一条“结果”。
+ */
+export function ComplaintSummaryCard({ typeLabel, stateLabel, subjectRef, summary }: {
+  typeLabel: string;
+  stateLabel: string;
+  subjectRef: string | null;
+  summary: ConsultationEventSummary | null;
+}) {
+  const result = (() => {
+    if (!summary || summary.status === "loading") return "正在读取处理记录…";
+    if (summary.status === "forbidden") return "无权查看处理记录";
+    if (summary.status === "missing") return "处理记录不可读（已结束、不存在或不在可查看范围）";
+    if (summary.status === "expired") return "会话已失效，本地处理记录已清除";
+    if (summary.status === "error") return "处理记录读取失败";
+    if (!summary.latest) return "暂无处理记录";
+    const label = EVENT_TYPE_LABELS[summary.latest.type] ?? summary.latest.type;
+    return `最近节点：${label} · ${formatDateTime(summary.latest.occurredAt)}；处理结论未在投影中提供`;
+  })();
+
+  return (
+    <section className="im-wb-sec im-wb-complaint" aria-label="投诉摘要" data-kind="COMPLAINT">
+      <span><CircleAlert size={12} />投诉摘要</span>
+      <dl>
+        <div><dt>投诉类型</dt><dd>{typeLabel}</dd></div>
+        <div><dt>处理状态</dt><dd>{stateLabel}</dd></div>
+        <div data-gap="reason"><dt>投诉原因</dt><dd>会话投影未提供投诉原因</dd></div>
+        <div data-gap="subject"><dt>关联订单/账号</dt><dd>{subjectRef ? "已关联引用；投影未提供类型与业务单号" : "未关联订单或账号"}</dd></div>
+        <div data-gap="result"><dt>最近处理结果</dt><dd>{result}</dd></div>
+      </dl>
+      <p className="im-wb-gap-note">缺口：会话投影没有投诉原因与处理结论字段；关联引用（subject_ref）不存类型，无法显示订单号或账号号。</p>
+    </section>
+  );
+}
+
+export function ConsultationEventsCard({ consultationId, request, onSummary }: { consultationId: string; request: EventsRequest; onSummary?: (summary: ConsultationEventSummary) => void }) {
   const [events, setEvents] = useState<ConsultationEvent[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [status, setStatus] = useState<LoadStatus>("loading");
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [earlierFailed, setEarlierFailed] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const [attempt, setAttempt] = useState(0);
   // 每（咨询，重试代次）一代：切换咨询或重读后，迟到的旧响应直接丢弃。
   const generationRef = useRef("");
+
+  // 切换咨询回到默认折叠：上一条会话展开过，不代表这一条也要全量铺开。
+  useEffect(() => { setExpanded(false); }, [consultationId]);
+
+  // 投诉摘要只需要最新节点；时间线本身仍是唯一的数据源，不额外发请求。
+  useEffect(() => {
+    onSummary?.({ consultationId, status, latest: events.length ? events[events.length - 1] ?? null : null });
+  }, [consultationId, events, onSummary, status]);
 
   useEffect(() => {
     const generation = `${consultationId}|${attempt}`;
@@ -138,8 +187,8 @@ export function ConsultationEventsCard({ consultationId, request }: { consultati
       {status === "ready" && events.length === 0 ? <small>该咨询暂无处理记录。</small> : null}
       {events.length > 0 ? (
         <ol className="im-wb-events">
-          {events.map((event) => (
-            <li key={event.id} className="im-wb-event" data-type={typeof event.type === "string" ? event.type : "UNKNOWN"}>
+          {events.map((event, index) => (
+            <li key={event.id} className="im-wb-event" hidden={!expanded && index < events.length - COLLAPSED_EVENT_COUNT} data-type={typeof event.type === "string" ? event.type : "UNKNOWN"}>
               <span className="im-wb-event-tag">{EVENT_TYPE_LABELS[event.type] ?? event.type}</span>
               <time>{formatDateTime(event.occurredAt)}</time>
               <span className="im-wb-event-actor">{event.actor?.displayName ?? "未知"}</span>
@@ -148,6 +197,7 @@ export function ConsultationEventsCard({ consultationId, request }: { consultati
           ))}
         </ol>
       ) : null}
+      {events.length > COLLAPSED_EVENT_COUNT ? <button type="button" className="im-wb-btn" data-action="toggle-events" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>{expanded ? "收起处理记录" : "查看全部处理记录"}</button> : null}
       {status === "ready" && nextCursor ? <button type="button" className="im-wb-btn" data-action="load-earlier-events" onClick={loadEarlier} disabled={loadingEarlier}>{loadingEarlier ? "正在读取更早记录…" : earlierFailed ? "更早记录读取失败，点击重试" : "加载更早的处理记录"}</button> : null}
     </section>
   );

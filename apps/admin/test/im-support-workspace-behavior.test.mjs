@@ -75,6 +75,7 @@ globalThis.fetch = async (input, init = {}) => {
     return json({ consultationId: "c-1", version: 1, service: { type: "SERVICE", state: "ACTIVE", messageScopeState: "READY", handler: null }, user: { status: "available", publicId: "user-a", displayName: "测试用户甲", avatar: null }, subject: contextSubject, membership: { status: "unavailable", reason: "membership_projection_not_integrated" } });
   }
   if (url.pathname.includes("/users/")) { if (profileGate) await profileGate; return json(profileFixture); }
+  if (url.pathname.includes("/events")) return json({ events: fixture.events ?? [], nextCursor: null });
   if (url.pathname.endsWith("/im/presence")) return json({ adminUserId: "admin-a", availability: "OFF_DUTY", connectionState: "CONNECTED", activeLoad: 0, version: 1 });
   if (url.pathname.endsWith("/im/messages") && init.method === "POST") {
     const result = fixture.post ? fixture.post(JSON.parse(String(init.body))) : { message: {} };
@@ -111,13 +112,14 @@ async function mount(t, props) {
 }
 
 const activeConsultation = {
-  id: "c-active", type: "SERVICE", state: "ACTIVE", subjectRef: null, version: 1,
+  id: "c-active", threadId: "thread-a", roundId: "c-active", roundSeq: 3, threadState: "ACTIVE",
+  type: "SERVICE", state: "ACTIVE", subjectRef: null, version: 1,
   assignedAdmin: { id: "admin-a", name: "客服 A" }, peerAccountId: "user-a", conversationType: "TEAM",
-  conversationId: "conv-a", messageScopeState: "READY",
+  conversationId: "conv-a", messageScopeState: "READY", canSend: true,
   lastMessageAt: "2026-09-17T00:02:00.000Z", createdAt: "2026-09-17T00:00:00.000Z", updatedAt: "2026-09-17T00:02:00.000Z",
   user: { id: "user-a", name: "用户 A", username: "user-a" },
 };
-const waitingConsultation = { ...activeConsultation, id: "c-waiting", state: "WAITING", assignedAdmin: null, conversationId: null, messageScopeState: undefined, lastMessageAt: null, user: { id: "user-b", name: "用户 B", username: "user-b" } };
+const waitingConsultation = { ...activeConsultation, id: "c-waiting", threadId: "thread-b", roundId: "c-waiting", roundSeq: 1, threadState: "WAITING", state: "WAITING", assignedAdmin: null, conversationId: null, messageScopeState: undefined, canSend: false, lastMessageAt: null, user: { id: "user-b", name: "用户 B", username: "user-b" } };
 
 test("chat header and queue follow the real selected consultation", async (t) => {
   fixture = { consultations: [activeConsultation, waitingConsultation], history: [], post: null };
@@ -127,7 +129,7 @@ test("chat header and queue follow the real selected consultation", async (t) =>
   assert.ok(rootNode.querySelector(".im-wb-viewport"), "viewport renders inside the scroller");
   assert.equal(rootNode.querySelectorAll(".im-wb-row").length, 1, "the default filter lists only my own sessions");
   assert.equal(rootNode.querySelector(".im-wb-chat-title h2").textContent, "用户 A · 平台咨询", "title comes from the selected consultation");
-  assert.match(rootNode.querySelector(".im-wb-chat-title span").textContent, /当前接待：客服 A/);
+  assert.match(rootNode.querySelector(".im-wb-chat-title span").textContent, /第 3 轮接待 · 客服 A/);
 
   // The unassigned consultation must be reachable and must not invent an input.
   await act(async () => { [...rootNode.querySelectorAll(".im-wb-filters button")].find((b) => b.textContent.includes("待接待")).click(); });
@@ -138,8 +140,31 @@ test("chat header and queue follow the real selected consultation", async (t) =>
   await act(async () => { rows[0].click(); });
   await settle();
   assert.equal(rootNode.querySelector(".im-wb-chat-title h2").textContent, "用户 B · 平台咨询");
-  assert.match(rootNode.querySelector(".im-wb-chat-title span").textContent, /等待客服接待/);
+  assert.match(rootNode.querySelector(".im-wb-chat-title span").textContent, /第 1 轮接待 · 等待客服接入/);
   assert.equal(rootNode.querySelector("textarea").disabled, true, "a waiting consultation cannot be replied to");
+});
+
+test("an active round assigned to another admin is read-only with a stated reason", async (t) => {
+  const otherAdminsRound = {
+    ...activeConsultation,
+    id: "c-other", roundId: "c-other", roundSeq: 4,
+    assignedAdmin: { id: "admin-b", name: "客服 B" },
+    canSend: false,
+  };
+  fixture = { consultations: [otherAdminsRound], history: [], post: null };
+  const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept"]) });
+  await waitFor(() => Boolean(rootNode.querySelector(".im-wb-chat-title h2")));
+
+  assert.equal(rootNode.querySelector("textarea").disabled, true, "a non-responsible admin cannot type a reply");
+  assert.equal(rootNode.querySelector(".im-wb-send").disabled, true, "a non-responsible admin cannot send");
+  assert.equal(rootNode.querySelector('[data-action="close-consultation"]'), null, "only the responsible admin can end the round");
+  const reason = rootNode.querySelector('[data-action="support-readonly"]');
+  assert.ok(reason, "the read-only state explains itself instead of silently disabling the composer");
+  assert.match(reason.textContent, /只读查看/);
+  assert.match(reason.textContent, /客服 B/);
+  assert.match(reason.textContent, /仅负责客服可发送消息或结束本轮/);
+  assert.match(rootNode.querySelector(".im-wb-chat-title span").textContent, /第 4 轮接待 · 客服 B/);
+  assert.match(rootNode.querySelector("textarea").placeholder, /本轮由 客服 B 接待，仅可只读查看/);
 });
 
 test("an empty conversation keeps its own identity instead of the unselected state", async (t) => {
@@ -410,7 +435,7 @@ test("the case column reads the account profile only through its own permission"
   await waitFor(() => /账号正常/.test(granted.rootNode.textContent));
   const aside = granted.rootNode.querySelector(".im-wb-details");
   assert.match(aside.textContent, /测试用户甲/, "the display name comes from the consultation context, not the list row");
-  assert.match(aside.textContent, /user-a/, "the stable user id is shown for addressing");
+  assert.doesNotMatch(aside.textContent, /user-a/, "the user UUID is never rendered in the rail");
   assert.match(aside.textContent, /已实名/);
   assert.match(aside.textContent, /138.{4}8000 · 未验证/, "the phone arrives pre-masked with its own verification state");
   assert.match(aside.textContent, /邮箱未绑定/, "an absent email says absent instead of disappearing");
@@ -449,7 +474,7 @@ test("a failed context read keeps the base identity and marks the subject unavai
   const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept"]) });
   await waitFor(() => /关联对象暂时不可读取/.test(rootNode.textContent));
   const details = rootNode.querySelector(".im-wb-details");
-  assert.match(details.textContent, /user-a/, "the list-projected user id remains available when context is unavailable");
+  assert.doesNotMatch(details.textContent, /user-a/, "a list-projected user UUID is not used as a fallback fact either");
   assert.match(details.textContent, /关联对象暂时不可读取/);
   assert.doesNotMatch(details.textContent, /尚未关联商品或订单/, "a failed context read is not turned into an absent subject");
 });
@@ -542,21 +567,113 @@ test("a failed profile read can be retried without restarting the IM client", as
   assert.equal(calls.slice(mark).every(call => call.method === "GET"), true, "retry only reads");
 });
 
-test("profile copying gives visible success and failure feedback", async (t) => {
+test("the admin user hover card reuses the authorized summary without exposing the user UUID", async (t) => {
   fixture = { consultations: [activeConsultation], history: [], post: null };
   profileFixture = FULL_PROFILE;
-  const previous = Object.getOwnPropertyDescriptor(browser.navigator, "clipboard");
-  let fail = false;
-  Object.defineProperty(browser.navigator, "clipboard", { configurable: true, value: { writeText: async () => { if (fail) throw new Error("Synthetic clipboard denied"); } } });
-  t.after(() => { if (previous) Object.defineProperty(browser.navigator, "clipboard", previous); else delete browser.navigator.clipboard; });
   const { rootNode } = await mount(t, { snapshot: snapshot([...IM_BASE, "user.directory.read"]) });
-  await waitFor(() => rootNode.querySelector('[aria-label="复制用户ID"]'));
-  await act(async () => rootNode.querySelector('[aria-label="复制用户ID"]').click());
-  await waitFor(() => /已复制用户ID/.test(rootNode.querySelector(".im-rail-copy-status")?.textContent ?? ""));
-  assert.equal(rootNode.querySelector(".im-rail-copy-status").classList.contains("sr-only"), false, "copy feedback is visible as well as announced");
-  fail = true;
-  await act(async () => rootNode.querySelector('[aria-label="复制用户ID"]').click());
-  await waitFor(() => /复制失败/.test(rootNode.querySelector(".im-rail-copy-status")?.textContent ?? ""));
+  await waitFor(() => /账号正常/.test(rootNode.textContent));
+  const aside = rootNode.querySelector(".im-wb-details");
+  assert.ok(aside.querySelector('[data-slot="hover-card-trigger"]'), "the nickname/avatar block is the existing admin hover-card trigger");
+  assert.equal(aside.querySelector('[aria-label="复制用户ID"]'), null, "the rail offers no UUID copy control");
+  assert.doesNotMatch(aside.textContent, /user-a/, "the user UUID never reaches the rail text");
+
+  const previewButton = aside.querySelector('[aria-label="预览用户 测试用户甲"]');
+  assert.ok(previewButton, "the touch/keyboard entry opens the same preview");
+  await act(async () => previewButton.click());
+  await waitFor(() => document.querySelector('[data-slot="popover-content"]'));
+  const popup = document.querySelector('[data-slot="popover-content"]');
+  assert.equal(popup.querySelector('[role="region"]')?.getAttribute("aria-label"), "用户预览：测试用户甲");
+  assert.match(popup.textContent, /138\*\*\*\*8000/, "the preview shows the same masked phone");
+  assert.match(popup.textContent, /已实名/);
+  assert.doesNotMatch(popup.textContent, /user-a/, "the preview card carries no UUID");
+  assert.equal(popup.querySelector('[aria-label^="复制用户"]'), null, "without a business number there is nothing to copy");
+  await act(async () => popup.dispatchEvent(new browser.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+});
+
+test("the rail starts with the user/risk summary instead of repeating the header's service facts", async (t) => {
+  fixture = { consultations: [activeConsultation], history: [], post: null };
+  profileFixture = FULL_PROFILE;
+  const { rootNode } = await mount(t, { snapshot: snapshot([...IM_BASE, "user.directory.read"]) });
+  await waitFor(() => /账号正常/.test(rootNode.textContent));
+  const aside = rootNode.querySelector(".im-wb-details");
+  const firstBlock = aside.children[1];
+  assert.equal(firstBlock?.getAttribute("data-slot"), "card", "the user/risk card is the first rail block");
+  assert.match(firstBlock.textContent, /测试用户甲/);
+  assert.match(firstBlock.textContent, /账号正常/);
+  assert.doesNotMatch(aside.textContent, /本次服务|发起时间|服务状态/, "type/status/assignee are left to the chat header");
+  assert.equal(aside.querySelector('[aria-label="投诉摘要"]'), null, "a service consultation has no complaint summary");
+  assert.match(rootNode.querySelector(".im-wb-chat-head").textContent, /平台咨询/);
+  assert.match(rootNode.querySelector(".im-wb-chat-head").textContent, /第 3 轮接待 · 客服 A/);
+});
+
+test("user/risk summary names freeze and internal risk while keeping contacts masked", async (t) => {
+  fixture = { consultations: [activeConsultation], history: [], post: null };
+  profileFixture = { user: { ...FULL_PROFILE.user, accountStatus: "RESTRICTED", suspended: true, riskFlag: true } };
+  const { rootNode } = await mount(t, { snapshot: snapshot([...IM_BASE, "user.directory.read", "order.read", "supply.rental_account.read"]) });
+  await waitFor(() => /账号受限/.test(rootNode.textContent));
+  const aside = rootNode.querySelector(".im-wb-details");
+  assert.match(aside.textContent, /已冻结/, "suspension is named on its own, not folded into a friendlier status");
+  assert.match(aside.textContent, /内部高危/, "only an explicit risk flag is shown; unflagged is never called safe");
+  assert.match(aside.textContent, /138\*\*\*\*8000/);
+  assert.match(aside.textContent, /a\*\*\*@example\.com/);
+  assert.match(aside.textContent, /进行中订单18 单/);
+  assert.match(aside.textContent, /名下资源账号4 个/);
+  assert.doesNotMatch(aside.textContent, /user-a/, "risk facts do not add the UUID back");
+  profileFixture = FULL_PROFILE;
+});
+
+test("a complaint rail adds a compact summary that states its projection gaps instead of inventing them", async (t) => {
+  const complaint = { ...activeConsultation, id: "c-complaint", type: "COMPLAINT", subjectRef: "order-ref-9", user: { id: "user-c", name: "投诉用户", username: "user-c" } };
+  fixture = {
+    consultations: [complaint], history: [], post: null,
+    events: [
+      { id: "ev-c1", type: "CREATED", occurredAt: "2026-09-17T00:00:00.000Z", actor: { kind: "user", displayName: "投诉用户" }, from: null, to: null },
+      { id: "ev-c2", type: "TRANSFERRED", occurredAt: "2026-09-17T00:05:00.000Z", actor: { kind: "admin", displayName: "客服 A" }, from: { displayName: "客服 A" }, to: { displayName: "客服 B" } },
+    ],
+  };
+  profileFixture = FULL_PROFILE;
+  const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "user.directory.read"]) });
+  await waitFor(() => rootNode.querySelector('[aria-label="投诉摘要"]'));
+  await waitFor(() => /最近节点：转交/.test(rootNode.textContent));
+  const summary = rootNode.querySelector('[aria-label="投诉摘要"]');
+  assert.match(summary.textContent, /投诉类型投诉反馈/);
+  assert.match(summary.textContent, /处理状态处理中/);
+  assert.match(summary.textContent, /投诉原因会话投影未提供投诉原因/, "the missing reason is stated, never filled in");
+  assert.match(summary.textContent, /关联订单\/账号已关联引用；投影未提供类型与业务单号/);
+  assert.match(summary.textContent, /最近处理结果最近节点：转交/);
+  assert.match(summary.textContent, /处理结论未在投影中提供/, "an event node is not dressed up as a resolution");
+  assert.match(summary.textContent, /subject_ref/, "the exact gap names the untyped reference");
+  assert.doesNotMatch(summary.textContent, /order-ref-9/, "the raw reference may be a UUID and is not printed");
+  assert.doesNotMatch(rootNode.querySelector(".im-wb-card").textContent, /关联对象/, "the complaint summary owns the related-object line; the user card does not repeat it");
+});
+
+const handlingEvents = [
+  { id: "ev-h1", type: "CREATED", occurredAt: "2026-09-17T00:00:00.000Z", actor: { kind: "user", displayName: "用户 A" }, from: null, to: null },
+  { id: "ev-h2", type: "CLAIMED", occurredAt: "2026-09-17T00:01:00.000Z", actor: { kind: "admin", displayName: "客服 A" }, from: null, to: { displayName: "客服 A" } },
+  { id: "ev-h3", type: "TRANSFERRED", occurredAt: "2026-09-17T00:02:00.000Z", actor: { kind: "admin", displayName: "客服 A" }, from: { displayName: "客服 A" }, to: { displayName: "客服 B" } },
+  { id: "ev-h4", type: "CLOSED", occurredAt: "2026-09-17T00:03:00.000Z", actor: { kind: "admin", displayName: "客服 B" }, from: null, to: null },
+];
+
+test("the handling log starts at the latest two events and 查看全部 opens the full timeline", async (t) => {
+  fixture = { consultations: [activeConsultation], history: [], post: null, events: handlingEvents };
+  const { rootNode } = await mount(t, { snapshot: snapshot([...IM_BASE, "user.directory.read"]) });
+  await waitFor(() => rootNode.querySelectorAll(".im-wb-event").length === 4);
+  const rows = () => [...rootNode.querySelectorAll(".im-wb-event")];
+  const visible = () => rows().filter((row) => !row.hidden);
+  assert.equal(rows().length, 4, "the real timeline is still the only source");
+  assert.deepEqual(visible().map((row) => row.getAttribute("data-type")), ["TRANSFERRED", "CLOSED"], "only the latest two are expanded by default");
+  assert.equal(rows()[0].hidden, true, "earlier events are collapsed, not dropped");
+  const toggle = rootNode.querySelector('[data-action="toggle-events"]');
+  assert.match(toggle.textContent, /查看全部/);
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  await act(async () => toggle.click());
+  await settle();
+  assert.equal(visible().length, 4, "查看全部 reveals the full loaded timeline");
+  assert.match(toggle.textContent, /收起处理记录/);
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  await act(async () => toggle.click());
+  await settle();
+  assert.equal(visible().length, 2, "the log can collapse back to the latest two");
 });
 
 test("missing profile summaries remain unavailable rather than zero or a false permission denial", async (t) => {

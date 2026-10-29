@@ -371,17 +371,17 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
 
   const task = useMemo(() => {
     switch (stage.key) {
-      case "needs-opening": return { title: "待核对期初", note: "尚未正式开租。按本单冻结库存核对数量后录入期初。", action: "核对并录入期初" };
-      case "opening-pending": return { title: "等待双方确认期初", note: `期初清单 v${latestOpening?.versionNo ?? "?"}。客服不能代替买卖双方确认。`, action: "查看期初清单" };
-      case "intake-pending": return { title: "有结束申请待处理", note: "先核对归还数量与原因，再生成服务端结算预览。", action: "打开核对面板" };
-      case "needs-settlement": return { title: "履约中 · 等待结算", note: "正常结算由买卖双方提交并互相确认；客服只处理提前分类与人工调整。", action: "打开核对面板" };
-      case "awaiting-decision": return { title: "等待双方确认结算", note: `结算版本 v${current?.versionNo ?? "?"}。数量与金额以该版本服务端结果为准。`, action: "查看本版明细" };
-      case "needs-review": return { title: "待客服复核", note: "双方已确认同一版本；核对数量与金额后复核。", action: "打开复核面板" };
-      case "reviewed": return { title: "已复核，等待生效", note: "复核已完成；生效以服务端过账结果为准。", action: "查看结算明细" };
-      case "normal-version": return { title: "正常结算版本", note: "双方同版确认后的正常结算。", action: "查看结算明细" };
-      default: return { title: "已过账", note: "金额已生效；应退与到期不代表渠道退款已到账。", action: "查看过账明细" };
+      case "needs-opening": return { title: "待核对期初", action: "核对并录入期初" };
+      case "opening-pending": return { title: "等待双方确认期初", action: "查看期初清单" };
+      case "intake-pending": return { title: "有结束申请待处理", action: "打开核对面板" };
+      case "needs-settlement": return { title: "履约中 · 等待结算", action: "打开核对面板" };
+      case "awaiting-decision": return { title: "等待双方确认结算", action: "查看本版明细" };
+      case "needs-review": return { title: "待客服复核", action: "打开复核面板" };
+      case "reviewed": return { title: "已复核，等待生效", action: "查看结算明细" };
+      case "normal-version": return { title: "正常结算版本", action: "查看结算明细" };
+      default: return { title: "已过账", action: "查看过账明细" };
     }
-  }, [stage.key, latestOpening?.versionNo, current?.versionNo]);
+  }, [stage.key]);
 
   // 确认状态只认同一版本上的 ack/decision：新版本会让旧确认失效。
   const partyFacts = useMemo(() => {
@@ -548,12 +548,13 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
     </Card>;
   }
 
+  // 右栏只留任务入口：阶段、订单状态与版本确认由顶部阶段条与本核对面板承担，避免重复。
   return <><Card className="im-support-fulfillment im-order-card" data-stage={stage.key} aria-label="本单当前任务">
     <CardContent className="grid gap-2.5 p-4">
       <div className="flex items-start gap-3">
         <div className="grid min-w-0 flex-1 gap-1">
-          <CardTitle className="flex items-start gap-2 text-sm"><ClipboardList className="mt-0.5 size-4 shrink-0 text-primary" />{task.title}</CardTitle>
-          <CardDescription className="text-xs leading-relaxed">{task.note}</CardDescription>
+          <CardTitle className="flex items-start gap-2 text-sm"><ClipboardList className="mt-0.5 size-4 shrink-0 text-primary" />履约核对</CardTitle>
+          <CardDescription className="text-xs leading-relaxed">开租、结算与人工调整都以订单冻结事实为准；数量与版本在核对面板中确认，聊天不会改变订单状态。</CardDescription>
         </div>
         <div className="flex shrink-0 flex-col items-stretch gap-1.5">
           <Button size="sm" data-action="open-fulfillment-panel" onClick={() => setPanelOpen(true)}>{task.action}</Button>
@@ -561,27 +562,22 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
         </div>
       </div>
       {panelOpen ? null : statusMessages}
-      {partyFacts ? <div className="im-order-parties overflow-hidden rounded-lg border">
-        <div className="bg-muted/60 px-3 py-2 text-xs font-semibold text-muted-foreground">双方确认 · {partyFacts.version}</div>
-        <ItemGroup className="divide-y divide-border">
-          {partyFacts.rows.map((row) => <Item key={row.party} size="sm" className="gap-2 px-3 py-2">
-            <ItemContent><ItemTitle className="text-sm">{partyLabel(row.party)}</ItemTitle></ItemContent>
-            <ItemActions><Badge variant={row.confirmed ? "secondary" : "destructive"} data-state={row.confirmed ? "confirmed" : "pending"}>{row.confirmed ? "已确认" : "待确认"}</Badge></ItemActions>
-          </Item>)}
-        </ItemGroup>
-        <p className="px-3 py-2 text-xs text-muted-foreground">{supportReviewed ? "客服已复核本版本。" : "客服不能代替买卖双方确认。"}</p>
-      </div> : null}
-      <div className="flex flex-wrap items-center gap-1.5">
-        <Badge variant="outline">{view.rentalStarted === true ? "已开租" : view.rentalStarted === false ? "未开租" : "开租状态未知"}</Badge>
-        {view.currentRequest?.kind === "INTAKE" ? <Badge variant="destructive">有结算申请待处理</Badge> : null}
-        {posting ? <Badge variant="secondary">已过账{posting.early ? " · 提前" : ""}</Badge> : null}
-      </div>
     </CardContent>
 
     <Dialog open={panelOpen} onOpenChange={setPanelOpen}>
       <DialogContent className="im-order-panel" aria-label={task.title} showCloseButton={false}>
         <div className="im-wb-dialog-head"><div><strong>{task.title}</strong><span>订单 {displayNo} · {stage.label}</span></div><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setPanelOpen(false)} aria-label="关闭核对面板"><X size={14} /></button></div>
         {statusMessages}
+        {partyFacts ? <div className="im-order-parties overflow-hidden rounded-lg border">
+          <div className="bg-muted/60 px-3 py-2 text-xs font-semibold text-muted-foreground">双方确认 · {partyFacts.version}</div>
+          <ItemGroup className="divide-y divide-border">
+            {partyFacts.rows.map((row) => <Item key={row.party} size="sm" className="gap-2 px-3 py-2">
+              <ItemContent><ItemTitle className="text-sm">{partyLabel(row.party)}</ItemTitle></ItemContent>
+              <ItemActions><Badge variant={row.confirmed ? "secondary" : "destructive"} data-state={row.confirmed ? "confirmed" : "pending"}>{row.confirmed ? "已确认" : "待确认"}</Badge></ItemActions>
+            </Item>)}
+          </ItemGroup>
+          <p className="px-3 py-2 text-xs text-muted-foreground">{supportReviewed ? "客服已复核本版本。" : "客服不能代替买卖双方确认。"}</p>
+        </div> : null}
 
       {stage.key === "needs-opening" ? <div className="im-support-fulfillment-stage-panel">
         <strong>第一步：期初代录</strong>

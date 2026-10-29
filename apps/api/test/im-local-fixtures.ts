@@ -1,8 +1,16 @@
+import { createHash } from "node:crypto";
+
 import {
   ImTransportRequestError,
+  IM_TRANSPORT_MEDIA_LIMITS,
+  IM_TRANSPORT_MEDIA_MESSAGE_TYPES,
+  isImTransportMediaMimeType,
   type ImMessageTransport,
   type ImOrderImageScope,
+  type ImOrderMediaScope,
   type ImTransportImage,
+  type ImTransportMediaFile,
+  type ImTransportMediaKind,
   type ImTransportMessage,
   type ImTransportMessageReference,
   type ImTransportReply,
@@ -35,10 +43,11 @@ import { OrderTeamTransport } from "./order-team-fixtures";
 export class InMemoryMessageTransport implements ImMessageTransport {
   private readonly messages = new Map<string, ImTransportMessage[]>();
   private readonly images = new Map<string, ImTransportImage>();
+  private readonly media = new Map<string, ImTransportMediaFile>();
   /** Per-viewer local hides; the shared team log is never mutated. */
   private readonly hidden = new Map<string, Map<string, Set<string>>>();
   private nextId = 1;
-  readonly calls = { history: 0, sendText: 0, sendImage: 0, replyText: 0, revoke: 0, hideForViewer: 0, readImage: 0, card: 0 };
+  readonly calls = { history: 0, sendText: 0, sendImage: 0, sendMedia: 0, replyText: 0, revoke: 0, hideForViewer: 0, readImage: 0, readMedia: 0, card: 0 };
 
   constructor(private readonly now: () => number = Date.now) {}
 
@@ -73,7 +82,9 @@ export class InMemoryMessageTransport implements ImMessageTransport {
   }
 
   private replyOf(target: ImTransportMessage): ImTransportReply {
-    const text = target.messageType === 1 ? "[图片]" : (target.text ?? "").slice(0, 120);
+    const text = target.messageType === 1 ? "[图片]" : target.media
+      ? (target.media.kind === "video" ? "[视频]" : target.media.kind === "file" ? "[文件]" : "[语音]")
+      : (target.text ?? "").slice(0, 120);
     return {
       messageId: this.messageKey(target),
       senderId: target.senderId,
@@ -162,6 +173,7 @@ export class InMemoryMessageTransport implements ImMessageTransport {
     target.revoked = true;
     target.text = "";
     delete target.attachment;
+    delete target.media;
     delete target.reply;
     return { ...target, conversationId: input.conversationId };
   }
@@ -223,6 +235,87 @@ export class InMemoryMessageTransport implements ImMessageTransport {
   async readImage(input: { imageId: string; scope: ImOrderImageScope; viewerAccountId: string }): Promise<ImTransportImage | null> {
     this.calls.readImage += 1;
     return this.images.get(input.imageId) ?? null;
+  }
+
+  async sendMedia(input: {
+    conversationId: string;
+    scope: ImOrderMediaScope;
+    senderAccountId: string;
+    receiverAccountId: string;
+    messageClientId: string;
+    kind: ImTransportMediaKind;
+    name: string;
+    mimeType: string;
+    size: number;
+    body: Uint8Array;
+    width?: number;
+    height?: number;
+    durationMs?: number;
+  }): Promise<ImTransportMessage> {
+    this.calls.sendMedia += 1;
+    if (input.scope.teamId !== this.teamKey(input.conversationId)) {
+      throw new ImTransportRequestError(403, "Media scope does not match the conversation");
+    }
+    if (!Number.isInteger(input.size) || input.size < 1 || input.size > IM_TRANSPORT_MEDIA_LIMITS[input.kind].maxBytes) {
+      throw new ImTransportRequestError(400, "Media size is outside the allowed range");
+    }
+    if (!isImTransportMediaMimeType(input.kind, input.mimeType)) {
+      throw new ImTransportRequestError(400, "Media MIME type is invalid");
+    }
+    if (input.body.length !== input.size) throw new ImTransportRequestError(400, "Media payload is invalid");
+    const rows = this.messages.get(this.teamKey(input.conversationId)) ?? [];
+    // The caller-owned client id makes a retried send return the first message.
+    const existing = rows.find((row) => row.messageClientId === input.messageClientId);
+    if (existing) {
+      if (!existing.media || existing.media.kind !== input.kind || existing.senderId !== input.senderAccountId) {
+        throw new ImTransportRequestError(409, "Message client id is already used");
+      }
+      return { ...existing, conversationId: input.conversationId };
+    }
+    const mediaId = `fixture-media-${createHash("sha256").update(`${input.scope.teamId}:${input.messageClientId}`).digest("hex").slice(0, 32)}`;
+    this.media.set(mediaId, {
+      mediaId,
+      scope: input.scope,
+      kind: input.kind,
+      name: input.name,
+      mimeType: input.mimeType,
+      body: input.body,
+    });
+    const id = this.nextMessageId();
+    const message: ImTransportMessage = {
+      messageClientId: input.messageClientId,
+      messageServerId: `fixture-server-${id}`,
+      conversationId: input.conversationId,
+      senderId: input.senderAccountId,
+      receiverId: input.receiverAccountId,
+      createTime: this.now(),
+      messageType: IM_TRANSPORT_MEDIA_MESSAGE_TYPES[input.kind],
+      media: {
+        mediaId,
+        kind: input.kind,
+        name: input.name,
+        mimeType: input.mimeType,
+        size: input.size,
+        ...(input.width === undefined ? {} : { width: input.width }),
+        ...(input.height === undefined ? {} : { height: input.height }),
+        ...(input.durationMs === undefined ? {} : { durationMs: input.durationMs }),
+      },
+    };
+    return this.appendMessage(input.conversationId, message);
+  }
+
+  async getMediaScope(mediaId: string): Promise<{ mediaId: string; scope: ImOrderMediaScope } | null> {
+    const media = this.media.get(mediaId);
+    return media ? { mediaId, scope: media.scope } : null;
+  }
+
+  async readMedia(input: { mediaId: string; scope: ImOrderMediaScope; viewerAccountId: string }): Promise<ImTransportMediaFile | null> {
+    this.calls.readMedia += 1;
+    const media = this.media.get(input.mediaId);
+    if (!media) return null;
+    const scope = input.scope;
+    if (media.scope.appId !== scope.appId || media.scope.orderId !== scope.orderId || media.scope.teamId !== scope.teamId) return null;
+    return media;
   }
 }
 

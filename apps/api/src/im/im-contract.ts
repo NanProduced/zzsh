@@ -22,6 +22,66 @@ export type ImTransportCard = {
   cardId: string;
 };
 
+export type ImTransportMediaKind = "video" | "file" | "audio";
+
+/**
+ * Local-fake limits. Real NIM/cloud-storage upload is a separate provider
+ * seam; these bounds only describe what this API surface accepts today.
+ */
+export const IM_TRANSPORT_MEDIA_LIMITS = {
+  video: {
+    maxBytes: 100 * 1024 * 1024,
+    mimeTypes: ["video/mp4", "video/quicktime", "video/webm"],
+  },
+  file: {
+    maxBytes: 50 * 1024 * 1024,
+    mimeTypes: [
+      "application/pdf",
+      "application/zip",
+      "text/plain",
+      "text/csv",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ],
+  },
+  audio: {
+    maxBytes: 20 * 1024 * 1024,
+    mimeTypes: ["audio/mpeg", "audio/mp4", "audio/aac", "audio/ogg", "audio/wav"],
+  },
+} as const satisfies Record<ImTransportMediaKind, { maxBytes: number; mimeTypes: readonly string[] }>;
+
+export const IM_TRANSPORT_MEDIA_MESSAGE_TYPES: Record<ImTransportMediaKind, 2 | 3 | 6> = {
+  audio: 2,
+  video: 3,
+  file: 6,
+};
+
+export function isImTransportMediaKind(value: unknown): value is ImTransportMediaKind {
+  return value === "video" || value === "file" || value === "audio";
+}
+
+export function isImTransportMediaMimeType(kind: ImTransportMediaKind, mimeType: unknown): mimeType is string {
+  return typeof mimeType === "string"
+    && (IM_TRANSPORT_MEDIA_LIMITS[kind].mimeTypes as readonly string[]).includes(mimeType);
+}
+
+/**
+ * Safe, server-owned media metadata. `url` is only filled by the authorized
+ * API response; clients never supply it in a send body.
+ */
+export type ImTransportMedia = {
+  mediaId: string;
+  kind: ImTransportMediaKind;
+  name: string;
+  mimeType: string;
+  size: number;
+  width?: number;
+  height?: number;
+  durationMs?: number;
+  url?: string;
+};
+
 export type ImTransportMessage = {
   messageClientId: string;
   messageServerId: string;
@@ -30,7 +90,7 @@ export type ImTransportMessage = {
   receiverId: string;
   createTime: number;
   text?: string;
-  messageType: 0 | 1;
+  messageType: 0 | 1 | 2 | 3 | 6;
   reply?: ImTransportReply;
   revoked?: boolean;
   card?: ImTransportCard;
@@ -43,6 +103,7 @@ export type ImTransportMessage = {
     width?: number;
     height?: number;
   };
+  media?: ImTransportMedia;
 };
 
 export type ImTransportMessageReference = {
@@ -67,10 +128,26 @@ export type ImOrderImageScope = {
   teamId: string;
 };
 
+/** Same order/conversation grant as images; named for the media seam. */
+export type ImOrderMediaScope = {
+  appId: string;
+  orderId: string;
+  teamId: string;
+};
+
 export type ImTransportImage = {
   imageId: string;
   scope: ImOrderImageScope;
   mimeType: "image/jpeg" | "image/png";
+  body: Uint8Array;
+};
+
+export type ImTransportMediaFile = {
+  mediaId: string;
+  scope: ImOrderMediaScope;
+  kind: ImTransportMediaKind;
+  name: string;
+  mimeType: string;
   body: Uint8Array;
 };
 
@@ -79,12 +156,15 @@ export type ImMessageTransport = {
   history(input: { conversationId: string; viewerAccountId: string; limit: number; before?: string }): Promise<ImTransportMessage[]>;
   sendText(input: { conversationId: string; senderAccountId: string; receiverAccountId: string; text: string; messageClientId?: string }): Promise<ImTransportMessage>;
   sendImage?(input: { conversationId: string; scope: ImOrderImageScope; senderAccountId: string; receiverAccountId: string; messageClientId: string; name: string; mimeType: "image/jpeg" | "image/png"; size: number; body: Uint8Array; width?: number; height?: number }): Promise<ImTransportMessage>;
+  sendMedia?(input: { conversationId: string; scope: ImOrderMediaScope; senderAccountId: string; receiverAccountId: string; messageClientId: string; kind: ImTransportMediaKind; name: string; mimeType: string; size: number; body: Uint8Array; width?: number; height?: number; durationMs?: number }): Promise<ImTransportMessage>;
   card?(input: { conversationId: string; senderAccountId: string; receiverAccountId: string; card: ImTransportCard }): Promise<ImTransportMessage>;
   replyText?(input: { conversationId: string; senderAccountId: string; receiverAccountId: string; text: string; replyTo: ImTransportMessageReference }): Promise<ImTransportMessage>;
   revoke?(input: { conversationId: string; viewerAccountId: string; message: ImTransportMessageReference }): Promise<ImTransportMessage>;
   hideForViewer?(input: { conversationId: string; viewerAccountId: string; message: ImTransportMessageReference }): Promise<void>;
   getImageScope?(imageId: string): Promise<{ imageId: string; scope: ImOrderImageScope } | null>;
   readImage?(input: { imageId: string; scope: ImOrderImageScope; viewerAccountId: string }): Promise<ImTransportImage | null>;
+  getMediaScope?(mediaId: string): Promise<{ mediaId: string; scope: ImOrderMediaScope } | null>;
+  readMedia?(input: { mediaId: string; scope: ImOrderMediaScope; viewerAccountId: string }): Promise<ImTransportMediaFile | null>;
 };
 
 export type ImRoutingBlocker =

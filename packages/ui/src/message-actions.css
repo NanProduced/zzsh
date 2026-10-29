@@ -1,6 +1,6 @@
 /* Shared message menu and reply quote. Values fall back across the user site
    tokens (--color-*) and the admin theme tokens (--background/--foreground). */
-.message-action-menu{position:fixed;z-index:70;min-width:148px;padding:4px;display:grid;gap:2px;border:1px solid var(--color-border-default,var(--border,#c8d0da));border-radius:9px;background:var(--color-bg-surface,var(--background,#fff));color:var(--color-text-primary,var(--foreground,inherit));box-shadow:var(--shadow-lg,0 12px 32px rgb(15 23 42 / 18%))}
+.message-action-menu{position:fixed;z-index:130;min-width:148px;padding:4px;display:grid;gap:2px;border:1px solid var(--color-border-default,var(--border,#c8d0da));border-radius:9px;background:var(--color-bg-surface,var(--background,#fff));color:var(--color-text-primary,var(--foreground,inherit));box-shadow:var(--shadow-lg,0 12px 32px rgb(15 23 42 / 18%))}
 .message-action-menu-item{display:flex;align-items:center;gap:8px;width:100%;padding:8px 12px;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit;font-size:13px;line-height:1.4;text-align:left;white-space:nowrap;cursor:pointer}
 .message-action-icon{display:inline-grid;flex:none;width:14px;height:14px;place-items:center;opacity:.8}
 .message-action-menu-item:hover,.message-action-menu-item:focus-visible{background:color-mix(in srgb,currentColor 9%,transparent);outline:none}
@@ -16,7 +16,6 @@
 .message-quoted-sender{font-weight:600;margin-right:2px;opacity:.9}
 .message-quote-target{background:color-mix(in srgb,var(--ring,#38bdf8) 14%,transparent)!important;border-radius:8px;transition:background .2s ease}
 .order-team-message-revoked{padding:10px 12px;margin:5px 0;border-radius:9px;border:1px dashed var(--ot-border,currentColor);color:var(--ot-muted,inherit);font-style:normal;background:transparent}
-.support-message-quote{display:block;margin:0 0 4px;padding:2px 6px;border-left:2px solid currentColor;opacity:.72;font-size:12px}
 .support-message-bubble[data-revoked=true]{border:1px dashed var(--color-border-default,currentColor);color:var(--color-text-muted,inherit);background:transparent;font-style:normal}
 .chat-emoji-grid{display:grid;grid-template-columns:repeat(6,34px);gap:2px;padding:4px}
 .chat-emoji-button{display:grid;width:34px;height:34px;place-items:center;border:0;border-radius:6px;background:transparent;font-size:20px;line-height:1;cursor:pointer}

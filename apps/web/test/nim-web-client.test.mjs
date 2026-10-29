@@ -5,8 +5,11 @@ import {
   createNimWebClientFactory,
   mergeImMessages,
   NimImageSendError,
+  NimMediaSendError,
   NimTextSendError,
+  parseNimMessageMedia,
   resolveNimSdkModule,
+  validateNimMediaFile,
 } from "../src/lib/nim-web-client.ts";
 import { ImLifecycleSupersededError } from "../src/lib/im-client-lifecycle.ts";
 
@@ -758,4 +761,327 @@ test("message state clears revoked content and never resurrects it from stale hi
   const [stale] = mergeImMessages([revoked], [{ id: "s1", createTime: 1, text: "stale page" }]);
   assert.equal(stale.revoked, true);
   assert.equal(stale.text, "");
+
+  const [media] = mergeImMessages(
+    [{ id: "m2", createTime: 2, media: { mediaId: "media-1", kind: "video", name: "clip.mp4", mimeType: "video/mp4", size: 3 } }],
+    [{ id: "m2", createTime: 2, media: { url: "/api/im/media/media-1" } }],
+  );
+  assert.equal(media.media.url, "/api/im/media/media-1");
+  assert.equal(media.media.kind, "video");
+  const [mediaRevoked] = mergeImMessages([media], [{ id: "m2", createTime: 2, revoked: true }]);
+  assert.equal(mediaRevoked.media, undefined);
+});
+
+test("media metadata mapping keeps only bounded safe fields", () => {
+  const safe = {
+    mediaId: "fixture-media-1",
+    kind: "video",
+    name: "clip.mp4",
+    mimeType: "video/mp4",
+    size: 3,
+    width: 640,
+    height: 360,
+    durationMs: 1_500,
+    url: "/api/im/media/fixture-media-1",
+    extra: "discarded",
+  };
+  assert.deepEqual(parseNimMessageMedia(safe), {
+    mediaId: "fixture-media-1",
+    kind: "video",
+    name: "clip.mp4",
+    mimeType: "video/mp4",
+    size: 3,
+    width: 640,
+    height: 360,
+    durationMs: 1_500,
+    url: "/api/im/media/fixture-media-1",
+  });
+  const remote = "https://nos.example/uploads/fixture-media-1";
+  assert.equal(parseNimMessageMedia({ ...safe, url: remote }).url, remote);
+  for (const url of [
+    "javascript:alert(1)",
+    "data:text/plain,hi",
+    "http://nos.example/uploads/fixture-media-1",
+    "/media/fixture-media-1",
+    "//nos.example/uploads/fixture-media-1",
+    "https://user:pass@nos.example/uploads/fixture-media-1",
+    "https://nos.example/uploads/fixture media-1",
+    `https://nos.example/${"a".repeat(2048)}`,
+  ]) {
+    assert.equal(parseNimMessageMedia({ ...safe, url }).url, undefined, url);
+  }
+  assert.equal(parseNimMessageMedia({ ...safe, kind: "image" }), undefined);
+  assert.equal(parseNimMessageMedia({ ...safe, mimeType: "application/x-msdownload" }), undefined);
+  assert.equal(parseNimMessageMedia({ ...safe, size: 100 * 1024 * 1024 + 1 }), undefined);
+  assert.equal(parseNimMessageMedia({ ...safe, height: undefined }), undefined);
+  assert.equal(parseNimMessageMedia({ ...safe, name: "clip\u0000.mp4" }), undefined);
+  assert.equal(validateNimMediaFile(new File([new Uint8Array([1])], "voice.mp3", { type: "audio/mpeg" }), "audio"), "audio/mpeg");
+  assert.throws(() => validateNimMediaFile(new File([new Uint8Array([1])], "run.exe", { type: "application/x-msdownload" }), "file"), /不支持该媒体格式/);
+});
+
+test("local fake media transport posts bounded base64, maps safe metadata and retries the same client ID", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  let first = true;
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url, init });
+    if (first) {
+      first = false;
+      throw new Error("local transport interrupted");
+    }
+    const body = JSON.parse(init.body);
+    return Response.json({ message: {
+      messageClientId: body.media.messageClientId,
+      messageServerId: "fixture-server-media-1",
+      conversationId: body.conversationId,
+      senderId: "customer-local-media",
+      receiverId: "9001",
+      createTime: 1,
+      messageType: 3,
+      media: {
+        mediaId: "fixture-media-abc",
+        kind: body.media.kind,
+        name: body.media.name,
+        mimeType: body.media.mimeType,
+        size: body.media.size,
+        width: body.media.width,
+        height: body.media.height,
+        durationMs: body.media.durationMs,
+        url: "/api/im/media/fixture-media-abc",
+        unsafeExtra: true,
+      },
+    } });
+  };
+  try {
+    const state = testContext("customer-local-media");
+    const handle = await createLocalFakeNimWebClientFactory({ endpoint: "/api/im/messages", accountId: "customer-local-media" })(state.context);
+    const file = new File([new Uint8Array([1, 2, 3])], "clip.mp4", { type: "video/mp4" });
+    await assert.rejects(
+      handle.client.sendMedia("customer-local-media|2|9001", file, "video", { width: 640, height: 360, durationMs: 1_500 }),
+      (error) => error instanceof NimMediaSendError && error.kind === "UNKNOWN" && Boolean(error.messageClientId),
+    );
+    const firstBody = JSON.parse(requests[0].init.body);
+    const clientId = firstBody.media.messageClientId;
+    assert.equal(firstBody.media.kind, "video");
+    assert.equal(firstBody.media.size, 3);
+    assert.equal(firstBody.media.width, 640);
+    assert.equal(firstBody.media.durationMs, 1_500);
+    assert.match(firstBody.media.data, /^[A-Za-z0-9+/]+=*$/);
+    const reply = await handle.client.retryMedia("customer-local-media|2|9001", clientId);
+    const retryBody = JSON.parse(requests[1].init.body);
+    assert.equal(retryBody.media.messageClientId, clientId);
+    assert.equal(reply.media.mediaId, "fixture-media-abc");
+    assert.equal(reply.media.url, "/api/im/media/fixture-media-abc");
+    assert.equal(reply.media.unsafeExtra, undefined);
+    assert.equal(requests[0].url, "/api/im/messages");
+    await handle.dispose();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("real media adapter calls the V2 creators, reports progress, and retries the same message after an unknown result", async () => {
+  const sent = [];
+  const created = [];
+  const messageService = {
+    on() {},
+    off() {},
+    async sendMessage(message, conversationId, params, progress) {
+      sent.push({ message, conversationId, params });
+      progress?.(37);
+      return { message: { ...message, conversationId, senderId: "customer-media-real", receiverId: "9001", createTime: 2, attachment: { ...message.attachment, url: `https://nos.example/uploads/${message.messageClientId}` } } };
+    },
+  };
+  const messageCreator = {
+    createTextMessage: (text) => ({ messageClientId: "text-media", text, messageType: 0 }),
+    createVideoMessage(file, name, sceneName, duration, width, height) {
+      const message = { messageClientId: "video-client-1", messageType: 3, attachment: { name, size: file.size, ext: "mp4", file } };
+      created.push({ kind: "video", file, name, sceneName, duration, width, height, message });
+      return message;
+    },
+    createAudioMessage(file, name, sceneName, duration) {
+      const message = { messageClientId: "audio-client-2", messageType: 2, attachment: { name, size: file.size, ext: "aac", file } };
+      created.push({ kind: "audio", file, name, sceneName, duration, message });
+      return message;
+    },
+    createFileMessage(file, name, sceneName) {
+      const message = { messageClientId: "file-client-3", messageType: 6, attachment: { name, size: file.size, ext: "pdf", file } };
+      created.push({ kind: "file", file, name, sceneName, message });
+      return message;
+    },
+  };
+  const { sdk } = fakeSdk({ messageService, messageCreator, storageService: {} });
+  const authorizations = [];
+  const progress = [];
+  const handle = await createNimWebClientFactory({ appKey: "test-app-key", token: "test-token" }, async () => sdk)(testContext("customer-media-real").context);
+  const conversationId = "customer-media-real|2|9001";
+  const grant = { appId: "test-app", orderId: "order-media", teamId: "9001", conversationId, routeEnvironment: "oim4d-test" };
+  const params = { routeConfig: { routeEnabled: true, routeEnvironment: "oim4d-test" } };
+  const authorize = async (input) => { authorizations.push(input); return grant; };
+  const video = new File([new Uint8Array([1, 2, 3])], "clip.mp4", { type: "video/mp4" });
+  const beforeValidation = created.length;
+  await assert.rejects(handle.client.sendMedia(conversationId, new File([new Uint8Array([1])], "run.exe", { type: "application/x-msdownload" }), "file"), /不支持该媒体格式/);
+  await assert.rejects(handle.client.sendMedia(conversationId, video, "video", { width: 640 }), /视频宽高必须同时提供/);
+  await assert.rejects(handle.client.sendMedia(conversationId, video, "file"), /不支持该媒体格式/);
+  assert.equal(created.length, beforeValidation, "invalid media never reaches the SDK creators");
+
+  let failVideo = true;
+  messageService.sendMessage = async (message, id, sendParams, onProgress) => {
+    sent.push({ message, conversationId: id, params: sendParams });
+    onProgress?.(37);
+    if (message.messageType === 3 && failVideo) {
+      failVideo = false;
+      throw new Error("connection lost after upload");
+    }
+    return { message: { ...message, conversationId: id, senderId: "customer-media-real", receiverId: "9001", createTime: 2, attachment: { ...message.attachment, url: `https://nos.example/uploads/${message.messageClientId}` } } };
+  };
+  await assert.rejects(
+    handle.client.sendMedia(conversationId, video, "video", { authorize, width: 640, height: 360, durationMs: 1_500, onProgress: (value) => progress.push(value) }),
+    (error) => error instanceof NimMediaSendError && error.kind === "UNKNOWN" && error.messageClientId === "video-client-1",
+  );
+  assert.equal(created[0].kind, "video");
+  assert.equal(created[0].file, video);
+  assert.equal(created[0].name, "clip.mp4");
+  assert.equal(created[0].sceneName, undefined);
+  assert.equal(created[0].duration, 2, "milliseconds are passed to NIM as whole seconds");
+  assert.equal(created[0].width, 640);
+  assert.equal(created[0].height, 360);
+
+  const reply = await handle.client.retryMedia(conversationId, "video-client-1", { authorize, onProgress: (value) => progress.push(value) });
+  assert.equal(reply.messageType, 3);
+  assert.equal(sent[0].message, sent[1].message, "retry sends the same SDK message object");
+  assert.deepEqual(sent.map((call) => call.params), [params, params]);
+  assert.deepEqual(reply.media, {
+    mediaId: "nim-video-client-1",
+    kind: "video",
+    name: "clip.mp4",
+    mimeType: "video/mp4",
+    size: 3,
+    width: 640,
+    height: 360,
+    durationMs: 1_500,
+    url: "https://nos.example/uploads/video-client-1",
+  });
+  assert.deepEqual(reply.attachment, { name: "clip.mp4", size: 3, mimeType: "video/mp4", url: "https://nos.example/uploads/video-client-1" });
+  assert.deepEqual(progress, [0, 37, 0, 37, 100]);
+
+  const audio = new File([new Uint8Array([4, 5])], "voice.aac", { type: "audio/aac" });
+  const audioReply = await handle.client.sendMedia(conversationId, audio, "audio", { authorize, durationMs: 4_200 });
+  assert.equal(created[1].kind, "audio");
+  assert.equal(created[1].file, audio);
+  assert.equal(created[1].duration, 4);
+  assert.equal(created[1].width, undefined);
+  assert.equal(audioReply.messageType, 2);
+  assert.deepEqual(audioReply.media, {
+    mediaId: "nim-audio-client-2",
+    kind: "audio",
+    name: "voice.aac",
+    mimeType: "audio/aac",
+    size: 2,
+    durationMs: 4_200,
+    url: "https://nos.example/uploads/audio-client-2",
+  });
+
+  const file = new File([new Uint8Array([6])], "report.pdf", { type: "application/pdf" });
+  const fileReply = await handle.client.sendMedia(conversationId, file, "file", { authorize });
+  assert.equal(created[2].kind, "file");
+  assert.equal(created[2].file, file);
+  assert.equal(created[2].sceneName, undefined);
+  assert.equal(created[2].duration, undefined);
+  assert.equal(fileReply.messageType, 6);
+  assert.deepEqual(fileReply.media, {
+    mediaId: "nim-file-client-3",
+    kind: "file",
+    name: "report.pdf",
+    mimeType: "application/pdf",
+    size: 1,
+    url: "https://nos.example/uploads/file-client-3",
+  });
+  assert.deepEqual(authorizations, [
+    { conversationId, operation: "send" },
+    { conversationId, operation: "send" },
+    { conversationId, operation: "send" },
+    { conversationId, operation: "send" },
+  ]);
+  await assert.rejects(handle.client.retryMedia(conversationId, "missing-media"), (error) => error instanceof NimMediaSendError && error.kind === "FAILED");
+  await handle.dispose();
+});
+
+test("real NIM audio/video/file messages map into the safe media envelope and unsafe attachments are dropped", async () => {
+  const listeners = new Map();
+  const historyMessages = [];
+  const messageService = {
+    on(eventName, listener) { listeners.set(eventName, listener); },
+    off(eventName, listener) { if (listeners.get(eventName) === listener) listeners.delete(eventName); },
+    async getMessageList() { return historyMessages; },
+  };
+  const { sdk } = fakeSdk({ messageService, messageCreator: { createTextMessage: (text) => ({ messageClientId: "text-incoming", text }) } });
+  const handle = await createNimWebClientFactory({ appKey: "test-app-key", token: "test-token" }, async () => sdk)(testContext("customer-incoming-media").context);
+  const received = [];
+  handle.client.onMessages((messages) => received.push(...messages));
+  const base = { conversationId: "customer-incoming-media|2|9001", senderId: "agent-1", receiverId: "customer-incoming-media", createTime: 5 };
+  const videoUrl = "https://nos.example/uploads/in-video";
+  const audioUrl = "https://nos.example/uploads/in-audio";
+  const fileUrl = "https://nos.example/uploads/in-file";
+  const video = { ...base, messageClientId: "in-video", messageType: 3, attachment: { name: "clip.MP4", size: 3, ext: "mp4", url: videoUrl, width: 640, height: 360, duration: 1.5, md5: "0123456789abcdef0123456789abcdef" } };
+  const messages = [
+    video,
+    { ...base, messageClientId: "in-audio", messageType: 2, attachment: { name: "voice.aac", size: 2, ext: "aac", url: audioUrl, duration: 3 } },
+    { ...base, messageClientId: "in-file", messageType: 6, attachment: { name: "report.PDF", size: 10, ext: "pdf", url: fileUrl } },
+    { ...base, messageClientId: "in-image", messageType: 1, attachment: { imageId: "img-1", url: "https://nos.example/uploads/image" } },
+    { ...base, messageClientId: "bad-http", messageType: 3, attachment: { name: "clip.mp4", size: 3, ext: "mp4", url: "http://nos.example/x", width: 1, height: 1, duration: 1 } },
+    { ...base, messageClientId: "bad-js", messageType: 6, attachment: { name: "x.pdf", size: 3, ext: "pdf", url: "javascript:alert(1)" } },
+    { ...base, messageClientId: "bad-data", messageType: 6, attachment: { name: "x.pdf", size: 3, ext: "pdf", url: "data:text/plain,hi" } },
+    { ...base, messageClientId: "bad-relative", messageType: 6, attachment: { name: "x.pdf", size: 3, ext: "pdf", url: "/media/x" } },
+    { ...base, messageClientId: "bad-name", messageType: 6, attachment: { name: `${"a".repeat(256)}.pdf`, size: 3, ext: "pdf", url: fileUrl } },
+    { ...base, messageClientId: "bad-size", messageType: 6, attachment: { name: "x.pdf", size: 50 * 1024 * 1024 + 1, ext: "pdf", url: fileUrl } },
+    { ...base, messageClientId: "bad-dim", messageType: 3, attachment: { name: "clip.mp4", size: 3, ext: "mp4", url: videoUrl, width: 9_000, height: 360, duration: 1 } },
+    { ...base, messageClientId: "bad-partial-dim", messageType: 3, attachment: { name: "clip.mp4", size: 3, ext: "mp4", url: videoUrl, width: 640, duration: 1 } },
+    { ...base, messageClientId: "bad-duration", messageType: 2, attachment: { name: "voice.aac", size: 2, ext: "aac", url: audioUrl, duration: 86_401 } },
+    { ...base, messageClientId: "bad-ext", messageType: 6, attachment: { name: "run.exe", size: 3, ext: "exe", url: fileUrl } },
+  ];
+  listeners.get("onReceiveMessages")(messages);
+  const byId = Object.fromEntries(received.map((message) => [message.messageClientId, message]));
+  assert.deepEqual(byId["in-video"].media, {
+    mediaId: "nim-0123456789abcdef0123456789abcdef",
+    kind: "video",
+    name: "clip.MP4",
+    mimeType: "video/mp4",
+    size: 3,
+    width: 640,
+    height: 360,
+    durationMs: 1_500,
+    url: videoUrl,
+  });
+  assert.deepEqual(byId["in-video"].attachment, { name: "clip.MP4", size: 3, mimeType: "video/mp4", url: videoUrl });
+  assert.deepEqual(byId["in-audio"].media, {
+    mediaId: "nim-in-audio",
+    kind: "audio",
+    name: "voice.aac",
+    mimeType: "audio/aac",
+    size: 2,
+    durationMs: 3_000,
+    url: audioUrl,
+  });
+  assert.deepEqual(byId["in-file"].media, {
+    mediaId: "nim-in-file",
+    kind: "file",
+    name: "report.PDF",
+    mimeType: "application/pdf",
+    size: 10,
+    url: fileUrl,
+  });
+  assert.equal(byId["in-file"].attachment.duration, undefined);
+  assert.equal(byId["in-image"].media, undefined);
+  assert.equal(byId["in-image"].attachment.imageId, "img-1", "image messages keep their existing attachment path");
+  for (const id of ["bad-http", "bad-js", "bad-data", "bad-relative", "bad-name", "bad-size", "bad-dim", "bad-partial-dim", "bad-duration", "bad-ext"]) {
+    assert.equal(byId[id].media, undefined, `${id} must not expose a media envelope`);
+    assert.equal(byId[id].attachment, undefined, `${id} must not leak a raw attachment`);
+  }
+
+  historyMessages.push(video);
+  const history = await handle.client.getMessageHistory(base.conversationId, 20, undefined, async () => undefined);
+  assert.deepEqual(history[0].media, byId["in-video"].media, "history uses the same mapping as live delivery");
+  await handle.dispose();
+  assert.equal(listeners.size, 0);
 });

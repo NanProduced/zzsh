@@ -407,10 +407,15 @@ test("a late settlement read never refills private data across an order switch",
   await act(async () => { root.render(createElement(OrderFulfillmentSection, { orderId: "order-A", displayNo: "A", viewerId: "admin-A", frozenInventory })); });
   await settle();
   await act(async () => { root.render(createElement(OrderFulfillmentSection, { orderId: "order-B", displayNo: "B", viewerId: "admin-A", frozenInventory })); });
-  await waitFor(() => document.body.textContent.includes("履约中 · 等待结算"));
+  const action = () => document.body.querySelector('[data-action="open-fulfillment-panel"]')?.textContent ?? "";
+  await waitFor(() => action().includes("打开核对面板"));
+  await act(async () => { document.body.querySelector('[data-action="open-fulfillment-panel"]').click(); });
+  await waitFor(() => Boolean(document.body.querySelector(".im-order-panel")));
+  const panel = () => document.body.querySelector(".im-order-panel");
+  assert.match(panel().textContent, /履约中 · 等待结算/, "order-B's stage is in the check panel");
   await act(async () => { resolveA(response(paidNoOpening)); await settle(); });
-  assert.match(document.body.textContent, /履约中 · 等待结算/, "the late order-A response cannot replace order-B facts");
-  assert.doesNotMatch(document.body.textContent, /待核对期初/, "a superseded order's stage never refills the current card");
+  assert.match(panel().textContent, /履约中 · 等待结算/, "the late order-A response cannot replace order-B facts");
+  assert.doesNotMatch(panel().textContent, /待核对期初/, "a superseded order's stage never refills the current panel");
 });
 
 test("editing while the write is in flight cannot lose the original responsibility", async (t) => {
@@ -662,6 +667,21 @@ test("an active order keeps its existing fulfillment entry", async (t) => {
   assert.ok(host.querySelector('[data-action="open-fulfillment-panel"]'), "the active order keeps its write entry");
   assert.equal(host.querySelector('[data-ended="true"]'), null, "an active order is never labelled ended");
   assert.equal(host.querySelector('[data-read-state]'), null, "the loaded active card has no read-failure state");
+});
+
+test("the rail card keeps the action and leaves stage and status facts to the header and check panel", async (t) => {
+  globalThis.fetch = async () => response(paidNoOpening);
+  const { host, root } = mount();
+  t.after(async () => { await act(async () => root.unmount()); host.remove(); });
+  await act(async () => { root.render(createElement(OrderFulfillmentSection, { orderId: "order-A", displayNo: "ZZ-TEST-0001", viewerId: "admin-A", frozenInventory })); });
+  await waitFor(() => Boolean(host.querySelector('[data-action="open-fulfillment-panel"]')));
+  const card = host.querySelector(".im-support-fulfillment");
+  assert.match(card.textContent, /履约核对/, "the rail card speaks about the action, not the stage");
+  assert.doesNotMatch(card.textContent, /待核对期初|未开租|已开租|有结算申请待处理|已过账|双方确认/, "the rail card does not repeat stage or status facts");
+  assert.match(card.querySelector('[data-action="open-fulfillment-panel"]').textContent, /期初/, "the stage-specific action stays available");
+  await act(async () => { card.querySelector('[data-action="open-fulfillment-panel"]').click(); });
+  await waitFor(() => Boolean(document.body.querySelector(".im-order-panel")));
+  assert.match(document.body.querySelector(".im-order-panel").textContent, /待核对期初/, "the check panel owns the stage facts");
 });
 
 test("manual close is offered only with permission, warns that funds stay offline, and reports success", async (t) => {

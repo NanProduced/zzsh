@@ -91,6 +91,7 @@ function responseCapture() {
     setHeader(name: string, value: string | string[]) { result.headers.set(name.toLowerCase(), value); return result; },
     status(value: number) { result.statusCode = value; return result; },
     json(value: unknown) { result.body = value; result.headersSent = true; },
+    send(value: unknown) { result.body = value; result.headersSent = true; },
   };
   return result;
 }
@@ -284,6 +285,12 @@ function consultationRow(userId: string, teamId: string) {
     messageScopeId: teamId,
     messageScopeState: "READY",
     messageScopeVersion: "1",
+    threadId: `im_thread_${teamId}`,
+    roundSeq: 1,
+    threadState: "ACTIVE",
+    threadScopeId: teamId,
+    threadScopeState: "READY",
+    threadPeerAccountId: "support-1",
     version: "1",
     lastMessageAt: new Date(0),
     createdAt: new Date(0),
@@ -291,6 +298,22 @@ function consultationRow(userId: string, teamId: string) {
     userName: "User",
     userUsername: "user",
     adminName: null,
+  };
+}
+
+function threadRow(userId: string, teamId: string) {
+  return {
+    id: `im_thread_${teamId}`,
+    appId: APP_ID,
+    userId,
+    kind: "SERVICE",
+    state: "ACTIVE",
+    userAccountId: userAccount(userId),
+    peerAccountId: "support-1",
+    messageScopeId: teamId,
+    messageScopeState: "READY",
+    lastRoundSeq: "1",
+    version: "1",
   };
 }
 
@@ -309,6 +332,19 @@ function messageHarness(input: { clock?: () => number; transport?: InMemoryMessa
       const userId = String(values?.[1] ?? "");
       const teamId = String(values?.[2] ?? "");
       return allowedTeams.has(teamId) && userId ? { rows: [consultationRow(userId, teamId)], rowCount: 1 } : { rows: [], rowCount: 0 };
+    }
+    // Support threads own the Team; user access is thread-scoped.
+    if (text.includes('"zzsh_iam"."im_support_thread"')) {
+      const userId = String(values?.[1] ?? "");
+      const teamId = String(values?.[2] ?? "");
+      const viewer = String(values?.[3] ?? "");
+      return allowedTeams.has(teamId) && userId && viewer === userAccount(userId)
+        ? { rows: [threadRow(userId, teamId)], rowCount: 1 }
+        : { rows: [], rowCount: 0 };
+    }
+    if (text.includes('FROM "zzsh_iam"."im_consultation"') && text.includes('"thread_id" = $2')) {
+      const threadId = String(values?.[1] ?? "");
+      return { rows: [{ id: `im_consult_${threadId}`, state: "ACTIVE" }], rowCount: 1 };
     }
     if (text.includes("im_order_group")) return { rows: [], rowCount: 0 };
     if (text.includes('"zzsh_auth_user"."session"')) return { rows: [{}], rowCount: 1 };
@@ -545,4 +581,280 @@ test("IM delete hides a message only for the requesting viewer", async () => {
   });
   assert.equal(crossConversation.statusCode, 404);
   assert.equal(errorOf(crossConversation).code, "NOT_FOUND");
+});
+
+type MediaHarness = {
+  transport: InMemoryMessageTransport;
+  options: YunxinRouteOptions;
+};
+
+/** Offline order-team access: one READY team whose renter is user-1. */
+function orderTeamMessageHarness(clock?: () => number): MediaHarness {
+  const actor = { userId: "user-1", sessionId: "session-1" };
+  const teamId = "9001";
+  const orderId = "order-1";
+  const accountId = userAccount(actor.userId);
+  const query = async (text: string, values?: unknown[]) => {
+    if (/^(BEGIN|COMMIT|ROLLBACK)$/i.test(text.trim())) return { rows: [], rowCount: 0 };
+    if (text.includes("FROM zzsh_order.rental_order o")) {
+      return {
+        rows: [{
+          order_status: "PAID", cancel_reason: null, cancelled_at: null, title: "测试账号", account_id: "account-1",
+          quote_snapshot: null, game_name: "测试游戏", term_seconds: null, opening_id: null, opening_status: null,
+          opening_confirmed_at: null, intake_open: false, settlement_current: false, settlement_posted_at: null,
+          renter_user_id: actor.userId, owner_user_id: "user-owner", game_id: "game-1", display_no: "ZZ1",
+          escalation_responsible_admin_id: null, escalation_first_response_at: null, escalation_remind_due_at: null,
+          escalation_add_round: 0, escalation_state: "NOT_STARTED",
+          app_id: APP_ID, team_id: teamId, team_name: "订单群", team_state: "READY", provision_state: "READY",
+        }],
+        rowCount: 1,
+      };
+    }
+    if (text.includes("FROM zzsh_order.im_order_member")) {
+      return {
+        rows: [{
+          party: "RENTER", state: "JOINED", platform_subject_id: actor.userId, identity_kind: "USER", realm: "user",
+          account_id: accountId, status: "READY", identity_marker: buildYunxinIdentityMarker(key("USER", actor.userId)),
+          name: "用户", avatar: null,
+        }],
+        rowCount: 1,
+      };
+    }
+    if (text.includes("FROM zzsh_order.im_order_group")) {
+      const teamIndex = text.includes("team_id=$3") ? 2 : 1;
+      if (String(values?.[teamIndex] ?? "") !== teamId) return { rows: [], rowCount: 0 };
+      return { rows: [{ order_id: orderId, team_id: teamId, app_id: APP_ID }], rowCount: 1 };
+    }
+    if (text.includes("zzsh_order.rental_opening_ack") || text.includes("zzsh_supply.billable_item")) return { rows: [], rowCount: 0 };
+    if (text.includes('"zzsh_iam"."im_identity_mapping"')) {
+      return { rows: [{ accountId, identityMarker: buildYunxinIdentityMarker(key("USER", actor.userId)), status: "READY" }], rowCount: 1 };
+    }
+    if (text.includes('"zzsh_auth_user"."user"')) return { rows: [{ suspended: false, accountStatus: "ACTIVE" }], rowCount: 1 };
+    if (text.includes('"zzsh_auth_user"."session"')) return { rows: [{}], rowCount: 1 };
+    return { rows: [], rowCount: 0 };
+  };
+  const pool = { query, connect: async () => ({ query, release: () => undefined }) } as never;
+  const security = {
+    pool,
+    apiOrigin: "http://127.0.0.1:3102",
+    userOrigin: USER_ORIGIN,
+    adminOrigin: "http://127.0.0.1:3101",
+    userAuth: { api: { getSession: async () => ({ user: { id: actor.userId }, session: { id: actor.sessionId } }) } },
+    adminAuth: { api: { getSession: async () => null } },
+  } as unknown as YunxinRouteOptions["security"];
+  const transport = new InMemoryMessageTransport(clock);
+  return {
+    transport,
+    options: userRouteOptions({ security, consultation: { pool, appId: APP_ID, messageTransport: transport } as never }),
+  };
+}
+
+function mediaBody(kind: string, bytes: Buffer, overrides: Record<string, unknown> = {}) {
+  const names: Record<string, [string, string]> = {
+    video: ["clip.mp4", "video/mp4"],
+    file: ["proof.pdf", "application/pdf"],
+    audio: ["voice.mp3", "audio/mpeg"],
+  };
+  const [name, mimeType] = names[kind]!;
+  return {
+    conversationId: conversationOf("user-1", "9001"),
+    media: {
+      kind,
+      messageClientId: `${kind}-1`,
+      name,
+      mimeType,
+      size: bytes.length,
+      data: bytes.toString("base64"),
+      ...(kind === "video" ? { width: 640, height: 360, durationMs: 1_500 } : {}),
+      ...(kind === "audio" ? { durationMs: 900 } : {}),
+      ...overrides,
+    },
+  };
+}
+
+test("in-memory media transport is order-scoped and idempotent", async () => {
+  const transport = new InMemoryMessageTransport();
+  const conversationId = conversationOf("user-1", "9001");
+  const scope = { appId: APP_ID, orderId: "order-1", teamId: "9001" };
+  const input = {
+    conversationId,
+    scope,
+    senderAccountId: userAccount("user-1"),
+    receiverAccountId: "support-1",
+    messageClientId: "video-1",
+    kind: "video" as const,
+    name: "clip.mp4",
+    mimeType: "video/mp4",
+    size: 3,
+    body: new Uint8Array([1, 2, 3]),
+    width: 640,
+    height: 360,
+    durationMs: 1_500,
+  };
+  const first = await transport.sendMedia(input);
+  assert.equal(first.messageType, 3);
+  assert.ok(first.media);
+  assert.equal(first.media!.kind, "video");
+  assert.equal(first.media!.url, undefined, "transport never stores a URL");
+  const retry = await transport.sendMedia(input);
+  assert.equal(retry.messageServerId, first.messageServerId);
+  assert.equal(transport.calls.sendMedia, 2);
+  assert.deepEqual(await transport.getMediaScope(first.media!.mediaId), { mediaId: first.media!.mediaId, scope });
+  assert.equal(await transport.readMedia({ mediaId: first.media!.mediaId, scope: { ...scope, orderId: "order-2" }, viewerAccountId: "user-1" }), null);
+  const stored = await transport.readMedia({ mediaId: first.media!.mediaId, scope, viewerAccountId: "user-1" });
+  assert.deepEqual([...stored!.body], [1, 2, 3]);
+  await assert.rejects(
+    () => transport.sendMedia({ ...input, messageClientId: "file-1", kind: "file", name: "proof.pdf", mimeType: "video/mp4" }),
+    /Media MIME type is invalid/,
+  );
+  await assert.rejects(
+    () => transport.sendMedia({ ...input, messageClientId: "video-2", size: 100 * 1024 * 1024 + 1, body: new Uint8Array(1) }),
+    /Media size is outside the allowed range/,
+  );
+});
+
+test("IM media body accepts safe metadata and rejects malformed or oversized payloads", async () => {
+  const bytes = Buffer.from([1, 2, 3]);
+  for (const kind of ["video", "file", "audio"]) {
+    const parsed = await parseMessageBody(mediaBody(kind, bytes));
+    assert.equal(parsed.kind, "media", kind);
+    if (parsed.kind !== "media") throw new Error("media parser returned another kind");
+    assert.equal(parsed.media.kind, kind);
+    assert.equal(parsed.media.size, 3);
+    assert.deepEqual([...parsed.media.body], [1, 2, 3]);
+  }
+  const invalid: Array<[string, Record<string, unknown>]> = [
+    ["unknown kind", mediaBody("video", bytes, { kind: "image" })],
+    ["unknown top-level field", { ...mediaBody("video", bytes), url: "/api/im/media/x" }],
+    ["unknown media field", mediaBody("video", bytes, { url: "/api/im/media/x" })],
+    ["disallowed MIME", mediaBody("file", bytes, { mimeType: "application/x-msdownload" })],
+    ["MIME mismatch", mediaBody("video", bytes, { mimeType: "audio/mpeg" })],
+    ["missing bytes", mediaBody("video", bytes, { data: "" })],
+    ["short bytes", mediaBody("video", bytes, { data: "AA==" })],
+    ["oversized video", mediaBody("video", bytes, { size: 100 * 1024 * 1024 + 1 })],
+    ["oversized audio", mediaBody("audio", bytes, { size: 20 * 1024 * 1024 + 1 })],
+    ["file with duration", mediaBody("file", bytes, { durationMs: 1_000 })],
+    ["audio with dimensions", mediaBody("audio", bytes, { width: 10, height: 10 })],
+    ["half dimensions", mediaBody("video", bytes, { width: 640, height: undefined })],
+    ["control name", mediaBody("video", bytes, { name: "clip\u0000.mp4" })],
+    ["both text and media", { ...mediaBody("video", bytes), text: "hello" }],
+  ];
+  for (const [label, body] of invalid) {
+    await assert.rejects(() => parseMessageBody(body), /Media|Message body/, label);
+  }
+});
+
+async function postUserMedia(options: YunxinRouteOptions, body: unknown) {
+  const response = responseCapture();
+  await handleYunxinRoute({
+    method: "POST",
+    url: "/api/v1/im/user/messages",
+    originalUrl: "/api/v1/im/user/messages",
+    headers: { origin: USER_ORIGIN, cookie: "zzsh_user.session_token=opaque" },
+    body,
+  }, response, options);
+  return response;
+}
+
+async function readUserMedia(options: YunxinRouteOptions, mediaId: string) {
+  const response = responseCapture();
+  const url = `/api/v1/im/user/media/${encodeURIComponent(mediaId)}`;
+  await handleYunxinRoute({ method: "GET", url, originalUrl: url, headers: { origin: USER_ORIGIN, cookie: "zzsh_user.session_token=opaque" } }, response, options);
+  return response;
+}
+
+test("user media routes reuse order-team authorization and authorize downloads", async () => {
+  const harness = orderTeamMessageHarness();
+  const videoBytes = Buffer.from([1, 2, 3, 4]);
+  const sent = await postUserMedia(harness.options, mediaBody("video", videoBytes));
+  assert.equal(sent.statusCode, 200, JSON.stringify(sent.body));
+  const message = messageOf(sent);
+  assert.equal(message.messageType, 3);
+  const media = message.media as { mediaId: string; kind: string; size: number; url: string; width: number; height: number; durationMs: number };
+  assert.equal(media.kind, "video");
+  assert.equal(media.size, videoBytes.length);
+  assert.equal(media.url, `/api/im/media/${media.mediaId}`);
+  assert.deepEqual({ width: media.width, height: media.height, durationMs: media.durationMs }, { width: 640, height: 360, durationMs: 1_500 });
+
+  const retried = await postUserMedia(harness.options, mediaBody("video", videoBytes));
+  assert.equal(retried.statusCode, 200);
+  assert.equal(messageOf(retried).messageServerId, message.messageServerId);
+  assert.equal(harness.transport.calls.sendMedia, 2);
+
+  const history = await readMessages(harness.options, conversationOf("user-1", "9001"));
+  const historyMessage = (history.body as { messages: Array<{ messageServerId: string; media?: { url?: string } }> }).messages
+    .find((row) => row.messageServerId === message.messageServerId);
+  assert.equal(historyMessage?.media?.url, media.url);
+
+  const download = await readUserMedia(harness.options, media.mediaId);
+  assert.equal(download.statusCode, 200, JSON.stringify(download.body));
+  assert.equal(download.headers.get("content-type"), "video/mp4");
+  assert.equal(download.headers.get("x-content-type-options"), "nosniff");
+  assert.deepEqual([...(download.body as Uint8Array)], [...videoBytes]);
+
+  const file = await postUserMedia(harness.options, mediaBody("file", Buffer.from("%PDF-1.4")));
+  assert.equal(file.statusCode, 200, JSON.stringify(file.body));
+  const fileMedia = messageOf(file).media as { mediaId: string };
+  const fileDownload = await readUserMedia(harness.options, fileMedia.mediaId);
+  assert.equal(fileDownload.statusCode, 200);
+  assert.equal(fileDownload.headers.get("content-disposition"), "attachment");
+
+  assert.equal((await readUserMedia(harness.options, "fixture-media-unknown")).statusCode, 404);
+});
+
+test("user media routes reject unauthenticated, out-of-scope and malformed sends", async () => {
+  const harness = orderTeamMessageHarness();
+  const bytes = Buffer.from([1, 2, 3]);
+  const valid = mediaBody("video", bytes);
+
+  const denied = await postUserMedia({
+    ...harness.options,
+    security: {
+      ...harness.options.security,
+      userAuth: { api: { getSession: async () => null } },
+    } as never,
+  }, valid);
+  assert.equal(denied.statusCode, 401);
+  assert.equal(harness.transport.calls.sendMedia, 0);
+
+  const crossTeam = await postUserMedia(harness.options, { ...valid, conversationId: conversationOf("user-1", "9999") });
+  assert.equal(crossTeam.statusCode, 403);
+  assert.equal(errorOf(crossTeam).code, "FORBIDDEN");
+  assert.equal(harness.transport.calls.sendMedia, 0);
+
+  const oversized = await postUserMedia(harness.options, mediaBody("video", bytes, { size: 100 * 1024 * 1024 + 1 }));
+  assert.equal(oversized.statusCode, 400);
+  const badMime = await postUserMedia(harness.options, mediaBody("file", bytes, { mimeType: "application/x-msdownload" }));
+  assert.equal(badMime.statusCode, 400);
+  const badMetadata = await postUserMedia(harness.options, mediaBody("file", bytes, { durationMs: 1_000 }));
+  assert.equal(badMetadata.statusCode, 400);
+  assert.equal(harness.transport.calls.sendMedia, 0);
+});
+
+test("admin media send fails closed without im.support.read", async () => {
+  const transport = new InMemoryMessageTransport();
+  const query = async (text: string) => {
+    if (text.includes('"zzsh_iam"."admin_security"')) return { rows: [{ status: "ACTIVE", isBoss: false, passwordChangeRequired: false }], rowCount: 1 };
+    return { rows: [], rowCount: 0 };
+  };
+  const pool = { query, connect: async () => ({ query, release: () => undefined }) } as never;
+  const options = userRouteOptions({
+    security: {
+      ...userRouteOptions().security,
+      pool,
+      adminAuth: { api: { getSession: async () => ({ user: { id: "admin-1", twoFactorEnabled: true }, session: { id: "admin-session", locked: false } }) } },
+    } as never,
+    consultation: { pool, appId: APP_ID, messageTransport: transport } as never,
+  });
+  const response = responseCapture();
+  await handleYunxinRoute({
+    method: "POST",
+    url: "/api/v1/im/admin/messages",
+    originalUrl: "/api/v1/im/admin/messages",
+    headers: { origin: "http://127.0.0.1:3101", cookie: "zzsh_admin.session_token=opaque" },
+    body: mediaBody("video", Buffer.from([1, 2, 3])),
+  }, response, options);
+  assert.equal(response.statusCode, 403);
+  assert.equal(errorOf(response).code, "FORBIDDEN");
+  assert.equal(transport.calls.sendMedia, 0);
 });

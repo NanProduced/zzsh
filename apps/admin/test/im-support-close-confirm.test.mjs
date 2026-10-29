@@ -73,6 +73,9 @@ const baseConsultation = {
   assignedAdmin: { id: "admin-a", name: "客服 A" },
   conversationType: "TEAM",
   messageScopeState: "READY",
+  canSend: true,
+  threadState: "ACTIVE",
+  roundSeq: 2,
   version: 1,
   lastMessageAt: "2026-09-17T00:05:00.000Z",
   createdAt: "2026-09-17T00:00:00.000Z",
@@ -81,6 +84,8 @@ const baseConsultation = {
 const makeConsultation = (tag) => ({
   ...baseConsultation,
   id: `consultation-${tag}`,
+  roundId: `consultation-${tag}`,
+  threadId: `thread-${tag}`,
   subjectRef: tag === "a" ? "listing-9" : null,
   conversationId: `team-${tag}`,
   peerAccountId: `user-${tag}`,
@@ -92,6 +97,8 @@ let currentAdmin = "admin-a";
 let closedIds = [];
 let pendingCloses = new Map();
 let closeBehavior = () => "hold";
+let reopenedRound = null;
+let threadHistory = [];
 const requests = [];
 
 globalThis.fetch = async (input, init = {}) => {
@@ -103,13 +110,14 @@ globalThis.fetch = async (input, init = {}) => {
     const rows = ["a", "b"]
       .map(makeConsultation)
       .filter((row) => !closedIds.includes(row.id))
-      .map((row) => ({ ...row, assignedAdmin: { id: currentAdmin, name: currentAdmin === "admin-a" ? "客服 A" : "客服 B" } }));
+      .map((row) => ({ ...row, canSend: true, assignedAdmin: { id: currentAdmin, name: currentAdmin === "admin-a" ? "客服 A" : "客服 B" } }));
+    if (reopenedRound) rows.push({ ...makeConsultation("a"), ...reopenedRound });
     return response({ consultations: rows });
   }
   if (url.pathname.endsWith("/im/message-access")) return response({ authorized: true });
   if (url.pathname.endsWith("/context")) return response({ consultationId: "c-1", version: 1, service: { type: "SERVICE", state: "ACTIVE", messageScopeState: "READY", handler: null }, user: { status: "available", publicId: "user-7", displayName: "测试用户甲", avatar: null }, subject: { status: "absent" }, membership: { status: "unavailable", reason: "membership_projection_not_integrated" } });
   if (url.pathname.includes("/users/")) return response({ userId: "user-7", maskedPhone: "138****8000", accountStatus: "ACTIVE", identityStatus: "VERIFIED", ageStatus: "ADULT", source: { kind: "LOCAL" }, registeredAt: "2026-01-05T00:00:00.000Z" });
-  if (url.pathname.endsWith("/im/messages")) return response({ messages: [] });
+  if (url.pathname.endsWith("/im/messages")) return response({ messages: url.searchParams.get("conversationId") === "team-a" ? threadHistory : [] });
   const closeMatch = /\/consultations\/([A-Za-z0-9._:-]+)\/close$/.exec(url.pathname);
   if (closeMatch && method === "POST") {
     const id = closeMatch[1];
@@ -145,6 +153,8 @@ async function mount(t, adminUserId = "admin-a") {
   closedIds = [];
   pendingCloses = new Map();
   closeBehavior = () => "hold";
+  reopenedRound = null;
+  threadHistory = [];
   requests.length = 0;
   // 只保留本用例活跃的定时器记录，避免上一个用例的条目干扰
   intervalCallbacks.splice(0, intervalCallbacks.length);
@@ -184,19 +194,27 @@ test("case column shows only proven current facts, not an inferred stage or turn
   assert.doesNotMatch(rootNode.textContent, /案件进度|轮到你回复|已加载消息/);
   const aside = rootNode.querySelector(".im-wb-details");
   assert.ok(aside, "case column still renders");
-  for (const label of ["本次服务", "服务状态", "当前接待", "发起时间", "关联对象"]) {
+  // 类型/状态/当前接待由聊天头部承担；右栏从用户与风险摘要开始，不再重复「本次服务」。
+  assert.doesNotMatch(aside.textContent, /本次服务|服务状态|当前接待|发起时间/, "the chat header owns type/status/assignee");
+  assert.equal(aside.children[1]?.getAttribute("data-slot"), "card", "the user/risk card is the first rail block");
+  for (const label of ["需用户目录读取权限", "关联对象"]) {
     assert.match(aside.textContent, new RegExp(label), `case column states ${label}`);
   }
 });
 
-test("ending a consultation is confirmed, cancel is free, and double submit stays single-flight", async (t) => {
+test("ending a consultation closes only the current round and says so", async (t) => {
   const { rootNode } = await mount(t);
   await openConfirm(rootNode, "a");
+  assert.match(closeButton(rootNode).textContent, /结束本轮/, "the header action names the round, not the whole consultation");
   const dialog = closeDialog();
-  assert.match(dialog.textContent, /结束咨询/);
+  assert.match(dialog.textContent, /结束本轮/);
+  assert.doesNotMatch(dialog.textContent, /结束咨询/, "the action never claims the whole consultation/history is closed");
+  assert.match(dialog.textContent, /第 2 轮/, "the dialog names the round being ended");
   assert.match(dialog.textContent, /客服 A/, "the dialog names the current assignee");
   assert.match(dialog.textContent, /listing-9/, "the dialog names the linked subject");
   assert.match(dialog.textContent, /不可撤销/, "the dialog states the consequence");
+  assert.match(dialog.textContent, /聊天记录保留在同一会话/, "the dialog keeps the thread history honest");
+  assert.match(dialog.textContent, /用户再次咨询会开启新一轮/, "reopening is described as the user's next round");
   assert.equal(closePosts(), 0, "opening the confirmation does not submit anything");
 
   const cancel = [...dialog.querySelectorAll("button")].find((button) => button.textContent.trim() === "取消");
@@ -211,10 +229,13 @@ test("ending a consultation is confirmed, cancel is free, and double submit stay
   await settle();
   assert.equal(closePosts("a"), 1, "double submitting the confirmation stays single-flight");
 
-  await act(async () => { pendingCloses.get("consultation-a")(response({ consultation: { ...makeConsultation("a"), state: "CLOSED" } })); });
+  await act(async () => { pendingCloses.get("consultation-a")(response({ consultation: { ...makeConsultation("a"), state: "CLOSED", threadState: "IDLE" } })); });
   await settle();
   assert.equal(browser.document.querySelector(".im-wb-dialog"), null, "the dialog closes after a confirmed close");
-  assert.equal(rootNode.querySelectorAll(".im-wb-row").length, 1, "the closed consultation leaves the queue");
+  assert.equal(rootNode.querySelectorAll(".im-wb-row").length, 1, "the closed round leaves the current-round queue");
+  assert.match(rootNode.textContent, /本轮已结束/, "the receipt reports the round result");
+  assert.match(rootNode.textContent, /聊天记录保留/, "the receipt does not claim the thread/history was closed");
+  assert.doesNotMatch(rootNode.textContent, /咨询已结束/, "the receipt never claims the whole consultation ended");
 });
 
 test("an unknown close outcome is never inferred from the directory", async (t) => {
@@ -264,7 +285,7 @@ test("a close that succeeds while another conversation is selected still settles
   await act(async () => { pendingCloses.get("consultation-a")(response({ consultation: { ...makeConsultation("a"), state: "CLOSED" } })); });
   await settle();
   assert.equal(rootNode.querySelectorAll(".im-wb-row").length, 1, "A leaves the queue even though B was selected when the receipt arrived");
-  assert.match(rootNode.textContent, /咨询已结束/, "the original close reports its own result");
+  assert.match(rootNode.textContent, /本轮已结束/, "the original close reports its own result");
 });
 
 test("a close that fails after switching away still records the unknown on the original consultation", async (t) => {
@@ -335,7 +356,7 @@ test("a close in flight when only the send permission is revoked still converges
   await settle();
   assert.equal(closePosts("a"), 1, "converging never re-posts the close");
   assert.equal(rootNode.querySelectorAll(".im-wb-row").length, 1, "the receipt still settles on the original consultation");
-  assert.match(rootNode.textContent, /咨询已结束/);
+  assert.match(rootNode.textContent, /本轮已结束/);
   assert.doesNotMatch(rootNode.textContent, /结束结果未确认/);
 });
 
@@ -356,4 +377,32 @@ test("a close that returns UNKNOWN after a send-only revoke keeps the original i
   assert.match(rootNode.textContent, /结束结果未确认，待平台核对/, "the queue row keeps the marker for A");
   assert.equal(closeButton(rootNode).disabled, true);
   assert.doesNotMatch(rootNode.textContent, /仍进行中|可以重新结束/);
+});
+
+test("ending one round keeps the same thread history for the next round", async (t) => {
+  const { rootNode } = await mount(t);
+  threadHistory = [{ messageClientId: "hist-1", messageServerId: "hist-1", conversationId: "team-a", senderId: "user-a", receiverId: "admin-a", createTime: Date.parse("2026-09-17T00:01:00.000Z"), messageType: 0, text: "同一线程的历史消息" }];
+  await openConfirm(rootNode, "a");
+  await act(async () => { confirmButton().click(); });
+  await settle();
+  await act(async () => { pendingCloses.get("consultation-a")(response({ consultation: { ...makeConsultation("a"), state: "CLOSED", threadState: "IDLE" } })); });
+  await settle();
+  closedIds = ["consultation-a"];
+  assert.match(rootNode.textContent, /本轮已结束/);
+  assert.equal(rootNode.querySelectorAll(".im-wb-row").length, 1, "only the closed round leaves the current list");
+
+  // 用户再次咨询：后台返回同一 thread 的新一轮；管理端列表只显示当前轮，历史仍是同一 Team。
+  reopenedRound = { id: "consultation-a-r3", roundId: "consultation-a-r3", roundSeq: 3, threadId: "thread-a", threadState: "ACTIVE", state: "ACTIVE", canSend: true, messageScopeState: "READY", conversationId: "team-a", assignedAdmin: { id: "admin-a", name: "客服 A" } };
+  for (const entry of intervalCallbacks.filter((item) => item.active && item.delay === 5_000)) {
+    await act(async () => { entry.callback(); await Promise.resolve(); });
+  }
+  await settle();
+  const reopenedRow = [...rootNode.querySelectorAll(".im-wb-row")].find((item) => item.textContent.includes("用户 A"));
+  assert.ok(reopenedRow, "the next round of the same thread returns to the current-round list");
+  assert.doesNotMatch(reopenedRow.textContent, /已结束/, "an open round is never presented as closed");
+  await act(async () => { reopenedRow.click(); });
+  await settle();
+  await waitFor(() => rootNode.textContent.includes("同一线程的历史消息"));
+  assert.match(rootNode.querySelector(".im-wb-chat-title span").textContent, /第 3 轮接待 · 客服 A/);
+  assert.match(rootNode.textContent, /同一线程的历史消息/, "the same Team history is still readable in the next round");
 });

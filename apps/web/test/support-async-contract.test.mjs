@@ -33,9 +33,9 @@ test('a delayed authorization denial cannot clear another identity or another co
 test("user support responses are bound to identity, consultation, and client generations", () => {
   assert.match(webSource, /identityGenerationRef/);
   assert.match(webSource, /generation !== identityGenerationRef\.current/);
-  assert.match(webSource, /activeIdRef\.current !== conversation\.id/);
+  assert.match(webSource, /activeIdRef\.current !== threadKeyOf\(conversation\)/);
   assert.match(webSource, /clientRef\.current !== client/);
-  assert.match(webSource, /mergeImMessages\(current\[conversation\.id\] \?\? \[\], rows\)/);
+  assert.match(webSource, /mergeImMessages\(current\[threadKeyOf\(conversation\)\] \?\? \[\], rows\)/);
   assert.match(webSource, /readSupportIntent/);
   assert.match(webSource, /error\.status = response\.status/);
   assert.match(webSource, /revalidateAfterUnauthorized/);
@@ -43,13 +43,14 @@ test("user support responses are bound to identity, consultation, and client gen
   assert.doesNotMatch(webSource, /consumeSupportIntent/);
 });
 
-test("closed support history requires an explicit new-consultation state", () => {
-  assert.match(webSource, /const \[isStartingNew, setIsStartingNew\]/);
-  assert.match(webSource, /if \(preview \|\| isStartingNew \|\| activeId \|\| consultations\.length === 0\)/);
-  assert.match(webSource, /data-action="start-new-consultation"/);
-  assert.match(webSource, /setIsStartingNew\(true\)/);
-  assert.match(webSource, /data-action=\{isStartingNew \? "submit-new-consultation" : "start-consultation"\}/);
-  assert.match(webSource, /setIsStartingNew\(false\)/);
+test("persistent support threads keep history and allow reopening without a new-consultation state", () => {
+  assert.doesNotMatch(webSource, /isStartingNew/);
+  assert.doesNotMatch(webSource, /start-new-consultation/);
+  assert.match(webSource, /threadKeyOf/);
+  assert.match(webSource, /threadState/);
+  assert.match(webSource, /本轮已结束（可继续）/);
+  assert.match(webSource, /conversation\.canSend === false/);
+  assert.match(webSource, /mergeImMessages\(current\[threadKeyOf\(conversation\)\] \?\? \[\], rows\)/);
 });
 
 test("admin support responses are bound to operator and selected consultation, with presence renewal", () => {
