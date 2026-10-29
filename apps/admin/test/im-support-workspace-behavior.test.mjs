@@ -963,3 +963,21 @@ test("delete hides the message locally and a failure never fakes success", async
   await waitFor(() => /无权删除此消息/.test(failing.rootNode.querySelector(".im-wb-notice")?.textContent ?? ""));
   assert.ok(failing.rootNode.querySelector('[data-message-id="srv-peer"]'), "a failed delete keeps the message");
 });
+
+test("claim while support is off duty opens the start-reception prompt instead of an opaque request error", async (t) => {
+  fixture = { consultations: [waitingConsultation], history: [], post: null };
+  const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept", "im.support.presence"]) });
+  await waitFor(() => Boolean(rootNode.querySelector(".im-wb-row")));
+  await act(async () => { [...rootNode.querySelectorAll(".im-wb-filters button")].find((button) => button.textContent.includes("待接待")).click(); });
+  await settle();
+  const row = rootNode.querySelector(".im-wb-row");
+  assert.ok(row, "waiting row");
+  await act(async () => { row.click(); });
+  await settle();
+  const claim = rootNode.querySelector('[data-action="claim-consultation"]');
+  assert.ok(claim, "claim action");
+  await act(async () => { claim.click(); });
+  await settle();
+  assert.match(browser.document.body.textContent ?? "", /还不能接入会话/);
+  assert.equal(requests.some((path) => path.includes("/claim")), false, "off-duty claim never reaches the server");
+});

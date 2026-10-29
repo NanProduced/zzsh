@@ -21,6 +21,7 @@ import "./im-support-details.css";
 import { formatDuration } from "./im-support-management-model";
 import { dayKeyOf, dayLabelOf, formatBytes, formatTime, initialOf } from "./im-support-format";
 import { Dialog, DialogContent } from "../components/ui/dialog";
+import { Button } from "../components/ui/button";
 import { Bubble, BubbleContent } from "../components/ui/bubble";
 import { Marker, MarkerContent } from "../components/ui/marker";
 import { Message, MessageAvatar, MessageContent, MessageFooter, MessageHeader } from "../components/ui/message";
@@ -246,6 +247,8 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
   const [transferNote, setTransferNote] = useState("");
   // 暂停/下线前提示未完成会话；不阻断，只提供「去交接」入口。
   const [offDutyOpen, setOffDutyOpen] = useState(false);
+  // 未开始接待时接入会 503；先给客服一个可操作的开始接待入口，而不是暴露请求编号。
+  const [receptionOpen, setReceptionOpen] = useState(false);
   const [pendingTransferId, setPendingTransferId] = useState<string | null>(null);
   // 结束是不可撤销动作（平台侧没有恢复合同），所以走显式确认而不是点一下就走，
   // 并把「结果未确认」当独立状态保留，而不是让人重复点出一个新 POST。
@@ -891,8 +894,14 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
     }
   };
 
-  const claim = async () => {
+  const claim = async (afterReception = false) => {
     if (!selected || selected.state !== "WAITING" || !canOperateSupportType(selected.type, canAccept, canComplaint)) return;
+    // Claim is only valid for an AVAILABLE + CONNECTED support presence. Do not
+    // send the request while off duty and then surface an opaque 503.
+    if (!afterReception && (presence.availability !== "AVAILABLE" || connection !== "CONNECTED")) {
+      setReceptionOpen(true);
+      return;
+    }
     const generation = operatorGenerationRef.current;
     const operator = readClientKey;
     const consultationId = selected.id;
@@ -905,7 +914,19 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
       if (!current || !isCurrentImRequest(requestKey, current) || selectedIdRef.current !== consultationId) return;
       setQueue((current) => current.map((item) => item.id === result.consultation.id ? result.consultation : item));
       setNotice("已接入，正在建立会话");
-    } catch (cause) { const current = currentRequestKey(); if (current && isCurrentImRequest(requestKey, current)) setNotice(friendlyError(cause)); } finally { endBusy(busyOwner); }
+    } catch (cause) {
+      const current = currentRequestKey();
+      if (current && isCurrentImRequest(requestKey, current)) {
+        setNotice(httpStatus(cause) === 503 ? "当前没有可接待客服或接待状态尚未生效，请确认已开始接待后重试。" : friendlyError(cause));
+      }
+    } finally { endBusy(busyOwner); }
+  };
+  const startReceptionAndClaim = async () => {
+    const started = await applyPresence("AVAILABLE");
+    if (!started) return;
+    setReceptionOpen(false);
+    if (connectionForPresence(connection) !== "CONNECTED") { setNotice("消息服务未连接，暂不能接入会话。"); return; }
+    await claim(true);
   };
   const close = async (consultationId: string) => {
     const target = queueRef.current.find((item) => item.id === consultationId);
@@ -1015,14 +1036,14 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
       if (current && isCurrentImRequest(requestKey, current)) setTransferError(friendlyError(cause));
     } finally { setTransferBusy(false); }
   };
-  const applyPresence = async (availability: Presence["availability"]) => {
-    if (!canPresence) return;
+  const applyPresence = async (availability: Presence["availability"]): Promise<boolean> => {
+    if (!canPresence) return false;
     const busyOwner = beginBusy();
     setNotice(undefined);
     const generation = operatorGenerationRef.current;
     const operator = readClientKey;
-    try { await writePresence(availability, connectionForPresence(connection)); }
-    catch (cause) { if (canPresenceRef.current && generation === operatorGenerationRef.current && operatorRef.current === operator) setNotice(friendlyError(cause)); }
+    try { await writePresence(availability, connectionForPresence(connection)); return availabilityRef.current === availability; }
+    catch (cause) { if (canPresenceRef.current && generation === operatorGenerationRef.current && operatorRef.current === operator) setNotice(friendlyError(cause)); return false; }
     finally { endBusy(busyOwner); }
   };
   const togglePresence = async () => {
@@ -1689,6 +1710,18 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
           <button type="button" className="im-wb-btn" onClick={() => setOffDutyOpen(false)}>继续接待</button>
           <button type="button" className="im-wb-btn im-wb-btn-danger" data-action="confirm-pause-presence" disabled={busy}
             onClick={() => { setOffDutyOpen(false); void applyPresence("OFF_DUTY"); }}>仍然暂停</button>
+        </div>
+      </DialogContent>
+    </Dialog>
+    <Dialog open={receptionOpen} onOpenChange={setReceptionOpen}>
+      <DialogContent className="im-wb-dialog" aria-label="需要先开始接待" showCloseButton={false}>
+        <div className="im-wb-dialog-head"><div><strong>还不能接入会话</strong><span>当前未开始接待</span></div>
+          <button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setReceptionOpen(false)} aria-label="关闭接待提醒"><X size={14} /></button></div>
+        <p className="im-wb-dialog-hint">你当前还没有开始接待，直接接入会被服务端拒绝。先开始接待，平台会把你的状态更新为“可接待”，然后自动接入当前会话。</p>
+        {connection !== "CONNECTED" ? <p className="im-wb-dialog-error" role="alert"><CircleAlert size={14} />消息服务未连接，暂不能开始接待。</p> : null}
+        <div className="im-wb-dialog-actions">
+          <Button type="button" variant="outline" onClick={() => setReceptionOpen(false)}>取消</Button>
+          <Button type="button" data-action="start-reception-and-claim" disabled={busy || connection !== "CONNECTED"} onClick={() => void startReceptionAndClaim()}>开始接待并接入</Button>
         </div>
       </DialogContent>
     </Dialog>
