@@ -6,6 +6,7 @@ import {
   type ImTransportMessage,
   type ImTransportMessageReference,
   type ImTransportReply,
+  type ImTransportCard,
 } from "../src/im/im-contract";
 import {
   YunxinApiError,
@@ -37,7 +38,7 @@ export class InMemoryMessageTransport implements ImMessageTransport {
   /** Per-viewer local hides; the shared team log is never mutated. */
   private readonly hidden = new Map<string, Map<string, Set<string>>>();
   private nextId = 1;
-  readonly calls = { history: 0, sendText: 0, sendImage: 0, replyText: 0, revoke: 0, hideForViewer: 0, readImage: 0 };
+  readonly calls = { history: 0, sendText: 0, sendImage: 0, replyText: 0, revoke: 0, hideForViewer: 0, readImage: 0, card: 0 };
 
   constructor(private readonly now: () => number = Date.now) {}
 
@@ -103,6 +104,26 @@ export class InMemoryMessageTransport implements ImMessageTransport {
       createTime: this.now(),
       text: input.text,
       messageType: 0,
+    };
+    return this.appendMessage(input.conversationId, message);
+  }
+
+  async card(input: { conversationId: string; senderAccountId: string; receiverAccountId: string; card: ImTransportCard }): Promise<ImTransportMessage> {
+    this.calls.card += 1;
+    const rows = this.messages.get(this.teamKey(input.conversationId)) ?? [];
+    // The card id doubles as the client id: a retried send returns the same message.
+    const existing = rows.find((row) => row.messageClientId === input.card.cardId);
+    if (existing) return { ...existing, conversationId: input.conversationId };
+    const id = this.nextMessageId();
+    const message: ImTransportMessage = {
+      messageClientId: input.card.cardId,
+      messageServerId: `fixture-server-${id}`,
+      conversationId: input.conversationId,
+      senderId: input.senderAccountId,
+      receiverId: input.receiverAccountId,
+      createTime: this.now(),
+      messageType: 0,
+      card: input.card,
     };
     return this.appendMessage(input.conversationId, message);
   }

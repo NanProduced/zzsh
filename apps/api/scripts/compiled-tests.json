@@ -227,5 +227,6 @@
   "dist/test/prestart-refund-store.test.js",
   "dist/test/prestart-termination-routes.test.js",
   "dist/test/im-worker-assembly.test.js",
-  "dist/test/im-support-management.test.js"
+  "dist/test/im-support-management.test.js",
+  "dist/test/order-stage-cards.test.js"
 ]

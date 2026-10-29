@@ -10,6 +10,7 @@ import { createImScopeLease, lockTeamBinding, onLeaseConnection } from "./scope-
 import { buildYunxinIdentityMarker, deriveYunxinAccountId, type ImIdentityKey, type ImIdentityProvisioner } from "./identity-lifecycle";
 import { OrderImSdkRouteError, type OrderImSdkRouteBindings } from "../config/config";
 import { ORDER_TEAM_CONFIGURATION, YunxinApiError, validateOrderTeamInput, type YunxinMessageRouteConfig, type YunxinOrderTeamApi, type YunxinOrderTeamInput, type YunxinOrderTeamState } from "./yunxin-provider";
+import { scanOrderStageCards, type StageCardTransport } from "./order-stage-cards";
 
 export type OrderTeamOptions = { pool: Pool; appId: string; provider: YunxinOrderTeamApi;
   identities: Pick<ImIdentityProvisioner,"ensure">; membersLimit: number; leaseMs?: number;
@@ -17,6 +18,8 @@ export type OrderTeamOptions = { pool: Pool; appId: string; provider: YunxinOrde
   firstResponseEnabled?: boolean;
   /** Explicit opt-in; requires this App's first-response ingress to be enabled as well. */
   escalationEnabled?: boolean;
+  /** Card-capable message seam; real NIM custom messages remain a later supplier step. */
+  stageCardTransport?: StageCardTransport;
   orderImSdkRouteBindings?: OrderImSdkRouteBindings };
 type Db = Pool | PoolClient;
 type Member = { identity_id:string; party:"BUYER"|"OWNER"|"STAFF"; state:string; account_id:string; platform_subject_id:string; realm:string; identity_kind:"USER"|"ADMIN"; status:string; identity_marker:string };
@@ -967,6 +970,7 @@ export class OrderTeamLifecycle implements BeforeApplicationShutdown {
       ||!Number.isInteger(options.membersLimit)||options.membersLimit<4||options.membersLimit>5000
       ||!options.provider?.createOrderTeam||!options.provider.readOrderTeam||!options.identities?.ensure
       ||(options.escalationEnabled===true&&(options.firstResponseEnabled!==true||!options.provider.addSupportTeamMember||!options.provider.sendOrderTeamNotice))
+      ||(options.stageCardTransport!==undefined&&typeof options.stageCardTransport.card!=="function")
       ||(options.leaseMs!==undefined&&(!Number.isInteger(options.leaseMs)||options.leaseMs<1000||options.leaseMs>300000)))throw new OrderTeamError("INVALID_CONFIGURATION");
     this.options=options;this.limit=limit;this.timer=setInterval(()=>this.wake(),intervalMs);this.timer.unref?.();this.wake();
   }
@@ -974,7 +978,8 @@ export class OrderTeamLifecycle implements BeforeApplicationShutdown {
     if(!this.options||this.flight)return;
     const options=this.options;
     const work=(async()=>{if(!this.routesRestored){this.routesRestored=true;await restoreApprovedOrderRoutes(options);}
-      await scanOrderTeams(options,this.limit);if(options.escalationEnabled)await scanOrderEscalations(options,this.limit);})()
+      await scanOrderTeams(options,this.limit);if(options.escalationEnabled)await scanOrderEscalations(options,this.limit);
+      if(options.stageCardTransport)await scanOrderStageCards({pool:options.pool,appId:options.appId,transport:options.stageCardTransport},this.limit);})()
       .catch(()=>{this.logger.error(JSON.stringify({event:"im.order.team.scan_failed"}));});
     const clear=()=>{if(this.flight===settled)this.flight=undefined;};const settled=work.then(clear,clear);this.flight=settled;
   }

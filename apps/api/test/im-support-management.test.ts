@@ -145,10 +145,9 @@ test("0108 creates one open interval per admin and records both permissions", ()
   assert.match(sql, /'im\.support\.audit\.takeover'/);
   assert.match(sql, /"note" text CHECK \("note" IS NULL OR char_length\("note"\) BETWEEN 1 AND 200\)/);
   const journal = JSON.parse(readFileSync(resolve("migrations/business/meta/_journal.json"), "utf8"));
-  assert.deepEqual(journal.entries.slice(-2).map(({ idx, tag }: { idx: number; tag: string }) => ({ idx, tag })), [
-    { idx: 108, tag: "0108_im_support_management" },
-    { idx: 109, tag: "0109_ops_support_management_grants" },
-  ]);
+  const entries = journal.entries.map(({ idx, tag }: { idx: number; tag: string }) => ({ idx, tag }));
+  assert.ok(entries.some((entry: { idx: number; tag: string }) => entry.idx === 108 && entry.tag === "0108_im_support_management"));
+  assert.ok(entries.some((entry: { idx: number; tag: string }) => entry.idx === 109 && entry.tag === "0109_ops_support_management_grants"));
   const acl = readFileSync(resolve("src/database/business-migrations.ts"), "utf8");
   assert.match(acl, /GRANT SELECT, INSERT ON TABLE "zzsh_iam"\."im_support_presence_session"/);
   assert.match(acl, /GRANT UPDATE \("ended_at", "end_reason", "last_heartbeat_at"\) ON TABLE "zzsh_iam"\."im_support_presence_session"/);

@@ -192,6 +192,11 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
       REVOKE UPDATE ON TABLE zzsh_order.im_order_event FROM ${runtimeUser};
       GRANT UPDATE (status) ON TABLE zzsh_order.im_order_event TO ${runtimeUser};`);
   }
+  if ((await pool.query(`SELECT to_regclass('zzsh_order.im_order_stage_card') AS relation`)).rows[0]?.relation) {
+    await pool.query(`REVOKE UPDATE ON TABLE zzsh_order.im_order_stage_card FROM ${runtimeUser};
+      GRANT UPDATE (state,attempt_count,next_attempt_at,lease_until,lease_token_hash,sent_at,failure_class,updated_at)
+        ON TABLE zzsh_order.im_order_stage_card TO ${runtimeUser};`);
+  }
   const hasEscalationColumns=(await pool.query(`SELECT count(*)=5 AS ready FROM pg_attribute
     WHERE attrelid=to_regclass('zzsh_order.im_order_group') AND attname=ANY($1::text[]) AND NOT attisdropped`,
     [["responsible_admin_id","remind_due_at","next_add_due_at","add_round","escalation_state"]])).rows[0]?.ready;
