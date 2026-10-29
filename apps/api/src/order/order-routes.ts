@@ -5,6 +5,8 @@ import { listUnifiedUserOrders, parseUnifiedOrderQuery } from "./unified-user-or
 import { getUserLegacyOrder, listUserLegacyOrders, parseLegacyUserOrderQuery } from "./legacy-user-order-read";
 import type { OrderImSdkRouteBindings } from "../config/config";
 import type { ImMessageTransport } from "../im/im-contract";
+import type { YunxinOrderTeamApi } from "../im/yunxin-provider";
+import { assertOrderTeamInviteAccess, inviteOrderTeamAdmin, listOrderTeamInviteTargets } from "../im/order-team-invite";
 import { assertManualCloseAccess, manualCloseOrder } from "./manual-close";
 import { readOrderTeamAccess, listJoinedOrderTeams } from "../im/order-team-access";
 import { parseRfc3339Timestamp } from "../content/content";
@@ -15,8 +17,8 @@ import { assertGameScopeUsable, gameScopeSignature, readAdminGameScope } from ".
 import { readAdminContext, assertAdminContextInTransaction, type AuthSecurityOptions } from "../auth/auth-security";
 import { readUserContext } from "../auth/user-identity";
 import { readPersonalNativeRefunds } from "../finance/personal-refund-read";
-import { withTransaction } from "../auth/security-core";
-import { ensureApiV1RequestId } from "../contracts/api-v1";
+import { withTransaction, SecurityApiError } from "../auth/security-core";
+import { ensureApiV1RequestId, API_V1_ERROR_CODES } from "../contracts/api-v1";
 import { humanText } from "../supply/content-hash";
 import { unknownSupplyGate, type SupplyGateReader } from "../supply/publishing";
 import { readOrderAccountViews } from "../supply/admin-supervision-read";
@@ -71,6 +73,8 @@ export type OrderRuntimeOptions = AuthSecurityOptions & {
   legacyPublicAdmission?: LegacyPublicAdmission;
   legacyPublicAdmissionDetail?: LegacyPublicAdmissionDetailIndex;
   orderImSdkRouteBindings?: OrderImSdkRouteBindings;
+  /** Present only when order Teams are configured; the invite path never creates a Team. */
+  orderTeamMembers?: { appId: string; provider: Pick<YunxinOrderTeamApi, "readOrderTeam"|"addSupportTeamMember"> };
   /** Explicit controlled-test switch. Production leaves it unset. */
   settlementRecordingEnabled?: boolean;
   /** Local/test system text seam; a production NIM implementation remains later work. */
@@ -306,6 +310,25 @@ export async function handleOrderAdminRoute(
     if (await handleLegacyContinuationRoute(request, response, options, "admin")) return;
     if (await handlePrestartTerminationRoute(request, response, options, "admin")) return;
     if (await handleSettlementAdminRoute(request, response, options)) return;
+    const memberInvite = /^\/([A-Za-z0-9._:-]+)\/members$/.exec(path);
+    if (method === "POST" && memberInvite) {
+      if (!requireOrigin(request, response, options, requestId)) return;
+      if (!options.orderTeamMembers) throw new SecurityApiError(503, API_V1_ERROR_CODES.IM_UNAVAILABLE, "Order Team settings are unavailable");
+      const orderId = decodeId(memberInvite[1]!);
+      const body = bodyOf(request);
+      ensureOnlyFields(body, ["adminUserId"]);
+      const targetAdminId = idField(body.adminUserId, "adminUserId");
+      const context = await readAdminContext(request, options);
+      const actor = { userId: context.userId, sessionId: context.sessionId };
+      const teamMembers = options.orderTeamMembers;
+      await runIdempotentWrite(options, request, response, requestId,
+        { principalId: actor.userId, operation: "im.order.team.member.invite", resourceId: orderId },
+        { realm: "admin", id: actor.userId, sessionId: actor.sessionId },
+        { orderId, adminUserId: targetAdminId },
+        async (client) => { await assertOrderTeamInviteAccess(client, actor, teamMembers.appId, orderId); },
+        async (client) => ({ status: 200, body: await inviteOrderTeamAdmin(client, teamMembers, actor, orderId, targetAdminId, requestId) }));
+      return;
+    }
     const manualClose = /^\/([A-Za-z0-9._:-]+)\/manual-close$/.exec(path);
     if (method === "POST" && manualClose) {
       if (!requireOrigin(request, response, options, requestId)) return;
@@ -351,6 +374,15 @@ export async function handleOrderAdminRoute(
       }
       const teamMatch=/^\/([A-Za-z0-9._:-]+)\/im$/.exec(path);
       if(teamMatch){const operation=query.get("operation")??"read";if(operation!=="read"&&operation!=="send")throw invalid("Operation is invalid");sendJson(response,200,await readOrderTeamAccess(client,{...context,realm:"admin"},decodeId(teamMatch[1]!),operation,options.orderImSdkRouteBindings),requestId);return;}
+      const candidateMatch=/^\/([A-Za-z0-9._:-]+)\/member-candidates$/.exec(path);
+      if(candidateMatch){
+        for(const key of query.keys())if(key!=="limit"||query.getAll(key).length!==1)throw invalid("Query is invalid",key);
+        const raw=query.get("limit");const limit=raw===null?20:Number(raw);
+        if(!Number.isInteger(limit)||limit<1||limit>50)throw invalid("Limit is invalid","limit");
+        if(!options.orderTeamMembers)throw new SecurityApiError(503,API_V1_ERROR_CODES.IM_UNAVAILABLE,"Order Team settings are unavailable");
+        sendJson(response,200,await listOrderTeamInviteTargets(client,{userId:context.userId,sessionId:context.sessionId},
+          options.orderTeamMembers.appId,decodeId(candidateMatch[1]!),limit),requestId);return;
+      }
       const access = await requireAdminAccess(client, context.userId);
       requirePermission(access, ADMIN_PERMISSION.orderRead);
       const gameScope = await readAdminGameScope(client, context.userId);

@@ -171,6 +171,25 @@ export function projectOrderFulfillment(f:{orderStatus:string;hasGroup:boolean;p
     :endState==="REQUESTED"?"ENDING":"RENTING";
   return {stage,rentalStartedAt,dueAt,openingState,endState};
 }
+export type OrderTeamMemberRow={party:"BUYER"|"OWNER"|"STAFF";state:"PLANNED"|"JOINED";platform_subject_id:string;
+  identity_kind:"USER"|"ADMIN";realm:"user"|"admin";account_id:string;status:string;identity_marker:string;name:string|null;avatar:string|null};
+export type OrderTeamMemberView={platformId:string;accountId:string;party:OrderTeamMemberRow["party"];name:string|null;avatar:string|null;
+  responsible:boolean;membershipStatus?:"UNKNOWN";identityStatus?:"UNKNOWN"};
+/** One member query and one projection shape for every order Team reader. */
+export async function readOrderTeamMemberRows(c:Pick<PoolClient,"query">,orderId:string,appId:string):Promise<OrderTeamMemberRow[]>{
+  return (await c.query<OrderTeamMemberRow>(`SELECT mm.party,mm.state,m.platform_subject_id,m.identity_kind,m.realm,m.account_id,m.status,m.identity_marker,
+    CASE WHEN m.realm='user' THEN u.name ELSE a.name END AS name,
+    CASE WHEN m.realm='user' THEN u.image ELSE a.image END AS avatar
+    FROM zzsh_order.im_order_member mm JOIN zzsh_iam.im_identity_mapping m ON m.id=mm.identity_id
+    LEFT JOIN zzsh_auth_user."user" u ON m.realm='user' AND u.id=m.platform_subject_id
+    LEFT JOIN zzsh_auth_admin."user" a ON m.realm='admin' AND a.id=m.platform_subject_id WHERE mm.order_id=$1 AND mm.app_id=$2`,[orderId,appId])).rows;
+}
+export function projectOrderTeamMembers(members:OrderTeamMemberRow[],responsibleAdminId:string|null|undefined,viewerRealm:"user"|"admin"):OrderTeamMemberView[]{
+  return members.filter(m=>m.state==="JOINED").map(m=>({platformId:m.platform_subject_id,accountId:m.account_id,party:m.party,name:m.name,
+    avatar:typeof m.avatar==="string"&&/^https?:\/\//.test(m.avatar)?m.avatar:null,
+    responsible:m.party==="STAFF"&&m.platform_subject_id===responsibleAdminId,
+    ...(viewerRealm==="admin"&&m.realm==="user"?{membershipStatus:"UNKNOWN" as const,identityStatus:"UNKNOWN" as const}:{})}));
+}
 /** Same checks for every JOINED staff member; responsibility is not an exclusive grant. */
 export async function readOrderTeamAccess(c:PoolClient,actor:OrderTeamActor,orderId:string,operation:"read"|"send"="read",
   orderImSdkRouteBindings?:OrderImSdkRouteBindings):Promise<Record<string,unknown>>{
@@ -217,12 +236,7 @@ export async function readOrderTeamAccess(c:PoolClient,actor:OrderTeamActor,orde
   const orderEndedAt=window.orderEndedAt;
   const sendUntil=window.sendUntil;
   if(terminal)canSend=canSend&&window.terminalSendAllowed;
-  const members=(await c.query(`SELECT mm.party,mm.state,m.platform_subject_id,m.identity_kind,m.realm,m.account_id,m.status,m.identity_marker,
-    CASE WHEN m.realm='user' THEN u.name ELSE a.name END AS name,
-    CASE WHEN m.realm='user' THEN u.image ELSE a.image END AS avatar
-    FROM zzsh_order.im_order_member mm JOIN zzsh_iam.im_identity_mapping m ON m.id=mm.identity_id
-    LEFT JOIN zzsh_auth_user."user" u ON m.realm='user' AND u.id=m.platform_subject_id
-    LEFT JOIN zzsh_auth_admin."user" a ON m.realm='admin' AND a.id=m.platform_subject_id WHERE mm.order_id=$1 AND mm.app_id=$2`,[orderId,g.app_id])).rows;
+  const members=await readOrderTeamMemberRows(c,orderId,g.app_id);
   const own=members.find(m=>m.platform_subject_id===actor.userId&&m.realm===actor.realm&&m.identity_kind===(actor.realm==="user"?"USER":"ADMIN"));
   if(actor.realm==="admin"&&(!own||own.party!=="STAFF"||own.state!=="JOINED"))throw denied();
   const escalationState=g.escalation_state_projection??"NOT_STARTED";
@@ -275,10 +289,7 @@ export async function readOrderTeamAccess(c:PoolClient,actor:OrderTeamActor,orde
   return {...summary,appId:g.app_id,teamState:"READY",teamId:g.team_id,name:g.team_name,
     viewerAccountId:own.account_id,conversationId,canRead:true,canSend,
     ...(messageRoute?{messageRoute}:{}),
-    members:members.filter(m=>m.state==="JOINED").map(m=>({platformId:m.platform_subject_id,accountId:m.account_id,party:m.party,name:m.name,
-      avatar:typeof m.avatar==="string"&&/^https?:\/\//.test(m.avatar)?m.avatar:null,
-      responsible:m.party==="STAFF"&&m.platform_subject_id===(g.escalation_responsible_admin_id??g.assigned_admin_id),
-      ...(actor.realm==="admin"&&m.realm==="user"?{membershipStatus:"UNKNOWN",identityStatus:"UNKNOWN"}:{})}))};
+    members:projectOrderTeamMembers(members,g.escalation_responsible_admin_id??g.assigned_admin_id,actor.realm)};
 }
 
 /** Short queue todo derived from the same stage facts; it never replaces the detail projection. */

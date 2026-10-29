@@ -35,18 +35,21 @@ const realSetInterval = globalThis.setInterval, realClearInterval = globalThis.c
 globalThis.setInterval = (fn, ms) => { if (ms === 5000) { timers.set(++timerId, fn); return timerId; } return realSetInterval(fn, ms); };
 globalThis.clearInterval = (id) => { if (!timers.has(id)) realClearInterval(id); };
 
-async function mount(t, caseId, { select = true, fixture } = {}) {
+async function mount(t, caseId, { select = true, fixture, request, props } = {}) {
   const item = fixture ?? fixtureById(caseId);
   const deps = createFixtureDeps(item);
+  const requestFn = request ? request(deps.request) : deps.request;
   globalThis.fetch = deps.fetchStub;
   const node = document.createElement("div");
   document.body.append(node);
   const root = createRoot(node);
+  const paneProps = {
+    identity: `fixture:${caseId}`, adminUserId: "admin-fixture", operatorName: "小周",
+    client: deps.client, connection: "CONNECTED", active: true, sendAllowed: true, request: requestFn, onAuthError: () => undefined,
+    ...props,
+  };
   await act(async () => {
-    root.render(createElement(OrderWorkbenchPane, {
-      identity: `fixture:${caseId}`, adminUserId: "admin-fixture", operatorName: "小周",
-      client: deps.client, connection: "CONNECTED", active: true, sendAllowed: true, request: deps.request, onAuthError: () => undefined,
-    }));
+    root.render(createElement(OrderWorkbenchPane, paneProps));
   });
   t.after(async () => {
     await act(async () => root.unmount());
@@ -62,11 +65,17 @@ async function mount(t, caseId, { select = true, fixture } = {}) {
     await until(() => node.querySelector(".im-wb-queue .im-wb-row"), "list loaded");
     await act(async () => node.querySelector(".im-wb-queue .im-wb-row").click());
   }
-  return { node, root, deps, item, settle, until };
+  return { node, root, deps, item, settle, until, props: paneProps };
 }
 const rows = (node) => [...node.querySelectorAll(".im-wb-queue .im-wb-row")];
 const click = async (button) => { assert.ok(button, "control available"); await act(async () => button.click()); };
 const byText = (node, text) => [...node.querySelectorAll("button")].find((button) => button.textContent.includes(text));
+const openGroupSettings = async (node, until) => {
+  await until(() => node.querySelector(".im-wb-chat"), "chat rendered");
+  await click(node.querySelector('[data-action="open-group-settings"]'));
+  await until(() => node.querySelector('[data-settings-drawer="true"]'), "group settings drawer");
+  return node.querySelector('[data-settings-drawer="true"]');
+};
 
 test("READY group list, role-attributed chat and the complementary order rail come from the loaded projections", async (t) => {
   const { node, until } = await mount(t, "ready-three");
@@ -461,4 +470,152 @@ test("quoted replies are visible on the admin side and revoked messages stay exp
   assert.ok(revoked, "revoked message keeps an explicit state");
   assert.match(revoked.textContent, /消息已撤回/);
   assert.equal(revoked.closest(".im-wb-msg").querySelector(".im-wb-msg-status"), null, "a revoked message does not claim 已发送");
+});
+
+test("the group settings drawer groups users and staff, marks the responsible admin and renders no identifiers", async (t) => {
+  browser.localStorage.clear();
+  const { node, until } = await mount(t, "multi-staff");
+  await until(() => /成员 6/.test(node.querySelector(".im-wb-chat-actions")?.textContent ?? ""), "six members");
+  const drawer = await openGroupSettings(node, until);
+  assert.equal(drawer.getAttribute("role"), "dialog");
+  assert.equal(drawer.getAttribute("data-settings-drawer"), "true");
+  assert.ok(drawer.closest("#im-order-details"), "the drawer is layered over the existing order rail");
+  assert.equal(document.body.querySelector(".im-wb-dialog"), null, "the settings surface is not a centered modal");
+  assert.match(drawer.textContent, /满配六套 · 资源账号/);
+  assert.match(drawer.textContent, /群成员 6 · 用户 2 · 客服 4/);
+
+  const userGroup = drawer.querySelector('[data-member-group="USER"]');
+  const staffGroup = drawer.querySelector('[data-member-group="STAFF"]');
+  assert.ok(userGroup, "user members have their own group");
+  assert.ok(staffGroup, "staff members have their own group");
+  assert.equal(userGroup.querySelectorAll(".im-og-member").length, 2);
+  assert.match(userGroup.textContent, /买家/);
+  assert.match(userGroup.textContent, /号主/);
+  assert.match(userGroup.textContent, /只读/);
+  assert.equal(staffGroup.querySelectorAll(".im-og-member").length, 4);
+  assert.match(staffGroup.textContent, /负责客服/);
+  assert.match(staffGroup.textContent, /协作客服/);
+  assert.equal(staffGroup.querySelectorAll('[data-relation="responsible"]').length, 1, "only one responsible marker");
+  assert.doesNotMatch(drawer.textContent, /10001|20002|30003|30004|30005|30006|tenant-account|owner-account|staff-b-account|staff-c-account/, "no user or account UUID reaches the drawer");
+  assert.doesNotMatch(drawer.textContent, /用户编号|稳定账号ID|account-8842/, "administrative identifiers stay out of the group settings");
+  assert.doesNotMatch(drawer.textContent, /我的群昵称/, "there is no my-group-nickname editor");
+  assert.equal(drawer.querySelector('input[placeholder*="昵称"], input[aria-label*="昵称"]'), null);
+
+  await act(async () => drawer.dispatchEvent(new browser.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+  await until(() => !node.querySelector('[data-settings-drawer="true"]'), "drawer closed");
+  assert.ok(node.querySelector("#im-order-details .im-rail-value"), "the existing order rail still renders after closing settings");
+});
+
+test("admin invites use the order-scoped bounded picker and report permission, unavailable and wired success", async (t) => {
+  browser.localStorage.clear();
+  const targets = Array.from({ length: 12 }, (_, index) => ({ adminUserId: `admin-candidate-${index}`, displayName: `候选管理员${index}` }));
+  const reads = [];
+  const writes = [];
+  let readMode = "denied";
+  const { node, root, until, settle, props } = await mount(t, "ready-three", {
+    request: (base) => async (path, body) => {
+      if (path.startsWith("/orders/order-8842/member-candidates")) {
+        reads.push(path);
+        if (readMode === "denied") throw Object.assign(new Error("synthetic forbidden"), { status: 403 });
+        if (readMode === "unavailable") throw Object.assign(new Error("synthetic unavailable"), { status: 503 });
+        return { targets, limit: 50 };
+      }
+      if (path === "/orders/order-8842/members" && body) {
+        writes.push({ path, body });
+        return { status: "JOINED", members: [] };
+      }
+      return base(path);
+    },
+  });
+  const drawer = await openGroupSettings(node, until);
+  await click(drawer.querySelector('[data-action="open-admin-invite"]'));
+  await until(() => /当前账号无权读取可邀请成员/.test(drawer.textContent), "permission is named without raw identifiers");
+  assert.equal(drawer.querySelectorAll('[data-action="invite-admin-candidate"]').length, 0);
+  assert.match(reads[0], /^\/orders\/order-8842\/member-candidates\?limit=50$/, "the picker uses the scoped bounded read");
+
+  readMode = "unavailable";
+  await click(drawer.querySelector('[data-action="retry-invite-candidates"]'));
+  await until(() => /服务端未就绪：成员邀请暂不可用/.test(drawer.textContent), "missing endpoint is explicit");
+  assert.equal(drawer.querySelectorAll('[data-action="invite-admin-candidate"]').length, 0);
+
+  readMode = "ready";
+  await click(drawer.querySelector('[data-action="retry-invite-candidates"]'));
+  await until(() => drawer.querySelectorAll('[data-action="invite-admin-candidate"]').length > 0, "bounded admin candidates");
+  const candidates = [...drawer.querySelectorAll('[data-action="invite-admin-candidate"]')];
+  assert.equal(candidates.length, 8, "the picker never renders the whole candidate pool");
+  assert.match(drawer.textContent, /任意管理端管理员/, "any administrator can invite, not only the responsible one");
+  assert.match(drawer.textContent, /普通用户与站外账号不可邀请/);
+  assert.doesNotMatch(drawer.textContent, /admin-candidate-0|admin-candidate-1/, "no admin UUID is rendered");
+  const target = [...drawer.querySelectorAll(".im-og-candidate")].find((item) => item.textContent.includes("候选管理员1"));
+  assert.ok(target, "candidate remains selectable by name");
+  await click(target.querySelector('[data-action="invite-admin-candidate"]'));
+  await until(() => writes.length === 1, "invite reaches the contract path");
+  assert.deepEqual(writes[0], { path: "/orders/order-8842/members", body: { adminUserId: "admin-candidate-1" } }, "the write body only carries the chosen admin id");
+  await until(() => /已邀请 候选管理员1/.test(drawer.textContent), "success is shown only after the server accepts");
+
+  const overridden = [];
+  await act(async () => root.render(createElement(OrderWorkbenchPane, {
+    ...props, inviteGroupMember: async (orderId, adminUserId) => { overridden.push([orderId, adminUserId]); },
+  })));
+  const second = [...drawer.querySelectorAll(".im-og-candidate")].find((item) => item.textContent.includes("候选管理员2"));
+  await click(second.querySelector('[data-action="invite-admin-candidate"]'));
+  await until(() => overridden.length === 1, "a typed callback overrides the default transport");
+  assert.deepEqual(overridden[0], ["order-8842", "admin-candidate-2"]);
+  assert.equal(writes.length, 1, "the overridden transport is the only writer");
+  await settle();
+});
+
+test("pin, mute and local hide are per-admin preferences and hiding never leaves the group", async (t) => {
+  browser.localStorage.clear();
+  const { node, root, deps, until, props } = await mount(t, "ready-three");
+  await until(() => rows(node).length === 3, "three loaded groups");
+  await act(async () => rows(node)[1].click());
+  await until(() => node.querySelector(".im-wb-chat-title")?.textContent.includes("ZZ20261010007710"), "second order selected");
+
+  const drawer = await openGroupSettings(node, until);
+  assert.match(drawer.textContent, /仅隐藏本机列表中的这一行/);
+  assert.match(drawer.textContent, /不会退出群聊/);
+  await click(drawer.querySelector('[data-pref="pin"]'));
+  await until(() => rows(node)[0].textContent.includes("置顶"), "pinned row moved first locally");
+  await click(drawer.querySelector('[data-pref="mute"]'));
+  await until(() => rows(node)[0].textContent.includes("免打扰"), "muted marker is local");
+
+  let leaveCalls = 0;
+  deps.client.leave = () => { leaveCalls += 1; return Promise.resolve(); };
+  await click(drawer.querySelector('[data-pref="hide"]'));
+  await until(() => rows(node).length === 2, "hidden row disappears from the local list");
+  assert.equal(leaveCalls, 0, "hiding never calls NIM leave");
+  assert.equal(deps.writes.length, 0, "hiding never writes to the order or settlement API");
+  const stored = JSON.parse(browser.localStorage.getItem("zzsh.im-support.order-group-prefs.admin-fixture"));
+  assert.deepEqual(stored["order-7710"], { pinned: true, muted: true, hidden: true }, "preferences persist under the admin user id");
+
+  await act(async () => root.render(createElement(OrderWorkbenchPane, { ...props, adminUserId: "admin-other" })));
+  await until(() => rows(node).length === 3, "another admin keeps their own unfiltered list");
+  await act(async () => root.render(createElement(OrderWorkbenchPane, { ...props, adminUserId: "admin-fixture" })));
+  await until(() => rows(node).length === 2, "the original admin preference is restored");
+  await click(node.querySelector('[data-action="restore-hidden-order-groups"]'));
+  await until(() => rows(node).length === 3, "restore only clears the local hide marker");
+});
+
+test("staff preview cards are platform-support cards without user profile fields or UUIDs", async (t) => {
+  browser.localStorage.clear();
+  const { node, until } = await mount(t, "multi-staff");
+  const drawer = await openGroupSettings(node, until);
+  const userGroup = drawer.querySelector('[data-member-group="USER"]');
+  const staffGroup = drawer.querySelector('[data-member-group="STAFF"]');
+  assert.equal(userGroup.querySelector('[aria-label^="预览客服信息"]'), null, "user members do not get the admin card");
+  const preview = staffGroup.querySelector('[aria-label="预览客服信息 小周"]');
+  assert.ok(preview, "staff name/avatar exposes the shared hover-card trigger");
+  assert.ok(staffGroup.querySelector('[data-slot="hover-card-trigger"]'), "the existing admin hover-card primitive is reused");
+
+  await click(preview);
+  await until(() => document.body.querySelector('[aria-label^="平台客服预览"]'), "admin card opened");
+  const card = document.body.querySelector('[aria-label^="平台客服预览"]');
+  assert.match(card.textContent, /小周/);
+  assert.match(card.textContent, /平台客服/);
+  assert.match(card.textContent, /负责客服/);
+  assert.doesNotMatch(card.textContent, /会员|信用分|脱敏手机|实名状态|用户编号|风险/, "user profile facts never enter the admin card");
+  assert.doesNotMatch(card.textContent, /30003|viewer|10001|20002/, "no member or account UUID is rendered");
+  assert.doesNotMatch(card.textContent, /可接待|已暂停|未上线/, "presence is not invented when the projection has none");
+  assert.equal(document.body.querySelector('[aria-label^="用户预览"]'), null, "the user preview card is not used for an administrator");
 });

@@ -1111,6 +1111,7 @@ export async function mountAuthHandlers(
     return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
   })();
   const collection = options.joinpayCollection;
+  const orderTeamProvider = yunxinRuntime?.provider as (YunxinOrderTeamApi | undefined);
   const paymentReadOptions = channelPaymentReadOptions(collection?.routes, Boolean(collection?.notifications
     && collection.notifications.admission === collection.routes?.initial?.admission
     && collection.notifications.admission === collection.routes?.execution?.formal?.admission));
@@ -1125,6 +1126,8 @@ export async function mountAuthHandlers(
     legacyPublicAdmissionDetail,
     settlementRecordingEnabled: options.testOperationsEnabled === true && process.env.ZZSH_SETTLEMENT_RECORDING === "controlled" && process.env.NODE_ENV !== "production",
     ...(orderImSdkRouteBindings ? { orderImSdkRouteBindings } : {}),
+    ...(options.orderTeams && orderTeamProvider
+      ? { orderTeamMembers: { appId: options.yunxin!.appId, provider: orderTeamProvider } } : {}),
     ...(options.testImMessageTransport ? { systemMessageTransport: { sendText: options.testImMessageTransport.sendText.bind(options.testImMessageTransport) } } : {}),
   };
   // Credit routes own both BFF prefixes and must be registered before the

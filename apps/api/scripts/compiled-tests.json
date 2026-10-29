@@ -13,6 +13,7 @@
   "dist/test/im-contract.test.js",
   "dist/test/yunxin-provider.test.js",
   "dist/test/order-team-provider.test.js",
+  "dist/test/order-team-invite.test.js",
   "dist/test/im-identity.test.js",
   "dist/test/order-im-events.test.js",
   "dist/test/im-sql-routes.test.js",

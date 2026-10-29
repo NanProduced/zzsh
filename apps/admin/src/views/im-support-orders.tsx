@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
-import { ArrowDown, ChevronLeft, ChevronRight, CircleAlert, Headphones, Images, MoreHorizontal, Search, Smile } from "lucide-react";
+import { ArrowDown, ChevronLeft, ChevronRight, CircleAlert, Headphones, Images, MoreHorizontal, Search, Settings, Smile } from "lucide-react";
 import { MessageScroller as MessageScrollerPrimitive } from "@shadcn/react/message-scroller";
 import { decodeImSystemNotice } from "@zzsh/im-client/message-state";
 import type { NimMessageLike, NimWebClientLike, NimWebConnectionState } from "@zzsh/im-client/nim-web-client";
@@ -17,6 +17,10 @@ import { MediaDraftBar, MediaMessage, mediaMessageOf } from "@zzsh/ui/message-me
 import "@zzsh/ui/message-media.css";
 import { OrderCardMessage } from "@zzsh/ui/order-card";
 import { OrderFulfillmentSection } from "./im-support-fulfillment";
+import {
+  AdminOrderGroupSettingsDrawer, groupPreferenceOf, readOrderGroupPreferences, storeOrderGroupPreferences, withGroupPreference,
+  type InviteOrderGroupMember, type OrderGroupPreference, type OrderGroupPreferenceMap,
+} from "./im-support-group-settings";
 import { Bubble, BubbleContent } from "../components/ui/bubble";
 import { InputGroup, InputGroupAddon, InputGroupTextarea } from "../components/ui/input-group";
 import { Kbd } from "../components/ui/kbd";
@@ -26,12 +30,13 @@ import { Attachment, AttachmentAction, AttachmentContent, AttachmentDescription,
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 import "@zzsh/ui/order-team.css";
 import "./im-order-rail.css";
+import "./im-support-group-settings.css";
 
 const GROUP_WINDOW_MS = 300_000;
 const MAX_STAGED_IMAGES = 6;
 const UNIT_LABELS: Record<string, string> = { HAFF_BASE: "哈夫币", ROUND: "发", PIECE: "件" };
 
-type Requester = <T>(path: string) => Promise<T>;
+type Requester = <T>(path: string, body?: Record<string, unknown>) => Promise<T>;
 
 /** Exact integer cents only; anything else stays unknown and is never rendered as 0. */
 function centsOf(value: string | null | undefined): bigint | null {
@@ -93,7 +98,7 @@ function serverTime(value: string): string {
  * authorization, draft and send decision; this module only decides how the
  * loaded facts are presented in the three-column case workspace.
  */
-export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client, connection, active, sendAllowed, canManualClose, request, onAuthError }: {
+export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client, connection, active, sendAllowed, canManualClose, request, onAuthError, inviteGroupMember }: {
   identity: string;
   adminUserId: string;
   operatorName: string;
@@ -104,12 +109,20 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
   canManualClose?: boolean;
   request: Requester;
   onAuthError: (status: number) => void;
+  /** Typed invite port. The BFF member endpoint is not shipped yet, so the drawer stays explicitly 未就绪 until a caller provides this. */
+  inviteGroupMember?: InviteOrderGroupMember;
 }) {
   const [query, setQuery] = useState("");
   const [emojiOpen, setEmojiOpen] = useState(false);
   const orderComposerRef = useRef<HTMLTextAreaElement | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(true);
   const [pane, setPane] = useState<"list" | "chat" | "details">("list");
+  const [groupSettingsOpen, setGroupSettingsOpen] = useState(false);
+  const [groupPrefs, setGroupPrefs] = useState<OrderGroupPreferenceMap>(() => readOrderGroupPreferences(adminUserId));
+  const groupPrefsRef = useRef(groupPrefs); groupPrefsRef.current = groupPrefs;
+  const groupTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const listItemsRef = useRef<OrderTeamListItem[]>([]);
+  const selectOrderRef = useRef<((id: string | null) => void) | null>(null);
   const [imageErrors, setImageErrors] = useState<Record<string, number>>({});
   const chatHeadingRef = useRef<HTMLElement | null>(null);
   const detailsTriggerRef = useRef<HTMLButtonElement | null>(null);
@@ -128,10 +141,12 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
   }, []);
 
   const isNarrow = () => typeof window !== "undefined" && window.matchMedia("(max-width: 760px)").matches;
-  useEffect(() => { setPane("list"); setQuery(""); setImageErrors({}); }, [identity]);
+  useEffect(() => { setPane("list"); setQuery(""); setImageErrors({}); setGroupSettingsOpen(false); }, [identity]);
+  useEffect(() => { setGroupPrefs(readOrderGroupPreferences(adminUserId)); setGroupSettingsOpen(false); }, [adminUserId]);
   const openDetails = () => { setDetailsOpen(true); if (isNarrow()) setPane("details"); };
   const closeDetails = () => {
     const narrow = isNarrow();
+    setGroupSettingsOpen(false);
     setDetailsOpen(false);
     if (!narrow) { detailsTriggerRef.current?.focus(); return; }
     setPane(selectedRef.current ? "chat" : "list");
@@ -139,6 +154,50 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
       (selectedRef.current ? chatHeadingRef.current : document.querySelector<HTMLElement>('.im-wb-pane--orders .im-wb-queue [data-active="true"]'))?.focus();
     });
   };
+
+  const persistGroupPrefs = (next: OrderGroupPreferenceMap) => {
+    groupPrefsRef.current = next;
+    setGroupPrefs(next);
+    storeOrderGroupPreferences(adminUserId, next);
+  };
+  const changeGroupPreference = (orderId: string, patch: Partial<OrderGroupPreference>) => {
+    persistGroupPrefs(withGroupPreference(groupPrefsRef.current, orderId, patch));
+  };
+  const hideOrderGroup = (orderId: string) => {
+    const next = withGroupPreference(groupPrefsRef.current, orderId, { hidden: true });
+    persistGroupPrefs(next);
+    setGroupSettingsOpen(false);
+    if (selectedRef.current !== orderId) return;
+    // Hiding is local: only the visible row goes away; the NIM group and its history stay untouched.
+    const nextVisible = listItemsRef.current.find((item) => !groupPreferenceOf(next, item.id).hidden)?.id ?? null;
+    selectOrderRef.current?.(nextVisible);
+    if (isNarrow()) setPane(nextVisible === null ? "list" : "chat");
+  };
+  const restoreHiddenGroups = () => {
+    const next: OrderGroupPreferenceMap = {};
+    for (const [orderId, preference] of Object.entries(groupPrefsRef.current)) next[orderId] = { ...preference, hidden: false };
+    persistGroupPrefs(next);
+  };
+  const openGroupSettings = () => {
+    setDetailsOpen(true);
+    setGroupSettingsOpen(true);
+    if (isNarrow()) setPane("details");
+  };
+  const closeGroupSettings = () => {
+    const narrow = isNarrow();
+    setGroupSettingsOpen(false);
+    if (!narrow) { requestAnimationFrame(() => groupTriggerRef.current?.focus()); return; }
+    setPane(selectedRef.current ? "chat" : "list");
+    requestAnimationFrame(() => {
+      (selectedRef.current ? chatHeadingRef.current : document.querySelector<HTMLElement>('.im-wb-pane--orders .im-wb-queue [data-active="true"]'))?.focus();
+    });
+  };
+  // Contract: POST /api/bff/admin/orders/{orderId}/members { adminUserId }. Callers may override the
+  // transport through the typed prop; the default keeps the server as the only source of success.
+  const defaultInviteGroupMember = useCallback<InviteOrderGroupMember>(async (orderId, adminUserId) => {
+    await request(`/orders/${encodeURIComponent(orderId)}/members`, { adminUserId });
+  }, [request]);
+  const resolvedInviteGroupMember = inviteGroupMember ?? defaultInviteGroupMember;
 
   useEffect(() => {
     if (previousPaneRef.current === pane) return;
@@ -157,11 +216,20 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
 
   const renderList = ({ items, selectedId, onSelect, loading, refreshing, nextCursor, onLoadMore }: OrderTeamListView) => {
     selectedRef.current = selectedId;
+    listItemsRef.current = items;
+    const chooseOrder = (id: string | null) => { setGroupSettingsOpen(false); onSelect(id); };
+    selectOrderRef.current = chooseOrder;
     const text = query.trim().toLowerCase();
-    const rows = text ? items.filter((row: OrderTeamListItem) => `${row.title} ${row.displayNo} ${orderStageLabel(row)}`.toLowerCase().includes(text)) : items;
+    const preferenceOf = (id: string) => groupPreferenceOf(groupPrefs, id);
+    const hiddenItems = items.filter((row: OrderTeamListItem) => preferenceOf(row.id).hidden);
+    const visibleItems = items.filter((row: OrderTeamListItem) => !preferenceOf(row.id).hidden);
+    // Pinned groups only move locally; the server order and every membership fact stay unchanged.
+    const orderedItems = [...visibleItems].sort((a, b) => Number(preferenceOf(b.id).pinned) - Number(preferenceOf(a.id).pinned));
+    const rows = text ? orderedItems.filter((row: OrderTeamListItem) => `${row.title} ${row.displayNo} ${orderStageLabel(row)}`.toLowerCase().includes(text)) : orderedItems;
+    const allHidden = !text && items.length > 0 && rows.length === 0 && hiddenItems.length === items.length;
     return (
       <aside className="im-wb-queue" aria-label="我参与的订单群">
-        <div className="im-wb-queue-head"><strong>我参与的订单群</strong><b>{items.length}</b></div>
+        <div className="im-wb-queue-head"><strong>我参与的订单群</strong><b>{items.length - hiddenItems.length}</b></div>
         <label className="im-wb-search"><Search size={13} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索筛选当前列表" aria-label="搜索订单群" /></label>
         <p className="im-wb-filter-note">仅筛选本机已加载的订单群，计数不代表全部；「我参与的」即当前目录已授权的群。</p>
         <div className="im-wb-rows">
@@ -173,12 +241,13 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
               : null;
             const todo = !ended ? row.todo ?? null : null;
             const due = !ended && row.dueAt ? `到期 ${serverTime(row.dueAt)}` : null;
+            const preference = preferenceOf(row.id);
             return (
-              <button type="button" key={row.id} className="im-wb-row" data-active={selectedId === row.id} aria-current={selectedId === row.id ? "page" : undefined}
-                onClick={() => { setImageErrors({}); onSelect(row.id); setPane("chat"); }}>
+              <button type="button" key={row.id} className="im-wb-row" data-active={selectedId === row.id} data-pinned={preference.pinned ? "true" : undefined} data-muted={preference.muted ? "true" : undefined} aria-current={selectedId === row.id ? "page" : undefined}
+                onClick={() => { setImageErrors({}); chooseOrder(row.id); setPane("chat"); }}>
                 <span className="im-wb-row-av" aria-hidden="true">{initialOf(row.title)}</span>
                 <span className="im-wb-row-copy">
-                  <span className="im-wb-row-top"><b>{row.title}</b><i className="im-wb-tag">{row.displayNo}</i></span>
+                  <span className="im-wb-row-top"><b>{row.title}</b><i className="im-wb-tag">{row.displayNo}</i>{preference.pinned ? <i className="im-wb-tag im-og-list-tag" data-tone="pinned">置顶</i> : null}{preference.muted ? <i className="im-wb-tag im-og-list-tag" data-tone="muted">免打扰</i> : null}</span>
                   <span className="im-wb-row-snip">{orderStageLabel(row)}</span>
                   {todo || due || fact ? <span className="im-wb-row-foot">
                     {todo ? <em data-tone="todo">{todo}</em> : null}
@@ -189,7 +258,11 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
               </button>
             );
           })}
-          {!rows.length && items.length ? <p className="im-wb-list-empty"><strong>当前列表没有匹配订单群</strong><span>试试其他账号名称或订单编号。</span></p> : null}
+          {!rows.length && items.length ? <p className="im-wb-list-empty">
+            <strong>{allHidden ? "本机已隐藏全部订单群" : "当前列表没有匹配订单群"}</strong>
+            <span>{allHidden ? "恢复显示后仍按服务端授权读取；不会退出群聊。" : "试试其他账号名称或订单编号。"}</span>
+          </p> : null}
+          {hiddenItems.length ? <button type="button" className="im-wb-more im-og-restore" data-action="restore-hidden-order-groups" onClick={restoreHiddenGroups}>已隐藏 {hiddenItems.length} 个订单群 · 恢复显示</button> : null}
           {nextCursor ? <button type="button" className="im-wb-more" disabled={loading || refreshing} onClick={onLoadMore}>{refreshing ? "正在读取…" : "更多订单群"}</button> : null}
         </div>
       </aside>
@@ -283,6 +356,8 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
           </div>
           <div className="im-wb-chat-actions">
             <span className="im-wb-state">成员 {info.members.length}</span>
+            <button ref={groupTriggerRef} type="button" className="im-wb-btn im-wb-btn-icon" data-action="open-group-settings" aria-label="群设置" aria-expanded={groupSettingsOpen}
+              onClick={() => { if (groupSettingsOpen) closeGroupSettings(); else openGroupSettings(); }}><Settings size={15} /></button>
             <button ref={detailsTriggerRef} type="button" className="im-wb-btn im-wb-btn-icon" data-action="toggle-order-details" aria-label={detailsOpen ? "收起本单详情" : "展开本单详情"} aria-expanded={detailsOpen} aria-controls="im-order-details"
               onClick={() => { if (detailsOpen) closeDetails(); else openDetails(); }}><MoreHorizontal size={15} /></button>
           </div>
@@ -394,7 +469,7 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
       (coinLines.length > 0 && coinAmount === null) || (itemLines.length > 0 && itemAmount === null)
     );
     return (
-      <aside id="im-order-details" className="order-team-aside im-wb-details" aria-label="本单详情" hidden={!detailsOpen}>
+      <aside id="im-order-details" className="order-team-aside im-wb-details im-order-rail-host" aria-label="本单详情" hidden={!detailsOpen} data-settings-open={groupSettingsOpen ? "true" : undefined}>
         <div className="im-wb-details-head"><strong>本单详情</strong></div>
         <div className="im-order-rail">
           <RailSection title="账号价值">
@@ -449,6 +524,9 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
           {/* 已结束订单的进度与终态只在顶部阶段条呈现；右栏不再重复状态卡。 */}
           {ended ? null : <OrderFulfillmentSection key={info.orderId} orderId={info.orderId} displayNo={info.displayNo} viewerId={adminUserId} orderStatus={info.orderStatus} canManualClose={canManualClose === true && info.members.some((member) => member.party === "STAFF" && member.platformId === adminUserId)} {...(info.frozenInventory ? { frozenInventory: info.frozenInventory } : {})} />}
         </div>
+        {groupSettingsOpen ? <AdminOrderGroupSettingsDrawer info={info} request={request}
+          preferences={groupPreferenceOf(groupPrefs, info.orderId)} onPreferenceChange={(patch) => changeGroupPreference(info.orderId, patch)}
+          onHide={() => hideOrderGroup(info.orderId)} onClose={closeGroupSettings} inviteMember={resolvedInviteGroupMember} /> : null}
       </aside>
     );
   };

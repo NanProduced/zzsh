@@ -1,0 +1,99 @@
+/*
+ * Admin order-group settings drawer: a right-side sheet over the existing order
+ * detail rail (full width on narrow screens). Local list markers for pin/mute stay
+ * compact so they never turn the queue into a dashboard.
+ */
+
+.workspace-root .im-order-rail-host { position:relative; }
+.workspace-root .im-order-rail-host[data-settings-open="true"] { overflow:hidden; }
+
+.workspace-root .im-og-drawer { position:absolute; inset:0; z-index:8; display:flex; justify-content:flex-end; background:color-mix(in oklab,var(--background) 38%,transparent); }
+.workspace-root .im-og-sheet { display:flex; flex-direction:column; width:360px; max-width:100%; height:100%; min-height:0; border-left:1px solid var(--border); background:var(--card); box-shadow:-14px 0 34px color-mix(in oklab,var(--foreground) 10%,transparent); }
+.workspace-root .im-og-head { display:flex; flex:none; align-items:center; justify-content:space-between; gap:10px; min-height:48px; padding:10px 14px; border-bottom:1px solid var(--border); }
+.workspace-root .im-og-head strong { display:block; font-size:14px; }
+.workspace-root .im-og-head span { display:block; margin-top:2px; color:var(--muted-foreground); font-size:11px; }
+.workspace-root .im-og-icon-btn { display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; border:1px solid transparent; border-radius:6px; color:var(--muted-foreground); background:none; cursor:pointer; }
+.workspace-root .im-og-icon-btn:hover { border-color:var(--border); color:var(--foreground); background:var(--background); }
+.workspace-root .im-og-icon-btn:focus-visible { outline:2px solid var(--ring); outline-offset:1px; }
+.workspace-root .im-og-body { display:flex; flex:1; flex-direction:column; gap:14px; min-height:0; padding:12px 14px 18px; overflow-y:auto; overscroll-behavior:contain; }
+
+.workspace-root .im-og-group { display:grid; gap:3px; padding:10px 11px; border:1px solid var(--border); border-radius:8px; background:var(--background); }
+.workspace-root .im-og-group b { font-size:13px; line-height:1.5; overflow-wrap:anywhere; }
+.workspace-root .im-og-group span { color:var(--muted-foreground); font-size:11px; }
+
+.workspace-root .im-og-section { display:grid; gap:8px; padding-top:2px; }
+.workspace-root .im-og-section h3 { margin:0; font-size:12px; font-weight:600; }
+.workspace-root .im-og-section-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.workspace-root .im-og-staff-head { margin-top:6px; }
+.workspace-root .im-og-readonly { padding:1px 6px; border:1px solid var(--border); border-radius:999px; color:var(--muted-foreground); font-size:10px; }
+.workspace-root .im-og-members { display:grid; gap:2px; margin:0; padding:0; list-style:none; }
+.workspace-root .im-og-member { display:flex; align-items:center; gap:8px; min-height:42px; padding:5px 6px; border-radius:7px; }
+.workspace-root .im-og-member:hover { background:color-mix(in oklab,var(--muted) 60%,transparent); }
+.workspace-root .im-og-member-trigger { flex:1; min-width:0; }
+.workspace-root .im-og-member-hit { display:flex; align-items:center; gap:8px; width:100%; min-width:0; margin:0; padding:0; border:0; border-radius:6px; color:inherit; background:none; font:inherit; text-align:left; cursor:pointer; }
+.workspace-root .im-og-member-hit:focus-visible { outline:2px solid var(--ring); outline-offset:2px; }
+.workspace-root .im-og-member-copy { display:grid; flex:1; min-width:0; gap:1px; }
+.workspace-root .im-og-member-copy b { overflow:hidden; font-size:12px; font-weight:500; text-overflow:ellipsis; white-space:nowrap; }
+.workspace-root .im-og-member-copy small { color:var(--muted-foreground); font-size:10px; }
+.workspace-root .im-og-relation { flex:none; padding:1px 6px; border-radius:999px; font-size:10px; }
+.workspace-root .im-og-relation[data-relation="responsible"] { color:var(--im-accent-strong); background:color-mix(in oklab,var(--im-accent-strong) 12%,transparent); }
+.workspace-root .im-og-relation[data-relation="collaborating"] { color:var(--muted-foreground); background:color-mix(in oklab,var(--muted) 70%,transparent); }
+
+.workspace-root .im-og-avatar { display:inline-flex; flex:none; align-items:center; justify-content:center; width:28px; height:28px; overflow:hidden; border:1px solid var(--border); border-radius:50%; color:var(--muted-foreground); background:color-mix(in oklab,var(--muted) 70%,var(--card)); font-size:11px; font-weight:600; }
+.workspace-root .im-og-avatar img { width:100%; height:100%; object-fit:cover; }
+
+.workspace-root .im-og-note { margin:0; color:var(--muted-foreground); font-size:10px; line-height:1.6; }
+.workspace-root .im-og-note svg { margin:0 3px 0 0; vertical-align:-1px; }
+.workspace-root .im-og-empty { margin:0; color:var(--muted-foreground); font-size:11px; line-height:1.6; }
+
+.workspace-root .im-og-invite-btn { display:inline-flex; align-items:center; gap:4px; min-height:26px; padding:0 8px; border:1px solid var(--border); border-radius:6px; color:var(--foreground); background:var(--background); font:inherit; font-size:11px; cursor:pointer; }
+.workspace-root .im-og-invite-btn:hover { border-color:var(--im-accent-strong); color:var(--im-accent-strong); }
+.workspace-root .im-og-picker { display:grid; gap:7px; padding:9px; border:1px solid var(--border); border-radius:8px; background:var(--background); }
+.workspace-root .im-og-search { display:flex; align-items:center; gap:6px; min-height:30px; padding:0 8px; border:1px solid var(--border); border-radius:6px; background:var(--card); color:var(--muted-foreground); }
+.workspace-root .im-og-search input { flex:1; min-width:0; border:0; outline:0; color:var(--foreground); background:none; font:inherit; font-size:12px; }
+.workspace-root .im-og-candidates { display:grid; gap:2px; max-height:228px; margin:0; padding:0; overflow-y:auto; list-style:none; }
+.workspace-root .im-og-candidate { display:flex; align-items:center; gap:8px; min-height:40px; padding:4px; border-radius:6px; }
+.workspace-root .im-og-candidate:hover { background:color-mix(in oklab,var(--muted) 55%,transparent); }
+.workspace-root .im-og-candidate-copy { display:grid; flex:1; min-width:0; gap:1px; }
+.workspace-root .im-og-candidate-copy b { overflow:hidden; font-size:12px; font-weight:500; text-overflow:ellipsis; white-space:nowrap; }
+.workspace-root .im-og-candidate-copy small { color:var(--muted-foreground); font-size:10px; }
+.workspace-root .im-og-candidate-invite { flex:none; min-height:26px; padding:0 9px; border:1px solid var(--border); border-radius:6px; color:var(--foreground); background:var(--card); font:inherit; font-size:11px; cursor:pointer; }
+.workspace-root .im-og-candidate-invite:hover:not(:disabled) { border-color:var(--im-accent-strong); color:var(--im-accent-strong); }
+.workspace-root .im-og-candidate-invite:disabled { cursor:not-allowed; color:var(--muted-foreground); opacity:.7; }
+.workspace-root .im-og-status { display:flex; align-items:flex-start; gap:5px; margin:0; padding:6px 8px; border-radius:6px; font-size:11px; line-height:1.55; }
+.workspace-root .im-og-status[data-tone="warn"] { color:var(--destructive); background:color-mix(in oklab,var(--destructive) 8%,transparent); }
+.workspace-root .im-og-status[data-tone="good"] { color:var(--ring); background:color-mix(in oklab,var(--ring) 9%,transparent); }
+.workspace-root .im-og-status button { display:inline-flex; align-items:center; gap:3px; margin-left:4px; border:0; color:inherit; background:none; font:inherit; font-size:11px; text-decoration:underline; cursor:pointer; }
+
+.workspace-root .im-og-prefs { display:grid; gap:2px; }
+.workspace-root .im-og-pref { display:flex; align-items:center; gap:10px; width:100%; min-height:42px; padding:6px; border:0; border-radius:7px; color:inherit; background:none; font:inherit; text-align:left; cursor:pointer; }
+.workspace-root .im-og-pref:hover { background:color-mix(in oklab,var(--muted) 55%,transparent); }
+.workspace-root .im-og-pref:focus-visible { outline:2px solid var(--ring); outline-offset:1px; }
+.workspace-root .im-og-pref-copy { display:grid; flex:1; min-width:0; gap:1px; }
+.workspace-root .im-og-pref-copy b { font-size:12px; font-weight:500; }
+.workspace-root .im-og-pref-copy small { color:var(--muted-foreground); font-size:10px; line-height:1.5; }
+.workspace-root .im-og-switch { position:relative; flex:none; width:30px; height:18px; border:1px solid var(--border); border-radius:999px; background:var(--muted); }
+.workspace-root .im-og-switch i { position:absolute; top:2px; left:2px; width:12px; height:12px; border-radius:50%; background:var(--card); transition:transform .15s; }
+.workspace-root .im-og-switch[data-on="true"] { border-color:var(--im-accent-strong); background:var(--im-accent-strong); }
+.workspace-root .im-og-switch[data-on="true"] i { transform:translateX(12px); }
+.workspace-root .im-og-hide-row { display:flex; align-items:center; gap:8px; min-height:48px; padding:6px; }
+.workspace-root .im-og-hide-btn { display:inline-flex; flex:none; align-items:center; gap:4px; min-height:28px; padding:0 9px; border:1px solid color-mix(in oklab,var(--destructive) 35%,var(--border)); border-radius:6px; color:var(--destructive); background:var(--card); font:inherit; font-size:11px; cursor:pointer; }
+.workspace-root .im-og-hide-btn:hover { border-color:var(--destructive); }
+
+.workspace-root .im-og-list-tag { margin-left:0; font-style:normal; font-weight:400; }
+.workspace-root .im-og-list-tag[data-tone="pinned"] { color:var(--im-accent-strong); border-color:color-mix(in oklab,var(--im-accent-strong) 35%,var(--border)); }
+.workspace-root .im-og-list-tag[data-tone="muted"] { color:var(--muted-foreground); }
+.workspace-root .im-og-restore { margin-top:2px; color:var(--muted-foreground); }
+
+.workspace-root .im-og-card-identity { display:grid; min-width:0; gap:2px; }
+.workspace-root .im-og-card-identity strong { overflow:hidden; font-size:13px; text-overflow:ellipsis; white-space:nowrap; }
+.workspace-root .im-og-card-identity span { color:var(--muted-foreground); font-size:11px; }
+.workspace-root .im-og-card-facts { display:grid; gap:4px; margin:0; }
+.workspace-root .im-og-card-facts div { display:flex; justify-content:space-between; gap:12px; }
+.workspace-root .im-og-card-facts dt { color:var(--muted-foreground); }
+.workspace-root .im-og-card-facts dd { margin:0; color:var(--foreground); font-weight:500; }
+
+@media (max-width:760px) {
+  .workspace-root .im-og-drawer { background:var(--background); }
+  .workspace-root .im-og-sheet { width:100%; border-left:0; box-shadow:none; }
+}
