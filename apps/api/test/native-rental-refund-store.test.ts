@@ -18,6 +18,13 @@ test("原应退（包括租客押金）计划仅借应退责任、贷现有清�
   assert.equal(p.lines.some(l => String(l.account) === "WALLET_AVAILABLE"), false);
 });
 
+test('未开租终止复用同一核销清算计划但不伪造posting；其他来源不能传null',()=>{
+ const p=planNativeRentalRefundJournal({...input(),postingId:null,basisKind:'PRESTART_TERMINATION'});
+ assert.equal(p.lines[0]!.details.postingId,null);assert.equal(p.lines[1]!.account,'PAYOUT_CLEARING');
+ assert.throws(()=>planNativeRentalRefundJournal({...input(),postingId:null}));
+ assert.throws(()=>planNativeRentalRefundJournal({...input(),postingId:null,basisKind:'REVIEW_CONFIRMATION'} as any));
+});
+
 test("异常REVIEW原款终态计划只核销未分配收款负债，不借正常posting清算", () => {
   const p = planAbnormalNativeRentalRefundJournal({ intentId: "refund_synthetic_1", paymentConfirmationId: "paid_synthetic_1",
     renterUserId: "renter_synthetic_1", refundOrderNo: "RF0123456789abcdef0123456789ab", amountCents: "15908", factsDigest: "a".repeat(64) });

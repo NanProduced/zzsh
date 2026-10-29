@@ -85,6 +85,9 @@ export async function confirmOrderPayment(client: PoolClient, fact: VerifiedPaym
   // A provider transaction may be replayed against a different App/order. Serialize its binding too.
   const transactionKey = createHash("sha256").update(JSON.stringify([fact.source, fact.merchantScopeId, fact.providerTransactionId])).digest("hex");
   await client.query(`SELECT pg_advisory_xact_lock($1::bigint)`, [BigInt(`0x${transactionKey.slice(0, 15)}`).toString()]);
+  // 与原路退款首派共用原号锁，避免“检查唯一后、首派前”并发接纳第二笔本地原款。
+  if(formalScope)await client.query(`SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array(
+    'zzsh:refund-order-no:v1',$1::text,$2::text)::text,0))`,[fact.merchantScopeId,fact.merchantOrderNo]);
   const existing = (await client.query<{
     id: string; orderId: string; merchantOrderNo: string; amountCents: string; currency: string;
     providerPaidAt: string; disposition: "APPLIED" | "REVIEW_REQUIRED"; reasonCode: string | null;

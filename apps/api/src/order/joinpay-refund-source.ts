@@ -7,7 +7,7 @@ import { assertFormalRefundProfile, describeRefundProfile, inspectRefundProfile,
 const sha = (v: string | Uint8Array) => createHash("sha256").update(v).digest("hex"), ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 export type RefundSourceOptions = { admission: FormalRefundAdmission; profileFor: (operation: RefundOperation, binding: Readonly<RefundBinding>, pinned?: Readonly<{ profileId: string; profileSha256: string; keyVersionRef: string }>) => BoundRefundProfile; keyFor: (ref: string) => string };
 export type NativeRefundTerminalFact = Readonly<{ evidenceId: string; intentId: string; postingId: string | null; orderId: string; paymentConfirmationId: string;
-  basisKind?: "POSTING" | "REVIEW_CONFIRMATION"; abnormalConfirmationId?: string | null;
+  basisKind?: "POSTING" | "REVIEW_CONFIRMATION" | "PRESTART_TERMINATION"; abnormalConfirmationId?: string | null;
   renterUserId: string; merchantIdentityId: string; originalPaymentTrxNo: string; originalPaymentOrderNo: string; responsibilityVersionHash: string;
   refundOrderNo: string; amountCents: string; currency: "CNY"; terminal: "SUCCEEDED" | "FAILED_NO_EXECUTION"; refundTransactionNo: string | null;
   completedAt: string | null; sourceObservationId: string; factsDigest: string }>;
@@ -51,7 +51,7 @@ function bodyFor(r: FormalRefundRow, observationId: string, terminal: "SUCCEEDED
     refundOrderNo: r.refund_order_no, amountCents: r.amount_cents, currency: "CNY", terminal, refundTransactionNo: trx, completedAt: at, sourceObservationId: observationId };
   return r.basis_kind === "REVIEW_CONFIRMATION"
     ? { ...base, postingId: null, basisKind: "REVIEW_CONFIRMATION", abnormalConfirmationId: r.payment_confirmation_id }
-    : base;
+    : r.basis_kind === "PRESTART_TERMINATION" ? { ...base, postingId:null, basisKind:"PRESTART_TERMINATION" } : base;
 }
 /** 只读原件再验；数据库cached status/verified/canonical均不能单独产事实。 */
 export async function readVerifiedRefundTerminalFact(client: PoolClient, options: RefundSourceOptions, evidenceId: string): Promise<NativeRefundTerminalFact> {

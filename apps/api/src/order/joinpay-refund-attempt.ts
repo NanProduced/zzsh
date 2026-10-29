@@ -8,6 +8,7 @@ import { assertRefundResource, createFormalRefundIntent, createPostedNativeRefun
 import { assertFormalRefundProfile, assertRefundStart, describeRefundProfile, inspectRefundProfile, produceRefundRequest, readFormalRefundAdmission,
   readRefundOutbound, readRefundProfileEvidence, refundCompleteTimeToUtc, refundFailureMayRelease, refundWayAccepted, RefundProfileError, type BoundRefundProfile, type RefundBinding, type RefundOperation, type RefundOutbound } from "./joinpay-refund-profile";
 import { readAbnormalRefundGate } from "./joinpay-abnormal-refund-store";
+import { readPrestartRefundGate } from "./prestart-refund-store";
 import { captureRefundTerminalFact, refundTerminalConflicts, type RefundSourceOptions } from "./joinpay-refund-source";
 import { preflightJoinpayRefundResponse } from "./joinpay-refund-protocol";
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/, sha = (v: string | Uint8Array) => createHash("sha256").update(v).digest("hex"), fresh = (p: string) => `${p}_${randomUUID().replaceAll("-", "")}`;
@@ -20,7 +21,7 @@ async function confirmed<T>(pool: Pool, id: string, phase: "CLAIM" | "RESULT", c
 }
 export const createJoinpayNativeRefund = (pool: Pool, input: FormalRefundCreateInput) => withTransaction(pool, c => createFormalRefundIntent(c, input));
 export type RefundExecution = RefundSourceOptions & { pool: Pool; fetch?: typeof globalThis.fetch; initialProfile?: BoundRefundProfile };
-export type RefundQuerySkipReason = "TERMINAL" | "REVIEW_REQUIRED" | "ACTIVE_LEASE" | "NOT_DUE" | "THROTTLED" | "BUDGET_EXHAUSTED" | "INELIGIBLE" | "ABNORMAL_BASIS_REVIEW";
+export type RefundQuerySkipReason = "TERMINAL" | "REVIEW_REQUIRED" | "ACTIVE_LEASE" | "NOT_DUE" | "THROTTLED" | "BUDGET_EXHAUSTED" | "INELIGIBLE" | "ABNORMAL_BASIS_REVIEW" | "PRESTART_BASIS_REVIEW";
 export type RefundQueryOptions = Readonly<{ minimumIntervalSeconds: number; authorize?: (client: PoolClient, intentId: string) => Promise<void> }>;
 export type RefundQueryOutcome =
   | Readonly<{ kind: "NOT_DISPATCHED"; intentId: string; state: NativeRefundState }>
@@ -114,6 +115,14 @@ async function prepare(o: RefundExecution, intentId: string, owner: string, mini
             objectType: "channel_refund_intent", objectId: intentId, outcome: "FAILURE", requestId: intentId, reason: gate.reason,
             details: { gateReason: gate.reason, orderNoTrxCount: gate.orderNoTrxCount } });
           return { kind: "SKIPPED", state, reason: "ABNORMAL_BASIS_REVIEW" };
+        }
+      }
+      if (row.basis_kind === "PRESTART_TERMINATION") {
+        const gate=await readPrestartRefundGate(c,row);
+        if(!gate.valid){
+          await recordAudit(c,{actorType:"system",action:"order.refund.prestart.first_submit.blocked",objectType:"channel_refund_intent",
+            objectId:intentId,outcome:"FAILURE",requestId:intentId,reason:gate.reason!,details:{gateReason:gate.reason,orderNoTrxCount:gate.orderNoTrxCount}});
+          return {kind:"SKIPPED",state,reason:"PRESTART_BASIS_REVIEW"};
         }
       }
     }

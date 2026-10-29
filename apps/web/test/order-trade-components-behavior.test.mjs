@@ -39,6 +39,10 @@ function loadComponent(relativePath, session, extra) {
     if (name === "@/components/order/order-list") return loadComponent("apps/web/src/components/order/order-list.tsx", session);
     if (name === "./rental-price-summary") return loadComponent("apps/web/src/components/order/rental-price-summary.tsx", session);
     if (name === "./legacy-continuation-panel") return {LegacyContinuationPanel:()=>null};
+    if (name === './prestart-termination-panel'||name === '@/components/order/prestart-termination-panel') return loadComponent('apps/web/src/components/order/prestart-termination-panel.tsx',session,extra);
+    if (name === './order-trade-actions') return loadComponent('apps/web/src/components/order/order-trade-actions.tsx',session,extra);
+    if (name === '@/lib/prestart-termination-client') return requireFromTree(path.join(tree,'apps/web/src/lib/prestart-termination-client.ts'));
+    if (name === '@/lib/personal-wallet-client') return requireFromTree(path.join(tree,'apps/web/src/lib/personal-wallet-client.ts'));
     if (name === "@/components/ui/tooltip") return { Tooltip: props => React.createElement(React.Fragment, null, props.children), TooltipTrigger: props => React.createElement(React.Fragment, null, props.children), TooltipContent: () => null };
     if (extra && Object.hasOwn(extra, name)) return extra[name];
     if (name === "@/lib/account-title") return loadComponent("apps/web/src/lib/account-title.ts", session);
@@ -148,6 +152,32 @@ function router(routes, log) {
 }
 
 const session = (userId) => ({ status: "authenticated", userId, identityVersion: 1, revalidate() {}, confirm: async () => "authenticated", signOut: async () => undefined });
+
+test('未开租结束组件只读原责任/未知退款，不显示正常结算或银行到账成功',async()=>withDom(async window=>{
+ const current=session('user_A'),{PrestartTerminationPanel}=loadComponent('apps/web/src/components/order/prestart-termination-panel.tsx',current),calls=[];
+ const at='2026-10-28T00:00:00.000000Z',read={contractVersion:'order-prestart-termination.v1',orderId:'order_A',orderRevision:'2',eligibility:{allowed:false,reason:'ORDER_NOT_PAID',refundCents:null},
+  request:{id:'term_1',revision:'2',state:'APPROVED',requestedByParty:'RENTER',reason:'申请未交付结束',reviewReason:'核实无争议',createdAt:at,updatedAt:at,approvedAt:at,
+   fullRefundCents:'15908',currency:'CNY',dataOrigin:'JOINPAY_LOCAL_ACCEPTANCE',liabilityRecognized:true,channelSubmission:'NOT_REPORTED',bankArrival:'UNKNOWN'},
+  refund:{integration:'INTEGRATED',truncated:false,reason:null,channelRecordsChecked:false,bankArrival:'UNKNOWN',totals:{originalCents:'15908',allocatedCents:'15908',consumedCents:'0',releasedCents:'0',remainingCents:'0',totalsComplete:true},
+   intents:[{intentId:'refund_1',refundOrderNo:'RF'+'a'.repeat(28),state:'UNKNOWN',amountCents:'15908',firstSubmit:'DISPATCHED',blockedReason:null,localWriteOff:'NOT_RECORDED',savedChannelEvidence:null,bankArrival:'UNKNOWN'}]},
+  coverage:'LOCAL_REGISTERED_ONLY',asOf:at,localAcceptanceObservedAt:at,unknowns:['BANK_ARRIVAL_NOT_VERIFIED'],bankArrival:'UNKNOWN'};
+ const probe=createProbe(window,PrestartTerminationPanel,{order:{...paidOrder,status:'CANCELLED'},party:'renter',onChanged(){}},async(url,init)=>{calls.push({url,init});return json(read);});
+ try{await probe.render();assert.equal(calls.length,1);assert.match(probe.host.textContent,/159\.08/);assert.match(probe.host.textContent,/按原号恢复/);assert.match(probe.host.textContent,/尚未分配/);assert.match(probe.host.textContent,/银行到账未核定/);assert.equal(probe.host.querySelector('form'),null);assert(calls.every(c=>!c.init?.method||c.init.method==='GET'));}
+ finally{await probe.dispose();}
+}));
+test('未开租申请202未知保留同一原键/body，恢复不按编辑内容重建',async()=>withDom(async window=>{
+ const current=session('user_A'),{PrestartTerminationPanel}=loadComponent('apps/web/src/components/order/prestart-termination-panel.tsx',current),posts=[];
+ const read={contractVersion:'order-prestart-termination.v1',orderId:'order_A',orderRevision:'1',eligibility:{allowed:true,reason:null,refundCents:'15908'},request:null,refund:null,
+  coverage:'LOCAL_REGISTERED_ONLY',asOf:'2026-10-28T00:00:00.000000Z',localAcceptanceObservedAt:null,unknowns:['BANK_ARRIVAL_NOT_VERIFIED'],bankArrival:'UNKNOWN'};
+ const probe=createProbe(window,PrestartTerminationPanel,{order:paidOrder,party:'renter',onChanged(){}},async(url,init)=>{
+  if(init?.method==='POST'){posts.push(init);return json({contractVersion:'order-prestart-termination.v1',orderId:'order_A',outcome:'UNKNOWN',originalKeyRequired:true},202);}return json(read);});
+ try{await probe.render();const field=probe.host.querySelector('textarea');await React.act(async()=>{Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value').set.call(field,'未交付申请结束');field.dispatchEvent(new window.Event('input',{bubbles:true}));await tick();});
+  await React.act(async()=>{probe.host.querySelector('form').dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true}));await tick();});
+  assert.equal(posts.length,1);const original=intents.loadIntent('user_A','order.prestart.request','order_A');assert.ok(original);assert.equal(original.body.reason,'未交付申请结束');
+  await React.act(async()=>{probe.host.querySelector('form').dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true}));await tick();});
+  assert.equal(posts.length,2);assert.equal(posts[0].body,posts[1].body);assert.equal(new Headers(posts[0].headers).get('idempotency-key'),new Headers(posts[1].headers).get('idempotency-key'));
+ }finally{await probe.dispose(()=>intents.clearIntent('user_A','order.prestart.request','order_A'));}
+}));
 
 // SYNTHETIC_COMPONENT_MODEL：只验证真实组件与本地API替身，不能当渠道付款或浏览器验收。
 const channelOrder={...paidOrder,status:"PENDING_PAYMENT",paymentOpen:true,cancelOpen:true,expiredAwaitingCancel:false};
@@ -2284,4 +2314,17 @@ test("C04B: dispatched and unknown first-submit facts are stated without claimin
       assert.doesNotMatch(section.textContent, /渠道已收到|渠道处理中|银行已到账|退款已到账/);
     } finally { await probe.dispose(); }
   });
+});
+
+test('paid prestart termination keeps payment wording and time; unpaid cancellation keeps snapshot wording',async()=>{
+ await withDom(async window=>{
+  const paid=await detailProbe(window,{...paidOrder,status:'CANCELLED',cancelReason:'PRESTART_TERMINATED',paidAt:'2026-10-28T09:00:00.000000Z',cancelledAt:'2026-10-28T09:10:00.000000Z'},'renter');
+  const text=paid.host.textContent??'';
+  assert.match(text,/租客已付/);assert.match(text,/未开租订单已终止/);
+  assert.doesNotMatch(text,/本金额为下单时的订单快照，不代表已扣款或应退款/);
+  await paid.dispose();
+  const unpaid=await detailProbe(window,{...paidOrder,status:'CANCELLED',cancelReason:'TIMEOUT',paidAt:null},'renter');
+  assert.match(unpaid.host.textContent??'',/下单金额/);assert.doesNotMatch(unpaid.host.textContent??'',/租客已付/);
+  await unpaid.dispose();
+ });
 });

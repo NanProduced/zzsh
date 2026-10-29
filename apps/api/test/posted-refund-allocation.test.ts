@@ -6,6 +6,7 @@ import * as profiles from "../src/order/joinpay-refund-profile";
 import * as store from "../src/order/channel-refund-store";
 import { allocatePostedJoinpayRefunds, RefundAllocationCommitUnknown, type RefundExecution } from "../src/order/joinpay-refund-attempt";
 import * as attempts from "../src/order/joinpay-refund-attempt";
+import * as prestart from '../src/order/prestart-refund-store';
 import { JoinpayFundsRecoveryLifecycle, recoverJoinpayRefundBatch } from "../src/finance/joinpay-funds-recovery";
 
 const never = (): never => { throw Error("UNEXPECTED_COMPONENT_IO"); };
@@ -149,6 +150,7 @@ test("错资源在扫描前退出并释放；无正式初始资格在连接前�
 
 test("恢复编排先确认分配再消费原意图；ALLOCATION未知不查单/外呼且后台状态保留正确对象", async t => {
   admission(t); let allocated = 0, scans = 0;
+  t.mock.method(prestart,'allocatePrestartJoinpayRefunds',async()=>({selected:0,allocated:0,replayed:0,skipped:0}));
   const pool = { connect: async () => { scans++; return { release() {}, query: async (sql: string) => ({ rows: sql.startsWith("SELECT current_database()")
     ? [{ db: view.database, actor: view.runtimeUser }] : [] }) }; } } as unknown as Pool;
   const execution = { pool, admission: {} as profiles.FormalRefundAdmission, initialProfile: {} as profiles.BoundRefundProfile, profileFor: never, keyFor: never, fetch: never } as RefundExecution;

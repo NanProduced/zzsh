@@ -137,15 +137,18 @@ test("presence session transitions classify every end reason without double-open
   assert.match(PRESENCE_SESSION_CLOSE_SQL, /"ended_at" IS NULL/);
 });
 
-test("0106 creates one open interval per admin and records both permissions", () => {
-  const sql = readFileSync(resolve("migrations/business/0106_im_support_management.sql"), "utf8");
+test("0108 creates one open interval per admin and records both permissions", () => {
+  const sql = readFileSync(resolve("migrations/business/0108_im_support_management.sql"), "utf8");
   assert.match(sql, /CREATE UNIQUE INDEX IF NOT EXISTS "im_support_presence_session_open_unique"[\s\S]*?WHERE "ended_at" IS NULL/);
   assert.match(sql, /"end_reason" IN \('MANUAL_OFF', 'PAUSED', 'DISCONNECTED', 'STALE', 'FORCED', 'OFF_DUTY'\)/);
   assert.match(sql, /'im\.support\.management\.read'/);
   assert.match(sql, /'im\.support\.audit\.takeover'/);
   assert.match(sql, /"note" text CHECK \("note" IS NULL OR char_length\("note"\) BETWEEN 1 AND 200\)/);
   const journal = JSON.parse(readFileSync(resolve("migrations/business/meta/_journal.json"), "utf8"));
-  assert.deepEqual(journal.entries.at(-1), { idx: 106, version: "7", when: 1793170180000, tag: "0106_im_support_management", breakpoints: true });
+  assert.deepEqual(journal.entries.slice(-2).map(({ idx, tag }: { idx: number; tag: string }) => ({ idx, tag })), [
+    { idx: 108, tag: "0108_im_support_management" },
+    { idx: 109, tag: "0109_ops_support_management_grants" },
+  ]);
   const acl = readFileSync(resolve("src/database/business-migrations.ts"), "utf8");
   assert.match(acl, /GRANT SELECT, INSERT ON TABLE "zzsh_iam"\."im_support_presence_session"/);
   assert.match(acl, /GRANT UPDATE \("ended_at", "end_reason", "last_heartbeat_at"\) ON TABLE "zzsh_iam"\."im_support_presence_session"/);

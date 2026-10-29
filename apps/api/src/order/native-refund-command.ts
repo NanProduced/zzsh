@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from "pg";
 import { assertAdminCommandAuthorizedInTransaction } from "../auth/admin-auth-session";
+import { assertAdminContextInTransaction } from '../auth/auth-security';
 import { ADMIN_PERMISSION, loadEffectiveAdminAccess } from "../auth/admin-authorization";
 import { assertGameScopeUsable, readAdminGameScope, scopeAllowsGame } from "../auth/admin-scope";
 import { recordAudit, SecurityApiError, withTransaction } from "../auth/security-core";
@@ -8,6 +9,7 @@ import { API_V1_ERROR_CODES, validateIdempotencyKey } from "../contracts/api-v1"
 import { conflict, forbidden, invalid, notFound } from "../supply/supply-util";
 import { createFormalRefundIntent, type FormalRefundCreateInput } from "./channel-refund-store";
 import { createAbnormalFormalRefundIntent } from "./joinpay-abnormal-refund-store";
+import { createPrestartFormalRefundIntent } from "./prestart-refund-store";
 import { describeRefundProfile, type BoundRefundProfile, type FormalRefundAdmission } from "./joinpay-refund-profile";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -24,8 +26,9 @@ export class AdminRefundCommitUnknown extends SecurityApiError {
 }
 
 /** 复用Admin权限与游戏对象范围；order.settlement.write是命令权限，finance.read只读不能发起退款。 */
-export async function authorizeAdminNativeRefund(client: PoolClient, actor: AdminNativeRefundActor, orderId: string): Promise<void> {
-  await assertAdminCommandAuthorizedInTransaction(client, { userId: actor.userId, sessionId: actor.sessionId });
+export async function authorizeAdminNativeRefund(client: PoolClient, actor: AdminNativeRefundActor, orderId: string,readOnly=false): Promise<void> {
+  if(readOnly)await assertAdminContextInTransaction(client,actor);
+  else await assertAdminCommandAuthorizedInTransaction(client, { userId: actor.userId, sessionId: actor.sessionId });
   const access = await loadEffectiveAdminAccess(client, actor.userId);
   if (access?.status !== "ACTIVE" || !access.permissions.has(ADMIN_PERMISSION.orderSettlementWrite)) throw forbidden();
   const order = (await client.query<{ game_id: string }>(`SELECT game_id FROM zzsh_order.rental_order WHERE id=$1`, [orderId])).rows[0];
@@ -89,11 +92,12 @@ export async function requestAdminNativeRefund(pool: Pool, execution: AdminNativ
 }
 
 export type AdminAbnormalNativeRefundInput = Readonly<{
-  actor: AdminNativeRefundActor; orderId: string; confirmationId: string; idempotencyKey: unknown; requestId: string;
+  actor: AdminNativeRefundActor; orderId: string; confirmationId: string; idempotencyKey: unknown; requestId: string;reason?:string;
 }>;
 /** 已核实重复/迟到REVIEW原款的人工核准；只建原责任/意图，不出网、不生成渠道成功。 */
 export async function requestAdminAbnormalNativeRefund(pool: Pool, execution: AdminNativeRefundExecution, input: AdminAbnormalNativeRefundInput) {
   if (!ID.test(input.orderId) || !ID.test(input.confirmationId) || !ID.test(input.requestId)) throw invalid();
+  if(input.reason!==undefined&&(typeof input.reason!=='string'||input.reason.trim().length<3||Buffer.byteLength(input.reason)>600))throw invalid();
   const key = validateIdempotencyKey(input.idempotencyKey);
   let completed = false;
   try { return await withTransaction(pool, async client => {
@@ -106,7 +110,7 @@ export async function requestAdminAbnormalNativeRefund(pool: Pool, execution: Ad
       await recordAudit(client, { actorType: "admin", actorId: input.actor.userId, sessionId: input.actor.sessionId,
         action: "order.refund.abnormal.review_required", objectType: "payment_confirmation", objectId: input.confirmationId,
         outcome: "SUCCESS", requestId: input.requestId, reason: result.reason,
-        details: { confirmationId: input.confirmationId, orderId: input.orderId, channelResult: "NOT_SUBMITTED" } });
+        details: { confirmationId: input.confirmationId, orderId: input.orderId, channelResult: "NOT_SUBMITTED",reviewReason:input.reason?.trim()??null } });
       completed = true;
       return { contractVersion: "admin-abnormal-native-refund.v1" as const, replayed: false, outcome: "REVIEW_REQUIRED" as const,
         reason: result.reason, confirmationId: input.confirmationId, intentId: null, state: "REVIEW_REQUIRED" as const,
@@ -115,7 +119,7 @@ export async function requestAdminAbnormalNativeRefund(pool: Pool, execution: Ad
     if (result.kind !== "REPLAYED") await recordAudit(client, { actorType: "admin", actorId: input.actor.userId, sessionId: input.actor.sessionId,
       action: "order.refund.abnormal.requested", objectType: "channel_refund_intent", objectId: result.intentId, outcome: "SUCCESS",
       requestId: input.requestId, details: { confirmationId: result.confirmationId, evidenceId: result.evidenceId, anchorId: result.anchorId,
-        amountCents: result.amountCents, currency: "CNY", reasonCode: result.reasonCode, channelResult: "NOT_SUBMITTED", reviewDecision: "APPROVED" } });
+        amountCents: result.amountCents, currency: "CNY", reasonCode: result.reasonCode, channelResult: "NOT_SUBMITTED", reviewDecision: "APPROVED",reviewReason:input.reason?.trim()??null } });
     completed = true;
     return { contractVersion: "admin-abnormal-native-refund.v1" as const, replayed: result.kind === "REPLAYED", outcome: result.kind,
       intentId: result.intentId, refundOrderNo: result.refundOrderNo, state: result.state, budgetDisposition: result.budgetDisposition,
@@ -131,10 +135,30 @@ type RefundRow = { id: string; posting_id: string | null; refund_order_no: strin
   frozen_cents: string | null; allocated_cents: string; latest_event: string | null; latest_evidence_level: string | null; latest_observed_at: string | null };
 
 /** 本地意图与渠道观察分列；未取得终态时不得读成已退款或已到账。 */
+/** 未开租核准后的全额原款分配/失败释放重提；授权和原键恢复先于新渠道资格。 */
+export async function requestAdminPrestartNativeRefund(pool:Pool,execution:AdminNativeRefundExecution,input:{actor:AdminNativeRefundActor;orderId:string;terminationId:string;idempotencyKey:unknown;requestId:string}){
+ if(!ID.test(input.orderId)||!ID.test(input.terminationId)||!ID.test(input.requestId))throw invalid();
+ const key=validateIdempotencyKey(input.idempotencyKey);let completed=false;
+ try{return await withTransaction(pool,async c=>{
+  await authorizeAdminNativeRefund(c,input.actor,input.orderId);
+  const original=(await c.query(`SELECT id FROM zzsh_order.prestart_termination WHERE id=$1 AND order_id=$2 AND state='APPROVED'`,[input.terminationId,input.orderId])).rows;
+  if(original.length!==1)throw notFound();
+  const result=await createPrestartFormalRefundIntent(c,{terminationId:input.terminationId,idempotencyKey:key,requestId:input.requestId,
+    admission:execution.admission,profile:execution.initialProfile});
+  await recordAudit(c,{actorType:'admin',actorId:input.actor.userId,sessionId:input.actor.sessionId,
+   action:'order.refund.prestart.requested',objectType:'prestart_termination',objectId:input.terminationId,outcome:'SUCCESS',requestId:input.requestId,
+   details:{orderId:input.orderId,outcome:result.kind,channelResult:'NOT_SUBMITTED',...('intentId' in result?{intentId:result.intentId}:{reason:result.reason})}});
+  const receipt={contractVersion:'admin-prestart-native-refund.v1' as const,orderId:input.orderId,terminationId:input.terminationId,outcome:result.kind,
+   replayed:result.kind==='REPLAYED',...result,channel:{result:result.kind==='REPLAYED'?'UNKNOWN':'NOT_SUBMITTED',bankArrival:'UNKNOWN' as const}};
+  completed=true;return receipt;
+ });}catch(error){if(completed)throw new AdminRefundCommitUnknown(key);throw error;}
+}
+
 export async function readAdminNativeRefunds(pool: Pool, input: { actor: AdminNativeRefundActor; orderId: string }) {
   if (!ID.test(input.orderId)) throw invalid();
   return withTransaction(pool, async client => {
-    await authorizeAdminNativeRefund(client, input.actor, input.orderId);
+    await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    await authorizeAdminNativeRefund(client, input.actor, input.orderId,true);
     const rows = (await client.query<RefundRow>(`SELECT i.id,i.posting_id,i.refund_order_no,i.amount_cents::text,i.state,i.budget_disposition,
         i.requires_review,i.provider_refund_trx_no,i.completed_at::text,
         (SELECT p.renter_refund_cents::bigint::text FROM zzsh_order.settlement_posting p WHERE p.id=i.posting_id) AS frozen_cents,

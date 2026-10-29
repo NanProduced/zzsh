@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
 import { admitLegacyEvidence, planLegacyContinuation, LEGACY_REJECT_ASSIGNMENTS, type LegacyContinuationSource, type LegacyPrices, type LegacyQuantities } from "../src/order/legacy-continuation-calc";
+import { deriveLegacyFacts, initialLegacyFacts, legacyPlanYuanToCents } from "../src/order/legacy-continuation-model";
 
 const names = ["barrett", "bullet", "awm", "armor", "helmet", "coffee", "card"] as const;
 const prices = (value: string | null): LegacyPrices => Object.fromEntries(names.map(name => [name, value])) as LegacyPrices;
@@ -157,4 +158,57 @@ test("the live 70 ratio is not the code default 90", () => {
   if (!live.ok || !fallback.ok) assert.fail("threshold cases should calculate");
   assert.deepEqual([live.isAdvanceSet, live.amounts.returnOrderMoney], [0, "87.00"]);
   assert.deepEqual([fallback.isAdvanceSet, fallback.amounts.returnOrderMoney], [1, "90.00"]);
+});
+
+test("legacy PROPOSE books an integer-cent 8 percent fee from an exact-cent sale for both parties", () => {
+  // The latter three bases/fees/nets are the accepted immutable source assessment examples; inputs remain synthetic.
+  for (const example of [
+    { account: "0.20", buyer: "0.40", fee: "82", net: "938" },
+    { account: "345.10", buyer: "345.30", fee: "2841", net: "32669" },
+    { account: "297.90", buyer: "298.10", fee: "2463", net: "28327" },
+    { account: "180.20", buyer: "180.40", fee: "1522", net: "17498" },
+  ]) for (const caller of [renter, owner]) {
+    const original = source({ isFullPayout: "1", payMoney: "10000.00", paidPay: [{ id: "9", payOrderSn: "P7", payMoney: "10000.00" }],
+      accountPrices: { ...prices("8.00"), barrett: example.account }, orderPrices: { ...prices("8.00"), barrett: example.buyer } });
+    const command = { kind: "propose" as const, caller, quantities: qty("1.00", "1.00") }, result = planLegacyContinuation(admitLegacyEvidence(original), command);
+    assert(result.ok); assert.equal(result.isAdvanceSet, 0);
+    assert.equal(legacyPlanYuanToCents(result.amounts.fullPayoutMoney!), example.fee);
+    assert.equal(legacyPlanYuanToCents(result.amounts.ownerNet!), example.net);
+    const facts = deriveLegacyFacts(initialLegacyFacts(original), result, command, "synthetic-precision-input", "synthetic-precision-version");
+    assert.equal(facts.evidence.source.fullPayoutMoney, result.amounts.fullPayoutMoney);
+    const cents = (key: string) => BigInt(legacyPlanYuanToCents(result.amounts[key]!));
+    assert.equal(cents("ownerNet") + cents("fullPayoutMoney"), cents("saleEarnings"));
+    assert.equal(cents("ownerNet") + cents("fullPayoutMoney") + cents("returnOrderMoney") + cents("commissionPool"), 1_000_000n);
+    const replay = planLegacyContinuation(admitLegacyEvidence(original), command); assert(replay.ok); assert.equal(replay.fingerprint, result.fingerprint);
+  }
+});
+
+test("an already exact-cent assigned fee retains its padded text and previously accepted fingerprint byte-for-byte", () => {
+  const result = plan({ isFullPayout: "1", accountPrices: { ...prices("8.00"), barrett: "0.25" }, orderPrices: { ...prices("8.00"), barrett: "0.25" } }, { kind: "propose", caller: renter, quantities: qty("1.00", "1.00") });
+  assert(result.ok);
+  assert.deepEqual([result.amounts.saleEarnings, result.amounts.fullPayoutMoney, result.amounts.ownerNet, result.fingerprint], ["10.2500", "0.820000", "9.430000", "ecfa58da3835ced028cbb6b55dd0fe202cc3d2a6e25bfee74d67e725d17b6f5e"]);
+});
+
+test("CONFIRM consumes the stored fee and never recomputes the newly normalized PROPOSE fee", () => {
+  const command = { kind: "confirm" as const, caller: owner }, original = source({ orderStatus: "8", isFullPayout: "1", saleEarnings: "10.20", returnOrderMoney: "87.00", fullPayoutMoney: "0.81" });
+  const result = planLegacyContinuation(admitLegacyEvidence(original), command); assert(result.ok);
+  assert.equal(result.amounts.fullPayoutMoney, "0.81"); assert.equal(result.amounts.ownerNet, "9.39");
+  assert.equal(deriveLegacyFacts(initialLegacyFacts(original), result, command, "synthetic-confirm-input", "synthetic-confirm-version").amounts.ownerNet, "9.39");
+  const fractional = source({ ...original, fullPayoutMoney: "0.816" }), unchanged = planLegacyContinuation(admitLegacyEvidence(fractional), command); assert(unchanged.ok);
+  assert.equal(unchanged.amounts.fullPayoutMoney, "0.816");
+  assert.throws(() => deriveLegacyFacts(initialLegacyFacts(fractional), unchanged, command, "synthetic-confirm-input", "synthetic-confirm-version"), /PRECISION_UNSUPPORTED/);
+});
+
+test("legacy PROPOSE still refuses negative quantities, non-cent sale and the old fee-column overflow", () => {
+  const command = { kind: "propose" as const, caller: renter, quantities: qty("1.00", "1.00") };
+  for (const amount of ["-0.20", "0.201", "1249999990.00", "1249999989.99"]) {
+    const original = source({ isFullPayout: "1", payMoney: "2000000000.00", paidPay: [{ id: "9", payOrderSn: "P7", payMoney: "2000000000.00" }], accountPrices: { ...prices("8.00"), barrett: amount }, orderPrices: { ...prices("8.00"), barrett: amount } });
+    const result = planLegacyContinuation(admitLegacyEvidence(original), command);
+    if (result.ok) assert.throws(() => deriveLegacyFacts(initialLegacyFacts(original), result, command, "synthetic-invalid-input", "synthetic-invalid-version"));
+  }
+  const negativeQuantity = plan({ isFullPayout: "1" }, { ...command, quantities: qty("1.00", "-1.00") }); assert.equal(negativeQuantity.ok, false);
+  const zero = plan({ isFullPayout: "1", goodsMoney: "0.00" }, { ...command, quantities: qty("0.00") }); assert(zero.ok);
+  assert.equal(legacyPlanYuanToCents(zero.amounts.fullPayoutMoney!), "0"); assert.equal(legacyPlanYuanToCents(zero.amounts.ownerNet!), "0");
+  const maximum = plan({ isFullPayout: "1", payMoney: "2000000000.00", paidPay: [{ id: "9", payOrderSn: "P7", payMoney: "2000000000.00" }], accountPrices: { ...prices("8.00"), barrett: "1249999989.93" }, orderPrices: { ...prices("8.00"), barrett: "1249999989.93" } }, command); assert(maximum.ok);
+  assert.equal(legacyPlanYuanToCents(maximum.amounts.fullPayoutMoney!), "9999999999"); assert.equal(legacyPlanYuanToCents(maximum.amounts.ownerNet!), "114999999994");
 });

@@ -9,8 +9,10 @@ const basis={dutyId:duty.id,amountCents:'8200',parentSourceDigest:'1'.repeat(64)
 function fixture(snapshots:Record<string,unknown>[]=[]){
  const cutoff='2026-09-13T13:31:22.000Z',rows=snapshots.map(snapshot=>{const o=prepareHistoricalObservation(snapshot,{userId:'renter',legacyUserId:'11',sourceSystem:'legacy_mysql_restore',basisId:null});return{source_id:o.sourceId,source_digest:o.sourceDigest,source_canonical:o.sourceCanonical,snapshot};});
  const proof=prepareObservationCoverage({userId:'renter',legacyUserId:'11',sourceSystem:'legacy_mysql_restore',sourceKind:'HISTORICAL_EARNINGS_LOG',cutoff,inputSha256:'a'.repeat(64),identityDigest:'b'.repeat(64),sourceCount:rows.length,imported:rows.map(r=>({sourceId:r.source_id,sourceDigest:r.source_digest})),isolated:[]});
- const state={opening:true,installed:true,covered:false,posted:false,badCount:false,cutoff,rows,coveredRoots:[] as Record<string,string>[],queries:[] as {sql:string;args:any[]}[]};
+ const state={opening:true,installed:true,covered:false,posted:false,badCount:false,cutoff,rows,sourceProof:null as any,coveredRoots:[] as Record<string,string>[],queries:[] as {sql:string;args:any[]}[]};
  const c={query:async(sql:string,args:any[]=[])=>{state.queries.push({sql,args});
+  if(sql.includes('legacy reviewed source proof contract'))return{rows:[{ready:state.sourceProof!==null}]};
+  if(sql.includes('sealed legacy source bindings only'))return{rows:[{proof:state.sourceProof}]};
   if(sql.includes('legacy funding immutable opening'))return{rows:state.opening?[{id:'basis-fixture',source_system:'legacy_mysql_restore',source_id:'11',source_digest:'9'.repeat(64),covered_set_digest:'8'.repeat(64),cutoff:state.cutoff}]:[]};
   if(sql.includes('finance history coverage installed'))return{rows:[{installed:state.installed}]};
   if(sql.includes('finance history coverage exact target'))return{rows:[{id:proof.id,source_count:rows.length,imported_count:rows.length,isolated_count:0,imported_set_digest:proof.importedSetDigest,actual_count:state.badCount?'99':String(rows.length),actual_digest:proof.importedSetDigest,invalid_count:'0',outside_count:'0',cutoff}]};
@@ -38,4 +40,21 @@ test('bad source digest/schema/count and database errors are not swallowed as or
  const f=fixture([credit('LEGACY_ADMIN_LOG')]);f.state.rows[0]!.source_digest='f'.repeat(64);await assert.rejects(readLegacyDutyFundingProof(f.c,duty,basis),(e:any)=>e.status===503);
  const g=fixture();g.state.badCount=true;await assert.rejects(readLegacyDutyFundingProof(g.c,duty,basis),(e:any)=>e.status===503);
  const failure=Error('SOURCE_DB_UNAVAILABLE');await assert.rejects(readLegacyDutyFundingProof({query:async()=>{throw failure;}} as any,duty,basis),e=>e===failure);
+});
+
+test('a withdrawal return uses its original log root and never proves a rental refund or resolves an unrelated unknown credit',async()=>{
+ const returned={...credit('LEGACY_WITHDRAWAL_RETURN','201'),referenceSn:'FIXTURE-WITHDRAWAL-201'},f=fixture([returned]);
+ assert.equal((await readLegacyDutyFundingProof(f.c,duty,basis)).knowledge,'UNKNOWN');
+ f.state.coveredRoots.push({source_kind:'LEGACY_WITHDRAWAL_RETURN',source_entity:'la_log_earnings',source_id:'201',source_type:'LEGACY_MYSQL',source_digest:'d'.repeat(64)});
+ assert.equal((await readLegacyDutyFundingProof(f.c,duty,basis)).knowledge,'UNKNOWN');
+ f.state.coveredRoots[0]!.source_id='501';assert.equal((await readLegacyDutyFundingProof(f.c,duty,basis)).knowledge,'UNKNOWN');
+ f.state.coveredRoots[0]!.beneficiary_role='WALLET_HOLDER';
+ f.state.sourceProof={schema:'reviewed-opening-log-bindings.v1',basisId:'basis-fixture',userId:'renter',legacyUserId:'11',sourceDigest:'9'.repeat(64),coveredDigest:'8'.repeat(64),cutoff:f.state.cutoff,digest:'a'.repeat(64),
+  logBindings:[{observationId:'501',observationDigest:f.state.rows[0]!.source_digest,sourceKind:'LEGACY_WITHDRAWAL_RETURN',sourceEntity:'la_log_earnings',sourceId:'501',beneficiaryRole:'WALLET_HOLDER',sourceDigest:'d'.repeat(64)}]};
+ assert.equal((await readLegacyDutyFundingProof(f.c,duty,basis)).knowledge,'KNOWN');
+ const unknown=fixture([{...returned,referenceType:'UNRESOLVED_ECONOMIC_SOURCE'}]);unknown.state.coveredRoots=f.state.coveredRoots;
+ assert.equal((await readLegacyDutyFundingProof(unknown.c,duty,basis)).knowledge,'UNKNOWN');
+ const priorRefund=fixture([{...credit('LEGACY_RENTAL_REFUND'),sourceId:502}]);priorRefund.state.coveredRoots=f.state.coveredRoots;
+ assert.equal((await readLegacyDutyFundingProof(priorRefund.c,duty,basis)).knowledge,'UNKNOWN');
+ assert(f.state.queries.every(q=>!/^\s*(INSERT|UPDATE|DELETE)/.test(q.sql)));
 });

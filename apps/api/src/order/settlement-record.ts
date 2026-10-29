@@ -5,6 +5,7 @@ import { ADMIN_PERMISSION, loadEffectiveAdminAccess, requirePermission } from ".
 import { lockActor } from "../auth/admin-directory";
 import { hashApprovalPayload } from "../auth/approval-audit";
 import { assertAdminContextInTransaction } from "../auth/auth-security";
+import { assertAdminCommandAuthorizedInTransaction } from "../auth/admin-auth-session";
 import { recordAudit, SecurityApiError, type AuditOutcome } from "../auth/security-core";
 import { assertActiveInTransaction, assertUserContextInTransaction } from "../auth/user-identity";
 import { readOrderTeamAccess } from "../im/order-team-access";
@@ -30,6 +31,7 @@ export const SETTLEMENT_ADJUST_TRIGGER = "manual-net";
 const EARLY_REASONS = ["TENANT_VOLUNTARY_EARLY", "OWNER_OR_ACCOUNT_EARLY"] as const;
 type EarlyReason = (typeof EARLY_REASONS)[number];
 type Actor = { realm: "user" | "admin"; userId: string; sessionId: string };
+export type SettlementActor = Actor;
 type LineQty = { itemId: string; quantity: string };
 type Command = { status: number; body: Record<string, unknown> };
 type LockedOrder = {
@@ -82,7 +84,7 @@ async function assertSettlementDatabase(client: PoolClient): Promise<void> {
 /** Idempotency advisory is already held by the caller when this runs inside a keyed write.
  * Dispatch gate, then the acting admin, then party users, then game, account and order.
  * Admin before users matches restoreDeactivatedUserAccount, which locks the actor and then the user. */
-async function lockSettlement(client: PoolClient, orderId: string, actor: Actor, write: boolean, allowCompletedReplay = false): Promise<LockedOrder> {
+export async function lockSettlement(client: PoolClient, orderId: string, actor: Actor, write: boolean | "PRESTART_TERMINATION", allowCompletedReplay = false): Promise<LockedOrder> {
   await assertSettlementDatabase(client);
   const located = (await client.query<{ renterUserId: string; ownerUserId: string; accountId: string; gameId: string; appId: string | null }>(
     `SELECT o.renter_user_id AS "renterUserId", o.owner_user_id AS "ownerUserId", o.account_id AS "accountId",
@@ -99,10 +101,15 @@ async function lockSettlement(client: PoolClient, orderId: string, actor: Actor,
     await client.query(`SET LOCAL lock_timeout = '5s'`);
   }
   const adminAccess = actor.realm === "admin" ? await lockActor(client, actor.userId) : null;
-  if (adminAccess) await assertAdminContextInTransaction(client, actor);
+  if (adminAccess) {
+    if (write === "PRESTART_TERMINATION") await assertAdminCommandAuthorizedInTransaction(client, actor);
+    else await assertAdminContextInTransaction(client, actor);
+  }
   await lockOrderPartiesInOrder(client, located.renterUserId, located.ownerUserId);
-  await assertActiveInTransaction(client, located.renterUserId);
-  await assertActiveInTransaction(client, located.ownerUserId);
+  if (write !== "PRESTART_TERMINATION") {
+    await assertActiveInTransaction(client, located.renterUserId);
+    await assertActiveInTransaction(client, located.ownerUserId);
+  }
   if (actor.realm === "user") await assertUserContextInTransaction(client, actor);
   await client.query(`SELECT id FROM zzsh_supply.game WHERE id = $1 FOR SHARE`, [located.gameId]);
   await client.query(`SELECT id FROM zzsh_supply.rental_account WHERE id = $1 FOR UPDATE`, [located.accountId]);
@@ -133,7 +140,8 @@ async function lockSettlement(client: PoolClient, orderId: string, actor: Actor,
     if (write) requirePermission(adminAccess, ADMIN_PERMISSION.orderSettlementWrite);
     else if (!adminAccess.permissions.has(ADMIN_PERMISSION.orderSettlementWrite) && !adminAccess.permissions.has(ADMIN_PERMISSION.orderRead)) throw forbidden();
   }
-  if (write && row.status !== "PAID" && !(allowCompletedReplay && row.status === "COMPLETED")) throw conflict("ORDER_NOT_SETTLEABLE");
+  if (write && row.status !== "PAID" && !(allowCompletedReplay && row.status === "COMPLETED")
+    && !(write === "PRESTART_TERMINATION" && row.status === "CANCELLED")) throw conflict("ORDER_NOT_SETTLEABLE");
   return row;
 }
 

@@ -13,6 +13,7 @@ export type IntentKind =
   | "order.payment"
   | "order.channel-payment"
   | "order.cancel"
+  | "order.prestart.request"
   | "opening.confirm"
   | "settlement.submit"
   | "settlement.decision"

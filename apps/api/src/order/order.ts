@@ -56,7 +56,7 @@ export type OrderRow = {
   remindDueAt: string | null;
   addRound: number;
   escalationState: string;
-  cancelReason: "USER" | "TIMEOUT" | null;
+  cancelReason: "USER" | "TIMEOUT" | "PRESTART_TERMINATED" | null;
   cancelledAt: string | null;
   createdAt: string;
   revision: string;
@@ -120,6 +120,11 @@ function orderConflict(code: "OCCUPIED" | "RULE_CHANGED" | "VERSION_CHANGED" | "
 
 export type OrderParty = "renter" | "owner" | "admin";
 
+export function orderHasPaidState(status: string, cancelReason?: string | null): boolean {
+  return status === ORDER_STATUS.PAID || status === ORDER_STATUS.COMPLETED
+    || status === ORDER_STATUS.CANCELLED && cancelReason === "PRESTART_TERMINATED";
+}
+
 export function projectOrder(
   row: OrderRow,
   party: OrderParty,
@@ -152,7 +157,7 @@ export function projectOrder(
     expiredAwaitingCancel: expired,
     paymentOpen: row.status === ORDER_STATUS.PENDING_PAYMENT && !expired,
     cancelOpen: row.status === ORDER_STATUS.PENDING_PAYMENT,
-    ...(row.status === ORDER_STATUS.PAID || row.status === ORDER_STATUS.COMPLETED ? { paidAt: row.paidAt } : {}),
+    ...(orderHasPaidState(row.status, row.cancelReason) ? { paidAt: row.paidAt } : {}),
     ...(row.dispatchState ? { fulfillmentAssignment: { state: row.dispatchState, waitingReason: row.dispatchWaitReason,
       assignedAt: row.assignedAt, teamReady: row.teamState === "READY", teamState: row.teamState } } : {}),
     ...(row.status === ORDER_STATUS.CANCELLED

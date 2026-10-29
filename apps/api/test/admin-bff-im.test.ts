@@ -1,9 +1,21 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { handleAdminBff, type AdminBffOptions } from "../src/bff/admin-bff";
+import * as orderRoutes from '../src/order/order-routes';
 
 const ADMIN_ORIGIN = "http://127.0.0.1:4291";
 const API_ORIGIN = "http://127.0.0.1:4292";
+
+test('Admin BFF仅放行准确的未开租审核命令，保持原body/key并交订单领域授权',async t=>{
+ let forwarded:any;
+ t.mock.method(orderRoutes,'handleOrderAdminRoute',async(req:any,res:any)=>{forwarded=req;res.status(200).json({outcome:'LOCAL_REVIEW_ONLY'});});
+ const output=capture(),body={decision:'APPROVE',expectedRevision:'1',assessment:'NO_USE_NO_DISPUTE',reason:'核实无交付与争议'};
+ await handleAdminBff({method:'POST',url:'/orders/order_1/prestart-termination/term_1/review',originalUrl:'/orders/order_1/prestart-termination/term_1/review',
+  headers:{origin:ADMIN_ORIGIN,'idempotency-key':'original_review'},body} as any,output.response as never,options());
+ assert.equal(output.result().status,200);assert.equal(forwarded.originalUrl,'/api/v1/admin/orders/order_1/prestart-termination/term_1/review');
+ assert.equal(forwarded.body,body);assert.equal(forwarded.headers['idempotency-key'],'original_review');
+ const unknown=await route('/orders/order_1/prestart-termination/term_1/auto-refund','POST');assert.equal(unknown.status,404);
+});
 
 function capture() {
   let status = 200;

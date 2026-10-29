@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import { recordAudit, SecurityApiError } from "../auth/security-core";
 import { assertJoinpayRefundTerminalFact, type NativeRefundTerminalFact } from "../order/joinpay-refund-source";
+import { verifyPrestartRefundLiability } from "./prestart-refund-liability";
+import type { PrestartPaymentBasis } from "../order/prestart-termination";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/;
 const SHA = /^[a-f0-9]{64}$/;
@@ -13,10 +15,11 @@ const hash = (value: string) => createHash("sha256").update(value, "utf8").diges
 
 /** 纯账务计划没有准入能力；虚构输入只能验证分录守恒，不能产生退款事实。 */
 export function planNativeRentalRefundJournal(input: {
-  intentId: string; postingId: string; paymentConfirmationId: string; renterUserId: string;
+  intentId: string; postingId: string | null; basisKind?: "PRESTART_TERMINATION"; paymentConfirmationId: string; renterUserId: string;
   refundOrderNo: string; amountCents: string; factsDigest: string;
 }) {
-  if (![input.intentId, input.postingId, input.paymentConfirmationId, input.renterUserId, input.refundOrderNo].every(v => typeof v === "string" && ID.test(v))
+  if (![input.intentId, input.paymentConfirmationId, input.renterUserId, input.refundOrderNo].every(v => typeof v === "string" && ID.test(v))
+    || (input.postingId===null?input.basisKind!=="PRESTART_TERMINATION":!ID.test(input.postingId))
     || !cents(input.amountCents) || !SHA.test(input.factsDigest)) throw conflict("Invalid native refund journal basis");
   const key = hash(input.intentId).slice(0, 40);
   const rootId = `native_refund_root_${key}`, eventId = `native_refund_paid_${key}`;
@@ -38,7 +41,7 @@ type IntentRow = {
   payment_source: string; evidence_level: string; state: string; budget_disposition: string; requires_review: boolean;
   terminal_evidence_id: string | null; terminal_root_id: string | null; terminal_event_id: string | null;
   provider_refund_trx_no: string | null; completed_at: string | null; revision: string;
-  basis_kind?: "POSTING" | "REVIEW_CONFIRMATION"; liability_root_id: string | null; liability_event_id: string | null;
+  basis_kind?: "POSTING" | "REVIEW_CONFIRMATION" | "PRESTART_TERMINATION"; liability_root_id: string | null; liability_event_id: string | null;
 };
 const columns = `id,posting_id,order_id,payment_confirmation_id,renter_user_id,merchant_identity_id,
   original_payment_trx_no,original_payment_order_no,responsibility_version_hash,refund_order_no,
@@ -47,7 +50,7 @@ const columns = `id,posting_id,order_id,payment_confirmation_id,renter_user_id,m
   basis_kind,liability_root_id,liability_event_id`;
 
 function assertBinding(row: IntentRow, fact: NativeRefundTerminalFact) {
-  const kind = row.basis_kind === "REVIEW_CONFIRMATION" ? "REVIEW_CONFIRMATION" : "POSTING";
+  const kind = row.basis_kind ?? "POSTING";
   if (row.id !== fact.intentId || row.posting_id !== fact.postingId || row.order_id !== fact.orderId
     || row.payment_confirmation_id !== fact.paymentConfirmationId || row.renter_user_id !== fact.renterUserId
     || row.merchant_identity_id !== fact.merchantIdentityId || row.original_payment_trx_no !== fact.originalPaymentTrxNo
@@ -55,8 +58,9 @@ function assertBinding(row: IntentRow, fact: NativeRefundTerminalFact) {
     || row.refund_order_no !== fact.refundOrderNo || row.amount_cents !== fact.amountCents || row.currency !== "CNY"
     || fact.currency !== "CNY" || row.payment_source !== "JOINPAY" || row.evidence_level !== "JOINPAY_FORMAL"
     || kind === "POSTING" && (row.posting_id === null || fact.postingId !== row.posting_id)
-    || kind === "REVIEW_CONFIRMATION" && (row.posting_id !== null || fact.postingId !== null || fact.basisKind !== "REVIEW_CONFIRMATION"
-      || fact.abnormalConfirmationId !== row.payment_confirmation_id || !row.liability_root_id || !row.liability_event_id)) {
+    || !["POSTING","REVIEW_CONFIRMATION","PRESTART_TERMINATION"].includes(kind)
+    || kind !== "POSTING" && (row.posting_id !== null || fact.postingId !== null || fact.basisKind !== kind
+      || kind === "REVIEW_CONFIRMATION" && fact.abnormalConfirmationId !== row.payment_confirmation_id || !row.liability_root_id || !row.liability_event_id)) {
     throw unavailable("Native refund terminal binding changed");
   }
 }
@@ -102,11 +106,16 @@ export async function consumeNativeRentalRefundTerminal(client: PoolClient, inpu
   const row = (await client.query<IntentRow>(`SELECT ${columns} FROM zzsh_order.channel_refund_intent WHERE id=$1 FOR UPDATE`, [fact.intentId])).rows[0];
   if (!row) throw unavailable("Original refund intent is unavailable");
   assertBinding(row, fact);
-  const kind = row.basis_kind === "REVIEW_CONFIRMATION" ? "REVIEW_CONFIRMATION" : "POSTING";
+  const kind = row.basis_kind ?? "POSTING";
   if (fact.refundTransactionNo) await client.query(`SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array(
     'zzsh:refund-transaction:v1','JOINPAY',$1::text,$2::text)::text,0))`, [fact.merchantIdentityId, fact.refundTransactionNo]);
   let basisValid = false;
-  if (kind === "REVIEW_CONFIRMATION") {
+  if (kind === "PRESTART_TERMINATION") {
+    const terms=(await client.query<{id:string;payment_basis:PrestartPaymentBasis}>(`SELECT id,payment_basis FROM zzsh_order.prestart_termination
+      WHERE state='APPROVED' AND order_id=$1 AND payment_basis->>'paymentConfirmationId'=$2`,[row.order_id,row.payment_confirmation_id])).rows;
+    if(terms.length!==1||terms[0]!.payment_basis.amountCents!==row.amount_cents||terms[0]!.payment_basis.digest!==row.responsibility_version_hash)throw unavailable("Original prestart refund liability is unavailable");
+    await verifyPrestartRefundLiability(client,terms[0]!.id,terms[0]!.payment_basis,row.liability_root_id,row.liability_event_id);basisValid=true;
+  } else if (kind === "REVIEW_CONFIRMATION") {
     const basis = (await client.query<{ valid: boolean }>(`/* abnormal review refund original immutable liability */ SELECT EXISTS(
       SELECT 1 FROM zzsh_order.channel_refund_intent i
       JOIN zzsh_order.payment_confirmation c ON c.id=i.payment_confirmation_id AND c.order_id=i.order_id
@@ -161,7 +170,7 @@ export async function consumeNativeRentalRefundTerminal(client: PoolClient, inpu
         objectId: row.id, outcome: "SUCCESS", requestId: input.requestId, details: { evidenceId: fact.evidenceId, originalTerminal: terminal, budgetDisposition: row.budget_disposition } });
       return { event: "CONFLICT" as const, intentId: row.id, terminal, budgetDisposition: row.budget_disposition, rootId: row.terminal_root_id, eventId: row.terminal_event_id };
     }
-    const complete = (await client.query<{ complete: boolean }>(`SELECT zzsh_order.${kind === "REVIEW_CONFIRMATION" ? "native_abnormal_refund_terminal_complete" : "native_refund_terminal_complete"}($1) AS complete`, [row.id])).rows[0];
+    const complete = (await client.query<{ complete: boolean }>(`SELECT zzsh_order.${kind === "REVIEW_CONFIRMATION" ? "native_abnormal_refund_terminal_complete" : kind === "PRESTART_TERMINATION" ? "native_prestart_refund_terminal_complete" : "native_refund_terminal_complete"}($1) AS complete`, [row.id])).rows[0];
     if (complete?.complete !== true) throw unavailable("Original refund terminal batch is incomplete");
     return { event: "REPLAYED" as const, intentId: row.id, terminal, budgetDisposition: row.budget_disposition, rootId: row.terminal_root_id, eventId: row.terminal_event_id };
   }
@@ -172,7 +181,7 @@ export async function consumeNativeRentalRefundTerminal(client: PoolClient, inpu
   const plan = kind === "REVIEW_CONFIRMATION"
     ? planAbnormalNativeRentalRefundJournal({ intentId: row.id, paymentConfirmationId: row.payment_confirmation_id,
       renterUserId: row.renter_user_id, refundOrderNo: row.refund_order_no, amountCents: row.amount_cents, factsDigest: fact.factsDigest })
-    : planNativeRentalRefundJournal({ intentId: row.id, postingId: row.posting_id!, paymentConfirmationId: row.payment_confirmation_id,
+    : planNativeRentalRefundJournal({ intentId: row.id, postingId: row.posting_id, ...(kind === "PRESTART_TERMINATION" ? {basisKind:"PRESTART_TERMINATION" as const} : {}), paymentConfirmationId: row.payment_confirmation_id,
       renterUserId: row.renter_user_id, refundOrderNo: row.refund_order_no, amountCents: row.amount_cents, factsDigest: fact.factsDigest });
   const succeeded = fact.terminal === "SUCCEEDED";
   if (succeeded) {

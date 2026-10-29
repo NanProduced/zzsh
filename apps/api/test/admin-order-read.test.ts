@@ -730,3 +730,18 @@ test('迁入单以账号为准：ZZ 编号、真实名称、无草稿标题；�
  const frozen=accountViewFrozen({source:'ACCOUNT_PUBLIC_VERSION',versionId:'v1',haff:{itemId:'haff',quantity:'51000000'},materials:[{itemId:'m',code:'awm',name:'AWM子弹',quantity:'10',unit:'ROUND'}],materialsVisibleTotal:1,safeBoxText:'基础安全箱(1*2)',gradingText:'黄金',loginMethodText:'QQ账密',term:{name:'6天',termSeconds:'518400',dailyConsumption:'10000000'},fullPayout:'NOT_SELECTED',haffRatioWanPerYuan:'52',fees:{completeness:'COMPLETE',haffRental:null,materials:null,resourceTotal:null,tenantDeposit:null,tenantPayableTotal:null,baseDepositCents:null}});
  assert.equal(frozen.source,'ACCOUNT_PUBLIC_VERSION');assert.equal(frozen.termDays,'6');assert.equal(frozen.haff?.quantity,'51000000');assert.equal(frozen.gradingText,'黄金');assert.equal(frozen.materials[0]!.name,'AWM子弹');
 });
+
+test('未开租已付终止保留原付款；普通未付取消不提升，金额权限保持',()=>{
+ const payment={id:'prestart-payment',order_id:native.id,source:'JOINPAY',disposition:'APPLIED',amount_cents:'22000',currency:'CNY'};
+ const row={...native,status:'CANCELLED',cancel_reason:'PRESTART_TERMINATED',paid_at:'2026-10-28T09:00:00.000000Z',cancelled_at:'2026-10-28T09:10:00.000000Z',
+  rental_amount_cents:'17000',deposit_amount_cents:'5000',paid_confirmation_id:payment.id,native_payment_record:payment};
+ const paid=projectAdminReadOrder('NATIVE',row,{...viewer,financeReadable:true});
+ assert.equal(paid.payment.state,'RECORDED_PAID');assert.equal(paid.payment.recordedAmount.amount,'220.00');assert.equal(paid.paidAt,row.paid_at);
+ assert.equal(paid.paymentOpen,false);assert.equal(paid.cancelOpen,false);
+ for(const financeReadable of [false,undefined])assert.equal(projectAdminReadOrder('NATIVE',row,{...viewer,financeReadable}).payment.recordedAmount,null);
+ for(const disposition of ['REVIEW_REQUIRED','REJECTED'])assert.equal(projectAdminReadOrder('NATIVE',{...row,native_payment_record:{...payment,disposition}},{...viewer,financeReadable:true}).payment.recordedAmount,null);
+ for(const cancel_reason of ['USER','TIMEOUT',null]){
+  const unpaid=projectAdminReadOrder('NATIVE',{...row,cancel_reason,paid_at:null,paid_confirmation_id:null,native_payment_record:null},{...viewer,financeReadable:true});
+  assert.equal(unpaid.payment.state,'RECORDED_UNPAID');assert.equal(unpaid.payment.recordedAmount,null);assert.equal(unpaid.paidAt,undefined);
+ }
+});

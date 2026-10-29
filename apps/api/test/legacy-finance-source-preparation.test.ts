@@ -55,6 +55,101 @@ function openingLogFixture(){
  return{subject,source,candidate:{legacyId:'11',targetUserId:subject.userId,storedEarningsCents:'110',storedMoneyCents:'0',sourceDigest:sha(JSON.stringify(source)),admission:'MAPPED_PENDING_BATCH_APPROVAL' as const},inputSha256,cutoff,covered:[economic],observations:[observed.row],included:['la_log_earnings:101'],logBindings:[binding]};
 }
 
+function withdrawalReturnFixture(){
+ const sha=(x:string)=>createHash('sha256').update(x).digest('hex'),base=openingLogFixture();
+ const attempt={...withdrawal,status:4},debit={...log,id:301,sourceId:201,changeType:1002,action:2,amount:'5.00'},returned={...debit,id:302,changeType:1003,action:1,createdAt:debit.createdAt+1};
+ const raw=[debit,returned],observations=raw.map(r=>prepareFrozenFinanceObservation('HISTORICAL_EARNINGS_LOG',r,subject));
+ const covered=[{sourceKind:'LEGACY_WITHDRAWAL',sourceEntity:'la_withdraw_apply',sourceId:'201',beneficiaryRole:'WALLET_HOLDER',sourceEventAt:String(attempt.create_time),sourceCanonical:canonicalize(attempt),sourceDigest:sha(canonicalize(attempt))},
+  {sourceKind:'LEGACY_WITHDRAWAL_RETURN',sourceEntity:'la_log_earnings',sourceId:'302',beneficiaryRole:'WALLET_HOLDER',sourceEventAt:String(returned.createdAt),sourceCanonical:canonicalize(returned),sourceDigest:sha(canonicalize(returned))}];
+ return{...base,covered,observations:observations.map(o=>o.row),included:raw.map(r=>'la_log_earnings:'+r.id),logBindings:observations.map((o,i)=>({observationId:o.sourceId,observationDigest:o.sourceDigest,sourceKind:covered[i]!.sourceKind,sourceEntity:covered[i]!.sourceEntity,sourceId:covered[i]!.sourceId,beneficiaryRole:'WALLET_HOLDER',sourceDigest:covered[i]!.sourceDigest}))};
+}
+
+test('a failed withdrawal is covered by distinct debit and return roots without deriving or replaying wallet movements',()=>{
+ const input=withdrawalReturnFixture(),before=canonicalize(input.observations),result=prepareStoredOpeningCandidate(input);
+ assert.equal(result.state,'CANDIDATE');if(result.state!=='CANDIDATE')return;
+ assert.equal(result.input.proof.coveredCount,2);assert.equal(result.input.proof.availableCents,'110');assert.equal(canonicalize(result.input.observations),before);
+ assert.equal(result.input.sourceProof?.schema,'legacy-finance-source-proof.v1');assert.deepEqual(result.input.sourceProof?.sources,input.covered);
+ assert.deepEqual(result.input.proof.coveredSet.map(r=>r[1]).sort(),['LEGACY_WITHDRAWAL','LEGACY_WITHDRAWAL_RETURN']);
+ for(const type of [1003,1004]){const x=withdrawalReturnFixture(),raw=JSON.parse(x.covered[1]!.sourceCanonical);raw.changeType=type;x.observations[1]=prepareFrozenFinanceObservation('HISTORICAL_EARNINGS_LOG',raw,subject).row;x.covered[1]!.sourceCanonical=canonicalize(raw);x.covered[1]!.sourceDigest=createHash('sha256').update(canonicalize(raw)).digest('hex');x.logBindings[1]!.sourceDigest=x.covered[1]!.sourceDigest;x.logBindings[1]!.observationDigest=createHash('sha256').update(canonicalize(x.observations[1])).digest('hex');assert.equal(prepareStoredOpeningCandidate(x).state,'CANDIDATE');}
+});
+
+test('withdrawal return proof rejects absent, duplicated, mismatched or unsupported events',()=>{
+ for(const mutate of [
+  (x:ReturnType<typeof withdrawalReturnFixture>)=>{x.observations.pop();x.logBindings.pop();},
+  (x:ReturnType<typeof withdrawalReturnFixture>)=>x.covered.pop(),
+  (x:ReturnType<typeof withdrawalReturnFixture>)=>{const r=JSON.parse(x.covered[0]!.sourceCanonical);r.status=2;x.covered[0]!.sourceCanonical=canonicalize(r);x.covered[0]!.sourceDigest=createHash('sha256').update(canonicalize(r)).digest('hex');x.logBindings[0]!.sourceDigest=x.covered[0]!.sourceDigest;},
+  (x:ReturnType<typeof withdrawalReturnFixture>)=>{const r=JSON.parse(x.covered[0]!.sourceCanonical);r.left_money='4.00';x.covered[0]!.sourceCanonical=canonicalize(r);x.covered[0]!.sourceDigest=createHash('sha256').update(canonicalize(r)).digest('hex');x.logBindings[0]!.sourceDigest=x.covered[0]!.sourceDigest;},
+  (x:ReturnType<typeof withdrawalReturnFixture>)=>{x.covered.push({...x.covered[1]!});},
+  (x:ReturnType<typeof withdrawalReturnFixture>)=>{x.included.pop();},
+  (x:ReturnType<typeof withdrawalReturnFixture>)=>{
+   const r=JSON.parse(x.covered[1]!.sourceCanonical);r.changeType=1005;
+   const observed=prepareFrozenFinanceObservation('HISTORICAL_EARNINGS_LOG',r,subject);
+   x.observations[1]=observed.row;x.covered[1]!.sourceCanonical=canonicalize(r);x.covered[1]!.sourceDigest=createHash('sha256').update(canonicalize(r)).digest('hex');
+   x.logBindings[1]!.sourceDigest=x.covered[1]!.sourceDigest;x.logBindings[1]!.observationDigest=observed.sourceDigest;
+  },
+ ]){const x=withdrawalReturnFixture();mutate(x);assert.throws(()=>prepareStoredOpeningCandidate(x));}
+});
+
+function supplementalFixture(type:1006|1007|1008){
+ const sha=(value:string)=>createHash('sha256').update(value).digest('hex'),base=openingLogFixture();
+ const raw={...log,id:401,sourceId:type===1008?701:0,changeType:type,action:type===1007?2:1};
+ const observed=prepareFrozenFinanceObservation('HISTORICAL_EARNINGS_LOG',raw,subject);
+ const source=type===1008?{id:'701',sale_user_id:'11',pay_is:'1',is_settle:'3',deposit_amount:raw.amount,confirm_time:String(raw.createdAt+99)}:raw;
+ const covered=[{sourceKind:type===1008?'LEGACY_DEPOSIT_COMPENSATION':'LEGACY_ADMIN_LOG',sourceEntity:type===1008?'la_order':'la_log_earnings',sourceId:type===1008?'701':'401',beneficiaryRole:type===1008?'OWNER':'WALLET_HOLDER',sourceEventAt:String(raw.createdAt),sourceCanonical:canonicalize(source),sourceDigest:sha(canonicalize(source))}];
+ const canonical=canonicalize({...raw,source_sn:type===1008?'FIXTURE-ORDER-701':'',remark:'Fixture original remark',extra:null});
+ const root=covered[0]!;
+ return{...base,covered,observations:[observed.row],included:['la_log_earnings:401'],logBindings:[{observationId:'401',observationDigest:observed.sourceDigest,sourceKind:root.sourceKind,sourceEntity:root.sourceEntity,sourceId:root.sourceId,beneficiaryRole:root.beneficiaryRole,sourceDigest:root.sourceDigest}],
+  sourceEvidence:[{observationId:'401',originalDigest:sha(canonicalize(raw)),extractSha256:'c'.repeat(64),canonical,digest:sha(canonical)}]};
+}
+
+test('separately extracted admin and deposit log proof seals original values without changing frozen observations or event time',()=>{
+ for(const type of [1006,1007,1008] as const){
+  const x=supplementalFixture(type),before=canonicalize(x.observations),result=prepareStoredOpeningCandidate(x);
+  assert.equal(result.state,'CANDIDATE');if(result.state!=='CANDIDATE')continue;
+  assert.equal(result.input.proof.availableCents,'110');assert.equal(result.input.proof.coveredSet[0]![6],String(log.createdAt));assert.equal(canonicalize(result.input.observations),before);
+  assert.deepEqual(result.input.sourceProof?.supplementalLogs,x.sourceEvidence);
+  const original=JSON.parse((x.observations[0]!.rawSource as any).canonical),supplement=JSON.parse(x.sourceEvidence[0]!.canonical);
+  assert.equal(Object.keys(original).length,9);assert.equal(supplement.remark,'Fixture original remark');assert.equal(supplement.extra,null);
+  assert.equal(supplement.source_sn,type===1008?'FIXTURE-ORDER-701':'');
+ }
+});
+
+test('missing supplementary source fields stay unknown; altered original bytes, subject or duplicate evidence are rejected',()=>{
+ for(const type of [1006,1007,1008] as const){
+  const x=supplementalFixture(type);assert.equal(prepareStoredOpeningCandidate({...x,sourceEvidence:[]}).state,'REVIEW_REQUIRED');
+  assert.equal(prepareStoredOpeningCandidate({...x,observations:[],logBindings:[],included:[],sourceEvidence:[]}).state,'REVIEW_REQUIRED');
+  for(const missing of ['source_sn','remark','extra']){
+   const value=JSON.parse(x.sourceEvidence[0]!.canonical);delete value[missing];const canonical=canonicalize(value);
+   assert.equal(prepareStoredOpeningCandidate({...x,sourceEvidence:[{...x.sourceEvidence[0]!,canonical,digest:createHash('sha256').update(canonical).digest('hex')}]}).state,'REVIEW_REQUIRED');
+  }
+  for(const change of [(value:Record<string,unknown>)=>value.userId=12,(value:Record<string,unknown>)=>value.amount='2.20',(value:Record<string,unknown>)=>value.source_sn=42]){
+   const value=JSON.parse(x.sourceEvidence[0]!.canonical);change(value);const canonical=canonicalize(value);
+   assert.throws(()=>prepareStoredOpeningCandidate({...x,sourceEvidence:[{...x.sourceEvidence[0]!,canonical,digest:createHash('sha256').update(canonical).digest('hex')}]}));
+  }
+  assert.throws(()=>prepareStoredOpeningCandidate({...x,sourceEvidence:[x.sourceEvidence[0]!,x.sourceEvidence[0]!]}));
+ }
+ const x=supplementalFixture(1006),unrelated=openingLogFixture();unrelated.logBindings[0]!.sourceDigest='0'.repeat(64);
+ assert.throws(()=>prepareStoredOpeningCandidate({...x,sourceEvidence:[],covered:[...x.covered,...unrelated.covered],observations:[...x.observations,...unrelated.observations],included:[...x.included,...unrelated.included],logBindings:[...x.logBindings,...unrelated.logBindings]}),/another economic source/);
+});
+
+test('a success mark without its extracted payment time does not prove failure or a return',()=>{
+ const x=withdrawalReturnFixture(),value=JSON.parse(x.covered[0]!.sourceCanonical);value.status=3;value.payment_time=0;
+ x.covered.length=1;x.observations.length=1;x.logBindings.length=1;x.included.length=1;
+ x.covered[0]!.sourceCanonical=canonicalize(value);x.covered[0]!.sourceDigest=createHash('sha256').update(canonicalize(value)).digest('hex');x.logBindings[0]!.sourceDigest=x.covered[0]!.sourceDigest;
+ assert.equal(prepareStoredOpeningCandidate(x).state,'REVIEW_REQUIRED');
+});
+
+test('withdrawal proof retains exact cents beyond safe-integer precision while the opening remains the independent original balance',()=>{
+ const x=withdrawalReturnFixture(),attempt=JSON.parse(x.covered[0]!.sourceCanonical);attempt.money='90071992547409.93';attempt.handling_fee='0.50';attempt.left_money='90071992547409.43';
+ x.covered[0]!.sourceCanonical=canonicalize(attempt);x.covered[0]!.sourceDigest=createHash('sha256').update(canonicalize(attempt)).digest('hex');x.logBindings[0]!.sourceDigest=x.covered[0]!.sourceDigest;
+ for(let n=0;n<2;n++){
+  const raw=JSON.parse((x.observations[n]!.rawSource as any).canonical);raw.amount=attempt.money;
+  const o=prepareFrozenFinanceObservation('HISTORICAL_EARNINGS_LOG',raw,subject);x.observations[n]=o.row;x.logBindings[n]!.observationDigest=o.sourceDigest;
+  if(n===1){x.covered[1]!.sourceCanonical=canonicalize(raw);x.covered[1]!.sourceDigest=createHash('sha256').update(canonicalize(raw)).digest('hex');x.logBindings[1]!.sourceDigest=x.covered[1]!.sourceDigest;}
+ }
+ const result=prepareStoredOpeningCandidate(x);assert.equal(result.state,'CANDIDATE');if(result.state==='CANDIDATE')assert.equal(result.input.proof.availableCents,'110');
+});
+
 test('an exact separate economic binding closes the stored candidate without rewriting an already imported log',()=>{
  const x=openingLogFixture(),original=canonicalize(x.observations[0]),p=prepareStoredOpeningCandidate(x);assert.equal(p.state,'CANDIDATE');
  if(p.state==='CANDIDATE'){assert.equal(p.input.proof.availableCents,'110');assert.equal(p.input.proof.coveredCount,1);assert.equal(p.input.admissions[0]!.included,true);assert.equal(canonicalize(p.input.observations[0]),original);assert.equal(p.input.observations[0]!.referenceType,'UNRESOLVED_ECONOMIC_SOURCE');}
@@ -71,6 +166,8 @@ test('opening bindings reject changed original observation bytes, direction, sou
   (x:ReturnType<typeof openingLogFixture>)=>x.logBindings.push({...x.logBindings[0]!}),
  ]){const x=openingLogFixture();change(x);assert.throws(()=>prepareStoredOpeningCandidate(x));}
  assert.throws(()=>prepareStoredOpeningCandidate({...openingLogFixture(),logBindings:{} as never}));
+ const changedNumber=openingLogFixture();changedNumber.observations[0]!.legacyLogNumber='OTHER-LOG-NUMBER';changedNumber.logBindings[0]!.observationDigest=createHash('sha256').update(canonicalize(changedNumber.observations[0])).digest('hex');
+ assert.throws(()=>prepareStoredOpeningCandidate(changedNumber),/subject, amount or direction changed/);
 });
 
 test('rehashing a foreign, pending, wrongly valued or wrongly classified source cannot prove a stored credit',()=>{
@@ -238,4 +335,13 @@ test('FIN-ORDER-2 root assembly isolates null/scalar/array rows and preserves th
  assert.notEqual(foLiability({...liability,rows:[source,null,43,[]] as unknown as FoLiabilityRow[]}).inputDigest,result.inputDigest);
  const commissions=foCommission({batchId:'root',cutoff:foCutoff,parents:[foParent('7',foDone,foCompletedAt)],current:null,verifiedBeneficiaries:null,rows:[foCommissionRow('91','7','COMPLETED_PARENT'),null,42,[]] as unknown as FoCommissionRow[]});
  assert.equal(commissions.rows.length,4);assert.equal(commissions.rows[0]!.state,'MISSING_FACT');assert(commissions.rows.slice(1).every(r=>r.state==='CONFLICT'));assert.equal(commissions.conserved,true);
+});
+
+test('普通佣金的已核日志映射进入封存输入，无映射旧输入形状不变',()=>{
+ const x=openingLogFixture(),before=canonicalize(x.observations),p=prepareStoredOpeningCandidate(x);
+ assert.equal(p.state,'CANDIDATE');if(p.state!=='CANDIDATE')return;
+ assert.deepEqual(p.input.sourceProof?.logBindings,x.logBindings);assert.deepEqual(p.input.sourceProof?.sources,x.covered);
+ assert.equal(canonicalize(p.input.observations),before);assert.equal(p.input.proof.availableCents,'110');
+ const old=prepareStoredOpeningCandidate({...x,covered:[],observations:[],included:[],logBindings:[]});
+ assert.equal(old.state,'CANDIDATE');if(old.state==='CANDIDATE')assert.equal(Object.hasOwn(old.input,'sourceProof'),false);
 });

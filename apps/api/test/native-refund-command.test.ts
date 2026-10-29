@@ -3,13 +3,15 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Pool, PoolClient } from "pg";
 import * as adminAuthSession from "../src/auth/admin-auth-session";
+import * as adminAuth from '../src/auth/auth-security';
+import * as prestartStore from '../src/order/prestart-refund-store';
 import * as adminAuthorization from "../src/auth/admin-authorization";
 import * as adminScope from "../src/auth/admin-scope";
 import * as refundStore from "../src/order/channel-refund-store";
 import * as refundProfile from "../src/order/joinpay-refund-profile";
 import * as securityCore from "../src/auth/security-core";
 import * as orderTeam from "../src/im/order-team-access";
-import { requestAdminNativeRefund, readAdminNativeRefunds } from "../src/order/native-refund-command";
+import { requestAdminNativeRefund, readAdminNativeRefunds,requestAdminPrestartNativeRefund } from "../src/order/native-refund-command";
 
 const ACTOR = { userId: "admin_1", sessionId: "admin_session" };
 const ACCESS = { status: "ACTIVE", isBoss: true, passwordChangeRequired: false, permissions: new Set<string>(["order.settlement.write"]) };
@@ -20,6 +22,8 @@ function model(options: { access?: unknown; scope?: unknown; postings?: unknown[
     calls.queries.push(sql);
     if (sql === "COMMIT" && options.commitLoss) throw Object.assign(new Error("SYNTHETIC_COMMIT_ACK_LOSS"), { code: "ECONNRESET" });
     if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [], rowCount: 0 };
+    if(sql==='SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')return{rows:[]};
+    if(sql.startsWith('SELECT id FROM zzsh_order.prestart_termination'))return{rows:[{id:'term_1'}]};
     if (sql.startsWith("SELECT game_id FROM zzsh_order.rental_order")) return { rows: [{ game_id: "game_1" }], rowCount: 1 };
     if (sql.includes("FROM zzsh_order.settlement_posting p")) return { rows: options.postings ?? [POSTING] };
     if (sql.includes("FROM zzsh_order.channel_refund_intent i")) return { rows: [] };
@@ -31,6 +35,7 @@ function model(options: { access?: unknown; scope?: unknown; postings?: unknown[
 function mocks(t: any, options: { access?: unknown; scope?: unknown; receipt?: unknown; failCreate?: Error } = {}) {
   t.mock.method(orderTeam, "readOrderTeamAccess", async () => ({ teamState: "READY", canRead: true }));
   t.mock.method(adminAuthSession, "assertAdminCommandAuthorizedInTransaction", async () => ({}));
+  t.mock.method(adminAuth,'assertAdminContextInTransaction',async()=>{});
   t.mock.method(adminAuthorization, "loadEffectiveAdminAccess", async () => options.access ?? ACCESS);
   t.mock.method(adminScope, "readAdminGameScope", async () => options.scope ?? { mode: "ALL_GAMES", gameIds: [] });
   t.mock.method(refundProfile, "describeRefundProfile", () => ({ notifyUrl: "https://refund.example.invalid/notify" }));
@@ -45,6 +50,24 @@ function mocks(t: any, options: { access?: unknown; scope?: unknown; receipt?: u
 }
 const execution = { admission: {} as never, initialProfile: {} as never };
 const input = { actor: ACTOR, orderId: "order_1", amountCents: "1200", reason: "部分退款", idempotencyKey: "refund_key_1", requestId: "request_1" };
+
+test('未开租全额退款命令沿同一管理员授权，不收用户金额；提交未知保留原键',async t=>{
+ mocks(t);let n=0;
+ t.mock.method(prestartStore,'createPrestartFormalRefundIntent',async(_c:any,v:any)=>{n++;assert.equal(v.terminationId,'term_1');assert.equal(v.idempotencyKey,'original_1');assert.equal('amountCents' in v,false);
+  return{kind:'ALLOCATED',intentId:'refund_1',refundOrderNo:'RF'+'a'.repeat(28),state:'READY',budgetDisposition:'ALLOCATED'} as any;});
+ t.mock.method(securityCore,'recordAudit',async()=>{});
+ const request={actor:ACTOR,orderId:'order_1',terminationId:'term_1',idempotencyKey:'original_1',requestId:'req_1'};
+ const m=model(),result=await requestAdminPrestartNativeRefund(m.pool,execution,request);assert.equal(result.channel.result,'NOT_SUBMITTED');assert.equal(result.channel.bankArrival,'UNKNOWN');
+ await assert.rejects(requestAdminPrestartNativeRefund(model({commitLoss:true}).pool,execution,request),(e:any)=>e.originalKey==='original_1');assert.equal(n,2);
+});
+test('未开租退款拒绝finance.read命令替代和跨订单termination，不触碰分配器',async t=>{
+ mocks(t,{access:{...ACCESS,permissions:new Set(['finance.read'])}});let n=0;t.mock.method(prestartStore,'createPrestartFormalRefundIntent',async()=>{n++;throw Error('UNEXPECTED');});
+ const request={actor:ACTOR,orderId:'order_1',terminationId:'term_1',idempotencyKey:'original_1',requestId:'req_1'};
+ await assert.rejects(requestAdminPrestartNativeRefund(model().pool,execution,request),(e:any)=>e.status===403);assert.equal(n,0);
+ t.mock.method(adminAuthorization,'loadEffectiveAdminAccess',async()=>ACCESS);
+ const m=model(),c=await m.pool.connect(),q=c.query.bind(c);(c as any).query=async(sql:string,v:any[])=>sql.startsWith('SELECT id FROM zzsh_order.prestart_termination')?{rows:[]}:q(sql,v);
+ await assert.rejects(requestAdminPrestartNativeRefund(m.pool,execution,request),(e:any)=>e.status===404);assert.equal(n,0);
+});
 
 test("MasterReader：异常意图没有posting时，不把posting分配额填成0",async t=>{
   mocks(t);const m=model(),c=await m.pool.connect(),query=c.query.bind(c);
@@ -115,9 +138,11 @@ test("Admin读取退款列表区分本地意图与渠道观察，不把未取得
   t.mock.method(orderTeam, "readOrderTeamAccess", async () => ({ teamState: "READY", canRead: true }));
   t.mock.method(adminAuthSession, "assertAdminCommandAuthorizedInTransaction", async () => ({}));
   t.mock.method(adminAuthorization, "loadEffectiveAdminAccess", async () => ACCESS);
+  t.mock.method(adminAuth,'assertAdminContextInTransaction',async()=>{});
   const client = { release() {}, async query(sql: string) {
     if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [], rowCount: 0 };
     if (sql.startsWith("SELECT game_id FROM zzsh_order.rental_order")) return { rows: [{ game_id: "game_1" }] };
+    if(sql==='SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')return{rows:[]};
     if (sql.includes("FROM zzsh_order.channel_refund_intent i")) return { rows: [{ id: "refund_1", posting_id: "posting_1", refund_order_no: "RF" + "b".repeat(28),
       amount_cents: "1200", state: "UNKNOWN", budget_disposition: "ALLOCATED", requires_review: false, provider_refund_trx_no: null,
       completed_at: null, frozen_cents: "5000", allocated_cents: "1200", latest_event: "UNKNOWN", latest_evidence_level: "PROVIDER_RESPONSE",

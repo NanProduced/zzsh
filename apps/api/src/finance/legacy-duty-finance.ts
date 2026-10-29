@@ -20,7 +20,7 @@ export type LegacyDutyFundingProof={
  originalSourceSystem:'legacy_mysql_restore';originalSourceEntity:'la_order'|'la_distribution_order';originalSourceId:string;originalSourceDigest:string;
  originalOrderNumber:string|null;
  finalEvidenceDigest:string;coverageDecision:'NOT_PREVIOUSLY_CREDITED';coverageEvidenceDigest:string;sourceStatus:'CONFIRMED_UNPAID_LIABILITY';evidenceRef:string;
- witness:{openingBasisId:string;openingSourceDigest:string;coveredSetDigest:string;historyCoverageVersion:string;historyReferenceDigest:string;historyCutoff:string;sourceCount:string};
+ witness:{openingBasisId:string;openingSourceDigest:string;coveredSetDigest:string;historyCoverageVersion:string;historyReferenceDigest:string;historyCutoff:string;sourceCount:string;sourceProofDigest?:string};
 };
 export type LegacyDutyRef={type:'LEDGER_ENTRY'|'FINANCE_EVENT';id:string;digest:string};
 export type LegacyDutyFinalization='NONE'|'POSTED_POSITIVE_REFUND'|'FINALIZED_ZERO'|'UNKNOWN';
@@ -86,7 +86,7 @@ export function planLegacyDutyFinalization(duty:LegacyFinanceDuty,basis:LegacyDu
   ||funding.coverageDecision!=='NOT_PREVIOUSLY_CREDITED'||funding.sourceStatus!=='CONFIRMED_UNPAID_LIABILITY'||!digest.test(funding.coverageEvidenceDigest)||!funding.evidenceRef||funding.evidenceRef.length>512)throw conflict('DUTY_FUNDING_OR_NONREPEAT_PROOF_REQUIRED');
  const w=funding.witness;
  if(!w||!id.test(w.openingBasisId)||!digest.test(w.openingSourceDigest)||!digest.test(w.coveredSetDigest)||!id.test(w.historyCoverageVersion.split(':')[0]??'')||!digest.test(w.historyReferenceDigest)
-  ||!/^(0|[1-9]\d{0,8})$/.test(w.sourceCount)||sha(canonicalize(w))!==funding.coverageEvidenceDigest)throw conflict('DUTY_FUNDING_WITNESS_REQUIRED');
+  ||!/^(0|[1-9]\d{0,8})$/.test(w.sourceCount)||w.sourceProofDigest!==undefined&&!digest.test(w.sourceProofDigest)||sha(canonicalize(w))!==funding.coverageEvidenceDigest)throw conflict('DUTY_FUNDING_WITNESS_REQUIRED');
  const canonical=canonicalize({contractVersion:LEGACY_DUTY_FINANCE_CONTRACT,duty,basis,funding}),factDigest=sha(canonical),rootId='legacy_duty_root_'+sha(duty.id).slice(0,40),eventId='legacy_duty_settled_'+sha(duty.id).slice(0,40);
  const positiveId='legacy_duty_cr_'+sha(duty.id).slice(0,40),zero=duty.amountCents==='0';
  return{canonical,factDigest,rootId,eventId,zero,ref:{type:zero?'FINANCE_EVENT':'LEDGER_ENTRY',id:zero?eventId:positiveId,digest:factDigest} as LegacyDutyRef,

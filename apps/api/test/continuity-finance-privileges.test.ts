@@ -13,12 +13,12 @@ function tableColumns(){const result=new Map<string,string[]>();for(const sql of
 type Rights={table:Set<string>;columns:Map<string,Set<string>>};
 function fixture(){
  const columns=tableColumns(),rights=new Map<string,Rights>([...columns].map(([name,cols])=>[name,{table:new Set(['SELECT','INSERT','UPDATE','DELETE','TRUNCATE']),columns:new Map(['SELECT','INSERT','UPDATE','REFERENCES'].map(op=>[op,new Set(cols)]))}])),seen:{sql:string;args:any[]}[]=[];
- const state={oldPrefix:false,v4:true,identity:{roleOid:'20001',superuser:false,ownerRights:false} as any,badInventory:false,badHelper:false,queryError:null as Error|null};
+ const state={oldPrefix:false,v4:true,proofPresent:false,proofReady:false,identity:{roleOid:'20001',superuser:false,ownerRights:false} as any,badInventory:false,badHelper:false,queryError:null as Error|null};
  function emitted(sql:string){for(const raw of sql.split(';')){const s=raw.replace(/\s+/g,' ').trim(),broad=/^GRANT (.+) ON ALL TABLES IN SCHEMA "zzsh_order" TO/.exec(s);if(broad){for(const r of rights.values())for(const op of broad[1]!.split(',').map(x=>x.trim()))r.table.add(op);continue;}const m=/^(GRANT|REVOKE) (.+?) ON TABLE ([\w."]+) (?:TO|FROM) /.exec(s);if(!m)continue;const r=rights.get(m[3]!.replaceAll('"',''));if(!r)continue;if(m[2]==='ALL'){assert.equal(m[1],'REVOKE');r.table.clear();continue;}const all=/^ALL \(([^)]*)\)$/.exec(m[2]!);if(all){assert.equal(m[1],'REVOKE');for(const c of all[1]!.split(',').map(x=>x.replaceAll('"','').trim()))for(const set of r.columns.values())set.delete(c);continue;}const column=/^(INSERT|UPDATE) \(([^)]*)\)$/.exec(m[2]!);if(column){assert.equal(m[1],'GRANT');for(const c of column[2]!.split(',').map(x=>x.replaceAll('"','').trim()))r.columns.get(column[1]!)!.add(c);continue;}if(m[1]==='GRANT')for(const op of m[2]!.split(',').map(x=>x.trim()))r.table.add(op);}}
  const pool={query:async(sql:string,args:any[]=[])=>{seen.push({sql,args});if(state.queryError)throw state.queryError;
   if(sql.startsWith('SELECT name,to_regprocedure(name)'))return{rows:args[0].map((name:string)=>({name,present:false}))};
   if(sql.startsWith('SELECT name,to_regclass')){const names:string[]=args[0],isContinuity=names.includes('zzsh_order.legacy_duty_finance_fact');let rows=names.map(name=>({name,present:isContinuity&&!state.oldPrefix&&columns.has(name)}));if(state.badInventory&&isContinuity)rows=rows.slice(1);return{rows};}
-  if(sql.includes("to_regprocedure('zzsh_order.assert_personal_growth_order_v4" )&&!sql.includes('continuity runtime role ownership'))return{rows:state.badHelper?[]:[{present:state.v4}]};
+  if(sql.includes("to_regprocedure('zzsh_order.assert_personal_growth_order_v4" )&&!sql.includes('continuity runtime role ownership'))return{rows:state.badHelper?[]:[{present:state.v4,proof_present:state.proofPresent,proof_ready:state.proofReady}]};
   if(sql.includes('continuity runtime role ownership'))return{rows:state.identity?[state.identity]:[]};
   if(sql.startsWith('SELECT attname AS name FROM pg_attribute'))return{rows:(columns.get(args[0])??[]).map(name=>({name}))};
   if(sql.includes('native_user_insert_proof')&&sql.startsWith('SELECT'))return{rows:[{proof:false,initializer:false}]};
@@ -31,6 +31,14 @@ function fixture(){
  return{pool,state,columns,rights,seen,can,snapshot};
 }
 const dml=(seen:{sql:string}[])=>seen.filter(s=>/^\s*(GRANT|REVOKE|ALTER DEFAULT PRIVILEGES)/.test(s.sql));
+
+test('旧来源证明只开放安全摘要函数，原始review继续不可读；半部署在变权前拒绝',async()=>{
+ const p=fixture();p.state.proofPresent=true;p.state.proofReady=true;await configureContinuityFinancePrivileges(p.pool,'runtime_role');
+ assert(p.seen.some(q=>q.sql.includes('GRANT EXECUTE ON FUNCTION zzsh_order.legacy_opening_source_proof(text) TO "runtime_role"')));
+ for(const op of ['SELECT','INSERT','UPDATE'])assert.equal(p.can('finance_stored_opening_review',op),false);
+ assert(p.seen.some(q=>q.sql.includes("p.proconfig=ARRAY['search_path=pg_catalog']")&&q.sql.includes('p.proowner=c.relowner')));
+ const partial=fixture();partial.state.proofPresent=true;await assert.rejects(configureContinuityFinancePrivileges(partial.pool,'runtime_role'),/partially deployed/);assert.equal(dml(partial.seen).length,0);
+});
 
 test('last common ACL convergence survives broad/default grants and clears both table and stale column privileges on repeated apply',async()=>{
  const p=fixture();await applyRuntimePrivileges(p.pool,'runtime_role');const first=p.snapshot(),firstSql=p.seen.map(q=>q.sql),broad=p.seen.findIndex(q=>q.sql.includes('GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA "zzsh_order"')),defaults=p.seen.findIndex(q=>q.sql.includes('ALTER DEFAULT PRIVILEGES IN SCHEMA "zzsh_order"')),narrow=p.seen.findIndex(q=>q.sql.startsWith('REVOKE ALL ON TABLE "zzsh_order"."legacy_continuation_evidence"'));assert(broad>=0&&defaults>=0&&narrow>broad&&narrow>defaults);

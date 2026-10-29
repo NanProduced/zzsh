@@ -19,6 +19,7 @@ function fixture(amount='8200'){
   if(sql.includes('legacy duty finance schema'))return{rows:[{ready:true}],rowCount:1};
   if(sql.includes('legacy duty finance contract'))return{rows:[{contract_version:'legacy-duty-finance.v1',enabled:state.enabled}],rowCount:1};
   if(sql.includes('legacy funding immutable opening'))return{rows:[{id:witness.openingBasisId,source_system:'legacy_mysql_restore',source_id:'11',source_digest:witness.openingSourceDigest,covered_set_digest:witness.coveredSetDigest,cutoff:witness.historyCutoff}],rowCount:1};
+  if(sql.includes('legacy reviewed source proof contract'))return{rows:[{ready:false}],rowCount:1};
   if(sql.includes('finance history coverage installed'))return{rows:[{installed:true}],rowCount:1};
   if(sql.includes('finance history coverage exact target'))return{rows:[{id:'history_fixture',source_count:0,imported_count:0,isolated_count:0,imported_set_digest:emptyDigest,actual_count:'0',actual_digest:emptyDigest,invalid_count:'0',outside_count:'0',cutoff:witness.historyCutoff}],rowCount:1};
   if(sql.includes('legacy funding original order identity'))return{rows:[{legacy_id:'101',original_order_no:'FIXTURE'}],rowCount:1};

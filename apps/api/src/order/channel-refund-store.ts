@@ -186,7 +186,7 @@ export async function recordRefundTransportFailure(client: PoolClient, input: {
 }
 
 export type NativeRefundState = RefundIntentState | "PROCESSING" | "REVIEW_REQUIRED" | "SUCCEEDED" | "FAILED";
-export type RefundBasisKind = "POSTING" | "REVIEW_CONFIRMATION";
+export type RefundBasisKind = "POSTING" | "REVIEW_CONFIRMATION" | "PRESTART_TERMINATION";
 export type FormalRefundRow = Omit<RefundRow, "payment_source" | "state" | "posting_id"> & {
   payment_source: "JOINPAY"; state: NativeRefundState; posting_id: string | null; basis_kind: RefundBasisKind;
   evidence_level: string; budget_disposition: "ALLOCATED" | "CONSUMED" | "RELEASED";
@@ -207,10 +207,11 @@ export async function assertRefundResource(client: PoolClient, admission: Formal
 }
 export function formalRefundBinding(r: FormalRefundRow, admission: FormalRefundAdmission): RefundBinding {
   const a = readFormalRefundAdmission(admission), basisKind: RefundBasisKind = r.basis_kind ?? "POSTING";
-  if (r.payment_source !== "JOINPAY" || r.evidence_level !== "JOINPAY_FORMAL" || r.currency !== "CNY" || r.merchant_identity_id !== a.merchantIdentityId
+  if (!["POSTING","REVIEW_CONFIRMATION","PRESTART_TERMINATION"].includes(basisKind)
+    || r.payment_source !== "JOINPAY" || r.evidence_level !== "JOINPAY_FORMAL" || r.currency !== "CNY" || r.merchant_identity_id !== a.merchantIdentityId
     || r.wire_merchant_no !== a.merchantNo || !r.initial_admission_canonical || createHash("sha256").update(r.initial_admission_canonical).digest("hex") !== r.initial_admission_sha256
     || basisKind === "POSTING" && r.posting_id === null
-    || basisKind === "REVIEW_CONFIRMATION" && (r.posting_id !== null || !r.liability_root_id || !r.liability_event_id)) throw conflict("Original native refund admission unavailable");
+    || basisKind !== "POSTING" && (r.posting_id !== null || !r.liability_root_id || !r.liability_event_id)) throw conflict("Original native refund admission unavailable");
   assertInitialRefundAdmission(admission, r.initial_admission_ref, r.initial_admission_sha256);
   let initial: any; try { initial = JSON.parse(r.initial_admission_canonical); } catch { throw conflict("Original refund admission malformed"); }
   if (initial.kind !== "FORMAL_NATIVE_REFUND_SERVER_REVIEW" || initial.reference !== r.initial_admission_ref || initial.database !== a.database || initial.runtimeUser !== a.runtimeUser
@@ -235,7 +236,7 @@ export async function lockFormalRefundContext(client: PoolClient, admission: For
   const original = await readFormalRefundRow(client, admission, id);
   await lockRefundFunds(client, "JOINPAY", original.merchant_identity_id, original.original_payment_trx_no);
   // 与异常创建共用 funds → order-no → user → intent 顺序；只对REVIEW basis取原号锁。
-  if (original.basis_kind === "REVIEW_CONFIRMATION") {
+  if (original.basis_kind === "REVIEW_CONFIRMATION" || original.basis_kind === "PRESTART_TERMINATION") {
     await client.query(`SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array(
       'zzsh:refund-order-no:v1',$1::text,$2::text)::text,0))`, [original.merchant_identity_id, original.original_payment_order_no]);
   }

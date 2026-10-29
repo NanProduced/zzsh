@@ -2,10 +2,11 @@ import type {Pool,PoolClient} from 'pg';
 import {createHash} from 'node:crypto';
 import {loadEffectiveAdminAccess} from '../auth/admin-authorization';
 import {assertAdminContextInTransaction} from '../auth/auth-security';
-import {recordAudit,setAuditContext,withTransaction} from '../auth/security-core';
+import {recordAudit,setAuditContext,withTransaction,SecurityApiError} from '../auth/security-core';
 import {forbidden,invalid,conflict,ensureOnlyFields,withIdempotency,fingerprintRequest} from '../supply/supply-util';
 import {canonicalize} from '../supply/content-hash';
 import {prepareHistoricalObservation,sourceYuanToCents,sourceSignedYuanToCents} from './personal-finance-read';
+import {isStoredEconomicSource,reviewedOpeningCoveredSet,validateReviewedOpeningSources,type FinanceSourceProof} from './legacy-finance-source-evidence';
 
 type Actor={userId:string;sessionId:string;requestId:string};
 export type OpeningMaintenanceInput={inputSha256:string;cutoff:string;proof:{userId:string;source:{sourceSystem:string;sourceEntity:string;sourceId:string;identityDigest:string};availableCents:string;sourceDigest:string;coveredCount:number;coveredDigest:string;coveredSet:string[][]};observations:Record<string,unknown>[];admissions:{sourceEntity:string;sourceId:string;sourceDigest:string;sourceEventAt:string;included:boolean}[]};
@@ -17,9 +18,9 @@ export type FinanceOpeningReview={
  subject:{userId:string;sourceId:string;identityDigest:string;sourceDigest:string;availableCents:string;coveredDigest:string};
 };
 export type FinanceOpeningAdmission=Readonly<{kind:'REVIEWED_FINANCE_OPENING'}>;
-export type StoredOpeningInput=OpeningMaintenanceInput&{sourceCanonical:string};
-export type StoredOpeningReview=FinanceOpeningReview&{coveredCount:number;observationCount:number;admissionDigest:string};
-const admissions=new WeakMap<object,{review:FinanceOpeningReview;recoveryOnly:boolean;stored?:Pick<StoredOpeningReview,'coveredCount'|'observationCount'|'admissionDigest'>}>();
+export type StoredOpeningInput=OpeningMaintenanceInput&{sourceCanonical:string;sourceProof?:FinanceSourceProof};
+export type StoredOpeningReview=FinanceOpeningReview&{coveredCount:number;observationCount:number;admissionDigest:string;sourceProofDigest?:string};
+const admissions=new WeakMap<object,{review:FinanceOpeningReview;recoveryOnly:boolean;stored?:Pick<StoredOpeningReview,'coveredCount'|'observationCount'|'admissionDigest'|'sourceProofDigest'>}>();
 const digest=/^[a-f0-9]{64}$/,identifier=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 function admission(value:FinanceOpeningAdmission){const p=admissions.get(value);if(!p)throw invalid('Finance opening admission is not internally bound');return p;}
 async function assertAdmission(client:PoolClient,actor:Actor,scope:FinanceOpeningAdmission,recover=false){
@@ -59,13 +60,14 @@ export async function bindReviewedFinanceOpeningAdmission(client:PoolClient,acto
 /** A separate, bounded review of each stored balance; the original C admissions stay unchanged. */
 export async function bindReviewedStoredOpeningAdmission(client:PoolClient,actor:Actor,review:StoredOpeningReview,mode:'execute'|'recover'='execute'){
  if(!review||Date.parse(review.cutoff)>Date.parse(review.notBefore)||!Number.isSafeInteger(review.coveredCount)||review.coveredCount<0||review.coveredCount>5000
-  ||!Number.isSafeInteger(review.observationCount)||review.observationCount<0||review.observationCount>10000||!digest.test(review.admissionDigest))throw invalid('Exact bounded stored review required');
- const {coveredCount,observationCount,admissionDigest,...base}=JSON.parse(canonicalize(review)) as StoredOpeningReview;
+  ||!Number.isSafeInteger(review.observationCount)||review.observationCount<0||review.observationCount>10000||!digest.test(review.admissionDigest)
+  ||review.sourceProofDigest!==undefined&&!digest.test(review.sourceProofDigest))throw invalid('Exact bounded stored review required');
+ const {coveredCount,observationCount,admissionDigest,sourceProofDigest,...base}=JSON.parse(canonicalize(review)) as StoredOpeningReview;
  const scope=await bindReviewedFinanceOpeningAdmission(client,actor,base,mode);
- admission(scope).stored={coveredCount,observationCount,admissionDigest};return scope;
+ admission(scope).stored={coveredCount,observationCount,admissionDigest,...(sourceProofDigest!==undefined?{sourceProofDigest}:{})};return scope;
 }
 function validateStoredOpening(input:StoredOpeningInput,review:NonNullable<ReturnType<typeof admission>['stored']>){
- ensureOnlyFields(input,['inputSha256','cutoff','proof','observations','admissions','sourceCanonical']);
+ ensureOnlyFields(input,['inputSha256','cutoff','proof','observations','admissions','sourceCanonical','sourceProof']);
  const p=input.proof;ensureOnlyFields(p,['userId','source','availableCents','sourceDigest','coveredCount','coveredDigest','coveredSet']);
  ensureOnlyFields(p.source,['sourceSystem','sourceEntity','sourceId','identityDigest']);
  let source:Record<string,unknown>;
@@ -82,13 +84,20 @@ function validateStoredOpening(input:StoredOpeningInput,review:NonNullable<Retur
   if(!Array.isArray(row)||row.length!==8||row.some(v=>typeof v!=='string')||row[0]!==p.userId||row[2]!=='LEGACY_MYSQL'||!/^[1-9]\d{0,23}$/.test(row[4]!)
    ||!/^\d{1,10}$/.test(row[6]!)||BigInt(row[6]!)<1n||BigInt(row[6]!)>4294967295n||Number(row[6])*1000>Date.parse(input.cutoff)||!digest.test(row[7]!))throw invalid('Stored covered economic tuple invalid');
   const [,kind,,entity,,role]=row;
-  if(!(kind==='LEGACY_DISTRIBUTION_EARNING'&&entity==='la_distribution_order'&&['TASK_REFERRAL','RENTER_REFERRAL','OWNER_REFERRAL'].includes(role!)
-   ||kind==='LEGACY_WITHDRAWAL'&&entity==='la_withdraw_apply'&&role==='WALLET_HOLDER'
-   ||['LEGACY_RENTAL_OWNER_INCOME','LEGACY_DEPOSIT_COMPENSATION'].includes(kind!)&&entity==='la_order'&&role==='OWNER'
-   ||kind==='LEGACY_ADMIN_LOG'&&entity==='la_log_earnings'&&role==='WALLET_HOLDER'))throw invalid('Unresolved stored economic source');
+  if(!isStoredEconomicSource(kind!,entity!,role!))throw invalid('Unresolved stored economic source');
   const key=JSON.stringify(row.slice(1,6));if(keys.has(key)||previous&&key<=previous)throw invalid('Stored covered set must be unique in source C order');keys.add(key);previous=key;
  }
  for(const a of input.admissions){ensureOnlyFields(a,['sourceEntity','sourceId','sourceDigest','sourceEventAt','included']);if(typeof a.included!=='boolean'||!digest.test(a.sourceDigest))throw invalid('Exact stored observation admission required');}
+ if(input.sourceProof!==undefined){
+  const proof=input.sourceProof;
+  if(!proof||typeof proof!=='object'||proof.schema!=='legacy-finance-source-proof.v1'||sha(canonicalize(proof))!==review.sourceProofDigest
+   ||!Array.isArray(proof.logBindings)||!Array.isArray(proof.supplementalLogs))throw invalid('Stored source proof is not separately reviewed');
+  ensureOnlyFields(proof,['schema','sources','logBindings','supplementalLogs']);
+  const subject={userId:p.userId,legacyUserId:p.source.sourceId};
+  if(canonicalize(reviewedOpeningCoveredSet(proof.sources,subject,input.cutoff))!==canonicalize(p.coveredSet))throw invalid('Stored source proof differs from covered set');
+  if(!validateReviewedOpeningSources({covered:proof.sources,logBindings:proof.logBindings,sourceEvidence:proof.supplementalLogs,observations:input.observations,cutoff:input.cutoff,
+   included:input.admissions.filter(a=>a.included).map(a=>a.sourceEntity+':'+a.sourceId)},subject))throw invalid('Stored source evidence is incomplete');
+ }else if(review.sourceProofDigest!==undefined||p.coveredSet.some(row=>row[1]==='LEGACY_WITHDRAWAL_RETURN'))throw invalid('Withdrawal return requires its reviewed original source proof');
 }
 function reviewedInput(input:OpeningMaintenanceInput,scope:FinanceOpeningAdmission){
  const r=admission(scope).review,p=input.proof,s=r.subject;
@@ -116,7 +125,12 @@ async function planOpening(client:PoolClient,actor:Actor,input:OpeningMaintenanc
  if(scope){reviewedInput(input,scope);await assertAdmission(client,actor,scope,recover);}
  else if(input.inputSha256!=='ee431b3ac1ed74952bbc08e57581c6d9ab04a4bd01100ca05ac00a77e6175ec0'||input.cutoff!=='2026-10-03T02:31:22.516Z')throw invalid('Unreviewed frozen input or cutoff');
  const p=input.proof;if(!/^(0|[1-9]\d{0,23})$/.test(p.availableCents)||p.source.sourceEntity!=='la_user'||p.coveredCount!==p.coveredSet.length)throw invalid('Opening proof invalid');
- if(scope&&admission(scope).stored){const schema=(await client.query(`/* stored opening review schema */ SELECT to_regclass('zzsh_order.finance_stored_opening_review') IS NOT NULL AS ready,(SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid=to_regclass('zzsh_order.finance_stored_opening_review')) AS owner`)).rows[0];if(schema?.ready!==true||schema.owner!==admission(scope).review.resource.role)throw conflict('Stored opening review schema/owner not admitted');}
+ if(scope&&admission(scope).stored){const schema=(await client.query(`/* stored opening review schema */ SELECT to_regclass('zzsh_order.finance_stored_opening_review') IS NOT NULL AS ready,
+  (SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid=to_regclass('zzsh_order.finance_stored_opening_review')) AS owner,
+  to_regprocedure('zzsh_order.legacy_opening_source_proof(text)') IS NOT NULL AND EXISTS(SELECT 1 FROM pg_trigger
+   WHERE tgrelid=to_regclass('zzsh_order.finance_stored_opening_review') AND tgname='stored_opening_source_proof_guard' AND tgenabled='O' AND NOT tgisinternal) AS proof_ready`)).rows[0];
+  if(schema?.ready!==true||schema.owner!==admission(scope).review.resource.role)throw conflict('Stored opening review schema/owner not admitted');
+  if((input as StoredOpeningInput).sourceProof!==undefined&&schema.proof_ready!==true)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Reviewed legacy source-proof schema is not deployed');}
  const identity=(await client.query(`SELECT 1 FROM zzsh_iam.audit_event WHERE object_id=$1 AND action='user.legacy_owner.migrated' AND outcome='SUCCESS' AND details->>'sourceSystem'=$2 AND details->>'sourceEntity'='la_user' AND details->>'legacyId'=$3 AND details->>'sourceDigest'=$4`,[p.userId,p.source.sourceSystem,p.source.sourceId,p.source.identityDigest])).rowCount;
  if(!identity)throw conflict('Opening source identity changed');
  if(sha(p.coveredSet.map(row=>JSON.stringify(row)).join('\n'))!==p.coveredDigest)throw invalid('Covered set digest mismatch');
