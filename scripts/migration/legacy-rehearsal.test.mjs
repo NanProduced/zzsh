@@ -76,7 +76,7 @@ test('missing duty money remains unknown instead of becoming a conserved zero',(
 
 test('readiness rejects a conserved report belonging to another plan and labels fixture evidence',()=>{
  const p=planned(),r=run(['reconcile','--plan',p.planFile,'--target',join(HERE,'fixtures/target-readback.positive.json'),'--out',join(p.dir,'compare')]);assert.equal(r.status,0,r.stderr);
- const report=join(p.dir,'compare/reconcile.json');let ready=run(['readiness','--plan',p.planFile,'--reconcile',report,'--out',join(p.dir,'ready')]);assert.equal(ready.status,0,ready.stderr);assert.equal(load(join(p.dir,'ready/rehearsal-readiness.json')).domains.sourceTargetConservation,'FIXTURE_PASS');
+ const report=join(p.dir,'compare/reconcile.json');let ready=run(['readiness','--plan',p.planFile,'--reconcile',report,'--out',join(p.dir,'ready')]);assert.equal(ready.status,0,ready.stderr);const result=load(join(p.dir,'ready/rehearsal-readiness.json'));assert.equal(result.domains.sourceTargetConservation,'FIXTURE_PASS');assert.equal(p.plan.domains.account.counts.CONFLICT,0);assert.notEqual(result.domains.accountSource,'BLOCKED_CONFLICT');assert.notEqual(result.domains.skins,'BLOCKED_CONFLICT');
  p.plan.generatedAt='2026-01-01T00:00:00.000Z';put(p.planFile,p.plan);ready=run(['readiness','--plan',p.planFile,'--reconcile',report,'--out',join(p.dir,'wrong')]);assert.equal(ready.status,3);assert.match(ready.stderr,/RECONCILIATION_PLAN_MISMATCH/);
 });
 

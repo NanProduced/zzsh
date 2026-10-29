@@ -1454,9 +1454,10 @@ function domainReadiness(plan, name) {
   const domain = plan.domains?.[name];
   if (!domain || domain.status === "NOT_RUN") return "NOT_RUN";
   const counts = domain?.counts ?? {};
-  if (domain.status === "BLOCKED" || (counts.CONFLICT ?? 0) > 0) return "BLOCKED_CONFLICT";
+  if ((counts.CONFLICT ?? 0) > 0 || [domain.openingDutyOverlap, domain.duplicateOpeningSubjects, domain.duplicateDutyIds, domain.duplicateEconomicRoots].some(items => items?.length > 0)) return "BLOCKED_CONFLICT";
   if ((counts.MISSING_FACT ?? 0) > 0) return "BLOCKED_MISSING_FACT";
   if ((counts.ISOLATED ?? 0) > 0) return "ISOLATED_ROWS_RETAINED";
+  if (domain.status === "BLOCKED") return "BLOCKED_DOMAIN";
   return "PLAN_READY";
 }
 
