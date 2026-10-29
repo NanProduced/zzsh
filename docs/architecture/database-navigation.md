@@ -4,7 +4,7 @@
 
 ## 迁移基线与结构事实
 
-业务迁移位于 `apps/api/migrations/business/`，源码共 **108 份 SQL**，`meta/_journal.json` **108 条**登记（idx 0…107，tag 与文件名一一对应）。源码登记不表示数据库已经执行；实际链与权限须分别核验。另有一条独立正式迁移线 `apps/api/migrations/0000_fnd004_test_metadata.sql`（`zzsh_meta.database_marker`，journal 1 条）。两条线分别由 `apps/api/src/database/migrations.ts` 与 `business-migrations.ts` 执行，记账 schema 分别为 `zzsh_meta` 与 `zzsh_business_meta`（后者不在任何 SQL 中 CREATE，由 migrator 自建）。
+业务迁移位于 `apps/api/migrations/business/`，源码共 **109 份 SQL**，`meta/_journal.json` **109 条**登记（idx 0…108，tag 与文件名一一对应）。源码登记不表示数据库已经执行；实际链与权限须分别核验。另有一条独立正式迁移线 `apps/api/migrations/0000_fnd004_test_metadata.sql`（`zzsh_meta.database_marker`，journal 1 条）。两条线分别由 `apps/api/src/database/migrations.ts` 与 `business-migrations.ts` 执行，记账 schema 分别为 `zzsh_meta` 与 `zzsh_business_meta`（后者不在任何 SQL 中 CREATE，由 migrator 自建）。
 
 0102 支持极速比例仅设下限；0103 增加用户冻结状态及权限；0104 增加提现查单权限；0105 保存本人实名展示来源；0106 增加异常原款退款责任，0107 增加未开租终止与全额原款应退。0105 的 runtime 权限由正式 `migrate:business` 后置 ACL 收敛为仅 SELECT，不能把 `GRANT SELECT` 当作撤销 schema 默认写权限。升级保留已执行 SQL 字节与 journal 时间；新的迁移须使用未占用编号和晚于现有链的时间。
 
@@ -45,6 +45,7 @@
 | 0101 | 本人银行卡加密资料及版本守卫，1 个新关系 |
 | 0102–0105 | 极速比例下限、用户冻结、提现查询权限、本人实名展示来源 |
 | 0106–0107 | 异常原款退款责任、未开租终止及全额原款退款守卫 |
+| 0108 | 旧资金来源证明、提现退回独立根、安全摘要与旧责任覆盖核验；不回写旧期初/原件 |
 
 ### 按 schema 查对象（0000–0090 历史静态基线）
 
@@ -65,6 +66,24 @@
 0097–0100的fresh-install前检要求本组新关系均不存在，并核对被替换父函数的准确签名及正文；已有支付fixture不能直接重装。运行角色窄权统一由 `configureJoinpayFinancialPrivileges` 在既有独立ACL事务中收敛，迁移SQL不使用测试角色GUC授予权限。Schema提交与ACL提交/未知分别报告；本源码登记不授权安装、服务切换或渠道启用。
 
 `0101` 保存银行卡密文、脱敏摘要与版本；前检拒绝已有同名表/守卫并要求用户父表存在。已有对象须另核采用，不能直接重装或补记迁移账；runtime由上述helper授8列SELECT、6列INSERT、4列UPDATE。
+
+### 旧资金来源证明安装合同
+
+`0108_legacy_finance_source_proof.sql` 是唯一当前 SQL 来源，测试读取该正式文件，不维护同内容的 fixture。它沿0076/0077父结构前向扩展，不改旧SQL、旧journal、期初余额、观察或成功回执。SQL 内的父检查只核两个来源 CHECK 的数量和来源标识，不证明完整定义等价；升级前还须按正式前缀逐对象核对原定义，未知差异不得直接重装。
+
+| 对象 | 作用与核验责任 |
+|---|---|
+| `finance_covered_event_source_kind_check/source_shape` | 保留原来源并加入提现退回的原日志根；核CHECK定义/已验证状态，不只核名称。 |
+| `guard_stored_opening_source_proof()` / `stored_opening_source_proof_guard` | INSERT原review时核新proof、映射、九字段及补源；核函数正文/owner、BEFORE INSERT逐行绑定、启用状态。旧无proof分支保留原0076准入。 |
+| `legacy_opening_source_proof(text)` | 只返安全绑定摘要；旧basis/无proof返回NULL，不补证明。必须为原表owner的SECURITY DEFINER、固定`search_path=pg_catalog`。 |
+| `guard_withdrawal_return_covered()` / `withdrawal_return_covered_guard` | 退回根必须来自同事务已审proof；核条件、函数绑定和启用，不能将退回当租赁退款。 |
+| `assert_legacy_duty_funding(jsonb,legacy_order_duty)` | 替换原校验，保留完整历史/已记账排除；有proof则核来源摘要/角色，无proof的旧witness不增加字段。 |
+
+干净库使用正式新链；已完整安装前缀的库先核旧hash/时间及父对象，再由同一正式runner追加0108。schema/journal事务提交后，既有`applyRuntimePrivileges`→`configureContinuityFinancePrivileges`在独立ACL事务收敛：受保护关系同时撤销PUBLIC与runtime的原表/列权限，再恢复各自允许的runtime权限；原review表仍不可读写，新函数撤销PUBLIC EXECUTE，只给runtime安全摘要函数EXECUTE；原触发器/资金表权限不放宽。还须核既有显式列权及函数ACL，不能以GRANT SELECT或“函数存在”代替收敛结果。
+
+已手装这些约束/函数/触发器的资源不属于可直接升级前缀：重复执行会被父检查/对象冲突拒绝。默认保留其事实和安装来源，另在获准空库验证正式链；现有runner没有自动adoption机制，禁止手写journal、删对象重装或放宽父守卫。未来采用须单独核完整对象/权限与业务数据，再定明确迁移方案。
+
+旧无`sourceProof`输入、review、观察及已接受回执不因安装而补字段、重算或重复过账。已有三类合成源的局部PG证据不代替干净新装、正式前缀升级、旧无proof既有数据和ACL反例实测；schema失败、schema已提交但ACL失败、COMMIT未知分别保留，不自动撤销已提交schema。
 
 ## 权限与不可变性模型
 

@@ -1,4 +1,4 @@
--- 未编号前向候选：0076/0077封存来源接缝。旧无proof的input/review/观察字节不改。
+-- 0108: reviewed legacy source proof; preserve old inputs, receipts and original financial facts.
 -- 只接纳维护者受审输入，不新增HTTP导入或从流水净和推算期初余额。
 DO $$ DECLARE item record;n integer:=0;
 BEGIN

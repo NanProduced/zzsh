@@ -492,6 +492,9 @@ export async function configureContinuityFinancePrivileges(pool: Pick<Pool, "que
     const statements = [
       `REVOKE ALL ON TABLE ${table} FROM ${role}`,
       `REVOKE ALL (${allColumns}) ON TABLE ${table} FROM ${role}`,
+      // PUBLIC grants are inherited even after the runtime role loses its direct grants.
+      `REVOKE ALL ON TABLE ${table} FROM PUBLIC`,
+      `REVOKE ALL (${allColumns}) ON TABLE ${table} FROM PUBLIC`,
     ];
     if (profile.read) statements.push(`GRANT SELECT ON TABLE ${table} TO ${role}`);
     if (profile.insert?.length) statements.push(`GRANT INSERT (${profile.insert.map(quoteIdentifier).join(",")}) ON TABLE ${table} TO ${role}`);

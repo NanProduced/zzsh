@@ -226,5 +226,6 @@
   "dist/test/prestart-termination.test.js",
   "dist/test/prestart-refund-liability.test.js",
   "dist/test/prestart-refund-store.test.js",
-  "dist/test/prestart-termination-routes.test.js"
+  "dist/test/prestart-termination-routes.test.js",
+  "dist/test/legacy-finance-source-proof-migration.test.js"
 ]

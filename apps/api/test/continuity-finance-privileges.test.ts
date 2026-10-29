@@ -66,3 +66,22 @@ test('old prefix is a no-op, while bad schema/column metadata and DB failures re
  for(const mode of ['inventory','helper','columns'] as const){const p=fixture();if(mode==='inventory')p.state.badInventory=true;else if(mode==='helper')p.state.badHelper=true;else p.columns.set('zzsh_order.legacy_continuation_evidence',[]);await assert.rejects(configureContinuityFinancePrivileges(p.pool,'runtime_role'),/inventory/);assert.equal(dml(p.seen).length,0);}
  const p=fixture(),error=Error('OFFLINE_DB_FAILURE');p.state.queryError=error;await assert.rejects(configureContinuityFinancePrivileges(p.pool,'runtime_role'),e=>e===error);assert.equal(dml(p.seen).length,0);
 });
+
+test('stale PUBLIC table and column grants cannot expose the sealed review after convergence',async()=>{
+ const p=fixture(),query=p.pool.query.bind(p.pool);let publicTableRead=true,publicColumnRead=true;
+ const client={query:async(sql:string,args:any[]=[])=>{
+  for(const raw of sql.split(';')){
+   const statement=raw.replace(/\s+/g,' ').trim();
+   if(!statement.endsWith('FROM PUBLIC')||!statement.includes('ON TABLE "zzsh_order"."finance_stored_opening_review"'))continue;
+   if(statement.startsWith('REVOKE ALL ON TABLE'))publicTableRead=false;
+   if(statement.startsWith('REVOKE ALL (')&&statement.includes('"review_canonical"')&&statement.includes('"unlisted_column"'))publicColumnRead=false;
+  }
+  return query(sql,args);
+ }} as Pick<Pool,'query'>;
+ const effectiveRead=()=>publicTableRead||publicColumnRead||p.can('finance_stored_opening_review','SELECT','review_canonical');
+ assert.equal(effectiveRead(),true,'positive control retains inherited PUBLIC access before convergence');
+ await configureContinuityFinancePrivileges(client,'runtime_role');
+ assert.equal(publicTableRead,false,'PUBLIC table SELECT must be revoked');
+ assert.equal(publicColumnRead,false,'explicit PUBLIC column SELECT must also be revoked');
+ assert.equal(effectiveRead(),false);assert.equal(p.can('legacy_duty_finance_fact','SELECT'),true);
+});

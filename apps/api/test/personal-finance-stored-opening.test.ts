@@ -34,11 +34,11 @@ function adminInput():StoredOpeningInput{
  assert.equal(candidate.state,'CANDIDATE');if(candidate.state!=='CANDIDATE')throw Error('Fixture proof failed');return candidate.input;
 }
 function fixture(){
- const state={queries:[] as {sql:string;args:any[]}[],receipts:new Map<string,any>(),now:'2026-10-15T08:30:00.000Z',identity:true,role:'fixture_owner',existing:null as any,failAudit:false};
+ const state={queries:[] as {sql:string;args:any[]}[],receipts:new Map<string,any>(),now:'2026-10-15T08:30:00.000Z',identity:true,role:'fixture_owner',existing:null as any,failAudit:false,proofReady:true,recoveryRows:null as Record<string,any[]>|null};
  const query=async(sql:string,args:any[]=[])=>{
   state.queries.push({sql,args});
   if(sql.includes('finance-opening resource'))return{rows:[{...resource,role:state.role,now:state.now,tableOwner:state.role}],rowCount:1};
-  if(sql.includes('stored opening review schema'))return{rows:[{ready:true,owner:state.role,proof_ready:true}],rowCount:1};
+  if(sql.includes('stored opening review schema'))return{rows:[{ready:true,owner:state.role,proof_ready:state.proofReady}],rowCount:1};
   if(sql.includes('s."locked",u."twoFactorEnabled"'))return{rows:[{locked:false,twoFactorEnabled:true}],rowCount:1};
   if(sql.includes('admin_security'))return{rows:[{status:'ACTIVE',isBoss:true,passwordChangeRequired:false}],rowCount:1};
   if(sql.includes('SELECT suspended'))return{rows:[{suspended:false}],rowCount:1};
@@ -46,6 +46,11 @@ function fixture(){
   if(sql.includes('stored opening existing observation'))return{rows:state.existing?[state.existing]:[],rowCount:state.existing?1:0};
   if(sql.includes('"requestFingerprint"')){const r=state.receipts.get(args[1]);return{rows:r?[{requestFingerprint:r.fingerprint,responseStatus:r.status,responseBody:r.body,publishRequired:false}]:[],rowCount:r?1:0};}
   if(sql.includes('request_fingerprint AS fingerprint')){const r=state.receipts.get(args[1]);return{rows:r?[r]:[],rowCount:r?1:0};}
+  if(state.recoveryRows){
+   for(const name of ['basis','covered','observations','ledger','audit'])if(sql.includes('finance-opening recovery '+name))return{rows:state.recoveryRows[name]!,rowCount:state.recoveryRows[name]!.length};
+   if(sql.includes('AS lines,COALESCE'))return{rows:state.recoveryRows.facts!,rowCount:state.recoveryRows.facts!.length};
+   if(sql.includes('stored opening recovery review'))return{rows:state.recoveryRows.review!,rowCount:state.recoveryRows.review!.length};
+  }
   if(sql.includes('INSERT INTO "zzsh_supply"."idempotency_record"'))state.receipts.set(args[1],{fingerprint:args[2],status:args[3],body:JSON.parse(args[4])});
   if(sql.includes('INSERT INTO zzsh_iam.audit_event')&&state.failAudit)throw Error('FIXTURE_AUDIT_FAILED');
   return{rows:sql.includes('wallet_revision')?[{ledger_revision:'0'}]:[],rowCount:1};
@@ -115,6 +120,46 @@ test('old stored input and review keep their original byte shape with no implici
  await importReviewedStoredOpeningBatch(f.pool,actor,[f.i],[f.scope]);const sealed=f.state.queries.find(q=>q.sql.includes('finance_stored_opening_review('));assert(sealed);
  assert.equal(sealed.args[3],canonicalize(f.r));assert.equal(sealed.args[5],canonicalize(f.i));
  assert.equal(Object.hasOwn(JSON.parse(sealed.args[3]),'sourceProofDigest'),false);assert.equal(Object.hasOwn(JSON.parse(sealed.args[5]),'sourceProof'),false);
+});
+
+test('0108 old no-proof receipt replays byte-for-byte after extension readiness; expired write approval permits only read recovery',async()=>{
+ const f=await prepare(),inputBytes=JSON.stringify(f.i),reviewBytes=canonicalize(f.r);f.state.proofReady=false;
+ const original=await importReviewedStoredOpeningBatch(f.pool,actor,[f.i],[f.scope]);
+ const receiptBytes=JSON.stringify([...f.state.receipts.values()]);const inserts=f.state.queries.filter(q=>/^\s*INSERT/.test(q.sql)).length;
+ const sealed=f.state.queries.find(q=>q.sql.includes('finance_stored_opening_review('))!;assert.equal(sealed.args[3],reviewBytes);assert.equal(sealed.args[5],canonicalize(f.i));
+ f.state.proofReady=true;const replay=await importReviewedStoredOpeningBatch(f.pool,actor,[f.i],[f.scope]);
+ assert.equal(original[0]!.replayed,false);assert.equal(replay[0]!.replayed,true);assert.equal(replay[0]!.status,original[0]!.status);assert.equal(JSON.stringify(replay[0]!.body),JSON.stringify(original[0]!.body));
+ assert.equal(JSON.stringify([...f.state.receipts.values()]),receiptBytes);assert.equal(JSON.stringify(f.i),inputBytes);
+ assert.equal(f.state.queries.filter(q=>/^\s*INSERT/.test(q.sql)).length,inserts);
+ const plan=await planFinanceOpening(f.client,actor,f.i,f.scope),p=f.i.proof,o=plan.observations[0]!;
+ f.state.recoveryRows={
+  facts:[{amount:'750',subject:'fixture-wallet',kind:'OPENING',lines:2,debits:'750',credits:'750'}],
+  review:[{body_digest:sealed.args[1],source_canonical:sealed.args[2],review_canonical:sealed.args[3],review_digest:sealed.args[4]}],
+  basis:[{userId:p.userId,sourceSystem:p.source.sourceSystem,sourceEntity:'la_user',sourceId:'101',identityDigest:p.source.identityDigest,sourceDigest:p.sourceDigest,cutoff:f.i.cutoff,coveredCount:0,coveredDigest:p.coveredDigest,rootKind:'LEGACY_OPENING',rootType:'LEGACY_MYSQL',rootSystem:p.source.sourceSystem,rootEntity:'la_user',rootSourceId:'101',rootSubject:p.userId,rootRole:'WALLET_HOLDER'}],
+  covered:[],
+  observations:[{userId:p.userId,sourceSystem:o.sourceSystem,legacyUserId:'101',sourceEntity:'la_log_earnings',sourceId:'501',sourceDigest:o.sourceDigest,sourceEventAt:o.sourceEventAt,included:true,canonical:o.sourceCanonical,observationUserId:p.userId,observationBasis:plan.basisId,observationDigest:o.sourceDigest,observationCanonical:o.sourceCanonical,observationIncluded:true}],
+  ledger:[{line:1,account:'LEGACY_OPENING_SOURCE',debit:'750',credit:'0',subject:null},{line:2,account:'WALLET_AVAILABLE',debit:'0',credit:'750',subject:p.userId}],audit:[{}]
+ };
+ f.state.now='2026-10-15T10:00:00.000Z';const recoveredScope=await bindReviewedStoredOpeningAdmission(f.client,actor,f.r,'recover'),before=f.state.queries.length;
+ const recovered=await recoverReviewedStoredOpeningBatch(f.client,actor,[f.i],[recoveredScope]);assert.equal(recovered.knowledge,'KNOWN');
+ assert(!f.state.queries.slice(before).some(q=>/^\s*(INSERT|UPDATE|DELETE)/.test(q.sql)));assert.equal(JSON.stringify([...f.state.receipts.values()]),receiptBytes);
+ f.state.recoveryRows.review![0]!.review_canonical='{}';
+ await assert.rejects(recoverReviewedStoredOpeningBatch(f.client,actor,[f.i],[recoveredScope]),(error:any)=>error.status===409);
+ assert(!f.state.queries.slice(before).some(q=>/^\s*(INSERT|UPDATE|DELETE)/.test(q.sql)));
+});
+
+test('0108 old economic key with changed stored body stays 409 rather than creating another opening',async()=>{
+ const f=await prepare();await importReviewedStoredOpeningBatch(f.pool,actor,[f.i],[f.scope]);const inserts=f.state.queries.filter(q=>/^\s*INSERT/.test(q.sql)).length;
+ const changed=JSON.parse(JSON.stringify(f.i)) as StoredOpeningInput,selected=JSON.parse(changed.sourceCanonical);selected.money='1.00';changed.sourceCanonical=canonicalize(selected);changed.proof.sourceDigest=sha(JSON.stringify({id:selected.id,earnings:selected.earnings,money:selected.money}));
+ const scope=await bindReviewedStoredOpeningAdmission(f.client,actor,review(changed));
+ await assert.rejects(importReviewedStoredOpeningBatch(f.pool,actor,[changed],[scope]),(error:any)=>error.status===409);
+ assert.equal(f.state.queries.filter(q=>/^\s*INSERT/.test(q.sql)).length,inserts);assert.equal(f.state.receipts.size,1);
+});
+
+test('0108 new proof fails closed before insert when its schema readiness is missing',async()=>{
+ const f=await prepare(returnInput());f.state.proofReady=false;
+ await assert.rejects(importReviewedStoredOpeningBatch(f.pool,actor,[f.i],[f.scope]),(error:any)=>error.status===503);
+ assert(!f.state.queries.some(q=>/^\s*INSERT/.test(q.sql)));
 });
 
 test('FIN02 supplement is admitted only through a new sealed opening without replacing an already immutable nine-field observation',async()=>{

@@ -757,6 +757,13 @@
       "when": 1793170240000,
       "tag": "0107_prestart_termination",
       "breakpoints": true
+    },
+    {
+      "idx": 108,
+      "version": "7",
+      "when": 1793170300000,
+      "tag": "0108_legacy_finance_source_proof",
+      "breakpoints": true
     }
   ]
 }
