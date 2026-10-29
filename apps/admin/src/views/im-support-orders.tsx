@@ -137,7 +137,7 @@ function OrderInventoryDialog({ info, onClose, triggerRef }: { info: OrderTeamAc
  * authorization, draft and send decision; this module only decides how the
  * loaded facts are presented in the three-column case workspace.
  */
-export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client, connection, active, sendAllowed, request, onAuthError }: {
+export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client, connection, active, sendAllowed, canManualClose, request, onAuthError }: {
   identity: string;
   adminUserId: string;
   operatorName: string;
@@ -145,6 +145,7 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
   connection: NimWebConnectionState | "idle" | "error";
   active: boolean;
   sendAllowed: boolean;
+  canManualClose?: boolean;
   request: Requester;
   onAuthError: (status: number) => void;
 }) {
@@ -370,7 +371,7 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
         <div className="im-wb-details-head"><strong>本单详情</strong></div>
         <div className="im-order-rail">
           {/* 右侧需要订单终态：renderFulfillment 槽位不带 orderStatus，故由本栏直接传入。 */}
-          <OrderFulfillmentSection key={info.orderId} orderId={info.orderId} displayNo={info.displayNo} viewerId={adminUserId} orderStatus={info.orderStatus} {...(info.frozenInventory ? { frozenInventory: info.frozenInventory } : {})} />
+          <OrderFulfillmentSection key={info.orderId} orderId={info.orderId} displayNo={info.displayNo} viewerId={adminUserId} orderStatus={info.orderStatus} canManualClose={canManualClose === true && info.members.some((member) => member.party === "STAFF" && member.platformId === adminUserId)} {...(info.frozenInventory ? { frozenInventory: info.frozenInventory } : {})} />
 
           <RailSection title="账号与订单">
             <div className="im-rail-account">

@@ -663,3 +663,41 @@ test("an active order keeps its existing fulfillment entry", async (t) => {
   assert.equal(host.querySelector('[data-ended="true"]'), null, "an active order is never labelled ended");
   assert.equal(host.querySelector('[data-read-state]'), null, "the loaded active card has no read-failure state");
 });
+
+test("manual close is offered only with permission, warns that funds stay offline, and reports success", async (t) => {
+  let posted = null;
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes("/manual-close")) {
+      posted = { url: String(url), method: init?.method, key: new Headers(init?.headers).get("idempotency-key"), body: JSON.parse(String(init?.body)) };
+      return response({ orderId: "order-A", status: "CANCELLED", cancelReason: "MANUAL_CLOSE", cancelledAt: "2026-10-29T13:30:00.000Z", localFundsEffect: "NONE", financeHandling: "OFFLINE_REQUIRED" });
+    }
+    return response(confirmedOpening);
+  };
+  const { host, root } = mount();
+  t.after(async () => { await act(async () => root.unmount()); host.remove(); });
+  await render(root, host, { orderStatus: "PAID", canManualClose: true });
+  await waitFor(() => host.querySelector('[data-action="manual-close-open"]'));
+
+  const card = host.querySelector('[data-manual-close="true"]');
+  assert.match(card.textContent, /不生成结算或退款/);
+  assert.match(card.textContent, /财务线下核对/);
+  await click(host, "手动结单");
+  await waitFor(() => document.body.querySelector('[aria-label="手动结单"]'));
+  assert.match(document.body.textContent, /资金不会被自动处理/);
+
+  assert.equal(document.body.querySelector('[data-action="manual-close-submit"]').disabled, true, "an empty remark cannot submit");
+  const textarea = document.body.querySelector('textarea[aria-label="手动结单处理备注"]');
+  const setter = Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype, "value").set;
+  setter.call(textarea, "异常订单，线下核对资金");
+  await act(async () => { textarea.dispatchEvent(new browser.Event("input", { bubbles: true })); });
+  await settle();
+  await click(host, "确认手动结单");
+  await waitFor(() => host.querySelector('[data-manual-close="true"]').textContent.includes("已手动结单"));
+
+  assert.equal(posted.method, "POST");
+  assert.match(posted.url, /\/orders\/order-A\/manual-close$/);
+  assert.equal(posted.body.remark, "异常订单，线下核对资金");
+  assert.ok(posted.key, "the idempotency key is sent");
+  assert.equal(host.querySelector('[data-action="manual-close-open"]'), null, "a closed order hides the action");
+  assert.match(host.textContent, /资金未自动结算或退款/);
+});

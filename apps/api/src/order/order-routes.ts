@@ -4,6 +4,8 @@ import type { DistributionEarningStore } from "../finance/distribution-earning-s
 import { listUnifiedUserOrders, parseUnifiedOrderQuery } from "./unified-user-order-read";
 import { getUserLegacyOrder, listUserLegacyOrders, parseLegacyUserOrderQuery } from "./legacy-user-order-read";
 import type { OrderImSdkRouteBindings } from "../config/config";
+import type { ImMessageTransport } from "../im/im-contract";
+import { assertManualCloseAccess, manualCloseOrder } from "./manual-close";
 import { readOrderTeamAccess, listJoinedOrderTeams } from "../im/order-team-access";
 import { parseRfc3339Timestamp } from "../content/content";
 import { queryAdminReadOrders, getAdminReadOrder, parseOrderOrigin, type OrderReadFilters } from "./admin-order-read";
@@ -71,6 +73,8 @@ export type OrderRuntimeOptions = AuthSecurityOptions & {
   orderImSdkRouteBindings?: OrderImSdkRouteBindings;
   /** Explicit controlled-test switch. Production leaves it unset. */
   settlementRecordingEnabled?: boolean;
+  /** Local/test system text seam; a production NIM implementation remains later work. */
+  systemMessageTransport?: Pick<ImMessageTransport, "sendText">;
 };
 
 export type OrderResponse = SupplyResponse;
@@ -302,6 +306,40 @@ export async function handleOrderAdminRoute(
     if (await handleLegacyContinuationRoute(request, response, options, "admin")) return;
     if (await handlePrestartTerminationRoute(request, response, options, "admin")) return;
     if (await handleSettlementAdminRoute(request, response, options)) return;
+    const manualClose = /^\/([A-Za-z0-9._:-]+)\/manual-close$/.exec(path);
+    if (method === "POST" && manualClose) {
+      if (!requireOrigin(request, response, options, requestId)) return;
+      const orderId = decodeId(manualClose[1]!);
+      const body = bodyOf(request);
+      ensureOnlyFields(body, ["remark"]);
+      const remark = typeof body.remark === "string" ? body.remark.trim() : "";
+      if (remark.length < 3 || remark.length > 200) throw invalid("Remark is invalid", "remark");
+      if ([...remark].some((ch) => { const code = ch.codePointAt(0)!; return code < 32 || code === 127; })) throw invalid("Remark is invalid", "remark");
+      const context = await readAdminContext(request, options);
+      const actor = { userId: context.userId, sessionId: context.sessionId };
+      await runIdempotentWrite(options, request, response, requestId,
+        { principalId: actor.userId, operation: "order.manual_close", resourceId: orderId },
+        { realm: "admin", id: actor.userId, sessionId: actor.sessionId }, { remark },
+        async (client) => { await assertManualCloseAccess(client, orderId, actor); },
+        (client) => manualCloseOrder(client, orderId, actor, remark, requestId),
+        undefined,
+        async () => {
+          const transport = options.systemMessageTransport;
+          if (!transport) return;
+          const group = (await options.pool.query<{ teamId: string; systemAccount: string }>(
+            `SELECT g.team_id AS "teamId", m.account_id AS "systemAccount"
+               FROM zzsh_order.im_order_group g JOIN zzsh_iam.im_identity_mapping m ON m.id = g.system_identity_id
+              WHERE g.order_id = $1 AND g.team_state = 'READY' AND g.team_id IS NOT NULL LIMIT 1`, [orderId])).rows[0];
+          if (!group) return;
+          try {
+            await transport.sendText({ conversationId: `${group.systemAccount}|2|${group.teamId}`,
+              senderAccountId: group.systemAccount, receiverAccountId: group.teamId,
+              text: "客服已手动结束本单。如对处理有疑问，请联系客服。",
+              messageClientId: `manual_close_${orderId}` });
+          } catch { /* The close and audit are committed; notification is best-effort in the fake seam. */ }
+        });
+      return;
+    }
     if (method !== "GET") throw notFound();
     const context = await readAdminContext(request, options);
     await withTransaction(options.pool, async (client) => {

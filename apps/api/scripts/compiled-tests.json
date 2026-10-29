@@ -229,5 +229,6 @@
   "dist/test/im-worker-assembly.test.js",
   "dist/test/im-support-management.test.js",
   "dist/test/order-stage-cards.test.js",
-  "dist/test/order-due-reminders.test.js"
+  "dist/test/order-due-reminders.test.js",
+  "dist/test/manual-close.test.js"
 ]

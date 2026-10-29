@@ -68,6 +68,11 @@ export type FulfillmentIntent = {
   createdAt: string;
 };
 
+export type ManualCloseResult = {
+  orderId: string; status: "CANCELLED"; cancelReason: "MANUAL_CLOSE"; cancelledAt: string;
+  localFundsEffect: "NONE"; financeHandling: "OFFLINE_REQUIRED"; alreadyClosed?: boolean;
+};
+
 export type FulfillmentOutcome =
   | { kind: "accepted"; status: number; body: SettlementReadView }
   | { kind: "blocked"; status: number; reasons: readonly string[]; message: string }
@@ -180,4 +185,9 @@ export async function sendFulfillmentIntent(intent: FulfillmentIntent, replay = 
     }
     return { kind: "unknown", error };
   }
+}
+
+/** O-03 status-only close. The key must survive an unknown result and be replayed unchanged. */
+export async function sendManualClose(orderId: string, remark: string, key: string): Promise<ManualCloseResult> {
+  return adminRequest<ManualCloseResult>(`${orderBase(orderId)}/manual-close`, { remark }, "POST", { "idempotency-key": key });
 }

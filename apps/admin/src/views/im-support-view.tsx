@@ -1461,7 +1461,8 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
     </nav>
     <div className="im-wb-pane" hidden={section !== "consultation"}>{consultationPane}</div>
     {canRead ? <div className="im-wb-pane im-wb-pane--orders" hidden={section !== "orders"}><OrderWorkbenchPane identity={readClientKey} adminUserId={snapshot.adminUserId} operatorName={operatorName}
-      client={clientRef.current} connection={connection} active={section === "orders"} sendAllowed={canAccept} request={adminRequest} onAuthError={() => { void onRefresh(); }} /></div> : null}
+      client={clientRef.current} connection={connection} active={section === "orders"} sendAllowed={canAccept}
+      canManualClose={snapshot.security.isBoss || snapshot.permissions.includes("order.settlement.write")} request={adminRequest} onAuthError={() => { void onRefresh(); }} /></div> : null}
     <Dialog open={transferOpen} onOpenChange={setTransferOpen}>
       <DialogContent className="im-wb-dialog" aria-label="转交会话" showCloseButton={false} finalFocus={transferTriggerRef}>
         <div className="im-wb-dialog-head"><div><strong>转交会话</strong><span>{selected?.user?.name || "当前咨询"}</span></div><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setTransferOpen(false)} aria-label="关闭转交"><X size={14} /></button></div>

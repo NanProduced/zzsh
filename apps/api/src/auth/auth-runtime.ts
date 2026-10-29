@@ -1125,6 +1125,7 @@ export async function mountAuthHandlers(
     legacyPublicAdmissionDetail,
     settlementRecordingEnabled: options.testOperationsEnabled === true && process.env.ZZSH_SETTLEMENT_RECORDING === "controlled" && process.env.NODE_ENV !== "production",
     ...(orderImSdkRouteBindings ? { orderImSdkRouteBindings } : {}),
+    ...(options.testImMessageTransport ? { systemMessageTransport: { sendText: options.testImMessageTransport.sendText.bind(options.testImMessageTransport) } } : {}),
   };
   // Credit routes own both BFF prefixes and must be registered before the
   // generic BFF fallbacks, which otherwise turn unknown credit paths into 404.

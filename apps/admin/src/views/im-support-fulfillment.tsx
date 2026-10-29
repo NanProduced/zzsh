@@ -2,9 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CircleAlert, ClipboardList, Info, RefreshCw, ShieldCheck, TriangleAlert, X } from "lucide-react";
-import { friendlyError } from "../api";
+import { AdminApiError, friendlyError } from "../api";
 import { formatDateTime } from "./im-support-format";
 import { Dialog, DialogContent } from "../components/ui/dialog";
+import { Textarea } from "../components/ui/textarea";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
@@ -14,6 +15,8 @@ import {
   buildFulfillmentIntent,
   readOrderSettlement,
   sendFulfillmentIntent,
+  sendManualClose,
+  type ManualCloseResult,
   type EarlyEndReason,
   type FulfillmentIntent,
   type SettlementReadView,
@@ -87,7 +90,7 @@ function storageKeyFor(viewerId: string, orderId: string): string {
  * Frozen order inventory arrives through the authorized IM slot projection;
  * the section never computes money and never writes an order/ledger row.
  */
-export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderStatus, frozenInventory }: { orderId: string; displayNo: string; viewerId: string; orderStatus?: string; frozenInventory?: InventoryLine[] }) {
+export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderStatus, frozenInventory, canManualClose }: { orderId: string; displayNo: string; viewerId: string; orderStatus?: string; frozenInventory?: InventoryLine[]; canManualClose?: boolean }) {
   const [view, setView] = useState<SettlementReadView | null>(null);
   const [readState, setReadState] = useState<FulfillmentReadState>("idle");
   const [readDetail, setReadDetail] = useState("");
@@ -545,7 +548,7 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
     </Card>;
   }
 
-  return <Card className="im-support-fulfillment im-order-card" data-stage={stage.key} aria-label="本单当前任务">
+  return <><Card className="im-support-fulfillment im-order-card" data-stage={stage.key} aria-label="本单当前任务">
     <CardContent className="grid gap-2.5 p-4">
       <div className="flex items-start gap-3">
         <div className="grid min-w-0 flex-1 gap-1">
@@ -653,6 +656,64 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
       </div>
 
       <p className="im-support-fulfillment-hint">聊天和已读不会改变订单状态；金额以系统结果为准，"应退"不等于退款已到账。</p>
+      </DialogContent>
+    </Dialog>
+  </Card>
+  {canManualClose && orderStatus === "PAID" ? <ManualCloseCard orderId={orderId} displayNo={displayNo} /> : null}
+  </>;
+}
+
+function ManualCloseCard({ orderId, displayNo }: { orderId: string; displayNo: string }) {
+  const [open, setOpen] = useState(false);
+  const [remark, setRemark] = useState("");
+  const [phase, setPhase] = useState<"IDLE" | "SENDING" | "UNKNOWN">("IDLE");
+  const [result, setResult] = useState<ManualCloseResult | null>(null);
+  const [error, setError] = useState("");
+  const keyRef = useRef("");
+  const valid = remark.trim().length >= 3 && remark.trim().length <= 200
+    && ![...remark].some((ch) => { const code = ch.codePointAt(0)!; return code < 32 || code === 127; });
+  const submit = async () => {
+    if (!valid || phase === "SENDING" || result) return;
+    if (!keyRef.current) keyRef.current = `manual_close_${orderId}_${crypto.randomUUID()}`;
+    setPhase("SENDING"); setError("");
+    try {
+      const closed = await sendManualClose(orderId, remark.trim(), keyRef.current);
+      setResult(closed); setPhase("IDLE"); setOpen(false);
+    } catch (cause) {
+      if (cause instanceof AdminApiError && (cause.status === 0 || cause.status === 429 || cause.status >= 500)) {
+        setPhase("UNKNOWN");
+        setError("结果未确认，请刷新订单核对；不要用新备注重复提交，可保留本页重试同一请求。");
+      } else {
+        setPhase("IDLE");
+        const code = cause instanceof AdminApiError ? cause.code : "";
+        setError(code === "ORDER_NOT_CLOSABLE" ? "订单已不是可手动结单的状态；请刷新后核对。"
+          : cause instanceof AdminApiError && cause.status === 403 ? "当前账号不是本单客服，或没有订单结算写权限。"
+          : friendlyError(cause));
+      }
+    }
+  };
+  return <Card className="im-support-fulfillment im-order-card" data-manual-close="true" aria-label="异常处理">
+    <CardContent className="grid gap-2 p-4">
+      <CardTitle className="flex items-center gap-2 text-sm"><TriangleAlert className="size-4 shrink-0 text-destructive" />异常处理</CardTitle>
+      <CardDescription className="text-xs leading-relaxed">手动结单只改订单状态，不生成结算或退款；已收款由财务线下核对。必须填写备注并通知双方。</CardDescription>
+      {result ? <Alert><ShieldCheck /><AlertTitle>已手动结单</AlertTitle><AlertDescription>资金未自动结算或退款，请财务线下核对。订单群保留，72 小时沟通窗口从结单时间开始。</AlertDescription></Alert>
+        : <div className="im-support-fulfillment-actions">
+          <Button variant="outline" size="sm" data-action="manual-close-open" onClick={() => { setError(""); setOpen(true); }}>手动结单</Button>
+        </div>}
+      {error && !open ? <p className="im-support-fulfillment-error" role="alert"><CircleAlert size={14} />{error}</p> : null}
+    </CardContent>
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogContent className="im-wb-dialog" aria-label="手动结单" showCloseButton={false}>
+        <div className="im-wb-dialog-head"><div><strong>手动结单</strong><span>订单 {displayNo} · 只改状态</span></div><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setOpen(false)} disabled={phase === "SENDING"} aria-label="关闭手动结单"><X size={14} /></button></div>
+        <Alert variant="warning"><TriangleAlert /><AlertTitle>资金不会被自动处理</AlertTitle><AlertDescription>本操作不生成结算、退款责任或银行到账；已收款由财务线下核对。提交后订单变为已取消，订单群保留 72 小时沟通窗口。</AlertDescription></Alert>
+        <label className="im-wb-dialog-note"><span>处理备注（必填，3–200 字）<em>{remark.length}/200</em></span>
+          <Textarea value={remark} maxLength={200} rows={3} aria-label="手动结单处理备注" placeholder="说明异常原因与后续资金处理方式" disabled={phase === "SENDING" || phase === "UNKNOWN"} onChange={(event) => { setRemark(event.target.value); setError(""); }} />
+        </label>
+        {error ? <p className="im-wb-dialog-error" role="alert"><CircleAlert size={14} />{error}</p> : null}
+        <div className="im-wb-dialog-actions">
+          <Button variant="ghost" size="sm" onClick={() => setOpen(false)} disabled={phase === "SENDING"}>取消</Button>
+          <Button variant="destructive" size="sm" data-action="manual-close-submit" onClick={() => void submit()} disabled={!valid || phase === "SENDING" || Boolean(result)}>{phase === "SENDING" ? "提交中…" : phase === "UNKNOWN" ? "重试同一请求" : "确认手动结单"}</Button>
+        </div>
       </DialogContent>
     </Dialog>
   </Card>;

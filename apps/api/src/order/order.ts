@@ -122,7 +122,7 @@ export type OrderParty = "renter" | "owner" | "admin";
 
 export function orderHasPaidState(status: string, cancelReason?: string | null): boolean {
   return status === ORDER_STATUS.PAID || status === ORDER_STATUS.COMPLETED
-    || status === ORDER_STATUS.CANCELLED && cancelReason === "PRESTART_TERMINATED";
+    || status === ORDER_STATUS.CANCELLED && (cancelReason === "PRESTART_TERMINATED" || cancelReason === "MANUAL_CLOSE");
 }
 
 export function projectOrder(

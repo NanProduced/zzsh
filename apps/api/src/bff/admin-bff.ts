@@ -548,7 +548,8 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     const settlementPath = /^\/orders\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(openings|settlements|settlement-preview|settlement)(\/|$)/.test(path);
     const legacyContinuationPath = /^\/orders\/legacy\/legacy_order_[a-f0-9]{40}\/continuation\/(?:hold|release|confiscate|duties\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(?:mature|void))$/.test(path);
     const prestartReviewPath=/^\/orders\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/prestart-termination\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/review$/.test(path);
-    if (method !== "GET" && !(method === "POST" && (settlementPath || legacyContinuationPath||prestartReviewPath))) {
+    const manualClosePath=/^\/orders\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/manual-close$/.test(path);
+    if (method !== "GET" && !(method === "POST" && (settlementPath || legacyContinuationPath||prestartReviewPath||manualClosePath))) {
       sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);
       return;
     }
