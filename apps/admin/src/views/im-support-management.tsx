@@ -148,7 +148,7 @@ export function SupportDashboard({ active, request }: { active: boolean; request
         <div className="im-wb-mgmt-table-wrap"><Table className="im-wb-mgmt-table">
           <TableHeader><TableRow>
             <TableHead>客服</TableHead><TableHead>状态</TableHead><TableHead className="text-right">当前接待</TableHead>
-            <TableHead className="text-right">今日接线</TableHead><TableHead className="text-right">今日会话</TableHead>
+            <TableHead className="text-right">今日接待</TableHead><TableHead className="text-right">今日会话</TableHead>
             <TableHead className="text-right">今日用户</TableHead><TableHead className="text-right">负责订单群</TableHead>
           </TableRow></TableHeader>
           <TableBody>
@@ -186,19 +186,24 @@ function MetricCard({ label, value }: { label: string; value: number }) {
 function TrendChart({ points }: { points: SupportTrendPoint[] }) {
   const visible = points.slice(-7);
   const data = visible.map((point) => ({ label: formatDayLabel(point.date), sessions: point.sessions, users: point.users }));
+  const totalSessions = data.reduce((sum, point) => sum + point.sessions, 0);
   return <Card className="im-wb-mgmt-card" data-chart="trend" data-points={data.length}>
     <CardHeader><CardTitle>近 7 天咨询与会话用户</CardTitle><CardDescription>双系列：咨询会话数 / 接待用户数</CardDescription></CardHeader>
     <CardContent>
-      <div className="im-wb-mgmt-legend"><span data-series="sessions">会话</span><span data-series="users">用户</span></div>
+      <div className="im-wb-mgmt-legend"><span data-series="sessions">会话</span><span data-series="users">用户</span><span className="im-wb-mgmt-chart-summary">7 天会话 {totalSessions} 次</span></div>
       {hasTrendData(visible) ? <div className="im-wb-mgmt-chartbox" role="img" aria-label="近 7 天咨询会话数与接待用户数">
         <ResponsiveContainer width="100%" height={220}>
           <BarChart data={data} margin={{ top: 8, right: 8, left: -18, bottom: 0 }} barCategoryGap="26%">
+            <defs>
+              <linearGradient id="mgmt-trend-sessions" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="var(--mgmt-chart-1)" stopOpacity={0.95} /><stop offset="100%" stopColor="var(--mgmt-chart-1)" stopOpacity={0.38} /></linearGradient>
+              <linearGradient id="mgmt-trend-users" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="var(--mgmt-chart-2)" stopOpacity={0.95} /><stop offset="100%" stopColor="var(--mgmt-chart-2)" stopOpacity={0.38} /></linearGradient>
+            </defs>
             <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-            <XAxis dataKey="label" tick={{ fill: "var(--muted-foreground)", fontSize: 11 }} axisLine={false} tickLine={false} />
+            <XAxis dataKey="label" tick={{ fill: "var(--muted-foreground)", fontSize: 11 }} axisLine={false} tickLine={false} tickMargin={8} />
             <YAxis allowDecimals={false} tick={{ fill: "var(--muted-foreground)", fontSize: 11 }} axisLine={false} tickLine={false} width={40} />
-            <Tooltip cursor={{ fill: "color-mix(in oklab, var(--foreground) 6%, transparent)" }} contentStyle={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }} labelStyle={{ color: "var(--foreground)" }} formatter={(value, name) => [`${value}`, name === "sessions" ? "会话" : "用户"]} />
-            <Bar dataKey="sessions" name="sessions" fill="var(--mgmt-chart-1)" radius={[4, 4, 0, 0]} maxBarSize={26} />
-            <Bar dataKey="users" name="users" fill="var(--mgmt-chart-2)" radius={[4, 4, 0, 0]} maxBarSize={26} />
+            <Tooltip wrapperStyle={{ pointerEvents: "none" }} cursor={{ fill: "color-mix(in oklab, var(--foreground) 6%, transparent)" }} contentStyle={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }} labelStyle={{ color: "var(--foreground)" }} formatter={(value, name) => [`${value}`, name === "sessions" ? "会话" : "用户"]} />
+            <Bar dataKey="sessions" name="sessions" fill="url(#mgmt-trend-sessions)" radius={[5, 5, 0, 0]} maxBarSize={26} />
+            <Bar dataKey="users" name="users" fill="url(#mgmt-trend-users)" radius={[5, 5, 0, 0]} maxBarSize={26} />
           </BarChart>
         </ResponsiveContainer>
       </div> : <p className="im-wb-mgmt-chart-empty" role="status">暂无数据</p>}
@@ -209,17 +214,19 @@ function TrendChart({ points }: { points: SupportTrendPoint[] }) {
 function HourlyChart({ hourly }: { hourly: ReturnType<typeof hourlySlots> }) {
   const slots = hourlySlots(hourly);
   const data = slots.map((point) => ({ hour: point.hour, label: String(point.hour).padStart(2, "0"), sessions: point.sessions }));
+  const totalSessions = data.reduce((sum, point) => sum + point.sessions, 0);
   return <Card className="im-wb-mgmt-card" data-chart="hourly" data-points={slots.filter((point) => point.sessions > 0).length}>
-    <CardHeader><CardTitle>今日每小时新咨询</CardTitle><CardDescription>00:00–23:00；悬停查看具体时段</CardDescription></CardHeader>
+    <CardHeader><CardTitle>今日每小时新咨询</CardTitle><CardDescription>00:00–23:00 · 今日共 {totalSessions} 次；悬停查看具体时段</CardDescription></CardHeader>
     <CardContent>
       {hasHourlyData(slots) ? <div className="im-wb-mgmt-chartbox" role="img" aria-label="今日每小时新咨询量">
         <ResponsiveContainer width="100%" height={220}>
           <BarChart data={data} margin={{ top: 8, right: 8, left: -18, bottom: 0 }} barCategoryGap="18%">
+            <defs><linearGradient id="mgmt-hourly" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="var(--mgmt-chart-1)" stopOpacity={0.95} /><stop offset="100%" stopColor="var(--mgmt-chart-1)" stopOpacity={0.35} /></linearGradient></defs>
             <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-            <XAxis dataKey="label" interval={2} tick={{ fill: "var(--muted-foreground)", fontSize: 11 }} axisLine={false} tickLine={false} />
+            <XAxis dataKey="label" interval={2} tick={{ fill: "var(--muted-foreground)", fontSize: 11 }} axisLine={false} tickLine={false} tickMargin={8} />
             <YAxis allowDecimals={false} tick={{ fill: "var(--muted-foreground)", fontSize: 11 }} axisLine={false} tickLine={false} width={40} />
-            <Tooltip cursor={{ fill: "color-mix(in oklab, var(--foreground) 6%, transparent)" }} contentStyle={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }} labelStyle={{ color: "var(--foreground)" }} labelFormatter={(label) => `${label}:00`} formatter={(value) => [`${value}`, "新咨询"]} />
-            <Bar dataKey="sessions" name="sessions" fill="var(--mgmt-chart-1)" radius={[3, 3, 0, 0]} maxBarSize={18} />
+            <Tooltip wrapperStyle={{ pointerEvents: "none" }} cursor={{ fill: "color-mix(in oklab, var(--foreground) 6%, transparent)" }} contentStyle={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }} labelStyle={{ color: "var(--foreground)" }} labelFormatter={(label) => `${label}:00`} formatter={(value) => [`${value}`, "新咨询"]} />
+            <Bar dataKey="sessions" name="sessions" fill="url(#mgmt-hourly)" radius={[4, 4, 0, 0]} maxBarSize={18} />
           </BarChart>
         </ResponsiveContainer>
       </div> : <p className="im-wb-mgmt-chart-empty" role="status">暂无数据</p>}
@@ -237,18 +244,20 @@ function AgentWorkloadChart({ agents }: { agents: SupportOverviewAgent[] }) {
   }));
   // A single three-minute shift must not paint a full-width bar: keep an 8h workday domain.
   const maxHours = Math.max(8, Math.ceil(Math.max(0, ...data.map((point) => point.hours))));
+  const totalHours = Math.round(data.reduce((sum, point) => sum + point.hours, 0) * 10) / 10;
   return <Card className="im-wb-mgmt-card" data-chart="workload" data-points={data.length}>
-    <CardHeader><CardTitle>今日接线时长</CardTitle><CardDescription>横向条按小时；会话数在悬停提示中显示，不做排名考核</CardDescription></CardHeader>
+    <CardHeader><CardTitle>今日接待时长</CardTitle><CardDescription>{data.length} 名客服 · 合计 {totalHours} 小时；会话数在悬停提示中显示</CardDescription></CardHeader>
     <CardContent>
-      <div className="im-wb-mgmt-legend"><span data-series="seconds">接线时长（小时）</span></div>
-      {hasWorkloadData(agents) ? <div className="im-wb-mgmt-chartbox" role="img" aria-label="今日各客服接线时长">
+      <div className="im-wb-mgmt-legend"><span data-series="seconds">接待时长（小时）</span></div>
+      {hasWorkloadData(agents) ? <div className="im-wb-mgmt-chartbox" role="img" aria-label="今日各客服接待时长">
         <ResponsiveContainer width="100%" height={Math.max(180, data.length * 48)}>
           <BarChart data={data} layout="vertical" margin={{ top: 4, right: 24, left: 8, bottom: 4 }}>
+            <defs><linearGradient id="mgmt-workload" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stopColor="var(--mgmt-chart-3)" stopOpacity={0.45} /><stop offset="100%" stopColor="var(--mgmt-chart-3)" stopOpacity={0.95} /></linearGradient></defs>
             <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" horizontal={false} />
-            <XAxis type="number" domain={[0, maxHours]} tick={{ fill: "var(--muted-foreground)", fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={(value) => `${value}h`} />
+            <XAxis type="number" domain={[0, maxHours]} tick={{ fill: "var(--muted-foreground)", fontSize: 11 }} axisLine={false} tickLine={false} tickMargin={6} tickFormatter={(value) => `${value}h`} />
             <YAxis type="category" dataKey="name" width={64} tick={{ fill: "var(--foreground)", fontSize: 12 }} axisLine={false} tickLine={false} />
-            <Tooltip cursor={{ fill: "color-mix(in oklab, var(--foreground) 6%, transparent)" }} contentStyle={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }} formatter={(value, _name, item) => [`${(item.payload as { display?: string }).display ?? `${value}h`} · ${(item.payload as { sessions?: number }).sessions ?? 0} 会话`, "接线"]} />
-            <Bar dataKey="hours" name="hours" fill="var(--mgmt-chart-3)" radius={[0, 4, 4, 0]} maxBarSize={18} />
+            <Tooltip wrapperStyle={{ pointerEvents: "none" }} cursor={{ fill: "color-mix(in oklab, var(--foreground) 6%, transparent)" }} contentStyle={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }} formatter={(value, _name, item) => [`${(item.payload as { display?: string }).display ?? `${value}h`} · ${(item.payload as { sessions?: number }).sessions ?? 0} 会话`, "接待"]} />
+            <Bar dataKey="hours" name="hours" fill="url(#mgmt-workload)" radius={[0, 5, 5, 0]} maxBarSize={18} />
           </BarChart>
         </ResponsiveContainer>
       </div> : <p className="im-wb-mgmt-chart-empty" role="status">暂无数据</p>}

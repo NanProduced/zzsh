@@ -257,18 +257,27 @@
 /* Admin IM workbench (formal-v1): toolbar + queue / record stream / case column.
    The case column participates in the grid — it must never overlay the chat or the send button. */
 .workspace-root .im-wb-root { --im-accent:#38bdf8; --im-accent-strong:#7dd3fc; --im-accent-soft:rgba(56,189,248,.14); --im-bubble-bg:#1b6fae; --im-bubble-fg:#f2f8fd; --im-warn:#f59e0b; --border-strong:color-mix(in oklab,var(--border) 100%,var(--foreground) 15%);
-  display:flex; flex-direction:column; gap:10px; min-width:0; min-height:0; height:calc(100svh - 124px); min-height:520px; }
+  display:flex; flex-direction:column; gap:6px; min-width:0; min-height:0; height:calc(100svh - 112px); min-height:520px; }
+.workspace-root .workspace-page:has(.im-wb-root) { padding-top:8px; padding-bottom:8px; }
 .workspace-root .im-wb-pane { display:flex; flex-direction:column; flex:1; min-height:0; container-type:inline-size; }
 .workspace-root .im-wb-pane[hidden] { display:none; }
 
 /* toolbar */
-.workspace-root .im-wb-bar { display:flex; align-items:center; gap:10px; flex:none; min-height:40px; flex-wrap:wrap; }
+.workspace-root .im-wb-bar { display:flex; align-items:center; gap:8px; flex:none; min-height:36px; flex-wrap:wrap; }
 .workspace-root .im-wb-seg { display:flex; gap:2px; padding:2px; border:1px solid var(--border); border-radius:8px; background:var(--card); }
 .workspace-root .im-wb-seg button { display:inline-flex; align-items:center; gap:6px; min-height:30px; padding:0 12px; border:1px solid transparent; border-radius:6px; color:var(--muted-foreground); background:transparent; font:inherit; font-size:13px; cursor:pointer; }
 .workspace-root .im-wb-seg button:hover { color:var(--foreground); }
 .workspace-root .im-wb-seg button[aria-pressed="true"] { color:var(--ring); border-color:color-mix(in oklab,var(--ring) 45%,var(--border)); background:color-mix(in oklab,var(--ring) 10%,var(--card)); font-weight:600; }
 .workspace-root .im-wb-seg b { display:grid; min-width:18px; height:18px; place-items:center; padding:0 5px; border-radius:999px; color:var(--muted-foreground); background:var(--secondary); font-size:10px; font-weight:500; }
 .workspace-root .im-wb-spacer { flex:1; min-width:4px; }
+.workspace-root .im-wb-runtime { display:flex; align-items:center; gap:0; min-height:34px; padding:2px 3px 2px 10px; border:1px solid var(--border); border-radius:9px; background:var(--card); }
+.workspace-root .im-wb-runtime .im-wb-state { min-height:28px; padding:0 8px; border:0; background:transparent; }
+.workspace-root .im-wb-runtime .im-wb-state:first-child { padding-left:0; }
+.workspace-root .im-wb-runtime-divider { flex:none; width:1px; height:14px; background:var(--border); }
+.workspace-root .im-wb-today b { color:var(--foreground); font-weight:600; }
+.workspace-root .im-wb-runtime-action { min-height:28px; margin-left:6px; padding:0 12px; border:0 !important; border-radius:7px; background:var(--im-accent) !important; color:#06141f !important; font-weight:600; }
+.workspace-root .im-wb-runtime-action:disabled { opacity:.45; }
+.workspace-root .im-wb-local { padding:0 7px; font-size:10px; opacity:.82; }
 .workspace-root .im-wb-state { display:inline-flex; align-items:center; gap:6px; padding:0 9px; min-height:28px; border:1px solid var(--border); border-radius:7px; color:var(--muted-foreground); background:var(--card); font-size:12px; white-space:nowrap; }
 .workspace-root .im-wb-state i { width:7px; height:7px; flex:none; border-radius:50%; background:var(--muted-foreground); }
 .workspace-root .im-wb-state i.on { background:var(--im-accent); box-shadow:0 0 0 3px var(--im-accent-soft); }
@@ -328,7 +337,7 @@
 .workspace-root .im-wb-chat > * { flex:none; min-width:0; }
 .workspace-root .im-wb-chat > .im-wb-stream-wrap { flex:1; min-height:0; }
 .workspace-root .im-wb-chat:has(.im-wb-scope-note:not(:last-child)) { }
-.workspace-root .im-wb-chat-head { display:flex; align-items:center; gap:12px; flex:none; min-height:60px; padding:10px 16px; border-bottom:1px solid var(--border); background:var(--card); }
+.workspace-root .im-wb-chat-head { display:flex; align-items:center; gap:10px; flex:none; min-height:48px; padding:6px 14px; border-bottom:1px solid var(--border); background:var(--card); }
 .workspace-root .im-wb-back { display:none; align-items:center; gap:2px; flex:none; min-height:30px; padding:0 9px; border:1px solid var(--border); border-radius:6px; color:var(--foreground); background:var(--secondary); font-size:12px; cursor:pointer; }
 .workspace-root .im-wb-chat-av { display:grid; width:38px; height:38px; flex:none; place-items:center; border-radius:50%; color:var(--im-accent); background:var(--im-accent-soft); font-size:15px; font-weight:600; box-shadow:0 1px 2px rgba(0,0,0,.05); }
 .workspace-root .im-wb-chat-title { display:grid; min-width:0; gap:3px; }
@@ -510,7 +519,40 @@
 .workspace-root .im-order-inventory-dialog .im-order-table th,.workspace-root .im-order-inventory-dialog .im-order-table td { padding:10px 12px; white-space:normal; overflow-wrap:anywhere; }
 .workspace-root .im-order-inventory-dialog .im-wb-dialog-hint { flex:none; margin:0; }
 /* 本单详情 rail：分区与行由 Card/Item/Badge/Table 承担，这里只补节奏、头像位与角色徽标配色。 */
-.workspace-root .im-order-rail { display:grid; gap:16px; padding:14px 16px 20px; }
+.workspace-root .im-order-rail { display:flex; flex-direction:column; gap:0; padding:0; }
+.workspace-root .im-rail-section { display:grid; gap:8px; padding:14px 16px; border-bottom:1px solid var(--border); }
+.workspace-root .im-rail-section:last-child { border-bottom:0; }
+.workspace-root .im-rail-section-title { margin:0; color:var(--foreground); font-size:12px; font-weight:600; line-height:1.4; }
+.workspace-root .im-rail-section-body { display:grid; gap:8px; min-width:0; }
+.workspace-root .im-order-rail .im-support-fulfillment,.workspace-root .im-order-rail .im-order-card { border:0; border-radius:0; background:transparent; box-shadow:none; }
+.workspace-root .im-order-rail .im-support-fulfillment [data-slot="card-content"] { padding:14px 16px; }
+.workspace-root .im-rail-account { display:grid; gap:3px; }
+.workspace-root .im-rail-account-title { margin:0; font-size:14px; font-weight:600; line-height:1.45; overflow-wrap:anywhere; }
+.workspace-root .im-rail-account-sub { margin:0; color:var(--muted-foreground); font-size:11px; line-height:1.5; }
+.workspace-root .im-rail-copy-list { display:grid; gap:0; margin-top:6px; border-top:1px solid var(--border); }
+.workspace-root .im-rail-copy-row { display:grid; grid-template-columns:minmax(72px,auto) minmax(0,1fr) auto; align-items:center; gap:8px; min-height:32px; }
+.workspace-root .im-rail-copy-label { color:var(--muted-foreground); font-size:11px; white-space:nowrap; }
+.workspace-root .im-rail-value { min-width:0; overflow-wrap:anywhere; font-size:12px; font-variant-numeric:tabular-nums; line-height:1.5; text-align:right; user-select:text; }
+.workspace-root .im-rail-icon { flex:none; width:26px; height:26px; }
+.workspace-root .im-rail-copy-status { margin:-4px 0 0; color:var(--muted-foreground); font-size:11px; line-height:1.4; text-align:right; }
+.workspace-root .im-rail-money { display:grid; gap:6px; }
+.workspace-root .im-rail-money > div { display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
+.workspace-root .im-rail-money span { color:var(--muted-foreground); font-size:11px; }
+.workspace-root .im-rail-money strong { font-size:13px; font-weight:600; font-variant-numeric:tabular-nums; }
+.workspace-root .im-rail-note { margin:0; color:var(--muted-foreground); font-size:10px; line-height:1.5; }
+.workspace-root .im-rail-empty { margin:0; color:var(--muted-foreground); font-size:12px; line-height:1.6; }
+.workspace-root .im-rail-inventory { display:grid; gap:0; border-top:1px solid var(--border); }
+.workspace-root .im-rail-inv-row { display:flex; align-items:baseline; justify-content:space-between; gap:12px; min-height:30px; padding:5px 0; border-bottom:1px solid color-mix(in oklab,var(--border) 65%,transparent); font-size:12px; }
+.workspace-root .im-rail-inv-row span { min-width:0; overflow-wrap:anywhere; }
+.workspace-root .im-rail-inv-row strong { flex:none; font-weight:500; font-variant-numeric:tabular-nums; }
+.workspace-root .im-rail-section-foot { display:flex; align-items:center; justify-content:flex-end; gap:8px; }
+.workspace-root .im-rail-section-foot > span { margin-right:auto; color:var(--muted-foreground); font-size:10px; }
+.workspace-root .im-rail-members { display:grid; gap:0; border-top:1px solid var(--border); }
+.workspace-root .im-rail-member { min-height:38px; padding:6px 0; border-bottom:1px solid color-mix(in oklab,var(--border) 65%,transparent); }
+.workspace-root .im-rail-member:last-child { border-bottom:0; }
+.workspace-root .im-rail-member [data-slot="item-title"] { font-size:12px; }
+.workspace-root .im-rail-member [data-slot="item-description"] { font-size:10px; }
+.workspace-root .im-order-role { flex:none; }
 .workspace-root .im-order-card { border-radius:10px; box-shadow:none; }
 .workspace-root .im-order-avatar { width:32px; height:32px; border:0; border-radius:50%; background:var(--im-accent-soft); color:var(--im-accent); font-size:13px; font-weight:600; }
 .workspace-root .im-order-role { font-size:12px; }
@@ -696,10 +738,6 @@
 .workspace-root .im-wb-details .im-wb-card { margin:12px 14px; border-radius:10px; box-shadow:none; }
 .workspace-root .im-wb-avatar { width:32px; height:32px; flex:none; border:0; border-radius:50%; background:var(--im-accent-soft); color:var(--im-accent); font-size:13px; font-weight:600; overflow:hidden; }
 .workspace-root .im-wb-avatar img { width:100%; height:100%; object-fit:cover; }
-.workspace-root .im-rail-fact { min-width:0; }
-.workspace-root .im-rail-value-actions { min-width:0; max-width:70%; }
-.workspace-root .im-rail-value { min-width:0; overflow-wrap:anywhere; text-align:right; line-height:1.5; user-select:text; }
-.workspace-root .im-rail-copy-status { margin:0; padding:0 16px 8px; color:var(--muted-foreground); font-size:12px; line-height:1.5; text-align:right; }
 .workspace-root .im-rail-copy-status[data-state="success"] { color:var(--im-accent-strong); }
 .workspace-root .im-rail-copy-status[data-state="error"] { color:var(--destructive); }
 .workspace-root .im-rail-permission { display:grid; gap:6px; }
@@ -727,8 +765,10 @@
 /* ---------- 客服管理：看板 / 巡视（运营） ---------- */
 .workspace-root .im-wb-today { font-size:11px; color:var(--muted-foreground); font-variant-numeric:tabular-nums; }
 .workspace-root .im-wb-pane--mgmt { overflow:hidden; }
-.workspace-root .im-wb-mgmt { --mgmt-chart-1:#38bdf8; --mgmt-chart-2:#34d399; --mgmt-chart-3:#f59e0b; display:flex; flex:1; min-width:0; min-height:0; }
-[data-theme="light"] .workspace-root .im-wb-mgmt { --mgmt-chart-1:#0284c7; --mgmt-chart-2:#047857; --mgmt-chart-3:#b45309; }
+.workspace-root .workspace-page:has(.im-wb-mgmt-host) { height:calc(100svh - 82px); max-height:calc(100svh - 82px); overflow:hidden; padding-top:8px; padding-bottom:8px; }
+.workspace-root .im-wb-mgmt-host { display:flex; flex:1; min-height:0; height:100%; }
+.workspace-root .im-wb-mgmt { --mgmt-chart-1:#38bdf8; --mgmt-chart-2:#34d399; --mgmt-chart-3:#a78bfa; display:flex; flex:1; min-width:0; min-height:0; height:100%; }
+[data-theme="light"] .workspace-root .im-wb-mgmt { --mgmt-chart-1:#0284c7; --mgmt-chart-2:#047857; --mgmt-chart-3:#6d28d9; }
 .workspace-root .im-wb-mgmt-tabs { flex:1; min-height:0; gap:10px; }
 .workspace-root .im-wb-mgmt-head { display:flex; align-items:center; gap:10px; flex:none; }
 .workspace-root .im-wb-mgmt-tabs [data-slot="tabs-list"] { flex:none; width:auto; align-self:flex-start; }
@@ -755,6 +795,7 @@
 .workspace-root .im-wb-mgmt-legend span::before { content:""; width:8px; height:8px; border-radius:2px; background:var(--mgmt-chart-1); }
 .workspace-root .im-wb-mgmt-legend span[data-series="users"]::before { background:var(--mgmt-chart-2); }
 .workspace-root .im-wb-mgmt-legend span[data-series="seconds"]::before { background:var(--mgmt-chart-3); }
+.workspace-root .im-wb-mgmt-chart-summary { margin-left:auto; color:var(--muted-foreground); font-variant-numeric:tabular-nums; }
 .workspace-root .im-wb-mgmt-chartbox { width:100%; min-height:220px; }
 .workspace-root .im-wb-mgmt-chartbox .recharts-surface { overflow:visible; }
 .workspace-root .im-wb-mgmt-chart-empty { display:flex; min-height:120px; align-items:center; justify-content:center; margin:0; border:1px dashed var(--border); border-radius:8px; color:var(--muted-foreground); font-size:12px; }

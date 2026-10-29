@@ -494,7 +494,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
     return () => window.clearInterval(timer);
   }, [canPresence, connection, readClientKey, writePresence]);
 
-  // 接线心跳：只在页面可见且确实处于“可接待 + 通道已连接”时发送；失败不影响 UI。
+  // 接待心跳：只在页面可见且确实处于“可接待 + 可收发消息”时发送；失败不影响 UI。
   useEffect(() => {
     if (!canPresence || presence.availability !== "AVAILABLE" || connection !== "CONNECTED" || snapshot.session.locked) return;
     const timer = window.setInterval(() => {
@@ -1289,8 +1289,6 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
           ? <div className="im-wb-empty"><ShieldCheck size={22} /><strong>无法查看该会话历史</strong></div>
           : <div className="im-wb-empty"><Headphones size={22} /><strong>{hasSelection ? "等待第一条消息" : "尚未选择会话"}</strong><span>{hasSelection ? "该会话暂时没有可读消息。" : "从左侧队列选择会话。"}</span></div>);
 
-  const connectionTone = connection === "CONNECTED" ? "good" : connection === "idle" || connection === "CONNECTING" ? "neutral" : "warn";
-  const connectionText = connection === "CONNECTED" ? "通道已连接" : connection === "RECONNECTING" ? "通道重连中" : connection === "CONNECTING" ? "通道连接中" : connection === "KICKED" ? "通道已在其他端登录" : connection === "AUTH_FAILED" || connection === "error" ? "通道授权失败" : "通道未启动";
   const authorFor = (message: SupportMessage) => {
     if (message.self) return { name: operatorName, role: "平台客服" };
     if (selected?.peerAccountId && message.senderId === selected.peerAccountId) return { name: selected.user?.name || selected.user?.username || "平台用户", role: "平台用户" };
@@ -1447,13 +1445,19 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
         <button type="button" aria-pressed={section === "orders"} onClick={() => setSection("orders")}>订单沟通</button>
       </div>
       <span className="im-wb-spacer" />
-      {canPresence ? <>
-        <span className="im-wb-state" data-tone={presence.availability === "AVAILABLE" ? "good" : "neutral"}><i className={presence.availability === "AVAILABLE" ? "on" : ""} />{presence.availability === "AVAILABLE" ? "可接待" : presence.availability === "PAUSED" ? "已暂停" : "未上线"}</span>
-        <span className="im-wb-state im-wb-today" data-action="today-duty" title="今日接线时长（仅统计可接待且通道已连接的时间）">今日接线 {formatDuration(presence.today?.seconds)}</span>
-        <button type="button" className="im-wb-btn im-wb-presence-toggle" data-action="toggle-presence" onClick={() => void togglePresence()} disabled={busy || connection !== "CONNECTED"}>{presence.availability === "AVAILABLE" ? "暂停接待" : "开始接待"}</button>
-      </> : <span className="im-wb-state">无在线状态权限</span>}
-      <span className="im-wb-state im-wb-conn" data-tone={connectionTone}><i className={connection === "CONNECTED" ? "on" : ""} />{connectionText}</span>
-      {clientRef.current?.transport === "local-fake" ? <span className="im-wb-state im-wb-local">本地测试通道</span> : null}
+      <div className="im-wb-runtime">
+        {canPresence ? <>
+          <span className="im-wb-state im-wb-runtime-state" data-tone={presence.availability === "AVAILABLE" ? "good" : "neutral"}><i className={presence.availability === "AVAILABLE" ? "on" : ""} />{presence.availability === "AVAILABLE" ? "可接待" : presence.availability === "PAUSED" ? "已暂停" : "未上线"}</span>
+          <span className="im-wb-runtime-divider" aria-hidden="true" />
+          <span className="im-wb-state im-wb-today" data-action="today-duty" title="今日接待时长（仅统计可接待且可收发消息的时间）">今日接待 <b>{formatDuration(presence.today?.seconds)}</b></span>
+          <button type="button" className="im-wb-btn im-wb-presence-toggle im-wb-runtime-action" data-action="toggle-presence" onClick={() => void togglePresence()} disabled={busy || connection !== "CONNECTED"} title={connection !== "CONNECTED" ? "消息服务异常，暂不可接待" : undefined}>{presence.availability === "AVAILABLE" ? "暂停接待" : "开始接待"}</button>
+        </> : <span className="im-wb-state">无在线状态权限</span>}
+        {connection !== "CONNECTED" ? <>
+          <span className="im-wb-runtime-divider" aria-hidden="true" />
+          <span className="im-wb-state im-wb-runtime-warning" data-tone="warn"><i />消息服务异常</span>
+        </> : null}
+      </div>
+      {clientRef.current?.transport === "local-fake" ? <span className="im-wb-state im-wb-local">本地测试</span> : null}
     </nav>
     <div className="im-wb-pane" hidden={section !== "consultation"}>{consultationPane}</div>
     {canRead ? <div className="im-wb-pane im-wb-pane--orders" hidden={section !== "orders"}><OrderWorkbenchPane identity={readClientKey} adminUserId={snapshot.adminUserId} operatorName={operatorName}

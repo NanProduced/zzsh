@@ -325,7 +325,7 @@ test("the frozen inventory dialog opens, closes, reopens and stays bound to its 
 test("a long inventory stays summarized in the rail and complete in its dialog", async (t) => {
   const { node, until } = await mount(t, "inventory-many");
   await until(() => node.querySelector('[data-action="order-open-inventory"]'), "inventory ready");
-  assert.equal(node.querySelectorAll("#im-order-details .im-order-table tbody tr").length, 4, "the rail shows a bounded summary");
+  assert.equal(node.querySelectorAll("#im-order-details .im-rail-inv-row").length, 4, "the rail shows a bounded summary");
   assert.match(node.querySelector("#im-order-details").textContent, /共 24 项/);
   await click(node.querySelector('[data-action="order-open-inventory"]'));
   await until(() => document.body.querySelector(".im-order-inventory-dialog"), "inventory opened");

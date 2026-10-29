@@ -64,9 +64,9 @@ function orderStageLabel(order: Parameters<typeof orderTeamLabel>[0]): string {
 }
 
 function RailSection({ title, children }: { title: string; children: ReactNode }) {
-  return <section className="grid gap-2">
-    <h3 className="px-0.5 text-sm font-semibold text-foreground">{title}</h3>
-    {children}
+  return <section className="im-rail-section">
+    <h3 className="im-rail-section-title">{title}</h3>
+    <div className="im-rail-section-body">{children}</div>
   </section>;
 }
 
@@ -84,15 +84,13 @@ function CopyRow({ label, value }: { label: string; value: string }) {
     }
   };
   return (
-    <><Item size="sm" className="im-rail-fact px-4 py-2">
-      <ItemContent><ItemDescription className="text-xs">{label}</ItemDescription></ItemContent>
-      <ItemActions className="im-rail-value-actions">
-        <span className="im-rail-value text-sm font-medium tabular-nums">{value}</span>
-        <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-sm" className="im-rail-icon" aria-label={`复制${label}`} onClick={() => void copy()} />}>
-          {notice.startsWith("已复制") ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
-        </TooltipTrigger><TooltipContent>{notice || `复制${label}`}</TooltipContent></Tooltip>
-      </ItemActions>
-    </Item>
+    <><div className="im-rail-copy-row">
+      <span className="im-rail-copy-label">{label}</span>
+      <span className="im-rail-value">{value}</span>
+      <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-sm" className="im-rail-icon" aria-label={`复制${label}`} onClick={() => void copy()} />}>
+        {notice.startsWith("已复制") ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
+      </TooltipTrigger><TooltipContent>{notice || `复制${label}`}</TooltipContent></Tooltip>
+    </div>
     {notice ? <p className="im-rail-copy-status" data-state={notice.startsWith("已复制") ? "success" : "error"} role="status">{notice}</p> : null}</>
   );
 }
@@ -351,6 +349,14 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
     const esc = info.supportEscalation;
     const review = escalationReviewReason(esc);
     const tracking = escalationStateLabel(esc.state, esc.firstResponseAt ?? null);
+    const terms = info.terms;
+    const staff = terms?.basis === "QUOTE" ? terms.staff : undefined;
+    const money = (value: string | null | undefined) => {
+      if (typeof value !== "string" || !/^(0|[1-9]\d{0,17})$/.test(value)) return "金额待核对";
+      const digits = value.padStart(3, "0");
+      return `¥${digits.slice(0, -2).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${digits.slice(-2)}`;
+    };
+    const staffMoney = staff ? { buyerTotal: money(staff.buyerTotal), ownerTotal: money(staff.ownerTotal), platformContribution: money(staff.platformContribution) } : null;
     return (
       <aside id="im-order-details" className="order-team-aside im-wb-details" aria-label="本单详情" hidden={!detailsOpen}>
         <div className="im-wb-details-head"><strong>本单详情</strong></div>
@@ -358,60 +364,58 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
           {/* 右侧需要订单终态：renderFulfillment 槽位不带 orderStatus，故由本栏直接传入。 */}
           <OrderFulfillmentSection key={info.orderId} orderId={info.orderId} displayNo={info.displayNo} viewerId={adminUserId} orderStatus={info.orderStatus} {...(info.frozenInventory ? { frozenInventory: info.frozenInventory } : {})} />
 
-          <RailSection title="本单账号">
-            <Card className="im-order-card">
-              <CardContent className="grid gap-0 p-0">
-                <Item size="sm" className="px-4 py-3">
-                  <ItemMedia variant="icon" className="im-order-avatar" aria-hidden="true">{initialOf(info.account.title)}</ItemMedia>
-                  <ItemContent>
-                    <ItemTitle className="line-clamp-2">{info.account.title}</ItemTitle>
-                    <ItemDescription>{info.gameName} · 成交快照账号</ItemDescription>
-                  </ItemContent>
-                </Item>
-                <ItemSeparator />
+          <RailSection title="账号与订单">
+            <div className="im-rail-account">
+              <p className="im-rail-account-title">{info.account.title}</p>
+              <p className="im-rail-account-sub">{info.gameName} · 成交快照账号</p>
+              <div className="im-rail-copy-list">
                 <CopyRow label="稳定账号ID" value={info.account.id} />
                 <CopyRow label="订单编号" value={info.displayNo} />
-              </CardContent>
-            </Card>
+              </div>
+            </div>
           </RailSection>
 
-          <RailSection title="冻结库存摘要">
-            <Card className="im-order-card">
-              {lines.length ? <>
-                <Table className="im-order-table">
-                  <TableHeader><TableRow><TableHead>项目</TableHead><TableHead className="text-right">数量</TableHead></TableRow></TableHeader>
-                  <TableBody>{lines.slice(0, 4).map((line) => (
-                    <TableRow key={line.itemId}><TableCell className="font-medium">{line.name ?? line.itemId}</TableCell><TableCell className="text-right tabular-nums">{line.quantity}{line.unit ? ` ${UNIT_LABELS[line.unit] ?? line.unit}` : ""}</TableCell></TableRow>
-                  ))}</TableBody>
-                </Table>
-                <CardFooter className="justify-end gap-1 px-3 py-2">
-                  {lines.length > 4 ? <span className="mr-auto text-xs text-muted-foreground">共 {lines.length} 项</span> : null}
-                  <Button variant="link" size="sm" data-action="order-open-inventory" ref={inventoryTriggerRef} onClick={() => setInventoryOrderId(info.orderId)}>查看完整清单<ChevronRight aria-hidden="true" /></Button>
-                </CardFooter>
-              </> : <CardDescription className="px-4 py-3">本单还没有可显示的库存清单。</CardDescription>}
-            </Card>
+          <RailSection title="本单金额">
+            {staffMoney === null
+              ? <p className="im-rail-empty">金额依据待核对；确认前不展示推算值。</p>
+              : <div className="im-rail-money">
+                  <div><span>买家合计</span><strong>{staffMoney.buyerTotal}</strong></div>
+                  <div><span>号主合计</span><strong>{staffMoney.ownerTotal}</strong></div>
+                  <div><span>平台贡献</span><strong>{staffMoney.platformContribution}</strong></div>
+                </div>}
+            <p className="im-rail-note">按订单冻结价展示；不代表已结算或已到账。</p>
+          </RailSection>
+
+          <RailSection title={`期初库存 · ${lines.length}`}>
+            {lines.length ? <>
+              <div className="im-rail-inventory">
+                {lines.slice(0, 4).map((line) => <div key={line.itemId} className="im-rail-inv-row">
+                  <span>{line.name ?? line.itemId}</span>
+                  <strong>{line.quantity}{line.unit ? ` ${UNIT_LABELS[line.unit] ?? line.unit}` : ""}</strong>
+                </div>)}
+              </div>
+              <div className="im-rail-section-foot">
+                {lines.length > 4 ? <span>共 {lines.length} 项</span> : null}
+                <Button variant="link" size="sm" data-action="order-open-inventory" ref={inventoryTriggerRef} onClick={() => setInventoryOrderId(info.orderId)}>查看完整清单<ChevronRight aria-hidden="true" /></Button>
+              </div>
+            </> : <p className="im-rail-empty">本单还没有可显示的库存清单。</p>}
           </RailSection>
 
           <RailSection title={`群成员 · ${info.members.length}`}>
-            <Card className="im-order-card">
-              <CardContent className="grid gap-0 p-0">
-                <ItemGroup role="list" className="im-order-members divide-y divide-border">
-                  {info.members.map((member) => {
-                    const name = member.name?.trim() || orderTeamMemberRole(member);
-                    return (
-                      <Item key={member.accountId} size="sm" className="px-4 py-2.5">
-                        <ItemMedia variant="icon" className="im-order-avatar" aria-hidden="true">{initialOf(name)}</ItemMedia>
-                        <ItemContent><ItemTitle className="truncate">{name}</ItemTitle>{member.party !== "STAFF" ? <ItemDescription>用户编号 {member.platformId}</ItemDescription> : null}</ItemContent>
-                        <ItemActions><Badge variant="outline" className="im-order-role" data-role={orderTeamMemberRole(member)}>{orderTeamMemberRole(member)}</Badge></ItemActions>
-                      </Item>
-                    );
-                  })}
-                </ItemGroup>
-              </CardContent>
-            </Card>
+            <ItemGroup role="list" className="im-order-members im-rail-members">
+              {info.members.map((member) => {
+                const name = member.name?.trim() || orderTeamMemberRole(member);
+                return (
+                  <Item key={member.accountId} size="sm" className="im-rail-member">
+                    <ItemContent><ItemTitle className="truncate">{name}</ItemTitle>{member.party !== "STAFF" ? <ItemDescription>用户编号 {member.platformId}</ItemDescription> : null}</ItemContent>
+                    <ItemActions><Badge variant="outline" className="im-order-role" data-role={orderTeamMemberRole(member)}>{orderTeamMemberRole(member)}</Badge></ItemActions>
+                  </Item>
+                );
+              })}
+            </ItemGroup>
           </RailSection>
 
-          <RailSection title="接待跟踪">
+          {esc.state !== "NOT_STARTED" || esc.firstResponseAt || review ? <RailSection title="接待跟踪">
             <Card className="im-order-card">
               <Collapsible>
                 <CollapsibleTrigger className="flex w-full items-center gap-3 px-4 py-3 text-left outline-none focus-visible:bg-muted/50">
@@ -430,7 +434,7 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
                 </CollapsibleContent>
               </Collapsible>
             </Card>
-          </RailSection>
+          </RailSection> : null}
           {inventoryOrderId === info.orderId ? <OrderInventoryDialog info={info} onClose={closeInventory} triggerRef={inventoryTriggerRef} /> : null}
         </div>
       </aside>
