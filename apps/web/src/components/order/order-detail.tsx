@@ -263,7 +263,11 @@ function ContactCard({ order, party, onChanged, quiet }: { order: Order; party: 
   const copy = value.state === "WAITING"
     ? value.waitingReason === "NO_ELIGIBLE_STAFF" ? "当前暂无可用客服，正在等待平台调度。" : "等待客服分配；分配与建群都不等于开租。"
     : value.state === "ASSIGNED" && value.teamReady
-      ? ended ? "本单已结束，订单群只保留历史记录；如需核对请联系客服。" : "订单群已就绪，可在订单群中与客服、对方核对交付事项。"
+      ? ended
+        ? order.cancelReason === "PRESTART_TERMINATED"
+          ? "本单未开租终止；退款处理期间订单群仍可沟通，窗口以群内提示为准。"
+          : "本单已结束，订单群只保留历史记录；如需核对请联系客服。"
+        : "订单群已就绪，可在订单群中与客服、对方核对交付事项。"
     : value.state === "ASSIGNED" ? "客服已分配，订单群准备中。" : "履约状态待确认。";
   return <section className="order-side-card">
     <h2 className="order-section-title">履约与沟通</h2>

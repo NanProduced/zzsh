@@ -690,6 +690,18 @@ test("the six-step projection maps to stage, due, ending and read-only copy", ()
   assert.deepEqual(display.orderFulfillmentStepStates(null), ["unknown", "unknown", "unknown", "unknown", "unknown", "unknown"]);
 });
 
+test("a prestart termination speaks about refund pending instead of a generic cancellation", () => {
+  const now = Date.parse("2026-10-20T00:00:00Z");
+  assert.equal(
+    display.orderFulfillmentSummary(stageProjection({ stage: "CANCELLED", cancelReason: "PRESTART_TERMINATED", refundPending: true }), { now }),
+    "未开租终止 · 退款处理中 · 可沟通",
+  );
+  assert.equal(
+    display.orderFulfillmentSummary(stageProjection({ stage: "CANCELLED", cancelReason: "PRESTART_TERMINATED", refundPending: false, sendUntil: "2026-10-21T00:00:00.000Z" }), { now }),
+    "未开租终止 · 退款已核销 · 可沟通至 2026/10/21 08:00",
+  );
+});
+
 test("the IM projection parser rejects an unknown stage or malformed fact instead of guessing", () => {
   assert.equal(client.parseOrderImProjection(stageProjection({ stage: "OPENING_CONFIRM" })).stage, "OPENING_CONFIRM");
   assert.equal(client.parseOrderImProjection({ stage: "RENTING" }).openingAcks, null);

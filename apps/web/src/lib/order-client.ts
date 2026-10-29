@@ -213,6 +213,9 @@ export type OrderImEndState = "NONE" | "REQUESTED" | "POSTED";
 /** Read-only slice of the order IM projection; the order page has no use for group members or routes. */
 export type OrderImProjection = {
   stage: OrderImStage;
+  cancelReason?: string | null;
+  refundPending?: boolean;
+  refundCompletedAt?: string | null;
   rentalStartedAt: string | null;
   dueAt: string | null;
   openingState: OrderImOpeningState;
@@ -640,8 +643,13 @@ export function parseOrderImProjection(value: unknown): OrderImProjection {
     || !ORDER_IM_END_STATES.includes(endState as OrderImEndState)) throw invalidOrderIm();
   const canSend = root.canSend === undefined ? false : root.canSend;
   if (typeof canSend !== "boolean") throw invalidOrderIm();
+  if (root.cancelReason !== undefined && root.cancelReason !== null && typeof root.cancelReason !== "string") throw invalidOrderIm();
+  const refundPending = root.refundPending === undefined ? false : root.refundPending;
+  if (typeof refundPending !== "boolean") throw invalidOrderIm();
   return {
     stage: root.stage as OrderImStage,
+    ...(typeof root.cancelReason === "string" ? { cancelReason: root.cancelReason } : {}),
+    refundPending,
     rentalStartedAt: orderImTime(root.rentalStartedAt),
     dueAt: orderImTime(root.dueAt),
     openingState: openingState as OrderImOpeningState,
@@ -649,6 +657,7 @@ export function parseOrderImProjection(value: unknown): OrderImProjection {
     endState: endState as OrderImEndState,
     orderEndedAt: orderImTime(root.orderEndedAt),
     sendUntil: orderImTime(root.sendUntil),
+    ...(root.refundCompletedAt !== undefined ? { refundCompletedAt: orderImTime(root.refundCompletedAt) } : {}),
     canSend,
   };
 }

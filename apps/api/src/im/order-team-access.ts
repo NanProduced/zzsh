@@ -7,10 +7,33 @@ import { SecurityApiError } from "../auth/security-core";
 import { decimalToBigInt, formatDecimalExact, formatScaledInteger, parseNonNegativeDecimal } from "../supply/decimal";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId } from "./identity-lifecycle";
 import { OrderImSdkRouteError, type OrderImSdkRoute, type OrderImSdkRouteBindings } from "../config/config";
+import { readPrestartRefundProgress } from "../order/prestart-refund-store";
+import type { PrestartPaymentBasis } from "../order/prestart-termination";
 
 export type OrderTeamActor={realm:"user"|"admin";userId:string;sessionId:string};
 const denied=()=>new SecurityApiError(403,"FORBIDDEN","Order Team access denied");
 const POST_END_SEND_WINDOW_MS=72*60*60*1000;
+
+export type TerminalSendWindow={orderEndedAt:string|null;sendUntil:string|null;refundPending:boolean;refundCompletedAt:string|null;terminalSendAllowed:boolean};
+/** A prestart termination is not an archive until the full refund is written off. */
+export function terminalSendWindow(input:{orderStatus:string;cancelReason:string|null;cancelledAt:string|null;
+  settlementPostedAt:string|null;refundCompletedAt:string|null;now?:number}):TerminalSendWindow{
+  const now=input.now??Date.now();
+  if(input.orderStatus!=="COMPLETED"&&input.orderStatus!=="CANCELLED")return {orderEndedAt:null,sendUntil:null,refundPending:false,refundCompletedAt:null,terminalSendAllowed:true};
+  if(input.orderStatus==="CANCELLED"&&input.cancelReason==="PRESTART_TERMINATED"){
+    const completed=input.refundCompletedAt??null;
+    if(completed===null)return {orderEndedAt:input.cancelledAt,sendUntil:null,refundPending:true,refundCompletedAt:null,terminalSendAllowed:true};
+    const completedMs=new Date(completed).getTime();
+    if(!Number.isFinite(completedMs))return {orderEndedAt:input.cancelledAt,sendUntil:null,refundPending:true,refundCompletedAt:null,terminalSendAllowed:true};
+    const until=completedMs+POST_END_SEND_WINDOW_MS;
+    return {orderEndedAt:input.cancelledAt,sendUntil:new Date(until).toISOString(),refundPending:false,refundCompletedAt:completed,terminalSendAllowed:now<until};
+  }
+  const source=input.orderStatus==="COMPLETED"?input.settlementPostedAt:input.cancelledAt;
+  const sourceMs=source===null?null:new Date(source).getTime();
+  if(sourceMs===null||!Number.isFinite(sourceMs))return {orderEndedAt:null,sendUntil:null,refundPending:false,refundCompletedAt:null,terminalSendAllowed:false};
+  const until=sourceMs+POST_END_SEND_WINDOW_MS;
+  return {orderEndedAt:new Date(sourceMs).toISOString(),sendUntil:new Date(until).toISOString(),refundPending:false,refundCompletedAt:null,terminalSendAllowed:now<until};
+}
 
 /**
  * Frozen order inventory projection for the first opening recording. Reads the
@@ -152,7 +175,7 @@ export function projectOrderFulfillment(f:{orderStatus:string;hasGroup:boolean;p
 export async function readOrderTeamAccess(c:PoolClient,actor:OrderTeamActor,orderId:string,operation:"read"|"send"="read",
   orderImSdkRouteBindings?:OrderImSdkRouteBindings):Promise<Record<string,unknown>>{
   if(actor.realm==="user")await assertUserContextInTransaction(c,actor);else await assertAdminContextInTransaction(c,actor);
-  const g=(await c.query(`SELECT g.*,o.renter_user_id,o.owner_user_id,o.game_id,o.display_no,o.status AS order_status,o.cancelled_at AS order_cancelled_at,o.title,o.account_id,o.quote_snapshot AS quote_snapshot,game.name AS game_name,
+  const g=(await c.query(`SELECT g.*,o.renter_user_id,o.owner_user_id,o.game_id,o.display_no,o.status AS order_status,o.cancel_reason AS order_cancel_reason,o.cancelled_at AS order_cancelled_at,o.title,o.account_id,o.quote_snapshot AS quote_snapshot,game.name AS game_name,
       o.term_seconds::text AS term_seconds,
       latest_opening.id AS opening_id,latest_opening.status AS opening_status,latest_opening.confirmed_at AS opening_confirmed_at,
       EXISTS(SELECT 1 FROM zzsh_order.settlement_intake si WHERE si.order_id=o.id AND si.status='OPEN') AS intake_open,
@@ -183,13 +206,17 @@ export async function readOrderTeamAccess(c:PoolClient,actor:OrderTeamActor,orde
     }
   }
   const terminal=g.order_status==="COMPLETED"||g.order_status==="CANCELLED";
-  const endedSource=g.order_status==="COMPLETED"?g.settlement_posted_at:g.order_status==="CANCELLED"?g.order_cancelled_at:null;
-  const endedMs=endedSource==null?null:new Date(endedSource).getTime();
-  const orderEndedMs=endedMs!==null&&Number.isFinite(endedMs)?endedMs:null;
-  const sendUntilMs=orderEndedMs===null?null:orderEndedMs+POST_END_SEND_WINDOW_MS;
-  const orderEndedAt=orderEndedMs===null?null:new Date(orderEndedMs).toISOString();
-  const sendUntil=sendUntilMs===null?null:new Date(sendUntilMs).toISOString();
-  if(terminal)canSend=canSend&&sendUntilMs!==null&&Date.now()<sendUntilMs;
+  let refundCompletedAt:string|null=null;
+  if(g.order_status==="CANCELLED"&&g.order_cancel_reason==="PRESTART_TERMINATED"){
+    const termination=(await c.query<{id:string;payment_basis:PrestartPaymentBasis}>(`SELECT id,payment_basis FROM zzsh_order.prestart_termination
+      WHERE order_id=$1 AND state='APPROVED' ORDER BY approved_at DESC NULLS LAST,id DESC LIMIT 1`,[orderId])).rows[0];
+    if(termination)refundCompletedAt=(await readPrestartRefundProgress(c,termination.id,termination.payment_basis,false)).completedLocallyAt??null;
+  }
+  const window=terminalSendWindow({orderStatus:g.order_status,cancelReason:g.order_cancel_reason??null,cancelledAt:g.order_cancelled_at??null,
+    settlementPostedAt:g.settlement_posted_at??null,refundCompletedAt});
+  const orderEndedAt=window.orderEndedAt;
+  const sendUntil=window.sendUntil;
+  if(terminal)canSend=canSend&&window.terminalSendAllowed;
   const members=(await c.query(`SELECT mm.party,mm.state,m.platform_subject_id,m.identity_kind,m.realm,m.account_id,m.status,m.identity_marker,
     CASE WHEN m.realm='user' THEN u.name ELSE a.name END AS name,
     CASE WHEN m.realm='user' THEN u.image ELSE a.image END AS avatar
@@ -223,7 +250,7 @@ export async function readOrderTeamAccess(c:PoolClient,actor:OrderTeamActor,orde
     teamState:g.team_state??null,openingStatus:g.opening_status??null,openingConfirmedAt:g.opening_confirmed_at??null,
     openingAcked:openingAcks.renter||openingAcks.owner,termSeconds:g.term_seconds,
     intakeOpen:g.intake_open===true,currentSettlement:g.settlement_current===true,posted:g.settlement_posted_at!=null});
-  const summary={orderId,displayNo:g.display_no,orderStatus:g.order_status,orderEndedAt,sendUntil,...fulfillment,openingAcks,terms,gameName:g.game_name,account:{id:g.account_id,title:g.title},assignmentState:g.provision_state??null,
+  const summary={orderId,displayNo:g.display_no,orderStatus:g.order_status,cancelReason:g.order_cancel_reason??null,orderEndedAt,sendUntil,refundPending:window.refundPending,refundCompletedAt:window.refundCompletedAt,...fulfillment,openingAcks,terms,gameName:g.game_name,account:{id:g.account_id,title:g.title},assignmentState:g.provision_state??null,
     ...(frozenInventory?{frozenInventory}:{}),
     supportEscalation:{firstResponseAt:g.escalation_first_response_at??null,remindDueAt:g.escalation_remind_due_at??null,
       addRound:Number(g.escalation_add_round??0),state:escalationState,needsManualReview:escalationState==="VERIFY_REQUIRED"||escalationState==="EXHAUSTED",

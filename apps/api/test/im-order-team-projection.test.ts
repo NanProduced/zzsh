@@ -6,7 +6,7 @@ import * as adminScope from "../src/auth/admin-scope";
 import * as authSecurity from "../src/auth/auth-security";
 import * as userIdentity from "../src/auth/user-identity";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId } from "../src/im/identity-lifecycle";
-import { projectFrozenInventory, projectOrderTerms, readOrderTeamAccess, type OrderTeamActor } from "../src/im/order-team-access";
+import { projectFrozenInventory, projectOrderTerms, readOrderTeamAccess, terminalSendWindow, type OrderTeamActor } from "../src/im/order-team-access";
 
 test("frozen inventory projection whitelists order snapshot lines and never invents stock", () => {
   const snapshot = {
@@ -463,4 +463,42 @@ test("order team summary reports UNKNOWN terms when the frozen quote is missing 
   assert.equal(terms.lines[0].name, "哈夫币");
   assert.equal(JSON.stringify(terms).includes("0."), false);
   assert.equal(JSON.stringify(terms).includes("\"0\""), false);
+});
+
+test("prestart termination keeps chat open until the refund is fully written off", () => {
+  const now = Date.parse("2026-10-29T00:00:00.000Z");
+  const pending = terminalSendWindow({
+    orderStatus: "CANCELLED", cancelReason: "PRESTART_TERMINATED", cancelledAt: "2026-10-28T00:00:00.000Z",
+    settlementPostedAt: null, refundCompletedAt: null, now,
+  });
+  assert.deepEqual(pending, {
+    orderEndedAt: "2026-10-28T00:00:00.000Z", sendUntil: null, refundPending: true,
+    refundCompletedAt: null, terminalSendAllowed: true,
+  }, "no write-off yet: keep communication open instead of archiving from cancelledAt");
+
+  const recent = terminalSendWindow({
+    orderStatus: "CANCELLED", cancelReason: "PRESTART_TERMINATED", cancelledAt: "2026-10-20T00:00:00.000Z",
+    settlementPostedAt: null, refundCompletedAt: "2026-10-28T23:00:00.000Z", now,
+  });
+  assert.equal(recent.refundPending, false);
+  assert.equal(recent.sendUntil, "2026-10-31T23:00:00.000Z");
+  assert.equal(recent.terminalSendAllowed, true);
+
+  const expired = terminalSendWindow({
+    orderStatus: "CANCELLED", cancelReason: "PRESTART_TERMINATED", cancelledAt: "2026-10-20T00:00:00.000Z",
+    settlementPostedAt: null, refundCompletedAt: "2026-10-25T00:00:00.000Z", now,
+  });
+  assert.equal(expired.terminalSendAllowed, false);
+
+  const normal = terminalSendWindow({
+    orderStatus: "CANCELLED", cancelReason: "USER", cancelledAt: "2026-10-25T00:00:00.000Z",
+    settlementPostedAt: null, refundCompletedAt: null, now,
+  });
+  assert.equal(normal.terminalSendAllowed, false, "a normal cancellation still closes after its own 72h");
+
+  const completed = terminalSendWindow({
+    orderStatus: "COMPLETED", cancelReason: null, cancelledAt: "2026-10-20T00:00:00.000Z",
+    settlementPostedAt: "2026-10-28T23:00:00.000Z", refundCompletedAt: null, now,
+  });
+  assert.equal(completed.sendUntil, "2026-10-31T23:00:00.000Z", "completed orders keep using posted_at");
 });

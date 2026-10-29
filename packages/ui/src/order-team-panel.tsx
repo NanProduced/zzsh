@@ -22,6 +22,7 @@ export type OrderTeamTermsStaff={buyerRentalAmount:string|null;ownerRentalAmount
 export type OrderTeamTerms={viewerParty:OrderTeamTermsViewerParty;basis:"QUOTE"|"UNKNOWN";currency:"CNY";scale:2;version:string|null;
   rentalAmount:string|null;depositAmount:string|null;paidTotal:string|null;lines:OrderTeamTermsLine[];staff?:OrderTeamTermsStaff};
 export type OrderTeamAccess={orderId:string;displayNo:string;orderStatus:string;
+  cancelReason?:string|null;refundPending?:boolean;refundCompletedAt?:string|null;
   stage?:OrderTeamFulfillmentStage;rentalStartedAt?:string|null;dueAt?:string|null;
   openingState?:"NONE"|"DRAFT"|"PARTIAL"|"CONFIRMED";endState?:"NONE"|"REQUESTED"|"POSTED";
   openingAcks?:{renter:boolean;owner:boolean};
@@ -117,7 +118,14 @@ function stageCollapsedText(info:OrderTeamAccess):string{
     return "租用中";
   }
   if(stage==="ENDING")return "结束确认 · 等待双方确认";
-  if(stage==="CANCELLED")return "已取消";
+  if(stage==="CANCELLED"){
+    if(info.cancelReason==="PRESTART_TERMINATED"){
+      if(info.refundPending===true)return "未开租终止 · 退款处理中 · 可沟通";
+      if(info.sendUntil){const until=new Date(info.sendUntil).getTime();return Number.isFinite(until)&&Date.now()<until?`未开租终止 · 退款已核销 · 可沟通至 ${serverTimeLabel(info.sendUntil)}`:"未开租终止 · 退款已核销 · 仅可查看";}
+      return "未开租终止 · 仅可查看";
+    }
+    return "已取消";
+  }
   const until=info.sendUntil?new Date(info.sendUntil).getTime():Number.NaN;
   if(!Number.isFinite(until))return "结算完成";
   return Date.now()<until?`结算完成 · 可沟通至 ${serverTimeLabel(info.sendUntil!)}`:"结算完成 · 已超过 72 小时 · 仅可查看";
@@ -445,7 +453,7 @@ export function OrderTeamPanel({identity,realm,client,connection,active,visible=
   const choose=(id:string|null)=>{accessSequence.current++;setInfo(null);setSelected(id);setError("");};
   const visibleItems=itemsScope.current===listScope?items:[],visibleNext=itemsScope.current===listScope?next:null;
   const orderHeader=info&&!renderConversation?<header className="order-team-head">
-    <div className="order-team-head-row"><h3>{info.name??info.displayNo}</h3><span className="order-team-head-chip">{fulfillmentStageLabel(stageOf(info))}</span><a className="order-team-head-link" href={`/account?view=${party==="owner"?"leased":"rentals"}&orderId=${encodeURIComponent(info.orderId)}`}>订单详情</a></div>
+    <div className="order-team-head-row"><h3>{info.name??info.displayNo}</h3><span className="order-team-head-chip">{stageOf(info)==="CANCELLED"&&info.cancelReason==="PRESTART_TERMINATED"?"未开租终止":fulfillmentStageLabel(stageOf(info))}</span><a className="order-team-head-link" href={`/account?view=${party==="owner"?"leased":"rentals"}&orderId=${encodeURIComponent(info.orderId)}`}>订单详情</a></div>
     <p className="order-team-head-sub">{info.gameName} · {info.account.title}{info.name===info.displayNo?"":` · 订单 ${info.displayNo}`}</p>
     <p className="order-team-head-members">{info.members.map(member=>`${role(member)} ${member.name?.trim()||"未署名"}`).join(" · ")}</p>
   </header>:null;
@@ -882,7 +890,9 @@ function OrderConversation({
     {menuMessage&&menu?<MessageActionMenu key={menu.id} x={menu.x} y={menu.y} items={menuItems} onSelect={selectMenuAction} onClose={()=>setMenu(null)} returnFocus={menu.row}/>:null}
   </>;
   const readOnlyText=info.orderStatus==="COMPLETED"||info.orderStatus==="CANCELLED"
-    ?(info.sendUntil&&Date.now()<new Date(info.sendUntil).getTime()?"本单已结束，仍可在沟通窗口内发送消息":"本单已结束，仅可查看历史")
+    ?(info.cancelReason==="PRESTART_TERMINATED"
+      ?(info.sendUntil&&Date.now()<new Date(info.sendUntil).getTime()?"本单未开租终止，仍可在沟通窗口内发送消息":"本单未开租终止，退款已核销，仅可查看历史")
+      :(info.sendUntil&&Date.now()<new Date(info.sendUntil).getTime()?"本单已结束，仍可在沟通窗口内发送消息":"本单已结束，仅可查看历史"))
     :info.teamState!=="READY"?"订单群尚未就绪，暂不可发送":"当前不可发送";
   return <section className="order-team-chat" aria-label="订单文字和图片沟通">
     {more&&messages.length?<div className="order-team-history"><button type="button" className="order-team-link" disabled={reading} onClick={()=>void history(messages[0])}>{reading?"正在读取…":"更早的消息"}</button></div>:null}
