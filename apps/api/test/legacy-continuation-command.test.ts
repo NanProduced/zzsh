@@ -24,11 +24,11 @@ function arrange(t: import("node:test").TestContext, source = legacySource(), he
   const facts = initialLegacyFacts(source), row = legacyEvidence(facts);
   t.mock.method(evidence, "readLegacyContinuationBinding", async () => legacyBinding);
   t.mock.method(evidence, "authorizeLegacyContinuation", async () => ({ canOperate: true, canReadCommission: true }));
-  t.mock.method(evidence, "readLegacyContinuationUserIds", async () => [legacyBinding.ownerUserId,legacyBinding.renterUserId].sort());
-  t.mock.method(evidence, "lockLegacyContinuationOrder", async () => ({ head, duties }));
+  const readUsers = t.mock.method(evidence, "readLegacyContinuationUserIds", async () => [legacyBinding.ownerUserId,legacyBinding.renterUserId].sort());
+  t.mock.method(evidence, "lockLegacyContinuationOrder", async () => ({ head, duties: structuredClone(duties) }));
   t.mock.method(evidence, "readLegacyContinuationEvidence", async () => row);
-  const probe = clientFor(sql => sql.includes("maturityAt") && sql.includes("SELECT to_char") ? { rows: [{ at: "2026-10-16T02:03:04.123456Z", maturityAt: "2026-10-23T02:03:04.123456Z" }], rowCount: 1 } : sql.startsWith("UPDATE zzsh_order.legacy_continuation_version") ? { rows: [], rowCount: 1 } : empty);
-  return { ...probe, facts, row };
+  const probe = clientFor(sql => sql.includes("maturityAt") && sql.includes("SELECT to_char") ? { rows: [{ at: "2026-10-16T02:03:04.123456Z", maturityAt: "2026-10-23T02:03:04.123456Z" }], rowCount: 1 } : sql.startsWith("UPDATE zzsh_order.legacy_continuation_version") || sql.startsWith("INSERT INTO zzsh_iam.membership_growth_contribution") ? { rows: [], rowCount: 1 } : empty);
+  return { ...probe, facts, row, readUsers };
 }
 function mutation(source: ReturnType<typeof legacySource>, kind: "propose" | "confirm" | "reject" | "hold" | "release" | "confiscate", who: LegacyContinuationActor) {
   const role = who.realm === "admin" ? "admin" : who.userId === legacyBinding.ownerUserId ? "owner" : "renter";
@@ -84,7 +84,7 @@ test("definitive business refusal rolls all action effects back before retaining
 });
 test("beneficiary-set drift under common order lock refuses before writes rather than taking a late third-party user lock",async t=>{
  const p=arrange(t),who=actor("user"),input=mutation(legacySource(),"propose",who);let reads=0;
- t.mock.method(evidence,"readLegacyContinuationUserIds",async()=>++reads===1?[legacyBinding.ownerUserId,legacyBinding.renterUserId].sort():[legacyBinding.ownerUserId,legacyBinding.renterUserId,"third-beneficiary"].sort());
+ p.readUsers.mock.mockImplementation(async()=>++reads===1?[legacyBinding.ownerUserId,legacyBinding.renterUserId].sort():[legacyBinding.ownerUserId,legacyBinding.renterUserId,"third-beneficiary"].sort());
  await assert.rejects(()=>applyLegacyContinuationCommand(p.client,who,legacyBinding.id,input),/CONTINUATION_BENEFICIARIES_CHANGED/);assert(!p.calls.some(q=>/INSERT|UPDATE/.test(q.sql)));
 });
 test("real standard idempotency rechecks current party/session and O permission before success replay, skips only business CAS", async t => {
@@ -116,7 +116,6 @@ function reviewedCommissionFixture(t: import("node:test").TestContext, stage: "8
   const source = legacySource({ orderStatus: stage, quantities: legacyQuantities("10.00"), saleEarnings: "13.00", returnOrderMoney: "80.00", commissions: [commission] });
   const duty: LegacyDutyRow = { id: "fixture_commission", orderId: legacyBinding.id, continuationVersionId: null, kind: "COMMISSION", sourceRecordId: "41", counterpartyUserId: legacyBinding.renterUserId, amountCents: "50", currency: "CNY", status: "PENDING", source: "LEGACY_IMPORT", sourceStatus: "1", level: "1", ratio: "10", maturityAt: null, revision: "1", settledBy: null, settledRefType: null, settledRefId: null, settledRefDigest: null };
   arrange(t, source, null, [duty]);
-  t.mock.method(evidence, "lockLegacyContinuationOrder", async () => ({ head: null, duties: [structuredClone(duty)] }));
   t.mock.method(evidence, "legacyBeneficiaryUserId", async (_client: PoolClient, id: string) => id === "11" ? legacyBinding.renterUserId : null);
   const canonical = canonicalize({ id: "41", order_id: "7", user_id: "11", status: "3", level: "1", ratio: "10", earnings: "0.50" });
   const fact: VoidAudit = { id: "fixture_review", actorType: "admin", actorId: "fixture_reviewer", sessionId: "review_session", requestId: "req_review", action: "order.legacy.duty.source_fact_reviewed", objectType: "rental_order", objectId: legacyBinding.id, outcome: "SUCCESS", details: { sourceRecordId: "41", parentSourceDigest: legacyBinding.sourceDigest, sourceStatus: "3", parentCancelledNotPayable: false, sourceRecord: { canonical, digest: sha256Hex(canonical) }, parentCancellation: null, evidenceRef: "fixture:reviewed-status3" } };
@@ -212,4 +211,35 @@ test("reviewed parent cancellation must carry its exact canonical not-payable de
     const offset = p.calls.length; await assert.rejects(p.confirm, /DUTY_SOURCE_BINDING_MISMATCH/);
     assert(!p.calls.slice(offset).some(q => /^(INSERT|UPDATE)/.test(q.sql))); t.mock.restoreAll();
   }
+});
+
+test("CONFIRM records both exact growth components on the same caller transaction without an owner coverage write", async t => {
+  const source = legacySource({ orderStatus: "8", quantities: legacyQuantities("10.00"), saleEarnings: "13.00", returnOrderMoney: "87.00" });
+  const p = arrange(t, source), who = actor("user", "owner");
+  await applyLegacyContinuationCommand(p.client, who, legacyBinding.id, mutation(source, "confirm", who));
+  const contributions = p.calls.filter(q => q.sql.startsWith("INSERT INTO zzsh_iam.membership_growth_contribution"));
+  assert.equal(contributions.length, 2, "confirmation must persist rental and material facts, including a legitimate zero component");
+  assert.deepEqual(contributions.map(q => [q.values[4], q.values[10]]).sort(), [["MATERIAL_CONSUMPTION", "0"], ["RENTAL_SETTLEMENT", "1300"]]);
+  assert(contributions.every(q => q.values[1] === legacyBinding.renterUserId && q.values[8] === "2026-10-16T02:03:04.123456Z"));
+  assert(!p.calls.some(q => /INSERT INTO zzsh_iam.membership_growth_legacy_coverage|^(BEGIN|COMMIT)/.test(q.sql)));
+});
+
+test("two old orders sharing a renter keep the real ordered party/game prefix before each order lock", async t => {
+  t.mock.method(userAuth, "assertUserContextInTransaction", async () => undefined);
+  const traces: Query[][] = [];
+  for (const legacyId of ["7", "8"]) {
+    const orderId = "legacy_order_" + sha256Hex(JSON.stringify(["legacy_mysql_restore", "la_order", legacyId])).slice(0, 40);
+    const db = clientFor(sql => sql.includes("FROM zzsh_order.legacy_order_read_snapshot WHERE id=$1") ? { rows: [{ ...legacyBinding, id: orderId, legacyId }], rowCount: 1 }
+      : sql.includes("WITH current_facts") ? { rows: [{ id: legacyBinding.renterUserId }, { id: legacyBinding.ownerUserId }], rowCount: 2 }
+      : sql.includes("AS valid") ? { rows: [{ valid: true }], rowCount: 1 } : empty);
+    await authorizeLegacyMutation(db.client, actor("user", "owner"), orderId);
+    await evidence.lockLegacyContinuationOrder(db.client, orderId);
+    const userLock = db.calls.findIndex(q => /ORDER BY id FOR UPDATE/.test(q.sql));
+    const gameLock = db.calls.findIndex(q => /zzsh_supply.game.*FOR SHARE/.test(q.sql));
+    const orderLock = db.calls.findIndex(q => /pg_advisory_xact_lock/.test(q.sql));
+    assert(userLock >= 0 && gameLock > userLock && orderLock > gameLock);
+    assert.deepEqual(db.calls[userLock]!.values[0], [legacyBinding.ownerUserId, legacyBinding.renterUserId].sort());
+    traces.push(db.calls);
+  }
+  assert.deepEqual(traces[0]!.find(q => /ORDER BY id FOR UPDATE/.test(q.sql))!.values, traces[1]!.find(q => /ORDER BY id FOR UPDATE/.test(q.sql))!.values);
 });

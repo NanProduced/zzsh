@@ -31,8 +31,10 @@ export async function decodeImage(bytes: Buffer): Promise<{ info: ImageInfo; pub
     if (!["jpeg", "png", "webp"].includes(metadata.format ?? "") || (metadata.pages ?? 1) !== 1) throw new MediaValidationError("Unsupported image or animation");
     const info: ImageInfo = { mime: ("image/" + metadata.format) as ImageMime, width: metadata.width!, height: metadata.height! };
     assertImageWithinBounds(info, bytes.length);
-    // Full decode and re-encode; Sharp strips metadata by default. Never publish original evidence.
-    const publicBytes = await decoder.toFormat(metadata.format as "jpeg" | "png" | "webp").toBuffer();
+    // Orient only the derivative; original evidence bytes and their hashes stay intact.
+    const output = await decoder.autoOrient().toFormat(metadata.format as "jpeg" | "png" | "webp").toBuffer({ resolveWithObject: true });
+    const publicBytes = output.data;
+    info.width = output.info.width; info.height = output.info.height;
     assertImageWithinBounds(info, publicBytes.length);
     return { info, publicBytes };
   } catch {
@@ -66,7 +68,7 @@ export const STORAGE_KEY_PATTERN = /^[0-9a-f]{64}$/;
 export type MediaStorage = {
   available: boolean;
   kind: "local" | "oss" | "unavailable";
-  write: (bytes: Buffer, contentHash: string) => Promise<{ storageKey: string }>;
+  write: (bytes: Buffer, contentHash: string, mime: ImageMime) => Promise<{ storageKey: string }>;
   read: (storageKey: string) => Promise<Buffer>;
 };
 
@@ -317,9 +319,9 @@ export async function prepareMediaUpload(
   const writtenStorageKeys: string[] = [];
   try {
     writtenStorageKeys.push(contentHash);
-    await storage.write(bytes, contentHash);
+    await storage.write(bytes, contentHash, image.mime);
     writtenStorageKeys.push(publicHash);
-    await storage.write(publicBytes, publicHash);
+    await storage.write(publicBytes, publicHash, image.mime);
   } catch (error) {
     logOrphanedMediaObjects({ intentId, storageKeys: [...new Set(writtenStorageKeys)], phase: "write" });
     throw error;

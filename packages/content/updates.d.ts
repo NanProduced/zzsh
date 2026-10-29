@@ -1,0 +1,10 @@
+export type UpdateSurface = 'publish' | 'rental' | 'orders';
+export type UpdateSettings = { format: 'plain' | 'markdown'; tickerEnabled: boolean; tickerFrom: string | null; tickerUntil: string | null; pinned: boolean; pinnedUntil: string | null; validUntil: string | null; noticeKind: 'general' | 'maintenance' | 'rule-change'; effectiveAt: string | null; impact: string; surfaces: UpdateSurface[]; mediaIds: string[] };
+export const UPDATE_SURFACES: readonly UpdateSurface[];
+export const DEFAULT_UPDATE_SETTINGS: Readonly<UpdateSettings>;
+export function updateSettings(value?: unknown): UpdateSettings;
+export function checkUpdatePublication(type: string, value: unknown): UpdateSettings;
+export function updateVisibility(value: unknown, now?: number): { expired: boolean; ticker: boolean; pinned: boolean; reminder: boolean };
+export function plainTextMarkdown(text: string): string;
+export type PublicUpdate = { id: string; versionId: string; type: 'ANNOUNCEMENT' | 'NEWS'; title: string; summary: string; body?: string; publishedAt: string; gameName: string | null; coverMediaId: string | null; settings: UpdateSettings; expired: boolean; pinned: boolean; mediaUrls: Record<string, string | null> };
+export type UpdatesPage = { items: PublicUpdate[]; page: number; limit: number; total: number; totalPages: number; asOf: string };

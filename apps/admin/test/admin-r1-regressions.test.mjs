@@ -132,7 +132,7 @@ test("ADM-R1-01：父级每次渲染产生新回调并更新 tab 时，内容页
   await view.close();
 });
 
-test("ADM-R1-02：仅 content.read 且无 query 时，首个列表请求直接是游戏资讯（不先请求平台公告）", async (t) => {
+test("ADM-R1-02：仅 content.read 的内容首页直接读取游戏手册，不先读取平台内容", async (t) => {
   const h = await harness(t, { permissions: ["content.read"], path: "/content" });
   const view = await h.mount(h.ContentView, {
     snapshot: snapshot("r1-content-read-only", h.permissions),
@@ -141,15 +141,14 @@ test("ADM-R1-02：仅 content.read 且无 query 时，首个列表请求直接�
     tab: { id: "content", kind: "content", path: "/content", title: "内容管理", closable: true, query: {} },
     onQueryChange: noop,
   });
-  await h.until(() => h.requests.some((url) => url.includes("/content/items")));
-  const itemsRequests = h.requests.filter((url) => url.includes("/content/items"));
+  await h.until(() => h.requests.some((url) => url.includes("/content/resources")));
+  const itemsRequests = h.requests.filter((url) => url.includes("/content/resources"));
   const first = new URLSearchParams(itemsRequests[0].split("?")[1]);
   assert.equal(first.get("scope"), "game", "首个 items 请求为游戏范围");
-  assert.equal(first.get("type"), "NEWS", "首个 items 请求为资讯");
   assert.equal(first.get("gameId"), "game_1", "带对象范围");
   assert.equal(itemsRequests.some((url) => url.includes("type=ANNOUNCEMENT")), false, "不得先请求平台公告");
   assert.equal(itemsRequests.some((url) => url.includes("scope=platform")), false, "不得先请求平台范围");
-  assert.ok(view.element.textContent.includes("资讯"), "只渲染可访问分区");
+  assert.ok(view.element.textContent.includes("规则与手册"), "只渲染可访问分区");
   await view.close();
 });
 

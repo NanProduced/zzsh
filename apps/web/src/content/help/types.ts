@@ -1,5 +1,6 @@
-// 帮助中心内容类型：受控 typed 内容块，不执行 MDX/JSX/任意 HTML。
-// 后续接入后台内容模块时，API 结果映射到同一结构，阅读组件不需要重写。
+import type { ContentBlock, ContentSection } from "@zzsh/content";
+
+// 帮助正文保留历史 blocks；新 Markdown 经共享解析投影目录和搜索文本。
 
 export const helpCategories = [
   { id: "rental", label: "租号与使用", description: "选号、下单、交付与租用期间的操作" },
@@ -35,18 +36,9 @@ export const audienceLabels: Record<HelpAudience, string> = {
   all: "全体用户",
 };
 
-export type HelpBlock =
-  | { type: "paragraph"; text: string }
-  | { type: "list"; ordered?: boolean; items: readonly string[] }
-  | { type: "callout"; tone: "info" | "warning"; text: string }
-  | { type: "table"; caption?: string; columns: readonly string[]; rows: readonly (readonly string[])[] };
+export type HelpBlock = ContentBlock;
 
-export type HelpSection = {
-  /** 稳定锚点 id，文章内唯一，用于页内目录与章节直链 */
-  id: string;
-  title: string;
-  blocks: readonly HelpBlock[];
-};
+export type HelpSection = ContentSection;
 
 export type HelpArticle = {
   /** 稳定内部编号，与内容目录一致，例如 R01 */
@@ -62,11 +54,19 @@ export type HelpArticle = {
   keywords: readonly string[];
   /** 真实内容更新日期，ISO YYYY-MM-DD */
   updatedAt: string;
-  sections: readonly HelpSection[];
+  sections?: readonly HelpSection[];
+  format?: "markdown" | "blocks";
+  schemaVersion?: number;
+  markdown?: string;
+  anchorAliases?: Readonly<Record<string, string>>;
+  toc?: readonly { id: string; title: string; depth: number }[];
+  plainText?: string;
+  version?: { id: string; sequence: number; publishedAt: string | null } | null;
   /** 相关文章 slug，来自真实内容关系 */
   related: readonly string[];
   /** 结尾是否提供“联系平台客服”入口（公共文章无订单上下文） */
   contactCta?: boolean;
+  mediaUrls?: Readonly<Record<string, string | null>>;
 };
 
 export type HelpArticleMeta = Omit<HelpArticle, "sections">;

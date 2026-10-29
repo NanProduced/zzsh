@@ -5,6 +5,7 @@ import type { PersonalRentalQuote, RentalPricePreview, OrderLine } from "@/lib/o
 import type { ResourceLine } from "@/lib/listing-view";
 import { moneyText, personalMembershipLabel, personalBenefitSources } from "@/lib/order-display";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { ManagedNoticeText } from "@/components/content/managed-notice";
 
 export type PriceQuote = PersonalRentalQuote | RentalPricePreview;
 
@@ -392,7 +393,7 @@ export function RentalPriceSummary({
                   <CircleHelp size={15} aria-hidden="true" />
                 </button>
               </TooltipTrigger>
-              <TooltipContent side="bottom">{noteDetail}</TooltipContent>
+              <TooltipContent side="bottom"><ManagedNoticeText contentKey="placement:RENTAL_FEES" /><p>{noteDetail}</p></TooltipContent>
             </Tooltip>
           </div>
           <p className="account-quote-status">{quote ? `个人报价${tier ? ` · ${tier}` : ""}` : pendingLabel ?? "公开参考 · 押金另核"}</p>

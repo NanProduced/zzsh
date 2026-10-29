@@ -6,7 +6,7 @@
 
 - 业务接口使用 `/api/v1/...`，个人确认及新版建单使用显式 `/api/v2/...`；`/api/health` 继续是独立 liveness 探针，不参与业务版本或 readiness 语义。
 - NestJS 业务层只依赖 JSON、HTTP header 和服务端校验，不依赖 Cookie、DOM、Next.js Server Actions 或小程序运行时。
-- 已提供待支付订单、个人确认/v2建单、原子占用，以及隔离受控付款与开租/结算账务；没有面向客户端的付款成功注入接口，真实支付、退款和提现渠道未接入。认证与管理员操作权限已由 Admin 安全/BFF 入口提供，不经过本文件的 probe controller。
+- 已提供待支付订单、个人确认/v2建单、原子占用、支付/退款/提现适配及开租/结算账务；没有面向客户端的付款成功注入接口。正式渠道需显式商户/产品/协议及身份政策装配，源码存在不代表真实资金验收。完整业务状态、接口与新旧资金承接见[支付与资金领域规格](payments-and-funds.md)。认证与管理员操作权限由 Admin 安全/BFF 入口提供，不经过本文件的 probe controller。
 - OpenAPI 与运行时校验在 `apps/api/test/api-contract.test.ts` 的隔离 Nest app 中验证；该 probe controller 不在生产 `AppModule` 注册，不能作为生产测试写路由。
 - probe 的严格请求 schema 使用显式 ApiBody 声明；DTO 本身不会自动禁止所有未知字段。业务 controller 必须声明对应约束并验证其实际生成 schema，不得把测试示例通过当成业务文档自动一致。
 
@@ -256,12 +256,36 @@ npm run typecheck
 - Nest用户BFF仍为`/api/bff/user/supply`，透传查询串（含`q`、既有gameId/item/skin/cursor）和只读新字段，不自行搜索、重算租期或推断媒体审核状态。Next用户BFF新增`/api/supply/*`，仅允许已实现用户接口、筛选用户Cookie，保留幂等键/受限上传Token；JSON输入64KiB、图片10MiB，输出及读取时间有界。媒体URL仅作本地路径适配，金额原样传输；认证代理共用既有Cookie及有界读取工具，认证规则不变。`GET /listings` 的`q`走查询串，路径白名单无需为搜索新增段。
 - 用户调用DTO和错误恢复位于apps/web/src/lib/supply-types.ts、supply-client.ts；分组接入见[供给表单契约](supply-form-contract.md)。这部分是数据接口；用户站公开列表/详情与发布页已进入main基线，游客收藏合并与后续交易页仍按当前实现范围验收。
 
-## 内容后台：公告、资讯与固定槽位轮播（M3 内容分片）
+## 内容管理：手册、固定图片与公告资讯
+
+帮助文章、流程说明和页面固定图片的资源契约见[内容管理](content-management.md)。图片/二维码只更换媒体，页面文案、alt、按钮和链接由用户端代码维护。原公告/资讯与接管前轮播接口保留兼容，不能把旧纯文本无标记重解释成 Markdown。
 
 核心前缀 `/api/v1/content`（公共）与 `/api/v1/admin/content`（管理）；Admin BFF `/api/bff/admin/content/...` 只适配传输。写操作要求 `Idempotency-Key`，业务、审计与幂等记录同事务，审计失败回滚；`revision` 是并发令牌，过期确认返回 409，同 key 重放返回原结果、异体同 key 409。
 
+### 平台动态
+
+- 公共 `GET /updates?type=ANNOUNCEMENT|NEWS&page=1&limit=12` 返回 `{items,page,limit,total,totalPages,asOf}`；缺 type 为全部，page 上限10000，limit 上限20。按发布时间倒序，有效置顶公告在前；最多3条，发布时事务锁校验并发。
+- `GET /updates/{id}` 返回当前已发布正文及同版本的类型、标题、摘要、发布时间、封面、`settings` 与资格过滤后的 `mediaUrls`。旧 `plain` 保持字面与换行，新稿显式 `markdown`；只有同一发布版本的媒体引用可投影。
+- 列表可选 `surface=home|publish|rental|orders`。home 只返回当前曝光窗口内的内容；业务面只返回适用的有效公告，可带 gameId（同时包含平台通用公告）。不支持的 query 返回400。时间失效只退出曝光，不删除历史；撤回后公共详情404。
+- 管理原 `/items` 创建与草稿保存增加 `updateSettings`，与原 revision、幂等及对象权限一并处理：`format`、`tickerEnabled/tickerFrom/tickerUntil`、`pinned/pinnedUntil`、`validUntil`、`noticeKind/effectiveAt/impact/surfaces`。`mediaIds` 由 API 从正文派生。曝光与置顶独立，启用须有截止时间；维护/规则调整须有生效时间、影响范围及相关业务面。首页曝光发布须另有 `content.platform.publish`，游戏 `content.publish` 单独不足；可留草稿交平台运营发布。
+
+### 版本化资源
+
+- `0105_content_management` 为原内容模型增加 `RESOURCE`、唯一 `resource_key` 和版本 `payload`；标识为 `guide:<slug>` 或已登记的 `placement:<code>`。`0106_content_draft_history_shape` 仅允许未发布 RESOURCE 草稿以 `SUPERSEDED` 保留双null发布元数据，不改变旧公告/资讯约束或伪造发布时间。整合 journal 保留主线含0104的既有条目，按顺序追加，不改写已执行迁移 hash。
+- guide/notice 正文为互斥 union：原 `{sections}`（可带 `format:'blocks',schemaVersion:1`），或 `{format:'markdown',schemaVersion:1,markdown,mediaIds,anchorAliases?}`。24篇内置帮助使用 Markdown，保留原地址；已存在的 blocks 历史不改写。RESOURCE 权威正文在 payload，资源接口不将全文复制或截断到旧纯文本 body 列；恢复保留源快照兼容字段，旧列限制不变。API 保存原文并用 AST 覆盖客户端 mediaIds，发布时锁定实际媒体资格重验；原始 HTML/JSX/未支持指令、危险或未知引用可留草稿，但会丢内容或不获准公开时阻止发布，返回位置诊断。
+- 解析入口 `@zzsh/content/markdown` 与 API 专用 `@zzsh/content/api-markdown` CJS→ESM 桥接分开；`@zzsh/ui/content-markdown` 和独立 CSS 供 Admin/Web 共享安全渲染与 Typeset。UIW、文档导航、Next 服务端读取不进入 renderer。旧 blocks 沿旧读取器，不能直接把对象送入 Markdown。
+- 公共 `GET /resources?kind=guide&limit=5&cursor=` 和 `GET /resources/{key}` 返回 `schema:'content-resource.v1'`、key/source/state、payload、当前资格过滤的 media，以及 `version:{id,sequence,publishedAt}|null`。正文、元数据和媒体引用来自同一发布快照；未发布内置内容 version=null，已发布 payload 不随读取改写。新自定义资源在首次发布前不可公开读；撤回不复活默认内容。
+- 管理 `GET /resources?scope=platform&kind=guide&limit=5&cursor=`（game 范围另传 gameId）与详情受内容权限、游戏范围及对象授权。公共/管理资源分页默认及上限均5，6/10返回400，响应 `{items,nextCursor,limit}`，cursor 绑定范围、过滤与 limit；旧 `/items` 分页不变，Web BFF JSON 上限维持2MiB。
+- `POST /resources/{key}/draft` 无现存草稿时创建；新手册可给 payload 及 gameId，内置范围不可改，固定图片资源只能从服务器模板建立。`PUT /resources/{key}/draft` 接 `{versionId,expectedRevision,payload}`，仅用于文档资源，不能改 contact/banner/carousel 的文案。
+- `PUT /resources/{key}/media-draft` 接 `{versionId,expectedRevision,media}`：contact 只准 `{qrMediaId}`，banner 只准 `{mediaId,mobileMediaId}`，carousel 只准 `{slides:[{id,mediaId,mobileMediaId}]}`；媒体 ID 可空，固定槽位集合/顺序不变，额外字段400。HOME_HERO 固定 delta/protection/accounts，旧随机ID不猜映射，原记录保留。保存返回新 ResourceDetail 和内容项 revision，不改代码文案、链接、排序、排期或历史 enabled。
+- `GET /resources/{key}/versions/{id}` 返回同对象原格式 `{version,media}`。`POST /resources/{key}/restore` 接 `{sourceVersionId,expectedRevision}`，事务内保存当前已存草稿为 SUPERSEDED，再从选中历史或当前已存 DRAFT 复制新草稿；保留原正文格式、元数据与媒体，不delete历史。进入 Markdown 编辑前须显式转换并校验结构、文字和旧锚点；HOME_HERO 可显式重建固定模板，但不猜媒体对应关系。
+- `POST /resources/{key}/publish`、`/withdraw` 接 `{versionId,expectedRevision}`；资源 CAS 使用内容项 revision。`GET /operation-result` 使用原幂等 key header 与 `operation/resourceId/fingerprint`，校验原操作者和当前权限。operation 为 `content.resource.draft.create`、`content.resource.draft.save`、`content.resource.media-draft.save`、`content.resource.draft.restore`、`content.resource.publish`、`content.resource.withdraw`。未知结果保留原请求身份，先查回执回读，不以新 key 重发发布。
+- 资源读取 no-store，搜索运行时匹配当前公开帮助内容，不新建索引服务/队列；读取失败不能当空结果。`GET /storage`、`/storage/check` 仅返回服务器适配器配置状态与公开样本只读检查，不接收云凭据。OSS 凭据、桶/前缀与 CDN 在服务器配置，样本读取和本地验证不证明真实上传、生产 CDN、撤权失效、相机扫码或原生端渲染已验收。
+
+### 原公告、资讯与接管前轮播
+
 - 模型在 `zzsh_content` schema（迁移 `0024_m3_content_foundation`）：`content_item`（稳定 ID、`type`=`ANNOUNCEMENT|NEWS`、`game_id` 可空、`sort_order`、条目 `revision`）与 `content_version`（`DRAFT|PUBLISHED|SUPERSEDED|WITHDRAWN`、title/summary/body/cover_media_id、草稿 `revision`、`published_at`）。每条目最多一个草稿与一个线上版本：发布把草稿转为 PUBLISHED、旧线上版本转 SUPERSEDED；撤回把线上版本转 WITHDRAWN。编辑已发布内容必须 `POST /items/{id}/draft` 复制新草稿，不能原地修改线上正文；无任何版本时列表以 `latest` 显示最后版本。正文为 NFC 规范化纯文本（LF 换行，≤20000 字节，拒绝控制字符），不执行 HTML、不提供自由页面或插件能力。发布动作要求随幂等记录持久化（迁移 `0025_m3_content_idempotency_publish_flag`），见下条。
-- 平台公告只允许平台级；资讯可平台级或绑定单个游戏。平台级内容（公告、平台资讯、轮播、平台内容素材）使用 `content.platform.read/edit/publish`；游戏资讯使用 `content.read/edit/publish` 并检查该游戏 `admin_supply_scope`；无权或跨范围统一 404。游戏内容权限不能修改平台公告或全站轮播，平台权限也不能修改游戏级资讯。
+- 平台公告只允许平台级；资讯可平台级或绑定单个游戏。平台级内容（公告、平台资讯、轮播、平台内容素材）使用 `content.platform.read/edit/publish`；游戏资讯使用 `content.read/edit/publish` 并检查该游戏 `admin_supply_scope`。缺操作权限403，未配置游戏范围403 `NO_GAME_SCOPE`，范围外对象404。游戏内容权限不能修改平台公告或全站轮播，平台权限也不能修改游戏级资讯。
 - 轮播权限按影响公开展示的动作区分：创建或编辑未启用草稿只需 `content.platform.edit`；创建即 `enabled=true`、启用、停用、以及修改已启用条目的图片/无障碍文本/标题/说明/跳转/排序/起止时间必须另有 `content.platform.publish`。判断在事务内锁定条目后按实际状态进行（并发启用不能靠旧状态规避）；幂等重放在复核当前授权之外，还必须满足原操作记录的发布要求（`idempotency_record.publish_required`），停用或线上字段修改成功后即使用户随后被撤销发布权限、条目状态已改变，重放也不会降级放行；被拒绝的请求不产生公共变化、成功审计或幂等回执。
 - 管理：`GET /items?scope=platform|game&gameId=&type=&limit=&cursor=`、`GET /items/{id}`（含 draft/published/latest 与版本历史）、`POST /items`、`PUT /items/{id}/draft`（`versionId`+`expectedRevision`+字段；服务端不自行选择草稿，过期或已替换版本返回 409/404，缺 `versionId` 返回 400）、`POST /items/{id}/draft`、`POST /items/{id}/publish`（versionId+expectedRevision）、`POST /items/{id}/withdraw`（versionId+条目 expectedRevision）、`PUT /items/{id}`（排序）；`GET/POST /carousel`、`PUT /carousel/{id}`（槽位仅 `HOME_HERO`，启停、排序、起止时间、跳转与无障碍说明）；`POST /media/upload-intents`（purpose=`CONTENT_MEDIA`，无 gameId）、`PUT /media/uploads/{intentId}`、`POST /media/{id}/review`、`POST /media/{id}/visibility`、`GET /media`、`GET /media-options`、`GET /media/{id}/content`（私有原图，要求 `content.platform.read`）。
 - 公共：`GET /items`（只返回当前 PUBLISHED；排序 `sort_order DESC, published_at DESC, id DESC`；游标保留数据库微秒精度并绑定 type/gameId/limit，过滤不一致 409）、`GET /items/{id}`、`GET /carousel?slot=HOME_HERO`（enabled、服务端 UTC 时间窗内：开始包含、结束不包含、素材已审核公开）、`GET /media/{id}/content`（仅 CONTENT_MEDIA 的 APPROVED+PUBLIC_DISPLAY 公开衍生图）。公共 DTO 不包含 revision、操作人员身份、私有存储键或内部备注；封面素材撤权后 `coverMediaId` 返回 null 而正文保留，轮播素材撤权后条目整体不返回。公共内容响应 `no-store`，内容媒体响应 `public, max-age=0, must-revalidate`。
@@ -295,13 +319,13 @@ ORIGINAL 列表通过 `user_registration_fact` 读取最新成功迁移审计的
 ### 原单查询、管理租赁退款与提现上下文
 
 - 用户 `POST /api/v1/orders/{orderId}/channel-payment-requests/query`（Nest BFF `/api/bff/user/orders/...`，Web `/api/orders/...`）正文为空对象。仅本人原单，按订单定位独立 payreq；`order-payment-request.v1` 回执含 `request:{id,orderId,state}` 与 `query.kind`，不首次派发、换商户号或返回支付参数，沿用查询间隔、预算和租约。此 POST 可在可信 E4 后调用正式付款接纳，产生本地账务、分佣、订单及群效果；普通 GET 仍仅读本地。提交未知返回 `202`、`request.state=UNKNOWN`、`query.kind=UNKNOWN_COMMIT` 并保留实际 payreq ID，按原请求恢复。Web BFF 用同一捕获 Cookie 核对期望主体；客户端核对两种 ID 后再读本地状态，不能据渠道查询文字判定到账。
-- 管理 `GET/POST /api/v1/admin/orders/{orderId}/refunds`（BFF `/api/bff/admin/orders/{orderId}/refunds`）均需现有 `order.settlement.write`、管理员事务复检、游戏范围和 `readOrderTeamAccess` 的 `READY/canRead` 订单对象授权；`finance.read` 或同游戏权限均不单独授权退款。POST 要求 `Idempotency-Key` 与 `{amountCents:string,reason?:string,postingId?:string}`：金额为 CNY 正整数字符串分，只从可信 `JOINPAY/APPLIED` 原款和已到期冻结责任分配，歧义时须指定 postingId。返回 `admin-native-refund.v1` 的意图/原退款号、金额、状态、预算及责任，创建与审计同事务；GET 返回 `admin-native-refunds.v1` 的本地意图、冻结/已分配/剩余责任及最近观察。接口不直接提交渠道，本批未交付管理退款页面。
+- 管理 `GET/POST /api/v1/admin/orders/{orderId}/refunds`（BFF `/api/bff/admin/orders/{orderId}/refunds`）均需现有 `order.settlement.write`、管理员事务复检、游戏范围和 `readOrderTeamAccess` 的 `READY/canRead` 订单对象授权；`finance.read` 或同游戏权限均不单独授权退款。POST 要求 `Idempotency-Key` 与 `{amountCents:string,reason?:string,postingId?:string}`：金额为 CNY 正整数字符串分，只从可信 `JOINPAY/APPLIED` 原款和已到期冻结责任分配，歧义时须指定 postingId。返回 `admin-native-refund.v1` 的意图/原退款号、金额、状态、预算及责任，创建与审计同事务；GET 返回 `admin-native-refunds.v1` 的本地意图、冻结/已分配/剩余责任及最近观察。管理订单页已消费普通退款及独立异常/未开租入口；接口只建本地意图，不直接提交渠道。
 - 关闭新退款或当前 initialProfile 缺失时，既有 store 仍先处理安全的原键重放，新意图继续拒绝。首次创建的 `channel.result=NOT_SUBMITTED` 仅描述创建时；重放为 `UNKNOWN`，当前状态另由 GET 读取，银行到账保持 `UNKNOWN`。COMMIT ACK 未知返回 `503/EVIDENCE_UNAVAILABLE`，保留同键同体恢复，不换键重建。
 - 用户 `GET /api/v1/users/me/channel-withdrawals/options`（Nest BFF `/api/bff/user/channel-withdrawals/options`）的 `withdrawal-request-context.v1` 兼容增加 `identity` 和 `quota`；后者含 `used/maxIntents/remaining/windowStart/windowEnd`，缺证据为 null。`canQuote/reasonCodes` 明示身份、成年、政策及 `WITHDRAWAL_QUOTA_UNKNOWN/EXHAUSTED` 等原因；报价/创建仍重核身份、次数、原目标、政策和余额，不补造证明或为消除 503 开启 PAYOUT。旧 CONTROLLED、SYNTHETIC_PROTOCOL、LOCAL_CONTROLLED、本地接纳、渠道成功与银行到账分别表达；源码接入不等于部署、PG 或真实渠道验收。
 
 
 ### 渠道本地证据读取（内部装配）
 
-- 收款、退款、提现和精确原号证据 helper 仅复用已有 PoolClient；不创建连接、不取渠道钥、不出网、不推进付款/退款/出款。普通资金读取和原账务口径保持；QUERY-only 仍是待实现命令合同。
+- 收款、退款、提现和精确原号证据 helper 仅复用已有 PoolClient；不创建连接、不取渠道钥、不出网、不推进付款/退款/出款。普通资金读取和原账务口径保持；已实现的 Admin QUERY-only 是独立 POST 命令，锁内禁止首次派发，可能推进本站接纳/核销/释放，权限及路径见支付与资金领域规格。
 - 调用方须先完成真实身份、读取权限、对象/game 与商户授权，并显式提供服务端逐对象 readableOrderIds/readableUserIds；对象集合缺省为空，无通配符，不从 URL/body 或 finance.read 推导商户/对象授权。尚无可读商户策略时渠道补充保持未装配，不隐藏原站内凭证。
-- 仅投影本站已登记原件，保留多锚点歧义、原可信观察和最后失败/冲突；受理流水不是终态，合成/受控证据不升格为供应商事实。费用、实收、实退、去向或银行到账未核时保持 null/UNKNOWN。主列表不逐行调用详情 helper；本轮未新增公开/BFF 路径或权限。
+- 仅投影本站已登记原件，保留多锚点歧义、原可信观察和最后失败/冲突；受理流水不是终态，合成/受控证据不升格为供应商事实。费用、实收、实退、去向或银行到账未核时保持 null/UNKNOWN。主列表不逐行调用详情 helper；公开 API/BFF 由既有资金路由统一授权装配，helper 自身不暴露入口。

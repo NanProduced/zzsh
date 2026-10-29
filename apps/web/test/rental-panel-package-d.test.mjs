@@ -1,3 +1,4 @@
+import { contentFixtureDependency } from "./content-fixture.mjs";
 import assert from "node:assert/strict";
 import { createRequire, Module } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -41,7 +42,8 @@ function loadComponent(relativePath, session, extra) {
     if (name.endsWith(".css")) return {};
     return requireFromTree(name);
   };
-  module._compile(compile(relativePath), file);
+  module.require = ((original) => (name) => contentFixtureDependency(name) ?? original(name))(module.require.bind(module));
+ module._compile(compile(relativePath), file);
   return module.exports;
 }
 

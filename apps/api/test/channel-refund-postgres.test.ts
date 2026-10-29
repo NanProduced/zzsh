@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import type { Pool, PoolClient } from "pg";
 import type { AppConfig } from "../src/config/config";
-import { withTransaction } from "../src/auth/security-core";
+import { withTransaction, SecurityApiError } from "../src/auth/security-core";
 import { fingerprintRequest } from "../src/supply/supply-util";
 import { createSyntheticChannelRequestCapability } from "../src/order/channel-payment-store";
 import { claimRefundIntent, createNativeRefundIntent, readRecoverableRefundIntent, recordRefundTransportFailure, type RefundIntent } from "../src/order/channel-refund-store";
@@ -188,4 +188,68 @@ export async function resumeChannelRefundPostgres(pool:Pool,input:Input & {origi
  const create=(c:PoolClient,amountCents:string,label:string)=>createNativeRefundIntent(c,{postingId:input.postingId,amountCents,idempotencyKey:key(label),requestId,capability});
  try{return {...await finishControlledRefundPg(pool,input,capability,basis,first,tag,requestId,checks,ids,allocated,create),resumedFrom:input.originalAttempt,prefixNotReplayed:true};}
  catch(error){throw Object.assign(error instanceof Error?error:Error(String(error)),{refundPgPartial:{checks,committedIntentIds:ids,originalIntentId:first.intentId,retainOriginalRecords:true,retryAuthorized:false}});}
+}
+
+
+/** A lock wait is evidence only while the same lease is live and our blocker owns the wait. */
+export function assertControlledRefundWaitEvidence(row: { wait_event_type: string | null; blocked_by_expected: boolean; lease_matches: boolean; lease_valid: boolean } | undefined): boolean {
+  if (row?.wait_event_type !== "Lock" || row.blocked_by_expected !== true) return false;
+  assert.equal(row.lease_matches, true, "WAIT_LEASE_IDENTITY_CHANGED");
+  assert.equal(row.lease_valid, true, "WAIT_DID_NOT_BEGIN_WITH_LIVE_LEASE");
+  return true;
+}
+
+/** 只补原意图的超额、真实行锁跨期与审计回滚；不新分配、不重建posting、不构造正式渠道事实。 */
+export async function runControlledRefundGapPostgres(runtime:Pool,input:Input&{intentId:string;guardClient:PoolClient;expectedRefundOrderNo:string}){
+ if(!ID.test(input.intentId)||!ID.test(input.postingId)||!ID.test(input.expectedRefundOrderNo)||!ID.test(input.attempt))throw Error('REFUND_GAP_PG_INPUT_INVALID');
+ const control=input.guardClient,config=input.config,id=input.intentId,checks:string[]=[],check=(name:string)=>checks.push(name),
+  capability=createSyntheticChannelRequestCapability({config,resourceSet:input.resourceSet,evidenceLevel:'CONTROLLED_TEST'}),
+  tx=<T>(fn:(client:PoolClient)=>Promise<T>)=>withTransaction(runtime,fn);
+ const connection=(control as PoolClient&{connectionParameters?:{host:string;port:number;database:string}}).connectionParameters;
+ if(!connection||connection.host!==config.database.host||connection.port!==config.database.port||connection.database!==config.database.name)throw Error('REFUND_GAP_GUARD_RESOURCE_DIFF');
+ const guard=(await control.query(`SELECT current_database() AS db,current_user AS actor,pg_get_userbyid(relowner) AS owner FROM pg_class WHERE oid=to_regclass('zzsh_iam.audit_event')`)).rows[0];
+ if(guard?.db!==config.database.name||guard.actor!==guard.owner)throw Error('REFUND_GAP_GUARD_OWNER_REQUIRED');
+ const ownerTx=async(fn:()=>Promise<unknown>)=>{await control.query('BEGIN');try{await fn();await control.query('COMMIT');}catch(e){await control.query('ROLLBACK');throw e;}};
+ const read=async()=> (await runtime.query(`SELECT id,posting_id,payment_source,refund_order_no,state,amount_cents::text,lease_version::text,revision::text,lease_owner,lease_until FROM zzsh_order.channel_refund_intent WHERE id=$1`,[id])).rows[0];
+ const original=await read();assert(original&&original.payment_source==='CONTROLLED'&&original.state==='UNKNOWN');assert.equal(original.posting_id,input.postingId);assert.equal(original.refund_order_no,input.expectedRefundOrderNo);
+ const money=async()=>JSON.stringify((await runtime.query(`SELECT
+ (SELECT md5(COALESCE(string_agg(to_jsonb(e)::text,chr(10) ORDER BY e.id),'')) FROM zzsh_order.finance_event e) AS events,
+ (SELECT md5(COALESCE(string_agg(to_jsonb(l)::text,chr(10) ORDER BY l.id),'')) FROM zzsh_order.settlement_ledger_entry l) AS ledger,
+ (SELECT md5(COALESCE(string_agg(user_id||':'||ledger_revision::text,chr(10) ORDER BY user_id),'')) FROM zzsh_order.wallet_revision) AS revisions`)).rows[0]);
+ const budget=async()=> (await runtime.query(`SELECT sum(i.amount_cents)::text AS allocated,p.renter_refund_cents::text AS ceiling FROM zzsh_order.channel_refund_intent i JOIN zzsh_order.settlement_posting p ON p.id=i.posting_id WHERE i.posting_id=$1 GROUP BY p.renter_refund_cents`,[original.posting_id])).rows[0];
+ const fundsBefore=await money(),budgetBefore=await budget();assert.equal(budgetBefore.allocated,budgetBefore.ceiling);
+ await assert.rejects(tx(c=>createNativeRefundIntent(c,{postingId:original.posting_id,amountCents:'1',idempotencyKey:'verifydoc2_budget_rejection',requestId:'verifydoc2_budget_rejection',capability})),e=>e instanceof SecurityApiError&&e.status===409&&e.message==='Refund allocation exceeds original payment or frozen responsibility');
+ assert.deepEqual(await budget(),budgetBefore);check('CURRENT_ORIGINAL_FULL_BUDGET_REJECTS_EXTRA_ONE_CENT');
+ const lease=await tx(c=>claimRefundIntent(c,{intentId:id,owner:'verifydoc2_refund_owner',ttlSeconds:1,requestId:'verifydoc2_lease',capability}));assert(lease);assert.equal(lease.operation,'QUERY');
+ const afterClaim=await read(),blocker=await runtime.connect();let pending:Promise<{value?:Awaited<ReturnType<typeof recordRefundTransportFailure>>;error?:unknown}>|undefined;
+ try{
+  const blockerPid = (await blocker.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+  await blocker.query('BEGIN');await blocker.query('SELECT id FROM zzsh_order.channel_refund_intent WHERE id=$1 FOR UPDATE',[id]);
+  let start!:()=>void;const started=new Promise<void>(r=>{start=r;});let writerPid:number|undefined;
+  pending=tx(async c=>{writerPid=(await c.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;start();return recordRefundTransportFailure(c,{intentId:id,owner:lease.owner,version:lease.version,reason:'TIMEOUT',requestId:'verifydoc2_wait',capability});}).then(value=>({value}),error=>({error}));
+  await Promise.race([started,pending.then(r=>{if(r.error)throw r.error;})]);let waiting=false;
+  for (let n=0;n<20;n++) {
+    await blocker.query('SELECT pg_stat_clear_snapshot()');
+    const observation = (await blocker.query(
+      `SELECT a.wait_event_type, $2::int=ANY(pg_blocking_pids(a.pid)) AS blocked_by_expected,
+        i.lease_owner=$4 AND i.lease_version=$5::bigint AS lease_matches,
+        i.lease_until>clock_timestamp() AS lease_valid
+       FROM pg_stat_activity a CROSS JOIN zzsh_order.channel_refund_intent i WHERE a.pid=$1 AND i.id=$3`,
+      [writerPid,blockerPid,id,lease.owner,lease.version])).rows[0];
+    waiting=assertControlledRefundWaitEvidence(observation);if(waiting)break;
+    await control.query('SELECT pg_sleep(0.02)');
+  }
+  assert(waiting,'ACTUAL_ROW_WAIT_NOT_OBSERVED');await control.query('SELECT pg_sleep(1.2)');
+  assert.equal((await blocker.query('SELECT lease_until<=clock_timestamp() AS expired FROM zzsh_order.channel_refund_intent WHERE id=$1',[id])).rows[0].expired,true);
+  await blocker.query('COMMIT');const result=await pending;if(result.error)throw result.error;assert(result.value);assert.equal(result.value.event,'STALE');
+ }catch(e){await blocker.query('ROLLBACK');throw e;}finally{blocker.release();if(pending)await pending;}
+ const afterWait=await read();for(const k of ['state','lease_version','revision','lease_owner'])assert.equal(afterWait[k],afterClaim[k]);assert.deepEqual(await budget(),budgetBefore);check('ACTUAL_PG_ROW_WAIT_CROSSES_LEASE_EXPIRY_ONLY_STALE');
+ const prefix='channel_refund_pg_audit_fault',ddl=`CREATE FUNCTION zzsh_iam.${prefix}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action='order.refund.transport.observed' AND NEW.object_id='${id}' THEN RAISE EXCEPTION 'SYNTHETIC_VERIFYDOC2_AUDIT_FAULT' USING ERRCODE='P0001';END IF;RETURN NEW;END $$;CREATE TRIGGER ${prefix} BEFORE INSERT ON zzsh_iam.audit_event FOR EACH ROW EXECUTE FUNCTION zzsh_iam.${prefix}()`;
+ assert.equal((await control.query('SELECT to_regprocedure($1) IS NULL AS absent',['zzsh_iam.'+prefix+'()'])).rows[0].absent,true);
+ await ownerTx(()=>control.query(ddl));let failure:unknown;
+ try{await tx(c=>recordRefundTransportFailure(c,{intentId:id,owner:lease.owner,version:lease.version,reason:'TIMEOUT',requestId:'verifydoc2_audit_rollback',capability}));}catch(e){failure=e;}
+ finally{await ownerTx(()=>control.query(`DROP TRIGGER ${prefix} ON zzsh_iam.audit_event;DROP FUNCTION zzsh_iam.${prefix}()`));}
+ assert.equal((failure as {code?:string})?.code,'P0001');assert.equal((await runtime.query(`SELECT count(*)::int AS n FROM zzsh_order.channel_refund_observation WHERE intent_id=$1 AND request_id='verifydoc2_audit_rollback'`,[id])).rows[0].n,0);
+ assert.deepEqual(await budget(),budgetBefore);assert.equal(await money(),fundsBefore);check('REAL_AUDIT_INSERT_FAILURE_ROLLS_BACK_OBSERVATION_AND_PRESERVES_FUNDS');
+ return{checks,evidence:'CONTROLLED_DATABASE_CONTRACT',intentId:id,originalRefundOrderNo:original.refund_order_no,newFormalRefunds:0,providerCalls:0,notRun:['formal JOINPAY terminal','PAYOUT/real bank result','real COMMIT UNKNOWN is inherited 07/09 only, not replayed']};
 }

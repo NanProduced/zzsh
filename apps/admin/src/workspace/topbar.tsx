@@ -25,6 +25,7 @@ export function WorkspaceTopbar({
   onLock,
   canLock,
   refreshing,
+  refreshDisabled = false,
   pages,
   onNavigate,
   tabs,
@@ -44,6 +45,7 @@ export function WorkspaceTopbar({
   onLock: () => void;
   canLock: boolean;
   refreshing: boolean;
+  refreshDisabled?: boolean;
   pages: SearchableWorkspacePage[];
   onNavigate: (path: string) => boolean | void;
   tabs?: WorkspaceTab[];
@@ -83,7 +85,7 @@ export function WorkspaceTopbar({
             已临时应用，无法保存在此浏览器
           </span>
         )}
-        <Button variant="ghost" size="icon-sm" aria-label="刷新当前页" onClick={onRefresh} disabled={refreshing}>
+        <Button variant="ghost" size="icon-sm" aria-label="刷新当前页" onClick={onRefresh} disabled={refreshing || refreshDisabled}>
           <RefreshCwIcon className={refreshing ? "size-4 animate-spin" : "size-4"} />
         </Button>
         {onSelectThemeMode ? (

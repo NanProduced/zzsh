@@ -23,6 +23,7 @@ export async function createOfflineAdminSource(options){
       if(name.endsWith(".css"))return {};
       const source=resolveSource(name,file);
       if(source&&/\.(?:tsx?|jsx?)$/.test(source))return load(source);
+      if(name.startsWith("@zzsh/")){const shared=native.resolve(name);if(/\.(?:tsx?|jsx?)$/.test(shared))return load(shared);}
       return native(name);
     };
     const source=fs.readFileSync(file,"utf8");

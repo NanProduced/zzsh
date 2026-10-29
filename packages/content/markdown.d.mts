@@ -1,0 +1,10 @@
+import type { ContentSection } from './index';
+export type MarkdownIssue = { code: string; severity: 'blocking' | 'warning'; message: string; hint: string; line: number; column: number };
+export type MarkdownOptions = { media?: Record<string, { available: boolean; reason?: string }>; compact?: boolean };
+export type MarkdownInspection = { issues: MarkdownIssue[]; blocking: number; warnings: number; toc: {id: string; title: string; depth: number}[]; mediaIds: string[]; plainText: string };
+export function inspectMarkdown(source: string, options?: MarkdownOptions): Promise<MarkdownInspection>;
+export function createHeadingIds(): (text: string) => string;
+export function remarkContentHeadings(): (tree: any) => void;
+export function markdownMediaId(value: unknown): string | null;
+export function safeMarkdownLink(value: unknown): string | null;
+export function convertLegacyDocument(document: {sections: readonly ContentSection[]}): Promise<{markdown: string; anchorAliases: Record<string,string>; issues: string[]; lossless: boolean}>;

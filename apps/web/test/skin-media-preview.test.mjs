@@ -1,3 +1,4 @@
+import { contentFixtureDependency } from "./content-fixture.mjs";
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -57,7 +58,8 @@ test('real skin preview restores its clicked trigger after Escape and close, alo
     };
     let source = fs.readFileSync(absolute, 'utf8');
     if (file.endsWith('listing-detail.tsx')) source = source.replace('function ReadyDetail(', 'export function ReadyDetail(').replace('function DetailGallery(', 'export function DetailGallery(');
-    m._compile(ts.transpileModule(source, { compilerOptions: {
+    m.require = ((original) => (name) => contentFixtureDependency(name) ?? original(name))(m.require.bind(m));
+ m._compile(ts.transpileModule(source, { compilerOptions: {
       module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX,
       target: ts.ScriptTarget.ES2022, esModuleInterop: true,
     } }).outputText, absolute);
@@ -190,7 +192,8 @@ test('picker metadata renders quality as a tag and hides unconfirmed quality', (
   m.filename = absolute;
   m.paths = Module._nodeModulePaths(tree);
   m.require = (name) => (name.endsWith('.css') ? {} : rq(name));
-  m._compile(ts.transpileModule(fs.readFileSync(absolute, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, m.filename);
+  m.require = ((original) => (name) => contentFixtureDependency(name) ?? original(name))(m.require.bind(m));
+ m._compile(ts.transpileModule(fs.readFileSync(absolute, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, m.filename);
   const { renderToStaticMarkup } = rq('react-dom/server');
   const render = (skin, props = {}) => renderToStaticMarkup(React.createElement(m.exports.SkinMetadata, { skin, ...props }));
   const known = render({ name: 'M4A1-棱镜攻势', rarityName: '传说', rarityBasis: 'PLATFORM_REFERENCE', isCollectible: true }, { qualityTag: true });

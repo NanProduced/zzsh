@@ -4,7 +4,7 @@ import {sha256Hex} from "../supply/supply-util";
 import {legacyOwnerUserId} from "../supply/legacy-user-migration";
 import {legacyEpochTimestamp} from "./legacy-order-read";
 import {planLegacyContinuation,type LegacyCommand} from "./legacy-continuation-calc";
-import {deriveLegacyFacts,legacyPlanYuanToCents,legacyTimeMicros,readSealedLegacyFacts,type LegacyContinuationActor,type LegacyEvidenceRow,type LegacyOrderBinding} from "./legacy-continuation-model";
+import {deriveLegacyFacts,legacyDecimalEquals,legacyPlanYuanToCents,legacyTimeMicros,readSealedLegacyFacts,type LegacyContinuationActor,type LegacyEvidenceRow,type LegacyOrderBinding} from "./legacy-continuation-model";
 
 type Proof={canonical:string;digest:string};
 type Confirm={id:string;revision:string;createdAt:string;inputEvidenceId:string;resultEvidenceId:string;planFingerprint:string;actor:LegacyContinuationActor};
@@ -73,6 +73,11 @@ export function projectLegacyGrowthConsumption(input:LegacyGrowthConsumptionInpu
         || result.evidence.source.legacyOrderId!==b.legacyId || result.evidence.source.renterId!==b.legacyRenterId || result.evidence.source.orderStatus!=="4" || canonicalize(deriveLegacyFacts(before,plan,cmd,o.input.id,c.id))!==canonicalize(result))return unknown("CONFIRMED_RESULT_UNPROVEN");
       paid=BigInt(legacyPlanYuanToCents(result.evidence.source.payMoney!));returned=BigInt(legacyPlanYuanToCents(result.evidence.source.returnOrderMoney!));
       if(result.amounts.expendOrder!=null)items=BigInt(legacyPlanYuanToCents(result.amounts.expendOrder));
+      // Imported pending confirmations have no proposed material subtotal; explicit all-zero usage proves zero without a price fallback.
+      else if(["barrett","bullet","awm","armor","helmet","coffee","card"].every(key=>{
+        const quantity=result.evidence.source.quantities[key as keyof typeof result.evidence.source.quantities];
+        return typeof quantity==="string" && /^(0|[1-9]\d{0,9})(?:\.\d{1,2})?$/.test(quantity) && legacyDecimalEquals(quantity,"0");
+      }))items=0n;
       effectiveAt=c.createdAt;version=c.id;revision=Number(c.revision);proof=o.components;base.evidence.basisDigest=o.result.factsDigest;base.evidence.basisRef=o.result.id;
     }else{
       const o=input.origin,row=parsedProof(o.sourceRecord);

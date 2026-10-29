@@ -52,13 +52,13 @@ test("opening cards are materialized from a draft opening, not only after both a
   assert.match(source, /opening_status IN \('DRAFT', 'CONFIRMED'\)/);
 });
 
-test("0110 records one card per stage with a narrow runtime update grant", () => {  const sql = readFileSync(resolve("migrations/business/0110_im_order_stage_card.sql"), "utf8");
+test("0110 records one card per stage with a narrow runtime update grant", () => {  const sql = readFileSync(resolve("migrations/business/0114_im_order_stage_card.sql"), "utf8");
   assert.match(sql, /UNIQUE \("order_id", "app_id", "kind"\)/);
   assert.match(sql, /UNIQUE \("card_id"\)/);
   assert.match(sql, /"kind" IN \('ORDER_OPENING', 'ORDER_ENDING', 'ORDER_SETTLED', 'ORDER_PRICE_CHANGE'\)/);
   assert.match(sql, /"state" IN \('PENDING', 'SENDING', 'SENT', 'SKIPPED'\)/);
   const journal = JSON.parse(readFileSync(resolve("migrations/business/meta/_journal.json"), "utf8"));
-  assert.ok(journal.entries.some((entry: { idx: number; tag: string }) => entry.idx === 110 && entry.tag === "0110_im_order_stage_card"));
+  assert.ok(journal.entries.some((entry: { idx: number; tag: string }) => entry.idx === 114 && entry.tag === "0114_im_order_stage_card"));
   const acl = readFileSync(resolve("src/database/business-migrations.ts"), "utf8");
   assert.match(acl, /REVOKE UPDATE ON TABLE zzsh_order\.im_order_stage_card FROM \$\{runtimeUser\}/);
   assert.match(acl, /GRANT UPDATE \(state,attempt_count,next_attempt_at,lease_until,lease_token_hash,sent_at,failure_class,updated_at\)\s+ON TABLE zzsh_order\.im_order_stage_card/);

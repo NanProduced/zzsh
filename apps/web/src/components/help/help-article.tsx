@@ -1,38 +1,14 @@
 import Link from "next/link";
-import { ChevronRight, Hash, Headphones } from "lucide-react";
+import { ChevronRight, Headphones } from "lucide-react";
+import { ContentSections } from "@zzsh/ui/content-document";
+import { MarkdownDocument } from "@zzsh/ui/content-markdown";
+import "@zzsh/ui/content-markdown.css";
 import { resolveRelated } from "@/content/help";
-import { audienceLabels, helpCategoryLabel, type HelpArticle, type HelpBlock } from "@/content/help/types";
-import { HelpCalloutIcon, HelpCopyLink, HelpToc } from "./help-article-extras";
-import { isLongArticle } from "./nav-data";
+import { audienceLabels, type HelpArticle } from "@/content/help/types";
+import { HelpCopyLink, HelpLegacyAnchors, HelpToc } from "./help-article-extras";
+import { articleToc, isLongArticle } from "./nav-data";
 import { SupportContactButton } from "@/components/support/support-contact-button";
 import "./help.css";
-
-function HelpBlockView({ block }: { block: HelpBlock }) {
-  switch (block.type) {
-    case "paragraph":
-      return <p>{block.text}</p>;
-    case "list":
-      return block.ordered
-        ? <ol>{block.items.map((item, index) => <li key={index}>{item}</li>)}</ol>
-        : <ul>{block.items.map((item, index) => <li key={index}>{item}</li>)}</ul>;
-    case "callout":
-      return <div className={`help-callout${block.tone === "warning" ? " help-callout--warning" : ""}`} role="note"><HelpCalloutIcon tone={block.tone} /><span>{block.text}</span></div>;
-    case "table":
-      return (
-        <div className="help-table-wrap">
-          <table className="help-table">
-            {block.caption ? <caption>{block.caption}</caption> : null}
-            <thead><tr>{block.columns.map((column) => <th key={column} scope="col">{column}</th>)}</tr></thead>
-            <tbody>
-              {block.rows.map((row, index) => (
-                <tr key={index}>{row.map((cell, cellIndex) => <td key={cellIndex}>{cell}</td>)}</tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      );
-  }
-}
 
 function audienceText(article: HelpArticle): string {
   if (article.audience.includes("all")) return audienceLabels.all;
@@ -62,38 +38,39 @@ export function HelpArticleMeta({ article }: { article: HelpArticle }) {
 
 export function HelpArticleInlineToc({ article }: { article: HelpArticle }) {
   if (!isLongArticle(article)) return null;
-  return <HelpToc variant="inline" sections={article.sections.map(({ id, title }) => ({ id, title }))} />;
+  return <HelpToc variant="inline" sections={articleToc(article)} />;
 }
 
 export function HelpArticleAsideToc({ article }: { article: HelpArticle }) {
   if (!isLongArticle(article)) return null;
-  return <HelpToc variant="aside" sections={article.sections.map(({ id, title }) => ({ id, title }))} />;
+  return <HelpToc variant="aside" sections={articleToc(article)} />;
 }
 
-export function HelpArticleBody({ article }: { article: HelpArticle }) {
-  const related = resolveRelated(article);
+export function HelpArticleBody({ article, articles }: { article: HelpArticle; articles?: readonly HelpArticle[] }) {
+  const related = resolveRelated(article, articles);
   const isLong = isLongArticle(article);
   return (
-    <article className="help-article">
+    <article className={`help-article${isLong ? "" : " help-article--short"}`} data-content-version={article.version?.id}>
       <h1 className="help-article-title">{article.title}</h1>
       <HelpArticleMeta article={article} />
       {article.summary ? <p className="help-article-summary">{article.summary}</p> : null}
       {isLong ? <HelpArticleInlineToc article={article} /> : null}
-      {article.sections.map((section) => (
-        <section key={section.id} id={section.id} className="help-article-section" aria-labelledby={`${section.id}-title`}>
-          <h2 id={`${section.id}-title`}>
-            {section.title}
-            <a className="help-section-anchor" href={`#${section.id}`} aria-label={`章节链接：${section.title}`}><Hash size={15} aria-hidden="true" /></a>
-          </h2>
-          {section.blocks.map((block, index) => <HelpBlockView key={index} block={block} />)}
-        </section>
-      ))}
+      {article.format === "markdown" && typeof article.markdown === "string" ? <>
+        <HelpLegacyAnchors aliases={article.anchorAliases ?? {}} />
+        <MarkdownDocument markdown={article.markdown} mediaUrls={article.mediaUrls} />
+      </> : <ContentSections sections={article.sections ?? []} mediaUrls={article.mediaUrls} anchors />}
       {article.contactCta ? (
         <div className="help-article-footer">
-          <SupportContactButton className="help-article-contact-btn">
-            <Headphones size={16} aria-hidden="true" />
-            <span>联系平台客服</span>
-          </SupportContactButton>
+          <div className="help-article-support-box">
+            <div className="help-article-support-info">
+              <h3 className="help-article-support-title">还有疑问？联系平台客服</h3>
+              <p className="help-article-support-desc">真人客服将在服务时间内协助核实订单与账号情况。</p>
+            </div>
+            <SupportContactButton className="help-article-contact-btn">
+              <Headphones size={16} aria-hidden="true" />
+              <span>联系平台客服</span>
+            </SupportContactButton>
+          </div>
         </div>
       ) : null}
       {related.length > 0 ? (

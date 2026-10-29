@@ -1,5 +1,7 @@
 # 旧号正式交易与旧单续办接口
 
+期初余额、历史观察、渠道原号与退款/佣金责任的承接边界见[支付与资金领域规格](payments-and-funds.md#7-新旧资金承接矩阵)；本页维护旧单命令与责任续办。
+
 旧展示记录继续保留原金额和来源。旧号进入正式交易，必须完成逐行来源核定、合法目录和单位映射、真实媒体、当前 sealed 规则报价及接受、发布物化；个人确认与新建单继续走现有 v2 合同。历史报价不成为新单价格。
 
 供给承接复用 `takeoverLegacyTrade` → `resolveLegacyObservationToDraft` → `saveListingDraft` → `quoteListing` → `reviewListing`。共同 `buildLegacyTradeDeclaration` 使用原 `df_billable_top_insure_card`/DAY 身份承接旧账号保险天数，不换算、不要求卡片张数证明。完整 payload、版本 attributes、库存/媒体行和内容 hash 必须相等。普通承接授权不能代替号主包赔条款接受；选择包赔的草稿等待号主通过原接受流程确认，再按同一版本完成发布。旧订单中保险数量依其原有字段语义核定，不直接当新期初库存。迁移媒体必须真实 READY/PUBLIC_DISPLAY。
@@ -22,9 +24,9 @@ Web BFF沿 `/api/orders/legacy/…`，管理 BFF沿 `/api/bff/admin/orders/legac
 
 普通命令体为 `expectedRevision`（首条可null）、`inputEvidenceId`、`planFingerprint`；propose另带完整八项 quantities。每次输入为当前 head.result，结果继承全部有效事实后合并本次delta。命令/证据/责任/CAS/审计同事务。解除暂扣不清 detain，不增加扣留部分退款；87−5仍为82。完成、财账终定和渠道到账独立，渠道未知保持 UNKNOWN。
 
-责任经济键为 `(order_id,kind,source_record_id)`。162在途佣金先PENDING、成熟为空；confirm按原逐条佣金证据重算终金额，时点为同一次服务端confirm时间+7天。208已完成父单佣金走独立不可变admission，保留原行canonical/digest、稳定受益映射、终金额、cutoff、原时间单位和UTC微秒；COMPLETED_AT加旧7天，MATURES_AT直接使用，双证据须一致，不要求旧账号分母或新head。
+责任经济键为 `(order_id,kind,source_record_id)`。在途佣金先PENDING、成熟为空；confirm按原逐条佣金证据重算终金额，时点为同一次服务端confirm时间+7天。已完成父单佣金走独立不可变admission，保留原行canonical/digest、稳定受益映射、终金额、cutoff、原时间单位和UTC微秒；COMPLETED_AT加旧7天，MATURES_AT直接使用，双证据须一致，不要求旧账号分母或新head。
 
-历史18笔完成未退与1笔暂扣均保留经核净额的PENDING退款责任；暂扣由HELD阻断执行，解除后消费同一责任，保留detain且不追加退款。6笔旧侧没收保留LEGACY_RECORDS终态及空新财账ref，不再次支付；61笔退款记录仅作防重复依据，不等于到账。完整来源缺失逐行隔离，不能以0代替未知。
+历史完成未退与暂扣均保留经核净额的PENDING退款责任；暂扣由HELD阻断执行，解除后消费同一责任，保留detain且不追加退款。旧侧已没收保留LEGACY_RECORDS终态及空新财账ref，不再次支付；既有退款记录仅作防重复依据，不等于到账。完整来源缺失逐行隔离，不能以0代替未知；具体批次行数不是业务全量。
 
 共同占用读取新订单、旧519映射单有效head与1条隔离登记。OCCUPIED优先，其次UNKNOWN，再FREE；缺schema/查询异常不可回退FREE。供给/新建单与维护导入遵循用户→game→account前缀；续办与财务使用同一稳定mapped order advisory→head→按id排序duty。纯续办仅保持占用或释放，不复开终态；财务先锁全部资金受益人并在共同锁后复核集合，不能持head后补锁user/account。
 

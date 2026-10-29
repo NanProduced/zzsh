@@ -35,6 +35,7 @@ const vite = await createServer({
   }],
   resolve: { alias: { '@': path.join(rootPath, 'src'), '@brand': path.resolve(rootPath, '../../assets/brand') } },
   optimizeDeps: { noDiscovery: true, include: [] },
+  ssr: { external: ['@zzsh/content'] },
   server: { middlewareMode: true, hmr: false, ws: false, watch: null },
 });
 const { UserDirectoryView } = await vite.ssrLoadModule('/src/views/user-directory/user-directory-view.tsx');

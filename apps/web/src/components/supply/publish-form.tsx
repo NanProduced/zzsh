@@ -1,9 +1,13 @@
 "use client";
+import { BusinessUpdateNotices } from "@/components/content/platform-update-notices";
+import { ManagedNoticeSections, ManagedNoticeText } from "@/components/content/managed-notice";
+import { usePublicContent } from "@/components/content/public-content-provider";
 import { FormSelect, FormRadioGroup, Input, IntegerStepper, Textarea, DateTimePicker } from "../ui/form-controls";
 import { ConfirmAlertDialog } from "../ui/alert-dialog";
 import { RecoveryAlert } from "../ui/information";
 import { SessionLoading } from "../auth/session-loading";
 import { SkinMediaThumb, SkinMediaPreview, SkinMetadata } from "./skin-media-thumb";
+import { CatalogItemArt } from "./catalog-item-art";
 import "./publish-refinement.css";
 
 import Link from "next/link";
@@ -417,6 +421,8 @@ function PublishingNotice({
   returnFocus?: () => HTMLElement | null;
   manual?: boolean;
 }) {
+  const notice = usePublicContent("placement:PUBLISH_NOTICE");
+  const noticeTitle = notice.resource?.payload?.kind === "notice" ? notice.resource.payload.title : "出租上架须知";
   const isReadStored = useCallback(() => {
     if (manual) return true;
     if (typeof window === "undefined") return false;
@@ -468,49 +474,14 @@ function PublishingNotice({
         <header className="publish-reading-header">
           <ShieldCheck size={26} aria-hidden="true" />
           <div>
-            <Dialog.Title ref={titleRef} tabIndex={-1}>出租上架须知</Dialog.Title>
+            <Dialog.Title ref={titleRef} tabIndex={-1}>{noticeTitle}</Dialog.Title>
             <Dialog.Description>保障账号权益，先了解以下规则。</Dialog.Description>
           </div>
           <Dialog.Close className="publish-reading-close" aria-label="关闭上架须知" disabled={seconds > 0} onClick={handleConfirmClose}><X size={20} aria-hidden="true" /></Dialog.Close>
         </header>
         <div className="publish-reading-body">
-          <div className="publish-reading-cards">
-            <div className="publish-reading-card is-highlight">
-              <div className="publish-reading-card-icon"><ShieldCheck size={18} aria-hidden="true" /></div>
-              <div className="publish-reading-card-text">
-                <h3>绑定人脸须为号主本人</h3>
-                <p>解除人脸验证需准备双设备：两部手机，或手机与电脑。</p>
-              </div>
-            </div>
-            <div className="publish-reading-card is-highlight">
-              <div className="publish-reading-card-icon"><CreditCard size={18} aria-hidden="true" /></div>
-              <div className="publish-reading-card-text">
-                <h3>核对提现条件</h3>
-                <p>可用渠道和办理条件以钱包的当前状态为准。</p>
-              </div>
-            </div>
-            <div className="publish-reading-card">
-              <div className="publish-reading-card-icon"><Box size={18} aria-hidden="true" /></div>
-              <div className="publish-reading-card-text">
-                <h3>如实申报资料与库存</h3>
-                <p>安全箱填写赛季永久容量，{INSURANCE_EXPERIENCE_CARD}另填可用天数；有封禁记录时，需提供对应截图。<br />申报可出租的全量库存，留空与 0 含义不同。六级子弹 <strong>1 组 = 60 发</strong>，AWM、巴雷特按发，{INSURANCE_EXPERIENCE_CARD}按天。</p>
-              </div>
-            </div>
-            <div className="publish-reading-card">
-              <div className="publish-reading-card-icon"><Calculator size={18} aria-hidden="true" /></div>
-              <div className="publish-reading-card-text">
-                <h3>核对报价、租期与收入</h3>
-                <p>租期和金额由平台按本次规则计算；修改资料或规则变化后，需要重新核价。<br />预计收入为<strong>扣费前金额</strong>，最终按实际消耗与结束场景结算。押金不计入收入。</p>
-              </div>
-            </div>
-            <div className="publish-reading-card">
-              <div className="publish-reading-card-icon"><Shield size={18} aria-hidden="true" /></div>
-              <div className="publish-reading-card-text">
-                <h3>确认上号配合与赔付方案</h3>
-                <p>请填写实际可协助上号的时间。全额包赔为可选方案，费率 <strong>8%</strong>、基础押金至少 <strong>300 元</strong>；收费基数、承担方及保障条件以本次有效条款为准。</p>
-              </div>
-            </div>
-          </div>
+          <ManagedNoticeSections contentKey="placement:PUBLISH_NOTICE" />
+          <p className="publish-reading-unit-note">安全箱填写赛季永久容量，{INSURANCE_EXPERIENCE_CARD}另填可用天数。填写单位：六级子弹 <strong>1 组 = 60 发</strong>，AWM、巴雷特按发，{INSURANCE_EXPERIENCE_CARD}按天。留空表示尚未申报，0 表示明确没有。</p>
           <p className="publish-reading-tip"><Info size={16} aria-hidden="true" />备注向租客公开，请勿填写密码、验证码等敏感信息。</p>
         </div>
         <footer className="publish-reading-footer">
@@ -524,7 +495,7 @@ function PublishingNotice({
               <Dialog.Close className="button secondary">返回上架须知</Dialog.Close>
             </Dialog.Popup></Dialog.Portal>
           </Dialog.Root>
-          <p>阅读须知不代表接受本次报价，上架前仍需单独确认。</p><Dialog.Close className="button primary" disabled={seconds > 0} onClick={handleConfirmClose}>{seconds > 0 ? `请阅读须知（${seconds} 秒）` : "我已了解，开始填写"}</Dialog.Close>
+          <p>阅读须知不代表接受本次报价，上架前仍需单独确认。</p><Dialog.Close className="button primary" disabled={seconds > 0} onClick={handleConfirmClose}>{seconds > 0 ? `请阅读须知（${seconds} 秒）` : notice.status === "error" ? "返回填写" : "我已了解，开始填写"}</Dialog.Close>
         </footer>
       </Dialog.Popup>
     </Dialog.Portal>
@@ -3078,6 +3049,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   };
 
   return <ServiceShell {...publishShell} title="上架出租">
+    <BusinessUpdateNotices surface="publish" gameId={gameId || undefined} />
     <PublishingNotice open={readingNotice} onClose={handleNoticeClose} agreement={agreement} returnFocus={noticeReturnFocus} manual={noticeManualRef.current} />
     {intentStorageIssue ? <div className="supply-conflict" role="alert"><strong>暂不能提交新的操作</strong><p>{intentStorageIssue}</p><button type="button" className="button secondary" disabled={Boolean(busy)} onClick={() => { restoredSubjectRef.current = null; setIntentRestoreVersion(value => value + 1); }}>重试恢复记录</button></div> : null}
     {authRequired ? <div className="supply-auth-block"><LockKeyhole size={18} /><span>此操作需要登录并确认当前身份。</span><Link className="button secondary" href={`/login?next=${encodeURIComponent(accountId ? `/publish?accountId=${accountId}` : "/publish")}`}>登录 / 注册</Link></div> : null}
@@ -3115,7 +3087,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                   <small>仅显示已开放出租的游戏。</small>
                 </label>
               ) : null}
-              <fieldset className="supply-radio-field publish-choice-field publish-safe-box-field supply-wide"><legend><span className="publish-account-label">安全箱档位<FieldHelp label="安全箱档位">填写当前赛季永久安全箱的容量，不包含临时体验卡；体验卡数量在库存区填写。</FieldHelp></span></legend>
+              <fieldset className="supply-radio-field publish-choice-field publish-safe-box-field supply-wide"><legend><span className="publish-account-label">安全箱档位<FieldHelp label="安全箱档位"><ManagedNoticeText contentKey="placement:PUBLISH_SAFE_BOX" /></FieldHelp></span></legend>
                 {safeBoxChoiceOptions.length ? <FormRadioGroup variant="segmented" name="safe_box_code" label="安全箱档位" error={fieldError("attributes.safe_box_code")} value={currentSafeBox} options={safeBoxChoiceOptions} disabled={formDisabled || !options} onChange={(value) => changeAttribute("safe_box_code", value)} /> : <small className="publish-choice-empty">{options ? "当前规则未配置安全箱档位。" : "正在读取安全箱档位…"}</small>}
               </fieldset>
               {(["next_season_pass", "demulan_unlocked"] as const).some(key => declarationOptions?.[key]?.enabled || typeof draft.attributes[key] === "boolean") ? <div className="publish-safety-row supply-wide">
@@ -3215,7 +3187,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
 
           <SectionCard id="assets" title={groupMeta.assets.title} hasError={errorGroups.has("assets")} actions={sectionActions()}>
             <div className="supply-subsection">
-              <div className="publish-assets-heading"><h3><Box size={20} aria-hidden="true" />物品资源</h3><FieldHelp label="物品资源">只统计可用于本次出租的资源。留空表示尚未申报，0表示明确没有；数量只支持整数。</FieldHelp><span className="publish-preview-updating" data-updating={ownerIncomePreviewPending} aria-hidden="true">更新中</span></div>
+              <div className="publish-assets-heading"><h3><Box size={20} aria-hidden="true" />物品资源</h3><FieldHelp label="物品资源"><ManagedNoticeText contentKey="placement:PUBLISH_RESOURCES" /></FieldHelp><span className="publish-preview-updating" data-updating={ownerIncomePreviewPending} aria-hidden="true">更新中</span></div>
               <p className="publish-resource-read-state">留空表示尚未申报，0表示明确没有。数量填整数；标注必填的项目需在核价前补齐，草稿可暂留空。</p>
               <p className="publish-resource-read-state publish-resource-preview-status" role="status" aria-live="polite" aria-busy={ownerIncomePreviewPending}><Info size={16} aria-hidden="true" />{resourcePreviewState}</p>
               {resourceRows.length ? <div className="supply-resource-grid" role="list" aria-label="资源库存" aria-busy={ownerIncomePreviewPending}>{resourceRows.map((item) => {
@@ -3234,7 +3206,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                 const durabilityRequired = ["df_billable_level6_armor", "df_billable_level6_helmet"].includes(canonicalResourceCode(itemCode) ?? "");
                 return <article className="supply-resource-card" key={key} role="listitem" data-resource-code={itemCode??undefined}>
                   <div className="supply-resource-card-head">
-                    <span className="supply-resource-art"><InventoryIcon code={itemCode} /></span>
+                    <span className="supply-resource-art"><CatalogItemArt mediaId={"mediaId" in item ? item.mediaId : null}><InventoryIcon code={itemCode} /></CatalogItemArt></span>
                     <div className="supply-resource-info">
                       <div className="supply-resource-name"><label htmlFor={`quantity-${key}`}>{itemName}</label>{help?<FieldHelp label={itemName}>{help}</FieldHelp>:null}</div>
                       <div className="publish-owner-rate"><span>单价</span><strong>{line?.ownerUnitAmount ? `¥ ${formatUnitPrice(line.ownerUnitAmount.amount)} / ${inputUnit}` : !item.itemId || unpriced ? "待配置" : ownerIncomePreviewPending ? "读取中…" : "暂未取得"}</strong>{line ? <FieldHelp label={`${itemName}单价`}>按当前规则预估，实际收入以核价和结算为准。</FieldHelp> : null}</div>
@@ -3472,7 +3444,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                 </div>
                 {fastLocked && options && options.pricingSchema !== "haff-ratio-v2" ? <div className="supply-blockers" role="alert"><strong>极速入口当前不可用</strong><p>当前规则未开放极速比例合同，不能以极速入口上架。</p><Link className="button secondary" href={modeHref(false)}>切换到普通出租</Link></div> : null}
                 {fastLocked && optionsAvailability === "ready" && options?.pricingSchema === "haff-ratio-v2" && rentalModes?.fast?.enabled !== true ? <div className="supply-blockers" role="alert"><strong>极速入口当前不可用</strong><p>{rentalModes?.fast ? "当前规则未启用极速比例，不能以极速入口上架。" : "当前规则未提供极速比例范围，不能以极速入口上架。"}</p><Link className="button secondary" href={modeHref(false)}>切换到普通出租</Link></div> : null}
-                <details className="publish-rule-disclosure"><summary><span>日耗、租期与比例怎么选？</span></summary><div className="publish-disclosure-panel"><p>预计租期按哈夫币余额除以每日消耗推算，不足一天按一天计。租期结束后按约定办理结算，不是手动承诺的成交时间。</p><p>普通比例由平台按账号配置和日耗核定；自定义比例仅支持10M/天。每收入1元对应的哈夫币越多，租金就越低，租客也更容易比较。</p><p>具体可选档位与比例以当前页面为准，不承诺几小时或几天内租出。核价后修改余额、日耗或账号配置，需要重新核对报价。</p></div></details>
+                <details className="publish-rule-disclosure"><summary><span>日耗、租期与比例怎么选？</span></summary><div className="publish-disclosure-panel"><ManagedNoticeSections contentKey="placement:PUBLISH_TERM" compact /><p>预计租期按哈夫币余额除以每日消耗推算，不足一天按一天计。租期结束后按约定办理结算，不是手动承诺的成交时间。</p><p>普通比例由平台按账号配置和日耗核定；自定义比例仅支持10M/天。每收入1元对应的哈夫币越多，租金就越低，租客也更容易比较。</p><p>具体可选档位与比例以当前页面为准，不承诺几小时或几天内租出。核价后修改余额、日耗或账号配置，需要重新核对报价。</p></div></details>
               </section>
 
               <section className="publish-term-section">

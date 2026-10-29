@@ -1259,12 +1259,6 @@ export async function readPresentation(
       item !== null &&
       typeof (item as { id?: unknown }).id === "string",
   );
-  const needsItems = itemRefs.some(
-    (item) =>
-      typeof item.code !== "string" ||
-      typeof item.name !== "string" ||
-      typeof item.unit !== "string",
-  );
   const rawSkins = Array.isArray(v.presentation.skins)
     ? v.presentation.skins
     : [];
@@ -1279,13 +1273,18 @@ export async function readPresentation(
     (skin) =>
       skin.categoryModel !== "RETIRED" && (typeof skin.categoryCode !== "string" || typeof skin.categoryName !== "string"),
   );
-  if (!needsItems && !needsSkins)
+  if (!itemRefs.length && !needsSkins)
     return v.presentation;
-  const itemRows = needsItems
+  const itemRows = itemRefs.length
     ? (
-      await client.query<{ id: string; code: string; name: string; unit: string }>(
-        `SELECT id,code,name,unit FROM zzsh_supply.billable_item WHERE id=ANY($1::text[])`,
-        [itemRefs.map((item) => item.id as string)],
+      await client.query<{ id: string; code: string; name: string; unit: string; mediaId: string | null }>(
+        `SELECT i.id,i.code,i.name,i.unit,m.id AS "mediaId" FROM zzsh_supply.billable_item i
+          JOIN zzsh_supply.rental_account a ON a.id=$2 AND a.game_id=i.game_id
+          LEFT JOIN zzsh_supply.media_asset m ON m.id=i.media_id AND m.game_id=i.game_id
+            AND i.enabled AND m.ownership_kind='PLATFORM_CATALOG' AND m.purpose='ITEM_MEDIA'
+            AND m.review_state='APPROVED' AND m.access_class='PUBLIC_DISPLAY' AND m.public_storage_key IS NOT NULL
+          WHERE i.id=ANY($1::text[])`,
+        [itemRefs.map((item) => item.id as string), v.account_id],
       )
     ).rows
     : [];
@@ -1313,11 +1312,12 @@ export async function readPresentation(
       return catalog
         ? {
             ...current,
+            mediaId: catalog.mediaId ?? null,
             ...(typeof current.code === "string" ? {} : { code: catalog.code }),
             ...(typeof current.name === "string" ? {} : { name: catalog.name }),
             ...(typeof current.unit === "string" ? {} : { unit: catalog.unit }),
           }
-        : item;
+        : { ...current, mediaId: null };
     }),
     skins: rawSkins.map((skin) => {
       if (

@@ -3,11 +3,12 @@ import assert from "node:assert/strict";
 import { allHelpArticles, getHelpArticle, listFeaturedArticles, listHelpArticlesByCategory, resolveRelated } from "../src/content/help/index.ts";
 import { searchHelpArticles } from "../src/content/help/search.ts";
 import { legacyHelpHashMap, legacySiteUrlMap, resolveLegacyHash } from "../src/content/help/legacy-links.ts";
-import { helpAuxCategories, helpCategories } from "../src/content/help/types.ts";
+import { helpAuxCategories, helpCategories, helpCategoryLabel } from "../src/content/help/types.ts";
 import { buildHelpNavData, toArticleCard } from "../src/components/help/nav-data.ts";
 import { stripHelpSearchQuery } from "../src/components/help/help-url.ts";
 
-test("slugs are unique and every article has required metadata", () => {
+test("slugs are unique and every article has required metadata", async () => {
+  const { inspectMarkdown } = await import("@zzsh/content/markdown");
   const slugs = new Set(allHelpArticles.map((a) => a.slug));
   assert.equal(slugs.size, allHelpArticles.length);
   const categories = new Set([...helpCategories, ...helpAuxCategories].map((c) => c.id));
@@ -16,10 +17,17 @@ test("slugs are unique and every article has required metadata", () => {
     assert.ok(categories.has(article.category), `${article.slug} category`);
     assert.ok(article.audience.length > 0, article.slug);
     assert.match(article.updatedAt, /^\d{4}-\d{2}-\d{2}$/, article.slug);
-    assert.ok(article.sections.length > 0, article.slug);
-    const sectionIds = new Set(article.sections.map((s) => s.id));
-    assert.equal(sectionIds.size, article.sections.length, `${article.slug} section anchor uniqueness`);
-    for (const section of article.sections) assert.ok(section.blocks.length > 0, `${article.slug}#${section.id}`);
+    if (article.format === "markdown") {
+      const document = await inspectMarkdown(article.markdown);
+      assert.ok(article.markdown.length > 0 && document.toc.length > 0, article.slug);
+      assert.equal(new Set(document.toc.map(item => item.id)).size, document.toc.length, `${article.slug} heading IDs`);
+      for (const target of Object.values(article.anchorAliases ?? {})) assert.ok(document.toc.some(item => item.id === target), `${article.slug} old section target`);
+    } else {
+      assert.ok(article.sections.length > 0, article.slug);
+      const sectionIds = new Set(article.sections.map((s) => s.id));
+      assert.equal(sectionIds.size, article.sections.length, `${article.slug} section anchor uniqueness`);
+      for (const section of article.sections) assert.ok(section.blocks.length > 0, `${article.slug}#${section.id}`);
+    }
   }
 });
 
@@ -150,7 +158,9 @@ test("long vs short article detection correctly distinguishes TOC requirements",
   const shortArticle = getHelpArticle("minor-protection");
   assert.ok(longArticle);
   assert.ok(shortArticle);
-  assert.equal(isLongArticle(longArticle), true);
+  const { publicHelpArticle } = await import("../src/lib/help-content.ts");
+  const projectedLong = await publicHelpArticle({ state: "available", payload: { ...longArticle, kind: "guide" }, media: [] });
+  assert.equal(isLongArticle(projectedLong), true);
   assert.equal(isLongArticle(shortArticle), false);
 
   const crumbs = articleBreadcrumb(longArticle);
@@ -158,4 +168,54 @@ test("long vs short article detection correctly distinguishes TOC requirements",
   assert.equal(crumbs[2].label, "租号与使用");
   // Does not duplicate long article title in breadcrumb
   assert.ok(!crumbs.some((c) => c.label === longArticle.title));
+});
+
+async function helpPageRenderer() {
+  const React = (await import("react")).default;
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const { readFileSync } = await import("node:fs");
+  const { createRequire } = await import("node:module");
+  const ts = (await import("typescript")).default;
+  const native = createRequire(import.meta.url), exports = {};
+  const source = readFileSync(new URL("../src/components/help/help-page.tsx", import.meta.url), "utf8");
+  new Function("require", "exports", ts.transpileModule(source, { compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS, esModuleInterop: true } }).outputText)(name => {
+    if (name.endsWith(".css")) return {};
+    if (name === "next/link") return ({ children, ...props }) => React.createElement("a", props, children);
+    if (name === "@/content/help/types") return { helpCategories, helpCategoryLabel };
+    if (name === "./help-shell") return { HelpShell: ({ topContent, children }) => React.createElement(React.Fragment, null, topContent, children) };
+    if (name === "./help-nav") return { HelpNavAside: () => null, HelpNavDrawer: () => null };
+    if (name === "./help-article-extras") return { LegacyHashHandler: () => null };
+    if (name === "@/components/support/support-contact-button") return { SupportContactButton: ({ children, ...props }) => React.createElement("button", props, children) };
+    return native(name);
+  }, exports);
+  return props => renderToStaticMarkup(React.createElement(exports.HelpPage, props));
+}
+
+test("help home only links to currently public articles and has an explicit empty-publication state", async () => {
+  const renderPage = await helpPageRenderer();
+  const render = articles => renderPage({ view: { kind: "home", featured: [] }, navData: buildHelpNavData(articles), query: "", legacyHashMap: {} });
+  const empty = render([]);
+  assert.match(empty, /当前暂无公开帮助文档/);
+  assert.doesNotMatch(empty, /href="\/help\/(?:rental-getting-started|publish-prepare|fees-refund-status|terms-and-privacy)"/);
+  const one = render([getHelpArticle("publish-pricing-modes")]);
+  assert.match(one, /href="\/help\/publish-pricing-modes"/);
+  assert.doesNotMatch(one, /href="\/help\/(?:rental-getting-started|publish-prepare|fees-refund-status|terms-and-privacy)"/);
+  const full = render([...allHelpArticles].reverse());
+  assert.match(full, /<form(?=[^>]*action="\/help")(?=[^>]*method="get")(?=[^>]*role="search")[^>]*>/);
+  assert.match(full, /type="search"[^>]+name="q"/);
+  assert.equal((full.match(/class="help-home-category-card"/g) ?? []).length, 6);
+  assert.match(full, /class="help-home-category-card" href="\/help\/rental-getting-started"/);
+  assert.match(full, /class="help-home-category-card" href="\/help\/fees-overview"/);
+  assert.match(full, /查看平台协议与规则/);
+  assert.doesNotMatch(full, /平台动态|\/updates/);
+});
+
+test("search results name auxiliary agreement categories in Chinese", async () => {
+  const article = getHelpArticle("terms-and-privacy");
+  assert.ok(article);
+  const render = await helpPageRenderer();
+  const html = render({ view: { kind: "search", query: "协议", hits: [toArticleCard(article)] }, navData: buildHelpNavData([article]), query: "协议", legacyHashMap: {} });
+  assert.match(html, /href="\/help\/terms-and-privacy"/);
+  assert.match(html, /class="help-audience-badge">协议与规则<\/span>/);
+  assert.doesNotMatch(html, />agreement</);
 });

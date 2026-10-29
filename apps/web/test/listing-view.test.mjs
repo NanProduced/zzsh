@@ -81,7 +81,7 @@ test('card view uses presentation names, public conditions and server totals', (
   assert.equal(card.depositLabel, null);
   assert.equal(card.payableTotalLabel, null);
   assert.equal(card.termLabel, '6 天');
-  assert.deepEqual(card.resourceLines, [{ itemId: 'item_haff', code: null, name: '哈夫币', quantity: '60000000', quantityLabel: '60 M', unitLabel: '哈夫币', costAmount: '150.00', costLabel: '¥150.00', unitPriceLabel: '¥0.00000250 / 1 哈夫币' }]);
+  assert.deepEqual(card.resourceLines, [{ itemId: 'item_haff', mediaId: null, code: null, name: '哈夫币', quantity: '60000000', quantityLabel: '60 M', unitLabel: '哈夫币', costAmount: '150.00', costLabel: '¥150.00', unitPriceLabel: '¥0.00000250 / 1 哈夫币' }]);
   assert.deepEqual(card.skinNames, ['M4A1 金色']);
   assert.deepEqual(card.skinLabels, ['武器 · M4A1 金色']);
   assert.deepEqual(card.conditionLines.map((line) => line.key), ['safe_box_code', 'vit_level', 'grading_code', 'login_method_code', 'region_province', 'secret_kd', 'service_window', 'term_option', 'daily_consumption']);

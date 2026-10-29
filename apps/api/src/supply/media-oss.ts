@@ -2,7 +2,7 @@ import OSS from "ali-oss";
 import { join } from "node:path";
 
 import { ConfigurationError } from "../config/config";
-import { createLocalMediaStorage, MediaStorageError, STORAGE_KEY_PATTERN, type MediaStorage } from "./media";
+import { ALLOWED_IMAGE_MIMES, createLocalMediaStorage, MediaStorageError, STORAGE_KEY_PATTERN, type ImageMime, type MediaStorage } from "./media";
 
 export const OSS_REQUEST_TIMEOUT_MS = 30_000;
 
@@ -22,7 +22,7 @@ export type OssCredentials = {
 // Structural surface of the ali-oss client used by this adapter; injected in tests.
 export type OssObjectClient = {
   head: (objectKey: string) => Promise<unknown>;
-  put: (objectKey: string, bytes: Buffer) => Promise<unknown>;
+  put: (objectKey: string, bytes: Buffer, options: { mime: ImageMime }) => Promise<unknown>;
   get: (objectKey: string) => Promise<{ content: Buffer }>;
 };
 
@@ -117,8 +117,9 @@ export function createOssMediaStorage(
   return {
     available: true,
     kind: "oss",
-    async write(bytes, contentHash) {
+    async write(bytes, contentHash, mime) {
       if (!STORAGE_KEY_PATTERN.test(contentHash)) throw new MediaStorageError("content hash is invalid");
+      if (!ALLOWED_IMAGE_MIMES.includes(mime)) throw new MediaStorageError("image MIME is invalid");
       const objectKey = ossObjectKey(options.objectPrefix, contentHash);
       try {
         // Content-addressed object already present; skip the upload.
@@ -128,7 +129,8 @@ export function createOssMediaStorage(
         if (!isObjectMissing(error)) throw storageFailure();
       }
       try {
-        await client.put(objectKey, bytes);
+        // Hash keys have no extension; use the MIME verified by the upload decoder.
+        await client.put(objectKey, bytes, { mime });
         return { storageKey: contentHash };
       } catch {
         // Unknown outcome (including timeouts): keys are content addressed, so a

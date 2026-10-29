@@ -874,13 +874,55 @@ test("R2：意图丢响应后GET确认，不丢原文件，原key取回凭据后
 for (const [accessClass, action] of [["PRIVATE_REVIEW", "转为公开"], ["PUBLIC_DISPLAY", "撤销公开"]]) test(`R2：${action}确认说明可留空，填写时2–500字，取消零写`, async (t) => {
   const h = await mountHarness(t, { fetchImpl: r2Router(url => url.pathname.endsWith("/reviews") ? json(page([platform({ reviewState: "APPROVED", accessClass })])) : null) });
   await h.click(h.rowViews()[0]);
-  assert.ok(h.textOf().includes("公开调整可选"));
   await h.click(h.btn(action));
   const dialog = h.el.querySelector('[role="dialog"]');
-  assert.ok(dialog); assert.ok(!h.btn(`确认${action}`, dialog).disabled);
+  assert.ok(dialog); assert.ok(dialog.textContent.includes("说明（可选 2–500 字）")); assert.ok(!h.btn(`确认${action}`, dialog).disabled);
   await h.fillTextarea("字", dialog);
   assert.ok(h.btn(`确认${action}`, dialog).disabled);
   await h.fillTextarea("只读走查说明", dialog);
   assert.ok(!h.btn(`确认${action}`, dialog).disabled);
   await h.click(h.btn("取消", dialog)); assert.equal(h.writes.length, 0);
+});
+
+test("审核完成后保留结果并提供下一张待审，不清空右栏", async (t) => {
+  let reads = 0;
+  const h = await mountHarness(t, {
+    fetchImpl: router([
+      { match: "/api/bff/admin/supply/games", response: () => json({ games: [{ id: "game_1", name: "三角洲行动" }] }) },
+      {
+        match: "/api/bff/admin/supply/media/reviews",
+        response: () => {
+          reads += 1;
+          return json(page(reads === 1 ? [platform(), platform({ id: "asset_platform_2" })] : [platform({ id: "asset_platform_2" })]));
+        },
+      },
+      { match: /^\/api\/bff\/admin\/supply\/media\/asset_platform_1\/review$/, method: "POST", response: () => json({ id: "asset_platform_1", reviewState: "REJECTED" }) },
+    ]),
+  });
+  await h.click(h.rowViews()[0]);
+  await h.click(h.btn("驳回"));
+  await h.fillTextarea("图片模糊，无法辨认内容");
+  await h.click(h.btn("确认驳回"));
+  await h.settle(60);
+  const aside = h.el.querySelector("aside");
+  assert.ok(aside, "右栏保留");
+  assert.ok(aside.textContent.includes("已驳回"), "右栏显示完成后的审核状态");
+  assert.ok(h.btn("下一张待审"), "提供下一张待审入口");
+  await h.click(h.btn("下一张待审"));
+  assert.ok(h.el.querySelector("aside").textContent.includes("asset_platform_2"), "下一张待审切换到队列下一项");
+});
+
+test("reviewed queue does not offer a next-pending action", async (t) => {
+  const h = await mountHarness(t, {
+    fetchImpl: router([
+      { match: "/api/bff/admin/supply/games", response: () => json({ games: [{ id: "game_1", name: "三角洲行动" }] }) },
+      { match: "/api/bff/admin/supply/media/reviews", response: () => json(page([platform({ reviewState: "APPROVED", accessClass: "PUBLIC_DISPLAY" }), platform({ id: "asset_platform_2", reviewState: "APPROVED", accessClass: "PUBLIC_DISPLAY" })])) },
+    ]),
+  });
+  await h.click(h.btn("已审核"));
+  await h.settle(50);
+  await h.click(h.rowViews()[0]);
+  await h.settle(30);
+  assert.ok(h.el.querySelector("aside")?.textContent.includes("已通过"));
+  assert.equal(h.btn("下一张待审"), undefined, "reviewed assets do not claim a next pending item");
 });

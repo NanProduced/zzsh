@@ -130,6 +130,7 @@ export type UserDirectoryMembershipSummary =
         status: "ACTIVE";
         label: string;
         depositWaived: boolean;
+        depositAllowanceCents?: string;
       }>;
     }
   | {
@@ -668,6 +669,8 @@ export type ContentDraftSummary = {
   title: string;
   summary: string;
   body: string;
+  updateSettings?: import('@zzsh/content/updates').UpdateSettings;
+  bodyMedia?: Record<string, string | null>;
   coverMediaId: string | null;
   publishedAt: string | null;
   updatedAt: string;

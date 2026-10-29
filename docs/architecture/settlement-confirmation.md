@@ -1,5 +1,7 @@
 # 开租与结算确认
 
+支付、退款、钱包/提现及新旧来源的总口径见[支付与资金领域规格](payments-and-funds.md)。本页维护开租、结算和未开租终止的专项规则。
+
 管理端的已记录结算凭证独立使用资金单据读取：`GET /api/bff/admin/finance/documents/ORDER:<id>`、`LEGACY_ORDER:<id>` 及 `LEGACY_DUTY:<id>`（引用须URL编码）。读取要求 `finance.document.read`；新增 `orderSettlement` 投影还要求该订单在当前 `order.read` 与游戏/对象范围内可读。普通查询复用原资金reader与旧责任完整验证，不调用结算操作的用户/账号/订单行锁、付款/退款命令或供应商补查。无当前过账记录不代表已证实未结算，金额缺依据保持未知，旧退款记录、当前应退责任、实际已退与渠道结果分别保留；本地责任过账不证明退款到账。该读取不改变下述受控操作开关。
 
 开租与结算接口仅在受控测试配置下开放：`ENABLE_TEST_OPERATIONS=true`、`ZZSH_SETTLEMENT_RECORDING=controlled`、测试 profile、fake provider，且当前库是 `zzsh_test_order_*`、运行角色是 `zzsh_order_*_r`。不满足时返回404，生产默认关闭。
@@ -49,4 +51,4 @@
 
 `PRESTART_TERMINATED`取消单保留原付款时间和实付事实，普通未付款取消仍不显示为已支付。此取消状态不代表退款已到账。
 
-旧资金补充来源证明SQL目前仅为测试候选，未登记到自动迁移链。需要补充来源证明的新期初输入在相应结构/守卫未安装时拒绝，旧输入的恢复合同保持；正式登记和真实旧数据承接需单独完成PG验证。
+旧资金补充来源证明由正式0108提供，测试不保留同内容的第二份SQL。需要新proof的期初输入在相应结构/守卫未安装时拒绝，旧无proof输入和原回执保持；新装链、旧数据升级与手装资源留置分别按[安装合同](database-navigation.md#旧资金来源证明安装合同)验证，不从局部合成样例推断真实旧数据已承接。

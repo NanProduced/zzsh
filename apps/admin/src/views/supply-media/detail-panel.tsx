@@ -4,7 +4,6 @@ import { Check, Copy, ExternalLink } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
 import type { MediaAssetReview, SupplyGame } from "../../api";
@@ -23,15 +22,6 @@ import {
   VISIBILITY_LABELS,
   type MediaAction,
 } from "./model";
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label className="block space-y-1.5 text-xs">
-      <span className="font-medium text-foreground">{label}</span>
-      {children}
-    </label>
-  );
-}
 
 function StatusRow({ label, value, badge }: { label: string; value: string; badge?: "ok" | "warn" | "danger" | "neutral" }) {
   return (
@@ -61,11 +51,11 @@ export function MediaDetailPanel({
   games,
   canDecide,
   canUpload,
-  reason,
-  onReasonChange,
   onZoom,
   onOpenPath,
   onAction,
+  onNext,
+  hasNext = false,
   busy,
   hideHeading = false,
 }: {
@@ -73,17 +63,20 @@ export function MediaDetailPanel({
   games: SupplyGame[];
   canDecide: boolean;
   canUpload: boolean;
-  reason: string;
-  onReasonChange: (value: string) => void;
   onZoom: (target: ZoomTarget) => void;
   onOpenPath?: (path: string) => void;
   onAction: (action: MediaAction) => void;
+  onNext?: () => void;
+  hasNext?: boolean;
   busy: boolean;
   hideHeading?: boolean;
 }) {
   const [copied, setCopied] = useState<"idle" | "ok" | "fail">("idle");
   const gameNames = new Map(games.map((game) => [game.id, game.name]));
   const set = actionsFor(asset, { canDecide, canUpload });
+  const reviewActions = set.actions.filter((action) => action.kind === "review");
+  const visibilityActions = set.actions.filter((action) => action.kind === "visibility");
+  const coverActions = set.actions.filter((action) => action.kind === "cover");
   const copy = (value: string) => {
     void navigator.clipboard
       ?.writeText(value)
@@ -96,19 +89,15 @@ export function MediaDetailPanel({
         setTimeout(() => setCopied("idle"), 1500);
       });
   };
-  const needsReasonField = set.actions.some((a) => a.kind === "review" || (a.kind === "visibility" && a.visibility === "PRIVATE_REVIEW"));
 
-  const getActionBtnProps = (action: MediaAction) => {
+  const getActionVariant = (action: MediaAction) => {
     if (action.kind === "review") {
-      if (action.decision === "APPROVE") return { variant: "default" as const, className: "bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs font-medium" };
-      if (action.decision === "REJECT") return { variant: "destructive" as const, className: "shadow-xs font-medium" };
-      if (action.decision === "QUARANTINE") return { variant: "outline" as const, className: "border-amber-500/50 text-amber-600 dark:text-amber-400 hover:bg-amber-500/10 shadow-xs font-medium" };
+      if (action.decision === "APPROVE") return "default" as const;
+      if (action.decision === "REJECT") return "destructive" as const;
+      return "outline" as const;
     }
-    if (action.kind === "visibility") {
-      if (action.visibility === "PUBLIC_DISPLAY") return { variant: "default" as const, className: "bg-sky-600 hover:bg-sky-700 text-white shadow-xs font-medium" };
-      if (action.visibility === "PRIVATE_REVIEW") return { variant: "secondary" as const, className: "shadow-xs font-medium" };
-    }
-    return { variant: "default" as const, className: "bg-purple-600 hover:bg-purple-700 text-white shadow-xs font-medium" };
+    if (action.kind === "visibility") return action.visibility === "PUBLIC_DISPLAY" ? "default" as const : "secondary" as const;
+    return "secondary" as const;
   };
 
   return (
@@ -223,32 +212,32 @@ export function MediaDetailPanel({
       {!set.accountDisplayOnly && (set.actions.length > 0 || set.note) ? (
         <div className="max-h-[50%] shrink-0 space-y-2 overflow-y-auto border-t border-border/60 pt-3">
           {set.note ? <p className="text-xs text-muted-foreground">{set.note}</p> : null}
-          {needsReasonField ? (
-            <div className="space-y-1">
-              <Field label="处置说明（审核按需必填，公开调整可选）">
-                <Textarea className="min-h-16 max-h-32 resize-y text-xs" value={reason} onChange={(event) => onReasonChange(event.target.value)} maxLength={500} rows={2} placeholder="请填写本次核对说明" disabled={busy} />
-              </Field>
-              <p className="text-[11px] text-muted-foreground">驳回、隔离或重新通过需填 2–500 字；公开调整可留空。</p>
+          {reviewActions.length ? (
+            <div className="space-y-2">
+              <p className="text-[11px] font-medium text-muted-foreground">审核决定</p>
+              {(() => {
+                const primary = reviewActions.find((action) => action.kind === "review" && action.decision === "APPROVE");
+                const rest = reviewActions.filter((action) => action !== primary);
+                return <>
+                  {primary ? <Button type="button" size="sm" className="h-9 w-full font-medium" variant="default" disabled={busy} onClick={() => onAction(primary)}>{primary.label}</Button> : null}
+                  {rest.length ? <div className="grid grid-cols-2 gap-2">{rest.map((action) => <Button key={`${action.kind}-${action.kind === "review" ? action.decision : "x"}`} type="button" size="sm" className="h-9 w-full" variant={getActionVariant(action)} disabled={busy} onClick={() => onAction(action)}>{action.label}</Button>)}</div> : null}
+                </>;
+              })()}
             </div>
           ) : null}
-          <div className="flex flex-wrap gap-2 pt-1">
-            {set.actions.map((action) => {
-              const props = getActionBtnProps(action);
-              return (
-                <Button
-                  key={`${action.kind}-${action.kind === "review" ? action.decision : action.kind === "visibility" ? action.visibility : "cover"}`}
-                  type="button"
-                  size="sm"
-                  className={`h-8.5 px-3 ${props.className}`}
-                  variant={props.variant}
-                  disabled={busy}
-                  onClick={() => onAction(action)}
-                >
-                  {action.label}
-                </Button>
-              );
-            })}
-          </div>
+          {visibilityActions.length ? (
+            <div className="space-y-2">
+              <p className="text-[11px] font-medium text-muted-foreground">公开范围</p>
+              <div className={visibilityActions.length > 1 ? "grid grid-cols-2 gap-2" : ""}>{visibilityActions.map((action) => <Button key={`${action.kind}-${action.kind === "visibility" ? action.visibility : "x"}`} type="button" size="sm" className="h-9 w-full" variant={getActionVariant(action)} disabled={busy} onClick={() => onAction(action)}>{action.label}</Button>)}</div>
+            </div>
+          ) : null}
+          {coverActions.length ? (
+            <div className="space-y-2">
+              <p className="text-[11px] font-medium text-muted-foreground">目录绑定</p>
+              {coverActions.map((action) => <Button key={`${action.kind}-cover`} type="button" size="sm" className="h-9 w-full" variant={getActionVariant(action)} disabled={busy} onClick={() => onAction(action)}>{action.label}</Button>)}
+            </div>
+          ) : null}
+          {onNext && hasNext ? <Button type="button" size="sm" variant="secondary" className="h-9 w-full" disabled={busy} onClick={onNext}>下一张待审</Button> : null}
         </div>
       ) : null}
     </div>

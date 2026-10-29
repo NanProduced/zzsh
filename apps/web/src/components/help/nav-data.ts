@@ -54,7 +54,11 @@ export function toArticleCard(article: HelpArticle): HelpArticleCard {
 }
 
 export function isLongArticle(article: HelpArticle): boolean {
-  return article.sections.length >= 3;
+  return article.format === "markdown" ? (article.toc?.length ?? 0) >= 3 || (article.plainText ?? article.markdown ?? "").length >= 1600 : (article.sections?.length ?? 0) >= 3;
+}
+
+export function articleToc(article: HelpArticle) {
+  return article.format === "markdown" ? article.toc ?? [] : (article.sections ?? []).map(section => ({ id: section.id, title: section.title, depth: 2 }));
 }
 
 export function articleBreadcrumb(article: HelpArticle) {

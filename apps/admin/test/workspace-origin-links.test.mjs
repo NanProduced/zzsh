@@ -49,6 +49,7 @@ export default WorkbenchPage;`;
   ],
   resolve: { alias: { '@': path.join(rootPath, 'src'), '@brand': path.resolve(rootPath, '../../assets/brand') } },
   optimizeDeps: { noDiscovery: true, include: [] },
+  ssr: { external: ['@zzsh/content'] },
   server: { middlewareMode: true, hmr: false, ws: false, watch: null },
 });
 const { WorkspacePageContent } = await vite.ssrLoadModule('/src/workspace/page-content.tsx');

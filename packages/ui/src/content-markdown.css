@@ -1,0 +1,43 @@
+@import "./content-typeset.css";
+/* Adapted from shadcn Typeset (https://ui.shadcn.com/docs/typeset): scoped Chinese document preset. */
+/* The existing Typeset marker protects document flow from consumer element resets. */
+.content-markdown {
+  --typeset-size: 1rem;
+  --typeset-leading: 1.85;
+  --typeset-flow: 1em;
+  color: inherit;
+  font-family: inherit;
+  font-size: var(--typeset-size);
+  line-height: var(--typeset-leading);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.content-markdown.typeset :where(p, ul, ol, blockquote, pre, .content-markdown-table) { margin: var(--typeset-flow) 0; }
+.content-markdown.typeset :where(h1, h2, h3, h4, h5, h6) { color: inherit; font-weight: 650; line-height: 1.45; scroll-margin-top: 8rem; }
+.content-markdown.typeset :where(h1) { font-size: 1.8em; margin: 1.5em 0 .7em; }
+.content-markdown.typeset :where(h2) { font-size: 1.4em; margin: 2em 0 .7em; }
+.content-markdown.typeset :where(h3) { font-size: 1.15em; margin: 1.65em 0 .6em; }
+.content-markdown.typeset :where(h4, h5, h6) { font-size: 1em; margin: 1.4em 0 .5em; }
+.content-markdown.typeset :where(ul, ol) { padding-inline-start: 1.55em; }
+.content-markdown.typeset :where(ul) { list-style: disc; }
+.content-markdown.typeset :where(ol) { list-style: decimal; }
+.content-markdown.typeset :where(li) { margin-block: .35em; padding-inline-start: .15em; }
+.content-markdown.typeset :where(li > p) { margin-block: .3em; }
+.content-markdown.typeset :where(blockquote) { border-inline-start: 1px solid currentColor; padding: .35em 1em; opacity: .9; }
+.content-markdown.typeset :where(blockquote > p:first-child) { margin-top: 0; }
+.content-markdown.typeset :where(blockquote > p:last-child) { margin-bottom: 0; }
+.content-markdown.typeset :where(a) { text-decoration: underline; text-underline-offset: .2em; }
+.content-markdown.typeset :where(a:focus-visible, [tabindex]:focus-visible) { outline: 2px solid currentColor; outline-offset: 3px; }
+.content-markdown.typeset :where(code) { font-family: ui-monospace, monospace; font-size: .88em; overflow-wrap: normal; }
+.content-markdown.typeset :where(pre) { max-width: 100%; overflow: auto; padding: 1em; border: 1px solid color-mix(in srgb, currentColor 18%, transparent); border-radius: .5rem; }
+.content-markdown-table { max-width: 100%; overflow-x: auto; overscroll-behavior-inline: contain; }
+.content-markdown.typeset :where(table) { width: 100%; border-collapse: collapse; font-size: .94em; line-height: 1.65; }
+.content-markdown.typeset :where(th, td) { min-width: 6em; padding: .7em .9em; text-align: start; vertical-align: top; border-bottom: 1px solid color-mix(in srgb, currentColor 18%, transparent); }
+.content-markdown.typeset :where(th) { font-weight: 650; }
+.content-markdown.typeset :where(img) { display: block; max-width: 100%; height: auto; margin-block: 1em; border-radius: .4rem; }
+.content-markdown.typeset :where(.content-document-image) { display: block; max-width: 100%; }
+.content-markdown.typeset :where(hr) { border: 0; border-top: 1px solid color-mix(in srgb, currentColor 18%, transparent); margin: 2em 0; }
+.content-markdown.typeset > :first-child { margin-top: 0; }
+.content-markdown.typeset > :last-child { margin-bottom: 0; }
+.content-markdown--compact { --typeset-size: .875rem; --typeset-leading: 1.7; --typeset-flow: .65em; }
+.content-markdown--compact.typeset :where(h1, h2, h3, h4) { font-size: 1em; margin-block: .8em .35em; }

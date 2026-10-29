@@ -1,8 +1,12 @@
 import type { PoolClient } from "pg";
+import { DEFAULT_RESOURCES, resourceMediaIds, validateResource, validateResourceKey, validateResourceMedia, type ContentResource } from "@zzsh/content";
+import { inspectContentMarkdown } from "@zzsh/content/api-markdown";
+import type { UpdateSettings } from "@zzsh/content/updates";
+import { prepareUpdateSettings, checkedUpdateSettings, checkUpdateRelease } from "./updates";
 
 import { API_V1_ERROR_CODES } from "../contracts/api-v1";
 import { SecurityApiError } from "../auth/security-core";
-import { conflict, invalid, newSupplyId, notFound } from "../supply/supply-util";
+import { conflict, ensureOnlyFields, invalid, newSupplyId, notFound } from "../supply/supply-util";
 
 export const CONTENT_TYPES = ["ANNOUNCEMENT", "NEWS"] as const;
 export type ContentType = (typeof CONTENT_TYPES)[number];
@@ -94,6 +98,7 @@ export function itemScope(row: { gameId: string | null }): ContentScope {
 export type ContentItemRow = {
   id: string;
   type: string;
+  resourceKey: string | null;
   gameId: string | null;
   gameName: string | null;
   sortOrder: number;
@@ -111,6 +116,8 @@ export type ContentVersionRow = {
   title: string;
   summary: string;
   body: string;
+  payload: ContentResource | null;
+  updateSettings?: UpdateSettings;
   coverMediaId: string | null;
   revision: string;
   publishedAt: Date | null;
@@ -119,10 +126,10 @@ export type ContentVersionRow = {
   updatedAt: Date;
 };
 
-const ITEM_FIELDS = `i."id", i."type", i."game_id" AS "gameId", g."name" AS "gameName", i."sort_order" AS "sortOrder",
+const ITEM_FIELDS = `i."id", i."type", i."resource_key" AS "resourceKey", i."game_id" AS "gameId", g."name" AS "gameName", i."sort_order" AS "sortOrder",
   i."revision"::text AS "revision", i."created_by_admin_id" AS "createdByAdminId", i."created_at" AS "createdAt", i."updated_at" AS "updatedAt"`;
 
-const VERSION_FIELDS = `v."id", v."item_id" AS "itemId", v."sequence", v."state", v."title", v."summary", v."body",
+const VERSION_FIELDS = `v."id", v."item_id" AS "itemId", v."sequence", v."state", v."title", v."summary", v."body", v."payload", v."update_settings" AS "updateSettings",
   v."cover_media_id" AS "coverMediaId", v."revision"::text AS "revision", v."published_at" AS "publishedAt",
   v."published_by_admin_id" AS "publishedByAdminId", v."created_at" AS "createdAt", v."updated_at" AS "updatedAt"`;
 
@@ -136,10 +143,10 @@ export async function loadContentItem(client: PoolClient, itemId: string, forUpd
   return result.rows[0] ?? null;
 }
 
-export async function loadContentVersions(client: PoolClient, itemId: string): Promise<ContentVersionRow[]> {
+export async function loadContentVersions(client: PoolClient, itemId: string, activePayloadsOnly = false): Promise<ContentVersionRow[]> {
   return (
     await client.query<ContentVersionRow>(
-      `SELECT ${VERSION_FIELDS} FROM "zzsh_content"."content_version" v WHERE v."item_id" = $1 ORDER BY v."sequence" DESC, v."id" DESC`,
+      `SELECT ${activePayloadsOnly ? VERSION_FIELDS.replace('v."payload"', `CASE WHEN v."state" IN ('DRAFT', 'PUBLISHED') THEN v."payload" ELSE NULL END AS "payload"`) : VERSION_FIELDS} FROM "zzsh_content"."content_version" v WHERE v."item_id" = $1 ORDER BY v."sequence" DESC, v."id" DESC`,
       [itemId],
     )
   ).rows;
@@ -168,29 +175,155 @@ async function requirePublicContentMedia(client: PoolClient, mediaId: string, la
   if (row.rows.length === 0) throw conflict(`${label} must be approved and publicly displayable`);
 }
 
+export function checkedResource(key: string, value: unknown): ContentResource {
+  try {
+    validateResourceKey(key);
+    return validateResource(key, value);
+  } catch (error) {
+    throw invalid(error instanceof Error ? error.message : "Content resource is invalid");
+  }
+}
+
+function isMarkdownResource(payload: ContentResource): payload is Extract<ContentResource, { kind: "guide" | "notice" }> & { format: "markdown"; markdown: string; mediaIds: string[] } {
+  return (payload.kind === "guide" || payload.kind === "notice") && "format" in payload && payload.format === "markdown";
+}
+
+export function isMediaResource(payload: ContentResource): boolean {
+  return payload.kind === "contact" || payload.kind === "banner" || payload.kind === "carousel";
+}
+
+export function fixedCarouselDraft(source: ContentResource): ContentResource {
+  const template = DEFAULT_RESOURCES["placement:HOME_HERO"];
+  if (source.kind !== "carousel" || template?.kind !== "carousel") throw invalid("Carousel template is unavailable");
+  return checkedResource("placement:HOME_HERO", {
+    ...template,
+    slides: template.slides.map(slot => {
+      const previous = source.slides.find(slide => slide.id === slot.id);
+      return { ...slot, mediaId: previous?.mediaId ?? null, mobileMediaId: previous?.mobileMediaId ?? null };
+    }),
+  });
+}
+
+/** Store original Markdown, with only its media manifest derived from the same AST. */
+export async function prepareResourceDraft(key: string, value: unknown): Promise<ContentResource> {
+  const payload = checkedResource(key, value);
+  if (!isMarkdownResource(payload)) return payload;
+  const analysis = await inspectContentMarkdown(payload.markdown);
+  return { ...payload, mediaIds: analysis.mediaIds };
+}
+
+/** Fixed-page resources keep their original metadata; this boundary accepts images only. */
+export function replaceResourceMedia(key: string, payload: ContentResource, input: unknown): ContentResource {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw invalid("Media fields are required");
+  const media = input as Record<string, unknown>;
+  if (payload.kind === "contact") {
+    ensureOnlyFields(media, ["qrMediaId"]);
+    if (!("qrMediaId" in media)) throw invalid("qrMediaId is required");
+    return checkedResource(key, { ...payload, qrMediaId: media.qrMediaId });
+  }
+  if (payload.kind === "banner") {
+    ensureOnlyFields(media, ["mediaId", "mobileMediaId"]);
+    if (!("mediaId" in media) || !("mobileMediaId" in media)) throw invalid("Both image references are required");
+    return checkedResource(key, { ...payload, mediaId: media.mediaId, mobileMediaId: media.mobileMediaId });
+  }
+  if (payload.kind === "carousel") {
+    const template = DEFAULT_RESOURCES["placement:HOME_HERO"];
+    if (template?.kind !== "carousel" || JSON.stringify(payload.slides.map(slide => slide.id)) !== JSON.stringify(template.slides.map(slide => slide.id))) {
+      throw conflict("Legacy carousel positions are not automatically mapped; explicitly restore a version to create the fixed-position draft first");
+    }
+    ensureOnlyFields(media, ["slides"]);
+    if (!Array.isArray(media.slides) || media.slides.length !== payload.slides.length) throw invalid("Existing carousel positions cannot be added or removed");
+    const inputSlides = media.slides;
+    const slides = payload.slides.map((slide, index) => {
+      const entry = inputSlides[index];
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw invalid("Carousel image fields are invalid");
+      const fields = entry as Record<string, unknown>;
+      ensureOnlyFields(fields, ["id", "mediaId", "mobileMediaId"]);
+      if (fields.id !== slide.id || !("mediaId" in fields) || !("mobileMediaId" in fields)) throw invalid("Carousel positions and order cannot change");
+      return { ...slide, mediaId: fields.mediaId, mobileMediaId: fields.mobileMediaId };
+    });
+    return checkedResource(key, { ...payload, slides });
+  }
+  throw invalid("Only fixed image resources accept media replacement");
+}
+
+export async function requireResourceMedia(client: PoolClient, payload: ContentResource, publishing: boolean, resourceKey?: string): Promise<void> {
+  const document = isMarkdownResource(payload) ? payload : null;
+  // Unchecked draft text is inert and must be recoverable, including unresolved image references.
+  if (document && !publishing) return;
+  const markdown = document ? await inspectContentMarkdown(document.markdown) : null;
+  const ids = markdown ? markdown.mediaIds : resourceMediaIds(payload);
+  if (!markdown && !ids.length) return;
+  const result = ids.length ? await client.query<{ id: string; reviewState: string; accessClass: string; publicStorageKey: string | null; width: number; height: number }>(
+    `SELECT "id", "width", "height", "review_state" AS "reviewState", "access_class" AS "accessClass", "public_storage_key" AS "publicStorageKey"
+       FROM "zzsh_supply"."media_asset" WHERE "id" = ANY($1::text[])
+        AND "purpose" = 'CONTENT_MEDIA' AND "ownership_kind" = 'PLATFORM_CONTENT'${publishing ? " FOR SHARE" : ""}`,
+    [ids],
+  ) : { rows: [] };
+  if (markdown) {
+    const media = Object.fromEntries(result.rows.map(row => [row.id, {
+      available: row.reviewState === "APPROVED" && row.accessClass === "PUBLIC_DISPLAY" && Boolean(row.publicStorageKey),
+      reason: "素材未通过审核、已撤权或缺少公开衍生图",
+    }]));
+    const compact = ["placement:PUBLISH_SAFE_BOX", "placement:PUBLISH_RESOURCES", "placement:PUBLISH_TERM", "placement:RENTAL_FEES"].includes(resourceKey ?? "");
+    const analysis = await inspectContentMarkdown(document!.markdown, { media, compact });
+    if (analysis.blocking > 0) {
+      const issues = analysis.issues.filter(issue => issue.severity === "blocking");
+      throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT,
+        `正文未发布：${issues.map(issue => `第${issue.line}行 ${issue.message}`).slice(0, 10).join("；")}`,
+        issues.map(issue => ({ path: `payload.markdown:${issue.line}:${issue.column}`, code: "INVALID_FIELD" as const })));
+    }
+    if (JSON.stringify(ids) !== JSON.stringify(document!.mediaIds)) throw conflict("Markdown media references changed; save this draft again before publishing");
+  }
+  if (result.rows.length !== ids.length) throw invalid("Only platform content media can be referenced");
+  if (publishing && result.rows.some(row => row.reviewState !== "APPROVED" || row.accessClass !== "PUBLIC_DISPLAY" || !row.publicStorageKey)) {
+    throw conflict("Every referenced media asset must be approved and publicly displayable");
+  }
+  if (publishing) { try { validateResourceMedia(payload, result.rows); } catch (error) { throw invalid(error instanceof Error ? error.message : "Resource image dimensions are invalid"); } }
+}
+
 export type DraftInput = {
   title?: string;
   summary?: string;
   body?: string;
   coverMediaId?: string | null;
+  payload?: ContentResource;
+  updateSettings?: UpdateSettings;
 };
 
-async function applyDraftFields(client: PoolClient, versionId: string, itemId: string, input: DraftInput): Promise<void> {
+async function applyDraftFields(client: PoolClient, versionId: string, item: ContentItemRow, input: DraftInput, mediaOnly = false): Promise<void> {
   const sets: string[] = [];
   const parameters: unknown[] = [];
   const push = (fragment: string, value: unknown): void => {
     parameters.push(value);
     sets.push(fragment.replace("?", `$${parameters.length}`));
   };
+  if (input.payload !== undefined) {
+    if (item.type !== "RESOURCE" || !item.resourceKey) throw invalid("Structured content requires a managed resource");
+    const payload = await prepareResourceDraft(item.resourceKey, input.payload);
+    if (isMediaResource(payload) && !mediaOnly) throw invalid("Fixed page images require the media-only draft endpoint");
+    await requireResourceMedia(client, payload, false);
+    push(`"payload" = ?::jsonb`, JSON.stringify(payload));
+    push(`"title" = ?`, payload.title);
+    push(`"summary" = ?`, payload.kind === "guide" ? payload.summary : "");
+  } else if (item.type === "RESOURCE") throw invalid("Managed resources require a complete payload");
+  if (item.type === "RESOURCE" && [input.title, input.summary, input.body, input.coverMediaId].some(value => value !== undefined)) throw invalid("Managed resource text is derived from its payload");
   if (input.title !== undefined) push(`"title" = ?`, normalizeContentText(input.title, "title"));
   if (input.summary !== undefined) push(`"summary" = ?`, normalizeContentText(input.summary, "summary"));
   if (input.body !== undefined) push(`"body" = ?`, normalizeContentText(input.body, "body"));
+  if (input.updateSettings !== undefined && item.type === "RESOURCE") throw invalid("Resources cannot carry platform update settings");
+  if (item.type !== "RESOURCE" && (input.body !== undefined || input.updateSettings !== undefined)) {
+    const current = await loadContentVersion(client, versionId);
+    if (!current) throw notFound();
+    const settings = await prepareUpdateSettings(normalizeContentText(input.body ?? current.body, "body"), input.updateSettings ?? current.updateSettings ?? {});
+    push(`"update_settings" = ?::jsonb`, JSON.stringify(settings));
+  }
   if (input.coverMediaId !== undefined) {
     if (input.coverMediaId !== null) await requireContentMedia(client, input.coverMediaId);
     push(`"cover_media_id" = ?`, input.coverMediaId);
   }
   if (sets.length === 0) throw invalid("No draft fields were provided");
-  parameters.push(versionId, itemId);
+  parameters.push(versionId, item.id);
   await client.query(
     `UPDATE "zzsh_content"."content_version" SET ${sets.join(", ")}, "revision" = "revision" + 1, "updated_at" = clock_timestamp()
       WHERE "id" = $${parameters.length - 1} AND "item_id" = $${parameters.length} AND "state" = 'DRAFT'`,
@@ -199,18 +332,27 @@ async function applyDraftFields(client: PoolClient, versionId: string, itemId: s
 }
 
 export type NewContentItemInput = {
-  type: ContentType;
+  type: ContentType | "RESOURCE";
+  resourceKey?: string;
+  payload?: ContentResource;
   gameId: string | null;
   title?: string;
   summary?: string;
   body?: string;
   coverMediaId?: string | null;
+  updateSettings?: UpdateSettings;
   // Offline seed writers only: deterministic ids make seed re-runs idempotent.
   // HTTP routes never populate this, so untrusted callers cannot mint ids.
   ids?: { itemId: string; versionId: string };
 };
 
 export async function createContentItem(client: PoolClient, adminUserId: string, input: NewContentItemInput): Promise<{ item: ContentItemRow; version: ContentVersionRow }> {
+  const payload = input.type === "RESOURCE" && input.resourceKey ? await prepareResourceDraft(input.resourceKey, input.payload) : null;
+  if (input.type === "RESOURCE" && !payload) throw invalid("A resource key and payload are required");
+  if (input.type !== "RESOURCE" && (input.resourceKey !== undefined || input.payload !== undefined)) throw invalid("Legacy content does not accept a resource payload");
+  if (input.type === "RESOURCE" && input.updateSettings !== undefined) throw invalid("Resources cannot carry platform update settings");
+  const updateConfig = input.type === "RESOURCE" ? {} : await prepareUpdateSettings(normalizeContentText(input.body ?? "", "body"), input.updateSettings ?? {});
+  if (payload) await requireResourceMedia(client, payload, false);
   if (input.type === "ANNOUNCEMENT" && input.gameId !== null) throw invalid("Platform announcements cannot belong to a game");
   if (input.gameId !== null) {
     const game = await client.query(`SELECT 1 FROM "zzsh_supply"."game" WHERE "id" = $1`, [input.gameId]);
@@ -223,20 +365,22 @@ export async function createContentItem(client: PoolClient, adminUserId: string,
   const itemId = input.ids?.itemId ?? newSupplyId("cnt");
   const versionId = input.ids?.versionId ?? newSupplyId("cntv");
   await client.query(
-    `INSERT INTO "zzsh_content"."content_item" ("id", "type", "game_id", "created_by_admin_id") VALUES ($1, $2, $3, $4)`,
-    [itemId, input.type, input.gameId, adminUserId],
+    `INSERT INTO "zzsh_content"."content_item" ("id", "type", "game_id", "created_by_admin_id", "resource_key") VALUES ($1, $2, $3, $4, $5)`,
+    [itemId, input.type, input.gameId, adminUserId, input.resourceKey ?? null],
   );
   await client.query(
-    `INSERT INTO "zzsh_content"."content_version" ("id", "item_id", "sequence", "title", "summary", "body", "cover_media_id", "created_by_admin_id")
-     VALUES ($1, $2, 1, $3, $4, $5, $6, $7)`,
+    `INSERT INTO "zzsh_content"."content_version" ("id", "item_id", "sequence", "title", "summary", "body", "cover_media_id", "created_by_admin_id", "payload", "update_settings")
+     VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb)`,
     [
       versionId,
       itemId,
-      normalizeContentText(input.title ?? "", "title"),
-      normalizeContentText(input.summary ?? "", "summary"),
+      payload?.title ?? normalizeContentText(input.title ?? "", "title"),
+      payload?.kind === "guide" ? payload.summary : normalizeContentText(input.summary ?? "", "summary"),
       normalizeContentText(input.body ?? "", "body"),
       input.coverMediaId ?? null,
       adminUserId,
+      payload ? JSON.stringify(payload) : null,
+      JSON.stringify(updateConfig),
     ],
   );
   return { item: (await loadContentItem(client, itemId))!, version: (await loadContentVersion(client, versionId))! };
@@ -249,18 +393,36 @@ export async function saveContentDraft(
   expectedRevision: string,
   input: DraftInput,
 ): Promise<{ item: ContentItemRow; version: ContentVersionRow }> {
+  return saveDraft(client, itemId, versionId, expectedRevision, input);
+}
+
+async function saveDraft(
+  client: PoolClient, itemId: string, versionId: string, expectedRevision: string, input: DraftInput, mediaOnly = false,
+): Promise<{ item: ContentItemRow; version: ContentVersionRow }> {
   const item = await loadContentItem(client, itemId, true);
   if (!item) throw notFound();
   const version = await loadContentVersion(client, versionId, true);
   if (!version || version.itemId !== itemId) throw notFound();
   if (version.state !== "DRAFT") throw conflict("Only the current draft can be edited");
-  if (version.revision !== expectedRevision) throw conflict("Content changed; reload and retry");
-  await applyDraftFields(client, versionId, itemId, input);
-  await client.query(`UPDATE "zzsh_content"."content_item" SET "updated_at" = clock_timestamp() WHERE "id" = $1`, [itemId]);
+  if ((item.type === "RESOURCE" ? item.revision : version.revision) !== expectedRevision) throw conflict("Content changed; reload and retry");
+  await applyDraftFields(client, versionId, item, input, mediaOnly);
+  await client.query(`UPDATE "zzsh_content"."content_item" SET "revision" = "revision" + CASE WHEN "type" = 'RESOURCE' THEN 1 ELSE 0 END, "updated_at" = clock_timestamp() WHERE "id" = $1`, [itemId]);
   return { item: (await loadContentItem(client, itemId))!, version: (await loadContentVersion(client, versionId))! };
 }
 
-export async function createContentDraftFromLatest(client: PoolClient, adminUserId: string, itemId: string): Promise<{ version: ContentVersionRow }> {
+export async function saveContentMediaDraft(
+  client: PoolClient, itemId: string, versionId: string, expectedRevision: string, media: unknown,
+): Promise<{ item: ContentItemRow; version: ContentVersionRow }> {
+  const item = await loadContentItem(client, itemId, true);
+  if (!item || item.type !== "RESOURCE" || !item.resourceKey) throw notFound();
+  const version = await loadContentVersion(client, versionId, true);
+  if (!version || version.itemId !== itemId) throw notFound();
+  if (version.state !== "DRAFT" || item.revision !== expectedRevision) throw conflict("Content changed; reload and retry");
+  const payload = replaceResourceMedia(item.resourceKey, checkedResource(item.resourceKey, version.payload), media);
+  return saveDraft(client, itemId, versionId, expectedRevision, { payload }, true);
+}
+
+export async function createContentDraftFromLatest(client: PoolClient, adminUserId: string, itemId: string, sourceVersionId?: string): Promise<{ version: ContentVersionRow }> {
   const item = await loadContentItem(client, itemId, true);
   if (!item) throw notFound();
   const existingDraft = await client.query(`SELECT 1 FROM "zzsh_content"."content_version" WHERE "item_id" = $1 AND "state" = 'DRAFT'`, [itemId]);
@@ -272,14 +434,31 @@ export async function createContentDraftFromLatest(client: PoolClient, adminUser
     )
   ).rows[0];
   if (!latest) throw conflict("There is no version to copy into a draft");
+  const source = sourceVersionId ? await loadContentVersion(client, sourceVersionId) : latest;
+  if (!source || source.itemId !== itemId || source.state === "DRAFT") throw notFound();
   const versionId = newSupplyId("cntv");
+  const payload = item.resourceKey === "placement:HOME_HERO" && source.payload ? fixedCarouselDraft(source.payload) : source.payload;
   await client.query(
-    `INSERT INTO "zzsh_content"."content_version" ("id", "item_id", "sequence", "title", "summary", "body", "cover_media_id", "created_by_admin_id")
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-    [versionId, itemId, latest.sequence + 1, latest.title, latest.summary, latest.body, latest.coverMediaId, adminUserId],
+    `INSERT INTO "zzsh_content"."content_version" ("id", "item_id", "sequence", "title", "summary", "body", "cover_media_id", "created_by_admin_id", "payload", "update_settings")
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb)`,
+    [versionId, itemId, latest.sequence + 1, payload?.title ?? source.title, source.summary, source.body, source.coverMediaId, adminUserId, payload ? JSON.stringify(payload) : null, JSON.stringify(source.updateSettings ?? {})],
   );
-  await client.query(`UPDATE "zzsh_content"."content_item" SET "updated_at" = clock_timestamp() WHERE "id" = $1`, [itemId]);
+  await client.query(`UPDATE "zzsh_content"."content_item" SET "revision" = "revision" + CASE WHEN "type" = 'RESOURCE' THEN 1 ELSE 0 END, "updated_at" = clock_timestamp() WHERE "id" = $1`, [itemId]);
   return { version: (await loadContentVersion(client, versionId))! };
+}
+
+/** A saved draft becomes immutable history before its replacement; the selected source is copied unchanged. */
+export async function restoreContentDraft(
+  client: PoolClient, adminUserId: string, itemId: string, sourceVersionId: string, expectedRevision: string,
+): Promise<{ version: ContentVersionRow }> {
+  const item = await loadContentItem(client, itemId, true);
+  if (!item || item.type !== "RESOURCE") throw notFound();
+  if (item.revision !== expectedRevision) throw conflict("Content changed; reload before restoring");
+  const source = await loadContentVersion(client, sourceVersionId, true);
+  if (!source || source.itemId !== item.id) throw notFound();
+  await client.query(`UPDATE "zzsh_content"."content_version" SET "state" = 'SUPERSEDED', "updated_at" = clock_timestamp()
+    WHERE "item_id" = $1 AND "state" = 'DRAFT'`, [item.id]);
+  return createContentDraftFromLatest(client, adminUserId, item.id, source.id);
 }
 
 export async function publishContentVersion(
@@ -294,8 +473,16 @@ export async function publishContentVersion(
   const version = await loadContentVersion(client, versionId, true);
   if (!version || version.itemId !== itemId) throw notFound();
   if (version.state !== "DRAFT") throw conflict("Only a draft can be published");
-  if (version.revision !== expectedRevision) throw conflict("Content changed; reload and retry");
-  if ([...version.title].length === 0) throw invalid("A title is required to publish");
+  if ((item.type === "RESOURCE" ? item.revision : version.revision) !== expectedRevision) throw conflict("Content changed; reload and retry");
+  if (!version.title.trim()) throw invalid("A title is required to publish");
+  if (item.type === "RESOURCE") {
+    if (!item.resourceKey) throw invalid("Resource key is missing");
+    await requireResourceMedia(client, checkedResource(item.resourceKey, version.payload), true, item.resourceKey);
+  } else {
+    const settings = checkedUpdateSettings(version.updateSettings ?? {});
+    await checkUpdateRelease(client, item, settings);
+    if (settings.format === "markdown") await requireResourceMedia(client, { kind: "notice", title: version.title, format: "markdown", schemaVersion: 1, markdown: version.body, mediaIds: settings.mediaIds }, true);
+  }
   if (version.coverMediaId) await requirePublicContentMedia(client, version.coverMediaId, "Cover media");
   await client.query(`UPDATE "zzsh_content"."content_version" SET "state" = 'SUPERSEDED', "updated_at" = clock_timestamp() WHERE "item_id" = $1 AND "state" = 'PUBLISHED'`, [itemId]);
   await client.query(
@@ -342,7 +529,7 @@ export async function listAdminContentItems(
   cursor: { updatedAt: string; id: string } | null,
 ): Promise<{ items: (ContentItemRow & { draft: Record<string, unknown> | null; published: Record<string, unknown> | null })[]; nextCursor: string | null }> {
   const parameters: unknown[] = [];
-  const conditions: string[] = [];
+  const conditions: string[] = filter.type ? [] : [`i."type" IN ('ANNOUNCEMENT', 'NEWS')`];
   if (filter.type) {
     parameters.push(filter.type);
     conditions.push(`i."type" = $${parameters.length}`);
@@ -477,6 +664,7 @@ export function carouselUpdateRequiresPublish(current: CarouselRow, input: Carou
 }
 
 export async function createCarouselItem(client: PoolClient, adminUserId: string, slot: CarouselSlot, input: CarouselInput, idOverride?: string): Promise<CarouselRow> {
+  await assertLegacyCarouselEditable(client);
   if (idOverride !== undefined && !/^crl_[0-9a-f]{32}$/.test(idOverride)) throw invalid("Carousel id is invalid");
   if (!input.mediaId) throw invalid("mediaId is required");
   if (!input.title) throw invalid("title is required");
@@ -505,6 +693,7 @@ export async function createCarouselItem(client: PoolClient, adminUserId: string
 }
 
 export async function updateCarouselItem(client: PoolClient, id: string, expectedRevision: string, input: CarouselInput): Promise<CarouselRow> {
+  await assertLegacyCarouselEditable(client);
   const current = await loadCarouselItem(client, id, true);
   if (!current) throw notFound();
   if (current.revision !== expectedRevision) throw conflict("Carousel item changed; reload and retry");
@@ -549,6 +738,12 @@ export async function updateCarouselItem(client: PoolClient, id: string, expecte
   return (await loadCarouselItem(client, id))!;
 }
 
+async function assertLegacyCarouselEditable(client: PoolClient): Promise<void> {
+  await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, ["content-resource:placement:HOME_HERO"]);
+  const row = await client.query(`SELECT 1 FROM "zzsh_content"."content_item" WHERE "type" = 'RESOURCE' AND "resource_key" = 'placement:HOME_HERO'`);
+  if (row.rows.length) throw conflict("Home carousel is managed through content resources; edit its draft there");
+}
+
 export async function listAdminCarousel(
   client: PoolClient,
   slot: CarouselSlot,
@@ -589,7 +784,7 @@ export async function listPublicContentItems(
   cursor: { sortOrder: number; publishedAt: string; id: string } | null,
 ): Promise<{ items: Record<string, unknown>[]; nextCursor: string | null }> {
   const parameters: unknown[] = [];
-  const conditions = [`v."state" = 'PUBLISHED'`];
+  const conditions = [`v."state" = 'PUBLISHED'`, `i."type" IN ('ANNOUNCEMENT', 'NEWS')`];
   if (filter.type) {
     parameters.push(filter.type);
     conditions.push(`i."type" = $${parameters.length}`);
@@ -637,7 +832,7 @@ export async function getPublicContentItem(client: PoolClient, itemId: string): 
        LEFT JOIN "zzsh_supply"."game" g ON g."id" = i."game_id"
        LEFT JOIN "zzsh_supply"."media_asset" m ON m."id" = v."cover_media_id" AND m."purpose" = 'CONTENT_MEDIA'
               AND m."review_state" = 'APPROVED' AND m."access_class" = 'PUBLIC_DISPLAY' AND m."public_storage_key" IS NOT NULL
-      WHERE i."id" = $1`,
+      WHERE i."id" = $1 AND i."type" IN ('ANNOUNCEMENT', 'NEWS')`,
     [itemId],
   );
   return row.rows[0] ?? null;

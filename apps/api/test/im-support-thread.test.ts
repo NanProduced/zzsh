@@ -201,7 +201,7 @@ test("the responsible agent may send, another admin may only read the same threa
 });
 
 test("0113 adds the persistent thread, round link and round-close operation without claiming dismissed Teams", () => {
-  const sql = readFileSync(resolve("migrations/business/0113_im_support_thread.sql"), "utf8");
+  const sql = readFileSync(resolve("migrations/business/0117_im_support_thread.sql"), "utf8");
   assert.match(sql, /CREATE TABLE IF NOT EXISTS "zzsh_iam"\."im_support_thread"/);
   assert.match(sql, /CREATE UNIQUE INDEX IF NOT EXISTS "im_support_thread_user_kind_unique"[\s\S]*?\("app_id", "user_id", "kind"\)/);
   assert.match(sql, /CREATE UNIQUE INDEX IF NOT EXISTS "im_consultation_thread_open_unique"[\s\S]*?WHERE "state" <> 'CLOSED'/);
@@ -213,7 +213,7 @@ test("0113 adds the persistent thread, round link and round-close operation with
   assert.match(sql, /"operation_type" = 'CREATE'[\s\S]*?"target_admin_id" IS NULL AND "target_admin_account_id" IS NULL/);
 
   const journal = JSON.parse(readFileSync(resolve("migrations/business/meta/_journal.json"), "utf8"));
-  assert.ok(journal.entries.some((entry: { idx: number; tag: string }) => entry.idx === 113 && entry.tag === "0113_im_support_thread"));
+  assert.ok(journal.entries.some((entry: { idx: number; tag: string }) => entry.idx === 117 && entry.tag === "0117_im_support_thread"));
 
   const acl = readFileSync(resolve("src/database/business-migrations.ts"), "utf8");
   assert.match(acl, /GRANT SELECT, INSERT ON TABLE "zzsh_iam"\."im_support_thread"/);

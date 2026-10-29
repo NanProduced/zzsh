@@ -15,7 +15,7 @@ test("manual close is a paid cancellation, while unpaid cancellations stay unpai
 });
 
 test("0112 admits only the paid MANUAL_CLOSE transition and keeps the row immutable", () => {
-  const sql = readFileSync(resolve("migrations/business/0112_manual_close.sql"), "utf8");
+  const sql = readFileSync(resolve("migrations/business/0116_manual_close.sql"), "utf8");
   assert.match(sql, /cancel_reason IN\('USER','TIMEOUT','PRESTART_TERMINATED','MANUAL_CLOSE'\)/);
   assert.match(sql, /cancel_reason IN\('PRESTART_TERMINATED','MANUAL_CLOSE'\) AND paid_confirmation_id IS NOT NULL/);
   assert.match(sql, /OLD\.status='PAID' AND NEW\.status='CANCELLED' AND NEW\.cancel_reason='MANUAL_CLOSE'/);
@@ -24,5 +24,5 @@ test("0112 admits only the paid MANUAL_CLOSE transition and keeps the row immuta
   assert.match(sql, /prestart_termination t WHERE t\.order_id=NEW\.id AND t\.state<>'REJECTED'/);
   assert.match(sql, /CREATE TRIGGER manual_close_order_guard BEFORE UPDATE ON zzsh_order\.rental_order/);
   const journal = JSON.parse(readFileSync(resolve("migrations/business/meta/_journal.json"), "utf8"));
-  assert.ok(journal.entries.some((entry: { idx: number; tag: string }) => entry.idx === 112 && entry.tag === "0112_manual_close"));
+  assert.ok(journal.entries.some((entry: { idx: number; tag: string }) => entry.idx === 116 && entry.tag === "0116_manual_close"));
 });

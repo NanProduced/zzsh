@@ -7,13 +7,15 @@
 - [多端与 BFF](architecture/multi-client-bff.md)
 - [供给目录、管理权限与会员计价术语](architecture/GLOSSARY.md)
 - [API v1 契约](architecture/api-v1-contract.md)
+- [支付与资金领域规格](architecture/payments-and-funds.md)（支付、退款、钱包/分销、绑卡提现及新旧资金承接总入口）
 - [三角洲租赁业务边界](architecture/rental-business-rules.md)（已确认要求与当前实现范围分开）
 - [新旧交易与结算行为对照](architecture/legacy-business-behavior-diff.md)（测试用预期变更、保留行为与证据边界）
 - [旧数据转换与字段映射](architecture/legacy-data-mapping.md)（源字段、目标、接口及双端消费；规则变更对照）
-- [数据库结构导航](architecture/database-navigation.md)（源码 108 份业务迁移 0000–0107、实际执行状态分别核验）
+- [数据库结构导航](architecture/database-navigation.md)（源码 112 份业务迁移 0000–0111、实际执行状态分别核验）
 - [用户供给表单数据契约](architecture/supply-form-contract.md)
 - [租赁会员、个人确认与建单](architecture/personal-confirmation.md)
 - [公开交易统计读取](architecture/public-trade-activity.md)
+- [内容管理、资源格式与存储](architecture/content-management.md)
 - [旧交易续办与责任边界](architecture/legacy-trade-continuation.md)
 - [会员成长与人工礼遇](architecture/membership-growth.md)
 - [信用与号主保证金运行合同](architecture/credit-guarantee.md)

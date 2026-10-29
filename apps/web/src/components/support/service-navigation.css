@@ -240,3 +240,4 @@
  .supply-account-row { flex-direction:column; }
  .supply-account-state { text-align:left; }
 }
+.contact-save { display:block; text-align:center; text-decoration:underline; text-underline-offset:4px; font-size:13px; }

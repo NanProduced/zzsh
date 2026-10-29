@@ -10,8 +10,8 @@ export function getHelpArticle(slug: string): HelpArticle | undefined {
   return bySlug.get(slug);
 }
 
-export function listHelpArticlesByCategory(category: AnyHelpCategoryId): readonly HelpArticle[] {
-  return allHelpArticles.filter((article) => article.category === category);
+export function listHelpArticlesByCategory(category: AnyHelpCategoryId, articles: readonly HelpArticle[] = allHelpArticles): readonly HelpArticle[] {
+  return articles.filter((article) => article.category === category);
 }
 
 /** 首页推荐问题：人工挑选，不伪称热门或阅读数 */
@@ -24,10 +24,10 @@ export const featuredSlugs = [
   "account-recovery",
 ] as const;
 
-export function listFeaturedArticles(): HelpArticle[] {
-  return featuredSlugs.map((slug) => bySlug.get(slug)).filter((a): a is HelpArticle => a !== undefined);
+export function listFeaturedArticles(articles: readonly HelpArticle[] = allHelpArticles): HelpArticle[] {
+  return featuredSlugs.map(slug => articles.find(article => article.slug === slug)).filter((a): a is HelpArticle => a !== undefined);
 }
 
-export function resolveRelated(article: HelpArticle): HelpArticle[] {
-  return article.related.map((slug) => bySlug.get(slug)).filter((a): a is HelpArticle => a !== undefined);
+export function resolveRelated(article: HelpArticle, articles: readonly HelpArticle[] = allHelpArticles): HelpArticle[] {
+  return article.related.map(slug => articles.find(value => value.slug === slug)).filter((a): a is HelpArticle => a !== undefined);
 }

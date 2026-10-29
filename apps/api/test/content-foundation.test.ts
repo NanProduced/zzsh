@@ -2,10 +2,11 @@ import { ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
 import sharp from "sharp";
 import { strict as assert } from "node:assert";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { cp, lstat, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { test } from "node:test";
+import { execFileSync } from "node:child_process";
 
 import { Pool, type PoolClient } from "pg";
 
@@ -15,15 +16,25 @@ import { assertBusinessRuntimeIdentity, createBusinessPool } from "../src/databa
 import { runBusinessMigrations } from "../src/database/business-migrations";
 import { createLocalMediaStorage } from "../src/supply/media";
 import { loadConfig, type AppConfig } from "../src/config/config";
+import { DEFAULT_GUIDES, DEFAULT_RESOURCES, validateResource, type ContentResource } from "@zzsh/content";
+import { fingerprintRequest } from "../src/supply/supply-util";
 
 const RESOURCE_SET = process.env.CONTENT_TEST_RESOURCE_SET?.trim() || "";
 if (RESOURCE_SET && !/^[a-z][a-z0-9_]{0,20}$/.test(RESOURCE_SET)) throw new Error("Invalid content test resource set");
 const DEFAULT_DATABASE = RESOURCE_SET ? "zzsh_test_content_" + RESOURCE_SET : "zzsh_test_content";
 const RESOURCE_MARKER = "zzsh:m3-content-test:v1";
 const LOCK_KEY = RESOURCE_SET ? (BigInt("0x" + createHash("sha256").update("content-test:" + RESOURCE_SET).digest("hex").slice(0, 15)) + 3000000n).toString() : "805016";
-const USER_ORIGIN = "http://127.0.0.1:3100";
-const ADMIN_ORIGIN = "http://127.0.0.1:3101";
-const API_ORIGIN = "http://127.0.0.1:3102";
+function testOrigin(name: string, fallback: string): string {
+  const value = process.env[name]?.trim() || fallback;
+  const url = new URL(value);
+  assert.ok(["http:", "https:"].includes(url.protocol) && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname), `${name} must use a loopback origin`);
+  assert.ok(!url.username && !url.password && url.pathname === "/" && !url.search && !url.hash, `${name} must be an origin without credentials, path or query`);
+  return url.origin;
+}
+
+const USER_ORIGIN = testOrigin("CONTENT_TEST_USER_ORIGIN", "http://127.0.0.1:3100");
+const ADMIN_ORIGIN = testOrigin("CONTENT_TEST_ADMIN_ORIGIN", "http://127.0.0.1:3101");
+const API_ORIGIN = testOrigin("CONTENT_TEST_API_ORIGIN", "http://127.0.0.1:3102");
 const BUSINESS_SCHEMAS = ["zzsh_business_meta", "zzsh_iam", "zzsh_auth_user", "zzsh_auth_admin", "zzsh_supply", "zzsh_content"] as const;
 
 type CookieJar = { values: Map<string, string>; update: (response: Response) => void; header: () => string };
@@ -38,6 +49,69 @@ type Resources = {
   runtimePassword: string;
 };
 type Staff = { id: string; username: string; jar: CookieJar; password: string; secret: string };
+type FixtureExport = {
+  schema: "zzsh-content-local-fixture.v1";
+  resourceSet: "cms_formal";
+  database: { name: string; migrationUser: string; runtimeUser: string; marker: string };
+  origins: { user: string; admin: string; api: string };
+  boss: Pick<Staff, "id" | "username" | "password" | "secret">;
+  authRuntimeEnv: Record<"AUTH_API_ORIGIN" | "AUTH_USER_ORIGIN" | "AUTH_ADMIN_ORIGIN" | "AUTH_USER_SECRET" | "AUTH_ADMIN_SECRET" | "AUTH_ADMIN_BOOTSTRAP_SECRET", string>;
+  mediaDirectory: string;
+  createdAt: string;
+};
+
+let fixturePrivateRoot: string | undefined;
+function fixturePrivateDirectory(): string {
+  if (!fixturePrivateRoot) {
+    const common = execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" }).trim();
+    fixturePrivateRoot = join(dirname(common), "apps", "api", ".secrets", "content-management-fullstack");
+  }
+  return fixturePrivateRoot;
+}
+
+async function requireAbsent(file: string, message: string): Promise<void> {
+  try { await lstat(file); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+  throw new Error(message);
+}
+
+async function fixtureExportPaths(): Promise<{ output: string; media: string } | null> {
+  const targetDatabase = process.env.CONTENT_TEST_DB_NAME?.trim() || DEFAULT_DATABASE;
+  if (targetDatabase === "zzsh_test_content_cms_formal") {
+    await requireAbsent(join(fixturePrivateDirectory(), "fixture-ui-retained.json"), "cms_formal is UI_RETAINED; regression reset is blocked");
+    await requireAbsent(join(fixturePrivateDirectory(), "formal-ui-fixture.json"), "cms_formal already has a retained fixture; regression reset is blocked");
+    await requireAbsent(join(fixturePrivateDirectory(), "formal-ui-media"), "cms_formal already has retained media; regression reset is blocked");
+  }
+  const requested = process.env.CONTENT_TEST_FIXTURE_OUTPUT;
+  if (!requested) return null;
+  assert.equal(RESOURCE_SET, "cms_formal", "fixture export is limited to the cms_formal resource");
+  assert.ok(isAbsolute(requested) && basename(requested) === "formal-ui-fixture.json", "fixture export requires the approved absolute private file");
+  const approved = await realpath(fixturePrivateDirectory());
+  const parent = await realpath(dirname(requested));
+  assert.equal(relative(approved, parent), "", "fixture output must remain in the approved private directory");
+  const output = join(approved, "formal-ui-fixture.json");
+  const media = join(approved, "formal-ui-media");
+  await requireAbsent(output, "private fixture already exists; refusing to reset or overwrite it");
+  await requireAbsent(media, "private fixture media already exists; refusing to reset or overwrite it");
+  return { output, media };
+}
+
+async function copyOwnedFixtureMedia(source: string, expectedSource: string, destination: string): Promise<void> {
+  const sourceRoot = await realpath(source);
+  assert.equal(relative(expectedSource, sourceRoot), "", "fixture media source cannot be a reparse redirect");
+  assert.equal(relative(await realpath(fixturePrivateDirectory()), await realpath(dirname(destination))), "", "fixture media destination must remain in the approved private directory");
+  assert.equal(basename(destination), "formal-ui-media");
+  await requireAbsent(destination, "private fixture media already exists; refusing to overwrite it");
+  await cp(sourceRoot, destination, {
+    recursive: true, force: false, errorOnExist: true,
+    filter: async file => {
+      assert.equal((await lstat(file)).isSymbolicLink(), false, "fixture media cannot contain symbolic links or junctions");
+      const location = relative(sourceRoot, await realpath(file));
+      assert.ok(!isAbsolute(location) && location !== ".." && !location.startsWith(`..${sep}`), "fixture media cannot escape its owned source directory");
+      return true;
+    },
+  });
+}
 
 function cookieJar(): CookieJar {
   const values = new Map<string, string>();
@@ -203,7 +277,29 @@ async function prepareOwnership(pool: Pool, resources: Resources): Promise<void>
 }
 
 async function resetIsolatedData(pool: Pool): Promise<void> {
-  await pool.query(ISOLATED_BUSINESS_DATA_TRUNCATE);
+  // The content fixture never writes immutable finance/growth tables; DELETE leaves them protected.
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    let pending = ISOLATED_BUSINESS_DATA_TRUNCATE.replace(/^TRUNCATE\s+/, "").split(",").map(table => table.trim());
+    while (pending.length) {
+      const blocked: string[] = [];
+      for (const table of pending) {
+        await client.query("SAVEPOINT content_fixture_clear");
+        try { await client.query(`DELETE FROM ${table}`); }
+        catch (error) {
+          await client.query("ROLLBACK TO SAVEPOINT content_fixture_clear");
+          if ((error as { code?: string }).code !== "23503") throw error;
+          blocked.push(table);
+        }
+        await client.query("RELEASE SAVEPOINT content_fixture_clear");
+      }
+      if (blocked.length === pending.length) throw new Error("Content fixture has retained references outside its explicit cleanup list");
+      pending = blocked;
+    }
+    await client.query("COMMIT");
+  } catch (error) { await client.query("ROLLBACK"); throw error; }
+  finally { client.release(); }
 }
 
 function base32Decode(value: string): Buffer {
@@ -289,6 +385,8 @@ async function uploadBytes(base: string, path: string, jar: CookieJar, token: st
 }
 
 test("M3 content foundation: announcements, news, carousel and platform media under real PostgreSQL", async (testContext) => {
+  const exportPaths = await fixtureExportPaths();
+  let exportedFixture: FixtureExport | undefined;
   let resources: Resources | undefined;
   let maintenancePool: Pool | undefined;
   let maintenanceDataPool: Pool | undefined;
@@ -298,10 +396,12 @@ test("M3 content foundation: announcements, news, carousel and platform media un
   let app: Awaited<ReturnType<typeof createApp>> | undefined;
   let runtimeClosedByApp = false;
   const mediaDir = await mkdtemp(join(tmpdir(), "zzsh-m3-content-media-"));
+  const mediaDirReal = await realpath(mediaDir);
   const mediaStorage = createLocalMediaStorage(mediaDir);
   let pngFixture = Buffer.alloc(0);
   try {
     resources = makeResources();
+    if (exportPaths) assert.equal(resources.databaseName, "zzsh_test_content_cms_formal", "fixture export cannot target another database");
     pngFixture = await sharp({ create: { width: 64, height: 64, channels: 3, background: "red" } }).withExif({ IFD0: { Artist: "private original" } }).png().toBuffer();
     maintenancePool = poolFor(resources.maintenance, "postgres", "zzsh-m3-content-maintenance", 2);
     guard = await resourceGuard(maintenancePool);
@@ -328,20 +428,20 @@ test("M3 content foundation: announcements, news, carousel and platform media un
     );
     assert.deepEqual(nullableGame.rows.map((row) => row.isNullable), ["YES", "YES"]);
 
+    const authRuntimeEnv = {
+      AUTH_API_ORIGIN: API_ORIGIN,
+      AUTH_USER_ORIGIN: USER_ORIGIN,
+      AUTH_ADMIN_ORIGIN: ADMIN_ORIGIN,
+      AUTH_USER_SECRET: randomBytes(32).toString("hex"),
+      AUTH_ADMIN_SECRET: randomBytes(32).toString("hex"),
+      AUTH_ADMIN_BOOTSTRAP_SECRET: randomBytes(32).toString("hex"),
+    };
     const authOptions = {
-      ...loadAuthRuntimeConfig({
-        AUTH_API_ORIGIN: API_ORIGIN,
-        AUTH_USER_ORIGIN: USER_ORIGIN,
-        AUTH_ADMIN_ORIGIN: ADMIN_ORIGIN,
-        AUTH_USER_SECRET: randomBytes(32).toString("hex"),
-        AUTH_ADMIN_SECRET: randomBytes(32).toString("hex"),
-        AUTH_ADMIN_BOOTSTRAP_SECRET: randomBytes(32).toString("hex"),
-      }, undefined, {}),
+      ...loadAuthRuntimeConfig(authRuntimeEnv, undefined, {}),
       pool: runtimePool,
       mediaStorage,
     };
-    const bootstrapSecret = randomBytes(32).toString("hex");
-    (authOptions as { adminBootstrapSecret?: string }).adminBootstrapSecret = bootstrapSecret;
+    const bootstrapSecret = authRuntimeEnv.AUTH_ADMIN_BOOTSTRAP_SECRET;
     app = await createApp({
       health: {
         dependencies: {
@@ -407,7 +507,7 @@ test("M3 content foundation: announcements, news, carousel and platform media un
     assert.equal(unscopedList.response.status, 403, "content list must check game scope");
     assert.equal(unscopedList.body?.error?.code, "NO_GAME_SCOPE");
     const platformOnlyGameList = await request(base, "/api/bff/admin/content/games", undefined, platform.jar, ADMIN_ORIGIN);
-    assert.equal(platformOnlyGameList.response.status, 403, "game selector requires game content read");
+    assert.equal(platformOnlyGameList.response.status, 200, "game metadata is readable; game content operations still require their scope");
 
     // ---------- 平台公告生命周期 ----------
     const created = await request(base, "/api/bff/admin/content/items", { type: "ANNOUNCEMENT", title: "首次公告", summary: "摘要", body: "第一版正文" }, platform.jar, ADMIN_ORIGIN, "POST", key());
@@ -415,6 +515,11 @@ test("M3 content foundation: announcements, news, carousel and platform media un
     const itemId = created.body?.item.id as string;
     const draftId = created.body?.version.id as string;
     assert.equal(created.body?.version.revision, "1");
+    await assert.rejects(
+      () => runtimePool!.query(`UPDATE "zzsh_content"."content_version" SET "state" = 'SUPERSEDED' WHERE "id" = $1`, [draftId]),
+      (error: unknown) => (error as { code?: string }).code === "23514",
+      "unpublished ANNOUNCEMENT cannot use the RESOURCE-only draft archive exception",
+    );
     const draftNotPublicList = await request(base, "/api/v1/content/items?type=ANNOUNCEMENT", undefined, cookieJar(), API_ORIGIN);
     assert.equal(draftNotPublicList.response.status, 200);
     assert.deepEqual(draftNotPublicList.body?.items, [], "drafts must not be public");
@@ -573,6 +678,11 @@ test("M3 content foundation: announcements, news, carousel and platform media un
     // ---------- 游戏资讯 ----------
     const gameNews = await request(base, "/api/bff/admin/content/items", { type: "NEWS", gameId: gameA, title: "游戏A资讯", body: "游戏A玩法说明" }, gameEditor.jar, ADMIN_ORIGIN, "POST", key());
     assert.equal(gameNews.response.status, 200, JSON.stringify(gameNews.body));
+    await assert.rejects(
+      () => runtimePool!.query(`UPDATE "zzsh_content"."content_version" SET "state" = 'SUPERSEDED' WHERE "id" = $1`, [gameNews.body?.version.id]),
+      (error: unknown) => (error as { code?: string }).code === "23514",
+      "unpublished NEWS still requires its original publication shape",
+    );
     assert.equal((await request(base, `/api/bff/admin/content/items/${gameNews.body?.item.id}/publish`, { versionId: gameNews.body?.version.id, expectedRevision: "1" }, gameEditor.jar, ADMIN_ORIGIN, "POST", key())).response.status, 200);
     const gameListA = await request(base, `/api/v1/content/items?gameId=${gameA}`, undefined, cookieJar(), API_ORIGIN);
     assert.equal(gameListA.body?.items.some((entry: { title: string }) => entry.title === "游戏A资讯"), true);
@@ -897,6 +1007,180 @@ test("M3 content foundation: announcements, news, carousel and platform media un
     const mediaOptionsDenied = await request(base, "/api/bff/admin/content/media-options", undefined, gameEditor.jar, ADMIN_ORIGIN);
     assert.equal(mediaOptionsDenied.response.status, 403);
 
+    // ---------- 受控资源：草稿、发布、回执、撤回与范围 ----------
+    const resourceRoot = "/api/bff/admin/content/resources/";
+    const resourceKey = `guide:${DEFAULT_GUIDES[0]!.slug}`;
+    const resourceUrl = resourceRoot + encodeURIComponent(resourceKey);
+    const publicResourceUrl = "/api/v1/content/resources/" + encodeURIComponent(resourceKey);
+    const readResource = () => request(base, resourceUrl, undefined, platform.jar, ADMIN_ORIGIN);
+    const resourceWrite = (suffix: string, body: Record<string, unknown>, verb = "POST", headers = key(), jar = platform.jar) => request(base, `${resourceUrl}/${suffix}`, body, jar, ADMIN_ORIGIN, verb, headers);
+    const builtin = await request(base, publicResourceUrl, undefined, cookieJar(), API_ORIGIN);
+    assert.equal(builtin.response.status, 200); assert.equal(builtin.body?.source, "BUILTIN");
+    assert.deepEqual(builtin.body?.payload, validateResource(resourceKey, DEFAULT_GUIDES[0]), "the current built-in document survives the ownership switch");
+    assert.equal((await resourceWrite("draft", {}, "POST", key(), reader.jar)).response.status, 403);
+    assert.equal((await resourceWrite("draft", {}, "POST", { "idempotency-key": "bad key with spaces" })).response.status, 400);
+    const originalBody = {}, originalKey = key();
+    const adopted = await resourceWrite("draft", originalBody, "POST", originalKey);
+    assert.equal(adopted.response.status, 200, JSON.stringify(adopted.body));
+    assert.equal(adopted.body?.draft.state, "DRAFT");
+    assert.equal((await resourceWrite("draft", originalBody, "POST", originalKey)).body?.draft.id, adopted.body?.draft.id, "same key replays the original draft");
+    assert.equal((await resourceWrite("draft", { payload: DEFAULT_GUIDES[0] }, "POST", originalKey)).response.status, 409, "original key cannot change its payload");
+    const recoveryQuery = new URLSearchParams({ operation: "content.resource.draft.create", resourceId: resourceKey, fingerprint: fingerprintRequest("content.resource.draft.create", resourceKey, originalBody) });
+    const recovery = await request(base, `/api/bff/admin/content/operation-result?${recoveryQuery}`, undefined, platform.jar, ADMIN_ORIGIN, "GET", originalKey);
+    assert.equal(recovery.body?.receipt, "RECORDED", JSON.stringify(recovery.body));
+    assert.equal(recovery.body?.result.itemId, adopted.body?.item.id); assert.equal("payload" in recovery.body!, false);
+    assert.equal((await request(base, `/api/bff/admin/content/operation-result?${recoveryQuery}`, undefined, reader.jar, ADMIN_ORIGIN, "GET", originalKey)).response.status, 403);
+    assert.equal((await request(base, `/api/bff/admin/content/operation-result?${recoveryQuery}`, undefined, carouselEditor.jar, ADMIN_ORIGIN, "GET", originalKey)).body?.receipt, "UNRESOLVED", "another principal cannot read an original receipt");
+    const { format: _oldFormat, schemaVersion: _oldSchema, markdown: _oldMarkdown, mediaIds: _oldMedia, anchorAliases: _oldAliases, sections: _oldSections, ...legacyMetadata } = adopted.body?.draft.payload;
+    const changed = { ...legacyMetadata, title: "内容发布后可读的手册", sections: [{ id: "check", title: "核对", blocks: [{ type: "paragraph", text: "<script>只会作为文字展示</script>" }, { type: "link", text: "帮助中心", href: "/help" }] }] };
+    const savedResource = await resourceWrite("draft", { versionId: adopted.body?.draft.id, expectedRevision: adopted.body?.item.revision, payload: changed }, "PUT");
+    assert.equal(savedResource.response.status, 200, JSON.stringify(savedResource.body));
+    assert.equal((await request(base, publicResourceUrl, undefined, cookieJar(), API_ORIGIN)).body?.payload.title, DEFAULT_GUIDES[0]!.title, "saving a draft must not replace public content");
+    const publishBody = { versionId: savedResource.body?.draft.id, expectedRevision: savedResource.body?.item.revision };
+    const concurrent = await Promise.all([resourceWrite("publish", publishBody), resourceWrite("publish", publishBody)]);
+    assert.deepEqual(concurrent.map(result => result.response.status).sort(), [200, 409], "one current revision may publish only once");
+    const online = await request(base, publicResourceUrl, undefined, cookieJar(), API_ORIGIN);
+    assert.equal(online.body?.payload.title, changed.title); assert.equal(online.body?.source, "MANAGED");
+    assert.equal(online.body?.version.id, savedResource.body?.draft.id);
+    assert.equal(online.body?.version.sequence, 1);
+    for (const name of ["draft", "versions", "createdByAdminId", "storageKey", "publishedByAdminId"]) assert.equal(JSON.stringify(online.body).includes(`\"${name}\"`), false, name);
+    const state = (await readResource()).body!;
+    await assert.rejects(() => runtimePool!.query(`UPDATE zzsh_content.content_version SET payload = payload || '{"title":"illegal"}'::jsonb WHERE id = $1`, [state.published.id]), /immutable/, "published versions are immutable in PostgreSQL");
+    const withdrawnResource = await resourceWrite("withdraw", { versionId: state.published.id, expectedRevision: state.item.revision });
+    assert.equal(withdrawnResource.response.status, 200);
+    const afterWithdraw = await request(base, publicResourceUrl, undefined, cookieJar(), API_ORIGIN);
+    assert.equal(afterWithdraw.body?.state, "withdrawn"); assert.equal(afterWithdraw.body?.payload, null, "withdraw must not revive stale builtins");
+    const restored = await resourceWrite("draft", { sourceVersionId: state.published.id });
+    assert.equal(restored.response.status, 200); assert.equal(restored.body?.draft.sequence, 2); assert.equal(restored.body?.draft.payload.title, changed.title);
+    const sourceDetail = await request(base, `${resourceUrl}/versions/${state.published.id}`, undefined, platform.jar, ADMIN_ORIGIN);
+    assert.deepEqual(sourceDetail.body?.version.payload, changed);
+    const explicitRestore = await resourceWrite("restore", { sourceVersionId: restored.body?.draft.id, expectedRevision: restored.body?.item.revision });
+    assert.equal(explicitRestore.response.status, 200, JSON.stringify(explicitRestore.body));
+    assert.deepEqual(explicitRestore.body?.draft.payload, changed, "blocks restore preserves the selected payload without conversion");
+    assert.equal(explicitRestore.body?.versions.find((row: { id: string }) => row.id === restored.body?.draft.id)?.state, "SUPERSEDED", "replaced draft remains recoverable history");
+    const archivedResourceDraft = explicitRestore.body?.versions.find((row: { id: string }) => row.id === restored.body?.draft.id);
+    assert.equal(archivedResourceDraft?.publishedAt, null, "archiving a draft must not invent a publication time");
+    assert.equal(archivedResourceDraft?.publishedByAdminId, null, "archiving a draft must not invent a publisher");
+    const { sections: _sections, format: _format, schemaVersion: _schemaVersion, markdown: _markdown, mediaIds: _mediaIds, anchorAliases: _aliases, ...guideMetadata } = DEFAULT_GUIDES[0]!;
+    const markdownPayload = { ...guideMetadata, format: "markdown", schemaVersion: 1, markdown: "<div>保留原文，不能发布</div>", mediaIds: [] };
+    const markdownDraft = await resourceWrite("draft", { versionId: explicitRestore.body?.draft.id, expectedRevision: explicitRestore.body?.item.revision, payload: markdownPayload }, "PUT");
+    assert.equal(markdownDraft.response.status, 200, JSON.stringify(markdownDraft.body));
+    assert.equal(markdownDraft.body?.draft.payload.markdown, markdownPayload.markdown);
+    assert.equal((await resourceWrite("publish", { versionId: markdownDraft.body?.draft.id, expectedRevision: markdownDraft.body?.item.revision })).response.status, 400, "HTML can be saved verbatim but not published");
+    const validMarkdown = { ...markdownPayload, markdown: "## 新正文\n\n这一版已通过正文校验。", mediaIds: [] };
+    const validDraft = await resourceWrite("draft", { versionId: markdownDraft.body?.draft.id, expectedRevision: markdownDraft.body?.item.revision, payload: validMarkdown }, "PUT");
+    assert.equal(validDraft.response.status, 200);
+    assert.equal((await resourceWrite("publish", { versionId: validDraft.body?.draft.id, expectedRevision: validDraft.body?.item.revision })).response.status, 200);
+    const markdownPublic = await request(base, publicResourceUrl, undefined, cookieJar(), API_ORIGIN);
+    assert.equal(markdownPublic.body?.payload.markdown, validMarkdown.markdown);
+    assert.equal(markdownPublic.body?.version.id, validDraft.body?.draft.id);
+    const unknownKey = "guide:custom-content-test";
+    const custom = { ...DEFAULT_GUIDES[0]!, id: "custom-content-test", slug: "custom-content-test" };
+    const customCreated = await request(base, resourceRoot + encodeURIComponent(unknownKey) + "/draft", { payload: custom, gameId: gameA }, gameEditor.jar, ADMIN_ORIGIN, "POST", key());
+    assert.equal(customCreated.response.status, 200, JSON.stringify(customCreated.body));
+    assert.equal((await request(base, `${resourceUrl}/versions/${customCreated.body?.draft.id}`, undefined, platform.jar, ADMIN_ORIGIN)).response.status, 404, "history detail cannot cross resource ownership");
+    const customAdminList = await request(base, `/api/bff/admin/content/resources?scope=game&gameId=${gameA}&limit=5`, undefined, gameEditor.jar, ADMIN_ORIGIN);
+    assert.equal(customAdminList.body?.items.find((row: { current: { key: string } }) => row.current.key === unknownKey)?.metadata.title, custom.title, "admin lists name draft-only articles without exposing them publicly");
+    assert.equal((await request(base, "/api/v1/content/resources/" + encodeURIComponent(unknownKey), undefined, cookieJar(), API_ORIGIN)).response.status, 404);
+    assert.equal((await request(base, resourceRoot + encodeURIComponent(unknownKey), undefined, platform.jar, ADMIN_ORIGIN)).response.status, 403);
+    assert.equal((await request(base, resourceRoot + encodeURIComponent(unknownKey), undefined, unscopedEditor.jar, ADMIN_ORIGIN)).response.status, 403);
+    const allPublicKeys: string[] = []; let resourcesCursor: string | null = null;
+    do {
+      const query = new URLSearchParams({ kind: "guide", limit: "5", ...(resourcesCursor ? { cursor: resourcesCursor } : {}) });
+      const list = await request(base, `/api/v1/content/resources?${query}`, undefined, cookieJar(), API_ORIGIN);
+      assert.equal(list.response.status, 200, JSON.stringify(list.body));
+      allPublicKeys.push(...list.body!.items.map((row: { key: string }) => row.key)); resourcesCursor = list.body!.nextCursor;
+    } while (resourcesCursor);
+    assert.equal(allPublicKeys.length, 24); assert.equal(new Set(allPublicKeys).size, 24); assert.equal(allPublicKeys.includes(unknownKey), false);
+    for (const limit of [6, 10]) {
+      assert.equal((await request(base, `/api/v1/content/resources?limit=${limit}`, undefined, cookieJar(), API_ORIGIN)).response.status, 400);
+      assert.equal((await request(base, `/api/bff/admin/content/resources?scope=platform&limit=${limit}`, undefined, platform.jar, ADMIN_ORIGIN)).response.status, 400);
+    }
+    const largeKey = "guide:resource-size-contract", largeUrl = resourceRoot + encodeURIComponent(largeKey);
+    const largePrefix = "## 合成容量校验\n\n";
+    const largeMarkdown = largePrefix + "x".repeat(195_000 - Buffer.byteLength(largePrefix, "utf8"));
+    const largePayload = { ...guideMetadata, id: "resource-size-contract", slug: "resource-size-contract", title: "本地合成容量测试", format: "markdown", schemaVersion: 1, markdown: largeMarkdown, mediaIds: [] };
+    const largeCreateBody = { payload: largePayload }, largeCreateKey = key();
+    const largeCreated = await request(base, `${largeUrl}/draft`, largeCreateBody, platform.jar, ADMIN_ORIGIN, "POST", largeCreateKey);
+    assert.equal(largeCreated.response.status, 200, JSON.stringify(largeCreated.body));
+    assert.equal(largeCreated.body?.draft.body, "", "RESOURCE canonical text belongs to payload, not the legacy 20000-byte body column");
+    assert.equal((await request(base, `${largeUrl}/draft`, largeCreateBody, platform.jar, ADMIN_ORIGIN, "POST", largeCreateKey)).body?.draft.id, largeCreated.body?.draft.id);
+    const largeSaved = await request(base, `${largeUrl}/draft`, { versionId: largeCreated.body?.draft.id, expectedRevision: largeCreated.body?.item.revision, payload: largePayload }, platform.jar, ADMIN_ORIGIN, "PUT", key());
+    assert.equal(largeSaved.response.status, 200, JSON.stringify(largeSaved.body)); assert.equal(largeSaved.body?.draft.body, "");
+    const largePublishBody = { versionId: largeSaved.body?.draft.id, expectedRevision: largeSaved.body?.item.revision }, largePublishKey = key();
+    const largePublished = await request(base, `${largeUrl}/publish`, largePublishBody, platform.jar, ADMIN_ORIGIN, "POST", largePublishKey);
+    assert.equal(largePublished.response.status, 200, JSON.stringify(largePublished.body));
+    const largeReplay = await request(base, `${largeUrl}/publish`, largePublishBody, platform.jar, ADMIN_ORIGIN, "POST", largePublishKey);
+    assert.equal(largeReplay.response.status, 200); assert.equal(largeReplay.body?.published.id, largeSaved.body?.draft.id);
+    const largePublic = await request(base, "/api/v1/content/resources/" + encodeURIComponent(largeKey), undefined, cookieJar(), API_ORIGIN);
+    assert.equal(largePublic.response.status, 200); assert.equal(largePublic.body?.payload.markdown, largeMarkdown);
+    assert.equal(largePublic.body?.version.id, largeSaved.body?.draft.id);
+    const largeStored = (await runtimePool.query(`SELECT "body", octet_length("payload"->>'markdown') AS "markdownBytes" FROM "zzsh_content"."content_version" WHERE "id" = $1`, [largeSaved.body?.draft.id])).rows[0];
+    assert.equal(largeStored.body, ""); assert.equal(largeStored.markdownBytes, 195_000, "large Markdown must not be truncated to the legacy body limit");
+    const largeReceiptQuery = new URLSearchParams({ operation: "content.resource.publish", resourceId: largeKey, fingerprint: fingerprintRequest("content.resource.publish", largeKey, largePublishBody) });
+    const largeReceipt = await request(base, `/api/bff/admin/content/operation-result?${largeReceiptQuery}`, undefined, platform.jar, ADMIN_ORIGIN, "GET", largePublishKey);
+    assert.equal(largeReceipt.response.status, 200); assert.equal(largeReceipt.body?.receipt, "RECORDED"); assert.equal(largeReceipt.body?.result.publishedVersionId, largeSaved.body?.draft.id);
+    const largeRestored = await request(base, `${largeUrl}/restore`, { sourceVersionId: largeSaved.body?.draft.id, expectedRevision: largePublished.body?.item.revision }, platform.jar, ADMIN_ORIGIN, "POST", key());
+    assert.equal(largeRestored.response.status, 200, JSON.stringify(largeRestored.body)); assert.equal(largeRestored.body?.draft.body, "");
+    assert.equal(largeRestored.body?.draft.payload.markdown, largeMarkdown);
+    const contactKey = "placement:FOLLOW", contactUrl = resourceRoot + encodeURIComponent(contactKey);
+    assert.equal((await request(base, `${contactUrl}/draft`, { payload: DEFAULT_RESOURCES[contactKey] }, platform.jar, ADMIN_ORIGIN, "POST", key())).response.status, 400, "fixed resource metadata cannot be injected at creation");
+    const createdContact = await request(base, `${contactUrl}/draft`, {}, platform.jar, ADMIN_ORIGIN, "POST", key());
+    assert.equal(createdContact.response.status, 200);
+    assert.equal((await request(base, `${contactUrl}/draft`, { versionId: createdContact.body?.draft.id, expectedRevision: createdContact.body?.item.revision, payload: createdContact.body?.draft.payload }, platform.jar, ADMIN_ORIGIN, "PUT", key())).response.status, 400, "fixed images cannot use the generic complete-payload writer");
+    assert.equal((await request(base, `${contactUrl}/media-draft`, { versionId: createdContact.body?.draft.id, expectedRevision: createdContact.body?.item.revision, media: { qrMediaId: assetId, title: "不能改文案" } }, platform.jar, ADMIN_ORIGIN, "PUT", key())).response.status, 400);
+    const contactDraft = await request(base, `${contactUrl}/media-draft`, { versionId: createdContact.body?.draft.id, expectedRevision: createdContact.body?.item.revision, media: { qrMediaId: assetId } }, platform.jar, ADMIN_ORIGIN, "PUT", key());
+    assert.equal(contactDraft.response.status, 200, JSON.stringify(contactDraft.body));
+    assert.deepEqual(contactDraft.body?.draft.payload, { ...createdContact.body?.draft.payload, qrMediaId: assetId }, "only the media reference changes");
+    const contactPublish = { versionId: contactDraft.body?.draft.id, expectedRevision: contactDraft.body?.item.revision };
+    assert.equal((await request(base, `${contactUrl}/publish`, contactPublish, platform.jar, ADMIN_ORIGIN, "POST", key())).response.status, 409, "revoked media cannot be published");
+    assert.equal((await request(base, `/api/bff/admin/content/media/${assetId}/visibility`, { visibility: "PUBLIC_DISPLAY" }, platform.jar, ADMIN_ORIGIN, "POST", key())).response.status, 200);
+    assert.equal((await request(base, `${contactUrl}/publish`, contactPublish, platform.jar, ADMIN_ORIGIN, "POST", key())).response.status, 400, "undersized QR is rejected at publishing");
+    const uploadResourceImage = async (width: number, height: number, color: string): Promise<string> => {
+      const bytes = await sharp({ create: { width, height, channels: 3, background: color } }).png().toBuffer();
+      const intent = await request(base, "/api/bff/admin/content/media/upload-intents", { purpose: "CONTENT_MEDIA", mime: "image/png", size: bytes.length }, platform.jar, ADMIN_ORIGIN, "POST", key());
+      assert.equal(intent.response.status, 200);
+      const uploaded = await uploadBytes(base, `/api/bff/admin/content/media/uploads/${intent.body?.intentId}`, platform.jar, intent.body?.uploadToken, bytes);
+      assert.equal(uploaded.status, 200);
+      const id = uploaded.body?.assetId as string;
+      assert.equal((await request(base, `/api/bff/admin/content/media/${id}/review`, { decision: "APPROVE", visibility: "PUBLIC_DISPLAY" }, platform.jar, ADMIN_ORIGIN, "POST", key())).response.status, 200);
+      return id;
+    };
+    const qrFixtureId = await uploadResourceImage(512, 512, "green");
+    const correctedContact = await request(base, `${contactUrl}/media-draft`, { versionId: contactDraft.body?.draft.id, expectedRevision: contactDraft.body?.item.revision, media: { qrMediaId: qrFixtureId } }, platform.jar, ADMIN_ORIGIN, "PUT", key());
+    assert.equal(correctedContact.response.status, 200);
+    assert.equal((await request(base, `${contactUrl}/publish`, { versionId: correctedContact.body?.draft.id, expectedRevision: correctedContact.body?.item.revision }, platform.jar, ADMIN_ORIGIN, "POST", key())).response.status, 200);
+    assert.equal((await request(base, `/api/bff/admin/content/media/${qrFixtureId}/visibility`, { visibility: "PRIVATE_REVIEW" }, platform.jar, ADMIN_ORIGIN, "POST", key())).response.status, 200);
+    const revokedContact = await request(base, "/api/v1/content/resources/" + encodeURIComponent(contactKey), undefined, cookieJar(), API_ORIGIN);
+    assert.equal(revokedContact.body?.media[0].url, null, "resource projection checks current media visibility");
+    assert.equal((await request(base, "/api/bff/admin/content/storage", undefined, reader.jar, ADMIN_ORIGIN)).body?.backend, "local");
+    assert.equal((await request(base, "/api/bff/admin/content/storage", undefined, gameEditor.jar, ADMIN_ORIGIN)).response.status, 403);
+    const heroUrl = resourceRoot + encodeURIComponent("placement:HOME_HERO");
+    let heroDraft = await request(base, `${heroUrl}/draft`, {}, platform.jar, ADMIN_ORIGIN, "POST", key());
+    assert.equal(heroDraft.response.status, 200, JSON.stringify(heroDraft.body));
+    assert.equal(heroDraft.body?.draft.payload.kind, "carousel");
+    const neverPublishedHeroDraftId = heroDraft.body?.draft.id;
+    heroDraft = await request(base, `${heroUrl}/restore`, { sourceVersionId: neverPublishedHeroDraftId, expectedRevision: heroDraft.body?.item.revision }, platform.jar, ADMIN_ORIGIN, "POST", key());
+    assert.equal(heroDraft.response.status, 200, JSON.stringify(heroDraft.body));
+    const archivedHero = heroDraft.body?.versions.find((row: { id: string }) => row.id === neverPublishedHeroDraftId);
+    assert.equal(archivedHero?.state, "SUPERSEDED"); assert.equal(archivedHero?.publishedAt, null); assert.equal(archivedHero?.publishedByAdminId, null);
+    const pendingHeroPublic = await request(base, "/api/v1/content/resources/" + encodeURIComponent("placement:HOME_HERO"), undefined, cookieJar(), API_ORIGIN);
+    assert.equal(pendingHeroPublic.body?.state, "available", "unpublished archived drafts must not be mistaken for withdrawn content");
+    assert.equal(pendingHeroPublic.body?.version, null);
+    assert.equal((await request(base, `/api/bff/admin/content/carousel/${carouselId}`, { expectedRevision: "1", title: "旧入口不能再写" }, platform.jar, ADMIN_ORIGIN, "PUT", key())).response.status, 409, "legacy carousel writes stop once adopted");
+    const heroDesktop = await uploadResourceImage(920, 400, "blue"), heroMobile = await uploadResourceImage(920, 400, "orange");
+    assert.deepEqual(heroDraft.body?.draft.payload.slides.map((row: { id: string }) => row.id), ["delta", "protection", "accounts"]);
+    const heroMedia = { slides: heroDraft.body?.draft.payload.slides.map((slide: { id: string }) => ({ id: slide.id, mediaId: slide.id === "delta" ? heroDesktop : null, mobileMediaId: slide.id === "delta" ? heroMobile : null })) };
+    const heroSaved = await request(base, `${heroUrl}/media-draft`, { versionId: heroDraft.body?.draft.id, expectedRevision: heroDraft.body?.item.revision, media: heroMedia }, platform.jar, ADMIN_ORIGIN, "PUT", key());
+    assert.equal(heroSaved.response.status, 200, JSON.stringify(heroSaved.body));
+    assert.equal((await request(base, `${heroUrl}/publish`, { versionId: heroSaved.body?.draft.id, expectedRevision: heroSaved.body?.item.revision }, platform.jar, ADMIN_ORIGIN, "POST", key())).response.status, 200);
+    const heroPublic = await request(base, "/api/v1/content/carousel?slot=HOME_HERO", undefined, cookieJar(), API_ORIGIN);
+    assert.deepEqual(heroPublic.body?.items.map((row: { id: string }) => row.id), ["delta"]);
+    assert.equal(heroPublic.body?.items[0].mobileMediaUrl, `/api/v1/content/media/${heroMobile}/content`);
+    assert.equal((await request(base, `/api/bff/admin/content/media/${heroMobile}/visibility`, { visibility: "PRIVATE_REVIEW" }, platform.jar, ADMIN_ORIGIN, "POST", key())).response.status, 200);
+    const heroRevokedMobile = await request(base, "/api/v1/content/carousel?slot=HOME_HERO", undefined, cookieJar(), API_ORIGIN);
+    assert.equal(heroRevokedMobile.body?.items[0].mobileMediaUrl, null); assert.ok(heroRevokedMobile.body?.items[0].mediaUrl);
+
     // ---------- 审计 ----------
     const auditCount = await runtimePool.query<{ count: string }>(`SELECT count(*)::text AS count FROM "zzsh_iam"."audit_event" WHERE "action" LIKE 'content.%'`);
     assert.ok(Number(auditCount.rows[0]?.count ?? "0") >= 15, "content writes must be audited");
@@ -913,6 +1197,18 @@ test("M3 content foundation: announcements, news, carousel and platform media un
     assert.ok(platformPage.body?.nextCursor, "admin list must page with a cursor");
     const staleScopeCursor = await request(base, `/api/bff/admin/content/items?scope=game&gameId=${gameA}&cursor=${encodeURIComponent(platformPage.body?.nextCursor)}`, undefined, gameEditor.jar, ADMIN_ORIGIN);
     assert.equal(staleScopeCursor.response.status, 409, "admin cursor must be bound to scope filters");
+    if (exportPaths) {
+      await copyOwnedFixtureMedia(mediaDir, mediaDirReal, exportPaths.media);
+      exportedFixture = {
+        schema: "zzsh-content-local-fixture.v1", resourceSet: "cms_formal",
+        database: { name: resources.databaseName, migrationUser: resources.migrationUser, runtimeUser: resources.runtimeUser, marker: RESOURCE_MARKER },
+        origins: { user: USER_ORIGIN, admin: ADMIN_ORIGIN, api: API_ORIGIN },
+        boss: { id: boss.id, username: boss.username, password: boss.password, secret: boss.secret },
+        authRuntimeEnv,
+        mediaDirectory: exportPaths.media,
+        createdAt: new Date().toISOString(),
+      };
+    }
   } finally {
     const cleanupErrors: unknown[] = [];
     if (app) {
@@ -938,7 +1234,14 @@ test("M3 content foundation: announcements, news, carousel and platform media un
       if (!pool) continue;
       try { await pool.end(); } catch (error) { cleanupErrors.push(error); }
     }
-    try { await rm(mediaDir, { recursive: true, force: true }); } catch (error) { cleanupErrors.push(error); }
+    try {
+      assert.equal((await lstat(mediaDir)).isSymbolicLink(), false, "owned fixture directory cannot become a symbolic link");
+      assert.equal(relative(mediaDirReal, await realpath(mediaDir)), "", "owned fixture directory cannot be redirected before cleanup");
+      await rm(mediaDirReal, { recursive: true, force: true });
+    } catch (error) { cleanupErrors.push(error); }
     if (cleanupErrors.length > 0) throw cleanupErrors[0];
+  }
+  if (exportPaths && exportedFixture) {
+    await writeFile(exportPaths.output, JSON.stringify(exportedFixture, null, 2) + "\n", { flag: "wx", mode: 0o600 });
   }
 });

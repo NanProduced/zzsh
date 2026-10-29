@@ -18,6 +18,7 @@ export function HelpArticlePager({ prev, next }: { prev: HelpNavArticle | null; 
       initialRender.current = false;
       return;
     }
+    if (window.location?.hash) return;
     const heading = document.querySelector<HTMLElement>("main h1");
     if (!heading) return;
     if (!heading.hasAttribute("tabindex")) heading.setAttribute("tabindex", "-1");
@@ -47,22 +48,32 @@ export function HelpArticlePager({ prev, next }: { prev: HelpNavArticle | null; 
     <nav className="help-pager" aria-label="上一篇 / 下一篇">
       {prev ? (
         <Link className="help-pager-link help-pager-link--prev" href={`/help/${prev.slug}`} rel="prev">
-          <ArrowLeft size={15} className="help-pager-arrow" aria-hidden="true" />
-          <span className="help-pager-copy">
-            <span className="help-pager-dir">上一篇 <kbd aria-hidden="true">←</kbd></span>
+          <div className="help-pager-icon-box" aria-hidden="true">
+            <ArrowLeft size={16} className="help-pager-arrow" />
+          </div>
+          <div className="help-pager-copy">
+            <div className="help-pager-header">
+              <span className="help-pager-dir">上一篇</span>
+              <kbd className="help-pager-kbd" aria-hidden="true">←</kbd>
+            </div>
             <span className="help-pager-title">{prev.title}</span>
-          </span>
+          </div>
         </Link>
       ) : (
         <span className="help-pager-link help-pager-link--placeholder" aria-hidden="true" />
       )}
       {next ? (
         <Link className="help-pager-link help-pager-link--next" href={`/help/${next.slug}`} rel="next">
-          <span className="help-pager-copy">
-            <span className="help-pager-dir"><kbd aria-hidden="true">→</kbd> 下一篇</span>
+          <div className="help-pager-copy">
+            <div className="help-pager-header">
+              <span className="help-pager-dir">下一篇</span>
+              <kbd className="help-pager-kbd" aria-hidden="true">→</kbd>
+            </div>
             <span className="help-pager-title">{next.title}</span>
-          </span>
-          <ArrowRight size={15} className="help-pager-arrow" aria-hidden="true" />
+          </div>
+          <div className="help-pager-icon-box" aria-hidden="true">
+            <ArrowRight size={16} className="help-pager-arrow" />
+          </div>
         </Link>
       ) : (
         <span className="help-pager-link help-pager-link--placeholder" aria-hidden="true" />

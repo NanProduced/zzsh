@@ -87,7 +87,7 @@ function Thumb({ asset }: { asset: MediaAssetReview }) {
         src={mediaContentUrl(asset.id)}
         alt=""
         loading="lazy"
-        className="relative size-full object-cover transition-transform duration-200 group-hover:scale-105"
+        className="relative size-full object-contain transition-transform duration-200"
         onError={() => setFailed(true)}
       />
     </span>
@@ -458,7 +458,7 @@ export function SupplyMediaReviewView({
           saveRecord(accepted);
           setWriteRecord(accepted);
           if (record.kind !== "cover") setSelected((previous) => previous?.id === record.targetId ? { ...previous, reviewState: isReviewState(receipt.reviewState) ? receipt.reviewState : previous.reviewState, accessClass: receipt.accessClass === "PUBLIC_DISPLAY" || receipt.accessClass === "PRIVATE_REVIEW" ? receipt.accessClass : previous.accessClass, reviewReason: typeof receipt.reviewReason === "string" || receipt.reviewReason === null ? receipt.reviewReason : previous.reviewReason } : previous);
-          const ok = await loadQueue(cursorNow(), true);
+          const ok = await loadQueue(cursorNow(), record.kind !== "review");
           if (!isCurrentWrite(seq)) return;
           if (ok) resolveRecord(seq, accepted, `${record.targetLabel}：${record.kind === "review" ? "审核决定" : record.kind === "visibility" ? "可见性变更" : "封面关联"}已成功。`);
           else { setRecoveryChecked(true); setNotice(`${record.targetLabel}：原写回执已受理，最新队列读取未确认；可重新读取，不重复提交。`); }
@@ -659,7 +659,8 @@ export function SupplyMediaReviewView({
   }
 
   const writeLocked = Boolean(writeRecord) || writeBusy || Boolean(storedProblem) || (Boolean(writeRecord) && !recoveryChecked);
-  const filterSummary = tab === "reviewed" ? `${STATE_LABELS[queueState]} · ${OWNERSHIP_LABELS[ownershipKind]} · 已审核子状态（单一真实查询）` : `待审核 · ${OWNERSHIP_LABELS[ownershipKind]}`;
+  const nextAsset = tab === "pending" && selected && page ? page.items.find((item) => item.id !== selected.id && item.reviewState === "PENDING") ?? null : null;
+  const filterSummary = tab === "reviewed" ? `${STATE_LABELS[queueState]} · ${OWNERSHIP_LABELS[ownershipKind]}` : `待审核 · ${OWNERSHIP_LABELS[ownershipKind]}`;
   const confirmReasonError =
     confirm && confirm.action.kind === "review"
       ? reviewReasonError(confirm.asset, confirm.action.decision, reasonFor(confirm.asset))
@@ -673,13 +674,13 @@ export function SupplyMediaReviewView({
       games={games}
       canDecide={canDecide}
       canUpload={canUpload}
-      reason={reasonFor(selected)}
-      onReasonChange={(value) => setReasonFor(selected, value)}
       onZoom={setZoom}
       onOpenPath={onOpenPath}
       busy={writeLocked}
       hideHeading={!wide}
       onAction={(action) => setConfirm({ asset: selected, action })}
+      onNext={nextAsset ? () => setSelected(nextAsset) : undefined}
+      hasNext={Boolean(nextAsset)}
     />
   ) : null;
 
@@ -690,9 +691,8 @@ export function SupplyMediaReviewView({
           <div className="space-y-1">
             <div className="flex items-center gap-2.5">
               <h3 className="text-base font-semibold tracking-tight">平台素材审核</h3>
-              <Badge variant="outline" className="text-[10px] font-normal px-2 py-0.5 border-emerald-500/30 text-emerald-500 bg-emerald-500/5">双轴独立核审</Badge>
             </div>
-            <p className="text-xs text-muted-foreground">全平台图片与凭证合规审核 · 审核通过保持私有，公开需显式授权</p>
+            <p className="text-xs text-muted-foreground">审核决定与公开范围分开记录；公开需显式授权。</p>
           </div>
           {canUpload ? (
             <Button type="button" size="sm" className="h-9 gap-1.5 shadow-sm" onClick={() => setUploadState({ ...emptyUploadDialog(), open: true })} disabled={writeLocked}>
@@ -734,7 +734,7 @@ export function SupplyMediaReviewView({
           </div>
         ) : null}
         {unresolvedNotice ? <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">{unresolvedNotice}</p> : null}
-        {notice ? <p className="mt-2 text-xs text-muted-foreground">{notice}</p> : null}
+        {notice ? <p role="status" aria-live="polite" className="mt-2 text-xs text-muted-foreground">{notice}</p> : null}
 
         <div className="mt-3 flex flex-wrap items-center gap-3">
           <Tabs value={tab} onValueChange={(value) => setTab(value as ReviewTab)} className="mr-2">
@@ -765,7 +765,6 @@ export function SupplyMediaReviewView({
             </Select>
           </label>
           <span className="text-[11px] text-muted-foreground">仅显示当前授权范围</span>
-          <span className="ml-auto inline-flex items-center rounded-md bg-muted/50 px-2 py-0.5 text-[11px] font-mono text-muted-foreground">{page ? `本页 ${page.items.length} 条` : loading ? "读取中…" : "—"}</span>
         </div>
       </section>
 
@@ -803,8 +802,9 @@ export function SupplyMediaReviewView({
                     {page.items.map((asset) => (
                       <TableRow
                         key={asset.id}
+                        aria-selected={selected?.id === asset.id}
                         data-selected={selected?.id === asset.id ? "true" : undefined}
-                        className={`group transition-colors ${selected?.id === asset.id ? "bg-primary/5 ring-1 ring-inset ring-primary/20 border-l-2 border-l-primary" : "hover:bg-muted/40"}`}
+                        className={`group transition-colors ${selected?.id === asset.id ? "bg-primary/5 ring-1 ring-inset ring-primary/20" : "hover:bg-muted/40"}`}
                       >
                         <TableCell>
                           <div className="flex items-center gap-2.5">
@@ -883,10 +883,10 @@ export function SupplyMediaReviewView({
 
         {wide ? (
           <aside ref={asideRef} className="section-panel hidden self-start overflow-hidden xl:flex xl:min-h-0 xl:flex-col xl:sticky xl:top-2" style={selected && asideHeight !== undefined ? { height: asideHeight } : undefined}>
-            {detail ?? <p className="text-xs text-muted-foreground">选择左侧素材查看审核详情；审核与公开是两个独立动作。</p>}
+            {detail ?? <div className="flex min-h-72 flex-col items-center justify-center gap-1.5 p-8 text-center text-muted-foreground"><strong className="text-base text-foreground">选择左侧素材</strong><p className="max-w-[30ch] text-xs leading-relaxed">审核与公开是两个独立动作；审核通过保持私有，公开需另行授权。</p></div>}
           </aside>
         ) : (
-          <Sheet open={Boolean(selected)} onOpenChange={(open) => { if (!open) setSelected(null); }}>
+          <Sheet open={Boolean(selected) && !confirm} onOpenChange={(open) => { if (!open && !confirm) setSelected(null); }}>
             <SheetContent className="w-full gap-0 data-[side=right]:w-full data-[side=right]:sm:max-w-[420px]" closeLabel="关闭素材详情">
               <SheetHeader className="shrink-0 border-b border-border">
                 <SheetTitle>素材详情</SheetTitle>
@@ -924,7 +924,7 @@ export function SupplyMediaReviewView({
               </DialogHeader>
               <div className="space-y-2 text-xs">
                 <div className="flex items-center gap-2">
-                  <img src={mediaContentUrl(confirm.asset.id)} alt="" className="size-10 rounded border border-border object-cover" />
+                  <img src={mediaContentUrl(confirm.asset.id)} alt="" className="size-12 rounded border border-border object-contain" />
                   <div className="min-w-0">
                     <p className="truncate font-medium">{PURPOSE_LABELS[confirm.asset.purpose] ?? confirm.asset.purpose} · {objectName(confirm.asset, gameNames)}</p>
                     <p className="break-all text-muted-foreground">{confirm.asset.id}</p>

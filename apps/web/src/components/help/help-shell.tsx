@@ -15,6 +15,7 @@ export function HelpShell({
   showPageHeading = true,
   headingInContent = false,
   topContent,
+  home = false,
 }: {
   children: ReactNode;
   breadcrumbs: readonly BreadcrumbItem[];
@@ -24,6 +25,7 @@ export function HelpShell({
   showPageHeading?: boolean;
   headingInContent?: boolean;
   topContent?: ReactNode;
+  home?: boolean;
 }) {
   const router = useRouter();
   // "/" 或 Ctrl/⌘+K 聚焦帮助搜索框；输入控件、弹窗/菜单/浮层、已处理事件与输入法组合不拦截
@@ -31,7 +33,7 @@ export function HelpShell({
     const onKeyDown = (event: KeyboardEvent) => {
       if (!isBackgroundKeyboardEvent(event)) return;
       const focusSearch = () => {
-        const input = document.querySelector<HTMLElement>('form.site-search input[type="search"]');
+        const input = document.querySelector<HTMLElement>('.help-hero-search input[type="search"]') ?? document.querySelector<HTMLElement>('form.site-search input[type="search"]');
         input?.focus({ preventScroll: true });
       };
       if (event.key === "/" && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
@@ -57,7 +59,7 @@ export function HelpShell({
     return () => document.removeEventListener("click", onClick, true);
   }, [router]);
   return (
-    <ServiceShell
+    <div className={`help-center${home ? ' help-center--home' : ''}`}><ServiceShell
       surface="utility"
       contextLabel={null}
       showBack={false}
@@ -78,6 +80,6 @@ export function HelpShell({
       searchCompactPlaceholder="搜索帮助文档"
     >
       {children}
-    </ServiceShell>
+    </ServiceShell></div>
   );
 }

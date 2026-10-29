@@ -1,3 +1,4 @@
+import { contentFixtureDependency } from "./content-fixture.mjs";
 import assert from "node:assert/strict";
 import { createRequire, Module } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -297,6 +298,7 @@ async function probe({ mode = "standard", accountId, editRequested = false, game
   module.filename = path.join(tree, "publish-form-probe.cjs");
   module.paths = Module._nodeModulePaths(tree);
   module.require = (name) => {
+    const contentDependency=contentFixtureDependency(name); if(contentDependency)return contentDependency;
     if (name.endsWith(".css")) return {};
     if (name === "../ui/information" || name === "../auth/session-loading") {
       const loadPresentation = (relative) => {

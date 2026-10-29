@@ -5,6 +5,7 @@ import { assessLegacyCoverageRecord, legacyGrowthVersionHash, verifyLegacyCovera
 import { canonicalize } from "../supply/content-hash";
 import { sha256Hex } from "../supply/supply-util";
 import { SecurityApiError } from "./security-core";
+import { LEGACY_GROWTH_LIVE_COLUMNS, LEGACY_GROWTH_LIVE_FROM, prepareLegacyConfirmGrowth, type LegacyGrowthLiveSource } from "./membership-growth-legacy-live";
 
 const TABLE = "zzsh_iam.membership_growth_legacy_coverage";
 type Client = Pick<PoolClient, "query">;
@@ -63,7 +64,6 @@ function isLegacy(row: LegacyGrowthStoredContribution): boolean {
   return /^legacy_mysql_restore:la_order:[1-9]\d{0,23}$/.test(source);
 }
 
-type LegacyLiveSource = { sourceKey: string; commandId: string | null; revision: string | null };
 type CoverageAssessment = ReturnType<typeof assessLegacyCoverageRecord>;
 const pendingCoverage = (reason: string): CoverageAssessment => ({ state: "BACKFILL_PENDING", reasons: [reason], incrementRows: [] });
 
@@ -84,44 +84,67 @@ export async function readLegacyGrowthCoverageAssessment(client: Client, subject
   const versions = (await client.query<StoredRecord>(`SELECT /* legacy-growth-versions */ record_canonical AS canonical,record_digest AS digest
     FROM ${TABLE} WHERE subject_user_id=$1 AND cutoff<=$2::timestamptz
     ORDER BY cutoff DESC,created_at DESC,id COLLATE "C" DESC`, [subject, asOf])).rows.map(row => decode(row)!);
-  return assessReadCoverage(subject, contributions, asOf, versions, async () => (await client.query<LegacyLiveSource>(`SELECT /* legacy-growth-live-sources */
-    'legacy_mysql_restore:la_order:'||o.legacy_id AS "sourceKey",v.id AS "commandId",v.revision::text AS revision
-    FROM zzsh_order.legacy_order_read_snapshot o LEFT JOIN zzsh_order.legacy_continuation_version v
-      ON v.order_id=o.id AND v.command='CONFIRM' AND v.created_at<=$2::timestamptz
+  return assessReadCoverage(subject, contributions, asOf, versions, async () => (await client.query<LegacyGrowthLiveSource>(`SELECT /* legacy-growth-live-sources */ ${LEGACY_GROWTH_LIVE_COLUMNS}
+    ${LEGACY_GROWTH_LIVE_FROM}
     WHERE o.renter_user_id=$1 AND o.source_system='legacy_mysql_restore' AND o.source_entity='la_order' AND o.source_pay_status=1
       AND ((o.source_order_status=4 AND (o.source_completed_at IS NULL OR o.source_completed_at<=$2::timestamptz)) OR v.id IS NOT NULL)
     ORDER BY o.id,v.revision`, [subject, asOf])).rows);
 }
 
-async function assessReadCoverage(subject: string, contributions: readonly LegacyGrowthStoredContribution[], asOf: string, versions: LegacyCoverageRecord[], readSources: () => Promise<LegacyLiveSource[]>): Promise<CoverageAssessment> {
+async function assessReadCoverage(subject: string, contributions: readonly LegacyGrowthStoredContribution[], asOf: string, versions: LegacyCoverageRecord[], readSources: () => Promise<LegacyGrowthLiveSource[]>): Promise<CoverageAssessment> {
   const pending = pendingCoverage;
   const conflict = (reason: string): CoverageAssessment => ({ state: "SOURCE_CONFLICT", reasons: [reason], incrementRows: [] });
   if (versions.some(record => record.subjectUserId !== subject)) throw unavailable();
   const base = versions.find(record => record.fromExclusive === null && record.coverageState === "COMPLETE");
   if (!base) return pending("LEGACY_COVERAGE_RECEIPT_MISSING");
-  const keys = new Set(base.expectedSourceKeys), refunds = new Set(base.refundReviewEvidenceRefs), proofDigests = new Set(base.correctionProofDigests);
+  const coveredVersions = [base];
+  let coveredThrough = normalizeGrowthInstant(base.cutoff);
+  // A longer window may bridge a shorter one; traverse starts and never shrink the covered endpoint.
+  for (const version of versions.filter(record => record.fromExclusive !== null && record.coverageState === "COMPLETE" && normalizeGrowthInstant(record.cutoff) > normalizeGrowthInstant(base.cutoff)).sort((a, b) => normalizeGrowthInstant(a.fromExclusive!).localeCompare(normalizeGrowthInstant(b.fromExclusive!)))) {
+    if (normalizeGrowthInstant(version.fromExclusive!) > coveredThrough) return pending("LEGACY_SOURCE_WINDOW_UNVERIFIED");
+    coveredVersions.push(version); coveredThrough = normalizeGrowthInstant(version.cutoff) > coveredThrough ? normalizeGrowthInstant(version.cutoff) : coveredThrough;
+  }
+  const keys = new Set(coveredVersions.flatMap(record => record.expectedSourceKeys)), refunds = new Set(coveredVersions.flatMap(record => record.refundReviewEvidenceRefs)), proofDigests = new Set(coveredVersions.flatMap(record => record.correctionProofDigests));
   if (versions.some(v => v.expectedSourceKeys.some(k => !keys.has(k)) || v.refundReviewEvidenceRefs.some(k => !refunds.has(k)) || v.correctionProofDigests.some(k => !proofDigests.has(k)))) return pending("LEGACY_SOURCE_WINDOW_UNVERIFIED");
   const legacyRows = contributions.filter(row => isLegacy(row) && row.status !== "PENDING");
   for (const row of legacyRows) {
     if (row.userId !== subject || !row.sourceDigest || growthContributionSourceDigest(legacyGrowthVersionHash(row.sourceId, row.settlementVersion), row.gameId, row) !== row.sourceDigest) return conflict("LEGACY_FACT_DIGEST_MISMATCH");
   }
-  const ownFacts = new Set(base.factKeys.map(k => `${k.sourceKey}\u0000${k.revision}\u0000${k.sourceDigest}`));
+  const factIdentity = (row: LegacyGrowthStoredContribution) => `${row.sourceKey}\u0000${row.revision}\u0000${row.sourceDigest}`;
+  const ownFacts = new Set(coveredVersions.flatMap(record => record.factKeys.map(k => `${k.sourceKey}\u0000${k.revision}\u0000${k.sourceDigest}`)));
+  for (const version of coveredVersions) {
+    const own = new Set(version.factKeys.map(k => `${k.sourceKey}\u0000${k.revision}\u0000${k.sourceDigest}`));
+    const assessment = assessLegacyCoverageRecord(version, legacyRows.filter(row => own.has(factIdentity(row))));
+    if (assessment.state !== "COMPLETE") return assessment;
+  }
+  const verifiedIncrements = new Set<string>();
   // A source can exist before its contribution. Read all CONFIRMs, including those superseded by HOLD/RELEASE.
   const sources = await readSources();
   for (const source of sources) {
-    if (!keys.has(source.sourceKey)) return pending("LEGACY_SOURCE_WINDOW_UNVERIFIED");
+    if (!keys.has(source.sourceKey) && source.commandId === null) return pending("LEGACY_SOURCE_WINDOW_UNVERIFIED");
     if (source.commandId !== null) {
       const revision = Number(source.revision);
       if (!Number.isSafeInteger(revision) || revision < 1) return conflict("LEGACY_CONFIRM_SOURCE_INVALID");
-      for (const component of ["RENTAL_SETTLEMENT", "MATERIAL_CONSUMPTION"]) {
-        const row = legacyRows.find(r => r.sourceKey === `${component}:${source.sourceKey}` && r.sourceId === source.sourceKey && r.settlementVersion === source.commandId && r.revision === revision && !r.correctionOf);
-        if (!row?.sourceDigest || !ownFacts.has(`${row.sourceKey}\u0000${row.revision}\u0000${row.sourceDigest}`)) return pending("LEGACY_CONFIRM_FACTS_NOT_INGESTED");
+      const components = ["RENTAL_SETTLEMENT", "MATERIAL_CONSUMPTION"].map(component => legacyRows.find(r => r.sourceKey === `${component}:${source.sourceKey}` && r.sourceId === source.sourceKey && r.settlementVersion === source.commandId && r.revision === revision && !r.correctionOf));
+      if (keys.has(source.sourceKey) && components.every(row => row?.sourceDigest && ownFacts.has(factIdentity(row)))) continue;
+      // The historical receipt stays immutable; only this separately re-derived formal source can prove an increment.
+      if (!source.growthInput || !source.createdAt || normalizeGrowthInstant(source.createdAt) <= coveredThrough) return pending(keys.has(source.sourceKey) ? "LEGACY_CONFIRM_FACTS_NOT_INGESTED" : "LEGACY_SOURCE_WINDOW_UNVERIFIED");
+      const input = source.growthInput;
+      if (input.subjectUserId !== subject || `legacy_mysql_restore:la_order:${input.binding.legacyId}` !== source.sourceKey || input.origin.command.id !== source.commandId || input.origin.command.revision !== source.revision || input.origin.command.createdAt !== source.createdAt) return conflict("LEGACY_CONFIRM_SOURCE_INVALID");
+      const prepared = prepareLegacyConfirmGrowth(input);
+      if (!prepared.ok) return pending("LEGACY_CONFIRM_SOURCE_UNPROVEN");
+      for (const expected of prepared.rows) {
+        const row = components.find(row => row?.sourceKey === expected.contribution.sourceKey);
+        if (!row?.sourceDigest) return pending("LEGACY_CONFIRM_FACTS_NOT_INGESTED");
+        if (row.sourceDigest !== expected.sourceDigest || row.gameId !== expected.gameId) return conflict("LEGACY_CONFIRM_FACT_BINDING_INVALID");
+        verifiedIncrements.add(factIdentity(row));
       }
     }
   }
   // Future rows are not increments at this asOf; the base's own immutable factKeys are still checked in full.
   const atThisTime = legacyRows.filter(r => ownFacts.has(`${r.sourceKey}\u0000${r.revision}\u0000${r.sourceDigest}`) || normalizeGrowthInstant(r.recordedAt) <= asOf);
-  return assessLegacyCoverageRecord(base, atThisTime);
+  if (atThisTime.some(row => !ownFacts.has(factIdentity(row)) && !verifiedIncrements.has(factIdentity(row)))) return pending("LEGACY_INCREMENTS_UNVERIFIED");
+  return assessLegacyCoverageRecord(base, atThisTime, "VERIFIED");
 }
 
 /** All subjects use the original receipt/source checks; SQL count does not grow with page length. */
@@ -141,11 +164,9 @@ export async function readLegacyGrowthCoverageAssessments(client: Client, contri
     if (!contributions.has(row.userId) || record.subjectUserId !== row.userId) throw unavailable();
     const records = versions.get(row.userId) ?? []; records.push(record); versions.set(row.userId, records);
   }
-  const sources = new Map<string, LegacyLiveSource[]>();
-  for (const row of (await client.query<LegacyLiveSource & { userId: string }>(`SELECT /* legacy-growth-batch-live-sources */ o.renter_user_id AS "userId",
-    'legacy_mysql_restore:la_order:'||o.legacy_id AS "sourceKey",v.id AS "commandId",v.revision::text AS revision
-    FROM zzsh_order.legacy_order_read_snapshot o LEFT JOIN zzsh_order.legacy_continuation_version v
-      ON v.order_id=o.id AND v.command='CONFIRM' AND v.created_at<=$2::timestamptz
+  const sources = new Map<string, LegacyGrowthLiveSource[]>();
+  for (const row of (await client.query<LegacyGrowthLiveSource & { userId: string }>(`SELECT /* legacy-growth-batch-live-sources */ o.renter_user_id AS "userId", ${LEGACY_GROWTH_LIVE_COLUMNS}
+    ${LEGACY_GROWTH_LIVE_FROM}
     WHERE o.renter_user_id=ANY($1::text[]) AND o.source_system='legacy_mysql_restore' AND o.source_entity='la_order' AND o.source_pay_status=1
       AND ((o.source_order_status=4 AND (o.source_completed_at IS NULL OR o.source_completed_at<=$2::timestamptz)) OR v.id IS NOT NULL)
     ORDER BY o.renter_user_id,o.id,v.revision`, [ids, asOf])).rows) {

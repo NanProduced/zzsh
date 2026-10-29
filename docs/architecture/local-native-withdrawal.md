@@ -1,6 +1,6 @@
 # 本地原生提现作用域
 
-本契约仅描述显式 test/fake 的原生金融验收装配，不构成生产渠道、真实KYC或全历史可提现结论。未装配 scope 时保留原 R6 资源路径。
+本契约仅描述显式 test/fake 的原生金融验收装配，不构成生产渠道、真实KYC或全历史可提现结论。正式银行卡提现及其默认关闭/装配前提见[支付与资金领域规格](payments-and-funds.md)；不能将此本地 scope 作为正式出款授权。未装配 scope 时保留原本地受控资源路径。
 
 服务端通过 `createNativeWithdrawalScope` 创建不可伪造 token，绑定准确资源、主体、准入、目的地、意向和 payoutKey。允许集合复制保存；HTTP/ENV不能创建或修改 scope。每个实际连接检查数据库名、OID、marker、runtime角色及所需基础表。
 

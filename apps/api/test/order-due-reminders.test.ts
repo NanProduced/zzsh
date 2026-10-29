@@ -48,12 +48,12 @@ test("fixture transport keys a system text retry by messageClientId", async () =
 });
 
 test("0111 records one reminder per bucket with a narrow runtime update grant", () => {
-  const sql = readFileSync(resolve("migrations/business/0111_im_order_due_reminder.sql"), "utf8");
+  const sql = readFileSync(resolve("migrations/business/0115_im_order_due_reminder.sql"), "utf8");
   assert.match(sql, /UNIQUE \("order_id", "app_id", "bucket"\)/);
   assert.match(sql, /"bucket" IN \('BEFORE_24H', 'DUE', 'AFTER_1D', 'AFTER_2D', 'AFTER_3D'\)/);
   assert.match(sql, /"state" IN \('PENDING', 'SENDING', 'SENT', 'SKIPPED'\)/);
   const journal = JSON.parse(readFileSync(resolve("migrations/business/meta/_journal.json"), "utf8"));
-  assert.ok(journal.entries.some((entry: { idx: number; tag: string }) => entry.idx === 111 && entry.tag === "0111_im_order_due_reminder"));
+  assert.ok(journal.entries.some((entry: { idx: number; tag: string }) => entry.idx === 115 && entry.tag === "0115_im_order_due_reminder"));
   const acl = readFileSync(resolve("src/database/business-migrations.ts"), "utf8");
   assert.match(acl, /REVOKE UPDATE ON TABLE zzsh_order\.im_order_due_reminder FROM \$\{runtimeUser\}/);
   assert.match(acl, /GRANT UPDATE \(state,attempt_count,next_attempt_at,lease_until,lease_token_hash,sent_at,failure_class,updated_at\)\s+ON TABLE zzsh_order\.im_order_due_reminder/);

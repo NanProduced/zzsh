@@ -1,61 +1,52 @@
 "use client";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import useEmblaCarousel from "embla-carousel-react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
-type DefaultSlide = { kind: "default"; title: ReactNode; text: string; button: string; href: string; poster: string; subtitle?: string; label: string };
-type ApiSlide = { kind: "api"; id: string; title: string; description: string | null; linkUrl: string | null; label: string; mediaUrl: string };
+import { usePublicContent } from "../content/public-content-provider";
+type DefaultSlide = { kind: "default"; id: string; title: ReactNode; text: string; button: string; href: string; poster: string; subtitle?: string; label: string };
+type ApiSlide = Omit<DefaultSlide, "kind"> & { kind: "api"; mobileLabel: string; mediaUrl: string; mobileMediaUrl: string | null };
 type Slide = DefaultSlide | ApiSlide;
 const DEFAULT_SLIDES: DefaultSlide[] = [
-  { kind: "default", title: <>三角洲行动<br/><span>资源账号租赁</span></>, text: "按消耗计费 · 真人客服协助履约", button: "浏览三角洲资源账号", href: "#delta-section", poster:"delta", label:"三角洲资源账号租赁" },
-  { kind: "default", title: <>未成年人<br/><span>禁止消费</span></>, text: "理性游戏 · 守护成长", button: "了解平台规则", href: "/help#protection", poster:"protection", label:"未成年人保护" },
-  { kind: "default", title: <>海量账号<br/><span>真实可靠</span></>, text: "洲洲商行 · 游戏账号服务", button: "浏览资源账号", href: "#delta-section", poster:"accounts", subtitle:"洲洲商行 · 游戏账号服务", label:"洲洲商行" },
-  { kind: "default", title: <>账号交易<br/><span>即将上线</span></>, text: "打造属于您的游戏专属集市", button: "了解交易服务", href: "", poster:"market", label:"账号交易预告" },
-  { kind: "default", title: <>邀好友注册<br/><span>交易返现5%</span></>, text: "2元即可提现", button: "查看邀请活动", href: "", poster:"invite", label:"邀请好友活动" },
+  { kind: "default", id: "delta", title: <>三角洲行动<br/><span>资源账号租赁</span></>, text: "按消耗计费 · 真人客服协助履约", button: "浏览三角洲资源账号", href: "#delta-section", poster:"delta", label:"三角洲资源账号租赁" },
+  { kind: "default", id: "protection", title: <>未成年人<br/><span>禁止消费</span></>, text: "理性游戏 · 守护成长", button: "了解平台规则", href: "/help#protection", poster:"protection", label:"未成年人保护" },
+  { kind: "default", id: "accounts", title: <>海量账号<br/><span>真实可靠</span></>, text: "洲洲商行 · 游戏账号服务", button: "浏览资源账号", href: "#delta-section", poster:"accounts", subtitle:"洲洲商行 · 游戏账号服务", label:"洲洲商行" },
 ];
-function parseApiSlide(value: unknown): ApiSlide | null {
-  if (!value || typeof value !== "object") return null;
-  const record = value as Record<string, unknown>;
-  const id = typeof record.id === "string" ? record.id : "";
-  const title = typeof record.title === "string" ? record.title.trim() : "";
-  const mediaUrl = typeof record.mediaUrl === "string" ? record.mediaUrl : "";
-  if (!id || !title || !mediaUrl.startsWith("/api/content/media/")) return null;
-  const description = typeof record.description === "string" && record.description.trim() ? record.description : null;
-  const linkUrl = typeof record.linkUrl === "string" && record.linkUrl.startsWith("/") && !record.linkUrl.startsWith("//") ? record.linkUrl : null;
-  const imageAlt = typeof record.imageAlt === "string" && record.imageAlt.trim() ? record.imageAlt.trim() : title;
-  return { kind: "api", id, title, description, linkUrl, label: imageAlt, mediaUrl };
-}
 export function HeroCarousel() {
   const [reduced, setReduced] = useState(true);
   const [playing, setPlaying] = useState(true);
   const [current, setCurrent] = useState(0);
-  const [imageFailed, setImageFailed] = useState(false);
+  const [imageFailed, setImageFailed] = useState<Record<string, boolean>>({});
+  const [mobileFailed, setMobileFailed] = useState<Record<string, boolean>>({});
   const [hovered,setHovered]=useState(false);
   const [focused,setFocused]=useState(false);
   const [visible,setVisible]=useState(true);
-  const [apiSlides,setApiSlides]=useState<ApiSlide[]|null>(null);
+  const [apiSlides,setApiSlides]=useState<Slide[]|null>(null);
+  const [narrow, setNarrow] = useState(false);
+  const { resource } = usePublicContent("placement:HOME_HERO");
   useEffect(()=>{const update=()=>setVisible(!document.hidden);document.addEventListener("visibilitychange",update);return()=>document.removeEventListener("visibilitychange",update);},[]);
   useEffect(()=>{
-    const controller=new AbortController();
-    (async()=>{
-      try{
-        const response=await fetch("/api/content/carousel?slot=HOME_HERO",{cache:"no-store",signal:controller.signal,headers:{accept:"application/json"}});
-        if(!response.ok)return;
-        const payload=await response.json() as {items?:unknown};
-        const items=Array.isArray(payload.items)?payload.items.map(parseApiSlide).filter((slide):slide is ApiSlide=>slide!==null):[];
-        if(items.length>0)setApiSlides(items);
-      }catch{/* The default brand slides stay in place when the public carousel is unreachable. */}
-    })();
-    return()=>controller.abort();
-  },[]);
+    const payload = resource?.payload;
+    if (payload?.kind !== "carousel") { setApiSlides(null); return; }
+    const items: Slide[] = DEFAULT_SLIDES.map(slide => {
+      const binding = payload.slides.find(value => value.id === slide.id);
+      const mediaUrl = binding?.mediaId ? resource?.media.find(value => value.id === binding.mediaId)?.url : null;
+      if (!mediaUrl) return slide;
+      const mobileMediaUrl = binding?.mobileMediaId ? resource?.media.find(value => value.id === binding.mobileMediaId)?.url ?? null : null;
+      return { ...slide, kind: "api", mediaUrl, mobileMediaUrl, mobileLabel: slide.label };
+    });
+    setApiSlides(items.some(slide => slide.kind === "api") ? items : null);
+  },[resource]);
   const [viewport, api] = useEmblaCarousel({ loop: true, duration: reduced ? 0 : 25, watchFocus: false });
   useEffect(() => {
     const media = matchMedia("(prefers-reduced-motion: reduce)");
+    const mobile = matchMedia("(max-width: 599px)");
     const update = () => {
       setReduced(media.matches);
+      setNarrow(mobile.matches);
       if (media.matches) setPlaying(false);
     };
-    update(); media.addEventListener("change", update);
-    return () => media.removeEventListener("change", update);
+    update(); media.addEventListener("change", update); mobile.addEventListener("change", update);
+    return () => { media.removeEventListener("change", update); mobile.removeEventListener("change", update); };
   }, []);
   useEffect(() => {
     if (!api) return;
@@ -66,22 +57,7 @@ export function HeroCarousel() {
   }, [api]);
   const autoPlaying = playing && !reduced && !hovered && !focused && visible;
   const slides: Slide[] = apiSlides ?? DEFAULT_SLIDES;
-  // Rebuild only when the slide set actually arrives/changes (never on first
-  // mount): reInit alone preserves the old engine index (Embla reActivate keeps
-  // selectedScrollSnap as startIndex), which can also be out of the new range.
-  // Actually move the engine to the first slide, then mirror the engine's truth
-  // into React so aria-hidden/inert/dots all point at the same slide.
-  const slideSetMounted = useRef(false);
-  useEffect(() => {
-    if (!api) return;
-    if (!slideSetMounted.current) {
-      slideSetMounted.current = true;
-      return;
-    }
-    api.reInit?.();
-    api.scrollTo(0, true);
-    setCurrent(api.selectedScrollSnap());
-  }, [api, slides]);
+  // 位置、数量和顺序固定，换图不重置用户当前查看的幻灯片。
   useEffect(() => {
     if (!api || !autoPlaying) return;
     const timer = setInterval(() => api.scrollNext(), 5500);
@@ -104,16 +80,19 @@ export function HeroCarousel() {
       }
     }}>
     <div className="hero-viewport" ref={viewport}><div className="hero-track">
-      {slides.map((slide, index) => <div key={slide.kind === "api" ? slide.id : index} className={`hero-slide hero-slide-${index}`}
-        role="group" aria-roledescription="幻灯片" aria-label={`${slide.label}，${index + 1} / ${slides.length}`}
+      {slides.map((slide, index) => <div key={slide.id} className={`hero-slide hero-slide-${index}`}
+        role="group" aria-roledescription="幻灯片" aria-label={`${slide.kind === "api" && narrow && slide.mobileMediaUrl && !mobileFailed[slide.id] ? slide.mobileLabel : slide.label}，${index + 1} / ${slides.length}`}
         aria-hidden={index !== current} inert={index !== current}>
-        <div className="hero-scene" aria-hidden="true"><img className="poster-sheet" src={slide.kind === "api" ? slide.mediaUrl : `/art/zhouzhou/poster-${slide.poster}.webp`} srcSet={slide.kind === "default" ? posterSrcSet(slide.poster) : undefined} sizes={slide.kind === "default" ? "(max-width: 599px) 92vw, (max-width: 1023px) 476px, 804px" : undefined} alt="" onError={()=>setImageFailed(true)} ref={image=>{if(image?.complete&&image.naturalWidth===0&&!imageFailed)setImageFailed(true);}}/></div>
-        {slide.kind === "default" && slide.subtitle && <p className="poster-subtitle" aria-hidden="true">{slide.subtitle}</p>}
-        {slide.kind === "api" && <div className="hero-copy"><h1>{slide.title}</h1>{slide.description && <p>{slide.description}</p>}</div>}
-        <p className="sr-only">{slide.title}</p>{slide.kind === "default" && <p className="sr-only">{slide.text}</p>}
-        {slide.kind === "api" && slide.description && <p className="sr-only">{slide.description}</p>}
-        {((slide.kind === "default" && slide.href) || (slide.kind === "api" && slide.linkUrl)) && <a className="hero-poster-link" href={slide.kind === "api" ? slide.linkUrl! : slide.href} aria-label={slide.kind === "api" ? slide.title : slide.button}/>}
-        {imageFailed && <span className="art-failed">装饰图片加载失败</span>}
+        <div className="hero-scene" aria-hidden="true"><picture>
+          {slide.kind === "api" && !imageFailed[slide.mediaUrl] && slide.mobileMediaUrl && !mobileFailed[slide.id] ? <source media="(max-width: 599px)" srcSet={slide.mobileMediaUrl} /> : null}
+          <img className="poster-sheet" src={slide.kind === "api" && !imageFailed[slide.mediaUrl] ? slide.mediaUrl : `/art/zhouzhou/poster-${slide.poster}.webp`} srcSet={slide.kind === "default" || imageFailed[slide.kind === "api" ? slide.mediaUrl : ""] ? posterSrcSet(slide.poster) : undefined} sizes={slide.kind === "default" || imageFailed[slide.kind === "api" ? slide.mediaUrl : ""] ? "(max-width: 599px) 92vw, (max-width: 1023px) 476px, 804px" : undefined} alt="" onError={() => {
+            if (slide.kind === "api" && slide.mobileMediaUrl && !mobileFailed[slide.id] && window.matchMedia("(max-width: 599px)").matches) setMobileFailed(value => ({ ...value, [slide.id]: true }));
+            else if (slide.kind === "api") setImageFailed(value => ({ ...value, [slide.mediaUrl]: true }));
+          }} />
+        </picture></div>
+        {slide.subtitle && <p className="poster-subtitle" aria-hidden="true">{slide.subtitle}</p>}
+        <p className="sr-only">{slide.title}</p><p className="sr-only">{slide.text}</p>
+        <a className="hero-poster-link" href={slide.href} aria-label={slide.button}/>
       </div>)}
     </div></div>
     <button className="carousel-arrow carousel-prev" aria-label="上一张幻灯片" onClick={()=>move(-1)}><ChevronLeft size={18} aria-hidden="true"/></button>

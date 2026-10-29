@@ -36,4 +36,8 @@ Owner于2026-09-15提供四张设计与应用稿，指定作为后续IP物料和
 6. 不同业务语义不得复用同一插画或宣传物料；只有语义本就相同的用途才可复用。CTA协助与成交播报必须使用独立动作素材。
 7. 不把整张图鉴缩小后塞入页面，不给每个按钮重复加角色。先确定一个画面的主次，再选择动作。
 
-当前仅归档与确认参考规范；未生成独立角色切图、未替换业务UI、未验证各终端物料。
+## 服务帮助首页插画
+
+`zhouzhou-service-help-v1.png` 由内置 imagegen 依据形象设定生成，保留透明背景；用于帮助首页的客服陪伴场景，图内标记仅为角色装饰，页面正式 Logo 仍使用原始品牌文件。上线切图为 `apps/web/public/images/help/zhouzhou-service-v1-{480,960}.webp`，比例均为 3:2；桌面与手机以 `srcset` 选择尺寸并完整显示，不把标题、搜索框或业务文案烘焙进图中。
+
+平台动态使用独立播报动作 `zhouzhou-platform-updates-v1.png`，公开切图为 `apps/web/public/images/updates/zhouzhou-announcer-v1-{400,800}.webp`。两套插画的提示词、来源与产物校验见 [service-pages-generation.json](service-pages-generation.json)。

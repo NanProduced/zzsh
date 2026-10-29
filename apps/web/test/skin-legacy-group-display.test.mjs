@@ -1,3 +1,4 @@
+import { contentFixtureDependency } from "./content-fixture.mjs";
 // SK7-R1-01: the retired red/gold business grouping must not come back on new UI surfaces.
 // Real listing-detail.tsx and supply-workspaces.tsx are compiled and rendered to static markup;
 // snapshot payloads are deep-frozen and compared byte-for-byte after rendering.
@@ -43,7 +44,8 @@ function load(file, extra = {}) {
     return require(n);
   };
   const raw = readFileSync(file, 'utf8').replace('function ReadyDetail(', 'export function ReadyDetail(').replace('function AccountDetail(', 'export function AccountDetail(');
-  m._compile(ts.transpileModule(raw, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, file);
+  m.require = ((original) => (name) => contentFixtureDependency(name) ?? original(name))(m.require.bind(m));
+ m._compile(ts.transpileModule(raw, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, file);
   return m.exports;
 }
 const card = load(path.join(web, 'src/components/delta/account-card.tsx'));

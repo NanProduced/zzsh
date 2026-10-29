@@ -75,7 +75,7 @@ export type PublicListing = {
   game?: { id: string; code: string; name: string } | null;
   attributes: Record<string, string | number | boolean | null>;
   presentation: {
-    items: Array<{ id: string; code?: string; name: string; unit: string }>;
+    items: Array<{ id: string; code?: string; name: string; unit: string; mediaId?: string | null }>;
     skins: PublicListingSkin[];
     /** Migrated accounts only: declared references whose skin is not public yet (count, never names). */
     skinsWithheld?: number;
@@ -263,6 +263,7 @@ export type PublicCatalog = {
     quantityScale: number;
     required: boolean;
     sortOrder: number;
+    mediaId?: string | null;
   }>;
   categories: Array<{
     id: string;
@@ -298,6 +299,7 @@ export type PublishingCatalog = {
     code: string;
     name: string;
     priced: boolean;
+    mediaId?: string | null;
     unit: "HAFF_BASE" | "ROUND" | "PIECE" | "DAY";
     quantityScale: number;
     required: boolean;
@@ -624,7 +626,7 @@ export type MySupply = {
       dailyConsumption: { quantity: string; unit: "HAFF_BASE" } | null;
     } | null;
     presentation?: {
-      items: Array<{ id: string; code?: string; name: string; unit: string }>;
+      items: Array<{ id: string; code?: string; name: string; unit: string; mediaId?: string | null }>;
       skins: PublicListingSkin[];
       entitlements: Array<{ id: string; name: string }>;
     };

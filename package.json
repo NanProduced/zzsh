@@ -21,10 +21,12 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test -w @zzsh/api",
     "test:smoke": "node scripts/smoke.mjs",
-    "check:offline": "node scripts/assert-offline-env.mjs && node scripts/check-test-entries.mjs && npm run test:local-auth && npm run build && npm run typecheck -w @zzsh/web && npm run test:compiled -w @zzsh/api && npm run test:web && npm run test:ui -w @zzsh/web && npm run test:admin && npm run test:production -w @zzsh/web && npm run test:smoke",
+    "check:offline": "node scripts/assert-offline-env.mjs && node scripts/check-test-entries.mjs && npm run test:local-auth && npm run test:content && npm run test:ui:shared && npm run build && npm run typecheck -w @zzsh/web && npm run test:compiled -w @zzsh/api && npm run test:web && npm run test:ui -w @zzsh/web && npm run test:admin && npm run test:production -w @zzsh/web && npm run test:smoke",
     "test:web": "npm test -w @zzsh/web",
     "check": "npm run check:offline && npm run test:db:compiled -w @zzsh/api",
-    "test:admin": "npm test -w @zzsh/admin"
+    "test:admin": "npm test -w @zzsh/admin",
+    "test:content": "npm test -w @zzsh/content",
+    "test:ui:shared": "npm test -w @zzsh/ui"
   },
   "devDependencies": {
     "@types/node": "24.5.0",

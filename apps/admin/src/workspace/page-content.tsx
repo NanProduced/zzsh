@@ -37,6 +37,7 @@ export function WorkspacePageContent({
   onRecoveryCompleted,
   onOpenPath,
   onDirtyChange,
+  onWriteLockChange,
   onQueryChange,
   refreshNonce,
   theme,
@@ -57,6 +58,7 @@ export function WorkspacePageContent({
   onRecoveryCompleted: () => void;
   onOpenPath: (path: string, title?: string) => void;
   onDirtyChange: (dirty: boolean) => void;
+  onWriteLockChange?: (locked: boolean) => void;
   onQueryChange: (query: Record<string, string>) => void;
   refreshNonce: number;
   theme?: Theme;
@@ -189,7 +191,7 @@ export function WorkspacePageContent({
     return <SupplyMediaReviewView key={[tab.id,snapshot.adminUserId,snapshot.session.id,snapshot.permissions.slice().sort().join(",")].join("|")} snapshot={snapshot} refreshNonce={refreshNonce} onOpenPath={onOpenPath} />;
   }
   if (tab.kind === "content") {
-    return <ContentView key={tab.id} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} tab={tab} onQueryChange={onQueryChange} />;
+    return <ContentView key={[tab.id,snapshot.adminUserId,snapshot.session.id,snapshot.permissions.slice().sort().join(",")].join("|")} snapshot={snapshot} onDirtyChange={onDirtyChange} onWriteLockChange={onWriteLockChange} refreshNonce={refreshNonce} tab={tab} onQueryChange={onQueryChange} onOpenPath={onOpenPath} />;
   }
   if (tab.kind === "orders" || tab.kind === "order-object") {
     const fromUser = tab.kind === "order-object" && tab.query.fromUserId && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(tab.query.fromUserId) && (snapshot.security.isBoss || snapshot.permissions.includes("user.directory.read")) ? tab.query.fromUserId : null;

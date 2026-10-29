@@ -22,9 +22,12 @@ class Stub {
   media = new Set<string>();
   publicMedia = new Set<string>();
   statements: string[] = [];
+  managedCarousel = false;
 
   query = async (text: string, values: unknown[] = []): Promise<{ rows: unknown[]; rowCount?: number }> => {
     this.statements.push(text);
+    if (text.startsWith("SELECT pg_advisory_xact_lock")) return { rows: [] };
+    if (text.startsWith('SELECT 1 FROM "zzsh_content"."content_item"') && text.includes('"resource_key"')) return { rows: this.managedCarousel ? [{ "?column?": 1 }] : [] };
     if (text.startsWith(`SELECT "id" FROM "zzsh_content"."content_item" WHERE "id" = $1`)) {
       return { rows: this.items.has(String(values[0])) ? [{ id: values[0] }] : [] };
     }

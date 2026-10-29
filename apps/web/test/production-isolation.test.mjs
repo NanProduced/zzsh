@@ -1,3 +1,4 @@
+import { DEFAULT_GUIDES } from "@zzsh/content";
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
@@ -49,8 +50,12 @@ test('game framework keeps tools scoped and migrated guide links resolve', () =>
   for (const id of ['rental-guide', 'billing-guide', 'publish-guide', 'protection']) {
     assert.ok(legacy.includes(`"${id}"`), `legacy anchor ${id} must stay mapped to an article`);
   }
+  const appPaths = JSON.parse(readFileSync(build('server/app-paths-manifest.json'), 'utf8'));
+  assert.ok(appPaths['/help/[slug]/page']);
+  assert.ok(existsSync(build('server', appPaths['/help/[slug]/page'])));
   for (const slug of ['rental-getting-started', 'fees-overview', 'publish-prepare', 'minor-protection']) {
-    assert.ok(existsSync(build(`server/app/help/${slug}.html`)), `${slug} must be prerendered`);
+    assert.ok(DEFAULT_GUIDES.some(article => article.slug === slug), `${slug} remains a known default route`);
+    assert.equal(existsSync(build(`server/app/help/${slug}.html`)), false, 'managed articles must not freeze publication state in build-time HTML');
   }
   const delta = readFileSync(resolve(web, 'src/components/delta/delta-section.tsx'), 'utf8');
   assert.match(delta, /<GameIdentity game="delta">.*改枪码.*<\/GameIdentity>/);
@@ -80,12 +85,15 @@ test('retained static and dynamic homepage artwork resolves after cleanup', () =
 
 test('production campaigns retain approved content without fabricated activity statistics',()=>{
   const html=readFileSync(build('server/app/index.html'),'utf8');
-  for(const content of ['未成年人','禁止消费','账号交易','即将上线','交易返现5%','2元即可提现']) assert.ok(html.includes(content),content);
+  for(const content of ['未成年人','禁止消费','三角洲行动','资源账号租赁','海量账号','真实可靠']) assert.ok(html.includes(content),content);
   assert.ok(html.includes('class="platform-activity"'));
   assert.equal((html.match(/class="stat-unknown"/g)||[]).length,3);
   assert.ok(!html.includes('演示数据'));
   for(const value of ['12,580','150,960','3,086'])assert.ok(!html.includes(value),value);
-  assert.ok(html.includes('暂无可展示的成交信息'));
+  assert.ok(html.includes('class="platform-update-ticker"'));
+  assert.ok(html.includes('平台动态'));
+  assert.ok(!html.includes('暂无可展示的成交信息'));
+  for(const claim of ['交易返现5%','2元即可提现'])assert.ok(!html.includes(claim), `${claim} must not ship without current policy evidence`);
   assert.ok(!html.includes('class="game-transition"'));
   assert.ok(!html.includes('class="brand-signature"'));
   assert.ok(!html.includes('>系统<'));
@@ -93,7 +101,7 @@ test('production campaigns retain approved content without fabricated activity s
   assert.ok(!html.includes('class="brand-monument"'));
   assert.ok(!html.includes('class="hero-copy"'));
   assert.equal((html.match(/class="hero-poster-link"/g)||[]).length,3);
-  for(const poster of ['delta','protection','accounts','market','invite']) assert.ok(html.includes(`poster-${poster}.webp`));
+  for(const poster of ['delta','protection','accounts']) assert.ok(html.includes(`poster-${poster}.webp`));
 });
 
 test('shared font distribution carries the canonical license', () => {
