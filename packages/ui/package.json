@@ -13,7 +13,9 @@
     "./order-card": "./src/order-card.tsx",
     "./order-card.css": "./src/order-card.css",
     "./message-actions": "./src/message-actions.tsx",
-    "./message-actions.css": "./src/message-actions.css"
+    "./message-actions.css": "./src/message-actions.css",
+    "./message-media": "./src/message-media.tsx",
+    "./message-media.css": "./src/message-media.css"
   },
   "dependencies": {
     "@zzsh/im-client": "0.0.0",
