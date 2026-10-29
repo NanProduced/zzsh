@@ -129,8 +129,31 @@ export function buildFulfillmentIntent(orderId: string, command: FulfillmentComm
   return { id: key, kind: command.kind, orderId, path: commandPath(orderId, command), key, body: commandBody(command), createdAt: new Date().toISOString() };
 }
 
-export function readOrderSettlement(orderId: string): Promise<SettlementReadView> {
-  return adminRequest<SettlementReadView>(`${orderBase(orderId)}/settlement`);
+/**
+ * A settlement read has three honest failure meanings: 404 = the recording
+ * surface is off in this environment (or the object is not readable at all),
+ * 403 = this account lacks permission, everything else stays unknown. The
+ * caller must not collapse them into one "no permission" message.
+ */
+export type SettlementReadOutcome =
+  | { kind: "ok"; view: SettlementReadView }
+  | { kind: "unavailable"; status: 404 }
+  | { kind: "forbidden"; status: 403 }
+  | { kind: "auth"; status: 401 | 423 }
+  | { kind: "unknown"; error: unknown };
+
+export async function readOrderSettlement(orderId: string): Promise<SettlementReadOutcome> {
+  try {
+    const view = await adminRequest<SettlementReadView>(`${orderBase(orderId)}/settlement`);
+    return { kind: "ok", view };
+  } catch (error) {
+    if (error instanceof AdminApiError) {
+      if (error.status === 404) return { kind: "unavailable", status: 404 };
+      if (error.status === 403) return { kind: "forbidden", status: 403 };
+      if (error.status === 401 || error.status === 423) return { kind: "auth", status: error.status };
+    }
+    return { kind: "unknown", error };
+  }
 }
 
 /**

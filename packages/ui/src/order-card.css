@@ -1,0 +1,34 @@
+/* Order-stage card inside a chat message. Values fall back across the user site
+   tokens (--color-*) and the admin theme tokens (--card/--border/--muted-foreground). */
+.order-card{--oc-border:var(--ot-border,var(--color-border-default,var(--border,#c8d0da)));--oc-muted:var(--ot-muted,var(--color-text-secondary,var(--muted-foreground,#737d89)));--oc-accent:var(--color-accent-brand,var(--im-accent,var(--ring,#c9a15a)));box-sizing:border-box;display:grid;gap:8px;width:100%;max-width:340px;padding:12px 13px;border:1px solid var(--oc-border);border-radius:10px;background:var(--color-bg-surface,var(--card,transparent));color:inherit;font-size:12px;line-height:1.5;text-align:left;overflow-wrap:anywhere}
+.order-card[data-kind="ORDER_OPENING"]{border-left:3px solid var(--oc-accent);padding-left:11px}
+.order-card-head{display:grid;gap:2px;min-width:0}
+.order-card-tag{justify-self:start;padding:0 6px;border:1px solid var(--oc-border);border-radius:999px;color:var(--oc-muted);font-size:10px;line-height:1.6}
+.order-card-title{margin:0;font-size:13px;font-weight:600;line-height:1.4}
+.order-card-no{color:var(--oc-muted);font-size:10px;font-variant-numeric:tabular-nums}
+.order-card-account{margin:0;font-size:12px;font-weight:600;line-height:1.45}
+/* The admin shell styles bare <p> as a panel; inside a message card that reads as a nested card. */
+.order-card .order-card-account,.order-card .order-card-verify,.order-card .order-card-note{padding:0;border:0;border-radius:0;background:none}
+.order-card-account small{display:block;color:var(--oc-muted);font-size:11px;font-weight:400;font-variant-numeric:tabular-nums}
+.order-card-verify{margin:0;color:var(--oc-muted);font-size:11px;line-height:1.5}
+.order-card-rows{display:grid;gap:4px;margin:0;padding-top:6px;border-top:1px solid var(--oc-border)}
+.order-card-row{display:grid;grid-template-columns:5rem minmax(0,1fr);gap:8px;margin:0}
+.order-card-row dt{color:var(--oc-muted)}
+.order-card-row dd{margin:0;min-width:0}
+.order-card-acks{display:flex;flex-wrap:wrap;gap:6px}
+.order-card-ack{padding:1px 7px;border:1px solid var(--oc-border);border-radius:999px;color:var(--oc-muted);font-size:11px;line-height:1.6}
+.order-card-ack[data-state="confirmed"]{color:var(--color-status-success,var(--success,#6b9f78));border-color:color-mix(in srgb,var(--color-status-success,var(--success,#6b9f78)) 45%,var(--oc-border))}
+.order-card-ack[data-self="true"]{font-weight:600}
+.order-card-lines{display:grid;gap:3px;margin:0;padding:6px 0 0;border-top:1px dashed var(--oc-border);list-style:none}
+.order-card-line{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;align-items:baseline;margin:0}
+.order-card-line-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.order-card-line-qty{color:var(--oc-muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+.order-card-line-amount{font-variant-numeric:tabular-nums;text-align:right;white-space:normal}
+.order-card .order-card-toggle{justify-self:start;padding:2px 0;border:0;border-radius:0;background:transparent;color:var(--oc-accent);font:inherit;font-size:11px;cursor:pointer}
+.order-card-toggle:hover{text-decoration:underline;text-underline-offset:2px}
+.order-card-note{margin:0;color:var(--oc-muted);font-size:11px;line-height:1.5}
+.order-card-foot{display:flex;align-items:center;justify-content:flex-end;padding-top:7px;border-top:1px solid var(--oc-border)}
+.order-card .order-card-action{flex:none;padding:5px 11px;border:1px solid var(--oc-border);border-radius:6px;background:transparent;color:inherit;font:inherit;font-size:12px;font-weight:600;line-height:1.5;text-decoration:none;white-space:nowrap;cursor:pointer}
+.order-card-action:hover{border-color:var(--oc-accent);color:var(--oc-accent)}
+.order-card .order-card-action:focus-visible{outline:2px solid var(--oc-accent);outline-offset:2px}
+@media(max-width:520px){.order-card{max-width:none;width:calc(100% - 24px)}}

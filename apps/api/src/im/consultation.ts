@@ -33,6 +33,13 @@ import {
 import type { ImMessageTransport } from "./im-contract";
 import { lockDispatchGate, lockSupportMutation, readEligibleSupport, reserveSupportCandidate, type LockedSupportRoster } from "./support-dispatch";
 import { assignWaitingOrders } from "./order-dispatch";
+import {
+  readLatestHandoverNote,
+  readSupportToday,
+  recordSupportHandover,
+  requireSupportManagementRead,
+  type SupportDayCounts,
+} from "./support-management";
 
 export type SupportType = "SERVICE" | "COMPLAINT";
 export type ConsultationState = "WAITING" | "ACTIVE" | "CLOSED";
@@ -66,6 +73,7 @@ export type SupportPresence = {
   lastConnectedAt: string | null;
   activeLoad: number;
   version: number;
+  today: SupportDayCounts;
 };
 
 export type ConsultationView = {
@@ -911,7 +919,10 @@ async function completeTransferRecovery(options: ConsultationRouteOptions, claim
       [options.appId, claim.id, teamId, scopeLeaseHash(claim.leaseToken)],
     );
     if (settled.rowCount !== 1) throw new ScopeOperationFailure("STALE_OPERATION", "transfer lease changed before completion", true);
-    await writeEvent(client, { consultationId: claim.consultationId, eventType: "TRANSFERRED", actorType: "system", actorId: claim.ownerAccountId, fromAdminId: claim.previousAdminId, toAdminId: claim.targetAdminId, peerAccountId: claim.targetAdminAccountId, details: { recovered: true } });
+    const note = claim.previousAdminId && claim.targetAdminId
+      ? await readLatestHandoverNote(client, options.appId, "CONSULTATION", claim.consultationId, claim.previousAdminId, claim.targetAdminId)
+      : null;
+    await writeEvent(client, { consultationId: claim.consultationId, eventType: "TRANSFERRED", actorType: "system", actorId: claim.ownerAccountId, fromAdminId: claim.previousAdminId, toAdminId: claim.targetAdminId, peerAccountId: claim.targetAdminAccountId, details: { recovered: true, ...(note ? { note } : {}) } });
     await recordAudit(client, { actorType: "system", actorId: claim.ownerAccountId, action: "im.scope.transfer.recovered", objectType: "im_consultation_scope_operation", objectId: claim.id, outcome: "SUCCESS", requestId: `im_scope_${claim.id}` });
   });
 }
@@ -1337,21 +1348,44 @@ export async function readAdminMessageAccess(
   context: AdminContext,
   conversationId: string,
   requireSendPermission = false,
+  requestId?: string,
 ): Promise<ImConversationAccess> {
   return withTransaction(options.pool, async (client) => {
     await assertAdminContextInTransaction(client, context);
     const viewerAccountId = await readyAccount(client, identityKey(options.appId, "admin", "ADMIN", context.userId));
     const teamId = teamIdFromConversationId(viewerAccountId, conversationId);
     const matching = (await client.query<ConsultationRow>(
-      `${CONSULTATION_SELECT} WHERE c."app_id" = $1 AND c."assigned_admin_id" = $2 AND c."message_scope_id" = $3`,
-      [options.appId, context.userId, teamId],
+      `${CONSULTATION_SELECT} WHERE c."app_id" = $1 AND c."message_scope_id" = $2 AND c."message_scope_state" = 'READY'
+        ORDER BY c."updated_at" DESC, c."id" DESC LIMIT 1`,
+      [options.appId, teamId],
     )).rows[0];
-    if (!matching || matching.state !== "ACTIVE" || matching.messageScopeState !== "READY" || matching.peerAccountId !== viewerAccountId) {
+    if (!matching || matching.messageScopeState !== "READY" || (requireSendPermission && matching.state !== "ACTIVE")) {
       throw new SecurityApiError(403, "FORBIDDEN", "Consultation is not authorized");
+    }
+    const access = await loadEffectiveAdminAccess(client, context.userId);
+    const assigned = matching.assignedAdminId === context.userId;
+    if (assigned) {
+      if (matching.peerAccountId !== viewerAccountId) throw new SecurityApiError(403, "FORBIDDEN", "Consultation is not authorized");
+    } else {
+      // 运营巡视旁路：只读任意会话，不要求 assigned；发送权限仍逐次重查。
+      if (requireSendPermission || !hasPermission(access, ADMIN_PERMISSION.imSupportManagementRead)) {
+        throw new SecurityApiError(403, "FORBIDDEN", "Consultation is not authorized");
+      }
+      await recordAudit(client, {
+        actorType: "admin",
+        actorId: context.userId,
+        sessionId: context.sessionId,
+        action: "im.audit.conversation_viewed",
+        objectType: "im_consultation",
+        objectId: matching.id,
+        outcome: "SUCCESS",
+        requestId: requestId ?? `im_patrol_${matching.id}`,
+        details: { mode: "PATROL_READ", teamId },
+      });
     }
     // History remains readable under the directory/read contract; every send
     // rechecks the current type-specific reception grant in this transaction.
-    if (requireSendPermission) requireSupportAccess(await loadEffectiveAdminAccess(client, context.userId), matching.kind);
+    if (requireSendPermission) requireSupportAccess(access, matching.kind);
     return { viewerAccountId, peerAccountId: matching.userAccountId };
   });
 }
@@ -1441,15 +1475,16 @@ export async function readOwnPresence(options: ConsultationRouteOptions, context
          FROM "zzsh_iam"."im_support_presence" WHERE "app_id" = $1 AND "admin_user_id" = $2`,
       [options.appId, context.userId],
     )).rows[0];
-    return row ? presenceView(row) : defaultPresence(context.userId);
+    const today = await readSupportToday(client, options.appId, context.userId);
+    return row ? { ...presenceView(row), today } : { ...defaultPresence(context.userId), today };
   });
 }
 
-function defaultPresence(adminUserId: string): SupportPresence {
+function defaultPresence(adminUserId: string): Omit<SupportPresence, "today"> {
   return { adminUserId, availability: "OFF_DUTY", connectionState: "DISCONNECTED", lastConnectedAt: null, activeLoad: 0, version: 0 };
 }
 
-function presenceView(row: PresenceRow): SupportPresence {
+function presenceView(row: PresenceRow): Omit<SupportPresence, "today"> {
   return {
     adminUserId: row.adminUserId,
     availability: row.availability,
@@ -1458,6 +1493,77 @@ function presenceView(row: PresenceRow): SupportPresence {
     activeLoad: row.activeLoad,
     version: numberValue(row.version),
   };
+}
+
+/** 开区间只在 AVAILABLE + CONNECTED 成立；所有其他组合都结束区间。 */
+export function presenceSessionAction(
+  availability: SupportAvailability,
+  connectionState: SupportConnectionState,
+): "OPEN" | "CLOSE" {
+  return availability === "AVAILABLE" && connectionState === "CONNECTED" ? "OPEN" : "CLOSE";
+}
+
+export function presenceSessionEndReason(
+  availability: SupportAvailability,
+  connectionState: SupportConnectionState,
+): "PAUSED" | "OFF_DUTY" | "DISCONNECTED" | null {
+  if (availability === "PAUSED") return "PAUSED";
+  if (availability === "OFF_DUTY") return "OFF_DUTY";
+  if (connectionState !== "CONNECTED") return "DISCONNECTED";
+  // AVAILABLE + CONNECTED is the open interval, not an end reason.
+  return null;
+}
+
+export const PRESENCE_SESSION_OPEN_SQL = `INSERT INTO "zzsh_iam"."im_support_presence_session"
+  ("id", "app_id", "admin_user_id")
+  VALUES ($1, $2, $3)
+  ON CONFLICT ("app_id", "admin_user_id") WHERE "ended_at" IS NULL DO NOTHING`;
+
+export const PRESENCE_SESSION_CLOSE_SQL = `UPDATE "zzsh_iam"."im_support_presence_session"
+  SET "ended_at" = clock_timestamp(), "end_reason" = $3
+  WHERE "app_id" = $1 AND "admin_user_id" = $2 AND "ended_at" IS NULL`;
+
+async function syncPresenceSession(client: PoolClient, appId: string, adminUserId: string, row: PresenceRow): Promise<void> {
+  if (presenceSessionAction(row.availability, row.connectionState) === "OPEN") {
+    await client.query(PRESENCE_SESSION_OPEN_SQL, [`im_presence_${randomUUID().replaceAll("-", "")}`, appId, adminUserId]);
+    return;
+  }
+  const reason = presenceSessionEndReason(row.availability, row.connectionState);
+  if (!reason) return;
+  await client.query(PRESENCE_SESSION_CLOSE_SQL, [appId, adminUserId, reason]);
+}
+
+/** 心跳只在本人当前 AVAILABLE + CONNECTED 且存在未结束区间时生效；不推进 presence 版本。 */
+export async function heartbeatOwnPresence(
+  options: ConsultationRouteOptions,
+  context: AdminContext,
+): Promise<{ ok: boolean; serverTime: string }> {
+  return withTransaction(options.pool, async (client) => {
+    await assertAdminContextInTransaction(client, context);
+    const row = (await client.query<{ presence: boolean; session: boolean; serverTime: string }>(
+      `WITH p AS (
+         UPDATE "zzsh_iam"."im_support_presence"
+            SET "last_connected_at" = clock_timestamp()
+          WHERE "app_id" = $1 AND "admin_user_id" = $2
+            AND "availability" = 'AVAILABLE' AND "connection_state" = 'CONNECTED'
+          RETURNING "admin_user_id"
+       ), s AS (
+         UPDATE "zzsh_iam"."im_support_presence_session"
+            SET "last_heartbeat_at" = clock_timestamp()
+          WHERE "app_id" = $1 AND "admin_user_id" = $2 AND "ended_at" IS NULL
+            AND EXISTS (SELECT 1 FROM p)
+          RETURNING "id"
+       )
+       SELECT EXISTS (SELECT 1 FROM p) AS "presence",
+              EXISTS (SELECT 1 FROM s) AS "session",
+              to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "serverTime"`,
+      [options.appId, context.userId],
+    )).rows[0];
+    return {
+      ok: row?.presence === true && row?.session === true,
+      serverTime: row?.serverTime ?? new Date().toISOString(),
+    };
+  });
 }
 
 export async function updateOwnPresence(
@@ -1516,6 +1622,8 @@ export async function updateOwnPresence(
       persisted = updated.rows[0];
     }
     if (!persisted) throw conflict("Presence version is stale");
+    await syncPresenceSession(client, options.appId, context.userId, persisted);
+    const today = await readSupportToday(client, options.appId, context.userId);
     await recordAudit(client, {
       actorType: "admin",
       actorId: context.userId,
@@ -1527,7 +1635,7 @@ export async function updateOwnPresence(
       requestId,
       details: { availability: input.availability, connectionState: input.connectionState, appId: options.appId },
     });
-    return presenceView(persisted);
+    return { ...presenceView(persisted), today };
   });
   if (result.availability === "AVAILABLE" && result.connectionState === "CONNECTED") options.wakeDispatch?.();
   return result;
@@ -1564,11 +1672,26 @@ async function claimInTransaction(options: ConsultationRouteOptions, context: Ad
   return result;
 }
 
-type TransferPlan = {
-  operationId: string;
-};
+type TransferPlan = { operationId: string } | { alreadyAssigned: true };
+type TransferKind = "TRANSFER" | "TAKEOVER";
 
-async function beginTransfer(options: ConsultationRouteOptions, context: AdminContext, consultationId: string, targetAdminId: string, requestId: string): Promise<TransferPlan> {
+export function takeoverDecision(
+  row: { state: ConsultationState; assignedAdminId: string | null },
+  actorId: string,
+): "NOOP" | "TRANSFER" {
+  if (row.state !== "ACTIVE") throw conflict("Consultation is not active");
+  return row.assignedAdminId === actorId ? "NOOP" : "TRANSFER";
+}
+
+async function beginTransfer(
+  options: ConsultationRouteOptions,
+  context: AdminContext,
+  consultationId: string,
+  targetAdminId: string,
+  requestId: string,
+  note: string | null,
+  kind: TransferKind,
+): Promise<TransferPlan | null> {
   const manager = supportManagerAccount(options);
   if (!options.provider) throw unavailable("IM message scope provider is not configured");
   const result = await withTransaction(options.pool, async (client) => {
@@ -1576,13 +1699,23 @@ async function beginTransfer(options: ConsultationRouteOptions, context: AdminCo
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
     await assertAdminContextInTransaction(client, context);
     const currentAccess = await loadEffectiveAdminAccess(client, context.userId);
-    if (!hasPermission(currentAccess, ADMIN_PERMISSION.imSupportRead)) throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
+    if (kind === "TAKEOVER") {
+      requireSupportManagementRead(currentAccess);
+      if (!hasPermission(currentAccess, ADMIN_PERMISSION.imSupportAuditTakeover)) throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
+    } else if (!hasPermission(currentAccess, ADMIN_PERMISSION.imSupportRead)) {
+      throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
+    }
     if (!ID_PATTERN.test(targetAdminId)) throw invalid("Target administrator is invalid");
     const row = await readConsultation(client, options.appId, consultationId);
-    requireSupportAccess(currentAccess, row.kind, "transfer");
-    if (row.state !== "ACTIVE" || row.assignedAdminId !== context.userId) throw new SecurityApiError(403, "FORBIDDEN", "Consultation is not assigned to the current administrator");
-    if (targetAdminId === context.userId) throw invalid("Target administrator must be different");
-    if (row.messageScopeState !== "READY" || !row.messageScopeId || !row.peerAccountId || !row.assignedAdminId) throw unavailable("IM message scope is not ready for transfer");
+    if (kind === "TAKEOVER") {
+      if (takeoverDecision(row, context.userId) === "NOOP") return { alreadyAssigned: true } as const;
+    } else {
+      requireSupportAccess(currentAccess, row.kind, "transfer");
+      if (row.state !== "ACTIVE" || row.assignedAdminId !== context.userId) throw new SecurityApiError(403, "FORBIDDEN", "Consultation is not assigned to the current administrator");
+      if (targetAdminId === context.userId) throw invalid("Target administrator must be different");
+    }
+    if (!row.assignedAdminId) throw conflict("Consultation is not assigned");
+    if (row.messageScopeState !== "READY" || !row.messageScopeId || !row.peerAccountId) throw unavailable("IM message scope is not ready for transfer");
     const priority = await assignWaitingOrders(client, options.appId, await readEligibleSupport(client, options.appId, locked));
     if (priority.more) return null;
     await readConsultation(client, options.appId, consultationId, true);
@@ -1615,17 +1748,32 @@ async function beginTransfer(options: ConsultationRouteOptions, context: AdminCo
       [operationId, options.appId, row.id, updated.rows[0].messageScopeVersion, manager.accountId, row.userAccountId,
         row.assignedAdminId, target.adminUserId, row.peerAccountId, target.accountId, row.messageScopeId],
     );
-    return {
-      operationId,
-    };
+    // 交接记录在转交发起并完成全部本地校验后写入；远端恢复失败不会抹掉这次请求。
+    await recordSupportHandover(client, {
+      appId: options.appId,
+      objectType: "CONSULTATION",
+      objectId: row.id,
+      fromAdminId: row.assignedAdminId,
+      toAdminId: target.adminUserId,
+      note,
+    });
+    return { operationId };
   });
   if (!result) throw unavailable("已付款订单正在优先分配，请稍后重试");
   return result;
 }
 
-async function transferWithScope(options: ConsultationRouteOptions, context: AdminContext, consultationId: string, targetAdminId: string, requestId: string): Promise<{ consultation: ConsultationView }> {
-  const plan = await beginTransfer(options, context, consultationId, targetAdminId, requestId);
-  await runScopeOperationNow(options, plan.operationId);
+async function transferWithScope(
+  options: ConsultationRouteOptions,
+  context: AdminContext,
+  consultationId: string,
+  targetAdminId: string,
+  requestId: string,
+  note: string | null,
+): Promise<{ consultation: ConsultationView }> {
+  const plan = await beginTransfer(options, context, consultationId, targetAdminId, requestId, note, "TRANSFER");
+  if (plan && "alreadyAssigned" in plan) return readAdminConsultationView(options, context, consultationId);
+  await runScopeOperationNow(options, plan!.operationId);
   return readAdminConsultationView(options, context, consultationId);
 }
 
@@ -1740,8 +1888,22 @@ export async function claimConsultation(options: ConsultationRouteOptions, conte
   return readAdminConsultationView(options, context, consultationId);
 }
 
-export function transferConsultation(options: ConsultationRouteOptions, context: AdminContext, id: string, targetAdminId: string, requestId: string): Promise<{ consultation: ConsultationView }> {
-  return transferWithScope(options, context, id, targetAdminId, requestId);
+export function transferConsultation(options: ConsultationRouteOptions, context: AdminContext, id: string, targetAdminId: string, requestId: string, note: string | null = null): Promise<{ consultation: ConsultationView }> {
+  return transferWithScope(options, context, id, targetAdminId, requestId, note);
+}
+
+/** 巡视接管：把当前 ACTIVE 咨询责任转给当前运营；已归属本人时幂等返回，不重复写事件。 */
+export async function takeoverConsultation(
+  options: ConsultationRouteOptions,
+  context: AdminContext,
+  id: string,
+  requestId: string,
+  note: string | null,
+): Promise<{ consultation: ConsultationView }> {
+  const plan = await beginTransfer(options, context, id, context.userId, requestId, note, "TAKEOVER");
+  if (plan && "alreadyAssigned" in plan) return readAdminConsultationView(options, context, id);
+  await runScopeOperationNow(options, plan!.operationId);
+  return readAdminConsultationView(options, context, id);
 }
 
 export async function closeConsultation(options: ConsultationRouteOptions, context: AdminContext, id: string, requestId: string): Promise<{ consultation: ConsultationView }> {

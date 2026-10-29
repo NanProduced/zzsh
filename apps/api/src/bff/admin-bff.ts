@@ -566,10 +566,20 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
   const imAction = /^\/im\/consultations\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/(claim|transfer|close|reconcile)$/.exec(path);
   const imImage = /^\/im\/images\/[A-Za-z0-9._:-]{1,128}$/.test(path);
   const imReadSub = /^\/im\/consultations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(events|context)$/.test(path);
-  const imPathAllowed = path === "/im/token" || path === "/im/identities" || path === "/im/consultations" || path === "/im/messages" || path === "/im/message-access" || path === "/im/presence" || path === "/im/transfer-targets" || imImage || Boolean(imAction) || imReadSub;
-  const imMethodAllowed = path === "/im/token" || path === "/im/identities" || path === "/im/consultations" || path === "/im/messages" || path === "/im/message-access" || path === "/im/presence" || path === "/im/transfer-targets" || imImage || imReadSub
-    ? (method === "GET" || ((path === "/im/consultations" || path === "/im/messages") && method === "POST") || (path === "/im/presence" && method === "PUT"))
-    : method === "POST";
+  const imAuditTakeover = /^\/im\/audit\/consultations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/takeover$/.test(path);
+  const imGetOrPost = path === "/im/consultations" || path === "/im/messages";
+  const imGetOnly = path === "/im/token" || path === "/im/identities" || path === "/im/support-overview"
+    || path === "/im/handovers" || path === "/im/audit/conversations" || path === "/im/transfer-targets"
+    || path === "/im/message-access" || imImage || imReadSub;
+  const imPostOnly = Boolean(imAction) || path === "/im/presence/heartbeat" || imAuditTakeover;
+  const imPathAllowed = imGetOrPost || imGetOnly || imPostOnly || path === "/im/presence";
+  const imMethodAllowed = path === "/im/presence"
+    ? method === "GET" || method === "PUT"
+    : imGetOrPost
+      ? method === "GET" || method === "POST"
+      : imPostOnly
+        ? method === "POST"
+        : method === "GET";
   if (imPathAllowed) {
     if (!options.yunxin || !imMethodAllowed) {
       sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);

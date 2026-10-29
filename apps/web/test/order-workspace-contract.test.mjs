@@ -83,3 +83,35 @@ test("account route passes order navigation inputs into the workspace", () => {
   assert.match(account, /orderId=\{orderId\}/);
   assert.match(account, /status=\{status\}/);
 });
+
+test("the six-step bar reads the IM projection and never borrows the settlement stage", () => {
+  // The order page reads the same authorized IM projection as the order group; it never derives a
+  // fulfillment step from order.status or from the settlement-stage label.
+  assert.match(client, /\/im\?operation=read/);
+  assert.match(client, /parseOrderImProjection/);
+  assert.match(client, /ORDER_IM_STAGES/);
+  assert.match(detail, /FulfillmentStageBar/);
+  assert.match(detail, /orderApi\.orderIm\(order\.id/);
+  assert.match(detail, /orderFulfillmentSummary\(projection/);
+  assert.match(detail, /orderFulfillmentStepStates\(projection\.stage\)/);
+  assert.doesNotMatch(detail, /orderFulfillmentStepStates\(order\.stage/);
+  assert.match(detail, /阶段待核对/);
+  assert.match(detail, /aria-label="履约阶段"/);
+  assert.match(detail, /order\.status !== "PENDING_PAYMENT"/);
+  // The group entry stays on the existing support host event; no second chat surface is created.
+  assert.match(detail, /zzsh:order-groups/);
+  assert.match(detail, /data-support-trigger/);
+  assert.match(display, /ORDER_FULFILLMENT_STEPS/);
+  assert.match(display, /已付款/);
+  assert.match(display, /客服与群/);
+  assert.match(display, /账号与开租/);
+  assert.match(display, /租用中/);
+  assert.match(display, /结束确认/);
+  assert.match(display, /结算完成/);
+  assert.match(display, /阶段待核对/);
+  // The list tag states only what its own assignment projection can prove.
+  assert.match(list, /orderListFulfillmentTag/);
+  assert.match(list, /data-fulfillment-stage/);
+  assert.match(display, /待客服接入/);
+  assert.match(display, /订单群准备中/);
+});

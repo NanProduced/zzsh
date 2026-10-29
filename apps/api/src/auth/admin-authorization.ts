@@ -80,6 +80,8 @@ export const ADMIN_PERMISSION = {
   imSupportComplaint: "im.support.complaint",
   imSupportTransfer: "im.support.transfer",
   imSupportPresence: "im.support.presence",
+  imSupportManagementRead: "im.support.management.read",
+  imSupportAuditTakeover: "im.support.audit.takeover",
 } as const;
 
 export const ADMIN_PERMISSION_CODES = Object.values(ADMIN_PERMISSION);

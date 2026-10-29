@@ -280,11 +280,10 @@
 .workspace-root .im-wb-btn-icon { padding:0 7px; }
 
 /* three columns */
-/* design-notes：队列 280–320、右栏 320–380、**聊天占剩余**，超宽屏详情不得膨胀成仪表盘。
-   原来写成 minmax(360px,1fr)，2560 下详情吃掉 1028px，而聊天被封在 880 —— 详情里只有
-   不到一半宽度有内容。这里改成给详情一个上限，剩余宽度交给聊天；消息阅读列自身由
-   .im-wb-content 的 max-width 居中限宽，所以超宽时不会拉成一行长文。 */
-.workspace-root .im-wb { display:grid; grid-template-columns:clamp(260px,16vw,320px) minmax(420px,1fr) clamp(380px,26vw,520px); flex:1; min-height:0; overflow:hidden; border:1px solid var(--border); border-radius:10px; background:var(--background); }
+/* design-notes：工作台属于 Admin shell，必须占满内容区，不能做成居中卡片。
+   队列 240–300、聊天吃掉剩余、详情 22vw（上限 480）；
+   聊天保持横向长方形，详情常驻并自行滚动。 */
+.workspace-root .im-wb { display:grid; grid-template-columns:clamp(240px,13vw,280px) minmax(0,1fr) clamp(400px,23vw,460px); width:100%; margin:0; flex:1; min-height:0; overflow:hidden; border:1px solid var(--border); border-radius:10px; background:var(--background); }
 .workspace-root .im-wb[data-details="false"] { grid-template-columns:clamp(260px,16vw,320px) minmax(0,1fr) 0; }
 .workspace-root .im-wb[data-details="false"] .im-wb-details { display:none; }
 .workspace-root .im-wb > * { min-width:0; min-height:0; }
@@ -341,10 +340,9 @@
 .workspace-root .im-wb-btn-primary:hover:not(:disabled) { background:color-mix(in oklab,var(--im-bubble-bg) 88%,black); color:var(--im-bubble-fg); }
 .workspace-root .im-wb-btn-outline { border-color:var(--border); background:var(--background); color:var(--foreground); }
 .workspace-root .im-wb-btn-outline:hover:not(:disabled) { border-color:var(--im-accent-strong); color:var(--im-accent-strong); background:var(--card); }
-.workspace-root .im-wb-action-note { color:var(--muted-foreground); }
-.workspace-root .im-wb-action-note,.workspace-root .im-wb-scope-note { display:flex; align-items:center; gap:7px; flex:none; margin:0; padding:7px 14px; border-bottom:1px solid var(--border); color:var(--muted-foreground); background:color-mix(in oklab,var(--card) 80%,var(--background)); font-size:11px; line-height:1.5; }
+.workspace-root .im-wb-scope-note { display:flex; align-items:center; gap:7px; flex:none; margin:0; padding:7px 14px; border-bottom:1px solid var(--border); color:var(--muted-foreground); background:color-mix(in oklab,var(--card) 80%,var(--background)); font-size:11px; line-height:1.5; }
 .workspace-root .im-wb-scope-note { color:var(--destructive); border-bottom-color:color-mix(in oklab,var(--destructive) 25%,var(--border)); }
-.workspace-root .im-wb-scope-note svg,.workspace-root .im-wb-action-note svg { flex:none; }
+.workspace-root .im-wb-scope-note svg { flex:none; }
 .workspace-root .im-wb-notice { display:flex; align-items:center; gap:8px; flex:none; padding:8px 14px; border-bottom:1px solid var(--border); color:var(--foreground); background:color-mix(in oklab,var(--ring) 8%,var(--card)); font-size:12px; }
 .workspace-root .im-wb-notice svg { flex:none; color:var(--ring); }
 .workspace-root .im-wb-notice[data-tone="warn"] { background:color-mix(in oklab,var(--im-warn) 10%,var(--card)); }
@@ -367,6 +365,8 @@
 .workspace-root .im-wb-av { align-self:flex-start; margin-top:2px; width:34px; height:34px; color:var(--im-accent); background:var(--im-accent-soft); font-size:13px; font-weight:600; border-radius:8px; box-shadow:0 1px 2px rgba(0,0,0,.04); }
 .workspace-root .im-wb-msg[data-self="true"] .im-wb-av { color:var(--im-bubble-fg); background:var(--im-bubble-bg); }
 .workspace-root .im-wb-msg-body { max-width:min(68ch, 76%); display:flex; flex-direction:column; gap:4px; }
+/* 阶段卡按消息展示：给卡片留出约 340px 的宽度，气泡的 76% 限制会让它被压窄。 */
+.workspace-root .im-wb-msg-body[data-card="true"] { width:100%; max-width:min(360px, calc(100% - 44px)); }
 .workspace-root .im-wb-msg[data-grouped="true"] { margin-top:-6px; }
 .workspace-root .im-wb-msg[data-grouped="true"] .im-wb-av { visibility:hidden; }
 .workspace-root .im-wb-msg-meta { display:inline-flex; align-items:center; gap:6px; margin-bottom:2px; padding:0 2px; color:var(--muted-foreground); font-size:12px; }
@@ -378,6 +378,10 @@
 [data-theme="light"] .workspace-root .im-wb-bub { background:color-mix(in oklab,var(--card) 92%,var(--secondary)); border-color:color-mix(in oklab,var(--border) 80%,transparent); }
 [data-theme="light"] .workspace-root .im-wb-root { --im-accent:#0284c7; --im-accent-strong:#0357a4; --im-accent-soft:rgba(2,132,199,.10); --im-bubble-bg:#0284c7; --im-bubble-fg:#ffffff; --im-warn:#b45309; --border-strong:color-mix(in oklab,var(--border) 100%,black 18%); }
 .workspace-root .im-wb-msg[data-self="true"] .im-wb-bub { color:var(--im-bubble-fg); border-color:transparent; background:var(--im-bubble-bg); box-shadow:0 1px 3px rgba(2,132,199,.25); }
+/* Revoked placeholder: read as a neutral system fact, even on an own bubble. */
+.workspace-root .im-wb-msg .im-wb-bub[data-revoked="true"] { color:var(--muted-foreground); border:1px dashed var(--border-strong); background:transparent; box-shadow:none; font-style:normal; }
+/* Quote bar belongs to the composer: aligned with its side padding, not the stream. */
+.workspace-root .im-wb-chat > .message-reply-quote { flex:none; margin:8px 16px 0; }
 .workspace-root .im-wb-msg-status { display:flex; align-items:center; gap:5px; margin-top:2px; padding:0 2px; color:var(--muted-foreground); font-size:11px; }
 .workspace-root .im-wb-msg-status time { font-variant-numeric:tabular-nums; opacity:.85; }
 .workspace-root .im-wb-msg-status svg { color:var(--ring); }
@@ -404,6 +408,7 @@
 
 /* composer */
 .workspace-root .im-wb-composer { flex:none; padding:12px 16px calc(14px + env(safe-area-inset-bottom)); border-top:1px solid var(--border); background:var(--card); }
+.workspace-root .im-wb-composer-readonly { display:flex; align-items:center; gap:7px; color:var(--muted-foreground); font-size:12px; line-height:1.5; }
 .workspace-root .im-wb-composer-box { padding:8px 12px 6px; border:1px solid var(--border); border-radius:10px; background:var(--background); box-shadow:0 1px 2px rgba(0,0,0,.03); transition:border-color .15s, box-shadow .15s; }
 .workspace-root .im-wb-composer-box:focus-within { border-color:var(--im-accent); box-shadow:0 0 0 2px var(--im-accent-soft); }
 .workspace-root .im-wb-composer-box textarea { min-height:48px; max-height:120px; padding:2px 0; border:0; outline:0; resize:none !important; color:var(--foreground); background:transparent; font:inherit; font-size:14px; line-height:1.6; caret-color:var(--ring); }
@@ -470,7 +475,7 @@
 .workspace-root .im-wb-pane--orders .order-team-panel { display:flex; flex-direction:column; flex:1; min-height:0; }
 .workspace-root .im-wb-pane--orders .order-team-panel > .order-team-toolbar { flex:none; padding:0 0 8px; }
 .workspace-root .im-wb-pane--orders .order-team-panel > p[role="alert"] { flex:none; margin:0 0 8px; }
-.workspace-root .im-wb-pane--orders .order-team-grid { display:grid; grid-template-columns:clamp(280px,18vw,320px) minmax(420px,1fr) clamp(340px,24vw,380px); flex:1; min-height:0; overflow:hidden; border:1px solid var(--border); border-radius:10px; background:var(--background); }
+.workspace-root .im-wb-pane--orders .order-team-grid { display:grid; grid-template-columns:clamp(240px,13vw,280px) minmax(0,1fr) clamp(400px,23vw,460px); width:100%; margin:0; flex:1; min-height:0; overflow:hidden; border:1px solid var(--border); border-radius:10px; background:var(--background); }
 .workspace-root .im-wb-pane--orders .order-team-grid > * { min-width:0; min-height:0; }
 .workspace-root .im-wb-pane--orders .order-team-grid[data-details="false"] { grid-template-columns:clamp(280px,18vw,320px) minmax(0,1fr); }
 .workspace-root .im-wb-pane--orders .order-team-detail { display:contents; }
@@ -519,14 +524,15 @@
 /* Responsive. The sidebar width is fixed, so viewport breakpoints are the honest
    tool here: container queries measured the pane narrower than the window and
    collapsed a 1024px desktop into a single column. */
-@media (max-width:1180px) {
+@media (min-width:761px) { .workspace-root [data-action="toggle-order-details"],.workspace-root [data-action="toggle-details"] { display:none; } }
+@media (max-width:1599px) {
   /* Tighter three columns. Moving the case column to a second grid row starved the
      message stream (the 1fr row stopped absorbing height), so the case column stays
      a real column and only narrows. */
   .workspace-root .im-wb[data-details="false"] { grid-template-columns:250px minmax(0,1fr); }
   .workspace-root .im-wb-pane--orders .order-team-grid[data-details="false"] { grid-template-columns:250px minmax(0,1fr); }
 }
-@media (min-width:761px) and (max-width:1180px) {
+@media (min-width:761px) and (max-width:1599px) {
   /* Expanding the case column trades the queue away instead of crushing the chat.
      Bounded below at 761px: below that the pane state owns visibility.
      240px 队列 + 300px 详情在 1024 视口下只剩约 220px 给聊天（工作区还有左侧导航），
@@ -534,7 +540,13 @@
   .workspace-root .im-wb[data-details="true"] { grid-template-columns:minmax(0,1fr) clamp(340px,36%,440px); }
   .workspace-root .im-wb[data-details="true"] .im-wb-queue { display:none; }
   .workspace-root .im-wb-pane--orders .order-team-grid[data-details="true"] { grid-template-columns:minmax(0,1fr) clamp(340px,36%,440px); }
-  .workspace-root .im-wb-pane--orders .order-team-grid[data-details="true"] .im-wb-queue { display:none; }
+  /* Only an open conversation trades the queue away; with nothing selected the queue stays
+     so the operator can pick an order instead of facing an empty pane. */
+  .workspace-root .im-wb-pane--orders .order-team-grid[data-details="true"][data-pane="chat"] .im-wb-queue { display:none; }
+  /* Expanded details trade the queue away in this range, so keep the collapse toggle
+     reachable; collapsing brings the queue (and conversation switching) back. */
+  .workspace-root [data-action="toggle-order-details"],
+  .workspace-root [data-action="toggle-details"] { display:inline-flex; }
 }
 @media (max-width:760px) {
   .workspace-root .im-wb-root { height:calc(100svh - 116px); }
@@ -548,6 +560,7 @@
   .workspace-root .im-wb[data-details="false"] .im-wb-details { display:none; }
   .workspace-root .im-wb-back { display:inline-flex; }
   .workspace-root .im-wb-chat-head,.workspace-root .im-wb-composer { padding-inline:10px; }
+  .workspace-root .im-wb-chat > .message-reply-quote { margin-inline:10px; }
   /* 手机宽度下头部放不下"标题＋三个动作"：.im-wb-chat-actions 是 flex:none，会把标题挤成
      一个字符宽（文字竖排）。窄屏让头部换成两行，标题独占第一行，动作整行右对齐。 */
   .workspace-root .im-wb-chat-head { flex-wrap:wrap; row-gap:6px; }
@@ -699,4 +712,95 @@
   .workspace-root .im-order-inventory-dialog { padding:16px; max-height:calc(100dvh - 32px); }
   .workspace-root .im-order-inventory-dialog .im-order-table th,.workspace-root .im-order-inventory-dialog .im-order-table td { padding:8px 6px; }
   .workspace-root .im-rail-value-actions { max-width:72%; }
+}
+
+.workspace-root .im-wb-details-back{display:none;margin-left:auto;font-size:11px;min-height:26px;padding:0 8px}
+@media(max-width:760px){.workspace-root .im-wb-details-back{display:inline-flex}}
+
+.order-stage-demo{display:grid;gap:12px;padding:14px 0 4px;min-height:0}
+.order-stage-demo-head{display:grid;gap:3px}
+.order-stage-demo-head strong{font-size:14px}
+.order-stage-demo-head span{color:var(--muted-foreground);font-size:12px;line-height:1.5}
+
+.workspace-root .im-wb-local{font-size:10px;color:var(--im-warn);border-color:color-mix(in oklab,var(--im-warn) 40%,var(--border))}
+
+/* ---------- 客服管理：看板 / 巡视（运营） ---------- */
+.workspace-root .im-wb-today { font-size:11px; color:var(--muted-foreground); font-variant-numeric:tabular-nums; }
+.workspace-root .im-wb-pane--mgmt { overflow:hidden; }
+.workspace-root .im-wb-mgmt { --mgmt-chart-1:#38bdf8; --mgmt-chart-2:#34d399; --mgmt-chart-3:#f59e0b; display:flex; flex:1; min-width:0; min-height:0; }
+[data-theme="light"] .workspace-root .im-wb-mgmt { --mgmt-chart-1:#0284c7; --mgmt-chart-2:#047857; --mgmt-chart-3:#b45309; }
+.workspace-root .im-wb-mgmt-tabs { flex:1; min-height:0; gap:10px; }
+.workspace-root .im-wb-mgmt-head { display:flex; align-items:center; gap:10px; flex:none; }
+.workspace-root .im-wb-mgmt-tabs [data-slot="tabs-list"] { flex:none; width:auto; align-self:flex-start; }
+.workspace-root .im-wb-mgmt-content { display:flex; flex-direction:column; flex:1; min-height:0; outline:none; }
+.workspace-root .im-wb-mgmt-content--scroll { overflow-y:auto; overscroll-behavior:contain; }
+.workspace-root .im-wb-mgmt-content--fill { overflow:hidden; }
+.workspace-root .im-wb-mgmt-dashboard { display:flex; flex-direction:column; gap:12px; padding:2px 2px 16px; }
+.workspace-root .im-wb-mgmt-toolbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; min-height:30px; }
+.workspace-root .im-wb-mgmt-toolbar-note { margin-right:auto; color:var(--muted-foreground); font-size:12px; line-height:1.5; }
+.workspace-root .im-wb-mgmt-totals { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; }
+.workspace-root .im-wb-mgmt-metric [data-slot="card-content"] { display:flex; align-items:baseline; gap:8px; padding:10px 14px; }
+.workspace-root .im-wb-mgmt-metric-value { font-size:24px; font-weight:600; line-height:1.1; font-variant-numeric:tabular-nums; }
+.workspace-root .im-wb-mgmt-metric-label { color:var(--muted-foreground); font-size:12px; }
+.workspace-root .im-wb-mgmt-card { box-shadow:none; }
+.workspace-root .im-wb-mgmt-card-content { padding:0 0 4px; }
+.workspace-root .im-wb-mgmt-table-wrap { overflow-x:auto; }
+.workspace-root .im-wb-mgmt-table th,.workspace-root .im-wb-mgmt-table td { padding:8px 14px; white-space:nowrap; }
+.workspace-root .im-wb-mgmt-table th:first-child,.workspace-root .im-wb-mgmt-table td:first-child { padding-left:16px; }
+.workspace-root .im-wb-mgmt-empty-cell { padding:18px 16px !important; color:var(--muted-foreground); text-align:center; }
+.workspace-root .im-wb-mgmt-charts { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+.workspace-root .im-wb-mgmt-charts [data-chart="workload"] { grid-column:1 / -1; }
+.workspace-root .im-wb-mgmt-legend { display:flex; gap:14px; margin-bottom:8px; color:var(--muted-foreground); font-size:11px; }
+.workspace-root .im-wb-mgmt-legend span { display:inline-flex; align-items:center; gap:5px; }
+.workspace-root .im-wb-mgmt-legend span::before { content:""; width:8px; height:8px; border-radius:2px; background:var(--mgmt-chart-1); }
+.workspace-root .im-wb-mgmt-legend span[data-series="users"]::before { background:var(--mgmt-chart-2); }
+.workspace-root .im-wb-mgmt-legend span[data-series="seconds"]::before { background:var(--mgmt-chart-3); }
+.workspace-root .im-wb-mgmt-chartbox { width:100%; min-height:220px; }
+.workspace-root .im-wb-mgmt-chartbox .recharts-surface { overflow:visible; }
+.workspace-root .im-wb-mgmt-chart-empty { display:flex; min-height:120px; align-items:center; justify-content:center; margin:0; border:1px dashed var(--border); border-radius:8px; color:var(--muted-foreground); font-size:12px; }
+.workspace-root .im-wb-mgmt-handovers { display:grid; margin:0; padding:0; list-style:none; }
+.workspace-root .im-wb-mgmt-handovers li { display:grid; gap:3px; padding:10px 16px; border-bottom:1px solid var(--border); }
+.workspace-root .im-wb-mgmt-handovers li:last-child { border-bottom:0; }
+.workspace-root .im-wb-mgmt-handover-top { display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:12px; }
+.workspace-root .im-wb-mgmt-handover-top strong { font-size:13px; }
+.workspace-root .im-wb-mgmt-handover-top time { margin-left:auto; color:var(--muted-foreground); font-size:11px; }
+.workspace-root .im-wb-mgmt-handover-target { margin:0; color:var(--muted-foreground); font-size:12px; overflow-wrap:anywhere; }
+.workspace-root .im-wb-mgmt-handover-note { margin:0; color:var(--foreground); font-size:12px; line-height:1.6; overflow-wrap:anywhere; }
+.workspace-root .im-wb-mgmt-inline-state { margin:0; padding:14px 16px; color:var(--muted-foreground); font-size:12px; }
+.workspace-root .im-wb-mgmt-state { display:flex; min-height:260px; flex-direction:column; align-items:center; justify-content:center; gap:8px; margin:0; padding:24px; color:var(--muted-foreground); font-size:12px; text-align:center; }
+.workspace-root .im-wb-mgmt-state strong { color:var(--foreground); font-size:14px; }
+/* 巡视：左列表 + 右只读会话，沿用工作台聊天形态 */
+.workspace-root .im-wb-mgmt-patrol { display:grid; grid-template-columns:clamp(280px,22vw,360px) minmax(0,1fr); flex:1; min-height:0; overflow:hidden; border:1px solid var(--border); border-radius:10px; background:var(--background); }
+.workspace-root .im-wb-mgmt-patrol > * { min-width:0; min-height:0; }
+.workspace-root .im-wb-mgmt-patrol-list { display:flex; flex-direction:column; overflow:hidden; border-right:1px solid var(--border); background:color-mix(in oklab,var(--card) 82%,var(--background)); }
+.workspace-root .im-wb-mgmt-filters { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; flex:none; padding:8px 10px 4px; }
+.workspace-root .im-wb-mgmt-filter { width:100%; justify-content:space-between; }
+.workspace-root .im-wb-mgmt-refresh { margin-left:auto; }
+.workspace-root .im-wb-mgmt-chat { background:var(--background); }
+.workspace-root .im-wb-mgmt-viewport { height:100%; overflow-y:auto; overscroll-behavior:contain; }
+.workspace-root .im-wb-mgmt-chat-empty { display:flex; flex:1; flex-direction:column; align-items:center; justify-content:center; gap:8px; padding:24px; color:var(--muted-foreground); font-size:12px; text-align:center; }
+.workspace-root .im-wb-mgmt-chat-empty strong { color:var(--foreground); font-size:13px; }
+.workspace-root .im-wb-mgmt-card-msg { display:flex; flex-direction:column; gap:4px; }
+.workspace-root .im-wb-mgmt-card-msg small { color:var(--muted-foreground); font-size:11px; }
+.workspace-root .im-wb-mgmt-inline-image { display:block; max-width:200px; max-height:220px; border-radius:8px; object-fit:cover; }
+/* 转交备注 / 暂停未完成清单 */
+.workspace-root .im-wb-dialog-note { display:grid; gap:5px; font-size:12px; }
+.workspace-root .im-wb-dialog-note > span { display:flex; justify-content:space-between; gap:8px; color:var(--muted-foreground); }
+.workspace-root .im-wb-dialog-note em { font-style:normal; font-variant-numeric:tabular-nums; }
+.workspace-root .im-wb-dialog-note textarea { min-height:58px; resize:vertical; }
+.workspace-root .im-wb-offduty-list { display:grid; gap:6px; max-height:220px; margin:0; padding:0; overflow-y:auto; list-style:none; }
+.workspace-root .im-wb-offduty-list li { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:8px 10px; border:1px solid var(--border); border-radius:8px; background:var(--card); }
+.workspace-root .im-wb-offduty-list li > div { display:grid; gap:2px; min-width:0; }
+.workspace-root .im-wb-offduty-list strong { font-size:13px; }
+.workspace-root .im-wb-offduty-list span { color:var(--muted-foreground); font-size:11px; }
+@media (max-width:1200px) {
+  .workspace-root .im-wb-mgmt-totals { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .workspace-root .im-wb-mgmt-charts { grid-template-columns:minmax(0,1fr); }
+  .workspace-root .im-wb-mgmt-charts [data-chart="workload"] { grid-column:auto; }
+}
+@media (max-width:760px) {
+  .workspace-root .im-wb-mgmt-patrol { grid-template-columns:minmax(0,1fr); grid-template-rows:minmax(150px,38%) minmax(0,1fr); }
+  .workspace-root .im-wb-mgmt-patrol-list { border-right:0; border-bottom:1px solid var(--border); }
+  .workspace-root .im-wb-mgmt-agentbar { grid-template-columns:minmax(0,1fr); }
+  .workspace-root .im-wb-mgmt-agentbar-name { grid-row:auto; }
 }

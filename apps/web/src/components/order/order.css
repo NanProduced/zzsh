@@ -399,3 +399,34 @@
 .order-stage-label { display: inline-flex; align-items: center; min-height: 26px; padding: 4px 10px; border: 1px solid var(--color-border-default); border-radius: 999px; color: var(--color-text-secondary); font-size: 12px; font-weight: 600; }
 .order-stage-label.is-action { color: var(--color-accent-brand); border-color: color-mix(in srgb, var(--color-accent-brand) 45%, var(--color-border-default)); background: color-mix(in srgb, var(--color-accent-brand) 8%, transparent); }
 .order-entitlements { padding: 0 2px; }
+
+/* ---------- 六段履约阶段条（只读投影） ---------- */
+/* The list tag never borrows the settlement stage: "阶段待核" means the detail projection is needed. */
+.order-row-stage[data-fulfillment-stage="WAITING_STAFF"],
+.order-row-stage[data-fulfillment-stage="TEAM_PENDING"] { border-color: color-mix(in srgb, var(--color-status-info) 32%, var(--color-border-default)); color: color-mix(in srgb, var(--color-status-info) 54%, var(--color-text-primary)); }
+.order-row-stage[data-fulfillment-stage="CHECK"] { border-style: dashed; color: var(--color-text-muted); }
+.order-fulfillment-stage { display: grid; gap: 9px; margin-top: 16px; padding: 12px 16px; border: 1px solid var(--color-border-subtle); border-radius: var(--functional-radius); background: var(--color-bg-card); }
+.order-fulfillment-head { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 12px; min-width: 0; }
+.order-fulfillment-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--color-status-info); }
+.order-fulfillment-stage[data-tone="done"] .order-fulfillment-dot { background: var(--color-status-success); }
+.order-fulfillment-stage[data-tone="closed"] .order-fulfillment-dot { background: var(--color-text-muted); }
+.order-fulfillment-stage[data-tone="unknown"] .order-fulfillment-dot { background: transparent; border: 1px dashed var(--color-text-muted); }
+.order-fulfillment-summary { flex: 1 1 220px; min-width: 0; margin: 0; color: var(--color-text-primary); font-size: 13px; font-weight: 600; line-height: 1.55; overflow-wrap: anywhere; }
+.order-fulfillment-head .button { flex: 0 0 auto; margin-left: auto; }
+.order-fulfillment-steps { display: flex; align-items: center; gap: 5px; margin: 0; padding: 1px 0 2px; overflow-x: auto; list-style: none; scrollbar-width: thin; }
+.order-fulfillment-steps li { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; padding: 3px 9px; border: 1px solid var(--color-border-subtle); border-radius: 999px; color: var(--color-text-muted); font-size: 11px; line-height: 1.6; white-space: nowrap; }
+.order-fulfillment-steps li[data-state="done"] { color: var(--color-text-secondary); border-color: color-mix(in srgb, var(--color-status-success) 26%, var(--color-border-subtle)); }
+.order-fulfillment-steps li[data-state="current"] { color: var(--color-text-primary); border-color: color-mix(in srgb, var(--color-accent-brand) 45%, var(--color-border-default)); background: color-mix(in srgb, var(--color-accent-brand) 8%, transparent); font-weight: 600; }
+.order-fulfillment-steps li[data-state="cancelled"],
+.order-fulfillment-steps li[data-state="unknown"] { border-style: dashed; }
+.order-fulfillment-step-dot { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: currentColor; opacity: 0.45; }
+.order-fulfillment-steps li[data-state="done"] .order-fulfillment-step-dot { background: var(--color-status-success); opacity: 1; }
+.order-fulfillment-steps li[data-state="current"] .order-fulfillment-step-dot { background: var(--color-accent-brand); opacity: 1; }
+
+@media (max-width: 599px) {
+  .order-fulfillment-stage { padding: 11px 13px; }
+  /* The summary and the group entry share the first line; steps scroll sideways instead of squeezing. */
+  .order-fulfillment-head .button { min-height: 36px; }
+  .order-fulfillment-steps { padding-bottom: 4px; }
+}
+

@@ -219,5 +219,7 @@
   "dist/test/membership-profit-readonly-chain.test.js",
   "dist/test/supply-quote-preview-consistency.test.js",
   "dist/test/order-list-line-names.test.js",
-  "dist/test/listing-quote-deposits.test.js"
+  "dist/test/listing-quote-deposits.test.js",
+  "dist/test/im-worker-assembly.test.js",
+  "dist/test/im-support-management.test.js"
 ]

@@ -3,10 +3,10 @@
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowLeft, Check, CheckCircle2, CircleSlash, Clock3, Copy, Gamepad2, MessageCircle, RefreshCw, UserRound, WalletCards, XCircle } from "lucide-react";
-import { formatOrderMoney, formatOrderTime as timeText, orderApi, OrderRequestError, type Order, type OrderParty, type OrderStatusFilter, type PersonalAbnormalResponsibility, type PersonalFirstSubmit, type PersonalRefundBasis, type PersonalRefundIntent, type PersonalRefundRead } from "@/lib/order-client";
+import { formatOrderMoney, formatOrderTime as timeText, orderApi, OrderRequestError, type Order, type OrderImProjection, type OrderParty, type OrderStatusFilter, type PersonalAbnormalResponsibility, type PersonalFirstSubmit, type PersonalRefundBasis, type PersonalRefundIntent, type PersonalRefundRead } from "@/lib/order-client";
 import { useUserSession } from "@/components/session/user-session-provider";
 import { useIdentityReset } from "@/components/session/identity-reset";
-import { orderLinesTotalLabel, orderRentalModeLabel, orderUnitPriceText, unitHint, unitLabel, orderAccountTitle } from "@/lib/order-display";
+import { ORDER_FULFILLMENT_STEPS, orderFulfillmentStepStates, orderFulfillmentSummary, orderLinesTotalLabel, orderRentalModeLabel, orderUnitPriceText, unitHint, unitLabel, orderAccountTitle } from "@/lib/order-display";
 import { OrderTradeActions, type OrderStageFacts } from "@/components/order/order-trade-actions";
 import { OrderError, OrderStatusBadge, orderTermLabel, orderUrl, statusLabel } from "@/components/order/order-presentation";
 import "./order.css";
@@ -70,6 +70,58 @@ function AttentionBlock({ attention, party, orderId, onRetry }: { attention: Att
       {attention.actions.includes("manage") ? <Link href="/account?view=accounts" className="button primary button--sm">管理上架账号</Link> : null}
       {attention.actions.includes("retry") ? <button type="button" className="order-attention-link" onClick={onRetry}>重试读取</button> : null}
     </div>
+  </section>;
+}
+
+type StageReadState = { scope: string; status: "loading" | "ready" | "failed"; projection: OrderImProjection | null };
+
+/**
+ * A compact six-step bar. It is read-only: the stage comes from the order IM projection, the group
+ * entry reuses the existing support host, and a missing projection says "阶段待核对" rather than
+ * deriving progress from the order status.
+ */
+function FulfillmentStageBar({ order, party, facts }: { order: Order; party: OrderParty; facts: OrderStageFacts | null }) {
+  const session = useUserSession();
+  const userId = session.status === "authenticated" ? session.userId : null;
+  const scope = userId ? `${userId}:${order.id}:${order.status}` : "";
+  const [state, setState] = useState<StageReadState>({ scope: "", status: "loading", projection: null });
+  const confirm = useRef(session.confirm);
+  confirm.current = session.confirm;
+  useEffect(() => {
+    if (!userId) return;
+    const controller = new AbortController();
+    setState({ scope, status: "loading", projection: null });
+    void orderApi.orderIm(order.id, controller.signal).then((projection) => {
+      if (!controller.signal.aborted) setState({ scope, status: "ready", projection });
+    }).catch((error: unknown) => {
+      if (controller.signal.aborted) return;
+      const typed = error instanceof OrderRequestError ? error : new OrderRequestError(0, null);
+      if (typed.status === 401 || typed.code === "UNAUTHENTICATED") void confirm.current();
+      setState({ scope, status: "failed", projection: null });
+    });
+    return () => controller.abort();
+  }, [order.id, order.status, scope, userId]);
+  const visible = state.scope === scope ? state : { scope, status: "loading" as const, projection: null };
+  const projection = visible.status === "ready" ? visible.projection : null;
+  const ending = facts?.phase === "DECISION_PENDING" ? "PENDING" as const
+    : facts?.phase === "DECISION_WAITING" ? "WAITING" as const
+    : facts?.phase === "INTAKE_PENDING" ? "SERVICE" as const
+    : null;
+  const summary = projection
+    ? orderFulfillmentSummary(projection, { ending })
+    : visible.status === "failed" ? "阶段待核对" : "阶段核对中…";
+  const steps = projection ? orderFulfillmentStepStates(projection.stage) : null;
+  const tone = !projection ? "unknown" : projection.stage === "SETTLED" ? "done" : projection.stage === "CANCELLED" ? "closed" : "active";
+  return <section className="order-fulfillment-stage" data-stage={projection?.stage ?? "UNKNOWN"} data-tone={tone} aria-label="履约阶段">
+    <div className="order-fulfillment-head">
+      <span className="order-fulfillment-dot" aria-hidden="true" />
+      <p className="order-fulfillment-summary" role="status">{summary}</p>
+      <button type="button" className="button quiet button--sm" data-support-trigger onClick={() => window.dispatchEvent(new CustomEvent("zzsh:order-groups", { detail: { party, orderId: order.id } }))}><MessageCircle size={15} aria-hidden="true" />打开订单群</button>
+    </div>
+    {steps ? <ol className="order-fulfillment-steps" aria-label="六个履约阶段">{ORDER_FULFILLMENT_STEPS.map((step, index) => {
+      const stepState = steps[index] ?? "unknown";
+      return <li key={step.key} data-state={stepState} aria-current={stepState === "current" ? "step" : undefined}><span className="order-fulfillment-step-dot" aria-hidden="true" />{step.label}</li>;
+    })}</ol> : null}
   </section>;
 }
 
@@ -206,9 +258,11 @@ function AmountCard({ order, party, facts, readFailed }: { order: Order; party: 
 function ContactCard({ order, party, onChanged, quiet }: { order: Order; party: OrderParty; onChanged: () => void; quiet: boolean }) {
   if (!order.fulfillmentAssignment) return null;
   const value = order.fulfillmentAssignment;
+  const ended = order.status === "COMPLETED" || order.status === "CANCELLED" || order.readOnly === true;
   const copy = value.state === "WAITING"
     ? value.waitingReason === "NO_ELIGIBLE_STAFF" ? "当前暂无可用客服，正在等待平台调度。" : "等待客服分配；分配与建群都不等于开租。"
-    : value.state === "ASSIGNED" && value.teamReady ? "订单群已就绪，可在订单群中与客服、对方核对交付事项。"
+    : value.state === "ASSIGNED" && value.teamReady
+      ? ended ? "本单已结束，订单群只保留历史记录；如需核对请联系客服。" : "订单群已就绪，可在订单群中与客服、对方核对交付事项。"
     : value.state === "ASSIGNED" ? "客服已分配，订单群准备中。" : "履约状态待确认。";
   return <section className="order-side-card">
     <h2 className="order-section-title">履约与沟通</h2>
@@ -218,7 +272,7 @@ function ContactCard({ order, party, onChanged, quiet }: { order: Order; party: 
       <div><dt>订单群</dt><dd>{value.teamReady ? "已就绪" : value.teamState ? "尚未就绪" : "状态待确认"}</dd></div>
     </dl> : null}
     {quiet ? null : <div className="order-contact-actions">
-      <button type="button" className="button secondary" data-support-trigger onClick={() => window.dispatchEvent(new CustomEvent("zzsh:order-groups", { detail: { party, orderId: order.id } }))}><MessageCircle size={15} aria-hidden="true" />打开订单群</button>
+      <button type="button" className="button secondary" data-support-trigger onClick={() => window.dispatchEvent(new CustomEvent("zzsh:order-groups", { detail: { party, orderId: order.id } }))}><MessageCircle size={15} aria-hidden="true" />{ended ? "查看订单群" : "打开订单群"}</button>
       <button type="button" className="button quiet" onClick={onChanged}><RefreshCw size={15} aria-hidden="true" />刷新订单</button>
     </div>}
   </section>;
@@ -475,6 +529,7 @@ export function OrderDetail({ party, status, accountId, orderId, state, onRetry,
         </div>
       </div>
     </header>
+    {order.source?.origin !== "LEGACY" && !order.readOnly && order.status !== "PENDING_PAYMENT" ? <FulfillmentStageBar order={order} party={party} facts={facts} /> : null}
     <AttentionBlock attention={attention} party={party} orderId={order.id} onRetry={onChanged} />
     <div className="order-detail-body">
       <div className="order-detail-main">

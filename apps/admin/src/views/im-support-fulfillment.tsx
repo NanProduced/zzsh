@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CircleAlert, ClipboardList, Info, RefreshCw, ShieldCheck, TriangleAlert, X } from "lucide-react";
-import { AdminApiError, friendlyError } from "../api";
+import { friendlyError } from "../api";
+import { formatDateTime } from "./im-support-format";
 import { Dialog, DialogContent } from "../components/ui/dialog";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
@@ -27,12 +28,9 @@ type PreviewState = {
   adjustArmed: boolean;
 };
 type IntentPhase = "IDLE" | "SENDING" | "UNKNOWN" | "AUTH" | "ACCEPTED_READBACK_PENDING";
+type FulfillmentReadState = "idle" | "ok" | "unavailable" | "forbidden" | "auth" | "unknown";
 type PersistedIntent = { subject: string; intent: FulfillmentIntent; accepted?: boolean };
 const ACCEPTED_STORAGE_WARNING = "操作已受理，但本地无法保存恢复状态；不会重复提交。请勿刷新或离开页面，先查看当前状态或联系维护处理。";
-
-function isAuthFailure(error: unknown): boolean {
-  return error instanceof AdminApiError && (error.status === 401 || error.status === 423);
-}
 
 const AMOUNT_LABELS: Record<string, string> = {
   haffConsumedBuyer: "哈夫币消耗（租客侧）",
@@ -89,8 +87,10 @@ function storageKeyFor(viewerId: string, orderId: string): string {
  * Frozen order inventory arrives through the authorized IM slot projection;
  * the section never computes money and never writes an order/ledger row.
  */
-export function OrderFulfillmentSection({ orderId, displayNo, viewerId, frozenInventory }: { orderId: string; displayNo: string; viewerId: string; frozenInventory?: InventoryLine[] }) {
+export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderStatus, frozenInventory }: { orderId: string; displayNo: string; viewerId: string; orderStatus?: string; frozenInventory?: InventoryLine[] }) {
   const [view, setView] = useState<SettlementReadView | null>(null);
+  const [readState, setReadState] = useState<FulfillmentReadState>("idle");
+  const [readDetail, setReadDetail] = useState("");
   const [lines, setLines] = useState<LineDraft[]>([]);
   const [endReason, setEndReason] = useState<"" | EarlyEndReason>("");
   const [reason, setReason] = useState("");
@@ -180,17 +180,18 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, frozenIn
   const load = useCallback(async () => {
     setLoading(true);
     setError("");
-    try {
-      const next = await readOrderSettlement(orderId);
-      if (scopeRef.current !== scope) return;
-      applyView(next);
-    } catch (cause) {
-      if (scopeRef.current !== scope) return;
-      if (isAuthFailure(cause)) hidePrivate();
-      setError(friendlyError(cause));
-    } finally {
-      if (scopeRef.current === scope) setLoading(false);
+    setReadDetail("");
+    const outcome = await readOrderSettlement(orderId);
+    if (scopeRef.current !== scope) return;
+    setReadState(outcome.kind);
+    if (outcome.kind === "ok") {
+      applyView(outcome.view);
+    } else if (outcome.kind === "auth") {
+      hidePrivate();
+    } else if (outcome.kind === "unknown") {
+      setReadDetail(friendlyError(outcome.error));
     }
+    if (scopeRef.current === scope) setLoading(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orderId, seed, scope]);
 
@@ -229,22 +230,23 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, frozenIn
   }, [load]);
 
   const readbackAccepted = async () => {
-    try {
-      const next = await readOrderSettlement(orderId);
-      if (scopeRef.current !== scope) return;
-      applyView(next);
+    const outcome = await readOrderSettlement(orderId);
+    if (scopeRef.current !== scope) return;
+    if (outcome.kind === "ok") {
+      setReadState("ok");
+      applyView(outcome.view);
       clearIntent();
       setNotice((current) => current || "操作已受理，最新状态已读取。");
       setError("");
-    } catch (cause) {
-      if (scopeRef.current !== scope) return;
-      setPhase("ACCEPTED_READBACK_PENDING");
-      if (isAuthFailure(cause)) {
-        hidePrivate();
-        setError("操作已受理；登录状态已变化，订单私有投影已隐藏。重新确认同一管理员身份后请查看当前状态。");
-      } else {
-        setError("操作已受理，但读取最新状态失败；仅可查看当前状态，不会重复提交。");
-      }
+      return;
+    }
+    setPhase("ACCEPTED_READBACK_PENDING");
+    if (outcome.kind === "auth") {
+      setReadState("auth");
+      hidePrivate();
+      setError("操作已受理；登录状态已变化，订单私有投影已隐藏。重新确认同一管理员身份后请查看当前状态。");
+    } else {
+      setError("操作已受理，但读取最新状态失败；仅可查看当前状态，不会重复提交。");
     }
   };
 
@@ -309,26 +311,30 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, frozenIn
   const observeCurrent = async () => {
     setLoading(true);
     setError("");
-    try {
-      const next = await readOrderSettlement(orderId);
-      if (scopeRef.current !== scope) return;
-      applyView(next);
+    const outcome = await readOrderSettlement(orderId);
+    if (scopeRef.current !== scope) return;
+    setLoading(false);
+    if (outcome.kind === "ok") {
+      setReadState("ok");
+      applyView(outcome.view);
       if (phase === "ACCEPTED_READBACK_PENDING") {
         clearIntent();
         setNotice("操作已受理，最新状态已读取。");
       } else {
         setNotice("已查看当前状态；该读取不构成原请求回执，未决操作仍保留。");
       }
-    } catch (cause) {
-      if (scopeRef.current !== scope) return;
-      if (isAuthFailure(cause)) {
-        hidePrivate();
-        setError("登录状态已变化，订单私有投影已隐藏；请重新确认同一管理员身份后重试。");
-      } else {
-        setError(friendlyError(cause));
-      }
-    } finally {
-      if (scopeRef.current === scope) setLoading(false);
+      return;
+    }
+    setReadState(outcome.kind);
+    if (outcome.kind === "auth") {
+      hidePrivate();
+      setError("登录状态已变化，订单私有投影已隐藏；请重新确认同一管理员身份后重试。");
+    } else if (outcome.kind === "unavailable") {
+      setError("本环境未启用结算记录，无法查看当前状态；原请求责任仍保留。");
+    } else if (outcome.kind === "forbidden") {
+      setError("当前账号无权查看本单结算记录；原请求责任仍保留。");
+    } else {
+      setError(friendlyError(outcome.error));
     }
   };
 
@@ -481,15 +487,63 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, frozenIn
 
   const readButton = <Button variant="ghost" size="icon-sm" onClick={() => void load()} disabled={loading || busy} aria-label="重新读取本单进度"><RefreshCw /></Button>;
 
+  const ended = orderStatus === "COMPLETED" || orderStatus === "CANCELLED";
+  const endedLabel = orderStatus === "CANCELLED" ? "已取消" : "已完成";
+
+  // 已结束订单是只读事实页：不再提供开租/结算写操作；读取不可用也只做中性说明。
+  if (ended) {
+    const readNote = readState === "unavailable" ? "本环境未启用结算记录，无法读取本单结算摘要。"
+      : readState === "forbidden" ? "当前账号无权读取本单结算摘要。"
+      : readState === "auth" ? "登录状态已变化，结算摘要已隐藏。"
+      : readState === "unknown" ? `结算摘要暂时不可读。${readDetail ? ` ${readDetail}` : ""}`
+      : null;
+    return <Card className="im-support-fulfillment im-order-card" data-ended="true" data-stage="ended" data-read-state={readState} aria-label="本单已结束">
+      <CardContent className="grid gap-2.5 p-4">
+        {statusMessages}
+        <div className="flex items-start gap-3">
+          <div className="grid min-w-0 flex-1 gap-1">
+            <CardTitle className="flex items-start gap-2 text-sm"><ShieldCheck className="mt-0.5 size-4 shrink-0 text-muted-foreground" />本单已结束</CardTitle>
+            <CardDescription className="text-xs leading-relaxed">{endedLabel}订单的开租与结算操作已关闭；订单群沟通是否仍可用以群内提示为准。</CardDescription>
+          </div>
+          <Badge variant="secondary">已结束</Badge>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Badge variant="outline">{endedLabel}</Badge>
+          {posting ? <Badge variant="secondary">已结算</Badge> : view ? <Badge variant="outline">未读到已过账结算</Badge> : null}
+          {posting?.refundDueAt ? <span className="text-xs text-muted-foreground">退款应付时间：{formatDateTime(posting.refundDueAt)}</span> : null}
+        </div>
+        {!view && (loading || readState === "idle") ? <p className="im-support-fulfillment-empty">正在读取结算摘要…</p> : null}
+        {!view && readNote ? <p className="im-support-fulfillment-empty">{readNote}</p> : null}
+        {!view && readNote ? <div><Button variant="outline" size="sm" data-action="fulfillment-reload" onClick={() => void load()} disabled={loading || busy}>重新读取</Button></div> : null}
+      </CardContent>
+    </Card>;
+  }
+
   // 读取失败与"读取成功但没有结算投影"是两件事：前者不能默认成待录入，也不影响本单聊天。
-  if (!view) return <Card className="im-support-fulfillment im-order-card" data-available="false" aria-label="本单当前任务">
-    <CardContent className="grid gap-2 p-4">
-      {statusMessages}
-      <Alert variant="warning" role="status"><TriangleAlert /><AlertTitle>{loading ? "正在读取本单进度…" : "本单进度暂时读不到"}</AlertTitle><AlertDescription>不影响在这里沟通，稍后可重新读取。{error ? ` ${error}` : ""}</AlertDescription><AlertAction>
-        <Button variant="outline" size="sm" data-action="fulfillment-reload" onClick={() => void load()} disabled={loading || busy}>重新读取</Button>
-      </AlertAction></Alert>
-    </CardContent>
-  </Card>;
+  // 404 只说明本环境未启用结算记录，不能宣称无权；403 才是当前账号无权。
+  if (!view) {
+    const reading = loading || readState === "idle";
+    return <Card className="im-support-fulfillment im-order-card" data-available="false" data-read-state={readState} aria-label="本单当前任务">
+      <CardContent className="grid gap-2 p-4">
+        {statusMessages}
+        {reading ? <Alert variant="warning" role="status"><TriangleAlert /><AlertTitle>正在读取本单进度…</AlertTitle><AlertDescription>不影响在这里沟通，稍后自动显示。</AlertDescription><AlertAction>
+          <Button variant="outline" size="sm" data-action="fulfillment-reload" onClick={() => void load()} disabled>重新读取</Button>
+        </AlertAction></Alert> : null}
+        {!reading && readState === "unavailable" ? <Alert variant="info" role="status"><Info /><AlertTitle>本单结算记录不可用</AlertTitle><AlertDescription>本环境未启用结算记录，或该订单的记录不可读；不影响本单沟通。</AlertDescription><AlertAction>
+          <Button variant="outline" size="sm" data-action="fulfillment-reload" onClick={() => void load()} disabled={busy}>重新读取</Button>
+        </AlertAction></Alert> : null}
+        {!reading && readState === "forbidden" ? <Alert variant="destructive" role="alert"><CircleAlert /><AlertTitle>当前账号无权查看本单结算记录</AlertTitle><AlertDescription>不影响本单沟通；如权限刚调整，可重新读取。</AlertDescription><AlertAction>
+          <Button variant="outline" size="sm" data-action="fulfillment-reload" onClick={() => void load()} disabled={busy}>重新读取</Button>
+        </AlertAction></Alert> : null}
+        {!reading && readState === "auth" ? <Alert variant="warning" role="status"><TriangleAlert /><AlertTitle>登录状态已变化，本单私有信息已隐藏</AlertTitle><AlertDescription>重新确认同一管理员身份后再读取。</AlertDescription><AlertAction>
+          <Button variant="outline" size="sm" data-action="fulfillment-reload" onClick={() => void load()} disabled={busy}>重新读取</Button>
+        </AlertAction></Alert> : null}
+        {!reading && readState !== "unavailable" && readState !== "forbidden" && readState !== "auth" ? <Alert variant="warning" role="status"><TriangleAlert /><AlertTitle>本单进度暂时读不到</AlertTitle><AlertDescription>不影响在这里沟通，稍后可重新读取。{readDetail ? ` ${readDetail}` : ""}</AlertDescription><AlertAction>
+          <Button variant="outline" size="sm" data-action="fulfillment-reload" onClick={() => void load()} disabled={busy}>重新读取</Button>
+        </AlertAction></Alert> : null}
+      </CardContent>
+    </Card>;
+  }
 
   return <Card className="im-support-fulfillment im-order-card" data-stage={stage.key} aria-label="本单当前任务">
     <CardContent className="grid gap-2.5 p-4">

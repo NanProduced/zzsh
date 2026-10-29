@@ -205,6 +205,23 @@ export type OrderStage = {
   viewerActionRequired: boolean;
   settlementVersionNo: number | null;
 };
+
+/** Server-authoritative fulfillment stage from the order IM projection, never derived from `Order.stage`. */
+export type OrderImStage = "PENDING_PAYMENT" | "WAITING_STAFF" | "TEAM_PENDING" | "OPENING_CONFIRM" | "RENTING" | "ENDING" | "SETTLED" | "CANCELLED";
+export type OrderImOpeningState = "NONE" | "DRAFT" | "PARTIAL" | "CONFIRMED";
+export type OrderImEndState = "NONE" | "REQUESTED" | "POSTED";
+/** Read-only slice of the order IM projection; the order page has no use for group members or routes. */
+export type OrderImProjection = {
+  stage: OrderImStage;
+  rentalStartedAt: string | null;
+  dueAt: string | null;
+  openingState: OrderImOpeningState;
+  openingAcks: { renter: boolean; owner: boolean } | null;
+  endState: OrderImEndState;
+  orderEndedAt: string | null;
+  sendUntil: string | null;
+  canSend: boolean;
+};
 export type Order = {
   source?: { origin: "NATIVE" | "LEGACY"; statusLabel?: string };
   readOnly?: boolean;
@@ -590,6 +607,52 @@ export function parsePersonalRefunds(value: unknown, expectedUserId: string, exp
   };
 }
 
+const ORDER_IM_STAGES: readonly OrderImStage[] = ["PENDING_PAYMENT", "WAITING_STAFF", "TEAM_PENDING", "OPENING_CONFIRM", "RENTING", "ENDING", "SETTLED", "CANCELLED"];
+const ORDER_IM_OPENING_STATES: readonly OrderImOpeningState[] = ["NONE", "DRAFT", "PARTIAL", "CONFIRMED"];
+const ORDER_IM_END_STATES: readonly OrderImEndState[] = ["NONE", "REQUESTED", "POSTED"];
+const invalidOrderIm = () => new OrderRequestError(502, null);
+const orderImTime = (value: unknown): string | null => {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string" || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?(?:Z|[+-]\d\d:\d\d)$/.test(value) || !Number.isFinite(Date.parse(value))) throw invalidOrderIm();
+  return value;
+};
+
+/**
+ * The stage is the only fact the bar may not invent: a projection without a recognized `stage`
+ * is rejected as a whole, so the page shows "阶段待核对" instead of borrowing another status.
+ * Missing optional facts stay unknown (null / false), never guessed.
+ */
+export function parseOrderImProjection(value: unknown): OrderImProjection {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw invalidOrderIm();
+  const root = value as Record<string, unknown>;
+  if (!ORDER_IM_STAGES.includes(root.stage as OrderImStage)) throw invalidOrderIm();
+  const rawAcks = root.openingAcks;
+  let openingAcks: OrderImProjection["openingAcks"] = null;
+  if (rawAcks !== null && rawAcks !== undefined) {
+    if (typeof rawAcks !== "object" || Array.isArray(rawAcks)
+      || typeof (rawAcks as Record<string, unknown>).renter !== "boolean"
+      || typeof (rawAcks as Record<string, unknown>).owner !== "boolean") throw invalidOrderIm();
+    openingAcks = { renter: (rawAcks as { renter: boolean }).renter, owner: (rawAcks as { owner: boolean }).owner };
+  }
+  const openingState = root.openingState === undefined ? "NONE" : root.openingState;
+  const endState = root.endState === undefined ? "NONE" : root.endState;
+  if (!ORDER_IM_OPENING_STATES.includes(openingState as OrderImOpeningState)
+    || !ORDER_IM_END_STATES.includes(endState as OrderImEndState)) throw invalidOrderIm();
+  const canSend = root.canSend === undefined ? false : root.canSend;
+  if (typeof canSend !== "boolean") throw invalidOrderIm();
+  return {
+    stage: root.stage as OrderImStage,
+    rentalStartedAt: orderImTime(root.rentalStartedAt),
+    dueAt: orderImTime(root.dueAt),
+    openingState: openingState as OrderImOpeningState,
+    openingAcks,
+    endState: endState as OrderImEndState,
+    orderEndedAt: orderImTime(root.orderEndedAt),
+    sendUntil: orderImTime(root.sendUntil),
+    canSend,
+  };
+}
+
 export function orderItemKey(order: Order): string { return JSON.stringify([order.source?.origin ?? "NATIVE", order.id]); }
 
 export function mergeOrderItems(previous: Order[], incoming: Order[]): Order[] {
@@ -711,6 +774,9 @@ export const orderApi = {
     requestJson<OrderPage>(`/api/orders/unified?${orderListQuery(input)}`, { signal }),
   detail: (orderId: string, signal?: AbortSignal) =>
     requestJson<{ order: Order }>(`/api/orders/${encodeURIComponent(orderId)}`, { signal }).then(unwrapOrder),
+  /** Read-only fulfillment projection; same authorization and same-origin read as the order group. */
+  orderIm: (orderId: string, signal?: AbortSignal) =>
+    requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/im?operation=read`, { signal }).then(parseOrderImProjection),
   personalRefunds: async (userId: string, orderId: string, signal?: AbortSignal) =>
     parsePersonalRefunds(await requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/refunds`, { signal, expectedUserId: userId }), userId, orderId),
   previewRentalPrice: (input: RentalPricePreviewInput, signal?: AbortSignal) =>

@@ -79,3 +79,41 @@ export async function reserveSupportCandidate(client: PoolClient, appId: string,
     ${kind === "ORDER" ? "" : ",active_load=active_load+1"} WHERE app_id=$1 AND admin_user_id=$2`, [appId, selected.admin_user_id]);
   return eligible.find((c) => c.adminUserId === selected.admin_user_id)!;
 }
+
+/**
+ * CS-M1 僵尸接线区间：超过 3 分钟无心跳的未结束区间以最后心跳截断，并把仍显示
+ * CONNECTED 的 presence 降级为 DISCONNECTED。只关闭本人区间；若同一客服已有更新
+ * 的未结束区间则不动 presence。调用方持有 App 调度闸门与同一事务。
+ */
+export async function reapStaleSupportSessions(
+  client: PoolClient,
+  appId: string,
+  staleSeconds = 180,
+): Promise<{ sessions: number; presences: number }> {
+  if (!Number.isSafeInteger(staleSeconds) || staleSeconds < 1) throw new Error("Invalid stale session window");
+  const row = (await client.query<{ sessions: string | number; presences: string | number }>(
+    `WITH stale AS (
+       UPDATE "zzsh_iam"."im_support_presence_session"
+          SET "ended_at" = "last_heartbeat_at", "end_reason" = 'STALE'
+        WHERE "app_id" = $1 AND "ended_at" IS NULL
+          AND "last_heartbeat_at" < clock_timestamp() - ($2::int * interval '1 second')
+       RETURNING "admin_user_id"
+     ), disconnected AS (
+       UPDATE "zzsh_iam"."im_support_presence" p
+          SET "connection_state" = 'DISCONNECTED',
+              "version" = p."version" + 1,
+              "updated_at" = clock_timestamp()
+        WHERE p."app_id" = $1 AND p."connection_state" = 'CONNECTED'
+          AND p."admin_user_id" IN (SELECT "admin_user_id" FROM stale)
+          AND NOT EXISTS (
+            SELECT 1 FROM "zzsh_iam"."im_support_presence_session" s
+             WHERE s."app_id" = p."app_id" AND s."admin_user_id" = p."admin_user_id" AND s."ended_at" IS NULL
+          )
+       RETURNING p."admin_user_id"
+     )
+     SELECT (SELECT count(*)::int FROM stale) AS "sessions",
+            (SELECT count(*)::int FROM disconnected) AS "presences"`,
+    [appId, staleSeconds],
+  )).rows[0];
+  return { sessions: Number(row?.sessions ?? 0), presences: Number(row?.presences ?? 0) };
+}

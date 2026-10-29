@@ -10,6 +10,18 @@ export type ImPlatformAccountState = "ACTIVE" | "PENDING" | "FROZEN" | "DEACTIVA
 
 export type ImServiceAvailability = "OFF_DUTY" | "AVAILABLE" | "PAUSED";
 
+export type ImTransportReply = {
+  messageId: string;
+  senderId: string;
+  text?: string;
+};
+
+export type ImTransportCard = {
+  kind: "ORDER_OPENING"|"ORDER_ENDING"|"ORDER_SETTLED"|"ORDER_PRICE_CHANGE";
+  orderId: string;
+  cardId: string;
+};
+
 export type ImTransportMessage = {
   messageClientId: string;
   messageServerId: string;
@@ -19,6 +31,9 @@ export type ImTransportMessage = {
   createTime: number;
   text?: string;
   messageType: 0 | 1;
+  reply?: ImTransportReply;
+  revoked?: boolean;
+  card?: ImTransportCard;
   attachment?: {
     imageId: string;
     url?: string;
@@ -29,6 +44,22 @@ export type ImTransportMessage = {
     height?: number;
   };
 };
+
+export type ImTransportMessageReference = {
+  messageServerId?: string;
+  messageClientId?: string;
+};
+
+/**
+ * A transport may reject a reply/revoke/hide with an HTTP-like status. The
+ * route maps it to the existing API error envelope instead of a generic 500.
+ */
+export class ImTransportRequestError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+    this.name = "ImTransportRequestError";
+  }
+}
 
 export type ImOrderImageScope = {
   appId: string;
@@ -48,6 +79,10 @@ export type ImMessageTransport = {
   history(input: { conversationId: string; viewerAccountId: string; limit: number; before?: string }): Promise<ImTransportMessage[]>;
   sendText(input: { conversationId: string; senderAccountId: string; receiverAccountId: string; text: string }): Promise<ImTransportMessage>;
   sendImage?(input: { conversationId: string; scope: ImOrderImageScope; senderAccountId: string; receiverAccountId: string; messageClientId: string; name: string; mimeType: "image/jpeg" | "image/png"; size: number; body: Uint8Array; width?: number; height?: number }): Promise<ImTransportMessage>;
+  card?(input: { conversationId: string; senderAccountId: string; receiverAccountId: string; card: ImTransportCard }): Promise<ImTransportMessage>;
+  replyText?(input: { conversationId: string; senderAccountId: string; receiverAccountId: string; text: string; replyTo: ImTransportMessageReference }): Promise<ImTransportMessage>;
+  revoke?(input: { conversationId: string; viewerAccountId: string; message: ImTransportMessageReference }): Promise<ImTransportMessage>;
+  hideForViewer?(input: { conversationId: string; viewerAccountId: string; message: ImTransportMessageReference }): Promise<void>;
   getImageScope?(imageId: string): Promise<{ imageId: string; scope: ImOrderImageScope } | null>;
   readImage?(input: { imageId: string; scope: ImOrderImageScope; viewerAccountId: string }): Promise<ImTransportImage | null>;
 };

@@ -35,8 +35,8 @@ const realSetInterval = globalThis.setInterval, realClearInterval = globalThis.c
 globalThis.setInterval = (fn, ms) => { if (ms === 5000) { timers.set(++timerId, fn); return timerId; } return realSetInterval(fn, ms); };
 globalThis.clearInterval = (id) => { if (!timers.has(id)) realClearInterval(id); };
 
-async function mount(t, caseId, { select = true } = {}) {
-  const item = fixtureById(caseId);
+async function mount(t, caseId, { select = true, fixture } = {}) {
+  const item = fixture ?? fixtureById(caseId);
   const deps = createFixtureDeps(item);
   globalThis.fetch = deps.fetchStub;
   const node = document.createElement("div");
@@ -99,6 +99,27 @@ test("READY group list, role-attributed chat and 本单详情 come from the load
   assert.match(aside.textContent, /未开租/);
 });
 
+test("admin custom conversation opens the platform message menu on a row", async (t) => {
+  const { node, until } = await mount(t, "ready-three");
+  await until(() => node.querySelector(".im-wb-msg"), "chat rendered");
+  const buyer = [...node.querySelectorAll(".im-wb-msg")].find((row) => row.textContent.includes("付款后从哪里交接"));
+  await act(async () => buyer.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 160, clientY: 160 })));
+  await until(() => document.querySelector('.message-action-menu[role="menu"]'), "buyer menu");
+  const buyerItems = [...document.querySelectorAll('.message-action-menu [role="menuitem"]')].map((item) => item.textContent.trim());
+  assert.ok(buyerItems.includes("复制"), "text message offers copy");
+  assert.ok(buyerItems.includes("回复"), "sendable group offers reply");
+  assert.ok(buyerItems.includes("删除"), "any visible message offers local delete");
+  assert.ok(!buyerItems.includes("撤回"), "another member's message cannot be revoked");
+  await act(async () => document.dispatchEvent(new browser.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+  await until(() => !document.querySelector('.message-action-menu[role="menu"]'), "menu closed");
+
+  const staff = [...node.querySelectorAll(".im-wb-msg")].find((row) => row.textContent.includes("我来协助本次交接"));
+  await act(async () => staff.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 180, clientY: 200 })));
+  await until(() => document.querySelector('.message-action-menu[role="menu"]'), "staff menu");
+  const staffItems = [...document.querySelectorAll('.message-action-menu [role="menuitem"]')].map((item) => item.textContent.trim());
+  assert.ok(staffItems.includes("撤回"), "the operator can revoke their own message");
+});
+
 test("unknown historical senders degrade neutrally instead of borrowing a name", async (t) => {
   const { node, until } = await mount(t, "unknown-sender");
   await until(() => node.textContent.includes("成员表已无此账号"), "history loaded");
@@ -135,20 +156,60 @@ test("settlement unavailable keeps the conversation readable and never defaults 
   const { node, until } = await mount(t, "settlement-unavailable");
   await until(() => node.querySelector(".im-wb-msg"), "history still loaded");
   const task = node.querySelector(".im-support-fulfillment");
-  assert.match(task.textContent, /本单进度暂时读不到/);
-  assert.match(task.textContent, /不影响在这里沟通/);
+  assert.match(task.textContent, /本单结算记录不可用/);
+  assert.match(task.textContent, /本环境未启用结算记录/);
+  assert.match(task.textContent, /不影响本单沟通/);
+  assert.doesNotMatch(task.textContent, /未找到此内容|无权/, "404 never claims a permission problem");
   assert.doesNotMatch(task.textContent, /待核对期初|核对并录入期初/, "a failed read is not presented as a missing opening");
+  assert.equal(task.querySelector('[role="alert"]'), null, "an unavailable surface is neutral, not a red error");
   assert.ok(byText(node, "重新读取"), "the only offered action is another read");
   assert.equal(node.querySelectorAll(".im-support-fulfillment-lines input").length, 0);
+  assert.equal(node.querySelector('[data-action="open-fulfillment-panel"]'), null, "no write panel without a readable settlement");
+});
+
+test("a forbidden settlement read still reports the missing permission", async (t) => {
+  const { node, until } = await mount(t, "settlement-forbidden");
+  await until(() => node.querySelector(".im-support-fulfillment"), "task card loaded");
+  const task = node.querySelector(".im-support-fulfillment");
+  assert.match(task.textContent, /当前账号无权查看本单结算记录/);
+  assert.doesNotMatch(task.textContent, /本环境未启用结算记录/, "403 is not the unavailable-surface copy");
+  assert.ok(task.querySelector('[role="alert"]'), "permission failure stays an alert");
+  assert.ok(byText(node, "重新读取"), "a denied read can be retried");
+  assert.equal(node.querySelectorAll(".im-support-fulfillment-lines input").length, 0);
+});
+
+test("a completed order shows ended read-only facts and never offers write entries", async (t) => {
+  const base = fixtureById("posted");
+  const completed = { ...base, id: "completed-order", info: { ...base.info, orderStatus: "COMPLETED" } };
+  const { node, until } = await mount(t, "completed-order", { fixture: completed });
+  await until(() => node.querySelector('.im-support-fulfillment[data-ended="true"]'), "ended summary loaded");
+  await until(() => node.querySelector(".im-support-fulfillment")?.textContent.includes("已结算"), "posting read");
+  const task = node.querySelector(".im-support-fulfillment");
+  assert.match(task.textContent, /本单已结束/);
+  assert.match(task.textContent, /已完成/);
+  assert.match(task.textContent, /已结算/);
+  assert.match(task.textContent, /退款应付时间：10\/14 16:00/);
+  assert.equal(node.querySelector('[data-action="open-fulfillment-panel"]'), null, "ended orders have no write entry");
+  assert.equal(document.body.querySelector(".im-order-panel"), null, "no check panel is mounted");
+  assert.doesNotMatch(task.textContent, /期初代录|生成提前结算预览|确认复核|人工调整/);
+  await until(() => rows(node)[0].textContent.includes("已结束"), "list chip speaks the ended stage");
+  assert.match(rows(node)[0].textContent, /已完成 · 已结束/);
+});
+
+test("an active order keeps the existing fulfillment write entry", async (t) => {
+  const { node, until } = await mount(t, "ready-three");
+  await until(() => node.querySelector(".im-support-fulfillment"), "task card");
+  assert.ok(node.querySelector('[data-action="open-fulfillment-panel"]'), "active orders keep the existing entry");
+  assert.equal(node.querySelector('[data-ended="true"]'), null);
+  assert.equal(node.querySelector('[data-read-state]'), null);
 });
 
 test("send-only revocation keeps history and draft but blocks new sends", async (t) => {
   const { node, until, settle } = await mount(t, "send-only");
   await until(() => node.querySelector(".im-wb-msg"), "history loaded");
   assert.match(node.textContent, /当前只可阅读/);
-  const textarea = node.querySelector("textarea");
-  assert.equal(textarea.disabled, true, "the composer is read-only");
-  assert.equal(byText(node, "发送").disabled, true);
+  assert.equal(node.querySelector("textarea"), null, "read-only replaces the composer instead of leaving a dead input");
+  assert.equal(node.querySelector(".im-wb-send"), null);
   assert.ok(node.querySelector(".im-wb-thumb"), "already loaded images stay visible");
   await settle();
   assert.match(node.textContent, /期初截图已发/, "loaded history is never cleared by a send revocation");
@@ -315,4 +376,49 @@ test("a new identity returns the narrow workbench to its selectable list", async
   await until(() => node.querySelectorAll(".im-wb-queue .im-wb-row").length === 3, "new scoped directory");
   assert.equal(node.querySelector(".order-team-grid").getAttribute("data-pane"), "list", "the new session can choose a group instead of being trapped in the old chat pane");
   assert.equal(node.querySelector('[aria-label="搜索订单群"]').value, "", "old scoped search text is cleared");
+});
+
+test("the admin custom conversation renders an order-stage card with both sides", async (t) => {
+  const base = fixtureById("ready-three");
+  const terms = {
+    viewerParty: "STAFF", basis: "QUOTE", currency: "CNY", scale: 2, version: "quote-v1", rentalAmount: null, depositAmount: null, paidTotal: null,
+    lines: [
+      { itemId: "item_haff", name: "哈夫币", quantity: "10000000", unitPrice: null, amount: null, buyerUnitPrice: "1", ownerUnitPrice: "0.8", buyerAmount: "10000000", ownerAmount: "8000000", platformContribution: "2000000" },
+      { itemId: "item_case", name: "装备箱", quantity: "3", unitPrice: null, amount: null, buyerUnitPrice: "6000", ownerUnitPrice: "5000", buyerAmount: "18000", ownerAmount: "15000", platformContribution: "3000" },
+    ],
+    staff: { buyerRentalAmount: "10018000", ownerRentalAmount: "8015000", buyerTotal: "10018000", ownerTotal: "8015000", platformContribution: "2003000" },
+  };
+  const fixture = {
+    ...base,
+    info: { ...base.info, openingState: "PARTIAL", openingAcks: { renter: true, owner: false }, terms },
+    history: [...base.history, {
+      messageClientId: "m-card", messageServerId: "srv-card", senderId: "tenant-account", receiverId: "team-8842",
+      createTime: Date.parse("2026-10-11T01:34:00Z"), messageType: 0, text: "",
+      card: { kind: "ORDER_OPENING", orderId: "order-8842", cardId: "card-1" },
+    }],
+  };
+  const { node, until } = await mount(t, "ready-three-card", { fixture });
+  await until(() => node.querySelector(".im-wb-msg .order-card"), "stage card rendered");
+  const card = node.querySelector(".im-wb-msg .order-card");
+  assert.equal(card.getAttribute("data-kind"), "ORDER_OPENING", "the shared card keeps its kind");
+  assert.equal(card.getAttribute("data-party"), "STAFF", "the admin workbench reads the staff projection");
+  assert.match(card.textContent, /账号信息与开租确认/);
+  assert.match(card.textContent, /买家 已确认/, "both party chips are shown");
+  assert.match(card.textContent, /号主 待确认/);
+  assert.match(card.textContent, /买家合计 ¥100,180\.00/, "staff sees the buyer side");
+  assert.match(card.textContent, /号主合计 ¥80,150\.00/, "staff sees the owner side");
+  assert.match(card.textContent, /平台贡献/);
+  assert.match(card.textContent, /¥20,030\.00/);
+  assert.equal(card.closest(".im-wb-bub"), null, "the card replaces the text bubble instead of nesting inside it");
+  assert.equal(card.closest(".im-wb-msg-body").getAttribute("data-card"), "true", "the message body is widened for the card");
+
+  const row = card.closest("[data-message-id]");
+  assert.ok(row, "the card stays a message row");
+  await act(async () => row.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 160, clientY: 180 })));
+  await until(() => document.querySelector('.message-action-menu[role="menu"]'), "card menu");
+  const labels = [...document.querySelectorAll('.message-action-menu [role="menuitem"]')].map((item) => item.textContent.trim());
+  assert.ok(labels.includes("删除"), "delete stays available on a card row");
+  assert.ok(labels.includes("回复"), "reply is still offered");
+  await act(async () => document.dispatchEvent(new browser.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+  await until(() => !document.querySelector(".message-action-menu"), "menu closed");
 });

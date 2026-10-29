@@ -1,7 +1,7 @@
 import { Injectable, Logger, type BeforeApplicationShutdown } from "@nestjs/common";
 import type { Pool, PoolClient } from "pg";
 import { recordAudit, withTransaction } from "../auth/security-core";
-import { lockSupportMutation, readEligibleSupport, reserveSupportCandidate, type SupportCandidate } from "./support-dispatch";
+import { lockSupportMutation, readEligibleSupport, reapStaleSupportSessions, reserveSupportCandidate, type SupportCandidate } from "./support-dispatch";
 
 export type DispatchResult = { assigned: string[]; more: boolean };
 
@@ -46,7 +46,10 @@ export async function dispatchPaidOrders(pool: Pool, appId: string, batchLimit =
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(appId)) throw new Error("Invalid dispatch App");
   return withTransaction(pool, async (client) => {
     const locked = await lockSupportMutation(client, appId);
-    return assignWaitingOrders(client, appId, await readEligibleSupport(client, appId, locked), batchLimit);
+    const result = await assignWaitingOrders(client, appId, await readEligibleSupport(client, appId, locked), batchLimit);
+    // CS-M1：周期 tick 同时收敛无心跳接线区间；失败由 worker 统一记录，不回滚派单。
+    await reapStaleSupportSessions(client, appId);
+    return result;
   });
 }
 

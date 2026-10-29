@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   createLocalFakeNimWebClientFactory,
   createNimWebClientFactory,
+  mergeImMessages,
   NimImageSendError,
   NimTextSendError,
   resolveNimSdkModule,
@@ -565,4 +566,196 @@ test("keeps the SDK text message id for an unknown result and retries the same m
   assert.equal(sent[1].message.messageClientId, "text-client-retry");
   await assert.rejects(handle.client.retryText("customer-x|2|9001", "missing-id"), (error) => error instanceof NimTextSendError && error.kind === "FAILED");
   await handle.dispose();
+});
+
+function sampleMessage(overrides = {}) {
+  return {
+    messageClientId: "m1",
+    messageServerId: "s1",
+    conversationId: "customer-actions|2|9001",
+    senderId: "peer-1",
+    receiverId: "customer-actions",
+    createTime: 1,
+    messageType: 0,
+    text: "原消息",
+    ...overrides,
+  };
+}
+
+test("local fake message actions post action bodies and preflight authorization", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (url, init) => {
+    const body = JSON.parse(init.body);
+    requests.push({ url, body });
+    if (body.action === "reply") {
+      return Response.json({ message: sampleMessage({ messageClientId: "reply-1", messageServerId: "reply-server", senderId: "customer-actions", text: body.text, reply: { messageId: "s1", senderId: "peer-1", text: "原消息" } }) });
+    }
+    if (body.action === "revoke") {
+      return Response.json({ message: sampleMessage({ text: "", revoked: true }) });
+    }
+    return Response.json({ deleted: true });
+  };
+  try {
+    const state = testContext("customer-actions");
+    const handle = await createLocalFakeNimWebClientFactory({ endpoint: "/api/im/messages", accountId: "customer-actions" })(state.context);
+    const operations = [];
+    const authorize = async ({ operation }) => { operations.push(operation); };
+    const message = sampleMessage();
+
+    const reply = await handle.client.replyText("customer-actions|2|9001", "收到", message, authorize);
+    assert.equal(reply.text, "收到");
+    assert.deepEqual(requests[0], {
+      url: "/api/im/messages",
+      body: { action: "reply", conversationId: "customer-actions|2|9001", text: "收到", replyTo: { messageServerId: "s1", messageClientId: "m1" } },
+    });
+
+    const revoked = await handle.client.revokeMessage("customer-actions|2|9001", message, authorize);
+    assert.equal(revoked.revoked, true);
+    assert.equal(revoked.text, "");
+    assert.deepEqual(requests[1].body, { action: "revoke", conversationId: "customer-actions|2|9001", message: { messageServerId: "s1", messageClientId: "m1" } });
+
+    await handle.client.deleteMessage("customer-actions|2|9001", message, authorize);
+    assert.deepEqual(requests[2].body, { action: "delete", conversationId: "customer-actions|2|9001", message: { messageServerId: "s1", messageClientId: "m1" } });
+    assert.deepEqual(operations, ["send", "send", "read"]);
+    await handle.dispose();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("local fake message actions never reach transport when authorization fails", async () => {
+  const originalFetch = globalThis.fetch;
+  let requests = 0;
+  globalThis.fetch = async () => {
+    requests += 1;
+    return Response.json({});
+  };
+  try {
+    const state = testContext("customer-denied-actions");
+    const handle = await createLocalFakeNimWebClientFactory({ endpoint: "/api/im/messages", accountId: "customer-denied-actions" })(state.context);
+    const message = sampleMessage({ conversationId: "customer-denied-actions|2|9001", receiverId: "customer-denied-actions" });
+    const deny = async () => { throw Object.assign(new Error("denied"), { status: 403 }); };
+    await assert.rejects(handle.client.replyText("customer-denied-actions|2|9001", "回复", message, deny), (error) => error?.status === 403);
+    await assert.rejects(handle.client.revokeMessage("customer-denied-actions|2|9001", message, deny), (error) => error?.status === 403);
+    await assert.rejects(handle.client.deleteMessage("customer-denied-actions|2|9001", message, deny), (error) => error?.status === 403);
+    assert.equal(requests, 0);
+    await handle.dispose();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("local fake polling pushes known messages whose content was revoked or quoted", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalWindow = globalThis.window;
+  globalThis.window = { setInterval: globalThis.setInterval, clearInterval: globalThis.clearInterval };
+  const base = sampleMessage();
+  let history = [base];
+  globalThis.fetch = async () => Response.json({ messages: history });
+  try {
+    const state = testContext("customer-actions");
+    const handle = await createLocalFakeNimWebClientFactory({ endpoint: "/api/im/messages", accountId: "customer-actions", pollMs: 100 })(state.context);
+    await handle.client.getMessageHistory("customer-actions|2|9001", 50);
+    const received = [];
+    handle.client.onMessages((messages) => received.push(...messages));
+    const waitFor = async (predicate) => {
+      for (let attempt = 0; attempt < 100 && !predicate(); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.ok(predicate(), "expected a live update");
+    };
+
+    history = [{ ...base, text: "", revoked: true }];
+    await waitFor(() => received.some((message) => message.revoked === true));
+    assert.equal(received.find((message) => message.revoked === true)?.text, "");
+
+    const seen = received.length;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal(received.length, seen, "an unchanged polled snapshot is not pushed again");
+
+    history = [{ ...base, text: "改过", reply: { messageId: "s0", senderId: "peer-1", text: "引用" } }];
+    await waitFor(() => received.some((message) => message.reply?.messageId === "s0"));
+    await handle.dispose();
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.window = originalWindow;
+  }
+});
+
+test("real adapter calls replyMessage/revokeMessage/deleteMessage behind authorization and merges modified events", async () => {
+  const listeners = new Map();
+  const calls = { reply: [], revoke: [], delete: [] };
+  const messageService = {
+    on(eventName, listener) { listeners.set(eventName, listener); },
+    off(eventName, listener) { if (listeners.get(eventName) === listener) listeners.delete(eventName); },
+    async replyMessage(...args) {
+      calls.reply.push(args);
+      const replyTo = args[1];
+      return { message: { messageClientId: "client-reply", messageServerId: "server-reply", conversationId: replyTo.conversationId, senderId: "customer-real", receiverId: "peer-1", createTime: 2, messageType: 0, text: "回复" } };
+    },
+    async revokeMessage(message) { calls.revoke.push(message); },
+    async deleteMessage(message) { calls.delete.push(message); },
+  };
+  const { sdk } = fakeSdk({ messageService, messageCreator: { createTextMessage: (text) => ({ messageClientId: "client-reply", text }) } });
+  const handle = await createNimWebClientFactory({ appKey: "test-app-key", token: "test-token" }, async () => sdk)(testContext("customer-real").context);
+  try {
+    const operations = [];
+    const authorize = async ({ operation }) => { operations.push(operation); };
+    const replyTo = sampleMessage({ conversationId: "customer-real|2|9001", senderId: "peer-1", text: "长".repeat(200) });
+    const reply = await handle.client.replyText("customer-real|2|9001", "回复", replyTo, authorize);
+    assert.equal(calls.reply.length, 1);
+    assert.equal(calls.reply[0][1], replyTo);
+    assert.equal(calls.reply[0].length, 2);
+    assert.equal(reply.reply.messageId, "s1");
+    assert.equal(reply.reply.senderId, "peer-1");
+    assert.equal(reply.reply.text.length, 120);
+
+    const message = sampleMessage({ conversationId: "customer-real|2|9001", senderId: "customer-real", attachment: { imageId: "ignored" } });
+    const revoked = await handle.client.revokeMessage("customer-real|2|9001", message, authorize);
+    assert.deepEqual(calls.revoke, [message]);
+    assert.equal(revoked.revoked, true);
+    assert.equal(revoked.text, "");
+    assert.equal(revoked.attachment, undefined);
+
+    await handle.client.deleteMessage("customer-real|2|9001", message, authorize);
+    assert.deepEqual(calls.delete, [message]);
+    assert.deepEqual(operations, ["send", "send", "read"]);
+
+    const deny = async () => { throw Object.assign(new Error("denied"), { status: 403 }); };
+    await assert.rejects(handle.client.replyText("customer-real|2|9001", "回复", replyTo, deny), (error) => error?.status === 403);
+    await assert.rejects(handle.client.revokeMessage("customer-real|2|9001", message, deny), (error) => error?.status === 403);
+    await assert.rejects(handle.client.deleteMessage("customer-real|2|9001", message, deny), (error) => error?.status === 403);
+    assert.equal(calls.reply.length, 1);
+    assert.equal(calls.revoke.length, 1);
+    assert.equal(calls.delete.length, 1);
+
+    assert.ok(listeners.has("onReceiveMessagesModified"));
+    assert.ok(listeners.has("onMessageRevokeNotifications"));
+    const received = [];
+    handle.client.onMessages((messages) => received.push(...messages));
+    listeners.get("onReceiveMessagesModified")([{ messageClientId: "m2", messageServerId: "s2", conversationId: "customer-real|2|9001", senderId: "peer-1", receiverId: "customer-real", createTime: 3, messageType: 0, text: "修改", threadReply: { messageClientId: "m1", messageServerId: "s1", senderId: "peer-1", receiverId: "customer-real", createTime: 1 } }]);
+    assert.deepEqual(received[0].reply, { messageId: "s1", senderId: "peer-1" });
+    listeners.get("onMessageRevokeNotifications")([{ messageRefer: { messageClientId: "m1", messageServerId: "s1", conversationId: "customer-real|2|9001", senderId: "customer-real", receiverId: "peer-1", createTime: 1 }, revokeAccountId: "customer-real" }]);
+    assert.equal(received[1].revoked, true);
+    assert.equal(received[1].text, "");
+    assert.equal(received[1].messageServerId, "s1");
+    await handle.dispose();
+    assert.equal(listeners.size, 0);
+  } finally {
+    await handle.dispose();
+  }
+});
+
+test("message state clears revoked content and never resurrects it from stale history", () => {
+  const [revoked] = mergeImMessages(
+    [{ id: "s1", createTime: 1, text: "hello", attachment: { imageId: "img-1" }, reply: { messageId: "s0", senderId: "peer" } }],
+    [{ id: "s1", createTime: 1, revoked: true }],
+  );
+  assert.equal(revoked.text, "");
+  assert.equal(revoked.revoked, true);
+  assert.equal(revoked.attachment, undefined);
+  assert.equal(revoked.reply, undefined);
+
+  const [stale] = mergeImMessages([revoked], [{ id: "s1", createTime: 1, text: "stale page" }]);
+  assert.equal(stale.revoked, true);
+  assert.equal(stale.text, "");
 });

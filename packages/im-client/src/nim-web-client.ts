@@ -8,6 +8,8 @@ import {
 export type NimWebConnectionState = "DISCONNECTED" | "CONNECTING" | "CONNECTED" | "RECONNECTING" | "KICKED" | "AUTH_FAILED";
 type NimListener = (...args: unknown[]) => void;
 
+export type NimMessageReplySummary = { messageId: string; senderId: string; text?: string };
+
 export type NimMessageLike = {
   messageClientId: string;
   messageServerId?: string;
@@ -19,6 +21,9 @@ export type NimMessageLike = {
   messageType?: number;
   attachment?: { raw?: string; url?: string; name?: string; [key: string]: unknown };
   sendingState?: number;
+  reply?: NimMessageReplySummary;
+  revoked?: boolean;
+  card?: { kind: "ORDER_OPENING"|"ORDER_ENDING"|"ORDER_SETTLED"|"ORDER_PRICE_CHANGE"; orderId: string; cardId: string };
 };
 
 export const NIM_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
@@ -92,6 +97,9 @@ export type NimWebClientLike = {
   retryText(conversationId: string, messageClientId: string, authorize?: NimMessageAuthorization): Promise<NimMessageLike>;
   sendImage(conversationId: string, file: File, options?: NimImageSendOptions): Promise<NimMessageLike>;
   retryImage(conversationId: string, messageClientId: string, options?: NimImageSendOptions): Promise<NimMessageLike>;
+  replyText(conversationId: string, text: string, replyTo: NimMessageLike, authorize?: NimMessageAuthorization): Promise<NimMessageLike>;
+  revokeMessage(conversationId: string, message: NimMessageLike, authorize?: NimMessageAuthorization): Promise<NimMessageLike>;
+  deleteMessage(conversationId: string, message: NimMessageLike, authorize?: NimMessageAuthorization): Promise<void>;
 };
 
 type NimMessageServiceLike = {
@@ -99,6 +107,9 @@ type NimMessageServiceLike = {
   off: (eventName: string, listener: NimListener) => void;
   sendMessage: (message: unknown, conversationId: string, params?: NimV2SendMessageParams, progress?: (percentage: number) => void) => Promise<{ message?: NimMessageLike }>;
   getMessageList?: (options: Record<string, unknown>) => Promise<NimMessageLike[]>;
+  replyMessage?: (message: unknown, replyTo: unknown, params?: NimV2SendMessageParams) => Promise<{ message?: NimMessageLike }>;
+  revokeMessage?: (message: unknown) => Promise<void>;
+  deleteMessage?: (message: unknown) => Promise<void>;
 };
 type NimMessageCreatorLike = { createTextMessage: (text: string) => unknown; createImageMessage?: (image: File, name?: string, sceneName?: string, width?: number, height?: number) => unknown };
 type NimConversationIdUtilLike = {
@@ -180,6 +191,101 @@ function localImageClientId(): string {
 function localTextClientId(): string {
   return `local-text-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
 }
+
+function localMessageReference(message: NimMessageLike, conversationId: string): { messageServerId?: string; messageClientId: string } {
+  if (!message || typeof message !== "object" || typeof message.messageClientId !== "string" || !message.messageClientId) {
+    throw new TypeError("Local IM message is invalid");
+  }
+  if (message.conversationId && message.conversationId !== conversationId) throw new TypeError("Local IM message does not belong to the conversation");
+  return {
+    ...(typeof message.messageServerId === "string" && message.messageServerId ? { messageServerId: message.messageServerId } : {}),
+    messageClientId: message.messageClientId,
+  };
+}
+
+function localActionMessage(value: Record<string, unknown>): NimMessageLike {
+  const message = value.message;
+  if (!message || typeof message !== "object" || Array.isArray(message)) throw new Error("IM message response is invalid");
+  return message as NimMessageLike;
+}
+
+const REPLY_SUMMARY_MAX = 120;
+
+function messageSummary(message: NimMessageLike): string | undefined {
+  if (message.messageType === 1) return "[图片]";
+  const text = typeof message.text === "string" ? message.text.trim().slice(0, REPLY_SUMMARY_MAX) : "";
+  return text || undefined;
+}
+
+function replySummary(value: unknown): NimMessageReplySummary | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const reply = value as Record<string, unknown>;
+  const messageId = typeof reply.messageServerId === "string" && reply.messageServerId
+    ? reply.messageServerId
+    : typeof reply.messageClientId === "string" ? reply.messageClientId : "";
+  if (!messageId || typeof reply.senderId !== "string" || !reply.senderId) return undefined;
+  return {
+    messageId,
+    senderId: reply.senderId,
+    ...(typeof reply.text === "string" && reply.text ? { text: reply.text.slice(0, REPLY_SUMMARY_MAX) } : {}),
+  };
+}
+
+function nimMessageView(value: unknown): NimMessageLike | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const message = value as NimMessageLike & Record<string, unknown>;
+  if (typeof message.messageClientId !== "string" || !message.messageClientId) return null;
+  const revoked = message.revoked === true || message.isRevoked === true;
+  const reply = replySummary(message.reply) ?? replySummary(message.threadReply);
+  if (!revoked && !reply) return message;
+  // Keep the SDK message object intact for later SDK calls; only replace the
+  // neutral summary fields and strip content from a revoked message.
+  const view: NimMessageLike & Record<string, unknown> = { ...message };
+  if (reply) view.reply = reply;
+  if (revoked) {
+    view.text = "";
+    view.revoked = true;
+    delete view.attachment;
+    delete view.reply;
+    delete view.threadReply;
+    delete view.isRevoked;
+  }
+  return view;
+}
+
+function revokedMessageView(message: NimMessageLike): NimMessageLike {
+  return {
+    messageClientId: message.messageClientId,
+    ...(message.messageServerId ? { messageServerId: message.messageServerId } : {}),
+    conversationId: message.conversationId,
+    senderId: message.senderId,
+    receiverId: message.receiverId,
+    createTime: message.createTime,
+    ...(message.messageType === undefined ? {} : { messageType: message.messageType }),
+    text: "",
+    revoked: true,
+  };
+}
+
+function revokedNotificationView(value: unknown): NimMessageLike | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const refer = (value as { messageRefer?: unknown }).messageRefer;
+  if (!refer || typeof refer !== "object" || Array.isArray(refer)) return null;
+  const ref = refer as Record<string, unknown>;
+  const clientId = typeof ref.messageClientId === "string" ? ref.messageClientId : "";
+  const serverId = typeof ref.messageServerId === "string" ? ref.messageServerId : "";
+  if (!clientId && !serverId) return null;
+  return {
+    messageClientId: clientId || serverId,
+    ...(serverId ? { messageServerId: serverId } : {}),
+    conversationId: typeof ref.conversationId === "string" ? ref.conversationId : "",
+    senderId: typeof ref.senderId === "string" ? ref.senderId : "",
+    receiverId: typeof ref.receiverId === "string" ? ref.receiverId : "",
+    createTime: typeof ref.createTime === "number" ? ref.createTime : 0,
+    text: "",
+    revoked: true,
+  };
+}
 async function loadNimSdk(): Promise<NimSdkLike> {
   if (typeof window === "undefined") throw new Error("NIM Web SDK can only load in a browser");
   const module = (await import("nim-web-sdk-ng")) as unknown as { default?: NimSdkLike };
@@ -210,6 +316,7 @@ export class NimWebClient implements NimWebClientLike {
   private readonly listeners = new Set<(state: NimWebConnectionState) => void>();
   private readonly messageListeners = new Set<(messages: NimMessageLike[]) => void>();
   private readonly eventHandlers: Array<[string, NimListener]> = [];
+  private readonly messageEventHandlers: Array<[string, NimListener]> = [];
   private readonly pendingImages = new Map<string, { conversationId: string; message: unknown }>();
   private readonly pendingTexts = new Map<string, { conversationId: string; message: unknown }>();
 
@@ -220,7 +327,20 @@ export class NimWebClient implements NimWebClientLike {
     bind("onConnectStatus", (status) => { const next = mapConnectStatus(status); if (next) this.setState(next); });
     bind("onLoginStatus", (status) => { if (status === 2) this.setState("CONNECTING"); if (status === 0 && this.state !== "KICKED" && this.state !== "AUTH_FAILED") this.setState("DISCONNECTED"); });
     bind("onLoginFailed", () => this.setState("AUTH_FAILED")); bind("onKickedOffline", () => this.setState("KICKED")); bind("onDisconnected", () => this.setState("DISCONNECTED")); bind("onConnectFailed", () => this.setState("RECONNECTING"));
-    if (this.messageService) { const handler = context.onCurrent((messages: unknown) => { if (!Array.isArray(messages)) return; const safe = messages.filter((message): message is NimMessageLike => Boolean(message && typeof message === "object")); if (safe.length) for (const listener of this.messageListeners) listener(safe); }); this.messageEventHandler = handler; this.messageService.on("onReceiveMessages", handler); }
+    if (this.messageService) {
+      const bindMessage = (eventName: string, normalize: (value: unknown) => NimMessageLike | null) => {
+        const guarded = context.onCurrent((values: unknown) => {
+          if (!Array.isArray(values)) return;
+          const views = values.map(normalize).filter((message): message is NimMessageLike => message !== null);
+          if (views.length) for (const listener of this.messageListeners) listener(views);
+        });
+        try { this.messageService!.on(eventName, guarded); this.messageEventHandlers.push([eventName, guarded]); } catch { /* an older SDK build may not expose the event */ }
+      };
+      bindMessage("onReceiveMessages", nimMessageView);
+      // Modified/revoked messages are merged by the consumer's message-state merge.
+      bindMessage("onReceiveMessagesModified", nimMessageView);
+      bindMessage("onMessageRevokeNotifications", revokedNotificationView);
+    }
   }
   getConnectionState(): NimWebConnectionState { return this.state; }
   onConnectionStateChange(listener: (state: NimWebConnectionState) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
@@ -248,6 +368,62 @@ export class NimWebClient implements NimWebClientLike {
     const params=await this.authorizeMessage(id, "send", authorize);
     this.assertCurrent();
     return this.sendTextMessage(id, messageClientId, pending.message, params);
+  }
+  async replyText(conversationId: string, text: string, replyTo: NimMessageLike, authorize?: NimMessageAuthorization): Promise<NimMessageLike> {
+    this.assertCurrent();
+    const id = requireNonBlank(conversationId, "NIM conversation ID");
+    const body = requireNonBlank(text, "NIM message text");
+    if (body.length > 4_000) throw new TypeError("NIM message text must be at most 4000 characters");
+    this.assertMessageConversation(replyTo, id);
+    const senderId = requireNonBlank(replyTo.senderId, "NIM replied message sender");
+    if (!this.messageService?.replyMessage || !this.nim.V2NIMMessageCreator) throw new Error("NIM message reply is unavailable");
+    const params = await this.authorizeMessage(id, "send", authorize);
+    this.assertCurrent();
+    const message = this.nim.V2NIMMessageCreator.createTextMessage(body);
+    const messageClientId = messageClientIdOf(message);
+    let result: { message?: NimMessageLike };
+    try {
+      result = params ? await this.messageService.replyMessage(message, replyTo, params) : await this.messageService.replyMessage(message, replyTo);
+    } catch (cause) {
+      if (cause instanceof ImLifecycleSupersededError || (cause instanceof Error && /disposed/.test(cause.message))) throw cause;
+      throw new NimTextSendError("UNKNOWN", "消息回复结果未确认", { messageClientId, cause });
+    }
+    this.assertCurrent();
+    if (!result?.message || typeof result.message !== "object") throw new Error("NIM message response is invalid");
+    const summary = messageSummary(replyTo);
+    return {
+      ...result.message,
+      reply: {
+        messageId: replyTo.messageServerId || replyTo.messageClientId,
+        senderId,
+        ...(summary ? { text: summary } : {}),
+      },
+    };
+  }
+  async revokeMessage(conversationId: string, message: NimMessageLike, authorize?: NimMessageAuthorization): Promise<NimMessageLike> {
+    this.assertCurrent();
+    const id = requireNonBlank(conversationId, "NIM conversation ID");
+    this.assertMessageConversation(message, id);
+    if (!this.messageService?.revokeMessage) throw new Error("NIM message revoke is unavailable");
+    await this.authorizeMessage(id, "send", authorize);
+    this.assertCurrent();
+    await this.messageService.revokeMessage(message);
+    this.assertCurrent();
+    return revokedMessageView(message);
+  }
+  async deleteMessage(conversationId: string, message: NimMessageLike, authorize?: NimMessageAuthorization): Promise<void> {
+    this.assertCurrent();
+    const id = requireNonBlank(conversationId, "NIM conversation ID");
+    this.assertMessageConversation(message, id);
+    if (!this.messageService?.deleteMessage) throw new Error("NIM message deletion is unavailable");
+    await this.authorizeMessage(id, "read", authorize);
+    this.assertCurrent();
+    await this.messageService.deleteMessage(message);
+    this.assertCurrent();
+  }
+  private assertMessageConversation(message: NimMessageLike, conversationId: string): void {
+    if (!message || typeof message !== "object" || typeof message.messageClientId !== "string" || !message.messageClientId) throw new TypeError("NIM message is invalid");
+    if (message.conversationId && message.conversationId !== conversationId) throw localTransportError("NIM message does not belong to the conversation", 404);
   }
   private async sendTextMessage(conversationId: string, messageClientId: string, message: unknown, params?: NimV2SendMessageParams): Promise<NimMessageLike> {
     let started = false;
@@ -286,7 +462,7 @@ export class NimWebClient implements NimWebClientLike {
   }
   async login(options: NimWebClientOptions): Promise<void> { this.assertCurrent(); const loginOptions: Record<string, unknown> = { authType: options.tokenProvider ? 1 : 0, forceMode: options.forceMode ?? false }; if (options.retryCount !== undefined) loginOptions.retryCount = options.retryCount; if (options.timeout !== undefined) loginOptions.timeout = options.timeout; if (options.tokenProvider) loginOptions.tokenProvider = async () => { this.assertCurrent(); const token = await options.tokenProvider?.(this.accountId); this.assertCurrent(); return requireNonBlank(token ?? "", "NIM token provider result"); }; this.setState("CONNECTING"); await this.nim.V2NIMLoginService.login(this.accountId, options.token ?? "", loginOptions); this.assertCurrent(); this.loggedIn = true; this.setState(mapConnectStatus(this.getSdkConnectStatus()) ?? "CONNECTED"); }
   async logout(): Promise<void> { if (!this.loggedIn || this.disposed) return; await this.nim.V2NIMLoginService.logout(); this.loggedIn = false; this.setState("DISCONNECTED"); }
-  async dispose(): Promise<void> { if (this.disposed) return; this.disposed = true; this.pendingImages.clear(); this.pendingTexts.clear(); for (const [eventName, handler] of this.eventHandlers) { try { this.nim.V2NIMLoginService.off(eventName, handler); } catch { /* cleanup continues */ } } this.eventHandlers.length = 0; if (this.messageService && this.messageEventHandler) { try { this.messageService.off("onReceiveMessages", this.messageEventHandler); } catch { /* cleanup continues */ } } this.messageListeners.clear(); if (this.loggedIn) { try { await this.nim.V2NIMLoginService.logout(); } catch { /* destroy still runs */ } this.loggedIn = false; } try { await this.nim.destroy(); } finally { this.listeners.clear(); } }
+  async dispose(): Promise<void> { if (this.disposed) return; this.disposed = true; this.pendingImages.clear(); this.pendingTexts.clear(); for (const [eventName, handler] of this.eventHandlers) { try { this.nim.V2NIMLoginService.off(eventName, handler); } catch { /* cleanup continues */ } } this.eventHandlers.length = 0; for (const [eventName, handler] of this.messageEventHandlers) { try { this.messageService?.off(eventName, handler); } catch { /* cleanup continues */ } } this.messageEventHandlers.length = 0; this.messageListeners.clear(); if (this.loggedIn) { try { await this.nim.V2NIMLoginService.logout(); } catch { /* destroy still runs */ } this.loggedIn = false; } try { await this.nim.destroy(); } finally { this.listeners.clear(); } }
   private assertCurrent(): void { if (this.disposed) throw new Error("NIM client is disposed"); if (!this.context.isCurrent()) throw new ImLifecycleSupersededError(); }
   private async authorizeMessage(conversationId: string, operation: "read" | "send", override?: NimMessageAuthorization): Promise<NimV2SendMessageParams|undefined> {
     this.assertCurrent(); const authorize=typeof override==="function"?override:this.messageAuthorization;
@@ -357,7 +533,7 @@ export class LocalFakeNimWebClient implements NimWebClientLike {
   private polling = false;
   private readonly listeners = new Set<(state: NimWebConnectionState) => void>();
   private readonly messageListeners = new Set<(messages: NimMessageLike[]) => void>();
-  private readonly known = new Map<string, Set<string>>();
+  private readonly known = new Map<string, Map<string, string>>();
   private readonly latestSeen = new Map<string, number>();
   private readonly pendingImages = new Map<string, { conversationId: string; body: Record<string, unknown> }>();
   private readonly pendingTexts = new Map<string, { conversationId: string; text: string }>();
@@ -418,6 +594,60 @@ export class LocalFakeNimWebClient implements NimWebClientLike {
     if (!pending || pending.conversationId !== id) throw new NimTextSendError("FAILED", "待重试的文本消息已不可用", { messageClientId });
     if(typeof authorize==="function")await authorize({conversationId:id,operation:"send"});this.assertCurrent();
     return this.postText(id, messageClientId, pending.text);
+  }
+
+  async replyText(conversationId: string, text: string, replyTo: NimMessageLike, authorize?: NimMessageAuthorization): Promise<NimMessageLike> {
+    this.assertCurrent();
+    const id = conversationId.trim();
+    const body = text.trim();
+    if (!id || id.length > 160 || !body || body.length > 4_000) throw new TypeError("Local IM message is invalid");
+    const reference = localMessageReference(replyTo, id);
+    if(typeof authorize==="function")await authorize({conversationId:id,operation:"send"});this.assertCurrent();
+    const value = await this.postAction({ action: "reply", conversationId: id, text: body, replyTo: reference });
+    const message = localActionMessage(value);
+    this.remember(id, [message]);
+    return message;
+  }
+
+  async revokeMessage(conversationId: string, message: NimMessageLike, authorize?: NimMessageAuthorization): Promise<NimMessageLike> {
+    this.assertCurrent();
+    const id = conversationId.trim();
+    if (!id || id.length > 160) throw new TypeError("Local IM conversation is invalid");
+    const reference = localMessageReference(message, id);
+    if(typeof authorize==="function")await authorize({conversationId:id,operation:"send"});this.assertCurrent();
+    const value = await this.postAction({ action: "revoke", conversationId: id, message: reference });
+    const updated = localActionMessage(value);
+    this.remember(id, [updated]);
+    return updated;
+  }
+
+  async deleteMessage(conversationId: string, message: NimMessageLike, authorize?: NimMessageAuthorization): Promise<void> {
+    this.assertCurrent();
+    const id = conversationId.trim();
+    if (!id || id.length > 160) throw new TypeError("Local IM conversation is invalid");
+    const reference = localMessageReference(message, id);
+    if(typeof authorize==="function")await authorize({conversationId:id,operation:"read"});this.assertCurrent();
+    await this.postAction({ action: "delete", conversationId: id, message: reference });
+    this.forget(id, reference.messageServerId || reference.messageClientId || "");
+  }
+
+  private async postAction(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    let response: Response;
+    try {
+      response = await fetch(this.endpoint, {
+        method: "POST",
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    } catch (cause) {
+      throw new Error("IM message request failed", { cause });
+    }
+    if (!response.ok) throw localTransportError("IM message request failed", response.status);
+    const value = await response.json().catch(() => null) as Record<string, unknown> | null;
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("IM message response is invalid");
+    return value;
   }
 
   private async postText(id: string, messageClientId: string, body: string): Promise<NimMessageLike> {
@@ -546,12 +776,18 @@ export class LocalFakeNimWebClient implements NimWebClientLike {
 
   private async poll(): Promise<void> {
     if (this.disposed || !this.loggedIn || this.polling || this.known.size === 0) return;
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
     this.polling = true;
     try {
       for (const [conversationId, known] of this.known) {
         const messages = await this.readHistory(conversationId, 100);
         const latest=this.latestSeen.get(conversationId)??-Infinity;
-        const incoming = messages.filter((message) => !known.has(this.messageKey(message))&&message.createTime>=latest);
+        const incoming = messages.filter((message) => {
+          const previous = known.get(this.messageKey(message));
+          // Unknown ids keep the old "newer than everything seen" guard; a
+          // known id with changed content (revoked/reply) must still be pushed.
+          return previous === undefined ? message.createTime >= latest : previous !== this.messageSignature(message);
+        });
         this.remember(conversationId, messages);
         if (incoming.length > 0 && !this.disposed && this.context.isCurrent()) {
           for (const listener of this.messageListeners) listener(incoming);
@@ -565,10 +801,27 @@ export class LocalFakeNimWebClient implements NimWebClientLike {
   }
 
   private remember(conversationId: string, messages: NimMessageLike[]): void {
-    const known = this.known.get(conversationId) ?? new Set<string>();
-    for (const message of messages) known.add(this.messageKey(message));
+    const known = this.known.get(conversationId) ?? new Map<string, string>();
+    for (const message of messages) known.set(this.messageKey(message), this.messageSignature(message));
     this.known.set(conversationId, known);
     this.latestSeen.set(conversationId,Math.max(this.latestSeen.get(conversationId)??-Infinity,...messages.map(message=>message.createTime)));
+  }
+
+  private forget(conversationId: string, messageId: string): void {
+    if (!messageId) return;
+    this.known.get(conversationId)?.delete(messageId);
+  }
+
+  private messageSignature(message: NimMessageLike): string {
+    return JSON.stringify([
+      message.messageServerId ?? "",
+      message.createTime,
+      message.revoked === true,
+      message.text ?? "",
+      message.reply ?? null,
+      message.card ?? null,
+      message.attachment?.imageId ?? message.attachment?.url ?? "",
+    ]);
   }
 
   private messageKey(message: NimMessageLike): string {

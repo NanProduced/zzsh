@@ -23,6 +23,7 @@ export function findPhoneClue(value: string): { phone: string; exact: boolean } 
 export type WorkspaceRouteKind =
   | "workbench"
   | "support"
+  | "support-management"
   | "membership-growth"
   | "distribution-policy"
   | "account"
@@ -100,6 +101,7 @@ export type NavPermission = {
 const LIST_TABS: Record<string, Omit<WorkspaceTab, "query">> = {
   [WORKBENCH_TAB_ID]: { id: WORKBENCH_TAB_ID, title: "工作台", path: "/workbench", closable: false, kind: "workbench" },
   support: { id: "support", title: "客服工作台", path: "/support", closable: true, kind: "support" },
+  "support-management": { id: "support-management", title: "客服管理", path: "/support/management", closable: true, kind: "support-management" },
   "membership-growth": { id: "membership-growth", title: "会员与礼遇", path: "/membership-growth", closable: true, kind: "membership-growth" },
   "distribution-policy": { id: "distribution-policy", title: "分销管理", path: "/distribution-policy", closable: true, kind: "distribution-policy" },
   account: { id: "account", title: "账号安全", path: "/account", closable: true, kind: "account" },
@@ -161,6 +163,7 @@ export function parseWorkspacePath(pathname: string): { kind: WorkspaceRouteKind
   if (path === "/settings") return { kind: "settings", tabId: "settings", path: "/settings", title: "设置" };
   if (path === "/account") return { kind: "account", tabId: "account", path: "/account", title: "账号安全" };
   if (path === "/support") return { kind: "support", tabId: "support", path: "/support", title: "客服工作台" };
+  if (path === "/support/management") return { kind: "support-management", tabId: "support-management", path: "/support/management", title: "客服管理" };
   if (path === "/membership-growth") return { kind: "membership-growth", tabId: "membership-growth", path: "/membership-growth", title: "会员与礼遇" };
   if (path === "/distribution-policy") return { kind: "distribution-policy", tabId: "distribution-policy", path: "/distribution-policy", title: "分销管理" };
   if (path === "/admins") return { kind: "admins", tabId: "admins", path: "/admins", title: "管理员" };
@@ -252,6 +255,7 @@ export function canOpenKind(kind: WorkspaceRouteKind, nav: NavPermission): boole
   if(kind==="finance-period"||kind==="finance-user")return has("finance.read");
   if(kind==="finance-document")return has("finance.document.read");
   if (kind === "support") return has("im.support.read") || nav.isBoss;
+  if (kind === "support-management") return has("im.support.management.read") || nav.isBoss;
   if (kind === "distribution-policy") return nav.isBoss || ["order.read", "personal.distribution.policy.read", "personal.distribution.policy.manage"].some(has);
   if (kind === "membership-growth") return nav.isBoss || ["membership.policy.draft", "membership.policy.publish", "membership.growth.read.summary"].some(has) || has("approval.request.create") && has("membership.entitlement.request");
   if (kind === "admins" || kind === "admin-object") return has("admin.account.read") || nav.isBoss;
@@ -288,7 +292,7 @@ export function upsertTab(tabs: WorkspaceTab[], next: WorkspaceTab): WorkspaceTa
   }
   if(next.kind.startsWith("finance-"))return tabs.some(tab=>tab.id===next.id)?tabs.map(tab=>tab.id===next.id?next:tab):[...tabs,next];
   if (next.kind === "users" || next.kind === "user-object") return tabs.some(tab => tab.id === next.id) ? tabs.map(tab => tab.id === next.id ? next : tab) : [...tabs, next];
-  if (next.kind === "admins" || next.kind === "roles" || next.kind === "approvals" || next.kind === "audit" || next.kind === "account" || next.kind === "workbench" || next.kind === "support" || next.kind === "membership-growth" || next.kind === "distribution-policy" || next.kind === "catalog" || next.kind === "gunsmith" || next.kind === "rules" || next.kind === "media-review" || next.kind === "listing-review" || next.kind === "content" || next.kind === "orders") {
+  if (next.kind === "admins" || next.kind === "roles" || next.kind === "approvals" || next.kind === "audit" || next.kind === "account" || next.kind === "workbench" || next.kind === "support" || next.kind === "support-management" || next.kind === "membership-growth" || next.kind === "distribution-policy" || next.kind === "catalog" || next.kind === "gunsmith" || next.kind === "rules" || next.kind === "media-review" || next.kind === "listing-review" || next.kind === "content" || next.kind === "orders") {
     const existing = tabs.find((tab) => tab.id === next.id);
     if (existing) return tabs.map((tab) => (tab.id === next.id ? { ...existing, ...next, query: { ...existing.query, ...next.query } } : tab));
     return [...tabs, next];

@@ -76,7 +76,11 @@ globalThis.fetch = async (input, init = {}) => {
   }
   if (url.pathname.includes("/users/")) { if (profileGate) await profileGate; return json(profileFixture); }
   if (url.pathname.endsWith("/im/presence")) return json({ adminUserId: "admin-a", availability: "OFF_DUTY", connectionState: "CONNECTED", activeLoad: 0, version: 1 });
-  if (url.pathname.endsWith("/im/messages") && init.method === "POST") return json(fixture.post ? fixture.post(JSON.parse(String(init.body))) : { message: {} });
+  if (url.pathname.endsWith("/im/messages") && init.method === "POST") {
+    const result = fixture.post ? fixture.post(JSON.parse(String(init.body))) : { message: {} };
+    const isResponse = Boolean(result) && typeof result === "object" && typeof result.status === "number" && typeof result.json === "function";
+    return isResponse ? result : json(result);
+  }
   if (url.pathname.includes("/im/")) return json({ messages: fixture.history });
   throw new Error(`unexpected test request ${url.pathname}`);
 };
@@ -222,7 +226,7 @@ test("closing the case column on a narrow screen returns to the conversation and
   assert.equal(rootNode.querySelector(".im-wb-details").hidden, false);
 
   // 详情是独立面板：收起后必须回到会话，而不是三个面板同时隐藏留下空屏。
-  await act(async () => { rootNode.querySelector('[data-action="collapse-details"]').click(); });
+  await act(async () => { rootNode.querySelector('[data-action="back-to-chat"]').click(); });
   await settle();
   assert.equal(grid().dataset.details, "false");
   assert.equal(rootNode.querySelector(".im-wb-details").hidden, true);
@@ -252,13 +256,13 @@ test("the case column is a real grid column that reports its own collapsed state
   await waitFor(() => Boolean(rootNode.querySelector(".im-wb-row")));
   const trigger = rootNode.querySelector('[data-action="toggle-details"]');
   const panel = rootNode.querySelector(".im-wb-details");
-  // The test window is 1024 wide, so the case column must start collapsed instead of
-  // squeezing the chat into an unusable track.
-  assert.equal(trigger.getAttribute("aria-expanded"), "false", "collapsed by default at this width");
+  // The case column is permanent on desktop: it starts open and never squeezes the chat
+  // into a hidden or unusable track.
+  assert.equal(trigger.getAttribute("aria-expanded"), "true", "open by default at this width");
   assert.equal(trigger.getAttribute("aria-controls"), "im-wb-details", "the toggle names the panel it controls");
   assert.equal(panel.id, "im-wb-details", "the panel is the announced target");
-  assert.equal(panel.hidden, true, "collapsed means hidden, not painted over the chat");
-  assert.equal(rootNode.querySelector(".im-wb").dataset.details, "false");
+  assert.equal(panel.hidden, false, "the case column is visible, not collapsed");
+  assert.equal(rootNode.querySelector(".im-wb").dataset.details, "true");
   assert.ok(rootNode.querySelector(".im-wb-send"), "the composer stays reachable either way");
 });
 
@@ -297,8 +301,107 @@ for (const scenario of ["connected", "no-permission", "disconnected"]) {
       assert.equal(writes.at(-1).availability, expected);
       assert.equal(button.textContent, expected === "AVAILABLE" ? "暂停接待" : "开始接待");
     }
+    const written = writes.length;
+    await settle();
+    assert.equal(writes.length, written, "a successful toggle is not followed by an automatic rewrite");
   });
 }
+
+// 状态写入的失败注入装置：初始 GET/PUT 走真实成功路径，用户点击后的那一次写入按场景失败。
+async function mountPresenceHarness(t, { refreshedAvailability = "PAUSED" } = {}) {
+  const originalFetch = globalThis.fetch;
+  let availability = "OFF_DUTY";
+  let version = 1;
+  let failNext = null;
+  let conflictPending = false;
+  const writes = [];
+  const reads = [];
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url.endsWith("/im/token")) return json({ appKey: "synthetic", accountId: "admin-a", token: "synthetic", transport: "local-fake" });
+    if (url.includes("/im/consultations")) return json({ consultations: [] });
+    if (url.endsWith("/im/presence")) {
+      if (init.method === "PUT") {
+        const body = JSON.parse(String(init.body));
+        writes.push(body);
+        if (failNext === "conflict") {
+          failNext = null;
+          conflictPending = true;
+          return new browser.Response(JSON.stringify({ error: { code: "CONFLICT" } }), { status: 409, headers: { "content-type": "application/json" } });
+        }
+        if (failNext === "server") {
+          failNext = null;
+          return new browser.Response(JSON.stringify({ error: { code: "INTERNAL_ERROR" } }), { status: 500, headers: { "content-type": "application/json" } });
+        }
+        availability = body.availability;
+        version += 1;
+        return json({ adminUserId: "admin-a", availability, connectionState: "CONNECTED", activeLoad: 0, version });
+      }
+      reads.push(true);
+      if (conflictPending) { conflictPending = false; availability = refreshedAvailability; version = 9; }
+      return json({ adminUserId: "admin-a", availability, connectionState: "CONNECTED", activeLoad: 0, version });
+    }
+    if (url.includes("/im/messages")) return json({ messages: [] });
+    throw new Error(`unexpected test request ${url}`);
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept", "im.support.presence"]) });
+  // 等到初始 GET + PUT 都完成且按钮可用，再注入用户点击的那一次失败。
+  await waitFor(() => Boolean(rootNode.querySelector(".im-wb-presence-toggle")) && !rootNode.querySelector(".im-wb-presence-toggle").disabled && writes.length >= 1);
+  await settle();
+  const button = () => rootNode.querySelector(".im-wb-presence-toggle");
+  const stateLabel = () => rootNode.querySelector(".im-wb-bar .im-wb-state");
+  const noticeText = () => rootNode.querySelector(".im-wb-notice[role='status']")?.textContent ?? "";
+  return { rootNode, writes, reads, button, stateLabel, noticeText, arm: (mode) => { failNext = mode; } };
+}
+
+test("a presence version conflict re-reads the server, never resends, and shows a neutral notice", async (t) => {
+  const harness = await mountPresenceHarness(t);
+  assert.equal(harness.button().textContent, "开始接待");
+  assert.match(harness.stateLabel().textContent, /未上线/);
+  const writesBefore = harness.writes.length;
+  const readsBefore = harness.reads.length;
+
+  harness.arm("conflict");
+  await act(async () => harness.button().click());
+  await settle();
+
+  assert.equal(harness.writes.length, writesBefore + 1, "the conflicting write is not retried");
+  assert.equal(harness.reads.length, readsBefore + 1, "the conflict reads the authoritative presence instead");
+  assert.match(harness.noticeText(), /另一窗口已更新接待状态，已刷新为最新状态。/, "the conflict is explained, not hidden");
+  // 服务端刷新值是第三种状态：显示只能来自 GET，而不是这次点击的意图。
+  assert.match(harness.stateLabel().textContent, /已暂停/);
+  assert.equal(harness.button().textContent, "开始接待");
+  assert.doesNotMatch(harness.rootNode.querySelector(".im-wb-bar").textContent, /接待中/);
+
+  // 冲突刷新同时更新了本地版本：下一次显式切换必须带上服务端返回的 version。
+  await act(async () => harness.button().click());
+  await settle();
+  assert.equal(harness.writes.at(-1).version, 9, "the refreshed version is used by the next explicit write");
+  assert.equal(harness.writes.at(-1).availability, "AVAILABLE");
+  assert.equal(harness.button().textContent, "暂停接待", "an explicit retry after the refresh can still succeed");
+});
+
+test("a failed presence write stays visibly unsaved instead of showing the attempted state", async (t) => {
+  const harness = await mountPresenceHarness(t);
+  const writesBefore = harness.writes.length;
+  const readsBefore = harness.reads.length;
+
+  harness.arm("server");
+  await act(async () => harness.button().click());
+  await settle();
+
+  assert.equal(harness.writes.length, writesBefore + 1, "only the explicit write is attempted");
+  assert.equal(harness.reads.length, readsBefore, "a plain failure does not re-read the server");
+  assert.match(harness.noticeText(), /接待状态未保存，请重试/);
+  assert.match(harness.stateLabel().textContent, /未上线/, "the last server-confirmed state stays on screen");
+  assert.equal(harness.button().textContent, "开始接待", "the attempted AVAILABLE state is never shown as applied");
+  assert.doesNotMatch(harness.rootNode.querySelector(".im-wb-bar").textContent, /接待中/);
+
+  await settle();
+  assert.equal(harness.writes.length, writesBefore + 1, "no automatic retry follows a failed write");
+  assert.equal(harness.button().disabled, false, "the operator can deliberately retry");
+});
 
 test("the case column reads the account profile only through its own permission", async (t) => {
   fixture = { consultations: [activeConsultation], history: [], post: null };
@@ -465,4 +568,279 @@ test("missing profile summaries remain unavailable rather than zero or a false p
   assert.match(rootNode.textContent, /名下资源账号暂未提供/);
   assert.doesNotMatch(rootNode.querySelector(".im-wb-details").textContent, /0 单|0 个|需「订单读取」权限|需「资源账号读取」权限/);
   profileFixture = FULL_PROFILE;
+});
+
+/* ---------- consultation message menu ---------- */
+
+const menuHistory = () => [
+  { messageClientId: "peer-text", messageServerId: "srv-peer", conversationId: "conv-a", senderId: "user-a", receiverId: "admin-a", createTime: Date.parse("2026-09-17T00:01:00.000Z"), messageType: 0, text: "用户提问" },
+  { messageClientId: "own-text", messageServerId: "srv-own", conversationId: "conv-a", senderId: "admin-a", receiverId: "user-a", createTime: Date.parse("2026-09-17T00:02:00.000Z"), messageType: 0, text: "我方原文" },
+  { messageClientId: "peer-image", messageServerId: "srv-image", conversationId: "conv-a", senderId: "user-a", receiverId: "admin-a", createTime: Date.parse("2026-09-17T00:03:00.000Z"), messageType: 1, attachment: { imageId: "image-1", url: "/api/im/images/menu-peer", name: "图片", mimeType: "image/png", size: 1024 } },
+  { messageClientId: "sys-invite", messageServerId: "srv-system", conversationId: "conv-a", senderId: "system", receiverId: "admin-a", createTime: Date.parse("2026-09-17T00:04:00.000Z"), messageType: 5, attachment: { type: 0 } },
+  { messageClientId: "revoked-own", messageServerId: "srv-revoked", conversationId: "conv-a", senderId: "admin-a", receiverId: "user-a", createTime: Date.parse("2026-09-17T00:05:00.000Z"), messageType: 0, text: "", revoked: true },
+];
+
+async function mountMenu(t, options = {}) {
+  fixture = { consultations: [activeConsultation], history: options.history ?? menuHistory(), post: options.post ?? null };
+  return mount(t, { snapshot: snapshot(options.permissions ?? ["im.support.read", "im.support.accept"]) });
+}
+
+async function waitForMenuHistory(rootNode) {
+  await waitFor(() => rootNode.querySelectorAll(".im-wb-msg").length === 4 && rootNode.querySelector(".im-wb-sys"));
+}
+
+const menuLabels = () => [...document.querySelectorAll('.message-action-menu [role="menuitem"]')].map((button) => button.textContent.trim());
+
+async function openMenu(rootNode, id, point = { clientX: 120, clientY: 90 }) {
+  const row = rootNode.querySelector(`[data-message-id="${id}"]`);
+  assert.ok(row, `message row ${id} exists`);
+  await act(async () => { row.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, ...point })); });
+  await settle();
+  return row;
+}
+
+async function pickMenu(label) {
+  const button = [...document.querySelectorAll('.message-action-menu [role="menuitem"]')].find((item) => item.textContent.trim() === label);
+  assert.ok(button, `menu item ${label} exists`);
+  await act(async () => button.click());
+  await settle();
+}
+
+async function typeDraft(rootNode, text) {
+  await act(async () => {
+    const element = rootNode.querySelector("textarea");
+    const setValue = Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype, "value").set;
+    setValue.call(element, text);
+    element.dispatchEvent(new browser.Event("input", { bubbles: true }));
+    element.dispatchEvent(new browser.Event("change", { bubbles: true }));
+  });
+  await settle();
+}
+
+async function submitComposer(rootNode) {
+  await act(async () => {
+    rootNode.querySelector("form.im-wb-composer").dispatchEvent(new browser.Event("submit", { bubbles: true, cancelable: true }));
+    await Promise.resolve();
+  });
+  await settle();
+}
+
+function stubClipboard(t) {
+  const previous = Object.getOwnPropertyDescriptor(browser.navigator, "clipboard");
+  let copied = null;
+  Object.defineProperty(browser.navigator, "clipboard", { configurable: true, value: { writeText: async (text) => { copied = text; } } });
+  t.after(() => { if (previous) Object.defineProperty(browser.navigator, "clipboard", previous); else delete browser.navigator.clipboard; });
+  return () => copied;
+}
+
+test("consultation message menu follows message type, send capability and keyboard rules", async (t) => {
+  const { rootNode } = await mountMenu(t);
+  await waitForMenuHistory(rootNode);
+  await waitFor(() => !rootNode.querySelector("textarea").disabled);
+
+  const own = await openMenu(rootNode, "srv-own");
+  assert.deepEqual(menuLabels(), ["复制", "回复", "撤回", "删除"], "own text offers every action");
+  const menu = document.querySelector(".message-action-menu");
+  assert.equal(menu.getAttribute("role"), "menu");
+  assert.equal(document.activeElement?.getAttribute("role"), "menuitem", "focus enters the first item");
+  assert.equal(menu.querySelectorAll('[role="menuitem"]').length, 4);
+  await act(async () => { document.activeElement.dispatchEvent(new browser.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); });
+  await settle();
+  assert.equal(document.querySelector(".message-action-menu"), null, "Escape closes the menu");
+  assert.equal(document.activeElement, own, "Escape returns focus to the message row");
+
+  await openMenu(rootNode, "srv-peer");
+  assert.deepEqual(menuLabels(), ["复制", "回复", "删除"], "another account's message cannot be revoked");
+  await act(async () => { browser.document.body.dispatchEvent(new browser.PointerEvent("pointerdown", { bubbles: true })); });
+  await settle();
+  assert.equal(document.querySelector(".message-action-menu"), null, "an outside press closes the menu");
+
+  await openMenu(rootNode, "srv-image");
+  assert.deepEqual(menuLabels(), ["回复", "删除"], "images cannot be copied");
+  await act(async () => { document.activeElement.dispatchEvent(new browser.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); });
+  await settle();
+
+  const systemEvent = new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 });
+  await act(async () => { rootNode.querySelector('[data-message-id="srv-system"]').dispatchEvent(systemEvent); });
+  await settle();
+  assert.equal(systemEvent.defaultPrevented, true, "a message row never falls back to the browser menu");
+  assert.equal(document.querySelector(".message-action-menu"), null, "system notices have no menu");
+
+  const revokedEvent = new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+  await act(async () => { rootNode.querySelector('[data-message-id="srv-revoked"]').dispatchEvent(revokedEvent); });
+  await settle();
+  assert.equal(revokedEvent.defaultPrevented, true);
+  assert.equal(document.querySelector(".message-action-menu"), null, "revoked messages have no menu");
+  assert.match(rootNode.querySelector('[data-message-id="srv-revoked"]').textContent, /消息已撤回/);
+  assert.doesNotMatch(rootNode.querySelector('[data-message-id="srv-revoked"]').textContent, /已发送/, "a revoked message claims no send state");
+
+  await openMenu(rootNode, "srv-own", { clientX: 5000, clientY: 5000 });
+  const clamped = document.querySelector(".message-action-menu");
+  assert.ok(parseFloat(clamped.style.left) <= browser.innerWidth - 8, "menu is clamped inside the viewport horizontally");
+  assert.ok(parseFloat(clamped.style.top) <= browser.innerHeight - 8, "menu is clamped inside the viewport vertically");
+  await act(async () => { document.activeElement.dispatchEvent(new browser.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); });
+  await settle();
+
+  const ownRow = rootNode.querySelector('[data-message-id="srv-own"]');
+  await act(async () => {
+    ownRow.dispatchEvent(new browser.PointerEvent("pointerdown", { bubbles: true, pointerType: "touch", clientX: 200, clientY: 150 }));
+    await new Promise((resolve) => setTimeout(resolve, 600));
+  });
+  await settle();
+  assert.deepEqual(menuLabels(), ["复制", "回复", "撤回", "删除"], "long press opens the same menu");
+  await act(async () => { document.activeElement.dispatchEvent(new browser.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); });
+  await settle();
+
+  const readOnly = await mountMenu(t, { permissions: ["im.support.read"] });
+  await waitForMenuHistory(readOnly.rootNode);
+  assert.equal(readOnly.rootNode.querySelector("textarea").disabled, true, "read-only consultations cannot write");
+  await openMenu(readOnly.rootNode, "srv-own");
+  assert.deepEqual(menuLabels(), ["复制", "删除"], "without send capability reply and revoke are absent");
+  await act(async () => { document.activeElement.dispatchEvent(new browser.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); });
+  await settle();
+});
+
+test("copy writes only the original text", async (t) => {
+  const copied = stubClipboard(t);
+  const { rootNode } = await mountMenu(t);
+  await waitForMenuHistory(rootNode);
+
+  await openMenu(rootNode, "srv-own");
+  await pickMenu("复制");
+  assert.equal(copied(), "我方原文");
+  assert.equal(document.querySelector(".message-action-menu"), null, "copy closes the menu");
+
+  await openMenu(rootNode, "srv-image");
+  assert.equal(menuLabels().includes("复制"), false, "an image has no copy entry");
+});
+
+test("reply sends replyText with a quote above the composer and clears it after success", async (t) => {
+  let replyBody = null;
+  const { rootNode } = await mountMenu(t, {
+    post: (body) => {
+      if (body.action !== "reply") throw new Error(`unexpected action ${body.action}`);
+      replyBody = body;
+      return { message: { messageClientId: "reply-1", messageServerId: "reply-1", conversationId: "conv-a", senderId: "admin-a", receiverId: "user-a", createTime: Date.parse("2026-09-17T00:06:00.000Z"), messageType: 0, text: body.text, reply: { messageId: "srv-peer", senderId: "user-a", text: "用户提问" } } };
+    },
+  });
+  await waitForMenuHistory(rootNode);
+  await waitFor(() => !rootNode.querySelector("textarea").disabled);
+
+  await openMenu(rootNode, "srv-image");
+  await pickMenu("回复");
+  assert.match(rootNode.querySelector(".message-reply-quote").textContent, /回复：\[图片\]/, "an image quote uses the [图片] summary");
+  await act(async () => rootNode.querySelector(".message-reply-quote button").click());
+  await settle();
+  assert.equal(rootNode.querySelector(".message-reply-quote"), null, "cancelling clears the quote");
+
+  await openMenu(rootNode, "srv-peer");
+  await pickMenu("回复");
+  const quote = rootNode.querySelector(".message-reply-quote");
+  assert.match(quote.textContent, /回复：用户提问/);
+  assert.equal(quote.nextElementSibling, rootNode.querySelector("form.im-wb-composer"), "the quote sits directly above the composer");
+
+  await typeDraft(rootNode, "收到");
+  await submitComposer(rootNode);
+  await waitFor(() => replyBody?.text === "收到");
+  assert.equal(replyBody.action, "reply");
+  assert.equal(replyBody.conversationId, "conv-a");
+  assert.deepEqual(replyBody.replyTo, { messageServerId: "srv-peer", messageClientId: "peer-text" }, "replyText addresses the original message");
+  await waitFor(() => rootNode.querySelector(".message-reply-quote") === null);
+  assert.equal(rootNode.querySelector("textarea").value, "", "a confirmed reply clears the draft");
+  assert.ok([...rootNode.querySelectorAll(".im-wb-bub")].some((element) => element.textContent === "收到"), "the reply receipt is merged into the timeline");
+});
+
+test("an unknown reply keeps the draft and quote and is never re-sent under a new id", async (t) => {
+  let replyCalls = 0;
+  let plainCalls = 0;
+  const { rootNode } = await mountMenu(t, {
+    post: (body) => {
+      if (body.action === "reply") { replyCalls += 1; return new browser.Response("{}", { status: 500 }); }
+      if (!body.action) {
+        plainCalls += 1;
+        return { message: { messageClientId: `plain-${plainCalls}`, messageServerId: `plain-${plainCalls}`, conversationId: "conv-a", senderId: "admin-a", receiverId: "user-a", createTime: Date.parse("2026-09-17T00:07:00.000Z"), messageType: 0, text: body.text } };
+      }
+      throw new Error(`unexpected action ${body.action}`);
+    },
+  });
+  await waitForMenuHistory(rootNode);
+  await waitFor(() => !rootNode.querySelector("textarea").disabled);
+
+  await openMenu(rootNode, "srv-peer");
+  await pickMenu("回复");
+  await typeDraft(rootNode, "回复内容");
+  await submitComposer(rootNode);
+  await waitFor(() => replyCalls === 1);
+  await waitFor(() => /回复结果未确认，请刷新确认后再发送/.test(rootNode.querySelector(".im-wb-notice")?.textContent ?? ""));
+  assert.equal(rootNode.querySelector("textarea").value, "回复内容", "the reply draft survives an unknown result");
+  assert.match(rootNode.querySelector(".message-reply-quote").textContent, /回复：用户提问/, "the quote survives an unknown result");
+
+  await submitComposer(rootNode);
+  assert.equal(replyCalls, 1, "a quoted submit cannot repeat an unconfirmed reply");
+  assert.equal(plainCalls, 0, "an unconfirmed reply never degrades into a new plain message");
+
+  await act(async () => rootNode.querySelector(".message-reply-quote button").click());
+  await settle();
+  assert.equal(rootNode.querySelector(".message-reply-quote"), null);
+  await submitComposer(rootNode);
+  await waitFor(() => plainCalls === 1);
+  assert.equal(replyCalls, 1, "cancelling the quote does not replay the reply");
+  assert.equal(rootNode.querySelector("textarea").value, "");
+});
+
+test("revoke asks for a second confirmation, replaces the content and maps 409/403", async (t) => {
+  let revokeCalls = 0;
+  const { rootNode } = await mountMenu(t, {
+    post: (body) => {
+      if (body.action !== "revoke") throw new Error(`unexpected action ${body.action}`);
+      revokeCalls += 1;
+      return { message: { messageClientId: "own-text", messageServerId: "srv-own", conversationId: "conv-a", senderId: "admin-a", receiverId: "user-a", createTime: Date.parse("2026-09-17T00:02:00.000Z"), messageType: 0, text: "", revoked: true } };
+    },
+  });
+  await waitForMenuHistory(rootNode);
+
+  await openMenu(rootNode, "srv-own");
+  await pickMenu("撤回");
+  assert.ok(menuLabels().includes("确认撤回"), "the same menu asks for confirmation");
+  assert.equal(revokeCalls, 0, "the first press only arms the confirmation");
+  await pickMenu("确认撤回");
+  await waitFor(() => revokeCalls === 1);
+  await waitFor(() => /消息已撤回/.test(rootNode.querySelector('[data-message-id="srv-own"]').textContent));
+  assert.doesNotMatch(rootNode.querySelector('[data-message-id="srv-own"]').textContent, /我方原文/, "revoked content is cleared");
+  await act(async () => { rootNode.querySelector('[data-message-id="srv-own"]').dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true })); });
+  await settle();
+  assert.equal(document.querySelector(".message-action-menu"), null, "a revoked message has no menu");
+
+  for (const [status, copy] of [[409, "已超过可撤回时间"], [403, "无权撤回此消息"]]) {
+    const failing = await mountMenu(t, { post: () => new browser.Response("{}", { status }) });
+    await waitForMenuHistory(failing.rootNode);
+    await openMenu(failing.rootNode, "srv-own");
+    await pickMenu("撤回");
+    await pickMenu("确认撤回");
+    await waitFor(() => new RegExp(copy).test(failing.rootNode.querySelector(".im-wb-notice")?.textContent ?? ""));
+    assert.match(failing.rootNode.querySelector('[data-message-id="srv-own"]').textContent, /我方原文/, "a failed revoke keeps the message");
+  }
+});
+
+test("delete hides the message locally and a failure never fakes success", async (t) => {
+  let deleteCalls = 0;
+  const { rootNode } = await mountMenu(t, {
+    post: (body) => {
+      if (body.action !== "delete") throw new Error(`unexpected action ${body.action}`);
+      deleteCalls += 1;
+      return { ok: true };
+    },
+  });
+  await waitForMenuHistory(rootNode);
+  await openMenu(rootNode, "srv-peer");
+  await pickMenu("删除");
+  await waitFor(() => !rootNode.querySelector('[data-message-id="srv-peer"]'));
+  assert.equal(deleteCalls, 1);
+
+  const failing = await mountMenu(t, { post: () => new browser.Response("{}", { status: 403 }) });
+  await waitForMenuHistory(failing.rootNode);
+  await openMenu(failing.rootNode, "srv-peer");
+  await pickMenu("删除");
+  await waitFor(() => /无权删除此消息/.test(failing.rootNode.querySelector(".im-wb-notice")?.textContent ?? ""));
+  assert.ok(failing.rootNode.querySelector('[data-message-id="srv-peer"]'), "a failed delete keeps the message");
 });

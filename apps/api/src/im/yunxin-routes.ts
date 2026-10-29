@@ -3,6 +3,7 @@ import { withTransaction } from "../auth/security-core";
 import { readOrderTeamAccess } from "./order-team-access";
 
 import { ADMIN_PERMISSION, requireDirectoryPermission } from "../auth/admin-directory";
+import { hasPermission, loadEffectiveAdminAccess } from "../auth/admin-authorization";
 import {
   readAdminContext,
   SecurityApiError,
@@ -27,6 +28,7 @@ import {
   claimConsultation,
   closeConsultation,
   createOrResumeUserConsultation,
+  heartbeatOwnPresence,
   listAdminConsultations,
   listConsultationEvents,
   readConsultationContext,
@@ -39,12 +41,26 @@ import {
   readOwnPresence,
   readUserMessageAccess,
   retryMessageScopeOperation,
+  takeoverConsultation,
   transferConsultation,
   updateOwnPresence,
   type ConsultationRouteOptions,
 } from "./consultation";
+import {
+  listAuditConversations,
+  listSupportHandovers,
+  parseHandoverNote,
+  parseSupportDate,
+  readPatrolOrderTeamAccess,
+  readSupportOverview,
+} from "./support-management";
 import { inspectImage, MAX_MEDIA_BYTES } from "../supply/media";
-import type { ImOrderImageScope, ImTransportMessage } from "./im-contract";
+import {
+  ImTransportRequestError,
+  type ImOrderImageScope,
+  type ImTransportMessage,
+  type ImTransportMessageReference,
+} from "./im-contract";
 
 type NodeRequest = AuthSecurityNodeRequest;
 type NodeResponse = AuthSecurityNodeResponse;
@@ -234,7 +250,10 @@ function messageConversationId(value: string | null): string {
 
 type ParsedMessageBody =
   | { conversationId: string; kind: "text"; text: string }
-  | { conversationId: string; kind: "image"; image: { messageClientId: string; name: string; mimeType: "image/jpeg" | "image/png"; size: number; body: Buffer; width: number; height: number } };
+  | { conversationId: string; kind: "image"; image: { messageClientId: string; name: string; mimeType: "image/jpeg" | "image/png"; size: number; body: Buffer; width: number; height: number } }
+  | { conversationId: string; kind: "reply"; text: string; replyTo: ImTransportMessageReference }
+  | { conversationId: string; kind: "revoke"; message: ImTransportMessageReference }
+  | { conversationId: string; kind: "delete"; message: ImTransportMessageReference };
 
 const MAX_IMAGE_BASE64_LENGTH = Math.ceil(MAX_MEDIA_BYTES / 3) * 4;
 const BASE64_ALPHABET = /^[A-Za-z0-9+/]$/;
@@ -258,18 +277,54 @@ function decodeBase64(value: string, size: number): Buffer {
   return bytes;
 }
 
+const MESSAGE_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+
+function messageReference(value: unknown): ImTransportMessageReference {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Message reference is invalid");
+  const source = value as Record<string, unknown>;
+  if (Object.keys(source).some((key) => key !== "messageServerId" && key !== "messageClientId")) {
+    throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Message reference is invalid");
+  }
+  const reference: ImTransportMessageReference = {};
+  for (const key of ["messageServerId", "messageClientId"] as const) {
+    const id = source[key];
+    if (id === undefined) continue;
+    if (typeof id !== "string" || !MESSAGE_ID_PATTERN.test(id)) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Message reference is invalid");
+    reference[key] = id;
+  }
+  if (!reference.messageServerId && !reference.messageClientId) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Message reference is invalid");
+  return reference;
+}
+
+function messageText(value: unknown): string {
+  if (typeof value !== "string") throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Message text is invalid");
+  const text = value.trim();
+  if (!text || text.length > 4_000) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Message text is invalid");
+  return text;
+}
+
 export async function parseMessageBody(value: unknown): Promise<ParsedMessageBody> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Message body is invalid");
   const body = value as Record<string, unknown>;
-  if (typeof body.conversationId !== "string" || (body.text === undefined && body.image === undefined) || (body.text !== undefined && body.image !== undefined)) {
+  if (typeof body.conversationId !== "string") throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Message body is invalid");
+  const conversationId = messageConversationId(body.conversationId);
+  if (body.action !== undefined) {
+    if (body.action === "reply") {
+      if (Object.keys(body).some((key) => !["conversationId", "action", "text", "replyTo"].includes(key))) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Reply message is invalid");
+      return { conversationId, kind: "reply", text: messageText(body.text), replyTo: messageReference(body.replyTo) };
+    }
+    if (body.action === "revoke" || body.action === "delete") {
+      if (Object.keys(body).some((key) => !["conversationId", "action", "message"].includes(key))) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Message action is invalid");
+      return { conversationId, kind: body.action, message: messageReference(body.message) };
+    }
+    throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Message action is invalid");
+  }
+  if ((body.text === undefined && body.image === undefined) || (body.text !== undefined && body.image !== undefined)) {
     throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Message body is invalid");
   }
-  const conversationId = messageConversationId(body.conversationId);
   if (body.text !== undefined) {
-    if (Object.keys(body).some((key) => key !== "conversationId" && key !== "text") || typeof body.text !== "string") throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Message body is invalid");
-    const text = body.text.trim();
-    if (!text || text.length > 4_000) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Message text is invalid");
-    return { conversationId, kind: "text", text };
+    if (Object.keys(body).some((key) => key !== "conversationId" && key !== "text")) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Message body is invalid");
+    return { conversationId, kind: "text", text: messageText(body.text) };
   }
   if (Object.keys(body).some((key) => key !== "conversationId" && key !== "image") || !body.image || typeof body.image !== "object" || Array.isArray(body.image)) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Image message is invalid");
   const image = body.image as Record<string, unknown>;
@@ -320,6 +375,15 @@ function parseMessageOperation(value: string | null): "read" | "send" {
   return value;
 }
 
+/** 客服读路径：接待客服需要 im.support.read；运营巡视只需 im.support.management.read。 */
+async function requireAdminImRead(pool: Parameters<typeof loadEffectiveAdminAccess>[0], userId: string): Promise<void> {
+  const access = await loadEffectiveAdminAccess(pool, userId);
+  if (!hasPermission(access, ADMIN_PERMISSION.imSupportRead)
+    && !hasPermission(access, ADMIN_PERMISSION.imSupportManagementRead)) {
+    throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Permission required");
+  }
+}
+
 async function handleUserMessageAccess(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions): Promise<void> {
   if (!options.consultation) {
     sendUnavailable(response, requestId);
@@ -338,28 +402,49 @@ async function handleAdminMessageAccess(request: NodeRequest, response: NodeResp
     return;
   }
   const context = await readAdminContext(request, options.security);
-  await requireDirectoryPermission(options.security.pool, context.userId, ADMIN_PERMISSION.imSupportRead);
+  await requireAdminImRead(options.security.pool, context.userId);
   const query = routeQuery(request);
   const operation = parseMessageOperation(query.get("operation"));
-  await readAdminMessageAccess(options.consultation, context, messageConversationId(query.get("conversationId")), operation === "send");
+  await readAdminMessageAccess(options.consultation, context, messageConversationId(query.get("conversationId")), operation === "send", requestId);
   sendJson(response, 200, { authorized: true }, requestId);
 }
 
 type MessageAccess = { viewerAccountId: string; peerAccountId: string; scope?: ImOrderImageScope };
 
-async function readMessageAccess(options:YunxinRouteOptions,actor:({realm:"user"}&Awaited<ReturnType<typeof readUserContext>>)|({realm:"admin"}&Awaited<ReturnType<typeof readAdminContext>>),conversationId:string,send=false):Promise<MessageAccess>{
-  const teamId=/^[^|]+\|2\|([0-9]{1,19})$/.exec(conversationId)?.[1];
-  if(teamId){
-    const access=await withTransaction(options.security.pool,async c=>{
-      const row=(await c.query(`SELECT order_id FROM zzsh_order.im_order_group WHERE app_id=$1 AND team_id=$2`,[options.appId,teamId])).rows[0];
-      if(!row)return null;
-      const result=await readOrderTeamAccess(c,actor,row.order_id,send?"send":"read");
-      if(result.canRead!==true||result.conversationId!==conversationId)throw new SecurityApiError(403,"FORBIDDEN","Order Team access denied");
-      return {viewerAccountId:result.viewerAccountId as string,peerAccountId:teamId,scope:{appId:options.appId,orderId:result.orderId as string,teamId:result.teamId as string}};
-    });
-    if(access)return access;
+async function readMessageAccess(
+  options: YunxinRouteOptions,
+  actor: ({ realm: "user" } & Awaited<ReturnType<typeof readUserContext>>) | ({ realm: "admin" } & Awaited<ReturnType<typeof readAdminContext>>),
+  conversationId: string,
+  send = false,
+  allowPatrol = false,
+  requestId = "im_message_access",
+): Promise<MessageAccess> {
+  const teamId = /^[^|]+\|2\|([0-9]{1,19})$/.exec(conversationId)?.[1];
+  if (teamId) {
+    let access: MessageAccess | null = null;
+    try {
+      access = await withTransaction(options.security.pool, async (c) => {
+        const row = (await c.query(`SELECT order_id FROM zzsh_order.im_order_group WHERE app_id=$1 AND team_id=$2`, [options.appId, teamId])).rows[0];
+        if (!row) return null;
+        const result = await readOrderTeamAccess(c, actor, row.order_id, send ? "send" : "read");
+        if (result.canRead !== true || result.conversationId !== conversationId) throw new SecurityApiError(403, "FORBIDDEN", "Order Team access denied");
+        return { viewerAccountId: result.viewerAccountId as string, peerAccountId: teamId, scope: { appId: options.appId, orderId: result.orderId as string, teamId: result.teamId as string } };
+      });
+    } catch (error) {
+      // 运营巡视旁路：订单群只读不要求 JOINED，但仍要求 appId/订单群存在；不获得发送权。
+      if (!send && allowPatrol && actor.realm === "admin" && error instanceof SecurityApiError && error.status === 403) {
+        const patrol = await withTransaction(options.security.pool, (c) => readPatrolOrderTeamAccess(
+          c, { appId: options.appId, teamId, conversationId, requestId }, actor,
+        ));
+        if (patrol) return patrol;
+      }
+      throw error;
+    }
+    if (access) return access;
   }
-  return actor.realm==="user"?readUserMessageAccess(options.consultation!,actor,conversationId):readAdminMessageAccess(options.consultation!,actor,conversationId,send);
+  return actor.realm === "user"
+    ? readUserMessageAccess(options.consultation!, actor, conversationId)
+    : readAdminMessageAccess(options.consultation!, actor, conversationId, send, requestId);
 }
 
 function sameImageScope(left: ImOrderImageScope, right: ImOrderImageScope): boolean {
@@ -388,6 +473,54 @@ function messageBefore(request:NodeRequest):string|undefined{
   if(!/^[A-Za-z0-9._:-]{1,128}$/.test(raw))throw new SecurityApiError(400,"INVALID_ARGUMENT","Invalid history cursor");return raw;
 }
 
+type MessageActor = ({ realm: "user" } & Awaited<ReturnType<typeof readUserContext>>) | ({ realm: "admin" } & Awaited<ReturnType<typeof readAdminContext>>);
+
+async function handleMessageAction(
+  response: NodeResponse,
+  requestId: string,
+  options: YunxinRouteOptions,
+  actor: MessageActor,
+  input: Extract<ParsedMessageBody, { kind: "reply" | "revoke" | "delete" }>,
+): Promise<void> {
+  const transport = options.consultation?.messageTransport;
+  if (!options.consultation || !transport) {
+    sendUnavailable(response, requestId);
+    return;
+  }
+  // Reply and revoke reuse the send grant; hiding a message only needs read.
+  const access = await readMessageAccess(options, actor, input.conversationId, input.kind !== "delete", false, requestId);
+  if (input.kind === "reply") {
+    if (!transport.replyText) {
+      sendUnavailable(response, requestId);
+      return;
+    }
+    const message = await transport.replyText({
+      conversationId: input.conversationId,
+      senderAccountId: access.viewerAccountId,
+      receiverAccountId: access.peerAccountId,
+      text: input.text,
+      replyTo: input.replyTo,
+    });
+    sendJson(response, 200, { message: publicMessage(message, actor.realm) }, requestId);
+    return;
+  }
+  if (input.kind === "revoke") {
+    if (!transport.revoke) {
+      sendUnavailable(response, requestId);
+      return;
+    }
+    const message = await transport.revoke({ conversationId: input.conversationId, viewerAccountId: access.viewerAccountId, message: input.message });
+    sendJson(response, 200, { message: publicMessage(message, actor.realm) }, requestId);
+    return;
+  }
+  if (!transport.hideForViewer) {
+    sendUnavailable(response, requestId);
+    return;
+  }
+  await transport.hideForViewer({ conversationId: input.conversationId, viewerAccountId: access.viewerAccountId, message: input.message });
+  sendJson(response, 200, { deleted: true }, requestId);
+}
+
 async function handleUserMessages(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions): Promise<void> {
   const transport = options.consultation?.messageTransport;
   if (!options.consultation || !transport) {
@@ -402,6 +535,10 @@ async function handleUserMessages(request: NodeRequest, response: NodeResponse, 
     return;
   }
   const input = await parseMessageBody(request.body);
+  if (input.kind === "reply" || input.kind === "revoke" || input.kind === "delete") {
+    await handleMessageAction(response, requestId, options, {...context,realm:"user"}, input);
+    return;
+  }
   const access = await readMessageAccess(options, {...context,realm:"user"}, input.conversationId,true);
   if (input.kind === "text") {
     sendJson(response, 200, { message: publicMessage(await transport.sendText({ conversationId: input.conversationId, senderAccountId: access.viewerAccountId, receiverAccountId: access.peerAccountId, text: input.text }), "user") }, requestId);
@@ -423,15 +560,19 @@ async function handleAdminMessages(request: NodeRequest, response: NodeResponse,
     return;
   }
   const context = await readAdminContext(request, options.security);
-  await requireDirectoryPermission(options.security.pool, context.userId, ADMIN_PERMISSION.imSupportRead);
+  await requireAdminImRead(options.security.pool, context.userId);
   if (request.method?.toUpperCase() === "GET") {
     const conversationId = messageConversationId(routeQuery(request).get("conversationId"));
-    const access = await readMessageAccess(options, {...context,realm:"admin"}, conversationId);
+    const access = await readMessageAccess(options, {...context,realm:"admin"}, conversationId, false, true, requestId);
     sendJson(response, 200, { messages: (await transport.history({ conversationId, viewerAccountId: access.viewerAccountId, limit: parseLimit(routeQuery(request).get("limit")),before:messageBefore(request) })).map(message => publicMessage(message, "admin")) }, requestId);
     return;
   }
   const input = await parseMessageBody(request.body);
-  const access = await readMessageAccess(options, {...context,realm:"admin"}, input.conversationId, true);
+  if (input.kind === "reply" || input.kind === "revoke" || input.kind === "delete") {
+    await handleMessageAction(response, requestId, options, {...context,realm:"admin"}, input);
+    return;
+  }
+  const access = await readMessageAccess(options, {...context,realm:"admin"}, input.conversationId, true, false, requestId);
   if (input.kind === "text") {
     sendJson(response, 200, { message: publicMessage(await transport.sendText({ conversationId: input.conversationId, senderAccountId: access.viewerAccountId, receiverAccountId: access.peerAccountId, text: input.text }), "admin") }, requestId);
     return;
@@ -493,10 +634,13 @@ async function handleAdminConsultations(request: NodeRequest, response: NodeResp
     return;
   }
   const body = request.body;
-  if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body as Record<string, unknown>).length !== 1 || typeof (body as Record<string, unknown>).targetAdminId !== "string") {
+  if (!body || typeof body !== "object" || Array.isArray(body)
+    || Object.keys(body as Record<string, unknown>).some((key) => key !== "targetAdminId" && key !== "note")
+    || typeof (body as Record<string, unknown>).targetAdminId !== "string") {
     throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Target administrator is required");
   }
-  sendJson(response, 200, await transferConsultation(options.consultation, context, action.id, (body as { targetAdminId: string }).targetAdminId, requestId), requestId);
+  const note = parseHandoverNote((body as Record<string, unknown>).note);
+  sendJson(response, 200, await transferConsultation(options.consultation, context, action.id, (body as { targetAdminId: string }).targetAdminId, requestId, note), requestId);
 }
 
 async function handleAdminConsultationEvents(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions, consultationId: string): Promise<void> {
@@ -546,6 +690,58 @@ async function handleAdminPresence(request: NodeRequest, response: NodeResponse,
     return;
   }
   sendJson(response, 200, await updateOwnPresence(options.consultation, context, parsePresenceBody(request.body), requestId), requestId);
+}
+
+function strictQuery(query: URLSearchParams, allowed: readonly string[]): void {
+  if ([...query.keys()].some((key) => !allowed.includes(key))) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Query is invalid");
+  for (const key of allowed) if (query.getAll(key).length > 1) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Query is invalid");
+}
+
+async function handleAdminPresenceHeartbeat(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions): Promise<void> {
+  if (!options.consultation) {
+    sendUnavailable(response, requestId);
+    return;
+  }
+  strictQuery(routeQuery(request), []);
+  const context = await readAdminContext(request, options.security);
+  sendJson(response, 200, await heartbeatOwnPresence(options.consultation, context), requestId);
+}
+
+async function handleAdminSupportOverview(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions): Promise<void> {
+  const query = routeQuery(request);
+  strictQuery(query, ["date"]);
+  const context = await readAdminContext(request, options.security);
+  sendJson(response, 200, await readSupportOverview({ pool: options.security.pool, appId: options.appId }, context, query.get("date")), requestId);
+}
+
+async function handleAdminHandovers(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions): Promise<void> {
+  const query = routeQuery(request);
+  strictQuery(query, ["limit"]);
+  const context = await readAdminContext(request, options.security);
+  sendJson(response, 200, await listSupportHandovers({ pool: options.security.pool, appId: options.appId }, context, query.get("limit")), requestId);
+}
+
+async function handleAdminAuditConversations(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions): Promise<void> {
+  const query = routeQuery(request);
+  strictQuery(query, ["limit", "cursor"]);
+  const context = await readAdminContext(request, options.security);
+  sendJson(response, 200, await listAuditConversations({ pool: options.security.pool, appId: options.appId }, context, query.get("limit"), query.get("cursor")), requestId);
+}
+
+async function handleAdminTakeover(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions, consultationId: string): Promise<void> {
+  if (!options.consultation) {
+    sendUnavailable(response, requestId);
+    return;
+  }
+  strictQuery(routeQuery(request), []);
+  const body = request.body;
+  if (body !== undefined && body !== null && (typeof body !== "object" || Array.isArray(body)
+    || Object.keys(body as Record<string, unknown>).some((key) => key !== "note"))) {
+    throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Takeover body is invalid");
+  }
+  const note = body && typeof body === "object" ? parseHandoverNote((body as Record<string, unknown>).note) : null;
+  const context = await readAdminContext(request, options.security);
+  sendJson(response, 200, await takeoverConsultation(options.consultation, context, consultationId, requestId, note), requestId);
 }
 
 export async function handleYunxinRoute(request: NodeRequest, response: NodeResponse, options: YunxinRouteOptions): Promise<void> {
@@ -699,9 +895,61 @@ export async function handleYunxinRoute(request: NodeRequest, response: NodeResp
       await handleAdminPresence(request, response, requestId, options);
       return;
     }
+    if (path === "/admin/presence/heartbeat") {
+      if (!originAllowed(request, [options.security.apiOrigin, options.security.adminOrigin])) {
+        sendError(response, new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Request rejected"), requestId);
+        return;
+      }
+      if (method !== "POST") {
+        sendError(response, new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found"), requestId);
+        return;
+      }
+      await handleAdminPresenceHeartbeat(request, response, requestId, options);
+      return;
+    }
+    if (path === "/admin/support-overview") {
+      if (!originAllowed(request, [options.security.apiOrigin, options.security.adminOrigin]) || method !== "GET") {
+        sendError(response, new SecurityApiError(method === "GET" ? 403 : 404, method === "GET" ? API_V1_ERROR_CODES.FORBIDDEN : API_V1_ERROR_CODES.NOT_FOUND, method === "GET" ? "Request rejected" : "Resource not found"), requestId);
+        return;
+      }
+      await handleAdminSupportOverview(request, response, requestId, options);
+      return;
+    }
+    if (path === "/admin/handovers") {
+      if (!originAllowed(request, [options.security.apiOrigin, options.security.adminOrigin]) || method !== "GET") {
+        sendError(response, new SecurityApiError(method === "GET" ? 403 : 404, method === "GET" ? API_V1_ERROR_CODES.FORBIDDEN : API_V1_ERROR_CODES.NOT_FOUND, method === "GET" ? "Request rejected" : "Resource not found"), requestId);
+        return;
+      }
+      await handleAdminHandovers(request, response, requestId, options);
+      return;
+    }
+    if (path === "/admin/audit/conversations") {
+      if (!originAllowed(request, [options.security.apiOrigin, options.security.adminOrigin]) || method !== "GET") {
+        sendError(response, new SecurityApiError(method === "GET" ? 403 : 404, method === "GET" ? API_V1_ERROR_CODES.FORBIDDEN : API_V1_ERROR_CODES.NOT_FOUND, method === "GET" ? "Request rejected" : "Resource not found"), requestId);
+        return;
+      }
+      await handleAdminAuditConversations(request, response, requestId, options);
+      return;
+    }
+    const auditTakeover = /^\/admin\/audit\/consultations\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/takeover$/.exec(path);
+    if (auditTakeover) {
+      if (!originAllowed(request, [options.security.apiOrigin, options.security.adminOrigin]) || method !== "POST") {
+        sendError(response, new SecurityApiError(method === "POST" ? 403 : 404, method === "POST" ? API_V1_ERROR_CODES.FORBIDDEN : API_V1_ERROR_CODES.NOT_FOUND, method === "POST" ? "Request rejected" : "Resource not found"), requestId);
+        return;
+      }
+      await handleAdminTakeover(request, response, requestId, options, auditTakeover[1]!);
+      return;
+    }
     sendError(response, new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found"), requestId);
   } catch (error) {
     if (error instanceof SecurityApiError) sendError(response, error, requestId);
+    else if (error instanceof ImTransportRequestError) {
+      const code = error.status === 404 ? API_V1_ERROR_CODES.NOT_FOUND
+        : error.status === 403 ? API_V1_ERROR_CODES.FORBIDDEN
+        : error.status === 409 ? API_V1_ERROR_CODES.CONFLICT
+        : API_V1_ERROR_CODES.INVALID_ARGUMENT;
+      sendError(response, new SecurityApiError(error.status, code, error.message), requestId);
+    }
     else if ((error as { code?: string })?.code === "55P03") sendUnavailable(response, requestId);
     else if (error instanceof ImIdentityUnavailableError) sendUnavailable(response, requestId);
     else if (error instanceof ImIdentityInvariantError) sendInternalError(response, requestId);

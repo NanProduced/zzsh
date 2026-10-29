@@ -1,7 +1,7 @@
 "use client";
 import { SessionLoading } from "../auth/session-loading";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent as ReactClipboardEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent as ReactClipboardEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { ArrowDown, Check, ChevronLeft, CircleAlert, Clock3, Headphones, ImagePlus, Info, Paperclip, ReceiptText, SendHorizontal, ShieldCheck, UserRound, Wifi, WifiOff, X } from "lucide-react";
 import * as Popover from "@radix-ui/react-popover";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -14,7 +14,9 @@ import { clearSupportIntent, readSupportIntent, saveSupportIntent, type SupportT
 import "./customer-support-workspace.css";
 import { readSupportOrders, type SupportOrder } from "@/lib/support-directory";
 import { OrderTeamPanel, orderTeamLabel } from "@zzsh/ui/order-team-panel";
+import { MessageActionMenu, MessageReplyQuote, useMessageLongPress, type MessageActionId, type MessageActionItem } from "@zzsh/ui/message-actions";
 import "@zzsh/ui/order-team.css";
+import "@zzsh/ui/message-actions.css";
 
 async function orderRequest<T>(path:string, signal?: AbortSignal):Promise<T>{
   const response=await fetch(path,{credentials:"same-origin",cache:"no-store",signal});return readJson<T>(response,"订单请求未完成");
@@ -45,6 +47,13 @@ type SupportMessage = {
   self?: boolean;
   createTime?: number;
   senderId?: string;
+  messageClientId?: string;
+  messageServerId?: string;
+  messageType?: number;
+  reply?: { messageId: string; senderId: string; text?: string };
+  revoked?: boolean;
+  /** Raw channel message kept only so reply/revoke/delete can address the original. */
+  source?: NimMessageLike;
   image?: { imageId: string; url?: string; name: string; mimeType: string; size: number };
 };
 
@@ -176,17 +185,36 @@ export function messageFromNim(message: NimMessageLike, accountId: string): Supp
   const senderId = typeof message.senderId === "string" ? message.senderId : "";
   if (!senderId) return null;
   const self = senderId === accountId;
+  const base = {
+    id: message.messageServerId || message.messageClientId || `${senderId}-${message.createTime}`,
+    createTime: message.createTime,
+    senderId,
+    messageClientId: message.messageClientId,
+    ...(message.messageServerId ? { messageServerId: message.messageServerId } : {}),
+    ...(message.messageType === undefined ? {} : { messageType: message.messageType }),
+    source: message,
+  };
+
+  if (message.revoked === true) {
+    return {
+      ...base,
+      from: self ? "customer" : "agent",
+      text: "",
+      time: formatTime(message.createTime),
+      status: self ? "sent" : undefined,
+      self,
+      revoked: true,
+    };
+  }
 
   if (message.messageType === 5) {
     const attach = message.attachment as { type?: number } | undefined;
     const isTeamInvite = attach && typeof attach === "object" && attach.type === 0;
     return {
-      id: message.messageServerId || message.messageClientId || `sys-${message.createTime}`,
+      ...base,
       from: "system",
       text: isTeamInvite ? "成员已加入会话" : "会话信息已更新",
       time: formatTime(message.createTime),
-      createTime: message.createTime,
-      senderId,
     };
   }
 
@@ -195,14 +223,13 @@ export function messageFromNim(message: NimMessageLike, accountId: string): Supp
     ? message.text
     : image ? "" : message.messageType === 0 ? "" : "暂不支持展示的消息类型";
   return {
-    id: message.messageServerId || message.messageClientId || `${senderId}-${message.createTime}`,
+    ...base,
     from: self ? "customer" : "agent",
     text,
     time: formatTime(message.createTime),
     status: self ? "sent" : undefined,
     self,
-    createTime: message.createTime,
-    senderId,
+    ...(message.reply ? { reply: message.reply } : {}),
     ...(image === undefined ? {} : { image }),
   };
 }
@@ -312,16 +339,18 @@ function MessageRow({ message, agentMeta, peerAccountId, grouped = false, isLast
         {!outgoing && senderRole ? <span className="support-role-tag" data-role={senderRole}>{senderRole}</span> : null}
       </div>
       <div className="support-message-bubble-row">
-        {message.image ? (() => {
+        {message.revoked ? (
+          <div className="support-message-bubble" data-slot="bubble" data-revoked="true">消息已撤回</div>
+        ) : message.image ? (() => {
           const raw = message.image.url ?? (message.image.imageId ? `/api/im/images/${encodeURIComponent(message.image.imageId)}` : "");
           const url = raw ? supportedImageUrl(raw) : null;
           return url
             ? <a className="support-message-image" href={url} target="_blank" rel="noreferrer" aria-label={`查看图片 ${message.image.name}`}><img src={url} alt={message.image.name} loading="lazy" /></a>
             : <div className="support-message-bubble" data-slot="bubble">图片暂不可预览</div>;
-        })() : <div className="support-message-bubble" data-slot="bubble">{message.text}</div>}
+        })() : <div className="support-message-bubble" data-slot="bubble">{message.reply ? <span className="support-message-quote">回复：{message.reply.text ?? "消息"}</span> : null}{message.text}</div>}
         <time className="support-message-hover-time">{message.time}</time>
       </div>
-      {outgoing && isLastSelf && message.status ? <div className="support-message-status"><Check size={12} />{message.status === "read" ? "已读" : "已发送"}</div> : null}
+      {outgoing && isLastSelf && message.status && !message.revoked ? <div className="support-message-status"><Check size={12} />{message.status === "read" ? "已读" : "已发送"}</div> : null}
     </div>
   </article>;
 }
@@ -380,6 +409,9 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   const stagedImagesRef = useRef<Record<string, StagedImageItem[]>>({});
   const [pendingImage, setPendingImage] = useState<Record<string, PendingImageItem | null>>({});
   const [failedTexts, setFailedTexts] = useState<Record<string, UnresolvedText>>({});
+  const [replyTargets, setReplyTargets] = useState<Record<string, SupportMessage | null>>({});
+  const [replyUncertain, setReplyUncertain] = useState<Record<string, boolean>>({});
+  const [supportMenu, setSupportMenu] = useState<{ key: string; id: string; x: number; y: number; row: HTMLElement | null } | null>(null);
   const readHiddenRef = useRef<Record<string, boolean>>({});
   const [stagedImages, setStagedImages] = useState<Record<string, StagedImageItem[]>>({});
   const stagedImage = useMemo(() => {
@@ -445,7 +477,19 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   const setDraftFor = (key: string, value: string) => setDrafts((current) => ({ ...current, [key]: value }));
   const setAttachmentFor = (key: string, value: string | null) => setAttachments((current) => ({ ...current, [key]: value }));
 
-  useEffect(() => { setSelectedType(initialType); }, [initialType]);
+  // Opening the window resolves the entry type instead of inheriting whatever
+  // conversation loaded first: a live consultation of that type is selected, and
+  // without one the window stays on this type's start panel. Opening never creates.
+  useEffect(() => {
+    if (preview) return;
+    setSelectedType(initialType);
+    if (initialOrderId && initialOrderParty) return;
+    const existing = consultationsRef.current.find((item) => item.type === initialType && (item.state === "ACTIVE" || item.state === "WAITING"));
+    setSection("consultation");
+    setPanelView("chat");
+    setIsStartingNew(false);
+    setActiveId(existing ? existing.id : null);
+  }, [initialOrderId, initialOrderParty, initialType, preview, requestSerial]);
 
   useEffect(() => {
     if (preview || !imReady || readyIdentityRef.current !== currentIdentity || session.status !== "authenticated" || !session.userId) return;
@@ -480,6 +524,9 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
       setMessages(PREVIEW_MESSAGES);
       setDrafts({});
       setAttachments({});
+      setReplyTargets({});
+      setReplyUncertain({});
+      setSupportMenu(null);
       setActiveId(PREVIEW_CONVERSATIONS[0].id);
       setIsStartingNew(false);
       setConnection("idle");
@@ -504,6 +551,9 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     setHistoryMore({});
     setHistoryLoading(false);
     setFailedTexts({});
+    setReplyTargets({});
+    setReplyUncertain({});
+    setSupportMenu(null);
     readHiddenRef.current = {};
     setPendingImage((current) => {
       for (const item of Object.values(current)) if (item) URL.revokeObjectURL(item.previewUrl);
@@ -527,7 +577,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     const identity = currentIdentity;
     const lifecycle = new ImClientLifecycle<NimWebClientLike>(async (context) => {
       const token = await fetchImToken();
-      if (token.transport === "local-fake") return createLocalFakeNimWebClientFactory({ endpoint: "/api/im/messages", accountId: token.accountId })(context);
+      if (token.transport === "local-fake") return createLocalFakeNimWebClientFactory({ endpoint: "/api/im/messages", accountId: token.accountId, pollMs: 1_500 })(context);
       const factory = createNimWebClientFactory({
         appKey: token.appKey,
         accountId: token.accountId,
@@ -644,9 +694,9 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
 
   useEffect(() => {
     if (preview || isStartingNew || activeId || consultations.length === 0) return;
-    setActiveId(consultations[0]!.id);
-    setSelectedType(consultations[0]!.type);
-  }, [activeId, consultations, isStartingNew, preview]);
+    const existing = consultations.find((item) => item.type === selectedType && (item.state === "ACTIVE" || item.state === "WAITING"));
+    if (existing) setActiveId(existing.id);
+  }, [activeId, consultations, isStartingNew, preview, selectedType]);
 
   useEffect(()=>{if(!preview&&!initialOrderId&&!activeId&&!selectedOrder&&!consultations.length&&orders.length){setSelectedOrder({id:orders[0]!.id,party:orders[0]!.party});setSection("orders");}},[preview,initialOrderId,activeId,selectedOrder,consultations,orders]);
   useEffect(() => { setContextOpen(false); }, [activeId]);
@@ -671,6 +721,103 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   const activeMessages = messages[activeConversationKey] ?? [];
   const canSend = preview || Boolean(activeConversation?.state === "ACTIVE" && activeConversation.conversationId && activeConversation.messageScopeState === "READY" && clientRef.current && connection === "CONNECTED");
   canStartSendRef.current = canSend;
+  const activeReply = replyTargets[activeConversationKey] ?? null;
+  const replyLabelOf = (message: SupportMessage): string => message.image ? "[图片]" : message.text.trim() ? message.text.trim().slice(0, 120) : "消息";
+  const copyableSupportText = (message: SupportMessage): string | null => !message.revoked && message.from !== "system" && !message.image
+    && (message.messageType === undefined || message.messageType === 0) && message.text.trim() ? message.text : null;
+  const rowOfMessage = (target: EventTarget | null): HTMLElement | null => {
+    const element = target as { closest?: (selector: string) => HTMLElement | null } | null;
+    return element && typeof element.closest === "function" ? element.closest("[data-message-id]") : null;
+  };
+  const findActiveMessage = (id: string | undefined): SupportMessage | null => id ? (messages[activeConversationKey] ?? []).find((item) => item.id === id) ?? null : null;
+  const openSupportMenu = (message: SupportMessage | null, x: number, y: number, row: HTMLElement | null) => {
+    if (!message || message.from === "system" || message.revoked) return;
+    setSupportMenu((current) => current?.key === activeConversationKey && current.id === message.id ? current : { key: activeConversationKey, id: message.id, x, y, row });
+  };
+  const onSupportContextMenu = (event: ReactMouseEvent<HTMLElement>) => {
+    const row = rowOfMessage(event.target);
+    if (!row) return;
+    // A message row never falls back to the browser menu, even without custom entries.
+    event.preventDefault();
+    openSupportMenu(findActiveMessage(row.dataset.messageId), event.clientX, event.clientY, row);
+  };
+  const supportLongPress = useMessageLongPress((point, target) => {
+    const row = rowOfMessage(target);
+    if (row) openSupportMenu(findActiveMessage(row.dataset.messageId), point.x, point.y, row);
+  });
+  const supportMenuMessage = supportMenu ? (messages[supportMenu.key] ?? []).find((item) => item.id === supportMenu.id) ?? null : null;
+  const supportMenuItems: MessageActionItem[] = supportMenuMessage && !supportMenuMessage.revoked && supportMenuMessage.from !== "system" ? [
+    ...(copyableSupportText(supportMenuMessage) ? [{ id: "copy" as const, label: "复制" }] : []),
+    ...(canSend ? [{ id: "reply" as const, label: "回复" }] : []),
+    ...(canSend && !preview && supportMenuMessage.self === true && supportMenuMessage.source ? [{ id: "revoke" as const, label: "撤回" }] : []),
+    { id: "delete" as const, label: "删除", danger: true },
+  ] : [];
+  const clearReplyFor = (key: string) => {
+    setReplyTargets((current) => (current[key] ? { ...current, [key]: null } : current));
+    setReplyUncertain((current) => (current[key] ? { ...current, [key]: false } : current));
+  };
+  const copySupportMessage = async (message: SupportMessage) => {
+    const text = copyableSupportText(message);
+    try {
+      if (!text || typeof navigator === "undefined" || !navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
+      await navigator.clipboard.writeText(text);
+      setError(undefined);
+    } catch { setError("复制失败，请手动选择文本"); }
+  };
+  const revokeSupportMessage = async (key: string, message: SupportMessage) => {
+    const client = clientRef.current;
+    const conversationId = message.source?.conversationId || consultationsRef.current.find((item) => item.id === key)?.conversationId;
+    if (!client || !conversationId || !message.source) { setError("撤回失败，请刷新消息后重试"); return; }
+    const generation = identityGenerationRef.current;
+    const identity = currentIdentity;
+    try {
+      const updated = await client.revokeMessage(conversationId, message.source);
+      if (generation !== identityGenerationRef.current || identityRef.current !== identity || clientRef.current !== client) return;
+      const next = messageFromNim(updated, client.accountId);
+      if (next && !readHiddenRef.current[conversationId]) setMessages((current) => ({ ...current, [key]: mergeImMessages(current[key] ?? [], [next]) }));
+      if (replyTargets[key]?.id === message.id) clearReplyFor(key);
+      setError(undefined);
+    } catch (cause) {
+      const status = httpStatus(cause);
+      setError(status === 409 ? "已超过可撤回时间" : status === 403 ? "无权撤回此消息" : "撤回失败，请重试");
+    }
+  };
+  const deleteSupportMessage = async (key: string, message: SupportMessage) => {
+    const client = clientRef.current;
+    const conversationId = message.source?.conversationId || consultationsRef.current.find((item) => item.id === key)?.conversationId;
+    const generation = identityGenerationRef.current;
+    const identity = currentIdentity;
+    if (!preview && (!client || !conversationId || !message.source)) { setError("删除失败，消息仍保留"); return; }
+    if (client && conversationId && message.source) {
+      try { await client.deleteMessage(conversationId, message.source); }
+      catch (cause) {
+        if (generation === identityGenerationRef.current && identityRef.current === identity) {
+          setError(httpStatus(cause) === 403 ? "无权删除此消息" : "删除失败，消息仍保留");
+        }
+        return;
+      }
+      if (generation !== identityGenerationRef.current || identityRef.current !== identity || clientRef.current !== client) return;
+    }
+    setMessages((current) => ({ ...current, [key]: (current[key] ?? []).filter((item) => item.id !== message.id) }));
+    if (replyTargets[key]?.id === message.id) clearReplyFor(key);
+    setError(undefined);
+  };
+  const onSupportMenuAction = (action: MessageActionId) => {
+    const menuState = supportMenu;
+    const message = supportMenuMessage;
+    setSupportMenu(null);
+    if (!message || !menuState) return;
+    if (action === "copy") { void copySupportMessage(message); return; }
+    if (action === "reply") {
+      setReplyTargets((current) => ({ ...current, [menuState.key]: message }));
+      setReplyUncertain((current) => ({ ...current, [menuState.key]: false }));
+      setError(undefined);
+      requestAnimationFrame(() => draftRef.current?.focus());
+      return;
+    }
+    if (action === "revoke") { void revokeSupportMessage(menuState.key, message); return; }
+    void deleteSupportMessage(menuState.key, message);
+  };
   const unresolvedText = failedTexts[activeConversationKey] ?? null;
   const setUnresolvedTextFor = (key: string, next: UnresolvedText | null) => setFailedTexts((current) => {
     const copy = { ...current };
@@ -698,7 +845,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
       timelineDay = dayKey;
       items.push(<MessageScrollerPrimitive.Item key={`day-${dayKey}`} messageId={`day-${dayKey}`}><div className="support-day-divider">{dayLabelOf(dayKey)}</div></MessageScrollerPrimitive.Item>);
     }
-    items.push(<MessageScrollerPrimitive.Item key={message.id} messageId={message.id} scrollAnchor={message.from === "customer"}><MessageRow message={message} grouped={grouped} agentMeta={message.from === "agent" ? agentMeta : undefined} peerAccountId={activeConversation?.peerAccountId} isLastSelf={index === lastSelfIndex} /></MessageScrollerPrimitive.Item>);
+    items.push(<MessageScrollerPrimitive.Item key={message.id} messageId={message.id} scrollAnchor={message.from === "customer"} tabIndex={-1} onContextMenu={onSupportContextMenu} {...supportLongPress}><MessageRow message={message} grouped={grouped} agentMeta={message.from === "agent" ? agentMeta : undefined} peerAccountId={activeConversation?.peerAccountId} isLastSelf={index === lastSelfIndex} /></MessageScrollerPrimitive.Item>);
     return items;
   }).flat();
 
@@ -999,6 +1146,10 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     const currentStaged = stagedImages[conversationKey] ?? [];
     const currentPending = pendingImage[conversationKey];
     if (!text && !attachment && currentStaged.length === 0) return;
+    const currentReply = replyTargets[conversationKey] ?? null;
+    if (currentReply && replyUncertain[conversationKey]) { setError("回复结果未确认，请刷新确认后再发送；取消引用后可按普通消息发送。"); return; }
+    if (currentReply && !text) { setError("回复需要先输入文字；图片回复暂不支持"); return; }
+    if (!preview && currentReply && !currentReply.source) { setError("引用消息不可用，请刷新历史后重试"); return; }
 
     if (isSubmittingRef.current || busy || imageSending) return;
 
@@ -1037,11 +1188,15 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
         parts.push(`[图片] ${currentStaged.map((s) => s.name).join(", ")}`);
       }
       if (text) parts.push(text);
-      const next: SupportMessage = { id: `local-${Date.now()}`, from: "customer", text: parts.join("\n"), time: "现在", status: "sent", self: true };
+      const next: SupportMessage = {
+        id: `local-${Date.now()}`, from: "customer", text: parts.join("\n"), time: "现在", status: "sent", self: true,
+        ...(currentReply ? { reply: { messageId: currentReply.id, senderId: currentReply.senderId ?? "", text: replyLabelOf(currentReply) } } : {}),
+      };
       setMessages((current) => ({ ...current, [conversationKey]: mergeImMessages(current[conversationKey] ?? [], [next]) }));
       setDrafts((current) => current[conversationKey] === draft ? { ...current, [conversationKey]: "" } : current);
       setAttachmentFor(conversationKey, null);
       setStagedImagesFor(conversationKey, []);
+      if (currentReply) clearReplyFor(conversationKey);
       isSubmittingRef.current = false;
       return;
     }
@@ -1055,7 +1210,9 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
       if (text) {
         setBusy(true); setError(undefined);
         try {
-          const sent = await client.sendText(conversationId, text);
+          const sent = currentReply
+            ? await client.replyText(conversationId, text, currentReply.source!)
+            : await client.sendText(conversationId, text);
           const next = messageFromNim(sent, client.accountId);
           // The receipt settles on the conversation it was sent from, not on whatever is
           // selected now; a hidden private projection is never refilled by a late success.
@@ -1071,13 +1228,27 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
             });
             setAttachmentFor(conversationKey, null);
             setUnresolvedTextFor(conversationKey, null);
+            if (currentReply) clearReplyFor(conversationKey);
           }
         } catch (cause) {
           revalidateAfterUnauthorized(cause);
           if (generation === identityGenerationRef.current && identityRef.current === identity) {
             const textError = cause instanceof NimTextSendError ? cause : null;
-            setError(textError?.kind === "UNKNOWN" ? "发送结果未确认，内容已保留；可先刷新历史确认是否送达。" : cause instanceof Error ? cause.message : "消息发送失败，请重试。");
-            setUnresolvedTextFor(conversationKey, { conversationId: conversationId ?? "", text, messageClientId: textError?.messageClientId, unknown: textError?.kind === "UNKNOWN" });
+            const status = httpStatus(cause);
+            if (currentReply) {
+              // A reply has no original-id replay API: an unconfirmed or transport-level
+              // failure keeps text + quote and is never re-dispatched automatically.
+              const unconfirmed = textError ? textError.kind === "UNKNOWN" : status === undefined || status >= 500;
+              if (unconfirmed) {
+                setReplyUncertain((current) => ({ ...current, [conversationKey]: true }));
+                setError("回复结果未确认，请刷新确认后再发送；取消引用后可按普通消息发送。");
+              } else {
+                setError(status === 403 ? "发送权限已变化，草稿和引用已保留" : cause instanceof Error ? cause.message : "回复发送失败，草稿和引用已保留。");
+              }
+            } else {
+              setError(textError?.kind === "UNKNOWN" ? "发送结果未确认，内容已保留；可先刷新历史确认是否送达。" : cause instanceof Error ? cause.message : "消息发送失败，请重试。");
+              setUnresolvedTextFor(conversationKey, { conversationId: conversationId ?? "", text, messageClientId: textError?.messageClientId, unknown: textError?.kind === "UNKNOWN" });
+            }
           }
           return;
         } finally {
@@ -1340,6 +1511,8 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
       if (clientRef.current !== client || activeIdRef.current !== conversation.id) return;
       const rows = history.map((item) => messageFromNim(item, client.accountId)).filter((item): item is SupportMessage => Boolean(item));
       setMessages((current) => ({ ...current, [conversation.id]: mergeImMessages(current[conversation.id] ?? [], rows) }));
+      // A fresh read is the confirmation step the UNKNOWN reply prompt asks for.
+      setReplyUncertain((current) => current[conversation.id] ? { ...current, [conversation.id]: false } : current);
     } catch (cause) {
       revalidateAfterUnauthorized(cause);
       setError(cause instanceof Error ? cause.message : "历史刷新失败。");
@@ -1348,12 +1521,22 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
 
   const chooseQuickReply = (value: string) => { setDraft(value); requestAnimationFrame(() => draftRef.current?.focus()); };
   const beginNewConsultation = () => {
-    if (!activeConversation || activeConversation.state !== "CLOSED") return;
-    setSelectedType(activeConversation.type);
-    setIsStartingNew(true);
-    setActiveId(null);
+    if (!activeConversation) return;
+    const type = activeConversation.type;
+    setSelectedType(type);
+    setSection("consultation");
     setPanelView("chat");
     setError(undefined);
+    // The server reuses a live consultation of the same type; select it instead of
+    // pretending a second one can be created.
+    const existing = consultations.find((item) => item.type === type && (item.state === "ACTIVE" || item.state === "WAITING"));
+    if (existing) {
+      setIsStartingNew(false);
+      setActiveId(existing.id);
+      return;
+    }
+    setIsStartingNew(true);
+    setActiveId(null);
   };
 
   if (!preview && session.status !== "authenticated") {
@@ -1403,7 +1586,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
           <button type="button" className="support-back" data-action="back-to-conversations" onClick={() => setPanelView("list")}><ChevronLeft size={15} />会话记录</button>
           <div className="support-conversation-identity"><span className="support-live-dot" data-state={activeConversation?.state === "ACTIVE" ? "active" : "idle"} aria-hidden="true" /><div><h3>{currentTitle}</h3><span>{currentSubtitle}</span></div></div>
           <div className="support-heading-actions">
-            {!preview && activeConversation?.state === "CLOSED" ? <button type="button" className="button secondary" data-action="start-new-consultation" onClick={beginNewConsultation}>再次咨询</button> : null}
+            {!preview && activeConversation?.state === "CLOSED" ? <button type="button" className="button secondary" data-action="start-new-consultation" onClick={beginNewConsultation}>发起新咨询</button> : null}
             {preview || subjectRef ? <button type="button" className="support-icon-button" data-action="toggle-product-context" aria-expanded={contextOpen} aria-label="商品上下文" onClick={() => setContextOpen((value) => !value)}><Info size={16} /></button> : null}
             {embedded ? <button type="button" className="support-icon-button" onClick={onClose} aria-label="关闭客服窗口"><X size={18} /></button> : null}
           </div>
@@ -1426,6 +1609,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
             const pending = pendingImage[activeConversationKey]!;
             return <div className="support-pending-image" data-state={pending.state}><img src={pending.previewUrl} alt={pending.name} /><span>{pending.name} · {pending.state === "UNKNOWN" ? "发送结果未确认" : pending.state === "SENDING" ? `发送中 ${pending.progress ?? 0}%` : "发送失败"}{pending.messageClientId ? "" : "（无原消息标识）"}</span><button type="button" onClick={() => void retryPendingImage()} disabled={imageSending || !canSend}>{pending.messageClientId ? "原消息重试" : "重试"}</button><button type="button" onClick={removePendingImage} disabled={imageSending || pending.state === "UNKNOWN"}>移除</button></div>;
           })() : null}
+          {activeReply && !(!preview && activeConversation?.state === "CLOSED") ? <MessageReplyQuote label={replyLabelOf(activeReply)} onCancel={() => { clearReplyFor(activeConversationKey); requestAnimationFrame(() => draftRef.current?.focus()); }} /> : null}
           {/* 已结束会话是只读的：不再摆一个"等待接待"的输入框，只说明状态。
               再次咨询入口保留在会话头，不在这里重复。 */}
           {!preview && activeConversation?.state === "CLOSED" ? <div className="support-composer-closed" role="status"><Headphones size={15} /><span>本次咨询已结束，无法继续发送消息。</span></div> : <form
@@ -1609,6 +1793,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
       </main>
       {contextOpen ? <aside className="support-context-panel" aria-label="商品上下文"><div className="support-context-heading"><div><strong>商品与订单信息</strong><span>{preview ? "演示快照" : "服务端授权快照"}</span></div><button type="button" className="support-icon-button" data-action="close-product-context" onClick={() => { setContextOpen(false); gridRef.current?.querySelector<HTMLButtonElement>('[data-action="toggle-product-context"]')?.focus(); }} aria-label="关闭商品上下文"><X size={15} /></button></div>{preview ? <><article className="support-product-card" data-slot="attachment"><div className="support-product-card-top"><span>zzsh.im-card</span><span>v1</span></div><h3>{PREVIEW_PRODUCT.title}</h3><p>{PREVIEW_PRODUCT.summary}</p><dl><div><dt>状态</dt><dd>{PREVIEW_PRODUCT.statusText}</dd></div><div><dt>费用</dt><dd>{PREVIEW_PRODUCT.priceText}</dd></div></dl><div className="support-product-card-id">商品 ID · {PREVIEW_PRODUCT.objectId}</div></article><button type="button" className="support-action-btn support-action-primary support-context-send-btn" data-action="send-product-context" onClick={() => { const text = `【咨询订单】${PREVIEW_PRODUCT.title} (ID: ${PREVIEW_PRODUCT.objectId})`; setDraft(draft ? `${draft}\n${text}` : text); setContextOpen(false); requestAnimationFrame(() => draftRef.current?.focus()); }}><ReceiptText size={13} /><span>发送此订单信息</span></button></> : orders.length > 0 ? <div className="support-verified-orders"><span className="support-verified-orders-hint">点击可将你参与的订单信息带入咨询输入框：</span><div className="support-verified-orders-list">{orders.map((ord) => <button key={ord.id} type="button" className="support-verified-order-item" onClick={() => { const text = `【咨询订单】${ord.title} (订单尾号: ${ord.displayNo}) [${ord.party === "owner" ? "出租" : "租入"}]`; setDraft(draft ? `${draft}\n${text}` : text); setContextOpen(false); requestAnimationFrame(() => draftRef.current?.focus()); }}><strong>{ord.title}</strong><span>尾号 {ord.displayNo} · {ord.party === "owner" ? "出租订单" : "租入订单"}</span></button>)}</div></div> : <div className="support-context-empty"><Headphones size={20} /><strong>暂无可关联的订单</strong><span>仅展示你当前已付款或出租中的真实订单。</span></div>}<div className="support-context-note"><ShieldCheck size={15} /><p>订单信息来自当前账号已授权的真实订单，带入后可在发送前补充说明。</p></div></aside> : null}
     </div>
+    {supportMenu && supportMenuMessage ? <MessageActionMenu key={`${supportMenu.key}:${supportMenu.id}`} x={supportMenu.x} y={supportMenu.y} items={supportMenuItems} onSelect={onSupportMenuAction} onClose={() => setSupportMenu(null)} returnFocus={supportMenu.row} /> : null}
   </section>;
   if(preview)return consultationView;
   const directoryReady=directoryIdentity===currentIdentity&&directoryState==="ready";

@@ -1,10 +1,112 @@
-import { formatOrderMoney } from "./order-client.ts";
-import type { Order, OrderParty, PersonalRentalQuote, SettlementOpening, SettlementPosting, SettlementPreview, SettlementVersion } from "./order-client";
+import { formatOrderMoney, formatOrderTime } from "./order-client.ts";
+import type { Order, OrderImProjection, OrderImStage, OrderParty, PersonalRentalQuote, SettlementOpening, SettlementPosting, SettlementPreview, SettlementVersion } from "./order-client";
 
 /** The frozen order snapshot's rental mode; older v1 orders carry no mode and stay unlabeled. */
 export function orderRentalModeLabel(order: Pick<Order, "quote">): string | null {
   const mode = order.quote?.rentalMode;
   return mode === "ordinary" ? "普通出租" : mode === "custom" ? "自定义出租" : mode === "fast" ? "极速出租" : null;
+}
+
+/** The six fulfillment steps, in the order the server projects them. */
+export const ORDER_FULFILLMENT_STEPS = [
+  { key: "PAID", label: "已付款" },
+  { key: "TEAM", label: "客服与群" },
+  { key: "OPENING", label: "账号与开租" },
+  { key: "RENTING", label: "租用中" },
+  { key: "ENDING", label: "结束确认" },
+  { key: "SETTLED", label: "结算完成" },
+] as const;
+
+export type OrderFulfillmentStepState = "done" | "current" | "pending" | "cancelled" | "unknown";
+
+/** WAITING_STAFF and TEAM_PENDING stay in the second step; PENDING_PAYMENT/CANCELLED own no step. */
+export function orderFulfillmentStepIndex(stage: OrderImStage | null | undefined): number {
+  switch (stage) {
+    case "WAITING_STAFF":
+    case "TEAM_PENDING": return 1;
+    case "OPENING_CONFIRM": return 2;
+    case "RENTING": return 3;
+    case "ENDING": return 4;
+    case "SETTLED": return 5;
+    default: return -1;
+  }
+}
+
+/** A missing projection leaves every step unknown; it never marks progress from the order status. */
+export function orderFulfillmentStepStates(stage: OrderImStage | null | undefined): OrderFulfillmentStepState[] {
+  if (stage === "CANCELLED") return ORDER_FULFILLMENT_STEPS.map(() => "cancelled");
+  const current = orderFulfillmentStepIndex(stage);
+  if (current < 0) return ORDER_FULFILLMENT_STEPS.map(() => "unknown");
+  return ORDER_FULFILLMENT_STEPS.map((_, index) => {
+    if (stage === "SETTLED") return "done";
+    return index < current ? "done" : index === current ? "current" : "pending";
+  });
+}
+
+/** The viewer's own settlement decision refines the ending copy; it never changes the stage itself. */
+export type OrderFulfillmentEnding = "PENDING" | "WAITING" | "SERVICE" | null;
+
+function fulfillmentWindowText(sendUntil: string | null, canSend: boolean, now: number): string {
+  if (!sendUntil) return "仅可查看";
+  const until = new Date(sendUntil).getTime();
+  if (!Number.isFinite(until)) return "仅可查看";
+  if (now >= until) return "已超过 72 小时 · 仅可查看";
+  return canSend ? `可沟通至 ${formatOrderTime(sendUntil, { timeZoneName: false })}` : "仅可查看";
+}
+
+/**
+ * One compact line: current stage plus the next thing that matters. Due and read-only states come
+ * only from the server projection; a missing projection stays "阶段待核对".
+ */
+export function orderFulfillmentSummary(
+  projection: OrderImProjection | null | undefined,
+  options: { now?: number; ending?: OrderFulfillmentEnding } = {},
+): string {
+  if (!projection) return "阶段待核对";
+  const now = options.now ?? Date.now();
+  switch (projection.stage) {
+    case "PENDING_PAYMENT": return "待付款";
+    case "WAITING_STAFF": return "已付款 · 待客服接入";
+    case "TEAM_PENDING": return "已付款 · 订单群准备中";
+    case "OPENING_CONFIRM": {
+      const acks = projection.openingAcks;
+      if (!acks) return "账号与开租确认";
+      return `账号与开租确认 · 买家${acks.renter ? "已确认" : "待确认"} · 号主${acks.owner ? "已确认" : "待确认"}`;
+    }
+    case "RENTING": {
+      if (!projection.dueAt) return "租用中";
+      const due = new Date(projection.dueAt).getTime();
+      if (!Number.isFinite(due)) return "租用中";
+      const when = formatOrderTime(projection.dueAt, { timeZoneName: false });
+      return due < now ? `租用中 · 已到期 ${when}` : `租用中 · 到期 ${when}`;
+    }
+    case "ENDING":
+      if (options.ending === "PENDING") return "结束确认 · 待你确认";
+      if (options.ending === "WAITING") return "结束确认 · 待对方确认";
+      if (options.ending === "SERVICE") return "结束确认 · 待客服核实";
+      return "结束确认 · 等待确认";
+    case "CANCELLED":
+      return `已取消 · ${fulfillmentWindowText(projection.sendUntil, projection.canSend, now)}`;
+    case "SETTLED":
+      return `结算完成 · ${fulfillmentWindowText(projection.sendUntil, projection.canSend, now)}`;
+    default:
+      return "阶段待核对";
+  }
+}
+
+export type OrderListFulfillmentTag = { code: "WAITING_STAFF" | "TEAM_PENDING"; label: string };
+
+/**
+ * A list row only knows the fulfillment assignment; the opening/ending stage needs the order IM
+ * projection. Show only the early stages the row can prove — a ready group is not a stage and
+ * gets no chip. `Order.stage` is a settlement stage and is never reused here.
+ */
+export function orderListFulfillmentTag(order: Pick<Order, "status" | "readOnly" | "fulfillmentAssignment">): OrderListFulfillmentTag | null {
+  if (order.readOnly || order.status !== "PAID") return null;
+  const assignment = order.fulfillmentAssignment;
+  if (assignment?.state === "WAITING") return { code: "WAITING_STAFF", label: "待客服接入" };
+  if (assignment?.state === "ASSIGNED" && assignment.teamReady === false) return { code: "TEAM_PENDING", label: "订单群准备中" };
+  return null;
 }
 
 /** Renter and owner see their own frozen unit amount, paired with the snapshot's real unit quantity. */

@@ -11,6 +11,9 @@ import {
 } from "@zzsh/ui/order-team-panel";
 import { supportedImageUrl } from "./im-support-guards";
 import { dayKeyOf, dayLabelOf, formatBytes, formatDateTime, formatTime, initialOf } from "./im-support-format";
+import { MessageReplyQuote } from "@zzsh/ui/message-actions";
+import "@zzsh/ui/message-actions.css";
+import { OrderCardMessage } from "@zzsh/ui/order-card";
 import { OrderFulfillmentSection } from "./im-support-fulfillment";
 import { Bubble, BubbleContent } from "../components/ui/bubble";
 import { InputGroup, InputGroupAddon, InputGroupTextarea } from "../components/ui/input-group";
@@ -50,6 +53,14 @@ function authorOf(info: OrderTeamAccess, senderId: string, accountId: string, op
   if (senderId === accountId) return { name: member?.name?.trim() || operatorName, role: member ? orderTeamMemberRole(member) : "平台客服" };
   if (!member) return { name: "未署名成员", role: null as string | null };
   return { name: member.name?.trim() || orderTeamMemberRole(member), role: orderTeamMemberRole(member) };
+}
+
+/** 终态订单的阶段文案只说明“已结束”，不退回过分配/匹配等过程词。 */
+function orderStageLabel(order: Parameters<typeof orderTeamLabel>[0]): string {
+  const status = order.orderStatus ?? order.status;
+  if (status === "COMPLETED") return "已完成 · 已结束";
+  if (status === "CANCELLED") return "已取消 · 已结束";
+  return orderTeamLabel(order);
 }
 
 function RailSection({ title, children }: { title: string; children: ReactNode }) {
@@ -140,7 +151,7 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
   onAuthError: (status: number) => void;
 }) {
   const [query, setQuery] = useState("");
-  const [detailsOpen, setDetailsOpen] = useState(() => typeof window === "undefined" || window.innerWidth > 1180);
+  const [detailsOpen, setDetailsOpen] = useState(true);
   const [pane, setPane] = useState<"list" | "chat" | "details">("list");
   const [imageErrors, setImageErrors] = useState<Record<string, number>>({});
   const [inventoryOrderId, setInventoryOrderId] = useState<string | null>(null);
@@ -192,7 +203,7 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
   const renderList = ({ items, selectedId, onSelect, loading, refreshing, nextCursor, onLoadMore }: OrderTeamListView) => {
     selectedRef.current = selectedId;
     const text = query.trim().toLowerCase();
-    const rows = text ? items.filter((row: OrderTeamListItem) => `${row.title} ${row.displayNo} ${orderTeamLabel(row)}`.toLowerCase().includes(text)) : items;
+    const rows = text ? items.filter((row: OrderTeamListItem) => `${row.title} ${row.displayNo} ${orderStageLabel(row)}`.toLowerCase().includes(text)) : items;
     return (
       <aside className="im-wb-queue" aria-label="我参与的订单群">
         <div className="im-wb-queue-head"><strong>我参与的订单群</strong><b>{items.length}</b></div>
@@ -201,14 +212,15 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
         <div className="im-wb-rows">
           {loading && !items.length ? <p className="im-wb-list-empty"><strong>正在读取订单群…</strong></p> : null}
           {rows.map((row) => {
-            const fact = row.teamState === "READY" ? escalationStateLabel(row.escalationState ?? "NOT_STARTED", row.firstResponseAt ?? null) : null;
+            const ended = row.status === "COMPLETED" || row.status === "CANCELLED";
+            const fact = !ended && row.teamState === "READY" ? escalationStateLabel(row.escalationState ?? "NOT_STARTED", row.firstResponseAt ?? null) : null;
             return (
               <button type="button" key={row.id} className="im-wb-row" data-active={selectedId === row.id} aria-current={selectedId === row.id ? "page" : undefined}
                 onClick={() => { setInventoryOrderId(null); setImageErrors({}); onSelect(row.id); setPane("chat"); }}>
                 <span className="im-wb-row-av" aria-hidden="true">{initialOf(row.title)}</span>
                 <span className="im-wb-row-copy">
                   <span className="im-wb-row-top"><b>{row.title}</b><i className="im-wb-tag">{row.displayNo}</i></span>
-                  <span className="im-wb-row-snip">{orderTeamLabel(row)}</span>
+                  <span className="im-wb-row-snip">{orderStageLabel(row)}</span>
                   {fact ? <span className="im-wb-row-foot"><em>{fact}</em></span> : null}
                 </span>
               </button>
@@ -242,23 +254,24 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
       const grouped = Boolean(previous && !decodeImSystemNotice(previous) && previous.senderId === message.senderId && (message.createTime ?? 0) - (previous.createTime ?? 0) < GROUP_WINDOW_MS);
       const self = message.senderId === view.accountId;
       const author = authorOf(info, message.senderId, view.accountId, operatorName);
+      const card = message.card;
       const image = imageOf(message);
       const imageUrl = image?.url ?? null;
       const failed = Boolean(imageUrl && imageErrors[message.id]);
       const text = typeof message.text === "string" && message.text.trim() ? message.text : message.messageType === 0 || image ? "" : "暂不支持展示的消息类型";
       nodes.push(<MessageScrollerPrimitive.Item key={message.id} messageId={message.id} scrollAnchor={!self}>
-        <Message align={self ? "end" : "start"} className="im-wb-msg" data-self={self} data-grouped={grouped}>
+        <Message align={self ? "end" : "start"} className="im-wb-msg" data-self={self} data-grouped={grouped} data-message-id={message.id} onContextMenu={view.menuHandlers.onContextMenu} {...view.menuHandlers.longPress}>
           <MessageAvatar className="im-wb-av" aria-hidden="true">{initialOf(author.name)}</MessageAvatar>
-          <MessageContent className="im-wb-msg-body">
+          <MessageContent className="im-wb-msg-body" data-card={card ? "true" : undefined}>
             {grouped ? null : <MessageHeader className="im-wb-msg-meta"><b>{author.name}</b>{author.role ? <span className="im-wb-role-tag" data-role={author.role}>{author.role}</span> : null}{self ? null : <time>{formatTime(message.createTime)}</time>}</MessageHeader>}
-            <Bubble align={self ? "end" : "start"} variant={self ? "default" : "secondary"}>
+            {card ? <OrderCardMessage message={message} info={info} onOpenOrder={() => { window.location.assign(`/orders/${encodeURIComponent(info.orderId)}`); }} /> : <Bubble align={self ? "end" : "start"} variant={self ? "default" : "secondary"}>
               <BubbleContent className="im-wb-bub">{image ? (imageUrl
                 ? (failed
                   ? <button type="button" className="im-wb-thumb im-wb-thumb-failed" onClick={() => setImageErrors((current) => { const next = { ...current }; delete next[message.id]; return next; })} aria-label={`重新加载图片 ${image.name}`}>图片加载失败 · 点击重试</button>
                   : <button type="button" className="im-wb-thumb" aria-label={`查看图片 ${image.name}`} onClick={(event) => view.openImage(imageUrl, image.name, event.currentTarget)}><img src={imageUrl} alt={image.name} loading="lazy" onError={() => setImageErrors((current) => ({ ...current, [message.id]: Date.now() }))} /></button>)
                 : <span className="im-wb-thumb-missing">图片暂不可预览</span>) : text}</BubbleContent>
-            </Bubble>
-            {self ? <MessageFooter className="im-wb-msg-status"><time>{formatTime(message.createTime)}</time><span>已发送</span></MessageFooter> : null}
+            </Bubble>}
+            {self && !card ? <MessageFooter className="im-wb-msg-status"><time>{formatTime(message.createTime)}</time><span>已发送</span></MessageFooter> : null}
           </MessageContent>
         </Message>
       </MessageScrollerPrimitive.Item>);
@@ -281,7 +294,6 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
           </div>
         </header>
         {view.error ? <p className="im-wb-notice" data-tone="warn" role="alert"><CircleAlert size={14} />{view.error}</p> : null}
-        {!view.canSend ? <p className="im-wb-action-note"><CircleAlert size={13} />当前只可阅读本单消息；已加载历史与草稿保留。</p> : null}
         <div className="im-wb-stream-wrap">
           <MessageScrollerPrimitive.Provider autoScroll defaultScrollPosition="last-anchor">
             <MessageScrollerPrimitive.Root className="im-wb-scroller">
@@ -304,7 +316,8 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
           <button type="button" onClick={view.onRetryPendingImage} disabled={view.sending || view.isImageSending || !view.canSend}>{view.pendingImage.messageClientId ? "原消息重试" : "重试"}</button>
           <button type="button" onClick={view.onRemovePending} disabled={view.sending || view.isImageSending || view.pendingImage.state === "UNKNOWN" || !view.canSend} title={view.pendingImage.state === "UNKNOWN" ? "结果未确认时不可移除原图片" : undefined}>移除</button>
         </div> : null}
-        <form className="im-wb-composer" onSubmit={(event) => { event.preventDefault(); void view.onSubmit(event); }}>
+        {view.replyLabel ? <MessageReplyQuote label={view.replyLabel} onCancel={view.onCancelReply} /> : null}
+        {!view.canSend ? <div className="im-wb-composer im-wb-composer-readonly" role="status"><CircleAlert size={14} aria-hidden="true" />{info.orderStatus === "COMPLETED" || info.orderStatus === "CANCELLED" ? "本单已结束，仅可查看历史消息" : "当前只可阅读本单消息；历史与草稿会保留"}</div> : <form className="im-wb-composer" onSubmit={(event) => { event.preventDefault(); void view.onSubmit(event); }}>
           {view.stagedImages.length ? <AttachmentGroup className="im-wb-tray">{view.stagedImages.map((item, idx) => <Attachment key={item.previewUrl} className="im-wb-tray-item" data-state={item.state} state={item.state === "DECODING" ? "processing" : "idle"} size="xs">
             <AttachmentMedia variant="image"><img src={item.previewUrl} alt="" /></AttachmentMedia>
             <AttachmentContent>
@@ -328,22 +341,22 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
               <button type="submit" className="im-wb-send" disabled={!view.canSend || view.connection !== "CONNECTED" || view.sending || view.isImageSending || view.imageBlocked || (!view.draft.trim() && !view.stagedImages.length && !(view.pendingImage?.state === "FAILED"))}>{view.sending ? "发送中…" : "发送"}</button>
             </InputGroupAddon>
           </InputGroup>
-        </form>
+        </form>}
       </div>
     );
   };
 
-  const renderAside = ({ info, fulfillment }: OrderTeamAsideView) => {
+  const renderAside = ({ info }: OrderTeamAsideView) => {
     const lines = info.frozenInventory ?? [];
     const esc = info.supportEscalation;
     const review = escalationReviewReason(esc);
     const tracking = escalationStateLabel(esc.state, esc.firstResponseAt ?? null);
     return (
       <aside id="im-order-details" className="order-team-aside im-wb-details" aria-label="本单详情" hidden={!detailsOpen}>
-        <div className="im-wb-details-head"><strong>本单详情</strong>
-          <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-sm" className="im-rail-icon" data-action="collapse-order-details" onClick={closeDetails} aria-label="收起本单详情" />}><X aria-hidden="true" /></TooltipTrigger><TooltipContent>收起本单详情</TooltipContent></Tooltip></div>
+        <div className="im-wb-details-head"><strong>本单详情</strong></div>
         <div className="im-order-rail">
-          {fulfillment}
+          {/* 右侧需要订单终态：renderFulfillment 槽位不带 orderStatus，故由本栏直接传入。 */}
+          <OrderFulfillmentSection key={info.orderId} orderId={info.orderId} displayNo={info.displayNo} viewerId={adminUserId} orderStatus={info.orderStatus} {...(info.frozenInventory ? { frozenInventory: info.frozenInventory } : {})} />
 
           <RailSection title="本单账号">
             <Card className="im-order-card">
@@ -429,7 +442,6 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
       key={identity} identity={identity} realm="admin" layout="aside" client={client} connection={connection} active={active}
       sendAllowed={sendAllowed} request={request} onAuthError={onAuthError}
       gridPane={pane} gridDetailsOpen={detailsOpen}
-      renderFulfillment={({ orderId, displayNo, frozenInventory }) => <OrderFulfillmentSection orderId={orderId} displayNo={displayNo} viewerId={adminUserId} {...(frozenInventory ? { frozenInventory } : {})} />}
       renderList={renderList} renderAside={renderAside} renderConversation={renderConversation}
     /></TooltipProvider>
   );

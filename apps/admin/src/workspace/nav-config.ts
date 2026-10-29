@@ -7,6 +7,7 @@ import {
   ImageIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
+  ChartNoAxesCombinedIcon,
   ListChecksIcon,
   MessagesSquareIcon,
   NewspaperIcon,
@@ -36,8 +37,12 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
     { label: "工作台", icon: LayoutDashboardIcon, path: "/workbench", kind: "workbench" },
   ];
 
-  if (has("im.support.read") || nav.isBoss) {
-    items.push({ label: "客户服务", isTitle: true }, { label: "客服工作台", icon: MessagesSquareIcon, path: "/support", kind: "support" });
+  const supportVisible = has("im.support.read") || nav.isBoss;
+  const supportManagementVisible = has("im.support.management.read") || nav.isBoss;
+  if (supportVisible || supportManagementVisible) {
+    items.push({ label: "客户服务", isTitle: true });
+    if (supportVisible) items.push({ label: "客服工作台", icon: MessagesSquareIcon, path: "/support", kind: "support" });
+    if (supportManagementVisible) items.push({ label: "客服管理", icon: ChartNoAxesCombinedIcon, path: "/support/management", kind: "support-management" });
   }
 
   const membershipOps = nav.isBoss || ["membership.policy.draft", "membership.policy.publish", "membership.growth.read.summary"].some(has)
@@ -135,6 +140,7 @@ export function titleForPath(pathname: string): string {
   if (pathname === "/settings") return "设置";
   if (pathname === "/account") return "账号安全";
   if (pathname === "/support") return "客服工作台";
+  if (pathname === "/support/management") return "客服管理";
   if (pathname === "/membership-growth") return "会员与礼遇";
   if (pathname === "/distribution-policy") return "分销管理";
   return "工作台";
@@ -158,6 +164,7 @@ export function normalizeSearchString(str: string): string {
 export const PAGE_SEARCH_KEYWORDS: Record<string, string[]> = {
   "/workbench": ["工作台", "首页", "workbench", "gzt"],
   "/support": ["客服工作台", "客服", "履约", "消息", "im", "support", "kf", "ly"],
+  "/support/management": ["客服管理", "看板", "巡视", "统计", "交接", "客服", "im"],
   "/distribution-policy": ["分销管理", "分销", "邀请", "政策", "distribution", "fx"],
   "/membership-growth": ["会员与礼遇", "会员成长", "礼遇", "会员", "增长", "策略", "membership", "hy", "cz"],
   "/admins": ["管理员管理", "管理员", "账号", "staff", "admins", "gly", "zh"],
