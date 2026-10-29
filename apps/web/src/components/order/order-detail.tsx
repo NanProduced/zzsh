@@ -256,7 +256,7 @@ function AmountCard({ order, party, facts, readFailed }: { order: Order; party: 
   </section>;
 }
 
-function ContactCard({ order, party, onChanged, quiet }: { order: Order; party: OrderParty; onChanged: () => void; quiet: boolean }) {
+function ContactCard({ order, onChanged, quiet }: { order: Order; onChanged: () => void; quiet: boolean }) {
   if (!order.fulfillmentAssignment) return null;
   const value = order.fulfillmentAssignment;
   const ended = order.status === "COMPLETED" || order.status === "CANCELLED" || order.readOnly === true;
@@ -277,7 +277,6 @@ function ContactCard({ order, party, onChanged, quiet }: { order: Order; party: 
       <div><dt>订单群</dt><dd>{value.teamReady ? "已就绪" : value.teamState ? "尚未就绪" : "状态待确认"}</dd></div>
     </dl> : null}
     {quiet ? null : <div className="order-contact-actions">
-      <button type="button" className="button secondary" data-support-trigger onClick={() => window.dispatchEvent(new CustomEvent("zzsh:order-groups", { detail: { party, orderId: order.id } }))}><MessageCircle size={15} aria-hidden="true" />{ended ? "查看订单群" : "打开订单群"}</button>
       <button type="button" className="button quiet" onClick={onChanged}><RefreshCw size={15} aria-hidden="true" />刷新订单</button>
     </div>}
   </section>;
@@ -552,7 +551,7 @@ export function OrderDetail({ party, status, accountId, orderId, state, onRetry,
       </div>
       <aside className="order-detail-aside">
         <AmountCard order={order} party={party} facts={facts} readFailed={read.failed} />
-        <ContactCard order={order} party={party} onChanged={onChanged} quiet={Boolean(attention)} />
+        <ContactCard order={order} onChanged={onChanged} quiet={Boolean(attention)} />
       </aside>
     </div>
   </section>;
