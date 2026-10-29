@@ -1,9 +1,17 @@
 "use client";
-import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
-export type MessageActionId = "copy" | "reply" | "revoke" | "delete";
-export type MessageActionItem = { id: MessageActionId; label: string; danger?: boolean };
+export type MessageActionId = "copy" | "reply" | "revoke" | "delete" | "jump";
+export type MessageActionItem = { id: MessageActionId; label: string; danger?: boolean; icon?: ReactNode };
+function menuIcon(id: MessageActionId): ReactNode {
+  const common = { width: 14, height: 14, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const, "aria-hidden": true };
+  if (id === "copy") return <svg {...common}><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>;
+  if (id === "reply") return <svg {...common}><path d="M9 17 4 12l5-5"/><path d="M4 12h10a6 6 0 0 1 6 6v2"/></svg>;
+  if (id === "revoke") return <svg {...common}><path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg>;
+  if (id === "delete") return <svg {...common}><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v5M14 11v5"/></svg>;
+  return <svg {...common}><path d="M7 7h10v10"/><path d="M7 17 17 7"/></svg>;
+}
 export type MessagePoint = { x: number; y: number };
 export type MessageLongPressHandlers = {
   onPointerDown: (event: ReactPointerEvent<HTMLElement>) => void;
@@ -141,7 +149,7 @@ export function MessageActionMenu({ x, y, items, onSelect, onClose, returnFocus,
           onClick={() => {
             if (item.id === "revoke" && !confirmRevoke) { setConfirmRevoke(true); return; }
             onSelect(item.id);
-          }}>{confirming ? "确认撤回" : item.label}</button>;
+          }}><span className="message-action-icon">{item.icon ?? menuIcon(item.id)}</span>{confirming ? "确认撤回" : item.label}</button>;
       })}
     </div>,
     document.body
@@ -161,9 +169,20 @@ export const CHAT_EMOJIS = [
   { emoji: "❌", label: "不行" }, { emoji: "⭐", label: "星标" }, { emoji: "🎮", label: "游戏" },
 ] as const;
 
-/** A compact, non-interactive quote shown inside a sent message bubble. */
-export function MessageQuoted({ text }: { text: string }) {
-  return <span className="message-quoted" title={text}><span className="message-quoted-label">引用</span><span className="message-quoted-text">{text}</span></span>;
+/** A compact quote below a sent message; right-click opens the jump action. */
+export function MessageQuoted({ text, senderName, onJump }: { text: string; senderName?: string | null; onJump?: () => void }) {
+  const [menu, setMenu] = useState<MessagePoint | null>(null);
+  const quoteRef = useRef<HTMLSpanElement | null>(null);
+  const jump = () => { setMenu(null); onJump?.(); };
+  return <>
+    <span ref={quoteRef} className="message-quoted" data-jump={onJump ? "true" : undefined} title={onJump ? "右键定位原文" : text}
+      onClick={() => { if (onJump) jump(); }}
+      onContextMenu={(event) => { if (!onJump) return; event.preventDefault(); event.stopPropagation(); setMenu({ x: event.clientX, y: event.clientY }); }}>
+      {senderName ? <span className="message-quoted-sender">{senderName}：</span> : null}
+      <span className="message-quoted-text">{text}</span>
+    </span>
+    {menu ? <MessageActionMenu x={menu.x} y={menu.y} label="引用操作" items={[{ id: "jump", label: "定位到原文位置" }]} onSelect={jump} onClose={() => setMenu(null)} returnFocus={quoteRef.current} /> : null}
+  </>;
 }
 
 export function MessageReplyQuote({ label, onCancel, disabled = false, cancelLabel = "取消引用" }: { label: string; onCancel: () => void; disabled?: boolean; cancelLabel?: string }) {

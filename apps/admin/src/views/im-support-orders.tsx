@@ -245,6 +245,16 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
 
   const renderConversation = (view: OrderTeamConversationView) => {
     const { info, messages } = view;
+    const jumpToMessage = (messageId: string) => {
+      const target = messages.find((message) => message.id === messageId || message.messageClientId === messageId || message.messageServerId === messageId);
+      if (!target) return;
+      const node = [...document.querySelectorAll<HTMLElement>("[data-message-id]")].find((item) => item.dataset.messageId === target.id);
+      if (!node) return;
+      node.scrollIntoView?.({ block: "center", behavior: "smooth" });
+      const targetNode = node.querySelector<HTMLElement>(".im-wb-bub") ?? node;
+      targetNode.classList.add("message-quote-target");
+      window.setTimeout(() => targetNode.classList.remove("message-quote-target"), 1600);
+    };
     const insertEmoji = (emoji: string) => {
       const el = orderComposerRef.current;
       const start = el?.selectionStart ?? view.draft.length;
@@ -293,12 +303,12 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
               <BubbleContent className="im-wb-bub" data-revoked="true">消息已撤回</BubbleContent>
             </Bubble> : card ? <OrderCardMessage message={message} info={info} onOpenOrder={() => { window.location.assign(`/orders/${encodeURIComponent(info.orderId)}`); }} /> : <Bubble align={self ? "end" : "start"} variant={self ? "default" : "secondary"}>
               <BubbleContent className="im-wb-bub">
-                {message.reply ? <MessageQuoted text={message.reply.text ?? "消息"} /> : null}
                 {image ? (imageUrl
                 ? (failed
                   ? <button type="button" className="im-wb-thumb im-wb-thumb-failed" onClick={() => setImageErrors((current) => { const next = { ...current }; delete next[message.id]; return next; })} aria-label={`重新加载图片 ${image.name}`}>图片加载失败 · 点击重试</button>
                   : <button type="button" className="im-wb-thumb" aria-label={`查看图片 ${image.name}`} onClick={(event) => view.openImage(imageUrl, image.name, event.currentTarget)}><img src={imageUrl} alt={image.name} loading="lazy" onError={() => setImageErrors((current) => ({ ...current, [message.id]: Date.now() }))} /></button>)
                 : <span className="im-wb-thumb-missing">图片暂不可预览</span>) : text}
+                {message.reply ? <MessageQuoted text={message.reply.text ?? "消息"} senderName={info.members.find((member) => member.accountId === message.reply!.senderId)?.name?.trim() || null} onJump={() => jumpToMessage(message.reply!.messageId)} /> : null}
               </BubbleContent>
             </Bubble>}
             {self && !card && !revoked ? <MessageFooter className="im-wb-msg-status"><time>{formatTime(message.createTime)}</time><span>已发送</span></MessageFooter> : null}

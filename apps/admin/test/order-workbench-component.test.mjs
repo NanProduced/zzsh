@@ -438,8 +438,11 @@ test("quoted replies are visible on the admin side and revoked messages stay exp
   const { node, until } = await mount(t, "ready-three", { fixture });
   await until(() => node.querySelector(".im-wb-bub .message-quoted"), "quoted reply rendered");
   const quote = node.querySelector(".im-wb-bub .message-quoted");
-  assert.match(quote.textContent, /引用/);
-  assert.match(quote.textContent, /你好，付款后从哪里交接？/);
+  assert.match(quote.textContent, /小林：你好，付款后从哪里交接？/);
+  await act(async () => quote.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 360, clientY: 260 })));
+  await until(() => browser.document.querySelector('.message-action-menu [data-action="jump"]'), "quote jump menu");
+  await act(async () => browser.document.querySelector('.message-action-menu [data-action="jump"]').click());
+  await until(() => node.querySelector(".message-quote-target"), "jumped message highlighted");
   const revoked = node.querySelector('.im-wb-bub[data-revoked="true"]');
   assert.ok(revoked, "revoked message keeps an explicit state");
   assert.match(revoked.textContent, /消息已撤回/);

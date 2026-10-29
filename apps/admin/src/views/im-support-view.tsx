@@ -1312,6 +1312,16 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
     // current assignee's identity.
     return message.from === "agent" ? { name: "客服", role: "平台客服" } : { name: selected?.user?.name || selected?.user?.username || "平台用户", role: "平台用户" };
   };
+  const jumpToMessage = (messageId: string) => {
+    const target = selectedMessages.find((message) => message.id === messageId || message.source?.messageServerId === messageId || message.source?.messageClientId === messageId);
+    if (!target) return;
+    const node = [...document.querySelectorAll<HTMLElement>("[data-message-id]")].find((item) => item.dataset.messageId === target.id);
+    if (!node) return;
+    node.scrollIntoView?.({ block: "center", behavior: "smooth" });
+    const targetNode = node.querySelector<HTMLElement>(".im-wb-bub") ?? node;
+    targetNode.classList.add("message-quote-target");
+    window.setTimeout(() => targetNode.classList.remove("message-quote-target"), 1600);
+  };
   let timelineDay = "";
   const timelineItems = selectedMessages.map((message, index) => {
     const nodes = [];
@@ -1330,19 +1340,19 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
     const imageUrl = message.image ? supportedImageUrl(message.image.url) : null;
     const mine = message.self === true;
     nodes.push(<MessageScrollerPrimitive.Item key={message.id} messageId={message.id} scrollAnchor={message.from === "customer"} tabIndex={-1} onContextMenu={onMessageContextMenu} {...messageLongPress}>
-      <Message align={mine ? "end" : "start"} className="im-wb-msg" data-from={message.from} data-self={mine} data-grouped={grouped}>
+      <Message align={mine ? "end" : "start"} className="im-wb-msg" data-message-id={message.id} data-from={message.from} data-self={mine} data-grouped={grouped}>
         <MessageAvatar className="im-wb-av" aria-hidden="true">{initialOf(author.name)}</MessageAvatar>
         <MessageContent className="im-wb-msg-body">
           {grouped ? null : <MessageHeader className="im-wb-msg-meta"><b>{author.name}</b><span className="im-wb-role-tag" data-role={author.role}>{author.role}</span>{mine ? null : <time>{message.time}</time>}</MessageHeader>}
           <Bubble align={mine ? "end" : "start"} variant={mine ? "default" : "secondary"}>
             <BubbleContent className="im-wb-bub" data-revoked={message.revoked ? "true" : undefined}>
               {message.revoked ? "消息已撤回" : <>
-                {message.source?.reply ? <MessageQuoted text={message.source.reply.text ?? "消息"} /> : null}
                 {message.image ? (imageUrl
                   ? (imageErrors[message.id]
                     ? <button type="button" className="im-wb-thumb im-wb-thumb-failed" data-action="retry-image" onClick={() => setImageErrors((current) => { const next = { ...current }; delete next[message.id]; return next; })} aria-label={`重新加载图片 ${message.image.name}`}>图片加载失败 · 点击重试</button>
                     : <button type="button" className="im-wb-thumb" onClick={() => setViewer({ url: imageUrl, name: message.image!.name })} aria-label={`查看图片 ${message.image.name}`}><img key={imageErrors[message.id] ?? imageUrl} src={imageUrl} alt={message.image.name} loading="lazy" onError={() => setImageErrors((current) => ({ ...current, [message.id]: Date.now() }))} /></button>)
                   : <span className="im-wb-thumb-missing">图片暂不可预览</span>) : message.text}
+                {message.source?.reply ? <MessageQuoted text={message.source.reply.text ?? "消息"} senderName={(() => { const target = selectedMessages.find((item) => item.id === message.source!.reply!.messageId || item.source?.messageServerId === message.source!.reply!.messageId || item.source?.messageClientId === message.source!.reply!.messageId); return target ? authorFor(target).name : null; })()} onJump={() => jumpToMessage(message.source!.reply!.messageId)} /> : null}
               </>}
             </BubbleContent>
           </Bubble>
