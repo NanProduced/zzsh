@@ -2,7 +2,7 @@ import {createHash} from 'node:crypto';
 import type {PoolClient} from 'pg';
 import {SecurityApiError} from '../auth/security-core';
 import {canonicalize} from '../supply/content-hash';
-import {ensureOnlyFields,invalid} from '../supply/supply-util';
+import {conflict,ensureOnlyFields,invalid} from '../supply/supply-util';
 
 export const OBSERVATION_ENTITIES={
  HISTORICAL_EARNINGS_LOG:'la_log_earnings',
@@ -101,4 +101,18 @@ export async function readObservationCoverage(client:PoolClient,userId:string,ki
  if(row.outside_count!=='0')return{knowledge:'UNKNOWN',reason:'HISTORICAL_COVERAGE_OUTDATED',count:null,cutoff:row.cutoff,version};
  if(counts[2]!=='0')return{knowledge:'UNKNOWN',reason:'HISTORICAL_SOURCE_ISOLATED',count:null,cutoff:row.cutoff,version};
  return{knowledge:'KNOWN',reason:'SOURCE_COMPLETE_THROUGH_CUTOFF',count:counts[0]!,cutoff:row.cutoff,version};
+}
+
+/** Opening and its earnings-log witness share a cutoff, unlike independent withdrawal/distribution history.
+ * Callers hold the subject lock; an existing incompatible witness must not be extended or hidden. */
+export async function assertFinanceSingleCutoff(client:PoolClient,input:{userId:string;cutoff:string;write:'OPENING'|'OBSERVATION'}){
+ if(typeof input.userId!=='string'||!id.test(input.userId)||typeof input.cutoff!=='string'||!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(input.cutoff)||!Number.isFinite(Date.parse(input.cutoff))||!['OPENING','OBSERVATION'].includes(input.write))throw invalid('Exact finance cutoff admission required');
+ let row:Record<string,unknown>|undefined;
+ try{row=(await client.query(`/* finance single cutoff admission */ SELECT
+  EXISTS(SELECT 1 FROM zzsh_order.finance_opening_basis b WHERE b.user_id=$1 AND b.source_kind='LEGACY_OPENING' AND b.source_system='legacy_mysql_restore' AND b.source_cutoff<>$2::timestamptz) AS "openingDiffers",
+  EXISTS(SELECT 1 FROM zzsh_order.personal_finance_observation_coverage c WHERE c.user_id=$1 AND c.source_system='legacy_mysql_restore' AND c.source_kind='HISTORICAL_EARNINGS_LOG' AND c.source_entity='la_log_earnings' AND c.source_cutoff<>$2::timestamptz) AS "coverageDiffers"`,
+  [input.userId,input.cutoff])).rows[0];}
+ catch(error){if((error as {code?:string}|null)?.code==='42P01')throw unavailable();throw error;}
+ if(typeof row?.openingDiffers!=='boolean'||typeof row?.coverageDiffers!=='boolean')throw unavailable();
+ if(row.openingDiffers||row.coverageDiffers)throw conflict('Opening and historical coverage cutoffs differ; a cross-cutoff history needs a separately reviewed version scheme');
 }

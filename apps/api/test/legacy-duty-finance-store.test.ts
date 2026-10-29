@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {canonicalize} from '../src/supply/content-hash';
-import {bindReviewedLegacyDutyFinance,finalizeReviewedLegacyDuty,recoverReviewedLegacyDuty,readLegacyDutyFinalization,type LegacyDutyTradeReader,type LegacyDutyFinanceReview} from '../src/finance/legacy-duty-finance-store';
+import {bindReviewedLegacyDutyFinance,finalizeReviewedLegacyDuty,recoverReviewedLegacyDuty,readLegacyDutyFinalization,readLegacyCommissionResponsibility,readLegacyCommissionResponsibilityVersion,type LegacyDutyTradeReader,type LegacyDutyFinanceReview} from '../src/finance/legacy-duty-finance-store';
 import type {LegacyFinanceDuty,LegacyDutyFinalBasis,LegacyDutyFundingProof} from '../src/finance/legacy-duty-finance';
 const sha=(v:unknown)=>createHash('sha256').update(canonicalize(v)).digest('hex'),actor={userId:'fixture-boss',sessionId:'fixture-session',requestId:'fixture-request'},orderId='legacy_order_'+'a'.repeat(40),dutyId='legacy_duty_'+'b'.repeat(40);
 const resource={host:'127.0.0.1' as const,port:55432 as const,database:'zzsh_test_order_duty_fixture',oid:42,owner:'fixture_owner',marker:'zzsh:order-reservation-test:v1',role:'fixture_owner',roleOid:43};
@@ -70,4 +70,30 @@ test('current authority/resource/window remain required for original receipt and
  const f=fixture(),s=await bindReviewedLegacyDutyFinance(f.client,actor,f.review,'recover'),result=await recoverReviewedLegacyDuty(f.client,actor,f.input,s,f.trade);assert.equal(result.knowledge,'UNKNOWN');assert.equal(result.receipt,null);assert(!f.state.queries.some(q=>q.sql.startsWith('INSERT')));await assert.rejects(finalizeReviewedLegacyDuty(f.client,actor,f.input,s,f.trade),(e:any)=>e.status===403);
  f.state.identity=false;await assert.rejects(recoverReviewedLegacyDuty(f.client,actor,f.input,s,f.trade),(e:any)=>e.status===401);
  const g=fixture();g.state.enabled=false;await assert.rejects(bindReviewedLegacyDutyFinance(g.client,actor,g.review),(e:any)=>e.status===503);
+});
+function readClient(rows:Record<string,any>[],version='a'.repeat(32)){
+ const seen:{sql:string;args:any[]}[]=[];
+ return{seen,c:{query:async(sql:string,args:any[]=[])=>{seen.push({sql,args});if(sql.includes('responsibility version'))return{rows:[{version}]};if(sql.includes('current responsibility'))return{rows};throw Error('Unexpected read query');}} as any};
+}
+test('current responsibility reads one bounded exact duty page and never treats a missing duty as zero or paid',async()=>{
+ const row={sourceRecordId:'1',dutyId:'legacy_duty_'+'a'.repeat(40),orderId:'legacy_order_'+'b'.repeat(40),status:'MATURED',amountCents:'900',currency:'CNY',revision:'2',revised:true,maturityAt:'2026-10-05T00:00:00.000000Z',settledBy:null};
+ const f=readClient([row]),map=await readLegacyCommissionResponsibility(f.c,'renter',['1','2']);
+ assert.deepEqual(map.get('1'),{knowledge:'KNOWN',dutyId:row.dutyId,orderId:row.orderId,state:'MATURED',amountCents:'900',currency:'CNY',revision:'2',revised:true,maturityAt:'2026-10-05T00:00:00.000000Z',settledBy:null});
+ assert.deepEqual(map.get('2'),{knowledge:'UNKNOWN',reason:'LEGACY_RESPONSIBILITY_NOT_ASSOCIATED'});
+ assert.deepEqual(f.seen[0]!.args,['renter',['1','2']]);assert.match(f.seen[0]!.sql,/kind='COMMISSION'/);assert.match(f.seen[0]!.sql,/counterparty_user_id=\$1/);assert.match(f.seen[0]!.sql,/LIMIT 51/);
+ assert(!f.seen.some(q=>/^(INSERT|UPDATE|DELETE)/.test(q.sql)));
+ for(const patch of [{status:'PAID'},{amountCents:'1.00'},{currency:'USD'},{revision:'0'},{settledBy:'FINANCE'},{status:'SETTLED',settledBy:null},{maturityAt:'2026-10-05T00:00:00Z'}]){
+  const bad=readClient([{...row,...patch}]);await assert.rejects(()=>readLegacyCommissionResponsibility(bad.c,'renter',['1']),/responsibility source changed/);
+ }
+ const settled=readClient([{...row,status:'SETTLED',settledBy:'FINANCE',amountCents:'0'}]);
+ assert.equal((await readLegacyCommissionResponsibility(settled.c,'renter',['1'])).get('1')?.knowledge,'KNOWN');
+ const duplicate=readClient([row,{...row,dutyId:'legacy_duty_'+'c'.repeat(40)}]);
+ assert.deepEqual((await readLegacyCommissionResponsibility(duplicate.c,'renter',['1'])).get('1'),{knowledge:'UNKNOWN',reason:'LEGACY_RESPONSIBILITY_AMBIGUOUS'});
+ const foreign=readClient([{...row,sourceRecordId:'9'}]);await assert.rejects(()=>readLegacyCommissionResponsibility(foreign.c,'renter',['1']),/subject\/source changed/);
+ for(const args of [['bad user',['1']],['renter',['01']],['renter',['1','1']],['renter',[]]] as any[]){
+  if(args[1].length===0&&args[0]==='renter'){assert.equal((await readLegacyCommissionResponsibility(readClient([]).c,'renter',[])).size,0);continue;}
+  await assert.rejects(()=>readLegacyCommissionResponsibility(readClient([]).c,args[0],args[1]));
+ }
+ assert.equal(await readLegacyCommissionResponsibilityVersion(readClient([], 'd'.repeat(32)).c,'renter'),'d'.repeat(32));
+ await assert.rejects(()=>readLegacyCommissionResponsibilityVersion(readClient([], 'short').c,'renter'),/version is inconsistent/);
 });

@@ -81,3 +81,20 @@ test('Native frozen terms are not relabelled local-controlled or channel arrival
  const calculation={knowledge:'KNOWN',policyVersion:'NATIVE_FROZEN',beneficiaryLevelCode:null,rateMode:'UNIFORM',percent:'2',basis:'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE',baseDisclosure:'INTERNAL_SETTLEMENT_ONLY',rounding:'HALF_UP_CENT',cap:'COMBINED_ROLES_NOT_ABOVE_BASE',scope:'NATIVE',orderNumber:null};
  const p=await probe(async()=>Response.json({...base('user_A'),item:{...native,calculation}}),'view=invite&earning=native%3Atwo');try{await p.render();const text=p.host.querySelector('.earning-calculation').textContent;assert.match(text,/原付款冻结政策/);assert.doesNotMatch(text,/本地联验政策|已到账/);}finally{await p.close();}
 });
+test('current responsibility VOID/MATURED is shown apart from the original state and never claims payout',async()=>{
+ const resp=(patch={})=>({knowledge:'KNOWN',dutyId:'legacy_duty_a',orderId:'legacy_order_b',state:'VOID',amountCents:'900',currency:'CNY',revision:'2',revised:true,maturityAt:'2026-10-05T00:00:00.000000Z',settledBy:null,...patch});
+ const entry={...old,currentResponsibility:resp()},p=await probe(async url=>Response.json(String(url).includes('/history%3Aone')?{...base('user_A'),item:entry}:page('user_A',[entry])));
+ try{await p.render();assert.match(p.host.textContent,/当前责任已撤销，不再支付/);assert.match(p.host.textContent,/当前责任与本站承接金额另列/);await p.click('购买分佣');const detail=p.host.querySelector('.earning-detail').textContent;assert.match(detail,/原记录状态已结算/);assert.match(detail,/当前责任已撤销，不再支付/);assert.match(detail,/当前责任金额¥9\.00/);assert.match(detail,/责任修订/);assert.doesNotMatch(detail,/已到账|已打款/);}finally{await p.close();}
+ const matured={...old,currentResponsibility:resp({state:'MATURED'})},q=await probe(async url=>Response.json(String(url).includes('/history%3Aone')?{...base('user_A'),item:matured}:page('user_A',[matured])));
+ try{await q.render();assert.match(q.host.textContent,/已成熟，待本站财账终定/);await q.click('购买分佣');const detail=q.host.querySelector('.earning-detail').textContent;assert.match(detail,/当前责任已成熟，但仍须本站财账终定/);assert.match(detail,/预计成熟时间/);assert.doesNotMatch(detail,/已到账|已打款/);}finally{await q.close();}
+});
+test('Root a settled duty without verified finance retains the original row state and never claims verified accounting',async()=>{
+ const item={...old,currentResponsibility:{knowledge:'KNOWN',dutyId:'legacy_duty_a',orderId:'legacy_order_b',state:'SETTLED',amountCents:'900',currency:'CNY',revision:'3',revised:true,maturityAt:at,settledBy:'FINANCE'}};
+ const p=await probe(async url=>Response.json(String(url).includes('/history%3Aone')?{...base('user_A'),item}:page('user_A',[item])));
+ try{
+  await p.render();const row=p.host.querySelector('.earning-record').textContent;
+  assert.match(row,/原记录：已结算/);assert.match(row,/责任标记已结清/);assert.doesNotMatch(row,/本站财账已终定|已按原责任入账/);
+  await p.click('购买分佣');const detail=p.host.querySelector('.earning-detail').textContent;
+  assert.match(detail,/责任标记已结清/);assert.doesNotMatch(detail,/本站财账已终定|已按原责任入账/);
+ }finally{await p.close();}
+});

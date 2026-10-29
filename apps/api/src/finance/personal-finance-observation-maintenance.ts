@@ -5,7 +5,7 @@ import {canonicalize} from '../supply/content-hash';
 import {conflict,ensureOnlyFields,fingerprintRequest,invalid,withIdempotency} from '../supply/supply-util';
 import {authorizeFinanceMaintenance,assertFinanceMaintenanceResource,type FinanceOpeningReview} from './personal-finance-maintenance';
 import {prepareHistoricalObservation} from './personal-finance-read';
-import {prepareObservationCoverage,type ObservationCoverageInput} from './personal-finance-coverage';
+import {prepareObservationCoverage,assertFinanceSingleCutoff,type ObservationCoverageInput} from './personal-finance-coverage';
 
 type Actor={userId:string;sessionId:string;requestId:string};
 export type ObservationImportInput={coverage:ObservationCoverageInput;observations:Record<string,unknown>[]};
@@ -81,6 +81,7 @@ export async function importReviewedFinanceObservations(client:PoolClient,actor:
  await authorize(client,actor,scope,input);
  const result=await withIdempotency(client,{realm:'admin',principalId:actor.userId,operation},plan.key,fingerprintRequest(operation,c.id,input),async()=>{await authorize(client,actor,scope,input);},async()=>{
   await client.query(`SELECT id FROM zzsh_auth_user."user" WHERE id=$1 FOR UPDATE`,[c.userId]);
+  if(c.sourceKind==='HISTORICAL_EARNINGS_LOG')await assertFinanceSingleCutoff(client,{userId:c.userId,cutoff:c.cutoff,write:'OBSERVATION'});
   await setAuditContext(client,'admin',actor.userId,actor.sessionId,actor.requestId);
   for(const o of plan.observations){
    const existing=(await client.query(`/* finance history existing observation */ SELECT * FROM zzsh_order.personal_finance_observation WHERE source_type='LEGACY_MYSQL' AND source_system=$1 AND source_entity=$2 AND source_id=$3`,[o.sourceSystem,o.sourceEntity,o.sourceId])).rows[0];

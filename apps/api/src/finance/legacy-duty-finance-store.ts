@@ -86,6 +86,10 @@ async function verifyOriginal(c:PoolClient,duty:LegacyFinanceDuty):Promise<Legac
  return verifyStoredFact(duty,fact,rawLines);
 }
 export type LegacyCommissionFinance= {knowledge:'UNKNOWN';reason:string}|{knowledge:'KNOWN';state:'SETTLED';amountCents:string;zeroFinalization:boolean;reference:LegacyDutyRef};
+/** Duty-level responsibility from the original source record/beneficiary; never a new posting or payable claim by itself. */
+export type LegacyCommissionResponsibility=
+ |{knowledge:'UNKNOWN';reason:'LEGACY_RESPONSIBILITY_NOT_ASSOCIATED'|'LEGACY_RESPONSIBILITY_AMBIGUOUS'|'LEGACY_RESPONSIBILITY_NOT_ADMITTED'}
+ |{knowledge:'KNOWN';dutyId:string;orderId:string;state:'PENDING'|'MATURED'|'SETTLED'|'VOID';amountCents:string;currency:'CNY';revision:string;revised:boolean;maturityAt:string|null;settledBy:'FINANCE'|'LEGACY_RECORDS'|null};
 export type AdminLegacyDutyFinance={dutyId:string;orderId:string;kind:LegacyFinanceDuty['kind'];subjectId:string|null;state:string;knowledge:'KNOWN'|'UNKNOWN';amountCents:string|null;finalization:'POSTED'|'FINALIZED_ZERO'|'UNKNOWN';reference:LegacyDutyRef|null;postedAt:string|null;parentSourceId:string|null;parentSourceDigest:string|null;reasonCodes:string[]};
 /** The caller supplies current document/object authority; one exact root read never advances a duty. */
 export async function readAdminLegacyDutyFinances(c:PoolClient,target:{orderId:string}|{dutyId:string}):Promise<Map<string,AdminLegacyDutyFinance>>{
@@ -134,6 +138,36 @@ export async function readLegacyCommissionFinance(c:PoolClient,userId:string,sou
   if(duty.status!=='SETTLED'||duty.settledBy!=='FINANCE'||verifyStoredFact(duty,row,row.actual_lines)==='UNKNOWN')throw unavailable('Legacy commission final financial facts require reconciliation');
   out.set(duty.sourceRecordId,{knowledge:'KNOWN',state:'SETTLED',amountCents:duty.amountCents,zeroFinalization:duty.amountCents==='0',reference:{type:duty.settledRefType as LegacyDutyRef['type'],id:duty.settledRefId!,digest:duty.settledRefDigest!}});
  }return out;
+}
+/** Persistent duty state is the current responsibility; maturity time alone never makes it MATURED. */
+export async function readLegacyCommissionResponsibility(c:PoolClient,userId:string,sourceIds:string[]):Promise<Map<string,LegacyCommissionResponsibility>>{
+ if(typeof userId!=='string'||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/.test(userId)||sourceIds.length>50||sourceIds.some(id=>!/^[1-9]\d{0,23}$/.test(id))||new Set(sourceIds).size!==sourceIds.length)throw invalid('Bounded original commission sources required');
+ const out=new Map<string,LegacyCommissionResponsibility>(sourceIds.map(id=>[id,{knowledge:'UNKNOWN',reason:'LEGACY_RESPONSIBILITY_NOT_ASSOCIATED'}]));if(!sourceIds.length)return out;
+ const rows=(await c.query(`/* own legacy commission current responsibility */ SELECT d.source_record_id AS "sourceRecordId",d.id AS "dutyId",d.order_id AS "orderId",d.status,d.amount_cents::text AS "amountCents",d.currency,d.revision::text AS revision,d.revised_at IS NOT NULL AS revised,
+  to_char(d.maturity_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "maturityAt",d.settled_by AS "settledBy"
+  FROM zzsh_order.legacy_order_duty d WHERE d.counterparty_user_id=$1 AND d.kind='COMMISSION' AND d.source_record_id=ANY($2::text[])
+  ORDER BY d.id COLLATE "C" LIMIT 51`,[userId,sourceIds])).rows;
+ if(rows.length>50)throw unavailable('Legacy commission responsibility source is ambiguous');
+ const seen=new Set<string>();
+ for(const row of rows){
+  if(typeof row.sourceRecordId!=='string'||!out.has(row.sourceRecordId))throw unavailable('Legacy commission responsibility subject/source changed');
+  if(seen.has(row.sourceRecordId)){out.set(row.sourceRecordId,{knowledge:'UNKNOWN',reason:'LEGACY_RESPONSIBILITY_AMBIGUOUS'});continue;}seen.add(row.sourceRecordId);
+  const valid=typeof row.dutyId==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/.test(row.dutyId)&&typeof row.orderId==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/.test(row.orderId)
+   &&['PENDING','MATURED','SETTLED','VOID'].includes(row.status)&&typeof row.amountCents==='string'&&/^(0|[1-9]\d{0,23})$/.test(row.amountCents)&&row.currency==='CNY'
+   &&typeof row.revision==='string'&&/^[1-9]\d{0,18}$/.test(row.revision)&&typeof row.revised==='boolean'
+   &&(row.maturityAt===null||typeof row.maturityAt==='string'&&/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z$/.test(row.maturityAt)&&Number.isFinite(Date.parse(row.maturityAt)))
+   &&(row.status==='SETTLED'?row.settledBy==='FINANCE'||row.settledBy==='LEGACY_RECORDS':row.settledBy===null);
+  if(!valid)throw unavailable('Legacy commission responsibility source changed');
+  out.set(row.sourceRecordId,{knowledge:'KNOWN',dutyId:row.dutyId,orderId:row.orderId,state:row.status,amountCents:row.amountCents,currency:'CNY',revision:row.revision,revised:row.revised,maturityAt:row.maturityAt,settledBy:row.settledBy});
+ }
+ return out;
+}
+/** Responsibility version: revision, decision, amount or settlement changes must invalidate an old page cursor. */
+export async function readLegacyCommissionResponsibilityVersion(c:PoolClient,userId:string){
+ if(typeof userId!=='string'||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/.test(userId))throw invalid('Original earning subject required');
+ const row=(await c.query(`/* own legacy commission responsibility version */ SELECT md5(COALESCE(string_agg(d.id||':'||d.revision::text||':'||d.status||':'||d.amount_cents::text||':'||COALESCE(d.settled_by,'')||':'||COALESCE(to_char(d.maturity_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),'')||':'||CASE WHEN d.revised_at IS NULL THEN '0' ELSE '1' END,chr(10) ORDER BY d.id COLLATE "C"),'')) AS version
+  FROM zzsh_order.legacy_order_duty d WHERE d.counterparty_user_id=$1 AND d.kind='COMMISSION'`,[userId])).rows[0];
+ if(typeof row?.version!=='string'||!/^[a-f0-9]{32}$/.test(row.version))throw unavailable('Legacy commission responsibility version is inconsistent');return row.version as string;
 }
 /** Caller owns one transaction/order. No HTTP mount or automatic worker; contract DDL remains a separately approved prerequisite. */
 export async function finalizeReviewedLegacyDuty(c:PoolClient,actor:Actor,input:Record<string,unknown>,s:LegacyDutyFinanceAdmission,t:LegacyDutyTradeReader){

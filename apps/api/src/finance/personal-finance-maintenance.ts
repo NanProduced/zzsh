@@ -6,6 +6,7 @@ import {recordAudit,setAuditContext,withTransaction,SecurityApiError} from '../a
 import {forbidden,invalid,conflict,ensureOnlyFields,withIdempotency,fingerprintRequest} from '../supply/supply-util';
 import {canonicalize} from '../supply/content-hash';
 import {prepareHistoricalObservation,sourceYuanToCents,sourceSignedYuanToCents} from './personal-finance-read';
+import {assertFinanceSingleCutoff} from './personal-finance-coverage';
 import {isStoredEconomicSource,reviewedOpeningCoveredSet,validateReviewedOpeningSources,type FinanceSourceProof} from './legacy-finance-source-evidence';
 
 type Actor={userId:string;sessionId:string;requestId:string};
@@ -146,6 +147,7 @@ export async function importFinanceOpening(client:PoolClient,actor:Actor,input:O
  const plan=await planFinanceOpening(client,actor,input,scope),p=input.proof;
  const result=await withIdempotency(client,{realm:'admin',principalId:actor.userId,operation:'finance.opening.import'},plan.key,fingerprintRequest('finance.opening.import',p.userId,input),async()=>{await authorizeFinanceMaintenance(client,actor);if(scope)await assertAdmission(client,actor,scope);},async()=>{
   await client.query(`SELECT id FROM zzsh_auth_user."user" WHERE id=$1 FOR UPDATE`,[p.userId]);
+  await assertFinanceSingleCutoff(client,{userId:p.userId,cutoff:input.cutoff,write:'OPENING'});
   const stored=scope?admission(scope).stored:undefined,reused=new Set<string>();
   if(stored)await setAuditContext(client,'admin',actor.userId,actor.sessionId,actor.requestId);
   if(stored)for(const o of plan.observations){

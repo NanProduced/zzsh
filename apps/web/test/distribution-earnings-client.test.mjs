@@ -28,3 +28,15 @@ test('legacy new financial finalization remains separate from original status/am
  for(const patch of [{zeroFinalization:false},{reference:{...currentFinance.reference,type:'LEDGER_ENTRY'}},{reference:{...currentFinance.reference,digest:'broken'}}])assert.throws(()=>earningsDetail({...base,projectionVersion:2,item:{...old,currentFinance:{...currentFinance,...patch}}},'self',old.id));
  assert.equal(earningsDetail({...base,projectionVersion:2,item:old},'self',old.id).item.currentFinance.knowledge,'UNKNOWN');assert.equal(earningsDetail({...base,item:old},'self',old.id).item.currentFinance,undefined);
 });
+test('current responsibility is additive: original amount/state stay and VOID/MATURED/revised duty is fully typed',()=>{
+ const responsibility=(patch={})=>({knowledge:'KNOWN',dutyId:'legacy_duty_x',orderId:'legacy_order_y',state:'MATURED',amountCents:'900',currency:'CNY',revision:'2',revised:true,maturityAt:'2026-10-05T00:00:00.000000Z',settledBy:null,...patch});
+ const r=earningsDetail({...base,projectionVersion:2,item:{...old,currentResponsibility:responsibility()}},'self',old.id).item;
+ assert.equal(r.amount.amountCents,'1234');assert.equal(r.state,'SETTLED');assert.equal(r.currentFinance.knowledge,'UNKNOWN');assert.equal(r.currentResponsibility.state,'MATURED');assert.equal(r.currentResponsibility.amountCents,'900');
+ assert.equal(earningsDetail({...base,projectionVersion:2,item:{...old,currentResponsibility:responsibility({state:'VOID'})}},'self',old.id).item.currentResponsibility.state,'VOID');
+ assert.equal(earningsDetail({...base,projectionVersion:2,item:{...old,currentResponsibility:responsibility({state:'SETTLED',settledBy:'LEGACY_RECORDS'})}},'self',old.id).item.currentResponsibility.settledBy,'LEGACY_RECORDS');
+ for(const patch of [{state:'PAID'},{currency:'USD'},{revision:'0'},{settledBy:'FINANCE'},{state:'SETTLED',settledBy:null},{revised:'yes'},{maturityAt:'2026-10-05T00:00:00Z'},{amountCents:'1.2'}])assert.throws(()=>earningsDetail({...base,projectionVersion:2,item:{...old,currentResponsibility:responsibility(patch)}},'self',old.id));
+ const native={...old,id:'native:new',origin:'NATIVE',state:'SETTLED',fundsDisposition:'SETTLED',dueAt:at,dueAtKnowledge:'KNOWN',version:'2',includedInOpening:false,accountingEffect:'EXISTING_LEDGER_EVENT',businessReference:{type:'RENTAL_ORDER',id:'order'}};
+ assert.equal(earningsDetail({...base,projectionVersion:2,item:native},'self',native.id).item.currentResponsibility,null);
+ assert.throws(()=>earningsDetail({...base,projectionVersion:2,item:{...native,currentResponsibility:responsibility()}},'self',native.id));
+ assert.equal(earningsDetail({...base,item:old},'self',old.id).item.currentResponsibility,undefined);
+});

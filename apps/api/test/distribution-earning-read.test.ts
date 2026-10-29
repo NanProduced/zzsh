@@ -10,7 +10,7 @@ const snapshot={kind:'historicalDistribution',sourceId:1,sourceUserId:11,amount:
 const original=prepareHistoricalObservation(snapshot,{userId:'self',legacyUserId:'11',sourceSystem:'legacy_mysql_restore',basisId:null});
 const legacy={id:'history:one',origin:'LEGACY_MYSQL',state:'SETTLED',role:'RENTER_REFERRAL',source_amount:'12.34',occurred_at:at,due_at:null,funds_disposition:'HISTORICAL_STATUS_ONLY',recovery_required_cents:null,included:true,version:'0',order_id:'71',user_id:'self',legacy_user_id:'11',source_system:original.sourceSystem,source_entity:original.sourceEntity,source_id:original.sourceId,source_digest:original.sourceDigest,source_canonical:original.sourceCanonical,snapshot};
 const native={...legacy,id:'native:two',origin:'NATIVE',state:'RECOVERY_REQUIRED',source_amount:'1234',funds_disposition:'SETTLED',recovery_required_cents:'1234',version:'3',due_at:at,included:false};
-function probe(nativeInstalled:boolean,rows:Record<string,any>[],coverage='RECONCILED_OPENING',historyCoverage?:Record<string,unknown>,earningBasisInstalled=false){
+function probe(nativeInstalled:boolean,rows:Record<string,any>[],coverage='RECONCILED_OPENING',historyCoverage?:Record<string,unknown>,earningBasisInstalled=false,legacyFinance?:{responsibility?:Record<string,any>[];finance?:Record<string,any>[];responsibilityVersion?:string;financeVersion?:string}){
  const seen:{sql:string;args:any[]}[]=[],pool={connect:async()=>({release(){},query:async(sql:string,args:any[]=[])=>{seen.push({sql,args});
   if(['BEGIN','COMMIT','ROLLBACK','SET TRANSACTION ISOLATION LEVEL REPEATABLE READ'].includes(sql))return{rows:[]};
   if(sql.startsWith('SELECT "suspended"'))return{rows:[{suspended:false}]};
@@ -19,7 +19,11 @@ function probe(nativeInstalled:boolean,rows:Record<string,any>[],coverage='RECON
   if(sql.includes('finance history coverage installed'))return{rows:[{installed:historyCoverage!==undefined}]};
   if(sql.includes('finance history coverage exact target'))return{rows:[historyCoverage]};
   if(sql.startsWith('SELECT EXISTS'))return{rows:[{complete:coverage==='NATIVE_GENESIS'&&!rows.some(r=>r.origin==='LEGACY_MYSQL')}]};
-  if(sql.startsWith('SELECT to_regclass'))return{rows:[{history:true,native:nativeInstalled,native_origin:true,earning_basis:earningBasisInstalled}]};
+  if(sql.startsWith('SELECT to_regclass'))return{rows:[{history:true,native:nativeInstalled,native_origin:true,earning_basis:earningBasisInstalled,legacy_finance:legacyFinance!==undefined}]};
+  if(sql.includes('own legacy commission responsibility version'))return{rows:[{version:legacyFinance?.responsibilityVersion??'a'.repeat(32)}]};
+  if(sql.includes('own legacy commission financial version'))return{rows:[{version:legacyFinance?.financeVersion??'f'.repeat(32)}]};
+  if(sql.includes('own legacy commission current responsibility'))return{rows:(legacyFinance?.responsibility??[]).filter(r=>r.userId===args[0]&&args[1].includes(r.sourceRecordId))};
+  if(sql.includes('own legacy commission complete financial facts'))return{rows:(legacyFinance?.finance??[]).filter(r=>r.actual_duty?.counterparty_user_id===args[0]&&args[1].includes(r.actual_duty?.source_record_id))};
   if(sql.startsWith('SELECT origin'))return{rows:coverage?[{origin:coverage}]:[]};
   if(sql.includes(' AS count,md5')){const selected=rows.filter(r=>args[1]==='ALL'||r.state===args[1]);return{rows:[{count:String(selected.length),digest:'source-digest',native_amount_cents:selected.filter(r=>r.origin==='NATIVE').reduce((s,r)=>s+BigInt(r.source_amount),0n).toString(),historical_amount_cents:selected.filter(r=>r.origin==='LEGACY_MYSQL').reduce((s,r)=>s+BigInt(r.source_amount.replace('.','')),0n).toString()}]};}
   if(sql.startsWith('SELECT to_char'))return{rows:[{at}]};
@@ -89,4 +93,44 @@ test('U04 lists never query frozen calculations per row, even when native basis 
  const p=probe(true,[{...native,state:'SETTLED',recovery_required_cents:null}],'NATIVE_GENESIS',undefined,true);
  await readMyDistributionEarnings(p.pool,actor,{state:'ALL',limit:20,cursor:null,projectionVersion:2},key);
  assert(!p.seen.some(q=>q.sql.includes('WHERE e.beneficiary_user_id=$1 AND e.id=$2')));
+});
+
+const duty=(patch:Record<string,any>={})=>({userId:'self',sourceRecordId:original.sourceId,dutyId:'legacy_duty_'+'a'.repeat(40),orderId:'legacy_order_'+'b'.repeat(40),status:'MATURED',amountCents:'900',currency:'CNY',revision:'2',revised:true,maturityAt:'2026-10-05T00:00:00.000000Z',settledBy:null,...patch});
+test('current responsibility projects VOID/MATURED/revised duty beside the unchanged original amount and unfinalized finance',async()=>{
+ const p=probe(true,[legacy],'RECONCILED_OPENING',undefined,false,{responsibility:[duty()]});
+ const r=await readMyDistributionEarnings(p.pool,actor,{state:'ALL',limit:20,cursor:null,projectionVersion:2},key),item=r.items![0] as any;
+ assert.equal(item.amount.amountCents,'1234');assert.equal(item.state,'SETTLED');
+ assert.equal(item.currentFinance.knowledge,'UNKNOWN');
+ assert.equal(item.currentResponsibility.knowledge,'KNOWN');assert.equal(item.currentResponsibility.state,'MATURED');assert.equal(item.currentResponsibility.amountCents,'900');assert.equal(item.currentResponsibility.revised,true);assert.equal(item.currentResponsibility.revision,'2');assert.equal(item.currentResponsibility.maturityAt,'2026-10-05T00:00:00.000000Z');assert.equal(item.currentResponsibility.settledBy,null);
+ assert.equal(p.seen.filter(q=>q.sql.includes('own legacy commission current responsibility')).length,1,'one bounded batch read for the page');
+ assert(!p.seen.some(q=>/^(INSERT|UPDATE|DELETE)/.test(q.sql)));
+ const voided=probe(true,[legacy],'RECONCILED_OPENING',undefined,false,{responsibility:[duty({status:'VOID'})]}),vr=await readMyDistributionEarnings(voided.pool,actor,{state:'ALL',limit:20,cursor:null,projectionVersion:2},key);
+ assert.equal((vr.items![0] as any).currentResponsibility.state,'VOID');assert.equal((vr.items![0] as any).currentFinance.knowledge,'UNKNOWN');
+ const pending=probe(true,[legacy],'RECONCILED_OPENING',undefined,false,{responsibility:[duty({status:'PENDING',maturityAt:'2020-01-01T00:00:00.000000Z',revised:false,revision:'1'})]}),pr=await readMyDistributionEarnings(pending.pool,actor,{state:'ALL',limit:20,cursor:null,projectionVersion:2},key);
+ assert.equal((pr.items![0] as any).currentResponsibility.state,'PENDING');
+ const missing=probe(true,[legacy],'RECONCILED_OPENING',undefined,false,{responsibility:[]}),mr=await readMyDistributionEarnings(missing.pool,actor,{state:'ALL',limit:20,cursor:null,projectionVersion:2},key);
+ assert.deepEqual((mr.items![0] as any).currentResponsibility,{knowledge:'UNKNOWN',reason:'LEGACY_RESPONSIBILITY_NOT_ASSOCIATED'});
+ const foreign=probe(true,[legacy],'RECONCILED_OPENING',undefined,false,{responsibility:[duty({userId:'other'})]}),fr=await readMyDistributionEarnings(foreign.pool,actor,{state:'ALL',limit:20,cursor:null,projectionVersion:2},key);
+ assert.equal((fr.items![0] as any).currentResponsibility.knowledge,'UNKNOWN');
+ const zero=probe(true,[legacy],'RECONCILED_OPENING',undefined,false,{responsibility:[duty({amountCents:'0'})]}),zr=await readMyDistributionEarnings(zero.pool,actor,{state:'ALL',limit:20,cursor:null,projectionVersion:2},key);
+ assert.equal((zr.items![0] as any).currentResponsibility.amountCents,'0');
+});
+test('detail and list share the same current responsibility while v1 keeps its original payload',async()=>{
+ const p=probe(true,[legacy],'RECONCILED_OPENING',undefined,false,{responsibility:[duty()]});
+ const list=await readMyDistributionEarnings(p.pool,actor,{state:'ALL',limit:20,cursor:null,projectionVersion:2},key);
+ const detail=await readMyDistributionEarnings(p.pool,actor,{state:'ALL',limit:20,cursor:null,projectionVersion:2},key,'history:one');
+ assert.deepEqual((detail as any).item.currentResponsibility,(list.items![0] as any).currentResponsibility);
+ assert.equal((detail as any).snapshotVersion,list.snapshotVersion);
+ assert(p.seen.filter(q=>q.sql.includes('own legacy commission current responsibility')).every(q=>q.args[0]==='self'));
+ const v1Before=p.seen.length,v1=await readMyDistributionEarnings(p.pool,actor,{state:'ALL',limit:20,cursor:null},key);
+ assert.equal('currentResponsibility' in v1.items![0]!,false);assert.equal('currentFinance' in v1.items![0]!,false);
+ assert(!p.seen.slice(v1Before).some(q=>q.sql.includes('own legacy commission current responsibility')),'v1 never reads the v2 responsibility projection');
+});
+test('a current responsibility version change rejects the old page cursor',async()=>{
+ const row={...native,state:'SETTLED',recovery_required_cents:null},rows=[{...row,id:'native:z'},{...row,id:'native:a'}];
+ const before=probe(true,rows,'NATIVE_GENESIS',undefined,false,{responsibilityVersion:'a'.repeat(32)});
+ const first=await readMyDistributionEarnings(before.pool,actor,{state:'ALL',limit:1,cursor:null,projectionVersion:2},key);assert(first.nextCursor);
+ const after=probe(true,rows,'NATIVE_GENESIS',undefined,false,{responsibilityVersion:'b'.repeat(32)});
+ await assert.rejects(readMyDistributionEarnings(after.pool,actor,{state:'ALL',limit:1,cursor:first.nextCursor!,projectionVersion:2},key),(e:any)=>e.status===409);
+ const same=await readMyDistributionEarnings(before.pool,actor,{state:'ALL',limit:1,cursor:first.nextCursor!,projectionVersion:2},key);assert.equal(same.items![0]?.id,'native:a');
 });

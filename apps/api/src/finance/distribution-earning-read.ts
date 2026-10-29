@@ -7,7 +7,7 @@ import {canonicalize} from '../supply/content-hash';
 import type {ListingCursorKey} from '../supply/listing-cursor';
 import {exactCents,sourceYuanToCents,encodeFinanceCursor,decodeFinanceCursor,OPENING_OBSERVATION_JOIN,prepareHistoricalObservation,parseFinanceProjectionVersion} from './personal-finance-read';
 import {hasProvedNativeHistoryAbsence,readObservationCoverage} from './personal-finance-coverage';
-import {readLegacyCommissionFinance,readLegacyCommissionFinanceVersion,type LegacyCommissionFinance} from './legacy-duty-finance-store';
+import {readLegacyCommissionFinance,readLegacyCommissionFinanceVersion,readLegacyCommissionResponsibility,readLegacyCommissionResponsibilityVersion,type LegacyCommissionFinance,type LegacyCommissionResponsibility} from './legacy-duty-finance-store';
 import {readOriginalPaymentDistributionBasis,type PaymentDistributionBasis} from './distribution-payment-basis';
 import {distributionPolicyRates,referralPercent,validateDistributionPolicy} from './distribution-policy';
 import {prepareAccrualFromFrozenPayment} from './distribution-accrual';
@@ -129,7 +129,7 @@ export async function readAdminEarningEventActions(c:PoolClient,eventIds:string[
  return result;
 }
 /** History is an observation, never a fresh ledger credit or a channel-paid claim. */
-export function earningProjection(row:Record<string,any>,currentFinance?:LegacyCommissionFinance,projectionVersion:1|2=1){
+export function earningProjection(row:Record<string,any>,currentFinance?:LegacyCommissionFinance,projectionVersion:1|2=1,currentResponsibility?:LegacyCommissionResponsibility){
  const legacy=row.origin==='LEGACY_MYSQL';if(!legacy&&row.origin!=='NATIVE')throw unavailable();
  if(legacy){
   try{
@@ -152,7 +152,7 @@ export function earningProjection(row:Record<string,any>,currentFinance?:LegacyC
   fundsDisposition:legacy?'HISTORICAL_STATUS_ONLY':row.funds_disposition,recoveryRequiredCents:debt,
   includedInOpening:legacy?row.included===true:false,version:legacy?null:String(row.version),
   accountingEffect:legacy?'OBSERVATION_ONLY_NO_NEW_CREDIT':'EXISTING_LEDGER_EVENT',
-  businessReference:{type:legacy?'LEGACY_UNRESOLVED':'RENTAL_ORDER',id:row.order_id??null},channelArrivalKnowledge:'UNKNOWN',...(projectionVersion===2?{currentFinance:legacy?currentFinance??{knowledge:'UNKNOWN' as const,reason:'LEGACY_FINANCE_NOT_ADMITTED_OR_NOT_FINALIZED'}:null}:{})};
+  businessReference:{type:legacy?'LEGACY_UNRESOLVED':'RENTAL_ORDER',id:row.order_id??null},channelArrivalKnowledge:'UNKNOWN',...(projectionVersion===2?{currentFinance:legacy?currentFinance??{knowledge:'UNKNOWN' as const,reason:'LEGACY_FINANCE_NOT_ADMITTED_OR_NOT_FINALIZED'}:null,currentResponsibility:legacy?currentResponsibility??{knowledge:'UNKNOWN' as const,reason:'LEGACY_RESPONSIBILITY_NOT_ADMITTED'}:null}:{})};
 }
 function sourceSql(native:boolean){
  const history=`SELECT 'history:'||o.id AS id,'LEGACY_MYSQL'::text AS origin,
@@ -172,8 +172,7 @@ function sourceSql(native:boolean){
 /** Candidate self read seam; route mounting requires the separately reviewed source package. */
 type EarningReadContext={contractVersion:string;projectionVersion?:2;subjectId:string;snapshotVersion:string;asOf:string};
 type EarningReadDetail=EarningReadContext&{item:ReturnType<typeof earningProjection>&{calculation?:EarningCalculation}};
-type EarningReadPage=EarningReadContext&{state:EarningsQuery['state'];knowledge:string;count:string|null;mappedRecordCount:string;reason:string|null;totalAmountKnowledge:string;items:ReturnType<typeof earningProjection>[];nextCursor:string|null;
- amountsByOrigin?:{scope:string;native:{knowledge:string;amountCents:string|null};historical:{knowledge:string;amountCents:string|null};mappedHistoricalAmountCents:string}};
+type EarningReadPage=EarningReadContext&{state:EarningsQuery['state'];knowledge:string;count:string|null;mappedRecordCount:string;reason:string|null;totalAmountKnowledge:string;items:ReturnType<typeof earningProjection>[];nextCursor:string|null; amountsByOrigin?:{scope:string;native:{knowledge:string;amountCents:string|null};historical:{knowledge:string;amountCents:string|null};mappedHistoricalAmountCents:string}};
 export function readMyDistributionEarnings(pool:Pool,actor:UserContext,q:EarningsQuery,key:ListingCursorKey|undefined,detailId:string):Promise<EarningReadDetail>;
 export function readMyDistributionEarnings(pool:Pool,actor:UserContext,q:EarningsQuery,key:ListingCursorKey|undefined,detailId?:undefined):Promise<EarningReadPage>;
 export function readMyDistributionEarnings(pool:Pool,actor:UserContext,q:EarningsQuery,key:ListingCursorKey|undefined,detailId?:string):Promise<EarningReadPage|EarningReadDetail>;
@@ -196,25 +195,27 @@ export async function readMyDistributionEarnings(pool:Pool,actor:UserContext,q:E
   const nativeAmount=projectionVersion===2?exactCents(aggregate.native_amount_cents):'0',historicalAmount=projectionVersion===2?exactCents(aggregate.historical_amount_cents):'0';
   if(BigInt(nativeAmount)<0n||BigInt(historicalAmount)<0n)throw unavailable();
   const legacyFinanceVersion=projectionVersion===2&&installed.legacy_finance===true?await readLegacyCommissionFinanceVersion(c,actor.userId):'NOT_ADMITTED';
-  const snapshotVersion='distribution-earnings.v1:'+hash(canonicalize([aggregate.count,aggregate.digest,installed.native,coverage?.origin??null,historyCoverage?.version??null,...(projectionVersion===2?['projection2',nativeAmount,historicalAmount,legacyFinanceVersion]:[])]));
+  const legacyResponsibilityVersion=projectionVersion===2&&installed.legacy_finance===true?await readLegacyCommissionResponsibilityVersion(c,actor.userId):'NOT_ADMITTED';
+  const snapshotVersion='distribution-earnings.v1:'+hash(canonicalize([aggregate.count,aggregate.digest,installed.native,coverage?.origin??null,historyCoverage?.version??null,...(projectionVersion===2?['projection2',nativeAmount,historicalAmount,legacyFinanceVersion,legacyResponsibilityVersion]:[])]));
   const binding={userId:actor.userId,sessionHash:hash(actor.sessionId),snapshotVersion,bucket:'DISTRIBUTION_EARNINGS:'+q.state};
   const after=q.cursor?decodeFinanceCursor(q.cursor,binding,key):null;
   const asOf=after?.asOf??(await c.query(`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`)).rows[0].at;
   const projection=`SELECT *,to_char(occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS occurred_at,
    to_char(due_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS due_at FROM earnings`;
-  if(detailId){const row=(await c.query(sql+projection+' WHERE id=$2',[actor.userId,detailId])).rows[0];if(!row)throw notFound();const finance=projectionVersion===2&&installed.legacy_finance===true&&row.origin==='LEGACY_MYSQL'?await readLegacyCommissionFinance(c,actor.userId,[row.source_id]):null;return{contractVersion:'distribution-earnings.read.v1',...(projectionVersion===2?{projectionVersion:2 as const}:{}),subjectId:actor.userId,snapshotVersion,asOf,item:{...earningProjection(row,finance?.get(row.source_id),projectionVersion),...(projectionVersion===2?{calculation:await readEarningCalculation(c,actor,row,installed.earning_basis===true,q.calculationVersion??1)}:{})}};}
+  if(detailId){const row=(await c.query(sql+projection+' WHERE id=$2',[actor.userId,detailId])).rows[0];if(!row)throw notFound();const finance=projectionVersion===2&&installed.legacy_finance===true&&row.origin==='LEGACY_MYSQL'?await readLegacyCommissionFinance(c,actor.userId,[row.source_id]):null;const responsibility=projectionVersion===2&&installed.legacy_finance===true&&row.origin==='LEGACY_MYSQL'?await readLegacyCommissionResponsibility(c,actor.userId,[row.source_id]):null;return{contractVersion:'distribution-earnings.read.v1',...(projectionVersion===2?{projectionVersion:2 as const}:{}),subjectId:actor.userId,snapshotVersion,asOf,item:{...earningProjection(row,finance?.get(row.source_id),projectionVersion,responsibility?.get(row.source_id)),...(projectionVersion===2?{calculation:await readEarningCalculation(c,actor,row,installed.earning_basis===true,q.calculationVersion??1)}:{})}};}
   const rows=(await c.query(sql+projection+` WHERE imported_at<=$2::timestamptz AND($3='ALL' OR state=$3)
    AND($4::timestamptz IS NULL OR (earnings.occurred_at,id COLLATE "C")<($4::timestamptz,$5 COLLATE "C"))
    ORDER BY earnings.occurred_at DESC,id COLLATE "C" DESC LIMIT $6`,[actor.userId,asOf,q.state,after?.position.at??null,after?.position.id??null,q.limit+1])).rows;
   const visible=rows.slice(0,q.limit),last=visible.at(-1);
   const finance=projectionVersion===2&&installed.legacy_finance===true?await readLegacyCommissionFinance(c,actor.userId,visible.filter(r=>r.origin==='LEGACY_MYSQL').map(r=>r.source_id)):null;
+  const responsibility=projectionVersion===2&&installed.legacy_finance===true?await readLegacyCommissionResponsibility(c,actor.userId,visible.filter(r=>r.origin==='LEGACY_MYSQL').map(r=>r.source_id)):null;
   return{contractVersion:'distribution-earnings.read.v1',subjectId:actor.userId,snapshotVersion,asOf,state:q.state,
    knowledge:complete?'KNOWN':'UNKNOWN',count:complete?aggregate.count:null,mappedRecordCount:aggregate.count,
    reason:complete?null:installed.native?historyCoverage?.reason??'HISTORICAL_EARNINGS_COVERAGE_NOT_CLOSED':'NATIVE_EARNINGS_NOT_INSTALLED',
    totalAmountKnowledge:projectionVersion===2&&complete?'KNOWN':'UNKNOWN',
    ...(projectionVersion===2?{projectionVersion:2 as const,amountsByOrigin:{scope:'SOURCE_RECORDS_ONLY',native:{knowledge:installed.native===true?'KNOWN':'UNKNOWN',amountCents:installed.native===true?nativeAmount:null},
     historical:{knowledge:nativeEmpty||historyCoverage?.knowledge==='KNOWN'?'KNOWN':'UNKNOWN',amountCents:nativeEmpty||historyCoverage?.knowledge==='KNOWN'?historicalAmount:null},mappedHistoricalAmountCents:historicalAmount}}:{}),
-   items:visible.map(row=>earningProjection(row,finance?.get(row.source_id),projectionVersion)),
+   items:visible.map(row=>earningProjection(row,finance?.get(row.source_id),projectionVersion,responsibility?.get(row.source_id))),
    nextCursor:rows.length>q.limit&&last?encodeFinanceCursor({id:last.id,at:last.occurred_at},asOf,binding,key):null};
  });
 }

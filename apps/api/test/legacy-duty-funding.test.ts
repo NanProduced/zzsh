@@ -80,3 +80,13 @@ test('a withdrawal return uses its original log root and never proves a rental r
  assert.equal((await readLegacyDutyFundingProof(priorRefund.c,duty,basis)).knowledge,'UNKNOWN');
  assert(f.state.queries.every(q=>!/^\s*(INSERT|UPDATE|DELETE)/.test(q.sql)));
 });
+
+test('an existing opening/coverage cutoff mismatch stays UNKNOWN and keeps both original facts',async()=>{
+ const f=fixture([credit('LEGACY_ADMIN_LOG')]);
+ f.state.coveredRoots.push({source_kind:'LEGACY_ADMIN_LOG',source_entity:'la_log_earnings',source_id:'501',source_type:'LEGACY_MYSQL',source_digest:'d'.repeat(64)});
+ assert.equal((await readLegacyDutyFundingProof(f.c,duty,basis)).knowledge,'KNOWN');
+ const originalCutoff=f.state.cutoff;f.state.cutoff='2026-09-12T13:31:22.000Z';
+ assert.deepEqual(await readLegacyDutyFundingProof(f.c,duty,basis),{knowledge:'UNKNOWN',reason:'OPENING_AND_HISTORY_CUTOFF_DIFFER'});
+ assert(!f.state.queries.some(q=>/^\s*(INSERT|UPDATE|DELETE)/.test(q.sql)));
+ f.state.cutoff=originalCutoff;assert.equal((await readLegacyDutyFundingProof(f.c,duty,basis)).knowledge,'KNOWN');
+});

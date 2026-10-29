@@ -43,6 +43,7 @@ function fixture(){
   if(sql.includes('admin_security'))return{rows:[{status:'ACTIVE',isBoss:true,passwordChangeRequired:false}],rowCount:1};
   if(sql.includes('SELECT suspended'))return{rows:[{suspended:false}],rowCount:1};
   if(sql.includes('user.legacy_owner.migrated'))return{rows:state.identity?[{}]:[],rowCount:state.identity?1:0};
+  if(sql.includes('finance single cutoff admission'))return{rows:[{openingDiffers:false,coverageDiffers:false}],rowCount:1};
   if(sql.includes('stored opening existing observation'))return{rows:state.existing?[state.existing]:[],rowCount:state.existing?1:0};
   if(sql.includes('"requestFingerprint"')){const r=state.receipts.get(args[1]);return{rows:r?[{requestFingerprint:r.fingerprint,responseStatus:r.status,responseBody:r.body,publishRequired:false}]:[],rowCount:r?1:0};}
   if(sql.includes('request_fingerprint AS fingerprint')){const r=state.receipts.get(args[1]);return{rows:r?[r]:[],rowCount:r?1:0};}

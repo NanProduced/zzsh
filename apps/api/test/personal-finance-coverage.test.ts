@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import type {PoolClient} from 'pg';
-import {hasProvedNativeHistoryAbsence,prepareObservationCoverage,readObservationCoverage,type ObservationCoverageInput} from '../src/finance/personal-finance-coverage';
+import {hasProvedNativeHistoryAbsence,prepareObservationCoverage,readObservationCoverage,assertFinanceSingleCutoff,type ObservationCoverageInput} from '../src/finance/personal-finance-coverage';
 
 const input=(patch:Partial<ObservationCoverageInput>={}):ObservationCoverageInput=>({
  userId:'fixture_user',legacyUserId:'101',sourceSystem:'legacy_mysql_restore',sourceKind:'HISTORICAL_WITHDRAWAL',
@@ -53,4 +53,33 @@ test('native absence reuses birth, identity, no migration audit and exact histor
  assert.equal(await hasProvedNativeHistoryAbsence(c,'fixture_user','HISTORICAL_DISTRIBUTION'),true);
  assert.deepEqual(seen[0]?.args,['fixture_user','HISTORICAL_DISTRIBUTION']);assert.match(seen[0]!.sql,/native_user_insert_proof/);assert.match(seen[0]!.sql,/s.provider='none'/);assert.match(seen[0]!.sql,/NOT EXISTS[^]*user.legacy_owner.migrated/);assert.match(seen[0]!.sql,/h.source_kind=\$2/);
  await assert.rejects(()=>hasProvedNativeHistoryAbsence({query:async()=>({rows:[{}]})} as unknown as PoolClient,'fixture_user','HISTORICAL_DISTRIBUTION'),/coverage is inconsistent/);
+});
+function gate(answer:unknown){const seen:{sql:string;args:unknown[]}[]=[];return{seen,c:{query:async(sql:string,args:unknown[]=[])=>{seen.push({sql,args});return{rows:answer===undefined?[]:[answer]};}} as unknown as PoolClient};}
+test('single cutoff admission rejects divergent funding inputs in either write direction, scoped to one wallet and never writing',async()=>{
+ const input={userId:'fixture_user',cutoff:'2026-10-01T00:00:00.000Z'} as const;
+ const same=gate({openingDiffers:false,coverageDiffers:false});
+ await assertFinanceSingleCutoff(same.c,{...input,write:'OPENING'});await assertFinanceSingleCutoff(same.c,{...input,write:'OBSERVATION'});
+ assert(same.seen.every(q=>/^\s*\/\*[^]*?\*\/\s*SELECT\b/i.test(q.sql)&&!/(INSERT|UPDATE|DELETE)/.test(q.sql)));
+ assert.match(same.seen[0]!.sql,/source_kind='LEGACY_OPENING'/);assert.match(same.seen[0]!.sql,/b\.source_system='legacy_mysql_restore'/);assert.match(same.seen[0]!.sql,/c\.source_system='legacy_mysql_restore'/);
+ assert.match(same.seen[0]!.sql,/c\.source_kind='HISTORICAL_EARNINGS_LOG'/);assert.match(same.seen[0]!.sql,/c\.source_entity='la_log_earnings'/);
+ assert.deepEqual(same.seen[0]!.args,['fixture_user',input.cutoff]);
+ const coverage=gate({openingDiffers:false,coverageDiffers:true});
+ await assert.rejects(()=>assertFinanceSingleCutoff(coverage.c,{...input,write:'OPENING'}),(e:any)=>e.status===409);
+ await assert.rejects(()=>assertFinanceSingleCutoff(coverage.c,{...input,write:'OBSERVATION'}),(e:any)=>e.status===409);
+ const opening=gate({openingDiffers:true,coverageDiffers:false});
+ await assert.rejects(()=>assertFinanceSingleCutoff(opening.c,{...input,write:'OBSERVATION'}),(e:any)=>e.status===409);
+ await assert.rejects(()=>assertFinanceSingleCutoff(opening.c,{...input,write:'OPENING'}),(e:any)=>e.status===409);
+});
+test('single cutoff admission fails closed on unreadable answers and malformed bindings',async()=>{
+ for(const answer of [undefined,{openingDiffers:'no',coverageDiffers:false},{openingDiffers:false}])await assert.rejects(()=>assertFinanceSingleCutoff(gate(answer).c,{userId:'fixture_user',cutoff:'2026-10-01T00:00:00.000Z',write:'OPENING'}),/coverage is inconsistent/);
+ for(const patch of [{userId:'bad user'},{cutoff:'2026-10-01T00:00:00Z'},{cutoff:'not-a-time'},{write:'OTHER'}])await assert.rejects(()=>assertFinanceSingleCutoff(gate({openingDiffers:false,coverageDiffers:false}).c,{userId:'fixture_user',cutoff:'2026-10-01T00:00:00.000Z',write:'OPENING',...patch} as any));
+});
+test('Root single cutoff refuses new writes that would hide an existing incompatible coverage or opening',async()=>{
+ const input={userId:'fixture_user',cutoff:'2026-10-01T00:00:00.000Z'} as const;
+ await assert.rejects(()=>assertFinanceSingleCutoff(gate({openingDiffers:false,coverageDiffers:true}).c,{...input,write:'OBSERVATION'}),(e:any)=>e.status===409);
+ await assert.rejects(()=>assertFinanceSingleCutoff(gate({openingDiffers:true,coverageDiffers:false}).c,{...input,write:'OPENING'}),(e:any)=>e.status===409);
+});
+test('Root a missing required funding table is unavailable, never a compatible empty history',async()=>{
+ const c={query:async()=>{throw Object.assign(Error('missing funding table'),{code:'42P01'});}} as unknown as PoolClient;
+ await assert.rejects(()=>assertFinanceSingleCutoff(c,{userId:'fixture_user',cutoff:'2026-10-01T00:00:00.000Z',write:'OPENING'}),(e:any)=>e.status===503);
 });

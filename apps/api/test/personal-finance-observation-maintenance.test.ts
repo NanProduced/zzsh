@@ -15,7 +15,7 @@ function input(empty=false):ObservationImportInput{
 }
 function review(i=input()):ObservationImportReview{return{ref:'FIXTURE_NOT_REAL_APPROVAL',attempt:'fixture_attempt',actor:{userId:actor.userId,sessionId:actor.sessionId},resource:{...resource},notBefore:'2026-10-16T05:00:00.000Z',expiresAt:'2026-10-16T06:00:00.000Z',inputSha256:i.coverage.inputSha256,cutoff:i.coverage.cutoff,bodyDigest:sha(i),userId:i.coverage.userId,sourceKind:i.coverage.sourceKind};}
 function fixture(){
- const state={now:'2026-10-16T05:30:00.000Z',identity:true,owner:resource.role,revoked:false,audit:true,readError:false,failAudit:false,queries:[] as {sql:string;args:any[]}[],receipts:new Map<string,any>(),observations:new Map<string,any>(),coverage:new Map<string,any>(),before:null as any};
+ const state={now:'2026-10-16T05:30:00.000Z',identity:true,owner:resource.role,revoked:false,audit:true,readError:false,failAudit:false,cutoffGate:{openingDiffers:false,coverageDiffers:false},queries:[] as {sql:string;args:any[]}[],receipts:new Map<string,any>(),observations:new Map<string,any>(),coverage:new Map<string,any>(),before:null as any};
  const client:any={connectionParameters:{host:resource.host,port:resource.port,database:resource.database,user:resource.role},release(){},query:async(sql:string,args:any[]=[])=>{
   state.queries.push({sql,args});
   if(sql==='BEGIN'){state.before=structuredClone({receipts:state.receipts,observations:state.observations,coverage:state.coverage});return{rows:[]};}
@@ -26,6 +26,7 @@ function fixture(){
   if(sql.includes('SELECT suspended'))return{rows:[{suspended:false}],rowCount:1};
   if(sql.includes('finance history maintenance schema'))return{rows:[{ready:true,owner:state.owner}]};
   if(sql.includes('finance history source identity'))return{rows:state.identity?[{}]:[],rowCount:state.identity?1:0};
+  if(sql.includes('finance single cutoff admission'))return{rows:[{openingDiffers:state.cutoffGate.openingDiffers,coverageDiffers:state.cutoffGate.coverageDiffers}],rowCount:1};
   if(sql.includes('"requestFingerprint"')){const r=state.receipts.get(args[1]);return{rows:r?[{requestFingerprint:r.fingerprint,responseStatus:r.status,responseBody:r.body,publishRequired:false}]:[]};}
   if(sql.includes('request_fingerprint AS fingerprint')){if(state.readError)throw Error('FIXTURE_READBACK_UNKNOWN');const r=state.receipts.get(args[1]);return{rows:r?[r]:[]};}
   if(sql.includes('finance history existing observation')){const row=state.observations.get(args.join(':'));return{rows:row?[row]:[]};}
@@ -78,4 +79,28 @@ test('audit failure calls outer rollback and leaves no synthetic import receipt'
  const f=fixture(),i=input(),scope=await bindReviewedFinanceObservationAdmission(f.client,actor,review(i));f.state.failAudit=true;
  await assert.rejects(()=>importReviewedFinanceObservationsBatch(f.pool,actor,[i],[scope]),/AUDIT_FAILED/);
  assert.equal(f.state.coverage.size,0);assert.equal(f.state.observations.size,0);assert.equal(f.state.receipts.size,0);assert(f.state.queries.some(q=>q.sql==='ROLLBACK'));
+});
+test('earnings coverage=D rejects under an existing opening=C before any observation/coverage/receipt write',async()=>{
+ const f=fixture(),i=input(true);i.coverage.sourceKind='HISTORICAL_EARNINGS_LOG';const scope=await bindReviewedFinanceObservationAdmission(f.client,actor,review(i));
+ f.state.cutoffGate.openingDiffers=true;
+ await assert.rejects(()=>importReviewedFinanceObservationsBatch(f.pool,actor,[i],[scope]),(e:any)=>e.status===409);
+ assert.equal(f.state.observations.size,0);assert.equal(f.state.coverage.size,0);assert.equal(f.state.receipts.size,0);
+ const gate=f.state.queries.findIndex(q=>q.sql.includes('finance single cutoff admission')),lock=f.state.queries.findIndex(q=>q.sql.includes('FROM zzsh_auth_user."user" WHERE id=$1 FOR UPDATE')),write=f.state.queries.findIndex(q=>/^(INSERT|UPDATE|DELETE)/.test(q.sql));
+ assert(lock>=0&&gate>lock&&(write===-1||write>gate),'the gate runs inside the subject lock and before any write');
+ const sql=f.state.queries[gate]!.sql;assert.match(sql,/source_kind='LEGACY_OPENING'/);assert.match(sql,/b\.source_system='legacy_mysql_restore'/);assert.match(sql,/c\.source_system='legacy_mysql_restore'/);
+ assert.deepEqual(f.state.queries[gate]!.args,['fixture_user','2026-10-01T00:00:00.000Z']);
+ f.state.cutoffGate.openingDiffers=false;await importReviewedFinanceObservationsBatch(f.pool,actor,[i],[scope]);const queries=f.state.queries.length;
+ f.state.cutoffGate.openingDiffers=true;
+ const replay=await importReviewedFinanceObservationsBatch(f.pool,actor,[i],[scope]);assert.equal(replay[0]?.replayed,true);
+ assert.equal((await recoverReviewedFinanceObservations(f.client,actor,i,scope)).knowledge,'KNOWN');
+ assert(!f.state.queries.slice(queries).some(q=>/^(INSERT|UPDATE|DELETE)/.test(q.sql)));
+});
+test('Root unrelated withdrawal and distribution coverage do not block on the wallet funding cutoff',async()=>{
+ for(const kind of ['HISTORICAL_WITHDRAWAL','HISTORICAL_DISTRIBUTION'] as const){
+  const f=fixture(),i=input(true);i.coverage.sourceKind=kind;
+  const scope=await bindReviewedFinanceObservationAdmission(f.client,actor,review(i));f.state.cutoffGate.openingDiffers=true;
+  await importReviewedFinanceObservationsBatch(f.pool,actor,[i],[scope]);
+  assert.equal(f.state.coverage.size,1);
+  assert(!f.state.queries.some(q=>q.sql.includes('finance single cutoff admission')));
+ }
 });

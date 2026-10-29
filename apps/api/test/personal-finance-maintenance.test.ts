@@ -32,7 +32,7 @@ function review(i=input()){
  return {ref:'FIXTURE-REVIEW-NOT-APPROVAL',attempt:'fixture-attempt-1',actor:{userId:actor.userId,sessionId:actor.sessionId},resource:{...resource},notBefore:'2026-10-15T08:00:00.000Z',expiresAt:'2026-10-15T09:00:00.000Z',inputSha256:i.inputSha256,cutoff:i.cutoff,subject:{userId:i.proof.userId,sourceId:i.proof.source.sourceId,identityDigest:i.proof.source.identityDigest,sourceDigest:i.proof.sourceDigest,availableCents:i.proof.availableCents,coveredDigest:i.proof.coveredDigest},bodyDigest:sha(i)};
 }
 function fixture(){
- const state:any={now:'2026-10-15T08:30:00.000Z',resource:{...resource},suspended:false,identity:true,revoked:false,queries:[],writes:0,receipts:new Map(),facts:new Map(),failAt:null,commitUnknown:false,readUnknown:false};
+ const state:any={now:'2026-10-15T08:30:00.000Z',resource:{...resource},suspended:false,identity:true,revoked:false,queries:[],writes:0,receipts:new Map(),facts:new Map(),failAt:null,commitUnknown:false,readUnknown:false,cutoffGate:{openingDiffers:false,coverageDiffers:false}};
  const query=async(sql:string,args:any[]=[])=>{
   state.queries.push({sql,args});
   if(sql==='BEGIN'){state.before={receipts:new Map(state.receipts),facts:structuredClone(state.facts)};return {rows:[],rowCount:0};}
@@ -42,6 +42,7 @@ function fixture(){
   if(sql.includes('s."locked",u."twoFactorEnabled"'))return {rows:state.revoked?[]:[{locked:false,twoFactorEnabled:true}],rowCount:state.revoked?0:1};
   if(sql.includes('admin_security'))return {rows:[{status:'ACTIVE',isBoss:true,passwordChangeRequired:false}],rowCount:1};
   if(sql.includes('SELECT suspended'))return {rows:[{suspended:state.suspended}],rowCount:1};
+  if(sql.includes('finance single cutoff admission'))return {rows:[{openingDiffers:state.cutoffGate.openingDiffers,coverageDiffers:state.cutoffGate.coverageDiffers}],rowCount:1};
   if(sql.includes('user.legacy_owner.migrated'))return {rows:state.identity?[{}]:[],rowCount:state.identity?1:0};
   if(sql.includes('"requestFingerprint"')){const r=state.receipts.get(args[1]);return {rows:r?[{requestFingerprint:r.fingerprint,responseStatus:r.status,responseBody:r.body,publishRequired:false}]:[],rowCount:r?1:0};}
   if(sql.includes('request_fingerprint AS fingerprint')){if(state.readUnknown)throw Error('FIXTURE_READBACK_UNKNOWN');const r=state.receipts.get(args[1]);return {rows:r?[r]:[],rowCount:r?1:0};}
@@ -144,4 +145,22 @@ test('a success receipt alone never recovers missing or conflicting basis/covera
 test('external input mutation across an await never changes approved write bytes',async()=>{
  const f=await admitted();const digest=sha(f.i);f.state.onResource=()=>{f.i.proof.availableCents='2200';f.i.observations[0]!.amount='22.00';};
  const result=await api.importReviewedFinanceOpeningBatch(f.pool,actor,[f.i],f.scope);assert.equal(result[0].body.bodyDigest,digest);assert.equal([...f.state.facts.values()][0].amount,'110');assert.equal(f.i.proof.availableCents,'2200');
+});
+test('opening=C rejects a new coverage=D before any write, while original success, replay and read-only recovery stay successful',async()=>{
+ const f=await admitted();const plan=await api.planFinanceOpening(f.client,actor,f.i,f.scope);
+ f.state.cutoffGate.coverageDiffers=true;
+ await assert.rejects(api.importReviewedFinanceOpeningBatch(f.pool,actor,[f.i],f.scope),(e:any)=>e.status===409);
+ assert.equal(f.state.writes,0);assert.equal(f.state.facts.size,0);assert.equal(f.state.receipts.size,0);
+ const gate=f.state.queries.findIndex((q:any)=>q.sql.includes('finance single cutoff admission')),lock=f.state.queries.findIndex((q:any)=>q.sql.includes('WHERE id=$1 FOR UPDATE')),insert=f.state.queries.findIndex((q:any)=>/^INSERT/.test(q.sql));
+ assert(lock>=0&&gate>lock&&(insert===-1||insert>gate),'the gate runs inside the subject lock and before any insert');
+ const sql=f.state.queries[gate]!.sql;assert.match(sql,/source_kind='LEGACY_OPENING'/);assert.match(sql,/b\.source_system='legacy_mysql_restore'/);assert.match(sql,/c\.source_system='legacy_mysql_restore'/);assert.deepEqual(f.state.queries[gate]!.args,[f.i.proof.userId,f.i.cutoff]);
+ f.state.cutoffGate.coverageDiffers=false;await api.importReviewedFinanceOpeningBatch(f.pool,actor,[f.i],f.scope);const writes=f.state.writes;recoveryEvidence(f,plan);
+ f.state.cutoffGate.coverageDiffers=true;
+ const replay=await api.importReviewedFinanceOpeningBatch(f.pool,actor,[f.i],f.scope);assert.equal(replay[0].replayed,true);assert.equal(f.state.writes,writes);
+ assert.equal((await api.recoverReviewedFinanceOpeningBatch(f.client,actor,[f.i],f.scope)).knowledge,'KNOWN');assert.equal(f.state.writes,writes);
+});
+test('same-cutoff opening writes keep working and an inconsistent gate answer is unavailable, not silently allowed',async()=>{
+ const f=await admitted();await api.importReviewedFinanceOpeningBatch(f.pool,actor,[f.i],f.scope);assert.equal(f.state.facts.size,1);
+ const g=await admitted();g.state.cutoffGate={};
+ await assert.rejects(api.importReviewedFinanceOpeningBatch(g.pool,actor,[g.i],g.scope),(e:any)=>e.status===503);assert.equal(g.state.writes,0);
 });
