@@ -94,7 +94,7 @@ async function materialize(options: OrderStageCardOptions): Promise<void> {
           AND (o.status = 'PAID'
             OR (o.status = 'COMPLETED' AND posting.posted_at > clock_timestamp() - interval '72 hours'))
      ), wanted AS (
-       SELECT order_id, app_id, 'ORDER_OPENING'::text AS kind FROM facts WHERE opening_status = 'CONFIRMED'
+       SELECT order_id, app_id, 'ORDER_OPENING'::text AS kind FROM facts WHERE opening_status IN ('DRAFT', 'CONFIRMED')
        UNION ALL
        SELECT order_id, app_id, 'ORDER_ENDING' FROM facts WHERE has_intake
        UNION ALL

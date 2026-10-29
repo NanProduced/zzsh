@@ -47,8 +47,12 @@ test("fixture transport treats the card id as the client id and both viewers see
   assert.equal((await transport.history({ conversationId, viewerAccountId: "zzUSER1", limit: 10 })).length, 2);
 });
 
-test("0110 records one card per stage with a narrow runtime update grant", () => {
-  const sql = readFileSync(resolve("migrations/business/0110_im_order_stage_card.sql"), "utf8");
+test("opening cards are materialized from a draft opening, not only after both acks", () => {
+  const source = readFileSync(resolve("src/im/order-stage-cards.ts"), "utf8");
+  assert.match(source, /opening_status IN \('DRAFT', 'CONFIRMED'\)/);
+});
+
+test("0110 records one card per stage with a narrow runtime update grant", () => {  const sql = readFileSync(resolve("migrations/business/0110_im_order_stage_card.sql"), "utf8");
   assert.match(sql, /UNIQUE \("order_id", "app_id", "kind"\)/);
   assert.match(sql, /UNIQUE \("card_id"\)/);
   assert.match(sql, /"kind" IN \('ORDER_OPENING', 'ORDER_ENDING', 'ORDER_SETTLED', 'ORDER_PRICE_CHANGE'\)/);
