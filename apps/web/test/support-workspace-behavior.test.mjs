@@ -2123,9 +2123,10 @@ test("order stage cards render by kind as chat messages with the stage facts", a
   for (const card of cards) assert.ok(card.querySelector(".order-card-action"), "every card opens the order detail");
   const staffCard = cards[0];
   assert.equal(staffCard.getAttribute("data-party"), "STAFF");
-  assert.match(staffCard.textContent, /平台贡献/, "staff sees the platform contribution");
-  assert.match(staffCard.textContent, /买家合计 ¥15,320\.00/, "staff sees both sides");
-  assert.match(staffCard.textContent, /号主合计 ¥11,260\.00/);
+  const staffFigures = Object.fromEntries([...staffCard.querySelectorAll(".order-card-figure")]
+    .map(figure => [figure.querySelector("dt").textContent, figure.querySelector("dd").textContent]));
+  assert.deepEqual(staffFigures, { 买家合计: "¥15,320.00", 号主合计: "¥11,260.00" }, "staff sees both sides");
+  assert.equal(staffCard.querySelector(".order-card-platform strong").textContent, "¥2,060.00", "staff sees the platform contribution");
   assert.match(staffCard.textContent, /物品3 项 · 买家 ¥320\.00 · 号主 ¥260\.00/, "the 物品 row sums only non-Haff lines, not the rental total");
   assert.equal(staffCard.querySelectorAll(".order-card-line").length, 3, "the Haff line is summarized above, so the item list stays at three rows");
   assert.equal(staffCard.querySelector(".order-card-toggle"), null, "three non-Haff items need no fold toggle");
@@ -2136,7 +2137,9 @@ test("user cards hide the counterparty and platform amounts, and unknown basis s
   const renterHost = await mountOrderCardPanel(t, renter, [cardMessage("ORDER_OPENING", 1, renter)]);
   const renterCard = renterHost.querySelector(".order-card");
   assert.equal(renterCard.getAttribute("data-party"), "RENTER");
-  assert.match(renterCard.textContent, /押金 ¥5,000\.00 · 实付 ¥15,320\.00/, "the renter sees only their own deposit and payment");
+  const renterFigures = Object.fromEntries([...renterCard.querySelectorAll(".order-card-figure")]
+    .map(figure => [figure.querySelector("dt").textContent, figure.querySelector("dd").textContent]));
+  assert.deepEqual(renterFigures, { 押金: "¥5,000.00", 实付: "¥15,320.00" }, "the renter sees only their own deposit and payment");
   assert.match(renterCard.textContent, /物品3 项 · 合计 ¥320\.00/, "the 物品 row is the non-Haff item sum, not the rental total");
   assert.doesNotMatch(renterCard.textContent, /¥8,260\.00|¥11,260\.00|¥2,060\.00|平台贡献|号主合计/, "no owner or platform amount leaks to a user");
   assert.match(renterCard.textContent, /稳定 ID acc-card-1/, "the stable account id is shown");
@@ -2146,7 +2149,9 @@ test("user cards hide the counterparty and platform amounts, and unknown basis s
   const ownerHost = await mountOrderCardPanel(t, owner, [cardMessage("ORDER_OPENING", 1, owner)]);
   const ownerCard = ownerHost.querySelector(".order-card");
   assert.equal(ownerCard.getAttribute("data-party"), "OWNER");
-  assert.match(ownerCard.textContent, /保证金 ¥3,000\.00 · 应收 ¥8,260\.00/);
+  const ownerFigures = Object.fromEntries([...ownerCard.querySelectorAll(".order-card-figure")]
+    .map(figure => [figure.querySelector("dt").textContent, figure.querySelector("dd").textContent]));
+  assert.deepEqual(ownerFigures, { 保证金: "¥3,000.00", 应收: "¥8,260.00" });
   assert.doesNotMatch(ownerCard.textContent, /¥15,320\.00|¥10,320\.00|¥2,060\.00|平台贡献|买家合计/, "the owner never sees the buyer or platform side");
 
   const unknown = cardAccess(cardTermsFor("RENTER", { basis: "UNKNOWN" }));
@@ -2154,6 +2159,8 @@ test("user cards hide the counterparty and platform amounts, and unknown basis s
   const unknownCard = unknownHost.querySelector(".order-card");
   assert.equal(unknownCard.getAttribute("data-basis"), "UNKNOWN");
   assert.match(unknownCard.textContent, /金额依据待核对/);
+  const unknownValues = [...unknownCard.querySelectorAll(".order-card-figure dd")].map(node => node.textContent);
+  assert.deepEqual(unknownValues, ["金额依据待核对", "金额依据待核对"]);
   assert.doesNotMatch(unknownCard.textContent, /¥0\.00|¥[\d,]+\.00/, "unreadable amounts are never rendered as zero");
 });
 

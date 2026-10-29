@@ -405,10 +405,10 @@ test("the admin custom conversation renders an order-stage card with both sides"
   assert.match(card.textContent, /账号信息与开租确认/);
   assert.match(card.textContent, /买家 已确认/, "both party chips are shown");
   assert.match(card.textContent, /号主 待确认/);
-  assert.match(card.textContent, /买家合计 ¥100,180\.00/, "staff sees the buyer side");
-  assert.match(card.textContent, /号主合计 ¥80,150\.00/, "staff sees the owner side");
-  assert.match(card.textContent, /平台贡献/);
-  assert.match(card.textContent, /¥20,030\.00/);
+  const figures = Object.fromEntries([...card.querySelectorAll(".order-card-figure")]
+    .map(figure => [figure.querySelector("dt").textContent, figure.querySelector("dd").textContent]));
+  assert.deepEqual(figures, { 买家合计: "¥100,180.00", 号主合计: "¥80,150.00" }, "staff sees both sides");
+  assert.equal(card.querySelector(".order-card-platform strong").textContent, "¥20,030.00", "staff sees the platform contribution");
   assert.equal(card.closest(".im-wb-bub"), null, "the card replaces the text bubble instead of nesting inside it");
   assert.equal(card.closest(".im-wb-msg-body").getAttribute("data-card"), "true", "the message body is widened for the card");
 

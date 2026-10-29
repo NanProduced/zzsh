@@ -91,61 +91,55 @@ export function OrderCardMessage({ message, info, onOpenOrder }: { message: NimM
   const itemBuyerTotal = sumAmounts(itemLines.map(line => party === "STAFF" ? line.buyerAmount : line.amount));
   const itemOwnerTotal = sumAmounts(itemLines.map(line => line.ownerAmount));
   const visibleLines = expanded ? itemLines : itemLines.slice(0, 3);
-  const rows: Array<{ label: string; value: string }> = [];
+  type Figure = { label: string; value: string };
+  const figures: Figure[] = [];
+  const meta: Figure[] = [];
+  let resource: { quantity: string; amount: string | null } | null = null;
+  let itemSummary: string | null = null;
+  let platform: string | null = null;
   let note: string | null = null;
   let showAcks = false;
 
   if (card.kind === "ORDER_OPENING") {
-    rows.push({
-      label: "哈夫币",
-      value: `${haffQuantity ? groupDigits(haffQuantity) : "数量待核对"}${readAmounts ? ` · ${party === "STAFF" ? both(haffLine?.buyerAmount, haffLine?.ownerAmount) : money(haffLine?.amount)}` : ""}`,
-    });
-    rows.push({
-      label: "物品",
-      value: `${itemLines.length ? `${itemLines.length} 项${readAmounts ? ` · ${party === "STAFF" ? both(itemBuyerTotal, itemOwnerTotal) : `合计 ${money(itemBuyerTotal)}`}` : ""}` : lines.length ? "无额外物品" : "清单待核对"}`,
-    });
-    rows.push({
-      label: party === "OWNER" ? "保证金 / 应收" : party === "STAFF" ? "双边金额" : "押金 / 实付",
-      value: party === "OWNER"
-        ? `保证金 ${money(terms?.depositAmount)} · 应收 ${money(terms?.rentalAmount)}`
-        : party === "STAFF"
-          ? `买家合计 ${money(staff?.buyerTotal)} · 号主合计 ${money(staff?.ownerTotal)}`
-          : `押金 ${money(terms?.depositAmount)} · 实付 ${money(terms?.paidTotal)}`,
-    });
-    if (party === "STAFF") rows.push({ label: "平台贡献", value: money(staff?.platformContribution) });
+    resource = {
+      quantity: haffQuantity ? groupDigits(haffQuantity) : "数量待核对",
+      amount: readAmounts
+        ? party === "STAFF" ? both(haffLine?.buyerAmount, haffLine?.ownerAmount) : money(haffLine?.amount)
+        : null,
+    };
+    itemSummary = itemLines.length
+      ? `${itemLines.length} 项${readAmounts ? ` · ${party === "STAFF" ? both(itemBuyerTotal, itemOwnerTotal) : `合计 ${money(itemBuyerTotal)}`}` : ""}`
+      : lines.length ? "无额外物品" : "清单待核对";
+    if (party === "RENTER") figures.push({ label: "押金", value: money(terms?.depositAmount) }, { label: "实付", value: money(terms?.paidTotal) });
+    else if (party === "OWNER") figures.push({ label: "保证金", value: money(terms?.depositAmount) }, { label: "应收", value: money(terms?.rentalAmount) });
+    else figures.push({ label: "买家合计", value: money(staff?.buyerTotal) }, { label: "号主合计", value: money(staff?.ownerTotal) });
+    if (party === "STAFF") platform = money(staff?.platformContribution);
     showAcks = true;
     note = readAmounts ? "金额按订单冻结价展示，双方确认前不变。" : null;
   } else if (card.kind === "ORDER_ENDING") {
-    rows.push({ label: "结束状态", value: endStateText(info.endState) });
-    rows.push({ label: "到期时间", value: dueLabel(info.dueAt) });
-    rows.push({
-      label: party === "OWNER" ? "应收 / 保证金" : party === "STAFF" ? "双边金额" : "应退 / 实付",
-      value: party === "OWNER"
-        ? `应收 ${money(terms?.rentalAmount)} · 保证金 ${money(terms?.depositAmount)}`
-        : party === "STAFF"
-          ? `买家合计 ${money(staff?.buyerTotal)} · 号主合计 ${money(staff?.ownerTotal)}`
-          : `实付 ${money(terms?.paidTotal)} · 押金 ${money(terms?.depositAmount)}`,
-    });
-    if (party === "STAFF") rows.push({ label: "平台贡献", value: money(staff?.platformContribution) });
+    meta.push({ label: "结束状态", value: endStateText(info.endState) }, { label: "到期时间", value: dueLabel(info.dueAt) });
+    if (party === "RENTER") figures.push({ label: "实付", value: money(terms?.paidTotal) }, { label: "押金", value: money(terms?.depositAmount) });
+    else if (party === "OWNER") figures.push({ label: "应收", value: money(terms?.rentalAmount) }, { label: "保证金", value: money(terms?.depositAmount) });
+    else figures.push({ label: "买家合计", value: money(staff?.buyerTotal) }, { label: "号主合计", value: money(staff?.ownerTotal) });
+    if (party === "STAFF") platform = money(staff?.platformContribution);
     note = "应退/应收金额以双方确认的结算单为准。";
   } else if (card.kind === "ORDER_SETTLED") {
-    rows.push({ label: "结算状态", value: "已结算" });
-    rows.push({
-      label: party === "OWNER" ? "我的应收" : party === "STAFF" ? "双边金额" : "我的实付",
-      value: party === "OWNER"
-        ? money(terms?.rentalAmount)
-        : party === "STAFF"
-          ? `买家合计 ${money(staff?.buyerTotal)} · 号主合计 ${money(staff?.ownerTotal)}`
-          : money(terms?.paidTotal),
-    });
-    if (party === "STAFF") rows.push({ label: "平台贡献", value: money(staff?.platformContribution) });
-    rows.push({ label: "沟通窗口", value: windowText(info.sendUntil) });
+    meta.push({ label: "结算状态", value: "已结算" });
+    if (party === "RENTER") figures.push({ label: "我的实付", value: money(terms?.paidTotal) });
+    else if (party === "OWNER") figures.push({ label: "我的应收", value: money(terms?.rentalAmount) });
+    else figures.push({ label: "买家合计", value: money(staff?.buyerTotal) }, { label: "号主合计", value: money(staff?.ownerTotal) });
+    if (party === "STAFF") platform = money(staff?.platformContribution);
+    meta.push({ label: "沟通窗口", value: windowText(info.sendUntil) });
     note = "到账时间以支付渠道为准。";
   } else {
     note = "价格调整内容以订单详情为准，确认前金额不变。";
   }
 
   const acks = info.openingAcks;
+  const viewerAck = party === "RENTER" ? acks?.renter : party === "OWNER" ? acks?.owner : null;
+  const actionLabel = card.kind === "ORDER_OPENING"
+    ? party !== "STAFF" && viewerAck === false ? "查看并确认开租" : party === "STAFF" ? "查看本单" : "查看订单详情"
+    : card.kind === "ORDER_ENDING" ? party === "STAFF" ? "去处理结束" : "查看并处理" : "查看订单详情";
   // The user site needs the party view to open the right order tab; staff always pass a callback.
   const detailHref = party === "STAFF"
     ? `/account?orderId=${encodeURIComponent(info.orderId)}`
@@ -157,30 +151,45 @@ export function OrderCardMessage({ message, info, onOpenOrder }: { message: NimM
   return <article className="order-card" data-kind={card.kind} data-party={party} data-basis={basis} data-order-id={card.orderId}
     aria-label={`订单阶段卡：${heading.title}`}>
     <header className="order-card-head">
-      <span className="order-card-tag">{heading.tag}</span>
+      <div className="order-card-kicker">
+        <span className="order-card-tag"><i className="order-card-tone-dot" aria-hidden="true" />{heading.tag}</span>
+        <small className="order-card-no">订单 {info.displayNo}</small>
+      </div>
       <strong className="order-card-title">{heading.title}</strong>
-      <small className="order-card-no">订单 {info.displayNo}</small>
     </header>
     <p className="order-card-account">{info.gameName} · {info.account.title}<small>稳定 ID {info.account.id}</small></p>
-    {!readAmounts ? <p className="order-card-verify" role="status">金额依据待核对，最终以订单详情为准。</p> : null}
-    <dl className="order-card-rows">{rows.map(row => <div className="order-card-row" key={row.label}><dt>{row.label}</dt><dd>{row.value}</dd></div>)}</dl>
-    {showAcks ? <div className="order-card-acks" aria-label="开租确认状态">
-      <span className="order-card-ack" data-state={acks?.renter ? "confirmed" : "pending"} data-self={party === "RENTER" ? "true" : undefined}>买家 {acks?.renter ? "已确认" : "待确认"}</span>
-      <span className="order-card-ack" data-state={acks?.owner ? "confirmed" : "pending"} data-self={party === "OWNER" ? "true" : undefined}>号主 {acks?.owner ? "已确认" : "待确认"}</span>
+    {!readAmounts ? <p className="order-card-verify" role="status"><i className="order-card-warn-dot" aria-hidden="true" />金额依据待核对，最终以订单详情为准。</p> : null}
+    {resource ? <div className="order-card-resource">
+      <span className="order-card-resource-label">哈夫币</span>
+      <strong className="order-card-resource-value">{resource.quantity}</strong>
+      {resource.amount ? <span className="order-card-resource-amount">{resource.amount}</span> : null}
     </div> : null}
-    {itemLines.length ? <ul className="order-card-lines" aria-label="物品清单">
-      {visibleLines.map(line => <li className="order-card-line" key={line.itemId}>
-        <span className="order-card-line-name">{line.name?.trim() || "未命名资源"}</span>
-        <span className="order-card-line-qty">× {groupDigits(line.quantity)}</span>
-        {readAmounts ? <span className="order-card-line-amount">{lineAmount(line)}</span> : null}
-      </li>)}
-      {itemLines.length > 3 ? <li><button type="button" className="order-card-toggle" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{expanded ? "收起清单" : `查看完整清单（${itemLines.length} 项）`}</button></li> : null}
-    </ul> : null}
+    {figures.length ? <dl className="order-card-figures" data-count={figures.length}>{figures.map(figure =>
+      <div className="order-card-figure" key={figure.label}><dt>{figure.label}</dt><dd>{figure.value}</dd></div>)}</dl> : null}
+    {platform ? <p className="order-card-platform"><span>平台贡献</span><strong>{platform}</strong></p> : null}
+    {meta.length ? <dl className="order-card-meta">{meta.map(item =>
+      <div className="order-card-meta-row" key={item.label}><dt>{item.label}</dt><dd>{item.value}</dd></div>)}</dl> : null}
+    {showAcks ? <div className="order-card-acks" aria-label="开租确认状态">
+      <span className="order-card-acks-label">开租确认</span>
+      <span className="order-card-ack" data-state={acks?.renter ? "confirmed" : "pending"} data-self={party === "RENTER" ? "true" : undefined}><i className="order-card-ack-dot" aria-hidden="true" />买家 {acks?.renter ? "已确认" : "待确认"}</span>
+      <span className="order-card-ack" data-state={acks?.owner ? "confirmed" : "pending"} data-self={party === "OWNER" ? "true" : undefined}><i className="order-card-ack-dot" aria-hidden="true" />号主 {acks?.owner ? "已确认" : "待确认"}</span>
+    </div> : null}
+    {itemSummary ? <div className="order-card-inventory">
+      <div className="order-card-inventory-head"><span>物品</span><span>{itemSummary}</span></div>
+      {itemLines.length ? <ul className="order-card-lines" aria-label="物品清单">
+        {visibleLines.map(line => <li className="order-card-line" key={line.itemId}>
+          <span className="order-card-line-name">{line.name?.trim() || "未命名资源"}</span>
+          <span className="order-card-line-qty">× {groupDigits(line.quantity)}</span>
+          {readAmounts ? <span className="order-card-line-amount">{lineAmount(line)}</span> : null}
+        </li>)}
+        {itemLines.length > 3 ? <li><button type="button" className="order-card-toggle" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{expanded ? "收起清单" : `查看完整清单（${itemLines.length} 项）`}</button></li> : null}
+      </ul> : null}
+    </div> : null}
     {note ? <p className="order-card-note">{note}</p> : null}
     <div className="order-card-foot">
       {onOpenOrder
-        ? <button type="button" className="order-card-action" onClick={onOpenOrder}>查看订单详情</button>
-        : <a className="order-card-action" href={detailHref}>查看订单详情</a>}
+        ? <button type="button" className="order-card-action" onClick={onOpenOrder} title="打开订单详情完成确认与操作">{actionLabel}</button>
+        : <a className="order-card-action" href={detailHref} title="打开订单详情完成确认与操作">{actionLabel}</a>}
     </div>
   </article>;
 }

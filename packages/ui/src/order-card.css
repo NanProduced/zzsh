@@ -1,34 +1,59 @@
 /* Order-stage card inside a chat message. Values fall back across the user site
-   tokens (--color-*) and the admin theme tokens (--card/--border/--muted-foreground). */
-.order-card{--oc-border:var(--ot-border,var(--color-border-default,var(--border,#c8d0da)));--oc-muted:var(--ot-muted,var(--color-text-secondary,var(--muted-foreground,#737d89)));--oc-accent:var(--color-accent-brand,var(--im-accent,var(--ring,#c9a15a)));box-sizing:border-box;display:grid;gap:8px;width:100%;max-width:340px;padding:12px 13px;border:1px solid var(--oc-border);border-radius:10px;background:var(--color-bg-surface,var(--card,transparent));color:inherit;font-size:12px;line-height:1.5;text-align:left;overflow-wrap:anywhere}
-.order-card[data-kind="ORDER_OPENING"]{border-left:3px solid var(--oc-accent);padding-left:11px}
-.order-card-head{display:grid;gap:2px;min-width:0}
-.order-card-tag{justify-self:start;padding:0 6px;border:1px solid var(--oc-border);border-radius:999px;color:var(--oc-muted);font-size:10px;line-height:1.6}
-.order-card-title{margin:0;font-size:13px;font-weight:600;line-height:1.4}
-.order-card-no{color:var(--oc-muted);font-size:10px;font-variant-numeric:tabular-nums}
-.order-card-account{margin:0;font-size:12px;font-weight:600;line-height:1.45}
+   tokens (--color-*) and the admin theme tokens (--card/--border/--muted-foreground).
+   Color marks the stage and confirmation state; amounts stay in the foreground. */
+.order-card{--oc-border:var(--ot-border,var(--color-border-default,var(--border,#c8d0da)));--oc-muted:var(--ot-muted,var(--color-text-secondary,var(--muted-foreground,#737d89)));--oc-strong:var(--color-text-primary,var(--foreground,currentColor));--oc-tone:var(--color-info,var(--color-status-info,#3b82f6));box-sizing:border-box;display:grid;gap:9px;width:100%;max-width:344px;padding:12px 14px;border:1px solid var(--oc-border);border-top-color:color-mix(in srgb,var(--oc-tone) 52%,var(--oc-border));border-radius:12px;background:var(--color-bg-surface,var(--card,transparent));color:var(--oc-strong);font-size:13px;line-height:1.5;text-align:left;overflow-wrap:anywhere}
+.order-card[data-kind="ORDER_ENDING"]{--oc-tone:var(--color-warning,var(--color-status-warning,#b45309))}
+.order-card[data-kind="ORDER_SETTLED"]{--oc-tone:var(--color-success,var(--color-status-success,#047857))}
+.order-card[data-kind="ORDER_PRICE_CHANGE"]{--oc-tone:var(--color-info,var(--color-status-info,#3b82f6))}
+.order-card-head{display:grid;gap:4px;min-width:0}
+.order-card-kicker{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0}
+.order-card-tag{display:inline-flex;align-items:center;gap:5px;min-width:0;padding:1px 7px 1px 6px;border-radius:999px;background:color-mix(in srgb,var(--oc-tone) 13%,transparent);color:var(--oc-strong);font-size:11px;font-weight:600;letter-spacing:.02em;line-height:1.55;white-space:nowrap}
+.order-card-tone-dot{width:5px;height:5px;flex:none;border-radius:50%;background:var(--oc-tone)}
+.order-card-title{margin:0;font-size:14px;font-weight:650;line-height:1.35;letter-spacing:-.01em;text-wrap:balance}
+.order-card-no{flex:none;color:var(--oc-muted);font-size:11px;font-weight:500;font-variant-numeric:tabular-nums;white-space:nowrap}
+.order-card-account{margin:0;font-size:13px;font-weight:600;line-height:1.45}
 /* The admin shell styles bare <p> as a panel; inside a message card that reads as a nested card. */
-.order-card .order-card-account,.order-card .order-card-verify,.order-card .order-card-note{padding:0;border:0;border-radius:0;background:none}
-.order-card-account small{display:block;color:var(--oc-muted);font-size:11px;font-weight:400;font-variant-numeric:tabular-nums}
-.order-card-verify{margin:0;color:var(--oc-muted);font-size:11px;line-height:1.5}
-.order-card-rows{display:grid;gap:4px;margin:0;padding-top:6px;border-top:1px solid var(--oc-border)}
-.order-card-row{display:grid;grid-template-columns:5rem minmax(0,1fr);gap:8px;margin:0}
-.order-card-row dt{color:var(--oc-muted)}
-.order-card-row dd{margin:0;min-width:0}
-.order-card-acks{display:flex;flex-wrap:wrap;gap:6px}
-.order-card-ack{padding:1px 7px;border:1px solid var(--oc-border);border-radius:999px;color:var(--oc-muted);font-size:11px;line-height:1.6}
-.order-card-ack[data-state="confirmed"]{color:var(--color-status-success,var(--success,#6b9f78));border-color:color-mix(in srgb,var(--color-status-success,var(--success,#6b9f78)) 45%,var(--oc-border))}
-.order-card-ack[data-self="true"]{font-weight:600}
-.order-card-lines{display:grid;gap:3px;margin:0;padding:6px 0 0;border-top:1px dashed var(--oc-border);list-style:none}
+.order-card .order-card-account,.order-card .order-card-verify,.order-card .order-card-platform,.order-card .order-card-note{padding:0;border:0;border-radius:0;background:none}
+.order-card-account small{display:block;margin-top:1px;color:var(--oc-muted);font-size:11px;font-weight:400;font-variant-numeric:tabular-nums}
+.order-card-verify{display:flex;align-items:flex-start;gap:6px;margin:0;color:var(--oc-strong);font-size:11.5px;line-height:1.5}
+.order-card-warn-dot{width:5px;height:5px;margin-top:.55em;flex:none;border-radius:50%;background:var(--color-warning,var(--color-status-warning,#b45309))}
+.order-card-resource{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 10px;align-items:baseline;padding:8px 0;border-block:1px solid var(--oc-border)}
+.order-card-resource-label{grid-column:1;color:var(--oc-muted);font-size:11px;font-weight:500;letter-spacing:.02em}
+.order-card-resource-value{grid-column:2;grid-row:1 / span 2;align-self:center;color:var(--oc-strong);font-size:18px;font-weight:650;line-height:1.2;font-variant-numeric:tabular-nums;text-align:right}
+.order-card-resource-amount{grid-column:1;color:var(--oc-muted);font-size:11px;line-height:1.45;font-variant-numeric:tabular-nums}
+.order-card-figures{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 14px;margin:0}
+.order-card-figures[data-count="1"]{grid-template-columns:minmax(0,1fr)}
+.order-card-figure{display:grid;gap:2px;min-width:0}
+.order-card-figure dt{color:var(--oc-muted);font-size:11px;font-weight:500;letter-spacing:.01em}
+.order-card-figure dd{margin:0;color:var(--oc-strong);font-size:15.5px;font-weight:650;line-height:1.25;font-variant-numeric:tabular-nums;letter-spacing:-.01em;overflow-wrap:anywhere}
+.order-card-platform{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin:0;padding-top:7px;border-top:1px dashed var(--oc-border);color:var(--oc-muted);font-size:11px}
+.order-card-platform strong{color:var(--oc-strong);font-size:12px;font-weight:600;font-variant-numeric:tabular-nums}
+.order-card-meta{display:grid;gap:4px;margin:0;padding-top:7px;border-top:1px solid var(--oc-border)}
+.order-card-meta-row{display:grid;grid-template-columns:4.5rem minmax(0,1fr);gap:8px;align-items:baseline}
+.order-card-meta-row dt{color:var(--oc-muted);font-size:11px;font-weight:500}
+.order-card-meta-row dd{margin:0;color:var(--oc-strong);font-size:12px;line-height:1.45;font-variant-numeric:tabular-nums}
+.order-card-acks{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.order-card-acks-label{margin-right:2px;color:var(--oc-muted);font-size:10.5px;font-weight:500;letter-spacing:.02em}
+.order-card-ack{display:inline-flex;align-items:center;gap:5px;padding:1px 7px;border:1px solid var(--oc-border);border-radius:999px;color:var(--oc-muted);font-size:11px;line-height:1.6;white-space:nowrap}
+.order-card-ack-dot{width:5px;height:5px;flex:none;border-radius:50%;background:var(--oc-muted);opacity:.7}
+.order-card-ack[data-state="confirmed"]{border-color:color-mix(in srgb,var(--color-success,var(--color-status-success,#047857)) 38%,var(--oc-border));background:color-mix(in srgb,var(--color-success,var(--color-status-success,#047857)) 9%,transparent);color:var(--oc-strong)}
+.order-card-ack[data-state="confirmed"] .order-card-ack-dot{background:var(--color-success,var(--color-status-success,#047857));opacity:1}
+.order-card-ack[data-self="true"]{box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--oc-strong) 28%,transparent);color:var(--oc-strong)}
+.order-card-inventory{display:grid;gap:4px;padding-top:7px;border-top:1px dashed var(--oc-border)}
+.order-card-inventory-head{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:4px 10px;color:var(--oc-muted);font-size:11px;line-height:1.5}
+.order-card-inventory-head span:last-child{color:var(--oc-strong);font-weight:500;font-variant-numeric:tabular-nums}
+.order-card-lines{display:grid;gap:4px;margin:0;padding:0;list-style:none}
 .order-card-line{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;align-items:baseline;margin:0}
-.order-card-line-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.order-card-line-qty{color:var(--oc-muted);font-variant-numeric:tabular-nums;white-space:nowrap}
-.order-card-line-amount{font-variant-numeric:tabular-nums;text-align:right;white-space:normal}
-.order-card .order-card-toggle{justify-self:start;padding:2px 0;border:0;border-radius:0;background:transparent;color:var(--oc-accent);font:inherit;font-size:11px;cursor:pointer}
-.order-card-toggle:hover{text-decoration:underline;text-underline-offset:2px}
-.order-card-note{margin:0;color:var(--oc-muted);font-size:11px;line-height:1.5}
-.order-card-foot{display:flex;align-items:center;justify-content:flex-end;padding-top:7px;border-top:1px solid var(--oc-border)}
-.order-card .order-card-action{flex:none;padding:5px 11px;border:1px solid var(--oc-border);border-radius:6px;background:transparent;color:inherit;font:inherit;font-size:12px;font-weight:600;line-height:1.5;text-decoration:none;white-space:nowrap;cursor:pointer}
-.order-card-action:hover{border-color:var(--oc-accent);color:var(--oc-accent)}
-.order-card .order-card-action:focus-visible{outline:2px solid var(--oc-accent);outline-offset:2px}
+.order-card-line-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--oc-strong);font-size:12px;font-weight:500}
+.order-card-line-qty{color:var(--oc-muted);font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.order-card-line-amount{color:var(--oc-muted);font-size:11px;font-variant-numeric:tabular-nums;text-align:right;white-space:normal}
+.order-card[data-party="RENTER"] .order-card-line-amount,.order-card[data-party="OWNER"] .order-card-line-amount{color:var(--oc-strong);font-weight:500}
+.order-card .order-card-toggle{justify-self:start;padding:2px 0;border:0;border-radius:0;background:transparent;color:var(--oc-strong);font:inherit;font-size:11px;font-weight:500;text-decoration:underline;text-decoration-color:color-mix(in srgb,var(--oc-tone) 55%,transparent);text-underline-offset:2px;cursor:pointer}
+.order-card-toggle:hover{text-decoration-color:var(--oc-tone)}
+.order-card .order-card-toggle:focus-visible{outline:2px solid var(--oc-tone);outline-offset:2px}
+.order-card-note{margin:0;color:var(--oc-muted);font-size:11px;line-height:1.5;text-wrap:pretty}
+.order-card-foot{display:flex;justify-content:flex-end;padding-top:8px;border-top:1px solid var(--oc-border)}
+.order-card .order-card-action{min-height:28px;padding:0 11px;border:1px solid color-mix(in srgb,var(--oc-tone) 32%,var(--oc-border));border-radius:7px;background:transparent;color:var(--oc-strong);font:inherit;font-size:12px;font-weight:600;line-height:1.4;text-decoration:none;white-space:nowrap;cursor:pointer}
+.order-card-action:hover{border-color:var(--oc-tone);background:color-mix(in srgb,var(--oc-tone) 7%,transparent)}
+.order-card .order-card-action:focus-visible{outline:2px solid var(--oc-tone);outline-offset:2px}
 @media(max-width:520px){.order-card{max-width:none;width:calc(100% - 24px)}}
