@@ -182,6 +182,7 @@ export function AdminOrderGroupSettingsDrawer({ info, request, preferences, onPr
   const users = info.members.filter((member) => member.party === "BUYER" || member.party === "OWNER");
   const staff = info.members.filter((member) => member.party === "STAFF") as MemberView[];
   const others = info.members.filter((member) => member.party !== "BUYER" && member.party !== "OWNER" && member.party !== "STAFF");
+  const ended = info.orderStatus === "COMPLETED" || info.orderStatus === "CANCELLED";
   const groupName = info.name?.trim() || `${info.account.title} · 订单群`;
   const memberIds = new Set(info.members.map((member) => member.platformId));
   const text = query.trim().toLowerCase();
@@ -233,7 +234,9 @@ export function AdminOrderGroupSettingsDrawer({ info, request, preferences, onPr
 
           <div className="im-og-section-head im-og-staff-head">
             <h3>客服成员</h3>
-            <button type="button" className="im-og-invite-btn" data-action="open-admin-invite" onClick={() => setPickerOpen((open) => !open)}><UserPlus size={13} />邀请管理员</button>
+            {ended
+              ? <span className="im-og-readonly" data-action="invite-ended-readonly">本单已结束</span>
+              : <button type="button" className="im-og-invite-btn" data-action="open-admin-invite" onClick={() => setPickerOpen((open) => !open)}><UserPlus size={13} />邀请管理员</button>}
           </div>
           {staff.length ? <ul className="im-og-members" data-member-group="STAFF" aria-label="客服成员">
             {staff.map((member) => <StaffMemberRow key={member.accountId} member={member} />)}
@@ -242,7 +245,7 @@ export function AdminOrderGroupSettingsDrawer({ info, request, preferences, onPr
             {others.map((member) => <li className="im-og-member" key={member.accountId}><MemberAvatar member={member} name={member.name?.trim() || "未分组成员"} /><span className="im-og-member-copy"><b>{member.name?.trim() || "未分组成员"}</b><small>成员类型待确认</small></span></li>)}
           </ul> : null}
 
-          {pickerOpen ? <div className="im-og-picker" aria-label="邀请管理员">
+          {pickerOpen && !ended ? <div className="im-og-picker" aria-label="邀请管理员">
             <label className="im-og-search"><Search size={13} aria-hidden="true" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索管理员姓名" aria-label="搜索管理员姓名" /></label>
             <p className="im-og-note">任意管理端管理员可邀请现有管理员；普通用户与站外账号不可邀请。仅列出状态正常的现有管理员。</p>
             {!inviteMember ? <p className="im-og-status" data-tone="warn" role="status">服务端未就绪：邀请接口尚未提供，当前不会发送邀请。</p> : null}
