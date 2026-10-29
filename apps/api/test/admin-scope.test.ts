@@ -183,6 +183,42 @@ test("a scoped collection without a matching game returns an empty page, not an 
   assert.equal(scoped.bindingSql, "", "an empty page reads no bindings at all");
 });
 
+test("collection rows project stage, dueAt and todo from the same fulfillment facts", async () => {
+  const scoped = new ScopeCollectionClient();
+  scoped.gameIds = ["delta"];
+  const confirmedAt = new Date(Date.now() - 60 * 60 * 1_000);
+  scoped.listRows = [{
+    id: "order_renting", displayNo: "ZZ-1", title: "租用中订单", status: "PAID", teamState: "READY", provisionState: "ASSIGNED",
+    openingStatus: "CONFIRMED", openingConfirmedAt: confirmedAt, openingAcked: true, termSeconds: "7200",
+    intakeOpen: false, settlementCurrent: false, postedAt: null, firstResponseAt: null, remindDueAt: null,
+    addRound: 0, escalationState: "NOT_STARTED", firstResponseOverdue: false, gameName: "三角洲行动",
+  }, {
+    id: "order_ending", displayNo: "ZZ-2", title: "结束中订单", status: "PAID", teamState: "READY", provisionState: "ASSIGNED",
+    openingStatus: "CONFIRMED", openingConfirmedAt: confirmedAt, openingAcked: true, termSeconds: "7200",
+    intakeOpen: true, settlementCurrent: false, postedAt: null, firstResponseAt: "2026-10-29T12:00:00.000Z", remindDueAt: null,
+    addRound: 1, escalationState: "RUNNING", firstResponseOverdue: false, gameName: "三角洲行动",
+  }, {
+    id: "order_done", displayNo: "ZZ-3", title: "已完成订单", status: "COMPLETED", teamState: "READY", provisionState: "ASSIGNED",
+    openingStatus: "CONFIRMED", openingConfirmedAt: confirmedAt, openingAcked: true, termSeconds: "7200",
+    intakeOpen: false, settlementCurrent: true, postedAt: confirmedAt, firstResponseAt: null, remindDueAt: null,
+    addRound: 0, escalationState: "STOPPED", firstResponseOverdue: false, gameName: "三角洲行动",
+  }];
+  const teams = await listJoinedOrderTeams(scoped as unknown as PoolClient, collectionActor, null, 20);
+  const rows = teams.items as Array<Record<string, unknown>>;
+  const renting = rows[0]!;
+  const ending = rows[1]!;
+  const done = rows[2]!;
+  assert.equal(renting.stage, "RENTING");
+  assert.equal(renting.todo, "即将到期", "a due inside 24h is a queue todo");
+  assert.ok(typeof renting.dueAt === "string" && renting.dueAt.length > 0, "the same projection supplies dueAt");
+  assert.equal(ending.stage, "ENDING");
+  assert.equal(ending.todo, "待结束确认");
+  assert.equal(done.stage, "SETTLED");
+  assert.equal(done.todo, "已完成");
+  assert.equal("openingStatus" in renting, false, "internal projection inputs stay out of the directory response");
+  assert.equal("postedAt" in renting, false);
+});
+
 test("media queue projects technical facts and scope-filtered binding counts split by currency", async () => {
   const scoped = new ScopeCollectionClient();
   scoped.gameIds = ["delta"];

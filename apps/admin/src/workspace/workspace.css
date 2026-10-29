@@ -323,6 +323,9 @@
 .workspace-root .im-wb-row-snip { overflow:hidden; color:var(--muted-foreground); font-size:13px; text-overflow:ellipsis; white-space:nowrap; }
 .workspace-root .im-wb-row-foot { display:flex; align-items:center; gap:7px; }
 .workspace-root .im-wb-row-foot em { color:var(--muted-foreground); font-size:12px; font-style:normal; }
+.workspace-root .im-wb-row-foot em[data-tone="todo"] { color:var(--foreground); font-weight:600; }
+.workspace-root .im-wb-row-foot em[data-tone="warn"] { color:var(--destructive); }
+.workspace-root .im-wb-row-foot small { color:var(--muted-foreground); font-size:11px; font-variant-numeric:tabular-nums; }
 .workspace-root .im-wb-row-foot em[data-state="处理中"] { color:var(--im-accent-strong); }
 .workspace-root .im-wb-row-foot em[data-state="待核验"],.workspace-root .im-wb-row-foot em[data-state="待接入"] { color:var(--destructive); }
 .workspace-root .im-wb-unread { display:grid; min-width:18px; height:16px; place-items:center; padding:0 5px; border-radius:999px; color:var(--background); background:var(--ring); font-size:10px; font-style:normal; font-weight:600; }

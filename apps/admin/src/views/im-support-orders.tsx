@@ -211,7 +211,11 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
           {loading && !items.length ? <p className="im-wb-list-empty"><strong>正在读取订单群…</strong></p> : null}
           {rows.map((row) => {
             const ended = row.status === "COMPLETED" || row.status === "CANCELLED";
-            const fact = !ended && row.teamState === "READY" ? escalationStateLabel(row.escalationState ?? "NOT_STARTED", row.firstResponseAt ?? null) : null;
+            const fact = !ended && row.teamState === "READY"
+              ? row.firstResponseOverdue ? "首响超时" : escalationStateLabel(row.escalationState ?? "NOT_STARTED", row.firstResponseAt ?? null)
+              : null;
+            const todo = !ended ? row.todo ?? null : null;
+            const due = !ended && row.dueAt ? `到期 ${serverTime(row.dueAt)}` : null;
             return (
               <button type="button" key={row.id} className="im-wb-row" data-active={selectedId === row.id} aria-current={selectedId === row.id ? "page" : undefined}
                 onClick={() => { setInventoryOrderId(null); setImageErrors({}); onSelect(row.id); setPane("chat"); }}>
@@ -219,7 +223,11 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
                 <span className="im-wb-row-copy">
                   <span className="im-wb-row-top"><b>{row.title}</b><i className="im-wb-tag">{row.displayNo}</i></span>
                   <span className="im-wb-row-snip">{orderStageLabel(row)}</span>
-                  {fact ? <span className="im-wb-row-foot"><em>{fact}</em></span> : null}
+                  {todo || due || fact ? <span className="im-wb-row-foot">
+                    {todo ? <em data-tone="todo">{todo}</em> : null}
+                    {due ? <small>{due}</small> : null}
+                    {fact ? <em data-tone={row.firstResponseOverdue ? "warn" : undefined}>{fact}</em> : null}
+                  </span> : null}
                 </span>
               </button>
             );

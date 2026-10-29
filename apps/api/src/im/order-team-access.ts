@@ -281,6 +281,25 @@ export async function readOrderTeamAccess(c:PoolClient,actor:OrderTeamActor,orde
       ...(actor.realm==="admin"&&m.realm==="user"?{membershipStatus:"UNKNOWN",identityStatus:"UNKNOWN"}:{})}))};
 }
 
+/** Short queue todo derived from the same stage facts; it never replaces the detail projection. */
+function queueTodo(f: OrderFulfillment, now = Date.now()): string | null {
+  switch (f.stage) {
+    case "PENDING_PAYMENT": return "未付款";
+    case "WAITING_STAFF": return "待客服接入";
+    case "TEAM_PENDING": return "待建群";
+    case "OPENING_CONFIRM": return "待开租确认";
+    case "RENTING": {
+      const due = f.dueAt ? new Date(f.dueAt).getTime() : Number.NaN;
+      if (Number.isFinite(due)) return due <= now ? "已到期 · 待处理" : due - now <= 24 * 60 * 60 * 1_000 ? "即将到期" : "租用中";
+      return "租用中";
+    }
+    case "ENDING": return "待结束确认";
+    case "SETTLED": return "已完成";
+    case "CANCELLED": return "已取消";
+    default: return null;
+  }
+}
+
 /** Member-scoped directory; deliberately independent of the order.read directory. */
 export async function listJoinedOrderTeams(c:PoolClient,actor:OrderTeamActor,cursor:string|null,limit:number):Promise<Record<string,unknown>>{
   if(actor.realm!=="admin")throw denied();
@@ -288,16 +307,34 @@ export async function listJoinedOrderTeams(c:PoolClient,actor:OrderTeamActor,cur
   const access=await loadEffectiveAdminAccess(c,actor.userId);
   if(!hasPermission(access,"im.support.read"))throw denied();
   assertGameScopeUsable(await readAdminGameScope(c,actor.userId),access?.isBoss===true);
-  const rows=(await c.query(`SELECT o.id,o.display_no AS "displayNo",o.title,o.status,g.team_state AS "teamState",game.name AS "gameName",
-      to_jsonb(g)->>'first_response_at' AS "firstResponseAt",
-      (to_jsonb(g)->>'remind_due_at') AS "remindDueAt",
-      COALESCE((to_jsonb(g)->>'add_round')::int,0) AS "addRound",
-      COALESCE(to_jsonb(g)->>'escalation_state','NOT_STARTED') AS "escalationState"
+  const rows=(await c.query<Record<string,any>>(`SELECT o.id,o.display_no AS "displayNo",o.title,o.status,
+      g.team_state AS "teamState",g.provision_state AS "provisionState",
+      latest_opening.status AS "openingStatus",latest_opening.confirmed_at AS "openingConfirmedAt",
+      EXISTS(SELECT 1 FROM zzsh_order.rental_opening_ack a WHERE a.opening_id=latest_opening.id) AS "openingAcked",
+      o.term_seconds::text AS "termSeconds",
+      EXISTS(SELECT 1 FROM zzsh_order.settlement_intake si WHERE si.order_id=o.id AND si.status='OPEN') AS "intakeOpen",
+      EXISTS(SELECT 1 FROM zzsh_order.settlement_version sv WHERE sv.order_id=o.id AND sv.superseded_at IS NULL) AS "settlementCurrent",
+      posting.posted_at AS "postedAt",
+      g.first_response_at AS "firstResponseAt",g.remind_due_at AS "remindDueAt",
+      COALESCE(g.add_round,0) AS "addRound",COALESCE(g.escalation_state,'NOT_STARTED') AS "escalationState",
+      (g.first_response_state='RUNNING' AND g.first_response_at IS NULL AND g.remind_due_at IS NOT NULL
+        AND g.remind_due_at<=clock_timestamp()) AS "firstResponseOverdue",
+      game.name AS "gameName"
     FROM zzsh_order.im_order_member mm JOIN zzsh_iam.im_identity_mapping m ON m.id=mm.identity_id AND m.app_id=mm.app_id
     JOIN zzsh_order.im_order_group g ON g.order_id=mm.order_id AND g.app_id=mm.app_id
     JOIN zzsh_order.rental_order o ON o.id=g.order_id JOIN zzsh_supply.game game ON game.id=o.game_id
+    LEFT JOIN LATERAL (SELECT op.id,op.status,op.confirmed_at FROM zzsh_order.rental_opening op WHERE op.order_id=o.id
+      ORDER BY op.version_no DESC LIMIT 1) latest_opening ON TRUE
+    LEFT JOIN LATERAL (SELECT p.posted_at FROM zzsh_order.settlement_posting p WHERE p.order_id=o.id
+      ORDER BY p.posted_at DESC,p.id DESC LIMIT 1) posting ON TRUE
     WHERE mm.party='STAFF' AND mm.state='JOINED' AND m.realm='admin' AND m.identity_kind='ADMIN' AND m.status='READY'
       AND m.platform_subject_id=$1 AND ${gameScopeSql("o.game_id","$1","$2")}
       AND ($3::text IS NULL OR o.id<$3) ORDER BY o.id DESC LIMIT $4`,[actor.userId,access!.isBoss,cursor,limit+1])).rows;
-  return {items:rows.slice(0,limit),nextCursor:rows.length>limit?rows[limit-1]!.id:null,limit};
+  const items=rows.slice(0,limit).map(({openingStatus,openingConfirmedAt,openingAcked,termSeconds,intakeOpen,settlementCurrent,postedAt,provisionState,...row})=>{
+    const fulfillment=projectOrderFulfillment({orderStatus:row.status,hasGroup:true,provisionState,teamState:row.teamState,
+      openingStatus,openingConfirmedAt,openingAcked:openingAcked===true,termSeconds,intakeOpen:Boolean(intakeOpen),
+      currentSettlement:Boolean(settlementCurrent),posted:postedAt!==null});
+    return {...row,stage:fulfillment.stage,dueAt:fulfillment.dueAt,todo:queueTodo(fulfillment)};
+  });
+  return {items,nextCursor:rows.length>limit?rows[limit-1]!.id:null,limit};
 }
