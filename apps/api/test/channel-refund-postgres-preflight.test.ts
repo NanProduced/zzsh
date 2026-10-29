@@ -87,3 +87,15 @@ for(const early of [false,true])test(`合成编排检查：${early?'提前分支
  else{const result=await createNativeRefundPostingFixture(pool,args);assert.equal(result.postingId,'posting_1');assert.equal(result.formalRefund,false);
   assert.deepEqual(trace,['recordOpening','opening:renter','opening:owner','preview','submit:renter','decide:owner']);assert.equal(sqls.at(-1),'COMMIT');}
 });
+
+
+test('row-wait evidence requires this blocker and the unchanged lease to be live before expiry', async () => {
+  const { assertControlledRefundWaitEvidence: check } = await import('./channel-refund-postgres.test');
+  const live={wait_event_type:'Lock',blocked_by_expected:true,lease_matches:true,lease_valid:true};
+  assert.equal(check(live),true);
+  assert.equal(check(undefined),false);
+  assert.equal(check({...live,wait_event_type:null}),false);
+  assert.equal(check({...live,blocked_by_expected:false}),false);
+  assert.throws(()=>check({...live,lease_valid:false}),/WAIT_DID_NOT_BEGIN_WITH_LIVE_LEASE/);
+  assert.throws(()=>check({...live,lease_matches:false}),/WAIT_LEASE_IDENTITY_CHANGED/);
+});

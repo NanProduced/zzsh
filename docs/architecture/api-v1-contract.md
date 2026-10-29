@@ -6,7 +6,7 @@
 
 - 业务接口使用 `/api/v1/...`，个人确认及新版建单使用显式 `/api/v2/...`；`/api/health` 继续是独立 liveness 探针，不参与业务版本或 readiness 语义。
 - NestJS 业务层只依赖 JSON、HTTP header 和服务端校验，不依赖 Cookie、DOM、Next.js Server Actions 或小程序运行时。
-- 已提供待支付订单、个人确认/v2建单、原子占用，以及隔离受控付款与开租/结算账务；没有面向客户端的付款成功注入接口，真实支付、退款和提现渠道未接入。认证与管理员操作权限已由 Admin 安全/BFF 入口提供，不经过本文件的 probe controller。
+- 已提供待支付订单、个人确认/v2建单、原子占用、支付/退款/提现适配及开租/结算账务；没有面向客户端的付款成功注入接口。正式渠道需显式商户/产品/协议及身份政策装配，源码存在不代表真实资金验收。完整业务状态、接口与新旧资金承接见[支付与资金领域规格](payments-and-funds.md)。认证与管理员操作权限由 Admin 安全/BFF 入口提供，不经过本文件的 probe controller。
 - OpenAPI 与运行时校验在 `apps/api/test/api-contract.test.ts` 的隔离 Nest app 中验证；该 probe controller 不在生产 `AppModule` 注册，不能作为生产测试写路由。
 - probe 的严格请求 schema 使用显式 ApiBody 声明；DTO 本身不会自动禁止所有未知字段。业务 controller 必须声明对应约束并验证其实际生成 schema，不得把测试示例通过当成业务文档自动一致。
 
@@ -295,13 +295,13 @@ ORIGINAL 列表通过 `user_registration_fact` 读取最新成功迁移审计的
 ### 原单查询、管理租赁退款与提现上下文
 
 - 用户 `POST /api/v1/orders/{orderId}/channel-payment-requests/query`（Nest BFF `/api/bff/user/orders/...`，Web `/api/orders/...`）正文为空对象。仅本人原单，按订单定位独立 payreq；`order-payment-request.v1` 回执含 `request:{id,orderId,state}` 与 `query.kind`，不首次派发、换商户号或返回支付参数，沿用查询间隔、预算和租约。此 POST 可在可信 E4 后调用正式付款接纳，产生本地账务、分佣、订单及群效果；普通 GET 仍仅读本地。提交未知返回 `202`、`request.state=UNKNOWN`、`query.kind=UNKNOWN_COMMIT` 并保留实际 payreq ID，按原请求恢复。Web BFF 用同一捕获 Cookie 核对期望主体；客户端核对两种 ID 后再读本地状态，不能据渠道查询文字判定到账。
-- 管理 `GET/POST /api/v1/admin/orders/{orderId}/refunds`（BFF `/api/bff/admin/orders/{orderId}/refunds`）均需现有 `order.settlement.write`、管理员事务复检、游戏范围和 `readOrderTeamAccess` 的 `READY/canRead` 订单对象授权；`finance.read` 或同游戏权限均不单独授权退款。POST 要求 `Idempotency-Key` 与 `{amountCents:string,reason?:string,postingId?:string}`：金额为 CNY 正整数字符串分，只从可信 `JOINPAY/APPLIED` 原款和已到期冻结责任分配，歧义时须指定 postingId。返回 `admin-native-refund.v1` 的意图/原退款号、金额、状态、预算及责任，创建与审计同事务；GET 返回 `admin-native-refunds.v1` 的本地意图、冻结/已分配/剩余责任及最近观察。接口不直接提交渠道，本批未交付管理退款页面。
+- 管理 `GET/POST /api/v1/admin/orders/{orderId}/refunds`（BFF `/api/bff/admin/orders/{orderId}/refunds`）均需现有 `order.settlement.write`、管理员事务复检、游戏范围和 `readOrderTeamAccess` 的 `READY/canRead` 订单对象授权；`finance.read` 或同游戏权限均不单独授权退款。POST 要求 `Idempotency-Key` 与 `{amountCents:string,reason?:string,postingId?:string}`：金额为 CNY 正整数字符串分，只从可信 `JOINPAY/APPLIED` 原款和已到期冻结责任分配，歧义时须指定 postingId。返回 `admin-native-refund.v1` 的意图/原退款号、金额、状态、预算及责任，创建与审计同事务；GET 返回 `admin-native-refunds.v1` 的本地意图、冻结/已分配/剩余责任及最近观察。管理订单页已消费普通退款及独立异常/未开租入口；接口只建本地意图，不直接提交渠道。
 - 关闭新退款或当前 initialProfile 缺失时，既有 store 仍先处理安全的原键重放，新意图继续拒绝。首次创建的 `channel.result=NOT_SUBMITTED` 仅描述创建时；重放为 `UNKNOWN`，当前状态另由 GET 读取，银行到账保持 `UNKNOWN`。COMMIT ACK 未知返回 `503/EVIDENCE_UNAVAILABLE`，保留同键同体恢复，不换键重建。
 - 用户 `GET /api/v1/users/me/channel-withdrawals/options`（Nest BFF `/api/bff/user/channel-withdrawals/options`）的 `withdrawal-request-context.v1` 兼容增加 `identity` 和 `quota`；后者含 `used/maxIntents/remaining/windowStart/windowEnd`，缺证据为 null。`canQuote/reasonCodes` 明示身份、成年、政策及 `WITHDRAWAL_QUOTA_UNKNOWN/EXHAUSTED` 等原因；报价/创建仍重核身份、次数、原目标、政策和余额，不补造证明或为消除 503 开启 PAYOUT。旧 CONTROLLED、SYNTHETIC_PROTOCOL、LOCAL_CONTROLLED、本地接纳、渠道成功与银行到账分别表达；源码接入不等于部署、PG 或真实渠道验收。
 
 
 ### 渠道本地证据读取（内部装配）
 
-- 收款、退款、提现和精确原号证据 helper 仅复用已有 PoolClient；不创建连接、不取渠道钥、不出网、不推进付款/退款/出款。普通资金读取和原账务口径保持；QUERY-only 仍是待实现命令合同。
+- 收款、退款、提现和精确原号证据 helper 仅复用已有 PoolClient；不创建连接、不取渠道钥、不出网、不推进付款/退款/出款。普通资金读取和原账务口径保持；已实现的 Admin QUERY-only 是独立 POST 命令，锁内禁止首次派发，可能推进本站接纳/核销/释放，权限及路径见支付与资金领域规格。
 - 调用方须先完成真实身份、读取权限、对象/game 与商户授权，并显式提供服务端逐对象 readableOrderIds/readableUserIds；对象集合缺省为空，无通配符，不从 URL/body 或 finance.read 推导商户/对象授权。尚无可读商户策略时渠道补充保持未装配，不隐藏原站内凭证。
-- 仅投影本站已登记原件，保留多锚点歧义、原可信观察和最后失败/冲突；受理流水不是终态，合成/受控证据不升格为供应商事实。费用、实收、实退、去向或银行到账未核时保持 null/UNKNOWN。主列表不逐行调用详情 helper；本轮未新增公开/BFF 路径或权限。
+- 仅投影本站已登记原件，保留多锚点歧义、原可信观察和最后失败/冲突；受理流水不是终态，合成/受控证据不升格为供应商事实。费用、实收、实退、去向或银行到账未核时保持 null/UNKNOWN。主列表不逐行调用详情 helper；公开 API/BFF 由既有资金路由统一授权装配，helper 自身不暴露入口。
