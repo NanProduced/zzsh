@@ -317,7 +317,7 @@ test("dashboard renders real totals, on-duty rows, three charts and honest empty
 
   const workload = rootNode.querySelector('[data-chart="workload"]');
   assert.equal(workload.dataset.points, "1", "each agent becomes one bar");
-  assert.match(workload.textContent, /今日接线时长/);
+  assert.match(workload.textContent, /今日接待时长/);
 
   const handover = rootNode.querySelector('[data-handover-id="h-1"]');
   assert.ok(handover, "handover record is rendered");
@@ -480,12 +480,12 @@ test("today connection time comes from presence and shows — when absent", asyn
   fixture.presence = { ...fixture.presence, today: { seconds: 8100, sessions: 3, users: 2 } };
   const first = await mount(t, {});
   await waitFor(() => first.rootNode.querySelector(".im-wb-today"));
-  assert.match(first.rootNode.querySelector(".im-wb-today").textContent, /今日接线 2h 15m/);
+  assert.match(first.rootNode.querySelector(".im-wb-today").textContent, /今日接待 2h 15m/);
 
   fixture = baseFixture();
   const second = await mount(t, {});
   await waitFor(() => second.rootNode.querySelector(".im-wb-today"));
-  assert.match(second.rootNode.querySelector(".im-wb-today").textContent, /今日接线 —/);
+  assert.match(second.rootNode.querySelector(".im-wb-today").textContent, /今日接待 —/);
 });
 
 test("a transfer carries an optional note and confirms it was recorded", async (t) => {
