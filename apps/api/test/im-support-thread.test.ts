@@ -205,6 +205,7 @@ test("0113 adds the persistent thread, round link and round-close operation with
   assert.match(sql, /CREATE TABLE IF NOT EXISTS "zzsh_iam"\."im_support_thread"/);
   assert.match(sql, /CREATE UNIQUE INDEX IF NOT EXISTS "im_support_thread_user_kind_unique"[\s\S]*?\("app_id", "user_id", "kind"\)/);
   assert.match(sql, /CREATE UNIQUE INDEX IF NOT EXISTS "im_consultation_thread_open_unique"[\s\S]*?WHERE "state" <> 'CLOSED'/);
+  assert.match(sql, /DROP INDEX IF EXISTS "zzsh_iam"\."im_consultation_message_scope_unique_idx"/);
   assert.match(sql, /ADD COLUMN "thread_id" text/);
   assert.match(sql, /ADD COLUMN "round_seq" integer/);
   assert.match(sql, /CASE WHEN x\."state" = 'CLOSED' THEN NULL ELSE x\."message_scope_id" END/);

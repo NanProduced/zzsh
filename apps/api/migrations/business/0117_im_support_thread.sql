@@ -103,6 +103,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS "im_consultation_thread_open_unique"
   WHERE "state" <> 'CLOSED';
 DROP INDEX IF EXISTS "zzsh_iam"."im_consultation_user_kind_active_unique_idx";
 DROP INDEX IF EXISTS "zzsh_iam"."im_consultation_app_user_kind_active_unique_idx";
+-- A persistent thread reuses one Team across rounds; the old per-round unique scope index must go.
+DROP INDEX IF EXISTS "zzsh_iam"."im_consultation_message_scope_unique_idx";
 
 --> statement-breakpoint
 
