@@ -149,6 +149,11 @@ export function MessageActionMenu({ x, y, items, onSelect, onClose, returnFocus,
 }
 
 /** Composer quote bar: the summary is the message's own text or [图片]; never an account id. */
+/** A compact, non-interactive quote shown inside a sent message bubble. */
+export function MessageQuoted({ text }: { text: string }) {
+  return <span className="message-quoted" title={text}><span className="message-quoted-label">引用</span><span className="message-quoted-text">{text}</span></span>;
+}
+
 export function MessageReplyQuote({ label, onCancel, disabled = false, cancelLabel = "取消引用" }: { label: string; onCancel: () => void; disabled?: boolean; cancelLabel?: string }) {
   return <div className="message-reply-quote" role="status">
     <span className="message-reply-quote-text" title={label}>回复：{label}</span>

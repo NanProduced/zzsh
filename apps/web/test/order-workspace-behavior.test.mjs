@@ -700,6 +700,10 @@ test("a prestart termination speaks about refund pending instead of a generic ca
     display.orderFulfillmentSummary(stageProjection({ stage: "CANCELLED", cancelReason: "PRESTART_TERMINATED", refundPending: false, sendUntil: "2026-10-21T00:00:00.000Z" }), { now }),
     "未开租终止 · 退款已核销 · 可沟通至 2026/10/21 08:00",
   );
+  assert.equal(
+    display.orderFulfillmentSummary(stageProjection({ stage: "CANCELLED", cancelReason: "MANUAL_CLOSE", sendUntil: "2026-10-21T00:00:00.000Z" }), { now }),
+    "客服手动结束 · 可沟通至 2026/10/21 08:00",
+  );
 });
 
 test("the IM projection parser rejects an unknown stage or malformed fact instead of guessing", () => {

@@ -422,3 +422,26 @@ test("the admin custom conversation renders an order-stage card with both sides"
   await act(async () => document.dispatchEvent(new browser.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
   await until(() => !document.querySelector(".message-action-menu"), "menu closed");
 });
+
+test("quoted replies are visible on the admin side and revoked messages stay explicit", async (t) => {
+  const base = fixtureById("ready-three");
+  const fixture = {
+    ...base,
+    history: [...base.history,
+      { messageClientId: "m-quote", messageServerId: "srv-quote", senderId: "viewer", receiverId: "team-8842",
+        createTime: Date.parse("2026-10-11T01:40:00Z"), messageType: 0, text: "123",
+        reply: { messageId: "srv-1", senderId: "tenant-account", text: "你好，付款后从哪里交接？" } },
+      { messageClientId: "m-revoked", messageServerId: "srv-revoked", senderId: "viewer", receiverId: "team-8842",
+        createTime: Date.parse("2026-10-11T01:41:00Z"), messageType: 0, text: "", revoked: true },
+    ],
+  };
+  const { node, until } = await mount(t, "ready-three", { fixture });
+  await until(() => node.querySelector(".im-wb-bub .message-quoted"), "quoted reply rendered");
+  const quote = node.querySelector(".im-wb-bub .message-quoted");
+  assert.match(quote.textContent, /引用/);
+  assert.match(quote.textContent, /你好，付款后从哪里交接？/);
+  const revoked = node.querySelector('.im-wb-bub[data-revoked="true"]');
+  assert.ok(revoked, "revoked message keeps an explicit state");
+  assert.match(revoked.textContent, /消息已撤回/);
+  assert.equal(revoked.closest(".im-wb-msg").querySelector(".im-wb-msg-status"), null, "a revoked message does not claim 已发送");
+});

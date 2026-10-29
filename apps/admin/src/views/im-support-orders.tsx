@@ -11,7 +11,7 @@ import {
 } from "@zzsh/ui/order-team-panel";
 import { supportedImageUrl } from "./im-support-guards";
 import { dayKeyOf, dayLabelOf, formatBytes, formatDateTime, formatTime, initialOf } from "./im-support-format";
-import { MessageReplyQuote } from "@zzsh/ui/message-actions";
+import { MessageQuoted, MessageReplyQuote } from "@zzsh/ui/message-actions";
 import "@zzsh/ui/message-actions.css";
 import { OrderCardMessage } from "@zzsh/ui/order-card";
 import { OrderFulfillmentSection } from "./im-support-fulfillment";
@@ -265,20 +265,26 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
       const image = imageOf(message);
       const imageUrl = image?.url ?? null;
       const failed = Boolean(imageUrl && imageErrors[message.id]);
+      const revoked = message.revoked === true;
       const text = typeof message.text === "string" && message.text.trim() ? message.text : message.messageType === 0 || image ? "" : "暂不支持展示的消息类型";
       nodes.push(<MessageScrollerPrimitive.Item key={message.id} messageId={message.id} scrollAnchor={!self}>
         <Message align={self ? "end" : "start"} className="im-wb-msg" data-self={self} data-grouped={grouped} data-message-id={message.id} onContextMenu={view.menuHandlers.onContextMenu} {...view.menuHandlers.longPress}>
           <MessageAvatar className="im-wb-av" aria-hidden="true">{initialOf(author.name)}</MessageAvatar>
           <MessageContent className="im-wb-msg-body" data-card={card ? "true" : undefined}>
             {grouped ? null : <MessageHeader className="im-wb-msg-meta"><b>{author.name}</b>{author.role ? <span className="im-wb-role-tag" data-role={author.role}>{author.role}</span> : null}{self ? null : <time>{formatTime(message.createTime)}</time>}</MessageHeader>}
-            {card ? <OrderCardMessage message={message} info={info} onOpenOrder={() => { window.location.assign(`/orders/${encodeURIComponent(info.orderId)}`); }} /> : <Bubble align={self ? "end" : "start"} variant={self ? "default" : "secondary"}>
-              <BubbleContent className="im-wb-bub">{image ? (imageUrl
+            {revoked ? <Bubble align={self ? "end" : "start"} variant={self ? "default" : "secondary"}>
+              <BubbleContent className="im-wb-bub" data-revoked="true">消息已撤回</BubbleContent>
+            </Bubble> : card ? <OrderCardMessage message={message} info={info} onOpenOrder={() => { window.location.assign(`/orders/${encodeURIComponent(info.orderId)}`); }} /> : <Bubble align={self ? "end" : "start"} variant={self ? "default" : "secondary"}>
+              <BubbleContent className="im-wb-bub">
+                {message.reply ? <MessageQuoted text={message.reply.text ?? "消息"} /> : null}
+                {image ? (imageUrl
                 ? (failed
                   ? <button type="button" className="im-wb-thumb im-wb-thumb-failed" onClick={() => setImageErrors((current) => { const next = { ...current }; delete next[message.id]; return next; })} aria-label={`重新加载图片 ${image.name}`}>图片加载失败 · 点击重试</button>
                   : <button type="button" className="im-wb-thumb" aria-label={`查看图片 ${image.name}`} onClick={(event) => view.openImage(imageUrl, image.name, event.currentTarget)}><img src={imageUrl} alt={image.name} loading="lazy" onError={() => setImageErrors((current) => ({ ...current, [message.id]: Date.now() }))} /></button>)
-                : <span className="im-wb-thumb-missing">图片暂不可预览</span>) : text}</BubbleContent>
+                : <span className="im-wb-thumb-missing">图片暂不可预览</span>) : text}
+              </BubbleContent>
             </Bubble>}
-            {self && !card ? <MessageFooter className="im-wb-msg-status"><time>{formatTime(message.createTime)}</time><span>已发送</span></MessageFooter> : null}
+            {self && !card && !revoked ? <MessageFooter className="im-wb-msg-status"><time>{formatTime(message.createTime)}</time><span>已发送</span></MessageFooter> : null}
           </MessageContent>
         </Message>
       </MessageScrollerPrimitive.Item>);

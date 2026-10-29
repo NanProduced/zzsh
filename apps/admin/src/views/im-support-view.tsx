@@ -6,7 +6,7 @@ import { MessageScroller as MessageScrollerPrimitive } from "@shadcn/react/messa
 import { ImClientLifecycle } from "@zzsh/im-client/lifecycle";
 import { createLocalFakeNimWebClientFactory, createNimWebClientFactory, NIM_IMAGE_MAX_BYTES, NimImageSendError, NimTextSendError, validateNimImageFile, type NimMessageLike, type NimWebClientLike, type NimWebConnectionState } from "@zzsh/im-client/nim-web-client";
 import { decodeImSystemNotice, mergeImMessages } from "@zzsh/im-client/message-state";
-import { MessageActionMenu, MessageReplyQuote, useMessageLongPress, type MessageActionId, type MessageActionItem } from "@zzsh/ui/message-actions";
+import { MessageActionMenu, MessageQuoted, MessageReplyQuote, useMessageLongPress, type MessageActionId, type MessageActionItem } from "@zzsh/ui/message-actions";
 import "@zzsh/ui/message-actions.css";
 import { AdminApiError, adminRequest, friendlyError, hasPermission, type SessionSnapshot } from "../api";
 import { confirmCurrentForbidden, isCurrentImRequest, messageAccessPath, supportedImageUrl, type ImRequestKey } from "./im-support-guards";
@@ -1319,11 +1319,16 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
         <MessageContent className="im-wb-msg-body">
           {grouped ? null : <MessageHeader className="im-wb-msg-meta"><b>{author.name}</b><span className="im-wb-role-tag" data-role={author.role}>{author.role}</span>{mine ? null : <time>{message.time}</time>}</MessageHeader>}
           <Bubble align={mine ? "end" : "start"} variant={mine ? "default" : "secondary"}>
-            <BubbleContent className="im-wb-bub" data-revoked={message.revoked ? "true" : undefined}>{message.revoked ? "消息已撤回" : message.image ? (imageUrl
-              ? (imageErrors[message.id]
-                ? <button type="button" className="im-wb-thumb im-wb-thumb-failed" data-action="retry-image" onClick={() => setImageErrors((current) => { const next = { ...current }; delete next[message.id]; return next; })} aria-label={`重新加载图片 ${message.image.name}`}>图片加载失败 · 点击重试</button>
-                : <button type="button" className="im-wb-thumb" onClick={() => setViewer({ url: imageUrl, name: message.image!.name })} aria-label={`查看图片 ${message.image.name}`}><img key={imageErrors[message.id] ?? imageUrl} src={imageUrl} alt={message.image.name} loading="lazy" onError={() => setImageErrors((current) => ({ ...current, [message.id]: Date.now() }))} /></button>)
-              : <span className="im-wb-thumb-missing">图片暂不可预览</span>) : message.text}</BubbleContent>
+            <BubbleContent className="im-wb-bub" data-revoked={message.revoked ? "true" : undefined}>
+              {message.revoked ? "消息已撤回" : <>
+                {message.source?.reply ? <MessageQuoted text={message.source.reply.text ?? "消息"} /> : null}
+                {message.image ? (imageUrl
+                  ? (imageErrors[message.id]
+                    ? <button type="button" className="im-wb-thumb im-wb-thumb-failed" data-action="retry-image" onClick={() => setImageErrors((current) => { const next = { ...current }; delete next[message.id]; return next; })} aria-label={`重新加载图片 ${message.image.name}`}>图片加载失败 · 点击重试</button>
+                    : <button type="button" className="im-wb-thumb" onClick={() => setViewer({ url: imageUrl, name: message.image!.name })} aria-label={`查看图片 ${message.image.name}`}><img key={imageErrors[message.id] ?? imageUrl} src={imageUrl} alt={message.image.name} loading="lazy" onError={() => setImageErrors((current) => ({ ...current, [message.id]: Date.now() }))} /></button>)
+                  : <span className="im-wb-thumb-missing">图片暂不可预览</span>) : message.text}
+              </>}
+            </BubbleContent>
           </Bubble>
           {mine && !message.revoked ? <MessageFooter className="im-wb-msg-status"><time>{message.time}</time><Check size={11} />已发送</MessageFooter> : null}
         </MessageContent>

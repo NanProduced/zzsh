@@ -86,6 +86,7 @@ export function orderFulfillmentSummary(
       if (options.ending === "SERVICE") return "结束确认 · 待客服核实";
       return "结束确认 · 等待确认";
     case "CANCELLED": {
+      if (projection.cancelReason === "MANUAL_CLOSE") return `客服手动结束 · ${fulfillmentWindowText(projection.sendUntil, projection.canSend, now)}`;
       if (projection.cancelReason !== "PRESTART_TERMINATED") return `已取消 · ${fulfillmentWindowText(projection.sendUntil, projection.canSend, now)}`;
       if (projection.refundPending) return "未开租终止 · 退款处理中 · 可沟通";
       return `未开租终止 · 退款已核销 · ${fulfillmentWindowText(projection.sendUntil, projection.canSend, now)}`;

@@ -4,12 +4,13 @@
 .message-action-menu-item{display:block;width:100%;padding:8px 12px;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit;font-size:13px;line-height:1.4;text-align:left;white-space:nowrap;cursor:pointer}
 .message-action-menu-item:hover,.message-action-menu-item:focus-visible{background:color-mix(in srgb,currentColor 9%,transparent);outline:none}
 .message-action-menu-item[data-danger=true]{color:var(--color-status-danger,var(--destructive,#b42318))}
-.message-reply-quote{display:flex;align-items:center;gap:8px;margin:6px 0;padding:6px 10px;border-left:3px solid var(--color-accent-brand,var(--border,#8a97a6));border-radius:4px;background:color-mix(in srgb,currentColor 6%,transparent);font-size:12px;line-height:1.5;min-width:0}
+.message-reply-quote{display:flex;align-items:center;gap:8px;margin:6px 0;padding:5px 9px;border-left:1px solid var(--color-accent-brand,var(--border,#8a97a6));border-radius:4px;background:color-mix(in srgb,currentColor 6%,transparent);font-size:12px;line-height:1.5;min-width:0}
 .message-reply-quote-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .message-reply-quote-cancel{flex:none;padding:2px 6px;border:0;border-radius:4px;background:transparent;color:inherit;font:inherit;font-size:12px;opacity:.72;cursor:pointer}
 .message-reply-quote-cancel:hover{opacity:1}
 .message-reply-quote-cancel:disabled{opacity:.4;cursor:not-allowed}
-.order-team-message-reply{display:block;margin:0 0 4px;padding:2px 6px;border-left:2px solid currentColor;opacity:.72;font-size:12px;white-space:normal}
+.message-quoted{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;max-width:100%;margin:0 0 5px;padding:3px 7px;border-left:1px solid color-mix(in srgb,currentColor 40%,transparent);border-radius:3px;background:color-mix(in srgb,currentColor 7%,transparent);font-size:11.5px;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere;opacity:.86}
+.message-quoted-label{margin-right:5px;font-weight:600;opacity:.9}
 .order-team-message-revoked{padding:10px 12px;margin:5px 0;border-radius:9px;border:1px dashed var(--ot-border,currentColor);color:var(--ot-muted,inherit);font-style:normal;background:transparent}
 .support-message-quote{display:block;margin:0 0 4px;padding:2px 6px;border-left:2px solid currentColor;opacity:.72;font-size:12px}
 .support-message-bubble[data-revoked=true]{border:1px dashed var(--color-border-default,currentColor);color:var(--color-text-muted,inherit);background:transparent;font-style:normal}

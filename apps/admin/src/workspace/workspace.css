@@ -386,7 +386,7 @@
 .workspace-root .im-wb-role-tag { display:inline-flex; align-items:center; font-size:10px; line-height:1; padding:2px 6px; border-radius:4px; font-weight:500; background:var(--secondary); color:var(--muted-foreground); border:1px solid var(--border); }
 .workspace-root .im-wb-role-tag[data-role="平台客服"] { background:rgba(2,132,199,.12); color:var(--im-accent); border-color:rgba(2,132,199,.3); }
 [data-theme="light"] .workspace-root .im-wb-role-tag[data-role="平台客服"] { background:rgba(229,169,60,.15); color:#d97706; border-color:rgba(229,169,60,.35); }
-.workspace-root .im-wb-bub { color:var(--foreground); border-color:var(--border); background:var(--card); font-size:14px; line-height:1.65; padding:10px 14px; border-radius:10px; overflow-wrap:anywhere; white-space:pre-wrap; box-shadow:0 1px 2px rgba(0,0,0,.04); }
+.workspace-root .im-wb-bub { color:var(--foreground); border-color:var(--border); background:var(--card); font-size:13.5px; line-height:1.5; padding:7px 11px; border-radius:9px; overflow-wrap:anywhere; white-space:pre-wrap; box-shadow:0 1px 2px rgba(0,0,0,.04); }
 [data-theme="light"] .workspace-root .im-wb-bub { background:color-mix(in oklab,var(--card) 92%,var(--secondary)); border-color:color-mix(in oklab,var(--border) 80%,transparent); }
 [data-theme="light"] .workspace-root .im-wb-root { --im-accent:#0284c7; --im-accent-strong:#0357a4; --im-accent-soft:rgba(2,132,199,.10); --im-bubble-bg:#0284c7; --im-bubble-fg:#ffffff; --im-warn:#b45309; --border-strong:color-mix(in oklab,var(--border) 100%,black 18%); }
 .workspace-root .im-wb-msg[data-self="true"] .im-wb-bub { color:var(--im-bubble-fg); border-color:transparent; background:var(--im-bubble-bg); box-shadow:0 1px 3px rgba(2,132,199,.25); }

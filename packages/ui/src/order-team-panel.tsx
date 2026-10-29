@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState, type ChangeEvent, type FormEv
 import { ImLifecycleSupersededError } from "@zzsh/im-client/lifecycle";
 import { mergeImMessages } from "@zzsh/im-client/message-state";
 import { NimImageSendError, NimTextSendError, validateNimImageFile, type NimMessageLike, type NimWebClientLike, type NimWebConnectionState, type NimMessageAuthorization } from "@zzsh/im-client/nim-web-client";
-import { MessageActionMenu, MessageReplyQuote, useMessageLongPress, type MessageActionId, type MessageActionItem, type MessageLongPressHandlers } from "./message-actions";
+import { MessageActionMenu, MessageQuoted, MessageReplyQuote, useMessageLongPress, type MessageActionId, type MessageActionItem, type MessageLongPressHandlers } from "./message-actions";
 import { OrderCardMessage } from "./order-card";
 
 type Member={platformId:string;accountId:string;party:string;name:string|null;avatar:string|null;responsible?:boolean;membershipStatus?:string;identityStatus?:string};
@@ -123,6 +123,10 @@ function stageCollapsedText(info:OrderTeamAccess):string{
       if(info.refundPending===true)return "未开租终止 · 退款处理中 · 可沟通";
       if(info.sendUntil){const until=new Date(info.sendUntil).getTime();return Number.isFinite(until)&&Date.now()<until?`未开租终止 · 退款已核销 · 可沟通至 ${serverTimeLabel(info.sendUntil)}`:"未开租终止 · 退款已核销 · 仅可查看";}
       return "未开租终止 · 仅可查看";
+    }
+    if(info.cancelReason==="MANUAL_CLOSE"){
+      if(info.sendUntil){const until=new Date(info.sendUntil).getTime();return Number.isFinite(until)&&Date.now()<until?`客服手动结束 · 可沟通至 ${serverTimeLabel(info.sendUntil)}`:"客服手动结束 · 仅可查看";}
+      return "客服手动结束 · 仅可查看";
     }
     return "已取消";
   }
@@ -453,7 +457,7 @@ export function OrderTeamPanel({identity,realm,client,connection,active,visible=
   const choose=(id:string|null)=>{accessSequence.current++;setInfo(null);setSelected(id);setError("");};
   const visibleItems=itemsScope.current===listScope?items:[],visibleNext=itemsScope.current===listScope?next:null;
   const orderHeader=info&&!renderConversation?<header className="order-team-head">
-    <div className="order-team-head-row"><h3>{info.name??info.displayNo}</h3><span className="order-team-head-chip">{stageOf(info)==="CANCELLED"&&info.cancelReason==="PRESTART_TERMINATED"?"未开租终止":fulfillmentStageLabel(stageOf(info))}</span><a className="order-team-head-link" href={`/account?view=${party==="owner"?"leased":"rentals"}&orderId=${encodeURIComponent(info.orderId)}`}>订单详情</a></div>
+    <div className="order-team-head-row"><h3>{info.name??info.displayNo}</h3><span className="order-team-head-chip">{stageOf(info)==="CANCELLED"&&info.cancelReason==="PRESTART_TERMINATED"?"未开租终止":stageOf(info)==="CANCELLED"&&info.cancelReason==="MANUAL_CLOSE"?"客服手动结束":fulfillmentStageLabel(stageOf(info))}</span><a className="order-team-head-link" href={`/account?view=${party==="owner"?"leased":"rentals"}&orderId=${encodeURIComponent(info.orderId)}`}>订单详情</a></div>
     <p className="order-team-head-sub">{info.gameName} · {info.account.title}{info.name===info.displayNo?"":` · 订单 ${info.displayNo}`}</p>
     <p className="order-team-head-members">{info.members.map(member=>`${role(member)} ${member.name?.trim()||"未署名"}`).join(" · ")}</p>
   </header>:null;
@@ -892,7 +896,9 @@ function OrderConversation({
   const readOnlyText=info.orderStatus==="COMPLETED"||info.orderStatus==="CANCELLED"
     ?(info.cancelReason==="PRESTART_TERMINATED"
       ?(info.sendUntil&&Date.now()<new Date(info.sendUntil).getTime()?"本单未开租终止，仍可在沟通窗口内发送消息":"本单未开租终止，退款已核销，仅可查看历史")
-      :(info.sendUntil&&Date.now()<new Date(info.sendUntil).getTime()?"本单已结束，仍可在沟通窗口内发送消息":"本单已结束，仅可查看历史"))
+      :info.cancelReason==="MANUAL_CLOSE"
+        ?(info.sendUntil&&Date.now()<new Date(info.sendUntil).getTime()?"本单客服手动结束，仍可在沟通窗口内发送消息":"本单客服手动结束，仅可查看历史")
+        :(info.sendUntil&&Date.now()<new Date(info.sendUntil).getTime()?"本单已结束，仍可在沟通窗口内发送消息":"本单已结束，仅可查看历史"))
     :info.teamState!=="READY"?"订单群尚未就绪，暂不可发送":"当前不可发送";
   return <section className="order-team-chat" aria-label="订单文字和图片沟通">
     {more&&messages.length?<div className="order-team-history"><button type="button" className="order-team-link" disabled={reading} onClick={()=>void history(messages[0])}>{reading?"正在读取…":"更早的消息"}</button></div>:null}
@@ -900,7 +906,7 @@ function OrderConversation({
     {textRetry?<button type="button" disabled={sending||!textRetry.messageClientId||!info.canSend||connection!=="CONNECTED"} onClick={()=>void retryText()}>原消息重试</button>:null}
     <ol className="order-team-messages" aria-label="订单消息" aria-live="polite" onContextMenu={onMessagesContextMenu} {...longPress}>{messages.map((message,index)=>{
       const member=info.members.find(m=>m.accountId===message.senderId),self=message.senderId===client.accountId,revoked=message.revoked===true;
-      return <li key={message.id} data-message-id={message.id} tabIndex={-1} data-self={self} data-grouped={Boolean(index>0&&messages[index-1]?.senderId===message.senderId&&message.createTime-messages[index-1]!.createTime<300_000)}><small>{self?"我":member?.name?.trim()|| (member?role(member):"平台消息")} {member?role(member):""} · {serverTimeLabel(new Date(message.createTime).toString())}</small>{revoked?<span className="order-team-message-revoked">消息已撤回</span>:<>{message.reply?<span className="order-team-message-reply">回复：{message.reply.text??"消息"}</span>:null}{message.card?<OrderCardMessage message={message} info={info}/>:message.messageType===1&&message.attachment?<MessageImage attachment={message.attachment} onOpen={(url,name,trigger)=>{viewerTrigger.current=trigger;setViewer({url,name});}}/>:<p>{(message.messageType===undefined||message.messageType===0)&&typeof message.text==="string"?message.text:"暂不支持此消息类型"}</p>}</>}{self&&!revoked&&!message.card?<small>已发送</small>:null}</li>;
+      return <li key={message.id} data-message-id={message.id} tabIndex={-1} data-self={self} data-grouped={Boolean(index>0&&messages[index-1]?.senderId===message.senderId&&message.createTime-messages[index-1]!.createTime<300_000)}><small>{self?"我":member?.name?.trim()|| (member?role(member):"平台消息")} {member?role(member):""} · {serverTimeLabel(new Date(message.createTime).toString())}</small>{revoked?<span className="order-team-message-revoked">消息已撤回</span>:<>{message.reply?<MessageQuoted text={message.reply.text??"消息"}/>:null}{message.card?<OrderCardMessage message={message} info={info}/>:message.messageType===1&&message.attachment?<MessageImage attachment={message.attachment} onOpen={(url,name,trigger)=>{viewerTrigger.current=trigger;setViewer({url,name});}}/>:<p>{(message.messageType===undefined||message.messageType===0)&&typeof message.text==="string"?message.text:"暂不支持此消息类型"}</p>}</>}{self&&!revoked&&!message.card?<small>已发送</small>:null}</li>;
     })}</ol>
     {!messages.length?<div className="order-team-chat-empty" role="status"><span className="order-team-empty-mark" aria-hidden="true"/><strong>{reading?"正在读取消息…":"还没有消息"}</strong><span>{reading?"请稍候":info.canSend?"客服或对方发言后会显示在这里；你也可以先发一条消息。":"客服或对方发言后会显示在这里。"}</span></div>:null}
     {pendingImage?<div className="order-team-image-draft" aria-label="待发送图片" data-state={pendingImage.state}><img src={pendingImage.previewUrl} alt={pendingImage.name}/><span>{pendingImage.name} · {formatBytes(pendingImage.size)}{pendingImage.state==="DECODING"?" · 正在检查":pendingImage.state==="SENDING"?` · 发送中 ${pendingImage.progress}%`:pendingImage.state==="UNKNOWN"?" · 结果未确认":pendingImage.state==="FAILED"?" · 发送失败":" · 待发送"}</span><button type="button" onClick={()=>void retryPendingImage()} disabled={sending||imageInFlight}>{pendingImage.messageClientId?"原消息重试":"重试"}</button><button type="button" onClick={removePendingImage} disabled={sending||imageInFlight||pendingImage.state==="UNKNOWN"}>移除</button></div>:null}

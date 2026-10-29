@@ -38,8 +38,9 @@ function attentionFor(order: Order, facts: OrderStageFacts | null, readFailed: b
   if (order.status === "CANCELLED") {
     return {
       tone: "info",
-      title: order.cancelReason === "PRESTART_TERMINATED" ? "未开租订单已终止" : "账号占用已解除",
-      note: order.cancelReason === "PRESTART_TERMINATED" ? "账号占用已解除，退款处理进度见下方记录。终止订单不代表退款已到账。" : "本单不再产生新的交易动作；已确认的订单信息仍可查看。",
+      title: order.cancelReason === "PRESTART_TERMINATED" ? "未开租订单已终止" : order.cancelReason === "MANUAL_CLOSE" ? "客服已手动结束本单" : "账号占用已解除",
+      note: order.cancelReason === "PRESTART_TERMINATED" ? "账号占用已解除，退款处理进度见下方记录。终止订单不代表退款已到账。"
+        : order.cancelReason === "MANUAL_CLOSE" ? "已收款不会自动结算或退款；资金处理以客服通知与对账为准。订单群保留 72 小时沟通窗口。" : "本单不再产生新的交易动作；已确认的订单信息仍可查看。",
       actions: [party === "renter" ? "browse" : "manage"],
     };
   }
@@ -210,7 +211,7 @@ function linesSummary(order: Order, party: OrderParty): string {
  */
 /** The renter-side figure's name for the reading party, never implying a charge that did not happen. */
 function renterFigureLabel(order: Order): string {
-  if (order.status === "CANCELLED" && order.cancelReason !== "PRESTART_TERMINATED") return "下单时租客金额";
+  if (order.status === "CANCELLED" && order.cancelReason !== "PRESTART_TERMINATED" && order.cancelReason !== "MANUAL_CLOSE") return "下单时租客金额";
   return order.paidAt ? "租客已付" : "租客应付";
 }
 
@@ -237,7 +238,7 @@ function AmountCard({ order, party, facts, readFailed }: { order: Order; party: 
   }
 
   const lead = settledUnread ? null : posted ?? {
-    label: closed && !(order.cancelReason === "PRESTART_TERMINATED" && paid) ? "下单金额" : order.status === "PENDING_PAYMENT" ? "待支付" : "租客已付",
+    label: closed && !((order.cancelReason === "PRESTART_TERMINATED" || order.cancelReason === "MANUAL_CLOSE") && paid) ? "下单金额" : order.status === "PENDING_PAYMENT" ? "待支付" : "租客已付",
     text: formatOrderMoney(amounts?.totalDue),
   };
   return <section className="order-side-card order-amount-block">
@@ -251,7 +252,9 @@ function AmountCard({ order, party, facts, readFailed }: { order: Order; party: 
       <div><dt>{paid && !closed ? "租赁预付" : "租赁费用"}</dt><dd>{formatOrderMoney(amounts?.rental)}</dd></div>
       <div><dt>租客押金</dt><dd>{formatOrderMoney(amounts?.deposit)}</dd></div>
     </dl>
-    {closed ? <p className="order-muted">{order.cancelReason === "PRESTART_TERMINATED" && paid ? "原付款记录保留；退款处理以本单记录为准，不代表已到账。" : "本金额为下单时的订单快照，不代表已扣款或应退款。"}</p> : null}
+    {closed ? <p className="order-muted">{order.cancelReason === "PRESTART_TERMINATED" && paid ? "原付款记录保留；退款处理以本单记录为准，不代表已到账。"
+      : order.cancelReason === "MANUAL_CLOSE" && paid ? "原付款记录保留；本操作不生成结算或退款，资金处理以客服通知与对账为准。"
+      : "本金额为下单时的订单快照，不代表已扣款或应退款。"}</p> : null}
     {paid || order.status === "COMPLETED" ? <p className="order-side-link"><WalletCards size={14} aria-hidden="true" />退款到账结果待确认时，可在<Link href="/account?view=wallet" scroll={false}>我的钱包</Link>查看实际记录。</p> : null}
   </section>;
 }

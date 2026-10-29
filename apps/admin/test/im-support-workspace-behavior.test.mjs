@@ -747,7 +747,9 @@ test("reply sends replyText with a quote above the composer and clears it after 
   assert.deepEqual(replyBody.replyTo, { messageServerId: "srv-peer", messageClientId: "peer-text" }, "replyText addresses the original message");
   await waitFor(() => rootNode.querySelector(".message-reply-quote") === null);
   assert.equal(rootNode.querySelector("textarea").value, "", "a confirmed reply clears the draft");
-  assert.ok([...rootNode.querySelectorAll(".im-wb-bub")].some((element) => element.textContent === "收到"), "the reply receipt is merged into the timeline");
+  const replyBubble = [...rootNode.querySelectorAll(".im-wb-bub")].find((element) => element.textContent.includes("收到"));
+  assert.ok(replyBubble, "the reply receipt is merged into the timeline");
+  assert.match(replyBubble.querySelector(".message-quoted").textContent, /引用.*用户提问/, "the sent reply shows its quote on the admin side");
 });
 
 test("an unknown reply keeps the draft and quote and is never re-sent under a new id", async (t) => {
