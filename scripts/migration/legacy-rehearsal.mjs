@@ -436,6 +436,9 @@ function accountAndOrderDomains(p, input) {
 }
 
 function continuationDomain(p, input) {
+  if (input === undefined) {
+    return { status: "NOT_RUN", counts: countStatuses([]), items: [], reason: "CONTINUATION_INPUT_NOT_PROVIDED", nextRequest: "NEXT-READ-CONTINUATION-CURRENT", writeAllowed: false };
+  }
   const currentFacts = input.current?.json ? JSON.parse(input.current.json) : null;
   const accountByLegacy = new Map((currentFacts?.accounts ?? []).map((account) => [account.legacyId, account.accountId]));
   const accountByTarget = new Map((currentFacts?.accounts ?? []).map((account) => [account.accountId, account.legacyId]));
@@ -842,7 +845,7 @@ function buildPlan(options) {
   const inputs = loaded.inputs;
   const identity = identityDomain(p, inputs.identities ?? {});
   const accountOrder = accountAndOrderDomains(p, inputs.chains ?? {});
-  const continuation = continuationDomain(p, inputs.continuation ?? {});
+  const continuation = continuationDomain(p, inputs.continuation);
   const finance = financeDomain(p, inputs.finance ?? {}, continuation);
   const skinsMedia = skinsAndMediaDomains(p, inputs.skins ?? {}, inputs.media ?? {});
   const occupancy = occupancyDomain(accountOrder.account.items, accountOrder.order.items, continuation);

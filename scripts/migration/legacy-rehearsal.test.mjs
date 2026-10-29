@@ -28,6 +28,19 @@ const put=(p,value)=>writeFileSync(p,JSON.stringify(value));
 const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
 function planned(){const dir=temp(),r=run(['plan','--out',dir]);assert.equal(r.status,0,r.stderr);return{dir,plan:load(join(dir,'plan.json')),planFile:join(dir,'plan.json')};}
 
+test('source-only plan omits continuation without inventing a target',()=>{
+ const dir=temp(),manifest=load(join(HERE,'fixtures/manifest.json'));for(const spec of Object.values(manifest.inputs))spec.path=join(HERE,'fixtures',spec.path);
+ delete manifest.inputs.continuation;manifest.target={databaseOid:null,bound:false};const mf=join(dir,'manifest.json');put(mf,manifest);
+ const r=run(['plan','--manifest',mf,'--out',join(dir,'plan')]);assert.equal(r.status,0,r.stderr);const plan=load(join(dir,'plan/plan.json'));
+ assert.equal(plan.domains.continuation.status,'NOT_RUN');assert.equal(plan.domains.continuation.reason,'CONTINUATION_INPUT_NOT_PROVIDED');assert.deepEqual(plan.domains.continuation.items,[]);assert.equal(plan.totals.writeAllowed,false);assert.equal(plan.io.dbConnects,0);
+});
+
+test('provided continuation with an invalid target still fails closed',()=>{
+ const dir=temp(),manifest=load(join(HERE,'fixtures/manifest.json'));for(const spec of Object.values(manifest.inputs))spec.path=join(HERE,'fixtures',spec.path);
+ const packet=load(manifest.inputs.continuation.path);packet.targetDatabaseOid=0;const input=join(dir,'continuation.json');put(input,packet);manifest.inputs.continuation={path:input,sha256:sha(readFileSync(input))};const mf=join(dir,'manifest.json');put(mf,manifest);
+ const r=run(['plan','--manifest',mf,'--out',join(dir,'plan')]);assert.equal(r.status,3);assert.match(r.stderr,/BATCH_BINDING_INVALID/);
+});
+
 test("offline plan is zero-network, zero-writer and never rentable", () => {
   const out = temp();
   const run = spawnSync(process.execPath, [CLI, "plan", "--api-dist", API_DIST, "--out", out], { encoding: "utf8" });
