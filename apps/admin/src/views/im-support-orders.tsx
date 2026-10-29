@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
-import { ArrowDown, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Copy, Headphones, Images, MoreHorizontal, Search, X } from "lucide-react";
+import { ArrowDown, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Copy, Headphones, Images, MoreHorizontal, Search, Smile, X } from "lucide-react";
 import { MessageScroller as MessageScrollerPrimitive } from "@shadcn/react/message-scroller";
 import { decodeImSystemNotice } from "@zzsh/im-client/message-state";
 import type { NimMessageLike, NimWebClientLike, NimWebConnectionState } from "@zzsh/im-client/nim-web-client";
@@ -11,7 +11,7 @@ import {
 } from "@zzsh/ui/order-team-panel";
 import { supportedImageUrl } from "./im-support-guards";
 import { dayKeyOf, dayLabelOf, formatBytes, formatDateTime, formatTime, initialOf } from "./im-support-format";
-import { MessageQuoted, MessageReplyQuote } from "@zzsh/ui/message-actions";
+import { CHAT_EMOJIS, MessageQuoted, MessageReplyQuote } from "@zzsh/ui/message-actions";
 import "@zzsh/ui/message-actions.css";
 import { OrderCardMessage } from "@zzsh/ui/order-card";
 import { OrderFulfillmentSection } from "./im-support-fulfillment";
@@ -29,6 +29,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../componen
 import { Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemSeparator, ItemTitle } from "../components/ui/item";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip";
+import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 import "@zzsh/ui/order-team.css";
 
 const GROUP_WINDOW_MS = 300_000;
@@ -150,6 +151,8 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
   onAuthError: (status: number) => void;
 }) {
   const [query, setQuery] = useState("");
+  const [emojiOpen, setEmojiOpen] = useState(false);
+  const orderComposerRef = useRef<HTMLTextAreaElement | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(true);
   const [pane, setPane] = useState<"list" | "chat" | "details">("list");
   const [imageErrors, setImageErrors] = useState<Record<string, number>>({});
@@ -242,6 +245,20 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
 
   const renderConversation = (view: OrderTeamConversationView) => {
     const { info, messages } = view;
+    const insertEmoji = (emoji: string) => {
+      const el = orderComposerRef.current;
+      const start = el?.selectionStart ?? view.draft.length;
+      const end = el?.selectionEnd ?? start;
+      const next = `${view.draft.slice(0, start)}${emoji}${view.draft.slice(end)}`;
+      if (next.length > 4000) return;
+      view.setDraft(next);
+      setEmojiOpen(false);
+      requestAnimationFrame(() => {
+        el?.focus();
+        const position = start + emoji.length;
+        el?.setSelectionRange(position, position);
+      });
+    };
     const scope = info.members.map((member) => orderTeamMemberRole(member));
     const visibleScope = [...new Set(scope)].join("、");
     let timelineDay = "";
@@ -341,12 +358,18 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
           </Attachment>)}
             <span className="im-wb-tray-count">{view.stagedImages.length + (view.pendingImage ? 1 : 0)}/{MAX_STAGED_IMAGES}</span></AttachmentGroup> : null}
           <InputGroup className="im-wb-composer-box">
-            <InputGroupTextarea value={view.draft} onChange={(event) => view.setDraft(event.target.value)} onKeyDown={onComposerKeyDown}
+            <InputGroupTextarea ref={orderComposerRef} value={view.draft} onChange={(event) => view.setDraft(event.target.value)} onKeyDown={onComposerKeyDown}
               onCompositionStart={() => { composingRef.current = true; }} onCompositionEnd={() => { composingRef.current = false; }}
               aria-label="输入订单群消息" rows={3} maxLength={4000}
               placeholder={!view.canSend ? "当前只可阅读，草稿会保留" : view.connection !== "CONNECTED" ? "云信通道未连接，草稿会保留" : "输入消息…"}
               disabled={!view.canSend} />
             <InputGroupAddon align="block-end" className="im-wb-composer-tools">
+              <Popover open={emojiOpen} onOpenChange={setEmojiOpen}>
+                <PopoverTrigger render={<button type="button" className="im-wb-tool" aria-label="表情" disabled={!view.canSend || view.imageBlocked || view.isImageSending} />}><Smile size={14} /></PopoverTrigger>
+                <PopoverContent side="top" align="start" className="w-auto p-0"><div className="chat-emoji-grid">
+                  {CHAT_EMOJIS.map((item) => <button key={item.emoji} type="button" className="chat-emoji-button" aria-label={item.label} onClick={() => insertEmoji(item.emoji)}>{item.emoji}</button>)}
+                </div></PopoverContent>
+              </Popover>
               <label className="im-wb-tool"><Images size={14} />图片<input type="file" accept="image/jpeg,image/png" multiple onChange={(event: ChangeEvent<HTMLInputElement>) => { const files = event.target.files ? Array.from(event.target.files) : []; event.target.value = ""; view.onStageFiles(files); }} disabled={!view.canSend || view.imageBlocked || view.isImageSending} /></label>
               <button type="button" className="im-wb-tool" data-action="order-insert-summary" disabled={!view.canSend}
                 onClick={() => view.setDraft(`${view.draft ? `${view.draft}\n` : ""}【本单信息】${info.account.title}（订单 ${info.displayNo}）`)}>本单信息</button>

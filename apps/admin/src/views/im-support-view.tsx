@@ -1,12 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent as ReactClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
-import { ArrowDown, Check, ChevronLeft, CircleAlert, Headphones, Images, Info, MoreHorizontal, ReceiptText, Search, ShieldCheck, UserRound, X } from "lucide-react";
+import { ArrowDown, Check, ChevronLeft, CircleAlert, Headphones, Images, Info, MoreHorizontal, ReceiptText, Search, ShieldCheck, Smile, UserRound, X } from "lucide-react";
 import { MessageScroller as MessageScrollerPrimitive } from "@shadcn/react/message-scroller";
 import { ImClientLifecycle } from "@zzsh/im-client/lifecycle";
 import { createLocalFakeNimWebClientFactory, createNimWebClientFactory, NIM_IMAGE_MAX_BYTES, NimImageSendError, NimTextSendError, validateNimImageFile, type NimMessageLike, type NimWebClientLike, type NimWebConnectionState } from "@zzsh/im-client/nim-web-client";
 import { decodeImSystemNotice, mergeImMessages } from "@zzsh/im-client/message-state";
-import { MessageActionMenu, MessageQuoted, MessageReplyQuote, useMessageLongPress, type MessageActionId, type MessageActionItem } from "@zzsh/ui/message-actions";
+import { CHAT_EMOJIS, MessageActionMenu, MessageQuoted, MessageReplyQuote, useMessageLongPress, type MessageActionId, type MessageActionItem } from "@zzsh/ui/message-actions";
+import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 import "@zzsh/ui/message-actions.css";
 import { AdminApiError, adminRequest, friendlyError, hasPermission, type SessionSnapshot } from "../api";
 import { confirmCurrentForbidden, isCurrentImRequest, messageAccessPath, supportedImageUrl, type ImRequestKey } from "./im-support-guards";
@@ -169,6 +170,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Record<string, SupportMessage[]>>({});
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [emojiOpen, setEmojiOpen] = useState(false);
   // Below this width a third column leaves the chat unusable, so the case column
 // starts collapsed and the operator opens it deliberately.
   const [detailsOpen, setDetailsOpen] = useState(true);
@@ -276,6 +278,20 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
   const failedFor = (id: string) => (id ? failedText[id] ?? null : null);
   const draft = drafts[draftKey] ?? "";
   const setDraft = (value: string) => setDrafts((current) => ({ ...current, [draftKey]: value }));
+  const insertEmoji = (emoji: string) => {
+    const el = composerRef.current;
+    const start = el?.selectionStart ?? draft.length;
+    const end = el?.selectionEnd ?? start;
+    const next = `${draft.slice(0, start)}${emoji}${draft.slice(end)}`;
+    if (next.length > 4000) return;
+    setDraft(next);
+    setEmojiOpen(false);
+    requestAnimationFrame(() => {
+      el?.focus();
+      const position = start + emoji.length;
+      el?.setSelectionRange(position, position);
+    });
+  };
   const beginBusy = () => { const owner = busyOwnerRef.current + 1; busyOwnerRef.current = owner; setBusy(true); return owner; };
   const endBusy = (owner: number) => { if (busyOwnerRef.current === owner) setBusy(false); };
   // 所有 presence 显示/版本只从服务端返回值更新；客户端没有任何"先行生效"的路径。
@@ -1414,6 +1430,12 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
             placeholder={!selected ? "从左侧选择会话" : selected.state === "WAITING" ? "接入会话后可回复" : selected.messageScopeState === "FAILED" ? "云信会话待人工核验，暂不可回复" : connection !== "CONNECTED" ? "云信通道未连接，草稿会保留" : "输入回复…"}
             disabled={!canEdit} />
           <InputGroupAddon align="block-end" className="im-wb-composer-tools">
+            <Popover open={emojiOpen} onOpenChange={setEmojiOpen}>
+              <PopoverTrigger render={<button type="button" className="im-wb-tool" aria-label="表情" disabled={!canEdit || sendBlocked} />}><Smile size={14} /></PopoverTrigger>
+              <PopoverContent side="top" align="start" className="w-auto p-0"><div className="chat-emoji-grid">
+                {CHAT_EMOJIS.map((item) => <button key={item.emoji} type="button" className="chat-emoji-button" aria-label={item.label} onClick={() => insertEmoji(item.emoji)}>{item.emoji}</button>)}
+              </div></PopoverContent>
+            </Popover>
             <label className="im-wb-tool"><Images size={14} />图片<input type="file" accept="image/jpeg,image/png" multiple onChange={(event: ChangeEvent<HTMLInputElement>) => { const files = event.target.files ? Array.from(event.target.files) : []; event.target.value = ""; stageFiles(files); }} disabled={!canEdit || sendBlocked} /></label>
             <span className="im-wb-hint im-wb-hint-right"><Kbd>Enter</Kbd> 发送 · <Kbd>Shift</Kbd>+<Kbd>Enter</Kbd> 换行</span>
             <button type="submit" className="im-wb-send" disabled={!canSend || busy || sendBlocked || (!draft.trim() && !selectedStaged.length && !(selectedPending?.state === "FAILED"))}>{busy ? "处理中…" : "发送"}</button>

@@ -2,7 +2,7 @@
 import { SessionLoading } from "../auth/session-loading";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent as ReactClipboardEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
-import { ArrowDown, Check, ChevronLeft, CircleAlert, Clock3, Headphones, ImagePlus, Info, Paperclip, ReceiptText, SendHorizontal, ShieldCheck, UserRound, Wifi, WifiOff, X } from "lucide-react";
+import { ArrowDown, Check, ChevronLeft, CircleAlert, Clock3, Headphones, ImagePlus, Info, Paperclip, ReceiptText, SendHorizontal, ShieldCheck, Smile, UserRound, Wifi, WifiOff, X } from "lucide-react";
 import * as Popover from "@radix-ui/react-popover";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { MessageScroller as MessageScrollerPrimitive } from "@shadcn/react/message-scroller";
@@ -14,7 +14,7 @@ import { clearSupportIntent, readSupportIntent, saveSupportIntent, type SupportT
 import "./customer-support-workspace.css";
 import { readSupportOrders, type SupportOrder } from "@/lib/support-directory";
 import { OrderTeamPanel, orderTeamLabel } from "@zzsh/ui/order-team-panel";
-import { MessageActionMenu, MessageReplyQuote, useMessageLongPress, type MessageActionId, type MessageActionItem } from "@zzsh/ui/message-actions";
+import { CHAT_EMOJIS, MessageActionMenu, MessageReplyQuote, useMessageLongPress, type MessageActionId, type MessageActionItem } from "@zzsh/ui/message-actions";
 import "@zzsh/ui/order-team.css";
 import "@zzsh/ui/message-actions.css";
 
@@ -394,6 +394,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   const [attachments, setAttachments] = useState<Record<string, string | null>>({});
   const [panelView, setPanelView] = useState<"list" | "chat">("chat");
   const [contextOpen, setContextOpen] = useState(false);
+  const [emojiOpen, setEmojiOpen] = useState(false);
   const [orderPopoverOpen, setOrderPopoverOpen] = useState(false);
   const [connection, setConnection] = useState<NimWebConnectionState | "idle" | "error">(preview ? "idle" : "idle");
   const [busy, setBusy] = useState(false);
@@ -475,6 +476,20 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   const setDraft = (value: string) => setDrafts((current) => ({ ...current, [activeDraftKey]: value }));
   const setAttachment = (value: string | null) => setAttachments((current) => ({ ...current, [activeDraftKey]: value }));
   const setDraftFor = (key: string, value: string) => setDrafts((current) => ({ ...current, [key]: value }));
+  const insertEmoji = (emoji: string) => {
+    const el = draftRef.current;
+    const start = el?.selectionStart ?? draft.length;
+    const end = el?.selectionEnd ?? start;
+    const next = `${draft.slice(0, start)}${emoji}${draft.slice(end)}`;
+    if (next.length > 4000) return;
+    setDraft(next);
+    setEmojiOpen(false);
+    requestAnimationFrame(() => {
+      el?.focus();
+      const position = start + emoji.length;
+      el?.setSelectionRange(position, position);
+    });
+  };
   const setAttachmentFor = (key: string, value: string | null) => setAttachments((current) => ({ ...current, [key]: value }));
 
   // Opening the window resolves the entry type instead of inheriting whatever
@@ -1753,6 +1768,19 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
                             <span>仅展示你当前已付款或出租中的真实订单。</span>
                           </div>
                         )}
+                      </Popover.Content>
+                    </Popover.Portal>
+                  </Popover.Root>
+
+                  <Popover.Root open={emojiOpen} onOpenChange={setEmojiOpen}>
+                    <Popover.Trigger asChild>
+                      <button type="button" className="support-tool-btn" aria-label="表情" disabled={preview ? busy : (!canSend || busy)}>
+                        <Smile size={16} />
+                      </button>
+                    </Popover.Trigger>
+                    <Popover.Portal>
+                      <Popover.Content className="support-emoji-pop chat-emoji-grid" align="start" side="top" sideOffset={8}>
+                        {CHAT_EMOJIS.map((item) => <button key={item.emoji} type="button" className="chat-emoji-button" aria-label={item.label} onClick={() => insertEmoji(item.emoji)}>{item.emoji}</button>)}
                       </Popover.Content>
                     </Popover.Portal>
                   </Popover.Root>

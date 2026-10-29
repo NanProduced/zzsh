@@ -149,6 +149,18 @@ export function MessageActionMenu({ x, y, items, onSelect, onClose, returnFocus,
 }
 
 /** Composer quote bar: the summary is the message's own text or [图片]; never an account id. */
+/** Portable text emoji for chat composers; Unicode keeps every client/history readable. */
+export const CHAT_EMOJIS = [
+  { emoji: "😀", label: "开心" }, { emoji: "😄", label: "大笑" }, { emoji: "😂", label: "笑哭" },
+  { emoji: "🙂", label: "微笑" }, { emoji: "😉", label: "眨眼" }, { emoji: "😊", label: "害羞" },
+  { emoji: "😍", label: "喜欢" }, { emoji: "🤔", label: "思考" }, { emoji: "😅", label: "尴尬" },
+  { emoji: "😭", label: "大哭" }, { emoji: "😡", label: "生气" }, { emoji: "😴", label: "困了" },
+  { emoji: "👍", label: "赞" }, { emoji: "👎", label: "踩" }, { emoji: "🙏", label: "感谢" },
+  { emoji: "👌", label: "好的" }, { emoji: "💪", label: "加油" }, { emoji: "🎉", label: "庆祝" },
+  { emoji: "❤️", label: "爱心" }, { emoji: "🔥", label: "火热" }, { emoji: "✅", label: "完成" },
+  { emoji: "❌", label: "不行" }, { emoji: "⭐", label: "星标" }, { emoji: "🎮", label: "游戏" },
+] as const;
+
 /** A compact, non-interactive quote shown inside a sent message bubble. */
 export function MessageQuoted({ text }: { text: string }) {
   return <span className="message-quoted" title={text}><span className="message-quoted-label">引用</span><span className="message-quoted-text">{text}</span></span>;
