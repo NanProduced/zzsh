@@ -1,3 +1,4 @@
+import { contentFixtureDependency } from "./content-fixture.mjs";
 import assert from "node:assert/strict";
 import { createRequire, Module } from "node:module";
 import path from "node:path";
@@ -800,7 +801,7 @@ async function skin12MarketProbe(browse, {searchParams={game:'game_1'},feedState
   const calls=[], page=(categoryId,cursor)=>({game:{id:'game_1',code:'delta',name:'三角洲行动',catalogRevision:'1'},items:[],categories,owners:[{id:'owner_agent',kind:'AGENT',name:'测试干员'},{id:'owner_firearm',kind:'FIREARM',name:'测试枪械'}],rarities:[{code:'legend',name:'传说'}],entitlements:[],skins:categoryId?[{id:`${categoryId}_${cursor?'second':'first'}`,name:`${categoryId} ${cursor?'第二页':'第一页'}`,categoryId,mediaId:null}]:Array.from({length:30},(_,n)=>({id:'global_weapon_'+n,name:'全局枪械'+n,categoryId:'category_firearm',mediaId:null})),nextCursor:cursor?null:(categoryId||'global')+'_next',limit:30});
   const supply={games:async()=>({games:[{id:'game_1',code:'delta',name:'三角洲行动'}]}),listingFilters:async()=>meta,browseCatalog:async(game,query,signal)=>{const call={game,query:Object.fromEntries(query),signal};calls.push(call);return browse?browse(call,page):page(query.get('categoryId'),query.get('cursor'));}};
   const actualSupply=require(path.join(repoRoot,'apps/web/src/lib/supply-client.ts')), feed={status:'ready',items:[],nextCursor:null,error:null,requestedCursors:[null],scanBudgetReached:false,loadMore(){},reload(){},reloadFirstPage(){},...feedState};
-  function load(file){const module=new Module(file);module.filename=file;module.paths=Module._nodeModulePaths(repoRoot);module.require=name=>{
+  function load(file){const module=new Module(file);module.filename=file;module.paths=Module._nodeModulePaths(repoRoot);module.require=name=>{const contentDependency=contentFixtureDependency(name);if(contentDependency)return contentDependency;
     if(name.endsWith('.css'))return{};if(name==='next/link')return({children,href})=>React.createElement('a',{href},children);if(name==='@heroui/react')return{Button:pass,Drawer};if(name==='@heroui/react/list-box')return{ListBox};if(name==='@heroui/react/select')return{Select};if(name==='@radix-ui/react-popover')return Object.fromEntries(['Root','Trigger','Portal','Content'].map(k=>[k,pass]));if(name==='embla-carousel-react')return()=>[()=>{}];
     if(name==='@/components/market/market-filter-controls')return load(path.join(repoRoot,'apps/web/src/components/market/market-filter-controls.tsx'));
     if(name==='@/components/supply/skin-media-thumb'){

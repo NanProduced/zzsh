@@ -90,6 +90,7 @@ export function WorkspaceApp({
     return canOpenKind(locationTab.kind, nav) ? locationTab.id : WORKBENCH_TAB_ID;
   });
   const [dirtyIds, setDirtyIds] = useState<Record<string, boolean>>({});
+  const [writeLockedIds, setWriteLockedIds] = useState<Record<string, boolean>>({});
   const [discardIntent, setDiscardIntent] = useState<DiscardIntent | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshNonce, setRefreshNonce] = useState(0);
@@ -97,12 +98,14 @@ export function WorkspaceApp({
   const tabsRef = useRef(tabs);
   const activeIdRef = useRef(activeId);
   const dirtyIdsRef = useRef(dirtyIds);
+  const writeLockedIdsRef = useRef(writeLockedIds);
   const discardIntentRef = useRef<DiscardIntent | null>(null);
   const accessKey = JSON.stringify([snapshot.adminUserId, snapshot.session?.id, snapshot.session?.locked, snapshot.security.status, snapshot.security.isBoss, [...snapshot.permissions].sort()]);
   const accessRef = useRef({ key: accessKey, nav, locked: snapshot.session?.locked === true });
   tabsRef.current = tabs;
   activeIdRef.current = activeId;
   dirtyIdsRef.current = dirtyIds;
+  writeLockedIdsRef.current = writeLockedIds;
   accessRef.current = { key: accessKey, nav, locked: snapshot.session?.locked === true };
 
   const cancelDiscard = useCallback(() => {
@@ -121,6 +124,26 @@ export function WorkspaceApp({
   useEffect(() => { cancelDiscard(); }, [accessKey, cancelDiscard]);
 
   const active = tabs.find((tab) => tab.id === activeId) ?? tabs[0] ?? tabFromLocation("/workbench");
+  const writeLockBinding = useMemo(() => ({ tabId: active.id, kind: active.kind }), [active.id, active.kind, accessKey]);
+  const writeLockBindingRef = useRef(writeLockBinding);
+  writeLockBindingRef.current = writeLockBinding;
+  const onWriteLockChange = useCallback((locked: boolean) => {
+    // 旧工作面的清理回调不能解除新页或新会话的写锁。
+    if (writeLockBindingRef.current !== writeLockBinding || activeIdRef.current !== writeLockBinding.tabId || writeLockBinding.kind !== "content") return;
+    const next = applyDirtyMap(writeLockedIdsRef.current, writeLockBinding.tabId, locked);
+    writeLockedIdsRef.current = next;
+    setWriteLockedIds(next);
+  }, [writeLockBinding]);
+  const isWriteLocked = useCallback((tabId: string) => {
+    const tab = tabsRef.current.find(item => item.id === tabId);
+    return Boolean(writeLockedIdsRef.current[tabId] && tab?.kind === "content" && !accessRef.current.locked && canOpenKind(tab.kind, accessRef.current.nav));
+  }, []);
+  const clearWriteLocks = useCallback((tabIds: string[]) => {
+    const next = clearDirtyForTabs(writeLockedIdsRef.current, tabIds);
+    writeLockedIdsRef.current = next;
+    setWriteLockedIds(next);
+  }, []);
+  const activeWriteLocked = isWriteLocked(active.id);
   // 侧栏唯一活动入口按真实地址（含 query）判定：/settings?section=security 只点亮账号安全。
   // 前进/后退后 tab 可能还没有本轮 query，故用 revision 触发重算。
   const [locationRevision, bumpLocationRevision] = useState(0);
@@ -163,11 +186,12 @@ export function WorkspaceApp({
       setTabs(next);
       setActiveId(WORKBENCH_TAB_ID);
       setDirtyIds(current => clearDirtyForTabs(current, removed.map(tab => tab.id)));
+      clearWriteLocks(removed.map(tab => tab.id));
       replaceUrl(tabFromLocation("/workbench"), true);
     };
     window.addEventListener(FINANCE_ACCESS_FAILURE_EVENT, revoke);
     return () => window.removeEventListener(FINANCE_ACCESS_FAILURE_EVENT, revoke);
-  }, [cancelDiscard, replaceUrl]);
+  }, [cancelDiscard, clearWriteLocks, replaceUrl]);
   useEffect(() => {
     const next = filterTabsByPermission(tabs, nav);
     if (next.length !== tabs.length || next.some((tab, index) => tab.id !== tabs[index]?.id)) {
@@ -176,6 +200,7 @@ export function WorkspaceApp({
       tabsRef.current = next;
       setTabs(next);
       setDirtyIds((current) => clearDirtyForTabs(current, removed.map((tab) => tab.id)));
+      clearWriteLocks(removed.map(tab => tab.id));
       if (!next.some((tab) => tab.id === activeId)) {
         activeIdRef.current = WORKBENCH_TAB_ID;
         setActiveId(WORKBENCH_TAB_ID);
@@ -183,9 +208,10 @@ export function WorkspaceApp({
         replaceUrl(workbench, true);
       }
     }
-  }, [activeId, cancelDiscard, nav, replaceUrl, tabs]);
+  }, [activeId, cancelDiscard, clearWriteLocks, nav, replaceUrl, tabs]);
 
   const confirmLeave = useCallback((tabId: string, proceed: () => boolean): boolean => {
+    if (isWriteLocked(tabId)) return false;
     if (!dirtyIdsRef.current[tabId]) {
       return proceed();
     }
@@ -194,12 +220,12 @@ export function WorkspaceApp({
       titles: [tab?.title ?? "当前页"],
       execute: () => {
         const current = tabsRef.current.find(item => item.id === tabId);
-        if (activeIdRef.current !== tabId || !current || !canOpenKind(current.kind, accessRef.current.nav)) return;
+        if (activeIdRef.current !== tabId || !current || !canOpenKind(current.kind, accessRef.current.nav) || isWriteLocked(tabId)) return;
         if (proceed()) markDirty(tabId, false);
       },
     });
     return false;
-  }, [markDirty, queueDiscard]);
+  }, [isWriteLocked, markDirty, queueDiscard]);
 
   useEffect(() => {
     const onPop = () => {
@@ -207,6 +233,10 @@ export function WorkspaceApp({
       const next = currentLocationTab();
       const currentId = activeIdRef.current;
       const currentTab = tabsRef.current.find((tab) => tab.id === currentId);
+      if (currentTab && isWriteLocked(currentId) && tabHref(next) !== tabHref(currentTab)) {
+        window.history.pushState({ tabId: currentTab.id }, "", tabHref(currentTab));
+        return;
+      }
       const hasDirty = currentTab && dirtyIdsRef.current[currentId] && (next.id !== currentId || changesSettingsContent(currentTab, next));
       if (hasDirty) {
         window.history.pushState({ tabId: currentTab.id }, "", tabHref(currentTab));
@@ -216,7 +246,7 @@ export function WorkspaceApp({
           execute: () => {
             const access = accessRef.current;
             const source = tabsRef.current.find(tab => tab.id === currentId);
-            if (access.locked || activeIdRef.current !== currentId || !source || !canOpenKind(source.kind, access.nav) || !canOpenKind(next.kind, access.nav)) return;
+            if (access.locked || activeIdRef.current !== currentId || !source || !canOpenKind(source.kind, access.nav) || !canOpenKind(next.kind, access.nav) || isWriteLocked(currentId)) return;
             const updated = upsertTab(filterTabsByPermission(tabsRef.current, access.nav), next);
             tabsRef.current = updated;
             activeIdRef.current = next.id;
@@ -246,7 +276,7 @@ export function WorkspaceApp({
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
-  }, [markDirty, queueDiscard, replaceUrl]);
+  }, [isWriteLocked, markDirty, queueDiscard, replaceUrl]);
 
   useEffect(() => {
     const href = tabHref(active);
@@ -255,7 +285,7 @@ export function WorkspaceApp({
 
   useEffect(() => {
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
-      if (Object.values(dirtyIds).some(Boolean)) {
+      if (Object.values(dirtyIds).some(Boolean) || Object.values(writeLockedIdsRef.current).some(Boolean)) {
         event.preventDefault();
         event.returnValue = "";
       }
@@ -283,11 +313,12 @@ export function WorkspaceApp({
     if (next.id === activeIdRef.current && currentHref === nextHref) {
       return true;
     }
+    if (isWriteLocked(activeIdRef.current)) return false;
     if (next.id === activeIdRef.current && (!current || !changesSettingsContent(current, next))) {
       return proceed();
     }
     return confirmLeave(activeIdRef.current, proceed);
-  }, [confirmLeave, replaceUrl]);
+  }, [confirmLeave, isWriteLocked, replaceUrl]);
 
   const openPath = useCallback((path: string, title?: string): boolean => {
     const [pathname, search = ""] = path.split("?");
@@ -312,6 +343,7 @@ export function WorkspaceApp({
   const close = (action: TabCloseAction, targetId: string) => {
     if (accessRef.current.locked) return;
     const removed = tabsRemovedBy(tabsRef.current, action, targetId);
+    if (removed.some(tab => isWriteLocked(tab.id))) return;
     const dirtyRemoved = removed.filter((tab) => dirtyIdsRef.current[tab.id]);
     const confirmedDirtyIds = new Set(dirtyRemoved.map(tab => tab.id));
     const executeClose = () => {
@@ -319,6 +351,7 @@ export function WorkspaceApp({
       const latest = filterTabsByPermission(tabsRef.current, access.nav);
       if (access.locked || !latest.some(tab => tab.id === targetId)) return;
       const removedNow = tabsRemovedBy(latest, action, targetId);
+      if (removedNow.some(tab => isWriteLocked(tab.id))) return;
       if (removedNow.some(tab => dirtyIdsRef.current[tab.id] && !confirmedDirtyIds.has(tab.id))) return;
       const result = closeTabs(latest, activeIdRef.current, action, targetId);
       tabsRef.current = result.tabs;
@@ -328,6 +361,7 @@ export function WorkspaceApp({
       const next = result.tabs.find((tab) => tab.id === result.activeId);
       if (next) replaceUrl(next, true);
       setDirtyIds((curr) => clearDirtyForTabs(curr, removedNow.map((tab) => tab.id)));
+      clearWriteLocks(removedNow.map(tab => tab.id));
     };
     if (dirtyRemoved.length > 0) {
       queueDiscard({
@@ -340,9 +374,12 @@ export function WorkspaceApp({
   };
 
   const refreshPage = async () => {
+    const tabId = activeIdRef.current;
+    if (isWriteLocked(tabId)) return;
     setRefreshing(true);
     try {
       await onRefresh();
+      if (accessRef.current.locked || activeIdRef.current !== tabId || isWriteLocked(tabId)) return;
       setRefreshNonce((value) => value + 1);
     } finally {
       setRefreshing(false);
@@ -427,6 +464,7 @@ export function WorkspaceApp({
             onLock={onLock}
             canLock={snapshot.security.status === "ACTIVE" && snapshot.session.pinConfigured && !snapshot.session.locked}
             refreshing={refreshing}
+            refreshDisabled={activeWriteLocked}
             pages={searchableWorkspacePages(nav)}
             onNavigate={openPath}
             tabs={filterTabsByPermission(tabs, nav)}
@@ -444,6 +482,7 @@ export function WorkspaceApp({
             onClose={close}
           />
           <div className="workspace-page flex min-h-0 flex-1 flex-col overflow-auto px-4 py-4 sm:px-5 sm:py-5">
+            {activeWriteLocked ? <p role="status" className="mb-3 text-xs text-muted-foreground">内容操作正在处理或等待结果核对，暂不能离开或刷新。</p> : null}
             <WorkspacePageContent
               tab={active}
               snapshot={snapshot}
@@ -454,6 +493,7 @@ export function WorkspaceApp({
               onRecoveryCompleted={onRecoveryCompleted}
               onOpenPath={openPath}
               onDirtyChange={onDirtyChange}
+              onWriteLockChange={onWriteLockChange}
               onQueryChange={(query) => {
                 const current = tabsRef.current.find((item) => item.id === activeIdRef.current);
                 if (!current) return;

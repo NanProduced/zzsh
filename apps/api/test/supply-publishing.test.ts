@@ -135,13 +135,26 @@ test("readPresentation only fills missing snapshot presentation fields", async (
   );
 
   assert.deepEqual(result.items, [
-    { id: "item-a", code: "current-code", name: "审核时旧名", unit: "ROUND" },
-    { id: "item-b", code: "snapshot-code-b", name: "审核时旧名B", unit: "HAFF_BASE" },
+    { id: "item-a", code: "current-code", name: "审核时旧名", unit: "ROUND", mediaId: null },
+    { id: "item-b", code: "snapshot-code-b", name: "审核时旧名B", unit: "HAFF_BASE", mediaId: null },
   ]);
   assert.deepEqual(result.skins, [
     { id: "skin-a", name: "旧皮肤", categoryName: "旧分类" },
     { id: "skin-b", name: "完整旧皮肤", categoryCode: "snapshot-category", categoryName: "完整旧分类" },
   ]);
+});
+
+test("current item media is projected once per presentation and cannot replace frozen labels or source data", async () => {
+  const presentation = { items: [{ id: "a", name: "历史名称", code: "frozen", unit: "ROUND", mediaId: "unsafe_snapshot" }, { id: "b", name: "未匹配项", code: "b", unit: "DAY" }], skins: [] };
+  const before = JSON.stringify(presentation), queries: string[] = [];
+  const result = await readPresentation({ query: async (sql: string, params: unknown[]) => {
+    queries.push(sql); assert.deepEqual(params, [["a", "b"], "account_a"]);
+    assert.match(sql, /a\.game_id=i\.game_id/); assert.match(sql, /m\.game_id=i\.game_id/);
+    for (const gate of ["PLATFORM_CATALOG", "ITEM_MEDIA", "APPROVED", "PUBLIC_DISPLAY", "public_storage_key"]) assert.ok(sql.includes(gate));
+    return { rows: [{ id: "a", name: "当前名称", code: "current", unit: "DAY", mediaId: "safe_current" }] };
+  } } as never, { account_id: "account_a", presentation } as never);
+  assert.equal(queries.length, 1); assert.equal(JSON.stringify(presentation), before);
+  assert.deepEqual(result.items, [{ ...presentation.items[0], mediaId: "safe_current" }, { ...presentation.items[1], mediaId: null }]);
 });
 
 test("empty presentation is not filled from the current catalog", async () => {

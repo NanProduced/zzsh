@@ -1,0 +1,40 @@
+{
+  "name": "@zzsh/content",
+  "version": "0.0.0",
+  "private": true,
+  "main": "index.cjs",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.cjs"
+    },
+    "./markdown": {
+      "types": "./markdown.d.mts",
+      "default": "./markdown.mjs"
+    },
+    "./markdown/policy": {
+      "types": "./markdown-policy.d.mts",
+      "default": "./markdown-policy.mjs"
+    },
+    "./api-markdown": {
+      "types": "./api-markdown.d.ts",
+      "default": "./api-markdown.cjs"
+    },
+    "./updates": {
+      "types": "./updates.d.ts",
+      "default": "./updates.cjs"
+    }
+  },
+  "dependencies": {
+    "unified": "11.0.5",
+    "remark-parse": "11.0.0",
+    "remark-gfm": "4.0.1",
+    "remark-stringify": "11.0.0",
+    "unist-util-visit": "5.1.0",
+    "mdast-util-to-string": "4.0.0"
+  },
+  "scripts": {
+    "test": "node --test test/content.test.mjs test/markdown.test.mjs test/updates.test.mjs"
+  }
+}

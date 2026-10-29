@@ -2376,3 +2376,11 @@ html[data-theme="dark"] .account-gallery-dialog { --gallery-stage-bg:#080808; --
 
 .auth-form .auth-methods button, .auth-form .auth-secondary-actions button, .auth-form .auth-password-toggle { min-height:44px; }
 .auth-form input[aria-invalid="true"] { border-color:var(--color-accent-brand); }
+.managed-notice section + section { margin-top:18px; }
+.managed-notice h3 { margin:0 0 6px; font-size:15px; font-weight:650; line-height:1.6; }
+.managed-notice p { font-size:13px; line-height:1.8; }
+.managed-notice--compact section { margin:0; }
+.managed-notice--compact p { margin:0; }
+.hero-carousel[data-source="api"] .hero-copy { max-width:100%; padding:5cqw; width:80%; }
+.hero-carousel[data-source="api"] .hero-copy h1 { font-size:clamp(18px,4cqw,46px); line-height:1.25; overflow-wrap:anywhere; }
+.hero-carousel[data-source="api"] .hero-copy p { max-width:45ch; font-size:clamp(11px,1.6cqw,16px); line-height:1.6; overflow-wrap:anywhere; }

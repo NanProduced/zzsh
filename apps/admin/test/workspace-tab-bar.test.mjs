@@ -27,7 +27,17 @@ const vite = await createServer({
       if (id === "./page-content" && importer?.replaceAll("\\", "/").endsWith("/workspace/app-shell.tsx")) return "\0tab-bar-dirty-page";
     },
     load(id) {
-      if (id === "\0tab-bar-dirty-page") return 'import {createElement} from "react"; export function WorkspacePageContent({onDirtyChange,onOpenPath}) { return createElement("div",null,createElement("button",{onClick:()=>onDirtyChange(true)},"标记未保存"),createElement("button",{onClick:()=>onOpenPath("/finance")},"打开资金")); }';
+      if (id === "\0tab-bar-dirty-page") return `import {createElement,useEffect} from "react";
+export const lockCallbacks=[];
+export function WorkspacePageContent({tab,onDirtyChange,onWriteLockChange,onOpenPath,refreshNonce}) {
+  useEffect(()=>{lockCallbacks.push({tabId:tab.id,callback:onWriteLockChange});return()=>onWriteLockChange?.(false);},[tab.id,onWriteLockChange]);
+  return createElement("div",{"data-write-test-page":tab.kind,"data-refresh-nonce":refreshNonce},
+    createElement("button",{onClick:()=>onDirtyChange(true)},"标记未保存"),
+    createElement("button",{onClick:()=>onOpenPath("/finance")},"打开资金"),
+    createElement("button",{onClick:()=>onOpenPath("/content?tab=news&scope=game&gameId=game_1")},"改变内容范围"),
+    createElement("button",{onClick:()=>onWriteLockChange?.(true)},"标记写入中"),
+    createElement("button",{onClick:()=>onWriteLockChange?.(false)},"解除写入锁"));
+}`;
     },
   }],
   resolve: { alias: { "@": path.join(adminRoot, "src"), "@brand": path.resolve(adminRoot, "../../assets/brand") } },
@@ -36,6 +46,7 @@ const vite = await createServer({
 });
 const { WorkspaceTabBar } = await vite.ssrLoadModule("/src/workspace/tab-bar.tsx");
 const { WorkspaceApp } = await vite.ssrLoadModule("/src/workspace/app-shell.tsx");
+const { lockCallbacks } = await vite.ssrLoadModule("\0tab-bar-dirty-page");
 after(async () => { await vite.close(); await browser.happyDOM.abort(); });
 const settle = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 35)); });
 const buttons = () => [...browser.document.querySelectorAll("button")];
@@ -213,4 +224,110 @@ test("pending browser-history navigation is cancelled with revoked finance conte
   await act(async () => browser.dispatchEvent(new browser.CustomEvent("zzsh-admin-finance-access-failure"))); await settle();
   await confirmOnlyIfStillPending(); assert.equal(tabButton("finance-lookup"), null);
   assert.equal(browser.location.pathname, "/workbench");
+});
+
+async function mountWriteLockedShell(t, refresh = async snapshot => snapshot) {
+  const snapshot = { authenticated: true, adminUserId: `write-admin-${++shellSerial}`, user: { name: "测试运营", username: "ZZ1" }, security: { status: "ACTIVE", isBoss: false }, session: { id: `write-session-${shellSerial}`, pinConfigured: false, locked: false }, permissions: ["content.platform.read", "content.platform.edit", "content.platform.publish", "admin.role.read", "finance.read", "im.support.read"] };
+  browser.history.replaceState({}, "", "/content?tab=announcement");
+  persistTabs(snapshot.adminUserId, { tabs: [tabFromLocation("/workbench"), tabFromLocation("/content", "tab=announcement"), tabFromLocation("/roles")], activeId: "content" });
+  let refreshes = 0;
+  const props = { ...shellProps(snapshot), onRefresh: async () => { refreshes += 1; return refresh(snapshot); } };
+  const host = await mount(t, createElement(WorkspaceApp, props));
+  return { host, snapshot, props, refreshes: () => refreshes };
+}
+
+test("content hard write lock blocks navigation, aggregate close, history and refresh without a discard override", async t => {
+  const h = await mountWriteLockedShell(t);
+  await dispatch(button("标记写入中"), "click");
+  assert.ok(h.host.textContent.includes("内容操作正在处理或等待结果核对"));
+  await dispatch(tabButton("roles"), "click");
+  await dispatch(button("打开资金"), "click");
+  await dispatch(button("改变内容范围"), "click");
+  await dispatch(button("关闭 内容管理"), "click");
+  await dispatch(tabButton("roles"), "contextmenu", { button: 2 });
+  await dispatch(item("关闭其他标签页"), "click");
+  assert.ok(tabButton("content"));
+  assert.equal(tabButton("content").getAttribute("aria-selected"), "true");
+  assert.equal(tabButton("finance-lookup"), null);
+  assert.equal(browser.document.querySelector('[role="alertdialog"]'), null, "a hard lock is not confirmable dirty text");
+  assert.equal(button("刷新当前页").disabled, true);
+  await dispatch(button("刷新当前页"), "click");
+  assert.equal(h.refreshes(), 0);
+  for (const target of ["/roles", "/content?tab=news&scope=game&gameId=game_1"]) {
+    browser.history.pushState({}, "", target);
+    await act(async () => browser.dispatchEvent(new browser.PopStateEvent("popstate"))); await settle();
+    assert.equal(browser.location.pathname + browser.location.search, "/content?tab=announcement");
+  }
+  const unload = new browser.Event("beforeunload", { cancelable: true });
+  await act(async () => browser.dispatchEvent(unload));
+  assert.equal(unload.defaultPrevented, true, "native unload receives the existing browser warning");
+  await dispatch(button("解除写入锁"), "click");
+  await dispatch(tabButton("roles"), "click");
+  assert.equal(tabButton("roles").getAttribute("aria-selected"), "true");
+});
+
+test("a pending dirty discard cannot bypass a write lock acquired before confirmation", async t => {
+  await mountWriteLockedShell(t);
+  await dispatch(button("标记未保存"), "click");
+  await dispatch(tabButton("roles"), "click");
+  assert.ok(browser.document.querySelector('[role="alertdialog"]'));
+  await act(async () => lockCallbacks.at(-1).callback(true)); await settle();
+  await dispatch(button("放弃修改并离开"), "click");
+  assert.equal(tabButton("content").getAttribute("aria-selected"), "true");
+  await dispatch(button("解除写入锁"), "click");
+  await dispatch(tabButton("roles"), "click");
+  assert.ok(browser.document.querySelector('[role="alertdialog"]'), "rejecting the hard-locked intent retains dirty state");
+  await dispatch(button("继续编辑"), "click");
+});
+
+test("an old page lock callback cannot clear the new content page lock", async t => {
+  await mountWriteLockedShell(t);
+  const old = lockCallbacks.at(-1).callback;
+  await dispatch(tabButton("roles"), "click");
+  await dispatch(tabButton("content"), "click");
+  await dispatch(button("标记写入中"), "click");
+  await act(async () => old(false)); await settle();
+  assert.equal(button("刷新当前页").disabled, true);
+  await dispatch(tabButton("roles"), "click");
+  assert.equal(tabButton("content").getAttribute("aria-selected"), "true");
+  await dispatch(button("解除写入锁"), "click");
+  await dispatch(tabButton("roles"), "click");
+  assert.equal(tabButton("roles").getAttribute("aria-selected"), "true");
+});
+
+test("a content write lock does not prevent permission revocation from removing the page", async t => {
+  const h = await mountWriteLockedShell(t);
+  const old = lockCallbacks.at(-1).callback;
+  await dispatch(button("标记写入中"), "click");
+  const revoked = { ...h.snapshot, permissions: h.snapshot.permissions.filter(permission => !permission.startsWith("content.")) };
+  await h.host.render(createElement(WorkspaceApp, { ...h.props, snapshot: revoked }));
+  assert.equal(tabButton("content"), null);
+  assert.equal(browser.location.pathname, "/workbench");
+  await act(async () => old(true)); await settle();
+  assert.equal(button("刷新当前页").disabled, false, "a disposed page cannot lock the replacement page");
+});
+
+test("a session lock still follows the fail-closed history route despite a content write lock", async t => {
+  const h = await mountWriteLockedShell(t);
+  await dispatch(button("标记写入中"), "click");
+  const locked = { ...h.snapshot, session: { ...h.snapshot.session, locked: true } };
+  await h.host.render(createElement(WorkspaceApp, { ...h.props, snapshot: locked }));
+  browser.history.pushState({}, "", "/roles");
+  await act(async () => browser.dispatchEvent(new browser.PopStateEvent("popstate"))); await settle();
+  assert.equal(browser.location.pathname, "/workbench");
+  assert.equal(browser.document.querySelector('[role="alertdialog"]'), null);
+});
+
+test("a manual refresh that started earlier cannot reset a newly write-locked content page", async t => {
+  let release;
+  const read = new Promise(resolve => { release = resolve; });
+  const h = await mountWriteLockedShell(t, () => read);
+  await dispatch(button("刷新当前页"), "click");
+  assert.equal(h.refreshes(), 1);
+  await act(async () => lockCallbacks.at(-1).callback(true)); await settle();
+  await act(async () => release(h.snapshot)); await settle();
+  assert.equal(h.host.querySelector('[data-write-test-page="content"]').getAttribute("data-refresh-nonce"), "0");
+  await dispatch(button("解除写入锁"), "click");
+  await dispatch(button("刷新当前页"), "click");
+  assert.equal(h.host.querySelector('[data-write-test-page="content"]').getAttribute("data-refresh-nonce"), "1");
 });

@@ -69,10 +69,11 @@ export type InventoryEditorRow = {
   priced: boolean | null;
   required: boolean;
   catalogState: CatalogAvailability;
+  mediaId: string | null;
 };
 
 export function inventoryEditorRows(
-  catalog: { items: Array<{ id: string; name: string; unit: string; required?: boolean; priced?: boolean }> } | null,
+  catalog: { items: Array<{ id: string; name: string; unit: string; required?: boolean; priced?: boolean; mediaId?: string | null }> } | null,
   inventory: DraftInput["inventory"],
   labels: Array<{ id: string; name: string; unit: string; priced?: boolean }> = [],
   availability: CatalogAvailability = catalog ? "ready" : "pending",
@@ -89,6 +90,7 @@ export function inventoryEditorRows(
     priced: typeof item.priced === "boolean" ? item.priced : null,
     required: Boolean(item.required),
     catalogState,
+    mediaId: item.mediaId ?? null,
   }));
   for (const line of inventory) {
     if (catalogIds.has(line.itemId)) continue;
@@ -101,6 +103,7 @@ export function inventoryEditorRows(
       priced: catalogState === "ready" ? false : null,
       required: false,
       catalogState,
+      mediaId: null,
     });
   }
   return rows;

@@ -5,7 +5,9 @@ import { UserSessionProvider } from "@/components/session/user-session-provider"
 import { AuthOverlayProvider } from "@/components/auth/auth-overlay-provider";
 import { SupportRail } from "@/components/support/support-rail";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { PublicContentProvider } from "@/components/content/public-content-provider";
 import "./globals.css";
+import "@zzsh/ui/content-document.css";
 
 export const metadata: Metadata = {
   title: "洲洲商行 · 游戏服务与高价值账号租赁门户",
@@ -58,7 +60,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       <body className="min-h-screen bg-[var(--color-bg-canvas)] text-[var(--color-text-primary)] antialiased selection:bg-[var(--color-accent-brand)] selection:text-black">
         <TooltipProvider delayDuration={180} skipDelayDuration={100}>
         <ThemeProvider>
-          <UserSessionProvider><AuthOverlayProvider>{children}<SupportRail /></AuthOverlayProvider></UserSessionProvider>
+          <PublicContentProvider><UserSessionProvider><AuthOverlayProvider>{children}<SupportRail /></AuthOverlayProvider></UserSessionProvider></PublicContentProvider>
         </ThemeProvider>
         </TooltipProvider>
       </body>

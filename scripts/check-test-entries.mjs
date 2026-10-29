@@ -12,6 +12,8 @@ export const WORKSPACES = [
   { dir: "apps/api", pkgName: "@zzsh/api", testDir: "apps/api/test" },
   { dir: "apps/web", pkgName: "@zzsh/web", testDir: "apps/web/test" },
   { dir: "apps/admin", pkgName: "@zzsh/admin", testDir: "apps/admin/test" },
+  { dir: "packages/content", pkgName: "@zzsh/content", testDir: "packages/content/test" },
+  { dir: "packages/ui", pkgName: "@zzsh/ui", testDir: "packages/ui/test" },
 ];
 
 const parseSource = source => ts.createSourceFile("inventory.ts", source, ts.ScriptTarget.Latest, true);

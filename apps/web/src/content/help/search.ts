@@ -46,10 +46,13 @@ function expandTerms(terms: readonly string[]): readonly string[] {
 }
 
 function articleBodyText(article: HelpArticle): string {
-  return article.sections
+  if (article.format === "markdown") return article.plainText ?? article.markdown ?? "";
+  return (article.sections ?? [])
     .map((section) => section.title + " " + section.blocks.map((block) => {
       if (block.type === "paragraph" || block.type === "callout") return block.text;
       if (block.type === "list") return block.items.join(" ");
+      if (block.type === "image") return [block.alt, block.caption ?? ""].join(" ");
+      if (block.type === "link") return block.text;
       return block.columns.join(" ") + " " + block.rows.map((row) => row.join(" ")).join(" ");
     }).join(" "))
     .join(" ");

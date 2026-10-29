@@ -31,8 +31,10 @@ export async function decodeImage(bytes: Buffer): Promise<{ info: ImageInfo; pub
     if (!["jpeg", "png", "webp"].includes(metadata.format ?? "") || (metadata.pages ?? 1) !== 1) throw new MediaValidationError("Unsupported image or animation");
     const info: ImageInfo = { mime: ("image/" + metadata.format) as ImageMime, width: metadata.width!, height: metadata.height! };
     assertImageWithinBounds(info, bytes.length);
-    // Full decode and re-encode; Sharp strips metadata by default. Never publish original evidence.
-    const publicBytes = await decoder.toFormat(metadata.format as "jpeg" | "png" | "webp").toBuffer();
+    // Orient only the derivative; original evidence bytes and their hashes stay intact.
+    const output = await decoder.autoOrient().toFormat(metadata.format as "jpeg" | "png" | "webp").toBuffer({ resolveWithObject: true });
+    const publicBytes = output.data;
+    info.width = output.info.width; info.height = output.info.height;
     assertImageWithinBounds(info, publicBytes.length);
     return { info, publicBytes };
   } catch {

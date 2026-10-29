@@ -764,6 +764,27 @@
       "when": 1793170300000,
       "tag": "0108_legacy_finance_source_proof",
       "breakpoints": true
+    },
+    {
+      "idx": 109,
+      "version": "7",
+      "when": 1793183880000,
+      "tag": "0109_content_management",
+      "breakpoints": true
+    },
+    {
+      "idx": 110,
+      "version": "7",
+      "when": 1793183940000,
+      "tag": "0110_content_draft_history_shape",
+      "breakpoints": true
+    },
+    {
+      "idx": 111,
+      "version": "7",
+      "when": 1793184000000,
+      "tag": "0111_platform_updates",
+      "breakpoints": true
     }
   ]
 }

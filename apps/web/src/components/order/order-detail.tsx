@@ -1,4 +1,5 @@
 "use client";
+import { BusinessUpdateNotices } from "@/components/content/platform-update-notices";
 
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -476,6 +477,7 @@ export function OrderDetail({ party, status, accountId, orderId, state, onRetry,
         </div>
       </div>
     </header>
+    <BusinessUpdateNotices surface="orders" />
     <AttentionBlock attention={attention} party={party} orderId={order.id} onRetry={onChanged} />
     <div className="order-detail-body">
       <div className="order-detail-main">

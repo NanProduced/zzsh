@@ -11,6 +11,7 @@ export type ResourceLine = {
   costAmount: string | null;
   costLabel: string | null;
   unitPriceLabel: string | null;
+  mediaId?: string | null;
 };
 export type ConditionLine = { key: string; label: string; value: string };
 export type SkinTag = {
@@ -260,6 +261,7 @@ export function toListingCard(listing: PublicListing): ListingCardData {
   const itemLines = listing.quote.lines.filter((line) => line.unit !== "HAFF_BASE");
   const resourceLines: ResourceLine[] = listing.quote.lines.map((line) => ({
     itemId: line.itemId,
+    mediaId: items.get(line.itemId)?.mediaId ?? null,
     code: items.get(line.itemId)?.code ?? null,
     name: resourceItemDisplayName(items.get(line.itemId), { gameCode: listing.game?.code, itemId: line.itemId }),
     quantity: line.quantity,

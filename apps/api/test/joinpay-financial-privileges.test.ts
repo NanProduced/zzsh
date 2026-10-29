@@ -191,10 +191,12 @@ test('未开租单表/三扩展列缺一/缺完整性函数时在任何GRANT前�
  const fn=prestartCatalog();fn.state.functions.delete('zzsh_order.native_prestart_refund_terminal_complete(text)');await assert.rejects(configure(fn.pool),/function inventory/);assert.equal(mutations(fn).length,0);
 });
 
-test('退款前向迁移按0106后0107登记，未验旧来源证明不自动安装',()=>{
+test('退款前向迁移按0106后0107登记，来源证明由后继0108独立提供',()=>{
  const j=JSON.parse(readFileSync(resolve('migrations/business/meta/_journal.json'),'utf8'));
  const a=j.entries.findIndex((e:any)=>e.tag==='0106_joinpay_abnormal_refund_basis'),b=j.entries.findIndex((e:any)=>e.tag==='0107_prestart_termination');
  assert(a>=0);assert.equal(b,a+1);assert(j.entries[b].when>j.entries[a].when);
- assert(!j.entries.some((e:any)=>e.tag.includes('legacy_finance_source_proof')));
+ const proof=j.entries.findIndex((e:any)=>e.tag==='0108_legacy_finance_source_proof');
+ assert.equal(proof,b+1);assert(j.entries[proof].when>j.entries[b].when);
+ assert.equal(j.entries.filter((e:any)=>e.tag==='0108_legacy_finance_source_proof').length,1);
  assert(readFileSync(resolve('migrations/business/0106_joinpay_abnormal_refund_basis.sql'),'utf8').includes('ADD COLUMN basis_kind'));
 });
