@@ -4,6 +4,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { createHash } from "node:crypto";
+import type { Pool } from "pg";
 
 import {
   assertImageWithinBounds,
@@ -12,6 +14,8 @@ import {
   inspectImage,
   decodeImage,
   MediaValidationError,
+  prepareMediaUpload,
+  type ImageMime,
 } from "../src/supply/media";
 import {
   createOssMediaStorage,
@@ -53,8 +57,8 @@ test("local storage is content addressed, repeatable, and rejects invalid keys",
     assert.equal(storage.available, true);
     const bytes = Buffer.from("storage fixture");
     const hash = "a".repeat(64);
-    await storage.write(bytes, hash);
-    await storage.write(bytes, hash);
+    await storage.write(bytes, hash, "image/png");
+    await storage.write(bytes, hash, "image/png");
     assert.deepEqual(await storage.read(hash), bytes);
     await assert.rejects(() => storage.read("../../escape"), /storage key is invalid/);
     await assert.rejects(() => storage.read("f".repeat(64)), /unavailable/);
@@ -66,10 +70,10 @@ test("local storage is content addressed, repeatable, and rejects invalid keys",
 test("unconfigured storage reports itself unavailable instead of pretending to work", async () => {
   const storage = createUnavailableMediaStorage();
   assert.equal(storage.available, false);
-  await assert.rejects(() => storage.write(Buffer.from("x"), "a".repeat(64)));
+  await assert.rejects(() => storage.write(Buffer.from("x"), "a".repeat(64), "image/png"));
 });
 
-type FakeOssState = { objects: Map<string, Buffer>; puts: number; heads: number; failsNextWith?: Error; failGetFor?: Set<string> };
+type FakeOssState = { objects: Map<string, Buffer>; puts: number; heads: number; mimes?: Map<string, ImageMime>; failsNextWith?: Error; failGetFor?: Set<string> };
 
 function fakeOssClient(state: FakeOssState): OssObjectClient {
   const missing = () => {
@@ -88,7 +92,7 @@ function fakeOssClient(state: FakeOssState): OssObjectClient {
       }
       if (!state.objects.has(objectKey)) throw missing();
     },
-    async put(objectKey, bytes) {
+    async put(objectKey, bytes, options) {
       state.puts += 1;
       if (state.failsNextWith) {
         const error = state.failsNextWith;
@@ -96,6 +100,7 @@ function fakeOssClient(state: FakeOssState): OssObjectClient {
         throw error;
       }
       state.objects.set(objectKey, Buffer.from(bytes));
+      (state.mimes ??= new Map()).set(objectKey, options.mime);
     },
     async get(objectKey) {
       if (state.failGetFor?.has(objectKey)) throw new Error("SDK request id and signature must not leak");
@@ -118,11 +123,11 @@ test("oss storage is content addressed, skips existing objects and reads them ba
   const hash = "ab".padEnd(64, "0");
   const objectKey = ossObjectKey(OSS_OPTIONS.objectPrefix, hash);
   assert.equal(objectKey, "zzsh-rebuild/dev/ab/ab00000000000000000000000000000000000000000000000000000000000000");
-  await storage.write(bytes, hash);
-  await storage.write(bytes, hash);
+  await storage.write(bytes, hash, "image/png");
+  await storage.write(bytes, hash, "image/png");
   assert.equal(state.puts, 1, "repeat writes of the same content must only upload once");
   assert.deepEqual(await storage.read(hash), bytes);
-  await assert.rejects(() => storage.write(bytes, "not-a-hash"), /content hash is invalid/);
+  await assert.rejects(() => storage.write(bytes, "not-a-hash", "image/png"), /content hash is invalid/);
   await assert.rejects(() => storage.read("../escape"), /storage key is invalid/);
   await assert.rejects(() => storage.read("f".repeat(64)), /stored media is unavailable/);
 });
@@ -132,12 +137,51 @@ test("oss storage maps transport failures to generic messages without SDK detail
   const storage = createOssMediaStorage(OSS_OPTIONS, OSS_CREDENTIALS, { createClient: () => fakeOssClient(state) });
   const hash = "c".repeat(64);
   state.failsNextWith = Object.assign(new Error("ConnectionTimeoutError signed-url detail"), { code: "ConnectionTimeoutError", status: -2 });
-  await assert.rejects(() => storage.write(Buffer.from("x"), hash), /media storage operation failed/);
+  await assert.rejects(() => storage.write(Buffer.from("x"), hash, "image/png"), /media storage operation failed/);
   // An unknown-outcome failure must not block a retry: the next attempt re-runs.
-  await storage.write(Buffer.from("x"), hash);
+  await storage.write(Buffer.from("x"), hash, "image/png");
   assert.equal(state.puts, 1);
   state.failGetFor = new Set([ossObjectKey(OSS_OPTIONS.objectPrefix, hash)]);
   await assert.rejects(() => storage.read(hash), (error: unknown) => error instanceof Error && !/signed-url|ConnectionTimeout/.test(error.message));
+});
+
+for (const format of ["png", "jpeg", "webp"] as const) {
+  test(`upload preparation passes decoded ${format} MIME to both original and public OSS objects`, async () => {
+    const bytes = await sharp({ create: { width: 12, height: 12, channels: 3, background: "red" } })
+      .withExif({ IFD0: { Artist: "private marker" } }).toFormat(format).toBuffer();
+    const token = "synthetic-upload-token";
+    const mime: ImageMime = `image/${format}`;
+    const intent = {
+      tokenHash: createHash("sha256").update(token).digest("hex"),
+      uploadedByRealm: "user", uploadedByUserId: "synthetic-owner", uploadedByAdminId: null,
+      declaredMime: mime, declaredSize: String(bytes.length),
+      expiresAt: new Date(Date.now() + 60_000), consumedAt: null,
+    };
+    const pool = { query: async () => ({ rows: [intent] }) } as unknown as Pool;
+    const state: FakeOssState = { objects: new Map(), puts: 0, heads: 0 };
+    const storage = createOssMediaStorage(OSS_OPTIONS, OSS_CREDENTIALS, { createClient: () => fakeOssClient(state) });
+    const prepared = await prepareMediaUpload(pool, storage, { realm: "user", userId: "synthetic-owner" }, "intent", token, bytes);
+    assert.equal(state.puts, 2);
+    for (const key of [prepared.contentHash, prepared.publicHash]) {
+      assert.equal(state.mimes?.get(ossObjectKey(OSS_OPTIONS.objectPrefix, key)), mime);
+      assert.equal((await sharp(await storage.read(key)).metadata()).format, format);
+    }
+    await prepareMediaUpload(pool, storage, { realm: "user", userId: "synthetic-owner" }, "intent", token, bytes);
+    assert.equal(state.puts, 2, "same content still reuses existing objects");
+    intent.declaredMime = format === "png" ? "image/jpeg" : "image/png";
+    await assert.rejects(() => prepareMediaUpload(pool, storage, { realm: "user", userId: "synthetic-owner" }, "intent", token, bytes), /declared image type/);
+    assert.equal(state.puts, 2, "unverified MIME cannot reach OSS");
+  });
+}
+
+test("oss rejects missing or unsupported MIME before any network call", async () => {
+  const state: FakeOssState = { objects: new Map(), puts: 0, heads: 0 };
+  const storage = createOssMediaStorage(OSS_OPTIONS, OSS_CREDENTIALS, { createClient: () => fakeOssClient(state) });
+  for (const mime of [undefined, "text/html", "image/svg+xml", "image/png\r\nx-test: bad"]) {
+    await assert.rejects(() => storage.write(Buffer.from("x"), "a".repeat(64), mime as ImageMime), /image MIME is invalid/);
+  }
+  assert.equal(state.heads, 0);
+  assert.equal(state.puts, 0);
 });
 
 test("oss configuration validates target, prefix and credential gaps by name only", () => {

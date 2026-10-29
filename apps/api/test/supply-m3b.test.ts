@@ -374,7 +374,7 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
   const mediaStorage = {
     get available() { return storageAvailable; },
     get kind() { return baseStorage.kind; },
-    async write(bytes: Buffer, contentHash: string) {
+    async write(bytes: Buffer, contentHash: string, mime: Parameters<typeof baseStorage.write>[2]) {
       storageFaults.writeCalls += 1;
       // Capture the sequence number at increment time: reading it later would
       // let two concurrent writes observe the same value and break barriers.
@@ -388,11 +388,11 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
       if (outcome === "land-then-timeout") {
         // The object lands in storage, then the transport reports a timeout:
         // the outcome of this write is unknown to the caller.
-        await baseStorage.write(bytes, contentHash);
+        await baseStorage.write(bytes, contentHash, mime);
         await storageFaults.afterWrite?.(call);
         throw new MediaStorageError("media storage operation failed");
       }
-      const result = await baseStorage.write(bytes, contentHash);
+      const result = await baseStorage.write(bytes, contentHash, mime);
       await storageFaults.afterWrite?.(call);
       return result;
     },

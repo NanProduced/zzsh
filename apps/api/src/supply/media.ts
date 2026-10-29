@@ -66,7 +66,7 @@ export const STORAGE_KEY_PATTERN = /^[0-9a-f]{64}$/;
 export type MediaStorage = {
   available: boolean;
   kind: "local" | "oss" | "unavailable";
-  write: (bytes: Buffer, contentHash: string) => Promise<{ storageKey: string }>;
+  write: (bytes: Buffer, contentHash: string, mime: ImageMime) => Promise<{ storageKey: string }>;
   read: (storageKey: string) => Promise<Buffer>;
 };
 
@@ -317,9 +317,9 @@ export async function prepareMediaUpload(
   const writtenStorageKeys: string[] = [];
   try {
     writtenStorageKeys.push(contentHash);
-    await storage.write(bytes, contentHash);
+    await storage.write(bytes, contentHash, image.mime);
     writtenStorageKeys.push(publicHash);
-    await storage.write(publicBytes, publicHash);
+    await storage.write(publicBytes, publicHash, image.mime);
   } catch (error) {
     logOrphanedMediaObjects({ intentId, storageKeys: [...new Set(writtenStorageKeys)], phase: "write" });
     throw error;
