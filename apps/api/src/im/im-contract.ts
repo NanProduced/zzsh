@@ -77,7 +77,7 @@ export type ImTransportImage = {
 /** Server-authorized seam for the explicit local IM substitute. */
 export type ImMessageTransport = {
   history(input: { conversationId: string; viewerAccountId: string; limit: number; before?: string }): Promise<ImTransportMessage[]>;
-  sendText(input: { conversationId: string; senderAccountId: string; receiverAccountId: string; text: string }): Promise<ImTransportMessage>;
+  sendText(input: { conversationId: string; senderAccountId: string; receiverAccountId: string; text: string; messageClientId?: string }): Promise<ImTransportMessage>;
   sendImage?(input: { conversationId: string; scope: ImOrderImageScope; senderAccountId: string; receiverAccountId: string; messageClientId: string; name: string; mimeType: "image/jpeg" | "image/png"; size: number; body: Uint8Array; width?: number; height?: number }): Promise<ImTransportMessage>;
   card?(input: { conversationId: string; senderAccountId: string; receiverAccountId: string; card: ImTransportCard }): Promise<ImTransportMessage>;
   replyText?(input: { conversationId: string; senderAccountId: string; receiverAccountId: string; text: string; replyTo: ImTransportMessageReference }): Promise<ImTransportMessage>;

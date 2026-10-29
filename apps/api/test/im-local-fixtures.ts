@@ -92,11 +92,16 @@ export class InMemoryMessageTransport implements ImMessageTransport {
     return rows.slice(start, end).map((row) => ({ ...row, conversationId: input.conversationId }));
   }
 
-  async sendText(input: { conversationId: string; senderAccountId: string; receiverAccountId: string; text: string }): Promise<ImTransportMessage> {
+  async sendText(input: { conversationId: string; senderAccountId: string; receiverAccountId: string; text: string; messageClientId?: string }): Promise<ImTransportMessage> {
     this.calls.sendText += 1;
+    if (input.messageClientId) {
+      const rows = this.messages.get(this.teamKey(input.conversationId)) ?? [];
+      const existing = rows.find((row) => row.messageClientId === input.messageClientId);
+      if (existing) return { ...existing, conversationId: input.conversationId };
+    }
     const id = this.nextMessageId();
     const message: ImTransportMessage = {
-      messageClientId: `fixture-client-${id}`,
+      messageClientId: input.messageClientId ?? `fixture-client-${id}`,
       messageServerId: `fixture-server-${id}`,
       conversationId: input.conversationId,
       senderId: input.senderAccountId,

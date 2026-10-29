@@ -1204,6 +1204,7 @@ export async function mountAuthHandlers(
       membersLimit:options.orderTeams.membersLimit,firstResponseEnabled:orderImEventsActivateApp(options.orderImEvents,options.yunxin!.appId),
       ...(orderImSdkRouteBindings ? { orderImSdkRouteBindings } : {}),
       ...(options.testImMessageTransport?.card ? { stageCardTransport: { card: options.testImMessageTransport.card.bind(options.testImMessageTransport) } } : {}),
+      ...(options.testImMessageTransport ? { dueReminderTransport: { sendText: options.testImMessageTransport.sendText.bind(options.testImMessageTransport) } } : {}),
       ...(options.orderTeams.escalationEnabled===true?{escalationEnabled:true}:{})},options.orderTeams.intervalMs,options.orderTeams.batchLimit);
   }
   if (options.supportDispatch) app.get(OrderDispatchLifecycle).start({ ...options.supportDispatch, pool: options.pool,
