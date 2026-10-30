@@ -881,7 +881,7 @@ export function friendlyError(error: unknown): string {
 export function formatDate(value: string | null): string {
   if (!value) return "未提供";
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "时间未知" : new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(date);
+  return Number.isNaN(date.getTime()) ? "时间未知" : new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Shanghai" }).format(date);
 }
 
 export function readTotpSecret(uri: string): string {
