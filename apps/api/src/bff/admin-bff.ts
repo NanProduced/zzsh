@@ -14,6 +14,7 @@ import {
 } from "../auth/auth-security";
 import { handleSupplyAdminRoute, type SupplyRuntimeOptions } from "../supply/supply-routes";
 import { handleContentAdminRoute } from "../content/content-routes";
+import { handleLegalAdminRoute } from "../legal/legal-routes";
 import { handleOrderAdminRoute, type OrderRuntimeOptions } from "../order/order-routes";
 import { handleRentalMembershipAdmin } from "../auth/rental-membership-routes";
 import { handleMembershipGrowthAdmin, handleMembershipGrowthPolicyAdmin } from "../auth/membership-growth-routes";
@@ -522,6 +523,22 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     try {
       await handleSupplyAdminRoute(request, response as AuthSecurityNodeResponse & { send?: (body: Buffer | string) => void }, options.supply);
     } catch (error) {
+      if (error instanceof SecurityApiError) sendError(response, error.status, error.code, error.message, requestId);
+      else sendError(response, 500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);
+    }
+    return;
+  }
+  if (path === "/legal-documents" || path.startsWith("/legal-documents/")) {
+    const draft = /^\/legal-documents\/drafts\/[A-Za-z0-9._:-]+$/;
+    const seal = /^\/legal-documents\/drafts\/[A-Za-z0-9._:-]+\/seal$/;
+    if (!(method === "GET" && path === "/legal-documents") && !(method === "POST" && (path === "/legal-documents/drafts" || seal.test(path))) && !(method === "PUT" && draft.test(path))) {
+      sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId); return;
+    }
+    const targetPath = `/api/v1/admin${path}${requestQuery(request)}`;
+    request.url = targetPath; request.originalUrl = targetPath;
+    request.headers = { ...request.headers, "x-request-id": requestId };
+    try { await handleLegalAdminRoute(request, response as AuthSecurityNodeResponse & { send?: (body: Buffer | string) => void }, options.adminSecurityOptions); }
+    catch (error) {
       if (error instanceof SecurityApiError) sendError(response, error.status, error.code, error.message, requestId);
       else sendError(response, 500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);
     }

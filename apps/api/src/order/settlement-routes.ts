@@ -91,20 +91,22 @@ export async function handleSettlementUserRoute(request: Request, response: Supp
   const orderId = idOf((submit ?? decision ?? opening)![1]!);
   if (method === "POST" && submit) {
     const body = bodyOf(request);
-    ensureOnlyFields(body, ["lines", "acceptedHash"]);
+    ensureOnlyFields(body, ["lines", "acceptedHash", "termsAccepted"]);
+    if (body.termsAccepted !== undefined && typeof body.termsAccepted !== "boolean") throw invalid("termsAccepted is invalid", "termsAccepted");
     const remaining = linesOf(body, "remainingQuantity");
     const acceptedHash = hashOf(body, "acceptedHash");
     await runIdempotentWrite(options, request, response, requestId, { principalId: actor.userId, operation: "order.settlement.submit", resourceId: orderId },
-      { realm: "user", id: actor.userId, sessionId: actor.sessionId }, { lines: remaining, acceptedHash },
+      { realm: "user", id: actor.userId, sessionId: actor.sessionId }, { lines: remaining, acceptedHash, ...(body.termsAccepted === undefined ? {} : { termsAccepted: body.termsAccepted }) },
       async (client) => { await recheckSettlement(client, orderId, actor); },
-      (client) => submitSettlement(client, orderId, actor, remaining, acceptedHash, requestId),
+      (client) => submitSettlement(client, orderId, actor, remaining, acceptedHash, requestId, body.termsAccepted === true),
       (client, result) => projectSettlementResponse(client, actor, result));
     return true;
   }
   if (method === "POST" && decision) {
     const versionId = idOf(decision[2]!);
     const body = bodyOf(request);
-    ensureOnlyFields(body, ["action", "versionHash", "reason"]);
+    ensureOnlyFields(body, ["action", "versionHash", "reason", "termsAccepted"]);
+    if (body.termsAccepted !== undefined && typeof body.termsAccepted !== "boolean") throw invalid("termsAccepted is invalid", "termsAccepted");
     if (body.action !== "CONFIRM" && body.action !== "REJECT") throw invalid("Action is invalid", "action");
     const versionHash = hashOf(body, "versionHash");
     let reason: string | null = null;
@@ -113,9 +115,9 @@ export async function handleSettlementUserRoute(request: Request, response: Supp
       reason = body.reason.trim();
     }
     await runIdempotentWrite(options, request, response, requestId, { principalId: actor.userId, operation: "order.settlement.decide", resourceId: versionId },
-      { realm: "user", id: actor.userId, sessionId: actor.sessionId }, { action: body.action, versionHash, reason },
+      { realm: "user", id: actor.userId, sessionId: actor.sessionId }, { action: body.action, versionHash, reason, ...(body.termsAccepted === undefined ? {} : { termsAccepted: body.termsAccepted }) },
       async (client, replay) => { await recheckSettlement(client, orderId, actor, replay !== null); },
-      (client) => decideSettlement(client, orderId, versionId, actor, body.action as "CONFIRM" | "REJECT", versionHash, reason, requestId),
+      (client) => decideSettlement(client, orderId, versionId, actor, body.action as "CONFIRM" | "REJECT", versionHash, reason, requestId, body.termsAccepted === true),
       (client, result) => projectSettlementResponse(client, actor, result),
       settlementPostCommit(options, orderId, actor, requestId));
     return true;

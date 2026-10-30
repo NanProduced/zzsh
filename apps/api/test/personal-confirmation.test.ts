@@ -46,6 +46,9 @@ test("v2 creation bounds the original credential body without pre-validating suc
   assert.deepEqual(personalOrderInput({confirmationToken:"opaque-original"}),{confirmationToken:"opaque-original"});
   for(const confirmationToken of [null,0,{},"","x".repeat(4097)])assert.throws(()=>personalOrderInput({confirmationToken}));
   for(const extra of [{tier:"VIP"},{rentalAmountCents:"0"},{accountId:"other"}])assert.throws(()=>personalOrderInput({confirmationToken:"opaque-original",...extra}));
+  const acceptance={versionId:"agreement-1",digest:"d".repeat(64)};
+  assert.deepEqual(personalOrderInput({confirmationToken:"opaque-original",agreementAcceptance:acceptance}),{confirmationToken:"opaque-original",agreementAcceptance:acceptance});
+  for(const agreementAcceptance of [null,{}, {versionId:"agreement-1"}, {versionId:"agreement-1",digest:"x"}, {...acceptance,extra:true}])assert.throws(()=>personalOrderInput({confirmationToken:"opaque-original",agreementAcceptance}));
 });
 
 // Exercise the real rebuild -> sign -> verify path; only SQL transport is synthetic.

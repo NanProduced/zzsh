@@ -1849,6 +1849,7 @@ html[data-theme="dark"] .account-card--grid .breakdown-total-val--unconfirmed {
 .auth-consent a { color: var(--color-accent-brand-ink); text-decoration: underline; text-underline-offset: 3px; }
 .auth-consent .auth-field-help { display: block; margin-top: 4px; }
 .auth-consent-docs { margin: 0; }
+.auth-consent-version { margin: 4px 0 0; color: var(--color-text-muted); font-size: 11px; line-height: 1.5; }
 /* 未同意协议：主动作给明确的“还不可继续”状态，按钮仍可聚焦可点击以触发原校验与焦点引导。 */
 .auth-submit.is-consent-pending { background: var(--color-bg-elevated); color: var(--color-text-secondary); border-color: var(--color-border-default); }
 .auth-submit.is-consent-pending:hover { background: var(--color-bg-card-hover); color: var(--color-text-primary); }

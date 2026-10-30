@@ -53,6 +53,8 @@ import { resolveMediaStorage } from "../supply/media-oss";
 import { loadLegacyPublicAdmission, loadLegacyPublicAdmissionManifest, parseLegacyPublicAdmission, assertLegacyPublicAdmissionTarget, assertLegacyPublicAdmissionManifestTarget, type LegacyPublicAdmission, type LegacyPublicAdmissionManifest } from "../legacy-load/legacy-public-admission";
 import { mountSupplyHandlers } from "../supply/supply-routes";
 import { mountContentHandlers } from "../content/content-routes";
+import { mountLegalHandlers } from "../legal/legal-routes";
+import { parsePlatformLegalAcceptance, recordPlatformAcceptances, verifyPlatformLegalAcceptance } from "../legal/legal-documents";
 import { mountOrderHandlers, mountUserOrderBff, type OrderRuntimeOptions } from "../order/order-routes";
 import { createTradePublicActivityReaders, loadTradePublicActivityBindings, type TradeActivityBindings } from "../order/public-trade-activity";
 import { readLegacyDutyFinalization } from "../finance/legacy-duty-finance-store";
@@ -487,6 +489,13 @@ function buildPhoneRegistrationPlugin(
   creditGuaranteeEnabled = false,
   distributionScope?: LocalDistributionScope,
 ) {
+  const authDomainError = (error: unknown): never => {
+    if (error instanceof SecurityApiError) {
+      const status = error.status === 400 ? "BAD_REQUEST" : error.status === 403 ? "FORBIDDEN" : error.status === 409 ? "CONFLICT" : error.status === 503 ? "SERVICE_UNAVAILABLE" : "INTERNAL_SERVER_ERROR";
+      throw new APIError(status, { code: error.code, message: error.status >= 500 ? "Authentication dependency unavailable" : error.message });
+    }
+    throw error;
+  };
   const bodyOf = (value: unknown, allowed: readonly string[]): Record<string, unknown> => {
     if (!value || typeof value !== "object" || Array.isArray(value)) {
       throw new APIError("BAD_REQUEST", { message: "Invalid authentication request" });
@@ -518,7 +527,8 @@ function buildPhoneRegistrationPlugin(
     version: "1.0.0",
     endpoints: {
       signInIdentifier: createAuthEndpoint("/sign-in/identifier", { method: "POST", metadata: noStore }, async (ctx) => {
-        const body = bodyOf(ctx.body, ["identifier", "password", "kind"]);
+        try {
+        const body = bodyOf(ctx.body, ["identifier", "password", "kind", "legalAcceptance"]);
         const identifier = typeof body.identifier === "string" ? body.identifier.trim() : "";
         const password = passwordFrom(body);
         if (!identifier || identifier.length > 128 || !signInIdentifier.dispatch) {
@@ -526,7 +536,23 @@ function buildPhoneRegistrationPlugin(
         }
         const kind = body.kind === undefined ? undefined : body.kind === "phone" ? body.kind : null;
         if (kind === null) throw new APIError("BAD_REQUEST", { message: "Invalid authentication request" });
-        return signInIdentifier.dispatch(identifier, password, ctx.headers ?? new Headers(), kind);
+        const requestId = (ctx.headers ?? new Headers()).get("x-request-id") ?? undefined;
+        const legal = await withTransaction(pool, client => verifyPlatformLegalAcceptance(client, body.legalAcceptance));
+        const acceptance = legal.required ? parsePlatformLegalAcceptance(body.legalAcceptance) : undefined;
+        if (legal.required && !acceptance) throw new APIError("BAD_REQUEST", { message: "Legal acceptance is required" });
+        const response = await signInIdentifier.dispatch(identifier, password, ctx.headers ?? new Headers(), kind);
+        if (!response.ok) return response;
+        if (acceptance) {
+          const authenticated = await response.clone().json() as { user?: { id?: unknown }; userId?: unknown };
+          const userId = authenticated.user?.id ?? authenticated.userId;
+          if (typeof userId !== "string" || !userId) throw new APIError("INTERNAL_SERVER_ERROR", { message: "Legal acceptance was not recorded" });
+          await withTransaction(pool, async client => {
+            await verifyPlatformLegalAcceptance(client, acceptance);
+            await recordPlatformAcceptances(client, userId, acceptance, "LOGIN", requestId);
+          });
+        }
+        return response;
+        } catch (error) { return authDomainError(error); }
       }),
       sendPhoneRegistrationOTP: createAuthEndpoint("/phone-registration/send-otp", { method: "POST", metadata: noStore }, async (ctx) => {
         if (!fakeSmsEnabled) throw new APIError("NOT_IMPLEMENTED", { message: "SMS provider is not configured" });
@@ -553,7 +579,7 @@ function buildPhoneRegistrationPlugin(
         return ctx.json({ status: true, cooldownUntil: new Date(now.getTime() + PHONE_REGISTRATION_OTP_COOLDOWN_MS).toISOString() });
       }),
       completePhoneRegistration: createAuthEndpoint("/phone-registration/complete", { method: "POST", metadata: noStore }, async (ctx) => {
-        const body = bodyOf(ctx.body, ["phoneNumber", "code", "password", "acceptedTerms", "loginOrRegister", "inviteCode"]);
+        const body = bodyOf(ctx.body, ["phoneNumber", "code", "password", "acceptedTerms", "loginOrRegister", "inviteCode", "legalAcceptance"]);
         const phoneNumber = phoneFrom(body);
         const code = codeFrom(body);
         const unified = body.loginOrRegister === true;
@@ -573,6 +599,7 @@ function buildPhoneRegistrationPlugin(
         const accountId = ctx.context.generateId({ model: "account" }) || `account_${randomUUID().replaceAll("-", "")}`;
         const identifier = phoneRegistrationIdentifier(phoneNumber);
         const requestId = (ctx.headers ?? new Headers()).get("x-request-id") ?? `req_${randomUUID().replaceAll("-", "")}`;
+        let legalAcceptance: ReturnType<typeof parsePlatformLegalAcceptance> = undefined;
         try {
           const invalidVerification = await withTransaction(pool, async (client) => {
             await setAuditContext(client, "system", undefined, undefined, requestId);
@@ -602,12 +629,16 @@ function buildPhoneRegistrationPlugin(
               await client.query(`UPDATE "zzsh_auth_user"."verification" SET "value" = $2, "updatedAt" = clock_timestamp() WHERE "id" = $1`, [row.id, `${storedCode}:${attempts + 1}`]);
               return true;
             }
+            const legal = await verifyPlatformLegalAcceptance(client, body.legalAcceptance);
+            legalAcceptance = legal.required ? parsePlatformLegalAcceptance(body.legalAcceptance) : undefined;
+            if (legal.required && !legalAcceptance) throw new APIError("BAD_REQUEST", { message: "Legal acceptance is required" });
             if (await hasLegacyPhoneConflict(client, phoneNumber)) throw new APIError("CONFLICT", { message: "Account association requires review" });
             const existing = await client.query<{ id: string }>(`SELECT "id" FROM "zzsh_auth_user"."user" WHERE "phoneNumber" = $1 FOR UPDATE`, [phoneNumber]);
             if (existing.rowCount) {
               if (!unified) throw new APIError("CONFLICT", { message: "Phone number is already registered" });
               resolvedUserId = existing.rows[0]!.id;
               await client.query(`UPDATE zzsh_auth_user."user" SET "phoneNumberVerified"=true,"updatedAt"=clock_timestamp() WHERE id=$1`, [resolvedUserId]);
+              if (legalAcceptance) await recordPlatformAcceptances(client, resolvedUserId, legalAcceptance, "LOGIN", requestId);
               authenticated = await createTransactionalUserSession(client, ctx, resolvedUserId);
               passwordCapability.state = await readUserPasswordState(client, resolvedUserId);
               await client.query(`UPDATE "zzsh_auth_user"."verification" SET value=$2,"updatedAt"=clock_timestamp() WHERE "identifier"=$1`, [identifier, `${storedCode}:3`]);
@@ -635,6 +666,7 @@ function buildPhoneRegistrationPlugin(
             // Existing-user OTP returned above: only this new-user transaction initializes provenance.
             await initializeNewDistributionRegistration(client, { userId, requestId, ...(body.inviteCode === undefined ? {} : { inviteCode: body.inviteCode as string }) }, distributionScope);
             await initializeNativeWalletOrigin(client, userId, requestId, nativeWalletOrigin);
+            if (legalAcceptance) await recordPlatformAcceptances(client, userId, legalAcceptance, "REGISTRATION", requestId);
             passwordCapability.state = passwordHash !== undefined ? "set" : "not-set";
             authenticated = await createTransactionalUserSession(client, ctx, resolvedUserId);
             return false;
@@ -644,7 +676,7 @@ function buildPhoneRegistrationPlugin(
           if (error && typeof error === "object" && "code" in error && error.code === "23505") {
             throw new APIError("CONFLICT", { message: "Phone number is already registered" });
           }
-          throw error;
+          return authDomainError(error);
         }
         if (!authenticated) throw new APIError("INTERNAL_SERVER_ERROR", { message: "Failed to create session" });
         await setSessionCookie(ctx, authenticated);
@@ -1165,6 +1197,7 @@ export async function mountAuthHandlers(
     legacyPublicAdmission,
     legacyPublicAdmissionDetail,
   });
+  mountLegalHandlers(app, securityOptions);
   mountContentHandlers(app, {
     ...securityOptions,
     mediaStorage,

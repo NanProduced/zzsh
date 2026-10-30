@@ -1,5 +1,5 @@
 import { runSupplyPoolChecks } from "./supply-pool-checks";
-import { admitTestDatabase, ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
+import { admitTestDatabase, installedBusinessTruncate, ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
 import { runPublishingChecks } from "./supply-publishing-checks";
 import { runPricingCompatChecks } from "./supply-pricing-compat-checks";
 import { personalFixture } from "./personal-confirmation-checks";
@@ -268,7 +268,8 @@ async function resetIsolatedData(pool: Pool): Promise<void> {
   const present=(await pool.query(`SELECT to_regclass('zzsh_iam.user_rental_membership') AS relation`)).rows[0]?.relation;
   const configPresent=(await pool.query(`SELECT to_regclass('zzsh_supply.listing_filter_config') AS relation`)).rows[0]?.relation;
   const orderReadPresent=(await pool.query(`SELECT to_regclass('zzsh_order.legacy_order_read_snapshot') AS relation`)).rows[0]?.relation;
-  let statement=present?ISOLATED_BUSINESS_DATA_TRUNCATE:ISOLATED_BUSINESS_DATA_TRUNCATE.replace('      "zzsh_iam"."user_rental_membership",\n',"");
+  const legalStatement=await installedBusinessTruncate(pool);
+  let statement=present?legalStatement:legalStatement.replace('      "zzsh_iam"."user_rental_membership",\n',"");
   if(!configPresent)statement=statement.replace('      "zzsh_supply"."listing_filter_config",\n',"");
   if(!orderReadPresent)statement=statement.replace('  "zzsh_order"."legacy_order_read_snapshot",\n',"");
   await pool.query(statement);

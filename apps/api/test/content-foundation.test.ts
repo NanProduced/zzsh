@@ -291,7 +291,8 @@ async function resetIsolatedData(pool: Pool): Promise<void> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    let pending = ISOLATED_BUSINESS_DATA_TRUNCATE.replace(/^TRUNCATE\s+/, "").split(",").map(table => table.trim());
+    await client.query('TRUNCATE "zzsh_content"."document_acceptance", "zzsh_content"."legal_document_version"');
+    let pending = ISOLATED_BUSINESS_DATA_TRUNCATE.replace(/^TRUNCATE\s+/, "").split(",").map(table => table.trim()).filter(table => !table.includes('"document_acceptance"') && !table.includes('"legal_document_version"'));
     while (pending.length) {
       const blocked: string[] = [];
       for (const table of pending) {

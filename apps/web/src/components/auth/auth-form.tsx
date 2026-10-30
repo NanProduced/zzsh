@@ -28,6 +28,8 @@ export type AuthPendingWrite = {
 
 type Props = { next?: string; inviteCode?: string; onSuccess?: () => void | Promise<void>; autoFocus?: boolean; pendingWrite?: { current: AuthPendingWrite | null } };
 
+type LegalSummary = { id: string; docType: string; title: string; digest: string; effectiveAt: string | null };
+
 function unknownReceiptMessage(state: "accepted" | "unknown"): string {
   return state === "accepted" ? "操作已接受，后续状态暂未读到。请重新确认，勿重复提交。" : "结果暂时无法确认，请先查询状态，勿重复提交。";
 }
@@ -45,6 +47,9 @@ export function AuthForm({ next, inviteCode: initialInviteCode, onSuccess, autoF
   const [confirmation, setConfirmation] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [acceptedTerms, setAcceptedTerms] = useState(false);
+  const [legalDocs, setLegalDocs] = useState<{ terms: LegalSummary | null; privacy: LegalSummary | null } | null>(null);
+  const [legalDocsState, setLegalDocsState] = useState<"loading" | "ready" | "error">("loading");
+  const [legalRefresh, setLegalRefresh] = useState(0);
   const [inviteCode, setInviteCode] = useState(initialInviteCode ?? "");
   const [challengeId, setChallengeId] = useState(restored?.challengeId ?? "");
   const [proofId, setProofId] = useState(restored?.proofId ?? "");
@@ -63,6 +68,24 @@ export function AuthForm({ next, inviteCode: initialInviteCode, onSuccess, autoF
   const abort = useRef<AbortController | null>(null);
   const writeLock = useRef(Boolean(restored));
   useEffect(() => { if (!writeLock.current) setInviteCode(initialInviteCode ?? ""); }, [initialInviteCode]);
+  useEffect(() => {
+    let active = true;
+    fetch("/api/legal-documents/current", { cache: "no-store", credentials: "same-origin" })
+      .then(async response => {
+        if (!response.ok) throw new Error("LEGAL_DOCS_UNAVAILABLE");
+        const value = await response.json() as { terms: LegalSummary | null; privacy: LegalSummary | null };
+        const valid = (doc: LegalSummary | null) => doc === null || doc && typeof doc.id === "string" && typeof doc.digest === "string" && /^[0-9a-f]{64}$/.test(doc.digest);
+        if (!value || !Object.hasOwn(value, "terms") || !Object.hasOwn(value, "privacy") || !valid(value.terms) || !valid(value.privacy)) throw new Error("LEGAL_DOCS_UNAVAILABLE");
+        return value;
+      })
+      .then(value => { if (active) { setLegalDocs({ terms: value.terms ?? null, privacy: value.privacy ?? null }); setLegalDocsState("ready"); setAcceptedTerms(false); } })
+      .catch(() => { if (active) setLegalDocsState("error"); });
+    return () => { active = false; };
+  }, [legalRefresh]);
+  const legalRequired = Boolean(legalDocs?.terms && legalDocs?.privacy);
+  const legalAcceptance = legalRequired && legalDocs?.terms && legalDocs.privacy
+    ? { terms: { versionId: legalDocs.terms.id, digest: legalDocs.terms.digest }, privacy: { versionId: legalDocs.privacy.id, digest: legalDocs.privacy.digest } }
+    : undefined;
   const loginSubject = useRef<{ phone: string; userId: string | null } | null>(restored?.mode === "login" ? { phone: restored.subject, userId: restored.userId } : null);
   const formRef = useRef<HTMLFormElement | null>(null);
   const restoredNext = useRef<string | undefined | null>(null);
@@ -138,7 +161,7 @@ export function AuthForm({ next, inviteCode: initialInviteCode, onSuccess, autoF
         setProofId(""); setChallengeId(""); setMode("login"); setMethod("password"); if (channel === "email") setContact(""); setChannel("phone"); setAcceptedTerms(false);
         clearWrite(); setNotice("密码已重置，旧会话已退出。请使用手机号和新密码登录。");
       } else {
-        const result = await webAuthRequest<{ status: boolean; userId: string }>(method === "sms" ? "/phone-registration/complete" : "/sign-in/identifier", method === "sms" ? { phoneNumber: normalized(), code, acceptedTerms: true, loginOrRegister: true, ...(inviteCode.trim() ? { inviteCode: inviteCode.trim() } : {}) } : { identifier: normalized(), password, kind: "phone" }, request.controller.signal);
+        const result = await webAuthRequest<{ status: boolean; userId: string }>(method === "sms" ? "/phone-registration/complete" : "/sign-in/identifier", method === "sms" ? { phoneNumber: normalized(), code, acceptedTerms: true, loginOrRegister: true, ...(inviteCode.trim() ? { inviteCode: inviteCode.trim() } : {}), ...(legalAcceptance ? { legalAcceptance } : {}) } : { identifier: normalized(), password, kind: "phone", ...(legalAcceptance ? { legalAcceptance } : {}) }, request.controller.signal);
         accepted = true; if (!current(request.id)) return; setOutcome("accepted");
         if (result.status !== true || typeof result.userId !== "string" || !result.userId) throw new WebAuthError(502, "RESPONSE_UNCONFIRMED", true);
         loginSubject.current = { phone: normalized(), userId: result.userId }; recordWrite("accepted");
@@ -203,7 +226,7 @@ export function AuthForm({ next, inviteCode: initialInviteCode, onSuccess, autoF
           原有提交校验、aria-invalid 与焦点引导继续生效，不自动勾选也不静默同意。 */}
       <button type="submit" className={`button primary auth-submit${consentPending ? " is-consent-pending" : ""}`} disabled={locked} aria-busy={busy || undefined} aria-describedby={consentPending ? "auth-consent-hint" : undefined}>{busy ? "处理中…" : mode === "recover" ? proofId ? "重置密码" : "验证身份" : method === "sms" ? "登录 / 注册" : "登录"}</button>
       {mode === "recover" && <button type="button" className="button quiet" disabled={locked} onClick={() => changeMode("login")}>返回登录</button>}
-      {mode === "login" && <div className="auth-consent"><input id="auth-terms" aria-invalid={invalidField === "auth-terms" || undefined} name="terms" type="checkbox" checked={acceptedTerms} disabled={locked} onChange={event => setAcceptedTerms(event.target.checked)} /><div><label htmlFor="auth-terms">我已阅读并同意</label><p className="auth-consent-docs"><a href="/legal/terms" target="_blank" rel="noopener noreferrer" aria-label="平台服务协议（在新窗口打开）">《平台服务协议》</a>和<a href="/legal/privacy" target="_blank" rel="noopener noreferrer" aria-label="用户隐私政策（在新窗口打开）">《用户隐私政策》</a></p></div></div>}
+      {mode === "login" && <div className="auth-consent"><input id="auth-terms" aria-invalid={invalidField === "auth-terms" || undefined} name="terms" type="checkbox" checked={acceptedTerms} disabled={locked} onChange={event => setAcceptedTerms(event.target.checked)} /><div><label htmlFor="auth-terms">我已阅读并同意</label><p className="auth-consent-docs"><a href={legalDocs?.terms ? `/legal/terms?version=${encodeURIComponent(legalDocs.terms.id)}` : "/legal/terms"} target="_blank" rel="noopener noreferrer" aria-label="平台服务协议（在新窗口打开）">《平台服务协议》</a>和<a href={legalDocs?.privacy ? `/legal/privacy?version=${encodeURIComponent(legalDocs.privacy.id)}` : "/legal/privacy"} target="_blank" rel="noopener noreferrer" aria-label="用户隐私政策（在新窗口打开）">《用户隐私政策》</a></p><button type="button" className="button quiet" disabled={locked} onClick={() => { setAcceptedTerms(false); setLegalDocsState("loading"); setLegalRefresh(value => value + 1); }}>重新读取协议</button>{legalRequired ? <p className="auth-consent-version">当前版本：{legalDocs?.terms?.id} · {legalDocs?.privacy?.id}</p> : legalDocsState === "ready" ? <p className="auth-consent-version">正式协议尚未发布；已有账号仍可登录。</p> : null}</div></div>}
       {consentPending && <p id="auth-consent-hint" className="auth-consent-hint">请先阅读并同意《平台服务协议》和《用户隐私政策》。</p>}
       {(error || notice) && <p id="auth-status" className={"auth-status " + (error ? "is-error" : "is-success")} role={error ? "alert" : "status"}>{error ?? notice}</p>}
       {outcome !== "idle" && <button type="button" className="button secondary" disabled={busy} onClick={() => void readResult()}>重新确认结果</button>}

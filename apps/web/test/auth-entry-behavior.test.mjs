@@ -174,7 +174,7 @@ test('account overview confirmed anonymous arrival opens the shared login once w
     assert.equal(p.host.querySelector('[data-private-account-view]'), null);
     assert.doesNotMatch(p.host.textContent, /登录状态暂未确认|暂时无法加载页面/);
     assert.deepEqual(p.router.replaces, []);
-    assert.equal(p.calls.length, 0);
+    assert.equal(p.calls.filter(call => !String(call.url).includes("/legal-documents/")).length, 0);
   } finally { await p.close(); }
 });
 
@@ -211,7 +211,7 @@ test('account unavailable retry can settle anonymous, preserve the query and can
     assert.equal(dialog(p), null);
     assert.deepEqual(p.router.replaces, ['/']);
     assert.equal(p.host.querySelector('[data-private-account-view]'), null);
-    assert.equal(p.calls.length, 0);
+    assert.equal(p.calls.filter(call => !String(call.url).includes("/legal-documents/")).length, 0);
   } finally { await p.close(); }
 });
 
@@ -476,6 +476,7 @@ test("legal page and metadata reject prototype keys through the same allowlist",
   if(name==="next/link")return ()=>null;
   if(name==="@/components/brand/brand-logo")return {BrandLogo:()=>null};
   if(name==="@/content/legal/documents")return legalDocuments;
+  if(name==="@/lib/legal-server")return {readLegalDocument:async()=>({state:"UNAVAILABLE"})};
   return require(name);
  },exports);
  for(const doc of ["toString","constructor","__proto__","missing"]){

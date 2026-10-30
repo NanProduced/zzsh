@@ -1,4 +1,10 @@
 import { strict as assert } from "node:assert";
+import type { Pool } from "pg";
+import { parseLegalAcceptanceRef } from "../src/legal/legal-documents";
+
+export function fixtureAgreementAcceptance(confirmation: { agreementAcceptance?: unknown } | null | undefined) {
+  return parseLegalAcceptanceRef(confirmation?.agreementAcceptance, "fixtureAgreementAcceptance");
+}
 
 export const DATABASE_CLEANUP_TIMEOUT_MS = 2_000;
 
@@ -71,6 +77,8 @@ export async function finishDatabaseTest(
 
 // Explicit tables owned by the isolated business test target; never use CASCADE.
 export const ISOLATED_BUSINESS_DATA_TRUNCATE = `TRUNCATE
+      "zzsh_content"."document_acceptance",
+      "zzsh_content"."legal_document_version",
       "zzsh_order"."settlement_ledger_entry",
       "zzsh_order"."settlement_posting",
       "zzsh_order"."settlement_intake",
@@ -157,6 +165,15 @@ export const ISOLATED_BUSINESS_DATA_TRUNCATE = `TRUNCATE
       "zzsh_iam"."im_identity_mapping",
       "zzsh_iam"."admin_security",
       "zzsh_iam"."audit_event"`;
+
+export async function installedBusinessTruncate(pool: Pick<Pool, "query">): Promise<string> {
+  const row = (await pool.query("SELECT to_regclass('zzsh_content.legal_document_version') AS version, to_regclass('zzsh_content.document_acceptance') AS acceptance")).rows[0];
+  assert.ok(row && Object.hasOwn(row, "version") && Object.hasOwn(row, "acceptance"), "legal cleanup schema must be observed");
+  assert.equal(Boolean(row.version), Boolean(row.acceptance), "legal cleanup schema is incomplete");
+  return row.version ? ISOLATED_BUSINESS_DATA_TRUNCATE : ISOLATED_BUSINESS_DATA_TRUNCATE
+    .replace('      "zzsh_content"."document_acceptance",\n', "")
+    .replace('      "zzsh_content"."legal_document_version",\n', "");
+}
 
 export type TestDatabaseAdmission = {
   exists: boolean;

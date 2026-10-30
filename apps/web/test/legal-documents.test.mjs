@@ -14,13 +14,14 @@ const pageCode = ts.transpileModule(
   { compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS, esModuleInterop: true } },
 ).outputText;
 
-function loadPage(registry) {
+function loadPage(reading) {
   const exports = {};
   new Function("require", "exports", pageCode)(name => {
     if (name === "next/navigation") return { notFound() { throw Object.assign(new Error("Not found"), { status: 404 }); } };
     if (name === "next/link") return (props) => React.createElement("a", props);
     if (name === "@/components/brand/brand-logo") return { BrandLogo: () => null };
-    if (name === "@/content/legal/documents") return registry;
+    if (name === "@/content/legal/documents") return { getLegalDocument, getLegalDocumentSibling: (doc) => legalDocuments.find((record) => record.doc !== doc), isLegalDocId, listLegalDocuments };
+    if (name === "@/lib/legal-server") return { readLegalDocument: async (doc, version) => reading(doc, version) };
     return require(name);
   }, exports);
   return exports;
@@ -31,27 +32,29 @@ async function renderDoc(page, doc) {
   return renderToStaticMarkup(element);
 }
 
-test("registry holds exactly terms and privacy as versioned records", () => {
+const publishedTerms = {
+  state: "PUBLISHED",
+  document: {
+    id: "legal_terms_1",
+    docType: "PLATFORM_TERMS",
+    title: "平台服务协议",
+    body: "第一条 服务范围\n\n正式条款正文段落。",
+    digest: "a".repeat(64),
+    effectiveAt: "2026-11-01T00:00:00.000Z",
+  },
+};
+
+test("registry holds exactly terms and privacy as non-fabricated records", () => {
   assert.equal(legalDocuments.length, 2);
-  assert.deepEqual(listLegalDocuments().map((r) => r.doc).sort(), ["privacy", "terms"]);
+  assert.deepEqual(listLegalDocuments().map((record) => record.doc).sort(), ["privacy", "terms"]);
   for (const record of legalDocuments) {
     assert.equal(typeof record.title, "string");
     assert.ok(record.title.length > 0, record.doc);
-    assert.equal(typeof record.note, "string");
+    assert.equal(record.status, "PENDING");
+    assert.equal(record.version, null, `${record.doc} must not fabricate a version`);
+    assert.equal(record.effectiveAt, null, `${record.doc} must not fabricate an effective date`);
+    assert.equal(record.body, null, `${record.doc} must not fabricate a body`);
     assert.ok(record.note.length > 0, `${record.doc} note`);
-    assert.ok(record.status === "PENDING" || record.status === "PUBLISHED", record.doc);
-    if (record.version !== null) assert.equal(typeof record.version, "string", `${record.doc}.version`);
-    if (record.effectiveAt !== null) assert.match(record.effectiveAt, /^\d{4}-\d{2}-\d{2}$/, `${record.doc}.effectiveAt`);
-    if (record.body !== null) assert.ok(Array.isArray(record.body), `${record.doc}.body`);
-    if (record.status === "PENDING") {
-      assert.equal(record.version, null, `${record.doc} must not fabricate a version`);
-      assert.equal(record.effectiveAt, null, `${record.doc} must not fabricate an effective date`);
-      assert.equal(record.body, null, `${record.doc} must not fabricate a body`);
-    } else {
-      assert.ok(Array.isArray(record.body) && record.body.length > 0, `${record.doc} published without body`);
-      assert.match(record.version, /.+/, `${record.doc} published without version`);
-      assert.match(record.effectiveAt, /^\d{4}-\d{2}-\d{2}$/, `${record.doc} published without effective date`);
-    }
   }
 });
 
@@ -65,60 +68,48 @@ test("registry lookup is hardened against prototype keys", () => {
   assert.ok(isLegalDocId("terms") && isLegalDocId("privacy"));
 });
 
-test("PENDING pages render the registry note without fabricated version or body", async () => {
-  const page = loadPage({ getLegalDocument, getLegalDocumentSibling: (doc) => legalDocuments.find((r) => r.doc !== doc), isLegalDocId, listLegalDocuments });
-  assert.deepEqual(page.generateStaticParams(), [{ doc: "terms" }, { doc: "privacy" }]);
-  for (const doc of ["terms", "privacy"]) {
-    const html = await renderDoc(page, doc);
-    const record = getLegalDocument(doc);
-    assert.ok(html.includes(`《${record.title}》`), doc);
-    assert.ok(html.includes(record.note), `${doc} shows the registry status note`);
-    assert.ok(html.includes("不是正式协议文本"), `${doc} keeps the honest status semantics`);
-    assert.ok(html.includes('role="status"'), `${doc} exposes the status landmark`);
-    assert.ok(!/版本\s*[0-9vV.]/.test(html), `${doc} must not show a fabricated version`);
-    assert.ok(!/生效/.test(html), `${doc} must not show an effective date while pending`);
+test("pending and unavailable pages state the truth without a fabricated version or body", async () => {
+  for (const state of ["PENDING", "UNAVAILABLE"]) {
+    const page = loadPage(() => state === "PENDING" ? { state: "PENDING", title: "平台服务协议" } : { state: "UNAVAILABLE" });
+    assert.deepEqual(page.generateStaticParams(), [{ doc: "terms" }, { doc: "privacy" }]);
+    for (const doc of ["terms", "privacy"]) {
+      const html = await renderDoc(page, doc);
+      assert.ok(html.includes(`《${getLegalDocument(doc).title}》`), doc);
+      assert.ok(html.includes("不是正式协议文本"), `${state} ${doc} keeps honest status semantics`);
+      assert.ok(html.includes('role="status"'), `${state} ${doc} exposes the status landmark`);
+      assert.ok(!/版本\s*[0-9a-zA-Z_]/.test(html), `${state} ${doc} must not show a fabricated version`);
+      assert.ok(!/于 .* 生效/.test(html), `${state} ${doc} must not show an effective date`);
+    }
+    const terms = await renderDoc(page, "terms");
+    assert.ok(terms.includes('href="/legal/privacy"'), "terms links to privacy sibling");
+    const privacy = await renderDoc(page, "privacy");
+    assert.ok(privacy.includes('href="/legal/terms"'), "privacy links to terms sibling");
   }
-  const terms = await renderDoc(page, "terms");
-  assert.ok(terms.includes('href="/legal/privacy"'), "terms links to privacy sibling");
-  const privacy = await renderDoc(page, "privacy");
-  assert.ok(privacy.includes('href="/legal/terms"'), "privacy links to terms sibling");
-  const termsMeta = await page.generateMetadata({ params: Promise.resolve({ doc: "terms" }) });
-  assert.match(termsMeta.title, /《平台服务协议》 · 洲洲商行/);
 });
 
-test("PUBLISHED records render version, effective date, body and sibling link", async () => {
-  const publishedTerms = {
-    ...getLegalDocument("terms"),
-    version: "1.0",
-    effectiveAt: "2026-11-01",
-    status: "PUBLISHED",
-    body: [
-      { type: "heading", text: "第一条 服务范围" },
-      { type: "paragraph", text: "正式条款正文段落。" },
-      { type: "list", ordered: true, items: ["第一项", "第二项"] },
-    ],
-  };
-  const registry = {
-    getLegalDocument: (doc) => (doc === "terms" ? publishedTerms : getLegalDocument(doc)),
-    getLegalDocumentSibling: (doc) => (doc === "terms" ? getLegalDocument("privacy") : publishedTerms),
-    isLegalDocId,
-    listLegalDocuments,
-  };
-  const page = loadPage(registry);
+test("published page renders the API version, effective date, body and sibling link", async () => {
+  const page = loadPage((doc) => doc === "terms" ? publishedTerms : { state: "PENDING", title: "用户隐私政策" });
   const html = await renderDoc(page, "terms");
-  assert.ok(html.includes("版本 1.0"), "shows the registered version");
-  assert.ok(html.includes("2026-11-01"), "shows the registered effective date");
-  assert.ok(html.includes("第一条 服务范围") && html.includes("<h2"), "renders heading blocks");
-  assert.ok(html.includes("正式条款正文段落。"), "renders paragraph blocks");
-  assert.ok(html.includes("<ol") && html.includes("第一项") && html.includes("第二项"), "renders ordered lists");
+  assert.ok(html.includes("版本 legal_terms_1"), "shows the API version id");
+  assert.ok(html.includes("2026-11-01T00:00:00.000Z"), "shows the API effective time");
+  assert.ok(html.includes("第一条 服务范围") && html.includes("正式条款正文段落。"), "renders the API body text");
+  assert.ok(!html.includes(publishedTerms.document.digest.slice(0, 16)), "internal digests stay out of the public reading UI");
   assert.ok(!html.includes("不是正式协议文本"), "published page drops the pending disclaimer");
   assert.ok(html.includes('href="/legal/privacy"'), "keeps the sibling link");
 });
 
+test("consent links can read their exact accepted version after a newer release", async () => {
+  let requested;
+  const page = loadPage((doc, version) => { requested = { doc, version }; return publishedTerms; });
+  const element = await page.default({ params: Promise.resolve({ doc: "terms" }), searchParams: Promise.resolve({ version: "legal_terms_1" }) });
+  assert.deepEqual(requested, { doc: "terms", version: "legal_terms_1" });
+  assert.match(renderToStaticMarkup(element), /第一条 服务范围/);
+});
+
 test("unknown and prototype doc ids go through notFound", async () => {
-  const page = loadPage({ getLegalDocument, getLegalDocumentSibling: (doc) => legalDocuments.find((r) => r.doc !== doc), isLegalDocId, listLegalDocuments });
+  const page = loadPage(() => ({ state: "UNAVAILABLE" }));
   for (const doc of ["missing", "toString", "constructor", "__proto__", "terms?x=1"]) {
-    await assert.rejects(() => page.default({ params: Promise.resolve({ doc }) }), (e) => e.status === 404, doc);
-    await assert.rejects(() => page.generateMetadata({ params: Promise.resolve({ doc }) }), (e) => e.status === 404, doc);
+    await assert.rejects(() => page.default({ params: Promise.resolve({ doc }) }), (error) => error.status === 404, doc);
+    await assert.rejects(() => page.generateMetadata({ params: Promise.resolve({ doc }) }), (error) => error.status === 404, doc);
   }
 });

@@ -17,7 +17,7 @@ test("rejected password login uses credential copy, associates the field and foc
 test("real React phone OTP registration logs in without a password step; consent is required", async () => {
   const p = await mountAuthComponent(file, "AuthForm", {}, { fetch: async () => reply() });
   try {
-    await p.input("auth-identifier", "13800138000"); await p.click("获取验证码"); assert.equal(p.calls.length, 0);
+    await p.input("auth-identifier", "13800138000"); await p.click("获取验证码"); assert.equal(p.calls.filter(item => String(item.url).endsWith("/phone-registration/send-otp")).length, 0);
     await p.input("auth-terms", true); await p.click("获取验证码"); await p.input("phone-registration-code", "123456"); await p.submit();
     assert.equal(p.successes, 1); assert.equal(p.confirmations, 1);
     assert.ok(p.calls.find(item => item.url.endsWith("/complete"))?.body.password === undefined);
@@ -142,7 +142,7 @@ test("both document names are keyboard-reachable reading links that neither tick
     await p.settle();
     assert.equal(p.host.querySelector("#auth-terms").checked, false, "reading a document never ticks consent");
     assert.equal(submissions, 0, "reading a document never submits the form");
-    assert.equal(p.calls.length, 0, "reading a document sends nothing");
+    assert.equal(p.calls.filter(item => !String(item.url).includes("/legal-documents/")).length, 0, "reading a document sends nothing");
     assert.equal(p.host.querySelector(".auth-policy-notice"), null, "the link is the reading path, not an in-form notice");
   } finally { await p.close(); }
 });
@@ -172,7 +172,7 @@ test("closing and reopening the form cannot launder an unknown identity write in
     assert.match(second.host.textContent, /结果暂时无法确认/, "the inherited receipt is restored after remounting");
     assert.ok(second.findButton("重新确认结果"), "the only way forward is reading the result");
     await second.submit();
-    assert.equal(second.calls.length, 0, "reopening must not start a second identity write");
+    assert.equal(second.calls.filter(item => String(item.url).includes("/complete")).length, 0, "reopening must not start a second identity write");
     await second.click("重新确认结果");
     assert.equal(second.successes, 1, "the receipt resolves only after this subject is confirmed");
     assert.equal(second.calls.filter(item => item.url.endsWith("/complete")).length, 0);

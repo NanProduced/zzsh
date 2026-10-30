@@ -2,9 +2,26 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { handleAdminBff, type AdminBffOptions } from "../src/bff/admin-bff";
 import * as orderRoutes from '../src/order/order-routes';
+import * as legalRoutes from "../src/legal/legal-routes";
 
 const ADMIN_ORIGIN = "http://127.0.0.1:4291";
 const API_ORIGIN = "http://127.0.0.1:4292";
+
+test("legal Admin BFF forwards exact routes and keeps method/origin boundaries", async t => {
+  const calls: Array<{ path: string; body: unknown }> = [];
+  t.mock.method(legalRoutes, "handleLegalAdminRoute", async (request: Parameters<typeof legalRoutes.handleLegalAdminRoute>[0], response: Parameters<typeof legalRoutes.handleLegalAdminRoute>[1]) => {
+    calls.push({ path: request.originalUrl!, body: request.body }); response.status(200).json({ versions: [] });
+  });
+  assert.equal((await route("/legal-documents?docType=PLATFORM_TERMS")).status, 200);
+  assert.equal(calls[0]?.path, "/api/v1/admin/legal-documents?docType=PLATFORM_TERMS");
+  const output = capture(), body = { title: "测试正文", expectedRevision: "1" };
+  await handleAdminBff({ method: "PUT", url: "/legal-documents/drafts/legal_1", headers: { origin: ADMIN_ORIGIN }, body } as never, output.response as never, options());
+  assert.equal(calls[1]?.body, body);
+  assert.equal(calls[1]?.path, "/api/v1/admin/legal-documents/drafts/legal_1");
+  assert.equal((await route("/legal-documents/drafts/legal_1", "DELETE")).status, 404);
+  assert.equal((await route("/legal-documents/unknown", "POST")).status, 404);
+  assert.equal(calls.length, 2);
+});
 
 test('Admin BFF仅放行准确的未开租审核命令，保持原body/key并交订单领域授权',async t=>{
  let forwarded:any;

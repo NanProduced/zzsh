@@ -1,3 +1,4 @@
+import { fixtureAgreementAcceptance } from "./database-test-support";
 // TR-B3A: real PostgreSQL, cookie sessions, and controlled payment. No browser page run.
 import { strict as assert } from "node:assert";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -422,7 +423,7 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
     assert.equal(confirmation.body!.compensationDisclosure.selected, selected);
     assert.equal(hasKeyDeep(confirmation.body, "sourceRef"), false);
     assertNoSettlementInternals(confirmation.body);
-    const created = await post("/api/v2/orders", { confirmationToken: confirmation.body!.confirmationToken }, o.buyer, USER_ORIGIN, key());
+    const created = await post("/api/v2/orders", { confirmationToken: confirmation.body!.confirmationToken, agreementAcceptance: fixtureAgreementAcceptance(confirmation.body) }, o.buyer, USER_ORIGIN, key());
     assert.equal(created.response.status, 200, JSON.stringify(created.body));
     const orderId = created.body!.order.id as string;
     const order = (await pool.query<{ displayNo: string; total: string; depositAmount: string; status: string; quote: Record<string, any>; paidConfirmationId: string | null }>(
@@ -1715,7 +1716,7 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
       const confirmation = await formalPost("/api/v2/order-confirmations", { accountId: account.accountId, versionId: account.versionId, releaseId: account.releaseId });
       assert.equal(confirmation.response.status, 200, JSON.stringify(confirmation.body));
       assert.equal(confirmation.body!.compensationDisclosure.selected, selected);
-      const created = await formalPost("/api/v2/orders", { confirmationToken: confirmation.body!.confirmationToken }, o.buyer, USER_ORIGIN, key());
+      const created = await formalPost("/api/v2/orders", { confirmationToken: confirmation.body!.confirmationToken, agreementAcceptance: fixtureAgreementAcceptance(confirmation.body) }, o.buyer, USER_ORIGIN, key());
       assert.equal(created.response.status, 200, JSON.stringify(created.body));
       const stored = (await pool.query<{ status: string; personal: Record<string, any> }>(
         `SELECT status, quote_snapshot->'personal' AS personal FROM zzsh_order.rental_order WHERE id=$1`, [created.body!.order.id],
@@ -1733,6 +1734,7 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
     });
     assert.equal(staleNotRequiredConfirmationA.response.status, 200, JSON.stringify(staleNotRequiredConfirmationA.body));
     var staleNotRequiredTokenA = staleNotRequiredConfirmationA.body!.confirmationToken as string;
+    var staleNotRequiredAgreement = fixtureAgreementAcceptance(staleNotRequiredConfirmationA.body);
     console.log("trc1 imp1 formal reader", JSON.stringify({ policy: "trc1-imp1-policy-v1", proofs: [normalProof.id, fullProof.id], selected: [false, true], source: "same runtime PoolClient via production reader" }));
   } finally {
     await formal.app.close();
@@ -1757,7 +1759,7 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
     assert.equal(staleConfirmationB.response.status, 503, JSON.stringify(staleConfirmationB.body));
     assert.equal(staleConfirmationB.body?.error?.code, "CONFIRMATION_DEPENDENCY_UNAVAILABLE");
     const staleOrdersBefore = Number((await pool.query(`SELECT count(*)::int AS n FROM zzsh_order.rental_order WHERE account_id=$1`, [staleNotRequired.accountId])).rows[0].n);
-    const staleOrder = await staleFormalPost("/api/v2/orders", { confirmationToken: staleNotRequiredTokenA }, o.buyer, USER_ORIGIN, key());
+    const staleOrder = await staleFormalPost("/api/v2/orders", { confirmationToken: staleNotRequiredTokenA, agreementAcceptance: staleNotRequiredAgreement }, o.buyer, USER_ORIGIN, key());
     assert.ok([404, 503].includes(staleOrder.response.status), JSON.stringify(staleOrder.body));
     assert.ok(staleOrder.response.status === 404
       ? staleOrder.body?.error?.code === "NOT_FOUND"
@@ -1794,6 +1796,7 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
 
   const satisfiedAtAApp = await o.createFormalApp();
   let staleSatisfiedTokenA: string;
+  let staleSatisfiedAgreement: ReturnType<typeof fixtureAgreementAcceptance>;
   try {
     const satisfiedAtAPost = (path: string, body: Record<string, unknown> | undefined, jar = o.buyer, origin = USER_ORIGIN, headers?: Record<string, string>) =>
       o.request(satisfiedAtAApp.base, path, body, jar, origin, body === undefined ? "GET" : "POST", headers ?? (body === undefined ? {} : key()));
@@ -1802,6 +1805,7 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
     });
     assert.equal(confirmationA.response.status, 200, JSON.stringify(confirmationA.body));
     staleSatisfiedTokenA = confirmationA.body!.confirmationToken as string;
+    staleSatisfiedAgreement = fixtureAgreementAcceptance(confirmationA.body);
   } finally {
     await satisfiedAtAApp.app.close();
   }
@@ -1822,7 +1826,7 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
     assert.equal(staleSatisfiedConfirmation.response.status, 503, JSON.stringify(staleSatisfiedConfirmation.body));
     assert.equal(staleSatisfiedConfirmation.body?.error?.code, "CONFIRMATION_DEPENDENCY_UNAVAILABLE");
     const satisfiedOrdersBefore = Number((await pool.query(`SELECT count(*)::int AS n FROM zzsh_order.rental_order WHERE account_id=$1`, [staleSatisfied.accountId])).rows[0].n);
-    const staleSatisfiedOrder = await satisfiedFormalPost("/api/v2/orders", { confirmationToken: staleSatisfiedTokenA }, o.buyer, USER_ORIGIN, key());
+    const staleSatisfiedOrder = await satisfiedFormalPost("/api/v2/orders", { confirmationToken: staleSatisfiedTokenA, agreementAcceptance: staleSatisfiedAgreement! }, o.buyer, USER_ORIGIN, key());
     assert.ok([404, 503].includes(staleSatisfiedOrder.response.status), JSON.stringify(staleSatisfiedOrder.body));
     assert.ok(staleSatisfiedOrder.response.status === 404
       ? staleSatisfiedOrder.body?.error?.code === "NOT_FOUND"
@@ -1851,7 +1855,7 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
     });
     assert.equal(afterRevokeConfirmation.response.status, 503, JSON.stringify(afterRevokeConfirmation.body));
     assert.equal(afterRevokeConfirmation.body?.error?.code, "CONFIRMATION_DEPENDENCY_UNAVAILABLE");
-    const beforeRevokeOrder = await satisfiedFormalPost("/api/v2/orders", { confirmationToken: beforeRevoke.body!.confirmationToken }, o.buyer, USER_ORIGIN, key());
+    const beforeRevokeOrder = await satisfiedFormalPost("/api/v2/orders", { confirmationToken: beforeRevoke.body!.confirmationToken, agreementAcceptance: fixtureAgreementAcceptance(beforeRevoke.body) }, o.buyer, USER_ORIGIN, key());
     assert.equal(beforeRevokeOrder.response.status, 503, JSON.stringify(beforeRevokeOrder.body));
     assert.equal(beforeRevokeOrder.body?.error?.code, "CONFIRMATION_DEPENDENCY_UNAVAILABLE");
     const afterRevokeOrders = Number((await pool.query(`SELECT count(*)::int AS n FROM zzsh_order.rental_order WHERE account_id=$1`, [staleSatisfied.accountId])).rows[0].n);

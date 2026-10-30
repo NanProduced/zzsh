@@ -785,6 +785,13 @@
       "when": 1793184000000,
       "tag": "0111_platform_updates",
       "breakpoints": true
+    },
+    {
+      "idx": 112,
+      "version": "7",
+      "when": 1793184001000,
+      "tag": "0112_legal_documents",
+      "breakpoints": true
     }
   ]
 }

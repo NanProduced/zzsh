@@ -11,29 +11,36 @@ import { createPersonalReservation } from "../src/order/personal-order";
 import { sweepExpiredHolds } from "../src/order/order";
 import { changeRentalMembership } from "../src/auth/rental-membership";
 import { activateRelease } from "../src/supply/rules";
+import { fixtureAgreementAcceptance } from "./database-test-support";
 
 export async function runPersonalOrderChecks(o:Options,input:ReturnType<typeof confirmationInput>,fixture:typeof personalFixture) {
   const actor=(await o.pool.query(`SELECT u.id,s.id AS session_id FROM zzsh_auth_user."user" u JOIN zzsh_auth_user."session" s ON s."userId"=u.id WHERE u.email='m3b-user-2@example.invalid' LIMIT 1`)).rows[0];
   const context={userId:actor.id,sessionId:actor.session_id};
   const options={key:fixture.key,gate:async()=>o.gates.get(o.accountId)!,fundingReader:async()=>fixture.funding};
+  let lastAgreement: ReturnType<typeof fixtureAgreementAcceptance>;
+  const agreements = new Map<string, ReturnType<typeof fixtureAgreementAcceptance>>();
   const call=async(path:string,body?:unknown,jar=o.stranger,method=body===undefined?"GET":"POST",key="pc2b_"+randomUUID(),base=o.base)=>{
+    if ((path === "/api/v2/orders" || path === "/api/bff/user/orders-v2") && body && typeof body === "object" && typeof (body as {confirmationToken?:unknown}).confirmationToken === "string") {
+      const token=(body as {confirmationToken:string}).confirmationToken;
+      body={...body,agreementAcceptance:agreements.get(token)??lastAgreement};
+    }
     const r=await fetch(base+path,{method,headers:{cookie:jar.header(),origin:path.includes("/admin/")?o.adminOrigin:o.userOrigin,...(body===undefined?{}:{"content-type":"application/json","idempotency-key":key})},...(body===undefined?{}:{body:JSON.stringify(body)})});
     jar.update?.(r);return {status:r.status,body:await r.json()};
   };
   const ok=async(path:string,body?:unknown,jar=o.stranger,method?:string)=>{const r=await call(path,body,jar,method);assert.equal(r.status,200,JSON.stringify(r.body));return r.body;};
   const grant=async(tier:string)=>{const path=`/api/bff/admin/users/${actor.id}/rental-membership`;const current=(await ok(path,undefined,o.boss)).membership;await ok(path,{tier,expectedVersion:current.version,sourceRef:"fixture:pc2b",reason:"isolated consumption"},o.boss,"PUT");};
-  const confirm=async()=> (await ok("/api/bff/user/order-confirmations",input)).confirmationToken as string;
+  const confirm=async()=> {const quoted=await ok("/api/bff/user/order-confirmations",input);lastAgreement=fixtureAgreementAcceptance(quoted);agreements.set(quoted.confirmationToken,lastAgreement);return quoted.confirmationToken as string;};
   const create=(token:string,key="pc2b_"+randomUUID(),jar=o.stranger)=>call("/api/bff/user/orders-v2",{confirmationToken:token},jar,"POST",key);
   const cancel=(id:string)=>ok(`/api/v1/orders/${id}/cancel`,{reason:"isolated test cleanup"});
   const counts=async()=> (await o.pool.query(`SELECT (SELECT count(*)::int FROM zzsh_order.rental_order) AS orders,(SELECT count(*)::int FROM zzsh_supply.idempotency_record WHERE scope_key LIKE '%order.reservation.create.v2%') AS receipts,(SELECT count(*)::int FROM zzsh_iam.audit_event WHERE action='order.reservation.created') AS audits`)).rows[0];
-  const freshProof=async(remaining:number)=>withTransaction(o.pool,async client=>{const rebuilt=await rebuildPersonalConfirmation(client,context,input,options);return signConfirmation(rebuilt.binding,rebuilt.now-300+remaining,fixture.key);});
+  const freshProof=async(remaining:number)=>withTransaction(o.pool,async client=>{const rebuilt=await rebuildPersonalConfirmation(client,context,input,options);const signed=signConfirmation(rebuilt.binding,rebuilt.now-300+remaining,fixture.key);const refs=rebuilt.snapshot.ruleRefs;lastAgreement=fixtureAgreementAcceptance({agreementAcceptance:{versionId:refs.agreementVersionId,digest:refs.agreementDigest}});agreements.set(signed.token,lastAgreement);return signed;});
   const original=(await o.pool.query(`SELECT payload,content_hash FROM zzsh_supply.listing_version WHERE id=$1`,[input.versionId])).rows[0];
   let firstId="";
   await o.testContext.test("PC2B real Cookie/Web BFF four-tier order creation, immutable personal snapshot and safe projections",async()=>{
     const web=require("../../../web/src/app/api/v2/orders/route.ts");
     for(const [tier,rental,deposit] of [["STANDARD","253.90","300.00"],["VIP","240.56","0.00"],["SVIP","229.22","0.00"],["DISCOUNT_USER","240.56","300.00"]]) {
       await grant(tier!);const token=await confirm();
-      const r=await web.POST(new Request(o.userOrigin+"/api/v2/orders",{method:"POST",headers:{origin:o.userOrigin,"content-type":"application/json",cookie:o.stranger.header(),"idempotency-key":"pc2b_web_"+randomUUID()},body:JSON.stringify({confirmationToken:token})}));
+      const r=await web.POST(new Request(o.userOrigin+"/api/v2/orders",{method:"POST",headers:{origin:o.userOrigin,"content-type":"application/json",cookie:o.stranger.header(),"idempotency-key":"pc2b_web_"+randomUUID()},body:JSON.stringify({confirmationToken:token,agreementAcceptance:agreements.get(token)})}));
       assert.equal(r.status,200);assert.equal(r.headers.get("cache-control"),"no-store");const {order}=await r.json();firstId ||= order.id;
       assert.equal(order.amounts.rental.amount,rental);assert.equal(order.amounts.deposit.amount,deposit);
       const row=(await o.pool.query(`SELECT * FROM zzsh_order.rental_order WHERE id=$1`,[order.id])).rows[0];

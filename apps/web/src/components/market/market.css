@@ -769,6 +769,8 @@ span.detail-shot-image { display:flex; min-height:110px; align-items:center; jus
 .rental-confirm-facts dt { color: var(--color-text-secondary); font-size: 12px; }
 .rental-confirm-facts dd { margin: 0; color: var(--color-text-primary); font-size: 12px; font-variant-numeric: tabular-nums; }
 .rental-confirm-total dd { font-size: 15px; font-weight: 700; }
+.rental-confirm-consent { display: flex; align-items: flex-start; gap: 8px; color: var(--color-text-secondary); font-size: 12px; line-height: 1.55; }
+.rental-confirm-consent input { width: 18px; height: 18px; margin: 0; accent-color: var(--color-accent-brand); }
 .rental-confirm-disclosure, .rental-confirm-expiry { display: flex; align-items: flex-start; gap: 6px; margin: 0; color: var(--color-text-muted); font-size: 11px; line-height: 1.55; }
 .rental-confirm-disclosure svg, .rental-confirm-expiry svg { flex: 0 0 auto; margin-top: 1px; }
 .rental-confirm-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }

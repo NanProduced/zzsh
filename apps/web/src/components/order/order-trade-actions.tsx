@@ -573,15 +573,18 @@ function EndingForm({ opening, order, party, onChanged }: { opening: SettlementO
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [unknown, setUnknown] = useState<string | null>(null);
+  const [termsAccepted, setTermsAccepted] = useState(false);
   const revision = useRef(0);
-  const reset = useCallback(() => { setChecked(null); setError(null); setBusy(false); setUnknown(null); }, []);
+  const reset = useCallback(() => { setChecked(null); setError(null); setBusy(false); setUnknown(null); setTermsAccepted(false); }, []);
   const { userId, isCurrent } = useIdentityReset(session, reset);
   useEffect(() => {
     revision.current += 1;
     setChecked(null);
     setError(null);
+    setTermsAccepted(false);
     setRaw(Object.fromEntries(opening.lines.map((line) => [line.itemId, ""])));
   }, [opening.id, opening.versionNo, order.id, order.status]);
+  useEffect(() => { setTermsAccepted(false); }, [checked?.versionHash]);
   useEffect(() => {
     if (!userId) return;
     const intent = loadIntent(userId, "settlement.submit", order.id);
@@ -668,12 +671,14 @@ function EndingForm({ opening, order, party, onChanged }: { opening: SettlementO
     const result = validate();
     if (result.error || !result.lines) { setChecked(null); setError(result.error ?? "数量无效"); return; }
     if (!checked || JSON.stringify(result.lines) !== checked.snapshot) { setChecked(null); setError("数量已修改或尚未预览，请重新预览后再提交。"); return; }
+    const early = checked.preview.reasons?.includes("EARLY_REASON_REQUIRED") === true;
+    if (early && order.earlySettlementDisclosure && !termsAccepted) { setError("请阅读并同意提前结束规则后再提交。"); return; }
     setBusy(true);
     setError(null);
     const outcome = await performGuardedWrite(acting, "settlement.submit", order.id,
-      { lines: checked.lines, acceptedHash: checked.versionHash },
+      { lines: checked.lines, acceptedHash: checked.versionHash, ...(early && order.earlySettlementDisclosure ? { termsAccepted: true } : {}) },
       { openingId: opening.id, openingVersion: opening.versionNo },
-      (key, body) => orderApi.submitSettlement(order.id, body as { lines: Array<{ itemId: string; remainingQuantity: string }>; acceptedHash: string }, key));
+      (key, body) => orderApi.submitSettlement(order.id, body as { lines: Array<{ itemId: string; remainingQuantity: string }>; acceptedHash: string; termsAccepted?: boolean }, key));
     if (!isCurrent(acting)) return;
     setBusy(false);
     apply(acting, outcome as WriteOutcome<OrderSettlement>);
@@ -708,6 +713,7 @@ function EndingForm({ opening, order, party, onChanged }: { opening: SettlementO
     {unknown ? <UnknownNotice label="结束提交结果未知" message={unknown} onQuery={() => void querySubmit()} onOpenOrder={onChanged} /> : null}
     {checked && !locked ? <div className="order-trade-preview">
       <p className="order-muted">{checked.preview.reasons?.includes("EARLY_REASON_REQUIRED") ? "本次消耗低于 70%，属于提前结束：提交后由受权客服核实原因并复核，双方确认后生效，退款在复核生效后 7 天发起。" : "消耗比例满足正常结算条件：对方确认后自动生效，无需客服审核。"}</p>
+      {checked.preview.reasons?.includes("EARLY_REASON_REQUIRED") && order.earlySettlementDisclosure ? <><p>{order.earlySettlementDisclosure.body}</p><label className="order-trade-consent"><input type="checkbox" checked={termsAccepted} disabled={busy} onChange={(event) => setTermsAccepted(event.target.checked)} /><span>我已核对并接受本次提前结束的费用与退款安排</span></label></> : null}
       <ConsumedTable order={order} opening={opening} remaining={Object.fromEntries(checked.lines.map((line) => [line.itemId, line.remainingQuantity]))} consumed={checked.preview.consumed} />
       <AmountTable rows={amounts} caption={`本版结算金额明细（${party === "renter" ? "租客口径" : "号主口径"}，服务端计算）`} />
       <div className="order-trade-actions">
@@ -727,13 +733,15 @@ function DecisionPanel({ version, party, order, onChanged }: { version: Settleme
   const [unknown, setUnknown] = useState<string | null>(null);
   const [rejectOpen, setRejectOpen] = useState(false);
   const [reason, setReason] = useState("");
-  const reset = useCallback(() => { setBusy(null); setError(null); setUnknown(null); setRejectOpen(false); setReason(""); }, []);
+  const [termsAccepted, setTermsAccepted] = useState(false);
+  const reset = useCallback(() => { setBusy(null); setError(null); setUnknown(null); setRejectOpen(false); setReason(""); setTermsAccepted(false); }, []);
   const { userId, isCurrent } = useIdentityReset(session, reset);
   useEffect(() => {
     if (!userId) return;
     const intent = loadIntent(userId, "settlement.decision", order.id);
     if (intent) setUnknown(isIntentStale(intent) ? STALE_MESSAGE : "检测到一条结果未知的结算决定；原幂等键与内容已冻结。");
   }, [userId, order.id]);
+  useEffect(() => { setTermsAccepted(false); }, [version.id, version.versionHash]);
   const myParty = party.toUpperCase();
   const decided = (version.decisions ?? []).find((decision) => decision.party === myParty);
   const locked = unknown !== null;
@@ -782,10 +790,14 @@ function DecisionPanel({ version, party, order, onChanged }: { version: Settleme
       setError("服务端未返回可读的拟调整金额，无法确认这一版；请刷新或联系客服核对后重试。");
       return;
     }
+    if (action === "CONFIRM" && version.early && order.earlySettlementDisclosure && !termsAccepted) {
+      setError("请阅读并同意提前结束规则后再确认。");
+      return;
+    }
     const acting = userId;
     setBusy(action);
     setError(null);
-    const body = { action, versionHash: version.versionHash, ...(action === "REJECT" && reason.trim() ? { reason: reason.trim() } : {}) };
+    const body = { action, versionHash: version.versionHash, ...(action === "REJECT" && reason.trim() ? { reason: reason.trim() } : {}), ...(action === "CONFIRM" && version.early && order.earlySettlementDisclosure ? { termsAccepted: true } : {}) };
     const outcome = await performGuardedWrite(acting, "settlement.decision", order.id, body, { versionId: version.id, orderId: order.id },
       (key, frozen) => orderApi.decideSettlement(order.id, version.id, frozen as { action: "CONFIRM" | "REJECT"; versionHash: string }, key));
     if (!isCurrent(acting)) return;
@@ -822,11 +834,12 @@ function DecisionPanel({ version, party, order, onChanged }: { version: Settleme
     {adjusted ? <p className="order-muted">调整说明：{version.inputSnapshot?.reason ?? version.inputSnapshot?.endReason ?? "服务端未返回说明"}</p> : null}
     {unknown ? <UnknownNotice label="结算决定结果未知" message={unknown} onQuery={() => void query()} onOpenOrder={onChanged} /> : null}
     {error ? <p className="order-inline-notice" role="alert">{error}</p> : null}
+    {version.early && order.earlySettlementDisclosure && !decided && !locked ? <><p>{order.earlySettlementDisclosure.body}</p><label className="order-trade-consent"><input type="checkbox" checked={termsAccepted} disabled={busy !== null} onChange={(event) => setTermsAccepted(event.target.checked)} /><span>我已核对并接受本次提前结束的费用与退款安排</span></label></> : null}
     {decided ? <p className="order-muted">{decided.action === "CONFIRM" ? "你已确认这一版结算" : "你已拒绝这一版结算"} · {decided.createdAt ? new Date(decided.createdAt).toLocaleString("zh-CN") : ""}</p> :
       locked ? null :
       <div className="order-trade-actions">
         {!confirmable ? <p className="order-inline-notice" role="status">这一版的拟调整金额暂时不可读，确认已暂时停用；可以刷新、拒绝，或先查询原请求。拒绝与查询不受影响。</p> : null}
-        <button type="button" className="button" onClick={() => void decide("CONFIRM")} disabled={busy !== null || !confirmable}>{busy === "CONFIRM" ? "确认中…" : version.early ? "确认提前结算（待客服复核）" : "确认结算"}</button>
+        <button type="button" className="button" onClick={() => void decide("CONFIRM")} disabled={busy !== null || !confirmable || (version.early && Boolean(order.earlySettlementDisclosure) && !termsAccepted)}>{busy === "CONFIRM" ? "确认中…" : version.early ? "确认提前结算（待客服复核）" : "确认结算"}</button>
         {!rejectOpen ? <button type="button" className="button quiet" onClick={() => setRejectOpen(true)} disabled={busy !== null}>拒绝并说明</button> :
           <span className="order-trade-reject"><input type="text" value={reason} maxLength={500} placeholder="请填写拒绝原因（可留空）" onChange={(event) => setReason(event.target.value)} aria-label="拒绝原因" /><button type="button" className="button secondary button--sm" onClick={() => void decide("REJECT")} disabled={busy !== null}>{busy === "REJECT" ? "提交中…" : "提交拒绝"}</button><button type="button" className="button quiet button--sm" onClick={() => setRejectOpen(false)} disabled={busy !== null}>返回</button></span>}
       </div>}

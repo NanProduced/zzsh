@@ -1,3 +1,4 @@
+import { fixtureAgreementAcceptance } from "./database-test-support";
 import assert from "node:assert/strict";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -415,7 +416,7 @@ test("credit business PG/API G0 then G1/G2 with maintenance fixture separation",
     const g0Account = await publish(g0Release, "g0");
     const creditBefore = (await maintenanceData.query(`SELECT (SELECT count(*) FROM zzsh_credit.user_credit_state)::int AS states,(SELECT count(*) FROM zzsh_credit.credit_event)::int AS events`)).rows[0];
     const confirmation = await request(base, "/api/bff/user/order-confirmations", { accountId: g0Account.accountId, versionId: g0Account.versionId, releaseId: g0Account.releaseId }, renter.jar, USER_ORIGIN, "POST", key("g0-confirm")); assert.equal(confirmation.response.status, 200, JSON.stringify(confirmation.body));
-    const order = await request(base, "/api/v2/orders", { confirmationToken: confirmation.body?.confirmationToken }, renter.jar, USER_ORIGIN, "POST", key("g0-order")); assert.equal(order.response.status, 200, JSON.stringify(order.body));
+    const order = await request(base, "/api/v2/orders", { confirmationToken: confirmation.body?.confirmationToken, agreementAcceptance: fixtureAgreementAcceptance(confirmation.body) }, renter.jar, USER_ORIGIN, "POST", key("g0-order")); assert.equal(order.response.status, 200, JSON.stringify(order.body));
     const creditAfter = (await maintenanceData.query(`SELECT (SELECT count(*) FROM zzsh_credit.user_credit_state)::int AS states,(SELECT count(*) FROM zzsh_credit.credit_event)::int AS events`)).rows[0]; assert.deepEqual(creditAfter, creditBefore);
     const fixedRelease = await makeRelease("FIXED_CENTS", await currentGeneration());
     const fixed = await publish(fixedRelease, "fixed-missing-proof", 409);
@@ -601,7 +602,7 @@ test("credit business PG/API G0 then G1/G2 with maintenance fixture separation",
     assert.equal(staleConfirmation.response.status, 200, JSON.stringify(staleConfirmation.body));
     const liveConfirmation = await request(base, "/api/bff/user/order-confirmations", { accountId: finalA.accountId, versionId: finalA.versionId, releaseId: finalA.releaseId }, renter.jar, USER_ORIGIN, "POST", key("f3-live-confirmation"));
     assert.equal(liveConfirmation.response.status, 200, JSON.stringify(liveConfirmation.body));
-    const paidOrder = await request(base, "/api/v2/orders", { confirmationToken: liveConfirmation.body?.confirmationToken }, renter.jar, USER_ORIGIN, "POST", key("f3-paid-order"));
+    const paidOrder = await request(base, "/api/v2/orders", { confirmationToken: liveConfirmation.body?.confirmationToken, agreementAcceptance: fixtureAgreementAcceptance(liveConfirmation.body) }, renter.jar, USER_ORIGIN, "POST", key("f3-paid-order"));
     assert.equal(paidOrder.response.status, 200, JSON.stringify(paidOrder.body));
 
     const lowUncoveredBreach = await transaction(f3RuntimePool, (client) => confirmBreach(client, {
@@ -611,7 +612,7 @@ test("credit business PG/API G0 then G1/G2 with maintenance fixture separation",
     assert.equal(lowUncoveredBreach.duplicate, false);
 
     const staleOrderCount = Number((await maintenanceData.query(`SELECT count(*)::int AS n FROM zzsh_order.rental_order WHERE account_id=$1`, [staleAccount.accountId])).rows[0].n);
-    const staleOrder = await request(base, "/api/v2/orders", { confirmationToken: staleConfirmation.body?.confirmationToken }, renter.jar, USER_ORIGIN, "POST", key("f3-stale-order"));
+    const staleOrder = await request(base, "/api/v2/orders", { confirmationToken: staleConfirmation.body?.confirmationToken, agreementAcceptance: fixtureAgreementAcceptance(staleConfirmation.body) }, renter.jar, USER_ORIGIN, "POST", key("f3-stale-order"));
     assert.equal(staleOrder.response.status, 409, JSON.stringify(staleOrder.body));
     assert.equal(staleOrder.body?.error?.code, "CONFIRMATION_CHANGED");
     assert.equal(Number((await maintenanceData.query(`SELECT count(*)::int AS n FROM zzsh_order.rental_order WHERE account_id=$1`, [staleAccount.accountId])).rows[0].n), staleOrderCount);
@@ -639,12 +640,12 @@ test("credit business PG/API G0 then G1/G2 with maintenance fixture separation",
     const score80Account = await publish(finalRelease, "f3-score80");
     const score80Confirmation = await request(base, "/api/bff/user/order-confirmations", { accountId: score80Account.accountId, versionId: score80Account.versionId, releaseId: score80Account.releaseId }, renter.jar, USER_ORIGIN, "POST", key("f3-score80-confirmation"));
     assert.equal(score80Confirmation.response.status, 200, JSON.stringify(score80Confirmation.body));
-    const score80Order = await request(base, "/api/v2/orders", { confirmationToken: score80Confirmation.body?.confirmationToken }, renter.jar, USER_ORIGIN, "POST", key("f3-score80-order"));
+    const score80Order = await request(base, "/api/v2/orders", { confirmationToken: score80Confirmation.body?.confirmationToken, agreementAcceptance: fixtureAgreementAcceptance(score80Confirmation.body) }, renter.jar, USER_ORIGIN, "POST", key("f3-score80-order"));
     assert.equal(score80Order.response.status, 200, JSON.stringify(score80Order.body));
     const score100Account = await publish(finalRelease, "f3-score100", undefined, renter);
     const score100Confirmation = await request(base, "/api/bff/user/order-confirmations", { accountId: score100Account.accountId, versionId: score100Account.versionId, releaseId: score100Account.releaseId }, owner.jar, USER_ORIGIN, "POST", key("f3-score100-confirmation"));
     assert.equal(score100Confirmation.response.status, 200, JSON.stringify(score100Confirmation.body));
-    const score100Order = await request(base, "/api/v2/orders", { confirmationToken: score100Confirmation.body?.confirmationToken }, owner.jar, USER_ORIGIN, "POST", key("f3-score100-order"));
+    const score100Order = await request(base, "/api/v2/orders", { confirmationToken: score100Confirmation.body?.confirmationToken, agreementAcceptance: fixtureAgreementAcceptance(score100Confirmation.body) }, owner.jar, USER_ORIGIN, "POST", key("f3-score100-order"));
     assert.equal(score100Order.response.status, 200, JSON.stringify(score100Order.body));
     console.log(JSON.stringify({ evidenceClass: "LOCAL_PG_LOCAL_HTTP", f3: { enabled: true, lowUncoveredRejected: lowUncovered.submitted.response.status, paid70Order: paidOrder.body?.order?.id, staleConfirmationRejected: staleOrder.body?.error?.code, underpaidRejected: underpaidConfirmation.body?.error?.code, refundState: refundContext.state, score80Order: score80Order.body?.order?.id, score100Order: score100Order.body?.order?.id, providerRequests: 0 } }));
     console.log(JSON.stringify({ evidenceClass: "LOCAL_PG_LOCAL_HTTP", runId, g0: { accountId: g0Account.accountId, orderId: order.body?.order?.id, creditUnchanged: true }, g0FixedMissingProofStatus: fixed.submitted.response.status, g1: { firstConcurrentEventId: concurrent.find((result) => !result.duplicate)?.event.id, firstConcurrentScoreAfter: 90, replayEventId: g1.event.id, replayScoreAfter: snapshot?.score, reversedScoreAfter: reversedSnapshot?.score, concurrentFirstResults: concurrent.map((result) => result.duplicate), replayResults: concurrentReplay.map((result) => result.duplicate) }, g2: { contextAccountId: g2Context.accountId, contextScore: g2Context.score, contextRevision: g2Context.creditRevision, paymentFinanceEventId: captured.financeEventId, refundFinanceEventId: refunded.financeEventId, walletRevisionUnchanged: true, providerRequests: 0 }, http: { userOverview: true, adminOverview: true, evilOriginRejected: true, userToAdminRejected: true, foreignScopeRejected: true, selfAuditRejected: true } }));

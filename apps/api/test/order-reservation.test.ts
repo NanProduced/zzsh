@@ -1,4 +1,4 @@
-import { admitTestDatabase, ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
+import { admitTestDatabase, installedBusinessTruncate, fixtureAgreementAcceptance, ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
 import { lockPublishingAccount, type SupplyGate } from "../src/supply/publishing";
 import { createLocalMediaStorage } from "../src/supply/media";
 import sharp from "sharp";
@@ -386,7 +386,7 @@ function orderKey(): Record<string, string> {
 
 /** Truncate the isolated business tables, tolerating a target that predates later order tables. */
 async function truncateIsolatedBusinessData(pool: Pool): Promise<void> {
-  let statement = ISOLATED_BUSINESS_DATA_TRUNCATE;
+  let statement = await installedBusinessTruncate(pool);
   const event = (await pool.query(`SELECT to_regclass('zzsh_order.im_order_event') AS relation`)).rows[0]?.relation;
   if (!event) statement = statement.replace(/\s*"zzsh_order"\."im_order_event",/, "");
   const intake = (await pool.query(`SELECT to_regclass('zzsh_order.settlement_intake') AS relation`)).rows[0]?.relation;
@@ -1076,7 +1076,7 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
         await v2Holder.query("BEGIN");
         await lockPublishingAccount(v2Holder, v2Target.accountId);
         await v2Holder.query(`SELECT id FROM zzsh_supply.media_asset WHERE id=$1 FOR UPDATE`, [v2Media.assetId]);
-        const pending = request(base, "/api/v2/orders", { confirmationToken }, renter3, USER_ORIGIN, "POST", { "idempotency-key": `pub_r4_v2_consume_${r4OrderBarrierRunId}` });
+        const pending = request(base, "/api/v2/orders", { confirmationToken, agreementAcceptance: fixtureAgreementAcceptance(confirmation.body) }, renter3, USER_ORIGIN, "POST", { "idempotency-key": `pub_r4_v2_consume_${r4OrderBarrierRunId}` });
         v2Wait = await r4WaitForCommonLock("v2 confirmation consume");
         await v2Holder.query(
           `UPDATE zzsh_supply.media_asset

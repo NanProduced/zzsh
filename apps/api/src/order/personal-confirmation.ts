@@ -260,7 +260,7 @@ export async function issuePersonalConfirmation(client:PoolClient,context:OrderU
       priceVersionId:snapshot.ruleRefs.priceVersionId,releaseId:snapshot.ruleRefs.releaseId,policyVersion:snapshot.funding.version,
       reference:snapshot.guarantee.reference,status:snapshot.guarantee.status},options.fundingReader);
   }
-  return {...rebuilt.projection,confirmationId:signed.claims.confirmationId,listingHash:rebuilt.binding.listingHash,expiresAt:new Date(signed.claims.expiresAt*1000).toISOString(),confirmationToken:signed.token};
+  return {...rebuilt.projection,agreementAcceptance:{versionId:snapshot.ruleRefs.agreementVersionId,digest:snapshot.ruleRefs.agreementDigest},confirmationId:signed.claims.confirmationId,listingHash:rebuilt.binding.listingHash,expiresAt:new Date(signed.claims.expiresAt*1000).toISOString(),confirmationToken:signed.token};
 }
 export async function verifyPersonalConfirmation(client:PoolClient,context:OrderUserContext,input:ReturnType<typeof confirmationInput>,token:unknown,options:PersonalConfirmationOptions) {
   const rebuilt=await rebuildPersonalConfirmation(client,context,input,options);

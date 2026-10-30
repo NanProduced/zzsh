@@ -601,6 +601,11 @@ export type RuleReleaseRecord = {
   activatedAt: string;
 };
 
+export type FullPayoutTermsRecord = {
+  id: string; gameId: string; policyRef: string; policyVersion: string; disclosureVersion: string;
+  title: string; digest: string; status: "DRAFT" | "SEALED"; revision: string;
+  createdAt: string; sealedAt: string | null;
+};
 export type RulesResponse = {
   game: SupplyGame;
   release: RuleReleaseRecord | null;
@@ -609,6 +614,7 @@ export type RulesResponse = {
   termVersions: TermVersionRecord[];
   termOptions: TermOptionRecord[];
   agreementVersions: AgreementVersionRecord[];
+  fullPayoutTermsVersions: FullPayoutTermsRecord[];
   items: CatalogItem[];
   depositCatalog?: {
     catalogRevision: string;

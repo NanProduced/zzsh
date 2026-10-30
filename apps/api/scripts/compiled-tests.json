@@ -231,5 +231,8 @@
   "dist/test/legacy-finance-source-proof-migration.test.js",
   "dist/test/content-managed-contract.test.js",
   "dist/test/content-body-parser.test.js",
-  "dist/test/platform-updates.test.js"
+  "dist/test/platform-updates.test.js",
+  "dist/test/legal-documents.test.js",
+  "dist/test/settlement-acceptance.test.js",
+  "dist/test/auth-legal-acceptance.test.js"
 ]
