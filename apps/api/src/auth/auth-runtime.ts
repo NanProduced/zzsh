@@ -427,10 +427,17 @@ async function safeWebAuthHandler(
     if (response.status >= 400) {
       headers.delete("content-length");
       headers.set("content-type", "application/json; charset=utf-8");
+      let frozenSignIn = false;
+      if (response.status === 403 && request.method === "POST"
+        && ["/api/auth/user/sign-in/phone-number", "/api/auth/user/sign-in/identifier"].includes(new URL(request.url).pathname)) {
+        const body: unknown = await response.clone().json().catch(() => null);
+        frozenSignIn = typeof body === "object" && body !== null && "code" in body && body.code === "ACCOUNT_FROZEN";
+      }
       return new Response(JSON.stringify({
         error: {
           code: authErrorCode(response.status),
-          message: response.status >= 500 ? "Internal server error" : "Authentication request rejected",
+          message: frozenSignIn ? "账号已被冻结，如有疑问请联系客服" : response.status >= 500 ? "Internal server error" : "Authentication request rejected",
+          ...(frozenSignIn ? { reason: "ACCOUNT_FROZEN" } : {}),
           requestId,
         },
       }), { status: response.status, headers });

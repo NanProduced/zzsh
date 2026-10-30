@@ -1539,7 +1539,7 @@ export async function attemptLegacyCredentialUpgrade(
 /** Same compatibility path, sharing the caller's lock/transaction with session creation or reset. */
 export async function verifyUserCredentialInTransaction(
   client: PoolClient, verifyPassword: PasswordVerifier, hashPassword: PasswordHasher,
-  lookup: LegacyCredentialLookup, password: string, requestId: string,
+  lookup: LegacyCredentialLookup, password: string, requestId: string, mode: "active-only" | "sign-in" = "active-only",
 ): Promise<LegacyCredentialOutcome> {
     const account = await client.query<{
       id: string;
@@ -1561,7 +1561,10 @@ export async function verifyUserCredentialInTransaction(
       ["username" in lookup ? lookup.username : lookup.phoneNumber],
     );
     const row = account.rows[0];
-    if (!row || row.suspended || row.accountStatus !== "ACTIVE") return "none";
+    if (!row) return "none";
+    const frozen = row.accountStatus === "FROZEN";
+    // Sign-in verifies the secret before disclosing a freeze; it still cannot create a session or upgrade this credential.
+    if ((row.suspended || row.accountStatus !== "ACTIVE") && !(mode === "sign-in" && frozen)) return "none";
     if (!row.legacyPasswordMd5) {
       if (!row.password) return "none";
       return await verifyPassword(password, row.password) ? "retry" : "none";
@@ -1572,6 +1575,7 @@ export async function verifyUserCredentialInTransaction(
         ? createHash("md5").update(password, "utf8").digest("hex")
         : undefined;
     if (!legacyHash || !sameSecret(row.legacyPasswordMd5, legacyHash)) return "none";
+    if (frozen) return "retry";
     const passwordHash = await hashPassword(password);
     await setAuditContext(client, "user", row.userId, undefined, requestId);
     const updated = await client.query(
