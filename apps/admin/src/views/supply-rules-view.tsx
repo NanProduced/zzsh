@@ -16,6 +16,7 @@ import { RulesOverview } from "./supply-rules/rules-overview";
 import { draftCommand, RULES_RELEASE_OPERATION, useRulesWrite } from "./supply-rules/rules-write";
 import { SkinDepositPolicyEditor } from "./supply-rules/skin-deposit-policy-editor";
 import { RentalModeEditor } from "./supply-rules/rental-mode-editor";
+import { FullPayoutTermsPanel } from "./supply-rules/full-payout-terms-panel";
 
 const inputClass = "h-9";
 const textareaClass = "min-h-32";
@@ -605,6 +606,8 @@ export function SupplyRulesView({
               </form>
             ) : null}
           </section>
+
+          <FullPayoutTermsPanel gameId={gameId} versions={rules.fullPayoutTermsVersions ?? []} canEdit={canEdit} onReload={reload} />
 
           </div></CollapsibleContent>
           </Collapsible>

@@ -14,6 +14,7 @@
 - [数据库结构导航](architecture/database-navigation.md)（源码 112 份业务迁移 0000–0111、实际执行状态分别核验）
 - [用户供给表单数据契约](architecture/supply-form-contract.md)
 - [租赁会员、个人确认与建单](architecture/personal-confirmation.md)
+- [协议、规则披露与接受](architecture/agreements-acceptance.md)
 - [公开交易统计读取](architecture/public-trade-activity.md)
 - [内容管理、资源格式与存储](architecture/content-management.md)
 - [旧交易续办与责任边界](architecture/legacy-trade-continuation.md)

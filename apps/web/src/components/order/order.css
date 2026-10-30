@@ -255,6 +255,8 @@
 .order-trade-unit { margin-left: 6px; color: var(--color-text-muted); font-size: 11px; }
 .order-trade-facts { margin: 0; }
 .order-trade-facts dd { font-variant-numeric: tabular-nums; }
+.order-trade-consent { display: flex; align-items: flex-start; gap: 8px; color: var(--color-text-secondary); font-size: 12px; line-height: 1.6; }
+.order-trade-consent input { width: 18px; height: 18px; margin: 0; accent-color: var(--color-accent-brand); }
 .order-trade-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; }
 .order-channel-payment { display: grid; gap: 10px; width: 100%; min-width: 0; }
 .order-channel-payment > p { margin: 0; }

@@ -78,6 +78,13 @@ function createProbe(window, Component, props, fetchImpl, { strict = false } = {
     await tick();
   };
   const buttons = () => [...host.querySelectorAll("button")].map((button) => button.textContent ?? "");
+  const acceptAgreement = async () => {
+    const label = [...host.querySelectorAll("label")].find((candidate) => candidate.textContent?.includes("我已阅读并同意本单适用协议"));
+    const input = label?.querySelector('input[type="checkbox"]');
+    assert.ok(input, "agreement checkbox not found");
+    await React.act(async () => { input.click(); await tick(); });
+    await tick();
+  };
   const click = async (text) => {
     const button = [...host.querySelectorAll("button")].find((candidate) => candidate.textContent?.includes(text));
     assert.ok(button, `button not found: ${text}; have ${JSON.stringify(buttons())}; text=${host.textContent?.slice(0, 300)}`);
@@ -90,7 +97,7 @@ function createProbe(window, Component, props, fetchImpl, { strict = false } = {
     globalThis.fetch = previousFetch;
     if (removeIntent) removeIntent();
   };
-  return { host, render, click, unmount, dispose, buttons };
+  return { host, render, click, acceptAgreement, unmount, dispose, buttons };
 }
 
 function json(body, status = 200) { return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } }); }
@@ -233,6 +240,7 @@ async function withConfirmedPanel(preview, confirmed, run) {
     try {
       await probe.render();
       await probe.click("立即租用");
+      await probe.acceptAgreement();
       const create = probe.host.querySelector(".rental-confirm-primary");
       assert.match(create?.textContent ?? "", /确认并创建订单/);
       assert.equal(create.disabled, false, "a missing agreement stub must not silently block this confirmation scenario");
@@ -855,6 +863,7 @@ test("D-refresh: focus during confirmation and after quoting cannot replace the 
       await React.act(async () => { window.dispatchEvent(new window.Event('focus')); await tick(); });
       assert.equal(log.filter(x => x.method === 'GET').length, 1);
       assert.equal(probe.host.querySelector('.account-reference-price').textContent, '¥292.12');
+      await probe.acceptAgreement();
       assert.equal(probe.host.querySelector('.rental-confirm-primary').disabled, false);
     } finally { await probe.dispose(); }
   });

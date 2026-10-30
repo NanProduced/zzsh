@@ -7,18 +7,20 @@ import { ensureOnlyFields, invalid } from "../supply/supply-util";
 import type { PublishingAccount, ListingVersion } from "../supply/publishing";
 import { parseFullPayoutTermsAcceptance, type FullPayoutTermsAcceptance } from "../supply/full-payout-terms";
 import { assertFinalConfirmationFunding } from "../supply/funding-authority";
+import { parseLegalAcceptanceRef, recordDocumentAcceptance, sameAcceptanceRef, type LegalAcceptanceRef } from "../legal/legal-documents";
 
 export const PERSONAL_ORDER_OPERATION="order.reservation.create.v2";
-export function personalOrderInput(body:Record<string,unknown>):{confirmationToken:string;fullPayoutTermsAcceptance?:FullPayoutTermsAcceptance} {
-  ensureOnlyFields(body,["confirmationToken","fullPayoutTermsAcceptance"]);
+export function personalOrderInput(body:Record<string,unknown>):{confirmationToken:string;fullPayoutTermsAcceptance?:FullPayoutTermsAcceptance;agreementAcceptance?:LegalAcceptanceRef} {
+  ensureOnlyFields(body,["confirmationToken","fullPayoutTermsAcceptance","agreementAcceptance"]);
   if(typeof body.confirmationToken!=="string" || body.confirmationToken.length<1 || body.confirmationToken.length>4096)throw invalid("Invalid confirmation credential","confirmationToken");
   // No signature, current key, expiry, membership or hold validation before replay lookup.
   const terms=parseFullPayoutTermsAcceptance(body.fullPayoutTermsAcceptance);
-  return {confirmationToken:body.confirmationToken,...(terms?{fullPayoutTermsAcceptance:terms}:{})};
+  const agreement=body.agreementAcceptance===undefined?undefined:parseLegalAcceptanceRef(body.agreementAcceptance,"agreementAcceptance");
+  return {confirmationToken:body.confirmationToken,...(terms?{fullPayoutTermsAcceptance:terms}:{}),...(agreement?{agreementAcceptance:agreement}:{})};
 }
 const used=():never=>{throw new SecurityApiError(409,"CONFIRMATION_USED","Confirmation already consumed; confirm again");};
 
-export async function createPersonalReservation(client:PoolClient,context:OrderUserContext,token:string,options:PersonalConfirmationOptions & {holdSeconds?:number},requestId:string,fullPayoutTermsAcceptance?:FullPayoutTermsAcceptance) {
+export async function createPersonalReservation(client:PoolClient,context:OrderUserContext,token:string,options:PersonalConfirmationOptions & {holdSeconds?:number},requestId:string,fullPayoutTermsAcceptance?:FullPayoutTermsAcceptance,agreementAcceptance?:LegalAcceptanceRef) {
   const now=Number((await client.query(`SELECT floor(extract(epoch FROM clock_timestamp()))::text AS now`)).rows[0].now);
   const authenticated=authenticateConfirmation(token,context,now,options.key);
   await assertFreshCreateAuthorization(client,context,authenticated.accountId);
@@ -38,8 +40,20 @@ export async function createPersonalReservation(client:PoolClient,context:OrderU
       priceVersionId:personal.ruleRefs.priceVersionId,releaseId:personal.ruleRefs.releaseId,policyVersion:personal.funding.version,
       reference:personal.guarantee.reference,status:personal.guarantee.status},options.fundingReader);
   }
+  if (agreementAcceptance && !sameAcceptanceRef(agreementAcceptance, personal.ruleRefs.agreementVersionId, personal.ruleRefs.agreementDigest)) {
+    throw new SecurityApiError(409,"CONFIRMATION_CHANGED","Agreement changed; confirm again");
+  }
   try {
-    return await insertReservationSnapshot(client,{context,account,version,snapshot,holdSeconds:options.holdSeconds!,requestId,confirmationId:verified.claims.confirmationId});
+    const created=await insertReservationSnapshot(client,{context,account,version,snapshot,holdSeconds:options.holdSeconds!,requestId,confirmationId:verified.claims.confirmationId});
+    const orderId=(created.body as {order?:{id?:unknown}}).order?.id;
+    if(typeof orderId!=="string")throw new Error("Created order id is unavailable");
+    if(agreementAcceptance)await recordDocumentAcceptance(client,{userId:context.userId,documentType:"RENTAL_AGREEMENT",
+      documentVersionId:agreementAcceptance.versionId,documentDigest:agreementAcceptance.digest,subjectType:"ORDER",subjectId:orderId,
+      source:"ORDER_CREATE",requestId});
+    if(fullPayoutTermsAcceptance)await recordDocumentAcceptance(client,{userId:context.userId,documentType:"FULL_PAYOUT_TERMS",
+      documentVersionId:fullPayoutTermsAcceptance.termsVersionId,documentDigest:fullPayoutTermsAcceptance.termsDigest,subjectType:"ORDER",subjectId:orderId,
+      source:"ORDER_CREATE",requestId});
+    return created;
   } catch(error) {
     const db=error as {code?:string;constraint?:string;message?:string};
     if(db.code==="23505" && db.constraint==="rental_order_confirmation_unique")used();

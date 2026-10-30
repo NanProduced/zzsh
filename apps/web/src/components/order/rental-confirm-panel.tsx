@@ -305,6 +305,7 @@ export function RentalConfirmPanel({
   const lastPreviewStartRef = useRef(0);
   const [payout, setPayout] = useState<PayoutState | null>(fullPayoutSelected ? { status: "loading" } : null);
   const [payoutAccepted, setPayoutAccepted] = useState(false);
+  const [agreementAccepted, setAgreementAccepted] = useState(false);
   const quoteTarget = JSON.stringify([accountId, gameId, versionId, releaseId]);
   const currentQuoteTarget = useRef(quoteTarget);
   currentQuoteTarget.current = quoteTarget;
@@ -316,6 +317,7 @@ export function RentalConfirmPanel({
     isFetchingPreviewRef.current = false;
     lastPreviewStartRef.current = 0;
     setAgreementOpen(false);
+    setAgreementAccepted(false);
     setPriceChangeNotice(null);
     setPreviewState({ status: "idle" });
     setStage({ kind: "idle" });
@@ -325,6 +327,8 @@ export function RentalConfirmPanel({
     previousQuoteTarget.current = quoteTarget;
     reset();
   }
+  const quotedToken = stage.kind === "quoted" ? stage.quote.confirmationToken : null;
+  useEffect(() => { setAgreementAccepted(false); }, [quotedToken]);
   const { userId, isCurrent } = useIdentityReset(session, reset);
   const isCurrentRef = useRef(isCurrent);
   isCurrentRef.current = isCurrent;
@@ -601,6 +605,11 @@ export function RentalConfirmPanel({
       setStage({ kind: "notice", message: "请先阅读并同意本账号的全额包赔条款，再创建订单。", canRequote: false });
       return;
     }
+    const agreement = stage.kind === "quoted" ? stage.agreement : null;
+    if (!agreement || !agreementAccepted) {
+      setStage({ kind: "notice", message: "请先阅读并同意本单适用协议，再创建订单。", canRequote: false });
+      return;
+    }
     if (loadIntent(acting, "order.create.v2", accountId)) {
       const intent = loadIntent(acting, "order.create.v2", accountId)!;
       setStage({ kind: "create-unknown", context: (intent.context ?? {}) as StoredContext, message: "已有未决的创建请求；只允许查询原结果，不会重新下单。", stale: isIntentStale(intent) });
@@ -615,7 +624,7 @@ export function RentalConfirmPanel({
       expiresAt: quote.expiresAt,
       ...(quote.compensationDisclosure ? { disclosure: quote.compensationDisclosure.disclosureVersion } : {}),
     };
-    const saved = saveIntent({ userId: acting, kind: "order.create.v2", resourceId: accountId, key, body: payoutAcceptance ? { fullPayoutTermsAcceptance: payoutAcceptance } : {}, token: quote.confirmationToken, context: context as Record<string, unknown> });
+    const saved = saveIntent({ userId: acting, kind: "order.create.v2", resourceId: accountId, key, body: { ...(payoutAcceptance ? { fullPayoutTermsAcceptance: payoutAcceptance } : {}), agreementAcceptance: { versionId: agreement.id, digest: agreement.digest } }, token: quote.confirmationToken, context: context as Record<string, unknown> });
     if (!saved.persisted) {
       createKey.current = null;
       setStage({ kind: "notice", message: BLOCKED_MESSAGE, canRequote: true });
@@ -623,7 +632,7 @@ export function RentalConfirmPanel({
     }
     setStage({ kind: "creating", quote });
     try {
-      const order = await orderApi.createOrder(quote.confirmationToken, key, payoutAcceptance);
+      const order = await orderApi.createOrder(quote.confirmationToken, key, payoutAcceptance, { versionId: agreement.id, digest: agreement.digest });
       if (!isCurrent(acting) || target !== currentQuoteTarget.current) return;
       clearIntent(acting, "order.create.v2", accountId);
       createKey.current = null;
@@ -646,7 +655,7 @@ export function RentalConfirmPanel({
       createKey.current = null;
       setStage({ kind: "notice", ...noticeFor(typed) });
     }
-  }, [accountId, userId, isCurrent, session, fullPayoutSelected, payoutAcceptance]);
+  }, [accountId, userId, isCurrent, session, fullPayoutSelected, payoutAcceptance, stage, agreementAccepted]);
 
   const recoverCreate = useCallback(async () => {
     if (!userId) return;
@@ -660,8 +669,9 @@ export function RentalConfirmPanel({
     createKey.current = intent.key;
     setStage({ kind: "creating", quote: null });
     try {
-      const frozenAcceptance = (intent.body as { fullPayoutTermsAcceptance?: FullPayoutTermsAcceptance } | undefined)?.fullPayoutTermsAcceptance;
-      const order = await orderApi.createOrder(intent.token, intent.key, frozenAcceptance);
+      const frozenAcceptance = (intent.body as { fullPayoutTermsAcceptance?: FullPayoutTermsAcceptance; agreementAcceptance?: { versionId: string; digest: string } } | undefined)?.fullPayoutTermsAcceptance;
+      const frozenAgreement = (intent.body as { agreementAcceptance?: { versionId: string; digest: string } } | undefined)?.agreementAcceptance;
+      const order = await orderApi.createOrder(intent.token, intent.key, frozenAcceptance, frozenAgreement);
       if (!isCurrent(acting) || target !== currentQuoteTarget.current) return;
       clearIntent(acting, "order.create.v2", accountId);
       createKey.current = null;
@@ -946,9 +956,10 @@ export function RentalConfirmPanel({
         </> : null}
         {stage.agreementProblem ? <p className="rental-confirm-error"><AlertCircle size={14} aria-hidden="true" />{stage.agreementProblem}</p> : null}
       </details>
+      <label className="rental-confirm-consent"><input type="checkbox" checked={agreementAccepted} disabled={!stage.agreement || Boolean(stage.agreementProblem)} onChange={(event) => setAgreementAccepted(event.target.checked)} /><span>我已阅读并同意本单适用协议{stage.agreement ? `《${stage.agreement.title}》` : ""}</span></label>
       <p className="rental-confirm-expiry"><Clock3 size={14} aria-hidden="true" />确认凭据 {countdown(quote.expiresAt, now) ?? "有效期以服务端为准"}；会员、规则或资格变化后需要重新确认。</p>
       <div className="rental-confirm-actions">
-        <div className="rental-confirm-primary-action">{dockPrice}<button type="button" className="button rental-confirm-primary" onClick={() => void sendCreate(quote)} disabled={Boolean(stage.agreementProblem) || expired || (fullPayoutSelected && !payoutAcceptance)}><WalletCards size={15} aria-hidden="true" />确认并创建订单</button></div>
+        <div className="rental-confirm-primary-action">{dockPrice}<button type="button" className="button rental-confirm-primary" onClick={() => void sendCreate(quote)} disabled={Boolean(stage.agreementProblem) || !stage.agreement || !agreementAccepted || expired || (fullPayoutSelected && !payoutAcceptance)}><WalletCards size={15} aria-hidden="true" />确认并创建订单</button></div>
         <button type="button" className="button quiet button--sm" onClick={() => void requote()}>重新报价</button>
         <button type="button" className="button quiet button--sm" onClick={() => setStage({ kind: "idle" })}>取消</button>
       </div>

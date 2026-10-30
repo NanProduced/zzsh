@@ -13,6 +13,7 @@ import { lockDispatchGate } from "../im/support-dispatch";
 import { CUSTOMER_TIERS, type CustomerTier } from "../supply/delta-rental";
 import { conflict, forbidden, invalid, notFound } from "../supply/supply-util";
 import { centsToYuan, lockOrderPartiesInOrder, yuanToCents } from "./order";
+import { recordDocumentAcceptance } from "../legal/legal-documents";
 import {frozenPersonalGrowthV4Valid} from './personal-growth-confirmation';
 import {
   computeSettlement,
@@ -52,6 +53,11 @@ type LockedOrder = {
 
 export function settlementSurfaceOpen(flag: boolean | undefined): boolean {
   return flag === true && process.env.ZZSH_SETTLEMENT_RECORDING === "controlled" && process.env.NODE_ENV !== "production";
+}
+
+/** Only orders created through the v2 personal-confirmation path carry quoteKind. */
+export function requiresEarlySettlementAcceptance(order: Pick<LockedOrder, "quote">): boolean {
+  return order.quote.quoteKind === "ORDER_CONFIRMATION";
 }
 
 /** Labeled policy probe. HTTP order loading never calls this and never treats it as a paid order. */
@@ -1071,7 +1077,7 @@ export async function previewSettlement(client: PoolClient, orderId: string, act
   return done({ accepted: false, early: false, reasons: [], amounts: payload.amounts, versionHash: hashApprovalPayload(payload).hash, baseVersionId: base.versionId, consumed: result.consumed }, order.status);
 }
 
-export async function submitSettlement(client: PoolClient, orderId: string, actor: Actor, remaining: LineQty[], acceptedHash: string, requestId: string): Promise<Command> {
+export async function submitSettlement(client: PoolClient, orderId: string, actor: Actor, remaining: LineQty[], acceptedHash: string, requestId: string, termsAccepted = false): Promise<Command> {
   if (actor.realm !== "user") throw forbidden();
   const order = await lockSettlement(client, orderId, actor, true);
   const bill = await loadBill(client, order, remaining);
@@ -1079,8 +1085,17 @@ export async function submitSettlement(client: PoolClient, orderId: string, acto
   const base = await acceptanceBase(client, order.id);
   const result = probe(order, bill.opening.id, bill.basis, bill.lines, "NORMAL", "preview");
   if (needsEarlyReason(result)) {
+    if (requiresEarlySettlementAcceptance(order) && !termsAccepted) return blocked(["EARLY_TERMS_NOT_ACCEPTED"]);
     if (hashApprovalPayload(intakePayload(order, bill.opening, bill.basis, remaining, base)).hash !== acceptedHash) return blocked(["SETTLEMENT_HASH_MISMATCH"]);
-    return recordIntake(client, order, actor, bill.opening, bill.basis, remaining, base, requestId);
+    const intake = await recordIntake(client, order, actor, bill.opening, bill.basis, remaining, base, requestId);
+    if (requiresEarlySettlementAcceptance(order)) {
+      const party = partyOf(order, actor.userId);
+      await recordDocumentAcceptance(client, { userId: actor.userId,
+        documentType: party === "RENTER" ? "EARLY_SETTLEMENT_RENTER" : "EARLY_SETTLEMENT_OWNER",
+        documentVersionId: `settlement-intake:${acceptedHash}`, documentDigest: acceptedHash,
+        subjectType: "ORDER", subjectId: orderId, source: "SETTLEMENT_SUBMIT", requestId });
+    }
+    return intake;
   }
   if (!result.ok || result.early !== false || !result.amounts) return blocked(result.reasons);
   const payload = payloadFor({
@@ -1516,13 +1531,14 @@ async function postReadySettlement(
   });
 }
 
-export async function decideSettlement(client: PoolClient, orderId: string, versionId: string, actor: Actor, action: "CONFIRM" | "REJECT", versionHash: string, reason: string | null, requestId: string): Promise<Command> {
+export async function decideSettlement(client: PoolClient, orderId: string, versionId: string, actor: Actor, action: "CONFIRM" | "REJECT", versionHash: string, reason: string | null, requestId: string, termsAccepted = false): Promise<Command> {
   if (actor.realm !== "user") throw forbidden();
   const order = await lockSettlement(client, orderId, actor, true);
   const version = await currentVersion(client, orderId, versionId);
   if (!version || version.supersededAt || version.versionHash !== versionHash) return blocked(["STALE_VERSION"]);
   const party = partyOf(order, actor.userId);
   if (action === "REJECT" && !reason) throw invalid("A rejection reason is required");
+  if (action === "CONFIRM" && version.early && requiresEarlySettlementAcceptance(order) && !termsAccepted) return blocked(["EARLY_TERMS_NOT_ACCEPTED"]);
   if (action === "CONFIRM") {
     if ((await client.query(`SELECT 1 FROM zzsh_order.settlement_intake WHERE order_id = $1 AND status = 'OPEN' LIMIT 1`, [orderId])).rowCount) {
       return blocked(["SETTLEMENT_INTAKE_PENDING"]);
@@ -1543,6 +1559,12 @@ export async function decideSettlement(client: PoolClient, orderId: string, vers
     );
   }
   await audit(client, actor, "order.settlement.decided", orderId, requestId, { settlementVersionId: version.id, party, action });
+  if (action === "CONFIRM" && version.early && requiresEarlySettlementAcceptance(order)) {
+    await recordDocumentAcceptance(client, { userId: actor.userId,
+      documentType: party === "RENTER" ? "EARLY_SETTLEMENT_RENTER" : "EARLY_SETTLEMENT_OWNER",
+      documentVersionId: `settlement:${version.versionHash}`, documentDigest: version.versionHash,
+      subjectType: "ORDER", subjectId: orderId, source: "SETTLEMENT_DECISION", requestId });
+  }
   if (action === "CONFIRM") await postReadySettlement(client, order, version.id, actor, requestId, false);
   return view(client, order);
 }

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { BookOpen, FolderOpen, Image, Megaphone, Newspaper, Plus, RefreshCw, Search } from "lucide-react";
+import { BookOpen, FileText, FolderOpen, Image, Megaphone, Newspaper, Plus, RefreshCw, Search } from "lucide-react";
 
 import {
   adminRequest,
@@ -25,8 +25,9 @@ import { ContentSelect } from "./content-resource-fields";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from "../components/ui/dialog";
 import { ItemEditor, itemStateLabel } from "./content-item-editor";
 import { ContentMediaTab } from "./content-media-tab";
+import { LegalDocumentsPanel } from "./legal-documents-panel";
 
-type ContentTab = "rules" | "pages" | "announcement" | "news" | "media";
+type ContentTab = "rules" | "pages" | "announcement" | "news" | "media" | "legal";
 
 const TAB_META: Record<ContentTab, { label: string; icon: typeof BookOpen }> = {
   rules: { label: "规则与手册", icon: BookOpen },
@@ -34,6 +35,7 @@ const TAB_META: Record<ContentTab, { label: string; icon: typeof BookOpen }> = {
   announcement: { label: "平台公告", icon: Megaphone },
   news: { label: "资讯", icon: Newspaper },
   media: { label: "运营素材", icon: FolderOpen },
+  legal: { label: "法律文书", icon: FileText },
 };
 
 const CONTENT_TABS = Object.keys(TAB_META) as ContentTab[];
@@ -98,6 +100,7 @@ export function ContentView({
     ...(canPlatformRead ? (["announcement"] as const) : []),
     ...(canPlatformRead || canGameRead ? (["news"] as const) : []),
     ...(canPlatformRead ? (["media"] as const) : []),
+    ...(canPlatformRead || canPlatformEdit || canPlatformPublish ? (["legal"] as const) : []),
   ];
   const [tab, setTab] = useState<ContentTab>(() => allowedContentTab(workspaceTab?.query.tab, availableTabs) ?? defaultContentTab(availableTabs));
   const [newsScope, setNewsScope] = useState<"platform" | "game">(
@@ -424,6 +427,7 @@ export function ContentView({
       {tab === "rules" ? <details className="section-panel text-sm"><summary className="cursor-pointer text-muted-foreground">业务规则维护入口</summary><div className="mt-3 space-y-3"><p className="text-muted-foreground leading-relaxed">出租协议、包赔条款、价目与租期在“规则与价目”维护。这里的服务说明不会改变本单报价和已确认条款。</p>{onOpenPath && hasPermission(snapshot, "supply.rules.edit") ? <Button type="button" size="sm" variant="secondary" onClick={() => onOpenPath("/supply/rules")}>打开规则与价目</Button> : <p className="text-muted-foreground">维护业务参数需要规则编辑权限。</p>}</div></details> : null}
 
       {tab === "media" ? <><ContentStoragePanel /><ContentMediaTab canEdit={canPlatformEdit} canPublish={canPlatformPublish} refreshNonce={refreshNonce} onWriteLockChange={reportWriteLock} /></> : null}
+      {tab === "legal" ? <LegalDocumentsPanel snapshot={snapshot} /> : null}
       <Dialog open={createOpen} onOpenChange={open => { if (!creating) setCreateOpen(open); }}><DialogContent><DialogTitle>新建{ITEM_NOUN[itemType]}</DialogTitle><DialogDescription>先创建草稿；保存并发布后进入平台动态。</DialogDescription><Field label={`新建${ITEM_NOUN[itemType]}标题（可留空后编辑）`}><Input value={createTitle} onChange={(event) => setCreateTitle(event.target.value)} maxLength={200} autoFocus disabled={!itemCanEdit || creating} /></Field><DialogFooter><Button type="button" variant="secondary" disabled={creating} onClick={() => setCreateOpen(false)}>取消</Button><Button type="button" loading={creating} disabled={!itemCanEdit || (itemScope === "game" && !gameId)} onClick={() => void createItem()}>创建草稿</Button></DialogFooter></DialogContent></Dialog>
       <Dialog open={tabIntent !== null} onOpenChange={open => { if (!open) setTabIntent(null); }}><DialogContent role="alertdialog"><DialogTitle>离开当前内容？</DialogTitle><DialogDescription>未保存修改将丢失。结果待核对的请求会保留，回到对应内容后继续核对。</DialogDescription><DialogFooter><Button type="button" variant="secondary" autoFocus onClick={() => setTabIntent(null)}>继续编辑</Button><Button type="button" variant="danger" onClick={() => { if (writeLockedRef.current) return; const action = tabIntent; setTabIntent(null); reportDirty(false); action?.(); }}>离开当前内容</Button></DialogFooter></DialogContent></Dialog>
     </div>

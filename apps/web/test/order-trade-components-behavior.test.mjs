@@ -92,6 +92,14 @@ function createProbe(window, Component, props, fetchImpl, { strict = false } = {
     await React.act(async () => { button.dispatchEvent(new window.MouseEvent("click", { bubbles: true, button: 0 })); await tick(); });
     await tick();
   };
+  const checkLabel = async (text) => {
+    const label = [...host.querySelectorAll("label")].find((candidate) => candidate.textContent?.includes(text));
+    const input = label?.querySelector('input[type="checkbox"]');
+    assert.ok(input, `checkbox not found: ${text}`);
+    await React.act(async () => { input.click(); await tick(); });
+    await tick();
+  };
+  const acceptAgreement = () => checkLabel("我已阅读并同意本单适用协议");
   const setInput = async (label, value) => {
     const input = host.querySelector(`[aria-label="${label}"]`);
     assert.ok(input, `input not found: ${label}`);
@@ -110,7 +118,7 @@ function createProbe(window, Component, props, fetchImpl, { strict = false } = {
     globalThis.fetch = previousFetch;
     if (removeIntent) removeIntent();
   };
-  return { host, render, click, setInput, unmount, dispose, buttons };
+  return { host, render, click, acceptAgreement, checkLabel, setInput, unmount, dispose, buttons };
 }
 
 const orderClient = requireFromTree(path.join(tree, "apps/web/src/lib/order-client.ts"));
@@ -343,6 +351,36 @@ test("F3: blank and negative quantities are refused as unknown, never coerced to
   });
 });
 
+test("early settlement requires an explicit consent before submit and sends it to the server", async () => {
+  await withDom(async (window) => {
+    const log = [];
+    const earlyPreview = { ...previewBody, reasons: ["EARLY_REASON_REQUIRED"], amounts: { ...previewBody.amounts, earlyMakeup: money("4.00"), renterCharge: money("158.00") } };
+    const fetchImpl = router([
+      { match: "/settlement", method: "GET", respond: () => json(settlementBody) },
+      { match: "settlement-preview", method: "POST", respond: () => json(earlyPreview) },
+      { match: "/settlements", method: "POST", respond: () => json(settlementBody) },
+    ], log);
+    const OrderTradeActions = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A")).OrderTradeActions;
+    const probe = createProbe(window, OrderTradeActions, { order: paidOrder, party: "renter", onChanged() {} }, fetchImpl);
+    try {
+      await probe.render();
+      await probe.click("发起结束租用");
+      await probe.setInput("哈夫币 期末剩余数量", "200");
+      await probe.setInput("测试物品 期末剩余数量", "8");
+      await probe.click("预览结算金额");
+      assert.ok(probe.host.textContent.includes("提交结束申请"));
+      await probe.click("提交结束申请");
+      assert.equal(log.filter(entry => entry.url.endsWith("/settlements")).length, 0, "no early submit without consent");
+      await probe.checkLabel("我已阅读并同意本次提前结束的费用、等待期与责任规则");
+      await probe.click("提交结束申请");
+      const submit = log.find(entry => entry.url.endsWith("/settlements"));
+      assert.ok(submit, "consented early submit reaches the server");
+      assert.equal(submit.body.termsAccepted, true);
+      assert.equal(submit.body.acceptedHash, earlyPreview.versionHash);
+    } finally { await probe.dispose(() => intents.clearIntent("user_A", "settlement.submit", "order_A")); }
+  });
+});
+
 test("F3: editing after a preview invalidates it and a late preview response is dropped", async () => {
   await withDom(async (window) => {
     const log = [];
@@ -451,7 +489,7 @@ test("a partially reduced deposit freezes the actual payable deposit in the unkn
     const Panel = loadPanel("user_A", async () => publishingOptions);
     const probe = createProbe(window, Panel, { accountId, gameId: "game_1", versionId: "listing_1", releaseId: "release_1", reference: referenceFees }, fetchImpl);
     try {
-      await probe.render();await probe.click("查看我的报价");await probe.click("确认并创建订单");
+      await probe.render();await probe.click("查看我的报价");await probe.acceptAgreement(); await probe.click("确认并创建订单");
       const original = intents.loadIntent("user_A", "order.create.v2", accountId);
       assert.equal(original.context.deposit, "100.00", "never freeze the 300-yuan original deposit after a 200-yuan allowance");
       assert.equal(original.context.payable, "270.00");assert.equal(log.filter(entry => entry.url.endsWith("/api/v2/orders")).length, 1);
@@ -478,7 +516,7 @@ test("R03: invalid confirmation uses actionable Chinese copy and only explicitly
     try {
       await probe.render();
       await probe.click("查看我的报价");
-      await probe.click("确认并创建订单");
+      await probe.acceptAgreement(); await probe.click("确认并创建订单");
       assert.match(probe.host.textContent, /本次确认凭据无效，请重新获取本人报价后再创建订单/);
       assert.doesNotMatch(probe.host.textContent, /Invalid confirmation credential/);
       assert.ok(probe.buttons().includes("重新确认"), "invalid credentials allow a fresh personal quote");
@@ -659,10 +697,10 @@ test("I04: the real public detail requires an explicit quote action and consumes
       assert.ok(!probe.host.textContent.includes("查看我的报价"));
       await probe.render(); await tick();
       assert.equal(log.filter(entry => entry.url.endsWith("/api/order-confirmations")).length, 1);
-      await probe.click("确认并创建订单");
+      await probe.acceptAgreement(); await probe.click("确认并创建订单");
       const creates = log.filter(entry => entry.url.endsWith("/api/v2/orders"));
       assert.equal(creates.length, 1);
-      assert.deepEqual(creates[0].body, { confirmationToken: "token_1" });
+      assert.deepEqual(creates[0].body, { confirmationToken: "token_1", agreementAcceptance: { versionId: "ag_1", digest: "d".repeat(64) } });
     } finally { await probe.dispose(() => intents.clearIntent("user_A", "order.create.v2", "detail_price")); }
   });
 });
@@ -792,12 +830,12 @@ test("F2: an unknown create keeps the original token and key and recovers after 
     await first.click("查看我的报价");
     assert.ok(first.host.textContent.includes("¥470.00"));
     assert.ok(first.host.textContent.includes("三角洲出租协议"));
-    await first.click("确认并创建订单");
+    await first.acceptAgreement(); await first.click("确认并创建订单");
     assert.ok(first.host.textContent.includes("创建请求结果未知"), first.host.textContent.slice(0, 300));
     assert.equal(first.host.querySelector(".account-reference-price").textContent, "—");
     assert.ok(!first.host.querySelector(".rental-price-summary").textContent.includes("¥470.00"));
     const firstCreate = log.find((entry) => entry.url.endsWith("/api/v2/orders"));
-    assert.deepEqual(firstCreate.body, { confirmationToken: "token_1" });
+    assert.deepEqual(firstCreate.body, { confirmationToken: "token_1", agreementAcceptance: { versionId: "ag_1", digest: "d".repeat(64) } });
     await first.unmount();
     // Remount in the same window/session: the frozen intent is offered for query.
     const second = createProbe(window, Panel, props, fetchImpl);
@@ -825,7 +863,7 @@ test("F2: another identity cannot see or reuse the frozen create intent; 401 kee
     const ownerView = createProbe(window, loadPanel("user_A", async () => publishingOptions), props, fetchImpl);
     await ownerView.render();
     await ownerView.click("查看我的报价");
-    await ownerView.click("确认并创建订单");
+    await ownerView.acceptAgreement(); await ownerView.click("确认并创建订单");
     assert.ok(ownerView.host.textContent.includes("登录状态已变化"), ownerView.host.textContent.slice(0, 300));
     assert.ok(intents.loadIntent("user_A", "order.create.v2", "account_2"), "the owner's intent is retained");
     const stranger = createProbe(window, loadPanel("user_B", async () => publishingOptions), props, fetchImpl);
@@ -924,10 +962,10 @@ test("D1: a declared full-payout listing reads the sealed terms and binds the sa
     await first.click("查看我的报价");
     const quote = log.find((entry) => entry.url.includes("order-confirmations"));
     assert.deepEqual(quote.body, { accountId: "account_payout", versionId: "listing_1", releaseId: "release_1", fullPayoutTermsAcceptance: payoutAcceptance });
-    await first.click("确认并创建订单");
+    await first.acceptAgreement(); await first.click("确认并创建订单");
     assert.ok(first.host.textContent.includes("创建请求结果未知"), first.host.textContent.slice(0, 300));
     const firstCreate = log.find((entry) => entry.url.endsWith("/api/v2/orders"));
-    assert.deepEqual(firstCreate.body, { confirmationToken: "token_1", fullPayoutTermsAcceptance: payoutAcceptance });
+    assert.deepEqual(firstCreate.body, { confirmationToken: "token_1", fullPayoutTermsAcceptance: payoutAcceptance, agreementAcceptance: { versionId: "ag_1", digest: "d".repeat(64) } });
     await first.unmount();
     // Recovery replays the frozen acceptance from the intent, not whatever the UI shows now.
     const second = createProbe(window, Panel, props, fetchImpl);
