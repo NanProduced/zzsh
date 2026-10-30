@@ -6,7 +6,7 @@
 
 | 文书 | 存储 | 版本规则 |
 |---|---|---|
-| 平台服务协议 / 用户隐私政策 | `zzsh_content.legal_document_version` | `DRAFT → SEALED`；封存后不可原地修改；按 `effective_at` 取当前版本 |
+| 平台服务协议 / 用户隐私政策 | `zzsh_content.legal_document_version` | `DRAFT → SEALED`；封存后不可原地修改；按 `effective_at` 取当前版本。该表不替代 CMS：平台文书无游戏范围，但需要封存/生效/摘要接受语义 |
 | 出租协议 | `zzsh_supply.agreement_version` | 既有草稿/封存；绑定 `rule_release` |
 | 全额包赔条款 | `zzsh_supply.full_payout_terms_version` | 独立草稿/封存；价格版本通过 `policyRef / policyVersion / disclosureVersion` 引用 |
 | 帮助与公告 | `zzsh_content` 既有 CMS | 不可变发布版本；帮助文章不替代交易现场协议 |
