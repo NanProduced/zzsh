@@ -27,6 +27,25 @@ npm run check
 
 默认无资源集的固定测试库用于单维护者串行回归；多agent不得同时运行默认入口。锁占用即退出/等待协调，不抢锁、不终止别人连接、不增加随机后缀规避冲突。
 
+## 创建准入
+
+测试资源须先登记。缺库默认失败，不静默新建；获准首次创建时，仅将本套件的下列开关设为 `1`，其他套件的开关无效。资源集名称不代表创建授权。返修、复验和 Master 复跑复用同一资源组，不新增 `r1`/`r2`/`final` 库。
+
+| 测试入口 | 首次创建开关 |
+|---|---|
+| auth | `M2_AUTH_TEST_ALLOW_NEW_RESOURCE` |
+| content-foundation | `CONTENT_TEST_ALLOW_NEW_RESOURCE` |
+| order-reservation | `ORDER_TEST_ALLOW_NEW_RESOURCE` |
+| supply-m3b | `SUPPLY_TEST_ALLOW_NEW_RESOURCE` |
+| user-directory | `ADM_USER_LIST_TEST_ALLOW_NEW_RESOURCE` |
+| approval-audit | `APPROVAL_AUDIT_TEST_ALLOW_NEW_RESOURCE` |
+| admin-workspace-layout | `ADMIN_WORKSPACE_LAYOUT_TEST_ALLOW_NEW_RESOURCE` |
+| database / FND003 | `FND003_TEST_ALLOW_NEW_RESOURCE` |
+| database-reset / FND004 | `FND004_TEST_ALLOW_NEW_RESOURCE` |
+| im-postgres | `IM_TEST_ALLOW_NEW_RESOURCE` |
+
+共用 `admitTestDatabase` 校验已有库的 owner、marker、可连接与非模板属性；历史无标记 fixture 必须实读为 `null`，未读取不能代替无标记。既有角色、对象和锁校验继续执行。创建开关仅用于明确批准的准备过程，不长期写入日常配置。
+
 ## 登记是使用前提
 
 当前资源清单只维护在主检出 `tmp/postgresql-resources.md`，环境端口仍登记在 `tmp/local-environments.md`。不要在每个worktree复制一份互不一致的清单。

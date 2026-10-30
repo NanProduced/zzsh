@@ -19,7 +19,7 @@ import {
   resetWithFnd004Lease,
   resetVerifiedTestSchema,
 } from "../src/database/reset";
-import { finishDatabaseTest } from "./database-test-support";
+import { admitTestDatabase, finishDatabaseTest } from "./database-test-support";
 
 async function assertIdentity(
   client: Pool | PoolClient,
@@ -38,14 +38,23 @@ async function assertIdentity(
 }
 
 async function ensureTestDatabase(adminPool: Pool): Promise<void> {
-  const result = await adminPool.query<{ owner: string }>(
-    "SELECT pg_get_userbyid(datdba) AS owner FROM pg_database WHERE datname = $1",
+  const result = await adminPool.query<{ owner: string; marker: string | null; allowConnections: boolean; isTemplate: boolean }>(
+    "SELECT pg_get_userbyid(datdba) AS owner, shobj_description(oid, 'pg_database') AS marker, datallowconn AS \"allowConnections\", datistemplate AS \"isTemplate\" FROM pg_database WHERE datname = $1",
     [FND004_TEST_DATABASE],
   );
-  if (result.rows.length === 0) {
+  const admission = admitTestDatabase({
+    exists: result.rows.length > 0,
+    owner: result.rows[0]?.owner,
+    marker: result.rows[0]?.marker,
+    allowConnections: result.rows[0]?.allowConnections,
+    isTemplate: result.rows[0]?.isTemplate,
+    expectedOwner: "zzsh",
+    expectedMarker: null,
+    databaseName: FND004_TEST_DATABASE,
+    allowFlag: "FND004_TEST_ALLOW_NEW_RESOURCE",
+  });
+  if (admission === "CREATE") {
     await adminPool.query(`CREATE DATABASE "${FND004_TEST_DATABASE}" OWNER "zzsh"`);
-  } else {
-    assert.equal(result.rows[0]?.owner, "zzsh");
   }
 }
 

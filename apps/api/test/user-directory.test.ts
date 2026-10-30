@@ -16,7 +16,7 @@ import { withTransaction } from "../src/auth/security-core";
 import { loadConfig, type AppConfig } from "../src/config/config";
 import { assertBusinessRuntimeIdentity, createBusinessPool } from "../src/database/business";
 import { runBusinessMigrations } from "../src/database/business-migrations";
-import { ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
+import { admitTestDatabase, ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
 
 const RESOURCE_SET = process.env.USER_DIRECTORY_TEST_RESOURCE_SET?.trim() || "";
 if (RESOURCE_SET && !/^[a-z][a-z0-9_]{0,20}$/.test(RESOURCE_SET)) throw new Error("Invalid user directory test resource set");
@@ -165,17 +165,25 @@ async function resourceGuard(pool: Pool, resources: Resources): Promise<PoolClie
 }
 
 async function ensureDatabase(pool: Pool, resources: Resources): Promise<void> {
-  const existing = await pool.query<{ owner: string; comment: string | null }>(
-    "SELECT pg_get_userbyid(d.datdba) AS owner, shobj_description(d.oid, 'pg_database') AS comment FROM pg_database d WHERE d.datname = $1",
+  const existing = await pool.query<{ owner: string; comment: string | null; allowConnections: boolean; isTemplate: boolean }>(
+    "SELECT pg_get_userbyid(d.datdba) AS owner, shobj_description(d.oid, 'pg_database') AS comment, d.datallowconn AS \"allowConnections\", d.datistemplate AS \"isTemplate\" FROM pg_database d WHERE d.datname = $1",
     [resources.databaseName],
   );
-  if (existing.rows.length === 0) {
+  const admission = admitTestDatabase({
+    exists: existing.rows.length > 0,
+    owner: existing.rows[0]?.owner,
+    marker: existing.rows[0]?.comment,
+    allowConnections: existing.rows[0]?.allowConnections,
+    isTemplate: existing.rows[0]?.isTemplate,
+    expectedOwner: resources.maintenance.database.user,
+    expectedMarker: RESOURCE_MARKER,
+    databaseName: resources.databaseName,
+    allowFlag: "ADM_USER_LIST_TEST_ALLOW_NEW_RESOURCE",
+  });
+  if (admission === "CREATE") {
     await pool.query("CREATE DATABASE " + quotedIdentifier(resources.databaseName, "test database") + " OWNER " + quotedIdentifier(resources.maintenance.database.user, "maintenance user"));
     await pool.query("COMMENT ON DATABASE " + quotedIdentifier(resources.databaseName, "test database") + " IS " + quotedLiteral(RESOURCE_MARKER));
-    return;
   }
-  assert.equal(existing.rows[0]?.owner, resources.maintenance.database.user, "dedicated test database owner changed");
-  assert.equal(existing.rows[0]?.comment, RESOURCE_MARKER, "dedicated test database marker is missing or mismatched");
 }
 
 async function ensureRole(pool: Pool, roleName: string, password: string, marker: string): Promise<void> {

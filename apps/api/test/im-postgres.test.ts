@@ -1,3 +1,4 @@
+import { admitTestDatabase } from "./database-test-support";
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 import { test } from "node:test";
@@ -68,16 +69,25 @@ async function ensureDatabase(maintenance: Pool): Promise<void> {
        FROM pg_database WHERE datname = $1`,
     [DATABASE],
   );
-  if (result.rows.length === 0) {
+  const admission = admitTestDatabase({
+    exists: result.rows.length > 0,
+    owner: result.rows[0]?.owner,
+    marker: result.rows[0]?.marker,
+    allowConnections: result.rows[0]?.allowConnections,
+    isTemplate: result.rows[0]?.isTemplate,
+    expectedOwner: MAINTENANCE_USER,
+    expectedMarker: DATABASE_MARKER,
+    databaseName: DATABASE,
+    allowFlag: "IM_TEST_ALLOW_NEW_RESOURCE",
+  });
+  if (admission === "CREATE") {
     await maintenance.query(`CREATE DATABASE ${identifier(DATABASE)} OWNER ${identifier(MAINTENANCE_USER)}`);
     await maintenance.query(`COMMENT ON DATABASE ${identifier(DATABASE)} IS ${literal(DATABASE_MARKER)}`);
     return;
   }
   const row = result.rows[0]!;
-  assert.equal(row.owner, MAINTENANCE_USER);
   assert.equal(row.allowConnections, true);
   assert.equal(row.isTemplate, false);
-  assert.equal(row.marker, DATABASE_MARKER);
 }
 
 async function ensureRole(maintenance: Pool, roleName: string, password: string, marker: string, validateOnly = false): Promise<void> {

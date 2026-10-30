@@ -1,5 +1,5 @@
 import { runSupplyPoolChecks } from "./supply-pool-checks";
-import { ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
+import { admitTestDatabase, ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
 import { runPublishingChecks } from "./supply-publishing-checks";
 import { runPricingCompatChecks } from "./supply-pricing-compat-checks";
 import { personalFixture } from "./personal-confirmation-checks";
@@ -197,15 +197,25 @@ async function ensureDatabase(pool: Pool, resources: Resources): Promise<void> {
     "SELECT pg_get_userbyid(d.datdba) AS owner, d.datallowconn AS \"allowConnections\", d.datistemplate AS \"isTemplate\", shobj_description(d.oid, 'pg_database') AS comment FROM pg_database d WHERE d.datname = $1",
     [resources.databaseName],
   );
-  if (existing.rows.length === 0) {
+  const admission = admitTestDatabase({
+    exists: existing.rows.length > 0,
+    owner: existing.rows[0]?.owner,
+    marker: existing.rows[0]?.comment,
+    allowConnections: existing.rows[0]?.allowConnections,
+    isTemplate: existing.rows[0]?.isTemplate,
+    expectedOwner: resources.maintenance.database.user,
+    expectedMarker: RESOURCE_MARKER,
+    databaseName: resources.databaseName,
+    allowFlag: "SUPPLY_TEST_ALLOW_NEW_RESOURCE",
+  });
+  if (admission === "CREATE") {
     await pool.query("CREATE DATABASE " + quotedIdentifier(resources.databaseName, "test database") + " OWNER " + quotedIdentifier(resources.maintenance.database.user, "maintenance user"));
     await pool.query("COMMENT ON DATABASE " + quotedIdentifier(resources.databaseName, "test database") + " IS " + quotedLiteral(RESOURCE_MARKER));
-    return;
   }
-  assert.equal(existing.rows[0]?.owner, resources.maintenance.database.user, "dedicated test database owner changed");
-  assert.equal(existing.rows[0]?.allowConnections, true);
-  assert.equal(existing.rows[0]?.isTemplate, false);
-  assert.equal(existing.rows[0]?.comment, RESOURCE_MARKER, "dedicated test database marker is missing or mismatched");
+  if (existing.rows.length > 0) {
+    assert.equal(existing.rows[0]?.allowConnections, true);
+    assert.equal(existing.rows[0]?.isTemplate, false);
+  }
 }
 
 async function ensureRole(pool: Pool, roleName: string, password: string, marker: string, allowPasswordChange = true): Promise<void> {

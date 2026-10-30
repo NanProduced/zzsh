@@ -10,6 +10,7 @@ import { Pool, type PoolClient } from "pg";
 
 import { loadConfig } from "../src/config/config";
 import {
+  admitTestDatabase,
   closeResource,
   DATABASE_CLEANUP_TIMEOUT_MS,
   settlesWithin,
@@ -211,14 +212,23 @@ test("real PostgreSQL with Drizzle satisfies FND-003 criteria", async () => {
 
   try {
     await assertIdentity(adminPool, "postgres");
-    const databaseResult = await adminPool.query<{ owner: string }>(
-      "SELECT pg_get_userbyid(datdba) AS owner FROM pg_database WHERE datname = $1",
+    const databaseResult = await adminPool.query<{ owner: string; marker: string | null; allowConnections: boolean; isTemplate: boolean }>(
+      "SELECT pg_get_userbyid(datdba) AS owner, shobj_description(oid, 'pg_database') AS marker, datallowconn AS \"allowConnections\", datistemplate AS \"isTemplate\" FROM pg_database WHERE datname = $1",
       [TEST_DATABASE],
     );
-    if (databaseResult.rows.length === 0) {
+    const admission = admitTestDatabase({
+      exists: databaseResult.rows.length > 0,
+      owner: databaseResult.rows[0]?.owner,
+      marker: databaseResult.rows[0]?.marker,
+      allowConnections: databaseResult.rows[0]?.allowConnections,
+      isTemplate: databaseResult.rows[0]?.isTemplate,
+      expectedOwner: LOCAL_TARGET.user,
+      expectedMarker: null,
+      databaseName: TEST_DATABASE,
+      allowFlag: "FND003_TEST_ALLOW_NEW_RESOURCE",
+    });
+    if (admission === "CREATE") {
       await adminPool.query(`CREATE DATABASE "${TEST_DATABASE}" OWNER "${LOCAL_TARGET.user}"`);
-    } else {
-      assert.equal(databaseResult.rows[0]?.owner, LOCAL_TARGET.user);
     }
 
     testPool = new Pool({ ...connection, database: TEST_DATABASE, max: 6 });

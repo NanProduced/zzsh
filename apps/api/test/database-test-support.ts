@@ -1,3 +1,5 @@
+import { strict as assert } from "node:assert";
+
 export const DATABASE_CLEANUP_TIMEOUT_MS = 2_000;
 
 export type ReleasableClient = {
@@ -155,3 +157,27 @@ export const ISOLATED_BUSINESS_DATA_TRUNCATE = `TRUNCATE
       "zzsh_iam"."im_identity_mapping",
       "zzsh_iam"."admin_security",
       "zzsh_iam"."audit_event"`;
+
+export type TestDatabaseAdmission = {
+  exists: boolean;
+  owner: string | null | undefined;
+  marker: string | null | undefined;
+  allowConnections: boolean | undefined;
+  isTemplate: boolean | undefined;
+  expectedOwner: string;
+  expectedMarker: string | null;
+  databaseName: string;
+  allowFlag: string;
+};
+
+export function admitTestDatabase(input: TestDatabaseAdmission, env: Record<string, string | undefined> = process.env): "REUSE" | "CREATE" {
+  if (input.exists) {
+    assert.equal(input.owner, input.expectedOwner, "dedicated test database owner changed");
+    assert.equal(input.marker, input.expectedMarker, "dedicated test database marker is missing or mismatched");
+    assert.equal(input.allowConnections, true, "dedicated test database is not accepting connections");
+    assert.equal(input.isTemplate, false, "dedicated test database must not be a template");
+    return "REUSE";
+  }
+  assert.equal(env[input.allowFlag], "1", `new test database ${input.databaseName} requires ${input.allowFlag}=1; reuse a registered resource set`);
+  return "CREATE";
+}

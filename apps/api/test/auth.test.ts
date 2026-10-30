@@ -1,4 +1,4 @@
-import { ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
+import { admitTestDatabase, ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
 import { strict as assert } from "node:assert";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { test } from "node:test";
@@ -223,15 +223,25 @@ async function ensureTargetDatabase(
     `SELECT pg_get_userbyid(d.datdba) AS owner, d.datallowconn AS "allowConnections", d.datistemplate AS "isTemplate", shobj_description(d.oid, 'pg_database') AS comment FROM pg_database d WHERE d.datname = $1`,
     [resources.databaseName],
   );
-  if (existing.rows.length === 0) {
+  const admission = admitTestDatabase({
+    exists: existing.rows.length > 0,
+    owner: existing.rows[0]?.owner,
+    marker: existing.rows[0]?.comment,
+    allowConnections: existing.rows[0]?.allowConnections,
+    isTemplate: existing.rows[0]?.isTemplate,
+    expectedOwner: resources.maintenance.database.user,
+    expectedMarker: RESOURCE_MARKER,
+    databaseName: resources.databaseName,
+    allowFlag: "M2_AUTH_TEST_ALLOW_NEW_RESOURCE",
+  });
+  if (admission === "CREATE") {
     await maintenancePool.query(`CREATE DATABASE ${target} OWNER ${quotedIdentifier(resources.maintenance.database.user, "DB_USER")}`);
     await maintenancePool.query(`COMMENT ON DATABASE ${target} IS ${quotedLiteral(RESOURCE_MARKER)}`);
-  } else {
+  }
+  if (existing.rows.length > 0) {
     const row = existing.rows[0]!;
-    assert.equal(row.owner, resources.maintenance.database.user, "M2 auth test database owner changed");
     assert.equal(row.allowConnections, true);
     assert.equal(row.isTemplate, false);
-    assert.equal(row.comment, RESOURCE_MARKER, "M2 auth test database marker is missing or mismatched");
   }
 }
 
