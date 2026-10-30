@@ -61,7 +61,7 @@ export function LegalDocumentsPanel({ snapshot }: { snapshot: Extract<SessionSna
     setBody(selected?.body ?? "");
     setEffectiveAt(selected?.effectiveAt ? selected.effectiveAt.slice(0, 16) : "");
     setRevision(selected?.revision ?? "");
-    setError(undefined); setMessage(undefined);
+    setError(undefined);
   }, [selected?.id, selected?.revision]);
 
   const create = async () => {
@@ -119,8 +119,8 @@ export function LegalDocumentsPanel({ snapshot }: { snapshot: Extract<SessionSna
       </div>
     </div>
     <div className="content-toolbar">
-      <label className="content-inline-field"><span>文书</span><ContentSelect ariaLabel="法律文书类型" value={docType} disabled={busy !== null} onChange={value => { setDocType(value as DocType); setSelectedId(""); }} options={(Object.keys(DOC_LABELS) as DocType[]).map(value => ({ value, label: DOC_LABELS[value] }))} className="min-w-44" /></label>
-      <label className="content-inline-field"><span>版本</span><ContentSelect ariaLabel="法律文书版本" value={selectedId} disabled={busy !== null || versions.length === 0} onChange={setSelectedId} options={versions.map(version => ({ value: version.id, label: `${version.status === "SEALED" ? "已封存" : "草稿"} · 修订 ${version.revision} · ${version.id}` }))} className="min-w-72" /></label>
+      <label className="content-inline-field"><span>文书</span><ContentSelect ariaLabel="法律文书类型" value={docType} disabled={busy !== null} onChange={value => { setDocType(value as DocType); setSelectedId(""); setMessage(undefined); }} options={(Object.keys(DOC_LABELS) as DocType[]).map(value => ({ value, label: DOC_LABELS[value] }))} className="min-w-44" /></label>
+      <label className="content-inline-field"><span>版本</span><ContentSelect ariaLabel="法律文书版本" value={selectedId} disabled={busy !== null || versions.length === 0} onChange={value => { setSelectedId(value); setMessage(undefined); }} options={versions.map(version => ({ value: version.id, label: `${version.status === "SEALED" ? "已封存" : "草稿"} · 修订 ${version.revision} · ${version.id}` }))} className="min-w-72" /></label>
     </div>
     <StatusMessage error={error} success={message} className="mt-3" />
     <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">

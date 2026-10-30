@@ -51,14 +51,17 @@ test("legal acceptance refs are strict and digest-bound", () => {
 });
 
 test("no sealed platform documents keeps the legacy boolean path", async () => {
-  const client = fakeClient([(sql) => sql.includes("legal_document_version") ? [] : undefined]);
+  const client = fakeClient([(sql) => sql.includes("to_regclass") ? [{ relation: null }] : []]);
   const check = await verifyPlatformLegalAcceptance(client, undefined);
   assert.deepEqual(check, { required: false });
-  assert.equal(client.calls.length, 2);
+  assert.equal(client.calls.length, 1);
 });
 
 test("both sealed documents require exact id and digest", async () => {
-  const client = fakeClient([(sql, values) => sql.includes("legal_document_version") ? (values[0] === "PLATFORM_TERMS" ? [terms] : [privacy]) : undefined]);
+  const client = fakeClient([
+    (sql) => sql.includes("to_regclass") ? [{ relation: "zzsh_content.legal_document_version" }] : undefined,
+    (sql, values) => sql.includes("legal_document_version") ? (values[0] === "PLATFORM_TERMS" ? [terms] : [privacy]) : undefined,
+  ]);
   const acceptance = { terms: { versionId: terms.id, digest: terms.digest }, privacy: { versionId: privacy.id, digest: privacy.digest } };
   const check = await verifyPlatformLegalAcceptance(client, acceptance);
   assert.equal(check.required, true);

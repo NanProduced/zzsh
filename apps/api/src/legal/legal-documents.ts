@@ -205,6 +205,12 @@ export async function readCurrentLegalDocument(client: PoolClient, docType: Lega
 }
 
 export async function readCurrentPlatformDocuments(client: PoolClient, at?: string): Promise<{ terms: LegalDocumentVersion | null; privacy: LegalDocumentVersion | null }> {
+  // Rollout guard: code may be deployed before the additive migration is journaled
+  // and applied. No table means no sealed platform document yet, not a login outage.
+  const relation = (await client.query<{ relation: string | null }>(
+    `SELECT to_regclass('zzsh_content.legal_document_version')::text AS relation`,
+  )).rows[0]?.relation;
+  if (!relation) return { terms: null, privacy: null };
   const terms = await readCurrentLegalDocument(client, "PLATFORM_TERMS", at);
   const privacy = await readCurrentLegalDocument(client, "PLATFORM_PRIVACY", at);
   return { terms, privacy };
