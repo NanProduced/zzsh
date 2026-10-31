@@ -123,7 +123,7 @@ function earningStore(resource:Resource):DistributionEarningStore{
   if(!Number.isSafeInteger(input.limit)||input.limit<1||input.limit>100)throw invalid('Bounded accrual discovery required');const games=scopeIds(input.gameIds);
   return withTransaction(pool,async c=>{
    await c.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');await ready(c);
-   const rows=(await c.query(`SELECT p.id,p.order_id,p.payment_confirmation_id,p.early,p.manual_reason,p.captured_cents::text,p.owner_net_cents::text,
+   const rows=(await c.query(`SELECT p.id,p.order_id,p.payment_confirmation_id,p.version_hash,p.early,p.manual_reason,p.captured_cents::text,p.owner_net_cents::text,
     p.renter_refund_cents::text,p.platform_contribution_cents::text,p.compensation_fee_cents::text,
     to_char(p.posted_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS posted_at,o.game_id
     FROM zzsh_order.settlement_posting p JOIN zzsh_order.rental_order o ON o.id=p.order_id
@@ -131,7 +131,9 @@ function earningStore(resource:Resource):DistributionEarningStore{
     ORDER BY p.posted_at DESC,p.id DESC LIMIT $3`,[local?[...allowed]:null,games,input.limit])).rows;
    const orders:MissingAccrualOrder[]=[];
    for(const row of rows){
-    const facts=completedFacts(row,row.order_id),base={orderId:row.order_id,postingId:row.id,paymentConfirmationId:row.payment_confirmation_id,postedAt:row.posted_at,gameId:row.game_id};
+    // game_id is only for admin scope; the immutable posting digest must use the same columns as accrual.
+    const {game_id,...postingRow}=row;
+    const facts=completedFacts(postingRow,row.order_id),base={orderId:row.order_id,postingId:row.id,paymentConfirmationId:row.payment_confirmation_id,postedAt:row.posted_at,gameId:row.game_id};
     try{
      const original=await payment.readOriginal(c,row.order_id,row.payment_confirmation_id),allocation=prepareAccrualFromFrozenPayment(original.basis,facts);
      if(allocation.knowledge==='UNKNOWN'){orders.push({...base,status:'UNKNOWN',reason:allocation.reason,baseCents:allocation.baseCents,items:[]});continue;}
