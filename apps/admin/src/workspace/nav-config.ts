@@ -18,6 +18,7 @@ import {
   ScaleIcon,
   ShoppingBagIcon,
   ScrollTextIcon,
+  HistoryIcon,
   ShieldIcon,
   Settings2Icon,
   SlidersHorizontalIcon,
@@ -66,6 +67,9 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
   }
   if (has("admin.role.read") || has("admin.permission.read")) {
     system.push({ label: "角色权限", icon: KeyRoundIcon, path: "/roles", kind: "roles" });
+  }
+  if (nav.isBoss) {
+    system.push({ label: "操作日志", icon: HistoryIcon, path: "/operation-log", kind: "operation-log" });
   }
   if (system.length > 0) {
     items.push({ label: "系统与安全", isTitle: true }, ...system);
@@ -152,6 +156,7 @@ export function titleForPath(pathname: string): string {
   if (pathname.startsWith("/approvals/")) return "审批详情";
   if (pathname === "/approvals") return "审批中心";
   if (pathname === "/audit") return "账号与权限审计";
+  if (pathname === "/operation-log") return "操作日志";
   if (pathname === "/users") return "用户管理";
   if (pathname.startsWith("/users/")) return "用户详情";
   if (pathname === "/supply/catalog") return "目录维护";
@@ -214,7 +219,8 @@ export const PAGE_SEARCH_KEYWORDS: Record<string, string[]> = {
   "/orders": ["订单", "交易", "orders", "dd"],
   "/users": ["用户管理", "用户", "users", "yh"],
   "/approvals": ["审批与审计", "审批", "待办", "工单", "approvals", "sp"],
-  "/audit": ["账号与权限审计", "审计", "操作日志", "安全日志", "audit", "sj", "rz"],
+  "/audit": ["账号与权限审计", "审计", "安全日志", "audit", "sj"],
+  "/operation-log": ["操作日志", "全部日志", "审计日志", "operation", "log", "czrz", "rz"],
   "/settings?section=security": ["账号安全", "个人中心", "安全", "密码", "pin", "account", "gr", "aq"],
   "/settings": ["设置", "外观", "主题", "偏好", "深色", "浅色", "appearance", "theme", "settings", "sz", "wg", "zt"],
 };

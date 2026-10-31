@@ -135,7 +135,7 @@ test("game scope action is selectable and carried into the audit read", async ()
   globalThis.fetch = mockFetch;
   const view = await renderView({ snapshot: snapshot(["admin.audit.read"]), initialQuery: { action: "admin.game_scope.assigned" } });
   try {
-    await waitFor(() => tableText(view).includes("admin.account.updated"));
+    await waitFor(() => tableText(view).includes("修改管理员资料"));
     assert.equal(calls[0].params.get("action"), "admin.game_scope.assigned");
     const trigger = view.rootNode.querySelector('[aria-label="操作类型"]');
     assert.ok(trigger && trigger.getAttribute("role") === "combobox", "action filter is the project Select");
@@ -153,7 +153,7 @@ test("cursor stack paginates and safety details collapse by default", async () =
   globalThis.fetch = mockFetch;
   const view = await renderView({ snapshot: snapshot(["admin.audit.read"]), initialQuery: {} });
   try {
-    await waitFor(() => tableText(view).includes("admin.account.updated"));
+    await waitFor(() => tableText(view).includes("修改管理员资料"));
     assert.equal(calls.length >= 1, true);
     assert.equal(calls[0].params.get("limit"), "25");
     assert.equal(calls[0].params.get("cursor"), null, "first page carries no cursor");
@@ -163,8 +163,11 @@ test("cursor stack paginates and safety details collapse by default", async () =
     assert.ok(detail, "safety detail cell renders a details element");
     assert.equal(detail.hasAttribute("open"), false, "collapsed by default");
     const summaryEl = detail.querySelector("summary");
-    assert.equal(summaryEl.textContent.trim(), "安全详情");
-    assert.match(detail.querySelector("pre").textContent, /zz00002/, "JSON payload is preserved while collapsed");
+    assert.equal(summaryEl.textContent.trim(), "详情");
+    assert.match(detail.querySelector("dl").textContent, /账号zz00002/, "details render as a Chinese key-value list");
+    assert.equal(tableText(view).includes("admin.account.updated"), false, "raw action code is only in the tooltip");
+    assert.match(view.rootNode.textContent, /时间（北京时间）/);
+    assert.match(view.rootNode.textContent, /本页 \d+ 条/);
     await click(summaryEl);
     assert.equal(detail.open, true, "native summary click toggles open");
 
@@ -175,8 +178,8 @@ test("cursor stack paginates and safety details collapse by default", async () =
     assert.equal(prev.disabled, true, "first page cannot go back");
     assert.ok(!view.rootNode.textContent.includes("回到首页"), "no home button on page 1");
     await click(next);
-    await waitFor(() => tableText(view).includes("admin.frozen"));
-    assert.equal(tableText(view).includes("admin.account.updated"), false, "page 2 replaced page 1");
+    await waitFor(() => tableText(view).includes("冻结管理员"));
+    assert.equal(tableText(view).includes("修改管理员资料"), false, "page 2 replaced page 1");
     assert.match(view.rootNode.textContent, /第 2 页/);
     const cursorCall = calls.find((item) => item.params.get("cursor") === "AC1");
     assert.ok(cursorCall, "page 2 requests the next cursor");
@@ -186,9 +189,9 @@ test("cursor stack paginates and safety details collapse by default", async () =
 
     // 上一页还原
     await click([...view.rootNode.querySelectorAll("button")].find((button) => button.textContent.trim() === "上一页"));
-    await waitFor(() => tableText(view).includes("admin.account.updated"));
+    await waitFor(() => tableText(view).includes("修改管理员资料"));
     assert.match(view.rootNode.textContent, /第 1 页/);
-    assert.equal(tableText(view).includes("admin.frozen"), false);
+    assert.equal(tableText(view).includes("冻结管理员"), false);
   } finally {
     await view.cleanup();
     globalThis.fetch = undefined;
@@ -205,7 +208,7 @@ test("initialQuery backfills the filters and submit resets the cursor stack", as
     onQueryChange: (query) => changes.push(query),
   });
   try {
-    await waitFor(() => tableText(view).includes("admin.account.updated"));
+    await waitFor(() => tableText(view).includes("修改管理员资料"));
     const actorInput = [...view.rootNode.querySelectorAll("form label")].find((label) => label.textContent.includes("操作者账号")).querySelector("input");
     assert.equal(view.rootNode.querySelectorAll("form select").length, 0, "filters use the project Select, not native selects");
     assert.equal(fieldValue(view, "action"), "admin.account.updated", "select restored from initialQuery");
@@ -215,7 +218,7 @@ test("initialQuery backfills the filters and submit resets the cursor stack", as
 
     // 翻到第 2 页后再提交筛选,游标栈回到第 1 页
     await click([...view.rootNode.querySelectorAll("button")].find((button) => button.textContent.trim() === "下一页"));
-    await waitFor(() => tableText(view).includes("admin.frozen"));
+    await waitFor(() => tableText(view).includes("冻结管理员"));
     setInput(actorInput, "ZZ00001");
     const form = view.rootNode.querySelector("form");
     await act(async () => { form.dispatchEvent(new browser.Event("submit", { bubbles: true, cancelable: true })); });
@@ -244,7 +247,7 @@ test("without permission the view refuses to render audit data", async () => {
   try {
     await waitFor(() => view.rootNode.textContent.includes("当前账号没有账号与权限审计读取权限"));
     assert.equal(calls.length, 0, "no audit request without the permission");
-    assert.equal(view.rootNode.textContent.includes("admin.account.updated"), false);
+    assert.equal(view.rootNode.textContent.includes("修改管理员资料"), false);
   } finally {
     await view.cleanup();
     globalThis.fetch = undefined;
@@ -266,7 +269,7 @@ test("audit data clears when actor and session context changes before the new re
   };
   const view = await renderView({ snapshot: snapshot(["admin.audit.read"]), initialQuery: {} });
   try {
-    await waitFor(() => tableText(view).includes("admin.account.updated"));
+    await waitFor(() => tableText(view).includes("修改管理员资料"));
     const nextSnapshot = {
       ...snapshot(["admin.audit.read"]),
       adminUserId: "admin-staff",
@@ -275,10 +278,10 @@ test("audit data clears when actor and session context changes before the new re
     };
     await view.render({ snapshot: nextSnapshot, refreshNonce: 1 });
     await settle();
-    assert.equal(tableText(view).includes("admin.account.updated"), false, "old actor audit data is cleared while the new read is pending");
+    assert.equal(tableText(view).includes("修改管理员资料"), false, "old actor audit data is cleared while the new read is pending");
     assert.ok(releaseSecondAudit, "new actor audit read is held");
     releaseSecondAudit();
-    await waitFor(() => tableText(view).includes("admin.frozen"));
+    await waitFor(() => tableText(view).includes("冻结管理员"));
   } finally {
     if (releaseSecondAudit) releaseSecondAudit();
     await view.cleanup();
@@ -304,11 +307,11 @@ test("StrictMode restores audit reads and unmount rejects late responses", async
   const root = createRoot(rootNode);
   try {
     await act(async () => root.render(createElement(StrictMode, null, createElement(AdminAuditView, { snapshot: snapshot(["admin.audit.read"]), initialQuery: {} }))));
-    await waitFor(() => tableText({ rootNode }).includes("admin.frozen"));
-    assert.equal(tableText({ rootNode }).includes("admin.account.updated"), false, "StrictMode cleanup drops the first setup response");
+    await waitFor(() => tableText({ rootNode }).includes("冻结管理员"));
+    assert.equal(tableText({ rootNode }).includes("修改管理员资料"), false, "StrictMode cleanup drops the first setup response");
     releaseOld();
     await settle();
-    assert.equal(tableText({ rootNode }).includes("admin.frozen"), true, "the rebuilt effect remains live");
+    assert.equal(tableText({ rootNode }).includes("冻结管理员"), true, "the rebuilt effect remains live");
   } finally {
     await act(async () => root.unmount());
     rootNode.remove();
@@ -353,7 +356,7 @@ test("initial loading shows skeleton and '正在读取…', never '0条' or empt
     assert.ok(skeletons.length >= 5, "renders skeleton placeholder rows while loading");
 
     releaseLoad();
-    await waitFor(() => tableText(view).includes("admin.account.updated"));
+    await waitFor(() => tableText(view).includes("修改管理员资料"));
     assert.match(view.rootNode.textContent, /1 条/);
   } finally {
     await view.cleanup();
@@ -404,7 +407,7 @@ test("first page empty with filters shows '当前筛选无匹配记录' and clea
     assert.ok(clearBtn, "shows clear filters button");
 
     await click(clearBtn);
-    await waitFor(() => tableText(view).includes("admin.account.updated"));
+    await waitFor(() => tableText(view).includes("修改管理员资料"));
     assert.deepEqual(changes.at(-1), {}, "onQueryChange reports cleared query");
     assert.equal(calls.at(-1).params.get("action"), null, "clear filters re-fetched without action");
     assert.match(view.rootNode.textContent, /1 条/);
@@ -431,7 +434,7 @@ test("non-first page empty shows '当前页暂无记录' with back and home butt
 
   const view = await renderView({ snapshot: snapshot(["admin.audit.read"]), initialQuery: {} });
   try {
-    await waitFor(() => tableText(view).includes("admin.account.updated"));
+    await waitFor(() => tableText(view).includes("修改管理员资料"));
     const nextBtn = [...view.rootNode.querySelectorAll("button")].find((b) => b.textContent.trim() === "下一页");
     assert.ok(nextBtn && !nextBtn.disabled);
     await click(nextBtn);
@@ -443,7 +446,7 @@ test("non-first page empty shows '当前页暂无记录' with back and home butt
     assert.ok(prevBtn, "renders return to previous page button");
     await click(prevBtn);
 
-    await waitFor(() => tableText(view).includes("admin.account.updated"));
+    await waitFor(() => tableText(view).includes("修改管理员资料"));
     assert.match(view.rootNode.textContent, /第 1 页/);
   } finally {
     await view.cleanup();
@@ -476,7 +479,7 @@ test("initial read 500 displays failure empty state and retry recovers", async (
     assert.ok(retryBtn, "retry button is available");
 
     await click(retryBtn);
-    await waitFor(() => tableText(view).includes("admin.account.updated"));
+    await waitFor(() => tableText(view).includes("修改管理员资料"));
     assert.match(view.rootNode.textContent, /1 条/);
     assert.equal(view.rootNode.textContent.includes("读取失败"), false);
   } finally {
@@ -515,7 +518,7 @@ test("same query refresh failure retains existing rows and shows warning alert",
 
   const view = await renderView({ snapshot: snapshot(["admin.audit.read"]), initialQuery: {} });
   try {
-    await waitFor(() => tableText(view).includes("admin.account.updated"));
+    await waitFor(() => tableText(view).includes("修改管理员资料"));
     assert.match(view.rootNode.textContent, /1 条/);
 
     // Trigger a refresh with the same query via refreshNonce
@@ -523,7 +526,7 @@ test("same query refresh failure retains existing rows and shows warning alert",
     await waitFor(() => view.rootNode.textContent.includes("数据未更新"));
 
     // Previous row is still displayed!
-    assert.ok(tableText(view).includes("admin.account.updated"), "retains existing records on same-query refresh failure");
+    assert.ok(tableText(view).includes("修改管理员资料"), "retains existing records on same-query refresh failure");
     assert.match(view.rootNode.textContent, /1 条（未更新）/);
     assert.match(view.rootNode.textContent, /刷新失败：当前展示为上次成功获取的内容（未能更新）/);
   } finally {
@@ -549,17 +552,17 @@ test("query change failure does not retain old records from previous query", asy
 
   const view = await renderView({ snapshot: snapshot(["admin.audit.read"]), initialQuery: {} });
   try {
-    await waitFor(() => tableText(view).includes("admin.account.updated"));
+    await waitFor(() => tableText(view).includes("修改管理员资料"));
 
     // Submit new query with different actor
-    const actorInput = [...view.rootNode.querySelectorAll('form input:not([name="action"]):not([name="objectType"])')][0];
+    const actorInput = view.rootNode.querySelector('form input[name="actorUsername"]');
     setInput(actorInput, "ZZ00009");
     const form = view.rootNode.querySelector("form");
     await act(async () => { form.dispatchEvent(new browser.Event("submit", { bubbles: true, cancelable: true })); });
     await settle();
 
     await waitFor(() => view.rootNode.textContent.includes("审计记录读取失败"));
-    assert.equal(tableText(view).includes("admin.account.updated"), false, "does not leak previous records into new failed query");
+    assert.equal(tableText(view).includes("修改管理员资料"), false, "does not leak previous records into new failed query");
   } finally {
     await view.cleanup();
     globalThis.fetch = undefined;
@@ -585,12 +588,12 @@ test("end-of-feed badge is shown when nextCursor is null and hidden when nextCur
 
   const view = await renderView({ snapshot: snapshot(["admin.audit.read"]), initialQuery: {} });
   try {
-    await waitFor(() => tableText(view).includes("admin.account.updated"));
+    await waitFor(() => tableText(view).includes("修改管理员资料"));
     assert.equal(view.rootNode.textContent.includes("当前查询没有更多记录"), false, "no end-of-feed when nextCursor exists");
 
     const nextBtn = [...view.rootNode.querySelectorAll("button")].find((b) => b.textContent.trim() === "下一页");
     await click(nextBtn);
-    await waitFor(() => tableText(view).includes("admin.frozen"));
+    await waitFor(() => tableText(view).includes("冻结管理员"));
 
     assert.ok(view.rootNode.textContent.includes("当前查询没有更多记录"), "renders end-of-feed when nextCursor is null");
   } finally {
@@ -605,7 +608,7 @@ test("403 error or revoked permissions clears records and shows unauthorized sta
   const view = await renderView({ snapshot: snapshot(["admin.audit.read"]), initialQuery: {} });
   try {
     await waitFor(() => view.rootNode.textContent.includes("当前账号没有账号与权限审计读取权限"));
-    assert.equal(tableText(view).includes("admin.account.updated"), false);
+    assert.equal(tableText(view).includes("修改管理员资料"), false);
   } finally {
     await view.cleanup();
     globalThis.fetch = undefined;
@@ -623,13 +626,13 @@ test("F1: page-two failure retry replays target cursor instead of resetting to f
   };
   const view = await renderView({ snapshot: snapshot(["admin.audit.read"]), initialQuery: {} });
   try {
-    await waitFor(() => tableText(view).includes("admin.account.updated"));
+    await waitFor(() => tableText(view).includes("修改管理员资料"));
     await click([...view.rootNode.querySelectorAll("button")].find((b) => b.textContent === "下一页"));
     await waitFor(() => view.rootNode.textContent.includes("审计记录读取失败"));
     await click([...view.rootNode.querySelectorAll("button")].find((b) => b.textContent === "重试"));
     // Target was AC1, retry must replay AC1!
     assert.deepEqual(seen, [null, "AC1", "AC1"]);
-    await waitFor(() => tableText(view).includes("admin.account.updated"));
+    await waitFor(() => tableText(view).includes("修改管理员资料"));
   } finally {
     await view.cleanup();
     globalThis.fetch = undefined;
@@ -647,7 +650,7 @@ test("F1: new filter failure retry keeps new filter with cursor=null instead of 
   };
   const view = await renderView({ snapshot: snapshot(["admin.audit.read"]), initialQuery: {} });
   try {
-    await waitFor(() => tableText(view).includes("admin.account.updated"));
+    await waitFor(() => tableText(view).includes("修改管理员资料"));
     await click([...view.rootNode.querySelectorAll("button")].find((b) => b.textContent === "下一页"));
     await act(async () => setInput(view.rootNode.querySelector('input[placeholder="如 ZZ00001"]'), "ZZ00002"));
     await act(async () => view.rootNode.querySelector("form").dispatchEvent(new browser.Event("submit", { bubbles: true, cancelable: true })));
@@ -680,8 +683,23 @@ test("F2: successful refresh after 403 unlatches forbidden state and displays re
     // Service recovers and user triggers workspace refresh via refreshNonce
     await view.render({ refreshNonce: 1 });
     await settle();
-    await waitFor(() => tableText(view).includes("admin.account.updated"));
+    await waitFor(() => tableText(view).includes("修改管理员资料"));
     assert.equal(view.rootNode.textContent.includes("当前账号没有"), false);
+  } finally {
+    await view.cleanup();
+    globalThis.fetch = undefined;
+  }
+});
+
+test("outcome and Beijing time range filters are sent as ISO instants", async () => {
+  calls = [];
+  globalThis.fetch = mockFetch;
+  const view = await renderView({ snapshot: snapshot(["admin.audit.read"]), initialQuery: { outcome: "FAILURE", from: "2026-10-01T08:00", to: "2026-10-02T08:00" } });
+  try {
+    await waitFor(() => calls.length >= 1);
+    assert.equal(calls[0].params.get("outcome"), "FAILURE");
+    assert.equal(calls[0].params.get("from"), "2026-10-01T00:00:00.000Z");
+    assert.equal(calls[0].params.get("to"), "2026-10-02T00:00:00.000Z");
   } finally {
     await view.cleanup();
     globalThis.fetch = undefined;

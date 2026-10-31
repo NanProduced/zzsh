@@ -1,7 +1,9 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import {
   AlertCircleIcon,
   AlertTriangleIcon,
+  CopyIcon,
+  CheckIcon,
   InboxIcon,
   SearchXIcon,
 } from "lucide-react";
@@ -12,10 +14,24 @@ import { EmptyState, EndOfFeed } from "../components/empty-state";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Skeleton } from "../components/ui/skeleton";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "../components/ui/alert";
+import { InlineStatus } from "../components/ui/badge";
+import { Input } from "../components/ui/input";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip";
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "../components/ui/sheet";
+import {
+  ACCOUNT_AUDIT_ACTIONS,
+  ACCOUNT_OBJECT_TYPES,
+  DOMAIN_LABELS,
+  actionLabel as labelForAction,
+  beijingLocalToIso,
+  detailRows,
+  domainOf,
+  formatBeijing,
+  objectTypeLabel,
+} from "../lib/audit-labels";
 import {
   AdminApiError,
   adminRequest,
-  formatDate,
   friendlyError,
   hasPermission,
   type SessionSnapshot,
@@ -23,10 +39,12 @@ import {
 
 type AuditEvent = {
   eventId: string;
-  actor: { username: string; displayUsername?: string; name: string };
+  actor: { type?: string; username: string; displayUsername?: string; name: string };
   action: string;
   objectType: string;
   objectId: string | null;
+  objectDisplay?: string | null;
+  rawObjectType?: string;
   outcome: "SUCCESS" | "FAILURE";
   reason: string | null;
   requestId: string | null;
@@ -47,60 +65,87 @@ type AuditFilterQuery = {
   objectType: string;
   actorUsername: string;
   requestId: string;
+  outcome: string;
+  from: string;
+  to: string;
+  domain: string;
+  objectId: string;
 };
 
-const actions = [
-  "admin.account.created",
-  "admin.account.updated",
-  "admin.permission.assigned",
-  "admin.game_scope.assigned",
-  "admin.role.created",
-  "admin.role.updated",
-  "admin.frozen",
-  "admin.unfrozen",
-  "admin.session.force_logged_out",
-  "user.account.restored",
-  "user.account.frozen",
-  "user.account.unfrozen",
-];
+export type AuditViewVariant = "account" | "operations";
 
-const ACTION_LABELS: Record<string, string> = {
-  "admin.account.created": "创建管理员",
-  "admin.account.updated": "修改管理员",
-  "admin.permission.assigned": "调整个人权限",
-  "admin.game_scope.assigned": "调整游戏范围",
-  "admin.role.created": "创建角色",
-  "admin.role.updated": "修改角色",
-  "admin.frozen": "冻结管理员",
-  "admin.unfrozen": "解除冻结",
-  "admin.session.force_logged_out": "撤销会话",
-  "user.account.restored": "恢复用户账号（已退役）",
-  "user.account.frozen": "冻结用户",
-  "user.account.unfrozen": "解冻用户",
-};
+const FILTER_KEYS = ["action", "objectType", "actorUsername", "requestId", "outcome", "from", "to", "domain", "objectId"] as const;
+
+function queryFrom(source: Record<string, string> | undefined): AuditFilterQuery {
+  return Object.fromEntries(FILTER_KEYS.map((key) => [key, source?.[key]?.trim() ?? ""])) as AuditFilterQuery;
+}
+
+function cleanQuery(query: AuditFilterQuery): Record<string, string> {
+  return Object.fromEntries(FILTER_KEYS.filter((key) => query[key].trim()).map((key) => [key, query[key].trim()]));
+}
 
 export function actionLabel(action: string): string {
-  return ACTION_LABELS[action] ?? action;
+  return labelForAction(action);
 }
 
-function actorLabel(actor: AuditEvent["actor"]): string {
-  return `${actor.name}（${actor.displayUsername ?? actor.username}）`;
-}
-
-function objectLabel(event: AuditEvent): string {
-  const names: Record<string, string> = {
-    admin_user: "管理员账号",
-    admin_role: "管理员角色",
-    admin_security: "账号安全状态",
-    user_account: "用户账号",
-  };
-  return `${names[event.objectType] ?? event.objectType}${event.objectId ? ` · ${event.objectId}` : ""}`;
+function actorText(actor: AuditEvent["actor"]): string {
+  return actor.name || actor.displayUsername || actor.username;
 }
 
 function scopeLabel(scope: string | undefined): string {
-  if (scope === "BOSS_ALL_GENERIC_ADMIN_AUDIT") return "Boss：全部账号与权限审计白名单事件";
-  if (scope === "SELF_TARGET_AND_ROLE_ACTIONS") return "当前账号：自身对象及本人角色操作事件";
-  return "已按当前账号的对象范围过滤";
+  if (scope === "BOSS_ALL_GENERIC_ADMIN_AUDIT") return "全部管理员的账号与权限相关记录";
+  if (scope === "SELF_TARGET_AND_ROLE_ACTIONS") return "与你本人账号相关的记录，以及你执行的角色与账号操作";
+  if (scope === "BOSS_ALL_AUDIT_EVENTS") return "后台全部操作记录";
+  return "按当前账号可见范围";
+}
+
+function CopyId({ value, label }: { value: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={<button type="button" aria-label={`复制${label}`} className="inline-flex size-5 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" />}
+        onClick={() => { void navigator.clipboard?.writeText(value).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }).catch(() => undefined); }}
+      >
+        {copied ? <CheckIcon className="size-3" /> : <CopyIcon className="size-3" />}
+      </TooltipTrigger>
+      <TooltipContent className="max-w-72 break-all font-mono text-[11px]">{copied ? "已复制" : `${label}：${value}`}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+function Hint({ children, hint }: { children: ReactNode; hint: string }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger render={<span tabIndex={0} className="cursor-help rounded underline decoration-dotted decoration-muted-foreground/50 underline-offset-4 focus-visible:outline-2 focus-visible:outline-ring" />}>{children}</TooltipTrigger>
+      <TooltipContent className="max-w-72 break-all font-mono text-[11px]">{hint}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+function ObjectCell({ event }: { event: AuditEvent }) {
+  const type = objectTypeLabel(event.objectType);
+  return (
+    <div className="flex min-w-0 items-center gap-1">
+      <span className="truncate">{event.objectDisplay ? `${type} · ${event.objectDisplay}` : type}</span>
+      {event.objectId ? <CopyId value={event.objectId} label="对象编号" /> : null}
+    </div>
+  );
+}
+
+function DetailList({ details }: { details: Record<string, unknown> }) {
+  const rows = detailRows(details);
+  if (rows.length === 0) return <p className="text-[11px] text-muted-foreground">无附加详情</p>;
+  return (
+    <dl className="grid grid-cols-[minmax(5rem,auto)_1fr] gap-x-3 gap-y-1 text-[11px]">
+      {rows.map((row) => (
+        <div key={row.key} className="contents">
+          <dt className="text-muted-foreground">{row.label}</dt>
+          <dd className="break-all text-foreground">{row.value}</dd>
+        </div>
+      ))}
+    </dl>
+  );
 }
 
 function contextKeyOf(snapshot: Extract<SessionSnapshot, { authenticated: true }>): string {
@@ -119,42 +164,40 @@ function emptyPage(): CursorPage {
 }
 
 function hasActiveFilters(query: AuditFilterQuery): boolean {
-  return Boolean(
-    query.action ||
-    query.objectType ||
-    query.actorUsername.trim() ||
-    query.requestId.trim()
-  );
+  return FILTER_KEYS.some((key) => query[key].trim().length > 0);
 }
 
 function queryKeyOf(query: AuditFilterQuery | Record<string, string> | undefined): string {
-  return JSON.stringify(["action", "objectType", "actorUsername", "requestId"].map((key) => [
+  return JSON.stringify(FILTER_KEYS.map((key) => [
     key,
     (query as Record<string, string> | undefined)?.[key]?.trim() ?? "",
   ]));
 }
 
-const OBJECT_TYPE_ITEMS = [
-  { value: "ALL", label: "全部" },
-  { value: "admin_user", label: "管理员账号" },
-  { value: "admin_security", label: "账号安全状态" },
-  { value: "admin_role", label: "管理员角色" },
-  { value: "user_account", label: "用户账号" },
-];
-const actionItems = [{ value: "ALL", label: "全部" }, ...actions.map((item) => ({ value: item, label: actionLabel(item) }))];
+const ALL = { value: "ALL", label: "全部" };
+const ACCOUNT_OBJECT_ITEMS = [ALL, ...ACCOUNT_OBJECT_TYPES.map((value) => ({ value, label: objectTypeLabel(value) }))];
+const ACCOUNT_ACTION_ITEMS = [ALL, ...ACCOUNT_AUDIT_ACTIONS.map((value) => ({ value, label: labelForAction(value) }))];
+const OUTCOME_ITEMS = [ALL, { value: "SUCCESS", label: "成功" }, { value: "FAILURE", label: "失败" }];
+const DOMAIN_ITEMS = [ALL, ...Object.entries(DOMAIN_LABELS).map(([value, label]) => ({ value, label }))];
+const OPERATION_OBJECT_ITEMS = [ALL, ...["admin_user", "admin_security", "admin_role", "admin_session", "user_account", "approval_request", "approval_template"].map((value) => ({ value, label: objectTypeLabel(value) }))];
+const inputClass = "h-9 w-full text-xs";
 
 export function AdminAuditView({
   snapshot,
   initialQuery,
   onQueryChange,
   refreshNonce = 0,
+  variant = "account",
 }: {
+  variant?: AuditViewVariant;
   snapshot: Extract<SessionSnapshot, { authenticated: true }>;
   initialQuery?: Record<string, string>;
   onQueryChange?: (query: Record<string, string>) => void;
   refreshNonce?: number;
 }) {
-  const canRead = hasPermission(snapshot, "admin.audit.read");
+  const isOperations = variant === "operations";
+  const canRead = isOperations ? snapshot.security.isBoss : hasPermission(snapshot, "admin.audit.read");
+  const [selected, setSelected] = useState<AuditEvent | null>(null);
   const contextKey = contextKeyOf(snapshot);
   const contextKeyRef = useRef(contextKey);
   const contextEpochRef = useRef(0);
@@ -164,17 +207,9 @@ export function AdminAuditView({
   }
   const contextEpoch = contextEpochRef.current;
 
-  const [action, setAction] = useState(initialQuery?.action ?? "");
-  const [objectType, setObjectType] = useState(initialQuery?.objectType ?? "");
-  const [actorUsername, setActorUsername] = useState(initialQuery?.actorUsername ?? "");
-  const [requestId, setRequestId] = useState(initialQuery?.requestId ?? "");
-
-  const [submittedQuery, setSubmittedQuery] = useState<AuditFilterQuery>(() => ({
-    action: initialQuery?.action ?? "",
-    objectType: initialQuery?.objectType ?? "",
-    actorUsername: initialQuery?.actorUsername?.trim() ?? "",
-    requestId: initialQuery?.requestId?.trim() ?? "",
-  }));
+  const [draft, setDraft] = useState<AuditFilterQuery>(() => queryFrom(initialQuery));
+  const setField = (key: keyof AuditFilterQuery, value: string) => setDraft((current) => ({ ...current, [key]: value }));
+  const [submittedQuery, setSubmittedQuery] = useState<AuditFilterQuery>(() => queryFrom(initialQuery));
   const submittedQueryRef = useRef(submittedQuery);
   submittedQueryRef.current = submittedQuery;
 
@@ -208,7 +243,7 @@ export function AdminAuditView({
   const previousContextKeyRef = useRef(contextKey);
   const previousQueryKeyRef = useRef(initialQueryKey);
   const draftQueryKeyRef = useRef("");
-  draftQueryKeyRef.current = queryKeyOf({ action, objectType, actorUsername, requestId });
+  draftQueryKeyRef.current = queryKeyOf(draft);
 
   const isCurrent = (epoch: number, key: string) => mountedRef.current && contextEpochRef.current === epoch && contextKeyRef.current === key;
 
@@ -278,13 +313,19 @@ export function AdminAuditView({
 
     try {
       const params = new URLSearchParams({ limit: "25" });
-      if (targetQuery.action) params.set("action", targetQuery.action);
-      if (targetQuery.objectType) params.set("objectType", targetQuery.objectType);
-      if (targetQuery.actorUsername.trim()) params.set("actorUsername", targetQuery.actorUsername.trim());
-      if (targetQuery.requestId.trim()) params.set("requestId", targetQuery.requestId.trim());
+      for (const key of ["action", "objectType", "actorUsername", "requestId", "outcome"] as const) {
+        if (targetQuery[key].trim()) params.set(key, targetQuery[key].trim());
+      }
+      if (isOperations && targetQuery.domain.trim()) params.set("domain", targetQuery.domain.trim());
+      if (isOperations && targetQuery.objectId.trim()) params.set("objectId", targetQuery.objectId.trim());
+      const fromIso = beijingLocalToIso(targetQuery.from);
+      const toIso = beijingLocalToIso(targetQuery.to);
+      if (fromIso) params.set("from", fromIso);
+      if (toIso) params.set("to", toIso);
       if (cursor) params.set("cursor", cursor);
 
-      const result = await adminRequest<AuditResponse>(`/security/audit/events?${params.toString()}`);
+      const endpoint = isOperations ? "/security/audit/operations" : "/security/audit/events";
+      const result = await adminRequest<AuditResponse>(`${endpoint}?${params.toString()}`);
       if (!isCurrent(requestEpoch, requestContextKey) || seqRef.current !== seq) return;
 
       if (!result || typeof result !== "object" || !Array.isArray(result.events)) {
@@ -354,10 +395,7 @@ export function AdminAuditView({
   useEffect(() => {
     const queryChanged = previousQueryKeyRef.current !== initialQueryKey;
     previousQueryKeyRef.current = initialQueryKey;
-    setAction(initialQuery?.action ?? "");
-    setObjectType(initialQuery?.objectType ?? "");
-    setActorUsername(initialQuery?.actorUsername ?? "");
-    setRequestId(initialQuery?.requestId ?? "");
+    setDraft(queryFrom(initialQuery));
     if (queryChanged && draftQueryKeyRef.current !== initialQueryKey) {
       seqRef.current += 1;
       pageRef.current = emptyPage();
@@ -368,12 +406,7 @@ export function AdminAuditView({
       setRefreshWarning(undefined);
       lastSuccessRef.current = null;
       lastAttemptRef.current = null;
-      const syncedQuery: AuditFilterQuery = {
-        action: initialQuery?.action ?? "",
-        objectType: initialQuery?.objectType ?? "",
-        actorUsername: initialQuery?.actorUsername?.trim() ?? "",
-        requestId: initialQuery?.requestId?.trim() ?? "",
-      };
+      const syncedQuery = queryFrom(initialQuery);
       setSubmittedQuery(syncedQuery);
       submittedQueryRef.current = syncedQuery;
       if (canRead) {
@@ -383,7 +416,7 @@ export function AdminAuditView({
   }, [initialQueryKey]);
 
   if (!canRead || isForbidden) {
-    return <section className="section-panel"><StatusMessage tone="warning" error="当前账号没有账号与权限审计读取权限。普通账号读取权限不自动包含此权限。" /></section>;
+    return <section className="section-panel"><StatusMessage tone="warning" error={isOperations ? "操作日志仅 Boss 可查看。" : "当前账号没有账号与权限审计读取权限。普通账号读取权限不自动包含此权限。"} /></section>;
   }
 
   const navigate = (kind: "prev" | "next" | "first") => {
@@ -405,16 +438,8 @@ export function AdminAuditView({
   };
 
   const handleClearFilters = () => {
-    setAction("");
-    setObjectType("");
-    setActorUsername("");
-    setRequestId("");
-    const emptyFilters: AuditFilterQuery = {
-      action: "",
-      objectType: "",
-      actorUsername: "",
-      requestId: "",
-    };
+    const emptyFilters = queryFrom(undefined);
+    setDraft(emptyFilters);
     setSubmittedQuery(emptyFilters);
     submittedQueryRef.current = emptyFilters;
     onQueryChange?.({});
@@ -423,20 +448,10 @@ export function AdminAuditView({
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const nextQuery: AuditFilterQuery = {
-      action,
-      objectType,
-      actorUsername: actorUsername.trim(),
-      requestId: requestId.trim(),
-    };
+    const nextQuery = queryFrom(draft);
     setSubmittedQuery(nextQuery);
     submittedQueryRef.current = nextQuery;
-    const clean: Record<string, string> = {};
-    if (nextQuery.action) clean.action = nextQuery.action;
-    if (nextQuery.objectType) clean.objectType = nextQuery.objectType;
-    if (nextQuery.actorUsername) clean.actorUsername = nextQuery.actorUsername;
-    if (nextQuery.requestId) clean.requestId = nextQuery.requestId;
-    onQueryChange?.(clean);
+    onQueryChange?.(cleanQuery(nextQuery));
     void load({ query: nextQuery, target: { cursors: [null], index: 0 } });
   };
 
@@ -448,52 +463,73 @@ export function AdminAuditView({
     }
   };
 
+  const actionItems = isOperations ? null : ACCOUNT_ACTION_ITEMS;
+  const objectItems = isOperations ? OPERATION_OBJECT_ITEMS : ACCOUNT_OBJECT_ITEMS;
+  const timeInvalid = Boolean(draft.from && draft.to && beijingLocalToIso(draft.from) > beijingLocalToIso(draft.to));
+  const draftHasFilters = hasActiveFilters(draft) || hasActiveFilters(submittedQuery);
+  const selectField = (key: keyof AuditFilterQuery, label: string, items: { value: string; label: string }[]) => (
+    <label className="space-y-1 text-xs">
+      <span className="text-muted-foreground block">{label}</span>
+      <Select name={key} value={draft[key] || "ALL"} onValueChange={(next) => setField(key, next && next !== "ALL" ? String(next) : "")} items={items}>
+        <SelectTrigger aria-label={label} className="h-9 w-full text-xs"><SelectValue /></SelectTrigger>
+        <SelectContent>{items.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}</SelectContent>
+      </Select>
+    </label>
+  );
+  const textField = (key: keyof AuditFilterQuery, label: string, placeholder?: string) => (
+    <label className="space-y-1 text-xs"><span className="text-muted-foreground block">{label}</span><Input name={key} value={draft[key]} onChange={(event) => setField(key, event.target.value)} className={inputClass} placeholder={placeholder} /></label>
+  );
+  const timeField = (key: "from" | "to", label: string) => (
+    <label className="space-y-1 text-xs"><span className="text-muted-foreground block">{label}（北京时间）</span><Input type="datetime-local" name={key} value={draft[key]} onChange={(event) => setField(key, event.target.value)} className={inputClass} aria-invalid={timeInvalid || undefined} /></label>
+  );
+  const columns = ["时间（北京时间）", "操作者", "操作", "对象", "结果", isOperations ? "详情" : "详情"];
+
   return (
+    <TooltipProvider>
     <div className="space-y-6">
       <section className="section-panel">
         <div className="panel-heading">
           <div>
-            <h3>账号与权限审计</h3>
-            <p>只读查询账号、角色、授权、会话撤销与用户恢复事件；审批事件另在“审批与审计”中查看。敏感字段由服务端裁剪。</p>
+            <h3>{isOperations ? "操作日志" : "账号与权限审计"}</h3>
+            <p>{isOperations
+              ? "后台全部操作记录，仅供查看。敏感字段已由服务端隐藏。"
+              : "查看账号、角色、授权、登录安全与会话相关的操作记录。审批记录请在「审批与审计」中查看。"}</p>
           </div>
           <Icons.Shield size={20} className="text-muted-foreground" />
         </div>
-        <form onSubmit={submit} className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 mt-4" noValidate>
-          <label className="space-y-1 text-xs">
-            <span className="text-muted-foreground block">操作类型</span>
-            <Select name="action" value={action || "ALL"} onValueChange={(next) => setAction(next && next !== "ALL" ? String(next) : "")} items={actionItems}>
-                <SelectTrigger aria-label="操作类型" className="h-9 w-full text-xs"><SelectValue /></SelectTrigger>
-                <SelectContent>{actionItems.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}</SelectContent>
-              </Select>
-          </label>
-          <label className="space-y-1 text-xs">
-            <span className="text-muted-foreground block">对象类型</span>
-            <Select name="objectType" value={objectType || "ALL"} onValueChange={(next) => setObjectType(next && next !== "ALL" ? String(next) : "")} items={OBJECT_TYPE_ITEMS}>
-                <SelectTrigger aria-label="对象类型" className="h-9 w-full text-xs"><SelectValue /></SelectTrigger>
-                <SelectContent>{OBJECT_TYPE_ITEMS.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}</SelectContent>
-              </Select>
-          </label>
-          <label className="space-y-1 text-xs"><span className="text-muted-foreground">操作者账号</span><input value={actorUsername} onChange={(event) => setActorUsername(event.target.value)} className="w-full h-9 px-3 rounded border border-border bg-surface-raised text-xs" placeholder="如 ZZ00001" /></label>
-          <label className="space-y-1 text-xs"><span className="text-muted-foreground">请求编号（可选）</span><input value={requestId} onChange={(event) => setRequestId(event.target.value)} className="w-full h-9 px-3 rounded border border-border bg-surface-raised text-xs" /></label>
-          <Button type="submit" size="sm" loading={loading}>查询审计</Button>
+        <form onSubmit={submit} className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 mt-4" noValidate>
+          {isOperations ? selectField("domain", "业务域", DOMAIN_ITEMS) : null}
+          {isOperations ? textField("action", "操作代码", "如 admin.frozen") : selectField("action", "操作类型", actionItems ?? [])}
+          {selectField("objectType", "对象类型", objectItems)}
+          {selectField("outcome", "结果", OUTCOME_ITEMS)}
+          {textField("actorUsername", "操作者账号", "如 ZZ00001")}
+          {isOperations ? textField("objectId", "对象编号") : null}
+          {textField("requestId", "请求编号")}
+          {timeField("from", "开始时间")}
+          {timeField("to", "结束时间")}
+          <div className="flex items-end gap-2 sm:col-span-2 xl:col-span-4">
+            <Button type="submit" size="sm" variant="secondary" className="w-24 justify-center" loading={loading} disabled={timeInvalid}>查询</Button>
+            {draftHasFilters ? <Button type="button" size="sm" variant="ghost" disabled={loading} onClick={handleClearFilters}>清除筛选</Button> : null}
+            {timeInvalid ? <span className="text-[11px] text-destructive">开始时间不能晚于结束时间</span> : null}
+          </div>
         </form>
-        <p className="text-[11px] text-muted-foreground mt-3">查询范围：{scopeLabel(scope)}。结果仅供核查，审计记录不提供修改或删除入口。</p>
+        <p className="text-[11px] text-muted-foreground mt-3">查看范围：{scopeLabel(scope)}。记录只能查看，不能修改或删除。</p>
       </section>
 
       <section className="section-panel">
         <div className="flex items-center justify-between gap-3 mb-3">
-          <h3 className="text-sm font-semibold">审计记录</h3>
+          <h3 className="text-sm font-semibold">{isOperations ? "操作记录" : "审计记录"}</h3>
           <span className="text-[11px] text-muted-foreground">
             {loading && !hasLoadedOnce ? (
               "正在读取…"
             ) : error ? (
               <span className="text-destructive">读取失败</span>
             ) : refreshWarning ? (
-              <span className="text-amber-600 dark:text-amber-400">{events.length} 条（未更新）</span>
+              <span className="text-amber-600 dark:text-amber-400">本页 {events.length} 条（未更新）</span>
             ) : loading ? (
               "正在刷新…"
             ) : (
-              `${events.length} 条`
+              `本页 ${events.length} 条`
             )}
           </span>
         </div>
@@ -514,12 +550,7 @@ export function AdminAuditView({
             <table className="data-table">
               <thead>
                 <tr>
-                  <th>时间</th>
-                  <th>操作者</th>
-                  <th>操作</th>
-                  <th>对象摘要</th>
-                  <th>结果 / 原因</th>
-                  <th>安全详情</th>
+                  {columns.map((column) => <th key={column}>{column}</th>)}
                 </tr>
               </thead>
               <tbody>
@@ -616,32 +647,29 @@ export function AdminAuditView({
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>时间</th>
-                    <th>操作者</th>
-                    <th>操作</th>
-                    <th>对象摘要</th>
-                    <th>结果 / 原因</th>
-                    <th>安全详情</th>
+                    {columns.map((column) => <th key={column}>{column}</th>)}
                   </tr>
                 </thead>
                 <tbody>
                   {events.map((item) => (
-                    <tr key={item.eventId}>
-                      <td className="whitespace-nowrap">{formatDate(item.occurredAt)}</td>
-                      <td>{actorLabel(item.actor)}</td>
-                      <td><div>{actionLabel(item.action)}</div><div className="font-mono text-[10px] text-muted-foreground">{item.action}</div></td>
-                      <td>{objectLabel(item)}</td>
+                    <tr key={item.eventId} className={isOperations ? "cursor-pointer hover:bg-muted/40" : undefined} onClick={isOperations ? () => setSelected(item) : undefined}>
+                      <td className="whitespace-nowrap tabular-nums">{formatBeijing(item.occurredAt)}</td>
+                      <td>{item.actor.displayUsername || item.actor.username !== "系统" ? <Hint hint={`账号：${item.actor.displayUsername ?? item.actor.username}`}>{actorText(item.actor)}</Hint> : actorText(item.actor)}</td>
+                      <td><Hint hint={`操作代码：${item.action}`}>{labelForAction(item.action)}</Hint></td>
+                      <td className="max-w-56"><ObjectCell event={item} /></td>
                       <td>
-                        <span className={item.outcome === "SUCCESS" ? "text-emerald-400" : "text-rose-400"}>
-                          {item.outcome === "SUCCESS" ? "成功" : "失败"}
-                        </span>
+                        <InlineStatus tone={item.outcome === "SUCCESS" ? "success" : "error"}>{item.outcome === "SUCCESS" ? "成功" : "失败"}</InlineStatus>
                         {item.reason ? <span className="block text-[11px] text-muted-foreground mt-1">{item.reason}</span> : null}
                       </td>
                       <td className="max-w-xs">
-                        <details className="text-[11px] text-muted-foreground">
-                          <summary className="cursor-pointer select-none">安全详情</summary>
-                          <pre className="whitespace-pre-wrap break-words mt-1">{JSON.stringify(item.details)}</pre>
-                        </details>
+                        {isOperations ? (
+                          <Button type="button" size="sm" variant="ghost" onClick={(event) => { event.stopPropagation(); setSelected(item); }}>查看详情</Button>
+                        ) : (
+                          <details className="text-[11px] text-muted-foreground">
+                            <summary className="cursor-pointer select-none rounded focus-visible:outline-2 focus-visible:outline-ring">详情</summary>
+                            <div className="mt-1"><DetailList details={item.details} /></div>
+                          </details>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -691,6 +719,33 @@ export function AdminAuditView({
           </>
         )}
       </section>
+      <Sheet open={selected !== null} onOpenChange={(open) => { if (!open) setSelected(null); }}>
+        <SheetContent side="right" closeLabel="关闭" className="w-full overflow-y-auto sm:max-w-md">
+          {selected ? (
+            <>
+              <SheetHeader>
+                <SheetTitle>{labelForAction(selected.action)}</SheetTitle>
+                <SheetDescription>{formatBeijing(selected.occurredAt)}（北京时间）</SheetDescription>
+              </SheetHeader>
+              <div className="space-y-4 px-4 pb-6 text-xs">
+                <dl className="grid grid-cols-[5.5rem_1fr] gap-x-3 gap-y-2">
+                  <dt className="text-muted-foreground">业务域</dt><dd>{DOMAIN_LABELS[domainOf(selected.action)] ?? domainOf(selected.action)}</dd>
+                  <dt className="text-muted-foreground">操作代码</dt><dd className="font-mono break-all">{selected.action}</dd>
+                  <dt className="text-muted-foreground">操作者</dt><dd>{actorText(selected.actor)}{selected.actor.displayUsername ? `（${selected.actor.displayUsername}）` : ""}</dd>
+                  <dt className="text-muted-foreground">对象</dt><dd><ObjectCell event={selected} /></dd>
+                  <dt className="text-muted-foreground">结果</dt><dd><InlineStatus tone={selected.outcome === "SUCCESS" ? "success" : "error"}>{selected.outcome === "SUCCESS" ? "成功" : "失败"}</InlineStatus>{selected.reason ? <span className="ml-2 text-muted-foreground">{selected.reason}</span> : null}</dd>
+                  <dt className="text-muted-foreground">请求编号</dt><dd className="flex items-center gap-1">{selected.requestId ? <><span className="font-mono truncate">{selected.requestId}</span><CopyId value={selected.requestId} label="请求编号" /></> : "—"}</dd>
+                </dl>
+                <div>
+                  <h4 className="mb-2 text-xs font-semibold">详情（敏感字段已隐藏）</h4>
+                  <DetailList details={selected.details} />
+                </div>
+              </div>
+            </>
+          ) : null}
+        </SheetContent>
+      </Sheet>
     </div>
+    </TooltipProvider>
   );
 }

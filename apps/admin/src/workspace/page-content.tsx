@@ -162,6 +162,9 @@ export function WorkspacePageContent({
       />
     );
   }
+  if (tab.kind === "operation-log") {
+    return <AdminAuditView key={tab.id} variant="operations" snapshot={snapshot} initialQuery={tab.query} onQueryChange={onQueryChange} refreshNonce={refreshNonce} />;
+  }
   if (tab.kind === "audit") {
     return <AdminAuditView key={tab.id} snapshot={snapshot} initialQuery={tab.query} onQueryChange={onQueryChange} refreshNonce={refreshNonce} />;
   }
