@@ -16,7 +16,8 @@ function harness(options: { batchLimit?: number; workerId?: string; server?: { h
   const clients: Array<PoolClient & { id: string; alive: boolean; dropped: boolean }> = [];
   const makeClient = () => {
     const id = 'sess_' + (sequence++);
-    const entry = { id, alive: true, dropped: false, once() { /* the real client is an EventEmitter; loss is simulated by dropped */ }, release() { if (!entry.alive) return; entry.alive = false; if (locks.holder === id) locks.holder = null; clients.splice(clients.indexOf(entry as any), 1); },
+    const listeners = new Map<string, () => void>();
+    const entry = { id, alive: true, dropped: false, once(event: string, listener: () => void) { listeners.set(event, listener); }, removeListener(event: string, listener: () => void) { if (listeners.get(event) === listener) listeners.delete(event); }, emit(event: string) { const listener = listeners.get(event); listeners.delete(event); listener?.(); }, release() { if (!entry.alive) return; entry.alive = false; if (locks.holder === id) locks.holder = null; clients.splice(clients.indexOf(entry as any), 1); },
       async query(sql: string, args: any[] = []) {
         if (!entry.alive || entry.dropped) throw Object.assign(new Error('CONNECTION_CLOSED'), { code: '57P01' });
         if (sql.includes('pg_try_advisory_lock')) {
@@ -24,8 +25,14 @@ function harness(options: { batchLimit?: number; workerId?: string; server?: { h
           if (locks.holder !== null && locks.holder !== id) return { rows: [{ acquired: false }], rowCount: 1 };
           locks.holder = id; return { rows: [{ acquired: true }], rowCount: 1 };
         }
-        if (sql.includes('pg_advisory_unlock')) { if (String(args[0]) === '806007' && locks.holder === id) locks.holder = null; return { rows: [], rowCount: 0 }; }
-        if (sql.includes('FROM pg_locks')) return { rows: [{ held: locks.holder === id ? 1 : 0 }], rowCount: 1 };
+        if (sql.includes('pg_advisory_unlock')) { if (String(args[0]) === '806007' && locks.holder === id) locks.holder = null; return { rows: [{ released: true }], rowCount: 1 }; }
+        if (sql.includes('FROM pg_locks')) {
+          assert.doesNotMatch(sql, /objobjid/);
+          assert.match(sql, /\bobjid\s*=/);
+          assert.match(sql, /objsubid=1/);
+          assert.match(sql, /\bgranted\b/);
+          return { rows: [{ held: locks.holder === id ? 1 : 0 }], rowCount: 1 };
+        }
         return { rows: [], rowCount: 0 };
       } } as unknown as PoolClient & { id: string; alive: boolean; dropped: boolean };
     clients.push(entry);
@@ -141,4 +148,21 @@ test('the worker runtime stays opt-in and refuses an assembly without an earning
   assert.throws(() => loadDistributionDueRuntime({} as Pool, undefined, { DISTRIBUTION_DUE_WORKER_ENABLED: 'true' }), /requires explicit NATIVE distribution assembly/);
   assert.throws(() => loadDistributionDueRuntime({} as Pool, {} as any, { DISTRIBUTION_DUE_WORKER_ENABLED: 'true', DISTRIBUTION_DUE_INTERVAL_MS: '1000' }), /60000-3600000/);
   assert.throws(() => loadDistributionDueRuntime({} as Pool, {} as any, { DISTRIBUTION_DUE_WORKER_ENABLED: 'true', DISTRIBUTION_DUE_BATCH_LIMIT: '500' }), /BATCH_LIMIT must be 1-100/);
+});
+
+
+test('Root: session error/end releases the checked-out pool client exactly once', async () => {
+  for (const event of ['error', 'end']) {
+    const h = harness();
+    await h.service.tick();
+    const client = h.clients[0] as any;
+    client.dropped = true;
+    client.emit(event);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(h.clients.length, 0, event + ' must return the broken pool lease');
+    await h.service.tick();
+    assert.equal(h.driven.filter(d => d.kind === 'new').length, 2);
+    await h.service.onApplicationShutdown();
+    assert.equal(h.clients.length, 0);
+  }
 });

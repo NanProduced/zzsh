@@ -47,6 +47,9 @@ export async function declareReversal(client, config, { execute: write = false, 
   await client.query('BEGIN'); began.value = true;
   await client.query("SET LOCAL lock_timeout='2s'");
   try {
+    // Admin security precedes earning locks, as it does in the approval write path.
+    const decider = (await client.query('SELECT status,is_boss FROM zzsh_iam.admin_security WHERE admin_user_id=$1 FOR SHARE', [config.approvedByAdminId])).rows[0];
+    if (!decider || decider.status !== 'ACTIVE' || decider.is_boss !== true) fail('REVERSAL_APPROVER_NO_LONGER_VALID');
     const earning = (await client.query(`SELECT e.id,e.order_id,e.payment_confirmation_id,e.amount_cents::text,e.basis_digest,e.state,e.beneficiary_role,e.beneficiary_user_id,e.posting_id,e.policy_version
       FROM zzsh_order.rental_referral_earning e WHERE e.id=$1 AND e.order_id=$2 FOR UPDATE`, [config.earningId, config.orderId])).rows[0];
     if (!earning || String(earning.amount_cents) !== String(config.amountCents)) fail('ORIGINAL_EARNING_MISMATCH');
@@ -59,19 +62,26 @@ export async function declareReversal(client, config, { execute: write = false, 
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) fail('APPROVED_REVERSAL_PAYLOAD_MISMATCH');
     if (request.status !== 'EXECUTED' || request.requested_by === request.decided_by || sha(canonical(payload)) !== request.operation_payload_hash) fail('APPROVED_REVERSAL_EVIDENCE_MISMATCH');
     if (payload.schema !== 'distribution-reversal-request.v1' || payload.earningId !== config.earningId || payload.orderId !== config.orderId
-      || String(payload.amountCents) !== String(config.amountCents) || payload.full !== true) fail('APPROVED_REVERSAL_PAYLOAD_MISMATCH');
+      || String(payload.amountCents) !== String(config.amountCents) || payload.full !== true || payload.reason !== config.reason.trim()) fail('APPROVED_REVERSAL_PAYLOAD_MISMATCH');
     // A consumed authorization must exist, must have succeeded, and must name this exact earning.
     const receipt = (await client.query(`SELECT id,status,result_code,result_detail,executed_by,completed_at FROM zzsh_iam.approval_execution
       WHERE request_id=$1 FOR UPDATE`, [config.approvalRequestId])).rows[0];
     if (!receipt || receipt.status !== 'SUCCEEDED' || receipt.result_code !== RECEIPT_CODE || receipt.result_detail !== config.earningId) fail('REVERSAL_EXECUTION_RECEIPT_MISSING');
     // The decision itself has to remain valid at declaration time; an APPROVED row alone is not authority.
-    const decider = (await client.query('SELECT status,is_boss AS is_boss FROM zzsh_auth_admin."user" WHERE id=$1', [request.decided_by])).rows[0];
-    if (!decider || decider.status !== 'ACTIVE' || decider.is_boss !== true || request.decided_by !== config.approvedByAdminId) fail('REVERSAL_APPROVER_NO_LONGER_VALID');
+    if (request.decided_by !== config.approvedByAdminId) fail('REVERSAL_APPROVER_NO_LONGER_VALID');
     const admission = (await client.query(`SELECT mode,approval_digest,source_admission_ref FROM zzsh_order.distribution_order_admission WHERE order_id=$1`, [config.orderId])).rows[0];
     if (!admission || admission.approval_digest !== config.admissionDigest || admission.mode !== 'NATIVE') fail('ORIGINAL_NATIVE_ADMISSION_MISMATCH');
     const source = reversalSource(earning, admission.mode, config.earningId);
     if (declared) {
-      if (declared.id !== source.sourceId || declared.canonical_source !== source.canonicalSource || declared.source_digest !== source.sourceDigest) fail('EXISTING_REVERSAL_SOURCE_DIFFERS');
+      if (declared.id !== source.sourceId || declared.canonical_source !== source.canonicalSource || declared.source_digest !== source.sourceDigest || declared.approval_digest !== admission.approval_digest) fail('EXISTING_REVERSAL_SOURCE_DIFFERS');
+      const links = await client.query('SELECT details FROM "zzsh_iam"."audit_event" WHERE object_type=$1 AND object_id=$2 AND action=$3 AND outcome=$4',
+        ['rental_referral_reversal_source', source.sourceId, 'distribution.reversal.source.declared', 'SUCCESS']);
+      const details = links.rows[0]?.details;
+      const original = { reversalSourceId: source.sourceId, earningId: config.earningId, orderId: config.orderId, amountCents: String(earning.amount_cents),
+        basisDigest: earning.basis_digest, postingId: earning.posting_id, beneficiaryRole: earning.beneficiary_role,
+        approvalRequestId: config.approvalRequestId, approvalPayloadHash: request.operation_payload_hash,
+        executionReceiptId: receipt.id, executionResultCode: receipt.result_code, admissionDigest: admission.approval_digest };
+      if (links.rows.length !== 1 || !details || Object.entries(original).some(([key, value]) => details[key] !== value)) fail('EXISTING_REVERSAL_APPROVAL_DIFFERS');
       await client.query('ROLLBACK'); began.value = false;
       return { replayed: true, writing: false, earning, source, approval: { requestId: config.approvalRequestId, executionReceiptId: receipt.id, payloadHash: request.operation_payload_hash, executedBy: receipt.executed_by } };
     }
@@ -112,7 +122,7 @@ async function main() {
   if (!passwordFile) fail('DISTRIBUTION_OWNER_PASSWORD_FILE_REQUIRED');
   const password = readFileSync(resolve(passwordFile), 'utf8').trim();
   const client = new Client({ host, port, database: config.database, user: config.ownerUser, password, connectionTimeoutMillis: 4000, statement_timeout: 15000, application_name: 'zzsh-distribution-reversal-declare' });
-  let locked = false, unlocked = false, ended = false;
+  let locked = false, unlocked = false, ended = false, success = null;
   await client.connect();
   try {
     locked = (await client.query('SELECT pg_try_advisory_lock(806008) AS acquired')).rows[0]?.acquired === true;
@@ -122,10 +132,10 @@ async function main() {
     if (!identity || identity.database !== config.database || identity.role !== config.ownerUser || identity.oid !== String(config.resourceOid)
       || identity.owner !== config.ownerUser || identity.allow !== true) fail('OWNER_RESOURCE_IDENTITY_MISMATCH');
     if (!(await client.query("SELECT to_regclass('zzsh_order.rental_referral_reversal_source') IS NOT NULL AS ready")).rows[0]?.ready) fail('REVERSAL_SCHEMA_NOT_INSTALLED');
-    const outcome = await declareReversal(client, config);
-    console.log(JSON.stringify({ mode: 'EXECUTE', pass: true, identity: { database: identity.database, oid: identity.oid, owner: identity.role },
+    const outcome = await declareReversal(client, config, { execute: true });
+    success = { mode: 'EXECUTE', pass: true, identity: { database: identity.database, oid: identity.oid, owner: identity.role },
       writing: outcome.writing, replayed: outcome.replayed, sourceId: outcome.source.sourceId, sourceDigest: outcome.source.sourceDigest,
-      scope: outcome.source.scope, basisDigest: outcome.earning.basis_digest, ...outcome.approval, ...summary }));
+      scope: outcome.source.scope, basisDigest: outcome.earning.basis_digest, ...outcome.approval, ...summary };
   } catch (error) {
     console.error(JSON.stringify({ pass: false, code: error.code ?? 'FAILED', message: error.message }));
     process.exitCode = 1;
@@ -134,6 +144,7 @@ async function main() {
     try { await client.end(); ended = true; } catch { ended = false; }
     if (!unlocked || !ended) console.error(JSON.stringify({ pass: false, code: 'CLEANUP_UNKNOWN', unlocked, ended }));
     if (!process.exitCode && (!unlocked || !ended)) process.exitCode = 1;
+    if (!process.exitCode && success) console.log(JSON.stringify(success));
   }
 }
 

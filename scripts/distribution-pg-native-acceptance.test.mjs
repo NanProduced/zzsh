@@ -238,3 +238,52 @@ test('an unlocked or unended session is reported as CLEANUP_UNKNOWN and never as
 test('createHash and sha256 agree so the seal cannot be satisfied by a different digest', () => {
   assert.equal(sha256(Buffer.from('abc')), createHash('sha256').update('abc').digest('hex'));
 });
+
+
+test('Root: incomplete committing fixture/cleanup modes stop before credentials and connections', async () => {
+  for (const mode of ['fullNative','cleanup']) {
+    const host = recorder();
+    await run({config:baseConfig(),plan:sealedPlan(baseConfig(),baseState(),read),[mode]:true,log:host.log,exit:host.exit,connect:()=>{throw Error('must not connect');},loadStore:()=>{throw Error('must not load a store');}});
+    assert.deepEqual(host.codes,[2]);
+    assert.equal(host.lines.at(-1).pass,false);
+    assert.equal(host.lines.at(-1).code,'NATIVE_FIXTURE_RECOVERY_CONTRACT_UNAVAILABLE');
+    assert.equal(host.lines.at(-1).connections,0);
+  }
+});
+
+// Append to scripts/distribution-pg-native-acceptance.test.mjs after Root's bounded fix.
+// Reuses this file's test/assert/baseConfig/sealedPlan/baseState/read/ok helpers.
+// Models the PG aborted-transaction rule without connecting to PostgreSQL.
+test('structure permission probes recover each SQL error before issuing more SQL or RESET ROLE', async () => {
+  const config = baseConfig(), plan = sealedPlan(config, baseState(), read), statements = [];
+  let aborted = false;
+  const error = (code, message) => Object.assign(new Error(message), { code });
+  const client = { async query(sql) {
+    statements.push(sql);
+    if (/^ROLLBACK TO SAVEPOINT\b/.test(sql) || sql === 'ROLLBACK') { aborted = false; return ok([]); }
+    if (aborted) throw error('25P02', 'current transaction is aborted');
+    if (sql.includes('to_regprocedure')) return ok([{ present: true }]);
+    if (sql.includes('current_user AS role, zzsh_order.distribution_policy_contract_version')) return ok([{ role: config.runtimeUser, version: 2 }]);
+    if (sql.includes('SELECT zzsh_order.distribution_policy_contract_version() AS version')) return ok([{ version: 2 }]);
+    if (sql.includes('aclexplode(coalesce(p.proacl')) return ok([{ closed: true }]);
+    if (sql.includes('INSERT INTO zzsh_order.rental_referral_reversal_source')) {
+      aborted = true;
+      if (/\]\s*$/.test(sql)) throw error('42601', 'syntax error at or near ]');
+      throw error('42501', 'permission denied for table rental_referral_reversal_source');
+    }
+    if (sql.includes('UPDATE zzsh_order.rental_referral_earning SET canonical_seed')) {
+      aborted = true; throw error('42501', 'permission denied for table rental_referral_earning');
+    }
+    return ok([]);
+  } };
+  const ledger = createLedger();
+  await structurePhase(client, plan, config, ledger);
+  assert.equal(aborted, false, 'RESET ROLE must run after recovery, not in aborted transaction');
+  assert.equal(statements.filter(sql => /^ROLLBACK TO SAVEPOINT\b/.test(sql)).length, 2);
+  assert.ok(statements.includes('RESET ROLE'));
+  for (const code of ['RUNTIME_REVERSAL_DECLARATION_DENIED', 'RUNTIME_PROTECTED_EARNING_SOURCE_DENIED']) {
+    const check = ledger.checks.find(item => item.code === code);
+    assert.equal(check?.check, 'PASS');
+    assert.equal(check?.detail?.sqlstate, '42501');
+  }
+});

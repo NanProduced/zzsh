@@ -16,7 +16,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Client } from 'pg';
 
 export const CANDIDATES = ['01_uniform_policy_and_payment_basis.sql', '02_native_earning_and_reversal_scope.sql', '03_v2_registration_and_contract.sql'];
@@ -78,12 +78,12 @@ export async function verifyIdentity(owner, target, config) {
     const role = byName.get(config[entry]);
     if (role.super === true || role.bypass === true || role.createdb === true) fail('ROLE_PRIVILEGE_ESCALATION', entry);
     if (role.login !== true) fail('ROLE_CANNOT_LOGIN', entry);
-    const owns = (await owner.query('SELECT count(*)::int AS n FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.relowner=$1 AND n.nspname=$2',
+    const owns = (await target.query('SELECT count(*)::int AS n FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.relowner=$1 AND n.nspname=$2',
       [role.oid, 'zzsh_order'])).rows[0].n;
-    if (Number(owns) > 0) fail('ROLE_OWNS_BUSINESS_RELATIONS', { entry, owns: Number(owns) });
+    if (entry === 'runtimeUser' && Number(owns) > 0) fail('ROLE_OWNS_BUSINESS_RELATIONS', { entry, owns: Number(owns) });
   }
   if (byName.get(config.migrationUser).oid !== String(config.roles.migrationOid) || byName.get(config.runtimeUser).oid !== String(config.roles.runtimeOid)) fail('REGISTERED_ROLE_OID_DRIFT');
-  const runtimeIsOwner = (await owner.query('SELECT pg_has_role($1,$2,$3) AS member', [config.runtimeUser, config.ownerUser, 'MEMBER'])).rows[0].member;
+  const runtimeIsOwner = (await owner.query('SELECT (pg_has_role($1,$2,$3) OR pg_has_role($1,$4,$3)) AS member', [config.runtimeUser, config.ownerUser, 'MEMBER', config.migrationUser])).rows[0].member;
   if (runtimeIsOwner === true) fail('RUNTIME_IMPERSONATES_OWNER');
   // Only this host's own target session may be on the registered database while we work.
   const others = (await owner.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=$1 AND backend_type='client backend' AND pid<>pg_backend_pid()", [config.database])).rows[0].n;
@@ -142,15 +142,13 @@ export async function structurePhase(client, plan, config, ledger) {
   try {
     const read = await client.query('SELECT current_user AS role, zzsh_order.distribution_policy_contract_version() AS version');
     ledger.require(read.rows[0].role === config.runtimeUser && Number(read.rows[0].version) === 2, 'RUNTIME_CONTRACT_EXECUTE_READBACK', read.rows[0]);
-    const declaration = await client.query("INSERT INTO zzsh_order.rental_referral_reversal_source(id,earning_id,scope,basis_digest,amount_cents,canonical_source,source_digest,approval_digest,created_by_admin_id,reason) VALUES('p','p','NATIVE',repeat('b',64),'1','{}',repeat('c',64),repeat('a',64),'p','p']").catch(error => error);
-    ledger.require(declaration.code === '42501', 'RUNTIME_REVERSAL_DECLARATION_DENIED', { sqlstate: declaration.code ?? 'accepted' });
-    const seed = await client.query("UPDATE zzsh_order.rental_referral_earning SET canonical_seed='{}' WHERE id='probe'").catch(error => error);
-    ledger.require(seed.code === '42501', 'RUNTIME_PROTECTED_EARNING_SOURCE_DENIED', { sqlstate: seed.code ?? 'accepted' });
+    await rejected(client, 'runtime_declaration', "INSERT INTO zzsh_order.rental_referral_reversal_source(id,earning_id,scope,basis_digest,amount_cents,canonical_source,source_digest,approval_digest,created_by_admin_id,reason) VALUES('p','p','NATIVE',repeat('b',64),'1','{}',repeat('c',64),repeat('a',64),'p','p')", [], { sqlstate: '42501' }, ledger, 'RUNTIME_REVERSAL_DECLARATION_DENIED');
+    await rejected(client, 'runtime_seed', "UPDATE zzsh_order.rental_referral_earning SET canonical_seed='{}' WHERE id='probe'", [], { sqlstate: '42501' }, ledger, 'RUNTIME_PROTECTED_EARNING_SOURCE_DENIED');
   } finally { await client.query('RESET ROLE'); }
 }
 
 export async function policyPhase(client, config, plan, ledger) {
-  const adminId = plan.native ? (await client.query('SELECT id FROM zzsh_auth_admin."user" WHERE status=$1 AND is_boss IS NOT NULL ORDER BY id LIMIT 1', ['ACTIVE'])).rows[0]?.id : null;
+  const adminId = plan.native ? (await client.query('SELECT admin_user_id AS id FROM zzsh_iam.admin_security WHERE status=$1 AND is_boss=true ORDER BY admin_user_id LIMIT 1', ['ACTIVE'])).rows[0]?.id : null;
   if (!adminId) ledger.incomplete('ADMIN_FIXTURE_REQUIRED', 'the sealed native fixture must create an ACTIVE administrator');
   const version = (patch) => canonical({ schema: 'distribution-policy.v2', scope: 'NATIVE', enabled: false, participation: 'AUTO_AT_REGISTRATION', depth: 1, selfRebate: false,
     accountModes: ['ordinary', 'custom'], minimumAccrualCents: '0', settlementDelayDays: 7, rateMode: 'UNIFORM', renterPercent: '5', ownerPercent: '5', levels: [], ...patch });
@@ -267,6 +265,12 @@ export async function run(options) {
     log.log(JSON.stringify({ ...receipt, pass: true, readsSecrets: false, connections: 0, checksPlanned: ['IDENTITY', 'STRUCTURE_AND_ACL', 'POLICY_GUARDS', ...(plan.native ? ['NATIVE_FUNDS'] : ['NATIVE_FUNDS:INCOMPLETE'])] }));
     return receipt;
   }
+  // Committed fixture progress and immutable-ledger recovery are not yet a runnable contract.
+  if (mode === 'FULL_NATIVE' || mode === 'CLEANUP_NATIVE') {
+    log.error(JSON.stringify({ ...receipt, pass: false, incomplete: true, code: 'NATIVE_FIXTURE_RECOVERY_CONTRACT_UNAVAILABLE', readsSecrets: false, connections: 0 }));
+    exit(2);
+    return receipt;
+  }
   const owner = connect(config.ownerUser, 'postgres', 'DISTRIBUTION_OWNER_PASSWORD_FILE');
   const target = connect(config.migrationUser, config.database, 'DISTRIBUTION_MIGRATION_PASSWORD_FILE');
   let locked = false, unlocked = null, began = false, rolledBack = null, ended = null, primary = null, committed = false, success = null;
@@ -345,7 +349,7 @@ async function main() {
       if (!activePlan.native) return null;
       const dist = resolve(dirname(fileURLToPath(import.meta.url)), '../apps/api/dist/src').replace(/\\/g, '/');
       let store, runtime;
-      try { store = await import(dist + '/finance/distribution-earning-store.js'); runtime = await import(dist + '/order/joinpay-collection-runtime.js'); }
+      try { store = await import(pathToFileURL(dist + '/finance/distribution-earning-store.js').href); runtime = await import(pathToFileURL(dist + '/order/joinpay-collection-runtime.js').href); }
       catch { return null; }
       const assembly = runtime.loadJoinpayCollectionRuntime({ provider: 'real', authEnabled: true, database: { name: activeConfig.database, user: activeConfig.runtimeUser, runtimeUser: activeConfig.runtimeUser } },
         { JOINPAY_COLLECTION_ENABLED: 'true', JOINPAY_COLLECTION_CONFIG_FILE: activePlan.native.collectionPath });

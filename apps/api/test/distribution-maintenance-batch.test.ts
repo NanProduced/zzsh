@@ -18,7 +18,7 @@ function fakeTarget(options: { due: Due[]; max?: number; games?: readonly string
       const rows = (values: any[] = []) => ({ rows: values, rowCount: values.length });
       if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return rows();
       if (sql.includes('pg_try_advisory_lock')) return rows([{ acquired: true }]);
-      if (sql.includes('pg_advisory_unlock')) return rows();
+      if (sql.includes('pg_advisory_unlock')) return rows([{ released: true }]);
       if (sql.startsWith('SELECT request_fingerprint')) { const row = records.get(args[0] + '|' + args[1]); return rows(row ? [{ fingerprint: row.fingerprint, status: row.status, body: row.body }] : []); }
       if (sql.startsWith('SELECT key,response_status')) return rows([...records.entries()].filter(([receiptKey]) => receiptKey.startsWith(args[0] + '|')).map(([receiptKey, row]) => ({ key: receiptKey.split('|')[1], status: row.status, body: row.body })).filter(row => row.status !== 200).slice(-1));
       if (sql.startsWith('INSERT INTO zzsh_supply.idempotency_record')) { const key = String(args[0]) + '|' + String(args[1]); if (records.has(key)) throw new Error('duplicate receipt'); records.set(key, { fingerprint: args[2], status: 202, body: JSON.parse(args[3]) }); return rows(); }
@@ -155,4 +155,30 @@ test('a deterministic rejection terminalizes its root and never looks like a los
   const noBasis = await skipped.runner.runReplayBatch(skipped.pool, { orderIds: ['order_1'], requestId: 'replay_no_basis', operator: skipped.operator() });
   assert.equal(noBasis.batch.state, 'COMPLETE');
   assert.deepEqual(noBasis.batch.results[0], { id: 'order_1', orderId: 'order_1', status: 'REJECTED', reason: 'ORDER_NOT_COMPLETED', baseCents: null });
+});
+
+
+test('Root: unknown rollback destroys the session and never saves or commits a receipt on it', async () => {
+  const p = fakeTarget({ due:[{id:'earning_a',version:'1'}] });
+  const originalConnect=p.pool.connect.bind(p.pool), wire:string[]=[], releases:any[]=[];
+  (p.pool as any).connect=async()=>{const client=await originalConnect();const query=client.query.bind(client),release=client.release.bind(client);
+    (client as any).query=async(sql:string,args:any[])=>{wire.push(sql);if(sql==='ROLLBACK')throw Error('ROLLBACK_ACK_UNKNOWN');return query(sql,args);};
+    (client as any).release=(destroy?:boolean)=>{releases.push(destroy);release(destroy);};return client;};
+  p.control.failId='earning_a';
+  await assert.rejects(p.runner.runDueBatch(p.pool,{limit:1,requestId:'rollback_unknown',operator:p.operator()}),/unknown/);
+  const rollback=wire.indexOf('ROLLBACK');assert.ok(rollback>=0);
+  assert.deepEqual(wire.slice(rollback+1),[],'no BEGIN/save/COMMIT/unlock on the unconfirmed transaction');
+  assert.deepEqual(releases,[true]);
+  assert.equal([...p.records.values()][0]!.status,202,'original plan is retained for a fresh-connection read');
+});
+
+
+test('Root: an unknown advisory-lock acknowledgement destroys the session before any plan or money',async()=>{
+  const p=fakeTarget({due:[{id:'earning_a',version:'1'}]});const releases:any[]=[],wire:string[]=[];
+  const connect=p.pool.connect.bind(p.pool);
+  (p.pool as any).connect=async()=>{const client=await connect(),query=client.query.bind(client),release=client.release.bind(client);
+    (client as any).query=async(sql:string,args:any[])=>{wire.push(sql);if(sql.includes('pg_try_advisory_lock'))throw Error('LOCK_ACK_UNKNOWN');return query(sql,args);};
+    (client as any).release=(destroy?:boolean)=>{releases.push(destroy);release(destroy);};return client;};
+  await assert.rejects(p.runner.runDueBatch(p.pool,{limit:1,requestId:'lock_unknown',operator:p.operator()}),/LOCK_ACK_UNKNOWN/);
+  assert.equal(wire.length,1);assert.deepEqual(releases,[true]);assert.equal(p.calls.length,0);assert.equal(p.records.size,0);
 });

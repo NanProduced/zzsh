@@ -22,6 +22,7 @@ export function loadDistributionDueRuntime(pool: Pool | undefined, store: Distri
 export class DistributionDueService implements OnModuleInit, OnApplicationShutdown {
   private timer: NodeJS.Timeout | null = null;
   private locking: PoolClient | null = null;
+  private lockLost: (() => void) | null = null;
   private running = false;
   private stopping = false;
   private inFlight: Promise<void> | null = null;
@@ -35,12 +36,12 @@ export class DistributionDueService implements OnModuleInit, OnApplicationShutdo
     this.timer.unref();
   }
   /** Advisory locks die with their session, so the live session holding this exact key is the only execution right.
-   *  pg_locks exposes an int8 advisory key as classid=high 32 bits, objobjid=low 32 bits, objsubid=2. */
+   *  pg_locks exposes an int8 advisory key as classid=high 32 bits, objid=low 32 bits, objsubid=1. */
   private async ensureLock(): Promise<PoolClient | null> {
     if (this.locking) {
       try {
-        const held = await this.locking.query(`SELECT count(*)::int AS held FROM pg_locks WHERE locktype='advisory' AND pid=pg_backend_pid() AND objsubid=2
-          AND classid=(($1::bigint >> 32) & 4294967295)::int AND objobjid=($1::bigint & 4294967295)::int`, [LOCK_KEY]);
+        const held = await this.locking.query(`SELECT count(*)::int AS held FROM pg_locks WHERE locktype='advisory' AND pid=pg_backend_pid() AND objsubid=1 AND granted
+          AND classid=(($1::bigint >> 32) & 4294967295)::int AND objid=($1::bigint & 4294967295)::int`, [LOCK_KEY]);
         if (Number(held.rows[0]?.held ?? 0) > 0) return this.locking;
       } catch { /* the session is gone */ }
       console.error(JSON.stringify({ event: 'distribution.due.lock.lost', reason: 'the driving session no longer holds 806007' }));
@@ -51,18 +52,24 @@ export class DistributionDueService implements OnModuleInit, OnApplicationShutdo
     try {
       const acquired = (await client.query('SELECT pg_try_advisory_lock($1::bigint) AS acquired', [LOCK_KEY])).rows[0]?.acquired === true;
       if (!acquired) { client.release(); return null; }
-      client.once('error', () => { if (this.locking === client) this.locking = null; });
-      client.once('end', () => { if (this.locking === client) this.locking = null; });
+      const lost = () => { if (this.locking === client) void this.releaseLock(); };
+      this.lockLost = lost;
+      client.once('error', lost);
+      client.once('end', lost);
       this.locking = client;
       return client;
-    } catch { client.release(); return null; }
+    } catch { client.release(true); return null; }
   }
   private async releaseLock(): Promise<void> {
     const client = this.locking;
     this.locking = null;
+    const lost = this.lockLost;
+    this.lockLost = null;
     if (!client) return;
-    try { await client.query('SELECT pg_advisory_unlock($1::bigint)', [LOCK_KEY]); } catch { /* the session already dropped the lock */ }
-    try { client.release(); } catch { /* destroyed sessions release themselves */ }
+    if (lost) { client.removeListener('error', lost); client.removeListener('end', lost); }
+    let released = false;
+    try { released = (await client.query('SELECT pg_advisory_unlock($1::bigint) AS released', [LOCK_KEY])).rows[0]?.released === true; } catch { /* drop an unusable session below */ }
+    try { client.release(!released); } catch { /* already destroyed sessions have no pool lease */ }
   }
   /** One drive cycle: holding the session lock is the only execution right, and an unfinished original batch always wins. */
   async tick(): Promise<void> {

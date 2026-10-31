@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { declareReversal, reversalSource, sealedAuthorization, canonical, sha256 } from './distribution-reversal-declare.mjs';
 
@@ -19,14 +19,20 @@ const request = { id: 'approval_1', status: 'EXECUTED', operation_code: 'distrib
 const receipt = { id: 'execution_1', status: 'SUCCEEDED', result_code: 'DISTRIBUTION_REVERSAL_AUTHORIZED', result_detail: 'earning_1', executed_by: 'admin_ops', completed_at: '2026-10-31T00:00:00Z' };
 
 function fakeDb(overrides = {}) {
-  const rows = { earning, admission, decider, request, receipt, ...overrides }, queries = [];
+  const source = reversalSource(earning, 'NATIVE', earning.id);
+  const binding = { reversalSourceId: source.sourceId, earningId: earning.id, orderId: earning.order_id, amountCents: earning.amount_cents,
+    basisDigest: earning.basis_digest, postingId: earning.posting_id, beneficiaryRole: earning.beneficiary_role,
+    approvalRequestId: config.approvalRequestId, approvalPayloadHash: request.operation_payload_hash,
+    executionReceiptId: receipt.id, executionResultCode: receipt.result_code, admissionDigest: admission.approval_digest };
+  const rows = { earning, admission, decider, request, receipt, binding, ...overrides }, queries = [];
   const client = { async query(sql, params = []) {
     queries.push({ sql, params });
     if (sql.includes('FROM zzsh_order.rental_referral_earning e WHERE e.id=$1')) return { rows: rows.earning ? [rows.earning] : [], rowCount: rows.earning ? 1 : 0 };
     if (sql.includes('rental_referral_reversal_source WHERE earning_id=$1 FOR UPDATE')) return { rows: rows.declared ? [rows.declared] : [], rowCount: rows.declared ? 1 : 0 };
     if (sql.includes('FROM zzsh_iam.approval_request WHERE id=$1 FOR UPDATE')) return { rows: rows.request ? [rows.request] : [], rowCount: rows.request ? 1 : 0 };
+    if (sql.includes('SELECT details FROM "zzsh_iam"."audit_event"')) return { rows: rows.binding ? [{details:rows.binding}] : [], rowCount: rows.binding ? 1 : 0 };
     if (sql.includes('FROM zzsh_iam.approval_execution')) return { rows: rows.receipt ? [rows.receipt] : [], rowCount: rows.receipt ? 1 : 0 };
-    if (sql.includes('zzsh_auth_admin."user" WHERE id=$1')) return { rows: rows.decider ? [rows.decider] : [], rowCount: rows.decider ? 1 : 0 };
+    if (sql.includes('zzsh_iam.admin_security WHERE admin_user_id=$1')) return { rows: rows.decider ? [rows.decider] : [], rowCount: rows.decider ? 1 : 0 };
     if (sql.includes('distribution_order_admission WHERE order_id=$1')) return { rows: rows.admission ? [rows.admission] : [], rowCount: rows.admission ? 1 : 0 };
     if (sql.includes('rental_referral_transition WHERE earning_id=$1')) return { rows: rows.started ? [{ one: 1 }] : [], rowCount: rows.started ? 1 : 0 };
     return { rows: [], rowCount: 0 };
@@ -115,4 +121,70 @@ test('the default plan process reads no credential and opens no connection', () 
     assert.notEqual(exec.status, 0);
     assert.match(exec.stderr, /DISTRIBUTION_OWNER_PASSWORD_FILE_REQUIRED/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('Root: the actual --execute entry writes the declaration and approval audit', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'zzsh-reversal-execute-'));
+  try {
+    const file = join(dir, 'authorization.json'), password = join(dir, 'synthetic-password.txt');
+    const trace = join(dir, 'trace.json'), preload = join(dir, 'fake-pg.cjs');
+    writeFileSync(file, JSON.stringify(config));
+    writeFileSync(password, 'SYNTHETIC_NOT_A_SECRET');
+    writeFileSync(preload, `const fs=require('node:fs');
+const {Client}=require('node:module').createRequire(${JSON.stringify(script)})('pg');
+const facts=${JSON.stringify({earning,admission,decider,request,receipt,config})};
+const queries=[]; Client.prototype.connect=async function(){};
+Client.prototype.query=async function(sql,params=[]){queries.push({sql,params});
+const result=rows=>({rows,rowCount:rows.length});
+if(sql.includes('pg_try_advisory_lock'))return result([{acquired:true}]);
+if(sql.includes('pg_advisory_unlock'))return result([{released:process.env.ROOT_TEST_UNLOCK_UNKNOWN!=='true'}]);
+if(sql.includes('FROM pg_database'))return result([{database:facts.config.database,role:facts.config.ownerUser,oid:String(facts.config.resourceOid),owner:facts.config.ownerUser,allow:true}]);
+if(sql.includes('to_regclass'))return result([{ready:true}]);
+if(sql.includes('FROM zzsh_order.rental_referral_earning e'))return result([facts.earning]);
+if(sql.includes('FROM zzsh_iam.approval_request'))return result([facts.request]);
+if(sql.includes('FROM zzsh_iam.approval_execution'))return result([facts.receipt]);
+if(sql.includes('FROM zzsh_iam.admin_security'))return result([facts.decider]);
+if(sql.includes('FROM zzsh_auth_admin.'))throw Object.assign(new Error('wrong status/Boss table'),{code:'42703'});
+if(sql.includes('FROM zzsh_order.distribution_order_admission'))return result([facts.admission]);
+return result([]);};
+Client.prototype.end=async function(){fs.writeFileSync(${JSON.stringify(trace)},JSON.stringify(queries));};`);
+    const child = spawnSync(process.execPath, ['--require', preload, script, '--config', file, '--sha256', sha256(Buffer.from(JSON.stringify(config))), '--execute'],
+      {encoding:'utf8',env:{...process.env,DISTRIBUTION_OWNER_PASSWORD_FILE:password}});
+    assert.equal(child.status,0,child.stderr);
+    const outcome=JSON.parse(child.stdout);
+    assert.equal(outcome.writing,true);
+    const queries=JSON.parse(readFileSync(trace,'utf8'));
+    assert.equal(queries.filter(q=>q.sql.startsWith('INSERT INTO zzsh_order.rental_referral_reversal_source')).length,1);
+    assert.equal(queries.filter(q=>q.sql.startsWith('INSERT INTO "zzsh_iam"."audit_event"')).length,1);
+    assert.ok(queries.some(q=>q.sql==='COMMIT'));
+    const cleanupUnknown = spawnSync(process.execPath, ['--require', preload, script, '--config', file, '--sha256', sha256(Buffer.from(JSON.stringify(config))), '--execute'],
+      {encoding:'utf8',env:{...process.env,DISTRIBUTION_OWNER_PASSWORD_FILE:password,ROOT_TEST_UNLOCK_UNKNOWN:'true'}});
+    assert.equal(cleanupUnknown.status,1);
+    assert.equal(cleanupUnknown.stdout.trim(),'','no success record before cleanup acknowledgement');
+    assert.match(cleanupUnknown.stderr,/CLEANUP_UNKNOWN/);
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});
+
+
+test('Root: a declared source only replays the original approval receipt and its durable audit',async()=>{
+  const source=reversalSource(earning,'NATIVE',earning.id);
+  const declared={id:source.sourceId,canonical_source:source.canonicalSource,source_digest:source.sourceDigest,approval_digest:admission.approval_digest};
+  const missing=fakeDb({declared,binding:null});
+  await assert.rejects(declareReversal(missing.client,config,{execute:true}),/EXISTING_REVERSAL_APPROVAL_DIFFERS/);
+  const otherRequest={...request,id:'approval_other'};
+  const otherReceipt={...receipt,id:'execution_other'};
+  const other=fakeDb({declared,request:otherRequest,receipt:otherReceipt});
+  await assert.rejects(declareReversal(other.client,{...config,approvalRequestId:'approval_other'},{execute:true}),/EXISTING_REVERSAL_APPROVAL_DIFFERS/);
+  assert.equal(other.wrote(),false);
+  const wrongAdmission=fakeDb({declared:{...declared,approval_digest:'f'.repeat(64)}});
+  await assert.rejects(declareReversal(wrongAdmission.client,config,{execute:true}),/EXISTING_REVERSAL_SOURCE_DIFFERS/);
+});
+
+test('Root: approval security locks precede money-root locks and the declared reason stays approved',async()=>{
+  const db=fakeDb();await declareReversal(db.client,config,{execute:true});
+  const security=db.queries.findIndex(q=>q.sql.includes('admin_security'));
+  const root=db.queries.findIndex(q=>q.sql.includes('FROM zzsh_order.rental_referral_earning'));
+  assert.ok(security>=0&&security<root);
+  const wrong=fakeDb();await assert.rejects(declareReversal(wrong.client,{...config,reason:'another reason'},{execute:true}),/PAYLOAD_MISMATCH/);
+  assert.equal(wrong.wrote(),false);
 });

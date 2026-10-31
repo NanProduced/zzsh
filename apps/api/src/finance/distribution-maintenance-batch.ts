@@ -7,6 +7,7 @@ import type { MaintenanceBatch, MaintenanceOperator } from './distribution-earni
 
 const sha = (value: string) => createHash('sha256').update(value).digest('hex');
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const unusableClients = new WeakSet<PoolClient>();
 type Operation = 'ACCRUALS_REPLAY' | 'DUE_SETTLE';
 /** Money bodies run on the caller's client so a batch never borrows a second pooled connection. */
 type Callbacks = {
@@ -51,22 +52,33 @@ async function assertPlanScope(client: PoolClient, operator: MaintenanceOperator
   if (rows.length !== ids.length || rows.some(row => !allowed.includes(row.game_id))) throw forbidden('Distribution batch is outside the admin game scope');
 }
 async function onClient<T>(client: PoolClient, run: () => Promise<T>) {
+  if (unusableClients.has(client)) throw conflict('Original transaction requires receipt recovery on a new connection');
   await client.query('BEGIN');
   try { const value = await run(); await client.query('COMMIT'); return value; }
-  catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
+  catch (error) {
+    try { await client.query('ROLLBACK'); } catch { unusableClients.add(client); }
+    throw error;
+  }
 }
 /** Plan, money and progress share one connection: the session lock and its work die together. */
 async function withBatchLock<T>(target: Target, key: string, run: (client: PoolClient) => Promise<T>): Promise<T | null> {
   const borrowed = target.client ? null : await target.pool.connect();
   const client = target.client ?? borrowed!;
   const lockKey = JSON.stringify(['distribution-maintenance-batch', key]);
+  let acquired = false;
   try {
-    const acquired = (await client.query('SELECT pg_try_advisory_lock(hashtextextended($1,0)) AS acquired', [lockKey])).rows[0]?.acquired === true;
+    try { acquired = (await client.query('SELECT pg_try_advisory_lock(hashtextextended($1,0)) AS acquired', [lockKey])).rows[0]?.acquired === true; }
+    catch (error) { unusableClients.add(client); throw error; }
     if (!acquired) return null;
     return await run(client);
   } finally {
-    await client.query('SELECT pg_advisory_unlock(hashtextextended($1,0))', [lockKey]).catch(() => {});
-    borrowed?.release();
+    if (acquired && !unusableClients.has(client)) {
+      try {
+        const result = await client.query('SELECT pg_advisory_unlock(hashtextextended($1,0)) AS released', [lockKey]);
+        if (result.rows[0]?.released !== true) unusableClients.add(client);
+      } catch { unusableClients.add(client); }
+    }
+    if (borrowed || unusableClients.has(client)) client.release(unusableClients.has(client) ? true : undefined);
   }
 }
 async function updateReceipt(client: PoolClient, operator: MaintenanceOperator, key: string, fingerprint: string, status: number, batch: MaintenanceBatch) {
@@ -142,6 +154,8 @@ async function execute(client: PoolClient, batch: MaintenanceBatch, operator: Ma
         else result = { id, orderId: item.orderId, status: value.items.every((x: any) => x.replayed) ? 'REPLAYED' : 'ACCRUED', earningIds: value.items.map((x: any) => x.root.id) };
       }
     } catch (error) {
+      // A failed rollback cannot share a later receipt transaction that might commit old work.
+      if (unusableClients.has(client)) throw error;
       const rejected = terminalRejection(error);
       const nextResults = [...current.results.filter(resultValue => resultValue.id !== id), { id, ...(current.operation === 'DUE_SETTLE' ? { earningId: item.earningId } : { orderId: item.orderId }),
         status: rejected ? 'REJECTED' : 'UNKNOWN', errorCode: failureCode(error), ...(rejected ? {} : { recoveryRequired: true }) }];
