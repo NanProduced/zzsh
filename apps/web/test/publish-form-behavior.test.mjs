@@ -929,15 +929,27 @@ test("page anchors keep every group expanded and do not prompt or write", async 
   } finally { await p.close(); }
 });
 
-test("unquoted summary distinguishes missing pricing from a zero income", async () => {
-  const p=await probe();
+test("unquoted summary distinguishes missing pricing from a zero income", { timeout: 5000 }, async () => {
+  const requestStarted = Promise.withResolvers();
+  const response = Promise.withResolvers();
+  const p=await probe({ resourceIncomePreview: () => {
+    requestStarted.resolve();
+    return response.promise;
+  } });
   try {
     await p.render();
     const rail=p.host.querySelector('#publish-quote');
     assert.equal(rail.dataset.quoted,'false');
     assert.equal(rail.querySelector('[aria-label="预计收入合计"]'),null);
     assert.doesNotMatch(rail.textContent,/0\.00 元/);
+    // Wait for the real debounced read, then control its completion instead of sleeping.
+    await React.act(async () => { await requestStarted.promise; });
+    assert.equal(p.host.querySelector('.supply-resource-grid').getAttribute('aria-busy'),'true');
+    assert.equal(p.host.querySelector('[aria-label="物品预估收入"]').textContent,'读取中…');
+    await React.act(async () => { response.resolve({ available: false, reason: 'PREVIEW_UNAVAILABLE' }); });
+    assert.equal(p.host.querySelector('.supply-resource-grid').getAttribute('aria-busy'),'false');
     assert.equal(p.host.querySelector('[aria-label="物品预估收入"]').textContent,'预估暂不可用');
+    assert.doesNotMatch(rail.textContent,/0\.00 元/);
     assert.match(p.host.querySelector('[data-resource-code="df_billable_barrett_bullet"]').textContent,/待配置.*目录待配置/);
   } finally { await p.close(); }
 });

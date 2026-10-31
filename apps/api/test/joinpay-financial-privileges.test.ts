@@ -197,6 +197,7 @@ test('退款前向迁移按0106后0107登记，来源证明由后继0108独立�
  assert(a>=0);assert.equal(b,a+1);assert(j.entries[b].when>j.entries[a].when);
  const proof=j.entries.findIndex((e:any)=>e.tag==='0108_legacy_finance_source_proof');
  assert.equal(proof,b+1);assert(j.entries[proof].when>j.entries[b].when);
+ assert.equal(j.entries[proof].idx,j.entries[b].idx+1);
  assert.equal(j.entries.filter((e:any)=>e.tag==='0108_legacy_finance_source_proof').length,1);
  assert(readFileSync(resolve('migrations/business/0106_joinpay_abnormal_refund_basis.sql'),'utf8').includes('ADD COLUMN basis_kind'));
 });
