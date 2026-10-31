@@ -49,3 +49,17 @@ v2 UNIFORM 的数据库前向结构、支付依据推导、NATIVE 账本/冲回 
 ## 旧关系与旧佣金承接
 
 旧 `inviter_id` 迁为 `INVITER`，旧直属上级迁为 `DISTRIBUTION_LEADER`，两者可同一人但类型不合并；`second_leader`/`third_leader` 只作历史对照，不生成新计佣边。旧已结算佣金只随钱包期初承接并标记已覆盖，不再按新政策计提；旧已失效（VOID/失效状态）保持只读，不复活；旧待结算必须逐笔核父单仍完成、原受益人/原比例/原基数与父单证据，再按原责任显式入账，不能用切换日重算到期或新比例追补。旧等级和 5/10/20/30 比例仅作历史显示，不能成为新政策默认值。旧聚合在其最新源副本导入并逐域对账前只是观察，不是当前钱包或渠道到账事实。
+
+| 旧源 | 目标 | 规则 |
+| --- | --- | --- |
+| `la_user.inviter_id` | `invitation_relation(INVITER, source_type=LEGACY_MYSQL)` | 只表达注册来源；与分销上级分开，同人也不合并 |
+| `la_user.first_leader` | `invitation_relation(DISTRIBUTION_LEADER)` | 唯一计佣边；原父非零但未映射时拒绝，不补建 |
+| `second_leader`/`third_leader`/`ancestor_relation` | 不迁计佣边 | 只留历史对照；新平台一层 |
+| `la_distribution.level_id` | `distribution_participant.level_code` | 仅历史等级；v2 不读等级 |
+| `la_distribution.is_freeze`/`is_distribution`/`is_delete` | `commission_frozen`/`eligibility` | 冻结、资格和删除分别映射；未知不冒充资格 |
+| `la_distribution_order.status=2` | `personal_finance_observation(HISTORICAL_DISTRIBUTION)` + 期初 covered | 已入账只承接一次；不再新增佣金，不按新比例重算 |
+| `status=1` 待结 | 原责任逐笔核验后显式入账 | 需父单完成、原受益人/比例/基数/原到期证据；不进 `settleDue` 的新 PENDING |
+| `status=3` 失效 | 只读历史 | 不复活、不补扣快照中未入账的失效行 |
+| 原 `ratio`/`level` 快照 | 原行保留 | 历史显示；不按当前政策倒算 |
+
+对账以最新源副本为准：逐域核对源行数/金额、已映射主体、关系闭包、已覆盖期初和未结责任；同一来源键不重复导入。对账前旧聚合只是观察。关系导入复用 `importReviewedLegacyInvitations`/`recoverReviewedLegacyInvitations`，佣金观察与期初复用 `prepareFrozenFinanceObservation`/`prepareFrozenFinanceHistory`，不另写迁移框架。
