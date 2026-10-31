@@ -684,8 +684,21 @@ async function handleMessageAction(
 
 async function handleUserMessages(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions): Promise<void> {
   const transport = options.consultation?.messageTransport;
-  if (!options.consultation || !transport) {
+  if (!options.consultation) {
     sendUnavailable(response, requestId);
+    return;
+  }
+  // 真实通道没有服务端消息通道：正文由浏览器 NIM SDK 直连收发。这里只登记事实
+  // （预览、首响起点、未读），并且仍然先过同一份对象访问校验，避免客户端拿上报接口
+  // 去写别人会话的摘要。它不保存正文、不参与任何金额或状态判定。
+  if (!transport) {
+    if (request.method?.toUpperCase() !== "POST") { sendUnavailable(response, requestId); return; }
+    const realContext = await readUserContext(request, options.security);
+    const realInput = await parseMessageBody(request.body);
+    if (realInput.kind !== "text") { sendUnavailable(response, requestId); return; }
+    await readMessageAccess(options, {...realContext,realm:"user"}, realInput.conversationId, true);
+    const recorded = await recordSupportPreview(options, realInput.conversationId, realInput.text, true);
+    sendJson(response, 200, { recorded, via: "nim" }, requestId);
     return;
   }
   const context = await readUserContext(request, options.security);

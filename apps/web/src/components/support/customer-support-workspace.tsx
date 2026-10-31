@@ -1765,6 +1765,15 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
           const sent = currentReply
             ? await client.replyText(conversationId, text, currentReply.source!)
             : await client.sendText(conversationId, text);
+          // 真实通道下正文由 NIM 直连发出，服务端不会自动得知。补一条“只登记事实”的上报：
+          // 会话据此进入客服队列、首响起点与预览也随之更新。上报失败不影响已经发出的消息。
+          if (client.transport !== "local-fake") {
+            void fetch("/api/im/messages", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ conversationId, kind: "text", text }),
+            }).catch(() => undefined);
+          }
           const next = messageFromNim(sent, client.accountId);
           // The receipt settles on the conversation it was sent from, not on whatever is
           // selected now; a hidden private projection is never refilled by a late success.
