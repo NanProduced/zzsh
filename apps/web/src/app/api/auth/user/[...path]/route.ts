@@ -38,6 +38,12 @@ async function forward(request: Request, { params }: { params: Promise<{ path: s
   if (method !== (readPath ? "GET" : "POST") && !(readPath && method === "HEAD" && authPath === "/get-session")) return errorResponse(404, "NOT_FOUND", requestId);
   const expectedSecurityMethod = authPath === "/identity/status" ? "GET" : USER_SECURITY_POST_PATHS.has(authPath) ? "POST" : undefined;
   if (expectedSecurityMethod && method !== expectedSecurityMethod) return errorResponse(404, "NOT_FOUND", requestId);
+  let captchaAction: string | undefined;
+  if (authPath === "/security/captcha/challenge") {
+    const actions = new URL(request.url).searchParams.getAll("action");
+    if (actions.length !== 1 || (actions[0] !== "sign-in" && actions[0] !== "sms-send")) return errorResponse(400, "INVALID_ARGUMENT", requestId);
+    captchaAction = actions[0];
+  }
   if (method !== "GET" && method !== "HEAD" && request.headers.get("origin") !== WEB_ORIGIN) return errorResponse(403, "FORBIDDEN", requestId);
   let headers: Headers;
   try { headers = buildUserAuthUpstreamHeaders(request, { requestId, webOrigin: WEB_ORIGIN }); }
@@ -59,9 +65,11 @@ async function forward(request: Request, { params }: { params: Promise<{ path: s
       return errorResponse(error instanceof BodyTooLargeError ? 413 : 400, "INVALID_ARGUMENT", requestId);
     }
   }
+  const upstreamUrl = new URL(`/api/auth/user${authPath}`, API_ORIGIN);
+  if (captchaAction) upstreamUrl.searchParams.set("action", captchaAction);
   let upstream: Response;
   try {
-    upstream = await fetch(new URL(`/api/auth/user${authPath}`, API_ORIGIN), { method, headers, body, cache: "no-store", signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS) });
+    upstream = await fetch(upstreamUrl, { method, headers, body, cache: "no-store", signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS) });
   } catch {
     return errorResponse(503, "INTERNAL_ERROR", requestId);
   }

@@ -1,5 +1,6 @@
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
+import { withTransaction as pgTransaction } from "./security-core";
 
 import { API_V1_ERROR_CODES } from "../contracts/api-v1";
 import { ConfigurationError, readSecret } from "../config/config";
@@ -61,7 +62,7 @@ export function userAuthPathProtection(path: string, mode: UserThrottleMode): "r
 }
 
 type Kind = "reserved" | "failure" | "sent" | "unknown";
-type Row = { purpose: string; subject: string; kind: Kind; ticket: string; at: number };
+type Row = { purpose: string; subject: string; kind: Kind; ticket: string; at: number; expiresAt?: number };
 type Challenge = { parameters: Record<string, unknown> & { expiresAt?: number }; signature?: string };
 type Decision =
   | { decision: "allow"; ticket?: string }
@@ -213,10 +214,10 @@ export function createMemoryUserAuthThrottle(options: {
   };
   const secret = captchaKey(options.hmacKey, realm);
   const sweepExpired = (limit: number) => {
-    const cutoff = now() - policy.daySeconds * 1000;
+    const at = now();
     let events = 0;
     for (let index = 0; index < rows.length && events < limit;) {
-      if (rows[index]!.at <= cutoff) { rows.splice(index, 1); events += 1; }
+      if ((rows[index]!.expiresAt ?? rows[index]!.at + (rows[index]!.purpose === "sign-in" ? policy.signInWindowSeconds : policy.daySeconds) * 1000) <= at) { rows.splice(index, 1); events += 1; }
       else index += 1;
     }
     let proofs = 0;
@@ -265,9 +266,9 @@ export function createMemoryUserAuthThrottle(options: {
       if (!ip) return { decision: "allow" };
       const subject = throttleDigest(options.hmacKey, realm, "base-ip", `${rule.path}\0${ip}`);
       const since = now() - rule.windowSeconds * 1000;
-      const hits = rows.filter((row) => row.purpose === "base" && row.subject === subject && row.at > since);
+      const hits = rows.filter((row) => row.purpose === "base" && row.subject === subject && row.at > since && (row.expiresAt ?? Infinity) > now());
       if (hits.length >= rule.max) return { decision: "limited", retryAfter: retryAfter(hits, now(), rule.windowSeconds) };
-      rows.push({ purpose: "base", subject, kind: "failure", ticket: ticket(), at: now() });
+      rows.push({ purpose: "base", subject, kind: "failure", ticket: ticket(), at: now(), expiresAt: now() + rule.windowSeconds * 1000 });
       return { decision: "allow" };
     }),
     recordRejection: (event) => lock(async () => { await note(event); }),
@@ -350,19 +351,6 @@ export function createMemoryUserAuthThrottle(options: {
 const EVENT_TABLE = `"zzsh_iam"."user_auth_throttle_event"`;
 const CAPTCHA_TABLE = `"zzsh_iam"."user_auth_captcha_used"`;
 
-async function pgTransaction<T>(pool: Pool, fn: (client: PoolClient) => Promise<T>): Promise<T> {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    const value = await fn(client);
-    await client.query("COMMIT");
-    return value;
-  } catch (error) {
-    try { await client.query("ROLLBACK"); } catch { /* connection already dead */ }
-    throw error;
-  } finally { client.release(); }
-}
-
 async function postgresNow(client: PoolClient): Promise<number> {
   const result = await client.query<{ now: string }>("SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::text AS now");
   const at = Number(result.rows[0]?.now);
@@ -370,12 +358,13 @@ async function postgresNow(client: PoolClient): Promise<number> {
   return at;
 }
 
-async function loadRows(client: PoolClient, realm: string, subjects: readonly string[]): Promise<Row[]> {
+async function loadRows(client: PoolClient, realm: string, subjects: readonly string[], purpose: string, windowSeconds: number): Promise<Row[]> {
   if (subjects.length === 0) return [];
   const result = await client.query<{ purpose: string; subject: string; kind: Kind; ticket: string; at: Date }>(
     `SELECT purpose, subject, kind, ticket, occurred_at AS at FROM ${EVENT_TABLE}
-      WHERE realm = $1 AND subject = ANY($2::text[]) AND occurred_at > clock_timestamp() - interval '24 hours'`,
-    [realm, subjects],
+      WHERE realm = $1 AND subject = ANY($2::text[]) AND purpose = $3
+        AND occurred_at > clock_timestamp() - make_interval(secs => $4) AND expires_at > clock_timestamp()`,
+    [realm, subjects, purpose, windowSeconds],
   );
   return result.rows.map((row) => ({ ...row, at: new Date(row.at).getTime() }));
 }
@@ -384,7 +373,7 @@ async function lockSubjects(client: PoolClient, realm: string, purpose: string, 
   for (const subject of [...new Set(subjects)].sort()) {
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`${realm}:${purpose}:${subject}`]);
     await client.query(
-      `DELETE FROM ${EVENT_TABLE} WHERE realm = $1 AND purpose = $2 AND subject = $3 AND occurred_at <= clock_timestamp() - interval '24 hours'`,
+      `DELETE FROM ${EVENT_TABLE} WHERE realm = $1 AND purpose = $2 AND subject = $3 AND expires_at <= clock_timestamp()`,
       [realm, purpose, subject],
     );
   }
@@ -415,9 +404,9 @@ export function createPostgresUserAuthThrottle(pool: Pool, options: {
     }
     await client.query("RELEASE SAVEPOINT user_auth_throttle_audit");
   };
-  const insert = (client: PoolClient, purpose: string, subject: string, kind: Kind, id: string) => client.query(
-    `INSERT INTO ${EVENT_TABLE} (realm, purpose, subject, kind, ticket) VALUES ($1, $2, $3, $4, $5)`,
-    [realm, purpose, subject, kind, id],
+  const insert = (client: PoolClient, purpose: string, subject: string, kind: Kind, id: string, windowSeconds = purpose === "sign-in" ? policy.signInWindowSeconds : policy.daySeconds) => client.query(
+    `INSERT INTO ${EVENT_TABLE} (realm, purpose, subject, kind, ticket, expires_at) VALUES ($1, $2, $3, $4, $5, clock_timestamp() + make_interval(secs => $6))`,
+    [realm, purpose, subject, kind, id, windowSeconds],
   );
   const sweepExpired = (limit: number) => {
     const bounded = Math.min(Math.max(Math.floor(limit), 1), 1000);
@@ -427,8 +416,8 @@ export function createPostgresUserAuthThrottle(pool: Pool, options: {
       const events = await client.query(
         `DELETE FROM ${EVENT_TABLE} WHERE id IN (
            SELECT id FROM ${EVENT_TABLE}
-            WHERE occurred_at <= clock_timestamp() - interval '24 hours'
-            ORDER BY occurred_at
+            WHERE expires_at <= clock_timestamp()
+            ORDER BY expires_at
             LIMIT $1
             FOR UPDATE SKIP LOCKED)`,
         [bounded],
@@ -470,12 +459,12 @@ export function createPostgresUserAuthThrottle(pool: Pool, options: {
       try {
         return await pgTransaction(pool, async (client) => {
           await lockSubjects(client, realm, "base", [subject]);
-          const rows = await loadRows(client, realm, [subject]);
+          const rows = await loadRows(client, realm, [subject], "base", rule.windowSeconds);
           const at = await postgresNow(client);
           const since = at - rule.windowSeconds * 1000;
           const hits = rows.filter((row) => row.purpose === "base" && row.subject === subject && row.at > since);
           if (hits.length >= rule.max) return { decision: "limited" as const, retryAfter: retryAfter(hits, at, rule.windowSeconds) };
-          await insert(client, "base", subject, "failure", ticket());
+          await insert(client, "base", subject, "failure", ticket(), rule.windowSeconds);
           return { decision: "allow" as const };
         });
       } catch (error) {
@@ -485,7 +474,8 @@ export function createPostgresUserAuthThrottle(pool: Pool, options: {
     },
     sweepExpired,
     recordRejection: async (event) => {
-      await pgTransaction(pool, (client) => note(client, event));
+      try { await pgTransaction(pool, (client) => note(client, event)); }
+      catch { auditFallback(fallbackLogs, event); throw new ThrottleDependencyError(); }
     },
     async admitSignIn(subjects, payload) {
       await maybeSweep();
@@ -493,7 +483,7 @@ export function createPostgresUserAuthThrottle(pool: Pool, options: {
         return await pgTransaction(pool, async (client) => {
           const locked = [subjects.account, subjects.pair, subjects.ip].filter((value): value is string => !!value);
           await lockSubjects(client, realm, "sign-in", locked);
-          const rows = await loadRows(client, realm, locked);
+          const rows = await loadRows(client, realm, locked, "sign-in", policy.signInWindowSeconds);
           const at = await postgresNow(client);
           const preview = decideSignIn(rows, subjects, false, at, policy);
           if (preview.decision === "limited") {
@@ -533,7 +523,7 @@ export function createPostgresUserAuthThrottle(pool: Pool, options: {
           const count = await client.query<{ failures: number }>(
             `SELECT count(*)::int AS failures FROM ${EVENT_TABLE}
               WHERE realm = $1 AND purpose = 'sign-in' AND subject = $2 AND kind = 'failure'
-                AND occurred_at > clock_timestamp() - make_interval(secs => $3)`,
+                AND occurred_at > clock_timestamp() - make_interval(secs => $3) AND expires_at > clock_timestamp()`,
             [realm, input.account, policy.signInWindowSeconds],
           );
           return { captchaNow: (count.rows[0]?.failures ?? 0) >= policy.accountCaptchaAfter };
@@ -547,7 +537,7 @@ export function createPostgresUserAuthThrottle(pool: Pool, options: {
       try {
         return await pgTransaction(pool, async (client) => {
           await lockSubjects(client, realm, "sms-ip", [subject]);
-          const rows = await loadRows(client, realm, [subject]);
+          const rows = await loadRows(client, realm, [subject], "sms-ip", policy.daySeconds);
           const at = await postgresNow(client);
           const preview = decideSms(rows, { ip: subject }, false, at, policy);
           if (preview.decision === "limited") {
@@ -577,7 +567,7 @@ export function createPostgresUserAuthThrottle(pool: Pool, options: {
       const run = async (held: PoolClient, durable: boolean) => {
         if (memory.mode === "base") return { decision: "allow" as const, durable };
         await lockSubjects(held, realm, "sms-phone", [subject]);
-        const rows = await loadRows(held, realm, [subject]);
+        const rows = await loadRows(held, realm, [subject], "sms-phone", policy.daySeconds);
         const decision = decideSms(rows, { phone: subject }, true, await postgresNow(held), policy);
         if (decision.decision !== "allow" || !decision.ticket) {
           const rejection = { action: "user.auth.sms_limited", purpose: "sms-phone", subject, outcome: "FAILURE" as const };
@@ -612,6 +602,7 @@ async function verifyOnClient(client: PoolClient, realm: string, hmacKey: string
   const signature = decoded.challenge?.signature;
   const expiresAt = decoded.challenge?.parameters?.expiresAt;
   if (!signature || signature.length > 128 || !decoded.solution || typeof expiresAt !== "number" || decoded.challenge?.parameters?.data !== `${realm}:${action}`) return false;
+  if (!Number.isFinite(expiresAt) || expiresAt * 1000 <= await postgresNow(client)) return false;
   await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`${realm}:captcha:${signature}`]);
   await client.query(`DELETE FROM ${CAPTCHA_TABLE} WHERE realm = $1 AND expires_at < clock_timestamp() AND signature IN (SELECT signature FROM ${CAPTCHA_TABLE} WHERE expires_at < clock_timestamp() LIMIT 100)`, [realm]);
   const result = await altchaLib().verifySolution({ challenge: decoded.challenge, solution: decoded.solution, hmacSignatureSecret: secret });
@@ -706,13 +697,15 @@ function baseRule(path: string): { windowSeconds: number; max: number; path: str
   return { ...(USER_AUTH_BASE_RULES[path] ?? USER_AUTH_BASE_DEFAULT), path };
 }
 
-export function withUserAuthThrottle(handler: (request: Request) => Promise<Response>, throttle: UserAuthThrottle, hmacKey: string): (request: Request) => Promise<Response> {
+export function withUserAuthThrottle(handler: (request: Request) => Promise<Response>, throttle: UserAuthThrottle, hmacKey: string, options: { requireResolvedIp?: boolean } = {}): (request: Request) => Promise<Response> {
+  const requireResolvedIp = options.requireResolvedIp ?? process.env.NODE_ENV === "production";
   return async (request) => {
     const path = authPath(request.url);
     const requestId = request.headers.get("x-request-id") ?? `req_${randomUUID().replaceAll("-", "")}`;
     const dependency = () => controlled(503, errorBody(503, API_V1_ERROR_CODES.INTERNAL_ERROR, "Authentication dependency unavailable", requestId, { reason: "AUTH_DEPENDENCY_UNAVAILABLE" }));
     const clientIp = () => throttleClientIp(request.headers.get(USER_CLIENT_IP_FORWARD_HEADER) ?? undefined);
     const protection = userAuthPathProtection(path, throttle.mode);
+    if (requireResolvedIp && !clientIp() && (request.method === "POST" || request.method === "GET" && path === CHALLENGE_PATH && protection !== "unpublished")) return dependency();
     if (request.method === "GET" && path === "/security/captcha/challenge") {
       if (protection === "unpublished") return controlled(404, errorBody(404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId));
       try {
@@ -778,7 +771,7 @@ export function withUserAuthThrottle(handler: (request: Request) => Promise<Resp
         try { settled = await throttle.settleSignIn({ ticket: admitted.ticket, outcome, ...subjects }); }
         catch {
           if (upstream.ok) {
-            console.warn(JSON.stringify({ event: "user.auth.throttle_settlement_failed", purpose: "sign-in", upstreamAccepted: true }));
+            try { console.warn(JSON.stringify({ event: "user.auth.throttle_settlement_failed", purpose: "sign-in", upstreamAccepted: true })); } catch { /* preserve the accepted response */ }
             return upstream;
           }
           return dependency();
@@ -814,7 +807,7 @@ export function withUserAuthThrottle(handler: (request: Request) => Promise<Resp
       try { await throttle.settleSmsIp(smsTicket, smsOutcome); }
       catch {
         if (upstream.ok) {
-          console.warn(JSON.stringify({ event: "user.auth.throttle_settlement_failed", purpose: "sms", upstreamAccepted: true }));
+          try { console.warn(JSON.stringify({ event: "user.auth.throttle_settlement_failed", purpose: "sms", upstreamAccepted: true })); } catch { /* preserve the accepted response */ }
           return upstream;
         }
         return dependency();

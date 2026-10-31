@@ -15,12 +15,14 @@ export async function solveLocalPow(challenge: AuthChallenge, signal?: AbortSign
   if (signal?.aborted || stillCurrent?.() === false) throw new DOMException("Proof calculation cancelled", "AbortError");
   const parameters = challenge?.parameters;
   const keyLength = parameters?.keyLength ?? 32;
+  const expiresAt = parameters?.expiresAt;
   const prefix = typeof parameters?.keyPrefix === "string" ? parameters.keyPrefix.toLowerCase() : "";
   if (!parameters || parameters.algorithm !== "PBKDF2/SHA-256"
     || typeof parameters.nonce !== "string" || typeof parameters.salt !== "string"
     || !/^[0-9a-f]{8,128}$/i.test(parameters.nonce) || !/^[0-9a-f]{8,128}$/i.test(parameters.salt)
     || !Number.isInteger(parameters.cost) || parameters.cost < 1 || parameters.cost > 1_000_000
-    || keyLength !== 32 || !/^[0-9a-f]{1,8}$/i.test(prefix)) {
+    || keyLength !== 32 || !/^[0-9a-f]{1,8}$/i.test(prefix)
+    || typeof expiresAt !== "number" || !Number.isSafeInteger(expiresAt) || expiresAt * 1000 <= Date.now()) {
     throw new WebAuthError(403, "FORBIDDEN", false, undefined, "CAPTCHA_REQUIRED");
   }
   const { nonce, salt, cost } = parameters;
@@ -28,11 +30,13 @@ export async function solveLocalPow(challenge: AuthChallenge, signal?: AbortSign
   const saltBytes = hexToBytes(salt);
   for (let counter = 0; counter < 1_048_576; counter += 1) {
     if (signal?.aborted || stillCurrent?.() === false) throw new DOMException("Proof calculation cancelled", "AbortError");
+    if (expiresAt * 1000 <= Date.now()) throw new WebAuthError(403, "FORBIDDEN", false, undefined, "CAPTCHA_REQUIRED");
     const password = new Uint8Array(nonceBytes.length + 4);
     password.set(nonceBytes, 0);
     new DataView(password.buffer).setUint32(nonceBytes.length, counter, false);
     const key = await crypto.subtle.importKey("raw", password, "PBKDF2", false, ["deriveBits"]);
     const bits = new Uint8Array(await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: saltBytes, iterations: cost }, key, keyLength * 8));
+    if (expiresAt * 1000 <= Date.now()) throw new WebAuthError(403, "FORBIDDEN", false, undefined, "CAPTCHA_REQUIRED");
     const hex = bytesToHex(bits);
     if (hex.startsWith(prefix)) {
       const json = JSON.stringify({ challenge, solution: { counter, derivedKey: hex } });

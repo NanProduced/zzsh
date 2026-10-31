@@ -390,7 +390,7 @@ test("a sign-in proof does not satisfy SMS, and the window edge follows the inje
 
 test("memory cleanup removes a bounded number of old subjects", async () => {
   let clock = 0;
-  const store = createMemoryUserAuthThrottle({ hmacKey: KEY, mode: "candidate", now: () => clock, policy: { ...policy, daySeconds: 10, pairMax: 10, ipMax: 10, accountCaptchaAfter: 100 }, captchaCost: 1 });
+  const store = createMemoryUserAuthThrottle({ hmacKey: KEY, mode: "candidate", now: () => clock, policy: { ...policy, daySeconds: 10, signInWindowSeconds: 10, pairMax: 10, ipMax: 10, accountCaptchaAfter: 100 }, captchaCost: 1 });
   for (const phone of ["+8613800138011", "+8613800138012"]) {
     assert.equal((await store.admitSignIn(signInSubjects(KEY, phone, IP), undefined)).decision, "allow");
   }
@@ -475,4 +475,215 @@ test("candidate challenge issuance binds the action and base mode does not publi
   const issued = await wrapped(new Request("http://127.0.0.1/api/auth/user/security/captcha/challenge?action=sms-send"));
   assert.equal(issued.status, 200);
   assert.equal((await issued.json()).challenge.parameters.data, "user:sms-send");
+});
+
+
+test("Root R1: accepted login and SMS survive both settlement and diagnostic failures", async () => {
+  const oldWarn = console.warn;
+  console.warn = () => { throw new Error("synthetic diagnostic sink unavailable"); };
+  try {
+    const loginStore = { realm: "user", mode: "candidate", admitSignIn: async () => ({ decision: "allow", ticket: "held" }), settleSignIn: async () => { throw new Error("synthetic settlement failure"); } } as any;
+    const loggedIn = new Response("{}", { status: 200, headers: { "set-cookie": "zzsh_user.session_token=SYNTHETIC; HttpOnly" } });
+    const login = withUserAuthThrottle(async () => loggedIn, loginStore, KEY);
+    const response = await login(signInRequest({ phoneNumber: PHONE, password: "correct" }));
+    assert.equal(response, loggedIn);
+    assert.match(response.headers.get("set-cookie")!, /SYNTHETIC/);
+
+    const smsStore = { realm: "user", mode: "candidate", admitSmsIp: async () => ({ decision: "allow", ticket: "sms-held" }), settleSmsIp: async () => { throw new Error("synthetic settlement failure"); } } as any;
+    const sent = Response.json({ status: true, challengeId: "original_synthetic_challenge" });
+    const sms = withUserAuthThrottle(async () => sent, smsStore, KEY);
+    const result = await sms(signInRequest({ phoneNumber: PHONE }, IP, "/phone-registration/send-otp"));
+    assert.equal(result, sent);
+    assert.equal((await result.json()).challengeId, "original_synthetic_challenge");
+  } finally { console.warn = oldWarn; }
+});
+
+test("Root R1: a failed rollback destroys the throttle client instead of pooling it", async () => {
+  const released: Array<boolean | undefined> = [];
+  const oldWarn = console.warn;
+  console.warn = () => {};
+  const pool = { connect: async () => ({
+    query: async (sql: string) => {
+      if (sql === "BEGIN") return { rows: [], rowCount: 0 };
+      throw new Error(sql === "ROLLBACK" ? "synthetic rollback unavailable" : "synthetic query failed");
+    },
+    release: (destroy?: boolean) => { released.push(destroy); },
+  }) } as unknown as Pool;
+  try {
+    const store = createPostgresUserAuthThrottle(pool, { hmacKey: KEY, mode: "base" });
+    await assert.rejects(() => store.admitBase(IP, { path: "/security/password", windowSeconds: 10, max: 100 }), ThrottleDependencyError);
+    assert.ok(released.length > 0);
+    assert.equal(released.every((destroy) => destroy === true), true);
+  } finally { console.warn = oldWarn; }
+});
+
+type R1StoreQuery = { sql: string; parameters: readonly unknown[] };
+
+function r1StorePool(seen: R1StoreQuery[], sweepLock: () => boolean, now: number): Pool {
+  return { connect: async () => ({ release() {}, query: async (sql: string, parameters: unknown[] = []) => {
+    const text = sql.replace(/\s+/g, " ").trim();
+    seen.push({ sql: text, parameters });
+    if (/pg_try_advisory_xact_lock/.test(text)) return { rows: [{ ok: sweepLock() }], rowCount: 1 };
+    if (/extract\(epoch FROM clock_timestamp\(\)\)/.test(text)) return { rows: [{ now: String(now) }], rowCount: 1 };
+    if (/^DELETE.*FOR UPDATE SKIP LOCKED/.test(text)) return { rows: [], rowCount: 2 };
+    if (/^(BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE)|^SELECT pg_advisory|^SELECT purpose|^DELETE|^INSERT/.test(text)) return { rows: [], rowCount: 0 };
+    throw new Error("unsupported synthetic throttle SQL");
+  } }) } as unknown as Pool;
+}
+
+function r1ContainsTime(parameters: readonly unknown[], milliseconds: number, seconds: number): boolean {
+  return parameters.some((value) => value instanceof Date ? value.getTime() === milliseconds
+    : typeof value === "number" ? value === milliseconds || value === milliseconds / 1000 || value === seconds
+      : typeof value === "string" && /^\d+(?:\.\d+)?$/.test(value) ? Number(value) === milliseconds || Number(value) === milliseconds / 1000 || Number(value) === seconds : false);
+}
+
+test("Root R1: base SQL binds purpose, the actual window and explicit per-event expiry", async () => {
+  const seen: R1StoreQuery[] = [], now = 1_800_000_000_000;
+  const store = createPostgresUserAuthThrottle(r1StorePool(seen, () => false, now), { hmacKey: KEY, mode: "base" });
+  assert.equal((await store.admitBase(IP, { path: "/synthetic-base", windowSeconds: 13, max: 100 })).decision, "allow");
+  const read = seen.find((entry) => /^SELECT purpose/.test(entry.sql));
+  const insert = seen.find((entry) => /^INSERT/.test(entry.sql));
+  assert.ok(read && insert);
+  assert.match(read.sql, /\bpurpose\s*=\s*\$/);
+  assert.match(read.sql, /\boccurred_at\s*>/);
+  assert.match(read.sql, /\bexpires_at\s*>/);
+  assert.ok(read.parameters.includes("base"));
+  assert.ok(r1ContainsTime(read.parameters, now - 13_000, 13));
+  assert.match(insert.sql, /\bexpires_at\b/);
+  assert.ok(r1ContainsTime(insert.parameters, now + 13_000, 13));
+  const subjectLock = seen.findIndex((entry) => /pg_advisory_xact_lock/.test(entry.sql));
+  assert.ok(subjectLock >= 0 && subjectLock < seen.indexOf(read) && seen.indexOf(read) < seen.indexOf(insert));
+});
+
+test("Root R1: cleanup follows stored expiry, caps both tables and skips a competing sweeper", async () => {
+  const seen: R1StoreQuery[] = [];
+  let locked = true;
+  const store = createPostgresUserAuthThrottle(r1StorePool(seen, () => locked, 1_800_000_000_000), { hmacKey: KEY, mode: "base" });
+  assert.deepEqual(await store.sweepExpired(2), { events: 2, proofs: 2 });
+  const deletes = seen.filter((entry) => /^DELETE.*FOR UPDATE SKIP LOCKED/.test(entry.sql));
+  assert.equal(deletes.length, 2);
+  for (const entry of deletes) {
+    assert.match(entry.sql, /\bexpires_at\s*<=/);
+    assert.match(entry.sql, /ORDER BY(?:\s+\w+\.)?\s*expires_at/);
+    assert.doesNotMatch(entry.sql, /occurred_at\s*<=/);
+    const limit = /\bLIMIT\s+\$(\d+)/.exec(entry.sql);
+    assert.ok(limit);
+    assert.equal(entry.parameters[Number(limit[1]) - 1], 2);
+  }
+  seen.length = 0;
+  assert.deepEqual(await store.sweepExpired(100_000), { events: 2, proofs: 2 });
+  for (const entry of seen.filter((query) => /^DELETE.*FOR UPDATE SKIP LOCKED/.test(query.sql))) {
+    const limit = /\bLIMIT\s+\$(\d+)/.exec(entry.sql)!;
+    assert.equal(entry.parameters[Number(limit[1]) - 1], 1000);
+  }
+  seen.length = 0;
+  locked = false;
+  assert.deepEqual(await store.sweepExpired(2), { events: 0, proofs: 0 });
+  assert.equal(seen.some((entry) => /^DELETE/.test(entry.sql)), false);
+});
+
+test("Root R1: memory base events expire at their own rule window", async () => {
+  let now = 1_800_000_000_000;
+  const store = createMemoryUserAuthThrottle({ hmacKey: KEY, mode: "base", now: () => now });
+  assert.equal((await store.admitBase(IP, { path: "/synthetic-short", windowSeconds: 13, max: 100 })).decision, "allow");
+  assert.equal((await store.admitBase(IP, { path: "/synthetic-long", windowSeconds: 60, max: 100 })).decision, "allow");
+  now += 14_000;
+  assert.deepEqual(await store.sweepExpired(1), { events: 1, proofs: 0 });
+  now += 47_000;
+  assert.deepEqual(await store.sweepExpired(100), { events: 1, proofs: 0 });
+});
+
+
+function strictBaseWithoutProposalCounters() {
+  const store = createMemoryUserAuthThrottle({ hmacKey: KEY, mode: "base" });
+  const unexpected = async () => { throw new Error("Base mode must not run unpublished proposal counters"); };
+  store.admitSignIn = unexpected;
+  store.settleSignIn = unexpected;
+  store.admitSmsIp = unexpected;
+  store.settleSmsIp = unexpected;
+  return store;
+}
+
+function missingIpSignIn(value?: string): Request {
+  const headers = new Headers({ "content-type": "application/json" });
+  if (value) headers.set(USER_CLIENT_IP_FORWARD_HEADER, value);
+  return new Request("http://127.0.0.1/api/auth/user/sign-in/phone-number", { method: "POST", headers, body: JSON.stringify({ phoneNumber: PHONE, password: "synthetic_wrong" }) });
+}
+
+test("Root R1: strict base rejects unresolved and loopback IP before the auth handler", async () => {
+  let calls = 0;
+  const wrapped = withUserAuthThrottle(async () => { calls += 1; return Response.json({}, { status: 401 }); }, strictBaseWithoutProposalCounters(), KEY, { requireResolvedIp: true });
+  for (const address of [undefined, "127.0.0.1", "::1"]) {
+    const response = await wrapped(missingIpSignIn(address));
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).error.reason, "AUTH_DEPENDENCY_UNAVAILABLE");
+    assert.equal(response.headers.get("retry-after"), null, "a missing trusted IP is a dependency failure, not an exhausted quota");
+  }
+  assert.equal(calls, 0);
+});
+
+test("Root R1: strict candidate challenge does not issue a proof without a resolved IP", async () => {
+  const store = createMemoryUserAuthThrottle({ hmacKey: KEY, mode: "candidate", captchaCost: 1 });
+  let issued = 0;
+  store.challenge = async () => { issued += 1; throw new Error("Proof issuance must not run"); };
+  const wrapped = withUserAuthThrottle(async () => { throw new Error("No upstream challenge handler"); }, store, KEY, { requireResolvedIp: true });
+  const response = await wrapped(new Request("http://127.0.0.1/api/auth/user/security/captcha/challenge?action=sign-in"));
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error.reason, "AUTH_DEPENDENCY_UNAVAILABLE");
+  assert.equal(issued, 0);
+});
+
+test("Root R1: strict candidate POST rejects an unresolved IP before proposal admission", async () => {
+  const store = createMemoryUserAuthThrottle({ hmacKey: KEY, mode: "candidate", captchaCost: 1 });
+  let admissions = 0, calls = 0;
+  store.admitSignIn = async () => { admissions += 1; throw new Error("Unresolved IP must be rejected before proposal admission"); };
+  const wrapped = withUserAuthThrottle(async () => { calls += 1; return Response.json({}, { status: 401 }); }, store, KEY, { requireResolvedIp: true });
+  const response = await wrapped(missingIpSignIn());
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error.reason, "AUTH_DEPENDENCY_UNAVAILABLE");
+  assert.equal(admissions, 0);
+  assert.equal(calls, 0);
+});
+
+test("Root R1: strict base leaves the three read-only GET paths available without an IP", async () => {
+  let calls = 0;
+  const wrapped = withUserAuthThrottle(async () => { calls += 1; return Response.json({ readable: true }); }, strictBaseWithoutProposalCounters(), KEY, { requireResolvedIp: true });
+  for (const path of ["/get-session", "/security/overview", "/security/sessions"]) {
+    const response = await wrapped(new Request("http://127.0.0.1/api/auth/user" + path));
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).readable, true);
+  }
+  assert.equal(calls, 3);
+});
+
+test("Root R1: strict base keeps the existing resolved-IP sign-in and registration rules", async () => {
+  let calls = 0;
+  const wrapped = withUserAuthThrottle(async () => { calls += 1; return Response.json({}, { status: 401 }); }, strictBaseWithoutProposalCounters(), KEY, { requireResolvedIp: true });
+  for (const path of ["/sign-in/phone-number", "/sign-in/identifier"]) {
+    for (let index = 0; index < 3; index += 1) assert.equal((await wrapped(signInRequest({ phoneNumber: PHONE, password: "synthetic_wrong" }, IP, path))).status, 401);
+    assert.equal((await wrapped(signInRequest({ phoneNumber: PHONE, password: "synthetic_wrong" }, IP, path))).status, 429);
+  }
+  for (const path of ["/phone-registration/send-otp", "/phone-registration/complete"]) {
+    for (let index = 0; index < 5; index += 1) assert.equal((await wrapped(signInRequest({ phoneNumber: PHONE }, IP, path))).status, 401);
+    assert.equal((await wrapped(signInRequest({ phoneNumber: PHONE }, IP, path))).status, 429);
+  }
+  assert.equal(calls, 16);
+});
+
+test("Root R1: production defaults to resolved-IP enforcement while the explicit local fixture can opt out", async () => {
+  const before = process.env.NODE_ENV;
+  try {
+    process.env.NODE_ENV = "production";
+    let calls = 0;
+    const upstream = async () => { calls += 1; return Response.json({}, { status: 401 }); };
+    const production = withUserAuthThrottle(upstream, strictBaseWithoutProposalCounters(), KEY);
+    assert.equal((await production(missingIpSignIn())).status, 503);
+    assert.equal(calls, 0);
+    const localFixture = withUserAuthThrottle(upstream, strictBaseWithoutProposalCounters(), KEY, { requireResolvedIp: false });
+    assert.equal((await localFixture(missingIpSignIn())).status, 401);
+    assert.equal(calls, 1);
+  } finally {
+    if (before === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = before;
+  }
 });

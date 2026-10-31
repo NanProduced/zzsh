@@ -182,3 +182,28 @@ test("浏览器 User-Agent 有界转发：缺失不伪造、超长截断、其�
     assert.equal(seen.get("User-Agent"), null, "缺失时不伪造 UA");
   } finally { globalThis.fetch = original; }
 });
+
+
+test("Root R1: captcha GET validates and forwards only one allowed action", async () => {
+  const original = globalThis.fetch; const calls = [];
+  globalThis.fetch = async (input, init) => { calls.push({ url: new URL(input), init }); return Response.json({ provider: "local-pow", schema: 1, challenge: { parameters: { data: "user:sign-in" } } }); };
+  try {
+    for (const action of ["sign-in", "sms-send"]) {
+      const response = await GET(new Request("http://localhost/api/auth/user/security/captcha/challenge?action=" + action + "&ignored=not-forwarded", { headers: { "x-zzsh-user-client-ip": "203.0.113.9" } }), routeContext(["security", "captcha", "challenge"]));
+      assert.equal(response.status, 200); assert.equal(response.headers.get("cache-control"), "no-store");
+      assert.equal(calls.at(-1).url.pathname, "/api/auth/user/security/captcha/challenge");
+      assert.equal(calls.at(-1).url.search, "?action=" + action);
+      assert.equal(calls.at(-1).init.cache, "no-store");
+      assert.notEqual(new Headers(calls.at(-1).init.headers).get("x-zzsh-user-client-ip"), "203.0.113.9");
+    }
+    const before = calls.length;
+    for (const query of ["", "?action=", "?action=other", "?action=sign-in&action=sms-send", "?action=sign-in&action=sign-in"]) {
+      const response = await GET(new Request("http://localhost/api/auth/user/security/captcha/challenge" + query), routeContext(["security", "captcha", "challenge"]));
+      assert.equal(response.status, 400); assert.equal((await response.json()).error.code, "INVALID_ARGUMENT");
+      assert.equal(response.headers.get("cache-control"), "no-store");
+    }
+    assert.equal(calls.length, before, "invalid or duplicate actions never contact upstream");
+    await GET(new Request("http://localhost/api/auth/user/get-session?action=sms-send&ignored=1"), routeContext(["get-session"]));
+    assert.equal(calls.at(-1).url.search, "", "unrelated query forwarding stays unchanged");
+  } finally { globalThis.fetch = original; }
+});

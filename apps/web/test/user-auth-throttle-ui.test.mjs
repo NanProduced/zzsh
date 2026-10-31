@@ -11,6 +11,8 @@ const challenge = {
     cost: 1,
     keyLength: 32,
     keyPrefix: "00",
+    expiresAt: Math.floor(Date.now() / 1000) + 300,
+    data: "user:sign-in",
   },
   signature: "ab".repeat(32),
 };
@@ -123,4 +125,38 @@ test("Root: stale or cancelled proof work stops before starting a KDF", async ()
 
 test("Root: invalid proxy configuration cannot silently remove IP protection", () => {
   assert.throws(() => buildUserAuthUpstreamHeaders(new Request("http://127.0.0.1/"), { requestId: "req_bad_config", webOrigin: "http://127.0.0.1", env: { USER_TRUSTED_PROXIES: "everyone" } }), /TRUSTED_PROXIES/);
+});
+
+
+test("Root R1: missing, invalid or expired proof time is rejected before any KDF", async () => {
+  const view = await mountAuthComponent("apps/web/src/components/auth/auth-form.tsx", "AuthForm");
+  const { solveLocalPow } = view.loadSource("apps/web/src/lib/user-captcha.ts");
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto"); let kdfs = 0;
+  Object.defineProperty(globalThis, "crypto", { configurable: true, value: { subtle: { importKey: async () => { kdfs++; return {}; }, deriveBits: async () => { kdfs++; return new Uint8Array(32).buffer; } } } });
+  try {
+    for (const expiresAt of [undefined, null, "2000000000", NaN, Infinity, 0, Math.floor(Date.now() / 1000) - 1]) {
+      await assert.rejects(() => solveLocalPow({ ...challenge, parameters: { ...challenge.parameters, expiresAt } }), error => error.reason === "CAPTCHA_REQUIRED");
+    }
+    assert.equal(kdfs, 0);
+  } finally { Object.defineProperty(globalThis, "crypto", descriptor); await view.close(); }
+});
+
+test("Root R1: expiry during a KDF prevents proof replay and leaves signed parameters unchanged", async () => {
+  const view = await mountAuthComponent("apps/web/src/components/auth/auth-form.tsx", "AuthForm");
+  const { webAuthWithCaptcha, solveLocalPow } = view.loadSource("apps/web/src/lib/user-captcha.ts");
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto"), realNow = Date.now, originalFetch = globalThis.fetch;
+  const start = 2_000_000_000_000; let now = start, kdfs = 0, calls = 0;
+  const expiring = { ...challenge, parameters: { ...challenge.parameters, expiresAt: Math.floor(start / 1000) + 1 } };
+  const signed = JSON.stringify(expiring);
+  Date.now = () => now;
+  Object.defineProperty(globalThis, "crypto", { configurable: true, value: { subtle: { importKey: async () => ({}), deriveBits: async () => { kdfs++; now = start + 1000; return new Uint8Array(32).buffer; } } } });
+  globalThis.fetch = async () => { calls++; return Response.json({ error: { code: "FORBIDDEN", reason: "CAPTCHA_REQUIRED" }, challenge: expiring }, { status: 403 }); };
+  try {
+    await assert.rejects(() => solveLocalPow(expiring), error => error.reason === "CAPTCHA_REQUIRED");
+    assert.equal(kdfs, 1); assert.equal(JSON.stringify(expiring), signed);
+    now = start; kdfs = 0;
+    await assert.rejects(() => webAuthWithCaptcha("/sign-in/identifier", { identifier: "13800138000", password: "existing-password" }, undefined, () => true), error => error.reason === "CAPTCHA_REQUIRED");
+    assert.equal(calls, 1, "expired work never re-posts the credential body"); assert.equal(kdfs, 1);
+    assert.equal(JSON.stringify(expiring), signed);
+  } finally { globalThis.fetch = originalFetch; Date.now = realNow; Object.defineProperty(globalThis, "crypto", descriptor); await view.close(); }
 });
