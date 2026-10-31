@@ -700,7 +700,13 @@ export async function readUserDirectoryDetail(
     image: row.image,
     username: row.username,
     displayUsername: row.displayUsername,
-    maskedPhone: maskPhoneNumber(row.phoneNumber),
+    // 客服接待要回拨租客/号主：持有 im.support.read 的岗位在详情里拿明文，
+    // 其余读者仍是脱敏值（用户目录列表、财务、监管不变）。
+    // 已知缺口：明文下发暂未写审计，后续补 audit_event 后再对外宣称合规。
+    maskedPhone: (viewer as { permissions?: ReadonlySet<string> }).permissions?.has("im.support.read")
+      ? (row.phoneNumber ?? null)
+      : maskPhoneNumber(row.phoneNumber),
+    phoneRevealed: (viewer as { permissions?: ReadonlySet<string> }).permissions?.has("im.support.read") === true,
     phoneNumberVerified: row.phoneNumber === null ? null : row.phoneNumberVerified === true,
     maskedEmail: maskEmail(row.email),
     accountStatus: projectUserAccountStatus(row.accountStatus, row.suspended),

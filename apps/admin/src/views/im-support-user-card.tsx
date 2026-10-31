@@ -250,7 +250,7 @@ export function ConsultationUserCard({ consultationId, rowUserId, fallbackName, 
               {facts.riskFlag === true ? <Badge variant="destructive">内部高危</Badge> : null}
             </div>
             <ItemSeparator />
-            <Fact label="脱敏手机号" value={facts.maskedPhone ? `${facts.maskedPhone} · ${facts.phoneNumberVerified ? "已验证" : facts.phoneNumberVerified === false ? "未验证" : "验证状态未知"}` : "未绑定"} />
+            <Fact label="手机号" value={facts.maskedPhone ? `${facts.maskedPhone} · ${facts.phoneNumberVerified ? "已验证" : facts.phoneNumberVerified === false ? "未验证" : "验证状态未知"}` : "未绑定"} />
             <Fact label="脱敏邮箱" value={facts.maskedEmail || "未绑定"} />
             <Fact label="进行中订单" value={summaryText(facts.orderSummary, "单", scope.orders, PERMISSION.orders)} permission={!scope.orders || facts.orderSummary?.state === "denied" ? PERMISSION.orders : undefined} />
             <Fact label="名下资源账号" value={summaryText(facts.resourceSummary, "个", scope.resources, PERMISSION.resources)} permission={!scope.resources || facts.resourceSummary?.state === "denied" ? PERMISSION.resources : undefined} />
