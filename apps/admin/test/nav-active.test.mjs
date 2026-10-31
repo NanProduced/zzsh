@@ -85,9 +85,9 @@ test("侧栏菜单保留全部既有入口与分组命名一致性", () => {
   }
   assert.equal(items.find((item) => item.path === "/approvals").label, "审批中心", "侧栏与页内审批命名一致");
   const paths = menuPaths(boss);
-  assert.equal(paths.length, 19, "真实 Boss 权限下 19 个入口（账号恢复页已退役）");
+  assert.equal(paths.length, 20, "真实 Boss 权限下 20 个入口（含系统配置，账号恢复页已退役）");
   assert.equal(paths.includes("/users/restore"), false, "账号恢复入口已移除");
-  for (const path of ["/distribution-policy", "/supply/media", "/finance/period", "/settings?section=security"]) {
+  for (const path of ["/system", "/distribution-policy", "/supply/media", "/finance/period", "/settings?section=security"]) {
     assert.ok(paths.includes(path), `保留既有入口 ${path}`);
   }
 });

@@ -17,6 +17,7 @@
 - [协议、规则披露与接受](architecture/agreements-acceptance.md)
 - [公开交易统计读取](architecture/public-trade-activity.md)
 - [内容管理、资源格式与存储](architecture/content-management.md)
+- [系统配置、媒体存储与新环境初始化](operations/media-storage.md)
 - [旧交易续办与责任边界](architecture/legacy-trade-continuation.md)
 - [会员成长与人工礼遇](architecture/membership-growth.md)
 - [信用与号主保证金运行合同](architecture/credit-guarantee.md)

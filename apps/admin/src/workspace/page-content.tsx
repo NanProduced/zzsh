@@ -14,6 +14,7 @@ import { SupplyMediaReviewView } from "../views/supply-media-review-view";
 import { SupplyRulesView } from "../views/supply-rules-view";
 import { SupplyGunsmithView } from "../views/supply-gunsmith-view";
 import { ContentView } from "../views/content-view";
+import { SystemConfigurationView } from "../views/system-configuration-view";
 import { ImSupportView } from "../views/im-support-view";
 import { MembershipGrowthAdminHost } from "../views/membership-growth-admin-host";
 import { DistributionWorkspace } from "../views/distribution-workspace";
@@ -82,6 +83,7 @@ export function WorkspacePageContent({
   if (tab.kind === "workbench") {
     return <WorkbenchPage key={tab.id} snapshot={snapshot} onNavigate={(path) => onOpenPath(path)} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
   }
+  if (tab.kind === "system-configuration") return <SystemConfigurationView key={tab.id} snapshot={snapshot} refreshNonce={refreshNonce} />;
   if (tab.kind === "account") {
     return <AccountSecurityPage key={tab.id} snapshot={snapshot} idleMinutes={idleMinutes}
       onIdleMinutes={onIdleMinutes} onLock={onLock} onRefresh={onRefresh}

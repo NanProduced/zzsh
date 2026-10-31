@@ -68,6 +68,11 @@ export const STORAGE_KEY_PATTERN = /^[0-9a-f]{64}$/;
 export type MediaStorage = {
   available: boolean;
   kind: "local" | "oss" | "unavailable";
+  readonly configuration?: Readonly<{
+    target: Readonly<{ bucket: string; region: string; endpoint: string; objectPrefix: string }>;
+    credentialMode: "ACCESS_KEY" | "STS";
+    automaticCredentialRefresh: boolean;
+  }>;
   write: (bytes: Buffer, contentHash: string, mime: ImageMime) => Promise<{ storageKey: string }>;
   read: (storageKey: string) => Promise<Buffer>;
 };

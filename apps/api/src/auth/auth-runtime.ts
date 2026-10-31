@@ -50,6 +50,7 @@ import { mountAdminSelfSettingsHandlers } from "./admin-self-settings";
 import { mountAdminBffHandlers } from "../bff/admin-bff";
 import { createLocalMediaStorage, type MediaStorage } from "../supply/media";
 import { resolveMediaStorage } from "../supply/media-oss";
+import { mountSystemConfigurationHandlers } from "../system/system-configuration-routes";
 import { loadLegacyPublicAdmission, loadLegacyPublicAdmissionManifest, parseLegacyPublicAdmission, assertLegacyPublicAdmissionTarget, assertLegacyPublicAdmissionManifestTarget, type LegacyPublicAdmission, type LegacyPublicAdmissionManifest } from "../legacy-load/legacy-public-admission";
 import { mountSupplyHandlers } from "../supply/supply-routes";
 import { mountContentHandlers } from "../content/content-routes";
@@ -1190,6 +1191,7 @@ export async function mountAuthHandlers(
     legacyPublicAdmissionDetail,
   });
   mountLegalHandlers(app, securityOptions);
+  mountSystemConfigurationHandlers(app, { ...securityOptions, mediaStorage, supplyGateReader });
   mountContentHandlers(app, {
     ...securityOptions,
     mediaStorage,

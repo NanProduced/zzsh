@@ -27,6 +27,7 @@ export type WorkspaceRouteKind =
   | "distribution-policy"
   | "account"
   | "settings"
+  | "system-configuration"
   | "admins"
   | "admin-object"
   | "roles"
@@ -104,6 +105,7 @@ const LIST_TABS: Record<string, Omit<WorkspaceTab, "query">> = {
   "distribution-policy": { id: "distribution-policy", title: "分销管理", path: "/distribution-policy", closable: true, kind: "distribution-policy" },
   account: { id: "account", title: "账号安全", path: "/account", closable: true, kind: "account" },
   settings: { id: "settings", title: "设置", path: "/settings", closable: true, kind: "settings" },
+  "system-configuration": { id: "system-configuration", title: "系统配置", path: "/system", closable: true, kind: "system-configuration" },
   admins: { id: "admins", title: "管理员管理", path: "/admins", closable: true, kind: "admins" },
   roles: { id: "roles", title: "角色权限", path: "/roles", closable: true, kind: "roles" },
   approvals: { id: "approvals", title: "审批中心", path: "/approvals", closable: true, kind: "approvals" },
@@ -159,6 +161,7 @@ export function parseWorkspacePath(pathname: string): { kind: WorkspaceRouteKind
   const path = pathname.replace(/\/+$/, "") || "/";
   if (path === "/" || path === "/workbench") return { kind: "workbench", tabId: WORKBENCH_TAB_ID, path: "/workbench", title: "工作台" };
   if (path === "/settings") return { kind: "settings", tabId: "settings", path: "/settings", title: "设置" };
+  if (path === "/system") return { kind: "system-configuration", tabId: "system-configuration", path: "/system", title: "系统配置" };
   if (path === "/account") return { kind: "account", tabId: "account", path: "/account", title: "账号安全" };
   if (path === "/support") return { kind: "support", tabId: "support", path: "/support", title: "客服工作台" };
   if (path === "/membership-growth") return { kind: "membership-growth", tabId: "membership-growth", path: "/membership-growth", title: "会员与礼遇" };
@@ -248,6 +251,7 @@ export function changesSettingsContent(current: WorkspaceTab, next: WorkspaceTab
 export function canOpenKind(kind: WorkspaceRouteKind, nav: NavPermission): boolean {
   const has = (code: string) => nav.permissions.includes(code);
   if (kind === "workbench" || kind === "account" || kind === "settings") return true;
+  if (kind === "system-configuration") return nav.isBoss;
   if(kind==="finance-lookup")return has("finance.read")||has("finance.document.read");
   if(kind==="finance-period"||kind==="finance-user")return has("finance.read");
   if(kind==="finance-document")return has("finance.document.read");

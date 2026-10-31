@@ -111,6 +111,8 @@ HOME_HERO 新草稿按代码的3个位置建立，只继承相同位置 ID 的�
 
 开发默认 `MEDIA_STORAGE=local`。服务器使用现有 OSS 适配器时设置 `MEDIA_STORAGE=oss`、`OSS_BUCKET`、`OSS_REGION`、`OSS_ENDPOINT`、`OSS_OBJECT_PREFIX`；凭据通过服务器环境提供 `ALIBABA_CLOUD_ACCESS_KEY_ID`、`ALIBABA_CLOUD_ACCESS_KEY_SECRET`，可选 `ALIBABA_CLOUD_SECURITY_TOKEN`。模板仅占位值，管理端不收集、展示或修改凭据。
 
+Boss 可在独立“系统配置”（`/system`）查看实际媒体目标与只读样本完整性检查；内容运营页的原状态接口保持兼容。部署及新环境对象准备见[媒体存储](../operations/media-storage.md)，切换目标不自动迁移历史对象。
+
 `configured` 只表示适配器已装配；只读检查分别返回未检查、无公开样本、读取通过或读取失败。样本读取不证明上传、审核、桶权限、CDN 或生产链路通过。运营图片进对象存储，数据库保存引用；品牌和固定设计资源留项目中。原图与衍生图共用后端时不得把整个桶/前缀开放为公共 CDN；当前衍生图经 API 检查资格，边缘代理必须重验证，私有路由不得缓存。生产直链、撤权失效、真实 OSS 上传、真实相机扫码与原生客户端渲染需要分别验收。
 
 ## 部署与扩展

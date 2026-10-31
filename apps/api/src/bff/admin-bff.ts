@@ -14,6 +14,7 @@ import {
 } from "../auth/auth-security";
 import { handleSupplyAdminRoute, type SupplyRuntimeOptions } from "../supply/supply-routes";
 import { handleContentAdminRoute } from "../content/content-routes";
+import { handleSystemConfiguration } from "../system/system-configuration-routes";
 import { handleLegalAdminRoute } from "../legal/legal-routes";
 import { handleOrderAdminRoute, type OrderRuntimeOptions } from "../order/order-routes";
 import { handleRentalMembershipAdmin } from "../auth/rental-membership-routes";
@@ -542,6 +543,10 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
       if (error instanceof SecurityApiError) sendError(response, error.status, error.code, error.message, requestId);
       else sendError(response, 500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);
     }
+    return;
+  }
+  if (path === "/system/storage" || path === "/system/storage/check") {
+    await handleSystemConfiguration(request, response, options.supply);
     return;
   }
   if (path === "/content" || path.startsWith("/content/")) {

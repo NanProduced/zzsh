@@ -11,6 +11,7 @@
   "dist/test/supply-pricing.test.js",
   "dist/test/supply-content-hash.test.js",
   "dist/test/supply-media.test.js",
+  "dist/test/system-configuration.test.js",
   "dist/test/skin-identity.test.js",
   "dist/test/supply-listing-query.test.js",
   "dist/test/publishing-media-ownership.test.js",

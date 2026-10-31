@@ -282,6 +282,11 @@ npm run typecheck
 - `POST /resources/{key}/publish`、`/withdraw` 接 `{versionId,expectedRevision}`；资源 CAS 使用内容项 revision。`GET /operation-result` 使用原幂等 key header 与 `operation/resourceId/fingerprint`，校验原操作者和当前权限。operation 为 `content.resource.draft.create`、`content.resource.draft.save`、`content.resource.media-draft.save`、`content.resource.draft.restore`、`content.resource.publish`、`content.resource.withdraw`。未知结果保留原请求身份，先查回执回读，不以新 key 重发发布。
 - 资源读取 no-store，搜索运行时匹配当前公开帮助内容，不新建索引服务/队列；读取失败不能当空结果。`GET /storage`、`/storage/check` 仅返回服务器适配器配置状态与公开样本只读检查，不接收云凭据。OSS 凭据、桶/前缀与 CDN 在服务器配置，样本读取和本地验证不证明真实上传、生产 CDN、撤权失效、相机扫码或原生端渲染已验收。
 
+### 系统配置
+
+- `GET /api/v1/admin/system/storage`、`GET /api/v1/admin/system/storage/check`（Admin BFF 同路径 `/api/bff/admin/system/...`）仅限当前有效且未锁定的 ACTIVE Boss。只接受 GET、无查询参数；校验管理端/API Origin，响应 no-store。返回实际适配器的后端、装配状态、Bucket/地域/Endpoint/前缀、凭据类型及上传限制，不返回凭据、签名 URL、本地目录或任意环境变量。
+- 检查读取一张已审核公开的 `CONTENT_MEDIA` 衍生图并验证 SHA256，返回 `NOT_RUN|NO_PUBLIC_SAMPLE|PASS|FAILED`、检查时间及独立完整性结果；网络 I/O 不持有数据库事务，完成后复核当前会话和 Boss 身份。不上传或删除对象，不把单样本检查当作全量媒体、上传、私有权限或 CDN 验收。部署及初始对象准备见[媒体存储](../operations/media-storage.md)。
+
 ### 原公告、资讯与接管前轮播
 
 - 模型在 `zzsh_content` schema（迁移 `0024_m3_content_foundation`）：`content_item`（稳定 ID、`type`=`ANNOUNCEMENT|NEWS`、`game_id` 可空、`sort_order`、条目 `revision`）与 `content_version`（`DRAFT|PUBLISHED|SUPERSEDED|WITHDRAWN`、title/summary/body/cover_media_id、草稿 `revision`、`published_at`）。每条目最多一个草稿与一个线上版本：发布把草稿转为 PUBLISHED、旧线上版本转 SUPERSEDED；撤回把线上版本转 WITHDRAWN。编辑已发布内容必须 `POST /items/{id}/draft` 复制新草稿，不能原地修改线上正文；无任何版本时列表以 `latest` 显示最后版本。正文为 NFC 规范化纯文本（LF 换行，≤20000 字节，拒绝控制字符），不执行 HTML、不提供自由页面或插件能力。发布动作要求随幂等记录持久化（迁移 `0025_m3_content_idempotency_publish_flag`），见下条。
