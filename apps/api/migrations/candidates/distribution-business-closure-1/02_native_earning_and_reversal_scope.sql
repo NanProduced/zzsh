@@ -1,6 +1,5 @@
 -- UNNUMBERED CANDIDATE. Root owns numbering/journal/rollback. NOT APPLIED to any database.
 -- Lets the same typed earning ledger serve formal NATIVE collection without relabelling it LOCAL.
-BEGIN;
 
 ALTER TABLE zzsh_order.rental_referral_reversal_source
   DROP CONSTRAINT rental_referral_reversal_source_scope_check,

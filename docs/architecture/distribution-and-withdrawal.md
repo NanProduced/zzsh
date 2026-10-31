@@ -66,16 +66,16 @@ v2 UNIFORM 的数据库前向结构、支付依据推导、NATIVE 账本/冲回 
 
 ## v2/NATIVE 前向合同与维护恢复
 
-v2/NATIVE 结构必须作为一个前向包安装：政策 v2 形状/guard、按 scope 的 head 锁、UNIFORM 支付依据推导、participant v1/v2 约束与 trigger、NATIVE 分录/冲回 scope、`distribution_policy_contract_version()=2`。三份未编号候选须由 Root 编号并在同一迁移事务应用；函数标记只在同包成功后存在，runtime EXECUTE 由既有 `configureDistributionFinancialPrivileges` 在 ACL 事务授予并读回。v2 `levels=[]`、`level_code=null` 合法；v2 disabled 只停止新首款计佣，注册资格仍为 `ELIGIBLE`，旧 v1 的 disabled→`INELIGIBLE` 语义不变。注册必须引用其 scope 的当前不可变 head，旧头或伪造新生 proof 拒绝。
+v2/NATIVE 结构必须作为一个前向包安装：政策 v2 形状/guard、按 scope 的 head 锁、UNIFORM 支付依据推导、participant v1/v2 约束与 trigger、NATIVE 分录/冲回 scope、`distribution_policy_contract_version()=2`。三份未编号候选须由 Root 编号并在同一迁移事务应用；函数标记只在同包成功后存在，runtime EXECUTE 由既有 `configureDistributionFinancialPrivileges` 在 ACL 事务授予并读回。v2 `levels=[]`、`level_code=null` 合法；v2 disabled 只停止新首款计佣，注册资格仍为 `ELIGIBLE`，旧 v1 的 disabled→`INELIGIBLE` 语义不变。注册必须引用其 scope 的当前不可变 head，旧头或伪造新生 proof 拒绝；后续仅更新上级关系知识/版本时保留原注册政策，实际更换政策来源才重新校验当前头。
 
 空 NATIVE 政策的首版由显式 `distribution-policy-initialize.v1` 审批发起：完整填写两类比例、租赁方式、最低计提、结算期限和原因，经独立 Boss 审批后在同一执行事务插入 revision 1 与 head。它不接受伪造的 `expectedPolicyId`/正 revision，不灌 5% 或旧等级。Admin 政策页在 `knowledge=UNKNOWN` 且结构/审批就绪时显示首版表单；未就绪保持只读。
 
-漏计提发现按 `(posted_at,id)` 稳定 keyset 向旧分页，返回 `nextCursor`；管理端必须能继续检查更早记录。COMPLETE/SKIPPED/UNKNOWN/CONFLICT 均占扫描页但不隐藏旧 MISSING；没有下一页不等于没有漏计提，新单需从最新重查。到期与重放命令以 `requestId` 作为持久批次键，复用 `zzsh_supply.idempotency_record` 固定原 earningIds/versions 或 orderIds、参数指纹与回执：同键同参只恢复原计划，同键换参 409，UNKNOWN 不换键重发；每根仍在独立事务按原根幂等执行，外层批次回执不承诺回滚已提交的内层钱。`GET /maintenance/batches/:key` 与 `/orders/:orderId` 提供受游戏范围保护的只读恢复。
+漏计提发现按 `(posted_at,id)` 稳定 keyset 向旧分页，返回 `nextCursor`；管理端必须能继续检查更早记录。COMPLETE/SKIPPED/UNKNOWN/CONFLICT 均占扫描页但不隐藏旧 MISSING；没有下一页不等于没有漏计提，新单需从最新重查。到期与重放命令以 `requestId` 作为持久批次键，复用 `zzsh_supply.idempotency_record` 固定原 earningIds/versions 或 orderIds、参数指纹与回执：同键同参只恢复原计划，同键换参 409，UNKNOWN 不换键重发；每根仍在独立事务按原根幂等执行，外层批次回执不承诺回滚已提交的内层钱。`GET /maintenance/orders/:orderId` 按游戏范围读取；`GET /maintenance/batches/:key` 成功读取为 HTTP 200，原执行状态保留在 `httpStatus`。批次读取的逐对象范围复核和跨 operation 区分仍需补齐，不能当作完整受权恢复。管理端当前页保留原 key/body、阻止未决批次被新命令替换；页面重载后的持久恢复仍未实现。
 
-管理员维护的每笔实际资金事务在事务内重新核管理员安全/会话、当前 permission 和订单游戏范围，审计记录发起管理员与批次；结算后的内部 system callback 保持原系统身份。可选到期 worker 仅在显式 `DISTRIBUTION_DUE_WORKER_ENABLED=true` 且已装配 NATIVE 时启动，固定 worker 锁、间隔 60–3600 秒、批量 1–100；遇到 UNKNOWN 停止并保留原批次键，不能把按钮或无人监管循环冒充已入账。
+管理员维护的每笔实际资金事务在事务内重新核管理员安全/会话、当前 permission 和订单游戏范围，审计记录发起管理员与批次；结算后的内部 system callback 保持原系统身份。可选到期 worker 仅在显式 `DISTRIBUTION_DUE_WORKER_ENABLED=true` 且已装配 NATIVE 时启动，固定 worker 锁、间隔 60–3600 秒、批量 1–100；返回 UNKNOWN 时仅在本进程内停止；异常、重启后的原批次恢复及失锁接管尚未闭合。worker 默认关闭，这些恢复门槛未完成前不得作为可靠的自动入账装配，不能把按钮或无人监管循环冒充已入账。
 
-全额冲回采用 `distribution.earning.reverse` 独立审批：payload 只允许原 earning/order/满额并显式 `full:true`；审批执行只授权、不写钱。owner 维护工具以密封授权文件、原始 admission digest 和审批回执声明 `rental_referral_reversal_source`，runtime 不获声明写权；随后 Admin 入口按原 source 执行 REVOKE/RECOVER。部分更正的最小合同为：原 posting 与基准绑定、金额不超过原根且累计不超过原额、与计提相同的 HALF_UP 舍入、独立审批和可追溯回执；当前运行时只接受全额，部分请求明确 `PARTIAL_CORRECTION_CONTRACT_UNAVAILABLE`，不能用全额 REVOKE 代替。
+全额冲回采用 `distribution.earning.reverse` 独立审批：payload 只允许原 earning/order/满额并显式 `full:true`；审批执行只授权、不写钱。owner 维护工具按原始 admission digest 与审批状态准备 `rental_referral_reversal_source`，runtime 不获声明写权；但工具尚未强制成功的授权执行回执，也未耐久关联原审批，审批页的原根/金额摘要亦需补齐。满足这些合同前不得作为正式冲回声明入口；当前 `--execute` 在读取凭据和连接前以 `REVERSAL_EXECUTION_RECEIPT_CONTRACT_UNAVAILABLE` 拒绝，只保留 PLAN。Admin 转换按原 source 执行 REVOKE/RECOVER，不接受任意客户端金额。部分更正的最小合同为：原 posting 与基准绑定、金额不超过原根且累计不超过原额、与计提相同的 HALF_UP 舍入、独立审批和可追溯回执；当前运行时只接受全额，部分请求明确 `PARTIAL_CORRECTION_CONTRACT_UNAVAILABLE`，不能用全额 REVOKE 代替。
 
-本人邀请/条款读取使用装配的 policy scope 返回 `LOCAL_CONTROLLED` 或 `NATIVE`；Web 解析两端 scope，旧 v1 客户仍只消费原有字段。NATIVE 自助绑定写 `NATIVE_SELF_BIND`，不伪装为本地来源。
+本人邀请/条款读取使用装配的 policy scope 返回 `LOCAL_CONTROLLED` 或 `NATIVE`；当前 Web 解析两种 scope，旧客户端版本须另核兼容，不能从字段未变化推定其接受新增值。NATIVE 自助绑定写 `NATIVE_SELF_BIND`，不伪装为本地来源。
 
-PG 验收器默认 plan，固定本机 55432、登记 state/OID/nonce/marker/角色、维护锁 806006 与零外来会话；execute 在单事务应用三份候选并断言精确 SQLSTATE/约束、contract version/ACL 后回滚。无 owner/migration/runtime 受限凭据或完整 fixture 时输出 INCOMPLETE，不得 PASS。完整 Native 付款→posting→计提→SETTLE→全额撤销/不足追偿/恢复的真实 fixture 尚须在 Root 指定回归边界执行；该缺口与真实渠道/页面分别列示。
+候选 PG 验收器仍有身份/OID绑定、未提交 DDL 跨连接读取和收尾证据限制；默认 plan 也会连接数据库，不能作为零秘密/零连接预检。修复这些入口后才可在明确回归资源中应用三份候选并验证/回滚，不能以当前成功输出宣告 runtime ACL 或完整资金验收。无完整 fixture 时必须保持 INCOMPLETE。完整 Native 付款→posting→计提→SETTLE→全额撤销/不足追偿/恢复的真实 fixture 尚须在 Root 指定回归边界执行；该缺口与真实渠道/页面分别列示。

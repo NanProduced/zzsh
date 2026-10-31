@@ -45,9 +45,11 @@ BEGIN
  SELECT v.scope,v.schema_version,v.canonical_config::jsonb INTO policy_scope,policy_schema,policy
   FROM zzsh_order.distribution_policy_version v WHERE v.id=NEW.policy_version_id;
  IF policy IS NULL THEN RAISE EXCEPTION 'participant policy source is missing' USING ERRCODE='23514';END IF;
- SELECT h.current_version_id INTO head_id FROM zzsh_order.distribution_policy_head h WHERE h.scope=policy_scope;
- IF head_id IS DISTINCT FROM NEW.policy_version_id
- THEN RAISE EXCEPTION 'participant must use the exact current head of its policy scope' USING ERRCODE='23514';END IF;
+ IF TG_OP='INSERT' OR NEW.policy_version_id IS DISTINCT FROM OLD.policy_version_id THEN
+  SELECT h.current_version_id INTO head_id FROM zzsh_order.distribution_policy_head h WHERE h.scope=policy_scope;
+  IF head_id IS DISTINCT FROM NEW.policy_version_id
+  THEN RAISE EXCEPTION 'participant must use the exact current head of its policy scope' USING ERRCODE='23514';END IF;
+ END IF;
  IF policy_schema='distribution-policy.v2' THEN
   IF NEW.level_code IS NOT NULL THEN RAISE EXCEPTION 'uniform policy participant cannot carry a legacy level' USING ERRCODE='23514';END IF;
   -- v2 disabled stops new first-payment accrual; it does not erase participation eligibility.

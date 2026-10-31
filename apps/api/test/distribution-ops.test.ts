@@ -1,3 +1,4 @@
+import { handleAdminDistributionMaintenance } from '../src/finance/admin-distribution-maintenance';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as auth from '../src/auth/auth-security';
@@ -272,4 +273,34 @@ test('approved first uniform policy is explicit, scoped and cannot fake an exist
  assert.throws(()=>parseDistributionPolicyChange({...payload,expectedPolicyId:'fake'}));
  assert.throws(()=>parseDistributionPolicyChange({...payload,config:{...payload.config,minimumAccrualCents:'-1'}}));
  assert.throws(()=>prepareDistributionPolicyChange(head,initial as never),/no baseline/);
+});
+
+test('Root: ALL_GAMES managers retain global discovery and due planning instead of an empty scope',async()=>{
+ const security=auth as any,access=authorization as any,scope=scopes as any;
+ const saved=[security.readAdminContext,access.loadEffectiveAdminAccess,scope.readAdminGameScope];
+ const observed:any[]=[];
+ const client:any={release(){},query:async()=>({rows:[],rowCount:0})};
+ security.readAdminContext=async()=>({userId:'manager',sessionId:'session'});
+ access.loadEffectiveAdminAccess=async()=>({status:'ACTIVE',isBoss:false,permissions:new Set(['personal.distribution.policy.manage'])});
+ scope.readAdminGameScope=async()=>({mode:'ALL_GAMES',gameIds:[]});
+ const options:any={pool:{connect:async()=>client},apiOrigin:'http://127.0.0.1:3102',adminOrigin:'http://127.0.0.1:3101',userOrigin:'http://127.0.0.1:3100',distributionEarnings:{
+  discover:async(_pool:any,input:any)=>{observed.push(input.gameIds);return{orders:[],nextCursor:null};},
+  runDueBatch:async(_pool:any,input:any)=>{observed.push(input.gameIds,await input.operator.games(client));return{httpStatus:200,batch:{state:'COMPLETE'}};},
+ }};
+ const response:any={statusCode:0,setHeader(){return this;},status(code:number){this.statusCode=code;return this;},json(value:any){this.body=value;return this;}};
+ try{
+  await handleAdminDistributionMaintenance({method:'GET',url:'/api/v1/admin/distribution/maintenance/accruals',headers:{origin:options.adminOrigin}} as any,response,options);
+  assert.equal(response.statusCode,200);
+  await handleAdminDistributionMaintenance({method:'POST',url:'/api/v1/admin/distribution/maintenance/due-settlements',headers:{origin:options.adminOrigin},body:{limit:1,requestId:'root_scope'}} as any,response,options);
+  assert.equal(response.statusCode,200);assert.deepEqual(observed,[null,null,null]);
+ }finally{[security.readAdminContext,access.loadEffectiveAdminAccess,scope.readAdminGameScope]=saved;}
+});
+
+test('Root: reading a known UNKNOWN batch succeeds without replaying the original 503 transport status',async()=>{
+ const security=auth as any,original=security.readAdminContext;security.readAdminContext=async()=>({userId:'manager',sessionId:'session'});
+ const response:any={statusCode:0,setHeader(){return this;},status(code:number){this.statusCode=code;return this;},json(value:any){this.body=value;return this;}};
+ const options:any={apiOrigin:'http://127.0.0.1:3102',adminOrigin:'http://127.0.0.1:3101',userOrigin:'http://127.0.0.1:3100',distributionEarnings:{readBatch:async()=>({httpStatus:503,batch:{state:'UNKNOWN',requestId:'original_key'}})}};
+ try{await handleAdminDistributionMaintenance({method:'GET',url:'/api/v1/admin/distribution/maintenance/batches/original_key',headers:{origin:options.adminOrigin}} as any,response,options);
+  assert.equal(response.statusCode,200);assert.equal(response.body.httpStatus,503);assert.equal(response.body.batch.state,'UNKNOWN');
+ }finally{security.readAdminContext=original;}
 });

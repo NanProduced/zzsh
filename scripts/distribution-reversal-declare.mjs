@@ -21,6 +21,8 @@ if (config.schema !== 'distribution-full-reversal-authorization.v1' || typeof co
   || typeof config.approvalRequestId !== 'string' || typeof config.approvedByAdminId !== 'string'
   || typeof config.admissionDigest !== 'string' || !/^[0-9a-f]{64}$/.test(config.admissionDigest)
   || typeof config.reason !== 'string' || config.reason.trim().length < 3 || config.reason.length > 500) fail('AUTHORIZATION_SHAPE_INVALID');
+// A successful authorization receipt and durable approval link are required before this tool may write.
+if (execute) fail('REVERSAL_EXECUTION_RECEIPT_CONTRACT_UNAVAILABLE');
 const host = process.env.DISTRIBUTION_OWNER_DB_HOST ?? '127.0.0.1', port = Number(process.env.DISTRIBUTION_OWNER_DB_PORT ?? 55432);
 if (host !== '127.0.0.1' || port !== 55432) fail('OWNER_TARGET_MUST_BE_LOCAL_REGRESSION_SERVER');
 const passwordFile = process.env.DISTRIBUTION_OWNER_PASSWORD_FILE?.trim();
@@ -48,11 +50,12 @@ try {
   if (!admission || admission.approval_digest !== config.admissionDigest || admission.mode !== 'NATIVE') fail('ORIGINAL_NATIVE_ADMISSION_MISMATCH');
   const approval = (await client.query(`SELECT status,operation_code,operation_payload,operation_payload_hash,requested_by,decided_by,expires_at>clock_timestamp() AS live
     FROM zzsh_iam.approval_request WHERE id=$1`, [config.approvalRequestId])).rows[0];
+  const payload = typeof approval?.operation_payload === 'string' ? JSON.parse(approval.operation_payload) : approval?.operation_payload;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) fail('APPROVED_REVERSAL_PAYLOAD_MISMATCH');
   if (!approval || approval.operation_code !== 'distribution.earning.reverse' || !['APPROVED','EXECUTED'].includes(approval.status)
     || approval.status === 'APPROVED' && approval.live !== true
     || approval.requested_by === approval.decided_by || approval.decided_by !== config.approvedByAdminId
-    || sha(canonical(JSON.parse(approval.operation_payload))) !== approval.operation_payload_hash) fail('APPROVED_REVERSAL_EVIDENCE_MISMATCH');
-  const payload = JSON.parse(approval.operation_payload);
+    || sha(canonical(payload)) !== approval.operation_payload_hash) fail('APPROVED_REVERSAL_EVIDENCE_MISMATCH');
   if (payload.schema !== 'distribution-reversal-request.v1' || payload.earningId !== config.earningId || payload.orderId !== config.orderId
     || String(payload.amountCents) !== String(config.amountCents) || payload.full !== true) fail('APPROVED_REVERSAL_PAYLOAD_MISMATCH');
   const transition = (await client.query("SELECT 1 FROM zzsh_order.rental_referral_transition WHERE earning_id=$1 AND action IN('REVOKE','RECOVER') LIMIT 1", [config.earningId])).rowCount;

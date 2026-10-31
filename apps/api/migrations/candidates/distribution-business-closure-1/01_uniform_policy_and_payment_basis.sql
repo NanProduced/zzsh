@@ -1,7 +1,6 @@
 -- UNNUMBERED CANDIDATE. Root owns numbering/journal/rollback. NOT APPLIED to any database.
 -- Makes distribution-policy.v2 UNIFORM valid for both LOCAL_CONTROLLED and NATIVE scopes and
 -- aligns the immutable payment-basis derivation with the application freeze.
-BEGIN;
 
 ALTER TABLE zzsh_order.distribution_policy_version
   DROP CONSTRAINT distribution_policy_version_schema_version_check,

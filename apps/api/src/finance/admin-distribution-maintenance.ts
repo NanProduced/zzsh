@@ -4,7 +4,7 @@ import { readAdminContext, type AuthSecurityOptions } from '../auth/auth-securit
 import { assertAdminCommandAuthorizedInTransaction } from '../auth/admin-auth-session';
 import { withTransaction } from '../auth/security-core';
 import { loadEffectiveAdminAccess } from '../auth/admin-authorization';
-import { assertGameScopeUsable, readAdminGameScope, scopeAllowsGame } from '../auth/admin-scope';
+import { assertGameScopeUsable, readAdminGameScope, scopeAllowsGame, isAllGamesScope } from '../auth/admin-scope';
 import { ensureApiV1RequestId } from '../contracts/api-v1';
 import { bodyOf, forbidden, invalid, notFound, sendJson, type SupplyNodeRequest } from '../supply/supply-util';
 import { requestPath, requireOrigin, safely, type SupplyResponse } from '../supply/supply-routes';
@@ -19,7 +19,7 @@ async function authorize(c: PoolClient, adminId: string) {
   if (!access || access.status !== 'ACTIVE' || !access.permissions.has(DISTRIBUTION_POLICY_PERMISSION.manage)) throw forbidden('Distribution operations permission required');
   const scope = access.isBoss ? null : await readAdminGameScope(c, adminId);
   if (scope) assertGameScopeUsable(scope, false);
-  return { isBoss: access.isBoss === true, games: scope ? scope.gameIds : null, scope };
+  return { isBoss: access.isBoss === true, games: scope && !isAllGamesScope(scope) ? scope.gameIds : null, scope };
 }
 async function assertOrderScope(c: PoolClient, actor: { isBoss: boolean; scope: any }, orderIds: string[]) {
   if (actor.isBoss) return;
@@ -46,7 +46,7 @@ function operatorFor(actor: Actor): MaintenanceOperator {
     if (access.isBoss) return null;
     const scope = await readAdminGameScope(c, actor.userId);
     assertGameScopeUsable(scope, false);
-    return scope.gameIds;
+    return isAllGamesScope(scope) ? null : scope.gameIds;
   } };
 }
 /** Operator-only bounded maintenance. No full-table scheduler and no page GET drives money. */
@@ -69,7 +69,7 @@ export async function handleAdminDistributionMaintenance(request: SupplyNodeRequ
       if (query.size) throw invalid('Batch recovery does not accept query parameters');
       const result = await options.distributionEarnings.readBatch(options.pool, { requestId: path.slice('/batches/'.length), operator: operatorFor(actor) });
       if (!result) throw notFound();
-      sendJson(response, result.httpStatus, { contractVersion: 'distribution-maintenance.v1', ...result }, requestId);
+      sendJson(response, 200, { contractVersion: 'distribution-maintenance.v1', ...result }, requestId);
       return;
     }
     if (method === 'GET' && /^\/orders\/[A-Za-z0-9._:-]+$/.test(path)) {
