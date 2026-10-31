@@ -11,12 +11,35 @@ import { assertAdminContextInTransaction, type AdminContext } from "../auth/auth
 import { recordAudit, SecurityApiError, withTransaction } from "../auth/security-core";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId } from "./identity-lifecycle";
 import type { SupportAvailability, SupportConnectionState } from "./consultation";
+import { resolveSupportConcurrencyLimit } from "./support-dispatch";
 
 export const SUPPORT_HANDOVER_NOTE_MAX = 200;
 export const SUPPORT_HANDOVER_DEFAULT_LIMIT = 20;
 export const SUPPORT_HANDOVER_MAX_LIMIT = 50;
 export const SUPPORT_AUDIT_DEFAULT_LIMIT = 20;
 export const SUPPORT_AUDIT_MAX_LIMIT = 50;
+
+/** 咨询首响 SLA 默认阈值（秒）：与订单群首响提醒的口径一致（order-team.ts 的 interval '2 minutes'）。 */
+export const SUPPORT_FIRST_RESPONSE_DEFAULT_SECONDS = 120;
+export const SUPPORT_FIRST_RESPONSE_MIN_SECONDS = 30;
+export const SUPPORT_FIRST_RESPONSE_MAX_SECONDS = 86_400;
+
+/**
+ * 首响事实的动作名。im_consultation 没有 first_response 列（0120 只加了 first_user_message_at），
+ * im_consultation_event 的类型又被 0032 的 CHECK 锁死；事实先落在 append-only 的 audit_event，
+ * 写入在 consultation.ts::recordSupportFirstResponse，读取只允许走 readConsultationFirstResponse。
+ * 将来若补上正列，只改这两个函数，不在各读模型里散写 join。
+ */
+export const SUPPORT_FIRST_RESPONSE_ACTION = "im.consultation.first_response";
+export const SUPPORT_FIRST_RESPONSE_REMINDER_ACTION = "im.consultation.first_response.reminder";
+
+export function resolveFirstResponseSeconds(value?: number | null): number {
+  if (value === undefined || value === null) return SUPPORT_FIRST_RESPONSE_DEFAULT_SECONDS;
+  if (!Number.isSafeInteger(value) || value < SUPPORT_FIRST_RESPONSE_MIN_SECONDS || value > SUPPORT_FIRST_RESPONSE_MAX_SECONDS) {
+    throw new Error("Invalid first response SLA seconds");
+  }
+  return value;
+}
 
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const AUDIT_KINDS = new Set(["CONSULTATION", "ORDER_GROUP"]);
@@ -41,6 +64,44 @@ export type SupportOverviewRow = {
   todaySessions: number;
   todayUsers: number;
   currentOrderGroups: number;
+  /** 服务端接待上限；与 support-dispatch.ts 同一常量来源，不是 UI 关注线。 */
+  capacityLimit: number;
+  /** 当前占用 = 咨询接待数 + 在租订单群数。 */
+  totalLoad: number;
+  atCapacity: boolean;
+};
+
+/** 首响事实的单一读结果：answeredAt 为空表示本轮尚无人工首响。 */
+export type SupportFirstResponseFact = { answeredAt: string | null; answeredByAdminId: string | null };
+
+export type SupportQueueReasonView = "NO_ONLINE_STAFF" | "ALL_AT_CAPACITY" | "CAPACITY_AVAILABLE";
+
+/**
+ * 排队可见性：满载排队不能表现成“没人接待”。reason 只在有排队时才给：
+ * withFreeSlot > 0 说明还有空位，正在分配（IM 建群/订单优先），不是满载。
+ */
+export type SupportQueueView = {
+  queued: number;
+  oldestQueuedAt: string | null;
+  oldestWaitSeconds: number | null;
+  onDuty: number;
+  withFreeSlot: number;
+  atCapacity: number;
+  capacityLimit: number;
+  reason: SupportQueueReasonView | null;
+};
+
+export type SupportQualityView = {
+  /** sampleCount 是样本数（分母），null 均值 = 无样本，不是 0。 */
+  firstResponse: {
+    slaSeconds: number;
+    averageSeconds: number | null;
+    sampleCount: number;
+    breached: number;
+    pending: number;
+    overdue: number;
+  };
+  resolution: { averageSeconds: number | null; sampleCount: number };
 };
 
 export type SupportRatingOverview = {
@@ -52,8 +113,14 @@ export type SupportRatingOverview = {
 };
 
 export type SupportOverview = {
+  /** 满载排队事实：与“没人接待”区分。 */
+  queue: SupportQueueView;
+  quality: SupportQualityView;
   onDuty: SupportOverviewRow[];
-  totals: { onDutyCount: number; waitingConsultations: number; todaySessions: number; todayUsers: number };
+  totals: {
+    onDutyCount: number; waitingConsultations: number; todaySessions: number; todayUsers: number;
+    transfersToday: number; handoversToday: number;
+  };
   trend: { date: string; sessions: number; users: number }[];
   hourly: { hour: number; sessions: number }[];
   ratings: SupportRatingOverview;
@@ -352,6 +419,7 @@ const SUPPORT_OVERVIEW_ON_DUTY_SQL = `
   )
   SELECT p."admin_user_id" AS "adminUserId", p."name", p."availability",
          p."connection_state" AS "connectionState", p."active_load" AS "activeLoad",
+         p."active_load" + COALESCE(oc."groups", 0) AS "totalLoad",
          COALESCE(ss."seconds", 0) AS "todaySeconds",
          COALESCE(cc."sessions", 0) AS "todaySessions",
          COALESCE(cc."users", 0) AS "todayUsers",
@@ -386,7 +454,14 @@ const SUPPORT_OVERVIEW_TOTALS_SQL = `
       WHERE c."app_id" = $1 AND c."state" = 'WAITING') AS "waitingConsultations",
     (SELECT COUNT(DISTINCT t."consultation_id")::int FROM touched t) AS "todaySessions",
     (SELECT COUNT(DISTINCT c."user_id")::int FROM touched t
-      JOIN "zzsh_iam"."im_consultation" c ON c."id" = t."consultation_id" AND c."app_id" = $1) AS "todayUsers"`;
+      JOIN "zzsh_iam"."im_consultation" c ON c."id" = t."consultation_id" AND c."app_id" = $1) AS "todayUsers",
+    (SELECT COUNT(*)::int FROM "zzsh_iam"."im_consultation_event" e
+      JOIN "zzsh_iam"."im_consultation" c ON c."id" = e."consultation_id" AND c."app_id" = $1
+      CROSS JOIN bounds b
+     WHERE e."event_type" = 'TRANSFERRED'
+       AND e."created_at" >= b.day_start AND e."created_at" < b.day_end) AS "transfersToday",
+    (SELECT COUNT(*)::int FROM "zzsh_iam"."im_support_handover" h CROSS JOIN bounds b
+     WHERE h."app_id" = $1 AND h."created_at" >= b.day_start AND h."created_at" < b.day_end) AS "handoversToday"`;
 
 const SUPPORT_OVERVIEW_TREND_SQL = `
   WITH days AS (
@@ -447,6 +522,110 @@ const SUPPORT_OVERVIEW_RATING_AGENTS_SQL = `
             COALESCE(NULLIF(btrim(au."name"), ''), au."username", r."assigned_admin_id")
    ORDER BY "average" DESC, "count" DESC, "adminUserId"`;
 
+/** 首响事实的唯一读取入口：audit_event 中的 append-only 首次人工回复证据。 */
+export async function readConsultationFirstResponse(
+  client: PoolClient,
+  appId: string,
+  roundIds: readonly string[],
+): Promise<Map<string, SupportFirstResponseFact>> {
+  const facts = new Map<string, SupportFirstResponseFact>();
+  if (!roundIds.length) return facts;
+  const rows = (await client.query<{ roundId: string; answeredAt: string | null; answeredByAdminId: string | null }>(
+    `SELECT a."object_id" AS "roundId",
+            to_char(min(a."occurred_at") AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "answeredAt",
+            (array_agg(a."actor_id" ORDER BY a."occurred_at", a."id"))[1] AS "answeredByAdminId"
+       FROM "zzsh_iam"."audit_event" a
+       JOIN "zzsh_iam"."im_consultation" c ON c."app_id" = $1 AND c."id" = a."object_id"
+      WHERE a."action" = $2 AND a."object_type" = 'im_consultation' AND a."object_id" = ANY($3::text[])
+      GROUP BY a."object_id"`,
+    [appId, SUPPORT_FIRST_RESPONSE_ACTION, [...roundIds]],
+  )).rows;
+  for (const row of rows) facts.set(row.roundId, { answeredAt: row.answeredAt, answeredByAdminId: row.answeredByAdminId });
+  return facts;
+}
+
+const SUPPORT_OVERVIEW_FIRST_RESPONSE_ROUNDS_SQL = `
+  WITH bounds AS (${dayBounds("$2")})
+  SELECT c."id" AS "roundId", c."state", c."first_user_message_at" AS "askedAt"
+    FROM "zzsh_iam"."im_consultation" c CROSS JOIN bounds b
+   WHERE c."app_id" = $1 AND c."first_user_message_at" >= b.day_start AND c."first_user_message_at" < b.day_end
+   ORDER BY c."first_user_message_at", c."id"`;
+
+const SUPPORT_OVERVIEW_RESOLUTION_SQL = `
+  WITH bounds AS (${dayBounds("$2")}),
+  lifecycle AS (
+    SELECT e."consultation_id" AS id,
+           min(e."created_at") FILTER (WHERE e."event_type" IN ('ASSIGNED', 'CLAIMED')) AS taken_at,
+           max(e."created_at") FILTER (WHERE e."event_type" = 'CLOSED') AS closed_at
+      FROM "zzsh_iam"."im_consultation_event" e
+      JOIN "zzsh_iam"."im_consultation" c ON c."id" = e."consultation_id" AND c."app_id" = $1
+     GROUP BY e."consultation_id"
+  )
+  SELECT count(*)::int AS "closed",
+         avg(EXTRACT(EPOCH FROM (l.closed_at - l.taken_at))) AS "averageSeconds"
+    FROM lifecycle l CROSS JOIN bounds b
+   WHERE l.closed_at >= b.day_start AND l.closed_at < b.day_end AND l.taken_at IS NOT NULL`;
+
+const SUPPORT_OVERVIEW_QUEUE_SQL = `
+  WITH queued AS (
+    SELECT count(*)::int AS "queued", min(c."first_user_message_at") AS "oldestQueuedAt",
+           EXTRACT(EPOCH FROM (clock_timestamp() - min(c."first_user_message_at"))) AS "oldestWaitSeconds"
+      FROM "zzsh_iam"."im_consultation" c
+     WHERE c."app_id" = $1 AND c."state" = 'WAITING' AND c."assigned_admin_id" IS NULL
+       AND c."first_user_message_at" IS NOT NULL
+  ),
+  duty AS (
+    SELECT p."admin_user_id",
+           p."active_load" + COALESCE((SELECT count(*) FROM "zzsh_order"."im_order_group" g
+             JOIN "zzsh_order"."rental_order" o ON o."id" = g."order_id"
+            WHERE g."app_id" = $1 AND o."status" = 'PAID'
+              AND COALESCE(g."responsible_admin_id", g."assigned_admin_id") = p."admin_user_id"), 0) AS "load"
+      FROM "zzsh_iam"."im_support_presence" p
+     WHERE p."app_id" = $1 AND p."availability" = 'AVAILABLE' AND p."connection_state" = 'CONNECTED'
+       AND p."last_connected_at" > clock_timestamp() - interval '2 minutes'
+  )
+  SELECT q."queued",
+         to_char(q."oldestQueuedAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "oldestQueuedAt",
+         floor(COALESCE(q."oldestWaitSeconds", 0))::int AS "oldestWaitSeconds",
+         (SELECT count(*)::int FROM duty) AS "onDuty",
+         (SELECT count(*)::int FROM duty WHERE "load" < $2) AS "withFreeSlot",
+         (SELECT count(*)::int FROM duty WHERE "load" >= $2) AS "atCapacity"
+    FROM queued q`;
+
+/** 首响质量聚合：事实统一经 readConsultationFirstResponse，不在这里另写跨表 join。 */
+async function readSupportFirstResponseQuality(
+  client: PoolClient,
+  appId: string,
+  date: string | null,
+  slaSeconds: number,
+): Promise<SupportQualityView["firstResponse"]> {
+  const rounds = (await client.query<{ roundId: string; state: string; askedAt: Date | string }>(
+    SUPPORT_OVERVIEW_FIRST_RESPONSE_ROUNDS_SQL, [appId, date],
+  )).rows;
+  if (!rounds.length) return { slaSeconds, averageSeconds: null, sampleCount: 0, breached: 0, pending: 0, overdue: 0 };
+  const facts = await readConsultationFirstResponse(client, appId, rounds.map((row) => row.roundId));
+  const now = Date.now();
+  let answered = 0, breached = 0, pending = 0, overdue = 0, totalSeconds = 0;
+  for (const round of rounds) {
+    const askedAt = new Date(round.askedAt).getTime();
+    const fact = facts.get(round.roundId);
+    if (!fact?.answeredAt) {
+      if (round.state === "CLOSED") continue;
+      pending += 1;
+      if (now - askedAt > slaSeconds * 1000) overdue += 1;
+      continue;
+    }
+    const seconds = Math.max(0, Math.round((new Date(fact.answeredAt).getTime() - askedAt) / 1000));
+    answered += 1;
+    totalSeconds += seconds;
+    if (seconds > slaSeconds) breached += 1;
+  }
+  return {
+    slaSeconds, sampleCount: answered, breached, pending, overdue,
+    averageSeconds: answered ? Math.round(totalSeconds / answered) : null,
+  };
+}
+
 /**
  * 运营看板只读投影：统计表、今日汇总、近 7 天咨询趋势、今日每小时新咨询。
  * 数据不足时 trend/hourly 返回空数组，不画伪造的零趋势。
@@ -455,8 +634,11 @@ export async function readSupportOverview(
   options: { pool: Pool; appId: string },
   context: AdminContext,
   dateValue: string | null | undefined,
+  limits: { capacityLimit?: number | null; firstResponseSeconds?: number | null } = {},
 ): Promise<SupportOverview> {
   const date = parseSupportDate(dateValue);
+  const capacityLimit = resolveSupportConcurrencyLimit(limits.capacityLimit);
+  const firstResponseSeconds = resolveFirstResponseSeconds(limits.firstResponseSeconds);
   return withTransaction(options.pool, async (client) => {
     await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
     await assertAdminContextInTransaction(client, context);
@@ -464,7 +646,7 @@ export async function readSupportOverview(
     const onDuty = (await client.query<{
       adminUserId: string; name: string; availability: SupportAvailability; connectionState: SupportConnectionState;
       activeLoad: string | number; todaySeconds: string | number; todaySessions: string | number;
-      todayUsers: string | number; currentOrderGroups: string | number;
+      todayUsers: string | number; currentOrderGroups: string | number; totalLoad: string | number;
     }>(SUPPORT_OVERVIEW_ON_DUTY_SQL, [options.appId, date])).rows.map((row) => ({
       adminUserId: row.adminUserId,
       name: row.name,
@@ -475,10 +657,14 @@ export async function readSupportOverview(
       todaySessions: integer(row.todaySessions),
       todayUsers: integer(row.todayUsers),
       currentOrderGroups: integer(row.currentOrderGroups),
+      capacityLimit,
+      totalLoad: integer(row.totalLoad),
+      atCapacity: integer(row.totalLoad) >= capacityLimit,
     }));
     const totalsRow = (await client.query<{
       onDutyCount: string | number; waitingConsultations: string | number;
       todaySessions: string | number; todayUsers: string | number;
+      transfersToday: string | number; handoversToday: string | number;
     }>(SUPPORT_OVERVIEW_TOTALS_SQL, [options.appId, date])).rows[0];
     const trendRows = (await client.query<{ date: string; sessions: string | number; users: string | number }>(
       SUPPORT_OVERVIEW_TREND_SQL, [options.appId, date],
@@ -496,13 +682,45 @@ export async function readSupportOverview(
       const average = nullableAverage(row.average);
       return average === null ? [] : [{ adminUserId: row.adminUserId, name: row.name, count: integer(row.count), average }];
     });
+    // 排队、首响、解决时长都是只读聚合：没有事实就返回 null/0，不伪造。
+    const queueRow = (await client.query<{
+      queued: string | number; oldestQueuedAt: string | null; oldestWaitSeconds: string | number;
+      onDuty: string | number; withFreeSlot: string | number; atCapacity: string | number;
+    }>(SUPPORT_OVERVIEW_QUEUE_SQL, [options.appId, capacityLimit])).rows[0];
+    const queued = integer(queueRow?.queued);
+    const withFreeSlot = integer(queueRow?.withFreeSlot);
+    const atCapacity = integer(queueRow?.atCapacity);
+    const queue: SupportQueueView = {
+      queued,
+      oldestQueuedAt: queueRow?.oldestQueuedAt ?? null,
+      oldestWaitSeconds: queued > 0 ? integer(queueRow?.oldestWaitSeconds) : null,
+      onDuty: integer(queueRow?.onDuty),
+      withFreeSlot,
+      atCapacity,
+      capacityLimit,
+      reason: queued === 0 ? null
+        : withFreeSlot > 0 ? "CAPACITY_AVAILABLE"
+        : atCapacity > 0 ? "ALL_AT_CAPACITY" : "NO_ONLINE_STAFF",
+    };
+    const firstResponse = await readSupportFirstResponseQuality(client, options.appId, date, firstResponseSeconds);
+    const resolutionRow = (await client.query<{ closed: string | number; averageSeconds: string | number | null }>(
+      SUPPORT_OVERVIEW_RESOLUTION_SQL, [options.appId, date],
+    )).rows[0];
+    const quality: SupportQualityView = {
+      firstResponse,
+      resolution: { sampleCount: integer(resolutionRow?.closed), averageSeconds: nullableAverage(resolutionRow?.averageSeconds) },
+    };
     return {
+      queue,
+      quality,
       onDuty,
       totals: {
         onDutyCount: integer(totalsRow?.onDutyCount),
         waitingConsultations: integer(totalsRow?.waitingConsultations),
         todaySessions: integer(totalsRow?.todaySessions),
         todayUsers: integer(totalsRow?.todayUsers),
+        transfersToday: integer(totalsRow?.transfersToday),
+        handoversToday: integer(totalsRow?.handoversToday),
       },
       // 没有任何事实时返回空数组，不用 0 伪造趋势；真实为零的日期保留。
       trend: trendRows.some((row) => row.sessions > 0 || row.users > 0) ? trendRows : [],

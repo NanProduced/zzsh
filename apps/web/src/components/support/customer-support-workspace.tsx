@@ -13,6 +13,7 @@ import { createLocalFakeNimWebClientFactory, createNimWebClientFactory, mergeImM
 import { clearSupportIntent, normalizeSupportType, readSupportIntent, saveSupportIntent, type SupportType } from "@/lib/support-intent";
 import "./customer-support-workspace.css";
 import { readSupportOrders, type SupportOrder } from "@/lib/support-directory";
+import { computeSupportUnread, isDirectoryOrderGroup, publishSupportUnread, readDirectoryPreferences, writeDirectoryPreferences, type DirectoryPreference } from "./support-unread";
 import { SupportRoundRating, type RoundRatingResolution } from "./support-round-rating";
 import { OrderTeamPanel, orderStageTone, orderTeamLabel, type OrderTeamAccess } from "@zzsh/ui/order-team-panel";
 import { orderApi, orderIntentKey } from "@/lib/order-client";
@@ -170,36 +171,16 @@ function threadStateOf(conversation: Pick<Consultation, "state" | "threadState">
   return conversation.threadState ?? (conversation.state === "ACTIVE" ? "ACTIVE" : conversation.state === "WAITING" ? "WAITING" : "IDLE");
 }
 
-/** 线程状态短标签：结束态只用两个字，不再附加说明文案。 */
+/**
+ * 线程状态短标签。用户侧不露“结束”：轮次结束只是内部状态，用户再发一条消息服务端就会自然开新一轮
+ * （既有行为），所以这里只区分“进行中/等待接待”，IDLE 不给标签——客服离开的唯一痕迹是评价卡。
+ */
 function threadStateLabel(conversation: Pick<Consultation, "state" | "threadState">): string {
   const state = threadStateOf(conversation);
-  return state === "ACTIVE" ? "进行中" : state === "WAITING" ? "等待客服接待" : "已结束";
+  return state === "ACTIVE" ? "进行中" : state === "WAITING" ? "等待客服接待" : "";
 }
 
-/** 目录只隐藏草稿/未付款样本；建群待核验的真实订单仍要出现在这里，用户才看得到自己的订单群。 */
-function isDirectoryOrderGroup(order: SupportOrder): boolean {
-  return order.status !== "DRAFT" && order.status !== "PENDING_PAYMENT";
-}
-
-type DirectoryPreference = { pinned: boolean; muted: boolean };
-const DIRECTORY_PREFS_PREFIX = "zzsh.support.directory-prefs";
-
-/** 目录置顶/免打扰只是本机偏好：按登录身份分键，读不出或写不进时回退为空。 */
-function readDirectoryPreferences(identity: string): Record<string, DirectoryPreference> {
-  if (!identity || typeof window === "undefined") return {};
-  try {
-    const raw = window.localStorage.getItem(`${DIRECTORY_PREFS_PREFIX}.${identity}`);
-    if (!raw) return {};
-    const parsed: unknown = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    return Object.fromEntries(Object.entries(parsed).filter(([key]) => key.trim()).map(([key, value]) => {
-      const record = value && typeof value === "object" && !Array.isArray(value) ? value as { pinned?: unknown; muted?: unknown } : {};
-      return [key, { pinned: record.pinned === true, muted: record.muted === true }];
-    }));
-  } catch {
-    return {};
-  }
-}
+// 目录可见性、偏好键与入口未读共用一份规则：入口数出来的群，必须是目录里真的进得去的群。
 
 function normalizeConsultation(consultation: Consultation): Consultation {
   return {
@@ -258,6 +239,18 @@ function compactOrderStage(label: string): string {
     "结算完成": "已完成",
   };
   return map[label] ?? label;
+}
+
+/**
+ * 订单群目录行的兜底摘要：有消息就按消息说，没消息就把阶段说清楚。
+ * 结束/结算的群只剩历史可看，不能继续挂着“有新消息”；建群中的群也不该显示“暂无消息”。
+ */
+function orderDirectorySnippet(order: SupportOrder): string {
+  // 结束态只保证“历史仍可查看”；是否还在 72 小时沟通窗口由群内提示说明，目录行不替它下结论。
+  if (orderStageTone(order) === "done") return `${orderTeamLabel(order)} · 历史仍可查看`;
+  if (order.stage === "ENDING") return `${orderTeamLabel(order)} · 待双方确认`;
+  if (order.lastMessageAt) return "有新消息";
+  return orderTeamLabel(order);
 }
 
 /** 列表时间：刚刚/N 分钟前 → 今天 HH:mm → 昨天 → 一周内星期 → 月日 → 年月日。 */
@@ -949,6 +942,13 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     return()=>{cancelled=true;controller.abort();document.removeEventListener("visibilitychange", onVisibility);window.clearInterval(timer);};
   },[currentIdentity,preview,visible,directoryRevision,revalidateAfterUnauthorized,session.status]);
 
+  // 入口未读共用一份快照：窗口开着时它的目录轮询就是唯一写入方，轨道不再另外发请求；
+  // 关窗后由轨道接手。数字没变时 publish 不惊动订阅者，轮询不会引起额外渲染。
+  useEffect(() => {
+    if (preview) return;
+    publishSupportUnread(computeSupportUnread(consultations, orders, directoryPrefs));
+  }, [consultations, directoryPrefs, orders, preview]);
+
   useEffect(() => {
     if (preview || activeId || consultations.length === 0) return;
     // 入口意图（投诉/客服）共享 SERVICE 线程：优先选统一线程，只有不存在时才退回旧 COMPLAINT 行。
@@ -1143,9 +1143,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     setDirectoryPrefs((current) => {
       const pref = current[key] ?? { pinned: false, muted: false };
       const next = { ...current, [key]: { ...pref, [field]: !pref[field] } };
-      if (!preview && typeof window !== "undefined") {
-        try { window.localStorage.setItem(`${DIRECTORY_PREFS_PREFIX}.${currentIdentity}`, JSON.stringify(next)); } catch { /* 本机偏好写不进时仍保留在内存 */ }
-      }
+      if (!preview) writeDirectoryPreferences(currentIdentity, next);
       return next;
     });
   };
@@ -2170,14 +2168,14 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
         </header>
         <div className="support-facts-bar">
           <span className="support-fact-chip">{activeConversation ? typeLabel(activeConversation.type) : preview ? "商品咨询" : "客服咨询"}</span>
-          {activeConversation ? <span className="support-fact-chip" data-tone={activeConversation.messageScopeState === "FAILED" ? "warn" : threadStateOf(activeConversation) === "ACTIVE" ? "good" : "neutral"}>{activeConversation.messageScopeState === "FAILED" ? "待人工核验" : threadStateLabel(activeConversation)}</span> : null}
+          {activeConversation && (activeConversation.messageScopeState === "FAILED" || threadStateLabel(activeConversation)) ? <span className="support-fact-chip" data-tone={activeConversation.messageScopeState === "FAILED" ? "warn" : threadStateOf(activeConversation) === "ACTIVE" ? "good" : "neutral"}>{activeConversation.messageScopeState === "FAILED" ? "待人工核验" : threadStateLabel(activeConversation)}</span> : null}
           {activeConversation?.assignedAdmin ? <span className="support-fact-chip" data-tone="good">{`客服 · ${activeConversation.assignedAdmin.name}`}</span> : null}
           {subjectRef ? <span className="support-fact-chip">{`对象 ${subjectRef}`}</span> : preview ? <span className="support-fact-chip">演示对象</span> : null}
           <span className="support-facts-spacer" />
         </div>
         <div className="support-message-area">
            {unresolvedText ? <div className="support-send-retry" role="alert"><CircleAlert size={15} /><span>{unresolvedText.unknown ? "发送结果未确认，内容已保留。" : "消息发送失败，内容已保留。"}</span><button type="button" onClick={() => void refreshHistory()}>刷新历史</button><button type="button" onClick={() => void retrySend()} disabled={busy || !canSend}>{unresolvedText.messageClientId ? "原消息重试" : "重试发送"}</button></div> : null}
-           {!preview && !activeConversation ? <div className="support-start-panel" data-state="initial"><Headphones size={27} /><strong>从这里开始你的咨询</strong><span>点击后立即开始，客服接入后会看到你的留言。</span><SupportTypePicker value={selectedType} onChange={setSelectedType} disabled={busy} onSelect={(type) => void startConsultation(type)} />{busy ? <span className="support-start-panel-status" role="status">正在创建咨询…</span> : null}</div> : !preview && activeConversation?.messageScopeState === "FAILED" ? <div className="support-start-panel"><CircleAlert size={27} /><strong>客服会话待人工核验</strong><span>平台暂时无法确认客服会话状态，已暂停发送和自动重试。请稍后再试或联系平台处理。</span></div> : <MessageScrollerPrimitive.Provider autoScroll defaultScrollPosition="last-anchor"><MessageScrollerPrimitive.Root className="support-message-scroller"><MessageScrollerPrimitive.Viewport className="support-message-viewport" aria-label="消息内容" onContextMenu={onSupportContextMenu}><MessageScrollerPrimitive.Content className="support-message-content">{timelineItems.length > 0 ? <>{historyMore[activeConversationKey] ? <MessageScrollerPrimitive.Item messageId="load-earlier"><div className="support-history-more"><button type="button" onClick={() => void loadEarlier()} disabled={historyLoading}>{historyLoading ? "正在读取更早消息…" : "更早的消息"}</button></div></MessageScrollerPrimitive.Item> : null}{timelineItems}</> : <MessageScrollerPrimitive.Item messageId="empty"><div className="support-message-empty"><Headphones size={24} /><strong>{activeConversation?.state === "CLOSED" ? "本轮已结束" : activeConversation?.state === "WAITING" ? "咨询已提交" : "等待第一条消息"}</strong><span>{activeConversation?.state === "CLOSED" ? "可以继续留言，客服接入后会回复；这次线程的历史会一直保留。" : activeConversation?.state === "WAITING" ? (activeScopeReady ? "客服接入后会看到你的留言；现在也可以先发消息。" : "正在连接客服…已输入的内容会保留。") : preview ? "可以从下方快捷回复开始检查交互。" : "客服连接就绪后，消息会出现在这里。"}</span></div></MessageScrollerPrimitive.Item>}</MessageScrollerPrimitive.Content></MessageScrollerPrimitive.Viewport><MessageScrollerPrimitive.Button direction="end" className="support-jump-button" render={<button type="button" aria-label="跳到最新消息" title="跳到最新消息" />}><ArrowDown size={14} aria-hidden="true" /></MessageScrollerPrimitive.Button></MessageScrollerPrimitive.Root></MessageScrollerPrimitive.Provider>}
+           {!preview && !activeConversation ? <div className="support-start-panel" data-state="initial"><Headphones size={27} /><strong>从这里开始你的咨询</strong><span>点击后立即开始，客服接入后会看到你的留言。</span><SupportTypePicker value={selectedType} onChange={setSelectedType} disabled={busy} onSelect={(type) => void startConsultation(type)} />{busy ? <span className="support-start-panel-status" role="status">正在创建咨询…</span> : null}</div> : !preview && activeConversation?.messageScopeState === "FAILED" ? <div className="support-start-panel"><CircleAlert size={27} /><strong>客服会话待人工核验</strong><span>平台暂时无法确认客服会话状态，已暂停发送和自动重试。请稍后再试或联系平台处理。</span></div> : <MessageScrollerPrimitive.Provider autoScroll defaultScrollPosition="last-anchor"><MessageScrollerPrimitive.Root className="support-message-scroller"><MessageScrollerPrimitive.Viewport className="support-message-viewport" aria-label="消息内容" onContextMenu={onSupportContextMenu}><MessageScrollerPrimitive.Content className="support-message-content">{timelineItems.length > 0 ? <>{historyMore[activeConversationKey] ? <MessageScrollerPrimitive.Item messageId="load-earlier"><div className="support-history-more"><button type="button" onClick={() => void loadEarlier()} disabled={historyLoading}>{historyLoading ? "正在读取更早消息…" : "更早的消息"}</button></div></MessageScrollerPrimitive.Item> : null}{timelineItems}</> : <MessageScrollerPrimitive.Item messageId="empty"><div className="support-message-empty"><Headphones size={24} /><strong>{activeConversation?.state === "WAITING" ? "咨询已提交" : "等待第一条消息"}</strong><span>{activeConversation?.state === "WAITING" ? (activeScopeReady ? "客服接入后会看到你的留言；现在也可以先发消息。" : "正在连接客服…已输入的内容会保留。") : preview ? "可以从下方快捷回复开始检查交互。" : "客服连接就绪后，消息会出现在这里。"}</span></div></MessageScrollerPrimitive.Item>}</MessageScrollerPrimitive.Content></MessageScrollerPrimitive.Viewport><MessageScrollerPrimitive.Button direction="end" className="support-jump-button" render={<button type="button" aria-label="跳到最新消息" title="跳到最新消息" />}><ArrowDown size={14} aria-hidden="true" /></MessageScrollerPrimitive.Button></MessageScrollerPrimitive.Root></MessageScrollerPrimitive.Provider>}
         </div>
         <div className="support-composer-wrap">
           {preview ? <div className="support-quick-replies" aria-label="快捷回复"><span>快捷回复</span>{["我先帮你确认一下", "请稍等，我正在核对"].map((reply) => <button key={reply} type="button" onClick={() => chooseQuickReply(reply)}>{reply}</button>)}</div> : null}
@@ -2505,7 +2503,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
                 ? "客服会话核验中"
                 : item.assignedAdmin?.name && threadState === "ACTIVE"
                   ? `由客服 ${item.assignedAdmin.name} 接待中`
-                  : statusLabel;
+                  : statusLabel || "暂无消息";
           const rowActive = section === "consultation" && activeId === threadKeyOf(item);
           // 只有聊天窗真正可见时，选中线程才算“正在读”；窄屏列表视图保留当前线程的未读。
           const rowUnread = item.hasUnread === true && !(rowActive && chatPaneVisible);
@@ -2539,7 +2537,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
               <span className="support-conversation-copy">
                 <strong title={typeLabel(item.type)}>
                   <span className="support-conversation-title">{typeLabel(item.type)}</span>
-                  <em className="support-thread-state" data-thread-state={threadState}>{statusLabel}</em>
+                  {statusLabel ? <em className="support-thread-state" data-thread-state={threadState}>{statusLabel}</em> : null}
                   {pref.pinned ? <Pin size={11} className="support-directory-flag" aria-label="已置顶" /> : null}
                 </strong>
                 <span className="support-conversation-snippet">{snippet}</span>
@@ -2561,9 +2559,11 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
         const orderAt = Date.parse(item.lastMessageAt ?? item.createdAt ?? "") || 0;
         const orderTime = orderAt ? formatListTime(orderAt) : undefined;
         const orderActive = section === "orders" && selectedOrder?.id === item.id;
+        // 最后一句真消息仍然优先；没有摘要时才按阶段兜底——结束态的群不能谎报“有新消息”，
+        // 建群中的群也不该说“暂无消息”。
         const orderPreview = typeof item.lastMessagePreview === "string" && item.lastMessagePreview.trim()
           ? item.lastMessagePreview.trim()
-          : item.lastMessageAt ? "有新消息" : "暂无消息";
+          : orderDirectorySnippet(item);
         // 群聊真正可见时，未读交给服务端清；列表只保留未读事实，不显示气泡。
         const orderUnreadCount = Math.max(0, item.unreadCount ?? 0);
         const orderUnread = orderUnreadCount > 0 && !(orderActive && chatPaneVisible);

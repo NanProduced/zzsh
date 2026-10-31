@@ -6,7 +6,7 @@
  * 统计口径（北京时间自然日）由服务端决定，前端不推断。
  */
 import type { NimMessageLike } from "@zzsh/im-client/nim-web-client";
-import { beijingTodayStart } from "../workspace/beijing-time";
+import { BEIJING_TIME_ZONE, beijingTodayStart } from "../workspace/beijing-time";
 
 export type SupportOverviewAgent = {
   adminUserId: string;
@@ -18,6 +18,12 @@ export type SupportOverviewAgent = {
   todaySessions: number;
   todayUsers: number;
   currentOrderGroups: number;
+  /** 服务端接待容量上限；未提供时 null，不能拿它推断“满载”。 */
+  capacityLimit: number | null;
+  /** 咨询 + 在租订单群的当前合计负载；服务端未提供时回退 activeLoad。 */
+  totalLoad: number;
+  /** 服务端判定的满载；未提供时 null，不是 false。 */
+  atCapacity: boolean | null;
 };
 
 export type SupportTotals = {
@@ -25,6 +31,42 @@ export type SupportTotals = {
   waitingConsultations: number;
   todaySessions: number;
   todayUsers: number;
+  /** TRANSFERRED 事件今日计数；未提供时 null（不是 0）。 */
+  transfersToday: number | null;
+  /** im_support_handover 今日 DB 全量计数；未提供时 null（不是 0，也不受列表单页上限影响）。 */
+  handoversToday: number | null;
+};
+
+export type SupportFirstResponseQuality = {
+  /** 服务端的首响 SLA 阈值（秒）；未提供时 null。 */
+  slaSeconds: number | null;
+  /** 今日样本平均首响；无样本时 null（不是 0）。 */
+  averageSeconds: number | null;
+  sampleCount: number;
+  breached: number;
+  pending: number;
+  overdue: number;
+};
+
+export type SupportResolutionQuality = { averageSeconds: number | null; sampleCount: number };
+
+/** 服务时效段；服务端还没给整段时为 null，UI 才挂「服务端未提供」。 */
+export type SupportQuality = {
+  firstResponse: SupportFirstResponseQuality | null;
+  resolution: SupportResolutionQuality | null;
+};
+
+export type SupportQueueReason = "NO_ONLINE_STAFF" | "ALL_AT_CAPACITY" | "CAPACITY_AVAILABLE" | "UNKNOWN";
+
+export type SupportQueueSnapshot = {
+  queued: number;
+  oldestQueuedAt: string | null;
+  oldestWaitSeconds: number | null;
+  onDuty: number;
+  withFreeSlot: number;
+  atCapacity: number;
+  capacityLimit: number | null;
+  reason: SupportQueueReason;
 };
 
 export type SupportTrendPoint = { date: string; sessions: number; users: number };
@@ -43,7 +85,12 @@ export type SupportOverview = {
   trend: SupportTrendPoint[];
   hourly: SupportHourlyPoint[];
   ratings: SupportRatings;
+  /** 服务时效投影；服务端未提供时为 null。 */
+  quality: SupportQuality | null;
+  /** 排队与容量投影；服务端未提供时为 null。 */
+  queue: SupportQueueSnapshot | null;
 };
+
 const EMPTY_DISTRIBUTION: SupportRatings["distribution"] = [0, 0, 0, 0, 0];
 
 export type SupportHandover = {
@@ -83,6 +130,62 @@ const text = (value: unknown): string => (typeof value === "string" ? value : ""
 const count = (value: unknown): number =>
   typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
 
+/** 只有明确是有限非负数才算“服务端给了数”；缺失或非法一律 null，不补 0。 */
+function maybeCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+/**
+ * 时长类接受 0：服务端用 sampleCount 判“有无样本”，均值可能被四舍五入成 0 秒。
+ * 只有字段缺失或非法值才是 null。
+ */
+function maybeSeconds(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function parseFirstResponse(value: unknown): SupportFirstResponseQuality | null {
+  const row = recordOf(value);
+  if (!Object.keys(row).length) return null;
+  return {
+    slaSeconds: maybeCount(row.slaSeconds),
+    averageSeconds: maybeSeconds(row.averageSeconds),
+    sampleCount: count(row.sampleCount),
+    breached: count(row.breached),
+    pending: count(row.pending),
+    overdue: count(row.overdue),
+  };
+}
+
+function parseResolution(value: unknown): SupportResolutionQuality | null {
+  const row = recordOf(value);
+  if (!Object.keys(row).length) return null;
+  return { averageSeconds: maybeSeconds(row.averageSeconds), sampleCount: count(row.sampleCount) };
+}
+
+function parseQuality(value: unknown): SupportQuality | null {
+  const root = recordOf(value);
+  if (!Object.keys(root).length) return null;
+  return { firstResponse: parseFirstResponse(root.firstResponse), resolution: parseResolution(root.resolution) };
+}
+
+function parseQueue(value: unknown): SupportQueueSnapshot | null {
+  const row = recordOf(value);
+  if (!Object.keys(row).length) return null;
+  const reason: SupportQueueReason = row.reason === "NO_ONLINE_STAFF" || row.reason === "ALL_AT_CAPACITY" || row.reason === "CAPACITY_AVAILABLE"
+    ? row.reason
+    : "UNKNOWN";
+  return {
+    queued: count(row.queued),
+    oldestQueuedAt: text(row.oldestQueuedAt) || null,
+    oldestWaitSeconds: maybeCount(row.oldestWaitSeconds),
+    onDuty: count(row.onDuty),
+    withFreeSlot: count(row.withFreeSlot),
+    atCapacity: count(row.atCapacity),
+    capacityLimit: maybeCount(row.capacityLimit),
+    reason,
+  };
+}
+
 /** 秒 -> “Xh Ym”。缺失/非法一律 “—”，不把未知写成 0。 */
 export function formatDuration(seconds: number | null | undefined): string {
   if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) return "—";
@@ -98,16 +201,21 @@ export function todaySecondsOf(presence: unknown): number | null {
 
 function parseAgent(value: unknown): SupportOverviewAgent {
   const row = recordOf(value);
+  const activeLoad = count(row.activeLoad);
+  const totalLoad = maybeCount(row.totalLoad);
   return {
     adminUserId: text(row.adminUserId),
     name: text(row.name) || "未命名客服",
     availability: text(row.availability) || "UNKNOWN",
     connectionState: text(row.connectionState) || "UNKNOWN",
-    activeLoad: count(row.activeLoad),
+    activeLoad,
     todaySeconds: count(row.todaySeconds),
     todaySessions: count(row.todaySessions),
     todayUsers: count(row.todayUsers),
     currentOrderGroups: count(row.currentOrderGroups),
+    capacityLimit: maybeCount(row.capacityLimit),
+    totalLoad: totalLoad === null ? activeLoad : totalLoad,
+    atCapacity: typeof row.atCapacity === "boolean" ? row.atCapacity : null,
   };
 }
 
@@ -173,10 +281,14 @@ export function parseSupportOverview(value: unknown): SupportOverview {
       waitingConsultations: count(totals.waitingConsultations),
       todaySessions: count(totals.todaySessions),
       todayUsers: count(totals.todayUsers),
+      transfersToday: maybeCount(totals.transfersToday),
+      handoversToday: maybeCount(totals.handoversToday),
     },
     trend,
     hourly,
     ratings: parseRatings(root.ratings),
+    quality: parseQuality(root.quality),
+    queue: parseQueue(root.queue),
   };
 }
 
@@ -388,4 +500,296 @@ export function formatDayLabel(date: string): string {
 
 export function hourLabel(hour: number): string {
   return `${String(hour).padStart(2, "0")}:00`;
+}
+
+/* ------------------------------ 时效缺口与交接班 ------------------------------ */
+
+/**
+ * 运营关注用的接待量关注线。服务端没有「客服容量上限」事实，这条线只是本页关注阈值，
+ * 不代表系统会拒绝分配，也不能当容量结论。
+ */
+export const SUPPORT_ATTENTION_LOAD_LINE = 3;
+
+/** /im/handovers 单页上限 50 条：今日交接只能在这个分母内统计，UI 必须写明。 */
+export const SUPPORT_HANDOVER_PAGE_LIMIT = 50;
+
+export type SupportSlaGap = { id: string; label: string; missing: string; needed: string };
+
+/** 服务端尚未提供聚合事实的时效指标：只描述缺口，不估算、不补 0。 */
+export const SUPPORT_SLA_GAPS: readonly SupportSlaGap[] = [
+  {
+    id: "first-response",
+    label: "首响时长",
+    missing: "咨询轮次没有「首条人工回复」时间；事件类型只有 CREATED/ASSIGNED/CLAIMED/TRANSFERRED/CLOSED/REOPENED",
+    needed: "服务端产出每轮首条人工回复时间（当前落在 audit_event 并由单一函数读取，或换正列），再由 overview 聚合成 quality.firstResponse",
+  },
+  {
+    id: "resolution",
+    label: "解决时长",
+    missing: "CLOSED 与 CLAIMED 的时间差没有聚合端点，单会话事件接口只能逐条取",
+    needed: "overview 按今日 CLOSED(actor=admin) 轮次求 CLAIMED→CLOSED 平均秒数与样本数",
+  },
+  {
+    id: "support-cancel",
+    label: "客服取消数",
+    missing: "咨询轮次没有取消事件；SUPPORT_CANCELLED_REFUND 是订单取消原因，不在咨询域",
+    needed: "先定「客服取消」口径，再按口径出事件计数或订单域计数",
+  },
+];
+
+export type SupportDutySummary = {
+  /** 在岗可接待（availability=AVAILABLE）人数。 */
+  available: number;
+  /** 在岗可接待且通道已连接，与服务端 totals.onDutyCount 同口径。 */
+  connected: number;
+  /** 非在岗但名下仍有接待的客服数。 */
+  offDutyWithLoad: number;
+  /** presence 上报的 activeLoad 合计：覆盖有 presence 记录的账号，不等于全量未结。 */
+  activeLoadTotal: number;
+  names: string[];
+};
+
+export function summarizeDuty(agents: SupportOverviewAgent[]): SupportDutySummary {
+  const available = agents.filter((agent) => agent.availability === "AVAILABLE");
+  return {
+    available: available.length,
+    connected: available.filter((agent) => agent.connectionState === "CONNECTED").length,
+    offDutyWithLoad: agents.filter((agent) => agent.availability !== "AVAILABLE" && agent.activeLoad > 0).length,
+    activeLoadTotal: agents.reduce((sum, agent) => sum + agent.activeLoad, 0),
+    names: available.map((agent) => agent.name),
+  };
+}
+
+export type SupportAttention = { id: string; level: "high" | "watch"; title: string; detail: string };
+
+/**
+ * 异常只看服务端已有事实：服务端给了排队原因与容量上限就按原因报；
+ * 只有整段缺失时才退到本页关注线，并且文案里必须自曝口径。
+ */
+export function attentionSignals(input: { agents: SupportOverviewAgent[]; totals: SupportTotals; queue?: SupportQueueSnapshot | null }): SupportAttention[] {
+  const duty = summarizeDuty(input.agents);
+  const queue = input.queue ?? null;
+  const signals: SupportAttention[] = [];
+  if (queue) {
+    if (queue.reason === "NO_ONLINE_STAFF") {
+      signals.push({
+        id: "no-support",
+        level: "high",
+        title: "无在岗可接待客服",
+        detail: `排队 ${queue.queued} 条；服务端排队原因为 NO_ONLINE_STAFF。`,
+      });
+    } else if (queue.reason === "ALL_AT_CAPACITY") {
+      signals.push({
+        id: "at-capacity",
+        level: "high",
+        title: "全部客服已达容量上限",
+        detail: `排队 ${queue.queued} 条，满载 ${queue.atCapacity} 人${queue.capacityLimit !== null ? `（上限 ${queue.capacityLimit} 条/人）` : ""}；服务端排队原因为 ALL_AT_CAPACITY。`,
+      });
+    } else if (queue.reason === "CAPACITY_AVAILABLE" && queue.queued > 0) {
+      signals.push({
+        id: "queue-undigested",
+        level: "watch",
+        title: "有客服可接单但仍有排队",
+        detail: `排队 ${queue.queued} 条，可接单客服 ${queue.withFreeSlot} 人；派单可能仍在进行。`,
+      });
+    }
+    if (queue.oldestWaitSeconds !== null && queue.oldestWaitSeconds > 0) {
+      signals.push({
+        id: "queue-oldest",
+        level: queue.oldestWaitSeconds >= 300 ? "high" : "watch",
+        title: "有久等中的咨询",
+        detail: `最久已等 ${formatSlaDuration(queue.oldestWaitSeconds)}（服务端 oldestWaitSeconds）；300 秒分级为本页关注线，不是 SLA 承诺值。`,
+      });
+    }
+  }
+  if (duty.available === 0 && !queue) {
+    signals.push({
+      id: "no-support",
+      level: "high",
+      title: "无在岗可接待客服",
+      detail: `${input.agents.length} 名客服全部未上线或已暂停，排队 ${input.totals.waitingConsultations} 条。`,
+    });
+  }
+  if (duty.available > 0 && duty.connected === 0) {
+    signals.push({
+      id: "channel-down",
+      level: "high",
+      title: "在岗客服通道全部未连接",
+      detail: `${duty.available} 人在岗可接待，但没有任何一台通道处于已连接状态。`,
+    });
+  }
+  if (!queue && duty.available > 0 && input.totals.waitingConsultations > duty.available) {
+    signals.push({
+      id: "backlog",
+      level: "watch",
+      title: "排队高于在岗人数",
+      detail: `等待接入 ${input.totals.waitingConsultations} 条，在岗可接待 ${duty.available} 人。`,
+    });
+  }
+  const capped = input.agents.filter((agent) => agent.atCapacity === true);
+  if (capped.length) {
+    signals.push({
+      id: "at-capacity-agent",
+      level: "watch",
+      title: "有客服达到容量上限",
+      detail: `${capped.map((agent) => `${agent.name}（${agent.totalLoad}${agent.capacityLimit !== null ? `/${agent.capacityLimit}` : ""}）`).join("、")}；容量上限来自服务端。`,
+    });
+  } else if (input.agents.every((agent) => agent.atCapacity === null || agent.atCapacity === undefined)) {
+    const loaded = input.agents.filter((agent) => agent.activeLoad >= SUPPORT_ATTENTION_LOAD_LINE);
+    if (loaded.length) {
+      signals.push({
+        id: "load-line",
+        level: "watch",
+        title: "接待量达关注线",
+        detail: `${loaded.map((agent) => `${agent.name} ${agent.activeLoad} 条`).join("、")}；关注线 ${SUPPORT_ATTENTION_LOAD_LINE} 条为本页口径，服务端未提供容量上限。`,
+      });
+    }
+  }
+  if (duty.offDutyWithLoad > 0) {
+    signals.push({
+      id: "off-duty-load",
+      level: "watch",
+      title: "有客服未上线但挂着会话",
+      detail: `${duty.offDutyWithLoad} 人状态为未上线或已暂停，名下仍有接待中的会话。`,
+    });
+  }
+  return signals;
+}
+
+export type SupportHourlyTrendPoint = { hour: number; label: string; sessions: number; cumulative: number };
+
+/** 今日累计趋势：用服务端 hourly（CREATED 计数）累加，不重新估计。 */
+export function cumulativeSessions(hourly: SupportHourlyPoint[]): SupportHourlyTrendPoint[] {
+  let running = 0;
+  return hourlySlots(hourly).map((point) => {
+    running += point.sessions;
+    return { hour: point.hour, label: String(point.hour).padStart(2, "0"), sessions: point.sessions, cumulative: running };
+  });
+}
+
+/** 评分分布固定 5→1 星，缺失位补 0（服务端已按 1..5 给全量计数）。 */
+export function ratingBuckets(ratings: SupportRatings): Array<{ score: number; count: number }> {
+  return [5, 4, 3, 2, 1].map((score) => ({ score, count: ratings.distribution[score - 1] ?? 0 }));
+}
+
+export type SupportHandoverStats = {
+  /** 实际读到的交接记录条数：今日统计的分母。 */
+  scanned: number;
+  /** 已读到单页上限，今日数字可能被截断。 */
+  truncated: boolean;
+  consultation: number;
+  orderGroup: number;
+  total: number;
+};
+
+export function handoverStatsToday(items: SupportHandover[], now = new Date()): SupportHandoverStats {
+  const today = items.filter((item) => withinTimeFilter(item.createdAt, "today", now));
+  return {
+    scanned: items.length,
+    truncated: items.length >= SUPPORT_HANDOVER_PAGE_LIMIT,
+    consultation: today.filter((item) => item.objectType === "CONSULTATION").length,
+    orderGroup: today.filter((item) => item.objectType === "ORDER_GROUP").length,
+    total: today.length,
+  };
+}
+
+function beijingStamp(now: Date): string {
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: BEIJING_TIME_ZONE, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,
+  }).format(now);
+}
+
+/** 秒 -> 服务时效文案：秒/分，不和“小时级接待时长”混用。 */
+export function formatSlaDuration(seconds: number | null | undefined): string {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) return "—";
+  if (seconds < 60) return seconds < 1 ? "<1 秒" : `${Math.round(seconds)} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = Math.round(seconds % 60);
+  return rest ? `${minutes} 分 ${rest} 秒` : `${minutes} 分`;
+}
+
+export function queueReasonLabel(reason: SupportQueueReason): string {
+  if (reason === "NO_ONLINE_STAFF") return "无在岗客服";
+  if (reason === "ALL_AT_CAPACITY") return "全部满载";
+  if (reason === "CAPACITY_AVAILABLE") return "有空位";
+  return "原因未提供";
+}
+
+export type HandoverSummaryInput = {
+  totals: SupportTotals;
+  agents: SupportOverviewAgent[];
+  handovers: SupportHandover[] | null;
+  ratings?: SupportRatings | null;
+  quality?: SupportQuality | null;
+  queue?: SupportQueueSnapshot | null;
+  now?: Date;
+};
+
+/**
+ * 交接班摘要：只拼服务端已有事实，缺口如实写出，口径带分母，可整段复制给下一班。
+ * 服务端给了首响/解决/排队事实就用事实；没给就明说缺口，不拿 0 顶替。
+ */
+export function handoverSummaryText(input: HandoverSummaryInput): string {
+  const now = input.now ?? new Date();
+  const duty = summarizeDuty(input.agents);
+  const attention = attentionSignals({ agents: input.agents, totals: input.totals, queue: input.queue ?? null });
+  const stats = input.handovers ? handoverStatsToday(input.handovers, now) : null;
+  const names = duty.names.length === 0
+    ? "无"
+    : `${duty.names.slice(0, 6).join("、")}${duty.names.length > 6 ? ` 等 ${duty.names.length} 人` : ""}`;
+  const ratings = input.ratings;
+  const ratingLine = ratings && ratings.count > 0 ? ` · 评价 ${ratings.count} 条（平均 ${formatRatingAverage(ratings.average)}）` : " · 今日暂无评价";
+
+  const firstResponse = input.quality?.firstResponse ?? null;
+  const firstResponseLine = !firstResponse
+    ? "首响：服务端未提供聚合事实"
+    : firstResponse.sampleCount > 0
+      ? `首响：平均 ${formatSlaDuration(firstResponse.averageSeconds)}（样本 ${firstResponse.sampleCount}${firstResponse.slaSeconds !== null ? ` · 阈值 ${firstResponse.slaSeconds} 秒` : ""} · 超阈值 ${firstResponse.breached} · 未回 ${firstResponse.pending}，其中已超 ${firstResponse.overdue}）`
+      : `首响：今日暂无样本 · 未回 ${firstResponse.pending} 条${firstResponse.overdue > 0 ? `，其中已超阈值 ${firstResponse.overdue} 条` : ""}`;
+  const resolution = input.quality?.resolution ?? null;
+  const resolutionLine = !resolution
+    ? "解决：服务端未提供聚合事实"
+    : resolution.sampleCount > 0
+      ? `解决：平均 ${formatSlaDuration(resolution.averageSeconds)}（样本 ${resolution.sampleCount}）`
+      : "解决：今日无「已接起且已关闭」的样本";
+
+  // 类型上写着 number | null，但调用方/旧 fixture 可能整段缺失：undefined 一律当“未提供”。
+  const serverTransfers = typeof input.totals.transfersToday === "number" ? input.totals.transfersToday : null;
+  const serverHandovers = typeof input.totals.handoversToday === "number" ? input.totals.handoversToday : null;
+  const transferLine = serverTransfers !== null || serverHandovers !== null
+    ? `交接：转交 ${serverTransfers === null ? "服务端未提供" : `${serverTransfers} 件`} · 交接记录 ${serverHandovers === null ? "服务端未提供" : `${serverHandovers} 件`}（服务端全量计数）`
+    : stats
+      ? `交接：今日 ${stats.total} 件（咨询 ${stats.consultation} / 订单群 ${stats.orderGroup}）；分母为最近 ${stats.scanned} 条交接记录${stats.truncated ? `，已达单页上限 ${SUPPORT_HANDOVER_PAGE_LIMIT} 条，今日数字可能被截断` : ""}`
+      : "交接：交接记录未读取，本摘要不含交接数";
+
+  const queue = input.queue ?? null;
+  const queueLine = queue
+    ? `排队：${queue.queued} 条${queue.oldestWaitSeconds !== null && queue.oldestWaitSeconds > 0 ? `（最久 ${formatSlaDuration(queue.oldestWaitSeconds)}）` : ""} · 在岗 ${queue.onDuty} · 可接单 ${queue.withFreeSlot} · 满载 ${queue.atCapacity}${queue.capacityLimit !== null ? ` · 上限 ${queue.capacityLimit} 条/人` : ""} · 原因 ${queueReasonLabel(queue.reason)}`
+    : null;
+
+  const gaps: string[] = [];
+  if (!firstResponse) gaps.push("首响时长");
+  if (!resolution) gaps.push("解决时长");
+  gaps.push("客服取消数");
+  const gapLine = gaps.length
+    ? `口径缺口：${gaps.join("、")} 服务端未提供聚合事实，本摘要不估算。`
+    : "口径缺口：无（首响与解决时长已由服务端提供；客服取消数仍无口径）。";
+
+  const lines = [
+    `客服交接班摘要 · ${beijingStamp(now)}（北京时间）`,
+    `值班客服：${names}`,
+    `在线：可接待 ${duty.available} 人 / 通道已连接 ${duty.connected} 人${duty.offDutyWithLoad > 0 ? ` / 未上线仍有接待 ${duty.offDutyWithLoad} 人` : ""}`,
+    `待接待：${input.totals.waitingConsultations} 条（服务端 WAITING 全量）`,
+    `接待中：${duty.activeLoadTotal} 条（presence 上报合计，不含从未上报 presence 的账号）`,
+    `今日：会话 ${input.totals.todaySessions} · 用户 ${input.totals.todayUsers}${ratingLine}`,
+    firstResponseLine,
+    resolutionLine,
+    transferLine,
+    ...(queueLine ? [queueLine] : []),
+    attention.length === 0
+      ? "异常：无"
+      : `异常：\n${attention.map((item) => `  - [${item.level === "high" ? "严重" : "关注"}] ${item.title}：${item.detail}`).join("\n")}`,
+    gapLine,
+  ];
+  return lines.join("\n");
 }

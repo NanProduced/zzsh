@@ -331,7 +331,7 @@ test("dashboard renders real totals, on-duty rows, three charts and honest empty
   const overviewRequest = requests.find((request) => request.path.includes("/im/support-overview?date="));
   assert.ok(overviewRequest, "dashboard reads the overview endpoint");
   assert.match(overviewRequest.path, /date=\d{4}-\d{2}-\d{2}$/);
-  assert.ok(requests.some((request) => request.path.endsWith("/im/handovers?limit=20")), "handovers read the documented limit");
+  assert.ok(requests.some((request) => request.path.endsWith("/im/handovers?limit=50")), "handovers read the documented limit");
 });
 
 test("empty dashboard says 暂无数据 instead of drawing invented values", async (t) => {
@@ -341,7 +341,7 @@ test("empty dashboard says 暂无数据 instead of drawing invented values", asy
   await waitFor(() => rootNode.querySelector(".im-wb-mgmt-totals"));
   assert.deepEqual([...rootNode.querySelectorAll(".im-wb-mgmt-metric-value")].map((node) => node.textContent), ["0", "0", "0", "0"]);
   assert.match(rootNode.textContent, /暂无客服数据/);
-  assert.equal(rootNode.querySelectorAll(".im-wb-mgmt-chart-empty").length, 3, "all three charts declare no data");
+  assert.equal(rootNode.querySelectorAll(".im-wb-mgmt-chart-empty").length, 6, "all six dashboard charts declare no data");
   assert.equal(rootNode.querySelectorAll(".im-wb-mgmt-bar").length, 0, "no bar is painted without data");
   assert.match(rootNode.textContent, /暂无交接记录/);
 });

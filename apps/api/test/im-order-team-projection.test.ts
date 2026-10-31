@@ -58,6 +58,7 @@ type Fixture = {
   acks?: Array<"RENTER" | "OWNER">;
   intakeOpen?: boolean; currentSettlement?: boolean;
   quoteSnapshot?: unknown; itemNames?: Array<{ id: string; name: string }>;
+  stageCards?: Array<Record<string, unknown>>;
 };
 function client(fixture: Fixture): PoolClient {
   const teamState = fixture.teamState === undefined ? "READY" : fixture.teamState;
@@ -80,6 +81,7 @@ function client(fixture: Fixture): PoolClient {
     if (sql.includes("FROM zzsh_order.im_order_member mm")) return { rows: MEMBERS };
     if (sql.includes("FROM zzsh_order.rental_opening_ack")) return { rows: (fixture.acks ?? []).map(party => ({ party })) };
     if (sql.includes("FROM zzsh_supply.billable_item")) return { rows: fixture.itemNames ?? [] };
+    if (sql.includes("FROM zzsh_order.im_order_stage_card sc")) return { rows: fixture.stageCards ?? [] };
     throw Error("UNEXPECTED_SQL " + sql);
   } } as unknown as PoolClient;
 }
@@ -501,4 +503,25 @@ test("prestart termination keeps chat open until the refund is fully written off
     settlementPostedAt: "2026-10-28T23:00:00.000Z", refundCompletedAt: null, now,
   });
   assert.equal(completed.sendUntil, "2026-10-31T23:00:00.000Z", "completed orders keep using posted_at");
+});
+
+test("the order team detail carries the stage-card ledger with Chinese skip reasons", async t => {
+  mockUserContext(t);
+  const view = await readOrderTeamAccess(client({
+    orderStatus: "CANCELLED", cancelledAt: new Date(Date.now() - 1 * HOUR),
+    stageCards: [
+      { orderId: ORDER_ID, kind: "ORDER_OPENING", state: "SKIPPED", attemptCount: 1, failureClass: "STAGE_SUPERSEDED", updatedAt: new Date().toISOString(), displayNo: "ZZPROJECT", orderStatus: "CANCELLED" },
+      { orderId: ORDER_ID, kind: "ORDER_WELCOME", state: "SENT", attemptCount: 1, sentAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+    ],
+  }), userActor, ORDER_ID);
+  const cards = view.stageCards as Array<Record<string, unknown>>;
+  assert.equal(cards.length, 2);
+  assert.equal(cards[0]!.kindLabel, "开租确认");
+  assert.equal(cards[0]!.failureLabel, "订单已结束，前序阶段卡不再补发", "a skipped card explains itself instead of disappearing");
+  assert.equal(cards[0]!.retryable, false);
+  assert.equal(cards[0]!.needsAttention, true);
+  assert.equal(cards[1]!.state, "SENT");
+  assert.equal(cards[1]!.failureLabel, null);
+  assert.equal(cards[1]!.needsAttention, false);
+  assert.equal(view.canSend, true, "the stage-card ledger never changes the send permission");
 });

@@ -10,6 +10,7 @@ import { supportManagerIdentityKey } from "./consultation";
 import { OrderImSdkRouteError, type OrderImSdkRoute, type OrderImSdkRouteBindings } from "../config/config";
 import { readPrestartRefundProgress } from "../order/prestart-refund-store";
 import type { PrestartPaymentBasis } from "../order/prestart-termination";
+import type { StageCardKind } from "./order-stage-cards";
 
 export type OrderTeamActor={realm:"user"|"admin";userId:string;sessionId:string};
 const denied=()=>new SecurityApiError(403,"FORBIDDEN","Order Team access denied");
@@ -240,6 +241,7 @@ export async function readOrderTeamAccess(c:PoolClient,actor:OrderTeamActor,orde
   const orderEndedAt=window.orderEndedAt;
   const sendUntil=window.sendUntil;
   if(terminal)canSend=canSend&&window.terminalSendAllowed;
+  const stageCards=g.app_id ? (await readStageCardsByOrderIds(c,String(g.app_id),[orderId])).get(orderId)??[] : [];
   const members=await readOrderTeamMemberRows(c,orderId,g.app_id);
   const own=members.find(m=>m.platform_subject_id===actor.userId&&m.realm===actor.realm&&m.identity_kind===(actor.realm==="user"?"USER":"ADMIN"));
   if(actor.realm==="admin"&&(!own||own.party!=="STAFF"||own.state!=="JOINED"))throw denied();
@@ -273,7 +275,7 @@ export async function readOrderTeamAccess(c:PoolClient,actor:OrderTeamActor,orde
     teamState:g.team_state??null,openingStatus:g.opening_status??null,openingConfirmedAt:g.opening_confirmed_at??null,
     openingAcked:openingAcks.renter||openingAcks.owner,termSeconds:g.term_seconds,
     intakeOpen:g.intake_open===true,currentSettlement:g.settlement_current===true,posted:g.settlement_posted_at!=null});
-  const summary={orderId,displayNo:g.display_no,orderStatus:g.order_status,cancelReason:g.order_cancel_reason??null,orderEndedAt,sendUntil,refundPending:window.refundPending,refundCompletedAt:window.refundCompletedAt,...fulfillment,openingAcks,openingAckSources,
+  const summary={orderId,displayNo:g.display_no,orderStatus:g.order_status,stageCards,cancelReason:g.order_cancel_reason??null,orderEndedAt,sendUntil,refundPending:window.refundPending,refundCompletedAt:window.refundCompletedAt,...fulfillment,openingAcks,openingAckSources,
     openingId:g.opening_id??null,openingVersion:Number.isInteger(g.opening_version_no)?Number(g.opening_version_no):null,
     openingConfirmDueAt:g.opening_confirm_due_at?new Date(g.opening_confirm_due_at).toISOString():null,
     openingConfirmSource,terms,gameName:g.game_name,account:{id:g.account_id,title:g.title},assignmentState:g.provision_state??null,
@@ -304,6 +306,186 @@ export async function readOrderTeamAccess(c:PoolClient,actor:OrderTeamActor,orde
     members:projectOrderTeamMembers(members,g.escalation_responsible_admin_id??g.assigned_admin_id,actor.realm)};
 }
 
+/**
+ * 阶段卡读模型。
+ *
+ * 账本（zzsh_order.im_order_stage_card）里的 state / failure_class / next_attempt_at 原本只有
+ * worker 自己读写，管理端完全看不到“这张卡为什么没发出去”。这里只做只读投影，不改变任何投递规则：
+ * - 中文标签只覆盖 worker 自己会写的 code；未知 code 原样回传（failureLabel === failureClass），
+ *   排障时不会把“没见过的失败”折叠成一句“发送失败”。
+ * - retryable 只表示 worker 还会自己重试；终态跳过不谎称可重试。
+ */
+export const STAGE_CARD_KIND_LABEL: Record<StageCardKind, string> = {
+  ORDER_WELCOME: "订单群建立",
+  ORDER_OPENING: "开租确认",
+  ORDER_ENDING: "结束确认",
+  ORDER_SETTLED: "结算完成",
+};
+
+const STAGE_CARD_FAILURE_LABEL: Record<string, string> = {
+  IDENTITY_PENDING: "系统账号未就绪（云信账号仍在创建或校验）",
+  SEND_FAILED: "通道发送失败（云信返回失败或超时）",
+  LEASE_EXPIRED: "发送中断（租约过期，等待重新领取）",
+  TEXT_TRANSPORT_UNAVAILABLE: "文本通道不可用（本 App 未配置发送通道）",
+  INVALID_STAGE_KIND: "卡片类型非法（数据异常，需人工核查）",
+  ORDER_ENDED: "订单已离开付款状态，卡片不再发送",
+  ORDER_CANCELLED: "订单已取消，卡片不再发送",
+  ORDER_NOT_PAID: "订单未付款，卡片不再发送",
+  SEND_WINDOW_CLOSED: "超出结算后 72 小时沟通窗口，卡片不再发送",
+  STAGE_SUPERSEDED: "订单已结束，前序阶段卡不再补发",
+  STAGE_NOT_REACHED: "订单尚未结算，结算完成卡不发送",
+  WELCOME_SUPERSEDED: "群内已有更早的消息，欢迎语不再补发",
+};
+/** Worker 会自己重试的失败；其余都是终态事实。 */
+const STAGE_CARD_RETRYABLE: ReadonlySet<string> = new Set(["IDENTITY_PENDING", "SEND_FAILED", "LEASE_EXPIRED", "TEXT_TRANSPORT_UNAVAILABLE"]);
+
+export type StageCardAttention = {
+  kind: string;
+  kindLabel: string;
+  state: string;
+  attemptCount: number;
+  failureClass: string | null;
+  failureLabel: string | null;
+  retryable: boolean;
+  needsAttention: boolean;
+  nextAttemptAt: string | null;
+  sentAt: string | null;
+  updatedAt: string | null;
+  orderId?: string;
+  displayNo?: string | null;
+  orderStatus?: string | null;
+};
+export type StageCardQueueSummary = { pending: number; failed: number; skipped: number; attention: StageCardAttention | null };
+
+type StageCardRow = {
+  id?: string; orderId?: string | null; displayNo?: string | null; orderStatus?: string | null;
+  kind: string; state: string; attemptCount?: number | string | null;
+  failureClass?: string | null; nextAttemptAt?: Date | string | null;
+  sentAt?: Date | string | null; updatedAt?: Date | string | null;
+};
+
+function isoOrNull(value: Date | string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  const time = new Date(value).getTime();
+  return Number.isFinite(time) ? new Date(time).toISOString() : null;
+}
+
+function stageCardCount(value: unknown): number {
+  const parsed = Number(value ?? 0);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : 0;
+}
+
+/** One card row → the admin projection. Unknown kind/failure codes keep their raw value. */
+export function projectStageCardAttention(row: StageCardRow): StageCardAttention {
+  const failureClass = typeof row.failureClass === "string" && row.failureClass.length > 0 ? row.failureClass : null;
+  const kindLabel = Object.hasOwn(STAGE_CARD_KIND_LABEL, row.kind) ? STAGE_CARD_KIND_LABEL[row.kind as StageCardKind] : row.kind;
+  const failureLabel = failureClass === null ? null : STAGE_CARD_FAILURE_LABEL[failureClass] ?? failureClass;
+  return {
+    kind: row.kind,
+    kindLabel,
+    state: row.state,
+    attemptCount: stageCardCount(row.attemptCount),
+    failureClass,
+    failureLabel,
+    retryable: row.state === "PENDING" && failureClass !== null && STAGE_CARD_RETRYABLE.has(failureClass),
+    needsAttention: row.state !== "SENT" && failureClass !== null,
+    nextAttemptAt: isoOrNull(row.nextAttemptAt),
+    sentAt: isoOrNull(row.sentAt),
+    updatedAt: isoOrNull(row.updatedAt),
+    ...(row.orderId ? { orderId: row.orderId } : {}),
+    ...(row.displayNo === undefined ? {} : { displayNo: row.displayNo }),
+    ...(row.orderStatus === undefined ? {} : { orderStatus: row.orderStatus }),
+  };
+}
+
+/** The queue badge for one order: counts plus the single card an operator should look at first. */
+export function projectStageCardQueue(card: unknown, counts: unknown): StageCardQueueSummary {
+  const source = (counts ?? {}) as { pending?: unknown; failed?: unknown; skipped?: unknown };
+  const row = card !== null && typeof card === "object" && !Array.isArray(card) && typeof (card as { kind?: unknown }).kind === "string"
+    ? projectStageCardAttention(card as StageCardRow)
+    : null;
+  return { pending: stageCardCount(source.pending), failed: stageCardCount(source.failed), skipped: stageCardCount(source.skipped), attention: row };
+}
+
+const STAGE_CARD_COLUMNS = `sc.id,sc.order_id AS "orderId",sc.kind,sc.state,sc.attempt_count AS "attemptCount",
+  sc.failure_class AS "failureClass",sc.next_attempt_at AS "nextAttemptAt",sc.sent_at AS "sentAt",sc.updated_at AS "updatedAt",
+  o.display_no AS "displayNo",o.status AS "orderStatus"`;
+
+/** Detail read: every card of the order, SENT included. One batched query per read. */
+export async function readStageCardsByOrderIds(c:Pick<PoolClient,"query">,appId:string,orderIds:string[]):Promise<Map<string,StageCardAttention[]>>{
+  const wanted=[...new Set(orderIds.filter((id)=>typeof id==="string"&&id.length>0))];
+  if(wanted.length===0)return new Map();
+  const rows=(await c.query<StageCardRow & {orderId:string}>(`SELECT ${STAGE_CARD_COLUMNS}
+      FROM zzsh_order.im_order_stage_card sc JOIN zzsh_order.rental_order o ON o.id=sc.order_id
+     WHERE sc.app_id=$1 AND sc.order_id=ANY($2::text[]) ORDER BY sc.order_id,sc.created_at,sc.id`,[appId,wanted])).rows;
+  const result=new Map<string,StageCardAttention[]>();
+  for(const row of rows){const list=result.get(row.orderId)??[];list.push(projectStageCardAttention(row));result.set(row.orderId,list);}
+  return result;
+}
+
+const STAGE_CARD_CURSOR=/^(\d{4}-\d{2}-\d{2}T[0-9:.]+Z)\|([A-Za-z0-9][A-Za-z0-9._:-]{0,127})$/;
+
+export type StageCardFailurePage = {
+  items: StageCardAttention[];
+  nextCursor: string | null;
+  limit: number;
+  summary: { total: number; pending: number; sending: number; skipped: number; sent: number; failed: number };
+};
+
+/**
+ * 跨订单的失败清单：只读、按 App 隔离、按 updated_at 倒序分页。
+ * items 只列“没发出去/被跳过”的卡；SENT 只进 summary，避免运营翻历史噪音。
+ */
+export async function readStageCardFailures(c:Pick<PoolClient,"query">,input:{appId:string;limit?:number;cursor?:string|null}):Promise<StageCardFailurePage>{
+  const limit=input.limit===undefined?20:input.limit;
+  if(!Number.isInteger(limit)||limit<1||limit>100)throw new RangeError("INVALID_LIMIT");
+  const cursor=input.cursor??null;
+  const parsed=cursor===null?null:STAGE_CARD_CURSOR.exec(cursor);
+  if(cursor!==null&&!parsed)throw new RangeError("INVALID_CURSOR");
+  const rows=(await c.query<StageCardRow>(`SELECT ${STAGE_CARD_COLUMNS}
+      FROM zzsh_order.im_order_stage_card sc JOIN zzsh_order.rental_order o ON o.id=sc.order_id
+     WHERE sc.app_id=$1 AND sc.state<>'SENT'
+       AND ($3::timestamptz IS NULL OR (sc.updated_at,sc.id)<($3::timestamptz,$4::text))
+     ORDER BY sc.updated_at DESC,sc.id DESC LIMIT $2`,[input.appId,limit+1,parsed?parsed[1]:null,parsed?parsed[2]:null])).rows;
+  const page=rows.slice(0,limit);
+  const counts=(await c.query<Record<string,string>>(`SELECT count(*) AS total,count(*) FILTER (WHERE state='PENDING') AS pending,
+        count(*) FILTER (WHERE state='SENDING') AS sending,count(*) FILTER (WHERE state='SKIPPED') AS skipped,
+        count(*) FILTER (WHERE state='SENT') AS sent,count(*) FILTER (WHERE state<>'SENT' AND failure_class IS NOT NULL) AS failed
+       FROM zzsh_order.im_order_stage_card WHERE app_id=$1`,[input.appId])).rows[0];
+  const last=page.at(-1);
+  const nextCursor=rows.length>limit&&last&&last.updatedAt&&last.id
+    ? `${new Date(last.updatedAt).toISOString()}|${last.id}` : null;
+  return {
+    items:page.map(projectStageCardAttention),
+    nextCursor,
+    limit,
+    summary:{total:stageCardCount(counts?.total),pending:stageCardCount(counts?.pending),sending:stageCardCount(counts?.sending),
+      skipped:stageCardCount(counts?.skipped),sent:stageCardCount(counts?.sent),failed:stageCardCount(counts?.failed)},
+  };
+}
+
+export type StageCardRequeueOutcome="RETRY_SCHEDULED"|"ALREADY_SENT"|"SKIPPED_TERMINAL"|"ALREADY_PENDING"|"NOT_FOUND";
+
+/**
+ * 人工“立即重试”：只对 worker 还会重试的卡生效（把退避拉到当前，保留 attempt_count）。
+ * 已发送/已跳过的卡不重发——跳过是订单事实，补发会把过期话术塞回群里；那类交客服在群里说明。
+ */
+export async function requeueStageCard(c:Pick<PoolClient,"query">,input:{appId:string;orderId:string;kind:string}):Promise<{requeued:boolean;outcome:StageCardRequeueOutcome}>{
+  const rescheduled=await c.query(`UPDATE zzsh_order.im_order_stage_card
+      SET next_attempt_at=clock_timestamp(),failure_class=NULL,updated_at=clock_timestamp()
+    WHERE app_id=$1 AND order_id=$2 AND kind=$3 AND state='PENDING' AND failure_class IS NOT NULL`,[input.appId,input.orderId,input.kind]);
+  if((rescheduled.rowCount??0)>0)return {requeued:true,outcome:"RETRY_SCHEDULED"};
+  const reclaimed=await c.query(`UPDATE zzsh_order.im_order_stage_card
+      SET state='PENDING',lease_until=NULL,lease_token_hash=NULL,next_attempt_at=clock_timestamp(),
+          failure_class='LEASE_EXPIRED',updated_at=clock_timestamp()
+    WHERE app_id=$1 AND order_id=$2 AND kind=$3 AND state='SENDING' AND lease_until<=clock_timestamp()`,[input.appId,input.orderId,input.kind]);
+  if((reclaimed.rowCount??0)>0)return {requeued:true,outcome:"RETRY_SCHEDULED"};
+  const row=(await c.query<{state:string}>(`SELECT state FROM zzsh_order.im_order_stage_card WHERE app_id=$1 AND order_id=$2 AND kind=$3`,[input.appId,input.orderId,input.kind])).rows[0];
+  if(!row)return {requeued:false,outcome:"NOT_FOUND"};
+  if(row.state==="SENT")return {requeued:false,outcome:"ALREADY_SENT"};
+  if(row.state==="SKIPPED")return {requeued:false,outcome:"SKIPPED_TERMINAL"};
+  return {requeued:false,outcome:"ALREADY_PENDING"};
+}
 /** Short queue todo derived from the same stage facts; it never replaces the detail projection. */
 function queueTodo(f: OrderFulfillment, now = Date.now()): string | null {
   switch (f.stage) {
@@ -324,8 +506,9 @@ function queueTodo(f: OrderFulfillment, now = Date.now()): string | null {
 }
 
 /** Member-scoped directory; deliberately independent of the order.read directory. */
-export async function listJoinedOrderTeams(c:PoolClient,actor:OrderTeamActor,cursor:string|null,limit:number):Promise<Record<string,unknown>>{
+export async function listJoinedOrderTeams(c:PoolClient,actor:OrderTeamActor,cursor:string|null,limit:number,appId?:string):Promise<Record<string,unknown>>{
   if(actor.realm!=="admin")throw denied();
+
   await assertAdminContextInTransaction(c,actor);
   const access=await loadEffectiveAdminAccess(c,actor.userId);
   if(!hasPermission(access,"im.support.read"))throw denied();
@@ -345,7 +528,7 @@ export async function listJoinedOrderTeams(c:PoolClient,actor:OrderTeamActor,cur
       act.last_message_at AS "lastMessageAt",
       act.last_message_preview AS "lastMessagePreview",
       COALESCE(unread.unread_count,0) AS "unreadCount",
-      game.name AS "gameName"
+      game.name AS "gameName",to_jsonb(stage_card) AS "stageCard",to_jsonb(stage_count) AS "stageCardCounts"
     FROM zzsh_order.im_order_member mm JOIN zzsh_iam.im_identity_mapping m ON m.id=mm.identity_id AND m.app_id=mm.app_id
     JOIN zzsh_order.im_order_group g ON g.order_id=mm.order_id AND g.app_id=mm.app_id
     JOIN zzsh_order.rental_order o ON o.id=g.order_id JOIN zzsh_supply.game game ON game.id=o.game_id
@@ -360,14 +543,29 @@ export async function listJoinedOrderTeams(c:PoolClient,actor:OrderTeamActor,cur
       ORDER BY op.version_no DESC LIMIT 1) latest_opening ON TRUE
     LEFT JOIN LATERAL (SELECT p.posted_at FROM zzsh_order.settlement_posting p WHERE p.order_id=o.id
       ORDER BY p.posted_at DESC,p.id DESC LIMIT 1) posting ON TRUE
-    WHERE mm.party='STAFF' AND mm.state='JOINED' AND m.realm='admin' AND m.identity_kind='ADMIN' AND m.status='READY'
-      AND m.platform_subject_id=$1 AND ${gameScopeSql("o.game_id","$1","$2")}
-      AND ($3::text IS NULL OR o.id<$3) ORDER BY o.id DESC LIMIT $4`,[actor.userId,access!.isBoss,cursor,limit+1])).rows;
-  const items=rows.slice(0,limit).map(({openingStatus,openingConfirmedAt,openingAcked,termSeconds,intakeOpen,settlementCurrent,postedAt,provisionState,...row})=>{
+    LEFT JOIN LATERAL (
+      SELECT sc.kind,sc.state,sc.failure_class AS "failureClass",sc.attempt_count AS "attemptCount",
+             sc.next_attempt_at AS "nextAttemptAt",sc.sent_at AS "sentAt",sc.updated_at AS "updatedAt"
+        FROM zzsh_order.im_order_stage_card sc
+       WHERE sc.order_id=g.order_id AND sc.app_id=g.app_id AND sc.state<>''SENT''
+       ORDER BY CASE sc.state WHEN ''SENDING'' THEN 0 WHEN ''SKIPPED'' THEN 1 ELSE 2 END,sc.updated_at DESC
+       LIMIT 1
+    ) stage_card ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT count(*) FILTER (WHERE sc.state=''SKIPPED'') AS "skipped",
+             count(*) FILTER (WHERE sc.state IN (''PENDING'',''SENDING'')) AS "pending",
+             count(*) FILTER (WHERE sc.failure_class IS NOT NULL AND sc.state<>''SENT'') AS "failed"
+        FROM zzsh_order.im_order_stage_card sc
+       WHERE sc.order_id=g.order_id AND sc.app_id=g.app_id
+    ) stage_count ON TRUE
+    WHERE mm.party=''STAFF'' AND mm.state=''JOINED'' AND m.realm='admin' AND m.identity_kind='ADMIN' AND m.status='READY'
+      AND m.platform_subject_id=$1 AND m.app_id=$5 AND g.app_id=$5 AND ${gameScopeSql("o.game_id","$1","$2")}
+      AND ($3::text IS NULL OR o.id<$3) ORDER BY o.id DESC LIMIT $4`,[actor.userId,access!.isBoss,cursor,limit+1,appId??null])).rows;
+  const items=rows.slice(0,limit).map(({openingStatus,openingConfirmedAt,openingAcked,termSeconds,intakeOpen,settlementCurrent,postedAt,provisionState,stageCard,stageCardCounts,...row})=>{
     const fulfillment=projectOrderFulfillment({orderStatus:row.status,hasGroup:true,provisionState,teamState:row.teamState,
       openingStatus,openingConfirmedAt,openingAcked:openingAcked===true,termSeconds,intakeOpen:Boolean(intakeOpen),
       currentSettlement:Boolean(settlementCurrent),posted:postedAt!==null});
-    return {...row,stage:fulfillment.stage,dueAt:fulfillment.dueAt,todo:queueTodo(fulfillment)};
+    return {...row,stage:fulfillment.stage,dueAt:fulfillment.dueAt,todo:queueTodo(fulfillment),stageCards:projectStageCardQueue(stageCard,stageCardCounts)};
   });
   return {items,nextCursor:rows.length>limit?rows[limit-1]!.id:null,limit};
 }

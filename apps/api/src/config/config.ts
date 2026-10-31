@@ -30,6 +30,10 @@ export type SupportDispatchWorkerConfig = {
   batchLimit: number;
   /** Owner default: an enabled dispatch worker also auto-assigns waiting consultations unless explicitly disabled. */
   autoAssignConsultations: boolean;
+  /** How many active consultations one agent may hold before dispatch treats them as full. */
+  concurrencyLimit?: number;
+  /** Seconds an answered-staff reply may lag the user's first message before the breach worker records it. */
+  firstResponseSeconds?: number;
 };
 
 export type OrderImSdkRouteConfig = {
@@ -357,16 +361,22 @@ function loadSupportDispatchConfig(env: NodeJS.ProcessEnv, yunxin: YunxinConfig)
   if (!enabled) {
     assertWorkersDisabled(env, "SUPPORT_DISPATCH_ENABLED", [
       "SUPPORT_DISPATCH_INTERVAL_MS", "SUPPORT_DISPATCH_BATCH_LIMIT", "SUPPORT_DISPATCH_AUTO_ASSIGN_CONSULTATIONS",
+      "SUPPORT_CONCURRENCY_LIMIT", "SUPPORT_FIRST_RESPONSE_SECONDS",
     ]);
     return undefined;
   }
   const intervalMs = parseBoundedInteger(env, "SUPPORT_DISPATCH_INTERVAL_MS", 1000, 600000, 15000);
   const batchLimit = parseBoundedInteger(env, "SUPPORT_DISPATCH_BATCH_LIMIT", 1, 100, 5);
   const autoAssignConsultations = parseStrictBoolean(env, "SUPPORT_DISPATCH_AUTO_ASSIGN_CONSULTATIONS", true);
+  // Owner default keeps one operator from being buried: the value 3 restores the
+  // historical capacity default from 0032 that 0037 dropped when it removed the column.
+  const concurrencyLimit = parseBoundedInteger(env, "SUPPORT_CONCURRENCY_LIMIT", 1, 100, 3);
+  const firstResponseSeconds = parseBoundedInteger(env, "SUPPORT_FIRST_RESPONSE_SECONDS", 30, 86400, 120);
   if (!yunxin.enabled || !yunxin.appKey || !yunxin.appSecret) {
     throw new ConfigurationError("SUPPORT_DISPATCH_ENABLED=true requires YUNXIN_ENABLED=true with complete credentials");
   }
-  return { appId: yunxin.appKey, intervalMs, batchLimit, autoAssignConsultations };
+  return { appId: yunxin.appKey, intervalMs, batchLimit, autoAssignConsultations, concurrencyLimit, firstResponseSeconds };
+
 }
 
 function loadOrderImSdkRouteConfig(env: NodeJS.ProcessEnv, profile: ConfigProfile, yunxin: YunxinConfig): OrderImSdkRouteConfig | undefined {

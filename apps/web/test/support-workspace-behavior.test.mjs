@@ -1409,7 +1409,8 @@ test("a closed thread keeps its history and offers the normal composer", async (
   const page = await mountThreadWorkspace(t, { rows: [closed], history });
   await page.until(() => page.rowsInDirectory().length === 1, "closed thread row");
   const row = page.rowsInDirectory()[0];
-  assert.match(row.textContent, /已结束/, "the directory keeps a short ended label");
+  // 用户侧不露“结束”：结束只是内部轮次状态，行里既没有短标签也没有长解释。
+  assert.doesNotMatch(row.textContent, /已结束/, "the user side never names the ended round");
   assert.doesNotMatch(row.textContent, /本轮已结束/, "the long explanation is not repeated in the row");
   assert.equal(row.getAttribute("data-thread-state"), "IDLE");
   await page.until(() => page.host.querySelector('[data-message-id="srv-old-1"]'), "closed history rendered");
@@ -1419,6 +1420,7 @@ test("a closed thread keeps its history and offers the normal composer", async (
   assert.equal(composer.disabled, false, "the user can type directly after the round ends");
   assert.equal(page.host.querySelector('[data-action="continue-consultation"]'), null, "no continue CTA");
   assert.equal(page.host.querySelector(".support-system-notice"), null, "no ended system notice");
+  assert.doesNotMatch(page.host.querySelector(".support-fact-chip")?.textContent ?? "", /已结束/, "no ended chip in the fact bar");
   assert.equal(page.host.querySelector(".support-waiting-note"), null, "no duplicate closed waiting note");
   assert.doesNotMatch(page.host.textContent, /本轮已结束，聊天记录保留|继续咨询/);
   assert.doesNotMatch(page.host.textContent, /无法继续发送|历史记录的读取已随结束关闭|重新发起一次咨询/);
@@ -1558,7 +1560,7 @@ test("an ended thread stays selectable from the directory and opens its history"
   await page.until(() => page.rowsInDirectory().some((row) => row.getAttribute("data-active") === "true"), "requested type selected");
   const ended = page.rowsInDirectory().find((row) => row.textContent.includes("平台客服"));
   assert.ok(ended, "the ended service thread stays listed");
-  assert.match(ended.textContent, /已结束/, "the IDLE/CLOSED row uses the short ended label");
+  assert.doesNotMatch(ended.textContent, /已结束/, "an ended thread reads like a normal conversation row");
   assert.match(page.rowsInDirectory().find((row) => row.textContent.includes("投诉反馈")).textContent, /进行中/, "the ACTIVE row is labelled in progress");
   await act(async () => { ended.click(); });
   await settle();
@@ -1773,6 +1775,34 @@ test("the directory merges consultations and order groups into one chronological
   const ordersOnly = await mountThreadWorkspace(t, { rows: [], orders: [order], orderAccess });
   await ordersOnly.until(() => ordersOnly.rowsInDirectory().length === 1, "orders only");
   assert.match(ordersOnly.rowsInDirectory()[0].textContent, /ZZ-A/, "order groups render without any consultation");
+});
+
+test("an ended order-group row says history remains, and a provisioning one states its stage", async (t) => {
+  // 结束态的群没有新消息时，旧兜底会写“有新消息”，用户点进去只有历史；建群中的群又写成“暂无消息”，
+  // 两种情况都在骗人。目录行要么给最后一句真消息，要么把阶段说清楚。
+  const settled = {
+    id: "order-settled", displayNo: "ZZ-S", title: "已结算订单", status: "COMPLETED", stage: "SETTLED",
+    createdAt: "2026-10-30T00:00:00Z", lastMessageAt: "2026-10-30T02:00:00Z",
+    fulfillmentAssignment: { state: "ASSIGNED", teamState: "READY", teamReady: true },
+  };
+  const provisioning = {
+    id: "order-building", displayNo: "ZZ-B", title: "建群中订单", status: "PAID", stage: "TEAM_PENDING",
+    createdAt: "2026-10-29T00:00:00Z", fulfillmentAssignment: { state: "ASSIGNED", teamState: null },
+  };
+  const orderAccess = (id) => ({
+    orderId: id, displayNo: id, orderStatus: "PAID", stage: "TEAM_PENDING", assignmentState: "ASSIGNED", teamState: null,
+    appId: "synthetic", teamId: "team-" + id, name: "订单", gameName: "三角洲行动",
+    account: { id: "acct-1", title: "资源账号" }, viewerAccountId: "preview-user", conversationId: "team-" + id,
+    canRead: true, canSend: false, members: [],
+    supportEscalation: { firstResponseAt: null, remindDueAt: null, addRound: 0, state: "NOT_STARTED", needsManualReview: false, noEligibleStaff: false },
+  });
+  const page = await mountThreadWorkspace(t, { rows: [], orders: [settled, provisioning], orderAccess });
+  await page.until(() => page.rowsInDirectory().length === 2, "both order rows");
+  const rowOf = (displayNo) => page.rowsInDirectory().find((row) => row.textContent.includes(displayNo));
+  assert.match(rowOf("ZZ-S").textContent, /历史仍可查看/, "an ended group only promises its history");
+  assert.doesNotMatch(rowOf("ZZ-S").textContent, /有新消息/, "an ended group must not claim a new message");
+  assert.match(rowOf("ZZ-B").textContent, /组建订单群/, "a group still being provisioned names its stage");
+  assert.doesNotMatch(rowOf("ZZ-B").textContent, /暂无消息/, "provisioning is not emptiness");
 });
 
 test("right-clicking a directory row pins and mutes it locally", async (t) => {

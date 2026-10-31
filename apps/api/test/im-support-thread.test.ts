@@ -335,7 +335,7 @@ test("claim adds the agent to the existing thread Team and activates the round o
     if (sql.includes("FROM zzsh_iam.im_support_presence p JOIN")) {
       return { rows: [{ adminUserId: "admin_a", adminName: "客服甲", accountId: agentAccountId, identityMarker: buildYunxinIdentityMarker(identityFor("ADMIN", "admin_a").key) }] };
     }
-    if (sql.includes("SELECT admin_user_id FROM zzsh_iam.im_support_presence") && sql.includes("last_consultation_assigned_at")) return { rows: [{ admin_user_id: "admin_a" }] };
+    if ((sql.includes("SELECT admin_user_id FROM zzsh_iam.im_support_presence") || sql.includes('SELECT p."admin_user_id" FROM zzsh_iam.im_support_presence p')) && sql.includes("last_consultation_assigned_at")) return { rows: [{ admin_user_id: "admin_a" }] };
     if (sql.includes("UPDATE zzsh_iam.im_support_presence SET")) return { rows: [] };
     if (sql.includes("SELECT details FROM zzsh_iam.im_consultation_event")) return { rows: [] };
     if (sql.includes('INSERT INTO "zzsh_iam"."im_consultation_event"')) return { rows: [] };

@@ -26,9 +26,11 @@ import {
   parseHandoverLimit,
   parseHandoverNote,
   parseSupportDate,
+  readConsultationFirstResponse,
   readPatrolOrderTeamAccess,
   readSupportOverview,
   readSupportToday,
+  resolveFirstResponseSeconds,
   recordSupportHandover,
   readLatestHandoverNote,
   requireSupportAuditTakeover,
@@ -57,6 +59,7 @@ function adminAccess(permissions: string[], boss = false) {
 }
 
 const TRANSACTION_SQL = new Set(["BEGIN", "COMMIT", "ROLLBACK", "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"]);
+const emptyQueue = { queued: 0, oldestQueuedAt: null, oldestWaitSeconds: 0, onDuty: 0, withFreeSlot: 0, atCapacity: 0 };
 
 function adminContextHandler(input: {
   boss?: boolean;
@@ -221,6 +224,10 @@ function overviewHandler(state: {
   totals: unknown;
   trend: unknown[];
   hourly: unknown[];
+  queue?: unknown;
+  resolution?: unknown;
+  firstResponseRounds?: unknown[];
+  firstResponseFacts?: unknown[];
 }) {
   return adminContextHandler({
     boss: true,
@@ -232,11 +239,15 @@ function overviewHandler(state: {
       }
       if (sql.includes('"waitingConsultations"')) return { rows: [state.totals] };
       if (sql.includes("generate_series(0, 23)")) return { rows: state.hourly };
-      if (sql.includes("AS day")) return { rows: state.trend };
+      if (sql.includes("AS day") && sql.includes("generate_series(")) return { rows: state.trend };
       if (sql.includes('FILTER (WHERE "score" = 1)')) {
         return { rows: [{ count: 0, average: null, score1: 0, score2: 0, score3: 0, score4: 0, score5: 0 }] };
       }
       if (sql.includes('r."assigned_admin_id" AS "adminUserId"')) return { rows: [] };
+      if (sql.includes('FROM queued q')) return { rows: [state.queue ?? emptyQueue] };
+      if (sql.includes('AS "askedAt"')) return { rows: state.firstResponseRounds ?? [] };
+      if (sql.includes('FROM "zzsh_iam"."audit_event" a')) return { rows: state.firstResponseFacts ?? [] };
+      if (sql.includes('FROM lifecycle l')) return { rows: [state.resolution ?? { closed: 0, averageSeconds: null }] };
       return null;
     },
   });
@@ -244,15 +255,29 @@ function overviewHandler(state: {
 
 test("overview keeps zeros out of fabricated trends and exposes the documented fields", async () => {
   const f = fakePool(overviewHandler({
-    onDuty: [{ adminUserId: "admin_a", name: "客服甲", availability: "AVAILABLE", connectionState: "CONNECTED", activeLoad: 2, todaySeconds: "3600", todaySessions: 3, todayUsers: 2, currentOrderGroups: 1 }],
-    totals: { onDutyCount: 1, waitingConsultations: 2, todaySessions: 3, todayUsers: 2 },
+    onDuty: [{ adminUserId: "admin_a", name: "客服甲", availability: "AVAILABLE", connectionState: "CONNECTED", activeLoad: 2, todaySeconds: "3600", todaySessions: 3, todayUsers: 2, currentOrderGroups: 1, totalLoad: 3 }],
+    totals: { onDutyCount: 1, waitingConsultations: 2, todaySessions: 3, todayUsers: 2, transfersToday: 4, handoversToday: 6 },
     trend: Array.from({ length: 7 }, (_, index) => ({ date: `2026-10-2${index + 3}`, sessions: 0, users: 0 })),
     hourly: Array.from({ length: 24 }, (_, hour) => ({ hour, sessions: 0 })),
+    queue: { queued: 2, oldestQueuedAt: "2026-10-29T08:00:00.000000Z", oldestWaitSeconds: "300", onDuty: 1, withFreeSlot: 0, atCapacity: 1 },
+    resolution: { closed: "3", averageSeconds: "1830.4" },
   }));
   const overview = await readSupportOverview({ pool: f.pool, appId: APP_ID } as never, adminContext, "2026-10-29");
   assert.deepEqual(overview, {
-    onDuty: [{ adminUserId: "admin_a", name: "客服甲", availability: "AVAILABLE", connectionState: "CONNECTED", activeLoad: 2, todaySeconds: 3600, todaySessions: 3, todayUsers: 2, currentOrderGroups: 1 }],
-    totals: { onDutyCount: 1, waitingConsultations: 2, todaySessions: 3, todayUsers: 2 },
+    queue: {
+      queued: 2, oldestQueuedAt: "2026-10-29T08:00:00.000000Z", oldestWaitSeconds: 300,
+      onDuty: 1, withFreeSlot: 0, atCapacity: 1, capacityLimit: 3, reason: "ALL_AT_CAPACITY",
+    },
+    quality: {
+      firstResponse: { slaSeconds: 120, averageSeconds: null, sampleCount: 0, breached: 0, pending: 0, overdue: 0 },
+      resolution: { sampleCount: 3, averageSeconds: 1830.4 },
+    },
+    onDuty: [{
+      adminUserId: "admin_a", name: "客服甲", availability: "AVAILABLE", connectionState: "CONNECTED",
+      activeLoad: 2, todaySeconds: 3600, todaySessions: 3, todayUsers: 2, currentOrderGroups: 1,
+      capacityLimit: 3, totalLoad: 3, atCapacity: true,
+    }],
+    totals: { onDutyCount: 1, waitingConsultations: 2, todaySessions: 3, todayUsers: 2, transfersToday: 4, handoversToday: 6 },
     trend: [],
     hourly: [],
     ratings: { count: 0, average: null, distribution: [0, 0, 0, 0, 0], agents: [] },
@@ -558,4 +583,121 @@ test("admin BFF forwards the new support-management routes with strict methods",
   assert.equal((await run("/im/presence/heartbeat", "GET")).status, 404);
   assert.equal((await run("/im/audit/consultations/im_consult_1/takeover", "GET")).status, 404);
   assert.equal((await run("/im/audit/consultations/im_consult_1/other", "POST")).status, 404);
+});
+
+test("queue reason separates no online staff from an all-full roster", async () => {
+  const state = (queue: unknown) => ({
+    onDuty: [],
+    totals: { onDutyCount: 0, waitingConsultations: 3, todaySessions: 0, todayUsers: 0, transfersToday: 0, handoversToday: 0 },
+    trend: [], hourly: [], queue,
+  });
+  const empty = fakePool(overviewHandler(state({ queued: 3, oldestQueuedAt: "2026-10-29T08:00:00.000000Z", oldestWaitSeconds: "3600", onDuty: 0, withFreeSlot: 0, atCapacity: 0 })));
+  const noStaff = await readSupportOverview({ pool: empty.pool, appId: APP_ID } as never, adminContext, null);
+  assert.equal(noStaff.queue.reason, "NO_ONLINE_STAFF");
+  assert.equal(noStaff.queue.oldestWaitSeconds, 3600);
+  assert.equal(noStaff.queue.capacityLimit, 3);
+
+  const free = fakePool(overviewHandler(state({ queued: 1, oldestQueuedAt: null, oldestWaitSeconds: "5", onDuty: 2, withFreeSlot: 1, atCapacity: 1 })));
+  const available = await readSupportOverview({ pool: free.pool, appId: APP_ID } as never, adminContext, null, { capacityLimit: 5 });
+  assert.equal(available.queue.reason, "CAPACITY_AVAILABLE");
+  assert.equal(available.queue.capacityLimit, 5);
+
+  const idle = fakePool(overviewHandler(state({ queued: 0, oldestQueuedAt: null, oldestWaitSeconds: "0", onDuty: 1, withFreeSlot: 1, atCapacity: 0 })));
+  const none = await readSupportOverview({ pool: idle.pool, appId: APP_ID } as never, adminContext, null);
+  assert.equal(none.queue.reason, null);
+  assert.equal(none.queue.oldestWaitSeconds, null);
+});
+
+test("first response quality is derived from the single fact reader and reports no sample as null", async () => {
+  const now = Date.now();
+  const asked = (seconds: number) => new Date(now - seconds * 1000).toISOString();
+  const f = fakePool(overviewHandler({
+    onDuty: [],
+    totals: { onDutyCount: 0, waitingConsultations: 1, todaySessions: 0, todayUsers: 0, transfersToday: 0, handoversToday: 0 },
+    trend: [], hourly: [],
+    firstResponseRounds: [
+      { roundId: "r1", state: "ACTIVE", askedAt: asked(100) },
+      { roundId: "r2", state: "WAITING", askedAt: asked(400) },
+      { roundId: "r3", state: "CLOSED", askedAt: asked(10) },
+    ],
+    firstResponseFacts: [{ roundId: "r1", answeredAt: asked(40), answeredByAdminId: "admin_a" }],
+  }));
+  const overview = await readSupportOverview({ pool: f.pool, appId: APP_ID } as never, adminContext, null, { firstResponseSeconds: 120 });
+  assert.equal(overview.quality.firstResponse.slaSeconds, 120);
+  assert.equal(overview.quality.firstResponse.sampleCount, 1);
+  assert.equal(overview.quality.firstResponse.averageSeconds, 60);
+  assert.equal(overview.quality.firstResponse.breached, 0);
+  assert.equal(overview.quality.firstResponse.pending, 1);
+  assert.equal(overview.quality.firstResponse.overdue, 1);
+  const auditRead = f.calls.find(({ sql }) => sql.includes('a."action" = $2'));
+  assert.ok(auditRead, "首响事实必须走 readConsultationFirstResponse 的审计读，不在 overview 另写 join");
+  assert.equal(auditRead!.values[1], "im.consultation.first_response");
+  assert.deepEqual(auditRead!.values[2], ["r1", "r2", "r3"]);
+
+  const none = fakePool(overviewHandler({
+    onDuty: [],
+    totals: { onDutyCount: 0, waitingConsultations: 0, todaySessions: 0, todayUsers: 0, transfersToday: 0, handoversToday: 0 },
+    trend: [], hourly: [], firstResponseRounds: [],
+  }));
+  const empty = await readSupportOverview({ pool: none.pool, appId: APP_ID } as never, adminContext, null);
+  assert.equal(empty.quality.firstResponse.averageSeconds, null);
+  assert.equal(empty.quality.firstResponse.sampleCount, 0);
+});
+
+test("first response fact read is one row per round and skips the query for no rounds", async () => {
+  const calls: Array<{ sql: string; values: unknown[] }> = [];
+  const pool = { query: async (sql: string, values: unknown[] = []) => {
+    calls.push({ sql, values });
+    return { rows: [{ roundId: "r1", answeredAt: "2026-10-31T02:00:00.000000Z", answeredByAdminId: "admin_a" }] };
+  } };
+  assert.equal((await readConsultationFirstResponse(pool as never, APP_ID, [])).size, 0);
+  assert.equal(calls.length, 0);
+  const facts = await readConsultationFirstResponse(pool as never, APP_ID, ["r1", "r2"]);
+  assert.deepEqual(facts.get("r1"), { answeredAt: "2026-10-31T02:00:00.000000Z", answeredByAdminId: "admin_a" });
+  assert.equal(facts.get("r2"), undefined);
+  assert.deepEqual(calls[0]!.values, [APP_ID, "im.consultation.first_response", ["r1", "r2"]]);
+});
+
+test("first response SLA seconds default to two minutes and reject out-of-range values", () => {
+  assert.equal(resolveFirstResponseSeconds(undefined), 120);
+  assert.equal(resolveFirstResponseSeconds(300), 300);
+  for (const bad of [0, 29, 86_401, 1.5]) {
+    assert.throws(() => resolveFirstResponseSeconds(bad), /Invalid first response SLA seconds/, String(bad));
+  }
+});
+test("send authorization records the first human reply fact once per round", async () => {
+  const key = { provider: "yunxin" as const, appId: APP_ID, realm: "admin" as const, kind: "ADMIN" as const, platformSubjectId: "admin_a" };
+  const accountId = deriveYunxinAccountId(key);
+  const row = {
+    id: "im_consult_1", userId: "user_a", kind: "SERVICE", state: "ACTIVE", userAccountId: "user_im_a",
+    peerAccountId: accountId, assignedAdminId: "admin_a", subjectRef: null, version: 2,
+    lastMessageAt: null, createdAt: new Date(0), updatedAt: new Date(0), userName: "用户甲", userUsername: null,
+    adminName: "客服甲", appId: APP_ID, messageScopeType: "TEAM", messageScopeId: "900001",
+    messageScopeState: "READY", messageScopeVersion: 1,
+    threadId: "im_thread_1", roundSeq: 1, threadState: "ACTIVE", threadScopeId: "900001",
+    threadScopeState: "READY", threadPeerAccountId: accountId,
+  };
+  const handler = () => adminContextHandler({
+    boss: true,
+    extras: (sql) => {
+      if (sql.includes('FROM "zzsh_iam"."im_identity_mapping"')) {
+        return { rows: [{ accountId, identityMarker: buildYunxinIdentityMarker(key), status: "READY" }] };
+      }
+      if (sql.includes('FROM "zzsh_iam"."im_consultation" c')) return { rows: [row] };
+      if (sql.includes('INSERT INTO "zzsh_iam"."audit_event"')) return { rows: [] };
+      return null;
+    },
+  });
+  const send = fakePool(handler());
+  await readAdminMessageAccess({ pool: send.pool, appId: APP_ID } as never, adminContext, `${accountId}|2|900001`, true, "req_send");
+  const facts = send.calls.filter(({ sql }) => sql.includes('INSERT INTO "zzsh_iam"."audit_event"'));
+  assert.equal(facts.length, 1);
+  assert.ok(facts[0]!.values.includes("im.consultation.first_response"));
+  assert.ok(facts[0]!.values.includes("im_consult_1"));
+  assert.match(facts[0]!.sql, /NOT EXISTS/);
+
+  // 读取（不发送）不落首响事实。
+  const read = fakePool(handler());
+  await readAdminMessageAccess({ pool: read.pool, appId: APP_ID } as never, adminContext, `${accountId}|2|900001`, false, "req_read");
+  assert.ok(!read.calls.some(({ sql }) => sql.includes('INSERT INTO "zzsh_iam"."audit_event"')));
 });

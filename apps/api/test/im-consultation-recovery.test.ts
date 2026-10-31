@@ -746,7 +746,7 @@ function transferFixture(input: { failSend?: boolean } = {}) {
         { adminUserId: "admin_b", adminName: "客服 B", accountId: adminBAccountId, identityMarker: identityFor("ADMIN", "admin_b").marker },
       ] };
     }
-    if (sql.includes("SELECT admin_user_id FROM zzsh_iam.im_support_presence") && sql.includes("last_consultation_assigned_at")) {
+    if ((sql.includes("SELECT admin_user_id FROM zzsh_iam.im_support_presence") || sql.includes('SELECT p."admin_user_id" FROM zzsh_iam.im_support_presence p')) && sql.includes("last_consultation_assigned_at")) {
       return { rows: [{ admin_user_id: (values[1] as string[])[0] }] };
     }
     if (sql.includes('FROM "zzsh_iam"."im_consultation_scope_operation"')) {
@@ -996,7 +996,7 @@ function claimFixture(input: {
       return { rows: [], rowCount: 1 };
     }
     if (sql.includes("FROM zzsh_iam.im_support_presence p JOIN")) return input.offline ? { rows: [] } : staffRows(input.opTarget);
-    if (sql.includes("SELECT admin_user_id FROM zzsh_iam.im_support_presence") && sql.includes("last_consultation_assigned_at")) {
+    if ((sql.includes("SELECT admin_user_id FROM zzsh_iam.im_support_presence") || sql.includes('SELECT p."admin_user_id" FROM zzsh_iam.im_support_presence p')) && sql.includes("last_consultation_assigned_at")) {
       return { rows: [{ admin_user_id: input.opTarget }] };
     }
     if (sql.includes("SELECT details FROM zzsh_iam.im_consultation_event")) return { rows: [] };

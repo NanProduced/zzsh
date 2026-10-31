@@ -48,7 +48,9 @@ test("persistent support threads keep history and allow reopening without a new-
   assert.doesNotMatch(webSource, /start-new-consultation/);
   assert.match(webSource, /threadKeyOf/);
   assert.match(webSource, /threadState/);
-  assert.match(webSource, /已结束/);
+  // 用户侧不露“结束”：结束时历史保留、输入框照常、再发消息服务端自然开新一轮。
+  assert.doesNotMatch(webSource, /"已结束"/);
+  assert.doesNotMatch(webSource, /本轮已结束/);
   assert.doesNotMatch(webSource, /data-action="continue-consultation"/);
   assert.match(webSource, /endedThreadBeforeSend/);
   assert.match(webSource, /reloadThreadStates/);

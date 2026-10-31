@@ -4,11 +4,11 @@
  * 客服管理（运营）：看板 + 会话巡视。
  *
  * - 只看服务端已给出的数字；缺失/空/403/失败都保持真实状态，不造数据、不补时间。
- * - 图表用 CSS 条形绘制，不引入图表库；无可画数据时显示“暂无数据”。
+ * - 图表用 recharts 绘制，配色只取 --mgmt-chart-*；无可画数据时显示“暂无数据”。
  * - 巡视复用工作台的消息外观（文本/图片/卡片/系统事件），只读、无发送框。
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, CartesianGrid, ComposedChart, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { CircleAlert, Headphones, RefreshCw, ShieldCheck } from "lucide-react";
 import type { NimMessageLike } from "@zzsh/im-client/nim-web-client";
 import { decodeImSystemNotice } from "@zzsh/im-client/message-state";
@@ -26,11 +26,11 @@ import { Message, MessageAvatar, MessageContent, MessageHeader } from "../compon
 import { supportedImageUrl } from "./im-support-guards";
 import { dayKeyOf, dayLabelOf, formatDateTime, formatTime, initialOf } from "./im-support-format";
 import {
-  auditConversationsPath, auditMessagesPath, auditStateLabel, auditTypeLabel,
-  availabilityLabel, barPercent, formatDayLabel, formatDuration, formatRatingAverage,
-  handoverObjectLabel, hasHourlyData, hasTrendData, hasWorkloadData, hourlySlots,
-  maxOf, parseAuditConversations, parseAuditMessages, parseSupportHandovers,
-  parseSupportOverview, withinTimeFilter,
+  attentionSignals, auditConversationsPath, auditMessagesPath, auditStateLabel, auditTypeLabel,
+  availabilityLabel, cumulativeSessions, formatDayLabel, formatDuration, formatRatingAverage,
+  formatSlaDuration, handoverObjectLabel, handoverStatsToday, handoverSummaryText, hasHourlyData, hasTrendData, hasWorkloadData, hourlySlots,
+  parseAuditConversations, parseAuditMessages, parseSupportHandovers,
+  parseSupportOverview, queueReasonLabel, ratingBuckets, SUPPORT_ATTENTION_LOAD_LINE, SUPPORT_HANDOVER_PAGE_LIMIT, SUPPORT_SLA_GAPS, withinTimeFilter,
   type AuditConversation, type AuditTimeFilter, type SupportHandover, type SupportOverview,
   type SupportOverviewAgent, type SupportRatings, type SupportTrendPoint,
 } from "./im-support-management-model";
@@ -80,7 +80,8 @@ export function SupportDashboard({ active, request }: { active: boolean; request
     setHandoverState((current) => (current === "ready" ? current : "loading"));
     const [overviewResult, handoverResult] = await Promise.allSettled([
       request<unknown>(`/im/support-overview?date=${beijingCalendarDate()}`),
-      request<unknown>("/im/handovers?limit=20"),
+      // 交接单页上限 50 条：今日交接统计只能在这个分母内，卡片与摘要都写明。
+      request<unknown>(`/im/handovers?limit=${SUPPORT_HANDOVER_PAGE_LIMIT}`),
     ]);
     if (generation !== generationRef.current) return;
     if (overviewResult.status === "fulfilled") {
@@ -143,6 +144,10 @@ export function SupportDashboard({ active, request }: { active: boolean; request
       <MetricCard label="今日用户" value={overview.totals.todayUsers} />
     </div>
 
+    <HandoverSummaryCard overview={overview} handovers={handovers} handoverState={handoverState} />
+
+    <ServiceTimelinessCard overview={overview} handovers={handovers} handoverState={handoverState} />
+
     <RatingCard ratings={overview.ratings} />
 
     <Card className="im-wb-mgmt-card" data-panel="on-duty">
@@ -172,7 +177,10 @@ export function SupportDashboard({ active, request }: { active: boolean; request
     <div className="im-wb-mgmt-charts">
       <TrendChart points={overview.trend} />
       <HourlyChart hourly={overview.hourly} />
+      <TodayTrendChart hourly={overview.hourly} />
+      <RatingDistributionChart ratings={overview.ratings} />
       <AgentWorkloadChart agents={overview.onDuty} />
+      <AgentCompareChart agents={overview.onDuty} />
     </div>
 
     <HandoverCard state={handoverState} error={handoverError} items={handovers} onRetry={() => void load()} />
@@ -188,34 +196,22 @@ function MetricCard({ label, value }: { label: string; value: number }) {
 
 /** 评价统计：count 为 0 时只说明“今日暂无评价”，不画 0 分平均分或空趋势。 */
 function RatingCard({ ratings }: { ratings: SupportRatings }) {
-  const max = maxOf([...ratings.distribution]);
   return <Card className="im-wb-mgmt-card" data-panel="ratings" data-count={ratings.count}>
     <CardHeader><CardTitle>今日评价</CardTitle><CardDescription>仅统计已提交评价；按北京时间自然日</CardDescription></CardHeader>
     <CardContent className="im-wb-mgmt-card-content">
       {ratings.count === 0
         ? <p className="im-wb-mgmt-inline-state" role="status" data-rating-empty>今日暂无评价</p>
         : <>
-          <div className="grid gap-4 px-4 pb-3 md:grid-cols-[minmax(0,260px)_minmax(0,1fr)]">
-            <div className="flex flex-wrap items-baseline gap-x-8 gap-y-2">
-              <span className="flex items-baseline gap-2" data-rating-metric="count">
-                <b className="text-2xl font-semibold tabular-nums">{ratings.count}</b>
-                <span className="text-xs text-muted-foreground">今日评价数</span>
-              </span>
-              <span className="flex items-baseline gap-2" data-rating-metric="average">
-                <b className="text-2xl font-semibold tabular-nums">{formatRatingAverage(ratings.average)}</b>
-                <span className="text-xs text-muted-foreground">平均分</span>
-              </span>
-            </div>
-            <ul className="grid gap-1.5" aria-label="评价星级分布">
-              {[5, 4, 3, 2, 1].map((score) => {
-                const value = ratings.distribution[score - 1] ?? 0;
-                return <li key={score} className="grid grid-cols-[3rem_minmax(0,1fr)_2.5rem] items-center gap-2 text-xs" data-rating-score={score}>
-                  <span className="text-muted-foreground">{score} 星</span>
-                  <span className="h-2 overflow-hidden rounded-full bg-muted"><span className="im-wb-mgmt-bar block h-full rounded-full bg-[var(--mgmt-chart-1)]" style={{ width: `${barPercent(value, max)}%` }} /></span>
-                  <span className="text-right tabular-nums">{value}</span>
-                </li>;
-              })}
-            </ul>
+          <div className="flex flex-wrap items-baseline gap-x-8 gap-y-2 px-4 pb-3">
+            <span className="flex items-baseline gap-2" data-rating-metric="count">
+              <b className="text-2xl font-semibold tabular-nums">{ratings.count}</b>
+              <span className="text-xs text-muted-foreground">今日评价数</span>
+            </span>
+            <span className="flex items-baseline gap-2" data-rating-metric="average">
+              <b className="text-2xl font-semibold tabular-nums">{formatRatingAverage(ratings.average)}</b>
+              <span className="text-xs text-muted-foreground">平均分</span>
+            </span>
+            <span className="text-xs text-muted-foreground">星级分布在下方「今日评分分布」图里，只画一处</span>
           </div>
           <div className="im-wb-mgmt-table-wrap"><Table className="im-wb-mgmt-table">
             <TableHeader><TableRow><TableHead>客服</TableHead><TableHead className="text-right">评价数</TableHead><TableHead className="text-right">平均分</TableHead></TableRow></TableHeader>
@@ -316,7 +312,7 @@ function AgentWorkloadChart({ agents }: { agents: SupportOverviewAgent[] }) {
 
 function HandoverCard({ state, error, items, onRetry }: { state: LoadState; error: string; items: SupportHandover[] | null; onRetry: () => void }) {
   return <Card className="im-wb-mgmt-card" data-panel="handovers">
-    <CardHeader><CardTitle>最近交接</CardTitle><CardDescription>最近 20 条；客服本人只看到与自己相关的记录</CardDescription></CardHeader>
+    <CardHeader><CardTitle>最近交接</CardTitle><CardDescription>最近 50 条（单页上限）；客服本人只看到与自己相关的记录</CardDescription></CardHeader>
     <CardContent className="im-wb-mgmt-card-content">
       {state === "loading" && !items ? <p className="im-wb-mgmt-inline-state" role="status">正在读取交接记录…</p>
         : state === "forbidden" ? <p className="im-wb-mgmt-inline-state" role="status">无权查看交接记录</p>
@@ -333,6 +329,207 @@ function HandoverCard({ state, error, items, onRetry }: { state: LoadState; erro
                   {item.note ? <p className="im-wb-mgmt-handover-note">备注：{item.note}</p> : null}
                 </li>)}
               </ul>}
+    </CardContent>
+  </Card>;
+}
+
+/* ------------------------------ 交接班与服务时效 ------------------------------ */
+
+/** 图例色块：只用现有 --mgmt-chart-* 变量，不引新的视觉体系。 */
+function ChartSwatch({ color, label }: { color: string; label: string }) {
+  return <span className="inline-flex items-center gap-1.5"><i className="h-2 w-2 rounded-sm" style={{ background: color }} aria-hidden="true" />{label}</span>;
+}
+
+/** 时效指标位：有事实才给数字；没有事实保留「—」，只挂缺口徽标。 */
+function TimelinessMetric({ id, label, value, note, missing }: { id: string; label: string; value: string; note?: string; missing?: boolean }) {
+  return <div className="flex flex-col gap-1 rounded-md border border-border px-3 py-2" data-sla-metric={id} data-missing={missing ? "true" : undefined}>
+    <span className="flex flex-wrap items-center gap-2">
+      <b className="text-lg font-semibold tabular-nums">{value}</b>
+      {missing ? <Badge variant="outline">服务端未提供</Badge> : null}
+    </span>
+    <span className="text-xs text-muted-foreground">{label}</span>
+    {note ? <span className="text-[11px] leading-relaxed text-muted-foreground">{note}</span> : null}
+  </div>;
+}
+
+/**
+ * 服务时效：首响/解决用服务端 quality 段；服务端没给就挂缺口。
+ * 转交优先用服务端事件计数（全量），没有才退到交接记录，并把「最近 N 条」分母写在卡片上。
+ */
+function ServiceTimelinessCard({ overview, handovers, handoverState }: { overview: SupportOverview; handovers: SupportHandover[] | null; handoverState: LoadState }) {
+  const stats = handovers ? handoverStatsToday(handovers) : null;
+  const firstResponse = overview.quality?.firstResponse ?? null;
+  const resolution = overview.quality?.resolution ?? null;
+  const transfers = overview.totals.transfersToday;
+  const handoversToday = overview.totals.handoversToday;
+
+  const firstNote = !firstResponse
+    ? "服务端尚未提供 quality.firstResponse"
+    : firstResponse.sampleCount > 0
+      ? `样本 ${firstResponse.sampleCount} · 超阈值 ${firstResponse.breached}${firstResponse.slaSeconds !== null ? `（阈值 ${firstResponse.slaSeconds} 秒）` : ""} · 未回 ${firstResponse.pending}（已超 ${firstResponse.overdue}）`
+      : `今日暂无样本 · 未回 ${firstResponse.pending} 条${firstResponse.overdue > 0 ? `，其中已超阈值 ${firstResponse.overdue} 条` : ""}`;
+  const resolutionNote = !resolution
+    ? "服务端尚未提供 quality.resolution"
+    : resolution.sampleCount > 0
+      ? `样本 ${resolution.sampleCount}（缺接起或关闭事件的轮次不进分母）`
+      : "今日无「已接起且已关闭」的样本";
+
+  const transferNote = transfers !== null
+    ? `服务端 TRANSFERRED 事件今日计数（全量）${handoversToday !== null ? ` · 交接记录 ${handoversToday} 件` : ""}`
+    : stats
+      ? `服务端未提供事件计数，退到交接记录：分母是最近 ${stats.scanned} 条交接记录内${stats.truncated ? `（已达单页上限 ${SUPPORT_HANDOVER_PAGE_LIMIT} 条，可能被截断）` : ""}，不是今日全量`
+      : handoverState === "forbidden" ? "无权读取交接记录" : handoverState === "error" ? "交接记录读取失败，本次不给数字" : "交接记录读取中…";
+
+  const gaps = SUPPORT_SLA_GAPS.filter((gap) => (gap.id === "first-response" ? !firstResponse : gap.id === "resolution" ? !resolution : true));
+
+  return <Card className="im-wb-mgmt-card" data-panel="timeliness">
+    <CardHeader><CardTitle>服务时效</CardTitle><CardDescription>只显示服务端已有事实；缺事实的指标保留「—」，不估算、不补 0</CardDescription></CardHeader>
+    <CardContent className="im-wb-mgmt-card-content">
+      <div className="grid gap-2 px-4 pb-3 sm:grid-cols-2 xl:grid-cols-4">
+        <TimelinessMetric id="first-response" label="首响时长（首次人工回复 − 用户首条消息）" value={firstResponse && firstResponse.sampleCount > 0 ? formatSlaDuration(firstResponse.averageSeconds) : "—"} note={firstNote} missing={!firstResponse} />
+        <TimelinessMetric id="resolution" label="解决时长（结束 − 接起）" value={resolution && resolution.sampleCount > 0 ? formatSlaDuration(resolution.averageSeconds) : "—"} note={resolutionNote} missing={!resolution} />
+        <TimelinessMetric id="transfer" label="转交次数（今日）" value={transfers !== null ? String(transfers) : stats ? String(stats.consultation) : "—"} note={transferNote} />
+        <TimelinessMetric id="support-cancel" label="客服取消数" value="—" missing note="服务端尚未提供取消事件与口径；不估算、不上占位字段" />
+      </div>
+      {firstResponse ? <p className="px-4 pb-3 text-[11px] leading-relaxed text-muted-foreground" data-sla-note="first-response">首响口径：用户首条消息 → 平台放行首条人工发送（不是 NIM 送达回执，重发不重复计）。</p> : null}
+      {gaps.length ? <ul className="grid gap-2 px-4 pb-4 text-xs" aria-label="服务时效口径缺口">
+        {gaps.map((gap) => <li key={gap.id} data-sla-gap={gap.id} className="rounded-md border border-dashed border-border px-3 py-2 leading-relaxed text-muted-foreground">
+          <b className="text-foreground">{gap.label}</b>：{gap.missing}。需要：{gap.needed}。
+        </li>)}
+      </ul> : <p className="im-wb-mgmt-inline-state" role="status" data-sla-gaps="none">首响与解决时长已用服务端事实；客服取消数仍无口径，暂不显示。</p>}
+    </CardContent>
+  </Card>;
+}
+
+/** 交接班摘要：一段可直接粘贴给下一班的纯文本，数字全部来自本次看板读取。 */
+function HandoverSummaryCard({ overview, handovers, handoverState }: { overview: SupportOverview; handovers: SupportHandover[] | null; handoverState: LoadState }) {
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const text = useMemo(
+    () => handoverSummaryText({
+      totals: overview.totals,
+      agents: overview.onDuty,
+      handovers,
+      ratings: overview.ratings,
+      quality: overview.quality,
+      queue: overview.queue,
+    }),
+    [overview, handovers],
+  );
+  const attention = useMemo(() => attentionSignals({ agents: overview.onDuty, totals: overview.totals, queue: overview.queue }), [overview]);
+  const worst = attention.some((item) => item.level === "high") ? "warning" : attention.length ? "outline" : "success";
+  const queue = overview.queue;
+  const copy = async () => {
+    const clipboard = typeof navigator === "undefined" ? undefined : navigator.clipboard;
+    if (!clipboard || typeof clipboard.writeText !== "function") { setCopyState("failed"); return; }
+    try { await clipboard.writeText(text); setCopyState("copied"); } catch { setCopyState("failed"); }
+  };
+  return <Card className="im-wb-mgmt-card" data-panel="handover-summary" data-attention={attention.length}>
+    <CardHeader>
+      <CardTitle>交接班摘要</CardTitle>
+      <CardDescription>值班、待接待、接待中与异常拼成一段；口径与分母随文附上</CardDescription>
+    </CardHeader>
+    <CardContent className="im-wb-mgmt-card-content">
+      <div className="flex flex-wrap items-center gap-2 px-4 pb-3">
+        <Badge variant={worst}>{attention.length === 0 ? "无异常" : `${attention.length} 项需关注`}</Badge>
+        <span className="text-xs text-muted-foreground">{handoverState === "ready" ? "含交接数" : "交接记录未就绪，摘要不含交接数"}</span>
+        <Button variant="outline" size="sm" className="ml-auto" data-action="copy-handover-summary" onClick={() => void copy()}>{copyState === "copied" ? "已复制" : "复制摘要"}</Button>
+      </div>
+      {queue ? <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 pb-2 text-[11px] text-muted-foreground" data-queue data-queue-reason={queue.reason}>
+        <span>排队 {queue.queued} 条</span>
+        {queue.oldestWaitSeconds !== null ? <span>最久 {formatSlaDuration(queue.oldestWaitSeconds)}</span> : null}
+        <span>在岗 {queue.onDuty}</span>
+        <span>可接单 {queue.withFreeSlot}</span>
+        <span>满载 {queue.atCapacity}</span>
+        {queue.capacityLimit !== null ? <span>上限 {queue.capacityLimit} 条/人</span> : null}
+        <span>原因 {queueReasonLabel(queue.reason)}</span>
+      </div> : null}
+      {copyState === "failed" ? <p className="im-wb-mgmt-inline-state" role="alert" data-copy-state="failed">复制失败：浏览器未开放剪贴板权限，请手动全选摘要复制。</p> : null}
+      <pre data-handover-summary className="m-0 overflow-x-auto whitespace-pre-wrap px-4 pb-4 text-xs leading-relaxed text-foreground">{text}</pre>
+    </CardContent>
+  </Card>;
+}
+
+/** 今日会话趋势：柱=每小时新咨询，线=今日累计；两个系列都来自同一份服务端 hourly。 */
+function TodayTrendChart({ hourly }: { hourly: ReturnType<typeof hourlySlots> }) {
+  const points = cumulativeSessions(hourly);
+  const data = points.map((point) => ({ label: point.label, sessions: point.sessions, cumulative: point.cumulative }));
+  const last = points[points.length - 1];
+  const total = last ? last.cumulative : 0;
+  return <Card className="im-wb-mgmt-card" data-chart="today-trend" data-points={points.filter((point) => point.sessions > 0).length}>
+    <CardHeader><CardTitle>今日会话趋势</CardTitle><CardDescription>柱：每小时新咨询 · 线：今日累计；今日共 {total} 次</CardDescription></CardHeader>
+    <CardContent>
+      <div className="mb-2 flex flex-wrap items-center gap-3 text-[11px] text-muted-foreground">
+        <ChartSwatch color="var(--mgmt-chart-1)" label="每小时新咨询" />
+        <ChartSwatch color="var(--mgmt-chart-2)" label="今日累计" />
+        <span className="ml-auto tabular-nums">累计 {total} 次</span>
+      </div>
+      {hasHourlyData(points) ? <div className="im-wb-mgmt-chartbox" role="img" aria-label="今日每小时新咨询与累计会话">
+        <ResponsiveContainer width="100%" height={220}>
+          <ComposedChart data={data} margin={{ top: 8, right: 8, left: -18, bottom: 0 }} barCategoryGap="18%">
+            <defs><linearGradient id="mgmt-today-bars" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="var(--mgmt-chart-1)" stopOpacity={0.95} /><stop offset="100%" stopColor="var(--mgmt-chart-1)" stopOpacity={0.35} /></linearGradient></defs>
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+            <XAxis dataKey="label" interval={2} tick={{ fill: "var(--muted-foreground)", fontSize: 11 }} axisLine={false} tickLine={false} tickMargin={8} />
+            <YAxis allowDecimals={false} tick={{ fill: "var(--muted-foreground)", fontSize: 11 }} axisLine={false} tickLine={false} width={40} />
+            <Tooltip wrapperStyle={{ pointerEvents: "none" }} cursor={{ fill: "color-mix(in oklab, var(--foreground) 6%, transparent)" }} contentStyle={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }} labelStyle={{ color: "var(--foreground)" }} labelFormatter={(label) => `${label}:00`} formatter={(value, name) => [`${value}`, name === "cumulative" ? "累计" : "新咨询"]} />
+            <Bar dataKey="sessions" name="sessions" fill="url(#mgmt-today-bars)" radius={[4, 4, 0, 0]} maxBarSize={16} />
+            <Line type="monotone" dataKey="cumulative" name="cumulative" stroke="var(--mgmt-chart-2)" strokeWidth={2} dot={false} />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div> : <p className="im-wb-mgmt-chart-empty" role="status">暂无数据</p>}
+    </CardContent>
+  </Card>;
+}
+
+/** 评分分布：5→1 星计数；count 为 0 时只说今日暂无评价，不画 0 分柱。 */
+function RatingDistributionChart({ ratings }: { ratings: SupportRatings }) {
+  const data = ratingBuckets(ratings).map((bucket) => ({ label: `${bucket.score} 星`, score: bucket.score, count: bucket.count }));
+  const total = data.reduce((sum, point) => sum + point.count, 0);
+  return <Card className="im-wb-mgmt-card" data-chart="rating-distribution" data-count={ratings.count}>
+    <CardHeader><CardTitle>今日评分分布</CardTitle><CardDescription>{ratings.count > 0 ? `${ratings.count} 条评价 · 平均 ${formatRatingAverage(ratings.average)}` : "仅统计已提交评价"}</CardDescription></CardHeader>
+    <CardContent>
+      {total > 0 ? <div className="overflow-x-auto"><div className="im-wb-mgmt-chartbox min-w-[560px]" role="img" aria-label={`今日评分分布：${data.map((point) => `${point.label} ${point.count} 条`).join("、")}`}>
+        <ResponsiveContainer width="100%" height={220}>
+          <BarChart data={data} margin={{ top: 8, right: 8, left: -18, bottom: 0 }} barCategoryGap="24%">
+            <defs><linearGradient id="mgmt-rating" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="var(--mgmt-chart-2)" stopOpacity={0.95} /><stop offset="100%" stopColor="var(--mgmt-chart-2)" stopOpacity={0.35} /></linearGradient></defs>
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+            <XAxis dataKey="label" tick={{ fill: "var(--muted-foreground)", fontSize: 11 }} axisLine={false} tickLine={false} tickMargin={8} />
+            <YAxis allowDecimals={false} tick={{ fill: "var(--muted-foreground)", fontSize: 11 }} axisLine={false} tickLine={false} width={40} />
+            <Tooltip wrapperStyle={{ pointerEvents: "none" }} cursor={{ fill: "color-mix(in oklab, var(--foreground) 6%, transparent)" }} contentStyle={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }} labelStyle={{ color: "var(--foreground)" }} formatter={(value) => [`${value}`, "评价数"]} />
+            <Bar dataKey="count" name="count" fill="url(#mgmt-rating)" radius={[5, 5, 0, 0]} maxBarSize={26} />
+          </BarChart>
+        </ResponsiveContainer>
+      </div></div> : <p className="im-wb-mgmt-chart-empty" role="status">今日暂无评价</p>}
+    </CardContent>
+  </Card>;
+}
+
+/** 按客服对比：今日会话与当前接待并排；关注线只是本页口径，不冒充服务端容量。 */
+function AgentCompareChart({ agents }: { agents: SupportOverviewAgent[] }) {
+  const data = agents.map((agent) => ({ name: agent.name, sessions: agent.todaySessions, load: agent.activeLoad }));
+  const hasData = data.some((point) => point.sessions > 0 || point.load > 0);
+  return <Card className="im-wb-mgmt-card" data-chart="agent-compare" data-points={data.length}>
+    <CardHeader><CardTitle>按客服对比</CardTitle><CardDescription>今日会话数与当前接待数并排；关注线 {SUPPORT_ATTENTION_LOAD_LINE} 条为本页口径</CardDescription></CardHeader>
+    <CardContent>
+      <div className="mb-2 flex flex-wrap items-center gap-3 text-[11px] text-muted-foreground">
+        <ChartSwatch color="var(--mgmt-chart-1)" label="今日会话" />
+        <ChartSwatch color="var(--mgmt-chart-2)" label="当前接待" />
+      </div>
+      {hasData ? <div className="im-wb-mgmt-chartbox" role="img" aria-label="按客服对比今日会话与当前接待">
+        <ResponsiveContainer width="100%" height={Math.max(180, data.length * 52)}>
+          <BarChart data={data} layout="vertical" margin={{ top: 4, right: 24, left: 8, bottom: 4 }} barGap={2}>
+            <defs>
+              <linearGradient id="mgmt-compare-sessions" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stopColor="var(--mgmt-chart-1)" stopOpacity={0.45} /><stop offset="100%" stopColor="var(--mgmt-chart-1)" stopOpacity={0.95} /></linearGradient>
+              <linearGradient id="mgmt-compare-load" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stopColor="var(--mgmt-chart-2)" stopOpacity={0.45} /><stop offset="100%" stopColor="var(--mgmt-chart-2)" stopOpacity={0.95} /></linearGradient>
+            </defs>
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" horizontal={false} />
+            <XAxis type="number" allowDecimals={false} tick={{ fill: "var(--muted-foreground)", fontSize: 11 }} axisLine={false} tickLine={false} tickMargin={6} />
+            <YAxis type="category" dataKey="name" width={64} tick={{ fill: "var(--foreground)", fontSize: 12 }} axisLine={false} tickLine={false} />
+            <Tooltip wrapperStyle={{ pointerEvents: "none" }} cursor={{ fill: "color-mix(in oklab, var(--foreground) 6%, transparent)" }} contentStyle={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }} formatter={(value, name) => [`${value}`, name === "sessions" ? "今日会话" : "当前接待"]} />
+            <Bar dataKey="sessions" name="sessions" fill="url(#mgmt-compare-sessions)" radius={[0, 4, 4, 0]} maxBarSize={14} />
+            <Bar dataKey="load" name="load" fill="url(#mgmt-compare-load)" radius={[0, 4, 4, 0]} maxBarSize={14} />
+          </BarChart>
+        </ResponsiveContainer>
+      </div> : <p className="im-wb-mgmt-chart-empty" role="status">暂无数据</p>}
     </CardContent>
   </Card>;
 }

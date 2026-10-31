@@ -24,13 +24,13 @@ export type OrderStageCardOptions = {
 };
 
 const STAGE_KINDS = ["ORDER_WELCOME", "ORDER_OPENING", "ORDER_ENDING", "ORDER_SETTLED"] as const;
-type StageCardKind = (typeof STAGE_KINDS)[number];
+export type StageCardKind = (typeof STAGE_KINDS)[number];
 const WELCOME_TEXT = "订单群已建立。本单的账号核对、开租确认和沟通都会在这里进行，双方确认后开始计算租期。有疑问可以直接在群里留言。";
 const PREVIEWS: Record<StageCardKind, string> = {
   ORDER_WELCOME: "洲洲助手：订单群已建立",
   ORDER_OPENING: "开租确认卡",
   ORDER_ENDING: "结束确认卡",
-  ORDER_SETTLED: "结算完成卡",
+  ORDER_SETTLED: "洲洲助手：本单已完成结算",
 };
 
 const WINDOW_MS = 72 * 60 * 60 * 1_000;
@@ -45,6 +45,7 @@ type DueRow = {
   team_id: string;
   order_status: string;
   posted_at: Date | string | null;
+  has_activity: boolean;
   system_account: string | null;
   system_status: string | null;
   system_marker: string | null;
@@ -74,12 +75,65 @@ function failureClass(error: unknown): string {
 }
 
 /** Card sends never outlive the order's terminal chat window. */
-export function stageCardWindowReason(orderStatus: string, postedAt: Date | string | null, now: number): string | null {
+export function stageCardWindowReason(orderStatus: string, postedAt: Date | string | null, now: number): StageCardSkipReason | null {
   if (orderStatus === "CANCELLED") return "ORDER_CANCELLED";
   if (orderStatus === "PENDING_PAYMENT") return "ORDER_NOT_PAID";
   if (orderStatus !== "COMPLETED") return null;
   const posted = postedAt === null ? Number.NaN : new Date(postedAt).getTime();
   return Number.isFinite(posted) && now < posted + WINDOW_MS ? null : "SEND_WINDOW_CLOSED";
+}
+
+/** Why a produced card is not going to be posted. Narrow on purpose: every value is a reviewable fact. */
+export type StageCardSkipReason =
+  | "ORDER_CANCELLED"
+  | "ORDER_NOT_PAID"
+  | "ORDER_ENDED"
+  | "SEND_WINDOW_CLOSED"
+  | "STAGE_SUPERSEDED"
+  | "STAGE_NOT_REACHED"
+  | "WELCOME_SUPERSEDED";
+
+/**
+ * A card only describes the stage it was produced for. Once the order moved on, posting
+ * it would rewind the conversation ("请确认开租" after settlement), so it is skipped with an
+ * explicit reason instead of being replayed. The reason is written to failure_class, which is
+ * what makes a card that never went out visible in the admin read model.
+ */
+export function stageCardDeliveryBlock(input: {
+  kind: StageCardKind;
+  orderStatus: string;
+  postedAt: Date | string | null;
+  hasActivity: boolean;
+  now: number;
+}): StageCardSkipReason | null {
+  if (input.kind === "ORDER_WELCOME") {
+    if (input.orderStatus !== "PAID") return "ORDER_ENDED";
+    // Someone already spoke in the group; a late "群已建立" would read as a duplicate greeting.
+    return input.hasActivity ? "WELCOME_SUPERSEDED" : null;
+  }
+  // Terminal intercept: a settled or cancelled order must never receive a pre-terminal stage card.
+  if (input.kind !== "ORDER_SETTLED" && input.orderStatus === "COMPLETED") return "STAGE_SUPERSEDED";
+  if (input.kind !== "ORDER_SETTLED" && input.orderStatus === "CANCELLED") return "ORDER_CANCELLED";
+  if (input.kind === "ORDER_SETTLED" && input.orderStatus !== "COMPLETED") return "STAGE_NOT_REACHED";
+  return stageCardWindowReason(input.orderStatus, input.postedAt, input.now);
+}
+
+function beijingTime(value: Date | string | null): string {
+  if (!value) return "时间暂不可用";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "时间暂不可用";
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,
+  }).format(date).replaceAll("/", "-");
+}
+
+/**
+ * The settlement notice is the last message an order group gets. It names the posting time
+ * and where the amounts live; it deliberately carries no amount and no party-specific figure,
+ * because every member of the group reads the same text.
+ */
+export function settledNoticeText(postedAt: Date | string | null): string {
+  return `【结算完成】本单已完成结算（过账时间 ${beijingTime(postedAt)}）。退款与结算明细请到订单页查看；如有疑问，可直接在本群留言，客服会继续跟进。`;
 }
 
 /** Inserts only stages that are currently true; a later tick catches groups that were not READY yet. */
@@ -105,7 +159,6 @@ async function materialize(options: OrderStageCardOptions): Promise<void> {
      ), wanted AS (
        SELECT f.order_id, f.app_id, 'ORDER_WELCOME'::text AS kind FROM facts f
         WHERE f.order_status = 'PAID'
-          AND NOT EXISTS(SELECT 1 FROM zzsh_order.im_order_activity act WHERE act.order_id = f.order_id)
           AND NOT EXISTS(SELECT 1 FROM zzsh_order.im_order_stage_card sc WHERE sc.order_id = f.order_id)
        UNION ALL
        SELECT order_id, app_id, 'ORDER_OPENING'::text AS kind FROM facts WHERE opening_status IN ('DRAFT', 'CONFIRMED')
@@ -127,6 +180,7 @@ async function dueRows(options: OrderStageCardOptions, limit: number): Promise<D
   return (await options.pool.query<DueRow>(
     `SELECT sc.id, sc.order_id, sc.kind, sc.card_id, sc.attempt_count,
             g.team_id, o.status AS order_status, posting.posted_at,
+            EXISTS(SELECT 1 FROM zzsh_order.im_order_activity act WHERE act.order_id = sc.order_id) AS has_activity,
             m.account_id AS system_account, m.status AS system_status,
             m.identity_marker AS system_marker, m.platform_subject_id AS system_subject
        FROM zzsh_order.im_order_stage_card sc
@@ -187,6 +241,10 @@ async function deliver(options: OrderStageCardOptions, row: DueRow): Promise<voi
   if (row.kind === "ORDER_WELCOME") {
     if (!options.transport.text) throw codedError("TEXT_TRANSPORT_UNAVAILABLE");
     await options.transport.text({ conversationId, senderAccountId: systemAccount, receiverAccountId: row.team_id, text: WELCOME_TEXT, messageClientId: row.card_id });
+  } else if (row.kind === "ORDER_SETTLED" && options.transport.text) {
+    // The NIM custom card type is not verified on the real App, so the settlement notice is a
+    // plain text message; it carries the posting time, which a bare card cannot.
+    await options.transport.text({ conversationId, senderAccountId: systemAccount, receiverAccountId: row.team_id, text: settledNoticeText(row.posted_at), messageClientId: row.card_id });
   } else {
     await options.transport.card({
       conversationId,
@@ -213,11 +271,14 @@ export async function scanOrderStageCards(options: OrderStageCardOptions, limit 
   for (const row of await dueRows(options, limit)) {
     const tokenHash = createHash("sha256").update(randomBytes(32)).digest("hex");
     if (!(await claim(options, row, tokenHash))) continue;
-    const closed = row.kind === "ORDER_WELCOME" && row.order_status !== "PAID"
-      ? "ORDER_ENDED"
-      : stageCardWindowReason(row.order_status, row.posted_at, now);
-    if (closed) {
-      await finish(options, row, tokenHash, "SKIPPED", closed);
+    // An unknown kind can never be delivered; recording it as SKIPPED keeps it out of the retry loop.
+    if (!isStageKind(row.kind)) {
+      await finish(options, row, tokenHash, "SKIPPED", "INVALID_STAGE_KIND");
+      continue;
+    }
+    const blocked = stageCardDeliveryBlock({ kind: row.kind, orderStatus: row.order_status, postedAt: row.posted_at, hasActivity: row.has_activity === true, now });
+    if (blocked) {
+      await finish(options, row, tokenHash, "SKIPPED", blocked);
       continue;
     }
     try {

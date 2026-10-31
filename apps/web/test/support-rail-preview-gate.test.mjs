@@ -41,6 +41,9 @@ function runRail(nodeEnv, search) {
       if (name.includes("auth-overlay-provider")) return { useAuthOverlay: () => ({ open() {} }) };
       if (name === "./contact-popover") return { ContactPopover: () => null };
       if (name === "./customer-support-workspace") return { CustomerSupportWorkspace: () => null };
+      if (name.includes("session/user-session-provider")) return { useUserSession: () => ({ status: "guest", userId: null, identityVersion: 1 }) };
+      if (name === "./use-support-unread") return { useSupportUnread: () => null };
+      if (name === "./support-unread") return { supportUnreadAriaLabel: base => base, supportUnreadBadge: () => null, supportUnreadDescription: () => "" };
       if (name === "@radix-ui/react-dialog") return {
         Root: () => null,
         Portal: () => null,

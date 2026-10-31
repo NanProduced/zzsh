@@ -1816,7 +1816,8 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   const userHoverCard = selected ? <div className="im-wb-author-hover">
     <ConsultationUserCard consultationId={selected.id} rowUserId={selected.user?.id ?? ""} fallbackName={selected.user?.name || selected.user?.username || "平台用户"}
       request={adminRequest} scope={profileScope} showSubject={selected.type !== "COMPLAINT"}
-      onOpenProfile={(id) => onOpenPath?.(`/users/${encodeURIComponent(id)}`, "用户资料")} />
+      onOpenProfile={(id) => onOpenPath?.(`/users/${encodeURIComponent(id)}`, "用户资料")}
+          onOpenSubject={(target, label) => onOpenPath?.(target.kind === "ORDER" ? `/orders/${encodeURIComponent(target.id)}` : `/supply/accounts/${encodeURIComponent(target.id)}`, label)} />
   </div> : null;
   const jumpToMessage = (messageId: string) => {
     const target = selectedMessages.find((message) => message.id === messageId || message.source?.messageServerId === messageId || message.source?.messageClientId === messageId);
@@ -2008,7 +2009,8 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
             只使用现有投影并逐项标注缺口。 */}
         <ConsultationUserCard key={selected.id} consultationId={selected.id} rowUserId={selected.user?.id ?? ""} fallbackName={selected.user?.name || selected.user?.username || "平台用户"}
           request={adminRequest} scope={profileScope} showSubject
-          onOpenProfile={(id) => onOpenPath?.(`/users/${encodeURIComponent(id)}`, "用户资料")} />
+          onOpenProfile={(id) => onOpenPath?.(`/users/${encodeURIComponent(id)}`, "用户资料")}
+          onOpenSubject={(target, label) => onOpenPath?.(target.kind === "ORDER" ? `/orders/${encodeURIComponent(target.id)}` : `/supply/accounts/${encodeURIComponent(target.id)}`, label)} />
         <ConsultationEventsCard key={`${selected.id}:events`} consultationId={selected.id} request={adminRequest} />
 
         {blockedConsultations[selected.id] ? <section className="im-wb-sec"><span>授权状态</span><small>发送权限已失效</small>

@@ -134,7 +134,8 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   /** Explicit product capability: only enabled assemblies consume credit/guarantee state in supply gates. */
   creditGuaranteeEnabled?: boolean;
   /** Explicit local scheduler; omitted by default, never inferred from environment flags. */
-  supportDispatch?: Omit<OrderDispatchOptions, "pool"> & { autoAssignConsultations?: boolean };
+  supportDispatch?: Omit<OrderDispatchOptions, "pool"> & { autoAssignConsultations?: boolean; concurrencyLimit?: number; firstResponseSeconds?: number };
+
   orderTeams?: { membersLimit: number; intervalMs: number; batchLimit: number; escalationEnabled?: boolean };
   /** Explicit supplier event ingress; omitted by default and never mounted without configuration. */
   orderImEvents?: { appKey: string; appSecret: string; freshnessMs?: number; approvalLinkMs?: number; recoveryIntervalMs?: number; escalationEnabled?: boolean };
@@ -861,6 +862,8 @@ export async function mountAuthHandlers(
   const yunxinConsultation: ConsultationRouteOptions | undefined = yunxinRuntime ? {
     ...(options.supportDispatch?.appId === options.yunxin!.appId ? { wakeDispatch: () => app.get(OrderDispatchLifecycle).wake() } : {}),
     ...(options.supportDispatch?.autoAssignConsultations === true ? { autoAssignConsultations: true } : {}),
+    ...(options.supportDispatch?.concurrencyLimit !== undefined ? { supportConcurrency: options.supportDispatch.concurrencyLimit } : {}),
+    ...(options.supportDispatch?.firstResponseSeconds !== undefined ? { firstResponseSeconds: options.supportDispatch.firstResponseSeconds } : {}),
     pool: options.pool,
     appId: options.yunxin!.appId,
     provider: yunxinRuntime.provider,

@@ -376,7 +376,7 @@ export async function handleOrderAdminRoute(
       await assertAdminContextInTransaction(client, context);
       if(path==="/im-groups"){
         const cursor=query.get("cursor");if(cursor&&!ID_TOKEN.test(cursor))throw invalid("Cursor is invalid");
-        sendJson(response,200,await listJoinedOrderTeams(client,{...context,realm:"admin"},cursor,parseLimit(query.get("limit"))),requestId);return;
+        sendJson(response,200,await listJoinedOrderTeams(client,{...context,realm:"admin"},cursor,parseLimit(query.get("limit")),options.orderTeamMembers?.appId??""),requestId);return;
       }
       const teamMatch=/^\/([A-Za-z0-9._:-]+)\/im$/.exec(path);
       if(teamMatch){const operation=query.get("operation")??"read";if(operation!=="read"&&operation!=="send")throw invalid("Operation is invalid");sendJson(response,200,await readOrderTeamAccess(client,{...context,realm:"admin"},decodeId(teamMatch[1]!),operation,options.orderImSdkRouteBindings),requestId);return;}

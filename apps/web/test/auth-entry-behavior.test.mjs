@@ -33,7 +33,7 @@ test('support and complaint entries wait for unified authentication and both res
  const railCode=ts.transpileModule(readFileSync(new URL('../src/components/support/support-rail.tsx',import.meta.url),'utf8'),{compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS}}).outputText;
  // 投诉已并入普通客服：第二个入口（投诉建议）也必须恢复 SERVICE，而不是旧的 COMPLAINT。
  for(const triggerIndex of [0,1]){
-  const exports={},states=[];let index=0,pending;
+  const exports={},states=[];const unreadCalls=[];let index=0,pending;
   new Function('require','exports','window',railCode)(name=>{
    if(name==='react')return {...React,useState(initial){const i=index++;states[i]=initial;return [initial,value=>{states[i]=typeof value==='function'?value(states[i]):value;}];},useRef:value=>({current:value}),useEffect(){}};
    if(name==='next/navigation')return {usePathname:()=>'/'};
@@ -41,10 +41,16 @@ test('support and complaint entries wait for unified authentication and both res
    if(name.includes('auth-overlay-provider'))return {useAuthOverlay:()=>({open:(target,callback)=>{pending={target,callback};}})};
    if(name==='./contact-popover')return {ContactPopover:()=>null};
    if(name==='./customer-support-workspace')return {CustomerSupportWorkspace:()=>null};
+   // 入口未读是 rail 新增的读链路：未确认身份时必须整体关闭。这里既给它做桩，也留下调用证据。
+   if(name.includes('session/user-session-provider'))return {useUserSession:()=>({status:'loading',userId:null,identityVersion:1})};
+   if(name==='./use-support-unread')return {useSupportUnread:(identity,enabled)=>{unreadCalls.push({identity,enabled});return null;}};
+   if(name==='./support-unread')return {supportUnreadAriaLabel:base=>base,supportUnreadBadge:()=>null,supportUnreadDescription:()=>''};
    if(name.endsWith('.css'))return {};
    return require(name);
   },exports,{location:{pathname:'/',search:'?from=home'}});
   const rail=exports.SupportRail();
+  // 未确认身份：不发起未读请求，也不建咨询。角标链路只能是关着的。
+  assert.deepEqual(unreadCalls,[{identity:null,enabled:false}],'身份确认前入口未读不发起任何请求');
   // Collect the support triggers wherever they sit in the rail tree, so reshaping the rail (for
   // example adding the mobile tools toggle) cannot silently shift which button this test clicks.
   const triggers=[];

@@ -25,25 +25,72 @@ import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popove
  * 现有用户 hoverCard，且只在资料读取仍然持有时出现，卡内不出现 UUID。
  */
 
+/**
+ * 服务端关联对象投影。resolved 才带业务展示号与跳转事实；unresolved / absent
+ * 不带任何可以反推单号的字段，前端也不从 rawRef 里猜。
+ */
+type SubjectProjection = {
+  status?: unknown;
+  kind?: unknown;
+  displayNo?: unknown;
+  title?: unknown;
+  target?: unknown;
+  rawRef?: unknown;
+};
 type ContextView = {
   consultationId: string;
   user: { status: string; publicId?: string; displayName?: string; avatar?: string | null };
-  subject: { status: string; reference?: string };
+  subject: SubjectProjection;
 };
 type ContextState = "loading" | "ready" | "denied" | "error";
+export type SubjectTargetKind = "ORDER" | "ACCOUNT";
+/** 已解析的关联对象：displayNo 是业务号，id 只用于跳转、不上屏。 */
+export type UserCardSubject = { kind: SubjectTargetKind; id: string; displayNo: string; title: string | null };
 export type UserProfileScope = { profile: boolean; orders: boolean; resources: boolean };
 
-function subjectView(context: ContextView | null, state: ContextState): { label: string; value: string } {
+type SubjectView = {
+  label: string;
+  value: string;
+  /** 只有服务端给出业务展示号（且类型可识别）时才出现；其余分支不渲染任何跳转入口。 */
+  resolved?: UserCardSubject;
+};
+
+const SUBJECT_KIND_LABEL: Record<SubjectTargetKind, string> = { ORDER: "订单", ACCOUNT: "资源账号" };
+const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+function subjectTargetOf(value: unknown): { kind: SubjectTargetKind; id: string } | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as { kind?: unknown; id?: unknown };
+  const kind = row.kind === "ORDER" ? "ORDER" : row.kind === "ACCOUNT" ? "ACCOUNT" : null;
+  const id = typeof row.id === "string" && SAFE_ID.test(row.id) ? row.id : "";
+  return kind && id ? { kind, id } : null;
+}
+
+function subjectView(context: ContextView | null, state: ContextState): SubjectView {
   if (!context) {
     return {
       label: "关联对象",
       value: state === "loading" ? "正在读取关联对象…" : state === "denied" ? "当前账号无权读取关联对象" : "关联对象暂时不可读取",
     };
   }
-  if (context.subject.status === "absent") return { label: "关联对象", value: "尚未关联商品或订单" };
-  if (context.subject.status === "unresolved") {
-    // subject_ref 没有持久化类型，也没有业务单号；裸引用（可能是 UUID）不直接上屏。
+  const subject = context.subject ?? {};
+  if (subject.status === "absent") return { label: "关联对象", value: "尚未关联商品或订单" };
+  if (subject.status === "unresolved") {
+    // rawRef 没有持久化类型，也没有业务单号；裸引用（可能是 UUID）不直接上屏。
     return { label: "关联对象 · 类型待识别", value: "已关联引用（类型未识别）" };
+  }
+  if (subject.status === "resolved") {
+    const kind = subject.kind === "ORDER" ? "ORDER" : subject.kind === "ACCOUNT" ? "ACCOUNT" : null;
+    const displayNo = typeof subject.displayNo === "string" ? subject.displayNo.trim() : "";
+    // 没有类型或没有业务展示号就不是可展示的 resolved：不拿内部 id 冒充单号。
+    if (!kind || !displayNo) return { label: "关联对象", value: "关联对象类型暂未确认" };
+    const target = subjectTargetOf(subject.target);
+    const title = typeof subject.title === "string" && subject.title.trim() ? subject.title.trim() : null;
+    return {
+      label: `关联对象 · ${SUBJECT_KIND_LABEL[kind]}`,
+      value: displayNo,
+      resolved: { kind, id: target?.kind === kind ? target.id : "", displayNo, title },
+    };
   }
   return { label: "关联对象", value: "关联对象类型暂未确认" };
 }
@@ -83,13 +130,15 @@ function Fact({ label, value, permission }: { label: string; value: string; perm
   );
 }
 
-export function ConsultationUserCard({ consultationId, rowUserId, fallbackName, scope, request, onOpenProfile, showSubject = true }: {
+export function ConsultationUserCard({ consultationId, rowUserId, fallbackName, scope, request, onOpenProfile, onOpenSubject, showSubject = true }: {
   consultationId: string;
   rowUserId: string;
   fallbackName: string;
   scope: UserProfileScope;
   request: <T>(path: string) => Promise<T>;
   onOpenProfile?: (userId: string) => void;
+  /** 关联对象可跳转时由调用方决定路由；缺省只展示业务号，不给假入口。 */
+  onOpenSubject?: (target: { kind: SubjectTargetKind; id: string }, label: string) => void;
   /** 投诉摘要自己陈述关联订单/账号，卡片不再重复。 */
   showSubject?: boolean;
 }) {
@@ -214,7 +263,13 @@ export function ConsultationUserCard({ consultationId, rowUserId, fallbackName, 
       </CardContent>
       {showSubject ? <CardFooter className="justify-between gap-3 border-t px-4 py-2.5">
         <span className="shrink-0 text-xs text-muted-foreground">{subject.label}</span>
-        <span className="im-rail-value min-w-0 text-sm font-medium">{subject.value}</span>
+        <span className="grid min-w-0 justify-items-end gap-0.5 text-right" data-subject-status={subject.resolved ? "resolved" : undefined} data-subject-kind={subject.resolved?.kind}>
+          {subject.resolved && subject.resolved.id && onOpenSubject
+            ? <Button variant="link" size="sm" className="h-auto max-w-full px-0 text-sm font-medium" data-action="open-subject"
+              onClick={() => { const target = subject.resolved; if (target) onOpenSubject({ kind: target.kind, id: target.id }, target.displayNo); }}>{subject.resolved.displayNo}</Button>
+            : <span className="im-rail-value min-w-0 max-w-full truncate text-sm font-medium" data-subject-display-no={subject.resolved ? subject.resolved.displayNo : undefined}>{subject.value}</span>}
+          {subject.resolved?.title ? <span className="max-w-full truncate text-[11px] text-muted-foreground" title={subject.resolved.title} data-subject-title>{subject.resolved.title}</span> : null}
+        </span>
       </CardFooter> : null}
     </Card>
   );

@@ -20,6 +20,8 @@ globalThis.CustomEvent = browser.CustomEvent;
 globalThis.getComputedStyle = browser.getComputedStyle.bind(browser);
 globalThis.requestAnimationFrame = browser.requestAnimationFrame.bind(browser);
 globalThis.cancelAnimationFrame = browser.cancelAnimationFrame.bind(browser);
+// recharts 的 ResponsiveContainer 需要 ResizeObserver；评分分布图现在也走 recharts。
+globalThis.ResizeObserver = globalThis.ResizeObserver ?? class { observe() {} unobserve() {} disconnect() {} };
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const { createRoot } = await import("react-dom/client");
 
@@ -462,12 +464,15 @@ test("the dashboard renders today's rating count, average, distribution and per-
   assert.match(panel.querySelector('[data-rating-metric="average"]').textContent, /^4\.6平均分$/, "the average keeps one decimal");
   assert.doesNotMatch(panel.textContent, /今日暂无评价/);
 
-  const scores = [...panel.querySelectorAll("[data-rating-score]")].map((node) => node.dataset.ratingScore);
-  assert.deepEqual(scores, ["5", "4", "3", "2", "1"], "distribution is shown from five stars down to one");
-  assert.match(panel.querySelector('[data-rating-score="5"]').textContent, /5 星\s*5/);
-  assert.match(panel.querySelector('[data-rating-score="3"]').textContent, /3 星\s*1/);
-  assert.match(panel.querySelector('[data-rating-score="1"]').textContent, /1 星\s*0/);
-  assert.equal(panel.querySelector('[data-rating-score="5"] .im-wb-mgmt-bar').style.width, "100%", "the largest bucket fills the bar");
+  // 星级分布只在一处画：看板的「今日评分分布」图。卡内 CSS 条形已合并删除，避免两套渲染漂移。
+  assert.equal(panel.querySelectorAll("[data-rating-score]").length, 0, "卡内不再重复画分布");
+  assert.match(panel.textContent, /星级分布在下方/);
+  const chart = rootNode.querySelector('[data-chart="rating-distribution"]');
+  assert.equal(chart.dataset.count, "7", "图表读的是同一份服务端计数");
+  const summary = chart.querySelector('[role="img"]').getAttribute("aria-label");
+  assert.match(summary, /5 星 5 条/, "图表自带无障碍数值，删掉条形也不丢数字");
+  assert.match(summary, /3 星 1 条/);
+  assert.match(summary, /1 星 0 条/);
 
   const agentA = panel.querySelector('[data-rating-agent="admin-a"]');
   assert.ok(agentA, "each agent keeps a row");
@@ -489,7 +494,8 @@ test("no ratings today shows 今日暂无评价 without a fabricated average", a
   assert.equal(panel.dataset.count, "0");
   assert.equal(panel.querySelector('[data-rating-empty]')?.textContent, "今日暂无评价");
   assert.equal(panel.querySelectorAll("[data-rating-metric]").length, 0, "no average or count metric is invented");
-  assert.equal(panel.querySelectorAll(".im-wb-mgmt-bar").length, 0, "no zero-height distribution bars are painted");
+  assert.equal(panel.querySelectorAll("[data-rating-score]").length, 0, "没有评价就不画分布行");
+  assert.match(rootNode.querySelector('[data-chart="rating-distribution"]').textContent, /今日暂无评价/);
   assert.equal(panel.querySelectorAll("[data-rating-agent]").length, 0);
   assert.doesNotMatch(panel.textContent, /0\.0|平均分/);
 });

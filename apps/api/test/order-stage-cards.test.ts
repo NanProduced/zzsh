@@ -3,7 +3,10 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { test } from "node:test";
 
-import { stageCardWindowReason } from "../src/im/order-stage-cards";
+import { settledNoticeText, stageCardDeliveryBlock, stageCardWindowReason } from "../src/im/order-stage-cards";
+import {
+  projectStageCardAttention, projectStageCardQueue, readStageCardFailures, readStageCardsByOrderIds, requeueStageCard,
+} from "../src/im/order-team-access";
 import { InMemoryMessageTransport } from "./im-local-fixtures";
 
 const HOUR = 60 * 60 * 1_000;
@@ -55,7 +58,10 @@ test("opening cards are materialized from a draft opening, not only after both a
 test("a new order group gets one bot welcome before the opening card", () => {
   const source = readFileSync(resolve("src/im/order-stage-cards.ts"), "utf8");
   assert.match(source, /ORDER_WELCOME/);
-  assert.match(source, /NOT EXISTS\(SELECT 1 FROM zzsh_order\.im_order_activity/);
+  // The activity guard moved out of production and into delivery: the ledger row must exist so a
+  // welcome that could not be the group's first message is recorded as SKIPPED instead of vanishing.
+  assert.match(source, /EXISTS\(SELECT 1 FROM zzsh_order\.im_order_activity act WHERE act\.order_id = sc\.order_id\) AS has_activity/);
+  assert.doesNotMatch(source, /NOT EXISTS\(SELECT 1 FROM zzsh_order\.im_order_activity/);
   assert.match(source, /WHEN 'ORDER_WELCOME' THEN 0/);
   assert.match(source, /订单群已建立/);
 });
@@ -77,4 +83,137 @@ test("0110 records one card per stage with a narrow runtime update grant", () =>
   const acl = readFileSync(resolve("src/database/business-migrations.ts"), "utf8");
   assert.match(acl, /REVOKE UPDATE ON TABLE zzsh_order\.im_order_stage_card FROM \$\{runtimeUser\}/);
   assert.match(acl, /GRANT UPDATE \(state,attempt_count,next_attempt_at,lease_until,lease_token_hash,sent_at,failure_class,updated_at\)\s+ON TABLE zzsh_order\.im_order_stage_card/);
+});
+
+test("a produced card is skipped, not replayed, once its stage is gone", () => {
+  const welcome = { kind: "ORDER_WELCOME" as const, postedAt: null, now: POSTED_MS };
+  assert.equal(stageCardDeliveryBlock({ ...welcome, orderStatus: "PAID", hasActivity: false }), null);
+  assert.equal(stageCardDeliveryBlock({ ...welcome, orderStatus: "PAID", hasActivity: true }), "WELCOME_SUPERSEDED");
+  assert.equal(stageCardDeliveryBlock({ ...welcome, orderStatus: "COMPLETED", hasActivity: false }), "ORDER_ENDED");
+  assert.equal(stageCardDeliveryBlock({ ...welcome, orderStatus: "CANCELLED", hasActivity: false }), "ORDER_ENDED");
+
+  const opening = { kind: "ORDER_OPENING" as const, postedAt: POSTED, hasActivity: false, now: POSTED_MS };
+  assert.equal(stageCardDeliveryBlock({ ...opening, orderStatus: "PAID" }), null);
+  assert.equal(stageCardDeliveryBlock({ ...opening, orderStatus: "COMPLETED" }), "STAGE_SUPERSEDED");
+  assert.equal(stageCardDeliveryBlock({ ...opening, orderStatus: "CANCELLED" }), "ORDER_CANCELLED");
+  assert.equal(stageCardDeliveryBlock({ ...opening, orderStatus: "PENDING_PAYMENT" }), "ORDER_NOT_PAID");
+  assert.equal(stageCardDeliveryBlock({ ...opening, orderStatus: "COMPLETED", now: POSTED_MS + 72 * HOUR }), "STAGE_SUPERSEDED");
+
+  const ending = { kind: "ORDER_ENDING" as const, postedAt: POSTED, hasActivity: true, now: POSTED_MS };
+  assert.equal(stageCardDeliveryBlock({ ...ending, orderStatus: "PAID" }), null);
+  assert.equal(stageCardDeliveryBlock({ ...ending, orderStatus: "CANCELLED" }), "ORDER_CANCELLED");
+
+  const settled = { kind: "ORDER_SETTLED" as const, postedAt: POSTED, hasActivity: true, now: POSTED_MS };
+  assert.equal(stageCardDeliveryBlock({ ...settled, orderStatus: "COMPLETED" }), null);
+  assert.equal(stageCardDeliveryBlock({ ...settled, orderStatus: "COMPLETED", now: POSTED_MS + 72 * HOUR }), "SEND_WINDOW_CLOSED");
+  assert.equal(stageCardDeliveryBlock({ ...settled, orderStatus: "PAID" }), "STAGE_NOT_REACHED");
+  assert.equal(stageCardDeliveryBlock({ ...settled, orderStatus: "CANCELLED" }), "STAGE_NOT_REACHED");
+});
+
+test("the settlement notice names the Beijing posting time and never an amount", () => {
+  const text = settledNoticeText(POSTED);
+  assert.match(text, /结算完成/);
+  assert.match(text, /过账时间 2026-10-29 08:00/);
+  assert.match(text, /订单页/);
+  assert.match(text, /客服/);
+  assert.doesNotMatch(text, /¥\d/);
+  assert.doesNotMatch(text, /\d+\.\d{2} 元/);
+  assert.doesNotMatch(text, /买家|宄户/);
+  assert.match(settledNoticeText(null), /时间暂不可用/);
+});
+
+test("stage-card attention keeps an unknown failure code verbatim", () => {
+  const base = { kind: "ORDER_SETTLED", state: "PENDING", attemptCount: "2", nextAttemptAt: POSTED, sentAt: null, updatedAt: POSTED };
+  const known = projectStageCardAttention({ ...base, failureClass: "SEND_FAILED" });
+  assert.equal(known.kindLabel, "结算完成");
+  assert.equal(known.failureLabel, "通道发送失败（云信返回失败或超时）");
+  assert.equal(known.attemptCount, 2);
+  assert.equal(known.retryable, true, "the worker keeps retrying a retryable code");
+  assert.equal(known.needsAttention, true);
+
+  const unknown = projectStageCardAttention({ ...base, failureClass: "WEIRD_UPSTREAM_CODE" });
+  assert.equal(unknown.failureClass, "WEIRD_UPSTREAM_CODE");
+  assert.equal(unknown.failureLabel, "WEIRD_UPSTREAM_CODE", "an unknown code is never folded into a guess");
+  assert.equal(unknown.retryable, false);
+
+  const skipped = projectStageCardAttention({ kind: "ORDER_OPENING", state: "SKIPPED", failureClass: "STAGE_SUPERSEDED", attemptCount: 1 });
+  assert.equal(skipped.failureLabel, "订单已结束，前序阶段卡不再补发");
+  assert.equal(skipped.retryable, false, "a superseded stage is a fact, not a retryable failure");
+  assert.equal(skipped.needsAttention, true);
+
+  const sent = projectStageCardAttention({ kind: "ORDER_WELCOME", state: "SENT", failureClass: null, sentAt: POSTED });
+  assert.equal(sent.needsAttention, false);
+  assert.equal(sent.failureLabel, null);
+  assert.equal(sent.retryable, false);
+});
+
+test("the queue badge degrades to zeros when the roster predates stage cards", () => {
+  assert.deepEqual(projectStageCardQueue(undefined, undefined), { pending: 0, failed: 0, skipped: 0, attention: null });
+  const card = { kind: "ORDER_ENDING", state: "SKIPPED", failureClass: "ORDER_CANCELLED", attemptCount: 1 };
+  assert.deepEqual(projectStageCardQueue(card, { pending: "0", failed: "1", skipped: "2" }), {
+    pending: 0, failed: 1, skipped: 2, attention: projectStageCardAttention(card),
+  });
+});
+
+test("stage cards are read per order and never across Apps", async () => {
+  const seen: Array<{ sql: string; params: unknown[] }> = [];
+  const client = { query: async (sql: string, params?: unknown[]) => { seen.push({ sql, params: params ?? [] });
+    return { rows: [
+      { orderId: "o1", kind: "ORDER_WELCOME", state: "SENT", attemptCount: 1, sentAt: POSTED, updatedAt: POSTED, displayNo: "ZZ-1", orderStatus: "PAID" },
+      { orderId: "o1", kind: "ORDER_OPENING", state: "SKIPPED", attemptCount: 0, failureClass: "ORDER_CANCELLED", updatedAt: POSTED, displayNo: "ZZ-1", orderStatus: "CANCELLED" },
+      { orderId: "o2", kind: "ORDER_SETTLED", state: "PENDING", attemptCount: 0 },
+    ] }; } };
+  const byOrder = await readStageCardsByOrderIds(client as never, "app_live", ["o1", "o1", "o2"]);
+  assert.equal(seen.length, 1);
+  assert.match(seen[0]!.sql, /WHERE sc\.app_id=\$1 AND sc\.order_id=ANY\(\$2::text\[\]\)/);
+  assert.deepEqual(seen[0]!.params, ["app_live", ["o1", "o2"]], "order ids are deduplicated inside one query");
+  assert.equal(byOrder.get("o1")?.length, 2);
+  assert.equal(byOrder.get("o1")![0]!.kindLabel, "订单群建立");
+  assert.equal(byOrder.get("o2")![0]!.failureLabel, null);
+
+  const empty = await readStageCardsByOrderIds(client as never, "app_live", []);
+  assert.equal(empty.size, 0);
+  assert.equal(seen.length, 1, "an empty page reads nothing");
+});
+
+test("the failure list pages by updated_at with a bounded App scope", async () => {
+  const seen: Array<{ sql: string; params: unknown[] }> = [];
+  const first = { id: "im_card_b", orderId: "o2", kind: "ORDER_SETTLED", state: "PENDING", attemptCount: 3,
+    failureClass: "SEND_FAILED", nextAttemptAt: POSTED, updatedAt: POSTED };
+  const second = { id: "im_card_a", orderId: "o1", kind: "ORDER_OPENING", state: "SKIPPED", attemptCount: 1,
+    failureClass: "STAGE_SUPERSEDED", updatedAt: "2026-10-28T00:00:00.000Z" };
+  const client = { query: async (sql: string, params?: unknown[]) => { seen.push({ sql, params: params ?? [] });
+    if (sql.includes("count(*) AS total")) return { rows: [{ total: "9", pending: "2", sending: "0", skipped: "4", sent: "3", failed: "2" }] };
+    return { rows: [first, second] }; } };
+  const page = await readStageCardFailures(client as never, { appId: "app_live", limit: 1 });
+  assert.equal(page.items.length, 1);
+  assert.equal(page.items[0]!.failureLabel, "通道发送失败（云信返回失败或超时）");
+  assert.match(seen[0]!.sql, /WHERE sc\.app_id=\$1 AND sc\.state<>'SENT'/);
+  assert.deepEqual(seen[0]!.params, ["app_live", 2, null, null]);
+  assert.equal(page.nextCursor, POSTED + "|im_card_b");
+  assert.deepEqual(page.summary, { total: 9, pending: 2, sending: 0, skipped: 4, sent: 3, failed: 2 });
+
+  const next = await readStageCardFailures(client as never, { appId: "app_live", limit: 20, cursor: page.nextCursor });
+  assert.deepEqual(seen[2]!.params.slice(2), [POSTED, "im_card_b"], "the cursor becomes a keyset bound");
+  assert.equal(next.nextCursor, null);
+  await assert.rejects(readStageCardFailures(client as never, { appId: "app_live", cursor: "not-a-cursor" }), /INVALID_CURSOR/);
+  await assert.rejects(readStageCardFailures(client as never, { appId: "app_live", limit: 0 }), /INVALID_LIMIT/);
+});
+
+test("a human retry only requeues cards the worker still owns", async () => {
+  const script = (rowCount: number, state?: string) => ({ query: async (sql: string) => {
+    if (sql.startsWith("UPDATE") && sql.includes("failure_class IS NOT NULL")) return { rowCount };
+    if (sql.startsWith("UPDATE")) return { rowCount: 0 };
+    return { rows: state ? [{ state }] : [] }; } });
+  const target = { appId: "app_live", orderId: "o1", kind: "ORDER_SETTLED" };
+  assert.deepEqual(await requeueStageCard(script(1) as never, target), { requeued: true, outcome: "RETRY_SCHEDULED" });
+  assert.deepEqual(await requeueStageCard(script(0, "SENT") as never, target), { requeued: false, outcome: "ALREADY_SENT" });
+  assert.deepEqual(await requeueStageCard(script(0, "SKIPPED") as never, target), { requeued: false, outcome: "SKIPPED_TERMINAL" });
+  assert.deepEqual(await requeueStageCard(script(0, "PENDING") as never, target), { requeued: false, outcome: "ALREADY_PENDING" });
+  assert.deepEqual(await requeueStageCard(script(0) as never, target), { requeued: false, outcome: "NOT_FOUND" });
+  const seen: string[] = [];
+  await requeueStageCard({ query: async (sql: string) => { seen.push(sql); return { rowCount: 0, rows: [] }; } } as never, target);
+  assert.match(seen[0]!, /WHERE app_id=\$1 AND order_id=\$2 AND kind=\$3/);
+  assert.match(seen[0]!, /state='PENDING'/);
+  assert.doesNotMatch(seen[0]!, /state='SENT'/, "a sent card is never rewritten");
 });

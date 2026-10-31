@@ -77,7 +77,13 @@ test("valid worker configuration returns the assembled fields and defaults", () 
     SUPPORT_DISPATCH_INTERVAL_MS: "3000",
     SUPPORT_DISPATCH_BATCH_LIMIT: "7",
   });
-  assert.deepEqual(supportDispatch.supportDispatch, { appId: "test-app", intervalMs: 3000, batchLimit: 7, autoAssignConsultations: true });
+  assert.deepEqual(supportDispatch.supportDispatch, {
+    appId: "test-app", intervalMs: 3000, batchLimit: 7, autoAssignConsultations: true,
+    // Defaults restored with the capacity/first-response facts: 3 follows the historical 0032
+    // capacity default, 120s matches the order-group first-response reminder window.
+    concurrencyLimit: 3, firstResponseSeconds: 120,
+  });
+
   assert.equal(supportDispatch.orderTeams, undefined);
 
   const consultationsOff = loadConfig({
@@ -85,7 +91,7 @@ test("valid worker configuration returns the assembled fields and defaults", () 
     SUPPORT_DISPATCH_ENABLED: "true",
     SUPPORT_DISPATCH_AUTO_ASSIGN_CONSULTATIONS: "false",
   });
-  assert.deepEqual(consultationsOff.supportDispatch, { appId: "test-app", intervalMs: 15000, batchLimit: 5, autoAssignConsultations: false });
+  assert.deepEqual(consultationsOff.supportDispatch, { appId: "test-app", intervalMs: 15000, batchLimit: 5, autoAssignConsultations: false, concurrencyLimit: 3, firstResponseSeconds: 120 });
 
   const both = loadConfig({
     ...providerEnv(),
@@ -95,7 +101,7 @@ test("valid worker configuration returns the assembled fields and defaults", () 
     SUPPORT_DISPATCH_ENABLED: "true",
   });
   assert.deepEqual(both.orderTeams, { membersLimit: 2000, intervalMs: 15000, batchLimit: 5, escalationEnabled: true });
-  assert.deepEqual(both.supportDispatch, { appId: "test-app", intervalMs: 15000, batchLimit: 5, autoAssignConsultations: true });
+  assert.deepEqual(both.supportDispatch, { appId: "test-app", intervalMs: 15000, batchLimit: 5, autoAssignConsultations: true, concurrencyLimit: 3, firstResponseSeconds: 120 });
 });
 
 test("dependent worker settings without their enable switch are rejected", () => {

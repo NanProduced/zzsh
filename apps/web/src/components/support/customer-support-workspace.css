@@ -414,3 +414,35 @@ html.dark .support-kbd,html[data-theme="dark"] .support-kbd,:root:not([data-them
 .support-order-popover-header { display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--color-border-subtle); }
 .support-order-popover-header strong { font-size:12px;font-weight:600; }
 .support-order-popover-count { font-size:11px;color:var(--color-text-muted); }
+
+/* W4·窄屏：订单群面板把「返回会话/关闭」绝对定位压在群头右上，390px 下两个按钮合计超过给 header
+   留的 125px，订单号与阶段 chip 会被压掉。窄屏改成文档流一行，两端对齐，不再遮内容。 */
+@media(max-width:760px){
+ .support-order-actions { position:static; padding:8px 12px; border-bottom:1px solid var(--color-border-subtle); background:var(--color-bg-surface); }
+ .support-order-actions .support-back,.support-order-actions .support-icon-button { flex:none; }
+ .support-unified .order-team-detail>header { padding-right:0; }
+}
+
+/* W4·一致性：只在客服弹窗内把订单群气泡/输入框对齐到客服窗口的 token。
+   packages/ui 的基线不动，管理端与独立订单页仍然按自己的主题走。 */
+.support-unified .order-team-messages p { padding:6px 10px; border-color:rgba(0,0,0,.09); border-radius:4px 8px 8px 8px; background:#ffffff; color:#1e293b; box-shadow:0 1px 3px rgba(0,0,0,.05); }
+.support-unified .order-team-messages li[data-self="true"] p { border-color:rgba(229,169,60,.45); border-radius:8px 4px 8px 8px; background:#fff8eb; color:#0f172a; box-shadow:0 1px 3px rgba(229,169,60,.08); }
+html.dark .support-unified .order-team-messages p,
+html[data-theme="dark"] .support-unified .order-team-messages p,
+:root:not([data-theme="light"]) .support-unified .order-team-messages p { border-color:rgba(255,255,255,.12); background:#161d28; color:#f1f5f9; box-shadow:0 2px 6px rgba(0,0,0,.35); }
+html.dark .support-unified .order-team-messages li[data-self="true"] p,
+html[data-theme="dark"] .support-unified .order-team-messages li[data-self="true"] p,
+:root:not([data-theme="light"]) .support-unified .order-team-messages li[data-self="true"] p { border-color:rgba(229,169,60,.45); background:linear-gradient(135deg,rgba(229,169,60,.24),rgba(200,140,30,.17)); color:#ffffff; box-shadow:0 2px 6px rgba(0,0,0,.35); }
+.support-unified .order-team-composer-box { padding:8px 12px 6px; border-radius:8px; border-color:var(--color-border-subtle); background:var(--color-bg-canvas); }
+.support-unified .order-team-composer-box:focus-within { border-color:var(--color-accent-brand); box-shadow:0 0 0 1px color-mix(in srgb,var(--color-accent-brand) 45%,transparent); }
+.support-unified .order-team-composer-tools { gap:6px; }
+.support-unified .order-team-panel .order-team-tool { width:28px; height:28px; border-radius:4px; }
+.support-unified .order-team-panel .order-team-send { height:26px; padding:0 14px; border-radius:4px; font-size:12px; font-weight:500; }
+.support-unified .order-team-composer-hint { font-size:11px; }
+/* 触屏：客服窗口 760px 断点把工具/发送抬到 44px，订单群输入框跟同一档，别留 40px 的夹生尺寸。 */
+@media(max-width:768px){
+ .support-unified .order-team-panel .order-team-tool { width:44px; height:44px; border-radius:6px; }
+ .support-unified .order-team-panel .order-team-emoji-grid { grid-template-columns:repeat(8,40px); gap:4px; padding:8px; }
+ .support-unified .order-team-panel .order-team-emoji-item { width:40px; height:40px; font-size:20px; }
+ .support-unified .order-team-panel .order-team-send { height:44px; padding:0 18px; border-radius:6px; font-size:13px; }
+}
