@@ -1,4 +1,4 @@
-import { admitTestDatabase, ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
+import { admitTestDatabase, assertFreshRegressionRun } from "./database-test-support";
 import { strict as assert } from "node:assert";
 import { createHmac, randomBytes } from "node:crypto";
 import { test } from "node:test";
@@ -11,10 +11,11 @@ import { assertBusinessRuntimeIdentity, createBusinessPool } from "../src/databa
 import { runBusinessMigrations } from "../src/database/business-migrations";
 import { WORKSPACE_LAYOUT_LOCK_PREFIX } from "../src/auth/admin-workspace-layout";
 import { loadConfig, type AppConfig } from "../src/config/config";
+import { assertNotProtectedTarget, REGRESSION_ALLOW_NEW_RESOURCE, REGRESSION_DATABASE, REGRESSION_MARKER, REGRESSION_MIGRATION_USER, REGRESSION_RESOURCE_LOCK_KEY, REGRESSION_ROLE_PREFIX, REGRESSION_RUNTIME_USER, regressionOidBinding } from "../src/config/test-resource";
 
-const DEFAULT_DATABASE = "zzsh_test_m2_workspace_layout";
-const RESOURCE_MARKER = "zzsh:m2-workspace-layout-test:v1";
-const LOCK_KEY = "805014";
+const DEFAULT_DATABASE = REGRESSION_DATABASE;
+const RESOURCE_MARKER = REGRESSION_MARKER;
+const LOCK_KEY = REGRESSION_RESOURCE_LOCK_KEY;
 const USER_ORIGIN = "http://127.0.0.1:3100";
 const ADMIN_ORIGIN = "http://127.0.0.1:3101";
 const API_ORIGIN = "http://127.0.0.1:3102";
@@ -71,12 +72,12 @@ function roleMarker(databaseName: string, role: "migration" | "runtime"): string
 }
 
 function makeResources(): Resources {
-  const databaseName = process.env.M2_WORKSPACE_LAYOUT_TEST_DB_NAME?.trim() || DEFAULT_DATABASE;
-  assert.notEqual(databaseName, "zzsh_dev");
-  const migrationUser = safeIdentifier(process.env.M2_WORKSPACE_LAYOUT_TEST_MIGRATION_USER?.trim() || "zzsh_m2_layout_migration", "migration user");
-  const runtimeUser = safeIdentifier(process.env.M2_WORKSPACE_LAYOUT_TEST_RUNTIME_USER?.trim() || "zzsh_m2_layout_runtime", "runtime user");
+  const databaseName = DEFAULT_DATABASE;
+  assertNotProtectedTarget(databaseName);
+  const migrationUser = safeIdentifier(REGRESSION_MIGRATION_USER, "migration user");
+  const runtimeUser = safeIdentifier(REGRESSION_RUNTIME_USER, "runtime user");
   assert.notEqual(migrationUser, runtimeUser);
-  if (!migrationUser.startsWith("zzsh_m2_") || !runtimeUser.startsWith("zzsh_m2_")) throw new Error("workspace layout test roles must use the isolated zzsh_m2_ prefix");
+  if (!migrationUser.startsWith(REGRESSION_ROLE_PREFIX) || !runtimeUser.startsWith(REGRESSION_ROLE_PREFIX)) throw new Error("workspace layout test roles must use the isolated regression role prefix");
   const maintenanceUser = process.env.M2_WORKSPACE_LAYOUT_TEST_MAINTENANCE_USER ?? process.env.DB_USER;
   const baseEnv = {
     ...process.env,
@@ -135,8 +136,8 @@ async function resourceGuard(pool: Pool): Promise<PoolClient> {
 }
 
 async function ensureDatabase(pool: Pool, resources: Resources): Promise<void> {
-  const existing = await pool.query<{ owner: string; allowConnections: boolean; isTemplate: boolean; comment: string | null }>(
-    "SELECT pg_get_userbyid(d.datdba) AS owner, d.datallowconn AS \"allowConnections\", d.datistemplate AS \"isTemplate\", shobj_description(d.oid, 'pg_database') AS comment FROM pg_database d WHERE d.datname = $1",
+  const existing = await pool.query<{ owner: string; allowConnections: boolean; isTemplate: boolean; databaseOid: string | null; comment: string | null }>(
+    "SELECT pg_get_userbyid(d.datdba) AS owner, d.datallowconn AS \"allowConnections\", d.datistemplate AS \"isTemplate\", d.oid::text AS \"databaseOid\", shobj_description(d.oid, 'pg_database') AS comment FROM pg_database d WHERE d.datname = $1",
     [resources.databaseName],
   );
   const admission = admitTestDatabase({
@@ -147,8 +148,11 @@ async function ensureDatabase(pool: Pool, resources: Resources): Promise<void> {
     isTemplate: existing.rows[0]?.isTemplate,
     expectedOwner: resources.maintenance.database.user,
     expectedMarker: RESOURCE_MARKER,
+    databaseOid: existing.rows[0]?.databaseOid,
+    expectedOid: regressionOidBinding(),
+    requireOidOnReuse: true,
     databaseName: resources.databaseName,
-    allowFlag: "ADMIN_WORKSPACE_LAYOUT_TEST_ALLOW_NEW_RESOURCE",
+    allowFlag: REGRESSION_ALLOW_NEW_RESOURCE,
   });
   if (admission === "CREATE") {
     await pool.query("CREATE DATABASE " + quotedIdentifier(resources.databaseName, "test database") + " OWNER " + quotedIdentifier(resources.maintenance.database.user, "maintenance user"));
@@ -207,7 +211,7 @@ async function prepareOwnership(pool: Pool, resources: Resources): Promise<void>
 }
 
 async function resetIsolatedData(pool: Pool): Promise<void> {
-  await pool.query(ISOLATED_BUSINESS_DATA_TRUNCATE);
+  await assertFreshRegressionRun(pool);
 }
 
 function base32Decode(value: string): Buffer {
@@ -326,7 +330,7 @@ test("admin workspace layout is personal, versioned, and rejected when locked or
     assert.equal(bootstrap.response.status, 200);
     const boss = await activate(base, bootstrap.body?.username as string, bossInitialPassword);
 
-    const created = await request(base, "/api/v1/admin/security/admins/create", { name: "低权限布局员", allowPermissions: [] }, boss.jar, ADMIN_ORIGIN);
+    const created = await request(base, "/api/v1/admin/security/admins/create", { mode: "ALL_GAMES", name: "低权限布局员", allowPermissions: [] }, boss.jar, ADMIN_ORIGIN);
     assert.equal(created.response.status, 200);
     const staff = await activate(base, created.body?.username as string, created.body?.temporaryPassword as string);
 

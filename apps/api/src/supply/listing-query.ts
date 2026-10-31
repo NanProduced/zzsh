@@ -4,6 +4,17 @@ import { DELTA_GRADING_DIVISIONS, isDeltaGradingDivision } from "./delta-rental"
 
 export const LISTING_SEARCH_MAX_LENGTH = 120;
 
+export function isAccountMediaBinding(
+  asset: { ownership_kind: unknown; purpose: unknown; account_id: unknown; owner_user_id: unknown; game_id: unknown },
+  account: { id: unknown; owner_user_id: unknown; game_id: unknown },
+): boolean {
+  return typeof account.id === "string" && account.id.length > 0 &&
+    typeof account.owner_user_id === "string" && account.owner_user_id.length > 0 &&
+    typeof account.game_id === "string" && account.game_id.length > 0 &&
+    asset.ownership_kind === "USER_SUPPLY" && (asset.purpose === "ACCOUNT_DISPLAY" || asset.purpose === "ACCOUNT_EVIDENCE") &&
+    asset.account_id === account.id && asset.owner_user_id === account.owner_user_id && asset.game_id === account.game_id;
+}
+
 // Keep public, confirmation and order consumers on the same publication contract.
 export function effectivePublicationStateSql(versionAlias = "v", publicationAlias = "p"): string {
   return `((${versionAlias}.review_state='PUBLISHED' AND ${publicationAlias}.source='OWNER_DIRECT') OR (${versionAlias}.review_state='APPROVED' AND ${publicationAlias}.source='LEGACY_APPROVED'))`;

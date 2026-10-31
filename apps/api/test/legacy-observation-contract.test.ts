@@ -134,6 +134,7 @@ class FakeClient {
   readonly maps = new Map<string, { source_digest: string; account_id: string; version_id: string; evidence_ref: string }>();
   readonly versions = new Map<string, Version>();
   readonly children = new Map<string, ChildRow[]>();
+  readonly mediaAssets = new Map([["asset-a", { ownership_kind: "USER_SUPPLY", purpose: "ACCOUNT_DISPLAY", account_id: "account-1", owner_user_id: "user-1", game_id: "game-delta", content_hash: "a".repeat(64) }]]);
   readonly idempotency = new Map<string, { requestFingerprint: string; responseStatus: number; responseBody: unknown; publishRequired: boolean }>();
   readonly queries: string[] = [];
   nativeInsertBindings: unknown[] | undefined;
@@ -208,6 +209,16 @@ class FakeClient {
     if (sql.startsWith('SELECT asset_id AS "assetId"')) {
       const rows = (this.children.get("listing_media") ?? []).filter((row) => row.version_id === String(values[0]));
       return { rows: rows.map(({ version_id: _versionId, asset_id: assetId, position }) => ({ assetId, position }) as T), rowCount: rows.length };
+    }
+    if (sql.startsWith('SELECT m.asset_id AS "assetId"')) {
+      const version = this.versions.get(String(values[0]));
+      const owner = version ? this.accounts.get(version.account_id) : undefined;
+      const rows = (this.children.get("listing_media") ?? []).filter(row => row.version_id === String(values[0])).map(row => {
+        const asset = this.mediaAssets.get(String(row.asset_id));
+        return { assetId: row.asset_id, position: row.position, purpose: asset?.purpose, byteHash: asset?.content_hash, ...asset,
+          binding_account_id: owner?.id, binding_owner_user_id: owner?.owner_user_id, binding_game_id: owner?.game_id } as T;
+      });
+      return { rows, rowCount: rows.length };
     }
     if (sql.includes("COALESCE(MAX(sequence)")) return { rows: [{ next: "2" } as T], rowCount: 1 };
     if (sql.startsWith("INSERT INTO zzsh_supply.listing_version")) {

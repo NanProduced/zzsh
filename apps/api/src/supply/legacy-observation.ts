@@ -8,6 +8,7 @@ import {
 import {
   assertEditable,
   lockPublishingAccount,
+  readAccountMediaBindings,
   type PublishingAccount,
   type SupplyGateReader,
 } from "./publishing";
@@ -733,6 +734,7 @@ export async function resolveLegacyObservationToDraft(
           },
         };
       }
+      await readAccountMediaBindings(client, old.id);
       const nextSequence = (
         await client.query<{ next: string }>(
           `SELECT (COALESCE(MAX(sequence),0)+1)::text AS next FROM zzsh_supply.listing_version WHERE account_id=$1`,

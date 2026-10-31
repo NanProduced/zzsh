@@ -242,7 +242,7 @@ function legacyProjectionClient(row: Record<string, unknown>) {
 
 function legacyProjectionRow(overrides: Record<string, unknown> = {}) {
   return {
-    id: "account_1", game_id: "game-1", game_code: "delta", game_name: "三角洲行动", version_id: "version-1",
+    id: "account_1", owner_user_id: "owner-1", game_id: "game-1", game_code: "delta", game_name: "三角洲行动", version_id: "version-1",
     source_status: 3, owner_paused: false,
     title: "历史资料待核实", description: null,
     attributes: {},
@@ -275,6 +275,19 @@ test("legacy public listing projection stays read only and leaks no private evid
   // Mode is unknown for legacy rows: it is dropped, never defaulted to ordinary/fast.
   assert.equal(Object.hasOwn(listing as Record<string, unknown>, "rentalMode"), false);
   assert.equal(wire.includes("rentalMode"), false);
+});
+
+test("historical media uses the same account identity guard and keeps missing pictures readable", async () => {
+  const own = { assetId: "own", position: 0, purpose: "ACCOUNT_DISPLAY", ownership_kind: "USER_SUPPLY", account_id: "account_1", owner_user_id: "owner-1", game_id: "game-1" };
+  for (const patch of [null, { owner_user_id: "foreign" }, { account_id: "foreign" }, { game_id: "foreign" }, { ownership_kind: "PLATFORM_CATALOG" }]) {
+    const base = legacyProjectionClient(legacyProjectionRow());
+    const rows = patch === null ? [own] : [{ ...own, ...patch }];
+    const client = { query: async (sql: string, args: unknown[]) => sql.includes('SELECT m.asset_id AS "assetId"') ? { rows, rowCount: rows.length } : base.query(sql, args) } as unknown as PoolClient;
+    const listing = await readLegacyListing(client, "account_1");
+    assert.deepEqual(listing.media, patch === null ? [{ assetId: "own", position: 0, url: "/api/v1/supply/listings/account_1/media/own" }] : []);
+    assert.equal(listing.source, "LEGACY_READ_ONLY"); assert.equal(listing.canCreateOrder, false);
+    assert(!JSON.stringify(listing).includes("foreign"));
+  }
 });
 
 test("legacy public read never chooses a private current native draft over its frozen observation", async () => {

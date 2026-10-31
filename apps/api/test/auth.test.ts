@@ -1,4 +1,4 @@
-import { admitTestDatabase, ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
+import { admitTestDatabase, assertFreshRegressionRun } from "./database-test-support";
 import { strict as assert } from "node:assert";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { test } from "node:test";
@@ -13,15 +13,19 @@ import { createFakeRealNameProvider, type FakeRealNameScenario, type RealNamePro
 import { assertBusinessMigrationIdentity, assertBusinessRuntimeIdentity, createBusinessPool } from "../src/database/business";
 import { runBusinessMigrations } from "../src/database/business-migrations";
 import { loadConfig, type AppConfig } from "../src/config/config";
+import { assertNotProtectedTarget, registeredException, REGRESSION_ALLOW_NEW_RESOURCE, REGRESSION_DATABASE, REGRESSION_MARKER, REGRESSION_MIGRATION_USER, REGRESSION_RESOURCE_LOCK_KEY, REGRESSION_ROLE_PREFIX, REGRESSION_RUNTIME_USER, regressionOidBinding } from "../src/config/test-resource";
+
 import { runUserSecurityChecks } from "./user-security-checks";
+import { runAuthLegalChecks } from "./auth-legal-checks";
 import type { UserSecurityDelivery } from "../src/auth/user-security";
 import { migrateLegacyUserBatch, legacyOwnerEvidenceDigest, type LegacyOwnerEvidence } from "../src/supply/legacy-user-migration";
 
 const RESOURCE_SET = process.env.M2_AUTH_TEST_RESOURCE_SET?.trim() || "";
 if (RESOURCE_SET && !/^[a-z][a-z0-9_]{0,20}$/.test(RESOURCE_SET)) throw new Error("Invalid isolated resource set");
-const DEFAULT_TEST_DATABASE = RESOURCE_SET ? "zzsh_test_m2_auth_" + RESOURCE_SET : "zzsh_test_m2_auth";
-const RESOURCE_MARKER = "zzsh:m2-auth-test:v1";
-const RESOURCE_LOCK_KEY = RESOURCE_SET ? (BigInt("0x" + createHash("sha256").update("zzsh:m2-auth:" + RESOURCE_SET).digest("hex").slice(0, 15)) + 1000000n).toString() : "805002";
+const EXCEPTION = RESOURCE_SET ? registeredException("zzsh_test_m2_auth_" + RESOURCE_SET) : null;
+const DEFAULT_TEST_DATABASE = RESOURCE_SET ? "zzsh_test_m2_auth_" + RESOURCE_SET : REGRESSION_DATABASE;
+const RESOURCE_MARKER = EXCEPTION?.marker ?? REGRESSION_MARKER;
+const RESOURCE_LOCK_KEY = REGRESSION_RESOURCE_LOCK_KEY;
 const USER_ORIGIN = "http://127.0.0.1:3100";
 const ADMIN_ORIGIN = "http://127.0.0.1:3101";
 const API_ORIGIN = "http://127.0.0.1:3102";
@@ -81,7 +85,7 @@ function identifier(value: string, label: string): string {
 
 function dedicatedRoleName(value: string, label: string): string {
   const role = identifier(value, label);
-  if (!role.startsWith("zzsh_m2_")) throw new Error(`${label} must use the isolated zzsh_m2_ role prefix`);
+  if (!role.startsWith("zzsh_m2_") && !role.startsWith(REGRESSION_ROLE_PREFIX)) throw new Error(`${label} must use an isolated test role prefix`);
   return role;
 }
 
@@ -111,14 +115,10 @@ function baseTestEnv(databaseName: string): NodeJS.ProcessEnv {
 }
 
 function makeResources(): TestDatabaseResources {
-  const databaseName = process.env.M2_AUTH_TEST_DB_NAME?.trim() || DEFAULT_TEST_DATABASE;
-  const migrationUser = dedicatedRoleName(process.env.M2_AUTH_TEST_MIGRATION_USER?.trim() || (RESOURCE_SET ? "zzsh_m2_" + RESOURCE_SET + "_m" : "zzsh_m2_migration"), "M2_AUTH_TEST_MIGRATION_USER");
-  const runtimeUser = dedicatedRoleName(process.env.M2_AUTH_TEST_RUNTIME_USER?.trim() || (RESOURCE_SET ? "zzsh_m2_" + RESOURCE_SET + "_r" : "zzsh_m2_runtime"), "M2_AUTH_TEST_RUNTIME_USER");
-  if (RESOURCE_SET) {
-    assert.equal(databaseName, DEFAULT_TEST_DATABASE);
-    assert.equal(migrationUser, "zzsh_m2_" + RESOURCE_SET + "_m");
-    assert.equal(runtimeUser, "zzsh_m2_" + RESOURCE_SET + "_r");
-  }
+  const databaseName = DEFAULT_TEST_DATABASE;
+  assertNotProtectedTarget(databaseName);
+  const migrationUser = dedicatedRoleName(EXCEPTION?.migrationUser ?? REGRESSION_MIGRATION_USER, "M2_AUTH_TEST_MIGRATION_USER");
+  const runtimeUser = dedicatedRoleName(EXCEPTION?.runtimeUser ?? REGRESSION_RUNTIME_USER, "M2_AUTH_TEST_RUNTIME_USER");
   if (migrationUser === runtimeUser) throw new Error("M2 auth migration/runtime users must be different");
   const maintenanceEnv = baseTestEnv(databaseName);
   const maintenance = loadConfig(maintenanceEnv);
@@ -218,9 +218,10 @@ async function ensureTargetDatabase(
     owner: string;
     allowConnections: boolean;
     isTemplate: boolean;
+    databaseOid: string | null;
     comment: string | null;
   }>(
-    `SELECT pg_get_userbyid(d.datdba) AS owner, d.datallowconn AS "allowConnections", d.datistemplate AS "isTemplate", shobj_description(d.oid, 'pg_database') AS comment FROM pg_database d WHERE d.datname = $1`,
+    `SELECT pg_get_userbyid(d.datdba) AS owner, d.datallowconn AS "allowConnections", d.datistemplate AS "isTemplate", d.oid::text AS "databaseOid", shobj_description(d.oid, 'pg_database') AS comment FROM pg_database d WHERE d.datname = $1`,
     [resources.databaseName],
   );
   const admission = admitTestDatabase({
@@ -231,8 +232,12 @@ async function ensureTargetDatabase(
     isTemplate: existing.rows[0]?.isTemplate,
     expectedOwner: resources.maintenance.database.user,
     expectedMarker: RESOURCE_MARKER,
+    databaseOid: existing.rows[0]?.databaseOid,
+    expectedOid: EXCEPTION ? EXCEPTION.oid : regressionOidBinding(),
+    reuseOnly: EXCEPTION !== null,
+    requireOidOnReuse: EXCEPTION === null,
     databaseName: resources.databaseName,
-    allowFlag: "M2_AUTH_TEST_ALLOW_NEW_RESOURCE",
+    allowFlag: REGRESSION_ALLOW_NEW_RESOURCE,
   });
   if (admission === "CREATE") {
     await maintenancePool.query(`CREATE DATABASE ${target} OWNER ${quotedIdentifier(resources.maintenance.database.user, "DB_USER")}`);
@@ -306,22 +311,15 @@ async function ensureLoginRole(pool: Pool, roleName: string, password: string, e
   await pool.query(`ALTER ROLE ${role} PASSWORD ${quotedLiteral(password)}`);
 }
 
-async function assertUnknownRoleIsUntouched(pool: Pool, databaseName: string): Promise<void> {
-  const roleName = `zzsh_m2_unknown_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
-  const role = quotedIdentifier(roleName, "unknown M2 test role");
-  const password = randomBytes(32).toString("hex");
-  await pool.query(`CREATE ROLE ${role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT PASSWORD ${quotedLiteral(password)}`);
-  await pool.query(`COMMENT ON ROLE ${role} IS ${quotedLiteral(`${RESOURCE_MARKER}:${databaseName}:unknown`)}`);
-  try {
-    const before = await readTestRole(pool, roleName);
-    await assert.rejects(
-      () => ensureLoginRole(pool, roleName, randomBytes(32).toString("hex"), roleMarker(databaseName, "runtime")),
-      /isolated M2 test role/,
-    );
-    assert.deepEqual(await readTestRole(pool, roleName), before);
-  } finally {
-    await pool.query(`DROP ROLE ${role}`);
-  }
+async function assertMismatchedRoleIsUntouched(pool: Pool, databaseName: string, roleName: string): Promise<void> {
+  // Reuse this task's migration role for the wrong-marker control; never create an unapproved third PG role.
+  const before = await readTestRole(pool, roleName);
+  assert.ok(before, "the task migration role must already exist");
+  await assert.rejects(
+    () => ensureLoginRole(pool, roleName, randomBytes(32).toString("hex"), roleMarker(databaseName, "runtime")),
+    /isolated M2 test role/,
+  );
+  assert.deepEqual(await readTestRole(pool, roleName), before);
 }
 
 async function grantTestRoleAccess(pool: Pool, resources: TestDatabaseResources): Promise<void> {
@@ -368,7 +366,7 @@ async function prepareMigrationOwnership(pool: Pool, resources: TestDatabaseReso
 }
 
 async function resetBusinessData(pool: Pool): Promise<void> {
-  await pool.query(ISOLATED_BUSINESS_DATA_TRUNCATE);
+  await assertFreshRegressionRun(pool);
   await pool.query(`DELETE FROM "zzsh_iam"."admin_role" WHERE "code" NOT IN ('ops', 'support')`);
   await pool.query(`DELETE FROM "zzsh_iam"."admin_role_permission"`);
 }
@@ -521,7 +519,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
       resources.runtimeUser,
       roleMarker(resources.databaseName, "runtime"),
     );
-    await assertUnknownRoleIsUntouched(maintenancePool, resources.databaseName);
+    await assertMismatchedRoleIsUntouched(maintenancePool, resources.databaseName, resources.migrationUser);
     await ensureLoginRole(maintenancePool, resources.migrationUser, resources.migrationPassword, roleMarker(resources.databaseName, "migration"));
     await ensureLoginRole(maintenancePool, resources.runtimeUser, resources.runtimePassword, roleMarker(resources.databaseName, "runtime"));
     await grantTestRoleAccess(maintenancePool, resources);
@@ -1333,7 +1331,10 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     const freezeChallengeId = randomUUID().replaceAll('-', '');
     const freezeOtp = { code: '123456' };
     await migrationPool.query(`INSERT INTO zzsh_auth_user.verification (id,identifier,value,"expiresAt","createdAt","updatedAt") VALUES ($1,$2,$3,clock_timestamp()+interval '5 minutes',clock_timestamp(),clock_timestamp())`, [freezeChallengeId, 'user-security:'+freezeChallengeId, JSON.stringify({ version: 1, userId, purpose: 'recovery', verified: false, codeHash: createHash('sha256').update(freezeChallengeId+freezeOtp.code).digest('hex') })]);
-    assert.deepEqual(await identityRow(userId), { accountStatus: "ACTIVE", identityStatus: "VERIFIED", ageStatus: "ADULT", provider: "fake", version: 3, suspended: false });
+    // The version counter reflects the number of identity-state writes made so far; assert the projection
+    // strictly and the freeze/unfreeze increments relative to the baseline this run actually produced.
+    const identityBaseline = (await identityRow(userId))!.version;
+    assert.deepEqual(await identityRow(userId), { accountStatus: "ACTIVE", identityStatus: "VERIFIED", ageStatus: "ADULT", provider: "fake", version: identityBaseline, suspended: false });
 
     assert.equal((await request(base, "/api/v1/admin/security/users/freeze", freezeBody(userId, "未登录不得冻结"), cookieJar(), ADMIN_ORIGIN)).response.status, 401);
     assert.equal((await request(base, "/api/v1/admin/security/users/restore", freezeBody(userId, "旧恢复接口已移除"), freezeOperator.jar, ADMIN_ORIGIN)).response.status, 404);
@@ -1360,7 +1361,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     assert.equal(frozen.response.status, 200, JSON.stringify(frozen.body));
     assert.equal(frozen.body?.status, "FROZEN");
     assert.equal((await request(base, "/api/auth/user/get-session", undefined, user, USER_ORIGIN)).body, null);
-    assert.deepEqual(await identityRow(userId), { accountStatus: "FROZEN", identityStatus: "VERIFIED", ageStatus: "ADULT", provider: "fake", version: 4, suspended: true });
+    assert.deepEqual(await identityRow(userId), { accountStatus: "FROZEN", identityStatus: "VERIFIED", ageStatus: "ADULT", provider: "fake", version: identityBaseline + 1, suspended: true });
     const freezeOtpAfter = await runtimePool.query<{ count: string }>(`SELECT count(*)::text AS count FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1`, ['user-security:'+freezeChallengeId]);
     assert.equal(freezeOtpAfter.rows[0]?.count, "0");
     const frozenAudit = await runtimePool.query<{ count: string }>(`SELECT count(*)::text AS count FROM "zzsh_iam"."audit_event" WHERE "action" = 'user.account.frozen' AND "object_id" = $1`, [userId]);
@@ -1390,7 +1391,7 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     assert.equal(unfrozen.response.status, 200, JSON.stringify(unfrozen.body));
     assert.equal(unfrozen.body?.status, "ACTIVE");
     assert.match(unfrozen.body?.message ?? "", /旧会话不会复活/);
-    assert.deepEqual(await identityRow(userId), { accountStatus: "ACTIVE", identityStatus: "VERIFIED", ageStatus: "ADULT", provider: "fake", version: 5, suspended: false });
+    assert.deepEqual(await identityRow(userId), { accountStatus: "ACTIVE", identityStatus: "VERIFIED", ageStatus: "ADULT", provider: "fake", version: identityBaseline + 2, suspended: false });
     const revokedFreezeOtp = await request(base, '/api/auth/user/security/challenge/verify', { challengeId: freezeChallengeId, code: freezeOtp.code }, cookieJar(), USER_ORIGIN);
     assert.ok(revokedFreezeOtp.response.status >= 400);
     for (const path of ["/api/v1/admin/security/users/freeze", "/api/v1/admin/security/users/unfreeze"]) {
@@ -2616,6 +2617,18 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
       }
       console.log("AUTH_FULL_LIMITER_PG_CHECKS malformed-input-rate-limited-before-legacy-verification");
     } finally { await limitedApp.close(); }
+
+    await runAuthLegalChecks({ migration: migrationPool, runtime: runtimePool, adminId, password: PASSWORD,
+      otp: phone => { const delivery = fakeSmsOutbox.get("phone-registration:" + phone); assert.ok(delivery); return delivery.code; },
+      api: async (path, body) => {
+        const jar = cookieJar();
+        const result = await request(base, "/api/auth/user" + path, body, jar, USER_ORIGIN);
+        const session = await request(base, "/api/auth/user/get-session", undefined, jar, USER_ORIGIN);
+        return { status: result.response.status, body: result.body, authenticated: Boolean(session.body?.user?.id), userId: session.body?.user?.id,
+          cookieIssued: result.response.headers.getSetCookie().some(line => /^(?:__Secure-|__Host-)?zzsh_user\.session_token(?:\.\d+)?=[^;]/.test(line)),
+        };
+      },
+    });
 
   } finally {
     const cleanupErrors: unknown[] = [];

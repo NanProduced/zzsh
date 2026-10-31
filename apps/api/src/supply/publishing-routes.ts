@@ -269,6 +269,8 @@ export async function handlePublishingRoute(
           if (
             !asset ||
             asset.ownerUserId !== a.owner_user_id ||
+            asset.accountId !== a.id ||
+            asset.gameId !== a.game_id ||
             asset.purpose !== "ACCOUNT_DISPLAY" ||
             !isAccountDisplayPubliclyEligible(asset) ||
             !(await client.query(

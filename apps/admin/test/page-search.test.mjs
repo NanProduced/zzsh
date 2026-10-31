@@ -60,6 +60,7 @@ test("page search only lists implemented pages in the current permission set", (
     "/support",
     "/membership-growth",
     "/distribution-policy",
+    "/system",
     "/admins",
     "/roles",
     "/supply/catalog",
@@ -98,7 +99,7 @@ test("page search matches label, group and path, and stays empty for unknown bus
   });
   assert.deepEqual(filterSearchablePages(pages, "审计").map((page) => page.path), ["/audit"]);
   assert.deepEqual(filterSearchablePages(pages, "/admins").map((page) => page.path), ["/admins"]);
-  assert.deepEqual(filterSearchablePages(pages, "系统").map((page) => page.path), ["/admins"]);
+  assert.deepEqual(filterSearchablePages(pages, "系统").map((page) => page.path), ["/system", "/admins"]);
   assert.deepEqual(filterSearchablePages(pages, "设置").map((page) => page.path), ["/settings"]);
   assert.deepEqual(filterSearchablePages(pages, "外观").map((page) => page.path), ["/settings"]);
   assert.deepEqual(filterSearchablePages(pages, "主题").map((page) => page.path), ["/settings"]);

@@ -113,6 +113,8 @@ function fixture(options:{failAcl?:boolean;rollbackFails?:boolean;commitFailure?
  }
  async function query(via:string,sql:string,args:any[]=[]){
   seen.push({via,sql});
+  if(sql==="SELECT to_regclass('zzsh_business_meta.migrations') IS NOT NULL AS present")return{rows:[{present:migrated}]};
+  if(sql.startsWith('SELECT hash,created_at::text'))return{rows:readMigrationFiles({migrationsFolder:resolve('migrations/business')}).map(m=>({hash:m.hash,createdAt:String(m.folderMillis)}))};
   if(sql==='BEGIN'){assert.equal(pending,null);pending=copy(durable);return{rows:[]};}
   if(sql==='ROLLBACK'){if(options.rollbackFails)throw rollbackFault;pending=null;return{rows:[]};}
   if(sql==='COMMIT'){assert(pending);if(options.commitFailure==='before')throw commitFault;durable=pending;pending=null;if(options.commitFailure==='after')throw commitFault;return{rows:[]};}
@@ -158,7 +160,7 @@ test('real migration entry rolls back a mid-ACL failure; fake contract INSERT an
 });
 test('successful and repeated entry use one bound ACL client and commit only the final narrow policy',async()=>{
  const f=fixture();await f.run();assert(f.can('legacy_order_duty','UPDATE'));assert(f.can('legacy_duty_finance_fact','SELECT'));assert(!f.can('legacy_duty_finance_fact','INSERT'));assert(!f.can('legacy_duty_finance_contract','INSERT'));assert(!f.can('finance_stored_opening_review','SELECT'));
- assert.equal(f.connects,1);assert(f.seen.every(q=>q.via==='client'));assert.deepEqual(f.seen.filter(q=>/^(BEGIN|COMMIT|ROLLBACK)$/.test(q.sql)).map(q=>q.sql),['BEGIN','COMMIT']);assert.deepEqual(f.releases,[undefined]);
+ assert.equal(f.connects,1);assert(f.seen.filter(q=>q.via==='pool').every(q=>q.sql==="SELECT to_regclass('zzsh_business_meta.migrations') IS NOT NULL AS present"));assert.deepEqual(f.seen.filter(q=>/^(BEGIN|COMMIT|ROLLBACK)$/.test(q.sql)).map(q=>q.sql),['BEGIN','COMMIT']);assert.deepEqual(f.releases,[undefined]);
  const before=JSON.stringify([...f.durable].map(([name,roles])=>[name,[...roles].map(([role,r])=>[role,[...r.table],[...r.columns]])]));await f.run();assert.equal(f.connects,2);assert.equal(JSON.stringify([...f.durable].map(([name,roles])=>[name,[...roles].map(([role,r])=>[role,[...r.table],[...r.columns]])])),before);
 });
 test('rollback failure preserves the original ACL error and discards the connection without a success claim',async()=>{
@@ -168,11 +170,11 @@ test('both possible COMMIT-loss outcomes stay UNKNOWN, with no rollback, replay 
  for(const commitFailure of ['before','after'] as const){const f=fixture({commitFailure});await assert.rejects(f.run(),(error:any)=>error.outcome==='ACL_COMMIT_UNKNOWN'&&error.cause===f.commitFault&&error.rollbackAcknowledged===false);assert.deepEqual(f.seen.filter(q=>/^(BEGIN|COMMIT|ROLLBACK)$/.test(q.sql)).map(q=>q.sql),['BEGIN','COMMIT']);assert.deepEqual(f.releases,[true]);assert.equal(f.connects,1);assert(!f.can('legacy_duty_finance_contract','INSERT'));assert(!f.can('finance_stored_opening_review','SELECT'));}
 });
 test('migration failure never starts post-ACL, and direct apply leaves the rollback harness transaction owned by its caller',async()=>{
- const failed=fixture({migrationFails:true});await assert.rejects(failed.run(),(error:unknown)=>error===failed.migrationFault);assert.equal(failed.connects,0);assert.equal(failed.seen.length,0);assert.equal(failed.releases.length,0);
+ const failed=fixture({migrationFails:true});await assert.rejects(failed.run(),(error:unknown)=>error===failed.migrationFault);assert.equal(failed.connects,0);assert.deepEqual(failed.seen.map(q=>q.sql),["SELECT to_regclass('zzsh_business_meta.migrations') IS NOT NULL AS present"]);assert.equal(failed.releases.length,0);
  const direct=fixture();await direct.run();direct.seen.length=0;await direct.apply();assert(!direct.seen.some(q=>/^(BEGIN|COMMIT|ROLLBACK)$/.test(q.sql)));assert.equal(direct.connects,1);assert.equal(direct.releases.length,1);
 });
 test('post-migration connection failure keeps the committed-schema stage and original cause, without a false rollback or release',async()=>{
- const f=fixture({connectFails:true});await assert.rejects(f.run(),(error:any)=>error.outcome==='ACL_NOT_COMMITTED'&&error.cause===f.connectFault&&error.rollbackAcknowledged===false&&/schema migrations committed/.test(error.message));assert.equal(f.migrationVisibility.length,1);assert.equal(f.connects,1);assert.equal(f.seen.length,0);assert.equal(f.releases.length,0);assert(!f.can('legacy_duty_finance_contract','INSERT'));assert(!f.can('finance_stored_opening_review','SELECT'));
+ const f=fixture({connectFails:true});await assert.rejects(f.run(),(error:any)=>error.outcome==='ACL_NOT_COMMITTED'&&error.cause===f.connectFault&&error.rollbackAcknowledged===false&&/schema migrations committed/.test(error.message));assert.equal(f.migrationVisibility.length,1);assert.equal(f.connects,1);assert.deepEqual(f.seen.map(q=>q.sql),["SELECT to_regclass('zzsh_business_meta.migrations') IS NOT NULL AS present"]);assert.equal(f.releases.length,0);assert(!f.can('legacy_duty_finance_contract','INSERT'));assert(!f.can('finance_stored_opening_review','SELECT'));
 });
 
 test('dated numbering ACL repair removes stale runtime table and column rights and remains narrow when repeated',async()=>{

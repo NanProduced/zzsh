@@ -98,6 +98,27 @@ test("compiled runner inventory reads its explicit manifest without executing su
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("regression runner inventory reads literal suites and rejects unknown selections without running it", async () => {
+  const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { collectEntries } = await import("./check-test-entries.mjs");
+  const root = await mkdtemp(join(tmpdir(), "zzsh-regression-inventory-"));
+  try {
+    await mkdir(join(root, "scripts"));
+    const file = join(root, "scripts/run-regression-suites.mjs");
+    await writeFile(file, 'const SUITES = ["auth", "supply-m3b"]; throw new Error("must not execute");');
+    const command = "node --env-file-if-exists=.env scripts/run-regression-suites.mjs";
+    const read = suffix => collectEntries({ scripts: { "test:db": command + suffix } }, root);
+    assert.deepEqual(read("")[0].files, ["dist/test/auth.test.js", "dist/test/supply-m3b.test.js"]);
+    assert.deepEqual(read(" --rounds 1 --suites auth")[0].files, ["dist/test/auth.test.js"]);
+    for (const args of [" --suites forged", " --suites auth,auth", " --rounds 3", " --continue", " --suites", " --rounds 1 --rounds 2"]) assert.deepEqual(read(args), []);
+    for (const source of ['const SUITES = ["auth", "auth"];', 'const SUITES = ["../foreign"];', 'const SUITES = makeSuites();']) {
+      await writeFile(file, source); assert.deepEqual(read(""), []);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("runner bindings distinguish value aliases and namespaces from type-only imports", async () => {
   const { isExecutableSuite } = await import("./check-test-entries.mjs");
   const cases = [
@@ -204,7 +225,7 @@ test("the 5 order PG helpers are helpers, not unregistered default suites", asyn
     assert.ok(row.importedBy.includes("order-reservation.test.ts"), `${name} imported by order-reservation`);
     assert.equal(row.defaultReachable, false, `${name} is not in check:offline`);
     assert.equal(row.checkReachable, true, `${name} is in the additional root check DB entry`);
-    assert.deepEqual(row.reachedFrom, ["@zzsh/api:test:db:compiled"], name);
+    assert.deepEqual(row.reachedFrom, ["@zzsh/api:test:db:compiled", "@zzsh/api:test:db:rounds"], name);
   }
   // The real repository has no unregistered executable suite.
   assert.deepEqual(findUnregistered(rows).map(r => `${r.workspace}:${r.file}`), []);

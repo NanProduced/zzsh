@@ -58,7 +58,8 @@ function nativeFixture(id = "account-a", game = "game-a") {
     else if (sql.includes('rule_acceptance')) rows = facts.accepted ? [{}] : [];
     else if (sql.includes('SELECT a.* FROM zzsh_supply.listing_media')) rows = [{ id: "media-a", account_id: account.id, game_id: account.game_id, owner_user_id: account.owner_user_id,
       ownership_kind: "USER_SUPPLY", purpose: "ACCOUNT_DISPLAY", content_hash: "a".repeat(64), review_state: "APPROVED", access_class: "PUBLIC_DISPLAY", technical_state: facts.mediaReady ? "READY" : "FAILED", public_storage_key: "public-a" }];
-    else if (sql.includes('m.asset_id AS "assetId"')) rows = [{ assetId: "media-a", position: 0, purpose: "ACCOUNT_DISPLAY", byteHash: "a".repeat(64), reviewState: "APPROVED", accessClass: "PUBLIC_DISPLAY", publicStorageKey: "public-a", technicalState: facts.mediaReady ? "READY" : "FAILED", ownerUserId: account.owner_user_id, category: "SHOWCASE" }];
+    else if (sql.includes('m.asset_id AS "assetId"')) rows = [{ assetId: "media-a", position: 0, purpose: "ACCOUNT_DISPLAY", byteHash: "a".repeat(64), reviewState: "APPROVED", accessClass: "PUBLIC_DISPLAY", publicStorageKey: "public-a", technicalState: facts.mediaReady ? "READY" : "FAILED", ownerUserId: account.owner_user_id, category: "SHOWCASE", ownership_kind: "USER_SUPPLY", account_id: account.id, owner_user_id: account.owner_user_id, game_id: account.game_id, binding_account_id: account.id, binding_owner_user_id: account.owner_user_id, binding_game_id: account.game_id }];
+    else if (sql.includes('/* current-trade-resources */')) rows = [{ id: "haff-a", code: "haff_base", unit: "HAFF_BASE", enabled: true }];
     else if (sql.includes('SELECT item_id AS "itemId"')) rows = [{ itemId: "haff-a", quantity: "1000000" }];
     else if (sql.includes('SELECT * FROM zzsh_supply.listing_version')) rows = [facts.draft?.id === args[0] ? facts.draft : version];
     else if (sql.includes('SELECT v.* FROM zzsh_supply.listing_version')) rows = account.owner_user_id === "owner-a" ? [version] : [];
@@ -78,6 +79,36 @@ test("public free control keeps the current object and public money projection",
   const f = nativeFixture(), result = await readPublicListing(f.client, f.account, f.gate);
   assert.equal(result.id, f.account.id); assert.equal(result.displayNo, "AC0000000001");
   assert(!JSON.stringify(result).includes("123456.78")); assert(!Object.hasOwn(result, "owner_user_id"));
+});
+
+test("rentability rechecks both account media purposes and the whole frozen asset set", async () => {
+  const own = (f: ReturnType<typeof nativeFixture>) => ({ id: "media-a", account_id: f.account.id, owner_user_id: f.account.owner_user_id, game_id: f.account.game_id, ownership_kind: "USER_SUPPLY", purpose: "ACCOUNT_DISPLAY", content_hash: "a".repeat(64), review_state: "PENDING", technical_state: "READY", public_storage_key: "public-a", access_class: "PUBLIC_DISPLAY" });
+  for (const change of ["owner", "account", "game", "private-evidence", "extra", "missing", "hash", "purpose", "duplicate"] as const) {
+    const f = nativeFixture(), asset = own(f); let media: typeof asset[] = [asset];
+    if (change === "owner") asset.owner_user_id = "other";
+    if (change === "account") asset.account_id = "other";
+    if (change === "game") asset.game_id = "other";
+    if (change === "hash") asset.content_hash = "b".repeat(64);
+    if (change === "purpose") asset.purpose = "ACCOUNT_EVIDENCE";
+    if (change === "missing") media = [];
+    if (change === "duplicate") media.push({ ...asset });
+    if (change === "extra") media.push({ ...asset, id: "unfrozen" });
+    if (change === "private-evidence") {
+      media.push({ ...asset, id: "private", owner_user_id: "other", purpose: "ACCOUNT_EVIDENCE", access_class: "PRIVATE_REVIEW" });
+      f.version.payload = { ...f.version.payload!, declaration: { ...f.version.payload!.declaration, mediaBindings: [...f.version.payload!.declaration.mediaBindings, { assetId: "private", purpose: "ACCOUNT_EVIDENCE", byteHash: "a".repeat(64), position: 1 }] } };
+      f.version.content_hash = computeContentHash(f.version.payload!);
+    }
+    const client = { query: async (sql: string, args: unknown[]) => sql.includes("SELECT a.* FROM zzsh_supply.listing_media") ? { rows: media, rowCount: media.length } : f.client.query(sql, args) } as unknown as PoolClient;
+    assert((await evaluatePublication(client, f.account, f.version, f.gate)).includes("MEDIA_REQUIRED"), change);
+    const detail = await readPublicListing(client, f.account, f.gate);
+    assert.equal(detail.canCreateOrder, false, change);
+    assert(!JSON.stringify(detail.media).includes("private"), "private media stays hidden");
+  }
+  const f = nativeFixture(), display = own(f), evidence = { ...display, id: "private", purpose: "ACCOUNT_EVIDENCE", access_class: "PRIVATE_REVIEW" };
+  f.version.payload = { ...f.version.payload!, declaration: { ...f.version.payload!.declaration, mediaBindings: [...f.version.payload!.declaration.mediaBindings, { assetId: evidence.id, purpose: "ACCOUNT_EVIDENCE", byteHash: evidence.content_hash, position: 1 }] } };
+  f.version.content_hash = computeContentHash(f.version.payload!);
+  const client = { query: async (sql: string, args: unknown[]) => sql.includes("SELECT a.* FROM zzsh_supply.listing_media") ? { rows: [display, evidence], rowCount: 2 } : f.client.query(sql, args) } as unknown as PoolClient;
+  assert.deepEqual(await evaluatePublication(client, f.account, f.version, f.gate), []);
 });
 test("public detail exposes the owner's full-payout declaration, with unknown kept distinct from 普通赔付", async () => {
   const f = nativeFixture();

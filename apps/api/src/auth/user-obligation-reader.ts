@@ -41,7 +41,9 @@ const CHECKS: Record<UserObligationKind, (client: PoolClient, userId: string) =>
               EXISTS(SELECT 1 FROM zzsh_iam.audit_event a WHERE a.object_id=$1 AND a.action=$2 AND a.outcome='SUCCESS') AS migrated
          FROM zzsh_iam.user_identity_state s WHERE s.user_id=$1`, [userId, LEGACY_MIGRATION_ACTION])).rows[0];
     if (!subject) return { status: "UNKNOWN", obligation: "WALLET_BALANCE", reason: "IDENTITY_STATE_MISSING" };
-    const native = subject.provider === "none" && subject.migrated === false;
+    // provider also stores the real-name provider after verification, so only the explicit
+    // legacy marker identifies an old-platform subject; no migration fact means native.
+    const native = typeof subject.provider === "string" && subject.provider.length > 0 && subject.provider !== LEGACY_PROVIDER && subject.migrated === false;
     // 旧系统迁移用户在期初余额准入（wallet_coverage）之前，没有可信余额来源：拒绝。
     if (subject.covered !== true && !native) {
       return { status: "UNKNOWN", obligation: "WALLET_BALANCE", reason: subject.provider === LEGACY_PROVIDER || subject.migrated ? "LEGACY_OPENING_NOT_ADMITTED" : "SOURCE_UNKNOWN" };

@@ -19,6 +19,7 @@ import {
   ShoppingBagIcon,
   ScrollTextIcon,
   ShieldIcon,
+  Settings2Icon,
   SlidersHorizontalIcon,
   UserCheckIcon,
   UserRoundCogIcon,
@@ -57,6 +58,9 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
   if (distributionOps) items.push({ label: "分销管理", icon: NetworkIcon, path: "/distribution-policy", kind: "distribution-policy" });
 
   const system: WorkspaceMenuItem[] = [];
+  if (nav.isBoss) {
+    system.push({ label: "系统配置", icon: Settings2Icon, path: "/system", kind: "system-configuration" });
+  }
   if (has("admin.account.read") || nav.isBoss) {
     system.push({ label: "管理员管理", icon: UserRoundCogIcon, path: "/admins", kind: "admins" });
   }
@@ -140,6 +144,7 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
 }
 
 export function titleForPath(pathname: string): string {
+  if (pathname === "/system") return "系统配置";
   if (pathname.startsWith("/admins/")) return "管理员详情";
   if (pathname === "/admins") return "管理员管理";
   if (pathname.startsWith("/roles/")) return "角色详情";
@@ -185,6 +190,7 @@ export function normalizeSearchString(str: string): string {
 }
 
 export const PAGE_SEARCH_KEYWORDS: Record<string, string[]> = {
+  "/system": ["系统配置", "运维配置", "部署", "媒体存储", "OSS", "bucket", "storage", "xtpz", "ywpz"],
   "/workbench": ["工作台", "首页", "workbench", "gzt"],
   "/support": ["客服工作台", "客服", "履约", "消息", "im", "support", "kf", "ly"],
   "/distribution-policy": ["分销管理", "分销", "邀请", "政策", "distribution", "fx"],

@@ -1,4 +1,4 @@
-import { admitTestDatabase, ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
+import { admitTestDatabase, assertFreshRegressionRun } from "./database-test-support";
 import sharp from "sharp";
 import { strict as assert } from "node:assert";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
@@ -16,14 +16,17 @@ import { assertBusinessRuntimeIdentity, createBusinessPool } from "../src/databa
 import { runBusinessMigrations } from "../src/database/business-migrations";
 import { createLocalMediaStorage } from "../src/supply/media";
 import { loadConfig, type AppConfig } from "../src/config/config";
+import { assertNotProtectedTarget, registeredException, REGRESSION_ALLOW_NEW_RESOURCE, REGRESSION_DATABASE, REGRESSION_MARKER, REGRESSION_MIGRATION_USER, REGRESSION_RESOURCE_LOCK_KEY, REGRESSION_ROLE_PREFIX, REGRESSION_RUNTIME_USER, regressionOidBinding } from "../src/config/test-resource";
+
 import { DEFAULT_GUIDES, DEFAULT_RESOURCES, validateResource, type ContentResource } from "@zzsh/content";
 import { fingerprintRequest } from "../src/supply/supply-util";
 
 const RESOURCE_SET = process.env.CONTENT_TEST_RESOURCE_SET?.trim() || "";
 if (RESOURCE_SET && !/^[a-z][a-z0-9_]{0,20}$/.test(RESOURCE_SET)) throw new Error("Invalid content test resource set");
-const DEFAULT_DATABASE = RESOURCE_SET ? "zzsh_test_content_" + RESOURCE_SET : "zzsh_test_content";
-const RESOURCE_MARKER = "zzsh:m3-content-test:v1";
-const LOCK_KEY = RESOURCE_SET ? (BigInt("0x" + createHash("sha256").update("content-test:" + RESOURCE_SET).digest("hex").slice(0, 15)) + 3000000n).toString() : "805016";
+const EXCEPTION = RESOURCE_SET ? registeredException("zzsh_test_content_" + RESOURCE_SET) : null;
+const DEFAULT_DATABASE = RESOURCE_SET ? "zzsh_test_content_" + RESOURCE_SET : REGRESSION_DATABASE;
+const RESOURCE_MARKER = EXCEPTION?.marker ?? REGRESSION_MARKER;
+const LOCK_KEY = REGRESSION_RESOURCE_LOCK_KEY;
 function testOrigin(name: string, fallback: string): string {
   const value = process.env[name]?.trim() || fallback;
   const url = new URL(value);
@@ -76,7 +79,7 @@ async function requireAbsent(file: string, message: string): Promise<void> {
 }
 
 async function fixtureExportPaths(): Promise<{ output: string; media: string } | null> {
-  const targetDatabase = process.env.CONTENT_TEST_DB_NAME?.trim() || DEFAULT_DATABASE;
+  const targetDatabase = DEFAULT_DATABASE;
   if (targetDatabase === "zzsh_test_content_cms_formal") {
     await requireAbsent(join(fixturePrivateDirectory(), "fixture-ui-retained.json"), "cms_formal is UI_RETAINED; regression reset is blocked");
     await requireAbsent(join(fixturePrivateDirectory(), "formal-ui-fixture.json"), "cms_formal already has a retained fixture; regression reset is blocked");
@@ -151,12 +154,12 @@ function roleMarker(databaseName: string, role: "migration" | "runtime"): string
 }
 
 function makeResources(): Resources {
-  const databaseName = process.env.CONTENT_TEST_DB_NAME?.trim() || DEFAULT_DATABASE;
-  assert.notEqual(databaseName, "zzsh_dev");
-  const migrationUser = safeIdentifier(process.env.CONTENT_TEST_MIGRATION_USER?.trim() || (RESOURCE_SET ? "zzsh_content_" + RESOURCE_SET + "_m" : "zzsh_content_migration"), "migration user");
-  const runtimeUser = safeIdentifier(process.env.CONTENT_TEST_RUNTIME_USER?.trim() || (RESOURCE_SET ? "zzsh_content_" + RESOURCE_SET + "_r" : "zzsh_content_runtime"), "runtime user");
+  const databaseName = DEFAULT_DATABASE;
+  assertNotProtectedTarget(databaseName);
+  const migrationUser = safeIdentifier(EXCEPTION?.migrationUser ?? REGRESSION_MIGRATION_USER, "migration user");
+  const runtimeUser = safeIdentifier(EXCEPTION?.runtimeUser ?? REGRESSION_RUNTIME_USER, "runtime user");
   assert.notEqual(migrationUser, runtimeUser);
-  if (!migrationUser.startsWith("zzsh_content_") || !runtimeUser.startsWith("zzsh_content_")) throw new Error("content test roles must use the isolated zzsh_content_ prefix");
+  if (!(migrationUser.startsWith("zzsh_content_") || migrationUser.startsWith(REGRESSION_ROLE_PREFIX)) || !(runtimeUser.startsWith("zzsh_content_") || runtimeUser.startsWith(REGRESSION_ROLE_PREFIX))) throw new Error("content test roles must use an isolated test role prefix");
   const maintenanceUser = process.env.CONTENT_TEST_MAINTENANCE_USER ?? process.env.DB_USER;
   const baseEnv = {
     ...process.env,
@@ -215,8 +218,8 @@ async function resourceGuard(pool: Pool): Promise<PoolClient> {
 }
 
 async function ensureDatabase(pool: Pool, resources: Resources): Promise<void> {
-  const existing = await pool.query<{ owner: string; allowConnections: boolean; isTemplate: boolean; comment: string | null }>(
-    "SELECT pg_get_userbyid(d.datdba) AS owner, d.datallowconn AS \"allowConnections\", d.datistemplate AS \"isTemplate\", shobj_description(d.oid, 'pg_database') AS comment FROM pg_database d WHERE d.datname = $1",
+  const existing = await pool.query<{ owner: string; allowConnections: boolean; isTemplate: boolean; databaseOid: string | null; comment: string | null }>(
+    "SELECT pg_get_userbyid(d.datdba) AS owner, d.datallowconn AS \"allowConnections\", d.datistemplate AS \"isTemplate\", d.oid::text AS \"databaseOid\", shobj_description(d.oid, 'pg_database') AS comment FROM pg_database d WHERE d.datname = $1",
     [resources.databaseName],
   );
   const admission = admitTestDatabase({
@@ -227,8 +230,12 @@ async function ensureDatabase(pool: Pool, resources: Resources): Promise<void> {
     isTemplate: existing.rows[0]?.isTemplate,
     expectedOwner: resources.maintenance.database.user,
     expectedMarker: RESOURCE_MARKER,
+    databaseOid: existing.rows[0]?.databaseOid,
+    expectedOid: EXCEPTION ? EXCEPTION.oid : regressionOidBinding(),
+    reuseOnly: EXCEPTION !== null,
+    requireOidOnReuse: EXCEPTION === null,
     databaseName: resources.databaseName,
-    allowFlag: "CONTENT_TEST_ALLOW_NEW_RESOURCE",
+    allowFlag: REGRESSION_ALLOW_NEW_RESOURCE,
   });
   if (admission === "CREATE") {
     await pool.query("CREATE DATABASE " + quotedIdentifier(resources.databaseName, "test database") + " OWNER " + quotedIdentifier(resources.maintenance.database.user, "maintenance user"));
@@ -287,30 +294,7 @@ async function prepareOwnership(pool: Pool, resources: Resources): Promise<void>
 }
 
 async function resetIsolatedData(pool: Pool): Promise<void> {
-  // The content fixture never writes immutable finance/growth tables; DELETE leaves them protected.
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    await client.query('TRUNCATE "zzsh_content"."document_acceptance", "zzsh_content"."legal_document_version"');
-    let pending = ISOLATED_BUSINESS_DATA_TRUNCATE.replace(/^TRUNCATE\s+/, "").split(",").map(table => table.trim()).filter(table => !table.includes('"document_acceptance"') && !table.includes('"legal_document_version"'));
-    while (pending.length) {
-      const blocked: string[] = [];
-      for (const table of pending) {
-        await client.query("SAVEPOINT content_fixture_clear");
-        try { await client.query(`DELETE FROM ${table}`); }
-        catch (error) {
-          await client.query("ROLLBACK TO SAVEPOINT content_fixture_clear");
-          if ((error as { code?: string }).code !== "23503") throw error;
-          blocked.push(table);
-        }
-        await client.query("RELEASE SAVEPOINT content_fixture_clear");
-      }
-      if (blocked.length === pending.length) throw new Error("Content fixture has retained references outside its explicit cleanup list");
-      pending = blocked;
-    }
-    await client.query("COMMIT");
-  } catch (error) { await client.query("ROLLBACK"); throw error; }
-  finally { client.release(); }
+  await assertFreshRegressionRun(pool);
 }
 
 function base32Decode(value: string): Buffer {

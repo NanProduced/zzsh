@@ -12,6 +12,7 @@ import {
 import { assertBusinessRuntimeIdentity, createBusinessPool } from "./database/business";
 import { loadAuthRuntimeConfig } from "./auth/auth-runtime";
 import { createLocalDistributionReadScope } from "./finance/distribution-policy-store";
+import { loadOrderSweepRuntime } from "./order/order-sweep.module";
 // Root-accepted local copy identity. This capability only admits existing facts to GET.
 const milestoneDistributionReceipt={database:"zzsh_test_order_milestone_real_1",resourceOid:952624,owner:"zzsh",ownerOid:10,marker:"zzsh:order-reservation-test:v1",migrationRole:"zzsh_order_milestone_real_1_m",migrationRoleOid:952625,runtimeRole:"zzsh_order_milestone_real_1_r",runtimeRoleOid:952626};
 
@@ -41,9 +42,11 @@ export async function bootstrap() {
   const directoryReadPool = businessPool ? createBusinessPool(config, { max: 2, maxUses: 1 }) : undefined;
   let app: Awaited<ReturnType<typeof createApp>> | undefined;
   try {
+    const orderSweep = loadOrderSweepRuntime(businessPool);
     if (businessPool) await assertBusinessRuntimeIdentity(businessPool, config);
     app = await createApp({
       health: { dependencies },
+      ...(orderSweep ? { orderSweep } : {}),
       ...(businessPool
         ? {
             database: { pool: businessPool, directoryReadPool },

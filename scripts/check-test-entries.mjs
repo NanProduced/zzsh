@@ -93,6 +93,30 @@ function parseScript(script, packageDir) {
       if (supported && !(all && workspace)) calls.push({ script: name, workspace, all, ifPresent });
       else errors.push("unsupported npm invocation");
     } else if (program === "node") {
+      const nodeArgs = args.filter(arg => !arg.startsWith("--env-file-if-exists="));
+      if (nodeArgs[0] === "scripts/run-regression-suites.mjs") {
+        try {
+          const tree = parseSource(readFileSync(join(packageDir, nodeArgs[0]), "utf8"));
+          const list = tree.statements.filter(ts.isVariableStatement).flatMap(s => [...s.declarationList.declarations])
+            .find(d => ts.isIdentifier(d.name) && d.name.text === "SUITES")?.initializer;
+          if (tree.parseDiagnostics.length || !list || !ts.isArrayLiteralExpression(list) || !list.elements.length ||
+              list.elements.some(e => !ts.isStringLiteral(e) || !/^[\w-]+$/.test(e.text))) throw new Error("invalid suites");
+          const registered = list.elements.map(e => e.text);
+          if (new Set(registered).size !== registered.length) throw new Error("duplicate suites");
+          let selected = registered;
+          const seen = new Set();
+          for (let i = 1; i < nodeArgs.length; i += 2) {
+            const flag = nodeArgs[i], value = nodeArgs[i + 1];
+            if (seen.has(flag) || !["--rounds", "--suites"].includes(flag) || !value) throw new Error("invalid runner option");
+            seen.add(flag);
+            if (flag === "--rounds" && !["1", "2"].includes(value)) throw new Error("invalid rounds");
+            if (flag === "--suites") selected = value.split(",");
+          }
+          if (new Set(selected).size !== selected.length || selected.some(s => !registered.includes(s))) throw new Error("unknown suite");
+          files.push(...selected.map(s => `dist/test/${s}.test.js`));
+        } catch { errors.push("invalid regression runner inventory"); }
+        continue;
+      }
       if (args.length === 1 && args[0] === "scripts/run-compiled-tests.mjs") {
         try {
           const manifest = JSON.parse(readFileSync(join(packageDir, "scripts/compiled-tests.json"), "utf8"));

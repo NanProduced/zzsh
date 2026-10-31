@@ -113,14 +113,16 @@ export function createOssMediaStorage(
   deps: { createClient?: (options: OssMediaStorageOptions, credentials: OssCredentials) => OssObjectClient } = {},
 ): MediaStorage {
   const createClient = deps.createClient ?? defaultCreateClient;
-  const client = createClient(options, credentials);
+  const target = Object.freeze({ bucket: options.bucket, region: options.region, endpoint: options.endpoint, objectPrefix: options.objectPrefix });
+  const client = createClient(target, credentials);
   return {
     available: true,
     kind: "oss",
+    configuration: Object.freeze({ target, credentialMode: credentials.stsToken ? "STS" : "ACCESS_KEY", automaticCredentialRefresh: false }),
     async write(bytes, contentHash, mime) {
       if (!STORAGE_KEY_PATTERN.test(contentHash)) throw new MediaStorageError("content hash is invalid");
       if (!ALLOWED_IMAGE_MIMES.includes(mime)) throw new MediaStorageError("image MIME is invalid");
-      const objectKey = ossObjectKey(options.objectPrefix, contentHash);
+      const objectKey = ossObjectKey(target.objectPrefix, contentHash);
       try {
         // Content-addressed object already present; skip the upload.
         await client.head(objectKey);
@@ -141,7 +143,7 @@ export function createOssMediaStorage(
     async read(storageKey) {
       if (!STORAGE_KEY_PATTERN.test(storageKey)) throw new MediaStorageError("storage key is invalid");
       try {
-        const result = await client.get(ossObjectKey(options.objectPrefix, storageKey));
+        const result = await client.get(ossObjectKey(target.objectPrefix, storageKey));
         if (!Buffer.isBuffer(result.content)) throw storageFailure();
         return result.content;
       } catch (error) {

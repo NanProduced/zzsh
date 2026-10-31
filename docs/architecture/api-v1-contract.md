@@ -131,7 +131,7 @@ ID 以 opaque 字符串传输，允许 `A-Za-z0-9` 开头，后续使用 `A-Za-z
 | POST /accounts/{id}/withdraw | expectedRevision、versionId、可选reason；只撤回确切待审版本 |
 | POST /accounts/{id}/pause、/resume | expectedRevision及可选reason；恢复另核有效发布事实、规则、身份、保证金资格、占用和媒体，不能解除客服限制 |
 | GET /listings、GET /listings/{id} | 无登录墙的PublicQuote白名单；以下为未指定queryVersion的v1合同，v2见[组合筛选合同](listing-query.md)。list支持可选`q`（NFC+trim，空白视为未传，最长120，NUL拒绝；服务端参数化`ILIKE`且`%/_/\\`按字面量）、gameId、itemId/minQuantity、重复skinId+skinMatch=ANY/ALL、limit1–100和cursor。游标绑定规范化后的`q`及其他过滤，更换条件后旧游标400，不混页。`q`只在当前可租候选池匹配标题/公开号，不搜索内部用户ID、登录资料或私人说明；精确编号`GET /listings/lookup?number=&gameId=`可查仍获准公开的暂不可租资料，详见[账号可见性与编号](account-visibility.md)。原生编号须装配独立账号序列与约束后在创建事务中持久赋值，不借订单号；旧号按可信冻结来源保留。详情在既有quote/attributes上增加`attributes.safe_box_code`、`safeBox{code,displayName}`（已知稳定code从受控映射返回中文名称，未知code的displayName为null；attributeDisplay保留UNCONFIRMED及issueCode，缺值不猜测）和`termOption{code,displayName,dailyConsumption{quantity,unit=HAFF_BASE}}`，数据取自该公开版本绑定的封存release/term_option，不用当前运营草稿改写；缺字段为null，不默认0。`quote.termSeconds`仍为权威租期；每日消耗只用于租期推算，不是每日保底。不可公开统一404。 |
-| GET /listings/{id}/media/{assetId} | 仅当前可公开版本绑定且技术/公开资格有效的ACCOUNT_DISPLAY衍生图，no-store；下架、暂停、限制或规则过期后404 |
+| GET /listings/{id}/media/{assetId} | 仅当前可公开版本绑定且技术/公开资格有效的ACCOUNT_DISPLAY衍生图，no-store；下架、撤回、限制或公开前置失效后404，暂停和规则变更等非租赁阻断随已获准公开详情保持只读可读 |
 | 管理 GET /listing-reviews、/{accountId} | 按state/after/limit读取显式scope队列，nextCursor接后续after；详情含前版对比与审核/重复线索，不用内部ID作为主要人工入口 |
 | 管理 GET /listing-reviews?queryVersion=3 | 跨资料状态账号供给读取；view=all/changes/restricted/paused/orders，queryKind=account/legacy/owner/nickname/order、q、gameId、limit（1–50）、cursor。号主昵称多候选，业务编号/旧来源编号/稳定ID分别保留；无新编号时不落库伪造。游标HMAC绑定管理员/会话/权限/游戏scope/完整查询；旧ID游标、绑定或签名不符409回首页。列表无全局总计。order线索/视图另需order.read。 |
 | 管理 GET /listing-reviews/{accountId}?queryVersion=3 | 独立对象读取，versionId限同账号历史；返回contractVersion/contextKey、当前资料与历史/前版、supervision的权威公开/新单/阻断与主要原因、对象相关限制事件、按独立权限裁剪的号主/订单目标。公开读取复用原生及旧来源只读合同，旧来源公开不等原生接单许可；缺资料/原事件/图片不补造证据。历史版本只读，当前业务事实仍单列。 |
@@ -228,7 +228,7 @@ ID 以 opaque 字符串传输，允许 `A-Za-z0-9` 开头，后续使用 `A-Za-z
 
 新管理UI对列表、只读手机号lookup body和详情显式传`registrationTime=ORIGINAL`：`registeredAt`为真实注册时间或null，来源为`LEGACY/LOCAL/UNKNOWN`。迁移用户只用最新成功迁移事实，核对来源、实体、providerReference、来源摘要和凭证；原日期必须是合法UTC日期，缺失/错误/未知不回退导入时间或较早事实。原生来源明确时用真实本地注册时间。基础日期属于目录权限，审计原件仍单独裁剪。该模式列表默认`sort=registered_desc`，可选`registered_asc`；未知均在最后，同时间按userId的C序降序。registeredFrom为包含下界，registeredTo为包含上界；registeredBefore为排除上界（自然日范围可传带时区的次日零时），To/Before不可并用。筛选/排序先于分页，total使用同一条件，新模式/方向/边界/授权绑定contextKey和cursor，跨上下文409；非法参数400，域权限不足403。该模式不新增本地建档时间UI维度。
 
-原始时间模式在现有只读事务内关闭JIT并一次计算窄日期事实；保留3秒语句、500ms锁、8秒请求及2个并发读取上限，不更改全局设置或增加并行worker。目录路由使用单次租约的独立读池，现有业务10个连接名额按共享8/目录2分配，避免继承其他领域已复用的backend；该模式仍在确认ROLLBACK后退役自己的连接。其他领域及本人设置仍用共享池，生产连接建立成本需另行验证。旧`sourceCreatedAt/sourceUpdatedAt`仅审计授权后的技术追溯。管理身份状态行缺失返回UNKNOWN；其余按CANCELLED→DEACTIVATED→suspended时RESTRICTED→ACTIVE，不认识的值不默认正常。provider=legacy_mysql_restore表示旧平台用户；provider=none且无冲突来源表示未关联旧平台来源；无法判断则UNKNOWN。
+原始时间模式在现有只读事务内关闭JIT并一次计算窄日期事实；保留3秒语句、500ms锁、8秒请求及2个并发读取上限，不更改全局设置或增加并行worker。目录路由使用单次租约的独立读池，现有业务10个连接名额按共享8/目录2分配，避免继承其他领域已复用的backend；该模式仍在确认ROLLBACK后退役自己的连接。其他领域及本人设置仍用共享池，生产连接建立成本需另行验证。旧`sourceCreatedAt/sourceUpdatedAt`仅审计授权后的技术追溯。管理身份状态行缺失返回UNKNOWN；其余按CANCELLED→DEACTIVATED→suspended时RESTRICTED→ACTIVE，不认识的值不默认正常。provider=legacy_mysql_restore表示旧平台用户；无迁移冲突来源且身份状态存在表示本地用户（provider 同时记录实名提供方，不要求为 none）；无法判断则UNKNOWN。
 
 `resourceSummary`为`{state:ready,count,publishedCount}`或`{state:denied,permission,reason?}`；count为名下游戏账号档案数，含各生命周期。publishedCount为ACTIVE账号的当前有效发布版本数（账号去重），复用供给域的PUBLISHED/OWNER_DIRECT或APPROVED/LEGACY_APPROVED及完整发布元组；暂停、占用、运营限制不改变发布事实，归档、草稿/待审/撤回及仅有历史只读展示不计入，也不代表当前可租。`GET /users/{userId}/rental-accounts?publication=published`返回完全同口径集合，仍按原limit/cursor分页；该筛选绑定游标，不传时保留全部档案语义。条目新增`publication.currentlyPublished`，原versionPublished保留版本状态语义。`orderSummary`为`{state:ready,currentCount,renterCurrentCount,ownerCurrentCount}`或拒绝态，计数只含PENDING_PAYMENT/PAID，聚合currentCount按参与关系去重，不能将角色之和强当聚合数。数量由各域权限和游戏范围裁剪；非Boss的SELECTED_GAMES为空时，目录和详情保持200，对受影响摘要返回denied+reason=NO_GAME_SCOPE；对应业务分区仍403 NO_GAME_SCOPE。Boss或ALL_GAMES的空gameIds不是无范围。有效范围内的零保持ready:0，无权限/失败不返回数值或内部ID，不当零。当前`lastBusinessActivity={state:not_connected,domains:[ORDER,SUPPLY]}`，不支持活动排序，不能以表更新时间或迁入时间代替事件。
 
@@ -281,6 +281,11 @@ npm run typecheck
 - `GET /resources/{key}/versions/{id}` 返回同对象原格式 `{version,media}`。`POST /resources/{key}/restore` 接 `{sourceVersionId,expectedRevision}`，事务内保存当前已存草稿为 SUPERSEDED，再从选中历史或当前已存 DRAFT 复制新草稿；保留原正文格式、元数据与媒体，不delete历史。进入 Markdown 编辑前须显式转换并校验结构、文字和旧锚点；HOME_HERO 可显式重建固定模板，但不猜媒体对应关系。
 - `POST /resources/{key}/publish`、`/withdraw` 接 `{versionId,expectedRevision}`；资源 CAS 使用内容项 revision。`GET /operation-result` 使用原幂等 key header 与 `operation/resourceId/fingerprint`，校验原操作者和当前权限。operation 为 `content.resource.draft.create`、`content.resource.draft.save`、`content.resource.media-draft.save`、`content.resource.draft.restore`、`content.resource.publish`、`content.resource.withdraw`。未知结果保留原请求身份，先查回执回读，不以新 key 重发发布。
 - 资源读取 no-store，搜索运行时匹配当前公开帮助内容，不新建索引服务/队列；读取失败不能当空结果。`GET /storage`、`/storage/check` 仅返回服务器适配器配置状态与公开样本只读检查，不接收云凭据。OSS 凭据、桶/前缀与 CDN 在服务器配置，样本读取和本地验证不证明真实上传、生产 CDN、撤权失效、相机扫码或原生端渲染已验收。
+
+### 系统配置
+
+- `GET /api/v1/admin/system/storage`、`GET /api/v1/admin/system/storage/check`（Admin BFF 同路径 `/api/bff/admin/system/...`）仅限当前有效且未锁定的 ACTIVE Boss。只接受 GET、无查询参数；校验管理端/API Origin，响应 no-store。返回实际适配器的后端、装配状态、Bucket/地域/Endpoint/前缀、凭据类型及上传限制，不返回凭据、签名 URL、本地目录或任意环境变量。
+- 检查读取一张已审核公开的 `CONTENT_MEDIA` 衍生图并验证 SHA256，返回 `NOT_RUN|NO_PUBLIC_SAMPLE|PASS|FAILED`、检查时间及独立完整性结果；网络 I/O 不持有数据库事务，完成后复核当前会话和 Boss 身份。不上传或删除对象，不把单样本检查当作全量媒体、上传、私有权限或 CDN 验收。部署及初始对象准备见[媒体存储](../operations/media-storage.md)。
 
 ### 原公告、资讯与接管前轮播
 

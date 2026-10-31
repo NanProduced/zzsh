@@ -1,6 +1,6 @@
 import { ConfigurationError, loadConfig } from "../config/config";
 import { assertBusinessMigrationIdentity, createBusinessPool } from "./business";
-import { runBusinessMigrations } from "./business-migrations";
+import { BusinessMigrationHistoryError, runBusinessMigrations } from "./business-migrations";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -19,6 +19,8 @@ async function main(): Promise<void> {
 void main().catch((error: unknown) => {
   if (error instanceof ConfigurationError) {
     console.error(`Business migration configuration rejected: ${error.message}`);
+  } else if (error instanceof BusinessMigrationHistoryError) {
+    console.error(error.message);
   } else {
     console.error("Business migration failed; target was not reported.");
   }

@@ -14,6 +14,15 @@ export type OrderSweepModuleOptions = {
   onError?: (error: unknown) => void;
 };
 
+/** Standard authenticated startup owns cleanup; isolated createApp callers stay explicit. */
+export function loadOrderSweepRuntime(pool: Pool | undefined, env: NodeJS.ProcessEnv = process.env): OrderSweepModuleOptions | undefined {
+  const enabled = env.ORDER_SWEEP_ENABLED?.trim() ?? (pool ? "true" : "false");
+  if (enabled !== "true" && enabled !== "false") throw new ConfigurationError("ORDER_SWEEP_ENABLED must be true or false");
+  if (enabled === "false") return undefined;
+  if (!pool) throw new ConfigurationError("ORDER_SWEEP_ENABLED=true requires an authenticated business database");
+  return { pool, intervalMs: 5000, batchLimit: 25, scanLimit: 100, lockTimeoutMs: 250 };
+}
+
 const ORDER_SWEEP_OPTIONS = Symbol("ORDER_SWEEP_OPTIONS");
 
 /**
