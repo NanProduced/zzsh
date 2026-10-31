@@ -43,6 +43,7 @@ class Fixture {
   rollbackError?: Error;
   connectError?: Error;
   connectWait?: Promise<void>;
+  lastActiveMissing = false;
   constructor() {
     for (const [id, userId, age, valid] of [[CURRENT, SELF, 3, true], ["session_two", SELF, 2, true], ["session_three", SELF, 1, true], ["expired", SELF, 4, false], ["foreign", OTHER, 0, true]] as const) {
       this.sessions.set(id, { id, userId, createdAt: new Date(NOW.getTime() - age * 1000), expiresAt: new Date(Date.now() + (valid ? 86400000 : -86400000)), userAgent: id === CURRENT ? "Offline UA" : null, locked: id === "session_three" });
@@ -90,10 +91,13 @@ class Fixture {
       assert.deepEqual(values, [CURRENT, SELF]); const s = this.sessions.get(CURRENT), u = this.users.get(SELF);
       return rows(s?.userId === SELF && s.expiresAt.getTime() > Date.now() && u ? [{ locked: s.locked, twoFactorEnabled: u.twoFactorEnabled }] : []);
     }
+    if (q === "SAVEPOINT self_sessions_last_active" || q === "RELEASE SAVEPOINT self_sessions_last_active" || q === "ROLLBACK TO SAVEPOINT self_sessions_last_active") return rows([]);
+    if (q.startsWith('SELECT "username", "displayUsername", "email"')) { assert.deepEqual(values, [SELF]); const u = this.users.get(SELF); return rows(u ? [{ username: u.username, displayUsername: u.displayUsername, email: null }] : []); }
     if (q.startsWith('SELECT "id", "username"')) { assert.deepEqual(values, [SELF]); const u = this.users.get(SELF); return rows(u ? [{ ...u }] : []); }
     if (q.startsWith('SELECT "id", "createdAt"')) {
+      if (this.lastActiveMissing && q.includes('"last_active_at"')) throw Object.assign(new Error("column missing"), { code: "42703" });
       assert.deepEqual(values, [SELF]); assert.match(q, /WHERE "userId" = \$1 AND "expiresAt" > clock_timestamp\(\) ORDER BY "createdAt" DESC, "id" LIMIT 101$/);
-      return rows([...this.sessions.values()].filter(s => s.userId === SELF && s.expiresAt.getTime() > Date.now()).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).slice(0, 101));
+      return rows([...this.sessions.values()].filter(s => s.userId === SELF && s.expiresAt.getTime() > Date.now()).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).slice(0, 101).map(s => q.includes('"last_active_at"') ? s : { ...s, lastActiveAt: null }));
     }
     if (q.startsWith('SELECT e."id"')) return this.activity(q, values);
     assert.fail("Unrecognized read SQL: " + q);
@@ -112,7 +116,8 @@ class Fixture {
       const objectType = ["admin.frozen", "admin.unfrozen", "admin.enrollment.activated"].includes(a.action) ? "admin_security" : "admin_user";
       return (["admin", "admin_recovery_target"].includes(a.actorType) && a.actorId === SELF && actors.includes(a.action))
         || (a.objectType === objectType && a.objectId === SELF && targets.includes(a.action))
-        || (a.objectType === "admin_recovery_request" && recovery.includes(a.action) && a.details.targetAdminId === SELF);
+        || (a.objectType === "admin_recovery_request" && recovery.includes(a.action) && a.details.targetAdminId === SELF)
+        || (a.actorType === "system" && a.objectType === "admin_auth_subject" && (values[5] as string[]).includes(a.action) && (values[6] as string[]).includes(String(a.objectId)));
     }).filter(a => !action || a.action === action).filter(a => !from || micros(a.occurredAt) >= micros(from)).filter(a => !to || micros(a.occurredAt) <= micros(to))
       .filter(a => !cursor || micros(a.occurredAt) < micros(cursor) || (micros(a.occurredAt) === micros(cursor) && a.id < cursorId!))
       .sort((a, b) => micros(a.occurredAt) === micros(b.occurredAt) ? (a.id < b.id ? 1 : a.id > b.id ? -1 : 0) : micros(a.occurredAt) < micros(b.occurredAt) ? 1 : -1).slice(0, Number(values[4]));
@@ -166,7 +171,7 @@ test("sessions expose only permitted fields, truncate UA, retain locked valid ro
     const f = new Fixture(); f.sessions.get(CURRENT)!.userAgent = "x".repeat(600);
     Object.assign(f.sessions.get(CURRENT)!, { token: "private_token", ipAddress: "private_ip", pinHash: "private_pin" });
     const first = await read(f, "/sessions", bff); const own = first.body.sessions.find((s: any) => s.id === CURRENT);
-    assert.deepEqual(Object.keys(own).sort(), ["createdAt", "expiresAt", "id", "isCurrent", "locked", "userAgent"]); assert.equal(own.userAgent.length, 512); assert(!JSON.stringify(first.body).includes("private_"));
+    assert.deepEqual(Object.keys(own).sort(), ["client", "createdAt", "expiresAt", "id", "ipAddress", "ipMasked", "isCurrent", "lastActiveAt", "locked", "region", "userAgent"]); assert.equal(own.ipAddress, null); assert.equal(own.userAgent.length, 512); assert(!JSON.stringify(first.body).includes("private_"));
     for (let i = 3; i < 100; i++) f.sessions.set("extra_" + i, { ...f.sessions.get(CURRENT)!, id: "extra_" + i });
     const full = await read(f, "/sessions", bff); assert.equal(full.status, 200); assert.equal(full.body.sessions.length, 100); assert.equal(full.body.sessions.filter((s: any) => s.isCurrent).length, 1);
     f.sessions.set("one_over", { ...f.sessions.get(CURRENT)!, id: "one_over" }); const over = await read(f, "/sessions", bff); failure(over, 503, "session_list_limit_exceeded"); assert.equal(over.body.sessions, undefined); assert.equal(f.queries.at(-1)!.sql, "ROLLBACK");
@@ -248,7 +253,7 @@ test("activity filters own actor/typed target/recovery before pagination, with s
     const next = await read(f, "/security-activity?limit=2&cursor=" + r.body.nextCursor, bff); assert.deepEqual(next.body.events.map((e: any) => e.eventId), ["own", "maintenance"]); assert.equal(next.body.nextCursor, null);
     assert.deepEqual(next.body.events[0].details, { revokedSessionCount: 4 }); assert.deepEqual(next.body.events[0].actor, { kind: "self", ref: null }); assert.deepEqual(next.body.events[1].actor, { kind: "system", ref: null });
     assert(!JSON.stringify([r.body, next.body]).includes("PRIVATE")); assert(!JSON.stringify([r.body.events, next.body.events]).includes(OTHER));
-    assert(SELF_ACTIVITY_READABLE_ACTIONS.includes("admin.password.changed")); assert(next.body.coverage.recordedActions.includes("admin.password.changed")); assert(!next.body.coverage.recordedActions.includes("admin.self.sessions.revoked")); assert(next.body.coverage.notRecorded.includes("sign_in"));
+    assert(SELF_ACTIVITY_READABLE_ACTIONS.includes("admin.password.changed")); assert(next.body.coverage.recordedActions.includes("admin.password.changed")); assert(next.body.coverage.recordedActions.includes("admin.self.sessions.revoked")); assert(next.body.coverage.notRecorded.includes("sign_in"));
   }
 });
 test("activity projects each whitelisted details shape without raw JSON or credential fields", async () => {
@@ -258,6 +263,8 @@ test("activity projects each whitelisted details shape without raw JSON or crede
     ["admin.pin.unlock", { pinFailures: "bad", locked: false }, { locked: false }],
     ["admin.self.sessions.revoked", { scope: "others", revokedSessionCount: 2, sessionIds: ["PRIVATE"] }, { scope: "others", revokedSessionCount: 2 }],
     ["admin.session.force_logged_out", { revokedSessions: 3, targetAdminId: "PRIVATE" }, { revokedSessions: 3 }],
+    ["admin.password.reset", { revokedSessions: 2, before: { status: "PRIVATE" } }, { revokedSessions: 2 }],
+    ["admin.two_factor.reset", { revokedSessions: 1, temporaryPassword: "PRIVATE" }, { revokedSessions: 1 }],
   ];
   for (const [action, details, expected] of cases) { f.audits = [audit({ action, details, objectType: "admin_user", objectId: SELF })]; const r = await read(f, "/security-activity"); assert.deepEqual(r.body.events[0].details, expected); assert(!JSON.stringify(r.body).includes("PRIVATE")); }
 });
@@ -338,4 +345,34 @@ test("R0 wiring retains shared read/write transactions and introduces no command
   assert.match(runtime, /mountAuthSecurityHandlers\(app, securityOptions\);\s+mountAdminSelfSettingsHandlers\(app, securityOptions\);/);
   assert.match(runtime, /mountCreditGuaranteeRoutes\(app, \{\s*\.\.\.securityOptions,\s*listingCursorKey: options\.listingCursorKey\s*\}, options\.creditGuaranteeEnabled === true\)/);
   assert.match(runtime, /mountMembershipGrowth/);
+});
+
+test("sessions add masked IP, script UA flag, region and lastActiveAt, and fall back when 0119 is unapplied", async () => {
+  for (const missing of [false, true]) {
+    const f = new Fixture(); f.lastActiveMissing = missing;
+    Object.assign(f.sessions.get(CURRENT)!, { ipAddress: "10.1.2.3", userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/141.0.0.0 Safari/537.36", lastActiveAt: new Date("2026-10-15T11:58:00Z") });
+    Object.assign(f.sessions.get("session_two")!, { ipAddress: "203.0.113.77", userAgent: "node", lastActiveAt: null });
+    const r = await read(f, "/sessions"); assert.equal(r.status, 200);
+    const own = r.body.sessions.find((s: any) => s.id === CURRENT), other = r.body.sessions.find((s: any) => s.id === "session_two");
+    assert.equal(own.ipAddress, "10.1.2.3"); assert.equal(own.ipMasked, false); assert.equal(own.region, "本机/内网"); assert.equal(own.client.isScript, false); assert.match(own.client.label, /Chrome 141 · Windows/);
+    assert.equal(own.lastActiveAt, missing ? null : "2026-10-15T11:58:00.000Z");
+    assert.equal(other.ipAddress, "203.0.*.*"); assert.equal(other.ipMasked, true); assert(!JSON.stringify(r.body).includes("113.77")); assert.equal(other.client.isScript, true); assert.match(other.client.label, /脚本\/非浏览器客户端/);
+    assert.equal(f.queries.some(q => q.sql === "ROLLBACK TO SAVEPOINT self_sessions_last_active"), missing);
+  }
+});
+test("activity includes own brute-force failures/lockouts and login 2FA toggles but not other accounts' failures", async () => {
+  const { adminAuthSubject } = await import("../src/auth/admin-brute-force");
+  const mine = adminAuthSubject("account", "id:zz00001"), theirs = adminAuthSubject("account", "id:zz00002");
+  const f = new Fixture(); f.audits = [
+    audit({ id: "a1", actorType: "system", actorId: null as any, objectType: "admin_auth_subject", objectId: mine, action: "admin.auth.failure", outcome: "FAILURE", details: { scope: "sign-in", failures: 3, locked: false, subjectKinds: ["account"] }, occurredAt: "2026-10-15T12:00:00.000003Z" }),
+    audit({ id: "a2", actorType: "system", actorId: null as any, objectType: "admin_auth_subject", objectId: mine, action: "admin.auth.lockout", outcome: "FAILURE", details: { scope: "sign-in", level: 1, lockSeconds: 60, lockedUntil: "2026-10-15T12:01:00.000Z" }, occurredAt: "2026-10-15T12:00:00.000002Z" }),
+    audit({ id: "a3", actorType: "system", actorId: null as any, objectType: "admin_auth_subject", objectId: theirs, action: "admin.auth.failure", outcome: "FAILURE", details: { scope: "sign-in", failures: 1 }, occurredAt: "2026-10-15T12:00:00.000004Z" }),
+    audit({ id: "a4", action: "admin.login_two_factor.changed", objectType: "admin_security", objectId: SELF, details: { before: { loginTwoFactorRequired: true }, after: { loginTwoFactorRequired: false } }, occurredAt: "2026-10-15T12:00:00.000001Z" }),
+  ];
+  const r = await read(f, "/security-activity"); assert.equal(r.status, 200);
+  assert.deepEqual(r.body.events.map((e: any) => e.eventId), ["a1", "a2", "a4"]);
+  assert.deepEqual(r.body.events[0].details, { authScope: "sign-in", failures: 3, locked: false }); assert.equal(r.body.events[0].category, "auth"); assert.equal(r.body.events[0].actor.kind, "system");
+  assert.deepEqual(r.body.events[1].details, { authScope: "sign-in", lockSeconds: 60, lockedUntil: "2026-10-15T12:01:00.000Z" });
+  assert.deepEqual(r.body.events[2].details, { loginTwoFactorRequired: false });
+  assert(!JSON.stringify(r.body).includes(mine));
 });

@@ -40,12 +40,12 @@ function detail(id='request-a',editable=true){
 const settle=async()=>{await act(async()=>{await new Promise(resolve=>setTimeout(resolve,0));});};
 const dialog=()=>browser.document.querySelector('[role=dialog]');
 const button=(text,within=browser.document)=>[...within.querySelectorAll('button')].find(element=>element.textContent.trim()===text);
-async function click(element){assert.ok(element,'expected an interactive control');await act(async()=>element.click());await settle();}
+async function clickRaw(element){assert.ok(element,'expected an interactive control');await act(async()=>element.click());await settle();}
 async function type(element,value){assert.ok(element,'expected an editable field');await act(async()=>{const prototype=element.tagName==='TEXTAREA'?browser.HTMLTextAreaElement.prototype:browser.HTMLInputElement.prototype;Object.getOwnPropertyDescriptor(prototype,'value').set.call(element,value);element.dispatchEvent(new browser.Event('input',{bubbles:true}));element.dispatchEvent(new browser.Event('change',{bubbles:true}));});}
 async function check(text){const label=[...dialog().querySelectorAll('label')].find(element=>element.textContent.trim()===text);assert.ok(label);await click(browser.document.getElementById(label.htmlFor));}
 async function mount(t,data){
   const host=browser.document.createElement('div');browser.document.body.append(host);const root=createRoot(host),decisions=[];
-  const props={busy:false,blocked:false,onOpenRequest(){},onExecute(){throw new Error('No execution is authorized by this decision test');},onAppend(){throw new Error('No approver append is authorized by this decision test');},onDecide:(...args)=>decisions.push(structuredClone(args))};
+  const props={busy:false,blocked:false,onOpenRequest(){},onExecute(){throw new Error('No execution is authorized by this decision test');},onAppend(){throw new Error('No approver append is authorized by this decision test');},onDecide:(decision,reason,stepUp,amendment)=>{assert.ok(stepUp&&stepUp.password.length>=12&&/^\d{6}$/.test(stepUp.totpCode),'decision carries live step-up');decisions.push(structuredClone(amendment===undefined?[decision,reason]:[decision,reason,amendment]));}};
   const render=async next=>{await act(async()=>root.render(createElement(RequestDetail,{...props,detail:next})));await settle();};
   t.after(async()=>{await act(async()=>root.unmount());host.remove();await settle();});
   await render(data);return{host,decisions,render};
@@ -101,3 +101,13 @@ test('switching requests clears old edits and approval opinions before the next 
   await check('调整礼遇后批准');assert.equal(dialog().querySelector('[aria-label="批准应付比例"]').value,'0.97');
   await click(button('确认批准',dialog()));assert.equal(h.decisions[0][2].expectedPayloadHash,next.entitlementAmendment.expectedPayloadHash);assert.equal(h.decisions[0][2].finalPayload.userId,'user-b');assert.equal(h.decisions[0][2].finalPayload.pricing.payableRatio,'0.97');
 });
+
+// Step-up credentials are required in every approval write dialog; tests fill them once the dialog opens.
+async function click(element) { await clickRaw(element); await fillStepUpFields(element); }
+async function fillStepUpFields(element) {
+  const doc = element?.ownerDocument; if (!doc) return;
+  const fields = [...doc.querySelectorAll('input[autocomplete="current-password"], input[autocomplete="one-time-code"]')].filter((field) => !field.value);
+  if (fields.length === 0) return;
+  const setValue = Object.getOwnPropertyDescriptor(doc.defaultView.HTMLInputElement.prototype, "value").set;
+  await act(async () => { for (const field of fields) { setValue.call(field, field.autocomplete === "one-time-code" ? "123456" : "step-up-password-1"); field.dispatchEvent(new doc.defaultView.Event("input", { bubbles: true })); } });
+}

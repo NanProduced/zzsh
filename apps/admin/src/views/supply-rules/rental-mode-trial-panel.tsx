@@ -42,7 +42,7 @@ export function DraftFastTrial({ rules, version, dirty }: { rules: RulesResponse
   const sel = (key: "box" | "vit" | "bear", label: string, map: Record<string, string> | undefined) => <label className="min-w-0 space-y-1 text-xs"><span className="text-muted-foreground">{label}</span>
     <SupplySelect label={label} value={input[key]} options={Object.keys(map ?? {}).map((v) => ({ value: v, label: v }))} onValueChange={(v) => setInput((p) => ({ ...p, [key]: v }))} />{errs[key] ? <p className="text-[11px] text-destructive">{errs[key]}</p> : null}</label>;
   return <fieldset className="space-y-3 rounded-lg border border-border p-3" aria-label="极速草稿正式试算"><legend className="px-1 text-sm font-semibold">极速草稿正式试算</legend>
-    <p className="text-xs text-muted-foreground">按所选草稿（{version ? `${version.id} · 修订 ${version.revision}` : "未选择"}）、极速模式与号主比例 B 由服务端计算；草稿极速范围：下限 {boundText(fast?.min)}，上限 {boundText(fast?.max)}。改任何输入或草稿后需重新试算。</p>
+    <p className="text-xs text-muted-foreground">{version ? "按正在修改的草稿计算" : "还没有草稿"}；极速范围 {boundText(fast?.min)} ~ {boundText(fast?.max)}。改了输入要重新试算。</p>
     {dirty ? <p role="status" className="text-xs text-amber-600">草稿有未保存修改：先保存，试算只针对已保存修订。</p> : null}
     {errs.version ? <p role="status" className="text-xs text-muted-foreground">{errs.version}</p> : null}
     <div className="grid gap-3 sm:grid-cols-3">
@@ -59,7 +59,7 @@ export function DraftFastTrial({ rules, version, dirty }: { rules: RulesResponse
     {ok && !stale && ok.quotable && ok.quote ? <div role="status" aria-label="极速试算结果" className="rounded-md bg-muted px-3 py-2 text-xs tabular-nums">
       <p>基础比例 C {ratio(pi?.compatibility?.baseRatioC)} · 号主比例 B {ratio(pi?.compatibility?.ownerRatioB)} · 租客比例 {ratio(pi?.denominators?.buyer)} · 价差 P {ratio(pi?.spreadDelta)}</p>
       <p>可租 {num(ok.quote.termSeconds) ? Math.ceil(num(ok.quote.termSeconds)! / 86400) : "—"} 天 · 租客资源金额 {money(ok.quote.resourceTotal)} · 号主金额（扣费前） {money(ok.quote.ownerTotal)}</p>
-      <p className="text-muted-foreground">绑定：{ok.binding?.priceVersionId} · 修订 {ok.binding?.priceVersionRevision} · {ok.binding?.rentalMode} · B={ok.binding?.ownerRatioB}；会员统一总价折扣不在此试算。</p>
+      <p className="text-muted-foreground">按草稿 · {ok.binding?.rentalMode === "fast" ? "极速模式" : "普通模式"} · 号主比例 {ok.binding?.ownerRatioB}；不含会员折扣。</p>
     </div> : null}
   </fieldset>;
 }

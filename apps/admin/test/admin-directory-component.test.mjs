@@ -947,3 +947,93 @@ test("D3 创建必须显式选范围，旧接口未声明支持时拒绝发送",
     } finally { await view.cleanup(); }
   }
 });
+
+test("personal ALLOW locks boss-only codes with 仅 Boss tag; personal DENY keeps them selectable", async (t) => {
+  useServer({ ...baseRoutes(detailFixture({ roles: [ACTIVE_ROLE] })), "GET /security/roles": () => json({ roles: [ACTIVE_ROLE, DISABLED_ROLE], permissions: CATALOG_PERMISSIONS.map(p => p.code === "supply.rules.activate" ? { ...p, bossOnly: true } : p) }) });
+  const view = mount(); t.after(view.cleanup);
+  await openEditor(view, "access");
+  await click(section("角色与有效权限").querySelector("summary"));
+  const fieldsets = [...section("角色与有效权限").querySelectorAll("fieldset")];
+  const pick = (legend) => fieldsets.find(node => node.querySelector("legend")?.textContent === legend);
+  const box = (fs) => [...fs.querySelectorAll("label")].find(label => label.textContent.includes("规则生效"));
+  const allow = box(pick("个人允许"));
+  assert.ok(allow, "boss-only code is listed");
+  assert.match(allow.textContent, /仅 Boss/);
+  const allowInput = allow.querySelector("input[type=checkbox]") ?? allow.querySelector("[role=checkbox],button");
+  assert.ok(allowInput.disabled || allowInput.getAttribute("aria-disabled") === "true" || allowInput.hasAttribute("data-disabled"), "allow checkbox locked");
+  const deny = box(pick("个人禁止（优先）"));
+  const denyInput = deny.querySelector("input[type=checkbox]") ?? deny.querySelector("[role=checkbox],button");
+  assert.equal(Boolean(denyInput.disabled || denyInput.hasAttribute("data-disabled")), false, "deny remains selectable");
+});
+
+test("create dialog tells the operator about first-login password change and 2FA binding", async (t) => {
+  useServer({ ...baseRoutes(detailFixture()) });
+  const view = mount(); t.after(view.cleanup);
+  await view.render({ initialUsername: undefined });
+  await click(btn("新增管理员"));
+  const form = dialogWith("新管理员默认全部游戏范围");
+  assert.match(form.textContent, /本人首次登录需改密并绑定 2FA/);
+  assert.doesNotMatch(browser.document.body.textContent, /系统旁路|角色并集|当前运行版本/);
+});
+
+function bossSnap(sessionId) {
+  const base = snap(undefined, "admin-boss", sessionId);
+  return { ...base, security: { ...base.security, isBoss: true } };
+}
+const RESET_ACTIONS = [...ALLOWED_ACTIONS, ...["reset-password", "reset-2fa"].map((action) => ({ action, allowed: true, reasonCode: "OK", needsReauthentication: true, needsFullGrantBaseline: false }))];
+
+async function findOnTabs(page, label) {
+  for (const tab of ["概览", "访问与安全", "账号变更"]) {
+    if (btn(label, page)) return btn(label, page);
+    const tabButton = [...page.querySelectorAll("[role=tab]")].find((node) => node.textContent === tab);
+    if (tabButton) await click(tabButton);
+  }
+  return btn(label, page);
+}
+
+async function fillStepUp(dialog) {
+  const inputs = [...dialog.querySelectorAll("input")];
+  typeInto(inputs[0], "correct-horse-battery");
+  typeInto(inputs[1], "123456");
+  const area = dialog.querySelector("textarea");
+  Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype, "value").set.call(area, "手机丢失");
+  area.dispatchEvent(new browser.Event("input", { bubbles: true }));
+  await settle();
+}
+
+test("Boss resets password: step-up required, temp password shown once, closes only via acknowledgement", async (t) => {
+  const calls = useServer({ ...baseRoutes(detailFixture({ actions: RESET_ACTIONS })), "POST /security/admins/reset-password": () => json({ status: "PASSWORD_RESET", temporaryPassword: "Tmp-OneTime-xyz", target: { id: "admin-2", username: "ZZ00002" } }) });
+  const view = mount(); t.after(view.cleanup);
+  const page = await openDetail(view, { snapshot: bossSnap(view.sessionId) });
+  await click(await findOnTabs(page, "重置密码"));
+  const dialog = dialogWith("重置该管理员的密码");
+  assert.ok(dialog);
+  assert.equal(btn("确认重置密码", dialog).disabled, true, "未再验证前不可提交");
+  await fillStepUp(dialog);
+  await click(btn("确认重置密码", dialog));
+  await waitFor(() => dialogWith("交付临时密码"));
+  const post = calls.find((call) => call.route === "POST /security/admins/reset-password");
+  assert.deepEqual(Object.keys(post.body).sort(), ["password", "reason", "targetAdminId", "totpCode"]);
+  assert.equal(post.body.targetAdminId, "admin-2");
+  const delivery = dialogWith("交付临时密码");
+  assert.match(delivery.textContent, /Tmp-OneTime-xyz/);
+  assert.equal(btn("取消", delivery), undefined, "交付窗无取消，只能确认抄录");
+  await click(btn("我已抄录并关闭", delivery));
+  assert.equal(dialogWith("交付临时密码"), undefined);
+  assert.doesNotMatch(browser.document.body.textContent, /Tmp-OneTime-xyz/, "关闭后不再显示");
+});
+
+test("Boss resets 2FA via step-up; buttons hidden for non-Boss actors and Boss targets", async (t) => {
+  const calls = useServer({ ...baseRoutes(detailFixture({ actions: RESET_ACTIONS })), "POST /security/admins/reset-2fa": () => json({ status: "TWO_FACTOR_RESET", target: { id: "admin-2" } }) });
+  const view = mount(); t.after(view.cleanup);
+  const page = await openDetail(view, { snapshot: bossSnap(view.sessionId) });
+  await click(await findOnTabs(page, "重置 2FA"));
+  const dialog = dialogWith("重置该管理员的 2FA");
+  await fillStepUp(dialog);
+  await click(btn("确认重置 2FA", dialog));
+  await waitFor(() => calls.some((call) => call.route === "POST /security/admins/reset-2fa"));
+  await waitFor(() => !dialogWith("重置该管理员的 2FA"));
+  await view.render({ snapshot: snap(undefined, "admin-boss", view.sessionId) });
+  assert.equal(await findOnTabs(detailPage(), "重置密码"), undefined, "非 Boss 看不到重置入口");
+  assert.equal(await findOnTabs(detailPage(), "重置 2FA"), undefined);
+});

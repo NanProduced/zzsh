@@ -78,3 +78,60 @@ test("new audit action does not waive permission or allow unrelated domain event
   await assert.rejects(boss.read("action=approval.request.created"), { status: 400 });
   assert.equal(boss.auditQueries.length, 0);
 });
+
+test("all-audit and purge reads reject a Boss whose fresh security state is frozen or requires a password change", async () => {
+  for (const security of [
+    { status: "FROZEN", isBoss: true, passwordChangeRequired: false },
+    { status: "ACTIVE", isBoss: true, passwordChangeRequired: true },
+  ]) for (const route of ["/audit/operations", "/audit/purge/preview"]) {
+    let protectedQueries = 0;
+    const pool = { async query(sql: string) {
+      if (sql.includes('FROM "zzsh_iam"."admin_security"')) return { rows: [security] };
+      protectedQueries++; return { rows: [] };
+    } };
+    await assert.rejects(handleAdminAuditRoute(
+      { method: "GET", originalUrl: "/api/v1/admin/security" + route } as never,
+      {} as never, "dynamic-boss", { pool } as never,
+      async () => ({ userId: "boss-actor", sessionId: "fixture-session" }),
+    ), (error: any) => error.status === 403);
+    assert.equal(protectedQueries, 0, "initial readContext success does not bypass the fresh actor state");
+  }
+});
+
+// Step-up is enforced by the outer security handler; this checks the purge route's own transaction/actor gate.
+test("audit purge locks and rechecks its actor before calling the definer on that same client", async () => {
+  for (const inside of [
+    { status: "FROZEN", isBoss: true, passwordChangeRequired: false },
+    { status: "ACTIVE", isBoss: true, passwordChangeRequired: true },
+    { status: "ACTIVE", isBoss: false, passwordChangeRequired: false },
+    { status: "ACTIVE", isBoss: true, passwordChangeRequired: false },
+  ]) {
+    const statements: string[] = []; let locked = false, purgeCalls = 0, released = 0, body: any;
+    const client = { release() { released++; }, async query(sql: string, args: unknown[] = []) {
+      statements.push(sql);
+      if (sql.includes('FROM "zzsh_iam"."admin_security"')) {
+        if (sql.includes("FOR UPDATE")) locked = true;
+        return { rows: [inside], rowCount: 1 };
+      }
+      if (sql.includes("purge_admin_audit_events")) {
+        assert.equal(locked, true);
+        assert.deepEqual(args, [180, "boss-actor", "fixture-session", "purge-lock", false]);
+        purgeCalls++; return { rows: [{ deleted: "2", cutoff: "2026-01-01T00:00:00Z" }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    } };
+    const pool = { connect: async () => client, async query(sql: string) {
+      assert(sql.includes('FROM "zzsh_iam"."admin_security"'), "the purge function must run on the transaction client");
+      return { rows: [{ status: "ACTIVE", isBoss: true, passwordChangeRequired: false }] };
+    } };
+    const response = { headersSent: false, status() { return this; }, setHeader() { return this; }, json(value: unknown) { body = value; } };
+    const run = () => handleAdminAuditRoute(
+      { method: "POST", originalUrl: "/api/v1/admin/security/audit/purge", body: { retentionDays: 180, confirmText: "删除180天前的日志" } } as never,
+      response as never, "purge-lock", { pool } as never, async () => ({ userId: "boss-actor", sessionId: "fixture-session" }),
+    );
+    const allowed = inside.status === "ACTIVE" && inside.isBoss && !inside.passwordChangeRequired;
+    if (allowed) { await run(); assert.equal(body.deletedCount, 2); assert.equal(purgeCalls, 1); assert(statements.includes("COMMIT")); }
+    else { await assert.rejects(run(), (error: any) => error.status === 403); assert.equal(purgeCalls, 0); assert(statements.includes("ROLLBACK")); }
+    assert.equal(released, 1);
+  }
+});

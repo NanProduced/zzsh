@@ -417,7 +417,8 @@ function App() {
     setRecoveryNotice(undefined);
   }, [beginSessionMutation, refreshSession]);
 
-  const login = async (idValue: string, pwValue: string) => {
+  const [loginCaptcha, setLoginCaptcha] = useState({ required: false, round: 0, retry: false });
+  const login = async (idValue: string, pwValue: string, altcha?: string) => {
     setError(undefined);
     setRecoveryNotice(undefined);
     setTotpURI(undefined);
@@ -428,16 +429,22 @@ function App() {
       const isEmail = idValue.includes("@");
       const result = await adminRequest<AuthResponse>(
         isEmail ? "/auth/sign-in" : "/auth/sign-in/username",
-        isEmail ? { email: idValue, password: pwValue } : { username: idValue, password: pwValue }
+        { ...(isEmail ? { email: idValue, password: pwValue } : { username: idValue, password: pwValue }), ...(altcha ? { altcha } : {}) }
       );
+      setLoginCaptcha({ required: false, round: 0, retry: false });
       setPassword(pwValue);
       if (result.twoFactorRedirect) {
         setView("challenge");
       } else {
         endMutation();
-        await refreshSession(true);
+        const next = await refreshSession(true);
+        // 登录接口 200 但既无二次验证跳转、也未建立会话时，不能静默停留在登录页。
+        if (!next.authenticated) setError("登录未完成：服务端未建立会话，请刷新页面后重试。");
       }
     } catch (failure) {
+      const captcha = failure instanceof AdminApiError && failure.reason === "CAPTCHA_REQUIRED";
+      // 服务端只在下一次确实需要新挑战时返回 CAPTCHA_REQUIRED；组件按 round 重置，已解过一次则提示“重新完成”。
+      setLoginCaptcha((current) => ({ required: captcha, round: current.round + 1, retry: captcha && Boolean(altcha) }));
       setError(friendlyError(failure));
     } finally {
       endMutation();
@@ -589,6 +596,9 @@ function App() {
           error={error}
           onIdentifier={setIdentifier}
           onSubmit={login}
+          captchaRequired={loginCaptcha.required}
+          captchaRound={loginCaptcha.round}
+          captchaRetry={loginCaptcha.retry}
           onRecovery={() => {
             setError(undefined);
             setView("recovery");
@@ -709,6 +719,9 @@ function App() {
           error={error}
           onIdentifier={setIdentifier}
           onSubmit={login}
+          captchaRequired={loginCaptcha.required}
+          captchaRound={loginCaptcha.round}
+          captchaRetry={loginCaptcha.retry}
           onRecovery={() => setView("recovery")}
         />
       </AuthLayout>

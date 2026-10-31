@@ -1,3 +1,4 @@
+import { BeijingInstantField } from "@/components/beijing-datetime-field";
 import { updateVisibility, type UpdateSettings } from '@zzsh/content/updates';
 import { Checkbox } from '../components/ui/checkbox';
 import { Input } from '../components/ui/input';
@@ -37,7 +38,8 @@ export function ContentUpdateSettings({ value, onChange, disabled, announcement 
       if (text === local) return;
       patch({ [key]: text ? new Date(`${text}+08:00`).toISOString() : null });
     };
-    return <label className="content-settings-field"><span>{label}</span><Input type="datetime-local" value={local} onInput={change} onChange={change} onBlur={change} /></label>;
+    void change;
+    return <div className="content-settings-field"><BeijingInstantField label={label} value={value[key]} disabled={disabled} onChange={(iso) => patch({ [key]: iso })} /></div>;
   };
 
   return <fieldset disabled={disabled} className="content-settings">

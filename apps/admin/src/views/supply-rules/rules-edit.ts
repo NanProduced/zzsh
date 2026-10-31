@@ -9,13 +9,14 @@ export type EditValues = Record<string, string>;
 export type EditField = { key: string; group: "哈夫币价格" | "物品单价" | "押金规则" | "租期与每日消耗"; label: string; unit?: string };
 export type ChangeRow = EditField & { before: string; after: string };
 
-export const SKIN_LABELS: Record<string, string> = { LEGACY_GOLD: "人物金皮", LEGACY_AGENT: "人物红皮", LEGACY_KNIFE: "刀皮", LEGACY_WEAPON: "武器砖皮" };
 
 export type EditContext = { price?: PriceVersionRecord; haff: HaffV2 | null; policy: FundingPolicy | null; termVersionId?: string };
 
-export function editContext(rules: RulesResponse): EditContext {
+/** priceVersionId 省略时取线上版本；传入时按该版本（如草稿）读取。 */
+export function editContext(rules: RulesResponse, priceVersionId?: string): EditContext {
   const r = rules.release;
-  const price = r ? rules.priceVersions.find((v) => v.id === r.priceVersionId) : undefined;
+  const id = priceVersionId ?? r?.priceVersionId;
+  const price = id ? rules.priceVersions.find((v) => v.id === id) : undefined;
   return { price, haff: asHaffV2(price?.haffRule), policy: price?.fundingPolicy ?? null, termVersionId: r?.termVersionId };
 }
 
@@ -28,8 +29,8 @@ const normAmt = (x: string | null) => {
 const rawToM = (raw: string) => { const n = num(raw); return n === null ? "" : String(n / 1e6); };
 
 /** All editable fields with their baseline (current effective) values. */
-export function baseline(rules: RulesResponse): { fields: EditField[]; values: EditValues } {
-  const ctx = editContext(rules); const fields: EditField[] = []; const values: EditValues = {};
+export function baseline(rules: RulesResponse, priceVersionId?: string): { fields: EditField[]; values: EditValues } {
+  const ctx = editContext(rules, priceVersionId); const fields: EditField[] = []; const values: EditValues = {};
   const add = (f: EditField, v: string | null | undefined) => { fields.push(f); values[f.key] = v ?? ""; };
   const { haff, policy, price } = ctx;
   if (haff) {
@@ -78,10 +79,10 @@ export function validate(fields: EditField[], v: EditValues): Record<string, str
   for (const f of fields) {
     const x = (v[f.key] ?? "").trim();
     if (x !== "" && !Number.isFinite(Number(x))) { errors[f.key] = "数值超出可用范围"; continue; }
-    if (f.key.startsWith("haff.base.")) { if (!/^\d+(\.\d{1,8})?$/.test(x) || !Number.isFinite(Number(x)) || Number(x) <= 0) errors[f.key] = "须为大于 0 的数，最多八位小数"; }
-    else if (f.key.startsWith("haff.")) { if (!SIGNED.test(x) || !Number.isFinite(Number(x)) || (x.split(".")[1]?.length ?? 0) > 8) errors[f.key] = "须为数字，最多八位小数"; }
+    if (f.key.startsWith("haff.base.")) { if (!/^\d+(\.\d{1,2})?$/.test(x) || !Number.isFinite(Number(x)) || Number(x) <= 0) errors[f.key] = "须为大于 0 的数，最多两位小数"; }
+    else if (f.key.startsWith("haff.")) { if (!SIGNED.test(x) || !Number.isFinite(Number(x)) || (x.split(".")[1]?.length ?? 0) > 2) errors[f.key] = "须为数字，最多两位小数"; }
     else if (f.key.startsWith("term.")) { if (!/^\d+(\.\d{1,6})?$/.test(x) || Number(x) <= 0) errors[f.key] = "须为大于 0 的 M 数"; }
-    else if (f.key.startsWith("item.")) { if (x !== "" && (!/^\d+(\.\d{1,8})?$/.test(x) || !Number.isFinite(Number(x)))) errors[f.key] = "须为非负金额，最多八位小数"; }
+    else if (f.key.startsWith("item.")) { if (x !== "" && (!/^\d+(\.\d{1,2})?$/.test(x) || !Number.isFinite(Number(x)))) errors[f.key] = "须为非负金额，最多两位小数"; }
     else if (!DEC.test(x)) errors[f.key] = "金额最多两位小数";
   }
   if (v["dep.cap"] !== undefined && !errors["dep.cap"] && Number(v["dep.cap"]) < 300) errors["dep.cap"] = "上限不能低于 300 元（全额包赔最低押金）";

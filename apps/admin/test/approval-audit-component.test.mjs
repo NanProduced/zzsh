@@ -263,7 +263,7 @@ async function waitFor(predicate, timeout = 2000) {
   }
 }
 
-async function click(element) {
+async function clickRaw(element) {
   await act(async () => { element.dispatchEvent(new browser.MouseEvent("click", { bubbles: true, cancelable: true })); });
   await settle();
 }
@@ -858,4 +858,43 @@ test("actor-session change during readback clears the old busy state", async () 
     await view.cleanup();
     globalThis.fetch = undefined;
   }
+});
+
+// Step-up credentials are required in every approval write dialog; tests fill them once the dialog opens.
+async function click(element) { await clickRaw(element); await fillStepUpFields(element); }
+async function fillStepUpFields(element) {
+  const doc = element?.ownerDocument; if (!doc) return;
+  const fields = [...doc.querySelectorAll('input[autocomplete="current-password"], input[autocomplete="one-time-code"]')].filter((field) => !field.value);
+  if (fields.length === 0) return;
+  const setValue = Object.getOwnPropertyDescriptor(doc.defaultView.HTMLInputElement.prototype, "value").set;
+  await act(async () => { for (const field of fields) { setValue.call(field, field.autocomplete === "one-time-code" ? "123456" : "step-up-password-1"); field.dispatchEvent(new doc.defaultView.Event("input", { bubbles: true })); } });
+}
+
+
+test("Root: cold UNKNOWN replay collects fresh credentials without changing the original intent", async () => {
+  freshSession("root-cold-step-up"); writes = []; mineCall = 0; holdFirstMine = false;
+  const { savePendingWrite } = await vite.ssrLoadModule("/src/views/approval/pending-writes.ts");
+  const original = { actorId: "admin-boss", sessionId, target: "m1", operation: "approval.request.decide", path: "/security/approvals/requests/decision", idempotencyKey: "idem_1234567890abcdef1234567890abcdef", body: { requestId: "m1", decision: "APPROVE" }, readback: { kind: "detail-and-lists", requestId: "m1", keys: [] }, successMessage: "original intent", kind: "unknown" };
+  assert.equal(savePendingWrite(original).ok, true);
+  globalThis.fetch = async (input, init = {}) => {
+    if ((init.method ?? "GET") !== "GET") { writes.push({ body: JSON.parse(init.body), headers: init.headers }); return json({ error: { code: "INTERNAL_ERROR" } }, 500); }
+    return mockFetch(input, init);
+  };
+  const view = await renderView({ initialRequestId: "m1", objectOnly: true });
+  try {
+    await waitFor(() => buttonByText("用原请求重试") !== undefined);
+    assert.equal(buttonByText("用原请求重试").disabled, true);
+    assert.equal(writes.length, 0);
+    await act(async () => { setInput(view.rootNode.querySelector('[aria-label="原请求重试本人密码"]'), "root-fresh-password"); setInput(view.rootNode.querySelector('[aria-label="原请求重试动态码"]'), "123456"); });
+    assert.equal(buttonByText("用原请求重试").disabled, false);
+    await clickRaw(buttonByText("用原请求重试"));
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].headers["idempotency-key"], original.idempotencyKey);
+    const { password, totpCode, ...body } = writes[0].body;
+    assert.equal(password, "root-fresh-password"); assert.equal(totpCode, "123456"); assert.deepEqual(body, original.body);
+    assert.equal(view.rootNode.querySelector('[aria-label="原请求重试本人密码"]').value, "");
+    const persisted = Array.from({length:browser.sessionStorage.length},(_,i)=>browser.sessionStorage.getItem(browser.sessionStorage.key(i))).join("");
+    assert.ok(persisted.includes(original.idempotencyKey),"the original intent must actually be persisted");
+    assert.equal(persisted.includes("root-fresh-password"), false); assert.equal(persisted.includes('"totpCode"'), false);
+  } finally { await view.cleanup(); globalThis.fetch = undefined; }
 });

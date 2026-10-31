@@ -20,6 +20,7 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import type { SessionSnapshot } from "../api";
+import { BossCrest } from "./boss-touches";
 
 import { workspaceMenuItems } from "./nav-config";
 import { WorkspaceNavItem } from "./nav-item";
@@ -74,9 +75,12 @@ export function WorkspaceSidebar({
               <DropdownMenuTrigger
                 render={
                   <SidebarMenuButton size="lg" className="data-open:bg-sidebar-accent data-open:text-sidebar-accent-foreground">
-                    <Avatar className="size-8">
-                      <AvatarFallback>{initial}</AvatarFallback>
-                    </Avatar>
+                    <span className="relative inline-flex shrink-0">
+                      <Avatar className={snapshot.security.isBoss ? "boss-avatar size-8" : "size-8"}>
+                        <AvatarFallback>{initial}</AvatarFallback>
+                      </Avatar>
+                      {snapshot.security.isBoss ? <BossCrest size={9} className="boss-avatar-crest" /> : null}
+                    </span>
                     <div className="grid flex-1 text-left text-sm leading-tight">
                       <span className="truncate font-semibold">{name}</span>
                       <span className="text-muted-foreground truncate text-xs">{account || (snapshot.security.isBoss ? "同级 Boss" : "管理员")}</span>
@@ -87,12 +91,12 @@ export function WorkspaceSidebar({
               />
               <DropdownMenuContent className="min-w-56 rounded-lg" side="top" align="start" sideOffset={4}>
                 <div className="flex items-center gap-2.5 p-2 text-left text-sm">
-                  <Avatar className="size-8">
+                  <Avatar className={snapshot.security.isBoss ? "boss-avatar size-8" : "size-8"}>
                     <AvatarFallback>{initial}</AvatarFallback>
                   </Avatar>
                   <div className="grid flex-1 text-left text-sm leading-tight">
                     <span className="truncate font-semibold">{name}</span>
-                    <span className="text-muted-foreground truncate text-xs">{snapshot.security.isBoss ? "同级 Boss" : "管理员"}</span>
+                    <span className="text-muted-foreground truncate text-xs">{snapshot.security.isBoss ? <span className="boss-title">Boss · 拥有全部权限</span> : "管理员"}</span>
                   </div>
                 </div>
                 <DropdownMenuSeparator />

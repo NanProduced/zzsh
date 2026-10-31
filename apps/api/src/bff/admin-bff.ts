@@ -25,6 +25,7 @@ import type { LocalDistributionScope } from "../finance/distribution-policy-stor
 import { handleUserDirectoryAdmin } from "../auth/user-directory-routes";
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
 import { adminSecurityCommandId } from "../auth/admin-security-commands";
+import { ADMIN_CLIENT_IP_FORWARD_HEADER, resolveAdminClientIp } from "../auth/admin-client-ip";
 import { handleYunxinRoute, type YunxinRouteOptions } from "../im/yunxin-routes";
 
 type ReadEvents = { once?: (event: string, listener: () => void) => unknown; off?: (event: string, listener: () => void) => unknown };
@@ -67,6 +68,7 @@ const AUTH_PATHS = new Map([
 ]);
 
 const SECURITY_PATHS = new Map([
+  ["/security/captcha/challenge", "/api/v1/admin/security/captcha/challenge"],
   ["/security/enrollment/activate", "/api/v1/admin/security/enrollment/activate"],
   ["/security/operation", "/api/v1/admin/security/operation"],
   ["/security/pin/set", "/api/v1/admin/security/pin/set"],
@@ -76,6 +78,10 @@ const SECURITY_PATHS = new Map([
   ["/security/freeze", "/api/v1/admin/security/freeze"],
   ["/security/unfreeze", "/api/v1/admin/security/unfreeze"],
   ["/security/admins/force-logout", "/api/v1/admin/security/admins/force-logout"],
+  ["/security/admins/reset-password", "/api/v1/admin/security/admins/reset-password"],
+  ["/security/admins/reset-2fa", "/api/v1/admin/security/admins/reset-2fa"],
+  ["/security/login-two-factor", "/api/v1/admin/security/login-two-factor"],
+  ["/security/self-sessions/revoke", "/api/v1/admin/security/self-sessions/revoke"],
   ["/security/admins", "/api/v1/admin/security/admins"],
   ["/security/admins/detail", "/api/v1/admin/security/admins/detail"],
   ["/security/admins/scope", "/api/v1/admin/security/admins/scope"],
@@ -105,9 +111,15 @@ const SECURITY_PATHS = new Map([
   ["/security/approvals/requests/execute", "/api/v1/admin/security/approvals/requests/execute"],
   ["/security/approvals/audit/events", "/api/v1/admin/security/approvals/audit/events"],
   ["/security/audit/events", "/api/v1/admin/security/audit/events"],
+  ["/security/audit/operations", "/api/v1/admin/security/audit/operations"],
+  ["/security/audit/purge/preview", "/api/v1/admin/security/audit/purge/preview"],
+  ["/security/audit/purge", "/api/v1/admin/security/audit/purge"],
+  ["/security/approvals/requests/withdraw", "/api/v1/admin/security/approvals/requests/withdraw"],
 ]);
 
 const GET_SECURITY_PATHS = new Set([
+  "/security/captcha/challenge",
+  "/security/audit/purge/preview",
   "/security/admins",
   "/security/admins/detail",
   "/security/admins/scope",
@@ -122,6 +134,7 @@ const GET_SECURITY_PATHS = new Set([
   "/security/approvals/requests/detail",
   "/security/approvals/audit/events",
   "/security/audit/events",
+  "/security/audit/operations",
 ]);
 
 // The 2FA challenge is cookie-backed after password sign-in; keep the allowlist
@@ -241,6 +254,9 @@ async function forwardAuth(
     else sendError(response, 500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);
     return;
   }
+  // 防爆破按客户端 IP 计数：仅在经 ADMIN_TRUSTED_PROXIES 信任链解析后写入内部头。
+  const clientIp = resolveAdminClientIp(request as unknown as Parameters<typeof resolveAdminClientIp>[0], options.adminSecurityOptions.adminBruteForce?.clientIp);
+  if (clientIp) headers.set(ADMIN_CLIENT_IP_FORWARD_HEADER, clientIp);
   const body = method === "GET" || method === "HEAD" ? undefined : JSON.stringify(request.body ?? {});
   if (body !== undefined) headers.set("content-type", "application/json");
   const rejection = await preflightAuthRealmSecurity(

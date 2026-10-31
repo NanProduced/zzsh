@@ -214,6 +214,13 @@ const fillPassword = async (h) => {
   await h.type(h.el.querySelector("#self-confirm-password"), SECRET_NEXT);
 };
 
+async function pickOption(doc, trigger, label) {
+  await act(async () => trigger.click());
+  for (let i = 0; i < 100 && !doc.querySelector('[role="option"]'); i++) await act(async () => { await new Promise(r => setTimeout(r, 10)); });
+  const option = [...doc.querySelectorAll('[role="option"]')].find(item => item.textContent.trim() === label);
+  assert.ok(option, "missing option " + label);
+  await act(async () => option.click());
+}
 test("24. preview submission guard blocks valid secrets before storage or command calls", async (t) => {
   for (const kind of ["password", "pin", "backup"]) {
     const store = makeStore();
@@ -279,10 +286,8 @@ test("1. default facts are rendered truthfully with honest status copy", async (
   await h.render(idleProps);
   const select = h.el.querySelector('[aria-label="当前浏览器闲置锁定时长"]');
   assert.ok(select);
-  select.value = "30";
-  await act(async () => {
-    select.dispatchEvent(new browser.Event("change", { bubbles: true }));
-  });
+  assert.equal(select.tagName, "BUTTON");
+  await pickOption(browser.document, select, "30 分钟");
   assert.equal(idleSelected, 30);
 });
 

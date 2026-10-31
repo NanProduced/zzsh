@@ -1,0 +1,134 @@
+import { API_V1_ERROR_CODES } from "../contracts/api-v1";
+import { ADMIN_PERMISSION as P, isBossOnlyPermission } from "./admin-authorization";
+export { BOSS_ONLY_PERMISSIONS, isBossOnlyPermission } from "./admin-authorization";
+import { SecurityApiError } from "./security-core";
+
+/**
+ * 两套预设角色的初始授权（Owner 2026-10-31 定稿）。
+ *
+ * 仅作迁移 0114 的种子来源和测试基准：运行时有效权限一律以库内
+ * admin_role_permission 为准，角色名称/编码不触发任何硬编码能力。
+ * Boss 走 is_boss 旁路，不在此列。order.read 是全员基线，不进角色。
+ */
+export const SUPPORT_PRESET_PERMISSIONS = [
+  // 订单群与咨询
+  P.imSupportRead,
+  P.imSupportAccept,
+  P.imSupportTransfer,
+  P.imSupportComplaint,
+  P.imSupportPresence,
+  // 订单结算（含代确认收货）；服务端另要求本人是该订单群 STAFF 成员
+  P.orderSettlementWrite,
+  // 定位用户、写备注
+  P.userDirectoryRead,
+  P.userPhoneLookup,
+  P.userNoteWrite,
+  // 只读：答复用户需要
+  P.supplyRentalAccountRead,
+  P.supplyGuaranteeRead,
+  P.creditRead,
+  P.creditGuaranteeRead,
+  P.contentRead,
+  // 会员礼遇：只发起申请（运营审批后生效），不含审批/执行
+  P.approvalRequestCreate,
+  P.approvalRequestRead,
+  P.membershipEntitlementRequest,
+  P.membershipGrowthSummaryRead,
+] as const;
+
+/**
+ * 迁移 0118 追加到 role_preset_ops 的能力（Owner 2026-10-31）。护栏在服务端：
+ * 非 Boss 永远不能以 Boss 账号或自己为目标；创建仍受 assertDelegable 约束且
+ * 需另持 admin.permission.grant（仍仅 Boss）才能附带授权。
+ */
+export const OPS_PRESET_0118_ADDITIONS = [
+  P.accountCreate,
+  P.accountUpdate,
+  P.accountFreeze,
+  P.accountUnfreeze,
+  P.userIdentitySensitiveRead,
+] as const;
+
+export const OPS_PRESET_PERMISSIONS = [
+  ...SUPPORT_PRESET_PERMISSIONS,
+  // 订单
+  P.orderLegacyContinue,
+  // 用户
+  P.userNoteManage,
+  P.userWalletRead,
+  P.userFinanceRead,
+  P.userAccountFreeze,
+  P.userAccountUnfreeze,
+  P.userRiskManage,
+  P.userRentalMembershipManage,
+  // 供给与账号
+  P.supplyGuaranteeVerify,
+  P.supplyGuaranteeRevoke,
+  P.supplyReviewRead,
+  P.supplyReviewDecide,
+  P.supplyRestrict,
+  P.supplyDuplicateReview,
+  P.supplyCatalogManage,
+  P.supplyGunsmithManage,
+  P.supplyListingFiltersManage,
+  P.supplyQuoteInternalRead,
+  P.supplyRulesEdit,
+  // 信用
+  P.creditDecide,
+  P.creditGuaranteeManage,
+  // 内容（平台内容发布留 Boss）
+  P.contentEdit,
+  P.contentPublish,
+  P.contentPlatformRead,
+  P.contentPlatformEdit,
+  // 会员与分销（仅政策发布留 Boss；Boss 只做重要策略审批，日常运营归运营）
+  P.membershipGrowthDetailRead,
+  P.membershipPolicyDraft,
+  P.membershipEntitlementExecute,
+  P.membershipEntitlementRevoke,
+  P.membershipEntitlementDecide,
+  P.membershipGrowthBackfill,
+  P.distributionPolicyRead,
+  P.distributionPolicyManage,
+  // 资金（财务并入运营）
+  P.financeRead,
+  P.financeDocumentRead,
+  P.financeWithdrawalQuery,
+  // 审批：发起与查看
+  P.approvalAuditRead,
+  // 审批/执行（方案 A）：政策类代码强制仅 Boss；结算调整等由 Boss 配置的候选人名单管控
+  P.approvalRequestApprove,
+  P.approvalRequestExecute,
+  // 系统：只读
+  P.auditRead,
+  P.accountRead,
+  P.roleRead,
+  P.permissionRead,
+  // 迁移 0118（Owner 2026-10-31）：管理员账号日常维护与敏感身份查看下放运营
+  ...OPS_PRESET_0118_ADDITIONS,
+] as const;
+
+export const ROLE_PRESET_GRANTS = {
+  role_preset_support: SUPPORT_PRESET_PERMISSIONS,
+  role_preset_ops: OPS_PRESET_PERMISSIONS,
+} as const;
+/**
+ * 只留 Boss 的能力不能通过角色授予（Boss 自己也不行）。只拦新增，
+ * 已存在的历史授权不阻断其余编辑，由 Boss 在页面上手动移除。
+ */
+/** 只留 Boss 的能力不能作为个人「允许」授予；个人「禁止」不扩权，可以包含。只拦新增。 */
+export function assertNoNewBossOnlyPersonalAllows(before: Iterable<string>, after: Iterable<string>): void {
+  const existing = new Set(before);
+  const added = [...new Set(after)].filter((code) => !existing.has(code) && isBossOnlyPermission(code));
+  if (added.length > 0) {
+    throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, `Boss-only permissions cannot be granted personally: ${added.sort().join(", ")}`);
+  }
+}
+
+export function assertNoNewBossOnlyRoleGrants(before: Iterable<string>, after: Iterable<string>): void {
+  const existing = new Set(before);
+  const added = [...new Set(after)].filter((code) => !existing.has(code) && isBossOnlyPermission(code));
+  if (added.length > 0) {
+    throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, `Boss-only permissions cannot be granted to roles: ${added.sort().join(", ")}`);
+  }
+}

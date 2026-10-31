@@ -1,3 +1,4 @@
+import { StepUpCaptcha } from '../../components/altcha-field';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { ArrowDownLeftIcon, ArrowLeftIcon, ArrowUpRightIcon, ChevronDownIcon, ShieldCheckIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -485,6 +486,7 @@ function FreezeControl({ adapter, user, changed }: { adapter: UserDirectoryData;
                 onChange={e => setCode(e.target.value)}
               />
             </Field>
+            <StepUpCaptcha />
             {result ? (
               <Message
                 kind={result === 'success' ? 'success' : result === 'pending' || result === 'readback-failed' ? 'info' : 'error'}

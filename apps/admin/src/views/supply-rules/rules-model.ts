@@ -49,12 +49,31 @@ export function yuan(value: string | number | null | undefined): string {
   return n === null ? "未配置" : `¥${n.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+/** 金额展示统一最多两位小数（四舍五入到分，与服务端 HALF_UP_CENT 一致）。 */
 export function unitYuan(value: string | number | null | undefined): string {
-  if (typeof value === "number") return Number.isFinite(value) ? `¥${value.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 8 })}` : "未配置";
+  if (typeof value === "number") return Number.isFinite(value) ? `¥${value.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "未配置";
+  const cents = yuanCents(value);
+  if (cents === null) return "未配置";
+  const abs = cents < 0n ? -cents : cents;
+  return `¥${cents < 0n ? "-" : ""}${(abs / 100n).toLocaleString("zh-CN")}.${(abs % 100n).toString().padStart(2, "0")}`;
+}
+
+/** 十进制元字符串 → 分（四舍五入），非法返回 null；纯字符串运算不经浮点。 */
+export function yuanCents(value: string | null | undefined): bigint | null {
   const raw = value?.trim();
-  if (!raw || !/^-?\d+(\.\d{1,8})?$/.test(raw)) return "未配置";
+  if (!raw || !/^-?\d+(\.\d{1,8})?$/.test(raw)) return null;
   const [whole, fraction = ""] = raw.replace(/^-/, "").split(".");
-  return `¥${raw.startsWith("-") ? "-" : ""}${BigInt(whole!).toLocaleString("zh-CN")}.${fraction.replace(/0+$/, "").padEnd(2, "0")}`;
+  const scaled = BigInt(whole!) * 100_000_000n + BigInt(fraction.padEnd(8, "0"));
+  const cents = (scaled + 500_000n) / 1_000_000n;
+  return raw.startsWith("-") ? -cents : cents;
+}
+
+/** 输入框保留有效单价精度，整数至少展示两位；不把显示舍入写回价格合同。 */
+export function yuanInput(value: string | null | undefined): string {
+  const raw = value?.trim();
+  if (!raw || !/^-?\d+(\.\d{1,8})?$/.test(raw)) return value ?? "";
+  const [whole, fraction = ""] = raw.split(".");
+  return `${whole}.${fraction.replace(/0+$/, "").padEnd(2, "0")}`;
 }
 
 export function centsYuan(cents: string | null | undefined): string {
@@ -75,6 +94,7 @@ const BOX_LABELS: Record<string, string> = {
   "box-1x2": "1×2", "box-2x2": "2×2", "box-2x3": "2×3", "box-3x3": "3×3",
   "1x2": "1×2", "2x2": "2×2", "2x3": "2×3", "3x3": "3×3",
   "box-a": "标准箱 A", "box-b": "高级箱 B",
+  "safe_box_1x2": "1×2", "safe_box_2x2": "2×2", "safe_box_2x3": "2×3", "safe_box_3x3": "3×3",
 };
 export function safeBoxLabel(code: string): string {
   return BOX_LABELS[code] ?? code;
@@ -121,29 +141,51 @@ export function makeupShare(consumed: number): number {
   return 0;
 }
 
-export type RuleDiffRow = { group: string; label: string; before: string; after: string };
+export type RuleDiffRow = { group: string; label: string; before: string; after: string; detail?: string };
 
 const DIFF_LABELS: Record<string, string> = {
   mode: "计价方式", commissionRate: "平台抽成比例", roundingPolicy: "金额取整方式", compensationPolicyRef: "赔偿政策引用",
   schema: "规则格式", baseBySafeBox: "保险箱基准", vitalityDeltaByLevel: "体力调整", bearDeltaByLevel: "负重调整", dailyDeltaByTermOption: "每日消耗调整",
   compatibility: "兼容规则", ordinary: "普通 / 自定义", custom: "自定义", fast: "快速", spreadDelta: "比例差", discounts: "档位调整", modes: "模式", enabled: "启用状态", min: "下限", max: "上限", base: "基准类型", value: "数值",
   STANDARD: "普通", VIP: "VIP", SVIP: "SVIP", DISCOUNT_USER: "折扣用户", policyVersion: "政策版本", recommendation: "推荐押金", algorithm: "算法", version: "版本", currency: "币种", unit: "单位", inputSpec: "输入规范", parameters: "参数",
-  safeBoxWeightsByCode: "保险箱加价（分）", vitalityAtLeast7Cents: "7 级体力加价（分）", bearAtLeast7Cents: "7 级负重加价（分）", diveAtLeast3Cents: "3 级潜水加价（分）", skinGroupById: "皮肤分组", skinWeights: "皮肤加价", skinRules: "类型与品质加价", skinOverrides: "单词条覆盖", ownerKind: "皮肤类型", rarityCode: "品质匹配", skinId: "皮肤词条", amountCents: "加价金额（分）", firstCents: "首件（分）", subsequentCents: "后续每件（分）", rounding: "推荐押金取整", upperLimitCents: "推荐押金上限（分）", unitCents: "取整单位（分）", zeroFallbackCents: "零值最低推荐（分）",
-  ownerDepositRules: "账号押金约束", normal: "普通", fullPayoutSelected: "全额包赔", minCents: "最低值（分）", zeroAllowed: "允许零值", capCents: "押金上限（分）", guaranteeRequirement: "号主保证金", scope: "适用范围", requiredCents: "要求金额（分）", proofValidity: "凭证有效期", satisfiedMode: "满足方式", satisfiedDays: "天数", vipWaiver: "VIP 豁免", svipWaiver: "SVIP 豁免", fullPayoutPolicyRef: "包赔条款引用", fullPayoutPolicyVersion: "包赔条款版本", disclosureVersion: "披露版本",
+  safeBoxWeightsByCode: "保险箱加价", vitalityAtLeast7Cents: "7 级体力加价", bearAtLeast7Cents: "7 级负重加价", diveAtLeast3Cents: "3 级潜水加价", skinGroupById: "皮肤分组", skinWeights: "皮肤加价", skinRules: "类型与品质加价", skinOverrides: "单词条覆盖", ownerKind: "皮肤类型", rarityCode: "品质匹配", skinId: "皮肤词条", amountCents: "加价金额", firstCents: "首件", subsequentCents: "后续每件", rounding: "推荐押金取整", upperLimitCents: "推荐押金上限", unitCents: "取整单位", zeroFallbackCents: "零值最低推荐",
+  ownerDepositRules: "账号押金约束", normal: "普通", fullPayoutSelected: "全额包赔", minCents: "最低值", zeroAllowed: "允许零值", capCents: "押金上限", guaranteeRequirement: "号主保证金", scope: "适用范围", requiredCents: "要求金额", proofValidity: "凭证有效期", satisfiedMode: "满足方式", satisfiedDays: "天数", vipWaiver: "VIP 豁免", svipWaiver: "SVIP 豁免", fullPayoutPolicyRef: "包赔条款引用", fullPayoutPolicyVersion: "包赔条款版本", disclosureVersion: "披露版本",
   pricingKind: "计价类型", unitQuantity: "计费单位数量", buyerUnitAmount: "租客单价（元）", ownerUnitAmount: "号主单价（元）", name: "名称", dailyConsumption: "每日消耗（哈夫币）", durationRounding: "租期取整", title: "标题", body: "正文", digest: "正文摘要",
 };
 
 /** Compare every business leaf, including unknown future fields, without rounding away a difference. */
-function appendDiff(rows: RuleDiffRow[], group: string, label: string, before: unknown, after: unknown): void {
+function appendDiff(rows: RuleDiffRow[], group: string, label: string, before: unknown, after: unknown, key = ""): void {
   const object = (value: unknown): value is Record<string, unknown> => Boolean(value && typeof value === "object" && !Array.isArray(value));
   if (object(before) || object(after)) {
     const a = object(before) ? before : {}, b = object(after) ? after : {};
     const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
-    if (keys.size) { for (const key of keys) appendDiff(rows, group, `${label}${label ? " · " : ""}${DIFF_LABELS[key] ?? safeBoxLabel(key)}`, a[key], b[key]); return; }
+    if (keys.size) { for (const k of keys) { if (/^(schema|algorithm|version|currency|unit|inputSpec)$/.test(k)) continue; appendDiff(rows, group, `${label}${label ? " · " : ""}${DIFF_LABELS[k] ?? safeBoxLabel(k)}`, a[k], b[k], k); } return; }
   }
   if (JSON.stringify(before) === JSON.stringify(after)) return;
-  const text = (value: unknown) => value === undefined ? "未提供" : value === null ? "未配置" : typeof value === "boolean" ? value ? "是" : "否" : typeof value === "object" ? JSON.stringify(value) : String(value);
+  if (key === "policyVersion") { rows.push({ group, label: "押金政策", before: "", after: "更新为新版", detail: `版本 ${before ?? "无"} → ${after ?? "无"}` }); return; }
+  const cents = /Cents$/.test(key) || /保险箱加价/.test(label), unit = /UnitAmount$/.test(key);
+  const text = (value: unknown) => typeof value === "string" && cents && /^-?\d+$/.test(value) ? centsYuan(value) : typeof value === "string" && unit && /^-?\d+(\.\d+)?$/.test(value) ? exactYuan(value) : value === undefined ? "无" : value === null ? "未配置" : typeof value === "boolean" ? value ? "是" : "否" : typeof value === "object" ? JSON.stringify(value) : String(value);
   rows.push({ group, label: label || "规则内容", before: text(before), after: text(after) });
+}
+
+/** 元，至少两位小数；超过两位的有效小数原样保留，不在对比里四舍五入掉差异。 */
+function exactYuan(v: string): string { const [i, d = ""] = v.split("."); const t = d.replace(/0+$/, ""); return t.length > 2 ? `¥${i}.${t}` : unitYuan(v); }
+const KIND: Record<string, string> = { AGENT: "干员", MELEE_TYPE: "近战外观", FIREARM: "枪械" };
+function lineSummary(l: PriceLineRecord): string {
+  if (l.pricingKind !== "FIXED_UNIT") return "按哈夫币比例";
+  return `租客 ${l.buyerUnitAmount ? exactYuan(l.buyerUnitAmount) : "未配置"} / 号主 ${l.ownerUnitAmount ? exactYuan(l.ownerUnitAmount) : "未配置"}`;
+}
+/** 皮肤推荐押金一句话摘要：旧版按分类，新版按类型规则（元）。 */
+export function skinSummary(rec: { schema: string; parameters: unknown } | undefined): string {
+  if (!rec) return "无";
+  const p = rec.parameters as Record<string, unknown>;
+  if (rec.schema !== "deposit-recommendation-v2") return `旧版分类规则（${Object.keys((p.skinWeights as object) ?? {}).length} 类）`;
+  const y = (c: unknown) => typeof c === "string" ? centsYuan(c) : "未配置";
+  const rules = ((p.skinRules as Array<Record<string, unknown>>) ?? []).map(r => `${KIND[String(r.ownerKind)] ?? String(r.ownerKind)}${r.rarityCode ? `（${String(r.rarityCode)}）` : ""} 首件 ${y(r.firstCents)} / 后续 ${y(r.subsequentCents)}`);
+  const overrides = ((p.skinOverrides as Array<Record<string, unknown>>) ?? [])
+    .map(row => ({ id: String(row.skinId), amount: y(row.amountCents) }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+  return `新版类型规则：${rules.join("；") || "无"}${overrides.length ? `；单词条覆盖 ${overrides.length} 条：${overrides.map(row => `${row.id}：${row.amount}`).join("；")}` : ""}`;
 }
 
 export function priceDiff(rules: RulesResponse, fromId: string | undefined, toId: string | undefined): RuleDiffRow[] {
@@ -154,21 +196,26 @@ export function priceDiff(rules: RulesResponse, fromId: string | undefined, toId
   const rows: RuleDiffRow[] = [];
   for (const key of ["mode", "commissionRate", "roundingPolicy", "compensationPolicyRef"] as const) appendDiff(rows, "价格规则", DIFF_LABELS[key]!, a?.[key], b[key]);
   appendDiff(rows, "哈夫币价格", "", a?.haffRule, b.haffRule);
-  appendDiff(rows, "押金规则", "", a?.fundingPolicy, b.fundingPolicy);
+  const fa = a?.fundingPolicy ?? undefined, fb = b.fundingPolicy ?? undefined;
+  const strip = (f: typeof fa) => { if (!f || typeof f !== "object") return f; const { recommendation: _r, ...rest } = f as Record<string, unknown>; return rest; };
+  appendDiff(rows, "押金规则", "", strip(fa), strip(fb));
+  const ra0 = fa?.recommendation, rb0 = fb?.recommendation;
+  if (ra0 || rb0) {
+    const pa = (ra0?.parameters ?? {}) as Record<string, unknown>, pb = (rb0?.parameters ?? {}) as Record<string, unknown>;
+    for (const k of ["safeBoxWeightsByCode", "vitalityAtLeast7Cents", "bearAtLeast7Cents", "diveAtLeast3Cents", "upperLimitCents", "rounding"]) appendDiff(rows, "押金规则", `推荐押金 · ${DIFF_LABELS[k]}`, pa[k], pb[k], k);
+    const sa = skinSummary(ra0), sb = skinSummary(rb0);
+    if (sa !== sb) rows.push({ group: "押金规则", label: "皮肤推荐押金", before: sa, after: sb });
+  }
   const lines = (id: string | undefined) => rules.priceLines.filter((line) => line.priceVersionId === id);
   const ra = lines(fromId), rb = lines(toId);
   for (const key of new Set([...ra, ...rb].map((line) => `${line.itemId}\u0000${line.customerTier ?? "STANDARD"}`))) {
     const find = (list: PriceLineRecord[]) => list.find((line) => `${line.itemId}\u0000${line.customerTier ?? "STANDARD"}` === key);
     const x = find(ra), y = find(rb), ref = y ?? x!;
     const label = `${rules.items.find((item) => item.id === ref.itemId)?.name ?? ref.itemId} · ${DIFF_LABELS[ref.customerTier ?? "STANDARD"]}`;
-    for (const field of ["pricingKind", "unitQuantity", "buyerUnitAmount", "ownerUnitAmount"] as const) appendDiff(rows, "物品单价", `${label} · ${DIFF_LABELS[field]}`, x?.[field], y?.[field]);
+    if (!x || !y) { rows.push({ group: "物品单价", label: `${label}价`, before: x ? lineSummary(x) : "无", after: y ? lineSummary(y) : "将移除" }); continue; }
+    for (const field of ["pricingKind", "unitQuantity", "buyerUnitAmount", "ownerUnitAmount"] as const) appendDiff(rows, "物品单价", `${label} · ${DIFF_LABELS[field]}`, x?.[field], y?.[field], field);
   }
   return rows;
-}
-
-export function termOptionsText(rules: RulesResponse, versionId: string | undefined): string {
-  if (!versionId) return "无";
-  return rules.termOptions.filter((o) => o.versionId === versionId).map((o) => `${o.name} ${haffCount(o.dailyConsumption)}/天`).join("、") || "无";
 }
 
 export function termDiff(rules: RulesResponse, fromId: string | undefined, toId: string | undefined): RuleDiffRow[] {

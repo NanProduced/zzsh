@@ -82,5 +82,14 @@ test("the workspace menu exposes supply entries only with matching permissions",
   assert.deepEqual(reviewer.filter((item) => item.path?.startsWith("/supply")).map((item) => item.path), ["/supply/reviews", "/supply/media"]);
 
   const editor = workspaceMenuItems({ isBoss: false, permissions: ["supply.catalog.manage", "supply.rules.edit"] });
-  assert.deepEqual(editor.filter((item) => item.path?.startsWith("/supply")).map((item) => item.path), ["/supply/catalog", "/supply/rules"]);
+  assert.deepEqual(editor.filter((item) => item.path?.startsWith("/supply")).map((item) => item.path), ["/supply/catalog", "/supply/rules?section=overview", "/supply/rules?section=deposit", "/supply/rules?section=settlement", "/supply/rules?section=agreement", "/supply/rules?section=pricing", "/supply/rules?section=items", "/supply/rules?section=skin"]);
+});
+
+test("改枪码目录 sits under the 三角洲行动 group and keeps its route", () => {
+  const groupOf = (items, path) => { let g = null; for (const it of items) { if (it.isTitle) g = it.label; else if (it.path === path) return g; } return null; };
+  const boss = workspaceMenuItems({ isBoss: true, permissions: [] });
+  assert.equal(groupOf(boss, "/supply/gunsmith"), "三角洲行动");
+  const gunsmithOnly = workspaceMenuItems({ isBoss: false, permissions: ["supply.gunsmith.manage"] });
+  assert.equal(groupOf(gunsmithOnly, "/supply/gunsmith"), "三角洲行动");
+  assert.equal(gunsmithOnly.some((item) => item.label === "供给与目录"), false);
 });

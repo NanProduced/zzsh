@@ -126,6 +126,8 @@ const ADMIN_ACTION_LABELS: Record<AdminActionEligibility["action"], string> = {
   freeze: "冻结账号",
   unfreeze: "解除冻结",
   "force-logout": "撤销全部会话",
+  "reset-password": "重置密码",
+  "reset-2fa": "重置 2FA",
 };
 
 /** 服务端预检原因码的中文说明；未登记的原因原样带出，不塌缩成通用措辞。 */
@@ -134,10 +136,11 @@ export const ADMIN_REASON_LABELS: Record<AdminActionEligibility["reasonCode"], s
   ACTOR_INACTIVE: "当前账号不可发起该操作",
   PERMISSION_REQUIRED: "没有该操作的权限",
   BOSS_ACTOR_REQUIRED: "仅限 Boss 执行",
-  BOSS_TARGET_NOT_CONFIGURABLE: "Boss 的角色与业务范围不由此接口配置",
+  BOSS_TARGET_NOT_CONFIGURABLE: "Boss 账号不支持此操作",
   SELF_TARGET: "不能对自身执行该操作",
   ALREADY_FROZEN: "该账号已冻结",
   NOT_FROZEN: "该账号未处于冻结状态",
+  TARGET_FROZEN: "该账号已冻结，请先解冻",
 };
 
 export type DirectoryActionPlan = { action: AdminActionEligibility["action"]; label: string; blockedReason: string | null };

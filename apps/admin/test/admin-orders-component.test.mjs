@@ -105,7 +105,7 @@ test("order read list sends exact filters without persisting sensitive inputs an
   await until(() => node.textContent.includes(order.displayNo));
   assert.equal(new URL(browser.location.href).search, "");
 
-  const inputs = [...node.querySelectorAll("input")];
+  const inputs = [...node.querySelectorAll('input:not([name="status"])')];
   const setInput = async (input, value) => act(async () => {
     Object.getOwnPropertyDescriptor(browser.HTMLInputElement.prototype, "value").set.call(input, value);
     input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -113,8 +113,9 @@ test("order read list sends exact filters without persisting sensitive inputs an
   await setInput(inputs[0], order.displayNo);
   await setInput(inputs[1], order.renterUserId);
   await setInput(inputs[2], order.ownerUserId);
-  await setInput(inputs[3], "2026-09-29T00:00");
-  await setInput(inputs[4], "2026-10-01T00:00");
+  const dateInputs = [...node.querySelectorAll("[data-beijing-datetime-input]")];
+  await setInput(dateInputs[0], "2026-09-29T00:00");
+  await setInput(dateInputs[1], "2026-10-01T00:00");
   await act(async () => node.querySelector("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
   await until(() => calls.some((url) => url.includes("displayNo=")));
   const query = new URL(calls.at(-1), "http://127.0.0.1").searchParams;

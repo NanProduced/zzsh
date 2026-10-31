@@ -656,25 +656,22 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   position: relative;
   overflow: hidden;
   padding: 12px;
-  border: 1px solid color-mix(in oklab, var(--admin-accent) 45%, transparent);
+  border: 1px solid color-mix(in oklab, var(--boss-gold) 38%, transparent);
   border-radius: 12px;
-  background: color-mix(in oklab, var(--admin-accent) 9%, transparent);
+  background: linear-gradient(135deg, color-mix(in oklab, var(--boss-gold) 12%, transparent), color-mix(in oklab, var(--boss-gold) 3%, transparent) 70%);
   transition: border-color 180ms ease-out, background-color 180ms ease-out;
 }
-.role-boss:hover {
-  border-color: color-mix(in oklab, var(--admin-accent) 78%, transparent);
-  background: color-mix(in oklab, var(--admin-accent) 14%, transparent);
-}
+.role-boss:hover { border-color: color-mix(in oklab, var(--boss-gold) 62%, transparent); }
 .role-boss-mark {
   display: inline-flex;
-  color: var(--admin-accent);
+  color: var(--boss-gold);
   transition: transform 180ms ease-out;
 }
 .role-boss:hover .role-boss-mark { transform: translateY(-1px) scale(1.08); }
 .role-boss-badge {
-  border: 1px solid transparent;
-  background: var(--admin-accent);
-  color: var(--admin-accent-ink);
+  border: 1px solid color-mix(in oklab, var(--boss-gold) 45%, transparent);
+  background: transparent;
+  color: var(--boss-gold);
 }
 .role-boss-note { color: var(--admin-fg); }
 .role-boss::after {
@@ -684,7 +681,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   pointer-events: none;
   opacity: 0;
   transform: translateX(-100%);
-  background: linear-gradient(105deg, transparent 38%, color-mix(in oklab, var(--admin-accent) 16%, transparent) 50%, transparent 62%);
+  background: linear-gradient(105deg, transparent 38%, color-mix(in oklab, var(--boss-gold) 14%, transparent) 50%, transparent 62%);
 }
 .role-boss:hover::after { animation: role-boss-sheen 720ms ease-out; }
 @keyframes role-boss-sheen {
@@ -742,3 +739,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 /* 订单进度节点提示触发器与列表「见详情」标记 */
 .oc-stage-trigger{display:flex;flex-direction:column;align-items:center;gap:5px;background:none;border:0;padding:0;margin:0;color:inherit;font:inherit;cursor:help}.oc-stage-trigger:focus-visible{outline:2px solid var(--ring);outline-offset:2px;border-radius:6px}
 .oc-fee-chip{display:inline-block;margin-left:6px;padding:0 6px;border:1px solid var(--border);border-radius:999px;font-size:11px;line-height:18px;color:var(--muted-foreground);vertical-align:middle}
+
+/* Boss 专属：深墨 + 哑光香槟金。只做静态细节，不加持续动效。 */
+:root { --boss-gold: #cdb88e; --boss-gold-soft: rgba(205, 184, 142, 0.12); }
+:root[data-theme="light"] { --boss-gold: #86683a; --boss-gold-soft: rgba(134, 104, 58, 0.08); }
+.boss-crest { display: inline-flex; align-items: center; justify-content: center; color: var(--boss-gold); }
+.boss-greeting h2 { letter-spacing: -0.01em; }
+.boss-greeting-pulse { color: var(--admin-muted-fg); }
+.boss-avatar { box-shadow: 0 0 0 1.5px color-mix(in oklab, var(--boss-gold) 70%, transparent); }
+.boss-avatar-crest { position: absolute; right: -3px; bottom: -3px; width: 14px; height: 14px; border-radius: 999px; background: var(--admin-surface); border: 1px solid color-mix(in oklab, var(--boss-gold) 55%, transparent); }
+.boss-title { color: var(--boss-gold); }
+.boss-only-tag { color: var(--boss-gold); background: var(--boss-gold-soft); border: 1px solid color-mix(in oklab, var(--boss-gold) 30%, transparent); }

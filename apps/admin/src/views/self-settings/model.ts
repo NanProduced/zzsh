@@ -208,8 +208,17 @@ export type SessionRow = {
   current: boolean;
   createdAt: string | null;
   expiresAt: string | null;
-  /** 原始 UA 截断字符串；合同不提供设备型号、系统版本、位置或最近活跃。 */
+  /** 原始 UA 截断字符串；只在悬停提示中展示，主文案用服务端解析结果。 */
   userAgent: string | null;
+  /** 服务端经可信代理取得的 IP；非当前会话为脱敏值（如 203.0.*.*）。旧接口缺省为 null。 */
+  ipAddress: string | null;
+  ipMasked: boolean;
+  /** 离线 ip2region 解析的地区；内网显示「本机/内网」，无数据为 null。 */
+  region: string | null;
+  /** 最近活跃（服务端节流更新，约 5 分钟粒度）；迁移未应用时为 null。 */
+  lastActiveAt: string | null;
+  /** 服务端 UA 解析；isScript 表示脚本/非浏览器客户端。 */
+  client: { label: string; isScript: boolean; deviceType: string } | null;
   /** 该会话的 PIN 锁态，只表示「已锁屏」，不代表已失效。 */
   locked: boolean;
 };
@@ -232,6 +241,11 @@ export function parseSessionsPayload(payload: unknown): SessionsFacts {
       expiresAt: nullableTimestamp(row.expiresAt, `sessions[${index}].expiresAt`),
       userAgent: nullableText(row.userAgent, `sessions[${index}].userAgent`, 512),
       locked: requiredBoolean(row.locked, `sessions[${index}].locked`),
+      ipAddress: row.ipAddress === undefined ? null : nullableText(row.ipAddress, `sessions[${index}].ipAddress`, 64),
+      ipMasked: row.ipMasked === true,
+      region: row.region === undefined ? null : nullableText(row.region, `sessions[${index}].region`, 128),
+      lastActiveAt: row.lastActiveAt === undefined ? null : nullableTimestamp(row.lastActiveAt, `sessions[${index}].lastActiveAt`),
+      client: parseSessionClient(row.client),
     };
   });
   const marked = rows.filter((row) => row.current);
@@ -239,6 +253,36 @@ export function parseSessionsPayload(payload: unknown): SessionsFacts {
     throw new ContractViolation(`isCurrent 为 true 的会话有 ${marked.length} 条，当前会话必须唯一`);
   }
   return { rows, currentSessionId: marked[0]?.id ?? null };
+}
+
+function parseSessionClient(value: unknown): SessionRow["client"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+  if (typeof v.label !== "string" || !v.label.trim()) return null;
+  return { label: v.label.slice(0, 120), isScript: v.isScript === true, deviceType: typeof v.deviceType === "string" ? v.deviceType : "unknown" };
+}
+
+/** 「7 天后过期」「3 小时后过期」「即将过期」「已过期」。 */
+export function expiresInPhrase(expiresAt: string | null, now: number = Date.now()): string | null {
+  if (expiresAt === null) return null;
+  const ms = Date.parse(expiresAt) - now;
+  if (!Number.isFinite(ms)) return null;
+  if (ms <= 0) return "已过期";
+  const hours = ms / 3_600_000;
+  if (hours >= 24) return `${Math.floor(hours / 24)} 天后过期`;
+  if (hours >= 1) return `${Math.floor(hours)} 小时后过期`;
+  return "即将过期";
+}
+
+/** 「刚刚」「12 分钟前」「3 小时前」「2 天前」。 */
+export function relativePastPhrase(value: string | null, now: number = Date.now()): string | null {
+  if (value === null) return null;
+  const ms = now - Date.parse(value);
+  if (!Number.isFinite(ms)) return null;
+  if (ms < 5 * 60_000) return "刚刚";
+  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)} 分钟前`;
+  if (ms < 86_400_000) return `${Math.floor(ms / 3_600_000)} 小时前`;
+  return `${Math.floor(ms / 86_400_000)} 天前`;
 }
 
 /** 撤销成功信封：`{ status: true, revokedSessionCount: N }`。N 必须是合法非负整数。 */
@@ -328,6 +372,11 @@ export const ACTIVITY_ACTION_LABELS: Record<string, string> = {
   "admin.backup_codes.generated": "备用恢复码已生成",
   "admin.backup_codes.generate": "生成备用恢复码",
   "admin.self.sessions.revoked": "本人会话被注销",
+  "admin.login_two_factor.changed": "登录二次验证设置已更改",
+  "admin.password.reset": "登录密码被重置",
+  "admin.two_factor.reset": "二次验证被重置",
+  "admin.auth.failure": "登录验证失败",
+  "admin.auth.lockout": "因多次失败被临时锁定",
   "admin.enrollment.activated": "身份验证器绑定完成",
   "admin.recovery.requested": "账号恢复申请已发起",
   "admin.recovery.completed": "账号恢复已完成",
@@ -359,7 +408,22 @@ const ACTIVITY_DETAIL_LABELS: Record<string, string> = {
   pinFailures: "PIN 失败计次",
   locked: "锁态",
   scope: "作用范围",
+  authScope: "场景",
+  failures: "累计失败",
+  lockSeconds: "锁定时长",
+  lockedUntil: "解锁时间",
+  loginTwoFactorRequired: "登录需二次验证",
+  requestedSessionCount: "请求注销数",
 };
+
+const AUTH_SCOPE_LABELS: Record<string, string> = { "sign-in": "登录", "step-up": "敏感操作复核", recovery: "账号恢复", "two-factor": "二次验证" };
+const SCOPE_LABELS: Record<string, string> = { one: "单个会话", others: "其他全部会话", single: "单个会话" };
+
+function durationPhrase(seconds: number): string {
+  if (seconds >= 3600 && seconds % 3600 === 0) return `${seconds / 3600} 小时`;
+  if (seconds >= 60 && seconds % 60 === 0) return `${seconds / 60} 分钟`;
+  return `${seconds} 秒`;
+}
 
 export function activityActionLabel(action: string): string | null {
   return ACTIVITY_ACTION_LABELS[action] ?? null;
@@ -370,7 +434,8 @@ export function activityOutcomeLabel(outcome: string): string | null {
 }
 
 /** 发起方措辞：他人执行的不写成「你操作了」；系统维护如实标注。 */
-export function activityActorPhrase(kind: ActivityActorKind, ref: string | null): string {
+export function activityActorPhrase(kind: ActivityActorKind, ref: string | null, action?: string): string {
+  if (action === "admin.auth.failure" || action === "admin.auth.lockout") return "登录防护记录";
   if (kind === "self") return "本人发起";
   if (kind === "system") return "系统或离线维护执行";
   return ref ? `由 ${ref} 对本人账号执行` : "由其他管理员对本人账号执行";
@@ -381,7 +446,12 @@ export function activityDetailPhrases(details: ActivityEvent["details"]): string
   return Object.entries(details).flatMap(([key, value]) => {
     const label = ACTIVITY_DETAIL_LABELS[key];
     if (!label) return [];
-    const shown = typeof value === "boolean" ? (value ? "是" : "否") : String(value);
+    let shown = typeof value === "boolean" ? (value ? "是" : "否") : String(value);
+    if (key === "lockedUntil" && typeof value === "string") shown = beijingDateTime(value);
+    else if (key === "lockSeconds" && typeof value === "number") shown = durationPhrase(value);
+    else if (key === "authScope" && typeof value === "string") shown = AUTH_SCOPE_LABELS[value] ?? value;
+    else if (key === "scope" && typeof value === "string") shown = SCOPE_LABELS[value] ?? value;
+    else if (key === "failures" && typeof value === "number") shown = `${value} 次`;
     return [`${label}：${shown}`];
   });
 }

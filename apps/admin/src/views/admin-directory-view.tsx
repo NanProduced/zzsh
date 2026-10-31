@@ -1,9 +1,12 @@
+import { StepUpCaptcha } from "../components/altcha-field";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { Button as UiButton } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Icons } from "../components/icons";
 import { Timeline, TimelineContent, TimelineDate, TimelineHeader, TimelineIndicator, TimelineItem, TimelineSeparator } from "@/components/reui/timeline";
@@ -77,7 +80,7 @@ function isUnknownResult(error: unknown): boolean {
 }
 
 /** 本页面会产生的治理写。每种操作各自一条待确认记录，互不覆盖。 */
-const PENDING_OPERATIONS = ["profile", "access", "scope", "create", "freeze", "unfreeze", "force-logout", "restore-scope"] as const;
+const PENDING_OPERATIONS = ["profile", "access", "scope", "create", "freeze", "unfreeze", "force-logout", "restore-scope", "reset-password", "reset-2fa"] as const;
 type PendingOperationKey = (typeof PENDING_OPERATIONS)[number];
 const PENDING_LABELS: Record<PendingOperationKey, string> = {
   profile: "显示名称",
@@ -88,6 +91,8 @@ const PENDING_LABELS: Record<PendingOperationKey, string> = {
   unfreeze: "解冻账号",
   "force-logout": "撤销全部会话",
   "restore-scope": "恢复此前指定的范围",
+  "reset-password": "重置密码",
+  "reset-2fa": "重置 2FA",
 };
 /** 记录来自存储，操作名不能假定仍受编译期枚举约束。 */
 const pendingLabel = (operation: string) => PENDING_LABELS[operation as PendingOperationKey] ?? operation;
@@ -211,7 +216,7 @@ function SecurityFacts({ detail }: { detail: AdminDirectoryDetail }) {
       {rows.map(([label, value]) => (
         <div key={label} className="flex items-baseline justify-between gap-3 border-b border-border/40 pb-1.5">
           <dt className="text-xs font-medium text-foreground/70">{label}</dt>
-          <dd className="text-xs tabular-nums text-foreground">{value === "未接入" ? <UnknownFact hint="当前运行版本未返回会话摘要，不代表没有会话。" /> : value}</dd>
+          <dd className="text-xs tabular-nums text-foreground">{value === "未接入" ? <UnknownFact hint="暂未读取到会话摘要，不代表没有会话。" /> : value}</dd>
         </div>
       ))}
     </dl>
@@ -242,7 +247,7 @@ const ACCOUNT_HISTORY_SOURCES = [
 type WriteSection = "profile" | "access" | "scope";
 const SECTION_LABELS: Record<WriteSection, string> = { profile: "基本资料", access: "角色与有效权限", scope: "业务范围" };
 
-type SecurityAction = "freeze" | "unfreeze" | "force-logout" | "restore-scope";
+type SecurityAction = "freeze" | "unfreeze" | "force-logout" | "restore-scope" | "reset-password" | "reset-2fa";
 
 const ACTION_COPY: Record<SecurityAction, { title: string; impact: string; confirm: string; danger: boolean; needsReason: boolean }> = {
   freeze: {
@@ -263,6 +268,20 @@ const ACTION_COPY: Record<SecurityAction, { title: string; impact: string; confi
     title: "撤销该管理员全部会话",
     impact: "撤销全部设备会话与未完成登录挑战。账号状态不变，下次登录仍需密码与双因素验证。这不替代冻结：账号仍可重新登录。",
     confirm: "确认撤销会话",
+    danger: true,
+    needsReason: true,
+  },
+  "reset-password": {
+    title: "重置该管理员的密码",
+    impact: "系统生成一次性临时密码，只显示这一次。对方全部会话会被撤销，下次登录必须先改密。已绑定的 2FA 保持不变。",
+    confirm: "确认重置密码",
+    danger: true,
+    needsReason: true,
+  },
+  "reset-2fa": {
+    title: "重置该管理员的 2FA",
+    impact: "清除对方当前的 2FA 绑定（例如手机丢失）。对方全部会话会被撤销，下次登录需重新绑定 2FA。密码保持不变。",
+    confirm: "确认重置 2FA",
     danger: true,
     needsReason: true,
   },
@@ -301,6 +320,8 @@ function SecurityActionDialog({
   const [reason, setReason] = useState("");
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
+  /** 重置密码返回的一次性临时密码：只在本弹窗显示，显式确认后才关闭。 */
+  const [issuedPassword, setIssuedPassword] = useState<string>();
   const copy = ACTION_COPY[action];
   // 恢复范围只是切模式，不撤销访问，因此不要求再验证凭据。
   const needsReauth = action !== "restore-scope";
@@ -314,6 +335,8 @@ function SecurityActionDialog({
       action === "freeze" ? "/security/freeze"
       : action === "unfreeze" ? "/security/unfreeze"
       : action === "force-logout" ? "/security/admins/force-logout"
+      : action === "reset-password" ? "/security/admins/reset-password"
+      : action === "reset-2fa" ? "/security/admins/reset-2fa"
       : "/security/admins/scope";
     if (pending || busy || blockedReason) return;
     if (!markPending(action, target.username, path, "UNKNOWN")) {
@@ -326,8 +349,17 @@ function SecurityActionDialog({
         action === "restore-scope"
           ? buildRestoreScopePayload(target.username)
           : { targetAdminId: target.id, password, totpCode, reason: reason.trim() };
-      const result = await adminRequest<{ status?: string }>(path, body);
+      const result = await adminRequest<{ status?: string; temporaryPassword?: string }>(path, body);
       clearPending(action, target.username);
+      if (action === "reset-password") {
+        if (typeof result.temporaryPassword === "string" && result.temporaryPassword) setIssuedPassword(result.temporaryPassword);
+        else setError("密码已重置，但没有收到临时密码。请重新重置一次以获得新的临时密码。");
+        return;
+      }
+      if (action === "reset-2fa") {
+        onDone("已清除该账号的 2FA 绑定，其全部会话已撤销；对方下次登录需重新绑定 2FA。");
+        return;
+      }
       onDone(
         action === "freeze"
           ? "该账号已冻结，现有会话与未完成的恢复请求已一并处理。"
@@ -349,6 +381,37 @@ function SecurityActionDialog({
       setBusy(false);
     }
   };
+
+  if (issuedPassword) {
+    return (
+      <Dialog open onOpenChange={() => undefined}>
+        <DialogContent className="w-full sm:max-w-lg" showCloseButton={false}>
+          <DialogHeader>
+            <DialogTitle>交付临时密码</DialogTitle>
+            <DialogDescription>临时密码只在此显示一次，关闭后无法再次查看。</DialogDescription>
+          </DialogHeader>
+          <div className="rounded-lg border border-border/70 bg-foreground/[0.04] p-4">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <p className="text-xs text-muted-foreground">登录账号</p>
+                <p className="mt-1 font-mono text-sm text-foreground">{target.username}</p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">临时密码</p>
+                <p className="mt-1 font-mono text-sm text-foreground">{issuedPassword}</p>
+              </div>
+            </div>
+          </div>
+          <p className="text-xs leading-relaxed text-muted-foreground">请当面交付或走既有安全通道。对方下次登录必须先改密。</p>
+          <DialogFooter>
+            <Button type="button" size="sm" onClick={() => { setIssuedPassword(undefined); onDone(`已确认抄录 ${target.username} 的临时密码，其全部会话已撤销。`); }}>
+              我已抄录并关闭
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    );
+  }
 
   return (
     <Dialog open onOpenChange={(open) => (open || busy ? undefined : onClose())}>
@@ -393,14 +456,15 @@ function SecurityActionDialog({
               </label>
             </>
           ) : null}
+          <StepUpCaptcha />
           {copy.needsReason ? (
           <label className="block">
             <FieldLabel>原因（写入审计）</FieldLabel>
-            <textarea
+            <Textarea
               value={reason}
               onChange={(event) => setReason(event.target.value)}
               rows={2}
-              className="w-full resize-y rounded-lg border border-input bg-transparent px-2.5 py-2 text-sm focus-visible:outline-none! focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30"
+              className="min-h-16 text-sm"
             />
           </label>
           ) : null}
@@ -418,18 +482,31 @@ function SecurityActionDialog({
   );
 }
 
+const BOSS_ONLY_PERSONAL_REASON = "仅 Boss 账号持有，不能作为个人权限授予。";
+
+function BossOnlyTag() {
+  return (
+    <span title={BOSS_ONLY_PERSONAL_REASON} className="boss-only-tag ml-1.5 inline-flex shrink-0 items-center rounded px-1 py-px align-middle text-[10px] font-medium leading-4">
+      仅 Boss
+    </span>
+  );
+}
+
 function PermissionPicker({
   label,
   permissions,
   selected,
   onToggle,
   disabled = false,
+  lockBossOnly = false,
 }: {
   label: string;
   permissions: AdminPermissionCatalogEntry[];
   selected: string[];
   onToggle: (code: string) => void;
   disabled?: boolean;
+  /** 个人「允许」不能新增仅 Boss 能力；已勾的历史项仍可取消。 */
+  lockBossOnly?: boolean;
 }) {
   const catalog = permissionByCode(permissions);
   return (
@@ -446,11 +523,21 @@ function PermissionPicker({
               const permission = catalog.get(code);
               if (!permission) return null;
               const hint = permissionDescription(permission);
+              const checked = selected.includes(code);
+              const locked = lockBossOnly && Boolean(permission.bossOnly) && !checked;
+              const off = disabled || locked;
               return (
-                <label key={code} className="flex items-start gap-2.5 rounded-md px-2 py-2 hover:bg-foreground/[0.05]">
-                  <input type="checkbox" className="mt-0.5" disabled={disabled} checked={selected.includes(code)} onChange={() => onToggle(code)} />
+                <label key={code} title={permission.bossOnly ? BOSS_ONLY_PERSONAL_REASON : undefined} className={`flex items-start gap-2.5 rounded-md px-2 py-2 select-none ${off ? "cursor-not-allowed opacity-60" : "cursor-pointer hover:bg-foreground/[0.05]"}`}>
+                  <Checkbox
+                    name={code}
+                    className="mt-0.5"
+                    disabled={off}
+                    checked={checked}
+                    aria-description={permission.bossOnly ? BOSS_ONLY_PERSONAL_REASON : undefined}
+                    onCheckedChange={() => { if (!locked) onToggle(code); }}
+                  />
                   <span className="min-w-0">
-                    <strong className="block text-sm font-normal text-foreground">{permissionLabel(permission)}</strong>
+                    <strong className="block text-sm font-normal text-foreground">{permissionLabel(permission)}{permission.bossOnly ? <BossOnlyTag /> : null}</strong>
                     {hint ? <span className="mt-0.5 block text-xs leading-snug text-muted-foreground">{hint}</span> : null}
                   </span>
                 </label>
@@ -724,7 +811,7 @@ export function AdminDirectoryView({
   const scopeKnown = scopeChoice !== null;
 
   const actionReason = (action: AdminActionEligibility["action"], entry: AdminDirectoryEntry | undefined = detail) => {
-    const permitted = { update: canUpdate, assign: canGrant, scope: canGrant, freeze: canFreeze, unfreeze: canUnfreeze, "force-logout": isBossActor }[action];
+    const permitted = { update: canUpdate, assign: canGrant, scope: canGrant, freeze: canFreeze, unfreeze: canUnfreeze, "force-logout": isBossActor, "reset-password": isBossActor, "reset-2fa": isBossActor }[action];
     return permitted ? directoryActionBlockedReason(entry, action) : "没有该操作的权限";
   };
   const profileActionReason = actionReason("update");
@@ -1003,6 +1090,8 @@ export function AdminDirectoryView({
       freeze: () => setSecurityAction("freeze"),
       unfreeze: () => setSecurityAction("unfreeze"),
       "force-logout": () => setSecurityAction("force-logout"),
+      "reset-password": () => setSecurityAction("reset-password"),
+      "reset-2fa": () => setSecurityAction("reset-2fa"),
     };
     return planDirectoryActions(item).map((plan) => (
       // F1：本仓菜单项的动作走 onClick（Base UI Item）；onSelect 不会被执行。
@@ -1020,6 +1109,8 @@ export function AdminDirectoryView({
   freeze: <Lock size={14} aria-hidden />,
   unfreeze: <ShieldAlert size={14} aria-hidden />,
   "force-logout": <LogOut size={14} aria-hidden />,
+  "reset-password": <KeyRound size={14} aria-hidden />,
+  "reset-2fa": <ShieldAlert size={14} aria-hidden />,
 };
 
 /** 菜单标签下一行汇总禁用原因，避免把同一条原因重复写进每个条目。 */
@@ -1132,20 +1223,20 @@ export function AdminDirectoryView({
   ) : editSection === "access" ? (
 <Section title="角色与有效权限" hint="多个角色的权限取并集；能查看哪些游戏由业务范围单独决定。">
               {detail.isBoss ? (
-                <NotApplicable reason="Boss 由系统旁路直接持有平台全部权限，不参与角色并集，也不可在此配置。" />
+                <NotApplicable reason="Boss 拥有平台全部权限，不需要分配角色，也不能在此修改。" />
               ) : (
                 <>
                   {rolesReadable ? (
                     <div className="grid gap-2 sm:grid-cols-2">
                       {activeRoleOptions.map((role) => (
-                        <label key={role.id} className="flex items-center gap-2.5 rounded-md border border-border/60 px-3 py-2 text-sm hover:bg-foreground/[0.03]">
-                          <input type="checkbox" checked={roleIds.includes(role.id)} disabled={!canGrant || loading} onChange={() => toggle(roleIds, role.id, setRoleIds)} />
+                        <label key={role.id} className="flex items-center gap-2.5 rounded-md border border-border/60 px-3 py-2 text-sm hover:bg-foreground/[0.03] cursor-pointer select-none">
+                          <Checkbox name={role.name} checked={roleIds.includes(role.id)} disabled={!canGrant || loading} onCheckedChange={() => toggle(roleIds, role.id, setRoleIds)} />
                           <span className="min-w-0 truncate">{role.name}</span>
                         </label>
                       ))}
                       {disabledAssigned.map((role) => (
-                        <label key={role.id} className="flex items-center gap-2.5 rounded-md border border-dashed border-amber-500/50 bg-amber-500/[0.07] px-3 py-2 text-sm">
-                          <input type="checkbox" checked={roleIds.includes(role.id)} disabled={!canGrant || loading} onChange={() => toggle(roleIds, role.id, setRoleIds)} />
+                        <label key={role.id} className="flex items-center gap-2.5 rounded-md border border-dashed border-amber-500/50 bg-amber-500/[0.07] px-3 py-2 text-sm cursor-pointer select-none">
+                          <Checkbox name={role.name} checked={roleIds.includes(role.id)} disabled={!canGrant || loading} onCheckedChange={() => toggle(roleIds, role.id, setRoleIds)} />
                           <span className="min-w-0 truncate">{role.name}</span>
                           <Badge variant="outline" className="ml-auto shrink-0 border-transparent bg-amber-500/15 text-amber-800 dark:text-amber-400">
                             已停用
@@ -1189,7 +1280,7 @@ export function AdminDirectoryView({
                     </p>
                     {personalReadable ? (
                       <div className="mt-3 space-y-4">
-                        <PermissionPicker label="个人允许" permissions={permissions} disabled={loading || !canGrant} selected={allowPermissions} onToggle={(code) => toggle(allowPermissions, code, setAllowPermissions)} />
+                        <PermissionPicker label="个人允许" lockBossOnly permissions={permissions} disabled={loading || !canGrant} selected={allowPermissions} onToggle={(code) => toggle(allowPermissions, code, setAllowPermissions)} />
                         <PermissionPicker label="个人禁止（优先）" permissions={permissions} disabled={loading || !canGrant} selected={denyPermissions} onToggle={(code) => toggle(denyPermissions, code, setDenyPermissions)} />
                       </div>
                     ) : (
@@ -1267,8 +1358,8 @@ export function AdminDirectoryView({
                     ) : (
                       <div className="grid gap-2 sm:grid-cols-2">
                         {games.map((game) => (
-                          <label key={game.id} className="flex items-center gap-2.5 rounded-md border border-border/60 px-3 py-2 text-sm hover:bg-foreground/[0.03]">
-                            <input type="checkbox" checked={scopeGameIds.includes(game.id)} disabled={!canGrant || loading} onChange={() => toggle(scopeGameIds, game.id, setScopeGameIds)} />
+                          <label key={game.id} className="flex items-center gap-2.5 rounded-md border border-border/60 px-3 py-2 text-sm hover:bg-foreground/[0.03] cursor-pointer select-none">
+                            <Checkbox name={game.name} checked={scopeGameIds.includes(game.id)} disabled={!canGrant || loading} onCheckedChange={() => toggle(scopeGameIds, game.id, setScopeGameIds)} />
                             <span className="min-w-0 truncate">{game.name}</span>
                           </label>
                         ))}
@@ -1351,7 +1442,7 @@ export function AdminDirectoryView({
                 </Avatar>
                 <DialogTitle render={<h1 />} className="break-words text-2xl font-semibold tracking-tight">{detail.name}</DialogTitle>
                 <AdminStatusBadge status={detail.status} />
-                {detail.isBoss ? <Badge variant="outline">Boss · 系统旁路</Badge> : null}
+                {detail.isBoss ? <Badge variant="outline">Boss（拥有全部权限）</Badge> : null}
               </div>
               <p className="text-sm text-muted-foreground">登录账号 {detail.username} · 创建于 {formatDate(detail.createdAt ?? null)}</p>
             </div>
@@ -1379,7 +1470,7 @@ export function AdminDirectoryView({
                 <div className="flex justify-end">
                   {canGrant && !detail.isBoss ? <Button type="button" size="sm" variant="ghost" className="hover:bg-foreground/[0.06] hover:text-foreground" title={accessActionReason ?? undefined} disabled={Boolean(accessActionReason) || loading || !grantsComplete || writeLocked("access")} onClick={() => setEditSection("access")}>调整角色与权限</Button> : null}
                 </div>
-                {detail.isBoss ? <NotApplicable reason="Boss 通过系统旁路持有全部能力，角色与个人例外均不参与计算。" /> : (
+                {detail.isBoss ? <NotApplicable reason="Boss 拥有全部权限，角色与个人例外对 Boss 不生效。" /> : (
                   <>
                     <dl className="grid gap-x-12 gap-y-6 sm:grid-cols-2">
                       <div className="space-y-2">
@@ -1391,7 +1482,7 @@ export function AdminDirectoryView({
                         </dd>
                       </div>
                       <div className="space-y-2">
-                        <dt className="text-xs font-medium text-foreground/70">有效权限（角色并集 + 个人例外）</dt>
+                        <dt className="text-xs font-medium text-foreground/70">有效权限（角色权限 + 个人例外）</dt>
                         <dd className="text-sm">
                           {!personalReadable || !Array.isArray(detail.effectivePermissions) ? (canReadPermissions ? "有效权限未提供" : "无权查看有效权限")
                             : <span className="flex flex-wrap items-center gap-1.5">{extraPermissions.length} 项额外能力{detail.effectivePermissions.includes("order.read") ? "（含系统基础订单读取）" : ""}{permissionGroups.map(group => <Badge key={group.id} variant="secondary">{group.label} {group.count}</Badge>)}</span>}
@@ -1420,7 +1511,7 @@ export function AdminDirectoryView({
                 </div>
                 <dl className="grid gap-y-4">
                   <dt className="text-xs font-medium text-foreground/70">当前范围</dt>
-                  <dd className="text-sm">{detail.isBoss ? "全部游戏 · 系统旁路" : scopeKnown ? scopeLabel(detail.scope?.mode, detail.scope?.gameIds, savedScopeNames) : <UnknownFact hint="当前运行版本未返回该账号的业务范围，不代表无范围。" />}</dd>
+                  <dd className="text-sm">{detail.isBoss ? "全部游戏" : scopeKnown ? scopeLabel(detail.scope?.mode, detail.scope?.gameIds, savedScopeNames) : <UnknownFact hint="暂未读取到该账号的业务范围，不代表未设置业务范围。" />}</dd>
                 </dl>
               </section>
 
@@ -1430,6 +1521,8 @@ export function AdminDirectoryView({
                   {canFreeze && !detail.isBoss && detail.id !== snapshot.adminUserId && detail.status !== "FROZEN" ? <Button type="button" size="sm" variant="ghost" className="text-destructive hover:bg-destructive/10 hover:text-destructive" title={actionReason("freeze") ?? undefined} disabled={Boolean(actionReason("freeze")) || loading} onClick={() => setSecurityAction("freeze")}>冻结账号</Button> : null}
                   {canUnfreeze && !detail.isBoss && detail.status === "FROZEN" ? <Button type="button" size="sm" variant="ghost" className="hover:bg-foreground/[0.06] hover:text-foreground" title={actionReason("unfreeze") ?? undefined} disabled={Boolean(actionReason("unfreeze")) || loading} onClick={() => setSecurityAction("unfreeze")}>解除冻结</Button> : null}
                   {isBossActor && detail.id !== snapshot.adminUserId ? <Button type="button" size="sm" variant="ghost" className="hover:bg-foreground/[0.06] hover:text-foreground" title={actionReason("force-logout") ?? undefined} disabled={Boolean(actionReason("force-logout")) || loading} onClick={() => setSecurityAction("force-logout")}>撤销全部会话</Button> : null}
+                  {isBossActor && !detail.isBoss && detail.id !== snapshot.adminUserId ? <Button type="button" size="sm" variant="ghost" className="hover:bg-foreground/[0.06] hover:text-foreground" title={actionReason("reset-password") ?? undefined} disabled={Boolean(actionReason("reset-password")) || loading} onClick={() => setSecurityAction("reset-password")}>重置密码</Button> : null}
+                  {isBossActor && !detail.isBoss && detail.id !== snapshot.adminUserId ? <Button type="button" size="sm" variant="ghost" className="hover:bg-foreground/[0.06] hover:text-foreground" title={actionReason("reset-2fa") ?? undefined} disabled={Boolean(actionReason("reset-2fa")) || loading} onClick={() => setSecurityAction("reset-2fa")}>重置 2FA</Button> : null}
                 </div>
                 <div className="space-y-4 text-sm"><div className="space-y-1"><p className="text-xs text-muted-foreground">最近一次完整认证</p><p>{detail.lastFullAuthenticatedAt ? formatDate(detail.lastFullAuthenticatedAt) : "未记录"}</p></div></div>
                 <SecurityFacts detail={detail} />
@@ -1656,18 +1749,18 @@ export function AdminDirectoryView({
                           </Badge>
                         </td>
                         <td className="whitespace-normal">
-                          <span className="block truncate text-sm">{item.isBoss ? "全部能力 · 系统旁路" : access.roles}</span>
+                          <span className="block truncate text-sm">{item.isBoss ? "拥有全部权限" : access.roles}</span>
                           <span className="block truncate text-xs text-muted-foreground">
-                            {item.isBoss ? "不参与角色并集" : access.exception}
+                            {item.isBoss ? "无需分配角色" : access.exception}
                             {access.disabledCount > 0 ? ` · 含 ${access.disabledCount} 个已停用角色` : ""}
                           </span>
                         </td>
                         <td className="whitespace-nowrap text-sm">
-                          {item.isBoss ? "全部游戏" : scope.known ? scope.label : <UnknownFact hint="当前运行版本未返回该账号的业务范围，不代表无范围。" />}
+                          {item.isBoss ? "全部游戏" : scope.known ? scope.label : <UnknownFact hint="暂未读取到该账号的业务范围，不代表未设置业务范围。" />}
                         </td>
                         <td className="whitespace-normal">
                           <span className="block text-sm">
-                            {security.headline === "未提供" ? <UnknownFact hint="当前运行版本未返回安全摘要，不代表未启用双因素。" /> : security.headline}
+                            {security.headline === "未提供" ? <UnknownFact hint="暂未读取到安全摘要，不代表未启用双因素。" /> : security.headline}
                           </span>
                           <span className="block text-xs text-muted-foreground">
                             {security.detail ? `${security.detail} ` : ""}
@@ -1687,7 +1780,7 @@ export function AdminDirectoryView({
                               </span>
                             </>
                           ) : (
-                            <UnknownFact hint="当前运行版本未返回会话摘要。" />
+                            <UnknownFact hint="暂未读取到会话摘要。" />
                           )}
                         </td>
                         <td className="whitespace-nowrap">
@@ -1881,6 +1974,7 @@ export function AdminDirectoryView({
                     )}
                   </div>
                 ) : null}
+                <p className="text-xs text-muted-foreground">本人首次登录需改密并绑定 2FA。</p>
                 <label className="block">
                   <FieldLabel>显示名称</FieldLabel>
                   <Input value={createName} onChange={(event) => setCreateName(event.target.value)} className="focus-visible:outline-none!" required />
@@ -1894,7 +1988,7 @@ export function AdminDirectoryView({
                       {choice === "ALL_GAMES" ? "全部游戏" : choice === "SELECTED_GAMES" ? "指定游戏" : "无业务范围"}
                     </label>
                   ))}
-                  {createScopeChoice === "SELECTED_GAMES" ? <div className="flex flex-wrap gap-3">{games.map((game) => <label key={game.id} className="inline-flex items-center gap-2 text-sm"><input type="checkbox" checked={createScopeGameIds.includes(game.id)} onChange={() => toggle(createScopeGameIds, game.id, setCreateScopeGameIds)} />{game.name}</label>)}</div> : null}
+                  {createScopeChoice === "SELECTED_GAMES" ? <div className="flex flex-wrap gap-3">{games.map((game) => <label key={game.id} className="inline-flex items-center gap-2 text-sm cursor-pointer select-none"><Checkbox name={game.name} checked={createScopeGameIds.includes(game.id)} onCheckedChange={() => toggle(createScopeGameIds, game.id, setCreateScopeGameIds)} /><span>{game.name}</span></label>)}</div> : null}
                   {scopeChoiceError(createScopeChoice, createScopeGameIds) ? <p className="text-xs text-muted-foreground">{scopeChoiceError(createScopeChoice, createScopeGameIds)}</p> : null}
                 </fieldset>
                 {activeRoleOptions.length > 0 ? (
@@ -1902,8 +1996,8 @@ export function AdminDirectoryView({
                     <FieldLabel>预设角色</FieldLabel>
                     <div className="grid gap-2 sm:grid-cols-2">
                       {activeRoleOptions.map((role) => (
-                        <label key={role.id} className="flex items-center gap-2.5 rounded-md border border-border/60 px-3 py-2 text-sm hover:bg-foreground/[0.03]">
-                          <input type="checkbox" checked={createRoleIds.includes(role.id)} onChange={() => toggle(createRoleIds, role.id, setCreateRoleIds)} />
+                        <label key={role.id} className="flex items-center gap-2.5 rounded-md border border-border/60 px-3 py-2 text-sm hover:bg-foreground/[0.03] cursor-pointer select-none">
+                          <Checkbox name={role.name} checked={createRoleIds.includes(role.id)} onCheckedChange={() => toggle(createRoleIds, role.id, setCreateRoleIds)} />
                           <span className="min-w-0 truncate">{role.name}</span>
                         </label>
                       ))}
@@ -1917,7 +2011,7 @@ export function AdminDirectoryView({
                       角色是主要配置入口。个人禁止优先于角色允许；订单核心读取属于所有生效管理员，不需要在这里配置。
                     </p>
                     <div className="mt-3 space-y-4">
-                      <PermissionPicker label="个人允许" permissions={permissions} selected={createAllow} onToggle={(code) => toggle(createAllow, code, setCreateAllow)} />
+                      <PermissionPicker label="个人允许" lockBossOnly permissions={permissions} selected={createAllow} onToggle={(code) => toggle(createAllow, code, setCreateAllow)} />
                       <PermissionPicker label="个人禁止（优先）" permissions={permissions} selected={createDeny} onToggle={(code) => toggle(createDeny, code, setCreateDeny)} />
                     </div>
                   </details>

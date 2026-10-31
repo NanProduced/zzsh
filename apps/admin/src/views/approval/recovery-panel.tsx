@@ -1,6 +1,8 @@
+import { useState } from "react";
+import { StepUpCaptcha } from "../../components/altcha-field";
 import { CircleCheck, TriangleAlert } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
-import { Button } from "../../components/ui-elements";
+import { Button, PasswordInput } from "../../components/ui-elements";
 import { formatDate } from "../../api";
 import { ACTION_LABELS, executionView, reasonLabel, statusView, type RecoveryResult } from "./contract";
 import { Fact, FactGrid } from "./atoms";
@@ -77,7 +79,7 @@ function operationAction(operation: string): string {
  * 已知回执 / 未找到回执（读不到≠没执行）/ 恢复被拒（≠原操作失败）/ 查询本身失败。
  */
 export function RecoveryPanel({
-  kind, lookup, busy, lookupBusy = false, persisted = true, others = 0, onRetryWrite, onRetryReadback, onLookup, onDiscard,
+  kind, lookup, busy, lookupBusy = false, persisted = true, others = 0, onRetryWrite, onRetryReadback, onLookup, onDiscard, requiresStepUp = false,
 }: {
   kind: "unknown" | "readback" | "resolved";
   lookup: RecoveryLookup;
@@ -89,11 +91,21 @@ export function RecoveryPanel({
   persisted?: boolean;
   /** 同身份下其他对象的未核清笔数。 */
   others?: number;
-  onRetryWrite: () => void;
+  requiresStepUp?: boolean;
+  onRetryWrite: (stepUp?: { password: string; totpCode: string }) => void;
   onRetryReadback: () => void;
   onLookup: () => void;
   onDiscard: () => void;
 }) {
+  const [password, setPassword] = useState("");
+  const [totpCode, setTotpCode] = useState("");
+  const stepUpReady = !requiresStepUp || (password.length >= 12 && /^\d{6}$/.test(totpCode));
+  const retry = () => {
+    if (!stepUpReady || busy || lookupBusy) return;
+    const credentials = requiresStepUp ? { password, totpCode } : undefined;
+    setPassword(""); setTotpCode("");
+    onRetryWrite(credentials);
+  };
   if (kind === "resolved") {
     // 终态证据已到达：不再给出与结果矛盾的 UNKNOWN 重放出口。
     return (
@@ -157,9 +169,19 @@ export function RecoveryPanel({
       ) : null}
       {lookup.state === "loading" ? <p className="text-xs text-muted-foreground">正在查询原结果…</p> : null}
 
+      {kind === "unknown" && requiresStepUp ? <div className="space-y-3 rounded-md border border-border p-3">
+        <p className="text-xs text-muted-foreground">重试前请重新输入本人密码与动态码；原请求标识和业务内容保持不变，凭据不会保存在恢复记录中。</p>
+        <label className="block space-y-1 text-xs">本人密码
+          <PasswordInput aria-label="原请求重试本人密码" autoComplete="current-password" value={password} disabled={busy || lookupBusy} onChange={event => setPassword(event.target.value)} />
+        </label>
+        <label className="block space-y-1 text-xs">6 位动态验证码
+          <input aria-label="原请求重试动态码" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={totpCode} disabled={busy || lookupBusy} onChange={event => setTotpCode(event.target.value.replace(/\D/g, "").slice(0, 6))} />
+        </label>
+        <StepUpCaptcha />
+      </div> : null}
       <div className="flex flex-wrap gap-2">
         {kind === "unknown" ? (
-          <Button type="button" size="sm" variant="secondary" loading={busy} disabled={busy || lookupBusy} onClick={onRetryWrite}>用原请求重试</Button>
+          <Button type="button" size="sm" variant="secondary" loading={busy} disabled={busy || lookupBusy || !stepUpReady} onClick={retry}>用原请求重试</Button>
         ) : (
           <Button type="button" size="sm" variant="secondary" loading={busy} disabled={busy || lookupBusy} onClick={onRetryReadback}>重试读取最新状态</Button>
         )}

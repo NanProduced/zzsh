@@ -127,7 +127,7 @@ test("grant and replace validate recipients and lock one subject before checking
   } finally { if (previous === undefined) delete process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; else process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = previous; }
 });
 
-test("an authorized operator may execute an already approved policy with independent ranges", async () => {
+test("only Boss may execute an approved policy; legacy operator grants stay ineffective with independent ranges", async () => {
   const previous = process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = "true";
   try {
     for (const changeRange of [false, true]) {
@@ -137,17 +137,24 @@ test("an authorized operator may execute an already approved policy with indepen
         const byMode = Object.fromEntries((["ordinary", "custom", "fast"] as const).map(mode => [mode, { ...range, mode }]));
         policy.entitlementRanges = { FRIEND: { byMode }, PRESTIGE: { byMode } };
       }
+      for (const isBoss of [false, true]) {
       const fixture = draftApprovalFixture(policy);
       const original = fixture.client.query;
       fixture.client.query = async (sql, args = []) => {
-        if (sql.includes('FROM "zzsh_iam"."admin_security"')) return { rows: [{ status: "ACTIVE", isBoss: false, passwordChangeRequired: false }] } as any;
+        if (sql.includes('FROM "zzsh_iam"."admin_security"')) return { rows: [{ status: "ACTIVE", isBoss, passwordChangeRequired: false }] } as any;
         if (sql.includes('"admin_user_permission"') || sql.includes('"admin_role_permission"')) return { rows: [{ permissionCode: ADMIN_PERMISSION.membershipPolicyPublish }] } as any;
         if (sql.includes("WHERE status='APPROVED'")) return { rows: [{ policyPayload: readerPolicy() }] } as any;
         return original(sql, args);
       };
-      const run = () => executeMembershipGrowthOperation(fixture.client as never, fixture.input as never, { userId: "publisher", sessionId: "session-1" }, "publish-1");
-      assert.equal((await run()).resultCode, "MEMBERSHIP_POLICY_PUBLISHED");
-      assert.equal(fixture.inserted.length, 1);
+      const run = () => executeMembershipGrowthOperation(fixture.client as never, fixture.input as never, { userId: isBoss ? "boss-publisher" : "legacy-publisher", sessionId: "session-1" }, "publish-1");
+      if (!isBoss) {
+        await assert.rejects(run, (error: any) => error.status === 409 && /permission/.test(error.message));
+        assert.equal(fixture.inserted.length, 0, "a historical policy-publish code cannot write a policy");
+      } else {
+        assert.equal((await run()).resultCode, "MEMBERSHIP_POLICY_PUBLISHED");
+        assert.equal(fixture.inserted.length, 1);
+      }
+      }
     }
   } finally { if (previous === undefined) delete process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; else process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = previous; }
 });

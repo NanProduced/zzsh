@@ -162,6 +162,9 @@ export function WorkspacePageContent({
       />
     );
   }
+  if (tab.kind === "operation-log") {
+    return <AdminAuditView key={tab.id} variant="operations" snapshot={snapshot} initialQuery={tab.query} onQueryChange={onQueryChange} refreshNonce={refreshNonce} />;
+  }
   if (tab.kind === "audit") {
     return <AdminAuditView key={tab.id} snapshot={snapshot} initialQuery={tab.query} onQueryChange={onQueryChange} refreshNonce={refreshNonce} />;
   }
@@ -174,7 +177,7 @@ export function WorkspacePageContent({
     return <SupplyGunsmithView key={tab.id} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
   }
   if (tab.kind === "rules") {
-    return <SupplyRulesView key={tab.id} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
+    return <SupplyRulesView key={tab.id} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} section={tab.query.section} onOpenPath={onOpenPath} />;
   }
   if (tab.kind === "listing-review") return <SupplyListingReviewView key={tab.id} snapshot={snapshot} initialQuery={tab.query} onOpenPath={onOpenPath} onQueryChange={onQueryChange} refreshNonce={refreshNonce} onDirtyChange={onDirtyChange}/>;
   if (tab.kind === "media-review") {

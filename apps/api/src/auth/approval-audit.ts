@@ -107,10 +107,11 @@ const APPROVAL_WRITE_OPERATIONS = {
   decide: "approval.request.decide",
   addCandidate: "approval.request.add_candidate",
   execute: "approval.request.execute",
+  withdraw: "approval.request.withdraw",
 } as const;
 
 /** 恢复合同的三个目标型操作必须带申请号；白名单本身是全部已登记审批写操作，绝不接受任意表名或任意键扫描。 */
-const RECOVERY_TARGET_SCOPED = new Set<string>([APPROVAL_WRITE_OPERATIONS.decide, APPROVAL_WRITE_OPERATIONS.addCandidate, APPROVAL_WRITE_OPERATIONS.execute]);
+const RECOVERY_TARGET_SCOPED = new Set<string>([APPROVAL_WRITE_OPERATIONS.decide, APPROVAL_WRITE_OPERATIONS.addCandidate, APPROVAL_WRITE_OPERATIONS.execute, APPROVAL_WRITE_OPERATIONS.withdraw]);
 
 function headerOf(request: AuthSecurityNodeRequest, name: string): string | undefined {
   const value = request.headers?.[name];
@@ -183,7 +184,7 @@ async function runApprovalWrite(
   sendSuccess(response, { ...(committed.body as Record<string, unknown>), idempotencyReplay: committed.replayed }, requestId);
 }
 
-export const APPROVAL_ACTIONS = ["approve", "reject", "execute", "addCandidate", "replace"] as const;
+export const APPROVAL_ACTIONS = ["approve", "reject", "execute", "addCandidate", "replace", "withdraw"] as const;
 export type ApprovalAction = (typeof APPROVAL_ACTIONS)[number];
 
 export type ApprovalActionReasonCode =
@@ -362,6 +363,15 @@ export function evaluateApprovalActions(input: ApprovalActionContext): ApprovalA
       if (withState && status === "EXPIRED") return build("replace", "EXPIRED", permission);
       if (withState && row.status !== "PENDING") return build("replace", "STATUS_NOT_PENDING", permission);
       return build("replace", "OK", permission, "NEW_REQUEST_WITH_SUPERSEDES");
+    })(),
+    (() => {
+      const permission = ADMIN_PERMISSION.approvalRequestRead;
+      if (!active) return build("withdraw", "ACTOR_INACTIVE", permission);
+      if (unregistered) return build("withdraw", "OPERATION_UNREGISTERED", permission);
+      if (!(access.isBoss || selfRequester)) return build("withdraw", "REQUESTER_ONLY", permission);
+      if (withState && status === "EXPIRED") return build("withdraw", "EXPIRED", permission);
+      if (withState && row.status !== "PENDING") return build("withdraw", "STATUS_NOT_PENDING", permission);
+      return build("withdraw", "OK", permission);
     })(),
   ];
 }
@@ -1018,6 +1028,49 @@ async function appendCandidate(request: AuthSecurityNodeRequest, response: AuthS
   });
 }
 
+async function withdrawRequest(request: AuthSecurityNodeRequest, response: AuthSecurityNodeResponse, requestId: string, options: AuthSecurityOptions, readContext: ContextReader): Promise<void> {
+  const context = await readContext(request, options);
+  const body = bodyOf(request);
+  assertFields(body, ["requestId", "reason"]);
+  const targetRequestId = requiredString(body, "requestId", 128);
+  const reason = optionalString(body, "reason", 500)?.trim() || "申请人撤回";
+  await runApprovalWrite(request, response, requestId, options, context, {
+    operation: APPROVAL_WRITE_OPERATIONS.withdraw,
+    resourceId: targetRequestId,
+    fingerprint: approvalFingerprint([targetRequestId, reason]),
+    authorize: async (client) => {
+      const access = await lockActor(client, context.userId);
+      const row = await readRequestForUpdate(client, targetRequestId);
+      const input = await buildApprovalActionContext(client, row, context, access, {
+        testOperationsEnabled: options.testOperationsEnabled,
+        executorAssembled: Boolean(options.approvalOperationExecutor),
+        includeStatePreconditions: false,
+      });
+      assertApprovalAction(evaluateApprovalActions(input), "withdraw");
+    },
+    action: async (client) => {
+      const row = await readRequestForUpdate(client, targetRequestId);
+      if (row.status !== "PENDING") conflict("Only a pending request can be withdrawn");
+      if (new Date(row.expiresAt).getTime() <= Date.now()) {
+        await expireRequest(client, row, context, requestId);
+        return approvalErrorReceipt(409, API_V1_ERROR_CODES.CONFLICT, "Approval request expired before withdrawal", requestId, "EXPIRED");
+      }
+      const updated = await client.query(
+        `UPDATE "zzsh_iam"."approval_request" SET "status" = 'CANCELLED', "status_reason" = $1 WHERE "id" = $2 AND "status" = 'PENDING'`,
+        [row.requestedBy === context.userId ? "申请人已撤回" : "Boss 已撤回", row.id],
+      );
+      if (updated.rowCount !== 1) conflict("This approval request is already closed");
+      await recordAudit(client, {
+        actorType: "admin", actorId: context.userId, sessionId: context.sessionId,
+        action: "approval.request.withdrawn", objectType: "approval_request", objectId: row.id,
+        outcome: "SUCCESS", requestId, reason,
+        details: { summary: row.summary, operationCode: row.operationCode, withdrawnByRequester: row.requestedBy === context.userId },
+      });
+      return { status: 200, body: { requestId: row.id, approvalRequestId: row.id, status: "CANCELLED" } };
+    },
+  });
+}
+
 async function executeRequest(request: AuthSecurityNodeRequest, response: AuthSecurityNodeResponse, requestId: string, options: AuthSecurityOptions, readContext: ContextReader): Promise<void> {
   const context = await readContext(request, options);
   const body = bodyOf(request);
@@ -1630,7 +1683,7 @@ async function assertRecoveryAuthorization(
     ? "approve"
     : operation === APPROVAL_WRITE_OPERATIONS.addCandidate
       ? "addCandidate"
-      : "execute";
+      : operation === APPROVAL_WRITE_OPERATIONS.withdraw ? "withdraw" : "execute";
   const input = await buildApprovalActionContext(pool, row, context, access, {
     testOperationsEnabled: options.testOperationsEnabled,
     executorAssembled: Boolean(options.approvalOperationExecutor),
@@ -1823,6 +1876,7 @@ export async function handleAdminApprovalRoute(
     if (path === "/api/v1/admin/security/approvals/requests") return createRequest(request, response, requestId, options, readContext);
     if (path === "/api/v1/admin/security/approvals/requests/decision") return decideRequest(request, response, requestId, options, readContext);
     if (path === "/api/v1/admin/security/approvals/requests/add-candidate") return appendCandidate(request, response, requestId, options, readContext);
+    if (path === "/api/v1/admin/security/approvals/requests/withdraw") return withdrawRequest(request, response, requestId, options, readContext);
     if (path === "/api/v1/admin/security/approvals/requests/execute") return executeRequest(request, response, requestId, options, readContext);
   }
   throw new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found");

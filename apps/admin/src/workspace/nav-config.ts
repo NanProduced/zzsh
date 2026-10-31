@@ -1,21 +1,31 @@
 import {
   WalletIcon,
+  BadgeDollarSignIcon,
   BoxesIcon,
+  CalculatorIcon,
   CrosshairIcon,
   ClipboardCheckIcon,
   CrownIcon,
+  FileSignatureIcon,
   ImageIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
-  ListChecksIcon,
   MessagesSquareIcon,
+  NetworkIcon,
   NewspaperIcon,
+  PackageIcon,
+  PaletteIcon,
+  ScaleIcon,
   ShoppingBagIcon,
   ScrollTextIcon,
+  HistoryIcon,
   ShieldIcon,
   Settings2Icon,
+  SlidersHorizontalIcon,
+  UserCheckIcon,
   UserRoundCogIcon,
   UsersRoundIcon,
+  VaultIcon,
   type LucideIcon,
 } from "lucide-react";
 
@@ -46,7 +56,7 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
   const distributionOps = nav.isBoss || ["order.read", "personal.distribution.policy.read", "personal.distribution.policy.manage"].some(has);
   if (membershipOps || distributionOps) items.push({ label: "会员运营", isTitle: true });
   if (membershipOps) items.push({ label: "会员与礼遇", icon: CrownIcon, path: "/membership-growth", kind: "membership-growth" });
-  if (distributionOps) items.push({ label: "分销管理", icon: CrownIcon, path: "/distribution-policy", kind: "distribution-policy" });
+  if (distributionOps) items.push({ label: "分销管理", icon: NetworkIcon, path: "/distribution-policy", kind: "distribution-policy" });
 
   const system: WorkspaceMenuItem[] = [];
   if (nav.isBoss) {
@@ -58,6 +68,9 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
   if (has("admin.role.read") || has("admin.permission.read")) {
     system.push({ label: "角色权限", icon: KeyRoundIcon, path: "/roles", kind: "roles" });
   }
+  if (nav.isBoss) {
+    system.push({ label: "操作日志", icon: HistoryIcon, path: "/operation-log", kind: "operation-log" });
+  }
   if (system.length > 0) {
     items.push({ label: "系统与安全", isTitle: true }, ...system);
   }
@@ -66,18 +79,35 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
   if (has("supply.catalog.manage") || nav.isBoss) {
     supply.push({ label: "目录维护", icon: BoxesIcon, path: "/supply/catalog", kind: "catalog" });
   }
-  if (has("supply.gunsmith.manage") || nav.isBoss) {
-    supply.push({ label: "改枪码目录", icon: CrosshairIcon, path: "/supply/gunsmith", kind: "gunsmith" });
-  }
-  if (has("supply.rules.edit") || nav.isBoss) {
-    supply.push({ label: "规则与价目", icon: ListChecksIcon, path: "/supply/rules", kind: "rules" });
-  }
   if (has("supply.review.read") || nav.isBoss) {
-    supply.push({ label: "账号供给", icon: ClipboardCheckIcon, path: "/supply/reviews", kind: "listing-review" });
+    supply.push({ label: "账号供给", icon: UserCheckIcon, path: "/supply/reviews", kind: "listing-review" });
     supply.push({ label: "平台素材审核", icon: ImageIcon, path: "/supply/media", kind: "media-review" });
   }
   if (supply.length > 0) {
     items.push({ label: "供给与目录", isTitle: true }, ...supply);
+  }
+  const delta: WorkspaceMenuItem[] = [];
+  if (has("supply.rules.edit") || nav.isBoss) {
+    const r = (label: string, icon: LucideIcon, section: string) => ({ label, icon, path: `/supply/rules?section=${section}`, kind: "rules" as const });
+    items.push(
+      { label: "供给与规则", isTitle: true },
+      r("规则总览", SlidersHorizontalIcon, "overview"),
+      r("押金规则", VaultIcon, "deposit"),
+      r("结算与退赔", ScaleIcon, "settlement"),
+      r("出租协议", FileSignatureIcon, "agreement"),
+    );
+    delta.push(
+      r("租赁定价", BadgeDollarSignIcon, "pricing"),
+      r("物资价目", PackageIcon, "items"),
+      r("皮肤推荐押金", PaletteIcon, "skin"),
+    );
+  }
+  // 改枪码目录归到游戏分组；路由仍是 /supply/gunsmith。
+  if (has("supply.gunsmith.manage") || nav.isBoss) {
+    delta.push({ label: "改枪码目录", icon: CrosshairIcon, path: "/supply/gunsmith", kind: "gunsmith" });
+  }
+  if (delta.length > 0) {
+    items.push({ label: "三角洲行动", isTitle: true }, ...delta);
   }
 
   const content: WorkspaceMenuItem[] = [];
@@ -88,7 +118,10 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
     items.push({ label: "运营内容", isTitle: true }, ...content);
   }
 
-  if(has("finance.read")||has("finance.document.read")){items.push({label:"资金",isTitle:true},{label:"资金查找",icon:WalletIcon,path:"/finance",kind:"finance-lookup"});if(has("finance.read"))items.push({label:"期间核对",icon:ScrollTextIcon,path:"/finance/period",kind:"finance-period"});}
+  if (has("finance.read") || has("finance.document.read")) {
+    items.push({ label: "资金", isTitle: true }, { label: "资金查找", icon: WalletIcon, path: "/finance", kind: "finance-lookup" });
+    if (has("finance.read")) items.push({ label: "期间核对", icon: CalculatorIcon, path: "/finance/period", kind: "finance-period" });
+  }
   if (has("order.read") || nav.isBoss) {
     items.push({ label: "交易", isTitle: true }, { label: "订单", icon: ShoppingBagIcon, path: "/orders", kind: "orders" });
   }
@@ -123,6 +156,7 @@ export function titleForPath(pathname: string): string {
   if (pathname.startsWith("/approvals/")) return "审批详情";
   if (pathname === "/approvals") return "审批中心";
   if (pathname === "/audit") return "账号与权限审计";
+  if (pathname === "/operation-log") return "操作日志";
   if (pathname === "/users") return "用户管理";
   if (pathname.startsWith("/users/")) return "用户详情";
   if (pathname === "/supply/catalog") return "目录维护";
@@ -170,7 +204,13 @@ export const PAGE_SEARCH_KEYWORDS: Record<string, string[]> = {
   "/roles": ["角色权限", "角色", "权限", "授权", "roles", "js", "qx"],
   "/supply/catalog": ["目录维护", "商品", "目录", "货架", "皮肤", "catalog", "ml"],
   "/supply/gunsmith": ["改枪码目录", "枪械", "改枪", "配装", "gunsmith", "qx", "pz"],
-  "/supply/rules": ["规则与价目", "规则", "价目", "定价", "价格", "收费", "rules", "pricing", "jg", "gz"],
+  "/supply/rules?section=overview": ["规则与价目", "规则总览", "规则", "版本", "生效", "rules", "gz", "bb"],
+  "/supply/rules?section=deposit": ["押金规则", "押金", "上限", "deposit", "yj"],
+  "/supply/rules?section=settlement": ["结算与退赔", "结算", "退赔", "赔付", "settlement", "js", "tp"],
+  "/supply/rules?section=agreement": ["出租协议", "协议", "条款", "全额赔付", "agreement", "xy"],
+  "/supply/rules?section=pricing": ["租赁定价", "定价", "价格", "收费", "租赁模式", "租期", "每日消耗", "三角洲", "pricing", "delta", "dj"],
+  "/supply/rules?section=items": ["物资价目", "价目", "物资", "价格行", "items", "jm", "wz"],
+  "/supply/rules?section=skin": ["皮肤推荐押金", "皮肤", "推荐押金", "skin", "pf"],
   "/supply/reviews": ["账号供给", "供给", "审核", "上架审核", "reviews", "sh", "gj"],
   "/supply/media": ["平台素材审核", "图片审核", "素材", "截图", "图片", "media", "review", "sc", "tp"],
   "/content": ["内容管理", "运营内容", "content", "nr"],
@@ -179,7 +219,8 @@ export const PAGE_SEARCH_KEYWORDS: Record<string, string[]> = {
   "/orders": ["订单", "交易", "orders", "dd"],
   "/users": ["用户管理", "用户", "users", "yh"],
   "/approvals": ["审批与审计", "审批", "待办", "工单", "approvals", "sp"],
-  "/audit": ["账号与权限审计", "审计", "操作日志", "安全日志", "audit", "sj", "rz"],
+  "/audit": ["账号与权限审计", "审计", "安全日志", "audit", "sj"],
+  "/operation-log": ["操作日志", "全部日志", "审计日志", "operation", "log", "czrz", "rz"],
   "/settings?section=security": ["账号安全", "个人中心", "安全", "密码", "pin", "account", "gr", "aq"],
   "/settings": ["设置", "外观", "主题", "偏好", "深色", "浅色", "appearance", "theme", "settings", "sz", "wg", "zt"],
 };

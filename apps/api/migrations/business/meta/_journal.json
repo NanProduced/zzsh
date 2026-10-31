@@ -792,6 +792,62 @@
       "when": 1793184001000,
       "tag": "0112_legal_documents",
       "breakpoints": true
+    },
+    {
+      "idx": 113,
+      "version": "7",
+      "when": 1793184002000,
+      "tag": "0113_admin_permission_finance_phone_seed",
+      "breakpoints": true
+    },
+    {
+      "idx": 114,
+      "version": "7",
+      "when": 1793184003000,
+      "tag": "0114_admin_role_preset_grants",
+      "breakpoints": true
+    },
+    {
+      "idx": 115,
+      "version": "7",
+      "when": 1793184004000,
+      "tag": "0115_admin_login_two_factor_preference",
+      "breakpoints": true
+    },
+    {
+      "idx": 116,
+      "version": "7",
+      "when": 1793184005000,
+      "tag": "0116_admin_auth_throttle",
+      "breakpoints": true
+    },
+    {
+      "idx": 117,
+      "version": "7",
+      "when": 1793184006000,
+      "tag": "0117_approval_default_templates",
+      "breakpoints": true
+    },
+    {
+      "idx": 118,
+      "version": "7",
+      "when": 1793184007000,
+      "tag": "0118_ops_preset_account_admin",
+      "breakpoints": true
+    },
+    {
+      "idx": 119,
+      "version": "7",
+      "when": 1793184008000,
+      "tag": "0119_admin_session_last_active",
+      "breakpoints": true
+    },
+    {
+      "idx": 120,
+      "version": "7",
+      "when": 1793184009000,
+      "tag": "0120_admin_audit_noise_retention",
+      "breakpoints": true
     }
   ]
 }

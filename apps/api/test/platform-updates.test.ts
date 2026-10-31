@@ -9,7 +9,8 @@ test('global homepage promotion requires platform publication permission even fo
   assert.doesNotThrow(() => requireUpdatePromotionPermission(access, {}));
   assert.throws(() => requireUpdatePromotionPermission(access, { tickerEnabled: true }), error => (error as { status?: number }).status === 403);
   access.permissions.add(ADMIN_PERMISSION.contentPlatformPublish);
-  assert.doesNotThrow(() => requireUpdatePromotionPermission(access, { tickerEnabled: true }));
+  assert.throws(() => requireUpdatePromotionPermission(access, { tickerEnabled: true }), error => (error as { status?: number }).status === 403, 'a legacy Boss-only publication code does not promote a non-Boss');
+  assert.doesNotThrow(() => requireUpdatePromotionPermission({ ...access, isBoss: true }, { tickerEnabled: true }));
 });
 test('update drafts retain unsupported text while the server derives references instead of trusting the supplied list', async () => {
   const body = '<div>未支持原文</div>\n\n![图][x]\n\n[x]: media://public_asset';

@@ -8,7 +8,7 @@ import {
   actionFor, ACTION_LABELS, APPROVAL_ACTION_NAMES, businessProgress, businessTitleOf, candidateAvailabilityLabel,
   personLabel, statusView, type RequestSummary,
 } from "./contract";
-import { FieldLabel, formatApprovalDate as formatDate } from "./atoms";
+import { EmptyNote, FieldLabel, formatApprovalDate as formatDate, ReadingNote } from "./atoms";
 
 const ALL = "all";
 
@@ -96,7 +96,7 @@ export function RequestList({
         按条件查全集与统计暂未接入；当前只过滤本页。
       </p>
 
-      {busy ? <p className="text-xs text-muted-foreground">正在读取…</p> : null}
+      {busy ? <ReadingNote /> : null}
 
       <div className="table-wrap">
         <table className="data-table min-w-[860px]">
@@ -120,7 +120,7 @@ export function RequestList({
               const next = !Array.isArray(item.actions) ? "办理资格待读取" : actionable ? `可办理：${permitted.map(name => ACTION_LABELS[name] ?? name).join("、")}` : "暂无已确认的可办动作";
               const availability = candidateAvailabilityLabel(item.candidateAvailability);
               return (
-                <tr key={item.requestId}>
+                <tr key={item.requestId} className="transition-colors hover:bg-foreground/[0.03] focus-within:bg-foreground/[0.03]">
                   <td className="min-w-0">
                     <span className="block text-sm font-medium break-words">{businessTitleOf(item)}</span>
                     <span className="mt-0.5 block text-xs leading-relaxed break-words text-muted-foreground">{item.summary}</span>
@@ -142,7 +142,7 @@ export function RequestList({
                     <span className="mt-0.5 block text-xs text-muted-foreground">有效期至 {formatDate(item.expiresAt)}</span>
                   </td>
                   <td>
-                    <Button type="button" size="sm" variant="secondary" className="whitespace-nowrap" onClick={() => onOpen(item.requestId, businessTitleOf(item))}>
+                    <Button type="button" size="sm" variant={actionable ? "primary" : "secondary"} className="whitespace-nowrap focus-visible:ring-2 focus-visible:ring-ring/60" aria-label={`${actionable ? "查看并处理" : "查看"}：${businessTitleOf(item)}`} onClick={() => onOpen(item.requestId, businessTitleOf(item))}>
                       {actionable ? "查看并处理" : "查看"}
                     </Button>
                   </td>
@@ -153,9 +153,13 @@ export function RequestList({
         </table>
       </div>
 
-      {!busy && items.length === 0 ? <p className="text-xs text-muted-foreground">{emptyNote}</p> : null}
+      {!busy && items.length === 0 ? <EmptyNote title={emptyNote} /> : null}
       {!busy && items.length > 0 && filtered.length === 0 ? (
-        <p className="text-xs text-muted-foreground">当前页没有符合过滤条件的申请；过滤只作用于本页，换页或重置后重新查看。</p>
+        <EmptyNote
+          title="当前页没有符合过滤条件的申请"
+          description="过滤只作用于本页，换页或重置后重新查看。"
+          action={<Button type="button" size="sm" variant="ghost" onClick={() => { setBusiness(ALL); setStatus(ALL); setKeyword(""); }}>重置过滤</Button>}
+        />
       ) : null}
     </div>
   );

@@ -767,9 +767,8 @@ test("publication settings remain in a draft, use Beijing time and keep ticker i
   assert.ok(h.textOf().includes('轮播必须填写结束时间'));
   assert.ok(h.btn('发布草稿 v1').disabled);
   assert.ok(h.textOf().includes('长期指南请用帮助手册'));
-  const label = [...h.el.querySelectorAll('label')].find(x => x.textContent.includes('轮播结束时间'));
-  const input = label.querySelector('input');
-  await act(async () => { input.value = '2030-01-02T12:30'; input.dispatchEvent(new h.browser.Event('input', { bubbles: true })); });
+  const input = h.el.querySelector('[data-beijing-datetime-input][aria-label^="轮播结束时间"]');
+  await act(async () => { Object.getOwnPropertyDescriptor(h.browser.HTMLInputElement.prototype, 'value').set.call(input, '2030-01-02T12:30'); input.dispatchEvent(new h.browser.Event('input', { bubbles: true })); });
   await h.settle(); await h.click(h.btn('保存草稿'));
   const saved = h.writes.at(-1); assert.equal(saved.method, 'PUT');
   assert.equal(saved.body.updateSettings.tickerUntil, '2030-01-02T04:30:00.000Z');

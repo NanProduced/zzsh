@@ -4,7 +4,7 @@
 
 ## 迁移基线与结构事实
 
-业务迁移位于 `apps/api/migrations/business/`，源码共 **113 份 SQL**，`meta/_journal.json` **113 条**登记（idx 0…112，tag 与文件名一一对应）。源码登记不表示数据库已经执行；实际链与权限须分别核验。另有一条独立正式迁移线 `apps/api/migrations/0000_fnd004_test_metadata.sql`（`zzsh_meta.database_marker`，journal 1 条）。两条线分别由 `apps/api/src/database/migrations.ts` 与 `business-migrations.ts` 执行，记账 schema 分别为 `zzsh_meta` 与 `zzsh_business_meta`（后者不在任何 SQL 中 CREATE，由 migrator 自建）。
+业务迁移位于 `apps/api/migrations/business/`，源码共 **121 份 SQL**，`meta/_journal.json` **121 条**登记（idx 0…120，tag 与文件名一一对应）。源码登记不表示数据库已经执行；实际链与权限须分别核验。另有一条独立正式迁移线 `apps/api/migrations/0000_fnd004_test_metadata.sql`（`zzsh_meta.database_marker`，journal 1 条）。两条线分别由 `apps/api/src/database/migrations.ts` 与 `business-migrations.ts` 执行，记账 schema 分别为 `zzsh_meta` 与 `zzsh_business_meta`（后者不在任何 SQL 中 CREATE，由 migrator 自建）。
 
 0102 支持极速比例仅设下限；0103 增加用户冻结状态及权限；0104 增加提现查单权限；0105 保存本人实名展示来源；0106 增加异常原款退款责任，0107 增加未开租终止与全额原款应退。0105 的 runtime 权限由正式 `migrate:business` 后置 ACL 收敛为仅 SELECT，不能把 `GRANT SELECT` 当作撤销 schema 默认写权限。升级保留已执行 SQL 字节与 journal 时间；新的迁移须使用未占用编号和晚于现有链的时间。
 
@@ -48,6 +48,10 @@
 | 0108 | 旧资金来源证明、提现退回独立根、安全摘要与旧责任覆盖核验；不回写旧期初/原件 |
 | 0109–0111 | 内容资源/格式、未发布草稿历史、平台动态版本化展示与不可变性 |
 | 0112 | 平台法律文书封存版本、不可变接受台账；角色权限由正式后置ACL收敛 |
+| 0113–0114、0118 | 管理员权限与运营/客服预设；Boss 专属能力不能被历史角色或个人允许扩权 |
+| 0115–0116 | 登录二次验证偏好与管理员共享失败计数/渐进锁定/一次性证明 |
+| 0117 | 默认审批模板；实际审批人需按运营身份配置，不预置虚构候选人 |
+| 0119–0120 | 会话最近活跃、认证审计降噪与 Boss 有保留期清理；资金和审批审计不在清理范围 |
 
 ### 按 schema 查对象（0000–0090 历史静态基线）
 

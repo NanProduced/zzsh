@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import { adminRequest, friendlyError, AdminApiError } from "../api";
 import { Button } from "../components/ui-elements";
+import { Checkbox } from "@/components/ui/checkbox";
 import { formatFundingCents } from "./supply-review/model";
 
 type NativeRefundItem = { intentId: string; postingId: string | null; refundOrderNo: string; amountCents: string; state: string; budgetDisposition: string;
@@ -129,7 +130,7 @@ function NativeRefundForm({ orderId, canWrite, basis, binding }: RefundProps) {
       : <p className="oc-fact-note">本单暂无退款申请。</p>}
     {canWrite && basis ? <p className="oc-fact-note" data-refund-basis={basis.eligible ? "eligible" : "closed"}>原单 {orderId} · 过账 {basis.postingRef ?? "未知"} · 已核应退责任 {cents(basis.refundPayableCents)} · 责任到期 {basis.refundDueAt ?? "未知"} · 预算以申请回执为准{basis.eligible ? "" : ` · 普通退款关闭：${basis.reason}`} · 异常退款不在此开放</p> : null}
     {canWrite && (!closedNew || pending) ? <form className="flex flex-wrap items-end gap-2" onSubmit={e => { e.preventDefault(); void submit(); }}>
-      {basis?.eligible && !pending ? <label><input type="checkbox" aria-label="确认过账责任" checked={confirmed} disabled={busy} onChange={e => setConfirmed(e.target.checked)} />已核对原单、过账责任、到期与申请额</label> : null}
+      {basis?.eligible && !pending ? <label className="flex items-center gap-2 text-xs cursor-pointer select-none"><Checkbox name="confirmed" aria-label="确认过账责任" checked={confirmed} disabled={busy} onCheckedChange={checked => setConfirmed(checked === true)} /><span>已核对原单、过账责任、到期与申请额</span></label> : null}
       <label>金额（分）<input aria-label="退款金额（分）" value={amount} disabled={busy || !!pending} onChange={e => setAmount(e.target.value.trim())} inputMode="numeric" /></label>
       <label>原因<input aria-label="退款原因" value={reason} disabled={busy || !!pending} maxLength={120} onChange={e => setReason(e.target.value)} /></label>
       <Button size="sm" type="submit" disabled={busy||storageBlocked}>{pending ? "按原键恢复提交" : "发起退款申请"}</Button>

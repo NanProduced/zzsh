@@ -1,7 +1,9 @@
+import { BeijingDateTimeField } from "@/components/beijing-datetime-field";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { ArrowLeft, CheckCircle2, CircleAlert, Clock3, ExternalLink, FileText, Search, ShieldAlert } from "lucide-react";
 
 import { Button, StatusMessage } from "../components/ui-elements";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { BEIJING_TIME_ZONE } from "../workspace/beijing-time";
 import {
@@ -283,6 +285,14 @@ function OrderCards({ items, onOpen }: { items: AdminOrder[]; onOpen: (order: Ad
   );
 }
 
+const ORDER_STATUS_ITEMS = [
+  { value: "ALL", label: "全部" },
+  { value: "PENDING_PAYMENT", label: "待支付" },
+  { value: "PAID", label: "已支付" },
+  { value: "CANCELLED", label: "已取消" },
+  { value: "COMPLETED", label: "已完成" },
+];
+
 function OrderListView({
   snapshot,
   initialQuery,
@@ -443,12 +453,18 @@ function OrderListView({
       <section className="section-panel !mb-0" aria-labelledby="order-filter-title">
         <div className="mb-4 flex items-center gap-2"><Search size={16} className="text-muted-foreground" aria-hidden="true" /><h2 id="order-filter-title" className="text-sm font-semibold text-foreground">筛选订单</h2></div>
         <form className="flex flex-wrap items-end gap-3" onSubmit={submit}>
-          <label className="min-w-36 flex-1 space-y-1 text-xs"><span className="block text-muted-foreground">状态</span><select value={filters.status} onChange={(event) => setFilters((current) => ({ ...current, status: event.target.value }))} className="h-9 w-full rounded border border-border bg-surface-raised px-2 text-xs"><option value="">全部</option><option value="PENDING_PAYMENT">待支付</option><option value="PAID">已支付</option><option value="CANCELLED">已取消</option><option value="COMPLETED">已完成</option></select></label>
+          <label className="min-w-36 flex-1 space-y-1 text-xs">
+            <span className="block text-muted-foreground">状态</span>
+            <Select name="status" value={filters.status || "ALL"} onValueChange={(next) => ((v: string) => setFilters((current) => ({ ...current, status: v })))(next && next !== "ALL" ? String(next) : "")} items={ORDER_STATUS_ITEMS}>
+                <SelectTrigger aria-label="状态" className="h-9 w-full text-xs"><SelectValue /></SelectTrigger>
+                <SelectContent>{ORDER_STATUS_ITEMS.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}</SelectContent>
+              </Select>
+          </label>
           <label className="min-w-44 flex-1 space-y-1 text-xs"><span className="block text-muted-foreground">订单编号</span><input value={filters.displayNo} onChange={(event) => setFilters((current) => ({ ...current, displayNo: event.target.value }))} autoComplete="off" className="h-9 w-full rounded border border-border bg-surface-raised px-3 font-mono text-xs" placeholder="精确匹配" /></label>
           <label className="min-w-44 flex-1 space-y-1 text-xs"><span className="block text-muted-foreground">租客稳定 ID</span><input value={filters.renterUserId} onChange={(event) => setFilters((current) => ({ ...current, renterUserId: event.target.value }))} autoComplete="off" className="h-9 w-full rounded border border-border bg-surface-raised px-3 font-mono text-xs" placeholder="不支持姓名/手机号" /></label>
           <label className="min-w-44 flex-1 space-y-1 text-xs"><span className="block text-muted-foreground">号主稳定 ID</span><input value={filters.ownerUserId} onChange={(event) => setFilters((current) => ({ ...current, ownerUserId: event.target.value }))} autoComplete="off" className="h-9 w-full rounded border border-border bg-surface-raised px-3 font-mono text-xs" placeholder="不支持姓名/手机号" /></label>
-          <label className="min-w-44 flex-1 space-y-1 text-xs"><span className="block text-muted-foreground">下单起</span><input type="datetime-local" value={filters.createdFrom} onChange={(event) => setFilters((current) => ({ ...current, createdFrom: event.target.value }))} className="h-9 w-full rounded border border-border bg-surface-raised px-2 text-xs" /></label>
-          <label className="min-w-44 flex-1 space-y-1 text-xs"><span className="block text-muted-foreground">下单止（不含）</span><input type="datetime-local" value={filters.createdTo} onChange={(event) => setFilters((current) => ({ ...current, createdTo: event.target.value }))} className="h-9 w-full rounded border border-border bg-surface-raised px-2 text-xs" /></label>
+          <div className="min-w-44 flex-1"><BeijingDateTimeField label="下单起" value={filters.createdFrom} onChange={(value) => setFilters((current) => ({ ...current, createdFrom: value }))} /></div>
+          <div className="min-w-44 flex-1"><BeijingDateTimeField label="下单止（不含）" value={filters.createdTo} onChange={(value) => setFilters((current) => ({ ...current, createdTo: value }))} /></div>
           <div className="flex gap-2"><Button type="submit" size="sm" loading={loading && items.length === 0}>查询</Button><Button type="button" size="sm" variant="ghost" onClick={reset}>重置</Button></div>
           <p className="basis-full text-[11px] leading-relaxed text-muted-foreground">时间按北京时间解释；下单起包含、下单止不含。订单编号、双方稳定 ID 与下单时间只用于本次查询，不写入地址栏、对象标签或普通日志；关闭标签后需重新输入。</p>
         </form>

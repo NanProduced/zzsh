@@ -125,6 +125,21 @@ test("action preflight mirrors the write rules for boss targets, self targets an
   assert.equal(bossOnSelf("force-logout")?.reasonCode, "SELF_TARGET", "不能撤销自己的会话");
   assert.equal(bossOnSelf("update")?.allowed, true, "本人改自己的显示名仍然允许");
 
+  // 0118：运营持账号维护能力，但不能以自己或 Boss 为目标，也拿不到重置/撤销会话
+  const opsPermissions = new Set(["admin.account.read", "admin.account.create", "admin.account.update", "admin.account.freeze", "admin.account.unfreeze"]);
+  const opsOnSelf = reasonsFor({ actorId: "admin-ops", actorStatus: "ACTIVE", actorIsBoss: false, actorPermissions: opsPermissions, targetId: "admin-ops", targetIsBoss: false, targetStatus: "ACTIVE" });
+  assert.equal(opsOnSelf("update")?.reasonCode, "SELF_TARGET", "非 Boss 不能改自己的账号");
+  assert.equal(opsOnSelf("freeze")?.reasonCode, "SELF_TARGET");
+  const opsOnStaff = reasonsFor({ actorId: "admin-ops", actorStatus: "ACTIVE", actorIsBoss: false, actorPermissions: opsPermissions, targetId: "admin-staff", targetIsBoss: false, targetStatus: "ACTIVE" });
+  assert.equal(opsOnStaff("update")?.allowed, true);
+  assert.equal(opsOnStaff("freeze")?.allowed, true);
+  assert.equal(opsOnStaff("assign")?.reasonCode, "PERMISSION_REQUIRED", "授权仍仅 Boss");
+  assert.equal(opsOnStaff("reset-password")?.reasonCode, "BOSS_ACTOR_REQUIRED");
+  assert.equal(opsOnStaff("reset-2fa")?.reasonCode, "BOSS_ACTOR_REQUIRED");
+  const opsOnBoss = reasonsFor({ actorId: "admin-ops", actorStatus: "ACTIVE", actorIsBoss: false, actorPermissions: opsPermissions, targetId: "admin-boss", targetIsBoss: true, targetStatus: "ACTIVE" });
+  assert.equal(opsOnBoss("update")?.reasonCode, "BOSS_ACTOR_REQUIRED");
+  assert.equal(opsOnBoss("unfreeze")?.reasonCode, "BOSS_ACTOR_REQUIRED");
+
   const bossOnUnfrozen = reasonsFor({ actorId: "admin-boss", actorStatus: "ACTIVE", actorIsBoss: true, actorPermissions: bossPermissions, targetId: "admin-self", targetIsBoss: false, targetStatus: "PENDING_ENROLLMENT" });
   assert.equal(bossOnUnfrozen("unfreeze")?.reasonCode, "NOT_FROZEN");
   assert.equal(bossOnUnfrozen("freeze")?.allowed, true);
@@ -152,7 +167,7 @@ test("assign is the only action that needs a complete grant baseline, and reauth
     targetId: "admin-self", targetIsBoss: false, targetStatus: "ACTIVE",
   });
   assert.deepEqual(table.filter((entry) => entry.needsFullGrantBaseline).map((entry) => entry.action), ["assign"]);
-  assert.deepEqual(table.filter((entry) => entry.needsReauthentication).map((entry) => entry.action).sort(), ["force-logout", "freeze", "unfreeze"]);
+  assert.deepEqual(table.filter((entry) => entry.needsReauthentication).map((entry) => entry.action).sort(), ["force-logout", "freeze", "reset-2fa", "reset-password", "unfreeze"]);
   assert.equal(table.find((entry) => entry.action === "update")?.needsReauthentication, false, "改名不该在普通表单里收密码与动态码");
 });
 
@@ -190,4 +205,47 @@ test("directory list returns avatar and session facts without leaking identifier
   assert.equal(serialized.includes("ipAddress"), false, "列表不得泄漏登录 IP");
   assert.equal(serialized.includes("userAgent"), false, "列表不得泄漏 userAgent");
   assert.equal(/"id":"sess/i.test(serialized), false, "列表不得泄漏会话标识");
+});
+
+test("reset password / 2FA preflight: Boss only, never self, never another Boss, not frozen", () => {
+  const perms = new Set(["admin.account.read"]);
+  const staff = reasonsFor({ actorId: "s", actorStatus: "ACTIVE", actorIsBoss: false, actorPermissions: perms, targetId: "t", targetIsBoss: false, targetStatus: "ACTIVE" });
+  assert.equal(staff("reset-password")?.reasonCode, "BOSS_ACTOR_REQUIRED");
+  assert.equal(staff("reset-2fa")?.reasonCode, "BOSS_ACTOR_REQUIRED");
+  const boss = reasonsFor({ actorId: "b", actorStatus: "ACTIVE", actorIsBoss: true, actorPermissions: perms, targetId: "t", targetIsBoss: false, targetStatus: "ACTIVE" });
+  assert.equal(boss("reset-password")?.allowed, true);
+  assert.equal(boss("reset-2fa")?.allowed, true);
+  const bossOnBoss = reasonsFor({ actorId: "b", actorStatus: "ACTIVE", actorIsBoss: true, actorPermissions: perms, targetId: "b2", targetIsBoss: true, targetStatus: "ACTIVE" });
+  assert.equal(bossOnBoss("reset-password")?.reasonCode, "BOSS_TARGET_NOT_CONFIGURABLE");
+  const self = reasonsFor({ actorId: "b", actorStatus: "ACTIVE", actorIsBoss: true, actorPermissions: perms, targetId: "b", targetIsBoss: false, targetStatus: "ACTIVE" });
+  assert.equal(self("reset-2fa")?.reasonCode, "SELF_TARGET");
+  const frozen = reasonsFor({ actorId: "b", actorStatus: "ACTIVE", actorIsBoss: true, actorPermissions: perms, targetId: "t", targetIsBoss: false, targetStatus: "FROZEN" });
+  assert.equal(frozen("reset-password")?.reasonCode, "TARGET_FROZEN");
+});
+
+test("operations may create an ungranted administrator, but legacy governance grants cannot attach a role", async () => {
+  const make = () => {
+    const writes: string[] = [];
+    const client = { release() {}, async query(sql: string, args: unknown[] = []) {
+      if (/^(INSERT|UPDATE|DELETE)/.test(sql)) writes.push(sql);
+      if (sql.includes('"game_scope_mode"')) return { rows: [{ mode: "ALL_GAMES", gameIds: [] }] };
+      if (sql.includes('FROM "zzsh_iam"."admin_security"')) return { rows: [{ status: "ACTIVE", isBoss: false, passwordChangeRequired: false }] };
+      if (sql.startsWith("WITH role_permissions")) return { rows: ["admin.account.create", "admin.permission.grant", "approval.template.configure"].map(permissionCode => ({ permissionCode })) };
+      if (sql.includes('SELECT "id", "status" FROM "zzsh_iam"."admin_role"')) return { rows: (args[0] as string[]).map(id => ({ id, status: "ACTIVE" })) };
+      if (sql.includes('SELECT DISTINCT "permission_code"')) return { rows: [{ permissionCode: "approval.template.configure" }] };
+      if (sql.includes("nextval")) return { rows: [{ value: "99002" }] };
+      return { rows: [], rowCount: 0 };
+    } };
+    return { writes, pool: { connect: async () => client } };
+  };
+  const body = { name: "Operations-created fixture", mode: "ALL_GAMES", roleIds: [] as string[], allowPermissions: [] as string[], denyPermissions: [] as string[] };
+  const plain = make();
+  const created = await createAdministrator({ userId: "ops-actor", sessionId: "fixture-session" } as never, body, "ops-create", { pool: plain.pool, hashPassword: async () => "fixture-hash-only" } as never);
+  assert.equal(created.isBoss, false);
+  assert.equal(created.status, "PENDING_ENROLLMENT");
+  assert.equal(plain.writes.some(sql => sql.includes('INSERT INTO "zzsh_auth_admin"."user"')), true);
+  assert.equal(plain.writes.some(sql => sql.includes('INSERT INTO "zzsh_iam"."admin_user_role"')), false);
+  const attached = make();
+  await assert.rejects(createAdministrator({ userId: "ops-actor", sessionId: "fixture-session" } as never, { ...body, roleIds: ["legacy-role"] }, "ops-create-grants", { pool: attached.pool, hashPassword: async () => "fixture-hash-only" } as never), (error: any) => error.status === 403);
+  assert.deepEqual(attached.writes, [], "the denied attachment fails before account creation");
 });

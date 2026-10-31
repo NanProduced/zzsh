@@ -1,15 +1,21 @@
 import { useState, type FormEvent } from "react";
 import { Icons } from "../components/icons";
 import { Button, PasswordInput, StatusMessage } from "../components/ui-elements";
+import { Checkbox } from "@/components/ui/checkbox";
 import { useAuthTypingImpulse } from "../components/devl/auth-shell";
 import { bumpParticleTypingImpulse } from "../components/devl/particle-field";
+import { AltchaField } from "../components/altcha-field";
 
 type LoginViewProps = {
   identifier: string;
   loading: boolean;
   error?: string;
   onIdentifier: (value: string) => void;
-  onSubmit: (identifier: string, password: string) => void;
+  onSubmit: (identifier: string, password: string, altcha?: string) => void;
+  captchaRequired?: boolean;
+  captchaRound?: number;
+  /** 上一次已完成人机验证但凭据仍错误，且服务端要求新的挑战。 */
+  captchaRetry?: boolean;
   onRecovery: () => void;
 };
 
@@ -20,15 +26,21 @@ export function LoginView({
   onIdentifier,
   onSubmit,
   onRecovery,
+  captchaRequired = false,
+  captchaRound = 0,
+  captchaRetry = false,
 }: LoginViewProps) {
+  const [altcha, setAltcha] = useState<string | undefined>(undefined);
   const [password, setPassword] = useState("");
-  const [remember, setRemember] = useState(true);
+  const [remember, setRemember] = useState(false);
   const typingImpulse = useAuthTypingImpulse();
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (identifier.trim() && password) {
-      onSubmit(identifier.trim(), password);
+    if (identifier.trim() && password && (!captchaRequired || altcha)) {
+      const payload = captchaRequired ? altcha : undefined;
+      setAltcha(undefined);
+      onSubmit(identifier.trim(), password, payload);
     }
   };
 
@@ -91,12 +103,10 @@ export function LoginView({
             htmlFor="remember-account"
             className="inline-flex items-center gap-2 text-xs text-muted-foreground select-none cursor-pointer hover:text-foreground transition-colors"
           >
-            <input
+            <Checkbox
               id="remember-account"
-              type="checkbox"
               checked={remember}
-              onChange={(e) => setRemember(e.target.checked)}
-              className="h-4 w-4 rounded border-border bg-background/60 text-primary accent-sky-500 focus:ring-2 focus:ring-ring/20 focus:ring-offset-0 cursor-pointer transition-colors"
+              onCheckedChange={(checked) => setRemember(checked === true)}
             />
             <span>记住账号</span>
           </label>
@@ -105,12 +115,14 @@ export function LoginView({
           </span>
         </div>
 
+        {captchaRequired ? <AltchaField key={captchaRound} onPayload={setAltcha} hint={captchaRetry ? "请重新完成人机验证。" : "多次登录失败，请先完成人机验证。"} /> : null}
+
         <StatusMessage error={error} />
 
         <Button
           type="submit"
           loading={loading}
-          disabled={!identifier.trim() || !password}
+          disabled={!identifier.trim() || !password || (captchaRequired && !altcha)}
           className="mt-2 h-10 w-full rounded-lg bg-primary font-medium text-primary-foreground shadow-xs transition hover:bg-primary/90 text-sm flex items-center justify-center gap-2"
         >
           <span>登录并验证身份</span>

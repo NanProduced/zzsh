@@ -406,3 +406,23 @@ test("business pool retains idle removal and one persistent listener per physica
   const result = JSON.parse(child.stdout); assert.equal(result.idleRemoved, true); assert.equal(result.physicalClients, 2); assert.equal(result.socketAttempts, 0);
   assert(result.logs.some((row: { event: string }) => row.event === "business_pool_idle_client_error"));
 });
+
+test("0116 throttle ACL skips an old prefix, rejects partial schema, and grants only the complete table set", async () => {
+  const make = (shape: { failures: string | null; locks: string | null; proofs: string | null }) => {
+    const base = fundingAclFixture([false, false]);
+    const pool = { query: async (sql: string, args: unknown[] = []) => sql.includes("to_regclass('zzsh_iam.admin_auth_failure')")
+      ? { rows: [shape] } : base.pool.query(sql, args) } as unknown as Parameters<typeof applyRuntimePrivileges>[0];
+    return { pool, grants: () => base.seen.filter(sql => /GRANT/.test(sql) && sql.includes("admin_auth_failure")) };
+  };
+  const old = make({ failures: null, locks: null, proofs: null });
+  await applyRuntimePrivileges(old.pool, "fixture_runtime");
+  assert.deepEqual(old.grants(), []);
+  const partial = make({ failures: "zzsh_iam.admin_auth_failure", locks: null, proofs: null });
+  await assert.rejects(applyRuntimePrivileges(partial.pool, "fixture_runtime"), /Admin throttle schema is incomplete/);
+  assert.deepEqual(partial.grants(), []);
+  const full = make({ failures: "zzsh_iam.admin_auth_failure", locks: "zzsh_iam.admin_auth_lockout", proofs: "zzsh_iam.admin_auth_captcha_used" });
+  await applyRuntimePrivileges(full.pool, "fixture_runtime");
+  assert.equal(full.grants().length, 1);
+  assert.match(full.grants()[0]!, /GRANT USAGE ON SEQUENCE zzsh_iam.admin_auth_failure_id_seq TO "fixture_runtime"/);
+  assert.match(full.grants()[0]!, /GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE zzsh_iam.admin_auth_lockout/);
+});

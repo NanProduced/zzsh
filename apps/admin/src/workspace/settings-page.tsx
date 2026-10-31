@@ -9,7 +9,7 @@ import { RecoveryView } from "../views/recovery-view";
 import { ProfileView } from "../views/self-settings/profile-view";
 import { SessionsView } from "../views/self-settings/sessions-view";
 import { ActivityView } from "../views/self-settings/activity-view";
-import { readProfile, readSessions, readSecurityActivity } from "../views/self-settings/self-settings-api";
+import { readProfile, readSessions, readSecurityActivity, revokeOtherSessions, revokeSession } from "../views/self-settings/self-settings-api";
 import type { SessionSnapshot } from "../api";
 import { isLocalSettingsPreview } from "./settings-preview";
 import type { settingsPreviewData } from "./settings-preview-data";
@@ -34,8 +34,8 @@ type Props = ComponentProps<typeof SettingsView> & {
   onQueryChange: (query: Record<string, string>) => void;
 };
 
-// 本人资料改名与本人其他设备注销尚未开放：精确说明只读范围，不宣称读取未接通。
-const WRITE_DISABLED = "个人资料和设备记录仅供查看。";
+// 本人资料改名尚未开放：精确说明只读范围，不宣称读取未接通。
+const WRITE_DISABLED = "个人资料仅供查看。";
 
 export function SettingsWorkspace(props: Props) {
   const { query, snapshot, onOpenPath, onDirtyChange, onQueryChange } = props;
@@ -85,7 +85,8 @@ export function SettingsWorkspace(props: Props) {
   else if (section === "profile") content = <ProfileView {...common}
     load={preview ? examples!.readProfile : readProfile} writeDisabledReason={WRITE_DISABLED} />;
   else if (section === "sessions") content = <SessionsView {...common}
-    load={preview ? examples!.readSessions : readSessions} writeDisabledReason={WRITE_DISABLED} />;
+    load={preview ? examples!.readSessions : readSessions}
+    {...(preview ? { writeDisabledReason: "示例布局不会注销任何真实会话。" } : { revokeSession, revokeOtherSessions })} />;
   else content = <ActivityView {...common}
     load={preview ? examples!.readActivity : readSecurityActivity}
     initialQuery={query} onQueryChange={(values) => onQueryChange({ ...query, ...values })} />;

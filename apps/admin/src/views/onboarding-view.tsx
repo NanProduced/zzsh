@@ -2,6 +2,7 @@ import { useState, useEffect, type FormEvent } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import { Icons } from "../components/icons";
 import { Button, PasswordInput, StatusMessage } from "../components/ui-elements";
+import { Checkbox } from "@/components/ui/checkbox";
 import { readTotpSecret } from "../api";
 import { useAuthTypingImpulse } from "../components/devl/auth-shell";
 import { bumpParticleTypingImpulse } from "../components/devl/particle-field";
@@ -366,11 +367,9 @@ export function OnboardingView({
           </div>
 
           <label className="mt-5 flex items-center gap-2.5 text-xs text-foreground cursor-pointer select-none">
-            <input
-              type="checkbox"
+            <Checkbox
               checked={backupSaved}
-              onChange={(e) => setBackupSaved(e.target.checked)}
-              className="h-4 w-4 rounded border-border text-primary focus:ring-ring"
+              onCheckedChange={(checked) => setBackupSaved(checked === true)}
             />
             <span>我已完整保存上述 10 枚紧急恢复码，并知晓其重要性</span>
           </label>

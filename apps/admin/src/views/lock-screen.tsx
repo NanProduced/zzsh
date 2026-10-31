@@ -1,3 +1,4 @@
+import { StepUpCaptcha } from "../components/altcha-field";
 import { useState, useEffect, useRef, type FormEvent } from "react";
 import { Icons } from "../components/icons";
 import { Button, PasswordInput, StatusMessage } from "../components/ui-elements";
@@ -194,6 +195,7 @@ export function LockScreen({
             </div>
           )}
 
+          <StepUpCaptcha />
           <StatusMessage error={error} />
 
           <Button

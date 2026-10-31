@@ -346,7 +346,11 @@ test("requires distinct auth secrets and secure production cookies", () => {
     () => loadAuthRuntimeConfig({ ...authEnv, NODE_ENV: "production" }),
     (error: unknown) => error instanceof ConfigurationError && /AUTH_SECURE_COOKIES/.test(error.message),
   );
-  assert.equal(loadAuthRuntimeConfig({ ...authEnv, NODE_ENV: "production", AUTH_SECURE_COOKIES: "true" }).secureCookies, true);
+  assert.throws(
+    () => loadAuthRuntimeConfig({ ...authEnv, NODE_ENV: "production", AUTH_SECURE_COOKIES: "true" }),
+    (error: unknown) => error instanceof ConfigurationError && /ADMIN_ALTCHA_HMAC_KEY/.test(error.message),
+  );
+  assert.equal(loadAuthRuntimeConfig({ ...authEnv, NODE_ENV: "production", AUTH_SECURE_COOKIES: "true", ADMIN_ALTCHA_HMAC_KEY: "h".repeat(32) }).secureCookies, true);
 });
 
 

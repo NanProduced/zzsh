@@ -75,7 +75,7 @@ test("试算面板 SSR：真实 quotePreview 响应 → C/B/租客比例/P 与�
   assert.match(html, /价差 P 12 万哈夫币\/元/);
   assert.match(html, new RegExp(`租客资源金额 ¥${fx.response.quote.resourceTotal.amount.replace(".", "\\.")}`));
   assert.match(html, new RegExp(`号主金额（扣费前） ¥${fx.response.quote.ownerTotal.amount.replace(".", "\\.")}`));
-  assert.match(html, /会员统一总价折扣不在此试算/);
+  assert.match(html, /不含会员折扣/);
   assert.doesNotMatch(html, /租客比例 未返回/);
   const missing = structuredClone(fx.response);
   delete missing.quote.pricingInputs.denominators; delete missing.quote.ownerTotal; missing.quote.pricingInputs.spreadDelta = null;

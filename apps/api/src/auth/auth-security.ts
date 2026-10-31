@@ -1,5 +1,5 @@
 import type { INestApplication } from "@nestjs/common";
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import type { SupplyGateReader } from "../supply/publishing";
 
@@ -32,6 +32,7 @@ import {
   withTransaction,
 } from "./security-core";
 import { handleAdminApprovalRoute } from "./approval-audit";
+import { readAdminLoginTwoFactorRequired } from "./admin-login-two-factor";
 import { handleAdminAuditRoute } from "./admin-audit";
 import {
   changeUserFreezeState,
@@ -41,6 +42,8 @@ import {
 } from "./user-identity";
 import type { ImIdentityIntentRepository, ImIdentityProvisioner } from "../im/identity-lifecycle";
 import { assertAdminCommandAuthorizedInTransaction } from "./admin-auth-session";
+import { ADMIN_BRUTE_FORCE_POLICY, ADMIN_CAPTCHA_REQUIRED_REASON, adminAuthSubjects, clearAdminAuthFailures, gateAdminAuth, recordAdminAuthFailure, type AdminBruteForce } from "./admin-brute-force";
+import { resolveAdminClientIp } from "./admin-client-ip";
 import {
   AdminSecurityCommandError,
   adminSecurityCommandFingerprint,
@@ -149,6 +152,8 @@ export type AuthSecurityOptions = {
   verifyPassword: PasswordVerifier;
   /** HKDF 派生的命令指纹子密钥；缺省时本人安全命令退化为无命令身份（旧行为）。 */
   adminSecurityCommandKey?: Buffer;
+  /** 管理员防爆破（共享存储 + ALTCHA）；缺省时仅保留进程内限流（旧行为，测试用）。 */
+  adminBruteForce?: AdminBruteForce;
   rateLimitState: Map<string, { failures: number; resetAt: number }>;
   securityVerificationBudget: { inFlight: number };
   realNameProvider: RealNameProvider;
@@ -482,7 +487,7 @@ export type AdminSessionSnapshot =
       authenticated: true;
       adminUserId: string;
       user: { name?: string; email?: string; username?: string; displayUsername?: string; twoFactorEnabled: boolean };
-      security: { status: AdminContext["security"]["status"]; isBoss: boolean; passwordChangeRequired: boolean };
+      security: { status: AdminContext["security"]["status"]; isBoss: boolean; passwordChangeRequired: boolean; loginTwoFactorRequired?: boolean };
       session: { id: string; locked: boolean; pinConfigured: boolean; createdAt: string | null; expiresAt: string | null };
       permissions: string[];
     };
@@ -491,6 +496,25 @@ function isoDate(value: unknown): string | null {
   if (value instanceof Date) return value.toISOString();
   if (typeof value === "string") return value;
   return null;
+}
+
+let adminSessionLastActiveUnavailable = false;
+
+/**
+ * 最近活跃时间节流写入（≥5 分钟才更新一次）。列来自迁移 0119：未应用（42703）后本进程不再尝试；
+ * 任何失败都吞掉，绝不影响会话快照与登录。
+ */
+async function touchAdminSessionLastActive(pool: Pool, sessionId: string): Promise<void> {
+  if (adminSessionLastActiveUnavailable) return;
+  try {
+    await pool.query(
+      `UPDATE "zzsh_auth_admin"."session" SET "last_active_at" = clock_timestamp()
+        WHERE "id" = $1 AND ("last_active_at" IS NULL OR "last_active_at" < clock_timestamp() - interval '5 minutes')`,
+      [sessionId],
+    );
+  } catch (error) {
+    if ((error as { code?: unknown }).code === "42703") adminSessionLastActiveUnavailable = true;
+  }
 }
 
 export async function getAdminSessionSnapshot(headers: Headers, options: AuthSecurityOptions): Promise<AdminSessionSnapshot> {
@@ -508,7 +532,9 @@ export async function getAdminSessionSnapshot(headers: Headers, options: AuthSec
     `SELECT "pinHash" IS NOT NULL AS "pinConfigured" FROM "zzsh_auth_admin"."session" WHERE "id" = $1`,
     [sessionId],
   );
+  await touchAdminSessionLastActive(options.pool, sessionId);
   const access = await loadEffectiveAdminAccess(options.pool, userId);
+  const loginTwoFactorRequired = await readAdminLoginTwoFactorRequired(options.pool, userId);
   return {
     authenticated: true,
     adminUserId: userId,
@@ -519,7 +545,7 @@ export async function getAdminSessionSnapshot(headers: Headers, options: AuthSec
       ...(current.user?.displayUsername ? { displayUsername: current.user.displayUsername } : {}),
       twoFactorEnabled: current.user?.twoFactorEnabled === true,
     },
-    security: { status: security.status, isBoss: security.isBoss, passwordChangeRequired: security.passwordChangeRequired },
+    security: { status: security.status, isBoss: security.isBoss, passwordChangeRequired: security.passwordChangeRequired, ...(loginTwoFactorRequired === undefined ? {} : { loginTwoFactorRequired }) },
     session: {
       id: sessionId,
       locked: current.session?.locked === true,
@@ -703,7 +729,11 @@ async function verifyAdminReauthentication(
   if (!/^\d{6}$/.test(code)) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Two-factor code is invalid");
   const key = rateLimitKey(request, "admin.reauthentication", context.userId);
   checkRateLimit(options, key);
+  const bf = options.adminBruteForce;
+  const subjects = bf ? adminAuthSubjects(`admin:${context.userId}`, resolveAdminClientIp(request as unknown as Parameters<typeof resolveAdminClientIp>[0], bf.clientIp)) : [];
+  if (bf) await gateAdminAuth(bf, "step-up", subjects, { required: true, payload: body.altcha });
   const releaseVerificationBudget = acquireSecurityVerificationBudget(options);
+  let verified = false;
   try {
     if (!options.adminAuth.api.verifyPassword || !options.adminAuth.api.verifyTOTP) throw new Error("reauthentication API unavailable");
     const verifiedPassword = await options.adminAuth.api.verifyPassword({ body: { password }, headers: context.credentials.headers });
@@ -712,12 +742,24 @@ async function verifyAdminReauthentication(
       throw new Error("reauthentication rejected");
     }
     clearRateLimit(options, key);
+    verified = true;
   } catch {
     recordRateLimitFailure(options, key);
-    throw new SecurityApiError(401, API_V1_ERROR_CODES.UNAUTHENTICATED, "Password and two-factor verification are required");
   } finally {
     releaseVerificationBudget();
   }
+  if (verified) {
+    if (bf) await clearAdminAuthFailures(bf, "step-up", subjects);
+    return;
+  }
+  if (bf) {
+    const failure = await recordAdminAuthFailure(bf, "step-up", subjects, ensureApiV1RequestId(request));
+    if (!failure || failure.lockedUntil) throw new SecurityApiError(429, API_V1_ERROR_CODES.RATE_LIMITED, "尝试次数过多，请稍后再试");
+    if (failure.failures >= ADMIN_BRUTE_FORCE_POLICY.captchaThreshold) {
+      throw Object.assign(new SecurityApiError(401, API_V1_ERROR_CODES.UNAUTHENTICATED, "Password and two-factor verification are required"), { reason: ADMIN_CAPTCHA_REQUIRED_REASON });
+    }
+  }
+  throw new SecurityApiError(401, API_V1_ERROR_CODES.UNAUTHENTICATED, "Password and two-factor verification are required");
 }
 
 async function bootstrapAdmin(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
@@ -1092,7 +1134,7 @@ async function changeAdminFreezeState(request: NodeRequest, response: NodeRespon
   const targetAdminId = stringField(body, "targetAdminId", 128);
   const reason = reasonField(body);
   await verifyAdminReauthentication(request, context, body, options);
-  if (targetAdminId === context.userId) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "A boss cannot change its own availability");
+  if (targetAdminId === context.userId) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "An administrator cannot change its own availability");
   const result = await withTransaction(options.pool, async (client) => {
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
     // Freeze lock order: actor security -> actor roles -> target security -> target user -> recovery requests -> sessions.
@@ -1155,6 +1197,194 @@ async function changeUserAccountFreezeState(request: NodeRequest, response: Node
     revokedSessions: result.revokedSessions,
     revokedVerifications: result.revokedVerifications,
     message: next === "FROZEN" ? "用户账号已冻结，全部会话已下线。" : "用户账号已解冻；旧会话不会复活，请让用户重新登录。",
+  }, requestId);
+}
+
+/**
+ * 本人自助设置「登录时验证 2FA」。开或关都要求当场再验证密码与动态码，并写入前后审计。
+ * 仅影响登录挑战；敏感操作的再验证仍要求动态码。账号必须已绑定 2FA（readAdminContext 默认要求）。
+ */
+async function changeLoginTwoFactorPreference(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
+  const context = await readAdminContext(request, options);
+  const body = bodyOf(request);
+  if (typeof body.enabled !== "boolean") throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "enabled must be a boolean");
+  const enabled = body.enabled;
+  await verifyAdminReauthentication(request, context, body, options);
+  const result = await withTransaction(options.pool, async (client) => {
+    await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
+    const actor = await lockActor(client, context.userId);
+    if (actor.status !== "ACTIVE") throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Administrator is not active");
+    const before = await client.query<{ required: boolean }>(
+      `SELECT "login_two_factor_required" AS "required" FROM "zzsh_iam"."admin_security" WHERE "admin_user_id" = $1 FOR UPDATE`,
+      [context.userId],
+    );
+    const previous = before.rows[0]?.required;
+    if (typeof previous !== "boolean") throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Login two-factor preference is unavailable");
+    if (previous !== enabled) {
+      await client.query(`UPDATE "zzsh_iam"."admin_security" SET "login_two_factor_required" = $1, "updated_at" = clock_timestamp() WHERE "admin_user_id" = $2`, [enabled, context.userId]);
+    }
+    await recordAudit(client, {
+      actorType: "admin",
+      actorId: context.userId,
+      sessionId: context.sessionId,
+      action: "admin.login_two_factor.changed",
+      objectType: "admin_security",
+      objectId: context.userId,
+      outcome: "SUCCESS",
+      requestId,
+      details: { before: { loginTwoFactorRequired: previous }, after: { loginTwoFactorRequired: enabled }, isBoss: actor.isBoss },
+    });
+    return { loginTwoFactorRequired: enabled, changed: previous !== enabled };
+  });
+  sendSuccess(response, {
+    ...result,
+    message: enabled ? "已开启：登录时需要验证 2FA。" : "已关闭：登录时只需密码。敏感操作仍需验证 2FA。",
+  }, requestId);
+}
+
+const SELF_SESSION_REVOKE_MAX = 50;
+
+/**
+ * 本人注销其他会话（单条或「退出其他设备」固定集合）。
+ * - 当前会话受保护（409），只删除本人名下、未过期、且在本次确认集合内的会话；
+ * - 与其他敏感动作一致：当场验证本人密码与动态码（step-up）；
+ * - 写入 admin.self.sessions.revoked 审计（scope + 实际注销数）。
+ */
+async function revokeSelfSessions(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
+  const context = await readAdminContext(request, options);
+  const body = bodyOf(request);
+  const scope = body.scope === "one" || body.scope === "others" ? body.scope : undefined;
+  const ids = Array.isArray(body.sessionIds) ? body.sessionIds : undefined;
+  if (
+    !scope || !ids || ids.length === 0 || ids.length > SELF_SESSION_REVOKE_MAX
+    || ids.some((id) => typeof id !== "string" || id.length === 0 || id.length > 128)
+    || new Set(ids).size !== ids.length || (scope === "one" && ids.length !== 1)
+  ) {
+    throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Session selection is invalid");
+  }
+  if (ids.includes(context.sessionId)) throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Current session is protected");
+  await verifyAdminReauthentication(request, context, body, options);
+  const revokedSessionCount = await withTransaction(options.pool, async (client) => {
+    await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
+    const actor = await lockActor(client, context.userId);
+    if (actor.status !== "ACTIVE") throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Administrator is not active");
+    const deleted = await client.query(
+      `DELETE FROM "zzsh_auth_admin"."session" WHERE "userId" = $1 AND "id" = ANY($2::text[]) AND "id" <> $3 AND "expiresAt" > clock_timestamp()`,
+      [context.userId, ids, context.sessionId],
+    );
+    const count = deleted.rowCount ?? 0;
+    if (scope === "one" && count === 0) throw new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Session not found");
+    await recordAudit(client, {
+      actorType: "admin",
+      actorId: context.userId,
+      sessionId: context.sessionId,
+      action: "admin.self.sessions.revoked",
+      objectType: "admin_user",
+      objectId: context.userId,
+      outcome: "SUCCESS",
+      requestId,
+      details: { scope, requestedSessionCount: ids.length, revokedSessionCount: count },
+    });
+    return count;
+  });
+  sendSuccess(response, { status: true, revokedSessionCount }, requestId);
+}
+
+const ADMIN_CREDENTIAL_RESET_TTL = "7 days";
+
+/**
+ * Boss 为其他非 Boss 管理员重置密码或 2FA。
+ * - 仅 Boss（requireBoss + 事务内 lockActor 复核），发起方当场再验证密码与动态码；
+ * - 不能重置自己，不能重置另一位 Boss，冻结账号需先解冻；
+ * - 重置密码：签发一次性临时密码（仅本次响应返回），下次登录强制改密；
+ * - 重置 2FA：清除绑定，下次登录必须重新绑定；
+ * - 两者都会撤销目标全部会话与未完成登录挑战，并写入前后状态审计。
+ */
+async function resetAdminCredential(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions, kind: "password" | "two_factor"): Promise<void> {
+  const context = await readAdminContext(request, options);
+  await requireBoss(context, options);
+  const body = bodyOf(request);
+  const targetAdminId = stringField(body, "targetAdminId", 128);
+  const reason = reasonField(body);
+  await verifyAdminReauthentication(request, context, body, options);
+  if (targetAdminId === context.userId) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "An administrator cannot reset its own credentials here");
+  const temporaryPassword = kind === "password" ? randomBytes(18).toString("base64url") : null;
+  const passwordHash = temporaryPassword ? await options.hashPassword(temporaryPassword) : null;
+  const result = await withTransaction(options.pool, async (client) => {
+    await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
+    const actor = await lockActor(client, context.userId);
+    if (!actor.isBoss) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Boss permission required");
+    const account = await client.query<{ id: string }>(`SELECT "id" FROM "zzsh_auth_admin"."account" WHERE "userId" = $1 AND "providerId" = 'credential' FOR UPDATE`, [targetAdminId]);
+    const target = await client.query<{ status: AdminContext["security"]["status"]; isBoss: boolean; passwordChangeRequired: boolean }>(
+      `SELECT "status", "is_boss" AS "isBoss", "password_change_required" AS "passwordChangeRequired"
+         FROM "zzsh_iam"."admin_security" WHERE "admin_user_id" = $1 FOR UPDATE`,
+      [targetAdminId],
+    );
+    const before = target.rows[0];
+    if (!before) throw new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Administrator not found");
+    if (before.isBoss) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Boss credentials cannot be reset by this operation");
+    if (before.status === "FROZEN") throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Frozen administrator must be unfrozen first");
+    const targetUser = await client.query<{ username: string | null; name: string; email: string; phoneNumber: string | null; twoFactorEnabled: boolean }>(
+      `SELECT "username", "name", "email", "phoneNumber", "twoFactorEnabled" FROM "zzsh_auth_admin"."user" WHERE "id" = $1 FOR UPDATE`,
+      [targetAdminId],
+    );
+    const user = targetUser.rows[0];
+    if (!user) throw new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Administrator not found");
+    if (kind === "password") {
+      if (!account.rows[0]) throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Administrator credential is unavailable");
+      await client.query(`UPDATE "zzsh_auth_admin"."account" SET "password" = $1, "updatedAt" = clock_timestamp() WHERE "id" = $2`, [passwordHash, account.rows[0].id]);
+    } else {
+      await client.query(`DELETE FROM "zzsh_auth_admin"."twoFactor" WHERE "userId" = $1`, [targetAdminId]);
+      await client.query(`UPDATE "zzsh_auth_admin"."user" SET "twoFactorEnabled" = false, "updatedAt" = clock_timestamp() WHERE "id" = $1`, [targetAdminId]);
+    }
+    const passwordChangeRequired = kind === "password" ? true : before.passwordChangeRequired;
+    await client.query(`UPDATE "zzsh_iam"."admin_security"
+       SET "status" = 'PENDING_ENROLLMENT', "password_change_required" = $1,
+           "bootstrap_expires_at" = clock_timestamp() + $2::interval, "bootstrap_used_at" = NULL, "updated_at" = clock_timestamp()
+       WHERE "admin_user_id" = $3`, [passwordChangeRequired, ADMIN_CREDENTIAL_RESET_TTL, targetAdminId]);
+    const identifiers = [targetAdminId, user.email, user.phoneNumber].filter((value): value is string => Boolean(value));
+    const sessions = await client.query(`DELETE FROM "zzsh_auth_admin"."session" WHERE "userId" = $1`, [targetAdminId]);
+    const challenges = await client.query(
+      `WITH target_challenges AS (
+         SELECT "identifier" FROM "zzsh_auth_admin"."verification" WHERE "value" = $1
+       )
+       DELETE FROM "zzsh_auth_admin"."verification" AS verification
+        WHERE verification."value" = $1
+           OR verification."identifier" = ANY($2::text[])
+           OR verification."identifier" IN (
+             SELECT '2fa-attempts-' || "identifier" FROM target_challenges
+           )`,
+      [targetAdminId, identifiers],
+    );
+    const twoFactorEnabledAfter = kind === "two_factor" ? false : user.twoFactorEnabled;
+    await recordAudit(client, {
+      actorType: "admin",
+      actorId: context.userId,
+      sessionId: context.sessionId,
+      action: kind === "password" ? "admin.password.reset" : "admin.two_factor.reset",
+      objectType: "admin_user",
+      objectId: targetAdminId,
+      outcome: "SUCCESS",
+      reason,
+      requestId,
+      details: {
+        before: { status: before.status, passwordChangeRequired: before.passwordChangeRequired, twoFactorEnabled: user.twoFactorEnabled },
+        after: { status: "PENDING_ENROLLMENT", passwordChangeRequired, twoFactorEnabled: twoFactorEnabledAfter },
+        revokedSessions: sessions.rowCount,
+        revokedChallenges: challenges.rowCount,
+      },
+    });
+    return { id: targetAdminId, username: user.username ?? targetAdminId, name: user.name, revokedSessions: sessions.rowCount, revokedChallenges: challenges.rowCount };
+  });
+  sendSuccess(response, {
+    status: kind === "password" ? "PASSWORD_RESET" : "TWO_FACTOR_RESET",
+    target: { id: result.id, username: result.username, name: result.name, accountStatus: "PENDING_ENROLLMENT" },
+    ...(temporaryPassword ? { temporaryPassword } : {}),
+    revokedSessions: result.revokedSessions,
+    revokedChallenges: result.revokedChallenges,
+    message: kind === "password"
+      ? "已签发一次性临时密码，仅显示这一次；对方下次登录需改密。其全部会话已撤销。"
+      : "已清除对方的 2FA 绑定，下次登录需重新绑定。其全部会话已撤销。",
   }, requestId);
 }
 
@@ -1354,6 +1584,9 @@ async function requestRecovery(request: NodeRequest, response: NodeResponse, req
   const recoveryTokenDigest = recoveryTokenHash(targetRecoveryCredential);
   const rateKey = rateLimitKey(request, "admin.recovery.request", targetAdminIdInput ?? usernameInput);
   checkRateLimit(options, rateKey);
+  const bf = options.adminBruteForce;
+  const subjects = bf ? adminAuthSubjects(`recovery:${targetAdminIdInput ?? usernameInput}`, resolveAdminClientIp(request as unknown as Parameters<typeof resolveAdminClientIp>[0], bf.clientIp)) : [];
+  if (bf) await gateAdminAuth(bf, "recovery", subjects, { required: false, payload: undefined });
   const releaseVerificationBudget = acquireSecurityVerificationBudget(options);
   let result: { recoveryRequestId: string; status: "PENDING"; target: { username: string; name: string } };
   try {
@@ -1405,7 +1638,13 @@ async function requestRecovery(request: NodeRequest, response: NodeResponse, req
     });
     clearRateLimit(options, rateKey);
   } catch (error) {
-    if (error instanceof SecurityApiError && error.status === 401) recordRateLimitFailure(options, rateKey);
+    if (error instanceof SecurityApiError && error.status === 401) {
+      recordRateLimitFailure(options, rateKey);
+      if (bf) {
+        const failure = await recordAdminAuthFailure(bf, "recovery", subjects, requestId);
+        if (!failure || failure.lockedUntil) throw new SecurityApiError(429, API_V1_ERROR_CODES.RATE_LIMITED, "尝试次数过多，请稍后再试");
+      }
+    }
     throw error;
   } finally {
     releaseVerificationBudget();
@@ -1605,6 +1844,8 @@ async function readSecurityOperation(request: NodeRequest, response: NodeRespons
   sendSuccess(response, await readAdminSecurityCommandReceipt(options.pool, context.userId, commandId), requestId);
 }
 
+const APPROVAL_STEP_UP_PATHS = new Set(["/approvals/requests/decision", "/approvals/requests/execute", "/approvals/requests/withdraw"]);
+
 export async function handleAdminSecurity(request: AuthSecurityNodeRequest, response: AuthSecurityNodeResponse, options: AuthSecurityOptions): Promise<void> {
   const requestId = ensureApiV1RequestId(request);
   response.setHeader("X-Request-Id", requestId);
@@ -1614,9 +1855,36 @@ export async function handleAdminSecurity(request: AuthSecurityNodeRequest, resp
   }
   try {
     const path = routePath(request, "/api/v1/admin/security");
-    if (path.startsWith("/approvals")) return await handleAdminApprovalRoute(request, response, requestId, options, readAdminContext);
-    if (path.startsWith("/audit")) return await handleAdminAuditRoute(request, response, requestId, options, readAdminContext);
+    if (path.startsWith("/approvals")) {
+      if (request.method === "POST" && APPROVAL_STEP_UP_PATHS.has(path)) {
+        // 审批决定、执行与撤回均为高风险写：先实时复核密码 + TOTP（失败累计后要求 ALTCHA），再剥离复核字段交给审批路由的严格字段校验。
+        const context = await readAdminContext(request, options);
+        const body = bodyOf(request);
+        await verifyAdminReauthentication(request, context, body, options);
+        for (const key of ["password", "totpCode", "altcha"]) delete body[key];
+      }
+      return await handleAdminApprovalRoute(request, response, requestId, options, readAdminContext);
+    }
+    if (path.startsWith("/audit")) {
+      if (request.method === "POST" && path === "/audit/purge") {
+        // 日志清理为不可逆高风险写：实时复核密码 + TOTP（必要时 ALTCHA），剥离复核字段后交给清理路由。
+        const context = await readAdminContext(request, options);
+        const body = bodyOf(request);
+        await verifyAdminReauthentication(request, context, body, options);
+        for (const key of ["password", "totpCode", "altcha"]) delete body[key];
+      }
+      return await handleAdminAuditRoute(request, response, requestId, options, readAdminContext);
+    }
     if (request.method === "GET") {
+      if (path === "/captcha/challenge") {
+        if (!options.adminBruteForce) {
+          sendError(response, new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found"), requestId);
+          return;
+        }
+        response.setHeader("Cache-Control", "no-store");
+        sendSuccess(response, await options.adminBruteForce.captcha.challenge(), requestId);
+        return;
+      }
       if (path === "/admins") return await listAdminDirectory(request, response, requestId, options);
       if (path === "/admins/detail") return await readAdminDirectoryDetail(request, response, requestId, options);
       if (path === "/admins/scope") return await readAdminGameScopeRoute(request, response, requestId, options);
@@ -1639,6 +1907,10 @@ export async function handleAdminSecurity(request: AuthSecurityNodeRequest, resp
     if (path === "/freeze") return await changeAdminFreezeState(request, response, requestId, options, "FROZEN");
     if (path === "/unfreeze") return await changeAdminFreezeState(request, response, requestId, options, "ACTIVE");
     if (path === "/admins/force-logout") return await forceLogoutAdmin(request, response, requestId, options);
+    if (path === "/self-sessions/revoke") return await revokeSelfSessions(request, response, requestId, options);
+    if (path === "/login-two-factor") return await changeLoginTwoFactorPreference(request, response, requestId, options);
+    if (path === "/admins/reset-password") return await resetAdminCredential(request, response, requestId, options, "password");
+    if (path === "/admins/reset-2fa") return await resetAdminCredential(request, response, requestId, options, "two_factor");
     if (path === "/users/freeze") return await changeUserAccountFreezeState(request, response, requestId, options, "FROZEN");
     if (path === "/users/unfreeze") return await changeUserAccountFreezeState(request, response, requestId, options, "ACTIVE");
     if (path === "/admins/create") return await handleCreateAdministrator(request, response, requestId, options);

@@ -33,6 +33,7 @@ import {
   type ReadFailure,
 } from "./model";
 import { SettingsNotice, SettingsPageHeader } from "./settings-shell";
+import { ActionFilterCombobox, ActivityTimeline } from "./activity-parts";
 import { cn } from "@/lib/utils";
 
 export type ActivityViewProps = {
@@ -293,47 +294,20 @@ export function ActivityView({
       ) : null}
 
       {coverage && coverage.recordedActions.length > 0 ? (
-        <div className="grid grid-cols-1 items-end gap-3 rounded-xl border border-border bg-surface-raised/40 p-4 sm:grid-cols-[minmax(0,20rem)_auto]">
-          <Field label="事件类型" composite hint="可选值来自服务端声明的覆盖范围，未收录的动作不会出现在此。">
-            <Select
-              value={draftAction || ALL_ACTIONS}
-              onValueChange={(value) => setDraftAction(value === ALL_ACTIONS ? "" : String(value ?? ""))}
-              items={[
-                { value: ALL_ACTIONS, label: "全部" },
-                ...coverage.recordedActions.map((action) => ({ value: action, label: activityFilterLabel(action) })),
-              ]}
-            >
-              <SelectTrigger className="h-9 w-full text-xs focus-visible:outline-none!">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={ALL_ACTIONS}>全部</SelectItem>
-                {coverage.recordedActions.map((action) => (
-                  <SelectItem key={action} value={action}>
-                    {activityFilterLabel(action)}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </Field>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button type="button" size="sm" disabled={loading || !draftChanged} onClick={() => submitAction(draftAction)}>
-              应用筛选
+        <div className="flex flex-wrap items-center gap-2">
+          <ActionFilterCombobox actions={coverage.recordedActions} value={submittedAction} onChange={submitAction} disabled={loading} />
+          {filtersActive ? (
+            <Button type="button" size="sm" variant="ghost" disabled={loading} onClick={() => submitAction("")}>
+              清除筛选
             </Button>
-            {filtersActive ? (
-              <Button type="button" size="sm" variant="ghost" disabled={loading} onClick={() => submitAction("")}>
-                清除筛选
-              </Button>
-            ) : null}
-            {draftChanged ? <span className="text-muted-foreground text-xs">筛选条件已修改，尚未应用。</span> : null}
-          </div>
+          ) : null}
+          {stale ? <Badge variant="warning">旧数据</Badge> : null}
+          <span className="text-muted-foreground ml-auto text-xs">时间为北京时间</span>
         </div>
       ) : null}
 
       {notRecorded.length > 0 ? (
-        <p className="text-muted-foreground text-xs leading-relaxed">
-          覆盖范围披露：{notRecorded.join("、")}没有审计写入，因此本页不存在对应记录，也不做估算。
-        </p>
+        <p className="text-muted-foreground text-[11px]">未纳入记录：{notRecorded.join("、")}</p>
       ) : null}
 
       {loading && !hasLoadedOnce ? (
@@ -367,66 +341,22 @@ export function ActivityView({
 
       {events.length > 0 ? (
         <>
-          <div className="text-muted-foreground flex flex-wrap items-center gap-2 text-xs">
-            <span>第 {page.index + 1} 页</span>
-            <span>· 每页最多 {limit} 条</span>
-            <span>· 时间为北京时间</span>
-            {stale ? <Badge variant="warning">旧数据</Badge> : null}
-            {filtersActive ? <Badge variant="info">已按筛选</Badge> : null}
-          </div>
-          <ol className={cn("divide-border bg-surface-raised/40 divide-y rounded-xl border border-border", loading && "opacity-60")}>
-            {events.map((event) => {
-              const actionLabel = activityActionLabel(event.action);
-              const outcomeLabel = activityOutcomeLabel(event.outcome);
-              const details = activityDetailPhrases(event.details);
-              return (
-                <li key={event.eventId} className="flex flex-col gap-1 p-4 sm:flex-row sm:items-baseline sm:justify-between sm:gap-4">
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-sm font-medium text-foreground">{actionLabel ?? "未识别的事件"}</span>
-                      {actionLabel === null ? <Badge variant="unknown">未识别</Badge> : null}
-                      <span className="text-muted-foreground text-xs">{activityActorPhrase(event.actorKind, event.actorRef)}</span>
-                    </div>
-                    {event.reason ? (
-                      <p className="text-muted-foreground mt-0.5 break-words text-xs leading-relaxed [overflow-wrap:anywhere]">原因：{event.reason}</p>
-                    ) : null}
-                    {details.length > 0 ? (
-                      <p className="text-muted-foreground mt-0.5 break-words text-xs leading-relaxed [overflow-wrap:anywhere]">{details.join(" · ")}</p>
-                    ) : null}
-                  </div>
-                  <div className="flex shrink-0 flex-col gap-0.5 sm:items-end">
-                    {outcomeLabel === null ? (
-                      <Badge variant="unknown">结果未识别：{event.outcome}</Badge>
-                    ) : (
-                      <span className={event.outcome === "FAILURE" ? "text-destructive text-xs" : "text-xs text-foreground"}>{outcomeLabel}</span>
-                    )}
-                    <span className="text-muted-foreground font-mono text-[11px] break-all [overflow-wrap:anywhere]">
-                      {beijingDateTime(event.occurredAt)} · {event.action}
-                    </span>
-                    {event.requestId ? (
-                      <span className="text-muted-foreground font-mono text-[11px] break-all [overflow-wrap:anywhere]">
-                        请求编号 {event.requestId}
-                      </span>
-                    ) : null}
-                  </div>
-                </li>
-              );
-            })}
-          </ol>
-          <div className="flex items-center justify-between gap-2">
-            <Button type="button" size="sm" variant="outline" onClick={goPrev} disabled={loading || page.index === 0}>
-              <ArrowLeftIcon />
-              <span>上一页</span>
-            </Button>
-            <Button type="button" size="sm" variant="outline" onClick={goNext} disabled={loading || !page.nextCursor}>
-              <span>下一页</span>
-              <ArrowRightIcon />
-            </Button>
-          </div>
+          <ActivityTimeline events={events} dimmed={loading} />
+          {page.index > 0 || page.nextCursor ? (
+            <div className="flex items-center justify-between gap-2">
+              <Button type="button" size="sm" variant="ghost" onClick={goPrev} disabled={loading || page.index === 0}>
+                <ArrowLeftIcon />
+                <span>上一页</span>
+              </Button>
+              <span className="text-muted-foreground text-xs">第 {page.index + 1} 页</span>
+              <Button type="button" size="sm" variant="ghost" onClick={goNext} disabled={loading || !page.nextCursor}>
+                <span>下一页</span>
+                <ArrowRightIcon />
+              </Button>
+            </div>
+          ) : null}
         </>
       ) : null}
-
-      {showEndOfFeed ? <EndOfFeed /> : null}
     </div>
   );
 }

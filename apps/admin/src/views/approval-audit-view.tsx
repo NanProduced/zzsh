@@ -3,7 +3,7 @@ import { ClipboardCheck, TriangleAlert } from "lucide-react";
 
 import { Icons } from "../components/icons";
 import { ListPagination } from "../components/admin-list";
-import { formatApprovalDate as formatDate } from "./approval/atoms";
+import { EmptyNote, formatApprovalDate as formatDate, ReadingNote } from "./approval/atoms";
 import { Button, StatusMessage } from "../components/ui-elements";
 import { Badge, InlineStatus } from "../components/ui/badge";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
@@ -57,6 +57,8 @@ type WriteIntent = {
   successMessage: string;
   readback: ReadbackTarget;
   afterPost?: () => void;
+  /** 实时复核凭据（密码 + TOTP）：仅内存携带，不进 sessionStorage 待核对记录。 */
+  stepUp?: { password: string; totpCode: string };
 };
 type RecoveryState = { kind: "unknown" | "readback" | "resolved"; intent: WriteIntent; persisted: boolean; receipt?: RecoveryResult };
 
@@ -65,7 +67,12 @@ const TAB_LABELS: Record<Tab, string> = { pending: "待我处理", mine: "我的
 const ALL = "all";
 
 /** 恢复合同的操作白名单（approval-audit.ts:95-104）。target 型操作必须带申请号，非 target 型不能带。 */
-const TARGET_SCOPED_OPERATIONS = new Set(["approval.request.decide", "approval.request.add_candidate", "approval.request.execute"]);
+/** 政策类发布由服务端固定要求 Boss 审批；模板页只作说明，不改变服务端判定。 */
+const BOSS_FIXED_OPERATIONS = new Set(["distribution.policy.publish", "membership.benefit.policy.publish"]);
+
+const REAUTH_APPROVAL_OPERATIONS = new Set(["approval.request.decide", "approval.request.execute", "approval.request.withdraw"]);
+
+const TARGET_SCOPED_OPERATIONS = new Set(["approval.request.decide", "approval.request.add_candidate", "approval.request.execute", "approval.request.withdraw"]);
 
 /**
  * 已核实有发起入口的业务页（membership-growth-admin-host.tsx:122 政策发布、:128 礼遇发放）。
@@ -632,7 +639,7 @@ export function ApprovalAuditView({
     return detailOk && listOk;
   }, [canRead, canTemplateConfigure, loadCandidateOptions, loadDetail, loadList, loadOperations, loadTemplates]);
 
-  const makeWriteIntent = useCallback((path: string, body: Record<string, unknown>, successMessage: string, readback: ReadbackTarget, afterPost?: () => void): WriteIntent => {
+  const makeWriteIntent = useCallback((path: string, body: Record<string, unknown>, successMessage: string, readback: ReadbackTarget, afterPost?: () => void, stepUp?: { password: string; totpCode: string }): WriteIntent => {
     const operation = APPROVAL_WRITE_PATHS[path] ?? "";
     const targetRequestId = typeof body.requestId === "string" ? body.requestId : null;
     const target = targetRequestId
@@ -655,6 +662,7 @@ export function ApprovalAuditView({
       successMessage,
       readback,
       afterPost,
+      stepUp,
     };
   }, [contextEpoch, contextKey, snapshot.adminUserId, snapshot.session.id]);
 
@@ -699,7 +707,7 @@ export function ApprovalAuditView({
     setMessage(undefined);
     setLoading(true);
     try {
-      await adminRequest(intent.path, intent.body, intent.method, { "idempotency-key": intent.idempotencyKey });
+      await adminRequest(intent.path, intent.stepUp ? { ...intent.body, ...intent.stepUp } : intent.body, intent.method, { "idempotency-key": intent.idempotencyKey });
       if (!isCurrentIntent(intent)) return;
       intent.afterPost?.();
       const readbackOk = await performReadback(intent.readback);
@@ -711,19 +719,19 @@ export function ApprovalAuditView({
       } else {
         // 已受理之后只降级 kind；存储故障保留责任，不改成未提交。
         const downgraded = updatePendingWriteKind(subject, intent.idempotencyKey, "readback");
-        updateRecovery({ kind: "readback", intent, persisted: downgraded?.persisted ?? false });
+        updateRecovery({ kind: "readback", intent: { ...intent, stepUp: undefined }, persisted: downgraded?.persisted ?? false });
         setError(undefined);
         setMessage(`${intent.successMessage} 已成功，最新状态未确认。`, "warning");
       }
     } catch (failure) {
       if (!isCurrentIntent(intent)) return;
       if (isUnknownWriteError(failure)) {
-        updateRecovery({ kind: "unknown", intent, persisted: inspectPending(subject).state === "valid" ? (inspectPending(subject) as { record: PendingApprovalWrite }).record.persisted : false });
+        updateRecovery({ kind: "unknown", intent: { ...intent, stepUp: undefined }, persisted: inspectPending(subject).state === "valid" ? (inspectPending(subject) as { record: PendingApprovalWrite }).record.persisted : false });
         setMessage(undefined);
         setError("请求结果未知：服务端可能已处理；仅可使用原请求重试或查询原结果，不要换新标识重试。");
       } else if (recovering) {
         // 重放被拒只说明这次重放不成立（例如提交后撤权），不能证明第一次写没有发生。
-        updateRecovery({ kind: "unknown", intent, persisted: inspectPending(subject).state === "valid" ? (inspectPending(subject) as { record: PendingApprovalWrite }).record.persisted : false });
+        updateRecovery({ kind: "unknown", intent: { ...intent, stepUp: undefined }, persisted: inspectPending(subject).state === "valid" ? (inspectPending(subject) as { record: PendingApprovalWrite }).record.persisted : false });
         setError(`${friendlyError(failure)} 重放被拒不代表第一次写没有发生；原结果仍未核清。`);
       } else {
         // 首次提交被服务端明确拒绝是终态证据：这笔责任解除。
@@ -739,9 +747,10 @@ export function ApprovalAuditView({
     }
   }, [performReadback]);
 
-  const retryUnknown = () => {
+  const retryUnknown = (stepUp?: { password: string; totpCode: string }) => {
     const current = recoveryRef.current;
-    if (current?.kind === "unknown") void submitWrite(current.intent, true);
+    if (current?.kind !== "unknown" || (REAUTH_APPROVAL_OPERATIONS.has(current.intent.operation) && !stepUp)) return;
+    void submitWrite({ ...current.intent, stepUp }, true);
   };
 
   /** 收起面板不等于核清责任：记录保留，回到原身份/对象时会重新出现。 */
@@ -872,7 +881,7 @@ export function ApprovalAuditView({
     setConfirm({ kind: "template" });
   };
 
-  const decide = (decision: "APPROVE" | "REJECT", reason: string, amendment?: import("./approval/contract").ApprovalDecisionAmendment) => {
+  const decide = (decision: "APPROVE" | "REJECT", reason: string, stepUp: { password: string; totpCode: string }, amendment?: import("./approval/contract").ApprovalDecisionAmendment) => {
     const current = detail;
     if (!current) return;
     const successMessage = decision === "APPROVE"
@@ -883,6 +892,8 @@ export function ApprovalAuditView({
       { requestId: current.requestId, decision, ...(reason ? { reason } : {}), ...(decision === "APPROVE" && amendment ? amendment : {}) },
       successMessage,
       { kind: "detail-and-lists", requestId: current.requestId, keys: objectOnly ? [] : [tab === "pending" ? "pending" : "mine"] },
+      undefined,
+      stepUp,
     ));
   };
 
@@ -897,7 +908,7 @@ export function ApprovalAuditView({
     ));
   };
 
-  const execute = () => {
+  const execute = (stepUp: { password: string; totpCode: string }) => {
     const current = detail;
     if (!current) return;
     void submitWrite(makeWriteIntent(
@@ -905,6 +916,21 @@ export function ApprovalAuditView({
       { requestId: current.requestId },
       "执行结果已单独记录；执行成功不代表业务对象已生效或资金已到账，请以领域结果为准。",
       { kind: "detail-and-lists", requestId: current.requestId, keys: objectOnly ? [] : [tab === "pending" ? "pending" : "mine"] },
+      undefined,
+      stepUp,
+    ));
+  };
+
+  const withdraw = (reason: string, stepUp: { password: string; totpCode: string }) => {
+    const current = detail;
+    if (!current) return;
+    void submitWrite(makeWriteIntent(
+      "/security/approvals/requests/withdraw",
+      { requestId: current.requestId, ...(reason ? { reason } : {}) },
+      "申请已撤回，审批人不能再处理；撤回已写入审计。",
+      { kind: "detail-and-lists", requestId: current.requestId, keys: objectOnly ? [] : [tab === "pending" ? "pending" : "mine"] },
+      undefined,
+      stepUp,
     ));
   };
 
@@ -920,6 +946,8 @@ export function ApprovalAuditView({
   const recoveryPanel = recovery ? (
     <div ref={recoveryPanelElement} tabIndex={-1} aria-label="原结果核对" className="rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring">
     <RecoveryPanel
+      key={`${recovery.intent.sessionId}:${recovery.intent.idempotencyKey}`}
+      requiresStepUp={REAUTH_APPROVAL_OPERATIONS.has(recovery.intent.operation)}
       kind={recovery.kind}
       lookup={lookup}
       busy={loading}
@@ -974,6 +1002,7 @@ export function ApprovalAuditView({
                 onOpenPath={onOpenPath}
                 onDecide={decide}
                 onExecute={execute}
+                onWithdraw={withdraw}
                 onAppend={append}
               />
             </section>
@@ -1051,6 +1080,7 @@ export function ApprovalAuditView({
                 onOpenPath={onOpenPath}
                 onDecide={decide}
                 onExecute={execute}
+                onWithdraw={withdraw}
                 onAppend={append}
               />
             </section>
@@ -1074,7 +1104,7 @@ export function ApprovalAuditView({
               </div>
               <ClipboardCheck size={20} className="text-muted-foreground" aria-hidden />
             </div>
-            {reading.operations ? <p className="mt-4 text-xs text-muted-foreground">正在读取…</p> : null}
+            {reading.operations ? <ReadingNote className="mt-4" /> : null}
             {operations === undefined ? (
               <div className="mt-4">
                 <NotApplicable reason={operationsNote ?? "业务登记读取不可用。"} />
@@ -1173,6 +1203,9 @@ export function ApprovalAuditView({
                           </SelectContent>
                         </Select>
                       )}
+                      {BOSS_FIXED_OPERATIONS.has(operationCode) ? (
+                        <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-muted-foreground"><Badge variant="outline" className="text-[11px]">本类型固定 Boss 审批</Badge>非 Boss 候选人即使列入名单也不能作出决定。</p>
+                      ) : null}
                     </label>
                     <label className="block min-w-0">
                       <FieldLabel>触发条件</FieldLabel>
@@ -1255,8 +1288,8 @@ export function ApprovalAuditView({
                     <p>模板版本只用于新申请；在途申请展示自己的快照版本。</p>
                   </div>
                 </div>
-                {reading.templates ? <p className="mt-4 text-xs text-muted-foreground">正在读取…</p> : null}
-                {!reading.templates && templates.length === 0 ? <p className="mt-4 text-xs text-muted-foreground">暂无模板配置。</p> : null}
+                {reading.templates ? <ReadingNote className="mt-4" /> : null}
+                {!reading.templates && templates.length === 0 ? <EmptyNote className="mt-4" title="暂无模板配置。" /> : null}
                 <div className="table-wrap">
                   <table className="data-table min-w-[760px]">
                     <caption className="sr-only">审批模板列表</caption>
@@ -1274,7 +1307,7 @@ export function ApprovalAuditView({
                         const title = operations?.find((operation) => operation.operationCode === template.operationCode)?.title;
                         return (
                           <tr key={template.id}>
-                            <td>{title ?? <InlineStatus tone="unknown">未登记业务</InlineStatus>}<span className="mt-0.5 block font-mono text-[11px] break-all text-muted-foreground">{template.operationCode}</span></td>
+                            <td>{title ?? <InlineStatus tone="unknown">未登记业务</InlineStatus>}{BOSS_FIXED_OPERATIONS.has(template.operationCode) ? <Badge variant="outline" className="ml-1.5 align-middle text-[11px]">本类型固定 Boss 审批</Badge> : null}<span className="mt-0.5 block font-mono text-[11px] break-all text-muted-foreground">{template.operationCode}</span></td>
                             <td className="font-mono text-[11px] break-all">{template.triggerCondition}</td>
                             <td className="whitespace-nowrap">v{template.version}</td>
                             <td className="whitespace-nowrap">{formatDate(template.updatedAt)}</td>
@@ -1353,7 +1386,7 @@ export function ApprovalAuditView({
             <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
               查询范围：{auditScopeLabel(auditScope)}。审计按时间倒序分页，服务端暂无时间区间筛选；精确追查请用动作、操作者或申请编号。
             </p>
-            {reading.audit ? <p className="mt-4 text-xs text-muted-foreground">正在读取…</p> : null}
+            {reading.audit ? <ReadingNote className="mt-4" /> : null}
             <div className="table-wrap">
               <table className="data-table min-w-[900px]">
                 <caption className="sr-only">审批与授权审计事件</caption>
@@ -1397,7 +1430,7 @@ export function ApprovalAuditView({
                 </tbody>
               </table>
             </div>
-            {!reading.audit && !error && audit.length === 0 ? <p className="mt-4 text-xs text-muted-foreground">暂无符合条件的授权审批审计。</p> : null}
+            {!reading.audit && !error && audit.length === 0 ? <EmptyNote className="mt-4" title="暂无符合条件的授权审批审计。" /> : null}
             <PagePager loadedCount={audit.length} page={pageMeta.audit} busy={Boolean(reading.audit)} onPrev={() => navigate("audit", "prev")} onNext={() => navigate("audit", "next")} onFirst={() => navigate("audit", "first")} />
           </section>
         ) : null}

@@ -695,7 +695,10 @@ test("eligibility covers business permission, game scope and executor assembly",
   const base = { row, userId: CANDIDATE.id, access, twoFactorEnabled: true, gameScope: { mode: "ALL_GAMES" as const, gameIds: [] }, isCandidate: true, testOperationsEnabled: true, executorAssembled: true };
   const reasons = (input: typeof base) => evaluateApprovalActions(input).map((item) => [item.action, item.reasonCode]);
 
-  assert.deepEqual(reasons(base), [["approve", "BUSINESS_PERMISSION_REQUIRED"], ["reject", "BUSINESS_PERMISSION_REQUIRED"], ["execute", "BUSINESS_PERMISSION_REQUIRED"], ["addCandidate", "OUT_OF_REQUEST_SCOPE"], ["replace", "BUSINESS_PERMISSION_REQUIRED"]]);
+  assert.deepEqual(reasons(base), [["approve", "BUSINESS_PERMISSION_REQUIRED"], ["reject", "BUSINESS_PERMISSION_REQUIRED"], ["execute", "BUSINESS_PERMISSION_REQUIRED"], ["addCandidate", "PERMISSION_REQUIRED"], ["replace", "BUSINESS_PERMISSION_REQUIRED"], ["withdraw", "REQUESTER_ONLY"]]);
+
+  const bossAppend = evaluateApprovalActions({ ...base, userId: BOSS.id, access: { ...access, isBoss: true }, row: { ...row, status: "PENDING" } });
+  assert.equal(bossAppend.find((item) => item.action === "addCandidate")?.allowed, true, "Boss may manage candidates without changing the non-Boss object-scope controls below");
 
   const granted = evaluateApprovalActions({ ...base, access: grantedAccess, gameScope: { mode: "SELECTED_GAMES", gameIds: ["game_b"] } });
   assert.equal(granted.find((item) => item.action === "approve")?.reasonCode, "GAME_SCOPE_DENIED");
@@ -714,7 +717,7 @@ test("eligibility covers business permission, game scope and executor assembly",
   assert.equal(settled.find((item) => item.action === "execute")?.reasonCode, "EXECUTION_MODE_SOURCE_BUSINESS");
   assert.equal(settled.find((item) => item.action === "execute")?.executionMode, APPROVAL_EXECUTION_MODE.sourceBusiness);
   assert.equal(settled.find((item) => item.action === "execute")?.nextStepCode, "SOURCE_BUSINESS_COMPLETION_REQUIRED");
-  assert.equal(settled.find((item) => item.action === "addCandidate")?.reasonCode, "OUT_OF_REQUEST_SCOPE");
+  assert.equal(settled.find((item) => item.action === "addCandidate")?.reasonCode, "PERMISSION_REQUIRED", "a legacy Boss-only grant never authorizes a non-Boss");
   assert.equal(settled.find((item) => item.action === "replace")?.reasonCode, "REQUESTER_ONLY");
   assert.throws(() => assertApprovalAction(settled, "execute"), (error: any) => error.status === 409);
 
@@ -833,7 +836,10 @@ test("candidate without an eligible snapshot is explained instead of silently un
   assert.equal(frozenDetail.status, 200, JSON.stringify(frozenDetail.body));
   assert.equal(frozenDetail.body.candidateAvailability.eligible, 0);
   assert.equal(frozenDetail.body.candidateAvailability.blockingReasonCode, "NO_ELIGIBLE_CANDIDATE");
-  assert.ok(frozenDetail.body.actions.some((item: { action: string; reasonCode: string; allowed: boolean }) => item.action === "addCandidate" && item.allowed));
+  assert.ok(frozenDetail.body.actions.some((item: { action: string; reasonCode: string; allowed: boolean }) => item.action === "addCandidate" && !item.allowed && item.reasonCode === "PERMISSION_REQUIRED"));
+  const bossDetail = await call(frozen, BOSS.id, "GET", "/approvals/requests/detail?requestId=approval_req_target");
+  assert.equal(bossDetail.status, 200, JSON.stringify(bossDetail.body));
+  assert.ok(bossDetail.body.actions.some((item: { action: string; allowed: boolean }) => item.action === "addCandidate" && item.allowed));
 });
 
 test("operations and candidate-options reads gate on their own permissions", async () => {
@@ -857,10 +863,12 @@ test("operations and candidate-options reads gate on their own permissions", asy
   assert.equal(options.body.requiredPermission, "approval.template.configure");
 
   const asRequester = await call(view, REQUESTER.id, "GET", "/approvals/candidate-options?requestId=approval_req_target");
-  assert.equal(asRequester.status, 200, JSON.stringify(asRequester.body));
-  assert.equal(asRequester.body.requesterExcluded, true);
-  assert.equal(asRequester.body.candidates.some((item: { username: string }) => item.username === REQUESTER.username), false, "the original requester must never be offered as a self-approver");
-  assert.equal(asRequester.body.requiredPermission, "approval.request.add_approver");
+  assert.equal(asRequester.status, 403, "a requester with a historical add-approver code remains non-Boss");
+  const asBoss = await call(view, BOSS.id, "GET", "/approvals/candidate-options?requestId=approval_req_target");
+  assert.equal(asBoss.status, 200, JSON.stringify(asBoss.body));
+  assert.equal(asBoss.body.requesterExcluded, true);
+  assert.equal(asBoss.body.candidates.some((item: { username: string }) => item.username === REQUESTER.username), false, "the original requester must never be offered as a self-approver");
+  assert.equal(asBoss.body.requiredPermission, "approval.template.configure");
 
   const outsider = await call(view, CANDIDATE.id, "GET", "/approvals/candidate-options?requestId=approval_req_target");
   assert.equal(outsider.status, 403, "only the requester or a Boss may choose additional candidates");
@@ -1011,22 +1019,32 @@ test("R2-3 candidate options and the append write both judge the request context
   });
 
   const missingBusiness = harness(buildFixture(noDecide));
-  const picker = await call(missingBusiness, REQUESTER.id, "GET", "/approvals/candidate-options?requestId=" + grantRow.id);
+  const requesterDenied = await call(missingBusiness, REQUESTER.id, "GET", "/approvals/candidate-options?requestId=" + grantRow.id);
+  assert.equal(requesterDenied.status, 403, "non-Boss requesters cannot regain candidate governance through old grants");
+  const requesterAppend = await call(missingBusiness, REQUESTER.id, "POST", "/approvals/requests/add-candidate", { requestId: grantRow.id, username: noDecide.username, reason: "旧授权不能扩权" }, { "idempotency-key": "idem_requester_append_denied" });
+  assert.equal(requesterAppend.status, 403);
+  const picker = await call(missingBusiness, BOSS.id, "GET", "/approvals/candidate-options?requestId=" + grantRow.id);
   assert.equal(picker.status, 200, JSON.stringify(picker.body));
   assert.equal(picker.body.candidates.some((item: { username: string }) => item.username === noDecide.username), false, "a generic approver without the business decide permission is not choosable for this request");
   assert.equal(picker.body.excludedByReason.BUSINESS_PERMISSION_REQUIRED >= 1, true);
 
-  const appendDenied = await call(missingBusiness, REQUESTER.id, "POST", "/approvals/requests/add-candidate", { requestId: grantRow.id, username: noDecide.username, reason: "试图追加无业务权限者" }, { "idempotency-key": "idem_append_biz" });
+  const appendDenied = await call(missingBusiness, BOSS.id, "POST", "/approvals/requests/add-candidate", { requestId: grantRow.id, username: noDecide.username, reason: "试图追加无业务权限者" }, { "idempotency-key": "idem_append_biz" });
   assert.equal(appendDenied.status, 409, JSON.stringify(appendDenied.body));
   assert.equal(missingBusiness.state.requestCandidates.length, 1, "the append write re-checks the same condition the picker applied");
 
   const wrongScopeView = harness(buildFixture(wrongScope));
-  const scopePicker = await call(wrongScopeView, REQUESTER.id, "GET", "/approvals/candidate-options?requestId=" + grantRow.id);
+  const scopePicker = await call(wrongScopeView, BOSS.id, "GET", "/approvals/candidate-options?requestId=" + grantRow.id);
   assert.equal(scopePicker.body.candidates.some((item: { username: string }) => item.username === wrongScope.username), false, "a decider outside the target game is not choosable for this request");
   assert.equal(scopePicker.body.excludedByReason.GAME_SCOPE_DENIED >= 1, true);
-  const scopeAppend = await call(wrongScopeView, REQUESTER.id, "POST", "/approvals/requests/add-candidate", { requestId: grantRow.id, username: wrongScope.username, reason: "试图追加越范围者" }, { "idempotency-key": "idem_append_scope" });
+  const scopeAppend = await call(wrongScopeView, BOSS.id, "POST", "/approvals/requests/add-candidate", { requestId: grantRow.id, username: wrongScope.username, reason: "试图追加越范围者" }, { "idempotency-key": "idem_append_scope" });
   assert.equal(scopeAppend.status, 409);
   assert.equal(wrongScopeView.state.requestCandidates.length, 1);
+
+  const qualified: FixtureActor = { ...noDecide, id: "admin_qualified", username: "zz00015", permissions: [...noDecide.permissions, "membership.entitlement.decide"] };
+  const qualifiedView = harness(buildFixture(qualified));
+  const appended = await call(qualifiedView, BOSS.id, "POST", "/approvals/requests/add-candidate", { requestId: grantRow.id, username: qualified.username, reason: "Boss 追加有业务资格者" }, { "idempotency-key": "idem_boss_append_qualified" });
+  assert.equal(appended.status, 200, JSON.stringify(appended.body));
+  assert.equal(qualifiedView.state.requestCandidates.length, 2);
 
   const templateLevel = await call(missingBusiness, BOSS.id, "GET", "/approvals/candidate-options");
   assert.equal(templateLevel.status, 200, JSON.stringify(templateLevel.body));
@@ -1310,4 +1328,32 @@ test("policy context can reuse the original request scope with the same transact
   const calls: unknown[][] = [], client = { query: async (sql: string, values: unknown[]) => { assert.match(sql, /requested_by/); assert.match(sql, /approval_request_candidate/); assert.doesNotMatch(sql, /FOR UPDATE|FOR SHARE|INSERT|UPDATE|DELETE/); calls.push(values); return { rows: [{ allowed: true }] }; } } as unknown as PoolClient;
   assert.equal(await requestScope(client, "policy_viewer", "policy_request", false), true); assert.deepEqual(calls, [["policy_viewer", "policy_request"]]);
   assert.equal(await requestScope(client, "boss_viewer", "policy_request", true), true); assert.equal(calls.length, 1, "existing Boss scope does not invent another role or query");
+});
+
+test("withdrawal recovery keeps requester authority without execution rights for pending and source-business requests", async () => {
+  for (const operationCode of ["approval.test.execute", "order.settlement.adjust"]) {
+    const requester: FixtureActor = { ...REQUESTER, permissions: ["approval.request.read"] };
+    const row = requestFixture({ id: "approval_req_withdraw_" + (operationCode === "approval.test.execute" ? "test" : "source"), operationCode,
+      operationPayload: operationCode === "approval.test.execute" ? { outcome: "SUCCESS" } : { orderId: "order_1" }, requestedBy: requester.id });
+    const view = harness(baseFixture({ actors: [BOSS, requester, CANDIDATE], requests: [row], requestCandidates: [{ requestId: row.id, adminUserId: CANDIDATE.id }] }));
+    const key = operationCode === "approval.test.execute" ? "idem_withdraw_test" : "idem_withdraw_source";
+    const first = await call(view, requester.id, "POST", "/approvals/requests/withdraw", { requestId: row.id }, { "idempotency-key": key });
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    assert.equal(first.body.status, "CANCELLED");
+    assert.equal(view.state.requests.get(row.id)?.status, "CANCELLED");
+    assert.deepEqual({ audits: view.state.audits, decisions: view.state.decisions, executions: view.state.executions }, { audits: 1, decisions: 0, executions: 0 });
+    const recoveryPath = "/approvals/recovery?operation=approval.request.withdraw&key=" + key + "&requestId=" + encodeURIComponent(row.id);
+    const receipt = await call(view, requester.id, "GET", recoveryPath);
+    assert.equal(receipt.status, 200, JSON.stringify(receipt.body));
+    assert.equal(receipt.body.knowledge, "KNOWN");
+    assert.equal(receipt.body.receipt.approvalRequestId, row.id);
+    assert.equal(receipt.body.receipt.status, "CANCELLED");
+    const replay = await call(view, requester.id, "POST", "/approvals/requests/withdraw", { requestId: row.id }, { "idempotency-key": key });
+    assert.equal(replay.status, 200, JSON.stringify(replay.body));
+    assert.equal(replay.body.idempotencyReplay, true);
+    assert.equal(view.state.audits, 1, "recovery/replay does not append a second withdrawal audit");
+    const otherCandidate = await call(view, CANDIDATE.id, "GET", recoveryPath);
+    assert.equal(otherCandidate.status, 403, "being a request candidate does not grant the requester's withdrawal receipt");
+    assert.equal(otherCandidate.body.receipt, undefined);
+  }
 });

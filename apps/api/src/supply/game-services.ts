@@ -34,6 +34,17 @@ export function isSupportedGameService(gameCode: string, serviceCode: GameServic
   return CODE_SUPPORTED[gameCode]?.includes(serviceCode) ?? false;
 }
 
+/**
+ * 规则与价目（价格/租期/协议/包赔条款/组合生效）目前只按三角洲（code "delta"）的哈夫币口径建模。
+ * 写入统一入口在解析到 gameId 后调用本函数；未适配的游戏一律拒绝，避免以三角洲口径写入其他游戏。
+ * 后续按游戏抽取后端策略时，以策略注册替换此处判断（见 docs 中的后端游戏策略抽取说明）。
+ */
+export async function assertRulesGameSupported(client: Pool | PoolClient, gameId: string): Promise<void> {
+  const row = (await client.query<{ code: string }>(`SELECT "code" FROM "zzsh_supply"."game" WHERE "id" = $1`, [gameId])).rows[0];
+  if (!row) throw notFound();
+  if (!isSupportedGameService(row.code, GAME_SERVICE.ACCOUNT_RENTAL)) throw unsupportedGameService();
+}
+
 export function unsupportedGameService(): SecurityApiError {
   return new SecurityApiError(409, API_V1_ERROR_CODES.UNSUPPORTED_GAME_SERVICE, "该游戏尚未完成此业务适配");
 }
