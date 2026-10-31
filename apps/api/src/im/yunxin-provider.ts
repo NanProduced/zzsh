@@ -157,6 +157,8 @@ export type YunxinSupportScopeApi = {
   getSupportTeam(teamId: string): Promise<YunxinSupportTeamState | null>;
   findSupportTeam(input: { appId: string; consultationId: string; ownerAccountId: string }): Promise<YunxinSupportTeamLookup>;
   readSupportTeamExistence(input: { appId: string; consultationId: string; ownerAccountId: string; teamId: string }): Promise<YunxinSupportTeamExistenceLookup>;
+  /** Server-side text as the manager or an assigned agent; absent on local fakes that use the in-memory transport. */
+  sendSupportTeamText?(input: { teamId: string; senderAccountId: string; text: string; messageClientId: string }): Promise<void>;
 };
 
 export type YunxinCreateAccountInput = {
@@ -701,6 +703,29 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
     const data = responseData(response);
     const failed = field(data, "failed_list");
     if (Array.isArray(failed) && failed.length > 0) throw new YunxinApiError("add-support-team-member", null, false);
+  }
+
+  async sendSupportTeamText(input: { teamId: string; senderAccountId: string; text: string; messageClientId: string }): Promise<void> {
+    const team = normalizeTeamId(input.teamId);
+    const sender = normalizeAccountId(input.senderAccountId);
+    const text = input.text.trim();
+    if (!text || text.length > 5000 || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(input.messageClientId)) {
+      throw new Error("Invalid support team text");
+    }
+    const conversationId = `${sender}|2|${team}`;
+    const data = responseData(await this.request("send-support-team-text", "POST",
+      `/im/v2/conversations/${encodeURIComponent(conversationId)}/messages`, {
+        message: { message_type: 0, text },
+      }, "", "v2"));
+    const returnedSender = asString(field(data, "sender_id"));
+    const conversationType = asNumber(field(data, "conversation_type"));
+    const messageType = asNumber(field(data, "message_type"));
+    const createTime = asNumber(field(data, "create_time"));
+    if (!returnedSender || normalizeAccountId(returnedSender) !== sender || conversationType !== 2 || messageType !== 0
+      || createTime === undefined || !Number.isFinite(createTime)
+      || (field(data, "receiver_id", "team_id") !== undefined && String(field(data, "receiver_id", "team_id")) !== team)) {
+      throw new YunxinApiError("send-support-team-text", null, false);
+    }
   }
 
   async sendOrderTeamNotice(teamId: string, operatorAccountId: string, routeConfig?: YunxinMessageRouteConfig): Promise<void> {

@@ -56,9 +56,12 @@ export type OrderRow = {
   remindDueAt: string | null;
   addRound: number;
   escalationState: string;
-  cancelReason: "USER" | "TIMEOUT" | "PRESTART_TERMINATED" | null;
+  cancelReason: "USER" | "TIMEOUT" | "PRESTART_TERMINATED" | "MANUAL_CLOSE" | "SUPPORT_CANCELLED_REFUND" | null;
   cancelledAt: string | null;
   createdAt: string;
+  lastMessageAt?: string | null;
+  lastMessagePreview?: string | null;
+  unreadCount?: number;
   revision: string;
   expiredAwaitingCancel: boolean;
   ownerName: string;
@@ -83,11 +86,14 @@ export const ORDER_FIELDS = `
   o.cancel_reason AS "cancelReason",
   CASE WHEN o.cancelled_at IS NULL THEN NULL ELSE to_char(o.cancelled_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') END AS "cancelledAt",
   to_char(o.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "createdAt",
+  act.last_message_at AS "lastMessageAt",
+  act.last_message_preview AS "lastMessagePreview",
   o.revision::text AS "revision",
   (o.status = 'PENDING_PAYMENT' AND o.hold_until <= clock_timestamp()) AS "expiredAwaitingCancel",
   owner_u.name AS "ownerName", renter_u.name AS "renterName"`;
 export const ORDER_FROM = `FROM zzsh_order.rental_order o
   LEFT JOIN zzsh_order.im_order_group g ON g.order_id=o.id
+  LEFT JOIN zzsh_order.im_order_activity act ON act.order_id=o.id
   JOIN zzsh_auth_user."user" owner_u ON owner_u.id = o.owner_user_id
   JOIN zzsh_auth_user."user" renter_u ON renter_u.id = o.renter_user_id`;
 
@@ -122,7 +128,8 @@ export type OrderParty = "renter" | "owner" | "admin";
 
 export function orderHasPaidState(status: string, cancelReason?: string | null): boolean {
   return status === ORDER_STATUS.PAID || status === ORDER_STATUS.COMPLETED
-    || status === ORDER_STATUS.CANCELLED && (cancelReason === "PRESTART_TERMINATED" || cancelReason === "MANUAL_CLOSE");
+    || status === ORDER_STATUS.CANCELLED && (cancelReason === "PRESTART_TERMINATED" || cancelReason === "MANUAL_CLOSE"
+      || cancelReason === "SUPPORT_CANCELLED_REFUND");
 }
 
 export function projectOrder(
@@ -153,6 +160,9 @@ export function projectOrder(
     termSeconds: row.termSeconds,
     amounts,
     createdAt: row.createdAt,
+    lastMessageAt: row.lastMessageAt ?? null,
+    lastMessagePreview: row.lastMessagePreview ?? null,
+    unreadCount: row.unreadCount ?? 0,
     holdUntil: row.holdUntil,
     expiredAwaitingCancel: expired,
     paymentOpen: row.status === ORDER_STATUS.PENDING_PAYMENT && !expired,
@@ -529,6 +539,27 @@ async function attachLineNamesToOrders(client: PoolClient, projectedOrders: Reco
   }
 }
 
+/** 订单群未读按成员身份返回；不在成员表里的账号不会拿到别人的计数。 */
+async function attachOrderUnread(
+  client: PoolClient,
+  projectedOrders: Record<string, unknown>[],
+  viewer: { realm: "user" | "admin"; userId: string },
+): Promise<void> {
+  const ids = [...new Set(projectedOrders.map((order) => order.id).filter((id): id is string => typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id)))];
+  if (ids.length === 0) return;
+  const rows = (await client.query<{ orderId: string; unreadCount: number }>(
+    `SELECT u.order_id AS "orderId", u.unread_count AS "unreadCount"
+       FROM zzsh_order.im_order_unread u
+       JOIN zzsh_iam.im_identity_mapping m ON m.id=u.identity_id
+      WHERE u.order_id=ANY($1) AND m.platform_subject_id=$2 AND m.realm=$3 AND m.identity_kind=$4 AND m.status='READY'`,
+    [ids, viewer.userId, viewer.realm, viewer.realm === "user" ? "USER" : "ADMIN"],
+  )).rows;
+  const byOrder = new Map(rows.map((row) => [row.orderId, row.unreadCount]));
+  for (const order of projectedOrders) {
+    if (typeof order.id === "string") order.unreadCount = byOrder.get(order.id) ?? 0;
+  }
+}
+
 export async function getMyOrder(
   client: PoolClient,
   userId: string,
@@ -629,6 +660,29 @@ export async function listMyOrders(
   const pageRows = rows.slice(0, filter.limit);
   const items = pageRows.map((row) => projectOrder(row, filter.party));
   await attachLineNamesToOrders(client, items);
+  await attachOrderUnread(client, items, { realm: "user", userId });
+  const facts = (await client.query<{ id: string; openingStatus: string | null; intakeOpen: boolean; currentSettlement: boolean }>(
+    `SELECT o.id, latest.status AS "openingStatus",
+       EXISTS(SELECT 1 FROM zzsh_order.settlement_intake si WHERE si.order_id = o.id AND si.status = 'OPEN') AS "intakeOpen",
+       EXISTS(SELECT 1 FROM zzsh_order.settlement_version sv WHERE sv.order_id = o.id AND sv.superseded_at IS NULL) AS "currentSettlement"
+     FROM zzsh_order.rental_order o
+     LEFT JOIN LATERAL (SELECT op.id, op.status FROM zzsh_order.rental_opening op WHERE op.order_id = o.id
+       ORDER BY op.version_no DESC LIMIT 1) latest ON TRUE
+     WHERE o.id = ANY($1::text[])`, [pageRows.map((row) => row.id)],
+  )).rows;
+  const stageById = new Map(facts.map((fact) => [fact.id, fact]));
+  for (const [index, item] of items.entries()) {
+    const row = pageRows[index]!;
+    const fact = stageById.get(row.id);
+    const openingConfirmed = fact?.openingStatus === "CONFIRMED";
+    item.stage = row.status === "PENDING_PAYMENT" ? "PENDING_PAYMENT"
+      : row.status === "CANCELLED" ? "CANCELLED"
+      : row.status === "COMPLETED" ? "SETTLED"
+      : !row.teamState || row.dispatchState === "WAITING" ? "WAITING_STAFF"
+      : row.teamState !== "READY" ? "TEAM_PENDING"
+      : !openingConfirmed ? "OPENING_CONFIRM"
+      : fact?.intakeOpen || fact?.currentSettlement ? "ENDING" : "RENTING";
+  }
   const hasMore = rows.length > filter.limit;
   return {
     items,

@@ -61,7 +61,7 @@ import { ConfigurationError, OrderImSdkRouteBindings, readSecret, type OrderImSd
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
 import { SecurityApiError, setAuditContext, withTransaction } from "./security-core";
 import { ImIdentityProvisioner, YunxinDynamicTokenService } from "../im/identity-lifecycle";
-import { MessageScopeRecoveryLifecycle, supportManagerIdentityKey, type ConsultationRouteOptions } from "../im/consultation";
+import { MessageScopeRecoveryLifecycle, autoAssignWaitingConsultations, supportManagerIdentityKey, type ConsultationRouteOptions } from "../im/consultation";
 import { YunxinIdentityRepository } from "../im/yunxin-identity-repository";
 import { YunxinServerApiClient, type YunxinServerApi, type YunxinSupportScopeApi } from "../im/yunxin-provider";
 import type { ImMessageTransport } from "../im/im-contract";
@@ -133,7 +133,7 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   /** Explicit product capability: only enabled assemblies consume credit/guarantee state in supply gates. */
   creditGuaranteeEnabled?: boolean;
   /** Explicit local scheduler; omitted by default, never inferred from environment flags. */
-  supportDispatch?: Omit<OrderDispatchOptions, "pool">;
+  supportDispatch?: Omit<OrderDispatchOptions, "pool"> & { autoAssignConsultations?: boolean };
   orderTeams?: { membersLimit: number; intervalMs: number; batchLimit: number; escalationEnabled?: boolean };
   /** Explicit supplier event ingress; omitted by default and never mounted without configuration. */
   orderImEvents?: { appKey: string; appSecret: string; freshnessMs?: number; approvalLinkMs?: number; recoveryIntervalMs?: number; escalationEnabled?: boolean };
@@ -766,7 +766,7 @@ export function loadAuthRuntimeConfig(
 export async function mountAuthHandlers(
   app: INestApplication,
   options: AuthRuntimeOptions,
-): Promise<AuthSecurityOptions> {
+): Promise<AuthSecurityOptions & { settlementRecordingEnabled: boolean }> {
   if (options.localControlledPayments && options.joinpayCollection) {
     throw new ConfigurationError("Controlled and formal collection assemblies are exclusive");
   }
@@ -852,6 +852,7 @@ export async function mountAuthHandlers(
     : undefined;
   const yunxinConsultation: ConsultationRouteOptions | undefined = yunxinRuntime ? {
     ...(options.supportDispatch?.appId === options.yunxin!.appId ? { wakeDispatch: () => app.get(OrderDispatchLifecycle).wake() } : {}),
+    ...(options.supportDispatch?.autoAssignConsultations === true ? { autoAssignConsultations: true } : {}),
     pool: options.pool,
     appId: options.yunxin!.appId,
     provider: yunxinRuntime.provider,
@@ -859,6 +860,7 @@ export async function mountAuthHandlers(
     supportManager: {
       key: supportManagerIdentityKey(options.yunxin!.appId),
       provisioner: yunxinRuntime.provisioner,
+      avatarUrl: `${options.userOrigin.replace(/\/+$/, "")}/art/zhouzhou/avatar.webp`,
     },
   } : undefined;
   // Filled right after the user auth instance exists; the after hook only runs at request time.
@@ -1115,6 +1117,8 @@ export async function mountAuthHandlers(
   const paymentReadOptions = channelPaymentReadOptions(collection?.routes, Boolean(collection?.notifications
     && collection.notifications.admission === collection.routes?.initial?.admission
     && collection.notifications.admission === collection.routes?.execution?.formal?.admission));
+  const settlementRecordingEnabled = options.testOperationsEnabled === true
+    && process.env.ZZSH_SETTLEMENT_RECORDING === "controlled" && process.env.NODE_ENV !== "production";
   const orderOptions: OrderRuntimeOptions = {
     ...securityOptions,
     channelPaymentReadOptions: paymentReadOptions,
@@ -1124,7 +1128,7 @@ export async function mountAuthHandlers(
     supplyGateReader,
     legacyPublicAdmission,
     legacyPublicAdmissionDetail,
-    settlementRecordingEnabled: options.testOperationsEnabled === true && process.env.ZZSH_SETTLEMENT_RECORDING === "controlled" && process.env.NODE_ENV !== "production",
+    settlementRecordingEnabled,
     ...(orderImSdkRouteBindings ? { orderImSdkRouteBindings } : {}),
     ...(options.orderTeams && orderTeamProvider
       ? { orderTeamMembers: { appId: options.yunxin!.appId, provider: orderTeamProvider } } : {}),
@@ -1207,13 +1211,19 @@ export async function mountAuthHandlers(
     app.get(OrderTeamLifecycle).start({pool:options.pool,appId:options.yunxin!.appId,provider,identities:yunxinRuntime.provisioner,
       membersLimit:options.orderTeams.membersLimit,firstResponseEnabled:orderImEventsActivateApp(options.orderImEvents,options.yunxin!.appId),
       ...(orderImSdkRouteBindings ? { orderImSdkRouteBindings } : {}),
-      ...(options.testImMessageTransport?.card ? { stageCardTransport: { card: options.testImMessageTransport.card.bind(options.testImMessageTransport) } } : {}),
+      ...(options.testImMessageTransport?.card ? { stageCardTransport: {
+        card: options.testImMessageTransport.card.bind(options.testImMessageTransport),
+        ...(options.testImMessageTransport.sendText ? { text: options.testImMessageTransport.sendText.bind(options.testImMessageTransport) } : {}),
+      } } : {}),
       ...(options.testImMessageTransport ? { dueReminderTransport: { sendText: options.testImMessageTransport.sendText.bind(options.testImMessageTransport) } } : {}),
       ...(options.orderTeams.escalationEnabled===true?{escalationEnabled:true}:{})},options.orderTeams.intervalMs,options.orderTeams.batchLimit);
   }
   if (options.supportDispatch) app.get(OrderDispatchLifecycle).start({ ...options.supportDispatch, pool: options.pool,
+    // CS-04: reuse the order-dispatch tick for periodic consultation assignment; never a second timer.
+    ...(options.supportDispatch.autoAssignConsultations === true && yunxinConsultation
+      ? { consultationTick: () => autoAssignWaitingConsultations(yunxinConsultation, 5) } : {}),
     onResult: (result) => { if(options.orderTeams)app.get(OrderTeamLifecycle).wake(); options.supportDispatch!.onResult?.(result); } });
-  return securityOptions;
+  return { ...securityOptions, settlementRecordingEnabled };
 }
 
 function mountRealm(

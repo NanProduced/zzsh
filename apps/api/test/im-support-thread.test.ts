@@ -103,9 +103,13 @@ test("thread views keep history and sending after the round is closed, and never
   assert.equal(userView.conversationId, userConversationId());
   assert.equal(userView.canSend, true, "user keeps read/send on a closed round while the Team exists");
 
-  const adminView = toView(row, identityFor("ADMIN", "admin_a").accountId, true, "admin_a");
-  assert.equal(adminView.conversationId, null, "admin conversation stays bound to the ACTIVE round");
-  assert.equal(adminView.canSend, false);
+  const adminAccount = identityFor("ADMIN", "admin_a").accountId;
+  const adminView = toView(row, adminAccount, true, "admin_a");
+  assert.equal(adminView.conversationId, `${adminAccount}|2|900001`, "the responsible admin can reopen the same thread history after close");
+  assert.equal(adminView.canSend, false, "history read does not grant sending on a closed round");
+  const otherAdmin = identityFor("ADMIN", "admin_b").accountId;
+  assert.equal(toView(row, otherAdmin, true, "admin_b").conversationId, null, "an unrelated admin still cannot claim the team");
+  assert.equal(toView(row, otherAdmin, true, "admin_b", true).conversationId, `${otherAdmin}|2|900001`, "management patrol can read the thread history");
 
   // Team dismissed / never created: no conversation may be claimed as recoverable.
   const dismissed = toView(contextRow({ threadScopeId: null, threadScopeState: "PENDING", messageScopeId: null, messageScopeState: "REVOKED" }), identityFor("USER", "user_a").accountId);
@@ -219,7 +223,7 @@ test("0113 adds the persistent thread, round link and round-close operation with
   const acl = readFileSync(resolve("src/database/business-migrations.ts"), "utf8");
   assert.match(acl, /GRANT SELECT, INSERT ON TABLE "zzsh_iam"\."im_support_thread"/);
   assert.match(acl, /REVOKE UPDATE, DELETE, TRUNCATE ON TABLE "zzsh_iam"\."im_support_thread"/);
-  assert.match(acl, /GRANT UPDATE \("state", "peer_account_id", "message_scope_id", "message_scope_state", "last_round_seq", "version", "updated_at"\) ON TABLE "zzsh_iam"\."im_support_thread"/);
+  assert.match(acl, /GRANT UPDATE \("state", "peer_account_id", "message_scope_id", "message_scope_state", "last_round_seq", "version", "updated_at", "user_read_at"\) ON TABLE "zzsh_iam"\."im_support_thread"/);
 });
 
 test("round close ends the round only and never dismisses the thread Team", () => {

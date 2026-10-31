@@ -3,7 +3,7 @@ import { ADMIN_PERMISSION, hasPermission, loadEffectiveAdminAccess } from "../au
 import { orderDispatchLockKey } from "../order/payment-confirmation";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId } from "./identity-lifecycle";
 
-export type SupportCandidate = { adminUserId: string; adminName: string; accountId: string; allGames: boolean; gameIds: string[]; complaint: boolean };
+export type SupportCandidate = { adminUserId: string; adminName: string; accountId: string; allGames: boolean; gameIds: string[] };
 /** Transaction-local lock coverage, carried explicitly to every candidate read. */
 export type LockedSupportRoster = Readonly<{ client: PoolClient; appId: string; ids: readonly string[];
   scopes: readonly { admin_user_id: string; game_id: string }[];
@@ -60,15 +60,15 @@ export async function readEligibleSupport(client: PoolClient, appId: string, loc
     if (![ADMIN_PERMISSION.imSupportRead, ADMIN_PERMISSION.imSupportAccept].every((p) => hasPermission(access, p))) continue;
     const scopes = locked.scopes.filter((s) => s.admin_user_id === row.adminUserId);
     const allGames = access!.isBoss || locked.scopeModes.some((s) => s.admin_user_id === row.adminUserId && s.mode === "ALL_GAMES");
-    result.push({ ...row, allGames, gameIds: scopes.map((s) => s.game_id), complaint: hasPermission(access, ADMIN_PERMISSION.imSupportComplaint) });
+    result.push({ ...row, allGames, gameIds: scopes.map((s) => s.game_id) });
   }
   return result;
 }
 
 export async function reserveSupportCandidate(client: PoolClient, appId: string, kind: "ORDER" | "SERVICE" | "COMPLAINT",
-  candidates: SupportCandidate[], targetAdminId?: string, excludedIds: string[] = []): Promise<SupportCandidate | null> {
-  const eligible = candidates.filter((c) => (!targetAdminId || c.adminUserId === targetAdminId)
-    && (kind !== "COMPLAINT" || c.complaint) && !excludedIds.includes(c.adminUserId));
+  candidates: SupportCandidate[], targetAdminId?: string): Promise<SupportCandidate | null> {
+  // COMPLAINT 仅作为旧数据读类型保留；分配与 SERVICE 同权限，无投诉候选或排除规则。
+  const eligible = candidates.filter((c) => !targetAdminId || c.adminUserId === targetAdminId);
   const field = kind === "ORDER" ? "last_order_assigned_at" : "last_consultation_assigned_at";
   const selected = (await client.query<{ admin_user_id: string }>(`SELECT admin_user_id FROM zzsh_iam.im_support_presence
     WHERE app_id=$1 AND admin_user_id=ANY($2::text[]) AND availability='AVAILABLE' AND connection_state='CONNECTED'

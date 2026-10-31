@@ -52,6 +52,21 @@ test("opening cards are materialized from a draft opening, not only after both a
   assert.match(source, /opening_status IN \('DRAFT', 'CONFIRMED'\)/);
 });
 
+test("a new order group gets one bot welcome before the opening card", () => {
+  const source = readFileSync(resolve("src/im/order-stage-cards.ts"), "utf8");
+  assert.match(source, /ORDER_WELCOME/);
+  assert.match(source, /NOT EXISTS\(SELECT 1 FROM zzsh_order\.im_order_activity/);
+  assert.match(source, /WHEN 'ORDER_WELCOME' THEN 0/);
+  assert.match(source, /订单群已建立/);
+});
+
+test("0125 extends the stage-card ledger with the bot welcome", () => {
+  const sql = readFileSync(resolve("migrations/business/0125_im_order_group_welcome.sql"), "utf8");
+  assert.match(sql, /'ORDER_WELCOME'/);
+  const journal = JSON.parse(readFileSync(resolve("migrations/business/meta/_journal.json"), "utf8"));
+  assert.ok(journal.entries.some((entry: { idx: number; tag: string }) => entry.idx === 125 && entry.tag === "0125_im_order_group_welcome"));
+});
+
 test("0110 records one card per stage with a narrow runtime update grant", () => {  const sql = readFileSync(resolve("migrations/business/0114_im_order_stage_card.sql"), "utf8");
   assert.match(sql, /UNIQUE \("order_id", "app_id", "kind"\)/);
   assert.match(sql, /UNIQUE \("card_id"\)/);

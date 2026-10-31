@@ -33,12 +33,12 @@ type OrderFacts = {
   as_of: string; accepted_at: string | null;
 };
 type TerminationRow = {
-  id: string; order_id: string; requested_by_user_id: string; requested_by_party: string; reason: string;
-  state: PrestartTerminationState; revision: string; basis_digest: string; payment_basis: PrestartPaymentBasis;
+  id: string; order_id: string; requested_by_user_id: string | null; requested_by_party: string; requested_by_admin_user_id: string | null;
+  reason: string; state: PrestartTerminationState; revision: string; basis_digest: string; payment_basis: PrestartPaymentBasis;
   created_at: string; updated_at: string; approved_at: string | null; liability_root_id: string | null;
   liability_event_id: string | null; last_reason: string | null;
 };
-const COLUMNS = `id,order_id,requested_by_user_id,requested_by_party,reason,state,revision::text,basis_digest,payment_basis,
+const COLUMNS = `id,order_id,requested_by_user_id,requested_by_party,requested_by_admin_user_id,reason,state,revision::text,basis_digest,payment_basis,
   ${utc("created_at")} AS created_at,${utc("updated_at")} AS updated_at,${utc("approved_at")} AS approved_at,
   liability_root_id,liability_event_id,last_reason`;
 
@@ -47,6 +47,9 @@ export async function assertPrestartTerminationSchema(client: PoolClient) {
   const row = (await client.query(`SELECT to_regclass('zzsh_order.prestart_termination') IS NOT NULL
     AND to_regclass('zzsh_order.prestart_termination_decision') IS NOT NULL
     AND to_regprocedure('zzsh_order.prestart_liability_complete(text)') IS NOT NULL
+    AND to_regprocedure('zzsh_order.support_cancel_payment_basis_valid(jsonb)') IS NOT NULL
+    AND EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('zzsh_order.prestart_termination')
+      AND attname='requested_by_admin_user_id' AND attnum>0 AND NOT attisdropped)
     AND(SELECT count(*)=2 FROM pg_trigger WHERE tgrelid=to_regclass('zzsh_order.prestart_termination')
       AND tgname IN('prestart_termination_guard','prestart_request_closure') AND NOT tgisinternal AND tgenabled='O')
     AND has_table_privilege(current_user,to_regclass('zzsh_order.prestart_termination'),'SELECT') AS ready`)).rows[0];
@@ -133,7 +136,11 @@ export async function readPrestartTermination(client: PoolClient, actor: Settlem
     adminMoney = access.permissions.has(ADMIN_PERMISSION.financeRead) || canReview;
   }
   await assertPrestartTerminationSchema(client);
-  const facts = await originalFacts(client,orderId), request = await current(client,orderId);
+  const facts = await originalFacts(client,orderId);
+  let request = await current(client,orderId);
+  // 客服取消复用同一条全额原款责任链，但不是用户发起的“未开租终止”；
+  // 用户侧只通过订单取消事实获知，不把 SUPPORT 记录伪装成本人终止申请。
+  if (actor.realm === "user" && request?.requested_by_party === "SUPPORT") request = null;
   const moneyReadable = actor.realm === "user" ? actor.userId === facts.renter_user_id : adminMoney;
   const allowed = eligibility(facts);
   if (request?.state === "APPROVED") await verifyPrestartRefundLiability(client,request.id,request.payment_basis,request.liability_root_id,request.liability_event_id);

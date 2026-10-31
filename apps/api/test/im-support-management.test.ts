@@ -233,6 +233,10 @@ function overviewHandler(state: {
       if (sql.includes('"waitingConsultations"')) return { rows: [state.totals] };
       if (sql.includes("generate_series(0, 23)")) return { rows: state.hourly };
       if (sql.includes("AS day")) return { rows: state.trend };
+      if (sql.includes('FILTER (WHERE "score" = 1)')) {
+        return { rows: [{ count: 0, average: null, score1: 0, score2: 0, score3: 0, score4: 0, score5: 0 }] };
+      }
+      if (sql.includes('r."assigned_admin_id" AS "adminUserId"')) return { rows: [] };
       return null;
     },
   });
@@ -251,6 +255,7 @@ test("overview keeps zeros out of fabricated trends and exposes the documented f
     totals: { onDutyCount: 1, waitingConsultations: 2, todaySessions: 3, todayUsers: 2 },
     trend: [],
     hourly: [],
+    ratings: { count: 0, average: null, distribution: [0, 0, 0, 0, 0], agents: [] },
   });
 });
 

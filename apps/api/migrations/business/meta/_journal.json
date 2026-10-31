@@ -827,6 +827,62 @@
       "when": 1793184006000,
       "tag": "0117_im_support_thread",
       "breakpoints": true
+    },
+    {
+      "idx": 118,
+      "version": "7",
+      "when": 1793184007000,
+      "tag": "0118_im_round_rating",
+      "breakpoints": true
+    },
+    {
+      "idx": 119,
+      "version": "7",
+      "when": 1793184008000,
+      "tag": "0119_im_message_state",
+      "breakpoints": true
+    },
+    {
+      "idx": 120,
+      "version": "7",
+      "when": 1793184009000,
+      "tag": "0120_im_waiting_assignment",
+      "breakpoints": true
+    },
+    {
+      "idx": 121,
+      "version": "7",
+      "when": 1793184010000,
+      "tag": "0121_support_cancel",
+      "breakpoints": true
+    },
+    {
+      "idx": 122,
+      "version": "7",
+      "when": 1793184011000,
+      "tag": "0122_im_conversation_activity",
+      "breakpoints": true
+    },
+    {
+      "idx": 123,
+      "version": "7",
+      "when": 1793184012000,
+      "tag": "0123_im_order_unread",
+      "breakpoints": true
+    },
+    {
+      "idx": 124,
+      "version": "7",
+      "when": 1793184013000,
+      "tag": "0124_opening_confirmation",
+      "breakpoints": true
+    },
+    {
+      "idx": 125,
+      "version": "7",
+      "when": 1793184014000,
+      "tag": "0125_im_order_group_welcome",
+      "breakpoints": true
     }
   ]
 }

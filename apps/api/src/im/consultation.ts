@@ -42,6 +42,8 @@ import {
 } from "./support-management";
 
 export type SupportType = "SERVICE" | "COMPLAINT";
+/** 用户进入咨询页的入口场景；仅用于欢迎语，线程 kind 仍归一 SERVICE。 */
+export type ConsultationEntryIntent = SupportType;
 export type ConsultationState = "WAITING" | "ACTIVE" | "CLOSED";
 export type SupportThreadState = "IDLE" | "WAITING" | "ACTIVE";
 export type SupportAvailability = "OFF_DUTY" | "AVAILABLE" | "PAUSED";
@@ -56,7 +58,11 @@ export type ConsultationRouteOptions = {
   supportManager?: {
     key: ImIdentityKey;
     provisioner: Pick<ImIdentityProvisioner, "ensure">;
+    /** 公开可访问的洲洲 IP 头像；本地/未配置时省略。 */
+    avatarUrl?: string;
   };
+  /** Auto-assign a waiting round to the least-recently assigned eligible online agent. */
+  autoAssignConsultations?: boolean;
   /** Test-only barrier; runtime assembly never wires arbitrary callbacks. */
   testPresenceBarrier?: (context: AdminContext) => Promise<void>;
 };
@@ -77,6 +83,15 @@ export type SupportPresence = {
   today: SupportDayCounts;
 };
 
+export type SupportRoundRatingView = {
+  /** 当前已结束轮次且未评价、未暂不评价时可评价。 */
+  available: boolean;
+  submitted: boolean;
+  dismissed: boolean;
+  score: number | null;
+  comment?: string;
+};
+
 export type ConsultationView = {
   id: string;
   /** 持久线程 id：同一 user+kind 跨轮次不变。 */
@@ -90,6 +105,8 @@ export type ConsultationView = {
   subjectRef: string | null;
   assignedAdmin: { id: string; name: string } | null;
   peerAccountId: string | null;
+  /** 平台“洲洲助手（Bot）”云信账号；欢迎语与自动卡片由它发出。 */
+  botAccountId: string | null;
   conversationType: "TEAM";
   conversationId: string | null;
   messageScopeState: MessageScopeState;
@@ -97,6 +114,18 @@ export type ConsultationView = {
   canSend: boolean;
   version: number;
   lastMessageAt: string | null;
+  /** 最近一条消息摘要：纯文本折叠截断，媒体为类型标签。 */
+  lastMessagePreview: string | null;
+  /** 用户视图：最近消息晚于本人线程已读时间；管理视图恒为 false。 */
+  hasUnread: boolean;
+  /** 用户视图：本轮尚未读的客服消息数；管理视图不返回。 */
+  userUnreadCount?: number;
+  /** 管理视图：本轮当前负责客服尚未读的用户消息数；用户视图不返回。 */
+  adminUnreadCount?: number;
+  /** 平台读取事件推进的轮次已读时间；不是 NIM 原生回执。 */
+  adminReadAt: string | null;
+  /** 本轮评价状态；只有用户自读列表按已结束轮次计算可用性。 */
+  rating: SupportRoundRatingView;
   createdAt: string;
   updatedAt: string;
   user?: { id: string; name: string; username: string | null };
@@ -169,6 +198,11 @@ type ConsultationRow = {
   threadScopeId?: string | null;
   threadScopeState?: MessageScopeState;
   threadPeerAccountId?: string | null;
+  lastMessagePreview?: string | null;
+  userReadAt?: Date | string | null;
+  adminReadAt?: Date | string | null;
+  userUnreadCount?: string | number | null;
+  adminUnreadCount?: string | number | null;
 };
 
 type ThreadRow = {
@@ -239,11 +273,14 @@ function parseSubjectRef(value: unknown): string | null {
   return value;
 }
 
-export function parseConsultationBody(value: unknown): { type: SupportType; subjectRef: string | null } {
+export function parseConsultationBody(value: unknown): { type: SupportType; entryIntent: ConsultationEntryIntent; subjectRef: string | null } {
   if (!isRecord(value)) throw invalid("Request body is invalid");
   const allowed = new Set(["type", "subjectRef"]);
   if (Object.keys(value).some((key) => !allowed.has(key))) throw invalid("Request body contains an unknown field");
-  return { type: parseSupportType(value.type), subjectRef: parseSubjectRef(value.subjectRef) };
+  const entryIntent = parseSupportType(value.type);
+  // 投诉入口已并入普通咨询：旧客户端仍可传 COMPLAINT，新建请求只落到 SERVICE 线程；
+  // 原始入口意图只决定欢迎语文案，不改变线程 kind。
+  return { type: entryIntent === "COMPLAINT" ? "SERVICE" : entryIntent, entryIntent, subjectRef: parseSubjectRef(value.subjectRef) };
 }
 
 export function parsePresenceBody(value: unknown): { availability: SupportAvailability; connectionState: SupportConnectionState; version?: number } {
@@ -257,6 +294,20 @@ export function parsePresenceBody(value: unknown): { availability: SupportAvaila
     connectionState: value.connectionState as SupportConnectionState,
     ...(value.version === undefined ? {} : { version: value.version as number }),
   };
+}
+
+/** 评价分值只接受 1..5 整数；文字可选，去首尾空白后按码点不超过 200。 */
+export function parseSupportRatingBody(value: unknown): { score: number; comment: string | null } {
+  if (!isRecord(value)) throw invalid("Request body is invalid");
+  if (Object.keys(value).some((key) => key !== "score" && key !== "comment")) throw invalid("Request body contains an unknown field");
+  const score = value.score;
+  if (typeof score !== "number" || !Number.isInteger(score) || score < 1 || score > 5) throw invalid("Rating score is invalid");
+  if (value.comment === undefined || value.comment === null) return { score, comment: null };
+  if (typeof value.comment !== "string") throw invalid("Rating comment is invalid");
+  const comment = value.comment.trim();
+  if (!comment) return { score, comment: null };
+  if ([...comment].length > 200) throw invalid("Rating comment is invalid");
+  return { score, comment };
 }
 
 function teamConversationId(accountId: string, teamId: string): string {
@@ -293,7 +344,11 @@ const CONSULTATION_SELECT = `
          c."thread_id" AS "threadId", c."round_seq" AS "roundSeq",
          t."state" AS "threadState", t."message_scope_id" AS "threadScopeId",
          t."message_scope_state" AS "threadScopeState", t."peer_account_id" AS "threadPeerAccountId",
-         c."version", c."last_message_at" AS "lastMessageAt", c."created_at" AS "createdAt",
+         t."user_read_at" AS "userReadAt",
+         c."version", c."last_message_at" AS "lastMessageAt", c."last_message_preview" AS "lastMessagePreview",
+         c."admin_read_at" AS "adminReadAt",
+         c."user_unread_count" AS "userUnreadCount", c."admin_unread_count" AS "adminUnreadCount",
+         c."created_at" AS "createdAt",
          c."updated_at" AS "updatedAt", u."name" AS "userName", u."username" AS "userUsername",
          au."name" AS "adminName"
     FROM "zzsh_iam"."im_consultation" c
@@ -311,7 +366,11 @@ const USER_THREAD_SELECT = `
          c."thread_id" AS "threadId", c."round_seq" AS "roundSeq",
          t."state" AS "threadState", t."message_scope_id" AS "threadScopeId",
          t."message_scope_state" AS "threadScopeState", t."peer_account_id" AS "threadPeerAccountId",
-         c."version", c."last_message_at" AS "lastMessageAt", c."created_at" AS "createdAt",
+         t."user_read_at" AS "userReadAt",
+         c."version", c."last_message_at" AS "lastMessageAt", c."last_message_preview" AS "lastMessagePreview",
+         c."admin_read_at" AS "adminReadAt",
+         c."user_unread_count" AS "userUnreadCount", c."admin_unread_count" AS "adminUnreadCount",
+         c."created_at" AS "createdAt",
          c."updated_at" AS "updatedAt", u."name" AS "userName", u."username" AS "userUsername",
          au."name" AS "adminName"
     FROM (
@@ -345,7 +404,7 @@ function threadScopeForRow(row: ConsultationRow): { scopeId: string | null; scop
   return { scopeId, scopeState };
 }
 
-export function toView(row: ConsultationRow, viewerAccountId: string, includeUser = false, viewerAdminId?: string): ConsultationView {
+export function toView(row: ConsultationRow, viewerAccountId: string, includeUser = false, viewerAdminId?: string, adminThreadRead = false): ConsultationView {
   const thread = threadScopeForRow(row);
   const teamReady = thread.scopeState === "READY" && Boolean(thread.scopeId);
   // 用户始终读取本人持久线程：只要 Team 存在，任何轮次状态都能看历史、发消息。
@@ -353,8 +412,15 @@ export function toView(row: ConsultationRow, viewerAccountId: string, includeUse
   // 管理端仍只对当前轮次负责客服开放会话；其他管理员走只读巡视旁路。
   const adminCanUseScope = row.state === "ACTIVE" && row.messageScopeState === "READY" && Boolean(row.messageScopeId)
     && (!includeUser || row.assignedAdminId === viewerAdminId);
-  const canUseScope = includeUser ? adminCanUseScope : userCanUseScope;
-  const conversationScopeId = includeUser ? row.messageScopeId : thread.scopeId;
+  // 历史读取按持久线程 Team：轮次结束/等待接入时仍能看到上一轮消息，发送仍只看当前轮。
+  const adminCanReadThread = includeUser && teamReady && (adminThreadRead || row.assignedAdminId === viewerAdminId);
+  const canUseScope = includeUser ? (adminCanUseScope || adminCanReadThread) : userCanUseScope;
+  const conversationScopeId = includeUser ? (adminCanUseScope ? row.messageScopeId : thread.scopeId) : thread.scopeId;
+  const userReadAt = iso(row.userReadAt);
+  const lastMessageStamp = row.lastMessageAt;
+  // 用户未读只比较平台时间戳；管理视图不展示用户侧未读。
+  const hasUnread = !includeUser && lastMessageStamp !== null && lastMessageStamp !== undefined
+    && (!userReadAt || new Date(lastMessageStamp).getTime() > new Date(userReadAt).getTime());
   return {
     id: row.id,
     threadId: row.threadId ?? row.id,
@@ -366,6 +432,7 @@ export function toView(row: ConsultationRow, viewerAccountId: string, includeUse
     subjectRef: row.subjectRef,
     assignedAdmin: row.assignedAdminId && row.adminName ? { id: row.assignedAdminId, name: row.adminName } : null,
     peerAccountId: includeUser ? row.userAccountId : row.threadPeerAccountId ?? row.peerAccountId,
+    botAccountId: null,
     conversationType: "TEAM",
     conversationId: canUseScope ? teamConversationId(viewerAccountId, conversationScopeId!) : null,
     messageScopeState: includeUser ? row.messageScopeState : thread.scopeState,
@@ -374,6 +441,12 @@ export function toView(row: ConsultationRow, viewerAccountId: string, includeUse
       : userCanUseScope,
     version: numberValue(row.version),
     lastMessageAt: iso(row.lastMessageAt),
+    lastMessagePreview: row.lastMessagePreview ?? null,
+    hasUnread,
+    // User sees their own unread count; the admin view gets the count for the current round.
+    ...(includeUser ? { adminUnreadCount: numberValue(row.adminUnreadCount ?? 0) } : { userUnreadCount: numberValue(row.userUnreadCount ?? 0) }),
+    adminReadAt: iso(row.adminReadAt),
+    rating: { available: false, submitted: false, dismissed: false, score: null },
     createdAt: iso(row.createdAt) ?? new Date(0).toISOString(),
     updatedAt: iso(row.updatedAt) ?? new Date(0).toISOString(),
     ...(includeUser ? { user: { id: row.userId, name: row.userName, username: row.userUsername } } : {}),
@@ -462,23 +535,25 @@ async function createWaitingRound(
   client: PoolClient,
   options: ConsultationRouteOptions,
   thread: ThreadRow,
-  input: { subjectRef: string | null; actorType: "user" | "admin" | "system"; actorId: string; requestId?: string },
+  input: { subjectRef: string | null; entryIntent: ConsultationEntryIntent; actorType: "user" | "admin" | "system"; actorId: string; requestId?: string },
 ): Promise<WaitingRound> {
   const nextSeq = numberValue(thread.lastRoundSeq) + 1;
   const id = `im_consult_${randomUUID().replaceAll("-", "")}`;
   const scopeReady = thread.messageScopeState === "READY" && Boolean(thread.messageScopeId);
-  const excludedIds = await complaintExclusions(client, options.appId, thread.userId, thread.kind, input.subjectRef);
+  // 新轮次从提交起可读；first_user_message_at 只由用户真实消息推进，
+  // 管理队列与自动分配都据此隐藏“只进了页面、还没说话”的空会话。
   await client.query(
     `INSERT INTO "zzsh_iam"."im_consultation"
       ("id", "app_id", "user_id", "kind", "state", "user_account_id", "subject_ref", "thread_id", "round_seq",
-       "message_scope_id", "message_scope_state", "message_scope_version")
-     VALUES ($1,$2,$3,$4,'WAITING',$5,$6,$7,$8,$9,$10,1)`,
+       "message_scope_id", "message_scope_state", "message_scope_version", "last_message_at", "entry_intent")
+     VALUES ($1,$2,$3,$4,'WAITING',$5,$6,$7,$8,$9,$10,1,clock_timestamp(),$11)`,
     [id, options.appId, thread.userId, thread.kind, thread.userAccountId, input.subjectRef, thread.id, nextSeq,
-      scopeReady ? thread.messageScopeId : null, scopeReady ? "READY" : "PENDING"],
+      scopeReady ? thread.messageScopeId : null, scopeReady ? "READY" : "PENDING", input.entryIntent],
   );
   await client.query(
     `UPDATE "zzsh_iam"."im_support_thread"
         SET "state" = 'WAITING', "peer_account_id" = NULL, "last_round_seq" = $3,
+            "user_read_at" = clock_timestamp(),
             "version" = "version" + 1, "updated_at" = clock_timestamp()
       WHERE "app_id" = $1 AND "id" = $2`,
     [options.appId, thread.id, nextSeq],
@@ -488,7 +563,7 @@ async function createWaitingRound(
     eventType: "CREATED",
     actorType: input.actorType,
     actorId: input.actorId,
-    details: { type: thread.kind, roundSeq: nextSeq, reopened: nextSeq > 1, excludedAdminIds: excludedIds },
+    details: { type: thread.kind, roundSeq: nextSeq, reopened: nextSeq > 1 },
   });
   if (input.requestId) {
     await recordAudit(client, {
@@ -505,16 +580,45 @@ async function createWaitingRound(
   return { id, state: "WAITING", created: true, threadScopeReady: scopeReady };
 }
 
-function requiredSupportPermission(type: SupportType): string[] {
-  return type === "COMPLAINT"
-    ? [ADMIN_PERMISSION.imSupportAccept, ADMIN_PERMISSION.imSupportComplaint]
-    : [ADMIN_PERMISSION.imSupportAccept];
+/**
+ * Shared side effects of a newly opened round: provision the thread Team when
+ * needed and send the one-off entry welcome. Opening a round never assigns:
+ * auto-assignment only starts after the user's first message.
+ */
+async function afterRoundOpened(
+  options: ConsultationRouteOptions,
+  input: { roundId: string; threadId: string; threadScopeReady: boolean; threadMessageScopeId: string | null; created: boolean; entryIntent: ConsultationEntryIntent },
+): Promise<void> {
+  let teamId = input.threadMessageScopeId;
+  if (!input.threadScopeReady) {
+    await ensureThreadTeam(options, input.threadId, input.roundId);
+    // The Team was just provisioned: read the binding the operation attached.
+    if (input.created) {
+      const thread = await withTransaction(options.pool, (client) => readThreadById(client, options.appId, input.threadId, false));
+      teamId = thread.messageScopeId;
+    }
+  }
+  if (input.created && options.supportManager) {
+    // 欢迎语按入口场景选择文案，仍由平台账号发送；失败不影响轮次与后续分配。
+    const texts = SUPPORT_WELCOME_TEXTS[input.entryIntent];
+    for (const [index, text] of texts.entries()) {
+      await sendSupportText(options, teamId, supportManagerAccount(options).accountId,
+        text, `support_welcome_${input.roundId}_${index + 1}`);
+    }
+  }
 }
 
-export function requireSupportAccess(access: EffectiveAdminAccess | null, type: SupportType, action: "accept" | "transfer" = "accept"): void {
+/** CS-04: reuse the capacity a successful close/transfer freed; a wake failure never changes the business result. */
+async function wakeAutoAssign(options: ConsultationRouteOptions, limit = 5): Promise<void> {
+  if (!options.autoAssignConsultations) return;
+  await autoAssignWaitingConsultations(options, limit).catch(() => undefined);
+}
+
+export function requireSupportAccess(access: EffectiveAdminAccess | null, _type: SupportType, action: "accept" | "transfer" = "accept"): void {
+  // 投诉已并入普通咨询：旧 COMPLAINT 行同样只要求接待权限，不再追加 im.support.complaint。
   const required = action === "transfer"
-    ? [...requiredSupportPermission(type), ADMIN_PERMISSION.imSupportTransfer]
-    : requiredSupportPermission(type);
+    ? [ADMIN_PERMISSION.imSupportAccept, ADMIN_PERMISSION.imSupportTransfer]
+    : [ADMIN_PERMISSION.imSupportAccept];
   if (!required.every((permission) => hasPermission(access, permission))) {
     throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
   }
@@ -526,28 +630,67 @@ type Candidate = {
   accountId: string;
 };
 
-async function reserveEligibleAdmin(client: PoolClient, appId: string, locked: LockedSupportRoster, type: SupportType, targetAdminId?: string, excludedIds: string[] = []): Promise<Candidate | null> {
-  return reserveSupportCandidate(client, appId, type, await readEligibleSupport(client, appId, locked), targetAdminId, excludedIds);
+async function reserveEligibleAdmin(client: PoolClient, appId: string, locked: LockedSupportRoster, type: SupportType, targetAdminId?: string): Promise<Candidate | null> {
+  return reserveSupportCandidate(client, appId, type, await readEligibleSupport(client, appId, locked), targetAdminId);
 }
 
-async function complaintExclusions(client: PoolClient, appId: string, userId: string, kind: SupportType, subjectRef: string | null): Promise<string[]> {
-  if (kind !== "COMPLAINT") return [];
-  const result = await client.query<{ id: string }>(`SELECT assigned_admin_id AS id FROM zzsh_iam.im_consultation
-    WHERE app_id=$1 AND user_id=$2 AND kind='SERVICE' AND assigned_admin_id IS NOT NULL AND (id=$3 OR state='ACTIVE')
-    UNION SELECT g.assigned_admin_id FROM zzsh_order.im_order_group g JOIN zzsh_order.rental_order o ON o.id=g.order_id
-    WHERE g.app_id=$1 AND o.id=$3 AND (o.renter_user_id=$2 OR o.owner_user_id=$2) AND g.assigned_admin_id IS NOT NULL`, [appId, userId, subjectRef]);
-  return result.rows.map((r) => r.id);
-}
+const SUPPORT_WELCOME_TEXTS: Record<ConsultationEntryIntent, readonly string[]> = {
+  SERVICE: [
+    "您好，欢迎光临洲洲商行，很高兴为您服务～",
+    "账号、订单或售后问题都可以直接发在这里，客服会尽快为您处理。",
+  ],
+  COMPLAINT: [
+    "抱歉给您带来不好的体验，您的反馈已记录。",
+    "请把具体情况发在这里，客服会尽快跟进处理。",
+  ],
+};
+/** 本轮确定没有可用客服时平台账号的兜底；每轮最多一次，由 no_support_notice_at 保证。 */
+const NO_SUPPORT_NOTICE_TEXT = "抱歉，当前暂无在线客服，请先留言，客服上线后我们会第一时间联系您！";
+const supportGreetingText = (name: string) => `您好，我是本次为您服务的客服${name}，已收到您的留言，马上为您处理。`;
 
-async function storedComplaintExclusions(client: PoolClient, consultationId: string, requireEvidence = false): Promise<string[]> {
-  const row = (await client.query(`SELECT details FROM zzsh_iam.im_consultation_event WHERE consultation_id=$1 AND event_type='CREATED' ORDER BY created_at,id LIMIT 1`, [consultationId])).rows[0];
-  const ids: unknown = row?.details?.excludedAdminIds;
-  // A new read projection must not expose complaint data when its exclusion evidence is missing or corrupt.
-  if (requireEvidence && (!Array.isArray(ids) || ids.some((id) => typeof id !== "string" || !ID_PATTERN.test(id)))) {
-    throw new SecurityApiError(404, "NOT_FOUND", "Consultation not found");
+/** Server-side bot/agent text. Local-fake uses the in-memory transport; real NIM uses the provider seam. */
+async function sendSupportText(
+  options: ConsultationRouteOptions,
+  teamId: string | null | undefined,
+  senderAccountId: string,
+  text: string,
+  messageClientId: string,
+): Promise<void> {
+  if (!teamId) return;
+  const conversationId = `${senderAccountId}|2|${teamId}`;
+  try {
+    if (options.messageTransport?.sendText) {
+      await options.messageTransport.sendText({ conversationId, senderAccountId, receiverAccountId: teamId, text, messageClientId });
+    } else if (options.provider?.sendSupportTeamText) {
+      await options.provider.sendSupportTeamText({ teamId, senderAccountId, text, messageClientId });
+    } else {
+      return;
+    }
+    await recordSupportThreadMessage(options, conversationId, text);
+  } catch {
+    // Auto messages are best-effort; the round/assignment facts remain authoritative.
   }
-  return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string" && ID_PATTERN.test(id)) : [];
 }
+
+/**
+ * 自动分配确认“本轮没有可用客服”时的平台兜底：先原子标记本轮已通知，
+ * 再发送一次。标记失败（已发过/已被接管/已关闭）即不再发送。
+ */
+async function notifyNoSupport(options: ConsultationRouteOptions, consultationId: string, teamId: string): Promise<void> {
+  if (!options.supportManager) return;
+  const marked = await options.pool.query(
+    `UPDATE "zzsh_iam"."im_consultation"
+        SET "no_support_notice_at" = clock_timestamp()
+      WHERE "app_id" = $1 AND "id" = $2 AND "state" = 'WAITING'
+        AND "first_user_message_at" IS NOT NULL AND "no_support_notice_at" IS NULL
+      RETURNING "id"`,
+    [options.appId, consultationId],
+  );
+  if ((marked.rowCount ?? marked.rows.length) !== 1) return;
+  await sendSupportText(options, teamId, supportManagerAccount(options).accountId,
+    NO_SUPPORT_NOTICE_TEXT, `support_no_support_${consultationId}`);
+}
+
 async function decrementPresence(client: PoolClient, appId: string, adminUserId: string | null): Promise<void> {
   if (!adminUserId) return;
   await client.query(
@@ -556,6 +699,79 @@ async function decrementPresence(client: PoolClient, appId: string, adminUserId:
       WHERE "app_id" = $1 AND "admin_user_id" = $2`,
     [appId, adminUserId],
   );
+}
+
+/**
+ * A reserved claim that never became ACTIVE gives its load back exactly once.
+ * settleScopeOperationFailure already releases the reservation it recorded, so a
+ * settled (NEEDS_REVIEW/UNKNOWN) operation is not decremented again; only silent
+ * failures (claim lost, no writeback) reach decrementPresence here.
+ */
+async function releaseFailedClaim(options: ConsultationRouteOptions, consultationId: string, adminUserId: string): Promise<void> {
+  try {
+    await withTransaction(options.pool, async (client) => {
+      const row = await readConsultation(client, options.appId, consultationId);
+      if (row.state === "ACTIVE" && row.assignedAdminId === adminUserId) return;
+      const operation = (await client.query<{ state: MessageScopeOperationState }>(
+        `SELECT "state" FROM "zzsh_iam"."im_consultation_scope_operation"
+          WHERE "app_id" = $1 AND "consultation_id" = $2 ORDER BY "created_at" DESC, "id" DESC LIMIT 1`,
+        [options.appId, consultationId],
+      )).rows[0];
+      if (operation?.state === "NEEDS_REVIEW" || operation?.state === "UNKNOWN") return;
+      await decrementPresence(client, options.appId, adminUserId);
+    });
+  } catch {
+    // Load neutralisation is maintenance; it must never replace the business result.
+  }
+}
+
+/** A reused ADD_MEMBER was released when its operation settled; a successful recovery restores it once. */
+async function restoreClaimLoad(options: ConsultationRouteOptions, consultationId: string, adminUserId: string): Promise<void> {
+  try {
+    await withTransaction(options.pool, async (client) => {
+      const row = await readConsultation(client, options.appId, consultationId);
+      if (row.state !== "ACTIVE" || row.assignedAdminId !== adminUserId) return;
+      await client.query(
+        `UPDATE zzsh_iam.im_support_presence SET active_load=active_load+1,updated_at=clock_timestamp()
+          WHERE app_id=$1 AND admin_user_id=$2`,
+        [options.appId, adminUserId],
+      );
+    });
+  } catch {
+    // Load restoration is maintenance; the successful claim remains authoritative.
+  }
+}
+
+type RoundRatingRow = {
+  roundId: string;
+  score: number | string | null;
+  comment: string | null;
+  submittedAt: Date | string | null;
+  dismissedAt: Date | string | null;
+};
+
+const RATING_SELECT = `
+  SELECT "round_id" AS "roundId", "score", "comment",
+         "submitted_at" AS "submittedAt", "dismissed_at" AS "dismissedAt"
+    FROM "zzsh_iam"."im_support_round_rating"`;
+
+function ratingView(row: RoundRatingRow | undefined | null, available = false): SupportRoundRatingView {
+  if (!row) return { available, submitted: false, dismissed: false, score: null };
+  if (row.submittedAt) {
+    return {
+      available: false,
+      submitted: true,
+      dismissed: false,
+      score: row.score === null ? null : Number(row.score),
+      ...(row.comment ? { comment: row.comment } : {}),
+    };
+  }
+  // 暂不评价即对该轮隐藏评价入口，服务端仍保留唯一行。
+  return { available: false, submitted: false, dismissed: true, score: null };
+}
+
+async function readRoundRating(client: PoolClient, appId: string, roundId: string): Promise<RoundRatingRow | null> {
+  return (await client.query<RoundRatingRow>(`${RATING_SELECT} WHERE "app_id" = $1 AND "round_id" = $2`, [appId, roundId])).rows[0] ?? null;
 }
 
 export async function listUserConsultations(
@@ -570,7 +786,177 @@ export async function listUserConsultations(
       `${USER_THREAD_SELECT} ORDER BY c."updated_at" DESC, c."id" DESC LIMIT $3`,
       [options.appId, context.userId, limit],
     )).rows;
-    return { consultations: rows.map((row) => toView(row, accountId)) };
+    const ratings = new Map<string, RoundRatingRow>();
+    if (rows.length) {
+      const ratingRows = (await client.query<RoundRatingRow>(
+        `${RATING_SELECT} WHERE "app_id" = $1 AND "round_id" = ANY($2::text[])`,
+        [options.appId, rows.map((row) => row.id)],
+      )).rows;
+      for (const rating of ratingRows) ratings.set(rating.roundId, rating);
+    }
+    return {
+      consultations: rows.map((row) => ({
+        ...toView(row, accountId),
+        botAccountId: supportBotAccountId(options),
+        // 一轮最多一条：DISTINCT ON 已保证 CLOSED 行没有同线程未结束轮次；无负责客服的历史轮不可评。
+        rating: ratingView(ratings.get(row.id), row.state === "CLOSED" && Boolean(row.assignedAdminId)),
+      })),
+    };
+  });
+}
+
+/**
+ * 平台读取事件：仅当前负责客服在其 ACTIVE 轮次推进 admin_read_at。
+ * 幂等；不推进 version/updated_at，避免把“已读”当成业务变更。
+ */
+export async function markConsultationRead(
+  options: ConsultationRouteOptions,
+  context: AdminContext,
+  id: string,
+): Promise<{ adminReadAt: string | null }> {
+  return withTransaction(options.pool, async (client) => {
+    await assertAdminContextInTransaction(client, context);
+    const access = await loadEffectiveAdminAccess(client, context.userId);
+    if (!hasPermission(access, ADMIN_PERMISSION.imSupportRead)) throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
+    const row = await readConsultation(client, options.appId, id, true);
+    if (row.state !== "ACTIVE" || row.assignedAdminId !== context.userId) {
+      throw new SecurityApiError(403, "FORBIDDEN", "Consultation is not assigned to the current administrator");
+    }
+    requireSupportAccess(access, row.kind);
+    const updated = await client.query<{ adminReadAt: Date | string | null }>(
+      `UPDATE "zzsh_iam"."im_consultation"
+          SET "admin_read_at" = clock_timestamp(), "admin_unread_count" = 0
+        WHERE "app_id" = $1 AND "id" = $2 AND "state" = 'ACTIVE' AND "assigned_admin_id" = $3
+        RETURNING "admin_read_at" AS "adminReadAt"`,
+      [options.appId, id, context.userId],
+    );
+    if (updated.rowCount !== 1) throw conflict("Consultation changed while marking read");
+    return { adminReadAt: iso(updated.rows[0]?.adminReadAt ?? null) };
+  });
+}
+
+/**
+ * 用户读取事件：只推进本人线程的 user_read_at，不改线程版本和队列排序。
+ * 幂等；轮次归属在事务内复核，重复调用只刷新时间。
+ */
+export async function markUserConsultationRead(
+  options: ConsultationRouteOptions,
+  context: UserContext,
+  roundId: string,
+): Promise<{ userReadAt: string | null }> {
+  return withTransaction(options.pool, async (client) => {
+    await assertUserContextInTransaction(client, context);
+    const round = (await client.query<{ userId: string; threadId: string }>(
+      `SELECT "user_id" AS "userId", "thread_id" AS "threadId"
+         FROM "zzsh_iam"."im_consultation"
+        WHERE "app_id" = $1 AND "id" = $2`,
+      [options.appId, roundId],
+    )).rows[0];
+    if (!round) throw new SecurityApiError(404, "NOT_FOUND", "Consultation not found");
+    if (round.userId !== context.userId) {
+      throw new SecurityApiError(403, "FORBIDDEN", "Consultation is not owned by the current user");
+    }
+    const updated = await client.query<{ userReadAt: Date | string | null }>(
+      `UPDATE "zzsh_iam"."im_support_thread"
+          SET "user_read_at" = clock_timestamp()
+        WHERE "app_id" = $1 AND "id" = $2
+        RETURNING "user_read_at" AS "userReadAt"`,
+      [options.appId, round.threadId],
+    );
+    if (updated.rowCount !== 1) throw conflict("Support thread changed while marking read");
+    // 线程级已读覆盖该线程所有轮次的用户未读计数；轮次行仍保留，便于列表回显。
+    await client.query(
+      `UPDATE "zzsh_iam"."im_consultation"
+          SET "user_unread_count" = 0
+        WHERE "app_id" = $1 AND "thread_id" = $2 AND "user_unread_count" <> 0`,
+      [options.appId, round.threadId],
+    );
+    return { userReadAt: iso(updated.rows[0]?.userReadAt ?? null) };
+  });
+}
+
+/** 用户只能评本人线程中已结束、且线程当前没有新一轮的轮次；客服不可代评。 */
+function assertRatableRound(row: ConsultationRow, userId: string): void {
+  if (row.userId !== userId) throw new SecurityApiError(403, "FORBIDDEN", "Consultation is not owned by the current user");
+  if (row.state !== "CLOSED" || !row.assignedAdminId || !row.threadId) throw conflict("Only a closed round can be rated");
+}
+
+async function assertNoOpenRound(client: PoolClient, appId: string, threadId: string): Promise<void> {
+  const open = (await client.query(
+    `SELECT 1 FROM "zzsh_iam"."im_consultation" WHERE "app_id" = $1 AND "thread_id" = $2 AND "state" <> 'CLOSED' LIMIT 1`,
+    [appId, threadId],
+  )).rows[0];
+  if (open) throw conflict("The support thread has a new open round");
+}
+
+/**
+ * 评级与开轮共用 thread -> round 的加锁顺序，避免并发时互相等待；
+ * 锁住线程后再复核轮次归属与状态，防止检查后被新一轮插入。
+ */
+async function lockRatableRound(client: PoolClient, appId: string, id: string, userId: string): Promise<ConsultationRow> {
+  const initial = await readConsultation(client, appId, id);
+  if (initial.userId !== userId) throw new SecurityApiError(403, "FORBIDDEN", "Consultation is not owned by the current user");
+  if (!initial.threadId) throw conflict("Only a closed round can be rated");
+  await readThreadById(client, appId, initial.threadId, true);
+  const row = await readConsultation(client, appId, id, true);
+  assertRatableRound(row, userId);
+  await assertNoOpenRound(client, appId, row.threadId!);
+  return row;
+}
+
+const RATING_RETURNING = `RETURNING "round_id" AS "roundId", "score", "comment",
+         "submitted_at" AS "submittedAt", "dismissed_at" AS "dismissedAt"`;
+
+export async function submitSupportRating(
+  options: ConsultationRouteOptions,
+  context: UserContext,
+  id: string,
+  score: number,
+  comment: string | null,
+): Promise<{ rating: SupportRoundRatingView }> {
+  if (!Number.isInteger(score) || score < 1 || score > 5) throw invalid("Rating score is invalid");
+  return withTransaction(options.pool, async (client) => {
+    await assertUserContextInTransaction(client, context);
+    const row = await lockRatableRound(client, options.appId, id, context.userId);
+    const inserted = await client.query<RoundRatingRow>(
+      `INSERT INTO "zzsh_iam"."im_support_round_rating"
+        ("id", "app_id", "thread_id", "round_id", "user_id", "assigned_admin_id", "score", "comment", "submitted_at")
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,clock_timestamp())
+       ON CONFLICT ("round_id") DO NOTHING
+       ${RATING_RETURNING}`,
+      [`im_rating_${randomUUID().replaceAll("-", "")}`, options.appId, row.threadId, row.id, row.userId, row.assignedAdminId, score, comment],
+    );
+    const created = inserted.rows[0];
+    if (created) return { rating: ratingView(created) };
+    const existing = await readRoundRating(client, options.appId, row.id);
+    if (existing?.submittedAt) throw conflict("本轮已评价");
+    throw conflict("本轮评价已关闭");
+  });
+}
+
+export async function dismissSupportRating(
+  options: ConsultationRouteOptions,
+  context: UserContext,
+  id: string,
+): Promise<{ rating: SupportRoundRatingView }> {
+  return withTransaction(options.pool, async (client) => {
+    await assertUserContextInTransaction(client, context);
+    const row = await lockRatableRound(client, options.appId, id, context.userId);
+    const existing = await readRoundRating(client, options.appId, row.id);
+    if (existing?.submittedAt) throw conflict("本轮已评价");
+    if (existing) return { rating: ratingView(existing) };
+    const inserted = await client.query<RoundRatingRow>(
+      `INSERT INTO "zzsh_iam"."im_support_round_rating"
+        ("id", "app_id", "thread_id", "round_id", "user_id", "assigned_admin_id", "score", "submitted_at", "dismissed_at")
+       VALUES ($1,$2,$3,$4,$5,$6,NULL,NULL,clock_timestamp())
+       ON CONFLICT ("round_id") DO NOTHING
+       ${RATING_RETURNING}`,
+      [`im_rating_${randomUUID().replaceAll("-", "")}`, options.appId, row.threadId, row.id, row.userId, row.assignedAdminId],
+    );
+    const created = inserted.rows[0] ?? await readRoundRating(client, options.appId, row.id);
+    if (!created) throw conflict("Rating was not recorded");
+    if (created.submittedAt) throw conflict("本轮已评价");
+    return { rating: ratingView(created) };
   });
 }
 
@@ -650,6 +1036,10 @@ async function readScopeOperation(client: PoolClient, appId: string, operationId
   return scopeOperationRow(row);
 }
 
+function supportBotAccountId(options: ConsultationRouteOptions): string | null {
+  return options.supportManager ? deriveYunxinAccountId(options.supportManager.key) : null;
+}
+
 function supportManagerAccount(options: ConsultationRouteOptions): { key: ImIdentityKey; accountId: string } {
   if (!options.supportManager) throw unavailable("IM support manager is not configured");
   const key = normalizeImIdentityKey(options.supportManager.key);
@@ -661,7 +1051,7 @@ function supportManagerAccount(options: ConsultationRouteOptions): { key: ImIden
 
 async function ensureSupportManager(options: ConsultationRouteOptions): Promise<string | null> {
   const manager = supportManagerAccount(options);
-  const input: ImIdentityProvisionInput = { key: manager.key, displayName: "洲洲商行客服管理身份" };
+  const input: ImIdentityProvisionInput = { key: manager.key, displayName: "洲洲助手（Bot）", ...(options.supportManager?.avatarUrl ? { avatar: options.supportManager.avatarUrl } : {}) };
   const result: ImProvisionResult = await options.supportManager!.provisioner.ensure(input);
   if (result.mapping.accountId !== manager.accountId
     || result.mapping.key.appId !== manager.key.appId
@@ -1796,7 +2186,7 @@ async function readUserConsultationView(options: ConsultationRouteOptions, conte
       [options.appId, consultationId, context.userId],
     )).rows[0];
     if (!row) throw new SecurityApiError(404, "NOT_FOUND", "Consultation not found");
-    return { consultation: toView(row, accountId) };
+    return { consultation: { ...toView(row, accountId), botAccountId: supportBotAccountId(options) } };
   });
 }
 
@@ -1804,7 +2194,9 @@ async function readAdminConsultationView(options: ConsultationRouteOptions, cont
   return withTransaction(options.pool, async (client) => {
     await assertAdminContextInTransaction(client, context);
     const accountId = await readyAccount(client, identityKey(options.appId, "admin", "ADMIN", context.userId));
-    return { consultation: toView(await readConsultation(client, options.appId, consultationId), accountId, true, context.userId) };
+    const access = await loadEffectiveAdminAccess(client, context.userId);
+    const adminThreadRead = Boolean(access?.isBoss || hasPermission(access, ADMIN_PERMISSION.imSupportManagementRead));
+    return { consultation: { ...toView(await readConsultation(client, options.appId, consultationId), accountId, true, context.userId, adminThreadRead), botAccountId: supportBotAccountId(options) } };
   });
 }
 
@@ -1819,6 +2211,49 @@ function teamIdFromConversationId(accountId: string, conversationId: string): st
   return teamId;
 }
 
+/** 双端 account 都符合 ACCOUNT_PATTERN；订单群也会命中形状，由线程 join 自然 no-op。 */
+const TEAM_CONVERSATION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_@.-]{0,31}\|2\|([0-9]{1,19})$/;
+
+/** 摘要折叠空白并按码点截断到 80，空串归一为 null；客户端原文不直接进入队列。 */
+export function supportMessagePreview(value: string | null): string | null {
+  if (value === null) return null;
+  const collapsed = value.replace(/\s+/g, " ").trim();
+  if (!collapsed) return null;
+  return [...collapsed].slice(0, 80).join("");
+}
+
+/**
+ * Best-effort 最近消息摘要：只更新该 Team 对应线程上未结束的轮次。
+ * 订单群或未知 Team 没有匹配线程即 no-op；调用方在消息发送成功后调用并自行吞错。
+ * fromUser 只有用户本人发出的消息才置 true：它推进 first_user_message_at，
+ * 平台欢迎/兜底与客服消息绝不写这个字段。返回是否命中了一个真实咨询轮次。
+ */
+export async function recordSupportThreadMessage(
+  options: Pick<ConsultationRouteOptions, "pool" | "appId">,
+  conversationId: string,
+  preview: string | null,
+  fromUser = false,
+): Promise<boolean> {
+  const teamId = TEAM_CONVERSATION_PATTERN.exec(conversationId)?.[1];
+  if (!teamId) return false;
+  const result = await options.pool.query(
+    `UPDATE "zzsh_iam"."im_consultation" c
+        SET "last_message_at" = clock_timestamp(), "last_message_preview" = $3,
+            "user_unread_count" = CASE WHEN $4::boolean THEN c."user_unread_count" ELSE LEAST(c."user_unread_count" + 1, 999) END,
+            "admin_unread_count" = CASE WHEN $4::boolean THEN LEAST(c."admin_unread_count" + 1, 999) ELSE c."admin_unread_count" END,
+            "first_user_message_at" = CASE WHEN $4::boolean
+              THEN COALESCE(c."first_user_message_at", clock_timestamp())
+              ELSE c."first_user_message_at" END,
+            "updated_at" = clock_timestamp()
+       FROM "zzsh_iam"."im_support_thread" t
+      WHERE c."app_id" = $1 AND t."app_id" = c."app_id" AND c."thread_id" = t."id"
+        AND t."message_scope_id" = $2 AND c."state" <> 'CLOSED'
+      RETURNING c."id"`,
+    [options.appId, teamId, supportMessagePreview(preview), fromUser],
+  );
+  return (result.rowCount ?? result.rows.length) > 0;
+}
+
 /**
  * User message access is thread-based: history stays readable in IDLE, WAITING
  * and ACTIVE as long as the thread Team exists. A send also (re)opens a round so
@@ -1830,7 +2265,7 @@ export async function readUserMessageAccess(
   conversationId: string,
   send = false,
 ): Promise<ImConversationAccess> {
-  return withTransaction(options.pool, async (client) => {
+  const result = await withTransaction(options.pool, async (client) => {
     await assertUserContextInTransaction(client, context);
     const viewerAccountId = await readyAccount(client, identityKey(options.appId, "user", "USER", context.userId));
     const teamId = teamIdFromConversationId(viewerAccountId, conversationId);
@@ -1842,6 +2277,7 @@ export async function readUserMessageAccess(
       [options.appId, context.userId, teamId, viewerAccountId],
     )).rows[0];
     if (!thread) throw new SecurityApiError(403, "FORBIDDEN", "Consultation is not authorized");
+    let opened: WaitingRound | null = null;
     if (send) {
       const open = (await client.query<{ id: string; state: ConsultationState }>(
         `SELECT "id", "state" FROM "zzsh_iam"."im_consultation"
@@ -1850,7 +2286,9 @@ export async function readUserMessageAccess(
       )).rows[0];
       if (!open) {
         if (thread.state === "ACTIVE") throw unavailable("IM support thread state is inconsistent");
-        await createWaitingRound(client, options, thread, { subjectRef: null, actorType: "user", actorId: context.userId });
+        // 消息入口没有场景参数；重开轮次按普通客服咨询欢迎。真正的分配由调用方在
+        // 消息落库（first_user_message_at）后触发。
+        opened = await createWaitingRound(client, options, thread, { subjectRef: null, entryIntent: "SERVICE", actorType: "user", actorId: context.userId });
       } else if (thread.state === "IDLE") {
         await client.query(
           `UPDATE "zzsh_iam"."im_support_thread"
@@ -1866,8 +2304,21 @@ export async function readUserMessageAccess(
       // platform-side member while no agent is responsible.
       peerAccountId = deriveYunxinAccountId(supportManagerIdentityKey(options.appId));
     }
-    return { viewerAccountId, peerAccountId };
+    return { access: { viewerAccountId, peerAccountId }, threadId: thread.id, threadMessageScopeId: thread.messageScopeId, opened };
   });
+  // 只有本次调用真正打开了新轮次才执行欢迎和自动分配；普通发送不会重复触发。
+  // 副作用在提交后 fire-and-forget：慢 NIM 不能把已经落库的发送/开轮误报为失败。
+  if (result.opened) {
+    void afterRoundOpened(options, {
+      roundId: result.opened.id,
+      threadId: result.threadId,
+      threadScopeReady: result.opened.threadScopeReady,
+      threadMessageScopeId: result.threadMessageScopeId,
+      created: result.opened.created,
+      entryIntent: "SERVICE",
+    }).catch(() => undefined);
+  }
+  return result.access;
 }
 
 export async function readAdminMessageAccess(
@@ -1926,6 +2377,7 @@ export async function createOrResumeUserConsultation(
   type: SupportType,
   subjectRef: string | null,
   requestId: string,
+  entryIntent: ConsultationEntryIntent = "SERVICE",
 ): Promise<{ consultation: ConsultationView }> {
   const result = await withTransaction(options.pool, async (client) => {
     await lockSupportMutation(client, options.appId, [context.userId]);
@@ -1940,7 +2392,7 @@ export async function createOrResumeUserConsultation(
     )).rows[0];
     const round = open
       ? { id: open.id, state: open.state, created: false, threadScopeReady: thread.messageScopeState === "READY" }
-      : await createWaitingRound(client, options, thread, { subjectRef, actorType: "user", actorId: context.userId, requestId });
+      : await createWaitingRound(client, options, thread, { subjectRef, entryIntent, actorType: "user", actorId: context.userId, requestId });
     await recordAudit(client, {
       actorType: "user",
       actorId: context.userId,
@@ -1950,12 +2402,22 @@ export async function createOrResumeUserConsultation(
       objectId: round.id,
       outcome: "SUCCESS",
       requestId,
-      details: { type, threadId: thread.id, openedNewRound: round.created },
+      details: { type, entryIntent, threadId: thread.id, openedNewRound: round.created },
     });
-    return { id: round.id, threadId: thread.id, threadScopeReady: round.threadScopeReady };
+    return { id: round.id, threadId: thread.id, threadMessageScopeId: thread.messageScopeId, threadScopeReady: round.threadScopeReady, created: round.created };
   });
-  if (!result.threadScopeReady) await ensureThreadTeam(options, result.threadId, result.id);
-  return readUserConsultationView(options, context, result.id);
+  const view = await readUserConsultationView(options, context, result.id);
+  // 业务事实和视图已经提交/读出；欢迎失败不回滚、也不阻塞响应。进入页面不发欢迎时
+  // 不分配：自动分配只在用户第一条消息落库后由消息入口触发。
+  void afterRoundOpened(options, {
+    roundId: result.id,
+    threadId: result.threadId,
+    threadScopeReady: result.threadScopeReady,
+    threadMessageScopeId: result.threadMessageScopeId,
+    created: result.created,
+    entryIntent,
+  }).catch(() => undefined);
+  return view;
 }
 
 export async function listAdminConsultations(
@@ -1969,19 +2431,35 @@ export async function listAdminConsultations(
     const access = await loadEffectiveAdminAccess(client, context.userId);
     const accountId = await readyAccount(client, identityKey(options.appId, "admin", "ADMIN", context.userId));
     const serviceQueue = hasPermission(access, ADMIN_PERMISSION.imSupportAccept);
-    const complaintQueue = serviceQueue && hasPermission(access, ADMIN_PERMISSION.imSupportComplaint);
+    const adminThreadRead = Boolean(access?.isBoss || hasPermission(access, ADMIN_PERMISSION.imSupportManagementRead));
+    // 旧 COMPLAINT 行按普通会话进入同一队列；不再按 kind 或 im.support.complaint 分流。
+    // 用户还没说话的 WAITING 空会话不进队列；每个线程只保留一行：优先有用户消息的开放轮，
+    // 其次本人处理过的最近已结束轮，保证轮次结束后仍能从同一会话打开历史。
     const rows = (await client.query<ConsultationRow>(
       `${CONSULTATION_SELECT}
-        WHERE c."app_id" = $1 AND c."state" <> 'CLOSED' AND (
-          c."assigned_admin_id" = $2
-          OR (c."assigned_admin_id" IS NULL AND c."kind" = 'SERVICE' AND $3::boolean)
-          OR (c."assigned_admin_id" IS NULL AND c."kind" = 'COMPLAINT' AND $4::boolean)
-        )
+        WHERE c."app_id" = $1
+          AND c."id" = (
+            SELECT c2."id" FROM "zzsh_iam"."im_consultation" c2
+             WHERE c2."app_id" = c."app_id" AND c2."thread_id" = c."thread_id"
+               AND (c2."assigned_admin_id" = $2
+                 OR (c2."assigned_admin_id" IS NULL AND $3::boolean AND c2."state" = 'WAITING'))
+               AND (c2."state" <> 'CLOSED' OR NOT EXISTS (
+                 SELECT 1 FROM "zzsh_iam"."im_consultation" open_round
+                  WHERE open_round."app_id" = c2."app_id" AND open_round."thread_id" = c2."thread_id"
+                    AND open_round."state" <> 'CLOSED'))
+             ORDER BY (c2."state" <> 'CLOSED' AND c2."first_user_message_at" IS NOT NULL) DESC,
+                      (c2."assigned_admin_id" = $2 AND c2."state" = 'CLOSED') DESC,
+                      c2."created_at" DESC, c2."id" DESC
+             LIMIT 1
+          )
+          AND (c."assigned_admin_id" = $2
+            OR (c."assigned_admin_id" IS NULL AND $3::boolean AND c."state" = 'WAITING'))
+          AND NOT (c."state" = 'WAITING' AND c."assigned_admin_id" IS NULL AND c."first_user_message_at" IS NULL)
         ORDER BY CASE WHEN c."assigned_admin_id" = $2 THEN 0 ELSE 1 END, c."updated_at", c."id"
-        LIMIT $5`,
-      [options.appId, context.userId, serviceQueue, complaintQueue, limit],
+        LIMIT $4`,
+      [options.appId, context.userId, serviceQueue, limit],
     )).rows;
-    return { consultations: rows.map((row) => toView(row, accountId, true, context.userId)) };
+    return { consultations: rows.map((row) => ({ ...toView(row, accountId, true, context.userId, adminThreadRead), botAccountId: supportBotAccountId(options) })) };
   });
 }
 
@@ -2156,14 +2634,25 @@ export async function updateOwnPresence(
     });
     return { ...presenceView(persisted), today };
   });
-  if (result.availability === "AVAILABLE" && result.connectionState === "CONNECTED") options.wakeDispatch?.();
+  if (result.availability === "AVAILABLE" && result.connectionState === "CONNECTED") {
+    options.wakeDispatch?.();
+    if (options.autoAssignConsultations) void autoAssignWaitingConsultations(options, 5).catch(() => undefined);
+  }
   return result;
 }
 
 type ClaimPlan =
-  | { kind: "OPERATION"; operationId: string }
+  | { kind: "OPERATION"; operationId: string; reservedNew: boolean }
   | { kind: "ALREADY_ASSIGNED"; roundId: string }
   | { kind: "NEEDS_TEAM"; threadId: string };
+
+/**
+ * Round operations that still own the reception intent. A new ADD_MEMBER must
+ * never be stacked on any of them: the owner recovers the same operation or
+ * waits for it to settle. FAILED stays in the set because its only safe retry
+ * is the explicit recovery path, which resets this row instead of inserting one.
+ */
+const UNRESOLVED_SCOPE_OPERATION_STATES = "('PENDING','RUNNING','UNKNOWN','NEEDS_REVIEW','FAILED')";
 
 /**
  * Claim reserves the agent and records an ADD_MEMBER operation. The round stays
@@ -2189,17 +2678,61 @@ async function beginClaimMembership(options: ConsultationRouteOptions, context: 
       || row.messageScopeState !== "READY" || row.messageScopeId !== thread.messageScopeId) {
       return { kind: "NEEDS_TEAM" as const, threadId: thread.id };
     }
-    const active = (await client.query<{ id: string }>(
-      `SELECT "id" FROM "zzsh_iam"."im_consultation_scope_operation"
-        WHERE "app_id" = $1 AND "consultation_id" = $2 AND "state" IN ('PENDING', 'RUNNING', 'UNKNOWN')
+    const unresolved = (await client.query<{
+      id: string;
+      operationType: MessageScopeOperationType;
+      state: MessageScopeOperationState;
+      targetAdminId: string | null;
+    }>(
+      `SELECT "id", "operation_type" AS "operationType", "state", "target_admin_id" AS "targetAdminId"
+         FROM "zzsh_iam"."im_consultation_scope_operation"
+        WHERE "app_id" = $1 AND "consultation_id" = $2 AND "state" IN ${UNRESOLVED_SCOPE_OPERATION_STATES}
+        ORDER BY "created_at" DESC, "id" DESC
         LIMIT 1 FOR UPDATE`,
       [options.appId, row.id],
     )).rows[0];
-    if (active) throw unavailable("IM 接待操作正在恢复，请稍后重试");
-    const priority = await assignWaitingOrders(client, options.appId, await readEligibleSupport(client, options.appId, locked));
+    if (unresolved && ["PENDING", "RUNNING", "UNKNOWN"].includes(unresolved.state)) {
+      throw unavailable("IM 接待操作正在恢复，请稍后重试");
+    }
+    if (unresolved && unresolved.operationType !== "ADD_MEMBER") {
+      throw unavailable("IM message scope operation requires recovery before claim");
+    }
+    // 本轮接入已由同一客服的对账操作占用：只能恢复那一条，绝不插第二条 ADD_MEMBER。
+    if (unresolved && unresolved.targetAdminId !== context.userId) {
+      throw conflict("本轮接入待对账，请先恢复原接入");
+    }
+    const eligible = await readEligibleSupport(client, options.appId, locked);
+    const priority = await assignWaitingOrders(client, options.appId, eligible);
     if (priority.more) return null;
     await readConsultation(client, options.appId, consultationId, true);
-    const candidate = await reserveEligibleAdmin(client, options.appId, locked, row.kind, context.userId, await storedComplaintExclusions(client, row.id));
+    if (unresolved) {
+      // The unresolved operation already reserved this round: eligibility is checked
+      // read-only so the same agent never adds a second active_load for one round.
+      const target = eligible.find((candidate) => candidate.adminUserId === context.userId);
+      if (!target) throw unavailable("当前客服不可接待新咨询");
+      const resumed = await client.query(
+        `UPDATE "zzsh_iam"."im_consultation_scope_operation"
+            SET "state" = 'PENDING', "attempt_count" = 0, "next_retry_at" = clock_timestamp(),
+                "lease_until" = NULL, "lease_token_hash" = NULL, "last_failure_class" = NULL,
+                "last_failure_detail" = NULL, "updated_at" = clock_timestamp()
+          WHERE "app_id" = $1 AND "id" = $2 AND "state" IN ('NEEDS_REVIEW', 'FAILED')`,
+        [options.appId, unresolved.id],
+      );
+      if (resumed.rowCount !== 1) throw unavailable("IM 接待操作正在恢复，请稍后重试");
+      await recordAudit(client, {
+        actorType: "admin",
+        actorId: context.userId,
+        sessionId: context.sessionId,
+        action: "im.consultation.claim.retried",
+        objectType: "im_consultation_scope_operation",
+        objectId: unresolved.id,
+        outcome: "SUCCESS",
+        requestId,
+        details: { consultationId: row.id, threadId: thread.id, targetAdminId: context.userId },
+      });
+      return { kind: "OPERATION" as const, operationId: unresolved.id, reservedNew: false };
+    }
+    const candidate = await reserveSupportCandidate(client, options.appId, row.kind, eligible, context.userId);
     if (!candidate) throw unavailable("当前客服不可接待新咨询");
     const operationId = scopeOperationId();
     await client.query(
@@ -2221,13 +2754,109 @@ async function beginClaimMembership(options: ConsultationRouteOptions, context: 
       requestId,
       details: { threadId: thread.id, roundSeq: row.roundSeq },
     });
-    return { kind: "OPERATION" as const, operationId };
+    return { kind: "OPERATION" as const, operationId, reservedNew: true };
   });
   if (!plan) throw unavailable("已付款订单正在优先分配，请稍后重试");
   return plan;
 }
 
-type TransferPlan = { operationId: string } | { alreadyAssigned: true };
+/** 分配成功返回轮次 id；确定没有可用客服时返回线程 Team，交由调用方发一次兜底。 */
+type AutoAssignOutcome = string | { noCandidateTeamId: string };
+type AutoAssignPlan = { operationId: string; candidate: Candidate; teamId: string } | { noCandidateTeamId: string };
+
+async function autoAssignOne(options: ConsultationRouteOptions, consultationId: string): Promise<AutoAssignOutcome | null> {
+  const plan = await withTransaction<AutoAssignPlan | null>(options.pool, async (client) => {
+    const locked = await lockSupportMutation(client, options.appId);
+    const row = await readConsultation(client, options.appId, consultationId);
+    if (row.state !== "WAITING" || row.assignedAdminId || !row.threadId) return null;
+    const thread = await readThreadById(client, options.appId, row.threadId, true);
+    if (thread.messageScopeState !== "READY" || !thread.messageScopeId
+      || row.messageScopeState !== "READY" || row.messageScopeId !== thread.messageScopeId) return null;
+    const active = (await client.query<{ id: string }>(
+      `SELECT "id" FROM "zzsh_iam"."im_consultation_scope_operation"
+        WHERE "app_id" = $1 AND "consultation_id" = $2 AND "state" IN ${UNRESOLVED_SCOPE_OPERATION_STATES}
+        LIMIT 1 FOR UPDATE`,
+      [options.appId, row.id],
+    )).rows[0];
+    if (active) return null;
+    // 已付款订单优先：同一批在线客服还有待派订单时不先占咨询。
+    const priority = await assignWaitingOrders(client, options.appId, await readEligibleSupport(client, options.appId, locked));
+    if (priority.more) return null;
+    const candidate = await reserveEligibleAdmin(client, options.appId, locked, row.kind);
+    // 没有候选是业务事实（当前无人可接待），不是一次失败：给本轮发一次平台兜底，
+    // 客服上线后的 presence/tick 仍会再次尝试分配。
+    if (!candidate) return { noCandidateTeamId: thread.messageScopeId };
+    const operationId = scopeOperationId();
+    await client.query(
+      `INSERT INTO "zzsh_iam"."im_consultation_scope_operation"
+        ("id", "app_id", "consultation_id", "operation_type", "scope_version", "owner_account_id", "user_account_id",
+         "target_admin_id", "target_admin_account_id", "provider_team_id")
+       VALUES ($1,$2,$3,'ADD_MEMBER',$4,$5,$6,$7,$8,$9)`,
+      [operationId, options.appId, row.id, row.messageScopeVersion, supportManagerAccount(options).accountId,
+        row.userAccountId, candidate.adminUserId, candidate.accountId, thread.messageScopeId],
+    );
+    await recordAudit(client, {
+      actorType: "system",
+      actorId: supportManagerAccount(options).accountId,
+      action: "im.consultation.auto_assign.requested",
+      objectType: "im_consultation",
+      objectId: row.id,
+      outcome: "SUCCESS",
+      requestId: operationId,
+      details: { threadId: thread.id, roundSeq: row.roundSeq, assignedAdminId: candidate.adminUserId, auto: true },
+    });
+    return { operationId, candidate, teamId: thread.messageScopeId };
+  });
+  if (!plan) return null;
+  if ("noCandidateTeamId" in plan) return plan;
+  try {
+    await runScopeOperationNow(options, plan.operationId);
+  } catch {
+    await releaseFailedClaim(options, consultationId, plan.candidate.adminUserId);
+    return null;
+  }
+  const round = await withTransaction(options.pool, (client) => readConsultation(client, options.appId, consultationId));
+  if (round.state !== "ACTIVE" || round.assignedAdminId !== plan.candidate.adminUserId) {
+    await releaseFailedClaim(options, consultationId, plan.candidate.adminUserId);
+    return null;
+  }
+  await sendSupportText(options, plan.teamId, plan.candidate.accountId, supportGreetingText(plan.candidate.adminName),
+    `support_greeting_${round.id}_${plan.candidate.adminUserId}`);
+  return round.id;
+}
+
+/** Assigns waiting rounds to eligible online agents; called on presence changes and after a user message. */
+export async function autoAssignWaitingConsultations(options: ConsultationRouteOptions, limit = 5): Promise<string[]> {
+  if (!options.autoAssignConsultations || !options.provider || !options.supportManager) return [];
+  const rows = (await options.pool.query<{ id: string }>(
+    `SELECT c."id"
+       FROM "zzsh_iam"."im_consultation" c
+       JOIN "zzsh_iam"."im_support_thread" t ON t."id" = c."thread_id"
+      WHERE c."app_id" = $1 AND c."state" = 'WAITING' AND c."assigned_admin_id" IS NULL
+        AND c."first_user_message_at" IS NOT NULL
+        AND t."message_scope_state" = 'READY' AND t."message_scope_id" IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM "zzsh_iam"."im_consultation_scope_operation" o
+                         WHERE o."app_id" = c."app_id" AND o."consultation_id" = c."id"
+                           AND o."state" IN ${UNRESOLVED_SCOPE_OPERATION_STATES})
+      ORDER BY c."created_at", c."id" LIMIT $2`,
+    [options.appId, Math.max(1, Math.min(limit, 20))],
+  )).rows;
+  const assigned: string[] = [];
+  for (const row of rows) {
+    const outcome = await autoAssignOne(options, row.id).catch(() => null);
+    if (!outcome) continue;
+    if (typeof outcome === "string") {
+      assigned.push(outcome);
+      continue;
+    }
+    await notifyNoSupport(options, row.id, outcome.noCandidateTeamId).catch(() => undefined);
+  }
+  return assigned;
+}
+
+type TransferPlan =
+  | { operationId: string; teamId: string | null; targetAdminId: string }
+  | { alreadyAssigned: true };
 type TransferKind = "TRANSFER" | "TAKEOVER";
 
 export function takeoverDecision(
@@ -2282,8 +2911,8 @@ async function beginTransfer(
     )).rows[0];
     if (activeOperation) throw unavailable("IM message scope operation is being recovered");
     const targetAccess = await loadEffectiveAdminAccess(client, targetAdminId);
-    if (!requiredSupportPermission(row.kind).every((permission) => hasPermission(targetAccess, permission))) throw new SecurityApiError(403, "FORBIDDEN", "Target administrator is not authorized");
-    const target = await reserveEligibleAdmin(client, options.appId, locked, row.kind, targetAdminId, await storedComplaintExclusions(client, row.id));
+    if (!hasPermission(targetAccess, ADMIN_PERMISSION.imSupportAccept)) throw new SecurityApiError(403, "FORBIDDEN", "Target administrator is not authorized");
+    const target = await reserveEligibleAdmin(client, options.appId, locked, row.kind, targetAdminId);
     if (!target) throw unavailable("目标客服当前不可接待");
     const updated = await client.query<{ messageScopeVersion: string | number }>(
       `UPDATE "zzsh_iam"."im_consultation"
@@ -2312,10 +2941,30 @@ async function beginTransfer(
       toAdminId: target.adminUserId,
       note,
     });
-    return { operationId };
+    return { operationId, teamId: row.messageScopeId, targetAdminId: target.adminUserId };
   });
   if (!result) throw unavailable("已付款订单正在优先分配，请稍后重试");
   return result;
+}
+
+/** 用户可见的转接提示：只使用客服显示名，不暴露后台账号或流程术语。 */
+export function transferNoticeText(adminName: string): string {
+  const name = [...adminName.replace(/\s+/g, " ").trim()].slice(0, 40).join("");
+  return name ? `已为您转接客服 ${name}，请继续沟通。` : "已为您转接客服，请继续沟通。";
+}
+
+/** 转接成功后由平台助手告知新客服；发送失败只丢这条自动消息，不影响转接结果。 */
+async function notifyTransferReceived(
+  options: ConsultationRouteOptions,
+  input: { operationId: string; teamId: string | null; adminName: string },
+): Promise<void> {
+  try {
+    // messageClientId 绑定本次转交操作：同一操作被重试或对账时不会产生第二条提示。
+    await sendSupportText(options, input.teamId, supportManagerAccount(options).accountId,
+      transferNoticeText(input.adminName), `support_transfer_${input.operationId}`);
+  } catch {
+    // 自动提示是尽力而为，转交事实已提交。
+  }
 }
 
 async function transferWithScope(
@@ -2328,14 +2977,24 @@ async function transferWithScope(
 ): Promise<{ consultation: ConsultationView }> {
   const plan = await beginTransfer(options, context, consultationId, targetAdminId, requestId, note, "TRANSFER");
   if (plan && "alreadyAssigned" in plan) return readAdminConsultationView(options, context, consultationId);
-  await runScopeOperationNow(options, plan!.operationId);
-  return readAdminConsultationView(options, context, consultationId);
+  const transfer = plan!;
+  await runScopeOperationNow(options, transfer.operationId);
+  const result = await readAdminConsultationView(options, context, consultationId);
+  // 只有主动转交才广播新客服；巡视接管复用同一种 scope 操作，不能按操作类型区分。
+  // 以服务端返回的负责人为准，避免远端未完成时提前告知用户。
+  const assigned = result.consultation.assignedAdmin;
+  if (result.consultation.state === "ACTIVE" && assigned?.id === transfer.targetAdminId) {
+    await notifyTransferReceived(options, { operationId: transfer.operationId, teamId: transfer.teamId, adminName: assigned.name });
+  }
+  // 已提交的转交不被后台派发阻塞：容量唤醒失败只影响后续分配时机。
+  void wakeAutoAssign(options);
+  return result;
 }
 
 /**
  * Read-only candidate projection for the transfer dialog. Reuses the same
- * eligibility and complaint-exclusion rules as the transfer itself; it never
- * reserves, updates presence or writes an operation.
+ * eligibility rules as the transfer itself; it never reserves, updates presence
+ * or writes an operation.
  */
 export async function listTransferTargets(
   options: ConsultationRouteOptions,
@@ -2354,11 +3013,8 @@ export async function listTransferTargets(
     }
     if (row.messageScopeState !== "READY" || !row.messageScopeId) return { targets: [], transferReady: false };
     const candidates = await readEligibleSupport(client, options.appId, locked);
-    const exclusions = await storedComplaintExclusions(client, row.id);
     const targets = candidates
-      .filter((candidate) => candidate.adminUserId !== context.userId
-        && !exclusions.includes(candidate.adminUserId)
-        && (row.kind !== "COMPLAINT" || candidate.complaint))
+      .filter((candidate) => candidate.adminUserId !== context.userId)
       .map((candidate) => ({ adminUserId: candidate.adminUserId, displayName: candidate.adminName }));
     return { targets, transferReady: true };
   });
@@ -2463,15 +3119,46 @@ async function completeLocalClose(options: ConsultationRouteOptions, context: Ad
 }
 
 export async function claimConsultation(options: ConsultationRouteOptions, context: AdminContext, id: string, requestId: string): Promise<{ consultation: ConsultationView }> {
+  // Auto-assignment is the primary path. Manual claim is a management fallback;
+  // enforce it server-side so hiding the button is not the only control.
+  const access = await withTransaction(options.pool, async (client) => {
+    await assertAdminContextInTransaction(client, context);
+    return loadEffectiveAdminAccess(client, context.userId);
+  });
+  if (!(access?.isBoss || hasPermission(access, ADMIN_PERMISSION.imSupportAuditTakeover))) {
+    throw new SecurityApiError(403, "FORBIDDEN", "Manual takeover requires a management grant");
+  }
   let plan = await beginClaimMembership(options, context, id, requestId);
   if (plan.kind === "NEEDS_TEAM") {
     // First use after close/reopen may still need the thread Team; create it before adding the agent.
     await ensureThreadTeam(options, plan.threadId, id);
     plan = await beginClaimMembership(options, context, id, requestId);
   }
-  if (plan.kind === "OPERATION") await runScopeOperationNow(options, plan.operationId);
-  else if (plan.kind === "NEEDS_TEAM") throw unavailable("IM support thread Team is being recovered");
-  return readAdminConsultationView(options, context, id);
+  const claimedNow = plan.kind === "OPERATION";
+  const reservedNew = plan.kind === "OPERATION" && plan.reservedNew;
+  if (plan.kind === "OPERATION") {
+    try {
+      await runScopeOperationNow(options, plan.operationId);
+    } catch (error) {
+      // 新 claim 已 reserve 但没变成 ACTIVE：只中和本次预留，不掩盖原始错误。
+      if (reservedNew) await releaseFailedClaim(options, id, context.userId);
+      throw error;
+    }
+  } else if (plan.kind === "NEEDS_TEAM") throw unavailable("IM support thread Team is being recovered");
+  const result = await readAdminConsultationView(options, context, id);
+  if (claimedNow && !reservedNew && result.consultation.state === "ACTIVE" && result.consultation.assignedAdmin?.id === context.userId) {
+    // The settled operation released its reservation; recovery must put the active load back exactly once.
+    await restoreClaimLoad(options, id, context.userId);
+  }
+  if (reservedNew && (result.consultation.state !== "ACTIVE" || result.consultation.assignedAdmin?.id !== context.userId)) {
+    // 操作被并发认领或没有写回时 runScopeOperationNow 不抛错，这里补上中和。
+    await releaseFailedClaim(options, id, context.userId);
+  } else if (claimedNow && result.consultation.state === "ACTIVE" && result.consultation.assignedAdmin?.id === context.userId) {
+    const thread = await withTransaction(options.pool, (client) => readThreadById(client, options.appId, result.consultation.threadId, false));
+    await sendSupportText(options, thread?.messageScopeId, deriveYunxinAccountId(identityKey(options.appId, "admin", "ADMIN", context.userId)),
+      supportGreetingText(result.consultation.assignedAdmin.name), `support_greeting_${result.consultation.id}_${context.userId}`);
+  }
+  return result;
 }
 
 export function transferConsultation(options: ConsultationRouteOptions, context: AdminContext, id: string, targetAdminId: string, requestId: string, note: string | null = null): Promise<{ consultation: ConsultationView }> {
@@ -2489,7 +3176,9 @@ export async function takeoverConsultation(
   const plan = await beginTransfer(options, context, id, context.userId, requestId, note, "TAKEOVER");
   if (plan && "alreadyAssigned" in plan) return readAdminConsultationView(options, context, id);
   await runScopeOperationNow(options, plan!.operationId);
-  return readAdminConsultationView(options, context, id);
+  const result = await readAdminConsultationView(options, context, id);
+  void wakeAutoAssign(options);
+  return result;
 }
 
 export async function closeConsultation(options: ConsultationRouteOptions, context: AdminContext, id: string, requestId: string): Promise<{ consultation: ConsultationView }> {
@@ -2499,7 +3188,72 @@ export async function closeConsultation(options: ConsultationRouteOptions, conte
   } else {
     await completeLocalClose(options, context, id, requestId);
   }
-  return readAdminConsultationView(options, context, id);
+  const result = await readAdminConsultationView(options, context, id);
+  void wakeAutoAssign(options);
+  return result;
+}
+
+/**
+ * CS-03: an unresolved ADD_MEMBER is recovered through the claim flow. Only the
+ * agent the round was reserved for may reset that single operation; every other
+ * state falls through to the generic scope-operation retry unchanged.
+ */
+async function retryOwnClaimOperation(
+  options: ConsultationRouteOptions,
+  context: AdminContext,
+  consultationId: string,
+  requestId: string,
+): Promise<string | null> {
+  if (!options.provider) return null;
+  return withTransaction(options.pool, async (client) => {
+    await lockDispatchGate(client, options.appId);
+    await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
+    await assertAdminContextInTransaction(client, context);
+    const access = await loadEffectiveAdminAccess(client, context.userId);
+    if (!hasPermission(access, ADMIN_PERMISSION.imSupportRead)) return null;
+    const row = await readConsultation(client, options.appId, consultationId, true);
+    // Only a waiting, unassigned round can still be owned by an ADD_MEMBER; every
+    // other retry path keeps its existing close/transfer recovery semantics.
+    if (row.state !== "WAITING" || row.assignedAdminId !== null || !row.messageScopeId) return null;
+    const operation = (await client.query<{ id: string }>(
+      `SELECT "id" FROM "zzsh_iam"."im_consultation_scope_operation"
+        WHERE "app_id" = $1 AND "consultation_id" = $2 ORDER BY "created_at" DESC, "id" DESC LIMIT 1 FOR UPDATE`,
+      [options.appId, consultationId],
+    )).rows[0];
+    if (!operation) return null;
+    const detail = await readScopeOperation(client, options.appId, operation.id, true);
+    if (detail.operationType !== "ADD_MEMBER" || detail.targetAdminId !== context.userId) return null;
+    if (detail.state !== "FAILED" && detail.state !== "NEEDS_REVIEW") return null;
+    requireSupportAccess(access, row.kind);
+    if (row.messageScopeState !== "READY" || row.messageScopeId !== detail.providerTeamId) {
+      throw conflict("IM claim scope changed during recovery");
+    }
+    const locked = await lockSupportMutation(client, options.appId, [], [context.userId]);
+    // 同一目标已由原操作预留过一次：恢复只做只读资格校验，不 reserve、不再推进分配时间。
+    const target = (await readEligibleSupport(client, options.appId, locked)).find((candidate) => candidate.adminUserId === context.userId);
+    if (!target) throw unavailable("当前客服不可接待新咨询");
+    const resumed = await client.query(
+      `UPDATE "zzsh_iam"."im_consultation_scope_operation"
+          SET "state" = 'PENDING', "attempt_count" = 0, "next_retry_at" = clock_timestamp(),
+              "lease_until" = NULL, "lease_token_hash" = NULL, "last_failure_class" = NULL,
+              "last_failure_detail" = NULL, "updated_at" = clock_timestamp()
+        WHERE "app_id" = $1 AND "id" = $2 AND "state" IN ('NEEDS_REVIEW', 'FAILED')`,
+      [options.appId, detail.id],
+    );
+    if (resumed.rowCount !== 1) throw unavailable("IM 接待操作正在恢复，请稍后重试");
+    await recordAudit(client, {
+      actorType: "admin",
+      actorId: context.userId,
+      sessionId: context.sessionId,
+      action: "im.scope.recovery.retried",
+      objectType: "im_consultation_scope_operation",
+      objectId: detail.id,
+      outcome: "SUCCESS",
+      requestId,
+      details: { operationType: detail.operationType, resumedClaim: true },
+    });
+    return detail.id;
+  });
 }
 
 export async function retryMessageScopeOperation(
@@ -2508,6 +3262,13 @@ export async function retryMessageScopeOperation(
   consultationId: string,
   requestId: string,
 ): Promise<{ consultation: ConsultationView }> {
+  // ADD_MEMBER 对账恢复必须先于关单对账：等待中轮次没有负责人，关单路径会直接拒绝。
+  const claimRecoveryId = await retryOwnClaimOperation(options, context, consultationId, requestId);
+  if (claimRecoveryId) {
+    await runScopeOperationNow(options, claimRecoveryId);
+    await restoreClaimLoad(options, consultationId, context.userId);
+    return readAdminConsultationView(options, context, consultationId);
+  }
   const closeReconciliationClaim = await claimCloseReconciliation(options, context, consultationId, requestId);
   if (closeReconciliationClaim === "SUCCEEDED") return readAdminConsultationView(options, context, consultationId);
   if (closeReconciliationClaim) {
@@ -2625,7 +3386,7 @@ export function decodeEventCursor(consultationId: string, value: string): { crea
 
 /**
  * Same predicate as listAdminConsultations: own assignment, or unassigned rows this
- * admin may claim for the given kind. CLOSED stays out of scope this round.
+ * admin may claim. CLOSED stays out of scope this round.
  */
 async function readAuthorizedAdminConsultation(
   client: PoolClient,
@@ -2636,23 +3397,18 @@ async function readAuthorizedAdminConsultation(
   const access = await loadEffectiveAdminAccess(client, context.userId);
   if (!hasPermission(access, ADMIN_PERMISSION.imSupportRead)) throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
   const serviceQueue = hasPermission(access, ADMIN_PERMISSION.imSupportAccept);
-  const complaintQueue = serviceQueue && hasPermission(access, ADMIN_PERMISSION.imSupportComplaint);
   const result = await client.query<ConsultationRow>(
     `${CONSULTATION_SELECT}
       WHERE c."app_id" = $1 AND c."id" = $2 AND c."state" <> 'CLOSED' AND (
         c."assigned_admin_id" = $3
-        OR (c."assigned_admin_id" IS NULL AND c."kind" = 'SERVICE' AND $4::boolean)
-        OR (c."assigned_admin_id" IS NULL AND c."kind" = 'COMPLAINT' AND $5::boolean)
+        OR (c."assigned_admin_id" IS NULL AND $4::boolean)
       )`,
-    [appId, consultationId, context.userId, serviceQueue, complaintQueue],
+    [appId, consultationId, context.userId, serviceQueue],
   );
   const row = result.rows[0];
   // Identical rejection for "does not exist", "other app", "closed" and "not yours":
   // the projection must not confirm the existence of an object the caller cannot read.
   if (!row) throw new SecurityApiError(404, "NOT_FOUND", "Consultation not found");
-  if (row.kind === "COMPLAINT" && (await storedComplaintExclusions(client, row.id, true)).includes(context.userId)) {
-    throw new SecurityApiError(404, "NOT_FOUND", "Consultation not found");
-  }
   return row;
 }
 

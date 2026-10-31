@@ -46,6 +46,7 @@ import {
 } from "../supply/supply-routes";
 import { handleSettlementAdminRoute, handleSettlementUserRoute } from "./settlement-routes";
 import { handlePrestartTerminationRoute } from "./prestart-termination-routes";
+import { handleSupportCancelAdminRoute } from "./support-cancel-routes";
 import { handleLegacyContinuationRoute } from "./legacy-continuation-routes";
 import type { LegacyDutyFinalizationReader } from "./legacy-continuation-model";
 import {
@@ -310,6 +311,11 @@ export async function handleOrderAdminRoute(
     if (await handleLegacyContinuationRoute(request, response, options, "admin")) return;
     if (await handlePrestartTerminationRoute(request, response, options, "admin")) return;
     if (await handleSettlementAdminRoute(request, response, options)) return;
+    const supportCancel = /^\/([A-Za-z0-9._:-]+)\/support-cancel$/.exec(path);
+    if (supportCancel) {
+      await handleSupportCancelAdminRoute(request, response, options, decodeId(supportCancel[1]!), query, method);
+      return;
+    }
     const memberInvite = /^\/([A-Za-z0-9._:-]+)\/members$/.exec(path);
     if (method === "POST" && memberInvite) {
       if (!requireOrigin(request, response, options, requestId)) return;

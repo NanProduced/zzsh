@@ -43,11 +43,20 @@ export type SupportOverviewRow = {
   currentOrderGroups: number;
 };
 
+export type SupportRatingOverview = {
+  count: number;
+  average: number | null;
+  /** index 0 = 1 分 … index 4 = 5 分。 */
+  distribution: [number, number, number, number, number];
+  agents: { adminUserId: string; name: string; count: number; average: number }[];
+};
+
 export type SupportOverview = {
   onDuty: SupportOverviewRow[];
   totals: { onDutyCount: number; waitingConsultations: number; todaySessions: number; todayUsers: number };
   trend: { date: string; sessions: number; users: number }[];
   hourly: { hour: number; sessions: number }[];
+  ratings: SupportRatingOverview;
 };
 
 export type SupportHandoverView = {
@@ -100,6 +109,14 @@ function integer(value: string | number | null | undefined): number {
   const parsed = typeof value === "number" ? value : Number(value ?? 0);
   if (!Number.isSafeInteger(parsed)) throw new Error("IM support metric is invalid");
   return parsed;
+}
+
+/** 评分均值保留一位小数；无评分事实返回 null，不伪造 0 分。 */
+function nullableAverage(value: string | number | null | undefined): number | null {
+  if (value === null || value === undefined) return null;
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed)) throw new Error("IM support rating average is invalid");
+  return Math.round(parsed * 10) / 10;
 }
 
 export function parseSupportDate(value: string | null | undefined): string | null {
@@ -407,6 +424,29 @@ const SUPPORT_OVERVIEW_HOURLY_SQL = `
    GROUP BY h."hour"
    ORDER BY h."hour"`;
 
+const SUPPORT_OVERVIEW_RATING_SQL = `
+  SELECT COUNT(*)::int AS "count", AVG("score") AS "average",
+         COUNT(*) FILTER (WHERE "score" = 1)::int AS "score1",
+         COUNT(*) FILTER (WHERE "score" = 2)::int AS "score2",
+         COUNT(*) FILTER (WHERE "score" = 3)::int AS "score3",
+         COUNT(*) FILTER (WHERE "score" = 4)::int AS "score4",
+         COUNT(*) FILTER (WHERE "score" = 5)::int AS "score5"
+    FROM "zzsh_iam"."im_support_round_rating"
+   WHERE "app_id" = $1 AND "submitted_at" IS NOT NULL
+     AND ("submitted_at" AT TIME ZONE 'Asia/Shanghai')::date = COALESCE($2::date, (now() AT TIME ZONE 'Asia/Shanghai')::date)`;
+
+const SUPPORT_OVERVIEW_RATING_AGENTS_SQL = `
+  SELECT r."assigned_admin_id" AS "adminUserId",
+         COALESCE(NULLIF(btrim(au."name"), ''), au."username", r."assigned_admin_id") AS "name",
+         COUNT(*)::int AS "count", AVG(r."score") AS "average"
+    FROM "zzsh_iam"."im_support_round_rating" r
+    LEFT JOIN "zzsh_auth_admin"."user" au ON au."id" = r."assigned_admin_id"
+   WHERE r."app_id" = $1 AND r."submitted_at" IS NOT NULL
+     AND (r."submitted_at" AT TIME ZONE 'Asia/Shanghai')::date = COALESCE($2::date, (now() AT TIME ZONE 'Asia/Shanghai')::date)
+   GROUP BY r."assigned_admin_id",
+            COALESCE(NULLIF(btrim(au."name"), ''), au."username", r."assigned_admin_id")
+   ORDER BY "average" DESC, "count" DESC, "adminUserId"`;
+
 /**
  * 运营看板只读投影：统计表、今日汇总、近 7 天咨询趋势、今日每小时新咨询。
  * 数据不足时 trend/hourly 返回空数组，不画伪造的零趋势。
@@ -446,6 +486,16 @@ export async function readSupportOverview(
     const hourlyRows = (await client.query<{ hour: number; sessions: string | number }>(
       SUPPORT_OVERVIEW_HOURLY_SQL, [options.appId, date],
     )).rows.map((row) => ({ hour: integer(row.hour), sessions: integer(row.sessions) }));
+    const ratingRow = (await client.query<{
+      count: string | number; average: string | number | null;
+      score1: string | number; score2: string | number; score3: string | number; score4: string | number; score5: string | number;
+    }>(SUPPORT_OVERVIEW_RATING_SQL, [options.appId, date])).rows[0];
+    const ratingAgents = (await client.query<{ adminUserId: string; name: string; count: string | number; average: string | number }>(
+      SUPPORT_OVERVIEW_RATING_AGENTS_SQL, [options.appId, date],
+    )).rows.flatMap((row) => {
+      const average = nullableAverage(row.average);
+      return average === null ? [] : [{ adminUserId: row.adminUserId, name: row.name, count: integer(row.count), average }];
+    });
     return {
       onDuty,
       totals: {
@@ -457,6 +507,18 @@ export async function readSupportOverview(
       // 没有任何事实时返回空数组，不用 0 伪造趋势；真实为零的日期保留。
       trend: trendRows.some((row) => row.sessions > 0 || row.users > 0) ? trendRows : [],
       hourly: hourlyRows.some((row) => row.sessions > 0) ? hourlyRows : [],
+      ratings: {
+        count: integer(ratingRow?.count),
+        average: nullableAverage(ratingRow?.average),
+        distribution: [
+          integer(ratingRow?.score1),
+          integer(ratingRow?.score2),
+          integer(ratingRow?.score3),
+          integer(ratingRow?.score4),
+          integer(ratingRow?.score5),
+        ],
+        agents: ratingAgents,
+      },
     };
   });
 }

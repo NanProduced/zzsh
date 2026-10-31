@@ -77,6 +77,8 @@ test("listMyOrders hydrates frozen line names in one catalog read", async () => 
       calls.push({ sql, values });
       if (sql.includes("zzsh_order.rental_order")) return { rows: [row("order_1", "awm"), row("order_2", "coffee")] };
       if (sql.includes("zzsh_supply.billable_item")) return { rows: [{ id: "awm", name: "AWM子弹" }, { id: "coffee", name: "咖啡豆" }] };
+      if (sql.includes("zzsh_order.im_order_unread")) return { rows: [] };
+      if (sql.includes("settlement_intake") && sql.includes("rental_opening")) return { rows: [] };
       throw new Error(`unexpected query: ${sql}`);
     },
   } as unknown as PoolClient;

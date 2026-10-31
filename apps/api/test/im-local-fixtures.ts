@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 
 import {
   ImTransportRequestError,
@@ -35,10 +37,10 @@ import { FakeSupportScopeProvider } from "./im-test-fixtures";
 import { OrderTeamTransport } from "./order-team-fixtures";
 
 /**
- * Test-only in-memory message transport. Reuses the shape of the retired
- * browser-round2 FakeMessageTransport, extended with the order-scoped image
- * seam that the current ImMessageTransport contract exposes. Never injected in
- * production and never persists messages.
+ * Test-only message transport. Reuses the shape of the retired browser-round2
+ * FakeMessageTransport, extended with the order-scoped image seam. It is never
+ * injected in production; the optional persistPath keeps local-review history
+ * across API restarts (the real channel stores history server-side).
  */
 export class InMemoryMessageTransport implements ImMessageTransport {
   private readonly messages = new Map<string, ImTransportMessage[]>();
@@ -47,9 +49,55 @@ export class InMemoryMessageTransport implements ImMessageTransport {
   /** Per-viewer local hides; the shared team log is never mutated. */
   private readonly hidden = new Map<string, Map<string, Set<string>>>();
   private nextId = 1;
+  private readonly persistPath?: string;
   readonly calls = { history: 0, sendText: 0, sendImage: 0, sendMedia: 0, replyText: 0, revoke: 0, hideForViewer: 0, readImage: 0, readMedia: 0, card: 0 };
 
-  constructor(private readonly now: () => number = Date.now) {}
+  constructor(private readonly now: () => number = Date.now, options: { persistPath?: string } = {}) {
+    this.persistPath = options.persistPath;
+    this.restore();
+  }
+
+  /** Local-review restart durability lives here, not in the UI or business tables. */
+  private restore(): void {
+    if (!this.persistPath || !existsSync(this.persistPath)) return;
+    try {
+      const value = JSON.parse(readFileSync(this.persistPath, "utf8")) as {
+        nextId?: unknown;
+        messages?: Record<string, ImTransportMessage[]>;
+        images?: Record<string, { imageId: string; scope: ImOrderImageScope; mimeType: string; body: string }>;
+        media?: Record<string, { mediaId: string; scope: ImOrderMediaScope; kind: ImTransportMediaKind; name: string; mimeType: string; body: string }>;
+        hidden?: Record<string, Record<string, string[]>>;
+      };
+      for (const [key, rows] of Object.entries(value.messages ?? {})) if (Array.isArray(rows)) this.messages.set(key, rows.filter((row) => row && typeof row === "object"));
+      for (const [key, image] of Object.entries(value.images ?? {})) if (image) this.images.set(key, { imageId: image.imageId, scope: image.scope, mimeType: image.mimeType as ImTransportImage["mimeType"], body: Uint8Array.from(Buffer.from(image.body, "base64")) });
+      for (const [key, media] of Object.entries(value.media ?? {})) if (media) this.media.set(key, { mediaId: media.mediaId, scope: media.scope, kind: media.kind, name: media.name, mimeType: media.mimeType, body: Uint8Array.from(Buffer.from(media.body, "base64")) });
+      for (const [team, viewers] of Object.entries(value.hidden ?? {})) {
+        const next = new Map<string, Set<string>>();
+        for (const [viewer, ids] of Object.entries(viewers ?? {})) next.set(viewer, new Set(Array.isArray(ids) ? ids : []));
+        this.hidden.set(team, next);
+      }
+      const ids = [...this.messages.values()].flat().map((row) => Number(/^fixture-server-(\d+)$/.exec(row.messageServerId ?? "")?.[1] ?? 0));
+      this.nextId = Math.max(Number(value.nextId) || 1, ...ids, 1);
+    } catch {
+      // A corrupt local-review file starts empty; the next write replaces it.
+    }
+  }
+
+  private save(): void {
+    if (!this.persistPath) return;
+    try {
+      mkdirSync(dirname(this.persistPath), { recursive: true });
+      writeFileSync(this.persistPath, JSON.stringify({
+        nextId: this.nextId,
+        messages: Object.fromEntries(this.messages),
+        images: Object.fromEntries([...this.images].map(([key, image]) => [key, { ...image, body: Buffer.from(image.body).toString("base64") }])),
+        media: Object.fromEntries([...this.media].map(([key, media]) => [key, { ...media, body: Buffer.from(media.body).toString("base64") }])),
+        hidden: Object.fromEntries([...this.hidden].map(([team, viewers]) => [team, Object.fromEntries([...viewers].map(([viewer, ids]) => [viewer, [...ids]]))])),
+      }));
+    } catch {
+      // Local-review durability is best-effort; a read-only path must not break sending.
+    }
+  }
 
   /** NIM team conversations are viewer-specific (`<account>|2|<teamId>`); the
    *  retained message log is shared by team, like the supplier stores it. */
@@ -74,6 +122,7 @@ export class InMemoryMessageTransport implements ImMessageTransport {
     const rows = this.messages.get(teamKey) ?? [];
     rows.push(message);
     this.messages.set(teamKey, rows);
+    this.save();
     return { ...message };
   }
 
@@ -175,6 +224,7 @@ export class InMemoryMessageTransport implements ImMessageTransport {
     delete target.attachment;
     delete target.media;
     delete target.reply;
+    this.save();
     return { ...target, conversationId: input.conversationId };
   }
 
@@ -188,6 +238,7 @@ export class InMemoryMessageTransport implements ImMessageTransport {
     hidden.add(this.messageKey(target));
     viewers.set(input.viewerAccountId, hidden);
     this.hidden.set(teamKey, viewers);
+    this.save();
   }
 
   async sendImage(input: {

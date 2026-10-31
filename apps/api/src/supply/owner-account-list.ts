@@ -62,7 +62,7 @@ export const OWNER_ACCOUNT_LIST_SQL = `SELECT /* owner-account-list */ * FROM (
    u.name AS owner_name,g.name AS game_name,v.payload,v.presentation->'items' AS presentation_items,
    (v.rule_release_id IS NOT DISTINCT FROM g.current_release_id) AS rule_current,
    ao.id AS ao_id,ao.display_no AS ao_display_no,ao.status AS ao_status,ru.name AS ao_renter_name,ao.term_seconds::text AS ao_term_seconds,
-   ${utc("ao.paid_at")} AS ao_started_at,${utc("ao.paid_at + make_interval(secs => ao.term_seconds)")} AS ao_deadline_at,
+   ${utc("ao.paid_at")} AS ao_started_at,${utc("(ao.paid_at + make_interval(secs => ao.term_seconds))")} AS ao_deadline_at,
    ao.quote_snapshot->'ownerTotal' AS ao_owner_amount,
    ${RENTAL_STATE_SQL} AS rental_state
   FROM zzsh_supply.rental_account a

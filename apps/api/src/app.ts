@@ -15,6 +15,7 @@ import {
 import { mountAuthHandlers, type AuthRuntimeOptions } from "./auth/auth-runtime";
 import type { BusinessDatabaseOptions } from "./database/business";
 import type { OrderSweepModuleOptions } from "./order/order-sweep.module";
+import { OpeningAutoConfirmWorker } from "./order/opening-auto-confirm";
 
 export type ApiAppOptions = ApiAppInfrastructureOptions & {
   health: ReadinessModuleOptions;
@@ -143,6 +144,36 @@ export async function createApp(options: ApiAppOptions) {
     mountAdminFinanceRead(app,()=>financeOptions);
     const securityOptions=await mountAuthHandlers(app, options.auth);
     financeOptions={...securityOptions,listingCursorKey:options.auth.listingCursorKey,joinpayAccountRead:options.auth.joinpayAccountRead};
+    // 40-minute opening auto-confirm only runs where openings can actually be recorded
+    // (controlled settlement recording). The interval timer is unref'd and stops with the
+    // HTTP server, so isolated apps without that capability never start it.
+    if (options.database && securityOptions.settlementRecordingEnabled) {
+      const worker = new OpeningAutoConfirmWorker(options.database.pool, {
+        intervalMs: 60_000,
+        batchLimit: 20,
+        lockTimeoutMs: 3_000,
+        onResult: (result) => {
+          if (result.confirmed.length || result.failed.length || result.skippedLocked.length) {
+            console.error(JSON.stringify({
+              event: "order.opening.auto_confirm.batch",
+              candidates: result.candidates,
+              confirmed: result.confirmed.length,
+              skipped: result.skipped.length,
+              skippedLocked: result.skippedLocked.length,
+              failed: result.failed.length,
+            }));
+          }
+        },
+        onError: (error) => {
+          console.error(JSON.stringify({
+            event: "order.opening.auto_confirm.failed",
+            message: error instanceof Error ? error.message : String(error),
+          }));
+        },
+      });
+      worker.start();
+      app.getHttpServer().once("close", () => { void worker.stop(); });
+    }
   }
   if (process.env.NODE_ENV !== "production") {
     const config = new DocumentBuilder().setTitle("ZZSH API").setVersion("0.0.0").build();

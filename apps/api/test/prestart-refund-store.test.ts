@@ -43,7 +43,7 @@ function fixture(t:any){
    original={id:v[0],order_id:v[1],payment_confirmation_id:v[2],renter_user_id:v[3],merchant_identity_id:v[4],original_payment_trx_no:v[5],original_payment_order_no:v[6],
     responsibility_version_hash:v[7],refund_order_no:v[8],amount_cents:v[9],idempotency_key:v[10],request_fingerprint:v[11],
     initial_admission_ref:v[13],initial_admission_sha256:v[14],initial_admission_canonical:v[15],wire_merchant_no:v[16],initial_profile_id:v[17],initial_profile_sha256:v[18],
-    initial_key_version_ref:v[19],liability_root_id:v[22],liability_event_id:v[23],basis_kind:'PRESTART_TERMINATION',payment_source:'JOINPAY',posting_id:null,
+    initial_key_version_ref:v[19],liability_root_id:v[23],liability_event_id:v[24],basis_kind:'PRESTART_TERMINATION',payment_source:'JOINPAY',posting_id:null,
     evidence_level:'JOINPAY_FORMAL',currency:'CNY',state:'READY',budget_disposition:'ALLOCATED',requires_review:false,lease_version:'0'};
    return{rows:[original],rowCount:1};}
   if(sql.includes('"zzsh_iam"."audit_event"'))return{rows:[],rowCount:1};

@@ -6,6 +6,7 @@ import { assertGameScopeUsable, gameScopeSql, noGameScopeError, readAdminGameSco
 import { SecurityApiError } from "../auth/security-core";
 import { decimalToBigInt, formatDecimalExact, formatScaledInteger, parseNonNegativeDecimal } from "../supply/decimal";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId } from "./identity-lifecycle";
+import { supportManagerIdentityKey } from "./consultation";
 import { OrderImSdkRouteError, type OrderImSdkRoute, type OrderImSdkRouteBindings } from "../config/config";
 import { readPrestartRefundProgress } from "../order/prestart-refund-store";
 import type { PrestartPaymentBasis } from "../order/prestart-termination";
@@ -20,7 +21,7 @@ export function terminalSendWindow(input:{orderStatus:string;cancelReason:string
   settlementPostedAt:string|null;refundCompletedAt:string|null;now?:number}):TerminalSendWindow{
   const now=input.now??Date.now();
   if(input.orderStatus!=="COMPLETED"&&input.orderStatus!=="CANCELLED")return {orderEndedAt:null,sendUntil:null,refundPending:false,refundCompletedAt:null,terminalSendAllowed:true};
-  if(input.orderStatus==="CANCELLED"&&input.cancelReason==="PRESTART_TERMINATED"){
+  if(input.orderStatus==="CANCELLED"&&(input.cancelReason==="PRESTART_TERMINATED"||input.cancelReason==="SUPPORT_CANCELLED_REFUND")){
     const completed=input.refundCompletedAt??null;
     if(completed===null)return {orderEndedAt:input.cancelledAt,sendUntil:null,refundPending:true,refundCompletedAt:null,terminalSendAllowed:true};
     const completedMs=new Date(completed).getTime();
@@ -197,6 +198,8 @@ export async function readOrderTeamAccess(c:PoolClient,actor:OrderTeamActor,orde
   const g=(await c.query(`SELECT g.*,o.renter_user_id,o.owner_user_id,o.game_id,o.display_no,o.status AS order_status,o.cancel_reason AS order_cancel_reason,o.cancelled_at AS order_cancelled_at,o.title,o.account_id,o.quote_snapshot AS quote_snapshot,game.name AS game_name,
       o.term_seconds::text AS term_seconds,
       latest_opening.id AS opening_id,latest_opening.status AS opening_status,latest_opening.confirmed_at AS opening_confirmed_at,
+      latest_opening.version_no AS opening_version_no,latest_opening.confirm_source AS opening_confirm_source,
+      CASE WHEN latest_opening.status='DRAFT' THEN latest_opening.auto_confirm_due_at END AS opening_confirm_due_at,
       EXISTS(SELECT 1 FROM zzsh_order.settlement_intake si WHERE si.order_id=o.id AND si.status='OPEN') AS intake_open,
       EXISTS(SELECT 1 FROM zzsh_order.settlement_version sv WHERE sv.order_id=o.id AND sv.superseded_at IS NULL) AS settlement_current,
       posting.posted_at AS settlement_posted_at,
@@ -207,7 +210,8 @@ export async function readOrderTeamAccess(c:PoolClient,actor:OrderTeamActor,orde
       to_jsonb(g)->>'escalation_state' AS escalation_state_projection
     FROM zzsh_order.rental_order o JOIN zzsh_supply.game game ON game.id=o.game_id
     LEFT JOIN zzsh_order.im_order_group g ON g.order_id=o.id
-    LEFT JOIN LATERAL (SELECT op.id,op.status,op.confirmed_at FROM zzsh_order.rental_opening op WHERE op.order_id=o.id
+    LEFT JOIN LATERAL (SELECT op.id,op.status,op.confirmed_at,op.version_no,op.confirm_source,op.auto_confirm_due_at
+      FROM zzsh_order.rental_opening op WHERE op.order_id=o.id
       ORDER BY op.version_no DESC LIMIT 1) latest_opening ON TRUE
     LEFT JOIN LATERAL (SELECT p.posted_at FROM zzsh_order.settlement_posting p WHERE p.order_id=o.id
       ORDER BY p.posted_at DESC,p.id DESC LIMIT 1) posting ON TRUE WHERE o.id=$1`,[orderId])).rows[0];
@@ -226,7 +230,7 @@ export async function readOrderTeamAccess(c:PoolClient,actor:OrderTeamActor,orde
   }
   const terminal=g.order_status==="COMPLETED"||g.order_status==="CANCELLED";
   let refundCompletedAt:string|null=null;
-  if(g.order_status==="CANCELLED"&&g.order_cancel_reason==="PRESTART_TERMINATED"){
+  if(g.order_status==="CANCELLED"&&(g.order_cancel_reason==="PRESTART_TERMINATED"||g.order_cancel_reason==="SUPPORT_CANCELLED_REFUND")){
     const termination=(await c.query<{id:string;payment_basis:PrestartPaymentBasis}>(`SELECT id,payment_basis FROM zzsh_order.prestart_termination
       WHERE order_id=$1 AND state='APPROVED' ORDER BY approved_at DESC NULLS LAST,id DESC LIMIT 1`,[orderId])).rows[0];
     if(termination)refundCompletedAt=(await readPrestartRefundProgress(c,termination.id,termination.payment_basis,false)).completedLocallyAt??null;
@@ -255,16 +259,24 @@ export async function readOrderTeamAccess(c:PoolClient,actor:OrderTeamActor,orde
     if(projected.length>0)frozenInventory=projected;
   }
   const openingAcks={renter:false,owner:false};
+  const openingAckSources:{renter:"PARTY"|"ON_BEHALF"|"AUTO"|null;owner:"PARTY"|"ON_BEHALF"|"AUTO"|null}={renter:null,owner:null};
   if(g.opening_id!=null){
-    const acks=(await c.query<{party:string}>(`SELECT party FROM zzsh_order.rental_opening_ack WHERE opening_id=$1 AND party IN ('RENTER','OWNER')`,[g.opening_id])).rows;
-    openingAcks.renter=acks.some(a=>a.party==="RENTER");
-    openingAcks.owner=acks.some(a=>a.party==="OWNER");
+    const acks=(await c.query<{party:string;source:string}>(`SELECT party,source FROM zzsh_order.rental_opening_ack WHERE opening_id=$1 AND party IN ('RENTER','OWNER')`,[g.opening_id])).rows;
+    const renter=acks.find(a=>a.party==="RENTER"),owner=acks.find(a=>a.party==="OWNER");
+    openingAcks.renter=Boolean(renter);
+    openingAcks.owner=Boolean(owner);
+    openingAckSources.renter=renter?.source==="ON_BEHALF"||renter?.source==="AUTO"?renter.source:renter?"PARTY":null;
+    openingAckSources.owner=owner?.source==="ON_BEHALF"||owner?.source==="AUTO"?owner.source:owner?"PARTY":null;
   }
+  const openingConfirmSource=g.opening_confirm_source==="PARTY"||g.opening_confirm_source==="ON_BEHALF"||g.opening_confirm_source==="AUTO"?g.opening_confirm_source:null;
   const fulfillment=projectOrderFulfillment({orderStatus:g.order_status,hasGroup:g.app_id!=null,provisionState:g.provision_state??null,
     teamState:g.team_state??null,openingStatus:g.opening_status??null,openingConfirmedAt:g.opening_confirmed_at??null,
     openingAcked:openingAcks.renter||openingAcks.owner,termSeconds:g.term_seconds,
     intakeOpen:g.intake_open===true,currentSettlement:g.settlement_current===true,posted:g.settlement_posted_at!=null});
-  const summary={orderId,displayNo:g.display_no,orderStatus:g.order_status,cancelReason:g.order_cancel_reason??null,orderEndedAt,sendUntil,refundPending:window.refundPending,refundCompletedAt:window.refundCompletedAt,...fulfillment,openingAcks,terms,gameName:g.game_name,account:{id:g.account_id,title:g.title},assignmentState:g.provision_state??null,
+  const summary={orderId,displayNo:g.display_no,orderStatus:g.order_status,cancelReason:g.order_cancel_reason??null,orderEndedAt,sendUntil,refundPending:window.refundPending,refundCompletedAt:window.refundCompletedAt,...fulfillment,openingAcks,openingAckSources,
+    openingId:g.opening_id??null,openingVersion:Number.isInteger(g.opening_version_no)?Number(g.opening_version_no):null,
+    openingConfirmDueAt:g.opening_confirm_due_at?new Date(g.opening_confirm_due_at).toISOString():null,
+    openingConfirmSource,terms,gameName:g.game_name,account:{id:g.account_id,title:g.title},assignmentState:g.provision_state??null,
     ...(frozenInventory?{frozenInventory}:{}),
     supportEscalation:{firstResponseAt:g.escalation_first_response_at??null,remindDueAt:g.escalation_remind_due_at??null,
       addRound:Number(g.escalation_add_round??0),state:escalationState,needsManualReview:escalationState==="VERIFY_REQUIRED"||escalationState==="EXHAUSTED",
@@ -287,7 +299,7 @@ export async function readOrderTeamAccess(c:PoolClient,actor:OrderTeamActor,orde
     throw error;
   }
   return {...summary,appId:g.app_id,teamState:"READY",teamId:g.team_id,name:g.team_name,
-    viewerAccountId:own.account_id,conversationId,canRead:true,canSend,
+    viewerAccountId:own.account_id,botAccountId:deriveYunxinAccountId(supportManagerIdentityKey(g.app_id)),conversationId,canRead:true,canSend,
     ...(messageRoute?{messageRoute}:{}),
     members:projectOrderTeamMembers(members,g.escalation_responsible_admin_id??g.assigned_admin_id,actor.realm)};
 }
@@ -318,7 +330,7 @@ export async function listJoinedOrderTeams(c:PoolClient,actor:OrderTeamActor,cur
   const access=await loadEffectiveAdminAccess(c,actor.userId);
   if(!hasPermission(access,"im.support.read"))throw denied();
   assertGameScopeUsable(await readAdminGameScope(c,actor.userId),access?.isBoss===true);
-  const rows=(await c.query<Record<string,any>>(`SELECT o.id,o.display_no AS "displayNo",o.title,o.status,
+  const rows=(await c.query<Record<string,any>>(`SELECT o.id,o.display_no AS "displayNo",o.title,o.status,o.created_at AS "createdAt",
       g.team_state AS "teamState",g.provision_state AS "provisionState",
       latest_opening.status AS "openingStatus",latest_opening.confirmed_at AS "openingConfirmedAt",
       EXISTS(SELECT 1 FROM zzsh_order.rental_opening_ack a WHERE a.opening_id=latest_opening.id) AS "openingAcked",
@@ -330,10 +342,20 @@ export async function listJoinedOrderTeams(c:PoolClient,actor:OrderTeamActor,cur
       COALESCE(g.add_round,0) AS "addRound",COALESCE(g.escalation_state,'NOT_STARTED') AS "escalationState",
       (g.first_response_state='RUNNING' AND g.first_response_at IS NULL AND g.remind_due_at IS NOT NULL
         AND g.remind_due_at<=clock_timestamp()) AS "firstResponseOverdue",
+      act.last_message_at AS "lastMessageAt",
+      act.last_message_preview AS "lastMessagePreview",
+      COALESCE(unread.unread_count,0) AS "unreadCount",
       game.name AS "gameName"
     FROM zzsh_order.im_order_member mm JOIN zzsh_iam.im_identity_mapping m ON m.id=mm.identity_id AND m.app_id=mm.app_id
     JOIN zzsh_order.im_order_group g ON g.order_id=mm.order_id AND g.app_id=mm.app_id
     JOIN zzsh_order.rental_order o ON o.id=g.order_id JOIN zzsh_supply.game game ON game.id=o.game_id
+    LEFT JOIN zzsh_order.im_order_activity act ON act.order_id=o.id
+    LEFT JOIN LATERAL (
+      SELECT u.unread_count FROM zzsh_order.im_order_unread u
+        JOIN zzsh_iam.im_identity_mapping um ON um.id=u.identity_id AND um.app_id=g.app_id
+       WHERE u.order_id=o.id AND um.platform_subject_id=$1 AND um.realm='admin' AND um.identity_kind='ADMIN' AND um.status='READY'
+       LIMIT 1
+    ) unread ON TRUE
     LEFT JOIN LATERAL (SELECT op.id,op.status,op.confirmed_at FROM zzsh_order.rental_opening op WHERE op.order_id=o.id
       ORDER BY op.version_no DESC LIMIT 1) latest_opening ON TRUE
     LEFT JOIN LATERAL (SELECT p.posted_at FROM zzsh_order.settlement_posting p WHERE p.order_id=o.id
@@ -348,4 +370,63 @@ export async function listJoinedOrderTeams(c:PoolClient,actor:OrderTeamActor,cur
     return {...row,stage:fulfillment.stage,dueAt:fulfillment.dueAt,todo:queueTodo(fulfillment)};
   });
   return {items,nextCursor:rows.length>limit?rows[limit-1]!.id:null,limit};
+}
+
+const ORDER_TEAM_CONVERSATION=/^([A-Za-z0-9][A-Za-z0-9_@.-]{0,31})\|2\|([0-9]{1,19})$/;
+
+/**
+ * 订单群没有客服轮次：记录真实最后活动，并按 JOINED 成员身份递增未读。
+ * 发送成功后 best-effort 调用；活动/未读失败不能把已发送改判为失败。
+ */
+export async function recordOrderGroupMessage(c:{query:PoolClient["query"]},appId:string,conversationId:string,preview:string|null):Promise<boolean>{
+  const match=ORDER_TEAM_CONVERSATION.exec(conversationId);
+  const senderAccountId=match?.[1];
+  const teamId=match?.[2];
+  if(!teamId||!senderAccountId)return false;
+  const text=preview===null?null:[...preview.replace(/\s+/g," ").trim()].slice(0,80).join("")||null;
+  const activity=await c.query(
+    `INSERT INTO zzsh_order.im_order_activity(order_id,app_id,last_message_at,last_message_preview)
+     SELECT g.order_id,g.app_id,clock_timestamp(),$3
+       FROM zzsh_order.im_order_group g
+      WHERE g.app_id=$1 AND g.team_id=$2
+     ON CONFLICT(order_id) DO UPDATE
+       SET last_message_at=EXCLUDED.last_message_at,last_message_preview=EXCLUDED.last_message_preview`,
+    [appId,teamId,text],
+  );
+  if((activity.rowCount??activity.rows.length)===0)return false;
+  await c.query(
+    `INSERT INTO zzsh_order.im_order_unread(order_id,identity_id,unread_count)
+     SELECT mm.order_id,mm.identity_id,1
+       FROM zzsh_order.im_order_group g
+       JOIN zzsh_order.im_order_member mm ON mm.order_id=g.order_id AND mm.app_id=g.app_id AND mm.state='JOINED'
+       JOIN zzsh_iam.im_identity_mapping m ON m.id=mm.identity_id AND m.app_id=mm.app_id
+      WHERE g.app_id=$1 AND g.team_id=$2 AND m.account_id<>$3
+     ON CONFLICT(order_id,identity_id) DO UPDATE
+       SET unread_count=LEAST(zzsh_order.im_order_unread.unread_count+1,999)`,
+    [appId,teamId,senderAccountId],
+  );
+  return true;
+}
+
+/** 打开订单群时只清当前成员自己的未读；成员关系由服务端复核。 */
+export async function markOrderGroupRead(c:{query:PoolClient["query"]},appId:string,orderId:string,actor:OrderTeamActor):Promise<{orderId:string;unreadCount:number}>{
+  const kind=actor.realm==="user"?"USER":"ADMIN";
+  const identity=(await c.query<{id:string}>(
+    `SELECT m.id
+       FROM zzsh_iam.im_identity_mapping m
+       JOIN zzsh_order.im_order_member mm ON mm.identity_id=m.id AND mm.app_id=m.app_id
+      WHERE m.app_id=$1 AND m.platform_subject_id=$2 AND m.realm=$3 AND m.identity_kind=$4
+        AND mm.order_id=$5 AND mm.state='JOINED' AND m.status='READY'
+      LIMIT 1`,
+    [appId,actor.userId,actor.realm,kind,orderId],
+  )).rows[0];
+  if(!identity)throw denied();
+  await c.query(
+    `INSERT INTO zzsh_order.im_order_unread(order_id,identity_id,unread_count,last_read_at)
+     VALUES($1,$2,0,clock_timestamp())
+     ON CONFLICT(order_id,identity_id) DO UPDATE
+       SET unread_count=0,last_read_at=clock_timestamp()`,
+    [orderId,identity.id],
+  );
+  return {orderId,unreadCount:0};
 }

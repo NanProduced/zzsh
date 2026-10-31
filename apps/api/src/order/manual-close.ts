@@ -17,7 +17,11 @@ export type ManualCloseActor = { userId: string; sessionId: string };
  * no settlement/refund liability is created; finance reconciles the captured
  * funds offline. The order guard enforces the same shape in the database.
  */
-export async function assertManualCloseAccess(client: PoolClient, orderId: string, actor: ManualCloseActor): Promise<void> {
+/**
+ * Shared support command boundary: active admin with order settlement write,
+ * game scope, and a joined STAFF identity on this order's READY team.
+ */
+export async function assertSupportOrderAccess(client: PoolClient, orderId: string, actor: ManualCloseActor): Promise<void> {
   await assertAdminContextInTransaction(client, CONTEXT(actor));
   const access = await loadEffectiveAdminAccess(client, actor.userId);
   if (!access || access.status !== "ACTIVE" || !hasPermission(access, ADMIN_PERMISSION.orderSettlementWrite)) throw forbidden();
@@ -35,7 +39,11 @@ export async function assertManualCloseAccess(client: PoolClient, orderId: strin
        AND m.platform_subject_id = $2 AND g.team_state = 'READY' LIMIT 1`,
     [orderId, actor.userId],
   )).rowCount;
-  if (!joined) throw forbidden("Only joined support can close this order");
+  if (!joined) throw forbidden("Only joined support can handle this order");
+}
+
+export async function assertManualCloseAccess(client: PoolClient, orderId: string, actor: ManualCloseActor): Promise<void> {
+  await assertSupportOrderAccess(client, orderId, actor);
 }
 
 export async function manualCloseOrder(

@@ -1044,16 +1044,13 @@ export async function runOrderFirstResponseAcceptance(t: TestContext, o: Options
     assert.equal((await signedRequest(PRE_SEND_PATH, preSendBody(consultTeam, consultAdminAccount), { base: hooks.base })).body?.errCode, 1);
     await pool.query(`UPDATE zzsh_iam.admin_security SET status='ACTIVE',updated_at=clock_timestamp() WHERE admin_user_id=$1`, [consultAdmin]);
     assert.equal((await signedRequest(PRE_SEND_PATH, preSendBody(consultTeam, consultAdminAccount), { base: hooks.base })).body?.errCode, 0);
-    // A COMPLAINT scope additionally requires im.support.complaint for the assigned admin.
+    // 投诉已并入普通咨询：旧 COMPLAINT scope 与 SERVICE 使用同一接待权限。
     const complaintTeam = "979900002";
     await pool.query(`INSERT INTO zzsh_iam.im_consultation
       (id,user_id,kind,state,user_account_id,peer_account_id,assigned_admin_id,app_id,message_scope_type,message_scope_id,message_scope_state,message_scope_version,version)
       VALUES ($1,$2,'COMPLAINT','ACTIVE',$3,$4,$5,$6,'TEAM',$7,'READY',1,1)`,
     [`im_consult_oim4b_c_${run}`, consultUser, consultUserAccount, consultAdminAccount, consultAdmin, appId, complaintTeam]);
-    assert.equal((await signedRequest(PRE_SEND_PATH, preSendBody(complaintTeam, consultAdminAccount), { base: hooks.base })).body?.errCode, 1);
-    await grantPermissions(consultAdmin, ["im.support.complaint"]);
     assert.equal((await signedRequest(PRE_SEND_PATH, preSendBody(complaintTeam, consultAdminAccount), { base: hooks.base })).body?.errCode, 0);
-    await pool.query(`UPDATE zzsh_iam.admin_user_permission SET effect='DENY' WHERE admin_user_id=$1 AND permission_code='im.support.complaint'`, [consultAdmin]);
   });
 
   await t.test("T03 copy-first keeps WAITING_AUTH, approval recovers, duplicates stay idempotent", async () => {

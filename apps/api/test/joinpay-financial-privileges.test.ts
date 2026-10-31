@@ -167,11 +167,12 @@ function prestartCatalog(){
  const f=fixture(['REFUND']);const ddl=readFileSync(resolve('migrations/business/0107_prestart_termination.sql'),'utf8');
  f.state.catalog.get(intent)!.push('basis_kind','liability_root_id','liability_event_id');
  for(const name of ['zzsh_order.prestart_termination','zzsh_order.prestart_termination_decision']){
-  const cols=columns(ddl,name);f.state.present.add(name);f.state.catalog.set(name,cols);
+  const cols=columns(ddl,name);if(name==='zzsh_order.prestart_termination')cols.push('requested_by_admin_user_id');
+  f.state.present.add(name);f.state.catalog.set(name,cols);
   for(const principal of ['runtime_role','PUBLIC'])f.rights.set(principal+':'+name,{table:new Set(['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']),
    columns:new Map(ops.map(op=>[op,new Set(cols)])),grantOption:true});
  }
- for(const name of ['prestart_payment_basis_valid(jsonb)','prestart_liability_complete(text)','native_prestart_refund_liability_complete(text)',
+ for(const name of ['prestart_payment_basis_valid(jsonb)','support_cancel_payment_basis_valid(jsonb)','prestart_liability_complete(text)','native_prestart_refund_liability_complete(text)',
   'native_prestart_refund_terminal_complete(text)','native_abnormal_refund_liability_complete(text)','native_abnormal_refund_terminal_complete(text)'])f.state.functions.add('zzsh_order.'+name);
  return f;
 }

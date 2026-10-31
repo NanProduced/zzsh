@@ -28,6 +28,8 @@ export type SupportDispatchWorkerConfig = {
   appId: string;
   intervalMs: number;
   batchLimit: number;
+  /** Owner default: an enabled dispatch worker also auto-assigns waiting consultations unless explicitly disabled. */
+  autoAssignConsultations: boolean;
 };
 
 export type OrderImSdkRouteConfig = {
@@ -349,15 +351,18 @@ function loadOrderTeamsConfig(env: NodeJS.ProcessEnv, yunxin: YunxinConfig): Ord
 function loadSupportDispatchConfig(env: NodeJS.ProcessEnv, yunxin: YunxinConfig): SupportDispatchWorkerConfig | undefined {
   const enabled = parseStrictBoolean(env, "SUPPORT_DISPATCH_ENABLED", false);
   if (!enabled) {
-    assertWorkersDisabled(env, "SUPPORT_DISPATCH_ENABLED", ["SUPPORT_DISPATCH_INTERVAL_MS", "SUPPORT_DISPATCH_BATCH_LIMIT"]);
+    assertWorkersDisabled(env, "SUPPORT_DISPATCH_ENABLED", [
+      "SUPPORT_DISPATCH_INTERVAL_MS", "SUPPORT_DISPATCH_BATCH_LIMIT", "SUPPORT_DISPATCH_AUTO_ASSIGN_CONSULTATIONS",
+    ]);
     return undefined;
   }
   const intervalMs = parseBoundedInteger(env, "SUPPORT_DISPATCH_INTERVAL_MS", 1000, 600000, 15000);
   const batchLimit = parseBoundedInteger(env, "SUPPORT_DISPATCH_BATCH_LIMIT", 1, 100, 5);
+  const autoAssignConsultations = parseStrictBoolean(env, "SUPPORT_DISPATCH_AUTO_ASSIGN_CONSULTATIONS", true);
   if (!yunxin.enabled || !yunxin.appKey || !yunxin.appSecret) {
     throw new ConfigurationError("SUPPORT_DISPATCH_ENABLED=true requires YUNXIN_ENABLED=true with complete credentials");
   }
-  return { appId: yunxin.appKey, intervalMs, batchLimit };
+  return { appId: yunxin.appKey, intervalMs, batchLimit, autoAssignConsultations };
 }
 
 function loadOrderImSdkRouteConfig(env: NodeJS.ProcessEnv, profile: ConfigProfile, yunxin: YunxinConfig): OrderImSdkRouteConfig | undefined {

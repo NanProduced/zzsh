@@ -1,6 +1,6 @@
 import type { INestApplication } from "@nestjs/common";
 import { withTransaction } from "../auth/security-core";
-import { readOrderTeamAccess } from "./order-team-access";
+import { markOrderGroupRead, readOrderTeamAccess, recordOrderGroupMessage } from "./order-team-access";
 
 import { ADMIN_PERMISSION, requireDirectoryPermission } from "../auth/admin-directory";
 import { hasPermission, loadEffectiveAdminAccess } from "../auth/admin-authorization";
@@ -25,22 +25,29 @@ import {
   YunxinDynamicTokenService,
 } from "./identity-lifecycle";
 import {
+  autoAssignWaitingConsultations,
   claimConsultation,
   closeConsultation,
   createOrResumeUserConsultation,
+  dismissSupportRating,
   heartbeatOwnPresence,
   listAdminConsultations,
   listConsultationEvents,
+  markConsultationRead,
   readConsultationContext,
   listTransferTargets,
   listUserConsultations,
+  markUserConsultationRead,
   parseConsultationBody,
   parseLimit,
   parsePresenceBody,
+  parseSupportRatingBody,
   readAdminMessageAccess,
   readOwnPresence,
   readUserMessageAccess,
+  recordSupportThreadMessage,
   retryMessageScopeOperation,
+  submitSupportRating,
   takeoverConsultation,
   transferConsultation,
   updateOwnPresence,
@@ -246,12 +253,84 @@ async function handleUserConsultations(request: NodeRequest, response: NodeRespo
     return;
   }
   const input = parseConsultationBody(request.body);
-  sendJson(response, 200, await createOrResumeUserConsultation(options.consultation, context, input.type, input.subjectRef, requestId), requestId);
+  sendJson(response, 200, await createOrResumeUserConsultation(options.consultation, context, input.type, input.subjectRef, requestId, input.entryIntent), requestId);
+}
+
+async function handleUserConsultationRating(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions, consultationId: string): Promise<void> {
+  if (!options.consultation) {
+    sendUnavailable(response, requestId);
+    return;
+  }
+  const context = await readUserContext(request, options.security);
+  const input = parseSupportRatingBody(request.body);
+  sendJson(response, 200, await submitSupportRating(options.consultation, context, consultationId, input.score, input.comment), requestId);
+}
+
+async function handleUserConsultationRead(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions, consultationId: string): Promise<void> {
+  if (!options.consultation) {
+    sendUnavailable(response, requestId);
+    return;
+  }
+  const body = request.body;
+  if (body !== undefined && body !== null
+    && (typeof body !== "object" || Array.isArray(body) || Object.keys(body as Record<string, unknown>).length !== 0)) {
+    throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Read body must be empty");
+  }
+  const context = await readUserContext(request, options.security);
+  sendJson(response, 200, await markUserConsultationRead(options.consultation, context, consultationId), requestId);
+}
+
+async function handleUserConsultationRatingDismiss(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions, consultationId: string): Promise<void> {
+  if (!options.consultation) {
+    sendUnavailable(response, requestId);
+    return;
+  }
+  const body = request.body;
+  if (body !== undefined && body !== null
+    && (typeof body !== "object" || Array.isArray(body) || Object.keys(body as Record<string, unknown>).length !== 0)) {
+    throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Dismiss body must be empty");
+  }
+  const context = await readUserContext(request, options.security);
+  sendJson(response, 200, await dismissSupportRating(options.consultation, context, consultationId), requestId);
 }
 
 function messageConversationId(value: string | null): string {
   if (!value || value.length > 160) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Conversation is invalid");
   return value;
+}
+
+const MEDIA_MESSAGE_PREVIEW: Record<ImTransportMediaKind, string> = {
+  video: "[视频]",
+  file: "[文件]",
+  audio: "[语音]",
+};
+
+/** 消息已发送成功后才写摘要；摘要只是 best-effort，失败不能把成功发送改判为失败。 */
+async function recordSupportPreview(options: YunxinRouteOptions, conversationId: string, preview: string, fromUser = false): Promise<boolean> {
+  if (!options.consultation) return false;
+  try {
+    if (await recordSupportThreadMessage(options.consultation, conversationId, preview, fromUser)) return true;
+  } catch {
+    // Message already sent; a failed preview is overwritten by the next message.
+    return false;
+  }
+  // 订单群复用同一个发送入口：记录最后活动时间，列表才能和客服线程一起按最近消息排序。
+  try {
+    await recordOrderGroupMessage(options.consultation.pool, options.consultation.appId, conversationId, preview);
+  } catch {
+    // Activity is a read-side convenience; the message send remains authoritative.
+  }
+  return false;
+}
+
+/**
+ * 用户首条消息落库后唤醒一次自动分配；失败只影响后续分配时机，
+ * 不影响已经成功的发送结果。客服/管理端消息与订单群消息不调用。
+ */
+function wakeConsultationAutoAssign(options: YunxinRouteOptions): void {
+  const consultation = options.consultation;
+  if (!consultation?.autoAssignConsultations) return;
+  void autoAssignWaitingConsultations(consultation, 5).catch(() => undefined);
 }
 
 type ParsedMessageBody =
@@ -581,6 +660,8 @@ async function handleMessageAction(
       text: input.text,
       replyTo: input.replyTo,
     });
+    const fromUser = actor.realm === "user";
+    if (await recordSupportPreview(options, input.conversationId, input.text, fromUser) && fromUser) wakeConsultationAutoAssign(options);
     sendJson(response, 200, { message: publicMessage(message, actor.realm) }, requestId);
     return;
   }
@@ -621,7 +702,9 @@ async function handleUserMessages(request: NodeRequest, response: NodeResponse, 
   }
   const access = await readMessageAccess(options, {...context,realm:"user"}, input.conversationId,true);
   if (input.kind === "text") {
-    sendJson(response, 200, { message: publicMessage(await transport.sendText({ conversationId: input.conversationId, senderAccountId: access.viewerAccountId, receiverAccountId: access.peerAccountId, text: input.text }), "user") }, requestId);
+    const message = await transport.sendText({ conversationId: input.conversationId, senderAccountId: access.viewerAccountId, receiverAccountId: access.peerAccountId, text: input.text });
+    if (await recordSupportPreview(options, input.conversationId, input.text, true)) wakeConsultationAutoAssign(options);
+    sendJson(response, 200, { message: publicMessage(message, "user") }, requestId);
     return;
   }
   if (input.kind === "media") {
@@ -631,7 +714,7 @@ async function handleUserMessages(request: NodeRequest, response: NodeResponse, 
     }
     if (!access.scope) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Order Team media access denied");
     const media = input.media;
-    sendJson(response, 200, { message: publicMessage(await transport.sendMedia({
+    const message = await transport.sendMedia({
       conversationId: input.conversationId,
       scope: access.scope,
       senderAccountId: access.viewerAccountId,
@@ -645,7 +728,9 @@ async function handleUserMessages(request: NodeRequest, response: NodeResponse, 
       ...(media.width === undefined ? {} : { width: media.width }),
       ...(media.height === undefined ? {} : { height: media.height }),
       ...(media.durationMs === undefined ? {} : { durationMs: media.durationMs }),
-    }), "user") }, requestId);
+    });
+    if (await recordSupportPreview(options, input.conversationId, MEDIA_MESSAGE_PREVIEW[media.kind], true)) wakeConsultationAutoAssign(options);
+    sendJson(response, 200, { message: publicMessage(message, "user") }, requestId);
     return;
   }
   if (!transport.sendImage) {
@@ -654,7 +739,24 @@ async function handleUserMessages(request: NodeRequest, response: NodeResponse, 
   }
   const image = input.image;
   if (!access.scope) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Order Team image access denied");
-  sendJson(response, 200, { message: publicMessage(await transport.sendImage({ conversationId: input.conversationId, scope: access.scope, senderAccountId: access.viewerAccountId, receiverAccountId: access.peerAccountId, messageClientId: image.messageClientId, name: image.name, mimeType: image.mimeType, size: image.size, body: image.body, width: image.width, height: image.height }), "user") }, requestId);
+  const message = await transport.sendImage({ conversationId: input.conversationId, scope: access.scope, senderAccountId: access.viewerAccountId, receiverAccountId: access.peerAccountId, messageClientId: image.messageClientId, name: image.name, mimeType: image.mimeType, size: image.size, body: image.body, width: image.width, height: image.height });
+  if (await recordSupportPreview(options, input.conversationId, "[图片]", true)) wakeConsultationAutoAssign(options);
+  sendJson(response, 200, { message: publicMessage(message, "user") }, requestId);
+}
+
+async function handleOrderTeamRead(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions, realm: "user" | "admin", orderId: string): Promise<void> {
+  if (!options.consultation) {
+    sendUnavailable(response, requestId);
+    return;
+  }
+  if (realm === "user") {
+    const context = await readUserContext(request, options.security);
+    sendJson(response, 200, await markOrderGroupRead(options.consultation.pool, options.consultation.appId, orderId, { realm, userId: context.userId, sessionId: context.sessionId }), requestId);
+    return;
+  }
+  const context = await readAdminContext(request, options.security);
+  await requireAdminImRead(options.security.pool, context.userId);
+  sendJson(response, 200, await markOrderGroupRead(options.consultation.pool, options.consultation.appId, orderId, { realm, userId: context.userId, sessionId: context.sessionId }), requestId);
 }
 
 async function handleAdminMessages(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions): Promise<void> {
@@ -678,7 +780,9 @@ async function handleAdminMessages(request: NodeRequest, response: NodeResponse,
   }
   const access = await readMessageAccess(options, {...context,realm:"admin"}, input.conversationId, true, false, requestId);
   if (input.kind === "text") {
-    sendJson(response, 200, { message: publicMessage(await transport.sendText({ conversationId: input.conversationId, senderAccountId: access.viewerAccountId, receiverAccountId: access.peerAccountId, text: input.text }), "admin") }, requestId);
+    const message = await transport.sendText({ conversationId: input.conversationId, senderAccountId: access.viewerAccountId, receiverAccountId: access.peerAccountId, text: input.text });
+    await recordSupportPreview(options, input.conversationId, input.text);
+    sendJson(response, 200, { message: publicMessage(message, "admin") }, requestId);
     return;
   }
   if (input.kind === "media") {
@@ -688,7 +792,7 @@ async function handleAdminMessages(request: NodeRequest, response: NodeResponse,
     }
     if (!access.scope) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Order Team media access denied");
     const media = input.media;
-    sendJson(response, 200, { message: publicMessage(await transport.sendMedia({
+    const message = await transport.sendMedia({
       conversationId: input.conversationId,
       scope: access.scope,
       senderAccountId: access.viewerAccountId,
@@ -702,7 +806,9 @@ async function handleAdminMessages(request: NodeRequest, response: NodeResponse,
       ...(media.width === undefined ? {} : { width: media.width }),
       ...(media.height === undefined ? {} : { height: media.height }),
       ...(media.durationMs === undefined ? {} : { durationMs: media.durationMs }),
-    }), "admin") }, requestId);
+    });
+    await recordSupportPreview(options, input.conversationId, MEDIA_MESSAGE_PREVIEW[media.kind]);
+    sendJson(response, 200, { message: publicMessage(message, "admin") }, requestId);
     return;
   }
   if (!transport.sendImage) {
@@ -711,7 +817,9 @@ async function handleAdminMessages(request: NodeRequest, response: NodeResponse,
   }
   const image = input.image;
   if (!access.scope) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Order Team image access denied");
-  sendJson(response, 200, { message: publicMessage(await transport.sendImage({ conversationId: input.conversationId, scope: access.scope, senderAccountId: access.viewerAccountId, receiverAccountId: access.peerAccountId, messageClientId: image.messageClientId, name: image.name, mimeType: image.mimeType, size: image.size, body: image.body, width: image.width, height: image.height }), "admin") }, requestId);
+  const message = await transport.sendImage({ conversationId: input.conversationId, scope: access.scope, senderAccountId: access.viewerAccountId, receiverAccountId: access.peerAccountId, messageClientId: image.messageClientId, name: image.name, mimeType: image.mimeType, size: image.size, body: image.body, width: image.width, height: image.height });
+  await recordSupportPreview(options, input.conversationId, "[图片]");
+  sendJson(response, 200, { message: publicMessage(message, "admin") }, requestId);
 }
 
 async function handleImage(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions, realm: "user" | "admin", imageId: string): Promise<void> {
@@ -760,7 +868,7 @@ async function handleMedia(request: NodeRequest, response: NodeResponse, request
   sendMediaFile(response, media, requestId);
 }
 
-async function handleAdminConsultations(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions, action?: { id: string; name: "claim" | "transfer" | "close" | "reconcile" }): Promise<void> {
+async function handleAdminConsultations(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions, action?: { id: string; name: "claim" | "transfer" | "close" | "reconcile" | "read" }): Promise<void> {
   if (!options.consultation) {
     sendUnavailable(response, requestId);
     return;
@@ -777,6 +885,14 @@ async function handleAdminConsultations(request: NodeRequest, response: NodeResp
   }
   if (action.name === "close") {
     sendJson(response, 200, await closeConsultation(options.consultation, context, action.id, requestId), requestId);
+    return;
+  }
+  if (action.name === "read") {
+    const body = request.body;
+    if (body !== undefined && body !== null && (typeof body !== "object" || Array.isArray(body) || Object.keys(body as Record<string, unknown>).length !== 0)) {
+      throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Read body must be empty");
+    }
+    sendJson(response, 200, await markConsultationRead(options.consultation, context, action.id), requestId);
     return;
   }
   if (action.name === "reconcile") {
@@ -932,6 +1048,42 @@ export async function handleYunxinRoute(request: NodeRequest, response: NodeResp
       await handleAdminIdentities(request, response, requestId, options);
       return;
     }
+    const userRating = /^\/user\/consultations\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/rating$/.exec(path);
+    if (userRating) {
+      if (!originAllowed(request, [options.security.apiOrigin, options.security.userOrigin]) || method !== "POST") {
+        sendError(response, new SecurityApiError(method === "POST" ? 403 : 404, method === "POST" ? API_V1_ERROR_CODES.FORBIDDEN : API_V1_ERROR_CODES.NOT_FOUND, method === "POST" ? "Request rejected" : "Resource not found"), requestId);
+        return;
+      }
+      await handleUserConsultationRating(request, response, requestId, options, userRating[1]!);
+      return;
+    }
+    const userRatingDismiss = /^\/user\/consultations\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/rating\/dismiss$/.exec(path);
+    if (userRatingDismiss) {
+      if (!originAllowed(request, [options.security.apiOrigin, options.security.userOrigin]) || method !== "POST") {
+        sendError(response, new SecurityApiError(method === "POST" ? 403 : 404, method === "POST" ? API_V1_ERROR_CODES.FORBIDDEN : API_V1_ERROR_CODES.NOT_FOUND, method === "POST" ? "Request rejected" : "Resource not found"), requestId);
+        return;
+      }
+      await handleUserConsultationRatingDismiss(request, response, requestId, options, userRatingDismiss[1]!);
+      return;
+    }
+    const userRead = /^\/user\/consultations\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/read$/.exec(path);
+    if (userRead) {
+      if (!originAllowed(request, [options.security.apiOrigin, options.security.userOrigin]) || method !== "POST") {
+        sendError(response, new SecurityApiError(method === "POST" ? 403 : 404, method === "POST" ? API_V1_ERROR_CODES.FORBIDDEN : API_V1_ERROR_CODES.NOT_FOUND, method === "POST" ? "Request rejected" : "Resource not found"), requestId);
+        return;
+      }
+      await handleUserConsultationRead(request, response, requestId, options, userRead[1]!);
+      return;
+    }
+    const userOrderRead = /^\/user\/order-teams\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/read$/.exec(path);
+    if (userOrderRead) {
+      if (!originAllowed(request, [options.security.apiOrigin, options.security.userOrigin]) || method !== "POST") {
+        sendError(response, new SecurityApiError(method === "POST" ? 403 : 404, method === "POST" ? API_V1_ERROR_CODES.FORBIDDEN : API_V1_ERROR_CODES.NOT_FOUND, method === "POST" ? "Request rejected" : "Resource not found"), requestId);
+        return;
+      }
+      await handleOrderTeamRead(request, response, requestId, options, "user", userOrderRead[1]!);
+      return;
+    }
     if (path === "/user/consultations") {
       if (!originAllowed(request, [options.security.apiOrigin, options.security.userOrigin])) {
         sendError(response, new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Request rejected"), requestId);
@@ -980,6 +1132,15 @@ export async function handleYunxinRoute(request: NodeRequest, response: NodeResp
         return;
       }
       await handleUserMessageAccess(request, response, requestId, options);
+      return;
+    }
+    const adminOrderRead = /^\/admin\/order-teams\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/read$/.exec(path);
+    if (adminOrderRead) {
+      if (!originAllowed(request, [options.security.apiOrigin, options.security.adminOrigin]) || method !== "POST") {
+        sendError(response, new SecurityApiError(method === "POST" ? 403 : 404, method === "POST" ? API_V1_ERROR_CODES.FORBIDDEN : API_V1_ERROR_CODES.NOT_FOUND, method === "POST" ? "Request rejected" : "Resource not found"), requestId);
+        return;
+      }
+      await handleOrderTeamRead(request, response, requestId, options, "admin", adminOrderRead[1]!);
       return;
     }
     if (path === "/admin/consultations") {
@@ -1046,13 +1207,13 @@ export async function handleYunxinRoute(request: NodeRequest, response: NodeResp
       else await handleAdminConsultationContext(request, response, requestId, options, readMatch[1]!);
       return;
     }
-    const actionMatch = /^\/admin\/consultations\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/(claim|transfer|close|reconcile)$/.exec(path);
+    const actionMatch = /^\/admin\/consultations\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/(claim|transfer|close|reconcile|read)$/.exec(path);
     if (actionMatch) {
       if (!originAllowed(request, [options.security.apiOrigin, options.security.adminOrigin]) || method !== "POST") {
         sendError(response, new SecurityApiError(method === "POST" ? 403 : 404, method === "POST" ? API_V1_ERROR_CODES.FORBIDDEN : API_V1_ERROR_CODES.NOT_FOUND, method === "POST" ? "Request rejected" : "Resource not found"), requestId);
         return;
       }
-      await handleAdminConsultations(request, response, requestId, options, { id: actionMatch[1]!, name: actionMatch[2] as "claim" | "transfer" | "close" | "reconcile" });
+      await handleAdminConsultations(request, response, requestId, options, { id: actionMatch[1]!, name: actionMatch[2] as "claim" | "transfer" | "close" | "reconcile" | "read" });
       return;
     }
     if (path === "/admin/presence") {

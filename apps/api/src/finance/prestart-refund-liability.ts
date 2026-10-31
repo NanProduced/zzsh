@@ -34,9 +34,14 @@ export async function verifyPrestartRefundLiability(client: PoolClient, terminat
       AND c.amount_cents=$6::numeric AND c.currency='CNY' AND c.source=t.payment_basis->>'source'
       AND c.merchant_scope_id=t.payment_basis->>'merchantIdentityId' AND c.provider_transaction_id=t.payment_basis->>'channelTrxNo'
       AND c.merchant_order_no=t.payment_basis->>'merchantOrderNo' AND o.renter_user_id=$4
-      AND NOT EXISTS(SELECT 1 FROM zzsh_order.settlement_posting p WHERE p.order_id=o.id)
-      AND NOT EXISTS(SELECT 1 FROM zzsh_order.rental_opening x WHERE x.order_id=o.id AND x.status='CONFIRMED')
-      AND ((o.status='CANCELLED' AND o.cancel_reason='PRESTART_TERMINATED' AND t.liability_root_id=r.id AND t.liability_event_id=e.id)
+      AND r.policy_version=CASE WHEN t.requested_by_party='SUPPORT' THEN 'support-full-refund.v1' ELSE 'prestart-full-refund.v1' END
+      AND ((t.requested_by_party='SUPPORT' AND zzsh_order.support_cancel_payment_basis_valid(t.payment_basis))
+        OR(t.requested_by_party<>'SUPPORT' AND zzsh_order.prestart_payment_basis_valid(t.payment_basis)
+          AND NOT EXISTS(SELECT 1 FROM zzsh_order.rental_opening x WHERE x.order_id=o.id AND x.status='CONFIRMED')))
+      AND ((t.requested_by_party='SUPPORT' AND o.status='CANCELLED' AND o.cancel_reason='SUPPORT_CANCELLED_REFUND'
+          AND t.liability_root_id=r.id AND t.liability_event_id=e.id)
+        OR(t.requested_by_party<>'SUPPORT' AND o.status='CANCELLED' AND o.cancel_reason='PRESTART_TERMINATED'
+          AND t.liability_root_id=r.id AND t.liability_event_id=e.id)
         OR($8::boolean AND o.status='PAID' AND t.approved_xid=pg_current_xact_id_if_assigned()))
       AND (SELECT count(*) FROM zzsh_order.settlement_ledger_entry l WHERE l.finance_event_id=e.id)=2
       AND EXISTS(SELECT 1 FROM zzsh_order.settlement_ledger_entry l WHERE l.finance_event_id=e.id AND l.line_no=1
@@ -50,13 +55,14 @@ export async function verifyPrestartRefundLiability(client: PoolClient, terminat
   return plan;
 }
 
-export async function recognizePrestartRefundLiability(client:PoolClient,terminationId:string,basis:PrestartPaymentBasis,requestId:string){
+export async function recognizePrestartRefundLiability(client:PoolClient,terminationId:string,basis:PrestartPaymentBasis,requestId:string,
+  policyVersion:"prestart-full-refund.v1"|"support-full-refund.v1"="prestart-full-refund.v1"){
   const plan=prestartLiabilityPlan(terminationId,basis);
   const old=(await client.query(`SELECT id FROM zzsh_order.finance_economic_root WHERE id=$1`,[plan.rootId])).rows;
   if(old.length){await verifyPrestartRefundLiability(client,terminationId,basis,plan.rootId,plan.eventId);return plan;}
   await client.query(`INSERT INTO zzsh_order.finance_economic_root(id,basis_id,source_kind,source_type,source_system,source_entity,source_id,
-    subject_user_id,beneficiary_role,policy_version,source_digest) VALUES($1,NULL,'NATIVE_PRESTART_REFUND','NATIVE','zzsh','prestart_termination',$2,$3,'RENTER','prestart-full-refund.v1',$4)`,
-    [plan.rootId,terminationId,basis.renterUserId,basis.digest]);
+    subject_user_id,beneficiary_role,policy_version,source_digest) VALUES($1,NULL,'NATIVE_PRESTART_REFUND','NATIVE','zzsh','prestart_termination',$2,$3,'RENTER',$4,$5)`,
+    [plan.rootId,terminationId,basis.renterUserId,policyVersion,basis.digest]);
   // 原款root守卫仅补零版本计数器，不建立钱包来源；共同用户锁已串行化本次账务。
   const revision=(await client.query(`SELECT ledger_revision::text FROM zzsh_order.wallet_revision WHERE user_id=$1`,[basis.renterUserId])).rows[0]?.ledger_revision;
   if(typeof revision!=="string"||!/^[0-9]+$/.test(revision))throw unavailable();

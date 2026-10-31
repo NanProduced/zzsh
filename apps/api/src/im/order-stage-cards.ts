@@ -3,6 +3,7 @@ import type { Pool } from "pg";
 
 import { buildYunxinIdentityMarker, deriveYunxinAccountId, type ImIdentityKey } from "./identity-lifecycle";
 import type { ImTransportCard, ImTransportMessage } from "./im-contract";
+import { recordOrderGroupMessage } from "./order-team-access";
 
 /**
  * O-01 stage cards. A card is an ordinary chat message; the order facts stay in
@@ -11,6 +12,7 @@ import type { ImTransportCard, ImTransportMessage } from "./im-contract";
  */
 export type StageCardTransport = {
   card(input: { conversationId: string; senderAccountId: string; receiverAccountId: string; card: ImTransportCard }): Promise<ImTransportMessage>;
+  text?(input: { conversationId: string; senderAccountId: string; receiverAccountId: string; text: string; messageClientId?: string }): Promise<ImTransportMessage>;
 };
 
 export type OrderStageCardOptions = {
@@ -21,8 +23,15 @@ export type OrderStageCardOptions = {
   leaseMs?: number;
 };
 
-const STAGE_KINDS = ["ORDER_OPENING", "ORDER_ENDING", "ORDER_SETTLED"] as const;
+const STAGE_KINDS = ["ORDER_WELCOME", "ORDER_OPENING", "ORDER_ENDING", "ORDER_SETTLED"] as const;
 type StageCardKind = (typeof STAGE_KINDS)[number];
+const WELCOME_TEXT = "订单群已建立。本单的账号核对、开租确认和沟通都会在这里进行，双方确认后开始计算租期。有疑问可以直接在群里留言。";
+const PREVIEWS: Record<StageCardKind, string> = {
+  ORDER_WELCOME: "洲洲助手：订单群已建立",
+  ORDER_OPENING: "开租确认卡",
+  ORDER_ENDING: "结束确认卡",
+  ORDER_SETTLED: "结算完成卡",
+};
 
 const WINDOW_MS = 72 * 60 * 60 * 1_000;
 const SYSTEM_SUBJECT = "support-manager";
@@ -94,6 +103,11 @@ async function materialize(options: OrderStageCardOptions): Promise<void> {
           AND (o.status = 'PAID'
             OR (o.status = 'COMPLETED' AND posting.posted_at > clock_timestamp() - interval '72 hours'))
      ), wanted AS (
+       SELECT f.order_id, f.app_id, 'ORDER_WELCOME'::text AS kind FROM facts f
+        WHERE f.order_status = 'PAID'
+          AND NOT EXISTS(SELECT 1 FROM zzsh_order.im_order_activity act WHERE act.order_id = f.order_id)
+          AND NOT EXISTS(SELECT 1 FROM zzsh_order.im_order_stage_card sc WHERE sc.order_id = f.order_id)
+       UNION ALL
        SELECT order_id, app_id, 'ORDER_OPENING'::text AS kind FROM facts WHERE opening_status IN ('DRAFT', 'CONFIRMED')
        UNION ALL
        SELECT order_id, app_id, 'ORDER_ENDING' FROM facts WHERE has_intake
@@ -125,7 +139,7 @@ async function dueRows(options: OrderStageCardOptions, limit: number): Promise<D
        LEFT JOIN zzsh_iam.im_identity_mapping m ON m.id = g.system_identity_id
       WHERE sc.app_id = $1 AND sc.state = 'PENDING' AND sc.next_attempt_at <= clock_timestamp()
         AND g.team_state = 'READY' AND g.team_id IS NOT NULL
-      ORDER BY CASE sc.kind WHEN 'ORDER_OPENING' THEN 1 WHEN 'ORDER_ENDING' THEN 2 ELSE 3 END, sc.created_at, sc.id
+      ORDER BY CASE sc.kind WHEN 'ORDER_WELCOME' THEN 0 WHEN 'ORDER_OPENING' THEN 1 WHEN 'ORDER_ENDING' THEN 2 ELSE 3 END, sc.created_at, sc.id
       LIMIT $2`,
     [options.appId, limit],
   )).rows;
@@ -168,13 +182,21 @@ async function retry(options: OrderStageCardOptions, row: DueRow, tokenHash: str
 async function deliver(options: OrderStageCardOptions, row: DueRow): Promise<void> {
   if (!isStageKind(row.kind)) throw codedError("INVALID_STAGE_KIND");
   const systemAccount = systemAccountOf(options.appId, row);
+  const conversationId = `${systemAccount}|2|${row.team_id}`;
   // Retries reuse cardId; a card-capable supplier must key delivery idempotency on it.
-  await options.transport.card({
-    conversationId: `${systemAccount}|2|${row.team_id}`,
-    senderAccountId: systemAccount,
-    receiverAccountId: row.team_id,
-    card: { kind: row.kind, orderId: row.order_id, cardId: row.card_id },
-  });
+  if (row.kind === "ORDER_WELCOME") {
+    if (!options.transport.text) throw codedError("TEXT_TRANSPORT_UNAVAILABLE");
+    await options.transport.text({ conversationId, senderAccountId: systemAccount, receiverAccountId: row.team_id, text: WELCOME_TEXT, messageClientId: row.card_id });
+  } else {
+    await options.transport.card({
+      conversationId,
+      senderAccountId: systemAccount,
+      receiverAccountId: row.team_id,
+      card: { kind: row.kind, orderId: row.order_id, cardId: row.card_id },
+    });
+  }
+  // The message is already out; a failed list projection must not make the sender retry it.
+  try { await recordOrderGroupMessage(options.pool, options.appId, conversationId, PREVIEWS[row.kind]); } catch { /* next real message refreshes the preview */ }
 }
 
 export async function scanOrderStageCards(options: OrderStageCardOptions, limit = 10): Promise<void> {
@@ -191,7 +213,9 @@ export async function scanOrderStageCards(options: OrderStageCardOptions, limit 
   for (const row of await dueRows(options, limit)) {
     const tokenHash = createHash("sha256").update(randomBytes(32)).digest("hex");
     if (!(await claim(options, row, tokenHash))) continue;
-    const closed = stageCardWindowReason(row.order_status, row.posted_at, now);
+    const closed = row.kind === "ORDER_WELCOME" && row.order_status !== "PAID"
+      ? "ORDER_ENDED"
+      : stageCardWindowReason(row.order_status, row.posted_at, now);
     if (closed) {
       await finish(options, row, tokenHash, "SKIPPED", closed);
       continue;

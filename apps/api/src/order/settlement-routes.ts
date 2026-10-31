@@ -11,6 +11,7 @@ import {
   adjustSettlement,
   classifySettlement,
   confirmOpening,
+  confirmOpeningOnBehalf,
   decideSettlement,
   previewSettlement,
   previewStaffSettlement,
@@ -141,17 +142,18 @@ export async function handleSettlementAdminRoute(request: Request, response: Sup
   const read = /^\/([A-Za-z0-9._:-]+)\/settlement$/.exec(path);
   const preview = /^\/([A-Za-z0-9._:-]+)\/settlement-preview$/.exec(path);
   const openings = /^\/([A-Za-z0-9._:-]+)\/openings$/.exec(path);
+  const openingConfirm = /^\/([A-Za-z0-9._:-]+)\/openings\/([A-Za-z0-9._:-]+)\/confirm$/.exec(path);
   const classify = /^\/([A-Za-z0-9._:-]+)\/settlements\/classify$/.exec(path);
   const review = /^\/([A-Za-z0-9._:-]+)\/settlements\/([A-Za-z0-9._:-]+)\/review$/.exec(path);
   const adjust = /^\/([A-Za-z0-9._:-]+)\/settlements\/adjustments$/.exec(path);
-  if (!read && !preview && !openings && !classify && !review && !adjust) return false;
+  if (!read && !preview && !openings && !openingConfirm && !classify && !review && !adjust) return false;
   if (!settlementSurfaceOpen(options.settlementRecordingEnabled)) throw notFound();
   const requestId = ensureApiV1RequestId(request);
   response.setHeader("X-Request-Id", requestId);
   if (method !== "GET" && !requireOrigin(request, response, options, requestId)) return true;
   const context = await readAdminContext(request, options);
   const actor = { realm: "admin" as const, userId: context.userId, sessionId: context.sessionId };
-  const orderId = idOf((read ?? preview ?? openings ?? classify ?? review ?? adjust)![1]!);
+  const orderId = idOf((read ?? preview ?? openings ?? openingConfirm ?? classify ?? review ?? adjust)![1]!);
   if (method === "POST" && preview) {
     const body = bodyOf(request);
     ensureOnlyFields(body, ["lines", "endReason", "proposedOwnerNet", "proposedRenterRefund", "reason"]);
@@ -181,6 +183,21 @@ export async function handleSettlementAdminRoute(request: Request, response: Sup
       { realm: "admin", id: actor.userId, sessionId: actor.sessionId }, { lines },
       async (client) => { await recheckSettlement(client, orderId, actor); },
       (client) => recordOpening(client, orderId, actor, lines, requestId),
+      (client, result) => projectSettlementResponse(client, actor, result));
+    return true;
+  }
+  if (method === "POST" && openingConfirm) {
+    const openingId = idOf(openingConfirm[2]!);
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["party", "versionNo"]);
+    if (body.party !== "RENTER" && body.party !== "OWNER") throw invalid("Party is invalid", "party");
+    if (typeof body.versionNo !== "number" || !Number.isInteger(body.versionNo) || body.versionNo < 1) throw invalid("Version is invalid", "versionNo");
+    const party = body.party;
+    await runIdempotentWrite(options, request, response, requestId,
+      { principalId: actor.userId, operation: "order.opening.confirm_on_behalf", resourceId: `${openingId}:${party}` },
+      { realm: "admin", id: actor.userId, sessionId: actor.sessionId }, { party, versionNo: body.versionNo },
+      async (client) => { await recheckSettlement(client, orderId, actor); },
+      (client) => confirmOpeningOnBehalf(client, orderId, openingId, body.versionNo as number, party, actor, requestId),
       (client, result) => projectSettlementResponse(client, actor, result));
     return true;
   }
