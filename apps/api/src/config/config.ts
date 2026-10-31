@@ -269,22 +269,26 @@ function loadYunxinConfig(
   workingDirectory: string,
   profile: ConfigProfile,
 ): YunxinConfig {
-  const enabledValue = env.YUNXIN_ENABLED === undefined ? "false" : env.YUNXIN_ENABLED.trim();
-  if (enabledValue !== "true" && enabledValue !== "false") {
+  const enabledValue = env.YUNXIN_ENABLED?.trim();
+  if (enabledValue !== undefined && enabledValue !== "true" && enabledValue !== "false") {
     throw new ConfigurationError("YUNXIN_ENABLED must be true or false");
   }
-  const enabled = enabledValue === "true";
   const hasCredentials =
-    env.YUNXIN_APP_KEY !== undefined ||
-    env.YUNXIN_APP_SECRET !== undefined ||
-    env.YUNXIN_APP_SECRET_FILE !== undefined;
+    Boolean(env.YUNXIN_APP_KEY?.trim()) ||
+    Boolean(env.YUNXIN_APP_SECRET?.trim()) ||
+    Boolean(env.YUNXIN_APP_SECRET_FILE?.trim());
 
+  // A deployed target always runs real IM, so complete credentials are enough on
+  // their own; YUNXIN_ENABLED=false only exists to force it off while credentials
+  // are present. With no credentials the API stays offline, which is what every
+  // offline test run depends on.
+  const enabled = enabledValue === "true" || (enabledValue === undefined && hasCredentials);
   if (!enabled) {
-    if (hasCredentials) throw new ConfigurationError("YUNXIN credentials require YUNXIN_ENABLED=true");
+    if (hasCredentials) throw new ConfigurationError("YUNXIN_ENABLED=false cannot be combined with Yunxin credentials");
     return { enabled: false };
   }
-  if (profile !== "provider-test") {
-    throw new ConfigurationError("YUNXIN_ENABLED=true is only allowed in APP_PROFILE=provider-test");
+  if (profile === "migration") {
+    throw new ConfigurationError("APP_PROFILE=migration must not assemble a real IM provider");
   }
 
   const appKey = yunxinAppKey(env);

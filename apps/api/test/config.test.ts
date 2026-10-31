@@ -214,15 +214,27 @@ test("approves dynamic route binding only for explicit provider-test App/order a
   assert.throws(() => loadConfig({ ...env, YUNXIN_ORDER_TEST_ROUTE_CONFIG: JSON.stringify({ routeEnvironment: "oim4d-test", approvedOrders: [{ appId: "test-app", orderId: "*" }] }) }), /YUNXIN_ORDER_TEST_ROUTE_CONFIG is invalid/);
 });
 
-test("fails closed for incomplete or misplaced Yunxin configuration", () => {
+test("treats real Yunxin IM as the normal deployed state and stays offline without credentials", () => {
+  // No credentials at all: offline. Every automated/offline run depends on this.
   assert.equal(loadConfig(validEnv()).yunxin.enabled, false);
-  assert.throws(
-    () => loadConfig({ ...validEnv(), YUNXIN_APP_KEY: "app-key" }),
-    (error: unknown) => error instanceof ConfigurationError && /credentials require YUNXIN_ENABLED=true/.test(error.message),
+  // Complete credentials are enough on their own — no separate switch on a real target.
+  assert.deepEqual(
+    loadConfig({ ...validEnv(), YUNXIN_APP_KEY: "app-key", YUNXIN_APP_SECRET: "secret" }).yunxin,
+    { enabled: true, appKey: "app-key", appSecret: "secret" },
   );
   assert.throws(
-    () => loadConfig({ ...validEnv(), YUNXIN_ENABLED: "true", YUNXIN_APP_KEY: "app-key", YUNXIN_APP_SECRET: "secret" }),
-    (error: unknown) => error instanceof ConfigurationError && /APP_PROFILE=provider-test/.test(error.message),
+    () => loadConfig({ ...validEnv(), YUNXIN_APP_KEY: "app-key" }),
+    (error: unknown) => error instanceof ConfigurationError && /YUNXIN_APP_SECRET/.test(error.message),
+  );
+  // Explicitly switching it off while credentials are present is a configuration error, not a silent no-op.
+  assert.throws(
+    () => loadConfig({ ...validEnv(), YUNXIN_ENABLED: "false", YUNXIN_APP_KEY: "app-key", YUNXIN_APP_SECRET: "secret" }),
+    (error: unknown) => error instanceof ConfigurationError && /YUNXIN_ENABLED=false cannot be combined/.test(error.message),
+  );
+  // The migration profile exists to move data and must never open an external channel.
+  assert.throws(
+    () => loadConfig({ ...validEnv("migration"), YUNXIN_APP_KEY: "app-key", YUNXIN_APP_SECRET: "secret" }),
+    (error: unknown) => error instanceof ConfigurationError && /migration must not assemble/.test(error.message),
   );
   assert.throws(
     () => loadConfig({ ...validEnv("provider-test"), YUNXIN_ENABLED: "true" }),

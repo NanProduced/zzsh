@@ -108,7 +108,7 @@ read客户端身份与send能力分离：只撤接待权限时保留合法连接
 
 ## 配置与验收范围
 
-`YUNXIN_ENABLED`默认false；关闭时不装配真实provider、不签IM凭据。当前配置仅允许在明确的`APP_PROFILE=provider-test`下开启真实云信配置，并要求AppKey和服务端AppSecret；只设置开关不构成真实调用授权。测试provider/消息transport必须显式注入且具有受限test/fake能力，不能作为生产降级数据。
+`YUNXIN_ENABLED` 不再是默认关闭的显式开关：配置 `YUNXIN_APP_KEY` 与服务端 `YUNXIN_APP_SECRET`（或 `YUNXIN_APP_SECRET_FILE`）即启用真实provider，这是部署环境常态；两者都不配置时保持离线，不装配provider、不签IM凭据。显式`YUNXIN_ENABLED=false`与完整凭据并存视为配置错误而非静默关闭；`APP_PROFILE=migration`拒绝装配真实IM。业务侧默认走真实通道，离线测试靠“不提供凭据”保持可复现。填写凭据本身不构成真实调用授权，真实App验收另计。测试provider/消息transport必须显式注入且具有受限test/fake能力，不能作为生产降级数据。
 
 已完成咨询基础的共同迁移、平台Cookie/BFF与受控替身联验，以及独立非生产App的动态Token、真实NIM登录、SYSTEM群主咨询Team、双向文字、当前成员参与期间历史与网络重连验证。Server API按V1/V2分别使用官方端点，返回结构和成员归属严格校验。测试中已知创建成功后的人工修复不代表通用未知结果自动恢复能力。
 
