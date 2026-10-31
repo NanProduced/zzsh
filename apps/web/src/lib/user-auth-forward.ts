@@ -39,7 +39,7 @@ export function buildUserAuthUpstreamHeaders(request: Request, input: { requestI
   }
   const config = parseUserClientIpConfig(env);
   const peer = (request as Request & { socket?: { remoteAddress?: string } }).socket?.remoteAddress;
-  const clientIp = resolveBffClientIp(request.headers, config, peer);
+  const clientIp = resolveBffClientIp(request.headers, config, peer, env.USER_EDGE_ASSURED === "true");
   if (clientIp) headers.set(USER_CLIENT_IP_FORWARD_HEADER, clientIp);
   return headers;
 }

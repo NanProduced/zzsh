@@ -82,10 +82,14 @@ test("bff strips a forged internal ip and forwards only a resolved client", () =
   assert.equal(headers.get("user-agent"), "uatail");
   assert.equal(USER_AUTH_PATHS.has("/phone-number/send-otp"), false);
   assert.equal(USER_AUTH_PATHS.has("/security/captcha/challenge"), true);
-  const trusted = buildUserAuthUpstreamHeaders(new Request("http://127.0.0.1/", { headers: { "x-forwarded-for": "198.51.100.4, 10.0.0.8", [USER_CLIENT_IP_FORWARD_HEADER]: "1.2.3.4" } }), {
+  const unassured = buildUserAuthUpstreamHeaders(new Request("http://127.0.0.1/", { headers: { "x-forwarded-for": "198.51.100.4, 10.0.0.8", [USER_CLIENT_IP_FORWARD_HEADER]: "1.2.3.4" } }), {
     requestId: "req_bff", webOrigin: "http://127.0.0.1:3100", env: { USER_TRUSTED_PROXIES: "loopback,10.0.0.0/8" },
   });
-  assert.equal(trusted.get(USER_CLIENT_IP_FORWARD_HEADER), "198.51.100.4");
+  assert.equal(unassured.get(USER_CLIENT_IP_FORWARD_HEADER), null);
+  const assured = buildUserAuthUpstreamHeaders(new Request("http://127.0.0.1/", { headers: { "x-forwarded-for": "198.51.100.4, 10.0.0.8", [USER_CLIENT_IP_FORWARD_HEADER]: "1.2.3.4" } }), {
+    requestId: "req_bff", webOrigin: "http://127.0.0.1:3100", env: { USER_TRUSTED_PROXIES: "loopback,10.0.0.0/8", USER_EDGE_ASSURED: "true" },
+  });
+  assert.equal(assured.get(USER_CLIENT_IP_FORWARD_HEADER), "198.51.100.4");
 });
 
 test("Root: an already rejected password is not automatically sent a second time", async () => {
@@ -95,6 +99,16 @@ test("Root: an already rejected password is not automatically sent a second time
   globalThis.fetch = async () => { calls++; return Response.json({ error: { code: "UNAUTHENTICATED", reason: "CAPTCHA_REQUIRED" }, challenge }, { status: 401 }); };
   try { await assert.rejects(() => webAuthWithCaptcha("/sign-in/identifier", { identifier: "13800138000", password: "wrong" }, undefined, () => true)); assert.equal(calls, 1); }
   finally { globalThis.fetch = original; await view.close(); }
+});
+
+test("a challenge with the wrong shape is rejected before a KDF loop", async () => {
+  const view = await mountAuthComponent("apps/web/src/components/auth/auth-form.tsx", "AuthForm");
+  const { solveLocalPow } = view.loadSource("apps/web/src/lib/user-captcha.ts");
+  try {
+    await assert.rejects(() => solveLocalPow({ ...challenge, parameters: { ...challenge.parameters, algorithm: "SHA-1" } }), (error) => error.reason === "CAPTCHA_REQUIRED");
+    await assert.rejects(() => solveLocalPow({ ...challenge, parameters: { ...challenge.parameters, cost: 1_000_001 } }), (error) => error.reason === "CAPTCHA_REQUIRED");
+    await assert.rejects(() => solveLocalPow({ ...challenge, parameters: { ...challenge.parameters, keyPrefix: "zzzz" } }), (error) => error.reason === "CAPTCHA_REQUIRED");
+  } finally { await view.close(); }
 });
 
 test("Root: stale or cancelled proof work stops before starting a KDF", async () => {

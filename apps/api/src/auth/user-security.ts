@@ -85,6 +85,7 @@ export async function buildUserSecurityPlugin(options: { pool: Pool; outbox?: Ma
     const code = options.localMock ? "888888" : String(randomInt(0, 1_000_000)).padStart(6, "0");
     const now = new Date();
     let phoneHold: string | undefined;
+    let phoneRejection: { action: string; purpose: string; subject: string; outcome: string } | undefined;
     const delivery = await withTransaction(options.pool, async (client) => {
       let user: Subject | null = null;
       let sessionId: string | null = null;
@@ -128,10 +129,11 @@ export async function buildUserSecurityPlugin(options: { pool: Pool; outbox?: Ma
       }
       if (channel === "phone" && recipient && options.smsThrottle) {
         const held = await options.smsThrottle.holdSmsPhone(client, recipient).catch((error: unknown) => {
-          if (error instanceof ThrottleDependencyError) throw new APIError("SERVICE_UNAVAILABLE", { message: "Authentication dependency unavailable" });
+          if (error instanceof ThrottleDependencyError) throw new APIError("SERVICE_UNAVAILABLE", { code: "AUTH_DEPENDENCY_UNAVAILABLE", message: "Authentication dependency unavailable" });
           throw error;
         });
         if (held.decision === "limited") {
+          phoneRejection = held.rejection;
           ctx.setHeader("Retry-After", String(held.retryAfter));
           throw new APIError("TOO_MANY_REQUESTS", { message: "Verification rate limited" });
         }
@@ -152,6 +154,7 @@ export async function buildUserSecurityPlugin(options: { pool: Pool; outbox?: Ma
       return { data, expiresAt };
     }).catch(async (error: unknown) => {
       if (phoneHold && options.smsThrottle) await options.smsThrottle.releaseSmsPhone(phoneHold).catch(() => undefined);
+      if (phoneRejection && options.smsThrottle) await options.smsThrottle.recordRejection(phoneRejection).catch(() => undefined);
       throw error;
     });
     if (delivery.data.userId) options.outbox?.set(id, { code, target: delivery.data.recipient, channel, purpose, sentAt: now.toISOString() });

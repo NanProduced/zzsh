@@ -121,13 +121,13 @@ function withoutInternalHeader(headers: HeaderBag): Record<string, string | unde
 }
 
 /**
- * BFF 侧解析。看不到 socket 且未配置可信代理时返回 undefined，不采用浏览器带来的转发头。
- * 配置了可信代理但看不到 socket 时，按部署声明把入口视为可信，只走转发链。
+ * BFF 侧解析。没有 socket 时，仅 USER_EDGE_ASSURED=true 才消费转发链。
+ * 只配置可信代理名单，不表示这次请求来自该代理。
  */
-export function resolveBffClientIp(headers: HeaderBag, config: UserClientIpConfig, peer?: string): string | undefined {
+export function resolveBffClientIp(headers: HeaderBag, config: UserClientIpConfig, peer?: string, edgeAssured = false): string | undefined {
   const cleaned = withoutInternalHeader(headers);
   if (peer) return resolveUserClientIp({ headers: cleaned, socket: { remoteAddress: peer } }, config);
-  if (config.trustedProxies.length === 0) return undefined;
+  if (!edgeAssured || config.trustedProxies.length === 0) return undefined;
   return resolveUserClientIp(
     { headers: cleaned, socket: { remoteAddress: "0.0.0.0" } },
     { ...config, trustedProxies: ["0.0.0.0", ...config.trustedProxies] },

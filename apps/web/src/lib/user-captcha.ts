@@ -12,9 +12,18 @@ function bytesToHex(bytes: Uint8Array): string {
 
 /** 本地 PBKDF2 证明，不依赖 DOM 组件。多端提交同一个 captcha 字符串。 */
 export async function solveLocalPow(challenge: AuthChallenge, signal?: AbortSignal, stillCurrent?: () => boolean): Promise<string> {
-  const { nonce, salt, cost, keyPrefix } = challenge.parameters;
-  const keyLength = challenge.parameters.keyLength ?? 32;
-  const prefix = keyPrefix.toLowerCase();
+  if (signal?.aborted || stillCurrent?.() === false) throw new DOMException("Proof calculation cancelled", "AbortError");
+  const parameters = challenge?.parameters;
+  const keyLength = parameters?.keyLength ?? 32;
+  const prefix = typeof parameters?.keyPrefix === "string" ? parameters.keyPrefix.toLowerCase() : "";
+  if (!parameters || parameters.algorithm !== "PBKDF2/SHA-256"
+    || typeof parameters.nonce !== "string" || typeof parameters.salt !== "string"
+    || !/^[0-9a-f]{8,128}$/i.test(parameters.nonce) || !/^[0-9a-f]{8,128}$/i.test(parameters.salt)
+    || !Number.isInteger(parameters.cost) || parameters.cost < 1 || parameters.cost > 1_000_000
+    || keyLength !== 32 || !/^[0-9a-f]{1,8}$/i.test(prefix)) {
+    throw new WebAuthError(403, "FORBIDDEN", false, undefined, "CAPTCHA_REQUIRED");
+  }
+  const { nonce, salt, cost } = parameters;
   const nonceBytes = hexToBytes(nonce);
   const saltBytes = hexToBytes(salt);
   for (let counter = 0; counter < 1_048_576; counter += 1) {

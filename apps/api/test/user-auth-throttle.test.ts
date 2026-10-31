@@ -6,11 +6,17 @@ import { isUserAuthPathAllowed } from "../src/auth/auth-runtime";
 import {
   createMemoryUserAuthThrottle,
   readUserThrottleHmacKey,
+  readUserThrottleMode,
   createPostgresUserAuthThrottle,
   createUserAuthThrottle,
   decideSignIn,
   signInSubjects,
   throttleDigest,
+  ThrottleDependencyError,
+  USER_AUTH_BASE_DEFAULT,
+  USER_AUTH_BASE_RULES,
+  userAuthPathProtection,
+  userThrottleContract,
   USER_THROTTLE_PROPOSAL,
   withUserAuthThrottle,
 } from "../src/auth/user-auth-throttle";
@@ -55,7 +61,8 @@ test("client ip ignores forged headers, walks trusted hops, and does not use the
   assert.equal(resolveUserClientIp({ headers: {}, socket: { remoteAddress: "127.0.0.1" } }, trusted), undefined);
   assert.throws(() => parseUserClientIpConfig({ USER_TRUSTED_PROXIES: "everyone" }));
   assert.equal(resolveBffClientIp(new Headers({ "x-forwarded-for": "1.1.1.1", [USER_CLIENT_IP_FORWARD_HEADER]: "9.9.9.9" }), closed), undefined);
-  assert.equal(resolveBffClientIp(new Headers({ "x-forwarded-for": "198.51.100.4, 10.1.1.1" }), trusted), "198.51.100.4");
+  assert.equal(resolveBffClientIp(new Headers({ "x-forwarded-for": "198.51.100.4, 10.1.1.1", [USER_CLIENT_IP_FORWARD_HEADER]: "1.2.3.4" }), trusted), undefined);
+  assert.equal(resolveBffClientIp(new Headers({ "x-forwarded-for": "198.51.100.4, 10.1.1.1", [USER_CLIENT_IP_FORWARD_HEADER]: "1.2.3.4" }), trusted, undefined, true), "198.51.100.4");
   assert.equal(resolveBffClientIp(new Headers({ "x-forwarded-for": "1.1.1.1" }), closed, "203.0.113.5"), "203.0.113.5");
 });
 
@@ -243,12 +250,12 @@ test("postgres lock order is sorted and parameters are digests", async () => {
 test("Root: committed sign-in and SMS responses survive a later throttle settlement failure", async () => {
   const oldWarn = console.warn; console.warn = () => {};
   try {
-    const loginStore = { realm: "user", admitSignIn: async () => ({ decision: "allow", ticket: "original" }), settleSignIn: async () => { throw new Error("meter down"); } } as any;
+    const loginStore = { realm: "user", mode: "candidate", admitSignIn: async () => ({ decision: "allow", ticket: "original" }), settleSignIn: async () => { throw new Error("meter down"); } } as any;
     const original = new Response(JSON.stringify({ status: true }), { status: 200, headers: { "set-cookie": "zzsh_user.session_token=SYNTHETIC; HttpOnly" } });
     const login = withUserAuthThrottle(async () => original, loginStore, KEY);
     const response = await login(signInRequest({ phoneNumber: PHONE, password: "correct" }));
     assert.equal(response, original); assert.match(response.headers.get("set-cookie")!, /SYNTHETIC/);
-    const smsStore = { realm: "user", admitSmsIp: async () => ({ decision: "allow", ticket: "original_sms" }), settleSmsIp: async () => { throw new Error("meter down"); } } as any;
+    const smsStore = { realm: "user", mode: "candidate", admitSmsIp: async () => ({ decision: "allow", ticket: "original_sms" }), settleSmsIp: async () => { throw new Error("meter down"); } } as any;
     const sent = Response.json({ status: true, challengeId: "challenge_original" });
     const sms = withUserAuthThrottle(async () => sent, smsStore, KEY);
     const result = await sms(signInRequest({ phoneNumber: PHONE }, IP, "/phone-registration/send-otp"));
@@ -283,4 +290,189 @@ test("Root: failed SQL audit rolls back only its savepoint and keeps the counter
     assert.equal(queries.at(-1), "COMMIT");
     assert.equal(store.fallbackLogs.length, 1);
   } finally { console.warn = oldWarn; }
+});
+
+const ALLOWED_POSTS = [
+  "/sign-in/identifier", "/sign-in/phone-number", "/sign-out",
+  "/phone-registration/send-otp", "/phone-registration/complete",
+  "/profile/nickname", "/security/challenge/send", "/security/challenge/verify",
+  "/security/password", "/security/email", "/security/phone", "/security/recovery/complete", "/security/operation",
+  "/security/sessions/revoke", "/security/sessions/revoke-others", "/security/sessions/revoke-all",
+];
+
+test("default mode does not publish the proposal and base protection stays on the allowlist", () => {
+  assert.deepEqual(userThrottleContract(), { mode: "base", store: "memory", shared: false, proposalPublished: false });
+  assert.equal(userThrottleContract({ USER_AUTH_THROTTLE_MODE: "candidate", USER_AUTH_THROTTLE_STORE: "postgres" }).proposalPublished, false);
+  assert.equal(userThrottleContract({ USER_AUTH_THROTTLE_STORE: "postgres" }).shared, true);
+  assert.throws(() => readUserThrottleMode({ USER_AUTH_THROTTLE_MODE: "on" }), /base or candidate/);
+  for (const path of ALLOWED_POSTS) {
+    assert.equal(isUserAuthPathAllowed(path), true);
+    const protection = userAuthPathProtection(path, "base");
+    assert.equal(protection, "base-resolved-ip");
+    assert.ok((USER_AUTH_BASE_RULES[path] ?? USER_AUTH_BASE_DEFAULT).max >= 1);
+  }
+  assert.equal(userAuthPathProtection("/security/captcha/challenge", "base"), "unpublished");
+  assert.equal(userAuthPathProtection("/security/captcha/challenge", "candidate"), "base-resolved-ip");
+  assert.equal(userAuthPathProtection("/get-session", "base"), "read-allowlist");
+  assert.equal(userAuthPathProtection("/sign-in/identifier", "candidate"), "proposal");
+  assert.equal(userAuthPathProtection("/security/password", "candidate"), "base-resolved-ip");
+  assert.equal(isUserAuthPathAllowed("/identity/status"), false);
+  assert.equal(isUserAuthPathAllowed("/phone-number/send-otp"), false);
+});
+
+test("base mode keeps a resolved-ip limit and does not put unknown or loopback addresses in one bucket", async () => {
+  const store = createMemoryUserAuthThrottle({ hmacKey: KEY, mode: "base", policy, captchaCost: 1 });
+  let calls = 0;
+  const wrapped = withUserAuthThrottle(async () => { calls += 1; return Response.json({ status: true }, { status: 401 }); }, store, KEY);
+  for (let index = 0; index < 3; index += 1) assert.equal((await wrapped(signInRequest({ phoneNumber: PHONE, password: "nope" }))).status, 401);
+  const limited = await wrapped(signInRequest({ phoneNumber: "+8613800138099", password: "nope" }));
+  assert.equal(limited.status, 429);
+  assert.equal((await limited.json()).error.reason, "RATE_LIMITED");
+  assert.equal(calls, 3);
+  const open = createMemoryUserAuthThrottle({ hmacKey: KEY, mode: "base", policy, captchaCost: 1 });
+  const forwarded = withUserAuthThrottle(async () => Response.json({ status: true }), open, KEY);
+  for (let index = 0; index < 5; index += 1) {
+    const loopback = new Request("http://127.0.0.1/api/auth/user/sign-in/phone-number", {
+      method: "POST", headers: { "content-type": "application/json", [USER_CLIENT_IP_FORWARD_HEADER]: "127.0.0.1" },
+      body: JSON.stringify({ phoneNumber: PHONE, password: "nope" }),
+    });
+    const forged = new Request("http://127.0.0.1/api/auth/user/sign-out", {
+      method: "POST", headers: { "content-type": "application/json", "x-forwarded-for": IP }, body: "{}",
+    });
+    assert.equal((await forwarded(loopback)).status, 200);
+    assert.equal((await forwarded(forged)).status, 200);
+  }
+});
+
+test("candidate sign-in stays on the proposal while other posts keep the base limit", async () => {
+  const store = createMemoryUserAuthThrottle({ hmacKey: KEY, mode: "candidate", policy: { ...policy, accountCaptchaAfter: 9, pairMax: 20, ipMax: 20 }, captchaCost: 1 });
+  let posts = 0;
+  const wrapped = withUserAuthThrottle(async () => { posts += 1; return Response.json({ ok: true }); }, store, KEY);
+  for (let index = 0; index < USER_AUTH_BASE_DEFAULT.max; index += 1) {
+    assert.equal((await wrapped(signInRequest({ phoneNumber: PHONE }, IP, "/security/password"))).status, 200);
+  }
+  assert.equal((await wrapped(signInRequest({ phoneNumber: PHONE }, IP, "/security/password"))).status, 429);
+  assert.equal(posts, USER_AUTH_BASE_DEFAULT.max);
+  const fourth = await wrapped(signInRequest({ phoneNumber: "+8613800138077", password: "nope" }));
+  assert.notEqual(fourth.status, 429);
+});
+
+test("login and SMS digests differ, and every SMS hold shares one phone quota", async () => {
+  assert.notEqual(throttleDigest(KEY, "user", "sign-in-phone", PHONE), throttleDigest(KEY, "user", "sms-phone", PHONE));
+  const store = throttle();
+  assert.equal((await store.holdSmsPhone(null, PHONE)).decision, "allow");
+  assert.equal((await store.holdSmsPhone(null, PHONE)).decision, "allow");
+  assert.equal((await store.holdSmsPhone(null, PHONE)).decision, "allow");
+  assert.equal((await store.holdSmsPhone(null, PHONE)).decision, "limited");
+});
+
+test("a sign-in proof does not satisfy SMS, and the window edge follows the injected clock", async () => {
+  const altcha = require("altcha-lib") as { solveChallenge(input: Record<string, unknown>): Promise<{ counter: number; derivedKey: string }> };
+  const pbkdf2 = require("altcha-lib/algorithms/pbkdf2") as { deriveKey: unknown };
+  const store = createMemoryUserAuthThrottle({ hmacKey: KEY, mode: "candidate", policy: { ...policy, accountCaptchaAfter: 1, smsIpCaptchaAfter: 1, smsIpPerMinute: 100, smsIpPerDay: 100 }, captchaCost: 1 });
+  const subjects = signInSubjects(KEY, PHONE, undefined);
+  await store.settleSignIn({ outcome: "credential", account: subjects.account });
+  const issued = await store.challenge("sign-in");
+  assert.equal(issued.parameters.data, "user:sign-in");
+  const payload = Buffer.from(JSON.stringify({ challenge: issued, solution: await altcha.solveChallenge({ challenge: issued, deriveKey: pbkdf2.deriveKey }) })).toString("base64");
+  assert.equal((await store.admitSignIn(subjects, payload)).decision, "allow");
+  const sent = await store.admitSmsIp(IP, undefined);
+  assert.equal(sent.decision, "allow");
+  await store.settleSmsIp(sent.ticket, "sent");
+  assert.equal((await store.admitSmsIp(IP, payload)).decision, "captcha");
+  const now = 1_700_000_000_000;
+  const edge = now - policy.signInWindowSeconds * 1000;
+  const pair = signInSubjects(KEY, PHONE, IP).pair!;
+  const row = { purpose: "sign-in", subject: pair, kind: "failure" as const, ticket: "ab".repeat(16), at: edge };
+  assert.equal(decideSignIn([row], signInSubjects(KEY, PHONE, IP), false, now, { ...policy, pairMax: 1 }).decision, "allow");
+  assert.equal(decideSignIn([{ ...row, at: edge + 1 }], signInSubjects(KEY, PHONE, IP), false, now, { ...policy, pairMax: 1 }).decision, "limited");
+});
+
+test("memory cleanup removes a bounded number of old subjects", async () => {
+  let clock = 0;
+  const store = createMemoryUserAuthThrottle({ hmacKey: KEY, mode: "candidate", now: () => clock, policy: { ...policy, daySeconds: 10, pairMax: 10, ipMax: 10, accountCaptchaAfter: 100 }, captchaCost: 1 });
+  for (const phone of ["+8613800138011", "+8613800138012"]) {
+    assert.equal((await store.admitSignIn(signInSubjects(KEY, phone, IP), undefined)).decision, "allow");
+  }
+  clock = 20_000;
+  assert.deepEqual(await store.sweepExpired(2), { events: 2, proofs: 0 });
+  assert.equal((await store.sweepExpired(10)).events > 0, true);
+});
+
+test("postgres decisions use the database clock, and a missing relation is not a 429", async () => {
+  const subjects = signInSubjects(KEY, PHONE, IP);
+  const clockPool = { connect: async () => ({ release() {}, query: async (sql: string) => {
+    if (sql.includes("pg_try_advisory")) return { rows: [{ ok: false }], rowCount: 1 };
+    if (sql.includes("SELECT purpose")) return { rows: [{ purpose: "sign-in", subject: subjects.pair, kind: "reserved", ticket: "ab".repeat(16), at: new Date(4_000) }] };
+    if (sql.includes("extract(epoch FROM clock_timestamp())")) return { rows: [{ now: "5000" }], rowCount: 1 };
+    return { rows: [], rowCount: 1 };
+  } }) } as unknown as Pool;
+  const clockStore = createPostgresUserAuthThrottle(clockPool, { hmacKey: KEY, mode: "candidate", policy: { ...policy, pairMax: 1 } });
+  assert.equal((await clockStore.admitSignIn(subjects, undefined)).decision, "limited");
+  const missing = createPostgresUserAuthThrottle({ connect: async () => ({ release() {}, query: async (sql: string) => {
+    if (sql.includes("pg_try_advisory")) return { rows: [{ ok: false }], rowCount: 1 };
+    if (sql.includes("INSERT")) throw Object.assign(new Error("relation missing"), { code: "42P01" });
+    if (sql.includes("extract(epoch FROM clock_timestamp())")) return { rows: [{ now: String(Date.now()) }], rowCount: 1 };
+    return { rows: [], rowCount: 0 };
+  } }) } as unknown as Pool, { hmacKey: KEY, mode: "candidate", policy });
+  await assert.rejects(() => missing.admitSignIn(signInSubjects(KEY, "+8613800138066", OTHER_IP), undefined), (error: unknown) => error instanceof ThrottleDependencyError);
+});
+
+test("a durable phone denial is audited only after the business client is released", async () => {
+  const subject = throttleDigest(KEY, "user", "sms-phone", PHONE);
+  const rows = Array.from({ length: 3 }, () => ({ purpose: "sms-phone", subject, kind: "sent", ticket: "cd".repeat(16), at: new Date() }));
+  let businessOpen = true;
+  let connects = 0;
+  const answer = async (sql: string) => {
+    if (sql.includes("pg_try_advisory")) return { rows: [{ ok: false }], rowCount: 1 };
+    if (sql.includes("SELECT purpose")) return { rows, rowCount: rows.length };
+    if (sql.includes("extract(epoch FROM clock_timestamp())")) return { rows: [{ now: String(Date.now()) }], rowCount: 1 };
+    if (sql === "SELECT denial_audit") {
+      assert.equal(businessOpen, false);
+      assert.equal(connects, 1);
+      return { rows: [], rowCount: 1 };
+    }
+    return { rows: [], rowCount: 1 };
+  };
+  const pool = { connect: async () => { connects += 1; return { release() {}, query: (sql: string) => answer(sql) }; } } as unknown as Pool;
+  const store = createPostgresUserAuthThrottle(pool, { hmacKey: KEY, mode: "candidate", policy, audit: async (held) => { await held.query("SELECT denial_audit"); } });
+  const business = { query: (sql: string) => answer(sql), release() {} };
+  const held = await store.holdSmsPhone(business as unknown as import("pg").PoolClient, PHONE);
+  assert.equal(held.decision, "limited");
+  assert.equal(connects, 0);
+  assert.equal(held.rejection?.purpose, "sms-phone");
+  businessOpen = false;
+  await store.recordRejection(held.rejection!);
+  assert.equal(connects, 1);
+});
+
+test("postgres sweep is locked, ordered and capped", async () => {
+  const seen: Array<{ sql: string; params?: unknown[] }> = [];
+  let locked = true;
+  const pool = { connect: async () => ({ release() {}, query: async (sql: string, params?: unknown[]) => {
+    seen.push({ sql, params });
+    if (sql.includes("pg_try_advisory")) return { rows: [{ ok: locked }], rowCount: 1 };
+    return { rows: [], rowCount: 2 };
+  } }) } as unknown as Pool;
+  const store = createPostgresUserAuthThrottle(pool, { hmacKey: KEY, mode: "base" });
+  assert.deepEqual(await store.sweepExpired(2), { events: 2, proofs: 2 });
+  assert.equal(seen.some((query) => query.params?.[0] === "user-auth-throttle-sweep"), true);
+  assert.equal(seen.filter((query) => query.sql.includes("FOR UPDATE SKIP LOCKED") && query.params?.[0] === 2).length, 2);
+  seen.length = 0;
+  locked = false;
+  assert.deepEqual(await store.sweepExpired(2), { events: 0, proofs: 0 });
+  assert.equal(seen.some((query) => query.sql.includes("DELETE")), false);
+});
+
+test("candidate challenge issuance binds the action and base mode does not publish it", async () => {
+  const store = createMemoryUserAuthThrottle({ hmacKey: KEY, mode: "candidate", policy, captchaCost: 1 });
+  const base = createMemoryUserAuthThrottle({ hmacKey: KEY, mode: "base", policy, captchaCost: 1 });
+  const wrapped = withUserAuthThrottle(async () => Response.json({}), store, KEY);
+  const hidden = withUserAuthThrottle(async () => Response.json({ published: true }), base, KEY);
+  assert.equal((await hidden(new Request("http://127.0.0.1/api/auth/user/security/captcha/challenge"))).status, 404);
+  const missing = await wrapped(new Request("http://127.0.0.1/api/auth/user/security/captcha/challenge"));
+  assert.equal(missing.status, 400);
+  const issued = await wrapped(new Request("http://127.0.0.1/api/auth/user/security/captcha/challenge?action=sms-send"));
+  assert.equal(issued.status, 200);
+  assert.equal((await issued.json()).challenge.parameters.data, "user:sms-send");
 });

@@ -63,7 +63,7 @@ import { composeSupplyGateWithOrderOccupancy } from "../order/order";
 import { ConfigurationError, OrderImSdkRouteBindings, readSecret, type OrderImSdkRouteConfig } from "../config/config";
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
 import { SecurityApiError, setAuditContext, recordAudit, withTransaction } from "./security-core";
-import { createUserAuthThrottle, readUserThrottleHmacKey, ThrottleDependencyError, withUserAuthThrottle, type UserAuthThrottle } from "./user-auth-throttle";
+import { createUserAuthThrottle, readUserThrottleHmacKey, readUserThrottleMode, ThrottleDependencyError, withUserAuthThrottle, type UserAuthThrottle, type UserThrottleMode } from "./user-auth-throttle";
 import { parseUserClientIpConfig, resolveUserClientIp, USER_CLIENT_IP_FORWARD_HEADER, type UserClientIpConfig } from "./user-client-ip";
 import { ImIdentityProvisioner, YunxinDynamicTokenService } from "../im/identity-lifecycle";
 import { MessageScopeRecoveryLifecycle, supportManagerIdentityKey, type ConsultationRouteOptions } from "../im/consultation";
@@ -163,13 +163,15 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   /** Seconds a pending-payment order holds the account. Creation refuses to run when unset. */
   orderHoldSeconds?: number;
   /**
-   * Explicit Better Auth rate-limit settings for the user realm. Unset keeps the library default
-   * (enabled in production); the isolated auth tests pass their own settings to assert that the
-   * limiter runs before any legacy credential upgrade.
+   * Explicit Better Auth rate-limit settings for the user realm. Unset disables the library
+   * limiter and its X-Forwarded-For / no-trusted-ip bucket. The isolated auth tests pass their
+   * own settings to assert that limiter runs before any legacy credential upgrade.
    */
   userRateLimit?: Parameters<typeof import("better-auth").betterAuth>[0]["rateLimit"];
-  /** 缺省 memory：未编号 SQL 应用前不把缺表当成全站 429。postgres 才走共享原子表。 */
+  /** memory 是单进程夹具。postgres 缺表或 ACL 时保持 503，不退回 memory，也不伪装成 429。 */
   userAuthThrottleStore?: "memory" | "postgres";
+  /** 缺省 base：建议策略不发布。candidate 只用于未确认前的验证。 */
+  userAuthThrottleMode?: UserThrottleMode;
   userThrottleHmacKey?: string;
   userClientIp?: UserClientIpConfig;
   userAuthThrottle?: UserAuthThrottle;
@@ -442,17 +444,17 @@ async function safeWebAuthHandler(
     if (response.status >= 400 && !controlled) {
       headers.delete("content-length");
       headers.set("content-type", "application/json; charset=utf-8");
-      let frozenSignIn = false;
-      if (response.status === 403 && request.method === "POST"
-        && ["/api/auth/user/sign-in/phone-number", "/api/auth/user/sign-in/identifier"].includes(new URL(request.url).pathname)) {
-        const body: unknown = await response.clone().json().catch(() => null);
-        frozenSignIn = typeof body === "object" && body !== null && "code" in body && body.code === "ACCOUNT_FROZEN";
-      }
+      const parsed: unknown = response.status === 403 || response.status === 503 ? await response.clone().json().catch(() => null) : null;
+      const bodyCode = typeof parsed === "object" && parsed !== null && "code" in parsed ? (parsed as { code?: unknown }).code : undefined;
+      const frozenSignIn = response.status === 403 && request.method === "POST" && bodyCode === "ACCOUNT_FROZEN"
+        && ["/api/auth/user/sign-in/phone-number", "/api/auth/user/sign-in/identifier"].includes(new URL(request.url).pathname);
+      const dependencyFailure = response.status === 503 && bodyCode === "AUTH_DEPENDENCY_UNAVAILABLE";
       return new Response(JSON.stringify({
         error: {
           code: authErrorCode(response.status),
-          message: frozenSignIn ? "账号已被冻结，如有疑问请联系客服" : response.status >= 500 ? "Internal server error" : "Authentication request rejected",
+          message: frozenSignIn ? "账号已被冻结，如有疑问请联系客服" : dependencyFailure ? "Authentication dependency unavailable" : response.status >= 500 ? "Internal server error" : "Authentication request rejected",
           ...(frozenSignIn ? { reason: "ACCOUNT_FROZEN" } : {}),
+          ...(dependencyFailure ? { reason: "AUTH_DEPENDENCY_UNAVAILABLE" } : {}),
           requestId,
         },
       }), { status: response.status, headers });
@@ -569,6 +571,7 @@ function buildPhoneRegistrationPlugin(
         const code = localSmsMock ? "888888" : registrationOtp();
         const now = new Date();
         let phoneHold: string | undefined;
+        let phoneRejection: { action: string; purpose: string; subject: string; outcome: string } | undefined;
         try {
         await withTransaction(pool, async (client) => {
           await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [identifier]);
@@ -581,10 +584,11 @@ function buildPhoneRegistrationPlugin(
           }
           if (smsThrottle) {
             const held = await smsThrottle.holdSmsPhone(client, phoneNumber).catch((error: unknown) => {
-              if (error instanceof ThrottleDependencyError) throw new APIError("SERVICE_UNAVAILABLE", { message: "Authentication dependency unavailable" });
+              if (error instanceof ThrottleDependencyError) throw new APIError("SERVICE_UNAVAILABLE", { code: "AUTH_DEPENDENCY_UNAVAILABLE", message: "Authentication dependency unavailable" });
               throw error;
             });
             if (held.decision === "limited") {
+              phoneRejection = held.rejection;
               ctx.setHeader("Retry-After", String(held.retryAfter));
               throw new APIError("TOO_MANY_REQUESTS", { message: "Verification code rate limited" });
             }
@@ -598,6 +602,7 @@ function buildPhoneRegistrationPlugin(
         });
         } catch (error) {
           if (phoneHold && smsThrottle) await smsThrottle.releaseSmsPhone(phoneHold).catch(() => undefined);
+          if (phoneRejection && smsThrottle) await smsThrottle.recordRejection(phoneRejection).catch(() => undefined);
           throw error;
         }
         outbox.set(identifier, { code, sentAt: now.toISOString(), purpose: "phone-registration" });
@@ -759,6 +764,7 @@ export function loadAuthRuntimeConfig(
   if (userAuthThrottleStore !== "memory" && userAuthThrottleStore !== "postgres") {
     throw new ConfigurationError("USER_AUTH_THROTTLE_STORE must be memory or postgres");
   }
+  const userAuthThrottleMode = readUserThrottleMode(env);
   const adminBootstrapSecret = env.AUTH_ADMIN_BOOTSTRAP_SECRET !== undefined || env.AUTH_ADMIN_BOOTSTRAP_SECRET_FILE !== undefined
     ? readSecret(env, "AUTH_ADMIN_BOOTSTRAP_SECRET", "AUTH_ADMIN_BOOTSTRAP_SECRET_FILE", workingDirectory)
     : undefined;
@@ -822,6 +828,7 @@ export function loadAuthRuntimeConfig(
     localSmsMock,
     userClientIp,
     userAuthThrottleStore,
+    userAuthThrottleMode,
     ...(userThrottleHmacKey ? { userThrottleHmacKey } : {}),
     ...(orderImEvents === undefined ? {} : { orderImEvents }),
     testOperationsEnabled: capabilities.testOperationsEnabled === true,
@@ -894,6 +901,7 @@ export async function mountAuthHandlers(
     hmacKey: throttleKey,
     pool: options.pool,
     store: options.userAuthThrottleStore ?? "memory",
+    mode: options.userAuthThrottleMode ?? "base",
     audit: async (client, event) => {
       if (!client) {
         console.warn(JSON.stringify({ event: "user.auth.audit", action: event.action, purpose: event.purpose, subjectPrefix: event.subject.slice(0, 8) }));
@@ -989,8 +997,13 @@ export async function mountAuthHandlers(
       buildPhoneRegistrationPlugin(createAuthEndpoint, APIError, setSessionCookie, options.pool, fakeSmsOutbox, options.fakeSmsOutbox !== undefined || options.localSmsMock === true, options.localSmsMock === true, signInIdentifier, options.nativeWalletOrigin, options.creditGuaranteeEnabled === true, options.distributionScope, userThrottle),
       userSecurityPlugin,
     ],
-    advanced: { ...common.advanced, cookiePrefix: "zzsh_user" },
-    // ponytail: the library memory limiter trusts a single X-Forwarded-For and would double-count this gate.
+    advanced: {
+      ...common.advanced,
+      cookiePrefix: "zzsh_user",
+      // Default path does not restore the SDK X-Forwarded-For reader or its shared no-trusted-ip bucket.
+      ...(options.userRateLimit ? {} : { ipAddress: { disableIpTracking: true } }),
+    },
+    // Explicit userRateLimit keeps the library limiter for the isolated auth test. Otherwise base rules live in the wrapper.
     ...(options.userRateLimit ? { rateLimit: options.userRateLimit } : { rateLimit: { enabled: false } }),
     hooks: {
       before: createAuthMiddleware(async (ctx) => {
