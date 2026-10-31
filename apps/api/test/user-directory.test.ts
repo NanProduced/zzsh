@@ -16,16 +16,17 @@ import { withTransaction } from "../src/auth/security-core";
 import { loadConfig, type AppConfig } from "../src/config/config";
 import { assertBusinessRuntimeIdentity, createBusinessPool } from "../src/database/business";
 import { runBusinessMigrations } from "../src/database/business-migrations";
-import { admitTestDatabase, ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
+import { admitTestDatabase, assertFreshRegressionRun } from "./database-test-support";
+import { assertNotProtectedTarget, registeredException, REGRESSION_ALLOW_NEW_RESOURCE, REGRESSION_DATABASE, REGRESSION_MARKER, REGRESSION_MIGRATION_USER, REGRESSION_RESOURCE_LOCK_KEY, REGRESSION_ROLE_PREFIX, REGRESSION_RUNTIME_USER, regressionOidBinding } from "../src/config/test-resource";
+
 
 const RESOURCE_SET = process.env.USER_DIRECTORY_TEST_RESOURCE_SET?.trim() || "";
 if (RESOURCE_SET && !/^[a-z][a-z0-9_]{0,20}$/.test(RESOURCE_SET)) throw new Error("Invalid user directory test resource set");
-const DEFAULT_DATABASE = RESOURCE_SET ? "zzsh_test_admin_" + RESOURCE_SET : "zzsh_test_admin_user_directory";
+const EXCEPTION = RESOURCE_SET ? registeredException("zzsh_test_admin_" + RESOURCE_SET) : null;
+const DEFAULT_DATABASE = RESOURCE_SET ? "zzsh_test_admin_" + RESOURCE_SET : REGRESSION_DATABASE;
 const ROLE_PREFIX = "zzsh_admin_";
-const RESOURCE_MARKER = "zzsh:user-directory-test:v1";
-const LOCK_KEY = RESOURCE_SET
-  ? (BigInt("0x" + createHash("sha256").update("user-directory-test:" + RESOURCE_SET).digest("hex").slice(0, 15)) + 2000000n).toString()
-  : "930101";
+const RESOURCE_MARKER = EXCEPTION?.marker ?? REGRESSION_MARKER;
+const LOCK_KEY = REGRESSION_RESOURCE_LOCK_KEY;
 const USER_ORIGIN = "http://127.0.0.1:3100";
 const ADMIN_ORIGIN = "http://127.0.0.1:3101";
 const API_ORIGIN = "http://127.0.0.1:3102";
@@ -79,17 +80,12 @@ function roleMarker(databaseName: string, role: "migration" | "runtime"): string
 }
 
 function makeResources(): Resources {
-  const databaseName = process.env.USER_DIRECTORY_TEST_DB_NAME?.trim() || DEFAULT_DATABASE;
-  assert.notEqual(databaseName, "zzsh_dev");
-  const migrationUser = safeIdentifier(process.env.USER_DIRECTORY_TEST_MIGRATION_USER?.trim() || (RESOURCE_SET ? ROLE_PREFIX + RESOURCE_SET + "_m" : "zzsh_admin_user_directory_m"), "migration user");
-  const runtimeUser = safeIdentifier(process.env.USER_DIRECTORY_TEST_RUNTIME_USER?.trim() || (RESOURCE_SET ? ROLE_PREFIX + RESOURCE_SET + "_r" : "zzsh_admin_user_directory_r"), "runtime user");
+  const databaseName = DEFAULT_DATABASE;
+  assertNotProtectedTarget(databaseName);
+  const migrationUser = safeIdentifier(EXCEPTION?.migrationUser ?? REGRESSION_MIGRATION_USER, "migration user");
+  const runtimeUser = safeIdentifier(EXCEPTION?.runtimeUser ?? REGRESSION_RUNTIME_USER, "runtime user");
   assert.notEqual(migrationUser, runtimeUser);
-  if (RESOURCE_SET) {
-    assert.equal(databaseName, DEFAULT_DATABASE);
-    assert.equal(migrationUser, ROLE_PREFIX + RESOURCE_SET + "_m");
-    assert.equal(runtimeUser, ROLE_PREFIX + RESOURCE_SET + "_r");
-  }
-  if (!migrationUser.startsWith(ROLE_PREFIX) || !runtimeUser.startsWith(ROLE_PREFIX)) throw new Error("user directory test role prefix mismatch");
+  if (!(migrationUser.startsWith(ROLE_PREFIX) || migrationUser.startsWith(REGRESSION_ROLE_PREFIX)) || !(runtimeUser.startsWith(ROLE_PREFIX) || runtimeUser.startsWith(REGRESSION_ROLE_PREFIX))) throw new Error("user directory test role prefix mismatch");
   const maintenanceUser = process.env.USER_DIRECTORY_TEST_MAINTENANCE_USER ?? process.env.DB_USER;
   const baseEnv = {
     ...process.env,
@@ -165,8 +161,8 @@ async function resourceGuard(pool: Pool, resources: Resources): Promise<PoolClie
 }
 
 async function ensureDatabase(pool: Pool, resources: Resources): Promise<void> {
-  const existing = await pool.query<{ owner: string; comment: string | null; allowConnections: boolean; isTemplate: boolean }>(
-    "SELECT pg_get_userbyid(d.datdba) AS owner, shobj_description(d.oid, 'pg_database') AS comment, d.datallowconn AS \"allowConnections\", d.datistemplate AS \"isTemplate\" FROM pg_database d WHERE d.datname = $1",
+  const existing = await pool.query<{ owner: string; comment: string | null; allowConnections: boolean; isTemplate: boolean; databaseOid: string | null }>(
+    "SELECT pg_get_userbyid(d.datdba) AS owner, shobj_description(d.oid, 'pg_database') AS comment, d.datallowconn AS \"allowConnections\", d.datistemplate AS \"isTemplate\", d.oid::text AS \"databaseOid\" FROM pg_database d WHERE d.datname = $1",
     [resources.databaseName],
   );
   const admission = admitTestDatabase({
@@ -177,8 +173,12 @@ async function ensureDatabase(pool: Pool, resources: Resources): Promise<void> {
     isTemplate: existing.rows[0]?.isTemplate,
     expectedOwner: resources.maintenance.database.user,
     expectedMarker: RESOURCE_MARKER,
+    databaseOid: existing.rows[0]?.databaseOid,
+    expectedOid: EXCEPTION ? EXCEPTION.oid : regressionOidBinding(),
+    reuseOnly: EXCEPTION !== null,
+    requireOidOnReuse: EXCEPTION === null,
     databaseName: resources.databaseName,
-    allowFlag: "ADM_USER_LIST_TEST_ALLOW_NEW_RESOURCE",
+    allowFlag: REGRESSION_ALLOW_NEW_RESOURCE,
   });
   if (admission === "CREATE") {
     await pool.query("CREATE DATABASE " + quotedIdentifier(resources.databaseName, "test database") + " OWNER " + quotedIdentifier(resources.maintenance.database.user, "maintenance user"));
@@ -343,7 +343,7 @@ test("ADM-USER-DIRECTORY-READ-1 admin user directory read API", async (t) => {
     runtimePool = createBusinessPool(resources.runtime);
     await assertBusinessRuntimeIdentity(runtimePool, resources.runtime);
     if ((await maintenanceDataPool.query(`SELECT count(*)::int AS n FROM zzsh_auth_user."user"`)).rows[0].n > 0) {
-      await maintenanceDataPool.query(ISOLATED_BUSINESS_DATA_TRUNCATE);
+      await assertFreshRegressionRun(maintenanceDataPool);
     }
     // Fixture: the two new directory permission codes are registered here directly only
     // because this package must not add a product migration; production registration is a
@@ -402,13 +402,24 @@ test("ADM-USER-DIRECTORY-READ-1 admin user directory read API", async (t) => {
     const resourceViewer = await createStaff("供给只读员", ["user.directory.read", "supply.rental_account.read"]);
     const noPermStaff = await createStaff("无权限管理员", []);
 
-    // Users: one local email user with an account, one phone user, one migrated legacy user,
-    // one deactivated user.
+    // Users: one local user without a phone fact, one phone user, one migrated legacy user,
+    // one deactivated user. Email self-signup was retired with the phone-login contract, so
+    // the phone-less local sample registers through phone and the fixture then clears the
+    // synthetic phone and sets the contact fields the directory projects.
+    const registerLocalUser = async (jar: CookieJar, phoneNumber: string, name: string, username: string): Promise<string> => {
+      assert.equal((await request(base, "/api/auth/user/phone-registration/send-otp", { phoneNumber }, cookieJar(), USER_ORIGIN)).response.status, 200);
+      const delivery = fakeSmsOutbox.get(`phone-registration:${phoneNumber}`);
+      assert.ok(delivery, "phone registration OTP fixture delivered");
+      const registered = await request(base, "/api/auth/user/phone-registration/complete", { phoneNumber, code: delivery.code, password: "Sup3rSecret#Dir", acceptedTerms: true }, jar, USER_ORIGIN);
+      assert.equal(registered.response.status, 200, JSON.stringify(registered.body));
+      const session = await request(base, "/api/auth/user/get-session", undefined, jar, USER_ORIGIN);
+      const userId = session.body?.user?.id as string;
+      assert.ok(userId);
+      await maintenanceDataPool!.query(`UPDATE zzsh_auth_user."user" SET "phoneNumber"=NULL,"phoneNumberVerified"=NULL,name=$2,email=$3,username=$4 WHERE id=$1`, [userId, name, `${username}@example.invalid`, username]);
+      return userId;
+    };
     const localJar = cookieJar();
-    const localSignup = await request(base, "/api/auth/user/sign-up/email", { email: "dir_local01@example.invalid", password: "Sup3rSecret#Dir", name: "本地新用户", username: "dir_local01" }, localJar, USER_ORIGIN);
-    assert.equal(localSignup.response.status, 200, JSON.stringify(localSignup.body));
-    const localUserId = localSignup.body?.user?.id as string;
-    assert.ok(localUserId);
+    const localUserId = await registerLocalUser(localJar, "+8613900001112", "本地新用户", "dir_local01");
     assert.equal((await request(base, "/api/auth/user/identity/verify", { fullName: "本地新用户", documentNumber: "110101199001010000" }, localJar, USER_ORIGIN)).response.status, 200);
 
     const phoneJar = cookieJar();
@@ -430,9 +441,7 @@ test("ADM-USER-DIRECTORY-READ-1 admin user directory read API", async (t) => {
     assert.ok(legacyUserId);
 
     const deactivatedJar = cookieJar();
-    const deactivatedSignup = await request(base, "/api/auth/user/sign-up/email", { email: "dir_gone01@example.invalid", password: "Sup3rSecret#Dir", name: "冻结用户", username: "dir_gone01" }, deactivatedJar, USER_ORIGIN);
-    assert.equal(deactivatedSignup.response.status, 200);
-    const deactivatedUserId = deactivatedSignup.body?.user?.id as string;
+    const deactivatedUserId = await registerLocalUser(deactivatedJar, "+8613900001113", "冻结用户", "dir_gone01");
     // Self-service deactivation is retired; the directory sample is frozen through the admin freeze endpoint (Boss holds every code).
     const deactivated = await request(base, "/api/bff/admin/security/users/freeze", { targetUserId: deactivatedUserId, reason: "用户目录测试冻结样本", password: boss.password, totpCode: totpCode(boss.secret) }, boss.jar, ADMIN_ORIGIN);
     assert.equal(deactivated.response.status, 200, JSON.stringify(deactivated.body));
@@ -579,9 +588,12 @@ test("ADM-USER-DIRECTORY-READ-1 admin user directory read API", async (t) => {
       assert.equal(denied.response.status, 403);
     });
 
-    await t.test("orders read requires order.read and stays empty without order facts", async () => {
-      const denied = await request(base, `/api/v1/admin/users/${localUserId}/orders`, undefined, viewer.jar, ADMIN_ORIGIN);
-      assert.equal(denied.response.status, 403);
+    await t.test("orders read follows the administrator baseline and stays empty without order facts", async () => {
+      // admin-authorization.ts: order.read is a baseline business read for every active
+      // administrator, not an individually granted permission.
+      const baseline = await request(base, `/api/v1/admin/users/${localUserId}/orders`, undefined, viewer.jar, ADMIN_ORIGIN);
+      assert.equal(baseline.response.status, 200, JSON.stringify(baseline.body));
+      assert.deepEqual(baseline.body?.items, []);
       const empty = await request(base, `/api/v1/admin/users/${localUserId}/orders`, undefined, boss.jar, ADMIN_ORIGIN);
       assert.equal(empty.response.status, 200, JSON.stringify(empty.body));
       assert.deepEqual(empty.body?.items, []);

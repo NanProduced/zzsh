@@ -385,7 +385,7 @@ test('source filter keeps the NULL test on the newest migration fact instead of 
   // The three-state classification reads the latest migration fact through the batch relation and tests
   // its legacy id for NULL; an `EXISTS(...) IS NULL` form is always false and must never come back.
   assert.ok(sql.includes('SELECT DISTINCT ON (e.object_id)'),'the source filter reads one latest fact per user');
-  assert.ok(sql.includes("s.user_id IS NOT NULL AND s.provider='none' AND mig.legacy_id IS NULL"),'LOCAL still means "newest migration fact carries no legacy id"');
+  assert.ok(sql.includes("s.user_id IS NOT NULL AND NULLIF(s.provider,'') IS NOT NULL AND mig.legacy_id IS NULL"),'LOCAL requires an identity provider and no newest legacy id; real-name verification may replace the provider');
   assert.equal(/EXISTS\s*\([\s\S]*?\)\s*IS NULL/i.test(sql),false,'no existence test may stand in for the nullable newest value');
   const local:any=await listUserDirectory(client(pool),viewer,{source:'LOCAL',limit:20});
   assert.deepEqual([...local.items.map((row:any)=>row.userId)].sort(),

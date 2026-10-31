@@ -5,8 +5,8 @@ import {
   loadConfig,
   type AppConfig,
 } from "../config/config";
+import { MAINTENANCE_DATABASE, REGRESSION_DATABASE, REGRESSION_RESOURCE_LOCK_KEY } from "../config/test-resource";
 
-export const FND004_TEST_DATABASE = "zzsh_test_fnd004";
 export const FND004_TEST_SCHEMA = "fnd004_probe";
 export const FND004_TEST_TARGET = "zzsh-rebuild-local";
 export const FND004_MARKER_KEY = "fnd004-test-database";
@@ -30,7 +30,7 @@ function assertApprovedConfig(config: AppConfig): void {
     config.database.host !== LOCAL_HOST ||
     config.database.port !== LOCAL_DB_PORT ||
     config.database.user !== "zzsh" ||
-    config.database.name !== FND004_TEST_DATABASE
+    config.database.name !== REGRESSION_DATABASE
   ) {
     throw new ConfigurationError("FND-004 reset target is not the approved isolated test database");
   }
@@ -220,11 +220,66 @@ export async function resetVerifiedTestSchema(
   }
 }
 
+// The formal 0000 SQL still inserts the original database name, so the shared regression target gets
+// its marker row prepared here and then verified by the reset entry - the SQL bytes stay untouched.
+// Only the known legacy name may be retargeted, once; anything else is refused rather than rewritten.
+export async function prepareFndFixtureMarker(client: PoolClient, config: AppConfig): Promise<void> {
+  assertApprovedConfig(config);
+  await assertTargetIdentity(client, config);
+  const existing = await client.query<{ database_name: string }>(
+    `SELECT database_name FROM "zzsh_meta"."database_marker" WHERE marker_key = $1`,
+    [FND004_MARKER_KEY],
+  );
+  if (existing.rows.length === 0) throw new Error("FND-004 formal marker row is absent; run the formal migrations first");
+  const current = existing.rows[0]!.database_name;
+  if (current === config.database.name) return;
+  if (current !== "zzsh_test_fnd004") throw new Error(`FND-004 marker points at ${current}; refusing to retarget a foreign marker`);
+  await client.query(
+    `UPDATE "zzsh_meta"."database_marker" SET database_name = $1, target = $2, role_name = $3, marker_version = 1 WHERE marker_key = $4`,
+    [config.database.name, FND004_TEST_TARGET, config.database.user, FND004_MARKER_KEY],
+  );
+}
+
+// Maintenance-database session lock shared with every compiled suite: an advisory lock is scoped to its
+// database, so the in-database FND lease below is an inner lock only.
+export async function acquireRegressionResourceLock(pool: Pool, label = "FND-004"): Promise<PoolClient> {
+  const client = await pool.connect();
+  try {
+    const identity = await client.query<{ database_name: string }>("SELECT current_database() AS database_name");
+    if (identity.rows[0]?.database_name !== MAINTENANCE_DATABASE) throw new Error(`${label} must take the shared resource lock on the maintenance database`);
+    const acquired = (await client.query<{ acquired: boolean }>("SELECT pg_try_advisory_lock($1::bigint) AS acquired", [REGRESSION_RESOURCE_LOCK_KEY])).rows[0]?.acquired;
+    if (acquired !== true) throw new Error(`${label}: the local test resource is already in use by another process`);
+    return client;
+  } catch (error) {
+    client.release(true);
+    throw error;
+  }
+}
+
+export async function releaseRegressionResourceLock(client: PoolClient): Promise<void> {
+  try {
+    await client.query("SELECT pg_advisory_unlock($1::bigint)", [REGRESSION_RESOURCE_LOCK_KEY]);
+    client.release();
+  } catch {
+    client.release(true);
+  }
+}
+
 export async function resetTestDatabase(
   env: NodeJS.ProcessEnv = process.env,
   workingDirectory = process.cwd(),
 ): Promise<void> {
   const config = loadFnd004TestConfig(env, workingDirectory);
+  const maintenancePool = new Pool({
+    host: config.database.host,
+    port: config.database.port,
+    user: config.database.user,
+    password: config.database.password,
+    database: MAINTENANCE_DATABASE,
+    application_name: "zzsh-fnd004-reset-lock",
+    connectionTimeoutMillis: 2_000,
+    max: 1,
+  });
   const pool = new Pool({
     host: config.database.host,
     port: config.database.port,
@@ -235,9 +290,11 @@ export async function resetTestDatabase(
     connectionTimeoutMillis: 2_000,
     max: 1,
   });
+  let lockClient: PoolClient | undefined;
   let client: PoolClient | undefined;
   let lease: Fnd004Lease | undefined;
   try {
+    lockClient = await acquireRegressionResourceLock(maintenancePool);
     client = await pool.connect();
     lease = await acquireLeaseOnClient(client, config);
     await resetWithFnd004Lease(lease);
@@ -247,6 +304,8 @@ export async function resetTestDatabase(
     } else if (client) {
       client.release(true);
     }
+    if (lockClient) await releaseRegressionResourceLock(lockClient);
     await pool.end();
+    await maintenancePool.end();
   }
 }

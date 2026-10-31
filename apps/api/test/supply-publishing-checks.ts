@@ -104,6 +104,17 @@ export async function runPublishingChecks(o: Options): Promise<void> {
       vit_level: 6,
       bear_level: 6,
       info_source: "private fixture note",
+      // Delta publication declares grading, login method, service window and the
+      // supplemental booleans (delta-rental.ts validateDeltaPublicationAttributes).
+      grading_code: "1",
+      login_method_code: "legacy_login_qq",
+      dive_level: 1,
+      service_window_start_minute: 480,
+      service_window_end_minute: 1320,
+      service_window_timezone: "Asia/Shanghai",
+      service_window_cross_midnight: false,
+      next_season_pass: false,
+      demulan_unlocked: false,
     },
     termOptionCode: "daily-10m",
     pricingOptionCode: "standard",
@@ -261,7 +272,13 @@ export async function runPublishingChecks(o: Options): Promise<void> {
     userPrefix + "/draft",
     {
       ...declaration,
-      attributes: { safe_box_code: "box-a", vit_level: null, bear_level: null },
+      attributes: {
+        safe_box_code: "box-a", vit_level: null, bear_level: null,
+        grading_code: "1", login_method_code: "legacy_login_qq", dive_level: 1,
+        service_window_start_minute: 480, service_window_end_minute: 1320,
+        service_window_timezone: "Asia/Shanghai", service_window_cross_midnight: false,
+        next_season_pass: false, demulan_unlocked: false,
+      },
       expectedRevision: d.account.revision,
     },
     o.user,
@@ -318,18 +335,15 @@ export async function runPublishingChecks(o: Options): Promise<void> {
     400,
     "unknown expiry cannot become an assured date",
   );
+  // Delta categories are retired and categoryless storage is not installed yet, so the
+  // disabled legacy skin fixture is the undeclarable catalog entry here.
   const hiddenSkin = (
     await o.pool.query(
-      `SELECT id,category_id FROM zzsh_supply.skin WHERE game_id=$1 AND code='skin_m4_gold'`,
+      `SELECT id FROM zzsh_supply.skin WHERE game_id=$1 AND code='skin_no_rarity'`,
       [o.gameId],
     )
   ).rows[0];
-  await ok(
-    "/api/bff/admin/supply/categories/" + hiddenSkin.category_id,
-    { formVisible: false },
-    o.boss,
-    "PUT",
-  );
+  assert.ok(hiddenSkin, "the disabled legacy skin fixture must exist");
   d = await ok(
     userPrefix + "/draft",
     {
@@ -347,13 +361,7 @@ export async function runPublishingChecks(o: Options): Promise<void> {
       })
     ).status,
     400,
-    "hidden category blocks new skin declarations",
-  );
-  await ok(
-    "/api/bff/admin/supply/categories/" + hiddenSkin.category_id,
-    { formVisible: true },
-    o.boss,
-    "PUT",
+    "a disabled skin blocks new declarations",
   );
   d = await ok(
     userPrefix + "/draft",
@@ -465,10 +473,11 @@ export async function runPublishingChecks(o: Options): Promise<void> {
     reason: "审核期间暂不接单",
   });
   assert.equal(d.account.owner_paused, true);
-  assert.equal(
-    (await call("/api/v1/supply/listings/" + o.accountId, undefined)).status,
-    404,
-  );
+  // api-v1-contract.md: a paused account leaves the rentable list; its approved public
+  // detail stays readable and reports the non-createable state instead of 404.
+  const pausedListing = await ok("/api/v1/supply/listings/" + o.accountId, undefined);
+  assert.equal(pausedListing.availability.state, "OFFLINE");
+  assert.equal(pausedListing.canCreateOrder, false);
   d = await ok(userPrefix + "/resume", {
     expectedRevision: d.account.revision,
   });
@@ -549,11 +558,13 @@ export async function runPublishingChecks(o: Options): Promise<void> {
     expectedRevision: d.account.revision,
   });
   assert.notEqual(d.version.id, publishedId);
-  assert.equal(
-    (await fetch(o.base + publicListing.media[0].url)).status,
-    404,
-    "key edit blocks old listing media",
-  );
+  // Starting a new draft does not withdraw the published version: the detail stays readable as
+  // OFFLINE (not orderable) and the still-published version keeps its media until the new version
+  // is submitted. Only pause/restriction/withdraw remove the public access.
+  const editedPublic = await ok("/api/v1/supply/listings/" + o.accountId, undefined);
+  assert.equal(editedPublic.availability.state, "OFFLINE");
+  assert.equal(editedPublic.canCreateOrder, false);
+  assert.equal((await fetch(o.base + publicListing.media[0].url)).status, 200);
   assert.equal(
     (
       await o.pool.query(
@@ -1171,33 +1182,30 @@ export async function runPublishingChecks(o: Options): Promise<void> {
               true,
               "the entire list uses the pre-revocation snapshot",
             );
-          for (const next of routes) {
-            const r = await fetch(o.base + next);
-            if (next.includes("?"))
-              assert.equal(
-                (await r.json()).items.some((i: any) => i.id === o.accountId),
-                false,
-              );
-            else assert.equal(r.status, 404);
-          }
+          // New reads never use the frozen snapshot: the list drops the row, revoked media
+          // 404s, and a still-published detail stays readable but non-createable.
+          const assertRevokedReads = async () => {
+            for (const next of routes) {
+              const r = await fetch(o.base + next);
+              if (next.includes("?"))
+                assert.equal(
+                  (await r.json()).items.some((i: any) => i.id === o.accountId),
+                  false,
+                );
+              else if (next.includes("/media/"))
+                assert.equal(r.status, 404, "revoked media must reject new reads");
+              else {
+                assert.equal(r.status, 200);
+                assert.equal((await r.json()).canCreateOrder, false);
+              }
+            }
+          };
+          await assertRevokedReads();
           await o.maintenance.query(
             "UPDATE zzsh_supply.rental_account SET owner_paused=false WHERE id=$1",
             [o.accountId],
           );
-          for (const next of routes) {
-            const r = await fetch(o.base + next);
-            if (next.includes("?"))
-              assert.equal(
-                (await r.json()).items.some((i: any) => i.id === o.accountId),
-                false,
-              );
-            else
-              assert.equal(
-                r.status,
-                404,
-                "media revocation alone must reject new reads",
-              );
-          }
+          await assertRevokedReads();
         } finally {
           release();
           o.readProbe.run = undefined;

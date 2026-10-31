@@ -1,5 +1,5 @@
 import { runSupplyPoolChecks } from "./supply-pool-checks";
-import { admitTestDatabase, installedBusinessTruncate, ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
+import { admitTestDatabase, assertFreshRegressionRun } from "./database-test-support";
 import { runPublishingChecks } from "./supply-publishing-checks";
 import { runPricingCompatChecks } from "./supply-pricing-compat-checks";
 import { personalFixture } from "./personal-confirmation-checks";
@@ -26,13 +26,16 @@ import { assertBusinessRuntimeIdentity, createBusinessPool } from "../src/databa
 import { runBusinessMigrations } from "../src/database/business-migrations";
 import { createLocalMediaStorage, MediaStorageError } from "../src/supply/media";
 import { loadConfig, type AppConfig } from "../src/config/config";
+import { assertNotProtectedTarget, registeredException, REGRESSION_ALLOW_NEW_RESOURCE, REGRESSION_DATABASE, REGRESSION_MARKER, REGRESSION_MIGRATION_USER, REGRESSION_RESOURCE_LOCK_KEY, REGRESSION_ROLE_PREFIX, REGRESSION_RUNTIME_USER, regressionOidBinding } from "../src/config/test-resource";
+
 
 const RESOURCE_SET = process.env.SUPPLY_TEST_RESOURCE_SET?.trim() || "";
 if(process.env.SUPPLY_QUERY_A_ONLY==="1"&&RESOURCE_SET!=="pricing_compat")throw new Error("Query A requires explicit pricing_compat resource");
 if(RESOURCE_SET && !/^[a-z][a-z0-9_]{0,20}$/.test(RESOURCE_SET)) throw new Error("Invalid supply test resource set");
-const DEFAULT_DATABASE = RESOURCE_SET ? "zzsh_test_supply_"+RESOURCE_SET : "zzsh_test_m3b_supply";
-const RESOURCE_MARKER = "zzsh:m3b-supply-test:v1";
-const LOCK_KEY = RESOURCE_SET ? (BigInt("0x"+createHash("sha256").update("supply-test:"+RESOURCE_SET).digest("hex").slice(0,15))+2000000n).toString() : "805015";
+const EXCEPTION = RESOURCE_SET ? registeredException("zzsh_test_supply_"+RESOURCE_SET) : null;
+const DEFAULT_DATABASE = RESOURCE_SET ? "zzsh_test_supply_"+RESOURCE_SET : REGRESSION_DATABASE;
+const RESOURCE_MARKER = EXCEPTION?.marker ?? REGRESSION_MARKER;
+const LOCK_KEY = REGRESSION_RESOURCE_LOCK_KEY;
 const USER_ORIGIN = "http://127.0.0.1:3100";
 const ADMIN_ORIGIN = "http://127.0.0.1:3101";
 const API_ORIGIN = "http://127.0.0.1:3102";
@@ -115,13 +118,12 @@ function roleMarker(databaseName: string, role: "migration" | "runtime"): string
 }
 
 function makeResources(): Resources {
-  const databaseName = process.env.M3B_SUPPLY_TEST_DB_NAME?.trim() || DEFAULT_DATABASE;
-  assert.notEqual(databaseName, "zzsh_dev");
-  const migrationUser = safeIdentifier(process.env.M3B_SUPPLY_TEST_MIGRATION_USER?.trim() || (RESOURCE_SET?"zzsh_m3b_"+RESOURCE_SET+"_m":"zzsh_m3b_migration"), "migration user");
-  const runtimeUser = safeIdentifier(process.env.M3B_SUPPLY_TEST_RUNTIME_USER?.trim() || (RESOURCE_SET?"zzsh_m3b_"+RESOURCE_SET+"_r":"zzsh_m3b_runtime"), "runtime user");
+  const databaseName = DEFAULT_DATABASE;
+  assertNotProtectedTarget(databaseName);
+  const migrationUser = safeIdentifier(EXCEPTION?.migrationUser ?? REGRESSION_MIGRATION_USER, "migration user");
+  const runtimeUser = safeIdentifier(EXCEPTION?.runtimeUser ?? REGRESSION_RUNTIME_USER, "runtime user");
   assert.notEqual(migrationUser, runtimeUser);
-  if(RESOURCE_SET){assert.equal(databaseName,DEFAULT_DATABASE);assert.equal(migrationUser,"zzsh_m3b_"+RESOURCE_SET+"_m");assert.equal(runtimeUser,"zzsh_m3b_"+RESOURCE_SET+"_r");}
-  if (!migrationUser.startsWith("zzsh_m3b_") || !runtimeUser.startsWith("zzsh_m3b_")) throw new Error("supply test roles must use the isolated zzsh_m3b_ prefix");
+  if (!(migrationUser.startsWith("zzsh_m3b_") || migrationUser.startsWith(REGRESSION_ROLE_PREFIX)) || !(runtimeUser.startsWith("zzsh_m3b_") || runtimeUser.startsWith(REGRESSION_ROLE_PREFIX))) throw new Error("supply test roles must use an isolated test role prefix");
   const maintenanceUser = process.env.M3B_SUPPLY_TEST_MAINTENANCE_USER ?? process.env.DB_USER;
   const baseEnv = {
     ...process.env,
@@ -193,8 +195,8 @@ async function resourceGuard(pool: Pool, resources: Resources): Promise<PoolClie
 }
 
 async function ensureDatabase(pool: Pool, resources: Resources): Promise<void> {
-  const existing = await pool.query<{ owner: string; allowConnections: boolean; isTemplate: boolean; comment: string | null }>(
-    "SELECT pg_get_userbyid(d.datdba) AS owner, d.datallowconn AS \"allowConnections\", d.datistemplate AS \"isTemplate\", shobj_description(d.oid, 'pg_database') AS comment FROM pg_database d WHERE d.datname = $1",
+  const existing = await pool.query<{ owner: string; allowConnections: boolean; isTemplate: boolean; databaseOid: string | null; comment: string | null }>(
+    "SELECT pg_get_userbyid(d.datdba) AS owner, d.datallowconn AS \"allowConnections\", d.datistemplate AS \"isTemplate\", d.oid::text AS \"databaseOid\", shobj_description(d.oid, 'pg_database') AS comment FROM pg_database d WHERE d.datname = $1",
     [resources.databaseName],
   );
   const admission = admitTestDatabase({
@@ -205,8 +207,12 @@ async function ensureDatabase(pool: Pool, resources: Resources): Promise<void> {
     isTemplate: existing.rows[0]?.isTemplate,
     expectedOwner: resources.maintenance.database.user,
     expectedMarker: RESOURCE_MARKER,
+    databaseOid: existing.rows[0]?.databaseOid,
+    expectedOid: EXCEPTION ? EXCEPTION.oid : regressionOidBinding(),
+    reuseOnly: EXCEPTION !== null,
+    requireOidOnReuse: EXCEPTION === null,
     databaseName: resources.databaseName,
-    allowFlag: "SUPPLY_TEST_ALLOW_NEW_RESOURCE",
+    allowFlag: REGRESSION_ALLOW_NEW_RESOURCE,
   });
   if (admission === "CREATE") {
     await pool.query("CREATE DATABASE " + quotedIdentifier(resources.databaseName, "test database") + " OWNER " + quotedIdentifier(resources.maintenance.database.user, "maintenance user"));
@@ -265,14 +271,7 @@ async function prepareOwnership(pool: Pool, resources: Resources): Promise<void>
 }
 
 async function resetIsolatedData(pool: Pool): Promise<void> {
-  const present=(await pool.query(`SELECT to_regclass('zzsh_iam.user_rental_membership') AS relation`)).rows[0]?.relation;
-  const configPresent=(await pool.query(`SELECT to_regclass('zzsh_supply.listing_filter_config') AS relation`)).rows[0]?.relation;
-  const orderReadPresent=(await pool.query(`SELECT to_regclass('zzsh_order.legacy_order_read_snapshot') AS relation`)).rows[0]?.relation;
-  const legalStatement=await installedBusinessTruncate(pool);
-  let statement=present?legalStatement:legalStatement.replace('      "zzsh_iam"."user_rental_membership",\n',"");
-  if(!configPresent)statement=statement.replace('      "zzsh_supply"."listing_filter_config",\n',"");
-  if(!orderReadPresent)statement=statement.replace('  "zzsh_order"."legacy_order_read_snapshot",\n',"");
-  await pool.query(statement);
+  await assertFreshRegressionRun(pool);
 }
 
 function base32Decode(value: string): Buffer {
@@ -481,7 +480,7 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
     const boss = await activate(base, bootstrap.body?.username as string, bossPassword);
 
     const createStaff = async (name: string, allowPermissions: string[]): Promise<Staff> => {
-      const created = await request(base, "/api/v1/admin/security/admins/create", { mode: "ALL_GAMES", name, allowPermissions }, boss.jar, ADMIN_ORIGIN);
+      const created = await request(base, "/api/v1/admin/security/admins/create", { mode: "SELECTED_GAMES", gameIds: [], name, allowPermissions }, boss.jar, ADMIN_ORIGIN);
       assert.equal(created.response.status, 200, JSON.stringify(created.body));
       return activate(base, created.body?.username as string, created.body?.temporaryPassword as string);
     };
@@ -498,16 +497,37 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
     ]);
 
     // ---------- 目录 ----------
+    // docs/architecture/api-v1-contract.md: only delta supports ACCOUNT_RENTAL and GUNSMITH.
+    // A non-delta game keeps catalog authoring but must reject the rental combination
+    // instead of being admitted to the public catalog.
+    const authoringGame = await request(base, "/api/bff/admin/supply/games", { code: "arena_fps", name: "竞技射击", description: "合成测试游戏" }, boss.jar, ADMIN_ORIGIN, "POST", supplyKey());
+    assert.equal(authoringGame.response.status, 200, JSON.stringify(authoringGame.body));
+    const authoringGameId = authoringGame.body?.game?.id as string;
+    assert.ok(authoringGameId);
+    const unsupportedService = await request(base, `/api/bff/admin/supply/games/${authoringGameId}/services/ACCOUNT_RENTAL`, { enabled: true, expectedRevision: "1" }, boss.jar, ADMIN_ORIGIN, "PUT", supplyKey());
+    assert.equal(unsupportedService.response.status, 409, JSON.stringify(unsupportedService.body));
+    assert.equal(unsupportedService.body?.error?.code, "UNSUPPORTED_GAME_SERVICE");
+
     const createdGame = await request(base, "/api/bff/admin/supply/games", { code: "delta", name: "三角洲行动", description: "合成测试游戏" }, boss.jar, ADMIN_ORIGIN, "POST", supplyKey());
     assert.equal(createdGame.response.status, 200, JSON.stringify(createdGame.body));
     const gameId = createdGame.body?.game?.id as string;
     assert.ok(gameId);
+    // game-services.ts auto-enables ACCOUNT_RENTAL for delta; the documented admin route
+    // still toggles the supported combination.
+    const enabledService = await request(base, `/api/bff/admin/supply/games/${gameId}/services/ACCOUNT_RENTAL`, { enabled: true, expectedRevision: "1" }, boss.jar, ADMIN_ORIGIN, "PUT", supplyKey());
+    assert.equal(enabledService.response.status, 200, JSON.stringify(enabledService.body));
 
     const unscopedGames = await request(base, "/api/bff/admin/supply/games", undefined, unscoped.jar, ADMIN_ORIGIN);
     assert.equal(unscopedGames.response.status, 200);
-    assert.deepEqual(unscopedGames.body?.games, []);
+    // docs/architecture/authentication.md: game-selector metadata stays readable for a normal admin;
+    // an empty SELECTED_GAMES removes business scope, not the selector itself. The catalog below still 403s.
+    assert.equal(Array.isArray(unscopedGames.body?.games), true);
+    assert.equal(unscopedGames.body?.games?.some((game: { id?: string }) => game.id === gameId), true);
     const unscopedCatalog = await request(base, `/api/bff/admin/supply/games/${gameId}/catalog`, undefined, unscoped.jar, ADMIN_ORIGIN);
-    assert.equal(unscopedCatalog.response.status, 404);
+    // Empty SELECTED_GAMES is "no business scope" -> 403 NO_GAME_SCOPE; object-out-of-range inside a
+    // non-empty scope is the 404 case (covered further below).
+    assert.equal(unscopedCatalog.response.status, 403, JSON.stringify(unscopedCatalog.body));
+    assert.match(JSON.stringify(unscopedCatalog.body), /NO_GAME_SCOPE/);
 
     await runtimePool.query(
       `INSERT INTO "zzsh_supply"."admin_supply_scope" ("admin_user_id", "game_id", "granted_by_admin_id") VALUES ($1, $2, $3)`,
@@ -517,32 +537,77 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
       `INSERT INTO "zzsh_supply"."admin_supply_scope" ("admin_user_id", "game_id", "granted_by_admin_id") VALUES ($1, $2, $3)`,
       [gunsmithOnly.id, gameId, boss.id],
     );
+    await runtimePool.query(
+      `INSERT INTO "zzsh_supply"."admin_supply_scope" ("admin_user_id", "game_id", "granted_by_admin_id") VALUES ($1, $2, $3)`,
+      [operator.id, authoringGameId, boss.id],
+    );
 
-    const createEntry = async (kind: string, body: Record<string, unknown>): Promise<string> => {
-      const payload = kind === "skins" || kind === "skin-owners" ? { ...body, expectedCatalogRevision: await catalogRevision() } : body;
-      const created = await request(base, `/api/bff/admin/supply/games/${gameId}/${kind}`, payload, operator.jar, ADMIN_ORIGIN, "POST", supplyKey());
+    const catalogRevision = async (target: string = gameId): Promise<string> =>
+      (await runtimePool!.query<{ revision: string }>(`SELECT catalog_revision::text AS revision FROM zzsh_supply.game WHERE id=$1`, [target])).rows[0]!.revision;
+    const createEntry = async (kind: string, body: Record<string, unknown>, target: string = gameId): Promise<string> => {
+      const payload = kind === "skins" || kind === "skin-owners" ? { ...body, expectedCatalogRevision: await catalogRevision(target) } : body;
+      const created = await request(base, `/api/bff/admin/supply/games/${target}/${kind}`, payload, operator.jar, ADMIN_ORIGIN, "POST", supplyKey());
       assert.equal(created.response.status, 200, JSON.stringify(created.body));
       return created.body?.id as string;
     };
-    const catalogRevision = async (): Promise<string> =>
-      (await runtimePool!.query<{ revision: string }>(`SELECT catalog_revision::text AS revision FROM zzsh_supply.game WHERE id=$1`, [gameId])).rows[0]!.revision;
-    const haffItem = await createEntry("items", { code: "haff_base", name: "哈夫币", unit: "HAFF_BASE", required: true });
-    const roundItem = await createEntry("items", { code: "round_item", name: "子弹", unit: "ROUND" });
-    await createEntry("rarities", { code: "gold", name: "金色" });
-    const weaponRoot = await createEntry("categories", { code: "weapon", name: "武器" });
-    const rifle = await createEntry("categories", { code: "rifle", name: "步枪", parentId: weaponRoot });
-    const model = await createEntry("categories", { code: "m4a1", name: "M4A1", parentId: rifle });
-    const tooDeep = await request(base, `/api/bff/admin/supply/games/${gameId}/categories`, { code: "too_deep", name: "第四级", parentId: model }, operator.jar, ADMIN_ORIGIN, "POST", supplyKey());
+
+    // ---------- 非 delta：目录编写仍可用，但不能进入租赁与公开目录 ----------
+    const rarityEvidence = { schema: "skin-rarity-evidence-v1", basis: "PLATFORM_REFERENCE", sourceName: "合成品质参考", references: [{ url: "https://evidence.invalid/rarity/gold", observedAt: "2026-10-30", region: "CN", note: "本地合成夹具" }] };
+    await createEntry("rarities", { code: "gold", name: "金色" }, authoringGameId);
+    const weaponRoot = await createEntry("categories", { code: "weapon", name: "武器" }, authoringGameId);
+    const rifle = await createEntry("categories", { code: "rifle", name: "步枪", parentId: weaponRoot }, authoringGameId);
+    const model = await createEntry("categories", { code: "m4a1", name: "M4A1", parentId: rifle }, authoringGameId);
+    const tooDeep = await request(base, `/api/bff/admin/supply/games/${authoringGameId}/categories`, { code: "too_deep", name: "第四级", parentId: model }, operator.jar, ADMIN_ORIGIN, "POST", supplyKey());
     assert.equal(tooDeep.response.status, 400, JSON.stringify(tooDeep.body));
     const cycle = await request(base, `/api/bff/admin/supply/categories/${weaponRoot}`, { parentId: model }, operator.jar, ADMIN_ORIGIN, "PUT", supplyKey());
     assert.equal(cycle.response.status, 400, JSON.stringify(cycle.body));
     const selfParent = await request(base, `/api/bff/admin/supply/categories/${weaponRoot}`, { parentId: weaponRoot }, operator.jar, ADMIN_ORIGIN, "PUT", supplyKey());
     assert.equal(selfParent.response.status, 400);
 
-    const skin = await createEntry("skins", { code: "skin_m4_gold", name: "M4A1 金色", categoryId: model, rarityCode: "gold", sourceNamespace: "legacy_mysql_restore", sourceField: "knifeSkin", sourceToken: "legacy-unknown-token" });
-    const rarityCount = await runtimePool.query<{ count: string }>(`SELECT count(*)::text AS count FROM "zzsh_supply"."skin_rarity" WHERE "game_id" = $1 AND "code" = 'legacy-unknown-token'`, [gameId]);
+    const authoredSkin = await createEntry("skins", { code: "skin_m4_gold", name: "M4A1 金色", categoryId: model, rarityCode: "gold", rarityEvidence, sourceNamespace: "legacy_mysql_restore", sourceField: "knifeSkin", sourceToken: "legacy-unknown-token" }, authoringGameId);
+    const rarityCount = await runtimePool.query<{ count: string }>(`SELECT count(*)::text AS count FROM "zzsh_supply"."skin_rarity" WHERE "game_id" = $1 AND "code" = 'legacy-unknown-token'`, [authoringGameId]);
     assert.equal(rarityCount.rows[0]?.count, "0", "unknown legacy tokens must not be auto-created as valid catalog entries");
+    const authoredRename = await request(base, `/api/bff/admin/supply/skins/${authoredSkin}`, { name: "M4A1 金色（改名）", reason: "合成改名", expectedCatalogRevision: await catalogRevision(authoringGameId) }, operator.jar, ADMIN_ORIGIN, "PUT", supplyKey());
+    assert.equal(authoredRename.response.status, 200, JSON.stringify(authoredRename.body));
+    const authoredRow = await runtimePool.query<{ code: string; name: string; sourceToken: string | null }>(
+      `SELECT "code", "name", "source_token" AS "sourceToken" FROM "zzsh_supply"."skin" WHERE "id" = $1`,
+      [authoredSkin],
+    );
+    assert.equal(authoredRow.rows[0]?.code, "skin_m4_gold");
+    assert.equal(authoredRow.rows[0]?.name, "M4A1 金色（改名）");
+    assert.equal(authoredRow.rows[0]?.sourceToken, "legacy-unknown-token");
+    await createEntry("skins", { code: "skin_no_rarity", name: "无稀有度皮肤", categoryId: model }, authoringGameId);
+    const unsupportedCatalog = await request(base, `/api/v1/supply/games/${authoringGameId}/catalog`, undefined, cookieJar(), API_ORIGIN);
+    assert.equal(unsupportedCatalog.response.status, 404, "an unsupported game must not expose a public catalog");
 
+    // ---------- delta：旧分类只读、无分类结构未安装，历史词条由 PENDING fixture 承接 ----------
+    const haffItem = await createEntry("items", { code: "haff_base", name: "哈夫币", unit: "HAFF_BASE", required: true });
+    const roundItem = await createEntry("items", { code: "round_item", name: "子弹", unit: "ROUND" });
+    await createEntry("rarities", { code: "gold", name: "金色" });
+    const retiredCategory = await request(base, `/api/bff/admin/supply/games/${gameId}/categories`, { code: "weapon", name: "武器" }, operator.jar, ADMIN_ORIGIN, "POST", supplyKey());
+    assert.equal(retiredCategory.response.status, 400, JSON.stringify(retiredCategory.body));
+    assert.match(JSON.stringify(retiredCategory.body), /旧皮肤分类只保留历史读取/);
+    const retiredSkin = await request(base, `/api/bff/admin/supply/games/${gameId}/skins`, { code: "skin_legacy_attempt", name: "旧分类皮肤", categoryId: model, expectedCatalogRevision: await catalogRevision() }, operator.jar, ADMIN_ORIGIN, "POST", supplyKey());
+    assert.equal(retiredSkin.response.status, 400, JSON.stringify(retiredSkin.body));
+    const categorylessSkin = await request(base, `/api/bff/admin/supply/games/${gameId}/skins`, { code: "skin_categoryless_attempt", name: "无分类皮肤", expectedCatalogRevision: await catalogRevision() }, operator.jar, ADMIN_ORIGIN, "POST", supplyKey());
+    assert.equal(categorylessSkin.response.status, 503, JSON.stringify(categorylessSkin.body));
+    assert.match(JSON.stringify(categorylessSkin.body), /EVIDENCE_UNAVAILABLE/);
+
+    const legacyCategoryId = "supply_category_legacy_weapon";
+    await maintenanceDataPool!.query(`INSERT INTO "zzsh_supply"."skin_category" ("id","game_id","code","name") VALUES ($1,$2,'legacy_weapon','武器')`, [legacyCategoryId, gameId]);
+    // The API intentionally refuses new delta category bindings; production rows come from the
+    // frozen legacy migration. Insert the pre-identity PENDING row, then use the real rename,
+    // identity-confirmation and media APIs above it.
+    const seedPendingSkin = async (code: string, name: string, options: { rarityCode?: string; rarityEvidence?: unknown; legacySource?: boolean } = {}): Promise<string> => {
+      const id = `skin_fixture_${code}`;
+      await maintenanceDataPool!.query(
+        `INSERT INTO "zzsh_supply"."skin" ("id","game_id","code","name","category_id","rarity_code","enabled","form_visible","rarity_evidence","source_namespace","source_field","source_token")
+         VALUES ($1,$2,$3,$4,$5,$6,false,false,$7,$8,$9,$10)`,
+        [id, gameId, code, name, legacyCategoryId, options.rarityCode ?? null, options.rarityEvidence ?? null, options.legacySource ? "legacy_mysql_restore" : null, options.legacySource ? "knifeSkin" : null, options.legacySource ? "legacy-unknown-token" : null],
+      );
+      return id;
+    };
+    const skin = await seedPendingSkin("skin_m4_gold", "M4A1 金色", { rarityCode: "gold", rarityEvidence, legacySource: true });
     const renamed = await request(base, `/api/bff/admin/supply/skins/${skin}`, { name: "M4A1 金色（改名）", reason: "合成改名", expectedCatalogRevision: await catalogRevision() }, operator.jar, ADMIN_ORIGIN, "PUT", supplyKey());
     assert.equal(renamed.response.status, 200, JSON.stringify(renamed.body));
     const skinRow = await runtimePool.query<{ code: string; name: string; rarityCode: string | null; sourceToken: string | null }>(
@@ -553,6 +618,11 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
     assert.equal(skinRow.rows[0]?.name, "M4A1 金色（改名）");
     assert.equal(skinRow.rows[0]?.sourceToken, "legacy-unknown-token");
 
+    const bareSkin = await seedPendingSkin("skin_no_rarity", "无稀有度皮肤");
+    const bareRow = await runtimePool.query<{ rarityCode: string | null }>(`SELECT "rarity_code" AS "rarityCode" FROM "zzsh_supply"."skin" WHERE "id" = $1`, [bareSkin]);
+    assert.equal(bareRow.rows[0]?.rarityCode, null, "missing rarity must stay null instead of defaulting to a value");
+    const redSkin = await seedPendingSkin("skin_m4_red", "M4A1 红色");
+
     const skinOwner = await createEntry("skin-owners", { kind: "AGENT", code: "owner_luna", name: "露娜", reason: "合成词条", evidenceRefs: [{ url: "https://example.org/official", observedAt: "2026-09-26", region: "CN", note: "离线合成词条" }] });
     const identityEvidence = { reason: "合成身份确认", evidenceRefs: [{ url: "https://example.org/official", observedAt: "2026-09-26", region: "CN", note: "离线合成词条" }] };
     const confirmSkin = async (id: string, baseName: string) => {
@@ -560,14 +630,7 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
       assert.equal(confirmed.response.status, 200, JSON.stringify(confirmed.body));
     };
     await confirmSkin(skin, "天际线");
-
-    const bareSkin = await createEntry("skins", { code: "skin_no_rarity", name: "无稀有度皮肤", categoryId: model });
-    const bareRow = await runtimePool.query<{ rarityCode: string | null }>(`SELECT "rarity_code" AS "rarityCode" FROM "zzsh_supply"."skin" WHERE "id" = $1`, [bareSkin]);
-    assert.equal(bareRow.rows[0]?.rarityCode, null, "missing rarity must stay null instead of defaulting to a value");
-    const redSkin = await createEntry("skins", { code: "skin_m4_red", name: "M4A1 红色", categoryId: model });
     await confirmSkin(redSkin, "赤焰");
-
-    await request(base, `/api/bff/admin/supply/skins/${bareSkin}`, { enabled: false, expectedCatalogRevision: await catalogRevision() }, operator.jar, ADMIN_ORIGIN, "PUT", supplyKey());
 
     const publicCatalog = await request(base, `/api/v1/supply/games/${gameId}/catalog`, undefined, cookieJar(), API_ORIGIN);
     assert.equal(publicCatalog.response.status, 200, JSON.stringify(publicCatalog.body));
@@ -590,7 +653,7 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
 
     const rarityFiltered = await request(base, `/api/v1/supply/games/${gameId}/catalog?rarityCode=gold`, undefined, cookieJar(), API_ORIGIN);
     assert.equal(rarityFiltered.body?.skins.length, 1);
-    const categoryFiltered = await request(base, `/api/v1/supply/games/${gameId}/catalog?categoryId=${weaponRoot}`, undefined, cookieJar(), API_ORIGIN);
+    const categoryFiltered = await request(base, `/api/v1/supply/games/${gameId}/catalog?categoryId=${legacyCategoryId}`, undefined, cookieJar(), API_ORIGIN);
     assert.equal(categoryFiltered.body?.skins.length, 2);
 
     const deleteDenied = await runtimePool.query(`DELETE FROM "zzsh_supply"."billable_item" WHERE "id" = $1`, [roundItem]).then(() => null, (error: unknown) => error);
@@ -729,7 +792,9 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
     assert.equal(seedCount.rows[0]?.count, "1");
 
     await maintenanceDataPool.query(`UPDATE zzsh_iam.admin_security SET game_scope_mode = 'SELECTED_GAMES' WHERE admin_user_id = $1`, [operator.id]);
-    await maintenanceDataPool.query(`DELETE FROM zzsh_supply.admin_supply_scope WHERE admin_user_id = $1 AND game_id = $2`, [operator.id, gameId]);
+    // Empty selected scope (the authoring game row also goes away) means NO_GAME_SCOPE;
+    // an out-of-range object inside a non-empty scope is the separate 404 case.
+    await maintenanceDataPool.query(`DELETE FROM zzsh_supply.admin_supply_scope WHERE admin_user_id = $1`, [operator.id]);
     const replayRevoked = await request(base, `/api/bff/admin/supply/games/${gameId}/items`, { code: "seed_item", name: "种子物品", unit: "PIECE" }, operator.jar, ADMIN_ORIGIN, "POST", { "idempotency-key": replayKey });
     assert.equal(replayRevoked.response.status, 403, "R3 cached success must honor current scope");
     assert.equal(replayRevoked.body?.error?.code, "NO_GAME_SCOPE");
@@ -984,6 +1049,11 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
     const staleRead = await request(base, `/api/v1/supply/games/${gameId}/catalog?cursor=${encodeURIComponent(staleCursor)}&limit=1`, undefined, cookieJar(), API_ORIGIN);
     assert.equal(staleRead.response.status, 409, "cursors must be invalidated when the catalog revision changes");
 
+    // The idempotency block above left operator on ALL_GAMES; restore the selected scope so the
+    // check modules' object-scope revocation (NO_GAME_SCOPE / out-of-range 404) stays meaningful.
+    // A second in-range game keeps "out-of-range" distinct from "empty scope".
+    await maintenanceDataPool.query(`UPDATE zzsh_iam.admin_security SET game_scope_mode = 'SELECTED_GAMES' WHERE admin_user_id = $1`, [operator.id]);
+    await runtimePool.query(`INSERT INTO zzsh_supply.admin_supply_scope (admin_user_id, game_id, granted_by_admin_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`, [operator.id, authoringGameId, boss.id]);
     await runGunsmithChecks({base,gameId,boss:boss.jar,bossId:boss.id,user:userOne,operator:operator.jar,gunsmithOnly:gunsmithOnly.jar,catalogOnly:unscoped.jar,request,key:supplyKey,adminOrigin:ADMIN_ORIGIN,apiOrigin:API_ORIGIN,userOrigin:USER_ORIGIN,pool:runtimePool,uploadBytes,mediaBytes:pngBytes});
     await runPublishingChecks({testContext,readProbe,userOrigin:USER_ORIGIN,adminOrigin:ADMIN_ORIGIN,evidenceAssetId:userAssetId,base,pool:runtimePool,maintenance:maintenanceDataPool,migration:migrationPool,runtimeUser:resources.runtimeUser,gameId,accountId,itemId:haffItem,user:userOne,stranger:userTwo,userPhone,strangerPhone:"+8613800000002",boss:boss.jar,bossId:boss.id,operator:operator.jar,operatorId:operator.id,bytes:pngBytes(),gates:publicationGates});
     await runSupplyPoolChecks({testContext,pool:runtimePool,maintenance:maintenanceDataPool,auth:authOptions,user:userOne,boss:boss.jar,bossId:boss.id,accountId,gameId,bytes:pngBytes()});

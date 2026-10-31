@@ -10,8 +10,10 @@ const base: TestDatabaseAdmission = {
   marker: MARKER,
   allowConnections: true,
   isTemplate: false,
+  databaseOid: "700001",
   expectedOwner: "zzsh",
   expectedMarker: MARKER,
+  expectedOid: null,
   databaseName: "zzsh_test_order_fixture",
   allowFlag: "ORDER_TEST_ALLOW_NEW_RESOURCE",
 };
@@ -76,6 +78,11 @@ test("only the exact value 1 is an admission", () => {
     assert.throws(() => decide(base, { ORDER_TEST_ALLOW_NEW_RESOURCE: value }), /ORDER_TEST_ALLOW_NEW_RESOURCE=1/);
   }
   assert.throws(() => decide(base, { ORDER_TEST_ALLOW_NEW_RESOURCE: undefined }), /ORDER_TEST_ALLOW_NEW_RESOURCE=1/);
+});
+
+test("a registered OID that no longer matches the database is refused", () => {
+  assert.throws(() => admitTestDatabase({ ...base, exists: true, expectedOid: "700002" }, {}), /not OID 700002/);
+  assert.equal(admitTestDatabase({ ...base, exists: true, expectedOid: "700001" }, {}), "REUSE");
 });
 
 test("repeat reuse never produces r1/r2 resources", () => {

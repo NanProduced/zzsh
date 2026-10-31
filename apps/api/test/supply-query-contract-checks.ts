@@ -175,7 +175,14 @@ export async function runQueryContractChecks(o: {
       {
         title: input.title,
         description: "合成检索资料，不含登录凭据",
-        attributes: { safe_box_code: "box-a", vit_level: 6, bear_level: 6 },
+        attributes: {
+          safe_box_code: "box-a", vit_level: 6, bear_level: 6,
+          // Delta publication declarations (delta-rental.ts validateDeltaPublicationAttributes).
+          grading_code: "1", login_method_code: "legacy_login_qq", dive_level: 1,
+          service_window_start_minute: 480, service_window_end_minute: 1320,
+          service_window_timezone: "Asia/Shanghai", service_window_cross_midnight: false,
+          next_season_pass: false, demulan_unlocked: false,
+        },
         termOptionCode: "daily-10m",
         pricingOptionCode: "standard",
         inventory: [{ itemId: o.itemId, quantity: input.quantity ?? "60000000" }],
@@ -547,9 +554,11 @@ export async function runQueryContractChecks(o: {
       const afterPause = paused.version.declaration.mediaBindings.find(
         (b: any) => b.assetId === published.displayId,
       );
+      // account-visibility composition (f6883a00): an owner pause keeps the approved public
+      // detail and its display media readable; only staff restriction/withdrawal hide them.
       assert.equal(afterPause.publicDisplayEligible, true);
-      assert.equal(afterPause.publiclyReadable, false);
-      assert.equal((await fetch(o.base + publicMedia)).status, 404);
+      assert.equal(afterPause.publiclyReadable, true);
+      assert.equal((await fetch(o.base + publicMedia)).status, 200);
       const resumed = await ok(
         "/api/v1/supply/accounts/" + published.accountId + "/resume",
         { expectedRevision: paused.account.revision },
@@ -702,11 +711,13 @@ export async function runQueryContractChecks(o: {
         },
         o.boss,
       );
-      assert.equal(
-        (await fetch(o.base + "/api/v1/supply/listings/" + published.accountId))
-          .status,
-        404,
-      );
+      // Revoked display media removes the public images; the approved detail stays readable
+      // as non-createable (api-v1-contract.md) while the media URL itself 404s below.
+      const revokedDetail = await (
+        await fetch(o.base + "/api/v1/supply/listings/" + published.accountId)
+      ).json();
+      assert.equal(revokedDetail.canCreateOrder, false);
+      assert.equal(revokedDetail.media.length, 0);
       assert.equal(
         (
           await fetch(
@@ -752,7 +763,13 @@ export async function runQueryContractChecks(o: {
         {
           title: "媒体状态样例",
           description: "合成检索资料，不含登录凭据",
-          attributes: { safe_box_code: "box-a", vit_level: 6, bear_level: 6 },
+          attributes: {
+            safe_box_code: "box-a", vit_level: 6, bear_level: 6,
+            grading_code: "1", login_method_code: "legacy_login_qq", dive_level: 1,
+            service_window_start_minute: 480, service_window_end_minute: 1320,
+            service_window_timezone: "Asia/Shanghai", service_window_cross_midnight: false,
+            next_season_pass: false, demulan_unlocked: false,
+          },
           termOptionCode: "daily-10m",
           pricingOptionCode: "standard",
           inventory: [{ itemId: o.itemId, quantity: "60000000" }],

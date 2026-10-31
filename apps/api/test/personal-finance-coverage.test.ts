@@ -1,7 +1,42 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import type {PoolClient} from 'pg';
+import {DatabaseSync} from 'node:sqlite';
 import {hasProvedNativeHistoryAbsence,prepareObservationCoverage,readObservationCoverage,assertFinanceSingleCutoff,type ObservationCoverageInput} from '../src/finance/personal-finance-coverage';
+
+test('native history proof survives real-name verification but never proves migrated or incomplete history',async()=>{
+ const db=new DatabaseSync(':memory:');
+ db.exec(`ATTACH DATABASE ':memory:' AS zzsh_order; ATTACH DATABASE ':memory:' AS zzsh_iam;
+  CREATE TABLE zzsh_order.wallet_coverage(user_id TEXT,basis_id TEXT,origin TEXT);
+  CREATE TABLE zzsh_order.finance_opening_basis(id TEXT,user_id TEXT,source_kind TEXT,available_cents INTEGER,covered_count INTEGER);
+  CREATE TABLE zzsh_iam.user_identity_state(user_id TEXT,provider TEXT);
+  CREATE TABLE zzsh_order.native_user_insert_proof(user_id TEXT);
+  CREATE TABLE zzsh_iam.audit_event(object_id TEXT,action TEXT,outcome TEXT);
+  CREATE TABLE zzsh_order.personal_finance_observation(user_id TEXT,source_kind TEXT);
+  INSERT INTO zzsh_order.wallet_coverage VALUES('user','basis','NATIVE_GENESIS');
+  INSERT INTO zzsh_order.finance_opening_basis VALUES('basis','user','NATIVE_GENESIS',0,0);
+  INSERT INTO zzsh_iam.user_identity_state VALUES('user','none');
+  INSERT INTO zzsh_order.native_user_insert_proof VALUES('user');`);
+ const c={query:async(sql:string,args:unknown[])=>({rows:[{complete:db.prepare(sql.replace(/\$[12]/g,'?')).get(...args as string[])?.complete===1}]})} as unknown as PoolClient;
+ const read=()=>hasProvedNativeHistoryAbsence(c,'user','HISTORICAL_WITHDRAWAL');
+ try{
+  assert.equal(await read(),true);
+  db.exec("UPDATE zzsh_iam.user_identity_state SET provider='fake'");
+  assert.equal(await read(),true,'real-name verification preserves an existing native birth proof');
+  for(const provider of ['legacy_mysql_restore','',null]){
+   db.prepare('UPDATE zzsh_iam.user_identity_state SET provider=?').run(provider);
+   assert.equal(await read(),false);
+  }
+  db.exec("UPDATE zzsh_iam.user_identity_state SET provider='fake'; INSERT INTO zzsh_iam.audit_event VALUES('user','user.legacy_owner.migrated','SUCCESS')");
+  assert.equal(await read(),false,'a migration audit survives provider replacement');
+  db.exec('DELETE FROM zzsh_iam.audit_event; DELETE FROM zzsh_order.native_user_insert_proof');
+  assert.equal(await read(),false,'no birth proof means no confirmed empty history');
+  db.exec("INSERT INTO zzsh_order.native_user_insert_proof VALUES('user'); INSERT INTO zzsh_order.personal_finance_observation VALUES('user','HISTORICAL_WITHDRAWAL')");
+  assert.equal(await read(),false);
+  db.exec('DELETE FROM zzsh_order.personal_finance_observation; UPDATE zzsh_order.finance_opening_basis SET available_cents=1');
+  assert.equal(await read(),false);
+ }finally{db.close();}
+});
 
 const input=(patch:Partial<ObservationCoverageInput>={}):ObservationCoverageInput=>({
  userId:'fixture_user',legacyUserId:'101',sourceSystem:'legacy_mysql_restore',sourceKind:'HISTORICAL_WITHDRAWAL',
@@ -51,7 +86,7 @@ test('native absence reuses birth, identity, no migration audit and exact histor
  const seen:{sql:string;args:unknown[]}[]=[];
  const c={query:async(sql:string,args:unknown[])=>{seen.push({sql,args});return{rows:[{complete:true}]};}} as unknown as PoolClient;
  assert.equal(await hasProvedNativeHistoryAbsence(c,'fixture_user','HISTORICAL_DISTRIBUTION'),true);
- assert.deepEqual(seen[0]?.args,['fixture_user','HISTORICAL_DISTRIBUTION']);assert.match(seen[0]!.sql,/native_user_insert_proof/);assert.match(seen[0]!.sql,/s.provider='none'/);assert.match(seen[0]!.sql,/NOT EXISTS[^]*user.legacy_owner.migrated/);assert.match(seen[0]!.sql,/h.source_kind=\$2/);
+ assert.deepEqual(seen[0]?.args,['fixture_user','HISTORICAL_DISTRIBUTION']);assert.match(seen[0]!.sql,/native_user_insert_proof/);assert.match(seen[0]!.sql,/NULLIF\(s.provider,''\)<>'legacy_mysql_restore'/);assert.match(seen[0]!.sql,/NOT EXISTS[^]*user.legacy_owner.migrated/);assert.match(seen[0]!.sql,/h.source_kind=\$2/);
  await assert.rejects(()=>hasProvedNativeHistoryAbsence({query:async()=>({rows:[{}]})} as unknown as PoolClient,'fixture_user','HISTORICAL_DISTRIBUTION'),/coverage is inconsistent/);
 });
 function gate(answer:unknown){const seen:{sql:string;args:unknown[]}[]=[];return{seen,c:{query:async(sql:string,args:unknown[]=[])=>{seen.push({sql,args});return{rows:answer===undefined?[]:[answer]};}} as unknown as PoolClient};}

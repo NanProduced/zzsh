@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { parseLegalAcceptanceRef } from "../src/legal/legal-documents";
+import { MAINTENANCE_DATABASE, REGRESSION_RESOURCE_LOCK_KEY } from "../src/config/test-resource";
 
 export function fixtureAgreementAcceptance(confirmation: { agreementAcceptance?: unknown } | null | undefined) {
   return parseLegalAcceptanceRef(confirmation?.agreementAcceptance, "fixtureAgreementAcceptance");
@@ -175,16 +176,48 @@ export async function installedBusinessTruncate(pool: Pick<Pool, "query">): Prom
     .replace('      "zzsh_content"."legal_document_version",\n', "");
 }
 
+// Covers prepare, create/role maintenance, migrations, the test and cleanup on one maintenance-database
+// session: an advisory lock is scoped to its database, so a same-numbered lock taken inside the test
+// database does not exclude another process. Session close releases it after cleanup.
+export async function acquireSharedResourceLock(pool: Pool, label: string): Promise<PoolClient> {
+  const client = await pool.connect();
+  try {
+    const identity = await client.query<{ databaseName: string }>("SELECT current_database() AS \"databaseName\"");
+    assert.equal(identity.rows[0]?.databaseName, MAINTENANCE_DATABASE, `${label} must take the shared resource lock on the maintenance database`);
+    const acquired = (await client.query<{ acquired: boolean }>("SELECT pg_try_advisory_lock($1::bigint) AS acquired", [REGRESSION_RESOURCE_LOCK_KEY])).rows[0]?.acquired;
+    assert.equal(acquired, true, `${label}: the local test resource is already in use by another process`);
+    return client;
+  } catch (error) {
+    client.release(true);
+    throw error;
+  }
+}
+
+// The installed chain installs BEFORE TRUNCATE guards (0062/0063/0080) that refuse unconditionally,
+// so a shared target cannot be wiped in place and must not have its triggers disabled. Each suite
+// therefore requires a database freshly reset by scripts/regression-reset.mjs for this run: the
+// database-level nonce changes on every controlled reset.
+export async function assertFreshRegressionRun(pool: Pick<Pool, "query">): Promise<void> {
+  const expected = process.env.ZZSH_REGRESSION_RUN?.trim() ?? "";
+  assert.match(expected, /^[a-z0-9_]{12,40}$/, "ZZSH_REGRESSION_RUN is required; start the suite through the regression runner");
+  const row = (await pool.query("SELECT current_setting('zzsh.regression_run', true) AS run")).rows[0];
+  assert.equal(row?.run, expected, "the regression database was not reset for this run");
+}
+
 export type TestDatabaseAdmission = {
   exists: boolean;
   owner: string | null | undefined;
   marker: string | null | undefined;
   allowConnections: boolean | undefined;
   isTemplate: boolean | undefined;
+  databaseOid?: string | null;
   expectedOwner: string;
   expectedMarker: string | null;
+  expectedOid?: string | null;
   databaseName: string;
   allowFlag: string;
+  reuseOnly?: boolean;
+  requireOidOnReuse?: boolean;
 };
 
 export function admitTestDatabase(input: TestDatabaseAdmission, env: Record<string, string | undefined> = process.env): "REUSE" | "CREATE" {
@@ -193,8 +226,11 @@ export function admitTestDatabase(input: TestDatabaseAdmission, env: Record<stri
     assert.equal(input.marker, input.expectedMarker, "dedicated test database marker is missing or mismatched");
     assert.equal(input.allowConnections, true, "dedicated test database is not accepting connections");
     assert.equal(input.isTemplate, false, "dedicated test database must not be a template");
+    if (input.expectedOid) assert.equal(input.databaseOid, input.expectedOid, `dedicated test database is not OID ${input.expectedOid}`);
+    else if (input.requireOidOnReuse) assert.fail(`${input.databaseName} already exists; bind its registered OID with ZZSH_REGRESSION_DB_OID`);
     return "REUSE";
   }
+  assert.ok(!input.reuseOnly, `${input.databaseName} is a registered historical exception and is reuse-only; it must not be created`);
   assert.equal(env[input.allowFlag], "1", `new test database ${input.databaseName} requires ${input.allowFlag}=1; reuse a registered resource set`);
   return "CREATE";
 }

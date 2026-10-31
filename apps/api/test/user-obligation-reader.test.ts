@@ -7,7 +7,7 @@ import { readUserObligations, USER_OBLIGATION_ORDER } from "../src/auth/user-obl
 type Hit = Partial<Record<"listing" | "order" | "withdrawal" | "deposit" | "legacyDeposit" | "commission", boolean>>;
 type Fixture = {
   installed?: boolean | ((relations: string[]) => boolean);
-  subject?: { provider: string; covered: boolean; migrated: boolean } | null;
+  subject?: { provider: string | null | undefined; covered: boolean; migrated: boolean } | null;
   totals?: Record<string, string>;
   hits?: Hit;
   throwOn?: RegExp;
@@ -84,7 +84,13 @@ test("unknown or unreadable sources fail closed", async () => {
 test("legacy users without admitted opening balance are refused; covered legacy users use the ledger", async () => {
   const legacy = { provider: "legacy_mysql_restore", covered: false, migrated: true };
   assert.deepEqual(await readUserObligations("u", client({ subject: legacy }).client), { status: "UNKNOWN", obligation: "WALLET_BALANCE", reason: "LEGACY_OPENING_NOT_ADMITTED" });
-  assert.deepEqual(await readUserObligations("u", client({ subject: { provider: "other", covered: false, migrated: false } }).client), { status: "UNKNOWN", obligation: "WALLET_BALANCE", reason: "SOURCE_UNKNOWN" });
+  // provider also stores the real-name provider after verification; only the explicit legacy
+  // marker plus a migration fact identify an old-platform subject without admitted coverage.
+  assert.equal(await readUserObligations("u", client({ subject: { provider: "other", covered: false, migrated: false } }).client), "NONE");
+  for (const provider of [null, "", undefined]) {
+    assert.deepEqual(await readUserObligations("u", client({ subject: { provider, covered: false, migrated: false } }).client), { status: "UNKNOWN", obligation: "WALLET_BALANCE", reason: "SOURCE_UNKNOWN" });
+  }
+  assert.deepEqual(await readUserObligations("u", client({ subject: { provider: "fake", covered: false, migrated: true } }).client), { status: "UNKNOWN", obligation: "WALLET_BALANCE", reason: "LEGACY_OPENING_NOT_ADMITTED" });
   assert.equal(await readUserObligations("u", client({ subject: { ...legacy, covered: true } }).client), "NONE");
   assert.deepEqual(await readUserObligations("u", client({ subject: { ...legacy, covered: true }, totals: { ...ZERO, available: "100" } }).client), { status: "PENDING", obligation: "WALLET_BALANCE" });
 });

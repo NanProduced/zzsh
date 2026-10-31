@@ -418,7 +418,9 @@ export async function runMediaOssChecks(context: MediaOssChecksContext): Promise
   const revokedScopeBytes = await distinctBytes();
   const revokedScopeIntent = await createIntent(revokedScopeBytes.length);
   await maintenance.query(`UPDATE "zzsh_iam"."admin_security" SET "game_scope_mode" = 'SELECTED_GAMES' WHERE "admin_user_id" = $1`, [operator.id]);
-  await maintenance.query(`DELETE FROM "zzsh_supply"."admin_supply_scope" WHERE "admin_user_id" = $1 AND "game_id" = $2`, [operator.id, gameId]);
+  // Empty selected scope is the NO_GAME_SCOPE case; remove every row so another in-range
+  // game left by a sibling fixture cannot turn this into an out-of-range 404.
+  await maintenance.query(`DELETE FROM "zzsh_supply"."admin_supply_scope" WHERE "admin_user_id" = $1`, [operator.id]);
   const writesBeforeRevokedScope = faults.writeCalls;
   const revokedScopeUpload = await uploadBytes(base, `/api/bff/admin/supply/media/uploads/${revokedScopeIntent.body?.intentId}`, operator.jar, revokedScopeIntent.body?.uploadToken as string, revokedScopeBytes, key("upload"));
   assert.equal(revokedScopeUpload.status, 403, "a revoked game scope must be rejected before any object write");
@@ -441,7 +443,7 @@ export async function runMediaOssChecks(context: MediaOssChecksContext): Promise
   faults.afterWrite = async () => {
     faults.afterWrite = undefined;
     await maintenance.query(`UPDATE "zzsh_iam"."admin_security" SET "game_scope_mode" = 'SELECTED_GAMES' WHERE "admin_user_id" = $1`, [operator.id]);
-    await maintenance.query(`DELETE FROM "zzsh_supply"."admin_supply_scope" WHERE "admin_user_id" = $1 AND "game_id" = $2`, [operator.id, gameId]);
+    await maintenance.query(`DELETE FROM "zzsh_supply"."admin_supply_scope" WHERE "admin_user_id" = $1`, [operator.id]);
   };
   const filesBeforeMidRevocation = await countMediaFiles(mediaDir);
   let midRevocationResult: { status: number; body: Record<string, any> | null };

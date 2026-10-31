@@ -154,8 +154,11 @@ export async function runMarketChecks(o: {
         const hidden = (
           await request("/api/v1/supply/me/favorites")
         ).body.items.find((i: any) => i.accountId === o.accountId);
-        assert.equal(hidden.state, "UNAVAILABLE");
-        assert.equal(hidden.listing, null);
+        // A paused listing stays readable (availability OFFLINE, not orderable) per
+        // api-v1-contract.md; the saved id never exposes the private reason.
+        assert.equal(hidden.state, "AVAILABLE");
+        assert.equal(hidden.listing.availability.state, "OFFLINE");
+        assert.equal(hidden.listing.canCreateOrder, false);
         assert.equal(
           JSON.stringify(hidden).includes("private operational note"),
           false,
@@ -255,7 +258,10 @@ export async function runMarketChecks(o: {
           [o.gameId],
         )
       ).rows.map((r) => r.item_id);
-      assert.ok(catalog.body.items.every((i: any) => quoted.includes(i.id)));
+      // The publishing selector lists every enabled item and marks which ones the sealed
+      // release prices; the priced subset must agree with the release's price lines.
+      assert.ok(catalog.body.items.every((i: any) => typeof i.priced === "boolean"));
+      assert.ok(catalog.body.items.filter((i: any) => i.priced).every((i: any) => quoted.includes(i.id)));
       for (const field of [
         "owner_unit_amount",
         "ownerUnitAmount",
@@ -271,13 +277,16 @@ export async function runMarketChecks(o: {
         );
       const skin = (
         await o.pool.query(
-          `SELECT id,category_id FROM zzsh_supply.skin WHERE game_id=$1 AND code='skin_m4_gold'`,
+          `SELECT id FROM zzsh_supply.skin WHERE game_id=$1 AND code='skin_m4_gold'`,
           [o.gameId],
         )
       ).rows[0];
+      // Delta skin categories are retired; visibility is a skin-level fact.
+      const catalogRevision = async () =>
+        (await o.pool.query(`SELECT catalog_revision::text AS revision FROM zzsh_supply.game WHERE id=$1`, [o.gameId])).rows[0].revision;
       await request(
-        "/api/bff/admin/supply/categories/" + skin.category_id,
-        { formVisible: false },
+        "/api/bff/admin/supply/skins/" + skin.id,
+        { formVisible: false, expectedCatalogRevision: await catalogRevision() },
         o.boss,
       );
       try {
@@ -292,8 +301,8 @@ export async function runMarketChecks(o: {
         );
       } finally {
         await request(
-          "/api/bff/admin/supply/categories/" + skin.category_id,
-          { formVisible: true },
+          "/api/bff/admin/supply/skins/" + skin.id,
+          { formVisible: true, expectedCatalogRevision: await catalogRevision() },
           o.boss,
         );
       }

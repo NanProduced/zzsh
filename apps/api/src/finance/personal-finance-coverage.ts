@@ -64,7 +64,7 @@ export async function hasProvedNativeHistoryAbsence(client:PoolClient,userId:str
  const row=(await client.query(`SELECT EXISTS(SELECT 1 FROM zzsh_order.wallet_coverage c
   JOIN zzsh_order.finance_opening_basis b ON b.id=c.basis_id AND b.user_id=c.user_id
   JOIN zzsh_iam.user_identity_state s ON s.user_id=c.user_id JOIN zzsh_order.native_user_insert_proof p ON p.user_id=c.user_id
-  WHERE c.user_id=$1 AND c.origin='NATIVE_GENESIS' AND b.source_kind='NATIVE_GENESIS' AND b.available_cents=0 AND b.covered_count=0 AND s.provider='none'
+  WHERE c.user_id=$1 AND c.origin='NATIVE_GENESIS' AND b.source_kind='NATIVE_GENESIS' AND b.available_cents=0 AND b.covered_count=0 AND NULLIF(s.provider,'')<>'legacy_mysql_restore'
    AND NOT EXISTS(SELECT 1 FROM zzsh_iam.audit_event a WHERE a.object_id=c.user_id AND a.action='user.legacy_owner.migrated' AND a.outcome='SUCCESS')
    AND NOT EXISTS(SELECT 1 FROM zzsh_order.personal_finance_observation h WHERE h.user_id=c.user_id AND h.source_kind=$2)) AS complete`,[userId,kind])).rows[0];
  if(typeof row?.complete!=='boolean')throw unavailable();return row.complete;

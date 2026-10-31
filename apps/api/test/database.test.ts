@@ -15,6 +15,8 @@ import {
   DATABASE_CLEANUP_TIMEOUT_MS,
   settlesWithin,
 } from "./database-test-support";
+import { REGRESSION_ALLOW_NEW_RESOURCE, REGRESSION_DATABASE, REGRESSION_MARKER, REGRESSION_RESOURCE_LOCK_KEY, regressionOidBinding } from "../src/config/test-resource";
+
 
 const LOCAL_TARGET = {
   target: "local-compose",
@@ -22,9 +24,9 @@ const LOCAL_TARGET = {
   port: 55432,
   user: "zzsh",
 } as const;
-const TEST_DATABASE = "zzsh_test_fnd003";
+const TEST_DATABASE = REGRESSION_DATABASE;
 const TEST_SCHEMA = "fnd003";
-const RESOURCE_LOCK_KEY = "803003";
+const RESOURCE_LOCK_KEY = REGRESSION_RESOURCE_LOCK_KEY;
 
 const fnd003 = pgSchema(TEST_SCHEMA);
 const probe = fnd003.table("probe", {
@@ -179,7 +181,7 @@ async function cleanupSchema(client: PoolClient): Promise<void> {
 async function acquireResourceGuard(pool: Pool): Promise<PoolClient> {
   const client = await pool.connect();
   try {
-    await assertIdentity(client, TEST_DATABASE);
+    await assertIdentity(client, "postgres");
     const result = await client.query<{ acquired: boolean }>(
       "SELECT pg_try_advisory_lock($1::bigint) AS acquired",
       [RESOURCE_LOCK_KEY],
@@ -205,15 +207,18 @@ test("real PostgreSQL with Drizzle satisfies FND-003 criteria", async () => {
     application_name: "zzsh-fnd003-test",
     connectionTimeoutMillis: 2_000,
   };
-  const adminPool = new Pool({ ...connection, database: "postgres", max: 1 });
+  const adminPool = new Pool({ ...connection, database: "postgres", max: 3 });
   let testPool: Pool | undefined;
   let resourceGuard: PoolClient | undefined;
+  let schemaClient: PoolClient | undefined;
   let cleanupAuthorized = false;
 
   try {
     await assertIdentity(adminPool, "postgres");
-    const databaseResult = await adminPool.query<{ owner: string; marker: string | null; allowConnections: boolean; isTemplate: boolean }>(
-      "SELECT pg_get_userbyid(datdba) AS owner, shobj_description(oid, 'pg_database') AS marker, datallowconn AS \"allowConnections\", datistemplate AS \"isTemplate\" FROM pg_database WHERE datname = $1",
+    // The shared lock is held before the database is created and until cleanup finishes.
+    resourceGuard = await acquireResourceGuard(adminPool);
+    const databaseResult = await adminPool.query<{ owner: string; marker: string | null; allowConnections: boolean; isTemplate: boolean; databaseOid: string | null }>(
+      "SELECT pg_get_userbyid(datdba) AS owner, shobj_description(oid, 'pg_database') AS marker, datallowconn AS \"allowConnections\", datistemplate AS \"isTemplate\", oid::text AS \"databaseOid\" FROM pg_database WHERE datname = $1",
       [TEST_DATABASE],
     );
     const admission = admitTestDatabase({
@@ -223,20 +228,24 @@ test("real PostgreSQL with Drizzle satisfies FND-003 criteria", async () => {
       allowConnections: databaseResult.rows[0]?.allowConnections,
       isTemplate: databaseResult.rows[0]?.isTemplate,
       expectedOwner: LOCAL_TARGET.user,
-      expectedMarker: null,
+      expectedMarker: REGRESSION_MARKER,
+      databaseOid: databaseResult.rows[0]?.databaseOid,
+      expectedOid: regressionOidBinding(),
+      requireOidOnReuse: true,
       databaseName: TEST_DATABASE,
-      allowFlag: "FND003_TEST_ALLOW_NEW_RESOURCE",
+      allowFlag: REGRESSION_ALLOW_NEW_RESOURCE,
     });
     if (admission === "CREATE") {
       await adminPool.query(`CREATE DATABASE "${TEST_DATABASE}" OWNER "${LOCAL_TARGET.user}"`);
+      await adminPool.query(`COMMENT ON DATABASE "${TEST_DATABASE}" IS '${REGRESSION_MARKER}'`);
     }
 
     testPool = new Pool({ ...connection, database: TEST_DATABASE, max: 6 });
     await assertIdentity(testPool, TEST_DATABASE);
-    resourceGuard = await acquireResourceGuard(testPool);
-    await prepareSchema(resourceGuard);
+    schemaClient = await testPool.connect();
+    await prepareSchema(schemaClient);
     cleanupAuthorized = true;
-    const concurrentGuard = await testPool.connect();
+    const concurrentGuard = await adminPool.connect();
     try {
       const guardResult = await concurrentGuard.query<{ acquired: boolean }>(
         "SELECT pg_try_advisory_lock($1::bigint) AS acquired",
@@ -493,11 +502,18 @@ test("real PostgreSQL with Drizzle satisfies FND-003 criteria", async () => {
     assert.equal(amountRows[0]?.amount, exactAmount);
   } finally {
     let cleanupError: unknown;
-    if (resourceGuard) {
+    if (schemaClient) {
       try {
-        await closeResource(cleanupAuthorized, resourceGuard, () => cleanupSchema(resourceGuard!));
+        await closeResource(cleanupAuthorized, schemaClient, () => cleanupSchema(schemaClient!));
       } catch (error) {
         cleanupError = error;
+      }
+    }
+    if (resourceGuard) {
+      try {
+        resourceGuard.release();
+      } catch (error) {
+        cleanupError ??= error;
       }
     }
     try {

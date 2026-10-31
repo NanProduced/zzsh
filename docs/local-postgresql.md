@@ -6,12 +6,21 @@
 
 - PostgreSQL 实例固定为本项目 Compose 的 `127.0.0.1:55432`，不使用其他项目的5432。
 - `zzsh_dev` 是主开发库，不是测试清理目标；`postgres` 是维护连接库。两者默认保留。
+- 长期只保留两组资源：① 一套数据完整的日常联调库（Web/Admin/API 共用）；② 一套可重建的回归测试库 `zzsh_test_regression`（迁移、清理、重置类测试的唯一默认目标）。`postgres`/模板库与只读旧数据源不计入。旧库的独有事实经受限备份与恢复索引承接，不靠长期在线保命。
 - 测试以独立 **database** 隔离；库内 `zzsh_iam`、`zzsh_supply` 等 **schema** 由正式迁移创建，不按每个用例再建一套schema。
 - 数据库、迁移角色、runtime角色与advisory lock组成一个资源组，不能只换锁而仍操作同一库。
 
 ## 命名与复用
 
-优先使用测试入口已有的资源集参数，不另写随机建库脚本：
+回归/迁移/清理类测试的默认入口只有一个资源组，写在 `apps/api/src/config/test-resource.ts`：库 `zzsh_test_regression`、marker `zzsh:regression-test:v1`、角色 `zzsh_regression_migration`/`zzsh_regression_runtime`、advisory lock `806006`、创建许可 `REGRESSION_TEST_ALLOW_NEW_RESOURCE`。九个 compiled PostgreSQL 套件（`database`、`database-reset`、`auth`、`approval-audit`、`admin-workspace-layout`、`supply-m3b`、`content-foundation`、`order-reservation`、`user-directory`）全部从这里取值，不再各自持有默认库名、marker、锁和许可；实际解析出的库名/角色/marker/锁/OID 由 `test/regression-resource.test.ts` 离线守卫，任何套件重新引入私有默认名、自由库名/角色覆盖或私有许可都会失败。`npm run test:db` 先跑 database-safety，再由 `scripts/run-regression-suites.mjs` 串行复位并运行九个套件；runner 自己从受控复位取得并绑定 OID/nonce，覆盖准备、迁移、断言与清理全程。
+
+`806006` 必须取在维护库 `postgres` 的同一会话上：advisory lock 按数据库隔离，锁在测试库里即使号码相同也不会排斥另一个进程。该外层锁从任何建库/改角色密码之前开始，一直持到清理和连接收尾；FND 的 `804004` lease 只是内层锁，不代替外层互斥。
+
+回归库创建后把实际 OID 登记进 `tmp/postgresql-resources.md`；受控复位把 OID/nonce 写入私有 state 并绑定给 suite，直接运行单个 compiled suite 时仍须设置 `ZZSH_REGRESSION_DB_OID=<oid>` 与本次 reset 的 `ZZSH_REGRESSION_RUN=<nonce>`，缺省即拒绝。例外资源按各自登记的 OID 校验，不会套用回归库的 OID。
+
+普通复位/运行入口只依赖本机固定实例、已登记 state、准确 OID/marker、维护库外层锁和显式创建许可；任务执行期可另用外壳绑定限时授权文件，但普通开发/CI 入口和 runner 不依赖该任务授权、任务 ID 或任务临时目录。`REGRESSION_RESET_EMPTY_TARGET` 只供任务归档外壳恢复旧源时使用，普通入口不设置。
+
+只有浏览器/人工验收需要保留数据，或复验旧库承载的既有事实时，才使用测试入口已有的资源集参数，且该库必须已在 `REGISTERED_HISTORICAL_EXCEPTIONS` 中登记：登记记录库名、OID、marker 与角色对，运行期只允许 reuse（缺库/身份不符即失败），任何未登记的资源集名称直接拒绝，不能靠自由后缀加旧开关生成新克隆。收口后连同角色退役。
 
 ```powershell
 $env:SUPPLY_TEST_RESOURCE_SET = "m3d_web"
@@ -25,26 +34,23 @@ npm run check
 
 同一任务的实现、返修、Master复验优先串行复用同一资源组。不要为r1/r2/final/重试反复建库；只有确需并发或首次迁移空库验证时另登记一组。浏览器需要保留人工验收数据时单独用 `<任务>_ui`，不与会清数据的回归套件共库。
 
-默认无资源集的固定测试库用于单维护者串行回归；多agent不得同时运行默认入口。锁占用即退出/等待协调，不抢锁、不终止别人连接、不增加随机后缀规避冲突。
+默认入口即上述唯一回归组，供单维护者串行复跑；多agent不得同时运行默认入口，也不得以并发为由另建随机库。锁占用即退出/等待协调，不抢锁、不终止别人连接、不增加随机后缀规避冲突。
 
 ## 创建准入
 
-测试资源须先登记。缺库默认失败，不静默新建；获准首次创建时，仅将本套件的下列开关设为 `1`，其他套件的开关无效。资源集名称不代表创建授权。返修、复验和 Master 复跑复用同一资源组，不新增 `r1`/`r2`/`final` 库。
+测试资源须先登记。缺库默认失败，不静默新建；获准首次创建时，仅将对应开关设为 `1`，其他入口的开关无效。资源集名称不代表创建授权。返修、复验和 Master 复跑复用同一资源组，不新增 `r1`/`r2`/`final` 库。
 
 | 测试入口 | 首次创建开关 |
 |---|---|
-| auth | `M2_AUTH_TEST_ALLOW_NEW_RESOURCE` |
-| content-foundation | `CONTENT_TEST_ALLOW_NEW_RESOURCE` |
-| order-reservation | `ORDER_TEST_ALLOW_NEW_RESOURCE` |
-| supply-m3b | `SUPPLY_TEST_ALLOW_NEW_RESOURCE` |
-| user-directory | `ADM_USER_LIST_TEST_ALLOW_NEW_RESOURCE` |
-| approval-audit | `APPROVAL_AUDIT_TEST_ALLOW_NEW_RESOURCE` |
-| admin-workspace-layout | `ADMIN_WORKSPACE_LAYOUT_TEST_ALLOW_NEW_RESOURCE` |
-| database / FND003 | `FND003_TEST_ALLOW_NEW_RESOURCE` |
-| database-reset / FND004 | `FND004_TEST_ALLOW_NEW_RESOURCE` |
-| im-postgres | `IM_TEST_ALLOW_NEW_RESOURCE` |
+| 九个 compiled PostgreSQL 套件的默认目标（`zzsh_test_regression`） | `REGRESSION_TEST_ALLOW_NEW_RESOURCE` |
+| 上述套件显式指定 `*_TEST_RESOURCE_SET` 的已登记例外 | 不可创建：登记表外一律拒绝，登记表内只允许复用 |
+| im-postgres（IM 线自有资源，不并入回归组） | `IM_TEST_ALLOW_NEW_RESOURCE` |
+
+回归库创建后把实际 OID 登记进 `tmp/postgresql-resources.md`；runner 复跑时从受控复位绑定 OID/nonce，admission 会额外核对库 OID，防止同名库被换掉或指向别处的库。重置/首建仍要求显式 `REGRESSION_TEST_ALLOW_NEW_RESOURCE=1`。
 
 共用 `admitTestDatabase` 校验已有库的 owner、marker、可连接与非模板属性；历史无标记 fixture 必须实读为 `null`，未读取不能代替无标记。既有角色、对象和锁校验继续执行。创建开关仅用于明确批准的准备过程，不长期写入日常配置。
+
+九套件通过 runner 在每套开始前复位同一个回归库，并核对本次 OID/nonce；不在已安装的业务表上绕过不可变保护做全表清理。失败时保留现场并退出，显式选择继续后才进入下一次复位。历史例外只允许读取或按其原合同复验，不自动进入回归库的复位流程。
 
 ## 登记是使用前提
 
