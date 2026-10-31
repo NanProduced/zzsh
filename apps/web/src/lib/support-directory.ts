@@ -1,5 +1,5 @@
 /** The order API owns membership; scan both paginated roles before declaring empty. */
-export type SupportOrder = { id: string; displayNo: string; title: string; status: string; party: "renter" | "owner"; fulfillmentAssignment?: { state: string; teamState: string | null; teamReady?: boolean } | null };
+export type SupportOrder = { id: string; displayNo: string; title: string; status: string; stage?: "PENDING_PAYMENT" | "WAITING_STAFF" | "TEAM_PENDING" | "OPENING_CONFIRM" | "RENTING" | "ENDING" | "SETTLED" | "CANCELLED" | null; party: "renter" | "owner"; createdAt?: string | null; lastMessageAt?: string | null; lastMessagePreview?: string | null; unreadCount?: number; fulfillmentAssignment?: { state: string; teamState: string | null; teamReady?: boolean } | null };
 export async function* readSupportOrders(request: <T>(path: string) => Promise<T>, signal: AbortSignal): AsyncGenerator<{ items: SupportOrder[]; complete: boolean }> {
   const items = new Map<string, SupportOrder>();
   for (const party of ["renter", "owner"] as const) {

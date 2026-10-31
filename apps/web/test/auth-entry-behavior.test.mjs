@@ -29,9 +29,10 @@ test('explicit login opens during session outage without granting protected navi
  assert.equal(probe('guest','/publish'),true);
 });
 
-test('support and complaint entries wait for unified authentication without creating a consultation',()=>{
+test('support and complaint entries wait for unified authentication and both restore SERVICE without creating a consultation',()=>{
  const railCode=ts.transpileModule(readFileSync(new URL('../src/components/support/support-rail.tsx',import.meta.url),'utf8'),{compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS}}).outputText;
- for(const type of ['SERVICE','COMPLAINT']){
+ // 投诉已并入普通客服：第二个入口（投诉建议）也必须恢复 SERVICE，而不是旧的 COMPLAINT。
+ for(const triggerIndex of [0,1]){
   const exports={},states=[];let index=0,pending;
   new Function('require','exports','window',railCode)(name=>{
    if(name==='react')return {...React,useState(initial){const i=index++;states[i]=initial;return [initial,value=>{states[i]=typeof value==='function'?value(states[i]):value;}];},useRef:value=>({current:value}),useEffect(){}};
@@ -54,13 +55,13 @@ test('support and complaint entries wait for unified authentication without crea
    if(node.props['data-support-trigger'])triggers.push(node);
    walk(node.props.children);
   })(rail);
-  triggers[type==='SERVICE'?0:1].props.onClick({currentTarget:{}});
+  triggers[triggerIndex].props.onClick({currentTarget:{}});
   assert.equal(pending.target,'/?from=home');
   assert.equal(states[0],false,'guest or cancelled login never opens the support window');
   assert.equal(states[4],0,'no support request before confirmed login');
   pending.callback();
   assert.equal(states[0],true);
-  assert.equal(states[1],type,'restore the selected entry after authentication');
+  assert.equal(states[1],'SERVICE',`trigger ${triggerIndex} restores the unified SERVICE entry after authentication`);
   assert.equal(states[4],1);
  }
 });

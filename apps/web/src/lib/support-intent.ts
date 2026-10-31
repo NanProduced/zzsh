@@ -5,6 +5,11 @@ const MAX_AGE_MS = 10 * 60 * 1_000;
 
 export type SupportType = "SERVICE" | "COMPLAINT";
 
+/** 投诉已并入普通客服：入口与旧意图统一落到唯一的 SERVICE 线程。 */
+export function normalizeSupportType(type: SupportType): SupportType {
+  return type === "COMPLAINT" ? "SERVICE" : type;
+}
+
 export type SupportIntent = {
   type: SupportType;
   source: string;
@@ -32,14 +37,15 @@ export function parseSupportIntent(value: unknown, now = Date.now()): SupportInt
   if (!validType(candidate.type) || typeof candidate.source !== "string" || !safeReturnTo(candidate.source)) return null;
   if (typeof candidate.createdAt !== "number" || !Number.isSafeInteger(candidate.createdAt)) return null;
   if (candidate.createdAt > now + 30_000 || now - candidate.createdAt > MAX_AGE_MS) return null;
-  return { type: candidate.type, source: candidate.source, createdAt: candidate.createdAt };
+  return { type: normalizeSupportType(candidate.type), source: candidate.source, createdAt: candidate.createdAt };
 }
 
 export function saveSupportIntent(intent: Omit<SupportIntent, "createdAt">, storage = browserStorage(), now = Date.now()): void {
   const source = safeReturnTo(intent.source);
   if (!storage || !source || !validType(intent.type)) return;
+  const type = normalizeSupportType(intent.type);
   try {
-    storage.setItem(SUPPORT_INTENT_STORAGE_KEY, JSON.stringify({ type: intent.type, source, createdAt: now }));
+    storage.setItem(SUPPORT_INTENT_STORAGE_KEY, JSON.stringify({ type, source, createdAt: now }));
   } catch {
     // A blocked sessionStorage must not prevent the auth flow.
   }

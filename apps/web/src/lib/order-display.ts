@@ -71,7 +71,7 @@ export function orderFulfillmentSummary(
     case "OPENING_CONFIRM": {
       const acks = projection.openingAcks;
       if (!acks) return "账号与开租确认";
-      return `账号与开租确认 · 买家${acks.renter ? "已确认" : "待确认"} · 号主${acks.owner ? "已确认" : "待确认"}`;
+      return `账号与开租确认 · 租客${acks.renter ? "已确认" : "待确认"} · 号主${acks.owner ? "已确认" : "待确认"}`;
     }
     case "RENTING": {
       if (!projection.dueAt) return "租用中";

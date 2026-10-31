@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { clearSupportIntent, consumeSupportIntent, parseSupportIntent, readSupportIntent, saveSupportIntent } from "../src/lib/support-intent.ts";
+import { clearSupportIntent, consumeSupportIntent, parseSupportIntent, readSupportIntent, saveSupportIntent, SUPPORT_INTENT_STORAGE_KEY } from "../src/lib/support-intent.ts";
 
 function storage() {
   const values = new Map();
@@ -16,9 +16,18 @@ test("support intent survives login only for a short-lived same-site target", ()
   const store = storage();
   saveSupportIntent({ type: "COMPLAINT", source: "/listing/listing_1?view=detail" }, store, 1_000);
   const intent = readSupportIntent(store, 1_001);
-  assert.deepEqual(intent, { type: "COMPLAINT", source: "/listing/listing_1?view=detail", createdAt: 1_000 });
+  assert.deepEqual(intent, { type: "SERVICE", source: "/listing/listing_1?view=detail", createdAt: 1_000 });
   assert.deepEqual(consumeSupportIntent(store, 1_002), intent);
   assert.equal(readSupportIntent(store, 1_002), null);
+});
+
+test("a legacy COMPLAINT intent normalizes to the SERVICE thread on read", () => {
+  const store = storage();
+  // Before the merge, complaint entries stored type=COMPLAINT; those intents must still
+  // recover as ordinary support instead of being dropped or creating a second thread.
+  store.setItem(SUPPORT_INTENT_STORAGE_KEY, JSON.stringify({ type: "COMPLAINT", source: "/help/rental-getting-started", createdAt: 1_000 }));
+  assert.deepEqual(readSupportIntent(store, 1_001), { type: "SERVICE", source: "/help/rental-getting-started", createdAt: 1_000 });
+  assert.deepEqual(parseSupportIntent({ type: "COMPLAINT", source: "/help", createdAt: 1_000 }, 1_001), { type: "SERVICE", source: "/help", createdAt: 1_000 });
 });
 
 test("support intent rejects external, malformed, future, and expired values", () => {

@@ -39,6 +39,11 @@ test("the touch rail folds into one labelled FAB that reveals the tools only whe
   assert.match(rail, /aria-expanded=\{toolsOpen\}/);
   assert.match(rail, /aria-label=\{toolsOpen \? "收起常用工具" : "展开常用工具"\}/);
   assert.match(rail, /data-expanded=\{toolsOpen \? "true" : "false"\}/);
+  // The collapsed touch FAB still names the entry: 客服 sits inside the same 52px circle (and 收起
+  // once open), so it is discoverable before expanding and adds no extra footprint or safe-area band.
+  assert.match(rail, /className="rail-fab-label" aria-hidden="true">\{toolsOpen \? "收起" : "客服"\}<\/span>/);
+  assert.match(nav, /\.rail-fab-label \{[^}]*font-size:10px/);
+  assert.match(nav, /\.rail-fab \{ display:inline-flex; order:1; flex-direction:column;/);
   // Escape and choosing a tool both close the folded panel again.
   assert.match(rail, /event\.key === "Escape"/);
   assert.match(rail, /closest\("\.rail-item"\)/);

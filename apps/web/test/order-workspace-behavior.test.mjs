@@ -672,7 +672,7 @@ test("the six-step projection maps to stage, due, ending and read-only copy", ()
   assert.equal(display.orderFulfillmentSummary(stageProjection({ stage: "TEAM_PENDING" }), { now }), "已付款 · 订单群准备中");
   assert.equal(
     display.orderFulfillmentSummary(stageProjection({ stage: "OPENING_CONFIRM", openingAcks: { renter: true, owner: false } }), { now }),
-    "账号与开租确认 · 买家已确认 · 号主待确认",
+    "账号与开租确认 · 租客已确认 · 号主待确认",
   );
   assert.match(display.orderFulfillmentSummary(stageProjection({ dueAt: "2026-11-01T00:00:00.000Z" }), { now }), /^租用中 · 到期 /);
   assert.match(display.orderFulfillmentSummary(stageProjection({ dueAt: "2026-10-01T00:00:00.000Z" }), { now }), /^租用中 · 已到期 /);

@@ -48,7 +48,10 @@ test("persistent support threads keep history and allow reopening without a new-
   assert.doesNotMatch(webSource, /start-new-consultation/);
   assert.match(webSource, /threadKeyOf/);
   assert.match(webSource, /threadState/);
-  assert.match(webSource, /本轮已结束（可继续）/);
+  assert.match(webSource, /已结束/);
+  assert.doesNotMatch(webSource, /data-action="continue-consultation"/);
+  assert.match(webSource, /endedThreadBeforeSend/);
+  assert.match(webSource, /reloadThreadStates/);
   assert.match(webSource, /conversation\.canSend === false/);
   assert.match(webSource, /mergeImMessages\(current\[threadKeyOf\(conversation\)\] \?\? \[\], rows\)/);
 });
@@ -83,7 +86,7 @@ test("formal NIM clients preauthorize history and send through the same-origin B
 test("unknown remote scope is visible and cannot be presented as an active chat", () => {
   assert.match(webSource, /messageScopeState === "FAILED"/);
   assert.match(webSource, /客服会话待人工核验/);
-  assert.match(webSource, /远端状态待人工核验/);
+  assert.match(webSource, /客服会话核验中/);
   assert.match(adminSource, /scopeStateLabel/);
   assert.match(adminSource, /云信远端结果待人工核验/);
   assert.match(adminSource, /messageScopeState !== "FAILED"/);
