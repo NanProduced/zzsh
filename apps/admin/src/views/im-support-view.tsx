@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent as ReactClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
-import { ArrowDown, Check, ChevronLeft, CircleAlert, Headphones, Images, MoreHorizontal, ReceiptText, Search, ShieldCheck, Smile, UserRound, X } from "lucide-react";
+import { ArrowDown, Bell, BellOff, CalendarClock, Check, ChevronLeft, CircleAlert, FileText, Headphones, Images, MessageSquareText, MoreHorizontal, Pin, ReceiptText, Search, ShieldCheck, Smile, UserRound, Video, X } from "lucide-react";
 import { MessageScroller as MessageScrollerPrimitive } from "@shadcn/react/message-scroller";
 import { ImClientLifecycle, ImLifecycleSupersededError } from "@zzsh/im-client/lifecycle";
 import { createLocalFakeNimWebClientFactory, createNimWebClientFactory, NIM_IMAGE_MAX_BYTES, NimImageSendError, NimMediaSendError, NimTextSendError, validateNimImageFile, validateNimMediaFile, type NimMessageLike, type NimMessageMedia, type NimWebClientLike, type NimWebConnectionState } from "@zzsh/im-client/nim-web-client";
@@ -10,16 +10,22 @@ import { CHAT_EMOJIS, MessageActionMenu, MessageQuoted, MessageReplyQuote, useMe
 import { MediaDraftBar, MediaMessage, mediaMessageOf, mediaSummaryOf, type MessageMediaDraft } from "@zzsh/ui/message-media";
 import "@zzsh/ui/message-media.css";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip";
 import "@zzsh/ui/message-actions.css";
 import { AdminApiError, adminRequest, friendlyError, hasPermission, type SessionSnapshot } from "../api";
 import { confirmCurrentForbidden, isCurrentImRequest, messageAccessPath, supportedImageUrl, type ImRequestKey } from "./im-support-guards";
 import { canOperateSupportType, createReadClientKey, createSendCapabilityKey } from "./im-support-capabilities";
+import { planSupportNotificationToggle, playSupportChime, readSupportNotificationPreference, requestSupportNotificationPermission, storeSupportNotificationPreference, supportNotificationPermission, unlockSupportAudio, useSupportUnreadNotifications, type SupportNotificationPermission } from "./im-support-notifications";
+import { groupPreferenceOf, readOrderGroupPreferences, storeOrderGroupPreferences, withGroupPreference, ORDER_GROUP_PREF_EVENT, ORDER_GROUP_SETTINGS_EVENT, type OrderGroupPreference, type OrderGroupPreferenceMap } from "./im-support-group-settings";
 import { OrderWorkbenchPane } from "./im-support-orders";
+import { orderStageTone } from "@zzsh/ui/order-team-panel";
+import type { OrderTeamListItem } from "@zzsh/ui/order-team-panel";
 import { ConsultationUserCard } from "./im-support-user-card";
-import { ComplaintSummaryCard, ConsultationEventsCard, type ConsultationEventSummary } from "./im-support-events";
+import { EntityPreviewTrigger } from "../components/admin-preview";
+import { ConsultationEventsCard } from "./im-support-events";
 import "./im-support-details.css";
 import { formatDuration } from "./im-support-management-model";
-import { dayKeyOf, dayLabelOf, formatBytes, formatTime, initialOf } from "./im-support-format";
+import { dayKeyOf, dayLabelOf, formatBytes, formatListTime, formatMonthDay, formatTime, initialOf } from "./im-support-format";
 import { Dialog, DialogContent } from "../components/ui/dialog";
 import { Button } from "../components/ui/button";
 import { Bubble, BubbleContent } from "../components/ui/bubble";
@@ -44,6 +50,8 @@ type Consultation = {
   subjectRef: string | null;
   assignedAdmin: { id: string; name: string } | null;
   peerAccountId: string | null;
+  /** 平台“洲洲助手（Bot）”账号；欢迎语与自动卡片由它发出。 */
+  botAccountId?: string | null;
   conversationType: "TEAM";
   conversationId: string | null;
   messageScopeState?: string;
@@ -51,6 +59,10 @@ type Consultation = {
   canSend?: boolean;
   version: number;
   lastMessageAt: string | null;
+  /** 服务端最近一条消息摘要；未打开历史时队列行优先显示它。 */
+  lastMessagePreview?: string | null;
+  /** 本轮负责客服尚未读的用户消息数；服务端计数，仅 ACTIVE 轮次有意义。 */
+  adminUnreadCount?: number;
   createdAt: string;
   updatedAt: string;
   user?: { id: string; name: string; username: string | null };
@@ -76,11 +88,36 @@ type ImToken = { appKey: string; accountId: string; token: string; transport: "n
 type PresenceToday = { seconds: number; sessions: number; users: number };
 type Presence = { adminUserId: string; availability: "OFF_DUTY" | "AVAILABLE" | "PAUSED"; connectionState: string; activeLoad: number; version: number; today?: PresenceToday };
 type SupportSection = "consultation" | "orders";
-type QueueRow = { id: string; type: SupportType; title: string; snippet: string; time: string; state: "待接入" | "处理中" | "已结束" | "待核验"; unread: boolean; consultation?: Consultation };
+type QueueRow = { id: string; type: SupportType; title: string; snippet: string; time: string; sortAt: number; state: "待接入" | "接待中" | "已结束" | "待核验"; unreadCount: number; consultation?: Consultation };
+type UnifiedRow = {
+  kind: "consultation" | "order";
+  id: string;
+  title: string;
+  tag: string;
+  tone: "warn" | "neutral";
+  snippet: string;
+  state: string;
+  stateTone: "good" | "warn" | "neutral" | "attention" | "live" | "done" | "danger";
+  /** 订单群的到期等次要事实，用 icon+短标签显示，不占时间列。 */
+  meta?: string;
+  unreadCount: number;
+  sortAt: number;
+  time: string;
+  pinned?: boolean;
+  muted?: boolean;
+};
 type DraftImage = { key: string; file: File; previewUrl: string; name: string; size: number; width: number; height: number; state: "DECODING" | "READY" | "SENDING" | "FAILED" | "UNKNOWN"; progress: number; messageClientId?: string };
 type FailedText = { consultationId: string; conversationId: string; text: string; messageClientId?: string };
 
 const MAX_STAGED_IMAGES = 6;
+// 固定的业务常用语：只提供可复用句式，不代填任何订单、账号或处理结论。
+const SUPPORT_QUICK_REPLIES = [
+  { label: "首次回复", text: "您好，很高兴为您服务，请问有什么可以帮您？" },
+  { label: "核对账号", text: "您好，请提供需要处理的账号和验证码，我们马上为您核对。" },
+  { label: "核验等待", text: "正在为您核实账号信息，请稍等片刻，处理好后第一时间回复您。" },
+  { label: "核验完成", text: "账号已核验完成，请确认账号和密码无误；如有问题随时联系我们。" },
+  { label: "结束说明", text: "如暂无其他问题，本次服务就先到这里，后续有问题随时发在这里。" },
+] as const;
 // 预设状态写入失败的两种可见结果：版本冲突不是错误，而是"别的窗口已经改过"，
 // 所以重新读取后只给中性说明；真正的保存失败不能留在旧显示上假装成功。
 const PRESENCE_CONFLICT_NOTICE = "另一窗口已更新接待状态，已刷新为最新状态。";
@@ -113,8 +150,23 @@ function roundHeadlineOf(consultation: Consultation): string {
   if (consultation.assignedAdmin) return `${round}${consultation.assignedAdmin.name}`;
   return `${round}尚未分配接待`;
 }
-function stateLabel(state: ConsultationState): QueueRow["state"] { return state === "ACTIVE" ? "处理中" : state === "WAITING" ? "待接入" : "已结束"; }
+function stateLabel(state: ConsultationState): QueueRow["state"] { return state === "ACTIVE" ? "接待中" : state === "WAITING" ? "待接入" : "已结束"; }
 function scopeStateLabel(consultation: Consultation): QueueRow["state"] { return consultation.messageScopeState === "FAILED" ? "待核验" : stateLabel(consultation.state); }
+function stageLabelOf(row: OrderTeamListItem): string {
+  switch (row.stage) {
+    case "WAITING_STAFF": return "待分配";
+    case "TEAM_PENDING": return "建群中";
+    case "OPENING_CONFIRM": return "待开租确认";
+    case "RENTING": return "租用中";
+    case "ENDING": return "待结束";
+    case "SETTLED": return "已完成";
+    case "CANCELLED": return "已取消";
+    default: return row.status === "COMPLETED" ? "已完成" : row.status === "CANCELLED" ? "已取消" : "订单沟通";
+  }
+}
+function stageToneOf(state: string): "good" | "warn" | "neutral" {
+  return state === "接待中" || state === "租用中" ? "good" : state === "待接入" || state === "待核验" || state === "已取消" ? "warn" : "neutral";
+}
 function connectionForPresence(state: NimWebConnectionState | "idle" | "error"): Presence["connectionState"] {
   return state === "idle" ? "DISCONNECTED" : state === "error" ? "AUTH_FAILED" : state;
 }
@@ -182,13 +234,36 @@ async function readConsultations(): Promise<Consultation[]> {
   return value.consultations as Consultation[];
 }
 
-export function ImSupportView({ snapshot, initialSection = "consultation", onRefresh, onOpenPath }: { snapshot: Extract<SessionSnapshot, { authenticated: true }>; initialSection?: "consultation" | "orders"; onRefresh: () => Promise<SessionSnapshot>; onOpenPath?: (path: string, title?: string) => void }) {
+export function ImSupportView({ snapshot, initialSection = "consultation", initialConsultationId, initialOrderId, initialUnifiedType = "ALL", workspaceQuery = {}, onQueryChange, onRefresh, onOpenPath }: {
+  snapshot: Extract<SessionSnapshot, { authenticated: true }>;
+  initialSection?: "consultation" | "orders";
+  initialConsultationId?: string;
+  initialOrderId?: string;
+  initialUnifiedType?: "ALL" | "SERVICE" | "COMPLAINT" | "ORDER";
+  workspaceQuery?: Record<string, string>;
+  onQueryChange?: (query: Record<string, string>) => void;
+  onRefresh: () => Promise<SessionSnapshot>;
+  onOpenPath?: (path: string, title?: string) => void;
+}) {
   const [section, setSection] = useState<SupportSection>(initialSection);
   useEffect(() => setSection(initialSection), [initialSection]);
+  // 工作台只渲染当前 Tab，切换会卸载本视图；把选中与筛选留在工作区 tab query，
+  // 切回/刷新后按持久线程（或订单 id）恢复，而不是重新从空状态开始。
+  const persistQuery = useCallback((patch: Record<string, string | null>) => {
+    if (!onQueryChange) return;
+    const next = { ...workspaceQuery };
+    for (const [key, value] of Object.entries(patch)) {
+      if (value) next[key] = value;
+      else delete next[key];
+    }
+    onQueryChange(next);
+  }, [onQueryChange, workspaceQuery]);
   const canRead = hasPermission(snapshot, "im.support.read");
   const profileScope = { profile: hasPermission(snapshot, "user.directory.read"), orders: hasPermission(snapshot, "order.read"), resources: hasPermission(snapshot, "supply.rental_account.read") };
   const canComplaint = hasPermission(snapshot, "im.support.complaint");
   const canAccept = hasPermission(snapshot, "im.support.accept");
+  // 自动分配是主路径；手动“接管”只给管理岗，普通客服不再看到接入按钮。
+  const canManageSupport = Boolean(snapshot.security.isBoss || snapshot.permissions.includes("im.support.audit.takeover"));
   const canTransfer = hasPermission(snapshot, "im.support.transfer");
   const canPresence = canRead && hasPermission(snapshot, "im.support.presence");
   const readClientKey = createReadClientKey({ adminUserId: snapshot.adminUserId, sessionId: snapshot.session.id, locked: snapshot.session.locked, canRead });
@@ -196,15 +271,20 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
 
   const [queue, setQueue] = useState<Consultation[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  // 投诉摘要复用处理记录的第一页投影，不为“最近结果”再打一次请求。
-  const [eventSummary, setEventSummary] = useState<ConsultationEventSummary | null>(null);
-  const reportEventSummary = useCallback((summary: ConsultationEventSummary) => { setEventSummary(summary); }, []);
+  const [orderQueue, setOrderQueue] = useState<OrderTeamListItem[]>([]);
+  const [orderQueueLoaded, setOrderQueueLoaded] = useState(false);
+  const [orderSelection, setOrderSelection] = useState<string | null>(null);
+  const [groupPrefs, setGroupPrefs] = useState<OrderGroupPreferenceMap>(() => readOrderGroupPreferences(snapshot.adminUserId));
+  const [unifiedOrderMenu, setUnifiedOrderMenu] = useState<{ x: number; y: number; orderId: string; preference: OrderGroupPreference; row: HTMLElement | null } | null>(null);
+  const [unifiedQuery, setUnifiedQuery] = useState("");
+  const [unifiedType, setUnifiedType] = useState<"ALL" | "SERVICE" | "COMPLAINT" | "ORDER">(initialUnifiedType);
   const [messages, setMessages] = useState<Record<string, SupportMessage[]>>({});
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [emojiOpen, setEmojiOpen] = useState(false);
+  const [quickReplyOpen, setQuickReplyOpen] = useState(false);
   // Below this width a third column leaves the chat unusable, so the case column
 // starts collapsed and the operator opens it deliberately.
-  const [detailsOpen, setDetailsOpen] = useState(true);
+  const [detailsOpen, setDetailsOpen] = useState(() => !(typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(max-width:1439px)").matches));
   const [mobilePane, setMobilePane] = useState<"queue" | "chat" | "details">("queue");
   const [notice, setNotice] = useState<string>();
   const [query, setQuery] = useState("");
@@ -213,7 +293,22 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
   const [connection, setConnection] = useState<NimWebConnectionState | "idle" | "error">("idle");
   const [presence, setPresence] = useState<Presence>({ adminUserId: snapshot.adminUserId, availability: "OFF_DUTY", connectionState: "DISCONNECTED", activeLoad: 0, version: 0 });
   const [busy, setBusy] = useState(false);
+  const [notifyPermission, setNotifyPermission] = useState<SupportNotificationPermission>(() => supportNotificationPermission());
+  const [notifyEnabled, setNotifyEnabled] = useState(() => readSupportNotificationPreference(snapshot.adminUserId));
+  // 首个成功队列响应才算“已加载”：空队列也是合法状态，不能用 rows 非空猜测。
+  const [queueLoaded, setQueueLoaded] = useState(false);
+  useEffect(() => {
+    const unlock = () => unlockSupportAudio();
+    document.addEventListener("pointerdown", unlock, { once: true, capture: true });
+    return () => document.removeEventListener("pointerdown", unlock, true);
+  }, []);
   const [sending, setSending] = useState(false);
+  const visibleQueueRow = () => {
+    if (typeof document === "undefined") return null;
+    const pane = document.querySelector<HTMLElement>(".im-wb-pane:not([hidden])");
+    return pane?.querySelector<HTMLElement>('.im-wb-queue .im-wb-row[data-active="true"]')
+      ?? pane?.querySelector<HTMLElement>(".im-wb-queue .im-wb-row") ?? null;
+  };
   // Keyed by consultation: a receipt for conversation B must never erase the
   // unresolved responsibility belonging to conversation A.
   const [failedText, setFailedText] = useState<Record<string, FailedText | null>>({});
@@ -232,14 +327,6 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
   const [messageMenu, setMessageMenu] = useState<{ key: string; id: string; x: number; y: number; row: HTMLElement | null } | null>(null);
   const [replyTargets, setReplyTargets] = useState<Record<string, SupportMessage | null>>({});
   const [replyUncertain, setReplyUncertain] = useState<Record<string, boolean>>({});
-  const seenKey = `zzsh.im-support.seen.${snapshot.adminUserId}`;
-  const [seen, setSeen] = useState<Record<string, string>>(() => {
-    try {
-      const raw = window.localStorage.getItem(seenKey);
-      const parsed: unknown = raw ? JSON.parse(raw) : {};
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, string> : {};
-    } catch { return {}; }
-  });
   const [transferOpen, setTransferOpen] = useState(false);
   const [transferState, setTransferState] = useState<{ targets: { adminUserId: string; displayName: string }[]; transferReady: boolean } | null>(null);
   const [transferError, setTransferError] = useState<string>();
@@ -256,10 +343,14 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
   // 弹窗打开时快照确认对象，避免确认期间切换会话后关错人。
   const [closeTarget, setCloseTarget] = useState<Consultation | null>(null);
   const [closeOutcomeUnknown, setCloseOutcomeUnknown] = useState<Record<string, boolean>>({});
-  const [incomingAt, setIncomingAt] = useState<Record<string, number>>({});
   const [historyMore, setHistoryMore] = useState<Record<string, boolean>>({});
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyState, setHistoryState] = useState<Record<string, "loading" | "ready" | "error" | "forbidden">>({});
+  // 标记已读是平台读取事件：同一轮次的同一历史版本只上报一次；新消息到达时历史版本变化，
+  // 负责客服仍在看就必须继续推进已读。轮询/重渲染/重选同一版本不重复发。
+  const markedReadSignaturesRef = useRef(new Map<string, string>());
+  const readInFlightRef = useRef(new Map<string, string>());
+  const markedOrderReadRef = useRef(new Set<string>());
 
   const lifecycleRef = useRef<ImClientLifecycle<NimWebClientLike> | null>(null);
   const clientRef = useRef<NimWebClientLike | null>(null);
@@ -317,20 +408,23 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
   const failedFor = (id: string) => (id ? failedText[id] ?? null : null);
   const draft = drafts[draftKey] ?? "";
   const setDraft = (value: string) => setDrafts((current) => ({ ...current, [draftKey]: value }));
-  const insertEmoji = (emoji: string) => {
+  const insertIntoDraft = (insertion: string, close: () => void) => {
     const el = composerRef.current;
     const start = el?.selectionStart ?? draft.length;
     const end = el?.selectionEnd ?? start;
-    const next = `${draft.slice(0, start)}${emoji}${draft.slice(end)}`;
+    const next = `${draft.slice(0, start)}${insertion}${draft.slice(end)}`;
     if (next.length > 4000) return;
     setDraft(next);
-    setEmojiOpen(false);
+    close();
     requestAnimationFrame(() => {
       el?.focus();
-      const position = start + emoji.length;
+      const position = start + insertion.length;
       el?.setSelectionRange(position, position);
     });
   };
+  const insertEmoji = (emoji: string) => insertIntoDraft(emoji, () => setEmojiOpen(false));
+  // 常用语只插入草稿，不自动发送；发送仍由客服确认。
+  const insertQuickReply = (text: string) => insertIntoDraft(text, () => setQuickReplyOpen(false));
   const beginBusy = () => { const owner = busyOwnerRef.current + 1; busyOwnerRef.current = owner; setBusy(true); return owner; };
   const endBusy = (owner: number) => { if (busyOwnerRef.current === owner) setBusy(false); };
   // 所有 presence 显示/版本只从服务端返回值更新；客户端没有任何"先行生效"的路径。
@@ -384,6 +478,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
     clientRef.current = null;
     readyOperatorRef.current = null;
     setQueue([]);
+    setQueueLoaded(false);
     setMessages({});
     setDrafts({});
     setSelectedId(null);
@@ -391,8 +486,10 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
     setReplyTargets({});
     setReplyUncertain({});
     setHistoryMore({});
+    setHistoryState({});
+    markedReadSignaturesRef.current.clear();
+    readInFlightRef.current.clear();
     setHistoryLoading(false);
-    setIncomingAt({});
     setFailedText({});
     textFlightRef.current.clear();
     setStaged({});
@@ -482,7 +579,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
         ]);
         if (cancelled || generation !== operatorGenerationRef.current || operatorRef.current !== operator || clientRef.current !== client) return;
         if (presenceResult.status === "fulfilled" && presenceResult.value) rememberPresence(presenceResult.value);
-        if (queueResult.status === "fulfilled") setQueue(queueResult.value);
+        if (queueResult.status === "fulfilled") { setQueue(queueResult.value); setQueueLoaded(true); }
         else setNotice(friendlyError(queueResult.reason));
         if (canPresence) void writePresence(availabilityRef.current, connectionForPresence(client.getConnectionState()));
         client.onConnectionStateChange((state) => {
@@ -498,9 +595,10 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
             const consultation = queueRef.current.find((candidate) => candidate.state === "ACTIVE" && candidate.assignedAdmin?.id === snapshot.adminUserId && candidate.conversationId === raw.conversationId);
             if (!next || !consultation) continue;
             setMessages((current) => ({ ...current, [consultation.id]: mergeImMessages(current[consultation.id] ?? [], [next]) }));
-            // Client-observed arrival only drives the local badge; the consultation
-            // row has no server writer for last_message_at yet.
-            if (next.self !== true) setIncomingAt((current) => ({ ...current, [consultation.id]: Math.max(current[consultation.id] ?? 0, raw.createTime ?? 0) }));
+            // 即时反馈：服务端计数仍是权威，下一次队列轮询会覆盖这个乐观增量。
+            if (next.self !== true) setQueue((current) => current.map((item) => item.id === consultation.id
+              ? { ...item, adminUnreadCount: Math.min((item.adminUnreadCount ?? 0) + 1, 999) }
+              : item));
           }
         });
       } catch (cause) {
@@ -530,6 +628,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
       void readConsultations().then((next) => {
         if (cancelled || generation !== operatorGenerationRef.current || operatorRef.current !== operator) return;
         setQueue(next);
+        setQueueLoaded(true);
         setNotice((current) => current === QUEUE_REFRESH_ERROR ? undefined : current);
       }).catch(() => {
         if (!cancelled && generation === operatorGenerationRef.current && operatorRef.current === operator) setNotice((current) => current ?? QUEUE_REFRESH_ERROR);
@@ -538,6 +637,73 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
     const timer = window.setInterval(refreshQueue, 5_000);
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [canRead, connection, readClientKey]);
+
+  // Unified inbox: order groups share the same left directory as consultations.
+  useEffect(() => {
+    if (!canRead) return;
+    let cancelled = false;
+    let loading = false;
+    const refreshOrders = () => {
+      if (cancelled || loading) return;
+      loading = true;
+      void adminRequest<{ items?: OrderTeamListItem[] }>("/orders/im-groups?limit=50")
+        .then((value) => { if (!cancelled) { setOrderQueue(Array.isArray(value.items) ? value.items : []); setOrderQueueLoaded(true); } })
+        .catch(() => undefined)
+        .finally(() => { loading = false; });
+    };
+    refreshOrders();
+    const timer = window.setInterval(refreshOrders, 15_000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [canRead]);
+  useEffect(() => {
+    const onSync = (event: Event) => {
+      const detail = (event as CustomEvent<{ snapshot?: OrderGroupPreferenceMap }>).detail;
+      if (detail?.snapshot) setGroupPrefs(detail.snapshot);
+    };
+    window.addEventListener(ORDER_GROUP_PREF_EVENT, onSync);
+    return () => window.removeEventListener(ORDER_GROUP_PREF_EVENT, onSync);
+  }, []);
+
+  const restoredSelectionRef = useRef(false);
+  const restoreConsultation = () => {
+    if (!initialConsultationId) return false;
+    const target = queue.find((item) => item.id === initialConsultationId || (item.threadId ?? item.id) === initialConsultationId);
+    if (!target) return false;
+    setSection("consultation");
+    setSelectedId(target.id);
+    restoredSelectionRef.current = true;
+    return true;
+  };
+  const restoreOrder = () => {
+    if (!initialOrderId) return false;
+    const target = orderQueue.find((item) => item.id === initialOrderId);
+    if (!target) return false;
+    setSection("orders");
+    setOrderSelection(target.id);
+    restoredSelectionRef.current = true;
+    return true;
+  };
+  useEffect(() => {
+    if (restoredSelectionRef.current) return;
+    // 只恢复当前 section 的选中，等该 section 的目录首次加载完成再判断；
+    // 否则先到的另一侧会把视图抢到错误的 section。
+    if (initialSection === "orders") {
+      if (!orderQueueLoaded) return;
+      if (restoreOrder()) return;
+      restoredSelectionRef.current = true;
+      return;
+    }
+    if (!queueLoaded) return;
+    if (restoreConsultation()) return;
+    restoredSelectionRef.current = true;
+  }, [initialConsultationId, initialSection, orderQueueLoaded, queueLoaded, queue]);
+
+  // 内部切换 section 时也可以回到该 section 上次选中的会话；用户新点一条则不会被覆盖。
+  useEffect(() => {
+    if (!restoredSelectionRef.current) return;
+    if (section === "orders" && !orderSelection && initialOrderId) restoreOrder();
+    else if (section === "consultation" && !selectedId && initialConsultationId) restoreConsultation();
+  }, [section, orderSelection, selectedId, initialOrderId, initialConsultationId, orderQueue, queue]);
 
   useEffect(() => {
     if (!canPresence || readyOperatorRef.current !== readClientKey || connection !== "CONNECTED") return;
@@ -559,9 +725,11 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
     return () => window.clearInterval(timer);
   }, [canPresence, connection, presence.availability, snapshot.session.locked]);
 
+  // 日常流不代选：首次加载或队列刷新不替客服打开会话，否则未读会在没被看到时就上报。
+  // 只有显式选择（点行、铃铛通知、交接清单）会设置 selectedId；选中的一轮消失时才清空。
   useEffect(() => {
-    if (selectedId && queue.some((item) => item.id === selectedId)) return;
-    setSelectedId(queue[0]?.id ?? null);
+    if (!selectedId || queue.some((item) => item.id === selectedId)) return;
+    setSelectedId(null);
   }, [queue, selectedId]);
 
   useEffect(() => {
@@ -579,7 +747,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
       ? chatHeadingRef.current
       : mobilePane === "details"
         ? document.querySelector<HTMLElement>('[data-action="collapse-details"]')
-        : document.querySelector<HTMLElement>('.im-wb-row[data-active="true"]') ?? document.querySelector<HTMLElement>(".im-wb-row");
+        : visibleQueueRow() ?? document.querySelector<HTMLElement>(".im-wb-row");
     if (!target) return;
     const active = document.activeElement;
     if (active instanceof Node && target.contains(active)) return;
@@ -588,6 +756,19 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
 
   const selected = queue.find((item) => item.id === selectedId) ?? null;
   const selectedMessages = messages[selectedId ?? ""] ?? [];
+  // 订单群未读按成员身份计数；只有该群聊真的在屏幕上时才清自己的未读。
+  const selectedOrderRow = orderSelection ? orderQueue.find((item) => item.id === orderSelection) ?? null : null;
+  useEffect(() => {
+    if (section !== "orders" || !selectedOrderRow || (selectedOrderRow.unreadCount ?? 0) <= 0) return;
+    const narrow = typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(max-width: 760px)").matches;
+    if (narrow && mobilePane !== "chat") return;
+    const signature = `${selectedOrderRow.id}:${selectedOrderRow.lastMessageAt ?? ""}:${selectedOrderRow.unreadCount}`;
+    if (markedOrderReadRef.current.has(signature)) return;
+    markedOrderReadRef.current.add(signature);
+    void adminRequest(`/im/order-teams/${encodeURIComponent(selectedOrderRow.id)}/read`, {}, "POST")
+      .then(() => setOrderQueue((current) => current.map((item) => item.id === selectedOrderRow.id ? { ...item, unreadCount: 0 } : item)))
+      .catch(() => markedOrderReadRef.current.delete(signature));
+  }, [section, selectedOrderRow, mobilePane]);
   const rowOfMessage = (target: EventTarget | null): HTMLElement | null => {
     const element = target as { closest?: (selector: string) => HTMLElement | null } | null;
     return element && typeof element.closest === "function" ? element.closest("[data-message-id]") : null;
@@ -598,10 +779,11 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
     setMessageMenu((current) => current?.key === draftKey && current.id === message.id ? current : { key: draftKey, id: message.id, x, y, row });
   };
   const onMessageContextMenu = (event: ReactMouseEvent<HTMLElement>) => {
-    const row = rowOfMessage(event.target);
-    if (!row) return;
-    // 消息行永远不回落浏览器原生菜单：系统消息/已撤回只是没有平台动作，不是"换个菜单"。
+    if (event.defaultPrevented) return;
+    // 消息区域永远不回落浏览器原生菜单：空白处、系统消息、已撤回只是没有平台动作。
     event.preventDefault();
+    const row = rowOfMessage(event.target);
+    if (!row) { setMessageMenu(null); return; }
     openMessageMenu(findSelectedMessage(row.dataset.messageId), event.clientX, event.clientY, row);
   };
   const messageLongPress = useMessageLongPress((point, target) => {
@@ -632,18 +814,10 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
     requestAnimationFrame(() => {
       const target = selectedIdRef.current
         ? chatHeadingRef.current
-        : document.querySelector<HTMLElement>('.im-wb-row[data-active="true"]') ?? document.querySelector<HTMLElement>(".im-wb-row");
+        : visibleQueueRow() ?? document.querySelector<HTMLElement>(".im-wb-row");
       target?.focus();
     });
   };
-
-  useEffect(() => {
-    try { window.localStorage.setItem(seenKey, JSON.stringify(seen)); } catch { /* private mode keeps it in memory */ }
-  }, [seen, seenKey]);
-  useEffect(() => {
-    if (!selected) return;
-    setSeen((current) => ({ ...current, [selected.id]: new Date().toISOString() }));
-  }, [selected?.id, selectedMessages.length]);
 
   // 切换会话时丢弃未提交的结束确认，避免"看着 A 确认了 B"。
   useEffect(() => { setCloseOpen(false); setCloseTarget(null); }, [selectedId]);
@@ -653,6 +827,9 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
   const displayQueue = useMemo<QueueRow[]>(() => queue.map((item) => {
     const history = messages[item.id];
     const last = history?.length ? history[history.length - 1] : undefined;
+    const lastMessageAt = item.lastMessageAt ? Date.parse(item.lastMessageAt) : Number.NaN;
+    // 后端 best-effort 写入的最近消息摘要；没有历史时用它，避免未打开的 ACTIVE 行只显示“打开查看”。
+    const preview = item.lastMessagePreview?.trim() || null;
     // R1 重写时把这里的措辞缩短成了「待人工核验」，丢掉了「远端结果未知」这个
     // 关键差异（会读成普通待办）。恢复 HEAD 的完整措辞，队列行不得让 FAILED
     // 看起来像正常会话。
@@ -662,26 +839,148 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
         ? "结束结果未确认，待平台核对"
         : last
         ? `${last.from === "agent" ? (last.self ? "我：" : "客服：") : last.from === "system" ? "" : "用户："}${last.image ? "[图片]" : last.media ? mediaSummaryOf(last) ?? "[媒体]" : last.text || "[空消息]"}`
-        : item.state === "WAITING" ? "等待客服接待" : item.state === "CLOSED" ? "本轮已结束" : "会话已建立，等待消息";
+        : preview ? preview : item.state === "WAITING" ? "等待客服接待" : item.state === "CLOSED" ? "本轮已结束" : "打开查看消息";
+    const sortAt = last?.createTime ?? (Number.isFinite(lastMessageAt) ? lastMessageAt : 0);
     return {
       id: item.id,
       type: item.type,
       title: item.user?.name || item.user?.username || "平台用户",
       snippet,
-      time: last?.createTime ? formatTime(last.createTime) : "—",
+      time: sortAt ? formatListTime(sortAt) : "—",
+      sortAt,
       state: scopeStateLabel(item),
-      unread: item.state === "ACTIVE" && item.assignedAdmin?.id === snapshot.adminUserId
-        && item.id !== selectedId
-        && ((Boolean(item.lastMessageAt) && item.lastMessageAt! > (seen[item.id] ?? ""))
-          || (incomingAt[item.id] ?? 0) > (Date.parse(seen[item.id] ?? "") || 0)),
+      unreadCount: item.state === "ACTIVE" && item.assignedAdmin?.id === snapshot.adminUserId
+        ? Math.max(0, item.adminUnreadCount ?? 0)
+        : 0,
       consultation: item,
     };
-  }), [queue, messages, seen, selectedId, snapshot.adminUserId, incomingAt, closeOutcomeUnknown]);
+  }), [queue, messages, closeOutcomeUnknown, snapshot.adminUserId]);
 
   const counts = useMemo(() => ({
     waiting: displayQueue.filter((row) => row.state === "待接入").length,
-    mine: displayQueue.filter((row) => row.state === "处理中" || row.state === "待核验").length,
+    mine: displayQueue.filter((row) => row.state === "接待中" || row.state === "待核验").length,
   }), [displayQueue]);
+  const notificationRows = useMemo(() => displayQueue.map((row) => ({
+    id: row.id,
+    title: `${typeLabel(row.type)} · ${row.title}`,
+    body: row.snippet,
+    signature: `${row.consultation?.lastMessageAt ?? ""}|${row.snippet}`,
+    unread: row.unreadCount > 0,
+  })), [displayQueue]);
+  const { unreadCount: notifyUnreadCount } = useSupportUnreadNotifications({
+    adminUserId: snapshot.adminUserId,
+    enabled: notifyEnabled && notifyPermission === "granted",
+    loaded: queueLoaded,
+    rows: notificationRows,
+    selectedId,
+    onOpen: (id) => {
+      restoredSelectionRef.current = true;
+      setSection("consultation");
+      setSelectedId(id);
+      setMobilePane("chat");
+      const row = queue.find((item) => item.id === id);
+      persistQuery({ section: "consultation", consultation: row?.threadId ?? id });
+    },
+  });
+  const unifiedRows = useMemo<UnifiedRow[]>(() => {
+    const text = unifiedQuery.trim().toLowerCase();
+    const matches = (row: UnifiedRow) => (!text || `${row.title} ${row.snippet} ${row.tag} ${row.state}`.toLowerCase().includes(text));
+    const consultations: UnifiedRow[] = displayQueue
+      .filter((row) => unifiedType === "ALL" || (unifiedType !== "ORDER" && row.type === unifiedType))
+      .map((row): UnifiedRow => ({
+        kind: "consultation", id: row.id, title: row.title,
+        tag: row.type === "COMPLAINT" ? "投诉" : "咨询",
+        tone: row.type === "COMPLAINT" ? "warn" : "neutral",
+        snippet: row.snippet, state: row.state, stateTone: stageToneOf(row.state),
+        unreadCount: row.unreadCount, sortAt: row.sortAt, time: row.time,
+      }))
+      .filter(matches);
+    const orders: UnifiedRow[] = (unifiedType === "ALL" || unifiedType === "ORDER" ? orderQueue : [])
+      .filter((row) => !groupPreferenceOf(groupPrefs, row.id).hidden)
+      .map((row): UnifiedRow => {
+        const preference = groupPreferenceOf(groupPrefs, row.id);
+        const state = stageLabelOf(row);
+        // 没有消息的订单群用建群时间兜底，列表不留“—”这种无法排序的空时间。
+        const sortAt = Date.parse(row.lastMessageAt ?? row.createdAt ?? "") || 0;
+        return {
+          kind: "order" as const,
+          id: row.id,
+          title: row.displayNo,
+          tag: "",
+          tone: "neutral" as const,
+          snippet: typeof row.lastMessagePreview === "string" && row.lastMessagePreview.trim()
+            ? row.lastMessagePreview.trim()
+            : row.lastMessageAt ? "有新消息" : "暂无消息",
+          state, stateTone: orderStageTone(row),
+          // 到期只对正在租用/待结束的订单有意义；已完成的历史群不再占用列表宽度。
+          meta: row.dueAt && (row.stage === "RENTING" || row.stage === "ENDING") ? `到期 ${formatMonthDay(row.dueAt)}` : undefined,
+          unreadCount: Math.max(0, row.unreadCount ?? 0),
+          sortAt,
+          time: sortAt ? formatListTime(sortAt) : "—",
+          pinned: preference.pinned,
+          muted: preference.muted,
+        };
+      })
+      .filter(matches);
+    // 置顶优先，其余一律按最后一条消息倒序；咨询与订单群在同一条时间轴上。
+    return [...consultations, ...orders].sort((a, b) =>
+      Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || b.sortAt - a.sortAt);
+  }, [displayQueue, groupPrefs, orderQueue, unifiedQuery, unifiedType]);
+  const applyGroupPreference = (orderId: string, patch: Partial<OrderGroupPreference>) => {
+    const next = withGroupPreference(groupPrefs, orderId, patch);
+    setGroupPrefs(next);
+    storeOrderGroupPreferences(snapshot.adminUserId, next);
+    window.dispatchEvent(new CustomEvent(ORDER_GROUP_PREF_EVENT, { detail: { orderId, patch } }));
+  };
+  const unifiedTotal = displayQueue.length + orderQueue.filter((row) => !groupPreferenceOf(groupPrefs, row.id).hidden).length;
+  const hiddenOrderCount = orderQueue.filter((row) => groupPreferenceOf(groupPrefs, row.id).hidden).length;
+  const restoreHiddenOrders = () => {
+    const next: OrderGroupPreferenceMap = {};
+    for (const [orderId, preference] of Object.entries(groupPrefs)) next[orderId] = { ...preference, hidden: false };
+    setGroupPrefs(next);
+    storeOrderGroupPreferences(snapshot.adminUserId, next);
+    for (const [orderId, preference] of Object.entries(groupPrefs)) {
+      if (preference.hidden) window.dispatchEvent(new CustomEvent(ORDER_GROUP_PREF_EVENT, { detail: { orderId, patch: { hidden: false } } }));
+    }
+  };
+  const handleUnifiedOrderMenuAction = (action: MessageActionId) => {
+    const menu = unifiedOrderMenu;
+    setUnifiedOrderMenu(null);
+    if (!menu) return;
+    if (action === "pin") { applyGroupPreference(menu.orderId, { pinned: !menu.preference.pinned }); return; }
+    if (action === "mute") { applyGroupPreference(menu.orderId, { muted: !menu.preference.muted }); return; }
+    if (action === "hide") {
+      applyGroupPreference(menu.orderId, { hidden: true });
+      if (orderSelection === menu.orderId) setOrderSelection(null);
+      return;
+    }
+    if (action === "settings") {
+      setSection("orders");
+      setOrderSelection(menu.orderId);
+      window.setTimeout(() => window.dispatchEvent(new CustomEvent(ORDER_GROUP_SETTINGS_EVENT, { detail: { orderId: menu.orderId } })), 160);
+    }
+  };
+  const toggleNotifications = async () => {
+    const plan = planSupportNotificationToggle(notifyPermission, notifyEnabled);
+    if (plan.kind === "notice") { setNotice(plan.notice); return; }
+    if (plan.kind === "request") {
+      const permission = await requestSupportNotificationPermission();
+      setNotifyPermission(permission);
+      if (permission !== "granted") { setNotice("未获得通知权限；也可以保持页面打开并使用页面内未读提示。"); return; }
+      // 首次授权成功即开启：偏好默认是“开”，此时再取反会把刚授权的提醒关掉。
+      setNotifyEnabled(true);
+      storeSupportNotificationPreference(snapshot.adminUserId, true);
+      unlockSupportAudio();
+      playSupportChime();
+      setNotice("消息提醒已开启；请保持工作台标签页打开，关闭标签页后网页无法通知。");
+      return;
+    }
+    const next = plan.enabled;
+    setNotifyEnabled(next);
+    storeSupportNotificationPreference(snapshot.adminUserId, next);
+    if (next) { unlockSupportAudio(); playSupportChime(); setNotice("消息提醒已开启；请保持工作台标签页打开，关闭标签页后网页无法通知。"); }
+    else setNotice(undefined);
+  };
   // 暂停前清单只列“我名下仍在处理”的咨询；等待接入的不是我的责任。
   const myOpenConsultations = useMemo(
     () => queue.filter((item) => item.state === "ACTIVE" && item.assignedAdmin?.id === snapshot.adminUserId),
@@ -689,7 +988,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
   );  const filteredQueue = useMemo(() => {
     const text = query.trim().toLowerCase();
     return displayQueue.filter((row) => {
-      const inFilter = filter === "waiting" ? row.state === "待接入" : row.state === "处理中" || row.state === "待核验";
+      const inFilter = filter === "waiting" ? row.state === "待接入" : row.state === "接待中" || row.state === "待核验";
       if (!inFilter) return false;
       if (!text) return true;
       return `${row.title} ${row.snippet} ${typeLabel(row.type)}`.toLowerCase().includes(text);
@@ -865,6 +1164,30 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
     return () => { cancelled = true; };
   }, [canRead, connection, readClientKey, selected?.conversationId, selected?.id, historyRetryToken]);
 
+  // 负责客服打开 ACTIVE 轮次且历史已成功加载后上报平台已读；新消息改变历史版本时再次推进。
+  // 非负责、非 ACTIVE、历史失败或会话不在前台都不发。失败静默，已读只能来自服务端。
+  const selectedReadSignature = selected ? `${selectedMessages.length}:${selectedMessages.at(-1)?.id ?? ""}` : "";
+  useEffect(() => {
+    if (!canRead || section !== "consultation" || !selected || !selectedMessages.length) return;
+    if (selected.state !== "ACTIVE" || selected.assignedAdmin?.id !== snapshot.adminUserId) return;
+    if (historyState[selected.id] !== "ready") return;
+    // 窄屏三栏互斥：队列/详情在前台时，聊天并没有被看到。
+    if (typeof window !== "undefined" && typeof window.matchMedia === "function"
+      && window.matchMedia("(max-width: 760px)").matches && mobilePane !== "chat") return;
+    const roundId = selected.roundId || selected.id;
+    const signature = selectedReadSignature;
+    if (!roundId || !signature) return;
+    if (markedReadSignaturesRef.current.get(roundId) === signature || readInFlightRef.current.get(roundId) === signature) return;
+    readInFlightRef.current.set(roundId, signature);
+    void adminRequest(`/im/consultations/${encodeURIComponent(roundId)}/read`, {}, "POST").then(() => {
+      if (readInFlightRef.current.get(roundId) === signature) readInFlightRef.current.delete(roundId);
+      markedReadSignaturesRef.current.set(roundId, signature);
+      setQueue((current) => current.map((item) => item.id === selected.id ? { ...item, adminUnreadCount: 0 } : item));
+    }).catch(() => {
+      if (readInFlightRef.current.get(roundId) === signature) readInFlightRef.current.delete(roundId);
+    });
+  }, [canRead, section, mobilePane, snapshot.adminUserId, selected?.id, selected?.state, selected?.roundId, selected?.assignedAdmin?.id, historyState[selected?.id ?? ""], selectedReadSignature]);
+
   const reloadHistory = async (consultationId: string) => {
     setHistoryRetryToken((token) => token + 1);
     void consultationId;
@@ -895,6 +1218,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
   };
 
   const claim = async (afterReception = false) => {
+    if (!canManageSupport) { setNotice("当前会话由系统自动分配；需要人工接管请联系管理岗。"); return; }
     if (!selected || selected.state !== "WAITING" || !canOperateSupportType(selected.type, canAccept, canComplaint)) return;
     // Claim is only valid for an AVAILABLE + CONNECTED support presence. Do not
     // send the request while off duty and then surface an opaque 503.
@@ -917,7 +1241,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
     } catch (cause) {
       const current = currentRequestKey();
       if (current && isCurrentImRequest(requestKey, current)) {
-        setNotice(httpStatus(cause) === 503 ? "当前没有可接待客服或接待状态尚未生效，请确认已开始接待后重试。" : friendlyError(cause));
+        setNotice(httpStatus(cause) === 503 ? "会话暂时无法接入：云信群或接待状态尚未就绪，请刷新后重试。" : friendlyError(cause));
       }
     } finally { endBusy(busyOwner); }
   };
@@ -926,6 +1250,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
     if (!started) return;
     setReceptionOpen(false);
     if (connectionForPresence(connection) !== "CONNECTED") { setNotice("消息服务未连接，暂不能接入会话。"); return; }
+    if (!canManageSupport) { setNotice("已开始接待，系统会自动分配会话。"); return; }
     await claim(true);
   };
   const close = async (consultationId: string) => {
@@ -950,12 +1275,13 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
     const busyOwner = beginBusy();
     setNotice(undefined);
     try {
-      await adminRequest<{ consultation: Consultation }>(`/im/consultations/${encodeURIComponent(consultationId)}/close`, {}, "POST");
+      const result = await adminRequest<{ consultation: Consultation }>(`/im/consultations/${encodeURIComponent(consultationId)}/close`, {}, "POST");
       if (!sameOperation()) return;
-      setQueue((current) => current.filter((item) => item.id !== consultationId));
+      // 结束的是轮次，不是会话：保留这一行并选中它，让客服还能从同一会话查看历史。
+      setQueue((current) => current.map((item) => item.id === result.consultation.id ? result.consultation : item));
       setCloseOutcomeUnknown((value) => { const next = { ...value }; delete next[consultationId]; return next; });
       setCloseOpen(false);
-      if (selectedIdRef.current === consultationId) { setSelectedId(null); setMobilePane("queue"); }
+      setSelectedId(result.consultation.id);
       // 只结束本轮：线程与同一 Team 的聊天记录保留，用户再次咨询会在同一线程开启新一轮。
       setNotice("本轮已结束，聊天记录保留；用户再次咨询会在同一会话开启新一轮。");
     } catch (cause) {
@@ -1484,8 +1810,14 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
     if (selected?.peerAccountId && message.senderId === selected.peerAccountId) return { name: selected.user?.name || selected.user?.username || "平台用户", role: "平台用户" };
     // Historical senders we cannot map stay neutral instead of borrowing the
     // current assignee's identity.
+    if (message.from === "agent" && selected?.botAccountId && message.senderId === selected.botAccountId) return { name: "洲洲助手（Bot）", role: "机器人" };
     return message.from === "agent" ? { name: "客服", role: "平台客服" } : { name: selected?.user?.name || selected?.user?.username || "平台用户", role: "平台用户" };
   };
+  const userHoverCard = selected ? <div className="im-wb-author-hover">
+    <ConsultationUserCard consultationId={selected.id} rowUserId={selected.user?.id ?? ""} fallbackName={selected.user?.name || selected.user?.username || "平台用户"}
+      request={adminRequest} scope={profileScope} showSubject={selected.type !== "COMPLAINT"}
+      onOpenProfile={(id) => onOpenPath?.(`/users/${encodeURIComponent(id)}`, "用户资料")} />
+  </div> : null;
   const jumpToMessage = (messageId: string) => {
     const target = selectedMessages.find((message) => message.id === messageId || message.source?.messageServerId === messageId || message.source?.messageClientId === messageId);
     if (!target) return;
@@ -1515,16 +1847,21 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
     const mine = message.self === true;
     nodes.push(<MessageScrollerPrimitive.Item key={message.id} messageId={message.id} scrollAnchor={message.from === "customer"} tabIndex={-1} onContextMenu={onMessageContextMenu} {...messageLongPress}>
       <Message align={mine ? "end" : "start"} className="im-wb-msg" data-message-id={message.id} data-from={message.from} data-self={mine} data-grouped={grouped}>
-        <MessageAvatar className="im-wb-av" aria-hidden="true">{initialOf(author.name)}</MessageAvatar>
+        {author.role === "平台用户" && userHoverCard ? <EntityPreviewTrigger enableTouchButton={false} side="right" align="start" touchLabel={`预览用户 ${author.name}`} className="im-wb-author-preview"
+          trigger={<button type="button" className="im-wb-av-button" aria-label={`查看用户 ${author.name}`} title={`查看用户 ${author.name}`}><MessageAvatar className="im-wb-av" aria-hidden="true">{initialOf(author.name)}</MessageAvatar></button>}
+          content={userHoverCard} /> : <MessageAvatar className="im-wb-av" aria-hidden="true">{author.role === "机器人" ? <img src="/art/zhouzhou/avatar.webp" alt="" /> : initialOf(author.name)}</MessageAvatar>}
         <MessageContent className="im-wb-msg-body">
-          {grouped ? null : <MessageHeader className="im-wb-msg-meta"><b>{author.name}</b><span className="im-wb-role-tag" data-role={author.role}>{author.role}</span>{mine ? null : <time>{message.time}</time>}</MessageHeader>}
+          {grouped ? null : <MessageHeader className="im-wb-msg-meta">{author.role === "平台用户" && userHoverCard
+            ? <EntityPreviewTrigger enableTouchButton={false} side="right" align="start" touchLabel={`预览用户 ${author.name}`} className="im-wb-author-preview"
+                trigger={<button type="button" className="im-wb-author-name-trigger"><b>{author.name}</b></button>} content={userHoverCard} />
+            : <b>{author.name}</b>}<span className="im-wb-role-tag" data-role={author.role}>{author.role}</span>{mine ? null : <time>{message.time}</time>}</MessageHeader>}
           <Bubble align={mine ? "end" : "start"} variant={mine ? "default" : "secondary"}>
             <BubbleContent className="im-wb-bub" data-revoked={message.revoked ? "true" : undefined}>
               {message.revoked ? "消息已撤回" : <>
                 {message.media ? <MediaMessage media={message.media} /> : message.image ? (imageUrl
                   ? (imageErrors[message.id]
-                    ? <button type="button" className="im-wb-thumb im-wb-thumb-failed" data-action="retry-image" onClick={() => setImageErrors((current) => { const next = { ...current }; delete next[message.id]; return next; })} aria-label={`重新加载图片 ${message.image.name}`}>图片加载失败 · 点击重试</button>
-                    : <button type="button" className="im-wb-thumb" onClick={() => setViewer({ url: imageUrl, name: message.image!.name })} aria-label={`查看图片 ${message.image.name}`}><img key={imageErrors[message.id] ?? imageUrl} src={imageUrl} alt={message.image.name} loading="lazy" onError={() => setImageErrors((current) => ({ ...current, [message.id]: Date.now() }))} /></button>)
+                    ? <button type="button" className="im-wb-thumb im-wb-thumb-failed" data-action="retry-image" onClick={() => setImageErrors((current) => { const next = { ...current }; delete next[message.id]; return next; })} aria-label={`重新加载图片 ${message.image.name}`} title={`重新加载图片 ${message.image.name}`}>图片加载失败 · 点击重试</button>
+                    : <button type="button" className="im-wb-thumb" onClick={() => setViewer({ url: imageUrl, name: message.image!.name })} aria-label={`查看图片 ${message.image.name}`} title={`查看图片 ${message.image.name}`}><img key={imageErrors[message.id] ?? imageUrl} src={imageUrl} alt={message.image.name} loading="lazy" onError={() => setImageErrors((current) => ({ ...current, [message.id]: Date.now() }))} /></button>)
                   : <span className="im-wb-thumb-missing">图片暂不可预览</span>) : message.text}
                 {message.source?.reply ? <MessageQuoted text={message.source.reply.text ?? "消息"} senderName={(() => { const target = selectedMessages.find((item) => item.id === message.source!.reply!.messageId || item.source?.messageServerId === message.source!.reply!.messageId || item.source?.messageClientId === message.source!.reply!.messageId); return target ? authorFor(target).name : null; })()} onJump={() => jumpToMessage(message.source!.reply!.messageId)} /> : null}
               </>}
@@ -1546,13 +1883,19 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
       </div>
       <div className="im-wb-rows">
         {filteredQueue.length ? filteredQueue.map((row) => <button type="button" key={row.id} className="im-wb-row" data-active={selectedId === row.id} aria-current={selectedId === row.id ? "page" : undefined}
-          onClick={() => { setSelectedId(row.id); setMobilePane("chat"); setNotice(undefined); }}>
+          onClick={() => {
+            restoredSelectionRef.current = true;
+            setSelectedId(row.id);
+            setMobilePane("chat");
+            setNotice(undefined);
+            persistQuery({ section: "consultation", consultation: row.consultation?.threadId ?? row.id });
+          }}>
           <span className="im-wb-row-av" aria-hidden="true">{initialOf(row.title)}</span>
           <span className="im-wb-row-copy"><span className="im-wb-row-top"><b>{row.title}</b><i className="im-wb-tag" data-tone={row.type === "COMPLAINT" ? "warn" : "neutral"}>{row.type === "COMPLAINT" ? "投诉" : "咨询"}</i><time>{row.time}</time></span>
             <span className="im-wb-row-snip">{row.snippet}</span>
-            <span className="im-wb-row-foot"><em data-state={row.state}>{row.state}</em>{row.unread ? <i className="im-wb-unread" aria-label="有新消息">新</i> : null}</span></span>
+            <span className="im-wb-row-foot"><em data-tone={stageToneOf(row.state)}>{row.state}</em>{row.unreadCount > 0 ? <i className="im-wb-unread" aria-label={`${row.unreadCount} 条未读`}>{row.unreadCount > 99 ? "99+" : row.unreadCount}</i> : null}</span></span>
         </button>) : <div className="im-wb-list-empty">{query ? <><strong>当前列表没有匹配会话</strong><span>试试其他关键词。</span></>
-          : filter === "waiting" ? <><strong>暂无等待接入的会话</strong></>
+          : filter === "waiting" ? <><strong>系统正在分配…</strong><span>新咨询会按在线状态自动分配；异常时由管理岗接管。</span></>
           : <><strong>暂无你接待中的会话</strong><span>从「待接待」接入一条即可开始。</span></>}</div>}
       </div>
     </aside>
@@ -1566,13 +1909,13 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
           <span className="im-wb-chat-sub">{!selected ? "等待用户咨询" : roundHeadlineOf(selected)}</span>
         </div>
         <div className="im-wb-chat-actions">
-          {claimReady ? <button type="button" className="im-wb-btn im-wb-btn-primary" data-action="claim-consultation" onClick={() => void claim()} disabled={busy || connection !== "CONNECTED"}>接入会话</button> : null}
+          {claimReady && canManageSupport ? <button type="button" className="im-wb-btn im-wb-btn-outline" data-action="claim-consultation" title="自动分配异常时由管理岗接管" onClick={() => void claim()} disabled={busy || connection !== "CONNECTED"}>接管会话</button> : null}
+          {claimReady && !canManageSupport ? <span className="im-wb-state">系统分配中…</span> : null}
           {selected && isMine && selected.messageScopeState !== "FAILED" ? <button ref={closeTriggerRef} type="button" data-action="close-consultation" className="im-wb-btn im-wb-btn-outline" title={!serverCanSend && canOperateSelected ? "本轮尚未就绪，暂不可结束" : undefined} onClick={() => { if (!canOperateSelected || !serverCanSend || closeOutcomeUnknown[selected.id]) return; setCloseTarget(selected); setCloseOpen(true); }} disabled={busy || !canOperateSelected || !serverCanSend || Boolean(closeOutcomeUnknown[selected.id]) || Boolean(blockedConsultations[selected.id])}>{!canOperateSelected ? "无本类型接待权限" : closeOutcomeUnknown[selected.id] ? "结束结果未确认" : "结束本轮"}</button> : null}
           <button ref={transferTriggerRef} type="button" data-action="open-transfer" className="im-wb-btn im-wb-btn-outline" onClick={() => void openTransfer()} disabled={!canTransfer || !selected || selected.state !== "ACTIVE" || !isMine || selected.messageScopeState !== "READY" || busy}>{canTransfer ? "转交" : "无转交权限"}</button>
-          <button ref={detailsTriggerRef} type="button" className="im-wb-btn im-wb-btn-outline im-wb-btn-icon" aria-label={detailsOpen ? "收起会话详情" : "展开会话详情"} aria-expanded={detailsOpen} aria-controls="im-wb-details" data-action="toggle-details" onClick={() => { const narrow=typeof window!=="undefined"&&window.matchMedia("(max-width: 760px)").matches; if(narrow&&mobilePane!=="details"){openDetails();return;} if (detailsOpen) closeDetails(); else openDetails(); }}><MoreHorizontal size={15} /></button>
+          <button ref={detailsTriggerRef} type="button" className="im-wb-btn im-wb-btn-outline im-wb-btn-icon" aria-label={detailsOpen ? "收起会话详情" : "展开会话详情"} title={detailsOpen ? "收起会话详情" : "展开会话详情"} aria-expanded={detailsOpen} aria-controls="im-wb-details" data-action="toggle-details" onClick={() => { const narrow=typeof window!=="undefined"&&window.matchMedia("(max-width: 760px)").matches; if(narrow&&mobilePane!=="details"){openDetails();return;} if (detailsOpen) closeDetails(); else openDetails(); }}><MoreHorizontal size={15} /></button>
         </div>
       </header>
-      {selected?.type === "COMPLAINT" ? <p className="im-wb-scope-note"><CircleAlert size={13} />投诉内容不会同步到订单群</p> : null}
       {readOnlyReason ? <p className="im-wb-scope-note" data-tone="readonly" data-action="support-readonly" role="status"><ShieldCheck size={13} />{readOnlyReason}</p> : null}
       {notice ? <p className="im-wb-notice" role="status"><CircleAlert size={14} />{notice}</p> : null}
       {selected && closeOutcomeUnknown[selected.id] ? <p className="im-wb-notice" data-tone="warn" role="status"><CircleAlert size={14} />{CLOSE_OUTCOME_UNKNOWN_NOTICE}</p> : null}
@@ -1580,13 +1923,13 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
         {selected?.messageScopeState === "FAILED" ? <div className="im-wb-empty"><CircleAlert size={22} /><strong>会话待人工核验</strong><span>请先完成核验再回复。</span>{selected.assignedAdmin?.id === snapshot.adminUserId && canTransfer ? <button type="button" className="im-wb-btn" data-action="reconcile-consultation" onClick={() => void reconcile()} disabled={busy}>核验并恢复</button> : null}</div>
           : <MessageScrollerPrimitive.Provider autoScroll defaultScrollPosition="last-anchor">
             <MessageScrollerPrimitive.Root className="im-wb-scroller">
-              <MessageScrollerPrimitive.Viewport className="im-wb-viewport" aria-label="会话消息"><MessageScrollerPrimitive.Content className="im-wb-content">
+              <MessageScrollerPrimitive.Viewport className="im-wb-viewport" aria-label="会话消息" onContextMenu={onMessageContextMenu}><MessageScrollerPrimitive.Content className="im-wb-content">
                 {selectedMessages.length ? <>
                   {selected && historyMore[selected.id] ? <MessageScrollerPrimitive.Item messageId="load-earlier"><div className="im-wb-history-more"><button type="button" onClick={() => void loadEarlier()} disabled={historyLoading}>{historyLoading ? "正在读取更早消息…" : "更早的消息"}</button></div></MessageScrollerPrimitive.Item> : null}
                   {timelineItems}
                 </> : <MessageScrollerPrimitive.Item messageId="empty">{emptyStreamState(selected ? historyState[selected.id] : undefined, Boolean(selected))}</MessageScrollerPrimitive.Item>}
               </MessageScrollerPrimitive.Content></MessageScrollerPrimitive.Viewport>
-              <MessageScrollerPrimitive.Button direction="end" className="im-wb-jump" render={<button type="button" aria-label="跳到最新消息" />}><ArrowDown size={13} aria-hidden="true" /></MessageScrollerPrimitive.Button>
+              <MessageScrollerPrimitive.Button direction="end" className="im-wb-jump" render={<button type="button" aria-label="跳到最新消息" title="跳到最新消息" />}><ArrowDown size={13} aria-hidden="true" /></MessageScrollerPrimitive.Button>
             </MessageScrollerPrimitive.Root>
           </MessageScrollerPrimitive.Provider>}
       </div>
@@ -1616,17 +1959,40 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
             placeholder={!selected ? "从左侧选择会话" : selected.state === "WAITING" ? "接入会话后可回复" : selected.state === "ACTIVE" && !isMine ? readOnlyPlaceholder ?? "仅负责客服可发送消息" : selected.messageScopeState === "FAILED" ? "云信会话待人工核验，暂不可回复" : connection !== "CONNECTED" ? "云信通道未连接，草稿会保留" : "输入回复…"}
             disabled={!canEdit} />
           <InputGroupAddon align="block-end" className="im-wb-composer-tools">
-            <Popover open={emojiOpen} onOpenChange={setEmojiOpen}>
-              <PopoverTrigger render={<button type="button" className="im-wb-tool" aria-label="表情" disabled={!canEdit || sendBlocked} />}><Smile size={14} /></PopoverTrigger>
-              <PopoverContent side="top" align="start" className="w-auto p-0"><div className="chat-emoji-grid">
-                {CHAT_EMOJIS.map((item) => <button key={item.emoji} type="button" className="chat-emoji-button" aria-label={item.label} onClick={() => insertEmoji(item.emoji)}>{item.emoji}</button>)}
-              </div></PopoverContent>
-            </Popover>
-            <label className="im-wb-tool"><Images size={14} />图片<input type="file" accept="image/jpeg,image/png" multiple onChange={(event: ChangeEvent<HTMLInputElement>) => { const files = event.target.files ? Array.from(event.target.files) : []; event.target.value = ""; stageFiles(files); }} disabled={!canEdit || sendBlocked} /></label>
-            <button type="button" className="im-wb-tool" aria-label="发送视频" onClick={() => consultationVideoInput.current?.click()} disabled={!canEdit || sendBlocked}>视频</button>
-            <input ref={consultationVideoInput} type="file" accept="video/mp4,video/quicktime,video/webm" hidden onChange={(event: ChangeEvent<HTMLInputElement>) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) stageMediaFile(file, "video"); }} disabled={!canEdit || sendBlocked || selectedMedia?.state === "UNKNOWN"} />
-            <button type="button" className="im-wb-tool" aria-label="发送文件" onClick={() => consultationFileInput.current?.click()} disabled={!canEdit || sendBlocked}>文件</button>
-            <input ref={consultationFileInput} type="file" accept="application/pdf,application/zip,text/plain,text/csv,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.presentationml.presentation" hidden onChange={(event: ChangeEvent<HTMLInputElement>) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) stageMediaFile(file, "file"); }} disabled={!canEdit || sendBlocked || selectedMedia?.state === "UNKNOWN"} />
+            <TooltipProvider delay={200}>
+              <Popover open={quickReplyOpen} onOpenChange={setQuickReplyOpen}>
+                <PopoverTrigger render={<button type="button" className="im-wb-tool" data-action="quick-replies" aria-label="常用语" title="常用语" disabled={!canEdit || sendBlocked} />}><MessageSquareText size={15} /></PopoverTrigger>
+                <PopoverContent side="top" align="start" className="w-auto p-0">
+                  <div className="im-wb-quick-replies" role="group" aria-label="常用语">
+                    {SUPPORT_QUICK_REPLIES.map((item) => <button key={item.label} type="button" data-action="insert-quick-reply" onClick={() => insertQuickReply(item.text)}>
+                      <strong>{item.label}</strong><span>{item.text}</span>
+                    </button>)}
+                  </div>
+                </PopoverContent>
+              </Popover>
+              <Popover open={emojiOpen} onOpenChange={setEmojiOpen}>
+                <PopoverTrigger render={<button type="button" className="im-wb-tool" aria-label="表情" title="表情" disabled={!canEdit || sendBlocked} />}><Smile size={15} /></PopoverTrigger>
+                <PopoverContent side="top" align="start" className="w-auto p-0"><div className="chat-emoji-grid">
+                  {CHAT_EMOJIS.map((item) => <button key={item.emoji} type="button" className="chat-emoji-button" aria-label={item.label} onClick={() => insertEmoji(item.emoji)}>{item.emoji}</button>)}
+                </div></PopoverContent>
+              </Popover>
+              <Tooltip>
+                <TooltipTrigger render={<label className="im-wb-tool" aria-label="发送图片" />}>
+                  <Images size={15} /><input type="file" accept="image/jpeg,image/png" multiple onChange={(event: ChangeEvent<HTMLInputElement>) => { const files = event.target.files ? Array.from(event.target.files) : []; event.target.value = ""; stageFiles(files); }} disabled={!canEdit || sendBlocked} />
+                </TooltipTrigger>
+                <TooltipContent>发送图片</TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger render={<button type="button" className="im-wb-tool" aria-label="发送视频" onClick={() => consultationVideoInput.current?.click()} disabled={!canEdit || sendBlocked} />}><Video size={15} /></TooltipTrigger>
+                <TooltipContent>发送视频</TooltipContent>
+              </Tooltip>
+              <input ref={consultationVideoInput} type="file" accept="video/mp4,video/quicktime,video/webm" hidden onChange={(event: ChangeEvent<HTMLInputElement>) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) stageMediaFile(file, "video"); }} disabled={!canEdit || sendBlocked || selectedMedia?.state === "UNKNOWN"} />
+              <Tooltip>
+                <TooltipTrigger render={<button type="button" className="im-wb-tool" aria-label="发送文件" onClick={() => consultationFileInput.current?.click()} disabled={!canEdit || sendBlocked} />}><FileText size={15} /></TooltipTrigger>
+                <TooltipContent>发送文件</TooltipContent>
+              </Tooltip>
+              <input ref={consultationFileInput} type="file" accept="application/pdf,application/zip,text/plain,text/csv,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.presentationml.presentation" hidden onChange={(event: ChangeEvent<HTMLInputElement>) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) stageMediaFile(file, "file"); }} disabled={!canEdit || sendBlocked || selectedMedia?.state === "UNKNOWN"} />
+            </TooltipProvider>
             <span className="im-wb-hint im-wb-hint-right"><Kbd>Enter</Kbd> 发送 · <Kbd>Shift</Kbd>+<Kbd>Enter</Kbd> 换行</span>
             <button type="submit" className="im-wb-send" disabled={!canSend || busy || sendBlocked || (!draft.trim() && !selectedStaged.length && !(selectedPending?.state === "FAILED") && selectedMedia?.state !== "READY")}>{busy ? "处理中…" : "发送"}</button>
           </InputGroupAddon>
@@ -1641,12 +2007,9 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
             风险摘要开始。处理记录只陈列真实事件投影，不按当前状态推断历史；投诉的额外摘要
             只使用现有投影并逐项标注缺口。 */}
         <ConsultationUserCard key={selected.id} consultationId={selected.id} rowUserId={selected.user?.id ?? ""} fallbackName={selected.user?.name || selected.user?.username || "平台用户"}
-          request={adminRequest} scope={profileScope} showSubject={selected.type !== "COMPLAINT"}
+          request={adminRequest} scope={profileScope} showSubject
           onOpenProfile={(id) => onOpenPath?.(`/users/${encodeURIComponent(id)}`, "用户资料")} />
-        {selected.type === "COMPLAINT" ? <ComplaintSummaryCard typeLabel={typeLabel(selected.type)} stateLabel={scopeStateLabel(selected)}
-          subjectRef={selected.subjectRef} summary={eventSummary?.consultationId === selected.id ? eventSummary : null} /> : null}
-        <ConsultationEventsCard key={`${selected.id}:events`} consultationId={selected.id} request={adminRequest}
-          onSummary={selected.type === "COMPLAINT" ? reportEventSummary : undefined} />
+        <ConsultationEventsCard key={`${selected.id}:events`} consultationId={selected.id} request={adminRequest} />
 
         {blockedConsultations[selected.id] ? <section className="im-wb-sec"><span>授权状态</span><small>发送权限已失效</small>
           <button type="button" className="im-wb-btn" data-action="refresh-consultation-access" onClick={() => void refreshConsultationAccess()} disabled={busy || !selected.conversationId}>重新确认当前授权</button></section> : null}
@@ -1654,19 +2017,29 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
     </aside>
   </div>;
 
-  return <div className="im-wb-root">
+  return <div className="im-wb-root" data-unified="true">
     <nav className="im-wb-bar" aria-label="沟通类型">
+      <div className="im-wb-bar-title"><strong>客服工作台</strong><span>咨询与订单群按最近消息排序</span></div>
       <div className="im-wb-seg" role="group">
-        <button type="button" aria-pressed={section === "consultation"} onClick={() => setSection("consultation")}>咨询与投诉<b>{displayQueue.length}</b></button>
-        <button type="button" aria-pressed={section === "orders"} onClick={() => setSection("orders")}>订单沟通</button>
+        <button type="button" aria-pressed={section === "consultation"} onClick={() => { setSection("consultation"); persistQuery({ section: "consultation" }); }}>咨询与投诉<b>{displayQueue.length}</b></button>
+        <button type="button" aria-pressed={section === "orders"} onClick={() => { setSection("orders"); persistQuery({ section: "orders" }); }}>订单沟通</button>
       </div>
       <span className="im-wb-spacer" />
       <div className="im-wb-runtime">
+        <button type="button" className="im-wb-btn im-wb-btn-icon im-wb-notify" data-action="toggle-notifications"
+          data-state={notifyPermission === "denied" ? "denied" : notifyEnabled && notifyPermission === "granted" ? "on" : "prompt"}
+          aria-label={notifyEnabled && notifyPermission === "granted" ? "关闭消息提醒" : "开启消息提醒"}
+          title={notifyPermission === "denied" ? "浏览器已屏蔽通知，请在站点设置中允许" : notifyEnabled && notifyPermission === "granted" ? "消息提醒已开启（需保持标签页打开）" : "开启浏览器通知与提示音"}
+          onClick={() => void toggleNotifications()}>
+          {notifyPermission === "denied" || notifyPermission === "unsupported" ? <BellOff size={15} /> : <Bell size={15} />}
+          {notifyUnreadCount > 0 ? <b className="im-wb-notify-count" aria-label={`${notifyUnreadCount} 条未读`}>{notifyUnreadCount > 99 ? "99+" : notifyUnreadCount}</b> : null}
+        </button>
+        <span className="im-wb-runtime-divider" aria-hidden="true" />
         {canPresence ? <>
           <span className="im-wb-state im-wb-runtime-state" data-tone={presence.availability === "AVAILABLE" ? "good" : "neutral"}><i className={presence.availability === "AVAILABLE" ? "on" : ""} />{presence.availability === "AVAILABLE" ? "可接待" : presence.availability === "PAUSED" ? "已暂停" : "未上线"}</span>
           <span className="im-wb-runtime-divider" aria-hidden="true" />
           <span className="im-wb-state im-wb-today" data-action="today-duty" title="今日接待时长（仅统计可接待且可收发消息的时间）">今日接待 <b>{formatDuration(presence.today?.seconds)}</b></span>
-          <button type="button" className="im-wb-btn im-wb-presence-toggle im-wb-runtime-action" data-action="toggle-presence" onClick={() => void togglePresence()} disabled={busy || connection !== "CONNECTED"} title={connection !== "CONNECTED" ? "消息服务异常，暂不可接待" : undefined}>{presence.availability === "AVAILABLE" ? "暂停接待" : "开始接待"}</button>
+          <button type="button" className="im-wb-btn im-wb-btn-outline im-wb-presence-toggle im-wb-runtime-action" data-action="toggle-presence" onClick={() => void togglePresence()} disabled={busy || connection !== "CONNECTED"} title={connection !== "CONNECTED" ? "消息服务异常，暂不可接待" : undefined}>{presence.availability === "AVAILABLE" ? "暂停接待" : "开始接待"}</button>
         </> : <span className="im-wb-state">无在线状态权限</span>}
         {connection !== "CONNECTED" ? <>
           <span className="im-wb-runtime-divider" aria-hidden="true" />
@@ -1675,13 +2048,78 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
       </div>
       {clientRef.current?.transport === "local-fake" ? <span className="im-wb-state im-wb-local">本地测试</span> : null}
     </nav>
-    <div className="im-wb-pane" hidden={section !== "consultation"}>{consultationPane}</div>
-    {canRead ? <div className="im-wb-pane im-wb-pane--orders" hidden={section !== "orders"}><OrderWorkbenchPane identity={readClientKey} adminUserId={snapshot.adminUserId} operatorName={operatorName}
-      client={clientRef.current} connection={connection} active={section === "orders"} sendAllowed={canAccept}
-      canManualClose={snapshot.security.isBoss || snapshot.permissions.includes("order.settlement.write")} request={adminRequest} onAuthError={() => { void onRefresh(); }} /></div> : null}
+    <div className="im-wb-unified">
+      <aside className="im-wb-unified-queue" aria-label="全部会话" onContextMenu={(event) => { const rowEl = (event.target as Element).closest(".im-wb-row") as HTMLElement | null; event.preventDefault(); if (!rowEl || rowEl.dataset.unifiedKind !== "order") { setUnifiedOrderMenu(null); return; } event.stopPropagation(); const orderId = rowEl.dataset.orderId; if (!orderId) return; setUnifiedOrderMenu({ x: event.clientX, y: event.clientY, orderId, preference: groupPreferenceOf(groupPrefs, orderId), row: rowEl }); }}>
+        <div className="im-wb-unified-head"><strong>全部会话</strong><span>{unifiedRows.length < unifiedTotal ? `${unifiedRows.length} / ${unifiedTotal}` : unifiedTotal}</span></div>
+        <label className="im-wb-search"><Search size={13} /><input value={unifiedQuery} onChange={(event) => setUnifiedQuery(event.target.value)} placeholder="搜索用户、订单号或内容" aria-label="搜索全部会话" /></label>
+        <div className="im-wb-unified-types" role="group" aria-label="会话类型">
+          {([["ALL", "全部"], ["SERVICE", "咨询"], ["COMPLAINT", "投诉"], ["ORDER", "订单群"]] as const).map(([value, label]) =>
+            <button key={value} type="button" aria-pressed={unifiedType === value} onClick={() => { setUnifiedType(value); persistQuery({ type: value === "ALL" ? null : value }); }}>{label}</button>)}
+        </div>
+        <div className="im-wb-rows">
+          {unifiedRows.length ? unifiedRows.map((row) => {
+            const active = row.kind === "consultation" ? section === "consultation" && selectedId === row.id : section === "orders" && orderSelection === row.id;
+            return <button type="button" key={`${row.kind}:${row.id}`} className="im-wb-row" data-unified-kind={row.kind} data-order-id={row.kind === "order" ? row.id : undefined} data-active={active} aria-current={active ? "page" : undefined}
+              onContextMenu={row.kind === "order" ? (event) => { event.preventDefault(); event.stopPropagation(); setUnifiedOrderMenu({ x: event.clientX, y: event.clientY, orderId: row.id, preference: groupPreferenceOf(groupPrefs, row.id), row: event.currentTarget }); } : undefined}
+              onClick={() => {
+                restoredSelectionRef.current = true;
+                if (row.kind === "consultation") {
+                  setSection("consultation");
+                  setSelectedId(row.id);
+                  const target = queue.find((item) => item.id === row.id);
+                  persistQuery({ section: "consultation", consultation: target?.threadId ?? row.id });
+                } else {
+                  setSection("orders");
+                  setOrderSelection(row.id);
+                  persistQuery({ section: "orders", order: row.id });
+                }
+                setMobilePane("chat");
+              }}>
+              <span className="im-wb-row-av" data-kind={row.kind} aria-hidden="true">{row.kind === "order" ? <ReceiptText size={17} /> : initialOf(row.title)}</span>
+              <span className="im-wb-row-copy">
+                <span className="im-wb-row-top">
+                  <b>{row.title}</b>
+                  {row.tag ? <i className="im-wb-tag" data-tone={row.tone}>{row.tag}</i> : null}
+                  {row.pinned ? <Pin size={11} className="im-wb-row-flag" aria-label="已置顶" /> : null}
+                </span>
+                <span className="im-wb-row-snip">
+                  <i className="im-wb-row-state" data-tone={row.stateTone}>{row.state}</i>
+                  <span className="im-wb-row-preview">{row.snippet}</span>
+                  {row.meta ? <span className="im-wb-row-meta"><CalendarClock size={10} aria-hidden="true" />{row.meta}</span> : null}
+                </span>
+              </span>
+              <span className="im-wb-row-tail">
+                <time dateTime={row.sortAt ? new Date(row.sortAt).toISOString() : undefined}>{row.time}</time>
+                {row.muted
+                  ? <BellOff size={12} className="im-wb-row-flag" aria-label={row.unreadCount > 0 ? "有未读消息，已免打扰" : "已免打扰"} />
+                  : row.unreadCount > 0
+                    ? <i className="im-wb-unread" aria-label={`${row.unreadCount} 条未读`} title={`${row.unreadCount} 条未读`}>{row.unreadCount > 99 ? "99+" : row.unreadCount}</i>
+                    : null}
+              </span>
+            </button>;
+          }) : <div className="im-wb-list-empty"><strong>暂无会话</strong><span>新的咨询、投诉和订单群会出现在这里。</span></div>}
+          {hiddenOrderCount ? <button type="button" className="im-wb-more im-og-restore" onClick={restoreHiddenOrders}>已隐藏 {hiddenOrderCount} 个订单群 · 恢复显示</button> : null}
+        </div>
+      </aside>
+      {unifiedOrderMenu ? <MessageActionMenu x={unifiedOrderMenu.x} y={unifiedOrderMenu.y} label="订单群操作" returnFocus={unifiedOrderMenu.row}
+        items={[
+          { id: "pin" as const, label: unifiedOrderMenu.preference.pinned ? "取消置顶" : "置顶会话" },
+          { id: "mute" as const, label: unifiedOrderMenu.preference.muted ? "取消消息免打扰" : "消息免打扰" },
+          { id: "settings" as const, label: "群设置" },
+          { id: "hide" as const, label: "不显示会话", danger: true },
+        ]}
+        onSelect={handleUnifiedOrderMenuAction} onClose={() => setUnifiedOrderMenu(null)} /> : null}
+      <div className="im-wb-unified-detail">
+        <div className="im-wb-pane" hidden={section !== "consultation"}>{consultationPane}</div>
+        {canRead ? <div className="im-wb-pane im-wb-pane--orders" hidden={section !== "orders"}><OrderWorkbenchPane identity={readClientKey} adminUserId={snapshot.adminUserId} operatorName={operatorName}
+          client={clientRef.current} connection={connection} active={section === "orders"} sendAllowed={canAccept} selectedOrderId={orderSelection}
+          canManualClose={snapshot.security.isBoss || snapshot.permissions.includes("order.settlement.write")} request={adminRequest} onAuthError={() => { void onRefresh(); }}
+          onOpenProfile={(id) => onOpenPath?.(`/users/${encodeURIComponent(id)}`, "用户资料")} /></div> : null}
+      </div>
+    </div>
     <Dialog open={transferOpen} onOpenChange={setTransferOpen}>
       <DialogContent className="im-wb-dialog" aria-label="转交会话" showCloseButton={false} finalFocus={transferTriggerRef}>
-        <div className="im-wb-dialog-head"><div><strong>转交会话</strong><span>{selected?.user?.name || "当前咨询"}</span></div><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setTransferOpen(false)} aria-label="关闭转交"><X size={14} /></button></div>
+        <div className="im-wb-dialog-head"><div><strong>转交会话</strong><span>{selected?.user?.name || "当前咨询"}</span></div><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setTransferOpen(false)} aria-label="关闭转交" title="关闭转交"><X size={14} /></button></div>
         <label className="im-wb-dialog-note"><span>交接备注（可选，≤200 字）<em>{transferNote.length}/200</em></span>
           <Textarea value={transferNote} maxLength={200} rows={2} aria-label="交接备注（可选）" placeholder="说明交接原因或注意事项" disabled={transferBusy} onChange={(event) => setTransferNote(event.target.value)} /></label>
         {transferError ? <p className="im-wb-dialog-error" role="alert"><CircleAlert size={14} />{transferError}</p>
@@ -1696,7 +2134,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
     <Dialog open={offDutyOpen} onOpenChange={setOffDutyOpen}>
       <DialogContent className="im-wb-dialog" aria-label="暂停接待确认" showCloseButton={false}>
         <div className="im-wb-dialog-head"><div><strong>暂停接待</strong><span>还有 {myOpenConsultations.length} 条未完成咨询</span></div>
-          <button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setOffDutyOpen(false)} aria-label="关闭暂停确认"><X size={14} /></button></div>
+          <button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setOffDutyOpen(false)} aria-label="关闭暂停确认" title="关闭暂停确认"><X size={14} /></button></div>
         <p className="im-wb-dialog-hint">暂停后不再接新会话，已有会话不会自动结束；你可以先逐条交接，也可以直接暂停。</p>
         <ul className="im-wb-offduty-list" aria-label="未完成咨询">
           {myOpenConsultations.map((item) => <li key={item.id} data-consultation-id={item.id}>
@@ -1716,7 +2154,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
     <Dialog open={receptionOpen} onOpenChange={setReceptionOpen}>
       <DialogContent className="im-wb-dialog" aria-label="需要先开始接待" showCloseButton={false}>
         <div className="im-wb-dialog-head"><div><strong>还不能接入会话</strong><span>当前未开始接待</span></div>
-          <button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setReceptionOpen(false)} aria-label="关闭接待提醒"><X size={14} /></button></div>
+          <button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setReceptionOpen(false)} aria-label="关闭接待提醒" title="关闭接待提醒"><X size={14} /></button></div>
         <p className="im-wb-dialog-hint">你当前还没有开始接待，直接接入会被服务端拒绝。先开始接待，平台会把你的状态更新为“可接待”，然后自动接入当前会话。</p>
         {connection !== "CONNECTED" ? <p className="im-wb-dialog-error" role="alert"><CircleAlert size={14} />消息服务未连接，暂不能开始接待。</p> : null}
         <div className="im-wb-dialog-actions">
@@ -1729,12 +2167,12 @@ export function ImSupportView({ snapshot, initialSection = "consultation", onRef
         所以这里不给「撤销」，也不把结束本轮包装成可逆操作。 */}
     <Dialog open={closeOpen} onOpenChange={setCloseOpen}>
       <DialogContent className="im-wb-dialog" aria-label="结束本轮" showCloseButton={false} finalFocus={closeTriggerRef}>
-        <div className="im-wb-dialog-head"><div><strong>结束本轮</strong><span>{closeTarget ? `${typeLabel(closeTarget.type)} · ${roundTagOf(closeTarget)}${roundTagOf(closeTarget) ? " · " : ""}${closeTarget.user?.name || closeTarget.user?.username || "平台用户"}` : "当前轮次"}</span></div><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setCloseOpen(false)} aria-label="关闭结束本轮确认"><X size={14} /></button></div>
+        <div className="im-wb-dialog-head"><div><strong>结束本轮</strong><span>{closeTarget ? `${typeLabel(closeTarget.type)} · ${roundTagOf(closeTarget)}${roundTagOf(closeTarget) ? " · " : ""}${closeTarget.user?.name || closeTarget.user?.username || "平台用户"}` : "当前轮次"}</span></div><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setCloseOpen(false)} aria-label="关闭结束本轮确认" title="关闭结束本轮确认"><X size={14} /></button></div>
         {closeTarget ? <dl className="im-wb-confirm">
           <div><dt>{closeTarget.type === "COMPLAINT" ? "本轮处理" : "本轮接待"}</dt><dd>{closeTarget.assignedAdmin?.name || "尚未分配"}</dd></div>
           <div><dt>关联对象</dt><dd>{closeTarget.subjectRef || "未关联商品或订单"}</dd></div>
         </dl> : null}
-        <p className="im-wb-dialog-hint">结束后只结束当前这一轮接待：线程回到空闲，聊天记录保留在同一会话，用户再次咨询会开启新一轮并重新匹配客服。本轮结束不可撤销，平台当前没有恢复本轮接待的入口。</p>
+        <p className="im-wb-dialog-hint">结束后只结束当前这一轮接待：客服状态恢复为空闲，聊天记录保留在同一会话，用户再次咨询会开启新一轮并重新匹配客服。本轮结束不可撤销，平台当前没有恢复本轮接待的入口。</p>
         <div className="im-wb-dialog-actions">
           <button type="button" className="im-wb-btn" onClick={() => setCloseOpen(false)}>取消</button>
           <button type="button" className="im-wb-btn im-wb-btn-danger" data-action="confirm-close-consultation" onClick={() => { if (closeTarget) void close(closeTarget.id); }} disabled={busy || !closeTarget || !canOperateSelected || !closeTarget.canSend}>确认结束本轮</button>

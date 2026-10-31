@@ -19,6 +19,16 @@ const overview = {
   totals: { onDutyCount: 2, waitingConsultations: 3, todaySessions: 39, todayUsers: 24 },
   trend: [3, 5, 4, 8, 6, 9, 4].map((sessions, index) => ({ date: day(6 - index), sessions, users: Math.max(1, sessions - 2) })),
   hourly: Array.from({ length: 24 }, (_, hour) => ({ hour, sessions: [9, 10, 11, 14, 15, 16, 20, 21, 22].includes(hour) ? 3 + (hour % 3) : 0 })),
+  ratings: {
+    count: 18,
+    average: 4.5,
+    distribution: [0, 1, 1, 4, 12],
+    agents: [
+      { adminUserId: "demo-a", name: "林晓", count: 8, average: 4.8 },
+      { adminUserId: "demo-b", name: "陈晨", count: 6, average: 4.5 },
+      { adminUserId: "demo-c", name: "王悦", count: 4, average: 4.0 },
+    ],
+  },
 };
 
 type DemoConversation = {

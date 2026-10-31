@@ -84,6 +84,7 @@ const activeConsultation = {
   canSend: true,
   version: 1,
   lastMessageAt: "2026-09-17T00:05:00.000Z",
+  adminUnreadCount: 1,
   createdAt: "2026-09-17T00:00:00.000Z",
   updatedAt: "2026-09-17T00:05:00.000Z",
   user: { id: "user-a", name: "用户 A", username: "user-a" },
@@ -106,6 +107,7 @@ globalThis.fetch = async (input, init = {}) => {
   throw new Error(`unexpected test request ${url.pathname}${url.search}`);
 };
 
+const consultationRows = (root) => [...(root.querySelector(".im-wb-pane:not([hidden]) .im-wb-queue")?.querySelectorAll(".im-wb-row") ?? [])];
 async function settle() {
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
 }
@@ -128,7 +130,7 @@ test("support workbench groups the queue, marks local unread and runs the transf
   root = createRoot(rootNode);
   const permissions = ["im.support.read", "im.support.accept", "im.support.transfer", "im.support.presence"];
   await act(async () => { root.render(createElement(ImSupportView, { snapshot: snapshot(permissions), onRefresh: async () => snapshot(permissions) })); });
-  await waitFor(() => rootNode.querySelectorAll(".im-wb-row").length === 1);
+  await waitFor(() => consultationRows(rootNode).length === 1);
 
   // The default filter lists only my own sessions; the waiting item is one tap away.
   const filters = [...rootNode.querySelectorAll(".im-wb-filters button")].map((element) => element.textContent);
@@ -136,18 +138,18 @@ test("support workbench groups the queue, marks local unread and runs the transf
   assert.ok(filters.some((label) => label.includes("我接待中")), `queue offers my own filter, got ${JSON.stringify(filters)}`);
   assert.ok(rootNode.querySelector('.im-wb-filters button[aria-pressed="true"]').textContent.includes("我接待中"), "my own sessions is the default filter");
 
-  const unreadBadge = rootNode.querySelector('.im-wb-row[data-active="false"] .im-wb-unread');
+  const unreadBadge = rootNode.querySelector('.im-wb-pane:not([hidden]) .im-wb-queue .im-wb-row[data-active="false"] .im-wb-unread');
   assert.ok(unreadBadge, "the unselected assigned conversation shows a local unread badge");
 
   // The unassigned consultation must be reachable through its filter, never silently dropped.
   await act(async () => { [...rootNode.querySelectorAll(".im-wb-filters button")].find((b) => b.textContent.includes("待接待")).click(); });
   await settle();
-  const waitingRow = rootNode.querySelector(".im-wb-row");
+  const waitingRow = consultationRows(rootNode)[0];
   assert.ok(waitingRow && waitingRow.textContent.includes("用户 W"), "the waiting filter lists the unassigned consultation");
   assert.match(waitingRow.textContent, /待接入/, "the waiting row states it awaits an agent");
   await act(async () => { [...rootNode.querySelectorAll(".im-wb-filters button")].find((b) => b.textContent.includes("我接待中")).click(); });
   await settle();
-  const activeItem = [...rootNode.querySelectorAll(".im-wb-row")].find((item) => item.textContent.includes("用户 A"));
+  const activeItem = [...consultationRows(rootNode)].find((item) => item.textContent.includes("用户 A"));
   await act(async () => { activeItem.click(); });
   await settle();
   await act(async () => { rootNode.querySelector('[data-action="toggle-details"]').click(); });
@@ -187,8 +189,8 @@ test("transfer dialog reports an unavailable service when the target route fails
   root = createRoot(rootNode);
   const permissions = ["im.support.read", "im.support.accept", "im.support.transfer"];
   await act(async () => { root.render(createElement(ImSupportView, { snapshot: snapshot(permissions), onRefresh: async () => snapshot(permissions) })); });
-  await waitFor(() => rootNode.querySelectorAll(".im-wb-row").length === 1);
-  const activeItem = [...rootNode.querySelectorAll(".im-wb-row")].find((item) => item.textContent.includes("用户 A"));
+  await waitFor(() => consultationRows(rootNode).length === 1);
+  const activeItem = [...consultationRows(rootNode)].find((item) => item.textContent.includes("用户 A"));
   await act(async () => { activeItem.click(); });
   await settle();
   await act(async () => { rootNode.querySelector('[data-action="toggle-details"]').click(); });

@@ -256,14 +256,18 @@
 
 /* Admin IM workbench (formal-v1): toolbar + queue / record stream / case column.
    The case column participates in the grid — it must never overlay the chat or the send button. */
-.workspace-root .im-wb-root { --im-accent:#38bdf8; --im-accent-strong:#7dd3fc; --im-accent-soft:rgba(56,189,248,.14); --im-bubble-bg:#1b6fae; --im-bubble-fg:#f2f8fd; --im-warn:#f59e0b; --border-strong:color-mix(in oklab,var(--border) 100%,var(--foreground) 15%);
+.workspace-root .im-wb-root { --im-accent:#38bdf8; --im-accent-strong:#7dd3fc; --im-accent-soft:rgba(56,189,248,.14); --im-bubble-bg:#1b6fae; --im-bubble-fg:#f2f8fd; --im-warn:#f59e0b; --im-live:#34d399; --im-live-soft:rgba(16,185,129,.14); --im-attention:#fbbf24; --im-attention-soft:rgba(245,158,11,.14); --im-done:var(--muted-foreground); --im-done-soft:color-mix(in oklab,var(--muted) 70%,transparent); --im-danger:#f87171; --im-danger-soft:rgba(248,113,113,.14); --border-strong:color-mix(in oklab,var(--border) 100%,var(--foreground) 15%);
   display:flex; flex-direction:column; gap:6px; min-width:0; min-height:0; height:calc(100svh - 112px); min-height:520px; }
 .workspace-root .workspace-page:has(.im-wb-root) { padding-top:8px; padding-bottom:8px; }
 .workspace-root .im-wb-pane { display:flex; flex-direction:column; flex:1; min-height:0; container-type:inline-size; }
 .workspace-root .im-wb-pane[hidden] { display:none; }
 
 /* toolbar */
-.workspace-root .im-wb-bar { display:flex; align-items:center; gap:8px; flex:none; min-height:36px; flex-wrap:wrap; }
+.workspace-root .im-wb-bar { display:flex; align-items:center; gap:8px; flex:none; min-height:44px; padding:0 2px 8px; border-bottom:1px solid var(--border); flex-wrap:wrap; }
+.workspace-root .im-wb-bar-title { display:flex; align-items:baseline; gap:8px; min-width:0; }
+.workspace-root .im-wb-bar-title strong { font-size:15px; font-weight:600; letter-spacing:-.01em; }
+.workspace-root .im-wb-bar-title span { color:var(--muted-foreground); font-size:11px; }
+@media (max-width:1400px) { .workspace-root .im-wb-bar-title span { display:none; } }
 .workspace-root .im-wb-seg { display:flex; gap:2px; padding:2px; border:1px solid var(--border); border-radius:8px; background:var(--card); }
 .workspace-root .im-wb-seg button { display:inline-flex; align-items:center; gap:6px; min-height:30px; padding:0 12px; border:1px solid transparent; border-radius:6px; color:var(--muted-foreground); background:transparent; font:inherit; font-size:13px; cursor:pointer; }
 .workspace-root .im-wb-seg button:hover { color:var(--foreground); }
@@ -274,9 +278,13 @@
 .workspace-root .im-wb-runtime .im-wb-state { min-height:28px; padding:0 8px; border:0; background:transparent; }
 .workspace-root .im-wb-runtime .im-wb-state:first-child { padding-left:0; }
 .workspace-root .im-wb-runtime-divider { flex:none; width:1px; height:14px; background:var(--border); }
+.workspace-root .im-wb-notify { position:relative; min-height:28px; border:0; background:transparent; color:var(--muted-foreground); }
+.workspace-root .im-wb-notify[data-state="on"] { color:var(--im-accent-strong); }
+.workspace-root .im-wb-notify[data-state="denied"] { opacity:.6; }
+.workspace-root .im-wb-notify-count { position:absolute; top:-3px; right:-3px; display:grid; min-width:16px; height:16px; place-items:center; padding:0 4px; border-radius:999px; background:var(--destructive); color:#fff; font-size:9px; font-weight:700; line-height:16px; }
 .workspace-root .im-wb-today b { color:var(--foreground); font-weight:600; }
-.workspace-root .im-wb-runtime-action { min-height:28px; margin-left:6px; padding:0 12px; border:0 !important; border-radius:7px; background:var(--im-accent) !important; color:#06141f !important; font-weight:600; }
-.workspace-root .im-wb-runtime-action:disabled { opacity:.45; }
+/* 暂停/开始接待是日常次要动作：沿用 outline 变体，只保留运行条里的尺寸与间距。 */
+.workspace-root .im-wb-runtime-action { min-height:28px; margin-left:6px; padding:0 12px; border-radius:7px; }
 .workspace-root .im-wb-local { padding:0 7px; font-size:10px; opacity:.82; }
 .workspace-root .im-wb-state { display:inline-flex; align-items:center; gap:6px; padding:0 9px; min-height:28px; border:1px solid var(--border); border-radius:7px; color:var(--muted-foreground); background:var(--card); font-size:12px; white-space:nowrap; }
 .workspace-root .im-wb-state i { width:7px; height:7px; flex:none; border-radius:50%; background:var(--muted-foreground); }
@@ -308,19 +316,36 @@
 .workspace-root .im-wb-filters b { color:inherit; font-size:10px; font-weight:500; opacity:.8; }
 .workspace-root .im-wb-filter-note { flex:none; margin:0 12px 8px; color:var(--muted-foreground); font-size:10px; line-height:1.5; }
 .workspace-root .im-wb-rows { flex:1; min-height:0; overflow-y:auto; overscroll-behavior:contain; }
-.workspace-root .im-wb-row { display:grid; grid-template-columns:34px minmax(0,1fr); gap:10px; width:100%; padding:11px 12px; border:0; border-bottom:1px solid var(--border); color:var(--foreground); background:transparent; text-align:left; cursor:pointer; }
+.workspace-root .im-wb-row { display:grid; grid-template-columns:38px minmax(0,1fr) auto; align-items:center; gap:8px; width:100%; min-height:66px; padding:9px 12px; border:0; border-bottom:1px solid var(--border); color:var(--foreground); background:transparent; text-align:left; cursor:pointer; }
 .workspace-root .im-wb-row:hover { background:color-mix(in oklab,var(--ring) 6%,transparent); }
 .workspace-root .im-wb-row[data-active="true"] { background:color-mix(in oklab,var(--im-accent) 10%,var(--card)); box-shadow:inset 2px 0 0 var(--im-accent); }
-.workspace-root .im-wb-row-av { display:grid; width:34px; height:34px; place-items:center; border-radius:50%; color:var(--im-accent); background:var(--im-accent-soft); font-size:14px; font-weight:600; }
+.workspace-root .im-wb-row-av { display:grid; width:38px; height:38px; place-items:center; border-radius:50%; color:var(--im-accent); background:var(--im-accent-soft); font-size:15px; font-weight:600; }
+.workspace-root .im-wb-row-av[data-kind="order"] { color:var(--muted-foreground); background:var(--muted); border-radius:11px; }
 .workspace-root .im-wb-row[data-active="true"] .im-wb-row-av { color:var(--im-bubble-fg); background:var(--im-bubble-bg); }
-.workspace-root .im-wb-row-copy { display:grid; min-width:0; gap:3px; align-content:start; }
-.workspace-root .im-wb-row-top { display:flex; align-items:baseline; gap:6px; min-width:0; }
-.workspace-root .im-wb-row-top b { overflow:hidden; min-width:0; font-size:14px; font-weight:600; text-overflow:ellipsis; white-space:nowrap; }
-.workspace-root .im-wb-row-top time { margin-left:auto; flex:none; color:var(--muted-foreground); font-size:12px; font-variant-numeric:tabular-nums; }
-.workspace-root .im-wb-tag { flex:none; padding:1px 6px; border:1px solid var(--border-strong); border-radius:4px; color:var(--muted-foreground); font-size:12px; font-style:normal; }
+.workspace-root .im-wb-row-copy { display:grid; min-width:0; gap:3px; align-content:center; }
+.workspace-root .im-wb-row-top { display:flex; align-items:center; gap:5px; min-width:0; }
+.workspace-root .im-wb-row-top b { overflow:hidden; min-width:0; font-size:13.5px; font-weight:600; text-overflow:ellipsis; white-space:nowrap; }
+.workspace-root .im-wb-row-flag { flex:none; color:var(--muted-foreground); }
+.workspace-root .im-wb-row-state { flex:none; color:var(--muted-foreground); font-size:11px; font-style:normal; }
+.workspace-root .im-wb-row-state[data-tone="good"] { color:var(--im-accent-strong); }
+.workspace-root .im-wb-row-state[data-tone="warn"],.workspace-root .im-wb-row-state[data-tone="attention"] { color:var(--im-attention); }
+.workspace-root .im-wb-row-state[data-tone="live"] { color:var(--im-live); }
+.workspace-root .im-wb-row-state[data-tone="done"] { color:var(--im-done); }
+.workspace-root .im-wb-row-state[data-tone="danger"] { color:var(--im-danger); }
+.workspace-root .im-wb-order-state { display:inline-flex; flex:none; align-items:center; padding:0 6px; border-radius:5px; font-size:10px; font-style:normal; font-weight:500; line-height:18px; white-space:nowrap; }
+.workspace-root .im-wb-order-state[data-tone="attention"] { color:var(--im-attention); background:var(--im-attention-soft); }
+.workspace-root .im-wb-order-state[data-tone="live"] { color:var(--im-live); background:var(--im-live-soft); }
+.workspace-root .im-wb-order-state[data-tone="done"] { color:var(--im-done); background:var(--im-done-soft); }
+.workspace-root .im-wb-order-state[data-tone="danger"] { color:var(--im-danger); background:var(--im-danger-soft); }
+.workspace-root .im-wb-tag { flex:none; padding:0 5px; border:1px solid var(--border-strong); border-radius:4px; color:var(--muted-foreground); font-size:10px; font-style:normal; line-height:16px; }
 .workspace-root .im-wb-tag[data-tone="warn"] { color:var(--im-warn); border-color:color-mix(in oklab,var(--im-warn) 45%,var(--border)); background:color-mix(in oklab,var(--im-warn) 12%,transparent); }
 .workspace-root .im-wb-tag[data-tone="neutral"] { color:var(--muted-foreground); }
-.workspace-root .im-wb-row-snip { overflow:hidden; color:var(--muted-foreground); font-size:13px; text-overflow:ellipsis; white-space:nowrap; }
+.workspace-root .im-wb-row-snip { display:flex; align-items:center; gap:8px; min-width:0; overflow:hidden; color:var(--muted-foreground); font-size:12px; white-space:nowrap; }
+.workspace-root .im-wb-row-preview { overflow:hidden; min-width:0; text-overflow:ellipsis; }
+.workspace-root .im-wb-row-meta { display:inline-flex; flex:none; align-items:center; gap:3px; color:var(--muted-foreground); font-size:11px; font-variant-numeric:tabular-nums; }
+.workspace-root .im-wb-row-tail { display:grid; justify-items:end; align-content:space-between; gap:6px; align-self:stretch; padding:3px 0; }
+.workspace-root .im-wb-row-tail time { color:var(--muted-foreground); font-size:11px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.workspace-root .im-wb-row .im-wb-unread { margin-left:0; flex:none; }
 .workspace-root .im-wb-row-foot { display:flex; align-items:center; gap:7px; }
 .workspace-root .im-wb-row-foot em { color:var(--muted-foreground); font-size:12px; font-style:normal; }
 .workspace-root .im-wb-row-foot em[data-tone="todo"] { color:var(--foreground); font-weight:600; }
@@ -328,7 +353,8 @@
 .workspace-root .im-wb-row-foot small { color:var(--muted-foreground); font-size:11px; font-variant-numeric:tabular-nums; }
 .workspace-root .im-wb-row-foot em[data-state="处理中"] { color:var(--im-accent-strong); }
 .workspace-root .im-wb-row-foot em[data-state="待核验"],.workspace-root .im-wb-row-foot em[data-state="待接入"] { color:var(--destructive); }
-.workspace-root .im-wb-unread { display:grid; min-width:18px; height:16px; place-items:center; padding:0 5px; border-radius:999px; color:var(--background); background:var(--ring); font-size:10px; font-style:normal; font-weight:600; }
+.workspace-root .im-wb-unread { display:grid; min-width:17px; height:17px; place-items:center; padding:0 5px; border-radius:999px; color:#fff; background:var(--destructive); font-size:10px; font-style:normal; font-weight:600; line-height:1; }
+.workspace-root .im-wb-row[data-active="true"] .im-wb-unread { box-shadow:0 0 0 2px var(--card); }
 .workspace-root .im-wb-list-empty { display:flex; min-height:170px; flex-direction:column; align-items:center; justify-content:center; gap:6px; padding:18px 16px; color:var(--muted-foreground); text-align:center; }
 .workspace-root .im-wb-list-empty strong { color:var(--foreground); font-size:13px; }
 .workspace-root .im-wb-list-empty span { max-width:30ch; font-size:11px; line-height:1.6; }
@@ -336,7 +362,12 @@
 /* chat column */
 /* The chat column has a variable number of notice rows, so a fixed grid template
    silently starved the stream. Flex column keeps the stream the only growable row. */
-.workspace-root .im-wb-chat { display:flex; flex-direction:column; min-height:0; background:var(--background); }
+.workspace-root .im-wb-chat { display:flex; flex-direction:column; min-height:0; background:var(--background); container-type:inline-size; }
+@container (max-width:430px) {
+  .workspace-root .im-wb-chat-head { flex-wrap:wrap; row-gap:6px; }
+  .workspace-root .im-wb-chat-title { flex:1 1 auto; min-width:0; }
+  .workspace-root .im-wb-chat-actions { flex:1 1 100%; margin-left:0; justify-content:flex-end; }
+}
 .workspace-root .im-wb-chat > * { flex:none; min-width:0; }
 .workspace-root .im-wb-chat > .im-wb-stream-wrap { flex:1; min-height:0; }
 .workspace-root .im-wb-chat:has(.im-wb-scope-note:not(:last-child)) { }
@@ -373,12 +404,13 @@
 .workspace-root .im-wb-sys { display:flex; align-items:center; justify-content:center; width:100%; margin:6px 0; color:var(--muted-foreground); font-size:11px; }
 .workspace-root .im-wb-sys::before, .workspace-root .im-wb-sys::after { content:""; flex:1; height:1px; background:var(--border); max-width:80px; }
 .workspace-root .im-wb-sys [data-slot="marker-content"] { padding:0 10px; }
-.workspace-root .im-wb-msg { display:flex; align-items:flex-start; gap:10px; width:100%; }
-.workspace-root .im-wb-av { align-self:flex-start; margin-top:2px; width:34px; height:34px; color:var(--im-accent); background:var(--im-accent-soft); font-size:13px; font-weight:600; border-radius:8px; box-shadow:0 1px 2px rgba(0,0,0,.04); }
+.workspace-root .im-wb-msg { display:flex; align-items:flex-start; gap:8px; width:100%; }
+.workspace-root .im-wb-av { align-self:flex-start; margin-top:2px; width:30px; height:30px; overflow:hidden; color:var(--im-accent); background:var(--im-accent-soft); font-size:12px; font-weight:600; border-radius:8px; box-shadow:0 1px 2px rgba(0,0,0,.04); }
+.workspace-root .im-wb-av img { width:100%; height:100%; object-fit:cover; }
 .workspace-root .im-wb-msg[data-self="true"] .im-wb-av { color:var(--im-bubble-fg); background:var(--im-bubble-bg); }
-.workspace-root .im-wb-msg-body { max-width:min(68ch, 76%); display:flex; flex-direction:column; gap:4px; }
+.workspace-root .im-wb-msg-body { max-width:min(64ch, 72%); display:flex; flex-direction:column; gap:3px; }
 /* 阶段卡按消息展示：给卡片留出约 340px 的宽度，气泡的 76% 限制会让它被压窄。 */
-.workspace-root .im-wb-msg-body[data-card="true"] { width:100%; max-width:min(360px, calc(100% - 44px)); }
+.workspace-root .im-wb-msg-body[data-card="true"] { width:100%; max-width:min(440px, calc(100% - 44px)); }
 .workspace-root .im-wb-msg[data-grouped="true"] { margin-top:-6px; }
 .workspace-root .im-wb-msg[data-grouped="true"] .im-wb-av { visibility:hidden; }
 .workspace-root .im-wb-msg-meta { display:inline-flex; align-items:center; gap:6px; margin-bottom:2px; padding:0 2px; color:var(--muted-foreground); font-size:12px; }
@@ -386,9 +418,9 @@
 .workspace-root .im-wb-role-tag { display:inline-flex; align-items:center; font-size:10px; line-height:1; padding:2px 6px; border-radius:4px; font-weight:500; background:var(--secondary); color:var(--muted-foreground); border:1px solid var(--border); }
 .workspace-root .im-wb-role-tag[data-role="平台客服"] { background:rgba(2,132,199,.12); color:var(--im-accent); border-color:rgba(2,132,199,.3); }
 [data-theme="light"] .workspace-root .im-wb-role-tag[data-role="平台客服"] { background:rgba(229,169,60,.15); color:#d97706; border-color:rgba(229,169,60,.35); }
-.workspace-root .im-wb-bub { color:var(--foreground); border-color:var(--border); background:var(--card); font-size:13.5px; line-height:1.5; padding:7px 11px; border-radius:9px; overflow-wrap:anywhere; white-space:pre-wrap; box-shadow:0 1px 2px rgba(0,0,0,.04); }
+.workspace-root .im-wb-bub { color:var(--foreground); border-color:var(--border); background:var(--card); font-size:13px; line-height:1.5; padding:6px 10px; border-radius:8px; overflow-wrap:anywhere; white-space:pre-wrap; box-shadow:0 1px 2px rgba(0,0,0,.04); }
 [data-theme="light"] .workspace-root .im-wb-bub { background:color-mix(in oklab,var(--card) 92%,var(--secondary)); border-color:color-mix(in oklab,var(--border) 80%,transparent); }
-[data-theme="light"] .workspace-root .im-wb-root { --im-accent:#0284c7; --im-accent-strong:#0357a4; --im-accent-soft:rgba(2,132,199,.10); --im-bubble-bg:#0284c7; --im-bubble-fg:#ffffff; --im-warn:#b45309; --border-strong:color-mix(in oklab,var(--border) 100%,black 18%); }
+[data-theme="light"] .workspace-root .im-wb-root { --im-accent:#0284c7; --im-accent-strong:#0357a4; --im-accent-soft:rgba(2,132,199,.10); --im-bubble-bg:#0284c7; --im-bubble-fg:#ffffff; --im-warn:#b45309; --im-live:#047857; --im-live-soft:rgba(4,120,87,.10); --im-attention:#b45309; --im-attention-soft:rgba(180,83,9,.10); --im-done:#5c6977; --im-done-soft:rgba(92,105,119,.10); --im-danger:#b42318; --im-danger-soft:rgba(180,35,24,.09); --border-strong:color-mix(in oklab,var(--border) 100%,black 18%); }
 .workspace-root .im-wb-msg[data-self="true"] .im-wb-bub { color:var(--im-bubble-fg); border-color:transparent; background:var(--im-bubble-bg); box-shadow:0 1px 3px rgba(2,132,199,.25); }
 /* Revoked placeholder: read as a neutral system fact, even on an own bubble. */
 .workspace-root .im-wb-msg .im-wb-bub[data-revoked="true"] { color:var(--muted-foreground); border:1px dashed var(--border-strong); background:transparent; box-shadow:none; font-style:normal; }
@@ -424,10 +456,17 @@
 .workspace-root .im-wb-composer-box { padding:8px 12px 6px; border:1px solid var(--border); border-radius:10px; background:var(--background); box-shadow:0 1px 2px rgba(0,0,0,.03); transition:border-color .15s, box-shadow .15s; }
 .workspace-root .im-wb-composer-box:focus-within { border-color:var(--im-accent); box-shadow:0 0 0 2px var(--im-accent-soft); }
 .workspace-root .im-wb-composer-box textarea { min-height:48px; max-height:120px; padding:2px 0; border:0; outline:0; resize:none !important; color:var(--foreground); background:transparent; font:inherit; font-size:14px; line-height:1.6; caret-color:var(--ring); }
-.workspace-root .im-wb-composer-tools { display:flex; align-items:center; gap:10px; flex-wrap:wrap; min-width:0; padding:4px 0 2px; border-top:0 !important; margin-top:2px; }
-.workspace-root .im-wb-tool { display:inline-flex; align-items:center; gap:5px; min-height:28px; padding:0 8px; border:1px solid var(--border); border-radius:6px; color:var(--muted-foreground); background:var(--card); font-size:12px; cursor:pointer; transition:all .15s; }
+.workspace-root .im-wb-composer-tools { display:flex; align-items:center; gap:4px; flex-wrap:wrap; min-width:0; padding:4px 0 2px; border-top:0 !important; margin-top:2px; }
+.workspace-root .im-wb-tool { display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; padding:0; border:1px solid transparent; border-radius:6px; color:var(--muted-foreground); background:transparent; font-size:12px; cursor:pointer; transition:all .15s; }
 .workspace-root .im-wb-tool:hover { border-color:var(--im-accent-strong); color:var(--im-accent-strong); background:var(--background); }
+.workspace-root .im-wb-tool:focus-within { outline:2px solid var(--im-accent-strong); outline-offset:1px; }
 .workspace-root .im-wb-tool input { display:none; }
+.workspace-root .im-wb-quick-replies { display:grid; width:min(304px, 72vw); max-height:min(320px, 50vh); gap:2px; padding:4px; overflow-y:auto; }
+.workspace-root .im-wb-quick-replies button { display:grid; gap:2px; width:100%; padding:6px 8px; border:1px solid transparent; border-radius:6px; color:var(--foreground); background:transparent; font:inherit; text-align:left; cursor:pointer; }
+.workspace-root .im-wb-quick-replies button strong { font-size:11px; font-weight:600; }
+.workspace-root .im-wb-quick-replies button span { color:var(--muted-foreground); font-size:12px; line-height:1.55; }
+.workspace-root .im-wb-quick-replies button:hover { border-color:var(--ring); background:var(--secondary); }
+.workspace-root .im-wb-quick-replies button:focus-visible { outline:2px solid var(--ring); outline-offset:1px; }
 .workspace-root .im-wb-hint { display:inline-flex; align-items:center; gap:3px; color:var(--muted-foreground); font-size:11px; opacity:.9; }
 .workspace-root .im-wb-hint [data-slot="kbd"] { font-size:10px; height:18px; min-width:18px; padding:0 4px; border:1px solid var(--border); border-radius:4px; background:var(--secondary); color:var(--foreground); box-shadow:0 1px 0 rgba(0,0,0,.06); font-family:inherit; }
 .workspace-root .im-wb-hint-right { margin-left:auto; }
@@ -507,7 +546,7 @@
 .workspace-root .im-wb-more:hover:not(:disabled) { border-color:var(--im-accent-strong); color:var(--im-accent-strong); }
 .workspace-root .im-wb-more:disabled { cursor:not-allowed; opacity:.55; }
 /* 订单群角色：与咨询段的「平台客服」同一套标签语言，按身份区分而非按颜色随机。 */
-.workspace-root .im-wb-role-tag[data-role="买家"],.workspace-root .im-wb-role-tag[data-role="号主"] { background:color-mix(in oklab,var(--im-accent) 10%,transparent); color:var(--im-accent); border-color:color-mix(in oklab,var(--im-accent) 32%,var(--border)); }
+.workspace-root .im-wb-role-tag[data-role="租客"],.workspace-root .im-wb-role-tag[data-role="号主"] { background:color-mix(in oklab,var(--im-accent) 10%,transparent); color:var(--im-accent); border-color:color-mix(in oklab,var(--im-accent) 32%,var(--border)); }
 .workspace-root .im-wb-role-tag[data-role="负责客服"],.workspace-root .im-wb-role-tag[data-role="协作客服"] { background:color-mix(in oklab,var(--im-warn) 12%,transparent); color:var(--im-warn); border-color:color-mix(in oklab,var(--im-warn) 34%,var(--border)); }
 /* 库存摘要用现成 Table 原语，这里只压到侧栏/弹窗的紧凑尺寸。 */
 .workspace-root .im-order-table { font-size:12px; }
@@ -559,7 +598,7 @@
 .workspace-root .im-order-card { border-radius:10px; box-shadow:none; }
 .workspace-root .im-order-avatar { width:32px; height:32px; border:0; border-radius:50%; background:var(--im-accent-soft); color:var(--im-accent); font-size:13px; font-weight:600; }
 .workspace-root .im-order-role { font-size:12px; }
-.workspace-root .im-order-role[data-role="买家"],.workspace-root .im-order-role[data-role="号主"] { color:var(--im-accent); border-color:color-mix(in oklab,var(--im-accent) 34%,var(--border)); background:color-mix(in oklab,var(--im-accent) 10%,transparent); }
+.workspace-root .im-order-role[data-role="租客"],.workspace-root .im-order-role[data-role="号主"] { color:var(--im-accent); border-color:color-mix(in oklab,var(--im-accent) 34%,var(--border)); background:color-mix(in oklab,var(--im-accent) 10%,transparent); }
 .workspace-root .im-order-role[data-role="负责客服"],.workspace-root .im-order-role[data-role="协作客服"] { color:var(--im-warn); border-color:color-mix(in oklab,var(--im-warn) 36%,var(--border)); background:color-mix(in oklab,var(--im-warn) 12%,transparent); }
 .workspace-root .im-order-parties [data-slot="badge"][data-state="confirmed"] { color:var(--ring); background:color-mix(in oklab,var(--ring) 12%,transparent); }
 .workspace-root .im-order-panel { display:grid; gap:12px; width:min(620px,94vw); max-height:calc(100svh - 48px); overflow-y:auto; padding:16px; }
@@ -623,6 +662,24 @@
   .workspace-root .im-wb-pane--orders .order-team-grid[data-pane="details"] .im-wb-queue,
   .workspace-root .im-wb-pane--orders .order-team-grid[data-pane="details"] .order-team-conversation { display:none; }
   .workspace-root .im-wb-pane--orders .order-team-detail > p { grid-column:1; }
+}
+@media (min-width:761px) and (max-width:1439px) {
+  /* 1280 下四栏平铺会把聊天压到 300px 内：详情改为覆盖抽屉，聊天保留完整主视口。 */
+  .workspace-root .im-wb { position:relative; }
+  .workspace-root .im-wb[data-details="true"] { grid-template-columns:minmax(0,1fr) !important; }
+  .workspace-root .im-wb[data-details="true"] .im-wb-queue { display:none; }
+  .workspace-root .im-wb[data-details="true"] .im-wb-details {
+    position:absolute; inset:0 0 0 auto; z-index:20; display:flex; width:min(400px,92%);
+    border-left:1px solid var(--border); box-shadow:-18px 0 40px rgb(0 0 0 / .28);
+  }
+  .workspace-root .im-wb[data-details="true"] .im-wb-details .im-wb-details-back { display:inline-flex; }
+  .workspace-root .order-team-grid { position:relative; }
+  .workspace-root .order-team-grid[data-details="true"] { grid-template-columns:minmax(0,1fr) !important; }
+  .workspace-root .order-team-grid[data-details="true"] > .im-wb-details {
+    position:absolute; inset:0 0 0 auto; z-index:20; display:flex; width:min(400px,92%);
+    border-left:1px solid var(--border); box-shadow:-18px 0 40px rgb(0 0 0 / .28);
+  }
+  .workspace-root .order-team-grid[data-details="true"] > .im-wb-details .im-wb-details-back { display:inline-flex; }
 }
 @media (prefers-reduced-motion:no-preference) { .workspace-root .im-wb-jump { transition:opacity .18s,transform .18s; } }
 .workspace-root .order-team-fulfillment-slot { margin:0; }
@@ -847,4 +904,42 @@
   .workspace-root .im-wb-mgmt-patrol-list { border-right:0; border-bottom:1px solid var(--border); }
   .workspace-root .im-wb-mgmt-agentbar { grid-template-columns:minmax(0,1fr); }
   .workspace-root .im-wb-mgmt-agentbar-name { grid-row:auto; }
+}
+
+/* Message author hover card: same authorised user facts as the detail rail. */
+.workspace-root .im-wb-av-button { padding:0; border:0; background:none; cursor:pointer; }
+.workspace-root .im-wb-author-name-trigger { padding:0; border:0; background:none; color:inherit; font:inherit; font-weight:600; cursor:pointer; }
+.workspace-root .im-wb-author-name-trigger:hover { color:var(--im-accent-strong); text-decoration:underline; }
+.workspace-root .im-wb-author-hover { width:min(360px,calc(100vw - 48px)); max-height:min(520px,70vh); overflow:auto; }
+.workspace-root .im-wb-author-hover > * { width:100%; }
+
+/* Unified inbox: desktop uses one tagged directory for consultations, complaints and order groups. */
+.workspace-root .im-wb-unified { display:flex; flex:1; min-height:0; min-width:0; gap:8px; }
+.workspace-root .im-wb-unified-detail { display:flex; flex:1; flex-direction:column; min-width:0; min-height:0; }
+.workspace-root .im-wb-unified-queue { display:none; flex-direction:column; min-height:0; min-width:0; overflow:hidden; border:1px solid var(--border); border-radius:10px; background:var(--background); }
+.workspace-root .im-wb-unified-head { display:flex; align-items:center; justify-content:space-between; gap:8px; flex:none; padding:9px 12px; border-bottom:1px solid var(--border); }
+.workspace-root .im-wb-unified-head strong { font-size:13px; }
+.workspace-root .im-wb-unified-head span { color:var(--muted-foreground); font-size:11px; }
+.workspace-root .im-wb-unified-types { display:flex; flex-wrap:wrap; gap:4px; flex:none; padding:6px 8px; border-bottom:1px solid var(--border); }
+.workspace-root .im-wb-unified-types button { min-height:24px; padding:0 8px; border:1px solid transparent; border-radius:6px; color:var(--muted-foreground); background:transparent; font:inherit; font-size:11px; cursor:pointer; }
+.workspace-root .im-wb-unified-types button:hover { color:var(--foreground); background:var(--muted); }
+.workspace-root .im-wb-unified-types button[aria-pressed="true"] { color:var(--im-accent-strong); border-color:color-mix(in oklab,var(--im-accent-strong) 40%,var(--border)); background:color-mix(in oklab,var(--im-accent-strong) 10%,transparent); font-weight:600; }
+.workspace-root .im-wb-unified-queue .im-wb-rows { flex:1; min-height:0; overflow-y:auto; overscroll-behavior:contain; }
+.workspace-root .im-wb-unified-queue .im-wb-search { margin:8px 8px 0; }
+.workspace-root .im-wb-unified-queue .im-wb-row { width:100%; }
+@media (min-width:1100px) {
+  .workspace-root .im-wb-root[data-unified="true"] .im-wb-unified { display:grid; grid-template-columns:clamp(288px,18vw,340px) minmax(0,1fr); }
+  .workspace-root .im-wb-root[data-unified="true"] .im-wb-unified-queue { display:flex; }
+  .workspace-root .im-wb-root[data-unified="true"] .im-wb-seg { display:none; }
+  .workspace-root .im-wb-root[data-unified="true"] .im-wb > .im-wb-queue { display:none; }
+  .workspace-root .im-wb-root[data-unified="true"] .im-wb { grid-template-columns:minmax(0,1fr) clamp(400px,23vw,460px); }
+  /* 收起详情后咨询段同样只剩会话：不保留 400-460px 的空轨道（订单段规则保持在下方）。 */
+  .workspace-root .im-wb-root[data-unified="true"] .im-wb[data-details="false"] { grid-template-columns:minmax(0,1fr); }
+  .workspace-root .im-wb-root[data-unified="true"] .im-wb-pane--orders .order-team-grid { grid-template-columns:minmax(0,1fr) clamp(400px,23vw,460px); }
+  .workspace-root .im-wb-root[data-unified="true"] .im-wb-pane--orders .order-team-grid > .im-wb-queue { display:none; }
+  .workspace-root .im-wb-root[data-unified="true"] .im-wb-pane--orders .order-team-grid[data-details="false"] { grid-template-columns:minmax(0,1fr); }
+}
+@media (max-width:1099px) {
+  .workspace-root .im-wb-unified { display:block; }
+  .workspace-root .im-wb-unified-detail { height:100%; }
 }

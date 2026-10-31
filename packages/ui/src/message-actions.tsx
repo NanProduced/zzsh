@@ -2,7 +2,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
-export type MessageActionId = "copy" | "reply" | "revoke" | "delete" | "jump";
+export type MessageActionId = "copy" | "reply" | "revoke" | "delete" | "jump" | "pin" | "mute" | "hide" | "settings";
 export type MessageActionItem = { id: MessageActionId; label: string; danger?: boolean; icon?: ReactNode };
 function menuIcon(id: MessageActionId): ReactNode {
   const common = { width: 14, height: 14, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const, "aria-hidden": true };
@@ -10,6 +10,10 @@ function menuIcon(id: MessageActionId): ReactNode {
   if (id === "reply") return <svg {...common}><path d="M9 17 4 12l5-5"/><path d="M4 12h10a6 6 0 0 1 6 6v2"/></svg>;
   if (id === "revoke") return <svg {...common}><path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg>;
   if (id === "delete") return <svg {...common}><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v5M14 11v5"/></svg>;
+  if (id === "pin") return <svg {...common}><path d="M12 17v5"/><path d="M9 3h6l-1 6 4 3v2H6v-2l4-3z"/></svg>;
+  if (id === "mute") return <svg {...common}><path d="M18 8a6 6 0 0 0-9.33-5"/><path d="M6 8a6 6 0 0 0 9 5.2"/><path d="M3 3l18 18"/><path d="M10 21h4"/></svg>;
+  if (id === "hide") return <svg {...common}><path d="M3 3l18 18"/><path d="M10.6 10.6a2 2 0 0 0 2.8 2.8"/><path d="M9.9 5.2A9.7 9.7 0 0 1 12 5c5 0 8.5 4.5 9.5 7-0.4 1-1.1 2-2 3"/><path d="M6.1 6.1C4.6 7.1 3.5 8.5 2.5 12c1 2.5 4.5 7 9.5 7 1.4 0 2.7-.3 3.8-.9"/></svg>;
+  if (id === "settings") return <svg {...common}><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4v-.2a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1z"/></svg>;
   return <svg {...common}><path d="M7 7h10v10"/><path d="M7 17 17 7"/></svg>;
 }
 export type MessagePoint = { x: number; y: number };

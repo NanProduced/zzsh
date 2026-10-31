@@ -73,6 +73,71 @@ export type ManualCloseResult = {
   localFundsEffect: "NONE"; financeHandling: "OFFLINE_REQUIRED"; alreadyClosed?: boolean;
 };
 
+export type SupportCancelReason =
+  | "ORDER_COMPLETED" | "ORDER_NOT_PAID" | "PAYMENT_BASIS_UNAVAILABLE" | "SETTLEMENT_ALREADY_POSTED"
+  | "SETTLEMENT_DRAFT_EXISTS" | "MANUAL_ADJUSTMENT_REVIEW" | "DISTRIBUTION_RECONCILIATION_REQUIRED"
+  | "REFUND_PENDING" | "TERMINATION_PENDING" | "ALREADY_CANCELLED" | "ORDER_CHANGED";
+
+export type SupportCancelRefund = {
+  integration?: "INTEGRATED" | "NOT_INTEGRATED" | "UNAVAILABLE" | string;
+  intents?: Array<{
+    intentId?: string | null; refundOrderNo?: string | null; state?: string; budgetDisposition?: string | null;
+    requiresReview?: boolean; amountCents?: string | null; firstSubmit?: string;
+  }> | null;
+  totals?: { originalCents?: string; allocatedCents?: string; consumedCents?: string; releasedCents?: string;
+    remainingCents?: string; totalsComplete?: boolean } | null;
+  completedLocallyAt?: string | null;
+  bankArrival?: "UNKNOWN" | string;
+  reason?: string | null;
+};
+
+export type SupportCancelRow = {
+  terminationId: string; state: string; reason: string; reviewReason: string | null; approvedAt: string | null;
+  requestedByAdminUserId: string | null; refundCents: string | null; currency: "CNY";
+  liabilityRecognized: boolean;
+};
+
+export type SupportCancelView = {
+  contractVersion: "admin-support-cancel.v1";
+  orderId: string; orderRevision: string; orderStatus: string; cancelReason: string | null; cancelledAt: string | null;
+  eligibility: { allowed: boolean; reason: SupportCancelReason | null; refundCents: string | null; openingConfirmed?: boolean };
+  openingConfirmed: boolean;
+  supportCancellation: SupportCancelRow | null;
+  refund: SupportCancelRefund | null;
+  existing: boolean;
+  channel: { result: string; bankArrival: "UNKNOWN" } | null;
+};
+
+export type SupportCancelOutcome =
+  | { kind: "accepted"; view: SupportCancelView }
+  | { kind: "blocked"; status: number; reasons: readonly string[]; message: string }
+  | { kind: "auth"; status: number }
+  | { kind: "unknown"; error?: unknown };
+
+/** The support-cancel preview is a read-only projection; nothing is reserved or submitted. */
+export async function readSupportCancel(orderId: string): Promise<SupportCancelView> {
+  return adminRequest<SupportCancelView>(`${orderBase(orderId)}/support-cancel`);
+}
+
+/** Send or replay one frozen support cancellation. The caller must reuse `key` after an unknown result. */
+export async function sendSupportCancel(orderId: string, expectedOrderRevision: string, reason: string, key: string): Promise<SupportCancelOutcome> {
+  try {
+    const raw = await adminRequest<Record<string, unknown>>(`${orderBase(orderId)}/support-cancel`,
+      { expectedOrderRevision, reason }, "POST", { "idempotency-key": key });
+    if (raw.outcome === "UNKNOWN" || raw.originalKeyRequired === true) return { kind: "unknown" };
+    if (raw.contractVersion !== "admin-support-cancel.v1" || raw.orderId !== orderId || typeof raw.orderRevision !== "string"
+      || typeof raw.eligibility !== "object" || raw.eligibility === null) return { kind: "unknown" };
+    return { kind: "accepted", view: raw as unknown as SupportCancelView };
+  } catch (error) {
+    if (error instanceof AdminApiError) {
+      if (error.status === 401 || error.status === 423) return { kind: "auth", status: error.status };
+      if (error.status === 0 || error.status === 429 || error.status >= 500) return { kind: "unknown", error };
+      return { kind: "blocked", status: error.status, reasons: error.reasons, message: error.code };
+    }
+    return { kind: "unknown", error };
+  }
+}
+
 export type FulfillmentOutcome =
   | { kind: "accepted"; status: number; body: SettlementReadView }
   | { kind: "blocked"; status: number; reasons: readonly string[]; message: string }

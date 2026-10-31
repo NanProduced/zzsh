@@ -151,6 +151,7 @@ globalThis.fetch = async (input, init = {}) => {
     return json(fixture.presence);
   }
   if (pathname.endsWith("/im/consultations")) return json({ consultations: fixture.consultations });
+  if (/\/im\/consultations\/[^/]+\/read$/.test(pathname)) return json({ adminReadAt: "2026-10-29T02:05:00.000Z" });
   if (pathname.endsWith("/im/support-overview")) return fixture.overviewStatus === 200 ? json(fixture.overview) : failure(fixture.overviewStatus);
   if (pathname.endsWith("/im/handovers")) return fixture.handoverStatus === 200 ? json(fixture.handovers) : failure(fixture.handoverStatus);
   if (pathname.endsWith("/im/audit/conversations")) {
@@ -493,6 +494,8 @@ test("a transfer carries an optional note and confirms it was recorded", async (
   fixture = baseFixture({ consultations: [activeConsultation] });
   const { rootNode } = await mount(t, {});
   await waitFor(() => rootNode.querySelector(".im-wb-row"));
+  await act(async () => { rootNode.querySelector(".im-wb-row").click(); });
+  await settle();
   await act(async () => rootNode.querySelector('[data-action="open-transfer"]').click());
   await waitFor(() => browser.document.querySelector('[aria-label="转交会话"]'));
   const note = browser.document.querySelector('[aria-label="交接备注（可选）"]');
@@ -518,13 +521,16 @@ test("pausing with unfinished consultations shows the checklist without blocking
   fixture.presence = { ...fixture.presence, availability: "AVAILABLE", connectionState: "CONNECTED" };
   const { rootNode } = await mount(t, {});
   await waitFor(() => rootNode.querySelector(".im-wb-presence-toggle") && rootNode.querySelector(".im-wb-presence-toggle").textContent === "暂停接待");
+  const pauseToggle = rootNode.querySelector(".im-wb-presence-toggle");
+  assert.ok(pauseToggle.classList.contains("im-wb-btn-outline"), "pause is a secondary control");
+  assert.equal(pauseToggle.classList.contains("im-wb-btn-primary"), false, "pause is not a primary action");
   const writesBefore = presenceWrites.length;
   await act(async () => rootNode.querySelector(".im-wb-presence-toggle").click());
   await waitFor(() => browser.document.querySelector('[aria-label="暂停接待确认"]'));
   const dialog = browser.document.querySelector('[aria-label="暂停接待确认"]');
   assert.match(dialog.textContent, /还有 1 条未完成咨询/);
   assert.match(dialog.textContent, /用户 A/);
-  assert.match(dialog.textContent, /处理中/);
+  assert.match(dialog.textContent, /接待中/);
   assert.ok(dialog.querySelector('[data-action="offduty-transfer"]'), "the checklist offers 去交接");
   assert.equal(presenceWrites.length, writesBefore, "opening the checklist does not pause automatically");
 

@@ -27,11 +27,12 @@ import { supportedImageUrl } from "./im-support-guards";
 import { dayKeyOf, dayLabelOf, formatDateTime, formatTime, initialOf } from "./im-support-format";
 import {
   auditConversationsPath, auditMessagesPath, auditStateLabel, auditTypeLabel,
-  availabilityLabel, formatDayLabel, formatDuration, handoverObjectLabel, hasHourlyData,
-  hasTrendData, hasWorkloadData, hourlySlots, parseAuditConversations, parseAuditMessages,
-  parseSupportHandovers, parseSupportOverview, withinTimeFilter,
+  availabilityLabel, barPercent, formatDayLabel, formatDuration, formatRatingAverage,
+  handoverObjectLabel, hasHourlyData, hasTrendData, hasWorkloadData, hourlySlots,
+  maxOf, parseAuditConversations, parseAuditMessages, parseSupportHandovers,
+  parseSupportOverview, withinTimeFilter,
   type AuditConversation, type AuditTimeFilter, type SupportHandover, type SupportOverview,
-  type SupportOverviewAgent, type SupportTrendPoint,
+  type SupportOverviewAgent, type SupportRatings, type SupportTrendPoint,
 } from "./im-support-management-model";
 
 const DASHBOARD_REFRESH_MS = 20_000;
@@ -142,8 +143,10 @@ export function SupportDashboard({ active, request }: { active: boolean; request
       <MetricCard label="今日用户" value={overview.totals.todayUsers} />
     </div>
 
+    <RatingCard ratings={overview.ratings} />
+
     <Card className="im-wb-mgmt-card" data-panel="on-duty">
-      <CardHeader><CardTitle>统计</CardTitle><CardDescription>状态、当前负载与今日接待量</CardDescription></CardHeader>
+      <CardHeader><CardTitle>当日服务与接待</CardTitle><CardDescription>状态、当前负载与今日接待量</CardDescription></CardHeader>
       <CardContent className="im-wb-mgmt-card-content">
         <div className="im-wb-mgmt-table-wrap"><Table className="im-wb-mgmt-table">
           <TableHeader><TableRow>
@@ -181,6 +184,52 @@ function MetricCard({ label, value }: { label: string; value: number }) {
     <span className="im-wb-mgmt-metric-value">{value}</span>
     <span className="im-wb-mgmt-metric-label">{label}</span>
   </CardContent></Card>;
+}
+
+/** 评价统计：count 为 0 时只说明“今日暂无评价”，不画 0 分平均分或空趋势。 */
+function RatingCard({ ratings }: { ratings: SupportRatings }) {
+  const max = maxOf([...ratings.distribution]);
+  return <Card className="im-wb-mgmt-card" data-panel="ratings" data-count={ratings.count}>
+    <CardHeader><CardTitle>今日评价</CardTitle><CardDescription>仅统计已提交评价；按北京时间自然日</CardDescription></CardHeader>
+    <CardContent className="im-wb-mgmt-card-content">
+      {ratings.count === 0
+        ? <p className="im-wb-mgmt-inline-state" role="status" data-rating-empty>今日暂无评价</p>
+        : <>
+          <div className="grid gap-4 px-4 pb-3 md:grid-cols-[minmax(0,260px)_minmax(0,1fr)]">
+            <div className="flex flex-wrap items-baseline gap-x-8 gap-y-2">
+              <span className="flex items-baseline gap-2" data-rating-metric="count">
+                <b className="text-2xl font-semibold tabular-nums">{ratings.count}</b>
+                <span className="text-xs text-muted-foreground">今日评价数</span>
+              </span>
+              <span className="flex items-baseline gap-2" data-rating-metric="average">
+                <b className="text-2xl font-semibold tabular-nums">{formatRatingAverage(ratings.average)}</b>
+                <span className="text-xs text-muted-foreground">平均分</span>
+              </span>
+            </div>
+            <ul className="grid gap-1.5" aria-label="评价星级分布">
+              {[5, 4, 3, 2, 1].map((score) => {
+                const value = ratings.distribution[score - 1] ?? 0;
+                return <li key={score} className="grid grid-cols-[3rem_minmax(0,1fr)_2.5rem] items-center gap-2 text-xs" data-rating-score={score}>
+                  <span className="text-muted-foreground">{score} 星</span>
+                  <span className="h-2 overflow-hidden rounded-full bg-muted"><span className="im-wb-mgmt-bar block h-full rounded-full bg-[var(--mgmt-chart-1)]" style={{ width: `${barPercent(value, max)}%` }} /></span>
+                  <span className="text-right tabular-nums">{value}</span>
+                </li>;
+              })}
+            </ul>
+          </div>
+          <div className="im-wb-mgmt-table-wrap"><Table className="im-wb-mgmt-table">
+            <TableHeader><TableRow><TableHead>客服</TableHead><TableHead className="text-right">评价数</TableHead><TableHead className="text-right">平均分</TableHead></TableRow></TableHeader>
+            <TableBody>
+              {ratings.agents.length ? ratings.agents.map((agent) => <TableRow key={agent.adminUserId} data-rating-agent={agent.adminUserId}>
+                <TableCell className="font-medium">{agent.name}</TableCell>
+                <TableCell className="text-right tabular-nums">{agent.count}</TableCell>
+                <TableCell className="text-right tabular-nums">{formatRatingAverage(agent.average)}</TableCell>
+              </TableRow>) : <TableRow><TableCell colSpan={3} className="im-wb-mgmt-empty-cell">暂无按客服统计</TableCell></TableRow>}
+            </TableBody>
+          </Table></div>
+        </>}
+    </CardContent>
+  </Card>;
 }
 
 function TrendChart({ points }: { points: SupportTrendPoint[] }) {

@@ -54,43 +54,6 @@ function asEvents(value: unknown): ConsultationEvent[] {
   return value as ConsultationEvent[];
 }
 
-/**
- * 投诉会话的紧凑摘要。投影里真正有的只有咨询类型、状态、subject_ref 与事件节点：
- * 没有投诉原因/诉求正文，没有 subject_ref 的类型与业务单号，事件读投影也不含 details
- * 与处理结论。这里逐项如实标注，不拿时间线或状态去猜一条“结果”。
- */
-export function ComplaintSummaryCard({ typeLabel, stateLabel, subjectRef, summary }: {
-  typeLabel: string;
-  stateLabel: string;
-  subjectRef: string | null;
-  summary: ConsultationEventSummary | null;
-}) {
-  const result = (() => {
-    if (!summary || summary.status === "loading") return "正在读取处理记录…";
-    if (summary.status === "forbidden") return "无权查看处理记录";
-    if (summary.status === "missing") return "处理记录不可读（已结束、不存在或不在可查看范围）";
-    if (summary.status === "expired") return "会话已失效，本地处理记录已清除";
-    if (summary.status === "error") return "处理记录读取失败";
-    if (!summary.latest) return "暂无处理记录";
-    const label = EVENT_TYPE_LABELS[summary.latest.type] ?? summary.latest.type;
-    return `最近节点：${label} · ${formatDateTime(summary.latest.occurredAt)}；处理结论未在投影中提供`;
-  })();
-
-  return (
-    <section className="im-wb-sec im-wb-complaint" aria-label="投诉摘要" data-kind="COMPLAINT">
-      <span><CircleAlert size={12} />投诉摘要</span>
-      <dl>
-        <div><dt>投诉类型</dt><dd>{typeLabel}</dd></div>
-        <div><dt>处理状态</dt><dd>{stateLabel}</dd></div>
-        <div data-gap="reason"><dt>投诉原因</dt><dd>会话投影未提供投诉原因</dd></div>
-        <div data-gap="subject"><dt>关联订单/账号</dt><dd>{subjectRef ? "已关联引用；投影未提供类型与业务单号" : "未关联订单或账号"}</dd></div>
-        <div data-gap="result"><dt>最近处理结果</dt><dd>{result}</dd></div>
-      </dl>
-      <p className="im-wb-gap-note">缺口：会话投影没有投诉原因与处理结论字段；关联引用（subject_ref）不存类型，无法显示订单号或账号号。</p>
-    </section>
-  );
-}
-
 export function ConsultationEventsCard({ consultationId, request, onSummary }: { consultationId: string; request: EventsRequest; onSummary?: (summary: ConsultationEventSummary) => void }) {
   const [events, setEvents] = useState<ConsultationEvent[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);

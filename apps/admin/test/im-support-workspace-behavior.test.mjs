@@ -44,14 +44,15 @@ const vite = await createServer({
   server: { middlewareMode: true, hmr: false },
 });
 const { ImSupportView } = await vite.ssrLoadModule("/src/views/im-support-view.tsx");
+const notifications = await vite.ssrLoadModule("/src/views/im-support-notifications.ts");
 after(async () => { await vite.close(); });
 
-function snapshot(permissions) {
+function snapshot(permissions, boss = false) {
   return {
     authenticated: true,
     adminUserId: "admin-a",
     user: { name: "客服 A", username: "admin-a", displayUsername: "客服 A", twoFactorEnabled: true },
-    security: { status: "ACTIVE", isBoss: false, passwordChangeRequired: false },
+    security: { status: "ACTIVE", isBoss: boss, passwordChangeRequired: false },
     session: { id: "session-a", locked: false, pinConfigured: true, createdAt: null, expiresAt: null },
     permissions,
   };
@@ -86,6 +87,7 @@ globalThis.fetch = async (input, init = {}) => {
   throw new Error(`unexpected test request ${url.pathname}`);
 };
 
+const consultationRows = (root) => [...(root.querySelector(".im-wb-pane:not([hidden]) .im-wb-queue")?.querySelectorAll(".im-wb-row") ?? [])];
 async function settle() {
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
 }
@@ -96,6 +98,15 @@ async function waitFor(predicate, timeout = 3_000) {
     if (Date.now() >= deadline) throw new Error("component condition timed out");
     await settle();
   }
+}
+
+// 工作台不再自动选中首条；需要选中态的用例显式点一次，和客服的真实操作一致。
+async function selectFirst(rootNode) {
+  await waitFor(() => consultationRows(rootNode).length > 0);
+  const row = consultationRows(rootNode)[0];
+  assert.ok(row, "queue lists a row to select");
+  await act(async () => { row.click(); });
+  await settle();
 }
 
 async function mount(t, props) {
@@ -121,20 +132,42 @@ const activeConsultation = {
 };
 const waitingConsultation = { ...activeConsultation, id: "c-waiting", threadId: "thread-b", roundId: "c-waiting", roundSeq: 1, threadState: "WAITING", state: "WAITING", assignedAdmin: null, conversationId: null, messageScopeState: undefined, canSend: false, lastMessageAt: null, user: { id: "user-b", name: "用户 B", username: "user-b" } };
 
+test("the workspace query carries the selected thread and filter across tab remounts", async (t) => {
+  const second = {
+    ...activeConsultation, id: "c-active-2", threadId: "thread-a2", roundId: "c-active-2", conversationId: "conv-a2",
+    user: { id: "user-a2", name: "用户 B", username: "user-b" },
+  };
+  fixture = { consultations: [activeConsultation, second], history: [], post: null };
+  const changes = [];
+  const first = await mount(t, { onQueryChange: (next) => changes.push(next) });
+  await waitFor(() => consultationRows(first.rootNode).length === 2);
+  const secondRow = consultationRows(first.rootNode).find((row) => row.textContent.includes("用户 B"));
+  await act(async () => { secondRow.click(); });
+  await settle();
+  assert.equal(changes.at(-1)?.consultation, "thread-a2", "selecting a row persists the stable thread id, not the round id");
+  assert.equal(changes.at(-1)?.section, "consultation");
+
+  const restored = await mount(t, { initialSection: "consultation", initialConsultationId: "thread-a2", workspaceQuery: { section: "consultation", consultation: "thread-a2" } });
+  await waitFor(() => consultationRows(restored.rootNode).some((row) => row.getAttribute("data-active") === "true"));
+  const active = consultationRows(restored.rootNode).find((row) => row.getAttribute("data-active") === "true");
+  assert.match(active.textContent, /用户 B/, "a remounted workbench reopens the thread from the tab query");
+  assert.match(restored.rootNode.querySelector(".im-wb-chat-title h2").textContent, /用户 B/);
+});
+
 test("chat header and queue follow the real selected consultation", async (t) => {
   fixture = { consultations: [activeConsultation, waitingConsultation], history: [], post: null };
   const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept"]) });
-  await waitFor(() => Boolean(rootNode.querySelector(".im-wb-row")));
+  await selectFirst(rootNode);
 
   assert.ok(rootNode.querySelector(".im-wb-viewport"), "viewport renders inside the scroller");
-  assert.equal(rootNode.querySelectorAll(".im-wb-row").length, 1, "the default filter lists only my own sessions");
+  assert.equal(consultationRows(rootNode).length, 1, "the default filter lists only my own sessions");
   assert.equal(rootNode.querySelector(".im-wb-chat-title h2").textContent, "用户 A · 平台咨询", "title comes from the selected consultation");
   assert.match(rootNode.querySelector(".im-wb-chat-title span").textContent, /第 3 轮接待 · 客服 A/);
 
   // The unassigned consultation must be reachable and must not invent an input.
   await act(async () => { [...rootNode.querySelectorAll(".im-wb-filters button")].find((b) => b.textContent.includes("待接待")).click(); });
   await settle();
-  const rows = [...rootNode.querySelectorAll(".im-wb-row")];
+  const rows = [...consultationRows(rootNode)];
   assert.equal(rows.length, 1, "the waiting filter shows only the unassigned consultation");
   assert.match(rows[0].textContent, /待接入/, "the unassigned consultation is labelled as waiting");
   await act(async () => { rows[0].click(); });
@@ -142,6 +175,17 @@ test("chat header and queue follow the real selected consultation", async (t) =>
   assert.equal(rootNode.querySelector(".im-wb-chat-title h2").textContent, "用户 B · 平台咨询");
   assert.match(rootNode.querySelector(".im-wb-chat-title span").textContent, /第 1 轮接待 · 等待客服接入/);
   assert.equal(rootNode.querySelector("textarea").disabled, true, "a waiting consultation cannot be replied to");
+});
+
+test("the empty waiting filter explains automatic assignment and keeps manual claim available", async (t) => {
+  fixture = { consultations: [], history: [], post: null };
+  const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept"]) });
+  await act(async () => { [...rootNode.querySelectorAll(".im-wb-filters button")].find((button) => button.textContent.includes("待接待")).click(); });
+  await settle();
+  const empty = rootNode.querySelector(".im-wb-pane:not([hidden]) .im-wb-queue .im-wb-list-empty");
+  assert.ok(empty, "the waiting filter has an explicit empty state");
+  assert.match(empty.textContent, /系统正在分配/, "automatic assignment is the primary path");
+  assert.match(empty.textContent, /管理岗接管/, "management takeover is stated as the fallback");
 });
 
 test("an active round assigned to another admin is read-only with a stated reason", async (t) => {
@@ -153,6 +197,7 @@ test("an active round assigned to another admin is read-only with a stated reaso
   };
   fixture = { consultations: [otherAdminsRound], history: [], post: null };
   const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept"]) });
+  await selectFirst(rootNode);
   await waitFor(() => Boolean(rootNode.querySelector(".im-wb-chat-title h2")));
 
   assert.equal(rootNode.querySelector("textarea").disabled, true, "a non-responsible admin cannot type a reply");
@@ -170,7 +215,7 @@ test("an active round assigned to another admin is read-only with a stated reaso
 test("an empty conversation keeps its own identity instead of the unselected state", async (t) => {
   fixture = { consultations: [activeConsultation], history: [], post: null };
   const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept"]) });
-  await waitFor(() => Boolean(rootNode.querySelector(".im-wb-row")));
+  await selectFirst(rootNode);
   await settle();
   assert.equal(rootNode.querySelector(".im-wb-chat-title h2").textContent, "用户 A · 平台咨询");
   const messageArea = rootNode.querySelector(".im-wb-stream-wrap");
@@ -190,6 +235,7 @@ test("messages keep real sender identity, notices stay neutral, and only own mes
     ],
   };
   const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept"]) });
+  await selectFirst(rootNode);
   await waitFor(() => rootNode.querySelectorAll(".im-wb-msg").length === 3);
 
   const system = rootNode.querySelector(".im-wb-sys");
@@ -213,9 +259,9 @@ test("messages keep real sender identity, notices stay neutral, and only own mes
 test("queue/chat switching moves focus onto the visible pane control", async (t) => {
   fixture = { consultations: [activeConsultation], history: [], post: null };
   const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept", "im.support.transfer", "im.support.presence"]) });
-  await waitFor(() => Boolean(rootNode.querySelector(".im-wb-row")));
+  await waitFor(() => consultationRows(rootNode).length > 0);
 
-  const firstItem = rootNode.querySelector(".im-wb-row");
+  const firstItem = consultationRows(rootNode)[0];
   assert.ok(firstItem, "queue renders real consultations");
   await act(async () => { firstItem.click(); });
   await settle();
@@ -238,10 +284,10 @@ test("closing the case column on a narrow screen returns to the conversation and
   t.after(() => { browser.matchMedia = originalMatchMedia; });
   fixture = { consultations: [activeConsultation], history: [], post: null };
   const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept"]) });
-  await waitFor(() => Boolean(rootNode.querySelector(".im-wb-row")));
+  await waitFor(() => consultationRows(rootNode).length > 0);
   const grid = () => rootNode.querySelector(".im-wb");
 
-  await act(async () => { rootNode.querySelector(".im-wb-row").click(); });
+  await act(async () => { consultationRows(rootNode)[0].click(); });
   await settle();
   assert.equal(grid().dataset.pane, "chat", "a narrow screen shows one pane at a time");
 
@@ -278,7 +324,7 @@ test("timeline calendar labels preserve January and December", () => {  const so
 test("the case column is a real grid column that reports its own collapsed state", async (t) => {
   fixture = { consultations: [activeConsultation], history: [], post: null };
   const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept"]) });
-  await waitFor(() => Boolean(rootNode.querySelector(".im-wb-row")));
+  await waitFor(() => consultationRows(rootNode).length > 0);
   const trigger = rootNode.querySelector('[data-action="toggle-details"]');
   const panel = rootNode.querySelector(".im-wb-details");
   // The case column is permanent on desktop: it starts open and never squeezes the chat
@@ -289,6 +335,40 @@ test("the case column is a real grid column that reports its own collapsed state
   assert.equal(panel.hidden, false, "the case column is visible, not collapsed");
   assert.equal(rootNode.querySelector(".im-wb").dataset.details, "true");
   assert.ok(rootNode.querySelector(".im-wb-send"), "the composer stays reachable either way");
+});
+
+test("the runtime pause action is styled as a secondary control", () => {
+  const css = readFileSync(path.join(adminRoot, "src/workspace/workspace.css"), "utf8");
+  const rule = css.match(/\.workspace-root \.im-wb-runtime-action \{([^}]*)\}/)?.[1] ?? "";
+  assert.ok(rule, "the runtime action rule exists");
+  assert.doesNotMatch(rule, /background:\s*var\(--im-accent\)/, "pause does not keep the accent fill");
+  assert.doesNotMatch(rule, /color:\s*#06141f/, "pause does not keep the dark-on-accent text");
+});
+
+test("collapsing details in the unified inbox leaves a single conversation column", async (t) => {
+  const originalMatchMedia = browser.matchMedia;
+  browser.matchMedia = (query) => ({ matches: false, media: String(query), onchange: null, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}, dispatchEvent() { return false; } });
+  t.after(() => { browser.matchMedia = originalMatchMedia; });
+  fixture = { consultations: [activeConsultation], history: [], post: null };
+  const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept"]) });
+  await waitFor(() => consultationRows(rootNode).length > 0);
+
+  assert.ok(rootNode.querySelector('.im-wb-root[data-unified="true"]'), "the desktop workbench renders the unified directory");
+  const pane = rootNode.querySelector(".im-wb");
+  assert.equal(pane.dataset.details, "true", "details start expanded on desktop");
+  await act(async () => { rootNode.querySelector('[data-action="toggle-details"]').click(); });
+  await settle();
+  assert.equal(pane.dataset.details, "false", "collapsing details reaches the grid that owns the details track");
+  assert.ok(rootNode.querySelector('.im-wb-root[data-unified="true"] .im-wb[data-details="false"]'), "the single-column rule's DOM target is present");
+
+  // CSS 由浏览器应用，happy-dom 不算网格；至少锁住规则的归属、断点和声明。
+  const css = readFileSync(path.join(adminRoot, "src/workspace/workspace.css"), "utf8");
+  const desktop = css.indexOf("@media (min-width:1100px)");
+  assert.ok(desktop >= 0, "the desktop unified breakpoint exists");
+  const consultationRule = css.indexOf('.im-wb-root[data-unified="true"] .im-wb[data-details="false"]');
+  assert.ok(consultationRule > desktop, "the consultation pane collapses to one column from 1100px up");
+  assert.match(css.slice(consultationRule, consultationRule + 160), /grid-template-columns:\s*minmax\(0,\s*1fr\)/, "no 400-460px empty track remains");
+  assert.ok(css.indexOf('.im-wb-root[data-unified="true"] .im-wb-pane--orders .order-team-grid[data-details="false"]') > desktop, "the order grid keeps its own single-column rule");
 });
 
 for (const scenario of ["connected", "no-permission", "disconnected"]) {
@@ -315,10 +395,14 @@ for (const scenario of ["connected", "no-permission", "disconnected"]) {
     const { rootNode } = await mount(t, { preview: false, snapshot: snapshot(permissions) });
     await settle();
     const button = rootNode.querySelector(".im-wb-presence-toggle");
+    if (button) {
+      assert.ok(button.classList.contains("im-wb-btn-outline"), "pause/resume is a secondary control");
+      assert.equal(button.classList.contains("im-wb-btn-primary"), false, "pause is not a primary action");
+    }
     assert.equal(writes.some(value => value.availability === "AVAILABLE"), false, "render never starts accepting automatically");
     if (scenario === "no-permission") { assert.equal(button, null); assert.equal(writes.length, 0); return; }
     assert.ok(button.closest('.im-wb-root > nav'), "presence is outside either mutually hidden pane");
-    assert.equal(rootNode.querySelectorAll('.im-wb-row').length, 0);
+    assert.equal(consultationRows(rootNode).length, 0);
     assert.equal(button.disabled, scenario === "disconnected");
     if (scenario === "disconnected") { assert.equal(writes.length, 0); return; }
     for (const expected of ["AVAILABLE", "OFF_DUTY", "AVAILABLE"]) {
@@ -432,6 +516,7 @@ test("the case column reads the account profile only through its own permission"
   fixture = { consultations: [activeConsultation], history: [], post: null };
   profileFixture = { user: { userId: "user-a", image: null, maskedPhone: "138****8000", phoneNumberVerified: false, maskedEmail: null, accountStatus: "ACTIVE", suspended: false, identity: { status: "VERIFIED", ageStatus: "ADULT", provider: "local-fixture", verifiedAt: null }, identityStatus: "VERIFIED", ageStatus: "ADULT", source: { kind: "MIGRATED" }, registeredAt: "2026-01-05T00:00:00.000Z", resourceSummary: { state: "ready", count: 2 }, orderSummary: { state: "denied", permission: "order.read" }, lastBusinessActivity: { state: "not_connected", domains: ["ORDER"] } } };
   const granted = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept", "user.directory.read"]) });
+  await selectFirst(granted.rootNode);
   await waitFor(() => /账号正常/.test(granted.rootNode.textContent));
   const aside = granted.rootNode.querySelector(".im-wb-details");
   assert.match(aside.textContent, /测试用户甲/, "the display name comes from the consultation context, not the list row");
@@ -450,6 +535,7 @@ test("the case column reads the account profile only through its own permission"
 
   // Without user.directory.read the profile must be absent, not filled with guesses.
   const limited = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept"]) });
+  await selectFirst(limited.rootNode);
   await waitFor(() => /关联对象/.test(limited.rootNode.textContent));
   assert.doesNotMatch(limited.rootNode.querySelector(".im-wb-details").textContent, /账号正常|已实名|138\*\*\*\*8000|完整资料/, "no profile is invented without the permission");
   assert.match(limited.rootNode.querySelector(".im-wb-details").textContent, /需用户目录读取权限/, "the missing permission is named instead of the block silently vanishing");
@@ -458,6 +544,7 @@ test("the case column reads the account profile only through its own permission"
   // UNKNOWN never collapses into a friendlier default.
   profileFixture = { user: { userId: "user-a", image: null, maskedPhone: null, phoneNumberVerified: false, maskedEmail: null, accountStatus: "UNKNOWN", suspended: false, identity: { status: "UNKNOWN", ageStatus: "UNKNOWN", provider: null, verifiedAt: null }, identityStatus: "UNKNOWN", ageStatus: "UNKNOWN", source: { kind: "UNKNOWN" }, registeredAt: null, resourceSummary: { state: "denied", permission: "supply.rental_account.read" }, orderSummary: { state: "denied", permission: "order.read" }, lastBusinessActivity: { state: "not_connected", domains: ["ORDER"] } } };
   const unknown = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept", "user.directory.read"]) });
+  await selectFirst(unknown.rootNode);
   await waitFor(() => /账号状态未知/.test(unknown.rootNode.textContent));
   const rail = unknown.rootNode.querySelector(".im-wb-details");
   assert.match(rail.textContent, /实名状态未知/);
@@ -472,6 +559,7 @@ test("a failed context read keeps the base identity and marks the subject unavai
   t.after(() => { contextStatus = 200; contextSubject = { status: "absent" }; });
   fixture = { consultations: [activeConsultation], history: [], post: null };
   const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept"]) });
+  await selectFirst(rootNode);
   await waitFor(() => /关联对象暂时不可读取/.test(rootNode.textContent));
   const details = rootNode.querySelector(".im-wb-details");
   assert.doesNotMatch(details.textContent, /user-a/, "a list-projected user UUID is not used as a fallback fact either");
@@ -485,6 +573,7 @@ test("an unknown subject status fails closed instead of exposing a bare referenc
   t.after(() => { contextStatus = 200; contextSubject = { status: "absent" }; });
   fixture = { consultations: [activeConsultation], history: [], post: null };
   const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept"]) });
+  await selectFirst(rootNode);
   await waitFor(() => /关联对象类型暂未确认/.test(rootNode.textContent));
   assert.doesNotMatch(rootNode.querySelector(".im-wb-details").textContent, /order-secret/);
 });
@@ -501,6 +590,7 @@ test("revoking a read capability invalidates the profile facts it produced", asy
   fixture = { consultations: [activeConsultation], history: [], post: null };
   profileFixture = FULL_PROFILE;
   const { rootNode, root } = await mount(t, { snapshot: snapshot([...IM_BASE, "user.directory.read", "order.read", "supply.rental_account.read"]) });
+  await selectFirst(rootNode);
   await waitFor(() => /进行中订单18 单/.test(rootNode.textContent));
   assert.match(rootNode.textContent, /名下资源账号4 个/, "the label names ownership, not an active rental");
   assert.match(rootNode.textContent, /旧平台迁移/);
@@ -532,6 +622,7 @@ test("a profile response that lands after its capability is gone never refills t
   let release;
   profileGate = new Promise((resolve) => { release = resolve; });
   const { rootNode, root } = await mount(t, { snapshot: snapshot([...IM_BASE, "user.directory.read", "order.read", "supply.rental_account.read"]) });
+  await selectFirst(rootNode);
   await waitFor(() => /正在读取账号资料/.test(rootNode.textContent));
 
   await rerender(root, IM_BASE);
@@ -557,6 +648,7 @@ test("a failed profile read can be retried without restarting the IM client", as
   };
   t.after(() => { globalThis.fetch = originalFetch; });
   const { rootNode } = await mount(t, { snapshot: snapshot([...IM_BASE, "user.directory.read", "order.read", "supply.rental_account.read"]) });
+  await selectFirst(rootNode);
   await waitFor(() => [...rootNode.querySelectorAll("button")].some(button => button.textContent.includes("重读资料")));
   const tokenReads = calls.filter(call => call.path.endsWith("/im/token")).length;
   const mark = calls.length;
@@ -571,6 +663,7 @@ test("the admin user hover card reuses the authorized summary without exposing t
   fixture = { consultations: [activeConsultation], history: [], post: null };
   profileFixture = FULL_PROFILE;
   const { rootNode } = await mount(t, { snapshot: snapshot([...IM_BASE, "user.directory.read"]) });
+  await selectFirst(rootNode);
   await waitFor(() => /账号正常/.test(rootNode.textContent));
   const aside = rootNode.querySelector(".im-wb-details");
   assert.ok(aside.querySelector('[data-slot="hover-card-trigger"]'), "the nickname/avatar block is the existing admin hover-card trigger");
@@ -594,6 +687,7 @@ test("the rail starts with the user/risk summary instead of repeating the header
   fixture = { consultations: [activeConsultation], history: [], post: null };
   profileFixture = FULL_PROFILE;
   const { rootNode } = await mount(t, { snapshot: snapshot([...IM_BASE, "user.directory.read"]) });
+  await selectFirst(rootNode);
   await waitFor(() => /账号正常/.test(rootNode.textContent));
   const aside = rootNode.querySelector(".im-wb-details");
   const firstBlock = aside.children[1];
@@ -610,6 +704,7 @@ test("user/risk summary names freeze and internal risk while keeping contacts ma
   fixture = { consultations: [activeConsultation], history: [], post: null };
   profileFixture = { user: { ...FULL_PROFILE.user, accountStatus: "RESTRICTED", suspended: true, riskFlag: true } };
   const { rootNode } = await mount(t, { snapshot: snapshot([...IM_BASE, "user.directory.read", "order.read", "supply.rental_account.read"]) });
+  await selectFirst(rootNode);
   await waitFor(() => /账号受限/.test(rootNode.textContent));
   const aside = rootNode.querySelector(".im-wb-details");
   assert.match(aside.textContent, /已冻结/, "suspension is named on its own, not folded into a friendlier status");
@@ -622,29 +717,18 @@ test("user/risk summary names freeze and internal risk while keeping contacts ma
   profileFixture = FULL_PROFILE;
 });
 
-test("a complaint rail adds a compact summary that states its projection gaps instead of inventing them", async (t) => {
+test("a complaint rail is an ordinary chat without a complaint summary", async (t) => {
   const complaint = { ...activeConsultation, id: "c-complaint", type: "COMPLAINT", subjectRef: "order-ref-9", user: { id: "user-c", name: "投诉用户", username: "user-c" } };
-  fixture = {
-    consultations: [complaint], history: [], post: null,
-    events: [
-      { id: "ev-c1", type: "CREATED", occurredAt: "2026-09-17T00:00:00.000Z", actor: { kind: "user", displayName: "投诉用户" }, from: null, to: null },
-      { id: "ev-c2", type: "TRANSFERRED", occurredAt: "2026-09-17T00:05:00.000Z", actor: { kind: "admin", displayName: "客服 A" }, from: { displayName: "客服 A" }, to: { displayName: "客服 B" } },
-    ],
-  };
+  fixture = { consultations: [complaint], history: [], post: null };
   profileFixture = FULL_PROFILE;
   const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "user.directory.read"]) });
-  await waitFor(() => rootNode.querySelector('[aria-label="投诉摘要"]'));
-  await waitFor(() => /最近节点：转交/.test(rootNode.textContent));
-  const summary = rootNode.querySelector('[aria-label="投诉摘要"]');
-  assert.match(summary.textContent, /投诉类型投诉反馈/);
-  assert.match(summary.textContent, /处理状态处理中/);
-  assert.match(summary.textContent, /投诉原因会话投影未提供投诉原因/, "the missing reason is stated, never filled in");
-  assert.match(summary.textContent, /关联订单\/账号已关联引用；投影未提供类型与业务单号/);
-  assert.match(summary.textContent, /最近处理结果最近节点：转交/);
-  assert.match(summary.textContent, /处理结论未在投影中提供/, "an event node is not dressed up as a resolution");
-  assert.match(summary.textContent, /subject_ref/, "the exact gap names the untyped reference");
-  assert.doesNotMatch(summary.textContent, /order-ref-9/, "the raw reference may be a UUID and is not printed");
-  assert.doesNotMatch(rootNode.querySelector(".im-wb-card").textContent, /关联对象/, "the complaint summary owns the related-object line; the user card does not repeat it");
+  await selectFirst(rootNode);
+  await waitFor(() => rootNode.querySelector(".im-wb-details"));
+  const aside = rootNode.querySelector(".im-wb-details");
+  assert.equal(aside.querySelector('[aria-label="投诉摘要"]'), null, "complaints no longer get a separate summary card");
+  assert.doesNotMatch(aside.textContent, /投诉原因|关联订单\/账号|最近处理结果|处理结论暂未记录/, "complaint-only fields are gone");
+  assert.doesNotMatch(rootNode.querySelector(".im-wb-chat-head").textContent, /投诉内容不会同步到订单群/, "complaint scope note is gone");
+  assert.ok(aside.querySelector('[data-slot="card"]'), "the user card is still the first rail block");
 });
 
 const handlingEvents = [
@@ -657,6 +741,7 @@ const handlingEvents = [
 test("the handling log starts at the latest two events and 查看全部 opens the full timeline", async (t) => {
   fixture = { consultations: [activeConsultation], history: [], post: null, events: handlingEvents };
   const { rootNode } = await mount(t, { snapshot: snapshot([...IM_BASE, "user.directory.read"]) });
+  await selectFirst(rootNode);
   await waitFor(() => rootNode.querySelectorAll(".im-wb-event").length === 4);
   const rows = () => [...rootNode.querySelectorAll(".im-wb-event")];
   const visible = () => rows().filter((row) => !row.hidden);
@@ -680,6 +765,7 @@ test("missing profile summaries remain unavailable rather than zero or a false p
   fixture = { consultations: [activeConsultation], history: [], post: null };
   profileFixture = { user: { ...FULL_PROFILE.user, orderSummary: { state: "ready" }, resourceSummary: undefined } };
   const { rootNode } = await mount(t, { snapshot: snapshot([...IM_BASE, "user.directory.read", "order.read", "supply.rental_account.read"]) });
+  await selectFirst(rootNode);
   await waitFor(() => /账号正常/.test(rootNode.textContent));
   assert.match(rootNode.textContent, /进行中订单暂无数据/);
   assert.match(rootNode.textContent, /名下资源账号暂未提供/);
@@ -699,7 +785,9 @@ const menuHistory = () => [
 
 async function mountMenu(t, options = {}) {
   fixture = { consultations: [activeConsultation], history: options.history ?? menuHistory(), post: options.post ?? null };
-  return mount(t, { snapshot: snapshot(options.permissions ?? ["im.support.read", "im.support.accept"]) });
+  const mounted = await mount(t, { snapshot: snapshot(options.permissions ?? ["im.support.read", "im.support.accept"]) });
+  await selectFirst(mounted.rootNode);
+  return mounted;
 }
 
 async function waitForMenuHistory(rootNode) {
@@ -782,6 +870,12 @@ test("consultation message menu follows message type, send capability and keyboa
   await settle();
   assert.equal(systemEvent.defaultPrevented, true, "a message row never falls back to the browser menu");
   assert.equal(document.querySelector(".message-action-menu"), null, "system notices have no menu");
+
+  const blankEvent = new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 200, clientY: 500 });
+  await act(async () => { rootNode.querySelector(".im-wb-content").dispatchEvent(blankEvent); });
+  await settle();
+  assert.equal(blankEvent.defaultPrevented, true, "the message stream background never falls back to the browser menu");
+  assert.equal(document.querySelector(".message-action-menu"), null, "blank stream has no message actions");
 
   const revokedEvent = new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true });
   await act(async () => { rootNode.querySelector('[data-message-id="srv-revoked"]').dispatchEvent(revokedEvent); });
@@ -966,18 +1060,211 @@ test("delete hides the message locally and a failure never fakes success", async
 
 test("claim while support is off duty opens the start-reception prompt instead of an opaque request error", async (t) => {
   fixture = { consultations: [waitingConsultation], history: [], post: null };
-  const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept", "im.support.presence"]) });
-  await waitFor(() => Boolean(rootNode.querySelector(".im-wb-row")));
+  const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept", "im.support.presence"], true) });
+  await waitFor(() => consultationRows(rootNode).length > 0);
   await act(async () => { [...rootNode.querySelectorAll(".im-wb-filters button")].find((button) => button.textContent.includes("待接待")).click(); });
   await settle();
-  const row = rootNode.querySelector(".im-wb-row");
+  const row = consultationRows(rootNode)[0];
   assert.ok(row, "waiting row");
   await act(async () => { row.click(); });
   await settle();
   const claim = rootNode.querySelector('[data-action="claim-consultation"]');
   assert.ok(claim, "claim action");
+  assert.equal(claim.textContent, "接管会话", "management takeover is named as the fallback");
+  assert.ok(claim.classList.contains("im-wb-btn-outline"), "manual claim is a secondary control");
+  assert.equal(claim.classList.contains("im-wb-btn-primary"), false, "manual claim is not the primary path");
   await act(async () => { claim.click(); });
   await settle();
   assert.match(browser.document.body.textContent ?? "", /还不能接入会话/);
   assert.equal(requests.some((path) => path.includes("/claim")), false, "off-duty claim never reaches the server");
+});
+
+/* --------------------------- 消息提醒状态机 --------------------------- */
+
+const notificationRow = (overrides = {}) => ({
+  id: "c-1", title: "咨询 · 用户 A", body: "你好", signature: "2026-10-30T01:00:00.000Z|打开查看消息", unread: true, ...overrides,
+});
+function NotificationProbe({ input }) { notifications.useSupportUnreadNotifications(input); return null; }
+
+test("the notification bell treats the first permission grant as enable, not toggle-off", () => {
+  // 首次授权前偏好默认是“开”；成功后再取反就会把刚授权的提醒关掉。
+  assert.deepEqual(notifications.planSupportNotificationToggle("default", true), { kind: "request" });
+  assert.deepEqual(notifications.planSupportNotificationToggle("default", false), { kind: "request" });
+  // 已授权才在开/关之间切换。
+  assert.deepEqual(notifications.planSupportNotificationToggle("granted", true), { kind: "apply", enabled: false });
+  assert.deepEqual(notifications.planSupportNotificationToggle("granted", false), { kind: "apply", enabled: true });
+  assert.equal(notifications.planSupportNotificationToggle("denied", true).kind, "notice");
+  assert.equal(notifications.planSupportNotificationToggle("unsupported", true).kind, "notice");
+});
+
+test("notification changes only fire for signatures newer than the seeded baseline", () => {
+  const baseline = [
+    notificationRow(),
+    notificationRow({ id: "c-2", signature: "2026-10-30T01:01:00.000Z|已读", unread: false }),
+    notificationRow({ id: "c-3", signature: "2026-10-30T01:02:00.000Z|另一条", unread: true }),
+  ];
+  const seeded = notifications.seedSupportNotificationSeen(baseline);
+  assert.equal(notifications.changedSupportNotificationRows(seeded, baseline, null).length, 0, "loading the same queue never alerts");
+
+  const next = [
+    notificationRow({ signature: "2026-10-30T01:03:00.000Z|新消息" }),
+    notificationRow({ id: "c-2", signature: "2026-10-30T01:04:00.000Z|仍已读", unread: false }),
+    notificationRow({ id: "c-3", signature: "2026-10-30T01:02:00.000Z|另一条", unread: true }),
+    notificationRow({ id: "c-4", signature: "2026-10-30T01:05:00.000Z|新会话", unread: true }),
+  ];
+  assert.deepEqual(notifications.changedSupportNotificationRows(seeded, next, null).map((row) => row.id), ["c-1", "c-4"], "only changed unread rows alert");
+  assert.deepEqual(notifications.changedSupportNotificationRows(seeded, next, "c-1").map((row) => row.id), ["c-4"], "the open row is suppressed");
+});
+
+test("the first loaded queue seeds the baseline instead of replaying a backlog", async (t) => {
+  const fired = [];
+  class FakeNotification {
+    static permission = "granted";
+    static requestPermission = async () => "granted";
+    constructor(title, options) { fired.push({ title, tag: options?.tag }); }
+    close() {}
+  }
+  const originalNotification = globalThis.Notification;
+  const originalBrowserNotification = browser.Notification;
+  const hiddenDescriptor = Object.getOwnPropertyDescriptor(browser.document, "hidden");
+  globalThis.Notification = FakeNotification;
+  browser.Notification = FakeNotification;
+  Object.defineProperty(browser.document, "hidden", { configurable: true, value: true });
+  t.after(() => {
+    globalThis.Notification = originalNotification;
+    browser.Notification = originalBrowserNotification;
+    if (hiddenDescriptor) Object.defineProperty(browser.document, "hidden", hiddenDescriptor);
+    else delete browser.document.hidden;
+  });
+
+  const rootNode = browser.document.createElement("div");
+  browser.document.body.appendChild(rootNode);
+  const root = createRoot(rootNode);
+  t.after(async () => { await act(async () => { root.unmount(); }); rootNode.remove(); });
+  const render = async (input) => { await act(async () => { root.render(createElement(NotificationProbe, { input })); }); };
+  const base = { adminUserId: "admin-a", enabled: true, selectedId: null, onOpen: () => {} };
+
+  // 首帧 rows 为空、随后队列返回历史未读：只播种，不提示。
+  await render({ ...base, loaded: false, rows: [] });
+  await render({ ...base, loaded: true, rows: [notificationRow()] });
+  assert.equal(fired.length, 0, "mounting and loading the existing queue stays silent");
+
+  // 之后的签名变化才提示。
+  await render({ ...base, loaded: true, rows: [notificationRow({ signature: "2026-10-30T01:06:00.000Z|新消息" })] });
+  assert.equal(fired.length, 1, "a genuinely new signature alerts once");
+  assert.equal(fired[0].tag, "zzsh-im-c-1");
+
+  // 切换身份/重挂载：旧未读不能重放。
+  await render({ ...base, adminUserId: "admin-b", loaded: false, rows: [] });
+  await render({ ...base, adminUserId: "admin-b", loaded: true, rows: [notificationRow({ id: "c-9", signature: "sig-b" })] });
+  assert.equal(fired.length, 1, "switching operator seeds their queue without replaying it");
+
+  // 空队列是合法的已加载状态：先播种空基线，下一条未读才算新消息。
+  await render({ ...base, adminUserId: "admin-c", loaded: false, rows: [] });
+  await render({ ...base, adminUserId: "admin-c", loaded: true, rows: [] });
+  await render({ ...base, adminUserId: "admin-c", loaded: true, rows: [notificationRow({ id: "c-3", signature: "sig-c" })] });
+  assert.equal(fired.length, 2, "an empty loaded queue is still a baseline; the next unread row is new");
+});
+
+test("granting notification permission from the bell turns reminders on and persists it", async (t) => {
+  const originalNotification = globalThis.Notification;
+  const originalBrowserNotification = browser.Notification;
+  class FakeNotification {
+    static permission = "default";
+    static requestPermission = async () => { FakeNotification.permission = "granted"; return "granted"; };
+    constructor() {}
+    close() {}
+  }
+  globalThis.Notification = FakeNotification;
+  browser.Notification = FakeNotification;
+  t.after(() => {
+    globalThis.Notification = originalNotification;
+    browser.Notification = originalBrowserNotification;
+    browser.localStorage.removeItem("zzsh.im-support.notifications.admin-a");
+  });
+
+  fixture = { consultations: [activeConsultation], history: [], post: null };
+  const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept"]) });
+  await waitFor(() => consultationRows(rootNode).length > 0);
+  const bell = rootNode.querySelector('[data-action="toggle-notifications"]');
+  assert.equal(bell.dataset.state, "prompt", "permission is still unanswered before the click");
+
+  await act(async () => { bell.click(); });
+  await settle();
+  assert.equal(FakeNotification.permission, "granted");
+  assert.equal(bell.dataset.state, "on", "the first grant enables reminders instead of toggling them off");
+  assert.equal(browser.localStorage.getItem("zzsh.im-support.notifications.admin-a"), "on", "the enabled preference is persisted");
+  assert.match(rootNode.querySelector(".im-wb-notice")?.textContent ?? "", /消息提醒已开启/);
+});
+
+test("opening the workbench with an existing unread queue does not replay desktop notifications", async (t) => {
+  const fired = [];
+  class FakeNotification {
+    static permission = "granted";
+    static requestPermission = async () => "granted";
+    constructor(title, options) { fired.push({ title, tag: options?.tag }); }
+    close() {}
+  }
+  const originalNotification = globalThis.Notification;
+  const originalBrowserNotification = browser.Notification;
+  const hiddenDescriptor = Object.getOwnPropertyDescriptor(browser.document, "hidden");
+  globalThis.Notification = FakeNotification;
+  browser.Notification = FakeNotification;
+  Object.defineProperty(browser.document, "hidden", { configurable: true, value: true });
+  const seenKey = "zzsh.im-support.seen.admin-a";
+  const seenBefore = browser.localStorage.getItem(seenKey);
+  browser.localStorage.removeItem(seenKey);
+  t.after(() => {
+    globalThis.Notification = originalNotification;
+    browser.Notification = originalBrowserNotification;
+    if (hiddenDescriptor) Object.defineProperty(browser.document, "hidden", hiddenDescriptor);
+    else delete browser.document.hidden;
+    if (seenBefore === null) browser.localStorage.removeItem(seenKey);
+    else browser.localStorage.setItem(seenKey, seenBefore);
+  });
+
+  const unreadSecond = {
+    ...activeConsultation, id: "c-active-2", threadId: "thread-z", roundId: "c-active-2", conversationId: "conv-z",
+    lastMessageAt: "2026-09-17T00:05:00.000Z", lastMessagePreview: "历史未读消息", adminUnreadCount: 2,
+    user: { id: "user-z", name: "用户 Z", username: "user-z" },
+  };
+  fixture = { consultations: [activeConsultation, unreadSecond], history: [], post: null };
+  const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept"]) });
+  await waitFor(() => consultationRows(rootNode).length > 1);
+  await settle();
+  await settle();
+  assert.ok(rootNode.querySelector(".im-wb-unread"), "the existing second row is unread in the directory");
+  assert.equal(fired.length, 0, "the pre-existing unread queue is seeded, not announced");
+});
+
+test("composer quick replies insert one template into the draft without sending", async (t) => {
+  let posts = 0;
+  fixture = { consultations: [activeConsultation], history: [], post: () => { posts += 1; return { message: {} }; } };
+  const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept"]) });
+  await selectFirst(rootNode);
+  await waitFor(() => !rootNode.querySelector("textarea").disabled);
+
+  const trigger = rootNode.querySelector('[data-action="quick-replies"]');
+  assert.ok(trigger, "the composer offers quick replies next to emoji and media");
+  assert.equal(trigger.tagName, "BUTTON", "the entry is reachable with the keyboard");
+  assert.equal(trigger.getAttribute("aria-label"), "常用语");
+
+  await typeDraft(rootNode, "补充：");
+  const area = rootNode.querySelector("textarea");
+  area.setSelectionRange(area.value.length, area.value.length);
+  await act(async () => { trigger.click(); });
+  await settle();
+  const items = [...document.querySelectorAll(".im-wb-quick-replies button")];
+  assert.equal(items.length, 5, "the fixed business template list is offered");
+  assert.ok(items.every((item) => item.tagName === "BUTTON"), "every template is a keyboard-operable button");
+  const chosen = items.find((item) => item.textContent.includes("核验等待"));
+  assert.ok(chosen, "the waiting-while-verifying template is present");
+  const text = chosen.querySelector("span").textContent;
+  await act(async () => { chosen.click(); });
+  await settle();
+  assert.equal(rootNode.querySelector("textarea").value, `补充：${text}`, "the template is inserted at the cursor");
+  assert.equal(document.activeElement, rootNode.querySelector("textarea"), "focus returns to the composer");
+  assert.equal(document.querySelector(".im-wb-quick-replies"), null, "choosing one closes the list");
+  assert.equal(posts, 0, "a template is never sent automatically");
+  assert.equal(rootNode.querySelector(".im-wb-send").textContent, "发送", "the agent still confirms the send");
 });

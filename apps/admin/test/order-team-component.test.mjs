@@ -55,7 +55,7 @@ async function mountOrderSender(t, methods={}, options={}) {
 test('image authorization cancelled by an order switch leaves a removable undispatched draft',async t=>{
   let release,entered=false,dispatched=0;
   const h=await mountOrderSender(t,{async sendImage(cid,_file,options){entered=true;await new Promise(resolve=>{release=resolve;});await options.authorize({conversationId:cid,operation:'send'});dispatched++;return {...h.sent(cid,'','image'),messageType:1};}});
-  await h.stage(1);await h.submit();await h.until(()=>entered);await h.click('ZZ-b');await h.until(()=>h.node.querySelector('h3')?.textContent==='订单b');
+  await h.stage(1);await h.submit();await h.until(()=>entered);await h.click('ZZ-b');await h.until(()=>h.node.querySelector('h3')?.textContent==='订单 ZZ-b');
   await act(async()=>release());await h.settle();await h.click('ZZ-a');await h.until(()=>h.node.querySelector('.order-team-image-draft'));
   const card=h.node.querySelector('.order-team-image-draft');assert.equal(dispatched,0);assert.equal(card.getAttribute('data-state'),'FAILED');
   const remove=[...card.querySelectorAll('button')].find(button=>button.textContent==='移除');assert.equal(remove.disabled,false);
@@ -76,7 +76,7 @@ for(const replaceClient of [false,true])test(`post-authorization image expiry st
   let rejectSend,dispatched=0;
   const h=await mountOrderSender(t,{async sendImage(cid,_file,options){await options.authorize({conversationId:cid,operation:'send'});dispatched++;return new Promise((_resolve,reject)=>{rejectSend=reject;});}});
   await h.stage(1);await h.submit();await h.until(()=>dispatched===1);
-  if(replaceClient)await h.render({client:{...h.client}});else {await h.click('ZZ-b');await h.until(()=>h.node.querySelector('h3')?.textContent==='订单b');}
+  if(replaceClient)await h.render({client:{...h.client}});else {await h.click('ZZ-b');await h.until(()=>h.node.querySelector('h3')?.textContent==='订单 ZZ-b');}
   await act(async()=>rejectSend(replaceClient?new Error('old SDK is disposed'):new h.ImLifecycleSupersededError()));await h.settle();
   if(!replaceClient){await h.click('ZZ-a');await h.until(()=>h.node.querySelector('.order-team-image-draft'));}
   const card=h.node.querySelector('.order-team-image-draft');assert.equal(card?.getAttribute('data-state'),'UNKNOWN','missing id never proves lack of dispatch');
@@ -501,7 +501,7 @@ test('order list refresh rebases a loaded 20+5 cursor window and advances bounde
   t.after(async()=>{await act(async()=>root.unmount());globalThis.setInterval=oldSet;globalThis.clearInterval=oldClear;await vite.close();browser.happyDOM.abort();});
   const settle=()=>act(async()=>{await new Promise(resolve=>setTimeout(resolve,5));});
   const until=async predicate=>{for(let i=0;i<160;i++){if(predicate())return;await settle();}throw Error('pagination refresh condition timed out');};
-  const ids=()=>[...node.querySelectorAll('.order-team-list > button > small:first-child')].map(el=>el.textContent.replace('ZZ-',''));
+  const ids=()=>[...node.querySelectorAll('.order-team-list > button > strong')].map(el=>el.textContent.replace('ZZ-',''));
   const clickMore=async()=>{const button=[...node.querySelectorAll('.order-team-list button')].find(item=>item.textContent.includes('更多订单'));assert.ok(button,'next page cursor is available');await act(async()=>button.click());};
   let rows=Array.from({length:25},(_,i)=>40-i),stopped=new Set(),calls=[],active=0,maxActive=0;
   const order=id=>({id:String(id),displayNo:`ZZ-${id}`,title:`账号${id}`,status:'PAID',teamState:'READY',firstResponseAt:stopped.has(String(id))?'2026-09-22T09:01:00.000Z':null,remindDueAt:null,addRound:0,escalationState:stopped.has(String(id))?'STOPPED':'RUNNING'});
@@ -555,7 +555,7 @@ test('load-more and scheduled refresh serialize and recompute the page cursor',a
   t.after(async()=>{await act(async()=>root.unmount());globalThis.setInterval=oldSet;globalThis.clearInterval=oldClear;await vite.close();browser.happyDOM.abort();});
   const settle=()=>act(async()=>{await new Promise(resolve=>setTimeout(resolve,5));});
   const until=async predicate=>{for(let i=0;i<160;i++){if(predicate())return;await settle();}throw Error('load-more/refresh race timed out');};
-  const ids=()=>[...node.querySelectorAll('.order-team-list > button > small:first-child')].map(el=>el.textContent.replace('ZZ-',''));
+  const ids=()=>[...node.querySelectorAll('.order-team-list > button > strong')].map(el=>el.textContent.replace('ZZ-',''));
   let rows=Array.from({length:50},(_,i)=>50-i),hold=null,calls=[],active=0,maxActive=0;
   const request=async path=>{const url=new URL(path,'http://127.0.0.1:4311'),cursor=url.searchParams.get('cursor');calls.push(cursor);active++;maxActive=Math.max(maxActive,active);
     try{if(cursor&&hold){const current=hold;hold=null;current.entered=true;await new Promise(resolve=>{current.release=resolve;});}

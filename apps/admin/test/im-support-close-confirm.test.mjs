@@ -109,9 +109,11 @@ globalThis.fetch = async (input, init = {}) => {
   if (url.pathname.endsWith("/im/consultations") && method === "GET") {
     const rows = ["a", "b"]
       .map(makeConsultation)
-      .filter((row) => !closedIds.includes(row.id))
-      .map((row) => ({ ...row, canSend: true, assignedAdmin: { id: currentAdmin, name: currentAdmin === "admin-a" ? "客服 A" : "客服 B" } }));
-    if (reopenedRound) rows.push({ ...makeConsultation("a"), ...reopenedRound });
+      .map((row) => ({ ...row, ...(closedIds.includes(row.id) ? { state: "CLOSED", threadState: "IDLE" } : {}), canSend: !closedIds.includes(row.id), assignedAdmin: { id: currentAdmin, name: currentAdmin === "admin-a" ? "客服 A" : "客服 B" } }));
+    if (reopenedRound) {
+      const reopened = { ...makeConsultation("a"), ...reopenedRound };
+      return response({ consultations: [...rows.filter((row) => row.threadId !== reopened.threadId), reopened] });
+    }
     return response({ consultations: rows });
   }
   if (url.pathname.endsWith("/im/message-access")) return response({ authorized: true });
@@ -137,6 +139,10 @@ const closePosts = (tag) => requests.filter((request) => request.method === "POS
   : /\/consultations\/[^/]+\/close$/.test(request.path))).length;
 const consultationsGets = () => requests.filter((request) => request.method === "GET" && request.path.split("?")[0].endsWith("/im/consultations")).length;
 
+const consultationRows = (root) => {
+  const list = root.querySelector(".im-wb-unified-queue") ?? root.querySelector(".im-wb-pane:not([hidden]) .im-wb-queue");
+  return [...(list?.querySelectorAll(".im-wb-row") ?? [])];
+};
 async function settle() {
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
 }
@@ -167,7 +173,7 @@ async function mount(t, adminUserId = "admin-a") {
     browser.document.querySelectorAll(".im-wb-dialog").forEach((dialog) => dialog.remove());
   });
   await act(async () => { root.render(createElement(ImSupportView, { snapshot: snapshot(permissions, adminUserId), onRefresh: async () => snapshot(permissions, adminUserId) })); });
-  await waitFor(() => rootNode.querySelectorAll(".im-wb-row").length > 0);
+  await waitFor(() => consultationRows(rootNode).length > 0);
   return { rootNode, root };
 }
 
@@ -176,7 +182,7 @@ const closeButton = (rootNode) => rootNode.querySelector('[data-action="close-co
 const confirmButton = () => browser.document.querySelector('[data-action="confirm-close-consultation"]');
 
 async function pick(rootNode, tag) {
-  const row = [...rootNode.querySelectorAll(".im-wb-row")].find((item) => item.textContent.includes(`用户 ${tag.toUpperCase()}`));
+  const row = [...consultationRows(rootNode)].find((item) => item.textContent.includes(`用户 ${tag.toUpperCase()}`));
   assert.ok(row, `queue lists 用户 ${tag.toUpperCase()}`);
   await act(async () => { row.click(); });
   await settle();
@@ -189,6 +195,7 @@ async function openConfirm(rootNode, tag) {
 
 test("case column shows only proven current facts, not an inferred stage or turn", async (t) => {
   const { rootNode } = await mount(t);
+  await pick(rootNode, "a");
   assert.equal(rootNode.querySelector(".im-wb-stepper"), null, "no inferred case stepper");
   assert.equal(rootNode.querySelector(".im-wb-next"), null, "no inferred next-step card");
   assert.doesNotMatch(rootNode.textContent, /案件进度|轮到你回复|已加载消息/);
@@ -221,7 +228,7 @@ test("ending a consultation closes only the current round and says so", async (t
   await act(async () => { cancel.click(); });
   await settle();
   assert.equal(closePosts(), 0, "cancelling the confirmation never posts");
-  assert.equal(rootNode.querySelectorAll(".im-wb-row").length, 2);
+  assert.equal(consultationRows(rootNode).length, 2);
 
   await act(async () => { closeButton(rootNode).click(); });
   await waitFor(() => closeDialog());
@@ -232,10 +239,11 @@ test("ending a consultation closes only the current round and says so", async (t
   await act(async () => { pendingCloses.get("consultation-a")(response({ consultation: { ...makeConsultation("a"), state: "CLOSED", threadState: "IDLE" } })); });
   await settle();
   assert.equal(browser.document.querySelector(".im-wb-dialog"), null, "the dialog closes after a confirmed close");
-  assert.equal(rootNode.querySelectorAll(".im-wb-row").length, 1, "the closed round leaves the current-round queue");
+  assert.equal(consultationRows(rootNode).length, 2, "the closed round stays in the unified history list");
+  assert.match(consultationRows(rootNode).find((row) => row.textContent.includes("用户 A"))?.textContent ?? "", /已结束/, "the closed row keeps its closed state");
   assert.match(rootNode.textContent, /本轮已结束/, "the receipt reports the round result");
   assert.match(rootNode.textContent, /聊天记录保留/, "the receipt does not claim the thread/history was closed");
-  assert.doesNotMatch(rootNode.textContent, /咨询已结束/, "the receipt never claims the whole consultation ended");
+  assert.doesNotMatch(rootNode.querySelector(".im-wb-notice")?.textContent ?? "", /咨询已结束/, "the receipt never claims the whole consultation ended");
 });
 
 test("an unknown close outcome is never inferred from the directory", async (t) => {
@@ -265,7 +273,7 @@ test("an unknown close outcome is never inferred from the directory", async (t) 
   assert.match(rootNode.textContent, /结束结果未确认/, "a directory re-read cannot clear the unknown state");
   assert.equal(closePosts(), postsBefore, "a directory re-read never produces another close");
   assert.equal(closeButton(rootNode).disabled, true);
-  assert.equal(rootNode.querySelectorAll(".im-wb-row").length, 2, "the row is not optimistically removed");
+  assert.equal(consultationRows(rootNode).length, 2, "the row is not optimistically removed");
   await pick(rootNode, "b");
   assert.equal(rootNode.querySelector('.im-wb-notice[data-tone="warn"]'), null, "the unknown banner belongs to A, not to every conversation");
   assert.match(rootNode.textContent, /结束结果未确认，待平台核对/, "A still carries the marker in the queue row");
@@ -279,12 +287,12 @@ test("a close that succeeds while another conversation is selected still settles
   assert.equal(closePosts("a"), 1);
 
   await pick(rootNode, "b");
-  assert.equal(rootNode.querySelectorAll(".im-wb-row").length, 2);
+  assert.equal(consultationRows(rootNode).length, 2);
   assert.equal(closeButton(rootNode).disabled, true, "while A is in flight B cannot close either");
 
   await act(async () => { pendingCloses.get("consultation-a")(response({ consultation: { ...makeConsultation("a"), state: "CLOSED" } })); });
   await settle();
-  assert.equal(rootNode.querySelectorAll(".im-wb-row").length, 1, "A leaves the queue even though B was selected when the receipt arrived");
+  assert.equal(consultationRows(rootNode).length, 2, "the closed A row remains as history while B is selected");
   assert.match(rootNode.textContent, /本轮已结束/, "the original close reports its own result");
 });
 
@@ -298,7 +306,7 @@ test("a close that fails after switching away still records the unknown on the o
   await act(async () => { pendingCloses.get("consultation-a")(response({ error: { code: "INTERNAL_ERROR" } }, 500)); });
   await settle();
   assert.equal(closePosts("a"), 1, "the unknown outcome is not re-posted");
-  assert.equal(rootNode.querySelectorAll(".im-wb-row").length, 2, "A stays in the queue");
+  assert.equal(consultationRows(rootNode).length, 2, "A stays in the queue");
 
   await pick(rootNode, "a");
   assert.match(rootNode.textContent, /结束结果未确认/, "A carries the unknown responsibility, not B");
@@ -314,11 +322,11 @@ test("a receipt for the previous identity never lands on the new one", async (t)
   assert.equal(closePosts("a"), 1);
 
   await act(async () => { root.render(createElement(ImSupportView, { snapshot: snapshot(permissions, "admin-b"), onRefresh: async () => snapshot(permissions, "admin-b") })); });
-  await waitFor(() => rootNode.querySelectorAll(".im-wb-row").length === 2);
+  await waitFor(() => consultationRows(rootNode).length === 2);
 
   await act(async () => { pendingCloses.get("consultation-a")(response({ consultation: { ...makeConsultation("a"), state: "CLOSED" } })); });
   await settle();
-  assert.equal(rootNode.querySelectorAll(".im-wb-row").length, 2, "the old identity's receipt cannot remove rows from the new identity's queue");
+  assert.equal(consultationRows(rootNode).length, 2, "the old identity's receipt cannot remove rows from the new identity's queue");
   assert.doesNotMatch(rootNode.textContent, /咨询已结束|结束结果未确认/, "the old identity's result never lands on the new one");
 });
 
@@ -330,7 +338,7 @@ test("a definite rejection keeps the consultation actionable instead of marking 
   await settle();
   assert.equal(closePosts("a"), 1);
   assert.doesNotMatch(rootNode.textContent, /结束结果未确认/, "a 4xx is a definite answer, not an unknown outcome");
-  assert.equal(rootNode.querySelectorAll(".im-wb-row").length, 2);
+  assert.equal(consultationRows(rootNode).length, 2);
   await pick(rootNode, "a");
   assert.equal(closeButton(rootNode).disabled, false, "a definite rejection can still be acted on again");
 });
@@ -355,7 +363,7 @@ test("a close in flight when only the send permission is revoked still converges
   await act(async () => { pendingCloses.get("consultation-a")(response({ consultation: { ...makeConsultation("a"), state: "CLOSED" } })); });
   await settle();
   assert.equal(closePosts("a"), 1, "converging never re-posts the close");
-  assert.equal(rootNode.querySelectorAll(".im-wb-row").length, 1, "the receipt still settles on the original consultation");
+  assert.equal(consultationRows(rootNode).length, 2, "the receipt still settles on the original consultation and keeps its closed history row");
   assert.match(rootNode.textContent, /本轮已结束/);
   assert.doesNotMatch(rootNode.textContent, /结束结果未确认/);
 });
@@ -372,7 +380,7 @@ test("a close that returns UNKNOWN after a send-only revoke keeps the original i
   await settle();
 
   assert.equal(closePosts("a"), 1, "the unknown outcome is not re-posted after the permission change");
-  assert.equal(rootNode.querySelectorAll(".im-wb-row").length, 2, "A stays in the queue instead of silently dropping out");
+  assert.equal(consultationRows(rootNode).length, 2, "A stays in the queue instead of silently dropping out");
   assert.match(rootNode.textContent, /结束结果未确认/, "the unknown responsibility is kept, not discarded with the permission");
   assert.match(rootNode.textContent, /结束结果未确认，待平台核对/, "the queue row keeps the marker for A");
   assert.equal(closeButton(rootNode).disabled, true);
@@ -389,7 +397,7 @@ test("ending one round keeps the same thread history for the next round", async 
   await settle();
   closedIds = ["consultation-a"];
   assert.match(rootNode.textContent, /本轮已结束/);
-  assert.equal(rootNode.querySelectorAll(".im-wb-row").length, 1, "only the closed round leaves the current list");
+  assert.equal(consultationRows(rootNode).length, 2, "the closed round stays in the list with its thread history");
 
   // 用户再次咨询：后台返回同一 thread 的新一轮；管理端列表只显示当前轮，历史仍是同一 Team。
   reopenedRound = { id: "consultation-a-r3", roundId: "consultation-a-r3", roundSeq: 3, threadId: "thread-a", threadState: "ACTIVE", state: "ACTIVE", canSend: true, messageScopeState: "READY", conversationId: "team-a", assignedAdmin: { id: "admin-a", name: "客服 A" } };
@@ -397,7 +405,7 @@ test("ending one round keeps the same thread history for the next round", async 
     await act(async () => { entry.callback(); await Promise.resolve(); });
   }
   await settle();
-  const reopenedRow = [...rootNode.querySelectorAll(".im-wb-row")].find((item) => item.textContent.includes("用户 A"));
+  const reopenedRow = [...consultationRows(rootNode)].find((item) => item.textContent.includes("用户 A"));
   assert.ok(reopenedRow, "the next round of the same thread returns to the current-round list");
   assert.doesNotMatch(reopenedRow.textContent, /已结束/, "an open round is never presented as closed");
   await act(async () => { reopenedRow.click(); });

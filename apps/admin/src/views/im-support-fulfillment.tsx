@@ -5,21 +5,26 @@ import { CircleAlert, ClipboardList, Info, RefreshCw, ShieldCheck, TriangleAlert
 import { AdminApiError, friendlyError } from "../api";
 import { formatDateTime } from "./im-support-format";
 import { Dialog, DialogContent } from "../components/ui/dialog";
+import { ConfirmAlertDialog } from "../components/ui/alert-dialog";
 import { Textarea } from "../components/ui/textarea";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardDescription, CardTitle } from "../components/ui/card";
 import { Item, ItemActions, ItemContent, ItemGroup, ItemMedia, ItemTitle } from "../components/ui/item";
+import { formatFundingCents } from "./supply-review/model";
 import {
   buildFulfillmentIntent,
   readOrderSettlement,
+  readSupportCancel,
   sendFulfillmentIntent,
   sendManualClose,
+  sendSupportCancel,
   type ManualCloseResult,
   type EarlyEndReason,
   type FulfillmentIntent,
   type SettlementReadView,
+  type SupportCancelView,
 } from "../lib/order-fulfillment-client";
 
 type InventoryLine = { itemId: string; quantity: string; unit: string; pricingKind: string; name: string | null };
@@ -656,7 +661,141 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
     </Dialog>
   </Card>
   {canManualClose && orderStatus === "PAID" ? <ManualCloseCard orderId={orderId} displayNo={displayNo} /> : null}
+  {canManualClose && orderStatus === "PAID" ? <SupportCancelCard orderId={orderId} displayNo={displayNo} /> : null}
   </>;
+}
+
+const SUPPORT_CANCEL_REASON_TEXT: Record<string, string> = {
+  ORDER_COMPLETED: "结算已生成或订单已完成，不能在这里取消；请走财务/售后退款。",
+  ORDER_NOT_PAID: "订单当前不是已付款可取消状态；请刷新后核对。",
+  PAYMENT_BASIS_UNAVAILABLE: "原 JoinPay 支付单不可用，不能安全发起原路退款。",
+  SETTLEMENT_ALREADY_POSTED: "结算已落账，不能在这里取消；请走财务/售后退款。",
+  SETTLEMENT_DRAFT_EXISTS: "存在结算草稿或受理单，请先处理或关闭结算后再取消。",
+  MANUAL_ADJUSTMENT_REVIEW: "存在待处理金额调整，请先处理后再取消。",
+  DISTRIBUTION_RECONCILIATION_REQUIRED: "存在未冲销的佣金/分销收益，请先转财务核对。",
+  REFUND_PENDING: "本单已有未完成的退款申请，请先处理退款。",
+  TERMINATION_PENDING: "本单已有未处理的终止申请，请先处理。",
+  ALREADY_CANCELLED: "订单已取消。",
+  ORDER_CHANGED: "订单已变化，请刷新后重新核对退款资格。",
+};
+const SUPPORT_CANCEL_UNKNOWN = "取消结果未确认。请先刷新订单核对；不要用新原因重复提交，可在本页按原请求重试。";
+
+function supportCancelReasonText(reason: string | null | undefined): string {
+  return reason && SUPPORT_CANCEL_REASON_TEXT[reason] ? SUPPORT_CANCEL_REASON_TEXT[reason]! : "当前状态不满足客服取消条件，请刷新后核对。";
+}
+
+function supportCancelRefundText(view: SupportCancelView | null): string {
+  if (!view?.refund || view.refund.integration !== "INTEGRATED" || !view.refund.intents?.length) {
+    return "退款责任已登记，等待系统提交原路退款；银行到账未知。";
+  }
+  const latest = view.refund.intents[view.refund.intents.length - 1]!;
+  if (latest.requiresReview || latest.state === "REVIEW_REQUIRED") return "退款需人工复核；银行到账未知。";
+  if (latest.state === "SUCCEEDED") return "渠道退款成功（本地核销），银行到账未知。";
+  if (latest.state === "FAILED") return "渠道退款失败（未扣款），请转财务处理。";
+  if (latest.state === "SUBMITTING" || latest.state === "PROCESSING") return "渠道处理中，结果未确认。";
+  if (latest.state === "UNKNOWN") return "渠道结果未确认，不能视为已退款。";
+  return "原路退款待提交；银行到账未知。";
+}
+
+function SupportCancelCard({ orderId, displayNo }: { orderId: string; displayNo: string }) {
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState("");
+  const [phase, setPhase] = useState<"IDLE" | "LOADING" | "SENDING" | "UNKNOWN">("IDLE");
+  const [preview, setPreview] = useState<SupportCancelView | null>(null);
+  const [result, setResult] = useState<SupportCancelView | null>(null);
+  const [error, setError] = useState("");
+  const keyRef = useRef("");
+  const trimmed = reason.trim();
+  const valid = trimmed.length >= 3 && trimmed.length <= 600
+    && ![...reason].some((ch) => { const code = ch.codePointAt(0)!; return code < 32 && code !== 10 && code !== 13 || code === 127; });
+
+  const openDialog = async () => {
+    if (phase !== "UNKNOWN") keyRef.current = "";
+    setError("");
+    setReason("");
+    setPreview(null);
+    setPhase("LOADING");
+    setOpen(true);
+    try {
+      const view = await readSupportCancel(orderId);
+      setPreview(view);
+      if (view.supportCancellation) setResult(view);
+      setPhase("IDLE");
+    } catch (cause) {
+      setPhase("IDLE");
+      if (cause instanceof AdminApiError && (cause.status === 401 || cause.status === 423)) setError("登录状态已变化；请重新确认管理员身份后核对。");
+      else if (cause instanceof AdminApiError && cause.status === 403) setError("当前账号不是本单客服，或没有订单结算写权限。");
+      else if (cause instanceof AdminApiError && cause.status === 404) setError("客服取消服务未装配或订单不可读；不能据此认定无需退款。");
+      else setError(friendlyError(cause));
+    }
+  };
+
+  const submit = async () => {
+    if (!valid || phase === "SENDING" || !preview?.eligibility.allowed) return;
+    if (!keyRef.current) keyRef.current = `support_cancel_${orderId}_${crypto.randomUUID()}`;
+    setPhase("SENDING");
+    setError("");
+    const outcome = await sendSupportCancel(orderId, preview.orderRevision, trimmed, keyRef.current);
+    if (outcome.kind === "accepted") {
+      setResult(outcome.view);
+      setPreview(outcome.view);
+      setOpen(false);
+      setPhase("IDLE");
+      try {
+        const fresh = await readSupportCancel(orderId);
+        setResult(fresh);
+        setPreview(fresh);
+      } catch { /* the accepted receipt is already durable; a failed read must not undo it */ }
+      return;
+    }
+    if (outcome.kind === "unknown") {
+      setPhase("UNKNOWN");
+      setError(SUPPORT_CANCEL_UNKNOWN);
+      return;
+    }
+    if (outcome.kind === "auth") {
+      setPhase("IDLE");
+      setError("登录状态已变化；请重新确认管理员身份后核对。");
+      return;
+    }
+    setPhase("IDLE");
+    setError(supportCancelReasonText(outcome.reasons[0]));
+  };
+
+  const refundCents = result?.supportCancellation?.refundCents ?? preview?.eligibility.refundCents ?? null;
+  const blocked = preview !== null && !preview.eligibility.allowed && !preview.supportCancellation;
+  return <Card className="im-support-fulfillment im-order-card" data-support-cancel="true" aria-label="客服取消订单退款">
+    <CardContent className="grid gap-2 p-4">
+      <CardTitle className="flex items-center gap-2 text-sm"><TriangleAlert className="size-4 shrink-0 text-destructive" />取消订单（全额原路退款）</CardTitle>
+      <CardDescription className="text-xs leading-relaxed">结算落账前可取消；开租前和开租后都按原支付金额全额原路退回，不按已用时间扣费。结算已生成、佣金未冲销或存在未处理退款时不可用。</CardDescription>
+      {result ? <Alert><ShieldCheck /><AlertTitle>已取消并登记全额退款</AlertTitle><AlertDescription>
+        退款金额 {formatFundingCents(refundCents)}（原支付金额）。{supportCancelRefundText(result)} 订单已取消，群聊保留；退款处理结果以渠道与财务核对为准。
+      </AlertDescription></Alert>
+        : <div className="im-support-fulfillment-actions">
+          <Button variant="outline" size="sm" data-action="support-cancel-open" onClick={() => void openDialog()}>取消订单</Button>
+        </div>}
+      {error && !open ? <p className="im-support-fulfillment-error" role="alert"><CircleAlert size={14} />{error}</p> : null}
+    </CardContent>
+    <ConfirmAlertDialog open={open} onOpenChange={(next) => { if (!next && (phase === "SENDING" || phase === "UNKNOWN")) return; setOpen(next); }}
+      contentLabel="取消订单确认" title="确认取消订单并全额原路退款？"
+      description={`订单 ${displayNo}。提交后订单立即取消，并登记原支付金额的全额退款责任；渠道提交结果和银行到账状态未知。`}
+      confirmLabel={phase === "SENDING" ? "提交中…" : phase === "UNKNOWN" ? "重试同一请求" : "确认取消并退款"}
+      onConfirm={() => void submit()} busy={phase === "SENDING"} confirmDisabled={!preview?.eligibility.allowed || !valid}>
+      {phase === "LOADING" ? <p className="im-wb-dialog-hint">正在读取退款资格与金额…</p> : null}
+      {preview ? <div className="grid gap-2">
+        <p className="text-sm"><strong>退款金额：{formatFundingCents(preview.eligibility.refundCents ?? preview.supportCancellation?.refundCents)}</strong>（原支付金额，原路退回）</p>
+        <p className="im-wb-dialog-hint">{preview.openingConfirmed ? "订单已确认开租；本次仍按全额退款，不按已用时间扣费。" : "订单尚未确认开租；本次按全额退款。"} 渠道提交结果与银行到账状态未知，不能把本地退款责任当成已到账。</p>
+        {blocked ? <Alert variant="warning"><TriangleAlert /><AlertTitle>当前不可取消</AlertTitle><AlertDescription>{supportCancelReasonText(preview.eligibility.reason)}</AlertDescription></Alert> : null}
+      </div> : null}
+      {preview?.supportCancellation ? <Alert><ShieldCheck /><AlertTitle>已存在客服取消记录</AlertTitle><AlertDescription>{supportCancelRefundText(preview)}</AlertDescription></Alert> : null}
+      <label className="im-wb-dialog-note"><span>取消原因（必填，3–600 字）<em>{reason.length}/600</em></span>
+        <Textarea value={reason} maxLength={600} rows={3} aria-label="客服取消原因" data-support-cancel-reason="true"
+          placeholder="说明取消原因与已与双方沟通的事实" disabled={phase === "SENDING" || phase === "UNKNOWN" || !preview?.eligibility.allowed}
+          onChange={(event) => { setReason(event.target.value); setError(""); }} />
+      </label>
+      {error ? <p className="im-wb-dialog-error" role="alert"><CircleAlert size={14} />{error}</p> : null}
+    </ConfirmAlertDialog>
+  </Card>;
 }
 
 function ManualCloseCard({ orderId, displayNo }: { orderId: string; displayNo: string }) {

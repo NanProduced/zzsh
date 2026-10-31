@@ -107,6 +107,7 @@ globalThis.fetch = async (input, init = {}) => {
   requests.push({ path: `${url.pathname}${url.search}`, method: init.method ?? "GET" });
   if (url.pathname.endsWith("/im/token")) return response({ appKey: "test-app", accountId: "admin-a", token: "test-token", transport: "local-fake" });
   if (url.pathname.endsWith("/im/consultations")) return response({ consultations: [serviceConsultation] });
+  if (/\/im\/consultations\/[^/]+\/read$/.test(url.pathname)) return response({ adminReadAt: "2026-09-17T00:02:00.000Z" });
   if (url.pathname.endsWith("/im/message-access")) return response({ authorized: true });
   if (url.pathname.endsWith("/context")) return response({ consultationId: "c-1", version: 1, service: { type: "SERVICE", state: "ACTIVE", messageScopeState: "READY", handler: null }, user: { status: "available", publicId: "user-7", displayName: "测试用户甲", avatar: null }, subject: { status: "absent" }, membership: { status: "unavailable", reason: "membership_projection_not_integrated" } });
   if (url.pathname.includes("/users/")) return response({ userId: "user-7", maskedPhone: "138****8000", accountStatus: "ACTIVE", identityStatus: "VERIFIED", ageStatus: "ADULT", source: { kind: "LOCAL" }, registeredAt: "2026-01-05T00:00:00.000Z" });
@@ -145,6 +146,9 @@ test("support component preserves read state for send-only revoke and keeps sess
   };
 
   await act(async () => { root.render(createElement(ImSupportView, { snapshot: snapshot(basePermissions), onRefresh })); });
+  // 工作台不自动选中会话：显式点开唯一一行，后续断言仍针对真实选中态。
+  await waitFor(() => Boolean(rootNode.querySelector(".im-wb-row")));
+  await act(async () => { rootNode.querySelector(".im-wb-row").click(); });
   await waitFor(() => Boolean(rootNode.querySelector("textarea") && !rootNode.querySelector("textarea").disabled));
   await waitFor(() => [...rootNode.querySelectorAll(".im-wb-bub")].some((element) => element.textContent === "保留的授权历史消息"));
   const textarea = () => rootNode.querySelector("textarea");

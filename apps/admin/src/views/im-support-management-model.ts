@@ -29,12 +29,22 @@ export type SupportTotals = {
 
 export type SupportTrendPoint = { date: string; sessions: number; users: number };
 export type SupportHourlyPoint = { hour: number; sessions: number };
+export type SupportRatingAgent = { adminUserId: string; name: string; count: number; average: number | null };
+export type SupportRatings = {
+  count: number;
+  average: number | null;
+  /** 1..5 星各自数量；索引 0 是 1 星。 */
+  distribution: [number, number, number, number, number];
+  agents: SupportRatingAgent[];
+};
 export type SupportOverview = {
   onDuty: SupportOverviewAgent[];
   totals: SupportTotals;
   trend: SupportTrendPoint[];
   hourly: SupportHourlyPoint[];
+  ratings: SupportRatings;
 };
+const EMPTY_DISTRIBUTION: SupportRatings["distribution"] = [0, 0, 0, 0, 0];
 
 export type SupportHandover = {
   id: string;
@@ -115,6 +125,37 @@ function parseHourly(value: unknown): SupportHourlyPoint | null {
     : null;
 }
 
+/** 平均分只接受 1..5 的有限数；缺失或越界一律 null，不用 0 分补位。 */
+function ratingAverage(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 && value <= 5 ? value : null;
+}
+
+function parseRatingAgent(value: unknown): SupportRatingAgent | null {
+  const row = recordOf(value);
+  const adminUserId = text(row.adminUserId);
+  if (!adminUserId) return null;
+  return { adminUserId, name: text(row.name) || "未命名客服", count: count(row.count), average: ratingAverage(row.average) };
+}
+
+function parseRatings(value: unknown): SupportRatings {
+  const root = recordOf(value);
+  const rawDistribution = Array.isArray(root.distribution) ? root.distribution : [];
+  const distribution = EMPTY_DISTRIBUTION.map((_, index) => count(rawDistribution[index])) as SupportRatings["distribution"];
+  return {
+    count: count(root.count),
+    average: ratingAverage(root.average),
+    distribution,
+    agents: Array.isArray(root.agents)
+      ? root.agents.map(parseRatingAgent).filter((agent): agent is SupportRatingAgent => agent !== null)
+      : [],
+  };
+}
+
+/** 平均分固定一位小数；无评价给 “—”，不把 null 写成 0.0。 */
+export function formatRatingAverage(average: number | null | undefined): string {
+  return typeof average === "number" && Number.isFinite(average) && average > 0 ? average.toFixed(1) : "—";
+}
+
 export function parseSupportOverview(value: unknown): SupportOverview {
   const root = recordOf(value);
   const totals = recordOf(root.totals);
@@ -135,6 +176,7 @@ export function parseSupportOverview(value: unknown): SupportOverview {
     },
     trend,
     hourly,
+    ratings: parseRatings(root.ratings),
   };
 }
 

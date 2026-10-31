@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { BellOff, CircleAlert, EyeOff, Eye, Pin, RefreshCw, Search, UserPlus, X } from "lucide-react";
+import { ChevronLeft, CircleAlert, EyeOff, Eye, RefreshCw, Search, UserPlus, X } from "lucide-react";
 import { EntityPreviewTrigger, PreviewCardShell } from "../components/admin-preview";
 import { orderTeamMemberRole, type OrderTeamAccess, type OrderTeamMember } from "@zzsh/ui/order-team-panel";
 import { initialOf } from "./im-support-format";
@@ -19,6 +19,9 @@ const ADMIN_CANDIDATE_POOL = 50;
 
 export type OrderGroupPreference = { pinned: boolean; muted: boolean; hidden: boolean };
 export type OrderGroupPreferenceMap = Record<string, OrderGroupPreference>;
+/** Bridge the unified directory's row menu to the order workbench's local prefs/settings. */
+export const ORDER_GROUP_PREF_EVENT = "zzsh:im-order-group-preference";
+export const ORDER_GROUP_SETTINGS_EVENT = "zzsh:im-order-group-settings";
 export type InviteOrderGroupMember = (orderId: string, adminUserId: string) => Promise<void>;
 
 type StoredPreference = Partial<Record<keyof OrderGroupPreference, unknown>>;
@@ -183,7 +186,7 @@ export function AdminOrderGroupSettingsDrawer({ info, request, preferences, onPr
   const staff = info.members.filter((member) => member.party === "STAFF") as MemberView[];
   const others = info.members.filter((member) => member.party !== "BUYER" && member.party !== "OWNER" && member.party !== "STAFF");
   const ended = info.orderStatus === "COMPLETED" || info.orderStatus === "CANCELLED";
-  const groupName = info.name?.trim() || `${info.account.title} · 订单群`;
+
   const memberIds = new Set(info.members.map((member) => member.platformId));
   const text = query.trim().toLowerCase();
   const matchedAdmins = directory.filter((candidate) =>
@@ -216,13 +219,14 @@ export function AdminOrderGroupSettingsDrawer({ info, request, preferences, onPr
     onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section className="im-og-sheet" onClick={(event) => event.stopPropagation()}>
       <header className="im-og-head">
-        <div><strong>群设置</strong><span>{info.displayNo}</span></div>
+        <button type="button" className="im-og-back" data-action="back-to-order-chat" onClick={onClose}><ChevronLeft size={14} />返回会话</button>
+        <div className="im-og-head-title"><strong>群设置</strong><span>{info.displayNo}</span></div>
         <button ref={closeRef} type="button" className="im-og-icon-btn" data-action="close-group-settings" aria-label="关闭群设置" onClick={onClose}><X size={15} /></button>
       </header>
       <div className="im-og-body">
         <section className="im-og-group" aria-label="群信息">
-          <b>{groupName}</b>
-          <span>群成员 {info.members.length} · 用户 {users.length} · 客服 {staff.length}</span>
+          <b>{info.gameName} · 订单 {info.displayNo}</b>
+          <span>{info.account.title?.trim() || "账号"} · 群成员 {info.members.length} · 用户 {users.length} · 客服 {staff.length}</span>
         </section>
 
         <section className="im-og-section" aria-label="群成员">
@@ -230,7 +234,7 @@ export function AdminOrderGroupSettingsDrawer({ info, request, preferences, onPr
           {users.length ? <ul className="im-og-members" data-member-group="USER" aria-label="用户成员">
             {users.map((member) => <UserMemberRow key={member.accountId} member={member} />)}
           </ul> : <p className="im-og-empty">服务端未返回用户成员。</p>}
-          <p className="im-og-note">号主与租客由订单参与方决定，这里只读，不能添加、移除或改昵称。</p>
+          <p className="im-og-note">用户成员由订单决定，只读。</p>
 
           <div className="im-og-section-head im-og-staff-head">
             <h3>客服成员</h3>
@@ -247,7 +251,7 @@ export function AdminOrderGroupSettingsDrawer({ info, request, preferences, onPr
 
           {pickerOpen && !ended ? <div className="im-og-picker" aria-label="邀请管理员">
             <label className="im-og-search"><Search size={13} aria-hidden="true" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索管理员姓名" aria-label="搜索管理员姓名" /></label>
-            <p className="im-og-note">任意管理端管理员可邀请现有管理员；普通用户与站外账号不可邀请。仅列出状态正常的现有管理员。</p>
+            <p className="im-og-note">可邀请现有管理员。</p>
             {!inviteMember ? <p className="im-og-status" data-tone="warn" role="status">服务端未就绪：邀请接口尚未提供，当前不会发送邀请。</p> : null}
             {directoryState === "loading" ? <p className="im-og-empty">正在读取可邀请管理员…</p> : null}
             {directoryState === "denied" ? <div className="im-og-status" data-tone="warn" role="status"><CircleAlert size={13} />当前账号无权读取可邀请成员。<button type="button" data-action="retry-invite-candidates" onClick={() => void loadDirectory()}><RefreshCw size={12} />重试</button></div> : null}
@@ -278,16 +282,16 @@ export function AdminOrderGroupSettingsDrawer({ info, request, preferences, onPr
         <section className="im-og-section" aria-label="本机会话偏好">
           <h3>本机会话偏好</h3>
           <div className="im-og-prefs">
-            <PreferenceSwitch pref="pin" label="置顶会话" hint="仅让本机订单列表把该群排在最前" active={preferences.pinned} onClick={() => onPreferenceChange({ pinned: !preferences.pinned })} />
-            <PreferenceSwitch pref="mute" label="消息免打扰" hint="仅在本机标记，不改变消息接收" active={preferences.muted} onClick={() => onPreferenceChange({ muted: !preferences.muted })} />
+            <PreferenceSwitch pref="pin" label="置顶会话" hint="本机列表排到最前" active={preferences.pinned} onClick={() => onPreferenceChange({ pinned: !preferences.pinned })} />
+            <PreferenceSwitch pref="mute" label="消息免打扰" hint="只在本机标记" active={preferences.muted} onClick={() => onPreferenceChange({ muted: !preferences.muted })} />
             <div className="im-og-hide-row">
-              <span className="im-og-pref-copy"><b>{preferences.hidden ? "已在本机隐藏" : "不显示会话"}</b><small>仅隐藏本机列表中的这一行；不会退出群聊，也不删除任何人的聊天记录。</small></span>
+              <span className="im-og-pref-copy"><b>{preferences.hidden ? "已在本机隐藏" : "不显示会话"}</b><small>只隐藏本机列表，不影响群聊。</small></span>
               <button type="button" className="im-og-hide-btn" data-pref={preferences.hidden ? "restore" : "hide"} onClick={() => { if (preferences.hidden) onPreferenceChange({ hidden: false }); else onHide(); }}>
                 {preferences.hidden ? <><Eye size={13} />恢复显示</> : <><EyeOff size={13} />不显示会话</>}
               </button>
             </div>
           </div>
-          <p className="im-og-note"><Pin size={11} aria-hidden="true" />偏好按当前管理员保存在本机浏览器，不改变订单、群成员或他人的会话。<BellOff size={11} aria-hidden="true" />免打扰不会拦截平台通知。</p>
+          <p className="im-og-note">偏好只保存在本机；免打扰不拦截平台通知。</p>
         </section>
       </div>
     </section>

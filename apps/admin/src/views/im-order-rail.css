@@ -25,3 +25,11 @@
 .workspace-root .im-rail-party-role { flex:none; width:30px; color:var(--muted-foreground); font-size:11px; }
 .workspace-root .im-rail-party-name { min-width:0; font-weight:500; overflow-wrap:anywhere; }
 .workspace-root .im-rail-party-name:empty { display:none; }
+.workspace-root .im-rail-party-trigger { min-width:0; }
+.workspace-root .im-rail-party-link { display:inline-flex; min-width:0; align-items:center; gap:1px; border-radius:4px; color:var(--foreground); font-size:12px; font-weight:500; text-decoration:none; text-underline-offset:3px; }
+.workspace-root .im-rail-party-link span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.workspace-root .im-rail-party-link svg { width:12px; height:12px; flex:none; color:var(--muted-foreground); }
+.workspace-root .im-rail-party-link:hover { color:var(--im-accent-strong); text-decoration:underline; }
+.workspace-root .im-rail-party-link:hover svg { color:var(--im-accent-strong); }
+.workspace-root .im-rail-party-link:focus-visible { outline:2px solid var(--ring); outline-offset:2px; }
+.workspace-root .im-rail-party[data-empty="true"] .im-rail-party-name { color:var(--muted-foreground); }

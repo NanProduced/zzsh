@@ -1,27 +1,32 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
-import { ArrowDown, ChevronLeft, ChevronRight, CircleAlert, Headphones, Images, MoreHorizontal, Search, Settings, Smile } from "lucide-react";
+import { ArrowDown, ChevronLeft, ChevronRight, CircleAlert, FileText, Headphones, Images, MoreHorizontal, ReceiptText, Search, Settings, Smile, Video } from "lucide-react";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip";
 import { MessageScroller as MessageScrollerPrimitive } from "@shadcn/react/message-scroller";
 import { decodeImSystemNotice } from "@zzsh/im-client/message-state";
 import type { NimMessageLike, NimWebClientLike, NimWebConnectionState } from "@zzsh/im-client/nim-web-client";
 import {
-  OrderTeamPanel, escalationStateLabel, orderTeamLabel, orderTeamMemberRole,
-  type OrderTeamAccess, type OrderTeamAsideView, type OrderTeamConversationView, type OrderTeamListItem, type OrderTeamListView,
+  OrderTeamPanel, escalationStateLabel, orderStageTone, orderTeamLabel, orderTeamMemberRole,
+  type OrderTeamAccess, type OrderTeamAsideView, type OrderTeamConversationView, type OrderTeamListItem, type OrderTeamListView, type OrderTeamMember,
 } from "@zzsh/ui/order-team-panel";
 import { supportedImageUrl } from "./im-support-guards";
 import { dayKeyOf, dayLabelOf, formatBytes, formatDateTime, formatTime, initialOf } from "./im-support-format";
-import { CHAT_EMOJIS, MessageQuoted, MessageReplyQuote } from "@zzsh/ui/message-actions";
+import { CHAT_EMOJIS, MessageActionMenu, MessageQuoted, MessageReplyQuote, type MessageActionId, type MessageActionItem } from "@zzsh/ui/message-actions";
 import "@zzsh/ui/message-actions.css";
 import { MediaDraftBar, MediaMessage, mediaMessageOf } from "@zzsh/ui/message-media";
 import "@zzsh/ui/message-media.css";
 import { OrderCardMessage } from "@zzsh/ui/order-card";
+import { EntityPreviewTrigger, PreviewCardShell, UserPreviewCard } from "../components/admin-preview";
+import type { UserDirectoryDetail } from "../api";
 import { OrderFulfillmentSection } from "./im-support-fulfillment";
 import {
   AdminOrderGroupSettingsDrawer, groupPreferenceOf, readOrderGroupPreferences, storeOrderGroupPreferences, withGroupPreference,
+  ORDER_GROUP_PREF_EVENT, ORDER_GROUP_SETTINGS_EVENT,
   type InviteOrderGroupMember, type OrderGroupPreference, type OrderGroupPreferenceMap,
 } from "./im-support-group-settings";
 import { Bubble, BubbleContent } from "../components/ui/bubble";
+import { Dialog, DialogContent } from "../components/ui/dialog";
 import { InputGroup, InputGroupAddon, InputGroupTextarea } from "../components/ui/input-group";
 import { Kbd } from "../components/ui/kbd";
 import { Marker, MarkerContent } from "../components/ui/marker";
@@ -65,10 +70,11 @@ function imageOf(message: NimMessageLike): { url: string | null; name: string } 
   return { url, name: typeof record.name === "string" ? record.name : "订单图片" };
 }
 
-/** 发送者署名只认成员表：映射缺失时中性降级，绝不借用当前接待者或买家的身份。 */
+/** 发送者署名只认成员表：映射缺失时中性降级，绝不借用当前接待者或租客的身份。 */
 function authorOf(info: OrderTeamAccess, senderId: string, accountId: string, operatorName: string) {
   const member = info.members.find((item) => item.accountId === senderId);
   if (senderId === accountId) return { name: member?.name?.trim() || operatorName, role: member ? orderTeamMemberRole(member) : "平台客服" };
+  if (info.botAccountId && senderId === info.botAccountId) return { name: "洲洲助手（Bot）", role: "机器人" };
   if (!member) return { name: "未署名成员", role: null as string | null };
   return { name: member.name?.trim() || orderTeamMemberRole(member), role: orderTeamMemberRole(member) };
 }
@@ -76,8 +82,8 @@ function authorOf(info: OrderTeamAccess, senderId: string, accountId: string, op
 /** 终态订单的阶段文案只说明“已结束”，不退回过分配/匹配等过程词。 */
 function orderStageLabel(order: Parameters<typeof orderTeamLabel>[0]): string {
   const status = order.orderStatus ?? order.status;
-  if (status === "COMPLETED") return "已完成 · 已结束";
-  if (status === "CANCELLED") return "已取消 · 已结束";
+  if (status === "COMPLETED") return "已完成";
+  if (status === "CANCELLED") return "已取消";
   return orderTeamLabel(order);
 }
 
@@ -93,12 +99,60 @@ function serverTime(value: string): string {
   return formatDateTime(value);
 }
 
+const ACCOUNT_STATUS_TEXT: Record<string, string> = { ACTIVE: "账号正常", RESTRICTED: "账号受限", FROZEN: "已冻结", CANCELLED: "已注销", UNKNOWN: "状态未知" };
+const REAL_NAME_TEXT: Record<string, string> = { VERIFIED: "已实名", UNVERIFIED: "未实名", REJECTED: "实名未通过", UNKNOWN: "实名未知" };
+
+/** 群内用户只在悬停时读取资料摘要；读取失败不把未知伪装成正常。 */
+function PartyPreviewCard({ member, request, onOpenProfile }: { member: OrderTeamMember; request: Requester; onOpenProfile?: (userId: string) => void }) {
+  const [profile, setProfile] = useState<UserDirectoryDetail | null>(null);
+  const [state, setState] = useState<"loading" | "ready" | "denied" | "error">("loading");
+  useEffect(() => {
+    let active = true;
+    setProfile(null);
+    setState("loading");
+    void request<{ user: UserDirectoryDetail }>(`/users/${encodeURIComponent(member.platformId)}`)
+      .then((value) => { if (active) { setProfile(value.user ?? null); setState("ready"); } })
+      .catch((error) => { if (active) setState((error as { status?: number } | null)?.status === 403 || (error as { status?: number } | null)?.status === 401 ? "denied" : "error"); });
+    return () => { active = false; };
+  }, [member.platformId, request]);
+  const name = member.name?.trim() || orderTeamMemberRole(member);
+  if (state === "loading") return <PreviewCardShell ariaLabel={`用户预览：${name}`} header={<div className="im-og-card-identity"><strong>{name}</strong><span>正在读取用户资料…</span></div>}><p className="im-rail-note">读取完成后显示账号状态、实名与会员摘要。</p></PreviewCardShell>;
+  if (!profile) return <PreviewCardShell ariaLabel={`用户预览：${name}`} header={<div className="im-og-card-identity"><strong>{name}</strong><span>{orderTeamMemberRole(member)}</span></div>}><p className="im-rail-note">{state === "denied" ? "当前账号无权读取该用户资料。" : "用户资料暂时读不到，请打开资料页核对。"}</p></PreviewCardShell>;
+  return <UserPreviewCard
+    name={name}
+    currentName={profile.name && profile.name.trim() !== name ? profile.name : undefined}
+    userId={member.platformId}
+    image={profile.image}
+    maskedPhone={profile.maskedPhone}
+    accountStatus={ACCOUNT_STATUS_TEXT[profile.accountStatus] ?? "状态未知"}
+    realNameStatus={REAL_NAME_TEXT[profile.identity?.status ?? profile.identityStatus] ?? "实名未知"}
+    membershipSummary={profile.membershipSummary}
+    creditSummary={profile.creditSummary}
+    riskFlag={profile.riskFlag}
+    canOpen={Boolean(onOpenProfile)}
+    onOpen={() => onOpenProfile?.(member.platformId)}
+    deniedReason="当前账号无权查看用户资料"
+  />;
+}
+
+function PartyRow({ role, member, request, onOpenProfile }: { role: string; member: OrderTeamMember | undefined; request: Requester; onOpenProfile?: (userId: string) => void }) {
+  if (!member) return <div className="im-rail-party" data-empty="true"><span className="im-rail-party-role">{role}</span><span className="im-rail-party-name">成员表未列</span></div>;
+  const name = member.name?.trim() || orderTeamMemberRole(member);
+  const href = `/users/${encodeURIComponent(member.platformId)}`;
+  return <div className="im-rail-party">
+    <span className="im-rail-party-role">{role}</span>
+    <EntityPreviewTrigger className="im-rail-party-trigger" side="left" align="start" touchLabel={`预览${role}资料`}
+      trigger={<a className="im-rail-party-link" href={href} onClick={(event) => { if (onOpenProfile) { event.preventDefault(); onOpenProfile(member.platformId); } }}><span>{name}</span><ChevronRight aria-hidden="true" /></a>}
+      content={<PartyPreviewCard member={member} request={request} onOpenProfile={onOpenProfile} />} />
+  </div>;
+}
+
 /**
  * Admin order workbench: the shared order-team panel keeps every read,
  * authorization, draft and send decision; this module only decides how the
  * loaded facts are presented in the three-column case workspace.
  */
-export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client, connection, active, sendAllowed, canManualClose, request, onAuthError, inviteGroupMember }: {
+export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client, connection, active, sendAllowed, canManualClose, request, onAuthError, inviteGroupMember, selectedOrderId, onOpenProfile }: {
   identity: string;
   adminUserId: string;
   operatorName: string;
@@ -111,13 +165,18 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
   onAuthError: (status: number) => void;
   /** Typed invite port. The BFF member endpoint is not shipped yet, so the drawer stays explicitly 未就绪 until a caller provides this. */
   inviteGroupMember?: InviteOrderGroupMember;
+  selectedOrderId?: string | null;
+  onOpenProfile?: (userId: string) => void;
 }) {
   const [query, setQuery] = useState("");
   const [emojiOpen, setEmojiOpen] = useState(false);
   const orderComposerRef = useRef<HTMLTextAreaElement | null>(null);
-  const [detailsOpen, setDetailsOpen] = useState(true);
+  const [detailsOpen, setDetailsOpen] = useState(() => !(typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(max-width:1439px)").matches));
   const [pane, setPane] = useState<"list" | "chat" | "details">("list");
   const [groupSettingsOpen, setGroupSettingsOpen] = useState(false);
+  const [listMenu, setListMenu] = useState<{ x: number; y: number; orderId: string; preference: OrderGroupPreference; row: HTMLElement | null } | null>(null);
+  const [activeOrderId, setActiveOrderId] = useState<string | null>(selectedOrderId ?? null);
+  useEffect(() => { if (selectedOrderId) setActiveOrderId(selectedOrderId); }, [selectedOrderId]);
   const [groupPrefs, setGroupPrefs] = useState<OrderGroupPreferenceMap>(() => readOrderGroupPreferences(adminUserId));
   const groupPrefsRef = useRef(groupPrefs); groupPrefsRef.current = groupPrefs;
   const groupTriggerRef = useRef<HTMLButtonElement | null>(null);
@@ -159,6 +218,7 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
     groupPrefsRef.current = next;
     setGroupPrefs(next);
     storeOrderGroupPreferences(adminUserId, next);
+    window.dispatchEvent(new CustomEvent(ORDER_GROUP_PREF_EVENT, { detail: { snapshot: next } }));
   };
   const changeGroupPreference = (orderId: string, patch: Partial<OrderGroupPreference>) => {
     persistGroupPrefs(withGroupPreference(groupPrefsRef.current, orderId, patch));
@@ -183,6 +243,51 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
     setGroupSettingsOpen(true);
     if (isNarrow()) setPane("details");
   };
+  const performGroupAction = (action: MessageActionId, orderId: string, preference: OrderGroupPreference) => {
+    if (action === "pin") { changeGroupPreference(orderId, { pinned: !preference.pinned }); return; }
+    if (action === "mute") { changeGroupPreference(orderId, { muted: !preference.muted }); return; }
+    if (action === "hide") { hideOrderGroup(orderId); return; }
+    if (action === "settings") {
+      selectOrderRef.current?.(orderId);
+      window.setTimeout(openGroupSettings, 80);
+    }
+  };
+  const handleListMenuAction = (action: MessageActionId) => {
+    const menu = listMenu;
+    setListMenu(null);
+    if (menu) performGroupAction(action, menu.orderId, menu.preference);
+  };
+  const activeGroupPreference = activeOrderId ? groupPreferenceOf(groupPrefs, activeOrderId) : null;
+  const messageGroupItems: MessageActionItem[] = activeOrderId && activeGroupPreference ? [
+    { id: "pin", label: activeGroupPreference.pinned ? "取消置顶" : "置顶会话" },
+    { id: "mute", label: activeGroupPreference.muted ? "取消消息免打扰" : "消息免打扰" },
+    { id: "settings", label: "群设置" },
+    { id: "hide", label: "不显示会话", danger: true },
+  ] : [];
+  const onMessageGroupAction = (action: MessageActionId) => {
+    if (activeOrderId && activeGroupPreference) performGroupAction(action, activeOrderId, activeGroupPreference);
+  };
+  // The unified directory owns its own row menu; it bridges local prefs/settings here.
+  useEffect(() => {
+    const onPreference = (event: Event) => {
+      const detail = (event as CustomEvent<{ orderId?: string; patch?: Partial<OrderGroupPreference>; snapshot?: OrderGroupPreferenceMap }>).detail;
+      if (!detail?.orderId || !detail.patch || detail.snapshot) return;
+      if (detail.patch.hidden === true) hideOrderGroup(detail.orderId);
+      else changeGroupPreference(detail.orderId, detail.patch);
+    };
+    const onSettings = (event: Event) => {
+      const detail = (event as CustomEvent<{ orderId?: string }>).detail;
+      if (!detail?.orderId) return;
+      if (selectedRef.current !== detail.orderId) selectOrderRef.current?.(detail.orderId);
+      window.setTimeout(openGroupSettings, 60);
+    };
+    window.addEventListener(ORDER_GROUP_PREF_EVENT, onPreference);
+    window.addEventListener(ORDER_GROUP_SETTINGS_EVENT, onSettings);
+    return () => {
+      window.removeEventListener(ORDER_GROUP_PREF_EVENT, onPreference);
+      window.removeEventListener(ORDER_GROUP_SETTINGS_EVENT, onSettings);
+    };
+  }, [changeGroupPreference, hideOrderGroup, openGroupSettings]);
   const closeGroupSettings = () => {
     const narrow = isNarrow();
     setGroupSettingsOpen(false);
@@ -223,12 +328,13 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
     const preferenceOf = (id: string) => groupPreferenceOf(groupPrefs, id);
     const hiddenItems = items.filter((row: OrderTeamListItem) => preferenceOf(row.id).hidden);
     const visibleItems = items.filter((row: OrderTeamListItem) => !preferenceOf(row.id).hidden);
-    // Pinned groups only move locally; the server order and every membership fact stay unchanged.
-    const orderedItems = [...visibleItems].sort((a, b) => Number(preferenceOf(b.id).pinned) - Number(preferenceOf(a.id).pinned));
-    const rows = text ? orderedItems.filter((row: OrderTeamListItem) => `${row.title} ${row.displayNo} ${orderStageLabel(row)}`.toLowerCase().includes(text)) : orderedItems;
+    // Pinned groups first, then the latest real message; server order/membership stay unchanged.
+    const messageAt = (row: OrderTeamListItem) => Date.parse(row.lastMessageAt ?? row.createdAt ?? "") || 0;
+    const orderedItems = [...visibleItems].sort((a, b) => Number(preferenceOf(b.id).pinned) - Number(preferenceOf(a.id).pinned) || messageAt(b) - messageAt(a));
+    const rows = text ? orderedItems.filter((row: OrderTeamListItem) => `${row.displayNo} ${orderStageLabel(row)}`.toLowerCase().includes(text)) : orderedItems;
     const allHidden = !text && items.length > 0 && rows.length === 0 && hiddenItems.length === items.length;
     return (
-      <aside className="im-wb-queue" aria-label="我参与的订单群">
+      <aside className="im-wb-queue" aria-label="我参与的订单群" onContextMenu={(event) => { if ((event.target as Element).closest(".im-wb-row")) return; event.preventDefault(); setListMenu(null); }}>
         <div className="im-wb-queue-head"><strong>我参与的订单群</strong><b>{items.length - hiddenItems.length}</b></div>
         <label className="im-wb-search"><Search size={13} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索筛选当前列表" aria-label="搜索订单群" /></label>
         <p className="im-wb-filter-note">仅筛选本机已加载的订单群，计数不代表全部；「我参与的」即当前目录已授权的群。</p>
@@ -239,18 +345,20 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
             const fact = !ended && row.teamState === "READY"
               ? row.firstResponseOverdue ? "首响超时" : escalationStateLabel(row.escalationState ?? "NOT_STARTED", row.firstResponseAt ?? null)
               : null;
-            const todo = !ended ? row.todo ?? null : null;
             const due = !ended && row.dueAt ? `到期 ${serverTime(row.dueAt)}` : null;
+            const preview = typeof row.lastMessagePreview === "string" && row.lastMessagePreview.trim()
+              ? row.lastMessagePreview.trim()
+              : row.lastMessageAt ? "有新消息" : "暂无消息";
             const preference = preferenceOf(row.id);
             return (
-              <button type="button" key={row.id} className="im-wb-row" data-active={selectedId === row.id} data-pinned={preference.pinned ? "true" : undefined} data-muted={preference.muted ? "true" : undefined} aria-current={selectedId === row.id ? "page" : undefined}
-                onClick={() => { setImageErrors({}); chooseOrder(row.id); setPane("chat"); }}>
-                <span className="im-wb-row-av" aria-hidden="true">{initialOf(row.title)}</span>
+              <button type="button" key={row.id} className="im-wb-row" data-order-id={row.id} data-active={selectedId === row.id} data-pinned={preference.pinned ? "true" : undefined} data-muted={preference.muted ? "true" : undefined} aria-current={selectedId === row.id ? "page" : undefined}
+                onClick={() => { setImageErrors({}); chooseOrder(row.id); setPane("chat"); }}
+                onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setListMenu({ x: event.clientX, y: event.clientY, orderId: row.id, preference, row: event.currentTarget }); }}>
+                <span className="im-wb-row-av" data-kind="order" aria-hidden="true"><ReceiptText size={15} /></span>
                 <span className="im-wb-row-copy">
-                  <span className="im-wb-row-top"><b>{row.title}</b><i className="im-wb-tag">{row.displayNo}</i>{preference.pinned ? <i className="im-wb-tag im-og-list-tag" data-tone="pinned">置顶</i> : null}{preference.muted ? <i className="im-wb-tag im-og-list-tag" data-tone="muted">免打扰</i> : null}</span>
-                  <span className="im-wb-row-snip">{orderStageLabel(row)}</span>
-                  {todo || due || fact ? <span className="im-wb-row-foot">
-                    {todo ? <em data-tone="todo">{todo}</em> : null}
+                  <span className="im-wb-row-top"><b>{row.displayNo}</b>{preference.pinned ? <i className="im-wb-tag im-og-list-tag" data-tone="pinned">置顶</i> : null}{preference.muted ? <i className="im-wb-tag im-og-list-tag" data-tone="muted">免打扰</i> : null}{(row.unreadCount ?? 0) > 0 && !preference.muted ? <i className="im-wb-unread" aria-label={`${row.unreadCount} 条未读`}>{row.unreadCount! > 99 ? "99+" : row.unreadCount}</i> : null}</span>
+                  <span className="im-wb-row-snip"><em className="im-wb-order-state" data-tone={orderStageTone(row)}>{orderStageLabel(row)}</em><span className="im-wb-row-preview">{preview}</span></span>
+                  {due || fact ? <span className="im-wb-row-foot">
                     {due ? <small>{due}</small> : null}
                     {fact ? <em data-tone={row.firstResponseOverdue ? "warn" : undefined}>{fact}</em> : null}
                   </span> : null}
@@ -260,17 +368,35 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
           })}
           {!rows.length && items.length ? <p className="im-wb-list-empty">
             <strong>{allHidden ? "本机已隐藏全部订单群" : "当前列表没有匹配订单群"}</strong>
-            <span>{allHidden ? "恢复显示后仍按服务端授权读取；不会退出群聊。" : "试试其他账号名称或订单编号。"}</span>
+            <span>{allHidden ? "恢复显示后仍按服务端授权读取；不会退出群聊。" : "试试订单编号或状态。"}</span>
           </p> : null}
           {hiddenItems.length ? <button type="button" className="im-wb-more im-og-restore" data-action="restore-hidden-order-groups" onClick={restoreHiddenGroups}>已隐藏 {hiddenItems.length} 个订单群 · 恢复显示</button> : null}
           {nextCursor ? <button type="button" className="im-wb-more" disabled={loading || refreshing} onClick={onLoadMore}>{refreshing ? "正在读取…" : "更多订单群"}</button> : null}
         </div>
+        {listMenu ? <MessageActionMenu x={listMenu.x} y={listMenu.y} label="订单群操作" returnFocus={listMenu.row}
+          items={[
+            { id: "pin" as const, label: listMenu.preference.pinned ? "取消置顶" : "置顶会话" },
+            { id: "mute" as const, label: listMenu.preference.muted ? "取消消息免打扰" : "消息免打扰" },
+            { id: "settings" as const, label: "群设置" },
+            { id: "hide" as const, label: "不显示会话", danger: true },
+          ]}
+          onSelect={handleListMenuAction} onClose={() => setListMenu(null)} /> : null}
       </aside>
     );
   };
 
   const renderConversation = (view: OrderTeamConversationView) => {
-    const { info, messages } = view;
+    const { info, messages, refreshAccess } = view;
+    // 代确认只对负责客服开放；boss/其他客服即使看得到卡片也不渲染该动作，服务端仍会复核。
+    const viewerResponsible = info.members.some((member) => member.accountId === info.viewerAccountId && member.party === "STAFF" && member.responsible);
+    const confirmOnBehalf = canManualClose === true && viewerResponsible
+      ? async (target: OrderTeamAccess, party: "RENTER" | "OWNER") => {
+          if (!target.openingId || !Number.isInteger(target.openingVersion)) throw new Error("期初信息未就绪，请刷新后重试");
+          await request(`/orders/${encodeURIComponent(target.orderId)}/openings/${encodeURIComponent(target.openingId)}/confirm`,
+            { party, versionNo: target.openingVersion });
+          await refreshAccess();
+        }
+      : undefined;
     const jumpToMessage = (messageId: string) => {
       const target = messages.find((message) => message.id === messageId || message.messageClientId === messageId || message.messageServerId === messageId);
       if (!target) return;
@@ -295,8 +421,6 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
         el?.setSelectionRange(position, position);
       });
     };
-    const scope = info.members.map((member) => orderTeamMemberRole(member));
-    const visibleScope = [...new Set(scope)].join("、");
     let timelineDay = "";
     const items = messages.map((message, index) => {
       const nodes = [];
@@ -323,17 +447,17 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
       const text = typeof message.text === "string" && message.text.trim() ? message.text : message.messageType === 0 || image || media ? "" : "暂不支持展示的消息类型";
       nodes.push(<MessageScrollerPrimitive.Item key={message.id} messageId={message.id} scrollAnchor={!self}>
         <Message align={self ? "end" : "start"} className="im-wb-msg" data-self={self} data-grouped={grouped} data-message-id={message.id} onContextMenu={view.menuHandlers.onContextMenu} {...view.menuHandlers.longPress}>
-          <MessageAvatar className="im-wb-av" aria-hidden="true">{initialOf(author.name)}</MessageAvatar>
+          <MessageAvatar className="im-wb-av" aria-hidden="true">{author.role === "机器人" ? <img src="/art/zhouzhou/avatar.webp" alt="" /> : initialOf(author.name)}</MessageAvatar>
           <MessageContent className="im-wb-msg-body" data-card={card ? "true" : undefined}>
             {grouped ? null : <MessageHeader className="im-wb-msg-meta"><b>{author.name}</b>{author.role ? <span className="im-wb-role-tag" data-role={author.role}>{author.role}</span> : null}{self ? null : <time>{formatTime(message.createTime)}</time>}</MessageHeader>}
             {revoked ? <Bubble align={self ? "end" : "start"} variant={self ? "default" : "secondary"}>
               <BubbleContent className="im-wb-bub" data-revoked="true">消息已撤回</BubbleContent>
-            </Bubble> : card ? <OrderCardMessage message={message} info={info} onOpenOrder={() => { window.location.assign(`/orders/${encodeURIComponent(info.orderId)}`); }} /> : <Bubble align={self ? "end" : "start"} variant={self ? "default" : "secondary"}>
+            </Bubble> : card ? <OrderCardMessage message={message} info={info} onConfirmOpeningOnBehalf={confirmOnBehalf} onOpenOrder={() => { window.location.assign(`/orders/${encodeURIComponent(info.orderId)}`); }} /> : <Bubble align={self ? "end" : "start"} variant={self ? "default" : "secondary"}>
               <BubbleContent className="im-wb-bub">
                 {media ? <MediaMessage media={media}/> : image ? (imageUrl
                 ? (failed
                   ? <button type="button" className="im-wb-thumb im-wb-thumb-failed" onClick={() => setImageErrors((current) => { const next = { ...current }; delete next[message.id]; return next; })} aria-label={`重新加载图片 ${image.name}`}>图片加载失败 · 点击重试</button>
-                  : <button type="button" className="im-wb-thumb" aria-label={`查看图片 ${image.name}`} onClick={(event) => view.openImage(imageUrl, image.name, event.currentTarget)}><img src={imageUrl} alt={image.name} loading="lazy" onError={() => setImageErrors((current) => ({ ...current, [message.id]: Date.now() }))} /></button>)
+                  : <button type="button" className="im-wb-thumb" aria-label={`查看图片 ${image.name}`} title={`查看图片 ${image.name}`} onClick={(event) => view.openImage(imageUrl, image.name, event.currentTarget)}><img src={imageUrl} alt={image.name} loading="lazy" onError={() => setImageErrors((current) => ({ ...current, [message.id]: Date.now() }))} /></button>)
                 : <span className="im-wb-thumb-missing">图片暂不可预览</span>) : text}
                 {message.reply ? <MessageQuoted text={message.reply.text ?? "消息"} senderName={info.members.find((member) => member.accountId === message.reply!.senderId)?.name?.trim() || null} onJump={() => jumpToMessage(message.reply!.messageId)} /> : null}
               </BubbleContent>
@@ -349,16 +473,16 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
       <div className="im-wb-chat">
         <header className="im-wb-chat-head" ref={chatHeadingRef} tabIndex={-1}>
           <button type="button" className="im-wb-back" data-action="back-to-order-list" onClick={() => setPane("list")}><ChevronLeft size={14} />列表</button>
-          <span className="im-wb-chat-av" aria-hidden="true">{initialOf(info.account.title)}</span>
+          <span className="im-wb-chat-av" aria-hidden="true">{initialOf(info.account.title?.trim() || "账")}</span>
           <div className="im-wb-chat-title">
             <h2><span className="im-wb-chat-user">{info.gameName} · 订单 {info.displayNo}</span></h2>
-            <span>{info.account.title} · {visibleScope || "群内成员"}共同可见</span>
+            <span>{info.account.title?.trim() || "账号"}</span>
           </div>
           <div className="im-wb-chat-actions">
             <span className="im-wb-state">成员 {info.members.length}</span>
-            <button ref={groupTriggerRef} type="button" className="im-wb-btn im-wb-btn-icon" data-action="open-group-settings" aria-label="群设置" aria-expanded={groupSettingsOpen}
+            <button ref={groupTriggerRef} type="button" className="im-wb-btn im-wb-btn-icon" data-action="open-group-settings" aria-label="群设置" title="群设置" aria-expanded={groupSettingsOpen}
               onClick={() => { if (groupSettingsOpen) closeGroupSettings(); else openGroupSettings(); }}><Settings size={15} /></button>
-            <button ref={detailsTriggerRef} type="button" className="im-wb-btn im-wb-btn-icon" data-action="toggle-order-details" aria-label={detailsOpen ? "收起本单详情" : "展开本单详情"} aria-expanded={detailsOpen} aria-controls="im-order-details"
+            <button ref={detailsTriggerRef} type="button" className="im-wb-btn im-wb-btn-icon" data-action="toggle-order-details" aria-label={detailsOpen ? "收起本单详情" : "展开本单详情"} title={detailsOpen ? "收起本单详情" : "展开本单详情"} aria-expanded={detailsOpen} aria-controls="im-order-details"
               onClick={() => { if (detailsOpen) closeDetails(); else openDetails(); }}><MoreHorizontal size={15} /></button>
           </div>
         </header>
@@ -374,7 +498,7 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
                     : <div className="im-wb-empty"><Headphones size={22} /><strong>本单群还没有可读消息</strong><span>连接状态：{view.connection === "CONNECTED" ? "已连接" : view.connection === "RECONNECTING" ? "网络中断，正在重连" : "连接不可用"}。</span><button type="button" onClick={view.onRefresh}>重新读取</button></div>}</MessageScrollerPrimitive.Item>}
                 </MessageScrollerPrimitive.Content>
               </MessageScrollerPrimitive.Viewport>
-              <MessageScrollerPrimitive.Button direction="end" className="im-wb-jump" render={<button type="button" aria-label="跳到最新消息" />}><ArrowDown size={13} aria-hidden="true" /></MessageScrollerPrimitive.Button>
+              <MessageScrollerPrimitive.Button direction="end" className="im-wb-jump" render={<button type="button" aria-label="跳到最新消息" title="跳到最新消息" />}><ArrowDown size={13} aria-hidden="true" /></MessageScrollerPrimitive.Button>
             </MessageScrollerPrimitive.Root>
           </MessageScrollerPrimitive.Provider>
         </div>
@@ -404,19 +528,33 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
               placeholder={!view.canSend ? "当前只可阅读，草稿会保留" : view.connection !== "CONNECTED" ? "云信通道未连接，草稿会保留" : "输入消息…"}
               disabled={!view.canSend} />
             <InputGroupAddon align="block-end" className="im-wb-composer-tools">
-              <Popover open={emojiOpen} onOpenChange={setEmojiOpen}>
-                <PopoverTrigger render={<button type="button" className="im-wb-tool" aria-label="表情" disabled={!view.canSend || view.imageBlocked || view.isImageSending} />}><Smile size={14} /></PopoverTrigger>
-                <PopoverContent side="top" align="start" className="w-auto p-0"><div className="chat-emoji-grid">
-                  {CHAT_EMOJIS.map((item) => <button key={item.emoji} type="button" className="chat-emoji-button" aria-label={item.label} onClick={() => insertEmoji(item.emoji)}>{item.emoji}</button>)}
-                </div></PopoverContent>
-              </Popover>
-              <label className="im-wb-tool"><Images size={14} />图片<input type="file" accept="image/jpeg,image/png" multiple onChange={(event: ChangeEvent<HTMLInputElement>) => { const files = event.target.files ? Array.from(event.target.files) : []; event.target.value = ""; view.onStageFiles(files); }} disabled={!view.canSend || view.imageBlocked || view.isImageSending || view.isMediaSending} /></label>
-              <button type="button" className="im-wb-tool" aria-label="发送视频" onClick={() => orderVideoInput.current?.click()} disabled={!view.canSend || view.imageBlocked || view.isImageSending || view.isMediaSending}>视频</button>
-              <input ref={orderVideoInput} type="file" accept="video/mp4,video/quicktime,video/webm" hidden onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) view.onStageMedia(file, "video"); }} disabled={!view.canSend || view.isImageSending || view.isMediaSending || view.mediaDraft?.state === "UNKNOWN"} />
-              <button type="button" className="im-wb-tool" aria-label="发送文件" onClick={() => orderFileInput.current?.click()} disabled={!view.canSend || view.imageBlocked || view.isImageSending || view.isMediaSending}>文件</button>
-              <input ref={orderFileInput} type="file" accept="application/pdf,application/zip,text/plain,text/csv,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.presentationml.presentation" hidden onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) view.onStageMedia(file, "file"); }} disabled={!view.canSend || view.isImageSending || view.isMediaSending || view.mediaDraft?.state === "UNKNOWN"} />
-              <button type="button" className="im-wb-tool" data-action="order-insert-summary" disabled={!view.canSend}
-                onClick={() => view.setDraft(`${view.draft ? `${view.draft}\n` : ""}【本单信息】${info.account.title}（订单 ${info.displayNo}）`)}>本单信息</button>
+              <TooltipProvider delay={200}>
+                <Popover open={emojiOpen} onOpenChange={setEmojiOpen}>
+                  <PopoverTrigger render={<button type="button" className="im-wb-tool" aria-label="表情" title="表情" disabled={!view.canSend || view.imageBlocked || view.isImageSending} />}><Smile size={15} /></PopoverTrigger>
+                  <PopoverContent side="top" align="start" className="w-auto p-0"><div className="chat-emoji-grid">
+                    {CHAT_EMOJIS.map((item) => <button key={item.emoji} type="button" className="chat-emoji-button" aria-label={item.label} onClick={() => insertEmoji(item.emoji)}>{item.emoji}</button>)}
+                  </div></PopoverContent>
+                </Popover>
+                <Tooltip>
+                  <TooltipTrigger render={<label className="im-wb-tool" aria-label="发送图片" />}><Images size={15} /><input type="file" accept="image/jpeg,image/png" multiple onChange={(event: ChangeEvent<HTMLInputElement>) => { const files = event.target.files ? Array.from(event.target.files) : []; event.target.value = ""; view.onStageFiles(files); }} disabled={!view.canSend || view.imageBlocked || view.isImageSending || view.isMediaSending} /></TooltipTrigger>
+                  <TooltipContent>发送图片</TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger render={<button type="button" className="im-wb-tool" aria-label="发送视频" onClick={() => orderVideoInput.current?.click()} disabled={!view.canSend || view.imageBlocked || view.isImageSending || view.isMediaSending} />}><Video size={15} /></TooltipTrigger>
+                  <TooltipContent>发送视频</TooltipContent>
+                </Tooltip>
+                <input ref={orderVideoInput} type="file" accept="video/mp4,video/quicktime,video/webm" hidden onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) view.onStageMedia(file, "video"); }} disabled={!view.canSend || view.isImageSending || view.isMediaSending || view.mediaDraft?.state === "UNKNOWN"} />
+                <Tooltip>
+                  <TooltipTrigger render={<button type="button" className="im-wb-tool" aria-label="发送文件" onClick={() => orderFileInput.current?.click()} disabled={!view.canSend || view.imageBlocked || view.isImageSending || view.isMediaSending} />}><FileText size={15} /></TooltipTrigger>
+                  <TooltipContent>发送文件</TooltipContent>
+                </Tooltip>
+                <input ref={orderFileInput} type="file" accept="application/pdf,application/zip,text/plain,text/csv,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.presentationml.presentation" hidden onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) view.onStageMedia(file, "file"); }} disabled={!view.canSend || view.isImageSending || view.isMediaSending || view.mediaDraft?.state === "UNKNOWN"} />
+                <Tooltip>
+                  <TooltipTrigger render={<button type="button" className="im-wb-tool" data-action="order-insert-summary" aria-label="插入本单信息" disabled={!view.canSend}
+                    onClick={() => view.setDraft(`${view.draft ? `${view.draft}\n` : ""}【本单信息】${info.account.title?.trim() || "账号"}（订单 ${info.displayNo}）`)} />}><ReceiptText size={15} /></TooltipTrigger>
+                  <TooltipContent>插入本单信息</TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
               <span className="im-wb-hint im-wb-hint-right"><Kbd>Enter</Kbd> 发送 · <Kbd>Shift</Kbd>+<Kbd>Enter</Kbd> 换行</span>
               <button type="submit" className="im-wb-send" disabled={!view.canSend || view.connection !== "CONNECTED" || view.sending || view.isImageSending || view.isMediaSending || view.imageBlocked || (!view.draft.trim() && !view.stagedImages.length && !(view.pendingImage?.state === "FAILED") && view.mediaDraft?.state !== "READY")}>{view.sending ? "发送中…" : "发送"}</button>
             </InputGroupAddon>
@@ -458,19 +596,13 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
     const itemAmount = sumAmount(itemLines);
     const buyer = info.members.find((member) => member.party === "BUYER");
     const owner = info.members.find((member) => member.party === "OWNER");
-    const partyRow = (role: string, member: typeof buyer) => (
-      <div className="im-rail-party" key={role}>
-        <span className="im-rail-party-role">{role}</span>
-        <span className="im-rail-party-name">{member ? member.name?.trim() || "未署名" : "成员表未列"}</span>
-      </div>
-    );
     const ended = info.orderStatus === "COMPLETED" || info.orderStatus === "CANCELLED";
     const amountUnknown = quote !== null && (
       (coinLines.length > 0 && coinAmount === null) || (itemLines.length > 0 && itemAmount === null)
     );
     return (
       <aside id="im-order-details" className="order-team-aside im-wb-details im-order-rail-host" aria-label="本单详情" hidden={!detailsOpen} data-settings-open={groupSettingsOpen ? "true" : undefined}>
-        <div className="im-wb-details-head"><strong>本单详情</strong></div>
+        <div className="im-wb-details-head"><strong>本单详情</strong><button type="button" className="im-wb-btn im-wb-btn-icon im-wb-details-back" data-action="back-to-chat" onClick={closeDetails}>返回会话</button></div>
         <div className="im-order-rail">
           <RailSection title="账号价值">
             {visible.length ? <>
@@ -504,7 +636,7 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
               <p className="im-rail-empty">{frozen.length ? "冻结清单中没有数量大于 0 的项目。" : "本单没有返回冻结清单。"}</p>
               <a className="im-rail-link" data-action="order-open-inventory" href={`/orders/${encodeURIComponent(info.orderId)}`}>查看完整清单<ChevronRight aria-hidden="true" /></a>
             </div>}
-            <p className="im-rail-note">按本单冻结报价的买家口径展示；不代表结算或到账。</p>
+            <p className="im-rail-note">按本单冻结报价的租客口径展示；不代表结算或到账。</p>
             {quote === null
               ? <p className="im-rail-note">订单未返回可用冻结报价，金额保持待核对。</p>
               : amountUnknown ? <p className="im-rail-note">部分项目缺少冻结报价，金额保持待核对。</p> : null}
@@ -512,11 +644,11 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
 
           <RailSection title="账号与双方">
             <div className="im-rail-account">
-              <p className="im-rail-account-title">{info.account.title}</p>
+              <p className="im-rail-account-title">{info.account.title?.trim() || "账号"}</p>
               <p className="im-rail-account-sub">{info.gameName} · 成交快照账号</p>
               <div className="im-rail-parties">
-                {partyRow("买家", buyer)}
-                {partyRow("号主", owner)}
+                <PartyRow role="租客" member={buyer} request={request} onOpenProfile={onOpenProfile} />
+                <PartyRow role="号主" member={owner} request={request} onOpenProfile={onOpenProfile} />
               </div>
             </div>
           </RailSection>
@@ -524,9 +656,13 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
           {/* 已结束订单的进度与终态只在顶部阶段条呈现；右栏不再重复状态卡。 */}
           {ended ? null : <OrderFulfillmentSection key={info.orderId} orderId={info.orderId} displayNo={info.displayNo} viewerId={adminUserId} orderStatus={info.orderStatus} canManualClose={canManualClose === true && info.members.some((member) => member.party === "STAFF" && member.platformId === adminUserId)} {...(info.frozenInventory ? { frozenInventory: info.frozenInventory } : {})} />}
         </div>
-        {groupSettingsOpen ? <AdminOrderGroupSettingsDrawer info={info} request={request}
-          preferences={groupPreferenceOf(groupPrefs, info.orderId)} onPreferenceChange={(patch) => changeGroupPreference(info.orderId, patch)}
-          onHide={() => hideOrderGroup(info.orderId)} onClose={closeGroupSettings} inviteMember={resolvedInviteGroupMember} /> : null}
+        <Dialog open={groupSettingsOpen} onOpenChange={(open) => { if (!open) closeGroupSettings(); }}>
+          <DialogContent className="im-og-settings-dialog" aria-label="群设置" showCloseButton={false} showOverlay={false}>
+            <AdminOrderGroupSettingsDrawer info={info} request={request}
+              preferences={groupPreferenceOf(groupPrefs, info.orderId)} onPreferenceChange={(patch) => changeGroupPreference(info.orderId, patch)}
+              onHide={() => hideOrderGroup(info.orderId)} onClose={closeGroupSettings} inviteMember={resolvedInviteGroupMember} />
+          </DialogContent>
+        </Dialog>
       </aside>
     );
   };
@@ -534,9 +670,16 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
   return (
     <OrderTeamPanel
       key={identity} identity={identity} realm="admin" layout="aside" client={client} connection={connection} active={active}
+      selectedOrderId={selectedOrderId ?? undefined}
       sendAllowed={sendAllowed} request={request} onAuthError={onAuthError}
       gridPane={pane} gridDetailsOpen={detailsOpen}
       renderList={renderList} renderAside={renderAside} renderConversation={renderConversation}
+      onBlankContextMenu={(event) => {
+        if ((event.target as Element).closest("[data-message-id], .im-wb-row, button, a, input, textarea, [role='menu']")) return;
+        event.preventDefault();
+        setListMenu(null);
+      }}
+      extraMenuItems={messageGroupItems} onExtraMenuAction={onMessageGroupAction} onSelectedOrderChange={setActiveOrderId}
     />
   );
 }

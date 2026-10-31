@@ -73,15 +73,16 @@ const byText = (node, text) => [...node.querySelectorAll("button")].find((button
 const openGroupSettings = async (node, until) => {
   await until(() => node.querySelector(".im-wb-chat"), "chat rendered");
   await click(node.querySelector('[data-action="open-group-settings"]'));
-  await until(() => node.querySelector('[data-settings-drawer="true"]'), "group settings drawer");
-  return node.querySelector('[data-settings-drawer="true"]');
+  await until(() => document.querySelector('[data-settings-drawer="true"]'), "group settings drawer");
+  return [...document.querySelectorAll('[data-settings-drawer="true"]')].at(-1);
 };
 
 test("READY group list, role-attributed chat and the complementary order rail come from the loaded projections", async (t) => {
   const { node, until } = await mount(t, "ready-three");
   await until(() => rows(node).length === 3, "three loaded groups");
-  assert.match(rows(node)[0].textContent, /满配六套 · 资源账号/);
   assert.match(rows(node)[0].textContent, /ZZ20261011008842/, "full display number stays addressable, never a guessed tail");
+  assert.doesNotMatch(rows(node)[0].textContent, /满配六套 · 资源账号/, "the order-group list title is the order number only");
+  assert.match(rows(node)[0].textContent, /暂无消息/, "the list keeps a quiet latest-message fallback");
   assert.match(rows(node)[0].textContent, /订单群已就绪/);
   assert.match(rows(node)[2].textContent, /建群待人工核查/, "teamState NEEDS_REVIEW is reported, not smoothed over");
   assert.equal(rows(node)[0].getAttribute("data-active"), "true", "the first loaded group is selected");
@@ -91,7 +92,7 @@ test("READY group list, role-attributed chat and the complementary order rail co
   const messages = [...node.querySelectorAll(".im-wb-msg")];
   const buyer = messages.find((row) => row.textContent.includes("付款后从哪里交接"));
   assert.match(buyer.textContent, /小林/, "sender name comes from the member table");
-  assert.match(buyer.textContent, /买家/, "party BUYER is labelled 买家, never 租客 by guess");
+  assert.match(buyer.textContent, /租客/, "party BUYER is labelled 租客");
   const staff = messages.find((row) => row.textContent.includes("我来协助本次交接"));
   assert.equal(staff.getAttribute("data-self"), "true", "the operator's own messages sit on the right");
   assert.match(staff.textContent, /负责客服/);
@@ -101,7 +102,7 @@ test("READY group list, role-attributed chat and the complementary order rail co
   const aside = node.querySelector("#im-order-details");
   assert.match(aside.textContent, /满配六套 · 资源账号（含安全箱）/, "the rail complements the header with the account title");
   assert.match(aside.textContent, /三角洲行动/);
-  assert.match(aside.textContent, /买家小林/);
+  assert.match(aside.textContent, /租客小林/);
   assert.match(aside.textContent, /号主老陈/);
   assert.match(aside.textContent, /哈夫币/);
   assert.match(aside.textContent, /10,000,000 哈夫币/, "frozen quantities are copied from the projection verbatim");
@@ -142,7 +143,7 @@ test("unknown historical senders degrade neutrally instead of borrowing a name",
   await until(() => node.textContent.includes("成员表已无此账号"), "history loaded");
   const row = [...node.querySelectorAll(".im-wb-msg")].find((item) => item.textContent.includes("成员表已无此账号"));
   assert.match(row.textContent, /未署名成员/);
-  assert.doesNotMatch(row.textContent, /买家|号主|负责客服/, "an unmapped sender is never attributed to a known party");
+  assert.doesNotMatch(row.textContent, /租客|号主|负责客服/, "an unmapped sender is never attributed to a known party");
 });
 
 test("more staff members stay counted in the header while the rail keeps only the two parties", async (t) => {
@@ -150,8 +151,8 @@ test("more staff members stay counted in the header while the rail keeps only th
   await until(() => /成员 6/.test(node.querySelector(".im-wb-chat-actions")?.textContent ?? ""), "six members");
   const aside = node.querySelector("#im-order-details");
   const parties = [...aside.querySelectorAll(".im-rail-party")].map((row) => row.textContent.replace(/\s+/g, ""));
-  assert.deepEqual(parties, ["买家林小林小林", "号主老陈"], "the rail names only the renter and owner");
-  assert.match(node.querySelector(".im-wb-chat-title").textContent, /负责客服/, "staff roles stay in the chat header");
+  assert.deepEqual(parties, ["租客林小林小林", "号主老陈"], "the rail names only the renter and owner");
+  assert.doesNotMatch(node.querySelector(".im-wb-chat-title").textContent, /共同可见|负责客服|协作客服/, "the header does not repeat a role roster as noise");
   assert.doesNotMatch(aside.textContent, /小李|小赵|小孙/, "staff members are not duplicated into the rail");
 });
 
@@ -403,11 +404,16 @@ test("a new identity returns the narrow workbench to its selectable list", async
 
 test("the admin custom conversation renders an order-stage card with both sides", async (t) => {
   const base = fixtureById("ready-three");
+  const copied = [];
+  Object.defineProperty(browser.navigator, "clipboard", { configurable: true, value: { writeText: async (text) => { copied.push(text); } } });
+  t.after(() => { delete browser.navigator.clipboard; });
   const terms = {
     viewerParty: "STAFF", basis: "QUOTE", currency: "CNY", scale: 2, version: "quote-v1", rentalAmount: null, depositAmount: null, paidTotal: null,
     lines: [
       { itemId: "item_haff", name: "哈夫币", quantity: "10000000", unitPrice: null, amount: null, buyerUnitPrice: "1", ownerUnitPrice: "0.8", buyerAmount: "10000000", ownerAmount: "8000000", platformContribution: "2000000" },
       { itemId: "item_case", name: "装备箱", quantity: "3", unitPrice: null, amount: null, buyerUnitPrice: "6000", ownerUnitPrice: "5000", buyerAmount: "18000", ownerAmount: "15000", platformContribution: "3000" },
+      { itemId: "item_zero", name: "零号弹匣", quantity: "0", unitPrice: null, amount: null, buyerUnitPrice: "7000", ownerUnitPrice: "6000", buyerAmount: "0", ownerAmount: "0", platformContribution: "0" },
+      { itemId: "item_unknown_qty", name: "神秘物资", quantity: "待核对", unitPrice: null, amount: null, buyerUnitPrice: "0", ownerUnitPrice: "0", buyerAmount: "0", ownerAmount: "0", platformContribution: "0" },
     ],
     staff: { buyerRentalAmount: "10018000", ownerRentalAmount: "8015000", buyerTotal: "10018000", ownerTotal: "8015000", platformContribution: "2003000" },
   };
@@ -425,13 +431,33 @@ test("the admin custom conversation renders an order-stage card with both sides"
   const card = node.querySelector(".im-wb-msg .order-card");
   assert.equal(card.getAttribute("data-kind"), "ORDER_OPENING", "the shared card keeps its kind");
   assert.equal(card.getAttribute("data-party"), "STAFF", "the admin workbench reads the staff projection");
-  assert.match(card.textContent, /账号信息与开租确认/);
-  assert.match(card.textContent, /买家 已确认/, "both party chips are shown");
-  assert.match(card.textContent, /号主 待确认/);
+  assert.equal(card.querySelector(".order-card-head .order-card-title").textContent, "开租确认", "the dark header names the stage");
+  assert.ok(card.querySelector(".order-card-head .order-card-icon"), "the header keeps its document icon");
+  const acks = [...card.querySelectorAll(".order-card-ack")].map(ack => [ack.querySelector(".order-card-ack-name").textContent, ack.getAttribute("data-state"), ack.querySelector(".order-card-ack-state").textContent, Boolean(ack.querySelector(".order-card-ack-mark svg"))]);
+  assert.deepEqual(acks, [["租客", "confirmed", "已确认", true], ["号主", "pending", "待确认", false]], "both party steps are shown with their marks");
+  assert.match(card.querySelector(".order-card-account").textContent, /满配六套 · 资源账号（含安全箱）/);
+  assert.equal(card.querySelector(".order-card-game").textContent, "三角洲行动");
+  assert.doesNotMatch(card.textContent, /account-8842|稳定 ID/, "no account stable id is rendered");
   const figures = Object.fromEntries([...card.querySelectorAll(".order-card-figure")]
     .map(figure => [figure.querySelector("dt").textContent, figure.querySelector("dd").textContent]));
-  assert.deepEqual(figures, { 买家合计: "¥100,180.00", 号主合计: "¥80,150.00" }, "staff sees both sides");
+  assert.deepEqual(figures, { 租客合计: "¥100,180.00", 号主合计: "¥80,150.00" }, "staff sees both sides");
   assert.equal(card.querySelector(".order-card-platform strong").textContent, "¥20,030.00", "staff sees the platform contribution");
+  const itemToggle = card.querySelector(".order-card-items-toggle");
+  assert.match(itemToggle.querySelector(".order-card-row-label").textContent, /物品清单（2 项）/, "quantity 0 is not counted but an unreadable quantity stays");
+  assert.equal(itemToggle.querySelector(".order-card-row-value").textContent, "租客 ¥180.00 · 号主 ¥150.00");
+  await act(async () => itemToggle.click());
+  assert.deepEqual([...card.querySelectorAll(".order-card-line")].map(line => line.querySelector(".order-card-line-name").textContent), ["装备箱", "神秘物资"], "only positive or unreadable items are listed");
+  const unknownLine = [...card.querySelectorAll(".order-card-line")].find(line => line.textContent.includes("神秘物资"));
+  assert.match(unknownLine.querySelector(".order-card-line-qty").textContent, /数量待核对/, "an unreadable quantity is never shown as 0");
+  assert.doesNotMatch(card.textContent, /零号弹匣/, "quantity 0 never renders a row");
+  assert.match(card.querySelector(".order-card-no").textContent, /订单 ZZ20261011008842/, "the footer carries only the order display number");
+  const copy = card.querySelector('button[aria-label="复制订单号 ZZ20261011008842"]');
+  assert.ok(copy, "the copy control names the order number");
+  await act(async () => copy.click());
+  await until(() => copied.length === 1, "order number copied");
+  assert.deepEqual(copied, ["ZZ20261011008842"], "the clipboard receives the display number");
+  assert.match(card.querySelector(".order-card-copy-state").textContent, /已复制/, "the copy result is announced");
+  assert.equal(card.querySelector(".order-card-action").tagName, "BUTTON", "the footer action keeps the admin callback");
   assert.equal(card.closest(".im-wb-bub"), null, "the card replaces the text bubble instead of nesting inside it");
   assert.equal(card.closest(".im-wb-msg-body").getAttribute("data-card"), "true", "the message body is widened for the card");
 
@@ -479,8 +505,8 @@ test("the group settings drawer groups users and staff, marks the responsible ad
   const drawer = await openGroupSettings(node, until);
   assert.equal(drawer.getAttribute("role"), "dialog");
   assert.equal(drawer.getAttribute("data-settings-drawer"), "true");
-  assert.ok(drawer.closest("#im-order-details"), "the drawer is layered over the existing order rail");
-  assert.equal(document.body.querySelector(".im-wb-dialog"), null, "the settings surface is not a centered modal");
+  assert.ok(drawer.closest(".im-og-settings-dialog"), "settings render in their own dialog surface");
+  assert.equal(drawer.closest("#im-order-details"), null, "settings are never layered over the live order rail");
   assert.match(drawer.textContent, /满配六套 · 资源账号/);
   assert.match(drawer.textContent, /群成员 6 · 用户 2 · 客服 4/);
 
@@ -489,7 +515,7 @@ test("the group settings drawer groups users and staff, marks the responsible ad
   assert.ok(userGroup, "user members have their own group");
   assert.ok(staffGroup, "staff members have their own group");
   assert.equal(userGroup.querySelectorAll(".im-og-member").length, 2);
-  assert.match(userGroup.textContent, /买家/);
+  assert.match(userGroup.textContent, /租客/);
   assert.match(userGroup.textContent, /号主/);
   assert.match(userGroup.textContent, /只读/);
   assert.equal(staffGroup.querySelectorAll(".im-og-member").length, 4);
@@ -543,8 +569,7 @@ test("admin invites use the order-scoped bounded picker and report permission, u
   await until(() => drawer.querySelectorAll('[data-action="invite-admin-candidate"]').length > 0, "bounded admin candidates");
   const candidates = [...drawer.querySelectorAll('[data-action="invite-admin-candidate"]')];
   assert.equal(candidates.length, 8, "the picker never renders the whole candidate pool");
-  assert.match(drawer.textContent, /任意管理端管理员/, "any administrator can invite, not only the responsible one");
-  assert.match(drawer.textContent, /普通用户与站外账号不可邀请/);
+  assert.match(drawer.textContent, /可邀请现有管理员/, "any administrator can invite, not only the responsible one");
   assert.doesNotMatch(drawer.textContent, /admin-candidate-0|admin-candidate-1/, "no admin UUID is rendered");
   const target = [...drawer.querySelectorAll(".im-og-candidate")].find((item) => item.textContent.includes("候选管理员1"));
   assert.ok(target, "candidate remains selectable by name");
@@ -573,8 +598,7 @@ test("pin, mute and local hide are per-admin preferences and hiding never leaves
   await until(() => node.querySelector(".im-wb-chat-title")?.textContent.includes("ZZ20261010007710"), "second order selected");
 
   const drawer = await openGroupSettings(node, until);
-  assert.match(drawer.textContent, /仅隐藏本机列表中的这一行/);
-  assert.match(drawer.textContent, /不会退出群聊/);
+  assert.match(drawer.textContent, /只隐藏本机列表/);
   await click(drawer.querySelector('[data-pref="pin"]'));
   await until(() => rows(node)[0].textContent.includes("置顶"), "pinned row moved first locally");
   await click(drawer.querySelector('[data-pref="mute"]'));
