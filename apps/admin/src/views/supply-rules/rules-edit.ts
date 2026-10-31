@@ -9,7 +9,6 @@ export type EditValues = Record<string, string>;
 export type EditField = { key: string; group: "哈夫币价格" | "物品单价" | "押金规则" | "租期与每日消耗"; label: string; unit?: string };
 export type ChangeRow = EditField & { before: string; after: string };
 
-export const SKIN_LABELS: Record<string, string> = { LEGACY_GOLD: "人物金皮", LEGACY_AGENT: "人物红皮", LEGACY_KNIFE: "刀皮", LEGACY_WEAPON: "武器砖皮" };
 
 export type EditContext = { price?: PriceVersionRecord; haff: HaffV2 | null; policy: FundingPolicy | null; termVersionId?: string };
 

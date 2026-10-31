@@ -1,20 +1,29 @@
 import {
   WalletIcon,
+  BadgeDollarSignIcon,
   BoxesIcon,
+  CalculatorIcon,
   CrosshairIcon,
   ClipboardCheckIcon,
   CrownIcon,
+  FileSignatureIcon,
   ImageIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
-  ListChecksIcon,
   MessagesSquareIcon,
+  NetworkIcon,
   NewspaperIcon,
+  PackageIcon,
+  PaletteIcon,
+  ScaleIcon,
   ShoppingBagIcon,
   ScrollTextIcon,
   ShieldIcon,
+  SlidersHorizontalIcon,
+  UserCheckIcon,
   UserRoundCogIcon,
   UsersRoundIcon,
+  VaultIcon,
   type LucideIcon,
 } from "lucide-react";
 
@@ -45,7 +54,7 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
   const distributionOps = nav.isBoss || ["order.read", "personal.distribution.policy.read", "personal.distribution.policy.manage"].some(has);
   if (membershipOps || distributionOps) items.push({ label: "会员运营", isTitle: true });
   if (membershipOps) items.push({ label: "会员与礼遇", icon: CrownIcon, path: "/membership-growth", kind: "membership-growth" });
-  if (distributionOps) items.push({ label: "分销管理", icon: CrownIcon, path: "/distribution-policy", kind: "distribution-policy" });
+  if (distributionOps) items.push({ label: "分销管理", icon: NetworkIcon, path: "/distribution-policy", kind: "distribution-policy" });
 
   const system: WorkspaceMenuItem[] = [];
   if (has("admin.account.read") || nav.isBoss) {
@@ -63,7 +72,7 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
     supply.push({ label: "目录维护", icon: BoxesIcon, path: "/supply/catalog", kind: "catalog" });
   }
   if (has("supply.review.read") || nav.isBoss) {
-    supply.push({ label: "账号供给", icon: ClipboardCheckIcon, path: "/supply/reviews", kind: "listing-review" });
+    supply.push({ label: "账号供给", icon: UserCheckIcon, path: "/supply/reviews", kind: "listing-review" });
     supply.push({ label: "平台素材审核", icon: ImageIcon, path: "/supply/media", kind: "media-review" });
   }
   if (supply.length > 0) {
@@ -71,9 +80,19 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
   }
   const delta: WorkspaceMenuItem[] = [];
   if (has("supply.rules.edit") || nav.isBoss) {
-    const r = (label: string, section: string) => ({ label, icon: ListChecksIcon, path: `/supply/rules?section=${section}`, kind: "rules" as const });
-    items.push({ label: "供给与规则", isTitle: true }, r("规则总览", "overview"), r("押金规则", "deposit"), r("结算与退赔", "settlement"), r("出租协议", "agreement"));
-    delta.push(r("租赁定价", "pricing"), r("物资价目", "items"), r("皮肤推荐押金", "skin"));
+    const r = (label: string, icon: LucideIcon, section: string) => ({ label, icon, path: `/supply/rules?section=${section}`, kind: "rules" as const });
+    items.push(
+      { label: "供给与规则", isTitle: true },
+      r("规则总览", SlidersHorizontalIcon, "overview"),
+      r("押金规则", VaultIcon, "deposit"),
+      r("结算与退赔", ScaleIcon, "settlement"),
+      r("出租协议", FileSignatureIcon, "agreement"),
+    );
+    delta.push(
+      r("租赁定价", BadgeDollarSignIcon, "pricing"),
+      r("物资价目", PackageIcon, "items"),
+      r("皮肤推荐押金", PaletteIcon, "skin"),
+    );
   }
   // 改枪码目录归到游戏分组；路由仍是 /supply/gunsmith。
   if (has("supply.gunsmith.manage") || nav.isBoss) {
@@ -91,7 +110,10 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
     items.push({ label: "运营内容", isTitle: true }, ...content);
   }
 
-  if(has("finance.read")||has("finance.document.read")){items.push({label:"资金",isTitle:true},{label:"资金查找",icon:WalletIcon,path:"/finance",kind:"finance-lookup"});if(has("finance.read"))items.push({label:"期间核对",icon:ScrollTextIcon,path:"/finance/period",kind:"finance-period"});}
+  if (has("finance.read") || has("finance.document.read")) {
+    items.push({ label: "资金", isTitle: true }, { label: "资金查找", icon: WalletIcon, path: "/finance", kind: "finance-lookup" });
+    if (has("finance.read")) items.push({ label: "期间核对", icon: CalculatorIcon, path: "/finance/period", kind: "finance-period" });
+  }
   if (has("order.read") || nav.isBoss) {
     items.push({ label: "交易", isTitle: true }, { label: "订单", icon: ShoppingBagIcon, path: "/orders", kind: "orders" });
   }

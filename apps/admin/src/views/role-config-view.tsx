@@ -99,6 +99,16 @@ function ToggleChip({
   );
 }
 
+const BOSS_ONLY_REASON = "仅 Boss 账号持有，不能通过角色授予。";
+
+function BossOnlyTag() {
+  return (
+    <span title={BOSS_ONLY_REASON} className="boss-only-tag ml-1.5 inline-flex shrink-0 items-center rounded px-1 py-px align-middle text-[10px] font-medium leading-4">
+      仅 Boss
+    </span>
+  );
+}
+
 // ---------- 对比矩阵 ----------
 
 function MatrixGroup({
@@ -107,27 +117,42 @@ function MatrixGroup({
   roles,
   showHint,
   highlightCode,
+  fullCodes,
+  forceOpen,
 }: {
   group: AdminPermissionGroup;
   catalog: Map<string, AdminPermissionCatalogEntry>;
   roles: AdminRoleRecord[];
   showHint: boolean;
   highlightCode: string;
+  fullCodes: string[];
+  forceOpen: boolean;
 }) {
+  const [collapsed, setCollapsed] = useState(false);
+  const expanded = forceOpen || !collapsed;
   return (
     <tbody>
       <tr>
         <th
           scope="rowgroup"
           colSpan={roles.length + 1}
-          className="sticky left-0 border-y border-border/60 bg-foreground/[0.05] px-4 py-2 text-left"
+          className="sticky left-0 border-y border-border/60 bg-foreground/[0.05] px-2 py-1.5 text-left"
         >
-          <span className="text-xs font-semibold text-foreground">{group.label}</span>
-          <span className="ml-2 text-xs font-normal text-muted-foreground">{group.codes.length} 项</span>
-          <span className="ml-3 hidden text-xs font-normal text-muted-foreground md:inline">{group.description}</span>
+          <button
+            type="button"
+            onClick={() => setCollapsed((value) => !value)}
+            aria-expanded={expanded}
+            className="flex w-full flex-wrap items-center gap-x-2 gap-y-0.5 rounded px-2 py-0.5 text-left hover:bg-foreground/[0.04]"
+          >
+            <Icons.ChevronDown size={13} className={`shrink-0 text-muted-foreground transition-transform ${expanded ? "" : "-rotate-90"}`} aria-hidden />
+            <span className="text-xs font-semibold text-foreground">{group.label}</span>
+            <span className="text-xs font-normal tabular-nums text-muted-foreground">
+              {roles.map((role) => `${role.name} ${fullCodes.filter((code) => role.permissionCodes.includes(code)).length}/${fullCodes.length}`).join(" · ")}
+            </span>
+          </button>
         </th>
       </tr>
-      {group.sections.map((section) => (
+      {expanded && group.sections.map((section) => (
         <MatrixSection key={section.id} section={section} catalog={catalog} roles={roles} showHint={showHint} highlightCode={highlightCode} />
       ))}
     </tbody>
@@ -163,7 +188,7 @@ function MatrixSection({
         return (
           <tr key={code} className="group border-t border-border/40">
             <th scope="row" className="sticky left-0 z-[1] bg-surface px-4 py-2.5 pl-7 text-left font-normal transition-colors group-hover:bg-surface-raised">
-              <span className="block text-sm text-foreground">{permissionLabel(permission)}</span>
+              <span className="block text-sm text-foreground">{permissionLabel(permission)}{permission.bossOnly ? <BossOnlyTag /> : null}</span>
               {showHint && hint ? <span className="mt-0.5 block text-xs leading-snug text-muted-foreground">{hint}</span> : null}
             </th>
             {roles.map((role) => (
@@ -195,7 +220,7 @@ function CapabilityMatrix({
   onHighlight: (code: string) => void;
 }) {
   const [query, setQuery] = useState("");
-  const [diffOnly, setDiffOnly] = useState(false);
+  const [diffOnly, setDiffOnly] = useState(true);
   const [showHint, setShowHint] = useState(false);
   const catalog = permissionByCode(permissions);
   const allGroups = groupAdminPermissions(permissions);
@@ -241,6 +266,7 @@ function CapabilityMatrix({
           <ToggleChip checked={showHint} onChange={setShowHint}>显示说明</ToggleChip>
         </div>
       </div>
+      <p className="text-xs text-muted-foreground">所有生效管理员默认拥有「订单核心读取」，下表不再列出。</p>
       <div className="overflow-hidden rounded-lg border border-border/70">
         <div className="max-h-[70vh] overflow-auto">
           <table className="w-full min-w-[560px] table-fixed border-collapse bg-surface">
@@ -268,35 +294,17 @@ function CapabilityMatrix({
                 })}
               </tr>
             </thead>
-            <tbody>
-              <tr className="group border-b border-border/50">
-                <th scope="row" className="sticky left-0 z-[1] bg-surface px-4 py-2.5 text-left font-normal transition-colors group-hover:bg-surface-raised">
-                  <span className="block text-sm text-foreground">订单核心读取</span>
-                  <span className="mt-0.5 block text-xs text-muted-foreground">所有生效管理员的系统基础权限</span>
-                </th>
-                {roles.map((role) => (
-                  <td
-                    key={role.id}
-                    className={`px-2 py-2.5 text-center transition-colors group-hover:bg-foreground/[0.04] ${
-                      role.code === highlightCode ? "border-x border-foreground/20" : "border-l border-border/40"
-                    }`}
-                  >
-                    <GrantedCell granted label="系统默认授予" />
-                  </td>
-                ))}
-              </tr>
-            </tbody>
             {groups.length === 0 ? (
               <tbody>
                 <tr>
                   <td colSpan={roles.length + 1} className="px-4 py-12 text-center text-sm text-muted-foreground">
-                    {query.trim() ? `没有匹配"${query.trim()}"的权限。` : diffOnly ? "这些角色的额外权限相同。" : "服务端权限目录为空。"}
+                    {query.trim() ? `没有匹配"${query.trim()}"的权限。` : diffOnly ? "这些角色的权限完全相同。" : "服务端权限目录为空。"}
                   </td>
                 </tr>
               </tbody>
             ) : (
               groups.map((group) => (
-                <MatrixGroup key={group.id} group={group} catalog={catalog} roles={roles} showHint={showHint} highlightCode={highlightCode} />
+                <MatrixGroup key={group.id} group={group} catalog={catalog} roles={roles} showHint={showHint} highlightCode={highlightCode} fullCodes={allGroups.find((item) => item.id === group.id)?.codes ?? group.codes} forceOpen={query.trim().length > 0} />
               ))
             )}
           </table>
@@ -386,7 +394,7 @@ function PermissionGroupBlock({
               {section.label ? (
                 <div className="mb-1 flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
                   <span className="text-xs font-medium text-muted-foreground">{section.label}</span>
-                  <SectionSelectAll label={section.label} codes={section.codes} selected={selected} disabled={disabled} onSetMany={onSetMany} />
+                  <SectionSelectAll label={section.label} codes={section.codes.filter((code) => !catalog.get(code)?.bossOnly || selected.includes(code))} selected={selected} disabled={disabled} onSetMany={onSetMany} />
                 </div>
               ) : null}
               <div className="grid gap-x-4 sm:grid-cols-2">
@@ -395,12 +403,16 @@ function PermissionGroupBlock({
                   if (!permission) return null;
                   const hint = permissionDescription(permission);
                   const checked = selected.includes(code);
+                  // 仅 Boss：不可勾选；历史遗留的已勾选项允许取消
+                  const locked = Boolean(permission.bossOnly) && !checked;
+                  const off = disabled || locked;
                   return (
-                    <label key={code} className={`flex items-start gap-2.5 rounded-md px-2 py-2 ${disabled ? "opacity-60" : "hover:bg-foreground/[0.05]"}`}>
-                      <input type="checkbox" className="mt-0.5" checked={checked} disabled={disabled} onChange={() => onToggle(code)} />
+                    <label key={code} title={permission.bossOnly ? BOSS_ONLY_REASON : undefined} className={`flex items-start gap-2.5 rounded-md px-2 py-2 ${off ? "cursor-not-allowed opacity-60" : "hover:bg-foreground/[0.05]"}`}>
+                      <input type="checkbox" className="mt-0.5" checked={checked} disabled={off} aria-description={permission.bossOnly ? BOSS_ONLY_REASON : undefined} onChange={() => onToggle(code)} />
                       <span className="min-w-0">
                         <strong className={`block text-sm ${checked ? "font-semibold text-foreground" : "font-normal text-foreground"}`}>
                           {permissionLabel(permission)}
+                          {permission.bossOnly ? <BossOnlyTag /> : null}
                         </strong>
                         {hint ? <span className="mt-0.5 block text-xs leading-snug text-muted-foreground">{hint}</span> : null}
                       </span>
@@ -541,7 +553,7 @@ function RoleFormDialog({
       <DialogContent className="flex h-[88vh] w-full flex-col gap-0 p-0 sm:max-w-4xl" showCloseButton={!saving}>
         <DialogHeader className="shrink-0 px-6 pb-4 pt-6">
           <DialogTitle>{editing ? `${readOnly ? "查看" : "编辑"}角色「${editing.name}」` : "新建角色"}</DialogTitle>
-          <DialogDescription>{readOnly ? "角色资料与权限仅供查看。" : editing ? "改动在下一次请求立即生效。" : "先填岗位名称，再勾选需要的额外权限。"}</DialogDescription>
+          <DialogDescription>{readOnly ? "角色资料与权限仅供查看。" : editing ? "改动在下一次请求立即生效。" : "先填岗位名称，再勾选这个岗位需要的权限。"}</DialogDescription>
         </DialogHeader>
         <form onSubmit={submit} className="flex min-h-0 flex-1 flex-col">
           <fieldset disabled={saving} className="min-h-0 min-w-0 flex-1 space-y-5 overflow-y-auto px-6 pb-6">
@@ -639,7 +651,7 @@ function RoleFormDialog({
 
             <div className="space-y-3">
               <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-                <h3 className="text-sm font-semibold text-foreground">额外权限</h3>
+                <h3 className="text-sm font-semibold text-foreground">权限</h3>
                 <span className="text-xs tabular-nums text-muted-foreground">
                   已选 {form.permissionCodes.length} 项
                   {change.added.length > 0 ? ` · 新增 ${change.added.length}` : ""}
@@ -672,7 +684,7 @@ function RoleFormDialog({
                   disabled={readOnly}
                   forceOpen={needle.length > 0}
                   onToggle={(code) =>
-                    setForm((prev) => ({
+                    catalog.get(code)?.bossOnly && !form.permissionCodes.includes(code) ? undefined : setForm((prev) => ({
                       ...prev,
                       permissionCodes: prev.permissionCodes.includes(code)
                         ? prev.permissionCodes.filter((item) => item !== code)
@@ -683,7 +695,7 @@ function RoleFormDialog({
                     setForm((prev) => ({
                       ...prev,
                       permissionCodes: want
-                        ? [...new Set([...prev.permissionCodes, ...codes])]
+                        ? [...new Set([...prev.permissionCodes, ...codes.filter((code) => !catalog.get(code)?.bossOnly)])]
                         : prev.permissionCodes.filter((item) => !codes.includes(item)),
                     }))
                   }
@@ -779,7 +791,7 @@ export function RoleConfigView({
   // 深链 /roles/:code 复用同一个编辑弹窗，避免出现两套编辑界面。
   useEffect(() => {
     if (!objectOnly || !initialCode || roles.length === 0) return;
-    const target = roles.find((role) => role.code === initialCode);
+    const target = roles.find((role) => (role.code === initialCode || role.id === initialCode));
     setDialog(target ? { kind: "edit", role: target } : null);
   }, [initialCode, objectOnly, roles]);
 
@@ -804,7 +816,7 @@ export function RoleConfigView({
     );
   }
 
-  if (objectOnly && initialCode && ready && !roles.some((role) => role.code === initialCode)) {
+  if (objectOnly && initialCode && ready && !roles.some((role) => (role.code === initialCode || role.id === initialCode))) {
     return (
       <div className="space-y-3">
         <StatusMessage error={error ?? `找不到角色 ${initialCode}，它可能已被删除或不在你的可见范围内。`} />
@@ -821,7 +833,7 @@ export function RoleConfigView({
         <div className="min-w-0">
           <h1 className="text-2xl font-semibold tracking-tight text-foreground">预设角色</h1>
           <p className="mt-1 text-sm tabular-nums text-muted-foreground">
-            {ready ? `${roles.length} 个角色 · ${permissionTotal} 项额外权限` : "正在读取…"}
+            {ready ? `${roles.length} 个角色 · 共 ${permissionTotal} 项权限` : "正在读取…"}
           </p>
         </div>
           <div className="flex gap-2">
@@ -864,7 +876,7 @@ export function RoleConfigView({
       ) : (
         <div className="grid gap-5 lg:grid-cols-[240px_minmax(0,1fr)]">
           <aside className="min-w-0">
-            {/* Boss 是账号级旁路而非角色：可显示，但不可选、不可编辑、不编造权限数 */}
+            {/* Boss 是账号身份而非角色：可显示，但不可选、不可编辑 */}
             <TooltipProvider delay={300}>
               <Tooltip>
                 <TooltipTrigger
@@ -881,7 +893,7 @@ export function RoleConfigView({
                     </span>
                     <span className="role-boss-badge shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium">最高权限</span>
                   </div>
-                  <p className="role-boss-note mt-2 text-xs">系统旁路 · 不可配置</p>
+                  <p className="role-boss-note mt-2 text-xs">拥有全部权限</p>
                   <p className="mt-1 text-xs tabular-nums text-muted-foreground">使用成员 {bossCount ?? "—"}</p>
                 </TooltipTrigger>
                 <TooltipContent side="right" className="max-w-64 leading-relaxed">
@@ -908,7 +920,7 @@ export function RoleConfigView({
                       </div>
                       <dl className="mt-2.5 flex flex-wrap gap-x-5 gap-y-1">
                         <div className="flex items-baseline gap-1.5">
-                          <dt className="text-xs text-muted-foreground">额外权限</dt>
+                          <dt className="text-xs text-muted-foreground">权限</dt>
                           <dd className="text-xs font-medium tabular-nums text-foreground">{role.permissionCodes.length}</dd>
                         </div>
                         <div className="flex items-baseline gap-1.5">

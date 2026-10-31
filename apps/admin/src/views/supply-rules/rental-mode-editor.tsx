@@ -70,7 +70,7 @@ export function RentalModeEditor({ rules, command, canEdit, onDirtyChange, draft
   return <section className="section-panel space-y-4" aria-label="租赁模式配置">
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div><h2 className="text-base font-semibold">租赁模式</h2>
-        <p className="mt-1 max-w-3xl text-sm text-muted-foreground">租客比例＝号主比例 − 利润点。比例＝1 元换多少万哈夫币。</p></div>
+        <p className="mt-1 max-w-3xl text-xs text-muted-foreground leading-relaxed">租客比例 ＝ 号主比例 − 平台利润点（比例差）。比例数值为 1 元兑换万哈夫币数量，数值越小单价越高。</p></div>
       {canEdit ? <Button type="button" variant="outline" disabled={locked || !draft} onClick={fillFastDefaults}>填入极速默认值</Button> : null}
     </div>
     {!base || !draft ? <p role="status" className="text-sm text-muted-foreground">当前生效版本不是可编辑的兼容比例规则，暂不能配置模式；请核对原始配置。</p> : <>

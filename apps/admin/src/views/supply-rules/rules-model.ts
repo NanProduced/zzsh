@@ -216,11 +216,6 @@ export function priceDiff(rules: RulesResponse, fromId: string | undefined, toId
   return rows;
 }
 
-export function termOptionsText(rules: RulesResponse, versionId: string | undefined): string {
-  if (!versionId) return "无";
-  return rules.termOptions.filter((o) => o.versionId === versionId).map((o) => `${o.name} ${haffCount(o.dailyConsumption)}/天`).join("、") || "无";
-}
-
 export function termDiff(rules: RulesResponse, fromId: string | undefined, toId: string | undefined): RuleDiffRow[] {
   if (!toId || fromId === toId) return [];
   const rows: RuleDiffRow[] = [];

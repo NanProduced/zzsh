@@ -792,6 +792,20 @@
       "when": 1793184001000,
       "tag": "0112_legal_documents",
       "breakpoints": true
+    },
+    {
+      "idx": 113,
+      "version": "7",
+      "when": 1793184002000,
+      "tag": "0113_admin_permission_finance_phone_seed",
+      "breakpoints": true
+    },
+    {
+      "idx": 114,
+      "version": "7",
+      "when": 1793184003000,
+      "tag": "0114_admin_role_preset_grants",
+      "breakpoints": true
     }
   ]
 }

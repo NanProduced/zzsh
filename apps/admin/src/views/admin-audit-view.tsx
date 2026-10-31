@@ -63,6 +63,25 @@ const actions = [
   "user.account.unfrozen",
 ];
 
+const ACTION_LABELS: Record<string, string> = {
+  "admin.account.created": "创建管理员",
+  "admin.account.updated": "修改管理员",
+  "admin.permission.assigned": "调整个人权限",
+  "admin.game_scope.assigned": "调整游戏范围",
+  "admin.role.created": "创建角色",
+  "admin.role.updated": "修改角色",
+  "admin.frozen": "冻结管理员",
+  "admin.unfrozen": "解除冻结",
+  "admin.session.force_logged_out": "撤销会话",
+  "user.account.restored": "恢复用户账号（已退役）",
+  "user.account.frozen": "冻结用户",
+  "user.account.unfrozen": "解冻用户",
+};
+
+export function actionLabel(action: string): string {
+  return ACTION_LABELS[action] ?? action;
+}
+
 function actorLabel(actor: AuditEvent["actor"]): string {
   return `${actor.name}（${actor.displayUsername ?? actor.username}）`;
 }
@@ -430,7 +449,7 @@ export function AdminAuditView({
           <Icons.Shield size={20} className="text-muted-foreground" />
         </div>
         <form onSubmit={submit} className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 mt-4" noValidate>
-          <label className="space-y-1 text-xs"><span className="text-muted-foreground">操作类型</span><select value={action} onChange={(event) => setAction(event.target.value)} className="w-full h-9 px-2 rounded border border-border bg-surface-raised text-xs"><option value="">全部</option>{actions.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
+          <label className="space-y-1 text-xs"><span className="text-muted-foreground">操作类型</span><select value={action} onChange={(event) => setAction(event.target.value)} className="w-full h-9 px-2 rounded border border-border bg-surface-raised text-xs"><option value="">全部</option>{actions.map((item) => <option key={item} value={item}>{actionLabel(item)}</option>)}</select></label>
           <label className="space-y-1 text-xs"><span className="text-muted-foreground">对象类型</span><select value={objectType} onChange={(event) => setObjectType(event.target.value)} className="w-full h-9 px-2 rounded border border-border bg-surface-raised text-xs"><option value="">全部</option><option value="admin_user">管理员账号</option><option value="admin_security">账号安全状态</option><option value="admin_role">管理员角色</option><option value="user_account">用户账号</option></select></label>
           <label className="space-y-1 text-xs"><span className="text-muted-foreground">操作者账号</span><input value={actorUsername} onChange={(event) => setActorUsername(event.target.value)} className="w-full h-9 px-3 rounded border border-border bg-surface-raised text-xs" placeholder="如 ZZ00001" /></label>
           <label className="space-y-1 text-xs"><span className="text-muted-foreground">请求编号（可选）</span><input value={requestId} onChange={(event) => setRequestId(event.target.value)} className="w-full h-9 px-3 rounded border border-border bg-surface-raised text-xs" /></label>
@@ -588,7 +607,7 @@ export function AdminAuditView({
                     <tr key={item.eventId}>
                       <td className="whitespace-nowrap">{formatDate(item.occurredAt)}</td>
                       <td>{actorLabel(item.actor)}</td>
-                      <td className="font-mono text-[11px]">{item.action}</td>
+                      <td><div>{actionLabel(item.action)}</div><div className="font-mono text-[10px] text-muted-foreground">{item.action}</div></td>
                       <td>{objectLabel(item)}</td>
                       <td>
                         <span className={item.outcome === "SUCCESS" ? "text-emerald-400" : "text-rose-400"}>

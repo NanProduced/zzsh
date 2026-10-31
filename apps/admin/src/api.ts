@@ -309,7 +309,7 @@ export type UserAuditEventItem = {
   details: Record<string, unknown>;
 };
 export type UserAuditEventPage = { items?: UserAuditEventItem[]; nextCursor?: string | null; scope?: string };
-export type AdminPermissionCatalogEntry = { code: string; name: string; description?: string | null };
+export type AdminPermissionCatalogEntry = { code: string; name: string; description?: string | null; bossOnly?: boolean; };
 export type AdminRoleRecord = {
   id: string;
   code: string;

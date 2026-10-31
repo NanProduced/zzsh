@@ -165,7 +165,63 @@ export function PublishBar({ rules, command, dirty, isBoss, canEdit, onOpenSecti
     } catch (failure) { setError(friendlyError(failure)); }
   };
 
-  const list = (rows: DiffRow[]) => rows.length ? <ul className="divide-y divide-border rounded-md border border-border">{rows.map((r, i) => <li key={i} className={`flex gap-x-3 gap-y-1 px-3 py-2 text-sm ${r.before.length + r.after.length > 24 ? "flex-wrap items-start" : "items-center"}`}><span className={`min-w-24 flex-1 ${r.before.length + r.after.length > 24 ? "basis-full" : ""}`}>{r.label}{r.detail ? <MutedDetails className="mt-1"><p className="text-xs text-muted-foreground">{r.detail}</p></MutedDetails> : null}</span>{r.before ? <><span className="tabular-nums text-muted-foreground line-through">{r.before}</span><span aria-hidden>→</span></> : null}<b className="tabular-nums">{r.after}</b>{canEdit && draft ? <Button type="button" variant="link" size="sm" className="h-auto p-0" onClick={() => go(r.section)}>去改</Button> : null}</li>)}</ul> : <p className="text-sm text-muted-foreground">和线上一样，没有改动。</p>;
+function renderDrawerDiffValue(after: string) {
+  if (after === "将移除") {
+    return <span className="inline-flex items-center rounded-md bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive">将移除</span>;
+  }
+  if (after === "更新为新版") {
+    return <span className="inline-flex items-center rounded-md bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">更新为新版</span>;
+  }
+  if (after.includes("；")) {
+    const parts = after.split("；");
+    return (
+      <div className="w-full space-y-1 pt-1">
+        {parts.map((p, idx) => (
+          <div key={idx} className="rounded bg-muted/60 px-2 py-1 text-xs font-medium text-foreground leading-relaxed">
+            {p.trim()}
+          </div>
+        ))}
+      </div>
+    );
+  }
+  return <b className="font-semibold tabular-nums text-foreground">{after}</b>;
+}
+
+  const list = (rows: DiffRow[]) => rows.length ? (
+    <ul className="divide-y divide-border/70 rounded-lg border border-border/80 bg-card/40">
+      {rows.map((r, i) => (
+        <li key={i} className="p-3 text-sm space-y-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5">
+              <span className="font-medium text-foreground">{r.label}</span>
+              <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">{SECTION_NAME[r.section]}</span>
+            </div>
+            {canEdit && draft ? (
+              <Button type="button" variant="link" size="sm" className="h-auto p-0 text-xs" onClick={() => go(r.section)}>
+                去改
+              </Button>
+            ) : null}
+          </div>
+          {r.detail ? (
+            <MutedDetails className="text-xs">
+              <p className="text-muted-foreground">{r.detail}</p>
+            </MutedDetails>
+          ) : null}
+          <div className="flex flex-wrap items-center gap-2 pt-0.5">
+            {r.before ? (
+              <>
+                <span className="text-xs text-muted-foreground line-through tabular-nums">{r.before}</span>
+                <span className="text-xs text-muted-foreground" aria-hidden>→</span>
+              </>
+            ) : null}
+            {renderDrawerDiffValue(r.after)}
+          </div>
+        </li>
+      ))}
+    </ul>
+  ) : (
+    <p className="rounded-md border border-dashed border-border px-3 py-3 text-xs text-muted-foreground">和线上一样，没有改动。</p>
+  );
 
   return <>
     <div className="section-panel flex flex-wrap items-center gap-3 py-3" aria-label="发布状态">

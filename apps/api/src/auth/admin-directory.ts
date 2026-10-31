@@ -10,12 +10,14 @@ import {
   computeProposedPermissions,
   evaluateAdminDirectoryActions,
   hasPermission,
+  isAdminPermissionCode,
   loadEffectiveAdminAccess,
   requirePermission,
   type AdminFieldAccess,
   type EffectiveAdminAccess,
   type ProposedAdminGrants,
 } from "./admin-authorization";
+import { assertNoNewBossOnlyRoleGrants, isBossOnlyPermission } from "./admin-role-presets";
 import { recordAudit, setAuditContext, SecurityApiError, withTransaction } from "./security-core";
 import {
   ADMIN_GAME_SCOPE_MODE,
@@ -341,10 +343,11 @@ export async function listRolesAndCatalog(pool: Pool, fields: AdminFieldAccess):
           name: role.name,
           description: role.description,
           status: role.status,
-          permissionCodes: role.permissionCodes ?? [],
+          // 已退役的权限码（如 user.account.restore）仍在库里，但不再展示
+          permissionCodes: (role.permissionCodes ?? []).filter(isAdminPermissionCode),
         }))
       : [],
-    permissions: fields.permissionRead ? permissions.rows : [],
+    permissions: fields.permissionRead ? permissions.rows.filter((row) => isAdminPermissionCode(row.code)).map((row) => ({ ...row, bossOnly: isBossOnlyPermission(row.code) })) : [],
   };
 }
 
@@ -611,6 +614,7 @@ export async function createRole(
     const actor = await lockActor(client, context.userId);
     requirePermission(actor, ADMIN_PERMISSION.roleConfigure);
     assertDelegable(actor, permissionCodes);
+    assertNoNewBossOnlyRoleGrants([], permissionCodes);
     const id = `role_${randomUUID().replaceAll("-", "")}`;
     try {
       await client.query(
@@ -680,6 +684,7 @@ export async function updateRole(
     const nextStatus = status ?? current.status;
     const afterCodes = permissionCodes ?? beforeCodes;
     assertRolePermissionSet(actor, afterCodes, nextStatus, permissionCodes !== undefined);
+    assertNoNewBossOnlyRoleGrants(beforeCodes, afterCodes);
     if (permissionCodes) {
       await replaceRolePermissions(client, current.id, permissionCodes);
     }

@@ -1,4 +1,6 @@
 [
+  "dist/test/admin-permission-seed-0113.test.js",
+  "dist/test/admin-role-preset-grants-0114.test.js",
   "dist/test/api-contract.test.js",
   "dist/test/config.test.js",
   "dist/test/database-safety.test.js",

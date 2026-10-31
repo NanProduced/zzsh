@@ -31,8 +31,8 @@ function Pick({ label, value, onChange, options, disabled }: { label: string; va
 function ScrollTable({ children, label }: { children: ReactNode; label: string }) {
   return (
     <div className="min-w-0">
-      <p className="mb-1 text-xs text-muted-foreground sm:hidden">左右滑动查看完整表格</p>
-      <div className="overflow-x-auto [&_th]:h-8 [&_th]:text-xs [&_th]:font-normal [&_th]:text-muted-foreground [&_td]:text-sm" role="region" aria-label={label} tabIndex={0}>{children}</div>
+      <p className="mb-1 text-[11px] text-muted-foreground sm:hidden">左右滑动查看完整表格</p>
+      <div className="overflow-x-auto rounded-md border border-border/60 [&_th]:h-9 [&_th]:text-xs [&_th]:font-normal [&_th]:text-muted-foreground [&_td]:text-sm" role="region" aria-label={label} tabIndex={0}>{children}</div>
     </div>
   );
 }
@@ -44,16 +44,16 @@ function Card({ title, note, badges, action, metrics, info, children, wide }: { 
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <h3 className="flex flex-wrap items-center gap-2 text-base font-semibold leading-6">{title}{badges}</h3>
-          {note ? <p className="mt-0.5 text-sm text-muted-foreground">{note}</p> : null}
+          {note ? <p className="mt-0.5 text-xs text-muted-foreground leading-relaxed">{note}</p> : null}
         </div>
         {action}
       </header>
-      {metrics ? <dl className="flex flex-wrap gap-x-8 gap-y-3 border-b border-border pb-4">{metrics}</dl> : null}
+      {metrics ? <dl className="flex flex-wrap gap-x-8 gap-y-3 border-b border-border/60 pb-4">{metrics}</dl> : null}
       {children}
       {info ? (
         <Collapsible open={infoOpen} onOpenChange={setInfoOpen}>
-          <CollapsibleTrigger render={<Button type="button" variant="ghost" size="sm" className="h-8 px-2 text-muted-foreground" />}>{infoOpen ? "收起说明" : "规则说明"}</CollapsibleTrigger>
-          <CollapsibleContent><div className="mt-2 space-y-1 rounded-md bg-muted/40 px-3 py-2 text-sm leading-6 text-muted-foreground">{info}</div></CollapsibleContent>
+          <CollapsibleTrigger render={<Button type="button" variant="ghost" size="sm" className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground" />}>{infoOpen ? "收起说明" : "规则说明"}</CollapsibleTrigger>
+          <CollapsibleContent><div className="mt-2 space-y-1 rounded-md bg-muted/40 px-3 py-2 text-xs leading-relaxed text-muted-foreground">{info}</div></CollapsibleContent>
         </Collapsible>
       ) : null}
     </section>
@@ -74,13 +74,60 @@ function Hint({ children }: { children: ReactNode }) {
   return <p role="status" className="rounded-md border border-dashed border-border px-3 py-3 text-xs text-muted-foreground">{children}</p>;
 }
 
+function renderDiffValue(val: string, isAfter: boolean) {
+  if (val === "将移除") {
+    return <span className="inline-flex items-center rounded-md bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive">将移除</span>;
+  }
+  if (val === "更新为新版") {
+    return <span className="inline-flex items-center rounded-md bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">更新为新版</span>;
+  }
+  if (val.includes("；")) {
+    const parts = val.split("；");
+    return (
+      <div className={`space-y-1 text-left ${isAfter ? "text-foreground font-medium" : "text-muted-foreground"}`}>
+        {parts.map((part, idx) => (
+          <div key={idx} className="text-xs leading-relaxed">{part.trim()}</div>
+        ))}
+      </div>
+    );
+  }
+  return <span className={isAfter ? "text-foreground font-medium" : "text-muted-foreground"}>{val}</span>;
+}
+
 function DiffTable({ rows, empty }: { rows: RuleDiffRow[]; empty: string }) {
   if (rows.length === 0) return <Hint>{empty}</Hint>;
   return (
     <ScrollTable label="规则对比">
-      <Table>
-        <TableHeader><TableRow><TableHead>分组</TableHead><TableHead>项目</TableHead><TableHead className="text-right">现在</TableHead><TableHead className="text-right">调整后</TableHead></TableRow></TableHeader>
-        <TableBody>{rows.map((r, i) => <TableRow key={i}><TableCell>{r.group}</TableCell><TableCell className="max-w-64 whitespace-normal break-words">{r.label}{r.detail ? <MutedDetails className="mt-1"><p className="text-xs text-muted-foreground">{r.detail}</p></MutedDetails> : null}</TableCell><TableCell className="max-w-80 whitespace-pre-wrap break-words text-right tabular-nums">{r.before}</TableCell><TableCell className="max-w-80 whitespace-pre-wrap break-words text-right font-medium tabular-nums">{r.after}</TableCell></TableRow>)}</TableBody>
+      <Table className="min-w-[560px]">
+        <TableHeader>
+          <TableRow>
+            <TableHead className="w-24">分组</TableHead>
+            <TableHead className="w-48">项目</TableHead>
+            <TableHead className="w-40 text-right">现在</TableHead>
+            <TableHead className="min-w-[160px] text-right">调整后</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((r, i) => (
+            <TableRow key={i}>
+              <TableCell className="align-top">
+                <span className="inline-flex items-center rounded-md bg-muted px-2 py-0.5 text-xs font-normal text-muted-foreground whitespace-nowrap">
+                  {r.group}
+                </span>
+              </TableCell>
+              <TableCell className="align-top max-w-64 whitespace-normal break-words">
+                <span className="font-medium text-foreground">{r.label}</span>
+                {r.detail ? <MutedDetails className="mt-1"><p className="text-xs text-muted-foreground">{r.detail}</p></MutedDetails> : null}
+              </TableCell>
+              <TableCell className="align-top max-w-80 whitespace-pre-wrap break-words text-right tabular-nums">
+                {r.before ? renderDiffValue(r.before, false) : "—"}
+              </TableCell>
+              <TableCell className="align-top max-w-80 whitespace-pre-wrap break-words text-right tabular-nums">
+                {renderDiffValue(r.after, true)}
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
       </Table>
     </ScrollTable>
   );
@@ -197,7 +244,7 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
                       <span className="text-xs text-muted-foreground">当前比例差：普通 {haff.compatibility.ordinary.spreadDelta} · 辅助测算</span>
                     </div>
                     <ScrollTable label="换算参考示例">
-                      <Table className="mt-2">
+                      <Table className="mt-2 min-w-[520px]">
                         <TableHeader>
                           <TableRow>
                             <TableHead>参考场景 / 号主比例</TableHead>
@@ -245,7 +292,7 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
               info={<><p>开租与结束各确认一次数量，按实际消耗计费。</p><p>显示「未配置」的物品不会按 0 计价，相关报价会提示无法报价。</p>{compatTiers ? <p>另有 {compatTiers} 个会员档位的兼容价格数据，本页不展示也不修改。</p> : null}</>} badges={changeBadge(priceChanged, () => priceDiff(rules, curPrice?.id, latestPrice?.id).filter((r) => r.group === "物品单价"))}>
               {itemRows.length === 0 ? <Hint>该游戏没有按件计费的物品。</Hint> : (
                 <ScrollTable label="物品单价表">
-                  <Table>
+                  <Table className="min-w-[480px]">
                     <TableHeader><TableRow><TableHead>物品</TableHead><TableHead>计费单位</TableHead><TableHead className="text-right">租客价</TableHead><TableHead className="text-right">号主价</TableHead><TableHead className="text-right">平台价差/单位</TableHead></TableRow></TableHeader>
                     <TableBody>{itemRows.map(({ item, line }) => (
                       <TableRow key={item.id}>
@@ -266,7 +313,7 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
               badges={changeBadge(priceChanged, () => priceDiff(rules, curPrice?.id, latestPrice?.id).filter((r) => r.group === "押金规则"))}>
               {!policy ? <Hint>资金政策未提供：押金上限、普通/包赔最低值、加价项与号主保证金要求均为未提供，不参与本地估算。</Hint> : (
                 <>
-                  <dl className="grid grid-cols-2 gap-x-6 gap-y-3 border-b border-border pb-4 sm:grid-cols-4">
+                  <dl className="grid grid-cols-2 gap-x-6 gap-y-3 border-b border-border/60 pb-4 sm:grid-cols-4">
                     <div><dt className="text-xs text-muted-foreground">押金上限</dt><dd className="mt-0.5 text-xl font-semibold leading-7 tabular-nums">{V("dep.cap", centsYuan(policy.recommendation.parameters.upperLimitCents), { unit: "元" })}</dd></div>
                     <div><dt className="text-xs text-muted-foreground">普通最低</dt><dd className="mt-0.5 text-xl font-semibold leading-7 tabular-nums">{centsYuan(policy.ownerDepositRules.normal.minCents)}</dd></div>
                     <div><dt className="text-xs text-muted-foreground">选全额包赔时最低</dt><dd className="mt-0.5 text-xl font-semibold leading-7 tabular-nums">{centsYuan(policy.ownerDepositRules.fullPayoutSelected.minCents)}</dd></div>
@@ -274,7 +321,7 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
                   </dl>
 
                   <ScrollTable label="推荐押金加价项">
-                    <Table>
+                    <Table className="min-w-[460px]">
                       <TableHeader><TableRow><TableHead>加价项</TableHead><TableHead>分类</TableHead><TableHead className="text-right">首件 / 金额</TableHead><TableHead className="text-right">之后每件</TableHead></TableRow></TableHeader>
                       <TableBody>
                         {Object.entries(policy.recommendation.parameters.safeBoxWeightsByCode).map(([code, cents]) => (
@@ -290,7 +337,7 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
                       </TableBody>
                     </Table>
                   </ScrollTable>
-                  {policy.recommendation.schema === "deposit-recommendation-v1" ? <p className="mt-4 border-t border-border pt-3 text-xs text-muted-foreground">{pendingSkinV2 ? "线上仍是旧皮肤押金规则，待生效版本已更新为新版。" : "线上皮肤押金还是旧规则，去「皮肤推荐押金」配好新版并提交。"}</p> : null}
+                  {policy.recommendation.schema === "deposit-recommendation-v1" ? <p className="mt-4 border-t border-border/60 pt-3 text-xs text-muted-foreground">{pendingSkinV2 ? "线上仍是旧皮肤押金规则，待生效版本已更新为新版。" : "线上皮肤押金还是旧规则，去「皮肤推荐押金」配好新版并提交。"}</p> : null}
                 </>
               )}
             </Card>
@@ -305,7 +352,7 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
               <div className="min-w-0">
                 {termOpts.length ? (
                   <ScrollTable label="租期档位表">
-                    <Table>
+                    <Table className="min-w-[340px]">
                       <TableHeader><TableRow><TableHead>档位</TableHead><TableHead className="text-right">每日消耗</TableHead><TableHead>租期取整</TableHead></TableRow></TableHeader>
                       <TableBody>{termOpts.map((option) => (
                         <TableRow key={option.code}>
@@ -374,7 +421,7 @@ export function SettlementRules() {
           <div className="min-w-0">
             <h4 className="mb-2 text-xs font-semibold">全额包赔 8% · 谁承担</h4>
             <ScrollTable label="包赔承担方">
-              <Table>
+              <Table className="min-w-[360px]">
                 <TableHeader><TableRow><TableHead>怎么结束</TableHead><TableHead>按什么算</TableHead><TableHead className="text-right">谁付</TableHead></TableRow></TableHeader>
                 <TableBody>
                   <TableRow><TableCell>正常结束</TableCell><TableCell>号主按实际消耗得到的金额</TableCell><TableCell className="text-right">号主</TableCell></TableRow>
@@ -438,7 +485,7 @@ function History({ rules }: { rules: RulesResponse }) {
       </CollapsibleTrigger>
       <CollapsibleContent>
         <ScrollTable label="版本记录">
-          <Table className="mt-3">
+          <Table className="mt-3 min-w-[440px]">
             <TableHeader><TableRow><TableHead>类型</TableHead><TableHead>状态</TableHead><TableHead>创建</TableHead><TableHead>提交</TableHead></TableRow></TableHeader>
             <TableBody>{main.map(({ kind, v }) => (
               <TableRow key={v.id}><TableCell>{kind}</TableCell>
@@ -488,18 +535,33 @@ function ConfirmDialog({ rules, command, onClose, onOpenSettlement }: { rules: R
         ) : (
           <>
             {pending ? <p className="rounded-md bg-muted/50 p-3 text-sm">原请求：游戏 {pending.gameId}{isRelease ? ` · 基线第 ${String(pending.body.expectedGeneration)} 版组合` : " · 高级草稿维护"}；保留原 key，不自动重发。{crossGame ? "请切回原游戏后核对。" : ""}</p> : null}
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <div className="grid grid-cols-1 gap-3 rounded-lg border border-border/70 bg-card/40 p-3.5 sm:grid-cols-3">
               <Pick label="价格版本" value={priceId} onChange={setPriceId} disabled={command.locked} options={sealed(rules.priceVersions).map((v) => ({ value: v.id, label: label(v, release?.priceVersionId) }))} />
               <Pick label="租期版本" value={termId} onChange={setTermId} disabled={command.locked} options={sealed(rules.termVersions).map((v) => ({ value: v.id, label: label(v, release?.termVersionId) }))} />
               <Pick label="出租协议" value={agreementId} onChange={setAgreementId} disabled={command.locked} options={sealed(rules.agreementVersions).map((v) => ({ value: v.id, label: label(v, release?.agreementVersionId, v.title) }))} />
             </div>
             {!crossGame ? <div><p className="mb-2 text-sm font-semibold">改了的规则</p><DiffTable rows={rows} empty={same ? "所选组合与当前生效组合相同，无需生效。" : "已提供的业务字段未发现差异；版本引用将变化。"} /></div> : null}
-            <div className="text-xs"><p className="mb-1 font-semibold">沿用不变</p><p className="text-muted-foreground">{unchanged.length ? unchanged.join("、") : "无"}</p></div>
-            <div className="text-xs"><p className="mb-1 font-semibold">本次引用的包赔条款</p>
-              <p className="text-muted-foreground">{payoutName(rules, rules.priceVersions.find((v) => v.id === priceId)) ?? "未设置"} {curRef === nextRef ? <Badge variant="outline">沿用</Badge> : <Badge variant="warning">更换（原：{payoutName(rules, rules.priceVersions.find((v) => v.id === release?.priceVersionId)) ?? "无"}）</Badge>}{onOpenSettlement ? <Button type="button" variant="link" className="h-auto px-1 text-xs" onClick={() => { onClose(); onOpenSettlement(); }}>查看包赔正文</Button> : null}</p></div>
-            <div className="rounded-md border border-border bg-muted/40 p-3 text-xs">
-              <p>切换后，依赖旧规则的后续操作需重新确认；具体数量在生效后显示。</p>
-              <p className="mt-1 text-muted-foreground">已冻结报价的订单按冻结时的报价结算。</p>
+            <div className="grid grid-cols-1 gap-3 rounded-lg border border-border/60 bg-muted/20 p-3 text-xs sm:grid-cols-2">
+              <div className="min-w-0">
+                <p className="font-semibold text-foreground">沿用不变</p>
+                <p className="mt-1 text-muted-foreground">{unchanged.length ? unchanged.join("、") : "无"}</p>
+              </div>
+              <div className="min-w-0">
+                <p className="font-semibold text-foreground">本次引用的包赔条款</p>
+                <div className="mt-1 flex flex-wrap items-center gap-1.5 text-muted-foreground">
+                  <span>{payoutName(rules, rules.priceVersions.find((v) => v.id === priceId)) ?? "未设置"}</span>
+                  {curRef === nextRef ? <Badge variant="outline" className="text-[11px] font-normal">沿用</Badge> : <Badge variant="warning" className="text-[11px]">更换（原：{payoutName(rules, rules.priceVersions.find((v) => v.id === release?.priceVersionId)) ?? "无"}）</Badge>}
+                  {onOpenSettlement ? <Button type="button" variant="link" className="h-auto p-0 text-xs" onClick={() => { onClose(); onOpenSettlement(); }}>查看包赔正文</Button> : null}
+                </div>
+              </div>
+            </div>
+            <div className="flex items-start gap-2.5 rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 text-xs text-muted-foreground">
+              <Info className="mt-0.5 size-4 shrink-0 text-amber-500" />
+              <div className="space-y-0.5">
+                <p className="font-medium text-foreground">生效影响说明</p>
+                <p>切换后，依赖旧规则的后续操作需重新确认；具体数量在生效后显示。</p>
+                <p>已冻结报价的订单按冻结时的报价结算。</p>
+              </div>
             </div>
             {state.kind === "conflict" ? <Alert variant="warning" role="alert"><TriangleAlert aria-hidden="true" /><AlertTitle>规则已被其他人更新</AlertTitle><AlertDescription>版本冲突。请关闭后刷新页面，核对当前生效版本再确认。</AlertDescription></Alert> : null}
             {state.kind === "unknown" ? <Alert variant="warning" role="status"><TriangleAlert aria-hidden="true" /><AlertTitle>结果未知</AlertTitle><AlertDescription>{state.message ?? "请求可能已执行。核对原回执前不能重复提交；关闭或刷新仍保留原请求。"}</AlertDescription></Alert> : null}

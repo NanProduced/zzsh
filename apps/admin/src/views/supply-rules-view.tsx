@@ -88,15 +88,12 @@ export function SupplyRulesView({
   onDirtyChange,
   refreshNonce = 0,
   section: sectionQuery,
-  draft: draftQuery,
   onOpenPath,
 }: {
   snapshot: Extract<SessionSnapshot, { authenticated: true }>;
   onDirtyChange: (dirty: boolean) => void;
   refreshNonce?: number;
   section?: string;
-  /** 显式指定要编辑的价格草稿（深链接）；不会自动切换。 */
-  draft?: string;
   onOpenPath?: (path: string) => void;
 }) {
   const requestedSection = rulesSection(sectionQuery);
@@ -111,7 +108,6 @@ export function SupplyRulesView({
   const [games, setGames] = useState<SupplyGame[]>([]);
   const [gameId, setGameId] = useState("");
   const [rules, setRules] = useState<RulesResponse | null>(null);
-  void draftQuery;
   const [pricingTab, setPricingTab] = useState<typeof PRICING_TABS[number][0]>("base");
   const [termId, setTermId] = useState("");
   const [agreementId, setAgreementId] = useState("");
@@ -371,7 +367,7 @@ export function SupplyRulesView({
       <section className="section-panel">
         <div className="min-w-0 max-w-3xl">
           <h2 className="flex flex-wrap items-center gap-2 text-2xl leading-9 font-semibold">{RULES_SECTION_LABEL[section]}{rules ? <span className="rounded-full border border-border px-2 py-0.5 text-xs font-normal text-muted-foreground">{rules.game.name}</span> : null}</h2>
-          <p className="mt-1 text-sm text-muted-foreground">{section === "overview" ? "线上正在用的规则和历史。" : section === "settlement" ? "全额包赔谁承担、提前结束怎么补差。" : section === "agreement" ? "租客下单时阅读的出租协议。" : deltaSection ? "改完保存为草稿，提交后由 Boss 确认生效。" : ""}</p>
+          <p className="mt-1 text-xs text-muted-foreground leading-relaxed">{section === "overview" ? "线上正在运行的规则与版本历史。" : section === "settlement" ? "全额包赔承担方及提前结束时的价差补交规则。" : section === "agreement" ? "租客下单时查阅的标准出租协议。" : deltaSection ? "修改将先保存为草稿，提交后由 Boss 确认正式生效。" : ""}</p>
         </div>
         <StatusMessage themeAware error={error} success={success} className="mt-3" />
         {command.locked ? (

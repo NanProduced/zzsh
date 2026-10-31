@@ -1,5 +1,6 @@
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../../components/ui/collapsible";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { FileEdit, Info, Lock } from "lucide-react";
 import type { FundingPolicy, PriceVersionRecord, RulesResponse } from "../../api";
 import { friendlyError } from "../../api";
 import { Button } from "../../components/ui/button";
@@ -22,18 +23,40 @@ const DECIMAL = /^-?\d+(\.\d{1,2})?$/;
 const MONEY = /^\d+(\.\d{1,2})?$/;
 /** 服务端要求这三项的计费数量为 1。见 delta-rental DELTA_RESOURCE_UNITS。 */
 const LOCKED_UNIT_QUANTITY = new Set(["df_billable_top_insure_card", "df_billable_barrett_bullet", "df_billable_turtle_backpack_45"]);
-const fmtTime = (iso: string | null | undefined) => iso ? new Date(iso).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
-const shortId = (id: string) => id.slice(-6);
-/** 版本的人话名称：状态 · 创建时间 · 第 N 次修改 · 编号尾号。 */
-export function versionLabel(v: PriceVersionRecord, releaseId?: string): string {
-  return `${v.id === releaseId ? "当前生效" : v.status === "SEALED" ? "已封存" : "草稿"} · ${fmtTime(v.createdAt)} 创建`;
-}
 /** 四舍五入到分。 */
 const r2 = (n: number) => Math.round(n * 100 + 1e-9) / 100;
 
 /** 编辑提示：一行，说明现在改的是什么。 */
 export function DraftLine({ selected, locked }: { selected: PriceVersionRecord | undefined; locked?: boolean }) {
-  return <p className="text-xs text-muted-foreground">{selected?.status === "SEALED" ? "已提交，等 Boss 生效。这一版已锁定，只能查看；生效后可以继续改。" : locked ? "有一个写入还在核对，暂时不能修改。" : selected ? "正在修改草稿，保存后不影响线上。" : "显示的是线上值，直接修改；保存时自动存为草稿。"}</p>;
+  if (selected?.status === "SEALED") {
+    return (
+      <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3.5 py-2 text-xs text-amber-950 dark:text-amber-200" role="status">
+        <Lock className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+        <span>已提交，等 Boss 确认生效。本版本已锁定为只读；生效后可新建草稿继续修改。</span>
+      </div>
+    );
+  }
+  if (locked) {
+    return (
+      <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/60 px-3.5 py-2 text-xs text-muted-foreground" role="status">
+        <Info className="size-3.5 shrink-0" />
+        <span>有一个写入操作正在核对中，暂时不能修改。</span>
+      </div>
+    );
+  }
+  if (selected) {
+    return (
+      <div className="flex items-center gap-2 rounded-lg border border-blue-500/30 bg-blue-500/10 px-3.5 py-2 text-xs text-blue-950 dark:text-blue-200" role="status">
+        <FileEdit className="size-3.5 shrink-0 text-blue-600 dark:text-blue-400" />
+        <span>正在编辑草稿。保存后仅暂存在草稿中，提交并由 Boss 确认后才替换线上。</span>
+      </div>
+    );
+  }
+  return (
+    <p className="text-xs text-muted-foreground">
+      显示的是线上生效值；修改后保存将自动创建为新草稿，不影响当前线上运行。
+    </p>
+  );
 }
 
 function useDirty<T>(initial: T, locked: boolean, onDirtyChange: (dirty: boolean) => void) {
@@ -50,7 +73,29 @@ function useDirty<T>(initial: T, locked: boolean, onDirtyChange: (dirty: boolean
 export const MONEY2 = /^\d*(?:\.\d{0,2})?$/;
 
 function Panel({ title, note, more, children }: { title: string; note?: ReactNode; more?: ReactNode; children: ReactNode }) {
-  return <section className="section-panel space-y-4" aria-label={title}><div><h2 className="text-base font-semibold">{title}</h2>{note ? <p className="mt-1 max-w-3xl text-sm text-muted-foreground">{note}</p> : null}{more ? <Collapsible><CollapsibleTrigger className="mt-1 text-xs text-primary underline-offset-2 hover:underline">说明</CollapsibleTrigger><CollapsibleContent><p className="mt-1 max-w-3xl text-xs text-muted-foreground">{more}</p></CollapsibleContent></Collapsible> : null}</div>{children}</section>;
+  const [open, setOpen] = useState(false);
+  return (
+    <section className="section-panel space-y-4" aria-label={title}>
+      <div>
+        <h2 className="text-base font-semibold text-foreground">{title}</h2>
+        {note ? <div className="mt-1 max-w-3xl text-xs leading-relaxed text-muted-foreground">{note}</div> : null}
+        {more ? (
+          <Collapsible open={open} onOpenChange={setOpen} className="mt-1.5">
+            <CollapsibleTrigger render={<Button type="button" variant="ghost" size="sm" className="h-6 px-1.5 text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1" />}>
+              <Info className="size-3 shrink-0" />
+              <span>{open ? "收起说明" : "计价说明与示例"}</span>
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+              <div className="mt-2 max-w-3xl rounded-md bg-muted/40 p-2.5 text-xs leading-relaxed text-muted-foreground">
+                {more}
+              </div>
+            </CollapsibleContent>
+          </Collapsible>
+        ) : null}
+      </div>
+      {children}
+    </section>
+  );
 }
 
 function useSave(command: Command) {
@@ -150,11 +195,11 @@ export function PriceItemsEditor({ rules, command, draftId, canEdit, onDirtyChan
   return <Panel title="物资价目" note={<>按「每 N 个多少钱」计价：租客付 <b>数量÷N×租客价</b>，号主得 <b>数量÷N×号主价</b>，差额归平台。</>} more="例：六级子弹每 60 发租客 ¥10.00、号主 ¥4.00，租 120 发 → 租客付 ¥20.00、号主得 ¥8.00。金额四舍五入到分；会员优惠按总价折扣另算。">
     <DraftLine selected={selected} locked={command.locked} />
     {memberTiers ? <p role="note" className="text-xs text-muted-foreground">此草稿还带有旧的会员档位价目；保存后草稿只保留普通档位（已封存版本不受影响）。</p> : null}
-    <div className="rules-items-table overflow-x-auto rounded-md border border-border max-sm:overflow-visible max-sm:border-0 max-sm:[&_thead]:hidden max-sm:[&_table]:block max-sm:[&_tbody]:grid max-sm:[&_tbody]:gap-3 max-sm:[&_tr]:grid max-sm:[&_tr]:grid-cols-2 max-sm:[&_tr]:gap-x-3 max-sm:[&_tr]:gap-y-2 max-sm:[&_tr]:rounded-md max-sm:[&_tr]:border max-sm:[&_tr]:border-border max-sm:[&_tr]:p-3 max-sm:[&_td]:block max-sm:[&_td]:p-0 max-sm:[&_td]:text-left"><Table><TableHeader><TableRow><TableHead>物品</TableHead><TableHead>计价方式</TableHead><TableHead className="text-right">当前租客单价</TableHead><TableHead>计费数量 N</TableHead><TableHead>{sealedView ? "待生效租客价（元）" : "草稿租客价（元）"}</TableHead>{mode === "SPREAD" ? <><TableHead className="text-right">当前号主单价</TableHead><TableHead>{sealedView ? "待生效号主价（元）" : "草稿号主价（元）"}</TableHead><TableHead className="text-right">平台差价</TableHead></> : null}</TableRow></TableHeader><TableBody>
+    <div className="rules-items-table overflow-x-auto rounded-md border border-border max-sm:overflow-visible max-sm:border-0 max-sm:[&_thead]:hidden max-sm:[&_table]:block max-sm:[&_tbody]:grid max-sm:[&_tbody]:gap-3 max-sm:[&_tr]:grid max-sm:[&_tr]:grid-cols-2 max-sm:[&_tr]:gap-x-3 max-sm:[&_tr]:gap-y-2 max-sm:[&_tr]:rounded-md max-sm:[&_tr]:border max-sm:[&_tr]:border-border max-sm:[&_tr]:p-3 max-sm:[&_td]:block max-sm:[&_td]:p-0 max-sm:[&_td]:text-left"><Table className="min-w-[720px]"><TableHeader><TableRow><TableHead>物品</TableHead><TableHead>计价方式</TableHead><TableHead className="text-right">当前租客单价</TableHead><TableHead className="text-right">计费数量 N</TableHead><TableHead className="text-right">{sealedView ? "待生效租客价（元）" : "草稿租客价（元）"}</TableHead>{mode === "SPREAD" ? <><TableHead className="text-right">当前号主单价</TableHead><TableHead className="text-right">{sealedView ? "待生效号主价（元）" : "草稿号主价（元）"}</TableHead><TableHead className="text-right">平台差价</TableHead></> : null}</TableRow></TableHeader><TableBody>
       {form.value.map((r, i) => { const item = rules.items.find(x => x.id === r.itemId); const cur = std(current?.id).find(l => l.itemId === r.itemId); const haff = r.pricingKind === "HAFF_RATIO"; const lockedQty = LOCKED_UNIT_QUANTITY.has(item?.code ?? ""); return <TableRow key={r.itemId}>
         <TableCell className="max-sm:col-span-2"><span className="font-medium">{item?.name ?? r.itemId}</span>{rowIssue(r) ? <p className="text-[11px] text-destructive">{rowIssue(r)}</p> : null}</TableCell><TableCell data-label="计价方式" className={`whitespace-nowrap ${ML}`}>{haff ? "按哈夫币比例（见基础计价）" : `每 ${cur?.unitQuantity ?? r.unitQuantity} ${unitLabel(item?.unit ?? "", item?.code)}`}</TableCell>
         <TableCell data-label="当前租客单价" className={`text-right tabular-nums ${ML}`}>{haff ? "—" : cur?.buyerUnitAmount ? unitYuan(cur.buyerUnitAmount) : "未配置"}</TableCell>
-        <TableCell data-label="计费数量 N" className={`min-w-24 ${ML} ${haff ? "max-sm:hidden" : ""}`}>{haff ? "—" : lockedQty ? <p className="text-right text-sm tabular-nums">{r.unitQuantity}<span className="mt-1 block text-left text-xs text-muted-foreground">按 1 个基础单位计价，不能改</span></p> : <Input aria-label={`${item?.name} 单位数量`} inputMode="numeric" className={`text-right tabular-nums ${cur && cur.unitQuantity !== r.unitQuantity.trim() ? "border-primary" : ""}`} value={r.unitQuantity} disabled={locked} onChange={e => set(i, "unitQuantity", e.target.value)} />}</TableCell>
+        <TableCell data-label="计费数量 N" className={`min-w-24 ${ML} ${haff ? "max-sm:hidden" : ""}`}>{haff ? "—" : lockedQty ? <div className="text-right max-sm:text-left"><span className="text-sm font-medium tabular-nums">{r.unitQuantity}</span><span className="block text-[11px] text-muted-foreground whitespace-nowrap max-sm:inline max-sm:ml-1.5" title="按 1 个基础单位计价，不能改">（固定 1 单位）</span></div> : <Input aria-label={`${item?.name} 单位数量`} inputMode="numeric" className={`text-right tabular-nums ${cur && cur.unitQuantity !== r.unitQuantity.trim() ? "border-primary" : ""}`} value={r.unitQuantity} disabled={locked} onChange={e => set(i, "unitQuantity", e.target.value)} />}</TableCell>
         <TableCell data-label={sealedView ? "待生效租客价（元）" : "草稿租客价（元）"} className={`min-w-24 ${ML} ${haff ? "max-sm:hidden" : ""}`}>{haff ? "—" : <Input aria-label={`${item?.name} 租客单价`} inputMode="decimal" value={r.buyerUnitAmount} disabled={locked} className={`text-right tabular-nums ${cur && yuanInput(cur.buyerUnitAmount) !== r.buyerUnitAmount.trim() ? "border-primary" : ""}`} onChange={e => { if (MONEY2.test(e.target.value)) set(i, "buyerUnitAmount", e.target.value); }} />}</TableCell>
         {mode === "SPREAD" ? <><TableCell data-label="当前号主单价" className={`text-right tabular-nums ${ML} ${haff ? "max-sm:hidden" : ""}`}>{haff ? "—" : cur?.ownerUnitAmount ? unitYuan(cur.ownerUnitAmount) : "未配置"}</TableCell><TableCell data-label={sealedView ? "待生效号主价（元）" : "草稿号主价（元）"} className={`min-w-24 ${ML} ${haff ? "max-sm:hidden" : ""}`}>{haff ? "—" : <Input aria-label={`${item?.name} 号主单价`} inputMode="decimal" value={r.ownerUnitAmount} disabled={locked} className={`text-right tabular-nums ${cur && yuanInput(cur.ownerUnitAmount) !== r.ownerUnitAmount.trim() ? "border-primary" : ""}`} onChange={e => { if (MONEY2.test(e.target.value)) set(i, "ownerUnitAmount", e.target.value); }} />}</TableCell><TableCell data-label="平台差价" className={`text-right tabular-nums ${ML} ${haff ? "max-sm:hidden" : ""}`}>{haff || !MONEY.test(r.buyerUnitAmount.trim()) || !MONEY.test(r.ownerUnitAmount.trim()) ? "—" : unitYuan(r2(Number(r.buyerUnitAmount) - Number(r.ownerUnitAmount)))}</TableCell></> : null}
       </TableRow>; })}

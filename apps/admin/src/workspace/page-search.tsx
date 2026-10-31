@@ -7,25 +7,34 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import {
+  BadgeDollarSignIcon,
   BoxesIcon,
+  CalculatorIcon,
   ClipboardCheckIcon,
   CrosshairIcon,
   CrownIcon,
+  FileSignatureIcon,
   FileTextIcon,
   ImageIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
-  ListChecksIcon,
   MessagesSquareIcon,
+  NetworkIcon,
   NewspaperIcon,
+  PackageIcon,
+  PaletteIcon,
+  ScaleIcon,
   ScrollTextIcon,
   SearchIcon,
   SearchXIcon,
   SettingsIcon,
   ShieldIcon,
   ShoppingBagIcon,
+  SlidersHorizontalIcon,
+  UserCheckIcon,
   UserRoundCogIcon,
   UsersRoundIcon,
+  VaultIcon,
   WalletIcon,
   type LucideIcon,
 } from "lucide-react";
@@ -74,14 +83,23 @@ function getPageIcon(path: string): LucideIcon {
   if (path === "/workbench") return LayoutDashboardIcon;
   if (path === "/support") return MessagesSquareIcon;
   if (path === "/membership-growth") return CrownIcon;
+  if (path === "/distribution-policy") return NetworkIcon;
   if (path === "/admins" || path.startsWith("/admins/")) return UserRoundCogIcon;
   if (path === "/roles" || path.startsWith("/roles/")) return KeyRoundIcon;
   if (path === "/supply/catalog") return BoxesIcon;
   if (path === "/supply/gunsmith") return CrosshairIcon;
-  if (path === "/supply/rules") return ListChecksIcon;
-  if (path === "/supply/reviews" || path.startsWith("/supply/reviews/")) return ClipboardCheckIcon;
+  if (path === "/supply/rules?section=overview") return SlidersHorizontalIcon;
+  if (path === "/supply/rules?section=deposit") return VaultIcon;
+  if (path === "/supply/rules?section=settlement") return ScaleIcon;
+  if (path === "/supply/rules?section=agreement") return FileSignatureIcon;
+  if (path === "/supply/rules?section=pricing") return BadgeDollarSignIcon;
+  if (path === "/supply/rules?section=items") return PackageIcon;
+  if (path === "/supply/rules?section=skin") return PaletteIcon;
+  if (path.startsWith("/supply/rules")) return SlidersHorizontalIcon;
+  if (path === "/supply/reviews" || path.startsWith("/supply/reviews/")) return UserCheckIcon;
   if (path === "/supply/media") return ImageIcon;
   if (path === "/content") return NewspaperIcon;
+  if (path === "/finance/period") return CalculatorIcon;
   if (path === "/finance" || path.startsWith("/finance/")) return WalletIcon;
   if (path === "/orders" || path.startsWith("/orders/")) return ShoppingBagIcon;
   if (path === "/users" || path.startsWith("/users/")) return UsersRoundIcon;
