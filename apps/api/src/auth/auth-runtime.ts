@@ -62,7 +62,9 @@ import { readLegacyDutyFinalization } from "../finance/legacy-duty-finance-store
 import { composeSupplyGateWithOrderOccupancy } from "../order/order";
 import { ConfigurationError, OrderImSdkRouteBindings, readSecret, type OrderImSdkRouteConfig } from "../config/config";
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
-import { SecurityApiError, setAuditContext, withTransaction } from "./security-core";
+import { SecurityApiError, setAuditContext, recordAudit, withTransaction } from "./security-core";
+import { createUserAuthThrottle, readUserThrottleHmacKey, ThrottleDependencyError, withUserAuthThrottle, type UserAuthThrottle } from "./user-auth-throttle";
+import { parseUserClientIpConfig, resolveUserClientIp, USER_CLIENT_IP_FORWARD_HEADER, type UserClientIpConfig } from "./user-client-ip";
 import { ImIdentityProvisioner, YunxinDynamicTokenService } from "../im/identity-lifecycle";
 import { MessageScopeRecoveryLifecycle, supportManagerIdentityKey, type ConsultationRouteOptions } from "../im/consultation";
 import { YunxinIdentityRepository } from "../im/yunxin-identity-repository";
@@ -166,6 +168,11 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
    * limiter runs before any legacy credential upgrade.
    */
   userRateLimit?: Parameters<typeof import("better-auth").betterAuth>[0]["rateLimit"];
+  /** 缺省 memory：未编号 SQL 应用前不把缺表当成全站 429。postgres 才走共享原子表。 */
+  userAuthThrottleStore?: "memory" | "postgres";
+  userThrottleHmacKey?: string;
+  userClientIp?: UserClientIpConfig;
+  userAuthThrottle?: UserAuthThrottle;
 };
 
 type NodeRequest = {
@@ -207,7 +214,12 @@ const USER_ALLOWED_PATHS = new Set([
   "/security/overview", "/profile/nickname", "/security/challenge/send", "/security/challenge/verify",
   "/security/password", "/security/email", "/security/phone", "/security/recovery/complete", "/security/operation",
   "/security/sessions", "/security/sessions/revoke", "/security/sessions/revoke-others", "/security/sessions/revoke-all",
+  "/security/captcha/challenge",
 ]);
+
+export function isUserAuthPathAllowed(path: string): boolean {
+  return USER_ALLOWED_PATHS.has(path);
+}
 
 const USER_SECURITY_PATHS = new Set([
   "/identity/status",
@@ -425,7 +437,9 @@ async function safeWebAuthHandler(
     const response = await handler(request);
     const headers = copyWebResponseHeaders(response.headers);
     headers.set("x-request-id", requestId);
-    if (response.status >= 400) {
+    const controlled = headers.get("x-zzsh-controlled-auth") === "1";
+    headers.delete("x-zzsh-controlled-auth");
+    if (response.status >= 400 && !controlled) {
       headers.delete("content-length");
       headers.set("content-type", "application/json; charset=utf-8");
       let frozenSignIn = false;
@@ -496,6 +510,7 @@ function buildPhoneRegistrationPlugin(
   nativeWalletOrigin?: NativeOriginResource,
   creditGuaranteeEnabled = false,
   distributionScope?: LocalDistributionScope,
+  smsThrottle?: UserAuthThrottle,
 ) {
   const authDomainError = (error: unknown): never => {
     if (error instanceof SecurityApiError) {
@@ -553,7 +568,20 @@ function buildPhoneRegistrationPlugin(
         const identifier = phoneRegistrationIdentifier(phoneNumber);
         const code = localSmsMock ? "888888" : registrationOtp();
         const now = new Date();
+        let phoneHold: string | undefined;
+        try {
         await withTransaction(pool, async (client) => {
+          if (smsThrottle) {
+            const held = await smsThrottle.holdSmsPhone(client, phoneNumber).catch((error: unknown) => {
+              if (error instanceof ThrottleDependencyError) throw new APIError("SERVICE_UNAVAILABLE", { message: "Authentication dependency unavailable" });
+              throw error;
+            });
+            if (held.decision === "limited") {
+              ctx.setHeader("Retry-After", String(held.retryAfter));
+              throw new APIError("TOO_MANY_REQUESTS", { message: "Verification code rate limited" });
+            }
+            if (held.decision === "allow" && !held.durable && held.ticket) phoneHold = held.ticket;
+          }
           await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [identifier]);
           const previous = await client.query<{ createdAt: Date }>(
             `SELECT "createdAt" FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1 ORDER BY "createdAt" DESC LIMIT 1 FOR UPDATE`,
@@ -568,6 +596,10 @@ function buildPhoneRegistrationPlugin(
             [`verification_${randomUUID().replaceAll("-", "")}`, identifier, `${code}:0`, new Date(now.getTime() + PHONE_REGISTRATION_OTP_TTL_MS), now],
           );
         });
+        } catch (error) {
+          if (phoneHold && smsThrottle) await smsThrottle.releaseSmsPhone(phoneHold).catch(() => undefined);
+          throw error;
+        }
         outbox.set(identifier, { code, sentAt: now.toISOString(), purpose: "phone-registration" });
         return ctx.json({ status: true, cooldownUntil: new Date(now.getTime() + PHONE_REGISTRATION_OTP_COOLDOWN_MS).toISOString() });
       }),
@@ -720,6 +752,13 @@ export function loadAuthRuntimeConfig(
   if (userSecret === adminSecret) {
     throw new ConfigurationError("AUTH_USER_SECRET and AUTH_ADMIN_SECRET must be different");
   }
+  let userClientIp: UserClientIpConfig;
+  try { userClientIp = parseUserClientIpConfig(env); }
+  catch (error) { throw new ConfigurationError(error instanceof Error ? error.message : "USER client IP configuration is invalid"); }
+  const userAuthThrottleStore = env.USER_AUTH_THROTTLE_STORE?.trim() || "memory";
+  if (userAuthThrottleStore !== "memory" && userAuthThrottleStore !== "postgres") {
+    throw new ConfigurationError("USER_AUTH_THROTTLE_STORE must be memory or postgres");
+  }
   const adminBootstrapSecret = env.AUTH_ADMIN_BOOTSTRAP_SECRET !== undefined || env.AUTH_ADMIN_BOOTSTRAP_SECRET_FILE !== undefined
     ? readSecret(env, "AUTH_ADMIN_BOOTSTRAP_SECRET", "AUTH_ADMIN_BOOTSTRAP_SECRET_FILE", workingDirectory)
     : undefined;
@@ -743,6 +782,7 @@ export function loadAuthRuntimeConfig(
   if (env.NODE_ENV === "production" && !secureCookies) {
     throw new ConfigurationError("AUTH_SECURE_COOKIES=true is required in production");
   }
+  const userThrottleHmacKey = readUserThrottleHmacKey(env, workingDirectory, { userSecret, adminSecret });
   // Supplier event ingress is explicit and default-closed; missing configuration mounts nothing.
   const orderImEventsSetting = env.ORDER_IM_EVENTS_ENABLED?.trim() || "false";
   if (orderImEventsSetting !== "true" && orderImEventsSetting !== "false") {
@@ -780,6 +820,9 @@ export function loadAuthRuntimeConfig(
     adminBootstrapSecret,
     secureCookies,
     localSmsMock,
+    userClientIp,
+    userAuthThrottleStore,
+    ...(userThrottleHmacKey ? { userThrottleHmacKey } : {}),
     ...(orderImEvents === undefined ? {} : { orderImEvents }),
     testOperationsEnabled: capabilities.testOperationsEnabled === true,
     // Independent of PROVIDER_MODE: selecting OSS media storage never turns SMS,
@@ -842,7 +885,20 @@ export async function mountAuthHandlers(
   if (options.fakeUserSecurityOutbox && (!options.testOperationsEnabled && !options.localSmsMock || process.env.NODE_ENV === "production")) {
     throw new ConfigurationError("User security outbox requires local test capability");
   }
-  const userSecurityPlugin = await buildUserSecurityPlugin({ pool: options.pool, outbox: options.fakeUserSecurityOutbox, localMock: options.localSmsMock === true });
+  const throttleKey = options.userThrottleHmacKey ?? randomUUID() + randomUUID();
+  const userThrottle = options.userAuthThrottle ?? createUserAuthThrottle({
+    hmacKey: throttleKey,
+    pool: options.pool,
+    store: options.userAuthThrottleStore ?? "memory",
+    audit: async (client, event) => {
+      if (!client) return;
+      await recordAudit(client, {
+        actorType: "system", action: event.action, objectType: "user_auth_subject", objectId: event.subject,
+        outcome: "FAILURE", requestId: "user-auth-throttle", details: { purpose: event.purpose },
+      });
+    },
+  });
+  const userSecurityPlugin = await buildUserSecurityPlugin({ pool: options.pool, outbox: options.fakeUserSecurityOutbox, localMock: options.localSmsMock === true, smsThrottle: userThrottle });
   const adminSelfSecurityPlugin = await buildAdminSelfSecurityPlugin({ pool: options.pool, adminSecret: options.adminSecret });
   const adminSchema = createAuthSchema("zzsh_auth_admin");
   const userDatabase = drizzle(options.pool);
@@ -923,11 +979,12 @@ export async function mountAuthHandlers(
     plugins: [
       bearer(),
       buildFakePhoneNumberPlugin(phoneNumber, fakeSmsOutbox, options.localSmsMock === true, buildTransactionalPhoneSignIn(options.pool, createAuthEndpoint, APIError, setSessionCookie)),
-      buildPhoneRegistrationPlugin(createAuthEndpoint, APIError, setSessionCookie, options.pool, fakeSmsOutbox, options.fakeSmsOutbox !== undefined || options.localSmsMock === true, options.localSmsMock === true, signInIdentifier, options.nativeWalletOrigin, options.creditGuaranteeEnabled === true, options.distributionScope),
+      buildPhoneRegistrationPlugin(createAuthEndpoint, APIError, setSessionCookie, options.pool, fakeSmsOutbox, options.fakeSmsOutbox !== undefined || options.localSmsMock === true, options.localSmsMock === true, signInIdentifier, options.nativeWalletOrigin, options.creditGuaranteeEnabled === true, options.distributionScope, userThrottle),
       userSecurityPlugin,
     ],
     advanced: { ...common.advanced, cookiePrefix: "zzsh_user" },
-    ...(options.userRateLimit ? { rateLimit: options.userRateLimit } : {}),
+    // ponytail: the library memory limiter trusts a single X-Forwarded-For and would double-count this gate.
+    ...(options.userRateLimit ? { rateLimit: options.userRateLimit } : { rateLimit: { enabled: false } }),
     hooks: {
       before: createAuthMiddleware(async (ctx) => {
         if (!["/sign-in/phone-number", "/phone-number/send-otp", "/phone-number/verify", "/phone-number/request-password-reset", "/phone-number/reset-password"].includes(ctx.path)) return;
@@ -1034,7 +1091,7 @@ export async function mountAuthHandlers(
     },
   });
 
-  const userWebHandler = (request: Request) => safeWebAuthHandler(userAuth.handler, request);
+  const userWebHandler = (request: Request) => safeWebAuthHandler(withUserAuthThrottle(userAuth.handler, userThrottle, throttleKey), request);
   const adminSelfSecurityInterceptor = buildAdminSelfSecurityInterceptor(adminAuth as unknown as AdminSelfSecurityApi);
   const adminWebHandler = (request: Request) => safeWebAuthHandler(adminAuth.handler, request, adminSelfSecurityInterceptor);
   const userNodeHandler = toNodeHandler(userWebHandler) as unknown as AuthHandler;
@@ -1084,6 +1141,11 @@ export async function mountAuthHandlers(
       imAppId: options.yunxin!.appId,
     } : {}),
   };
+  let userClientIp = options.userClientIp;
+  if (!userClientIp) {
+    try { userClientIp = parseUserClientIpConfig(process.env); }
+    catch (error) { throw new ConfigurationError(error instanceof Error ? error.message : "USER client IP configuration is invalid"); }
+  }
   mountRealm(
     app,
     "user",
@@ -1092,7 +1154,12 @@ export async function mountAuthHandlers(
     [options.apiOrigin, options.userOrigin],
     USER_ALLOWED_PATHS,
     options.pool,
-    async (request, response, path) => USER_SECURITY_PATHS.has(path) && await handleUserIdentityRoute(request, response, securityOptions),
+    async (request, response, path) => {
+      const clientIp = resolveUserClientIp(request, userClientIp);
+      delete request.headers[USER_CLIENT_IP_FORWARD_HEADER];
+      if (clientIp) request.headers[USER_CLIENT_IP_FORWARD_HEADER] = clientIp;
+      return USER_SECURITY_PATHS.has(path) && await handleUserIdentityRoute(request, response, securityOptions);
+    },
   );
   mountRealm(app, "admin", adminAuth as unknown as AuthRealm, adminNodeHandler, [options.apiOrigin, options.adminOrigin], ADMIN_ALLOWED_PATHS, options.pool);
   mountAuthSecurityHandlers(app, securityOptions);

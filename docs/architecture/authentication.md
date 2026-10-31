@@ -45,6 +45,10 @@
 
 手机号密码登录保留输入字符串，新设置/恢复规则12–128位不套用登录。标准限流与正文校验先于凭据读取。已识别旧注册/改密算法为`md5(password+salt)`（legacy-md5-v1），v0仅按既有兼容边界保留，未知版本拒绝校验且不丢弃材料。成功后在同一PG事务内锁定用户与credential、使用Better Auth现有哈希接口升级、清旧列、写审计并创建SDK会话；任一步失败整体回滚。现代哈希沿用当前SDK算法；客户端与业务入口不trim、截断或变换密码。升级后原密码继续有效，冻结/停用/注销账号不能借兼容入口建立会话。
 
+用户节流的窗口和次数在 `USER_THROTTLE_PROPOSAL`，是待 Owner 确认的建议值，不是已发布政策。硬限制只落在真实客户端 IP 与账号+IP；账号维度达到建议次数后要求本地 PBKDF2 证明，不锁定整个账号，也不修改 `account_status`。短信验证码错误不计入密码计数。号码配额跨注册、找回和改绑。依赖故障是 503 `AUTH_DEPENDENCY_UNAVAILABLE`；只有实际超限才是 429 且带 `Retry-After`。门禁在凭据升级、会话和协议接受之前。
+
+`GET /security/captcha/challenge`（相对 `/api/auth/user`）和风险响应给出 `provider=local-pow`、`schema=1` 与挑战正文。解答放在 JSON 字段 `captcha`，不依赖 Cookie 或 DOM。旧客户端看到 `reason=CAPTCHA_REQUIRED` 后应提示升级；窗口过后原请求仍可登录。证明按 realm 隔离，过期拒绝，签名只消费一次。直连 API 在不可信对端上忽略 `X-Forwarded-For` 和 `x-zzsh-user-client-ip`。Web BFF 删除浏览器自带的内部头，解析出地址后才写入。解析不到时不做全站共享硬锁。回环地址不进 IP 硬桶。主体是用途隔离的 HMAC，密钥为 `USER_AUTH_THROTTLE_HMAC_KEY` 或同名 `_FILE`，不得复用认证 secret。`USER_AUTH_THROTTLE_STORE=postgres` 使用未编号候选 `apps/api/migrations/candidates/user_auth_throttle.sql`；未应用该表时默认 memory，不能当作多实例共享计数。原生 `/phone-number/send-otp` 与 `/phone-number/request-password-reset` 仍不在白名单。
+
 账号安全概况、昵称、再次验证、密码、邮箱、手机和会话接口均在用户realm。`security/challenge/send`与`verify`复用verification保存带版本证明；证明绑定userId、原session、现有安全版本、用途、准确目标、有效期和消费状态。邮箱绑定/更换须先验证现有身份再验证目标；手机换绑按上述两条路径。占位邮箱或未验证邮箱不能恢复，联系方式占用拒绝且不合并账号。恢复发码公开响应不枚举账号或其他渠道。
 
 敏感提交与证明消费、凭据/联系方式、原会话撤销、当前SDK会话换发及审计同事务；换发expiresAt等于原会话expiresAt，不延长30天绝对上限。匿名密码恢复撤销全部会话后要求重新登录。`POST security/operation`只读查询完成回执；completed优先，按相同锁序确认未消费证明过期时才返回expired。未知或写成功后回读失败期间不重复业务POST；仅服务端确认过期未完成后重新验证，或由共享退出流程结束旧身份范围，不宣称原操作失败。明确401使旧私有事实及操作许可失效并重新确认身份。

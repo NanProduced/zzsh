@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { publishUserSessionChange, useUserSession, useUserSessionStore } from "@/components/session/user-session-provider";
 import { authErrorMessage, webAuthRequest, WebAuthError } from "@/lib/web-auth-request";
+import { webAuthWithCaptcha } from "@/lib/user-captcha";
 import { maskPhone } from "../auth/auth-form";
 import { Callout, FieldGroup, LocalRetry, RecordStatus, RecoveryAlert, SkeletonBlock } from "@/components/ui/information";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -293,7 +294,7 @@ export function AccountSecurityControls({ userId, canAct, pendingWrite }: Props)
     if (action !== "password" && !target) { rejectField("security-target", "请先填写新的联系方式。"); return; }
     const request = start(); setBusy(true); setError(""); setInvalidField("");
     try {
-      const result = await webAuthRequest<{ status: boolean; challengeId: string; cooldownUntil: string }>("/security/challenge/send", { purpose: action, channel: stage === "target" ? action === "phone" ? "phone" : "email" : channel, stage, ...(action !== "password" ? { target } : {}), ...(stage === "target" ? { proofId: proof } : {}) }, request.abort.signal);
+      const result = await webAuthWithCaptcha<{ status: boolean; challengeId: string; cooldownUntil: string }>("/security/challenge/send", { purpose: action, channel: stage === "target" ? action === "phone" ? "phone" : "email" : channel, stage, ...(action !== "password" ? { target } : {}), ...(stage === "target" ? { proofId: proof } : {}) }, request.abort.signal, () => active(request.id));
       if (!active(request.id)) return;
       if (!result.challengeId || !Number.isFinite(Date.parse(result.cooldownUntil))) throw new WebAuthError(502, "RESPONSE_UNCONFIRMED");
       setChallenge(result.challengeId); setCode(""); setCooldown(Date.parse(result.cooldownUntil)); setNow(Date.now()); setNotice("验证码已发送，请填写后完成验证。发送成功不代表身份已验证。");

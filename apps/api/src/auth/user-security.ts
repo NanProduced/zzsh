@@ -5,6 +5,7 @@ import { normalizeMainlandPhone } from "./phone-number";
 import { recordAudit, setAuditContext, withTransaction } from "./security-core";
 import { createTransactionalUserSession } from "./user-auth-session";
 import { hasLegacyPhoneConflict, readUserPasswordState } from "./legacy-login";
+import { ThrottleDependencyError, type UserAuthThrottle } from "./user-auth-throttle";
 
 export type UserSecurityDelivery = { code: string; target: string; channel: "phone" | "email"; purpose: string; sentAt: string };
 type Purpose = "password" | "email" | "phone" | "recovery";
@@ -29,7 +30,7 @@ export function normalizeContactEmail(value: unknown): string | null {
   return email;
 }
 
-export async function buildUserSecurityPlugin(options: { pool: Pool; outbox?: Map<string, UserSecurityDelivery>; localMock: boolean }) {
+export async function buildUserSecurityPlugin(options: { pool: Pool; outbox?: Map<string, UserSecurityDelivery>; localMock: boolean; smsThrottle?: UserAuthThrottle }) {
   const { APIError, createAuthEndpoint, getSessionFromCtx } = await import("better-auth/api");
   const { setSessionCookie, deleteSessionCookie } = await import("better-auth/cookies");
   type Context = Parameters<typeof setSessionCookie>[0];
@@ -83,6 +84,7 @@ export async function buildUserSecurityPlugin(options: { pool: Pool; outbox?: Ma
     const id = proofId();
     const code = options.localMock ? "888888" : String(randomInt(0, 1_000_000)).padStart(6, "0");
     const now = new Date();
+    let phoneHold: string | undefined;
     const delivery = await withTransaction(options.pool, async (client) => {
       let user: Subject | null = null;
       let sessionId: string | null = null;
@@ -124,6 +126,17 @@ export async function buildUserSecurityPlugin(options: { pool: Pool; outbox?: Ma
         }
         if (!recipient) reject("FORBIDDEN", "Verified contact unavailable");
       }
+      if (channel === "phone" && recipient && options.smsThrottle) {
+        const held = await options.smsThrottle.holdSmsPhone(client, recipient).catch((error: unknown) => {
+          if (error instanceof ThrottleDependencyError) throw new APIError("SERVICE_UNAVAILABLE", { message: "Authentication dependency unavailable" });
+          throw error;
+        });
+        if (held.decision === "limited") {
+          ctx.setHeader("Retry-After", String(held.retryAfter));
+          throw new APIError("TOO_MANY_REQUESTS", { message: "Verification rate limited" });
+        }
+        if (held.decision === "allow" && !held.durable && held.ticket) phoneHold = held.ticket;
+      }
       const sendKey = `user-security-send:${sha(JSON.stringify([user?.id ?? "anonymous", purpose, stage, channel, recipient]))}`;
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [sendKey]);
       const previous = (await client.query<{ createdAt: Date }>(`SELECT "createdAt" FROM zzsh_auth_user.verification WHERE identifier=$1 FOR UPDATE`, [sendKey])).rows[0];
@@ -137,6 +150,9 @@ export async function buildUserSecurityPlugin(options: { pool: Pool; outbox?: Ma
       const data: Proof & { sendKey: string } = { version: 1, userId: user?.id ?? null, sessionId, stamp: user?.stamp ?? "", purpose, stage, channel, target, recipient: recipient!, parentProofId, codeHash: sha(id + code), attempts: 0, verified: false, completed: null, sendKey };
       await client.query(`INSERT INTO zzsh_auth_user.verification (id,identifier,value,"expiresAt","createdAt","updatedAt") VALUES ($1,$2,$3,$4,$5,$5)`, [id, prefix + id, JSON.stringify(data), expiresAt, now]);
       return { data, expiresAt };
+    }).catch(async (error: unknown) => {
+      if (phoneHold && options.smsThrottle) await options.smsThrottle.releaseSmsPhone(phoneHold).catch(() => undefined);
+      throw error;
     });
     if (delivery.data.userId) options.outbox?.set(id, { code, target: delivery.data.recipient, channel, purpose, sentAt: now.toISOString() });
     return ctx.json({ status: true, challengeId: id, cooldownUntil: new Date(now.getTime() + COOLDOWN).toISOString(), expiresAt: delivery.expiresAt.toISOString() });
