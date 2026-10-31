@@ -183,8 +183,9 @@ test('lost accrual commit acknowledgement recovers with a read of original roots
 });
 
 test('post-commit accrual crash is discoverable as missing and replay uses the same original roots without duplicating money', async () => {
-  const p = earningProbe();
+  const p = earningProbe(), seen = p.seen.length;
   const before = await p.store.discover(p.pool, { limit: 10 });
+  assert(!p.seen.slice(seen).some(sql => /^(INSERT|UPDATE|DELETE)/.test(sql)), 'discovery must stay read-only');
   assert.equal(before.examined, 1); assert.equal(before.orders[0]!.status, 'MISSING'); assert.equal(before.orders[0]!.items.length, 2);
   p.control.failAudit = 1;
   await assert.rejects(p.store.accrue(p.pool, 'order', 'req_crash'), /audit unavailable/);
