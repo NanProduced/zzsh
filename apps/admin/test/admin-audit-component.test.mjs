@@ -158,18 +158,12 @@ test("cursor stack paginates and safety details collapse by default", async () =
     assert.equal(calls[0].params.get("limit"), "25");
     assert.equal(calls[0].params.get("cursor"), null, "first page carries no cursor");
 
-    // B2: details 默认收起,内容保留,点击可展开
-    const detail = view.rootNode.querySelector("details");
-    assert.ok(detail, "safety detail cell renders a details element");
-    assert.equal(detail.hasAttribute("open"), false, "collapsed by default");
-    const summaryEl = detail.querySelector("summary");
-    assert.equal(summaryEl.textContent.trim(), "详情");
-    assert.match(detail.querySelector("dl").textContent, /账号zz00002/, "details render as a Chinese key-value list");
+    // B2: 账号审计页不再展示详情列
+    assert.equal(view.rootNode.querySelector("details"), null, "no per-row details on /audit");
+    assert.equal([...view.rootNode.querySelectorAll("th")].some((th) => th.textContent.trim() === "详情"), false, "no 详情 column");
     assert.equal(tableText(view).includes("admin.account.updated"), false, "raw action code is only in the tooltip");
     assert.match(view.rootNode.textContent, /时间（北京时间）/);
     assert.match(view.rootNode.textContent, /本页 \d+ 条/);
-    await click(summaryEl);
-    assert.equal(detail.open, true, "native summary click toggles open");
 
     // B1: 下一页 → 第 2 页
     const next = [...view.rootNode.querySelectorAll("button")].find((button) => button.textContent.trim() === "下一页");

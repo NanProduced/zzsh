@@ -1865,7 +1865,16 @@ export async function handleAdminSecurity(request: AuthSecurityNodeRequest, resp
       }
       return await handleAdminApprovalRoute(request, response, requestId, options, readAdminContext);
     }
-    if (path.startsWith("/audit")) return await handleAdminAuditRoute(request, response, requestId, options, readAdminContext);
+    if (path.startsWith("/audit")) {
+      if (request.method === "POST" && path === "/audit/purge") {
+        // 日志清理为不可逆高风险写：实时复核密码 + TOTP（必要时 ALTCHA），剥离复核字段后交给清理路由。
+        const context = await readAdminContext(request, options);
+        const body = bodyOf(request);
+        await verifyAdminReauthentication(request, context, body, options);
+        for (const key of ["password", "totpCode", "altcha"]) delete body[key];
+      }
+      return await handleAdminAuditRoute(request, response, requestId, options, readAdminContext);
+    }
     if (request.method === "GET") {
       if (path === "/captcha/challenge") {
         if (!options.adminBruteForce) {

@@ -324,6 +324,70 @@ async function operationLog(
   sendSuccess(response, { ...page, scope: "BOSS_ALL_AUDIT_EVENTS" }, requestId);
 }
 
+export const AUDIT_RETENTION_MIN_DAYS = 90;
+export const AUDIT_RETENTION_MAX_DAYS = 3650;
+export const AUDIT_RETENTION_DEFAULT_DAYS = 180;
+
+/** 二次确认口令：前端须让 Boss 原样输入。 */
+export function auditPurgeConfirmText(days: number): string {
+  return `删除${days}天前的日志`;
+}
+
+function parseRetentionDays(value: unknown): number {
+  const days = typeof value === "string" && /^\d{1,4}$/.test(value) ? Number(value) : value;
+  if (typeof days !== "number" || !Number.isInteger(days) || days < AUDIT_RETENTION_MIN_DAYS || days > AUDIT_RETENTION_MAX_DAYS) {
+    invalid(`Retention days must be between ${AUDIT_RETENTION_MIN_DAYS} and ${AUDIT_RETENTION_MAX_DAYS}`);
+  }
+  return days;
+}
+
+async function requireBoss(request: AuthSecurityNodeRequest, options: AuthSecurityOptions, readContext: ContextReader): Promise<AdminContext> {
+  const context = await readContext(request, options);
+  const access = await loadEffectiveAdminAccess(options.pool, context.userId);
+  if (!access || !access.isBoss) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Boss required");
+  return context;
+}
+
+async function callPurge(options: AuthSecurityOptions, days: number, context: AdminContext, requestId: string, dryRun: boolean) {
+  try {
+    const result = await options.pool.query<{ deleted: string | number; cutoff: Date | string }>(
+      `SELECT "deleted", "cutoff" FROM "zzsh_iam"."purge_admin_audit_events"($1::integer, $2, $3, $4, $5::boolean)`,
+      [days, context.userId, context.sessionId, requestId, dryRun],
+    );
+    const row = result.rows[0];
+    return { count: Number(row?.deleted ?? 0), cutoff: iso(row?.cutoff) };
+  } catch (error) {
+    const code = (error as { code?: string }).code;
+    if (code === "22023") invalid("Retention days out of range");
+    if (code === "42501") throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Boss required");
+    if (code === "42883") throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Audit retention is not enabled yet");
+    throw error;
+  }
+}
+
+/** Boss 预览：N 天前可清理（admin.* / auth.*）的条数。 */
+async function purgePreview(request: AuthSecurityNodeRequest, response: AuthSecurityNodeResponse, requestId: string, options: AuthSecurityOptions, readContext: ContextReader): Promise<void> {
+  const context = await requireBoss(request, options, readContext);
+  const days = parseRetentionDays(queryValue(request, "retentionDays") ?? String(AUDIT_RETENTION_DEFAULT_DAYS));
+  const preview = await callPurge(options, days, context, requestId, true);
+  sendSuccess(response, {
+    retentionDays: days, cutoff: preview.cutoff, purgeableCount: preview.count,
+    minDays: AUDIT_RETENTION_MIN_DAYS, maxDays: AUDIT_RETENTION_MAX_DAYS, defaultDays: AUDIT_RETENTION_DEFAULT_DAYS,
+    confirmText: auditPurgeConfirmText(days), scope: ["admin", "auth"],
+  }, requestId);
+}
+
+/** Boss 执行清理（复核已由 auth-security 前置完成）；清理本身写入永久审计。 */
+async function purgeExecute(request: AuthSecurityNodeRequest, response: AuthSecurityNodeResponse, requestId: string, options: AuthSecurityOptions, readContext: ContextReader): Promise<void> {
+  const context = await requireBoss(request, options, readContext);
+  const body = request.body && typeof request.body === "object" && !Array.isArray(request.body) ? request.body as Record<string, unknown> : invalid("Body is invalid");
+  if (Object.keys(body).some((key) => key !== "retentionDays" && key !== "confirmText")) invalid("Body is invalid");
+  const days = parseRetentionDays(body.retentionDays);
+  if (body.confirmText !== auditPurgeConfirmText(days)) invalid("Confirmation text does not match");
+  const result = await callPurge(options, days, context, requestId, false);
+  sendSuccess(response, { retentionDays: days, cutoff: result.cutoff, deletedCount: result.count }, requestId);
+}
+
 export async function handleAdminAuditRoute(
   request: AuthSecurityNodeRequest,
   response: AuthSecurityNodeResponse,
@@ -339,6 +403,14 @@ export async function handleAdminAuditRoute(
   }
   if (method === "GET" && path === "/api/v1/admin/security/audit/operations") {
     await operationLog(request, response, requestId, options, readContext);
+    return;
+  }
+  if (method === "GET" && path === "/api/v1/admin/security/audit/purge/preview") {
+    await purgePreview(request, response, requestId, options, readContext);
+    return;
+  }
+  if (method === "POST" && path === "/api/v1/admin/security/audit/purge") {
+    await purgeExecute(request, response, requestId, options, readContext);
     return;
   }
   throw new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found");

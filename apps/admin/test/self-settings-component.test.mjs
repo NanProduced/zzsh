@@ -776,7 +776,8 @@ test("activity: 首次读取渲染真实事件；有下一页时不显示已读�
   assert.ok(byText(view, "本人发起"));
   assert.ok(!byText(view, "admin.password.changed"), "正文不展示原始动作码");
   assert.ok(view.el.querySelector('[title="admin.password.changed"]'), "原码仅保留在悬停提示");
-  assert.ok(byText(view, "请求编号 req_e1"));
+  assert.ok(view.el.querySelector('[aria-label="复制请求编号"]'), "请求编号收进复制图标");
+  assert.ok(!byText(view, "请求编号 req_e1"), "正文不平铺请求编号");
   assert.ok(!byText(view, "当前查询没有更多记录"), "分页未完时不得显示终点");
   assert.equal(buttonByText(view, "上一页").disabled, true);
   assert.equal(buttonByText(view, "下一页").disabled, false);
@@ -786,7 +787,7 @@ test("activity: 首次读取渲染真实事件；有下一页时不显示已读�
   await settle();
   assert.ok(byText(view, "第 2 页"));
   assert.ok(byText(view, "由 ZZ00002 对本人账号执行"), "他人操作不得写成本人");
-  assert.ok(byText(view, "当前查询没有更多记录"), "服务端确认无游标后才显示终点");
+  assert.ok(!byText(view, "当前查询没有更多记录"), "不再显示冗余终点提示");
   assert.equal(buttonByText(view, "下一页").disabled, true);
   view.unmount();
 });
@@ -795,7 +796,7 @@ test("activity: 覆盖范围披露如实呈现，不估算登录历史", async (
   const h = activityHarness([{ events: [event("e1")], nextCursor: null, coverage: COVERAGE }]);
   const view = mount(ActivityView, activityProps({ load: h.load }));
   await settle();
-  assert.ok(byText(view, "覆盖范围披露：登录、退出登录没有审计写入"), text(view));
+  assert.ok(byText(view, "未纳入记录：登录、退出登录"), text(view));
   assert.ok(!byText(view, "最后登录"), "不存在的数据不得出现在界面上");
   view.unmount();
 });
@@ -804,14 +805,9 @@ test("activity: 筛选值来自服务端 coverage，草稿与应用分离", asyn
   const h = activityHarness([{ events: [event("e1")], nextCursor: null, coverage: COVERAGE }]);
   const view = mount(ActivityView, activityProps({ load: h.load }));
   await settle();
-  assert.ok(byText(view, "事件类型"), "首次读取成功后应出现事件类型筛选");
-  assert.ok(byText(view, "可选值来自服务端声明的覆盖范围"));
-  assert.ok(byText(view, "全部"), "触发器默认展示全部");
-  const apply = buttonByText(view, "应用筛选");
-  assert.equal(apply.disabled, true, "未改动草稿时不得提交");
-  const before = h.calls.length;
-  await click(apply);
-  assert.equal(h.calls.length, before, "未改动时点击应用也不发请求");
+  assert.ok(view.el.querySelector('[aria-label="事件类型筛选"]'), "首次读取成功后应出现事件类型筛选");
+  assert.ok(byText(view, "全部事件类型"), "触发器默认展示全部");
+  assert.ok(!byText(view, "应用筛选"), "筛选即选即用，不再需要应用按钮");
   view.unmount();
 
   // 已提交筛选时给出「清除筛选」，提交动作才把 action 变化发给后端。

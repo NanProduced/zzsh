@@ -841,6 +841,13 @@
       "when": 1793184008000,
       "tag": "0119_admin_session_last_active",
       "breakpoints": true
+    },
+    {
+      "idx": 120,
+      "version": "7",
+      "when": 1793184009000,
+      "tag": "0120_admin_audit_noise_retention",
+      "breakpoints": true
     }
   ]
 }

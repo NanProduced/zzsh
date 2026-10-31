@@ -245,6 +245,10 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   } else if ((await pool.query(`SELECT to_regprocedure('zzsh_supply.next_account_display_no()') AS allocator`)).rows[0]?.allocator) {
     await pool.query(`GRANT USAGE, SELECT ON SEQUENCE zzsh_supply.account_display_no_seq TO ${runtimeUser}; GRANT EXECUTE ON FUNCTION zzsh_supply.next_account_display_no() TO ${runtimeUser}`);
   }
+  if ((await pool.query(`SELECT to_regprocedure('zzsh_iam.purge_admin_audit_events(integer,text,text,text,boolean)') AS fn`)).rows[0]?.fn) {
+    // 0120：运行时角色无 audit_event DELETE，只能经 Boss 复核的清理函数删除 admin.*/auth.* 历史审计。
+    await pool.query(`GRANT EXECUTE ON FUNCTION zzsh_iam.purge_admin_audit_events(integer,text,text,text,boolean) TO ${runtimeUser}`);
+  }
   if ((await pool.query(`SELECT to_regclass('zzsh_order.rental_opening') AS relation`)).rows[0]?.relation) {
     await pool.query(`REVOKE UPDATE, DELETE, TRUNCATE ON zzsh_order.rental_opening, zzsh_order.rental_opening_ack, zzsh_order.settlement_version, zzsh_order.settlement_decision FROM ${runtimeUser};
       GRANT UPDATE (status, confirmed_at) ON zzsh_order.rental_opening TO ${runtimeUser};

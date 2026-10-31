@@ -112,11 +112,14 @@ const SECURITY_PATHS = new Map([
   ["/security/approvals/audit/events", "/api/v1/admin/security/approvals/audit/events"],
   ["/security/audit/events", "/api/v1/admin/security/audit/events"],
   ["/security/audit/operations", "/api/v1/admin/security/audit/operations"],
+  ["/security/audit/purge/preview", "/api/v1/admin/security/audit/purge/preview"],
+  ["/security/audit/purge", "/api/v1/admin/security/audit/purge"],
   ["/security/approvals/requests/withdraw", "/api/v1/admin/security/approvals/requests/withdraw"],
 ]);
 
 const GET_SECURITY_PATHS = new Set([
   "/security/captcha/challenge",
+  "/security/audit/purge/preview",
   "/security/admins",
   "/security/admins/detail",
   "/security/admins/scope",

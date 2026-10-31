@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 
 import { Icons } from "../components/icons";
+import { AuditRetentionPanel } from "./audit-retention-panel";
 import { Button, StatusMessage } from "../components/ui-elements";
 import { EmptyState, EndOfFeed } from "../components/empty-state";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
@@ -482,7 +483,7 @@ export function AdminAuditView({
   const timeField = (key: "from" | "to", label: string) => (
     <label className="space-y-1 text-xs"><span className="text-muted-foreground block">{label}（北京时间）</span><Input type="datetime-local" name={key} value={draft[key]} onChange={(event) => setField(key, event.target.value)} className={inputClass} aria-invalid={timeInvalid || undefined} /></label>
   );
-  const columns = ["时间（北京时间）", "操作者", "操作", "对象", "结果", isOperations ? "详情" : "详情"];
+  const columns = ["时间（北京时间）", "操作者", "操作", "对象", "结果", ...(isOperations ? ["详情"] : [])];
 
   return (
     <TooltipProvider>
@@ -661,16 +662,11 @@ export function AdminAuditView({
                         <InlineStatus tone={item.outcome === "SUCCESS" ? "success" : "error"}>{item.outcome === "SUCCESS" ? "成功" : "失败"}</InlineStatus>
                         {item.reason ? <span className="block text-[11px] text-muted-foreground mt-1">{item.reason}</span> : null}
                       </td>
-                      <td className="max-w-xs">
-                        {isOperations ? (
+                      {isOperations ? (
+                        <td className="max-w-xs">
                           <Button type="button" size="sm" variant="ghost" onClick={(event) => { event.stopPropagation(); setSelected(item); }}>查看详情</Button>
-                        ) : (
-                          <details className="text-[11px] text-muted-foreground">
-                            <summary className="cursor-pointer select-none rounded focus-visible:outline-2 focus-visible:outline-ring">详情</summary>
-                            <div className="mt-1"><DetailList details={item.details} /></div>
-                          </details>
-                        )}
-                      </td>
+                        </td>
+                      ) : null}
                     </tr>
                   ))}
                 </tbody>
@@ -745,6 +741,7 @@ export function AdminAuditView({
           ) : null}
         </SheetContent>
       </Sheet>
+      {isOperations && canRead ? <AuditRetentionPanel onPurged={() => navigate("first")} /> : null}
     </div>
     </TooltipProvider>
   );
