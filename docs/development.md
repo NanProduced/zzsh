@@ -59,7 +59,9 @@ API 启动前校验 `APP_PROFILE`、数据库/Redis 目标和 provider 模式；
 
 M3-B 的 `0016_m3b_review_guards` 与 `0017_m3b_idempotency_realm` 是前向返修迁移，不改写已应用0015；0017按原操作/上传actor迁移旧幂等键，无法确定realm或发生键冲突时停止，需核对后处理，不丢弃原成功结果。先在隔离库验证，再由环境维护者迁移目标；历史媒体缺少已验证衍生图时保持公共读取拒绝，重新上传后再审核公开。媒体阶段新增 `0023_m3_media_item_binding`（billable_item.media_id 外键），同样只前向应用，不改写历史迁移。
 
-auth 默认资源锁805002被占用时不得抢占。需要并行隔离时设置 `M2_AUTH_TEST_RESOURCE_SET=<小写标识>`（1–21位字母数字/下划线、字母开头），库、迁移/runtime角色及资源锁一起派生；不得同时覆盖为旧库/旧角色。该套件在标记、归属与独占锁核验后，将供给外键涉及表纳入明确的同次TRUNCATE清单，不使用CASCADE；未知资源拒绝修改。测试账号在隔离库内生成，首次及重复运行均需回归。
+数据库回归统一使用 `zzsh_test_regression` 和维护库锁806006，由串行runner在每套开始前受控复位并绑定实际OID/nonce；不再用 `*_TEST_RESOURCE_SET` 派生私有库，也不在已安装业务表上全量TRUNCATE。锁占用时不得抢占，失败保留现场；具体入口和维护凭据引用见[PostgreSQL规范](local-postgresql.md)。
+
+业务迁移执行前逐项比较已安装journal与本地SQL的SHA和时间戳，只有精确前缀才继续。分叉、缺行、重复、超前或SQL字节变化均在Drizzle及后置ACL前拒绝；不得通过重写旧hash/时间或提高watermark绕过。迁移仍须由单维护者使用冻结候选执行，前缀检查不替代对象、数据、权限和分叉接纳验证。schema与后置ACL分别提交，ACL失败/提交未知不能当成schema已回滚。
 
 ```powershell
 npm run check:offline
@@ -72,7 +74,7 @@ check:offline 先检查离线环境及测试入口登记，再执行类型检查
 
 部分测试受环境变量控制进入PG，执行前核实际入口与继承环境。check增加test:db:compiled，但不自动覆盖所有专用资金/IM套件；例如order-reservation的深层验收依赖ORDER_TEST_RESOURCE_SET及具体资源分支，两个独立 IM PG 命令也不在默认离线入口中，未进入须列NOT_RUN。不要把根命令或CI绿灯当作全部交易验收。Web 独立 typecheck 保留，不依赖 Next 构建的实验类型检查开关替代它。
 
-test:auth 使用有标记的隔离库及专用角色，不使用开发业务库；缺失配置应失败，不静默跳过。管理员个人工作台布局测试使用独立库 `zzsh_test_m2_workspace_layout` 与锁 `805014`，不占用 M2 auth 套件的 `805002`。迁移身份与运行身份分离，runtime 无 DDL/角色继承和审计修改权限。管理员目录与操作权限依赖 business migration `0008_m2_admin_permissions`；未应用时管理会话快照会查询失败。具体环境变量见 apps/api/.env.example，禁止将本地秘密提交。
+test:auth、工作台布局及其余默认PG套件共用上述唯一回归资源，不使用日常联调库；缺失配置应失败，不静默跳过。迁移身份与运行身份分离，runtime 无 DDL/角色继承和审计修改权限。管理员目录与操作权限依赖 business migration `0008_m2_admin_permissions`；未应用时管理会话快照会查询失败。具体环境变量见 apps/api/.env.example，禁止将本地秘密提交。
 
 test:readiness 会受控停止/恢复本项目依赖，不属于日常前端检查。禁止影响其它 Compose 项目。灾备命令 security:disaster-recovery 仅为 test/fake 验证入口，维护身份、线下确认及预登记通知必须配置，生产启用仍未验收。
 

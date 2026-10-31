@@ -491,7 +491,7 @@ function buildPhoneRegistrationPlugin(
   outbox: Map<string, { code: string; sentAt: string; purpose: "phone-verification" | "password-reset" | "phone-registration" }>,
   fakeSmsEnabled: boolean,
   localSmsMock: boolean,
-  signInIdentifier: { dispatch?: (identifier: string, password: string, headers: Headers, kind?: "phone" | "username") => Promise<Response> },
+  signInIdentifier: { dispatch?: (identifier: string, password: string, headers: Headers, kind?: "phone" | "username", legalAcceptance?: unknown) => Promise<Response> },
   nativeWalletOrigin?: NativeOriginResource,
   creditGuaranteeEnabled = false,
   distributionScope?: LocalDistributionScope,
@@ -543,22 +543,7 @@ function buildPhoneRegistrationPlugin(
         }
         const kind = body.kind === undefined ? undefined : body.kind === "phone" ? body.kind : null;
         if (kind === null) throw new APIError("BAD_REQUEST", { message: "Invalid authentication request" });
-        const requestId = (ctx.headers ?? new Headers()).get("x-request-id") ?? undefined;
-        const legal = await withTransaction(pool, client => verifyPlatformLegalAcceptance(client, body.legalAcceptance));
-        const acceptance = legal.required ? parsePlatformLegalAcceptance(body.legalAcceptance) : undefined;
-        if (legal.required && !acceptance) throw new APIError("BAD_REQUEST", { message: "Legal acceptance is required" });
-        const response = await signInIdentifier.dispatch(identifier, password, ctx.headers ?? new Headers(), kind);
-        if (!response.ok) return response;
-        if (acceptance) {
-          const authenticated = await response.clone().json() as { user?: { id?: unknown }; userId?: unknown };
-          const userId = authenticated.user?.id ?? authenticated.userId;
-          if (typeof userId !== "string" || !userId) throw new APIError("INTERNAL_SERVER_ERROR", { message: "Legal acceptance was not recorded" });
-          await withTransaction(pool, async client => {
-            await verifyPlatformLegalAcceptance(client, acceptance);
-            await recordPlatformAcceptances(client, userId, acceptance, "LOGIN", requestId);
-          });
-        }
-        return response;
+        return await signInIdentifier.dispatch(identifier, password, ctx.headers ?? new Headers(), kind, body.legalAcceptance);
         } catch (error) { return authDomainError(error); }
       }),
       sendPhoneRegistrationOTP: createAuthEndpoint("/phone-registration/send-otp", { method: "POST", metadata: noStore }, async (ctx) => {
@@ -901,7 +886,7 @@ export async function mountAuthHandlers(
     },
   } : undefined;
   // Filled right after the user auth instance exists; the after hook only runs at request time.
-  const signInIdentifier: { dispatch?: (identifier: string, password: string, headers: Headers, kind?: "phone" | "username") => Promise<Response> } = {};
+  const signInIdentifier: { dispatch?: (identifier: string, password: string, headers: Headers, kind?: "phone" | "username", legalAcceptance?: unknown) => Promise<Response> } = {};
   const common = {
     baseURL: options.apiOrigin,
     trustedOrigins,
@@ -986,10 +971,10 @@ export async function mountAuthHandlers(
     },
   });
 
-  signInIdentifier.dispatch = async (identifier, password, headers, kind) => {
+  signInIdentifier.dispatch = async (identifier, password, headers, kind, legalAcceptance) => {
     const phoneNumber = normalizeMainlandPhone(identifier);
     if (!phoneNumber || kind === "username") throw new APIError("BAD_REQUEST", { message: "Phone authentication required" });
-    const response = await userAuth.api.signInPhoneNumber({ body: { phoneNumber, password }, headers, asResponse: true });
+    const response = await userAuth.api.signInPhoneNumber({ body: { phoneNumber, password, ...(legalAcceptance === undefined ? {} : { legalAcceptance }) }, headers, asResponse: true });
     return response as Response;
   };
 

@@ -16,6 +16,7 @@ import { loadConfig, type AppConfig } from "../src/config/config";
 import { assertNotProtectedTarget, registeredException, REGRESSION_ALLOW_NEW_RESOURCE, REGRESSION_DATABASE, REGRESSION_MARKER, REGRESSION_MIGRATION_USER, REGRESSION_RESOURCE_LOCK_KEY, REGRESSION_ROLE_PREFIX, REGRESSION_RUNTIME_USER, regressionOidBinding } from "../src/config/test-resource";
 
 import { runUserSecurityChecks } from "./user-security-checks";
+import { runAuthLegalChecks } from "./auth-legal-checks";
 import type { UserSecurityDelivery } from "../src/auth/user-security";
 import { migrateLegacyUserBatch, legacyOwnerEvidenceDigest, type LegacyOwnerEvidence } from "../src/supply/legacy-user-migration";
 
@@ -2616,6 +2617,18 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
       }
       console.log("AUTH_FULL_LIMITER_PG_CHECKS malformed-input-rate-limited-before-legacy-verification");
     } finally { await limitedApp.close(); }
+
+    await runAuthLegalChecks({ migration: migrationPool, runtime: runtimePool, adminId, password: PASSWORD,
+      otp: phone => { const delivery = fakeSmsOutbox.get("phone-registration:" + phone); assert.ok(delivery); return delivery.code; },
+      api: async (path, body) => {
+        const jar = cookieJar();
+        const result = await request(base, "/api/auth/user" + path, body, jar, USER_ORIGIN);
+        const session = await request(base, "/api/auth/user/get-session", undefined, jar, USER_ORIGIN);
+        return { status: result.response.status, body: result.body, authenticated: Boolean(session.body?.user?.id), userId: session.body?.user?.id,
+          cookieIssued: result.response.headers.getSetCookie().some(line => /^(?:__Secure-|__Host-)?zzsh_user\.session_token(?:\.\d+)?=[^;]/.test(line)),
+        };
+      },
+    });
 
   } finally {
     const cleanupErrors: unknown[] = [];

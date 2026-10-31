@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
+import { readMigrationFiles } from "drizzle-orm/migrator";
 import type { Pool, PoolClient } from "pg";
 
 const IDENTIFIER = /^[a-z][a-z0-9_]{0,62}$/;
@@ -34,7 +35,34 @@ export class BusinessMigrationAclError extends Error {
   }
 }
 
+export class BusinessMigrationHistoryError extends Error {
+  constructor(readonly reason: "INVALID_LOCAL_CHAIN" | "HISTORY_UNAVAILABLE" | "NOT_EXACT_PREFIX", readonly index?: number) {
+    super(`Business migration preflight rejected: ${reason}${index === undefined ? "" : ` at index ${index}`}`);
+    this.name = "BusinessMigrationHistoryError";
+  }
+}
+
+/** Drizzle checks only the newest timestamp; a divergent journal needs reviewed adoption. */
+export async function assertBusinessMigrationPrefix(pool: Pick<Pool, "query">, migrationsFolder = BUSINESS_MIGRATIONS_FOLDER): Promise<void> {
+  const local = readMigrationFiles({ migrationsFolder });
+  if (!local.length || local.some((m, i) => !Number.isSafeInteger(m.folderMillis) || m.folderMillis <= 0 ||
+    i > 0 && m.folderMillis <= local[i - 1]!.folderMillis)) throw new BusinessMigrationHistoryError("INVALID_LOCAL_CHAIN");
+  const present = (await pool.query("SELECT to_regclass('zzsh_business_meta.migrations') IS NOT NULL AS present")).rows[0]?.present;
+  if (typeof present !== "boolean") throw new BusinessMigrationHistoryError("HISTORY_UNAVAILABLE");
+  if (!present) return;
+  const history = (await pool.query<{ hash: string; createdAt: string }>(
+    'SELECT hash,created_at::text AS "createdAt" FROM zzsh_business_meta.migrations ORDER BY id',
+  )).rows;
+  if (history.length > local.length) throw new BusinessMigrationHistoryError("NOT_EXACT_PREFIX", local.length);
+  for (const [index, row] of history.entries()) {
+    if (row.hash !== local[index]!.hash || row.createdAt !== String(local[index]!.folderMillis)) {
+      throw new BusinessMigrationHistoryError("NOT_EXACT_PREFIX", index);
+    }
+  }
+}
+
 export async function runBusinessMigrations(pool: Pool, options: { runtimeUser: string; migrationsFolder?: string }): Promise<void> {
+  await assertBusinessMigrationPrefix(pool, options.migrationsFolder);
   await migrate(drizzle(pool), { ...BUSINESS_MIGRATION_CONFIG, ...(options.migrationsFolder ? { migrationsFolder: options.migrationsFolder } : {}) });
   // Drizzle owns its migration transaction; all subsequent broad and narrow grants share this client.
   let client: PoolClient;

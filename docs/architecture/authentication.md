@@ -72,7 +72,7 @@ Owner确认的迁移要求（2026-09-30收敛，以下为上线迁移合同，�
 
 `POST /api/auth/user/phone-registration/send-otp`接收phoneNumber；`POST /phone-registration/complete`接收phoneNumber、6位code、acceptedTerms=true、可选password与loginOrRegister。OTP有效5分钟、最多3错、发送冷却60秒；成功消费和耗尽仍保留冷却。新号不带password即创建无credential用户、UNVERIFIED/UNKNOWN身份和SDK会话，同事务提交。可选新密码须12–128位，验证码/手机号不授予实名、年龄或交易资格。默认纯注册已有号409；loginOrRegister=true使正确验证码进入原userId且不覆盖原密码。结果返回userId、passwordState和passwordSet（能力未知时null）。会话建立失败全部回滚，响应丢失先确认会话；不能重复注册或消费。
 
-当前服务协议/隐私政策正式正文与版本尚未接入，页面明确说明正文未提供；acceptedTerms仅完成本地流程门禁验证，不代表正式协议确认已验收。上线前须提供真实正文、版本及确认合同。
+平台服务协议/隐私政策的版本与接受机制已接入，正文是否发布以实际封存/生效记录为准。两份均未生效时保留旧输入兼容，注册仍要求acceptedTerms；仅一份生效时拒绝注册/登录。两份生效后，密码登录的两个入口均需legalAcceptance，创建会话及两份接受在同一事务提交后才发Cookie。机制通过不代表正文已经Owner审阅或发布，详见[协议接受合同](agreements-acceptance.md)。
 
 以下路径均相对`/api/auth/user`，Web同源BFF逐项映射、no-store并过滤用户Cookie；POST校验Origin，DTO拒绝额外字段。敏感提交须当前会话及新鲜用途证明；恢复仅持有已验证恢复证明。发码冷却通过cooldownUntil/Retry-After返回。
 
@@ -81,8 +81,8 @@ Owner确认的迁移要求（2026-09-30收敛，以下为上线迁移合同，�
 | GET /get-session | 无 → null或受权user/session投影 |
 | POST /phone-registration/send-otp | phoneNumber → status,cooldownUntil |
 | POST /phone-registration/complete | phoneNumber,code,acceptedTerms,password?,loginOrRegister? → status,userId,passwordState,passwordSet |
-| POST /sign-in/identifier | identifier,password,kind=phone? → status,userId |
-| POST /sign-in/phone-number | phoneNumber,password,rememberMe? → status,userId；固定30天 |
+| POST /sign-in/identifier | identifier,password,kind=phone?,legalAcceptance? → status,userId；已有完整生效文书时须提供精确引用 |
+| POST /sign-in/phone-number | phoneNumber,password,rememberMe?,legalAcceptance? → status,userId；固定30天，沿相同文书接受事务 |
 | POST /sign-out | 空 → status；随后确认guest |
 | GET /security/overview | 无 → userId,nickname,phoneNumber,email|null,passwordState(set/not-set/unavailable) |
 | POST /profile/nickname | nickname → status,nickname |

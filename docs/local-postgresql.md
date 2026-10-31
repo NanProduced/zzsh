@@ -35,7 +35,7 @@
 | 测试入口 | 首次创建开关 |
 |---|---|
 | 九个 compiled PostgreSQL 套件的默认目标（`zzsh_test_regression`） | `REGRESSION_TEST_ALLOW_NEW_RESOURCE` |
-| 上述套件显式指定 `*_TEST_RESOURCE_SET` 的已登记例外 | 不可创建：登记表外一律拒绝，登记表内只允许复用 |
+| 上述套件的历史 `*_TEST_RESOURCE_SET` 入口 | 已退出，不可复用或创建；历史材料仅作冷恢复证据，重新验证使用回归组 |
 | im-postgres（IM 线自有资源，不并入回归组） | `IM_TEST_ALLOW_NEW_RESOURCE` |
 
 回归库创建后把实际 OID 登记进 `tmp/postgresql-resources.md`；runner 复跑时从受控复位绑定 OID/nonce，admission 会额外核对库 OID，防止同名库被换掉或指向别处的库。重置/首建仍要求显式 `REGRESSION_TEST_ALLOW_NEW_RESOURCE=1`。

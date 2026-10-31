@@ -3,7 +3,8 @@ import type { PoolClient } from "pg";
 import { createAuthSchema } from "./auth-schema";
 import type { Pool } from "pg";
 import { normalizeMainlandPhone } from "./phone-number";
-import { verifyUserCredentialInTransaction, withTransaction } from "./auth-security";
+import { SecurityApiError, verifyUserCredentialInTransaction, withTransaction } from "./auth-security";
+import { parsePlatformLegalAcceptance, recordPlatformAcceptances, verifyPlatformLegalAcceptance } from "../legal/legal-documents";
 import { z } from "zod";
 import { hasLegacyPhoneConflict } from "./legacy-login";
 
@@ -51,12 +52,12 @@ export function buildTransactionalPhoneSignIn(
 ) {
   return createAuthEndpoint("/sign-in/phone-number", {
     method: "POST", metadata: { noStore: true },
-    body: z.object({ phoneNumber: z.string(), password: z.string().min(1), rememberMe: z.boolean().optional() }).strict(),
+    body: z.object({ phoneNumber: z.string(), password: z.string().min(1), rememberMe: z.boolean().optional(), legalAcceptance: z.unknown().optional() }).strict(),
   }, async (ctx) => {
     const body = ctx.body as Record<string, unknown> | undefined;
     const phoneNumber = normalizeMainlandPhone(body?.phoneNumber);
     const password = body?.password;
-    if (!phoneNumber || typeof password !== "string" || !password.length || Object.keys(body ?? {}).some(key => !["phoneNumber", "password", "rememberMe"].includes(key))) {
+    if (!phoneNumber || typeof password !== "string" || !password.length || Object.keys(body ?? {}).some(key => !["phoneNumber", "password", "rememberMe", "legalAcceptance"].includes(key))) {
       throw new APIError("BAD_REQUEST", { message: "Invalid authentication request" });
     }
     const authenticated = await withTransaction(pool, async (client) => {
@@ -68,7 +69,20 @@ export function buildTransactionalPhoneSignIn(
         { phoneNumber }, password, requestId, "sign-in") !== "retry") {
         throw new APIError("UNAUTHORIZED", { message: "Invalid phone number or password" });
       }
-      return createTransactionalUserSession(client, ctx, user.rows[0].id);
+      const legal = await verifyPlatformLegalAcceptance(client, body?.legalAcceptance);
+      const acceptance = legal.required ? parsePlatformLegalAcceptance(body?.legalAcceptance) : undefined;
+      const authenticated = await createTransactionalUserSession(client, ctx, user.rows[0].id);
+      if (acceptance) {
+        await verifyPlatformLegalAcceptance(client, acceptance);
+        await recordPlatformAcceptances(client, authenticated.user.id, acceptance, "LOGIN", requestId);
+      }
+      return authenticated;
+    }).catch((error: unknown) => {
+      if (error instanceof SecurityApiError) {
+        const status = error.status === 400 ? "BAD_REQUEST" : error.status === 403 ? "FORBIDDEN" : error.status === 409 ? "CONFLICT" : error.status === 503 ? "SERVICE_UNAVAILABLE" : "INTERNAL_SERVER_ERROR";
+        throw new APIError(status, { code: error.code, message: error.status >= 500 ? "Authentication dependency unavailable" : error.message });
+      }
+      throw error;
     });
     await setSessionCookie(ctx, authenticated);
     return ctx.json({ status: true, userId: authenticated.user.id });
