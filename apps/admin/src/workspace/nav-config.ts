@@ -62,18 +62,25 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
   if (has("supply.catalog.manage") || nav.isBoss) {
     supply.push({ label: "目录维护", icon: BoxesIcon, path: "/supply/catalog", kind: "catalog" });
   }
-  if (has("supply.gunsmith.manage") || nav.isBoss) {
-    supply.push({ label: "改枪码目录", icon: CrosshairIcon, path: "/supply/gunsmith", kind: "gunsmith" });
-  }
-  if (has("supply.rules.edit") || nav.isBoss) {
-    supply.push({ label: "规则与价目", icon: ListChecksIcon, path: "/supply/rules", kind: "rules" });
-  }
   if (has("supply.review.read") || nav.isBoss) {
     supply.push({ label: "账号供给", icon: ClipboardCheckIcon, path: "/supply/reviews", kind: "listing-review" });
     supply.push({ label: "平台素材审核", icon: ImageIcon, path: "/supply/media", kind: "media-review" });
   }
   if (supply.length > 0) {
     items.push({ label: "供给与目录", isTitle: true }, ...supply);
+  }
+  const delta: WorkspaceMenuItem[] = [];
+  if (has("supply.rules.edit") || nav.isBoss) {
+    const r = (label: string, section: string) => ({ label, icon: ListChecksIcon, path: `/supply/rules?section=${section}`, kind: "rules" as const });
+    items.push({ label: "供给与规则", isTitle: true }, r("规则总览", "overview"), r("押金规则", "deposit"), r("结算与退赔", "settlement"), r("出租协议", "agreement"));
+    delta.push(r("租赁定价", "pricing"), r("物资价目", "items"), r("皮肤推荐押金", "skin"));
+  }
+  // 改枪码目录归到游戏分组；路由仍是 /supply/gunsmith。
+  if (has("supply.gunsmith.manage") || nav.isBoss) {
+    delta.push({ label: "改枪码目录", icon: CrosshairIcon, path: "/supply/gunsmith", kind: "gunsmith" });
+  }
+  if (delta.length > 0) {
+    items.push({ label: "三角洲行动", isTitle: true }, ...delta);
   }
 
   const content: WorkspaceMenuItem[] = [];
@@ -164,7 +171,13 @@ export const PAGE_SEARCH_KEYWORDS: Record<string, string[]> = {
   "/roles": ["角色权限", "角色", "权限", "授权", "roles", "js", "qx"],
   "/supply/catalog": ["目录维护", "商品", "目录", "货架", "皮肤", "catalog", "ml"],
   "/supply/gunsmith": ["改枪码目录", "枪械", "改枪", "配装", "gunsmith", "qx", "pz"],
-  "/supply/rules": ["规则与价目", "规则", "价目", "定价", "价格", "收费", "rules", "pricing", "jg", "gz"],
+  "/supply/rules?section=overview": ["规则与价目", "规则总览", "规则", "版本", "生效", "rules", "gz", "bb"],
+  "/supply/rules?section=deposit": ["押金规则", "押金", "上限", "deposit", "yj"],
+  "/supply/rules?section=settlement": ["结算与退赔", "结算", "退赔", "赔付", "settlement", "js", "tp"],
+  "/supply/rules?section=agreement": ["出租协议", "协议", "条款", "全额赔付", "agreement", "xy"],
+  "/supply/rules?section=pricing": ["租赁定价", "定价", "价格", "收费", "租赁模式", "租期", "每日消耗", "三角洲", "pricing", "delta", "dj"],
+  "/supply/rules?section=items": ["物资价目", "价目", "物资", "价格行", "items", "jm", "wz"],
+  "/supply/rules?section=skin": ["皮肤推荐押金", "皮肤", "推荐押金", "skin", "pf"],
   "/supply/reviews": ["账号供给", "供给", "审核", "上架审核", "reviews", "sh", "gj"],
   "/supply/media": ["平台素材审核", "图片审核", "素材", "截图", "图片", "media", "review", "sc", "tp"],
   "/content": ["内容管理", "运营内容", "content", "nr"],

@@ -1,0 +1,17 @@
+.rules-markdown .w-md-editor { box-shadow: none; border-radius: 0; background: transparent; color: var(--foreground); --color-canvas-default: var(--background); --color-canvas-subtle: var(--muted); --color-fg-default: var(--foreground); --color-fg-muted: var(--muted-foreground); --color-border-default: var(--border); }
+.rules-markdown .w-md-editor-text-input { caret-color: var(--foreground); font-size: 14px; line-height: 1.85; }
+.rules-markdown .w-md-editor-toolbar { background: var(--muted); border-bottom: 1px solid var(--border); padding: .5rem; min-height: 2.75rem; flex-wrap: wrap; }
+.rules-markdown .w-md-editor-toolbar button { min-width: 1.875rem; min-height: 1.875rem; }
+
+/* 窄屏：皮肤加价表改为卡片，避免横向滚动 */
+@media (max-width: 639px) {
+  .skin-rules-table { overflow: visible; }
+  .skin-rules-table thead { display: none; }
+  .skin-rules-table table, .skin-rules-table tbody { display: block; }
+  .skin-rules-table tbody tr { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem .75rem; padding: .75rem; margin-bottom: .75rem; border: 1px solid var(--border); border-radius: .375rem; }
+  .skin-rules-table tbody td { display: block; padding: 0; text-align: left; }
+  .skin-rules-table tbody td:nth-child(3)::before { content: "首件加价（元）"; }
+  .skin-rules-table tbody td:nth-child(4)::before { content: "后续每件（元）"; }
+  .skin-rules-table tbody td:nth-child(3)::before, .skin-rules-table tbody td:nth-child(4)::before { display: block; margin-bottom: .25rem; font-size: 11px; color: var(--muted-foreground); }
+  .skin-rules-table tbody td:nth-child(5) { grid-column: span 2; }
+}

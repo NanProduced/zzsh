@@ -5,13 +5,12 @@ import { buildRentalModeRule, legacyNonZero, rentalModeDraft, rentalModeIssues, 
 // 合成的 haff-ratio-v2：极速关闭且无 lane，模拟现网 v1 规则
 const base = () => ({ schema: "haff-ratio-v2", compatibility: { ordinary: { spreadDelta: "4" }, modes: { ordinary: { enabled: true }, custom: { enabled: true, min: { base: "C", value: "-2" }, max: { base: "C", value: "10" } }, fast: { enabled: false } } } });
 
-test("读取不补默认；极速默认只在显式新建时套用，且不写上限、档位增量为 0", () => {
+test("读取不补默认；极速默认只在显式新建时套用，且不写上限、旧档位增量保持原值", () => {
   const b = base(), d = rentalModeDraft(b);
   assert.equal(d.fast.enabled, false); assert.equal(d.fast.spreadDelta, ""); assert.equal(d.fast.min.value, "");
   const f = withFastDefaults(d);
   assert.deepEqual([f.fast.enabled, f.fast.spreadDelta, f.fast.min, f.fast.max.value], [true, "12", { base: "C", value: "6" }, ""]);
-  assert.ok(Object.values(f.fast.legacyDiscounts).every(v => v === "0"));
-  assert.ok(Object.isFrozen(f.fast.legacyDiscounts), "旧档位增量只读");
+  assert.equal(f.fast.legacyDiscounts, d.fast.legacyDiscounts, "旧档位增量不被改写");
   assert.deepEqual(rentalModeIssues(f), {});
   const rule = buildRentalModeRule(b, f);
   assert.deepEqual(rule.compatibility.modes.fast, { enabled: true, min: { base: "C", value: "6" } });
@@ -40,5 +39,6 @@ test("R4：已有非零旧档位增量原样保留且只读，不被静默清零
   assert.ok(legacyNonZero(d).length === 3);
   assert.throws(() => { d.fast.legacyDiscounts.VIP = "0"; });
   assert.deepEqual(buildRentalModeRule(b, d).compatibility.fast.discounts, b.compatibility.fast.discounts);
+  const fd = withFastDefaults(d); assert.ok(Object.isFrozen(fd.fast.legacyDiscounts)); assert.deepEqual(buildRentalModeRule(b, fd).compatibility.fast.discounts, b.compatibility.fast.discounts, "填入极速默认值不清零旧档位增量");
   assert.deepEqual(buildRentalModeRule(base(), withFastDefaults(rentalModeDraft(base()))).compatibility.fast.discounts, { STANDARD: "0", VIP: "0", SVIP: "0", DISCOUNT_USER: "0" });
 });

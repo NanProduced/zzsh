@@ -32,12 +32,12 @@ test("deposit editing keeps zero distinct from blank, uses exact cents and rejec
   draft.rules.push({ ...draft.rules[0] }); assert.match(skinDepositIssues(draft).join(), /重复/);
 });
 
-test("policy-only updates omit other price fields; new drafts copy complete existing member price lines", () => {
-  const target = { id: "draft", revision: "1", mode: "SPREAD", haffRule: null }, base = { id: "base", mode: "SPREAD", haffRule: { schema: "fixture" }, commissionRate: null, roundingPolicy: "HALF_UP_CENT_V1" }, policy = fundingPolicyFixture("NOT_REQUIRED");
-  const rules = { priceLines: ["STANDARD", "VIP", "SVIP", "DISCOUNT_USER"].map(customerTier => ({ priceVersionId: "base", customerTier, itemId: "item", pricingKind: "FIXED_UNIT", unitQuantity: "1", buyerUnitAmount: "1.25", ownerUnitAmount: "1.00" })) };
+test("policy-only updates omit other price fields; new drafts copy only STANDARD lines (Owner override)", () => {
+  const target = { id: "draft", revision: "1", mode: "SPREAD", haffRule: null, roundingPolicy: "HALF_UP_CENT_V1" }, base = { id: "base", status: "SEALED", mode: "SPREAD", haffRule: { schema: "fixture" }, commissionRate: null, roundingPolicy: "HALF_UP_CENT_V1" }, policy = fundingPolicyFixture("NOT_REQUIRED");
+  const rules = { release: { priceVersionId: "base" }, priceVersions: [target, base], priceLines: ["STANDARD", "VIP", "SVIP", "DISCOUNT_USER"].map(customerTier => ({ priceVersionId: "base", customerTier, itemId: "item", pricingKind: "FIXED_UNIT", unitQuantity: "1", buyerUnitAmount: "1.25", ownerUnitAmount: "1.00" })) };
   const body = skinDepositSaveBody(rules, target, base, policy);
-  assert.equal(body.lines.length, 4); assert.deepEqual(body.lines.map(line => line.customerTier), ["STANDARD", "VIP", "SVIP", "DISCOUNT_USER"]);
+  assert.equal(body.lines.length, 1); assert.deepEqual(body.lines.map(line => line.customerTier), ["STANDARD"]);
   assert.deepEqual(body.haffRule, base.haffRule);
   rules.priceLines.push({ ...rules.priceLines[0], priceVersionId: "draft" });
-  assert.deepEqual(skinDepositSaveBody(rules, target, base, policy), { expectedRevision: "1", fundingPolicy: policy });
+  assert.deepEqual(skinDepositSaveBody(rules, target, base, policy), { expectedRevision: "1", fundingPolicy: policy, haffRule: base.haffRule });
 });

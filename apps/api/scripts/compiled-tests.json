@@ -92,6 +92,7 @@
   "dist/test/admin-audit-read.test.js",
   "dist/test/admin-directory-read.test.js",
   "dist/test/supply-backend-closeout.test.js",
+  "dist/test/rules-game-gate.test.js",
   "dist/test/unified-user-order-read.test.js",
   "dist/test/approval-backend-contract.test.js",
   "dist/test/user-directory-read.test.js",

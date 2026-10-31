@@ -56,7 +56,7 @@ import {
   updateFirearm,
   updateGunsmithCode,
 } from "./gunsmith";
-import { GAME_SERVICE, isSupportedGameService, requirePublicGameService, requireWritableGameService, unsupportedGameService, ensureGameServiceRows, type GameServiceCode } from "./game-services";
+import { GAME_SERVICE, assertRulesGameSupported, isSupportedGameService, requirePublicGameService, requireWritableGameService, unsupportedGameService, ensureGameServiceRows, type GameServiceCode } from "./game-services";
 import {
   activateRelease,
   createAgreementDraft,
@@ -1015,6 +1015,7 @@ async function handleAdminWrite(
         requirePermission(access, permission);
         const gameId = await gameIdResolver(client);
         if (gameId) await assertGameScope(client, actor.id, access.isBoss, gameId);
+        if (gameId && operation.startsWith("supply.rules.")) await assertRulesGameSupported(client, gameId);
       },
       async (client) => {
         const access = await requireAdminAccess(client, actor.id);

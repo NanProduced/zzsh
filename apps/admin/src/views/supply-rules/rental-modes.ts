@@ -1,5 +1,6 @@
 import type { PriceVersionRecord, RulesResponse } from "../../api";
 import { asHaffV2, type HaffV2, type RatioBound } from "./rules-model.ts";
+import { priceSaveBody } from "./price-draft.ts";
 
 /**
  * 租赁模式（普通/自定义/极速）配置的纯模型。
@@ -38,12 +39,12 @@ export function legacyNonZero(d: RentalModeDraft): string[] {
   return Object.entries(d.fast.legacyDiscounts ?? {}).filter(([, v]) => !/^0(\.0+)?$/.test(String(v).trim())).map(([t, v]) => `${t}=${v}`);
 }
 
-/** 仅用于“新建极速草稿”：开启极速并填入 Owner 已定的 P=12、下限 C+6、无上限；新会员按统一总价折扣，档位增量全部为 0。 */
+/** 仅用于“新建极速草稿”：开启极速并填入 Owner 已定的 P=12、下限 C+6、无上限；新会员按统一总价折扣，隐藏的旧档位增量保持原值（无原值时为 0）。 */
 export function withFastDefaults(draft: RentalModeDraft): RentalModeDraft {
-  return { ...draft, fast: { enabled: true, spreadDelta: FAST_DEFAULT_SPREAD, min: { ...FAST_DEFAULT_MIN }, max: { base: "C", value: "" }, legacyDiscounts: zeroDiscounts() } };
+  return { ...draft, fast: { enabled: true, spreadDelta: FAST_DEFAULT_SPREAD, min: { ...FAST_DEFAULT_MIN }, max: { base: "C", value: "" }, legacyDiscounts: draft.fast.legacyDiscounts } };
 }
 
-const SIGNED8 = /^-?(0|[1-9]\d*)(\.\d{1,8})?$/, UNSIGNED8 = /^(0|[1-9]\d*)(\.\d{1,8})?$/;
+const SIGNED8 = /^-?(0|[1-9]\d*)(\.\d{1,2})?$/, UNSIGNED8 = /^(0|[1-9]\d*)(\.\d{1,2})?$/;
 
 /** 字段级问题；键与表单控件一一对应。 */
 export function rentalModeIssues(d: RentalModeDraft): Record<string, string> {
@@ -52,14 +53,14 @@ export function rentalModeIssues(d: RentalModeDraft): Record<string, string> {
     const m = d[name];
     if (!m.enabled) continue;
     const min = m.min.value.trim(), max = m.max.value.trim();
-    if (!SIGNED8.test(min)) e[`${name}.min`] = "启用时下限必填，须为数字，最多八位小数";
-    if (max !== "" && !SIGNED8.test(max)) e[`${name}.max`] = "上限须为数字，最多八位小数；留空表示不设上限";
+    if (!SIGNED8.test(min)) e[`${name}.min`] = "启用时下限必填，须为数字，最多两位小数";
+    if (max !== "" && !SIGNED8.test(max)) e[`${name}.max`] = "上限须为数字，最多两位小数；留空表示不设上限";
     if (!e[`${name}.min`] && !e[`${name}.max`] && max !== "" && m.min.base === m.max.base && Number(max) < Number(min)) e[`${name}.max`] = "上限不能小于下限";
     if (m.min.base === "ABSOLUTE" && !e[`${name}.min`] && Number(min) <= 0) e[`${name}.min`] = "固定比例下限须大于 0";
   }
   if (d.fast.enabled) {
     const p = d.fast.spreadDelta.trim();
-    if (!UNSIGNED8.test(p)) e["fast.spreadDelta"] = "利润点须为非负数，最多八位小数";
+    if (!UNSIGNED8.test(p)) e["fast.spreadDelta"] = "利润点须为非负数，最多两位小数";
     // 旧档位增量不可编辑，此处不校验其数值；保留原值由服务端规则校验兜底。
   }
   return e;
@@ -82,16 +83,10 @@ export function buildRentalModeRule(base: HaffV2, d: RentalModeDraft): HaffV2 {
   return { ...base, compatibility: { ...rest, ...(fastLane ? { fast: fastLane } : {}), modes: { ordinary: c.modes.ordinary, custom: mode(c.modes.custom, d.custom), fast: mode(c.modes.fast, d.fast) } } };
 }
 
-/** 保存体：目标草稿尚无价格行时，从来源版本复制价格行、取整、资金政策，保证草稿完整可封存。 */
-export function rentalModeSaveBody(rules: RulesResponse, target: PriceVersionRecord, source: PriceVersionRecord, haffRule: HaffV2): Record<string, unknown> {
-  const result: Record<string, unknown> = { expectedRevision: target.revision, haffRule };
-  if (rules.priceLines.some((l) => l.priceVersionId === target.id)) return result;
-  const lines = rules.priceLines.filter((l) => l.priceVersionId === source.id);
-  if (!lines.length) throw new Error("来源版本缺少价格行，不能生成完整草稿。");
-  return { ...result, mode: source.mode, roundingPolicy: source.roundingPolicy, ...(target.fundingPolicy || !source.fundingPolicy ? {} : { fundingPolicy: source.fundingPolicy }),
-    lines: lines.map(({ itemId, customerTier, pricingKind, unitQuantity, buyerUnitAmount, ownerUnitAmount }) => ({ itemId, ...(customerTier === undefined ? {} : { customerTier }), pricingKind, ...(pricingKind === "FIXED_UNIT" ? { unitQuantity, buyerUnitAmount, ...(source.mode === "SPREAD" && ownerUnitAmount !== null ? { ownerUnitAmount } : {}) } : {}) })) };
+/** 保存体：只提交 haffRule；目标草稿尚为空时由 priceSaveBody 从当前生效版本补齐普通档位价目与资金政策。 */
+export function rentalModeSaveBody(rules: RulesResponse, target: PriceVersionRecord, _source: PriceVersionRecord, haffRule: HaffV2): Record<string, unknown> {
+  return priceSaveBody(rules, target, { haffRule });
 }
-
 /** 选用的编辑基线：所选草稿自身已有 v2 规则时用草稿，否则用当前生效版本。 */
 export function rentalModeBase(rules: RulesResponse, selectedId: string): { source: PriceVersionRecord; haff: HaffV2 } | null {
   const selected = rules.priceVersions.find((v) => v.id === selectedId), sh = asHaffV2(selected?.haffRule);

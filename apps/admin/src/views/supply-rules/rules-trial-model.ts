@@ -35,10 +35,10 @@ export function validateTrialAccount(rules: RulesResponse, account: TrialAccount
 }
 
 /** An estimate requires every selected parameter. Missing configuration never becomes a numeric zero. */
-export function trialEstimate(rules: RulesResponse, values: EditValues, account: TrialAccount) {
+export function trialEstimate(rules: RulesResponse, values: EditValues, account: TrialAccount, priceVersionId?: string) {
   const invalid = (message: string) => ({ rows: null as TrialRow[] | null, ratio: null as number | null, days: null as number | null, message });
   if (!validateTrialAccount(rules, account).ready) return invalid("待计算：账号条件尚未填写完整或有误。");
-  const { haff, price } = editContext(rules);
+  const { haff, price } = editContext(rules, priceVersionId);
   if (!haff || price?.mode !== "SPREAD" || !haff.compatibility.modes.ordinary.enabled) return invalid("当前计价规则暂不支持本地普通模式估算；可继续核对左侧服务端结果。");
   const keys = [`haff.base.${account.box}`, `haff.vit.${account.vit}`, `haff.bear.${account.bear}`, `haff.daily.${account.term}`];
   const parts = keys.map(key => decimal(values[key])), spread = decimal(values["haff.spread.ordinary"]), discount = decimal(haff.compatibility.ordinary.discounts.STANDARD);
@@ -66,9 +66,9 @@ export function trialEstimate(rules: RulesResponse, values: EditValues, account:
   return { rows: rows as TrialRow[] | null, ratio: owner as number | null, days: days as number | null, message: "" };
 }
 
-export function trialDeposit(rules: RulesResponse, values: EditValues, account: TrialAccount): number | null {
+export function trialDeposit(rules: RulesResponse, values: EditValues, account: TrialAccount, priceVersionId?: string): number | null {
   if (!validateTrialAccount(rules, account).ready) return null;
-  const { policy } = editContext(rules);
+  const { policy } = editContext(rules, priceVersionId);
   if (!policy || policy.recommendation.algorithm !== "delta-deposit-owner-declared-v1" || policy.recommendation.parameters.rounding.mode !== "CEIL") return null;
   const box = decimal(values[`dep.box.${account.box}`]), cap = decimal(values["dep.cap"]);
   const unit = num(policy.recommendation.parameters.rounding.unitCents), zero = num(policy.recommendation.parameters.rounding.zeroFallbackCents);

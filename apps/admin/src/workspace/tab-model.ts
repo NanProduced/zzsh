@@ -137,7 +137,7 @@ export function sanitizeFinanceReturn(value: string | undefined): string | undef
     const url = new URL(value, 'https://workspace.invalid');
     const route=parseWorkspacePath(url.pathname);
     if (url.origin !== 'https://workspace.invalid' || url.searchParams.has('financeReturn') || !['finance-lookup','finance-period','finance-document','finance-user','order-object','orders','user-object','users'].includes(route.kind) || route.objectId&&findPhoneClue(route.objectId)) return undefined;
-    const allowed = new Set(['scope','from','to','period','bucket','kind','state','q','page','pageSize','size','section','role','status','publication','sort','fromUserId','fromUserSection','fromUserRole','fromUserStatus','fromOrderId','entry','financeFrom','financeTo']);
+    const allowed = new Set(['scope','from','to','period','bucket','kind','state','q','page','pageSize','size','section','role','status','publication','sort','fromUserId','fromUserSection','fromUserRole','fromUserStatus','fromOrderId','entry','draft','financeFrom','financeTo']);
     const query: Record<string,string> = {};
     for (const [key,item] of url.searchParams) {
       if (findPhoneClue(item) || SENSITIVE_QUERY.test(key) || SENSITIVE_QUERY.test(item)) return undefined;

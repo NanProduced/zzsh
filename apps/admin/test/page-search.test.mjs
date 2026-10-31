@@ -63,10 +63,16 @@ test("page search only lists implemented pages in the current permission set", (
     "/admins",
     "/roles",
     "/supply/catalog",
-    "/supply/gunsmith",
-    "/supply/rules",
     "/supply/reviews",
     "/supply/media",
+    "/supply/rules?section=overview",
+    "/supply/rules?section=deposit",
+    "/supply/rules?section=settlement",
+    "/supply/rules?section=agreement",
+    "/supply/rules?section=pricing",
+    "/supply/rules?section=items",
+    "/supply/rules?section=skin",
+    "/supply/gunsmith",
     "/content",
     "/orders",
     "/approvals",
@@ -268,8 +274,8 @@ test("aliases, pinyin initials, and multi-token AND matching work accurately", (
   });
 
   // Explicit aliases
-  assert.deepEqual(filterSearchablePages(boss, "定价").map((p) => p.path), ["/supply/rules"]);
-  assert.deepEqual(filterSearchablePages(boss, "价目").map((p) => p.path), ["/supply/rules"]);
+  assert.deepEqual(filterSearchablePages(boss, "定价").map((p) => p.path), ["/supply/rules?section=pricing"]);
+  assert.deepEqual(filterSearchablePages(boss, "价目").map((p) => p.path), ["/supply/rules?section=items", "/supply/rules?section=overview"]);
   assert.deepEqual(filterSearchablePages(boss, "图片审核").map((p) => p.path), ["/supply/media"]);
   assert.deepEqual(filterSearchablePages(boss, "素材").map((p) => p.path), ["/supply/media"]);
   assert.deepEqual(filterSearchablePages(boss, "外观").map((p) => p.path), ["/settings"]);
@@ -283,7 +289,7 @@ test("aliases, pinyin initials, and multi-token AND matching work accurately", (
 
   // Multi-token AND search: every token must match across title/group/alias
   const multiMatched = filterSearchablePages(boss, "供给 规则");
-  assert.ok(multiMatched.some((p) => p.path === "/supply/rules"), "multi-token matches supply rules");
+  assert.ok(multiMatched.some((p) => p.path.startsWith("/supply/rules?section=")), "multi-token matches supply rules");
   assert.equal(filterSearchablePages(boss, "未知 规则").length, 0, "unmatched token fails entire search");
 
   // Full-width ASCII & spaces normalization

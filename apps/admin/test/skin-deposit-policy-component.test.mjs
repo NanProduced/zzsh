@@ -6,7 +6,7 @@ import { act, createElement } from "react";
 import { fundingPolicyFixture } from "../../api/test/funding-authority-fixtures.ts";
 import { createOfflineAdminSource } from "./offline-admin-source.mjs";
 
-test("skin deposit editor saves unconfigured drafts, keeps zero explicit, and blocks seal and duplicate unknown writes", async () => {
+test("skin deposit editor saves unconfigured drafts, keeps zero explicit, and blocks duplicate unknown writes (seal lives in the draft bar)", async () => {
   const browser = new Window({ url: "http://127.0.0.1:3101/supply/rules" });
   Object.assign(globalThis, { window: browser, document: browser.document, HTMLElement: browser.HTMLElement, Element: browser.Element, Node: browser.Node, Event: browser.Event, CustomEvent: browser.CustomEvent, IS_REACT_ACT_ENVIRONMENT: true, getComputedStyle: browser.getComputedStyle.bind(browser), requestAnimationFrame: browser.requestAnimationFrame.bind(browser), cancelAnimationFrame: browser.cancelAnimationFrame.bind(browser) });
   Object.defineProperty(globalThis, "navigator", { value: browser.navigator, configurable: true });
@@ -28,7 +28,7 @@ test("skin deposit editor saves unconfigured drafts, keeps zero explicit, and bl
     if (operation.operation.endsWith("seal")) rules.priceVersions[0].status = "SEALED";
     render(); return { receipt: { id: "draft", revision: rules.priceVersions[0].revision }, fresh: rules };
   } };
-  const render = () => root.render(createElement(Editor, { rules, command, onDirtyChange: changed }));
+  const render = () => root.render(createElement(Editor, { rules, command, onDirtyChange: changed, draftId: "draft", ensureDraft: async () => ({ rules, draft: rules.priceVersions[0] }) }));
   const button = text => [...document.querySelectorAll("button")].find(node => node.textContent.trim() === text);
   const click = async text => { const node = button(text); assert.ok(node, text); await act(async () => node.click()); };
   const fill = async (label, value) => act(async () => {
@@ -39,18 +39,16 @@ test("skin deposit editor saves unconfigured drafts, keeps zero explicit, and bl
   try {
     await act(async () => render());
     assert.equal(document.querySelector('[aria-label="皮肤推荐押金配置"]').id, "skin-deposit-policy-game", "rules overview has a stable configuration anchor");
-    assert.match(document.body.textContent, /留空为待配置/);
-    assert.ok(button("封存此价格版本").disabled);
+    assert.match(document.body.textContent, /留空＝还没配/);
+    assert.equal(button("封存此价格版本"), undefined, "seal moved to the shared draft bar");
     await fill("本次资金政策版本", "synthetic-v2");
     await click("保存皮肤押金草稿");
     assert.equal(writes.length, 1);
     assert.deepEqual(Object.keys(writes[0].body).sort(), ["expectedRevision", "fundingPolicy"]);
     assert.ok(writes[0].body.fundingPolicy.recommendation.parameters.skinRules.every(row => row.firstCents === null && row.subsequentCents === null));
-    assert.ok(button("封存此价格版本").disabled);
     for (let index = 1; index <= 3; index++) { await fill(`第${index}行首件加价`, "0"); await fill(`第${index}行后续每件加价`, "0"); }
     await click("保存皮肤押金草稿");
     assert.ok(writes[1].body.fundingPolicy.recommendation.parameters.skinRules.every(row => row.firstCents === "0" && row.subsequentCents === "0"));
-    assert.equal(button("封存此价格版本").disabled, false);
     assert.equal(writes[1].body.fundingPolicy.ownerDepositRules.capCents, policy.ownerDepositRules.capCents);
     await fill("第1行首件加价", "2.25"); unknown = true;
     await click("保存皮肤押金草稿");

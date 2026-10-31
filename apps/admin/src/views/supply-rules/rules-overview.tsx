@@ -1,21 +1,20 @@
-import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { CircleAlert, ChevronDownIcon, ChevronRightIcon, Clock, Info, TriangleAlert } from "lucide-react";
 
 import { formatDate, type RulesResponse } from "../../api";
 import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
-import { Button, buttonVariants } from "../../components/ui/button";
+import { Button } from "../../components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../../components/ui/collapsible";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../../components/ui/dialog";
-import { Input } from "../../components/ui/input";
 import { SupplySelect } from "../../components/supply/supply-select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../../components/ui/table";
 import {
   asHaffV2, boundText, centsYuan, compatTierCount, haffCount, makeupShare, num, payoutRef, perMillion,
   agreementDiff, priceDiff, safeBoxLabel, spread, standardItemRows, termDiff, unitLabel, unitYuan, yuan, type RuleDiffRow,
 } from "./rules-model";
-import { baseline, changes, validate, editContext, SKIN_LABELS, type ChangeRow, type EditValues } from "./rules-edit";
 import { TrialWindow } from "./rules-trial-window";
+import { activePriceDraft, pendingSealedPrice, MutedDetails, priceDiff as draftDiff } from "./publish-flow";
 import { RULES_RELEASE_OPERATION, type useRulesWrite } from "./rules-write";
 
 type Option = { value: string; label: string };
@@ -71,22 +70,6 @@ function Metric({ label, value, unit, sub }: { label: string; value: ReactNode; 
   );
 }
 
-function EditCell({ value, before, onChange, error, label, unit, wide }: { value: string; before: string; onChange: (v: string) => void; error?: string; label: string; unit?: string; wide?: boolean }) {
-  const changed = value.trim() !== before.trim();
-  const errorId = useId();
-  return (
-    <span className={`inline-flex flex-col items-end gap-0.5 ${wide ? "w-full" : ""}`}>
-      <span className="inline-flex items-center gap-1">
-        <Input aria-label={label} aria-invalid={error ? true : undefined} aria-describedby={error ? errorId : undefined} value={value} placeholder={before || "—"} inputMode="decimal" onChange={(e) => onChange(e.target.value)}
-          className={`h-8 ${wide ? "w-full" : "w-24"} text-right text-sm tabular-nums placeholder:text-muted-foreground/50 placeholder:font-normal ${changed ? "border-amber-500 bg-amber-500/10 ring-1 ring-amber-500/40" : ""} ${error ? "border-destructive" : ""}`} />
-        {unit ? <span className="text-xs text-muted-foreground">{unit}</span> : null}
-      </span>
-      {changed ? <span className="text-xs text-muted-foreground tabular-nums">原 {before || "未配置"}</span> : null}
-      {error ? <span id={errorId} className="text-[13px] leading-relaxed text-destructive">{error}</span> : null}
-    </span>
-  );
-}
-
 function Hint({ children }: { children: ReactNode }) {
   return <p role="status" className="rounded-md border border-dashed border-border px-3 py-3 text-xs text-muted-foreground">{children}</p>;
 }
@@ -97,7 +80,7 @@ function DiffTable({ rows, empty }: { rows: RuleDiffRow[]; empty: string }) {
     <ScrollTable label="规则对比">
       <Table>
         <TableHeader><TableRow><TableHead>分组</TableHead><TableHead>项目</TableHead><TableHead className="text-right">现在</TableHead><TableHead className="text-right">调整后</TableHead></TableRow></TableHeader>
-        <TableBody>{rows.map((r, i) => <TableRow key={i}><TableCell>{r.group}</TableCell><TableCell className="max-w-64 whitespace-normal break-words">{r.label}</TableCell><TableCell className="max-w-80 whitespace-pre-wrap break-words text-right tabular-nums">{r.before}</TableCell><TableCell className="max-w-80 whitespace-pre-wrap break-words text-right font-medium tabular-nums">{r.after}</TableCell></TableRow>)}</TableBody>
+        <TableBody>{rows.map((r, i) => <TableRow key={i}><TableCell>{r.group}</TableCell><TableCell className="max-w-64 whitespace-normal break-words">{r.label}{r.detail ? <MutedDetails className="mt-1"><p className="text-xs text-muted-foreground">{r.detail}</p></MutedDetails> : null}</TableCell><TableCell className="max-w-80 whitespace-pre-wrap break-words text-right tabular-nums">{r.before}</TableCell><TableCell className="max-w-80 whitespace-pre-wrap break-words text-right font-medium tabular-nums">{r.after}</TableCell></TableRow>)}</TableBody>
       </Table>
     </ScrollTable>
   );
@@ -107,29 +90,13 @@ function DiffTable({ rows, empty }: { rows: RuleDiffRow[]; empty: string }) {
  * 规则与价目 · 第一片：只读总览 + 版本条 + 服务端试算 + Boss 确认生效。
  * 价格只读后端返回值，不在页面里写死；每 1M 金额只是按比例换算的显示辅助。
  */
-export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = false, onDirtyChange }: { rules: RulesResponse; command: ReturnType<typeof useRulesWrite>; isBoss: boolean; canPreview: boolean; canEdit?: boolean; onDirtyChange?: (dirty: boolean) => void }) {
-  const bl = useMemo(() => baseline(rules), [rules]);
-  const [editing, setEditing] = useState(false);
-  const [vals, setVals] = useState<EditValues>(bl.values);
-  const [editDialog, setEditDialog] = useState<"none" | "review" | "discard">("none");
-  const [notice, setNotice] = useState<string>();
+export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = false, onOpenSkin, onOpenSettlement }: { rules: RulesResponse; command: ReturnType<typeof useRulesWrite>; isBoss: boolean; canPreview: boolean; canEdit?: boolean; onOpenSkin?: () => void; onOpenSettlement?: () => void }) {
   const [trialOpen, setTrialOpen] = useState(false);
-  const changeRows: ChangeRow[] = useMemo(() => (editing ? changes(bl.fields, bl.values, vals) : []), [editing, bl, vals]);
-  const errors = useMemo(() => (editing ? validate(bl.fields, vals) : {}), [editing, bl, vals]);
-  const dirty = editing && changeRows.length > 0;
-  useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
-  useEffect(() => {
-    if (!dirty && !command.locked) return;
-    const h = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ""; };
-    window.addEventListener("beforeunload", h); return () => window.removeEventListener("beforeunload", h);
-  }, [dirty, command.locked]);
-  const startEdit = () => { setVals(bl.values); setNotice(undefined); setEditing(true); };
-  const stopEdit = () => { setEditing(false); setVals(bl.values); setEditDialog("none"); };
-  const val = (k: string) => (editing && k in vals ? vals[k]! : bl.values[k] ?? "");
-  const V = (k: string, display: ReactNode, opts: { unit?: string; wide?: boolean } = {}) => editing && k in bl.values
-    ? <EditCell label={bl.fields.find((x) => x.key === k)?.label ?? k} value={vals[k] ?? ""} before={bl.values[k] ?? ""} error={errors[k]} unit={opts.unit} wide={opts.wide} onChange={(v) => setVals((x) => ({ ...x, [k]: v }))} />
-    : display;
+  const V = (_key: string, display: ReactNode, _opts?: { unit?: string; wide?: boolean }) => display;
   const release = rules.release;
+  const pendingSkinV2 = pendingSealedPrice(rules)?.fundingPolicy?.recommendation.schema === "deposit-recommendation-v2";
+  const liveSkinV2 = rules.priceVersions.find(v => v.id === release?.priceVersionId)?.fundingPolicy?.recommendation.schema === "deposit-recommendation-v2";
+  const skinV2Ready = pendingSkinV2 || liveSkinV2;
   const curPrice = release ? rules.priceVersions.find((v) => v.id === release.priceVersionId) : undefined;
   const curTerm = release ? rules.termVersions.find((v) => v.id === release.termVersionId) : undefined;
   const curAgreement = release ? rules.agreementVersions.find((v) => v.id === release.agreementVersionId) : undefined;
@@ -148,7 +115,7 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
   const sealedAfter = (list: { status: string; sealedAt: string | null; id: string }[], currentId?: string) =>
     list.filter((v) => v.status === "SEALED" && v.id !== currentId && (!release || (v.sealedAt ?? "") > release.activatedAt)).length;
   const sealedPending = sealedAfter(rules.priceVersions, curPrice?.id) + sealedAfter(rules.termVersions, curTerm?.id) + sealedAfter(rules.agreementVersions, curAgreement?.id);
-  const drafts = [...rules.priceVersions, ...rules.termVersions, ...rules.agreementVersions].filter((v) => v.status === "DRAFT").length;
+  const inProgress = draftDiff(rules, activePriceDraft(rules)).length > 0;
   const changeBadge = (changed: boolean, rows: () => RuleDiffRow[]) => changed ? (
     <Button type="button" variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={() => openCompare(rows())}>
       <Badge variant="warning">有未生效调整</Badge><span className="ml-1 underline-offset-2 hover:underline">查看对比</span>
@@ -167,34 +134,30 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
 
   return (
     <div className="space-y-4">
-      <section className="section-panel" aria-label="当前生效版本"><h2 className="mb-3 text-base font-semibold">当前生效版本 <span className="ml-2 text-xs font-normal text-muted-foreground">以下均为当前生效值</span></h2>
+      <section className="section-panel" aria-label="当前生效版本"><h2 className="mb-3 text-base font-semibold">当前生效版本</h2>
         <div className="flex flex-wrap items-center gap-x-8 gap-y-3">
-          <div><p className="text-xs text-muted-foreground">当前生效</p><p className="text-lg font-semibold tabular-nums">{release ? `第 ${release.generation} 版组合` : "尚未生效"}</p></div>
+          <div><p className="text-xs text-muted-foreground">当前生效</p><p className="text-lg font-semibold tabular-nums">{release ? "已生效" : "尚未生效"}</p></div>
           <div><p className="text-xs text-muted-foreground">生效时间</p><p className="text-lg font-semibold tabular-nums">{release ? formatDate(release.activatedAt) : "—"}</p></div>
-          <div className="min-w-0"><p className="text-xs text-muted-foreground">尚未生效的版本</p>
-            <p className="text-sm leading-7">{sealedPending ? `${sealedPending} 个已封存，尚未生效` : "无已封存的新版本"}{drafts ? ` · ${drafts} 个草稿` : ""}</p></div>
+          <div className="min-w-0"><p className="text-xs text-muted-foreground">待发布</p>
+            <p className="text-sm leading-7">{sealedPending ? `${sealedPending} 个已提交，等 Boss 生效` : inProgress ? "" : "无"}{inProgress ? `${sealedPending ? " · " : ""}1 份价格草稿编辑中` : ""}</p></div>
           <div className="ml-auto flex flex-wrap gap-2">
-            {canEdit ? <a className={buttonVariants({ variant: "secondary" })} href={`#skin-deposit-policy-${rules.game.id}`}>配置新版皮肤押金</a> : null}
-            {canEdit && release && !editing ? <Button type="button" variant="outline" disabled={command.locked} onClick={startEdit}>编辑规则（仅预览）</Button> : null}
+            {canEdit && !skinV2Ready ? <Button type="button" variant="secondary" onClick={onOpenSkin}>配置新版皮肤押金</Button> : null}
             <Button type="button" variant="outline" disabled={!canPreview || !release} title={!canPreview ? "当前账号没有内部试算权限" : undefined} onClick={() => setTrialOpen(true)}>试算一单</Button>
-            {isBoss && !editing ? <Button type="button" disabled={command.locked && command.pending?.operation !== RULES_RELEASE_OPERATION} onClick={() => setDialog("confirm")}>选择版本并确认生效</Button> : null}
+            {isBoss ? <Button type="button" disabled={command.locked && command.pending?.operation !== RULES_RELEASE_OPERATION} onClick={() => setDialog("confirm")}>选择版本并确认生效</Button> : null}
           </div>
         </div>
-        <p className="mt-3 border-t border-border pt-2 text-xs text-muted-foreground">按「价格 + 租期 + 出租协议」组合生效；封存后由 Boss 选择并确认生效。</p>
-        <p className="mt-2 text-sm text-muted-foreground">整页编辑与试算可预览调整；审批接口尚未接入，本轮修改不能保存。</p>
-        {editing ? <Alert variant="info" role="status" className="mt-2"><Info aria-hidden="true" /><AlertDescription><p>本地预览中：改过的输入会高亮并显示原值。确认修改只展示差异，暂不能保存或提交审批；当前生效规则不变。</p></AlertDescription></Alert> : null}
-        {notice ? <p role="status" className="mt-2 rounded-md bg-muted px-3 py-2 text-xs">{notice}</p> : null}
+                <p className="mt-2 text-sm text-muted-foreground">这里只看线上值和试算；改规则去左侧对应分区。</p>
       </section>
 
-      {!release ? <section className="section-panel"><Hint>还没有生效的规则。请联系平台管理员配置初始生效规则，封存后由 Boss 选择并确认生效。</Hint></section> : (
+      {!release ? <section className="section-panel"><Hint>还没有生效的规则。请联系平台管理员配置初始生效规则，提交后由 Boss 确认生效。</Hint></section> : (
         <>
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <Card wide title="哈夫币计价规则" note="平台按比例差计算租客比例与金额；比例＝1 元换多少万哈夫币，比例越小单价越高"
               metrics={haff && curPrice?.mode === "SPREAD" && p !== null ? (<>
-                <Metric label="平台比例差 · 普通/自定义" value={val("haff.spread.ordinary") || p} />
-                <Metric label="平台比例差 · 快速" value={val("haff.spread.fast") || pf || "—"} />
-                <Metric label="参考平台价差" value={perMillion(50) !== null && perMillion(50 - (num(val("haff.spread.ordinary")) ?? p) + (standardDelta ?? 0)) !== null ? yuan(perMillion(50 - (num(val("haff.spread.ordinary")) ?? p) + (standardDelta ?? 0))! - perMillion(50)!) : "待计算"} unit="/1M" sub="以常用 50 比例测算" />
-                <Metric label="计价模式" value="差价换算（SPREAD）" />
+                <Metric label="平台比例差 · 普通/自定义" value={haff.compatibility.ordinary.spreadDelta} />
+                <Metric label="平台比例差 · 快速" value={haff.compatibility.fast?.spreadDelta || pf || "—"} />
+                <Metric label="参考平台价差" value={perMillion(50) !== null && p !== null && perMillion(50 - p + (standardDelta ?? 0)) !== null ? yuan(perMillion(50 - p + (standardDelta ?? 0))! - perMillion(50)!) : "待计算"} unit="/1M" sub="以常用 50 比例测算" />
+                <Metric label="计价模式" value="差价换算" />
               </>) : undefined}
               info={haff ? (<>
                 <p>1. 比例换算关系：比例＝1 元换多少万哈夫币；金额（元/1M）＝ 100 ÷ 比例。比例越小单价越高，比例差是比例上的差额，不是固定金额。</p>
@@ -212,7 +175,7 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
                         <div className="flex items-center gap-2">
                           <span className="text-sm font-semibold">核心参数：平台比例差</span>
                           <Badge variant="outline">普通/自定义模式适用</Badge>
-                          {haff.compatibility.modes.fast.enabled && haff.compatibility.fast ? <Badge variant="secondary">快速模式: {val("haff.spread.fast") || haff.compatibility.fast.spreadDelta}</Badge> : null}
+                          {haff.compatibility.modes.fast.enabled && haff.compatibility.fast ? <Badge variant="secondary">快速模式: {haff.compatibility.fast.spreadDelta}</Badge> : null}
                         </div>
                         <p className="mt-1 text-xs text-muted-foreground">
                           租客比例 ＝ 号主比例 − 平台比例差{standardDelta ? ` + 普通档调整(${standardDelta})` : ""}；调大比例差，租客支付增加、平台留存收益扩大。
@@ -231,7 +194,7 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
                   <div className="rounded-lg border border-border/80 bg-muted/20 p-3.5">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <h4 className="text-xs font-semibold">换算参考示例（非固定平台价）</h4>
-                      <span className="text-[11px] text-muted-foreground">当前比例差：普通 {val("haff.spread.ordinary") || haff.compatibility.ordinary.spreadDelta} · 辅助测算</span>
+                      <span className="text-xs text-muted-foreground">当前比例差：普通 {haff.compatibility.ordinary.spreadDelta} · 辅助测算</span>
                     </div>
                     <ScrollTable label="换算参考示例">
                       <Table className="mt-2">
@@ -246,7 +209,7 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
                         </TableHeader>
                         <TableBody>
                           {[50, 60, 70].map((sampleRatio) => {
-                            const sp = num(val("haff.spread.ordinary")) ?? p ?? 10;
+                            const sp = p ?? 10;
                             const sd = standardDelta ?? 0;
                             const tenantRatio = sampleRatio - sp + sd;
                             const ownerPerM = perMillion(sampleRatio);
@@ -290,7 +253,7 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
                         <TableCell>{line?.unitQuantity && line.unitQuantity !== "1" ? `每 ${line.unitQuantity} ${unitLabel(item.unit, item.code)}` : `每${unitLabel(item.unit, item.code)}`}</TableCell>
                         <TableCell className="text-right tabular-nums">{V(`item.${item.id}.buyer`, unitYuan(line?.buyerUnitAmount), { unit: "元" })}</TableCell>
                         <TableCell className="text-right tabular-nums">{V(`item.${item.id}.owner`, unitYuan(line?.ownerUnitAmount), { unit: "元" })}</TableCell>
-                        <TableCell className="text-right tabular-nums">{spread(editing ? val(`item.${item.id}.buyer`) : line?.buyerUnitAmount, editing ? val(`item.${item.id}.owner`) : line?.ownerUnitAmount)}</TableCell>
+                        <TableCell className="text-right tabular-nums">{spread(line?.buyerUnitAmount, line?.ownerUnitAmount)}</TableCell>
                       </TableRow>
                     ))}</TableBody>
                   </Table>
@@ -298,7 +261,7 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
               )}
             </Card>
 
-            <Card title="押金规则" note="对齐平台基准押金配置 · 系统给出推荐押金，号主填写的金额为最终押金"
+            <Card title="押金规则" note="系统给推荐押金，号主填的金额为准"
               info={policy ? <p>推荐押金＝各项之和，按政策取整单位（{centsYuan(policy.recommendation.parameters.rounding.unitCents)}）向上取整，零值时最低 {centsYuan(policy.recommendation.parameters.rounding.zeroFallbackCents)}，不超过上限；号主可改，但必须满足最低值且不超过上限。</p> : <p>当前生效价格版本未提供资金政策，本节不使用任何默认金额。</p>}
               badges={changeBadge(priceChanged, () => priceDiff(rules, curPrice?.id, latestPrice?.id).filter((r) => r.group === "押金规则"))}>
               {!policy ? <Hint>资金政策未提供：押金上限、普通/包赔最低值、加价项与号主保证金要求均为未提供，不参与本地估算。</Hint> : (
@@ -309,7 +272,7 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
                     <div><dt className="text-xs text-muted-foreground">选全额包赔时最低</dt><dd className="mt-0.5 text-xl font-semibold leading-7 tabular-nums">{centsYuan(policy.ownerDepositRules.fullPayoutSelected.minCents)}</dd></div>
                     <div><dt className="text-xs text-muted-foreground">号主保证金</dt><dd className="mt-0.5 text-xl font-semibold leading-7 tabular-nums">{policy.guaranteeRequirement.mode === "NOT_REQUIRED" ? "政策不要求" : centsYuan(policy.guaranteeRequirement.requiredCents)}</dd></div>
                   </dl>
-                  {editing ? <DepositExample vals={vals} boxes={Object.keys(policy.recommendation.parameters.safeBoxWeightsByCode)} policy={policy} /> : null}
+
                   <ScrollTable label="推荐押金加价项">
                     <Table>
                       <TableHeader><TableRow><TableHead>加价项</TableHead><TableHead>分类</TableHead><TableHead className="text-right">首件 / 金额</TableHead><TableHead className="text-right">之后每件</TableHead></TableRow></TableHeader>
@@ -327,15 +290,7 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
                       </TableBody>
                     </Table>
                   </ScrollTable>
-                  {policy.recommendation.schema === "deposit-recommendation-v1" ? <Collapsible className="mt-4 border-t border-border pt-3">
-                    <CollapsibleTrigger render={<Button type="button" variant="ghost" className="h-auto w-full justify-between gap-3 whitespace-normal px-0 text-left" />}>
-                      <span><span className="block font-medium">原版本 v1 皮肤加价（只读）</span><span className="mt-1 block text-xs font-normal text-muted-foreground">v2 完成配置并生效前，既有版本口径保留。</span></span><ChevronDownIcon className="size-4" />
-                    </CollapsibleTrigger>
-                    <CollapsibleContent className="pt-3"><ScrollTable label="原版本 v1 皮肤加价（只读）"><Table>
-                      <TableHeader><TableRow><TableHead>原版本分组</TableHead><TableHead className="text-right">首件（元）</TableHead><TableHead className="text-right">后续每件（元）</TableHead></TableRow></TableHeader>
-                      <TableBody>{Object.entries(policy.recommendation.parameters.skinWeights).map(([group, weight]) => <TableRow key={group}><TableCell>{SKIN_LABELS[group] ?? group}</TableCell><TableCell className="text-right tabular-nums">{centsYuan(weight.firstCents)}</TableCell><TableCell className="text-right tabular-nums">{centsYuan(weight.subsequentCents)}</TableCell></TableRow>)}</TableBody>
-                    </Table></ScrollTable></CollapsibleContent>
-                  </Collapsible> : null}
+                  {policy.recommendation.schema === "deposit-recommendation-v1" ? <p className="mt-4 border-t border-border pt-3 text-xs text-muted-foreground">{pendingSkinV2 ? "线上仍是旧皮肤押金规则，待生效版本已更新为新版。" : "线上皮肤押金还是旧规则，去「皮肤推荐押金」配好新版并提交。"}</p> : null}
                 </>
               )}
             </Card>
@@ -343,7 +298,7 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
 
           <section className="section-panel" aria-label="租期与出租协议引用">
             <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
-              <div><h2 className="text-base font-semibold">租期与每日消耗 · 出租协议引用</h2><p className="mt-0.5 text-xs text-muted-foreground">档位与协议按生效版本引用；协议正文在本页只读查看，编辑沿现有版本维护流程。</p></div>
+              <div><h2 className="text-base font-semibold">租期与每日消耗 · 出租协议引用</h2><p className="mt-0.5 text-xs text-muted-foreground">这里只读；改协议去「出租协议」。</p></div>
               <div className="flex flex-wrap gap-2">{changeBadge(termChanged, () => termDiff(rules, curTerm?.id, latestTerm?.id))}{changeBadge(agreementChanged, () => agreementDiff(rules, curAgreement?.id, latestAgreement?.id))}</div>
             </div>
             <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,320px)]">
@@ -351,11 +306,10 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
                 {termOpts.length ? (
                   <ScrollTable label="租期档位表">
                     <Table>
-                      <TableHeader><TableRow><TableHead>档位</TableHead><TableHead>代码</TableHead><TableHead className="text-right">每日消耗</TableHead><TableHead>租期取整</TableHead></TableRow></TableHeader>
+                      <TableHeader><TableRow><TableHead>档位</TableHead><TableHead className="text-right">每日消耗</TableHead><TableHead>租期取整</TableHead></TableRow></TableHeader>
                       <TableBody>{termOpts.map((option) => (
                         <TableRow key={option.code}>
-                          <TableCell>{option.name}</TableCell>
-                          <TableCell className="font-mono text-xs text-muted-foreground">{option.code}</TableCell>
+                          <TableCell>{termName(option)}</TableCell>
                           <TableCell className="text-right tabular-nums">{V(`term.${option.code}.daily`, haffCount(option.dailyConsumption), { unit: "M" })}</TableCell>
                           <TableCell>{option.durationRounding === "CEIL_DAY" ? "按天向上取整" : option.durationRounding}</TableCell>
                         </TableRow>
@@ -370,13 +324,12 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
                 {curAgreement ? (
                   <>
                     <p className="mt-1 text-sm">{curAgreement.title}</p>
-                    <p className="mt-1 text-xs text-muted-foreground">版本 {curAgreement.id} · 状态 {curAgreement.status === "SEALED" ? "已封存" : curAgreement.status === "DRAFT" ? "草稿" : curAgreement.status}</p>
-                    <p className="mt-1 text-xs text-muted-foreground break-all">正文摘要 {curAgreement.digest ? curAgreement.digest.slice(0, 16) + "…" : "未提供"}</p>
-                    {payoutRef(curPrice) ? <p className="mt-2 text-xs text-muted-foreground">全额包赔条款：{payoutRef(curPrice)}</p> : <p className="mt-2 text-xs text-muted-foreground">全额包赔条款引用未提供。</p>}
+                    <p className="mt-2 text-xs text-muted-foreground">全额包赔条款：{payoutName(rules, curPrice) ?? "未设置"}</p>
+                    <MutedDetails className="mt-1"><p className="break-all">正文摘要 {curAgreement.digest ? curAgreement.digest.slice(0, 16) + "…" : "未提供"}{payoutRef(curPrice) ? ` · 条款 ${payoutRef(curPrice)}` : ""}</p></MutedDetails>
                     <Button type="button" variant="outline" size="sm" className="mt-3" onClick={() => setDialog("agreement")}>查看协议正文</Button>
                   </>
                 ) : <p className="mt-1 text-sm text-muted-foreground">生效组合未提供出租协议版本，或该版本未随规则读取返回。</p>}
-                <p className="mt-2 text-[11px] text-muted-foreground">引用版本变化不会自动改变已冻结订单的原协议依据。</p>
+                <p className="mt-2 text-[11px] text-muted-foreground">换协议后，已有订单仍按下单时的协议。</p>
               </div>
             </div>
           </section>
@@ -400,29 +353,13 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
         </DialogContent>
       </Dialog>
 
-      {trialOpen && release ? <TrialWindow rules={rules} seed={editing ? vals : undefined} onClose={() => setTrialOpen(false)} /> : null}
-      {editing ? (
-        <div className="sticky bottom-0 z-30 -mx-1 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-background/95 px-4 py-3 shadow-lg backdrop-blur" role="region" aria-label="编辑操作">
-          <p className="text-sm"><span className="font-semibold tabular-nums">{changeRows.length}</span> 项修改{Object.keys(errors).length ? <span className="ml-2 text-xs text-destructive">{Object.keys(errors).length} 项需修正</span> : null}<span className="ml-2 text-xs text-muted-foreground">仅预览差异，尚不能保存或提交审批</span></p>
-          <div className="flex gap-2">
-            <Button type="button" variant="outline" onClick={() => (dirty ? setEditDialog("discard") : stopEdit())}>取消</Button>
-            <Button type="button" disabled={!dirty || Object.keys(errors).length > 0} onClick={() => setEditDialog("review")}>确认修改</Button>
-          </div>
-        </div>
-      ) : null}
-      <Dialog open={editDialog === "discard"} onOpenChange={(o) => !o && setEditDialog("none")}>
-        <DialogContent closeLabel="关闭窗口">
-          <DialogHeader><DialogTitle>放弃修改？</DialogTitle><DialogDescription>有 {changeRows.length} 项修改尚未提交，退出编辑后将丢失。</DialogDescription></DialogHeader>
-          <DialogFooter><Button type="button" variant="outline" onClick={() => setEditDialog("none")}>继续编辑</Button><Button type="button" variant="destructive" onClick={stopEdit}>放弃修改</Button></DialogFooter>
-        </DialogContent>
-      </Dialog>
-      {editDialog === "review" ? <ReviewDialog rows={changeRows} onClose={() => setEditDialog("none")} /> : null}
-      {dialog === "confirm" ? <ConfirmDialog rules={rules} command={command} onClose={() => { setDialog("none"); command.dismissResult(); }} /> : null}
+      {trialOpen && release ? <TrialWindow rules={rules} onClose={() => setTrialOpen(false)} /> : null}
+      {dialog === "confirm" ? <ConfirmDialog rules={rules} command={command} onOpenSettlement={onOpenSettlement} onClose={() => { setDialog("none"); command.dismissResult(); }} /> : null}
     </div>
   );
 }
 
-function SettlementRules() {
+export function SettlementRules() {
   const [open, setOpen] = useState(false);
   const W = 360, H = 140, L = 36, R = 350, T = 18, B = 112;
   const x = (c: number) => L + (R - L) * c, y = (v: number) => B - (B - T) * v;
@@ -469,6 +406,20 @@ function SettlementRules() {
   );
 }
 
+/** 包赔条款显示名：用条款标题，不显示编号。 */
+function payoutName(rules: RulesResponse, price: RulesResponse["priceVersions"][number] | undefined): string | null {
+  const fp = price?.fundingPolicy;
+  if (!fp?.fullPayoutPolicyRef) return null;
+  return (rules.fullPayoutTermsVersions ?? []).find(t => t.policyRef === fp.fullPayoutPolicyRef && t.policyVersion === fp.fullPayoutPolicyVersion)?.title ?? "已设置";
+}
+
+/** 租期档位名：旧数据的名字是代码（如 legacy_daily_10m）时，换成“每天 10M”。 */
+export function termName(option: { name: string; code: string; dailyConsumption: string }): string {
+  if (option.name && !/^[a-z0-9_]+$/.test(option.name)) return option.name;
+  const m = /daily_(\d+)m$/i.exec(option.code);
+  return m ? `每天 ${m[1]}M` : `每天 ${haffCount(option.dailyConsumption)}M`;
+}
+
 function History({ rules }: { rules: RulesResponse }) {
   const [open, setOpen] = useState(false);
   const rows = [
@@ -476,73 +427,33 @@ function History({ rules }: { rules: RulesResponse }) {
     ...rules.termVersions.map((v) => ({ kind: "租期", v })),
     ...rules.agreementVersions.map((v) => ({ kind: "出租协议", v })),
   ].sort((a, b) => (b.v.sealedAt ?? b.v.createdAt).localeCompare(a.v.sealedAt ?? a.v.createdAt));
+  const current = activePriceDraft(rules)?.id;
+  const oldDrafts = rows.filter(r => r.v.status === "DRAFT" && r.v.id !== current);
+  const main = rows.filter(r => !(r.v.status === "DRAFT" && r.v.id !== current));
   const inRelease = (id: string) => rules.release && [rules.release.priceVersionId, rules.release.termVersionId, rules.release.agreementVersionId].includes(id);
   return (
     <Collapsible open={open} onOpenChange={setOpen} className="section-panel">
       <CollapsibleTrigger render={<Button type="button" variant="ghost" className="h-auto w-full justify-start px-0 py-2 text-left whitespace-normal" />}>
-        {open ? <ChevronDownIcon className="size-4 shrink-0" /> : <ChevronRightIcon className="size-4 shrink-0" />}<span className="text-base font-semibold">版本记录</span><span className="text-xs text-muted-foreground">共 {rows.length} 个版本</span>
+        {open ? <ChevronDownIcon className="size-4 shrink-0" /> : <ChevronRightIcon className="size-4 shrink-0" />}<span className="text-base font-semibold">版本记录</span><span className="text-xs text-muted-foreground">共 {main.length} 个版本</span>
       </CollapsibleTrigger>
       <CollapsibleContent>
         <ScrollTable label="版本记录">
           <Table className="mt-3">
-            <TableHeader><TableRow><TableHead>类型</TableHead><TableHead>状态</TableHead><TableHead>修订</TableHead><TableHead>创建</TableHead><TableHead>封存</TableHead></TableRow></TableHeader>
-            <TableBody>{rows.map(({ kind, v }) => (
+            <TableHeader><TableRow><TableHead>类型</TableHead><TableHead>状态</TableHead><TableHead>创建</TableHead><TableHead>提交</TableHead></TableRow></TableHeader>
+            <TableBody>{main.map(({ kind, v }) => (
               <TableRow key={v.id}><TableCell>{kind}</TableCell>
-                <TableCell>{inRelease(v.id) ? <Badge variant="success">当前生效</Badge> : v.status === "SEALED" ? <Badge variant="outline">已封存，尚未生效</Badge> : <Badge variant="secondary">草稿</Badge>}</TableCell>
-                <TableCell className="tabular-nums">{v.revision}</TableCell><TableCell>{formatDate(v.createdAt)}</TableCell><TableCell>{v.sealedAt ? formatDate(v.sealedAt) : "—"}</TableCell></TableRow>
+                <TableCell>{inRelease(v.id) ? <Badge variant="success">当前生效</Badge> : v.status === "SEALED" ? <Badge variant="outline">已提交</Badge> : <Badge variant="secondary">草稿</Badge>}</TableCell>
+                <TableCell>{formatDate(v.createdAt)}</TableCell><TableCell>{v.sealedAt ? formatDate(v.sealedAt) : "—"}</TableCell></TableRow>
             ))}</TableBody>
           </Table>
         </ScrollTable>
-        <p className="mt-2 text-[11px] text-muted-foreground">后台暂未提供历次生效组合列表，这里按版本列出。</p>
+        {oldDrafts.length ? <MutedDetails className="mt-3" label={`历史草稿（${oldDrafts.length}）`}><p className="mt-1 text-muted-foreground">以前没提交的草稿，不会生效，保留备查。</p><ul className="mt-1 divide-y divide-border rounded-md border border-border">{oldDrafts.map(({ kind, v }) => <li key={v.id} className="flex gap-3 px-3 py-1.5"><span className="w-16">{kind}</span><span className="text-muted-foreground">{formatDate(v.createdAt)} 创建</span></li>)}</ul></MutedDetails> : null}
       </CollapsibleContent>
     </Collapsible>
   );
 }
 
-function DepositExample({ vals, boxes, policy }: { vals: EditValues; boxes: string[]; policy: NonNullable<ReturnType<typeof editContext>["policy"]> }) {
-  const unit = num(policy.recommendation.parameters.rounding.unitCents) ?? 0, zeroYuan = (num(policy.recommendation.parameters.rounding.zeroFallbackCents) ?? 0) / 100;
-  const box = boxes.find(b => vals[`dep.box.${b}`]);
-  const required = [`dep.box.${box}`, "dep.vit7", "dep.bear7", "dep.dive3", "dep.cap"].map(k => num(vals[k]));
-  if (!box || required.some(n => n === null || n < 0) || (required[4] ?? 0) <= 0 || unit <= 0) return <Hint>实时示例待计算：所选保险箱、加价项、取整单位与上限须由政策提供且合法，缺项不按 0 参与。</Hint>;
-  const cap = required[4]!, sum = required.slice(0, 4).reduce<number>((total, n) => total + n!, 0);
-  const yuanUnit = unit / 100;
-  const rec = Math.min(sum <= 0 ? zeroYuan : Math.ceil(sum / yuanUnit) * yuanUnit, cap);
-  return (
-    <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-xs" aria-live="polite">
-      <p className="font-medium">实时示例 · {safeBoxLabel(box)} 保险箱 + 7 级体力 + 7 级负重 + 3 级潜水（不含皮肤）</p>
-      <p className="mt-1 tabular-nums">合计 {yuan(sum)} → 向上取整到 {centsYuan(policy.recommendation.parameters.rounding.unitCents)} → 推荐 <b>{yuan(rec)}</b>{sum > cap ? <span className="ml-1 text-amber-900 dark:text-amber-300">（已触顶，按上限 {yuan(cap)}）</span> : null}</p>
-      <p className="mt-1 text-muted-foreground">上限同时约束推荐押金与号主填写的押金；号主可改的最低值为普通 {centsYuan(policy.ownerDepositRules.normal.minCents)}、选全额包赔时 {centsYuan(policy.ownerDepositRules.fullPayoutSelected.minCents)}。</p>
-    </div>
-  );
-}
-
-function ReviewDialog({ rows, onClose }: { rows: ChangeRow[]; onClose: () => void }) {
-  const groups = [...new Set(rows.map((r) => r.group))];
-  return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent closeLabel="关闭窗口" className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
-        <DialogHeader><DialogTitle>确认修改 · {rows.length} 项</DialogTitle><DialogDescription>以下为本地修改与当前生效值的对比。审批接口尚未接入，当前不能保存或提交申请。</DialogDescription></DialogHeader>
-        {groups.map((g) => (
-          <div key={g} className="min-w-0">
-            <p className="mb-1 text-sm font-semibold">{g}</p>
-            <ScrollTable label={`${g}修改`}>
-              <Table><TableHeader><TableRow><TableHead>项目</TableHead><TableHead className="text-right">现在</TableHead><TableHead className="text-right">修改后</TableHead></TableRow></TableHeader>
-                <TableBody>{rows.filter((r) => r.group === g).map((r) => <TableRow key={r.key}><TableCell>{r.label}</TableCell><TableCell className="text-right tabular-nums text-muted-foreground">{r.before || "未配置"}{r.unit ? ` ${r.unit}` : ""}</TableCell><TableCell className="text-right font-semibold tabular-nums">{r.after || "未配置"}{r.unit ? ` ${r.unit}` : ""}</TableCell></TableRow>)}</TableBody>
-              </Table>
-            </ScrollTable>
-          </div>
-        ))}
-        <p className="rounded-md border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">提交审批将在下一轮接入；本轮不会写入任何数据。未修改的分组沿用当前版本，会员档位兼容价目原样保留。</p>
-        <DialogFooter>
-          <Button type="button" variant="outline" onClick={onClose}>返回编辑</Button>
-          <Button type="button" disabled title="审批接口下一轮接入">提交审批（下轮接入）</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function ConfirmDialog({ rules, command, onClose }: { rules: RulesResponse; command: ReturnType<typeof useRulesWrite>; onClose: () => void }) {
+function ConfirmDialog({ rules, command, onClose, onOpenSettlement }: { rules: RulesResponse; command: ReturnType<typeof useRulesWrite>; onClose: () => void; onOpenSettlement?: () => void }) {
   const release = rules.release;
   const sealed = <T extends { status: string }>(list: T[]) => list.filter((v) => v.status === "SEALED");
   const first = (list: { id: string; status: string }[], current?: string) => sealed(list)[0]?.id ?? current ?? "";
@@ -551,7 +462,7 @@ function ConfirmDialog({ rules, command, onClose }: { rules: RulesResponse; comm
   const [priceId, setPriceId] = useState(() => isRelease ? String(pending.body.priceVersionId) : first(rules.priceVersions, release?.priceVersionId));
   const [termId, setTermId] = useState(() => isRelease ? String(pending.body.termVersionId) : first(rules.termVersions, release?.termVersionId));
   const [agreementId, setAgreementId] = useState(() => isRelease ? String(pending.body.agreementVersionId) : first(rules.agreementVersions, release?.agreementVersionId));
-  const label = (v: { revision: string; sealedAt: string | null; id: string }, current?: string, title?: string) => `${title ? title + " · " : ""}修订 ${v.revision} · ${v.sealedAt ? formatDate(v.sealedAt) : ""}${v.id === current ? "（当前生效）" : ""}`;
+  const label = (v: { revision: string; sealedAt: string | null; id: string }, current?: string, title?: string) => `${title ? title + " · " : ""}${v.sealedAt ? formatDate(v.sealedAt) + " 提交" : "草稿"}${v.id === current ? "（当前生效）" : ""}`;
   const rows = useMemo(() => [
     ...priceDiff(rules, release?.priceVersionId, priceId),
     ...termDiff(rules, release?.termVersionId, termId),
@@ -568,10 +479,10 @@ function ConfirmDialog({ rules, command, onClose }: { rules: RulesResponse; comm
   return (
     <Dialog open disablePointerDismissal onOpenChange={(o) => !o && !busy && onClose()}>
       <DialogContent closeLabel="关闭窗口" showCloseButton={!busy} className="max-h-[92dvh] overflow-y-auto sm:max-w-3xl">
-        <DialogHeader><DialogTitle>{done ? "已收到生效回执" : pending ? "核对原生效请求" : "选择版本并确认生效"}</DialogTitle><DialogDescription>只能选择已封存的版本。关闭窗口不会清除原请求或改变规则；审批通过与实际生效属于不同阶段。</DialogDescription></DialogHeader>
+        <DialogHeader><DialogTitle>{done ? "已收到生效回执" : pending ? "核对原生效请求" : "选择版本并确认生效"}</DialogTitle><DialogDescription>只能选已提交的版本。关闭窗口不会改变线上规则。</DialogDescription></DialogHeader>
         {done ? (
           <div role="status" className="space-y-2 text-sm">
-            <p>已收到第 {state.receipt.generation} 版组合的生效回执。生效时间请核对页面当前版本记录。</p>
+            <p>已生效，新订单按新规则计算。</p>
             <p className="text-sm text-muted-foreground">{state.receipt.affectedCount === undefined ? "原回执未提供受影响账号数量，不按 0 显示。" : <>生效时，本游戏有 <b className="text-foreground">{state.receipt.affectedCount}</b> 个启用中的账号尚未接受新规则，需号主重新确认后才能继续使用新规则。</>}</p>
           </div>
         ) : (
@@ -585,14 +496,14 @@ function ConfirmDialog({ rules, command, onClose }: { rules: RulesResponse; comm
             {!crossGame ? <div><p className="mb-2 text-sm font-semibold">改了的规则</p><DiffTable rows={rows} empty={same ? "所选组合与当前生效组合相同，无需生效。" : "已提供的业务字段未发现差异；版本引用将变化。"} /></div> : null}
             <div className="text-xs"><p className="mb-1 font-semibold">沿用不变</p><p className="text-muted-foreground">{unchanged.length ? unchanged.join("、") : "无"}</p></div>
             <div className="text-xs"><p className="mb-1 font-semibold">本次引用的包赔条款</p>
-              <p className="text-muted-foreground">{nextRef ?? "所选价格版本未引用包赔条款"} {curRef === nextRef ? <Badge variant="outline">沿用</Badge> : <Badge variant="warning">更换（原：{curRef ?? "无"}）</Badge>} · 条款单独维护，通过本次价格版本引用；正文查看待接入</p></div>
+              <p className="text-muted-foreground">{payoutName(rules, rules.priceVersions.find((v) => v.id === priceId)) ?? "未设置"} {curRef === nextRef ? <Badge variant="outline">沿用</Badge> : <Badge variant="warning">更换（原：{payoutName(rules, rules.priceVersions.find((v) => v.id === release?.priceVersionId)) ?? "无"}）</Badge>}{onOpenSettlement ? <Button type="button" variant="link" className="h-auto px-1 text-xs" onClick={() => { onClose(); onOpenSettlement(); }}>查看包赔正文</Button> : null}</p></div>
             <div className="rounded-md border border-border bg-muted/40 p-3 text-xs">
               <p>切换后，依赖旧规则的后续操作需重新确认；具体数量在生效后显示。</p>
               <p className="mt-1 text-muted-foreground">已冻结报价的订单按冻结时的报价结算。</p>
             </div>
             {state.kind === "conflict" ? <Alert variant="warning" role="alert"><TriangleAlert aria-hidden="true" /><AlertTitle>规则已被其他人更新</AlertTitle><AlertDescription>版本冲突。请关闭后刷新页面，核对当前生效版本再确认。</AlertDescription></Alert> : null}
             {state.kind === "unknown" ? <Alert variant="warning" role="status"><TriangleAlert aria-hidden="true" /><AlertTitle>结果未知</AlertTitle><AlertDescription>{state.message ?? "请求可能已执行。核对原回执前不能重复提交；关闭或刷新仍保留原请求。"}</AlertDescription></Alert> : null}
-            {state.kind === "accepted" ? <Alert variant="warning" role="status"><Clock aria-hidden="true" /><AlertTitle>已收到生效回执，尚未完成回读</AlertTitle><AlertDescription>{state.message ?? "当前规则尚未完成回读，不能再次提交。"}</AlertDescription></Alert> : null}
+            {state.kind === "accepted" ? <Alert variant="warning" role="status"><Clock aria-hidden="true" /><AlertTitle>已确认生效，线上规则刷新中</AlertTitle><AlertDescription>{state.message ?? "稍后刷新查看，刷新完成前不要重复提交。"}</AlertDescription></Alert> : null}
             {state.kind === "blocked" ? <Alert variant="warning" role="alert"><TriangleAlert aria-hidden="true" /><AlertTitle>当前条件不允许提交</AlertTitle><AlertDescription>{state.message}</AlertDescription></Alert> : null}
             {state.kind === "error" ? <Alert variant="destructive"><CircleAlert aria-hidden="true" /><AlertTitle>请求被明确拒绝</AlertTitle><AlertDescription>{state.message}</AlertDescription></Alert> : null}
             {state.kind === "not_sent" ? <Alert variant="info" role="status"><Info aria-hidden="true" /><AlertDescription>{state.message}</AlertDescription></Alert> : null}

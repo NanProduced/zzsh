@@ -1,4 +1,5 @@
 import type { FundingPolicy, PriceVersionRecord, RulesResponse, SkinDepositRecommendation, SkinDepositRule } from "../../api";
+import { priceSaveBody } from "./price-draft.ts";
 
 export const SKIN_DEPOSIT_TYPES = { AGENT: "干员", MELEE_TYPE: "近战外观", FIREARM: "枪械" };
 export type SkinDepositDraft = {
@@ -29,7 +30,7 @@ export function skinDepositDraft(policy: FundingPolicy): SkinDepositDraft {
   };
 }
 export function buildSkinDepositPolicy(base: FundingPolicy, draft: SkinDepositDraft): FundingPolicy & { recommendation: SkinDepositRecommendation } {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(draft.policyVersion)) throw new Error("请填写本次资金政策版本标识。");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(draft.policyVersion)) throw new Error("请填写本次修改的版本名（如 2026-11）。");
   const p = base.recommendation.parameters;
   return { ...structuredClone(base), policyVersion: draft.policyVersion, recommendation: {
     schema: "deposit-recommendation-v2", algorithm: "delta-deposit-type-rarity-v2", version: "2", currency: "CNY", unit: "cent",
@@ -41,7 +42,7 @@ export function buildSkinDepositPolicy(base: FundingPolicy, draft: SkinDepositDr
 }
 export function skinDepositIssues(draft: SkinDepositDraft): string[] {
   const issues: string[] = [], keys = new Set<string>(), ids = new Set<string>();
-  if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(draft.policyVersion)) issues.push("资金政策版本未填写或格式有误");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(draft.policyVersion)) issues.push("版本名只能用字母、数字和 - . _（如 2026-11）");
   for (const kind of Object.keys(SKIN_DEPOSIT_TYPES)) if (!draft.rules.some(row => row.ownerKind === kind && row.rarityCode === null)) issues.push(`${SKIN_DEPOSIT_TYPES[kind as keyof typeof SKIN_DEPOSIT_TYPES]}缺少类型兜底规则`);
   for (const row of draft.rules) {
     const key = JSON.stringify([row.ownerKind, row.rarityCode]);
@@ -57,12 +58,7 @@ export function skinDepositIssues(draft: SkinDepositDraft): string[] {
   return [...new Set(issues)];
 }
 
-/** Copy the current price contract only when initializing an empty, newly created price draft. */
-export function skinDepositSaveBody(rules: RulesResponse, target: PriceVersionRecord, base: PriceVersionRecord, policy: FundingPolicy): Record<string, unknown> {
-  const result: Record<string, unknown> = { expectedRevision: target.revision, fundingPolicy: policy };
-  if (rules.priceLines.some(line => line.priceVersionId === target.id)) return result;
-  const lines = rules.priceLines.filter(line => line.priceVersionId === base.id);
-  if (!lines.length) throw new Error("缺少可复用的价格行，请先完成原价格草稿配置。");
-  return { ...result, mode: base.mode, ...(base.commissionRate === null ? {} : { commissionRate: base.commissionRate }), haffRule: base.haffRule, roundingPolicy: base.roundingPolicy,
-    lines: lines.map(({ itemId, customerTier, pricingKind, unitQuantity, buyerUnitAmount, ownerUnitAmount }) => ({ itemId, ...(customerTier === undefined ? {} : { customerTier }), pricingKind, ...(pricingKind === "FIXED_UNIT" ? { unitQuantity, buyerUnitAmount, ...(base.mode === "SPREAD" && ownerUnitAmount !== null ? { ownerUnitAmount } : {}) } : {}) })) };
+/** 只提交资金政策；目标草稿尚为空时由 priceSaveBody 从当前生效版本补齐普通档位价目与哈夫币规则。 */
+export function skinDepositSaveBody(rules: RulesResponse, target: PriceVersionRecord, _base: PriceVersionRecord, policy: FundingPolicy): Record<string, unknown> {
+  return priceSaveBody(rules, target, { fundingPolicy: policy });
 }

@@ -7,7 +7,7 @@ import { fundingPolicyFixture } from "../../api/test/funding-authority-fixtures.
 import { createOfflineAdminSource } from "./offline-admin-source.mjs";
 import { installSupplyLockFixture } from "./supply-lock-fixture.mjs";
 
-test("actual price editor preserves every member tier in either row order and still saves v1", async () => {
+test("items editor saves STANDARD-only lines for the explicit draft in any row order, v1 or missing tier (Owner override)", async () => {
   const browser = new Window({url:"http://127.0.0.1:3101/workspace/supply/rules"});
   installSupplyLockFixture(browser);
   Object.assign(globalThis,{window:browser,document:browser.document,HTMLElement:browser.HTMLElement,Element:browser.Element,Node:browser.Node,Event:browser.Event,CustomEvent:browser.CustomEvent,IS_REACT_ACT_ENVIRONMENT:true,getComputedStyle:browser.getComputedStyle.bind(browser),requestAnimationFrame:browser.requestAnimationFrame.bind(browser),cancelAnimationFrame:browser.cancelAnimationFrame.bind(browser)});
@@ -31,17 +31,23 @@ test("actual price editor preserves every member tier in either row order and st
       const writes=[];
       globalThis.fetch=async(input,init={})=>{const url=new URL(String(input),browser.location.href);if(init.method && init.method!=="GET"){writes.push({path:url.pathname,body:JSON.parse(init.body)});fixture.priceVersions[0].revision=String(Number(fixture.priceVersions[0].revision)+1);return Response.json({id:"price"});}return Response.json(url.pathname.endsWith("/supply/games")?{games:[game]}:fixture);};
       const el=document.createElement("div");document.body.append(el);root=createRoot(el);
-      await act(async()=>root.render(createElement(SupplyRulesView,{snapshot:{authenticated:true,adminUserId:"admin-fixture",security:{isBoss:true},permissions:["supply.rules.edit","supply.quote.internal.read"]},onDirtyChange:()=>{}})));
-      const priceSection=[...el.querySelectorAll("section")].find(s=>s.querySelector("h3")?.textContent==="价格版本");
-      assert.ok(priceSection);
+      await act(async()=>root.render(createElement(SupplyRulesView,{snapshot:{authenticated:true,adminUserId:"admin-fixture",security:{isBoss:true},permissions:["supply.rules.edit","supply.quote.internal.read"]},onDirtyChange:()=>{},section:"items",draft:"price"})));
+      const items=el.querySelector('[aria-label="物资价目"]');
+      assert.ok(items);
+      assert.ok(el.querySelector('[aria-label="发布状态"]'),"publish bar replaces the draft picker");
       {
-        const save=[...priceSection.querySelectorAll("button")].find(b=>b.textContent==="保存价格草稿");assert.ok(save);
-        await act(async()=>save.closest("form").dispatchEvent(new browser.Event("submit",{bubbles:true,cancelable:true})));
+        const input=items.querySelector('[aria-label="Rounds 租客单价"]');assert.ok(input);assert.equal(input.value,"10.00");
+        await act(async()=>{Object.getOwnPropertyDescriptor(browser.HTMLInputElement.prototype,"value").set.call(input,"11");input.dispatchEvent(new browser.Event("input",{bubbles:true}));input.dispatchEvent(new browser.Event("change",{bubbles:true}));});
+        const save=[...items.querySelectorAll("button")].find(b=>b.textContent==="保存物资价目");assert.ok(save);assert.equal(save.disabled,false);
+        await act(async()=>save.click());
         assert.equal(writes.length,1);
         assert.match(writes[0].path,/price-drafts\/price$/);
-        assert.equal(writes[0].body.lines.length,readonly ? 8 : 2);
-        assert.equal(writes[0].body.lines.find(l=>l.itemId==="round").buyerUnitAmount,"10");
-        if(readonly) assert.deepEqual(Object.fromEntries(writes[0].body.lines.filter(l=>l.itemId==="round").map(l=>[l.customerTier,l.buyerUnitAmount])),{STANDARD:"10",VIP:"8",SVIP:"7",DISCOUNT_USER:"8"});
+        assert.equal(writes[0].body.expectedRevision,"2");
+        assert.equal(writes[0].body.lines.length,2,"only STANDARD lines are written");
+        assert.ok(writes[0].body.lines.every(l=>l.customerTier==="STANDARD"));
+        assert.equal(writes[0].body.lines.find(l=>l.itemId==="round").buyerUnitAmount,"11");
+        assert.equal(writes[0].body.lines.find(l=>l.itemId==="round").ownerUnitAmount,"4.00","owner price kept (normalised to two decimals)");
+        if(readonly) assert.match(items.textContent,/旧的会员档位价目/,"member-tier drafts are flagged before save");
       }
       await act(async()=>root.unmount());root=null;el.remove();
     }
@@ -72,6 +78,8 @@ test("rules writes and trial window preserve uncertainty across lifecycle change
   const byText = (text, scope = document) => buttons(scope).find(button => button.textContent.trim() === text);
   const click = async (text, scope = document) => { const button = byText(text, scope); assert.ok(button, "button " + text); await act(async () => button.click()); };
   const fill = async (label, value) => act(async () => { const input = document.querySelector(`[aria-label="${label}"]`); assert.ok(input, label); Object.getOwnPropertyDescriptor(browser.HTMLInputElement.prototype, "value").set.call(input, value); input.dispatchEvent(new Event("input", { bubbles: true })); input.dispatchEvent(new Event("change", { bubbles: true })); });
+  // 新流程没有「新建草稿」按钮：第一次保存时自动建草稿。
+  const createDraft = async (scope = document) => { const input = scope.querySelector('[aria-label="普通模式利润点"]'); assert.ok(input, "spread input"); await act(async () => { Object.getOwnPropertyDescriptor(browser.HTMLInputElement.prototype, "value").set.call(input, "9"); input.dispatchEvent(new Event("input", { bubbles: true })); input.dispatchEvent(new Event("change", { bubbles: true })); }); const button = byText("保存基础计价", scope); assert.ok(button, "save base"); await act(async () => button.click()); };
   const wait = async ms => act(async () => { await new Promise(resolve => setTimeout(resolve, ms)); });
   const businessWrites = () => writes.filter(write => !write.path.endsWith("quote-preview"));
   globalThis.fetch = async (input, init = {}) => {
@@ -89,70 +97,65 @@ test("rules writes and trial window preserve uncertainty across lifecycle change
     if (policy === "conflict") return Response.json({ error: { code: "CONFLICT" } }, { status: 409 });
     const receipt = path.endsWith("releases") ? { releaseId: "r2", generation: "2", affectedCount: 4 } : { id: "pnew" };
     if (path.endsWith("releases")) model.release = { ...model.release, id: "r2", generation: "2", priceVersionId: body.priceVersionId, termVersionId: body.termVersionId, agreementVersionId: body.agreementVersionId };
-    else if (path.endsWith("price-drafts")) model.priceVersions.unshift({ ...model.priceVersions[0], id: "pnew", status: "DRAFT", revision: "1", haffRule: null, sealedAt: null });
+    else if (path.endsWith("price-drafts")) model.priceVersions.unshift({ ...model.priceVersions[0], id: "pnew", status: "DRAFT", revision: "1", sealedAt: null }), model.priceLines.push(...model.priceLines.filter(line => line.priceVersionId === "p2").map(line => ({ ...line, priceVersionId: "pnew" })));
     else if (path.endsWith("/seal")) model.priceVersions.find(version => version.id === "pnew").status = "SEALED";
     if (policy === "lost") throw new Error("response lost");
     if (policy === "server-error") return Response.json({ error: { code: "INTERNAL_ERROR" } }, { status: 500 });
     if (policy === "foreign-id") return Response.json({ id: "another-draft" });
     return Response.json(receipt);
   };
-  async function mount({ preserve = false, permissions = snapshot.permissions, fundingPolicy = null } = {}) {
+  async function mount({ preserve = false, permissions = snapshot.permissions, fundingPolicy = null, draftPolicy = null, section = undefined, draft = undefined, onOpenPath = undefined } = {}) {
     if (root) { await act(async () => root.unmount()); el.remove(); }
     if (!preserve) { browser.localStorage.clear(); model = fresh(); writes = []; reads = []; policy = "ok"; quotes = []; recovery = { receipt: "UNRESOLVED" }; readResume = null; }
     if (fundingPolicy) model.priceVersions.find(version => version.id === "p1").fundingPolicy = fundingPolicy;
+    if (draft === "p2" && !preserve) Object.assign(model.priceVersions[0], { status: "DRAFT", sealedAt: null });
+    if (draftPolicy) model.priceVersions.find(version => version.id === "p2").fundingPolicy = draftPolicy;
     el = document.createElement("div"); document.body.append(el); root = createRoot(el);
-    await act(async () => root.render(createElement(View, { snapshot: { ...snapshot, permissions }, onDirtyChange: () => undefined })));
+    await act(async () => root.render(createElement(View, { snapshot: { ...snapshot, permissions }, onDirtyChange: () => undefined, section, draft, onOpenPath })));
     await wait(0);
   }
   const activate = async () => { await click("选择版本并确认生效"); await click("确认生效"); };
   try {
     ({ SupplyRulesView: View } = await vite.ssrLoadModule("/src/views/supply-rules-view.tsx"));
-    await t.test("unified controls and honest editing limitation appear before entering edit", async () => {
-      await mount(); assert.match(el.textContent, /本轮修改不能保存/);
-      assert.equal(el.querySelectorAll('select,details,summary,textarea:not([data-slot]),button:not([data-slot]),input:not([data-slot]):not([type=hidden]):not([aria-hidden])').length, 0);
-      await click("编辑规则（仅预览）"); assert.match(el.textContent, /暂不能保存或提交审批/);
+    await t.test("overview keeps trial and activation and does not offer an unsavable preview editor", async () => {
+      await mount();
+      assert.equal(byText("编辑规则（仅预览）"), undefined);
+      assert.ok(byText("试算一单"));
+      assert.ok(byText("选择版本并确认生效"));
+      assert.doesNotMatch(el.textContent, /本轮修改不能保存|暂不能保存或提交审批/);
+      assert.equal([...el.querySelectorAll('select,details,summary,textarea:not([data-slot]),button:not([data-slot]),input:not([data-slot]):not([type=hidden]):not([aria-hidden])')].filter(n => !n.closest('.rules-markdown')).length, 0, 'only the shared Markdown editor may bring its own controls');
     });
-    await t.test("v1 skin groups stay folded and read-only while the nearby link reaches the v2 editor", async () => {
+    await t.test("v1 skin hides old group amounts and the overview opens the skin section", async () => {
       const fundingPolicy = fundingPolicyFixture("NOT_REQUIRED");
       fundingPolicy.recommendation.parameters.skinWeights.LEGACY_GOLD = { firstCents: "12345", subsequentCents: "6789" };
       const original = structuredClone(fundingPolicy);
-      await mount({ fundingPolicy });
-      const link = el.querySelector('a[href="#skin-deposit-policy-g1"]'), editor = el.querySelector('#skin-deposit-policy-g1');
-      assert.ok(link, "current rules provide a visible v2 configuration link");
-      assert.ok(editor, "the link targets the existing v2 editor");
-      assert.ok(link.compareDocumentPosition(editor) & Node.DOCUMENT_POSITION_FOLLOWING, "the editor keeps its existing order after the rules overview");
-      const trigger = [...el.querySelectorAll('[data-slot="collapsible-trigger"]')].find(node => node.textContent.includes("原版本 v1 皮肤加价（只读）"));
-      assert.ok(trigger); assert.equal(trigger.getAttribute("aria-expanded"), "false", "original skin groups start folded");
-      assert.match(trigger.textContent, /v2 完成配置并生效前，既有版本口径保留/);
-      assert.doesNotMatch(trigger.textContent, /退役/);
-      await click("编辑规则（仅预览）");
-      assert.match(el.textContent, /不含皮肤/, "the non-skin deposit example remains available");
-      await act(async () => trigger.click());
-      const content = trigger.closest('[data-slot="collapsible"]').querySelector('[data-slot="collapsible-content"]');
-      assert.ok(content); assert.match(content.textContent, /123\.45/); assert.match(content.textContent, /67\.89/);
-      assert.equal(content.querySelectorAll('input,select,textarea,[role="spinbutton"]').length, 0, "v1 amounts never become editable");
+      let opened = "";
+      await mount({ fundingPolicy, onOpenPath: (path) => { opened = path; } });
+      await click("配置新版皮肤押金");
+      assert.equal(opened, "/supply/rules?section=skin");
+      assert.equal(el.querySelector('a[href="#skin-deposit-policy-g1"]'), null);
+      assert.ok(el.querySelector("#skin-deposit-policy-g1"));
+      assert.match(el.textContent, /旧写法/);
+      assert.doesNotMatch(el.textContent, /旧版分组|人物金皮|人物红皮|刀皮|武器砖皮|123\.45/);
       assert.equal(el.querySelectorAll('[aria-label*="人物金皮"]').length, 0);
       assert.deepEqual(model.priceVersions.find(version => version.id === "p1").fundingPolicy, original, "read-only disclosure preserves the existing policy amounts");
       assert.equal(businessWrites().length, 0);
     });
-    await t.test("the non-skin deposit example remains available with an effective v2 policy", async () => {
+    await t.test("an effective v2 policy does not show the unsavable preview editor", async () => {
       const { buildSkinDepositPolicy, skinDepositDraft } = await vite.ssrLoadModule("/src/views/supply-rules/skin-deposit-policy.ts");
       const original = fundingPolicyFixture("NOT_REQUIRED"), draft = skinDepositDraft(original);
       draft.policyVersion = "synthetic-v2";
       draft.rules = draft.rules.map(row => ({ ...row, first: "0", subsequent: "0" }));
-      await mount({ fundingPolicy: buildSkinDepositPolicy(original, draft) });
-      await click("编辑规则（仅预览）");
-      assert.match(el.textContent, /实时示例.*不含皮肤/);
-      assert.doesNotMatch(el.textContent, /原版本 v1 皮肤加价/);
+      await mount({ section: "deposit", fundingPolicy: buildSkinDepositPolicy(original, draft) });
+      assert.equal(byText("编辑规则（仅预览）"), undefined);
+      assert.match(el.textContent, /草稿押金上限/);
+      assert.doesNotMatch(el.textContent, /旧版分组/);
       assert.equal(businessWrites().length, 0);
     });
     await t.test("field association reaches the real select trigger through the rules wrapper", async () => {
-      await mount();
-      await click("编辑规则（仅预览）");
-      for (const label of ["游戏", "价目档位"]) {
-        const box = [...el.querySelectorAll('[data-slot="field"]')].find(node => node.querySelector('[data-slot="field-label"]')?.textContent.trim().startsWith(label));
-        assert.ok(box, "field " + label);
-        const trigger = box.querySelector("[aria-labelledby]");
+      await mount({ section: "pricing" });
+      for (const label of []) {
+        const trigger = [...el.querySelectorAll("[aria-labelledby]")].find(node => document.getElementById(node.getAttribute("aria-labelledby"))?.textContent.trim() === label);
         assert.ok(trigger, "labelled trigger for " + label);
         assert.equal(document.getElementById(trigger.getAttribute("aria-labelledby"))?.textContent.trim(), label, "visible label is the accessible name of " + label);
         assert.equal(trigger.getAttribute("aria-label"), null, "no stale aria-label on " + label);
@@ -199,50 +202,59 @@ test("rules writes and trial window preserve uncertainty across lifecycle change
       model = fresh(); model.game = { ...model.game, id: "g2", name: "新游戏" }; model.release.gameId = "g2"; policy = "ok";
       await act(async () => root.render(createElement(View, { snapshot: { ...snapshot, adminUserId: "admin-b", session: { id: "session-b" } }, onDirtyChange: () => undefined }))); await wait(0);
       assert.match(el.textContent, /新游戏/); assert.ok(el.querySelector('[aria-label="当前生效版本"]'));
-      await act(async () => readResume()); await wait(0); assert.match(el.textContent, /新游戏/); assert.match(el.querySelector('[aria-label="当前生效版本"]').textContent, /第 1 版组合/);
+      await act(async () => readResume()); await wait(0); assert.match(el.textContent, /新游戏/); assert.match(el.querySelector('[aria-label="当前生效版本"]').textContent, /已生效/);
       assert.equal(businessWrites().length, 1); assert.ok(browser.localStorage.getItem("zzsh.admin.rules.pending.v1:admin-a"), "old accepted intent stays under the original actor");
     });
     await t.test("advanced creation response loss and refresh cannot recreate a draft", async () => {
-      await mount(); policy = "lost"; await click("新建价格草稿"); assert.match(el.textContent, /请求可能已执行/); const write = businessWrites()[0]; assert.match(write.path, /price-drafts$/);
-      await mount({ preserve: true }); assert.equal(byText("新建价格草稿").disabled, true); await click("新建价格草稿"); assert.equal(businessWrites().length, 1);
+      await mount({ section: "pricing" }); policy = "lost"; await createDraft(); assert.match(el.textContent, /请求可能已执行/); const write = businessWrites()[0]; assert.match(write.path, /price-drafts$/);
+      await mount({ preserve: true, section: "pricing" }); await createDraft().catch(() => undefined); assert.equal(businessWrites().length, 1);
       await click("核对原写入回执"); const recoveryRead = reads.find(read => read.path.includes("operation-result")); assert.equal(new URLSearchParams(recoveryRead.search).get("operation"), "supply.rules.price_draft.create"); assert.equal(new URLSearchParams(recoveryRead.search).has("resourceId"), false); assert.equal(recoveryRead.headers["idempotency-key"], write.key);
     });
     await t.test("seal response cannot settle another draft's ID", async () => {
-      await mount(); await click("新建价格草稿"); policy = "foreign-id"; await click("封存版本"); assert.match(el.textContent, /写入回执不完整/); const record = JSON.parse(browser.localStorage.getItem("zzsh.admin.rules.pending.v1:admin-a")); assert.equal(record.resourceId, "pnew"); assert.equal(record.operation, "supply.rules.price_draft.seal"); assert.equal(businessWrites().length, 2);
+      const { buildSkinDepositPolicy, skinDepositDraft } = await vite.ssrLoadModule("/src/views/supply-rules/skin-deposit-policy.ts"); const base = fundingPolicyFixture("NOT_REQUIRED"), sd = skinDepositDraft(base); sd.policyVersion = "synthetic-v2"; sd.rules = sd.rules.map(row => ({ ...row, first: "0", subsequent: "0" }));
+      await mount({ section: "pricing", draft: "p2", draftPolicy: buildSkinDepositPolicy(base, sd) }); policy = "foreign-id"; await act(async () => buttons().find(b => b.textContent.startsWith("待发布修改")).click()); await click("提交发布"); await click("确认提交"); assert.match(el.textContent, /写入回执不完整|请求可能已执行/); const record = JSON.parse(browser.localStorage.getItem("zzsh.admin.rules.pending.v1:admin-a")); assert.equal(record.resourceId, "p2", "the sealed draft ID is kept, not the foreign one"); assert.equal(record.operation, "supply.rules.price_draft.seal"); assert.equal(businessWrites().length, 1);
     });
     await t.test("tampered body cannot start a receipt query with the old digest", async () => {
-      await mount(); policy = "lost"; await click("新建价格草稿"); const key = "zzsh.admin.rules.pending.v1:admin-a", record = JSON.parse(browser.localStorage.getItem(key)); record.body.mode = "PERCENT"; browser.localStorage.setItem(key, JSON.stringify(record)); await mount({ preserve: true }); await click("核对原写入回执"); assert.match(el.textContent, /本地原请求与指纹不一致/); assert.equal(reads.filter(read => read.path.includes("operation-result")).length, 0); assert.equal(businessWrites().length, 1);
+      await mount({ section: "pricing" }); policy = "lost"; await createDraft(); const key = "zzsh.admin.rules.pending.v1:admin-a", record = JSON.parse(browser.localStorage.getItem(key)); record.body.mode = "PERCENT"; browser.localStorage.setItem(key, JSON.stringify(record)); await mount({ preserve: true, section: "pricing" }); await click("核对原写入回执"); assert.match(el.textContent, /本地原请求与指纹不一致/); assert.equal(reads.filter(read => read.path.includes("operation-result")).length, 0); assert.equal(businessWrites().length, 1);
     });
     await t.test("409 preserves inputs and does not auto-adopt a revision", async () => {
       await mount(); policy = "conflict"; await activate(); assert.match(document.body.textContent, /版本冲突|版本已变化/); assert.equal(businessWrites()[0].body.expectedGeneration, "1"); assert.equal(businessWrites().length, 1); assert.equal(browser.localStorage.length, 0);
     });
     await t.test("storage failure blocks a command before POST", async () => {
-      await mount(); const original = browser.localStorage, descriptor = Object.getOwnPropertyDescriptor(browser, "localStorage"); Object.defineProperty(browser, "localStorage", { configurable: true, value: { getItem: original.getItem.bind(original), removeItem: original.removeItem.bind(original), setItem: () => { throw new Error("quota"); } } });
-      try { await click("新建价格草稿"); assert.equal(businessWrites().length, 0); assert.match(el.textContent, /未发送写入命令/); } finally { if (descriptor) Object.defineProperty(browser, "localStorage", descriptor); else delete browser.localStorage; }
+      await mount({ section: "pricing" }); const original = browser.localStorage, descriptor = Object.getOwnPropertyDescriptor(browser, "localStorage"); Object.defineProperty(browser, "localStorage", { configurable: true, value: { getItem: original.getItem.bind(original), removeItem: original.removeItem.bind(original), setItem: () => { throw new Error("quota"); } } });
+      try { await createDraft(); assert.equal(businessWrites().length, 0); assert.match(el.textContent, /未发送写入命令/); } finally { if (descriptor) Object.defineProperty(browser, "localStorage", descriptor); else delete browser.localStorage; }
     });
     await t.test("a busy cross-window lock sends no command and creates no UNKNOWN intent", async () => {
-      await mount(); const lockName = "zzsh:supply-write:zzsh.admin.rules.pending.v1:admin-a"; held.add(lockName);
-      try { await click("新建价格草稿"); assert.equal(businessWrites().length, 0); assert.equal(browser.localStorage.length, 0); assert.match(el.textContent, /另一窗口正在处理.*本次未发送写入命令/); assert.ok(!el.textContent.includes("原规则写入结果尚未核清")); } finally { held.delete(lockName); }
+      await mount({ section: "pricing" }); const lockName = "zzsh:supply-write:zzsh.admin.rules.pending.v1:admin-a"; held.add(lockName);
+      try { await createDraft(); assert.equal(businessWrites().length, 0); assert.equal(browser.localStorage.length, 0); assert.match(el.textContent, /另一窗口正在处理.*本次未发送写入命令/); assert.ok(!el.textContent.includes("原规则写入结果尚未核清")); } finally { held.delete(lockName); }
     });
     await t.test("a missing LockManager fails closed before POST", async () => {
-      await mount(); Object.defineProperty(browser.navigator, "locks", { configurable: true, value: undefined });
-      try { await click("新建价格草稿"); assert.equal(businessWrites().length, 0); assert.equal(browser.localStorage.length, 0); assert.match(el.textContent, /跨窗口写入锁.*本次未发送写入命令/); } finally { installSupplyLockFixture(browser, held); }
+      await mount({ section: "pricing" }); Object.defineProperty(browser.navigator, "locks", { configurable: true, value: undefined });
+      try { await createDraft(); assert.equal(businessWrites().length, 0); assert.equal(browser.localStorage.length, 0); assert.match(el.textContent, /跨窗口写入锁.*本次未发送写入命令/); } finally { installSupplyLockFixture(browser, held); }
     });
     await t.test("the lock also covers receipt lookup and keeps the original key", async () => {
-      await mount(); policy = "lost"; await click("新建价格草稿"); const original = browser.localStorage.getItem("zzsh.admin.rules.pending.v1:admin-a"), lockName = "zzsh:supply-write:zzsh.admin.rules.pending.v1:admin-a"; held.add(lockName);
+      await mount({ section: "pricing" }); policy = "lost"; await createDraft(); const original = browser.localStorage.getItem("zzsh.admin.rules.pending.v1:admin-a"), lockName = "zzsh:supply-write:zzsh.admin.rules.pending.v1:admin-a"; held.add(lockName);
       try { await click("核对原写入回执"); assert.equal(reads.filter(read => read.path.includes("operation-result")).length, 0); assert.equal(browser.localStorage.getItem("zzsh.admin.rules.pending.v1:admin-a"), original); assert.match(el.textContent, /本次未发送恢复查询/); } finally { held.delete(lockName); }
     });
     await t.test("two same-admin instances with a late digest issue exactly one POST", async () => {
-      await mount(); const second = document.createElement("div"); document.body.append(second); const secondRoot = createRoot(second);
-      await act(async () => secondRoot.render(createElement(View, { snapshot, onDirtyChange: () => undefined }))); await wait(0);
+      await mount({ section: "pricing" }); const second = document.createElement("div"); document.body.append(second); const secondRoot = createRoot(second);
+      await act(async () => secondRoot.render(createElement(View, { snapshot, onDirtyChange: () => undefined, section: "pricing" }))); await wait(0);
       const descriptor = Object.getOwnPropertyDescriptor(crypto.subtle, "digest"), originalDigest = crypto.subtle.digest;
       let release, entered = false; const gate = new Promise(resolve => { release = resolve; });
       Object.defineProperty(crypto.subtle, "digest", { configurable: true, value: async (...args) => { if (!entered) { entered = true; await gate; } return originalDigest.apply(crypto.subtle, args); } });
       try {
-        await click("新建价格草稿", el); assert.equal(entered, true); assert.equal(businessWrites().length, 0);
-        await click("新建价格草稿", second); assert.match(second.textContent, /另一窗口正在处理/); assert.equal(businessWrites().length, 0);
-        await act(async () => release()); await wait(0); assert.equal(businessWrites().length, 1);
+        await createDraft(el); assert.equal(entered, true); assert.equal(businessWrites().length, 0);
+        await createDraft(second); assert.match(second.textContent, /另一窗口正在处理/); assert.equal(businessWrites().length, 0);
+        await act(async () => release()); await wait(0); assert.equal(businessWrites().length, 2, "one create + one save, nothing from the second window");
       } finally { release(); if (descriptor) Object.defineProperty(crypto.subtle, "digest", descriptor); else delete crypto.subtle.digest; await act(async () => secondRoot.unmount()); second.remove(); }
+    });
+    await t.test("draft save 409 keeps input, offers reread and never retries", async () => {
+      await mount({ section: "items", draft: "p2" }); policy = "conflict"; await fill("物品 租客单价", "9"); await click("保存物资价目");
+      assert.match(el.textContent, /版本已变化（409）/); assert.equal(document.querySelector('[aria-label="物品 租客单价"]').value, "9"); assert.equal(businessWrites().length, 1); assert.match(businessWrites()[0].path, /price-drafts\/p2$/);
+      await wait(50); assert.equal(businessWrites().length, 1, "no auto-retry");
+    });
+    await t.test("sealed version is read-only and drafts stay isolated", async () => {
+      await mount({ section: "items" }); await fill("物品 租客单价", "7"); await click("保存物资价目"); assert.match(businessWrites()[0].path, /price-drafts$/, "sealed versions are never edited; saving creates a new draft"); assert.ok(businessWrites().every(w => !/p1|p2/.test(w.path))); assert.equal(model.priceVersions.find(v => v.id === "p1").status, "SEALED");
     });
     await t.test("cleared account conditions invalidate an already running quote", async () => {
       await mount(); policy = "quote-delay"; await click("试算一单"); await wait(450); assert.equal(quotes.length, 1);
@@ -254,8 +266,16 @@ test("rules writes and trial window preserve uncertainty across lifecycle change
       await act(async () => quotes[1]("777.77")); await act(async () => quotes[0]("999.99")); await wait(0); assert.match(document.querySelector('[aria-label="当前生效规则"]').textContent, /777\.77/); assert.ok(!document.querySelector('[aria-label="当前生效规则"]').textContent.includes("999.99"));
       await fill("物品（件）", "-1"); assert.match(document.querySelector('[aria-label="当前生效规则"]').textContent, /待计算/); assert.ok(!document.querySelector('[aria-label="可调整参数"]').textContent.includes("¥"));
     });
+    await t.test("trial compares live and draft via two server quotes and never writes a draft", async () => {
+      model = fresh(); await mount({ draft: "p2" }); model.priceLines.find(l => l.priceVersionId === "p2" && l.itemId === "piece").buyerUnitAmount = "3"; await mount({ draft: "p2", preserve: true });
+      await click("试算一单"); await wait(450);
+      const q = writes.filter(w => w.path.endsWith("quote-preview")); assert.deepEqual(q.map(w => w.body.priceVersionId).sort(), ["p1", "p2"]); assert.equal(q.find(w => w.body.priceVersionId === "p2").body.expectedRevision, "3");
+      const pane = document.querySelector('[aria-label="试算一单"]'); for (const h of ["线上", "草稿", "差额", "保险箱", "体力等级", "负重等级", "潜水等级", "每日消耗档"]) assert.match(pane.textContent, new RegExp(h));
+      assert.match(document.querySelector('[aria-label="可调整参数"]').textContent, /238\.10/); assert.equal(businessWrites().length, 0);
+      await click("临时调整（估算）"); await fill("比例差（普通/自定义）", "9"); assert.match(pane.textContent, /估算/);
+    });
     await t.test("empty adjustment cannot produce a numeric result", async () => {
-      await mount(); await click("试算一单"); await click("规则参数（只调整右侧）"); await fill("比例差（普通/自定义）", ""); const adjusted = document.querySelector('[aria-label="可调整参数"]'); assert.match(adjusted.textContent, /缺失|非法/); assert.ok(!adjusted.textContent.includes("¥"));
+      await mount(); await click("试算一单"); await click("临时调整（估算）"); await fill("比例差（普通/自定义）", ""); const adjusted = document.querySelector('[aria-label="可调整参数"]'); assert.match(adjusted.textContent, /缺失|非法/); assert.ok(!adjusted.textContent.includes("¥"));
     });
     await t.test("drag and resize keep controls reachable; Escape returns focus", async () => {
       await mount(); const trigger = byText("试算一单"); trigger.focus(); await click("试算一单"); const pane = document.querySelector('[aria-label="试算一单"]'), header = pane.firstElementChild;

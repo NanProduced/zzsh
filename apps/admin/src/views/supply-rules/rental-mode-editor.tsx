@@ -6,6 +6,7 @@ import { Checkbox } from "../../components/ui/checkbox";
 import { SupplySelect } from "../../components/supply/supply-select";
 import { draftCommand, type useRulesWrite } from "./rules-write";
 import { DraftFastTrial } from "./rental-mode-trial-panel";
+import { DraftLine, type EnsureDraft } from "./step0-editors";
 import { boundText, buildRentalModeRule, legacyNonZero, rentalModeBase, rentalModeDraft, rentalModeIssues, rentalModeSaveBody, withFastDefaults, type BoundDraft, type RentalModeDraft } from "./rental-modes";
 
 
@@ -13,9 +14,8 @@ import { boundText, buildRentalModeRule, legacyNonZero, rentalModeBase, rentalMo
  * 租赁模式配置：自定义 / 极速的启停、利润点与号主比例范围。
  * 只写价格草稿（新建→保存→封存），沿用 rules-write 的幂等键与原请求恢复；生效仍由 Boss 在“选择版本并确认生效”中完成。
  */
-export function RentalModeEditor({ rules, command, canEdit, onDirtyChange }: { rules: RulesResponse; command: ReturnType<typeof useRulesWrite>; canEdit: boolean; onDirtyChange: (dirty: boolean) => void }) {
-  const drafts = rules.priceVersions.filter((v) => v.status === "DRAFT");
-  const [id, setId] = useState(drafts[0]?.id ?? "");
+export function RentalModeEditor({ rules, command, canEdit, onDirtyChange, draftId, ensureDraft }: { rules: RulesResponse; command: ReturnType<typeof useRulesWrite>; canEdit: boolean; onDirtyChange: (dirty: boolean) => void; draftId: string; ensureDraft: EnsureDraft }) {
+  const id = draftId;
   const [pendingDefaults, setPendingDefaults] = useState(false);
   const selected = rules.priceVersions.find((v) => v.id === id);
   const base = useMemo(() => rentalModeBase(rules, id), [rules, id]);
@@ -27,7 +27,7 @@ export function RentalModeEditor({ rules, command, canEdit, onDirtyChange }: { r
   const dirty = JSON.stringify(draft) !== baseline;
   const issues = draft ? rentalModeIssues(draft) : {};
   const hasIssues = Object.keys(issues).length > 0;
-  const locked = !canEdit || command.locked || selected?.status !== "DRAFT";
+  const locked = !canEdit || command.locked || (selected ? selected.status !== "DRAFT" : false);
   useEffect(() => { onDirtyChange(dirty); return () => onDirtyChange(false); }, [dirty, onDirtyChange]);
   useEffect(() => {
     if (dirty || command.locked) return;
@@ -35,28 +35,23 @@ export function RentalModeEditor({ rules, command, canEdit, onDirtyChange }: { r
     setDraft(next); setBaseline(JSON.stringify(initial));
   }, [initial, dirty, command.locked, pendingDefaults]);
 
-  const create = async () => {
-    if (!base || dirty || !canEdit) return;
-    const result = await command.write(draftCommand(rules.game.id, "price", "create", { gameId: rules.game.id, mode: base.source.mode }));
-    if (!result) return;
-    // 默认值只在用户明确新建极速草稿后填入表单，仍需点“保存”才写入草稿。
-    setPendingDefaults(true); setId(result.receipt.id!);
-    setNotice("已创建空价格草稿，表单已填入极速默认值（利润点 12、下限 C+6、不设上限）。核对后点“保存模式草稿”。");
+  const fillFastDefaults = () => {
+    if (!draft || locked) return;
+    // 默认值只填入表单，仍需点“保存”才写入草稿。
+    setDraft(withFastDefaults(draft));
+    setNotice("表单已填入极速默认值（利润点 12、下限 C+6、不设上限）。隐藏的旧档位增量保持原值不变。核对后点“保存模式草稿”。");
   };
   const save = async () => {
-    if (!selected || !base || !draft || locked || hasIssues) return;
+    if (!base || !draft || locked || hasIssues) return;
     setError(undefined); setNotice(undefined);
     try {
       const rule = buildRentalModeRule(base.haff, draft);
-      const result = await command.write(draftCommand(rules.game.id, "price", "update", rentalModeSaveBody(rules, selected, base.source, rule), selected.id));
+      const t = await ensureDraft(); if (!t) return;
+      const result = await command.write(draftCommand(t.rules.game.id, "price", "update", rentalModeSaveBody(t.rules, t.draft, base.source, rule), t.draft.id));
       if (!result) return;
       setPendingDefaults(false); setBaseline(JSON.stringify(draft));
-      setNotice("模式草稿已保存。封存后由 Boss 选择版本并确认生效；生效前现有规则不变。");
+      setNotice("已保存草稿。去「待发布修改」提交。");
     } catch (failure) { setError((failure as Error).message); }
-  };
-  const seal = async () => {
-    if (!selected || dirty || hasIssues || !canEdit || selected.status !== "DRAFT") return;
-    await command.write(draftCommand(rules.game.id, "price", "seal", { expectedRevision: selected.revision }, selected.id));
   };
 
   const set = (fn: (d: RentalModeDraft) => RentalModeDraft) => setDraft((prev) => (prev ? fn(prev) : prev));
@@ -64,8 +59,8 @@ export function RentalModeEditor({ rules, command, canEdit, onDirtyChange }: { r
   const boundInput = (name: "custom" | "fast", key: "min" | "max", value: BoundDraft, label: string) => (
     <div className="min-w-0 space-y-1 text-xs"><span className="text-muted-foreground">{label}</span>
       <div className="flex gap-2">
-        <SupplySelect label={`${label}基准`} className="w-28" value={value.base} disabled={locked} options={[{ value: "C", label: "基础比例 C ±" }, { value: "ABSOLUTE", label: "固定比例" }]} onValueChange={(v) => set((d) => ({ ...d, [name]: { ...d[name], [key]: { ...d[name][key], base: v as BoundDraft["base"] } } }))} />
-        <Input aria-label={label} inputMode="decimal" value={value.value} disabled={locked} placeholder={key === "max" ? "留空＝不设上限" : "必填"} aria-invalid={Boolean(issues[`${name}.${key}`])} className="min-w-24 tabular-nums"
+        <SupplySelect label={`${label}基准`} className="w-36 shrink-0" value={value.base} disabled={locked} options={[{ value: "C", label: "基础比例 C ±" }, { value: "ABSOLUTE", label: "固定比例" }]} onValueChange={(v) => set((d) => ({ ...d, [name]: { ...d[name], [key]: { ...d[name][key], base: v as BoundDraft["base"] } } }))} />
+        <Input aria-label={label} inputMode="decimal" value={value.value} disabled={locked} placeholder={key === "max" ? "不设上限" : "必填"} aria-invalid={Boolean(issues[`${name}.${key}`])} className="min-w-28 tabular-nums"
           onChange={(e) => set((d) => ({ ...d, [name]: { ...d[name], [key]: { ...d[name][key], value: e.target.value } } }))} />
       </div>{err(`${name}.${key}`)}
     </div>
@@ -74,18 +69,17 @@ export function RentalModeEditor({ rules, command, canEdit, onDirtyChange }: { r
   const current = rules.priceVersions.find((v) => v.id === rules.release?.priceVersionId);
   return <section className="section-panel space-y-4" aria-label="租赁模式配置">
     <div className="flex flex-wrap items-start justify-between gap-3">
-      <div><h2 className="text-base font-semibold">租赁模式配置</h2>
-        <p className="mt-1 max-w-3xl text-sm text-muted-foreground">比例＝1 元换多少万哈夫币。号主比例 B 须在范围内；租客比例＝B − 利润点。利润点是比例差，不是百分比或固定金额。会员优惠按统一总价折扣另算一次，不在此叠加。</p></div>
-      {canEdit ? <Button type="button" variant="outline" disabled={command.locked || dirty || !base} onClick={() => void create()}>新建极速草稿</Button> : null}
+      <div><h2 className="text-base font-semibold">租赁模式</h2>
+        <p className="mt-1 max-w-3xl text-sm text-muted-foreground">租客比例＝号主比例 − 利润点。比例＝1 元换多少万哈夫币。</p></div>
+      {canEdit ? <Button type="button" variant="outline" disabled={locked || !draft} onClick={fillFastDefaults}>填入极速默认值</Button> : null}
     </div>
     {!base || !draft ? <p role="status" className="text-sm text-muted-foreground">当前生效版本不是可编辑的兼容比例规则，暂不能配置模式；请核对原始配置。</p> : <>
       <div className="grid gap-3 sm:grid-cols-2">
-        <label className="min-w-0 space-y-1 text-xs"><span className="text-muted-foreground">价格草稿</span>
-          <SupplySelect label="模式价格草稿" value={id} disabled={command.locked || dirty} options={[{ value: "", label: drafts.length ? "请选择草稿" : "请先新建草稿" }, ...drafts.map((v) => ({ value: v.id, label: `${v.id} · 修订 ${v.revision}` }))]} onValueChange={(v) => { setPendingDefaults(false); setId(v); setNotice(undefined); setError(undefined); }} /></label>
-        <div className="text-xs text-muted-foreground"><p>参数来源：{base.source.id}{base.source.id === current?.id ? "（当前生效）" : ""}</p>
+        <DraftLine selected={selected} locked={command.locked} />
+        <div className="text-xs text-muted-foreground"><p>参数来源：{base.source.id === current?.id ? "当前生效版本" : `版本 #${base.source.id.slice(-6)}`}</p>
           <p>当前生效：自定义 {current && rentalModeBase(rules, "")?.haff.compatibility.modes.custom.enabled ? "开" : "关"} · 极速 {rentalModeBase(rules, "")?.haff.compatibility.modes.fast.enabled ? `开（下限 ${boundText(rentalModeBase(rules, "")?.haff.compatibility.modes.fast.min)}，上限 ${boundText(rentalModeBase(rules, "")?.haff.compatibility.modes.fast.max)}）` : "关"}</p></div>
       </div>
-      {!selected ? <p role="status" className="text-xs text-muted-foreground">请选择或新建价格草稿后编辑；未选择草稿时仅显示当前生效值，不能保存。</p> : null}
+      {!selected ? <p role="status" className="text-xs text-muted-foreground">请在顶部草稿栏选择或新建价格草稿后编辑；未选择草稿时仅显示当前生效值，不能保存。</p> : null}
       <div className="grid gap-4 lg:grid-cols-2">
         <fieldset className="space-y-3 rounded-lg border border-border p-3"><legend className="px-1 text-sm font-semibold">自定义模式</legend>
           <label className="flex items-center gap-2 text-sm"><Checkbox aria-label="启用自定义模式" checked={draft.custom.enabled} disabled={locked} onCheckedChange={(v) => set((d) => ({ ...d, custom: { ...d.custom, enabled: v === true } }))} />启用</label>
@@ -99,7 +93,7 @@ export function RentalModeEditor({ rules, command, canEdit, onDirtyChange }: { r
               {boundInput("fast", "min", draft.fast.min, "号主比例下限")}
               {boundInput("fast", "max", draft.fast.max, "号主比例上限（可选）")}
             </div>
-            {legacyNonZero(draft).length ? <p role="note" className="text-xs text-muted-foreground">本草稿沿用原有旧档位兼容增量（只读、不在此编辑）：{legacyNonZero(draft).join("，")}。新会员按统一总价折扣，不叠加旧档位。</p> : <p className="text-xs text-muted-foreground">旧 VIP/SVIP 档位增量为 0（只读）；新会员按统一总价折扣另算一次。</p>}
+            {legacyNonZero(draft).length ? <p role="note" className="text-xs text-muted-foreground">旧会员档位加减保持原值（不在这里改）：{legacyNonZero(draft).join("，")}</p> : null}
           </> : <p className="text-xs text-muted-foreground">已关闭；号主不能选择极速上架。</p>}
         </fieldset>
       </div>
@@ -108,7 +102,6 @@ export function RentalModeEditor({ rules, command, canEdit, onDirtyChange }: { r
       {notice ? <p role="status" className="rounded-md bg-muted px-3 py-2 text-xs">{notice}</p> : null}
       {canEdit ? <div className="flex flex-wrap gap-2">
         <Button type="button" disabled={locked || !dirty || hasIssues} onClick={() => void save()}>保存模式草稿</Button>
-        <Button type="button" variant="outline" disabled={locked || dirty || hasIssues} onClick={() => void seal()}>封存草稿</Button>
       </div> : <p className="text-xs text-muted-foreground">当前账号只有查看权限。</p>}
     </>}
   </section>;

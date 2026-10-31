@@ -172,7 +172,7 @@ export function WorkspacePageContent({
     return <SupplyGunsmithView key={tab.id} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
   }
   if (tab.kind === "rules") {
-    return <SupplyRulesView key={tab.id} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
+    return <SupplyRulesView key={tab.id} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} section={tab.query.section} draft={tab.query.draft} onOpenPath={onOpenPath} />;
   }
   if (tab.kind === "listing-review") return <SupplyListingReviewView key={tab.id} snapshot={snapshot} initialQuery={tab.query} onOpenPath={onOpenPath} onQueryChange={onQueryChange} refreshNonce={refreshNonce} onDirtyChange={onDirtyChange}/>;
   if (tab.kind === "media-review") {

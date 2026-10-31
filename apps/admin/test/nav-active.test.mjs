@@ -47,7 +47,9 @@ test("每条目标路由只有唯一活动入口，不再按前缀点亮父级",
     ["/supply/media", "", ["/supply/media"]],
     ["/supply/catalog", "", ["/supply/catalog"]],
     ["/supply/gunsmith", "", ["/supply/gunsmith"]],
-    ["/supply/rules", "", ["/supply/rules"]],
+    ["/supply/rules", "?section=overview", ["/supply/rules?section=overview"]],
+    ["/supply/rules", "?section=pricing", ["/supply/rules?section=pricing"]],
+    ["/supply/rules", "?section=skin", ["/supply/rules?section=skin"]],
     ["/approvals", "", ["/approvals"]],
     ["/approvals/req_1", "", ["/approvals"]],
     ["/audit", "", ["/audit"]],
@@ -79,13 +81,13 @@ test("带 query 的入口只在对应分区点亮，旧入口与分区入口互�
 test("侧栏菜单保留全部既有入口与分组命名一致性", () => {
   const items = workspaceMenuItems(boss);
   const titles = items.filter((item) => item.isTitle).map((item) => item.label);
-  assert.deepEqual(titles, ["工作区", "客户服务", "会员运营", "系统与安全", "供给与目录", "运营内容", "资金", "交易", "用户与会员", "审批与审计", "个人"]);
+  assert.deepEqual(titles, ["工作区", "客户服务", "会员运营", "系统与安全", "供给与目录", "供给与规则", "三角洲行动", "运营内容", "资金", "交易", "用户与会员", "审批与审计", "个人"]);
   for (const title of titles) {
     assert.equal(items.filter((item) => item.path).some((item) => item.label === title), false, `组名不得与组内入口同名：${title}`);
   }
   assert.equal(items.find((item) => item.path === "/approvals").label, "审批中心", "侧栏与页内审批命名一致");
   const paths = menuPaths(boss);
-  assert.equal(paths.length, 19, "真实 Boss 权限下 19 个入口（账号恢复页已退役）");
+  assert.equal(paths.length, 25, "真实 Boss 权限下 25 个入口（账号恢复页已退役；规则与价目拆为 7 个分区入口）");
   assert.equal(paths.includes("/users/restore"), false, "账号恢复入口已移除");
   for (const path of ["/distribution-policy", "/supply/media", "/finance/period", "/settings?section=security"]) {
     assert.ok(paths.includes(path), `保留既有入口 ${path}`);
@@ -109,6 +111,12 @@ test("侧栏入口名、页面标题与工作区标签名一致（同一对象�
       // 设置壳下的安全分区：壳名「设置」，页内分区名「登录与安全」由 settings-page 的 SECTIONS 给出。
       assert.equal(tabFromLocation(pathname, `?${search}`).title, "设置", "/settings?section=security 使用设置壳标签");
       assert.ok(["账号安全", "登录与安全"].includes(item.label), "侧栏安全入口名保持在既有命名集合内");
+      continue;
+    }
+    if (pathname === "/supply/rules") {
+      // 规则与价目壳下的分区：壳名「规则与价目」，分区名由侧栏入口给出。
+      assert.equal(titleForPath(pathname), "规则与价目");
+      assert.equal(tabFromLocation(pathname, `?${search}`).title, "规则与价目", `${item.path} 使用规则与价目壳标签`);
       continue;
     }
     assert.equal(titleForPath(pathname), item.label, `${item.path} 的页面标题应与侧栏入口名一致`);

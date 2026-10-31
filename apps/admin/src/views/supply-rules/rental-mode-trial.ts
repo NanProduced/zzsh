@@ -9,7 +9,7 @@ import { asHaffV2 } from "./rules-model.ts";
 export type DraftTrialInput = { ownerRatioB: string; haffM: string; box: string; vit: string; bear: string; term: string };
 export type DraftTrialBinding = { priceVersionId: string; priceVersionRevision: string; rentalMode: string | null; ownerRatioB: string | null; inventory: { itemId: string; quantity: string }[] };
 
-const B_RE = /^(0|[1-9]\d*)(\.\d{1,8})?$/;
+const B_RE = /^(0|[1-9]\d*)(\.\d{1,2})?$/;
 
 export function draftTrialRequest(rules: RulesResponse, version: PriceVersionRecord | undefined, input: DraftTrialInput):
   { ok: true; body: Record<string, unknown>; signature: string; expected: DraftTrialBinding } | { ok: false; errors: Record<string, string> } {
@@ -19,7 +19,7 @@ export function draftTrialRequest(rules: RulesResponse, version: PriceVersionRec
   else if (!haff) errors.version = "草稿尚未保存完整的兼容比例规则，先保存模式草稿";
   else if (!haff.compatibility.modes.fast.enabled) errors.version = "所选草稿未启用极速模式";
   if (!rules.release) errors.version = "当前没有生效版本，无法确定消耗档版本";
-  if (!B_RE.test(input.ownerRatioB.trim()) || Number(input.ownerRatioB) <= 0) errors.ownerRatioB = "号主比例 B 须为正数，最多八位小数";
+  if (!B_RE.test(input.ownerRatioB.trim()) || Number(input.ownerRatioB) <= 0) errors.ownerRatioB = "号主比例 B 须为正数，最多两位小数";
   let raw = "";
   if (!/^\d+(\.\d{1,6})?$/.test(input.haffM)) errors.haffM = "填入大于 0 的 M 数，最多六位小数";
   else { const [w, f = ""] = input.haffM.split("."); raw = BigInt(`${w}${f.padEnd(6, "0")}`).toString(); if (raw === "0" || raw.length > 24) errors.haffM = "哈夫币数量须大于 0"; }

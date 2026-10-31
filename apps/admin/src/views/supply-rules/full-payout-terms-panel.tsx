@@ -1,15 +1,19 @@
+import { docStage, DocStatusRow, MutedDetails, versionTime } from "./publish-flow";
 import { useEffect, useState } from "react";
 
 import { adminRequest, friendlyError, type FullPayoutTermsRecord } from "../../api";
 import { Button } from "../../components/ui/button";
 import { Field } from "../../components/ui/field";
 import { Input } from "../../components/ui/input";
-import { Textarea } from "../../components/ui/textarea";
+import { RulesMarkdownField } from "./rules-markdown-field";
 import { SupplySelect } from "../../components/supply/supply-select";
 
 type TermsDetail = FullPayoutTermsRecord & { body: string };
 
-export function FullPayoutTermsPanel({ gameId, versions, canEdit, onReload }: {
+export function FullPayoutTermsPanel({ gameId, versions, canEdit, isBoss = false, live = null, onReload }: {
+  isBoss?: boolean;
+  /** 线上价格版本引用的条款编号与版本；条款随价格版本生效。 */
+  live?: { ref: string; version: string } | null;
   gameId: string;
   versions: FullPayoutTermsRecord[];
   canEdit: boolean;
@@ -51,7 +55,7 @@ export function FullPayoutTermsPanel({ gameId, versions, canEdit, onReload }: {
       const created = await adminRequest<TermsDetail>("/supply/full-payout-terms-drafts", {
         gameId, policyRef, policyVersion, disclosureVersion: newDisclosure, title: newTitle, body: newBody,
       }, "POST");
-      setMessage("包赔条款草稿已创建。");
+      setMessage("已新建草稿。");
       setCreating(false); setNewTitle(""); setNewBody(""); setPolicyRef(""); setPolicyVersion(""); setNewDisclosure("");
       await onReload(); setSelectedId(created.id);
     } catch (failure) { setError(friendlyError(failure)); }
@@ -65,7 +69,7 @@ export function FullPayoutTermsPanel({ gameId, versions, canEdit, onReload }: {
       await adminRequest(`/supply/full-payout-terms-drafts/${encodeURIComponent(detail.id)}`, {
         expectedRevision: revision, title, body, disclosureVersion,
       }, "PUT");
-      setMessage("包赔条款草稿已保存。");
+      setMessage("已保存草稿。");
       await onReload();
     } catch (failure) { setError(friendlyError(failure)); }
     finally { setBusy(null); }
@@ -76,7 +80,7 @@ export function FullPayoutTermsPanel({ gameId, versions, canEdit, onReload }: {
     setBusy("seal"); setError(undefined); setMessage(undefined);
     try {
       await adminRequest(`/supply/full-payout-terms-drafts/${encodeURIComponent(detail.id)}/seal`, { expectedRevision: revision }, "POST");
-      setMessage("包赔条款已封存；已有价格版本引用不受影响，封存正文不可原地修改。");
+      setMessage("已提交。下次价格发布引用它后生效。");
       await onReload();
     } catch (failure) { setError(friendlyError(failure)); }
     finally { setBusy(null); }
@@ -84,31 +88,32 @@ export function FullPayoutTermsPanel({ gameId, versions, canEdit, onReload }: {
 
   return <section className="section-panel">
     <div className="flex flex-wrap items-center justify-between gap-3">
-      <div><h3 className="text-sm font-semibold">全额包赔条款</h3><p className="mt-1 text-xs text-muted-foreground">独立不可变版本；价格版本通过 policyRef / policyVersion / disclosureVersion 引用。费率与承担方沿用已确认规则，不在本页另建费率真值。</p></div>
+      <div><h3 className="text-sm font-semibold">全额包赔条款</h3><p className="mt-1 max-w-3xl text-xs text-muted-foreground">号主选「全额包赔」时，租客下单前会看到这份条款。提交后不能改，要改就新建草稿。</p></div>
       <Button type="button" size="sm" disabled={!canEdit || !gameId || busy !== null} onClick={() => setCreating(value => !value)}>{creating ? "收起新建" : "新建条款草稿"}</Button>
     </div>
     {error ? <p className="mt-3 text-xs text-destructive" role="alert">{error}</p> : null}
     {message ? <p className="mt-3 text-xs text-muted-foreground" role="status">{message}</p> : null}
     {creating ? <div className="mt-4 grid gap-3 sm:grid-cols-2">
-      <Field label="条款引用 policyRef"><Input value={policyRef} disabled={busy !== null} onChange={event => setPolicyRef(event.target.value)} /></Field>
-      <Field label="条款版本 policyVersion"><Input value={policyVersion} disabled={busy !== null} onChange={event => setPolicyVersion(event.target.value)} /></Field>
-      <Field label="披露版本 disclosureVersion"><Input value={newDisclosure} disabled={busy !== null} onChange={event => setNewDisclosure(event.target.value)} /></Field>
+      <Field label="条款编号"><Input value={policyRef} disabled={busy !== null} onChange={event => setPolicyRef(event.target.value)} /></Field>
+      <Field label="条款版本"><Input value={policyVersion} disabled={busy !== null} onChange={event => setPolicyVersion(event.target.value)} /></Field>
+      <Field label="告知版本"><Input value={newDisclosure} disabled={busy !== null} onChange={event => setNewDisclosure(event.target.value)} /></Field>
       <Field label="标题"><Input value={newTitle} disabled={busy !== null} onChange={event => setNewTitle(event.target.value)} /></Field>
-      <div className="sm:col-span-2"><Field label="正文（纯文本，最多 20000 字节）"><Textarea className="min-h-40" value={newBody} disabled={busy !== null} onChange={event => setNewBody(event.target.value)} /></Field></div>
+      <div className="sm:col-span-2"><RulesMarkdownField label="条款正文" hint="支持 Markdown，最多 20000 字节（约 6600 个汉字）" height={360} value={newBody} disabled={busy !== null} onChange={setNewBody} /></div>
       <div className="sm:col-span-2"><Button type="button" disabled={!canEdit || busy !== null} onClick={() => void create()}>{busy === "create" ? "创建中…" : "创建包赔条款草稿"}</Button></div>
     </div> : null}
     <div className="mt-4 flex flex-wrap items-center gap-2">
-      <div className="w-full sm:w-96"><SupplySelect label="包赔条款版本" value={selectedId} onValueChange={setSelectedId} options={versions.map(version => ({ value: version.id, label: `${version.title} · ${version.status === "SEALED" ? "已封存" : "草稿"} · 修订 ${version.revision}` }))} disabled={busy !== null || versions.length === 0} /></div>
+      <div className="w-full sm:w-96"><SupplySelect label="包赔条款版本" value={selectedId} onValueChange={setSelectedId} options={versions.map(version => ({ value: version.id, label: `${version.title} · ${live && version.policyRef === live.ref && version.policyVersion === live.version && version.status === "SEALED" ? "线上" : version.status === "SEALED" ? "已提交" : "草稿"}${versionTime(version) ? " · " + versionTime(version) : ""}` }))} disabled={busy !== null || versions.length === 0} /></div>
     </div>
     {detail ? <div className="mt-4 grid gap-3">
-      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground"><span>引用 {detail.policyRef} · {detail.policyVersion} · 披露 {detail.disclosureVersion} · 摘要 {detail.digest.slice(0, 16)}…</span><span>{detail.status === "SEALED" ? `已封存 · ${detail.sealedAt ?? ""}` : "草稿"}</span></div>
+      {(() => { const isLive = !!live && detail.status === "SEALED" && detail.policyRef === live.ref && detail.policyVersion === live.version; const dirty = detail.status === "DRAFT" && (title !== detail.title || body !== detail.body || disclosureVersion !== detail.disclosureVersion); const st = docStage(detail, { dirty, live: isLive, after: null }); return <DocStatusRow stage={st} note={st === "unsaved" ? "有输入还没保存" : st === "draft" ? "草稿，线上还没变" : st === "sealed" ? (isBoss ? "已提交；价格发布时引用它就生效" : "已提交，等 Boss 随价格发布生效") : "线上订单使用这份条款"} />; })()}
+      <MutedDetails><p>编号 {detail.policyRef} · 版本 {detail.policyVersion} · 告知 {detail.disclosureVersion}</p></MutedDetails>
       <Field label="标题"><Input value={title} disabled={detail.status !== "DRAFT" || busy !== null} onChange={event => setTitle(event.target.value)} /></Field>
-      <Field label="披露版本"><Input value={disclosureVersion} disabled={detail.status !== "DRAFT" || busy !== null} onChange={event => setDisclosureVersion(event.target.value)} /></Field>
-      <Field label="正文（纯文本）"><Textarea className="min-h-40" value={body} disabled={detail.status !== "DRAFT" || busy !== null} onChange={event => setBody(event.target.value)} /></Field>
+      {detail.status === "DRAFT" ? <Field label="告知版本号"><Input value={disclosureVersion} disabled={busy !== null} onChange={event => setDisclosureVersion(event.target.value)} /></Field> : null}
+      <RulesMarkdownField label="条款正文" hint={detail.status === "DRAFT" ? "支持 Markdown" : "已提交，只读"} height={360} value={body} disabled={detail.status !== "DRAFT" || busy !== null} onChange={setBody} />
       {detail.status === "DRAFT" ? <div className="flex flex-wrap gap-2">
         <Button type="button" disabled={!canEdit || busy !== null} onClick={() => void save()}>{busy === "save" ? "保存中…" : "保存草稿"}</Button>
-        <Button type="button" variant="secondary" disabled={!canEdit || busy !== null} onClick={() => void seal()}>{busy === "seal" ? "封存中…" : "封存条款"}</Button>
-      </div> : <p className="text-xs text-muted-foreground">已封存，不能原地修改；修正请新建草稿。</p>}
+        <Button type="button" variant="secondary" disabled={!canEdit || busy !== null} onClick={() => void seal()}>{busy === "seal" ? "提交中…" : "提交发布"}</Button>
+      </div> : null}
     </div> : <p className="mt-4 text-xs text-muted-foreground">{versions.length === 0 ? "当前游戏还没有包赔条款版本。" : "选择版本查看正文。"}</p>}
   </section>;
 }

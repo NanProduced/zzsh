@@ -50,7 +50,8 @@ test("rules model: complete changes, honest estimates, original request fingerpr
       assert.equal(Object.keys(bl.values).some(key => key.startsWith("dep.skin.")), false, "original v1 skin amounts are absent from edit state");
       assert.equal(bl.values["dep.vit7"], "50", "non-skin deposit fields remain editable");
       assert.equal(edit.submitChanges, undefined); assert.equal(edit.buildPriceBody, undefined);
-      assert.equal(edit.validate(bl.fields, { ...bl.values, "item.piece.buyer": "1.00000001" })["item.piece.buyer"], undefined);
+      assert.equal(edit.validate(bl.fields, { ...bl.values, "item.piece.buyer": "1.01" })["item.piece.buyer"], undefined);
+      assert.match(edit.validate(bl.fields, { ...bl.values, "item.piece.buyer": "1.001" })["item.piece.buyer"], /最多两位小数/, "inputs accept at most two decimals");
       assert.ok(edit.validate(bl.fields, { ...bl.values, "dep.cap": "200" })["dep.cap"]);
       assert.ok(edit.validate(bl.fields, { ...bl.values, "term.d10.daily": "9".repeat(400) })["term.d10.daily"]);
     });
@@ -72,15 +73,15 @@ test("rules model: complete changes, honest estimates, original request fingerpr
       assert.match(labels, /推荐押金上限/); assert.match(labels, /保险箱加价/); assert.match(labels, /账号押金约束.*押金上限/); assert.match(labels, /号主保证金.*要求金额/);
     });
     await t.test("all tiers, quantity and sub-cent unit amounts are compared without display rounding", () => {
-      assert.equal(model.unitYuan("0.00000001"), "¥0.00000001"); assert.equal(model.unitYuan("0"), "¥0.00");
-      assert.equal(model.unitYuan("99999999999999.00000001"), "¥99,999,999,999,999.00000001");
-      assert.equal(model.spread("99999999999999.00000002", "99999999999999.00000001"), "¥0.00000001");
+      assert.equal(model.unitYuan("0.00000001"), "¥0.00", "display keeps at most two decimals"); assert.equal(model.unitYuan("10.00500000"), "¥10.01"); assert.equal(model.unitYuan(238.0952), "¥238.10"); assert.equal(model.unitYuan("0"), "¥0.00");
+      assert.equal(model.unitYuan("99999999999999.00000001"), "¥99,999,999,999,999.00");
+      assert.equal(model.spread("99999999999999.00000002", "99999999999999.00000001"), "¥0.00");
       const rules = next(), line = rules.priceLines.find(line => line.priceVersionId === "p2" && line.itemId === "piece" && line.customerTier === "VIP");
       line.buyerUnitAmount = "1.80000001"; line.unitQuantity = "60";
-      const rows = model.priceDiff(rules, "p1", "p2"); assert.ok(rows.some(row => /VIP.*租客单价/.test(row.label) && row.after === "1.80000001")); assert.ok(rows.some(row => /单位数量/.test(row.label)));
+      const rows = model.priceDiff(rules, "p1", "p2"); assert.ok(rows.some(row => /VIP.*租客单价/.test(row.label) && row.after === "¥1.80000001")); assert.ok(rows.some(row => /单位数量/.test(row.label)));
       rules.priceLines.find(line => line.priceVersionId === "p1" && line.itemId === "piece" && line.customerTier === "STANDARD").buyerUnitAmount = "99999999999999.00000001"; assert.equal(edit.baseline(rules).values["item.piece.buyer"], "99999999999999.00000001");
       rules.priceLines = rules.priceLines.filter(line => !(line.priceVersionId === "p2" && line.customerTier === "SVIP"));
-      assert.ok(model.priceDiff(rules, "p1", "p2").some(row => /SVIP/.test(row.label) && row.after === "未提供"));
+      assert.ok(model.priceDiff(rules, "p1", "p2").some(row => /SVIP/.test(row.label) && row.after === "将移除"));
     });
     await t.test("object key order is harmless, empty vs missing is not silently equal", () => {
       const rules = next(); rules.priceVersions[1].haffRule.baseBySafeBox = Object.fromEntries(Object.entries(rules.priceVersions[1].haffRule.baseBySafeBox).reverse()); assert.deepEqual(model.priceDiff(rules, "p1", "p2"), []);
