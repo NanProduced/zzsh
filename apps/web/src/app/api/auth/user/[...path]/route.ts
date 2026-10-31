@@ -1,5 +1,6 @@
 import { isHttpOrigin, userCookies, copySetCookies, sanitizeResponse, readBoundedBody, BodyTooLargeError } from "../../../../../lib/user-proxy.ts";
 import { randomUUID } from "node:crypto";
+import { USER_AUTH_PATHS, USER_AUTH_READ_PATHS, buildUserAuthUpstreamHeaders } from "../../../../../lib/user-auth-forward.ts";
 
 const LOCAL_ONLY = process.env.NODE_ENV !== "production";
 const API_ORIGIN = process.env.ZZSH_API_ORIGIN ?? (LOCAL_ONLY ? "http://127.0.0.1:3102" : "");
@@ -8,22 +9,6 @@ const MAX_BODY_BYTES = 64 * 1024;
 const UPSTREAM_TIMEOUT_MS = 5_000;
 
 const ORIGIN_CONFIGURATION_VALID = isHttpOrigin(API_ORIGIN) && isHttpOrigin(WEB_ORIGIN);
-const USER_AUTH_PATHS = new Set([
-  "/get-session",
-  "/sign-in/identifier",
-  "/sign-in/phone-number",
-  "/sign-out",
-  "/phone-registration/send-otp",
-  "/phone-registration/complete",
-  "/security/overview", "/profile/nickname", "/security/challenge/send", "/security/challenge/verify",
-  "/security/password", "/security/email", "/security/phone", "/security/recovery/complete", "/security/operation",
-  "/security/sessions", "/security/sessions/revoke", "/security/sessions/revoke-others", "/security/sessions/revoke-all",
-  "/identity/status",
-  "/identity/verify",
-  "/trade-eligibility/check",
-  "/account/deactivate",
-  "/account/cancel",
-]);
 const USER_SECURITY_POST_PATHS = new Set([
   "/identity/verify",
   "/trade-eligibility/check",
@@ -38,8 +23,8 @@ const RESPONSE_HEADERS = new Set([
   "x-ratelimit-remaining",
   "x-ratelimit-reset",
 ]);
-function errorResponse(status: number, code: string, requestId: string, headers?: Headers, accepted = false): Response {
-  return Response.json({ error: { code, message: "Authentication request rejected", requestId, ...(accepted ? { accepted: true } : {}) } }, { status, headers: headers ?? { "Cache-Control": "no-store", "X-Request-Id": requestId } });
+function errorResponse(status: number, code: string, requestId: string, headers?: Headers, accepted = false, reason?: string): Response {
+  return Response.json({ error: { code, message: "Authentication request rejected", requestId, ...(accepted ? { accepted: true } : {}), ...(reason ? { reason } : {}) } }, { status, headers: headers ?? { "Cache-Control": "no-store", "X-Request-Id": requestId } });
 }
 
 async function forward(request: Request, { params }: { params: Promise<{ path: string[] }> }): Promise<Response> {
@@ -49,19 +34,20 @@ async function forward(request: Request, { params }: { params: Promise<{ path: s
   const authPath = `/${path.join("/")}`;
   if (!USER_AUTH_PATHS.has(authPath)) return errorResponse(404, "NOT_FOUND", requestId);
   const method = request.method.toUpperCase();
-  const readPath = ["/get-session", "/identity/status", "/security/overview", "/security/sessions"].includes(authPath);
+  const readPath = USER_AUTH_READ_PATHS.includes(authPath);
   if (method !== (readPath ? "GET" : "POST") && !(readPath && method === "HEAD" && authPath === "/get-session")) return errorResponse(404, "NOT_FOUND", requestId);
   const expectedSecurityMethod = authPath === "/identity/status" ? "GET" : USER_SECURITY_POST_PATHS.has(authPath) ? "POST" : undefined;
   if (expectedSecurityMethod && method !== expectedSecurityMethod) return errorResponse(404, "NOT_FOUND", requestId);
-  if (method !== "GET" && method !== "HEAD" && request.headers.get("origin") !== WEB_ORIGIN) return errorResponse(403, "FORBIDDEN", requestId);
-  const headers = new Headers({ Origin: WEB_ORIGIN, "X-Request-Id": requestId });
-  // 只补转发浏览器自报的 User-Agent（客户端声明，不是服务端事实）：有界、去控制字符；
-  // 浏览器没带就不设（不伪造），也绝不转发其余请求头。会话创建读取 UA 的落库效果需正常认证窗口验证。
-  const userAgent = request.headers.get("user-agent");
-  if (userAgent) {
-    const sanitized = userAgent.replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 512);
-    if (sanitized) headers.set("User-Agent", sanitized);
+  let captchaAction: string | undefined;
+  if (authPath === "/security/captcha/challenge") {
+    const actions = new URL(request.url).searchParams.getAll("action");
+    if (actions.length !== 1 || (actions[0] !== "sign-in" && actions[0] !== "sms-send")) return errorResponse(400, "INVALID_ARGUMENT", requestId);
+    captchaAction = actions[0];
   }
+  if (method !== "GET" && method !== "HEAD" && request.headers.get("origin") !== WEB_ORIGIN) return errorResponse(403, "FORBIDDEN", requestId);
+  let headers: Headers;
+  try { headers = buildUserAuthUpstreamHeaders(request, { requestId, webOrigin: WEB_ORIGIN }); }
+  catch { return errorResponse(503, "INTERNAL_ERROR", requestId, undefined, false, "AUTH_DEPENDENCY_UNAVAILABLE"); }
   const cookie = userCookies(request.headers.get("cookie"));
   if (cookie) headers.set("Cookie", cookie);
   const contentType = request.headers.get("content-type");
@@ -79,9 +65,11 @@ async function forward(request: Request, { params }: { params: Promise<{ path: s
       return errorResponse(error instanceof BodyTooLargeError ? 413 : 400, "INVALID_ARGUMENT", requestId);
     }
   }
+  const upstreamUrl = new URL(`/api/auth/user${authPath}`, API_ORIGIN);
+  if (captchaAction) upstreamUrl.searchParams.set("action", captchaAction);
   let upstream: Response;
   try {
-    upstream = await fetch(new URL(`/api/auth/user${authPath}`, API_ORIGIN), { method, headers, body, cache: "no-store", signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS) });
+    upstream = await fetch(upstreamUrl, { method, headers, body, cache: "no-store", signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS) });
   } catch {
     return errorResponse(503, "INTERNAL_ERROR", requestId);
   }

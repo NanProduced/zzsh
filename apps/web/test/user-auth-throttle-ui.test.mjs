@@ -1,0 +1,162 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { mountAuthComponent, deferred } from "./react-auth-harness.mjs";
+import { buildUserAuthUpstreamHeaders, USER_AUTH_PATHS, USER_CLIENT_IP_FORWARD_HEADER } from "../src/lib/user-auth-forward.ts";
+
+const challenge = {
+  parameters: {
+    algorithm: "PBKDF2/SHA-256",
+    nonce: "00112233445566778899aabbccddeeff",
+    salt: "ffeeddccbbaa99887766554433221100",
+    cost: 1,
+    keyLength: 32,
+    keyPrefix: "00",
+    expiresAt: Math.floor(Date.now() / 1000) + 300,
+    data: "user:sign-in",
+  },
+  signature: "ab".repeat(32),
+};
+
+test("password login retries the original request after a challenge and drops a late one", async () => {
+  let phase = "challenge";
+  const p = await mountAuthComponent("apps/web/src/components/auth/auth-form.tsx", "AuthForm", {}, {
+    fetch: async (url, body) => {
+      if (!String(url).includes("/api/auth/user")) return Response.json({});
+      if (phase === "challenge" && !body?.captcha) {
+        phase = "retry";
+        return Response.json({ error: { code: "FORBIDDEN", reason: "CAPTCHA_REQUIRED" }, challenge, captchaRequired: true }, { status: 403 });
+      }
+      assert.equal(body.password, "existing-password");
+      assert.equal(typeof body.captcha, "string");
+      return Response.json({ status: true, userId: "user_A" });
+    },
+  });
+  try {
+    await p.click("密码登录");
+    await p.input("auth-identifier", "13800138000");
+    await p.input("auth-terms", true);
+    await p.input("auth-password", "existing-password");
+    await p.submit();
+    const loginCalls = () => p.calls.filter((item) => String(item.url).endsWith("/sign-in/identifier"));
+    const started = Date.now();
+    while (Date.now() - started < 3000 && loginCalls().length < 2) await p.settle();
+    const logins = loginCalls();
+    assert.equal(logins.length, 2, p.host.textContent);
+    assert.equal(logins[1].body.identifier, logins[0].body.identifier);
+    assert.equal(logins[1].body.password, "existing-password");
+    assert.equal(typeof logins[1].body.captcha, "string");
+    assert.equal(p.successes, 1);
+  } finally { await p.close(); }
+});
+
+test("a changed return intent ignores a late challenge instead of replaying it", async () => {
+  const gate = deferred();
+  const p = await mountAuthComponent("apps/web/src/components/auth/auth-form.tsx", "AuthForm", { next: "/publish" }, {
+    fetch: async (url) => {
+      if (!String(url).includes("/api/auth/user")) return Response.json({});
+      if (String(url).endsWith("/sign-in/identifier")) await gate.promise;
+      return Response.json({ error: { code: "FORBIDDEN", reason: "CAPTCHA_REQUIRED" }, challenge }, { status: 403 });
+    },
+  });
+  try {
+    await p.click("密码登录");
+    await p.input("auth-identifier", "13800138000");
+    await p.input("auth-terms", true);
+    await p.input("auth-password", "existing-password");
+    const form = p.host.querySelector("form");
+    await p.React.act(async () => form.dispatchEvent(new p.window.Event("submit", { bubbles: true, cancelable: true })));
+    await p.render({ next: "/account" });
+    gate.resolve();
+    await p.settle();
+    assert.equal(p.calls.filter((item) => String(item.url).endsWith("/sign-in/identifier")).length, 1);
+    assert.equal(p.successes, 0);
+  } finally { await p.close(); }
+});
+
+test("bff strips a forged internal ip and forwards only a resolved client", () => {
+  const forged = {
+    headers: new Headers({ [USER_CLIENT_IP_FORWARD_HEADER]: "9.9.9.9", "x-forwarded-for": "198.51.100.8", "user-agent": "ua" }),
+    socket: { remoteAddress: "203.0.113.8" },
+  };
+  forged.headers.get = ((original) => (name) => name === "user-agent" ? "ua\u0000tail" : original.call(forged.headers, name))(forged.headers.get);
+  const headers = buildUserAuthUpstreamHeaders(forged, { requestId: "req_test", webOrigin: "http://127.0.0.1:3100", env: {} });
+  assert.equal(headers.get(USER_CLIENT_IP_FORWARD_HEADER), "203.0.113.8");
+  assert.equal(headers.get("user-agent"), "uatail");
+  assert.equal(USER_AUTH_PATHS.has("/phone-number/send-otp"), false);
+  assert.equal(USER_AUTH_PATHS.has("/security/captcha/challenge"), true);
+  const unassured = buildUserAuthUpstreamHeaders(new Request("http://127.0.0.1/", { headers: { "x-forwarded-for": "198.51.100.4, 10.0.0.8", [USER_CLIENT_IP_FORWARD_HEADER]: "1.2.3.4" } }), {
+    requestId: "req_bff", webOrigin: "http://127.0.0.1:3100", env: { USER_TRUSTED_PROXIES: "loopback,10.0.0.0/8" },
+  });
+  assert.equal(unassured.get(USER_CLIENT_IP_FORWARD_HEADER), null);
+  const assured = buildUserAuthUpstreamHeaders(new Request("http://127.0.0.1/", { headers: { "x-forwarded-for": "198.51.100.4, 10.0.0.8", [USER_CLIENT_IP_FORWARD_HEADER]: "1.2.3.4" } }), {
+    requestId: "req_bff", webOrigin: "http://127.0.0.1:3100", env: { USER_TRUSTED_PROXIES: "loopback,10.0.0.0/8", USER_EDGE_ASSURED: "true" },
+  });
+  assert.equal(assured.get(USER_CLIENT_IP_FORWARD_HEADER), "198.51.100.4");
+});
+
+test("Root: an already rejected password is not automatically sent a second time", async () => {
+  const view = await mountAuthComponent("apps/web/src/components/auth/auth-form.tsx", "AuthForm");
+  const { webAuthWithCaptcha } = view.loadSource("apps/web/src/lib/user-captcha.ts");
+  const original = globalThis.fetch; let calls = 0;
+  globalThis.fetch = async () => { calls++; return Response.json({ error: { code: "UNAUTHENTICATED", reason: "CAPTCHA_REQUIRED" }, challenge }, { status: 401 }); };
+  try { await assert.rejects(() => webAuthWithCaptcha("/sign-in/identifier", { identifier: "13800138000", password: "wrong" }, undefined, () => true)); assert.equal(calls, 1); }
+  finally { globalThis.fetch = original; await view.close(); }
+});
+
+test("a challenge with the wrong shape is rejected before a KDF loop", async () => {
+  const view = await mountAuthComponent("apps/web/src/components/auth/auth-form.tsx", "AuthForm");
+  const { solveLocalPow } = view.loadSource("apps/web/src/lib/user-captcha.ts");
+  try {
+    await assert.rejects(() => solveLocalPow({ ...challenge, parameters: { ...challenge.parameters, algorithm: "SHA-1" } }), (error) => error.reason === "CAPTCHA_REQUIRED");
+    await assert.rejects(() => solveLocalPow({ ...challenge, parameters: { ...challenge.parameters, cost: 1_000_001 } }), (error) => error.reason === "CAPTCHA_REQUIRED");
+    await assert.rejects(() => solveLocalPow({ ...challenge, parameters: { ...challenge.parameters, keyPrefix: "zzzz" } }), (error) => error.reason === "CAPTCHA_REQUIRED");
+  } finally { await view.close(); }
+});
+
+test("Root: stale or cancelled proof work stops before starting a KDF", async () => {
+  const view = await mountAuthComponent("apps/web/src/components/auth/auth-form.tsx", "AuthForm");
+  const { solveLocalPow } = view.loadSource("apps/web/src/lib/user-captcha.ts");
+  const cancelled = new AbortController(); cancelled.abort();
+  try {
+  await assert.rejects(() => solveLocalPow(challenge, cancelled.signal), error => error.name === "AbortError");
+  await assert.rejects(() => solveLocalPow(challenge, undefined, () => false), error => error.name === "AbortError");
+  } finally { await view.close(); }
+});
+
+test("Root: invalid proxy configuration cannot silently remove IP protection", () => {
+  assert.throws(() => buildUserAuthUpstreamHeaders(new Request("http://127.0.0.1/"), { requestId: "req_bad_config", webOrigin: "http://127.0.0.1", env: { USER_TRUSTED_PROXIES: "everyone" } }), /TRUSTED_PROXIES/);
+});
+
+
+test("Root R1: missing, invalid or expired proof time is rejected before any KDF", async () => {
+  const view = await mountAuthComponent("apps/web/src/components/auth/auth-form.tsx", "AuthForm");
+  const { solveLocalPow } = view.loadSource("apps/web/src/lib/user-captcha.ts");
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto"); let kdfs = 0;
+  Object.defineProperty(globalThis, "crypto", { configurable: true, value: { subtle: { importKey: async () => { kdfs++; return {}; }, deriveBits: async () => { kdfs++; return new Uint8Array(32).buffer; } } } });
+  try {
+    for (const expiresAt of [undefined, null, "2000000000", NaN, Infinity, 0, Math.floor(Date.now() / 1000) - 1]) {
+      await assert.rejects(() => solveLocalPow({ ...challenge, parameters: { ...challenge.parameters, expiresAt } }), error => error.reason === "CAPTCHA_REQUIRED");
+    }
+    assert.equal(kdfs, 0);
+  } finally { Object.defineProperty(globalThis, "crypto", descriptor); await view.close(); }
+});
+
+test("Root R1: expiry during a KDF prevents proof replay and leaves signed parameters unchanged", async () => {
+  const view = await mountAuthComponent("apps/web/src/components/auth/auth-form.tsx", "AuthForm");
+  const { webAuthWithCaptcha, solveLocalPow } = view.loadSource("apps/web/src/lib/user-captcha.ts");
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto"), realNow = Date.now, originalFetch = globalThis.fetch;
+  const start = 2_000_000_000_000; let now = start, kdfs = 0, calls = 0;
+  const expiring = { ...challenge, parameters: { ...challenge.parameters, expiresAt: Math.floor(start / 1000) + 1 } };
+  const signed = JSON.stringify(expiring);
+  Date.now = () => now;
+  Object.defineProperty(globalThis, "crypto", { configurable: true, value: { subtle: { importKey: async () => ({}), deriveBits: async () => { kdfs++; now = start + 1000; return new Uint8Array(32).buffer; } } } });
+  globalThis.fetch = async () => { calls++; return Response.json({ error: { code: "FORBIDDEN", reason: "CAPTCHA_REQUIRED" }, challenge: expiring }, { status: 403 }); };
+  try {
+    await assert.rejects(() => solveLocalPow(expiring), error => error.reason === "CAPTCHA_REQUIRED");
+    assert.equal(kdfs, 1); assert.equal(JSON.stringify(expiring), signed);
+    now = start; kdfs = 0;
+    await assert.rejects(() => webAuthWithCaptcha("/sign-in/identifier", { identifier: "13800138000", password: "existing-password" }, undefined, () => true), error => error.reason === "CAPTCHA_REQUIRED");
+    assert.equal(calls, 1, "expired work never re-posts the credential body"); assert.equal(kdfs, 1);
+    assert.equal(JSON.stringify(expiring), signed);
+  } finally { globalThis.fetch = originalFetch; Date.now = realNow; Object.defineProperty(globalThis, "crypto", descriptor); await view.close(); }
+});

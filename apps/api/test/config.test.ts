@@ -348,9 +348,20 @@ test("requires distinct auth secrets and secure production cookies", () => {
   );
   assert.throws(
     () => loadAuthRuntimeConfig({ ...authEnv, NODE_ENV: "production", AUTH_SECURE_COOKIES: "true" }),
+    (error: unknown) => error instanceof ConfigurationError && /USER_AUTH_THROTTLE_HMAC_KEY/.test(error.message),
+  );
+  assert.throws(
+    () => loadAuthRuntimeConfig({ ...authEnv, NODE_ENV: "production", AUTH_SECURE_COOKIES: "true", USER_AUTH_THROTTLE_HMAC_KEY: "t".repeat(32) }),
     (error: unknown) => error instanceof ConfigurationError && /ADMIN_ALTCHA_HMAC_KEY/.test(error.message),
   );
-  assert.equal(loadAuthRuntimeConfig({ ...authEnv, NODE_ENV: "production", AUTH_SECURE_COOKIES: "true", ADMIN_ALTCHA_HMAC_KEY: "h".repeat(32) }).secureCookies, true);
+  const production = loadAuthRuntimeConfig({ ...authEnv, NODE_ENV: "production", AUTH_SECURE_COOKIES: "true", USER_AUTH_THROTTLE_HMAC_KEY: "t".repeat(32), ADMIN_ALTCHA_HMAC_KEY: "h".repeat(32) });
+  assert.equal(production.secureCookies, true);
+  assert.equal(production.userThrottleHmacKey, "t".repeat(32));
+  assert.equal(production.adminAltchaHmacKey, "h".repeat(32));
+  assert.throws(
+    () => loadAuthRuntimeConfig({ ...authEnv, USER_AUTH_THROTTLE_HMAC_KEY: authEnv.AUTH_USER_SECRET }),
+    (error: unknown) => error instanceof ConfigurationError && /independent/.test(error.message),
+  );
 });
 
 

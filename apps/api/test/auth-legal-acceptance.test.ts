@@ -147,6 +147,17 @@ test("unverified and foreign auth errors cannot disclose a frozen account", asyn
   }
 });
 
+test("dependency unavailability keeps only the first-party reason", async () => {
+  const result = await errorBoundary(503, { code: "AUTH_DEPENDENCY_UNAVAILABLE", message: "sdk said " + "SECRET_PROVIDER_TEXT" });
+  assert.equal(result.payload.error.reason, "AUTH_DEPENDENCY_UNAVAILABLE");
+  assert.equal(result.payload.error.message, "Authentication dependency unavailable");
+  assert.equal(JSON.stringify(result.payload).includes("SECRET_PROVIDER_TEXT"), false);
+  const generic = await errorBoundary(503, { message: "arbitrary sdk failure" });
+  assert.equal(generic.payload.error.reason, undefined);
+  assert.equal(generic.payload.error.message, "Internal server error");
+  assert.equal(JSON.stringify(generic.payload).includes("arbitrary"), false);
+});
+
 test("unknown SDK auth errors retain the generic boundary", async () => {
   const result = await errorBoundary(403, { code: "OTHER_PRIVATE_CODE", message: "PRIVATE_PROVIDER_MESSAGE" });
   assert.equal(result.payload.error.reason, undefined);

@@ -128,5 +128,5 @@ export async function mountAuthComponent(relativePath, componentName, props = {}
     }); await settle();
   };
   const submit = async (selector = "form") => { const form = host.querySelector(selector); assert.ok(form); await React.act(async () => form.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }))); await settle(); };
-  return { host, window, calls, identity, get session() { return session; }, store, nav, router, render, click, input, submit, findButton, settle, React, get confirmations() { return confirmations; }, get successes() { return successes; }, async close() { await React.act(async () => root.unmount()); await window.happyDOM.abort(); globalThis.fetch = originalFetch; } };
+  return { loadSource: relativePath => load(path.join(rootPath, relativePath)), host, window, calls, identity, get session() { return session; }, store, nav, router, render, click, input, submit, findButton, settle, React, get confirmations() { return confirmations; }, get successes() { return successes; }, async close() { await React.act(async () => root.unmount()); await window.happyDOM.abort(); globalThis.fetch = originalFetch; } };
 }

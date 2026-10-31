@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { publishUserSessionChange, useUserSession, useUserSessionStore } from "@/components/session/user-session-provider";
 import { webAuthRequest, WebAuthError, authErrorMessage } from "@/lib/web-auth-request";
+import { webAuthWithCaptcha } from "@/lib/user-captcha";
 export { webAuthRequest, WebAuthError } from "@/lib/web-auth-request";
 
 function compactPhone(value: string): string {
@@ -125,7 +126,7 @@ export function AuthForm({ next, inviteCode: initialInviteCode, onSuccess, autoF
     if (!validContact() || mode === "login" && !acceptedTerms) { validationError(!validContact() ? "请填写有效的手机号或邮箱。" : "请先阅读并同意服务协议与隐私政策。", !validContact() ? "auth-identifier" : "auth-terms"); return; }
     const request = begin(); setSending(true); setError(undefined);
     try {
-      const result = await webAuthRequest<{ status: boolean; challengeId?: string; cooldownUntil: string }>(mode === "recover" ? "/security/challenge/send" : "/phone-registration/send-otp", mode === "recover" ? { purpose: "recovery", channel, contact: normalized() } : { phoneNumber: normalized() }, request.controller.signal);
+      const result = await webAuthWithCaptcha<{ status: boolean; challengeId?: string; cooldownUntil: string }>(mode === "recover" ? "/security/challenge/send" : "/phone-registration/send-otp", mode === "recover" ? { purpose: "recovery", channel, contact: normalized() } : { phoneNumber: normalized() }, request.controller.signal, () => current(request.id));
       if (!current(request.id)) return;
       if (result.status !== true || !Number.isFinite(Date.parse(result.cooldownUntil))) throw new WebAuthError(502, "RESPONSE_UNCONFIRMED");
       setChallengeId(result.challengeId ?? ""); setSentFor(normalized()); setCode(""); setCooldownUntil(Date.parse(result.cooldownUntil)); setNow(Date.now());
@@ -161,7 +162,7 @@ export function AuthForm({ next, inviteCode: initialInviteCode, onSuccess, autoF
         setProofId(""); setChallengeId(""); setMode("login"); setMethod("password"); if (channel === "email") setContact(""); setChannel("phone"); setAcceptedTerms(false);
         clearWrite(); setNotice("密码已重置，旧会话已退出。请使用手机号和新密码登录。");
       } else {
-        const result = await webAuthRequest<{ status: boolean; userId: string }>(method === "sms" ? "/phone-registration/complete" : "/sign-in/identifier", method === "sms" ? { phoneNumber: normalized(), code, acceptedTerms: true, loginOrRegister: true, ...(inviteCode.trim() ? { inviteCode: inviteCode.trim() } : {}), ...(legalAcceptance ? { legalAcceptance } : {}) } : { identifier: normalized(), password, kind: "phone", ...(legalAcceptance ? { legalAcceptance } : {}) }, request.controller.signal);
+        const result = await webAuthWithCaptcha<{ status: boolean; userId: string }>(method === "sms" ? "/phone-registration/complete" : "/sign-in/identifier", method === "sms" ? { phoneNumber: normalized(), code, acceptedTerms: true, loginOrRegister: true, ...(inviteCode.trim() ? { inviteCode: inviteCode.trim() } : {}), ...(legalAcceptance ? { legalAcceptance } : {}) } : { identifier: normalized(), password, kind: "phone", ...(legalAcceptance ? { legalAcceptance } : {}) }, request.controller.signal, () => current(request.id));
         accepted = true; if (!current(request.id)) return; setOutcome("accepted");
         if (result.status !== true || typeof result.userId !== "string" || !result.userId) throw new WebAuthError(502, "RESPONSE_UNCONFIRMED", true);
         loginSubject.current = { phone: normalized(), userId: result.userId }; recordWrite("accepted");
