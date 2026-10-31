@@ -14,6 +14,8 @@
 
 `createLocalDistributionRuntime` 只为明确的本地 test/fake 资源组装已有能力，返回可传入认证装配的 `auth` 与有界 `earnings`。构造时不连接数据库，不写政策、注册身份或准入数据，也不生成默认 5% 政策。最多接受 100 个唯一订单；实际付款还要求该订单原生创建审计和有效的精确 admission。无此显式装配时，原行为保持。
 
+正式汇聚收款另在原接纳事务中通过 `createNativePaymentDistributionStore` 冻结分销依据，不使用本地100单名单。该付款接线不代表正式政策/关系维护、结算后计提或到期入账已启用；后面这些能力当前仍受本地受控装配限制。
+
 把返回的 `auth` 传入 `createApp` 的认证选项后，新注册、付款冻结、本人条款/佣金读与结算提交后计提使用现有模块。新原生钱包初始化仍需数据库端准入与同事务 INSERT 证明；缺失来源不能冒充零钱包。可选提现 binding 必须绑定 resource、subject、admission、destination、intent、payoutKey。
 
 结算确认及管理员复核提交后从原 posting 幂等计提 PENDING 佣金。回调异常单独记为 UNKNOWN，不改变已提交的结算事实；恢复依据是原订单的不可变 posting、冻结 basis 和唯一经济根。维护方可先 `earnings.readOrder(pool, orderId)` 只读核原根与原转换回执，再对同一原来源恢复 `accrue`。不得换业务键、回填旧付款或把回滚请求当作写入未发生的证明。

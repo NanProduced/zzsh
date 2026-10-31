@@ -2,7 +2,7 @@ import type { PoolClient } from "pg";
 import { loadEffectiveAdminAccess, requirePermission } from "../auth/admin-authorization";
 import { recordAudit } from "../auth/security-core";
 import { canonicalize } from "./content-hash";
-import { listingSearchPattern, projectPublicAttributeDisplay } from "./listing-query";
+import { isAccountMediaBinding, listingSearchPattern, projectPublicAttributeDisplay } from "./listing-query";
 import { assertGameScope, conflict, fingerprintRequest, invalid, notFound, sha256Hex, withIdempotency } from "./supply-util";
 import { legacyDisplayDigest, parseLegacyDisplaySnapshot, type LegacyDisplayInput } from "./legacy-display-snapshot";
 import { decodeListingCursor, encodeListingCursor, type ListingCursorBinding, type ListingCursorKey } from "./listing-cursor";
@@ -242,7 +242,7 @@ export async function readLegacyListing(client: PoolClient, accountId: string, a
   const values: unknown[]=[accountId];
   const param=(value:unknown)=>{values.push(value);return "$"+values.length;};
   const admitted=`((h.source_status=3 AND ${legacyAdmissionSql(admission,param)})${detailAdmission ? ` OR (h.source_status IN(4,5,6) AND ${legacyAdmissionSql(detailAdmission,param,false)})` : ""})`;
-  const r=(await client.query(`SELECT a.id,a.display_no,g.id game_id,g.code game_code,g.name game_name,v.id version_id,v.title,v.description,v.attributes,h.snapshot,h.source_updated_at,h.evidence_ref,a.owner_paused,h.source_status,
+  const r=(await client.query(`SELECT a.id,a.owner_user_id,a.display_no,g.id game_id,g.code game_code,g.name game_name,v.id version_id,v.title,v.description,v.attributes,h.snapshot,h.source_updated_at,h.evidence_ref,a.owner_paused,h.source_status,
     d.snapshot AS display_snapshot,d.display_digest,d.observation_version_id AS display_version_id,d.base_source_digest,d.extract_sha256,d.source_updated_at AS display_updated_at,d.evidence_ref AS display_evidence_ref
     ${FROM} WHERE a.id=$1 AND ${VISIBLE_BASE} AND ${admitted}`,values)).rows[0];
   if(!r)throw notFound();
@@ -280,10 +280,11 @@ export async function readLegacyListing(client: PoolClient, accountId: string, a
   const skins=declaredSkins.filter(x=>x.isPublic===true);
   // Counts only target references already on this version; it says nothing about un-extracted legacy holdings.
   const skinsWithheld=declaredSkins.length-skins.length;
-  const media=(await client.query<{assetId:string;position:number}>(`SELECT m.asset_id AS "assetId",m.position
+  const mediaRows=(await client.query(`SELECT m.asset_id AS "assetId",m.position,a.purpose,a.ownership_kind,a.account_id,a.owner_user_id,a.game_id
     FROM zzsh_supply.listing_media m JOIN zzsh_supply.media_asset a ON a.id=m.asset_id
     WHERE m.version_id=$1 AND a.purpose='ACCOUNT_DISPLAY' AND a.review_state IN ('PENDING','APPROVED') AND a.technical_state='READY' AND a.access_class='PUBLIC_DISPLAY' AND a.public_storage_key IS NOT NULL
     ORDER BY m.position,m.asset_id`,[r.version_id])).rows;
+  const media=mediaRows.filter(asset=>isAccountMediaBinding(asset,{id:r.id,owner_user_id:r.owner_user_id,game_id:r.game_id})).map(({assetId,position})=>({assetId,position}));
   const attrs=Object.fromEntries(["safe_box_code","vit_level","bear_level","dive_level","character_level","grading_code","login_method_code","region_province","region_city","secret_kd","service_window_start_minute","service_window_end_minute","service_window_timezone","service_window_cross_midnight"].map(k=>[k,extra ? extra.attributes[k]??null : r.attributes[k]??null]));
   const resources=extra ? extra.resources.map(x=>({id:`legacy-display:${x.code}`,code:x.code,name:x.name,quantity:x.quantity,unit:x.unit})) : rows;
   const display=projectPublicAttributeDisplay(attrs);

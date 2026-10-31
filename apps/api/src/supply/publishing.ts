@@ -31,6 +31,7 @@ import {
   projectPublicOffer,
   isEffectivePublicationState,
   mediaReviewAllowsPublication,
+  isAccountMediaBinding,
   type BoundTermOption,
   type PublicMediaRoute,
 } from "./listing-query";
@@ -601,6 +602,20 @@ export async function assertEditable(
   if (external.occupancy !== "FREE")
     throw conflict("暂不能确认账号空闲，请先处理占用状态");
 }
+export async function readAccountMediaBindings(client: PoolClient, versionId: string): Promise<ContentDeclaration["mediaBindings"]> {
+  const rows = (await client.query(
+    `SELECT m.asset_id AS "assetId",a.content_hash AS "byteHash",a.purpose,m.position,
+      a.ownership_kind,a.account_id,a.owner_user_id,a.game_id,
+      owner.id AS binding_account_id,owner.owner_user_id AS binding_owner_user_id,owner.game_id AS binding_game_id
+     FROM zzsh_supply.listing_media m LEFT JOIN zzsh_supply.media_asset a ON a.id=m.asset_id
+     JOIN zzsh_supply.listing_version version ON version.id=m.version_id
+     JOIN zzsh_supply.rental_account owner ON owner.id=version.account_id
+     WHERE m.version_id=$1 ORDER BY m.position`, [versionId],
+  )).rows;
+  if (rows.some(row => !isAccountMediaBinding(row, { id: row.binding_account_id, owner_user_id: row.binding_owner_user_id, game_id: row.binding_game_id }))) throw notFound();
+  return rows.map(({ assetId, byteHash, purpose, position }) => ({ assetId, byteHash, purpose, position }));
+}
+
 export async function readDeclaration(
   client: PoolClient,
   v: ListingVersion,
@@ -630,12 +645,7 @@ export async function readDeclaration(
       [v.id],
     )
   ).rows;
-  const mediaBindings = (
-    await client.query(
-      `SELECT m.asset_id AS "assetId",a.content_hash AS "byteHash",a.purpose,m.position FROM zzsh_supply.listing_media m JOIN zzsh_supply.media_asset a ON a.id=m.asset_id WHERE m.version_id=$1 ORDER BY m.position`,
-      [v.id],
-    )
-  ).rows;
+  const mediaBindings = await readAccountMediaBindings(client, v.id);
   return {
     title: v.title,
     description: v.description,
@@ -660,6 +670,7 @@ export async function createListingDraft(
   if (old?.review_state === "SUBMITTED")
     throw conflict("请先撤回正在审核的资料");
   if (old?.review_state === "DRAFT") throw conflict("已有可编辑草稿");
+  if (old) await readAccountMediaBindings(client, old.id);
   const id = newSupplyId("listing");
   await client.query(
     `INSERT INTO zzsh_supply.listing_version(id,account_id,sequence,title,description,attributes,term_option_code,pricing_option_code,schema_version) SELECT $1,$2,COALESCE(MAX(sequence),0)+1,$3,$4,$5,$6,$7,$8 FROM zzsh_supply.listing_version WHERE account_id=$2`,
@@ -810,6 +821,21 @@ export async function saveListingDraft(
       "entitlements",
     ),
     media = list(body.mediaBindings ?? [], "图片格式错误", "mediaBindings");
+  const mediaCategories: Record<string, "SHOWCASE" | "PENALTY"> = {};
+  for (const binding of media) {
+    ensureOnlyFields(binding, ["assetId", "position", "category"]);
+    idText(binding.assetId, "mediaBindings");
+    if (!Number.isInteger(binding.position) || Number(binding.position) < 0 || Number(binding.position) > 99) throw invalid("图片顺序错误", "mediaBindings");
+    if (binding.category !== undefined && binding.category !== "SHOWCASE" && binding.category !== "PENALTY") throw invalid("图片分类错误", "mediaBindings");
+    if (binding.category !== undefined) mediaCategories[binding.assetId as string] = binding.category;
+  }
+  if (media.length) {
+    const assets = (await client.query<ListingMediaAssetRow>(
+      `SELECT * FROM zzsh_supply.media_asset WHERE id=ANY($1::text[]) AND account_id=$2 AND owner_user_id=$3 AND game_id=$4 ORDER BY id FOR UPDATE`,
+      [media.map(binding => binding.assetId), a.id, a.owner_user_id, a.game_id],
+    )).rows;
+    if (assets.length !== media.length || assets.some(asset => !isAccountMediaBinding(asset, a))) throw invalid("图片绑定无效", "mediaBindings");
+  }
   if (inventory.length) {
     const items = (await client.query<{ id: string; code: string; unit: string; quantityScale: number }>(
       `SELECT id,code,unit,quantity_scale AS "quantityScale" FROM zzsh_supply.billable_item WHERE game_id=$1 AND id=ANY($2::text[])`,
@@ -860,19 +886,8 @@ export async function saveListingDraft(
       ],
     );
   }
-  const mediaCategories: Record<string, "SHOWCASE" | "PENALTY"> = {};
   delete normalized.attributes.media_categories;
   for (const binding of media) {
-    ensureOnlyFields(binding, ["assetId", "position", "category"]);
-    if (
-      !Number.isInteger(binding.position) ||
-      Number(binding.position) < 0 ||
-      Number(binding.position) > 99
-    )
-      throw invalid("图片顺序错误", "mediaBindings");
-    if (binding.category !== undefined && binding.category !== "SHOWCASE" && binding.category !== "PENALTY")
-      throw invalid("图片分类错误", "mediaBindings");
-    if (binding.category !== undefined) mediaCategories[idText(binding.assetId, "mediaBindings")] = binding.category;
     await client.query(
       `INSERT INTO zzsh_supply.listing_media(version_id,asset_id,position) VALUES($1,$2,$3)`,
       [v.id, idText(binding.assetId, "mediaBindings"), binding.position],
@@ -1426,22 +1441,27 @@ export function publicMediaCategory(attributes: Record<string, unknown>, assetId
 
 async function assertMediaReady(
   client: PoolClient,
+  account: PublishingAccount,
   v: ListingVersion,
   mode: "direct" | "review" = "direct",
   lockMedia = false,
-  account?: PublishingAccount,
   preloadedMedia?: ListingMediaAssetRow[],
 ): Promise<void> {
+  if (lockMedia) await client.query(
+    `SELECT id FROM zzsh_supply.media_asset WHERE id IN (SELECT asset_id FROM zzsh_supply.listing_media WHERE version_id=$1)
+      AND account_id=$2 AND owner_user_id=$3 AND game_id=$4 ORDER BY id FOR UPDATE`,
+    [v.id, account.id, account.owner_user_id, account.game_id],
+  );
   const media = preloadedMedia ??
     ((
       await client.query<ListingMediaAssetRow>(
-        `SELECT a.* FROM zzsh_supply.listing_media m JOIN zzsh_supply.media_asset a ON a.id=m.asset_id WHERE m.version_id=$1${lockMedia ? " ORDER BY a.id FOR UPDATE" : ""}`,
+        `SELECT a.* FROM zzsh_supply.listing_media m LEFT JOIN zzsh_supply.media_asset a ON a.id=m.asset_id WHERE m.version_id=$1 ORDER BY m.asset_id`,
         [v.id],
       )
     ).rows);
-  if (account && media.some(m => m.purpose === "ACCOUNT_DISPLAY" &&
-    (m.ownership_kind !== "USER_SUPPLY" || m.owner_user_id !== account.owner_user_id || m.account_id !== account.id || m.game_id !== account.game_id ||
-      !v.payload?.declaration.mediaBindings.some(binding => binding.assetId === m.id && binding.byteHash === m.content_hash))))
+  const frozen = v.payload?.declaration.mediaBindings;
+  if (!frozen || media.length !== frozen.length || new Set(media.map(m => m.id)).size !== media.length || media.some(m =>
+    !isAccountMediaBinding(m, account) || !frozen.some(binding => binding.assetId === m.id && binding.byteHash === m.content_hash && binding.purpose === m.purpose)))
     throw notFound();
   if (!media.some((m) => m.purpose === "ACCOUNT_DISPLAY" && publicMediaCategory(v.attributes, m.id, m.source_note) === "SHOWCASE"))
     throw invalid("至少需要一张展示图", "mediaBindings");
@@ -1481,7 +1501,7 @@ export async function submitListing(
   const blockers = await publicationBlockers(client, a, v, gate);
   if (blockers.length) throw conflict(blockers.join(","));
   await assertAccepted(client, a, v);
-  await assertMediaReady(client, v, "direct", true);
+  await assertMediaReady(client, a, v, "direct", true);
   a.display_no = await assignAccountNumber(client, a.id);
   await client.query(
     `INSERT INTO zzsh_supply.listing_publication
@@ -1534,7 +1554,7 @@ export async function reviewListing(
     const blockers = await publicationBlockers(client, a, v, gate);
     if (blockers.length) throw conflict(blockers.join(","));
     await assertAccepted(client, a, v);
-    await assertMediaReady(client, v, "review", true);
+    await assertMediaReady(client, a, v, "review", true);
     a.display_no = await assignAccountNumber(client, a.id);
   }
   await client.query(
@@ -1592,7 +1612,7 @@ export async function setOwnerPaused(
     const blockers = await publicationBlockers(client, a, v, gate);
     if (blockers.length) throw conflict(blockers.join(","));
     await assertAccepted(client, a, v);
-    await assertMediaReady(client, v, "direct", true);
+    await assertMediaReady(client, a, v, "direct", true);
   }
   await client.query(
     `UPDATE zzsh_supply.rental_account SET owner_paused=$2 WHERE id=$1`,
@@ -1648,7 +1668,7 @@ export async function evaluatePublication(
     return blockers;
   }
   try {
-    await assertMediaReady(client, v, "direct", false, purpose === "READ" ? a : undefined, media ? await media() : undefined);
+    await assertMediaReady(client, a, v, "direct", false, media ? await media() : undefined);
   } catch (error) {
     if (strictReadErrors && !(error instanceof SecurityApiError)) throw error;
     blockers.push("MEDIA_REQUIRED");
@@ -1944,7 +1964,7 @@ export async function listingDetail(
   const loadMedia = async (): Promise<ListingMediaAssetRow[]> =>
     (mediaRows ??= (
       await client.query<ListingMediaAssetRow>(
-        `SELECT a.* FROM zzsh_supply.listing_media m JOIN zzsh_supply.media_asset a ON a.id=m.asset_id WHERE m.version_id=$1`,
+        `SELECT a.* FROM zzsh_supply.listing_media m LEFT JOIN zzsh_supply.media_asset a ON a.id=m.asset_id WHERE m.version_id=$1`,
         [v.id],
       )
     ).rows);

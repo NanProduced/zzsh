@@ -12,6 +12,8 @@
   "dist/test/supply-media.test.js",
   "dist/test/skin-identity.test.js",
   "dist/test/supply-listing-query.test.js",
+  "dist/test/publishing-media-ownership.test.js",
+  "dist/test/order-sweep-runtime.test.js",
   "dist/test/im-contract.test.js",
   "dist/test/yunxin-provider.test.js",
   "dist/test/order-team-provider.test.js",

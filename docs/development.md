@@ -8,6 +8,8 @@
 
 本地测试库按[PostgreSQL使用规范](local-postgresql.md)登记、复用及清理。新任务先查主检出tmp/postgresql-resources.md；已结束测试不按返修轮次保留成批随机数据库。
 
+标准鉴权启动会组合已有的待付款到期清扫器：每5秒最多取消25个已过期原生占用，沿用账号→订单锁与精确截止CAS，不触碰已付款单。`ORDER_SWEEP_ENABLED=false`仅用于明确不运行交易后台任务的预览；直接调用`createApp`的测试仍须显式传入清扫选项。个人确认另需明确开启`ZZSH_MEMBERSHIP_GROWTH_ENABLED`并具备已批准政策及完整主体来源；关闭或UNKNOWN不自动降为标准价格。
+
 Node.js 24.20.0 / npm 11.19.0，版本见 `.node-version` 和根 package.json。使用根目录的单一 package-lock.json。
 
 `.agents/`、`skills-lock.json` 和 `.claude/skills/` 均为本机技能及安装器状态，保留本地并由根 `.gitignore` 忽略，不随业务仓库提交。其他机器按需自行安装技能；项目协作要求以仓库 AGENTS.md 和正式文档为准。
