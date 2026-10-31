@@ -21,13 +21,16 @@ export function readSessions(): Promise<unknown> {
   return adminRequest<unknown>("/self/sessions");
 }
 
-export function revokeSession(sessionId: string): Promise<unknown> {
-  return adminRequest<unknown>("/self/sessions/revoke", { sessionId });
+export type SessionStepUp = { password: string; totpCode: string };
+
+/** 本人会话注销走安全命令路由，强制本人密码 + 动态码复核；ALTCHA 由 adminRequest 按复核体自动附带。 */
+export function revokeSession(input: { sessionId: string } & SessionStepUp): Promise<unknown> {
+  return adminRequest<unknown>("/security/self-sessions/revoke", { scope: "one", sessionIds: [input.sessionId], password: input.password, totpCode: input.totpCode });
 }
 
-export function revokeOtherSessions(input: { sessionIds: string[] }): Promise<unknown> {
-  // v2.0：只提交用户确认的固定集合，不能重试时从最新列表重新选目标。
-  return adminRequest<unknown>("/self/sessions/revoke-others", { sessionIds: input.sessionIds });
+export function revokeOtherSessions(input: { sessionIds: string[] } & SessionStepUp): Promise<unknown> {
+  // 只提交用户确认的固定集合，不能重试时从最新列表重新选目标。
+  return adminRequest<unknown>("/security/self-sessions/revoke", { scope: "others", sessionIds: input.sessionIds, password: input.password, totpCode: input.totpCode });
 }
 
 export function readSecurityActivity(input: { cursor: string | null; action: string; limit?: number }): Promise<unknown> {

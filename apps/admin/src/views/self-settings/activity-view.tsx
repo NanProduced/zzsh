@@ -385,7 +385,7 @@ export function ActivityView({
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="text-sm font-medium text-foreground">{actionLabel ?? "未识别的事件"}</span>
                       {actionLabel === null ? <Badge variant="unknown">未识别</Badge> : null}
-                      <span className="text-muted-foreground text-xs">{activityActorPhrase(event.actorKind, event.actorRef)}</span>
+                      <span className="text-muted-foreground text-xs">{activityActorPhrase(event.actorKind, event.actorRef, event.action)}</span>
                     </div>
                     {event.reason ? (
                       <p className="text-muted-foreground mt-0.5 break-words text-xs leading-relaxed [overflow-wrap:anywhere]">原因：{event.reason}</p>
@@ -400,8 +400,8 @@ export function ActivityView({
                     ) : (
                       <span className={event.outcome === "FAILURE" ? "text-destructive text-xs" : "text-xs text-foreground"}>{outcomeLabel}</span>
                     )}
-                    <span className="text-muted-foreground font-mono text-[11px] break-all [overflow-wrap:anywhere]">
-                      {beijingDateTime(event.occurredAt)} · {event.action}
+                    <span title={event.action} className="text-muted-foreground font-mono text-[11px] break-all [overflow-wrap:anywhere]">
+                      {beijingDateTime(event.occurredAt)}
                     </span>
                     {event.requestId ? (
                       <span className="text-muted-foreground font-mono text-[11px] break-all [overflow-wrap:anywhere]">

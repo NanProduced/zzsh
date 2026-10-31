@@ -81,6 +81,7 @@ const SECURITY_PATHS = new Map([
   ["/security/admins/reset-password", "/api/v1/admin/security/admins/reset-password"],
   ["/security/admins/reset-2fa", "/api/v1/admin/security/admins/reset-2fa"],
   ["/security/login-two-factor", "/api/v1/admin/security/login-two-factor"],
+  ["/security/self-sessions/revoke", "/api/v1/admin/security/self-sessions/revoke"],
   ["/security/admins", "/api/v1/admin/security/admins"],
   ["/security/admins/detail", "/api/v1/admin/security/admins/detail"],
   ["/security/admins/scope", "/api/v1/admin/security/admins/scope"],

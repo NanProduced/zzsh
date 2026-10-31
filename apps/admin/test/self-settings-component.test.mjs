@@ -105,6 +105,14 @@ const click = async (node) => {
   });
   await settle();
 };
+const confirmRevoke = async (view) => {
+  const box = view.el.ownerDocument.querySelector('[role="dialog"]') ?? view.el;
+  const [pw, code] = [box.querySelector('input[type="password"]'), box.querySelector('input[inputmode="numeric"]')];
+  assert.ok(pw && code, "注销确认必须要求本人密码与动态码");
+  await type(view, pw, "fixture-password");
+  await type(view, code, "123456");
+  await click(dialogButton(view, "确认注销"));
+};
 const type = async (view, node, value) => {
   await act(async () => {
     const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
@@ -132,8 +140,8 @@ test("adapter: 六个调用都走既有 adminRequest 与合同 §0.1 路径", as
   await api.readProfile();
   await api.updateProfileDisplayName("新的显示名称");
   await api.readSessions();
-  await api.revokeSession("session_fixture_other");
-  await api.revokeOtherSessions({ sessionIds: ["session_fixture_other"] });
+  await api.revokeSession({ sessionId: "session_fixture_other", password: "pw", totpCode: "123456" });
+  await api.revokeOtherSessions({ sessionIds: ["session_fixture_other"], password: "pw", totpCode: "123456" });
   await api.readSecurityActivity({ cursor: "C1", action: "admin.frozen", limit: 20 });
   assert.deepEqual(
     calls.map((call) => [call.url.replace("/api/bff/admin", ""), call.method, call.body]),
@@ -141,8 +149,8 @@ test("adapter: 六个调用都走既有 adminRequest 与合同 §0.1 路径", as
       ["/self/profile", "GET", undefined],
       ["/self/profile", "POST", JSON.stringify({ displayName: "新的显示名称" })],
       ["/self/sessions", "GET", undefined],
-      ["/self/sessions/revoke", "POST", JSON.stringify({ sessionId: "session_fixture_other" })],
-      ["/self/sessions/revoke-others", "POST", JSON.stringify({ sessionIds: ["session_fixture_other"] })],
+      ["/security/self-sessions/revoke", "POST", JSON.stringify({ scope: "one", sessionIds: ["session_fixture_other"], password: "pw", totpCode: "123456" })],
+      ["/security/self-sessions/revoke", "POST", JSON.stringify({ scope: "others", sessionIds: ["session_fixture_other"], password: "pw", totpCode: "123456" })],
       ["/self/security-activity?limit=20&cursor=C1&action=admin.frozen", "GET", undefined],
     ],
   );
@@ -166,8 +174,8 @@ test("master: 资料成功必须有合法信封、本人身份和提交名称", 
 
 test("master: 批量注销适配器传递固定目标集合", async () => {
   const calls = stubFetch({});
-  await api.revokeOtherSessions({ sessionIds: ["fixed-a", "fixed-b"] });
-  assert.deepEqual(JSON.parse(calls[0].body), { sessionIds: ["fixed-a", "fixed-b"] });
+  await api.revokeOtherSessions({ sessionIds: ["fixed-a", "fixed-b"], password: "pw", totpCode: "123456" });
+  assert.deepEqual(JSON.parse(calls[0].body), { scope: "others", sessionIds: ["fixed-a", "fixed-b"], password: "pw", totpCode: "123456" });
 });
 
 test("master: 批量确认保存确切id，成功计数必须匹配确认集合", async () => {
@@ -176,8 +184,8 @@ test("master: 批量确认保存确切id，成功计数必须匹配确认集合"
     sent = value; return { status: true, revokedSessionCount: 0 };
   } }));
   try {
-    await settle(); await click(buttonByText(view, "退出其他设备")); await click(dialogButton(view, "确认注销"));
-    assert.deepEqual(sent, { sessionIds: ["session_fixture_other"] });
+    await settle(); await click(buttonByText(view, "退出其他设备")); await confirmRevoke(view);
+    assert.deepEqual(sent, { sessionIds: ["session_fixture_other"], password: "fixture-password", totpCode: "123456" });
     assert.ok(byText(view, "无法确认"));
     assert.equal(byText(view, "已确认注销"), false);
   } finally { view.unmount(); }
@@ -209,7 +217,7 @@ test("master: 切身份发生在快照刷新中时，两页不得启动旧身份
     try{
       await settle();
       if(Component===ProfileView){await type(view,input(view),"旧身份新名");await click(buttonByText(view,"保存显示名称"));}
-      else{await click(buttonByText(view,"注销该会话"));await click(dialogButton(view,"确认注销"));}
+      else{await click(buttonByText(view,"注销该会话"));await confirmRevoke(view);}
       view.rerender(propsFn({adminUserId:"admin_new",sessionId:"session_new",
         load:async()=>Component===ProfileView?{...PROFILE,adminUserId:"admin_new",zzNumber:"ZZ00002",displayName:"新身份"}:
           {sessions:[{...SESSIONS_BODY.sessions[0],id:"session_new"}]}}));
@@ -246,7 +254,7 @@ test("master: 路由404但目标仍在时不能宣称注销成功", async () => 
   let writes=0;
   const view=mount(SessionsView,sessionProps({revokeSession:async()=>{writes++;throw notFoundError();}}));
   try{
-    await settle();await click(buttonByText(view,"注销该会话"));await click(dialogButton(view,"确认注销"));await settle();
+    await settle();await click(buttonByText(view,"注销该会话"));await confirmRevoke(view);await settle();
     assert.equal(writes,1);
     assert.ok(byText(view,"仍在本人有效列表"));
     assert.equal(byText(view,"已确认注销"),false);
@@ -549,7 +557,7 @@ test("sessions: 取消确认零请求；确认后只注销该会话并重读列�
   assert.equal(dialog(view), null);
 
   await click(buttonByText(view, "注销该会话"));
-  await click(dialogButton(view, "确认注销"));
+  await confirmRevoke(view);
   await settle(60);
   assert.deepEqual(revoked, ["session_fixture_other"], "只允许注销非当前会话");
   assert.equal(reads, 2, "成功后以服务端列表为准重新读取");
@@ -565,7 +573,7 @@ test("sessions: 批量撤销结论只覆盖本次确认集合", async () => {
   await settle();
   await click(buttonByText(view, "退出其他设备"));
   assert.match(dialog(view).textContent, /当前会话保留/);
-  await click(dialogButton(view, "确认注销"));
+  await confirmRevoke(view);
   await settle(60);
   assert.ok(byText(view, "本次选择的 1 个有效会话"), text(view));
   assert.ok(byText(view, "此后新登录的会话不在该结论范围内"));
@@ -587,7 +595,7 @@ test("sessions: 响应丢失不本地删行、不自动重发；读回后目标�
   }));
   await settle();
   await click(buttonByText(view, "注销该会话"));
-  await click(dialogButton(view, "确认注销"));
+  await confirmRevoke(view);
   await settle(60);
   assert.equal(writes, 1, "未知态绝不自动重发");
   assert.ok(byText(view, "无法确认"), text(view));
@@ -609,7 +617,7 @@ test("sessions: 读回后目标仍在列表时不推断原请求终态", async (
   }));
   await settle();
   await click(buttonByText(view, "注销该会话"));
-  await click(dialogButton(view, "确认注销"));
+  await confirmRevoke(view);
   await settle(60);
   await click(buttonByText(view, "重新读取列表"));
   await settle(60);
@@ -625,7 +633,7 @@ test("sessions: 404 后以列表核实目标已不在；409 当前会话保护�
   }));
   await settle();
   await click(buttonByText(gone, "注销该会话"));
-  await click(dialogButton(gone, "确认注销"));
+  await confirmRevoke(gone);
   await settle(60);
   assert.ok(byText(gone, "已不在本人有效会话列表中"), text(gone));
   assert.ok(!byText(gone, "重新读取列表"), "404 已是明确结论，不诱导重放");
@@ -634,7 +642,7 @@ test("sessions: 404 后以列表核实目标已不在；409 当前会话保护�
   const protectedSelf = mount(SessionsView, sessionProps({ revokeSession: () => Promise.reject(conflictError()) }));
   await settle();
   await click(buttonByText(protectedSelf, "注销该会话"));
-  await click(dialogButton(protectedSelf, "确认注销"));
+  await confirmRevoke(protectedSelf);
   await settle(60);
   assert.ok(byText(protectedSelf, "当前登录会话"), text(protectedSelf));
   assert.ok(byText(protectedSelf, "登出流程"));
@@ -645,7 +653,7 @@ test("sessions: 撤销信封不合法时按合同异常，不当成成功", asyn
   const view = mount(SessionsView, sessionProps({ revokeSession: async () => ({ status: true }) }));
   await settle();
   await click(buttonByText(view, "注销该会话"));
-  await click(dialogButton(view, "确认注销"));
+  await confirmRevoke(view);
   await settle(60);
   assert.ok(byText(view, "revokedSessionCount"), text(view));
   assert.ok(!byText(view, "已确认注销"), "合同异常不得显示为成功");
@@ -662,7 +670,7 @@ test("sessions: 处理中互斥；未标记当前会话时禁用全部注销；�
   const targets = buttons(mutex).filter((node) => (node.textContent ?? "").includes("注销该会话"));
   assert.equal(targets.length, 2);
   await click(targets[0]);
-  await click(dialogButton(mutex, "确认注销"));
+  await confirmRevoke(mutex);
   assert.ok(byText(mutex, "处理中…"), text(mutex));
   assert.ok(buttons(mutex).filter((node) => (node.textContent ?? "").includes("注销该会话")).every((node) => node.disabled), "并发注销会改变目标集合，必须互斥");
   assert.ok(buttonByText(mutex, "退出其他设备").disabled);
@@ -766,7 +774,8 @@ test("activity: 首次读取渲染真实事件；有下一页时不显示已读�
   await settle();
   assert.ok(byText(view, "登录密码已修改"), text(view));
   assert.ok(byText(view, "本人发起"));
-  assert.ok(byText(view, "admin.password.changed"), "原码保留在次级追溯位");
+  assert.ok(!byText(view, "admin.password.changed"), "正文不展示原始动作码");
+  assert.ok(view.el.querySelector('[title="admin.password.changed"]'), "原码仅保留在悬停提示");
   assert.ok(byText(view, "请求编号 req_e1"));
   assert.ok(!byText(view, "当前查询没有更多记录"), "分页未完时不得显示终点");
   assert.equal(buttonByText(view, "上一页").disabled, true);
@@ -949,4 +958,25 @@ test("activity: 切身份清空投影并隔离旧响应", async () => {
   await settle(60);
   assert.equal(rows(view).length, 0, "旧身份迟到响应不得落到新身份");
   view.unmount();
+});
+
+test("sessions: 设备解析、脚本标记、IP 脱敏与地区、最近活跃与「N 天后过期」", async () => {
+  const now = Date.now();
+  const body = { sessions: [
+    { id: "session_fixture_current", isCurrent: true, createdAt: new Date(now - 3600e3).toISOString(), expiresAt: new Date(now + 7 * 86400e3 + 60e3).toISOString(), userAgent: "Mozilla/5.0 Chrome/141", locked: false, ipAddress: "10.0.0.8", ipMasked: false, region: "本机/内网", lastActiveAt: new Date(now - 60e3).toISOString(), client: { label: "Chrome 141 · Windows 10/11", isScript: false, deviceType: "desktop" } },
+    { id: "session_script", isCurrent: false, createdAt: new Date(now - 7200e3).toISOString(), expiresAt: new Date(now + 3 * 86400e3 + 60e3).toISOString(), userAgent: "node", locked: false, ipAddress: "203.0.*.*", ipMasked: true, region: "广东省 深圳市 · 电信", lastActiveAt: null, client: { label: "脚本/非浏览器客户端 (node)", isScript: true, deviceType: "script" } },
+  ] };
+  const view = mount(SessionsView, sessionProps({ load: async () => structuredClone(body) }));
+  try {
+    await settle();
+    assert.ok(byText(view, "Chrome 141 · Windows 10/11"));
+    assert.ok(byText(view, "7 天后过期") && byText(view, "3 天后过期"), text(view));
+    assert.ok(byText(view, "最近活跃") && byText(view, "刚刚"));
+    assert.ok(byText(view, "203.0.*.*") && byText(view, "广东省 深圳市 · 电信"));
+    assert.equal(view.el.querySelectorAll('[aria-label="复制会话引用"]').length, 2);
+    assert.ok(!byText(view, "会话引用 session_script"), "会话引用不直接铺在正文里");
+    assert.ok([...view.el.querySelectorAll("span,div")].some((n) => n.textContent === "脚本/非浏览器客户端"), "node UA 必须标记");
+    await click(buttonByText(view, "注销该会话"));
+    assert.equal(dialogButton(view, "确认注销").disabled, true, "未填密码与动态码不得提交");
+  } finally { view.unmount(); }
 });

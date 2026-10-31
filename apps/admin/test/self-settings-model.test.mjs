@@ -280,7 +280,9 @@ test("activity: details 只显示合同允许的键，未知键不透传", () =>
   });
   assert.deepEqual(Object.keys(parsed.events[0].details), ["revokedSessionCount"]);
   assert.deepEqual(activityDetailPhrases(parsed.events[0].details), ["注销会话数：2"]);
-  assert.deepEqual(activityDetailPhrases({ locked: true, scope: "others" }), ["锁态：是", "作用范围：others"]);
+  assert.deepEqual(activityDetailPhrases({ locked: true, scope: "others" }), ["锁态：是", "作用范围：其他全部会话"]);
+  assert.deepEqual(activityDetailPhrases({ authScope: "sign-in", failures: 3, lockSeconds: 900, lockedUntil: "2026-10-31T09:54:00.000Z", loginTwoFactorRequired: false }),
+    ["场景：登录", "累计失败：3 次", "锁定时长：15 分钟", "解锁时间：2026/10/31 17:54", "登录需二次验证：否"]);
 });
 
 test("activity: 游标栈只在服务端确认有下一页时前进，回退不越界", () => {

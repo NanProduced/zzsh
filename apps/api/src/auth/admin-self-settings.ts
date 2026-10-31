@@ -3,6 +3,8 @@ import type { PoolClient } from "pg";
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
 import { assertAdminContextInTransaction, readAdminContext, type AdminContext, type AuthSecurityNodeRequest, type AuthSecurityNodeResponse, type AuthSecurityOptions } from "./auth-security";
 import { SecurityApiError } from "./security-core";
+import { adminAuthSubject } from "./admin-brute-force";
+import { loadIp2RegionFromEnv, maskSessionIp, normalizeSessionIp, parseSessionUserAgent, sessionRegion } from "./admin-session-device";
 import { withDirectoryReadTransaction } from "./user-directory-read";
 
 // R0 shares existing authentication/read transactions; no settings writer or new schema is mounted.
@@ -24,6 +26,7 @@ export const SELF_ACTIVITY_ACTOR_ACTIONS = [
   "admin.backup_codes.generated",
   "admin.backup_codes.generate",
   "admin.self.sessions.revoked",
+  "admin.login_two_factor.changed",
   "admin.enrollment.activated",
   "admin.recovery.requested",
   "admin.recovery.completed",
@@ -40,6 +43,14 @@ export const SELF_ACTIVITY_TARGET_ACTIONS = [
   "admin.bootstrap.created",
   "admin.enrollment.activated",
   "admin.recovery.completed",
+  "admin.password.reset",
+  "admin.two_factor.reset",
+] as const;
+
+/** 登录防护（brute-force）审计：系统写入、object_id 为账号主体哈希，按本人登录标识反算主体后匹配。 */
+export const SELF_ACTIVITY_AUTH_ACTIONS = [
+  "admin.auth.failure",
+  "admin.auth.lockout",
 ] as const;
 
 export const SELF_ACTIVITY_RECOVERY_TARGET_ACTIONS = [
@@ -52,13 +63,14 @@ export const SELF_ACTIVITY_READABLE_ACTIONS = [
     ...SELF_ACTIVITY_ACTOR_ACTIONS,
     ...SELF_ACTIVITY_TARGET_ACTIONS,
     ...SELF_ACTIVITY_RECOVERY_TARGET_ACTIONS,
+    ...SELF_ACTIVITY_AUTH_ACTIONS,
   ]),
 ];
 
 // R1 已装配本人改密与备份码 writer（含带 key 拒绝回执审计）：admin.password.changed/.change 与
 // admin.backup_codes.generated/.generate 都有实际写入点，与可读历史动作分开记录。
-// 本人其他设备注销仍未实现；sign_in/sign_out 继续不在本投影内。
-const UNMOUNTED_ACTIVITY_ACTIONS = ["admin.self.sessions.revoked"];
+// 本人会话注销 writer 已装配（/security/self-sessions/revoke）；成功登录/退出仍无审计写入，不在本投影内。
+const UNMOUNTED_ACTIVITY_ACTIONS: string[] = [];
 // Readable historical actions do not imply that every held writer is mounted.
 export const SELF_ACTIVITY_RECORDED_ACTIONS = SELF_ACTIVITY_READABLE_ACTIONS.filter(action => !UNMOUNTED_ACTIVITY_ACTIONS.includes(action));
 export const SELF_ACTIVITY_NOT_RECORDED = ["sign_in", "sign_out", ...UNMOUNTED_ACTIVITY_ACTIONS];
@@ -73,6 +85,11 @@ const ACTIVITY_CATEGORY: Record<string, string> = {
   "admin.backup_codes.generated": "backup_codes",
   "admin.backup_codes.generate": "backup_codes",
   "admin.self.sessions.revoked": "session",
+  "admin.login_two_factor.changed": "credential",
+  "admin.password.reset": "credential",
+  "admin.two_factor.reset": "credential",
+  "admin.auth.failure": "auth",
+  "admin.auth.lockout": "auth",
   "admin.session.force_logged_out": "session",
   "admin.enrollment.activated": "account",
   "admin.bootstrap.created": "account",
@@ -206,6 +223,22 @@ function activityDetails(action: string, raw: unknown): Record<string, unknown> 
     if (details.scope === "one" || details.scope === "others") picked.scope = details.scope;
     const count = finiteNumber(details.revokedSessionCount);
     if (count !== undefined) picked.revokedSessionCount = count;
+  } else if (action === "admin.login_two_factor.changed") {
+    const after = details.after as Record<string, unknown> | undefined;
+    if (after && typeof after.loginTwoFactorRequired === "boolean") picked.loginTwoFactorRequired = after.loginTwoFactorRequired;
+  } else if (action === "admin.password.reset" || action === "admin.two_factor.reset") {
+    const count = finiteNumber(details.revokedSessions);
+    if (count !== undefined) picked.revokedSessions = count;
+  } else if (action === "admin.auth.failure") {
+    if (typeof details.scope === "string") picked.authScope = details.scope;
+    const failures = finiteNumber(details.failures);
+    if (failures !== undefined) picked.failures = failures;
+    if (typeof details.locked === "boolean") picked.locked = details.locked;
+  } else if (action === "admin.auth.lockout") {
+    if (typeof details.scope === "string") picked.authScope = details.scope;
+    const lockSeconds = finiteNumber(details.lockSeconds);
+    if (lockSeconds !== undefined) picked.lockSeconds = lockSeconds;
+    if (typeof details.lockedUntil === "string") picked.lockedUntil = details.lockedUntil;
   }
   return picked;
 }
@@ -297,13 +330,66 @@ async function readSelfProfile(client: PoolClient, context: AdminContext): Promi
   return row;
 }
 
+type SelfSessionRow = { id: string; createdAt: Date | null; expiresAt: Date; userAgent: string | null; locked: boolean; ipAddress?: string | null; lastActiveAt?: Date | string | null };
+
+const SELF_SESSIONS_SQL = (lastActive: string) =>
+  `SELECT "id", "createdAt", "expiresAt", "userAgent", "locked", "ipAddress", ${lastActive} AS "lastActiveAt" FROM "zzsh_auth_admin"."session" WHERE "userId" = $1 AND "expiresAt" > clock_timestamp() ORDER BY "createdAt" DESC, "id" LIMIT 101`;
+
+/** last_active_at 来自迁移 0119；未应用时（42703）在 SAVEPOINT 内回退为 null，不影响列表读取。 */
+async function readSelfSessionRows(client: PoolClient, userId: string): Promise<SelfSessionRow[]> {
+  await client.query("SAVEPOINT self_sessions_last_active");
+  try {
+    const rows = (await client.query<SelfSessionRow>(SELF_SESSIONS_SQL('"last_active_at"'), [userId])).rows;
+    await client.query("RELEASE SAVEPOINT self_sessions_last_active");
+    return rows;
+  } catch (error) {
+    if ((error as { code?: unknown }).code !== "42703") throw error;
+    await client.query("ROLLBACK TO SAVEPOINT self_sessions_last_active");
+    return (await client.query<SelfSessionRow>(SELF_SESSIONS_SQL("NULL::timestamptz"), [userId])).rows;
+  }
+}
+
 async function listSelfSessions(client: PoolClient, context: AdminContext): Promise<unknown> {
-  const rows = (await client.query<{ id: string; createdAt: Date | null; expiresAt: Date; userAgent: string | null; locked: boolean }>(
-    'SELECT "id", "createdAt", "expiresAt", "userAgent", "locked" FROM "zzsh_auth_admin"."session" WHERE "userId" = $1 AND "expiresAt" > clock_timestamp() ORDER BY "createdAt" DESC, "id" LIMIT 101',
-    [context.userId],
-  )).rows;
+  const rows = await readSelfSessionRows(client, context.userId);
   if (rows.length > 100) reject(503, API_V1_ERROR_CODES.INTERNAL_ERROR, "Session list capacity exceeded", "session_list_limit_exceeded");
-  return { sessions: rows.map(row => ({ id: row.id, isCurrent: row.id === context.sessionId, createdAt: iso(row.createdAt), expiresAt: iso(row.expiresAt), userAgent: row.userAgent ? row.userAgent.slice(0, USER_AGENT_MAX_LENGTH) : null, locked: row.locked === true })) };
+  const searcher = loadIp2RegionFromEnv();
+  return {
+    sessions: rows.map(row => {
+      const isCurrent = row.id === context.sessionId;
+      const ip = normalizeSessionIp(row.ipAddress);
+      const userAgent = row.userAgent ? row.userAgent.slice(0, USER_AGENT_MAX_LENGTH) : null;
+      return {
+        id: row.id,
+        isCurrent,
+        createdAt: iso(row.createdAt),
+        expiresAt: iso(row.expiresAt),
+        userAgent,
+        locked: row.locked === true,
+        // 本次会话显示完整 IP；其他会话只显示网段，地区按完整 IP 离线查询。
+        ipAddress: ip ? (isCurrent ? ip : maskSessionIp(ip)) : null,
+        ipMasked: Boolean(ip) && !isCurrent,
+        region: sessionRegion(ip, searcher),
+        lastActiveAt: iso(row.lastActiveAt ?? null),
+        client: parseSessionUserAgent(userAgent),
+      };
+    }),
+  };
+}
+
+/** 登录防护主体：与 withAdminBruteForce / 二次验证 / 恢复流程的 adminAuthSubjects 拼法一致（account 小写）。 */
+async function selfAuthSubjects(client: PoolClient, userId: string): Promise<string[]> {
+  const user = (await client.query<{ username: string | null; displayUsername: string | null; email: string | null }>(
+    'SELECT "username", "displayUsername", "email" FROM "zzsh_auth_admin"."user" WHERE "id" = $1',
+    [userId],
+  )).rows[0];
+  const identifiers = [user?.username, user?.displayUsername, user?.email].filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+  const accounts = [
+    ...identifiers.map(value => "id:" + value),
+    "admin:" + userId,
+    "recovery:" + userId,
+    ...identifiers.map(value => "recovery:" + value),
+  ];
+  return [...new Set(accounts.map(account => adminAuthSubject("account", account.trim().toLowerCase())))];
 }
 
 async function readSelfSecurityActivity(client: PoolClient, context: AdminContext, query: ActivityQuery): Promise<unknown> {
@@ -313,12 +399,15 @@ async function readSelfSecurityActivity(client: PoolClient, context: AdminContex
     [...SELF_ACTIVITY_TARGET_ACTIONS],
     [...SELF_ACTIVITY_RECOVERY_TARGET_ACTIONS],
     query.limit + 1,
+    [...SELF_ACTIVITY_AUTH_ACTIONS],
+    await selfAuthSubjects(client, context.userId),
   ];
   const conditions = [
     `((e."actor_type" IN ('admin', 'admin_recovery_target') AND e."actor_id" = $1 AND e."action" = ANY($2::text[]))
        OR (e."object_id" = $1 AND e."action" = ANY($3::text[])
            AND e."object_type" = CASE WHEN e."action" IN ('admin.frozen', 'admin.unfrozen', 'admin.enrollment.activated') THEN 'admin_security' ELSE 'admin_user' END)
-       OR (e."object_type" = 'admin_recovery_request' AND e."action" = ANY($4::text[]) AND e."details"->>'targetAdminId' = $1))`,
+       OR (e."object_type" = 'admin_recovery_request' AND e."action" = ANY($4::text[]) AND e."details"->>'targetAdminId' = $1)
+       OR (e."actor_type" = 'system' AND e."object_type" = 'admin_auth_subject' AND e."action" = ANY($6::text[]) AND e."object_id" = ANY($7::text[])))`,
   ];
   if (query.action) conditions.push(`e."action" = $${values.push(query.action)}`);
   if (query.from) conditions.push(`e."occurred_at" >= $${values.push(query.from)}`);

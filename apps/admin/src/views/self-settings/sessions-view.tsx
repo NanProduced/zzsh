@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
-import { LogOutIcon, MonitorIcon } from "lucide-react";
+import { CopyIcon, LogOutIcon, MonitorIcon, TerminalIcon } from "lucide-react";
 
 import { Button } from "../../components/ui/button";
 import { Badge } from "../../components/ui/badge";
+import { Input } from "../../components/ui/input";
+import { PasswordInput } from "../../components/ui-elements";
+import { StepUpCaptcha } from "../../components/altcha-field";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../../components/ui/dialog";
 import { Skeleton } from "../../components/ui/skeleton";
 import {
@@ -11,6 +14,8 @@ import {
   canRevokeRow,
   classifyReadFailure,
   ContractViolation,
+  expiresInPhrase,
+  relativePastPhrase,
   otherSessionCount,
   parseRevokePayload,
   parseSessionsPayload,
@@ -30,8 +35,8 @@ export type SessionsViewProps = {
   locked: boolean;
   load: () => Promise<unknown>;
   /** 缺少写回调即表示撤销合同未接入：给出原因并禁用，不放装饰性按钮。 */
-  revokeSession?: (input: { sessionId: string }) => Promise<unknown>;
-  revokeOtherSessions?: (input: { sessionIds: string[] }) => Promise<unknown>;
+  revokeSession?: (input: { sessionId: string; password: string; totpCode: string }) => Promise<unknown>;
+  revokeOtherSessions?: (input: { sessionIds: string[]; password: string; totpCode: string }) => Promise<unknown>;
   writeDisabledReason?: string;
   /** 既有快照/会话刷新协调；本包不自建全局 401/423 处理。 */
   onSessionRefresh?: () => Promise<unknown> | unknown;
@@ -43,7 +48,12 @@ type ConfirmTarget = { kind: "single"; row: SessionRow } | { kind: "others"; ses
 type Outcome = { kind: "done" | "unknown" | "checked" | "rejected"; message: string };
 
 function rowTitle(row: SessionRow): string {
-  return row.createdAt === null ? "创建时间未提供" : `${beijingDateTime(row.createdAt)} 建立`;
+  return row.createdAt === null ? "创建时间未提供" : `${beijingDateTime(row.createdAt)} 登录`;
+}
+
+/** 设备主文案：优先服务端 UA 解析；旧接口未解析时退回原始 UA。 */
+function deviceLabel(row: SessionRow): string | null {
+  return row.client?.label ?? row.userAgent;
 }
 
 export function SessionsView({
@@ -70,6 +80,11 @@ export function SessionsView({
   const [pending, setPending] = useState<Pending>(null);
   const [confirmTarget, setConfirmTarget] = useState<ConfirmTarget>(null);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
+  const [password, setPassword] = useState("");
+  const [totpCode, setTotpCode] = useState("");
+  const stepUpReady = password.length > 0 && /^\d{6}$/.test(totpCode);
+  const openConfirm = (target: NonNullable<ConfirmTarget>) => { setPassword(""); setTotpCode(""); setConfirmTarget(target); };
+  const closeConfirm = () => { setPassword(""); setTotpCode(""); setConfirmTarget(null); };
   const reconcileTargetRef = useRef<string[] | null>(null);
   const pendingRef = useRef(false);
 
@@ -161,8 +176,10 @@ export function SessionsView({
   const actionsBlocked = loading || pending !== null || outcome?.kind === "unknown" || Boolean(loadFailure) || !currentMarked || accountStatus !== "ACTIVE" || locked || writeUnavailable;
 
   const runRevoke = async (target: NonNullable<ConfirmTarget>) => {
-    if (actionsBlocked || pendingRef.current || writeDisabledReason) return;
+    if (actionsBlocked || pendingRef.current || writeDisabledReason || !stepUpReady) return;
     pendingRef.current = true;
+    const stepUp = { password, totpCode };
+    setPassword(""); setTotpCode("");
     const epoch = epochRef.current;
     const seq = ++seqRef.current;
     const scope = target.kind === "single" ? "single" : "others";
@@ -175,10 +192,10 @@ export function SessionsView({
       let revokedSessionCount = 0;
       if (scope === "single") {
         if (!revokeSession) throw new Error("撤销单个会话的接口尚未接入");
-        revokedSessionCount = parseRevokePayload(await revokeSession({ sessionId: targetId as string })).revokedSessionCount;
+        revokedSessionCount = parseRevokePayload(await revokeSession({ sessionId: targetId as string, ...stepUp })).revokedSessionCount;
       } else {
         if (!revokeOtherSessions) throw new Error("退出其他设备的接口尚未接入");
-        revokedSessionCount = parseRevokePayload(await revokeOtherSessions({ sessionIds: [...targetIds] })).revokedSessionCount;
+        revokedSessionCount = parseRevokePayload(await revokeOtherSessions({ sessionIds: [...targetIds], ...stepUp })).revokedSessionCount;
       }
       if (!isCurrent(epoch, seq)) return;
       if (revokedSessionCount !== targetIds.length) throw new ContractViolation("注销计数与本次确认的目标集合不一致");
@@ -230,7 +247,7 @@ export function SessionsView({
       <SettingsPageHeader
         eyebrow="设置 · 设备与会话"
         title="设备与会话"
-        description="查看本人当前有效的登录会话，并注销不再信任的其他会话。"
+        description="查看在哪些设备上登录过，退出不再使用或不认识的设备。"
       />
       {locked || accountStatus !== "ACTIVE" ? (
         <SettingsNotice tone="warning">{locked ? "当前会话已锁定，解锁后可查看会话列表。" : accountStatus === "FROZEN" ? "账号已冻结，会话列表暂不可用。" : "请先完成身份验证后查看会话列表。"}</SettingsNotice>
@@ -308,7 +325,7 @@ export function SessionsView({
             }
             aside={
               others > 0 ? (
-                <Button type="button" size="sm" variant="destructive" disabled={actionsBlocked || (!revokeOtherSessions && !writeDisabledReason) || others > 50} onClick={() => setConfirmTarget({ kind: "others", sessionIds: rows.filter(canRevokeRow).map((row) => row.id) })}>
+                <Button type="button" size="sm" variant="destructive" disabled={actionsBlocked || (!revokeOtherSessions && !writeDisabledReason) || others > 50} onClick={() => openConfirm({ kind: "others", sessionIds: rows.filter(canRevokeRow).map((row) => row.id) })}>
                   <LogOutIcon />
                   <span>退出其他设备（{others}）</span>
                 </Button>
@@ -323,7 +340,7 @@ export function SessionsView({
                   row={row}
                   pending={pending?.kind === "single" && pending.sessionId === row.id}
                   disabled={actionsBlocked || (!revokeSession && !writeDisabledReason)}
-                  onRevoke={() => setConfirmTarget({ kind: "single", row })}
+                  onRevoke={() => openConfirm({ kind: "single", row })}
                 />
               ))
             ) : (
@@ -341,7 +358,7 @@ export function SessionsView({
       <Dialog
         open={confirmTarget !== null}
         onOpenChange={(next) => {
-          if (!next) setConfirmTarget(null);
+          if (!next) closeConfirm();
         }}
       >
         <DialogContent className="sm:max-w-md">
@@ -356,14 +373,28 @@ export function SessionsView({
             </DialogDescription>
           </DialogHeader>
           <p className="text-muted-foreground text-xs leading-relaxed">
-            该动作在服务端执行身份与归属检查；确认后不可撤销，对应会话需要重新登录。取消不会发出任何请求。
+            确认后对应设备需要重新登录，无法撤回。取消不会发出任何请求。
           </p>
+          <form className="space-y-3" onSubmit={(event) => { event.preventDefault(); if (confirmTarget && stepUpReady) void runRevoke(confirmTarget); }}>
+            <label className="block space-y-1">
+              <span className="text-xs font-medium">本人密码</span>
+              <PasswordInput autoComplete="current-password" value={password} disabled={Boolean(writeDisabledReason)}
+                onChange={(event) => setPassword(event.target.value)}
+                className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm focus-visible:outline-none!" />
+            </label>
+            <label className="block space-y-1">
+              <span className="text-xs font-medium">6 位动态验证码</span>
+              <Input inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={totpCode} disabled={Boolean(writeDisabledReason)}
+                onChange={(event) => setTotpCode(event.target.value.replace(/\D/g, "").slice(0, 6))} className="focus-visible:outline-none!" />
+            </label>
+            <StepUpCaptcha />
+          </form>
           <DialogFooter>
             {writeDisabledReason ? <p className="text-xs text-muted-foreground">{writeDisabledReason}</p> : null}
-            <Button type="button" size="sm" variant="ghost" onClick={() => setConfirmTarget(null)}>
+            <Button type="button" size="sm" variant="ghost" onClick={closeConfirm}>
               取消
             </Button>
-            <Button type="button" size="sm" variant="destructive" disabled={Boolean(writeDisabledReason)} onClick={() => confirmTarget && void runRevoke(confirmTarget)}>
+            <Button type="button" size="sm" variant="destructive" disabled={Boolean(writeDisabledReason) || !stepUpReady} onClick={() => confirmTarget && void runRevoke(confirmTarget)}>
               确认注销
             </Button>
           </DialogFooter>
@@ -391,33 +422,52 @@ function SessionRowView({
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <h3 className="text-sm font-medium text-foreground break-words [overflow-wrap:anywhere]">{rowTitle(row)}</h3>
+            <h3 className="text-sm font-medium text-foreground break-words [overflow-wrap:anywhere]" title={row.userAgent ?? undefined}>
+              {deviceLabel(row) ?? "设备未识别"}
+            </h3>
             {current ? <Badge variant="secondary">当前会话</Badge> : null}
+            {row.client?.isScript ? <Badge variant="warning" title="该会话不是由浏览器建立的，若不是你本人运行的脚本，请立即退出并修改密码。"><TerminalIcon className="size-3" aria-hidden />脚本/非浏览器客户端</Badge> : null}
             {row.locked ? <Badge variant="warning">已锁屏</Badge> : null}
             {pending ? <Badge variant="info">处理中…</Badge> : null}
           </div>
           <dl className="text-muted-foreground mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs">
             <div className="flex min-w-0 items-baseline gap-1">
-              <dt>到期</dt>
-              <dd>{row.expiresAt === null ? <MissingValue /> : <span className="text-foreground">{beijingDateTime(row.expiresAt)}</span>}</dd>
+              <dt className="sr-only">登录时间</dt>
+              <dd>{rowTitle(row)}</dd>
             </div>
-            <div className="flex min-w-0 items-baseline gap-1">
-              <dt>客户端字符串</dt>
-              <dd>
-                {row.userAgent === null ? (
-                  <MissingValue />
-                ) : (
-                  <span className="text-foreground break-all [overflow-wrap:anywhere]">{row.userAgent}</span>
-                )}
-              </dd>
+            {row.lastActiveAt !== null ? (
+              <div className="flex min-w-0 items-baseline gap-1" title={beijingDateTime(row.lastActiveAt)}>
+                <dt>最近活跃</dt>
+                <dd className="text-foreground">{relativePastPhrase(row.lastActiveAt)}</dd>
+              </div>
+            ) : null}
+            {row.ipAddress !== null ? (
+              <div className="flex min-w-0 items-baseline gap-1" title={row.ipMasked ? "非当前设备的 IP 已部分隐藏" : undefined}>
+                <dt>IP</dt>
+                <dd className="text-foreground font-mono">{row.ipAddress}{row.region ? <span className="font-sans text-muted-foreground"> · {row.region}</span> : null}</dd>
+              </div>
+            ) : null}
+            <div className="flex min-w-0 items-baseline gap-1" title={row.expiresAt === null ? undefined : `北京时间 ${beijingDateTime(row.expiresAt)} 到期`}>
+              <dt className="sr-only">有效期</dt>
+              <dd>{row.expiresAt === null ? <MissingValue /> : <span className="text-foreground">{expiresInPhrase(row.expiresAt)}</span>}</dd>
             </div>
+            {deviceLabel(row) === null ? (
+              <div className="flex min-w-0 items-baseline gap-1">
+                <dt>客户端</dt>
+                <dd><MissingValue /></dd>
+              </div>
+            ) : null}
           </dl>
-          <p className="text-muted-foreground mt-1 break-all font-mono text-[11px]">会话引用 {row.id}</p>
+          <button type="button" title={`会话引用 ${row.id}`} aria-label="复制会话引用"
+            onClick={() => { void navigator.clipboard?.writeText(row.id).catch(() => undefined); }}
+            className="text-muted-foreground hover:text-foreground mt-1 inline-flex items-center gap-1 text-[11px]">
+            <CopyIcon className="size-3" aria-hidden />复制会话引用
+          </button>
         </div>
         {current ? (
           <p className="text-muted-foreground shrink-0 text-xs">本次登录；注销其他会话不影响它。</p>
         ) : (
-          <Button type="button" size="sm" variant="outline" disabled={disabled || pending} onClick={onRevoke} className="shrink-0">
+          <Button type="button" size="sm" variant="destructive" disabled={disabled || pending} onClick={onRevoke} className="shrink-0">
             <LogOutIcon />
             <span>注销该会话</span>
           </Button>

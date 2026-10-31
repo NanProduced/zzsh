@@ -498,6 +498,25 @@ function isoDate(value: unknown): string | null {
   return null;
 }
 
+let adminSessionLastActiveUnavailable = false;
+
+/**
+ * 最近活跃时间节流写入（≥5 分钟才更新一次）。列来自迁移 0119：未应用（42703）后本进程不再尝试；
+ * 任何失败都吞掉，绝不影响会话快照与登录。
+ */
+async function touchAdminSessionLastActive(pool: Pool, sessionId: string): Promise<void> {
+  if (adminSessionLastActiveUnavailable) return;
+  try {
+    await pool.query(
+      `UPDATE "zzsh_auth_admin"."session" SET "last_active_at" = clock_timestamp()
+        WHERE "id" = $1 AND ("last_active_at" IS NULL OR "last_active_at" < clock_timestamp() - interval '5 minutes')`,
+      [sessionId],
+    );
+  } catch (error) {
+    if ((error as { code?: unknown }).code === "42703") adminSessionLastActiveUnavailable = true;
+  }
+}
+
 export async function getAdminSessionSnapshot(headers: Headers, options: AuthSecurityOptions): Promise<AdminSessionSnapshot> {
   const credentials = credentialsFromHeaders(headers);
   if (credentials.conflict || credentials.malformed) {
@@ -513,6 +532,7 @@ export async function getAdminSessionSnapshot(headers: Headers, options: AuthSec
     `SELECT "pinHash" IS NOT NULL AS "pinConfigured" FROM "zzsh_auth_admin"."session" WHERE "id" = $1`,
     [sessionId],
   );
+  await touchAdminSessionLastActive(options.pool, sessionId);
   const access = await loadEffectiveAdminAccess(options.pool, userId);
   const loginTwoFactorRequired = await readAdminLoginTwoFactorRequired(options.pool, userId);
   return {
@@ -1222,6 +1242,54 @@ async function changeLoginTwoFactorPreference(request: NodeRequest, response: No
   }, requestId);
 }
 
+const SELF_SESSION_REVOKE_MAX = 50;
+
+/**
+ * 本人注销其他会话（单条或「退出其他设备」固定集合）。
+ * - 当前会话受保护（409），只删除本人名下、未过期、且在本次确认集合内的会话；
+ * - 与其他敏感动作一致：当场验证本人密码与动态码（step-up）；
+ * - 写入 admin.self.sessions.revoked 审计（scope + 实际注销数）。
+ */
+async function revokeSelfSessions(request: NodeRequest, response: NodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
+  const context = await readAdminContext(request, options);
+  const body = bodyOf(request);
+  const scope = body.scope === "one" || body.scope === "others" ? body.scope : undefined;
+  const ids = Array.isArray(body.sessionIds) ? body.sessionIds : undefined;
+  if (
+    !scope || !ids || ids.length === 0 || ids.length > SELF_SESSION_REVOKE_MAX
+    || ids.some((id) => typeof id !== "string" || id.length === 0 || id.length > 128)
+    || new Set(ids).size !== ids.length || (scope === "one" && ids.length !== 1)
+  ) {
+    throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Session selection is invalid");
+  }
+  if (ids.includes(context.sessionId)) throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Current session is protected");
+  await verifyAdminReauthentication(request, context, body, options);
+  const revokedSessionCount = await withTransaction(options.pool, async (client) => {
+    await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
+    const actor = await lockActor(client, context.userId);
+    if (actor.status !== "ACTIVE") throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Administrator is not active");
+    const deleted = await client.query(
+      `DELETE FROM "zzsh_auth_admin"."session" WHERE "userId" = $1 AND "id" = ANY($2::text[]) AND "id" <> $3 AND "expiresAt" > clock_timestamp()`,
+      [context.userId, ids, context.sessionId],
+    );
+    const count = deleted.rowCount ?? 0;
+    if (scope === "one" && count === 0) throw new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Session not found");
+    await recordAudit(client, {
+      actorType: "admin",
+      actorId: context.userId,
+      sessionId: context.sessionId,
+      action: "admin.self.sessions.revoked",
+      objectType: "admin_user",
+      objectId: context.userId,
+      outcome: "SUCCESS",
+      requestId,
+      details: { scope, requestedSessionCount: ids.length, revokedSessionCount: count },
+    });
+    return count;
+  });
+  sendSuccess(response, { status: true, revokedSessionCount }, requestId);
+}
+
 const ADMIN_CREDENTIAL_RESET_TTL = "7 days";
 
 /**
@@ -1830,6 +1898,7 @@ export async function handleAdminSecurity(request: AuthSecurityNodeRequest, resp
     if (path === "/freeze") return await changeAdminFreezeState(request, response, requestId, options, "FROZEN");
     if (path === "/unfreeze") return await changeAdminFreezeState(request, response, requestId, options, "ACTIVE");
     if (path === "/admins/force-logout") return await forceLogoutAdmin(request, response, requestId, options);
+    if (path === "/self-sessions/revoke") return await revokeSelfSessions(request, response, requestId, options);
     if (path === "/login-two-factor") return await changeLoginTwoFactorPreference(request, response, requestId, options);
     if (path === "/admins/reset-password") return await resetAdminCredential(request, response, requestId, options, "password");
     if (path === "/admins/reset-2fa") return await resetAdminCredential(request, response, requestId, options, "two_factor");
