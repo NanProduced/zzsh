@@ -20,6 +20,8 @@
 
 普通复位/运行入口只依赖本机固定实例、已登记 state、准确 OID/marker、维护库外层锁和显式创建许可；任务执行期可另用外壳绑定限时授权文件，但普通开发/CI 入口和 runner 不依赖该任务授权、任务 ID 或任务临时目录。`REGRESSION_RESET_EMPTY_TARGET` 只供任务归档外壳恢复旧源时使用，普通入口不设置。
 
+应用使用日常 runtime 身份；数据库回归在独立测试进程使用维护身份 `DB_USER=zzsh`、中央 `.secrets/postgres_password` 的 `DB_PASSWORD_FILE` 引用和显式 `REGRESSION_TEST_ALLOW_NEW_RESOURCE=1`。不要把维护身份永久写回应用配置。工作树沿用主检出的受限 `.secrets` 引用，不复制整套凭据；未登记的目标、错误 OID/marker 或尚未退出的连接仍拒绝复位。
+
 历史具名资源入口已退出；旧 `*_TEST_RESOURCE_SET` 明确拒绝，不能重建已归档样本。原执行 SQL、业务结果及 UNKNOWN 保留为冷恢复证据；需要复验时由维护者在规范资源上准备新的受控样本，不冒充原 OID/原 attempt。
 
 浏览器与人工业务验收共用有数据的日常资源；会复位数据库的自动回归只使用回归资源，两者不混用。IM 过渡资源按现有运行交接保留，最终并入统一日常资源，不按模块再分库。
