@@ -14,7 +14,7 @@
 
 `createLocalDistributionRuntime` 只为明确的本地 test/fake 资源组装已有能力，返回可传入认证装配的 `auth` 与有界 `earnings`。构造时不连接数据库，不写政策、注册身份或准入数据，也不生成默认 5% 政策。最多接受 100 个唯一订单；实际付款还要求该订单原生创建审计和有效的精确 admission。无此显式装配时，原行为保持。
 
-正式汇聚收款另在原接纳事务中通过 `createNativePaymentDistributionStore` 冻结分销依据，不使用本地100单名单。该付款接线不代表正式政策/关系维护、结算后计提或到期入账已启用；后面这些能力当前仍受本地受控装配限制。
+正式汇聚收款另在原接纳事务中通过 `createNativePaymentDistributionStore` 冻结分销依据，不使用本地100单名单。该付款接线不代表正式政策/关系维护、结算后计提或到期入账已启用；本候选增加独立NATIVE装配，但政策、注册及账务的前向结构和同版验收仍未闭合，默认不启用。
 
 把返回的 `auth` 传入 `createApp` 的认证选项后，新注册、付款冻结、本人条款/佣金读与结算提交后计提使用现有模块。新原生钱包初始化仍需数据库端准入与同事务 INSERT 证明；缺失来源不能冒充零钱包。可选提现 binding 必须绑定 resource、subject、admission、destination、intent、payoutKey。
 
@@ -44,7 +44,7 @@
 
 场景口径：未付款取消没有冻结 basis 或 posting，不计佣；未开租终止在存在正额佣金时 fail-closed（现有 `earning_count` 校验），不先 VOID 绕过；正常结算退款只核销租客应退责任，不改变 posting 的平台贡献，因此不重复扣佣；结算后退款/更正若需要部分冲回，当前合同只支持“同一原根全额 REVOKE/RECOVER”，部分比例更正尚未定义，不能以任意全额 REVOKE 代替。已入账追偿继续走原 `rental_referral_reversal_source` → `REVOKE`（余额不足转 `RECOVERY_REQUIRED`）→ 原来源 `RECOVER`，冲回声明仍只允许维护 owner 角色执行。
 
-v2 UNIFORM 的数据库前向结构、支付依据推导、NATIVE 账本/冲回 scope 尚未安装：见 `tmp/distribution-business-closure-1/migrations/01_uniform_policy_and_payment_basis.sql`、`02_native_earning_and_reversal_scope.sql`（未编号候选，Root 编号前 NOT_RUN）。在这些结构安装并验收前，正式 v2 政策提交、NATIVE basis 冻结、NATIVE 计提/冲回都应保持不可用，不能以源码存在视为经营开放。
+v2 UNIFORM 的数据库前向结构、支付依据推导、NATIVE 账本/冲回 scope 尚未安装：见[未编号迁移候选](../../apps/api/migrations/candidates/distribution-business-closure-1/README.md)（Root编号前不进入正式journal，真实业务验收另列）。在这些结构安装并验收前，正式 v2 政策提交、NATIVE basis 冻结、NATIVE 计提/冲回都应保持不可用，不能以源码存在视为经营开放。
 
 ## 旧关系与旧佣金承接
 

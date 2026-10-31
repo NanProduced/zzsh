@@ -73,6 +73,7 @@
   "dist/test/credit-guarantee-runtime.test.js",
   "dist/test/distribution-local-resource.test.js",
   "dist/test/distribution-local-runtime.test.js",
+  "dist/test/distribution-native-runtime.test.js",
   "dist/test/admin-finance-query.test.js",
   "dist/test/admin-supervision-read.test.js",
   "dist/test/admin-finance-read.test.js",

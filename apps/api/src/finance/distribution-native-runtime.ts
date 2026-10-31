@@ -4,6 +4,22 @@ import { readFormalCollectionAdmission, type FormalCollectionAdmission } from '.
 import { createNativeDistributionPolicyScope } from './distribution-policy-store';
 import { createNativeDistributionEarningStore } from './distribution-earning-store';
 
+const nativeBindings = new WeakMap<ReturnType<typeof createNativeDistributionEarningStore>, {
+  scope: ReturnType<typeof createNativeDistributionPolicyScope>; admission: FormalCollectionAdmission;
+}>();
+
+/** Only the loader's exact scope/store/admission combination may bypass local payment assembly. */
+export function assertNativeDistributionEarningAssembly(
+  earnings: ReturnType<typeof createNativeDistributionEarningStore>,
+  scope: ReturnType<typeof createNativeDistributionPolicyScope> | undefined,
+  admission: FormalCollectionAdmission | undefined,
+): boolean {
+  const bound = nativeBindings.get(earnings);
+  if (!bound) return false;
+  if (bound.scope !== scope || bound.admission !== admission) throw new ConfigurationError('NATIVE_DISTRIBUTION_ASSEMBLY_MISMATCH');
+  return true;
+}
+
 /** Explicit formal NATIVE assembly only. No environment-derived ratio, policy, identity or admission. */
 export function loadNativeDistributionRuntime(input: {
   config: Pick<AppConfig, 'provider' | 'database'>;
@@ -23,11 +39,13 @@ export function loadNativeDistributionRuntime(input: {
     throw new ConfigurationError('DISTRIBUTION_NATIVE_RESOURCE_MISMATCH');
   }
   const distributionScope = createNativeDistributionPolicyScope(input.admission);
+  const distributionEarnings = createNativeDistributionEarningStore(input.admission);
+  nativeBindings.set(distributionEarnings, { scope: distributionScope, admission: input.admission });
   return Object.freeze({
     auth: Object.freeze({
       distributionScope,
       distributionReadScope: distributionScope,
-      distributionEarnings: createNativeDistributionEarningStore(input.admission),
+      distributionEarnings,
     }),
   });
 }

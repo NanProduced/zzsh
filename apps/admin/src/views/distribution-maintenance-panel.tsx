@@ -38,7 +38,7 @@ export function DistributionMaintenancePanel() {
       const value = kind === 'replay'
         ? await adminRequest<Command>('/distribution/maintenance/accruals/replay', { orderIds: (scan?.orders ?? []).filter(o => o.status === 'MISSING' || o.status === 'PARTIAL').map(o => o.orderId).slice(0, 100), requestId: requestId() }, 'POST')
         : await adminRequest<Command>('/distribution/maintenance/due-settlements', { limit: 20, requestId: requestId() }, 'POST');
-      setNotice(`${kind === 'replay' ? '重放' : '到期入账'}处理 ${value.attempted ?? 0}/${value.selected ?? value.requested ?? 0}，未执行 ${value.notAttempted}${value.recoveryRequired ? '；存在 UNKNOWN，请先读原回执' : ''}`);
+      setNotice(`${kind === 'replay' ? '重放' : '到期入账'}处理 ${value.attempted ?? value.results.length}/${value.selected ?? value.requested ?? 0}，未执行 ${value.notAttempted}${value.recoveryRequired ? '；存在 UNKNOWN，请先读原回执' : ''}`);
       await load();
     } catch (reason) {
       setError(reason instanceof AdminApiError ? reason.message : '维护命令结果未知，请按原请求重读回执');

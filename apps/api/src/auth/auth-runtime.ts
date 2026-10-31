@@ -20,6 +20,7 @@ import { mountMembershipGrowthRoutes } from "./membership-growth-routes";
 import { executeMembershipGrowthOperation } from "./membership-growth-approval";
 import { createDistributionPolicyApprovalExecutor } from "../finance/distribution-policy-approval";
 import { mountAdminDistributionReadRoutes } from "../finance/admin-distribution-routes";
+import { assertNativeDistributionEarningAssembly } from '../finance/distribution-native-runtime';
 import { mountAdminDistributionMaintenanceRoutes } from "../finance/admin-distribution-maintenance";
 import { membershipGrowthEnabled, readMembershipGrowthQuoteCandidates } from "./membership-growth-integration";
 import { mountUserDirectory } from "./user-directory-routes";
@@ -834,7 +835,9 @@ export async function mountAuthHandlers(
   }
   assertLocalDistributionAssembly(options.distributionScope, options);
   assertLocalDistributionAssembly(options.distributionReadScope, options);
-  if(options.distributionEarnings){
+  if(options.distributionEarnings && !assertNativeDistributionEarningAssembly(
+    options.distributionEarnings, options.distributionScope, options.joinpayCollection?.admission,
+  )){
     if(!options.localControlledPayments||!options.distributionScope)throw new ConfigurationError('Distribution earnings require explicit local payment and distribution capabilities');
     assertLocalControlledPaymentAssembly(options.localControlledPayments);
   }

@@ -58,3 +58,16 @@ test('bounded maintenance rejects oversized, duplicate or malformed cohorts befo
  await assert.rejects(store.settleDue(pool,1,'req',['bad id']),/Bounded game scope/);
  await assert.rejects(store.settleDue(pool,0,'req'),/Bounded due batch/);
 });
+
+test('real auth assembly accepts the exact native capabilities and rejects cross-wired admission before database work',async()=>{
+ const {mountAuthHandlers}=require('../src/auth/auth-runtime');
+ const bound=admission(),runtime=loadNativeDistributionRuntime({config,authEnabled:true,admission:bound,env:{DISTRIBUTION_NATIVE_ENABLED:'true'}})!;
+ let calls=0;
+ const options:any={...runtime.auth,joinpayCollection:{admission:bound},testOperationsEnabled:false,secureCookies:true,
+  apiOrigin:'https://api.example.test',userOrigin:'https://www.example.test',adminOrigin:'https://admin.example.test',
+  pool:{query:async()=>{calls++;throw new Error('PG_BOUNDARY');},connect:async()=>{calls++;throw new Error('PG_BOUNDARY');}}};
+ await assert.rejects(mountAuthHandlers({},options),/Credit\/guarantee reads require reviewed schema or runtime privileges/);assert.equal(calls,1);
+ calls=0;await assert.rejects(mountAuthHandlers({},{...options,joinpayCollection:{admission:admission()}}),/ASSEMBLY_MISMATCH/);assert.equal(calls,0);
+ await assert.rejects(mountAuthHandlers({},{...options,distributionScope:undefined}),/ASSEMBLY_MISMATCH/);assert.equal(calls,0);
+ await assert.rejects(mountAuthHandlers({},{...options,localControlledPayments:{}}),/exclusive/);assert.equal(calls,0);
+});
