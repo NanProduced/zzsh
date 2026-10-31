@@ -774,8 +774,21 @@ async function handleOrderTeamRead(request: NodeRequest, response: NodeResponse,
 
 async function handleAdminMessages(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions): Promise<void> {
   const transport = options.consultation?.messageTransport;
-  if (!options.consultation || !transport) {
+  if (!options.consultation) {
     sendUnavailable(response, requestId);
+    return;
+  }
+  // 与用户侧对称：真实通道没有服务端消息通道，客服正文也由浏览器 NIM 直连发出。
+  // 这里只登记预览事实（谁接待、最后一句是什么），仍先过同一份客服访问校验。
+  if (!transport) {
+    if (request.method?.toUpperCase() !== "POST") { sendUnavailable(response, requestId); return; }
+    const realContext = await readAdminContext(request, options.security);
+    await requireAdminImRead(options.security.pool, realContext.userId);
+    const realInput = await parseMessageBody(request.body);
+    if (realInput.kind !== "text") { sendUnavailable(response, requestId); return; }
+    await readMessageAccess(options, {...realContext,realm:"admin"}, realInput.conversationId, true, false, requestId);
+    const recorded = await recordSupportPreview(options, realInput.conversationId, realInput.text);
+    sendJson(response, 200, { recorded, via: "nim" }, requestId);
     return;
   }
   const context = await readAdminContext(request, options.security);

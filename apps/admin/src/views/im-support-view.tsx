@@ -1696,6 +1696,15 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
             : replyTarget
               ? await client.replyText(conversationId, text, replyTarget.source!)
               : await client.sendText(conversationId, text);
+          // 真实通道下客服正文由 NIM 直连发出，服务端不会自动得知。补一条只登记预览的上报，
+          // 否则会话摘要会一直停在上一条用户消息（T5）。失败不影响已发出的消息。
+          if ((client as { transport?: string }).transport !== "local-fake") {
+            void fetch("/api/bff/admin/im/messages", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ conversationId, text }),
+            }).catch(() => undefined);
+          }
           // 收敛已发出的原操作：只按原身份代次/操作者匹配。撤销接待权限不改变身份代次
           // （readClientKey 只含 adminUserId/session/locked/canRead），所以这里不比较发送
           // 能力——否则单独撤权会把已经发出去的文字回执连同责任一起丢掉。
