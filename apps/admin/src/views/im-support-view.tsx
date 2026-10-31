@@ -443,7 +443,19 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     const operation = presenceWriteRef.current.then(async () => {
       if (!canPresenceRef.current) return undefined;
       if (operatorRef.current !== key || operatorGenerationRef.current !== generation) return undefined;
-      const version = presenceVersionRef.current;
+      let version = presenceVersionRef.current;
+      if (version === null) {
+        // 本操作员本次会话的第一次写入：先向服务端要当前版本，再写。
+        // 上一会话可能已留下 presence 行；此时省略 version 会让 PUT 必然 409，
+        // 首屏就变成“未上线 + 一次失败”，而这不是并发冲突。
+        try {
+          const existing = await adminRequest<Presence>("/im/presence");
+          rememberPresence(existing);
+          version = presenceVersionRef.current;
+        } catch {
+          // 读不到就保持 null，让服务端按“无行则插入”的规则自行裁决。
+        }
+      }
       try {
         const value = await adminRequest<Presence>("/im/presence", { availability, connectionState: state, ...(version === null ? {} : { version }) }, "PUT");
         if (canPresenceRef.current && operatorRef.current === key && operatorGenerationRef.current === generation) rememberPresence(value);
