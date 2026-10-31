@@ -107,22 +107,11 @@ test("daily, maintenance, IM, historical and UNKNOWN databases are refused as ta
   assert.equal(assertNotProtectedTarget(REGRESSION_DATABASE), undefined);
 });
 
-test("every registered exception carries its own identity and can never be created", () => {
-  const oids = new Set<string>();
-  for (const [name, entry] of Object.entries(REGISTERED_HISTORICAL_EXCEPTIONS)) {
-    assert.match(name, /^zzsh_test_/);
-    assert.match(entry.oid, /^[0-9]+$/, `${name} needs a numeric OID`);
-    assert.ok(!oids.has(entry.oid), `${name} duplicates OID ${entry.oid}`);
-    oids.add(entry.oid);
-    assert.ok(entry.marker.startsWith("zzsh:"), `${name} needs a registered marker`);
-    assert.notEqual(entry.migrationUser, entry.runtimeUser);
-    assert.equal(assertNotProtectedTarget(name), undefined);
+test("retired historical resources cannot be reopened through resource-set names", () => {
+  assert.deepEqual(Object.keys(REGISTERED_HISTORICAL_EXCEPTIONS), []);
+  for (const name of ["zzsh_test_order_trade_settlement", "zzsh_test_supply_skin_catalog_oss", "zzsh_test_m2_auth_review_unregistered"]) {
+    assert.throws(() => registeredException(name), /not a registered test resource/);
   }
-  const exception = registeredException("zzsh_test_order_trade_settlement");
-  assert.equal(exception.oid, "748138");
-  assert.equal(exception.migrationUser, "zzsh_order_trade_settlement_m");
-  // A free resource-set suffix is not a registration.
-  assert.throws(() => registeredException("zzsh_test_m2_auth_review_unregistered"), /not a registered test resource/);
   assert.throws(() => registeredException("zzsh_test_order_milestone_real_1"), /IM line/);
 });
 

@@ -4,7 +4,7 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: zzsh_dev
+      POSTGRES_DB: zzsh_dev_daily
       POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --auth-local=scram-sha-256
       POSTGRES_PASSWORD_FILE: /run/secrets/zzsh_postgres_password
       POSTGRES_USER: zzsh
@@ -15,7 +15,7 @@ services:
     secrets:
       - zzsh_postgres_password
     healthcheck:
-      test: ["CMD-SHELL", "PGPASSWORD=\"$$(cat /run/secrets/zzsh_postgres_password)\" psql -h 127.0.0.1 -U zzsh -d zzsh_dev -w -c 'SELECT 1' >/dev/null"]
+      test: ["CMD-SHELL", "PGPASSWORD=\"$$(cat /run/secrets/zzsh_postgres_password)\" psql -h 127.0.0.1 -U zzsh -d postgres -w -c 'SELECT 1' >/dev/null"]
       interval: 5s
       timeout: 5s
       retries: 10

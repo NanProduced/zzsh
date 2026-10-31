@@ -47,40 +47,14 @@ export type RegisteredException = {
   runtimeUser: string;
 };
 
-// Every historical resource a suite may still target. Reuse-only: the identifier, marker and roles
-// are the registered ones, so a free `*_TEST_RESOURCE_SET` suffix produces an unregistered name and
-// fails closed instead of creating a clone. Adding an entry is the explicit registration act.
-export const REGISTERED_HISTORICAL_EXCEPTIONS: Record<string, RegisteredException> = {
-  zzsh_test_m2_auth_auth_compat: { oid: "820148", marker: "zzsh:m2-auth-test:v1", migrationUser: "zzsh_m2_auth_compat_m", runtimeUser: "zzsh_m2_auth_compat_r" },
-  zzsh_test_m2_auth_auth_compat_ui: { oid: "833000", marker: "zzsh:m2-auth-test:v1", migrationUser: "zzsh_m2_auth_compat_ui_m", runtimeUser: "zzsh_m2_auth_compat_ui_r" },
-  zzsh_test_order_admin_order_read: { oid: "836794", marker: "zzsh:order-reservation-test:v1", migrationUser: "zzsh_order_admin_order_read_m", runtimeUser: "zzsh_order_admin_order_read_r" },
-  zzsh_test_order_credit_admin_batch2: { oid: "899098", marker: "zzsh:order-reservation-test:v1", migrationUser: "zzsh_order_credit_admin_batch2_m", runtimeUser: "zzsh_order_credit_admin_batch2_r" },
-  zzsh_test_order_im_workflow_ui: { oid: "881699", marker: "zzsh:order-reservation-test:v1", migrationUser: "zzsh_order_im_workflow_ui_m", runtimeUser: "zzsh_order_im_workflow_ui_r" },
-  zzsh_test_order_joinpay_pay03a: { oid: "1001585", marker: "zzsh:order-reservation-test:v1", migrationUser: "zzsh_order_joinpay_pay03a_m", runtimeUser: "zzsh_order_joinpay_pay03a_r" },
-  zzsh_test_order_membership_b_real: { oid: "918595", marker: "zzsh:order-reservation-test:v1", migrationUser: "zzsh_order_membership_b_real_m", runtimeUser: "zzsh_order_membership_b_real_r" },
-  zzsh_test_order_oim_escalation_ui: { oid: "571669", marker: "zzsh:order-reservation-test:v1", migrationUser: "zzsh_order_oim_escalation_ui_m", runtimeUser: "zzsh_order_oim_escalation_ui_r" },
-  zzsh_test_order_oim_first_response: { oid: "490143", marker: "zzsh:order-reservation-test:v1", migrationUser: "zzsh_order_oim_first_response_m", runtimeUser: "zzsh_order_oim_first_response_r" },
-  zzsh_test_order_order_web_reservation: { oid: "330772", marker: "zzsh:order-reservation-test:v1", migrationUser: "zzsh_order_order_web_reservation_m", runtimeUser: "zzsh_order_order_web_reservation_r" },
-  zzsh_test_order_personal_finance: { oid: "869754", marker: "zzsh:order-reservation-test:v1", migrationUser: "zzsh_order_personal_finance_m", runtimeUser: "zzsh_order_personal_finance_r" },
-  zzsh_test_order_qf80_integration: { oid: "947515", marker: "zzsh:order-reservation-test:v1", migrationUser: "zzsh_order_qf80_integration_m", runtimeUser: "zzsh_order_qf80_integration_r" },
-  zzsh_test_order_skin_experience_20: { oid: "983794", marker: "zzsh:order-reservation-test:v1", migrationUser: "zzsh_order_skin_experience_20_m", runtimeUser: "zzsh_order_skin_experience_20_r" },
-  zzsh_test_order_trade_loop_ui: { oid: "878001", marker: "zzsh:order-reservation-test:v1", migrationUser: "zzsh_order_trade_loop_ui_m", runtimeUser: "zzsh_order_trade_loop_ui_r" },
-  zzsh_test_order_trade_settlement: { oid: "748138", marker: "zzsh:order-reservation-test:v1", migrationUser: "zzsh_order_trade_settlement_m", runtimeUser: "zzsh_order_trade_settlement_r" },
-  zzsh_test_order_yunxin_main_integrate: { oid: "335246", marker: "zzsh:order-reservation-test:v1", migrationUser: "zzsh_order_yunxin_main_integrate_m", runtimeUser: "zzsh_order_yunxin_main_integrate_r" },
-  zzsh_test_supply_baseline_accept: { oid: "790510", marker: "zzsh:m3b-supply-test:v1", migrationUser: "zzsh_m3b_baseline_accept_m", runtimeUser: "zzsh_m3b_baseline_accept_r" },
-  zzsh_test_supply_migration_baseline: { oid: "793252", marker: "zzsh:m3b-supply-test:v1", migrationUser: "zzsh_m3b_migration_baseline_m", runtimeUser: "zzsh_m3b_migration_baseline_r" },
-  zzsh_test_supply_pricing_compat: { oid: "375132", marker: "zzsh:m3b-supply-test:v1", migrationUser: "zzsh_m3b_pricing_compat_m", runtimeUser: "zzsh_m3b_pricing_compat_r" },
-  zzsh_test_supply_pub_direct_ui: { oid: "736251", marker: "zzsh:m3b-supply-test:v1", migrationUser: "zzsh_m3b_pub_direct_ui_m", runtimeUser: "zzsh_m3b_pub_direct_ui_r" },
-  zzsh_test_supply_skin1b_fresh: { oid: "782454", marker: "zzsh:m3b-supply-test:v1", migrationUser: "zzsh_m3b_skin1b_fresh_m", runtimeUser: "zzsh_m3b_skin1b_fresh_r" },
-  zzsh_test_supply_skin1b_schema: { oid: "782451", marker: "zzsh:m3b-supply-test:v1", migrationUser: "zzsh_m3b_skin1b_schema_m", runtimeUser: "zzsh_m3b_skin1b_schema_r" },
-  zzsh_test_supply_skin_catalog_oss: { oid: "903097", marker: "zzsh:m3b-supply-test:v1", migrationUser: "zzsh_m3b_skin_catalog_oss_m", runtimeUser: "zzsh_m3b_skin_catalog_oss_r" },
-  zzsh_test_supply_supply_experience_catalog: { oid: "338176", marker: "zzsh:supply-experience-catalog:v1", migrationUser: "zzsh_m3b_supply_experience_catalog_m", runtimeUser: "zzsh_m3b_supply_experience_catalog_r" },
-};
+// Retired resource sets fail before connection or role changes. Historical proofs stay in their
+// recovery archive; ordinary database tests use only the shared regression resource.
+export const REGISTERED_HISTORICAL_EXCEPTIONS: Record<string, RegisteredException> = {};
 
 export function registeredException(databaseName: string): RegisteredException {
   assertNotProtectedTarget(databaseName);
   const entry = Object.hasOwn(REGISTERED_HISTORICAL_EXCEPTIONS, databaseName) ? REGISTERED_HISTORICAL_EXCEPTIONS[databaseName]! : undefined;
-  assert.ok(entry, `${databaseName} is not a registered test resource; add it explicitly instead of deriving a new clone from a resource-set name`);
+  assert.ok(entry, `${databaseName} is not a registered test resource; retired resource sets must not be recreated; use the shared regression runner`);
   return entry;
 }
 
