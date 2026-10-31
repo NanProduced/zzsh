@@ -1,13 +1,17 @@
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { CANDIDATES, EXPECTED, REQUIRED_STAGES, nativeContract, sealedPlan, sha256, run, structurePhase, policyPhase, fundsPhase, residuePhase, verifyIdentity, createLedger } from './distribution-pg-native-acceptance.mjs';
+import { CANDIDATES, EXPECTED, REQUIRED_STAGES, assertNativeFixtureSql, nativeContract, sealedPlan, sha256, run, structurePhase, policyPhase, fundsPhase, residuePhase, verifyIdentity, createLedger } from './distribution-pg-native-acceptance.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
+mkdirSync(resolve(here, '../tmp'), {recursive:true});
+const defaultJournalDir = mkdtempSync(resolve(here, '../tmp/distribution-host-unit-'));
+after(() => rmSync(defaultJournalDir, { recursive: true, force: true }));
+let journalNumber = 0;
 const clean = (name) => `-- ${name}\nSELECT 1;\n`;
 const bytes = new Map(CANDIDATES.map(name => [name, Buffer.from(clean(name))]));
 const STAGE = (phase, extra = {}) => ({ case: phase, phase, ...extra });
@@ -19,7 +23,7 @@ const fullExpectations = () => [
   STAGE('settle', { earningId: 'earning_b' }),
   STAGE('revoke-sufficient', { earningId: 'earning_a', admissionDigest: 'a'.repeat(64), reason: '客服核实的错发佣金' }),
   STAGE('revoke-insufficient', { earningId: 'earning_b', admissionDigest: 'a'.repeat(64), reason: '客服核实的错发佣金' }),
-  STAGE('recover', { earningId: 'earning_b', amountCents: '5', reversalSourceId: 'reversal_generated' }),
+  STAGE('recover', { earningId: 'earning_b', amountCents: '5', fundingSql: 'SELECT 1;' }),
 ];
 function baseConfig(extra = {}) {
   bytes.set('native-fixture.sql', Buffer.from('INSERT SELECT 1;'));
@@ -29,7 +33,7 @@ function baseConfig(extra = {}) {
     ownerUser: 'zzsh_regression_owner', migrationUser: 'zzsh_regression_migration', runtimeUser: 'zzsh_regression_runtime',
     roles: { migrationOid: 111, runtimeOid: 222 }, expectedSqlSha256: Object.fromEntries(CANDIDATES.map(name => [name, sha256(bytes.get(name))])),
     native: { file: 'native-fixture.sql', expectedSha256: sha256(Buffer.from('INSERT SELECT 1;')), collectionDocument: 'collection.json', expectedCollectionSha256: sha256(Buffer.from('{}')),
-      adminFixtureId: 'admin_boss', declarerUserId: 'admin_boss', expectations: fullExpectations(), journalPath: 'journal.log' } };
+      adminFixtureId: 'admin_boss', declarerUserId: 'admin_boss', expectations: fullExpectations(), journalPath: join(defaultJournalDir, `journal_${journalNumber++}.log`) } };
   return { ...config, ...extra, ...(extra.native ? { native: { ...config.native, ...extra.native } } : {}) };
 }
 const baseState = () => ({ database: EXPECTED.database, oid: '987654', nonce: 'a'.repeat(32), marker: EXPECTED.marker, pendingReset: null,
@@ -45,11 +49,13 @@ function pgSession(name, handlers = {}) {
       seen.push({ sql, params, role: state.role, aborted: state.aborted });
       if (/^BEGIN/.test(sql)) { if (state.inTransaction) throw Object.assign(new Error('nested transaction'), { code: '25001' }); state.inTransaction = true; return { rows: [], rowCount: 0 }; }
       if (/^ROLLBACK TO SAVEPOINT/.test(sql)) { state.aborted = false; return { rows: [], rowCount: 0 }; }
-      if (/^(COMMIT|ROLLBACK)$/.test(sql)) { state.inTransaction = false; state.aborted = false; return { rows: [], rowCount: 0 }; }
-      if (/^SAVEPOINT|^RELEASE SAVEPOINT|^SET CONSTRAINTS/.test(sql)) return { rows: [], rowCount: 0 };
+      if (/^(COMMIT|ROLLBACK)$/.test(sql)) { state.inTransaction = false; state.aborted = false; state.role = name; return { rows: [], rowCount: 0 }; }
+      if (/^SAVEPOINT|^RELEASE SAVEPOINT|^SET CONSTRAINTS/.test(sql)) { if (state.aborted) throw error('25P02','current transaction is aborted'); return { rows: [], rowCount: 0 }; }
       if (state.aborted) throw Object.assign(new Error('current transaction is aborted, commands ignored until end of transaction block'), { code: '25P02' });
       if (/^SET LOCAL ROLE/.test(sql)) { state.role = sql.split('ROLE')[1].trim(); return { rows: [], rowCount: 0 }; }
       if (/^RESET ROLE/.test(sql)) { state.role = name; return { rows: [], rowCount: 0 }; }
+      if (sql === 'SELECT current_user AS role') return { rows: [{role:state.role}], rowCount:1 };
+      if (sql.includes('FROM pg_auth_members') && !Object.keys(handlers).some(key => sql.includes(key))) return {rows:[{n:0}],rowCount:1};
       if (sql.includes('pg_try_advisory_lock')) return { rows: [{ acquired: state.held !== false }], rowCount: 1 };
       if (sql.includes('pg_advisory_unlock')) return { rows: [{ released: state.unlockResult !== false }], rowCount: 1 };
       for (const [fragment, value] of Object.entries(handlers)) if (sql.includes(fragment)) {
@@ -69,7 +75,7 @@ test('the native contract names every missing external input instead of failing 
   assert.deepEqual(nativeContract(baseConfig()).missing, []);
   assert.deepEqual(nativeContract(baseConfig()).absentStages, []);
   const stripped = baseConfig({ native: { expectations: [STAGE('accrue', { orderId: 'order_native_1', items: 1, amounts: {} })] } });
-  assert.deepEqual(nativeContract(stripped).missing.sort(), ['expectedSqlSha256', 'native.adminFixtureId', 'native.collectionDocument', 'native.declarerUserId', 'native.expectedCollectionSha256', 'native.expectedSha256', 'native.file'].filter(item => nativeContract(stripped).missing.includes(item)).sort());
+  assert.deepEqual(nativeContract(stripped).missing.sort(), ['expectedSqlSha256', 'native.adminFixtureId', 'native.collectionDocument', 'native.declarerUserId', 'native.expectedCollectionSha256', 'native.expectedSha256', 'native.file', 'native.expectations.recover.fundingSql'].filter(item => nativeContract(stripped).missing.includes(item)).sort());
   const short = baseConfig(); short.native.expectations = short.native.expectations.filter(item => item.phase !== 'recover');
   assert.deepEqual(nativeContract(short).absentStages, ['recover']);
   for (const field of ['native.file', 'native.journalPath', 'native.adminFixtureId', 'native.declarerUserId']) assert.ok(Object.keys(nativeContract(baseConfig()).fields).includes(field), field + ' has a documented format');
@@ -160,6 +166,7 @@ test('policy guards use the sealed administrator and synthetic probe rates only'
 
 function chainHandler(roles) {
   return {
+    'FROM zzsh_order.distribution_order_admission': ok([{mode:'NATIVE',approval_digest:'a'.repeat(64)}]),
     'FROM zzsh_order.rental_referral_earning e JOIN zzsh_order.rental_order o': (sql, params, state) => { roles.push(state.role); return ok([{ id: params[0], order_id: 'order_native_1', amount_cents: '5', basis_digest: 'b'.repeat(64), state: 'SETTLED', game_id: 'delta', version: '2' }]); },
     'SELECT id,version::text AS version,state FROM zzsh_order.rental_referral_earning': (sql, params) => ok([{ id: params[0], version: '2', state: params[0] === 'earning_a' ? 'PENDING' : 'SETTLED' }]),
     'SELECT id,version::text AS version FROM zzsh_order.rental_referral_earning': (sql, params) => ok([{ id: params[0], version: '2' }]),
@@ -191,13 +198,13 @@ test('the native chain runs each stage on the application path and journals ever
     transitionOn: async (client, earningId, action, version, requestId, sourceId) => { moneyCalls.push([action, requestId, sourceId ?? null]); return freshStore.transitionOn(client, earningId, action, version, requestId, sourceId); } };
   const created = await fundsPhase(session, config, plan, createLedger(), store);
   const lines = readFileSync(journalPath, 'utf8').trim().split(String.fromCharCode(10)).map(line => JSON.parse(line));
-  assert.deepEqual(lines.filter(line => line.status === 'APPLIED').map(line => line.phase), ['accrue', 'accrue-replay', 'settle-not-due', 'settle', 'revoke-sufficient', 'revoke-insufficient', 'recover']);
+  assert.deepEqual(lines.filter(line => line.status === 'APPLIED').map(line => line.phase), ['fixture', 'accrue', 'accrue-replay', 'settle-not-due', 'settle', 'revoke-sufficient', 'revoke-insufficient', 'recover-funding', 'recover']);
   assert.deepEqual(created.earnings, ['earning_a', 'earning_b']);
   assert.equal(created.declarations.length, 2, 'each revocation declares its own original source');
   assert.deepEqual(moneyCalls.map(call => call[0]), ['accrue', 'accrue', 'SETTLE', 'SETTLE', 'SETTLE', 'REVOKE', 'REVOKE', 'RECOVER'], 'not-due, settle and the settle replay are three distinct SETTLE calls on the application path');
   assert.ok(moneyCalls.every(call => call[1].startsWith('acceptance_')), 'every money call keeps the original acceptance request key');
   assert.deepEqual([...new Set(roles)], [config.migrationUser], 'the reversal declaration is taken by the table owner, never by runtime');
-  assert.equal(session.seen.filter(entry => entry.sql.includes('SET LOCAL ROLE ' + config.runtimeUser)).length, 8, 'one role switch per money transaction: seven stages, and the settle stage also replays its own receipt');
+  assert.equal(session.seen.filter(entry => entry.sql.includes('SET LOCAL ROLE ' + config.runtimeUser)).length, 10, 'fixture, funding and every money body use the runtime role');
   assert.ok(!session.seen.some(entry => /^COMMIT$/.test(entry.sql)), 'the chain never commits inside the assembly');
   assert.ok(session.seen.filter(entry => entry.sql === 'RESET ROLE').length >= 7);
   rmSync(directory, { recursive: true, force: true });
@@ -313,7 +320,7 @@ test('the real CLI keeps an incomplete native contract away from credentials and
     const parsed = JSON.parse(plan.stdout);
     assert.equal(parsed.mode, 'PLAN');
     assert.equal(parsed.readsSecrets, false);
-    assert.deepEqual(parsed.nativeContract.missing.sort(), ['native.adminFixtureId', 'native.collectionDocument', 'native.declarerUserId', 'native.file'].sort());
+    assert.deepEqual(parsed.nativeContract.missing.sort(), ['native.adminFixtureId', 'native.collectionDocument', 'native.declarerUserId', 'native.file', 'native.expectations.recover.fundingSql'].sort());
     assert.ok(parsed.nativeContract.absentStages.includes('recover'));
     const full = spawnSync(process.execPath, [script, '--config', file, '--sha256', sealed, '--full-native'], { encoding: 'utf8', env });
     assert.equal(full.status, 2, full.stderr);
@@ -328,4 +335,147 @@ test('the real CLI keeps an incomplete native contract away from credentials and
     assert.notEqual(badSeal.status, 0);
     assert.match(badSeal.stderr, /CONFIG_SHA_MISMATCH/);
   } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+// Append to the host's existing test file; reuses baseConfig/planOf/pgSession/ok/error/recorder.
+test('verify-identity never loads application assembly or runs DDL, ACL or fixture writes', async () => {
+  const config = baseConfig(), plan = planOf(); let loads = 0;
+  const roles = [{ name: config.ownerUser, oid: '100', super: false, bypass: false, login: true, createdb: false, inherit: false },
+    { name: config.migrationUser, oid: '111', super: false, bypass: false, login: true, createdb: false, inherit: false },
+    { name: config.runtimeUser, oid: '222', super: false, bypass: false, login: true, createdb: false, inherit: false }];
+  const owner = pgSession(config.ownerUser, { 'FROM pg_database': ok([{ oid: '987654', marker: EXPECTED.marker, owner: config.ownerUser, allow: true, template: false }]), 'FROM pg_roles': ok(roles), pg_has_role: ok([{ member: false }]), pg_stat_activity: ok([{ n: 1 }]) });
+  const target = pgSession(config.migrationUser, { 'zzsh.regression_run': ok([{ database: config.database, role: config.migrationUser, nonce: config.nonce }]), 'FROM pg_class': ok([{ n: 0 }]), 'pg_has_role(current_user': ok([{ member: true }]) });
+  const host = recorder();
+  await run({ config, plan, identity: true, log: host.log, exit: host.exit, connect: user => user === config.ownerUser ? owner : target,
+    loadAssembly: async () => { loads++; throw new Error('identity mode must not load assembly'); }, journalWrite() {} });
+  assert.equal(loads, 0);
+  assert.equal(host.lines.at(-1).pass, true, JSON.stringify(host.lines));
+  assert.equal(host.codes.length, 0);
+  assert.equal(target.seen.some(entry => /^\s*(?:-- UNNUMBERED CANDIDATE|ALTER|CREATE|GRANT|REVOKE|INSERT|UPDATE|DELETE)/.test(entry.sql)), false);
+});
+
+test('structure owner lookup uses the real pg_roles oid column', async () => {
+  const config = baseConfig(), plan = planOf();
+  const session = pgSession(config.migrationUser, {
+    'to_regprocedure': ok([{ present: true }]), 'has_function_privilege': ok([{ runtime_exec: true, public_closed: true }]),
+    'current_user AS role': (_sql, _params, state) => ok([{ role: state.role, version: 2 }]),
+    "relname='rental_referral_reversal_source'": sql => /SELECT\s+roid\s+FROM\s+pg_roles/.test(sql) ? error('42703', 'column roid does not exist') : ok([{ n: 1 }]),
+    'INSERT INTO zzsh_order.rental_referral_reversal_source': error('42501'), 'UPDATE zzsh_order.rental_referral_earning': error('42501'),
+  });
+  await structurePhase(session, plan, config, createLedger(), { applyRuntimePrivileges: async () => {}, configureDistributionFinancialPrivileges: async () => {} });
+  assert.equal(session.seen.some(entry => /SELECT\s+roid\s+FROM\s+pg_roles/.test(entry.sql)), false);
+});
+
+test('an unavailable failure journal never replaces the original error or skips the failure receipt', async () => {
+  const config = baseConfig(), plan = planOf(), host = recorder();
+  const owner = pgSession(config.ownerUser), target = pgSession(config.migrationUser);
+  await run({ config, plan, execute: true, log: host.log, exit: host.exit, connect: user => user === config.ownerUser ? owner : target,
+    loadAssembly: async () => { throw error('PRIMARY_TEST_FAILURE', 'original preparation failed'); },
+    journalWrite() { throw error('ENOSPC', 'synthetic full disk'); } });
+  assert.equal(host.lines.some(line => line.pass === false && line.code === 'PRIMARY_TEST_FAILURE'), true, JSON.stringify(host.lines));
+  assert.deepEqual(host.codes, [1]);
+  assert.equal(target.state.ended, true);
+  assert.equal(owner.state.ended, true);
+});
+
+
+test('Root: native fixture SQL cannot escape the rollback-only transaction', () => {
+  for (const sql of ['COMMIT;', 'END;', 'ABORT;', 'ROLLBACK;', 'BEGIN; SELECT 1; COMMIT;', 'SELECT 1; COMMIT AND CHAIN;', 'CREATE TABLE x(a int);', 'SET ROLE unsafe;']) {
+    assert.throws(() => assertNativeFixtureSql(sql), /NATIVE_FIXTURE_DML_ONLY/, sql);
+  }
+  for (const sql of ["SELECT 'COMMIT;';", 'SELECT $$END; COMMIT;$$;', "/* outer /* COMMIT */ nested */ INSERT INTO x VALUES('END'); -- ABORT\nSELECT 1;"]) {
+    assert.ok(assertNativeFixtureSql(sql) > 0);
+  }
+  assert.throws(() => assertNativeFixtureSql("SELECT 'unterminated"), /UNTERMINATED/);
+});
+
+test('Root: funding is an explicit input and recovery keys cannot switch to another debt', () => {
+  const missing = baseConfig(); delete missing.native.expectations.find(x => x.phase === 'recover').fundingSql;
+  assert.ok(nativeContract(missing).missing.includes('native.expectations.recover.fundingSql'));
+  assert.equal(nativeContract(missing).complete, false);
+  const blank = baseConfig(); blank.native.adminFixtureId = '';
+  assert.ok(nativeContract(blank).missing.includes('native.adminFixtureId'));
+  const escaped = baseConfig(); escaped.native.journalPath = resolve(here, '../apps/api/src/main.ts');
+  assert.throws(() => planOf(escaped), /JOURNAL_PATH_OUTSIDE_TMP/);
+  const debt = baseConfig(); debt.native.expectations.find(x => x.phase === 'recover').earningId = 'another_debt';
+  assert.throws(() => planOf(debt), /RECOVERY_ORIGINAL_ROOT_MISMATCH/);
+  const transaction = baseConfig(); bytes.set('native-fixture.sql', Buffer.from('SELECT 1; COMMIT;'));
+  transaction.native.expectedSha256 = sha256(bytes.get('native-fixture.sql'));
+  assert.throws(() => sealedPlan(transaction, baseState(), read), /NATIVE_FIXTURE_DML_ONLY/);
+});
+
+test('Root: an unrelated reversal source is rejected before funding or RECOVER', async () => {
+  const config=baseConfig(),plan=planOf(config),s=pgSession(config.migrationUser,chainHandler([]));
+  plan.native.stages.recover.reversalSourceId='unrelated_original_source';
+  let recoverCalls=0;
+  const store={...freshStore,transitionOn:async(...args)=>{if(args[2]==='RECOVER')recoverCalls++;return freshStore.transitionOn(...args);}};
+  await assert.rejects(fundsPhase(s,config,plan,createLedger(),store),/RECOVERY_ORIGINAL_SOURCE_MISMATCH/);
+  assert.equal(recoverCalls,0);
+});
+
+import { assertNativeFixtureSql as strictFixtureSql, nativeEarningKeys as strictEarningKeys, snapshot as strictSnapshot } from './distribution-pg-native-acceptance.mjs';
+
+test('plain-DML screening rejects transaction escape and DDL without reading a credential', () => {
+  for (const sql of ['BEGIN; SELECT 1; COMMIT;', 'SELECT 1; END;', 'ROLLBACK;', 'START TRANSACTION;', 'ALTER TABLE x ADD COLUMN y int;', 'SELECT 1; /* outer /* nested */ comment */ COMMIT;']) {
+    assert.throws(() => strictFixtureSql(sql), /NATIVE_FIXTURE_DML_ONLY/);
+  }
+  assert.equal(strictFixtureSql("SELECT 'COMMIT;'; SELECT $$ BEGIN; COMMIT; $$; /* one /* two */ three */"), 2);
+  const wrongFunding = baseConfig(); wrongFunding.native.expectations.find(item => item.phase === 'recover').fundingSql = 'SELECT 1; COMMIT;';
+  assert.throws(() => planOf(wrongFunding), /NATIVE_FIXTURE_DML_ONLY/);
+});
+
+function strictIdentityPair(config, extra = {}) {
+  const role = (name, oid) => ({ name, oid, super: false, bypass: false, login: true, createdb: false, inherit: false, createrole: false, replication: false });
+  const roles = [role(config.ownerUser, '100'), role(config.migrationUser, '111'), { ...role(config.runtimeUser, '222'), ...(extra.runtime ?? {}) }];
+  const owner = pgSession(config.ownerUser, { 'FROM pg_database': ok([{ oid: '987654', marker: EXPECTED.marker, owner: config.ownerUser, allow: true, template: false }]), 'FROM pg_roles': ok(roles), 'FROM pg_auth_members': ok([{ n: extra.memberships ?? 0 }]), pg_has_role: ok([{ member: false }]), pg_stat_activity: ok([{ n: 1 }]) });
+  const target = pgSession(config.migrationUser, { 'zzsh.regression_run': ok([{ database: config.database, role: config.migrationUser, nonce: config.nonce }]), 'FROM pg_class': ok([{ n: 0 }]), 'pg_has_role(current_user': ok([{ member: true }]), 'rental_referral_earning WHERE id=ANY': ok([{ earnings: 0, declarations: 0, entries: 0 }]) });
+  return { owner, target };
+}
+
+test('identity performs the actual role switch in a read-only transaction and denies every runtime membership', async () => {
+  const config = baseConfig(), good = strictIdentityPair(config);
+  await verifyIdentity(good.owner, good.target, config);
+  assert(good.target.seen.some(entry => entry.sql === 'BEGIN READ ONLY'));
+  assert(good.target.seen.some(entry => entry.sql === 'SELECT current_user AS role' && entry.role === config.runtimeUser));
+  assert.equal(good.target.state.inTransaction, false);
+  assert.equal(good.target.state.role, config.migrationUser);
+  for (const extra of [{ memberships: 1 }, { runtime: { createrole: true } }, { runtime: { replication: true } }]) {
+    const denied = strictIdentityPair(config, extra);
+    await assert.rejects(verifyIdentity(denied.owner, denied.target, config), /RUNTIME_MEMBERSHIP_CONTRACT_MISMATCH|ROLE_PRIVILEGE_ESCALATION/);
+  }
+});
+
+test('restore cannot replace its original plan cohort with an empty caller list', async () => {
+  const config = baseConfig(), plan = planOf(config), pair = strictIdentityPair(config), host = recorder();
+  await run({ config, plan, restore: true, residueKeys: { earnings: [] }, log: host.log, exit: host.exit, connect: user => user === config.ownerUser ? pair.owner : pair.target, loadAssembly: async () => { throw new Error('restore must not load assembly'); }, journalWrite() {} });
+  assert.equal(host.lines.some(item => item.pass === false && item.code === 'RESTORE_ORIGINAL_KEYS_REQUIRED'), true);
+  assert.equal(pair.target.seen.some(item => item.sql.includes('rental_referral_earning WHERE id=ANY')), false);
+  assert.deepEqual(strictEarningKeys(plan), ['earning_a', 'earning_b']);
+  const snap = pgSession(config.migrationUser); await strictSnapshot(snap);
+  assert(snap.seen.find(item => item.sql.includes('FROM pg_constraint')).sql.includes("'zzsh_order.distribution_policy_version'::regclass"));
+});
+
+// This observes frame/xid scheduling with deterministic PG-shaped IO. It is not a PG xid/constraint test.
+test('every money body stays in one parent transaction with deferred constraints restored per call', async () => {
+  const config = baseConfig(), plan = planOf(config), session = pgSession(config.migrationUser, chainHandler([]));
+  const query = session.query.bind(session); let epoch = 0, parentXid, mode = 'DEFERRED', commits = 0;
+  session.query = async (sql, params) => {
+    if (/^BEGIN/.test(sql)) { epoch++; parentXid = String(epoch); mode = 'DEFERRED'; }
+    if (sql === 'COMMIT') commits++;
+    if (sql === 'SET CONSTRAINTS ALL DEFERRED') mode = 'DEFERRED';
+    if (sql === 'SET CONSTRAINTS ALL IMMEDIATE') mode = 'IMMEDIATE';
+    if (sql === 'SELECT pg_current_xact_id()::text AS xid') return ok([{ xid: session.state.inTransaction ? parentXid : 'outside_transaction' }]);
+    return query(sql, params);
+  };
+  await session.query('BEGIN'); const initialXid = (await session.query('SELECT pg_current_xact_id()::text AS xid')).rows[0].xid, observed = [];
+  const body = async action => {
+    assert.equal(session.state.inTransaction, true); assert.equal(session.state.role, config.runtimeUser); assert.equal(mode, 'DEFERRED');
+    const xid = (await session.query('SELECT pg_current_xact_id()::text AS xid')).rows[0].xid; observed.push(xid); assert.equal(xid, initialXid);
+    const result = await action(); await session.query('SET CONSTRAINTS ALL IMMEDIATE'); return result;
+  };
+  await fundsPhase(session, config, plan, createLedger(), {
+    accrueOn: (...args) => body(() => freshStore.accrueOn(...args)), transitionOn: (...args) => body(() => freshStore.transitionOn(...args)),
+  });
+  assert.equal(epoch, 1); assert.equal(commits, 0); assert.equal(observed.length, 8); assert(observed.every(xid => xid === initialXid));
+  await session.query('ROLLBACK'); assert.equal(session.state.inTransaction, false); assert.equal(session.state.role, config.migrationUser);
 });

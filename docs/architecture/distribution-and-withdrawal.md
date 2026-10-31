@@ -80,3 +80,14 @@ v2/NATIVE 结构必须作为一个前向包安装：政策 v2 形状/guard、按
 
 `scripts/distribution-pg-native-acceptance.mjs` 是唯一验收宿主，模式按实际副作用命名，整包为 rollback-only 装配：PLAN 只做静态检查（配置摘要、中央 state、逐候选字节 SHA、原生合同字段），回执显式 `readsSecrets:false, connections:0`；缺任意外部输入时 PLAN 直接列出精确字段与格式，`--full-native/--restore-regression` 在读凭据、连库、加载 dist 之前以 `NATIVE_CONTRACT_INCOMPLETE` 退出 2，不交一个"填了也必失败"的宿主。`--verify-identity` 核数据库身份、`pg_roles` 实查的角色名+OID、非 super/bypass/createdb/inherit、runtime 不拥有 `zzsh_order` 对象（必须在目标库查询，维护库答复不了）、`pg_has_role` 阻止 runtime 成为 owner/migration，并要求登记 migration 会话确实是 runtime 成员（否则 `RUNTIME_SET_ROLE_UNAVAILABLE`，不临时授予成员关系）；外来 client backend 数必须恰为本宿主自己一条。`--execute` 在一个迁移事务内应用 01/02/03 后调用共用的 `applyRuntimePrivileges` 与 `configureDistributionFinancialPrivileges`（marker 的 runtime EXECUTE 只由这条公共路径授予），再读 `has_function_privilege` 有效权限、`SET LOCAL ROLE` 到登记 runtime 做正负断言（权限负例走 SAVEPOINT，事务保持可用后 `RESET ROLE`），最后 `SET CONSTRAINTS ALL IMMEDIATE` + ROLLBACK 并逐项比较函数体/约束定义/head/行数。`--full-native` 不先回滚结构：同一被批准装配内按封签阶段顺序跑真实编译应用资金体 `accrueOn/transitionOn`（钱以 runtime 身份、声明以表 owner 身份，顺序为 fixture→计提→重复计提幂等→未到期拒绝→SETTLE→全额 REVOKE 充足/不足→同原 source RECOVER），每阶段先写 journal 再进入下一阶段，失败保留原键与 `UNKNOWN` 阶段，且全程不 COMMIT，因此不存在"已提交对象丢失"；回执固定标注 `assembly:"rollback-only"`。不可变账本不用 DELETE 凑清零：`--restore-regression` 只读核残留并把任何残留连原键交给登记的受控复位（`npm run test:db:reset -w @zzsh/api`），宿主自身绝不 DROP/ALTER/TRUNCATE/禁 trigger。收尾顺序为先结束工作连接、再释放维护锁、最后结束 owner 连接，未确认即 `CLEANUP_UNKNOWN` 并把结果降级为 pass:false 且退出 1。本轮未连库，故候选结构、真实 ACL、并发锁与资金链仍为 NOT_RUN；真实执行由 Root 在唯一登记回归资源与受限凭据引用上集中安排。
 
+
+
+### Rollback-only 验收的输入与证据边界
+
+审批恢复装配必须使用服务器派生的原订单 gameId，不能因 payload 不带 gameId 而改用中性全范围。范围被收回后原回执也须拒绝；合法原范围可只读恢复，不创建新授权。
+
+验收 fixture 只接受被封签的纯 DML，禁止事务控制/DDL；原生数据在 runtime 身份、同一父事务内建立，结构和声明仍用对应维护身份。每次调用 On 资金体先恢复 DEFERRED，原资金体执行 IMMEDIATE 闭包，错误先回保存点再复原角色，不能让 RESET ROLE 的25P02覆盖原错误。该事务/约束合同仍需真实PG验证，SQL形状校验不是任意SQL安全沙箱。
+
+资金不足到 RECOVER 之间必须有明确封签的合成 fundingSql，通过既有合法账本补足可用额；同一原债/原声明、版本与责任金额保持不变。缺补款、换债/换源、补款偷做终定、RECOVER仅重放不能算新债闭环。期满与未到期使用合法独立样本，不改到期/种子。所有模拟操作在同一事务回滚，不证明真实充值或渠道到账。
+
+执行日志限于仓库tmp的已核路径，逐阶段flush，失败停止并回滚；错误日志再失败仍保留原主错误。原生earning键纳入封签输入并核实际输出，残留检查使用完整原计划队列，不把空列表通过当清理完成；仍不删除不可变账务证据。配置文档使用已核字节内联装配，避免绝对秘密文件路径和二次读漂移。身份模式仅目录/READ ONLY角色能力核验，不执行候选或政策。缺少真实fixture、角色SET能力或精确资源绑定时仍不可宣称PG验收就绪。

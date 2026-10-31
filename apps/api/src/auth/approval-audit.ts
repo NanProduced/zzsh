@@ -893,7 +893,7 @@ async function buildApprovalActionContext(
     [row.id, context.userId],
   );
   const self = await adminByUserId(client, context.userId);
-  const gameId = payloadGameId(row.operationPayload);
+  const gameId = payloadGameId(row.operationPayload) ?? row.objectGameId ?? null;
   const scopeNeeded = gameId !== null && membershipOperationRequiresGameScope(row.operationCode) && !access.isBoss;
   // 不带游戏目标或本人是 Boss 时范围判定不会触发，这里用中性全范围值省掉一次查询。
   const gameScope: AdminGameScope = scopeNeeded ? await readAdminGameScope(client, context.userId) : { mode: "ALL_GAMES", gameIds: [] };

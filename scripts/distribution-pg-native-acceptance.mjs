@@ -20,8 +20,8 @@
 //
 // Nothing here enables a policy, calls a channel, or leaves a committed change behind.
 import { createHash } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, resolve, relative, isAbsolute } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Client } from 'pg';
 
@@ -50,6 +50,7 @@ export function nativeContract(config) {
     'native.adminFixtureId': 'ACTIVE administrator id already present in the registered regression resource',
     'native.declarerUserId': 'table-owner administrator id used for the reversal declaration stage',
     'native.expectations': 'ordered stages, one per phase, each {case, phase, ...}',
+    'native.expectations.recover.fundingSql': 'sealed synthetic balanced-wallet funding DML, after insufficient REVOKE and before RECOVER of that same root; no change to the debt or original receipts',
     'native.journalPath': 'file under the repository tmp/ where each stage receipt is appended',
     'expectedSqlSha256': '64 hex per candidate file name (01/02/03)',
   };
@@ -58,16 +59,73 @@ export function nativeContract(config) {
   if (!/^[0-9a-f]{64}$/.test(String(native.expectedSha256 ?? ''))) missing.push('native.expectedSha256');
   if (!native.collectionDocument) missing.push('native.collectionDocument');
   if (!/^[0-9a-f]{64}$/.test(String(native.expectedCollectionSha256 ?? ''))) missing.push('native.expectedCollectionSha256');
-  if (!ROLE.test(String(native.adminFixtureId ?? '')) && typeof native.adminFixtureId !== 'string') missing.push('native.adminFixtureId');
-  if (typeof native.declarerUserId !== 'string' || !native.declarerUserId) missing.push('native.declarerUserId');
+  if (typeof native.adminFixtureId !== 'string' || !native.adminFixtureId.trim() || native.adminFixtureId.length > 128) missing.push('native.adminFixtureId');
+  if (typeof native.declarerUserId !== 'string' || !native.declarerUserId.trim() || native.declarerUserId.length > 128) missing.push('native.declarerUserId');
   if (!Array.isArray(native.expectations) || !native.expectations.length) missing.push('native.expectations');
   if (typeof native.journalPath !== 'string' || !native.journalPath) missing.push('native.journalPath');
   if (!config?.expectedSqlSha256 || CANDIDATES.some(name => !/^[0-9a-f]{64}$/.test(String(config.expectedSqlSha256[name] ?? '')))) missing.push('expectedSqlSha256');
   const stages = Array.isArray(native.expectations) ? native.expectations.map(item => item?.phase) : [];
   const absentStages = REQUIRED_STAGES.filter(phase => !stages.includes(phase));
-  return { complete: !missing.length, missing, absentStages, fields, stages };
+  const recovery = Array.isArray(native.expectations) ? native.expectations.find(item => item?.phase === 'recover') : null;
+  if (typeof recovery?.fundingSql !== 'string' || !recovery.fundingSql.trim()) missing.push('native.expectations.recover.fundingSql');
+  return { complete: !missing.length && !absentStages.length, missing, absentStages, fields, stages };
 }
 
+
+/** Plain fixture DML only. This prevents transaction escape; it is not an arbitrary-SQL sandbox. */
+export function assertNativeFixtureSql(text) {
+  if (typeof text !== 'string' || !text.trim()) fail('NATIVE_FIXTURE_SQL_REQUIRED');
+  const allowed = new Set(['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'WITH']);
+  let i = 0, first = '', content = false, statements = 0;
+  const finish = () => { if (!content) return; if (!allowed.has(first)) fail('NATIVE_FIXTURE_DML_ONLY'); statements++; first = ''; content = false; };
+  while (i < text.length) {
+    if (/\s/.test(text[i])) { i++; continue; }
+    if (text.startsWith('--', i)) { const end = text.indexOf('\n', i + 2); i = end < 0 ? text.length : end + 1; continue; }
+    if (text.startsWith('/*', i)) {
+      let depth = 1; i += 2;
+      while (i < text.length && depth) { if (text.startsWith('/*', i)) { depth++; i += 2; } else if (text.startsWith('*/', i)) { depth--; i += 2; } else i++; }
+      if (depth) fail('NATIVE_FIXTURE_SQL_UNTERMINATED');
+      continue;
+    }
+    if (text[i] === ';') { finish(); i++; continue; }
+    content = true;
+    if (text[i] === "'" || text[i] === '"') {
+      const quote = text[i], escaped = quote === "'" && /[eE]/.test(text[i - 1] ?? '') && !/[\w$]/.test(text[i - 2] ?? '');
+      let closed = false; i++;
+      while (i < text.length) {
+        if (escaped && text[i] === '\\') { i += 2; continue; }
+        if (text[i] === quote) { if (text[i + 1] === quote) { i += 2; continue; } i++; closed = true; break; }
+        i++;
+      }
+      if (!closed) fail('NATIVE_FIXTURE_SQL_UNTERMINATED');
+      continue;
+    }
+    if (text[i] === '$') {
+      const tag = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.exec(text.slice(i))?.[0];
+      if (tag) { const end = text.indexOf(tag, i + tag.length); if (end < 0) fail('NATIVE_FIXTURE_SQL_UNTERMINATED'); i = end + tag.length; continue; }
+    }
+    const word = /^[A-Za-z_][A-Za-z0-9_$]*/.exec(text.slice(i))?.[0];
+    if (word) { if (!first) first = word.toUpperCase(); i += word.length; } else i++;
+  }
+  finish();
+  if (!statements) fail('NATIVE_FIXTURE_SQL_REQUIRED');
+  return statements;
+}
+
+export function resolveJournalPath(value) {
+  const base = resolve(dirname(fileURLToPath(import.meta.url)), '../tmp');
+  const output = resolve(value), child = relative(base, output);
+  if (!child || child === '..' || child.startsWith('..' + (process.platform === 'win32' ? '\\' : '/')) || isAbsolute(child) || !/\.(jsonl|log)$/i.test(output)) fail('JOURNAL_PATH_OUTSIDE_TMP');
+  for (let cursor = output; ; cursor = dirname(cursor)) {
+    if (existsSync(cursor) && lstatSync(cursor).isSymbolicLink()) fail('JOURNAL_PATH_REPARSE');
+    if (relative(base, cursor) === '') break;
+    if (dirname(cursor) === cursor) fail('JOURNAL_PATH_OUTSIDE_TMP');
+  }
+  return output;
+}
+export function nativeEarningKeys(plan) {
+  return [...new Set([...(plan.native.stages.accrue.earningIds ?? []), ...plan.native.expectations.map(item => item.earningId).filter(Boolean)])].sort();
+}
 /** Static shape and sealing. Runs before any credential read or connection. */
 export function sealedPlan(config, state, read) {
   if (config.schema !== 'distribution-pg-acceptance.v3' || config.host !== EXPECTED.host || config.port !== EXPECTED.port || config.database !== EXPECTED.database
@@ -83,6 +141,7 @@ export function sealedPlan(config, state, read) {
   }
   if (state.database !== config.database || state.oid !== String(config.resourceOid) || state.nonce !== config.nonce || state.marker !== config.marker || state.pendingReset !== null) fail('REGISTERED_STATE_MISMATCH');
   const contract = nativeContract(config);
+  if (contract.absentStages.length) fail('NATIVE_STAGES_INCOMPLETE', { absent: contract.absentStages, required: REQUIRED_STAGES });
   if (contract.missing.length) fail('SEALED_INPUT_INCOMPLETE', { missing: contract.missing, format: contract.fields });
   const sql = CANDIDATES.map(name => {
     const path = resolve(config.candidateDir, name), bytes = read(path), text = bytes.toString('utf8'), digest = sha256(bytes);
@@ -92,6 +151,7 @@ export function sealedPlan(config, state, read) {
   });
   const path = resolve(config.candidateDir, config.native.file), bytes = read(path), digest = sha256(bytes);
   if (digest !== config.native.expectedSha256) fail('NATIVE_FIXTURE_SEAL_MISMATCH', { expected: config.native.expectedSha256, actual: digest });
+  assertNativeFixtureSql(bytes.toString('utf8'));
   const collectionPath = resolve(config.candidateDir, config.native.collectionDocument), collectionBytes = read(collectionPath);
   if (sha256(collectionBytes) !== config.native.expectedCollectionSha256) fail('NATIVE_COLLECTION_SEAL_MISMATCH');
   const stages = {};
@@ -102,8 +162,11 @@ export function sealedPlan(config, state, read) {
   }
   const absentStages = REQUIRED_STAGES.filter(phase => !stages[phase]);
   if (absentStages.length) fail('NATIVE_STAGES_INCOMPLETE', { absent: absentStages, required: REQUIRED_STAGES });
-  const native = { path, digest, sql: bytes.toString('utf8'), collectionPath, collectionDigest: sha256(collectionBytes),
-    adminFixtureId: config.native.adminFixtureId, declarerUserId: config.native.declarerUserId, journalPath: resolve(config.native.journalPath), expectations: config.native.expectations, stages };
+  assertNativeFixtureSql(stages.recover.fundingSql);
+  if (!Array.isArray(stages.accrue.earningIds) || stages.accrue.earningIds.length !== stages.accrue.items || new Set(stages.accrue.earningIds).size !== stages.accrue.items || stages.accrue.earningIds.some(id => typeof id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id))) fail('NATIVE_EARNING_KEYS_REQUIRED');
+  if (stages.recover.earningId !== stages['revoke-insufficient'].earningId) fail('RECOVERY_ORIGINAL_ROOT_MISMATCH');
+  const native = { path, digest, sql: bytes.toString('utf8'), collectionPath, collectionDocument: collectionBytes.toString('utf8'), collectionDigest: sha256(collectionBytes),
+    adminFixtureId: config.native.adminFixtureId, declarerUserId: config.native.declarerUserId, journalPath: resolveJournalPath(config.native.journalPath), expectations: config.native.expectations, stages };
   return { sql, native, contract };
 }
 
@@ -114,13 +177,13 @@ export async function verifyIdentity(owner, target, config) {
   if (!database || database.oid !== String(config.resourceOid) || database.marker !== config.marker || database.owner !== config.ownerUser
     || database.allow !== true || database.template !== false) fail('DATABASE_IDENTITY_MISMATCH', database);
   const names = [config.ownerUser, config.migrationUser, config.runtimeUser];
-  const rows = (await owner.query(`SELECT rolname AS name,oid::text AS oid,rolsuper AS super,rolbypassrls AS bypass,rolcanlogin AS login,rolcreatedb AS createdb,rolinherit AS inherit
+  const rows = (await owner.query(`SELECT rolname AS name,oid::text AS oid,rolsuper AS super,rolbypassrls AS bypass,rolcanlogin AS login,rolcreatedb AS createdb,rolinherit AS inherit,rolcreaterole AS createrole,rolreplication AS replication
     FROM pg_roles WHERE rolname=ANY($1::text[])`, [names])).rows;
   if (rows.length !== names.length) fail('REGISTERED_ROLE_ABSENT', { expected: names, found: rows.map(row => row.name) });
   const byName = new Map(rows.map(row => [row.name, row]));
   for (const entry of ['migrationUser', 'runtimeUser']) {
     const role = byName.get(config[entry]);
-    if (role.super === true || role.bypass === true || role.createdb === true || role.inherit === true) fail('ROLE_PRIVILEGE_ESCALATION', entry);
+    if (role.super === true || role.bypass === true || role.createdb === true || role.inherit === true || role.createrole === true || role.replication === true) fail('ROLE_PRIVILEGE_ESCALATION', entry);
     if (role.login !== true) fail('ROLE_CANNOT_LOGIN', entry);
   }
   if (byName.get(config.migrationUser).oid !== String(config.roles.migrationOid) || byName.get(config.runtimeUser).oid !== String(config.roles.runtimeOid)) fail('REGISTERED_ROLE_OID_DRIFT');
@@ -128,6 +191,8 @@ export async function verifyIdentity(owner, target, config) {
   const impersonates = (await owner.query('SELECT (pg_has_role($1,$2,$5) OR pg_has_role($1,$3,$5) OR pg_has_role($1,$4,$5)) AS member',
     [config.runtimeUser, config.ownerUser, config.migrationUser, database.owner, 'MEMBER'])).rows[0].member;
   if (impersonates === true) fail('RUNTIME_IMPERSONATES_OWNER');
+  const memberships = (await owner.query('SELECT count(*)::int AS n FROM pg_auth_members WHERE member=$1', [byName.get(config.runtimeUser).oid])).rows[0]?.n;
+  if (Number(memberships) !== 0) fail('RUNTIME_MEMBERSHIP_CONTRACT_MISMATCH');
   // Business relations are catalog objects of the TARGET database, never of the maintenance database.
   const runtimeOwns = (await target.query('SELECT count(*)::int AS n FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.relowner=$1 AND n.nspname=$2',
     [byName.get(config.runtimeUser).oid, 'zzsh_order'])).rows[0].n;
@@ -137,6 +202,11 @@ export async function verifyIdentity(owner, target, config) {
   if (canSetRole !== true) fail('RUNTIME_SET_ROLE_UNAVAILABLE', 'the registered migration session is not a member of the runtime role');
   const others = (await owner.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=$1 AND backend_type='client backend' AND pid<>pg_backend_pid()", [config.database])).rows[0].n;
   if (Number(others) !== 1) fail('FOREIGN_SESSION_PRESENT', { others: Number(others), expected: 1 });
+  await target.query('BEGIN READ ONLY');
+  try {
+    await target.query(`SET LOCAL ROLE ${config.runtimeUser}`);
+    if ((await target.query('SELECT current_user AS role')).rows[0]?.role !== config.runtimeUser) fail('RUNTIME_SET_ROLE_READBACK_MISMATCH');
+  } finally { await target.query('ROLLBACK'); }
   return { database, roles: Object.fromEntries([...byName].map(([name, row]) => [name, { oid: row.oid, super: row.super, bypass: row.bypass }])), canSetRole: true };
 }
 
@@ -152,7 +222,7 @@ export async function snapshot(client) {
         AND p.proname IN ('distribution_policy_contract_version','guard_distribution_participant','guard_distribution_policy_version','guard_distribution_policy_head','guard_referral_reversal_declaration','derive_payment_referral_inputs','guard_payment_distribution_basis','guard_earning_entry')
       ORDER BY 1`)).rows,
     constraints: (await client.query(`SELECT conname AS name,pg_get_constraintdef(oid) AS definition FROM pg_constraint
-      WHERE connamespace='zzsh_order'::regnamespace AND conname IN ('distribution_participant_check','distribution_policy_version_schema_check','distribution_policy_version_head_check','invitation_relation_source_type_check','rental_referral_reversal_source_scope_check','earning_expected_lines') ORDER BY 1`)).rows,
+      WHERE connamespace='zzsh_order'::regnamespace AND conrelid IN ('zzsh_order.distribution_policy_version'::regclass,'zzsh_order.distribution_policy_head'::regclass,'zzsh_order.distribution_participant'::regclass,'zzsh_order.invitation_relation'::regclass,'zzsh_order.rental_referral_reversal_source'::regclass,'zzsh_order.rental_referral_earning'::regclass) ORDER BY conrelid::regclass::text,conname`)).rows,
     heads: (await client.query('SELECT scope,revision,current_version_id FROM zzsh_order.distribution_policy_head ORDER BY scope')).rows,
   };
 }
@@ -179,9 +249,13 @@ async function inTxn(client, run) {
   await client.query('BEGIN');
   await client.query("SET LOCAL statement_timeout='15s'");
   await client.query("SET LOCAL lock_timeout='2s'");
+  await client.query("SET LOCAL standard_conforming_strings=on");
   return run();
 }
-const journal = (path, entry) => { try { mkdirSync(dirname(path), { recursive: true }); appendFileSync(path, JSON.stringify(entry) + '\n'); } catch { /* the journal is evidence, never a pass condition */ } };
+const journal = (path, entry) => {
+  try { mkdirSync(dirname(path), { recursive: true }); appendFileSync(path, JSON.stringify(entry) + '\n', { flush: true }); }
+  catch { fail('JOURNAL_WRITE_FAILED'); }
+};
 
 /**
  * Structure, then the SHARED privilege steps, then the effective runtime ACL - all inside the one
@@ -204,16 +278,21 @@ export async function structurePhase(client, plan, config, ledger, assembly) {
     NOT EXISTS(SELECT 1 FROM pg_proc p, aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a WHERE p.oid='zzsh_order.distribution_policy_contract_version()'::regprocedure AND a.grantee=0 AND a.privilege_type='EXECUTE') AS public_closed`,
     [config.runtimeUser])).rows[0];
   ledger.require(granted?.runtime_exec === true && granted?.public_closed === true, 'CONTRACT_ACL_EFFECTIVE', granted);
+  await client.query('SAVEPOINT runtime_acl_role');
   await client.query(`SET LOCAL ROLE ${config.runtimeUser}`);
   try {
     const read = await client.query('SELECT current_user AS role, zzsh_order.distribution_policy_contract_version() AS version');
     ledger.require(read.rows[0].role === config.runtimeUser && Number(read.rows[0].version) === 2, 'RUNTIME_CONTRACT_EXECUTE_READBACK', read.rows[0]);
     const declared = await client.query(`SELECT count(*)::int AS n FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-      WHERE n.nspname='zzsh_order' AND c.relname='rental_referral_reversal_source' AND c.relowner=(SELECT roid FROM pg_roles WHERE rolname=$1)`, [config.migrationUser]).then(result => result.rows[0]).catch(error => error);
+      WHERE n.nspname='zzsh_order' AND c.relname='rental_referral_reversal_source' AND c.relowner=(SELECT oid FROM pg_roles WHERE rolname=$1)`, [config.migrationUser]).then(result => result.rows[0]).catch(error => error);
     ledger.require(Number(declared?.n) === 1, 'DECLARATION_OWNER_IS_MIGRATION_SESSION', declared);
     await rejected(client, 'runtime_declaration', "INSERT INTO zzsh_order.rental_referral_reversal_source(id,earning_id,scope,basis_digest,amount_cents,canonical_source,source_digest,approval_digest,created_by_admin_id,reason) VALUES('p','p','NATIVE',repeat('b',64),'1','{}',repeat('c',64),repeat('a',64),'p','p')", [], { sqlstate: '42501' }, ledger, 'RUNTIME_REVERSAL_DECLARATION_DENIED');
     await rejected(client, 'runtime_seed', "UPDATE zzsh_order.rental_referral_earning SET canonical_seed='{}' WHERE id='probe'", [], { sqlstate: '42501' }, ledger, 'RUNTIME_PROTECTED_EARNING_SOURCE_DENIED');
-  } finally { await client.query('RESET ROLE'); }
+    await client.query('RESET ROLE'); await client.query('RELEASE SAVEPOINT runtime_acl_role');
+  } catch (error) {
+    try { await client.query('ROLLBACK TO SAVEPOINT runtime_acl_role'); await client.query('RESET ROLE'); await client.query('RELEASE SAVEPOINT runtime_acl_role'); } catch { /* outer rollback owns an unusable transaction */ }
+    throw error;
+  }
 }
 
 export async function policyPhase(client, config, plan, ledger) {
@@ -252,16 +331,32 @@ export async function fundsPhase(client, config, plan, ledger, store) {
   const stage = async (phase, run) => {
     const expectation = stages[phase];
     try { const value = await run(expectation); journal(journalPath, { phase, case: expectation.case, status: 'APPLIED', detail: value ?? null }); ledger.pass('STAGE_' + phase.toUpperCase().replace(/-/g, '_'), value ?? true); return value; }
-    catch (error) { journal(journalPath, { phase, case: expectation.case, status: 'UNKNOWN', errorCode: error?.code ?? 'FAILED', message: error?.message }); throw error; }
+    catch (error) {
+      try { journal(journalPath, { phase, case: expectation.case, status: 'UNKNOWN', errorCode: error?.code ?? 'FAILED' }); } catch { ledger.checks.push({check:'FAIL',code:'STAGE_JOURNAL_UNAVAILABLE'}); }
+      throw error;
+    }
   };
-  await client.query(plan.native.sql);
-  ledger.pass('NATIVE_FIXTURE_APPLIED', { sha256: plan.native.digest, stages: plan.native.expectations.map(item => item.phase) });
-  const asRuntime = async (body) => { await client.query(`SET LOCAL ROLE ${config.runtimeUser}`); try { return await body(); } finally { await client.query('RESET ROLE'); } };
+  const asRuntime = async (body) => {
+    await client.query('SAVEPOINT native_money');
+    await client.query('SET CONSTRAINTS ALL DEFERRED');
+    await client.query(`SET LOCAL ROLE ${config.runtimeUser}`);
+    try { const value = await body(); await client.query('RESET ROLE'); await client.query('RELEASE SAVEPOINT native_money'); return value; }
+    catch (error) {
+      // Recover the transaction and its previous role before rethrowing the original SQL error.
+      try { await client.query('ROLLBACK TO SAVEPOINT native_money'); await client.query('RESET ROLE'); await client.query('RELEASE SAVEPOINT native_money'); } catch { /* outer rollback owns an unusable transaction */ }
+      throw error;
+    }
+  };
+  await stage('fixture', async () => {
+    await asRuntime(async () => { await client.query(plan.native.sql); await client.query('SET CONSTRAINTS ALL IMMEDIATE'); });
+    return { sqlSha256: plan.native.digest };
+  });
   const accrue = stages.accrue;
   await stage('accrue', async () => {
     const result = await asRuntime(() => store.accrueOn(client, accrue.orderId, requestId));
     const items = result?.items ?? [];
     ledger.require(result.knowledge === 'KNOWN' && items.length === accrue.items && items.length > 0 && items.every(item => item.replayed !== true), 'NATIVE_ACCRUAL_ITEMS', { case: accrue.case, items: items.length });
+    ledger.require(canonical(items.map(item => item.root.id).sort()) === canonical([...accrue.earningIds].sort()), 'NATIVE_ORIGINAL_EARNING_KEYS');
     for (const item of items) { created.earnings.push(item.root.id);
       ledger.require(String(item.root.amountCents) === accrue.amounts[item.root.role] && item.root.state === 'PENDING', 'NATIVE_ACCRUAL_FACTS', { case: accrue.case, role: item.root.role, amount: item.root.amountCents }); }
     return { earningIds: items.map(item => item.root.id) };
@@ -295,10 +390,12 @@ export async function fundsPhase(client, config, plan, ledger, store) {
     const expectation = stages[phase];
     const earning = (await client.query('SELECT e.id,e.order_id,e.amount_cents::text,e.basis_digest,e.state,o.game_id FROM zzsh_order.rental_referral_earning e JOIN zzsh_order.rental_order o ON o.id=e.order_id WHERE e.id=$1', [expectation.earningId])).rows[0];
     ledger.require(!!earning && ['SETTLED', 'PENDING'].includes(earning.state), 'NATIVE_DECLARATION_REQUIRES_ORIGINAL_ROOT', { case: expectation.case, state: earning?.state ?? 'absent' });
+    const admission = (await client.query('SELECT mode,approval_digest FROM zzsh_order.distribution_order_admission WHERE order_id=$1', [earning.order_id])).rows[0];
+    ledger.require(admission?.mode === 'NATIVE' && /^[0-9a-f]{64}$/.test(admission.approval_digest ?? ''), 'NATIVE_ORIGINAL_ADMISSION_REQUIRED');
     const source = canonical({ schema: 'rental-referral-reversal.v1', scope: 'NATIVE', earningId: earning.id, basisDigest: earning.basis_digest, amountCents: String(earning.amount_cents) });
     const id = 'reversal_' + sha256(canonical(['NATIVE', earning.id])).slice(0, 40);
     await client.query(`INSERT INTO zzsh_order.rental_referral_reversal_source(id,earning_id,scope,basis_digest,amount_cents,canonical_source,source_digest,approval_digest,created_by_admin_id,reason)
-      VALUES($1,$2,'NATIVE',$3,$4,$5,$6,$7,$8,$9)`, [id, earning.id, earning.basis_digest, String(earning.amount_cents), source, sha256(source), plan.native.admissionDigest ?? expectation.admissionDigest, plan.native.declarerUserId, expectation.reason]);
+      VALUES($1,$2,'NATIVE',$3,$4,$5,$6,$7,$8,$9)`, [id, earning.id, earning.basis_digest, String(earning.amount_cents), source, sha256(source), admission.approval_digest, plan.native.declarerUserId, expectation.reason]);
     created.declarations.push(id);
     return { id, earning };
   };
@@ -324,10 +421,19 @@ export async function fundsPhase(client, config, plan, ledger, store) {
   const recover = stages.recover;
   await stage('recover', async () => {
     const expectation = recover;
+    if (expectation.earningId !== stages['revoke-insufficient'].earningId) fail('RECOVERY_ORIGINAL_ROOT_MISMATCH');
+    const sourceId = created.declarations.at(-1);
+    if (expectation.reversalSourceId && expectation.reversalSourceId !== sourceId) fail('RECOVERY_ORIGINAL_SOURCE_MISMATCH');
     const row = (await client.query('SELECT id,version::text AS version,state,recovery_required_cents::text AS obligation FROM zzsh_order.rental_referral_earning WHERE id=$1', [expectation.earningId])).rows[0];
     ledger.require(row?.state === 'RECOVERY_REQUIRED' && row.obligation === expectation.amountCents, 'NATIVE_RECOVER_REQUIRES_ORIGINAL_OBLIGATION', { case: expectation.case, state: row?.state });
-    const result = await asRuntime(() => store.transitionOn(client, row.id, 'RECOVER', row.version, requestId, expectation.reversalSourceId ?? created.declarations.at(-1)));
-    ledger.require(result.root.state === 'REVOKED' && result.root.recoveryRequiredCents === null, 'NATIVE_RECOVER_CLOSES_OBLIGATION', { case: expectation.case });
+    assertNativeFixtureSql(expectation.fundingSql);
+    await client.query('SET CONSTRAINTS ALL DEFERRED');
+    await asRuntime(async () => { await client.query(expectation.fundingSql); await client.query('SET CONSTRAINTS ALL IMMEDIATE'); });
+    const funded = (await client.query('SELECT id,version::text AS version,state,recovery_required_cents::text AS obligation FROM zzsh_order.rental_referral_earning WHERE id=$1', [expectation.earningId])).rows[0];
+    ledger.require(funded?.state === 'RECOVERY_REQUIRED' && funded.version === row.version && funded.obligation === row.obligation, 'RECOVERY_FUNDING_CANNOT_CHANGE_ORIGINAL_DEBT');
+    journal(journalPath, { phase: 'recover-funding', case: expectation.case, status: 'APPLIED', earningId: row.id, sourceId, sqlSha256: sha256(expectation.fundingSql) });
+    const result = await asRuntime(() => store.transitionOn(client, row.id, 'RECOVER', row.version, requestId, sourceId));
+    ledger.require(result.replayed !== true && result.root.state === 'REVOKED' && result.root.recoveryRequiredCents === null, 'NATIVE_RECOVER_CLOSES_OBLIGATION', { case: expectation.case });
     return { state: result.root.state };
   });
   for (const expectation of plan.native.expectations) if (expectation.orderId) created.orders.push(expectation.orderId);
@@ -364,7 +470,7 @@ export async function run(options) {
   const target = connect(config.migrationUser, config.database, 'DISTRIBUTION_MIGRATION_PASSWORD_FILE');
   let locked = false, unlocked = null, began = false, rolledBack = null, targetEnded = null, ownerEnded = null, primary = null, success = null;
   try {
-    const assembly = await loadAssembly(config, plan);
+    const assembly = mode === 'VERIFY_IDENTITY' || mode === 'RESTORE_CHECK' ? null : await loadAssembly(config, plan);
     await owner.connect();
     locked = (await owner.query('SELECT pg_try_advisory_lock($1::bigint) AS acquired', [Number(EXPECTED.lockKey)])).rows[0].acquired === true;
     if (!locked) fail('MAINTENANCE_LOCK_BUSY');
@@ -374,8 +480,14 @@ export async function run(options) {
     ledger.pass('TARGET_SESSION_REGISTERED', nonce);
     await verifyIdentity(owner, target, config);
     ledger.pass('REGISTERED_IDENTITY_ROLES_AND_SET_ROLE');
+    if (mode === 'VERIFY_IDENTITY') {
+      success = { ...receipt, pass: true, checks: ledger.checks };
+      return receipt;
+    }
     if (mode === 'RESTORE_CHECK') {
-      await residuePhase(target, options.residueKeys ?? { earnings: [] }, ledger);
+      const keys = nativeEarningKeys(plan);
+      if (!keys.length || options.residueKeys && canonical([...(options.residueKeys.earnings ?? [])].sort()) !== canonical(keys)) fail('RESTORE_ORIGINAL_KEYS_REQUIRED');
+      await residuePhase(target, { earnings: keys }, ledger);
       success = { ...receipt, pass: true, checks: ledger.checks };
       return receipt;
     }
@@ -384,6 +496,7 @@ export async function run(options) {
     await inTxn(target, async () => {
       await structurePhase(target, plan, config, ledger, assembly);
       await policyPhase(target, config, plan, ledger);
+      if (mode === 'FULL_NATIVE') journalWrite(plan.native.journalPath, { phase: 'policy', case: plan.native.stages.policy.case, status: 'APPLIED', assembly: 'rollback-only' });
       if (mode === 'FULL_NATIVE') {
         const store = assembly?.earnings;
         if (!store) ledger.incomplete('API_STORE_UNAVAILABLE', 'the sealed collection admission or the built API is missing');
@@ -397,13 +510,13 @@ export async function run(options) {
     const after = await snapshot(target);
     if (JSON.stringify(before) !== JSON.stringify(after)) fail('ROLLBACK_DID_NOT_RESTORE_DEFINITIONS_CONSTRAINTS_HEADS_OR_ROWS', { before, after });
     ledger.pass('ROLLBACK_RESTORED_DEFINITIONS_CONSTRAINTS_HEADS_AND_ROWS');
-    await residuePhase(target, { earnings: ledger.checks.filter(item => item.code.startsWith('STAGE_')).length ? plan.native.expectations.flatMap(item => item.earningIds ?? []) : [] }, ledger);
+    await residuePhase(target, { earnings: mode === 'FULL_NATIVE' ? nativeEarningKeys(plan) : [] }, ledger);
     success = { ...receipt, pass: true, checks: ledger.checks, cleanup: { began, rolledBack } };
     return receipt;
   } catch (error) {
     primary = error;
     if (began) { try { await target.query('ROLLBACK'); rolledBack = true; } catch { rolledBack = false; } }
-    journalWrite?.(plan.native.journalPath, { status: 'FAILED', code: error.code ?? 'FAILED', incomplete: error.incomplete === true, message: error.message, rolledBack, at: new Date().toISOString() });
+    try { journalWrite?.(plan.native.journalPath, { status: 'FAILED', code: error.code ?? 'FAILED', incomplete: error.incomplete === true, rolledBack, at: new Date().toISOString() }); } catch { ledger.checks.push({ check: 'FAIL', code: 'FAILURE_JOURNAL_UNAVAILABLE' }); }
     log.error(JSON.stringify({ ...receipt, pass: false, code: error.code ?? 'FAILED', incomplete: error.incomplete === true, message: error.message, detail: error.detail ?? null, checks: ledger.checks, cleanup: { began, rolledBack } }));
     exit(error.incomplete === true ? 2 : 1);
     return receipt;
@@ -463,7 +576,7 @@ async function main() {
       catch (error) { if (error.code === 'ERR_MODULE_NOT_FOUND') return { ...migrations, earnings: null }; throw error; }
       const database = { name: activeConfig.database, user: activeConfig.runtimeUser, runtimeUser: activeConfig.runtimeUser };
       const assembly = runtime.loadJoinpayCollectionRuntime({ provider: 'real', authEnabled: true, database },
-        { JOINPAY_COLLECTION_ENABLED: 'true', JOINPAY_COLLECTION_CONFIG_FILE: activePlan.native.collectionPath });
+        { JOINPAY_COLLECTION_ENABLED: 'true', JOINPAY_COLLECTION_CONFIG: activePlan.native.collectionDocument });
       if (!assembly?.admission) fail('NATIVE_COLLECTION_ADMISSION_UNAVAILABLE');
       const earnings = store.createNativeDistributionEarningStore(assembly.admission);
       // The store checks the resource identity itself; the host records the same view for the receipt.

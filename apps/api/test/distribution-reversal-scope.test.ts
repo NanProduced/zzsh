@@ -143,3 +143,61 @@ test('approval actions and candidates fail closed for a reversal without a resol
   const candidateApprove = reasons({ ...base, row: row('delta'), gameScope: { mode: 'SELECTED_GAMES' as const, gameIds: ['delta'] } });
   assert.equal(candidateApprove.find(item => item[0] === 'approve')?.[1], 'BUSINESS_PERMISSION_REQUIRED', 'a non-Boss candidate is blocked by the Boss rule before scope');
 });
+
+/** Exercise the public recovery route: it assembles current action scope before any receipt lookup. */
+async function reversalRecoveryRouteFixture(scope: any, objectGameId: string | null = 'delta') {
+  const access = { ...operator(scope), permissions: new Set(['approval.request.read', 'approval.request.execute', 'personal.distribution.policy.manage']) };
+  const restore = stubAccess({ ops_1: access });
+  const sql: string[] = [];
+  let body: any, responseStatus: number | undefined;
+  const row = { id: 'approval_recovery_r3', templateId: 'template_1', templateVersion: 1,
+    operationCode: 'distribution.earning.reverse', triggerCondition: 'manual', payloadVersion: 1,
+    operationPayload: payload, operationPayloadHash: 'c'.repeat(64), summary: '全额冲回', requestedBy: 'ops_1',
+    status: 'EXECUTED', statusReason: null, expiresAt: new Date(0), createdAt: new Date(0),
+    decidedAt: new Date(0), decidedBy: 'boss_1', decisionReason: null,
+    supersedesRequestId: null, supersededByRequestId: null, objectGameId };
+  const pool = { async query(query: string) {
+    sql.push(query);
+    if (query.includes('FROM "zzsh_iam"."approval_request" WHERE "id" = $1')) return { rows: [row] };
+    if (query.includes('FROM "zzsh_iam"."approval_request_candidate"')) return { rows: [] };
+    if (query.includes('WHERE u."id" = $1')) return { rows: [{ id: 'ops_1', username: 'ops_1', name: 'Operator', status: 'ACTIVE', isBoss: false, twoFactorEnabled: true }] };
+    if (query.includes('FROM "zzsh_supply"."idempotency_record"')) return { rows: [{ requestFingerprint: 'f'.repeat(64), responseStatus: 200,
+      responseBody: { approvalRequestId: row.id, status: 'EXECUTED', resultCode: 'DISTRIBUTION_REVERSAL_AUTHORIZED' }, createdAt: new Date(0) }] };
+    throw new Error('Unexpected recovery SQL: ' + query);
+  }, async connect() { throw new Error('Recovery GET must not open a write transaction'); } };
+  const response = { status(value: number) { responseStatus = value; return this; }, setHeader() { return this; }, json(value: unknown) { body = value; } };
+  const { handleAdminApprovalRoute } = await import('../src/auth/approval-audit');
+  return { sql, restore, response: () => ({ body, status: responseStatus }), run: () => handleAdminApprovalRoute({ method: 'GET',
+    url: '/api/v1/admin/security/approvals/recovery?operation=approval.request.execute&key=recovery_r3&requestId=' + row.id, headers: {} },
+    response, 'read_recovery_r3', { pool, testOperationsEnabled: false, approvalOperationExecutor: async () => ({ resultCode: 'UNUSED' }) } as any,
+    async () => ({ userId: 'ops_1', sessionId: 'session_1' } as any)) };
+}
+
+test('reversal recovery assembles the stored object game and denies a withdrawn scope before receipt lookup', async () => {
+  const fixture = await reversalRecoveryRouteFixture({ mode: 'SELECTED_GAMES', gameIds: ['alpha'] });
+  try {
+    await assert.rejects(fixture.run(), (error: any) => error.status === 403 && error.code === 'FORBIDDEN' && /GAME_SCOPE_DENIED/.test(error.message));
+    assert.equal(fixture.sql.filter(query => query.includes('idempotency_record')).length, 0);
+    assert.equal(fixture.response().body, undefined);
+  } finally { fixture.restore(); }
+});
+
+test('reversal recovery preserves the original executed receipt for the current original-game scope', async () => {
+  const fixture = await reversalRecoveryRouteFixture({ mode: 'SELECTED_GAMES', gameIds: ['delta'] });
+  try {
+    await fixture.run();
+    assert.equal(fixture.response().status, 200);
+    assert.equal(fixture.response().body.knowledge, 'KNOWN');
+    assert.equal(fixture.response().body.receipt.resultCode, 'DISTRIBUTION_REVERSAL_AUTHORIZED');
+    assert.equal(fixture.sql.filter(query => query.includes('idempotency_record')).length, 1);
+    assert.equal(fixture.sql.filter(query => /^\s*(INSERT|UPDATE|DELETE)/i.test(query)).length, 0);
+  } finally { fixture.restore(); }
+});
+
+test('reversal recovery fails closed when the stored original object game cannot be resolved', async () => {
+  const fixture = await reversalRecoveryRouteFixture({ mode: 'ALL_GAMES', gameIds: [] }, null);
+  try {
+    await assert.rejects(fixture.run(), (error: any) => error.status === 403 && /GAME_SCOPE_DENIED/.test(error.message));
+    assert.equal(fixture.sql.filter(query => query.includes('idempotency_record')).length, 0);
+  } finally { fixture.restore(); }
+});

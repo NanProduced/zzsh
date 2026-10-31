@@ -23,3 +23,13 @@ settle, revoke-sufficient, revoke-insufficient, recover. Missing or partial inpu
 before credentials or sockets; the marker grant for runtime comes only from the shared `applyRuntimePrivileges` step, which
 the host invokes from the built API inside the same transaction. Financial evidence is never deleted: residue is referred to
 the registered controlled reset (`npm run test:db:reset -w @zzsh/api`).
+
+Root execution contract additions:
+- The fixture is plain DML on the explicit runtime role, in the same transaction as native proofs. Transaction control and DDL are rejected; this is not an arbitrary-SQL sandbox.
+- recover must bind the newly insufficient earning and its just-created reversal source. Its sealed expectation includes fundingSql: legitimate synthetic balanced-ledger funding DML, which cannot alter the debt or its receipts. A no-op/insufficient fund cannot pass the actual store.
+- accrue.earningIds must name the expected original roots. Restore checks exactly the plan cohort and cannot substitute an empty caller list.
+- journalPath resolves under this repository tmp, without reparse ancestors. Every stage append is flushed and errors stop/rollback; a failed error journal cannot replace the original exception.
+- Collection document bytes are SHA-checked once and passed inline to the application loader. No absolute secret-file path or supplier key loading is required to brand the admission.
+- Each On body restores INITIALLY DEFERRED semantics and validates its own closure before the next one; SQL errors recover to savepoint before RESET ROLE.
+- Future and matured samples must be separate valid economic roots/orders with frozen original due dates. Do not update due_at or canonical_seed to make a test mature.
+- identity uses an actual READ ONLY role-switch probe and never loads application assembly or runs candidate DDL. Runtime must satisfy the original native no-membership contract; missing migration SET ROLE capability is an external registered-resource precondition, not permission to grant membership automatically.
