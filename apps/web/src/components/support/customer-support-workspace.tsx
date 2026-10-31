@@ -1771,7 +1771,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
             void fetch("/api/im/messages", {
               method: "POST",
               headers: { "content-type": "application/json" },
-              body: JSON.stringify({ conversationId, kind: "text", text }),
+              body: JSON.stringify({ conversationId, text }),
             }).catch(() => undefined);
           }
           const next = messageFromNim(sent, client.accountId);
