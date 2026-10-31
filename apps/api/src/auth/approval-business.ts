@@ -297,14 +297,29 @@ async function loadSettlements(client: Pool | PoolClient, rows: readonly Approva
  * approval_request_id 改写为撤销申请，因此“本次执行成功”必须以执行记录为准，
  * 再指向被操作的冻结目标；这与“新建业务行”是两种不同的结果来源。
  */
-async function loadExecutionReceipts(client: Pool | PoolClient, rows: readonly ApprovalRequestFacts[]): Promise<Map<string, { status: string; resultCode: string; resultDetail: string | null }>> {
+async function loadExecutionReceipts(client: Pool | PoolClient, rows: readonly ApprovalRequestFacts[]): Promise<Map<string, { receiptId: string; status: string; resultCode: string; resultDetail: string | null; executedBy: string | null }>> {
   if (rows.length === 0) return new Map();
-  const result = await client.query<{ requestId: string; status: string; resultCode: string; resultDetail: string | null }>(
-    `SELECT "request_id" AS "requestId", "status", "result_code" AS "resultCode", "result_detail" AS "resultDetail"
+  const result = await client.query<{ requestId: string; receiptId: string; status: string; resultCode: string; resultDetail: string | null; executedBy: string | null }>(
+    `SELECT "request_id" AS "requestId", "id" AS "receiptId", "status", "result_code" AS "resultCode", "result_detail" AS "resultDetail", "executed_by" AS "executedBy"
        FROM "zzsh_iam"."approval_execution" WHERE "request_id" = ANY($1::text[])`,
     [rows.map((row) => row.id)],
   );
-  return new Map(result.rows.map((row) => [row.requestId, { status: row.status, resultCode: row.resultCode, resultDetail: row.resultDetail }]));
+  return new Map(result.rows.map((row) => [row.requestId, { receiptId: row.receiptId, status: row.status, resultCode: row.resultCode, resultDetail: row.resultDetail, executedBy: row.executedBy }]));
+}
+
+/** Only the facts a Boss needs to decide which money responsibility a full reversal cancels. */
+async function loadReversalEarnings(client: Pool | PoolClient, rows: readonly ApprovalRequestFacts[]) {
+  const ids = rows.map(row => textField(row.finalPayload ?? row.operationPayload, "earningId")).filter((id): id is string => Boolean(id));
+  if (ids.length === 0) return new Map<string, Record<string, string | number | null>>();
+  const result = await client.query<Record<string, string | number | null>>(
+    `SELECT e."id", e."order_id" AS "orderId", e."state", e."amount_cents"::text AS "amountCents", e."beneficiary_role" AS "role",
+            e."beneficiary_user_id" AS "beneficiaryUserId", e."posting_id" AS "postingId", e."payment_confirmation_id" AS "paymentConfirmationId",
+            e."basis_digest" AS "basisDigest", e."policy_version" AS "policyVersion", e."version"::text AS "version",
+            (SELECT count(*)::int FROM "zzsh_order"."rental_referral_transition" t WHERE t."earning_id" = e."id" AND t."action" IN ('REVOKE','RECOVER')) AS "reversals"
+       FROM "zzsh_order"."rental_referral_earning" e WHERE e."id" = ANY($1::text[])`,
+    [[...new Set(ids)]],
+  );
+  return new Map(result.rows.map(row => [String(row.id), row]));
 }
 
 function settlementPendingConditions(row: SettlementRow): string[] {
@@ -589,11 +604,12 @@ export async function projectApprovalBusinesses(
     return !registration || (registration.businessType !== "membership" && registration.businessType !== "settlement");
   });
 
-  const [entitlements, policies, settlementRows, executions] = await Promise.all([
+  const [entitlements, policies, settlementRows, executions, reversalEarnings] = await Promise.all([
     loadEntitlements(client, membership),
     loadPolicies(client, membership),
     loadSettlements(client, settlements),
     loadExecutionReceipts(client, rows.filter(row => ["membership", "distribution"].includes(approvalRegistration(row.operationCode)?.businessType ?? ""))),
+    loadReversalEarnings(client, unknown.filter(row => row.operationCode === "distribution.earning.reverse")),
   ]);
   const gameIds = new Set<string>();
   for (const row of membership) {
@@ -622,6 +638,26 @@ export async function projectApprovalBusinesses(
       operationCode: row.operationCode,
       executionMode: registration?.executionMode ?? APPROVAL_EXECUTION_MODE.unsupported,
     };
+    if (row.operationCode === "distribution.earning.reverse") {
+      const readable = viewer.access.isBoss || hasPermission(viewer.access, "personal.distribution.policy.read") || hasPermission(viewer.access, "personal.distribution.policy.manage");
+      if (!readable) { views.set(row.id, restricted(base, "BUSINESS_PERMISSION_REQUIRED")); continue; }
+      const payload = row.finalPayload ?? row.operationPayload;
+      const receipt = executions.get(row.id);
+      const earning = reversalEarnings.get(String(textField(payload, "earningId") ?? ""));
+      const authorized = receipt?.status === "SUCCEEDED" && receipt.resultCode === "DISTRIBUTION_REVERSAL_AUTHORIZED" && receipt.resultDetail === textField(payload, "earningId");
+      views.set(row.id, { ...base, summaryAvailable: true, detailsAvailable: true, changeSummary: row.summary,
+        reversal: { schema: "distribution-reversal-review.v1",
+          earningId: textField(payload, "earningId"), orderId: textField(payload, "orderId"), amountCents: textField(payload, "amountCents"),
+          full: payload.full === true, reason: textField(payload, "reason"),
+          original: earning ? { state: earning.state, role: earning.role, beneficiaryUserId: earning.beneficiaryUserId, postingId: earning.postingId,
+            paymentConfirmationId: earning.paymentConfirmationId, basisDigest: earning.basisDigest, policyVersion: earning.policyVersion, version: earning.version, amountCents: earning.amountCents } : null,
+          originalFactsKnowledge: earning ? (String(earning.amountCents) === textField(payload, "amountCents") ? "KNOWN" : "MISMATCH") : "UNKNOWN",
+          reversalsAlreadyRecorded: earning ? Number(earning.reversals) : null,
+          requestPayloadHash: row.operationPayloadHash, approvedPayloadHash: row.finalPayloadHash ?? null,
+          authorization: authorized ? { knowledge: "KNOWN", executionReceiptId: receipt.receiptId, executedBy: receipt.executedBy } : { knowledge: receipt ? "REJECTED" : "NOT_EXECUTED" } },
+        result: authorized ? { knowledge: "KNOWN", earningId: textField(payload, "earningId") } : { knowledge: "UNKNOWN" }, restrictedReasonCodes: [] });
+      continue;
+    }
     if (registration?.businessType === "distribution") {
       const readable = viewer.access.isBoss || hasPermission(viewer.access, "personal.distribution.policy.read") || hasPermission(viewer.access, "personal.distribution.policy.manage");
       if (!readable) { views.set(row.id, restricted(base, "BUSINESS_PERMISSION_REQUIRED")); continue; }

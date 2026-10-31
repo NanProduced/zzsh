@@ -38,3 +38,30 @@ test('calculation version is explicit and cannot silently alter existing earning
  assert.equal(parseEarningsDetailQuery(new URLSearchParams('projectionVersion=2')).calculationVersion,undefined);
  for(const q of ['calculationVersion=1','calculationVersion=2&calculationVersion=2','calculationVersion=2&userId=other'])assert.throws(()=>parseEarningsDetailQuery(new URLSearchParams(q)));
 });
+const reversalPayload={schema:'distribution-reversal-request.v1',earningId:'earning_1',orderId:'order_1',amountCents:'2500',full:true,reason:'错发佣金全额冲回'};
+const reversalRow:any={id:'request_rev',operationCode:'distribution.earning.reverse',payloadVersion:1,operationPayload:reversalPayload,operationPayloadHash:'c'.repeat(64),summary:'错发佣金全额冲回',requestedBy:'ops_1',status:'APPROVED',decidedBy:'boss_1',expiresAt:'2099-10-29T00:00:00.000Z'};
+const earningRow={id:'earning_1',orderId:'order_1',state:'SETTLED',amountCents:'2500',role:'OWNER_REFERRAL',beneficiaryUserId:'user_owner',postingId:'post_1',paymentConfirmationId:'pay_1',basisDigest:'b'.repeat(64),policyVersion:'policy_1',version:'2',reversals:0};
+function reversalClient(executions:any[],earning:any=earningRow){const sql:string[]=[];return{sql,query:async(query:string)=>{sql.push(query);
+ if(query.includes('approval_execution'))return{rows:executions};
+ if(query.includes('rental_referral_earning'))return{rows:earning?[earning]:[]};
+ return{rows:[]};}};}
+const reversalViewer:any={userId:'ops_1',access:{status:'ACTIVE',passwordChangeRequired:false,isBoss:false,permissions:new Set(['personal.distribution.policy.read'])},gameScope:{kind:'ALL'}};
+test('full reversal approval shows the original earning and never claims authority without a consumed receipt',async()=>{
+ const unauthorized=await projectApprovalBusinesses(reversalClient([]) as any,[reversalRow],reversalViewer);
+ const first=unauthorized.views.get(reversalRow.id)! as any;
+ assert.equal(first.businessType,'distribution');assert.equal(first.reversal.authorization.knowledge,'NOT_EXECUTED');assert.deepEqual(first.result,{knowledge:'UNKNOWN'});
+ assert.equal(first.reversal.original.amountCents,'2500');assert.equal(first.reversal.original.role,'OWNER_REFERRAL');assert.equal(first.reversal.original.postingId,'post_1');
+ assert.equal(first.reversal.requestPayloadHash,'c'.repeat(64));assert.equal(first.reversal.originalFactsKnowledge,'KNOWN');
+ const failed=await projectApprovalBusinesses(reversalClient([{requestId:reversalRow.id,receiptId:'exec_1',status:'FAILED',resultCode:'X',resultDetail:null,executedBy:'ops_1'}]) as any,[reversalRow],reversalViewer);
+ assert.equal((failed.views.get(reversalRow.id) as any).reversal.authorization.knowledge,'REJECTED');
+ const succeeded=await projectApprovalBusinesses(reversalClient([{requestId:reversalRow.id,receiptId:'exec_1',status:'SUCCEEDED',resultCode:'DISTRIBUTION_REVERSAL_AUTHORIZED',resultDetail:'earning_1',executedBy:'ops_1'}]) as any,[reversalRow],reversalViewer);
+ const done=succeeded.views.get(reversalRow.id)! as any;
+ assert.equal(done.reversal.authorization.knowledge,'KNOWN');assert.equal(done.reversal.authorization.executionReceiptId,'exec_1');assert.deepEqual(done.result,{knowledge:'KNOWN',earningId:'earning_1'});
+ const drifted=await projectApprovalBusinesses(reversalClient([],{...earningRow,amountCents:'2400'}) as any,[reversalRow],reversalViewer);
+ assert.equal((drifted.views.get(reversalRow.id) as any).reversal.originalFactsKnowledge,'MISMATCH');
+ const missing=await projectApprovalBusinesses(reversalClient([],null) as any,[reversalRow],reversalViewer);
+ assert.equal((missing.views.get(reversalRow.id) as any).reversal.original,null);
+ assert.equal((missing.views.get(reversalRow.id) as any).reversal.originalFactsKnowledge,'UNKNOWN');
+ const denied=await projectApprovalBusinesses(reversalClient([]) as any,[reversalRow],{...reversalViewer,access:{...reversalViewer.access,permissions:new Set()}});
+ assert.equal((denied.views.get(reversalRow.id) as any).detailsAvailable,false);assert.equal('reversal' in (denied.views.get(reversalRow.id) as any),false);
+});
