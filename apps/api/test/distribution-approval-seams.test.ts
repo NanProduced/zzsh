@@ -18,7 +18,7 @@ test('approval business summary only projects real frozen policy change and actu
  const payload={schema:'distribution-policy-change.v1',expectedPolicyId:'policy_1',expectedRevision:'4',expectedPolicyDigest:'a'.repeat(64),changes:{enabled:false},reason:'暂停新计佣'};
  const row:any={id:'request_1',operationCode:'distribution.policy.publish',payloadVersion:1,operationPayload:payload,operationPayloadHash:'b'.repeat(64),summary:'暂停新计佣',requestedBy:'ops_1',status:'PENDING',decidedBy:null,expiresAt:'2026-10-29T00:00:00.000Z'};
  const client:any={query:async(sql:string)=>{assert(sql.includes('approval_execution'));return{rows:[]};}};
- const viewer:any={userId:'ops_1',access:{status:'ACTIVE',passwordChangeRequired:false,isBoss:false,permissions:new Set(['personal.distribution.policy.read'])},gameScope:{kind:'ALL'}};
+ const viewer:any={userId:'ops_1',access:{status:'ACTIVE',passwordChangeRequired:false,isBoss:false,permissions:new Set(['personal.distribution.policy.read'])},gameScope:{mode:'ALL_GAMES',gameIds:[]}};
  const result=await projectApprovalBusinesses(client,[row],viewer),view=result.views.get(row.id)!;
  assert.equal(view.businessType,'distribution');assert.deepEqual((view.policyChange as any).changes,{enabled:false});assert.deepEqual(view.result,{knowledge:'UNKNOWN'});assert.equal('targetUser' in view,false);
  const denied=await projectApprovalBusinesses(client,[row],{...viewer,access:{...viewer.access,permissions:new Set()}});assert.equal(denied.views.get(row.id)!.detailsAvailable,false);assert.equal('policyChange' in denied.views.get(row.id)!,false);
@@ -40,12 +40,12 @@ test('calculation version is explicit and cannot silently alter existing earning
 });
 const reversalPayload={schema:'distribution-reversal-request.v1',earningId:'earning_1',orderId:'order_1',amountCents:'2500',full:true,reason:'错发佣金全额冲回'};
 const reversalRow:any={id:'request_rev',operationCode:'distribution.earning.reverse',payloadVersion:1,operationPayload:reversalPayload,operationPayloadHash:'c'.repeat(64),summary:'错发佣金全额冲回',requestedBy:'ops_1',status:'APPROVED',decidedBy:'boss_1',expiresAt:'2099-10-29T00:00:00.000Z'};
-const earningRow={id:'earning_1',orderId:'order_1',state:'SETTLED',amountCents:'2500',role:'OWNER_REFERRAL',beneficiaryUserId:'user_owner',postingId:'post_1',paymentConfirmationId:'pay_1',basisDigest:'b'.repeat(64),policyVersion:'policy_1',version:'2',reversals:0};
+const earningRow={id:'earning_1',orderId:'order_1',gameId:'delta',state:'SETTLED',amountCents:'2500',role:'OWNER_REFERRAL',beneficiaryUserId:'user_owner',postingId:'post_1',paymentConfirmationId:'pay_1',basisDigest:'b'.repeat(64),policyVersion:'policy_1',version:'2',reversals:0};
 function reversalClient(executions:any[],earning:any=earningRow){const sql:string[]=[];return{sql,query:async(query:string)=>{sql.push(query);
  if(query.includes('approval_execution'))return{rows:executions};
  if(query.includes('rental_referral_earning'))return{rows:earning?[earning]:[]};
  return{rows:[]};}};}
-const reversalViewer:any={userId:'ops_1',access:{status:'ACTIVE',passwordChangeRequired:false,isBoss:false,permissions:new Set(['personal.distribution.policy.read'])},gameScope:{kind:'ALL'}};
+const reversalViewer:any={userId:'ops_1',access:{status:'ACTIVE',passwordChangeRequired:false,isBoss:false,permissions:new Set(['personal.distribution.policy.read'])},gameScope:{mode:'ALL_GAMES',gameIds:[]}};
 test('full reversal approval shows the original earning and never claims authority without a consumed receipt',async()=>{
  const unauthorized=await projectApprovalBusinesses(reversalClient([]) as any,[reversalRow],reversalViewer);
  const first=unauthorized.views.get(reversalRow.id)! as any;
@@ -60,8 +60,17 @@ test('full reversal approval shows the original earning and never claims authori
  const drifted=await projectApprovalBusinesses(reversalClient([],{...earningRow,amountCents:'2400'}) as any,[reversalRow],reversalViewer);
  assert.equal((drifted.views.get(reversalRow.id) as any).reversal.originalFactsKnowledge,'MISMATCH');
  const missing=await projectApprovalBusinesses(reversalClient([],null) as any,[reversalRow],reversalViewer);
- assert.equal((missing.views.get(reversalRow.id) as any).reversal.original,null);
- assert.equal((missing.views.get(reversalRow.id) as any).reversal.originalFactsKnowledge,'UNKNOWN');
+ assert.equal((missing.views.get(reversalRow.id) as any).detailsAvailable,false);
+ assert.deepEqual((missing.views.get(reversalRow.id) as any).restrictedReasonCodes,['ORIGINAL_OBJECT_UNAVAILABLE']);
+ const outside=await projectApprovalBusinesses(reversalClient([{requestId:reversalRow.id,receiptId:'exec_1',status:'SUCCEEDED',resultCode:'DISTRIBUTION_REVERSAL_AUTHORIZED',resultDetail:'earning_1',executedBy:'ops_1'}]) as any,[reversalRow],{...reversalViewer,gameScope:{mode:'SELECTED_GAMES',gameIds:['alpha']}});
+ assert.equal((outside.views.get(reversalRow.id) as any).detailsAvailable,false);
+ assert.deepEqual((outside.views.get(reversalRow.id) as any).restrictedReasonCodes,['GAME_SCOPE_DENIED']);
+ assert.doesNotMatch(JSON.stringify(outside.views.get(reversalRow.id)),/2500|user_owner|post_1/,'a withdrawn game scope must not leak the original money facts');
+ const inside=await projectApprovalBusinesses(reversalClient([{requestId:reversalRow.id,receiptId:'exec_1',status:'SUCCEEDED',resultCode:'DISTRIBUTION_REVERSAL_AUTHORIZED',resultDetail:'earning_1',executedBy:'ops_1'}]) as any,[reversalRow],{...reversalViewer,gameScope:{mode:'SELECTED_GAMES',gameIds:['delta']}});
+ assert.equal((inside.views.get(reversalRow.id) as any).reversal.original.role,'OWNER_REFERRAL');
+ assert.equal((inside.views.get(reversalRow.id) as any).reversal.authorization.knowledge,'KNOWN');
+ const emptyScope=await projectApprovalBusinesses(reversalClient([]) as any,[reversalRow],{...reversalViewer,gameScope:{mode:'SELECTED_GAMES',gameIds:[]}});
+ assert.deepEqual((emptyScope.views.get(reversalRow.id) as any).restrictedReasonCodes,['GAME_SCOPE_DENIED']);
  const denied=await projectApprovalBusinesses(reversalClient([]) as any,[reversalRow],{...reversalViewer,access:{...reversalViewer.access,permissions:new Set()}});
  assert.equal((denied.views.get(reversalRow.id) as any).detailsAvailable,false);assert.equal('reversal' in (denied.views.get(reversalRow.id) as any),false);
 });

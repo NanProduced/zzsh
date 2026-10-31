@@ -210,6 +210,7 @@
   "dist/test/skin-category-retirement.test.js",
   "dist/test/distribution-ops.test.js",
   "dist/test/distribution-approval-seams.test.js",
+  "dist/test/distribution-reversal-scope.test.js",
   "dist/test/public-deposit-projection.test.js",
   "dist/test/personal-refund-read.test.js",
   "dist/test/joinpay-abnormal-refund-store.test.js",

@@ -312,11 +312,11 @@ async function loadReversalEarnings(client: Pool | PoolClient, rows: readonly Ap
   const ids = rows.map(row => textField(row.finalPayload ?? row.operationPayload, "earningId")).filter((id): id is string => Boolean(id));
   if (ids.length === 0) return new Map<string, Record<string, string | number | null>>();
   const result = await client.query<Record<string, string | number | null>>(
-    `SELECT e."id", e."order_id" AS "orderId", e."state", e."amount_cents"::text AS "amountCents", e."beneficiary_role" AS "role",
+    `SELECT e."id", e."order_id" AS "orderId", o."game_id" AS "gameId", e."state", e."amount_cents"::text AS "amountCents", e."beneficiary_role" AS "role",
             e."beneficiary_user_id" AS "beneficiaryUserId", e."posting_id" AS "postingId", e."payment_confirmation_id" AS "paymentConfirmationId",
             e."basis_digest" AS "basisDigest", e."policy_version" AS "policyVersion", e."version"::text AS "version",
             (SELECT count(*)::int FROM "zzsh_order"."rental_referral_transition" t WHERE t."earning_id" = e."id" AND t."action" IN ('REVOKE','RECOVER')) AS "reversals"
-       FROM "zzsh_order"."rental_referral_earning" e WHERE e."id" = ANY($1::text[])`,
+       FROM "zzsh_order"."rental_referral_earning" e JOIN "zzsh_order"."rental_order" o ON o."id" = e."order_id" WHERE e."id" = ANY($1::text[])`,
     [[...new Set(ids)]],
   );
   return new Map(result.rows.map(row => [String(row.id), row]));
@@ -644,6 +644,9 @@ export async function projectApprovalBusinesses(
       const payload = row.finalPayload ?? row.operationPayload;
       const receipt = executions.get(row.id);
       const earning = reversalEarnings.get(String(textField(payload, "earningId") ?? ""));
+      const gameId = earning ? String(earning.gameId ?? "") : null;
+      if (!gameId) { views.set(row.id, restricted(base, "ORIGINAL_OBJECT_UNAVAILABLE")); continue; }
+      if (!viewer.access.isBoss && !isAllGamesScope(viewer.gameScope) && !scopeAllowsGame(viewer.gameScope, false, gameId)) { views.set(row.id, restricted(base, "GAME_SCOPE_DENIED")); continue; }
       const authorized = receipt?.status === "SUCCEEDED" && receipt.resultCode === "DISTRIBUTION_REVERSAL_AUTHORIZED" && receipt.resultDetail === textField(payload, "earningId");
       views.set(row.id, { ...base, summaryAvailable: true, detailsAvailable: true, changeSummary: row.summary,
         reversal: { schema: "distribution-reversal-review.v1",
