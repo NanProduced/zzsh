@@ -20,6 +20,8 @@ import { handleOrderAdminRoute, type OrderRuntimeOptions } from "../order/order-
 import { handleRentalMembershipAdmin } from "../auth/rental-membership-routes";
 import { handleMembershipGrowthAdmin, handleMembershipGrowthPolicyAdmin } from "../auth/membership-growth-routes";
 import { handleAdminDistributionRead } from "../finance/admin-distribution-routes";
+import { handleAdminDistributionMaintenance } from "../finance/admin-distribution-maintenance";
+import type { DistributionEarningStore } from "../finance/distribution-earning-store";
 import { handleDistributionPolicyAdmin } from "../finance/distribution-policy-routes";
 import type { LocalDistributionScope } from "../finance/distribution-policy-store";
 import { handleUserDirectoryAdmin } from "../auth/user-directory-routes";
@@ -51,6 +53,7 @@ export type AdminBffOptions = {
   adminSecurityOptions: AuthSecurityOptions;
   distributionScope?: LocalDistributionScope;
   distributionReadScope?: LocalDistributionScope;
+  distributionEarnings?: DistributionEarningStore;
   supply: SupplyRuntimeOptions;
   order: OrderRuntimeOptions;
   yunxin?: YunxinRouteOptions;
@@ -475,6 +478,18 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     request.url = targetPath; request.originalUrl = targetPath;
     request.headers = { ...request.headers, "x-request-id": requestId };
     await handleAdminDistributionRead(request as Parameters<typeof handleAdminDistributionRead>[0], response as Parameters<typeof handleAdminDistributionRead>[1], options.adminSecurityOptions);
+    return;
+  }
+  if (/^\/distribution\/maintenance\/(accruals|due-settlements)(\/replay)?$|^\/distribution\/maintenance\/(batches|orders)\/[A-Za-z0-9._:-]+$|^\/distribution\/maintenance\/earnings\/[A-Za-z0-9._:-]+\/(revoke|recover)$/.test(path)) {
+    const allowed = path === "/distribution/maintenance/accruals" || /^\/distribution\/maintenance\/(batches|orders)\//.test(path) ? method === "GET"
+      : method === "POST";
+    if (!allowed) { sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId); return; }
+    if (!options.distributionEarnings) { sendError(response, 503, API_V1_ERROR_CODES.EVIDENCE_UNAVAILABLE, "Distribution maintenance is not assembled", requestId); return; }
+    const targetPath = "/api/v1/admin" + path + requestQuery(request);
+    request.url = targetPath; request.originalUrl = targetPath;
+    request.headers = { ...request.headers, "x-request-id": requestId };
+    await handleAdminDistributionMaintenance(request as Parameters<typeof handleAdminDistributionMaintenance>[0], response as Parameters<typeof handleAdminDistributionMaintenance>[1],
+      { ...options.adminSecurityOptions, distributionEarnings: options.distributionEarnings });
     return;
   }
   if (path === "/distribution/policy") {

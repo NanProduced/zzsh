@@ -246,5 +246,10 @@
   "dist/test/legal-documents.test.js",
   "dist/test/settlement-acceptance.test.js",
   "dist/test/auth-legal-acceptance.test.js",
-  "dist/test/user-auth-throttle.test.js"
+  "dist/test/user-auth-throttle.test.js",
+  "dist/test/distribution-native-runtime.test.js",
+  "dist/test/distribution-reversal-scope.test.js",
+  "dist/test/distribution-maintenance-batch.test.js",
+  "dist/test/distribution-due-worker.test.js",
+  "dist/test/distribution-discovery-pagination.test.js"
 ]

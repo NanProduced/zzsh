@@ -1,3 +1,4 @@
+import { handleAdminDistributionMaintenance } from '../src/finance/admin-distribution-maintenance';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as auth from '../src/auth/auth-security';
@@ -13,7 +14,7 @@ import * as earningRead from '../src/finance/distribution-earning-read';
 import * as legacyFinance from '../src/finance/legacy-duty-finance-store';
 import { canonicalize } from '../src/supply/content-hash';
 import { freezePaymentDistributionBasis, readOriginalPaymentDistributionBasis } from '../src/finance/distribution-payment-basis';
-import { parseDistributionPolicyChange, prepareDistributionPolicyChange } from '../src/finance/distribution-policy-change';
+import { parseDistributionPolicyChange, prepareDistributionPolicyChange, initialDistributionPolicyConfig, type DistributionPolicyUpdate, type DistributionPolicyInitial } from '../src/finance/distribution-policy-change';
 import { assertDistributionApprovalAccess, createDistributionPolicyApprovalExecutor, validateDistributionPolicySubmission } from '../src/finance/distribution-policy-approval';
 import { readAdminDistributionOrder, readAdminDistributionRelations } from '../src/finance/admin-distribution-read';
 import { projectMyDistributionTerms, projectMyDistributionTermsV2 } from '../src/finance/invitation-store';
@@ -71,7 +72,7 @@ test('HTTP policy PUT cannot bypass approved execution even with an authenticate
 
 const hash=(v:unknown)=>createHash('sha256').update(canonicalize(v)).digest('hex');
 const legacyConfig=validateDistributionPolicy(legacy),head={versionId:'policy_1',revision:'4',digest:hash(legacyConfig),config:legacyConfig};
-const change=()=>parseDistributionPolicyChange({schema:'distribution-policy-change.v1',expectedPolicyId:head.versionId,expectedRevision:head.revision,expectedPolicyDigest:head.digest,changes:{renterPercent:'3',ownerPercent:'2',enabled:false},reason:'调整全站方案'});
+const change=()=>parseDistributionPolicyChange({schema:'distribution-policy-change.v1',expectedPolicyId:head.versionId,expectedRevision:head.revision,expectedPolicyDigest:head.digest,changes:{renterPercent:'3',ownerPercent:'2',enabled:false},reason:'调整全站方案'}) as DistributionPolicyUpdate;
 
 test('approved changes pin exact policy id/revision/digest and cannot alter other economics',()=>{
  const plan=change(),prepared=prepareDistributionPolicyChange(head,plan);
@@ -258,4 +259,48 @@ test('invitation write has the same version gate: v1 paused no relation write, v
  if(allowed){const result=await action();assert.equal((result.body as any).relation.parentUserId,'parent');assert.equal(f.calls.filter(x=>x.sql.startsWith('INSERT INTO zzsh_order.invitation_relation')).length,1);}
  else{await assert.rejects(action,(e:any)=>e.status===409);assert.equal(f.calls.some(x=>/^INSERT|^UPDATE|^DELETE/.test(x.sql)),false);}}}
  finally{p.readActiveDistributionPolicyInTransaction=oldRead;u.assertUserContextInTransaction=oldAuth;}
+});
+
+
+test('approved first uniform policy is explicit, scoped and cannot fake an existing head',()=>{
+ const payload={schema:'distribution-policy-initialize.v1',config:{enabled:false,accountModes:['ordinary','custom'],minimumAccrualCents:'0',settlementDelayDays:7,renterPercent:'5',ownerPercent:'5'},reason:'首版明确配置'};
+ const initial=parseDistributionPolicyChange(payload) as DistributionPolicyInitial;
+ assert.deepEqual(initial,{...payload,reason:'首版明确配置'});
+ const config=initialDistributionPolicyConfig(initial,'NATIVE');
+ assert.equal(config.schema,'distribution-policy.v2');assert.equal(config.scope,'NATIVE');assert.equal(config.enabled,false);assert.deepEqual(config.levels,[]);assert.equal(config.renterPercent,'5');
+ assert.equal(initialDistributionPolicyConfig(initial,'LOCAL_CONTROLLED').scope,'LOCAL_CONTROLLED');
+ assert.throws(()=>initialDistributionPolicyConfig(parseDistributionPolicyChange({...payload,config:{...payload.config,renterPercent:'60',ownerPercent:'60'}}) as DistributionPolicyInitial,'NATIVE'));
+ assert.throws(()=>parseDistributionPolicyChange({...payload,expectedPolicyId:'fake'}));
+ assert.throws(()=>parseDistributionPolicyChange({...payload,config:{...payload.config,minimumAccrualCents:'-1'}}));
+ assert.throws(()=>prepareDistributionPolicyChange(head,initial as never),/no baseline/);
+});
+
+test('Root: ALL_GAMES managers retain global discovery and due planning instead of an empty scope',async()=>{
+ const security=auth as any,access=authorization as any,scope=scopes as any;
+ const saved=[security.readAdminContext,access.loadEffectiveAdminAccess,scope.readAdminGameScope];
+ const observed:any[]=[];
+ const client:any={release(){},query:async()=>({rows:[],rowCount:0})};
+ security.readAdminContext=async()=>({userId:'manager',sessionId:'session'});
+ access.loadEffectiveAdminAccess=async()=>({status:'ACTIVE',isBoss:false,permissions:new Set(['personal.distribution.policy.manage'])});
+ scope.readAdminGameScope=async()=>({mode:'ALL_GAMES',gameIds:[]});
+ const options:any={pool:{connect:async()=>client},apiOrigin:'http://127.0.0.1:3102',adminOrigin:'http://127.0.0.1:3101',userOrigin:'http://127.0.0.1:3100',distributionEarnings:{
+  discover:async(_pool:any,input:any)=>{observed.push(input.gameIds);return{orders:[],nextCursor:null};},
+  runDueBatch:async(_pool:any,input:any)=>{observed.push(input.gameIds,await input.operator.games(client));return{httpStatus:200,batch:{state:'COMPLETE'}};},
+ }};
+ const response:any={statusCode:0,setHeader(){return this;},status(code:number){this.statusCode=code;return this;},json(value:any){this.body=value;return this;}};
+ try{
+  await handleAdminDistributionMaintenance({method:'GET',url:'/api/v1/admin/distribution/maintenance/accruals',headers:{origin:options.adminOrigin}} as any,response,options);
+  assert.equal(response.statusCode,200);
+  await handleAdminDistributionMaintenance({method:'POST',url:'/api/v1/admin/distribution/maintenance/due-settlements',headers:{origin:options.adminOrigin},body:{limit:1,requestId:'root_scope'}} as any,response,options);
+  assert.equal(response.statusCode,200);assert.deepEqual(observed,[null,null,null]);
+ }finally{[security.readAdminContext,access.loadEffectiveAdminAccess,scope.readAdminGameScope]=saved;}
+});
+
+test('Root: reading a known UNKNOWN batch succeeds without replaying the original 503 transport status',async()=>{
+ const security=auth as any,original=security.readAdminContext;security.readAdminContext=async()=>({userId:'manager',sessionId:'session'});
+ const response:any={statusCode:0,setHeader(){return this;},status(code:number){this.statusCode=code;return this;},json(value:any){this.body=value;return this;}};
+ const options:any={apiOrigin:'http://127.0.0.1:3102',adminOrigin:'http://127.0.0.1:3101',userOrigin:'http://127.0.0.1:3100',distributionEarnings:{readBatch:async()=>({httpStatus:503,batch:{state:'UNKNOWN',requestId:'original_key'}})}};
+ try{await handleAdminDistributionMaintenance({method:'GET',url:'/api/v1/admin/distribution/maintenance/batches/original_key',headers:{origin:options.adminOrigin}} as any,response,options);
+  assert.equal(response.statusCode,200);assert.equal(response.body.httpStatus,503);assert.equal(response.body.batch.state,'UNKNOWN');
+ }finally{security.readAdminContext=original;}
 });

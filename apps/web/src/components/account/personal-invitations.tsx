@@ -55,6 +55,6 @@ export function DistributionTermsCard({scope}:{scope:string}){
    {v.applicable?null:<p>{TERMS_REASON[v.reason??'']??'当前不适用'}</p>}
    {rates?<dl className="invitation-terms-list"><div><dt>邀请租客下单</dt><dd>{rates.renterPercent}%</dd></div><div><dt>邀请号主出租</dt><dd>{rates.ownerPercent}%</dd></div><div><dt>适用出租方式</dt><dd>{(v.accountModes??[]).map(m=>modeLabel[m]).join('、')}</dd></div><div><dt>结算后转入可用余额</dt><dd>{v.settlementDelayDays} 天</dd></div><div><dt>单笔最低</dt><dd>{v.minimumAccrualCents===null?'未核定':centsText(v.minimumAccrualCents)}</dd></div></dl>:null}
   </>}
-  {v?.policyVersion?<p className="invitation-source">政策版本 {v.policyVersion}{v.level&&v.participantPolicyVersion&&v.participantPolicyVersion!==v.policyVersion?`（等级登记于版本 ${v.participantPolicyVersion}）`:''} · 本地受控政策，不代表正式全量政策。比例仅说明规则，不代表已产生的收益。</p>:null}
+  {v?.policyVersion?<p className="invitation-source">政策版本 {v.policyVersion}{v.level&&v.participantPolicyVersion&&v.participantPolicyVersion!==v.policyVersion?`（等级登记于版本 ${v.participantPolicyVersion}）`:''} · {v.scope==='LOCAL_CONTROLLED'?'本地受控政策，不代表正式全量政策':'正式冻结政策'}。比例仅说明规则，不代表已产生的收益。</p>:null}
  </section>;
 }

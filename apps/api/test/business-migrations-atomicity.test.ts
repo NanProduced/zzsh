@@ -199,3 +199,19 @@ test('0102 只替换兼容规则校验函数，使启用模式的上限可省略
  assert.match(sql,/map_name='max' AND NOT \(\(cfg->'modes'->mode_name\) \? 'max'\)/);
  assert.doesNotMatch(sql,/\b(ALTER TABLE|DROP|UPDATE|INSERT|DELETE)\b/);
 });
+
+
+test('0121-0123 append the distribution contract after the immutable 121-entry prefix',()=>{
+ const journal=JSON.parse(readFileSync(resolve('migrations/business/meta/_journal.json'),'utf8'));
+ assert.equal(createHash('sha256').update(JSON.stringify(journal.entries.slice(0,121))).digest('hex'),'b8eeeabf076c413481ac6743fbc083fd99ac44072609835b50e5751105101567');
+ const tags=["0121_distribution_uniform_policy_basis","0122_distribution_native_earning_scope","0123_distribution_participant_contract"];
+ assert.deepEqual(journal.entries.slice(121,124).map((entry:{idx:number;tag:string})=>[entry.idx,entry.tag]),tags.map((tag,index)=>[121+index,tag]));
+ const sql=tags.map(tag=>readFileSync(resolve('migrations/business',tag+'.sql'),'utf8'));
+ assert.match(sql[0]!,/CREATE OR REPLACE FUNCTION zzsh_order\.derive_payment_referral_inputs/);
+ assert.match(sql[1]!,/scope IN\('LOCAL_CONTROLLED','NATIVE'\)/);
+ assert.doesNotMatch(sql.slice(0,2).join('\n'),/CREATE OR REPLACE FUNCTION zzsh_order\.distribution_policy_contract_version/);
+ assert.match(sql[2]!,/distribution_policy_contract_version\(\) RETURNS integer[\s\S]*?SELECT 2/);
+ assert.match(sql[2]!,/REVOKE ALL ON FUNCTION zzsh_order\.distribution_policy_contract_version\(\) FROM PUBLIC/);
+ const loaded=readMigrationFiles({migrationsFolder:resolve('migrations/business')});
+ for(let index=0;index<3;index++) assert.equal(loaded[121+index]!.hash,createHash('sha256').update(readFileSync(resolve('migrations/business',tags[index]+'.sql'))).digest('hex'));
+});

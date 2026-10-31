@@ -127,6 +127,7 @@ export function loadJoinpayCollectionRuntime(context: Context, env: NodeJS.Proce
     };
     const source = { admission, profileFor, keyFor };
     return {
+      admission,
       routes: {
         ...(document.newRequestsEnabled ? { initial: { admission, profile: submit!,
           wire: { tradeMerchantNo: submitDescriptor!.tradeMerchantNo, productName: document.productName!, notifyUrl: submitDescriptor!.notifyUrl } } } : {}),

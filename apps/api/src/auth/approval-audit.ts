@@ -23,6 +23,7 @@ import {
 import type { AdminContext, AuthSecurityNodeRequest, AuthSecurityNodeResponse, AuthSecurityOptions } from "./auth-security";
 import { validateMembershipEntitlementPayload, validateUnifiedMembershipPolicySubmission } from "./membership-growth-approval";
 import { validateDistributionPolicySubmission } from "../finance/distribution-policy-approval";
+import { DISTRIBUTION_REVERSAL_OPERATION, reversalObjectGameId, validateDistributionReversalSubmission } from "../finance/distribution-reversal-approval";
 import { isUnifiedTotalDiscountContract } from "./membership-growth";
 import { normalizeGrowthInstant } from "./membership-growth-integration";
 
@@ -81,6 +82,8 @@ type RequestRow = {
   decidedBy: string | null;
   decisionReason: string | null;
   supersedesRequestId: string | null;
+  /** Server-derived game of the reversal's original order; null for operations whose payload carries the game. */
+  objectGameId?: string | null;
   supersededByRequestId: string | null;
 };
 
@@ -283,7 +286,7 @@ export function evaluateApprovalActions(input: ApprovalActionContext): ApprovalA
   const active = access.status === "ACTIVE";
   const selfRequester = row.requestedBy === userId;
   const linked = access.isBoss || selfRequester || input.isCandidate;
-  const scopeDenied = businessScopeDenied({ isBoss: access.isBoss, gameScope: input.gameScope }, row.operationCode, row.operationPayload);
+  const scopeDenied = businessScopeDenied({ isBoss: access.isBoss, gameScope: input.gameScope }, row.operationCode, row.operationPayload, row.objectGameId);
   const registration = approvalRegistration(row.operationCode);
   const unregistered = registration === null;
   const build = (
@@ -729,7 +732,10 @@ async function configureTemplate(request: AuthSecurityNodeRequest, response: Aut
   });
 }
 
-const REQUEST_SELECT_COLUMNS = `"id", "template_id" AS "templateId", "template_version" AS "templateVersion", "operation_code" AS "operationCode", "trigger_condition" AS "triggerCondition", "payload_version" AS "payloadVersion", "operation_payload" AS "operationPayload", "operation_payload_hash" AS "operationPayloadHash", "summary", "requested_by" AS "requestedBy", "status", "status_reason" AS "statusReason", "expires_at" AS "expiresAt", "created_at" AS "createdAt", "decided_at" AS "decidedAt", "decided_by" AS "decidedBy", "decision_reason" AS "decisionReason", "supersedes_request_id" AS "supersedesRequestId", "superseded_by_request_id" AS "supersededByRequestId"`;
+const OBJECT_GAME_SQL = (alias: string) => `CASE WHEN ${alias}"operation_code" = 'distribution.earning.reverse' THEN
+  (SELECT o."game_id" FROM "zzsh_order"."rental_referral_earning" e JOIN "zzsh_order"."rental_order" o ON o."id" = e."order_id"
+    WHERE e."id" = ${alias}"operation_payload" ->> 'earningId' AND e."order_id" = ${alias}"operation_payload" ->> 'orderId') END`;
+const REQUEST_SELECT_COLUMNS = `"id", "template_id" AS "templateId", "template_version" AS "templateVersion", "operation_code" AS "operationCode", "trigger_condition" AS "triggerCondition", "payload_version" AS "payloadVersion", "operation_payload" AS "operationPayload", "operation_payload_hash" AS "operationPayloadHash", "summary", "requested_by" AS "requestedBy", "status", "status_reason" AS "statusReason", "expires_at" AS "expiresAt", "created_at" AS "createdAt", "decided_at" AS "decidedAt", "decided_by" AS "decidedBy", "decision_reason" AS "decisionReason", "supersedes_request_id" AS "supersedesRequestId", "superseded_by_request_id" AS "supersededByRequestId", ${OBJECT_GAME_SQL('')} AS "objectGameId"`;
 
 export async function readRequestById(executor: Pool | PoolClient, requestId: string): Promise<RequestRow | undefined> {
   const result = await executor.query<RequestRow>(
@@ -801,6 +807,7 @@ async function createRequest(request: AuthSecurityNodeRequest, response: AuthSec
       if (AMENDABLE_ENTITLEMENTS.has(op) && !isUnifiedTotalDiscountContract(payload.value.pricing)) throw new SecurityApiError(409, "CONFLICT", "礼遇办理已改为统一总价折扣，请刷新并使用新版表单", [{ path: "pricing.scope", code: "INVALID_FIELD" }]);
       if (op === "membership.benefit.policy.publish") await validateUnifiedMembershipPolicySubmission(client, payload.value as Record<string, unknown>);
       if (op === "distribution.policy.publish") await validateDistributionPolicySubmission(client, payload.value as Record<string, unknown>, options.distributionPolicyWriteScope);
+      if (op === "distribution.earning.reverse") await validateDistributionReversalSubmission(client, payload.value as Record<string, unknown>, context.userId);
       const templateResult = await client.query<TemplateRow>(
         `SELECT "id", "operation_code" AS "operationCode", "trigger_condition" AS "triggerCondition", "version", "created_at" AS "createdAt", "updated_at" AS "updatedAt"
            FROM "zzsh_iam"."approval_template" WHERE "operation_code" = $1 AND "trigger_condition" = $2 FOR UPDATE`,
@@ -896,7 +903,7 @@ async function buildApprovalActionContext(
     [row.id, context.userId],
   );
   const self = await adminByUserId(client, context.userId);
-  const gameId = payloadGameId(row.operationPayload);
+  const gameId = payloadGameId(row.operationPayload) ?? row.objectGameId ?? null;
   const scopeNeeded = gameId !== null && membershipOperationRequiresGameScope(row.operationCode) && !access.isBoss;
   // 不带游戏目标或本人是 Boss 时范围判定不会触发，这里用中性全范围值省掉一次查询。
   const gameScope: AdminGameScope = scopeNeeded ? await readAdminGameScope(client, context.userId) : { mode: "ALL_GAMES", gameIds: [] };
@@ -1187,7 +1194,7 @@ async function listRequests(request: AuthSecurityNodeRequest, response: AuthSecu
     conditions.push(`(r."created_at" < $${timeParam} OR (r."created_at" = $${timeParam} AND r."id" < $${idParam}))`);
   }
   const result = await options.pool.query<RequestRow & { requesterUsername: string | null; requesterDisplayUsername: string | null; requesterName: string }>(
-    `SELECT r."id", r."template_id" AS "templateId", r."template_version" AS "templateVersion", r."operation_code" AS "operationCode", r."trigger_condition" AS "triggerCondition", r."payload_version" AS "payloadVersion", r."operation_payload" AS "operationPayload", r."operation_payload_hash" AS "operationPayloadHash", r."summary", r."requested_by" AS "requestedBy", r."status", r."status_reason" AS "statusReason", r."expires_at" AS "expiresAt", r."created_at" AS "createdAt", r."decided_at" AS "decidedAt", r."decided_by" AS "decidedBy", r."decision_reason" AS "decisionReason", r."supersedes_request_id" AS "supersedesRequestId", r."superseded_by_request_id" AS "supersededByRequestId", u."username" AS "requesterUsername", u."displayUsername" AS "requesterDisplayUsername", u."name" AS "requesterName"
+    `SELECT r."id", r."template_id" AS "templateId", r."template_version" AS "templateVersion", r."operation_code" AS "operationCode", r."trigger_condition" AS "triggerCondition", r."payload_version" AS "payloadVersion", r."operation_payload" AS "operationPayload", r."operation_payload_hash" AS "operationPayloadHash", r."summary", r."requested_by" AS "requestedBy", r."status", r."status_reason" AS "statusReason", r."expires_at" AS "expiresAt", r."created_at" AS "createdAt", r."decided_at" AS "decidedAt", r."decided_by" AS "decidedBy", r."decision_reason" AS "decisionReason", r."supersedes_request_id" AS "supersedesRequestId", r."superseded_by_request_id" AS "supersededByRequestId", ${OBJECT_GAME_SQL('r.')} AS "objectGameId", u."username" AS "requesterUsername", u."displayUsername" AS "requesterDisplayUsername", u."name" AS "requesterName"
        FROM "zzsh_iam"."approval_request" r
        JOIN "zzsh_auth_admin"."user" u ON u."id" = r."requested_by"
        ${pending ? `JOIN "zzsh_iam"."approval_request_candidate" c ON c."request_id" = r."id"` : ""}
@@ -1310,7 +1317,7 @@ function candidateReasonCode(state: CandidateAccessState, row?: RequestRow): str
   const business = membershipBusinessPermission(row.operationCode, "DECIDE");
   if (membershipDecisionRequiresBoss(row.operationCode) && !state.isBoss) return "BUSINESS_PERMISSION_REQUIRED";
   if (business && !candidatePermission(state, business)) return "BUSINESS_PERMISSION_REQUIRED";
-  if (businessScopeDenied({ isBoss: state.isBoss, gameScope: state.gameScope }, row.operationCode, row.operationPayload)) return "GAME_SCOPE_DENIED";
+  if (businessScopeDenied({ isBoss: state.isBoss, gameScope: state.gameScope }, row.operationCode, row.operationPayload, row.objectGameId)) return "GAME_SCOPE_DENIED";
   return "OK";
 }
 
@@ -1325,12 +1332,15 @@ function candidateCanDecideRequest(state: CandidateAccessState, row: RequestRow)
 }
 
 /** 游戏范围谓词的单一实现：申请侧与候选侧同一判据。 */
-function businessScopeDenied(state: { isBoss: boolean; gameScope: AdminGameScope }, operationCode: string, payload: Record<string, unknown>): boolean {
-  const gameId = payloadGameId(payload);
-  if (!gameId || !membershipOperationRequiresGameScope(operationCode)) return false;
+function businessScopeDenied(state: { isBoss: boolean; gameScope: AdminGameScope }, operationCode: string, payload: Record<string, unknown>, objectGameId?: string | null): boolean {
+  if (!membershipOperationRequiresGameScope(operationCode)) return false;
+  const gameId = payloadGameId(payload) ?? (typeof objectGameId === "string" && objectGameId ? objectGameId : null);
+  // A reversal whose original order cannot be resolved fails closed; it must never read as unscoped money.
+  if (!gameId) return operationCode === DISTRIBUTION_REVERSAL_OPERATION;
   if (state.isBoss || isAllGamesScope(state.gameScope)) return false;
   return !scopeAllowsGame(state.gameScope, false, gameId);
 }
+
 
 async function candidateRowsFor(client: Pool | PoolClient, requestIds: readonly string[]): Promise<Array<{ requestId: string; adminUserId: string }>> {
   if (requestIds.length === 0) return [];
@@ -1482,7 +1492,7 @@ async function requestDetail(request: AuthSecurityNodeRequest, response: AuthSec
   if (!targetRequestId || targetRequestId.length > 128) invalid("Request id is required");
   if (!(await requestScope(options.pool, context.userId, targetRequestId, access.isBoss))) throw new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Approval request not found");
   const result = await options.pool.query<RequestRow>(
-    `SELECT "id", "template_id" AS "templateId", "template_version" AS "templateVersion", "operation_code" AS "operationCode", "trigger_condition" AS "triggerCondition", "payload_version" AS "payloadVersion", "operation_payload" AS "operationPayload", "operation_payload_hash" AS "operationPayloadHash", "summary", "requested_by" AS "requestedBy", "status", "status_reason" AS "statusReason", "expires_at" AS "expiresAt", "created_at" AS "createdAt", "decided_at" AS "decidedAt", "decided_by" AS "decidedBy", "decision_reason" AS "decisionReason", "supersedes_request_id" AS "supersedesRequestId", "superseded_by_request_id" AS "supersededByRequestId"
+    `SELECT ${REQUEST_SELECT_COLUMNS}
        FROM "zzsh_iam"."approval_request" WHERE "id" = $1`,
     [targetRequestId],
   );
@@ -1630,11 +1640,26 @@ async function assertBusinessAuthorization(
   operationCode: string,
   payload: Record<string, unknown>,
   stage: "REQUEST" | "DECIDE" | "EXECUTE",
+  objectGameId?: string | null,
 ): Promise<void> {
   requireMembershipBusinessPermission(access, operationCode, stage);
-  if (businessScopeDenied({ isBoss: access.isBoss, gameScope: await readAdminGameScope(client, adminUserId) }, operationCode, payload)) {
+  if (businessScopeDenied({ isBoss: access.isBoss, gameScope: await readAdminGameScope(client, adminUserId) }, operationCode, payload, objectGameId)) {
     throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Approval authorization is not available: GAME_SCOPE_DENIED");
   }
+}
+
+/** The object game of a reversal is derived from the stored payload, never supplied by it. */
+async function businessObjectGameId(
+  client: Pool | PoolClient,
+  operationCode: string,
+  payload: Record<string, unknown>,
+  known?: string | null,
+): Promise<string | null> {
+  if (typeof known === "string" && known) return known;
+  if (operationCode !== DISTRIBUTION_REVERSAL_OPERATION) return null;
+  const earningId = typeof payload?.earningId === "string" ? payload.earningId : "";
+  const orderId = typeof payload?.orderId === "string" ? payload.orderId : "";
+  return reversalObjectGameId(client, earningId, orderId);
 }
 
 /** 首次创建、重放与恢复共同检查新旧对象；旧申请已取消不影响原回执恢复。 */
@@ -1648,7 +1673,7 @@ async function assertCreateAuthorization(
   supersedesRequestId: string | null | undefined,
 ): Promise<void> {
   requirePermission(access, ADMIN_PERMISSION.approvalRequestCreate);
-  await assertBusinessAuthorization(client, context.userId, access, operationCode, payload, "REQUEST");
+  await assertBusinessAuthorization(client, context.userId, access, operationCode, payload, "REQUEST", await businessObjectGameId(client, operationCode, payload));
   if (!supersedesRequestId) return;
   const previous = await readRequestById(client, supersedesRequestId);
   if (!previous) throw new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Approval request not found");
@@ -1658,7 +1683,7 @@ async function assertCreateAuthorization(
     includeStatePreconditions: false,
   });
   assertApprovalAction(evaluateApprovalActions(input), "replace");
-  await assertBusinessAuthorization(client, context.userId, access, previous.operationCode, previous.operationPayload, "REQUEST");
+  await assertBusinessAuthorization(client, context.userId, access, previous.operationCode, previous.operationPayload, "REQUEST", await businessObjectGameId(client, previous.operationCode, previous.operationPayload, previous.objectGameId));
 }
 
 /**

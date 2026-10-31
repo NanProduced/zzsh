@@ -149,7 +149,7 @@ export type BusinessView = {
   pricingReference?: { mode: string | null; scope?: string | null; priceVersionId: string | null; costBasisRef: string | null; schema: string | null; payableRatio?: string | null; payloadSource?: string };
   costBasis?: { priceVersionId: string | null; ruleReleaseId: string | null };
   /** 分销申请的冻结改动，不是当前全局政策或完整原值。 */
-  policyChange?: { schema?: string; expectedPolicyId: string | null; expectedRevision: string | null; expectedPolicyDigest: string | null; changes?: Record<string, unknown>; reason: string | null };
+  policyChange?: { schema?: string; initial?: boolean; expectedPolicyId: string | null; expectedRevision: string | null; expectedPolicyDigest: string | null; changes?: Record<string, unknown>; reason: string | null };
   result?: { knowledge: string; policyVersionId?: string | null };
 };
 

@@ -31,7 +31,7 @@ function fixture(rows: unknown[], present: unknown = true) {
 
 test("migration history accepts new installation, exact prefixes and repeated full-chain reads without writing", async () => {
   const fresh = fixture([], false); await fresh.prefix(); assert.equal(fresh.queries.length, 1);
-  for (const size of [0, 1, 112, 113]) {
+  for (const size of [0, 1, 112, 113, 121, 124]) {
     const f = fixture(history.slice(0, size)); await f.prefix();
     assert.equal(f.queries.length, 2); assert.equal(f.ddlCalls, 0); assert.equal(f.aclConnections, 0);
   }

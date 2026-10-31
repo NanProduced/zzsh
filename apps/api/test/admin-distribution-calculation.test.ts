@@ -4,14 +4,15 @@ import {createHash} from 'node:crypto';
 import {canonicalize} from '../src/supply/content-hash';
 import {freezePaymentDistributionBasis} from '../src/finance/distribution-payment-basis';
 import {prepareAccrualFromFrozenPayment} from '../src/finance/distribution-accrual';
-import {readAdminEarningCalculations,readAdminEarningEventActions} from '../src/finance/distribution-earning-read';
+import {readEarningCalculation,readAdminEarningCalculations,readAdminEarningEventActions} from '../src/finance/distribution-earning-read';
 
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex'),at='2026-10-19T11:51:09.000001Z';
-function original(){
+function original(scope:'LOCAL_CONTROLLED'|'NATIVE'='LOCAL_CONTROLLED',uniform=false){
  const config={schema:'distribution-policy.v1',scope:'LOCAL_CONTROLLED',enabled:true,participation:'AUTO_AT_REGISTRATION',depth:1,selfRebate:false,accountModes:['ordinary'],minimumAccrualCents:'1',settlementDelayDays:7,
   levels:[{code:'FROZEN_LEVEL',rank:1,default:true,renterPercent:'5',ownerPercent:'5',upgrade:null}]} as const;
+ const frozenConfig=uniform?{...config,schema:'distribution-policy.v2',scope,rateMode:'UNIFORM',renterPercent:'5',ownerPercent:'5',levels:[]}:{...config,scope};
  const basis=freezePaymentDistributionBasis({orderId:'order-1',gameId:'delta',currency:'CNY',confirmationId:'payment-1',acceptedAt:at,paymentDigest:'a'.repeat(64),admissionId:'admission-1',admissionRevision:'1',origin:'NATIVE',accountMode:'ordinary',estimate:{baseCents:'9999',sourceDigest:'b'.repeat(64)},
-  policy:{versionId:'policy-original',digest:sha(canonicalize(config)),config:structuredClone(config) as never},facts:[
+  policy:{versionId:'policy-original',digest:sha(canonicalize(frozenConfig)),config:structuredClone(frozenConfig) as never},facts:[
    {role:'RENTER_REFERRAL',partyUserId:'renter',relation:{knowledge:'KNOWN_NONE',id:null,childUserId:'renter',parentUserId:null,sourceDigest:null},beneficiary:null},
    {role:'OWNER_REFERRAL',partyUserId:'owner',relation:{knowledge:'KNOWN_PARENT',id:'relation-1',childUserId:'owner',parentUserId:'referrer',sourceDigest:'c'.repeat(64)},beneficiary:{userId:'referrer',active:true,eligibility:'ELIGIBLE',commissionFrozen:false,levelCode:'FROZEN_LEVEL'}}]});
  const posting={id:'posting-1',order_id:'order-1',payment_confirmation_id:'payment-1',version_hash:'d'.repeat(64),early:false,manual_reason:null,
@@ -72,4 +73,14 @@ test('event missing receipts, wrong root/subject/kind/action/version and duplica
  for(const patch of [{economic_root_id:'other'},{subject_user_id:'other'},{kind:'EARNING_SETTLED'},{action:'OTHER'},{action:'ACCRUE'},{expected_version:'4'},{source_digest:null}]){const r=(await readAdminEarningEventActions(reader([{...valid,...patch}]).client,['event-1'])).get('event-1')!;assert.equal(r.knowledge,'UNKNOWN');assert.equal(r.action,null);}
  const duplicate=await readAdminEarningEventActions(reader([valid,valid]).client,['event-1']);assert.equal(duplicate.get('event-1')?.knowledge,'UNKNOWN');
  const empty=reader([]);assert.equal((await readAdminEarningEventActions(empty.client,[])).size,0);assert.equal(empty.seen.length,0);
+});
+
+test('native frozen policy scope is verified for both user and admin calculations',async()=>{
+ for(const uniform of [false,true]){
+  const f=original('NATIVE',uniform),p=reader([f]);
+  const admin=(await readAdminEarningCalculations(p.client,['earning-1'])).get('earning-1')!;
+  assert.equal(admin.knowledge,'KNOWN');assert.equal(admin.percent,'5');
+  const user=await readEarningCalculation(p.client,{userId:'referrer'} as never,{id:'native:earning-1',order_id:'order-1',role:'OWNER_REFERRAL',source_amount:'95'},true,2);
+  assert.equal(user.knowledge,'KNOWN');if(user.knowledge==='KNOWN'){assert.equal(user.scope,'NATIVE');assert.equal(user.percent,'5');}
+ }
 });

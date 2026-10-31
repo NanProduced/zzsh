@@ -119,7 +119,9 @@ function earningProbe() {
       if (sql === 'COMMIT') { state = tx; if (control.lostCommit) { control.lostCommit = false; throw Object.assign(new Error('commit acknowledgement lost'), { code: 'ECONNRESET' }); } return rows(); }
       if (sql.startsWith('SELECT d.oid')) return rows([{ oid: receipt.resourceOid, name: receipt.database, role: receipt.runtimeRole, marker: receipt.marker, complete: true }]);
       if (sql.startsWith('SELECT pg_advisory') || sql === 'SET CONSTRAINTS ALL IMMEDIATE') return rows();
+      if (sql.startsWith('SELECT p.id,p.order_id,p.payment_confirmation_id,p.early')) return rows(control.hasPosting ? [{ ...posting, game_id: 'delta' }] : []);
       if (sql.startsWith('SELECT p.id,p.order_id,p.payment_confirmation_id')) return rows(control.hasPosting ? [posting] : []);
+      if (sql.startsWith('SELECT amount_cents::text,basis_digest,posting_digest')) { const root = tx.roots.find(r => r.economic_key === args[0]); return rows(root ? [{ amount_cents: root.amount_cents, basis_digest: root.basis_digest, posting_digest: root.posting_digest }] : []); }
       if (sql.startsWith('SELECT p.id,p.order_id,p.source')) return rows([payment]);
       if (sql.startsWith('SELECT canonical_basis')) return rows(control.hasBasis ? [{ canonical_basis: canonicalize(basis), basis_digest: basisDigest }] : []);
       if (sql.startsWith('SELECT id FROM zzsh_auth_user')) return rows(args[0] instanceof Array ? args[0].map((id: string) => ({ id })) : [{ id: args[0] }]);
@@ -178,6 +180,32 @@ test('lost accrual commit acknowledgement recovers with a read of original roots
   assert(!p.seen.slice(start).some(sql => /^(INSERT|UPDATE|DELETE)/.test(sql)));
   assert(p.seen.slice(start).includes('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY'));
   const replay = await p.store.accrue(p.pool, 'order', 'req_same_source'); assert(replay.items.every((x: any) => x.replayed)); assert.deepEqual(p.state(), before);
+});
+
+test('post-commit accrual crash is discoverable as missing and replay uses the same original roots without duplicating money', async () => {
+  const p = earningProbe(), seen = p.seen.length;
+  const before = await p.store.discover(p.pool, { limit: 10 });
+  assert(!p.seen.slice(seen).some(sql => /^(INSERT|UPDATE|DELETE)/.test(sql)), 'discovery must stay read-only');
+  assert.equal(before.examined, 1); assert.equal(before.orders[0]!.status, 'MISSING'); assert.equal(before.orders[0]!.items.length, 2);
+  p.control.failAudit = 1;
+  await assert.rejects(p.store.accrue(p.pool, 'order', 'req_crash'), /audit unavailable/);
+  assert.equal((await p.store.discover(p.pool, { limit: 10 })).orders[0]!.status, 'MISSING');
+  p.control.failAudit = 0;
+  assert.equal((await p.store.replay(p.pool, ['order'], 'req_recover')).results[0]!.status, 'ACCRUED');
+  const complete = await p.store.discover(p.pool, { limit: 10 });
+  assert.equal(complete.orders[0]!.status, 'COMPLETE'); assert(complete.orders[0]!.items.every(item => item.state === 'PRESENT'));
+  const settled = p.state(), replay = await p.store.replay(p.pool, ['order'], 'req_replay');
+  assert.equal(replay.results[0]!.status, 'REPLAYED'); assert.deepEqual(p.state(), settled);
+});
+
+test('operator authorization is rechecked inside each money transaction before any earning write', async () => {
+  const p = earningProbe(); let denied = 0;
+  const operator = { userId: 'admin', sessionId: 'session', authorize: async () => { denied++; throw Object.assign(new Error('admin revoked'), { status: 403 }); } };
+  await assert.rejects(p.store.accrue(p.pool, 'order', 'req_operator', operator));
+  assert.equal(denied, 1); assert.equal(p.state().roots.length, 0); assert(!p.seen.some(sql => /^(INSERT|UPDATE|DELETE)/.test(sql)));
+  await p.store.accrue(p.pool, 'order', 'req_accrue');
+  await assert.rejects(p.store.transition(p.pool, 'earning', 'SETTLE', '1', 'req_operator', undefined, operator));
+  assert.equal(p.state().roots[0]!.state, 'PENDING');
 });
 
 test('bounded due driver waits for source due time, credits only the selected original root and is safe on subsequent passes', async () => {

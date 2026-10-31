@@ -848,6 +848,27 @@
       "when": 1793184009000,
       "tag": "0120_admin_audit_noise_retention",
       "breakpoints": true
+    },
+    {
+      "idx": 121,
+      "version": "7",
+      "when": 1793184010000,
+      "tag": "0121_distribution_uniform_policy_basis",
+      "breakpoints": true
+    },
+    {
+      "idx": 122,
+      "version": "7",
+      "when": 1793184011000,
+      "tag": "0122_distribution_native_earning_scope",
+      "breakpoints": true
+    },
+    {
+      "idx": 123,
+      "version": "7",
+      "when": 1793184012000,
+      "tag": "0123_distribution_participant_contract",
+      "breakpoints": true
     }
   ]
 }

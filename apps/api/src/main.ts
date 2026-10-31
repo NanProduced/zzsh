@@ -11,10 +11,9 @@ import {
 } from "./health/readiness";
 import { assertBusinessRuntimeIdentity, createBusinessPool } from "./database/business";
 import { loadAuthRuntimeConfig } from "./auth/auth-runtime";
-import { createLocalDistributionReadScope } from "./finance/distribution-policy-store";
+import { loadNativeDistributionRuntime } from "./finance/distribution-native-runtime";
+import { loadDistributionDueRuntime } from "./finance/distribution-due.module";
 import { loadOrderSweepRuntime } from "./order/order-sweep.module";
-// Root-accepted local copy identity. This capability only admits existing facts to GET.
-const milestoneDistributionReceipt={database:"zzsh_test_order_milestone_real_1",resourceOid:952624,owner:"zzsh",ownerOid:10,marker:"zzsh:order-reservation-test:v1",migrationRole:"zzsh_order_milestone_real_1_m",migrationRoleOid:952625,runtimeRole:"zzsh_order_milestone_real_1_r",runtimeRoleOid:952626};
 
 export async function bootstrap() {
   const config = loadConfig();
@@ -25,6 +24,7 @@ export async function bootstrap() {
   const withdrawalBankBinding = loadWithdrawalBankBindingRuntime({ database: config.database, authEnabled: authEnabledValue === "true" });
   const joinpayWithdrawal = loadJoinpayPayoutRuntime({ provider: config.provider, database: config.database, authEnabled: authEnabledValue === "true" }, withdrawalBankBinding);
   const joinpayCollection = loadJoinpayCollectionRuntime({ provider: config.provider, database: config.database, authEnabled: authEnabledValue === "true" });
+  const distributionNative = loadNativeDistributionRuntime({ config, authEnabled: authEnabledValue === "true", admission: joinpayCollection?.admission });
   const joinpayRefund = loadJoinpayRefundRuntime({ provider: config.provider, database: config.database, authEnabled: authEnabledValue === "true" });
   const joinpayAccounts = loadJoinpayAccountRuntime({ provider: config.provider, database: config.database, authEnabled: authEnabledValue === "true" });
   const readinessMode = process.env.READINESS_MODE?.trim() || "real";
@@ -43,10 +43,12 @@ export async function bootstrap() {
   let app: Awaited<ReturnType<typeof createApp>> | undefined;
   try {
     const orderSweep = loadOrderSweepRuntime(businessPool);
+    const distributionDue = loadDistributionDueRuntime(businessPool, distributionNative?.auth.distributionEarnings);
     if (businessPool) await assertBusinessRuntimeIdentity(businessPool, config);
     app = await createApp({
       health: { dependencies },
       ...(orderSweep ? { orderSweep } : {}),
+      ...(distributionDue ? { distributionDue } : {}),
       ...(businessPool
         ? {
             database: { pool: businessPool, directoryReadPool },
@@ -59,7 +61,7 @@ export async function bootstrap() {
               ...(joinpayRefund ? { joinpayRefund } : {}),
               ...(joinpayAccounts ? { joinpayAccountRead: joinpayAccounts.read, joinpayAccountObservation: joinpayAccounts.observation } : {}),
               directoryReadPool,
-              ...(config.database.name===milestoneDistributionReceipt.database?{distributionReadScope:createLocalDistributionReadScope(config,milestoneDistributionReceipt)}:{}),
+              ...(distributionNative ? distributionNative.auth : {}),
               ...(config.orderImSdkRouteConfig ? { orderImSdkRouteConfig: config.orderImSdkRouteConfig } : {}),
               ...(config.yunxin.enabled && config.yunxin.appKey && config.yunxin.appSecret
                 ? {

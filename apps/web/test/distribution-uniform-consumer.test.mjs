@@ -55,3 +55,14 @@ test('Native calculation source stays Native; unknown scopes and fabricated arri
  const v=earningsDetail(detail(calc({scope:'NATIVE'})),'self','native:one',2);assert.equal(v.item.calculation.scope,'NATIVE');assert.equal(v.item.channelArrivalKnowledge,'UNKNOWN');
  assert.throws(()=>earningsDetail(detail(calc({scope:'OTHER'})),'self','native:one',2));const falseArrival=detail(calc({scope:'NATIVE'}));falseArrival.item.channelArrivalKnowledge='KNOWN';assert.throws(()=>earningsDetail(falseArrival,'self','native:one',2));
 });
+test('NATIVE self terms survive the parser and only LOCAL/NATIVE scopes are accepted',()=>{
+ const native=terms({scope:'NATIVE'});assert.equal(distributionTerms(native,'self',2).scope,'NATIVE');
+ assert.equal(distributionTerms({...native,knowledge:'UNKNOWN',applicable:null,reason:'COMMISSION_FREEZE_STATE_UNKNOWN',rateMode:null,rates:null,accountModes:null,minimumAccrualCents:null,settlementDelayDays:null},'self',2).scope,'NATIVE');
+ assert.equal(distributionTerms(terms(),'self',2).scope,'LOCAL_CONTROLLED');
+ for(const bad of [{scope:'GLOBAL'},{scope:'LOCAL_CONTROLLED '},{scope:null}])assert.throws(()=>distributionTerms(terms(bad),'self',2));
+});
+test('invitation overview carries NATIVE but rejects any undeclared scope',()=>{
+ const overview={scope:'LOCAL_CONTROLLED',subjectId:'self',policyKnowledge:'KNOWN',policyVersion:'p2',policyEnabled:false,canBindLeader:true,participant:{knowledge:'KNOWN',eligibility:'ELIGIBLE',levelCode:null,revision:'1'},ownCode:{knowledge:'KNOWN',code:'SELF'},inviter:{knowledge:'KNOWN_NONE',relation:null},leader:{knowledge:'KNOWN_NONE',relation:null}};
+ assert.equal(invitationRead({...overview,scope:'NATIVE'},'self').scope,'NATIVE');
+ for(const scope of ['GLOBAL','LOCAL','native',null])assert.throws(()=>invitationRead({...overview,scope},'self'));
+});

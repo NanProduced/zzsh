@@ -7,7 +7,7 @@ import { exactCents } from './personal-finance-read';
 
 export type InvitationType = 'INVITER' | 'DISTRIBUTION_LEADER';
 export type InvitationRelation = { type: InvitationType; childUserId: string; parentUserId: string; policyVersion: string };
-export type LocalInvitationPolicy = { mode: 'LOCAL_CONTROLLED'; version: string; admittedSubjectIds: readonly string[]; allowedTypes: readonly InvitationType[]; binding: 'SINGLE_IMMUTABLE_PARENT'; codeCase: 'EXACT' | 'ASCII_UPPER' };
+export type LocalInvitationPolicy = { mode: 'LOCAL_CONTROLLED'|'NATIVE'; version: string; admittedSubjectIds: readonly string[]; allowedTypes: readonly InvitationType[]; binding: 'SINGLE_IMMUTABLE_PARENT'; codeCase: 'EXACT' | 'ASCII_UPPER' };
 export type InvitationCode = { code: string; userId: string | null; active: boolean; ownerActive: boolean | null; ownerEligible: boolean | null; sourceType: 'NATIVE' | 'LEGACY_MYSQL' };
 const sha = (value: string) => createHash('sha256').update(value).digest('hex');
 const unavailable = (reason: string) => new SecurityApiError(503, 'EVIDENCE_UNAVAILABLE', reason);
@@ -21,7 +21,7 @@ function utc(value: string): number {
  * Only returns a binding plan; no implicit registration or cross-type filling. */
 export function planInvitationBinding(input: { childUserId: string; type: InvitationType; code: string; policyVersion: string }, policy: LocalInvitationPolicy | null,
   facts: { childActive: boolean; eligible: boolean | null; codes: readonly InvitationCode[]; relations: readonly InvitationRelation[]; graphComplete: boolean }) {
-  if (!policy || policy.mode !== 'LOCAL_CONTROLLED' || typeof policy.version !== 'string' || !policy.version || policy.version.length > 128 || policy.binding !== 'SINGLE_IMMUTABLE_PARENT' || !['EXACT', 'ASCII_UPPER'].includes(policy.codeCase)) throw unavailable('INVITATION_POLICY_UNAVAILABLE');
+  if (!policy || !['LOCAL_CONTROLLED','NATIVE'].includes(policy.mode) || typeof policy.version !== 'string' || !policy.version || policy.version.length > 128 || policy.binding !== 'SINGLE_IMMUTABLE_PARENT' || !['EXACT', 'ASCII_UPPER'].includes(policy.codeCase)) throw unavailable('INVITATION_POLICY_UNAVAILABLE');
   if (!['INVITER', 'DISTRIBUTION_LEADER'].includes(input.type) || !policy.allowedTypes.includes(input.type)) throw invalid('Unsupported invitation relation type');
   if (policy.version !== input.policyVersion) throw conflict('Invitation policy changed');
   if (!policy.admittedSubjectIds.includes(input.childUserId) || !facts.childActive || facts.eligible === false) throw forbidden('Invitation participant unavailable');
@@ -99,7 +99,7 @@ export function prepareRentalEarning(facts: RentalEarningFacts, policy: LocalEar
   const key = earningEconomicKey(facts.source, facts.beneficiaryUserId, facts.role);
   if (facts.legacyBusiness || facts.source.type !== 'NATIVE') throw conflict('Legacy earnings are observations, not new accruals');
   if (facts.coveredEconomicRoots.has(key)) throw conflict('Economic event already included in opening');
-  if (!policy || policy.mode !== 'LOCAL_CONTROLLED' || typeof policy.version !== 'string' || !policy.version || policy.version.length > 128) throw unavailable('EARNING_POLICY_UNAVAILABLE');
+  if (!policy || !['LOCAL_CONTROLLED','NATIVE'].includes(policy.mode) || typeof policy.version !== 'string' || !policy.version || policy.version.length > 128) throw unavailable('EARNING_POLICY_UNAVAILABLE');
   if (!policy.admittedSubjectIds.includes(facts.beneficiaryUserId) || !facts.beneficiaryActive || facts.beneficiaryEligible === false) throw forbidden('Earning beneficiary unavailable');
   if (facts.beneficiaryEligible !== true || !facts.walletCoverageKnown || !facts.businessVerified) throw unavailable('EARNING_SOURCE_UNKNOWN');
   if (facts.source.kind !== policy.sourceKind || !policy.gameIds.includes(facts.gameId) || !policy.accountModes.includes(facts.accountMode) || facts.baseDefinition !== policy.baseDefinition) throw conflict('Earning business is outside frozen policy');
