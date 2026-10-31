@@ -1242,7 +1242,12 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
       if (oldest) historyAnchorRef.current[threadKeyOf(conversation)] = oldest;
       setHistoryMore((current) => ({ ...current, [threadKeyOf(conversation)]: history.length === 50 }));
       setHistoryLoaded((current) => ({ ...current, [threadKeyOf(conversation)]: true }));
-    }).catch((cause) => { revalidateAfterUnauthorized(cause); });
+    }).catch((cause) => {
+      revalidateAfterUnauthorized(cause);
+      // 历史拉取失败以前是静默的：页面上"没有历史"和"历史加载失败"完全同形。
+      // 这里把原因暴露到既有错误条，让用户和排障都能看到是哪一种失败。
+      if (!cancelled) setError(`历史消息读取失败：${cause instanceof Error ? cause.message : "未知错误"}，可稍后重试`);
+    });
     return () => { cancelled = true; };
   }, [activeConversation?.conversationId, activeConversation?.id, connection, currentIdentity, preview, revalidateAfterUnauthorized]);
 
