@@ -3,9 +3,9 @@ import type { ApprovalOperationExecutor } from '../auth/auth-security';
 import { loadEffectiveAdminAccess, hasPermission, type EffectiveAdminAccess } from '../auth/admin-authorization';
 import { SecurityApiError } from '../auth/security-core';
 import { canonicalize } from '../supply/content-hash';
-import { applyApprovedDistributionPolicyInTransaction, assertDistributionPolicyWriteReadyInTransaction, distributionPolicyScopeOf, type LocalDistributionScope } from './distribution-policy-store';
-import { DISTRIBUTION_POLICY_OPERATION, parseDistributionPolicyChange } from './distribution-policy-change';
-import { prepareDistributionPolicyChange } from './distribution-policy-change';
+import { applyApprovedDistributionPolicyInTransaction, initializeApprovedDistributionPolicyInTransaction, assertDistributionPolicyWriteReadyInTransaction, distributionPolicyScopeOf, type LocalDistributionScope } from './distribution-policy-store';
+import { DISTRIBUTION_POLICY_OPERATION, parseDistributionPolicyChange, isInitialPolicyChange, type DistributionPolicyUpdate } from './distribution-policy-change';
+import { prepareDistributionPolicyChange, initialDistributionPolicyConfig } from './distribution-policy-change';
 import { readDistributionPolicyRowInTransaction } from './distribution-policy-store';
 import type { PoolClient } from 'pg';
 
@@ -18,8 +18,13 @@ export async function validateDistributionPolicySubmission(client:PoolClient,pay
  await assertDistributionPolicyWriteReadyInTransaction(client,writeScope);
  await client.query("SELECT pg_advisory_xact_lock(hashtextextended('zzsh:distribution-policy-approval:v1',0))");
  const current=await readDistributionPolicyRowInTransaction(client,false,distributionPolicyScopeOf(writeScope));
- if(current.knowledge!=='KNOWN')throw new SecurityApiError(409,'CONFLICT','Distribution policy baseline unavailable');
- prepareDistributionPolicyChange(current.policy,input);
+ if(isInitialPolicyChange(input)){
+  if(current.knowledge!=='UNKNOWN')throw new SecurityApiError(409,'CONFLICT','Initial policy is only available before the first version');
+  initialDistributionPolicyConfig(input,distributionPolicyScopeOf(writeScope));
+ }else{
+  if(current.knowledge!=='KNOWN')throw new SecurityApiError(409,'CONFLICT','Distribution policy baseline unavailable');
+  prepareDistributionPolicyChange(current.policy,input);
+ }
  const existing=(await client.query("SELECT id FROM zzsh_iam.approval_request WHERE operation_code=$1 AND status IN ('PENDING','APPROVED','EXECUTION_FAILED') AND expires_at>clock_timestamp() ORDER BY created_at,id COLLATE \"C\" LIMIT 1",[DISTRIBUTION_POLICY_OPERATION])).rows[0];
  if(existing)throw new SecurityApiError(409,'CONFLICT','A distribution policy change already requires handling');
 }
@@ -36,7 +41,9 @@ export function createDistributionPolicyApprovalExecutor(binding?:LocalDistribut
   const now=new Date(at).getTime(),expires=new Date(input.expiresAt).getTime();
   if(!Number.isFinite(now)||!Number.isFinite(expires)||expires<=now)throw new SecurityApiError(409,'CONFLICT','Approved distribution request expired');
   if(!binding)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Approved distribution write scope is not assembled');
-  const result=await applyApprovedDistributionPolicyInTransaction(client,{...actor,requestId},payload,{approvalRequestId:input.requestId,payloadHash:input.operationPayloadHash},binding);
-  return{resultCode:'DISTRIBUTION_POLICY_APPLIED',resultDetail:result.policy.versionId};
+  let result;
+  if(isInitialPolicyChange(payload))result=await initializeApprovedDistributionPolicyInTransaction(client,{...actor,requestId},payload,{approvalRequestId:input.requestId,payloadHash:input.operationPayloadHash},binding);
+  else result=await applyApprovedDistributionPolicyInTransaction(client,{...actor,requestId},payload as DistributionPolicyUpdate,{approvalRequestId:input.requestId,payloadHash:input.operationPayloadHash},binding);
+  return{resultCode:isInitialPolicyChange(payload)?'DISTRIBUTION_POLICY_INITIALIZED':'DISTRIBUTION_POLICY_APPLIED',resultDetail:result.policy.versionId};
  };
 }

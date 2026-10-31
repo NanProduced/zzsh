@@ -12,6 +12,7 @@ import {
 import { assertBusinessRuntimeIdentity, createBusinessPool } from "./database/business";
 import { loadAuthRuntimeConfig } from "./auth/auth-runtime";
 import { loadNativeDistributionRuntime } from "./finance/distribution-native-runtime";
+import { loadDistributionDueRuntime } from "./finance/distribution-due.module";
 import { loadOrderSweepRuntime } from "./order/order-sweep.module";
 
 export async function bootstrap() {
@@ -42,10 +43,12 @@ export async function bootstrap() {
   let app: Awaited<ReturnType<typeof createApp>> | undefined;
   try {
     const orderSweep = loadOrderSweepRuntime(businessPool);
+    const distributionDue = loadDistributionDueRuntime(businessPool, distributionNative?.auth.distributionEarnings);
     if (businessPool) await assertBusinessRuntimeIdentity(businessPool, config);
     app = await createApp({
       health: { dependencies },
       ...(orderSweep ? { orderSweep } : {}),
+      ...(distributionDue ? { distributionDue } : {}),
       ...(businessPool
         ? {
             database: { pool: businessPool, directoryReadPool },

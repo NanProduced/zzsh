@@ -14,6 +14,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { inspectPending, pendingWriteSubject, savePendingWrite, dropPendingWrite, updatePendingWriteKind, type PendingApprovalWrite, type PendingInspection } from './approval/pending-writes';
 import { receiptEnvelopeIssue, type OperationEntry, type RequestDetail, type RecoveryResult } from './approval/contract';
 import { buildDistributionPolicyPayload, distributionCentsLabel, parseDistributionPolicyRead, sameDistributionProposal, type DistributionPolicyRead, type PolicyHead, type DistributionPolicyPayload } from './distribution-policy-model';
+import { DistributionInitialPolicyForm } from './distribution-initial-policy-form';
 export { parseDistributionPolicyRead } from './distribution-policy-model';
 export type { DistributionLevel, DistributionPolicyConfig, DistributionPolicyRead } from './distribution-policy-model';
 
@@ -71,14 +72,16 @@ export function DistributionPolicyPanel({snapshot,onOpenPath,onDirtyChange}:{sna
  const head=view.read?.knowledge==='KNOWN'?view.read.policy:null,context=view.read?.changeContext;
  const operationReady=view.operation?.initiation.allowed===true&&view.operation.triggers.some(t=>t.triggerCondition===TRIGGER);
  const canRequest=access.canManage&&hasPermission(snapshot,'approval.request.create')&&operationReady&&context?.state==='EMPTY'&&context.contractReady&&context.writeAssemblyReady&&pending.state==='absent';
+ const canInitial=canRequest&&view.read?.knowledge==='UNKNOWN'&&(view.read.scope==='NATIVE'||view.read.scope==='LOCAL_CONTROLLED');
  const activeRequest=context?.request?.requestId??knownRequestId;
  const openRequest=(id:string)=>onOpenPath?onOpenPath(requestPath(id),'分销政策申请'):window.location.assign(requestPath(id));
  const originalAction=knownRequestId?<Button variant='outline' size='sm' onClick={()=>openRequest(knownRequestId)}>查看原申请</Button>:pending.state==='valid'&&pending.record.subject===subject?<Button variant='outline' size='sm' onClick={()=>onOpenPath?onOpenPath('/approvals?tab=mine'):window.location.assign('/approvals?tab=mine')}>到审批中心核对原请求</Button>:null;
  async function submit(payload:DistributionPolicyPayload){
-  if(!canRequest||sending.current||!head)return;const owner=scope,gen=generation.current;
-  if(payload.expectedPolicyId!==head.versionId||payload.expectedRevision!==head.revision||payload.expectedPolicyDigest!==head.digest){setNotice('当前政策已变化，本次未提交；请核对后重新编辑');return;}
+  const initial=payload.schema==='distribution-policy-initialize.v1';
+  if((initial?!canInitial:!canRequest)||sending.current||!initial&&!head)return;const owner=scope,gen=generation.current;
+  if(!initial&&(payload.expectedPolicyId!==head!.versionId||payload.expectedRevision!==head!.revision||payload.expectedPolicyDigest!==head!.digest)){setNotice('当前政策已变化，本次未提交；请核对后重新编辑');return;}
   if(!globalThis.crypto?.randomUUID){setNotice('无法生成原请求标识，本次未提交');return;}
-  const idempotencyKey='idem_'+crypto.randomUUID().replaceAll('-',''),body={operationCode:OP,triggerCondition:TRIGGER,payloadVersion:1,payload,summary:'调整全站分销政策'};
+  const idempotencyKey='idem_'+crypto.randomUUID().replaceAll('-',''),body={operationCode:OP,triggerCondition:TRIGGER,payloadVersion:1,payload,summary:initial?'初始化全站分销政策':'调整全站分销政策'};
   const saved=savePendingWrite({actorId:snapshot.adminUserId,sessionId:snapshot.session.id,target:'',operation:CREATE_OP,path:CREATE,idempotencyKey,body,readback:{kind:'lists',keys:['mine']},successMessage:'分销变更申请已受理',kind:'unknown'});
   if(!saved.ok){refreshPending();setNotice('无法可靠保存原请求，本次没有提交');return;}
   sending.current=true;setBusy(true);refreshPending();setNotice('');
@@ -89,7 +92,7 @@ export function DistributionPolicyPanel({snapshot,onOpenPath,onDirtyChange}:{sna
  if(!access.canRead)return <Alert variant="warning"><CircleAlert aria-hidden="true"/><AlertTitle>当前管理员没有分销政策权限</AlertTitle><AlertDescription>政策读取与本单分销查询分别授权。</AlertDescription>{originalAction?<AlertAction>{originalAction}</AlertAction>:null}</Alert>;
  if(view.status==='loading')return <p role="status" className="text-sm text-muted-foreground">正在读取分销政策…</p>;
  if(view.status==='error'||!view.read)return <Alert variant="destructive"><CircleAlert aria-hidden="true"/><AlertTitle>分销政策暂未读到</AlertTitle><AlertDescription>{view.error}</AlertDescription><AlertAction><Button variant="outline" onClick={()=>void load(scope,generation.current)}>重新读取</Button>{originalAction}</AlertAction></Alert>;
- if(!head)return <Alert variant="warning"><CircleAlert aria-hidden="true"/><AlertTitle>尚未取得当前分销政策</AlertTitle><AlertDescription>不采用默认比例，也不能据此判断为已关闭。</AlertDescription>{originalAction?<AlertAction>{originalAction}</AlertAction>:null}</Alert>;
+ if(!head)return <div className="space-y-4"><Alert variant="warning"><CircleAlert aria-hidden="true"/><AlertTitle>尚未取得当前分销政策</AlertTitle><AlertDescription>不采用默认比例，也不能据此判断为已关闭。{canInitial?'可按显式完整配置发起首版审批。':'当前身份、审批能力或结构尚未就绪，不能发起首版政策。'}</AlertDescription>{originalAction?<AlertAction>{originalAction}</AlertAction>:null}</Alert>{canInitial?<DistributionInitialPolicyForm canSubmit={canInitial} busy={busy} onSubmit={payload=>void submit(payload)}/>:null}</div>;
  const config=head.config,foreign=pending.state==='valid'&&pending.record.body.operationCode!==OP;
  const pendingMessage=pending.state==='unreadable'?'原请求记录暂时不可读，新提交已暂停':pending.state==='valid'?(foreign?'还有其他审批创建请求待核对，请先到审批中心处理':'这次分销申请的原结果仍待核对'):context?.state==='PENDING'?(context.request?'已有分销政策变更等待处理':'已有分销政策变更；当前身份无权查看申请详情'):context?.state==='UNAVAILABLE'||!context?'暂未取得政策变更状态，不能视为没有申请':!context.contractReady||!context.writeAssemblyReady?'政策提审与执行能力待接入，当前保持只读':!operationReady?'当前身份暂不能发起分销政策申请':'';
  return <section className="space-y-5" data-distribution-policy>

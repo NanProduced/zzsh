@@ -182,4 +182,3 @@ BEGIN
   'estimateBaseCents',CASE WHEN base IS NULL THEN NULL ELSE base::numeric(24,0)::text END,'roles',to_jsonb(items));
 END $$;
 
-COMMIT;

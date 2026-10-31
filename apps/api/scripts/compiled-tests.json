@@ -238,5 +238,7 @@
   "dist/test/platform-updates.test.js",
   "dist/test/legal-documents.test.js",
   "dist/test/settlement-acceptance.test.js",
-  "dist/test/auth-legal-acceptance.test.js"
+  "dist/test/auth-legal-acceptance.test.js",
+  "dist/test/distribution-maintenance-batch.test.js",
+  "dist/test/distribution-discovery-pagination.test.js"
 ]

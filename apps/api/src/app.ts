@@ -15,12 +15,14 @@ import {
 import { mountAuthHandlers, type AuthRuntimeOptions } from "./auth/auth-runtime";
 import type { BusinessDatabaseOptions } from "./database/business";
 import type { OrderSweepModuleOptions } from "./order/order-sweep.module";
+import type { DistributionDueModuleOptions } from "./finance/distribution-due.module";
 
 export type ApiAppOptions = ApiAppInfrastructureOptions & {
   health: ReadinessModuleOptions;
   database?: BusinessDatabaseOptions;
   auth?: AuthRuntimeOptions;
   orderSweep?: OrderSweepModuleOptions;
+  distributionDue?: DistributionDueModuleOptions;
 };
 
 const LARGE_IM_MESSAGE_PATHS = new Set([
@@ -127,7 +129,7 @@ function installScopedBodyParsers(app: { getHttpAdapter: () => { getInstance: ()
 
 export async function createApp(options: ApiAppOptions) {
   const app = await NestFactory.create(
-    AppModule.register(options.health, options.database, options.orderSweep),
+    AppModule.register(options.health, options.database, options.orderSweep, options.distributionDue),
     { logger: ["error", "warn"], bodyParser: false, rawBody: true },
   );
   if (options.database) app.get(ReadinessService).observeBusinessPool(options.database.pool);

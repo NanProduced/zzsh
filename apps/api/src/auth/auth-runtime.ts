@@ -19,6 +19,7 @@ import type { WithdrawalBankBindingOptions } from "../finance/withdrawal-bank-bi
 import { mountMembershipGrowthRoutes } from "./membership-growth-routes";
 import { executeMembershipGrowthOperation } from "./membership-growth-approval";
 import { createDistributionPolicyApprovalExecutor } from "../finance/distribution-policy-approval";
+import { createDistributionReversalApprovalExecutor, DISTRIBUTION_REVERSAL_OPERATION } from "../finance/distribution-reversal-approval";
 import { mountAdminDistributionReadRoutes } from "../finance/admin-distribution-routes";
 import { assertNativeDistributionEarningAssembly } from '../finance/distribution-native-runtime';
 import { mountAdminDistributionMaintenanceRoutes } from "../finance/admin-distribution-maintenance";
@@ -1096,7 +1097,9 @@ export async function mountAuthHandlers(
     distributionPolicyWriteScope: options.distributionScope,
     approvalOperationExecutor: (client, input, actor, requestId) => input.operationCode === "distribution.policy.publish"
       ? createDistributionPolicyApprovalExecutor(options.distributionScope)(client, input, actor, requestId)
-      : executeMembershipGrowthOperation(client, input, actor, requestId),
+      : input.operationCode === DISTRIBUTION_REVERSAL_OPERATION
+        ? createDistributionReversalApprovalExecutor()(client, input, actor, requestId)
+        : executeMembershipGrowthOperation(client, input, actor, requestId),
     ...(yunxinRuntime ? {
       imProvisioner: yunxinRuntime.provisioner,
       imIdentityRepository: yunxinRuntime.repository,

@@ -3,6 +3,7 @@ import {strict as assert} from 'node:assert';
 import {createHash} from 'node:crypto';
 import type {Pool} from 'pg';
 import {loadNativeDistributionRuntime} from '../src/finance/distribution-native-runtime';
+import {loadDistributionDueRuntime} from '../src/finance/distribution-due.module';
 import {createNativeDistributionEarningStore,createDistributionEarningStore} from '../src/finance/distribution-earning-store';
 import {assertLocalDistributionAssembly, distributionPolicyScopeOf} from '../src/finance/distribution-policy-store';
 import {bindJoinpayCollectionProfile,bindFormalJoinpayCollectionAdmission,readFormalCollectionAdmission,COLLECTION_REQUIRED_RULES,type CollectionProfileOperation,type CollectionServerProfile} from '../src/order/joinpay-collection-profile';
@@ -118,4 +119,14 @@ test('native policy submission validates the bound native head rather than the l
  }};
  await validateDistributionPolicySubmission(client,{schema:'distribution-policy-change.v1',expectedPolicyId:'native_policy',expectedRevision:'1',expectedPolicyDigest:digest,changes:{renterPercent:'6'},reason:'synthetic policy change'},runtime.auth.distributionScope);
  assert.equal(nativeHeadReads,1);
+});
+
+
+test('due worker is opt-in, bounded and requires the explicit NATIVE assembly',()=>{
+ const store={runDueBatch:async()=>({})} as any, pool={} as any;
+ assert.equal(loadDistributionDueRuntime(pool,store,{}),undefined);
+ assert.throws(()=>loadDistributionDueRuntime(undefined,store,{DISTRIBUTION_DUE_WORKER_ENABLED:'true'}),/explicit NATIVE/);
+ assert.throws(()=>loadDistributionDueRuntime(pool,store,{DISTRIBUTION_DUE_WORKER_ENABLED:'true',DISTRIBUTION_DUE_INTERVAL_MS:'1000'}),/60000-3600000/);
+ assert.throws(()=>loadDistributionDueRuntime(pool,store,{DISTRIBUTION_DUE_WORKER_ENABLED:'true',DISTRIBUTION_DUE_BATCH_LIMIT:'101'}),/1-100/);
+ const runtime=loadDistributionDueRuntime(pool,store,{DISTRIBUTION_DUE_WORKER_ENABLED:'true'});assert.equal(runtime?.intervalMs,300000);assert.equal(runtime?.batchLimit,20);
 });

@@ -198,6 +198,16 @@ test('post-commit accrual crash is discoverable as missing and replay uses the s
   assert.equal(replay.results[0]!.status, 'REPLAYED'); assert.deepEqual(p.state(), settled);
 });
 
+test('operator authorization is rechecked inside each money transaction before any earning write', async () => {
+  const p = earningProbe(); let denied = 0;
+  const operator = { userId: 'admin', sessionId: 'session', authorize: async () => { denied++; throw Object.assign(new Error('admin revoked'), { status: 403 }); } };
+  await assert.rejects(p.store.accrue(p.pool, 'order', 'req_operator', operator));
+  assert.equal(denied, 1); assert.equal(p.state().roots.length, 0); assert(!p.seen.some(sql => /^(INSERT|UPDATE|DELETE)/.test(sql)));
+  await p.store.accrue(p.pool, 'order', 'req_accrue');
+  await assert.rejects(p.store.transition(p.pool, 'earning', 'SETTLE', '1', 'req_operator', undefined, operator));
+  assert.equal(p.state().roots[0]!.state, 'PENDING');
+});
+
 test('bounded due driver waits for source due time, credits only the selected original root and is safe on subsequent passes', async () => {
   const p = earningProbe(); await p.store.accrue(p.pool, 'order', 'req_accrue');
   assert.equal((await p.store.settleDue(p.pool, 1, 'req_early')).selected, 0);

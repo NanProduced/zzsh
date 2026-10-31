@@ -38,4 +38,3 @@ BEGIN
  THEN RAISE EXCEPTION 'earning line differs from exact original template' USING ERRCODE='23514';END IF;RETURN NEW;
 END $$;
 
-COMMIT;

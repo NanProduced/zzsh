@@ -13,7 +13,7 @@ import * as earningRead from '../src/finance/distribution-earning-read';
 import * as legacyFinance from '../src/finance/legacy-duty-finance-store';
 import { canonicalize } from '../src/supply/content-hash';
 import { freezePaymentDistributionBasis, readOriginalPaymentDistributionBasis } from '../src/finance/distribution-payment-basis';
-import { parseDistributionPolicyChange, prepareDistributionPolicyChange } from '../src/finance/distribution-policy-change';
+import { parseDistributionPolicyChange, prepareDistributionPolicyChange, initialDistributionPolicyConfig, type DistributionPolicyUpdate, type DistributionPolicyInitial } from '../src/finance/distribution-policy-change';
 import { assertDistributionApprovalAccess, createDistributionPolicyApprovalExecutor, validateDistributionPolicySubmission } from '../src/finance/distribution-policy-approval';
 import { readAdminDistributionOrder, readAdminDistributionRelations } from '../src/finance/admin-distribution-read';
 import { projectMyDistributionTerms, projectMyDistributionTermsV2 } from '../src/finance/invitation-store';
@@ -71,7 +71,7 @@ test('HTTP policy PUT cannot bypass approved execution even with an authenticate
 
 const hash=(v:unknown)=>createHash('sha256').update(canonicalize(v)).digest('hex');
 const legacyConfig=validateDistributionPolicy(legacy),head={versionId:'policy_1',revision:'4',digest:hash(legacyConfig),config:legacyConfig};
-const change=()=>parseDistributionPolicyChange({schema:'distribution-policy-change.v1',expectedPolicyId:head.versionId,expectedRevision:head.revision,expectedPolicyDigest:head.digest,changes:{renterPercent:'3',ownerPercent:'2',enabled:false},reason:'调整全站方案'});
+const change=()=>parseDistributionPolicyChange({schema:'distribution-policy-change.v1',expectedPolicyId:head.versionId,expectedRevision:head.revision,expectedPolicyDigest:head.digest,changes:{renterPercent:'3',ownerPercent:'2',enabled:false},reason:'调整全站方案'}) as DistributionPolicyUpdate;
 
 test('approved changes pin exact policy id/revision/digest and cannot alter other economics',()=>{
  const plan=change(),prepared=prepareDistributionPolicyChange(head,plan);
@@ -258,4 +258,18 @@ test('invitation write has the same version gate: v1 paused no relation write, v
  if(allowed){const result=await action();assert.equal((result.body as any).relation.parentUserId,'parent');assert.equal(f.calls.filter(x=>x.sql.startsWith('INSERT INTO zzsh_order.invitation_relation')).length,1);}
  else{await assert.rejects(action,(e:any)=>e.status===409);assert.equal(f.calls.some(x=>/^INSERT|^UPDATE|^DELETE/.test(x.sql)),false);}}}
  finally{p.readActiveDistributionPolicyInTransaction=oldRead;u.assertUserContextInTransaction=oldAuth;}
+});
+
+
+test('approved first uniform policy is explicit, scoped and cannot fake an existing head',()=>{
+ const payload={schema:'distribution-policy-initialize.v1',config:{enabled:false,accountModes:['ordinary','custom'],minimumAccrualCents:'0',settlementDelayDays:7,renterPercent:'5',ownerPercent:'5'},reason:'首版明确配置'};
+ const initial=parseDistributionPolicyChange(payload) as DistributionPolicyInitial;
+ assert.deepEqual(initial,{...payload,reason:'首版明确配置'});
+ const config=initialDistributionPolicyConfig(initial,'NATIVE');
+ assert.equal(config.schema,'distribution-policy.v2');assert.equal(config.scope,'NATIVE');assert.equal(config.enabled,false);assert.deepEqual(config.levels,[]);assert.equal(config.renterPercent,'5');
+ assert.equal(initialDistributionPolicyConfig(initial,'LOCAL_CONTROLLED').scope,'LOCAL_CONTROLLED');
+ assert.throws(()=>initialDistributionPolicyConfig(parseDistributionPolicyChange({...payload,config:{...payload.config,renterPercent:'60',ownerPercent:'60'}}) as DistributionPolicyInitial,'NATIVE'));
+ assert.throws(()=>parseDistributionPolicyChange({...payload,expectedPolicyId:'fake'}));
+ assert.throws(()=>parseDistributionPolicyChange({...payload,config:{...payload.config,minimumAccrualCents:'-1'}}));
+ assert.throws(()=>prepareDistributionPolicyChange(head,initial as never),/no baseline/);
 });

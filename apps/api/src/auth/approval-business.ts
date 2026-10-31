@@ -34,6 +34,7 @@ const SOURCE = APPROVAL_EXECUTION_MODE.sourceBusiness;
 
 const REGISTRATIONS: readonly ApprovalOperationRegistration[] = [
   { operationCode: "distribution.policy.publish", businessType: "distribution", title: "调整分销政策", executionMode: GENERIC, testOnly: false, permissionStage: "EXECUTE" },
+  { operationCode: "distribution.earning.reverse", businessType: "distribution", title: "全额冲回分销佣金", executionMode: GENERIC, testOnly: false, permissionStage: "EXECUTE" },
   { operationCode: "membership.benefit.policy.publish", businessType: "membership", title: "发布会员权益政策", executionMode: GENERIC, testOnly: false, permissionStage: "EXECUTE" },
   { operationCode: "membership.entitlement.grant", businessType: "membership", title: "发放会员礼遇权益", executionMode: GENERIC, testOnly: false, permissionStage: "EXECUTE" },
   { operationCode: "membership.entitlement.replace", businessType: "membership", title: "替换会员礼遇权益", executionMode: GENERIC, testOnly: false, permissionStage: "EXECUTE" },
@@ -56,7 +57,7 @@ export function approvalRegistration(operationCode: string): ApprovalOperationRe
  * 避免预检与实际执行各写一份而漂移。
  */
 export function membershipBusinessPermission(operationCode: string, stage: "REQUEST" | "DECIDE" | "EXECUTE"): string | null {
-  if (operationCode === "distribution.policy.publish") return "personal.distribution.policy.manage";
+  if (operationCode === "distribution.policy.publish" || operationCode === "distribution.earning.reverse") return "personal.distribution.policy.manage";
   if (!operationCode.startsWith("membership.")) return null;
   if (operationCode === "membership.benefit.policy.publish") return ADMIN_PERMISSION.membershipPolicyPublish;
   if (operationCode === "membership.entitlement.revoke") return ADMIN_PERMISSION.membershipEntitlementRevoke;
@@ -68,7 +69,7 @@ export function membershipBusinessPermission(operationCode: string, stage: "REQU
 }
 
 export function membershipDecisionRequiresBoss(operationCode: string): boolean {
-  return operationCode === "membership.benefit.policy.publish" || operationCode === "distribution.policy.publish";
+  return operationCode === "membership.benefit.policy.publish" || operationCode === "distribution.policy.publish" || operationCode === "distribution.earning.reverse";
 }
 
 /** 执行侧是否要求游戏对象范围：与会员执行器实际校验保持一致，不机械加严审批前置。 */
@@ -627,8 +628,8 @@ export async function projectApprovalBusinesses(
       const payload = row.finalPayload ?? row.operationPayload;
       const receipt = executions.get(row.id);
       views.set(row.id, { ...base, summaryAvailable: true, detailsAvailable: true, changeSummary: row.summary,
-        policyChange: { schema: payload.schema, expectedPolicyId: textField(payload, "expectedPolicyId"), expectedRevision: textField(payload, "expectedRevision"), expectedPolicyDigest: textField(payload, "expectedPolicyDigest"), changes: payload.changes, reason: textField(payload, "reason") },
-        result: receipt?.status === "SUCCEEDED" && receipt.resultCode === "DISTRIBUTION_POLICY_APPLIED" ? { knowledge: "KNOWN", policyVersionId: receipt.resultDetail } : { knowledge: "UNKNOWN" }, restrictedReasonCodes: [] });
+        policyChange: { schema: payload.schema, initial: payload.schema === 'distribution-policy-initialize.v1', expectedPolicyId: textField(payload, "expectedPolicyId"), expectedRevision: textField(payload, "expectedRevision"), expectedPolicyDigest: textField(payload, "expectedPolicyDigest"), changes: payload.schema === 'distribution-policy-initialize.v1' ? payload.config : payload.changes, reason: textField(payload, "reason") },
+        result: receipt?.status === "SUCCEEDED" && (receipt.resultCode === "DISTRIBUTION_POLICY_APPLIED" || receipt.resultCode === "DISTRIBUTION_POLICY_INITIALIZED") ? { knowledge: "KNOWN", policyVersionId: receipt.resultDetail } : { knowledge: "UNKNOWN" }, restrictedReasonCodes: [] });
       continue;
     }
     if (registration?.businessType === "test") {

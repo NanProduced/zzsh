@@ -463,9 +463,9 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     await handleAdminDistributionRead(request as Parameters<typeof handleAdminDistributionRead>[0], response as Parameters<typeof handleAdminDistributionRead>[1], options.adminSecurityOptions);
     return;
   }
-  if (/^\/distribution\/maintenance\/(accruals|due-settlements)(\/replay)?$/.test(path)) {
-    const allowed = path === "/distribution/maintenance/accruals" ? method === "GET"
-      : method === "POST" && (path === "/distribution/maintenance/accruals/replay" || path === "/distribution/maintenance/due-settlements");
+  if (/^\/distribution\/maintenance\/(accruals|due-settlements)(\/replay)?$|^\/distribution\/maintenance\/(batches|orders)\/[A-Za-z0-9._:-]+$|^\/distribution\/maintenance\/earnings\/[A-Za-z0-9._:-]+\/(revoke|recover)$/.test(path)) {
+    const allowed = path === "/distribution/maintenance/accruals" || /^\/distribution\/maintenance\/(batches|orders)\//.test(path) ? method === "GET"
+      : method === "POST";
     if (!allowed) { sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId); return; }
     if (!options.distributionEarnings) { sendError(response, 503, API_V1_ERROR_CODES.EVIDENCE_UNAVAILABLE, "Distribution maintenance is not assembled", requestId); return; }
     const targetPath = "/api/v1/admin" + path + requestQuery(request);
