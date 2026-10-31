@@ -20,6 +20,7 @@ import { mountMembershipGrowthRoutes } from "./membership-growth-routes";
 import { executeMembershipGrowthOperation } from "./membership-growth-approval";
 import { createDistributionPolicyApprovalExecutor } from "../finance/distribution-policy-approval";
 import { mountAdminDistributionReadRoutes } from "../finance/admin-distribution-routes";
+import { mountAdminDistributionMaintenanceRoutes } from "../finance/admin-distribution-maintenance";
 import { membershipGrowthEnabled, readMembershipGrowthQuoteCandidates } from "./membership-growth-integration";
 import { mountUserDirectory } from "./user-directory-routes";
 import { mountPersonalConfirmations } from "../order/confirmation-routes";
@@ -116,7 +117,8 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   /** Explicit local test-only payment seam; absent in production assembly and never inferred from flags. */
   localControlledPayments?: LocalControlledPaymentOptions;
   /** Explicit trusted composition only; ordinary configuration leaves collection closed. */
-  joinpayCollection?: { routes?: ChannelPaymentCollectionAssembly; notifications?: FormalCollectionSourceOptions;
+  joinpayCollection?: { admission?: import("../order/joinpay-collection-profile").FormalCollectionAdmission;
+    routes?: ChannelPaymentCollectionAssembly; notifications?: FormalCollectionSourceOptions;
     recovery?: Pick<JoinpayCollectionRecoveryOptions, "workerId" | "batchLimit" | "minimumIntervalSeconds"> };
   /** Server-only composition. Read scope remains available when new reservations are disabled. */
   withdrawalBankBinding?: WithdrawalBankBindingOptions;
@@ -1222,6 +1224,7 @@ export async function mountAuthHandlers(
   mountInvitationRoutes(app,{...securityOptions,listingCursorKey:options.listingCursorKey,distributionScope:options.distributionScope,distributionReadScope:options.distributionReadScope});
   mountDistributionPolicyRoutes(app,{...securityOptions,distributionScope:options.distributionScope,distributionReadScope:options.distributionReadScope});
   mountAdminDistributionReadRoutes(app, securityOptions);
+  if (options.distributionEarnings) mountAdminDistributionMaintenanceRoutes(app, { ...securityOptions, distributionEarnings: options.distributionEarnings });
   const payout=options.joinpayWithdrawal;
   const payoutReady=Boolean(payout?.execution&&payout.notifications===true&&payout.execution.scope===payout.routes.scope);
   if(options.joinpayRefund)mountJoinpayRefundNotifications(app,{...options.joinpayRefund,pool:options.pool});

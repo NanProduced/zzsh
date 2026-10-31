@@ -26,7 +26,7 @@ const hash=(s:string)=>createHash('sha256').update(s).digest('hex');
 const unavailable=()=>new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Original earning evidence is inconsistent');
 export type EarningCalculation={knowledge:'NOT_RECORDED'|'UNKNOWN';reason:string}|{
  knowledge:'KNOWN';policyVersion:string;beneficiaryLevelCode:string|null;rateMode?:'UNIFORM';percent:string;basis:'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE';
- baseDisclosure:'INTERNAL_SETTLEMENT_ONLY';rounding:'HALF_UP_CENT';cap:'COMBINED_ROLES_NOT_ABOVE_BASE';scope:'LOCAL_CONTROLLED';orderNumber:string|null;
+ baseDisclosure:'INTERNAL_SETTLEMENT_ONLY';rounding:'HALF_UP_CENT';cap:'COMBINED_ROLES_NOT_ABOVE_BASE';scope:'LOCAL_CONTROLLED'|'NATIVE';orderNumber:string|null;
 };
 function verifiedFrozenCalculation(f:Record<string,any>){
  if(hash(f.canonical_seed)!==f.seed_digest||f.basis_digest!==f.payment_basis_digest)throw unavailable();
@@ -41,7 +41,7 @@ function verifiedFrozenCalculation(f:Record<string,any>){
  const rates=distributionPolicyRates(policy,role.levelCode),level=policy.schema==='distribution-policy.v2'?{code:null}:policy.levels.find(l=>l.code===role.levelCode),percent=referralPercent(role.percent);
  if(role.status!=='ELIGIBLE'||!level||!rates||role.levelCode!==rates.levelCode||!role.ratio||canonicalize(role.ratio)!==canonicalize(percent.ratio)||seed.relationDigest!==role.relationDigest
   ||referralPercent(role.role==='RENTER_REFERRAL'?rates.renterPercent:rates.ownerPercent).percent!==percent.percent)throw unavailable();
- return{seed,basis,level,percent,policyVersion:basis.policyVersion,...(policy.schema==='distribution-policy.v2'?{rateMode:'UNIFORM' as const}:{})};
+ return{seed,basis,level,percent,policy,policyVersion:basis.policyVersion,...(policy.schema==='distribution-policy.v2'?{rateMode:'UNIFORM' as const}:{})};
 }
 /** Only the beneficiary's frozen terms; the private posting/base and other parties never leave this reader. */
 export async function readEarningCalculation(c:PoolClient,actor:UserContext,row:Record<string,any>,installed:boolean,calculationVersion:1|2=1):Promise<EarningCalculation>{
@@ -58,11 +58,11 @@ export async function readEarningCalculation(c:PoolClient,actor:UserContext,row:
  try{
   if(f.beneficiary_user_id!==actor.userId||`native:${f.id}`!==row.id||f.order_id!==row.order_id||f.beneficiary_role!==row.role||exactCents(f.amount_cents)!==exactCents(row.source_amount)
    )throw unavailable();
-  const {policyVersion,level,percent,rateMode}=verifiedFrozenCalculation(f);
+  const {policyVersion,level,percent,rateMode,policy}=verifiedFrozenCalculation(f);
   if(rateMode==='UNIFORM'&&calculationVersion!==2)return{knowledge:'UNKNOWN',reason:'UNIFORM_CALCULATION_REQUIRES_VERSION_2'};
   return{knowledge:'KNOWN',policyVersion,beneficiaryLevelCode:level.code,...(rateMode?{rateMode}:{}),percent:percent.percent,
    basis:'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE',baseDisclosure:'INTERNAL_SETTLEMENT_ONLY',rounding:'HALF_UP_CENT',
-   cap:'COMBINED_ROLES_NOT_ABOVE_BASE',scope:'LOCAL_CONTROLLED',orderNumber:typeof f.order_number==='string'&&f.order_number.length<=80?f.order_number:null};
+   cap:'COMBINED_ROLES_NOT_ABOVE_BASE',scope:policy.scope,orderNumber:typeof f.order_number==='string'&&f.order_number.length<=80?f.order_number:null};
  }catch{return{knowledge:'UNKNOWN',reason:'FROZEN_CALCULATION_NOT_VERIFIED'};}
 }
 export type AdminEarningCalculation={knowledge:'KNOWN'|'UNKNOWN';policyVersion:string|null;levelCode:string|null;percent:string|null;baseCents:string|null;formula:string|null;rateMode?:'UNIFORM';reasonCodes:string[]};

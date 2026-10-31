@@ -35,3 +35,17 @@
 `distribution.policy.publish` 冻结原政策ID、revision、digest、明确改动和理由；审批人与申请人分离，执行前再次核权限、原头CAS及幂等。新申请和执行均需要显式写准入及版本2的结构标记，读scope不授予写入；前向结构尚未安装时保持不可提交，不回退直接改政策。现有v1读取与冻结计算继续兼容。正式结构、实际身份与写准入应分别验收，源码存在不表示经营写入已开放。
 
 用户本人条款仅显式 `projectionVersion=2` 才消费统一政策投影；收益计算扩展使用 `calculationVersion=2`。旧v1不悄悄添加字段，也不以空等级冒充未知后继续使用新规则。
+
+## 正式 NATIVE 装配与维护
+
+正式进程不再按测试库名、端口或未满 100 单名单挂载分销。`loadNativeDistributionRuntime` 只由显式 `DISTRIBUTION_NATIVE_ENABLED=true` 开启，并要求真实的汇聚正式准入（同一 database/runtimeUser）、Authentication 打开、`provider=real`；它只从该准入构造 NATIVE 政策 scope 与收益 store，不创建政策、比例、身份或准入。缺失接管、上下文不符或本地 `createLocalDistributionRuntime` 同时存在时拒绝装配。LOCAL_CONTROLLED 工厂保留给测试，NATIVE 与 LOCAL 的支付依据、政策 scope、账本 `details.scope`、冲回来源 scope 各自标记，不能互相别名。
+
+维护命令走 `GET/POST /api/v1/admin/distribution/maintenance`：GET `/accruals?limit=` 只读检查已过账但缺失/冲突的 Original 经济根；POST `/accruals/replay` 以 1–100 个原订单重放同一 `accrue`；POST `/due-settlements` 以 1–100 上界执行 `settleDue`。三者都要求 `personal.distribution.policy.manage`、有效管理员和游戏对象范围；不接受全表调度器，也不在页面 GET 中写钱。GET 只报告 `MISSING/PARTIAL/CONFLICT/SKIPPED/UNKNOWN`，不代替修复。
+
+场景口径：未付款取消没有冻结 basis 或 posting，不计佣；未开租终止在存在正额佣金时 fail-closed（现有 `earning_count` 校验），不先 VOID 绕过；正常结算退款只核销租客应退责任，不改变 posting 的平台贡献，因此不重复扣佣；结算后退款/更正若需要部分冲回，当前合同只支持“同一原根全额 REVOKE/RECOVER”，部分比例更正尚未定义，不能以任意全额 REVOKE 代替。已入账追偿继续走原 `rental_referral_reversal_source` → `REVOKE`（余额不足转 `RECOVERY_REQUIRED`）→ 原来源 `RECOVER`，冲回声明仍只允许维护 owner 角色执行。
+
+v2 UNIFORM 的数据库前向结构、支付依据推导、NATIVE 账本/冲回 scope 尚未安装：见 `tmp/distribution-business-closure-1/migrations/01_uniform_policy_and_payment_basis.sql`、`02_native_earning_and_reversal_scope.sql`（未编号候选，Root 编号前 NOT_RUN）。在这些结构安装并验收前，正式 v2 政策提交、NATIVE basis 冻结、NATIVE 计提/冲回都应保持不可用，不能以源码存在视为经营开放。
+
+## 旧关系与旧佣金承接
+
+旧 `inviter_id` 迁为 `INVITER`，旧直属上级迁为 `DISTRIBUTION_LEADER`，两者可同一人但类型不合并；`second_leader`/`third_leader` 只作历史对照，不生成新计佣边。旧已结算佣金只随钱包期初承接并标记已覆盖，不再按新政策计提；旧已失效（VOID/失效状态）保持只读，不复活；旧待结算必须逐笔核父单仍完成、原受益人/原比例/原基数与父单证据，再按原责任显式入账，不能用切换日重算到期或新比例追补。旧等级和 5/10/20/30 比例仅作历史显示，不能成为新政策默认值。旧聚合在其最新源副本导入并逐域对账前只是观察，不是当前钱包或渠道到账事实。
