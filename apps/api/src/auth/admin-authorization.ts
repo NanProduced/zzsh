@@ -130,7 +130,7 @@ export function requirePermission(access: EffectiveAdminAccess | null, code: str
  * 抽成纯函数的目的是让目录响应能说明"这个入口为什么不可用"，而不是让前端猜，
  * 也避免 UI 与写规则各写一份判断后漂移。
  */
-export const ADMIN_DIRECTORY_ACTIONS = ["update", "assign", "scope", "freeze", "unfreeze", "force-logout"] as const;
+export const ADMIN_DIRECTORY_ACTIONS = ["update", "assign", "scope", "freeze", "unfreeze", "force-logout", "reset-password", "reset-2fa"] as const;
 export type AdminDirectoryAction = (typeof ADMIN_DIRECTORY_ACTIONS)[number];
 
 export type AdminActionEligibility = {
@@ -144,7 +144,8 @@ export type AdminActionEligibility = {
     | "BOSS_TARGET_NOT_CONFIGURABLE"
     | "SELF_TARGET"
     | "ALREADY_FROZEN"
-    | "NOT_FROZEN";
+    | "NOT_FROZEN"
+    | "TARGET_FROZEN";
   /** 该写要求发起方当场再验证本人密码与动态码。 */
   needsReauthentication: boolean;
   /** 该写是全量替换，必须先完整读到当前集合才能安全提交。 */
@@ -165,7 +166,7 @@ export function evaluateAdminDirectoryActions(input: {
   const build = (
     action: AdminDirectoryAction,
     permission: string | null,
-    options: { reauth?: boolean; fullBaseline?: boolean; bossMayNotTarget?: boolean; selfForbidden?: boolean } = {},
+    options: { reauth?: boolean; fullBaseline?: boolean; bossMayNotTarget?: boolean; selfForbidden?: boolean; bossOnly?: boolean; frozenForbidden?: boolean } = {},
   ): AdminActionEligibility => {
     const eligibility: AdminActionEligibility = {
       action,
@@ -176,10 +177,11 @@ export function evaluateAdminDirectoryActions(input: {
     };
     if (!active) eligibility.reasonCode = "ACTOR_INACTIVE";
     else if (permission && !input.actorPermissions.has(permission)) eligibility.reasonCode = "PERMISSION_REQUIRED";
-    else if (action === "force-logout" && !input.actorIsBoss) eligibility.reasonCode = "BOSS_ACTOR_REQUIRED";
+    else if (options.bossOnly && !input.actorIsBoss) eligibility.reasonCode = "BOSS_ACTOR_REQUIRED";
     else if (options.bossMayNotTarget && input.targetIsBoss && !input.actorIsBoss) eligibility.reasonCode = "BOSS_ACTOR_REQUIRED";
     else if (input.targetIsBoss && options.bossMayNotTarget === false) eligibility.reasonCode = "BOSS_TARGET_NOT_CONFIGURABLE";
     else if (self && options.selfForbidden) eligibility.reasonCode = "SELF_TARGET";
+    else if (options.frozenForbidden && input.targetStatus === "FROZEN") eligibility.reasonCode = "TARGET_FROZEN";
     else if (action === "freeze" && input.targetStatus === "FROZEN") eligibility.reasonCode = "ALREADY_FROZEN";
     else if (action === "unfreeze" && input.targetStatus !== "FROZEN") eligibility.reasonCode = "NOT_FROZEN";
     else eligibility.reasonCode = "OK";
@@ -193,7 +195,9 @@ export function evaluateAdminDirectoryActions(input: {
     build("scope", ADMIN_PERMISSION.permissionGrant, { bossMayNotTarget: false }),
     build("freeze", ADMIN_PERMISSION.accountFreeze, { reauth: true, bossMayNotTarget: true, selfForbidden: true }),
     build("unfreeze", ADMIN_PERMISSION.accountUnfreeze, { reauth: true, bossMayNotTarget: true, selfForbidden: true }),
-    build("force-logout", null, { reauth: true, selfForbidden: true }),
+    build("force-logout", null, { reauth: true, selfForbidden: true, bossOnly: true }),
+    build("reset-password", null, { reauth: true, selfForbidden: true, bossOnly: true, bossMayNotTarget: false, frozenForbidden: true }),
+    build("reset-2fa", null, { reauth: true, selfForbidden: true, bossOnly: true, bossMayNotTarget: false, frozenForbidden: true }),
   ];
 }
 

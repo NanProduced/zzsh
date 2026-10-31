@@ -26,7 +26,7 @@ export type AdminGameScopeMode = "ALL_GAMES" | "SELECTED_GAMES";
 export type AdminGameScope = { mode: AdminGameScopeMode; gameIds: string[] };
 export type AdminRoleSummary = { id?: string; code: string; name: string; status?: string };
 export type AdminActionEligibility = {
-  action: "update" | "assign" | "scope" | "freeze" | "unfreeze" | "force-logout";
+  action: "update" | "assign" | "scope" | "freeze" | "unfreeze" | "force-logout" | "reset-password" | "reset-2fa";
   allowed: boolean;
   reasonCode:
     | "OK"
@@ -36,7 +36,8 @@ export type AdminActionEligibility = {
     | "BOSS_TARGET_NOT_CONFIGURABLE"
     | "SELF_TARGET"
     | "ALREADY_FROZEN"
-    | "NOT_FROZEN";
+    | "NOT_FROZEN"
+    | "TARGET_FROZEN";
   needsReauthentication: boolean;
   /** 该写是全量替换，必须先完整读到当前集合。 */
   needsFullGrantBaseline: boolean;

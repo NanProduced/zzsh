@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { ADMIN_PERMISSION, ADMIN_PERMISSION_CODES } from "../src/auth/admin-authorization";
-import { assertNoNewBossOnlyRoleGrants, isBossOnlyPermission, BOSS_ONLY_PERMISSIONS, OPS_PRESET_PERMISSIONS, ROLE_PRESET_GRANTS, SUPPORT_PRESET_PERMISSIONS } from "../src/auth/admin-role-presets";
+import { assertNoNewBossOnlyPersonalAllows, assertNoNewBossOnlyRoleGrants, isBossOnlyPermission, BOSS_ONLY_PERMISSIONS, OPS_PRESET_PERMISSIONS, ROLE_PRESET_GRANTS, SUPPORT_PRESET_PERMISSIONS } from "../src/auth/admin-role-presets";
 
 const sql = readFileSync(resolve("migrations/business/0114_admin_role_preset_grants.sql"), "utf8");
 const pairs = [...sql.matchAll(/\('(role_preset_\w+)',\s*'([a-z0-9_.]+)'\)/g)].map((m) => [m[1], m[2]] as const);
@@ -55,4 +55,41 @@ test("roles cannot newly gain Boss-only permissions; legacy grants do not block 
   assert.throws(() => assertNoNewBossOnlyRoleGrants([ADMIN_PERMISSION.contentRead], [ADMIN_PERMISSION.contentRead, ADMIN_PERMISSION.approvalTemplateConfigure]), /Boss-only/);
   assert.doesNotThrow(() => assertNoNewBossOnlyRoleGrants([ADMIN_PERMISSION.permissionGrant], [ADMIN_PERMISSION.permissionGrant, ADMIN_PERMISSION.contentRead]));
   assert.doesNotThrow(() => assertNoNewBossOnlyRoleGrants([], [...OPS_PRESET_PERMISSIONS]));
+});
+
+test("personal ALLOW grants cannot add boss-only codes; DENY and pre-existing allows are not blocked", () => {
+  assert.throws(() => assertNoNewBossOnlyPersonalAllows([], [ADMIN_PERMISSION.contentRead, ADMIN_PERMISSION.permissionGrant]), /Boss-only permissions cannot be granted personally/);
+  assert.throws(() => assertNoNewBossOnlyPersonalAllows([], [ADMIN_PERMISSION.accountCreate]), /Boss-only/);
+  assert.doesNotThrow(() => assertNoNewBossOnlyPersonalAllows([ADMIN_PERMISSION.accountFreeze], [ADMIN_PERMISSION.accountFreeze]));
+  assert.doesNotThrow(() => assertNoNewBossOnlyPersonalAllows([], [ADMIN_PERMISSION.contentRead]));
+});
+
+test("admin account/role/grant writes are Boss-only and assign/scope reject self-modification (source wiring)", () => {
+  const root = resolve("src/auth");
+  const directory = readFileSync(resolve(root, "admin-directory.ts"), "utf8");
+  for (const fn of ["createAdministrator", "updateAdministrator", "assignAdministratorAccess", "assignAdministratorGameScope", "createRole", "updateRole"]) {
+    const start = directory.indexOf(`export async function ${fn}(`);
+    assert.ok(start >= 0, fn);
+    const next = directory.indexOf("export async function ", start + 10);
+    const body = directory.slice(start, next < 0 ? undefined : next);
+    assert.match(body, /requireBossActor\(actor\)/, `${fn} must require Boss`);
+    if (fn === "createAdministrator" || fn === "assignAdministratorAccess") assert.match(body, /assertNoNewBossOnlyPersonalAllows\(/, fn);
+    if (fn === "assignAdministratorAccess" || fn === "assignAdministratorGameScope") assert.match(body, /target\.id === context\.userId/, `${fn} self guard`);
+  }
+  const security = readFileSync(resolve(root, "auth-security.ts"), "utf8");
+  const freeze = security.slice(security.indexOf("async function changeAdminFreezeState("), security.indexOf("async function changeUserAccountFreezeState("));
+  assert.match(freeze, /if \(!actorAccess\.isBoss\) throw new SecurityApiError\(403/);
+});
+
+test("credential reset routes are Boss-only, re-verified, self/Boss/frozen guarded, audited and revoke sessions", () => {
+  const src = readFileSync(resolve("src/auth/auth-security.ts"), "utf8");
+  const bff = readFileSync(resolve("src/bff/admin-bff.ts"), "utf8");
+  assert.match(src, /"\/admins\/reset-password"\) return await resetAdminCredential\(.*"password"\)/);
+  assert.match(src, /"\/admins\/reset-2fa"\) return await resetAdminCredential\(.*"two_factor"\)/);
+  const body = src.slice(src.indexOf("async function resetAdminCredential"), src.indexOf("async function forceLogoutAdmin"));
+  for (const needle of ["await requireBoss(context, options)", "verifyAdminReauthentication(", "targetAdminId === context.userId", "before.isBoss", "FROZEN", "lockActor(", "DELETE FROM \"zzsh_auth_admin\".\"session\"", "DELETE FROM \"zzsh_auth_admin\".\"twoFactor\"", "\"password_change_required\" = $1", "admin.password.reset", "admin.two_factor.reset", "before: {", "after: {", "randomBytes(18)"]) {
+    assert.ok(body.includes(needle), "missing " + needle);
+  }
+  assert.ok(body.indexOf("requireBoss") < body.indexOf("verifyAdminReauthentication"));
+  assert.ok(bff.includes('"/security/admins/reset-password"') && bff.includes('"/security/admins/reset-2fa"'));
 });

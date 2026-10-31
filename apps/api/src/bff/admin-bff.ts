@@ -75,6 +75,8 @@ const SECURITY_PATHS = new Map([
   ["/security/freeze", "/api/v1/admin/security/freeze"],
   ["/security/unfreeze", "/api/v1/admin/security/unfreeze"],
   ["/security/admins/force-logout", "/api/v1/admin/security/admins/force-logout"],
+  ["/security/admins/reset-password", "/api/v1/admin/security/admins/reset-password"],
+  ["/security/admins/reset-2fa", "/api/v1/admin/security/admins/reset-2fa"],
   ["/security/admins", "/api/v1/admin/security/admins"],
   ["/security/admins/detail", "/api/v1/admin/security/admins/detail"],
   ["/security/admins/scope", "/api/v1/admin/security/admins/scope"],

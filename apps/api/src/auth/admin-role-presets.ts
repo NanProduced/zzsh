@@ -123,6 +123,15 @@ export function isBossOnlyPermission(code: string): boolean {
  * 只留 Boss 的能力不能通过角色授予（Boss 自己也不行）。只拦新增，
  * 已存在的历史授权不阻断其余编辑，由 Boss 在页面上手动移除。
  */
+/** 只留 Boss 的能力不能作为个人「允许」授予；个人「禁止」不扩权，可以包含。只拦新增。 */
+export function assertNoNewBossOnlyPersonalAllows(before: Iterable<string>, after: Iterable<string>): void {
+  const existing = new Set(before);
+  const added = [...new Set(after)].filter((code) => !existing.has(code) && BOSS_ONLY_SET.has(code));
+  if (added.length > 0) {
+    throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, `Boss-only permissions cannot be granted personally: ${added.sort().join(", ")}`);
+  }
+}
+
 export function assertNoNewBossOnlyRoleGrants(before: Iterable<string>, after: Iterable<string>): void {
   const existing = new Set(before);
   const added = [...new Set(after)].filter((code) => !existing.has(code) && BOSS_ONLY_SET.has(code));

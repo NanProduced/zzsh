@@ -17,7 +17,7 @@ import {
   type EffectiveAdminAccess,
   type ProposedAdminGrants,
 } from "./admin-authorization";
-import { assertNoNewBossOnlyRoleGrants, isBossOnlyPermission } from "./admin-role-presets";
+import { assertNoNewBossOnlyPersonalAllows, assertNoNewBossOnlyRoleGrants, isBossOnlyPermission } from "./admin-role-presets";
 import { recordAudit, setAuditContext, SecurityApiError, withTransaction } from "./security-core";
 import {
   ADMIN_GAME_SCOPE_MODE,
@@ -362,6 +362,7 @@ export async function createAdministrator(
   }
   const name = requiredName(body);
   const grants = grantsFromBody(body);
+  assertNoNewBossOnlyPersonalAllows([], grants.allowPermissions);
   const scopeChange = parseAdminGameScopeInput(body);
   if (scopeChange.mode === "SELECTED_GAMES" && !scopeChange.replaceSelected) {
     throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "An explicit selected game set is required");
@@ -379,6 +380,7 @@ export async function createAdministrator(
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
     const actor = await lockActor(client, context.userId, grants.roleIds);
     requirePermission(actor, ADMIN_PERMISSION.accountCreate);
+    requireBossActor(actor);
     assertGameScopeDelegable(await readAdminGameScope(client, context.userId), actor.isBoss, scopeChange);
     if (scopeChange.gameIds.length > 0) {
       const games = await client.query(`SELECT "id" FROM "zzsh_supply"."game" WHERE "id" = ANY($1::text[])`, [scopeChange.gameIds]);
@@ -476,6 +478,7 @@ export async function updateAdministrator(
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
     const actor = await lockActor(client, context.userId);
     requirePermission(actor, ADMIN_PERMISSION.accountUpdate);
+    requireBossActor(actor);
     const target = await lockTargetByUsername(client, username);
     if (target.isBoss && !actor.isBoss) {
       throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Boss identity cannot be modified by this operation");
@@ -512,13 +515,18 @@ export async function assignAdministratorAccess(
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
     const actor = await lockActor(client, context.userId, grants.roleIds);
     requirePermission(actor, ADMIN_PERMISSION.permissionGrant);
+    requireBossActor(actor);
     const target = await lockTargetByUsername(client, username);
+    if (target.id === context.userId) {
+      throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "An administrator cannot change its own grants");
+    }
     if (target.isBoss) {
       throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Boss identity cannot be modified by this operation");
     }
+    const before = await readGrants(client, target.id);
+    assertNoNewBossOnlyPersonalAllows(before.allowPermissions, grants.allowPermissions);
     const proposed = await computeProposedPermissions(client, grants);
     assertDelegable(actor, union(proposed, grants.denyPermissions));
-    const before = await readGrants(client, target.id);
     await replaceGrants(client, target.id, grants);
     await recordAudit(client, {
       actorType: "admin",
@@ -567,7 +575,11 @@ export async function assignAdministratorGameScope(
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
     const actor = await lockActor(client, context.userId);
     requirePermission(actor, ADMIN_PERMISSION.permissionGrant);
+    requireBossActor(actor);
     const target = await lockTargetByUsername(client, username);
+    if (target.id === context.userId) {
+      throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "An administrator cannot change its own game scope");
+    }
     if (target.isBoss) {
       throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Boss identity cannot be modified by this operation");
     }
@@ -613,6 +625,7 @@ export async function createRole(
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
     const actor = await lockActor(client, context.userId);
     requirePermission(actor, ADMIN_PERMISSION.roleConfigure);
+    requireBossActor(actor);
     assertDelegable(actor, permissionCodes);
     assertNoNewBossOnlyRoleGrants([], permissionCodes);
     const id = `role_${randomUUID().replaceAll("-", "")}`;
@@ -667,6 +680,7 @@ export async function updateRole(
     if (!identified.rows[0]) throw new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Role not found");
     const actor = await lockActor(client, context.userId, [identified.rows[0].id]);
     requirePermission(actor, ADMIN_PERMISSION.roleConfigure);
+    requireBossActor(actor);
     const role = await client.query<{ id: string; code: string; name: string; description: string | null; status: string }>(
       `SELECT "id", "code", "name", "description", "status"
          FROM "zzsh_iam"."admin_role"
@@ -730,6 +744,11 @@ export async function requireDirectoryPermission(
   const access = await loadEffectiveAdminAccess(pool, userId);
   requirePermission(access, permission);
   return access!;
+}
+
+/** 管理员账号、角色与授权写入仅限 Boss；保留原权限码校验作为第一道。 */
+function requireBossActor(actor: { isBoss: boolean }): void {
+  if (!actor.isBoss) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Boss permission required");
 }
 
 function grantsFromBody(body: Record<string, unknown>): ProposedAdminGrants {

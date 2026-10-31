@@ -152,7 +152,7 @@ test("assign is the only action that needs a complete grant baseline, and reauth
     targetId: "admin-self", targetIsBoss: false, targetStatus: "ACTIVE",
   });
   assert.deepEqual(table.filter((entry) => entry.needsFullGrantBaseline).map((entry) => entry.action), ["assign"]);
-  assert.deepEqual(table.filter((entry) => entry.needsReauthentication).map((entry) => entry.action).sort(), ["force-logout", "freeze", "unfreeze"]);
+  assert.deepEqual(table.filter((entry) => entry.needsReauthentication).map((entry) => entry.action).sort(), ["force-logout", "freeze", "reset-2fa", "reset-password", "unfreeze"]);
   assert.equal(table.find((entry) => entry.action === "update")?.needsReauthentication, false, "改名不该在普通表单里收密码与动态码");
 });
 
@@ -190,4 +190,20 @@ test("directory list returns avatar and session facts without leaking identifier
   assert.equal(serialized.includes("ipAddress"), false, "列表不得泄漏登录 IP");
   assert.equal(serialized.includes("userAgent"), false, "列表不得泄漏 userAgent");
   assert.equal(/"id":"sess/i.test(serialized), false, "列表不得泄漏会话标识");
+});
+
+test("reset password / 2FA preflight: Boss only, never self, never another Boss, not frozen", () => {
+  const perms = new Set(["admin.account.read"]);
+  const staff = reasonsFor({ actorId: "s", actorStatus: "ACTIVE", actorIsBoss: false, actorPermissions: perms, targetId: "t", targetIsBoss: false, targetStatus: "ACTIVE" });
+  assert.equal(staff("reset-password")?.reasonCode, "BOSS_ACTOR_REQUIRED");
+  assert.equal(staff("reset-2fa")?.reasonCode, "BOSS_ACTOR_REQUIRED");
+  const boss = reasonsFor({ actorId: "b", actorStatus: "ACTIVE", actorIsBoss: true, actorPermissions: perms, targetId: "t", targetIsBoss: false, targetStatus: "ACTIVE" });
+  assert.equal(boss("reset-password")?.allowed, true);
+  assert.equal(boss("reset-2fa")?.allowed, true);
+  const bossOnBoss = reasonsFor({ actorId: "b", actorStatus: "ACTIVE", actorIsBoss: true, actorPermissions: perms, targetId: "b2", targetIsBoss: true, targetStatus: "ACTIVE" });
+  assert.equal(bossOnBoss("reset-password")?.reasonCode, "BOSS_TARGET_NOT_CONFIGURABLE");
+  const self = reasonsFor({ actorId: "b", actorStatus: "ACTIVE", actorIsBoss: true, actorPermissions: perms, targetId: "b", targetIsBoss: false, targetStatus: "ACTIVE" });
+  assert.equal(self("reset-2fa")?.reasonCode, "SELF_TARGET");
+  const frozen = reasonsFor({ actorId: "b", actorStatus: "ACTIVE", actorIsBoss: true, actorPermissions: perms, targetId: "t", targetIsBoss: false, targetStatus: "FROZEN" });
+  assert.equal(frozen("reset-password")?.reasonCode, "TARGET_FROZEN");
 });
