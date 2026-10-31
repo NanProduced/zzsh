@@ -1,5 +1,8 @@
 import type {NativeWithdrawalScope} from '../finance/native-withdrawal-resource';
 import { readUserObligations } from "./user-obligation-reader";
+import { withAdminLoginTwoFactorPreference } from "./admin-login-two-factor";
+import { createAdminBruteForce, readAdminAltchaHmacKey, withAdminBruteForce, type AdminAuthThrottleStore } from "./admin-brute-force";
+import { ADMIN_CLIENT_IP_FORWARD_HEADER, parseAdminClientIpConfig, resolveAdminClientIp, type AdminClientIpConfig } from "./admin-client-ip";
 import type {NativeWithdrawalOptions} from '../finance/native-withdrawal-store';
 import type {PayoutExecution} from '../finance/joinpay-payout-attempt';
 import {mountJoinpayPayoutNotifications} from '../finance/joinpay-payout-notification-routes';
@@ -97,6 +100,10 @@ type AuthRuntimeConfig = {
   secureCookies: boolean;
   testOperationsEnabled: boolean;
   localSmsMock?: boolean;
+  /** ADMIN_TRUSTED_PROXIES / ADMIN_CLIENT_IP_HEADER：仅管理员 realm 的客户端 IP 解析，缺省不信任任何转发头。 */
+  adminClientIp?: AdminClientIpConfig;
+  /** ADMIN_ALTCHA_HMAC_KEY：生产必填；非生产缺省时启动随机生成。 */
+  adminAltchaHmacKey?: string;
 };
 
 export type AuthRuntimeCapabilities = {
@@ -165,6 +172,8 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
    * limiter runs before any legacy credential upgrade.
    */
   userRateLimit?: Parameters<typeof import("better-auth").betterAuth>[0]["rateLimit"];
+  /** 测试接缝：管理员防爆破计数存储；缺省使用 Postgres（zzsh_iam.admin_auth_*）。 */
+  adminAuthThrottleStore?: AdminAuthThrottleStore;
 };
 
 type NodeRequest = {
@@ -792,6 +801,8 @@ export function loadAuthRuntimeConfig(
     // Independent of PROVIDER_MODE: selecting OSS media storage never turns SMS,
     // identity or payment providers into real mode.
     mediaStorage: resolveMediaStorage(env, workingDirectory),
+    adminClientIp: parseAdminClientIpConfig(env),
+    ...(readAdminAltchaHmacKey(env) ? { adminAltchaHmacKey: readAdminAltchaHmacKey(env) } : {}),
   };
 }
 
@@ -986,6 +997,8 @@ export async function mountAuthHandlers(
     return response as Response;
   };
 
+  // 管理员防爆破：Postgres 共享计数 + 渐进锁定 + ALTCHA，与 NODE_ENV 无关始终启用；仅作用于管理员 realm。
+  const adminBruteForce = createAdminBruteForce({ pool: options.pool, hmacKey: options.adminAltchaHmacKey, clientIp: options.adminClientIp, store: options.adminAuthThrottleStore });
   const adminAuth = betterAuth({
     ...common,
     appName: "洲洲商行管理认证",
@@ -997,8 +1010,19 @@ export async function mountAuthHandlers(
     // SDK create-context 默认 minPasswordLength=8，只覆盖用户 realm 会让管理员改密
     // 比建档（auth-security passwordField 的 12 位）与恢复更宽松，这里在共同入口补齐。
     emailAndPassword: { enabled: true, disableSignUp: true, minPasswordLength: 12, maxPasswordLength: 128 },
-    plugins: [username({ immutableUsername: true }), bearer(), twoFactor(), adminSelfSecurityPlugin],
-    advanced: { ...common.advanced, cookiePrefix: "zzsh_admin" },
+    plugins: [username({ immutableUsername: true }), bearer(), withAdminLoginTwoFactorPreference(twoFactor(), options.pool, (handler) => createAuthMiddleware(handler)), adminSelfSecurityPlugin],
+    advanced: { ...common.advanced, cookiePrefix: "zzsh_admin", ipAddress: { ipAddressHeaders: [ADMIN_CLIENT_IP_FORWARD_HEADER] } },
+    // 库内限流作为第二道粗粒度闸门（内存、按实例）；主防线是 withAdminBruteForce 的共享存储。
+    rateLimit: {
+      enabled: true,
+      window: 60,
+      max: 300,
+      customRules: {
+        "/sign-in/*": { window: 60, max: 30 },
+        "/two-factor/*": { window: 60, max: 30 },
+        "/change-password": { window: 60, max: 10 },
+      },
+    },
      hooks: {
        before: createAuthMiddleware(async (ctx) => {
          if (ctx.path === "/sign-in/email" || ctx.path === "/sign-in/username") {
@@ -1043,7 +1067,7 @@ export async function mountAuthHandlers(
 
   const userWebHandler = (request: Request) => safeWebAuthHandler(userAuth.handler, request);
   const adminSelfSecurityInterceptor = buildAdminSelfSecurityInterceptor(adminAuth as unknown as AdminSelfSecurityApi);
-  const adminWebHandler = (request: Request) => safeWebAuthHandler(adminAuth.handler, request, adminSelfSecurityInterceptor);
+  const adminWebHandler = withAdminBruteForce((request: Request) => safeWebAuthHandler(adminAuth.handler, request, adminSelfSecurityInterceptor), adminBruteForce);
   const userNodeHandler = toNodeHandler(userWebHandler) as unknown as AuthHandler;
   const adminNodeHandler = toNodeHandler(adminWebHandler) as unknown as AuthHandler;
   const securityOptions: AuthSecurityOptions = {
@@ -1062,6 +1086,7 @@ export async function mountAuthHandlers(
     verifyPassword: (password, hash) => verifyPassword({ password, hash }),
     // 命令指纹子密钥由现有 admin realm secret 派生，不新增环境变量、不改动 secret。
     adminSecurityCommandKey: deriveAdminSecurityCommandKey(options.adminSecret),
+    adminBruteForce,
     // ponytail: process-local failure buckets are the minimum BFF guard; use a shared limiter before multi-instance rollout.
     rateLimitState: options.rateLimitState ?? new Map(),
     securityVerificationBudget: options.securityVerificationBudget ?? { inFlight: 0 },
@@ -1091,6 +1116,7 @@ export async function mountAuthHandlers(
       imAppId: options.yunxin!.appId,
     } : {}),
   };
+  mountAdminSecurityHeaders(app, options.apiOrigin);
   mountRealm(
     app,
     "user",
@@ -1101,7 +1127,13 @@ export async function mountAuthHandlers(
     options.pool,
     async (request, response, path) => USER_SECURITY_PATHS.has(path) && await handleUserIdentityRoute(request, response, securityOptions),
   );
-  mountRealm(app, "admin", adminAuth as unknown as AuthRealm, adminNodeHandler, [options.apiOrigin, options.adminOrigin], ADMIN_ALLOWED_PATHS, options.pool);
+  mountRealm(app, "admin", adminAuth as unknown as AuthRealm, adminNodeHandler, [options.apiOrigin, options.adminOrigin], ADMIN_ALLOWED_PATHS, options.pool, async (request) => {
+    // 直连入口：丢弃客户端自带的内部 IP 头，只写入经信任链解析的地址。
+    const ip = resolveAdminClientIp(request as unknown as Parameters<typeof resolveAdminClientIp>[0], adminBruteForce.clientIp);
+    if (ip) request.headers[ADMIN_CLIENT_IP_FORWARD_HEADER] = ip;
+    else delete request.headers[ADMIN_CLIENT_IP_FORWARD_HEADER];
+    return false;
+  });
   mountAuthSecurityHandlers(app, securityOptions);
   mountAdminSelfSettingsHandlers(app, securityOptions);
   if (options.orderImEvents) {
@@ -1241,6 +1273,29 @@ export async function mountAuthHandlers(
   if (options.supportDispatch) app.get(OrderDispatchLifecycle).start({ ...options.supportDispatch, pool: options.pool,
     onResult: (result) => { if(options.orderTeams)app.get(OrderTeamLifecycle).wake(); options.supportDispatch!.onResult?.(result); } });
   return securityOptions;
+}
+
+export const ADMIN_SECURITY_HEADER_PATHS = ["/api/bff/admin", "/api/auth/admin", "/api/v1/admin"] as const;
+
+/** 管理员 API/BFF 安全响应头：禁止被嵌入、禁止 MIME 嗅探、不外泄 Referer；https 时下发 HSTS。 */
+export function adminSecurityHeaders(apiOrigin: string, encrypted: boolean): Record<string, string> {
+  return {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+    "Referrer-Policy": "no-referrer",
+    ...(encrypted || apiOrigin.startsWith("https://") ? { "Strict-Transport-Security": "max-age=31536000; includeSubDomains" } : {}),
+  };
+}
+
+function mountAdminSecurityHeaders(app: INestApplication, apiOrigin: string): void {
+  const expressApp = app.getHttpAdapter().getInstance() as {
+    use: (paths: readonly string[], middleware: (request: { socket?: { encrypted?: boolean } }, response: NodeResponse, next: () => void) => void) => void;
+  };
+  expressApp.use([...ADMIN_SECURITY_HEADER_PATHS], (request, response, next) => {
+    for (const [name, value] of Object.entries(adminSecurityHeaders(apiOrigin, request.socket?.encrypted === true))) response.setHeader(name, value);
+    next();
+  });
 }
 
 function mountRealm(

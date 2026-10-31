@@ -14,6 +14,7 @@ import {
   type SessionSnapshot,
 } from "../api";
 import { RecoveryView } from "../views/recovery-view";
+import { StepUpCaptcha } from "../components/altcha-field";
 
 function Badge({ children, tone = "neutral" }: { children: ReactNode; tone?: "neutral" | "success" | "warning" | "danger" }) {
   return (
@@ -89,6 +90,83 @@ function PasswordChangePanel({ onRefresh, onDirtyChange }: { onRefresh: () => Pr
           <Button type="submit" size="sm" loading={loading} disabled={!currentPassword || newPassword.length < 12 || mismatch}>更新登录密码</Button>
         </form>
       ) : null}
+    </section>
+  );
+}
+
+/**
+ * 「登录时验证 2FA」自助开关。开或关都需当场输入密码与动态码；只影响登录，不影响敏感操作的再验证。
+ * 快照未返回该字段（服务端未接入/迁移未执行）时只显示状态，不提供开关。
+ */
+export function LoginTwoFactorPanel({
+  snapshot,
+  onRefresh,
+}: {
+  snapshot: Extract<SessionSnapshot, { authenticated: true }>;
+  onRefresh: () => Promise<SessionSnapshot>;
+}) {
+  const required = snapshot.security.loginTwoFactorRequired;
+  const [open, setOpen] = useState(false);
+  const [password, setPassword] = useState("");
+  const [totpCode, setTotpCode] = useState("");
+  const [error, setError] = useState<string>();
+  const [success, setSuccess] = useState<string>();
+  const [loading, setLoading] = useState(false);
+  const available = typeof required === "boolean" && snapshot.user.twoFactorEnabled && snapshot.security.status === "ACTIVE";
+  const next = !required;
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!available || password.length < 12 || !/^\d{6}$/.test(totpCode)) return;
+    setError(undefined);
+    setSuccess(undefined);
+    setLoading(true);
+    try {
+      await adminRequest("/security/login-two-factor", { enabled: next, password, totpCode });
+      setPassword("");
+      setTotpCode("");
+      setOpen(false);
+      setSuccess(next ? "已开启：登录时需要验证 2FA。" : "已关闭：登录时只需密码。敏感操作仍需验证 2FA。");
+      await onRefresh();
+    } catch (failure) {
+      setError(friendlyError(failure));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <section className="section-panel" aria-label="登录时验证 2FA">
+      <div className="panel-heading">
+        <div>
+          <h3>登录时验证 2FA</h3>
+          <p>关闭后登录只需密码；重置密码、授权变更等敏感操作仍需当场验证动态码。开关变更会写入审计。</p>
+        </div>
+        {available ? (
+          <Button type="button" size="sm" variant="secondary" onClick={() => setOpen((value) => !value)}>
+            {open ? "收起" : required ? "关闭登录验证" : "开启登录验证"}
+          </Button>
+        ) : null}
+      </div>
+      <div className="facts-grid">
+        <div><span>当前设置</span><strong>{typeof required !== "boolean" ? "服务端未接入" : required ? "登录时验证" : "登录时不验证"}</strong></div>
+      </div>
+      {!available && typeof required === "boolean" ? <p className="text-xs text-muted-foreground">需先完成 2FA 绑定并激活账号后才能调整。</p> : null}
+      {open && available ? (
+        <form onSubmit={submit} className="max-w-md space-y-3" noValidate>
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-foreground block">当前密码</label>
+            <PasswordInput autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} className="h-9 px-3 rounded text-xs border border-border bg-surface-raised" required />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-foreground block">动态码（6 位）</label>
+            <input inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={totpCode} onChange={(event) => setTotpCode(event.target.value.replace(/\D/g, ""))} className="h-9 px-3 rounded text-xs border border-border bg-surface-raised w-full" required />
+          </div>
+          <StepUpCaptcha />
+          <Button type="submit" size="sm" loading={loading} disabled={password.length < 12 || totpCode.length !== 6}>{next ? "确认开启" : "确认关闭"}</Button>
+        </form>
+      ) : null}
+      <StatusMessage error={error} success={success} />
     </section>
   );
 }
@@ -276,6 +354,7 @@ function FreezePanel({ snapshot }: { snapshot: Extract<SessionSnapshot, { authen
           </div>
           <Textarea value={reason} onChange={(event) => setReason(event.target.value)} rows={2} className="min-h-16 text-xs" placeholder="填写本次安全操作的具体原因" required />
           <StatusMessage error={error} success={message} />
+          <StepUpCaptcha />
           <Button type="submit" variant={action === "freeze" ? "danger" : "secondary"} size="sm" loading={loading} disabled={!targetAdminId || !password || totpCode.length !== 6 || !reason.trim()}>{action === "freeze" ? "确认冻结账号" : "确认解除冻结"}</Button>
         </form>
       ) : null}
@@ -324,6 +403,7 @@ export function AccountSecurityPage({
           <div><span>会话过期时间</span><strong>{formatDate(snapshot.session.expiresAt)}</strong></div>
         </div>
       </section>
+      <LoginTwoFactorPanel snapshot={snapshot} onRefresh={onRefresh} />
       <PinPanel snapshot={snapshot} onRefresh={onRefresh} />
       <section className="section-panel">
         <div className="panel-heading">

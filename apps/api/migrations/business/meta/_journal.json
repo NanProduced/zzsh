@@ -806,6 +806,20 @@
       "when": 1793184003000,
       "tag": "0114_admin_role_preset_grants",
       "breakpoints": true
+    },
+    {
+      "idx": 115,
+      "version": "7",
+      "when": 1793184004000,
+      "tag": "0115_admin_login_two_factor_preference",
+      "breakpoints": true
+    },
+    {
+      "idx": 116,
+      "version": "7",
+      "when": 1793184005000,
+      "tag": "0116_admin_auth_throttle",
+      "breakpoints": true
     }
   ]
 }

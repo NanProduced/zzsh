@@ -417,7 +417,8 @@ function App() {
     setRecoveryNotice(undefined);
   }, [beginSessionMutation, refreshSession]);
 
-  const login = async (idValue: string, pwValue: string) => {
+  const [loginCaptcha, setLoginCaptcha] = useState({ required: false, round: 0 });
+  const login = async (idValue: string, pwValue: string, altcha?: string) => {
     setError(undefined);
     setRecoveryNotice(undefined);
     setTotpURI(undefined);
@@ -428,8 +429,9 @@ function App() {
       const isEmail = idValue.includes("@");
       const result = await adminRequest<AuthResponse>(
         isEmail ? "/auth/sign-in" : "/auth/sign-in/username",
-        isEmail ? { email: idValue, password: pwValue } : { username: idValue, password: pwValue }
+        { ...(isEmail ? { email: idValue, password: pwValue } : { username: idValue, password: pwValue }), ...(altcha ? { altcha } : {}) }
       );
+      setLoginCaptcha({ required: false, round: 0 });
       setPassword(pwValue);
       if (result.twoFactorRedirect) {
         setView("challenge");
@@ -438,6 +440,8 @@ function App() {
         await refreshSession(true);
       }
     } catch (failure) {
+      const captcha = failure instanceof AdminApiError && failure.reason === "CAPTCHA_REQUIRED";
+      setLoginCaptcha((current) => ({ required: current.required || captcha, round: current.round + 1 }));
       setError(friendlyError(failure));
     } finally {
       endMutation();
@@ -589,6 +593,8 @@ function App() {
           error={error}
           onIdentifier={setIdentifier}
           onSubmit={login}
+          captchaRequired={loginCaptcha.required}
+          captchaRound={loginCaptcha.round}
           onRecovery={() => {
             setError(undefined);
             setView("recovery");
@@ -709,6 +715,8 @@ function App() {
           error={error}
           onIdentifier={setIdentifier}
           onSubmit={login}
+          captchaRequired={loginCaptcha.required}
+          captchaRound={loginCaptcha.round}
           onRecovery={() => setView("recovery")}
         />
       </AuthLayout>

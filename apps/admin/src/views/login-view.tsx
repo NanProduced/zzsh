@@ -4,13 +4,16 @@ import { Button, PasswordInput, StatusMessage } from "../components/ui-elements"
 import { Checkbox } from "@/components/ui/checkbox";
 import { useAuthTypingImpulse } from "../components/devl/auth-shell";
 import { bumpParticleTypingImpulse } from "../components/devl/particle-field";
+import { AltchaField } from "../components/altcha-field";
 
 type LoginViewProps = {
   identifier: string;
   loading: boolean;
   error?: string;
   onIdentifier: (value: string) => void;
-  onSubmit: (identifier: string, password: string) => void;
+  onSubmit: (identifier: string, password: string, altcha?: string) => void;
+  captchaRequired?: boolean;
+  captchaRound?: number;
   onRecovery: () => void;
 };
 
@@ -21,15 +24,20 @@ export function LoginView({
   onIdentifier,
   onSubmit,
   onRecovery,
+  captchaRequired = false,
+  captchaRound = 0,
 }: LoginViewProps) {
+  const [altcha, setAltcha] = useState<string | undefined>(undefined);
   const [password, setPassword] = useState("");
   const [remember, setRemember] = useState(false);
   const typingImpulse = useAuthTypingImpulse();
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (identifier.trim() && password) {
-      onSubmit(identifier.trim(), password);
+    if (identifier.trim() && password && (!captchaRequired || altcha)) {
+      const payload = captchaRequired ? altcha : undefined;
+      setAltcha(undefined);
+      onSubmit(identifier.trim(), password, payload);
     }
   };
 
@@ -104,12 +112,14 @@ export function LoginView({
           </span>
         </div>
 
+        {captchaRequired ? <AltchaField key={captchaRound} onPayload={setAltcha} hint="多次登录失败，请先完成人机验证。" /> : null}
+
         <StatusMessage error={error} />
 
         <Button
           type="submit"
           loading={loading}
-          disabled={!identifier.trim() || !password}
+          disabled={!identifier.trim() || !password || (captchaRequired && !altcha)}
           className="mt-2 h-10 w-full rounded-lg bg-primary font-medium text-primary-foreground shadow-xs transition hover:bg-primary/90 text-sm flex items-center justify-center gap-2"
         >
           <span>登录并验证身份</span>

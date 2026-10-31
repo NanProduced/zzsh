@@ -1,3 +1,4 @@
+import { StepUpCaptcha } from "../components/altcha-field";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { Button as UiButton } from "@/components/ui/button";
@@ -455,6 +456,7 @@ function SecurityActionDialog({
               </label>
             </>
           ) : null}
+          <StepUpCaptcha />
           {copy.needsReason ? (
           <label className="block">
             <FieldLabel>原因（写入审计）</FieldLabel>

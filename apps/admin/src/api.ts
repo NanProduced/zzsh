@@ -16,7 +16,7 @@ export type SessionSnapshot =
       authenticated: true;
       adminUserId: string;
       user: { name?: string; email?: string; username?: string; displayUsername?: string; twoFactorEnabled: boolean };
-      security: { status: "PENDING_ENROLLMENT" | "ACTIVE" | "FROZEN"; isBoss: boolean; passwordChangeRequired: boolean };
+      security: { status: "PENDING_ENROLLMENT" | "ACTIVE" | "FROZEN"; isBoss: boolean; passwordChangeRequired: boolean; loginTwoFactorRequired?: boolean };
       session: { id: string; locked: boolean; pinConfigured: boolean; createdAt: string | null; expiresAt: string | null };
       permissions: string[];
     };
@@ -820,9 +820,44 @@ export type WorkspaceLayoutPayload = {
   defaults: WorkspaceWidgetPlacement[];
 };
 
+/** 敏感操作复核（password + totpCode）的人机验证状态；由 adminRequest 自动附带与更新。 */
+type StepUpCaptchaSnapshot = { required: boolean; round: number };
+let stepUpSnapshot: StepUpCaptchaSnapshot = { required: false, round: 0 };
+let stepUpPayload: string | undefined;
+const stepUpListeners = new Set<() => void>();
+const emitStepUp = () => { for (const listener of stepUpListeners) listener(); };
+
+export const stepUpCaptcha = {
+  subscribe(listener: () => void) { stepUpListeners.add(listener); return () => { stepUpListeners.delete(listener); }; },
+  snapshot: () => stepUpSnapshot,
+  setPayload(value: string | undefined) { stepUpPayload = value; },
+  /** 取出并消费当前 payload；需要验证时换一轮新挑战。 */
+  take(): string | undefined {
+    const value = stepUpPayload;
+    stepUpPayload = undefined;
+    if (stepUpSnapshot.required) { stepUpSnapshot = { required: true, round: stepUpSnapshot.round + 1 }; emitStepUp(); }
+    return value;
+  },
+  setRequired(required: boolean) {
+    if (stepUpSnapshot.required === required) return;
+    stepUpPayload = undefined;
+    stepUpSnapshot = { required, round: stepUpSnapshot.round + 1 };
+    emitStepUp();
+  },
+};
+
+export function isStepUpBody(body: Record<string, unknown> | undefined): boolean {
+  return !!body && typeof body.totpCode === "string" && typeof body.password === "string";
+}
+
 export async function adminRequest<T>(path: string, body?: Record<string, unknown>, method?: "GET" | "POST" | "PUT" | "DELETE", extraHeaders: Record<string, string> = {}, signal?: AbortSignal): Promise<T> {
   let response: Response;
   const verb = method ?? (body === undefined ? "GET" : "POST");
+  const stepUp = verb !== "GET" && isStepUpBody(body);
+  if (stepUp) {
+    const altcha = stepUpCaptcha.take();
+    if (altcha) body = { ...body, altcha };
+  }
   const idempotencyKey = verb === "GET" ? undefined : `idem_${(globalThis.crypto?.randomUUID?.() ?? `${Date.now()}_${Math.random().toString(16).slice(2)}`).replaceAll("-", "")}`;
   try {
     response = await fetch(`${API_ROOT}${path}`, {
@@ -855,14 +890,17 @@ export async function adminRequest<T>(path: string, body?: Record<string, unknow
     // Security commands carry one controlled reason inside error; only short stable enums pass.
     const rawReason=(payload as {error?:{reason?:unknown}}|null)?.error?.reason;
     const reason=typeof rawReason==="string"&&rawReason.length>0&&rawReason.length<=64?rawReason:undefined;
+    if (stepUp && reason === "CAPTCHA_REQUIRED") stepUpCaptcha.setRequired(true);
     throw new AdminApiError(response.status, error?.code ?? "INTERNAL_ERROR", error?.requestId ?? response.headers.get("x-request-id") ?? undefined, path, details, reasons, reason);
   }
+  if (stepUp) stepUpCaptcha.setRequired(false);
   return payload as T;
 }
 
 export function friendlyError(error: unknown): string {
   if (!(error instanceof AdminApiError)) return "操作未完成，请重试；若仍失败，请联系维护人员。";
   if (error.status === 0 || error.code === "NETWORK_ERROR") return "网络连接失败，请检查连接后重试。";
+  if (error.reason === "CAPTCHA_REQUIRED") return error.status === 403 ? "请先完成人机验证后重试。" : "账号或密码错误，请完成人机验证后重试。";
   const auth = error.path === undefined || error.path.startsWith("/auth/");
   const reference = error.requestId ? ` 请求编号：${error.requestId}` : "";
   if (!auth) {
