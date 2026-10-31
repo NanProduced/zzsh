@@ -10,6 +10,8 @@ import {
   type ContentMediaOptionsPage,
 } from "../api";
 import { Button, StatusMessage } from "../components/ui-elements";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Textarea } from "@/components/ui/textarea";
 
 const inputClass = "w-full h-9 px-3 rounded border border-border bg-surface-raised text-xs";
 const textAreaClass = "w-full min-h-24 px-3 py-2 rounded border border-border bg-surface-raised text-xs leading-relaxed";
@@ -323,7 +325,7 @@ function CarouselEditor({
         <div className="space-y-3">
           <label className="space-y-1 text-xs block"><span className="text-muted-foreground">标题（≤120 字）</span><input value={model.title} onChange={(event) => setModel((current) => ({ ...current, title: event.target.value }))} className={inputClass} disabled={readOnly} /></label>
           <label className="space-y-1 text-xs block"><span className="text-muted-foreground">图片说明 / 无障碍文本（≤300 字）</span><input value={model.imageAlt} onChange={(event) => setModel((current) => ({ ...current, imageAlt: event.target.value }))} className={inputClass} disabled={readOnly} /></label>
-          <label className="space-y-1 text-xs block"><span className="text-muted-foreground">补充说明（≤300 字）</span><textarea value={model.description} onChange={(event) => setModel((current) => ({ ...current, description: event.target.value }))} className={textAreaClass} disabled={readOnly} /></label>
+          <label className="space-y-1 text-xs block"><span className="text-muted-foreground">补充说明（≤300 字）</span><Textarea value={model.description} onChange={(event) => setModel((current) => ({ ...current, description: event.target.value }))} className="min-h-20 text-xs" disabled={readOnly} /></label>
           <label className="space-y-1 text-xs block"><span className="text-muted-foreground">站内跳转（可空，例如 /accounts?tab=new）</span><input value={model.linkUrl} onChange={(event) => setModel((current) => ({ ...current, linkUrl: event.target.value }))} className={inputClass} disabled={readOnly} /></label>
           <div className="grid grid-cols-2 gap-3">
             <label className="space-y-1 text-xs block"><span className="text-muted-foreground">开始（本地时间）</span><input type="datetime-local" value={model.startsAt} onChange={(event) => setModel((current) => ({ ...current, startsAt: event.target.value }))} className={inputClass} disabled={readOnly} /></label>
@@ -331,8 +333,8 @@ function CarouselEditor({
           </div>
           <div className="flex flex-wrap items-center gap-4">
             <label className="space-y-1 text-xs"><span className="text-muted-foreground">排序</span><input value={model.sortOrder} onChange={(event) => setModel((current) => ({ ...current, sortOrder: Number(event.target.value) || 0 }))} className={inputClass} inputMode="numeric" disabled={readOnly} /></label>
-            <label className="flex items-center gap-2 text-xs mt-4">
-              <input type="checkbox" checked={model.enabled} onChange={(event) => setModel((current) => ({ ...current, enabled: event.target.checked }))} disabled={readOnly || !canPublish} />
+            <label className="flex items-center gap-2 text-xs mt-4 cursor-pointer select-none">
+              <Checkbox checked={model.enabled} onCheckedChange={(checked) => setModel((current) => ({ ...current, enabled: checked === true }))} disabled={readOnly || !canPublish} />
               <span>启用展示（素材必须已审核公开；启用/停用需要发布权限）</span>
             </label>
           </div>

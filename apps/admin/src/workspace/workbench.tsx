@@ -11,6 +11,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 
 import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from "@/components/ui/dialog";
 import { useSidebar } from "@/components/ui/sidebar";
@@ -26,6 +27,7 @@ import {
   type WorkspaceWidgetPlacement,
 } from "../api";
 import { StatusMessage } from "../components/ui-elements";
+import { BossGreeting } from "./boss-touches";
 
 import { timeRangeLabel } from "./beijing-time";
 import { listWasTruncated, previewItems } from "./truncated-list";
@@ -693,17 +695,38 @@ export function WorkbenchPage({
   return (
     <div className="workbench-page space-y-5">
       <div className="workbench-heading flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="text-2xl font-semibold">工作台</h2>
-          <p className="text-muted-foreground text-sm mt-2">处理审批、管理团队与账号安全。</p>
-        </div>
+        {snapshot.security.isBoss ? (
+          <BossGreeting
+            name={snapshot.user.name || snapshot.user.displayUsername || snapshot.user.username || "Boss"}
+            canApprove={hasPermission(snapshot, "approval.request.approve")}
+            refreshNonce={refreshNonce}
+          />
+        ) : (
+          <div>
+            <h2 className="text-2xl font-semibold">工作台</h2>
+            <p className="text-muted-foreground text-sm mt-2">处理审批、管理团队与账号安全。</p>
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-2">
           {hasTimeBound ? (
-            <select value={pageTime} onChange={(event) => setPageTime(event.target.value as WorkspaceTimeRange)} className="h-8 rounded-md border px-2 text-xs" aria-label="工作台时间范围">
-              <option value="today">今天（北京时间）</option>
-              <option value="7d">近 7 天</option>
-              <option value="30d">近 30 天</option>
-            </select>
+            <Select
+              value={pageTime}
+              onValueChange={(val) => val && setPageTime(val as WorkspaceTimeRange)}
+              items={[
+                { value: "today", label: "今天（北京时间）" },
+                { value: "7d", label: "近 7 天" },
+                { value: "30d", label: "近 30 天" },
+              ]}
+            >
+              <SelectTrigger aria-label="工作台时间范围" className="h-8 text-xs min-w-36">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="today">今天（北京时间）</SelectItem>
+                <SelectItem value="7d">近 7 天</SelectItem>
+                <SelectItem value="30d">近 30 天</SelectItem>
+              </SelectContent>
+            </Select>
           ) : null}
           {editing ? (
             <>

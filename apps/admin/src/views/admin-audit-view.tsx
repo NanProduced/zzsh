@@ -9,6 +9,7 @@ import {
 import { Icons } from "../components/icons";
 import { Button, StatusMessage } from "../components/ui-elements";
 import { EmptyState, EndOfFeed } from "../components/empty-state";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Skeleton } from "../components/ui/skeleton";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "../components/ui/alert";
 import {
@@ -132,6 +133,15 @@ function queryKeyOf(query: AuditFilterQuery | Record<string, string> | undefined
     (query as Record<string, string> | undefined)?.[key]?.trim() ?? "",
   ]));
 }
+
+const OBJECT_TYPE_ITEMS = [
+  { value: "ALL", label: "全部" },
+  { value: "admin_user", label: "管理员账号" },
+  { value: "admin_security", label: "账号安全状态" },
+  { value: "admin_role", label: "管理员角色" },
+  { value: "user_account", label: "用户账号" },
+];
+const actionItems = [{ value: "ALL", label: "全部" }, ...actions.map((item) => ({ value: item, label: actionLabel(item) }))];
 
 export function AdminAuditView({
   snapshot,
@@ -449,8 +459,20 @@ export function AdminAuditView({
           <Icons.Shield size={20} className="text-muted-foreground" />
         </div>
         <form onSubmit={submit} className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 mt-4" noValidate>
-          <label className="space-y-1 text-xs"><span className="text-muted-foreground">操作类型</span><select value={action} onChange={(event) => setAction(event.target.value)} className="w-full h-9 px-2 rounded border border-border bg-surface-raised text-xs"><option value="">全部</option>{actions.map((item) => <option key={item} value={item}>{actionLabel(item)}</option>)}</select></label>
-          <label className="space-y-1 text-xs"><span className="text-muted-foreground">对象类型</span><select value={objectType} onChange={(event) => setObjectType(event.target.value)} className="w-full h-9 px-2 rounded border border-border bg-surface-raised text-xs"><option value="">全部</option><option value="admin_user">管理员账号</option><option value="admin_security">账号安全状态</option><option value="admin_role">管理员角色</option><option value="user_account">用户账号</option></select></label>
+          <label className="space-y-1 text-xs">
+            <span className="text-muted-foreground block">操作类型</span>
+            <Select name="action" value={action || "ALL"} onValueChange={(next) => setAction(next && next !== "ALL" ? String(next) : "")} items={actionItems}>
+                <SelectTrigger aria-label="操作类型" className="h-9 w-full text-xs"><SelectValue /></SelectTrigger>
+                <SelectContent>{actionItems.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}</SelectContent>
+              </Select>
+          </label>
+          <label className="space-y-1 text-xs">
+            <span className="text-muted-foreground block">对象类型</span>
+            <Select name="objectType" value={objectType || "ALL"} onValueChange={(next) => setObjectType(next && next !== "ALL" ? String(next) : "")} items={OBJECT_TYPE_ITEMS}>
+                <SelectTrigger aria-label="对象类型" className="h-9 w-full text-xs"><SelectValue /></SelectTrigger>
+                <SelectContent>{OBJECT_TYPE_ITEMS.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}</SelectContent>
+              </Select>
+          </label>
           <label className="space-y-1 text-xs"><span className="text-muted-foreground">操作者账号</span><input value={actorUsername} onChange={(event) => setActorUsername(event.target.value)} className="w-full h-9 px-3 rounded border border-border bg-surface-raised text-xs" placeholder="如 ZZ00001" /></label>
           <label className="space-y-1 text-xs"><span className="text-muted-foreground">请求编号（可选）</span><input value={requestId} onChange={(event) => setRequestId(event.target.value)} className="w-full h-9 px-3 rounded border border-border bg-surface-raised text-xs" /></label>
           <Button type="submit" size="sm" loading={loading}>查询审计</Button>

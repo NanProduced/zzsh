@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { adminRequest, AdminApiError } from "../api";
 import { Button } from "../components/ui-elements";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { formatFundingCents } from "./supply-review/model";
 import { channelEvidenceErrorDisplay, channelEvidenceStatusDisplay, evidenceCents, type ChannelEvidenceDisplay } from "./admin-channel-evidence-model";
 
@@ -52,7 +53,21 @@ export function ChannelEvidenceLookup({ canRead, canSearch }: { canRead: boolean
     <div className="flex flex-wrap gap-2"><input aria-label="证据商户标识" placeholder="商户标识" value={merchant} onChange={e => { reset(); setMerchant(e.target.value.trim()); }}/>
       <input aria-label="原申请或商户原号" placeholder="原申请/商户原号" value={ref} onChange={e => { reset(); setRef(e.target.value.trim()); }}/>
       <Button size="sm" type="button" variant="secondary" onClick={withdrawal}>读取提现证据</Button>
-      {canSearch ? <><select aria-label="业务来源" value={family} onChange={e => { reset(); setFamily(e.target.value); }}>{["PAYOUT", "REFUND", "ALIPAY_NATIVE", "WEIXIN_NATIVE"].map(f => <option key={f} value={f}>{f}</option>)}</select>
+      {canSearch ? <>
+        <Select
+          value={family}
+          onValueChange={(val) => { if (val) { reset(); setFamily(val); } }}
+          items={["PAYOUT", "REFUND", "ALIPAY_NATIVE", "WEIXIN_NATIVE"].map(f => ({ value: f, label: f }))}
+        >
+          <SelectTrigger aria-label="业务来源" className="h-9 w-36 text-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {["PAYOUT", "REFUND", "ALIPAY_NATIVE", "WEIXIN_NATIVE"].map(f => (
+              <SelectItem key={f} value={f}>{f}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         <Button size="sm" type="button" variant="secondary" onClick={search}>按原号检索</Button></> : null}</div>
     {state ? <Meta state={state} seq={seq} set={setState}/> : null}
     {state?.display ? <Failure display={state.display}/> : null}

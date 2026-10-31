@@ -3,6 +3,8 @@ import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNod
 
 import { Icons } from "../components/icons";
 import { Button, PasswordInput, StatusMessage } from "../components/ui-elements";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 import {
   adminRequest,
   friendlyError,
@@ -237,12 +239,29 @@ function FreezePanel({ snapshot }: { snapshot: Extract<SessionSnapshot, { authen
           </div>
           <div className="space-y-1">
             <label className="text-xs font-medium text-foreground block">目标管理员</label>
-            <select value={targetAdminId} onChange={(event) => setTargetAdminId(event.target.value)} className="w-full h-9 px-3 rounded border border-border bg-surface-raised text-xs text-foreground" required>
-              <option value="">选择管理员账号</option>
-              {visibleAdmins.map((item) => (
-                <option key={item.id} value={item.id}>{item.name} · {item.username} · {item.status === "ACTIVE" ? "正常" : item.status === "FROZEN" ? "冻结" : "待绑定"}</option>
-              ))}
-            </select>
+            <Select
+              value={targetAdminId || "none"}
+              onValueChange={(val) => setTargetAdminId(val === "none" ? "" : String(val))}
+              items={[
+                { value: "none", label: "选择管理员账号" },
+                ...visibleAdmins.map((item) => ({
+                  value: item.id,
+                  label: `${item.name} · ${item.username} · ${item.status === "ACTIVE" ? "正常" : item.status === "FROZEN" ? "冻结" : "待绑定"}`
+                }))
+              ]}
+            >
+              <SelectTrigger aria-label="目标管理员" className="w-full h-9 text-xs">
+                <SelectValue placeholder="选择管理员账号" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">选择管理员账号</SelectItem>
+                {visibleAdmins.map((item) => (
+                  <SelectItem key={item.id} value={item.id}>
+                    {item.name} · {item.username} · {item.status === "ACTIVE" ? "正常" : item.status === "FROZEN" ? "冻结" : "待绑定"}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             {target ? <p className="text-[11px] text-muted-foreground">将对 {target.name}（{target.username}）执行{action === "freeze" ? "冻结并下线" : "解冻"}。</p> : null}
           </div>
           <div className="grid grid-cols-2 gap-3">
@@ -255,7 +274,7 @@ function FreezePanel({ snapshot }: { snapshot: Extract<SessionSnapshot, { authen
               <input type="text" inputMode="numeric" maxLength={6} value={totpCode} onChange={(event) => setTotpCode(event.target.value.replace(/\D/g, "").slice(0, 6))} className="w-full h-9 px-3 rounded border border-border bg-surface-raised text-xs font-mono" required />
             </div>
           </div>
-          <textarea value={reason} onChange={(event) => setReason(event.target.value)} rows={2} className="w-full p-2.5 rounded border border-border bg-surface-raised text-xs text-foreground" placeholder="填写本次安全操作的具体原因" required />
+          <Textarea value={reason} onChange={(event) => setReason(event.target.value)} rows={2} className="min-h-16 text-xs" placeholder="填写本次安全操作的具体原因" required />
           <StatusMessage error={error} success={message} />
           <Button type="submit" variant={action === "freeze" ? "danger" : "secondary"} size="sm" loading={loading} disabled={!targetAdminId || !password || totpCode.length !== 6 || !reason.trim()}>{action === "freeze" ? "确认冻结账号" : "确认解除冻结"}</Button>
         </form>
@@ -314,12 +333,26 @@ export function AccountSecurityPage({
           </div>
         </div>
         <div className="max-w-sm space-y-4">
-          <select value={idleMinutes} onChange={(event) => onIdleMinutes(Number(event.target.value))} className="w-full h-9 px-3 rounded border border-border bg-surface-raised text-xs text-foreground">
-            <option value={5}>5 分钟</option>
-            <option value={15}>15 分钟</option>
-            <option value={30}>30 分钟</option>
-            <option value={60}>60 分钟</option>
-          </select>
+          <Select
+            value={String(idleMinutes)}
+            onValueChange={(val) => val && onIdleMinutes(Number(val))}
+            items={[
+              { value: "5", label: "5 分钟" },
+              { value: "15", label: "15 分钟" },
+              { value: "30", label: "30 分钟" },
+              { value: "60", label: "60 分钟" },
+            ]}
+          >
+            <SelectTrigger aria-label="闲置锁定时长" className="w-full h-9 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="5">5 分钟</SelectItem>
+              <SelectItem value="15">15 分钟</SelectItem>
+              <SelectItem value="30">30 分钟</SelectItem>
+              <SelectItem value="60">60 分钟</SelectItem>
+            </SelectContent>
+          </Select>
           <Button type="button" variant="secondary" size="sm" disabled={snapshot.session.locked || !snapshot.session.pinConfigured} onClick={onLock} className="w-full">
             <Icons.Lock size={14} />
             <span>立即锁定当前会话</span>

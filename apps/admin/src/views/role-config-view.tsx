@@ -11,6 +11,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -92,8 +94,8 @@ function ToggleChip({
   children: React.ReactNode;
 }) {
   return (
-    <label className={`flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs ${checked ? "border-foreground/35 bg-foreground/[0.06] text-foreground" : "border-input bg-transparent text-muted-foreground dark:bg-input/30"}`}>
-      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
+    <label className={`flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs cursor-pointer select-none transition-colors ${checked ? "border-foreground/35 bg-foreground/[0.06] text-foreground" : "border-input bg-transparent text-muted-foreground dark:bg-input/30"}`}>
+      <Checkbox name="filter-chip" checked={checked} onCheckedChange={(c) => onChange(c === true)} />
       {children}
     </label>
   );
@@ -340,15 +342,18 @@ function SectionSelectAll({
   disabled?: boolean;
   onSetMany: (codes: string[], want: boolean) => void;
 }) {
-  const ref = useRef<HTMLInputElement>(null);
   const hit = codes.filter((code) => selected.includes(code)).length;
-  useEffect(() => {
-    if (ref.current) ref.current.indeterminate = hit > 0 && hit < codes.length;
-  }, [hit, codes.length]);
+  const indeterminate = hit > 0 && hit < codes.length;
   const all = hit === codes.length;
   return (
-    <label className="flex items-center gap-2 text-xs text-muted-foreground">
-      <input ref={ref} type="checkbox" checked={all} disabled={disabled} onChange={() => onSetMany(codes, !all)} />
+    <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer select-none">
+      <Checkbox
+        name={`group-${label}`}
+        checked={all}
+        indeterminate={indeterminate}
+        disabled={disabled}
+        onCheckedChange={() => onSetMany(codes, !all)}
+      />
       <span>{all ? `取消${label} ${codes.length} 项` : `全选${label} ${codes.length} 项`}</span>
     </label>
   );
@@ -407,8 +412,15 @@ function PermissionGroupBlock({
                   const locked = Boolean(permission.bossOnly) && !checked;
                   const off = disabled || locked;
                   return (
-                    <label key={code} title={permission.bossOnly ? BOSS_ONLY_REASON : undefined} className={`flex items-start gap-2.5 rounded-md px-2 py-2 ${off ? "cursor-not-allowed opacity-60" : "hover:bg-foreground/[0.05]"}`}>
-                      <input type="checkbox" className="mt-0.5" checked={checked} disabled={off} aria-description={permission.bossOnly ? BOSS_ONLY_REASON : undefined} onChange={() => onToggle(code)} />
+                    <label key={code} title={permission.bossOnly ? BOSS_ONLY_REASON : undefined} className={`flex items-start gap-2.5 rounded-md px-2 py-2 cursor-pointer select-none ${off ? "cursor-not-allowed opacity-60" : "hover:bg-foreground/[0.05]"}`}>
+                      <Checkbox
+                        name={code}
+                        className="mt-0.5"
+                        checked={checked}
+                        disabled={off}
+                        aria-description={permission.bossOnly ? BOSS_ONLY_REASON : undefined}
+                        onCheckedChange={() => onToggle(code)}
+                      />
                       <span className="min-w-0">
                         <strong className={`block text-sm ${checked ? "font-semibold text-foreground" : "font-normal text-foreground"}`}>
                           {permissionLabel(permission)}
@@ -618,13 +630,13 @@ function RoleFormDialog({
             </div>
             <label className="block">
               <FieldLabel>用途说明</FieldLabel>
-              <textarea
+              <Textarea
                 value={form.description}
                 readOnly={readOnly}
                 onChange={(event) => setForm((prev) => ({ ...prev, description: event.target.value }))}
                 rows={2}
                 placeholder="例如：负责供给审核与账号处置，不负责资金"
-                className="w-full resize-y rounded-lg border border-input bg-transparent px-2.5 py-2 text-sm transition-colors focus-visible:outline-none! focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 placeholder:text-muted-foreground dark:bg-input/30"
+                className="min-h-16 text-sm"
               />
             </label>
             {editing && form.status === "DISABLED" ? (

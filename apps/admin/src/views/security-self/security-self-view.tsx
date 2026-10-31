@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } fr
 
 import { Button } from "../../components/ui-elements";
 import { Icons } from "../../components/icons";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/select";
 import {
   backupCodesResultSubset,
   createLocalPendingStore,
@@ -487,18 +488,24 @@ export function SecuritySelfView({
           title="闲置自动锁定"
           description="无操作达到所选时长后，服务端锁定当前会话。偏好仅保存在当前浏览器；其他设备会话不受影响。"
           action={
-            <select
-              aria-label="当前浏览器闲置锁定时长"
-              value={normalizeIdleMinutes(idleMinutes)}
-              onChange={(event) => onIdleMinutesChange(Number(event.target.value))}
-              className="bg-surface-raised h-8 rounded border border-border px-2 text-xs text-foreground"
-            >
-              {IDLE_CHOICES.map((minutes) => (
-                <option key={minutes} value={minutes}>
-                  {minutes} 分钟
-                </option>
-              ))}
-            </select>
+            <div className="relative">
+              <Select
+                value={String(normalizeIdleMinutes(idleMinutes))}
+                onValueChange={(val) => val && onIdleMinutesChange(Number(val))}
+                items={IDLE_CHOICES.map((minutes) => ({ value: String(minutes), label: `${minutes} 分钟` }))}
+              >
+                <SelectTrigger aria-label="当前浏览器闲置锁定时长" className="h-8 text-xs min-w-28">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {IDLE_CHOICES.map((minutes) => (
+                    <SelectItem key={minutes} value={String(minutes)}>
+                      {minutes} 分钟
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
           }
         />
       </SecurityGroup>

@@ -105,7 +105,7 @@ test("order read list sends exact filters without persisting sensitive inputs an
   await until(() => node.textContent.includes(order.displayNo));
   assert.equal(new URL(browser.location.href).search, "");
 
-  const inputs = [...node.querySelectorAll("input")];
+  const inputs = [...node.querySelectorAll('input:not([name="status"])')];
   const setInput = async (input, value) => act(async () => {
     Object.getOwnPropertyDescriptor(browser.HTMLInputElement.prototype, "value").set.call(input, value);
     input.dispatchEvent(new Event("input", { bubbles: true }));

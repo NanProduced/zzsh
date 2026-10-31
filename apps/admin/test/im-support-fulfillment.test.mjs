@@ -70,6 +70,13 @@ async function render(root, host, props = {}) {
 function find(host, text) {
   return [...document.body.querySelectorAll("button")].find((button) => button.textContent.includes(text));
 }
+async function pickOption(doc, trigger, label) {
+  await act(async () => trigger.click());
+  for (let i = 0; i < 100 && !doc.querySelector('[role="option"]'); i++) await act(async () => { await new Promise(r => setTimeout(r, 10)); });
+  const option = [...doc.querySelectorAll('[role="option"]')].find(item => item.textContent.trim() === label);
+  assert.ok(option, "missing option " + label);
+  await act(async () => option.click());
+}
 async function click(host, text) {
   const button = find(host, text);
   assert.ok(button, `button available: ${text}`);
@@ -518,11 +525,9 @@ test("preview shows named server amounts and editing invalidates the accepted ha
   const { host, root } = mount();
   t.after(async () => { await act(async () => root.unmount()); host.remove(); });
   await render(root, host);
-  const select = document.body.querySelector(".im-support-fulfillment-controls select");
-  await act(async () => {
-    select.value = "TENANT_VOLUNTARY_EARLY";
-    select.dispatchEvent(new Event("change", { bubbles: true }));
-  });
+  const trigger = document.body.querySelector('.im-support-fulfillment-controls [aria-label="提前原因"]');
+  assert.ok(trigger);
+  await pickOption(document, trigger, "租客自愿提前");
   await settle();
   await click(host, "生成提前结算预览");
   assert.match(document.body.textContent, /号主净额/);

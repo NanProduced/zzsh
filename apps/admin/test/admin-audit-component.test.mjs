@@ -85,6 +85,11 @@ async function mockFetch(input, init = {}) {
   });
 }
 
+function fieldValue(view, name) {
+  const value = view.rootNode.querySelector(`input[name="${name}"]`)?.value ?? null;
+  return value === "ALL" ? "" : value;
+}
+
 async function settle() {
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
 }
@@ -132,9 +137,14 @@ test("game scope action is selectable and carried into the audit read", async ()
   try {
     await waitFor(() => tableText(view).includes("admin.account.updated"));
     assert.equal(calls[0].params.get("action"), "admin.game_scope.assigned");
-    const option = view.rootNode.querySelector('option[value="admin.game_scope.assigned"]');
+    const trigger = view.rootNode.querySelector('[aria-label="操作类型"]');
+    assert.ok(trigger && trigger.getAttribute("role") === "combobox", "action filter is the project Select");
+    assert.equal(fieldValue(view, "action"), "admin.game_scope.assigned");
+    await click(trigger);
+    await waitFor(() => browser.document.querySelector('[role="option"]'));
+    const option = [...browser.document.querySelectorAll('[role="option"]')].find((item) => item.getAttribute("aria-selected") === "true");
     assert.ok(option, "existing action picker must include game scope events");
-    assert.equal(option.selected, true);
+    assert.equal(option.textContent.trim(), trigger.querySelector('[data-slot="select-value"]').textContent.trim());
   } finally { await view.cleanup(); }
 });
 
@@ -196,8 +206,9 @@ test("initialQuery backfills the filters and submit resets the cursor stack", as
   });
   try {
     await waitFor(() => tableText(view).includes("admin.account.updated"));
-    const [actionSelect, , actorInput] = [...view.rootNode.querySelectorAll("form select, form input")];
-    assert.equal(actionSelect.value, "admin.account.updated", "select restored from initialQuery");
+    const actorInput = [...view.rootNode.querySelectorAll("form label")].find((label) => label.textContent.includes("操作者账号")).querySelector("input");
+    assert.equal(view.rootNode.querySelectorAll("form select").length, 0, "filters use the project Select, not native selects");
+    assert.equal(fieldValue(view, "action"), "admin.account.updated", "select restored from initialQuery");
     assert.equal(actorInput.value, "zz00002", "text input restored from initialQuery");
     assert.equal(calls[0].params.get("action"), "admin.account.updated", "first load used the restored filter");
     assert.equal(calls[0].params.get("actorUsername"), "zz00002");
@@ -217,10 +228,9 @@ test("initialQuery backfills the filters and submit resets the cursor stack", as
     // B3: 外部 query 变化回填表单
     await view.render({ initialQuery: { objectType: "admin_role" } });
     await settle();
-    assert.equal(actionSelect.value, "", "stale action filter cleared");
+    assert.equal(fieldValue(view, "action"), "", "stale action filter cleared");
     assert.equal(actorInput.value, "", "stale actor filter cleared");
-    const objectTypeSelect = [...view.rootNode.querySelectorAll("form select")][1];
-    assert.equal(objectTypeSelect.value, "admin_role", "new query backfills objectType");
+    assert.equal(fieldValue(view, "objectType"), "admin_role", "new query backfills objectType");
   } finally {
     await view.cleanup();
     globalThis.fetch = undefined;
@@ -542,7 +552,7 @@ test("query change failure does not retain old records from previous query", asy
     await waitFor(() => tableText(view).includes("admin.account.updated"));
 
     // Submit new query with different actor
-    const actorInput = [...view.rootNode.querySelectorAll("form input")][0];
+    const actorInput = [...view.rootNode.querySelectorAll('form input:not([name="action"]):not([name="objectType"])')][0];
     setInput(actorInput, "ZZ00009");
     const form = view.rootNode.querySelector("form");
     await act(async () => { form.dispatchEvent(new browser.Event("submit", { bubbles: true, cancelable: true })); });

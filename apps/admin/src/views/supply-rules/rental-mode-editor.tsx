@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
+import { CircleAlert, Info } from "lucide-react";
 import type { RulesResponse } from "../../api";
+import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { Checkbox } from "../../components/ui/checkbox";
 import { SupplySelect } from "../../components/supply/supply-select";
 import { draftCommand, type useRulesWrite } from "./rules-write";
 import { DraftFastTrial } from "./rental-mode-trial-panel";
-import { DraftLine, type EnsureDraft } from "./step0-editors";
+import { DraftLine, HelpTip, type EnsureDraft } from "./step0-editors";
 import { boundText, buildRentalModeRule, legacyNonZero, rentalModeBase, rentalModeDraft, rentalModeIssues, rentalModeSaveBody, withFastDefaults, type BoundDraft, type RentalModeDraft } from "./rental-modes";
 
 
@@ -57,7 +59,13 @@ export function RentalModeEditor({ rules, command, canEdit, onDirtyChange, draft
   const set = (fn: (d: RentalModeDraft) => RentalModeDraft) => setDraft((prev) => (prev ? fn(prev) : prev));
   const err = (key: string) => issues[key] ? <p id={`rm-${key}`} className="text-[11px] text-destructive">{issues[key]}</p> : null;
   const boundInput = (name: "custom" | "fast", key: "min" | "max", value: BoundDraft, label: string) => (
-    <div className="min-w-0 space-y-1 text-xs"><span className="text-muted-foreground">{label}</span>
+    <div className="min-w-0 space-y-1.5 text-xs">
+      <div className="flex items-center gap-1">
+        <span className="text-muted-foreground">{label}</span>
+        <HelpTip label={`${label}基准说明`}>
+          支持「基础比例 C ±」浮动偏移（以账号基础核算比例 C 为基准加减）或「固定比例」绝对数值。
+        </HelpTip>
+      </div>
       <div className="flex gap-2">
         <SupplySelect label={`${label}基准`} className="w-36 shrink-0" value={value.base} disabled={locked} options={[{ value: "C", label: "基础比例 C ±" }, { value: "ABSOLUTE", label: "固定比例" }]} onValueChange={(v) => set((d) => ({ ...d, [name]: { ...d[name], [key]: { ...d[name][key], base: v as BoundDraft["base"] } } }))} />
         <Input aria-label={label} inputMode="decimal" value={value.value} disabled={locked} placeholder={key === "max" ? "不设上限" : "必填"} aria-invalid={Boolean(issues[`${name}.${key}`])} className="min-w-28 tabular-nums"
@@ -69,32 +77,93 @@ export function RentalModeEditor({ rules, command, canEdit, onDirtyChange, draft
   const current = rules.priceVersions.find((v) => v.id === rules.release?.priceVersionId);
   return <section className="section-panel space-y-4" aria-label="租赁模式配置">
     <div className="flex flex-wrap items-start justify-between gap-3">
-      <div><h2 className="text-base font-semibold">租赁模式</h2>
-        <p className="mt-1 max-w-3xl text-xs text-muted-foreground leading-relaxed">租客比例 ＝ 号主比例 − 平台利润点（比例差）。比例数值为 1 元兑换万哈夫币数量，数值越小单价越高。</p></div>
-      {canEdit ? <Button type="button" variant="outline" disabled={locked || !draft} onClick={fillFastDefaults}>填入极速默认值</Button> : null}
+      <div>
+        <div className="flex items-center gap-2">
+          <h2 className="text-base font-semibold">租赁模式</h2>
+          <HelpTip label="租赁模式与比例概念">
+            租客比例 ＝ 号主比例 − 平台利润点（比例差）。比例数值为 1 元兑换万哈夫币数量，数值越小单价越高。
+          </HelpTip>
+        </div>
+        <p className="mt-1 max-w-3xl text-xs text-muted-foreground leading-relaxed">
+          配置自定义模式与极速模式的启停状态、号主比例限制区间及平台留存利润点。
+        </p>
+      </div>
+      {canEdit ? <Button type="button" variant="outline" size="sm" disabled={locked || !draft} onClick={fillFastDefaults}>填入极速默认值</Button> : null}
     </div>
     {!base || !draft ? <p role="status" className="text-sm text-muted-foreground">当前生效版本不是可编辑的兼容比例规则，暂不能配置模式；请核对原始配置。</p> : <>
       <div className="grid gap-3 sm:grid-cols-2">
         <DraftLine selected={selected} locked={command.locked} />
-        <div className="text-xs text-muted-foreground"><p>参数来源：{base.source.id === current?.id ? "当前生效版本" : `版本 #${base.source.id.slice(-6)}`}</p>
-          <p>当前生效：自定义 {current && rentalModeBase(rules, "")?.haff.compatibility.modes.custom.enabled ? "开" : "关"} · 极速 {rentalModeBase(rules, "")?.haff.compatibility.modes.fast.enabled ? `开（下限 ${boundText(rentalModeBase(rules, "")?.haff.compatibility.modes.fast.min)}，上限 ${boundText(rentalModeBase(rules, "")?.haff.compatibility.modes.fast.max)}）` : "关"}</p></div>
+        <div className="rounded-lg border border-border/80 bg-muted/20 p-2.5 text-xs text-muted-foreground space-y-1">
+          <p>参数基准：<span className="font-medium text-foreground">{base.source.id === current?.id ? "当前生效版本" : `历史版本 #${base.source.id.slice(-6)}`}</span></p>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span className="flex items-center gap-1">
+              自定义模式：
+              {current && rentalModeBase(rules, "")?.haff.compatibility.modes.custom.enabled ? (
+                <Badge variant="outline" className="border-emerald-500/30 text-emerald-600 dark:text-emerald-400 text-[10px] py-0 px-1.5 font-normal">已启用</Badge>
+              ) : (
+                <Badge variant="secondary" className="text-[10px] py-0 px-1.5 font-normal">未启用</Badge>
+              )}
+            </span>
+            <span className="flex items-center gap-1">
+              极速模式：
+              {rentalModeBase(rules, "")?.haff.compatibility.modes.fast.enabled ? (
+                <Badge variant="outline" className="border-emerald-500/30 text-emerald-600 dark:text-emerald-400 text-[10px] py-0 px-1.5 font-normal">
+                  已启用（下限 {boundText(rentalModeBase(rules, "")?.haff.compatibility.modes.fast.min)}，上限 {boundText(rentalModeBase(rules, "")?.haff.compatibility.modes.fast.max)}）
+                </Badge>
+              ) : (
+                <Badge variant="secondary" className="text-[10px] py-0 px-1.5 font-normal">未启用</Badge>
+              )}
+            </span>
+          </div>
+        </div>
       </div>
       {!selected ? <p role="status" className="text-xs text-muted-foreground">请在顶部草稿栏选择或新建价格草稿后编辑；未选择草稿时仅显示当前生效值，不能保存。</p> : null}
       <div className="grid gap-4 lg:grid-cols-2">
-        <fieldset className="space-y-3 rounded-lg border border-border p-3"><legend className="px-1 text-sm font-semibold">自定义模式</legend>
-          <label className="flex items-center gap-2 text-sm"><Checkbox aria-label="启用自定义模式" checked={draft.custom.enabled} disabled={locked} onCheckedChange={(v) => set((d) => ({ ...d, custom: { ...d.custom, enabled: v === true } }))} />启用</label>
-          {draft.custom.enabled ? <div className="grid gap-3 sm:grid-cols-2">{boundInput("custom", "min", draft.custom.min, "号主比例下限")}{boundInput("custom", "max", draft.custom.max, "号主比例上限（可选）")}</div> : <p className="text-xs text-muted-foreground">已关闭；原有界值保留在规则中，不参与报价。</p>}
+        <fieldset className="space-y-3.5 rounded-lg border border-border/80 bg-card/60 p-4 shadow-2xs">
+          <legend className="px-1 text-sm font-semibold text-foreground">自定义模式</legend>
+          <label className="flex items-center gap-2 text-sm font-medium">
+            <Checkbox aria-label="启用自定义模式" checked={draft.custom.enabled} disabled={locked} onCheckedChange={(v) => set((d) => ({ ...d, custom: { ...d.custom, enabled: v === true } }))} />
+            <span>启用自定义模式</span>
+          </label>
+          {draft.custom.enabled ? (
+            <div className="grid gap-3 sm:grid-cols-2">
+              {boundInput("custom", "min", draft.custom.min, "号主比例下限")}
+              {boundInput("custom", "max", draft.custom.max, "号主比例上限（可选）")}
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">已停用；保留原有区间参数，暂不对号主开放该模式。</p>
+          )}
         </fieldset>
-        <fieldset className="space-y-3 rounded-lg border border-border p-3"><legend className="px-1 text-sm font-semibold">极速模式</legend>
-          <label className="flex items-center gap-2 text-sm"><Checkbox aria-label="启用极速模式" checked={draft.fast.enabled} disabled={locked} onCheckedChange={(v) => set((d) => ({ ...d, fast: { ...d.fast, enabled: v === true } }))} />启用</label>
+        <fieldset className="space-y-3.5 rounded-lg border border-border/80 bg-card/60 p-4 shadow-2xs">
+          <legend className="px-1 text-sm font-semibold text-foreground">极速模式</legend>
+          <label className="flex items-center gap-2 text-sm font-medium">
+            <Checkbox aria-label="启用极速模式" checked={draft.fast.enabled} disabled={locked} onCheckedChange={(v) => set((d) => ({ ...d, fast: { ...d.fast, enabled: v === true } }))} />
+            <span>启用极速模式</span>
+          </label>
           {draft.fast.enabled ? <>
             <div className="grid gap-3 sm:grid-cols-2">
-              <label className="min-w-0 space-y-1 text-xs"><span className="text-muted-foreground">利润点（比例差）</span><Input aria-label="极速利润点" inputMode="decimal" value={draft.fast.spreadDelta} disabled={locked} placeholder="待配置" aria-invalid={Boolean(issues["fast.spreadDelta"])} onChange={(e) => set((d) => ({ ...d, fast: { ...d.fast, spreadDelta: e.target.value } }))} />{err("fast.spreadDelta")}</label>
+              <label className="min-w-0 space-y-1.5 text-xs">
+                <div className="flex items-center gap-1">
+                  <span className="text-muted-foreground">利润点（比例差）</span>
+                  <HelpTip label="极速模式利润点说明">
+                    平台在极速模式下留存的固定比例差。租客支付比例 ＝ 号主比例 − 利润点。
+                  </HelpTip>
+                </div>
+                <Input aria-label="极速利润点" inputMode="decimal" value={draft.fast.spreadDelta} disabled={locked} placeholder="待配置" aria-invalid={Boolean(issues["fast.spreadDelta"])} onChange={(e) => set((d) => ({ ...d, fast: { ...d.fast, spreadDelta: e.target.value } }))} />
+                {err("fast.spreadDelta")}
+              </label>
               {boundInput("fast", "min", draft.fast.min, "号主比例下限")}
               {boundInput("fast", "max", draft.fast.max, "号主比例上限（可选）")}
             </div>
-            {legacyNonZero(draft).length ? <p role="note" className="text-xs text-muted-foreground">旧会员档位加减保持原值（不在这里改）：{legacyNonZero(draft).join("，")}</p> : null}
-          </> : <p className="text-xs text-muted-foreground">已关闭；号主不能选择极速上架。</p>}
+            {legacyNonZero(draft).length ? (
+              <div className="flex items-center gap-1.5 rounded-md bg-muted/40 px-2.5 py-1.5 text-xs text-muted-foreground">
+                <Info className="size-3.5 shrink-0 text-muted-foreground" />
+                <span>历史会员档位增量已继承锁定：{legacyNonZero(draft).join("，")}</span>
+              </div>
+            ) : null}
+          </> : (
+            <p className="text-xs text-muted-foreground">已停用；号主不能选择极速上架。</p>
+          )}
         </fieldset>
       </div>
       {selected ? <DraftFastTrial key={`${selected.id}:${selected.revision}`} rules={rules} version={selected} dirty={dirty} /> : null}

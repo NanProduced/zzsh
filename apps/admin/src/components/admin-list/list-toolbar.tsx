@@ -130,7 +130,7 @@ export function ListToolbarEnumSelect({
         <SelectTrigger aria-label={label} className="h-9 w-full min-w-[120px] text-xs cursor-pointer">
           <SelectValue />
         </SelectTrigger>
-        <SelectContent className="w-[var(--anchor-width)] min-w-[var(--anchor-width)]">
+        <SelectContent className="min-w-[var(--anchor-width)]">
           <SelectItem value="all">{allLabel}</SelectItem>
           {options.map(([key, name]) => (
             <SelectItem key={key} value={key}>

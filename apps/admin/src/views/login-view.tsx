@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { Icons } from "../components/icons";
 import { Button, PasswordInput, StatusMessage } from "../components/ui-elements";
+import { Checkbox } from "@/components/ui/checkbox";
 import { useAuthTypingImpulse } from "../components/devl/auth-shell";
 import { bumpParticleTypingImpulse } from "../components/devl/particle-field";
 
@@ -22,7 +23,7 @@ export function LoginView({
   onRecovery,
 }: LoginViewProps) {
   const [password, setPassword] = useState("");
-  const [remember, setRemember] = useState(true);
+  const [remember, setRemember] = useState(false);
   const typingImpulse = useAuthTypingImpulse();
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
@@ -91,12 +92,10 @@ export function LoginView({
             htmlFor="remember-account"
             className="inline-flex items-center gap-2 text-xs text-muted-foreground select-none cursor-pointer hover:text-foreground transition-colors"
           >
-            <input
+            <Checkbox
               id="remember-account"
-              type="checkbox"
               checked={remember}
-              onChange={(e) => setRemember(e.target.checked)}
-              className="h-4 w-4 rounded border-border bg-background/60 text-primary accent-sky-500 focus:ring-2 focus:ring-ring/20 focus:ring-offset-0 cursor-pointer transition-colors"
+              onCheckedChange={(checked) => setRemember(checked === true)}
             />
             <span>记住账号</span>
           </label>

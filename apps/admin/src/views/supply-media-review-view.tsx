@@ -13,6 +13,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 
 import { SupplyWriteLockError, withSupplyWriteLock } from "@/lib/supply-write-lock";
+import { cn } from "@/lib/utils";
 
 import { adminRequest, friendlyError, hasPermission, type MediaAssetReview, type MediaReviewPage, type SessionSnapshot, type SupplyGame, type UploadedAssetResponse } from "../api";
 import { Lightbox } from "./supply-review/lightbox";
@@ -668,6 +669,9 @@ export function SupplyMediaReviewView({
         ? visibilityReasonError(reasonFor(confirm.asset))
         : null;
 
+  const hasItems = Boolean(page && page.items.length > 0);
+  const showAside = wide && (Boolean(selected) || hasItems);
+
   const detail = selected ? (
     <MediaDetailPanel
       asset={selected}
@@ -680,6 +684,7 @@ export function SupplyMediaReviewView({
       hideHeading={!wide}
       onAction={(action) => setConfirm({ asset: selected, action })}
       onNext={nextAsset ? () => setSelected(nextAsset) : undefined}
+      onClose={() => setSelected(null)}
       hasNext={Boolean(nextAsset)}
     />
   ) : null;
@@ -768,7 +773,7 @@ export function SupplyMediaReviewView({
         </div>
       </section>
 
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_400px]">
+      <div className={cn("grid grid-cols-1 gap-5", showAside ? "xl:grid-cols-[minmax(0,1fr)_460px] 2xl:grid-cols-[minmax(0,1fr)_480px]" : "w-full")}>
         <section className="section-panel min-w-0">
           <div className="flex items-center justify-between gap-3 pb-2 border-b border-border/40">
             <h3 className="text-sm font-semibold tracking-tight">审核队列</h3>
@@ -864,10 +869,15 @@ export function SupplyMediaReviewView({
               </div>
             </>
           ) : (
-            <div className="mt-4 space-y-2 rounded border border-border p-6 text-center">
-              <p className="text-sm">{filterSummary}：当前筛选下没有素材。</p>
-              <p className="text-[11px] text-muted-foreground">0 条仅是本次查询结果；空队列不代表账号没有图片，也不代表媒体系统无数据。</p>
-              <div className="flex flex-wrap justify-center gap-2">
+            <div className="mt-4 space-y-3 rounded-xl border border-border/70 bg-muted/20 p-8 text-center max-w-2xl mx-auto my-6">
+              <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-muted/60 text-muted-foreground/80">
+                <ShieldAlert className="size-6 text-primary" />
+              </div>
+              <p className="text-sm font-semibold">{filterSummary}：当前筛选下没有素材。</p>
+              <p className="text-xs text-muted-foreground max-w-md mx-auto leading-relaxed">
+                0 条仅是本次查询结果；空队列不代表账号没有图片，也不代表媒体系统无数据。
+              </p>
+              <div className="flex flex-wrap justify-center gap-2 pt-1">
                 {tab === "pending" ? (
                   <Button type="button" size="sm" variant="secondary" onClick={() => { setTab("reviewed"); setReviewedState("APPROVED"); }}>查看已通过</Button>
                 ) : (
@@ -882,8 +892,40 @@ export function SupplyMediaReviewView({
         </section>
 
         {wide ? (
-          <aside ref={asideRef} className="section-panel hidden self-start overflow-hidden xl:flex xl:min-h-0 xl:flex-col xl:sticky xl:top-2" style={selected && asideHeight !== undefined ? { height: asideHeight } : undefined}>
-            {detail ?? <div className="flex min-h-72 flex-col items-center justify-center gap-1.5 p-8 text-center text-muted-foreground"><strong className="text-base text-foreground">选择左侧素材</strong><p className="max-w-[30ch] text-xs leading-relaxed">审核与公开是两个独立动作；审核通过保持私有，公开需另行授权。</p></div>}
+          <aside
+            ref={asideRef}
+            className={cn(
+              "section-panel hidden self-start overflow-hidden xl:min-h-0 xl:flex-col xl:sticky xl:top-2",
+              showAside ? "xl:flex" : "xl:hidden",
+            )}
+            style={selected && asideHeight !== undefined ? { height: asideHeight } : undefined}
+            aria-label="素材详情"
+          >
+            {detail ?? (
+              <div className="flex min-h-72 flex-col items-center justify-center gap-3 p-8 text-center text-muted-foreground">
+                <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-muted/60 text-muted-foreground/80">
+                  <ShieldAlert className="size-6 text-primary" />
+                </div>
+                <div className="space-y-1">
+                  <strong className="text-base font-semibold text-foreground">选择左侧素材</strong>
+                  <p className="max-w-[32ch] text-xs leading-relaxed text-muted-foreground">
+                    审核与公开是两个独立动作；审核通过保持私有，公开需另行授权。
+                  </p>
+                </div>
+                {page && page.items.length > 0 ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="mt-2 h-9 gap-1.5 font-medium shadow-2xs"
+                    onClick={() => {
+                      if (page.items[0]) setSelected(page.items[0]);
+                    }}
+                  >
+                    开始审核队列（第 1 条）
+                  </Button>
+                ) : null}
+              </div>
+            )}
           </aside>
         ) : (
           <Sheet open={Boolean(selected) && !confirm} onOpenChange={(open) => { if (!open && !confirm) setSelected(null); }}>

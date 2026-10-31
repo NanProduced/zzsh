@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { CircleAlert, ChevronDownIcon, ChevronRightIcon, Clock, Info, TriangleAlert } from "lucide-react";
+import { CircleAlert, CircleHelp, ChevronDownIcon, ChevronRightIcon, Clock, Info, TriangleAlert } from "lucide-react";
 
 import { formatDate, type RulesResponse } from "../../api";
 import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
@@ -15,6 +15,7 @@ import {
 } from "./rules-model";
 import { TrialWindow } from "./rules-trial-window";
 import { activePriceDraft, pendingSealedPrice, MutedDetails, priceDiff as draftDiff } from "./publish-flow";
+import { HelpTip } from "./step0-editors";
 import { RULES_RELEASE_OPERATION, type useRulesWrite } from "./rules-write";
 
 type Option = { value: string; label: string };
@@ -37,13 +38,17 @@ function ScrollTable({ children, label }: { children: ReactNode; label: string }
   );
 }
 
-function Card({ title, note, badges, action, metrics, info, children, wide }: { title: string; note?: ReactNode; badges?: ReactNode; action?: ReactNode; metrics?: ReactNode; info?: ReactNode; children: ReactNode; wide?: boolean }) {
+function Card({ title, note, help, badges, action, metrics, info, children, wide }: { title: string; note?: ReactNode; help?: ReactNode; badges?: ReactNode; action?: ReactNode; metrics?: ReactNode; info?: ReactNode; children: ReactNode; wide?: boolean }) {
   const [infoOpen, setInfoOpen] = useState(false);
   return (
     <section className={`section-panel min-w-0 space-y-4 ${wide ? "lg:col-span-2" : ""}`}>
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <h3 className="flex flex-wrap items-center gap-2 text-base font-semibold leading-6">{title}{badges}</h3>
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="text-base font-semibold leading-6 text-foreground">{title}</h3>
+            {help ? <HelpTip label={`${title}说明`}>{help}</HelpTip> : null}
+            {badges}
+          </div>
           {note ? <p className="mt-0.5 text-xs text-muted-foreground leading-relaxed">{note}</p> : null}
         </div>
         {action}
@@ -52,7 +57,10 @@ function Card({ title, note, badges, action, metrics, info, children, wide }: { 
       {children}
       {info ? (
         <Collapsible open={infoOpen} onOpenChange={setInfoOpen}>
-          <CollapsibleTrigger render={<Button type="button" variant="ghost" size="sm" className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground" />}>{infoOpen ? "收起说明" : "规则说明"}</CollapsibleTrigger>
+          <CollapsibleTrigger render={<Button type="button" variant="ghost" size="sm" className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1" />}>
+            <Info className="size-3 shrink-0" />
+            <span>{infoOpen ? "收起说明" : "规则说明与约束"}</span>
+          </CollapsibleTrigger>
           <CollapsibleContent><div className="mt-2 space-y-1 rounded-md bg-muted/40 px-3 py-2 text-xs leading-relaxed text-muted-foreground">{info}</div></CollapsibleContent>
         </Collapsible>
       ) : null}
@@ -181,25 +189,54 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
 
   return (
     <div className="space-y-4">
-      <section className="section-panel" aria-label="当前生效版本"><h2 className="mb-3 text-base font-semibold">当前生效版本</h2>
+      <section className="section-panel" aria-label="当前生效版本">
+        <h2 className="mb-3 text-base font-semibold">当前生效版本</h2>
         <div className="flex flex-wrap items-center gap-x-8 gap-y-3">
-          <div><p className="text-xs text-muted-foreground">当前生效</p><p className="text-lg font-semibold tabular-nums">{release ? "已生效" : "尚未生效"}</p></div>
-          <div><p className="text-xs text-muted-foreground">生效时间</p><p className="text-lg font-semibold tabular-nums">{release ? formatDate(release.activatedAt) : "—"}</p></div>
-          <div className="min-w-0"><p className="text-xs text-muted-foreground">待发布</p>
-            <p className="text-sm leading-7">{sealedPending ? `${sealedPending} 个已提交，等 Boss 生效` : inProgress ? "" : "无"}{inProgress ? `${sealedPending ? " · " : ""}1 份价格草稿编辑中` : ""}</p></div>
+          <div>
+            <p className="text-xs text-muted-foreground">线上运行状态</p>
+            <p className="text-lg font-semibold tabular-nums text-foreground">{release ? "已生效" : "尚未生效"}</p>
+          </div>
+          <div>
+            <p className="text-xs text-muted-foreground">版本生效时间</p>
+            <p className="text-lg font-semibold tabular-nums text-foreground">{release ? formatDate(release.activatedAt) : "—"}</p>
+          </div>
+          <div className="min-w-0">
+            <p className="text-xs text-muted-foreground">待发布流程状态</p>
+            <div className="mt-0.5 flex flex-wrap items-center gap-2">
+              {sealedPending ? (
+                <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 font-normal text-xs py-0">
+                  {sealedPending} 份已提交待 Boss 确认生效
+                </Badge>
+              ) : inProgress ? null : (
+                <span className="text-sm font-medium text-muted-foreground">全部最新，无待发布项</span>
+              )}
+              {inProgress ? (
+                <Badge variant="outline" className="border-blue-500/40 bg-blue-500/10 text-blue-700 dark:text-blue-300 font-normal text-xs py-0">
+                  1 份价格草稿编辑中
+                </Badge>
+              ) : null}
+            </div>
+          </div>
           <div className="ml-auto flex flex-wrap gap-2">
             {canEdit && !skinV2Ready ? <Button type="button" variant="secondary" onClick={onOpenSkin}>配置新版皮肤押金</Button> : null}
             <Button type="button" variant="outline" disabled={!canPreview || !release} title={!canPreview ? "当前账号没有内部试算权限" : undefined} onClick={() => setTrialOpen(true)}>试算一单</Button>
             {isBoss ? <Button type="button" disabled={command.locked && command.pending?.operation !== RULES_RELEASE_OPERATION} onClick={() => setDialog("confirm")}>选择版本并确认生效</Button> : null}
           </div>
         </div>
-                <p className="mt-2 text-sm text-muted-foreground">这里只看线上值和试算；改规则去左侧对应分区。</p>
+        <div className="mt-3 flex items-center gap-2 rounded-md bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+          <Info className="size-3.5 shrink-0 text-muted-foreground" />
+          <span>当前页面呈现线上实时运行的基准规则与测算；若需调整请前往对应业务分区编辑草稿并提交。</span>
+        </div>
       </section>
 
       {!release ? <section className="section-panel"><Hint>还没有生效的规则。请联系平台管理员配置初始生效规则，提交后由 Boss 确认生效。</Hint></section> : (
         <>
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <Card wide title="哈夫币计价规则" note="平台按比例差计算租客比例与金额；比例＝1 元换多少万哈夫币，比例越小单价越高"
+            <Card
+              wide
+              title="哈夫币计价规则"
+              note="基于平台比例差动态计算租客与号主结算金额"
+              help="比例代表 1 元兑换万哈夫币数量，比例数值越小单价越高。租客支付比例 ＝ 号主比例 − 平台比例差，差额作为平台收益。"
               metrics={haff && curPrice?.mode === "SPREAD" && p !== null ? (<>
                 <Metric label="平台比例差 · 普通/自定义" value={haff.compatibility.ordinary.spreadDelta} />
                 <Metric label="平台比例差 · 快速" value={haff.compatibility.fast?.spreadDelta || pf || "—"} />
@@ -224,13 +261,18 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
                           <Badge variant="outline">普通/自定义模式适用</Badge>
                           {haff.compatibility.modes.fast.enabled && haff.compatibility.fast ? <Badge variant="secondary">快速模式: {haff.compatibility.fast.spreadDelta}</Badge> : null}
                         </div>
-                        <p className="mt-1 text-xs text-muted-foreground">
-                          租客比例 ＝ 号主比例 − 平台比例差{standardDelta ? ` + 普通档调整(${standardDelta})` : ""}；调大比例差，租客支付增加、平台留存收益扩大。
-                        </p>
+                        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                          <span className="inline-flex items-center gap-1 rounded bg-muted/60 px-1.5 py-0.5 font-mono text-[11px] font-medium text-foreground">
+                            租客比例 ＝ 号主比例 − 平台比例差{standardDelta ? ` + 普通档调整(${standardDelta})` : ""}
+                          </span>
+                          <HelpTip label="比例差作用说明">
+                            调大比例差，租客支付增加、平台留存收益扩大；调小比例差则提升号主端竞争力。
+                          </HelpTip>
+                        </div>
                       </div>
                       <div className="flex items-center gap-2">
                         <span className="text-xs text-muted-foreground">当前设定</span>
-                        <span className="text-base font-bold tabular-nums">
+                        <span className="text-lg font-bold tabular-nums text-foreground">
                           {V("haff.spread.ordinary", haff.compatibility.ordinary.spreadDelta)}
                         </span>
                       </div>
@@ -240,7 +282,12 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
                   {/* 换算参考示例（非固定平台价） */}
                   <div className="rounded-lg border border-border/80 bg-muted/20 p-3.5">
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <h4 className="text-xs font-semibold">换算参考示例（非固定平台价）</h4>
+                      <div className="flex items-center gap-1.5">
+                        <h4 className="text-xs font-semibold">换算参考示例</h4>
+                        <HelpTip label="换算示例说明">
+                          非全站固定价格，实际金额由号主上架时设定的申报比例与当前生效比例差动态换算，此表仅作为基准测算参考。
+                        </HelpTip>
+                      </div>
                       <span className="text-xs text-muted-foreground">当前比例差：普通 {haff.compatibility.ordinary.spreadDelta} · 辅助测算</span>
                     </div>
                     <ScrollTable label="换算参考示例">
@@ -251,7 +298,12 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
                             <TableHead className="text-right">租客比例</TableHead>
                             <TableHead className="text-right">号主侧金额（扣费前）</TableHead>
                             <TableHead className="text-right">租客哈夫币金额</TableHead>
-                            <TableHead className="text-right">平台价差（元/1M）</TableHead>
+                            <TableHead className="text-right">
+                              <span className="inline-flex items-center gap-1 justify-end">
+                                平台价差（元/1M）
+                                <HelpTip label="平台价差说明">以每 1M 哈夫币为标尺测算的平台留存价差</HelpTip>
+                              </span>
+                            </TableHead>
                           </TableRow>
                         </TableHeader>
                         <TableBody>
@@ -265,11 +317,11 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
                             return (
                               <TableRow key={sampleRatio}>
                                 <TableCell className="font-medium">
-                                  比例 {sampleRatio} 万/元 {sampleRatio === 50 ? <span className="text-xs text-muted-foreground">（常用基准）</span> : null}
+                                  比例 {sampleRatio} 万/元 {sampleRatio === 50 ? <span className="text-xs text-muted-foreground font-normal">（常用基准）</span> : null}
                                 </TableCell>
                                 <TableCell className="text-right tabular-nums">{tenantRatio > 0 ? tenantRatio : "待计算"}</TableCell>
-                                <TableCell className="text-right tabular-nums">{yuan(ownerPerM)}/1M</TableCell>
-                                <TableCell className="text-right tabular-nums">{tenantPerM !== null ? `${yuan(tenantPerM)}/1M` : "待计算"}</TableCell>
+                                <TableCell className="text-right tabular-nums text-muted-foreground">{yuan(ownerPerM)}/1M</TableCell>
+                                <TableCell className="text-right tabular-nums font-medium text-foreground">{tenantPerM !== null ? `${yuan(tenantPerM)}/1M` : "待计算"}</TableCell>
                                 <TableCell className="text-right tabular-nums font-semibold text-emerald-600 dark:text-emerald-400">
                                   {spreadPerM !== null ? `+${yuan(spreadPerM)}/1M` : "待计算"}
                                 </TableCell>
@@ -279,45 +331,100 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
                         </TableBody>
                       </Table>
                     </ScrollTable>
-                    <p className="mt-2 text-[11px] text-muted-foreground">
-                      * 换算示例仅供参考，实际金额由号主上架申报比例与平台比例差动态换算。
-                    </p>
+                    <div className="mt-2 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                      <CircleAlert className="size-3 shrink-0 text-muted-foreground/70" />
+                      <span>换算示例仅供参考，实际金额由号主上架申报比例与平台比例差动态换算。</span>
+                    </div>
                   </div>
                 </div>
               )}
             </Card>
 
-            <Card title="物资单价" note="普通租客口径 · 按实际消耗计费（号主价与租客价差额为平台收益）"
+            <Card
+              title="物资单价"
+              note="普通租客口径 · 按实际消耗计费（号主价与租客价差额为平台收益）"
               metrics={<><Metric label="计费物资" value={itemRows.length} unit="项" /><Metric label="未配置" value={itemRows.filter((r) => !r.line?.buyerUnitAmount).length} unit="项" /></>}
-              info={<><p>开租与结束各确认一次数量，按实际消耗计费。</p><p>显示「未配置」的物品不会按 0 计价，相关报价会提示无法报价。</p>{compatTiers ? <p>另有 {compatTiers} 个会员档位的兼容价格数据，本页不展示也不修改。</p> : null}</>} badges={changeBadge(priceChanged, () => priceDiff(rules, curPrice?.id, latestPrice?.id).filter((r) => r.group === "物品单价"))}>
+              info={<><p>开租与结束各确认一次数量，按实际消耗计费。</p><p>显示「未配置」的物品不会按 0 计价，相关报价会提示无法报价。</p>{compatTiers ? <p>另有 {compatTiers} 个会员档位的兼容价格数据，本页不展示也不修改。</p> : null}</>}
+              badges={changeBadge(priceChanged, () => priceDiff(rules, curPrice?.id, latestPrice?.id).filter((r) => r.group === "物品单价"))}
+            >
               {itemRows.length === 0 ? <Hint>该游戏没有按件计费的物品。</Hint> : (
                 <ScrollTable label="物品单价表">
                   <Table className="min-w-[480px]">
-                    <TableHeader><TableRow><TableHead>物品</TableHead><TableHead>计费单位</TableHead><TableHead className="text-right">租客价</TableHead><TableHead className="text-right">号主价</TableHead><TableHead className="text-right">平台价差/单位</TableHead></TableRow></TableHeader>
-                    <TableBody>{itemRows.map(({ item, line }) => (
-                      <TableRow key={item.id}>
-                        <TableCell>{item.name}{!item.enabled ? <Badge variant="unknown" className="ml-1">已停用</Badge> : null}</TableCell>
-                        <TableCell>{line?.unitQuantity && line.unitQuantity !== "1" ? `每 ${line.unitQuantity} ${unitLabel(item.unit, item.code)}` : `每${unitLabel(item.unit, item.code)}`}</TableCell>
-                        <TableCell className="text-right tabular-nums">{V(`item.${item.id}.buyer`, unitYuan(line?.buyerUnitAmount), { unit: "元" })}</TableCell>
-                        <TableCell className="text-right tabular-nums">{V(`item.${item.id}.owner`, unitYuan(line?.ownerUnitAmount), { unit: "元" })}</TableCell>
-                        <TableCell className="text-right tabular-nums">{spread(line?.buyerUnitAmount, line?.ownerUnitAmount)}</TableCell>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="w-36">物品</TableHead>
+                        <TableHead className="w-32">计费单位</TableHead>
+                        <TableHead className="text-right">租客价</TableHead>
+                        <TableHead className="text-right">号主价</TableHead>
+                        <TableHead className="text-right">
+                          <span className="inline-flex items-center gap-1 justify-end">
+                            平台价差/单位
+                            <HelpTip label="物资价差说明">租客单价与号主单价的差额，结算时按租客实际消耗件数留存为平台收益</HelpTip>
+                          </span>
+                        </TableHead>
                       </TableRow>
-                    ))}</TableBody>
+                    </TableHeader>
+                    <TableBody>{itemRows.map(({ item, line }) => {
+                      const sp = spread(line?.buyerUnitAmount, line?.ownerUnitAmount);
+                      const isPositive = sp.startsWith("+");
+                      return (
+                        <TableRow key={item.id}>
+                          <TableCell className="font-medium">
+                            {item.name}
+                            {!item.enabled ? <Badge variant="secondary" className="ml-1 text-[10px] text-muted-foreground">已停用</Badge> : null}
+                          </TableCell>
+                          <TableCell className="text-muted-foreground">{line?.unitQuantity && line.unitQuantity !== "1" ? `每 ${line.unitQuantity} ${unitLabel(item.unit, item.code)}` : `每${unitLabel(item.unit, item.code)}`}</TableCell>
+                          <TableCell className="text-right tabular-nums text-foreground">{V(`item.${item.id}.buyer`, unitYuan(line?.buyerUnitAmount), { unit: "元" })}</TableCell>
+                          <TableCell className="text-right tabular-nums text-muted-foreground">{V(`item.${item.id}.owner`, unitYuan(line?.ownerUnitAmount), { unit: "元" })}</TableCell>
+                          <TableCell className={`text-right tabular-nums ${isPositive ? "font-semibold text-emerald-600 dark:text-emerald-400" : ""}`}>
+                            {sp}
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}</TableBody>
                   </Table>
                 </ScrollTable>
               )}
             </Card>
 
-            <Card title="押金规则" note="系统给推荐押金，号主填的金额为准"
+            <Card
+              title="押金规则"
+              note="系统根据账号属性与装备推荐押金，实际以号主设定为准（受上下限约束）"
+              help="推荐押金根据保险箱、角色属性及皮肤加价项累加并按策略取整；号主可在满足最低要求且不超过上限的范围内调整实际押金。"
               info={policy ? <p>推荐押金＝各项之和，按政策取整单位（{centsYuan(policy.recommendation.parameters.rounding.unitCents)}）向上取整，零值时最低 {centsYuan(policy.recommendation.parameters.rounding.zeroFallbackCents)}，不超过上限；号主可改，但必须满足最低值且不超过上限。</p> : <p>当前生效价格版本未提供资金政策，本节不使用任何默认金额。</p>}
-              badges={changeBadge(priceChanged, () => priceDiff(rules, curPrice?.id, latestPrice?.id).filter((r) => r.group === "押金规则"))}>
+              badges={changeBadge(priceChanged, () => priceDiff(rules, curPrice?.id, latestPrice?.id).filter((r) => r.group === "押金规则"))}
+            >
               {!policy ? <Hint>资金政策未提供：押金上限、普通/包赔最低值、加价项与号主保证金要求均为未提供，不参与本地估算。</Hint> : (
                 <>
                   <dl className="grid grid-cols-2 gap-x-6 gap-y-3 border-b border-border/60 pb-4 sm:grid-cols-4">
-                    <div><dt className="text-xs text-muted-foreground">押金上限</dt><dd className="mt-0.5 text-xl font-semibold leading-7 tabular-nums">{V("dep.cap", centsYuan(policy.recommendation.parameters.upperLimitCents), { unit: "元" })}</dd></div>
-                    <div><dt className="text-xs text-muted-foreground">普通最低</dt><dd className="mt-0.5 text-xl font-semibold leading-7 tabular-nums">{centsYuan(policy.ownerDepositRules.normal.minCents)}</dd></div>
-                    <div><dt className="text-xs text-muted-foreground">选全额包赔时最低</dt><dd className="mt-0.5 text-xl font-semibold leading-7 tabular-nums">{centsYuan(policy.ownerDepositRules.fullPayoutSelected.minCents)}</dd></div>
-                    <div><dt className="text-xs text-muted-foreground">号主保证金</dt><dd className="mt-0.5 text-xl font-semibold leading-7 tabular-nums">{policy.guaranteeRequirement.mode === "NOT_REQUIRED" ? "政策不要求" : centsYuan(policy.guaranteeRequirement.requiredCents)}</dd></div>
+                    <div>
+                      <dt className="flex items-center gap-1 text-xs text-muted-foreground">
+                        押金上限
+                        <HelpTip label="押金上限说明">号主能填写的最高押金上限，也是推荐押金的封顶阈值</HelpTip>
+                      </dt>
+                      <dd className="mt-0.5 text-xl font-semibold leading-7 tabular-nums text-foreground">{V("dep.cap", centsYuan(policy.recommendation.parameters.upperLimitCents), { unit: "元" })}</dd>
+                    </div>
+                    <div>
+                      <dt className="flex items-center gap-1 text-xs text-muted-foreground">
+                        普通最低
+                        <HelpTip label="普通最低说明">号主普通出租模式下必须满足的最低押金门槛</HelpTip>
+                      </dt>
+                      <dd className="mt-0.5 text-xl font-semibold leading-7 tabular-nums text-foreground">{centsYuan(policy.ownerDepositRules.normal.minCents)}</dd>
+                    </div>
+                    <div>
+                      <dt className="flex items-center gap-1 text-xs text-muted-foreground">
+                        选全额包赔时最低
+                        <HelpTip label="全额包赔最低说明">租客勾选全额包赔时号主端要求的最低押金门槛</HelpTip>
+                      </dt>
+                      <dd className="mt-0.5 text-xl font-semibold leading-7 tabular-nums text-foreground">{centsYuan(policy.ownerDepositRules.fullPayoutSelected.minCents)}</dd>
+                    </div>
+                    <div>
+                      <dt className="flex items-center gap-1 text-xs text-muted-foreground">
+                        号主保证金
+                        <HelpTip label="号主保证金说明">平台要求的号主履约保证金资质要求</HelpTip>
+                      </dt>
+                      <dd className="mt-0.5 text-xl font-semibold leading-7 tabular-nums text-foreground">{policy.guaranteeRequirement.mode === "NOT_REQUIRED" ? "政策不要求" : centsYuan(policy.guaranteeRequirement.requiredCents)}</dd>
+                    </div>
                   </dl>
 
                   <ScrollTable label="推荐押金加价项">
@@ -331,9 +438,9 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
                         <TableRow><TableCell className="font-medium">7 级负重</TableCell><TableCell className="text-xs text-muted-foreground">角色属性</TableCell><TableCell className="text-right tabular-nums">{V("dep.bear7", centsYuan(policy.recommendation.parameters.bearAtLeast7Cents), { unit: "元" })}</TableCell><TableCell className="text-right text-muted-foreground">—</TableCell></TableRow>
                         <TableRow><TableCell className="font-medium">3 级潜水</TableCell><TableCell className="text-xs text-muted-foreground">角色属性</TableCell><TableCell className="text-right tabular-nums">{V("dep.dive3", centsYuan(policy.recommendation.parameters.diveAtLeast3Cents), { unit: "元" })}</TableCell><TableCell className="text-right text-muted-foreground">—</TableCell></TableRow>
                         {policy.recommendation.schema === "deposit-recommendation-v2" ? policy.recommendation.parameters.skinRules.map((row, index) => (
-                          <TableRow key={`skin-v2-${index}`}><TableCell>{row.ownerKind === "AGENT" ? "干员" : row.ownerKind === "FIREARM" ? "枪械" : "近战外观"}</TableCell><TableCell>{row.rarityCode === null ? "类型兜底（含未知品质）" : rules.depositCatalog?.rarities.find(rarity => rarity.code === row.rarityCode)?.name ?? row.rarityCode}</TableCell><TableCell className="text-right tabular-nums">{row.firstCents === null ? "待配置" : centsYuan(row.firstCents)}</TableCell><TableCell className="text-right tabular-nums">{row.subsequentCents === null ? "待配置" : centsYuan(row.subsequentCents)}</TableCell></TableRow>
+                          <TableRow key={`skin-v2-${index}`}><TableCell className="font-medium">{row.ownerKind === "AGENT" ? "干员" : row.ownerKind === "FIREARM" ? "枪械" : "近战外观"}</TableCell><TableCell className="text-xs text-muted-foreground">{row.rarityCode === null ? "类型兜底（含未知品质）" : rules.depositCatalog?.rarities.find(rarity => rarity.code === row.rarityCode)?.name ?? row.rarityCode}</TableCell><TableCell className="text-right tabular-nums">{row.firstCents === null ? "待配置" : centsYuan(row.firstCents)}</TableCell><TableCell className="text-right tabular-nums">{row.subsequentCents === null ? "待配置" : centsYuan(row.subsequentCents)}</TableCell></TableRow>
                         )) : null}
-                        {policy.recommendation.schema === "deposit-recommendation-v2" ? policy.recommendation.parameters.skinOverrides.map(row => <TableRow key={`override-${row.skinId}`}><TableCell>{rules.depositCatalog?.skins.find(skin => skin.id === row.skinId)?.name ?? row.skinId}</TableCell><TableCell>单词条覆盖</TableCell><TableCell className="text-right">{row.amountCents === null ? "待配置" : centsYuan(row.amountCents)}</TableCell><TableCell>—</TableCell></TableRow>) : null}
+                        {policy.recommendation.schema === "deposit-recommendation-v2" ? policy.recommendation.parameters.skinOverrides.map(row => <TableRow key={`override-${row.skinId}`}><TableCell className="font-medium">{rules.depositCatalog?.skins.find(skin => skin.id === row.skinId)?.name ?? row.skinId}</TableCell><TableCell className="text-xs text-muted-foreground">单词条覆盖</TableCell><TableCell className="text-right tabular-nums">{row.amountCents === null ? "待配置" : centsYuan(row.amountCents)}</TableCell><TableCell className="text-right text-muted-foreground">—</TableCell></TableRow>) : null}
                       </TableBody>
                     </Table>
                   </ScrollTable>
@@ -345,7 +452,10 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
 
           <section className="section-panel" aria-label="租期与出租协议引用">
             <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
-              <div><h2 className="text-base font-semibold">租期与每日消耗 · 出租协议引用</h2><p className="mt-0.5 text-xs text-muted-foreground">这里只读；改协议去「出租协议」。</p></div>
+              <div>
+                <h2 className="text-base font-semibold">租期与每日消耗 · 出租协议引用</h2>
+                <p className="mt-0.5 text-xs text-muted-foreground">呈现当前线上生效的租期规则与关联协议引用；调整条款请前往「出租协议」。</p>
+              </div>
               <div className="flex flex-wrap gap-2">{changeBadge(termChanged, () => termDiff(rules, curTerm?.id, latestTerm?.id))}{changeBadge(agreementChanged, () => agreementDiff(rules, curAgreement?.id, latestAgreement?.id))}</div>
             </div>
             <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,320px)]">
@@ -376,7 +486,10 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
                     <Button type="button" variant="outline" size="sm" className="mt-3" onClick={() => setDialog("agreement")}>查看协议正文</Button>
                   </>
                 ) : <p className="mt-1 text-sm text-muted-foreground">生效组合未提供出租协议版本，或该版本未随规则读取返回。</p>}
-                <p className="mt-2 text-[11px] text-muted-foreground">换协议后，已有订单仍按下单时的协议。</p>
+                <div className="mt-3 flex items-center gap-1.5 border-t border-border/60 pt-2.5 text-[11px] text-muted-foreground">
+                  <Info className="size-3 shrink-0 text-muted-foreground/70" />
+                  <span>协议更新后，存量历史订单继续遵循租客下单时签署的原协议版本。</span>
+                </div>
               </div>
             </div>
           </section>
@@ -414,27 +527,59 @@ export function SettlementRules() {
   return (
     <Collapsible open={open} onOpenChange={setOpen} className="section-panel">
       <CollapsibleTrigger render={<Button type="button" variant="ghost" className="h-auto w-full justify-start px-0 py-2 text-left whitespace-normal" />}>
-        {open ? <ChevronDownIcon className="size-4 shrink-0" /> : <ChevronRightIcon className="size-4 shrink-0" />}<span className="grid min-w-0 gap-1 sm:flex sm:items-center sm:gap-2"><span className="shrink-0 text-base font-semibold">结算与包赔规则说明</span><span className="text-xs text-muted-foreground">平台统一规定，本页不可修改 · 全额包赔服务费 8% · 租客主动提前结束时按消耗比例补差</span></span>
+        {open ? <ChevronDownIcon className="size-4 shrink-0" /> : <ChevronRightIcon className="size-4 shrink-0" />}<span className="grid min-w-0 gap-1 sm:flex sm:items-center sm:gap-2"><span className="shrink-0 text-base font-semibold">结算与包赔规则说明</span><span className="text-xs text-muted-foreground">平台统一结算标准，本页不可修改 · 全额包赔服务费 8% · 租客提前结束按实际消耗比例补差</span></span>
       </CollapsibleTrigger>
       <CollapsibleContent>
         <div className="mt-4 grid grid-cols-1 gap-6 lg:grid-cols-2">
           <div className="min-w-0">
-            <h4 className="mb-2 text-xs font-semibold">全额包赔 8% · 谁承担</h4>
+            <div className="mb-2 flex items-center gap-1.5">
+              <h4 className="text-xs font-semibold text-foreground">全额包赔服务费（8%）· 承担方矩阵</h4>
+              <HelpTip label="服务费承担说明">
+                全额包赔服务费由平台独立收取并记账，按此履约矩阵划分号主或租客承担，不与常规物资及哈夫币价差合并。
+              </HelpTip>
+            </div>
             <ScrollTable label="包赔承担方">
               <Table className="min-w-[360px]">
-                <TableHeader><TableRow><TableHead>怎么结束</TableHead><TableHead>按什么算</TableHead><TableHead className="text-right">谁付</TableHead></TableRow></TableHeader>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>结算场景</TableHead>
+                    <TableHead>计费依据</TableHead>
+                    <TableHead className="text-right">全额包赔服务费承担方</TableHead>
+                  </TableRow>
+                </TableHeader>
                 <TableBody>
-                  <TableRow><TableCell>正常结束</TableCell><TableCell>号主按实际消耗得到的金额</TableCell><TableCell className="text-right">号主</TableCell></TableRow>
-                  <TableRow><TableCell>租客主动提前结束</TableCell><TableCell>号主开租时的全额</TableCell><TableCell className="text-right">租客</TableCell></TableRow>
-                  <TableRow><TableCell>号主或账号原因提前结束</TableCell><TableCell>号主按实际消耗得到的金额</TableCell><TableCell className="text-right">号主</TableCell></TableRow>
-                  <TableRow><TableCell>开租前取消 / 未选包赔</TableCell><TableCell>—</TableCell><TableCell className="text-right">不收</TableCell></TableRow>
+                  <TableRow>
+                    <TableCell className="font-medium">正常履约结束</TableCell>
+                    <TableCell className="text-muted-foreground">号主按实际消耗结算金额</TableCell>
+                    <TableCell className="text-right font-medium text-foreground">号主承担</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell className="font-medium">租客主动提前结束</TableCell>
+                    <TableCell className="text-muted-foreground">号主开租时全额申报金额</TableCell>
+                    <TableCell className="text-right font-medium text-foreground">租客承担</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell className="font-medium">号主或账号异常提前结束</TableCell>
+                    <TableCell className="text-muted-foreground">号主按实际消耗结算金额</TableCell>
+                    <TableCell className="text-right font-medium text-foreground">号主承担</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell className="font-medium">开租前取消 / 未勾选包赔</TableCell>
+                    <TableCell className="text-muted-foreground">—</TableCell>
+                    <TableCell className="text-right text-muted-foreground">免收（不适用）</TableCell>
+                  </TableRow>
                 </TableBody>
               </Table>
             </ScrollTable>
-            <p className="mt-2 text-[11px] text-muted-foreground">服务费归平台，单独列出，不算在价差里。</p>
+            <p className="mt-2 text-[11px] text-muted-foreground">服务费归平台单独记账，不计入日常常规租金价差。</p>
           </div>
           <div className="min-w-0">
-            <h4 className="mb-2 text-xs font-semibold">租客主动提前结束 · 补交哈夫币价差</h4>
+            <div className="mb-2 flex items-center gap-1.5">
+              <h4 className="text-xs font-semibold text-foreground">租客主动提前结束 · 哈夫币价差补交梯度</h4>
+              <HelpTip label="提前结束补差说明">
+                租客主动提前结束租赁时，需按实际已消耗比例阶梯补交哈夫币价差，消耗达到 70% 及以上时免交补差。
+              </HelpTip>
+            </div>
             <svg viewBox={`0 0 ${W} ${H}`} className="w-full max-w-md text-foreground" role="img" aria-label="补差比例：消耗0%补100%，50%补50%，60%补25%，70%及以上为0">
               <line x1={L} y1={B} x2={R} y2={B} className="stroke-border" />
               <line x1={L} y1={T} x2={L} y2={B} className="stroke-border" />
@@ -445,7 +590,7 @@ export function SettlementRules() {
               {[0, 0.5, 0.7, 1].map((c) => <text key={c} x={x(c)} y={B + 14} fontSize={10} textAnchor="middle" className="fill-muted-foreground">{c * 100}%</text>)}
               <text x={R} y={B + 26} fontSize={10} textAnchor="end" className="fill-muted-foreground">哈夫币已消耗</text>
             </svg>
-            <p className="mt-2 text-[11px] text-muted-foreground">租客主动提前结束时，按消耗比例计算补差；达到 70% 时该项补差为 0。补差＝该单哈夫币价差总额 × 图中比例；号主原因提前结束不补差。</p>
+            <p className="mt-2 text-[11px] text-muted-foreground">租客主动提前结束时，按消耗比例梯度补交价差；达到 70% 时该项补差为 0。号主原因提前结束不产生补差。</p>
           </div>
         </div>
       </CollapsibleContent>

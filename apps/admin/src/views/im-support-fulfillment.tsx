@@ -7,6 +7,7 @@ import { Dialog, DialogContent } from "../components/ui/dialog";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Card, CardContent, CardDescription, CardTitle } from "../components/ui/card";
 import { Item, ItemActions, ItemContent, ItemGroup, ItemMedia, ItemTitle } from "../components/ui/item";
 import {
@@ -545,7 +546,33 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, frozenIn
         <small>正常结算由买卖双方提交并互相确认；客服处理提前分类或人工调整。</small>
         {renderInventory("remaining")}
         <div className="im-support-fulfillment-controls">
-          <label>提前原因<select value={endReason} disabled={locked} onChange={(event) => { invalidate(); setEndReason(event.target.value as "" | EarlyEndReason); }}><option value="">不选择（正常结算无需客服）</option><option value="TENANT_VOLUNTARY_EARLY">租客自愿提前</option><option value="OWNER_OR_ACCOUNT_EARLY">号主/账号原因提前</option></select></label>
+          <label className="space-y-1 block text-xs">
+            <span>提前原因</span>
+            <div className="relative">
+              <Select
+                value={endReason || "NONE"}
+                disabled={locked}
+                onValueChange={(val) => {
+                  invalidate();
+                  setEndReason(val === "NONE" ? "" : (val as EarlyEndReason));
+                }}
+                items={[
+                  { value: "NONE", label: "不选择（正常结算无需客服）" },
+                  { value: "TENANT_VOLUNTARY_EARLY", label: "租客自愿提前" },
+                  { value: "OWNER_OR_ACCOUNT_EARLY", label: "号主/账号原因提前" },
+                ]}
+              >
+                <SelectTrigger aria-label="提前原因" className="h-9 w-full text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="NONE">不选择（正常结算无需客服）</SelectItem>
+                  <SelectItem value="TENANT_VOLUNTARY_EARLY">租客自愿提前</SelectItem>
+                  <SelectItem value="OWNER_OR_ACCOUNT_EARLY">号主/账号原因提前</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </label>
         </div>
         <div className="im-support-fulfillment-actions">
           <button type="button" onClick={previewSettlement} disabled={primaryDisabled || lines.length === 0 || endReason === ""}>生成提前结算预览</button>

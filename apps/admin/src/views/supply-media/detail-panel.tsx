@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import { Check, Copy, ExternalLink } from "lucide-react";
+import { Check, Copy, ExternalLink, X } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -55,6 +55,7 @@ export function MediaDetailPanel({
   onOpenPath,
   onAction,
   onNext,
+  onClose,
   hasNext = false,
   busy,
   hideHeading = false,
@@ -67,6 +68,7 @@ export function MediaDetailPanel({
   onOpenPath?: (path: string) => void;
   onAction: (action: MediaAction) => void;
   onNext?: () => void;
+  onClose?: () => void;
   hasNext?: boolean;
   busy: boolean;
   hideHeading?: boolean;
@@ -101,22 +103,37 @@ export function MediaDetailPanel({
   };
 
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-hidden">
-      <div className="min-h-0 min-w-0 flex-1 space-y-3 overflow-y-auto pr-1">
-        <div className="flex items-start justify-between gap-2">
-          <div className="min-w-0">
-            {!hideHeading ? <h4 className="text-sm font-semibold tracking-tight">素材详情</h4> : null}
-            <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
-              <span className="font-medium text-foreground">{PURPOSE_LABELS[asset.purpose] ?? asset.purpose}</span>
-              <span>·</span>
-              <span className="font-mono">{asset.width}×{asset.height}</span>
-              <span>·</span>
-              <span className="font-mono">{asset.mime}</span>
-            </div>
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+      {/* 头部标题与收起入口 */}
+      <div className="flex items-center justify-between gap-2 pb-3 border-b border-border/60">
+        <div className="min-w-0">
+          {!hideHeading ? <h4 className="text-sm font-semibold tracking-tight">素材详情</h4> : null}
+          <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+            <span className="font-medium text-foreground">{PURPOSE_LABELS[asset.purpose] ?? asset.purpose}</span>
+            <span>·</span>
+            <span className="font-mono">{asset.width}×{asset.height}</span>
+            <span>·</span>
+            <span className="font-mono">{asset.mime}</span>
           </div>
         </div>
+        {onClose ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            aria-label="收起详情"
+            onClick={onClose}
+            className="size-7 rounded-md text-muted-foreground hover:text-foreground"
+          >
+            <X className="size-4" />
+          </Button>
+        ) : null}
+      </div>
 
-        <div className="group relative overflow-hidden rounded-lg border border-border/80 bg-surface-raised shadow-xs">
+      {/* 主体滚动区：单流顺畅滚动，彻底杜绝内部多层滚动嵌套 */}
+      <div className="min-h-0 min-w-0 flex-1 space-y-3.5 overflow-y-auto py-3 pr-1">
+        {/* 图片预览卡片 */}
+        <div className="group relative overflow-hidden rounded-xl border border-border/80 bg-surface-raised shadow-xs">
           <Button
             type="button"
             variant="outline"
@@ -127,7 +144,7 @@ export function MediaDetailPanel({
             <img
               src={mediaContentUrl(asset.id)}
               alt={`素材 ${asset.id} 预览`}
-              className="max-h-52 w-full rounded object-contain bg-surface-raised p-1"
+              className="max-h-60 w-full rounded-lg object-contain bg-surface-raised p-2"
               loading="lazy"
               onError={(event) => {
                 const img = event.currentTarget;
@@ -138,19 +155,20 @@ export function MediaDetailPanel({
               }}
             />
           </Button>
-          <div className="pointer-events-none absolute bottom-1.5 right-1.5 rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white/90 backdrop-blur-xs opacity-0 transition-opacity group-hover:opacity-100">
-            点击全屏核对
+          <div className="pointer-events-none absolute bottom-2 right-2 rounded-md bg-black/70 px-2 py-1 text-[11px] text-white/95 backdrop-blur-xs opacity-0 transition-opacity group-hover:opacity-100">
+            点击全屏放大核对
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-muted/40 px-2.5 py-1.5 text-[11px] text-muted-foreground">
+        {/* 标识与哈希属性条 */}
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-muted/40 px-3 py-2 text-[11px] text-muted-foreground border border-border/60">
           <div className="flex items-center gap-1.5 min-w-0">
             <span className="shrink-0 text-muted-foreground/70">素材ID:</span>
             <code className="truncate font-mono text-[10px] text-foreground font-medium">{asset.id}</code>
             <Button type="button" variant="ghost" size="icon-xs" className="h-5 w-5 shrink-0" aria-label="复制素材ID" onClick={() => copy(asset.id)}>
               {copied === "ok" ? <Check className="size-3 text-emerald-500" /> : <Copy className="size-3" />}
             </Button>
-            {copied === "ok" ? <span className="text-[10px] text-emerald-500">已复制</span> : copied === "fail" ? <span className="text-[10px] text-destructive">复制失败</span> : null}
+            {copied === "ok" ? <span className="text-[10px] text-emerald-500 font-medium">已复制</span> : copied === "fail" ? <span className="text-[10px] text-destructive">复制失败</span> : null}
           </div>
           <div className="flex items-center gap-2 text-[10px] shrink-0 font-mono text-muted-foreground">
             <span>hash {asset.contentHash.slice(0, 8)}…</span>
@@ -159,16 +177,22 @@ export function MediaDetailPanel({
           </div>
         </div>
 
-        <dl className="divide-y divide-border/60 rounded-md border border-border/80 bg-card/50 px-3 py-0.5">
+        {/* 状态与事实 dl */}
+        <dl className="divide-y divide-border/60 rounded-xl border border-border/80 bg-card/60 px-3.5 py-1">
           <StatusRow label="审核状态" value={STATE_LABELS[asset.reviewState] ?? asset.reviewState} badge={asset.reviewState === "APPROVED" ? "ok" : asset.reviewState === "PENDING" ? "warn" : "danger"} />
           <StatusRow label="当前可见性" value={VISIBILITY_LABELS[asset.accessClass] ?? asset.accessClass} badge={asset.accessClass === "PUBLIC_DISPLAY" ? "ok" : "neutral"} />
           <StatusRow label="技术状态" value={technicalFact(asset)} />
           <StatusRow label="对象绑定" value={bindingFact(asset)} />
           <StatusRow label="素材修订" value={revisionFact(asset)} />
         </dl>
-        {!asset.technicalState || !asset.binding ? <p className="text-[11px] text-muted-foreground/80 leading-relaxed">技术与绑定事实未随队列返回，不推定已完成；能加载图片不代表技术处理通过，公开配置也不单独证明匿名可读。素材版本冲突保护（expectedRevision/409）合同尚未统一，本页不承诺并发覆盖会被拒绝。</p> : null}
+        {!asset.technicalState || !asset.binding ? (
+          <p className="text-[11px] text-muted-foreground/80 leading-relaxed px-1">
+            技术与绑定事实未随队列返回，不推定已完成；能加载图片不代表技术处理通过，公开配置也不单独证明匿名可读。素材版本冲突保护（expectedRevision/409）合同尚未统一，本页不承诺并发覆盖会被拒绝。
+          </p>
+        ) : null}
 
-        <dl className="divide-y divide-border/60 rounded-md border border-border/80 bg-card/50 px-3 py-0.5">
+        {/* 归属与时间 dl */}
+        <dl className="divide-y divide-border/60 rounded-xl border border-border/80 bg-card/60 px-3.5 py-1">
           <StatusRow label="归属" value={OWNERSHIP_LABELS[asset.ownershipKind] ?? asset.ownershipKind} />
           <StatusRow label="对象" value={objectName(asset, gameNames)} />
           <StatusRow label="来源" value={asset.uploadedByRealm === "admin" ? "管理员" : "用户"} />
@@ -187,57 +211,122 @@ export function MediaDetailPanel({
           </div>
           {asset.reviewReason ? <StatusRow label="审核说明" value={asset.reviewReason} /> : null}
         </dl>
-
       </div>
 
+      {/* 底部操作区：去除嵌套滚动，按钮视觉加强 */}
       {set.accountDisplayOnly ? (
-          <div className="max-h-[50%] shrink-0 space-y-2 overflow-y-auto border-t border-border/60 pt-3">
-            <div className="rounded-md border border-sky-500/30 bg-sky-500/5 p-2.5">
-              <p className="text-xs text-muted-foreground leading-relaxed">{set.note}</p>
-            </div>
-            <Button
-              type="button"
-              variant="secondary"
-              size="sm"
-              className="h-9 w-full whitespace-normal font-medium shadow-2xs"
-              disabled={!asset.accountId || !onOpenPath}
-              onClick={() => asset.accountId && onOpenPath?.(`/supply/reviews/${encodeURIComponent(asset.accountId)}?context=changes&assetId=${encodeURIComponent(asset.id)}`)}
-            >
-              <ExternalLink className="size-3.5" /> 进入来源账号核对本图
-            </Button>
-            {!asset.accountId ? <p className="text-[11px] text-amber-600 dark:text-amber-400">来源账号未提供，请先核对对象关联；不能凭本图处置。</p> : null}
+        <div className="shrink-0 space-y-2 border-t border-border/60 pt-3">
+          <div className="rounded-lg border border-sky-500/30 bg-sky-500/5 p-2.5">
+            <p className="text-xs text-muted-foreground leading-relaxed">{set.note}</p>
           </div>
-        ) : null}
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            className="h-9 w-full whitespace-normal font-medium shadow-2xs"
+            disabled={!asset.accountId || !onOpenPath}
+            onClick={() => asset.accountId && onOpenPath?.(`/supply/reviews/${encodeURIComponent(asset.accountId)}?context=changes&assetId=${encodeURIComponent(asset.id)}`)}
+          >
+            <ExternalLink className="size-3.5" /> 进入来源账号核对本图
+          </Button>
+          {!asset.accountId ? <p className="text-[11px] text-amber-600 dark:text-amber-400">来源账号未提供，请先核对对象关联；不能凭本图处置。</p> : null}
+        </div>
+      ) : null}
 
       {!set.accountDisplayOnly && (set.actions.length > 0 || set.note) ? (
-        <div className="max-h-[50%] shrink-0 space-y-2 overflow-y-auto border-t border-border/60 pt-3">
+        <div className="shrink-0 space-y-2.5 border-t border-border/60 pt-3">
           {set.note ? <p className="text-xs text-muted-foreground">{set.note}</p> : null}
           {reviewActions.length ? (
-            <div className="space-y-2">
+            <div className="space-y-1.5">
               <p className="text-[11px] font-medium text-muted-foreground">审核决定</p>
               {(() => {
                 const primary = reviewActions.find((action) => action.kind === "review" && action.decision === "APPROVE");
                 const rest = reviewActions.filter((action) => action !== primary);
-                return <>
-                  {primary ? <Button type="button" size="sm" className="h-9 w-full font-medium" variant="default" disabled={busy} onClick={() => onAction(primary)}>{primary.label}</Button> : null}
-                  {rest.length ? <div className="grid grid-cols-2 gap-2">{rest.map((action) => <Button key={`${action.kind}-${action.kind === "review" ? action.decision : "x"}`} type="button" size="sm" className="h-9 w-full" variant={getActionVariant(action)} disabled={busy} onClick={() => onAction(action)}>{action.label}</Button>)}</div> : null}
-                </>;
+                return (
+                  <>
+                    {primary ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        className="h-9 w-full font-medium bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs"
+                        disabled={busy}
+                        onClick={() => onAction(primary)}
+                      >
+                        {primary.label}
+                      </Button>
+                    ) : null}
+                    {rest.length ? (
+                      <div className="grid grid-cols-2 gap-2">
+                        {rest.map((action) => (
+                          <Button
+                            key={`${action.kind}-${action.kind === "review" ? action.decision : "x"}`}
+                            type="button"
+                            size="sm"
+                            className="h-9 w-full"
+                            variant={getActionVariant(action)}
+                            disabled={busy}
+                            onClick={() => onAction(action)}
+                          >
+                            {action.label}
+                          </Button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </>
+                );
               })()}
             </div>
           ) : null}
           {visibilityActions.length ? (
-            <div className="space-y-2">
+            <div className="space-y-1.5">
               <p className="text-[11px] font-medium text-muted-foreground">公开范围</p>
-              <div className={visibilityActions.length > 1 ? "grid grid-cols-2 gap-2" : ""}>{visibilityActions.map((action) => <Button key={`${action.kind}-${action.kind === "visibility" ? action.visibility : "x"}`} type="button" size="sm" className="h-9 w-full" variant={getActionVariant(action)} disabled={busy} onClick={() => onAction(action)}>{action.label}</Button>)}</div>
+              <div className={visibilityActions.length > 1 ? "grid grid-cols-2 gap-2" : ""}>
+                {visibilityActions.map((action) => (
+                  <Button
+                    key={`${action.kind}-${action.kind === "visibility" ? action.visibility : "x"}`}
+                    type="button"
+                    size="sm"
+                    className="h-9 w-full"
+                    variant={getActionVariant(action)}
+                    disabled={busy}
+                    onClick={() => onAction(action)}
+                  >
+                    {action.label}
+                  </Button>
+                ))}
+              </div>
             </div>
           ) : null}
           {coverActions.length ? (
-            <div className="space-y-2">
+            <div className="space-y-1.5">
               <p className="text-[11px] font-medium text-muted-foreground">目录绑定</p>
-              {coverActions.map((action) => <Button key={`${action.kind}-cover`} type="button" size="sm" className="h-9 w-full" variant={getActionVariant(action)} disabled={busy} onClick={() => onAction(action)}>{action.label}</Button>)}
+              {coverActions.map((action) => (
+                <Button
+                  key={`${action.kind}-cover`}
+                  type="button"
+                  size="sm"
+                  className="h-9 w-full"
+                  variant={getActionVariant(action)}
+                  disabled={busy}
+                  onClick={() => onAction(action)}
+                >
+                  {action.label}
+                </Button>
+              ))}
             </div>
           ) : null}
-          {onNext && hasNext ? <Button type="button" size="sm" variant="secondary" className="h-9 w-full" disabled={busy} onClick={onNext}>下一张待审</Button> : null}
+          {onNext && hasNext ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              className="h-9 w-full font-medium"
+              disabled={busy}
+              onClick={onNext}
+            >
+              下一张待审
+            </Button>
+          ) : null}
         </div>
       ) : null}
     </div>

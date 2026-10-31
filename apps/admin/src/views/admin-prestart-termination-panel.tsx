@@ -1,6 +1,8 @@
 import { useEffect,useRef,useState } from "react";
 import { adminRequest,AdminApiError,friendlyError } from "../api";
 import { Button } from "../components/ui-elements";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Textarea } from "@/components/ui/textarea";
 import { formatFundingCents } from "./supply-review/model";
 import { AdminOriginalRefundPanel } from './admin-original-refund-panel';
 
@@ -91,8 +93,8 @@ export function AdminPrestartTerminationPanel({orderId,binding,canWrite}:{orderI
       canWrite={canWrite&&read?.canReview===true} binding={binding} onRecorded={()=>reload(n=>n+1)}/>:<p>本地受控责任未接真实渠道。</p>}
    </div>:null}
    {(canWrite&&read?.canReview&&(r.state==='REQUESTED'||r.state==='REVIEW_REQUIRED')||pending)?<div className="space-y-2">
-    <label className="block">核实记录<textarea aria-label="未开租核实记录" value={reason} maxLength={150} disabled={busy||!!pending} onChange={e=>setReason(e.target.value)}/></label>
-    <label className="flex gap-2"><input type="checkbox" checked={assessed} disabled={busy||!!pending} onChange={e=>setAssessed(e.target.checked)}/>已核实未交付/使用、无争议且无其他受审金额调整；本次全额原路应退</label>
+    <label className="block">核实记录<Textarea aria-label="未开租核实记录" value={reason} maxLength={150} disabled={busy||!!pending} onChange={e=>setReason(e.target.value)} rows={2} className="min-h-16 text-xs mt-1" /></label>
+    <label className="flex gap-2 items-center cursor-pointer select-none"><Checkbox name="assessed" checked={assessed} disabled={busy||!!pending} onCheckedChange={checked=>setAssessed(checked===true)}/><span>已核实未交付/使用、无争议且无其他受审金额调整；本次全额原路应退</span></label>
     {pending?<Button size="sm" disabled={busy||storageBlocked} onClick={()=>void run(pending.body.decision)}>恢复原审核请求</Button>:<div className="flex flex-wrap gap-2">
      <Button size="sm" disabled={busy||!assessed||reason.trim().length<3||storageBlocked||!read?.eligibility.allowed||r.fullRefundCents===null} onClick={()=>void run('APPROVE')}>核准终止并记录全额应退</Button>
      <Button size="sm" variant="secondary" disabled={busy||reason.trim().length<3||storageBlocked} onClick={()=>void run('REVIEW_REQUIRED')}>转争议/依据复核</Button>

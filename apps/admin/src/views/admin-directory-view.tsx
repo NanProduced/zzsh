@@ -4,6 +4,8 @@ import { Button as UiButton } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Icons } from "../components/icons";
 import { Timeline, TimelineContent, TimelineDate, TimelineHeader, TimelineIndicator, TimelineItem, TimelineSeparator } from "@/components/reui/timeline";
@@ -396,11 +398,11 @@ function SecurityActionDialog({
           {copy.needsReason ? (
           <label className="block">
             <FieldLabel>原因（写入审计）</FieldLabel>
-            <textarea
+            <Textarea
               value={reason}
               onChange={(event) => setReason(event.target.value)}
               rows={2}
-              className="w-full resize-y rounded-lg border border-input bg-transparent px-2.5 py-2 text-sm focus-visible:outline-none! focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30"
+              className="min-h-16 text-sm"
             />
           </label>
           ) : null}
@@ -447,8 +449,14 @@ function PermissionPicker({
               if (!permission) return null;
               const hint = permissionDescription(permission);
               return (
-                <label key={code} className="flex items-start gap-2.5 rounded-md px-2 py-2 hover:bg-foreground/[0.05]">
-                  <input type="checkbox" className="mt-0.5" disabled={disabled} checked={selected.includes(code)} onChange={() => onToggle(code)} />
+                <label key={code} className="flex items-start gap-2.5 rounded-md px-2 py-2 hover:bg-foreground/[0.05] cursor-pointer select-none">
+                  <Checkbox
+                    name={code}
+                    className="mt-0.5"
+                    disabled={disabled}
+                    checked={selected.includes(code)}
+                    onCheckedChange={() => onToggle(code)}
+                  />
                   <span className="min-w-0">
                     <strong className="block text-sm font-normal text-foreground">{permissionLabel(permission)}</strong>
                     {hint ? <span className="mt-0.5 block text-xs leading-snug text-muted-foreground">{hint}</span> : null}
@@ -1138,14 +1146,14 @@ export function AdminDirectoryView({
                   {rolesReadable ? (
                     <div className="grid gap-2 sm:grid-cols-2">
                       {activeRoleOptions.map((role) => (
-                        <label key={role.id} className="flex items-center gap-2.5 rounded-md border border-border/60 px-3 py-2 text-sm hover:bg-foreground/[0.03]">
-                          <input type="checkbox" checked={roleIds.includes(role.id)} disabled={!canGrant || loading} onChange={() => toggle(roleIds, role.id, setRoleIds)} />
+                        <label key={role.id} className="flex items-center gap-2.5 rounded-md border border-border/60 px-3 py-2 text-sm hover:bg-foreground/[0.03] cursor-pointer select-none">
+                          <Checkbox name={role.name} checked={roleIds.includes(role.id)} disabled={!canGrant || loading} onCheckedChange={() => toggle(roleIds, role.id, setRoleIds)} />
                           <span className="min-w-0 truncate">{role.name}</span>
                         </label>
                       ))}
                       {disabledAssigned.map((role) => (
-                        <label key={role.id} className="flex items-center gap-2.5 rounded-md border border-dashed border-amber-500/50 bg-amber-500/[0.07] px-3 py-2 text-sm">
-                          <input type="checkbox" checked={roleIds.includes(role.id)} disabled={!canGrant || loading} onChange={() => toggle(roleIds, role.id, setRoleIds)} />
+                        <label key={role.id} className="flex items-center gap-2.5 rounded-md border border-dashed border-amber-500/50 bg-amber-500/[0.07] px-3 py-2 text-sm cursor-pointer select-none">
+                          <Checkbox name={role.name} checked={roleIds.includes(role.id)} disabled={!canGrant || loading} onCheckedChange={() => toggle(roleIds, role.id, setRoleIds)} />
                           <span className="min-w-0 truncate">{role.name}</span>
                           <Badge variant="outline" className="ml-auto shrink-0 border-transparent bg-amber-500/15 text-amber-800 dark:text-amber-400">
                             已停用
@@ -1267,8 +1275,8 @@ export function AdminDirectoryView({
                     ) : (
                       <div className="grid gap-2 sm:grid-cols-2">
                         {games.map((game) => (
-                          <label key={game.id} className="flex items-center gap-2.5 rounded-md border border-border/60 px-3 py-2 text-sm hover:bg-foreground/[0.03]">
-                            <input type="checkbox" checked={scopeGameIds.includes(game.id)} disabled={!canGrant || loading} onChange={() => toggle(scopeGameIds, game.id, setScopeGameIds)} />
+                          <label key={game.id} className="flex items-center gap-2.5 rounded-md border border-border/60 px-3 py-2 text-sm hover:bg-foreground/[0.03] cursor-pointer select-none">
+                            <Checkbox name={game.name} checked={scopeGameIds.includes(game.id)} disabled={!canGrant || loading} onCheckedChange={() => toggle(scopeGameIds, game.id, setScopeGameIds)} />
                             <span className="min-w-0 truncate">{game.name}</span>
                           </label>
                         ))}
@@ -1894,7 +1902,7 @@ export function AdminDirectoryView({
                       {choice === "ALL_GAMES" ? "全部游戏" : choice === "SELECTED_GAMES" ? "指定游戏" : "无业务范围"}
                     </label>
                   ))}
-                  {createScopeChoice === "SELECTED_GAMES" ? <div className="flex flex-wrap gap-3">{games.map((game) => <label key={game.id} className="inline-flex items-center gap-2 text-sm"><input type="checkbox" checked={createScopeGameIds.includes(game.id)} onChange={() => toggle(createScopeGameIds, game.id, setCreateScopeGameIds)} />{game.name}</label>)}</div> : null}
+                  {createScopeChoice === "SELECTED_GAMES" ? <div className="flex flex-wrap gap-3">{games.map((game) => <label key={game.id} className="inline-flex items-center gap-2 text-sm cursor-pointer select-none"><Checkbox name={game.name} checked={createScopeGameIds.includes(game.id)} onCheckedChange={() => toggle(createScopeGameIds, game.id, setCreateScopeGameIds)} /><span>{game.name}</span></label>)}</div> : null}
                   {scopeChoiceError(createScopeChoice, createScopeGameIds) ? <p className="text-xs text-muted-foreground">{scopeChoiceError(createScopeChoice, createScopeGameIds)}</p> : null}
                 </fieldset>
                 {activeRoleOptions.length > 0 ? (
@@ -1902,8 +1910,8 @@ export function AdminDirectoryView({
                     <FieldLabel>预设角色</FieldLabel>
                     <div className="grid gap-2 sm:grid-cols-2">
                       {activeRoleOptions.map((role) => (
-                        <label key={role.id} className="flex items-center gap-2.5 rounded-md border border-border/60 px-3 py-2 text-sm hover:bg-foreground/[0.03]">
-                          <input type="checkbox" checked={createRoleIds.includes(role.id)} onChange={() => toggle(createRoleIds, role.id, setCreateRoleIds)} />
+                        <label key={role.id} className="flex items-center gap-2.5 rounded-md border border-border/60 px-3 py-2 text-sm hover:bg-foreground/[0.03] cursor-pointer select-none">
+                          <Checkbox name={role.name} checked={createRoleIds.includes(role.id)} onCheckedChange={() => toggle(createRoleIds, role.id, setCreateRoleIds)} />
                           <span className="min-w-0 truncate">{role.name}</span>
                         </label>
                       ))}
