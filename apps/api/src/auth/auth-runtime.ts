@@ -61,7 +61,7 @@ import { ConfigurationError, OrderImSdkRouteBindings, readSecret, type OrderImSd
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
 import { SecurityApiError, setAuditContext, withTransaction } from "./security-core";
 import { ImIdentityProvisioner, YunxinDynamicTokenService } from "../im/identity-lifecycle";
-import { MessageScopeRecoveryLifecycle, autoAssignWaitingConsultations, supportManagerIdentityKey, type ConsultationRouteOptions } from "../im/consultation";
+import { MessageScopeRecoveryLifecycle, autoAssignWaitingConsultations, scanSupportFirstResponseBreaches, supportManagerIdentityKey, type ConsultationRouteOptions } from "../im/consultation";
 import { YunxinIdentityRepository } from "../im/yunxin-identity-repository";
 import { YunxinServerApiClient, type YunxinServerApi, type YunxinSupportScopeApi } from "../im/yunxin-provider";
 import type { ImMessageTransport } from "../im/im-contract";
@@ -1233,8 +1233,13 @@ export async function mountAuthHandlers(
   }
   if (options.supportDispatch) app.get(OrderDispatchLifecycle).start({ ...options.supportDispatch, pool: options.pool,
     // CS-04: reuse the order-dispatch tick for periodic consultation assignment; never a second timer.
-    ...(options.supportDispatch.autoAssignConsultations === true && yunxinConsultation
-      ? { consultationTick: () => autoAssignWaitingConsultations(yunxinConsultation, 5) } : {}),
+    ...(yunxinConsultation
+      ? { consultationTick: async () => {
+        if (options.supportDispatch!.autoAssignConsultations === true) await autoAssignWaitingConsultations(yunxinConsultation, 5);
+        // The first-response breach scan shares this tick so the SLA fact has a writer
+        // in every deployment that has a dispatch worker; without it the metric is inert.
+        await scanSupportFirstResponseBreaches(yunxinConsultation, 20);
+      } } : {}),
     onResult: (result) => { if(options.orderTeams)app.get(OrderTeamLifecycle).wake(); options.supportDispatch!.onResult?.(result); } });
   return { ...securityOptions, settlementRecordingEnabled };
 }
