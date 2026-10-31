@@ -113,8 +113,9 @@ test("order read list sends exact filters without persisting sensitive inputs an
   await setInput(inputs[0], order.displayNo);
   await setInput(inputs[1], order.renterUserId);
   await setInput(inputs[2], order.ownerUserId);
-  await setInput(inputs[3], "2026-09-29T00:00");
-  await setInput(inputs[4], "2026-10-01T00:00");
+  const dateInputs = [...node.querySelectorAll("[data-beijing-datetime-input]")];
+  await setInput(dateInputs[0], "2026-09-29T00:00");
+  await setInput(dateInputs[1], "2026-10-01T00:00");
   await act(async () => node.querySelector("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
   await until(() => calls.some((url) => url.includes("displayNo=")));
   const query = new URL(calls.at(-1), "http://127.0.0.1").searchParams;

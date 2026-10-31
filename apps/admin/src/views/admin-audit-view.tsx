@@ -1,3 +1,4 @@
+import { BeijingDateTimeField } from "@/components/beijing-datetime-field";
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import {
   AlertCircleIcon,
@@ -481,7 +482,7 @@ export function AdminAuditView({
     <label className="space-y-1 text-xs"><span className="text-muted-foreground block">{label}</span><Input name={key} value={draft[key]} onChange={(event) => setField(key, event.target.value)} className={inputClass} placeholder={placeholder} /></label>
   );
   const timeField = (key: "from" | "to", label: string) => (
-    <label className="space-y-1 text-xs"><span className="text-muted-foreground block">{label}（北京时间）</span><Input type="datetime-local" name={key} value={draft[key]} onChange={(event) => setField(key, event.target.value)} className={inputClass} aria-invalid={timeInvalid || undefined} /></label>
+    <BeijingDateTimeField label={label} value={draft[key]} onChange={(value) => setField(key, value)} invalid={timeInvalid} />
   );
   const columns = ["时间（北京时间）", "操作者", "操作", "对象", "结果", ...(isOperations ? ["详情"] : [])];
 
