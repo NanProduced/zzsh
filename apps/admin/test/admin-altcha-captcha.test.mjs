@@ -67,6 +67,16 @@ test("login view renders the self-hosted ALTCHA widget only when captcha is requ
   await gated.unmount();
 });
 
+test("login captcha hint distinguishes first challenge from a re-challenge after a solved attempt", async () => {
+  const first = await render(inShell({ ...loginProps, captchaRequired: true, captchaRound: 1 }));
+  assert.match(first.host.textContent, /多次登录失败，请先完成人机验证/);
+  assert.doesNotMatch(first.host.textContent, /请重新完成人机验证/);
+  await first.unmount();
+  const retry = await render(inShell({ ...loginProps, captchaRequired: true, captchaRound: 2, captchaRetry: true, error: "账号或密码错误。" }));
+  assert.match(retry.host.textContent, /请重新完成人机验证/);
+  assert.doesNotMatch(retry.host.textContent, /请完成人机验证后重试/, "no contradictory error copy");
+  await retry.unmount();
+});
 test("step-up store consumes payloads once and rotates the challenge", () => {
   assert.equal(isStepUpBody({ password: "p", totpCode: "123456" }), true);
   assert.equal(isStepUpBody({ password: "p" }), false);
@@ -102,5 +112,6 @@ test("adminRequest attaches the step-up payload and tracks CAPTCHA_REQUIRED", as
     assert.equal(seen[2].altcha, undefined, "non step-up bodies never carry the payload");
   } finally { globalThis.fetch = original; }
   assert.equal(friendlyError(new AdminApiError(403, "FORBIDDEN", undefined, "/security/reauth", [], [], "CAPTCHA_REQUIRED")), "请先完成人机验证后重试。");
-  assert.equal(friendlyError(new AdminApiError(401, "UNAUTHENTICATED", undefined, "/auth/sign-in/username", [], [], "CAPTCHA_REQUIRED")), "账号或密码错误，请完成人机验证后重试。");
+  assert.equal(friendlyError(new AdminApiError(401, "UNAUTHENTICATED", undefined, "/auth/sign-in/username", [], [], "CAPTCHA_REQUIRED")), "账号或密码错误。", "captcha instruction lives in the widget hint, not the error");
+  assert.equal(friendlyError(new AdminApiError(401, "UNAUTHENTICATED", undefined, "/security/reauth", [], [], "CAPTCHA_REQUIRED")), "密码或动态码错误。");
 });

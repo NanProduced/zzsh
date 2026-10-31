@@ -14,6 +14,8 @@ type LoginViewProps = {
   onSubmit: (identifier: string, password: string, altcha?: string) => void;
   captchaRequired?: boolean;
   captchaRound?: number;
+  /** 上一次已完成人机验证但凭据仍错误，且服务端要求新的挑战。 */
+  captchaRetry?: boolean;
   onRecovery: () => void;
 };
 
@@ -26,6 +28,7 @@ export function LoginView({
   onRecovery,
   captchaRequired = false,
   captchaRound = 0,
+  captchaRetry = false,
 }: LoginViewProps) {
   const [altcha, setAltcha] = useState<string | undefined>(undefined);
   const [password, setPassword] = useState("");
@@ -112,7 +115,7 @@ export function LoginView({
           </span>
         </div>
 
-        {captchaRequired ? <AltchaField key={captchaRound} onPayload={setAltcha} hint="多次登录失败，请先完成人机验证。" /> : null}
+        {captchaRequired ? <AltchaField key={captchaRound} onPayload={setAltcha} hint={captchaRetry ? "请重新完成人机验证。" : "多次登录失败，请先完成人机验证。"} /> : null}
 
         <StatusMessage error={error} />
 

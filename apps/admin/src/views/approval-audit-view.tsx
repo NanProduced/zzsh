@@ -3,7 +3,7 @@ import { ClipboardCheck, TriangleAlert } from "lucide-react";
 
 import { Icons } from "../components/icons";
 import { ListPagination } from "../components/admin-list";
-import { formatApprovalDate as formatDate } from "./approval/atoms";
+import { EmptyNote, formatApprovalDate as formatDate, ReadingNote } from "./approval/atoms";
 import { Button, StatusMessage } from "../components/ui-elements";
 import { Badge, InlineStatus } from "../components/ui/badge";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
@@ -1099,7 +1099,7 @@ export function ApprovalAuditView({
               </div>
               <ClipboardCheck size={20} className="text-muted-foreground" aria-hidden />
             </div>
-            {reading.operations ? <p className="mt-4 text-xs text-muted-foreground">正在读取…</p> : null}
+            {reading.operations ? <ReadingNote className="mt-4" /> : null}
             {operations === undefined ? (
               <div className="mt-4">
                 <NotApplicable reason={operationsNote ?? "业务登记读取不可用。"} />
@@ -1283,8 +1283,8 @@ export function ApprovalAuditView({
                     <p>模板版本只用于新申请；在途申请展示自己的快照版本。</p>
                   </div>
                 </div>
-                {reading.templates ? <p className="mt-4 text-xs text-muted-foreground">正在读取…</p> : null}
-                {!reading.templates && templates.length === 0 ? <p className="mt-4 text-xs text-muted-foreground">暂无模板配置。</p> : null}
+                {reading.templates ? <ReadingNote className="mt-4" /> : null}
+                {!reading.templates && templates.length === 0 ? <EmptyNote className="mt-4" title="暂无模板配置。" /> : null}
                 <div className="table-wrap">
                   <table className="data-table min-w-[760px]">
                     <caption className="sr-only">审批模板列表</caption>
@@ -1381,7 +1381,7 @@ export function ApprovalAuditView({
             <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
               查询范围：{auditScopeLabel(auditScope)}。审计按时间倒序分页，服务端暂无时间区间筛选；精确追查请用动作、操作者或申请编号。
             </p>
-            {reading.audit ? <p className="mt-4 text-xs text-muted-foreground">正在读取…</p> : null}
+            {reading.audit ? <ReadingNote className="mt-4" /> : null}
             <div className="table-wrap">
               <table className="data-table min-w-[900px]">
                 <caption className="sr-only">审批与授权审计事件</caption>
@@ -1425,7 +1425,7 @@ export function ApprovalAuditView({
                 </tbody>
               </table>
             </div>
-            {!reading.audit && !error && audit.length === 0 ? <p className="mt-4 text-xs text-muted-foreground">暂无符合条件的授权审批审计。</p> : null}
+            {!reading.audit && !error && audit.length === 0 ? <EmptyNote className="mt-4" title="暂无符合条件的授权审批审计。" /> : null}
             <PagePager loadedCount={audit.length} page={pageMeta.audit} busy={Boolean(reading.audit)} onPrev={() => navigate("audit", "prev")} onNext={() => navigate("audit", "next")} onFirst={() => navigate("audit", "first")} />
           </section>
         ) : null}

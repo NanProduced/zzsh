@@ -380,7 +380,6 @@ export async function createAdministrator(
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
     const actor = await lockActor(client, context.userId, grants.roleIds);
     requirePermission(actor, ADMIN_PERMISSION.accountCreate);
-    requireBossActor(actor);
     assertGameScopeDelegable(await readAdminGameScope(client, context.userId), actor.isBoss, scopeChange);
     if (scopeChange.gameIds.length > 0) {
       const games = await client.query(`SELECT "id" FROM "zzsh_supply"."game" WHERE "id" = ANY($1::text[])`, [scopeChange.gameIds]);
@@ -478,10 +477,12 @@ export async function updateAdministrator(
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
     const actor = await lockActor(client, context.userId);
     requirePermission(actor, ADMIN_PERMISSION.accountUpdate);
-    requireBossActor(actor);
     const target = await lockTargetByUsername(client, username);
     if (target.isBoss && !actor.isBoss) {
       throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Boss identity cannot be modified by this operation");
+    }
+    if (target.id === context.userId && !actor.isBoss) {
+      throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "An administrator cannot modify its own account");
     }
     const previousName = target.name;
     await client.query(
@@ -746,7 +747,7 @@ export async function requireDirectoryPermission(
   return access!;
 }
 
-/** 管理员账号、角色与授权写入仅限 Boss；保留原权限码校验作为第一道。 */
+/** 授权、游戏范围与角色写入仅限 Boss；账号创建/改名/冻结按权限码（0118 起下放运营）。 */
 function requireBossActor(actor: { isBoss: boolean }): void {
   if (!actor.isBoss) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Boss permission required");
 }

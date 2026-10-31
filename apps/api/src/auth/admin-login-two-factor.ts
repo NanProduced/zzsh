@@ -40,20 +40,25 @@ type PluginWithAfterHooks = { hooks?: { after?: AfterHook[] } };
  * 包装 SDK twoFactor() 的登录后钩子：账号关闭了登录 2FA 时跳过登录挑战，直接保留密码登录建立的会话。
  * 2FA 绑定本身（twoFactorEnabled 与 TOTP 密钥）不变，敏感操作的再验证照常要求动态码。
  */
+/**
+ * 注意：SDK 的 after 钩子本身已是 createAuthMiddleware 产物，dispatch 以 { response, headers } 读取其返回值。
+ * 这里必须原样透传内层结果；再套一层 createAuthMiddleware 会把 { response, headers } 嵌进 response，
+ * 导致登录 200 却丢失 twoFactorRedirect 与 two_factor Cookie（会话已被 SDK 删除）→ 前端停在登录页。
+ */
 export function withAdminLoginTwoFactorPreference<T extends PluginWithAfterHooks>(
   plugin: T,
   pool: Queryable,
-  wrap: (handler: (ctx: any) => Promise<unknown>) => (ctx: any) => Promise<unknown>,
 ): T {
   const after = plugin.hooks?.after;
   if (!after) return plugin;
   const wrapped = after.map((hook) => ({
     ...hook,
-    handler: wrap(async (ctx: any) => {
+    handler: async (ctx: any) => {
       const user = ctx?.context?.newSession?.user;
-      if (user?.twoFactorEnabled && typeof user.id === "string" && await adminLoginTwoFactorOptedOut(pool, user.id)) return;
+      // 跳过挑战：返回空结果，保留密码登录已建立的会话与 Cookie。
+      if (user?.twoFactorEnabled && typeof user.id === "string" && await adminLoginTwoFactorOptedOut(pool, user.id)) return { response: undefined, headers: undefined };
       return hook.handler(ctx);
-    }),
+    },
   }));
   return { ...plugin, hooks: { ...plugin.hooks, after: wrapped } };
 }

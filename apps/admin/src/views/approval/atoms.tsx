@@ -1,6 +1,7 @@
 import { BEIJING_TIME_ZONE } from "../../workspace/beijing-time";
 import type { ReactNode } from "react";
-import { CircleHelp, Lock } from "lucide-react";
+import { CircleHelp, Inbox, Loader2, Lock } from "lucide-react";
+import { EmptyState } from "../../components/empty-state";
 
 import { Badge, InlineStatus, type InlineStatusTone } from "../../components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../components/ui/tooltip";
@@ -18,6 +19,21 @@ export function formatApprovalDate(value: string | null): string {
   if (!value) return "未提供";
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "时间未知" : approvalDateFormatter.format(date);
+}
+
+/** 统一的读取中提示：带旋转图标、对读屏播报，文案保持「正在读取…」。 */
+export function ReadingNote({ children = "正在读取…", className = "" }: { children?: ReactNode; className?: string }) {
+  return (
+    <p role="status" aria-live="polite" className={`flex items-center gap-1.5 text-xs text-muted-foreground ${className}`}>
+      <Loader2 aria-hidden className="size-3.5 shrink-0 animate-spin motion-reduce:animate-none" />
+      <span>{children}</span>
+    </p>
+  );
+}
+
+/** 统一的空列表：虚线卡片 + 图标，保持原有文案。 */
+export function EmptyNote({ title, description, action, className = "" }: { title: string; description?: ReactNode; action?: ReactNode; className?: string }) {
+  return <EmptyState icon={<Inbox aria-hidden className="size-4" />} title={title} description={description} action={action} className={`py-6 ${className}`} />;
 }
 
 export function InfoHint({ label, children }: { label: string; children: ReactNode }) {

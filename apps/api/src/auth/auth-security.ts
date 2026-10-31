@@ -1114,7 +1114,7 @@ async function changeAdminFreezeState(request: NodeRequest, response: NodeRespon
   const targetAdminId = stringField(body, "targetAdminId", 128);
   const reason = reasonField(body);
   await verifyAdminReauthentication(request, context, body, options);
-  if (targetAdminId === context.userId) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "A boss cannot change its own availability");
+  if (targetAdminId === context.userId) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "An administrator cannot change its own availability");
   const result = await withTransaction(options.pool, async (client) => {
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
     // Freeze lock order: actor security -> actor roles -> target security -> target user -> recovery requests -> sessions.
@@ -1122,7 +1122,6 @@ async function changeAdminFreezeState(request: NodeRequest, response: NodeRespon
     if (!hasPermission(actorAccess, requiredPermission)) {
       throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Permission required");
     }
-    if (!actorAccess.isBoss) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Boss permission required");
     const target = await client.query<{ status: AdminContext["security"]["status"]; isBoss: boolean; firstActivatedAt: Date | null }>(
       `SELECT "status", "is_boss" AS "isBoss", "first_activated_at" AS "firstActivatedAt" FROM "zzsh_iam"."admin_security" WHERE "admin_user_id" = $1 FOR UPDATE`,
       [targetAdminId],

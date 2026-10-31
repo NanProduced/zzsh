@@ -125,6 +125,21 @@ test("action preflight mirrors the write rules for boss targets, self targets an
   assert.equal(bossOnSelf("force-logout")?.reasonCode, "SELF_TARGET", "不能撤销自己的会话");
   assert.equal(bossOnSelf("update")?.allowed, true, "本人改自己的显示名仍然允许");
 
+  // 0118：运营持账号维护能力，但不能以自己或 Boss 为目标，也拿不到重置/撤销会话
+  const opsPermissions = new Set(["admin.account.read", "admin.account.create", "admin.account.update", "admin.account.freeze", "admin.account.unfreeze"]);
+  const opsOnSelf = reasonsFor({ actorId: "admin-ops", actorStatus: "ACTIVE", actorIsBoss: false, actorPermissions: opsPermissions, targetId: "admin-ops", targetIsBoss: false, targetStatus: "ACTIVE" });
+  assert.equal(opsOnSelf("update")?.reasonCode, "SELF_TARGET", "非 Boss 不能改自己的账号");
+  assert.equal(opsOnSelf("freeze")?.reasonCode, "SELF_TARGET");
+  const opsOnStaff = reasonsFor({ actorId: "admin-ops", actorStatus: "ACTIVE", actorIsBoss: false, actorPermissions: opsPermissions, targetId: "admin-staff", targetIsBoss: false, targetStatus: "ACTIVE" });
+  assert.equal(opsOnStaff("update")?.allowed, true);
+  assert.equal(opsOnStaff("freeze")?.allowed, true);
+  assert.equal(opsOnStaff("assign")?.reasonCode, "PERMISSION_REQUIRED", "授权仍仅 Boss");
+  assert.equal(opsOnStaff("reset-password")?.reasonCode, "BOSS_ACTOR_REQUIRED");
+  assert.equal(opsOnStaff("reset-2fa")?.reasonCode, "BOSS_ACTOR_REQUIRED");
+  const opsOnBoss = reasonsFor({ actorId: "admin-ops", actorStatus: "ACTIVE", actorIsBoss: false, actorPermissions: opsPermissions, targetId: "admin-boss", targetIsBoss: true, targetStatus: "ACTIVE" });
+  assert.equal(opsOnBoss("update")?.reasonCode, "BOSS_ACTOR_REQUIRED");
+  assert.equal(opsOnBoss("unfreeze")?.reasonCode, "BOSS_ACTOR_REQUIRED");
+
   const bossOnUnfrozen = reasonsFor({ actorId: "admin-boss", actorStatus: "ACTIVE", actorIsBoss: true, actorPermissions: bossPermissions, targetId: "admin-self", targetIsBoss: false, targetStatus: "PENDING_ENROLLMENT" });
   assert.equal(bossOnUnfrozen("unfreeze")?.reasonCode, "NOT_FROZEN");
   assert.equal(bossOnUnfrozen("freeze")?.allowed, true);

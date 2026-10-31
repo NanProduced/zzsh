@@ -190,7 +190,7 @@ export function evaluateAdminDirectoryActions(input: {
   };
 
   return [
-    build("update", ADMIN_PERMISSION.accountUpdate, { bossMayNotTarget: true }),
+    build("update", ADMIN_PERMISSION.accountUpdate, { bossMayNotTarget: true, selfForbidden: !input.actorIsBoss }),
     build("assign", ADMIN_PERMISSION.permissionGrant, { fullBaseline: true, bossMayNotTarget: false }),
     build("scope", ADMIN_PERMISSION.permissionGrant, { bossMayNotTarget: false }),
     build("freeze", ADMIN_PERMISSION.accountFreeze, { reauth: true, bossMayNotTarget: true, selfForbidden: true }),

@@ -1003,7 +1003,7 @@ export async function mountAuthHandlers(
     // SDK create-context 默认 minPasswordLength=8，只覆盖用户 realm 会让管理员改密
     // 比建档（auth-security passwordField 的 12 位）与恢复更宽松，这里在共同入口补齐。
     emailAndPassword: { enabled: true, disableSignUp: true, minPasswordLength: 12, maxPasswordLength: 128 },
-    plugins: [username({ immutableUsername: true }), bearer(), withAdminLoginTwoFactorPreference(twoFactor(), options.pool, (handler) => createAuthMiddleware(handler)), adminSelfSecurityPlugin],
+    plugins: [username({ immutableUsername: true }), bearer(), withAdminLoginTwoFactorPreference(twoFactor(), options.pool), adminSelfSecurityPlugin],
     advanced: { ...common.advanced, cookiePrefix: "zzsh_admin", ipAddress: { ipAddressHeaders: [ADMIN_CLIENT_IP_FORWARD_HEADER] } },
     // 库内限流作为第二道粗粒度闸门（内存、按实例）；主防线是 withAdminBruteForce 的共享存储。
     rateLimit: {

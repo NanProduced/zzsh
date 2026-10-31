@@ -35,6 +35,19 @@ export const SUPPORT_PRESET_PERMISSIONS = [
   P.membershipGrowthSummaryRead,
 ] as const;
 
+/**
+ * 迁移 0118 追加到 role_preset_ops 的能力（Owner 2026-10-31）。护栏在服务端：
+ * 非 Boss 永远不能以 Boss 账号或自己为目标；创建仍受 assertDelegable 约束且
+ * 需另持 admin.permission.grant（仍仅 Boss）才能附带授权。
+ */
+export const OPS_PRESET_0118_ADDITIONS = [
+  P.accountCreate,
+  P.accountUpdate,
+  P.accountFreeze,
+  P.accountUnfreeze,
+  P.userIdentitySensitiveRead,
+] as const;
+
 export const OPS_PRESET_PERMISSIONS = [
   ...SUPPORT_PRESET_PERMISSIONS,
   // 订单
@@ -90,19 +103,16 @@ export const OPS_PRESET_PERMISSIONS = [
   P.accountRead,
   P.roleRead,
   P.permissionRead,
+  // 迁移 0118（Owner 2026-10-31）：管理员账号日常维护与敏感身份查看下放运营
+  ...OPS_PRESET_0118_ADDITIONS,
 ] as const;
 
 /** 只留 Boss（is_boss 旁路）的能力：任何预设都不得包含。 */
 export const BOSS_ONLY_PERMISSIONS = [
-  P.accountCreate,
-  P.accountUpdate,
-  P.accountFreeze,
-  P.accountUnfreeze,
   P.roleConfigure,
   P.permissionGrant,
   P.supplyRulesActivate,
   P.contentPlatformPublish,
-  P.userIdentitySensitiveRead,
   P.membershipPolicyPublish,
   P.approvalRequestAddApprover,
   P.approvalTemplateRead,

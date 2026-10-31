@@ -900,7 +900,8 @@ export async function adminRequest<T>(path: string, body?: Record<string, unknow
 export function friendlyError(error: unknown): string {
   if (!(error instanceof AdminApiError)) return "操作未完成，请重试；若仍失败，请联系维护人员。";
   if (error.status === 0 || error.code === "NETWORK_ERROR") return "网络连接失败，请检查连接后重试。";
-  if (error.reason === "CAPTCHA_REQUIRED") return error.status === 403 ? "请先完成人机验证后重试。" : "账号或密码错误，请完成人机验证后重试。";
+  // 401 + CAPTCHA_REQUIRED = 凭据错误且下一次需要新的人机验证；验证提示由验证组件自己展示，这里只报凭据错误。
+  if (error.reason === "CAPTCHA_REQUIRED") return error.status === 403 ? "请先完成人机验证后重试。" : error.path === undefined || error.path.startsWith("/auth/") ? "账号或密码错误。" : "密码或动态码错误。";
   const auth = error.path === undefined || error.path.startsWith("/auth/");
   const reference = error.requestId ? ` 请求编号：${error.requestId}` : "";
   if (!auth) {
