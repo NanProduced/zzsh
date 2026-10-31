@@ -376,7 +376,16 @@ export async function handleOrderAdminRoute(
       await assertAdminContextInTransaction(client, context);
       if(path==="/im-groups"){
         const cursor=query.get("cursor");if(cursor&&!ID_TOKEN.test(cursor))throw invalid("Cursor is invalid");
-        sendJson(response,200,await listJoinedOrderTeams(client,{...context,realm:"admin"},cursor,parseLimit(query.get("limit")),options.orderTeamMembers?.appId??""),requestId);return;
+        let groups: Awaited<ReturnType<typeof listJoinedOrderTeams>>;
+        try {
+          groups = await listJoinedOrderTeams(client,{...context,realm:"admin"},cursor,parseLimit(query.get("limit")),options.orderTeamMembers?.appId??"");
+        } catch (error) {
+          // 订单群列表 500 曾无堆栈可查；这里把请求上下文与原始错误一起打出来。
+          console.error(JSON.stringify({ event: "order.im_groups.failed", requestId,
+            appId: options.orderTeamMembers?.appId ?? null, error: error instanceof Error ? error.message : String(error) }));
+          throw error;
+        }
+        sendJson(response,200,groups,requestId);return;
       }
       const teamMatch=/^\/([A-Za-z0-9._:-]+)\/im$/.exec(path);
       if(teamMatch){const operation=query.get("operation")??"read";if(operation!=="read"&&operation!=="send")throw invalid("Operation is invalid");sendJson(response,200,await readOrderTeamAccess(client,{...context,realm:"admin"},decodeId(teamMatch[1]!),operation,options.orderImSdkRouteBindings),requestId);return;}

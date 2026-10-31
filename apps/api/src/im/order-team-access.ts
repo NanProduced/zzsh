@@ -547,18 +547,18 @@ export async function listJoinedOrderTeams(c:PoolClient,actor:OrderTeamActor,cur
       SELECT sc.kind,sc.state,sc.failure_class AS "failureClass",sc.attempt_count AS "attemptCount",
              sc.next_attempt_at AS "nextAttemptAt",sc.sent_at AS "sentAt",sc.updated_at AS "updatedAt"
         FROM zzsh_order.im_order_stage_card sc
-       WHERE sc.order_id=g.order_id AND sc.app_id=g.app_id AND sc.state<>''SENT''
-       ORDER BY CASE sc.state WHEN ''SENDING'' THEN 0 WHEN ''SKIPPED'' THEN 1 ELSE 2 END,sc.updated_at DESC
+       WHERE sc.order_id=g.order_id AND sc.app_id=g.app_id AND sc.state<>'SENT'
+       ORDER BY CASE sc.state WHEN 'SENDING' THEN 0 WHEN 'SKIPPED' THEN 1 ELSE 2 END,sc.updated_at DESC
        LIMIT 1
     ) stage_card ON TRUE
     LEFT JOIN LATERAL (
-      SELECT count(*) FILTER (WHERE sc.state=''SKIPPED'') AS "skipped",
-             count(*) FILTER (WHERE sc.state IN (''PENDING'',''SENDING'')) AS "pending",
-             count(*) FILTER (WHERE sc.failure_class IS NOT NULL AND sc.state<>''SENT'') AS "failed"
+      SELECT count(*) FILTER (WHERE sc.state='SKIPPED') AS "skipped",
+             count(*) FILTER (WHERE sc.state IN ('PENDING','SENDING')) AS "pending",
+             count(*) FILTER (WHERE sc.failure_class IS NOT NULL AND sc.state<>'SENT') AS "failed"
         FROM zzsh_order.im_order_stage_card sc
        WHERE sc.order_id=g.order_id AND sc.app_id=g.app_id
     ) stage_count ON TRUE
-    WHERE mm.party=''STAFF'' AND mm.state=''JOINED'' AND m.realm='admin' AND m.identity_kind='ADMIN' AND m.status='READY'
+    WHERE mm.party='STAFF' AND mm.state='JOINED' AND m.realm='admin' AND m.identity_kind='ADMIN' AND m.status='READY'
       AND m.platform_subject_id=$1 AND m.app_id=$5 AND g.app_id=$5 AND ${gameScopeSql("o.game_id","$1","$2")}
       AND ($3::text IS NULL OR o.id<$3) ORDER BY o.id DESC LIMIT $4`,[actor.userId,access!.isBoss,cursor,limit+1,appId??null])).rows;
   const items=rows.slice(0,limit).map(({openingStatus,openingConfirmedAt,openingAcked,termSeconds,intakeOpen,settlementCurrent,postedAt,provisionState,stageCard,stageCardCounts,...row})=>{
