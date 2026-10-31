@@ -170,7 +170,9 @@ function legacyIdFromReference(provider: string | null, reference: string | null
 
 function sourceKindOf(migrationLegacyId: string | null, provider: string | null, identityPresent: boolean): UserDirectorySource {
   if (provider === LEGACY_PROVIDER) return USER_DIRECTORY_SOURCE.MIGRATED;
-  if (identityPresent && provider === "none" && migrationLegacyId === null) return USER_DIRECTORY_SOURCE.LOCAL;
+  // provider also records the real-name provider after verification; only the explicit legacy
+  // marker plus a migration fact identify an old-platform user.
+  if (identityPresent && migrationLegacyId === null) return USER_DIRECTORY_SOURCE.LOCAL;
   return USER_DIRECTORY_SOURCE.UNKNOWN;
 }
 
@@ -196,13 +198,13 @@ const RISK_FLAG_JOIN = "LEFT JOIN zzsh_iam.user_risk_flag risk_flag ON risk_flag
  * an existence test over all audit rows would treat any historical row as the newest one.
  */
 const SOURCE_SQL = `CASE WHEN s.provider='${LEGACY_PROVIDER}' THEN 'MIGRATED'
-  WHEN s.user_id IS NOT NULL AND s.provider='none' AND mig.legacy_id IS NULL THEN 'LOCAL' ELSE 'UNKNOWN' END`;
+  WHEN s.user_id IS NOT NULL AND mig.legacy_id IS NULL THEN 'LOCAL' ELSE 'UNKNOWN' END`;
 
 // Validate the newest fact after selection; invalid or empty facts must never revive an older date.
 function originalRegistrationSql(migration = "mig", projected = false): string {
-  if (projected) return `CASE WHEN s.user_id IS NOT NULL AND s.provider='none' AND ${migration}.object_id IS NULL THEN u."createdAt"
+  if (projected) return `CASE WHEN s.user_id IS NOT NULL AND ${migration}.object_id IS NULL THEN u."createdAt"
     WHEN s.provider='${LEGACY_PROVIDER}' AND s.provider_reference='la_user:' || ${migration}.legacy_id THEN ${migration}.registered_at ELSE NULL END`;
-  return `CASE WHEN s.user_id IS NOT NULL AND s.provider='none' AND ${migration}.object_id IS NULL THEN u."createdAt"
+  return `CASE WHEN s.user_id IS NOT NULL AND ${migration}.object_id IS NULL THEN u."createdAt"
     WHEN s.provider='${LEGACY_PROVIDER}' AND ${migration}.source_system='${LEGACY_PROVIDER}'
       AND ${migration}.source_entity='la_user' AND NULLIF(${migration}.legacy_id,'') IS NOT NULL
       AND s.provider_reference='la_user:' || ${migration}.legacy_id

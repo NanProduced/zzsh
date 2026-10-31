@@ -1,4 +1,4 @@
-import { admitTestDatabase, installedBusinessTruncate, fixtureAgreementAcceptance, ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
+import { admitTestDatabase, assertFreshRegressionRun, fixtureAgreementAcceptance, ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
 import { lockPublishingAccount, type SupplyGate } from "../src/supply/publishing";
 import { createLocalMediaStorage } from "../src/supply/media";
 import sharp from "sharp";
@@ -14,6 +14,8 @@ import { loadAuthRuntimeConfig } from "../src/auth/auth-runtime";
 import { createFakeRealNameProvider } from "../src/auth/user-identity";
 import { recordAudit, withTransaction } from "../src/auth/security-core";
 import { loadConfig, type AppConfig } from "../src/config/config";
+import { assertNotProtectedTarget, registeredException, REGRESSION_ALLOW_NEW_RESOURCE, REGRESSION_DATABASE, REGRESSION_MARKER, REGRESSION_MIGRATION_USER, REGRESSION_RESOURCE_LOCK_KEY, REGRESSION_RUNTIME_USER, regressionOidBinding } from "../src/config/test-resource";
+
 import { assertBusinessRuntimeIdentity, createBusinessPool } from "../src/database/business";
 import { runBusinessMigrations } from "../src/database/business-migrations";
 import { createControlledConfirmationFundingReader, type ControlledFundingListing } from "../src/order/personal-confirmation";
@@ -35,11 +37,11 @@ if (PRICING_COMPAT && process.env.ORDER_TEST_RESOURCE_SET) throw new Error("Conf
 const RESOURCE_SET = PRICING_COMPAT ? "pricing_compat" : process.env.ORDER_TEST_RESOURCE_SET?.trim() || "";
 const ROLE_PREFIX = PRICING_COMPAT ? "zzsh_m3b_" : "zzsh_order_";
 if (RESOURCE_SET && !/^[a-z][a-z0-9_]{0,20}$/.test(RESOURCE_SET)) throw new Error("Invalid order test resource set");
-const DEFAULT_DATABASE = PRICING_COMPAT ? "zzsh_test_supply_pricing_compat" : RESOURCE_SET ? "zzsh_test_order_" + RESOURCE_SET : "zzsh_test_order_reservation";
-const RESOURCE_MARKER = PRICING_COMPAT ? "zzsh:m3b-supply-test:v1" : "zzsh:order-reservation-test:v1";
-const LOCK_KEY = PRICING_COMPAT ? "1001320784187617071" : RESOURCE_SET
-  ? (BigInt("0x" + createHash("sha256").update("order-test:" + RESOURCE_SET).digest("hex").slice(0, 15)) + 2000000n).toString()
-  : "805021";
+const EXCEPTION_DATABASE = PRICING_COMPAT ? "zzsh_test_supply_pricing_compat" : RESOURCE_SET ? "zzsh_test_order_" + RESOURCE_SET : null;
+const EXCEPTION = EXCEPTION_DATABASE ? registeredException(EXCEPTION_DATABASE) : null;
+const DEFAULT_DATABASE = EXCEPTION_DATABASE ?? REGRESSION_DATABASE;
+const RESOURCE_MARKER = EXCEPTION?.marker ?? REGRESSION_MARKER;
+const LOCK_KEY = REGRESSION_RESOURCE_LOCK_KEY;
 const USER_ORIGIN = "http://127.0.0.1:3100";
 const ADMIN_ORIGIN = "http://127.0.0.1:3101";
 const API_ORIGIN = "http://127.0.0.1:3102";
@@ -120,17 +122,11 @@ function roleMarker(databaseName: string, role: "migration" | "runtime"): string
 }
 
 function makeResources(): Resources {
-  const databaseName = process.env.ORDER_TEST_DB_NAME?.trim() || DEFAULT_DATABASE;
-  assert.notEqual(databaseName, "zzsh_dev");
-  const migrationUser = safeIdentifier(process.env.ORDER_TEST_MIGRATION_USER?.trim() || (RESOURCE_SET ? ROLE_PREFIX + RESOURCE_SET + "_m" : "zzsh_order_migration"), "migration user");
-  const runtimeUser = safeIdentifier(process.env.ORDER_TEST_RUNTIME_USER?.trim() || (RESOURCE_SET ? ROLE_PREFIX + RESOURCE_SET + "_r" : "zzsh_order_runtime"), "runtime user");
+  const databaseName = DEFAULT_DATABASE;
+  assertNotProtectedTarget(databaseName);
+  const migrationUser = safeIdentifier(EXCEPTION?.migrationUser ?? REGRESSION_MIGRATION_USER, "migration user");
+  const runtimeUser = safeIdentifier(EXCEPTION?.runtimeUser ?? REGRESSION_RUNTIME_USER, "runtime user");
   assert.notEqual(migrationUser, runtimeUser);
-  if (RESOURCE_SET) {
-    assert.equal(databaseName, DEFAULT_DATABASE);
-    assert.equal(migrationUser, ROLE_PREFIX + RESOURCE_SET + "_m");
-    assert.equal(runtimeUser, ROLE_PREFIX + RESOURCE_SET + "_r");
-  }
-  if (!migrationUser.startsWith(ROLE_PREFIX) || !runtimeUser.startsWith(ROLE_PREFIX)) throw new Error("order test role prefix mismatch");
   const maintenanceUser = process.env.ORDER_TEST_MAINTENANCE_USER ?? process.env.DB_USER;
   const baseEnv = {
     ...process.env,
@@ -185,12 +181,11 @@ async function resourceGuard(pool: Pool, resources: Resources): Promise<PoolClie
     assert.equal(identity.rows[0]?.databaseName, "postgres");
     assert.equal(identity.rows[0]?.currentUser, pool.options.user);
     assert.equal(identity.rows[0]?.port, "5432");
-    if (RESOURCE_SET === "trade_settlement") assert.equal(LOCK_KEY, "860007356498332892", "registered settlement resource lock changed");
     assert.equal((await client.query<{ acquired: boolean }>("SELECT pg_try_advisory_lock($1::bigint) AS acquired", [LOCK_KEY])).rows[0]?.acquired, true, "dedicated order test target is already in use");
     // Complete read-only preflight BEFORE either ensureRole can change a password.
     const db = (await client.query(`SELECT pg_get_userbyid(datdba) AS owner,
       oid::text AS oid, shobj_description(oid,'pg_database') AS marker FROM pg_database WHERE datname=$1`, [resources.databaseName])).rows[0];
-    const requireRegisteredResources = RESOURCE_SET === "trade_settlement" || RESOURCE_SET === "oim_first_response" || RESOURCE_SET === "yunxin_main_integrate" || PRICING_COMPAT;
+    const requireRegisteredResources = EXCEPTION !== null;
     if (requireRegisteredResources) {
       assert.equal(resources.maintenance.database.user, "zzsh");
       assert.ok(db, "registered OIM database must already exist");
@@ -198,7 +193,7 @@ async function resourceGuard(pool: Pool, resources: Resources): Promise<PoolClie
     if (db) {
       assert.equal(db.owner, resources.maintenance.database.user);
       assert.equal(db.marker, RESOURCE_MARKER);
-      if (RESOURCE_SET === "trade_settlement") assert.equal(db.oid, "748138", "registered settlement database OID changed");
+      if (EXCEPTION) assert.equal(db.oid, EXCEPTION.oid, "registered exception database OID changed");
       assert.equal((await client.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=$1`, [resources.databaseName])).rows[0].n, 0, "another connection owns this database");
     }
     for (const [name, kind] of [[resources.migrationUser, "migration"], [resources.runtimeUser, "runtime"]] as const) {
@@ -258,8 +253,8 @@ async function resourceGuard(pool: Pool, resources: Resources): Promise<PoolClie
 }
 
 async function ensureDatabase(pool: Pool, resources: Resources): Promise<void> {
-  const existing = await pool.query<{ owner: string; allowConnections: boolean; isTemplate: boolean; comment: string | null }>(
-    "SELECT pg_get_userbyid(d.datdba) AS owner, d.datallowconn AS \"allowConnections\", d.datistemplate AS \"isTemplate\", shobj_description(d.oid, 'pg_database') AS comment FROM pg_database d WHERE d.datname = $1",
+  const existing = await pool.query<{ owner: string; allowConnections: boolean; isTemplate: boolean; databaseOid: string | null; comment: string | null }>(
+    "SELECT pg_get_userbyid(d.datdba) AS owner, d.datallowconn AS \"allowConnections\", d.datistemplate AS \"isTemplate\", d.oid::text AS \"databaseOid\", shobj_description(d.oid, 'pg_database') AS comment FROM pg_database d WHERE d.datname = $1",
     [resources.databaseName],
   );
   const admission = admitTestDatabase({
@@ -270,8 +265,12 @@ async function ensureDatabase(pool: Pool, resources: Resources): Promise<void> {
     isTemplate: existing.rows[0]?.isTemplate,
     expectedOwner: resources.maintenance.database.user,
     expectedMarker: RESOURCE_MARKER,
+    databaseOid: existing.rows[0]?.databaseOid,
+    expectedOid: EXCEPTION ? EXCEPTION.oid : regressionOidBinding(),
+    reuseOnly: EXCEPTION !== null,
+    requireOidOnReuse: EXCEPTION === null,
     databaseName: resources.databaseName,
-    allowFlag: "ORDER_TEST_ALLOW_NEW_RESOURCE",
+    allowFlag: REGRESSION_ALLOW_NEW_RESOURCE,
   });
   if (admission === "CREATE") {
     await pool.query("CREATE DATABASE " + quotedIdentifier(resources.databaseName, "test database") + " OWNER " + quotedIdentifier(resources.maintenance.database.user, "maintenance user"));
@@ -384,18 +383,9 @@ function orderKey(): Record<string, string> {
   return { "idempotency-key": `idem_${randomUUID().replaceAll("-", "")}` };
 }
 
-/** Truncate the isolated business tables, tolerating a target that predates later order tables. */
-async function truncateIsolatedBusinessData(pool: Pool): Promise<void> {
-  let statement = await installedBusinessTruncate(pool);
-  const event = (await pool.query(`SELECT to_regclass('zzsh_order.im_order_event') AS relation`)).rows[0]?.relation;
-  if (!event) statement = statement.replace(/\s*"zzsh_order"\."im_order_event",/, "");
-  const intake = (await pool.query(`SELECT to_regclass('zzsh_order.settlement_intake') AS relation`)).rows[0]?.relation;
-  if (!intake) statement = statement.replace(/\s*"zzsh_order"\."settlement_intake",/, "");
-  const opening = (await pool.query(`SELECT to_regclass('zzsh_order.rental_opening') AS relation`)).rows[0]?.relation;
-  if (!opening) {
-    statement = statement.replace(/\s*"zzsh_order"\."settlement_decision",\s*"zzsh_order"\."settlement_version",\s*"zzsh_order"\."rental_opening_ack",\s*"zzsh_order"\."rental_opening",/, "");
-  }
-  await pool.query(statement);
+/** The shared target is reset per suite; nothing is truncated in place. */
+async function requireFreshTarget(pool: Pool): Promise<void> {
+  await assertFreshRegressionRun(pool);
 }
 
 async function assertEmptyIsolatedBusinessData(pool: Pool): Promise<void> {
@@ -516,7 +506,6 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     if (RESOURCE_SET !== "trade_settlement") await grantDatabaseAccess(maintenancePool, resources);
     maintenanceDataPool = poolFor(resources.maintenance, resources.databaseName, "zzsh-order-owner", 2);
     if (RESOURCE_SET !== "trade_settlement") await prepareOwnership(maintenanceDataPool, resources);
-    retainedRoleIds = (await maintenanceDataPool.query<{ id: string }>(`SELECT id FROM zzsh_iam.admin_role`)).rows.map(r => r.id);
     migrationPool = createBusinessPool(resources.migration);
     const hasJournal = (await migrationPool.query(`SELECT to_regclass('zzsh_business_meta.migrations') AS name`)).rows[0].name;
     const migrationBefore = hasJournal ? (await migrationPool.query(`SELECT count(*)::int AS n, max(created_at)::text AS latest FROM zzsh_business_meta.migrations`)).rows[0] : { n: 0, latest: null };
@@ -556,9 +545,11 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
       migrationReplayVerified: !stagedFirstResponse && RESOURCE_SET !== "trade_settlement", reuseOnly55: RESOURCE_SET === "trade_settlement" }));
     runtimePool = createBusinessPool(resources.runtime);
     await assertBusinessRuntimeIdentity(runtimePool, resources.runtime);
+    // Read the seeded role set only after the canonical chain created zzsh_iam.admin_role (fresh target).
+    retainedRoleIds = (await maintenanceDataPool.query<{ id: string }>(`SELECT id FROM zzsh_iam.admin_role`)).rows.map(r => r.id);
     // The staged OIM-4B run reaches this point before 0043 creates im_order_event.
     await assertEmptyIsolatedBusinessData(maintenanceDataPool);
-    if (RESOURCE_SET !== "trade_settlement") await truncateIsolatedBusinessData(maintenanceDataPool);
+    if (RESOURCE_SET !== "trade_settlement") await requireFreshTarget(maintenanceDataPool);
     fixturesStarted = true;
     // B6 deliberately jumps this sequence to 999998 later. Reset the isolated
     // fixture sequence first so a repeat run cannot collide with that range.
@@ -590,6 +581,8 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
         ORDER_CONFIRMATION_KEY_ID: "trb3b1r2",
       }, undefined, { testOperationsEnabled: true }),
       pool: runtimePool,
+      // Phone registration needs an SMS sink; this fake outbox keeps the flow local and deterministic.
+      fakeSmsOutbox: new Map<string, { code: string; sentAt: string; purpose: "phone-verification" | "password-reset" | "phone-registration" }>(),
       mediaStorage: { ...evidenceStorage, read: async (storageKey: string) => {
         const bytes = await evidenceStorage.read(storageKey);
         await evidenceReadProbe.run?.();
@@ -649,11 +642,27 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     const orderViewer = await createStaff("受权订单查询员", ["order.read"]);
     const noScopeViewer = await createStaff("无范围订单查询员", ["order.read"]);
     const noPermStaff = await createStaff("无权限管理员", []);
+    // ALL_GAMES would make the "no scope" viewer equivalent to Boss scope; both viewers use an
+    // explicit SELECTED_GAMES mode and only orderViewer receives a game row below.
+    for (const viewer of [orderViewer, noScopeViewer]) {
+      await runtimePool.query(`UPDATE zzsh_iam.admin_security SET game_scope_mode='SELECTED_GAMES' WHERE admin_user_id=$1`, [viewer.id]);
+    }
 
+    // User registration is phone-first (USER_ALLOWED_PATHS); the local SMS mock fixes the code at 888888.
+    let phoneSeq = 0;
     const signupUser = async (name: string, username: string): Promise<CookieJar> => {
       const jar = cookieJar();
-      const signup = await request(base, "/api/auth/user/sign-up/email", { email: `${username}@example.invalid`, password: "Sup3rSecret#Order", name, username }, jar, USER_ORIGIN);
-      assert.equal(signup.response.status, 200, JSON.stringify(signup.body));
+      const phoneNumber = "+86137" + String(10000000 + (++phoneSeq)).padStart(8, "0");
+      const sent = await request(base, "/api/auth/user/phone-registration/send-otp", { phoneNumber }, jar, USER_ORIGIN);
+      assert.equal(sent.response.status, 200, JSON.stringify(sent.body));
+      const delivered = authOptions.fakeSmsOutbox.get("phone-registration:" + phoneNumber);
+      assert.ok(delivered, "the registration OTP must reach the local fake outbox");
+      const registered = await request(base, "/api/auth/user/phone-registration/complete", { phoneNumber, code: delivered.code, password: "Sup3rSecret#Order", acceptedTerms: true }, jar, USER_ORIGIN);
+      assert.equal(registered.response.status, 200, JSON.stringify(registered.body));
+      const session = await request(base, "/api/auth/user/get-session", undefined, jar, USER_ORIGIN);
+      const id = session.body?.user?.id as string;
+      assert.ok(id);
+      await maintenanceDataPool!.query(`UPDATE zzsh_auth_user."user" SET name=$2, username=$3, email=$4 WHERE id=$1`, [id, name, username, `${username}@example.invalid`]);
       const verify = await request(base, "/api/auth/user/identity/verify", { fullName: name, documentNumber: "110101199001010000" }, jar, USER_ORIGIN);
       assert.equal(verify.response.status, 200, JSON.stringify(verify.body));
       return jar;
@@ -772,6 +781,12 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
         description: "合成申报，不代表平台已登录验号",
         attributes: {
           safe_box_code: "box-a", vit_level: 6, bear_level: 6,
+          // Delta publication declares grading, login method, service window and the
+          // supplemental booleans (delta-rental.ts validateDeltaPublicationAttributes).
+          grading_code: "1", login_method_code: "legacy_login_qq", dive_level: 1,
+          service_window_start_minute: 480, service_window_end_minute: 1320,
+          service_window_timezone: "Asia/Shanghai", service_window_cross_midnight: false,
+          next_season_pass: false, demulan_unlocked: false,
             ...(formalFunding ? { owner_deposit_declaration: { schema: "owner-deposit-declaration-v1", amountCents: "30000", declarationVersion: "trc1-imp1-owner-v1" } } : {}),
             ...(rentalPricing === undefined ? {} : { rentalPricing }),
           ...(formalFunding || fullPayoutSelected !== undefined ? { full_payout_declaration: { schema: "full-payout-declaration-v1", selected: fullPayoutSelected ?? false } } : {}),
@@ -1323,8 +1338,12 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     const pauseRaceOrderId = pauseCreateResult.body?.order?.id as string;
     const pauseOrderDetail = await request(base, `/api/v1/orders/${pauseRaceOrderId}`, undefined, renter1, USER_ORIGIN);
     assert.equal(pauseOrderDetail.body?.order?.status, "PENDING_PAYMENT", "pause must not change the existing order");
+    // api-v1-contract.md: an occupied/paused account leaves the rentable list but an approved
+    // public detail stays readable and reports the non-createable state instead of 404.
     const pausedPublic = await request(base, `/api/v1/supply/listings/${accPauseRace.accountId}`, undefined, cookieJar(), API_ORIGIN);
-    assert.equal(pausedPublic.response.status, 404, "occupied accounts are not publicly listed");
+    assert.equal(pausedPublic.response.status, 200, JSON.stringify(pausedPublic.body));
+    assert.equal(pausedPublic.body?.availability?.state, "OFFLINE");
+    assert.equal(pausedPublic.body?.canCreateOrder, false);
     const resumeOccupiedRevision = (await request(base, `/api/v1/supply/accounts/${accPauseRace.accountId}`, undefined, owner2, USER_ORIGIN)).body?.account.revision;
     const resumeOccupied = await request(base, `/api/v1/supply/accounts/${accPauseRace.accountId}/resume`, { expectedRevision: resumeOccupiedRevision }, owner2, USER_ORIGIN, "POST", orderKey());
     assert.equal(resumeOccupied.response.status, 409, "resume requires the occupancy gate to be FREE");
@@ -1481,13 +1500,17 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     assert.equal(userOnAdmin.response.status, 401, "the admin realm must not accept user sessions");
     const adminOnUser = await request(base, "/api/v1/orders", { accountId: accSnapshot.accountId, versionId: accSnapshot.versionId, releaseId: accSnapshot.releaseId }, boss.jar, ADMIN_ORIGIN, "POST", orderKey());
     assert.equal(adminOnUser.response.status, 401, "the user realm must not accept admin sessions");
-    const noPermList = await request(base, "/api/v1/admin/orders", undefined, noPermStaff.jar, ADMIN_ORIGIN);
-    assert.equal(noPermList.response.status, 403, "order.read is required");
+    // admin-authorization.ts: order.read is a baseline business read for every active
+    // administrator, so an otherwise permissionless staff account can still query orders.
+    const baselineList = await request(base, "/api/v1/admin/orders", undefined, noPermStaff.jar, ADMIN_ORIGIN);
+    assert.equal(baselineList.response.status, 200, "order.read is a baseline administrator read");
+    assert.ok(Array.isArray(baselineList.body?.items));
     const noScopeDetail = await request(base, `/api/v1/admin/orders/${snapshotOrderId}`, undefined, noScopeViewer.jar, ADMIN_ORIGIN);
-    assert.equal(noScopeDetail.response.status, 404, "no game scope must be indistinguishable from missing");
+    assert.equal(noScopeDetail.response.status, 403, "an empty selected scope is an explicit NO_GAME_SCOPE");
+    assert.equal(noScopeDetail.body?.error?.code, "NO_GAME_SCOPE");
     const noScopeList = await request(base, "/api/v1/admin/orders", undefined, noScopeViewer.jar, ADMIN_ORIGIN);
-    assert.equal(noScopeList.response.status, 200);
-    assert.equal(noScopeList.body?.items?.length ?? -1, 0, "a scoped-out viewer sees an empty list");
+    assert.equal(noScopeList.response.status, 403);
+    assert.equal(noScopeList.body?.error?.code, "NO_GAME_SCOPE");
     const scopedDetail = await request(base, `/api/v1/admin/orders/${snapshotOrderId}`, undefined, orderViewer.jar, ADMIN_ORIGIN);
     assert.equal(scopedDetail.response.status, 200, JSON.stringify(scopedDetail.body));
     assert.equal(scopedDetail.body?.order?.id, snapshotOrderId);
@@ -2223,7 +2246,7 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
       }
     }
     if (fixturesStarted && maintenanceDataPool && guard) {
-      try { await truncateIsolatedBusinessData(maintenanceDataPool); } catch (error) { cleanupErrors.push(error); }
+      try { await requireFreshTarget(maintenanceDataPool); } catch (error) { cleanupErrors.push(error); }
       if (RESOURCE_SET === "trade_settlement" && cleanupErrors.length === 0) {
         // Preflight proved business tables empty under the resource lock. Only this run's
         // rows are cleared; retain every pre-existing role, including historical fixtures.

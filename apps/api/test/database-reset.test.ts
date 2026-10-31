@@ -9,17 +9,20 @@ import { Pool, type PoolClient } from "pg";
 import { runFormalMigrations } from "../src/database/migrations";
 import {
   acquireFnd004Lease,
+  acquireRegressionResourceLock,
   FND004_MARKER_KEY,
-  FND004_TEST_DATABASE,
   FND004_TEST_SCHEMA,
   type Fnd004Lease,
   loadFnd004TestConfig,
+  prepareFndFixtureMarker,
   releaseFnd004Lease,
+  releaseRegressionResourceLock,
   resetTestDatabase,
   resetWithFnd004Lease,
   resetVerifiedTestSchema,
 } from "../src/database/reset";
 import { admitTestDatabase, finishDatabaseTest } from "./database-test-support";
+import { REGRESSION_ALLOW_NEW_RESOURCE, REGRESSION_DATABASE as FND004_TEST_DATABASE, REGRESSION_MARKER, regressionOidBinding } from "../src/config/test-resource";
 
 async function assertIdentity(
   client: Pool | PoolClient,
@@ -37,9 +40,21 @@ async function assertIdentity(
   assert.equal(result.rows[0]?.server_port, "5432");
 }
 
+async function assertSecondEntryIsExcluded(adminPool: Pool): Promise<void> {
+  const competing = await adminPool.connect();
+  try {
+    const identity = await competing.query<{ database_name: string }>("SELECT current_database() AS database_name");
+    assert.equal(identity.rows[0]?.database_name, "postgres");
+    const acquired = await competing.query<{ acquired: boolean }>("SELECT pg_try_advisory_lock($1::bigint) AS acquired", ["806006"]);
+    assert.equal(acquired.rows[0]?.acquired, false, "a second entry must not share the regression resource");
+  } finally {
+    competing.release();
+  }
+}
+
 async function ensureTestDatabase(adminPool: Pool): Promise<void> {
-  const result = await adminPool.query<{ owner: string; marker: string | null; allowConnections: boolean; isTemplate: boolean }>(
-    "SELECT pg_get_userbyid(datdba) AS owner, shobj_description(oid, 'pg_database') AS marker, datallowconn AS \"allowConnections\", datistemplate AS \"isTemplate\" FROM pg_database WHERE datname = $1",
+  const result = await adminPool.query<{ owner: string; marker: string | null; allowConnections: boolean; isTemplate: boolean; databaseOid: string | null }>(
+    "SELECT pg_get_userbyid(datdba) AS owner, shobj_description(oid, 'pg_database') AS marker, datallowconn AS \"allowConnections\", datistemplate AS \"isTemplate\", oid::text AS \"databaseOid\" FROM pg_database WHERE datname = $1",
     [FND004_TEST_DATABASE],
   );
   const admission = admitTestDatabase({
@@ -49,12 +64,16 @@ async function ensureTestDatabase(adminPool: Pool): Promise<void> {
     allowConnections: result.rows[0]?.allowConnections,
     isTemplate: result.rows[0]?.isTemplate,
     expectedOwner: "zzsh",
-    expectedMarker: null,
+    expectedMarker: REGRESSION_MARKER,
+    databaseOid: result.rows[0]?.databaseOid,
+    expectedOid: regressionOidBinding(),
+    requireOidOnReuse: true,
     databaseName: FND004_TEST_DATABASE,
-    allowFlag: "FND004_TEST_ALLOW_NEW_RESOURCE",
+    allowFlag: REGRESSION_ALLOW_NEW_RESOURCE,
   });
   if (admission === "CREATE") {
     await adminPool.query(`CREATE DATABASE "${FND004_TEST_DATABASE}" OWNER "zzsh"`);
+    await adminPool.query(`COMMENT ON DATABASE "${FND004_TEST_DATABASE}" IS '${REGRESSION_MARKER}'`);
   }
 }
 
@@ -99,15 +118,18 @@ test("FND-004 formal migration and guarded reset are deterministic", async () =>
     application_name: "zzsh-fnd004-test",
     connectionTimeoutMillis: 2_000,
   };
-  const adminPool = new Pool({ ...connection, database: "postgres", max: 1 });
+  const adminPool = new Pool({ ...connection, database: "postgres", max: 2 });
   let testPool: Pool | undefined;
   let markerReady = false;
   let lease: Fnd004Lease | undefined;
+  let lockClient: PoolClient | undefined;
   let primaryError: unknown;
 
   try {
     try {
       await assertIdentity(adminPool, "postgres");
+      lockClient = await acquireRegressionResourceLock(adminPool, "FND-004 suite");
+      await assertSecondEntryIsExcluded(adminPool);
       await ensureTestDatabase(adminPool);
       testPool = new Pool({ ...connection, database: FND004_TEST_DATABASE, max: 4 });
       await assertIdentity(testPool, FND004_TEST_DATABASE);
@@ -116,6 +138,13 @@ test("FND-004 formal migration and guarded reset are deterministic", async () =>
       lease = activeLease;
       await runFormalMigrations(activeLease.client);
       await runFormalMigrations(activeLease.client);
+      // The formal 0000 SQL names the legacy database; the shared target gets its marker prepared here.
+      await prepareFndFixtureMarker(activeLease.client, config);
+      const preparedMarker = await activeLease.client.query<{ database_name: string; target: string; role_name: string; marker_version: number }>(
+        `SELECT database_name, target, role_name, marker_version FROM "zzsh_meta"."database_marker" WHERE marker_key = $1`,
+        [FND004_MARKER_KEY],
+      );
+      assert.deepEqual(preparedMarker.rows[0], { database_name: FND004_TEST_DATABASE, target: "zzsh-rebuild-local", role_name: "zzsh", marker_version: 1 });
       const formalMigrations = await activeLease.client.query<{ count: string }>(
         `SELECT count(*)::text AS count FROM "zzsh_meta"."migrations"`,
       );
@@ -124,6 +153,10 @@ test("FND-004 formal migration and guarded reset are deterministic", async () =>
       await resetWithFnd004Lease(activeLease);
       markerReady = true;
       assert.equal(await relationName(testPool, `${FND004_TEST_SCHEMA}.probe`), null);
+      // Inner lease stays an inner lock; the outer shared lock is what excludes another entry.
+      await assert.rejects(() => acquireFnd004Lease(testPool!, config), /test schema reset is already running/);
+      await releaseRegressionResourceLock(lockClient!);
+      lockClient = undefined;
       await runProbeMigrations(testPool);
       await testPool.query(
         `INSERT INTO "${FND004_TEST_SCHEMA}"."sentinel" (id, value) VALUES ($1, $2)`,
@@ -136,7 +169,7 @@ test("FND-004 formal migration and guarded reset are deterministic", async () =>
 
       await assert.rejects(
         () => resetTestDatabase(testEnv),
-        /test schema reset is already running/,
+        /test schema reset is already running|already in use by another process/,
       );
       assert.equal(await sentinelValue(testPool), "keep-me");
 
@@ -261,6 +294,8 @@ test("FND-004 formal migration and guarded reset are deterministic", async () =>
         if (testPool) await testPool.end();
       },
       async () => {
+        if (lockClient) await releaseRegressionResourceLock(lockClient);
+        lockClient = undefined;
         await adminPool.end();
       },
     );

@@ -84,7 +84,9 @@ test("unknown or unreadable sources fail closed", async () => {
 test("legacy users without admitted opening balance are refused; covered legacy users use the ledger", async () => {
   const legacy = { provider: "legacy_mysql_restore", covered: false, migrated: true };
   assert.deepEqual(await readUserObligations("u", client({ subject: legacy }).client), { status: "UNKNOWN", obligation: "WALLET_BALANCE", reason: "LEGACY_OPENING_NOT_ADMITTED" });
-  assert.deepEqual(await readUserObligations("u", client({ subject: { provider: "other", covered: false, migrated: false } }).client), { status: "UNKNOWN", obligation: "WALLET_BALANCE", reason: "SOURCE_UNKNOWN" });
+  // provider also stores the real-name provider after verification; only the explicit legacy
+  // marker plus a migration fact identify an old-platform subject without admitted coverage.
+  assert.equal(await readUserObligations("u", client({ subject: { provider: "other", covered: false, migrated: false } }).client), "NONE");
   assert.equal(await readUserObligations("u", client({ subject: { ...legacy, covered: true } }).client), "NONE");
   assert.deepEqual(await readUserObligations("u", client({ subject: { ...legacy, covered: true }, totals: { ...ZERO, available: "100" } }).client), { status: "PENDING", obligation: "WALLET_BALANCE" });
 });

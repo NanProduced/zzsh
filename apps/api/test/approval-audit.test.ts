@@ -1,4 +1,4 @@
-import { admitTestDatabase, ISOLATED_BUSINESS_DATA_TRUNCATE } from "./database-test-support";
+import { admitTestDatabase, assertFreshRegressionRun } from "./database-test-support";
 import { strict as assert } from "node:assert";
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { test } from "node:test";
@@ -10,10 +10,11 @@ import { loadAuthRuntimeConfig } from "../src/auth/auth-runtime";
 import { assertBusinessRuntimeIdentity, createBusinessPool } from "../src/database/business";
 import { runBusinessMigrations } from "../src/database/business-migrations";
 import { loadConfig, type AppConfig } from "../src/config/config";
+import { assertNotProtectedTarget, REGRESSION_ALLOW_NEW_RESOURCE, REGRESSION_DATABASE, REGRESSION_MARKER, REGRESSION_MIGRATION_USER, REGRESSION_RESOURCE_LOCK_KEY, REGRESSION_ROLE_PREFIX, REGRESSION_RUNTIME_USER, regressionOidBinding } from "../src/config/test-resource";
 
-const DEFAULT_DATABASE = "zzsh_test_m2_approval_audit";
-const RESOURCE_MARKER = "zzsh:m2-approval-audit-test:v1";
-const LOCK_KEY = "805003";
+const DEFAULT_DATABASE = REGRESSION_DATABASE;
+const RESOURCE_MARKER = REGRESSION_MARKER;
+const LOCK_KEY = REGRESSION_RESOURCE_LOCK_KEY;
 const USER_ORIGIN = "http://127.0.0.1:3100";
 const ADMIN_ORIGIN = "http://127.0.0.1:3101";
 const API_ORIGIN = "http://127.0.0.1:3102";
@@ -87,12 +88,12 @@ function roleMarker(databaseName: string, role: "migration" | "runtime"): string
 }
 
 function makeResources(): Resources {
-  const databaseName = process.env.M2_APPROVAL_AUDIT_TEST_DB_NAME?.trim() || DEFAULT_DATABASE;
-  assert.notEqual(databaseName, "zzsh_dev");
-  const migrationUser = safeIdentifier(process.env.M2_APPROVAL_AUDIT_TEST_MIGRATION_USER?.trim() || "zzsh_m2_approval_migration", "migration user");
-  const runtimeUser = safeIdentifier(process.env.M2_APPROVAL_AUDIT_TEST_RUNTIME_USER?.trim() || "zzsh_m2_approval_runtime", "runtime user");
+  const databaseName = DEFAULT_DATABASE;
+  assertNotProtectedTarget(databaseName);
+  const migrationUser = safeIdentifier(REGRESSION_MIGRATION_USER, "migration user");
+  const runtimeUser = safeIdentifier(REGRESSION_RUNTIME_USER, "runtime user");
   assert.notEqual(migrationUser, runtimeUser);
-  if (!migrationUser.startsWith("zzsh_m2_") || !runtimeUser.startsWith("zzsh_m2_")) throw new Error("approval audit test roles must use the isolated zzsh_m2_ prefix");
+  if (!migrationUser.startsWith(REGRESSION_ROLE_PREFIX) || !runtimeUser.startsWith(REGRESSION_ROLE_PREFIX)) throw new Error("approval audit test roles must use the isolated regression role prefix");
   const maintenanceUser = process.env.M2_APPROVAL_AUDIT_TEST_MAINTENANCE_USER ?? process.env.DB_USER;
   const baseEnv = {
     ...process.env,
@@ -151,8 +152,8 @@ async function resourceGuard(pool: Pool): Promise<PoolClient> {
 }
 
 async function ensureDatabase(pool: Pool, resources: Resources): Promise<void> {
-  const existing = await pool.query<{ owner: string; allowConnections: boolean; isTemplate: boolean; comment: string | null }>(
-    "SELECT pg_get_userbyid(d.datdba) AS owner, d.datallowconn AS \"allowConnections\", d.datistemplate AS \"isTemplate\", shobj_description(d.oid, 'pg_database') AS comment FROM pg_database d WHERE d.datname = $1",
+  const existing = await pool.query<{ owner: string; allowConnections: boolean; isTemplate: boolean; databaseOid: string | null; comment: string | null }>(
+    "SELECT pg_get_userbyid(d.datdba) AS owner, d.datallowconn AS \"allowConnections\", d.datistemplate AS \"isTemplate\", d.oid::text AS \"databaseOid\", shobj_description(d.oid, 'pg_database') AS comment FROM pg_database d WHERE d.datname = $1",
     [resources.databaseName],
   );
   const admission = admitTestDatabase({
@@ -163,8 +164,11 @@ async function ensureDatabase(pool: Pool, resources: Resources): Promise<void> {
     isTemplate: existing.rows[0]?.isTemplate,
     expectedOwner: resources.maintenance.database.user,
     expectedMarker: RESOURCE_MARKER,
+    databaseOid: existing.rows[0]?.databaseOid,
+    expectedOid: regressionOidBinding(),
+    requireOidOnReuse: true,
     databaseName: resources.databaseName,
-    allowFlag: "APPROVAL_AUDIT_TEST_ALLOW_NEW_RESOURCE",
+    allowFlag: REGRESSION_ALLOW_NEW_RESOURCE,
   });
   if (admission === "CREATE") {
     await pool.query("CREATE DATABASE " + quotedIdentifier(resources.databaseName, "test database") + " OWNER " + quotedIdentifier(resources.maintenance.database.user, "maintenance user"));
@@ -227,7 +231,7 @@ async function prepareOwnership(pool: Pool, resources: Resources): Promise<void>
 }
 
 async function resetBusinessData(pool: Pool): Promise<void> {
-  await pool.query(ISOLATED_BUSINESS_DATA_TRUNCATE);
+  await assertFreshRegressionRun(pool);
   await pool.query("DELETE FROM \"zzsh_iam\".\"admin_role\" WHERE \"code\" NOT IN ('ops', 'support')");
   await pool.query("DELETE FROM \"zzsh_iam\".\"admin_role_permission\"");
 }
@@ -395,7 +399,7 @@ test("M2-C approval and authorized audit query enforce the minimum workflow", as
     const boss = await activate(base, bossUsername, bossInitialPassword);
 
     async function createStaff(name: string, permissions: string[]): Promise<Staff> {
-      const created = await request(base, "/api/v1/admin/security/admins/create", { name, allowPermissions: permissions }, boss.jar, ADMIN_ORIGIN);
+      const created = await request(base, "/api/v1/admin/security/admins/create", { mode: "ALL_GAMES", name, allowPermissions: permissions }, boss.jar, ADMIN_ORIGIN);
       assert.equal(created.response.status, 200);
       return activate(base, created.body?.username as string, created.body?.temporaryPassword as string);
     }
@@ -698,6 +702,7 @@ test("M2-C approval and authorized audit query enforce the minimum workflow", as
     assert.equal(changedBody.response.status, 409, JSON.stringify(changedBody.body));
     assert.equal(changedBody.body?.error?.code, "IDEMPOTENCY_KEY_REUSED");
 
+    const concurrentBaseline = (await runtimePool.query<{ count: string }>(`SELECT count(*)::text AS count FROM "zzsh_iam"."approval_request" WHERE "operation_code" = 'approval.idempotent.create'`)).rows[0]!.count;
     const concurrentKey = newIdempotencyKey();
     const concurrentCreates = await Promise.all([
       createRequestRaw(base, requester, "approval.idempotent.create", "manual", "并发同 key 提交", concurrentKey),
@@ -710,7 +715,7 @@ test("M2-C approval and authorized audit query enforce the minimum workflow", as
     const concurrentCount = await runtimePool.query<{ count: string }>(
       "SELECT count(*)::text AS count FROM \"zzsh_iam\".\"approval_request\" WHERE \"operation_code\" = 'approval.idempotent.create'",
     );
-    assert.equal(concurrentCount.rows[0]?.count, "1");
+    assert.equal(concurrentCount.rows[0]?.count, (BigInt(concurrentBaseline) + 1n).toString(), "the concurrent key must add exactly one request beyond the earlier replay case");
 
     const templateKey = newIdempotencyKey();
     const templateFirst = await configure(base, boss, "approval.idempotent.template", "manual", [candidateOne.username], templateKey);
@@ -764,13 +769,16 @@ test("M2-C approval and authorized audit query enforce the minimum workflow", as
     assert.equal(addCandidateAction?.allowed, true);
     assert.ok(readback.body?.candidateAvailability?.total >= 1);
 
-    await configure(base, boss, "approval.read.contract", "manual", [candidateOne.username]);
-    const contractRequest = await createRequest(base, requester, "approval.read.contract", "manual", "SUCCESS", "读取合同样本");
+    // Manual confirmation is only actionable for a registered operation; the unregistered codes elsewhere
+    // in this suite deliberately assert the rejection path. Keep the registered test operation here.
+    await configure(base, boss, "approval.test.execute", "read-contract", [candidateOne.username]);
+    const contractRequest = await createRequest(base, requester, "approval.test.execute", "read-contract", "SUCCESS", "读取合同样本");
     const pendingView = await bff(base, "/security/approvals/requests/pending?limit=50", undefined, candidateOne);
     assert.equal(pendingView.response.status, 200);
     const pendingRow = pendingView.body?.requests?.find((item: { requestId?: string }) => item.requestId === contractRequest);
     assert.ok(pendingRow, "the new request must appear for its candidate");
-    assert.equal(pendingRow?.actions?.find((item: { action?: string }) => item.action === "approve")?.allowed, true);
+    const candidateApprove = pendingRow?.actions?.find((item: { action?: string }) => item.action === "approve");
+    assert.equal(candidateApprove?.allowed, true, `candidate approve gate: ${JSON.stringify(candidateApprove)}`);
     assert.equal(pendingRow?.business?.businessTitle, "本地非资金测试动作");
     assert.equal(pendingRow?.payload, undefined, "the list must not expose the raw payload");
     const operations = await bff(base, "/security/approvals/operations", undefined, boss);

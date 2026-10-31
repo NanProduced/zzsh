@@ -2015,7 +2015,6 @@ export async function listingDetail(
       displayNo: publicAccountNumber(a.display_no),
       versionId: v.id,
       releaseId: v.rule_release_id,
-      contentHash: v.content_hash,
       title: v.title,
       description: v.description,
       game: projectPublicListingGame(game),

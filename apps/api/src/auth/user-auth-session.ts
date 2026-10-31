@@ -29,6 +29,10 @@ export async function createTransactionalUserSession(client: PoolClient, ctx: Au
   const user = await internal.findUserById(userId);
   if (!user) throw new Error("User session subject unavailable");
   const state = await client.query<{ account_status: string }>(`SELECT account_status FROM zzsh_iam.user_identity_state WHERE user_id=$1`, [userId]);
+  if (state.rows[0]?.account_status === "FROZEN") {
+    const { APIError } = await import("better-auth/api");
+    throw new APIError("FORBIDDEN", { code: "ACCOUNT_FROZEN", message: "账号已被冻结，如有疑问请联系客服" });
+  }
   if ((user as typeof user & { suspended?: boolean }).suspended || state.rows[0]?.account_status !== "ACTIVE") {
     const { APIError } = await import("better-auth/api");
     throw new APIError("FORBIDDEN", { message: "Account unavailable" });
@@ -61,7 +65,7 @@ export function buildTransactionalPhoneSignIn(
       const requestId = ctx.headers?.get("x-request-id") ?? "auth-phone-sign-in";
       if (!user.rows[0] || await verifyUserCredentialInTransaction(client,
         (value, hash) => ctx.context.password.verify({ password: value, hash }), ctx.context.password.hash,
-        { phoneNumber }, password, requestId) !== "retry") {
+        { phoneNumber }, password, requestId, "sign-in") !== "retry") {
         throw new APIError("UNAUTHORIZED", { message: "Invalid phone number or password" });
       }
       return createTransactionalUserSession(client, ctx, user.rows[0].id);

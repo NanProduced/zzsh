@@ -7,6 +7,7 @@ import ts from "typescript";
 
 import { parsePlatformLegalAcceptance, recordPlatformAcceptances } from "../src/legal/legal-documents";
 import { SecurityApiError } from "../src/auth/security-core";
+import { API_V1_ERROR_CODES } from "../src/contracts/api-v1";
 
 const filename = resolve(__dirname, "../../src/auth/auth-runtime.ts");
 const file = ts.createSourceFile(filename, readFileSync(filename, "utf8"), ts.ScriptTarget.Latest, true);
@@ -67,4 +68,44 @@ test("version drift during authentication prevents acceptance and a success resp
 test("acceptance storage failure is not reported as successful login", async () => {
   const probe = await invoke(200, { storageFailure: true });
   await assert.rejects(probe.run, /STORAGE_FAILED/);
+});
+
+const boundaryNames = ["safeWebAuthHandler", "copyWebResponseHeaders", "authErrorCode", "safeWebError"];
+const boundaryDeclarations = file.statements.filter(node => ts.isFunctionDeclaration(node) && boundaryNames.includes(node.name?.text ?? ""));
+assert.equal(boundaryDeclarations.length, boundaryNames.length);
+const boundaryJavascript = ts.transpileModule(boundaryDeclarations.map(node => node.getText(file)).join("\n"), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText;
+async function errorBoundary(status: number, payload: unknown, path = "/api/auth/user/sign-in/phone-number", method = "POST") {
+  const handler = runInNewContext(`${boundaryJavascript}; safeWebAuthHandler`, { Headers, Response, URL, API_V1_ERROR_CODES, randomUUID: () => "boundary-test" });
+  const response = await handler(async () => Response.json(payload, { status }), new Request(`http://localhost${path}`, { method, headers: { "x-request-id": "req_boundary" } }));
+  return { response, payload: await response.json() as { error: { code: string; message: string; reason?: string; requestId: string } } };
+}
+
+test("verified frozen phone sign-in keeps only its controlled public reason", async () => {
+  for (const path of ["/api/auth/user/sign-in/phone-number", "/api/auth/user/sign-in/identifier"]) {
+    const result = await errorBoundary(403, { code: "ACCOUNT_FROZEN", message: "PRIVATE_UPSTREAM_MESSAGE" }, path);
+    assert.equal(result.payload.error.code, "FORBIDDEN");
+    assert.equal(result.payload.error.reason, "ACCOUNT_FROZEN");
+    assert.equal(result.payload.error.message, "账号已被冻结，如有疑问请联系客服");
+    assert.equal(result.payload.error.requestId, "req_boundary");
+    assert.equal(JSON.stringify(result.payload).includes("PRIVATE_UPSTREAM_MESSAGE"), false);
+  }
+});
+
+test("unverified and foreign auth errors cannot disclose a frozen account", async () => {
+  for (const [status, path, method] of [
+    [401, "/api/auth/user/sign-in/phone-number", "POST"],
+    [500, "/api/auth/user/sign-in/phone-number", "POST"],
+    [403, "/api/auth/admin/sign-in/username", "POST"],
+    [403, "/api/auth/user/sign-in/phone-number", "GET"],
+  ] as const) {
+    const result = await errorBoundary(status, { code: "ACCOUNT_FROZEN", message: "PRIVATE" }, path, method);
+    assert.equal(result.payload.error.reason, undefined);
+    assert.equal(JSON.stringify(result.payload).includes("PRIVATE"), false);
+  }
+});
+
+test("unknown SDK auth errors retain the generic boundary", async () => {
+  const result = await errorBoundary(403, { code: "OTHER_PRIVATE_CODE", message: "PRIVATE_PROVIDER_MESSAGE" });
+  assert.equal(result.payload.error.reason, undefined);
+  assert.equal(result.payload.error.message, "Authentication request rejected");
 });
