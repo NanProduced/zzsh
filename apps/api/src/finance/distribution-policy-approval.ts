@@ -3,7 +3,7 @@ import type { ApprovalOperationExecutor } from '../auth/auth-security';
 import { loadEffectiveAdminAccess, hasPermission, type EffectiveAdminAccess } from '../auth/admin-authorization';
 import { SecurityApiError } from '../auth/security-core';
 import { canonicalize } from '../supply/content-hash';
-import { applyApprovedDistributionPolicyInTransaction, assertDistributionPolicyWriteReadyInTransaction, type LocalDistributionScope } from './distribution-policy-store';
+import { applyApprovedDistributionPolicyInTransaction, assertDistributionPolicyWriteReadyInTransaction, distributionPolicyScopeOf, type LocalDistributionScope } from './distribution-policy-store';
 import { DISTRIBUTION_POLICY_OPERATION, parseDistributionPolicyChange } from './distribution-policy-change';
 import { prepareDistributionPolicyChange } from './distribution-policy-change';
 import { readDistributionPolicyRowInTransaction } from './distribution-policy-store';
@@ -17,7 +17,7 @@ export async function validateDistributionPolicySubmission(client:PoolClient,pay
  const input=parseDistributionPolicyChange(payload);
  await assertDistributionPolicyWriteReadyInTransaction(client,writeScope);
  await client.query("SELECT pg_advisory_xact_lock(hashtextextended('zzsh:distribution-policy-approval:v1',0))");
- const current=await readDistributionPolicyRowInTransaction(client);
+ const current=await readDistributionPolicyRowInTransaction(client,false,distributionPolicyScopeOf(writeScope));
  if(current.knowledge!=='KNOWN')throw new SecurityApiError(409,'CONFLICT','Distribution policy baseline unavailable');
  prepareDistributionPolicyChange(current.policy,input);
  const existing=(await client.query("SELECT id FROM zzsh_iam.approval_request WHERE operation_code=$1 AND status IN ('PENDING','APPROVED','EXECUTION_FAILED') AND expires_at>clock_timestamp() ORDER BY created_at,id COLLATE \"C\" LIMIT 1",[DISTRIBUTION_POLICY_OPERATION])).rows[0];

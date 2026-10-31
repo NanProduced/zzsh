@@ -35,7 +35,7 @@ function verifiedFrozenCalculation(f:Record<string,any>){
  if(seed.id!==f.id||seed.beneficiaryUserId!==f.beneficiary_user_id||seed.role!==f.beneficiary_role||seed.amountCents!==exactCents(f.amount_cents)
   ||seed.source?.id!==f.order_id||seed.source?.digest!==f.posting_digest||seed.policyVersion!==basis.policyVersion||seed.policyDigest!==basis.policyDigest
   ||!basis.policyVersion||!basis.policyConfig||hash(canonicalize(basis.policyConfig))!==basis.policyDigest)throw unavailable();
- const policy=validateDistributionPolicy(basis.policyConfig as unknown as Record<string,unknown>);
+ const policy=validateDistributionPolicy(basis.policyConfig as unknown as Record<string,unknown>,basis.policyConfig.scope);
  const roles=basis.roles.filter(r=>r.role===f.beneficiary_role&&r.beneficiaryUserId===f.beneficiary_user_id);
  if(roles.length!==1)throw unavailable();const role=roles[0]!;
  const rates=distributionPolicyRates(policy,role.levelCode),level=policy.schema==='distribution-policy.v2'?{code:null}:policy.levels.find(l=>l.code===role.levelCode),percent=referralPercent(role.percent);

@@ -3,9 +3,9 @@ import {strict as assert} from 'node:assert';
 import {createHash} from 'node:crypto';
 import type {Pool} from 'pg';
 import {loadNativeDistributionRuntime} from '../src/finance/distribution-native-runtime';
-import {createDistributionEarningStore} from '../src/finance/distribution-earning-store';
+import {createNativeDistributionEarningStore,createDistributionEarningStore} from '../src/finance/distribution-earning-store';
 import {assertLocalDistributionAssembly, distributionPolicyScopeOf} from '../src/finance/distribution-policy-store';
-import {bindJoinpayCollectionProfile,bindFormalJoinpayCollectionAdmission,COLLECTION_REQUIRED_RULES,type CollectionProfileOperation,type CollectionServerProfile} from '../src/order/joinpay-collection-profile';
+import {bindJoinpayCollectionProfile,bindFormalJoinpayCollectionAdmission,readFormalCollectionAdmission,COLLECTION_REQUIRED_RULES,type CollectionProfileOperation,type CollectionServerProfile} from '../src/order/joinpay-collection-profile';
 import {JOINPAY_SIGNATURE_ORDER} from '../src/order/joinpay-protocol';
 
 const config={provider:'real' as const,database:{name:'zzsh_prod',user:'zzsh_runtime',runtimeUser:'zzsh_runtime'} as any};
@@ -20,9 +20,9 @@ function descriptor():CollectionServerProfile{
    responseKnownAnswer:answer(JOINPAY_SIGNATURE_ORDER[op==='SUBMIT'?'uniPaySyncResponse':op==='QUERY'?'queryOrderResponse':'asyncNotify']),
    ...(op==='SUBMIT'?{}:{timeOffsetMinutes:480}),...(op==='NOTIFY'?{notificationDecoding:{ra_PayTime:0,rb_DealTime:0}}:{})}]))};
 }
-function admission(){const input=descriptor(),profile=bindJoinpayCollectionProfile(input);
+function admission(overrides:Partial<Parameters<typeof bindFormalJoinpayCollectionAdmission>[0]>={}){const input=descriptor(),profile=bindJoinpayCollectionProfile(input);
  return bindFormalJoinpayCollectionAdmission({kind:'JOINPAY_FORMAL_SERVER_REVIEW',reference:'fixture_review',reviewSha256:'2'.repeat(64),appId:'fixture_app',
-  database:'zzsh_prod',runtimeUser:'zzsh_runtime',merchantIdentityId:input.merchantIdentityId,wireMerchantNo:MERCHANT,profiles:[profile]});}
+  database:'zzsh_prod',runtimeUser:'zzsh_runtime',merchantIdentityId:input.merchantIdentityId,wireMerchantNo:MERCHANT,profiles:[profile],...overrides});}
 
 test('native distribution is off unless explicitly enabled and never derives a policy or ratio',()=>{
  assert.equal(loadNativeDistributionRuntime({config,authEnabled:true,admission:undefined,env:{}}),undefined);
@@ -70,4 +70,52 @@ test('real auth assembly accepts the exact native capabilities and rejects cross
  calls=0;await assert.rejects(mountAuthHandlers({},{...options,joinpayCollection:{admission:admission()}}),/ASSEMBLY_MISMATCH/);assert.equal(calls,0);
  await assert.rejects(mountAuthHandlers({},{...options,distributionScope:undefined}),/ASSEMBLY_MISMATCH/);assert.equal(calls,0);
  await assert.rejects(mountAuthHandlers({},{...options,localControlledPayments:{}}),/exclusive/);assert.equal(calls,0);
+});
+
+test('native reversal uses an explicitly accepted original admission after rotation, never the current hash',async()=>{
+ const {canonicalize}=require('../src/supply/content-hash'),{earningEconomicKey}=require('../src/finance/distribution-mechanism');
+ const a=admission(),view=readFormalCollectionAdmission(a),b=admission({reference:'fixture_next',reviewSha256:'3'.repeat(64),acceptedInitialAdmissions:[{reference:view.reference,sha256:view.sha256}]}),unaccepted=admission({reference:'fixture_unaccepted',reviewSha256:'4'.repeat(64)});
+ const h='a'.repeat(64),at='2026-10-04T00:00:00.000123Z',hash=(x:string)=>createHash('sha256').update(x).digest('hex');
+ const source={kind:'NATIVE_RENTAL_REFERRAL',type:'NATIVE',system:'zzsh',entity:'rental_order',id:'order',digest:h,eventAt:at};
+ const seed:any={id:'earning',economicKey:earningEconomicKey(source,'beneficiary','RENTER_REFERRAL'),source,beneficiaryUserId:'beneficiary',role:'RENTER_REFERRAL',policyVersion:'policy',policyDigest:h,baseDigest:h,relationDigest:h,amountCents:'100',dueAt:at,fingerprint:h,state:'PENDING',fundsDisposition:'PENDING',recoveryRequiredCents:null,version:'1'};
+ for(const action of ['REVOKE','RECOVER'] as const){
+  const make=(wrongDigest=false)=>{let writes=0;
+   const row={id:seed.id,economic_root_id:seed.id,economic_key:seed.economicKey,beneficiary_role:seed.role,posting_digest:h,order_id:'order',payment_confirmation_id:'payment',beneficiary_user_id:'beneficiary',amount_cents:'100',due_exact:at,canonical_seed:canonicalize(seed),seed_digest:hash(canonicalize(seed)),basis_digest:h,state:action==='RECOVER'?'RECOVERY_REQUIRED':'SETTLED',funds_disposition:'SETTLED',version:action==='RECOVER'?'3':'2',recovery_required_cents:action==='RECOVER'?'100':null};
+   const original=canonicalize({schema:'rental-referral-reversal.v1',scope:'NATIVE',earningId:'earning',basisDigest:h,amountCents:'100'});
+   const pool:any={connect:async()=>({release(){},query:async(sql:string)=>{
+    if(/^(INSERT|UPDATE)/.test(sql))writes++;
+    if(sql.startsWith('SELECT current_database() AS name'))return{rows:[{name:'zzsh_prod',role:'zzsh_runtime',complete:true}]};
+    if(sql.startsWith('SELECT order_id'))return{rows:[{order_id:'order',beneficiary_user_id:'beneficiary'}]};
+    if(sql.startsWith('SELECT e.*'))return{rows:[row]};
+    if(sql.startsWith('SELECT * FROM zzsh_order.rental_referral_transition'))return{rows:[]};
+    if(sql.startsWith('SELECT * FROM zzsh_order.rental_referral_reversal_source'))return{rows:[{id:'original',scope:'NATIVE',basis_digest:h,amount_cents:'100',canonical_source:original,source_digest:hash(original),approval_digest:wrongDigest?'f'.repeat(64):view.sha256}]};
+    if(sql.startsWith('SELECT a.source_admission_ref'))return{rows:[{source_admission_ref:view.reference,approval_digest:view.sha256}]};
+    if(sql.startsWith('SELECT reversal_source_id'))return{rows:[{reversal_source_id:'original',finance_event_id:null}]};
+    if(sql.startsWith('SELECT date_trunc'))return{rows:[{now:new Date('2026-10-31T00:00:00.000Z'),due:true}]};
+    if(sql.startsWith('SELECT 1 FROM zzsh_order.wallet_coverage'))return{rows:[{}],rowCount:1};
+    if(sql.startsWith('SELECT ledger_revision'))return{rows:[{revision:'5',available:'150'}]};
+    if(sql.startsWith('UPDATE zzsh_order.rental_referral_earning'))return{rows:[],rowCount:1};
+    return{rows:[]};
+   }})};return{pool,version:row.version,writes:()=>writes};};
+  for(const capability of [a,b]){const f=make();assert.equal((await createNativeDistributionEarningStore(capability).transition(f.pool,'earning',action,f.version,'request','original')).root.state,'REVOKED');assert(f.writes()>0);}
+  const denied=make();await assert.rejects(createNativeDistributionEarningStore(unaccepted).transition(denied.pool,'earning',action,denied.version,'request','original'));assert.equal(denied.writes(),0);
+  const wrong=make(true);await assert.rejects(createNativeDistributionEarningStore(b).transition(wrong.pool,'earning',action,wrong.version,'request','original'));assert.equal(wrong.writes(),0);
+ }
+});
+
+test('native policy submission validates the bound native head rather than the local policy head',async()=>{
+ const {validateDistributionPolicySubmission}=require('../src/finance/distribution-policy-approval'),{canonicalize}=require('../src/supply/content-hash');
+ const runtime=loadNativeDistributionRuntime({config,authEnabled:true,admission:admission(),env:{DISTRIBUTION_NATIVE_ENABLED:'true'}})!;
+ const policy={schema:'distribution-policy.v2',scope:'NATIVE',enabled:true,participation:'AUTO_AT_REGISTRATION',depth:1,selfRebate:false,accountModes:['ordinary','custom'],minimumAccrualCents:'0',settlementDelayDays:7,rateMode:'UNIFORM',renterPercent:'5',ownerPercent:'5',levels:[]};
+ const text=canonicalize(policy),digest=createHash('sha256').update(text).digest('hex');let nativeHeadReads=0;
+ const client:any={query:async(sql:string,args:any[]=[])=>{
+  if(sql.includes('current_database() AS name'))return{rows:[{name:'zzsh_prod',role:'zzsh_runtime',complete:true}]};
+  if(sql.includes('pg_get_userbyid(d.datdba) AS owner'))return{rows:[{rolsuper:false,rolbypassrls:false,complete:true}]};
+  if(sql.includes("to_regprocedure('zzsh_order.distribution_policy_contract_version()')"))return{rows:[{ready:true}]};
+  if(sql.includes('distribution_policy_contract_version() AS version'))return{rows:[{version:2}]};
+  if(sql.includes('FROM zzsh_order.distribution_policy_head h')){assert.equal(args[0],'NATIVE');nativeHeadReads++;return{rows:[{id:'native_policy',revision:'1',scope:'NATIVE',canonical_config:text,config_digest:digest,created_at:'2026-10-31T00:00:00Z'}]};}
+  return{rows:[]};
+ }};
+ await validateDistributionPolicySubmission(client,{schema:'distribution-policy-change.v1',expectedPolicyId:'native_policy',expectedRevision:'1',expectedPolicyDigest:digest,changes:{renterPercent:'6'},reason:'synthetic policy change'},runtime.auth.distributionScope);
+ assert.equal(nativeHeadReads,1);
 });
