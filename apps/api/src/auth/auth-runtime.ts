@@ -1184,6 +1184,7 @@ export async function mountAuthHandlers(
     adminSecurityOptions: securityOptions,
     distributionScope: options.distributionScope,
     distributionReadScope: options.distributionReadScope,
+    ...(options.distributionEarnings ? { distributionEarnings: options.distributionEarnings } : {}),
     supply: { ...securityOptions, mediaStorage, supplyGateReader,legacyPublicAdmission,legacyPublicAdmissionDetail,listingCursorKey:options.listingCursorKey },
     order: orderOptions,
     ...(yunxinRuntime ? {
