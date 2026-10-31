@@ -67,6 +67,8 @@ const admin = () => new Client({
   password: resolveSecret(),
   application_name: "zzsh-regression-reset",
   connectionTimeoutMillis: 3000,
+  statement_timeout: 5000,
+  lock_timeout: 500,
 });
 
 function identifier(value) {
@@ -130,7 +132,7 @@ async function ensureRoles(client, receipt, state) {
       // for its own connections to drain; never terminate or force-drop a foreign session.
       let foreign = (await client.query(
         "SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()", [DATABASE])).rows[0].n;
-      for (const deadline = Date.now() + 5000; foreign !== 0 && Date.now() < deadline;) {
+      for (const deadline = Date.now() + 60000; foreign !== 0 && Date.now() < deadline;) {
         await new Promise((resolve) => setTimeout(resolve, 100));
         foreign = (await client.query(
           "SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()", [DATABASE])).rows[0].n;
