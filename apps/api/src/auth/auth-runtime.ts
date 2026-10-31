@@ -65,6 +65,7 @@ import { MessageScopeRecoveryLifecycle, autoAssignWaitingConsultations, supportM
 import { YunxinIdentityRepository } from "../im/yunxin-identity-repository";
 import { YunxinServerApiClient, type YunxinServerApi, type YunxinSupportScopeApi } from "../im/yunxin-provider";
 import type { ImMessageTransport } from "../im/im-contract";
+import { createYunxinDueReminderTransport, createYunxinStageCardTransport, createYunxinSystemMessageTransport, type YunxinTeamTextSender } from "../im/yunxin-transport";
 import { mountYunxinHandlers } from "../im/yunxin-routes";
 import { mountOrderImEventHandlers, OrderImEventRecoveryLifecycle, orderImEventsActivateApp } from "../im/order-im-events";
 
@@ -850,6 +851,13 @@ export async function mountAuthHandlers(
         };
       })()
     : undefined;
+  // Real-channel notification seam for order groups. Without it the lifecycle
+  // workers skip their scans entirely, so a real App would create Teams but never
+  // send the Bot welcome, stage cards, due reminders or the manual-close notice.
+  const teamTextSender = yunxinRuntime
+    && typeof (yunxinRuntime.provider as { sendSupportTeamText?: unknown }).sendSupportTeamText === "function"
+    ? (yunxinRuntime.provider as YunxinTeamTextSender)
+    : undefined;
   const yunxinConsultation: ConsultationRouteOptions | undefined = yunxinRuntime ? {
     ...(options.supportDispatch?.appId === options.yunxin!.appId ? { wakeDispatch: () => app.get(OrderDispatchLifecycle).wake() } : {}),
     ...(options.supportDispatch?.autoAssignConsultations === true ? { autoAssignConsultations: true } : {}),
@@ -1132,7 +1140,9 @@ export async function mountAuthHandlers(
     ...(orderImSdkRouteBindings ? { orderImSdkRouteBindings } : {}),
     ...(options.orderTeams && orderTeamProvider
       ? { orderTeamMembers: { appId: options.yunxin!.appId, provider: orderTeamProvider } } : {}),
-    ...(options.testImMessageTransport ? { systemMessageTransport: { sendText: options.testImMessageTransport.sendText.bind(options.testImMessageTransport) } } : {}),
+    ...(options.testImMessageTransport
+      ? { systemMessageTransport: { sendText: options.testImMessageTransport.sendText.bind(options.testImMessageTransport) } }
+      : teamTextSender ? { systemMessageTransport: createYunxinSystemMessageTransport(teamTextSender) } : {}),
   };
   // Credit routes own both BFF prefixes and must be registered before the
   // generic BFF fallbacks, which otherwise turn unknown credit paths into 404.
@@ -1214,8 +1224,8 @@ export async function mountAuthHandlers(
       ...(options.testImMessageTransport?.card ? { stageCardTransport: {
         card: options.testImMessageTransport.card.bind(options.testImMessageTransport),
         ...(options.testImMessageTransport.sendText ? { text: options.testImMessageTransport.sendText.bind(options.testImMessageTransport) } : {}),
-      } } : {}),
-      ...(options.testImMessageTransport ? { dueReminderTransport: { sendText: options.testImMessageTransport.sendText.bind(options.testImMessageTransport) } } : {}),
+      } } : teamTextSender ? { stageCardTransport: createYunxinStageCardTransport(teamTextSender) } : {}),
+      ...(options.testImMessageTransport ? { dueReminderTransport: { sendText: options.testImMessageTransport.sendText.bind(options.testImMessageTransport) } } : teamTextSender ? { dueReminderTransport: createYunxinDueReminderTransport(teamTextSender) } : {}),
       ...(options.orderTeams.escalationEnabled===true?{escalationEnabled:true}:{})},options.orderTeams.intervalMs,options.orderTeams.batchLimit);
   }
   if (options.supportDispatch) app.get(OrderDispatchLifecycle).start({ ...options.supportDispatch, pool: options.pool,

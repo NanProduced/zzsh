@@ -244,5 +244,6 @@
   "dist/test/im-support-round-rating.test.js",
   "dist/test/im-support-message-state.test.js",
   "dist/test/order-opening-auto-confirm.test.js",
-  "dist/test/im-local-persistence.test.js"
+  "dist/test/im-local-persistence.test.js",
+  "dist/test/yunxin-transport.test.js"
 ]
