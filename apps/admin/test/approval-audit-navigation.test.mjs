@@ -193,7 +193,7 @@ async function waitFor(predicate, timeout = 2000) {
   }
 }
 
-async function click(element) {
+async function clickRaw(element) {
   assert.ok(element, "expected clickable element");
   await act(async () => { element.dispatchEvent(new browser.MouseEvent("click", { bubbles: true, cancelable: true })); });
   await settle();
@@ -473,3 +473,13 @@ test("audit rows lead with Chinese labels and the business narrative, technical 
     globalThis.fetch = undefined;
   }
 });
+
+// Step-up credentials are required in every approval write dialog; tests fill them once the dialog opens.
+async function click(element) { await clickRaw(element); await fillStepUpFields(element); }
+async function fillStepUpFields(element) {
+  const doc = element?.ownerDocument; if (!doc) return;
+  const fields = [...doc.querySelectorAll('input[autocomplete="current-password"], input[autocomplete="one-time-code"]')].filter((field) => !field.value);
+  if (fields.length === 0) return;
+  const setValue = Object.getOwnPropertyDescriptor(doc.defaultView.HTMLInputElement.prototype, "value").set;
+  await act(async () => { for (const field of fields) { setValue.call(field, field.autocomplete === "one-time-code" ? "123456" : "step-up-password-1"); field.dispatchEvent(new doc.defaultView.Event("input", { bubbles: true })); } });
+}

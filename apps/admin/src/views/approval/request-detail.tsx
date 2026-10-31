@@ -3,7 +3,8 @@ import {
   Ban, Check, Clock, FilePlus2, Settings2, UserPlus, X, Play, TriangleAlert,
 } from "lucide-react";
 
-import { Button } from "../../components/ui-elements";
+import { Button, PasswordInput } from "../../components/ui-elements";
+import { StepUpCaptcha } from "../../components/altcha-field";
 import { Badge } from "../../components/ui/badge";
 import {
   Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogTitle,
@@ -208,15 +209,24 @@ function AddCandidateForm({ requestId, busy, blocked, onAppend }: { requestId: s
   );
 }
 
+type DialogKind = "approve" | "reject" | "execute" | "withdraw";
+/** 实时复核凭据：只在内存中随本次请求发出，绝不写入待核对记录。 */
+export type ApprovalStepUp = { password: string; totpCode: string };
+
 function DecisionDialog({
   kind, detail, onClose, onSubmit,
 }: {
-  kind: "approve" | "reject" | "execute" | null;
+  kind: DialogKind | null;
   detail: Detail;
   onClose: () => void;
-  onSubmit: (kind: "approve" | "reject" | "execute", reason: string, amendment?: ApprovalDecisionAmendment) => void;
+  onSubmit: (kind: DialogKind, reason: string, stepUp: ApprovalStepUp, amendment?: ApprovalDecisionAmendment) => void;
 }) {
   const [reason, setReason] = useState("");
+  const [password, setPassword] = useState("");
+  const [totpCode, setTotpCode] = useState("");
+  const passwordId = useId();
+  const totpId = useId();
+  const stepUpReady = password.length >= 12 && /^\d{6}$/.test(totpCode);
   const [recall, setRecall] = useState("");
   const [editRequested, setEditRequested] = useState(false);
   const editId = useId();
@@ -239,7 +249,7 @@ function DecisionDialog({
   const change = detail.business?.changeSummary ?? detail.summary;
   const recallTarget = detail.summary.slice(0, 8);
   const rejectRequiresReason = kind === "reject";
-  const disabled = Boolean(editError) || (kind === null
+  const disabled = Boolean(editError) || !stepUpReady || (kind === null
     ? true
     : rejectRequiresReason
       ? reason.trim().length < 3
@@ -257,16 +267,18 @@ function DecisionDialog({
     } else {
       setDepositAllowanceInput("");
     }
-    if (kind === null) { setReason(""); setRecall(""); }
+    if (kind === null) { setReason(""); setRecall(""); setPassword(""); setTotpCode(""); }
   }, [kind, detail.requestId, detail.entitlementAmendment?.editablePayload]);
 
-  const title = kind === "approve" ? "确认批准" : kind === "reject" ? "确认驳回" : "确认执行";
+  const title = kind === "approve" ? "确认批准" : kind === "reject" ? "确认驳回" : kind === "withdraw" ? "确认撤回申请" : "确认执行";
   const consequence = kind === "approve"
     ? (detail.business?.executionMode === "SOURCE_BUSINESS"
       ? "批准后本申请进入待执行；本业务由来源流程完成双方确认、客服复核与过账，审批页不会代为到账。"
       : "批准后本申请进入待执行；执行是独立步骤，批准不代表执行完成或资金到账。")
     : kind === "reject"
       ? "驳回后原申请关闭且不会复活；如需再次办理请由来源业务重新发起。"
+      : kind === "withdraw"
+        ? "撤回后申请关闭（已撤回），审批人不能再处理；撤回动作写入审计，如需再次办理请重新发起。"
       : "执行结果单独记录，不可撤销。执行成功只代表本次执行完成，业务对象是否生效以领域结果为准。";
 
   return (
@@ -312,6 +324,12 @@ function DecisionDialog({
               {editError ? <p role="alert" className="text-destructive">{editError}</p> : null}
             </div> : null}
           </div> : null}
+          {kind === "withdraw" ? (
+            <label className="block space-y-1.5">
+              <FieldLabel>{`撤回原因（可选，最多 ${REASON_MAX} 字）`}</FieldLabel>
+              <Textarea value={reason} rows={2} maxLength={REASON_MAX} onChange={(event) => setReason(event.target.value)} placeholder="例如：信息填错，稍后重新提交" />
+            </label>
+          ) : null}
           {kind === "approve" || kind === "reject" ? (
             <label className="block space-y-1.5">
               <FieldLabel>{rejectRequiresReason ? `驳回原因（必填，至少 3 字，最多 ${REASON_MAX} 字）` : `批准意见（可选，最多 ${REASON_MAX} 字）`}</FieldLabel>
@@ -334,10 +352,24 @@ function DecisionDialog({
               </label>
             </>
           ) : null}
+          <div className="space-y-3 rounded-md border border-border p-3">
+            <p className="text-[11px] leading-relaxed text-muted-foreground">高风险操作需本人实时复核：输入登录密码与身份验证器中的 6 位动态码。</p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <label htmlFor={passwordId}><FieldLabel>本人密码</FieldLabel></label>
+                <PasswordInput id={passwordId} autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm" />
+              </div>
+              <div className="space-y-1.5">
+                <label htmlFor={totpId}><FieldLabel>6 位动态验证码</FieldLabel></label>
+                <Input id={totpId} inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={totpCode} onChange={(event) => setTotpCode(event.target.value.replace(/\D/g, "").slice(0, 6))} className="font-mono tracking-widest" />
+              </div>
+            </div>
+            <StepUpCaptcha />
+          </div>
         </div>
         <DialogFooter>
           <DialogClose render={<Button variant="secondary" size="sm" />}>取消</DialogClose>
-          <Button type="button" size="sm" variant={kind === "approve" ? "primary" : "danger"} disabled={disabled} onClick={() => {
+          <Button type="button" size="sm" variant={kind === "approve" ? "primary" : kind === "withdraw" ? "secondary" : "danger"} disabled={disabled} onClick={() => {
             if (!kind) return;
             const amendment = canEdit && editRequested && finalPayload ? {
               expectedPayloadHash: detail.entitlementAmendment!.expectedPayloadHash,
@@ -356,9 +388,11 @@ function DecisionDialog({
                 return base;
               })()
             } : undefined;
-            onSubmit(kind, reason.trim(), amendment);
+            const stepUp = { password, totpCode };
+            setPassword(""); setTotpCode("");
+            onSubmit(kind, reason.trim(), stepUp, amendment);
           }}>
-            {kind === "approve" ? "确认批准" : kind === "reject" ? "确认驳回" : "确认执行"}
+            {kind === "approve" ? "确认批准" : kind === "reject" ? "确认驳回" : kind === "withdraw" ? "确认撤回" : "确认执行"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -397,7 +431,7 @@ function ActionButton({ eligibility, busy, blocked, onClick }: { eligibility: Ac
 }
 
 export function RequestDetail({
-  detail, busy, blocked, onOpenRequest, onOpenPath, onLocateRecovery, onDecide, onExecute, onAppend,
+  detail, busy, blocked, onOpenRequest, onOpenPath, onLocateRecovery, onDecide, onExecute, onAppend, onWithdraw,
 }: {
   detail: Detail;
   busy: boolean;
@@ -406,11 +440,12 @@ export function RequestDetail({
   /** 跨对象导航由工作区壳提供；未透传时来源对象只列标识，不渲染死按钮。 */
   onOpenPath?: (path: string, title: string) => void;
   onLocateRecovery?: () => void;
-  onDecide: (decision: "APPROVE" | "REJECT", reason: string, amendment?: ApprovalDecisionAmendment) => void;
-  onExecute: () => void;
+  onDecide: (decision: "APPROVE" | "REJECT", reason: string, stepUp: ApprovalStepUp, amendment?: ApprovalDecisionAmendment) => void;
+  onExecute: (stepUp: ApprovalStepUp) => void;
   onAppend: (username: string, reason: string) => void;
+  onWithdraw?: (reason: string, stepUp: ApprovalStepUp) => void;
 }) {
-  const [dialog, setDialog] = useState<"approve" | "reject" | "execute" | null>(null);
+  const [dialog, setDialog] = useState<DialogKind | null>(null);
   const [flowView, setFlowView] = useState<"flow" | "timeline">("flow");
   const [flowExpanded, setFlowExpanded] = useState(true);
   const status = statusView(detail.status);
@@ -425,7 +460,8 @@ export function RequestDetail({
   const sourceBusiness = (detail.operation.executionMode ?? detail.business?.executionMode) === "SOURCE_BUSINESS";
   // 只显示真能办的动作；其余不可用原因按原因文案合并进「查看限制」，不摆一排灰按钮。
   const actionable = listed.filter((name) => name !== "addCandidate" && canAct(actions, name));
-  const blockedNames = listed.filter((name) => !canAct(actions, name));
+  // 撤回只对申请人/Boss 有意义：不可撤回时不进限制说明，避免审批人看到无关噪音。
+  const blockedNames = listed.filter((name) => !canAct(actions, name) && name !== "withdraw");
   const blockedReasonGroups = new Map<string, string[]>();
   for (const name of blockedNames) {
     const reason = actionBlockReason(actions, name) ?? "原因未提供";
@@ -450,7 +486,7 @@ export function RequestDetail({
   const renderActionButton = (name: string) => {
     const eligibility = actionFor(actions, name)!;
     if (name === "replace") {
-      // 没有 cancel/withdraw 接口：撤销只能由来源业务重新发起并带 supersedesRequestId。
+      // 替代：由来源业务重新发起并带 supersedesRequestId；单纯撤回走 withdraw。
       return (
         <Button key={name} type="button" size="sm" variant="secondary" disabled={busy || blocked || sourcePath === null || !onOpenPath}
           onClick={() => { if (sourcePath && onOpenPath) onOpenPath(sourcePath, "重新发起（替代本申请）"); }}>返回来源业务</Button>
@@ -458,7 +494,7 @@ export function RequestDetail({
     }
     return (
       <ActionButton key={name} eligibility={eligibility} busy={busy} blocked={blocked}
-        onClick={() => setDialog(name === "approve" ? "approve" : name === "reject" ? "reject" : "execute")} />
+        onClick={() => setDialog(name === "approve" ? "approve" : name === "reject" ? "reject" : name === "withdraw" ? "withdraw" : "execute")} />
     );
   };
   const guide = blocked ? "这次办理的原结果尚待核对，请先查询原结果，再决定是否继续。"
@@ -656,11 +692,12 @@ export function RequestDetail({
         kind={dialog}
         detail={detail}
         onClose={() => setDialog(null)}
-        onSubmit={(kind, reason, amendment) => {
+        onSubmit={(kind, reason, stepUp, amendment) => {
           setDialog(null);
-          if (kind === "approve") onDecide("APPROVE", reason, amendment);
-          else if (kind === "reject") onDecide("REJECT", reason);
-          else onExecute();
+          if (kind === "approve") onDecide("APPROVE", reason, stepUp, amendment);
+          else if (kind === "reject") onDecide("REJECT", reason, stepUp);
+          else if (kind === "withdraw") onWithdraw?.(reason, stepUp);
+          else onExecute(stepUp);
         }}
       />
     </div>

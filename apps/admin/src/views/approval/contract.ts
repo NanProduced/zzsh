@@ -99,8 +99,8 @@ export function recoveryOutcomeUnconfirmedSummary(result: RecoveryResult): strin
   return "原请求已确认受理；最新状态暂未读到，可重试读取。";
 }
 
-/** 动作集合固定，没有 cancel/withdraw；撤销只能通过 replace 新建申请产生 CANCELLED。 */
-export const APPROVAL_ACTION_NAMES = ["approve", "reject", "execute", "addCandidate", "replace"] as const;
+/** 动作集合固定：withdraw 由申请人（或 Boss）在待审批时显式撤回，产生 CANCELLED；replace 则新建替代申请。 */
+export const APPROVAL_ACTION_NAMES = ["approve", "reject", "execute", "addCandidate", "replace", "withdraw"] as const;
 
 export type ActionEligibility = {
   action: string;
@@ -256,7 +256,7 @@ const STATUS: Record<string, { label: string; tone: InlineStatusTone }> = {
   PENDING: { label: "待审批", tone: "warning" },
   APPROVED: { label: "已批准", tone: "info" },
   REJECTED: { label: "已驳回", tone: "error" },
-  CANCELLED: { label: "已被替代或取消", tone: "neutral" },
+  CANCELLED: { label: "已撤回或被替代", tone: "neutral" },
   EXPIRED: { label: "已过期", tone: "neutral" },
   EXECUTED: { label: "审批执行完成", tone: "success" },
   EXECUTION_FAILED: { label: "执行失败", tone: "error" },
@@ -278,7 +278,7 @@ export function executionView(value: string | undefined | null): { label: string
 }
 
 export const ACTION_LABELS: Record<string, string> = {
-  approve: "批准", reject: "驳回", execute: "执行", addCandidate: "追加审批人", replace: "替代申请",
+  approve: "批准", reject: "驳回", execute: "执行", addCandidate: "追加审批人", replace: "替代申请", withdraw: "撤回申请",
 };
 
 /** 原因码解释。未知码原样显示，不猜含义。 */
@@ -292,7 +292,7 @@ const REASONS: Record<string, string> = {
   BUSINESS_PERMISSION_REQUIRED: "缺少该业务的阶段权限",
   GAME_SCOPE_DENIED: "目标游戏不在你的业务范围内",
   OUT_OF_REQUEST_SCOPE: "这张申请不在你的可读范围内",
-  REQUESTER_ONLY: "只有申请人本人可以替代这张申请",
+  REQUESTER_ONLY: "只有申请人本人（或 Boss）可以替代或撤回这张申请",
   STATUS_NOT_PENDING: "申请已不在待审批状态",
   STATUS_NOT_APPROVED: "需要先有批准决定才能执行",
   EXPIRED: "申请已过期，不再推进",
@@ -525,6 +525,7 @@ export const AUDIT_ACTIONS = [
   "approval.request.cancelled",
   "approval.request.expired",
   "approval.request.candidate_added",
+  "approval.request.withdrawn",
   "approval.execution.completed",
   "approval.template.configured",
 ];
@@ -534,6 +535,7 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   "approval.request.approved": "审批同意",
   "approval.request.rejected": "审批驳回",
   "approval.request.cancelled": "申请被替代或取消",
+  "approval.request.withdrawn": "撤回申请",
   "approval.request.expired": "申请过期",
   "approval.request.candidate_added": "追加审批人",
   "approval.execution.completed": "执行完成",

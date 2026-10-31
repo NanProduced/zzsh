@@ -245,7 +245,7 @@ async function waitFor(predicate, timeout = 2000) {
   }
 }
 
-async function click(element) {
+async function clickRaw(element) {
   assert.ok(element, "element to click exists; buttons now: " + [...document.body.querySelectorAll("button")].map((b) => b.textContent.trim()).filter(Boolean).slice(0, 24).join("/"));
   await act(async () => { element.dispatchEvent(new browser.MouseEvent("click", { bubbles: true, cancelable: true })); });
   await settle();
@@ -1238,7 +1238,7 @@ test("an unresolved write survives unmount and remount for the same identity and
     await click(buttonByText("用原请求重试"));
     await waitFor(() => writes.length === 1);
     assert.equal(writes[0].headers["idempotency-key"], originalKey, "重放沿用原幂等标识");
-    assert.deepEqual(writes[0].body, originalBody, "重放沿用原请求体");
+    { const { password: _p, totpCode: _t, ...frozen } = originalBody; assert.deepEqual(writes[0].body, frozen, "重放沿用原请求体（本人凭证只在内存，不写入记录）"); }
   } finally {
     await second.cleanup();
   }
@@ -1806,3 +1806,13 @@ test('master integration: flow refresh and request changes select the actual cur
     assert.equal(host.querySelector('h4')?.textContent, '候选审批组');
   } finally { await act(async () => root.unmount()); host.remove(); }
 });
+
+// Step-up credentials are required in every approval write dialog; tests fill them once the dialog opens.
+async function click(element) { await clickRaw(element); await fillStepUpFields(element); }
+async function fillStepUpFields(element) {
+  const doc = element?.ownerDocument; if (!doc) return;
+  const fields = [...doc.querySelectorAll('input[autocomplete="current-password"], input[autocomplete="one-time-code"]')].filter((field) => !field.value);
+  if (fields.length === 0) return;
+  const setValue = Object.getOwnPropertyDescriptor(doc.defaultView.HTMLInputElement.prototype, "value").set;
+  await act(async () => { for (const field of fields) { setValue.call(field, field.autocomplete === "one-time-code" ? "123456" : "step-up-password-1"); field.dispatchEvent(new doc.defaultView.Event("input", { bubbles: true })); } });
+}

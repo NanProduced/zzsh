@@ -107,6 +107,10 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "zzsh_iam"."admin_security" TO ${runtimeUser};
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "zzsh_iam"."admin_recovery_request" TO ${runtimeUser};
     GRANT SELECT, INSERT, UPDATE ON TABLE "zzsh_iam"."admin_security_notification_outbox" TO ${runtimeUser};
+    GRANT SELECT, INSERT, DELETE ON TABLE "zzsh_iam"."admin_auth_failure" TO ${runtimeUser};
+    GRANT USAGE ON SEQUENCE "zzsh_iam"."admin_auth_failure_id_seq" TO ${runtimeUser};
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "zzsh_iam"."admin_auth_lockout" TO ${runtimeUser};
+    GRANT SELECT, INSERT, DELETE ON TABLE "zzsh_iam"."admin_auth_captcha_used" TO ${runtimeUser};
     GRANT SELECT ON TABLE "zzsh_iam"."admin_recovery_notification_target" TO ${runtimeUser};
     GRANT SELECT ON TABLE "zzsh_iam"."admin_permission" TO ${runtimeUser};
     GRANT SELECT, INSERT, UPDATE ON TABLE "zzsh_iam"."admin_role" TO ${runtimeUser};

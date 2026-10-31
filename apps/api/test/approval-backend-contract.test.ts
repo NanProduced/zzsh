@@ -695,7 +695,7 @@ test("eligibility covers business permission, game scope and executor assembly",
   const base = { row, userId: CANDIDATE.id, access, twoFactorEnabled: true, gameScope: { mode: "ALL_GAMES" as const, gameIds: [] }, isCandidate: true, testOperationsEnabled: true, executorAssembled: true };
   const reasons = (input: typeof base) => evaluateApprovalActions(input).map((item) => [item.action, item.reasonCode]);
 
-  assert.deepEqual(reasons(base), [["approve", "BUSINESS_PERMISSION_REQUIRED"], ["reject", "BUSINESS_PERMISSION_REQUIRED"], ["execute", "BUSINESS_PERMISSION_REQUIRED"], ["addCandidate", "OUT_OF_REQUEST_SCOPE"], ["replace", "BUSINESS_PERMISSION_REQUIRED"]]);
+  assert.deepEqual(reasons(base), [["approve", "BUSINESS_PERMISSION_REQUIRED"], ["reject", "BUSINESS_PERMISSION_REQUIRED"], ["execute", "BUSINESS_PERMISSION_REQUIRED"], ["addCandidate", "OUT_OF_REQUEST_SCOPE"], ["replace", "BUSINESS_PERMISSION_REQUIRED"], ["withdraw", "REQUESTER_ONLY"]]);
 
   const granted = evaluateApprovalActions({ ...base, access: grantedAccess, gameScope: { mode: "SELECTED_GAMES", gameIds: ["game_b"] } });
   assert.equal(granted.find((item) => item.action === "approve")?.reasonCode, "GAME_SCOPE_DENIED");

@@ -23,6 +23,7 @@ export const APPROVAL_WRITE_PATHS: Record<string, string> = {
   "/security/approvals/requests/decision": "approval.request.decide",
   "/security/approvals/requests/add-candidate": "approval.request.add_candidate",
   "/security/approvals/requests/execute": "approval.request.execute",
+  "/security/approvals/requests/withdraw": "approval.request.withdraw",
 };
 
 export type PendingApprovalWrite = {

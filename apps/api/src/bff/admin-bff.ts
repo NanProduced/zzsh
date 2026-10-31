@@ -110,6 +110,8 @@ const SECURITY_PATHS = new Map([
   ["/security/approvals/requests/execute", "/api/v1/admin/security/approvals/requests/execute"],
   ["/security/approvals/audit/events", "/api/v1/admin/security/approvals/audit/events"],
   ["/security/audit/events", "/api/v1/admin/security/audit/events"],
+  ["/security/audit/operations", "/api/v1/admin/security/audit/operations"],
+  ["/security/approvals/requests/withdraw", "/api/v1/admin/security/approvals/requests/withdraw"],
 ]);
 
 const GET_SECURITY_PATHS = new Set([
@@ -128,6 +130,7 @@ const GET_SECURITY_PATHS = new Set([
   "/security/approvals/requests/detail",
   "/security/approvals/audit/events",
   "/security/audit/events",
+  "/security/audit/operations",
 ]);
 
 // The 2FA challenge is cookie-backed after password sign-in; keep the allowlist

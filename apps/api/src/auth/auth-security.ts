@@ -1777,6 +1777,8 @@ async function readSecurityOperation(request: NodeRequest, response: NodeRespons
   sendSuccess(response, await readAdminSecurityCommandReceipt(options.pool, context.userId, commandId), requestId);
 }
 
+const APPROVAL_STEP_UP_PATHS = new Set(["/approvals/requests/decision", "/approvals/requests/execute", "/approvals/requests/withdraw"]);
+
 export async function handleAdminSecurity(request: AuthSecurityNodeRequest, response: AuthSecurityNodeResponse, options: AuthSecurityOptions): Promise<void> {
   const requestId = ensureApiV1RequestId(request);
   response.setHeader("X-Request-Id", requestId);
@@ -1786,7 +1788,16 @@ export async function handleAdminSecurity(request: AuthSecurityNodeRequest, resp
   }
   try {
     const path = routePath(request, "/api/v1/admin/security");
-    if (path.startsWith("/approvals")) return await handleAdminApprovalRoute(request, response, requestId, options, readAdminContext);
+    if (path.startsWith("/approvals")) {
+      if (request.method === "POST" && APPROVAL_STEP_UP_PATHS.has(path)) {
+        // 审批决定、执行与撤回均为高风险写：先实时复核密码 + TOTP（失败累计后要求 ALTCHA），再剥离复核字段交给审批路由的严格字段校验。
+        const context = await readAdminContext(request, options);
+        const body = bodyOf(request);
+        await verifyAdminReauthentication(request, context, body, options);
+        for (const key of ["password", "totpCode", "altcha"]) delete body[key];
+      }
+      return await handleAdminApprovalRoute(request, response, requestId, options, readAdminContext);
+    }
     if (path.startsWith("/audit")) return await handleAdminAuditRoute(request, response, requestId, options, readAdminContext);
     if (request.method === "GET") {
       if (path === "/captcha/challenge") {

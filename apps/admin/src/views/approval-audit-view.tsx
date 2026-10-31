@@ -57,6 +57,8 @@ type WriteIntent = {
   successMessage: string;
   readback: ReadbackTarget;
   afterPost?: () => void;
+  /** 实时复核凭据（密码 + TOTP）：仅内存携带，不进 sessionStorage 待核对记录。 */
+  stepUp?: { password: string; totpCode: string };
 };
 type RecoveryState = { kind: "unknown" | "readback" | "resolved"; intent: WriteIntent; persisted: boolean; receipt?: RecoveryResult };
 
@@ -65,7 +67,10 @@ const TAB_LABELS: Record<Tab, string> = { pending: "待我处理", mine: "我的
 const ALL = "all";
 
 /** 恢复合同的操作白名单（approval-audit.ts:95-104）。target 型操作必须带申请号，非 target 型不能带。 */
-const TARGET_SCOPED_OPERATIONS = new Set(["approval.request.decide", "approval.request.add_candidate", "approval.request.execute"]);
+/** 政策类发布由服务端固定要求 Boss 审批；模板页只作说明，不改变服务端判定。 */
+const BOSS_FIXED_OPERATIONS = new Set(["distribution.policy.publish", "membership.benefit.policy.publish"]);
+
+const TARGET_SCOPED_OPERATIONS = new Set(["approval.request.decide", "approval.request.add_candidate", "approval.request.execute", "approval.request.withdraw"]);
 
 /**
  * 已核实有发起入口的业务页（membership-growth-admin-host.tsx:122 政策发布、:128 礼遇发放）。
@@ -632,7 +637,7 @@ export function ApprovalAuditView({
     return detailOk && listOk;
   }, [canRead, canTemplateConfigure, loadCandidateOptions, loadDetail, loadList, loadOperations, loadTemplates]);
 
-  const makeWriteIntent = useCallback((path: string, body: Record<string, unknown>, successMessage: string, readback: ReadbackTarget, afterPost?: () => void): WriteIntent => {
+  const makeWriteIntent = useCallback((path: string, body: Record<string, unknown>, successMessage: string, readback: ReadbackTarget, afterPost?: () => void, stepUp?: { password: string; totpCode: string }): WriteIntent => {
     const operation = APPROVAL_WRITE_PATHS[path] ?? "";
     const targetRequestId = typeof body.requestId === "string" ? body.requestId : null;
     const target = targetRequestId
@@ -655,6 +660,7 @@ export function ApprovalAuditView({
       successMessage,
       readback,
       afterPost,
+      stepUp,
     };
   }, [contextEpoch, contextKey, snapshot.adminUserId, snapshot.session.id]);
 
@@ -699,7 +705,7 @@ export function ApprovalAuditView({
     setMessage(undefined);
     setLoading(true);
     try {
-      await adminRequest(intent.path, intent.body, intent.method, { "idempotency-key": intent.idempotencyKey });
+      await adminRequest(intent.path, intent.stepUp ? { ...intent.body, ...intent.stepUp } : intent.body, intent.method, { "idempotency-key": intent.idempotencyKey });
       if (!isCurrentIntent(intent)) return;
       intent.afterPost?.();
       const readbackOk = await performReadback(intent.readback);
@@ -872,7 +878,7 @@ export function ApprovalAuditView({
     setConfirm({ kind: "template" });
   };
 
-  const decide = (decision: "APPROVE" | "REJECT", reason: string, amendment?: import("./approval/contract").ApprovalDecisionAmendment) => {
+  const decide = (decision: "APPROVE" | "REJECT", reason: string, stepUp: { password: string; totpCode: string }, amendment?: import("./approval/contract").ApprovalDecisionAmendment) => {
     const current = detail;
     if (!current) return;
     const successMessage = decision === "APPROVE"
@@ -883,6 +889,8 @@ export function ApprovalAuditView({
       { requestId: current.requestId, decision, ...(reason ? { reason } : {}), ...(decision === "APPROVE" && amendment ? amendment : {}) },
       successMessage,
       { kind: "detail-and-lists", requestId: current.requestId, keys: objectOnly ? [] : [tab === "pending" ? "pending" : "mine"] },
+      undefined,
+      stepUp,
     ));
   };
 
@@ -897,7 +905,7 @@ export function ApprovalAuditView({
     ));
   };
 
-  const execute = () => {
+  const execute = (stepUp: { password: string; totpCode: string }) => {
     const current = detail;
     if (!current) return;
     void submitWrite(makeWriteIntent(
@@ -905,6 +913,21 @@ export function ApprovalAuditView({
       { requestId: current.requestId },
       "执行结果已单独记录；执行成功不代表业务对象已生效或资金已到账，请以领域结果为准。",
       { kind: "detail-and-lists", requestId: current.requestId, keys: objectOnly ? [] : [tab === "pending" ? "pending" : "mine"] },
+      undefined,
+      stepUp,
+    ));
+  };
+
+  const withdraw = (reason: string, stepUp: { password: string; totpCode: string }) => {
+    const current = detail;
+    if (!current) return;
+    void submitWrite(makeWriteIntent(
+      "/security/approvals/requests/withdraw",
+      { requestId: current.requestId, ...(reason ? { reason } : {}) },
+      "申请已撤回，审批人不能再处理；撤回已写入审计。",
+      { kind: "detail-and-lists", requestId: current.requestId, keys: objectOnly ? [] : [tab === "pending" ? "pending" : "mine"] },
+      undefined,
+      stepUp,
     ));
   };
 
@@ -974,6 +997,7 @@ export function ApprovalAuditView({
                 onOpenPath={onOpenPath}
                 onDecide={decide}
                 onExecute={execute}
+                onWithdraw={withdraw}
                 onAppend={append}
               />
             </section>
@@ -1051,6 +1075,7 @@ export function ApprovalAuditView({
                 onOpenPath={onOpenPath}
                 onDecide={decide}
                 onExecute={execute}
+                onWithdraw={withdraw}
                 onAppend={append}
               />
             </section>
@@ -1173,6 +1198,9 @@ export function ApprovalAuditView({
                           </SelectContent>
                         </Select>
                       )}
+                      {BOSS_FIXED_OPERATIONS.has(operationCode) ? (
+                        <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-muted-foreground"><Badge variant="outline" className="text-[11px]">本类型固定 Boss 审批</Badge>非 Boss 候选人即使列入名单也不能作出决定。</p>
+                      ) : null}
                     </label>
                     <label className="block min-w-0">
                       <FieldLabel>触发条件</FieldLabel>
@@ -1274,7 +1302,7 @@ export function ApprovalAuditView({
                         const title = operations?.find((operation) => operation.operationCode === template.operationCode)?.title;
                         return (
                           <tr key={template.id}>
-                            <td>{title ?? <InlineStatus tone="unknown">未登记业务</InlineStatus>}<span className="mt-0.5 block font-mono text-[11px] break-all text-muted-foreground">{template.operationCode}</span></td>
+                            <td>{title ?? <InlineStatus tone="unknown">未登记业务</InlineStatus>}{BOSS_FIXED_OPERATIONS.has(template.operationCode) ? <Badge variant="outline" className="ml-1.5 align-middle text-[11px]">本类型固定 Boss 审批</Badge> : null}<span className="mt-0.5 block font-mono text-[11px] break-all text-muted-foreground">{template.operationCode}</span></td>
                             <td className="font-mono text-[11px] break-all">{template.triggerCondition}</td>
                             <td className="whitespace-nowrap">v{template.version}</td>
                             <td className="whitespace-nowrap">{formatDate(template.updatedAt)}</td>
