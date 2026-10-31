@@ -37,9 +37,7 @@ export function buildUserAuthUpstreamHeaders(request: Request, input: { requestI
     const sanitized = userAgent.replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 512);
     if (sanitized) headers.set("User-Agent", sanitized);
   }
-  let config;
-  try { config = parseUserClientIpConfig(env); }
-  catch { config = parseUserClientIpConfig({}); }
+  const config = parseUserClientIpConfig(env);
   const peer = (request as Request & { socket?: { remoteAddress?: string } }).socket?.remoteAddress;
   const clientIp = resolveBffClientIp(request.headers, config, peer);
   if (clientIp) headers.set(USER_CLIENT_IP_FORWARD_HEADER, clientIp);

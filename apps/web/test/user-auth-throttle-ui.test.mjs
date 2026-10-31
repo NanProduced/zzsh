@@ -87,3 +87,26 @@ test("bff strips a forged internal ip and forwards only a resolved client", () =
   });
   assert.equal(trusted.get(USER_CLIENT_IP_FORWARD_HEADER), "198.51.100.4");
 });
+
+test("Root: an already rejected password is not automatically sent a second time", async () => {
+  const view = await mountAuthComponent("apps/web/src/components/auth/auth-form.tsx", "AuthForm");
+  const { webAuthWithCaptcha } = view.loadSource("apps/web/src/lib/user-captcha.ts");
+  const original = globalThis.fetch; let calls = 0;
+  globalThis.fetch = async () => { calls++; return Response.json({ error: { code: "UNAUTHENTICATED", reason: "CAPTCHA_REQUIRED" }, challenge }, { status: 401 }); };
+  try { await assert.rejects(() => webAuthWithCaptcha("/sign-in/identifier", { identifier: "13800138000", password: "wrong" }, undefined, () => true)); assert.equal(calls, 1); }
+  finally { globalThis.fetch = original; await view.close(); }
+});
+
+test("Root: stale or cancelled proof work stops before starting a KDF", async () => {
+  const view = await mountAuthComponent("apps/web/src/components/auth/auth-form.tsx", "AuthForm");
+  const { solveLocalPow } = view.loadSource("apps/web/src/lib/user-captcha.ts");
+  const cancelled = new AbortController(); cancelled.abort();
+  try {
+  await assert.rejects(() => solveLocalPow(challenge, cancelled.signal), error => error.name === "AbortError");
+  await assert.rejects(() => solveLocalPow(challenge, undefined, () => false), error => error.name === "AbortError");
+  } finally { await view.close(); }
+});
+
+test("Root: invalid proxy configuration cannot silently remove IP protection", () => {
+  assert.throws(() => buildUserAuthUpstreamHeaders(new Request("http://127.0.0.1/"), { requestId: "req_bad_config", webOrigin: "http://127.0.0.1", env: { USER_TRUSTED_PROXIES: "everyone" } }), /TRUSTED_PROXIES/);
+});

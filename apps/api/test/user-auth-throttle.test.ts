@@ -5,6 +5,7 @@ import type { Pool } from "pg";
 import { isUserAuthPathAllowed } from "../src/auth/auth-runtime";
 import {
   createMemoryUserAuthThrottle,
+  readUserThrottleHmacKey,
   createPostgresUserAuthThrottle,
   createUserAuthThrottle,
   decideSignIn,
@@ -35,7 +36,7 @@ function signInRequest(body: Record<string, unknown>, ip = IP, path = "/sign-in/
   return new Request(`http://127.0.0.1/api/auth/user${path}`, { method: "POST", headers, body: JSON.stringify(body) });
 }
 
-test("proposal stays unpublished and native sms paths stay closed", () => {
+test("proposal constants and native SMS path allowlist keep their declared values", () => {
   assert.equal(USER_THROTTLE_PROPOSAL.accountCaptchaAfter, 3);
   assert.equal(isUserAuthPathAllowed("/phone-number/send-otp"), false);
   assert.equal(isUserAuthPathAllowed("/phone-number/request-password-reset"), false);
@@ -222,6 +223,7 @@ test("postgres lock order is sorted and parameters are digests", async () => {
     query: async (sql: string, params?: unknown[]) => {
       seen.push({ sql, params });
       if (sql.includes("SELECT purpose")) return { rows: [] };
+      if (sql.includes("extract(epoch FROM clock_timestamp())")) return { rows: [{ now: String(Date.now()) }] };
       return { rows: [], rowCount: 1 };
     },
     release() {},
@@ -236,4 +238,49 @@ test("postgres lock order is sorted and parameters are digests", async () => {
   assert.equal(JSON.stringify(seen).includes(PHONE), false);
   assert.equal(JSON.stringify(seen).includes(IP), false);
   assert.equal(decideSignIn([], subjects, false, Date.now(), policy).decision, "allow");
+});
+
+test("Root: committed sign-in and SMS responses survive a later throttle settlement failure", async () => {
+  const oldWarn = console.warn; console.warn = () => {};
+  try {
+    const loginStore = { realm: "user", admitSignIn: async () => ({ decision: "allow", ticket: "original" }), settleSignIn: async () => { throw new Error("meter down"); } } as any;
+    const original = new Response(JSON.stringify({ status: true }), { status: 200, headers: { "set-cookie": "zzsh_user.session_token=SYNTHETIC; HttpOnly" } });
+    const login = withUserAuthThrottle(async () => original, loginStore, KEY);
+    const response = await login(signInRequest({ phoneNumber: PHONE, password: "correct" }));
+    assert.equal(response, original); assert.match(response.headers.get("set-cookie")!, /SYNTHETIC/);
+    const smsStore = { realm: "user", admitSmsIp: async () => ({ decision: "allow", ticket: "original_sms" }), settleSmsIp: async () => { throw new Error("meter down"); } } as any;
+    const sent = Response.json({ status: true, challengeId: "challenge_original" });
+    const sms = withUserAuthThrottle(async () => sent, smsStore, KEY);
+    const result = await sms(signInRequest({ phoneNumber: PHONE }, IP, "/phone-registration/send-otp"));
+    assert.equal(result, sent); assert.equal((await result.json()).challengeId, "challenge_original");
+  } finally { console.warn = oldWarn; }
+});
+
+test("Root: postgres requires a stable independent HMAC outside production too", () => {
+  assert.throws(() => readUserThrottleHmacKey({ NODE_ENV: "test", USER_AUTH_THROTTLE_STORE: "postgres" }, process.cwd()), /required/);
+  assert.equal(readUserThrottleHmacKey({ NODE_ENV: "test", USER_AUTH_THROTTLE_STORE: "memory" }, process.cwd()), undefined);
+  assert.equal(readUserThrottleHmacKey({ NODE_ENV: "test", USER_AUTH_THROTTLE_STORE: "postgres", USER_AUTH_THROTTLE_HMAC_KEY: KEY }, process.cwd()), KEY);
+});
+
+test("Root: failed SQL audit rolls back only its savepoint and keeps the counter transaction", async () => {
+  const queries: string[] = [], oldWarn = console.warn;
+  let aborted = false;
+  console.warn = () => {};
+  const client: any = { release() {}, query: async (sql: string) => {
+    queries.push(sql);
+    if (sql.startsWith("ROLLBACK TO SAVEPOINT")) { aborted = false; return { rows: [], rowCount: 0 }; }
+    if (aborted) throw Object.assign(new Error("aborted"), { code: "25P02" });
+    if (sql === "SELECT audit_probe") { aborted = true; throw Object.assign(new Error("denied"), { code: "42501" }); }
+    if (sql.includes("AS failures")) return { rows: [{ failures: 1 }], rowCount: 1 };
+    return { rows: [], rowCount: 1 };
+  } };
+  try {
+    const store = createPostgresUserAuthThrottle({ connect: async () => client } as any, { hmacKey: KEY, audit: async held => { await held.query("SELECT audit_probe"); } });
+    const result = await store.settleSignIn({ outcome: "credential", ...signInSubjects(KEY, PHONE, IP) });
+    assert.equal(result.captchaNow, false);
+    assert.ok(queries.includes("SAVEPOINT user_auth_throttle_audit"));
+    assert.ok(queries.includes("ROLLBACK TO SAVEPOINT user_auth_throttle_audit"));
+    assert.equal(queries.at(-1), "COMMIT");
+    assert.equal(store.fallbackLogs.length, 1);
+  } finally { console.warn = oldWarn; }
 });

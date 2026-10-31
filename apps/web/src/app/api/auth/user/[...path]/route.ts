@@ -23,8 +23,8 @@ const RESPONSE_HEADERS = new Set([
   "x-ratelimit-remaining",
   "x-ratelimit-reset",
 ]);
-function errorResponse(status: number, code: string, requestId: string, headers?: Headers, accepted = false): Response {
-  return Response.json({ error: { code, message: "Authentication request rejected", requestId, ...(accepted ? { accepted: true } : {}) } }, { status, headers: headers ?? { "Cache-Control": "no-store", "X-Request-Id": requestId } });
+function errorResponse(status: number, code: string, requestId: string, headers?: Headers, accepted = false, reason?: string): Response {
+  return Response.json({ error: { code, message: "Authentication request rejected", requestId, ...(accepted ? { accepted: true } : {}), ...(reason ? { reason } : {}) } }, { status, headers: headers ?? { "Cache-Control": "no-store", "X-Request-Id": requestId } });
 }
 
 async function forward(request: Request, { params }: { params: Promise<{ path: string[] }> }): Promise<Response> {
@@ -39,7 +39,9 @@ async function forward(request: Request, { params }: { params: Promise<{ path: s
   const expectedSecurityMethod = authPath === "/identity/status" ? "GET" : USER_SECURITY_POST_PATHS.has(authPath) ? "POST" : undefined;
   if (expectedSecurityMethod && method !== expectedSecurityMethod) return errorResponse(404, "NOT_FOUND", requestId);
   if (method !== "GET" && method !== "HEAD" && request.headers.get("origin") !== WEB_ORIGIN) return errorResponse(403, "FORBIDDEN", requestId);
-  const headers = buildUserAuthUpstreamHeaders(request, { requestId, webOrigin: WEB_ORIGIN });
+  let headers: Headers;
+  try { headers = buildUserAuthUpstreamHeaders(request, { requestId, webOrigin: WEB_ORIGIN }); }
+  catch { return errorResponse(503, "INTERNAL_ERROR", requestId, undefined, false, "AUTH_DEPENDENCY_UNAVAILABLE"); }
   const cookie = userCookies(request.headers.get("cookie"));
   if (cookie) headers.set("Cookie", cookie);
   const contentType = request.headers.get("content-type");

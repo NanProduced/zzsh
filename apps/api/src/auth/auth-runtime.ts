@@ -571,6 +571,14 @@ function buildPhoneRegistrationPlugin(
         let phoneHold: string | undefined;
         try {
         await withTransaction(pool, async (client) => {
+          await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [identifier]);
+          const previous = await client.query<{ createdAt: Date }>(
+            `SELECT "createdAt" FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1 ORDER BY "createdAt" DESC LIMIT 1 FOR UPDATE`,
+            [identifier],
+          );
+          if (previous.rows[0] && now.getTime() - new Date(previous.rows[0].createdAt).getTime() < PHONE_REGISTRATION_OTP_COOLDOWN_MS) {
+            throw new APIError("TOO_MANY_REQUESTS", { message: "Verification code rate limited" });
+          }
           if (smsThrottle) {
             const held = await smsThrottle.holdSmsPhone(client, phoneNumber).catch((error: unknown) => {
               if (error instanceof ThrottleDependencyError) throw new APIError("SERVICE_UNAVAILABLE", { message: "Authentication dependency unavailable" });
@@ -581,14 +589,6 @@ function buildPhoneRegistrationPlugin(
               throw new APIError("TOO_MANY_REQUESTS", { message: "Verification code rate limited" });
             }
             if (held.decision === "allow" && !held.durable && held.ticket) phoneHold = held.ticket;
-          }
-          await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [identifier]);
-          const previous = await client.query<{ createdAt: Date }>(
-            `SELECT "createdAt" FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1 ORDER BY "createdAt" DESC LIMIT 1 FOR UPDATE`,
-            [identifier],
-          );
-          if (previous.rows[0] && now.getTime() - new Date(previous.rows[0].createdAt).getTime() < PHONE_REGISTRATION_OTP_COOLDOWN_MS) {
-            throw new APIError("TOO_MANY_REQUESTS", { message: "Verification code rate limited" });
           }
           await client.query(`DELETE FROM "zzsh_auth_user"."verification" WHERE "identifier" = $1`, [identifier]);
           await client.query(
@@ -885,13 +885,20 @@ export async function mountAuthHandlers(
   if (options.fakeUserSecurityOutbox && (!options.testOperationsEnabled && !options.localSmsMock || process.env.NODE_ENV === "production")) {
     throw new ConfigurationError("User security outbox requires local test capability");
   }
+  if (options.userAuthThrottleStore === "postgres" && (!options.userThrottleHmacKey || options.userThrottleHmacKey.length < 32
+    || options.userThrottleHmacKey === options.userSecret || options.userThrottleHmacKey === options.adminSecret)) {
+    throw new ConfigurationError("Postgres user authentication throttle requires a stable independent HMAC key");
+  }
   const throttleKey = options.userThrottleHmacKey ?? randomUUID() + randomUUID();
   const userThrottle = options.userAuthThrottle ?? createUserAuthThrottle({
     hmacKey: throttleKey,
     pool: options.pool,
     store: options.userAuthThrottleStore ?? "memory",
     audit: async (client, event) => {
-      if (!client) return;
+      if (!client) {
+        console.warn(JSON.stringify({ event: "user.auth.audit", action: event.action, purpose: event.purpose, subjectPrefix: event.subject.slice(0, 8) }));
+        return;
+      }
       await recordAudit(client, {
         actorType: "system", action: event.action, objectType: "user_auth_subject", objectId: event.subject,
         outcome: "FAILURE", requestId: "user-auth-throttle", details: { purpose: event.purpose },
