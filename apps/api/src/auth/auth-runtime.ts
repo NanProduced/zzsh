@@ -59,6 +59,8 @@ import { resolveMediaStorage } from "../supply/media-oss";
 import { mountSystemConfigurationHandlers } from "../system/system-configuration-routes";
 import { loadLegacyPublicAdmission, loadLegacyPublicAdmissionManifest, parseLegacyPublicAdmission, assertLegacyPublicAdmissionTarget, assertLegacyPublicAdmissionManifestTarget, type LegacyPublicAdmission, type LegacyPublicAdmissionManifest } from "../legacy-load/legacy-public-admission";
 import { mountSupplyHandlers } from "../supply/supply-routes";
+import { mountProfileAvatarHandlers } from "../profile/profile-avatar-routes";
+import { ensureInitialProfileAvatar } from "../profile/profile-avatar";
 import { mountContentHandlers } from "../content/content-routes";
 import { mountLegalHandlers } from "../legal/legal-routes";
 import { parsePlatformLegalAcceptance, recordPlatformAcceptances, verifyPlatformLegalAcceptance } from "../legal/legal-documents";
@@ -694,6 +696,7 @@ function buildPhoneRegistrationPlugin(
               `INSERT INTO "zzsh_auth_user"."user" ("id", "name", "email", "emailVerified", "createdAt", "updatedAt", "phoneNumber", "phoneNumberVerified", "suspended") VALUES ($1, $2, $3, false, $4, $4, $5, true, false)`,
               [userId, "洲洲用户", email, now, phoneNumber],
             );
+            await ensureInitialProfileAvatar(client, "user", userId, requestId);
             if (passwordHash !== undefined) await client.query(
               `INSERT INTO "zzsh_auth_user"."account" ("id", "accountId", "providerId", "userId", "password", "createdAt", "updatedAt") VALUES ($1, $2, 'credential', $2, $3, $4, $4)`,
               [accountId, userId, passwordHash, now],
@@ -1318,6 +1321,7 @@ export async function mountAuthHandlers(
     legacyPublicAdmission,
     legacyPublicAdmissionDetail,
   });
+  mountProfileAvatarHandlers(app, { ...securityOptions, mediaStorage });
   mountLegalHandlers(app, securityOptions);
   mountSystemConfigurationHandlers(app, { ...securityOptions, mediaStorage, supplyGateReader });
   mountContentHandlers(app, {

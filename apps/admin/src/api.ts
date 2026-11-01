@@ -15,7 +15,7 @@ export type SessionSnapshot =
   | {
       authenticated: true;
       adminUserId: string;
-      user: { name?: string; email?: string; username?: string; displayUsername?: string; twoFactorEnabled: boolean };
+      user: { name?: string; email?: string; username?: string; displayUsername?: string; image?: string | null; twoFactorEnabled: boolean };
       security: { status: "PENDING_ENROLLMENT" | "ACTIVE" | "FROZEN"; isBoss: boolean; passwordChangeRequired: boolean; loginTwoFactorRequired?: boolean };
       session: { id: string; locked: boolean; pinConfigured: boolean; createdAt: string | null; expiresAt: string | null };
       permissions: string[];

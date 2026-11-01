@@ -1,7 +1,7 @@
 import { ChevronsUpDownIcon, LogOutIcon, SettingsIcon, ShieldIcon } from "lucide-react";
 
 import { BrandLogo } from "../components/brand-logo";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -77,6 +77,7 @@ export function WorkspaceSidebar({
                   <SidebarMenuButton size="lg" className="data-open:bg-sidebar-accent data-open:text-sidebar-accent-foreground">
                     <span className="relative inline-flex shrink-0">
                       <Avatar className={snapshot.security.isBoss ? "boss-avatar size-8" : "size-8"}>
+                        {snapshot.user.image ? <AvatarImage src={snapshot.user.image} alt="" /> : null}
                         <AvatarFallback>{initial}</AvatarFallback>
                       </Avatar>
                       {snapshot.security.isBoss ? <BossCrest size={9} className="boss-avatar-crest" /> : null}
@@ -92,6 +93,7 @@ export function WorkspaceSidebar({
               <DropdownMenuContent className="min-w-56 rounded-lg" side="top" align="start" sideOffset={4}>
                 <div className="flex items-center gap-2.5 p-2 text-left text-sm">
                   <Avatar className={snapshot.security.isBoss ? "boss-avatar size-8" : "size-8"}>
+                    {snapshot.user.image ? <AvatarImage src={snapshot.user.image} alt="" /> : null}
                     <AvatarFallback>{initial}</AvatarFallback>
                   </Avatar>
                   <div className="grid flex-1 text-left text-sm leading-tight">

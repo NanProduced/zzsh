@@ -14,6 +14,7 @@ import {
 } from "../auth/auth-security";
 import { handleSupplyAdminRoute, type SupplyRuntimeOptions } from "../supply/supply-routes";
 import { handleContentAdminRoute } from "../content/content-routes";
+import { handleProfileAvatarAdminReviewRoute, handleProfileAvatarAdminSelfRoute } from "../profile/profile-avatar-routes";
 import { handleSystemConfiguration } from "../system/system-configuration-routes";
 import { handleLegalAdminRoute } from "../legal/legal-routes";
 import { handleOrderAdminRoute, type OrderRuntimeOptions } from "../order/order-routes";
@@ -541,6 +542,30 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
       if (error instanceof SecurityApiError) sendError(response, error.status, error.code, error.message, requestId);
       else sendError(response, 500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);
     }
+    return;
+  }
+  if (path === "/profile/avatar" || path.startsWith("/profile/avatar/")) {
+    if (method !== "GET" && method !== "POST" && method !== "PUT") {
+      sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);
+      return;
+    }
+    const targetPath = `/api/v1/admin/profile-avatar${path.slice("/profile/avatar".length)}${requestQuery(request)}`;
+    request.url = targetPath;
+    request.originalUrl = targetPath;
+    request.headers = { ...request.headers, "x-request-id": requestId };
+    await handleProfileAvatarAdminSelfRoute(request, response as AuthSecurityNodeResponse & { send?: (body: Buffer | string) => void }, options.supply);
+    return;
+  }
+  if (path === "/profile-avatars" || path.startsWith("/profile-avatars/")) {
+    if (method !== "GET" && method !== "POST") {
+      sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);
+      return;
+    }
+    const targetPath = `/api/v1/admin/profile-avatars${path.slice("/profile-avatars".length)}${requestQuery(request)}`;
+    request.url = targetPath;
+    request.originalUrl = targetPath;
+    request.headers = { ...request.headers, "x-request-id": requestId };
+    await handleProfileAvatarAdminReviewRoute(request, response as AuthSecurityNodeResponse & { send?: (body: Buffer | string) => void }, options.supply);
     return;
   }
   if (path === "/supply" || path.startsWith("/supply/")) {

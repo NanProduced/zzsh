@@ -2,6 +2,7 @@ import type { INestApplication } from "@nestjs/common";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import type { SupplyGateReader } from "../supply/publishing";
+import { ensureInitialProfileAvatar } from "../profile/profile-avatar";
 
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
 import {
@@ -486,7 +487,7 @@ export type AdminSessionSnapshot =
   | {
       authenticated: true;
       adminUserId: string;
-      user: { name?: string; email?: string; username?: string; displayUsername?: string; twoFactorEnabled: boolean };
+      user: { name?: string; email?: string; username?: string; displayUsername?: string; image?: string | null; twoFactorEnabled: boolean };
       security: { status: AdminContext["security"]["status"]; isBoss: boolean; passwordChangeRequired: boolean; loginTwoFactorRequired?: boolean };
       session: { id: string; locked: boolean; pinConfigured: boolean; createdAt: string | null; expiresAt: string | null };
       permissions: string[];
@@ -543,6 +544,7 @@ export async function getAdminSessionSnapshot(headers: Headers, options: AuthSec
       ...(current.user?.email ? { email: current.user.email } : {}),
       ...(current.user?.username ? { username: current.user.username } : {}),
       ...(current.user?.displayUsername ? { displayUsername: current.user.displayUsername } : {}),
+      ...(typeof (current.user as { image?: unknown } | undefined)?.image === "string" && (current.user as { image: string }).image.startsWith("/api/v1/profile/avatars/") ? { image: (current.user as { image: string }).image } : {}),
       twoFactorEnabled: current.user?.twoFactorEnabled === true,
     },
     security: { status: security.status, isBoss: security.isBoss, passwordChangeRequired: security.passwordChangeRequired, ...(loginTwoFactorRequired === undefined ? {} : { loginTwoFactorRequired }) },
@@ -811,6 +813,7 @@ async function bootstrapAdmin(request: NodeRequest, response: NodeResponse, requ
        VALUES ($1, $2, $3, $4, $4, $5, $6, false, false)`,
       [id, name, loginEmail, now, login.username, login.displayUsername],
     );
+    await ensureInitialProfileAvatar(client, "admin", id, requestId);
     await client.query(
       `INSERT INTO "zzsh_auth_admin"."account" ("id", "accountId", "providerId", "userId", "password", "createdAt", "updatedAt")
        VALUES ($1, $2, 'credential', $2, $3, $4, $4)`,

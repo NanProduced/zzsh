@@ -147,6 +147,29 @@ class FakeClient {
       this.audits.push({ object_id: String(values[6]), action: String(values[4]), details: JSON.parse(String(values[10])) });
       return { rows: [], rowCount: 1 };
     }
+    if (sql.startsWith('INSERT INTO "zzsh_supply"."profile_avatar"')) {
+      const row = {
+        realm: String(values[0]),
+        subjectId: String(values[1]),
+        defaultPresetId: String(values[2]),
+        currentKind: "DEFAULT",
+        currentPresetId: String(values[3]),
+        currentAssetId: null,
+        pendingAssetId: null,
+        revision: "1",
+        currentVersion: "1",
+        lastReviewAssetId: null,
+        lastReviewState: null,
+        lastReviewReason: null,
+        lastReviewedAt: null,
+        lastReviewApplied: false,
+        updatedAt: new Date(),
+      };
+      return { rows: [row as T], rowCount: 1 };
+    }
+    if (sql.startsWith('UPDATE "zzsh_auth_user"."user" SET "image"')) {
+      return { rows: [], rowCount: 1 };
+    }
     if (sql.startsWith('INSERT INTO "zzsh_auth_user"."user"')) {
       const row: UserRow = { id: String(values[0]), name: String(values[1]), email: String(values[2]), phoneNumber: String(values[4]), phoneNumberVerified: false, suspended: false };
       this.users.set(row.id, row);

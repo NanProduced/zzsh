@@ -44,6 +44,7 @@ export type WorkspaceRouteKind =
   | "listing-review"
   | "listing-object"
   | "media-review"
+  | "avatar-review"
   | "content"
   | "orders"
   | "order-object"
@@ -118,6 +119,7 @@ const LIST_TABS: Record<string, Omit<WorkspaceTab, "query">> = {
   rules: { id: "rules", title: "规则与价目", path: "/supply/rules", closable: true, kind: "rules" },
   "listing-review": { id: "listing-review", title: "账号供给", path: "/supply/reviews", closable: true, kind: "listing-review" },
   "media-review": { id: "media-review", title: "平台素材审核", path: "/supply/media", closable: true, kind: "media-review" },
+  "avatar-review": { id: "avatar-review", title: "头像审核", path: "/avatar-reviews", closable: true, kind: "avatar-review" },
   orders: { id: "orders", title: "订单", path: "/orders", closable: true, kind: "orders" },
   content: { id: "content", title: "内容管理", path: "/content", closable: true, kind: "content" },
 };
@@ -205,6 +207,7 @@ export function parseWorkspacePath(pathname: string): { kind: WorkspaceRouteKind
     if (/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(objectId)) return { kind: "listing-object", objectType: "supply", objectId, tabId: `supply:${objectId}`, path: `/supply/reviews/${encodeURIComponent(objectId)}`, title: "账号供给详情" };
   }
   if (path === "/supply/media") return { kind: "media-review", tabId: "media-review", path: "/supply/media", title: "平台素材审核" };
+  if (path === "/avatar-reviews") return { kind: "avatar-review", tabId: "avatar-review", path: "/avatar-reviews", title: "头像审核" };
   if (path === "/orders") return { kind: "orders", tabId: "orders", path, title: "订单" };
   const orderObject = path.match(/^\/orders\/([^/]+)$/);
   if (orderObject) {
@@ -275,6 +278,7 @@ export function canOpenKind(kind: WorkspaceRouteKind, nav: NavPermission): boole
   if (kind === "listing-review") return has("supply.review.read") || nav.isBoss;
   if (kind === "listing-object" || kind === "resource-object") return nav.isBoss || has("supply.review.read") || has("supply.rental_account.read");
   if (kind === "media-review") return has("supply.review.read") || nav.isBoss;
+  if (kind === "avatar-review") return has("profile.avatar.review") || nav.isBoss;
   if (kind === "orders" || kind === "order-object") return true;
   if (kind === "content") return has("content.platform.read") || has("content.read") || nav.isBoss;
   return false;
@@ -296,7 +300,7 @@ export function upsertTab(tabs: WorkspaceTab[], next: WorkspaceTab): WorkspaceTa
   }
   if(next.kind.startsWith("finance-"))return tabs.some(tab=>tab.id===next.id)?tabs.map(tab=>tab.id===next.id?next:tab):[...tabs,next];
   if (next.kind === "users" || next.kind === "user-object") return tabs.some(tab => tab.id === next.id) ? tabs.map(tab => tab.id === next.id ? next : tab) : [...tabs, next];
-  if (next.kind === "admins" || next.kind === "roles" || next.kind === "approvals" || next.kind === "audit" || next.kind === "operation-log" || next.kind === "account" || next.kind === "workbench" || next.kind === "support" || next.kind === "membership-growth" || next.kind === "distribution-policy" || next.kind === "catalog" || next.kind === "gunsmith" || next.kind === "rules" || next.kind === "media-review" || next.kind === "listing-review" || next.kind === "content" || next.kind === "orders") {
+  if (next.kind === "admins" || next.kind === "roles" || next.kind === "approvals" || next.kind === "audit" || next.kind === "operation-log" || next.kind === "account" || next.kind === "workbench" || next.kind === "support" || next.kind === "membership-growth" || next.kind === "distribution-policy" || next.kind === "catalog" || next.kind === "gunsmith" || next.kind === "rules" || next.kind === "media-review" || next.kind === "avatar-review" || next.kind === "listing-review" || next.kind === "content" || next.kind === "orders") {
     const existing = tabs.find((tab) => tab.id === next.id);
     if (existing) return tabs.map((tab) => (tab.id === next.id ? { ...existing, ...next, query: { ...existing.query, ...next.query } } : tab));
     return [...tabs, next];

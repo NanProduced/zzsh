@@ -90,6 +90,7 @@ import {
   type MediaActor,
   type MediaStorage,
   type PreparedMediaUpload,
+  type UploadedAsset,
 } from "./media";
 import {
   assertGameScope,
@@ -333,6 +334,7 @@ export async function runMediaUpload(
     bytes: Buffer;
     authorize: (client: PoolClient) => Promise<void>;
     beforeFinalize?: (client: PoolClient) => Promise<void>;
+    afterFinalize?: (client: PoolClient, asset: UploadedAsset) => Promise<void>;
     lockPublishingAccount?: (client: PoolClient, accountId: string) => Promise<unknown>;
   },
 ): Promise<void> {
@@ -366,6 +368,7 @@ export async function runMediaUpload(
         await input.beforeFinalize?.(client);
         if (!prepared) throw new SecurityApiError(500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Media upload was not prepared");
         const asset = await finalizeMediaUpload(client, input.mediaActor, prepared, input.lockPublishingAccount);
+        await input.afterFinalize?.(client, asset);
         await recordAudit(client, {
           actorType: input.actor.realm,
           actorId: input.actor.id,

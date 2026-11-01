@@ -11,6 +11,7 @@ import { ApprovalAuditView } from "../views/approval-audit-view";
 import { RoleConfigView } from "../views/role-config-view";
 import { SupplyCatalogView } from "../views/supply-catalog-view";
 import { SupplyMediaReviewView } from "../views/supply-media-review-view";
+import { AvatarReviewView } from "../views/avatar-review-view";
 import { SupplyRulesView } from "../views/supply-rules-view";
 import { SupplyGunsmithView } from "../views/supply-gunsmith-view";
 import { ContentView } from "../views/content-view";
@@ -182,6 +183,9 @@ export function WorkspacePageContent({
   if (tab.kind === "listing-review") return <SupplyListingReviewView key={tab.id} snapshot={snapshot} initialQuery={tab.query} onOpenPath={onOpenPath} onQueryChange={onQueryChange} refreshNonce={refreshNonce} onDirtyChange={onDirtyChange}/>;
   if (tab.kind === "media-review") {
     return <SupplyMediaReviewView key={[tab.id,snapshot.adminUserId,snapshot.session.id,snapshot.permissions.slice().sort().join(",")].join("|")} snapshot={snapshot} refreshNonce={refreshNonce} onOpenPath={onOpenPath} />;
+  }
+  if (tab.kind === "avatar-review") {
+    return <AvatarReviewView key={[tab.id,snapshot.adminUserId,snapshot.session.id,snapshot.permissions.slice().sort().join(",")].join("|")} snapshot={snapshot} refreshNonce={refreshNonce} />;
   }
   if (tab.kind === "content") {
     return <ContentView key={[tab.id,snapshot.adminUserId,snapshot.session.id,snapshot.permissions.slice().sort().join(",")].join("|")} snapshot={snapshot} onDirtyChange={onDirtyChange} onWriteLockChange={onWriteLockChange} refreshNonce={refreshNonce} tab={tab} onQueryChange={onQueryChange} onOpenPath={onOpenPath} />;

@@ -869,6 +869,13 @@
       "when": 1793184012000,
       "tag": "0123_distribution_participant_contract",
       "breakpoints": true
+    },
+    {
+      "idx": 124,
+      "version": "7",
+      "when": 1793184013000,
+      "tag": "0124_profile_avatars",
+      "breakpoints": true
     }
   ]
 }

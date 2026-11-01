@@ -14,6 +14,7 @@ import { readUserDirectoryBusinessSummaries, directoryCreditScopeSql, directoryC
 import { readUserDirectoryWalletSummaries, DIRECTORY_WALLET_PERMISSION, DIRECTORY_WALLET_SORT_JOINS, DIRECTORY_WALLET_SORT_KEY } from "./user-directory-wallet";
 import { readKnownMembershipTiers, DIRECTORY_MEMBERSHIP_TIERS, type DirectoryMembershipTierFilter } from "./user-directory-membership";
 import { maskPhoneNumber, readDirectoryUserSummaries } from "./user-directory-summary";
+import { managedProfileImagePath } from "../profile/profile-avatar";
 export { maskPhoneNumber } from "./user-directory-summary";
 
 export const USER_DIRECTORY_SOURCE = {
@@ -255,7 +256,7 @@ function projectListItem(row: UserListRow, viewer: AdminDirectoryViewer, origina
   return {
     userId: row.id,
     name: row.name,
-    image: row.image,
+    image: managedProfileImagePath(row.image),
     username: row.username,
     displayUsername: row.displayUsername,
     maskedPhone: maskPhoneNumber(row.phoneNumber),
@@ -699,7 +700,7 @@ export async function readUserDirectoryDetail(
   return {
     userId: row.id,
     name: row.name,
-    image: row.image,
+    image: managedProfileImagePath(row.image),
     username: row.username,
     displayUsername: row.displayUsername,
     maskedPhone: maskPhoneNumber(row.phoneNumber),

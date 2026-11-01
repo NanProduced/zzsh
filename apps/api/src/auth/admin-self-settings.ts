@@ -182,7 +182,7 @@ function profileView(row: SelfProfileRow): Record<string, unknown> {
     // ZZ 编号来自 username/displayUsername（sequence 分配、不可改名），不是内部 UUID，也不自行生成。
     zzNumber: displayUsername ? displayUsername : row.username ? row.username.toUpperCase() : null,
     displayName: row.name,
-    avatarUrl: row.image ?? null,
+    avatarUrl: row.image && row.image.startsWith("/api/v1/profile/avatars/") ? row.image : null,
     updatedAt: iso(row.updatedAt),
   };
 }

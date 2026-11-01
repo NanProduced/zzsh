@@ -43,7 +43,7 @@ test("administrator creation rejects missing or implicit selected scope before h
 });
 
 test("directory detail selects and returns user.image without session identifiers or network facts", async () => {
-  for (const image of ["https://cdn.example/avatar.png", null]) {
+  for (const [image, expected] of [["/api/v1/profile/avatars/admin/admin-a/1", "/api/v1/profile/avatars/admin/admin-a/1"], ["https://cdn.example/avatar.png", null], [null, null]] as const) {
     const queries: string[] = [];
     const pool = { async query(sql: string) {
       queries.push(sql);
@@ -53,7 +53,7 @@ test("directory detail selects and returns user.image without session identifier
       throw new Error("unexpected detail query");
     } };
     const detail = await readAdministratorDetail(pool as never, "ZZ00002", { roleRead: false, permissionRead: false });
-    assert.equal(detail.image, image);
+    assert.equal(detail.image, expected);
     assert.match(queries[0] ?? "", /u\."image"/);
     for (const marker of ["PRIVATE_IP", "PRIVATE_UA", "PRIVATE_TOKEN", "PRIVATE_SESSION"]) assert.equal(JSON.stringify(detail).includes(marker), false);
     assert.deepEqual(detail.sessionSummary, { activeCount: 0, lockedCount: 0, lastSessionCreatedAt: null });
@@ -179,8 +179,8 @@ test("directory list returns avatar and session facts without leaking identifier
       if (text.includes('FROM "zzsh_auth_admin"."user" u')) {
         return {
           rows: [
-            { adminId: "admin-a", username: "ZZ00001", displayName: "甲", twoFactorEnabled: true, status: "ACTIVE", isBoss: false, passwordChangeRequired: false, bootstrapExpiresAt: null, firstActivatedAt: null, scopeMode: "ALL_GAMES", image: "https://cdn.example/a.png", createdAt: new Date("2026-01-01T00:00:00Z"), lastFullAuthenticatedAt: null, roles: [] },
-            { adminId: "admin-b", username: "ZZ00002", displayName: "乙", twoFactorEnabled: null, status: "ACTIVE", isBoss: false, passwordChangeRequired: false, bootstrapExpiresAt: null, firstActivatedAt: null, scopeMode: "SELECTED_GAMES", image: null, createdAt: new Date("2026-01-01T00:00:00Z"), lastFullAuthenticatedAt: null, roles: [] },
+            { adminId: "admin-a", username: "ZZ00001", displayName: "甲", twoFactorEnabled: true, status: "ACTIVE", isBoss: false, passwordChangeRequired: false, bootstrapExpiresAt: null, firstActivatedAt: null, scopeMode: "ALL_GAMES", image: "/api/v1/profile/avatars/admin/admin-a/1", createdAt: new Date("2026-01-01T00:00:00Z"), lastFullAuthenticatedAt: null, roles: [] },
+            { adminId: "admin-b", username: "ZZ00002", displayName: "乙", twoFactorEnabled: null, status: "ACTIVE", isBoss: false, passwordChangeRequired: false, bootstrapExpiresAt: null, firstActivatedAt: null, scopeMode: "SELECTED_GAMES", image: "https://cdn.example/legacy-b.png", createdAt: new Date("2026-01-01T00:00:00Z"), lastFullAuthenticatedAt: null, roles: [] },
           ],
         };
       }
@@ -197,9 +197,9 @@ test("directory list returns avatar and session facts without leaking identifier
   const withSessions = byId.get("admin-a");
   const withoutSessions = byId.get("admin-b");
   assert.deepEqual(withSessions?.sessionSummary, { activeCount: 2, lockedCount: 1, lastSessionCreatedAt: "2026-10-10T08:00:00.000Z" });
-  assert.equal(withSessions?.image, "https://cdn.example/a.png");
+  assert.equal(withSessions?.image, "/api/v1/profile/avatars/admin/admin-a/1");
   assert.deepEqual(withoutSessions?.sessionSummary, { activeCount: 0, lockedCount: 0, lastSessionCreatedAt: null }, "没有会话行是 0 与无最近建立，不是读取失败");
-  assert.equal(withoutSessions?.image, null);
+  assert.equal(withoutSessions?.image, null, "旧外链头像不进入新的管理端读取投影");
   assert.equal(queries.filter((text) => text.includes('FROM "zzsh_auth_admin"."session"')).length, 1, "会话摘要必须是一条分组查询");
   const serialized = JSON.stringify(admins);
   assert.equal(serialized.includes("ipAddress"), false, "列表不得泄漏登录 IP");

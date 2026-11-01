@@ -28,6 +28,7 @@
 - [公开列表组合筛选与配置](architecture/listing-query.md)
 - [账号公开查看、可租状态与编号](architecture/account-visibility.md)
 - [认证与账号安全](architecture/authentication.md)
+- [个人头像](architecture/profile-avatars.md)
 - [开发与验证](development.md)
 - [测试、验证与验收脚本规范](testing.md)
 - [本地环境协作规则](local-environments.md)

@@ -30,7 +30,7 @@ function SessionEntry() {
       <Tooltip>
         <TooltipTrigger asChild>
           <Link className="site-login" href="/account">
-            <UserRound size={18} aria-hidden="true" />
+            {session.avatarUrl ? <img className="site-session-avatar" src={session.avatarUrl} alt="" /> : <UserRound size={18} aria-hidden="true" />}
             <span className="site-session-name">{session.displayName ?? "个人中心"}</span>
           </Link>
         </TooltipTrigger>

@@ -12,7 +12,7 @@ export function publishUserSessionChange(): void {
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
-function readSessionUser(value: unknown): { id: string; displayName: string | null } | null {
+function readSessionUser(value: unknown): { id: string; displayName: string | null; avatarUrl: string | null } | null {
   if (!value || typeof value !== "object") return null;
   const user = (value as { user?: unknown }).user;
   if (!user || typeof user !== "object") return null;
@@ -20,7 +20,9 @@ function readSessionUser(value: unknown): { id: string; displayName: string | nu
   if (typeof id !== "string" || id.length === 0) return null;
   const name = (user as { name?: unknown }).name;
   const displayName = typeof name === "string" && name.trim() ? name : null;
-  return { id, displayName };
+  const image = (user as { image?: unknown }).image;
+  const avatarUrl = typeof image === "string" && image.startsWith("/api/v1/profile/avatars/") ? image : null;
+  return { id, displayName, avatarUrl };
 }
 
 /**
@@ -48,7 +50,7 @@ export function createBrowserUserSessionStore(fetchImpl: FetchLike = fetch): Use
       if (data === null) return { userId: null };
       const user = readSessionUser(data);
       if (!user) throw new Error("session-unavailable");
-      return { userId: user.id, displayName: user.displayName };
+      return { userId: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl };
     },
   });
 }

@@ -8,6 +8,7 @@
     "start": "node --env-file-if-exists=.env dist/src/main.js",
     "start:prod": "node --env-file-if-exists=.env dist/src/main.js",
     "migrate:business": "npm run build && node --env-file-if-exists=.env dist/src/database/migrate-business-cli.js",
+    "profile:avatar-presets": "npm run build && node --env-file-if-exists=.env dist/src/profile/profile-avatar-presets-cli.js",
     "security:disaster-recovery": "npm run build && node --env-file-if-exists=.env dist/src/auth/disaster-recovery-cli.js",
     "typecheck": "tsc --noEmit",
     "test": "node ../../scripts/assert-offline-env.mjs && npm run build && npm run test:compiled",

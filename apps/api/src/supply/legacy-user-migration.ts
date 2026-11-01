@@ -4,6 +4,7 @@ import { withTransaction } from "../auth/security-core";
 
 import { loadEffectiveAdminAccess, requirePermission } from "../auth/admin-authorization";
 import { recordAudit } from "../auth/security-core";
+import { ensureInitialProfileAvatar } from "../profile/profile-avatar";
 import { canonicalize } from "./content-hash";
 import { normalizeMainlandPhone } from "../auth/phone-number";
 import { lockLegacySource } from "./legacy-observation";
@@ -330,6 +331,7 @@ export async function migrateLegacyOwner(
          VALUES ($1,$2,$3,false,$4,$4,$5,false,false)`,
         [userId, evidence.nickname, email, now, phoneNumber],
       );
+      await ensureInitialProfileAvatar(client, "user", userId, actor.requestId);
       if (evidence.legacyPassword) {
         await client.query(
           `INSERT INTO "zzsh_auth_user"."account" ("id","accountId","providerId","userId","password","legacyPasswordMd5","legacyPasswordSalt","legacyPasswordVersion","createdAt","updatedAt")

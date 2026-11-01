@@ -18,6 +18,7 @@ import {
   type ProposedAdminGrants,
 } from "./admin-authorization";
 import { assertNoNewBossOnlyPersonalAllows, assertNoNewBossOnlyRoleGrants, isBossOnlyPermission } from "./admin-role-presets";
+import { ensureInitialProfileAvatar } from "../profile/profile-avatar";
 import { recordAudit, setAuditContext, SecurityApiError, withTransaction } from "./security-core";
 import {
   ADMIN_GAME_SCOPE_MODE,
@@ -154,7 +155,7 @@ export async function listAdministrators(
         isBoss: row.isBoss,
         createdAt: row.createdAt.toISOString(),
         lastFullAuthenticatedAt: row.lastFullAuthenticatedAt?.toISOString() ?? null,
-        image: row.image,
+        image: row.image && row.image.startsWith("/api/v1/profile/avatars/") ? row.image : null,
         // 列表只出会话事实：未过期会话数、其中锁定数、最近一条未过期会话的建立时间。
         sessionSummary: {
           activeCount: Number(sessionByAdmin.get(row.adminId)?.activeCount ?? 0),
@@ -256,7 +257,7 @@ export async function readAdministratorDetail(
     isBoss: row.isBoss,
     createdAt: row.createdAt.toISOString(),
     lastFullAuthenticatedAt: at(row.lastFullAuthenticatedAt),
-    image: row.image,
+    image: row.image && row.image.startsWith("/api/v1/profile/avatars/") ? row.image : null,
     // twoFactorEnabled 列可空：NULL 表示未知，不折算成 false。
     security: {
       status: row.status,
@@ -405,6 +406,7 @@ export async function createAdministrator(
        VALUES ($1, $2, $3, $4, $4, $5, $6, false, false)`,
       [id, name, loginEmail, now, login.username, login.displayUsername],
     );
+    await ensureInitialProfileAvatar(client, "admin", id, requestId);
     await client.query(
       `INSERT INTO "zzsh_auth_admin"."account" ("id", "accountId", "providerId", "userId", "password", "createdAt", "updatedAt")
        VALUES ($1, $2, 'credential', $2, $3, $4, $4)`,
