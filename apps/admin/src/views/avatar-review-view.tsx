@@ -1,78 +1,86 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { CheckIcon, RefreshCw, ShieldAlertIcon, ShieldXIcon, XIcon } from "lucide-react";
-
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Dialog, DialogContent, DialogTitle } from "../components/ui/dialog";
 import { SettingsNotice } from "./self-settings/settings-shell";
-import {
-  AdminAvatarError,
-  adminAvatarReviewContentUrl,
-  readAdminAvatarReviews,
-  reviewAdminAvatar,
-  withdrawAdminAvatar,
-  type AdminAvatarReviewItem,
-} from "./self-settings/avatar-api";
+import { AdminAvatarError, adminAvatarReviewContentUrl, assertAvatarReviewReceipt, clearPendingAdminAvatar, readAdminAvatarOperationResult, readAdminAvatarReviews, readPendingAdminAvatar, reviewAdminAvatar, savePendingAdminAvatar, withdrawAdminAvatar, type AdminAvatarReviewItem, type PendingAdminAvatar } from "./self-settings/avatar-api";
 
 const STATES = ["PENDING", "APPROVED", "REJECTED", "QUARANTINED"] as const;
 type State = typeof STATES[number];
 type Action = { kind: "APPROVE" | "REJECT" | "QUARANTINE" | "WITHDRAW"; item: AdminAvatarReviewItem } | null;
-
-export function AvatarReviewView({ snapshot, refreshNonce }: { snapshot: { adminUserId: string; security: { isBoss: boolean }; permissions: string[] }; refreshNonce: number }) {
-  const allowed = snapshot.security.isBoss || snapshot.permissions.includes("profile.avatar.review");
+type ReviewProps = { snapshot: { adminUserId: string; security: { isBoss: boolean; status: string }; session?: {id:string;locked?:boolean}; permissions: string[] }; refreshNonce: number };
+export function AvatarReviewView(props: ReviewProps) {
+  const {snapshot}=props;
+  const allowed=snapshot.security.status === "ACTIVE" && snapshot.session?.locked !== true && (snapshot.security.isBoss || snapshot.permissions.includes("profile.avatar.review"));
+  return <AvatarReviewBody key={snapshot.adminUserId + ":" + (snapshot.session?.id ?? "") + ":" + allowed} {...props} allowed={allowed} />;
+}
+function AvatarReviewBody({ snapshot, refreshNonce, allowed }: ReviewProps & {allowed:boolean}) {
   const [state, setState] = useState<State>("PENDING");
-  const [items, setItems] = useState<AdminAvatarReviewItem[]>([]);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
-  const [action, setAction] = useState<Action>(null);
-  const [reason, setReason] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [expectedRevision, setExpectedRevision] = useState("");
-
+  const [items, setItems] = useState<AdminAvatarReviewItem[]>([]), [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true), [loadingMore, setLoadingMore] = useState(false);
+  const [error, setError] = useState(""), [notice, setNotice] = useState("");
+  const [action, setAction] = useState<Action>(null), [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false), [pending, setPending] = useState<PendingAdminAvatar | null>(null), [storageBlocked, setStorageBlocked] = useState(false);
+  const alive = useRef(true), writing = useRef(false), readSequence = useRef(0);
+  const readAbort = useRef<AbortController | null>(null), writeAbort = useRef<AbortController | null>(null);
+  const current = () => alive.current;
   const load = async (append = false) => {
     if (!allowed) { setLoading(false); return; }
+    readAbort.current?.abort(); const controller=new AbortController(); readAbort.current=controller;
+    const sequence=++readSequence.current;
     append ? setLoadingMore(true) : setLoading(true);
+    if (!append) { setItems([]); setNextCursor(null); }
     setError("");
     try {
-      const page = await readAdminAvatarReviews(state, append ? nextCursor : null);
-      setItems((current) => append ? [...current, ...page.items] : page.items);
-      setNextCursor(page.nextCursor);
-    } catch (failure) {
-      setError(messageOf(failure, "头像审核列表读取失败"));
-    } finally {
-      append ? setLoadingMore(false) : setLoading(false);
-    }
+      const page=await readAdminAvatarReviews(state,append?nextCursor:null,20,controller.signal);
+      if (!current() || readSequence.current !== sequence) return;
+      setItems(old=>append?[...old,...page.items]:page.items);setNextCursor(page.nextCursor);
+    } catch (failure) { if (!controller.signal.aborted && current() && readSequence.current === sequence) setError(messageOf(failure,"头像审核列表读取失败")); }
+    finally { if (current() && readSequence.current === sequence) {setLoading(false);setLoadingMore(false);} }
   };
-
-  useEffect(() => { void load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [state, refreshNonce, allowed]);
-
-  const openAction = (item: AdminAvatarReviewItem, kind: NonNullable<Action>["kind"]) => {
-    setAction({ item, kind });
-    setReason("");
-    setExpectedRevision(item.revision);
-    setError("");
+  useEffect(()=>{
+    alive.current=true;
+    try {setPending(readPendingAdminAvatar(snapshot.adminUserId,"review"));} catch(failure){setStorageBlocked(true);setError(messageOf(failure,"原审核记录不可读"));}
+    return()=>{alive.current=false;readSequence.current++;readAbort.current?.abort();writeAbort.current?.abort();};
+  },[snapshot.adminUserId]);
+  useEffect(()=>{void load();/* eslint-disable-next-line react-hooks/exhaustive-deps */},[state,refreshNonce,allowed]);
+  const openAction=(item:AdminAvatarReviewItem,kind:NonNullable<Action>["kind"])=>{
+    if (writing.current || pending || storageBlocked || !allowed) return;
+    setAction({item,kind});setReason("");setError("");
   };
-
-  const submit = async () => {
-    if (!action || busy) return;
-    if (action.kind !== "APPROVE" && reason.trim().length < 2) { setError("请填写至少 2 个字符的原因。"); return; }
-    setBusy(true);
-    setError("");
-    try {
-      const key = `avatar-review-${action.kind.toLowerCase()}-${crypto.randomUUID()}`;
-      if (action.kind === "WITHDRAW") await withdrawAdminAvatar(action.item.assetId, reason.trim(), expectedRevision || null, key);
-      else await reviewAdminAvatar(action.item.assetId, action.kind, reason.trim() || null, expectedRevision || null, key);
-      setAction(null);
-      setNotice(action.kind === "APPROVE" ? "已通过；若仍是最新提交，头像已生效。" : action.kind === "WITHDRAW" ? "已撤回公开读取；如为当前头像则回退默认头像。" : "已记录审核结果，当前头像不受影响。");
+  function beginWrite(){if(writing.current||!allowed)return null;writing.current=true;setBusy(true);setError("");const controller=new AbortController();writeAbort.current=controller;return controller;}
+  function release(command:PendingAdminAvatar){clearPendingAdminAvatar(command);setPending(null);}
+  async function recover(){
+    const controller=beginWrite();if(!controller)return;
+    try{
+      const command=readPendingAdminAvatar(snapshot.adminUserId,"review");if(!command){setPending(null);return;}setPending(command);
+      const result=await readAdminAvatarOperationResult(command,controller.signal);if(!current())return;
+      if(result.receipt==="UNRESOLVED"){setNotice("原审核结果仍未确认，请稍后再读取；不会重新提交。");return;}
+      release(command);setAction(null);setNotice(result.responseStatus<300?"原审核操作已确认，正在读取当前队列。":"原审核已被拒绝，已解除原待确认记录。");await load();
+    }catch(failure){if(current())setError(messageOf(failure,"原审核结果尚未确认"));}
+    finally{if(current()){writing.current=false;setBusy(false);}}
+  }
+  const submit=async()=>{
+    if(!action||busy||pending||storageBlocked||!allowed)return;
+    if(action.kind!=="APPROVE"&&reason.trim().length<2){setError("请填写至少2个字符的原因。");return;}
+    if(!/^[1-9]\d{0,18}$/.test(action.item.revision)){setError("原审核版本无效，请重新读取队列。");return;}
+    const controller=beginWrite();if(!controller)return;
+    let command:PendingAdminAvatar|null=null;
+    try{
+      const prior=readPendingAdminAvatar(snapshot.adminUserId,"review");if(prior){setPending(prior);setNotice("请先读取原审核结果。");return;}
+      command={actorId:snapshot.adminUserId,slot:"review",key:"avatar-review-"+crypto.randomUUID(),assetId:action.item.assetId,action:action.kind,reason:reason.trim()||null,expectedRevision:action.item.revision};
+      savePendingAdminAvatar(command);setPending(command);
+      const result=action.kind==="WITHDRAW"?await withdrawAdminAvatar(command.assetId!,command.reason!,command.expectedRevision,command.key,controller.signal):await reviewAdminAvatar(command.assetId!,action.kind,command.reason??null,command.expectedRevision,command.key,controller.signal);
+      assertAvatarReviewReceipt(result,command.assetId!);if(!current())return;
+      setAction(null);setNotice(action.kind==="APPROVE"?"审核已通过；仅仍为最新提交时才生效。":action.kind==="WITHDRAW"?"已撤回公开读取；当前使用者回退默认头像。":"已记录审核结果。");
+      try{release(command);}catch{setNotice("审核已确认，本地记录待清理，请读取原审核结果。");}
       await load();
-    } catch (failure) {
-      setError(messageOf(failure, "审核操作未完成"));
-    } finally {
-      setBusy(false);
-    }
+    }catch(failure){
+      if(!current())return;
+      if(command&&failure instanceof AdminAvatarError&&[400,401,403,404,409,413,415,422,429].includes(failure.status)){try{release(command);}catch{setPending(command);}}
+      setError(messageOf(failure,"审核结果未确认，请读取原结果"));
+    }finally{if(current()){writing.current=false;setBusy(false);}}
   };
 
   const empty = useMemo(() => !loading && !error && items.length === 0, [loading, error, items.length]);
@@ -86,14 +94,16 @@ export function AvatarReviewView({ snapshot, refreshNonce }: { snapshot: { admin
           <h1 className="text-xl font-semibold">头像审核</h1>
           <p className="text-muted-foreground mt-1 max-w-2xl text-sm leading-6">审核用户与管理员本人上传的头像。默认头像为预审资源，不在此队列；本权限不包含目录素材或其他身份资料。</p>
         </div>
-        <Button type="button" variant="secondary" onClick={() => void load()} disabled={loading || loadingMore}><RefreshCw />刷新</Button>
+        <Button type="button" variant="secondary" onClick={() => void load()} disabled={loading || loadingMore || busy}><RefreshCw />刷新</Button>
       </div>
       {error ? <SettingsNotice tone="danger" role="alert">{error}</SettingsNotice> : null}
       {notice ? <SettingsNotice tone="success" role="status">{notice}</SettingsNotice> : null}
+      {storageBlocked ? <SettingsNotice tone="danger">原审核操作记录不可读，暂不能发起新审核。</SettingsNotice> : null}
+      {pending ? <SettingsNotice tone="warning"><p>原审核操作结果待确认（{pending.assetId}），不会新建请求。</p><Button type="button" variant="secondary" disabled={busy} onClick={() => void recover()}>读取原审核结果</Button></SettingsNotice> : null}
 
-      <div className="flex flex-wrap gap-1 rounded-lg border border-border bg-muted/40 p-1" role="tablist" aria-label="审核状态">
+      <div className="flex flex-wrap gap-1 rounded-lg border border-border bg-muted/40 p-1" role="group" aria-label="审核状态">
         {STATES.map((value) => (
-          <button key={value} type="button" role="tab" aria-selected={state === value} onClick={() => { setState(value); setNextCursor(null); }}
+          <button key={value} type="button" aria-pressed={state === value} onClick={() => { setState(value); setNextCursor(null); }}
             className={`rounded-md px-3 py-1.5 text-sm transition-colors ${state === value ? "bg-background font-medium text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}>
             {stateLabel(value)}
           </button>
@@ -117,12 +127,12 @@ export function AvatarReviewView({ snapshot, refreshNonce }: { snapshot: { admin
               {item.reviewReason ? <p className="text-muted-foreground line-clamp-2 text-xs">原因：{item.reviewReason}</p> : null}
               {item.reviewState === "PENDING" ? (
                 <div className="flex flex-wrap gap-1.5 pt-1">
-                  <Button type="button" size="sm" onClick={() => openAction(item, "APPROVE")}><CheckIcon />通过</Button>
-                  <Button type="button" size="sm" variant="secondary" onClick={() => openAction(item, "REJECT")}><XIcon />拒绝</Button>
-                  <Button type="button" size="sm" variant="outline" onClick={() => openAction(item, "QUARANTINE")}><ShieldAlertIcon />隔离</Button>
+                  <Button type="button" size="sm" disabled={busy || Boolean(pending) || storageBlocked} onClick={() => openAction(item, "APPROVE")}><CheckIcon />通过</Button>
+                  <Button type="button" size="sm" variant="secondary" disabled={busy || Boolean(pending) || storageBlocked} onClick={() => openAction(item, "REJECT")}><XIcon />拒绝</Button>
+                  <Button type="button" size="sm" variant="outline" disabled={busy || Boolean(pending) || storageBlocked} onClick={() => openAction(item, "QUARANTINE")}><ShieldAlertIcon />隔离</Button>
                 </div>
               ) : item.reviewState === "APPROVED" && item.accessClass === "PUBLIC_DISPLAY" ? (
-                <div className="pt-1"><Button type="button" size="sm" variant="outline" onClick={() => openAction(item, "WITHDRAW")}><ShieldXIcon />撤回公开</Button></div>
+                <div className="pt-1"><Button type="button" size="sm" variant="outline" disabled={busy || Boolean(pending) || storageBlocked} onClick={() => openAction(item, "WITHDRAW")}><ShieldXIcon />撤回公开</Button></div>
               ) : null}
             </div>
           </article>
@@ -145,16 +155,16 @@ export function AvatarReviewView({ snapshot, refreshNonce }: { snapshot: { admin
               </div>
               <label className="block space-y-1.5 text-sm">
                 <span className="font-medium">审核原因{action.kind === "APPROVE" ? "（可选）" : ""}</span>
-                <Input value={reason} onChange={(event) => setReason(event.target.value)} maxLength={500} placeholder={action.kind === "APPROVE" ? "可留空" : "说明拒绝、隔离或撤回的原因"} autoFocus />
+                <Input disabled={busy || Boolean(pending)} value={reason} onChange={(event) => setReason(event.target.value)} maxLength={500} placeholder={action.kind === "APPROVE" ? "可留空" : "说明拒绝、隔离或撤回的原因"} autoFocus />
               </label>
               <label className="block space-y-1.5 text-sm">
                 <span className="font-medium">原审核版本（CAS）</span>
-                <Input value={expectedRevision} onChange={(event) => setExpectedRevision(event.target.value.replace(/\D/g, ""))} inputMode="numeric" placeholder="留空则不校验" />
-                <span className="text-muted-foreground text-xs">默认使用列表中读取到的版本；并发审核时版本不符会被拒绝。</span>
+                <Input aria-label="原审核版本" value={action.item.revision} readOnly />
+                <span className="text-muted-foreground text-xs">固定使用列表读取的版本；并发变化时需重新读取，不能跳过版本校验。</span>
               </label>
               <div className="flex justify-end gap-2">
                 <Button type="button" variant="ghost" onClick={() => setAction(null)} disabled={busy}>取消</Button>
-                <Button type="button" onClick={() => void submit()} disabled={busy}>{busy ? "提交中…" : "确认"}</Button>
+                <Button type="button" onClick={() => void submit()} disabled={busy || Boolean(pending) || storageBlocked}>{busy ? "提交中…" : "确认"}</Button>
               </div>
             </div>
           ) : null}

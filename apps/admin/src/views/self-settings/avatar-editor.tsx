@@ -1,144 +1,123 @@
 import { useEffect, useRef, useState } from "react";
 import { Camera, RefreshCw, Upload } from "lucide-react";
-
 import { Button } from "../../components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "../../components/ui/avatar";
 import { SettingsNotice } from "./settings-shell";
-import {
-  AdminAvatarError,
-  adminAvatarPreviewUrl,
-  createAdminAvatarUploadIntent,
-  readAdminAvatarState,
-  selectAdminDefaultAvatar,
-  uploadAdminAvatar,
-  type AdminAvatarState,
-} from "./avatar-api";
+import { AdminAvatarError, adminAvatarPreviewUrl, assertAdminAvatarSubject, clearPendingAdminAvatar, createAdminAvatarUploadIntent, readAdminAvatarOperationResult, readAdminAvatarState, readPendingAdminAvatar, savePendingAdminAvatar, selectAdminDefaultAvatar, uploadAdminAvatar, type AdminAvatarState, type PendingAdminAvatar } from "./avatar-api";
 
 const MAX_BYTES = 10 * 1024 * 1024;
 const ALLOWED = new Set(["image/jpeg", "image/png", "image/webp"]);
-
-export function AdminAvatarEditor({
-  adminUserId,
-  sessionId,
-  fallbackInitial,
-  disabledReason,
-  onSessionRefresh,
-}: {
-  adminUserId: string;
-  sessionId: string;
-  fallbackInitial: string;
-  disabledReason?: string;
-  onSessionRefresh?: () => Promise<unknown> | unknown;
-}) {
+type EditorProps = { adminUserId: string; sessionId: string; fallbackInitial: string; disabledReason?: string; onSessionRefresh?: () => Promise<unknown> | unknown };
+export function AdminAvatarEditor(props: EditorProps) {
+  return <AvatarEditorBody key={props.adminUserId + ":" + props.sessionId} {...props} />;
+}
+function AvatarEditorBody({ adminUserId, fallbackInitial, disabledReason, onSessionRefresh }: EditorProps) {
   const [state, setState] = useState<AdminAvatarState | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
-  const [file, setFile] = useState<File | null>(null);
-  const [preview, setPreview] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true), [busy, setBusy] = useState(false);
+  const [error, setError] = useState(""), [notice, setNotice] = useState("");
+  const [file, setFile] = useState<File | null>(null), [preview, setPreview] = useState<string | null>(null);
   const [intent, setIntent] = useState<{ intentId: string; uploadToken: string; uploadKey: string } | null>(null);
-  const identity = useRef(`${adminUserId}:${sessionId}`);
-  const sequence = useRef(0);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  const current = () => identity.current === `${adminUserId}:${sessionId}`;
-  const load = async () => {
-    const seq = ++sequence.current;
-    setLoading(true);
-    setError("");
+  const [pendingDefault, setPendingDefault] = useState<PendingAdminAvatar | null>(null), [storageBlocked, setStorageBlocked] = useState(false);
+  const alive = useRef(true), writing = useRef(false), writeSequence = useRef(0), sequence = useRef(0);
+  const readAbort = useRef<AbortController | null>(null), writeAbort = useRef<AbortController | null>(null), inputRef = useRef<HTMLInputElement>(null);
+  const uploadCommand = useRef<{ file: File; intentKey: string; uploadKey: string; expectedRevision: string; intentId?: string; uploadToken?: string } | null>(null);
+  const current = () => alive.current;
+  const activeWrite = (id: number) => current() && writeSequence.current === id;
+  const refreshSession = async () => { try { await onSessionRefresh?.(); } catch { if (current()) setNotice("头像已保存，但顶部资料刷新失败，请重新读取。"); } };
+  const load = async (refreshGlobal = false) => {
+    readAbort.current?.abort(); const controller = new AbortController(); readAbort.current = controller;
+    const seq = ++sequence.current; setLoading(true); setError("");
     try {
-      const next = await readAdminAvatarState();
-      if (current() && sequence.current === seq) setState(next);
-    } catch (failure) {
-      if (current() && sequence.current === seq) setError(messageOf(failure, "头像状态读取失败"));
-    } finally {
-      if (current() && sequence.current === seq) setLoading(false);
-    }
+      const next = await readAdminAvatarState(controller.signal); assertAdminAvatarSubject(next, adminUserId);
+      if (!current() || sequence.current !== seq) return;
+      setState(next); if (refreshGlobal) await refreshSession();
+    } catch (failure) { if (!controller.signal.aborted && current() && sequence.current === seq) setError(messageOf(failure, "头像状态读取失败")); }
+    finally { if (current() && sequence.current === seq) setLoading(false); }
   };
-
   useEffect(() => {
-    identity.current = `${adminUserId}:${sessionId}`;
-    sequence.current += 1;
-    setState(null);
-    clearFile();
-    setIntent(null);
-    void load();
+    alive.current = true; void load();
+    try { setPendingDefault(readPendingAdminAvatar(adminUserId, "default")); }
+    catch (failure) { setStorageBlocked(true); setError(messageOf(failure, "原头像操作记录不可读")); }
+    return () => { alive.current = false; sequence.current++; writeSequence.current++; readAbort.current?.abort(); writeAbort.current?.abort(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [adminUserId, sessionId]);
-
+  }, [adminUserId]);
   useEffect(() => () => { if (preview) URL.revokeObjectURL(preview); }, [preview]);
-
-  function clearFile() {
-    setFile(null);
-    setPreview((value) => { if (value) URL.revokeObjectURL(value); return null; });
+  function clearFile() { setFile(null); setPreview(null); }
+  function beginWrite() {
+    if (writing.current || disabledReason) return null;
+    writing.current = true; setBusy(true); setError(""); setNotice("");
+    const controller = new AbortController(); writeAbort.current = controller;
+    return { id: ++writeSequence.current, signal: controller.signal };
   }
-
-  async function choosePreset(presetId: string) {
-    if (!state || busy || disabledReason) return;
-    if (state.current.kind === "DEFAULT" && state.current.presetId === presetId && !state.pending) return;
-    setBusy(true);
-    setError("");
-    setNotice("");
+  function finishWrite(id: number) { if (activeWrite(id)) { writing.current = false; setBusy(false); } }
+  function releaseDefault(command: PendingAdminAvatar) { clearPendingAdminAvatar(command); setPendingDefault(null); }
+  async function recoverDefault() {
+    const run = beginWrite(); if (!run) return;
     try {
-      const next = await selectAdminDefaultAvatar(presetId, state.revision, `admin-avatar-default-${crypto.randomUUID()}`);
-      if (!current()) return;
-      setState(next);
-      setNotice("默认头像已保存。");
-      try { await onSessionRefresh?.(); } catch { setNotice("头像已保存，但顶部当前用户显示刷新失败；刷新页面后可见。"); }
+      const command = readPendingAdminAvatar(adminUserId, "default"); if (!command) { setPendingDefault(null); return; }
+      setPendingDefault(command);
+      const receipt = await readAdminAvatarOperationResult(command, run.signal);
+      if (!activeWrite(run.id)) return;
+      if (receipt.receipt === "UNRESOLVED") { setNotice("原头像操作仍未确认，请稍后再读取；不会重复提交。"); return; }
+      const next = await readAdminAvatarState(run.signal); assertAdminAvatarSubject(next, adminUserId);
+      if (!activeWrite(run.id)) return;
+      setState(next); releaseDefault(command);
+      setNotice(receipt.responseStatus < 300 ? "原头像操作已确认，已读取当前状态。" : "原操作已被拒绝，可按当前状态重新选择。");
+      await refreshSession();
+    } catch (failure) { if (activeWrite(run.id)) setError(messageOf(failure, "原头像结果尚未确认")); }
+    finally { finishWrite(run.id); }
+  }
+  async function choosePreset(presetId: string) {
+    if (!state || busy || loading || disabledReason || storageBlocked) return;
+    const run = beginWrite(); if (!run) return;
+    let command: PendingAdminAvatar | null = null;
+    try {
+      const prior = readPendingAdminAvatar(adminUserId, "default");
+      if (prior) { setPendingDefault(prior); setNotice("请先读取原头像操作结果。"); return; }
+      command = { actorId: adminUserId, slot: "default", presetId, expectedRevision: state.revision, key: "admin-avatar-default-" + crypto.randomUUID() };
+      savePendingAdminAvatar(command); setPendingDefault(command);
+      const next = await selectAdminDefaultAvatar(presetId, state.revision, command.key, run.signal); assertAdminAvatarSubject(next, adminUserId);
+      if (!activeWrite(run.id)) return;
+      setState(next); setNotice("默认头像已保存。");
+      try { releaseDefault(command); } catch (failure) { setNotice("头像已保存；本地记录待清理，请读取原操作结果。"); setError(messageOf(failure, "本地记录尚未清除")); }
+      await refreshSession();
     } catch (failure) {
-      if (!current()) return;
-      setError(messageOf(failure, "默认头像保存失败"));
-      if (failure instanceof AdminAvatarError && failure.status === 409) {
-        setNotice("头像已在其他设备变化，已重新读取当前状态。");
-        await load();
-      }
-    } finally {
-      if (current()) setBusy(false);
-    }
+      if (!activeWrite(run.id)) return;
+      if (command && failure instanceof AdminAvatarError && [400,401,403,404,409,413,415,422,429].includes(failure.status)) { try { releaseDefault(command); } catch { setPendingDefault(command); } }
+      setError(messageOf(failure, "默认头像结果未确认，请读取原操作结果"));
+      if (failure instanceof AdminAvatarError && failure.status === 409) await load(true);
+    } finally { finishWrite(run.id); }
   }
-
   function chooseFile(next: File | null) {
-    setError("");
-    setNotice("");
-    setIntent(null);
-    if (preview) URL.revokeObjectURL(preview);
-    setPreview(next ? URL.createObjectURL(next) : null);
-    setFile(next);
+    if (writing.current || disabledReason || pendingDefault || storageBlocked) return;
+    setError(""); setNotice(""); setIntent(null); uploadCommand.current = null;
+    setPreview(next ? URL.createObjectURL(next) : null); setFile(next);
   }
-
   async function submitUpload() {
-    if (!file || busy || disabledReason) return;
+    if (!state || !file || busy || disabledReason || pendingDefault || storageBlocked) return;
     if (!ALLOWED.has(file.type)) { setError("仅支持 JPEG、PNG 或 WebP 图片。"); return; }
     if (file.size <= 0 || file.size > MAX_BYTES) { setError("图片需大于 0 且不超过 10 MiB。"); return; }
-    setBusy(true);
-    setError("");
-    setNotice("");
+    const run = beginWrite(); if (!run) return;
     try {
-      let nextIntent = intent;
-      if (!nextIntent) {
-        const created = await createAdminAvatarUploadIntent(file, `admin-avatar-intent-${crypto.randomUUID()}`);
-        nextIntent = { ...created, uploadKey: `admin-avatar-upload-${crypto.randomUUID()}` };
-        if (!current()) return;
-        setIntent(nextIntent);
+      let command = uploadCommand.current;
+      if (!command || command.file !== file) { command = { file, expectedRevision: state.revision, intentKey: "admin-avatar-intent-" + crypto.randomUUID(), uploadKey: "admin-avatar-upload-" + crypto.randomUUID() }; uploadCommand.current = command; }
+      if (!command.intentId || !command.uploadToken) {
+        const created = await createAdminAvatarUploadIntent(file, command.intentKey, command.expectedRevision, run.signal);
+        if (!activeWrite(run.id)) return;
+        Object.assign(command, created); setIntent({ ...created, uploadKey: command.uploadKey });
       }
-      await uploadAdminAvatar(nextIntent.intentId, nextIntent.uploadToken, file, nextIntent.uploadKey);
-      if (!current()) return;
-      clearFile();
-      setIntent(null);
-      setNotice("已提交审核。审核期间继续显示当前头像。");
-      await load();
+      await uploadAdminAvatar(command.intentId!, command.uploadToken!, file, command.uploadKey, run.signal);
+      if (!activeWrite(run.id)) return;
+      clearFile(); setIntent(null); uploadCommand.current = null;
+      setNotice("已提交审核。审核期间继续显示当前头像。"); await load();
     } catch (failure) {
-      if (!current()) return;
-      if (failure instanceof AdminAvatarError && failure.status === 409 && /expired|used/i.test(failure.message)) {
-        setIntent(null);
-        setError("本次上传凭证已过期，请重新上传。");
-      } else {
-        setError(messageOf(failure, "上传未完成；当前头像未改变"));
-      }
-    } finally {
-      if (current()) setBusy(false);
+      if (!activeWrite(run.id)) return;
+      if (failure instanceof AdminAvatarError && failure.status === 409) {
+        setIntent(null); uploadCommand.current = null; await load();
+        if (activeWrite(run.id)) setError("头像版本或上传准备已变化，已重读当前状态；请确认后再次提交。");
+      } else setError(messageOf(failure, "上传未完成；重试保留原上传请求"));
     }
+    finally { finishWrite(run.id); }
   }
 
   const review = state?.lastReview;
@@ -155,13 +134,15 @@ export function AdminAvatarEditor({
             {state?.current.kind === "CUSTOM" ? "自定义头像（已审核公开）" : "默认头像。默认头像即时生效；自定义头像先审后显。"}
           </p>
         </div>
-        <Button type="button" size="sm" variant="secondary" onClick={() => void load()} disabled={loading || busy}>
+        <Button type="button" size="sm" variant="secondary" onClick={() => void load(true)} disabled={loading || busy}>
           <RefreshCw />刷新
         </Button>
       </div>
 
       {disabledReason ? <SettingsNotice tone="warning">{disabledReason}</SettingsNotice> : null}
       {error ? <SettingsNotice tone="danger" role="alert">{error}</SettingsNotice> : null}
+      {storageBlocked ? <SettingsNotice tone="danger">原头像操作记录不可读，暂不能再次提交。</SettingsNotice> : null}
+      {pendingDefault ? <SettingsNotice tone="warning"><p>上次头像选择结果待确认，请先读取原操作。</p><Button type="button" variant="secondary" disabled={busy || Boolean(disabledReason)} onClick={() => void recoverDefault()}>读取原头像结果</Button></SettingsNotice> : null}
       {notice ? <SettingsNotice tone="success" role="status">{notice}</SettingsNotice> : null}
       {loading && !state ? <p className="text-muted-foreground text-sm" role="status">正在读取头像状态…</p> : null}
 
@@ -180,13 +161,13 @@ export function AdminAvatarEditor({
             <SettingsNotice tone="warning" role="status">先前的自定义头像已撤回：{review.reason ?? "公开读取已停止，当前回退到默认头像。"}</SettingsNotice>
           ) : null}
 
-          <fieldset className="space-y-2" disabled={busy || Boolean(disabledReason)}>
+          <fieldset className="space-y-2" disabled={busy || loading || Boolean(disabledReason) || Boolean(pendingDefault) || storageBlocked}>
             <legend className="text-sm font-medium">选择默认头像</legend>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-              {state.presets.map((preset) => {
+              {state.presets.map((preset, index) => {
                 const selected = state.current.kind === "DEFAULT" && state.current.presetId === preset.presetId && !state.pending;
                 return (
-                  <button key={preset.presetId} type="button" aria-pressed={selected} onClick={() => void choosePreset(preset.presetId)}
+                  <button key={preset.presetId} type="button" aria-pressed={selected} aria-label={`选择默认头像 ${index + 1}`} onClick={() => void choosePreset(preset.presetId)}
                     className={`flex flex-col items-center gap-1 rounded-lg border p-2 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${selected ? "border-primary bg-accent text-accent-foreground" : "border-border text-muted-foreground hover:bg-accent/60"}`}>
                     <img className="aspect-square w-full max-w-20 rounded-full object-cover" src={preset.url} alt="" width={preset.width} height={preset.height} />
                     <span>{selected ? "当前头像" : "选择"}</span>

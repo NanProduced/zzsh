@@ -86,7 +86,7 @@ async function forward(request: Request, context: { params: Promise<{ path: stri
   if (upstream.ok && mediaPath.test(path) && ["image/png", "image/jpeg", "image/webp"].includes(mime)) {
     const cacheControl = upstream.headers.get("cache-control");
     responseHeaders.set("content-type", mime);
-    responseHeaders.set("cache-control", cacheControl ?? "public, max-age=0, must-revalidate");
+    responseHeaders.set("cache-control", path === "/avatar/preview" ? "private, no-store" : cacheControl ?? "public, max-age=0, must-revalidate");
     try {
       const bytes = await readBoundedBody(upstream, 10 * 1024 * 1024, deadline);
       return new Response(bytes, { status: upstream.status, headers: responseHeaders });

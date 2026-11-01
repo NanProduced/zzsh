@@ -226,8 +226,17 @@ test("reset password / 2FA preflight: Boss only, never self, never another Boss,
 test("operations may create an ungranted administrator, but legacy governance grants cannot attach a role", async () => {
   const make = () => {
     const writes: string[] = [];
+    let profile: Record<string, unknown> | null = null;
     const client = { release() {}, async query(sql: string, args: unknown[] = []) {
       if (/^(INSERT|UPDATE|DELETE)/.test(sql)) writes.push(sql);
+      if (sql.includes('FROM "zzsh_supply"."profile_avatar"')) return { rows: profile ? [profile] : [], rowCount: profile ? 1 : 0 };
+      if (sql.startsWith('INSERT INTO "zzsh_supply"."profile_avatar"')) {
+        if (profile) return { rows: [], rowCount: 0 };
+        const values = args;
+        profile = {realm:String(values[0]),subjectId:String(values[1]),defaultPresetId:String(values[2]),currentKind:"DEFAULT",currentPresetId:String(values[3]),currentAssetId:null,pendingAssetId:null,latestUploadIntentId:null,revision:"1",currentVersion:"1",lastReviewAssetId:null,lastReviewState:null,lastReviewReason:null,lastReviewedAt:null,lastReviewApplied:false,updatedAt:new Date("2026-11-01T00:00:00Z")};
+        return { rows: [profile], rowCount: 1 };
+      }
+      if (sql === "ROLLBACK") profile = null;
       if (sql.includes('"game_scope_mode"')) return { rows: [{ mode: "ALL_GAMES", gameIds: [] }] };
       if (sql.includes('FROM "zzsh_iam"."admin_security"')) return { rows: [{ status: "ACTIVE", isBoss: false, passwordChangeRequired: false }] };
       if (sql.startsWith("WITH role_permissions")) return { rows: ["admin.account.create", "admin.permission.grant", "approval.template.configure"].map(permissionCode => ({ permissionCode })) };

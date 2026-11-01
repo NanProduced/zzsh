@@ -12,6 +12,10 @@ import { join } from "node:path";
 import {
   avatarImagePath,
   avatarReviewDisposition,
+  applyAvatarReview,
+  bindPendingAvatar,
+  managedProfileImagePath,
+  reserveAvatarUpload,
   ensureInitialProfileAvatar,
   isAvatarAssetPubliclyEligible,
   profileAvatarStateView,
@@ -187,7 +191,7 @@ function fakeAvatarPool(input: { profile?: Record<string, unknown> | null; image
 function profileRow(overrides: Record<string, unknown> = {}) {
   return {
     realm: "user", subjectId: "user_1", defaultPresetId: "avatar-strike", currentKind: "DEFAULT",
-    currentPresetId: "avatar-strike", currentAssetId: null, pendingAssetId: null,
+    currentPresetId: "avatar-strike", currentAssetId: null, pendingAssetId: null as string | null, latestUploadIntentId: null as string | null,
     revision: "1", currentVersion: "1", lastReviewAssetId: null, lastReviewState: null,
     lastReviewReason: null, lastReviewedAt: null, lastReviewApplied: false, updatedAt: new Date(),
     ...overrides,
@@ -328,7 +332,7 @@ test("default selection is CAS-protected and updates the compatibility image in 
 test("default allocation persists once and a replay never re-rolls the avatar or image", async () => {
   const calls: Array<{ sql: string; values: unknown[] }> = [];
   let inserted = false;
-  const stored = profileRow({ currentPresetId: "avatar-frost", revision: "1", currentVersion: "1" });
+  const stored = profileRow({ defaultPresetId: "avatar-frost", currentPresetId: "avatar-frost", revision: "1", currentVersion: "1" });
   const client = {
     async query(sql: string, values: unknown[] = []) {
       calls.push({ sql, values });
@@ -337,7 +341,7 @@ test("default allocation persists once and a replay never re-rolls the avatar or
         inserted = true;
         return { rows: [stored], rowCount: 1 };
       }
-      if (sql.includes('FROM "zzsh_supply"."profile_avatar"')) return { rows: [stored], rowCount: 1 };
+      if (sql.includes('FROM "zzsh_supply"."profile_avatar"')) return { rows: inserted ? [stored] : [], rowCount: inserted ? 1 : 0 };
       if (sql.startsWith('UPDATE "zzsh_auth_user"."user" SET "image"')) return { rows: [], rowCount: 1 };
       if (sql.startsWith('INSERT INTO "zzsh_iam"."audit_event"')) return { rows: [], rowCount: 1 };
       throw new Error(`unexpected avatar allocation query: ${sql.slice(0, 80)}`);
@@ -351,4 +355,96 @@ test("default allocation persists once and a replay never re-rolls the avatar or
   assert.equal(replay.created, false);
   assert.equal(replay.presetId, "avatar-frost", "重放返回已持久化的默认头像");
   assert.equal(calls.filter((call) => call.sql.startsWith('UPDATE "zzsh_auth_user"."user" SET "image"')).length, imagesAfterFirst, "重放不得再次写 image");
+});
+
+
+test("selecting the current preset cancels an in-flight upload, while a true no-op leaves the revision alone", async () => {
+  const row = profileRow({ currentPresetId: "avatar-night", latestUploadIntentId: "intent_old" });
+  const calls: Array<{ sql: string; values: unknown[] }> = [];
+  const client = { async query(sql: string, values: unknown[] = []) {
+    calls.push({ sql, values });
+    if (sql.startsWith('SELECT')) return { rows: [row] };
+    if (sql.startsWith('UPDATE "zzsh_supply"."profile_avatar"')) {
+      assert.match(sql, /"latest_upload_intent_id" = NULL/);
+      return { rows: [profileRow({ currentPresetId: "avatar-night", revision: "2", currentVersion: "2" })] };
+    }
+    return { rows: [], rowCount: 1 };
+  } } as unknown as PoolClient;
+  const result = await selectDefaultAvatar(client, "user", "user_1", { presetId: "avatar-night", expectedRevision: "1" }, { realm: "user", id: "user_1" }, "cancel_intent");
+  assert.equal(result.changed, true);
+  assert.equal(result.state.revision, "2");
+  assert.ok(calls.some(call => call.sql.startsWith('UPDATE "zzsh_supply"."profile_avatar"')));
+});
+
+test("upload reservations use CAS and a late upload cannot replace a newer ticket or default selection", async () => {
+  let row = profileRow();
+  const calls: string[] = [];
+  const client = { async query(sql: string, values: unknown[] = []) {
+    calls.push(sql);
+    if (sql.includes('FROM "zzsh_supply"."media_asset"')) return { rows: [avatarAsset({ reviewState: "PENDING" })] };
+    if (sql.startsWith('SELECT')) return { rows: [row] };
+    if (sql.includes('SET "latest_upload_intent_id"=$3')) row = { ...row, latestUploadIntentId: values[2] as string, pendingAssetId: null, revision: String(Number(row.revision) + 1) };
+    if (sql.includes('SET "pending_asset_id" = $3')) row = { ...row, latestUploadIntentId: null, pendingAssetId: values[2] as string, revision: String(Number(row.revision) + 1) };
+    return { rows: [], rowCount: 1 };
+  } } as unknown as PoolClient;
+  const actor = { realm: "user" as const, id: "user_1" };
+  await reserveAvatarUpload(client, "user", "user_1", "intent_a", "1", actor, "a");
+  await assert.rejects(() => reserveAvatarUpload(client, "user", "user_1", "intent_b", "1", actor, "stale"), (e: unknown) => (e as { status: number }).status === 409);
+  await reserveAvatarUpload(client, "user", "user_1", "intent_b", "2", actor, "b");
+  const writesBefore = calls.filter(sql => sql.startsWith('UPDATE')).length;
+  await assert.rejects(() => bindPendingAvatar(client, "user", "user_1", "asset_1", "intent_a", actor, "late_a"), (e: unknown) => (e as { status: number }).status === 409);
+  assert.equal(calls.filter(sql => sql.startsWith('UPDATE')).length, writesBefore);
+  await bindPendingAvatar(client, "user", "user_1", "asset_1", "intent_b", actor, "current_b");
+  assert.equal(row.pendingAssetId, "asset_1");
+  assert.equal(row.latestUploadIntentId, null);
+  row = { ...row, pendingAssetId: null };
+  await assert.rejects(() => bindPendingAvatar(client, "user", "user_1", "asset_1", "intent_b", actor, "after_default"), (e: unknown) => (e as { status: number }).status === 409);
+});
+
+test("first choice and first upload fail closed if another request won row creation", async () => {
+  const calls: string[] = [];
+  const client = { async query(sql: string) { calls.push(sql); return { rows: [], rowCount: 0 }; } } as unknown as PoolClient;
+  const actor = { realm: "user" as const, id: "user_1" };
+  await assert.rejects(() => selectDefaultAvatar(client, "user", "user_1", { presetId: "avatar-frost", expectedRevision: "0" }, actor, "first"), (e: unknown) => (e as { status: number }).status === 409);
+  await assert.rejects(() => reserveAvatarUpload(client, "user", "user_1", "intent_a", "0", actor, "first_upload"), (e: unknown) => (e as { status: number }).status === 409);
+  assert.equal(calls.some(sql => sql.startsWith('UPDATE')), false);
+});
+
+test("a superseded review records audit only and cannot overwrite the latest review or CAS revision", async () => {
+  const calls: Array<{ sql: string; values: unknown[] }> = [];
+  const client = { async query(sql: string, values: unknown[] = []) {
+    calls.push({ sql, values });
+    return { rows: sql.startsWith('SELECT') ? [profileRow({ pendingAssetId: "asset_new", revision: "7" })] : [] };
+  } } as unknown as PoolClient;
+  const result = await applyAvatarReview(client, "user", "user_1", "asset_old", "APPROVE", null, { realm: "admin", id: "reviewer" }, "late_review");
+  assert.deepEqual(result, { applied: false, fallback: false, revision: "7" });
+  assert.equal(calls.some(call => call.sql.startsWith('UPDATE')), false);
+  assert.equal(calls.filter(call => call.sql.startsWith('INSERT INTO "zzsh_iam"."audit_event"')).length, 1);
+});
+
+test("automatic defaults are system-attributed and existing custom avatars are never reinitialized", async () => {
+  let stored: ReturnType<typeof profileRow> | null = null;
+  const calls: Array<{ sql: string; values: unknown[] }> = [];
+  const client = { async query(sql: string, values: unknown[] = []) {
+    calls.push({ sql, values });
+    if (sql.startsWith('SELECT')) return { rows: stored ? [stored] : [] };
+    if (sql.startsWith('INSERT INTO "zzsh_supply"."profile_avatar"')) {
+      stored = profileRow({ defaultPresetId: values[2], currentPresetId: values[3] });
+      return { rows: [stored] };
+    }
+    return { rows: [], rowCount: 1 };
+  } } as unknown as PoolClient;
+  assert.equal((await ensureInitialProfileAvatar(client, "user", "user_1", "migration", "avatar-night")).created, true);
+  const audit = calls.find(call => call.sql.startsWith('INSERT INTO "zzsh_iam"."audit_event"'))!;
+  assert.deepEqual(audit.values.slice(1, 4), ["system", null, null]);
+  stored = profileRow({ defaultPresetId: "avatar-night", currentKind: "CUSTOM", currentAssetId: "custom", currentPresetId: null });
+  calls.length = 0;
+  assert.deepEqual(await ensureInitialProfileAvatar(client, "user", "user_1", "replay", "avatar-frost"), { created: false, presetId: "avatar-night" });
+  assert.equal(calls.length, 1);
+});
+
+test("managed profile paths reject traversal, arbitrary URLs and unbound query strings", () => {
+  assert.equal(managedProfileImagePath("/api/v1/profile/avatars/user/user_1/2"), "/api/v1/profile/avatars/user/user_1/2");
+  assert.equal(managedProfileImagePath("/api/v1/profile/avatars/presets/avatar-night/1/content"), "/api/v1/profile/avatars/presets/avatar-night/1/content");
+  for (const path of ["https://other.invalid/a.png", "/api/v1/profile/avatars/user/../1", "/api/v1/profile/avatars/user/user_1/1?key=secret", "/api/v1/profile/avatars/user/%2e%2e/1", "/api/v1/profile/avatars/presets/other/1/content/extra"]) assert.equal(managedProfileImagePath(path), null);
 });

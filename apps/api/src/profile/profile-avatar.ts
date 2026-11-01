@@ -24,6 +24,7 @@ type ProfileAvatarRow = {
   currentPresetId: ProfileAvatarPresetId | null;
   currentAssetId: string | null;
   pendingAssetId: string | null;
+  latestUploadIntentId: string | null;
   revision: string;
   currentVersion: string;
   lastReviewAssetId: string | null;
@@ -39,7 +40,7 @@ type AvatarAssetRow = Awaited<ReturnType<typeof loadMediaAsset>>;
 const PROFILE_AVATAR_COLUMNS = `
   "realm", "subject_id" AS "subjectId", "default_preset_id" AS "defaultPresetId",
   "current_kind" AS "currentKind", "current_preset_id" AS "currentPresetId",
-  "current_asset_id" AS "currentAssetId", "pending_asset_id" AS "pendingAssetId",
+  "current_asset_id" AS "currentAssetId", "pending_asset_id" AS "pendingAssetId", "latest_upload_intent_id" AS "latestUploadIntentId",
   "revision"::text AS "revision", "current_version"::text AS "currentVersion",
   "last_review_asset_id" AS "lastReviewAssetId", "last_review_state" AS "lastReviewState",
   "last_review_reason" AS "lastReviewReason", "last_reviewed_at" AS "lastReviewedAt",
@@ -71,7 +72,7 @@ export function avatarImagePath(realm: ProfileAvatarRealm, subjectId: string, ve
 
 /** Only server-managed avatar paths are exposed; legacy external URLs are never fetched. */
 export function managedProfileImagePath(value: string | null | undefined): string | null {
-  return typeof value === "string" && value.startsWith("/api/v1/profile/avatars/") ? value : null;
+  return typeof value === "string" && /^\/api\/v1\/profile\/avatars\/(?:(?:user|admin)\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(?:0|[1-9]\d{0,18})|presets\/[a-z0-9][a-z0-9-]{1,31}\/[1-9]\d{0,8}\/content)$/.test(value) ? value : null;
 }
 
 export async function loadProfileAvatar(client: PoolClient, realm: ProfileAvatarRealm, subjectId: string, forUpdate = false): Promise<ProfileAvatarRow | null> {
@@ -163,32 +164,20 @@ export async function ensureInitialProfileAvatar(
   realm: ProfileAvatarRealm,
   subjectId: string,
   requestId: string,
-  presetId: ProfileAvatarPresetId = randomPresetId(),
+  presetId?: ProfileAvatarPresetId,
 ): Promise<{ created: boolean; presetId: ProfileAvatarPresetId }> {
-  const row = await insertProfileAvatar(client, realm, subjectId, presetId, presetId, {
-    actor: { realm, id: subjectId },
-    requestId,
-  });
+  const existing = await loadProfileAvatar(client, realm, subjectId);
+  if (existing) return { created: false, presetId: existing.defaultPresetId };
+  const selected = presetId ?? randomPresetId();
+  const row = await insertProfileAvatar(client, realm, subjectId, selected, selected);
   if (!row) {
-    const existing = await loadProfileAvatar(client, realm, subjectId);
-    return { created: false, presetId: existing?.currentPresetId ?? presetId };
+    const winner = await loadProfileAvatar(client, realm, subjectId);
+    if (!winner) throw conflict("Profile avatar state is unavailable");
+    return { created: false, presetId: winner.defaultPresetId };
   }
-  return { created: true, presetId: row.currentPresetId ?? presetId };
-}
-
-async function ensureProfileRow(
-  client: PoolClient,
-  realm: ProfileAvatarRealm,
-  subjectId: string,
-  presetId: ProfileAvatarPresetId,
-  options: { actor?: ProfileAvatarActor; requestId?: string } = {},
-): Promise<ProfileAvatarRow> {
-  const existing = await loadProfileAvatar(client, realm, subjectId, true);
-  if (existing) return existing;
-  const inserted = await insertProfileAvatar(client, realm, subjectId, presetId, presetId, options);
-  const row = inserted ?? await loadProfileAvatar(client, realm, subjectId, true);
-  if (!row) throw conflict("Profile avatar state is unavailable");
-  return row;
+  await recordAudit(client, { actorType: "system", action: "profile.avatar.initialized", objectType: "profile_avatar", objectId: subjectId,
+    outcome: "SUCCESS", requestId, reason: "profile.avatar.initial_default", details: { realm, presetId: selected, result: "CREATED" } });
+  return { created: true, presetId: selected };
 }
 
 function assertRevision(row: { revision: string }, expectedRevision: string): void {
@@ -230,19 +219,20 @@ export async function selectDefaultAvatar(
   let row = await loadProfileAvatar(client, realm, subjectId, true);
   if (!row) {
     if (input.expectedRevision !== "0") throw conflict("Avatar changed; reload before saving");
-    row = await ensureProfileRow(client, realm, subjectId, presetId, { actor, requestId });
+    row = await insertProfileAvatar(client, realm, subjectId, presetId, presetId, { actor, requestId });
+    if (!row) throw conflict("Avatar changed; reload before saving");
     return { changed: true, state: { ...profileAvatarStateView(row, realm, subjectId), pending: null, lastReview: lastReviewView(row) } };
   }
   assertRevision(row, input.expectedRevision);
   const nextVersion = (BigInt(row.currentVersion) + 1n).toString();
   const nextRevision = (BigInt(row.revision) + 1n).toString();
-  if (row.currentKind === "DEFAULT" && row.currentPresetId === presetId && row.pendingAssetId === null) {
+  if (row.currentKind === "DEFAULT" && row.currentPresetId === presetId && row.pendingAssetId === null && row.latestUploadIntentId === null) {
     return { changed: false, state: { ...profileAvatarStateView(row, realm, subjectId), pending: null, lastReview: lastReviewView(row) } };
   }
   const updated = await client.query<ProfileAvatarRow>(
     `UPDATE "zzsh_supply"."profile_avatar"
-        SET "current_kind" = 'DEFAULT', "current_preset_id" = $3, "current_asset_id" = NULL,
-            "pending_asset_id" = NULL, "current_version" = $4, "revision" = $5, "updated_at" = clock_timestamp()
+        SET "current_kind" = 'DEFAULT', "default_preset_id" = $3, "current_preset_id" = $3, "current_asset_id" = NULL,
+            "pending_asset_id" = NULL, "latest_upload_intent_id" = NULL, "current_version" = $4, "revision" = $5, "updated_at" = clock_timestamp()
       WHERE "realm" = $1 AND "subject_id" = $2
       RETURNING ${PROFILE_AVATAR_COLUMNS}`,
     [realm, subjectId, presetId, nextVersion, nextRevision],
@@ -270,22 +260,39 @@ export function avatarReviewDisposition(input: {
   return { apply: false, clearPending: pending, fallback: current };
 }
 
+export async function reserveAvatarUpload(
+  client: PoolClient, realm: ProfileAvatarRealm, subjectId: string, intentId: string,
+  expectedRevision: string, actor: ProfileAvatarActor, requestId: string,
+): Promise<void> {
+  let row = await loadProfileAvatar(client, realm, subjectId, true);
+  if (row) assertRevision(row, expectedRevision);
+  else {
+    if (expectedRevision !== "0") throw conflict("Avatar changed; reload before uploading");
+    row = await insertProfileAvatar(client, realm, subjectId, deterministicPresetId(realm, subjectId), deterministicPresetId(realm, subjectId), { actor, requestId });
+    if (!row) throw conflict("Avatar changed; reload before uploading");
+  }
+  await client.query(`UPDATE "zzsh_supply"."profile_avatar" SET "latest_upload_intent_id"=$3,"pending_asset_id"=NULL,
+    "revision"="revision"+1,"updated_at"=clock_timestamp() WHERE "realm"=$1 AND "subject_id"=$2`, [realm, subjectId, intentId]);
+}
+
 export async function bindPendingAvatar(
   client: PoolClient,
   realm: ProfileAvatarRealm,
   subjectId: string,
   assetId: string,
+  intentId: string,
   actor: ProfileAvatarActor,
   requestId: string,
 ): Promise<void> {
   const asset = await loadMediaAsset(client, assetId);
   if (!asset || !isAvatarAsset(asset) || asset.ownershipKind !== ownershipForAvatarRealm(realm) || avatarSubjectOfAsset(asset)?.subjectId !== subjectId) throw notFound();
-  const row = await ensureProfileRow(client, realm, subjectId, deterministicPresetId(realm, subjectId), { actor, requestId });
+  const row = await loadProfileAvatar(client, realm, subjectId, true);
+  if (!row || row.latestUploadIntentId !== intentId) throw conflict("Avatar upload was superseded by a newer selection");
   if (row.currentAssetId === assetId) throw conflict("Avatar is already current");
   if (row.pendingAssetId === assetId) return;
   await client.query(
     `UPDATE "zzsh_supply"."profile_avatar"
-        SET "pending_asset_id" = $3, "revision" = "revision" + 1, "updated_at" = clock_timestamp()
+        SET "pending_asset_id" = $3, "latest_upload_intent_id" = NULL, "revision" = "revision" + 1, "updated_at" = clock_timestamp()
       WHERE "realm" = $1 AND "subject_id" = $2`,
     [realm, subjectId, assetId],
   );
@@ -325,6 +332,10 @@ export async function applyAvatarReview(
     return { applied: false, fallback: false, revision: "0" };
   }
   const disposition = avatarReviewDisposition({ pendingAssetId: row.pendingAssetId, currentAssetId: row.currentAssetId, assetId, decision });
+  if (!disposition.apply && !disposition.fallback && !disposition.clearPending) {
+    await auditAvatarReview(client, reviewer, requestId, subjectId, assetId, decision, reason, false, false);
+    return { applied: false, fallback: false, revision: row.revision };
+  }
   const nextRevision = (BigInt(row.revision) + 1n).toString();
   if (disposition.apply) {
     const nextVersion = (BigInt(row.currentVersion) + 1n).toString();
@@ -417,7 +428,7 @@ export async function resetAvatarOnCancellation(client: PoolClient, userId: stri
   await client.query(
     `UPDATE "zzsh_supply"."profile_avatar"
         SET "current_kind" = 'DEFAULT', "current_preset_id" = "default_preset_id", "current_asset_id" = NULL,
-            "pending_asset_id" = NULL, "current_version" = $2, "revision" = "revision" + 1,
+            "pending_asset_id" = NULL, "latest_upload_intent_id" = NULL, "current_version" = $2, "revision" = "revision" + 1,
             "last_review_asset_id" = NULL, "last_review_state" = NULL, "last_review_reason" = NULL,
             "last_reviewed_at" = NULL, "last_review_applied" = false, "updated_at" = clock_timestamp()
       WHERE "realm" = 'user' AND "subject_id" = $1`,

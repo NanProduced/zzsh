@@ -60,3 +60,30 @@ test("select and upload send the same keys and tokens the server contract requir
     globalThis.fetch = original;
   }
 });
+
+
+test("upload intent fetch carries the frozen revision before the AbortSignal", async () => {
+  const { createAvatarUploadIntent } = await import("../src/lib/profile-avatar-client.ts");
+  const calls = [], original = globalThis.fetch, signal = new AbortController().signal;
+  globalThis.fetch = async (url, init) => { calls.push({url:String(url),init}); return Response.json({intentId:"upload_fixture",uploadToken:"synthetic-token"}); };
+  try {
+    const file = new File([new Uint8Array([1,2,3])],"avatar.png",{type:"image/png"});
+    await createAvatarUploadIntent(file,"avatar-intent-original-key","0",signal);
+    assert.equal(calls.length,1); assert.equal(calls[0].url,"/api/v1/profile/avatar/upload-intents"); assert.equal(calls[0].init.method,"POST");
+    assert.deepEqual(JSON.parse(calls[0].init.body),{mime:"image/png",size:3,expectedRevision:"0"});
+    assert.equal(calls[0].init.headers["idempotency-key"],"avatar-intent-original-key"); assert.equal(calls[0].init.signal,signal);
+  } finally { globalThis.fetch = original; }
+});
+
+test("default operation recovery stays GET with the same key and zero revision", async () => {
+  const { readAvatarOperationResult } = await import("../src/lib/profile-avatar-client.ts");
+  const calls = [], original = globalThis.fetch;
+  globalThis.fetch = async (url, init) => { calls.push({url:String(url),init}); return Response.json({receipt:"RECORDED",responseStatus:200,result:STATE}); };
+  try {
+    await readAvatarOperationResult("avatar-default-original-key","avatar-night","0");
+    const call=calls[0], url=new URL(call.url,"https://fixture.test");
+    assert.equal(call.init.method,"GET"); assert.equal(call.init.body,undefined); assert.equal(call.init.headers["idempotency-key"],"avatar-default-original-key");
+    assert.equal(url.pathname,"/api/v1/profile/avatar/operation-result");
+    assert.deepEqual(Object.fromEntries(url.searchParams),{operation:"profile.avatar.default.select",presetId:"avatar-night",expectedRevision:"0"});
+  } finally { globalThis.fetch = original; }
+});

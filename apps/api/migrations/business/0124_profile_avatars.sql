@@ -31,7 +31,7 @@ ALTER TABLE "zzsh_supply"."media_upload_intent" ADD CONSTRAINT "media_upload_int
   OR ("uploaded_by_realm" = 'user' AND "ownership_kind" = 'USER_AVATAR'
     AND "purpose" = 'AVATAR' AND "game_id" IS NULL AND "account_id" IS NULL
     AND "owner_user_id" = "uploaded_by_user_id" AND "owner_user_id" IS NOT NULL
-    AND "uploaded_by_admin_id" IS NULL)
+    AND "uploaded_by_user_id" IS NOT NULL AND "uploaded_by_admin_id" IS NULL)
   OR ("uploaded_by_realm" = 'admin' AND "ownership_kind" = 'ADMIN_AVATAR'
     AND "purpose" = 'AVATAR' AND "game_id" IS NULL AND "account_id" IS NULL
     AND "owner_user_id" IS NULL AND "uploaded_by_user_id" IS NULL
@@ -53,7 +53,7 @@ ALTER TABLE "zzsh_supply"."media_asset" ADD CONSTRAINT "media_asset_actor_shape"
   OR ("uploaded_by_realm" = 'user' AND "ownership_kind" = 'USER_AVATAR'
     AND "purpose" = 'AVATAR' AND "game_id" IS NULL
     AND "owner_user_id" = "uploaded_by_user_id" AND "owner_user_id" IS NOT NULL
-    AND "uploaded_by_admin_id" IS NULL AND "account_id" IS NULL)
+    AND "uploaded_by_user_id" IS NOT NULL AND "uploaded_by_admin_id" IS NULL AND "account_id" IS NULL)
   OR ("uploaded_by_realm" = 'admin' AND "ownership_kind" = 'ADMIN_AVATAR'
     AND "purpose" = 'AVATAR' AND "game_id" IS NULL
     AND "owner_user_id" IS NULL AND "uploaded_by_user_id" IS NULL
@@ -80,6 +80,8 @@ CREATE TABLE "zzsh_supply"."profile_avatar" (
   "current_preset_id" text CHECK ("current_preset_id" ~ '^[a-z0-9][a-z0-9-]{1,31}$'),
   "current_asset_id" text REFERENCES "zzsh_supply"."media_asset"("id"),
   "pending_asset_id" text REFERENCES "zzsh_supply"."media_asset"("id"),
+  "latest_upload_intent_id" text REFERENCES "zzsh_supply"."media_upload_intent"("id"),
+  CHECK ("pending_asset_id" IS NULL OR "latest_upload_intent_id" IS NULL),
   "revision" bigint NOT NULL DEFAULT 1 CHECK ("revision" > 0),
   "current_version" bigint NOT NULL DEFAULT 1 CHECK ("current_version" > 0),
   "last_review_asset_id" text REFERENCES "zzsh_supply"."media_asset"("id"),

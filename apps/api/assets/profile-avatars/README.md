@@ -12,3 +12,5 @@ Owner 提供的四张原图只作来源追溯，不随应用公开，也不通�
 生成为 `sharp().rotate().resize(256, 256, { fit: "cover", position: "attention" }).webp({ quality: 82, effort: 6 })`，不带 EXIF。清单和文件变更必须同时更新 `apps/api/src/profile/profile-avatar-presets.ts`，测试会核对字节 SHA 和尺寸。
 
 初始化对象使用 `npm run profile:avatar-presets -w @zzsh/api -- upload`；只读核验使用 `-- check`。未初始化时不得称头像已上线。
+
+CLI只证明对象内容字节与清单一致，存储侧Content-Type/ACL/STS标为未观测并需真实OSS另验。部署API时保留本assets目录与dist目录的包内相对位置。

@@ -147,7 +147,8 @@ export function createOssMediaStorage(
         if (!Buffer.isBuffer(result.content)) throw storageFailure();
         return result.content;
       } catch (error) {
-        if (isObjectMissing(error)) throw new MediaStorageError("stored media is unavailable");
+        const code = (error as { code?: unknown }).code;
+        if (isObjectMissing(error) && (code === undefined || code === "NoSuchKey")) throw new MediaStorageError("stored media is unavailable", "MEDIA_OBJECT_NOT_FOUND");
         throw storageFailure();
       }
     },

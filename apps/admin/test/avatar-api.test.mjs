@@ -50,3 +50,39 @@ test("review and queue requests use the BFF paths, CAS revision and idempotency 
     globalThis.fetch = original;
   }
 });
+
+
+test("admin intent includes expectedRevision and default recovery remains same-key GET", async () => {
+  const { createAdminAvatarUploadIntent, readAdminAvatarOperationResult } = await import("../src/views/self-settings/avatar-api.ts");
+  const calls=[], original=globalThis.fetch, signal=new AbortController().signal;
+  globalThis.fetch=async (url,init)=>{calls.push({url:String(url),init});return Response.json(String(url).includes("/upload-intents")?{intentId:"upload_fixture",uploadToken:"synthetic-token"}:{receipt:"RECORDED",responseStatus:200,result:STATE});};
+  try {
+    const file=new File([new Uint8Array([1,2,3,4])],"avatar.webp",{type:"image/webp"});
+    await createAdminAvatarUploadIntent(file,"admin-intent-original-key","0",signal);
+    assert.equal(calls[0].url,"/api/bff/admin/profile/avatar/upload-intents"); assert.equal(calls[0].init.method,"POST");
+    assert.deepEqual(JSON.parse(calls[0].init.body),{mime:"image/webp",size:4,expectedRevision:"0"});
+    assert.equal(calls[0].init.headers["idempotency-key"],"admin-intent-original-key"); assert.equal(calls[0].init.signal,signal);
+    await readAdminAvatarOperationResult({actorId:"admin_1",slot:"default",key:"admin-default-original-key",presetId:"avatar-night",expectedRevision:"0"});
+    const call=calls[1],url=new URL(call.url,"https://fixture.test");
+    assert.equal(call.init.method,"GET"); assert.equal(call.init.body,undefined); assert.equal(call.init.headers["idempotency-key"],"admin-default-original-key");
+    assert.equal(url.pathname,"/api/bff/admin/profile/avatar/operation-result");
+    assert.deepEqual(Object.fromEntries(url.searchParams),{operation:"profile.avatar.default.select",presetId:"avatar-night",expectedRevision:"0"});
+  } finally { globalThis.fetch=original; }
+});
+
+test("review recovery POST preserves original body/key and withdraw omits decision", async () => {
+  const { readAdminAvatarOperationResult } = await import("../src/views/self-settings/avatar-api.ts");
+  const calls=[],original=globalThis.fetch;
+  globalThis.fetch=async(url,init)=>{calls.push({url:String(url),init});return Response.json({receipt:"RECORDED",responseStatus:200,result:{asset:{id:"asset_original"},review:{applied:true}}});};
+  try {
+    const base={actorId:"admin_1",slot:"review",assetId:"asset_original",reason:"仅正文中的审核理由",expectedRevision:"7"};
+    await readAdminAvatarOperationResult({...base,key:"review-original-key",action:"REJECT"});
+    await readAdminAvatarOperationResult({...base,key:"withdraw-original-key",action:"WITHDRAW"});
+    for(const call of calls){const url=new URL(call.url,"https://fixture.test");assert.equal(call.init.method,"POST");assert.equal(url.pathname,"/api/bff/admin/profile-avatars/operation-result");assert.equal(url.search,"");assert.equal(call.url.includes(base.reason),false);}
+    assert.equal(calls[0].init.headers["idempotency-key"],"review-original-key");
+    assert.deepEqual(JSON.parse(calls[0].init.body),{operation:"profile.avatar.review",assetId:"asset_original",decision:"REJECT",reason:base.reason,expectedRevision:"7"});
+    assert.equal(calls[1].init.headers["idempotency-key"],"withdraw-original-key");
+    assert.deepEqual(JSON.parse(calls[1].init.body),{operation:"profile.avatar.withdraw",assetId:"asset_original",reason:base.reason,expectedRevision:"7"});
+    assert.equal(Object.hasOwn(JSON.parse(calls[1].init.body),"decision"),false);
+  } finally { globalThis.fetch=original; }
+});

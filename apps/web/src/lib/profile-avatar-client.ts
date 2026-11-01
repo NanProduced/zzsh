@@ -23,6 +23,14 @@ export class ProfileAvatarError extends Error {
   }
 }
 
+const MANAGED_AVATAR_PATH = /^\/api\/v1\/profile\/avatars\/(?:(?:user|admin)\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(?:0|[1-9]\d{0,18})|presets\/[a-z0-9][a-z0-9-]{1,31}\/[1-9]\d{0,8}\/content)$/;
+function avatarUrl(value: unknown): string {
+  try {
+    if (typeof value === "string" && value.length <= 512 && value.startsWith("/api/v1/profile/avatars/") && MANAGED_AVATAR_PATH.test(decodeURIComponent(value))) return value;
+  } catch { /* malformed encoded path */ }
+  throw new ProfileAvatarError("头像地址不是受管路径", 0, "CONTRACT");
+}
+
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ProfileAvatarError("头像状态返回格式不正确", 0, "CONTRACT");
   return value as Record<string, unknown>;
@@ -46,7 +54,7 @@ function preset(value: unknown): AvatarPreset {
   return {
     presetId: text(row.presetId, "presetId"),
     version,
-    url: text(row.url, "url"),
+    url: avatarUrl(row.url),
     width: row.width,
     height: row.height,
   };
@@ -58,7 +66,7 @@ export function parseAvatarState(value: unknown): AvatarState {
   const kind = current.kind;
   if (kind !== "DEFAULT" && kind !== "CUSTOM") throw new ProfileAvatarError("当前头像类型不正确", 0, "CONTRACT");
   const presets = Array.isArray(body.presets) ? body.presets.map(preset) : [];
-  if (presets.length !== 4) throw new ProfileAvatarError("默认头像清单不完整", 0, "CONTRACT");
+  if (presets.length !== 4 || new Set(presets.map(item => item.presetId)).size !== 4) throw new ProfileAvatarError("默认头像清单不完整", 0, "CONTRACT");
   const pending = body.pending === null || body.pending === undefined ? null : (() => {
     const row = record(body.pending);
     return {
@@ -89,7 +97,7 @@ export function parseAvatarState(value: unknown): AvatarState {
       kind,
       assetId: typeof current.assetId === "string" ? current.assetId : null,
       presetId: typeof current.presetId === "string" ? current.presetId : null,
-      url: text(current.url, "current.url"),
+      url: avatarUrl(current.url),
       currentVersion: revision(current.currentVersion),
     },
     defaultPresetId: text(body.defaultPresetId, "defaultPresetId"),
@@ -138,11 +146,11 @@ export async function selectDefaultAvatar(presetId: string, expectedRevision: st
   }, signal));
 }
 
-export async function createAvatarUploadIntent(file: File, key: string, signal?: AbortSignal): Promise<{ intentId: string; uploadToken: string }> {
+export async function createAvatarUploadIntent(file: File, key: string, expectedRevision: string, signal?: AbortSignal): Promise<{ intentId: string; uploadToken: string }> {
   const response = record(await request("/api/v1/profile/avatar/upload-intents", {
     method: "POST",
     headers: { "content-type": "application/json", "idempotency-key": key },
-    body: JSON.stringify({ mime: file.type, size: file.size }),
+    body: JSON.stringify({ mime: file.type, size: file.size, expectedRevision }),
   }, signal));
   return { intentId: text(response.intentId, "intentId"), uploadToken: text(response.uploadToken, "uploadToken") };
 }
@@ -161,4 +169,41 @@ export async function readAvatarOperationResult(key: string, presetId: string, e
     method: "GET",
     headers: { "idempotency-key": key },
   }, signal);
+}
+
+export type PendingAvatarDefault = { userId: string; key: string; presetId: string; expectedRevision: string };
+const PENDING_PREFIX = "zzsh.profile-avatar.default:";
+export function readPendingAvatarDefault(userId: string): PendingAvatarDefault | null {
+  try {
+    const raw = window.sessionStorage.getItem(PENDING_PREFIX + userId);
+    if (raw === null) return null;
+    const value = JSON.parse(raw) as PendingAvatarDefault;
+    if (value.userId !== userId || !/^[A-Za-z0-9._:-]{1,128}$/.test(value.key) || !/^[a-z0-9][a-z0-9-]{1,31}$/.test(value.presetId) || !/^(0|[1-9]\d{0,18})$/.test(value.expectedRevision)) throw new Error();
+    return value;
+  } catch { throw new ProfileAvatarError("原头像操作记录不可读，暂不能再次提交", 0, "PENDING_STORAGE"); }
+}
+export function savePendingAvatarDefault(value: PendingAvatarDefault): void {
+  const prior = readPendingAvatarDefault(value.userId);
+  if (prior && JSON.stringify(prior) !== JSON.stringify(value)) throw new ProfileAvatarError("请先确认原头像操作结果", 0, "PENDING");
+  try {
+    const raw = JSON.stringify(value);
+    window.sessionStorage.setItem(PENDING_PREFIX + value.userId, raw);
+    if (window.sessionStorage.getItem(PENDING_PREFIX + value.userId) !== raw) throw new Error();
+  } catch { throw new ProfileAvatarError("无法保留原头像操作，未发送请求", 0, "PENDING_STORAGE"); }
+}
+export function clearPendingAvatarDefault(value: PendingAvatarDefault): void {
+  const current = readPendingAvatarDefault(value.userId);
+  if (current?.key !== value.key) return;
+  window.sessionStorage.removeItem(PENDING_PREFIX + value.userId);
+  if (window.sessionStorage.getItem(PENDING_PREFIX + value.userId) !== null) throw new ProfileAvatarError("已确认头像操作，本地记录尚未清除", 0, "PENDING_STORAGE");
+}
+export function assertAvatarSubject(state: AvatarState, userId: string): void {
+  if (state.current.url !== `/api/v1/profile/avatars/user/${encodeURIComponent(userId)}/${state.current.currentVersion}`) throw new ProfileAvatarError("头像响应主体不一致", 0, "CONTRACT");
+}
+export function parseAvatarReceipt(value: unknown): { receipt: "UNRESOLVED" } | { receipt: "RECORDED"; responseStatus: number } {
+  const row = record(value);
+  if (row.receipt === "UNRESOLVED") return { receipt: "UNRESOLVED" };
+  if (row.receipt !== "RECORDED" || !Number.isInteger(row.responseStatus) || typeof row.responseStatus !== "number" || row.responseStatus < 200 || row.responseStatus >= 500 || row.responseStatus >= 300 && row.responseStatus < 400) throw new ProfileAvatarError("原头像结果无法确认", 0, "CONTRACT");
+  if (row.responseStatus < 300) parseAvatarState(row.result);
+  return { receipt: "RECORDED", responseStatus: row.responseStatus };
 }

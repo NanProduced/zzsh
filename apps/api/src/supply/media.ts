@@ -19,7 +19,11 @@ export const ALLOWED_IMAGE_MIMES = ["image/jpeg", "image/png", "image/webp"] as 
 export type ImageMime = (typeof ALLOWED_IMAGE_MIMES)[number];
 
 export class MediaValidationError extends Error {}
-export class MediaStorageError extends Error {}
+export class MediaStorageError extends Error {
+  constructor(message: string, readonly code: "MEDIA_OBJECT_NOT_FOUND" | "MEDIA_STORAGE_UNAVAILABLE" = "MEDIA_STORAGE_UNAVAILABLE") {
+    super(message);
+  }
+}
 
 export type ImageInfo = { mime: ImageMime; width: number; height: number };
 
@@ -126,8 +130,9 @@ export function createLocalMediaStorage(root: string): MediaStorage {
       if (!STORAGE_KEY_PATTERN.test(storageKey)) throw new MediaStorageError("storage key is invalid");
       try {
         return await readFile(join(root, storageKey.slice(0, 2), storageKey));
-      } catch {
-        throw new MediaStorageError("stored media is unavailable");
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        throw new MediaStorageError("stored media is unavailable", code === "ENOENT" ? "MEDIA_OBJECT_NOT_FOUND" : "MEDIA_STORAGE_UNAVAILABLE");
       }
     },
   };

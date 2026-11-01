@@ -21,6 +21,7 @@ import {
   ownershipForAvatarRealm,
   profileAvatarWithPending,
   readAvatarOperationReceipt,
+  reserveAvatarUpload,
   selectDefaultAvatar,
   type ProfileAvatarDecision,
 } from "./profile-avatar";
@@ -51,7 +52,36 @@ function requestId(request: SupplyNodeRequest): string {
 
 function idempotencyKey(request: SupplyNodeRequest): string {
   const value = request.headers["idempotency-key"];
-  return validateIdempotencyKey(Array.isArray(value) ? value[0] : value);
+  return validateIdempotencyKey(value);
+}
+
+function avatarRevision(body: Record<string, unknown>, allowZero = false): string {
+  const value = body.expectedRevision;
+  if (typeof value !== "string" || !(allowZero ? /^(?:0|[1-9]\d{0,18})$/ : /^[1-9]\d{0,18}$/).test(value)) throw invalid("Avatar revision is invalid", "expectedRevision");
+  return value;
+}
+function subjectContext(actor: WriteActor) {
+  if (!actor.sessionId) throw new SecurityApiError(401, API_V1_ERROR_CODES.UNAUTHENTICATED, "Authentication required");
+  return { userId: actor.id, sessionId: actor.sessionId };
+}
+async function lockAvatarSubject(client: PoolClient, realm: ProfileAvatarRealm, id: string): Promise<void> {
+  const table = realm === "user" ? '"zzsh_auth_user"."user"' : '"zzsh_auth_admin"."user"';
+  if (!(await client.query(`SELECT "id" FROM ${table} WHERE "id"=$1 FOR UPDATE`, [id])).rows.length) throw notFound();
+}
+async function lockAvatarReviewSubjects(client: PoolClient, reviewerId: string, subject: { realm: ProfileAvatarRealm; subjectId: string }): Promise<void> {
+  // The asset reviewer FK also locks the reviewer; sort both admin subjects before the asset.
+  const adminIds = [...new Set(subject.realm === "admin" ? [reviewerId, subject.subjectId] : [reviewerId])].sort();
+  const locked = await client.query('SELECT "id" FROM "zzsh_auth_admin"."user" WHERE "id"=ANY($1::text[]) ORDER BY "id" FOR UPDATE', [adminIds]);
+  if (locked.rows.length !== adminIds.length) throw notFound();
+  if (subject.realm === "user") await lockAvatarSubject(client, "user", subject.subjectId);
+}
+function reviewInput(body: Record<string, unknown>, withdraw: boolean) {
+  ensureOnlyFields(body, withdraw ? ["reason", "expectedRevision"] : ["decision", "reason", "expectedRevision"]);
+  const decision = withdraw ? "WITHDRAW" : requiredString(body, "decision", 16);
+  if (!withdraw && !["APPROVE", "REJECT", "QUARANTINE"].includes(decision)) throw invalid("Review decision is invalid");
+  const reason = optionalTrimmedString(body, "reason", 500) ?? null;
+  if (decision !== "APPROVE" && !reason) throw invalid("A reason is required for this review decision");
+  return { decision, reason, expectedRevision: avatarRevision(body) };
 }
 
 function sendMediaFailure(realm: ProfileAvatarRealm | "preset", subjectId: string, version: string, presetId: string): void {
@@ -105,7 +135,7 @@ async function serveCurrentAvatar(
     if (await readSubjectImage(client, realm, subjectId) !== expected) throw notFound();
     if (row.currentKind === "DEFAULT") return { presetId: row.currentPresetId ?? row.defaultPresetId };
     const asset = row.currentAssetId ? await loadMediaAsset(client, row.currentAssetId) : null;
-    if (!asset || !isAvatarAssetPubliclyEligible(asset)) return { presetId: row.defaultPresetId };
+    if (!asset || !isAvatarAssetPubliclyEligible(asset) || avatarSubjectOfAsset(asset)?.realm !== realm || avatarSubjectOfAsset(asset)?.subjectId !== subjectId) return { presetId: row.defaultPresetId };
     return { asset };
   });
   if ("presetId" in current) {
@@ -148,7 +178,9 @@ async function createAvatarUploadIntent(
   realm: ProfileAvatarRealm,
 ) {
   const body = bodyOf(request);
-  ensureOnlyFields(body, ["mime", "size"]);
+  ensureOnlyFields(body, ["mime", "size", "expectedRevision"]);
+  const expectedRevision = avatarRevision(body, true);
+  let freshToken: string | undefined;
   const mime = requiredString(body, "mime", 64);
   const size = assertDeclaredMediaSize(body.size);
   if (!options.mediaStorage.available) throw new SecurityApiError(503, API_V1_ERROR_CODES.INTERNAL_ERROR, "Media storage is not configured");
@@ -161,13 +193,16 @@ async function createAvatarUploadIntent(
     requestIdValue,
     { principalId: subjectId, operation: "profile.avatar.upload_intent.create" },
     actor,
-    { mime, size },
+    { mime, size, expectedRevision },
     async (client) => {
       if (realm === "user") await assertUserContextInTransaction(client, { userId: context.userId, sessionId: context.sessionId });
       else await assertAdminContextInTransaction(client, { userId: context.userId, sessionId: context.sessionId });
     },
     async (client) => {
+      await lockAvatarSubject(client, realm, subjectId);
       const intent = await createMediaUploadIntent(client, realm === "user" ? { realm: "user", userId: subjectId } : { realm: "admin", adminUserId: subjectId }, { purpose: "AVATAR", mime, size });
+      await reserveAvatarUpload(client, realm, subjectId, intent.intentId, expectedRevision, { realm, id: subjectId, sessionId: actor.sessionId }, requestIdValue);
+      freshToken = intent.uploadToken;
       await recordAudit(client, {
         actorType: realm,
         actorId: subjectId,
@@ -180,8 +215,11 @@ async function createAvatarUploadIntent(
         reason: "profile.avatar.upload_intent.create",
         details: { realm, mime, size },
       });
-      return { status: 200, body: { intentId: intent.intentId, uploadToken: intent.uploadToken, expiresAt: intent.expiresAt } };
+      return { status: 200, body: { intentId: intent.intentId, expiresAt: intent.expiresAt } };
     },
+    async (_client, result) => freshToken
+      ? { status: result.status, body: { ...(result.body as Record<string, unknown>), uploadToken: freshToken } }
+      : { status: 409, body: { error: { code: "CONFLICT", reason: "UPLOAD_TOKEN_NOT_RECOVERABLE", message: "Upload preparation is recorded; explicitly prepare again for a new token", requestId: requestIdValue } } },
   );
 }
 
@@ -205,12 +243,13 @@ async function uploadAvatar(
     uploadToken,
     bytes,
     authorize: async (client) => {
-      if (realm === "user") await assertUserContextInTransaction(client, await readUserContext(request, options));
+      if (realm === "user") await assertUserContextInTransaction(client, subjectContext(actor));
       else await assertAdminContextInTransaction(client, { userId: subjectId, sessionId: actor.sessionId });
+      await lockAvatarSubject(client, realm, subjectId);
       await requireAvatarUploadIntent(client, { realm, id: subjectId }, intentId);
     },
     afterFinalize: async (client, asset) => {
-      await bindPendingAvatar(client, realm, subjectId, asset.assetId, { realm, id: subjectId, sessionId: actor.sessionId }, requestIdValue);
+      await bindPendingAvatar(client, realm, subjectId, asset.assetId, intentId, { realm, id: subjectId, sessionId: actor.sessionId }, requestIdValue);
     },
   });
 }
@@ -227,7 +266,7 @@ async function selectAvatarDefault(
   ensureOnlyFields(body, ["presetId", "expectedRevision"]);
   const presetId = requiredString(body, "presetId", 32);
   if (!isProfileAvatarPresetId(presetId)) throw invalid("Avatar preset is invalid", "presetId");
-  const expectedRevision = parseExpectedRevision(body);
+  const expectedRevision = avatarRevision(body, true);
   const normalized = { presetId, expectedRevision };
   const subjectId = actor.id;
   await runIdempotentWrite(
@@ -239,7 +278,7 @@ async function selectAvatarDefault(
     actor,
     normalized,
     async (client) => {
-      if (realm === "user") await assertUserContextInTransaction(client, await readUserContext(request, options));
+      if (realm === "user") await assertUserContextInTransaction(client, subjectContext(actor));
       else await assertAdminContextInTransaction(client, { userId: subjectId, sessionId: actor.sessionId });
     },
     async (client) => {
@@ -250,6 +289,7 @@ async function selectAvatarDefault(
       } catch {
         throw new SecurityApiError(503, API_V1_ERROR_CODES.INTERNAL_ERROR, "Default avatar object is not initialized");
       }
+      await lockAvatarSubject(client, realm, subjectId);
       const result = await selectDefaultAvatar(client, realm, subjectId, normalized, { realm, id: subjectId, sessionId: actor.sessionId }, requestIdValue);
       return { status: 200, body: { changed: result.changed, ...result.state } };
     },
@@ -257,30 +297,27 @@ async function selectAvatarDefault(
 }
 
 async function readAvatarState(options: ProfileAvatarRuntimeOptions, request: SupplyNodeRequest, realm: ProfileAvatarRealm): Promise<unknown> {
+  const context = realm === "user" ? await readUserContext(request, options) : await readAdminContext(request, options);
   return withTransaction(options.pool, async (client) => {
     if (realm === "user") {
-      const context = await readUserContext(request, options);
-      await assertUserContextInTransaction(client, context);
+      await assertUserContextInTransaction(client, context as { userId: string; sessionId: string }, "READ");
       return profileAvatarWithPending(client, "user", context.userId);
     }
-    const context = await readAdminContext(request, options);
     await assertAdminContextInTransaction(client, { userId: context.userId, sessionId: context.sessionId });
     return profileAvatarWithPending(client, "admin", context.userId);
   });
 }
 
 async function readAvatarPreview(options: ProfileAvatarRuntimeOptions, request: SupplyNodeRequest, response: SupplyNodeResponse, requestIdValue: string, realm: ProfileAvatarRealm): Promise<void> {
+  const context = realm === "user" ? await readUserContext(request, options) : await readAdminContext(request, options);
   const data = await withTransaction(options.pool, async (client) => {
-    const context = realm === "user"
-      ? await readUserContext(request, options)
-      : await readAdminContext(request, options);
-    if (realm === "user") await assertUserContextInTransaction(client, context as { userId: string; sessionId: string });
+    if (realm === "user") await assertUserContextInTransaction(client, context as { userId: string; sessionId: string }, "READ");
     else await assertAdminContextInTransaction(client, { userId: (context as { userId: string }).userId, sessionId: (context as { sessionId: string }).sessionId });
     const subjectId = (context as { userId: string }).userId;
     const row = await loadProfileAvatar(client, realm, subjectId);
     if (!row?.pendingAssetId) throw notFound();
     const asset = await loadMediaAsset(client, row.pendingAssetId);
-    if (!asset || !isAvatarAsset(asset) || !asset.publicStorageKey) throw notFound();
+    if (!asset || !isAvatarAsset(asset) || !asset.publicStorageKey || avatarSubjectOfAsset(asset)?.realm !== realm || avatarSubjectOfAsset(asset)?.subjectId !== subjectId) throw notFound();
     return asset;
   });
   await sendStoredMedia(response, requestIdValue, options.mediaStorage, { storageKey: data.publicStorageKey!, mime: data.mime, contentHash: data.publicStorageKey! }, "private, no-store");
@@ -297,10 +334,10 @@ async function readDefaultOperationResult(
   const presetId = query.get("presetId");
   if (!isProfileAvatarPresetId(presetId)) throw invalid("Avatar preset is invalid", "presetId");
   const expectedRevision = query.get("expectedRevision");
-  if (typeof expectedRevision !== "string" || !/^[1-9]\d{0,18}$/.test(expectedRevision)) throw invalid("Avatar revision is invalid", "expectedRevision");
+  if (typeof expectedRevision !== "string" || !/^(?:0|[1-9]\d{0,18})$/.test(expectedRevision)) throw invalid("Avatar revision is invalid", "expectedRevision");
+  const context = realm === "user" ? await readUserContext(request, options) : await readAdminContext(request, options);
   return withTransaction(options.pool, async (client) => {
-    const context = realm === "user" ? await readUserContext(request, options) : await readAdminContext(request, options);
-    if (realm === "user") await assertUserContextInTransaction(client, context as { userId: string; sessionId: string });
+    if (realm === "user") await assertUserContextInTransaction(client, context as { userId: string; sessionId: string }, "READ");
     else await assertAdminContextInTransaction(client, { userId: (context as { userId: string }).userId, sessionId: (context as { sessionId: string }).sessionId });
     const actor = { realm, id: (context as { userId: string }).userId };
     return readAvatarOperationReceipt(
@@ -320,6 +357,7 @@ export async function handleProfileAvatarUserRoute(request: SupplyNodeRequest, r
   const { path } = pathOf(request, "/api/v1/profile");
   const method = (request.method ?? "GET").toUpperCase();
   try {
+    if (method === "POST" || method === "PUT") idempotencyKey(request);
     const presetMatch = /^\/avatars\/presets\/([^/]+)\/([^/]+)\/content$/.exec(path);
     if (presetMatch && method === "GET") {
       await servePreset(response, requestIdValue, options, decodeId(presetMatch[1]!), presetMatch[2]!, PRESET_CACHE);
@@ -381,6 +419,7 @@ export async function handleProfileAvatarAdminSelfRoute(request: SupplyNodeReque
   const { path } = pathOf(request, "/api/v1/admin/profile-avatar");
   const method = (request.method ?? "GET").toUpperCase();
   try {
+    if (method === "POST" || method === "PUT") idempotencyKey(request);
     if (!requireOrigin(request, response, options, requestIdValue)) return;
     if (path === "/" && method === "GET") {
       sendJson(response, 200, await readAvatarState(options, request, "admin"), requestIdValue);
@@ -441,6 +480,7 @@ export async function handleProfileAvatarAdminReviewRoute(request: SupplyNodeReq
   const { path, query } = pathOf(request, "/api/v1/admin/profile-avatars");
   const method = (request.method ?? "GET").toUpperCase();
   try {
+    if (method === "POST" || method === "PUT") idempotencyKey(request);
     if (!requireOrigin(request, response, options, requestIdValue)) return;
     if (path === "/" && method === "GET") {
       const context = await readAdminContext(request, options);
@@ -458,19 +498,20 @@ export async function handleProfileAvatarAdminReviewRoute(request: SupplyNodeReq
       sendJson(response, 200, result, requestIdValue);
       return;
     }
-    if (path === "/operation-result" && method === "GET") {
-      const operation = query.get("operation");
-      if (operation !== "profile.avatar.review" && operation !== "profile.avatar.withdraw") throw invalid("Operation does not support result recovery", "operation");
-      const assetId = query.get("assetId");
-      if (!assetId || !new RegExp(`^${TOKEN}$`).test(assetId)) throw invalid("Avatar asset is required", "assetId");
-      const decision = query.get("decision");
-      const reason = query.get("reason");
-      const expectedRevision = query.get("expectedRevision");
-      const normalized = { decision: decision ?? null, reason: reason ?? null, expectedRevision: expectedRevision ?? null };
+    if (path === "/operation-result" && method === "POST") {
+      if (query.size) throw invalid("Result recovery does not accept query parameters");
+      const body = bodyOf(request);
+      ensureOnlyFields(body, ["operation", "assetId", "decision", "reason", "expectedRevision"]);
+      const operation = requiredString(body, "operation", 64);
+      if (operation !== "profile.avatar.review" && operation !== "profile.avatar.withdraw") throw invalid("Operation does not support result recovery");
+      const assetId = requiredString(body, "assetId", 128);
+      if (!new RegExp(`^${TOKEN}$`).test(assetId)) throw invalid("Avatar asset is required");
+      const normalized = reviewInput({ ...(operation === "profile.avatar.review" ? { decision: body.decision } : {}), reason: body.reason, expectedRevision: body.expectedRevision }, operation === "profile.avatar.withdraw");
       const context = await readAdminContext(request, options);
-      const result = await withTransaction(options.pool, async (client) => {
+      const result = await withTransaction(options.pool, async client => {
         await assertAdminContextInTransaction(client, { userId: context.userId, sessionId: context.sessionId });
         await adminAccess(client, context.userId);
+        await adminReviewAsset(client, assetId, undefined);
         return readAvatarOperationReceipt(client, { realm: "admin", id: context.userId }, operation, assetId, fingerprintRequest(operation, assetId, normalized), idempotencyKey(request));
       });
       sendJson(response, 200, result, requestIdValue);
@@ -495,15 +536,10 @@ export async function handleProfileAvatarAdminReviewRoute(request: SupplyNodeReq
       const assetId = decodeId(reviewMatch[1]!);
       const withdraw = reviewMatch[2] === "withdraw";
       const body = bodyOf(request);
-      ensureOnlyFields(body, withdraw ? ["reason", "expectedRevision"] : ["decision", "reason", "expectedRevision"]);
-      const decision = withdraw ? "WITHDRAW" : requiredString(body, "decision", 16);
-      if (!["APPROVE", "REJECT", "QUARANTINE", "WITHDRAW"].includes(decision)) throw invalid("Review decision is invalid");
-      const reason = optionalTrimmedString(body, "reason", 500);
-      if ((decision !== "APPROVE" || withdraw) && !reason) throw invalid("A reason is required for this review decision");
-      const expectedRevision = body.expectedRevision === undefined ? undefined : parseExpectedRevision(body);
+      const normalized = reviewInput(body, withdraw);
+      const { decision, reason, expectedRevision } = normalized;
       const context = await readAdminContext(request, options);
       const actor: WriteActor = { realm: "admin", id: context.userId, sessionId: context.sessionId };
-      const normalized = { decision, reason: reason ?? null, expectedRevision: expectedRevision ?? null };
       const operation = withdraw ? "profile.avatar.withdraw" : "profile.avatar.review";
       await runIdempotentWrite(
         options,
@@ -515,13 +551,17 @@ export async function handleProfileAvatarAdminReviewRoute(request: SupplyNodeReq
         normalized,
         async (client) => {
           await assertAdminContextInTransaction(client, { userId: context.userId, sessionId: context.sessionId });
-          const access = await adminAccess(client, context.userId);
-          const target = await adminReviewAsset(client, assetId, expectedRevision);
-          if (withdraw && target.asset.reviewState !== "APPROVED") throw conflict("Only an approved avatar can be withdrawn");
+          await adminAccess(client, context.userId);
+          const hint = await loadMediaAsset(client, assetId);
+          const subject = hint && isAvatarAsset(hint) ? avatarSubjectOfAsset(hint) : null;
+          if (!subject) throw notFound();
+          await lockAvatarReviewSubjects(client, context.userId, subject);
+          await adminReviewAsset(client, assetId, undefined);
         },
         async (client) => {
           const access = await adminAccess(client, context.userId);
           const target = await adminReviewAsset(client, assetId, expectedRevision);
+          if (withdraw && target.asset.reviewState !== "APPROVED") throw conflict("Only an approved avatar can be withdrawn");
           const reviewed = await reviewMediaAsset(client, context.userId, access.isBoss, assetId, {
             decision: withdraw ? "APPROVE" : decision,
             ...(reason ? { reason } : {}),
