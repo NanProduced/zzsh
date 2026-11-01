@@ -23,6 +23,11 @@ export function findPhoneClue(value: string): { phone: string; exact: boolean } 
 export type WorkspaceRouteKind =
   | "workbench"
   | "support"
+  | "support-mine"
+  | "support-overview"
+  | "support-patrol"
+  | "support-settings"
+  | "support-management"
   | "membership-growth"
   | "distribution-policy"
   | "account"
@@ -103,6 +108,11 @@ export type NavPermission = {
 const LIST_TABS: Record<string, Omit<WorkspaceTab, "query">> = {
   [WORKBENCH_TAB_ID]: { id: WORKBENCH_TAB_ID, title: "工作台", path: "/workbench", closable: false, kind: "workbench" },
   support: { id: "support", title: "客服工作台", path: "/support", closable: true, kind: "support" },
+  "support-mine": { id: "support-mine", title: "我的接待", path: "/support/mine", closable: true, kind: "support-mine" },
+  "support-overview": { id: "support-overview", title: "客服统计", path: "/support/overview", closable: true, kind: "support-overview" },
+  "support-patrol": { id: "support-patrol", title: "会话巡视", path: "/support/patrol", closable: true, kind: "support-patrol" },
+  "support-settings": { id: "support-settings", title: "助手设置", path: "/support/settings", closable: true, kind: "support-settings" },
+  "support-management": { id: "support-overview", title: "客服统计", path: "/support/overview", closable: true, kind: "support-overview" },
   "membership-growth": { id: "membership-growth", title: "会员与礼遇", path: "/membership-growth", closable: true, kind: "membership-growth" },
   "distribution-policy": { id: "distribution-policy", title: "分销管理", path: "/distribution-policy", closable: true, kind: "distribution-policy" },
   account: { id: "account", title: "账号安全", path: "/account", closable: true, kind: "account" },
@@ -168,6 +178,10 @@ export function parseWorkspacePath(pathname: string): { kind: WorkspaceRouteKind
   if (path === "/system") return { kind: "system-configuration", tabId: "system-configuration", path: "/system", title: "系统配置" };
   if (path === "/account") return { kind: "account", tabId: "account", path: "/account", title: "账号安全" };
   if (path === "/support") return { kind: "support", tabId: "support", path: "/support", title: "客服工作台" };
+  if (path === "/support/mine") return { kind: "support-mine", tabId: "support-mine", path: "/support/mine", title: "我的接待" };
+  if (path === "/support/overview" || path === "/support/management") return { kind: "support-overview", tabId: "support-overview", path: "/support/overview", title: "客服统计" };
+  if (path === "/support/patrol") return { kind: "support-patrol", tabId: "support-patrol", path: "/support/patrol", title: "会话巡视" };
+  if (path === "/support/settings") return { kind: "support-settings", tabId: "support-settings", path: "/support/settings", title: "助手设置" };
   if (path === "/membership-growth") return { kind: "membership-growth", tabId: "membership-growth", path: "/membership-growth", title: "会员与礼遇" };
   if (path === "/distribution-policy") return { kind: "distribution-policy", tabId: "distribution-policy", path: "/distribution-policy", title: "分销管理" };
   if (path === "/admins") return { kind: "admins", tabId: "admins", path: "/admins", title: "管理员" };
@@ -261,7 +275,8 @@ export function canOpenKind(kind: WorkspaceRouteKind, nav: NavPermission): boole
   if(kind==="finance-lookup")return has("finance.read")||has("finance.document.read");
   if(kind==="finance-period"||kind==="finance-user")return has("finance.read");
   if(kind==="finance-document")return has("finance.document.read");
-  if (kind === "support") return has("im.support.read") || nav.isBoss;
+  if (kind === "support" || kind === "support-mine") return has("im.support.read") || nav.isBoss;
+  if (kind === "support-management" || kind === "support-overview" || kind === "support-patrol" || kind === "support-settings") return has("im.support.management.read") || nav.isBoss;
   if (kind === "distribution-policy") return nav.isBoss || ["order.read", "personal.distribution.policy.read", "personal.distribution.policy.manage"].some(has);
   if (kind === "membership-growth") return nav.isBoss || ["membership.policy.draft", "membership.policy.publish", "membership.growth.read.summary"].some(has) || has("approval.request.create") && has("membership.entitlement.request");
   if (kind === "admins" || kind === "admin-object") return has("admin.account.read") || nav.isBoss;
@@ -300,7 +315,7 @@ export function upsertTab(tabs: WorkspaceTab[], next: WorkspaceTab): WorkspaceTa
   }
   if(next.kind.startsWith("finance-"))return tabs.some(tab=>tab.id===next.id)?tabs.map(tab=>tab.id===next.id?next:tab):[...tabs,next];
   if (next.kind === "users" || next.kind === "user-object") return tabs.some(tab => tab.id === next.id) ? tabs.map(tab => tab.id === next.id ? next : tab) : [...tabs, next];
-  if (next.kind === "admins" || next.kind === "roles" || next.kind === "approvals" || next.kind === "audit" || next.kind === "operation-log" || next.kind === "account" || next.kind === "workbench" || next.kind === "support" || next.kind === "membership-growth" || next.kind === "distribution-policy" || next.kind === "catalog" || next.kind === "gunsmith" || next.kind === "rules" || next.kind === "media-review" || next.kind === "avatar-review" || next.kind === "listing-review" || next.kind === "content" || next.kind === "orders") {
+  if (next.kind === "admins" || next.kind === "roles" || next.kind === "approvals" || next.kind === "audit" || next.kind === "operation-log" || next.kind === "account" || next.kind === "workbench" || next.kind === "support" || next.kind === "membership-growth" || next.kind === "distribution-policy" || next.kind === "catalog" || next.kind === "gunsmith" || next.kind === "rules" || next.kind === "media-review" || next.kind === "avatar-review" || next.kind === "listing-review" || next.kind === "content" || next.kind === "orders" || next.kind === "support-mine" || next.kind === "support-overview" || next.kind === "support-patrol" || next.kind === "support-settings" || next.kind === "support-management") {
     const existing = tabs.find((tab) => tab.id === next.id);
     if (existing) return tabs.map((tab) => (tab.id === next.id ? { ...existing, ...next, query: { ...existing.query, ...next.query } } : tab));
     return [...tabs, next];
@@ -363,13 +378,19 @@ export function restoreTabs(adminUserId: string, nav: NavPermission): { tabs: Wo
     const stored = parsed.tabs.filter((tab) => tab && typeof tab.id === "string" && typeof tab.path === "string");
     let normalized: WorkspaceTab[] = [];
     for (const tab of stored) {
-      const clean = { ...tab, query: sanitizePersistedTabQuery(tab.query ?? {}) };
-      normalized = clean.kind === "listing-object" || clean.kind === "resource-object" ? upsertTab(normalized, clean) : [...normalized, clean];
+      let candidate = tab;
+      if (candidate.kind === "support-management" || candidate.id === "support-management" || candidate.path === "/support/overview" || candidate.path === "/support/management" || candidate.title === "运营看板" || candidate.title === "客服管理") {
+        candidate = { ...candidate, id: "support-overview", kind: "support-overview", path: "/support/overview", title: "客服统计" };
+      }
+      if (candidate.kind === "support-overview") candidate = { ...candidate, title: "客服统计" };
+      const clean = { ...candidate, query: sanitizePersistedTabQuery(candidate.query ?? {}) };
+      normalized = clean.kind === "listing-object" || clean.kind === "resource-object" || clean.kind === "support-overview" ? upsertTab(normalized, clean) : [...normalized, clean];
     }
     const active = stored.find(tab => tab.id === parsed.activeId);
     if (active && (active.kind === "listing-object" || active.kind === "resource-object")) normalized = upsertTab(normalized, { ...active, query: sanitizePersistedTabQuery(active.query ?? {}) });
     const tabs = filterTabsByPermission(normalized, nav);
-    const activeRoute = active && (active.kind === "listing-object" || active.kind === "resource-object") ? parseWorkspacePath(active.path).tabId : parsed.activeId;
+    const parsedActiveId = parsed.activeId === "support-management" ? "support-overview" : parsed.activeId;
+    const activeRoute = active && (active.kind === "listing-object" || active.kind === "resource-object") ? parseWorkspacePath(active.path).tabId : parsedActiveId;
     const activeId = tabs.some((tab) => tab.id === activeRoute) ? activeRoute : WORKBENCH_TAB_ID;
     return { tabs, activeId };
   } catch {

@@ -414,10 +414,15 @@ test("a late settlement read never refills private data across an order switch",
   await act(async () => { root.render(createElement(OrderFulfillmentSection, { orderId: "order-A", displayNo: "A", viewerId: "admin-A", frozenInventory })); });
   await settle();
   await act(async () => { root.render(createElement(OrderFulfillmentSection, { orderId: "order-B", displayNo: "B", viewerId: "admin-A", frozenInventory })); });
-  await waitFor(() => document.body.textContent.includes("履约中 · 等待结算"));
+  const action = () => document.body.querySelector('[data-action="open-fulfillment-panel"]')?.textContent ?? "";
+  await waitFor(() => action().includes("打开核对面板"));
+  await act(async () => { document.body.querySelector('[data-action="open-fulfillment-panel"]').click(); });
+  await waitFor(() => Boolean(document.body.querySelector(".im-order-panel")));
+  const panel = () => document.body.querySelector(".im-order-panel");
+  assert.match(panel().textContent, /履约中 · 等待结算/, "order-B's stage is in the check panel");
   await act(async () => { resolveA(response(paidNoOpening)); await settle(); });
-  assert.match(document.body.textContent, /履约中 · 等待结算/, "the late order-A response cannot replace order-B facts");
-  assert.doesNotMatch(document.body.textContent, /待核对期初/, "a superseded order's stage never refills the current card");
+  assert.match(panel().textContent, /履约中 · 等待结算/, "the late order-A response cannot replace order-B facts");
+  assert.doesNotMatch(panel().textContent, /待核对期初/, "a superseded order's stage never refills the current panel");
 });
 
 test("editing while the write is in flight cannot lose the original responsibility", async (t) => {
@@ -587,4 +592,137 @@ test("confirmed opening lines borrow names from the frozen projection instead of
   const labels = [...document.body.querySelectorAll(".im-support-fulfillment-lines label span")].map((node) => node.textContent);
   assert.deepEqual(labels, ["哈夫币 · 哈夫币", "六级弹 · 发"]);
   assert.doesNotMatch(document.body.textContent, /物资 · 件/);
+});
+
+test("a 404 settlement read is a neutral unavailable state, not a permission claim", async (t) => {
+  globalThis.fetch = async () => response({ error: { code: "NOT_FOUND" } }, 404);
+  const { host, root } = mount();
+  t.after(async () => { await act(async () => root.unmount()); host.remove(); });
+  await act(async () => { root.render(createElement(OrderFulfillmentSection, { orderId: "order-A", displayNo: "ZZ-TEST-0001", viewerId: "admin-A", frozenInventory })); });
+  await waitFor(() => host.querySelector('[data-read-state="unavailable"]'));
+  const card = host.querySelector(".im-support-fulfillment");
+  assert.match(card.textContent, /本单结算记录不可用/);
+  assert.match(card.textContent, /本环境未启用结算记录/);
+  assert.match(card.textContent, /不影响本单沟通/);
+  assert.doesNotMatch(card.textContent, /未找到此内容|无权/, "404 must not be dressed up as a permission problem");
+  assert.equal(card.querySelector('[role="alert"]'), null, "an unavailable surface is neutral, not a red error");
+  assert.ok(host.querySelector('[data-action="fulfillment-reload"]'), "a read-only retry stays available");
+  assert.equal(host.querySelector('[data-action="open-fulfillment-panel"]'), null, "an unreadable settlement never opens a write panel");
+});
+
+test("a 403 settlement read still names the missing permission", async (t) => {
+  globalThis.fetch = async () => response({ error: { code: "FORBIDDEN" } }, 403);
+  const { host, root } = mount();
+  t.after(async () => { await act(async () => root.unmount()); host.remove(); });
+  await act(async () => { root.render(createElement(OrderFulfillmentSection, { orderId: "order-A", displayNo: "ZZ-TEST-0001", viewerId: "admin-A", frozenInventory })); });
+  await waitFor(() => host.querySelector('[data-read-state="forbidden"]'));
+  const card = host.querySelector(".im-support-fulfillment");
+  assert.match(card.textContent, /当前账号无权查看本单结算记录/);
+  assert.doesNotMatch(card.textContent, /本环境未启用结算记录/, "403 keeps its own permission meaning");
+  assert.ok(card.querySelector('[role="alert"]'), "a permission failure remains an alert");
+  assert.ok(host.querySelector('[data-action="fulfillment-reload"]'));
+  assert.equal(host.querySelector('[data-action="open-fulfillment-panel"]'), null);
+});
+
+test("a completed order shows read-only ended facts and no write commands", async (t) => {
+  const posted = {
+    orderId: "order-A", rentalStarted: true,
+    openings: [{ id: "opening_1", versionNo: 1, status: "CONFIRMED", lines: frozenInventory.map((line) => ({ itemId: line.itemId, quantity: line.quantity, unit: line.unit })) }],
+    settlement: { id: "settle_v3", versionNo: 3, early: true, versionHash: "hash_v3", decisions: [{ party: "RENTER", action: "CONFIRM" }, { party: "OWNER", action: "CONFIRM" }, { party: "SUPPORT", action: "REVIEW" }] },
+    posting: { id: "posting_1", versionHash: "hash_v3", early: true, postedAt: "2026-10-11T08:00:00.000Z", refundDueAt: "2026-10-14T08:00:00.000Z", amounts: { renterRefund: { amount: "320.00", unit: "yuan" } } },
+  };
+  globalThis.fetch = async () => response(posted);
+  const { host, root } = mount();
+  t.after(async () => { await act(async () => root.unmount()); host.remove(); });
+  await act(async () => { root.render(createElement(OrderFulfillmentSection, { orderId: "order-A", displayNo: "ZZ-TEST-0001", viewerId: "admin-A", orderStatus: "COMPLETED", frozenInventory })); });
+  await waitFor(() => host.querySelector('.im-support-fulfillment[data-ended="true"]'));
+  await waitFor(() => host.querySelector(".im-support-fulfillment").textContent.includes("已结算"));
+  const card = host.querySelector(".im-support-fulfillment");
+  assert.match(card.textContent, /本单已结束/);
+  assert.match(card.textContent, /已完成/);
+  assert.match(card.textContent, /已结算/);
+  assert.match(card.textContent, /退款应付时间：10\/14 16:00/);
+  assert.equal(host.querySelector('[data-action="open-fulfillment-panel"]'), null, "ended orders offer no write entry");
+  assert.equal(document.body.querySelector(".im-order-panel"), null, "no check panel is mounted");
+  assert.equal(host.querySelectorAll(".im-support-fulfillment-lines input").length, 0);
+  assert.doesNotMatch(card.textContent, /期初代录|生成提前结算预览|确认复核|人工调整/);
+});
+
+test("a cancelled order stays neutral even when settlement recording is unavailable", async (t) => {
+  globalThis.fetch = async () => response({ error: { code: "NOT_FOUND" } }, 404);
+  const { host, root } = mount();
+  t.after(async () => { await act(async () => root.unmount()); host.remove(); });
+  await act(async () => { root.render(createElement(OrderFulfillmentSection, { orderId: "order-A", displayNo: "ZZ-TEST-0001", viewerId: "admin-A", orderStatus: "CANCELLED", frozenInventory })); });
+  await waitFor(() => host.querySelector('.im-support-fulfillment[data-ended="true"]'));
+  await waitFor(() => host.querySelector(".im-support-fulfillment").textContent.includes("本环境未启用结算记录"));
+  const card = host.querySelector(".im-support-fulfillment");
+  assert.match(card.textContent, /已结束/);
+  assert.match(card.textContent, /已取消/);
+  assert.doesNotMatch(card.textContent, /无权|未找到此内容/, "a 404 on an ended order is not a permission verdict");
+  assert.equal(card.querySelector('[role="alert"]'), null, "ended reads stay neutral, never red");
+  assert.ok(host.querySelector('[data-action="fulfillment-reload"]'), "only another read is offered");
+  assert.equal(host.querySelector('[data-action="open-fulfillment-panel"]'), null);
+});
+
+test("an active order keeps its existing fulfillment entry", async (t) => {
+  globalThis.fetch = async () => response(paidNoOpening);
+  const { host, root } = mount();
+  t.after(async () => { await act(async () => root.unmount()); host.remove(); });
+  await render(root, host);
+  assert.ok(host.querySelector('[data-action="open-fulfillment-panel"]'), "the active order keeps its write entry");
+  assert.equal(host.querySelector('[data-ended="true"]'), null, "an active order is never labelled ended");
+  assert.equal(host.querySelector('[data-read-state]'), null, "the loaded active card has no read-failure state");
+});
+
+test("the rail card keeps the action and leaves stage and status facts to the header and check panel", async (t) => {
+  globalThis.fetch = async () => response(paidNoOpening);
+  const { host, root } = mount();
+  t.after(async () => { await act(async () => root.unmount()); host.remove(); });
+  await act(async () => { root.render(createElement(OrderFulfillmentSection, { orderId: "order-A", displayNo: "ZZ-TEST-0001", viewerId: "admin-A", frozenInventory })); });
+  await waitFor(() => Boolean(host.querySelector('[data-action="open-fulfillment-panel"]')));
+  const card = host.querySelector(".im-support-fulfillment");
+  assert.match(card.textContent, /履约核对/, "the rail card speaks about the action, not the stage");
+  assert.doesNotMatch(card.textContent, /待核对期初|未开租|已开租|有结算申请待处理|已过账|双方确认/, "the rail card does not repeat stage or status facts");
+  assert.match(card.querySelector('[data-action="open-fulfillment-panel"]').textContent, /期初/, "the stage-specific action stays available");
+  await act(async () => { card.querySelector('[data-action="open-fulfillment-panel"]').click(); });
+  await waitFor(() => Boolean(document.body.querySelector(".im-order-panel")));
+  assert.match(document.body.querySelector(".im-order-panel").textContent, /待核对期初/, "the check panel owns the stage facts");
+});
+
+test("manual close is offered only with permission, warns that funds stay offline, and reports success", async (t) => {
+  let posted = null;
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes("/manual-close")) {
+      posted = { url: String(url), method: init?.method, key: new Headers(init?.headers).get("idempotency-key"), body: JSON.parse(String(init?.body)) };
+      return response({ orderId: "order-A", status: "CANCELLED", cancelReason: "MANUAL_CLOSE", cancelledAt: "2026-10-29T13:30:00.000Z", localFundsEffect: "NONE", financeHandling: "OFFLINE_REQUIRED" });
+    }
+    return response(confirmedOpening);
+  };
+  const { host, root } = mount();
+  t.after(async () => { await act(async () => root.unmount()); host.remove(); });
+  await render(root, host, { orderStatus: "PAID", canManualClose: true });
+  await waitFor(() => host.querySelector('[data-action="manual-close-open"]'));
+
+  const card = host.querySelector('[data-manual-close="true"]');
+  assert.match(card.textContent, /不生成结算或退款/);
+  assert.match(card.textContent, /财务线下核对/);
+  await click(host, "手动结单");
+  await waitFor(() => document.body.querySelector('[aria-label="手动结单"]'));
+  assert.match(document.body.textContent, /资金不会被自动处理/);
+
+  assert.equal(document.body.querySelector('[data-action="manual-close-submit"]').disabled, true, "an empty remark cannot submit");
+  const textarea = document.body.querySelector('textarea[aria-label="手动结单处理备注"]');
+  const setter = Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype, "value").set;
+  setter.call(textarea, "异常订单，线下核对资金");
+  await act(async () => { textarea.dispatchEvent(new browser.Event("input", { bubbles: true })); });
+  await settle();
+  await click(host, "确认手动结单");
+  await waitFor(() => host.querySelector('[data-manual-close="true"]').textContent.includes("已手动结单"));
+
+  assert.equal(posted.method, "POST");
+  assert.match(posted.url, /\/orders\/order-A\/manual-close$/);
+  assert.equal(posted.body.remark, "异常订单，线下核对资金");
+  assert.ok(posted.key, "the idempotency key is sent");
+  assert.equal(host.querySelector('[data-action="manual-close-open"]'), null, "a closed order hides the action");
+  assert.match(host.textContent, /资金未自动结算或退款/);
 });

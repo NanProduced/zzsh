@@ -28,6 +28,8 @@ test("B1 rentalState precedence lives in SQL and filters server-side", () => {
   assert.match(OWNER_ACCOUNT_LIST_SQL, /a\.owner_user_id=\$1/);
   assert.match(OWNER_ACCOUNT_LIST_SQL, /o\.owner_user_id=a\.owner_user_id/);
   assert.match(OWNER_ACCOUNT_LIST_SQL, /LEFT JOIN LATERAL/);
+  // AT TIME ZONE must bind to the timestamp sum, not the interval inside make_interval.
+  assert.match(OWNER_ACCOUNT_LIST_SQL, /\(ao\.paid_at \+ make_interval\(secs => ao\.term_seconds\)\) AT TIME ZONE 'UTC'/);
 });
 
 test("B1 projection: titleFacts, available, blockers; unquoted owner total is null not 0", () => {

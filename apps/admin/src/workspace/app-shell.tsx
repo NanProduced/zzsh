@@ -43,6 +43,10 @@ function currentLocationTab(): WorkspaceTab {
 
 type DiscardIntent = { titles: string[]; execute: () => void; cancel?: () => void; accessKey: string };
 
+function supportsWriteLock(kind: WorkspaceTab["kind"]): boolean {
+  return kind === "content" || kind === "support-settings" || kind === "support-management";
+}
+
 export function WorkspaceApp({
   snapshot,
   theme,
@@ -129,14 +133,14 @@ export function WorkspaceApp({
   writeLockBindingRef.current = writeLockBinding;
   const onWriteLockChange = useCallback((locked: boolean) => {
     // 旧工作面的清理回调不能解除新页或新会话的写锁。
-    if (writeLockBindingRef.current !== writeLockBinding || activeIdRef.current !== writeLockBinding.tabId || writeLockBinding.kind !== "content") return;
+    if (writeLockBindingRef.current !== writeLockBinding || activeIdRef.current !== writeLockBinding.tabId || !supportsWriteLock(writeLockBinding.kind)) return;
     const next = applyDirtyMap(writeLockedIdsRef.current, writeLockBinding.tabId, locked);
     writeLockedIdsRef.current = next;
     setWriteLockedIds(next);
   }, [writeLockBinding]);
   const isWriteLocked = useCallback((tabId: string) => {
     const tab = tabsRef.current.find(item => item.id === tabId);
-    return Boolean(writeLockedIdsRef.current[tabId] && tab?.kind === "content" && !accessRef.current.locked && canOpenKind(tab.kind, accessRef.current.nav));
+    return Boolean(writeLockedIdsRef.current[tabId] && tab && supportsWriteLock(tab.kind) && !accessRef.current.locked && canOpenKind(tab.kind, accessRef.current.nav));
   }, []);
   const clearWriteLocks = useCallback((tabIds: string[]) => {
     const next = clearDirtyForTabs(writeLockedIdsRef.current, tabIds);

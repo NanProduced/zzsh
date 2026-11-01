@@ -2703,3 +2703,8 @@ test("FAST-REPAIR F1 custom 39-41 keeps its own inline bound", async () => {
     await p.close();
   }
 });
+
+test("RENTAL_COMPLETED is explained instead of exposing the raw code in the publish form", () => {
+  const source = fs.readFileSync(path.join(tree, "apps/web/src/components/supply/publish-form.tsx"), "utf8");
+  assert.match(source, /RENTAL_COMPLETED: "该账号已有已完成租约/);
+});

@@ -161,6 +161,8 @@ export const ISOLATED_BUSINESS_DATA_TRUNCATE = `TRUNCATE
       "zzsh_iam"."user_identity_state",
       "zzsh_iam"."im_consultation_scope_operation",
       "zzsh_iam"."im_consultation_event",
+      "zzsh_iam"."im_support_handover",
+      "zzsh_iam"."im_support_presence_session",
       "zzsh_iam"."im_consultation",
       "zzsh_iam"."im_support_presence",
       "zzsh_iam"."im_identity_mapping",

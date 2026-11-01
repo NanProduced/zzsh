@@ -3,7 +3,30 @@ import { ADMIN_PERMISSION, hasPermission, loadEffectiveAdminAccess } from "../au
 import { orderDispatchLockKey } from "../order/payment-confirmation";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId } from "./identity-lifecycle";
 
-export type SupportCandidate = { adminUserId: string; adminName: string; accountId: string; allGames: boolean; gameIds: string[]; complaint: boolean };
+export type SupportCandidate = { adminUserId: string; adminName: string; accountId: string; allGames: boolean; gameIds: string[] };
+
+/**
+ * 每客服同时占用的接待上限默认值。
+ * ponytail: 同一意图曾由 im_support_presence.capacity 表达（0032_yunxin_consultation.sql:7，DEFAULT 3，
+ * CHECK 1..100），该列在 0037_oim_support_dispatch.sql:2 被删除；服务端改由配置承接，默认沿用 3，
+ * 不为凑数放大容量。配置未接线时（auth-runtime.ts 尚未传参）用本默认值，满载即排队。
+ */
+export const SUPPORT_CONCURRENCY_DEFAULT = 3;
+export const SUPPORT_CONCURRENCY_MAX = 100;
+
+export function resolveSupportConcurrencyLimit(value?: number | null): number {
+  if (value === undefined || value === null) return SUPPORT_CONCURRENCY_DEFAULT;
+  if (!Number.isSafeInteger(value) || value < 1 || value > SUPPORT_CONCURRENCY_MAX) {
+    throw new Error("Invalid support concurrency limit");
+  }
+  return value;
+}
+
+/** 满载排队与无人接待是两件事：前者有客服只是都满，后者根本没有合格在线客服。 */
+export type SupportQueueReason = "NO_ONLINE_STAFF" | "ALL_AT_CAPACITY";
+export type SupportReserveOutcome =
+  | { candidate: SupportCandidate; reason: null }
+  | { candidate: null; reason: SupportQueueReason };
 /** Transaction-local lock coverage, carried explicitly to every candidate read. */
 export type LockedSupportRoster = Readonly<{ client: PoolClient; appId: string; ids: readonly string[];
   scopes: readonly { admin_user_id: string; game_id: string }[];
@@ -60,22 +83,91 @@ export async function readEligibleSupport(client: PoolClient, appId: string, loc
     if (![ADMIN_PERMISSION.imSupportRead, ADMIN_PERMISSION.imSupportAccept].every((p) => hasPermission(access, p))) continue;
     const scopes = locked.scopes.filter((s) => s.admin_user_id === row.adminUserId);
     const allGames = access!.isBoss || locked.scopeModes.some((s) => s.admin_user_id === row.adminUserId && s.mode === "ALL_GAMES");
-    result.push({ ...row, allGames, gameIds: scopes.map((s) => s.game_id), complaint: hasPermission(access, ADMIN_PERMISSION.imSupportComplaint) });
+    result.push({ ...row, allGames, gameIds: scopes.map((s) => s.game_id) });
   }
   return result;
 }
 
-export async function reserveSupportCandidate(client: PoolClient, appId: string, kind: "ORDER" | "SERVICE" | "COMPLAINT",
-  candidates: SupportCandidate[], targetAdminId?: string, excludedIds: string[] = []): Promise<SupportCandidate | null> {
-  const eligible = candidates.filter((c) => (!targetAdminId || c.adminUserId === targetAdminId)
-    && (kind !== "COMPLAINT" || c.complaint) && !excludedIds.includes(c.adminUserId));
+/** 在租订单群也算占位：订单由同一客服真实履约，不计入则上限会被订单悄悄吃光。*/
+const supportOrderLoad = (alias: string) => `(SELECT count(*) FROM zzsh_order.im_order_group g
+    JOIN zzsh_order.rental_order o ON o."id" = g."order_id"
+   WHERE g."app_id" = $1 AND o."status" = 'PAID'
+     AND COALESCE(g."responsible_admin_id", g."assigned_admin_id") = ${alias}."admin_user_id")`;
+
+/** 与 readEligibleSupport 同一在线口径；候选名单之外的 presence 不参与排队原因统计。 */
+const SUPPORT_READY_PRESENCE = `p."availability" = 'AVAILABLE' AND p."connection_state" = 'CONNECTED'
+    AND p."last_connected_at" > clock_timestamp() - interval '2 minutes'`;
+
+/**
+ * 满载的客服不进入候选：候选必须有空位（咨询接待数 + 在租订单群 < 上限）。
+ * 返回结构同时给出“为什么没选到”，因为满载排队不能被当成无人接待触发兜底文案。
+ * ponytail: 上限来自服务端配置（默认 3），不新增 presence.capacity 列，也不改 order-team/order-dispatch 调用方。
+ */
+export async function reserveSupportCandidateOutcome(client: PoolClient, appId: string, kind: "ORDER" | "SERVICE" | "COMPLAINT",
+  candidates: SupportCandidate[], targetAdminId?: string, concurrencyLimit?: number | null,
+  enforceCapacity = true): Promise<SupportReserveOutcome> {
+  const limit = resolveSupportConcurrencyLimit(concurrencyLimit);
+  // COMPLAINT 仅作为旧数据读类型保留；分配与 SERVICE 同权限，无投诉候选或排除规则。
+  const eligible = candidates.filter((c) => !targetAdminId || c.adminUserId === targetAdminId);
   const field = kind === "ORDER" ? "last_order_assigned_at" : "last_consultation_assigned_at";
-  const selected = (await client.query<{ admin_user_id: string }>(`SELECT admin_user_id FROM zzsh_iam.im_support_presence
-    WHERE app_id=$1 AND admin_user_id=ANY($2::text[]) AND availability='AVAILABLE' AND connection_state='CONNECTED'
-      AND last_connected_at>clock_timestamp()-interval '2 minutes'
-    ORDER BY ${field} ASC NULLS FIRST,admin_user_id LIMIT 1`, [appId, eligible.map((c) => c.adminUserId)])).rows[0];
-  if (!selected) return null;
-  await client.query(`UPDATE zzsh_iam.im_support_presence SET ${field}=clock_timestamp(),updated_at=clock_timestamp()
+  // 容量门禁只挡“新接待”；管理接管（TAKEOVER）替换现负责客服，系统总负载不增加，不应被挡。
+  const capacityClause = enforceCapacity ? `AND p."active_load" + ${supportOrderLoad("p")} < $3` : "";
+  const params: unknown[] = enforceCapacity ? [appId, eligible.map((c) => c.adminUserId), limit] : [appId, eligible.map((c) => c.adminUserId)];
+  const selected = (await client.query<{ admin_user_id: string }>(`SELECT p."admin_user_id" FROM zzsh_iam.im_support_presence p
+    WHERE p."app_id" = $1 AND p."admin_user_id" = ANY($2::text[]) AND ${SUPPORT_READY_PRESENCE}
+      ${capacityClause}
+    ORDER BY p."${field}" ASC NULLS FIRST, p."admin_user_id" LIMIT 1`,
+  params)).rows[0];
+  if (!selected) {
+    const online = (await client.query<{ count: string | number }>(`SELECT count(*)::int AS "count" FROM zzsh_iam.im_support_presence p
+      WHERE p."app_id" = $1 AND p."admin_user_id" = ANY($2::text[]) AND ${SUPPORT_READY_PRESENCE}`,
+    [appId, eligible.map((c) => c.adminUserId)])).rows[0];
+    return { candidate: null, reason: Number(online?.count ?? 0) === 0 ? "NO_ONLINE_STAFF" : "ALL_AT_CAPACITY" };
+  }
+  await client.query(`UPDATE zzsh_iam.im_support_presence SET ${field}=clock_timestamp(),"updated_at"=clock_timestamp()
     ${kind === "ORDER" ? "" : ",active_load=active_load+1"} WHERE app_id=$1 AND admin_user_id=$2`, [appId, selected.admin_user_id]);
-  return eligible.find((c) => c.adminUserId === selected.admin_user_id)!;
+  return { candidate: eligible.find((c) => c.adminUserId === selected.admin_user_id)!, reason: null };
+}
+
+export async function reserveSupportCandidate(client: PoolClient, appId: string, kind: "ORDER" | "SERVICE" | "COMPLAINT",
+  candidates: SupportCandidate[], targetAdminId?: string, concurrencyLimit?: number | null): Promise<SupportCandidate | null> {
+  return (await reserveSupportCandidateOutcome(client, appId, kind, candidates, targetAdminId, concurrencyLimit)).candidate;
+}
+
+/**
+ * CS-M1 僵尸接线区间：超过 3 分钟无心跳的未结束区间以最后心跳截断，并把仍显示
+ * CONNECTED 的 presence 降级为 DISCONNECTED。只关闭本人区间；若同一客服已有更新
+ * 的未结束区间则不动 presence。调用方持有 App 调度闸门与同一事务。
+ */
+export async function reapStaleSupportSessions(
+  client: PoolClient,
+  appId: string,
+  staleSeconds = 180,
+): Promise<{ sessions: number; presences: number }> {
+  if (!Number.isSafeInteger(staleSeconds) || staleSeconds < 1) throw new Error("Invalid stale session window");
+  const row = (await client.query<{ sessions: string | number; presences: string | number }>(
+    `WITH stale AS (
+       UPDATE "zzsh_iam"."im_support_presence_session"
+          SET "ended_at" = "last_heartbeat_at", "end_reason" = 'STALE'
+        WHERE "app_id" = $1 AND "ended_at" IS NULL
+          AND "last_heartbeat_at" < clock_timestamp() - ($2::int * interval '1 second')
+       RETURNING "admin_user_id"
+     ), disconnected AS (
+       UPDATE "zzsh_iam"."im_support_presence" p
+          SET "connection_state" = 'DISCONNECTED',
+              "version" = p."version" + 1,
+              "updated_at" = clock_timestamp()
+        WHERE p."app_id" = $1 AND p."connection_state" = 'CONNECTED'
+          AND p."admin_user_id" IN (SELECT "admin_user_id" FROM stale)
+          AND NOT EXISTS (
+            SELECT 1 FROM "zzsh_iam"."im_support_presence_session" s
+             WHERE s."app_id" = p."app_id" AND s."admin_user_id" = p."admin_user_id" AND s."ended_at" IS NULL
+          )
+       RETURNING p."admin_user_id"
+     )
+     SELECT (SELECT count(*)::int FROM stale) AS "sessions",
+            (SELECT count(*)::int FROM disconnected) AS "presences"`,
+    [appId, staleSeconds],
+  )).rows[0];
+  return { sessions: Number(row?.sessions ?? 0), presences: Number(row?.presences ?? 0) };
 }

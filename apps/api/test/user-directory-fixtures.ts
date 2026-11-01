@@ -40,6 +40,10 @@ export class DirectorySqlFixture extends EventEmitter {
     if(sql.includes("to_regclass('zzsh_order.legacy_order_read_snapshot')"))return {rows:[{present:false}],rowCount:1};
     this.queries.push({sql,values});
     const result=(rows:unknown[])=>({rows,rowCount:rows.length});
+    if(sql.includes('INSERT INTO "zzsh_iam"."audit_event"')) {
+      if(this.fault==='phone-audit')throw new Error('Injected disclosure audit failure');
+      return {rows:[],rowCount:1};
+    }
     if(sql.startsWith('WITH membership_candidates AS MATERIALIZED'))return result(this.filterSql?this.filterSql(sql,values):[]);
     if(this.filterSql&&sql.startsWith('SELECT u.id FROM zzsh_auth_user."user" u'))return result(this.filterSql(sql,values));
     if(this.filterSql&&sql.includes('directory-credit-summaries'))return result(this.filterSql(sql,values));

@@ -17,6 +17,25 @@ export type YunxinConfig = {
   appSecret?: string;
 };
 
+export type OrderTeamsWorkerConfig = {
+  membersLimit: number;
+  intervalMs: number;
+  batchLimit: number;
+  escalationEnabled: boolean;
+};
+
+export type SupportDispatchWorkerConfig = {
+  appId: string;
+  intervalMs: number;
+  batchLimit: number;
+  /** Owner default: an enabled dispatch worker also auto-assigns waiting consultations unless explicitly disabled. */
+  autoAssignConsultations: boolean;
+  /** How many active consultations one agent may hold before dispatch treats them as full. */
+  concurrencyLimit?: number;
+  /** Seconds an answered-staff reply may lag the user's first message before the breach worker records it. */
+  firstResponseSeconds?: number;
+};
+
 export type OrderImSdkRouteConfig = {
   routeEnvironment: string;
   scopes: { appId: string; orderId: string; teamId: string; conversationId: string }[];
@@ -141,6 +160,8 @@ export type AppConfig = {
   };
   providerTestScope?: string;
   yunxin: YunxinConfig;
+  orderTeams?: OrderTeamsWorkerConfig;
+  supportDispatch?: SupportDispatchWorkerConfig;
   orderImSdkRouteConfig?: OrderImSdkRouteConfig;
 };
 
@@ -252,22 +273,26 @@ function loadYunxinConfig(
   workingDirectory: string,
   profile: ConfigProfile,
 ): YunxinConfig {
-  const enabledValue = env.YUNXIN_ENABLED === undefined ? "false" : env.YUNXIN_ENABLED.trim();
-  if (enabledValue !== "true" && enabledValue !== "false") {
+  const enabledValue = env.YUNXIN_ENABLED?.trim();
+  if (enabledValue !== undefined && enabledValue !== "true" && enabledValue !== "false") {
     throw new ConfigurationError("YUNXIN_ENABLED must be true or false");
   }
-  const enabled = enabledValue === "true";
   const hasCredentials =
-    env.YUNXIN_APP_KEY !== undefined ||
-    env.YUNXIN_APP_SECRET !== undefined ||
-    env.YUNXIN_APP_SECRET_FILE !== undefined;
+    Boolean(env.YUNXIN_APP_KEY?.trim()) ||
+    Boolean(env.YUNXIN_APP_SECRET?.trim()) ||
+    Boolean(env.YUNXIN_APP_SECRET_FILE?.trim());
 
+  // A deployed target always runs real IM, so complete credentials are enough on
+  // their own; YUNXIN_ENABLED=false only exists to force it off while credentials
+  // are present. With no credentials the API stays offline, which is what every
+  // offline test run depends on.
+  const enabled = enabledValue === "true" || (enabledValue === undefined && hasCredentials);
   if (!enabled) {
-    if (hasCredentials) throw new ConfigurationError("YUNXIN credentials require YUNXIN_ENABLED=true");
+    if (hasCredentials) throw new ConfigurationError("YUNXIN_ENABLED=false cannot be combined with Yunxin credentials");
     return { enabled: false };
   }
-  if (profile !== "provider-test") {
-    throw new ConfigurationError("YUNXIN_ENABLED=true is only allowed in APP_PROFILE=provider-test");
+  if (profile === "migration") {
+    throw new ConfigurationError("APP_PROFILE=migration must not assemble a real IM provider");
   }
 
   const appKey = yunxinAppKey(env);
@@ -275,6 +300,83 @@ function loadYunxinConfig(
   const appSecret = optionalSecret(env, "YUNXIN_APP_SECRET", "YUNXIN_APP_SECRET_FILE", workingDirectory);
   if (!appSecret) throw new ConfigurationError("YUNXIN_APP_SECRET or YUNXIN_APP_SECRET_FILE is required");
   return { enabled: true, appKey, appSecret };
+}
+
+function parseStrictBoolean(env: NodeJS.ProcessEnv, key: string, fallback: boolean): boolean {
+  const raw = env[key];
+  if (raw === undefined) return fallback;
+  const value = raw.trim();
+  if (value !== "true" && value !== "false") throw new ConfigurationError(`${key} must be true or false`);
+  return value === "true";
+}
+
+function parseBoundedInteger(
+  env: NodeJS.ProcessEnv,
+  key: string,
+  min: number,
+  max: number,
+  fallback?: number,
+): number {
+  const raw = env[key];
+  if (raw === undefined) {
+    if (fallback === undefined) throw new ConfigurationError(`${key} is required`);
+    return fallback;
+  }
+  const value = raw.trim();
+  const parsed = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+    throw new ConfigurationError(`${key} must be an integer between ${min} and ${max}`);
+  }
+  return parsed;
+}
+
+function assertWorkersDisabled(env: NodeJS.ProcessEnv, enabledKey: string, dependentKeys: readonly string[]): void {
+  for (const key of dependentKeys) {
+    if (env[key] !== undefined) throw new ConfigurationError(`${key} requires ${enabledKey}=true`);
+  }
+}
+
+function loadOrderTeamsConfig(env: NodeJS.ProcessEnv, yunxin: YunxinConfig): OrderTeamsWorkerConfig | undefined {
+  const enabled = parseStrictBoolean(env, "ORDER_TEAMS_ENABLED", false);
+  if (!enabled) {
+    assertWorkersDisabled(env, "ORDER_TEAMS_ENABLED", [
+      "ORDER_TEAMS_MEMBERS_LIMIT", "ORDER_TEAMS_INTERVAL_MS", "ORDER_TEAMS_BATCH_LIMIT", "ORDER_TEAMS_ESCALATION_ENABLED",
+    ]);
+    return undefined;
+  }
+  const config = {
+    membersLimit: parseBoundedInteger(env, "ORDER_TEAMS_MEMBERS_LIMIT", 10, 2000),
+    intervalMs: parseBoundedInteger(env, "ORDER_TEAMS_INTERVAL_MS", 1000, 600000, 15000),
+    batchLimit: parseBoundedInteger(env, "ORDER_TEAMS_BATCH_LIMIT", 1, 100, 5),
+    escalationEnabled: parseStrictBoolean(env, "ORDER_TEAMS_ESCALATION_ENABLED", false),
+  };
+  if (!yunxin.enabled || !yunxin.appKey || !yunxin.appSecret) {
+    throw new ConfigurationError("ORDER_TEAMS_ENABLED=true requires YUNXIN_ENABLED=true with complete credentials");
+  }
+  return config;
+}
+
+function loadSupportDispatchConfig(env: NodeJS.ProcessEnv, yunxin: YunxinConfig): SupportDispatchWorkerConfig | undefined {
+  const enabled = parseStrictBoolean(env, "SUPPORT_DISPATCH_ENABLED", false);
+  if (!enabled) {
+    assertWorkersDisabled(env, "SUPPORT_DISPATCH_ENABLED", [
+      "SUPPORT_DISPATCH_INTERVAL_MS", "SUPPORT_DISPATCH_BATCH_LIMIT", "SUPPORT_DISPATCH_AUTO_ASSIGN_CONSULTATIONS",
+      "SUPPORT_CONCURRENCY_LIMIT", "SUPPORT_FIRST_RESPONSE_SECONDS",
+    ]);
+    return undefined;
+  }
+  const intervalMs = parseBoundedInteger(env, "SUPPORT_DISPATCH_INTERVAL_MS", 1000, 600000, 15000);
+  const batchLimit = parseBoundedInteger(env, "SUPPORT_DISPATCH_BATCH_LIMIT", 1, 100, 5);
+  const autoAssignConsultations = parseStrictBoolean(env, "SUPPORT_DISPATCH_AUTO_ASSIGN_CONSULTATIONS", true);
+  // Owner default keeps one operator from being buried: the value 3 restores the
+  // historical capacity default from 0032 that 0037 dropped when it removed the column.
+  const concurrencyLimit = parseBoundedInteger(env, "SUPPORT_CONCURRENCY_LIMIT", 1, 100, 3);
+  const firstResponseSeconds = parseBoundedInteger(env, "SUPPORT_FIRST_RESPONSE_SECONDS", 30, 86400, 120);
+  if (!yunxin.enabled || !yunxin.appKey || !yunxin.appSecret) {
+    throw new ConfigurationError("SUPPORT_DISPATCH_ENABLED=true requires YUNXIN_ENABLED=true with complete credentials");
+  }
+  return { appId: yunxin.appKey, intervalMs, batchLimit, autoAssignConsultations, concurrencyLimit, firstResponseSeconds };
+
 }
 
 function loadOrderImSdkRouteConfig(env: NodeJS.ProcessEnv, profile: ConfigProfile, yunxin: YunxinConfig): OrderImSdkRouteConfig | undefined {
@@ -422,6 +524,8 @@ export function loadConfig(
     throw new ConfigurationError("ENABLE_TEST_OPERATIONS=true requires APP_PROFILE=test and PROVIDER_MODE=fake");
   }
   const yunxin = loadYunxinConfig(env, workingDirectory, profile);
+  const orderTeams = loadOrderTeamsConfig(env, yunxin);
+  const supportDispatch = loadSupportDispatchConfig(env, yunxin);
   const orderImSdkRouteConfig = loadOrderImSdkRouteConfig(env, profile, yunxin);
 
   return {
@@ -443,6 +547,8 @@ export function loadConfig(
     redis: { host: redisHost, port: redisPort, password: redisPassword },
     providerTestScope,
     yunxin,
+    ...(orderTeams ? { orderTeams } : {}),
+    ...(supportDispatch ? { supportDispatch } : {}),
     ...(orderImSdkRouteConfig ? { orderImSdkRouteConfig } : {}),
   };
 }

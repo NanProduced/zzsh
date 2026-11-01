@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { handleAdminBff, type AdminBffOptions } from "../src/bff/admin-bff";
 import * as orderRoutes from '../src/order/order-routes';
 import * as legalRoutes from "../src/legal/legal-routes";
+import * as yunxinRoutes from '../src/im/yunxin-routes';
 
 const ADMIN_ORIGIN = "http://127.0.0.1:4291";
 const API_ORIGIN = "http://127.0.0.1:4292";
@@ -21,6 +22,30 @@ test("legal Admin BFF forwards exact routes and keeps method/origin boundaries",
   assert.equal((await route("/legal-documents/drafts/legal_1", "DELETE")).status, 404);
   assert.equal((await route("/legal-documents/unknown", "POST")).status, 404);
   assert.equal(calls.length, 2);
+});
+
+test("read-copy settings BFF preserves GET/PUT and original configuration payload, rejecting unrelated methods", async t => {
+  const forwarded: any[] = [];
+  t.mock.method(yunxinRoutes, "handleYunxinRoute", async (request: any, response: any) => { forwarded.push(request); response.status(200).json({ candidate: true }); });
+  for (const method of ["GET", "PUT"]) {
+    const result = capture(), body = method === "PUT" ? { version: 0, enabled: false, publicOrigin: null, operationId: "original_operation" } : undefined;
+    await handleAdminBff({ method, url: "/im/read-copy-settings", originalUrl: "/im/read-copy-settings", headers: { origin: ADMIN_ORIGIN }, body }, result.response as never, options());
+    assert.equal(result.result().status, 200); assert.equal(forwarded.at(-1).originalUrl, "/api/v1/im/admin/read-copy-settings");
+    assert.equal(forwarded.at(-1).method, method); assert.equal(forwarded.at(-1).body, body);
+  }
+  for (const method of ["POST", "DELETE"]) assert.equal((await route("/im/read-copy-settings", method)).status, 404);
+  assert.equal((await route("/im/read-copy-settings-extra")).status, 404); assert.equal(forwarded.length, 2);
+});
+
+test("both customer statistics BFF routes preserve the selected date range for domain authorization", async t => {
+  const forwarded: any[] = [];
+  t.mock.method(yunxinRoutes, "handleYunxinRoute", async (request: any, response: any) => { forwarded.push(request); response.status(200).json({ candidate: true }); });
+  for (const endpoint of ["support-overview", "my-support-statistics"]) {
+    const result = capture(), path = `/im/${endpoint}?dateFrom=2026-10-01&dateTo=2026-10-31`;
+    await handleAdminBff({method:"GET",url:path,originalUrl:path,headers:{origin:ADMIN_ORIGIN}},result.response as never,options());
+    assert.equal(result.result().status,200);
+    assert.equal(forwarded.at(-1).originalUrl,`/api/v1/im/admin/${endpoint}?dateFrom=2026-10-01&dateTo=2026-10-31`);
+  }
 });
 
 test('Admin BFF仅放行准确的未开租审核命令，保持原body/key并交订单领域授权',async t=>{

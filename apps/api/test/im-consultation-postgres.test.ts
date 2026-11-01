@@ -506,45 +506,20 @@ test(
       assert.equal(boundaryComplaint.consultation.conversationId, `${boundaryUserAccountId}|2|900002`);
       assert.equal(boundaryComplaint.consultation.messageScopeState, "READY");
       await migration.query(`UPDATE "zzsh_iam"."admin_security" SET "is_boss" = false WHERE "admin_user_id" = $1`, [adminId]);
+      // 投诉已并入普通咨询：旧 COMPLAINT 行只需要 read + accept，不再要求 im.support.complaint。
       await migration.query(
         `INSERT INTO "zzsh_iam"."admin_user_permission" ("admin_user_id", "permission_code", "effect")
-         VALUES ($1, 'im.support.read', 'ALLOW'), ($1, 'im.support.accept', 'ALLOW'), ($1, 'im.support.complaint', 'ALLOW')
+         VALUES ($1, 'im.support.read', 'ALLOW'), ($1, 'im.support.accept', 'ALLOW')
          ON CONFLICT ("admin_user_id", "permission_code") DO UPDATE SET "effect" = EXCLUDED."effect"`,
         [adminId],
       );
       const complaintMessageAccess = await readAdminMessageAccess(options, admin, `${adminAccountId}|2|900002`, true);
-      await migration.query(
-        `UPDATE "zzsh_iam"."admin_user_permission" SET "effect" = 'DENY' WHERE "admin_user_id" = $1 AND "permission_code" = 'im.support.complaint'`,
-        [adminId],
-      );
-      await assert.rejects(
-        readAdminMessageAccess(options, admin, `${adminAccountId}|2|900002`, true),
-        /Permission required/,
-      );
       assert.deepEqual(await readAdminMessageAccess(options, admin, `${adminAccountId}|2|900002`), complaintMessageAccess);
-      await assert.rejects(
-        closeConsultation(options, admin, boundaryComplaint.consultation.id, `${prefix}complaint-close-revoked`),
-        /Permission required/,
-      );
-      const complaintAfterDeniedClose = (await runtime.query<{ state: string; messageScopeState: string; operationCount: string }>(
-        `SELECT c."state", c."message_scope_state" AS "messageScopeState", count(o.*)::text AS "operationCount"
-           FROM "zzsh_iam"."im_consultation" c
-           LEFT JOIN "zzsh_iam"."im_consultation_scope_operation" o
-             ON o."app_id" = c."app_id" AND o."consultation_id" = c."id"
-          WHERE c."app_id" = $1 AND c."id" = $2
-          GROUP BY c."state", c."message_scope_state"`,
-        [APP_ID, boundaryComplaint.consultation.id],
-      )).rows[0];
-      assert.deepEqual(complaintAfterDeniedClose, { state: "ACTIVE", messageScopeState: "READY", operationCount: "1" });
-      await migration.query(
-        `UPDATE "zzsh_iam"."admin_user_permission" SET "effect" = 'ALLOW'
-          WHERE "admin_user_id" = $1 AND "permission_code" = 'im.support.complaint'`,
-        [adminId],
-      );
+      const closedBoundaryComplaint = await closeConsultation(options, admin, boundaryComplaint.consultation.id, `${prefix}boundary-complaint-close`);
+      assert.equal(closedBoundaryComplaint.consultation.state, "CLOSED");
+      assert.equal(provider.dismissed.includes("900002"), true);
       await migration.query(`DELETE FROM "zzsh_iam"."admin_user_permission" WHERE "admin_user_id" = $1`, [adminId]);
       await migration.query(`UPDATE "zzsh_iam"."admin_security" SET "is_boss" = true WHERE "admin_user_id" = $1`, [adminId]);
-      await closeConsultation(options, admin, boundaryComplaint.consultation.id, `${prefix}boundary-complaint-close`);
-      assert.equal(provider.dismissed.includes("900002"), true);
 
       await writePresence(options, admin, { availability: "OFF_DUTY", connectionState: "DISCONNECTED" }, `${prefix}presence-offline`);
       const complaint = await createOrResumeUserConsultation(options, user, "COMPLAINT", null, `${prefix}complaint-create`);
@@ -718,8 +693,8 @@ test(
       );
 
       await writePresence(options, targetAdmin, { availability: "OFF_DUTY", connectionState: "DISCONNECTED" }, `${prefix}target-offline-for-recovery-transfer`);
-      // Recovery is independent of complaint routing: this user has no current
-      // SERVICE assignee to exclude. Accused-member exclusion has its own PG case.
+      // Recovery is independent of the legacy read type: COMPLAINT rounds use the
+      // same assignment and recovery path as SERVICE.
       const recoveryTransfer = await createOrResumeUserConsultation(options, userContext(identityPendingUserId, identityPendingUserSessionId), "COMPLAINT", "listing_recovery_transfer", `${prefix}recovery-transfer-create`);
       assert.equal(recoveryTransfer.consultation.assignedAdmin?.id, adminId);
       assert.equal(recoveryTransfer.consultation.messageScopeState, "READY");

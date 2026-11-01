@@ -47,6 +47,10 @@ function snapshot(permissions) {
 }
 const consultation = {
   id: "consultation-a",
+  threadId: "thread-a",
+  roundId: "consultation-a",
+  roundSeq: 2,
+  threadState: "ACTIVE",
   type: "SERVICE",
   state: "ACTIVE",
   subjectRef: null,
@@ -55,6 +59,7 @@ const consultation = {
   conversationType: "TEAM",
   conversationId: "team-a",
   messageScopeState: "READY",
+  canSend: true,
   version: 1,
   lastMessageAt: null,
   createdAt: "2026-09-17T00:00:00.000Z",
@@ -62,6 +67,7 @@ const consultation = {
   user: { id: "user-a", name: "用户 A", username: "user-a" },
 };
 
+const consultationRows = (root) => [...(root.querySelector(".im-wb-pane:not([hidden]) .im-wb-queue")?.querySelectorAll(".im-wb-row") ?? [])];
 async function settle() {
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
 }
@@ -71,6 +77,12 @@ async function waitFor(predicate, timeout = 2_000) {
     if (Date.now() >= deadline) throw new Error("component condition timed out");
     await settle();
   }
+}
+// 工作台不再自动选中首条；需要输入/发图的用例显式点一行。
+async function selectFirst(rootNode) {
+  await waitFor(() => consultationRows(rootNode).length > 0);
+  await act(async () => { consultationRows(rootNode)[0].click(); });
+  await settle();
 }
 
 test("admin consultation image UNKNOWN keeps the original id for the retry", async (t) => {
@@ -112,6 +124,7 @@ test("admin consultation image UNKNOWN keeps the original id for the retry", asy
   root = createRoot(rootNode);
   const permissions = ["im.support.read", "im.support.accept"];
   await act(async () => { root.render(createElement(ImSupportView, { snapshot: snapshot(permissions), onRefresh: async () => snapshot(permissions) })); });
+  await selectFirst(rootNode);
   await waitFor(() => Boolean(rootNode.querySelector('input[type="file"]')));
   const input = rootNode.querySelector('input[type="file"]');
   const file = new browser.File([new Uint8Array([1, 2, 3])], "proof.png", { type: "image/png" });
@@ -165,10 +178,10 @@ test("a text UNKNOWN on one consultation survives a successful send on another",
   root = createRoot(rootNode);
   const permissions = ["im.support.read", "im.support.accept"];
   await act(async () => { root.render(createElement(ImSupportView, { snapshot: snapshot(permissions), onRefresh: async () => snapshot(permissions) })); });
-  await waitFor(() => rootNode.querySelectorAll(".im-wb-row").length === 2);
+  await waitFor(() => consultationRows(rootNode).length === 2);
 
   const pick = async (tag) => {
-    const row = [...rootNode.querySelectorAll(".im-wb-row")].find((item) => item.textContent.includes(`用户 ${tag}`));
+    const row = [...consultationRows(rootNode)].find((item) => item.textContent.includes(`用户 ${tag}`));
     await act(async () => { row.click(); });
     await waitFor(() => rootNode.querySelector("textarea") && !rootNode.querySelector("textarea").disabled);
   };
@@ -233,6 +246,7 @@ test("admin consultation routes the normal send and Enter to the original messag
   root = createRoot(rootNode);
   const permissions = ["im.support.read", "im.support.accept"];
   await act(async () => { root.render(createElement(ImSupportView, { snapshot: snapshot(permissions), onRefresh: async () => snapshot(permissions) })); });
+  await selectFirst(rootNode);
   await waitFor(() => Boolean(rootNode.querySelector("textarea") && !rootNode.querySelector("textarea").disabled));
 
   const type = async (value) => {
@@ -297,10 +311,10 @@ test("an in-flight text retry still settles the originating consultation after s
   root = createRoot(rootNode);
   const permissions = ["im.support.read", "im.support.accept"];
   await act(async () => { root.render(createElement(ImSupportView, { snapshot: snapshot(permissions), onRefresh: async () => snapshot(permissions) })); });
-  await waitFor(() => rootNode.querySelectorAll(".im-wb-row").length === 2);
+  await waitFor(() => consultationRows(rootNode).length === 2);
 
   const pick = async (tag) => {
-    const row = [...rootNode.querySelectorAll(".im-wb-row")].find((item) => item.textContent.includes(`用户 ${tag}`));
+    const row = [...consultationRows(rootNode)].find((item) => item.textContent.includes(`用户 ${tag}`));
     await act(async () => { row.click(); });
     await waitFor(() => rootNode.querySelector("textarea") && !rootNode.querySelector("textarea").disabled);
   };
@@ -381,6 +395,7 @@ test("an unresolved text cannot be bypassed by clearing the draft and staging on
   root = createRoot(rootNode);
   const permissions = ["im.support.read", "im.support.accept"];
   await act(async () => { root.render(createElement(ImSupportView, { snapshot: snapshot(permissions), onRefresh: async () => snapshot(permissions) })); });
+  await selectFirst(rootNode);
   await waitFor(() => Boolean(rootNode.querySelector('input[type="file"]')));
 
   const type = async (value) => {
@@ -443,7 +458,8 @@ function revokeHarness(t) {
     });
   };
   const submit = async () => { await act(async () => { node.querySelector("form").dispatchEvent(new browser.Event("submit", { bubbles: true, cancelable: true })); }); await settle(); };
-  return { node, render, type, submit };
+  const pickFirst = async () => { await selectFirst(node); };
+  return { node, render, type, submit, pickFirst };
 }
 
 function textSendFetch(textPosts, reply) {
@@ -470,8 +486,9 @@ test("a text send in flight when only the send permission is revoked still conve
   const textPosts = [];
   const reply = { current: null };
   globalThis.fetch = textSendFetch(textPosts, reply);
-  const { node, render, type, submit } = revokeHarness(t);
+  const { node, render, type, submit, pickFirst } = revokeHarness(t);
   await render(["im.support.read", "im.support.accept"]);
+  await pickFirst();
   await waitFor(() => Boolean(node.querySelector("form")));
   await type("撤权前发出的原文");
   await submit();
@@ -510,8 +527,9 @@ test("a text send in flight when only the send permission is revoked keeps its U
     if (url.pathname.endsWith("/im/messages")) return response({ messages: [] });
     throw new Error(`unexpected test request ${url.pathname}`);
   };
-  const { node, render, type, submit } = revokeHarness(t);
+  const { node, render, type, submit, pickFirst } = revokeHarness(t);
   await render(["im.support.read", "im.support.accept"]);
+  await pickFirst();
   await waitFor(() => Boolean(node.querySelector("form")));
   await type("撤权时未确认的原文");
   await submit();
@@ -532,8 +550,9 @@ test("a receipt that arrives after the read permission is gone never refills the
   const textPosts = [];
   const reply = { current: null };
   globalThis.fetch = textSendFetch(textPosts, reply);
-  const { node, render, type, submit } = revokeHarness(t);
+  const { node, render, type, submit, pickFirst } = revokeHarness(t);
   await render(["im.support.read", "im.support.accept"]);
+  await pickFirst();
   await waitFor(() => Boolean(node.querySelector("form")));
   await type("读取权限被撤后不应回填");
   await submit();
@@ -550,8 +569,9 @@ test("restoring the send permission never re-sends an already completed message"
   const textPosts = [];
   const reply = { current: null };
   globalThis.fetch = textSendFetch(textPosts, reply);
-  const { node, render, type, submit } = revokeHarness(t);
+  const { node, render, type, submit, pickFirst } = revokeHarness(t);
   await render(["im.support.read", "im.support.accept"]);
+  await pickFirst();
   await waitFor(() => Boolean(node.querySelector("form")));
   await type("只发一次的原文");
   await submit();
@@ -620,6 +640,7 @@ test("a queued image batch stops dispatching the rest once the send permission i
     await settle();
   };
   await render(["im.support.read", "im.support.accept"]);
+  await selectFirst(rootNode);
   await waitFor(() => Boolean(rootNode.querySelector('input[type="file"]')));
   const input = rootNode.querySelector('input[type="file"]');
   const files = [1, 2].map((n) => new browser.File([new Uint8Array([1, 2, 3, n])], `batch-${n}.png`, { type: "image/png" }));

@@ -1,6 +1,6 @@
 import { AdminFinanceView } from "../views/admin-finance-view";
 import { SupplyListingReviewView } from "../views/supply-listing-review-view";
-import type { SessionSnapshot, Theme, ThemeMode } from "../api";
+import { adminRequest, type SessionSnapshot, type Theme, type ThemeMode } from "../api";
 import type { ThemeStorageStatus } from "../lib/theme";
 import { SettingsWorkspace } from "./settings-page";
 import { AccountSecurityPage } from "./account-security-page";
@@ -17,6 +17,9 @@ import { SupplyGunsmithView } from "../views/supply-gunsmith-view";
 import { ContentView } from "../views/content-view";
 import { SystemConfigurationView } from "../views/system-configuration-view";
 import { ImSupportView } from "../views/im-support-view";
+import { SupportDashboard, SupportManagementPane, SupportPatrol } from "../views/im-support-management";
+import { SupportAssistantSettings } from "../views/im-support-settings";
+import { MySupportStatisticsView } from "../views/my-support-statistics";
 import { MembershipGrowthAdminHost } from "../views/membership-growth-admin-host";
 import { DistributionWorkspace } from "../views/distribution-workspace";
 
@@ -115,7 +118,37 @@ export function WorkspacePageContent({
       />
     );
   }
-  if (tab.kind === "support") return <>{tab.query.fromOrderId&&/^[A-Za-z0-9._:-]{1,128}$/.test(tab.query.fromOrderId)?<button className="oc-back" onClick={()=>onOpenPath(`/orders/${tab.query.fromOrderId}`)}>返回来源订单</button>:null}<ImSupportView key={tab.id} snapshot={snapshot} initialSection={tab.query.section==="orders"?"orders":"consultation"} onRefresh={onRefresh} onOpenPath={onOpenPath} /></>;
+  if (tab.kind === "support") {
+    const supportType = tab.query.type === "SERVICE" || tab.query.type === "COMPLAINT" || tab.query.type === "ORDER" ? tab.query.type : "ALL";
+    const selectedThread = tab.query.consultation && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(tab.query.consultation) ? tab.query.consultation : undefined;
+    const selectedOrder = tab.query.order && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(tab.query.order) ? tab.query.order : undefined;
+    return <>{tab.query.fromOrderId&&/^[A-Za-z0-9._:-]{1,128}$/.test(tab.query.fromOrderId)?<button className="oc-back" onClick={()=>onOpenPath(`/orders/${tab.query.fromOrderId}`)}>返回来源订单</button>:null}<ImSupportView key={tab.id} snapshot={snapshot} initialSection={tab.query.section==="orders"?"orders":"consultation"} initialConsultationId={selectedThread} initialOrderId={selectedOrder} initialUnifiedType={supportType} workspaceQuery={tab.query} onQueryChange={onQueryChange} onRefresh={onRefresh} onOpenPath={onOpenPath} onDirtyChange={onDirtyChange} /></>;
+  }
+  if (tab.kind === "support-mine") {
+    const canReadSupport = snapshot.security.isBoss || snapshot.permissions.includes("im.support.read");
+    if (!canReadSupport) return null;
+    return <div className="im-wb-mgmt-host"><MySupportStatisticsView key={tab.id} active request={adminRequest} snapshot={snapshot} onOpenPath={onOpenPath} /></div>;
+  }
+  if (tab.kind === "support-overview") {
+    const canManageSupport = snapshot.security.isBoss || snapshot.permissions.includes("im.support.management.read");
+    if (!canManageSupport) return null;
+    return <div className="im-wb-mgmt-host"><SupportDashboard key={tab.id} active request={adminRequest} /></div>;
+  }
+  if (tab.kind === "support-patrol") {
+    const canManageSupport = snapshot.security.isBoss || snapshot.permissions.includes("im.support.management.read");
+    if (!canManageSupport) return null;
+    return <div className="im-wb-mgmt-host"><SupportPatrol key={tab.id} active request={adminRequest} currentAdminUserId={snapshot.adminUserId} currentAdminName={snapshot.user.name || snapshot.user.username || snapshot.adminUserId} onOpenConsultation={()=>onOpenPath("/support?section=consultation")} onOpenProfile={snapshot.security.isBoss || snapshot.permissions.includes("user.directory.read") ? userId=>onOpenPath(`/users/${encodeURIComponent(userId)}`) : undefined} /></div>;
+  }
+  if (tab.kind === "support-settings") {
+    const canManageSupport = snapshot.security.isBoss || snapshot.permissions.includes("im.support.management.read");
+    if (!canManageSupport) return null;
+    return <div className="im-wb-mgmt-host"><SupportAssistantSettings key={[tab.id,snapshot.adminUserId,snapshot.session.id].join("|")} active request={adminRequest} onDirtyChange={onDirtyChange} onWriteLockChange={onWriteLockChange} canConfigure={snapshot.security.isBoss || snapshot.permissions.includes("im.support.configure")} canConfigureIntegration={snapshot.security.isBoss || snapshot.permissions.includes("im.support.integration.configure")} /></div>;
+  }
+  if (tab.kind === "support-management") {
+    const canManageSupport = snapshot.security.isBoss || snapshot.permissions.includes("im.support.management.read");
+    if (!canManageSupport) return null;
+    return <div className="im-wb-mgmt-host"><SupportManagementPane key={[tab.id,snapshot.adminUserId,snapshot.session.id].join("|")} active request={adminRequest} onDirtyChange={onDirtyChange} onWriteLockChange={onWriteLockChange} canConfigure={snapshot.security.isBoss || snapshot.permissions.includes("im.support.configure")} canConfigureIntegration={snapshot.security.isBoss || snapshot.permissions.includes("im.support.integration.configure")} canTakeover={snapshot.security.isBoss || snapshot.permissions.includes("im.support.audit.takeover")} currentAdminUserId={snapshot.adminUserId} currentAdminName={snapshot.user.name || snapshot.user.username || snapshot.adminUserId} onOpenConsultation={()=>onOpenPath("/support?section=consultation")} onOpenProfile={snapshot.security.isBoss || snapshot.permissions.includes("user.directory.read") ? userId=>onOpenPath(`/users/${encodeURIComponent(userId)}`) : undefined} /></div>;
+  }
   if (tab.kind === "distribution-policy") return snapshot.authenticated ? <DistributionWorkspace key={tab.id} snapshot={snapshot} query={tab.query} onOpenPath={onOpenPath} onQueryChange={onQueryChange} onDirtyChange={onDirtyChange} /> : null;
   if (tab.kind === "membership-growth") return <>{tab.query.fromUserId && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(tab.query.fromUserId) && (snapshot.security.isBoss || snapshot.permissions.includes("user.directory.read")) ? <Button variant="ghost" onClick={() => onOpenPath("/users/" + tab.query.fromUserId + "?section=growth")}>返回来源用户</Button> : null}<MembershipGrowthAdminHost key={tab.id} tab={tab} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} onOpenPath={onOpenPath} /></>;
   if (tab.kind === "admins" || tab.kind === "admin-object") {

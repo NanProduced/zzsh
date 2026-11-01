@@ -876,6 +876,125 @@
       "when": 1793184013000,
       "tag": "0124_profile_avatars",
       "breakpoints": true
+    },
+    {
+      "idx": 125,
+      "version": "7",
+      "when": 1793184013001,
+      "tag": "0125_im_support_management",
+      "breakpoints": true
+    },
+    {
+      "idx": 126,
+      "version": "7",
+      "when": 1793184013002,
+      "tag": "0126_ops_support_management_grants",
+      "breakpoints": true
+    },
+    {
+      "idx": 127,
+      "version": "7",
+      "when": 1793184013003,
+      "tag": "0127_im_order_stage_card",
+      "breakpoints": true
+    },
+    {
+      "idx": 128,
+      "version": "7",
+      "when": 1793184013004,
+      "tag": "0128_im_order_due_reminder",
+      "breakpoints": true
+    },
+    {
+      "idx": 129,
+      "version": "7",
+      "when": 1793184013005,
+      "tag": "0129_manual_close",
+      "breakpoints": true
+    },
+    {
+      "idx": 130,
+      "version": "7",
+      "when": 1793184013006,
+      "tag": "0130_im_support_thread",
+      "breakpoints": true
+    },
+    {
+      "idx": 131,
+      "version": "7",
+      "when": 1793184013007,
+      "tag": "0131_im_round_rating",
+      "breakpoints": true
+    },
+    {
+      "idx": 132,
+      "version": "7",
+      "when": 1793184013008,
+      "tag": "0132_im_message_state",
+      "breakpoints": true
+    },
+    {
+      "idx": 133,
+      "version": "7",
+      "when": 1793184013009,
+      "tag": "0133_im_waiting_assignment",
+      "breakpoints": true
+    },
+    {
+      "idx": 134,
+      "version": "7",
+      "when": 1793184013010,
+      "tag": "0134_support_cancel",
+      "breakpoints": true
+    },
+    {
+      "idx": 135,
+      "version": "7",
+      "when": 1793184013011,
+      "tag": "0135_im_conversation_activity",
+      "breakpoints": true
+    },
+    {
+      "idx": 136,
+      "version": "7",
+      "when": 1793184013012,
+      "tag": "0136_im_order_unread",
+      "breakpoints": true
+    },
+    {
+      "idx": 137,
+      "version": "7",
+      "when": 1793184013013,
+      "tag": "0137_opening_confirmation",
+      "breakpoints": true
+    },
+    {
+      "idx": 138,
+      "version": "7",
+      "when": 1793184013014,
+      "tag": "0138_im_order_group_welcome",
+      "breakpoints": true
+    },
+    {
+      "idx": 139,
+      "version": "7",
+      "when": 1793184013015,
+      "tag": "0139_im_support_settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 140,
+      "version": "7",
+      "when": 1793184013016,
+      "tag": "0140_im_aftersale_record",
+      "breakpoints": true
+    },
+    {
+      "idx": 141,
+      "version": "7",
+      "when": 1793184013017,
+      "tag": "0141_im_read_copy",
+      "breakpoints": true
     }
   ]
 }

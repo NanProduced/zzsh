@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { CircleAlert, History, ShieldCheck } from "lucide-react";
 import { AdminApiError } from "../api";
 import { formatDateTime } from "./im-support-format";
+import { CONSULTATION_EVENT_VOCABULARY, formatEventMovement, formatVocabulary } from "./im-support-vocabulary";
 
 /**
  * 处理记录时间线：im_consultation_event 的只读投影（GET …/consultations/:id/events）。
@@ -24,20 +25,12 @@ type ConsultationEvent = {
 type EventPage = { events?: unknown; nextCursor?: unknown };
 
 export type EventsRequest = <T>(path: string) => Promise<T>;
+export type ConsultationEventSummary = { consultationId: string; status: LoadStatus; latest: ConsultationEvent | null };
 
 const EVENT_PAGE_LIMIT = 20;
+// 折叠时只露出最近两条；上屏顺序仍是升序，最近两条就是列表尾部。
+const COLLAPSED_EVENT_COUNT = 2;
 
-// 与 im/consultation.ts 的 EVENT_TYPES 对齐。服务端会把未知类型归一为 UNKNOWN；
-// 前端仍对表外类型按原码兜底显示，任何一端新增类型都不会崩或丢事件。
-const EVENT_TYPE_LABELS: Record<string, string> = {
-  CREATED: "发起咨询",
-  ASSIGNED: "系统分配",
-  CLAIMED: "客服接入",
-  TRANSFERRED: "转交",
-  CLOSED: "结束咨询",
-  REOPENED: "重新开启",
-  UNKNOWN: "未知类型",
-};
 
 type LoadStatus = "loading" | "ready" | "error" | "forbidden" | "missing" | "expired";
 
@@ -51,15 +44,24 @@ function asEvents(value: unknown): ConsultationEvent[] {
   return value as ConsultationEvent[];
 }
 
-export function ConsultationEventsCard({ consultationId, request }: { consultationId: string; request: EventsRequest }) {
+export function ConsultationEventsCard({ consultationId, request, onSummary }: { consultationId: string; request: EventsRequest; onSummary?: (summary: ConsultationEventSummary) => void }) {
   const [events, setEvents] = useState<ConsultationEvent[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [status, setStatus] = useState<LoadStatus>("loading");
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [earlierFailed, setEarlierFailed] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const [attempt, setAttempt] = useState(0);
   // 每（咨询，重试代次）一代：切换咨询或重读后，迟到的旧响应直接丢弃。
   const generationRef = useRef("");
+
+  // 切换咨询回到默认折叠：上一条会话展开过，不代表这一条也要全量铺开。
+  useEffect(() => { setExpanded(false); }, [consultationId]);
+
+  // 投诉摘要只需要最新节点；时间线本身仍是唯一的数据源，不额外发请求。
+  useEffect(() => {
+    onSummary?.({ consultationId, status, latest: events.length ? events[events.length - 1] ?? null : null });
+  }, [consultationId, events, onSummary, status]);
 
   useEffect(() => {
     const generation = `${consultationId}|${attempt}`;
@@ -138,16 +140,19 @@ export function ConsultationEventsCard({ consultationId, request }: { consultati
       {status === "ready" && events.length === 0 ? <small>该咨询暂无处理记录。</small> : null}
       {events.length > 0 ? (
         <ol className="im-wb-events">
-          {events.map((event) => (
-            <li key={event.id} className="im-wb-event" data-type={typeof event.type === "string" ? event.type : "UNKNOWN"}>
-              <span className="im-wb-event-tag">{EVENT_TYPE_LABELS[event.type] ?? event.type}</span>
+          {events.map((event, index) => (
+            <li key={event.id} className="im-wb-event" hidden={!expanded && index < events.length - COLLAPSED_EVENT_COUNT} data-type={typeof event.type === "string" ? event.type : "UNKNOWN"}>
+              <span className="im-wb-event-tag">{formatVocabulary(CONSULTATION_EVENT_VOCABULARY, event.type, event.type)}</span>
               <time>{formatDateTime(event.occurredAt)}</time>
               <span className="im-wb-event-actor">{event.actor?.displayName ?? "未知"}</span>
-              {event.from?.displayName || event.to?.displayName ? <span className="im-wb-event-move">{event.from?.displayName ?? ""} → {event.to?.displayName ?? ""}</span> : null}
+              {formatEventMovement(event.from?.displayName, event.to?.displayName) ? (
+                <span className="im-wb-event-move">{formatEventMovement(event.from?.displayName, event.to?.displayName)}</span>
+              ) : null}
             </li>
           ))}
         </ol>
       ) : null}
+      {events.length > COLLAPSED_EVENT_COUNT ? <button type="button" className="im-wb-btn" data-action="toggle-events" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>{expanded ? "收起处理记录" : "查看全部处理记录"}</button> : null}
       {status === "ready" && nextCursor ? <button type="button" className="im-wb-btn" data-action="load-earlier-events" onClick={loadEarlier} disabled={loadingEarlier}>{loadingEarlier ? "正在读取更早记录…" : earlierFailed ? "更早记录读取失败，点击重试" : "加载更早的处理记录"}</button> : null}
     </section>
   );

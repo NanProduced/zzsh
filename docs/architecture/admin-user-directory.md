@@ -19,7 +19,7 @@
 
 ## 敏感资料
 
-`POST /admin/users/{id}/sensitive-profile` 是按需读取，需要目录权限和 `user.identity.sensitive.read`，同事务审计、响应 `no-store`。审计不记录明文；普通详情仅返回脱敏手机号。客户端不持久化明文，离开、锁屏、失权或显示到期时清除。
+`POST /admin/users/{id}/sensitive-profile` 是按需读取，需要目录权限和 `user.identity.sensitive.read`，同事务审计、响应 `no-store`。普通详情默认脱敏；具有 `im.support.read` 的客服在目录详情可收到已存手机号明文。详情快照保持只读，返回明文前另在短事务中重验管理会话、目录及客服读取权限，并提交 `user.phone.support.read` 审计；审计失败不返回明文。审计只记查看人、用户对象、请求和字段名，不含手机号。客户端不持久化明文，离开、锁屏、失权或显示到期时清除。
 
 当前实名验证仅存状态和验证引用，未保存姓名与证件号。两项返回 `null/NOT_RECORDED`，不得从昵称或验证引用伪造资料。手机号仅返回真实已存值。
 

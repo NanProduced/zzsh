@@ -117,10 +117,10 @@ export async function runDispatchAcceptance(t: TestContext, o: Parameters<typeof
       const second=await createOrResumeUserConsultation(options,await user(),"SERVICE",null,`req_${run}_rotation2`);
       assert.equal(second.consultation.assignedAdmin?.id,b);
       const complaint=await createOrResumeUserConsultation(options,firstUser,"COMPLAINT",consult.consultation.id,`req_${run}_complaint`);
-      assert.equal(complaint.consultation.assignedAdmin?.id,b,"do not send complaint back to accused staff");
+      assert.equal(complaint.consultation.assignedAdmin?.id,a,"legacy COMPLAINT rounds follow normal rotation without exclusions");
     });
 
-    await t.test("D03 qualification matrix, complaint permission and bad queue does not block service", async () => {
+    await t.test("D03 qualification matrix and bad queue does not block service", async () => {
       await presence(a); await presence(b,"OFF_DUTY");
       const f=await paid("资格边界");
       const variants = [
@@ -150,8 +150,10 @@ export async function runDispatchAcceptance(t: TestContext, o: Parameters<typeof
       await pool.query(`UPDATE zzsh_iam.admin_security SET game_scope_mode='ALL_GAMES' WHERE admin_user_id=$1`,[a]);
       await pool.query(`INSERT INTO zzsh_supply.admin_supply_scope(admin_user_id,game_id,granted_by_admin_id) VALUES($1,$2,$1)`,[a,gameId]);
       await pool.query(`UPDATE zzsh_iam.admin_user_permission SET effect='DENY' WHERE admin_user_id=$1 AND permission_code='im.support.complaint'`,[a]);
+      // 投诉不再有专属权限门禁：缺少 im.support.complaint 仍按普通咨询分配。
       const complaint=await createOrResumeUserConsultation(options,await user(),"COMPLAINT",null,`req_${run}_denied_complaint`);
-      assert.equal(complaint.consultation.state,"WAITING");
+      assert.equal(complaint.consultation.state,"ACTIVE");
+      assert.equal(complaint.consultation.assignedAdmin?.id,a);
       await pool.query(`UPDATE zzsh_iam.admin_user_permission SET effect='ALLOW' WHERE admin_user_id=$1 AND permission_code='im.support.complaint'`,[a]);
     });
 

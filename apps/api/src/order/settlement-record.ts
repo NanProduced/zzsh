@@ -14,6 +14,8 @@ import { CUSTOMER_TIERS, type CustomerTier } from "../supply/delta-rental";
 import { conflict, forbidden, invalid, notFound } from "../supply/supply-util";
 import { centsToYuan, lockOrderPartiesInOrder, yuanToCents } from "./order";
 import { readEarlySettlementDisclosure, recordDocumentAcceptance } from "../legal/legal-documents";
+import { assertSupportOrderAccess } from "./manual-close";
+import { openingConfirmStep, type OpeningConfirmParty } from "./opening-auto-confirm";
 import {frozenPersonalGrowthV4Valid} from './personal-growth-confirmation';
 import {
   computeSettlement,
@@ -666,23 +668,23 @@ function frozenLineFacts(order: LockedOrder): Map<string, { unit: string; pricin
 async function view(client: PoolClient, order: LockedOrder): Promise<Command> {
   const facts = frozenLineFacts(order);
   const openingRows = (await client.query<{
-    id: string; versionNo: number; status: string; confirmedAt: string | null; createdAt: string;
+    id: string; versionNo: number; status: string; confirmedAt: string | null; createdAt: string; confirmSource: string | null;
     lines: Array<{ itemId: string; quantity: string }>; quoteDigest: string; paymentDigest: string;
   }>(
     `SELECT id, version_no AS "versionNo", status, confirmed_at AS "confirmedAt", created_at AS "createdAt",
-            lines, quote_digest AS "quoteDigest", payment_digest AS "paymentDigest"
+            confirm_source AS "confirmSource", lines, quote_digest AS "quoteDigest", payment_digest AS "paymentDigest"
        FROM zzsh_order.rental_opening WHERE order_id = $1 ORDER BY version_no`,
     [order.id],
   )).rows;
-  const ackRows = openingRows.length === 0 ? [] : (await client.query<{ openingId: string; party: string; userId: string; createdAt: string }>(
-    `SELECT opening_id AS "openingId", party, user_id AS "userId", created_at AS "createdAt"
+  const ackRows = openingRows.length === 0 ? [] : (await client.query<{ openingId: string; party: string; userId: string; source: string; createdAt: string }>(
+    `SELECT opening_id AS "openingId", party, user_id AS "userId", source, created_at AS "createdAt"
        FROM zzsh_order.rental_opening_ack WHERE opening_id = ANY($1::text[]) ORDER BY created_at, party`,
     [openingRows.map((row) => row.id)],
   )).rows;
   const openings = openingRows.map((row) => ({
     ...row,
     lines: row.lines.map((line) => ({ ...line, ...(facts.get(line.itemId) ?? { unit: "", pricingKind: "" }) })),
-    acks: ackRows.filter((ack) => ack.openingId === row.id).map(({ party, userId, createdAt }) => ({ party, userId, createdAt })),
+    acks: ackRows.filter((ack) => ack.openingId === row.id).map(({ party, userId, source, createdAt }) => ({ party, userId, source, createdAt })),
   }));
   const versions = (await client.query<{
     id: string; versionNo: number; kind: "SYSTEM" | "MANUAL_ADJUSTMENT"; endReason: string; early: boolean;
@@ -824,9 +826,9 @@ function projectSettlementBody(value: unknown): unknown {
     "baseVersionId", "consumed", "systemOwnerNet", "systemRenterRefund", "proposedOwnerNet", "proposedRenterRefund", "reason",
   ]);
   if (Array.isArray(body.openings)) body.openings = body.openings.map((opening) => {
-    const projected = pickFields(opening, ["id", "versionNo", "status", "confirmedAt", "createdAt", "quoteDigest", "paymentDigest", "lines", "acks"]);
+    const projected = pickFields(opening, ["id", "versionNo", "status", "confirmedAt", "createdAt", "confirmSource", "quoteDigest", "paymentDigest", "lines", "acks"]);
     if (Array.isArray(projected.lines)) projected.lines = projected.lines.map((line) => pickFields(line, ["itemId", "quantity", "unit", "pricingKind"]));
-    if (Array.isArray(projected.acks)) projected.acks = projected.acks.map((ack) => pickFields(ack, ["party", "createdAt"]));
+    if (Array.isArray(projected.acks)) projected.acks = projected.acks.map((ack) => pickFields(ack, ["party", "source", "createdAt"]));
     return projected;
   });
   if (Array.isArray(body.intakes)) body.intakes = body.intakes.map((intake) => {
@@ -903,32 +905,111 @@ export async function recordOpening(client: PoolClient, orderId: string, actor: 
   return view(client, order);
 }
 
+async function openingAcks(client: PoolClient, openingId: string): Promise<string[]> {
+  return (await client.query<{ party: string }>(
+    `SELECT party FROM zzsh_order.rental_opening_ack WHERE opening_id = $1`,
+    [openingId],
+  )).rows.map((row) => row.party);
+}
+
 export async function confirmOpening(client: PoolClient, orderId: string, openingId: string, versionNo: number, actor: Actor, requestId: string): Promise<Command> {
   if (actor.realm !== "user") throw forbidden();
   const order = await lockSettlement(client, orderId, actor, true);
+  if (order.status !== "PAID") return blocked(["ORDER_NOT_PAID"]);
   const opening = (await client.query<{ id: string; versionNo: number; status: string }>(
     `SELECT id, version_no AS "versionNo", status FROM zzsh_order.rental_opening WHERE id = $1 AND order_id = $2 FOR UPDATE`,
     [openingId, orderId],
   )).rows[0];
   const latest = (await client.query<{ versionNo: number }>(`SELECT MAX(version_no) AS "versionNo" FROM zzsh_order.rental_opening WHERE order_id = $1`, [orderId])).rows[0];
-  if (!opening || opening.versionNo !== versionNo || opening.versionNo !== Number(latest?.versionNo)) return blocked(["STALE_OPENING"]);
-  if (opening.status === "CONFIRMED") return view(client, order);
+  if (!opening) return blocked(["STALE_OPENING"]);
   const party = partyOf(order, actor.userId);
+  const step = openingConfirmStep({
+    status: opening.status,
+    openingVersionNo: opening.versionNo,
+    requestedVersionNo: versionNo,
+    latestVersionNo: Number(latest?.versionNo),
+    acks: await openingAcks(client, opening.id),
+    mode: "PARTY",
+    party,
+  });
+  if (step.kind === "STALE") return blocked(["STALE_OPENING"]);
+  if (step.kind !== "ACK") return view(client, order);
   await client.query(
-    `INSERT INTO zzsh_order.rental_opening_ack (opening_id, party, user_id, version_no) VALUES ($1, $2, $3, $4)
+    `INSERT INTO zzsh_order.rental_opening_ack (opening_id, party, user_id, version_no, source) VALUES ($1, $2, $3, $4, 'PARTY')
      ON CONFLICT (opening_id, party) DO NOTHING`,
     [opening.id, party, actor.userId, opening.versionNo],
   );
-  const acks = (await client.query<{ party: string }>(`SELECT party FROM zzsh_order.rental_opening_ack WHERE opening_id = $1`, [opening.id])).rows.map((row) => row.party);
-  if (acks.includes("RENTER") && acks.includes("OWNER")) {
+  if (step.completes) {
     const confirmed = await client.query(
-      `UPDATE zzsh_order.rental_opening SET status = 'CONFIRMED', confirmed_at = clock_timestamp()
+      `UPDATE zzsh_order.rental_opening SET status = 'CONFIRMED', confirmed_at = clock_timestamp(), confirm_source = 'PARTY'
         WHERE id = $1 AND status = 'DRAFT' AND version_no = $2`,
       [opening.id, opening.versionNo],
     );
     if (confirmed.rowCount !== 1) return blocked(["STALE_OPENING"]);
   }
   await audit(client, actor, "order.opening.confirmed", orderId, requestId, { openingId: opening.id, party });
+  return view(client, order);
+}
+
+/**
+ * CS confirmation on behalf of one missing party. Requires the existing support
+ * command boundary (active admin, order.settlement.write, game scope, joined
+ * staff on a READY team) and, for non-boss admins, that this admin is the order's
+ * responsible support. Only the missing party gets an ack; the audit event keeps
+ * the acting admin separate from the party whose confirmation is filled in.
+ */
+export async function assertOpeningOnBehalfAccess(client: PoolClient, orderId: string, actor: { userId: string; sessionId: string }): Promise<void> {
+  await assertSupportOrderAccess(client, orderId, actor);
+  const access = await loadEffectiveAdminAccess(client, actor.userId);
+  if (access?.isBoss) return;
+  const row = (await client.query<{ responsibleAdminId: string | null }>(
+    `SELECT COALESCE(g.responsible_admin_id, g.assigned_admin_id) AS "responsibleAdminId"
+       FROM zzsh_order.im_order_group g WHERE g.order_id = $1`,
+    [orderId],
+  )).rows[0];
+  if (!row?.responsibleAdminId || row.responsibleAdminId !== actor.userId) throw forbidden("Only the responsible support admin can confirm on behalf");
+}
+
+export async function confirmOpeningOnBehalf(client: PoolClient, orderId: string, openingId: string, versionNo: number, party: OpeningConfirmParty, actor: Actor, requestId: string): Promise<Command> {
+  if (actor.realm !== "admin") throw forbidden();
+  await assertOpeningOnBehalfAccess(client, orderId, actor);
+  const order = await lockSettlement(client, orderId, actor, true);
+  if (order.status !== "PAID") return blocked(["ORDER_NOT_PAID"]);
+  const opening = (await client.query<{ id: string; versionNo: number; status: string }>(
+    `SELECT id, version_no AS "versionNo", status FROM zzsh_order.rental_opening WHERE id = $1 AND order_id = $2 FOR UPDATE`,
+    [openingId, orderId],
+  )).rows[0];
+  const latest = (await client.query<{ versionNo: number }>(`SELECT MAX(version_no) AS "versionNo" FROM zzsh_order.rental_opening WHERE order_id = $1`, [orderId])).rows[0];
+  if (!opening) return blocked(["STALE_OPENING"]);
+  const step = openingConfirmStep({
+    status: opening.status,
+    openingVersionNo: opening.versionNo,
+    requestedVersionNo: versionNo,
+    latestVersionNo: Number(latest?.versionNo),
+    acks: await openingAcks(client, opening.id),
+    mode: "ON_BEHALF",
+    party,
+  });
+  if (step.kind === "STALE") return blocked(["STALE_OPENING"]);
+  if (step.kind !== "ACK") return view(client, order);
+  const partyUserId = party === "RENTER" ? order.renterUserId : order.ownerUserId;
+  const inserted = await client.query(
+    `INSERT INTO zzsh_order.rental_opening_ack (opening_id, party, user_id, version_no, source) VALUES ($1, $2, $3, $4, 'ON_BEHALF')
+     ON CONFLICT (opening_id, party) DO NOTHING`,
+    [opening.id, party, partyUserId, opening.versionNo],
+  );
+  if (inserted.rowCount !== 1) return view(client, order);
+  if (step.completes) {
+    const confirmed = await client.query(
+      `UPDATE zzsh_order.rental_opening SET status = 'CONFIRMED', confirmed_at = clock_timestamp(), confirm_source = 'ON_BEHALF'
+        WHERE id = $1 AND status = 'DRAFT' AND version_no = $2`,
+      [opening.id, opening.versionNo],
+    );
+    if (confirmed.rowCount !== 1) return blocked(["STALE_OPENING"]);
+  }
+  await audit(client, actor, "order.opening.confirmed_on_behalf", orderId, requestId, {
+    openingId: opening.id, versionNo: opening.versionNo, party, completesOpening: step.completes,
+  });
   return view(client, order);
 }
 

@@ -3,11 +3,14 @@ import { test } from "node:test";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 
-import { MessageScopeRecoveryLifecycle, listConsultationEvents, readConsultationContext, decodeEventCursor, encodeEventCursor, parseEventLimit, parseConsultationBody, parseLimit, parsePresenceBody, parseSupportType, startMessageScopeRecovery, toView } from "../src/im/consultation";
+import { MessageScopeRecoveryLifecycle, listAdminConsultations, listConsultationEvents, readConsultationContext, decodeEventCursor, encodeEventCursor, parseEventLimit, parseConsultationBody, parseLimit, parsePresenceBody, parseSupportType, requireSupportAccess, scanSupportFirstResponseBreaches, startMessageScopeRecovery, toView } from "../src/im/consultation";
+import { buildYunxinIdentityMarker, deriveYunxinAccountId } from "../src/im/identity-lifecycle";
 import { OrderDispatchLifecycle } from "../src/im/order-dispatch";
+import { reserveSupportCandidateOutcome, resolveSupportConcurrencyLimit } from "../src/im/support-dispatch";
 import { createImScopeLease, onLeaseConnection } from "../src/im/scope-lease";
 import { scanOrderTeams } from "../src/im/order-team";
 import { handleAdminBff } from "../src/bff/admin-bff";
+import { SecurityApiError } from "../src/auth/security-core";
 
 test("order Team scanning stops on a global database failure instead of trying every object", async () => {
   const failure=Object.assign(new Error("private connection detail"),{code:"08006"});
@@ -93,11 +96,26 @@ test("order dispatcher stays off by default and reports only sanitized failure c
 });
 
 test("consultation input accepts only the supported type and safe subject reference", () => {
-  assert.deepEqual(parseConsultationBody({ type: "SERVICE", subjectRef: "listing_01" }), { type: "SERVICE", subjectRef: "listing_01" });
-  assert.deepEqual(parseConsultationBody({ type: "COMPLAINT" }), { type: "COMPLAINT", subjectRef: null });
+  assert.deepEqual(parseConsultationBody({ type: "SERVICE", subjectRef: "listing_01" }),
+    { type: "SERVICE", entryIntent: "SERVICE", subjectRef: "listing_01" });
+  // 投诉入口并入普通咨询：旧 body 仍合法，但服务端只创建/复用 SERVICE 线程；
+  // 原始入口意图单独保留，只用于欢迎语文案。
+  assert.deepEqual(parseConsultationBody({ type: "COMPLAINT", subjectRef: "listing_01" }),
+    { type: "SERVICE", entryIntent: "COMPLAINT", subjectRef: "listing_01" });
+  assert.deepEqual(parseConsultationBody({ type: "COMPLAINT" }),
+    { type: "SERVICE", entryIntent: "COMPLAINT", subjectRef: null });
+  assert.equal(parseSupportType("COMPLAINT"), "COMPLAINT", "legacy rows keep the read-only type");
   assert.throws(() => parseConsultationBody({ type: "SERVICE", subjectRef: "../private" }), /Subject reference is invalid/);
   assert.throws(() => parseConsultationBody({ type: "SERVICE", extra: true }), /unknown field/);
   assert.throws(() => parseSupportType("CHAT"), /Support type is invalid/);
+});
+
+test("legacy COMPLAINT access uses the same accept/transfer grants as SERVICE", () => {
+  const access = { status: "ACTIVE", isBoss: false, passwordChangeRequired: false, permissions: new Set(["im.support.accept"]) } as never;
+  assert.doesNotThrow(() => requireSupportAccess(access, "COMPLAINT"), "send/claim/read no longer need im.support.complaint");
+  assert.doesNotThrow(() => requireSupportAccess(access, "SERVICE"));
+  assert.throws(() => requireSupportAccess(access, "COMPLAINT", "transfer"), /Permission required/);
+  assert.throws(() => requireSupportAccess({ status: "ACTIVE", isBoss: false, passwordChangeRequired: false, permissions: new Set() } as never, "COMPLAINT"), /Permission required/);
 });
 
 test("presence and queue limits reject values outside the server contract", () => {
@@ -131,22 +149,43 @@ test("consultation views project the authorized team from each account and never
     messageScopeId: "900001",
     messageScopeState: "READY" as const,
     messageScopeVersion: 1,
+    threadId: "thread-1",
+    roundSeq: 2,
+    threadState: "ACTIVE" as const,
+    threadScopeId: "900001",
+    threadScopeState: "READY" as const,
+    threadPeerAccountId: "staff_im_1",
   };
 
   const userView = toView(row, "user_im_1");
   assert.equal(userView.peerAccountId, "staff_im_1");
   assert.equal(userView.conversationId, "user_im_1|2|900001");
+  assert.equal(userView.threadId, "thread-1");
+  assert.equal(userView.roundId, "consult-1");
+  assert.equal(userView.roundSeq, 2);
+  assert.equal(userView.threadState, "ACTIVE");
+  assert.equal(userView.canSend, true);
 
   const adminView = toView(row, "staff_im_1", true, "admin-1");
   assert.equal(adminView.peerAccountId, "user_im_1");
   assert.equal(adminView.conversationId, "staff_im_1|2|900001");
+  assert.equal(adminView.canSend, true);
   assert.notEqual(adminView.peerAccountId, "staff_im_1");
 
   const oldAdminView = toView(row, "old_staff_im", true, "admin-2");
   assert.equal(oldAdminView.peerAccountId, "user_im_1");
   assert.equal(oldAdminView.conversationId, null);
+  assert.equal(oldAdminView.canSend, false);
+  // 管理岗/本人可在轮次结束后读取同一线程历史；发送仍由轮次状态决定。
+  const patrolClosed = toView({ ...row, state: "CLOSED", threadState: "IDLE" }, "patrol_im", true, "admin-2", true);
+  assert.equal(patrolClosed.conversationId, "patrol_im|2|900001");
+  assert.equal(patrolClosed.canSend, false);
 
-  assert.equal(toView({ ...row, state: "CLOSED" }, "user_im_1").conversationId, null);
+  // 结束本轮只结束 round：Team 与历史保留，用户仍可读可发，线程回 IDLE。
+  const closedUserView = toView({ ...row, state: "CLOSED", threadState: "IDLE" }, "user_im_1");
+  assert.equal(closedUserView.conversationId, "user_im_1|2|900001");
+  assert.equal(closedUserView.canSend, true);
+  assert.equal(toView({ ...row, state: "CLOSED", threadState: "IDLE" }, "staff_im_1", true, "admin-1").canSend, false);
 });
 
 test("scope recovery shutdown waits for the in-flight batch and prevents later ticks", async () => {
@@ -238,10 +277,12 @@ test("event cursor rejects malformed, truncated and non-canonical payloads", () 
 function consultationReadFixture() {
   const state = {
     permissions: ["im.support.read", "im.support.accept"], locked: false, expired: false,
-    security: "ACTIVE", cookie: "", image: "https://media.example.test/avatar.png", exclusions: [] as unknown, hasExclusionEvent: true,
+    security: "ACTIVE", cookie: "", image: "/api/v1/profile/avatars/user/user_a/2",
     row: { id: "cons_a", appId: "app_a", userId: "user_a", userName: "用户甲", userUsername: "name",
       kind: "SERVICE", state: "ACTIVE", assignedAdminId: "admin_a", adminName: "客服甲",
       subjectRef: null as string | null, version: 3, messageScopeState: "READY" },
+    subjectMatches: [] as { kind: string; id: string; displayNo: string | null; title: string | null; related?: boolean; versionId?: string | null }[],
+    publicVersionId: null as string | null, publicFailure: null as Error | null, publicReads: [] as string[],
     events: [
       { id: "event_c", type: "TRANSFERRED", actorType: "admin", actorId: "missing_admin", fromAdminId: "admin_a", toAdminId: "admin_b", createdAt: "2026-10-11T08:19:04.123457Z" },
       { id: "event_b", type: "ASSIGNED", actorType: "system", actorId: "user_a", fromAdminId: null, toAdminId: "admin_a", createdAt: "2026-10-11T08:19:04.123456Z" },
@@ -255,12 +296,22 @@ function consultationReadFixture() {
     if (sql.includes('FROM "zzsh_auth_admin"."session"')) return { rows: state.expired ? [] : [{ locked: state.locked, twoFactorEnabled: true }] };
     if (sql.includes('FROM "zzsh_iam"."admin_security"')) return { rows: [{ status: state.security, isBoss: false, passwordChangeRequired: false }] };
     if (sql.includes("WITH role_permissions AS")) return { rows: state.permissions.map(permissionCode => ({ permissionCode })) };
-    if (sql.includes("SELECT details FROM zzsh_iam.im_consultation_event")) return { rows: state.hasExclusionEvent ? [{ details: { excludedAdminIds: state.exclusions } }] : [] };
+    if (sql.includes('FROM "zzsh_iam"."im_identity_mapping"')) {
+      const key = { provider: "yunxin" as const, appId: "app_a", realm: "admin" as const, kind: "ADMIN" as const, platformSubjectId: "admin_a" };
+      return { rows: [{ accountId: deriveYunxinAccountId(key), identityMarker: buildYunxinIdentityMarker(key), status: "READY" }] };
+    }
+    if (sql.includes('FROM "zzsh_iam"."im_consultation" c') && sql.includes('ORDER BY CASE WHEN c."assigned_admin_id" = $2')) {
+      const row = state.row;
+      const visible = row.appId === values[0] && row.state !== "CLOSED"
+        && (row.assignedAdminId === values[1] || (!row.assignedAdminId && Boolean(values[2])));
+      return { rows: visible ? [row] : [] };
+    }
     if (sql.includes('FROM "zzsh_iam"."im_consultation" c')) {
       assert.match(sql, /c\."id" = \$2/);
+      assert.doesNotMatch(sql, /c\."kind" = 'COMPLAINT'/);
       const row = state.row;
       const own = row.assignedAdminId === values[2];
-      const unassigned = !row.assignedAdminId && (row.kind === "SERVICE" ? values[3] : values[4]);
+      const unassigned = !row.assignedAdminId && Boolean(values[3]);
       return { rows: row.appId === values[0] && row.id === values[1] && row.state !== "CLOSED" && (own || unassigned) ? [row] : [] };
     }
     if (sql.includes('FROM "zzsh_iam"."im_consultation_event"')) {
@@ -276,10 +327,21 @@ function consultationReadFixture() {
     }
     if (sql.includes('SELECT "image" FROM "zzsh_auth_user"."user"')) return { rows: [{ image: state.image }] };
     if (sql.includes('FROM "zzsh_auth_user"."user"')) return { rows: [{ id: "user_a", name: "用户甲" }] };
+    if (sql.includes('FROM "zzsh_order"."rental_order" o')) {
+      assert.equal(values[2],state.row.userId);
+      assert.match(sql,/o\."renter_user_id"=\$3 OR o\."owner_user_id"=\$3/);
+      assert.match(sql,/own_order\.renter_user_id=\$3 OR own_order\.owner_user_id=\$3/);
+      assert.doesNotMatch(sql,/own_order\.status|o\."status"/);
+      return { rows: state.subjectMatches.map(row=>({...row,related:row.related===true,versionId:row.versionId??null})) };
+    }
     throw new Error("Unexpected SQL in consultation read test: " + sql);
   };
   const pool = { query, connect: async () => ({ query, release() {} }) };
-  const options = { pool, appId: "app_a" } as never;
+  const options = { pool, appId: "app_a", readPublicAccount: async (_client:unknown,id:string) => {
+    state.publicReads.push(id);if(state.publicFailure)throw state.publicFailure;
+    if(!state.publicVersionId)throw new SecurityApiError(404,"NOT_FOUND","Not found");
+    return {versionId:state.publicVersionId};
+  } } as never;
   const actor = { userId: "admin_a", sessionId: "session_a" } as never;
   return { state, calls, pool, options, actor };
 }
@@ -314,17 +376,72 @@ test("context distinguishes absent and untyped subject without granting director
   assert.doesNotMatch(JSON.stringify(value), /phone|email|identityStatus|accountId|details|普通会员/);
   f.state.row.subjectRef = "listing_or_order";
   assert.deepEqual((await readConsultationContext(f.options, f.actor, "cons_a")).subject,
-    { status: "unresolved", reference: "listing_or_order" });
-  assert.ok(!f.calls.some(({ sql }) => /rental_order|rental_account|im_identity_mapping/.test(sql)));
-  for (const image of ["javascript:alert(1)", "data:image/png;base64,secret", "https://name:secret@example.test/img", "not-a-url"]) {
+    { status: "unresolved", rawRef: "listing_or_order" });
+  // 关联对象只查业务单表，不碰身份映射，也不写任何表。
+  assert.ok(!f.calls.some(({ sql }) => /im_identity_mapping|\b(INSERT|UPDATE|DELETE)\b/.test(sql)));
+  // 唯一命中才 resolved，且必须带业务展示号；标题可为 null。
+  f.state.subjectMatches = [{ kind: "ORDER", id: "rental_order_1", displayNo: "DD20261031001", title: "三角洲行动账号", related:true }];
+  assert.deepEqual((await readConsultationContext(f.options, f.actor, "cons_a")).subject, {
+    status: "resolved", kind: "ORDER", displayNo: "DD20261031001", title: "三角洲行动账号",
+    target: { kind: "ORDER", id: "rental_order_1" },
+  });
+  // 订单与账号撞号：无法确定，保持 unresolved，绝不猜成订单。
+  f.state.subjectMatches = [
+    { kind: "ORDER", id: "same_id", displayNo: "DD20261031002", title: null },
+    { kind: "ACCOUNT", id: "same_id", displayNo: "AC0000000002", title: null },
+  ];
+  assert.equal((await readConsultationContext(f.options, f.actor, "cons_a")).subject.status, "unresolved");
+  // 没有业务展示号（内部 id 不上屏）也不给 resolved。
+  f.state.subjectMatches = [{ kind: "ACCOUNT", id: "acct_1", displayNo: null, title: null }];
+  assert.equal((await readConsultationContext(f.options, f.actor, "cons_a")).subject.status, "unresolved");
+  for (const image of ["https://media.example.test/avatar.png", "//media.example.test/avatar.png", "/api/v1/profile/avatars/user/user_a/2?token=secret", "javascript:alert(1)", "data:image/png;base64,secret", "https://name:secret@example.test/img", "not-a-url"]) {
     f.state.image = image;
     assert.equal((await readConsultationContext(f.options, f.actor, "cons_a")).user.avatar, null);
   }
 });
 
+test("subjects reject unrelated orders across aliases and retain related orders without a status gate",async()=>{
+  const f=consultationReadFixture();
+  for(const ref of ["order:other","ORDER:DD20261031001","other"]){
+    f.state.row.subjectRef=ref;
+    f.state.subjectMatches=[{kind:"ORDER",id:"other",displayNo:"DD20261031001",title:"private",related:false}];
+    const view=await readConsultationContext(f.options,f.actor,"cons_a");
+    assert.equal(view.subject.status,"unresolved");assert.doesNotMatch(JSON.stringify(view.subject),/private|DD20261031001.*title/);
+  }
+  f.state.subjectMatches[0]!.related=true;
+  assert.equal((await readConsultationContext(f.options,f.actor,"cons_a")).subject.status,"resolved");
+  assert.equal(f.state.publicReads.length,0);
+});
+
+test("account subjects preserve owned/order-related and public DETAIL visibility but not hidden version aliases",async()=>{
+  const f=consultationReadFixture();f.state.row.subjectRef="account:acct";
+  f.state.subjectMatches=[{kind:"ACCOUNT",id:"acct",displayNo:"AC0000000001",title:null,related:true}];
+  assert.equal((await readConsultationContext(f.options,f.actor,"cons_a")).subject.status,"resolved");
+  f.state.subjectMatches[0]!.related=false;
+  assert.equal((await readConsultationContext(f.options,f.actor,"cons_a")).subject.status,"unresolved");
+  f.state.publicVersionId="published-version";
+  assert.equal((await readConsultationContext(f.options,f.actor,"cons_a")).subject.status,"resolved");
+  f.state.row.subjectRef="listing:hidden-version";f.state.subjectMatches[0]!.versionId="hidden-version";
+  assert.equal((await readConsultationContext(f.options,f.actor,"cons_a")).subject.status,"unresolved");
+  f.state.subjectMatches[0]!.versionId="published-version";
+  assert.equal((await readConsultationContext(f.options,f.actor,"cons_a")).subject.status,"resolved");
+  f.state.publicFailure=new Error("database unavailable");
+  await assert.rejects(readConsultationContext(f.options,f.actor,"cons_a"),/database unavailable/);
+});
+
+test("subject collisions remain unresolved before permission filtering and historical references are rechecked",async()=>{
+  const f=consultationReadFixture();f.state.row.subjectRef="collision";
+  f.state.subjectMatches=[{kind:"ORDER",id:"foreign",displayNo:null,title:null,related:false},{kind:"ACCOUNT",id:"mine",displayNo:"AC0000000001",title:null,related:true}];
+  assert.equal((await readConsultationContext(f.options,f.actor,"cons_a")).subject.status,"unresolved");
+  f.state.subjectMatches=[{kind:"ACCOUNT",id:"mine",displayNo:"AC0000000001",title:null,related:true}];
+  assert.equal((await readConsultationContext(f.options,f.actor,"cons_a")).subject.status,"resolved");
+  f.state.subjectMatches[0]!.related=false;
+  assert.equal((await readConsultationContext(f.options,f.actor,"cons_a")).subject.status,"unresolved");
+});
+
 test("read projections recheck session and current read/object grants inside their transaction", async () => {
   for (const kind of ["events", "context"]) {
-    for (const scenario of ["no-read", "locked", "expired", "frozen", "other-app", "other-owner", "closed", "missing", "unqualified-complaint"]) {
+    for (const scenario of ["no-read", "locked", "expired", "frozen", "other-app", "other-owner", "closed", "missing"]) {
       const f = consultationReadFixture();
       if (scenario === "no-read") f.state.permissions = ["im.support.accept"];
       if (scenario === "locked") f.state.locked = true;
@@ -334,7 +451,6 @@ test("read projections recheck session and current read/object grants inside the
       if (scenario === "other-owner") f.state.row.assignedAdminId = "admin_b";
       if (scenario === "closed") f.state.row.state = "CLOSED";
       if (scenario === "missing") f.state.row.id = "other";
-      if (scenario === "unqualified-complaint") { f.state.row.kind = "COMPLAINT"; f.state.row.assignedAdminId = ""; }
       await assert.rejects(kind === "events" ? listConsultationEvents(f.options, f.actor, "cons_a", null, null)
         : readConsultationContext(f.options, f.actor, "cons_a"),
       (error: unknown) => Boolean(error && typeof error === "object" && "status" in error && [401, 403, 404, 423].includes(Number(error.status))), scenario);
@@ -342,27 +458,28 @@ test("read projections recheck session and current read/object grants inside the
       assert.ok(!f.calls.some(({ sql }) => sql.includes('FROM "zzsh_iam"."im_consultation_event"')));
     }
   }
-  const f = consultationReadFixture();
-  f.state.row.kind = "COMPLAINT"; f.state.row.assignedAdminId = "";
-  f.state.permissions.push("im.support.complaint");
-  assert.equal((await readConsultationContext(f.options, f.actor, "cons_a")).service.type, "COMPLAINT");
 });
 
-test("both complaint reads reject excluded viewers and missing or malformed stored evidence", async () => {
+test("legacy COMPLAINT rows stay readable with only read+accept and no exclusion evidence", async () => {
   for (const assigned of [true, false]) {
-    for (const evidence of ["excluded", "missing", "not-array", "invalid-entry", "absent-field"]) {
-      const f = consultationReadFixture();
-      f.state.row.kind = "COMPLAINT";
-      f.state.row.assignedAdminId = assigned ? "admin_a" : "";
-      f.state.permissions.push("im.support.complaint");
-      f.state.exclusions = evidence === "excluded" ? ["admin_a"] : evidence === "invalid-entry" ? [42] : evidence === "not-array" ? "admin_a" : undefined;
-      if (evidence === "missing") f.state.hasExclusionEvent = false;
-      for (const read of [() => readConsultationContext(f.options, f.actor, "cons_a"), () => listConsultationEvents(f.options, f.actor, "cons_a", null, null)]) {
-        await assert.rejects(read(), (error: unknown) => Boolean(error && typeof error === "object" && "status" in error && error.status === 404));
-      }
-      assert.ok(!f.calls.some(({ sql }) => sql.includes('SELECT "id", "event_type"') || sql.includes('SELECT "image"')));
-    }
+    const f = consultationReadFixture();
+    f.state.row.kind = "COMPLAINT";
+    f.state.row.assignedAdminId = assigned ? "admin_a" : "";
+    // 旧 COMPLAINT 行按普通会话读取；排除证据与投诉权限都不再参与。
+    assert.equal((await readConsultationContext(f.options, f.actor, "cons_a")).service.type, "COMPLAINT");
+    assert.equal((await listConsultationEvents(f.options, f.actor, "cons_a", null, null)).events.length, 3);
+    assert.ok(!f.calls.some(({ sql }) => sql.includes("SELECT details FROM zzsh_iam.im_consultation_event")));
   }
+
+  const f = consultationReadFixture();
+  f.state.row.kind = "COMPLAINT";
+  f.state.row.assignedAdminId = "";
+  const queue = await listAdminConsultations({ pool: f.pool, appId: "app_a" } as never, f.actor, null as never, 10);
+  assert.equal(queue.consultations.length, 1, "unassigned legacy complaint rows join the normal queue");
+  assert.equal(queue.consultations[0]!.type, "COMPLAINT");
+  const listQuery = f.calls.find(({ sql }) => sql.includes('ORDER BY CASE WHEN c."assigned_admin_id" = $2'));
+  assert.ok(listQuery);
+  assert.doesNotMatch(listQuery!.sql, /'COMPLAINT'|im\.support\.complaint/);
 });
 
 test("new consultation reads traverse the real BFF and handler with strict methods and queries", async () => {
@@ -400,4 +517,101 @@ test("new consultation reads traverse the real BFF and handler with strict metho
     assert.equal((await run("/im/consultations/cons_a/events?" + query)).status, 400, query);
   }
   assert.equal((await run("/im/consultations/cons_a/context?userId=other")).status, 400);
+});
+
+test("support concurrency caps candidates, counts order occupancy and explains the queue reason", async () => {
+  const staff = (id: string) => ({ adminUserId: id, adminName: id, accountId: `im_${id}`, allGames: true, gameIds: [] as string[] });
+  const calls: Array<{ sql: string; values: unknown[] }> = [];
+  const client = (rows: (sql: string) => unknown[]) => ({
+    query: async (sql: string, values: unknown[] = []) => {
+      calls.push({ sql, values });
+      return { rows: rows(sql) };
+    },
+  });
+
+  calls.length = 0;
+  const full = client((sql) => (sql.includes('count(*)::int AS "count"') ? [{ count: "1" }] : []));
+  assert.deepEqual(await reserveSupportCandidateOutcome(full as never, "app_a", "SERVICE", [staff("admin_a")], undefined, 2),
+    { candidate: null, reason: "ALL_AT_CAPACITY" });
+  const select = calls[0]!;
+  assert.match(select.sql, /o\."status" = 'PAID'/);
+  assert.match(select.sql, /COALESCE\(g\."responsible_admin_id", g\."assigned_admin_id"\) = p\."admin_user_id"/);
+  assert.match(select.sql, /p\."active_load" \+ \(SELECT count\(\*\)/);
+  assert.match(select.sql, /< \$3/);
+  assert.deepEqual(select.values, ["app_a", ["admin_a"], 2]);
+
+  // 没有在线客服是另一种业务事实，兜底文案不同。
+  const offline = client((sql) => (sql.includes('count(*)::int AS "count"') ? [{ count: 0 }] : []));
+  assert.deepEqual(await reserveSupportCandidateOutcome(offline as never, "app_a", "SERVICE", [staff("admin_a")]),
+    { candidate: null, reason: "NO_ONLINE_STAFF" });
+
+  // 选中后咨询占用 +1；订单只推进轮换时间，不把订单当第二份咨询占用。
+  calls.length = 0;
+  const picked = client((sql) => (sql.includes('SELECT p."admin_user_id" FROM') ? [{ admin_user_id: "admin_a" }] : []));
+  assert.equal((await reserveSupportCandidateOutcome(picked as never, "app_a", "SERVICE", [staff("admin_a")])).candidate?.adminUserId, "admin_a");
+  assert.match(calls[1]!.sql, /active_load=active_load\+1/);
+  calls.length = 0;
+  const order = client((sql) => (sql.includes('SELECT p."admin_user_id" FROM') ? [{ admin_user_id: "admin_a" }] : []));
+  assert.equal((await reserveSupportCandidateOutcome(order as never, "app_a", "ORDER", [staff("admin_a")])).candidate?.adminUserId, "admin_a");
+  assert.doesNotMatch(calls[1]!.sql, /active_load=active_load\+1/);
+  assert.match(calls[1]!.sql, /last_order_assigned_at=clock_timestamp\(\)/);
+});
+
+test("support concurrency limit keeps the historical default and rejects out-of-range values", () => {
+  assert.equal(resolveSupportConcurrencyLimit(undefined), 3);
+  assert.equal(resolveSupportConcurrencyLimit(null), 3);
+  assert.equal(resolveSupportConcurrencyLimit(1), 1);
+  assert.equal(resolveSupportConcurrencyLimit(100), 100);
+  for (const bad of [0, 101, -1, 2.5, Number.NaN]) {
+    assert.throws(() => resolveSupportConcurrencyLimit(bad), /Invalid support concurrency limit/, String(bad));
+  }
+});
+
+test("first response breach scan writes one reminder fact per overdue round", async () => {
+  let captured: { sql: string; values: unknown[] } | undefined;
+  const pool = { query: async (sql: string, values: unknown[] = []) => {
+    captured = { sql, values };
+    return { rows: [{ id: "im_consult_1", reminded: true }, { id: "im_consult_2", reminded: false }] };
+  } };
+  const result = await scanSupportFirstResponseBreaches({ pool: pool as never, appId: "app_a" }, 5);
+  assert.deepEqual(result, { overdue: ["im_consult_1", "im_consult_2"], reminded: ["im_consult_1"] });
+  assert.deepEqual(captured!.values, ["app_a", 120, "im.consultation.first_response", "im.consultation.first_response.reminder", 5]);
+  assert.match(captured!.sql, /LIMIT \$5/);
+  assert.match(captured!.sql, /NOT EXISTS/);
+  await scanSupportFirstResponseBreaches({ pool: pool as never, appId: "app_a", firstResponseSeconds: 300 }, 500);
+  assert.equal(captured!.values[1], 300);
+  assert.equal(captured!.values[4], 100);
+});
+
+test("admin view exposes queue facts for a waiting round but never to the user", () => {
+  const row = {
+    id: "cons_wait", userId: "user_a", kind: "SERVICE" as const, state: "WAITING" as const,
+    userAccountId: "user_im_a", peerAccountId: null, assignedAdminId: null, subjectRef: null,
+    firstUserMessageAt: new Date(Date.now() - 65_000).toISOString(), version: 1,
+    lastMessageAt: null, createdAt: new Date(0), updatedAt: new Date(0),
+    userName: "用户甲", userUsername: null, adminName: null, appId: "app_a",
+    messageScopeType: "TEAM" as const, messageScopeId: "900001", messageScopeState: "READY" as const,
+    messageScopeVersion: 1, threadId: "thread_1", roundSeq: 1, threadState: "WAITING" as const,
+    threadScopeId: "900001", threadScopeState: "READY" as const, threadPeerAccountId: null,
+  };
+  const adminView = toView(row, "staff_im_a", true, "admin_a");
+  assert.equal(adminView.queued, true);
+  assert.equal(adminView.waitingSince, row.firstUserMessageAt);
+  assert.ok((adminView.queueWaitSeconds ?? 0) >= 60);
+  const userView = toView(row, "user_im_a");
+  assert.equal(userView.queued, undefined);
+  assert.equal(userView.queueWaitSeconds, undefined);
+  // 已接起的轮次不再算排队。
+  assert.equal(toView({ ...row, state: "ACTIVE" as const, assignedAdminId: "admin_a" }, "staff_im_a", true, "admin_a").queued, false);
+});
+test("manual takeover bypasses the capacity gate while transfers still respect it", async () => {
+  const staff = (id: string) => ({ adminUserId: id, adminName: id, accountId: `im_${id}`, allGames: true, gameIds: [] as string[] });
+  const calls: Array<{ sql: string; values: unknown[] }> = [];
+  const client = { query: async (sql: string, values: unknown[] = []) => {
+    calls.push({ sql, values });
+    return { rows: sql.includes('SELECT p."admin_user_id" FROM') ? [{ admin_user_id: "admin_a" }] : [] };
+  } };
+  await reserveSupportCandidateOutcome(client as never, "app_a", "SERVICE", [staff("admin_a")], "admin_a", 1, false);
+  assert.doesNotMatch(calls[0]!.sql, /< \$3/);
+  assert.deepEqual(calls[0]!.values, ["app_a", ["admin_a"]]);
 });

@@ -1,6 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {readSupportOrders} from '../src/lib/support-directory.ts';
+import {computeSupportUnread,getSupportUnreadSnapshot,publishSupportUnread,readDirectoryPreferences,resetSupportUnread,subscribeSupportUnread,supportUnreadAriaLabel,supportUnreadBadge} from '../src/components/support/support-unread.ts';
 async function readAll(request) {
  let result;
  for await (const page of readSupportOrders(request,new AbortController().signal)) result=page;
@@ -16,6 +17,65 @@ test('partial failure and invalid pagination cannot prove an empty directory',as
  await assert.rejects(readAll(async path=>{if(path.includes('party=owner'))throw Error('403');return{items:[],nextCursor:null};}),/403/);
  await assert.rejects(readAll(async()=>({items:[],nextCursor:'same'})),/分页未完成/);
  await assert.rejects(readAll(async()=>({items:[]})),/格式无效/);
+});
+
+// 入口未读：窗口关着时用户只能靠常驻入口知道有新消息，所以计数规则必须自己站得住——
+// 只认服务端事实、免打扰不计、草稿/未付款不是会话、没有条数就退回圆点。
+test('entry unread sums server counts, skips muted threads and never counts unpaid drafts',()=>{
+ const summary=computeSupportUnread(
+  [{id:'round-1',threadId:'thread-1',hasUnread:true,userUnreadCount:2},
+   {id:'round-2',threadId:'thread-2',hasUnread:true,userUnreadCount:0},
+   {id:'round-3',threadId:'thread-3',hasUnread:false,userUnreadCount:0},
+   {id:'round-4',threadId:'thread-4',hasUnread:true,userUnreadCount:7}],
+  [{id:'order-1',status:'PAID',unreadCount:3},
+   {id:'order-2',status:'DRAFT',unreadCount:5},
+   {id:'order-3',status:'PENDING_PAYMENT',unreadCount:5},
+   {id:'order-4',status:'COMPLETED',unreadCount:1}],
+  {'consultation:thread-4':{pinned:false,muted:true}},
+  1000);
+ assert.equal(summary.total,6,'2 条客服 + 3 + 1 条订单群');
+ assert.equal(summary.consultations,2);
+ assert.equal(summary.orders,4);
+ assert.equal(summary.unknownThreads,1,'有未读但没有条数的线程只算“未知”，不能补成 0');
+ assert.equal(summary.unreadThreads,4);
+ assert.equal(summary.at,1000);
+ assert.equal(computeSupportUnread([],[],{}).total,0);
+});
+
+test('entry badge caps at 99 and degrades to a dot when the server cannot count',()=>{
+ assert.deepEqual(supportUnreadBadge(computeSupportUnread([{id:'a',hasUnread:true,userUnreadCount:150}],[])),{text:'99+',counted:true});
+ assert.deepEqual(supportUnreadBadge(computeSupportUnread([{id:'a',hasUnread:true}],[])),{text:'',counted:false});
+ assert.equal(supportUnreadBadge(computeSupportUnread([],[])),null);
+ assert.equal(supportUnreadBadge(null),null);
+ assert.equal(supportUnreadAriaLabel('联系客服',null),'联系客服');
+ assert.equal(supportUnreadAriaLabel('联系客服',computeSupportUnread([{id:'a',hasUnread:true,userUnreadCount:3}],[])),'联系客服，3 条未读消息');
+ assert.equal(supportUnreadAriaLabel('联系客服',computeSupportUnread([{id:'a',hasUnread:true}],[])),'联系客服，有新消息');
+});
+
+test('the shared snapshot notifies only on changed facts and clears on demand',()=>{
+ resetSupportUnread();
+ let notified=0;
+ const unsubscribe=subscribeSupportUnread(()=>{notified+=1;});
+ const first=computeSupportUnread([{id:'a',hasUnread:true,userUnreadCount:1}],[],{},1);
+ publishSupportUnread(first);
+ assert.equal(notified,1);
+ publishSupportUnread(computeSupportUnread([{id:'a',hasUnread:true,userUnreadCount:1}],[],{},2));
+ assert.equal(notified,1,'同一组数字换采样时间不惊动订阅者');
+ publishSupportUnread(computeSupportUnread([],[],{},3));
+ assert.equal(notified,2);
+ assert.equal(getSupportUnreadSnapshot().total,0,'清空是事实：没有未读就是 0，不是未知');
+ resetSupportUnread();
+ assert.equal(getSupportUnreadSnapshot(),null);
+ assert.equal(notified,3,'清空同样是一次事实变化');
+ unsubscribe();
+ publishSupportUnread(first);
+ assert.equal(notified,3,'退订后不再收到通知');
+ resetSupportUnread();
+});
+
+test('directory preferences stay empty without a browser and never throw on junk',()=>{
+ assert.deepEqual(readDirectoryPreferences('user_A:1'),{});
+ assert.deepEqual(readDirectoryPreferences(''),{});
 });
 
 test('scan advances only on demand and abort stops later pages even if the request ignores cancellation',async()=>{

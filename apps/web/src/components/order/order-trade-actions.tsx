@@ -176,6 +176,7 @@ function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendi
   const [readError, setReadError] = useState<string | null>(null), [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false), [reading, setReading] = useState(true);
   const [method, setMethod] = useState<ChannelPaymentMethod>("ALIPAY_NATIVE");
+  const autoOpenedGroup = useRef(false);
   const latest = useRef({ orderId: order.id, onChanged }); latest.current = { orderId: order.id, onChanged };
   const reset = useCallback(() => { setSnapshot(null); setReadError(null); setNotice(null); setBusy(false); setReading(true); setMethod("ALIPAY_NATIVE"); }, []);
   const { userId, isCurrent } = useIdentityReset(session, reset);
@@ -265,10 +266,18 @@ function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendi
       if (mounted.current && isCurrent(acting) && latest.current.orderId === order.id) setBusy(false);
     }
   };
+  const applied = channelApplied(view);
+  // 付款成功是用户此刻最关心的事件：付款页直接打开本单群。每个浏览器会话只主动开一次。
+  useEffect(() => {
+    if (!applied || autoOpenedGroup.current) return;
+    autoOpenedGroup.current = true;
+    const key = `zzsh:order-group-autopen:${order.id}`;
+    try { if (window.sessionStorage.getItem(key)) return; window.sessionStorage.setItem(key, "1"); } catch { /* sessionStorage is optional */ }
+    window.dispatchEvent(new CustomEvent("zzsh:order-groups", { detail: { party: "renter", orderId: order.id } }));
+  }, [applied, order.id]);
   if (!active) return <>{reading ? <p className="order-muted" role="status">正在读取支付方式…</p> : children}</>;
   const methods = (view?.capability?.methods ?? []).filter(m => m === "ALIPAY_NATIVE" || m === "WEIXIN_NATIVE");
   const selected = view?.request?.method ?? pending.intent?.body?.method ?? method;
-  const applied = channelApplied(view);
   const payable = paymentEntryOpen(order) && view?.order.status === "PENDING_PAYMENT";
   const amount = view?.request?.amount;
   const amountKnown = amount?.currency === "CNY" && typeof amount.cents === "string" && /^[1-9][0-9]{0,15}$/.test(amount.cents);
@@ -316,6 +325,14 @@ function PaymentAction({ order, party, onChanged }: { order: Order; party: Order
   const [cancelArmed, setCancelArmed] = useState(false);
   const [cancelUnknown, setCancelUnknown] = useState<string | null>(null);
   const [channelMode, setChannelMode] = useState(false), [channelPending, setChannelPending] = useState(false);
+  const autoOpenedGroup = useRef(false);
+  useEffect(() => {
+    if (party !== "renter" || receipt?.disposition !== "APPLIED" || autoOpenedGroup.current) return;
+    autoOpenedGroup.current = true;
+    const key = `zzsh:order-group-autopen:${order.id}`;
+    try { if (window.sessionStorage.getItem(key)) return; window.sessionStorage.setItem(key, "1"); } catch { /* sessionStorage is optional */ }
+    window.dispatchEvent(new CustomEvent("zzsh:order-groups", { detail: { party: "renter", orderId: order.id } }));
+  }, [order.id, party, receipt]);
   const reset = useCallback(() => { setBusy(false); setUnknown(null); setError(null); setReceipt(null); setCancelArmed(false); setCancelUnknown(null); }, []);
   const { userId, isCurrent } = useIdentityReset(session, reset);
   useEffect(() => {

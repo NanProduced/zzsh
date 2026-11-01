@@ -8,6 +8,7 @@ export function createSendCapabilityKey(input: { canAccept: boolean; canComplain
   return `service=${input.canAccept ? "allowed" : "blocked"};complaint=${input.canAccept && input.canComplaint ? "allowed" : "blocked"}`;
 }
 
-export function canOperateSupportType(type: ImSupportType, canAccept: boolean, canComplaint: boolean): boolean {
-  return canAccept && (type === "SERVICE" || canComplaint);
+export function canOperateSupportType(_type: ImSupportType, canAccept: boolean, _canComplaint: boolean): boolean {
+  // Complaints are ordinary chats now; reception only requires the service grant.
+  return canAccept;
 }

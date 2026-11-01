@@ -33,9 +33,9 @@ test('a delayed authorization denial cannot clear another identity or another co
 test("user support responses are bound to identity, consultation, and client generations", () => {
   assert.match(webSource, /identityGenerationRef/);
   assert.match(webSource, /generation !== identityGenerationRef\.current/);
-  assert.match(webSource, /activeIdRef\.current !== conversation\.id/);
+  assert.match(webSource, /activeIdRef\.current !== threadKeyOf\(conversation\)/);
   assert.match(webSource, /clientRef\.current !== client/);
-  assert.match(webSource, /mergeImMessages\(current\[conversation\.id\] \?\? \[\], rows\)/);
+  assert.match(webSource, /mergeImMessages\(current\[threadKeyOf\(conversation\)\] \?\? \[\], rows\)/);
   assert.match(webSource, /readSupportIntent/);
   assert.match(webSource, /error\.status = response\.status/);
   assert.match(webSource, /revalidateAfterUnauthorized/);
@@ -43,13 +43,19 @@ test("user support responses are bound to identity, consultation, and client gen
   assert.doesNotMatch(webSource, /consumeSupportIntent/);
 });
 
-test("closed support history requires an explicit new-consultation state", () => {
-  assert.match(webSource, /const \[isStartingNew, setIsStartingNew\]/);
-  assert.match(webSource, /if \(preview \|\| isStartingNew \|\| activeId \|\| consultations\.length === 0\)/);
-  assert.match(webSource, /data-action="start-new-consultation"/);
-  assert.match(webSource, /setIsStartingNew\(true\)/);
-  assert.match(webSource, /data-action=\{isStartingNew \? "submit-new-consultation" : "start-consultation"\}/);
-  assert.match(webSource, /setIsStartingNew\(false\)/);
+test("persistent support threads keep history and allow reopening without a new-consultation state", () => {
+  assert.doesNotMatch(webSource, /isStartingNew/);
+  assert.doesNotMatch(webSource, /start-new-consultation/);
+  assert.match(webSource, /threadKeyOf/);
+  assert.match(webSource, /threadState/);
+  // 用户侧不露“结束”：结束时历史保留、输入框照常、再发消息服务端自然开新一轮。
+  assert.doesNotMatch(webSource, /"已结束"/);
+  assert.doesNotMatch(webSource, /本轮已结束/);
+  assert.doesNotMatch(webSource, /data-action="continue-consultation"/);
+  assert.match(webSource, /endedThreadBeforeSend/);
+  assert.match(webSource, /reloadThreadStates/);
+  assert.match(webSource, /conversation\.canSend === false/);
+  assert.match(webSource, /mergeImMessages\(current\[threadKeyOf\(conversation\)\] \?\? \[\], rows\)/);
 });
 
 test("admin support responses are bound to operator and selected consultation, with presence renewal", () => {
@@ -73,7 +79,7 @@ test("admin support responses are bound to operator and selected consultation, w
 
 test("formal NIM clients preauthorize history and send through the same-origin BFF", () => {
   assert.match(webSource, /api\/im\/message-access\?conversationId=/);
-  assert.match(adminSource, /messageAccessPath\(conversationId, operation\)/);
+  assert.match(adminSource, /messageAccessPath\(conversationId, operation,intent\)/);
   assert.match(adminGuardSource, /\/im\/message-access\?conversationId=/);
 });
 
@@ -82,7 +88,7 @@ test("formal NIM clients preauthorize history and send through the same-origin B
 test("unknown remote scope is visible and cannot be presented as an active chat", () => {
   assert.match(webSource, /messageScopeState === "FAILED"/);
   assert.match(webSource, /客服会话待人工核验/);
-  assert.match(webSource, /远端状态待人工核验/);
+  assert.match(webSource, /客服会话核验中/);
   assert.match(adminSource, /scopeStateLabel/);
   assert.match(adminSource, /云信远端结果待人工核验/);
   assert.match(adminSource, /messageScopeState !== "FAILED"/);

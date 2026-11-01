@@ -4,11 +4,12 @@ import { BusinessUpdateNotices } from "@/components/content/platform-update-noti
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowLeft, Check, CheckCircle2, CircleSlash, Clock3, Copy, Gamepad2, MessageCircle, RefreshCw, UserRound, WalletCards, XCircle } from "lucide-react";
-import { formatOrderMoney, formatOrderTime as timeText, orderApi, OrderRequestError, type Order, type OrderParty, type OrderStatusFilter, type PersonalAbnormalResponsibility, type PersonalFirstSubmit, type PersonalRefundBasis, type PersonalRefundIntent, type PersonalRefundRead } from "@/lib/order-client";
+import { formatOrderMoney, formatOrderTime as timeText, orderApi, OrderRequestError, type Order, type OrderImProjection, type OrderParty, type OrderStatusFilter, type PersonalAbnormalResponsibility, type PersonalFirstSubmit, type PersonalRefundBasis, type PersonalRefundIntent, type PersonalRefundRead } from "@/lib/order-client";
 import { useUserSession } from "@/components/session/user-session-provider";
 import { useIdentityReset } from "@/components/session/identity-reset";
-import { orderLinesTotalLabel, orderRentalModeLabel, orderUnitPriceText, unitHint, unitLabel, orderAccountTitle } from "@/lib/order-display";
+import { ORDER_FULFILLMENT_STEPS, orderFulfillmentStepStates, orderFulfillmentSummary, orderLinesTotalLabel, orderRentalModeLabel, orderUnitPriceText, unitHint, unitLabel, orderAccountTitle } from "@/lib/order-display";
 import { OrderTradeActions, type OrderStageFacts } from "@/components/order/order-trade-actions";
+import { OrderAftersale } from "./order-aftersale";
 import { PrestartTerminationPanel } from "@/components/order/prestart-termination-panel";
 import { OrderError, OrderStatusBadge, orderTermLabel, orderUrl, statusLabel } from "@/components/order/order-presentation";
 import "./order.css";
@@ -39,8 +40,9 @@ function attentionFor(order: Order, facts: OrderStageFacts | null, readFailed: b
   if (order.status === "CANCELLED") {
     return {
       tone: "info",
-      title: order.cancelReason === "PRESTART_TERMINATED" ? "未开租订单已终止" : "账号占用已解除",
-      note: order.cancelReason === "PRESTART_TERMINATED" ? "账号占用已解除，退款处理进度见下方记录。终止订单不代表退款已到账。" : "本单不再产生新的交易动作；已确认的订单信息仍可查看。",
+      title: order.cancelReason === "PRESTART_TERMINATED" ? "未开租订单已终止" : order.cancelReason === "MANUAL_CLOSE" ? "客服已手动结束本单" : "账号占用已解除",
+      note: order.cancelReason === "PRESTART_TERMINATED" ? "账号占用已解除，退款处理进度见下方记录。终止订单不代表退款已到账。"
+        : order.cancelReason === "MANUAL_CLOSE" ? "已收款不会自动结算或退款；资金处理以客服通知与对账为准。订单群保留 72 小时沟通窗口。" : "本单不再产生新的交易动作；已确认的订单信息仍可查看。",
       actions: [party === "renter" ? "browse" : "manage"],
     };
   }
@@ -72,6 +74,58 @@ function AttentionBlock({ attention, party, orderId, onRetry }: { attention: Att
       {attention.actions.includes("manage") ? <Link href="/account?view=accounts" className="button primary button--sm">管理上架账号</Link> : null}
       {attention.actions.includes("retry") ? <button type="button" className="order-attention-link" onClick={onRetry}>重试读取</button> : null}
     </div>
+  </section>;
+}
+
+type StageReadState = { scope: string; status: "loading" | "ready" | "failed"; projection: OrderImProjection | null };
+
+/**
+ * A compact six-step bar. It is read-only: the stage comes from the order IM projection, the group
+ * entry reuses the existing support host, and a missing projection says "阶段待核对" rather than
+ * deriving progress from the order status.
+ */
+function FulfillmentStageBar({ order, party, facts }: { order: Order; party: OrderParty; facts: OrderStageFacts | null }) {
+  const session = useUserSession();
+  const userId = session.status === "authenticated" ? session.userId : null;
+  const scope = userId ? `${userId}:${order.id}:${order.status}` : "";
+  const [state, setState] = useState<StageReadState>({ scope: "", status: "loading", projection: null });
+  const confirm = useRef(session.confirm);
+  confirm.current = session.confirm;
+  useEffect(() => {
+    if (!userId) return;
+    const controller = new AbortController();
+    setState({ scope, status: "loading", projection: null });
+    void orderApi.orderIm(order.id, controller.signal).then((projection) => {
+      if (!controller.signal.aborted) setState({ scope, status: "ready", projection });
+    }).catch((error: unknown) => {
+      if (controller.signal.aborted) return;
+      const typed = error instanceof OrderRequestError ? error : new OrderRequestError(0, null);
+      if (typed.status === 401 || typed.code === "UNAUTHENTICATED") void confirm.current();
+      setState({ scope, status: "failed", projection: null });
+    });
+    return () => controller.abort();
+  }, [order.id, order.status, scope, userId]);
+  const visible = state.scope === scope ? state : { scope, status: "loading" as const, projection: null };
+  const projection = visible.status === "ready" ? visible.projection : null;
+  const ending = facts?.phase === "DECISION_PENDING" ? "PENDING" as const
+    : facts?.phase === "DECISION_WAITING" ? "WAITING" as const
+    : facts?.phase === "INTAKE_PENDING" ? "SERVICE" as const
+    : null;
+  const summary = projection
+    ? orderFulfillmentSummary(projection, { ending })
+    : visible.status === "failed" ? "阶段待核对" : "阶段核对中…";
+  const steps = projection ? orderFulfillmentStepStates(projection.stage) : null;
+  const tone = !projection ? "unknown" : projection.stage === "SETTLED" ? "done" : projection.stage === "CANCELLED" ? "closed" : "active";
+  return <section className="order-fulfillment-stage" data-stage={projection?.stage ?? "UNKNOWN"} data-tone={tone} aria-label="履约阶段">
+    <div className="order-fulfillment-head">
+      <span className="order-fulfillment-dot" aria-hidden="true" />
+      <p className="order-fulfillment-summary" role="status">{summary}</p>
+      <button type="button" className="button quiet button--sm" data-support-trigger onClick={() => window.dispatchEvent(new CustomEvent("zzsh:order-groups", { detail: { party, orderId: order.id } }))}><MessageCircle size={15} aria-hidden="true" />打开订单群</button>
+    </div>
+    {steps ? <ol className="order-fulfillment-steps" aria-label="六个履约阶段">{ORDER_FULFILLMENT_STEPS.map((step, index) => {
+      const stepState = steps[index] ?? "unknown";
+      return <li key={step.key} data-state={stepState} aria-current={stepState === "current" ? "step" : undefined}><span className="order-fulfillment-step-dot" aria-hidden="true" />{step.label}</li>;
+    })}</ol> : null}
   </section>;
 }
 
@@ -159,7 +213,7 @@ function linesSummary(order: Order, party: OrderParty): string {
  */
 /** The renter-side figure's name for the reading party, never implying a charge that did not happen. */
 function renterFigureLabel(order: Order): string {
-  if (order.status === "CANCELLED" && order.cancelReason !== "PRESTART_TERMINATED") return "下单时租客金额";
+  if (order.status === "CANCELLED" && order.cancelReason !== "PRESTART_TERMINATED" && order.cancelReason !== "MANUAL_CLOSE") return "下单时租客金额";
   return order.paidAt ? "租客已付" : "租客应付";
 }
 
@@ -186,7 +240,7 @@ function AmountCard({ order, party, facts, readFailed }: { order: Order; party: 
   }
 
   const lead = settledUnread ? null : posted ?? {
-    label: closed && !(order.cancelReason === "PRESTART_TERMINATED" && paid) ? "下单金额" : order.status === "PENDING_PAYMENT" ? "待支付" : "租客已付",
+    label: closed && !((order.cancelReason === "PRESTART_TERMINATED" || order.cancelReason === "MANUAL_CLOSE") && paid) ? "下单金额" : order.status === "PENDING_PAYMENT" ? "待支付" : "租客已付",
     text: formatOrderMoney(amounts?.totalDue),
   };
   return <section className="order-side-card order-amount-block">
@@ -200,17 +254,25 @@ function AmountCard({ order, party, facts, readFailed }: { order: Order; party: 
       <div><dt>{paid && !closed ? "租赁预付" : "租赁费用"}</dt><dd>{formatOrderMoney(amounts?.rental)}</dd></div>
       <div><dt>租客押金</dt><dd>{formatOrderMoney(amounts?.deposit)}</dd></div>
     </dl>
-    {closed ? <p className="order-muted">{order.cancelReason === "PRESTART_TERMINATED" && paid ? "原付款记录保留；退款处理以本单记录为准，不代表已到账。" : "本金额为下单时的订单快照，不代表已扣款或应退款。"}</p> : null}
+    {closed ? <p className="order-muted">{order.cancelReason === "PRESTART_TERMINATED" && paid ? "原付款记录保留；退款处理以本单记录为准，不代表已到账。"
+      : order.cancelReason === "MANUAL_CLOSE" && paid ? "原付款记录保留；本操作不生成结算或退款，资金处理以客服通知与对账为准。"
+      : "本金额为下单时的订单快照，不代表已扣款或应退款。"}</p> : null}
     {paid || order.status === "COMPLETED" ? <p className="order-side-link"><WalletCards size={14} aria-hidden="true" />退款到账结果待确认时，可在<Link href="/account?view=wallet" scroll={false}>我的钱包</Link>查看实际记录。</p> : null}
   </section>;
 }
 
-function ContactCard({ order, party, onChanged, quiet }: { order: Order; party: OrderParty; onChanged: () => void; quiet: boolean }) {
+function ContactCard({ order, onChanged, quiet }: { order: Order; onChanged: () => void; quiet: boolean }) {
   if (!order.fulfillmentAssignment) return null;
   const value = order.fulfillmentAssignment;
+  const ended = order.status === "COMPLETED" || order.status === "CANCELLED" || order.readOnly === true;
   const copy = value.state === "WAITING"
     ? value.waitingReason === "NO_ELIGIBLE_STAFF" ? "当前暂无可用客服，正在等待平台调度。" : "等待客服分配；分配与建群都不等于开租。"
-    : value.state === "ASSIGNED" && value.teamReady ? "订单群已就绪，可在订单群中与客服、对方核对交付事项。"
+    : value.state === "ASSIGNED" && value.teamReady
+      ? ended
+        ? order.cancelReason === "PRESTART_TERMINATED"
+          ? "本单未开租终止；退款处理期间订单群仍可沟通，窗口以群内提示为准。"
+          : "本单已结束，订单群只保留历史记录；如需核对请联系客服。"
+        : "订单群已就绪，可在订单群中与客服、对方核对交付事项。"
     : value.state === "ASSIGNED" ? "客服已分配，订单群准备中。" : "履约状态待确认。";
   return <section className="order-side-card">
     <h2 className="order-section-title">履约与沟通</h2>
@@ -220,7 +282,6 @@ function ContactCard({ order, party, onChanged, quiet }: { order: Order; party: 
       <div><dt>订单群</dt><dd>{value.teamReady ? "已就绪" : value.teamState ? "尚未就绪" : "状态待确认"}</dd></div>
     </dl> : null}
     {quiet ? null : <div className="order-contact-actions">
-      <button type="button" className="button secondary" data-support-trigger onClick={() => window.dispatchEvent(new CustomEvent("zzsh:order-groups", { detail: { party, orderId: order.id } }))}><MessageCircle size={15} aria-hidden="true" />打开订单群</button>
       <button type="button" className="button quiet" onClick={onChanged}><RefreshCw size={15} aria-hidden="true" />刷新订单</button>
     </div>}
   </section>;
@@ -477,10 +538,12 @@ export function OrderDetail({ party, status, accountId, orderId, state, onRetry,
         </div>
       </div>
     </header>
+    {order.source?.origin !== "LEGACY" && !order.readOnly && order.status !== "PENDING_PAYMENT" ? <FulfillmentStageBar order={order} party={party} facts={facts} /> : null}
     <BusinessUpdateNotices surface="orders" />
     <AttentionBlock attention={attention} party={party} orderId={order.id} onRetry={onChanged} />
     <div className="order-detail-body">
       <div className="order-detail-main">
+        {order.source?.origin!=="LEGACY"&&order.stage?.code==="POSTED"?<OrderAftersale key={`aftersale:${order.id}`} orderId={order.id} orderDisplayNo={order.displayNo??null}/>:null}
         {order.status !== "CANCELLED" ? <OrderTradeActions order={order} party={party} onChanged={onChanged} onStageFacts={(next, failed) => setRead({ facts: next, failed })} /> : null}
         <PrestartTerminationPanel key={`prestart:${order.id}:${order.status}`} order={order} party={party} onChanged={onChanged}/>
         {party === "renter" && order.source?.origin !== "LEGACY" && !order.readOnly ? <OrderRefundSection key={`${order.id}:${order.status}:${facts?.phase ?? "NONE"}`} order={order} /> : null}
@@ -495,7 +558,7 @@ export function OrderDetail({ party, status, accountId, orderId, state, onRetry,
       </div>
       <aside className="order-detail-aside">
         <AmountCard order={order} party={party} facts={facts} readFailed={read.failed} />
-        <ContactCard order={order} party={party} onChanged={onChanged} quiet={Boolean(attention)} />
+        <ContactCard order={order} onChanged={onChanged} quiet={Boolean(attention)} />
       </aside>
     </div>
   </section>;

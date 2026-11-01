@@ -10,6 +10,8 @@ import { createImScopeLease, lockTeamBinding, onLeaseConnection } from "./scope-
 import { buildYunxinIdentityMarker, deriveYunxinAccountId, type ImIdentityKey, type ImIdentityProvisioner } from "./identity-lifecycle";
 import { OrderImSdkRouteError, type OrderImSdkRouteBindings } from "../config/config";
 import { ORDER_TEAM_CONFIGURATION, YunxinApiError, validateOrderTeamInput, type YunxinMessageRouteConfig, type YunxinOrderTeamApi, type YunxinOrderTeamInput, type YunxinOrderTeamState } from "./yunxin-provider";
+import { scanOrderStageCards, type StageCardTransport } from "./order-stage-cards";
+import { scanOrderDueReminders, type DueReminderTransport } from "./order-due-reminders";
 
 export type OrderTeamOptions = { pool: Pool; appId: string; provider: YunxinOrderTeamApi;
   identities: Pick<ImIdentityProvisioner,"ensure">; membersLimit: number; leaseMs?: number;
@@ -17,6 +19,10 @@ export type OrderTeamOptions = { pool: Pool; appId: string; provider: YunxinOrde
   firstResponseEnabled?: boolean;
   /** Explicit opt-in; requires this App's first-response ingress to be enabled as well. */
   escalationEnabled?: boolean;
+  /** Card-capable message seam; real NIM custom messages remain a later supplier step. */
+  stageCardTransport?: StageCardTransport;
+  /** System text seam for rental due reminders; real NIM text remains a later supplier step. */
+  dueReminderTransport?: DueReminderTransport;
   orderImSdkRouteBindings?: OrderImSdkRouteBindings };
 type Db = Pool | PoolClient;
 type Member = { identity_id:string; party:"BUYER"|"OWNER"|"STAFF"; state:string; account_id:string; platform_subject_id:string; realm:string; identity_kind:"USER"|"ADMIN"; status:string; identity_marker:string };
@@ -390,6 +396,8 @@ async function insertOperationalEvent(c:PoolClient,p:EscalationPlan,input:{type:
 
 async function recordDueReminder(options:OrderTeamOptions,c:PoolClient,p:EscalationPlan):Promise<boolean>{
   assertOrderRouteReady(options,p);
+  // A prestart-terminated order keeps its group and chat, but never receives new escalation.
+  if(p.order_status!=="PAID")return false;
   if(!p.remind_due_at||p.escalation_state!=="RUNNING"||p.team_state!=="READY"||p.first_response_state!=="RUNNING")return false;
   const due=(await c.query(`SELECT $1::timestamptz<=clock_timestamp() AS due`,[p.remind_due_at])).rows[0]?.due;
   if(!due)return false;
@@ -453,6 +461,12 @@ async function planNextAdd(options:OrderTeamOptions,id:string):Promise<void>{
     let p=await escalationPlan(c,options.appId,id);if(!p||!p.team_id)return;
     assertOrderRouteReady(options,p);
     await c.query(`SELECT id FROM zzsh_order.im_order_operation WHERE order_id=$1 ORDER BY id FOR UPDATE`,[id]);
+    if(p.order_status!=="PAID"){
+      await c.query(`UPDATE zzsh_order.im_order_group SET escalation_state='STOPPED',remind_due_at=NULL,next_add_due_at=NULL,version=version+1
+        WHERE order_id=$1 AND app_id=$2 AND escalation_state='RUNNING'`,[id,options.appId]);
+      await cancelOrderUnsent(c,p,"ORDER_ENDED");
+      return;
+    }
     if(p.escalation_state!=="RUNNING"||p.team_state!=="READY")return;
     if(p.first_response_state!=="RUNNING"){
       const state=p.first_response_state==="STOPPED"?"STOPPED":"VERIFY_REQUIRED";
@@ -648,6 +662,7 @@ async function finishAdd(options:OrderTeamOptions,op:EscalationClaim,team:Yunxin
     await lockGroup(c,before);
     await lockOrderOperations(c,op.order_id);
     const fresh=await escalationPlan(c,options.appId,op.order_id);if(!fresh)throw new OrderTeamError("STALE_OPERATION");
+    if(fresh.order_status!=="PAID")throw new OrderTeamError("STALE_OPERATION");
     const current=await escalationOperation(c,op.id,options.appId);
     if(!current||current.version!==op.version||current.state!=="RUNNING"||current.lease_token_hash!==hash(op.token)
       ||!current.sent_at||!current.lease_until)throw new OrderTeamError("STALE_OPERATION");
@@ -697,6 +712,7 @@ async function executeAdd(options:OrderTeamOptions,op:EscalationClaim):Promise<v
   try{
     p=await escalationPlan(options.pool,options.appId,op.order_id);
     if(!p?.team_id)throw new OrderTeamError("STALE_OPERATION");
+    if(p.order_status!=="PAID")throw new OrderTeamError("STALE_OPERATION");
     const member=targetMember(p,op),teamId=p.team_id;
     if(!op.readonlyMode)assertOrderRouteReady(options,p);
     if(op.readonlyMode){
@@ -759,6 +775,9 @@ async function markBotSent(c:PoolClient,options:OrderTeamOptions,op:EscalationCl
   const current=await escalationOperation(c,op.id,options.appId);
   if(!current||current.version!==op.version||current.state!=="RUNNING"||current.sent_at||current.lease_token_hash!==hash(op.token))return false;
   const fresh=await escalationPlan(c,options.appId,op.order_id);if(!fresh)return false;
+  if(fresh.order_status!=="PAID"){
+    await cancelUnsentOperation(c,current,"ORDER_ENDED");return false;
+  }
   if(fresh.escalation_state!=="RUNNING"||fresh.first_response_state!=="RUNNING"){
     await cancelUnsentOperation(c,current,"ESCALATION_STOPPED");return false;
   }
@@ -816,6 +835,7 @@ async function executeBot(options:OrderTeamOptions,op:EscalationClaim):Promise<v
   const lease=escalationLease(options,op);let sent=Boolean(op.sent_at),p:EscalationPlan|null=null;
   try{
     p=await escalationPlan(options.pool,options.appId,op.order_id);if(!p?.team_id)throw new OrderTeamError("STALE_OPERATION");
+    if(p.order_status!=="PAID")throw new OrderTeamError("STALE_OPERATION");
     const system=assertSystemOwner(p);
     const send=await lease.mutate(`team:${p.team_id}`,async(c)=>{
       const fresh=await escalationPlan(c,options.appId,op.order_id);if(!fresh?.team_id)throw new OrderTeamError("STALE_OPERATION");
@@ -953,6 +973,8 @@ export class OrderTeamLifecycle implements BeforeApplicationShutdown {
       ||!Number.isInteger(options.membersLimit)||options.membersLimit<4||options.membersLimit>5000
       ||!options.provider?.createOrderTeam||!options.provider.readOrderTeam||!options.identities?.ensure
       ||(options.escalationEnabled===true&&(options.firstResponseEnabled!==true||!options.provider.addSupportTeamMember||!options.provider.sendOrderTeamNotice))
+      ||(options.stageCardTransport!==undefined&&typeof options.stageCardTransport.card!=="function")
+      ||(options.dueReminderTransport!==undefined&&typeof options.dueReminderTransport.sendText!=="function")
       ||(options.leaseMs!==undefined&&(!Number.isInteger(options.leaseMs)||options.leaseMs<1000||options.leaseMs>300000)))throw new OrderTeamError("INVALID_CONFIGURATION");
     this.options=options;this.limit=limit;this.timer=setInterval(()=>this.wake(),intervalMs);this.timer.unref?.();this.wake();
   }
@@ -960,7 +982,9 @@ export class OrderTeamLifecycle implements BeforeApplicationShutdown {
     if(!this.options||this.flight)return;
     const options=this.options;
     const work=(async()=>{if(!this.routesRestored){this.routesRestored=true;await restoreApprovedOrderRoutes(options);}
-      await scanOrderTeams(options,this.limit);if(options.escalationEnabled)await scanOrderEscalations(options,this.limit);})()
+      await scanOrderTeams(options,this.limit);if(options.escalationEnabled)await scanOrderEscalations(options,this.limit);
+      if(options.stageCardTransport)await scanOrderStageCards({pool:options.pool,appId:options.appId,transport:options.stageCardTransport},this.limit);
+      if(options.dueReminderTransport)await scanOrderDueReminders({pool:options.pool,appId:options.appId,transport:options.dueReminderTransport},this.limit);})()
       .catch(()=>{this.logger.error(JSON.stringify({event:"im.order.team.scan_failed"}));});
     const clear=()=>{if(this.flight===settled)this.flight=undefined;};const settled=work.then(clear,clear);this.flight=settled;
   }

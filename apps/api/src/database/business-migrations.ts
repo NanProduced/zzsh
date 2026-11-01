@@ -131,12 +131,23 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
     GRANT SELECT, INSERT ON TABLE "zzsh_iam"."im_consultation" TO ${runtimeUser};
     REVOKE DELETE, TRUNCATE ON TABLE "zzsh_iam"."im_consultation" FROM ${runtimeUser};
     REVOKE UPDATE ON TABLE "zzsh_iam"."im_consultation" FROM ${runtimeUser};
-    GRANT UPDATE ("state", "peer_account_id", "assigned_admin_id", "version", "last_message_at", "updated_at", "message_scope_id", "message_scope_state", "message_scope_version") ON TABLE "zzsh_iam"."im_consultation" TO ${runtimeUser};
+    GRANT UPDATE ("state", "peer_account_id", "assigned_admin_id", "version", "last_message_at", "last_message_preview", "updated_at", "message_scope_id", "message_scope_state", "message_scope_version", "admin_read_at", "first_user_message_at", "no_support_notice_at", "user_unread_count", "admin_unread_count") ON TABLE "zzsh_iam"."im_consultation" TO ${runtimeUser};
+    GRANT SELECT, INSERT ON TABLE "zzsh_iam"."im_support_round_rating" TO ${runtimeUser};
+    REVOKE UPDATE, DELETE, TRUNCATE ON TABLE "zzsh_iam"."im_support_round_rating" FROM ${runtimeUser};
+    GRANT UPDATE ("dismissed_at", "updated_at") ON TABLE "zzsh_iam"."im_support_round_rating" TO ${runtimeUser};
+    GRANT SELECT, INSERT ON TABLE "zzsh_iam"."im_support_thread" TO ${runtimeUser};
+    REVOKE UPDATE, DELETE, TRUNCATE ON TABLE "zzsh_iam"."im_support_thread" FROM ${runtimeUser};
+    GRANT UPDATE ("state", "peer_account_id", "message_scope_id", "message_scope_state", "last_round_seq", "version", "updated_at", "user_read_at") ON TABLE "zzsh_iam"."im_support_thread" TO ${runtimeUser};
     GRANT SELECT, INSERT ON TABLE "zzsh_iam"."im_consultation_scope_operation" TO ${runtimeUser};
     REVOKE UPDATE, DELETE, TRUNCATE ON TABLE "zzsh_iam"."im_consultation_scope_operation" FROM ${runtimeUser};
     GRANT UPDATE ("state", "provider_team_id", "attempt_count", "next_retry_at", "lease_until", "lease_token_hash", "last_failure_class", "last_failure_detail", "updated_at") ON TABLE "zzsh_iam"."im_consultation_scope_operation" TO ${runtimeUser};
     GRANT SELECT, INSERT ON TABLE "zzsh_iam"."im_consultation_event" TO ${runtimeUser};
     REVOKE UPDATE, DELETE, TRUNCATE ON TABLE "zzsh_iam"."im_consultation_event" FROM ${runtimeUser};
+    GRANT SELECT, INSERT ON TABLE "zzsh_iam"."im_support_presence_session" TO ${runtimeUser};
+    REVOKE UPDATE, DELETE, TRUNCATE ON TABLE "zzsh_iam"."im_support_presence_session" FROM ${runtimeUser};
+    GRANT UPDATE ("ended_at", "end_reason", "last_heartbeat_at") ON TABLE "zzsh_iam"."im_support_presence_session" TO ${runtimeUser};
+    GRANT SELECT, INSERT ON TABLE "zzsh_iam"."im_support_handover" TO ${runtimeUser};
+    REVOKE UPDATE, DELETE, TRUNCATE ON TABLE "zzsh_iam"."im_support_handover" FROM ${runtimeUser};
     GRANT SELECT, INSERT, UPDATE ON TABLE "zzsh_iam"."admin_workspace_layout" TO ${runtimeUser};
     GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA "zzsh_supply" TO ${runtimeUser};
     REVOKE DELETE, TRUNCATE ON ALL TABLES IN SCHEMA "zzsh_supply" FROM ${runtimeUser};
@@ -149,6 +160,10 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
     REVOKE DELETE, TRUNCATE ON ALL TABLES IN SCHEMA "zzsh_order" FROM ${runtimeUser};
     REVOKE UPDATE ON TABLE zzsh_order.payment_confirmation, zzsh_order.im_order_group FROM ${runtimeUser};
     GRANT UPDATE (provision_state,assigned_admin_id,assigned_at,version,wait_reason) ON zzsh_order.im_order_group TO ${runtimeUser};
+    GRANT SELECT, INSERT, UPDATE ON TABLE zzsh_order.im_order_activity TO ${runtimeUser};
+    REVOKE DELETE, TRUNCATE ON TABLE zzsh_order.im_order_activity FROM ${runtimeUser};
+    GRANT SELECT, INSERT, UPDATE ON TABLE zzsh_order.im_order_unread TO ${runtimeUser};
+    REVOKE DELETE, TRUNCATE ON TABLE zzsh_order.im_order_unread FROM ${runtimeUser};
     GRANT UPDATE (team_state,system_identity_id,team_name,members_limit,team_id,team_ready_at,team_failure,team_retry_at) ON zzsh_order.im_order_group TO ${runtimeUser};
     REVOKE UPDATE ON zzsh_order.im_order_member,zzsh_order.im_order_operation FROM ${runtimeUser};
     GRANT UPDATE (state,joined_at) ON zzsh_order.im_order_member TO ${runtimeUser};
@@ -217,6 +232,12 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   if ((await pool.query(`SELECT to_regclass('zzsh_iam.user_rental_membership') AS relation`)).rows[0]?.relation) {
     await pool.query(`GRANT SELECT,INSERT ON zzsh_iam.user_rental_membership TO ${runtimeUser}; REVOKE UPDATE,DELETE,TRUNCATE ON zzsh_iam.user_rental_membership FROM ${runtimeUser}; GRANT UPDATE (tier,version,source_ref,updated_by_admin_id) ON zzsh_iam.user_rental_membership TO ${runtimeUser}`);
   }
+  for (const table of ["im_support_settings", "im_aftersale_record", "im_read_copy_settings", "im_read_copy_position"]) {
+    if ((await pool.query(`SELECT to_regclass('zzsh_iam.${table}') AS relation`)).rows[0]?.relation) {
+      await pool.query(`GRANT SELECT,INSERT,UPDATE ON zzsh_iam.${table} TO ${runtimeUser};
+        REVOKE DELETE,TRUNCATE ON zzsh_iam.${table} FROM ${runtimeUser}`);
+    }
+  }
   // OIM-4B facts arrive with 0043; the runtime role writes the first-response pointer
   // and appends delivery/approval evidence with status-only updates.
   if ((await pool.query(`SELECT to_regclass('zzsh_order.im_order_event') AS relation`)).rows[0]?.relation) {
@@ -225,6 +246,16 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
       REVOKE DELETE, TRUNCATE ON TABLE zzsh_order.im_order_event FROM ${runtimeUser};
       REVOKE UPDATE ON TABLE zzsh_order.im_order_event FROM ${runtimeUser};
       GRANT UPDATE (status) ON TABLE zzsh_order.im_order_event TO ${runtimeUser};`);
+  }
+  if ((await pool.query(`SELECT to_regclass('zzsh_order.im_order_stage_card') AS relation`)).rows[0]?.relation) {
+    await pool.query(`REVOKE UPDATE ON TABLE zzsh_order.im_order_stage_card FROM ${runtimeUser};
+      GRANT UPDATE (state,attempt_count,next_attempt_at,lease_until,lease_token_hash,sent_at,failure_class,updated_at)
+        ON TABLE zzsh_order.im_order_stage_card TO ${runtimeUser};`);
+  }
+  if ((await pool.query(`SELECT to_regclass('zzsh_order.im_order_due_reminder') AS relation`)).rows[0]?.relation) {
+    await pool.query(`REVOKE UPDATE ON TABLE zzsh_order.im_order_due_reminder FROM ${runtimeUser};
+      GRANT UPDATE (state,attempt_count,next_attempt_at,lease_until,lease_token_hash,sent_at,failure_class,updated_at)
+        ON TABLE zzsh_order.im_order_due_reminder TO ${runtimeUser};`);
   }
   const hasEscalationColumns=(await pool.query(`SELECT count(*)=5 AS ready FROM pg_attribute
     WHERE attrelid=to_regclass('zzsh_order.im_order_group') AND attname=ANY($1::text[]) AND NOT attisdropped`,
@@ -256,7 +287,7 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   }
   if ((await pool.query(`SELECT to_regclass('zzsh_order.rental_opening') AS relation`)).rows[0]?.relation) {
     await pool.query(`REVOKE UPDATE, DELETE, TRUNCATE ON zzsh_order.rental_opening, zzsh_order.rental_opening_ack, zzsh_order.settlement_version, zzsh_order.settlement_decision FROM ${runtimeUser};
-      GRANT UPDATE (status, confirmed_at) ON zzsh_order.rental_opening TO ${runtimeUser};
+      GRANT UPDATE (status, confirmed_at, confirm_source) ON zzsh_order.rental_opening TO ${runtimeUser};
       GRANT UPDATE (superseded_at) ON zzsh_order.settlement_version TO ${runtimeUser}`);
   }
   if ((await pool.query(`SELECT to_regclass('zzsh_order.settlement_intake') AS relation`)).rows[0]?.relation) {
@@ -613,7 +644,7 @@ export async function configureJoinpayFinancialPrivileges(pool: Pick<Pool, "quer
   const account: Table[] = [{ name: "zzsh_order.joinpay_account_observation", insert: "attempt_id merchant_identity_id operation profile_id profile_sha256 rules_sha256 key_version_ref review_ref review_sha256 request_sha256 requested_at received_at http_status response_complete received_bytes transport_failure raw_body raw_sha256 evidence_level decision schema_status signature_status binding_status reason status_code error_code amounts", metadata: "recorded_at", select: "attempt_id merchant_identity_id operation evidence_level decision reason requested_at received_at recorded_at response_complete http_status status_code error_code amounts" }];
   const bank: Table[] = [{ name: "zzsh_order.withdrawal_bank_binding", insert: "id user_id revision sealed_details card_mask holder_mask", update: "revision sealed_details card_mask holder_mask", metadata: "created_at updated_at", select: "id user_id revision sealed_details card_mask holder_mask created_at updated_at" }];
   const prestart:Table[]=[
-    {name:'zzsh_order.prestart_termination',insert:'id order_id requested_by_user_id requested_by_party reason basis_digest payment_basis request_id',
+    {name:'zzsh_order.prestart_termination',insert:'id order_id requested_by_user_id requested_by_party requested_by_admin_user_id reason basis_digest payment_basis request_id',
       update:'state revision last_reason approved_at updated_at liability_root_id liability_event_id',metadata:'created_at approved_xid'},
     {name:'zzsh_order.prestart_termination_decision',insert:'id termination_id result_revision decision assessment reason admin_user_id session_id request_id',metadata:'created_xid created_at'},
   ];
@@ -641,7 +672,7 @@ export async function configureJoinpayFinancialPrivileges(pool: Pick<Pool, "quer
     ...(hasRefund ? ["zzsh_order.assert_joinpay_refund_profile(text,text,text,text,zzsh_order.channel_refund_intent)", "zzsh_order.native_refund_terminal_complete(text)"] : []),
     ...(hasPayout ? ["zzsh_order.assert_joinpay_payout_scope(text,text,text,text,text,text,zzsh_order.joinpay_withdrawal_intent)", "zzsh_order.assert_joinpay_payout_profile(text,text,text,text,zzsh_order.joinpay_withdrawal_intent)", "zzsh_order.assert_joinpay_withdrawal_admission(zzsh_order.joinpay_withdrawal_intent,boolean)", "zzsh_order.joinpay_payout_raw_data(zzsh_order.joinpay_payout_observation)", "zzsh_order.joinpay_withdrawal_expected_lines(text)", "zzsh_order.joinpay_withdrawal_complete(text)"] : []),
     ...(hasBank ? ["zzsh_order.withdrawal_bank_binding_guard()"] : []),
-    ...(hasPrestart?['zzsh_order.prestart_payment_basis_valid(jsonb)','zzsh_order.prestart_liability_complete(text)',
+    ...(hasPrestart?['zzsh_order.prestart_payment_basis_valid(jsonb)','zzsh_order.support_cancel_payment_basis_valid(jsonb)','zzsh_order.prestart_liability_complete(text)',
       'zzsh_order.native_prestart_refund_liability_complete(text)','zzsh_order.native_prestart_refund_terminal_complete(text)']:[]),
   ];
   const columns = (await pool.query<{ name: string; attname: string }>(`/* joinpay financial columns */ SELECT t.name,a.attname FROM unnest($1::text[]) AS t(name)

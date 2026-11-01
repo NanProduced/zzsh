@@ -29,10 +29,11 @@ test('explicit login opens during session outage without granting protected navi
  assert.equal(probe('guest','/publish'),true);
 });
 
-test('support and complaint entries wait for unified authentication without creating a consultation',()=>{
+test('support and complaint entries wait for unified authentication and preserve their entry intent without creating a consultation',()=>{
  const railCode=ts.transpileModule(readFileSync(new URL('../src/components/support/support-rail.tsx',import.meta.url),'utf8'),{compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS}}).outputText;
- for(const type of ['SERVICE','COMPLAINT']){
-  const exports={},states=[];let index=0,pending;
+ // 两入口共用客服线程，但投诉意图必须保留供新轮次选择欢迎语。
+ for(const triggerIndex of [0,1]){
+  const exports={},states=[];const unreadCalls=[];let index=0,pending;
   new Function('require','exports','window',railCode)(name=>{
    if(name==='react')return {...React,useState(initial){const i=index++;states[i]=initial;return [initial,value=>{states[i]=typeof value==='function'?value(states[i]):value;}];},useRef:value=>({current:value}),useEffect(){}};
    if(name==='next/navigation')return {usePathname:()=>'/'};
@@ -40,10 +41,16 @@ test('support and complaint entries wait for unified authentication without crea
    if(name.includes('auth-overlay-provider'))return {useAuthOverlay:()=>({open:(target,callback)=>{pending={target,callback};}})};
    if(name==='./contact-popover')return {ContactPopover:()=>null};
    if(name==='./customer-support-workspace')return {CustomerSupportWorkspace:()=>null};
+   // 入口未读是 rail 新增的读链路：未确认身份时必须整体关闭。这里既给它做桩，也留下调用证据。
+   if(name.includes('session/user-session-provider'))return {useUserSession:()=>({status:'loading',userId:null,identityVersion:1})};
+   if(name==='./use-support-unread')return {useSupportUnread:(identity,enabled)=>{unreadCalls.push({identity,enabled});return null;}};
+   if(name==='./support-unread')return {supportUnreadAriaLabel:base=>base,supportUnreadBadge:()=>null,supportUnreadDescription:()=>''};
    if(name.endsWith('.css'))return {};
    return require(name);
   },exports,{location:{pathname:'/',search:'?from=home'}});
   const rail=exports.SupportRail();
+  // 未确认身份：不发起未读请求，也不建咨询。角标链路只能是关着的。
+  assert.deepEqual(unreadCalls,[{identity:null,enabled:false}],'身份确认前入口未读不发起任何请求');
   // Collect the support triggers wherever they sit in the rail tree, so reshaping the rail (for
   // example adding the mobile tools toggle) cannot silently shift which button this test clicks.
   const triggers=[];
@@ -54,14 +61,14 @@ test('support and complaint entries wait for unified authentication without crea
    if(node.props['data-support-trigger'])triggers.push(node);
    walk(node.props.children);
   })(rail);
-  triggers[type==='SERVICE'?0:1].props.onClick({currentTarget:{}});
+  triggers[triggerIndex].props.onClick({currentTarget:{}});
   assert.equal(pending.target,'/?from=home');
   assert.equal(states[0],false,'guest or cancelled login never opens the support window');
-  assert.equal(states[4],0,'no support request before confirmed login');
+  assert.equal(states[5],0,'no support request before confirmed login');
   pending.callback();
   assert.equal(states[0],true);
-  assert.equal(states[1],type,'restore the selected entry after authentication');
-  assert.equal(states[4],1);
+  assert.equal(states[1],triggerIndex===1?'COMPLAINT':'SERVICE',`trigger ${triggerIndex} preserves its entry intent after authentication`);
+  assert.equal(states[5],1);
  }
 });
 

@@ -1,0 +1,17 @@
+/* 咨询/投诉右栏：用户风险摘要、投诉摘要与折叠处理记录。
+   会话类型/状态/接待留在聊天头部，这里不重复「本次服务」。 */
+
+/* 昵称+头像整体是 hoverCard 的触发区；点击进入完整资料。 */
+.workspace-root .im-wb-user-identity { display:flex; align-items:center; gap:12px; width:100%; min-width:0; margin:0; padding:0; border:0; background:none; color:inherit; font:inherit; text-align:left; }
+.workspace-root button.im-wb-user-identity { cursor:pointer; border-radius:6px; }
+.workspace-root button.im-wb-user-identity:hover .im-wb-user-identity-name { text-decoration:underline; text-underline-offset:3px; }
+.workspace-root button.im-wb-user-identity:focus-visible { outline:2px solid var(--ring); outline-offset:2px; }
+.workspace-root .im-wb-user-copy { display:grid; flex:1; min-width:0; gap:2px; }
+
+/* 投诉摘要：可用事实与缺口逐行分色，缺口不伪装成结论。 */
+.workspace-root .im-wb-complaint dl > div + div { margin-top:2px; }
+.workspace-root .im-wb-complaint dl > div[data-gap] dd { color:var(--muted-foreground); font-weight:400; }
+.workspace-root .im-wb-gap-note { margin:2px 0 0; color:var(--muted-foreground); font-size:11px; line-height:1.7; }
+
+/* 处理记录默认只露最近两条；更早的行仍在真实列表里，展开即见。 */
+.workspace-root .im-wb-event[hidden] { display:none; }

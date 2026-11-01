@@ -703,7 +703,13 @@ export async function readUserDirectoryDetail(
     image: managedProfileImagePath(row.image),
     username: row.username,
     displayUsername: row.displayUsername,
-    maskedPhone: maskPhoneNumber(row.phoneNumber),
+    // 客服接待要回拨租客/号主：持有 im.support.read 的岗位在详情里拿明文，
+    // 其余读者仍是脱敏值（用户目录列表、财务、监管不变）。
+    // 详情路由在只读快照结束后重验权限并提交披露审计，成功后才返回明文。
+    maskedPhone: (viewer as { permissions?: ReadonlySet<string> }).permissions?.has("im.support.read")
+      ? (row.phoneNumber ?? null)
+      : maskPhoneNumber(row.phoneNumber),
+    phoneRevealed: (viewer as { permissions?: ReadonlySet<string> }).permissions?.has("im.support.read") === true,
     phoneNumberVerified: row.phoneNumber === null ? null : row.phoneNumberVerified === true,
     maskedEmail: maskEmail(row.email),
     accountStatus: projectUserAccountStatus(row.accountStatus, row.suspended),

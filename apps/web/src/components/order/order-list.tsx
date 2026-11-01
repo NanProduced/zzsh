@@ -4,7 +4,7 @@ import Link from "next/link";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { AlertCircle, ChevronRight, Info, RefreshCw } from "lucide-react";
 import { orderItemKey, formatOrderTime as timeText, type FulfillmentAssignment, type Order, type OrderLine, type OrderPage, type OrderParty, type OrderRequestError, type OrderStatusFilter } from "@/lib/order-client";
-import { groupedInteger, orderAccountTitle, orderAmountFacts, orderRentalModeLabel, paymentEntryOpen } from "@/lib/order-display";
+import { groupedInteger, orderAccountTitle, orderAmountFacts, orderListFulfillmentTag, orderRentalModeLabel, paymentEntryOpen } from "@/lib/order-display";
 import { OrderError, OrderStatusBadge, orderTermLabel, orderUrl, STATUS_LABELS } from "@/components/order/order-presentation";
 import "./order.css";
 
@@ -112,6 +112,7 @@ function statusHint(order: Order): string | null {
 function ListRow({ party, order, status, accountId, onOpen }: { party: OrderParty; order: Order; status: OrderStatusFilter; accountId?: string; onOpen: (orderId: string, event: ReactMouseEvent<HTMLAnchorElement>) => void }) {
   const facts = orderAmountFacts(order, party);
   const hint = statusHint(order);
+  const stageTag = orderListFulfillmentTag(order);
   const title = orderAccountTitle(order);
   const resources = order.source?.origin === "LEGACY" ? null : resourceSummary(order, !title.includes("哈夫币"));
   const modeLabel = orderRentalModeLabel(order);
@@ -122,6 +123,7 @@ function ListRow({ party, order, status, accountId, onOpen }: { party: OrderPart
       {/* The title link is the row's single focusable target; its click surface covers the whole row. */}
       <div className="order-row-title-line">
         <Link className="order-row-title" href={orderUrl(party, status, accountId, order.id, order.source?.origin)} scroll={false} data-order-id={order.id} data-order-key={orderItemKey(order)} onClick={(event) => onOpen(orderItemKey(order), event)}>{title}</Link>
+        {stageTag ? <span className="order-row-tag order-row-stage" data-fulfillment-stage={stageTag.code}>{stageTag.label}</span> : null}
         {modeLabel ? <span className="order-row-tag" data-mode={order.quote?.rentalMode}>{modeLabel}</span> : null}
         {!order.listingFacts && order.listingFactsUnknownReason ? <span className="order-row-tag">资料待核实</span> : null}
       </div>

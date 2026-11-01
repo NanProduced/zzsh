@@ -8,10 +8,15 @@
 
 import * as React from "react"
 import { ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon } from "lucide-react"
-import { DayButton, DayPicker, getDefaultClassNames } from "react-day-picker"
+import { DayButton, DayPicker, getDefaultClassNames, type RootProps } from "react-day-picker"
 
 import { cn } from "@/lib/utils"
 import { Button, buttonVariants } from "@/components/ui/button"
+
+// A stable root keeps range-hover updates from replacing the day being clicked.
+function CalendarRoot({ className, rootRef, ...props }: RootProps) {
+  return <div data-slot="calendar" ref={rootRef} className={cn(className)} {...props} />
+}
 
 function Calendar({
   className,
@@ -86,9 +91,7 @@ function Calendar({
         ...classNames,
       }}
       components={{
-        Root: ({ className, rootRef, ...props }) => (
-          <div data-slot="calendar" ref={rootRef} className={cn(className)} {...props} />
-        ),
+        Root: CalendarRoot,
         Chevron: ({ className, orientation, ...props }) => {
           if (orientation === "left") return <ChevronLeftIcon className={cn("size-4", className)} {...props} />
           if (orientation === "right") return <ChevronRightIcon className={cn("size-4", className)} {...props} />

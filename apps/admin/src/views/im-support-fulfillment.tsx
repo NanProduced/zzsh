@@ -3,20 +3,29 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CircleAlert, ClipboardList, Info, RefreshCw, ShieldCheck, TriangleAlert, X } from "lucide-react";
 import { AdminApiError, friendlyError } from "../api";
+import { formatDateTime } from "./im-support-format";
 import { Dialog, DialogContent } from "../components/ui/dialog";
+import { ConfirmAlertDialog } from "../components/ui/alert-dialog";
+import { Textarea } from "../components/ui/textarea";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Card, CardContent, CardDescription, CardTitle } from "../components/ui/card";
 import { Item, ItemActions, ItemContent, ItemGroup, ItemMedia, ItemTitle } from "../components/ui/item";
+import { formatFundingCents } from "./supply-review/model";
 import {
   buildFulfillmentIntent,
   readOrderSettlement,
+  readSupportCancel,
   sendFulfillmentIntent,
+  sendManualClose,
+  sendSupportCancel,
+  type ManualCloseResult,
   type EarlyEndReason,
   type FulfillmentIntent,
   type SettlementReadView,
+  type SupportCancelView,
 } from "../lib/order-fulfillment-client";
 
 type InventoryLine = { itemId: string; quantity: string; unit: string; pricingKind: string; name: string | null };
@@ -28,12 +37,9 @@ type PreviewState = {
   adjustArmed: boolean;
 };
 type IntentPhase = "IDLE" | "SENDING" | "UNKNOWN" | "AUTH" | "ACCEPTED_READBACK_PENDING";
+type FulfillmentReadState = "idle" | "ok" | "unavailable" | "forbidden" | "auth" | "unknown";
 type PersistedIntent = { subject: string; intent: FulfillmentIntent; accepted?: boolean };
 const ACCEPTED_STORAGE_WARNING = "操作已受理，但本地无法保存恢复状态；不会重复提交。请勿刷新或离开页面，先查看当前状态或联系维护处理。";
-
-function isAuthFailure(error: unknown): boolean {
-  return error instanceof AdminApiError && (error.status === 401 || error.status === 423);
-}
 
 const AMOUNT_LABELS: Record<string, string> = {
   haffConsumedBuyer: "哈夫币消耗（租客侧）",
@@ -90,8 +96,10 @@ function storageKeyFor(viewerId: string, orderId: string): string {
  * Frozen order inventory arrives through the authorized IM slot projection;
  * the section never computes money and never writes an order/ledger row.
  */
-export function OrderFulfillmentSection({ orderId, displayNo, viewerId, frozenInventory }: { orderId: string; displayNo: string; viewerId: string; frozenInventory?: InventoryLine[] }) {
+export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderStatus, frozenInventory, canManualClose }: { orderId: string; displayNo: string; viewerId: string; orderStatus?: string; frozenInventory?: InventoryLine[]; canManualClose?: boolean }) {
   const [view, setView] = useState<SettlementReadView | null>(null);
+  const [readState, setReadState] = useState<FulfillmentReadState>("idle");
+  const [readDetail, setReadDetail] = useState("");
   const [lines, setLines] = useState<LineDraft[]>([]);
   const [endReason, setEndReason] = useState<"" | EarlyEndReason>("");
   const [reason, setReason] = useState("");
@@ -181,17 +189,18 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, frozenIn
   const load = useCallback(async () => {
     setLoading(true);
     setError("");
-    try {
-      const next = await readOrderSettlement(orderId);
-      if (scopeRef.current !== scope) return;
-      applyView(next);
-    } catch (cause) {
-      if (scopeRef.current !== scope) return;
-      if (isAuthFailure(cause)) hidePrivate();
-      setError(friendlyError(cause));
-    } finally {
-      if (scopeRef.current === scope) setLoading(false);
+    setReadDetail("");
+    const outcome = await readOrderSettlement(orderId);
+    if (scopeRef.current !== scope) return;
+    setReadState(outcome.kind);
+    if (outcome.kind === "ok") {
+      applyView(outcome.view);
+    } else if (outcome.kind === "auth") {
+      hidePrivate();
+    } else if (outcome.kind === "unknown") {
+      setReadDetail(friendlyError(outcome.error));
     }
+    if (scopeRef.current === scope) setLoading(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orderId, seed, scope]);
 
@@ -217,7 +226,7 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, frozenIn
         return;
       }
       setPhase("UNKNOWN");
-      setNotice("检测到上次未确认的履约操作；请查看当前状态或按原请求重放（同一幂等键）。");
+      setNotice("检测到上次未确认的履约操作；请查看当前状态或按原请求重试。");
     } catch {
       setStorageBlocked(true);
     }
@@ -230,22 +239,23 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, frozenIn
   }, [load]);
 
   const readbackAccepted = async () => {
-    try {
-      const next = await readOrderSettlement(orderId);
-      if (scopeRef.current !== scope) return;
-      applyView(next);
+    const outcome = await readOrderSettlement(orderId);
+    if (scopeRef.current !== scope) return;
+    if (outcome.kind === "ok") {
+      setReadState("ok");
+      applyView(outcome.view);
       clearIntent();
       setNotice((current) => current || "操作已受理，最新状态已读取。");
       setError("");
-    } catch (cause) {
-      if (scopeRef.current !== scope) return;
-      setPhase("ACCEPTED_READBACK_PENDING");
-      if (isAuthFailure(cause)) {
-        hidePrivate();
-        setError("操作已受理；登录状态已变化，订单私有投影已隐藏。重新确认同一管理员身份后请查看当前状态。");
-      } else {
-        setError("操作已受理，但读取最新状态失败；仅可查看当前状态，不会重复提交。");
-      }
+      return;
+    }
+    setPhase("ACCEPTED_READBACK_PENDING");
+    if (outcome.kind === "auth") {
+      setReadState("auth");
+      hidePrivate();
+      setError("操作已受理；登录状态已变化，订单私有投影已隐藏。重新确认同一管理员身份后请查看当前状态。");
+    } else {
+      setError("操作已受理，但读取最新状态失败；仅可查看当前状态，不会重复提交。");
     }
   };
 
@@ -310,26 +320,30 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, frozenIn
   const observeCurrent = async () => {
     setLoading(true);
     setError("");
-    try {
-      const next = await readOrderSettlement(orderId);
-      if (scopeRef.current !== scope) return;
-      applyView(next);
+    const outcome = await readOrderSettlement(orderId);
+    if (scopeRef.current !== scope) return;
+    setLoading(false);
+    if (outcome.kind === "ok") {
+      setReadState("ok");
+      applyView(outcome.view);
       if (phase === "ACCEPTED_READBACK_PENDING") {
         clearIntent();
         setNotice("操作已受理，最新状态已读取。");
       } else {
         setNotice("已查看当前状态；该读取不构成原请求回执，未决操作仍保留。");
       }
-    } catch (cause) {
-      if (scopeRef.current !== scope) return;
-      if (isAuthFailure(cause)) {
-        hidePrivate();
-        setError("登录状态已变化，订单私有投影已隐藏；请重新确认同一管理员身份后重试。");
-      } else {
-        setError(friendlyError(cause));
-      }
-    } finally {
-      if (scopeRef.current === scope) setLoading(false);
+      return;
+    }
+    setReadState(outcome.kind);
+    if (outcome.kind === "auth") {
+      hidePrivate();
+      setError("登录状态已变化，订单私有投影已隐藏；请重新确认同一管理员身份后重试。");
+    } else if (outcome.kind === "unavailable") {
+      setError("本环境未启用结算记录，无法查看当前状态；原请求责任仍保留。");
+    } else if (outcome.kind === "forbidden") {
+      setError("当前账号无权查看本单结算记录；原请求责任仍保留。");
+    } else {
+      setError(friendlyError(outcome.error));
     }
   };
 
@@ -363,17 +377,17 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, frozenIn
 
   const task = useMemo(() => {
     switch (stage.key) {
-      case "needs-opening": return { title: "待核对期初", note: "尚未正式开租。按本单冻结库存核对数量后录入期初。", action: "核对并录入期初" };
-      case "opening-pending": return { title: "等待双方确认期初", note: `期初清单 v${latestOpening?.versionNo ?? "?"}。客服不能代替买卖双方确认。`, action: "查看期初清单" };
-      case "intake-pending": return { title: "有结束申请待处理", note: "先核对归还数量与原因，再生成服务端结算预览。", action: "打开核对面板" };
-      case "needs-settlement": return { title: "履约中 · 等待结算", note: "正常结算由买卖双方提交并互相确认；客服只处理提前分类与人工调整。", action: "打开核对面板" };
-      case "awaiting-decision": return { title: "等待双方确认结算", note: `结算版本 v${current?.versionNo ?? "?"}。数量与金额以该版本服务端结果为准。`, action: "查看本版明细" };
-      case "needs-review": return { title: "待客服复核", note: "双方已确认同一版本；核对数量与金额后复核。", action: "打开复核面板" };
-      case "reviewed": return { title: "已复核，等待生效", note: "复核已完成；生效以服务端过账结果为准。", action: "查看结算明细" };
-      case "normal-version": return { title: "正常结算版本", note: "双方同版确认后的正常结算。", action: "查看结算明细" };
-      default: return { title: "已过账", note: "金额已生效；应退与到期不代表渠道退款已到账。", action: "查看过账明细" };
+      case "needs-opening": return { title: "待核对期初", action: "核对并录入期初" };
+      case "opening-pending": return { title: "等待双方确认期初", action: "查看期初清单" };
+      case "intake-pending": return { title: "有结束申请待处理", action: "打开核对面板" };
+      case "needs-settlement": return { title: "履约中 · 等待结算", action: "打开核对面板" };
+      case "awaiting-decision": return { title: "等待双方确认结算", action: "查看本版明细" };
+      case "needs-review": return { title: "待客服复核", action: "打开复核面板" };
+      case "reviewed": return { title: "已复核，等待生效", action: "查看结算明细" };
+      case "normal-version": return { title: "正常结算版本", action: "查看结算明细" };
+      default: return { title: "已过账", action: "查看过账明细" };
     }
-  }, [stage.key, latestOpening?.versionNo, current?.versionNo]);
+  }, [stage.key]);
 
   // 确认状态只认同一版本上的 ack/decision：新版本会让旧确认失效。
   const partyFacts = useMemo(() => {
@@ -465,15 +479,15 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, frozenIn
         return <label key={line.itemId ?? "line"}><span>{facts.name ?? "物资"}{facts.unit ? ` · ${UNIT_LABELS[facts.unit] ?? facts.unit}` : ""}</span><output>{line.remainingQuantity ?? line.openingQuantity ?? "—"}</output></label>;
       })}
     </div> : null}
-    {amountRows(currentAmounts).length > 0 ? <dl>{amountRows(currentAmounts).map((row) => <div key={row.key}><dt>{row.label}</dt><dd>{row.text}</dd></div>)}</dl> : <small>服务端未返回金额明细。</small>}
+    {amountRows(currentAmounts).length > 0 ? <dl>{amountRows(currentAmounts).map((row) => <div key={row.key}><dt>{row.label}</dt><dd>{row.text}</dd></div>)}</dl> : <small>暂无金额明细。</small>}
   </div> : null;
 
   const statusMessages = <>
     {error ? <Alert variant="destructive"><CircleAlert /><AlertDescription>{error}</AlertDescription></Alert> : null}
     {notice ? <Alert variant="info" role="status"><Info /><AlertDescription>{notice}</AlertDescription></Alert> : null}
-    {storageBlocked ? <Alert variant="destructive"><CircleAlert /><AlertTitle>本地写入已暂停</AlertTitle><AlertDescription>{phase === "ACCEPTED_READBACK_PENDING" ? ACCEPTED_STORAGE_WARNING : "本地无法保存操作意图，已阻止新写入；请刷新后重试。"}</AlertDescription></Alert> : null}
+    {storageBlocked ? <Alert variant="destructive"><CircleAlert /><AlertTitle>本地暂存不可用</AlertTitle><AlertDescription>{phase === "ACCEPTED_READBACK_PENDING" ? ACCEPTED_STORAGE_WARNING : "本地无法保存操作记录，已阻止新操作；请刷新后重试。"}</AlertDescription></Alert> : null}
     {phase !== "IDLE" ? <Alert role="status" variant="warning"><TriangleAlert /><AlertTitle>{phase === "SENDING" ? "本次操作正在发送" : phase === "AUTH" ? "登录状态已变化，原责任仍保留" : phase === "ACCEPTED_READBACK_PENDING" ? "操作已受理，等待最新状态" : "本次操作结果未确认"}</AlertTitle><AlertDescription>
-      {phase === "SENDING" ? "请求尚未返回，请勿重复提交。" : phase === "AUTH" ? "原操作责任仍保留（同一幂等键）。" : phase === "ACCEPTED_READBACK_PENDING" ? "操作已受理，等待读取最新状态；不会重复提交。" : "原幂等键与责任已保留。"}
+      {phase === "SENDING" ? "请求尚未返回，请勿重复提交。" : phase === "AUTH" ? "原操作记录仍保留。" : phase === "ACCEPTED_READBACK_PENDING" ? "操作已受理，等待读取最新状态；不会重复提交。" : "原操作记录与责任已保留。"}
     </AlertDescription><AlertAction>
       <Button variant="outline" size="xs" onClick={() => void observeCurrent()} disabled={loading || busy}>查看当前状态</Button>
       {phase !== "SENDING" && phase !== "ACCEPTED_READBACK_PENDING" ? <Button variant="outline" size="xs" onClick={() => void replay()} disabled={busy || loading}>按原请求重放</Button> : null}
@@ -482,22 +496,71 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, frozenIn
 
   const readButton = <Button variant="ghost" size="icon-sm" onClick={() => void load()} disabled={loading || busy} aria-label="重新读取本单进度"><RefreshCw /></Button>;
 
-  // 读取失败与"读取成功但没有结算投影"是两件事：前者不能默认成待录入，也不影响本单聊天。
-  if (!view) return <Card className="im-support-fulfillment im-order-card" data-available="false" aria-label="本单当前任务">
-    <CardContent className="grid gap-2 p-4">
-      {statusMessages}
-      <Alert variant="warning" role="status"><TriangleAlert /><AlertTitle>{loading ? "正在读取本单进度…" : "本单进度暂时读不到"}</AlertTitle><AlertDescription>不影响在这里沟通，稍后可重新读取。{error ? ` ${error}` : ""}</AlertDescription><AlertAction>
-        <Button variant="outline" size="sm" data-action="fulfillment-reload" onClick={() => void load()} disabled={loading || busy}>重新读取</Button>
-      </AlertAction></Alert>
-    </CardContent>
-  </Card>;
+  const ended = orderStatus === "COMPLETED" || orderStatus === "CANCELLED";
+  const endedLabel = orderStatus === "CANCELLED" ? "已取消" : "已完成";
 
-  return <Card className="im-support-fulfillment im-order-card" data-stage={stage.key} aria-label="本单当前任务">
+  // 已结束订单是只读事实页：不再提供开租/结算写操作；读取不可用也只做中性说明。
+  if (ended) {
+    const readNote = readState === "unavailable" ? "本环境未启用结算记录，无法读取本单结算摘要。"
+      : readState === "forbidden" ? "当前账号无权读取本单结算摘要。"
+      : readState === "auth" ? "登录状态已变化，结算摘要已隐藏。"
+      : readState === "unknown" ? `结算摘要暂时不可读。${readDetail ? ` ${readDetail}` : ""}`
+      : null;
+    return <Card className="im-support-fulfillment im-order-card" data-ended="true" data-stage="ended" data-read-state={readState} aria-label="本单已结束">
+      <CardContent className="grid gap-2.5 p-4">
+        {statusMessages}
+        <div className="flex items-start gap-3">
+          <div className="grid min-w-0 flex-1 gap-1">
+            <CardTitle className="flex items-start gap-2 text-sm"><ShieldCheck className="mt-0.5 size-4 shrink-0 text-muted-foreground" />本单已结束</CardTitle>
+            <CardDescription className="text-xs leading-relaxed">{endedLabel}订单的开租与结算操作已关闭；订单群沟通是否仍可用以群内提示为准。</CardDescription>
+          </div>
+          <Badge variant="secondary">已结束</Badge>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Badge variant="outline">{endedLabel}</Badge>
+          {posting ? <Badge variant="secondary">已结算</Badge> : view ? <Badge variant="outline">未读到已过账结算</Badge> : null}
+          {posting?.refundDueAt ? <span className="text-xs text-muted-foreground">退款应付时间：{formatDateTime(posting.refundDueAt)}</span> : null}
+        </div>
+        {!view && (loading || readState === "idle") ? <p className="im-support-fulfillment-empty">正在读取结算摘要…</p> : null}
+        {!view && readNote ? <p className="im-support-fulfillment-empty">{readNote}</p> : null}
+        {!view && readNote ? <div><Button variant="outline" size="sm" data-action="fulfillment-reload" onClick={() => void load()} disabled={loading || busy}>重新读取</Button></div> : null}
+      </CardContent>
+    </Card>;
+  }
+
+  // 读取失败与"读取成功但没有结算投影"是两件事：前者不能默认成待录入，也不影响本单聊天。
+  // 404 只说明本环境未启用结算记录，不能宣称无权；403 才是当前账号无权。
+  if (!view) {
+    const reading = loading || readState === "idle";
+    return <Card className="im-support-fulfillment im-order-card" data-available="false" data-read-state={readState} aria-label="本单当前任务">
+      <CardContent className="grid gap-2 p-4">
+        {statusMessages}
+        {reading ? <Alert variant="warning" role="status"><TriangleAlert /><AlertTitle>正在读取本单进度…</AlertTitle><AlertDescription>不影响在这里沟通，稍后自动显示。</AlertDescription><AlertAction>
+          <Button variant="outline" size="sm" data-action="fulfillment-reload" onClick={() => void load()} disabled>重新读取</Button>
+        </AlertAction></Alert> : null}
+        {!reading && readState === "unavailable" ? <Alert variant="info" role="status"><Info /><AlertTitle>本单结算记录不可用</AlertTitle><AlertDescription>本环境未启用结算记录，或该订单的记录不可读；不影响本单沟通。</AlertDescription><AlertAction>
+          <Button variant="outline" size="sm" data-action="fulfillment-reload" onClick={() => void load()} disabled={busy}>重新读取</Button>
+        </AlertAction></Alert> : null}
+        {!reading && readState === "forbidden" ? <Alert variant="destructive" role="alert"><CircleAlert /><AlertTitle>当前账号无权查看本单结算记录</AlertTitle><AlertDescription>不影响本单沟通；如权限刚调整，可重新读取。</AlertDescription><AlertAction>
+          <Button variant="outline" size="sm" data-action="fulfillment-reload" onClick={() => void load()} disabled={busy}>重新读取</Button>
+        </AlertAction></Alert> : null}
+        {!reading && readState === "auth" ? <Alert variant="warning" role="status"><TriangleAlert /><AlertTitle>登录状态已变化，本单私有信息已隐藏</AlertTitle><AlertDescription>重新确认同一管理员身份后再读取。</AlertDescription><AlertAction>
+          <Button variant="outline" size="sm" data-action="fulfillment-reload" onClick={() => void load()} disabled={busy}>重新读取</Button>
+        </AlertAction></Alert> : null}
+        {!reading && readState !== "unavailable" && readState !== "forbidden" && readState !== "auth" ? <Alert variant="warning" role="status"><TriangleAlert /><AlertTitle>本单进度暂时读不到</AlertTitle><AlertDescription>不影响在这里沟通，稍后可重新读取。{readDetail ? ` ${readDetail}` : ""}</AlertDescription><AlertAction>
+          <Button variant="outline" size="sm" data-action="fulfillment-reload" onClick={() => void load()} disabled={busy}>重新读取</Button>
+        </AlertAction></Alert> : null}
+      </CardContent>
+    </Card>;
+  }
+
+  // 右栏只留任务入口：阶段、订单状态与版本确认由顶部阶段条与本核对面板承担，避免重复。
+  return <><Card className="im-support-fulfillment im-order-card" data-stage={stage.key} aria-label="本单当前任务">
     <CardContent className="grid gap-2.5 p-4">
       <div className="flex items-start gap-3">
         <div className="grid min-w-0 flex-1 gap-1">
-          <CardTitle className="flex items-start gap-2 text-sm"><ClipboardList className="mt-0.5 size-4 shrink-0 text-primary" />{task.title}</CardTitle>
-          <CardDescription className="text-xs leading-relaxed">{task.note}</CardDescription>
+          <CardTitle className="flex items-start gap-2 text-sm"><ClipboardList className="mt-0.5 size-4 shrink-0 text-primary" />履约核对</CardTitle>
+          <CardDescription className="text-xs leading-relaxed">开租、结算与人工调整都以订单冻结事实为准；数量与版本在核对面板中确认，聊天不会改变订单状态。</CardDescription>
         </div>
         <div className="flex shrink-0 flex-col items-stretch gap-1.5">
           <Button size="sm" data-action="open-fulfillment-panel" onClick={() => setPanelOpen(true)}>{task.action}</Button>
@@ -505,27 +568,22 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, frozenIn
         </div>
       </div>
       {panelOpen ? null : statusMessages}
-      {partyFacts ? <div className="im-order-parties overflow-hidden rounded-lg border">
-        <div className="bg-muted/60 px-3 py-2 text-xs font-semibold text-muted-foreground">双方确认 · {partyFacts.version}</div>
-        <ItemGroup className="divide-y divide-border">
-          {partyFacts.rows.map((row) => <Item key={row.party} size="sm" className="gap-2 px-3 py-2">
-            <ItemContent><ItemTitle className="text-sm">{partyLabel(row.party)}</ItemTitle></ItemContent>
-            <ItemActions><Badge variant={row.confirmed ? "secondary" : "destructive"} data-state={row.confirmed ? "confirmed" : "pending"}>{row.confirmed ? "已确认" : "待确认"}</Badge></ItemActions>
-          </Item>)}
-        </ItemGroup>
-        <p className="px-3 py-2 text-xs text-muted-foreground">{supportReviewed ? "客服已复核本版本。" : "客服不能代替买卖双方确认。"}</p>
-      </div> : null}
-      <div className="flex flex-wrap items-center gap-1.5">
-        <Badge variant="outline">{view.rentalStarted === true ? "已开租" : view.rentalStarted === false ? "未开租" : "开租状态未知"}</Badge>
-        {view.currentRequest?.kind === "INTAKE" ? <Badge variant="destructive">有结算申请待处理</Badge> : null}
-        {posting ? <Badge variant="secondary">已过账{posting.early ? " · 提前" : ""}</Badge> : null}
-      </div>
     </CardContent>
 
     <Dialog open={panelOpen} onOpenChange={setPanelOpen}>
       <DialogContent className="im-order-panel" aria-label={task.title} showCloseButton={false}>
         <div className="im-wb-dialog-head"><div><strong>{task.title}</strong><span>订单 {displayNo} · {stage.label}</span></div><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setPanelOpen(false)} aria-label="关闭核对面板"><X size={14} /></button></div>
         {statusMessages}
+        {partyFacts ? <div className="im-order-parties overflow-hidden rounded-lg border">
+          <div className="bg-muted/60 px-3 py-2 text-xs font-semibold text-muted-foreground">双方确认 · {partyFacts.version}</div>
+          <ItemGroup className="divide-y divide-border">
+            {partyFacts.rows.map((row) => <Item key={row.party} size="sm" className="gap-2 px-3 py-2">
+              <ItemContent><ItemTitle className="text-sm">{partyLabel(row.party)}</ItemTitle></ItemContent>
+              <ItemActions><Badge variant={row.confirmed ? "secondary" : "destructive"} data-state={row.confirmed ? "confirmed" : "pending"}>{row.confirmed ? "已确认" : "待确认"}</Badge></ItemActions>
+            </Item>)}
+          </ItemGroup>
+          <p className="px-3 py-2 text-xs text-muted-foreground">{supportReviewed ? "客服已复核本版本。" : "客服不能代替买卖双方确认。"}</p>
+        </div> : null}
 
       {stage.key === "needs-opening" ? <div className="im-support-fulfillment-stage-panel">
         <strong>第一步：期初代录</strong>
@@ -626,6 +684,199 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, frozenIn
       </div>
 
       <p className="im-support-fulfillment-hint">聊天和已读不会改变订单状态；金额以系统结果为准，"应退"不等于退款已到账。</p>
+      </DialogContent>
+    </Dialog>
+  </Card>
+  {canManualClose && orderStatus === "PAID" ? <ManualCloseCard orderId={orderId} displayNo={displayNo} /> : null}
+  {canManualClose && orderStatus === "PAID" ? <SupportCancelCard orderId={orderId} displayNo={displayNo} /> : null}
+  </>;
+}
+
+const SUPPORT_CANCEL_REASON_TEXT: Record<string, string> = {
+  ORDER_COMPLETED: "结算已生成或订单已完成，不能在这里取消；请走财务/售后退款。",
+  ORDER_NOT_PAID: "订单当前不是已付款可取消状态；请刷新后核对。",
+  PAYMENT_BASIS_UNAVAILABLE: "原支付单不可用，不能安全发起原路退款。",
+  OPENING_ALREADY_CONFIRMED: "订单已确认开租，请使用现有结算与退款流程；不能按未开租全额取消。",
+  SETTLEMENT_ALREADY_POSTED: "结算已落账，不能在这里取消；请走财务/售后退款。",
+  SETTLEMENT_DRAFT_EXISTS: "存在结算草稿或受理单，请先处理或关闭结算后再取消。",
+  MANUAL_ADJUSTMENT_REVIEW: "存在待处理金额调整，请先处理后再取消。",
+  DISTRIBUTION_RECONCILIATION_REQUIRED: "存在待核对的佣金/分销收益，请先转财务核对。",
+  REFUND_PENDING: "本单已有未完成的退款申请，请先处理退款。",
+  TERMINATION_PENDING: "本单已有未处理的终止申请，请先处理。",
+  ALREADY_CANCELLED: "订单已取消。",
+  ORDER_CHANGED: "订单已变化，请刷新后重新核对退款资格。",
+};
+const SUPPORT_CANCEL_UNKNOWN = "取消结果未确认。请先刷新订单核对；不要用新原因重复提交，可在本页按原请求重试。";
+
+function supportCancelReasonText(reason: string | null | undefined): string {
+  return reason && SUPPORT_CANCEL_REASON_TEXT[reason] ? SUPPORT_CANCEL_REASON_TEXT[reason]! : "当前状态不满足客服取消条件，请刷新后核对。";
+}
+
+function supportCancelRefundText(view: SupportCancelView | null): string {
+  if (!view?.refund || view.refund.integration !== "INTEGRATED" || !view.refund.intents?.length) {
+    return "退款责任已登记，等待系统提交原路退款；银行到账未知。";
+  }
+  const latest = view.refund.intents[view.refund.intents.length - 1]!;
+  if (latest.requiresReview || latest.state === "REVIEW_REQUIRED") return "退款需人工复核；银行到账未知。";
+  if (latest.state === "SUCCEEDED") return "渠道退款成功（本地核销），银行到账未知。";
+  if (latest.state === "FAILED") return "渠道退款失败（未扣款），请转财务处理。";
+  if (latest.state === "SUBMITTING" || latest.state === "PROCESSING") return "渠道处理中，结果未确认。";
+  if (latest.state === "UNKNOWN") return "渠道结果未确认，不能视为已退款。";
+  return "原路退款待提交；银行到账未知。";
+}
+
+function SupportCancelCard({ orderId, displayNo }: { orderId: string; displayNo: string }) {
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState("");
+  const [phase, setPhase] = useState<"IDLE" | "LOADING" | "SENDING" | "UNKNOWN">("IDLE");
+  const [preview, setPreview] = useState<SupportCancelView | null>(null);
+  const [result, setResult] = useState<SupportCancelView | null>(null);
+  const [error, setError] = useState("");
+  const keyRef = useRef("");
+  const trimmed = reason.trim();
+  const valid = trimmed.length >= 3 && trimmed.length <= 600
+    && ![...reason].some((ch) => { const code = ch.codePointAt(0)!; return code < 32 && code !== 10 && code !== 13 || code === 127; });
+
+  const openDialog = async () => {
+    if (phase !== "UNKNOWN") keyRef.current = "";
+    setError("");
+    setReason("");
+    setPreview(null);
+    setPhase("LOADING");
+    setOpen(true);
+    try {
+      const view = await readSupportCancel(orderId);
+      setPreview(view);
+      if (view.supportCancellation) setResult(view);
+      setPhase("IDLE");
+    } catch (cause) {
+      setPhase("IDLE");
+      if (cause instanceof AdminApiError && (cause.status === 401 || cause.status === 423)) setError("登录状态已变化；请重新确认管理员身份后核对。");
+      else if (cause instanceof AdminApiError && cause.status === 403) setError("当前账号不是本单客服，或没有订单结算写权限。");
+      else if (cause instanceof AdminApiError && cause.status === 404) setError("客服取消服务未装配或订单不可读；不能据此认定无需退款。");
+      else setError(friendlyError(cause));
+    }
+  };
+
+  const submit = async () => {
+    if (!valid || phase === "SENDING" || !preview?.eligibility.allowed) return;
+    if (!keyRef.current) keyRef.current = `support_cancel_${orderId}_${crypto.randomUUID()}`;
+    setPhase("SENDING");
+    setError("");
+    const outcome = await sendSupportCancel(orderId, preview.orderRevision, trimmed, keyRef.current);
+    if (outcome.kind === "accepted") {
+      setResult(outcome.view);
+      setPreview(outcome.view);
+      setOpen(false);
+      setPhase("IDLE");
+      try {
+        const fresh = await readSupportCancel(orderId);
+        setResult(fresh);
+        setPreview(fresh);
+      } catch { /* the accepted receipt is already durable; a failed read must not undo it */ }
+      return;
+    }
+    if (outcome.kind === "unknown") {
+      setPhase("UNKNOWN");
+      setError(SUPPORT_CANCEL_UNKNOWN);
+      return;
+    }
+    if (outcome.kind === "auth") {
+      setPhase("IDLE");
+      setError("登录状态已变化；请重新确认管理员身份后核对。");
+      return;
+    }
+    setPhase("IDLE");
+    setError(supportCancelReasonText(outcome.reasons[0]));
+  };
+
+  const refundCents = result?.supportCancellation?.refundCents ?? preview?.eligibility.refundCents ?? null;
+  const blocked = preview !== null && !preview.eligibility.allowed && !preview.supportCancellation;
+  return <Card className="im-support-fulfillment im-order-card" data-support-cancel="true" aria-label="客服取消订单退款">
+    <CardContent className="grid gap-2 p-4">
+      <CardTitle className="flex items-center gap-2 text-sm"><TriangleAlert className="size-4 shrink-0 text-destructive" />取消订单（全额原路退款）</CardTitle>
+      <CardDescription className="text-xs leading-relaxed">结算落账前可取消；开租前和开租后都按原支付金额全额原路退回，不按已用时间扣费。结算已生成、佣金未冲销或存在未处理退款时不可用。</CardDescription>
+      {result ? <Alert><ShieldCheck /><AlertTitle>已取消并登记全额退款</AlertTitle><AlertDescription>
+        退款金额 {formatFundingCents(refundCents)}（原支付金额）。{supportCancelRefundText(result)} 订单已取消，群聊保留；退款处理结果以渠道与财务核对为准。
+      </AlertDescription></Alert>
+        : <div className="im-support-fulfillment-actions">
+          <Button variant="outline" size="sm" data-action="support-cancel-open" onClick={() => void openDialog()}>取消订单</Button>
+        </div>}
+      {error && !open ? <p className="im-support-fulfillment-error" role="alert"><CircleAlert size={14} />{error}</p> : null}
+    </CardContent>
+    <ConfirmAlertDialog open={open} onOpenChange={(next) => { if (!next && (phase === "SENDING" || phase === "UNKNOWN")) return; setOpen(next); }}
+      contentLabel="取消订单确认" title="确认取消订单并全额原路退款？"
+      description={`订单 ${displayNo}。提交后订单立即取消，并登记原支付金额的全额退款责任；渠道提交结果和银行到账状态未知。`}
+      confirmLabel={phase === "SENDING" ? "提交中…" : phase === "UNKNOWN" ? "重试同一请求" : "确认取消并退款"}
+      onConfirm={() => void submit()} busy={phase === "SENDING"} confirmDisabled={!preview?.eligibility.allowed || !valid}>
+      {phase === "LOADING" ? <p className="im-wb-dialog-hint">正在读取退款资格与金额…</p> : null}
+      {preview ? <div className="grid gap-2">
+        <p className="text-sm"><strong>退款金额：{formatFundingCents(preview.eligibility.refundCents ?? preview.supportCancellation?.refundCents)}</strong>（原支付金额，原路退回）</p>
+        <p className="im-wb-dialog-hint">{preview.openingConfirmed ? "订单已确认开租，请使用现有结算与退款流程。" : "订单尚未确认开租；核实未使用且无争议后登记全额应退。"} 渠道提交结果与银行到账状态未知，不能把本地退款责任当成已到账。</p>
+        {blocked ? <Alert variant="warning"><TriangleAlert /><AlertTitle>当前不可取消</AlertTitle><AlertDescription>{supportCancelReasonText(preview.eligibility.reason)}</AlertDescription></Alert> : null}
+      </div> : null}
+      {preview?.supportCancellation ? <Alert><ShieldCheck /><AlertTitle>已存在客服取消记录</AlertTitle><AlertDescription>{supportCancelRefundText(preview)}</AlertDescription></Alert> : null}
+      <label className="im-wb-dialog-note"><span>取消原因（必填，3–600 字）<em>{reason.length}/600</em></span>
+        <Textarea value={reason} maxLength={600} rows={3} aria-label="客服取消原因" data-support-cancel-reason="true"
+          placeholder="说明取消原因与已与双方沟通的事实" disabled={phase === "SENDING" || phase === "UNKNOWN" || !preview?.eligibility.allowed}
+          onChange={(event) => { setReason(event.target.value); setError(""); }} />
+      </label>
+      {error ? <p className="im-wb-dialog-error" role="alert"><CircleAlert size={14} />{error}</p> : null}
+    </ConfirmAlertDialog>
+  </Card>;
+}
+
+function ManualCloseCard({ orderId, displayNo }: { orderId: string; displayNo: string }) {
+  const [open, setOpen] = useState(false);
+  const [remark, setRemark] = useState("");
+  const [phase, setPhase] = useState<"IDLE" | "SENDING" | "UNKNOWN">("IDLE");
+  const [result, setResult] = useState<ManualCloseResult | null>(null);
+  const [error, setError] = useState("");
+  const keyRef = useRef("");
+  const valid = remark.trim().length >= 3 && remark.trim().length <= 200
+    && ![...remark].some((ch) => { const code = ch.codePointAt(0)!; return code < 32 || code === 127; });
+  const submit = async () => {
+    if (!valid || phase === "SENDING" || result) return;
+    if (!keyRef.current) keyRef.current = `manual_close_${orderId}_${crypto.randomUUID()}`;
+    setPhase("SENDING"); setError("");
+    try {
+      const closed = await sendManualClose(orderId, remark.trim(), keyRef.current);
+      setResult(closed); setPhase("IDLE"); setOpen(false);
+    } catch (cause) {
+      if (cause instanceof AdminApiError && (cause.status === 0 || cause.status === 429 || cause.status >= 500)) {
+        setPhase("UNKNOWN");
+        setError("结果未确认，请刷新订单核对；不要用新备注重复提交，可保留本页重试同一请求。");
+      } else {
+        setPhase("IDLE");
+        const code = cause instanceof AdminApiError ? cause.code : "";
+        setError(code === "ORDER_NOT_CLOSABLE" ? "订单已不是可手动结单的状态；请刷新后核对。"
+          : cause instanceof AdminApiError && cause.status === 403 ? "当前账号不是本单客服，或没有订单结算写权限。"
+          : friendlyError(cause));
+      }
+    }
+  };
+  return <Card className="im-support-fulfillment im-order-card" data-manual-close="true" aria-label="异常处理">
+    <CardContent className="grid gap-2 p-4">
+      <CardTitle className="flex items-center gap-2 text-sm"><TriangleAlert className="size-4 shrink-0 text-destructive" />异常处理</CardTitle>
+      <CardDescription className="text-xs leading-relaxed">手动结单只改订单状态，不生成结算或退款；已收款由财务线下核对。必须填写备注并通知双方。</CardDescription>
+      {result ? <Alert><ShieldCheck /><AlertTitle>已手动结单</AlertTitle><AlertDescription>资金未自动结算或退款，请财务线下核对。订单群保留，72 小时沟通窗口从结单时间开始。</AlertDescription></Alert>
+        : <div className="im-support-fulfillment-actions">
+          <Button variant="outline" size="sm" data-action="manual-close-open" onClick={() => { setError(""); setOpen(true); }}>手动结单</Button>
+        </div>}
+      {error && !open ? <p className="im-support-fulfillment-error" role="alert"><CircleAlert size={14} />{error}</p> : null}
+    </CardContent>
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogContent className="im-wb-dialog" aria-label="手动结单" showCloseButton={false}>
+        <div className="im-wb-dialog-head"><div><strong>手动结单</strong><span>订单 {displayNo} · 只改状态</span></div><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setOpen(false)} disabled={phase === "SENDING"} aria-label="关闭手动结单"><X size={14} /></button></div>
+        <Alert variant="warning"><TriangleAlert /><AlertTitle>资金不会被自动处理</AlertTitle><AlertDescription>本操作不生成结算、退款责任或银行到账；已收款由财务线下核对。提交后订单变为已取消，订单群保留 72 小时沟通窗口。</AlertDescription></Alert>
+        <label className="im-wb-dialog-note"><span>处理备注（必填，3–200 字）<em>{remark.length}/200</em></span>
+          <Textarea value={remark} maxLength={200} rows={3} aria-label="手动结单处理备注" placeholder="说明异常原因与后续资金处理方式" disabled={phase === "SENDING" || phase === "UNKNOWN"} onChange={(event) => { setRemark(event.target.value); setError(""); }} />
+        </label>
+        {error ? <p className="im-wb-dialog-error" role="alert"><CircleAlert size={14} />{error}</p> : null}
+        <div className="im-wb-dialog-actions">
+          <Button variant="ghost" size="sm" onClick={() => setOpen(false)} disabled={phase === "SENDING"}>取消</Button>
+          <Button variant="destructive" size="sm" data-action="manual-close-submit" onClick={() => void submit()} disabled={!valid || phase === "SENDING" || Boolean(result)}>{phase === "SENDING" ? "提交中…" : phase === "UNKNOWN" ? "重试同一请求" : "确认手动结单"}</Button>
+        </div>
       </DialogContent>
     </Dialog>
   </Card>;

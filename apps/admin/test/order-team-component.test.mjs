@@ -10,7 +10,7 @@ import {readFileSync} from 'node:fs';
 import ts from 'typescript';
 
 // Real component + controlled SDK: receipts may arrive after switching orders or permissions.
-async function mountOrderSender(t, methods={}) {
+async function mountOrderSender(t, methods={}, options={}) {
   const browser=new Window({url:'http://127.0.0.1:4311'});
   Object.assign(globalThis,{window:browser,document:browser.document,HTMLElement:browser.HTMLElement,Node:browser.Node,Event:browser.Event,requestAnimationFrame:browser.requestAnimationFrame.bind(browser),IS_REACT_ACT_ENVIRONMENT:true});
   Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
@@ -29,7 +29,7 @@ async function mountOrderSender(t, methods={}) {
   class DecodedImage {naturalWidth=640;naturalHeight=360;set src(_url){queueMicrotask(()=>this.onload?.());}}
   globalThis.Image=DecodedImage;
   let canRead=true;
-  const access=id=>({orderId:id,displayNo:`ZZ-${id}`,orderStatus:'PAID',assignmentState:'ASSIGNED',teamState:'READY',appId:'app',teamId:id==='a'?'1':'2',name:`订单${id}`,gameName:'三角洲行动',account:{id:`account-${id}`,title:`账号${id}`},viewerAccountId:'viewer',conversationId:`viewer|2|${id==='a'?'1':'2'}`,canRead:true,canSend:true,supportEscalation:{firstResponseAt:null,remindDueAt:null,addRound:0,state:'NOT_STARTED',needsManualReview:false,noEligibleStaff:false},members:[]});
+  const access=id=>({orderId:id,displayNo:`ZZ-${id}`,orderStatus:'PAID',assignmentState:'ASSIGNED',teamState:'READY',appId:'app',teamId:id==='a'?'1':'2',name:`订单${id}`,gameName:'三角洲行动',account:{id:`account-${id}`,title:`账号${id}`},viewerAccountId:'viewer',conversationId:`viewer|2|${id==='a'?'1':'2'}`,canRead:true,canSend:options.canSend??true,supportEscalation:{firstResponseAt:null,remindDueAt:null,addRound:0,state:'NOT_STARTED',needsManualReview:false,noEligibleStaff:false},members:[]});
   const request=async url=>{
     if(url.includes('/im?')){if(!canRead)throw Object.assign(new Error('forbidden'),{status:403});return access(url.includes('/a/')?'a':'b');}
     return {items:['a','b'].map(id=>({id,title:`账号${id}`,displayNo:`ZZ-${id}`,status:'PAID',teamState:'READY'})),nextCursor:null};
@@ -48,14 +48,14 @@ async function mountOrderSender(t, methods={}) {
     await act(async()=>input.dispatchEvent(new Event('change',{bubbles:true})));await settle();
   };
   t.after(async()=>{await act(async()=>root.unmount());globalThis.setInterval=interval;globalThis.clearInterval=clear;URL.createObjectURL=oldCreate;URL.revokeObjectURL=oldRevoke;globalThis.Image=oldImage;await vite.close();browser.happyDOM.abort();});
-  await render();await until(()=>node.textContent.includes('ZZ-a'));await click('ZZ-a');await until(()=>node.querySelector('textarea'));
+  await render();await until(()=>node.textContent.includes('ZZ-a'));await click('ZZ-a');await until(()=>node.querySelector('textarea')||node.querySelector('.order-team-readonly'));
   return {node,client,errors,ImLifecycleSupersededError,sent,render,settle,until,click,type,submit,stage,setRead:value=>{canRead=value;}};
 }
 
 test('image authorization cancelled by an order switch leaves a removable undispatched draft',async t=>{
   let release,entered=false,dispatched=0;
   const h=await mountOrderSender(t,{async sendImage(cid,_file,options){entered=true;await new Promise(resolve=>{release=resolve;});await options.authorize({conversationId:cid,operation:'send'});dispatched++;return {...h.sent(cid,'','image'),messageType:1};}});
-  await h.stage(1);await h.submit();await h.until(()=>entered);await h.click('ZZ-b');await h.until(()=>h.node.querySelector('h3')?.textContent==='订单b');
+  await h.stage(1);await h.submit();await h.until(()=>entered);await h.click('ZZ-b');await h.until(()=>h.node.querySelector('h3')?.textContent==='订单 ZZ-b');
   await act(async()=>release());await h.settle();await h.click('ZZ-a');await h.until(()=>h.node.querySelector('.order-team-image-draft'));
   const card=h.node.querySelector('.order-team-image-draft');assert.equal(dispatched,0);assert.equal(card.getAttribute('data-state'),'FAILED');
   const remove=[...card.querySelectorAll('button')].find(button=>button.textContent==='移除');assert.equal(remove.disabled,false);
@@ -76,7 +76,7 @@ for(const replaceClient of [false,true])test(`post-authorization image expiry st
   let rejectSend,dispatched=0;
   const h=await mountOrderSender(t,{async sendImage(cid,_file,options){await options.authorize({conversationId:cid,operation:'send'});dispatched++;return new Promise((_resolve,reject)=>{rejectSend=reject;});}});
   await h.stage(1);await h.submit();await h.until(()=>dispatched===1);
-  if(replaceClient)await h.render({client:{...h.client}});else {await h.click('ZZ-b');await h.until(()=>h.node.querySelector('h3')?.textContent==='订单b');}
+  if(replaceClient)await h.render({client:{...h.client}});else {await h.click('ZZ-b');await h.until(()=>h.node.querySelector('h3')?.textContent==='订单 ZZ-b');}
   await act(async()=>rejectSend(replaceClient?new Error('old SDK is disposed'):new h.ImLifecycleSupersededError()));await h.settle();
   if(!replaceClient){await h.click('ZZ-a');await h.until(()=>h.node.querySelector('.order-team-image-draft'));}
   const card=h.node.querySelector('.order-team-image-draft');assert.equal(card?.getAttribute('data-state'),'UNKNOWN','missing id never proves lack of dispatch');
@@ -376,8 +376,8 @@ test('formal order panel isolates orders, authorization, drafts, late SDK work a
   await act(async()=>root.render(createElement(OrderTeamPanel,{...props,active:false})));
   await act(async()=>root.render(createElement(OrderTeamPanel,props)));
   await until(()=>node.textContent.includes('历史a'));assert.equal(node.querySelector('textarea').value,'A草稿');
-  policy='send-denied';await clickRefresh();await until(()=>[...node.querySelectorAll('button')].some(b=>b.textContent==='发送文字'&&b.disabled));
-  assert.match(node.textContent,/历史a/);assert.equal(node.querySelector('textarea').value,'A草稿');
+  policy='send-denied';await clickRefresh();await until(()=>node.querySelector('.order-team-readonly')&&!node.querySelector('textarea'));
+  assert.match(node.textContent,/历史a/);assert.match(node.querySelector('.order-team-readonly').textContent,/当前不可发送/);
   policy='network';await clickRefresh();await until(()=>node.textContent.includes('检查网络'));assert.match(node.textContent,/历史a/);
   policy='read-denied';const before=historyCalls;await clickRefresh();await until(()=>!node.querySelector('textarea'));assert.doesNotMatch(node.textContent,/历史a|A草稿/);assert.equal(historyCalls,before);
   // 真的被拒之后才升级成"重新确认授权"这个授权语义。
@@ -501,7 +501,7 @@ test('order list refresh rebases a loaded 20+5 cursor window and advances bounde
   t.after(async()=>{await act(async()=>root.unmount());globalThis.setInterval=oldSet;globalThis.clearInterval=oldClear;await vite.close();browser.happyDOM.abort();});
   const settle=()=>act(async()=>{await new Promise(resolve=>setTimeout(resolve,5));});
   const until=async predicate=>{for(let i=0;i<160;i++){if(predicate())return;await settle();}throw Error('pagination refresh condition timed out');};
-  const ids=()=>[...node.querySelectorAll('.order-team-list > button > small:first-child')].map(el=>el.textContent.replace('ZZ-',''));
+  const ids=()=>[...node.querySelectorAll('.order-team-list > button > strong')].map(el=>el.textContent.replace('ZZ-',''));
   const clickMore=async()=>{const button=[...node.querySelectorAll('.order-team-list button')].find(item=>item.textContent.includes('更多订单'));assert.ok(button,'next page cursor is available');await act(async()=>button.click());};
   let rows=Array.from({length:25},(_,i)=>40-i),stopped=new Set(),calls=[],active=0,maxActive=0;
   const order=id=>({id:String(id),displayNo:`ZZ-${id}`,title:`账号${id}`,status:'PAID',teamState:'READY',firstResponseAt:stopped.has(String(id))?'2026-09-22T09:01:00.000Z':null,remindDueAt:null,addRound:0,escalationState:stopped.has(String(id))?'STOPPED':'RUNNING'});
@@ -555,7 +555,7 @@ test('load-more and scheduled refresh serialize and recompute the page cursor',a
   t.after(async()=>{await act(async()=>root.unmount());globalThis.setInterval=oldSet;globalThis.clearInterval=oldClear;await vite.close();browser.happyDOM.abort();});
   const settle=()=>act(async()=>{await new Promise(resolve=>setTimeout(resolve,5));});
   const until=async predicate=>{for(let i=0;i<160;i++){if(predicate())return;await settle();}throw Error('load-more/refresh race timed out');};
-  const ids=()=>[...node.querySelectorAll('.order-team-list > button > small:first-child')].map(el=>el.textContent.replace('ZZ-',''));
+  const ids=()=>[...node.querySelectorAll('.order-team-list > button > strong')].map(el=>el.textContent.replace('ZZ-',''));
   let rows=Array.from({length:50},(_,i)=>50-i),hold=null,calls=[],active=0,maxActive=0;
   const request=async path=>{const url=new URL(path,'http://127.0.0.1:4311'),cursor=url.searchParams.get('cursor');calls.push(cursor);active++;maxActive=Math.max(maxActive,active);
     try{if(cursor&&hold){const current=hold;hold=null;current.entered=true;await new Promise(resolve=>{current.release=resolve;});}
@@ -648,8 +648,6 @@ test('order panel gates image decoding and rejects blob history URLs',async(t)=>
   Object.defineProperty(globalThis,'Image',{value:ControlledImage,configurable:true});
   Object.defineProperty(browser,'Image',{value:ControlledImage,configurable:true});
   const oldCreate=globalThis.URL.createObjectURL,oldRevoke=globalThis.URL.revokeObjectURL;let previewId=0;
-  const showModal=browser.HTMLDialogElement.prototype.showModal;let modalCalls=0;
-  browser.HTMLDialogElement.prototype.showModal=function(){modalCalls++;return showModal.call(this);};
   globalThis.URL.createObjectURL=()=>`blob:preview-${++previewId}`;globalThis.URL.revokeObjectURL=()=>{};
   const {createRoot}=await import('react-dom/client');
   const rootPath=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
@@ -663,7 +661,7 @@ test('order panel gates image decoding and rejects blob history URLs',async(t)=>
   const access={orderId:'a',displayNo:'ZZ-a',orderStatus:'PAID',assignmentState:'ASSIGNED',teamState:'READY',appId:'app',teamId:'1',name:'订单a',gameName:'三角洲行动',account:{id:'account-a',title:'账号a'},viewerAccountId:'viewer',conversationId:'viewer|2|1',canRead:true,canSend:true,supportEscalation:{firstResponseAt:null,remindDueAt:'2026-09-21T09:30:00.000Z',addRound:1,state:'RUNNING',needsManualReview:false,noEligibleStaff:false},members:[{platformId:'buyer',accountId:'viewer',party:'BUYER',name:'买家甲',avatar:null}]};
   const history=[
     {messageClientId:'blob-history',messageServerId:'blob-history',conversationId:'viewer|2|1',senderId:'viewer',receiverId:'1',createTime:1,messageType:1,attachment:{imageId:'blob',url:'blob:http://127.0.0.1:4311/unsafe',name:'不可信图片',mimeType:'image/png',size:3}},
-    {messageClientId:'safe-history',messageServerId:'safe-history',conversationId:'viewer|2|1',senderId:'viewer',receiverId:'1',createTime:2,messageType:1,attachment:{imageId:'safe',url:'/api/im/images/safe',name:'安全图片',mimeType:'image/png',size:3}},
+    {messageClientId:'safe-history',messageServerId:'safe-history',conversationId:'viewer|2|1',senderId:'viewer',receiverId:'1',createTime:2,messageType:1,attachment:{imageId:'safe',url:'/api/im/images/safe',thumbUrl:'/api/im/images/safe-thumb',name:'安全图片',mimeType:'image/png',size:3}},
   ];
   let sendCalls=0,lastDimensions;const request=async url=>url.includes('/im?')?access:{items:[{id:'a',title:'账号a',displayNo:'ZZ-a',status:'PAID',teamState:'READY'}],nextCursor:null};
   const client={accountId:'viewer',transport:'local-fake',onMessages:()=>()=>{},async getMessageHistory(cid,_limit,_anchor,authorize){await authorize({conversationId:cid,operation:'read'});return history;},async sendText(){throw new Error('text should not be used');},async sendImage(cid,file,options){await options.authorize({conversationId:cid,operation:'send'});sendCalls+=1;lastDimensions={width:options.width,height:options.height,name:file.name};return {...history[1],messageClientId:`sent-${sendCalls}`,messageServerId:`sent-${sendCalls}`};}};
@@ -673,19 +671,7 @@ test('order panel gates image decoding and rejects blob history URLs',async(t)=>
   await act(async()=>root.render(createElement(OrderTeamPanel,props)));await until(()=>node.textContent.includes('ZZ-a'));await act(async()=>[...node.querySelectorAll('button')].find(b=>b.textContent.includes('ZZ-a')).click());await until(()=>node.textContent.includes('图片暂不可预览'));
   assert.equal(node.querySelector('img[src^="blob:"]'),null);
   const imageButton=node.querySelector('.order-team-image');assert.ok(imageButton);
-  await act(async()=>{imageButton.focus();imageButton.click();});
-  assert.equal(modalCalls,1,'preview must enter the native modal stack for Escape and focus containment');
-  const dialog=node.querySelector('dialog');assert.ok(dialog?.open);
-  const closeButton=dialog.querySelector('button');assert.ok(closeButton);
-  for(const shiftKey of [false,true]){let tab;await act(async()=>{tab=new browser.KeyboardEvent('keydown',{key:'Tab',shiftKey,bubbles:true,cancelable:true});closeButton.dispatchEvent(tab);});assert.equal(tab.defaultPrevented,true);assert.equal(document.activeElement,closeButton);}
-  let escapeBubbled=false;const watchEscape=event=>{if(event.key==='Escape')escapeBubbled=true;};document.addEventListener('keydown',watchEscape);
-  let escape;await act(async()=>{escape=new browser.KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true});closeButton.dispatchEvent(escape);});document.removeEventListener('keydown',watchEscape);
-  assert.equal(escape.defaultPrevented,true);assert.equal(escapeBubbled,false,'Escape must not reach the order panel');
-  await until(()=>node.querySelector('dialog')===null&&document.activeElement===imageButton);
-  await act(async()=>{imageButton.focus();imageButton.click();});await until(()=>node.querySelector('dialog')?.open);assert.equal(modalCalls,2);
-  const cancelDialog=node.querySelector('dialog');
-  await act(async()=>cancelDialog.dispatchEvent(new browser.Event('cancel',{bubbles:true,cancelable:true})));
-  await until(()=>node.querySelector('dialog')===null&&document.activeElement===imageButton);
+  assert.equal(imageButton.querySelector('img').getAttribute('src'),'/api/im/images/safe-thumb','the row uses the thumbnail');
   const input=node.querySelector('input[type=file]');const file=new browser.File([new Uint8Array([0xff,0xd8,0xff])],'proof.png',{type:'image/png'});Object.defineProperty(input,'files',{configurable:true,value:[file]});await act(async()=>input.dispatchEvent(new Event('change',{bubbles:true})));await until(()=>pendingImages.length===1);
   const submit=node.querySelector('form button[type=submit]');assert.equal(submit.disabled,true);await act(async()=>node.querySelector('form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));assert.equal(sendCalls,0);
   const decoder=pendingImages.shift();decoder.naturalWidth=640;decoder.naturalHeight=360;decoder.onload();await until(()=>!submit.disabled);await act(async()=>submit.click());await until(()=>sendCalls===1);assert.deepEqual(lastDimensions,{width:640,height:360,name:'proof.png'});
@@ -1010,4 +996,249 @@ test('zero accessible orders render one whole-area state and never a dead split,
   await act(async()=>refresh().click());
   await until(()=>node.querySelector('.order-team-empty')&&refresh().textContent.trim()==='刷新');
   assert.match(node.querySelector('.order-team-empty').textContent,/暂无可访问的订单/);
+});
+
+function menuHistory(){
+  return [
+    {messageClientId:'own-text',messageServerId:'srv-own',senderId:'viewer',receiverId:'1',createTime:100,text:'我方原文',messageType:0},
+    {messageClientId:'peer-text',messageServerId:'srv-peer',senderId:'buyer',receiverId:'1',createTime:200,text:'买家消息',messageType:0},
+    {messageClientId:'own-image',messageServerId:'srv-image',senderId:'viewer',receiverId:'1',createTime:300,text:'',messageType:1,attachment:{url:'https://nim-nosdn.example/a.png',name:'截图.png'}},
+    {messageClientId:'system-notice',messageServerId:'srv-system',senderId:'system',receiverId:'1',createTime:400,text:'',messageType:5,attachment:{type:0}},
+    {messageClientId:'revoked-note',messageServerId:'srv-revoked',senderId:'buyer',receiverId:'1',createTime:500,text:'',messageType:0,revoked:true},
+  ];
+}
+function historyMethods(rows){
+  return {async getMessageHistory(cid,_limit,_anchor,authorize){await authorize({conversationId:cid,operation:'read'});return rows.map(row=>({...row,conversationId:cid}));}};
+}
+function stubClipboard(t,browser){
+  const previous=Object.getOwnPropertyDescriptor(browser.navigator,'clipboard');
+  let copied=null;
+  Object.defineProperty(browser.navigator,'clipboard',{configurable:true,value:{writeText:async text=>{copied=text;}}});
+  t.after(()=>{if(previous)Object.defineProperty(browser.navigator,'clipboard',previous);else delete browser.navigator.clipboard;});
+  return ()=>copied;
+}
+
+test('message menu exposes copy/reply/revoke/delete by message type and ownership',async t=>{
+  const h=await mountOrderSender(t,historyMethods(menuHistory()));
+  const browser=globalThis.window;
+  await h.until(()=>h.node.querySelectorAll('.order-team-messages li[data-message-id]').length===5);
+  const row=id=>h.node.querySelector(`.order-team-messages li[data-message-id="${id}"]`);
+  const open=async(id,point={clientX:120,clientY:90})=>{await act(async()=>{const target=row(id);assert.ok(target,id);target.dispatchEvent(new browser.MouseEvent('contextmenu',{bubbles:true,cancelable:true,...point}));});await h.settle();};
+  const labels=()=>[...document.querySelectorAll('.message-action-menu [role=menuitem]')].map(b=>b.textContent.trim());
+  const pick=async label=>{const button=[...document.querySelectorAll('.message-action-menu [role=menuitem]')].find(b=>b.textContent.trim()===label);assert.ok(button,label);await act(async()=>button.click());await h.settle();};
+  const copied=stubClipboard(t,browser);
+
+  await open('srv-own');
+  assert.deepEqual(labels(),['复制','回复','撤回','删除']);
+  assert.equal(document.querySelector('.message-action-menu').getAttribute('role'),'menu');
+  assert.equal(document.activeElement?.getAttribute('role'),'menuitem','focus enters the first available item');
+  await pick('复制');
+  assert.equal(copied(),'我方原文');
+  assert.equal(document.querySelector('.message-action-menu'),null,'copy closes the menu');
+
+  await open('srv-peer');
+  assert.deepEqual(labels(),['复制','回复','删除'],'another account cannot revoke');
+  await act(async()=>document.activeElement.dispatchEvent(new browser.KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true})));
+  await h.settle();
+  assert.equal(document.querySelector('.message-action-menu'),null,'Escape closes');
+  assert.equal(document.activeElement,row('srv-peer'),'Escape returns focus to the message');
+
+  await open('srv-image');
+  assert.deepEqual(labels(),['回复','撤回','删除'],'images cannot be copied');
+  await act(async()=>document.activeElement.dispatchEvent(new browser.KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true})));
+  await h.settle();
+
+  const systemEvent=new browser.MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:10,clientY:10});
+  await act(async()=>row('srv-system').dispatchEvent(systemEvent));
+  await h.settle();
+  assert.equal(systemEvent.defaultPrevented,true,'a message row never falls back to the browser menu');
+  assert.equal(document.querySelector('.message-action-menu'),null,'system notices have no menu');
+  await act(async()=>row('srv-revoked').dispatchEvent(new browser.MouseEvent('contextmenu',{bubbles:true,cancelable:true})));
+  await h.settle();
+  assert.equal(document.querySelector('.message-action-menu'),null,'revoked messages have no menu');
+
+  await open('srv-own',{clientX:5000,clientY:5000});
+  const menu=document.querySelector('.message-action-menu');
+  assert.ok(parseFloat(menu.style.left)<=browser.innerWidth-8,'menu is clamped inside the viewport');
+  assert.ok(parseFloat(menu.style.top)<=browser.innerHeight-8);
+  await act(async()=>document.activeElement.dispatchEvent(new browser.KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true})));
+  await h.settle();
+  const selected=row('srv-own');
+  await act(async()=>{selected.dispatchEvent(new browser.PointerEvent('pointerdown',{bubbles:true,pointerType:'touch',clientX:200,clientY:150}));await new Promise(r=>setTimeout(r,600));});
+  assert.deepEqual(labels(),['复制','回复','撤回','删除'],'long press opens the same menu');
+});
+
+test('reply sends replyText, shows the quote and clears it after success',async t=>{
+  const rows=menuHistory();
+  let replyCalls=0,sendCalls=0,sentTo=null,sentText=null;
+  const h=await mountOrderSender(t,{
+    ...historyMethods(rows),
+    async replyText(cid,text,replyTo,authorize){await authorize({conversationId:cid,operation:'send'});replyCalls++;sentTo=replyTo;sentText=text;return {...rows[1],conversationId:cid,messageClientId:'reply-1',messageServerId:'srv-reply',senderId:'viewer',createTime:600,text,reply:{messageId:replyTo.messageServerId,senderId:replyTo.senderId,text:replyTo.text}};},
+    async sendText(cid,text,authorize){await authorize({conversationId:cid,operation:'send'});sendCalls++;return h.sent(cid,text,`plain-${sendCalls}`);},
+  });
+  await h.until(()=>h.node.querySelectorAll('.order-team-messages li[data-message-id]').length===5);
+  const open=async id=>{await act(async()=>h.node.querySelector(`.order-team-messages li[data-message-id="${id}"]`).dispatchEvent(new globalThis.window.MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:120,clientY:90})));await h.settle();};
+  const pick=async label=>{const button=[...document.querySelectorAll('.message-action-menu [role=menuitem]')].find(b=>b.textContent.trim()===label);assert.ok(button,label);await act(async()=>button.click());await h.settle();};
+
+  await open('srv-peer');
+  await pick('回复');
+  assert.match(h.node.querySelector('.message-reply-quote').textContent,/回复：买家消息/);
+  await h.type('收到');
+  await h.submit();
+  await h.until(()=>replyCalls===1,'reply dispatched');
+  assert.equal(sentTo.messageClientId,'peer-text','replyText receives the original message');
+  assert.equal(sentText,'收到');
+  assert.equal(h.node.querySelector('textarea').value,'','a confirmed reply clears the draft');
+  assert.equal(h.node.querySelector('.message-reply-quote'),null,'a confirmed reply clears the quote');
+  assert.match(h.node.querySelector('.order-team-messages .message-quoted').textContent,/买家消息/,'the receipt keeps its own quote summary');
+
+  await h.type('普通消息');
+  await h.submit();
+  await h.until(()=>sendCalls===1,'plain send after reply');
+  assert.equal(replyCalls,1,'no quote means no reply dispatch');
+});
+
+test('reply UNKNOWN keeps text and quote and never re-sends under a new id',async t=>{
+  const rows=menuHistory();
+  let replyCalls=0,sendCalls=0,plainText=null;
+  const h=await mountOrderSender(t,{
+    ...historyMethods(rows),
+    async replyText(cid,_text,_replyTo,authorize){await authorize({conversationId:cid,operation:'send'});replyCalls++;throw new h.errors.NimTextSendError('UNKNOWN','未确认',{messageClientId:'reply-unknown'});},
+    async sendText(cid,text,authorize){await authorize({conversationId:cid,operation:'send'});sendCalls++;plainText=text;return h.sent(cid,text,'plain-after-cancel');},
+  });
+  await h.until(()=>h.node.querySelectorAll('.order-team-messages li[data-message-id]').length===5);
+  await act(async()=>h.node.querySelector('.order-team-messages li[data-message-id="srv-peer"]').dispatchEvent(new globalThis.window.MouseEvent('contextmenu',{bubbles:true,cancelable:true})));
+  await h.settle();
+  const reply=[...document.querySelectorAll('.message-action-menu [role=menuitem]')].find(b=>b.textContent.trim()==='回复');
+  await act(async()=>reply.click());
+  await h.settle();
+  await h.type('回复内容');
+  await h.submit();
+  await h.until(()=>h.node.textContent.includes('回复结果未确认'));
+  assert.equal(h.node.querySelector('textarea').value,'回复内容','the reply draft survives an unknown result');
+  assert.match(h.node.querySelector('.message-reply-quote').textContent,/回复：买家消息/,'the quote survives an unknown result');
+  await h.settle();
+  assert.equal(replyCalls,1,'an unknown reply is not retried automatically');
+  await h.submit();
+  await h.settle();
+  assert.equal(replyCalls,1,'a quoted submit cannot repeat an unconfirmed reply');
+  await act(async()=>h.node.querySelector('.message-reply-quote button').click());
+  assert.equal(h.node.querySelector('.message-reply-quote'),null);
+  await h.submit();
+  await h.until(()=>sendCalls===1,'cancelling the quote allows a plain send');
+  assert.equal(plainText,'回复内容');
+});
+
+test('revoke asks for a second confirmation, merges the revoked message and keeps 409/403 visible',async t=>{
+  const rows=menuHistory();
+  let revokeCalls=0;
+  const h=await mountOrderSender(t,{
+    ...historyMethods(rows),
+    async revokeMessage(cid,message,authorize){await authorize({conversationId:cid,operation:'send'});revokeCalls++;return {...message,conversationId:cid,text:'',revoked:true};},
+  });
+  await h.until(()=>h.node.querySelectorAll('.order-team-messages li[data-message-id]').length===5);
+  await act(async()=>h.node.querySelector('.order-team-messages li[data-message-id="srv-own"]').dispatchEvent(new globalThis.window.MouseEvent('contextmenu',{bubbles:true,cancelable:true})));
+  await h.settle();
+  const item=label=>[...document.querySelectorAll('.message-action-menu [role=menuitem]')].find(b=>b.textContent.trim()===label);
+  await act(async()=>item('撤回').click());
+  await h.settle();
+  assert.ok(item('确认撤回'),'the same menu asks for confirmation');
+  assert.equal(revokeCalls,0,'the first press only arms the confirmation');
+  await act(async()=>item('确认撤回').click());
+  await h.until(()=>revokeCalls===1,'revoke dispatched');
+  await h.until(()=>h.node.querySelector('.order-team-messages li[data-message-id="srv-own"]').textContent.includes('消息已撤回'));
+  assert.doesNotMatch(h.node.querySelector('.order-team-messages li[data-message-id="srv-own"]').textContent,/我方原文/);
+  await act(async()=>h.node.querySelector('.order-team-messages li[data-message-id="srv-own"]').dispatchEvent(new globalThis.window.MouseEvent('contextmenu',{bubbles:true,cancelable:true})));
+  await h.settle();
+  assert.equal(document.querySelector('.message-action-menu'),null,'a revoked message has no menu');
+
+  for(const [status,copy] of [[409,'已超过可撤回时间'],[403,'无权撤回此消息']]){
+    const failing=await mountOrderSender(t,{...historyMethods(menuHistory()),async revokeMessage(){throw Object.assign(new Error('synthetic revoke'),{status});}});
+    await failing.until(()=>failing.node.querySelectorAll('.order-team-messages li[data-message-id]').length===5);
+    await act(async()=>failing.node.querySelector('.order-team-messages li[data-message-id="srv-own"]').dispatchEvent(new globalThis.window.MouseEvent('contextmenu',{bubbles:true,cancelable:true})));
+    await failing.settle();
+    const affordance=label=>[...document.querySelectorAll('.message-action-menu [role=menuitem]')].find(b=>b.textContent.trim()===label);
+    await act(async()=>affordance('撤回').click());
+    await act(async()=>affordance('确认撤回').click());
+    await failing.until(()=>failing.node.querySelector('[role=alert]')?.textContent.includes(copy));
+    assert.match(failing.node.querySelector('.order-team-messages li[data-message-id="srv-own"]').textContent,/我方原文/,'a failed revoke keeps the message');
+  }
+});
+
+test('delete removes the message locally and a failure never fakes success',async t=>{
+  const rows=menuHistory();
+  let deleteCalls=0;
+  const h=await mountOrderSender(t,{
+    ...historyMethods(rows),
+    async deleteMessage(cid){deleteCalls++;assert.ok(cid);},
+  });
+  await h.until(()=>h.node.querySelectorAll('.order-team-messages li[data-message-id]').length===5);
+  await act(async()=>h.node.querySelector('.order-team-messages li[data-message-id="srv-peer"]').dispatchEvent(new globalThis.window.MouseEvent('contextmenu',{bubbles:true,cancelable:true})));
+  await h.settle();
+  const remove=[...document.querySelectorAll('.message-action-menu [role=menuitem]')].find(b=>b.textContent.trim()==='删除');
+  await act(async()=>remove.click());
+  await h.until(()=>!h.node.querySelector('.order-team-messages li[data-message-id="srv-peer"]'));
+  assert.equal(deleteCalls,1);
+
+  const failing=await mountOrderSender(t,{...historyMethods(menuHistory()),async deleteMessage(){throw Object.assign(new Error('synthetic delete'),{status:403});}});
+  await failing.until(()=>failing.node.querySelectorAll('.order-team-messages li[data-message-id]').length===5);
+  await act(async()=>failing.node.querySelector('.order-team-messages li[data-message-id="srv-peer"]').dispatchEvent(new globalThis.window.MouseEvent('contextmenu',{bubbles:true,cancelable:true})));
+  await failing.settle();
+  const removeFailed=[...document.querySelectorAll('.message-action-menu [role=menuitem]')].find(b=>b.textContent.trim()==='删除');
+  await act(async()=>removeFailed.click());
+  await failing.until(()=>failing.node.querySelector('[role=alert]')?.textContent.includes('无权删除此消息'));
+  assert.ok(failing.node.querySelector('.order-team-messages li[data-message-id="srv-peer"]'),'a failed delete keeps the message');
+});
+
+test('read-only send permission hides reply and revoke but keeps copy and delete',async t=>{
+  const h=await mountOrderSender(t,historyMethods(menuHistory()),{canSend:false});
+  await h.until(()=>h.node.querySelectorAll('.order-team-messages li[data-message-id]').length===5);
+  assert.equal(h.node.querySelector('form'),null,'read-only orders replace the composer instead of leaving a disabled box');
+  assert.ok(h.node.querySelector('.order-team-readonly'),'read-only orders explain the restriction');
+  await act(async()=>h.node.querySelector('.order-team-messages li[data-message-id="srv-own"]').dispatchEvent(new globalThis.window.MouseEvent('contextmenu',{bubbles:true,cancelable:true})));
+  await h.settle();
+  assert.deepEqual([...document.querySelectorAll('.message-action-menu [role=menuitem]')].map(b=>b.textContent.trim()),['复制','删除']);
+});
+
+test('history failure blocks order sending, is not an empty conversation and can recover',async t=>{
+  let fail=true, sends=0;
+  const h=await mountOrderSender(t,{
+    async getMessageHistory(cid,_limit,_anchor,authorize){await authorize({conversationId:cid,operation:'read'});if(fail)throw Object.assign(new Error('history unavailable'),{status:503});return[];},
+    async sendText(){sends++;return{};}
+  });
+  await h.until(()=>h.node.textContent.includes('消息暂未加载'));
+  assert.doesNotMatch(h.node.textContent,/还没有消息/);
+  assert.equal(h.node.querySelector('textarea'),null);
+  assert.equal(sends,0);
+  fail=false;await h.click('重新加载消息');await h.until(()=>h.node.querySelector('textarea'));
+  assert.match(h.node.textContent,/还没有消息/);assert.equal(sends,0);
+});
+
+test('custom order conversation shares the initial history send gate and recovers explicitly',async t=>{
+  let fail=true,sends=0,h,view;
+  h=await mountOrderSender(t,{
+    async getMessageHistory(cid,_limit,_anchor,authorize){await authorize({conversationId:cid,operation:'read'});if(fail)throw Object.assign(new Error('history unavailable'),{status:503});return[];},
+    async sendText(cid,text,authorize){await authorize({conversationId:cid,operation:'send'});sends++;return h.sent(cid,text,'recovered-message');}
+  });
+  await h.until(()=>h.node.textContent.includes('消息暂未加载'));
+  await h.render({renderConversation:next=>{view=next;return createElement('form',{onSubmit:next.onSubmit},
+    createElement('textarea',{value:next.draft,onChange:e=>next.setDraft(e.target.value)}),
+    createElement('button',{type:'submit',disabled:!next.canSend},'自定义发送'));}});
+  assert.equal(view.canSend,false);assert.equal(view.info.canSend,false);
+  await h.type('不会提前发送');await h.submit();assert.equal(sends,0);
+  fail=false;await act(async()=>view.onRefresh());await h.until(()=>view.canSend);
+  await h.type('恢复后发送');await h.submit();await h.until(()=>sends===1);
+});
+
+test('order media renders a one-layer file card and an unframed caption',async t=>{
+  const media={mediaId:'media-file-1',kind:'file',name:'订单附件说明.pdf',mimeType:'application/pdf',size:4096,url:'/api/im/media/media-file-1'};
+  const history=[{messageClientId:'media-file',messageServerId:'srv-media-file',conversationId:'viewer|2|1',senderId:'buyer',receiverId:'viewer',createTime:10,messageType:6,text:'请查收订单附件',media}];
+  const h=await mountOrderSender(t,{async getMessageHistory(cid,_limit,_anchor,authorize){await authorize({conversationId:cid,operation:'read'});return history;}});
+  await h.until(()=>h.node.querySelector('a.message-media-file'));
+  const card=h.node.querySelector('a.message-media-file');
+  assert.equal(card.closest('[data-slot="bubble"]'),null);assert.equal(card.querySelector('a,p'),null);
+  assert.match(card.textContent,/点击下载/);
+  const caption=h.node.querySelector('.message-media-caption-text');
+  assert.ok(caption,'the media caption is rendered');assert.equal(caption.closest('[data-slot="bubble"]'),null,'the caption is not framed');
+  assert.match(caption.textContent,/请查收订单附件/);
 });

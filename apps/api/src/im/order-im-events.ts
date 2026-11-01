@@ -587,9 +587,14 @@ async function decideOrderPreSend(db: PoolClient, options: OrderImEventOptions, 
 }
 
 async function decideConsultationPreSend(db: PoolClient, options: OrderImEventOptions, event: SupplierMessageEvent): Promise<ScopeDecision> {
-  const consultation = (await db.query(`SELECT id, kind, state, message_scope_state, assigned_admin_id, user_id FROM zzsh_iam.im_consultation
-    WHERE app_id=$1 AND message_scope_id=$2`, [options.appId, event.teamId])).rows[0];
-  if (!consultation || consultation.state !== "ACTIVE" || consultation.message_scope_state !== "READY") {
+  // Support threads keep one Team across rounds: team readiness is a thread fact,
+  // while the responsible agent is still the current ACTIVE round's assignee.
+  const consultation = (await db.query(`SELECT c.id, c.kind, c.state, c.message_scope_state, c.assigned_admin_id, c.user_id,
+      t.message_scope_state AS thread_scope_state
+    FROM zzsh_iam.im_consultation c JOIN zzsh_iam.im_support_thread t ON t.id=c.thread_id
+    WHERE c.app_id=$1 AND t.message_scope_id=$2
+    ORDER BY (c.state<>'CLOSED') DESC, c.created_at DESC, c.id DESC LIMIT 1`, [options.appId, event.teamId])).rows[0];
+  if (!consultation || consultation.thread_scope_state !== "READY") {
     return { allow: false, reason: "UNKNOWN_SCOPE", orderId: null };
   }
   const mapping = await loadMapping(db, options.appId, event.fromAccount);
@@ -604,7 +609,8 @@ async function decideConsultationPreSend(db: PoolClient, options: OrderImEventOp
     }
     return { allow: true, reason: "CONSULTATION_USER", orderId: null };
   }
-  if (mapping.identity_kind === "ADMIN" && mapping.platform_subject_id === consultation.assigned_admin_id) {
+  if (mapping.identity_kind === "ADMIN" && consultation.state === "ACTIVE" && consultation.message_scope_state === "READY"
+    && mapping.platform_subject_id === consultation.assigned_admin_id) {
     const admin = (await db.query(`SELECT suspended FROM zzsh_auth_admin."user" WHERE id=$1`, [mapping.platform_subject_id])).rows[0];
     if (!admin || admin.suspended) return { allow: false, reason: "ADMIN_UNAVAILABLE", orderId: null };
     const access = await loadEffectiveAdminAccess(db, mapping.platform_subject_id);

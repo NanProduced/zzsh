@@ -96,11 +96,11 @@ test("user IM message authorization forwards only the scoped query and cookie", 
     return Response.json({ authorized: true });
   };
   try {
-    const response = await GET(new Request("http://127.0.0.1:3100/api/im/message-access?conversationId=customer%7C2%7C9001&operation=send", {
+    const response = await GET(new Request("http://127.0.0.1:3100/api/im/message-access?conversationId=customer%7C2%7C9001&operation=send&messageClientId=stable-cid&messageType=3", {
       headers: { origin: "http://127.0.0.1:3100", cookie: "zzsh_user.session_token=user; zzsh_admin.session_token=admin" },
     }), context(["message-access"]));
     assert.equal(response.status, 200);
-    assert.equal(seen.url, "http://127.0.0.1:3102/api/v1/im/user/message-access?conversationId=customer%7C2%7C9001&operation=send");
+    assert.equal(seen.url, "http://127.0.0.1:3102/api/v1/im/user/message-access?conversationId=customer%7C2%7C9001&operation=send&messageClientId=stable-cid&messageType=3");
     assert.equal(seen.options.headers.get("cookie"), "zzsh_user.session_token=user");
     assert.equal(seen.options.headers.get("authorization"), null);
   } finally {

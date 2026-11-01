@@ -35,7 +35,7 @@ import { readCreditGuaranteeEnabled, preflightCreditGuarantee } from "../credit/
 import { ensureCreditAccount } from "../credit/credit-guarantee";
 import type { ConfirmationKey } from "../order/confirmation-token";
 import type { ConfirmationFundingReader } from "../order/personal-confirmation";
-import { unknownSupplyGate, type SupplyGateReader } from "../supply/publishing";
+import { readPublicListing, readPublishingAccount, unknownSupplyGate, type SupplyGateReader } from "../supply/publishing";
 import { createProductionConfirmationFundingReader, createProductionSupplyGateReader, readFormalSupplyGate } from "../supply/funding-authority";
 import type { INestApplication } from "@nestjs/common";
 import { createHash, randomInt, randomUUID } from "node:crypto";
@@ -74,11 +74,13 @@ import { SecurityApiError, setAuditContext, recordAudit, withTransaction } from 
 import { createUserAuthThrottle, readUserThrottleHmacKey, readUserThrottleMode, ThrottleDependencyError, withUserAuthThrottle, type UserAuthThrottle, type UserThrottleMode } from "./user-auth-throttle";
 import { parseUserClientIpConfig, resolveUserClientIp, USER_CLIENT_IP_FORWARD_HEADER, type UserClientIpConfig } from "./user-client-ip";
 import { ImIdentityProvisioner, YunxinDynamicTokenService } from "../im/identity-lifecycle";
-import { MessageScopeRecoveryLifecycle, supportManagerIdentityKey, type ConsultationRouteOptions } from "../im/consultation";
+import { MessageScopeRecoveryLifecycle, autoAssignWaitingConsultations, scanSupportFirstResponseBreaches, supportManagerIdentityKey, type ConsultationRouteOptions } from "../im/consultation";
 import { YunxinIdentityRepository } from "../im/yunxin-identity-repository";
 import { YunxinServerApiClient, type YunxinServerApi, type YunxinSupportScopeApi } from "../im/yunxin-provider";
 import type { ImMessageTransport } from "../im/im-contract";
+import { createYunxinDueReminderTransport, createYunxinStageCardTransport, createYunxinSystemMessageTransport, type YunxinTeamTextSender } from "../im/yunxin-transport";
 import { mountYunxinHandlers } from "../im/yunxin-routes";
+import { mountReadCopyHandler } from "../im/read-copy";
 import { mountOrderImEventHandlers, OrderImEventRecoveryLifecycle, orderImEventsActivateApp } from "../im/order-im-events";
 
 import { assertLocalDistributionAssembly, type LocalDistributionScope } from '../finance/distribution-policy-store';
@@ -151,7 +153,8 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   /** Explicit product capability: only enabled assemblies consume credit/guarantee state in supply gates. */
   creditGuaranteeEnabled?: boolean;
   /** Explicit local scheduler; omitted by default, never inferred from environment flags. */
-  supportDispatch?: Omit<OrderDispatchOptions, "pool">;
+  supportDispatch?: Omit<OrderDispatchOptions, "pool"> & { autoAssignConsultations?: boolean; concurrencyLimit?: number; firstResponseSeconds?: number };
+
   orderTeams?: { membersLimit: number; intervalMs: number; batchLimit: number; escalationEnabled?: boolean };
   /** Explicit supplier event ingress; omitted by default and never mounted without configuration. */
   orderImEvents?: { appKey: string; appSecret: string; freshnessMs?: number; approvalLinkMs?: number; recoveryIntervalMs?: number; escalationEnabled?: boolean };
@@ -859,7 +862,7 @@ export function loadAuthRuntimeConfig(
 export async function mountAuthHandlers(
   app: INestApplication,
   options: AuthRuntimeOptions,
-): Promise<AuthSecurityOptions> {
+): Promise<AuthSecurityOptions & { settlementRecordingEnabled: boolean }> {
   if (options.localControlledPayments && options.joinpayCollection) {
     throw new ConfigurationError("Controlled and formal collection assemblies are exclusive");
   }
@@ -966,8 +969,18 @@ export async function mountAuthHandlers(
         };
       })()
     : undefined;
+  // Real-channel notification seam for order groups. Without it the lifecycle
+  // workers skip their scans entirely, so a real App would create Teams but never
+  // send the Bot welcome, stage cards, due reminders or the manual-close notice.
+  const teamTextSender = yunxinRuntime
+    && typeof (yunxinRuntime.provider as { sendSupportTeamText?: unknown }).sendSupportTeamText === "function"
+    ? (yunxinRuntime.provider as YunxinTeamTextSender)
+    : undefined;
   const yunxinConsultation: ConsultationRouteOptions | undefined = yunxinRuntime ? {
     ...(options.supportDispatch?.appId === options.yunxin!.appId ? { wakeDispatch: () => app.get(OrderDispatchLifecycle).wake() } : {}),
+    ...(options.supportDispatch?.autoAssignConsultations === true ? { autoAssignConsultations: true } : {}),
+    ...(options.supportDispatch?.concurrencyLimit !== undefined ? { supportConcurrency: options.supportDispatch.concurrencyLimit } : {}),
+    ...(options.supportDispatch?.firstResponseSeconds !== undefined ? { firstResponseSeconds: options.supportDispatch.firstResponseSeconds } : {}),
     pool: options.pool,
     appId: options.yunxin!.appId,
     provider: yunxinRuntime.provider,
@@ -975,6 +988,7 @@ export async function mountAuthHandlers(
     supportManager: {
       key: supportManagerIdentityKey(options.yunxin!.appId),
       provisioner: yunxinRuntime.provisioner,
+      avatarUrl: `${options.userOrigin.replace(/\/+$/, "")}/art/zhouzhou/avatar.webp`,
     },
   } : undefined;
   // Filled right after the user auth instance exists; the after hook only runs at request time.
@@ -1240,9 +1254,11 @@ export async function mountAuthHandlers(
       options.orderImEvents.recoveryIntervalMs === undefined ? undefined : options.orderImEvents.recoveryIntervalMs);
   }
   if (yunxinRuntime) {
+    mountReadCopyHandler(app, { pool: options.pool, appId: options.yunxin!.appId, appSecret: options.yunxin!.appSecret });
     mountYunxinHandlers(app, {
       security: securityOptions,
       appId: options.yunxin!.appId,
+      readCopyReceiverReady: true,
       repository: yunxinRuntime.repository,
       provisioner: yunxinRuntime.provisioner,
       tokenService: yunxinRuntime.tokenService,
@@ -1258,6 +1274,8 @@ export async function mountAuthHandlers(
   const fundingReader = options.testConfirmationFundingReader ?? createProductionConfirmationFundingReader({ creditGuaranteeEnabled: options.creditGuaranteeEnabled === true });
   const baseSupplyGateReader = options.testSupplyGateReader ?? (options.testConfirmationFundingReader ? unknownSupplyGate : options.creditGuaranteeEnabled === true ? createProductionSupplyGateReader({ creditGuaranteeEnabled: true }) : readFormalSupplyGate);
   const supplyGateReader=composeSupplyGateWithOrderOccupancy(baseSupplyGateReader);
+  if (yunxinConsultation) yunxinConsultation.readPublicAccount = async (client, id) =>
+    readPublicListing(client, await readPublishingAccount(client, id), supplyGateReader, legacyPublicAdmission, false, "DETAIL", legacyPublicAdmissionDetail);
   const mediaStorage = options.mediaStorage ?? createLocalMediaStorage(join(process.cwd(), "uploads"));
   const orderHoldSeconds = options.orderHoldSeconds ?? (() => {
     const raw = process.env.ORDER_HOLD_SECONDS?.trim();
@@ -1266,9 +1284,12 @@ export async function mountAuthHandlers(
     return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
   })();
   const collection = options.joinpayCollection;
+  const orderTeamProvider = yunxinRuntime?.provider as (YunxinOrderTeamApi | undefined);
   const paymentReadOptions = channelPaymentReadOptions(collection?.routes, Boolean(collection?.notifications
     && collection.notifications.admission === collection.routes?.initial?.admission
     && collection.notifications.admission === collection.routes?.execution?.formal?.admission));
+  const settlementRecordingEnabled = options.testOperationsEnabled === true
+    && process.env.ZZSH_SETTLEMENT_RECORDING === "controlled" && process.env.NODE_ENV !== "production";
   const orderOptions: OrderRuntimeOptions = {
     ...securityOptions,
     channelPaymentReadOptions: paymentReadOptions,
@@ -1278,8 +1299,13 @@ export async function mountAuthHandlers(
     supplyGateReader,
     legacyPublicAdmission,
     legacyPublicAdmissionDetail,
-    settlementRecordingEnabled: options.testOperationsEnabled === true && process.env.ZZSH_SETTLEMENT_RECORDING === "controlled" && process.env.NODE_ENV !== "production",
+    settlementRecordingEnabled,
     ...(orderImSdkRouteBindings ? { orderImSdkRouteBindings } : {}),
+    ...(options.orderTeams && orderTeamProvider
+      ? { orderTeamMembers: { appId: options.yunxin!.appId, provider: orderTeamProvider } } : {}),
+    ...(options.testImMessageTransport
+      ? { systemMessageTransport: { sendText: options.testImMessageTransport.sendText.bind(options.testImMessageTransport) } }
+      : teamTextSender ? { systemMessageTransport: createYunxinSystemMessageTransport(teamTextSender) } : {}),
   };
   // Credit routes own both BFF prefixes and must be registered before the
   // generic BFF fallbacks, which otherwise turn unknown credit paths into 404.
@@ -1305,6 +1331,7 @@ export async function mountAuthHandlers(
       yunxin: {
         security: securityOptions,
         appId: options.yunxin!.appId,
+        readCopyReceiverReady: true,
         repository: yunxinRuntime.repository,
         provisioner: yunxinRuntime.provisioner,
         tokenService: yunxinRuntime.tokenService,
@@ -1363,11 +1390,24 @@ export async function mountAuthHandlers(
     app.get(OrderTeamLifecycle).start({pool:options.pool,appId:options.yunxin!.appId,provider,identities:yunxinRuntime.provisioner,
       membersLimit:options.orderTeams.membersLimit,firstResponseEnabled:orderImEventsActivateApp(options.orderImEvents,options.yunxin!.appId),
       ...(orderImSdkRouteBindings ? { orderImSdkRouteBindings } : {}),
+      ...(options.testImMessageTransport?.card ? { stageCardTransport: {
+        card: options.testImMessageTransport.card.bind(options.testImMessageTransport),
+        ...(options.testImMessageTransport.sendText ? { text: options.testImMessageTransport.sendText.bind(options.testImMessageTransport) } : {}),
+      } } : teamTextSender ? { stageCardTransport: createYunxinStageCardTransport(teamTextSender) } : {}),
+      ...(options.testImMessageTransport ? { dueReminderTransport: { sendText: options.testImMessageTransport.sendText.bind(options.testImMessageTransport) } } : teamTextSender ? { dueReminderTransport: createYunxinDueReminderTransport(teamTextSender) } : {}),
       ...(options.orderTeams.escalationEnabled===true?{escalationEnabled:true}:{})},options.orderTeams.intervalMs,options.orderTeams.batchLimit);
   }
   if (options.supportDispatch) app.get(OrderDispatchLifecycle).start({ ...options.supportDispatch, pool: options.pool,
+    // CS-04: reuse the order-dispatch tick for periodic consultation assignment; never a second timer.
+    ...(yunxinConsultation
+      ? { consultationTick: async () => {
+        if (options.supportDispatch!.autoAssignConsultations === true) await autoAssignWaitingConsultations(yunxinConsultation, 5);
+        // The first-response breach scan shares this tick so the SLA fact has a writer
+        // in every deployment that has a dispatch worker; without it the metric is inert.
+        await scanSupportFirstResponseBreaches(yunxinConsultation, 20);
+      } } : {}),
     onResult: (result) => { if(options.orderTeams)app.get(OrderTeamLifecycle).wake(); options.supportDispatch!.onResult?.(result); } });
-  return securityOptions;
+  return { ...securityOptions, settlementRecordingEnabled };
 }
 
 export const ADMIN_SECURITY_HEADER_PATHS = ["/api/bff/admin", "/api/auth/admin", "/api/v1/admin"] as const;

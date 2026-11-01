@@ -1,4 +1,23 @@
-import type { ImMessageTransport, ImOrderImageScope, ImTransportImage, ImTransportMessage } from "../src/im/im-contract";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+
+import {
+  ImTransportRequestError,
+  IM_TRANSPORT_MEDIA_LIMITS,
+  IM_TRANSPORT_MEDIA_MESSAGE_TYPES,
+  isImTransportMediaMimeType,
+  type ImMessageTransport,
+  type ImOrderImageScope,
+  type ImOrderMediaScope,
+  type ImTransportImage,
+  type ImTransportMediaFile,
+  type ImTransportMediaKind,
+  type ImTransportMessage,
+  type ImTransportMessageReference,
+  type ImTransportReply,
+  type ImTransportCard,
+} from "../src/im/im-contract";
 import {
   YunxinApiError,
   type YunxinAccountLookupFailure,
@@ -18,16 +37,67 @@ import { FakeSupportScopeProvider } from "./im-test-fixtures";
 import { OrderTeamTransport } from "./order-team-fixtures";
 
 /**
- * Test-only in-memory message transport. Reuses the shape of the retired
- * browser-round2 FakeMessageTransport, extended with the order-scoped image
- * seam that the current ImMessageTransport contract exposes. Never injected in
- * production and never persists messages.
+ * Test-only message transport. Reuses the shape of the retired browser-round2
+ * FakeMessageTransport, extended with the order-scoped image seam. It is never
+ * injected in production; the optional persistPath keeps local-review history
+ * across API restarts (the real channel stores history server-side).
  */
 export class InMemoryMessageTransport implements ImMessageTransport {
   private readonly messages = new Map<string, ImTransportMessage[]>();
   private readonly images = new Map<string, ImTransportImage>();
+  private readonly media = new Map<string, ImTransportMediaFile>();
+  /** Per-viewer local hides; the shared team log is never mutated. */
+  private readonly hidden = new Map<string, Map<string, Set<string>>>();
   private nextId = 1;
-  readonly calls = { history: 0, sendText: 0, sendImage: 0, readImage: 0 };
+  private readonly persistPath?: string;
+  readonly calls = { history: 0, sendText: 0, sendImage: 0, sendMedia: 0, replyText: 0, revoke: 0, hideForViewer: 0, readImage: 0, readMedia: 0, card: 0 };
+
+  constructor(private readonly now: () => number = Date.now, options: { persistPath?: string } = {}) {
+    this.persistPath = options.persistPath;
+    this.restore();
+  }
+
+  /** Local-review restart durability lives here, not in the UI or business tables. */
+  private restore(): void {
+    if (!this.persistPath || !existsSync(this.persistPath)) return;
+    try {
+      const value = JSON.parse(readFileSync(this.persistPath, "utf8")) as {
+        nextId?: unknown;
+        messages?: Record<string, ImTransportMessage[]>;
+        images?: Record<string, { imageId: string; scope: ImOrderImageScope; mimeType: string; body: string }>;
+        media?: Record<string, { mediaId: string; scope: ImOrderMediaScope; kind: ImTransportMediaKind; name: string; mimeType: string; body: string }>;
+        hidden?: Record<string, Record<string, string[]>>;
+      };
+      for (const [key, rows] of Object.entries(value.messages ?? {})) if (Array.isArray(rows)) this.messages.set(key, rows.filter((row) => row && typeof row === "object"));
+      for (const [key, image] of Object.entries(value.images ?? {})) if (image) this.images.set(key, { imageId: image.imageId, scope: image.scope, mimeType: image.mimeType as ImTransportImage["mimeType"], body: Uint8Array.from(Buffer.from(image.body, "base64")) });
+      for (const [key, media] of Object.entries(value.media ?? {})) if (media) this.media.set(key, { mediaId: media.mediaId, scope: media.scope, kind: media.kind, name: media.name, mimeType: media.mimeType, body: Uint8Array.from(Buffer.from(media.body, "base64")) });
+      for (const [team, viewers] of Object.entries(value.hidden ?? {})) {
+        const next = new Map<string, Set<string>>();
+        for (const [viewer, ids] of Object.entries(viewers ?? {})) next.set(viewer, new Set(Array.isArray(ids) ? ids : []));
+        this.hidden.set(team, next);
+      }
+      const ids = [...this.messages.values()].flat().map((row) => Number(/^fixture-server-(\d+)$/.exec(row.messageServerId ?? "")?.[1] ?? 0));
+      this.nextId = Math.max(Number(value.nextId) || 1, ...ids, 1);
+    } catch {
+      // A corrupt local-review file starts empty; the next write replaces it.
+    }
+  }
+
+  private save(): void {
+    if (!this.persistPath) return;
+    try {
+      mkdirSync(dirname(this.persistPath), { recursive: true });
+      writeFileSync(this.persistPath, JSON.stringify({
+        nextId: this.nextId,
+        messages: Object.fromEntries(this.messages),
+        images: Object.fromEntries([...this.images].map(([key, image]) => [key, { ...image, body: Buffer.from(image.body).toString("base64") }])),
+        media: Object.fromEntries([...this.media].map(([key, media]) => [key, { ...media, body: Buffer.from(media.body).toString("base64") }])),
+        hidden: Object.fromEntries([...this.hidden].map(([team, viewers]) => [team, Object.fromEntries([...viewers].map(([viewer, ids]) => [viewer, [...ids]]))])),
+      }));
+    } catch {
+      // Local-review durability is best-effort; a read-only path must not break sending.
+    }
+  }
 
   /** NIM team conversations are viewer-specific (`<account>|2|<teamId>`); the
    *  retained message log is shared by team, like the supplier stores it. */
@@ -37,33 +107,138 @@ export class InMemoryMessageTransport implements ImMessageTransport {
     return match[1]!;
   }
 
+  private messageKey(message: ImTransportMessage): string {
+    return message.messageServerId || message.messageClientId;
+  }
+
+  private findMessage(conversationId: string, reference: ImTransportMessageReference): ImTransportMessage | null {
+    const rows = this.messages.get(this.teamKey(conversationId)) ?? [];
+    return rows.find((row) => (reference.messageServerId !== undefined && row.messageServerId === reference.messageServerId)
+      || (reference.messageClientId !== undefined && row.messageClientId === reference.messageClientId)) ?? null;
+  }
+
+  private appendMessage(conversationId: string, message: ImTransportMessage): ImTransportMessage {
+    const teamKey = this.teamKey(conversationId);
+    const rows = this.messages.get(teamKey) ?? [];
+    rows.push(message);
+    this.messages.set(teamKey, rows);
+    this.save();
+    return { ...message };
+  }
+
+  private nextMessageId(): string {
+    return String(this.nextId++).padStart(6, "0");
+  }
+
+  private replyOf(target: ImTransportMessage): ImTransportReply {
+    const text = target.messageType === 1 ? "[图片]" : target.media
+      ? (target.media.kind === "video" ? "[视频]" : target.media.kind === "file" ? "[文件]" : "[语音]")
+      : (target.text ?? "").slice(0, 120);
+    return {
+      messageId: this.messageKey(target),
+      senderId: target.senderId,
+      ...(text ? { text } : {}),
+    };
+  }
+
   async history(input: { conversationId: string; viewerAccountId: string; limit: number; before?: string }): Promise<ImTransportMessage[]> {
     this.calls.history += 1;
-    const rows = this.messages.get(this.teamKey(input.conversationId)) ?? [];
+    const hidden = this.hidden.get(this.teamKey(input.conversationId))?.get(input.viewerAccountId);
+    const rows = (this.messages.get(this.teamKey(input.conversationId)) ?? [])
+      .filter((row) => !hidden?.has(this.messageKey(row)));
     const beforeIndex = input.before === undefined ? rows.length : rows.findIndex((row) => (row.messageServerId || row.messageClientId) === input.before);
     const end = beforeIndex === -1 ? rows.length : beforeIndex;
     const start = Math.max(0, end - input.limit);
     return rows.slice(start, end).map((row) => ({ ...row, conversationId: input.conversationId }));
   }
 
-  async sendText(input: { conversationId: string; senderAccountId: string; receiverAccountId: string; text: string }): Promise<ImTransportMessage> {
+  async sendText(input: { conversationId: string; senderAccountId: string; receiverAccountId: string; text: string; messageClientId?: string }): Promise<ImTransportMessage> {
     this.calls.sendText += 1;
-    const id = String(this.nextId++).padStart(6, "0");
+    if (input.messageClientId) {
+      const rows = this.messages.get(this.teamKey(input.conversationId)) ?? [];
+      const existing = rows.find((row) => row.messageClientId === input.messageClientId);
+      if (existing) return { ...existing, conversationId: input.conversationId };
+    }
+    const id = this.nextMessageId();
+    const message: ImTransportMessage = {
+      messageClientId: input.messageClientId ?? `fixture-client-${id}`,
+      messageServerId: `fixture-server-${id}`,
+      conversationId: input.conversationId,
+      senderId: input.senderAccountId,
+      receiverId: input.receiverAccountId,
+      createTime: this.now(),
+      text: input.text,
+      messageType: 0,
+    };
+    return this.appendMessage(input.conversationId, message);
+  }
+
+  async card(input: { conversationId: string; senderAccountId: string; receiverAccountId: string; card: ImTransportCard }): Promise<ImTransportMessage> {
+    this.calls.card += 1;
+    const rows = this.messages.get(this.teamKey(input.conversationId)) ?? [];
+    // The card id doubles as the client id: a retried send returns the same message.
+    const existing = rows.find((row) => row.messageClientId === input.card.cardId);
+    if (existing) return { ...existing, conversationId: input.conversationId };
+    const id = this.nextMessageId();
+    const message: ImTransportMessage = {
+      messageClientId: input.card.cardId,
+      messageServerId: `fixture-server-${id}`,
+      conversationId: input.conversationId,
+      senderId: input.senderAccountId,
+      receiverId: input.receiverAccountId,
+      createTime: this.now(),
+      messageType: 0,
+      card: input.card,
+    };
+    return this.appendMessage(input.conversationId, message);
+  }
+
+  async replyText(input: { conversationId: string; senderAccountId: string; receiverAccountId: string; text: string; replyTo: ImTransportMessageReference }): Promise<ImTransportMessage> {
+    this.calls.replyText += 1;
+    const target = this.findMessage(input.conversationId, input.replyTo);
+    if (!target) throw new ImTransportRequestError(404, "Replied message not found");
+    const id = this.nextMessageId();
     const message: ImTransportMessage = {
       messageClientId: `fixture-client-${id}`,
       messageServerId: `fixture-server-${id}`,
       conversationId: input.conversationId,
       senderId: input.senderAccountId,
       receiverId: input.receiverAccountId,
-      createTime: Date.now(),
+      createTime: this.now(),
       text: input.text,
       messageType: 0,
+      reply: this.replyOf(target),
     };
+    return this.appendMessage(input.conversationId, message);
+  }
+
+  async revoke(input: { conversationId: string; viewerAccountId: string; message: ImTransportMessageReference }): Promise<ImTransportMessage> {
+    this.calls.revoke += 1;
+    const target = this.findMessage(input.conversationId, input.message);
+    if (!target) throw new ImTransportRequestError(404, "Message not found");
+    if (target.senderId !== input.viewerAccountId) throw new ImTransportRequestError(403, "Only the sender can revoke a message");
+    if (target.revoked) return { ...target, conversationId: input.conversationId };
+    if (this.now() - target.createTime > 120_000) throw new ImTransportRequestError(409, "Message revoke window has expired");
+    target.revoked = true;
+    target.text = "";
+    delete target.attachment;
+    delete target.media;
+    delete target.reply;
+    this.save();
+    return { ...target, conversationId: input.conversationId };
+  }
+
+  async hideForViewer(input: { conversationId: string; viewerAccountId: string; message: ImTransportMessageReference }): Promise<void> {
+    this.calls.hideForViewer += 1;
+    const target = this.findMessage(input.conversationId, input.message);
+    if (!target) throw new ImTransportRequestError(404, "Message not found");
     const teamKey = this.teamKey(input.conversationId);
-    const rows = this.messages.get(teamKey) ?? [];
-    rows.push(message);
-    this.messages.set(teamKey, rows);
-    return { ...message };
+    const viewers = this.hidden.get(teamKey) ?? new Map<string, Set<string>>();
+    const hidden = viewers.get(input.viewerAccountId) ?? new Set<string>();
+    hidden.add(this.messageKey(target));
+    viewers.set(input.viewerAccountId, hidden);
+    this.hidden.set(teamKey, viewers);
+    this.save();
   }
 
   async sendImage(input: {
@@ -82,14 +257,14 @@ export class InMemoryMessageTransport implements ImMessageTransport {
     this.calls.sendImage += 1;
     const imageId = `fixture-image-${input.messageClientId}`;
     this.images.set(imageId, { imageId, scope: input.scope, mimeType: input.mimeType, body: input.body });
-    const id = String(this.nextId++).padStart(6, "0");
+    const id = this.nextMessageId();
     const message: ImTransportMessage = {
       messageClientId: input.messageClientId,
       messageServerId: `fixture-server-${id}`,
       conversationId: input.conversationId,
       senderId: input.senderAccountId,
       receiverId: input.receiverAccountId,
-      createTime: Date.now(),
+      createTime: this.now(),
       messageType: 1,
       attachment: {
         imageId,
@@ -100,11 +275,7 @@ export class InMemoryMessageTransport implements ImMessageTransport {
         ...(input.height === undefined ? {} : { height: input.height }),
       },
     };
-    const teamKey = this.teamKey(input.conversationId);
-    const rows = this.messages.get(teamKey) ?? [];
-    rows.push(message);
-    this.messages.set(teamKey, rows);
-    return { ...message };
+    return this.appendMessage(input.conversationId, message);
   }
 
   async getImageScope(imageId: string): Promise<{ imageId: string; scope: ImOrderImageScope } | null> {
@@ -115,6 +286,87 @@ export class InMemoryMessageTransport implements ImMessageTransport {
   async readImage(input: { imageId: string; scope: ImOrderImageScope; viewerAccountId: string }): Promise<ImTransportImage | null> {
     this.calls.readImage += 1;
     return this.images.get(input.imageId) ?? null;
+  }
+
+  async sendMedia(input: {
+    conversationId: string;
+    scope: ImOrderMediaScope;
+    senderAccountId: string;
+    receiverAccountId: string;
+    messageClientId: string;
+    kind: ImTransportMediaKind;
+    name: string;
+    mimeType: string;
+    size: number;
+    body: Uint8Array;
+    width?: number;
+    height?: number;
+    durationMs?: number;
+  }): Promise<ImTransportMessage> {
+    this.calls.sendMedia += 1;
+    if (input.scope.teamId !== this.teamKey(input.conversationId)) {
+      throw new ImTransportRequestError(403, "Media scope does not match the conversation");
+    }
+    if (!Number.isInteger(input.size) || input.size < 1 || input.size > IM_TRANSPORT_MEDIA_LIMITS[input.kind].maxBytes) {
+      throw new ImTransportRequestError(400, "Media size is outside the allowed range");
+    }
+    if (!isImTransportMediaMimeType(input.kind, input.mimeType)) {
+      throw new ImTransportRequestError(400, "Media MIME type is invalid");
+    }
+    if (input.body.length !== input.size) throw new ImTransportRequestError(400, "Media payload is invalid");
+    const rows = this.messages.get(this.teamKey(input.conversationId)) ?? [];
+    // The caller-owned client id makes a retried send return the first message.
+    const existing = rows.find((row) => row.messageClientId === input.messageClientId);
+    if (existing) {
+      if (!existing.media || existing.media.kind !== input.kind || existing.senderId !== input.senderAccountId) {
+        throw new ImTransportRequestError(409, "Message client id is already used");
+      }
+      return { ...existing, conversationId: input.conversationId };
+    }
+    const mediaId = `fixture-media-${createHash("sha256").update(`${input.scope.teamId}:${input.messageClientId}`).digest("hex").slice(0, 32)}`;
+    this.media.set(mediaId, {
+      mediaId,
+      scope: input.scope,
+      kind: input.kind,
+      name: input.name,
+      mimeType: input.mimeType,
+      body: input.body,
+    });
+    const id = this.nextMessageId();
+    const message: ImTransportMessage = {
+      messageClientId: input.messageClientId,
+      messageServerId: `fixture-server-${id}`,
+      conversationId: input.conversationId,
+      senderId: input.senderAccountId,
+      receiverId: input.receiverAccountId,
+      createTime: this.now(),
+      messageType: IM_TRANSPORT_MEDIA_MESSAGE_TYPES[input.kind],
+      media: {
+        mediaId,
+        kind: input.kind,
+        name: input.name,
+        mimeType: input.mimeType,
+        size: input.size,
+        ...(input.width === undefined ? {} : { width: input.width }),
+        ...(input.height === undefined ? {} : { height: input.height }),
+        ...(input.durationMs === undefined ? {} : { durationMs: input.durationMs }),
+      },
+    };
+    return this.appendMessage(input.conversationId, message);
+  }
+
+  async getMediaScope(mediaId: string): Promise<{ mediaId: string; scope: ImOrderMediaScope } | null> {
+    const media = this.media.get(mediaId);
+    return media ? { mediaId, scope: media.scope } : null;
+  }
+
+  async readMedia(input: { mediaId: string; scope: ImOrderMediaScope; viewerAccountId: string }): Promise<ImTransportMediaFile | null> {
+    this.calls.readMedia += 1;
+    const media = this.media.get(input.mediaId);
+    if (!media) return null;
+    const scope = input.scope;
+    if (media.scope.appId !== scope.appId || media.scope.orderId !== scope.orderId || media.scope.teamId !== scope.teamId) return null;
+    return media;
   }
 }
 

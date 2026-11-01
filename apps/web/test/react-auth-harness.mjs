@@ -80,7 +80,7 @@ export async function mountAuthComponent(relativePath, componentName, props = {}
       // workspace packages that cannot run under happy-dom, and the contact popover is Radix too.
       // Routing tests only need the rail's trigger chain, so both stand in as null renders.
       if (name === "./contact-popover") return { ContactPopover: () => null };
-      if (name === "./customer-support-workspace") return { CustomerSupportWorkspace: () => null };
+      if (name === "./customer-support-workspace") return { CustomerSupportWorkspace: props => React.createElement("div", {"data-support-entry-type": props.initialType}) };
       if (name.endsWith(".css")) return {};
       // Sibling imports inside src/ resolve like a bundler would; the two stubs above still win.
       if (name.startsWith("./") || name.startsWith("../")) {

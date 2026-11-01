@@ -401,7 +401,7 @@ async function forwardYunxin(
   for (const [name, value] of captured.headers) response.setHeader(name, value);
   response.setHeader("X-Request-Id", requestId).setHeader("Cache-Control", "no-store");
   response.status(captured.statusCode);
-  if (targetPath.includes("/images/") && response.send) response.send(captured.body);
+  if ((targetPath.includes("/images/") || targetPath.includes("/media/")) && response.send) response.send(captured.body);
   else response.json(captured.body);
 }
 
@@ -626,7 +626,10 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     const settlementPath = /^\/orders\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(openings|settlements|settlement-preview|settlement)(\/|$)/.test(path);
     const legacyContinuationPath = /^\/orders\/legacy\/legacy_order_[a-f0-9]{40}\/continuation\/(?:hold|release|confiscate|duties\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(?:mature|void))$/.test(path);
     const prestartReviewPath=/^\/orders\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/prestart-termination\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/review$/.test(path);
-    if (method !== "GET" && !(method === "POST" && (settlementPath || legacyContinuationPath||prestartReviewPath))) {
+    const manualClosePath=/^\/orders\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/manual-close$/.test(path);
+    const supportCancelPath=/^\/orders\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/support-cancel$/.test(path);
+    const memberInvitePath=/^\/orders\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/members$/.test(path);
+    if (method !== "GET" && !(method === "POST" && (settlementPath || legacyContinuationPath||prestartReviewPath||manualClosePath||supportCancelPath||memberInvitePath))) {
       sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);
       return;
     }
@@ -642,13 +645,25 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     }
     return;
   }
-  const imAction = /^\/im\/consultations\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/(claim|transfer|close|reconcile)$/.exec(path);
+  const imAction = /^\/im\/consultations\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/(claim|transfer|close|reconcile|read)$/.exec(path);
+  const imOrderRead = /^\/im\/order-teams\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/read$/.test(path);
   const imImage = /^\/im\/images\/[A-Za-z0-9._:-]{1,128}$/.test(path);
+  const imMedia = /^\/im\/media\/[A-Za-z0-9._:-]{1,128}$/.test(path);
   const imReadSub = /^\/im\/consultations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(events|context)$/.test(path);
-  const imPathAllowed = path === "/im/token" || path === "/im/identities" || path === "/im/consultations" || path === "/im/messages" || path === "/im/message-access" || path === "/im/presence" || path === "/im/transfer-targets" || imImage || Boolean(imAction) || imReadSub;
-  const imMethodAllowed = path === "/im/token" || path === "/im/identities" || path === "/im/consultations" || path === "/im/messages" || path === "/im/message-access" || path === "/im/presence" || path === "/im/transfer-targets" || imImage || imReadSub
-    ? (method === "GET" || ((path === "/im/consultations" || path === "/im/messages") && method === "POST") || (path === "/im/presence" && method === "PUT"))
-    : method === "POST";
+  const imAuditTakeover = /^\/im\/audit\/consultations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/takeover$/.test(path);
+  const imGetOrPost = path === "/im/consultations" || path === "/im/messages";
+  const imGetOnly = path === "/im/aftersales" || path === "/im/token" || path === "/im/identities" || path === "/im/support-overview" || path === "/im/my-support-statistics"
+    || path === "/im/handovers" || path === "/im/audit/conversations" || path === "/im/transfer-targets"
+    || path === "/im/message-access" || imImage || imMedia || imReadSub;
+  const imPostOnly = Boolean(imAction) || /^\/im\/aftersales\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(claim|contact|resolve)$/.test(path) || imOrderRead || path === "/im/presence/heartbeat" || imAuditTakeover;
+  const imPathAllowed = imGetOrPost || imGetOnly || imPostOnly || path === "/im/presence" || path === "/im/support-settings" || path === "/im/read-copy-settings";
+  const imMethodAllowed = path === "/im/presence" || path === "/im/support-settings" || path === "/im/read-copy-settings"
+    ? method === "GET" || method === "PUT"
+    : imGetOrPost
+      ? method === "GET" || method === "POST"
+      : imPostOnly
+        ? method === "POST"
+        : method === "GET";
   if (imPathAllowed) {
     if (!options.yunxin || !imMethodAllowed) {
       sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);

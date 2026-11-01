@@ -1,7 +1,7 @@
 import { Injectable, Logger, type BeforeApplicationShutdown } from "@nestjs/common";
 import type { Pool, PoolClient } from "pg";
 import { recordAudit, withTransaction } from "../auth/security-core";
-import { lockSupportMutation, readEligibleSupport, reserveSupportCandidate, type SupportCandidate } from "./support-dispatch";
+import { lockSupportMutation, readEligibleSupport, reapStaleSupportSessions, reserveSupportCandidate, type SupportCandidate } from "./support-dispatch";
 
 export type DispatchResult = { assigned: string[]; more: boolean };
 
@@ -46,11 +46,16 @@ export async function dispatchPaidOrders(pool: Pool, appId: string, batchLimit =
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(appId)) throw new Error("Invalid dispatch App");
   return withTransaction(pool, async (client) => {
     const locked = await lockSupportMutation(client, appId);
-    return assignWaitingOrders(client, appId, await readEligibleSupport(client, appId, locked), batchLimit);
+    const result = await assignWaitingOrders(client, appId, await readEligibleSupport(client, appId, locked), batchLimit);
+    // CS-M1：周期 tick 同时收敛无心跳接线区间；失败由 worker 统一记录，不回滚派单。
+    await reapStaleSupportSessions(client, appId);
+    return result;
   });
 }
 
 export type OrderDispatchOptions = { pool: Pool; appId: string; batchLimit: number; intervalMs: number;
+  /** Runs after every dispatch attempt (success or failure) inside the same in-flight slot. */
+  consultationTick?: () => Promise<unknown>;
   onResult?: (result: DispatchResult) => void; onFailure?: (code: string) => void };
 
 @Injectable()
@@ -76,12 +81,15 @@ export class OrderDispatchLifecycle implements BeforeApplicationShutdown {
       const code = raw === "55P03" ? "LOCK_BUSY" : raw === "40P01" ? "DEADLOCK" : "DISPATCH_FAILED";
       if (options.onFailure) return this.observe("FAILURE", () => options.onFailure!(code));
       else this.logger.error(JSON.stringify({ event: "im.order.dispatch.failed", code }));
+    }).then(() => {
+      // CS-04: the same tick also sweeps waiting consultations; its failure never rewrites the dispatch outcome.
+      if (options.consultationTick) return this.observe("CONSULTATION", () => options.consultationTick!());
     });
     const clear = () => { if (this.inFlight === settled) this.inFlight = undefined; };
     const settled = work.then(clear, clear);
     this.inFlight = settled;
   }
-  private async observe(kind: "RESULT" | "FAILURE", callback: () => unknown): Promise<void> {
+  private async observe(kind: "RESULT" | "FAILURE" | "CONSULTATION", callback: () => unknown): Promise<void> {
     try { await callback(); }
     catch { this.logger.error(JSON.stringify({ event: "im.order.dispatch.observer_failed", kind })); }
   }

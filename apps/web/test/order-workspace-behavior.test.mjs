@@ -12,6 +12,8 @@ const requireFromTree = createRequire(path.join(tree, "package.json"));
 const typescript = requireFromTree("typescript");
 const React = requireFromTree("react");
 const { Window } = requireFromTree("happy-dom");
+const client = requireFromTree(path.join(tree, "apps/web/src/lib/order-client.ts"));
+const display = requireFromTree(path.join(tree, "apps/web/src/lib/order-display.ts"));
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
 function deferred() {
@@ -45,6 +47,7 @@ function loadWorkspace(session, router) {
         if (local === "order-trade-actions") return { OrderTradeActions: () => null };
         return loadOrderComponent(`${local}.tsx`);
       }
+      if (local === "order-aftersale") return {OrderAftersale:()=>null};
       if (name.endsWith(".css")) return {};
       return requireFromTree(name);
     };
@@ -648,5 +651,176 @@ test("API facts feed the order title, account number, stage and entitlements", a
     assert.match(detail.textContent, /待你确认结算/);
     assert.match(detail.textContent, /九格保险体验卡/);
     assert.match(detail.textContent, /不保证覆盖完整租期/);
+  } finally { await probe.dispose(); }
+});
+
+const stageProjection = (overrides = {}) => ({
+  stage: "RENTING",
+  rentalStartedAt: "2026-10-01T00:00:00.000Z",
+  dueAt: null,
+  openingState: "CONFIRMED",
+  openingAcks: { renter: true, owner: true },
+  endState: "NONE",
+  orderEndedAt: null,
+  sendUntil: null,
+  canSend: true,
+  ...overrides,
+});
+
+test("the six-step projection maps to stage, due, ending and read-only copy", () => {
+  const now = Date.parse("2026-10-20T00:00:00Z");
+  assert.equal(display.orderFulfillmentSummary(stageProjection({ stage: "WAITING_STAFF" }), { now }), "已付款 · 待客服接入");
+  assert.equal(display.orderFulfillmentSummary(stageProjection({ stage: "TEAM_PENDING" }), { now }), "已付款 · 订单群准备中");
+  assert.equal(
+    display.orderFulfillmentSummary(stageProjection({ stage: "OPENING_CONFIRM", openingAcks: { renter: true, owner: false } }), { now }),
+    "账号与开租确认 · 租客已确认 · 号主待确认",
+  );
+  assert.match(display.orderFulfillmentSummary(stageProjection({ dueAt: "2026-11-01T00:00:00.000Z" }), { now }), /^租用中 · 到期 /);
+  assert.match(display.orderFulfillmentSummary(stageProjection({ dueAt: "2026-10-01T00:00:00.000Z" }), { now }), /^租用中 · 已到期 /);
+  assert.equal(display.orderFulfillmentSummary(stageProjection({ stage: "ENDING" }), { now, ending: "WAITING" }), "结束确认 · 待对方确认");
+  assert.equal(display.orderFulfillmentSummary(stageProjection({ stage: "ENDING" }), { now, ending: "PENDING" }), "结束确认 · 待你确认");
+  assert.match(display.orderFulfillmentSummary(stageProjection({ stage: "SETTLED", sendUntil: "2026-10-21T00:00:00.000Z" }), { now }), /^结算完成 · 可沟通至 /);
+  assert.equal(
+    display.orderFulfillmentSummary(stageProjection({ stage: "SETTLED", canSend: false, sendUntil: "2026-10-19T00:00:00.000Z" }), { now }),
+    "结算完成 · 已超过 72 小时 · 仅可查看",
+  );
+  assert.equal(display.orderFulfillmentSummary(stageProjection({ stage: "SETTLED", canSend: false }), { now }), "结算完成 · 仅可查看");
+  // A missing projection is a state of its own; no stage, due or window is invented.
+  assert.equal(display.orderFulfillmentSummary(null), "阶段待核对");
+  assert.deepEqual(display.orderFulfillmentStepStates("RENTING"), ["done", "done", "done", "current", "pending", "pending"]);
+  assert.deepEqual(display.orderFulfillmentStepStates("SETTLED"), ["done", "done", "done", "done", "done", "done"]);
+  assert.deepEqual(display.orderFulfillmentStepStates("CANCELLED"), ["cancelled", "cancelled", "cancelled", "cancelled", "cancelled", "cancelled"]);
+  assert.deepEqual(display.orderFulfillmentStepStates(null), ["unknown", "unknown", "unknown", "unknown", "unknown", "unknown"]);
+});
+
+test("a prestart termination speaks about refund pending instead of a generic cancellation", () => {
+  const now = Date.parse("2026-10-20T00:00:00Z");
+  assert.equal(
+    display.orderFulfillmentSummary(stageProjection({ stage: "CANCELLED", cancelReason: "PRESTART_TERMINATED", refundPending: true }), { now }),
+    "未开租终止 · 退款处理中 · 可沟通",
+  );
+  assert.equal(
+    display.orderFulfillmentSummary(stageProjection({ stage: "CANCELLED", cancelReason: "PRESTART_TERMINATED", refundPending: false, sendUntil: "2026-10-21T00:00:00.000Z" }), { now }),
+    "未开租终止 · 退款已核销 · 可沟通至 2026/10/21 08:00",
+  );
+  assert.equal(
+    display.orderFulfillmentSummary(stageProjection({ stage: "CANCELLED", cancelReason: "MANUAL_CLOSE", sendUntil: "2026-10-21T00:00:00.000Z" }), { now }),
+    "客服手动结束 · 可沟通至 2026/10/21 08:00",
+  );
+});
+
+test("the IM projection parser rejects an unknown stage or malformed fact instead of guessing", () => {
+  assert.equal(client.parseOrderImProjection(stageProjection({ stage: "OPENING_CONFIRM" })).stage, "OPENING_CONFIRM");
+  assert.equal(client.parseOrderImProjection({ stage: "RENTING" }).openingAcks, null);
+  for (const bad of [null, {}, { stage: "PAID" }, stageProjection({ dueAt: "not-a-date" }), stageProjection({ openingAcks: { renter: true } })]) {
+    assert.throws(() => client.parseOrderImProjection(bad), (error) => error instanceof client.OrderRequestError && error.status === 502);
+  }
+});
+
+test("the list tag states a known early stage and stays silent on a ready group", () => {
+  assert.equal(display.orderListFulfillmentTag({ status: "PAID", fulfillmentAssignment: { state: "WAITING" } }).label, "待客服接入");
+  assert.equal(display.orderListFulfillmentTag({ status: "PAID", fulfillmentAssignment: { state: "ASSIGNED", teamReady: false } }).label, "订单群准备中");
+  assert.equal(display.orderListFulfillmentTag({ status: "PAID", fulfillmentAssignment: { state: "ASSIGNED", teamReady: true } }), null, "a ready group is not a stage, so it earns no chip");
+  assert.equal(display.orderListFulfillmentTag({ status: "PENDING_PAYMENT" }), null);
+  assert.equal(display.orderListFulfillmentTag({ status: "COMPLETED" }), null);
+  assert.equal(display.orderListFulfillmentTag({ status: "PAID", readOnly: true, fulfillmentAssignment: { state: "ASSIGNED", teamReady: true } }), null);
+  // A settlement-stage label never becomes the six-step tag.
+  assert.equal(display.orderListFulfillmentTag({ status: "PAID", stage: { code: "DECISION_PENDING" } }), null);
+});
+
+test("the detail renders the six-stage bar from the IM projection and keeps the order actions", async () => {
+  const order = { ...pricedOrder, id: "order_stage", status: "PAID", paidAt: "2026-10-12T00:21:00Z", fulfillmentAssignment: { state: "ASSIGNED", teamReady: true } };
+  const im = stageProjection({ dueAt: new Date(Date.now() + 10 * 86400000).toISOString() });
+  const opened = [];
+  const probe = await createProbe(async (input) => {
+    const url = String(input);
+    if (url.includes("/im?operation=read")) return Response.json(im);
+    if (url.endsWith("/order_stage")) return Response.json({ order });
+    if (url.includes("/refunds")) return Response.json({ error: { code: "NOT_FOUND" } }, { status: 404 });
+    return Response.json({ items: [order], nextCursor: null, limit: 20 });
+  });
+  probe.window.addEventListener("zzsh:order-groups", (event) => opened.push(event.detail));
+  try {
+    await probe.render({ status: "PAID", orderId: order.id }, "stage");
+    await tick(); await tick();
+    const detail = probe.host.querySelector("[data-testid=order-detail]");
+    assert.ok(detail, "the detail view renders");
+    assert.match(detail.querySelector(".order-fulfillment-summary").textContent, /^租用中 · 到期 /);
+    const steps = [...detail.querySelectorAll(".order-fulfillment-steps li")];
+    assert.deepEqual(steps.map((node) => node.textContent), ["已付款", "客服与群", "账号与开租", "租用中", "结束确认", "结算完成"]);
+    assert.deepEqual(steps.map((node) => node.dataset.state), ["done", "done", "done", "current", "pending", "pending"]);
+    assert.equal(steps[3].getAttribute("aria-current"), "step");
+    // The group entry is part of the bar and uses the existing support host, not a second chat.
+    const entry = [...detail.querySelectorAll("button")].find((node) => node.textContent?.includes("打开订单群"));
+    assert.ok(entry, "the group entry renders");
+    assert.ok(entry.hasAttribute("data-support-trigger"));
+    await React.act(async () => {
+      entry.dispatchEvent(new window.MouseEvent("click", { bubbles: true, button: 0 }));
+      await tick();
+    });
+    assert.deepEqual(opened, [{ party: "renter", orderId: order.id }]);
+    // The read-only bar leaves the existing amount and refresh actions in place.
+    assert.match(detail.querySelector(".order-amount-block").textContent, /租客侧金额/);
+    assert.match(detail.textContent, /刷新订单/);
+  } finally { await probe.dispose(); }
+});
+
+test("a settled projection names the 72-hour window and its read-only state", async () => {
+  const order = { ...pricedOrder, id: "order_stage_settled", status: "COMPLETED" };
+  const im = stageProjection({
+    stage: "SETTLED",
+    orderEndedAt: new Date(Date.now() - 5 * 86400000).toISOString(),
+    sendUntil: new Date(Date.now() - 2 * 86400000).toISOString(),
+    canSend: false,
+  });
+  const probe = await createProbe(async (input) => {
+    const url = String(input);
+    if (url.includes("/im?operation=read")) return Response.json(im);
+    if (url.endsWith("/order_stage_settled")) return Response.json({ order });
+    if (url.includes("/refunds")) return Response.json({ error: { code: "NOT_FOUND" } }, { status: 404 });
+    return Response.json({ items: [order], nextCursor: null, limit: 20 });
+  });
+  try {
+    await probe.render({ status: "COMPLETED", orderId: order.id }, "stage-settled");
+    await tick(); await tick();
+    const detail = probe.host.querySelector("[data-testid=order-detail]");
+    assert.equal(detail.querySelector(".order-fulfillment-summary").textContent, "结算完成 · 已超过 72 小时 · 仅可查看");
+    assert.deepEqual([...detail.querySelectorAll(".order-fulfillment-steps li")].map((node) => node.dataset.state), ["done", "done", "done", "done", "done", "done"]);
+  } finally { await probe.dispose(); }
+});
+
+test("a failed IM projection leaves the stage pending verification without a six-step claim", async () => {
+  const order = { ...pricedOrder, id: "order_stage_fail", status: "PAID", paidAt: "2026-10-12T00:21:00Z", fulfillmentAssignment: { state: "ASSIGNED", teamReady: true } };
+  const probe = await createProbe(async (input) => {
+    const url = String(input);
+    if (url.includes("/im?operation=read")) return Response.json({ error: { code: "NOT_FOUND" } }, { status: 404 });
+    if (url.endsWith("/order_stage_fail")) return Response.json({ order });
+    if (url.includes("/refunds")) return Response.json({ error: { code: "NOT_FOUND" } }, { status: 404 });
+    return Response.json({ items: [order], nextCursor: null, limit: 20 });
+  });
+  try {
+    await probe.render({ status: "PAID", orderId: order.id }, "stage-fail");
+    await tick(); await tick();
+    const detail = probe.host.querySelector("[data-testid=order-detail]");
+    const bar = detail.querySelector(".order-fulfillment-stage");
+    assert.equal(detail.querySelector(".order-fulfillment-summary").textContent, "阶段待核对");
+    assert.equal(detail.querySelector(".order-fulfillment-steps"), null);
+    assert.doesNotMatch(bar.textContent, /租用中|结算完成 ·|待客服接入|账号与开租/);
+  } finally { await probe.dispose(); }
+});
+
+test("the list marks only the early stages it can prove and never borrows the settlement stage", async () => {
+  const active = { ...pricedOrder, id: "order_tag_active", status: "PAID", fulfillmentAssignment: { state: "ASSIGNED", teamReady: true } };
+  const preparing = { ...pricedOrder, id: "order_tag_preparing", status: "PAID", fulfillmentAssignment: { state: "ASSIGNED", teamReady: false } };
+  const waiting = { ...pricedOrder, id: "order_tag_waiting", status: "PAID", fulfillmentAssignment: { state: "WAITING" } };
+  const settled = { ...pricedOrder, id: "order_tag_settled", status: "COMPLETED" };
+  const probe = await createProbe(async () => Response.json({ items: [active, preparing, waiting, settled], nextCursor: null, limit: 20 }));
+  try {
+    await probe.render({ party: "renter" }, "list-tags");
+    const row = (id) => probe.host.querySelector(`[data-order-id="${id}"]`).closest(".order-row");
+    assert.equal(row("order_tag_active").querySelector(".order-row-stage"), null, "a ready group adds no stage chip to every row");
+    assert.equal(row("order_tag_preparing").querySelector(".order-row-stage").textContent, "订单群准备中");
+    assert.equal(row("order_tag_waiting").querySelector(".order-row-stage").textContent, "待客服接入");
+    assert.equal(row("order_tag_settled").querySelector(".order-row-stage"), null);
   } finally { await probe.dispose(); }
 });

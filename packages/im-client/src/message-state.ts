@@ -5,9 +5,28 @@ export type ImMessageStateItem = {
 
 /** Object fields where a later record must not erase values it does not carry
  *  (a sender echo may omit the uploaded URL while history carries it). */
-const MERGED_OBJECT_FIELDS = ["attachment", "image"] as const;
+const MERGED_OBJECT_FIELDS = ["attachment", "image", "media", "reply"] as const;
 
 function mergeRecord<T extends ImMessageStateItem>(existing: T, message: T): T {
+  const existingRecord = existing as Record<string, unknown>;
+  const incomingRecord = message as Record<string, unknown>;
+  if (incomingRecord.revoked === true) {
+    // A revoked message must clear content both ways: the peer-facing revoke
+    // notification only carries a reference, while the sender still has text.
+    const cleared: Record<string, unknown> = { ...existingRecord };
+    for (const [field, value] of Object.entries(incomingRecord)) {
+      if (value !== undefined) cleared[field] = value;
+    }
+    cleared.text = "";
+    cleared.revoked = true;
+    delete cleared.attachment;
+    delete cleared.image;
+    delete cleared.media;
+    delete cleared.reply;
+    return cleared as T;
+  }
+  // A stale history page must never resurrect a message revoked live.
+  if (existingRecord.revoked === true) return existing;
   let merged: T | undefined;
   for (const key of MERGED_OBJECT_FIELDS) {
     const existingValue = (existing as Record<string, unknown>)[key];

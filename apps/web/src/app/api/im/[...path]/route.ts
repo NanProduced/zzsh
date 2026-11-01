@@ -5,8 +5,10 @@ import { BodyTooLargeError, isHttpOrigin, readBoundedBody, userCookies } from ".
 const local = process.env.NODE_ENV !== "production";
 const apiOrigin = process.env.ZZSH_API_ORIGIN ?? (local ? "http://127.0.0.1:3102" : "");
 const webOrigin = process.env.ZZSH_WEB_ORIGIN ?? (local ? "http://127.0.0.1:3100" : "");
-const pathPattern = /^(?:\/token|\/consultations|\/messages|\/message-access|\/images\/[A-Za-z0-9._:-]{1,128})$/;
+const pathPattern = /^(?:\/aftersales|\/token|\/consultations|\/consultations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/rating(?:\/dismiss)?|\/consultations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/read|\/order-teams\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/read|\/messages|\/message-access|\/images\/[A-Za-z0-9._:-]{1,128}|\/media\/[A-Za-z0-9._:-]{1,128})$/;
 const requestIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+// Matches the API video ceiling; audio/files stay within their own smaller limits.
+const MAX_MEDIA_RESPONSE_BYTES = 100 * 1024 * 1024;
 
 function errorResponse(status: number, code: string, requestId: string): Response {
   return Response.json(
@@ -27,8 +29,12 @@ async function proxy(request: Request, context: { params: Promise<{ path: string
   if (!pathPattern.test(path)) return errorResponse(404, "NOT_FOUND", requestId);
   const method = request.method.toUpperCase();
   if (path === "/token" && method !== "GET") return errorResponse(404, "NOT_FOUND", requestId);
-  if ((path === "/consultations" || path === "/messages") && method !== "GET" && method !== "POST") return errorResponse(404, "NOT_FOUND", requestId);
-  if (path.startsWith("/images/") && method !== "GET") return errorResponse(404, "NOT_FOUND", requestId);
+  if ((path === "/aftersales" || path === "/consultations" || path === "/messages") && method !== "GET" && method !== "POST") return errorResponse(404, "NOT_FOUND", requestId);
+  // 评价与已读只在 POST 下放行；GET 等其它方法不得落到通用咨询列表。
+  const ratingPath = /^\/consultations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(?:rating(?:\/dismiss)?|read)$/.test(path);
+  const orderReadPath = /^\/order-teams\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/read$/.test(path);
+  if ((ratingPath || orderReadPath) && method !== "POST") return errorResponse(404, "NOT_FOUND", requestId);
+  if ((path.startsWith("/images/") || path.startsWith("/media/")) && method !== "GET") return errorResponse(404, "NOT_FOUND", requestId);
   if (path === "/message-access" && method !== "GET") return errorResponse(404, "NOT_FOUND", requestId);
   const headers = new Headers({ origin: webOrigin, "x-request-id": requestId });
   headers.set("accept", "application/json");
@@ -38,26 +44,43 @@ async function proxy(request: Request, context: { params: Promise<{ path: string
   const deadline = AbortSignal.timeout(5_000);
   if (method === "POST") {
     const maxBody = path === "/messages" ? 14_100_000 : 16_384;
-    if (!request.headers.get("content-type")?.toLowerCase().includes("application/json")) {
+    // 暂不评价与用户已读按契约是空 body POST；仍按上限读取，其余 POST 必须是 JSON。
+    const bodyless = path.endsWith("/rating/dismiss") || path.endsWith("/read");
+    if (!bodyless && !request.headers.get("content-type")?.toLowerCase().includes("application/json")) {
       return errorResponse(400, "INVALID_ARGUMENT", requestId);
     }
     try {
-      body = await readBoundedBody(request, maxBody, deadline);
-      JSON.parse(new TextDecoder().decode(body));
+      const raw = await readBoundedBody(request, maxBody, deadline);
+      if (!bodyless) JSON.parse(new TextDecoder().decode(raw));
+      if (raw.byteLength) body = raw;
     } catch (cause) {
       return errorResponse(cause instanceof BodyTooLargeError ? 413 : 400, "INVALID_ARGUMENT", requestId);
     }
-    headers.set("content-type", "application/json");
+    if (!bodyless) headers.set("content-type", "application/json");
   }
-  const upstreamPath = path === "/token" ? "/api/v1/im/user/token" : path === "/messages" ? "/api/v1/im/user/messages" : path === "/message-access" ? "/api/v1/im/user/message-access" : path.startsWith("/images/") ? `/api/v1/im/user${path}` : "/api/v1/im/user/consultations";
+  const upstreamPath = path === "/token" ? "/api/v1/im/user/token" : path === "/messages" ? "/api/v1/im/user/messages" : path === "/message-access" ? "/api/v1/im/user/message-access" : path === "/aftersales" || path.startsWith("/images/") || path.startsWith("/media/") || ratingPath || orderReadPath ? `/api/v1/im/user${path}` : "/api/v1/im/user/consultations";
   const upstreamUrl = new URL(upstreamPath, apiOrigin);
-  if (method === "GET" && (path === "/consultations" || path === "/messages" || path === "/message-access")) {
+  if (method === "GET" && (path === "/aftersales" || path === "/consultations" || path === "/messages" || path === "/message-access")) {
     const limit = new URL(request.url).searchParams.get("limit");
     if (limit !== null) upstreamUrl.searchParams.set("limit", limit);
     const conversationId = new URL(request.url).searchParams.get("conversationId");
     if (conversationId !== null) upstreamUrl.searchParams.set("conversationId", conversationId);
     const operation = new URL(request.url).searchParams.get("operation");
     if (operation !== null) upstreamUrl.searchParams.set("operation", operation);
+    if(path==="/message-access"){
+      const query=new URL(request.url).searchParams;
+      for(const name of ["conversationId","operation","messageClientId","messageType","entryIntent"]){
+        if(query.getAll(name).length>1)return errorResponse(400,"INVALID_ARGUMENT",requestId);
+        const value=query.get(name);if(value!==null)upstreamUrl.searchParams.set(name,value);
+      }
+    }
+    if(path==="/aftersales"){
+      const query=new URL(request.url).searchParams;
+      for(const key of query.keys()){
+        if(!["orderId","orderSource","cursor"].includes(key)||query.getAll(key).length!==1)return errorResponse(400,"INVALID_ARGUMENT",requestId);
+        upstreamUrl.searchParams.set(key,query.get(key)!);
+      }
+    }
     const before = new URL(request.url).searchParams.get("before");
     if (path === "/messages" && before !== null) upstreamUrl.searchParams.set("before", before);
   }
@@ -77,12 +100,16 @@ async function proxy(request: Request, context: { params: Promise<{ path: string
   const responseHeaders = new Headers({ "cache-control": "no-store", "x-request-id": requestId });
   const contentType = upstream.headers.get("content-type");
   if (contentType) responseHeaders.set("content-type", contentType);
+  const contentDisposition = upstream.headers.get("content-disposition");
+  if (contentDisposition) responseHeaders.set("content-disposition", contentDisposition);
+  const noSniff = upstream.headers.get("x-content-type-options");
+  if (noSniff) responseHeaders.set("x-content-type-options", noSniff);
   const retryAfter = upstream.headers.get("retry-after");
   if (retryAfter) responseHeaders.set("retry-after", retryAfter);
-  if (path.startsWith("/images/")) {
+  if (path.startsWith("/images/") || path.startsWith("/media/")) {
     let bytes: ArrayBuffer;
     try {
-      bytes = await readBoundedBody(upstream, 10 * 1024 * 1024, deadline);
+      bytes = await readBoundedBody(upstream, path.startsWith("/media/") ? MAX_MEDIA_RESPONSE_BYTES : 10 * 1024 * 1024, deadline);
     } catch {
       return errorResponse(502, "INTERNAL_ERROR", requestId);
     }

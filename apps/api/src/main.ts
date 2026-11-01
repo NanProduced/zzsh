@@ -72,6 +72,17 @@ export async function bootstrap() {
                     },
                   }
                 : {}),
+              ...(config.orderTeams
+                ? {
+                    orderTeams: {
+                      membersLimit: config.orderTeams.membersLimit,
+                      intervalMs: config.orderTeams.intervalMs,
+                      batchLimit: config.orderTeams.batchLimit,
+                      ...(config.orderTeams.escalationEnabled ? { escalationEnabled: true } : {}),
+                    },
+                  }
+                : {}),
+              ...(config.supportDispatch ? { supportDispatch: config.supportDispatch } : {}),
             },
           }
         : {}),

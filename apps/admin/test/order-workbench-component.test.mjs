@@ -35,18 +35,21 @@ const realSetInterval = globalThis.setInterval, realClearInterval = globalThis.c
 globalThis.setInterval = (fn, ms) => { if (ms === 5000) { timers.set(++timerId, fn); return timerId; } return realSetInterval(fn, ms); };
 globalThis.clearInterval = (id) => { if (!timers.has(id)) realClearInterval(id); };
 
-async function mount(t, caseId, { select = true } = {}) {
-  const item = fixtureById(caseId);
+async function mount(t, caseId, { select = true, fixture, request, props } = {}) {
+  const item = fixture ?? fixtureById(caseId);
   const deps = createFixtureDeps(item);
+  const requestFn = request ? request(deps.request) : deps.request;
   globalThis.fetch = deps.fetchStub;
   const node = document.createElement("div");
   document.body.append(node);
   const root = createRoot(node);
+  const paneProps = {
+    identity: `fixture:${caseId}`, adminUserId: "admin-fixture", operatorName: "小周",
+    client: deps.client, connection: "CONNECTED", active: true, sendAllowed: true, request: requestFn, onAuthError: () => undefined,
+    ...props,
+  };
   await act(async () => {
-    root.render(createElement(OrderWorkbenchPane, {
-      identity: `fixture:${caseId}`, adminUserId: "admin-fixture", operatorName: "小周",
-      client: deps.client, connection: "CONNECTED", active: true, sendAllowed: true, request: deps.request, onAuthError: () => undefined,
-    }));
+    root.render(createElement(OrderWorkbenchPane, paneProps));
   });
   t.after(async () => {
     await act(async () => root.unmount());
@@ -62,17 +65,24 @@ async function mount(t, caseId, { select = true } = {}) {
     await until(() => node.querySelector(".im-wb-queue .im-wb-row"), "list loaded");
     await act(async () => node.querySelector(".im-wb-queue .im-wb-row").click());
   }
-  return { node, root, deps, item, settle, until };
+  return { node, root, deps, item, settle, until, props: paneProps };
 }
 const rows = (node) => [...node.querySelectorAll(".im-wb-queue .im-wb-row")];
 const click = async (button) => { assert.ok(button, "control available"); await act(async () => button.click()); };
 const byText = (node, text) => [...node.querySelectorAll("button")].find((button) => button.textContent.includes(text));
+const openGroupSettings = async (node, until) => {
+  await until(() => node.querySelector(".im-wb-chat"), "chat rendered");
+  await click(node.querySelector('[data-action="open-group-settings"]'));
+  await until(() => document.querySelector('[data-settings-drawer="true"]'), "group settings drawer");
+  return [...document.querySelectorAll('[data-settings-drawer="true"]')].at(-1);
+};
 
-test("READY group list, role-attributed chat and 本单详情 come from the loaded projections", async (t) => {
+test("READY group list, role-attributed chat and the complementary order rail come from the loaded projections", async (t) => {
   const { node, until } = await mount(t, "ready-three");
   await until(() => rows(node).length === 3, "three loaded groups");
-  assert.match(rows(node)[0].textContent, /满配六套 · 资源账号/);
   assert.match(rows(node)[0].textContent, /ZZ20261011008842/, "full display number stays addressable, never a guessed tail");
+  assert.doesNotMatch(rows(node)[0].textContent, /满配六套 · 资源账号/, "the order-group list title is the order number only");
+  assert.match(rows(node)[0].textContent, /暂无消息/, "the list keeps a quiet latest-message fallback");
   assert.match(rows(node)[0].textContent, /订单群已就绪/);
   assert.match(rows(node)[2].textContent, /建群待人工核查/, "teamState NEEDS_REVIEW is reported, not smoothed over");
   assert.equal(rows(node)[0].getAttribute("data-active"), "true", "the first loaded group is selected");
@@ -82,7 +92,7 @@ test("READY group list, role-attributed chat and 本单详情 come from the load
   const messages = [...node.querySelectorAll(".im-wb-msg")];
   const buyer = messages.find((row) => row.textContent.includes("付款后从哪里交接"));
   assert.match(buyer.textContent, /小林/, "sender name comes from the member table");
-  assert.match(buyer.textContent, /买家/, "party BUYER is labelled 买家, never 租客 by guess");
+  assert.match(buyer.textContent, /租客/, "party BUYER is labelled 租客");
   const staff = messages.find((row) => row.textContent.includes("我来协助本次交接"));
   assert.equal(staff.getAttribute("data-self"), "true", "the operator's own messages sit on the right");
   assert.match(staff.textContent, /负责客服/);
@@ -90,13 +100,42 @@ test("READY group list, role-attributed chat and 本单详情 come from the load
   assert.equal(node.querySelectorAll(".im-wb-thumb").length, 2, "both staged opening screenshots render");
 
   const aside = node.querySelector("#im-order-details");
-  assert.match(aside.textContent, /account-8842/, "stable account id is shown in full");
-  assert.match(aside.textContent, /ZZ20261011008842/);
+  assert.match(aside.textContent, /满配六套 · 资源账号（含安全箱）/, "the rail complements the header with the account title");
+  assert.match(aside.textContent, /三角洲行动/);
+  assert.match(aside.textContent, /租客小林/);
+  assert.match(aside.textContent, /号主老陈/);
   assert.match(aside.textContent, /哈夫币/);
-  assert.match(aside.textContent, /10000000/, "frozen quantities are copied from the projection verbatim");
+  assert.match(aside.textContent, /10,000,000 哈夫币/, "frozen quantities are copied from the projection verbatim");
+  assert.match(aside.textContent, /金额待核对/, "without a frozen quote the amount stays unknown, never 0");
+  assert.doesNotMatch(aside.textContent, /¥0\.00/, "an unknown amount is never rendered as 0");
+  assert.doesNotMatch(aside.textContent, /account-8842|tenant-account|owner-account|10001|20002|30003/, "no account or user UUID is repeated in the rail");
+  assert.doesNotMatch(aside.textContent, /用户编号|稳定账号ID|订单编号|ZZ20261011008842/, "order identity facts stay in the chat header");
+  assert.doesNotMatch(aside.textContent, /买家合计|号主合计|平台贡献/, "the settlement split stays on the order page");
   assert.doesNotMatch(aside.textContent, /区服|计划租期|实付金额/, "no cover, server, planned period or payment amount is invented");
-  assert.match(aside.querySelector(".im-support-fulfillment").textContent, /待核对期初/);
-  assert.match(aside.textContent, /未开租/);
+  assert.equal(aside.querySelector('[data-action="order-open-inventory"]').getAttribute("href"), "/orders/order-8842", "the full list links the existing order detail page");
+  assert.ok(aside.querySelector('[data-action="open-fulfillment-panel"]'), "the limited fulfillment action stays in the rail");
+  assert.doesNotMatch(aside.textContent, /待核对期初|未开租/, "the rail does not repeat the stage facts shown above the chat");
+});
+
+test("admin custom conversation opens the platform message menu on a row", async (t) => {
+  const { node, until } = await mount(t, "ready-three");
+  await until(() => node.querySelector(".im-wb-msg"), "chat rendered");
+  const buyer = [...node.querySelectorAll(".im-wb-msg")].find((row) => row.textContent.includes("付款后从哪里交接"));
+  await act(async () => buyer.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 160, clientY: 160 })));
+  await until(() => document.querySelector('.message-action-menu[role="menu"]'), "buyer menu");
+  const buyerItems = [...document.querySelectorAll('.message-action-menu [role="menuitem"]')].map((item) => item.textContent.trim());
+  assert.ok(buyerItems.includes("复制"), "text message offers copy");
+  assert.ok(buyerItems.includes("回复"), "sendable group offers reply");
+  assert.ok(buyerItems.includes("删除"), "any visible message offers local delete");
+  assert.ok(!buyerItems.includes("撤回"), "another member's message cannot be revoked");
+  await act(async () => document.dispatchEvent(new browser.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+  await until(() => !document.querySelector('.message-action-menu[role="menu"]'), "menu closed");
+
+  const staff = [...node.querySelectorAll(".im-wb-msg")].find((row) => row.textContent.includes("我来协助本次交接"));
+  await act(async () => staff.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 180, clientY: 200 })));
+  await until(() => document.querySelector('.message-action-menu[role="menu"]'), "staff menu");
+  const staffItems = [...document.querySelectorAll('.message-action-menu [role="menuitem"]')].map((item) => item.textContent.trim());
+  assert.ok(staffItems.includes("撤回"), "the operator can revoke their own message");
 });
 
 test("unknown historical senders degrade neutrally instead of borrowing a name", async (t) => {
@@ -104,51 +143,99 @@ test("unknown historical senders degrade neutrally instead of borrowing a name",
   await until(() => node.textContent.includes("成员表已无此账号"), "history loaded");
   const row = [...node.querySelectorAll(".im-wb-msg")].find((item) => item.textContent.includes("成员表已无此账号"));
   assert.match(row.textContent, /未署名成员/);
-  assert.doesNotMatch(row.textContent, /买家|号主|负责客服/, "an unmapped sender is never attributed to a known party");
+  assert.doesNotMatch(row.textContent, /租客|号主|负责客服/, "an unmapped sender is never attributed to a known party");
 });
 
-test("more staff members render as more members, and roles stay non-exclusive", async (t) => {
+test("more staff members stay counted in the header while the rail keeps only the two parties", async (t) => {
   const { node, until } = await mount(t, "multi-staff");
-  await until(() => node.querySelectorAll(".im-order-members [data-slot=item]").length === 6, "six members");
-  assert.match(node.querySelector(".im-wb-chat-actions").textContent, /成员 6/);
-  const members = [...node.querySelectorAll(".im-order-members [data-slot=item]")].map((item) => item.textContent);
-  assert.equal(members.filter((text) => /负责客服/.test(text)).length, 1);
-  assert.equal(members.filter((text) => /协作客服/.test(text)).length, 3);
+  await until(() => /成员 6/.test(node.querySelector(".im-wb-chat-actions")?.textContent ?? ""), "six members");
+  const aside = node.querySelector("#im-order-details");
+  const parties = [...aside.querySelectorAll(".im-rail-party")].map((row) => row.textContent.replace(/\s+/g, ""));
+  assert.deepEqual(parties, ["租客林小林小林", "号主老陈"], "the rail names only the renter and owner");
+  assert.doesNotMatch(node.querySelector(".im-wb-chat-title").textContent, /共同可见|负责客服|协作客服/, "the header does not repeat a role roster as noise");
+  assert.doesNotMatch(aside.textContent, /小李|小赵|小孙/, "staff members are not duplicated into the rail");
 });
 
 test("party confirmation binds to the same version only", async (t) => {
+  const openPanel = async ({ node, until }) => {
+    await click(node.querySelector('[data-action="open-fulfillment-panel"]'));
+    await until(() => document.body.querySelector(".im-order-panel"), "check panel");
+    return document.body.querySelector(".im-order-panel");
+  };
+  const closePanel = async (until) => {
+    await click(document.body.querySelector('[aria-label="关闭核对面板"]'));
+    await until(() => !document.body.querySelector(".im-order-panel"), "check panel closed");
+  };
   const oneAck = await mount(t, "opening-one-ack");
-  await oneAck.settle();
-  const parties = (node) => [...node.querySelectorAll(".im-order-parties [data-slot=item]")].map((row) => row.textContent.replace(/\s+/g, ""));
-  assert.deepEqual(parties(oneAck.node), ["租客待确认", "号主已确认"], "opening acks are per party on the same version");
-  assert.match(oneAck.node.querySelector(".im-order-parties").textContent, /客服不能代替/, "the operator is never offered a proxy confirmation");
-  assert.match(oneAck.node.querySelector(".im-support-fulfillment").textContent, /等待双方确认期初/);
-  assert.match(oneAck.node.textContent, /期初清单 v1/);
+  const first = await openPanel(oneAck);
+  const parties = (root) => [...root.querySelectorAll(".im-order-parties [data-slot=item]")].map((row) => row.textContent.replace(/\s+/g, ""));
+  assert.deepEqual(parties(first), ["租客待确认", "号主已确认"], "opening acks are per party on the same version");
+  assert.match(first.querySelector(".im-order-parties").textContent, /客服不能代替/, "the operator is never offered a proxy confirmation");
+  assert.match(first.textContent, /等待双方确认期初/);
+  assert.match(first.textContent, /期初 v1/);
+  await closePanel(oneAck.until);
 
   const stale = await mount(t, "stale-decision");
-  await stale.settle();
-  assert.deepEqual(parties(stale.node), ["租客待确认", "号主待确认"], "confirmations recorded on an older hash do not count for v3");
-  assert.match(stale.node.querySelector(".im-support-fulfillment").textContent, /有结束申请待处理/);
+  const second = await openPanel(stale);
+  assert.deepEqual(parties(second), ["租客待确认", "号主待确认"], "confirmations recorded on an older hash do not count for v3");
+  assert.match(second.textContent, /有结束申请待处理/);
 });
 
 test("settlement unavailable keeps the conversation readable and never defaults to 待录入", async (t) => {
   const { node, until } = await mount(t, "settlement-unavailable");
   await until(() => node.querySelector(".im-wb-msg"), "history still loaded");
   const task = node.querySelector(".im-support-fulfillment");
-  assert.match(task.textContent, /本单进度暂时读不到/);
-  assert.match(task.textContent, /不影响在这里沟通/);
+  assert.match(task.textContent, /本单结算记录不可用/);
+  assert.match(task.textContent, /本环境未启用结算记录/);
+  assert.match(task.textContent, /不影响本单沟通/);
+  assert.doesNotMatch(task.textContent, /未找到此内容|无权/, "404 never claims a permission problem");
   assert.doesNotMatch(task.textContent, /待核对期初|核对并录入期初/, "a failed read is not presented as a missing opening");
+  assert.equal(task.querySelector('[role="alert"]'), null, "an unavailable surface is neutral, not a red error");
   assert.ok(byText(node, "重新读取"), "the only offered action is another read");
   assert.equal(node.querySelectorAll(".im-support-fulfillment-lines input").length, 0);
+  assert.equal(node.querySelector('[data-action="open-fulfillment-panel"]'), null, "no write panel without a readable settlement");
+});
+
+test("a forbidden settlement read still reports the missing permission", async (t) => {
+  const { node, until } = await mount(t, "settlement-forbidden");
+  await until(() => node.querySelector(".im-support-fulfillment"), "task card loaded");
+  const task = node.querySelector(".im-support-fulfillment");
+  assert.match(task.textContent, /当前账号无权查看本单结算记录/);
+  assert.doesNotMatch(task.textContent, /本环境未启用结算记录/, "403 is not the unavailable-surface copy");
+  assert.ok(task.querySelector('[role="alert"]'), "permission failure stays an alert");
+  assert.ok(byText(node, "重新读取"), "a denied read can be retried");
+  assert.equal(node.querySelectorAll(".im-support-fulfillment-lines input").length, 0);
+});
+
+test("a completed order leaves ended facts in the header stage bar instead of repeating them in the rail", async (t) => {
+  const base = fixtureById("posted");
+  const completed = { ...base, id: "completed-order", info: { ...base.info, orderStatus: "COMPLETED" } };
+  const { node, until } = await mount(t, "completed-order", { fixture: completed });
+  await until(() => node.querySelector("#im-order-details .im-rail-value"), "account value loaded");
+  const aside = node.querySelector("#im-order-details");
+  assert.equal(aside.querySelector(".im-support-fulfillment"), null, "no ended status card in the rail");
+  assert.doesNotMatch(aside.textContent, /本单已结束|已完成|已取消|已结算/, "ended facts stay in the header stage bar");
+  assert.match(aside.textContent, /哈夫币/, "account value stays available for ended orders");
+  assert.match(aside.textContent, /查看完整清单/);
+  assert.equal(node.querySelector('[data-action="open-fulfillment-panel"]'), null, "ended orders have no write entry");
+  assert.equal(document.body.querySelector(".im-order-panel"), null, "no check panel is mounted");
+  assert.match(node.querySelector(".order-team-stage").textContent, /结算完成/, "the header keeps the ended stage");
+});
+
+test("an active order keeps the existing fulfillment write entry", async (t) => {
+  const { node, until } = await mount(t, "ready-three");
+  await until(() => node.querySelector(".im-support-fulfillment"), "task card");
+  assert.ok(node.querySelector('[data-action="open-fulfillment-panel"]'), "active orders keep the existing entry");
+  assert.equal(node.querySelector('[data-ended="true"]'), null);
+  assert.equal(node.querySelector('[data-read-state]'), null);
 });
 
 test("send-only revocation keeps history and draft but blocks new sends", async (t) => {
   const { node, until, settle } = await mount(t, "send-only");
   await until(() => node.querySelector(".im-wb-msg"), "history loaded");
   assert.match(node.textContent, /当前只可阅读/);
-  const textarea = node.querySelector("textarea");
-  assert.equal(textarea.disabled, true, "the composer is read-only");
-  assert.equal(byText(node, "发送").disabled, true);
+  assert.equal(node.querySelector("textarea"), null, "read-only replaces the composer instead of leaving a dead input");
+  assert.equal(node.querySelector(".im-wb-send"), null);
   assert.ok(node.querySelector(".im-wb-thumb"), "already loaded images stay visible");
   await settle();
   assert.match(node.textContent, /期初截图已发/, "loaded history is never cleared by a send revocation");
@@ -221,85 +308,83 @@ test("an unknown text result keeps responsibility and replays the original messa
   await settle();
 });
 
-test("the frozen inventory dialog opens, closes, reopens and stays bound to its order", async (t) => {
-  const { node, until, settle } = await mount(t, "ready-three");
-  await until(() => node.querySelector('[data-action="order-open-inventory"]'), "inventory entry");
-  assert.equal(document.body.querySelector(".im-order-inventory-dialog"), null, "nothing is mounted until it is opened");
-
-  const trigger = node.querySelector('[data-action="order-open-inventory"]');
-  await click(trigger);
-  await until(() => document.body.querySelector(".im-order-inventory-dialog"), "dialog opened");
-  assert.match(document.body.querySelector(".im-order-inventory-dialog").textContent, /ZZ20261011008842/, "the dialog names the order it was opened for");
-  assert.match(document.body.querySelector(".im-order-inventory-dialog").textContent, /哈夫币/);
-
-  const closeBtn = document.body.querySelector(`[data-action="close-inventory"]`) ?? document.querySelector(`[data-action="close-inventory"]`);
-  assert.ok(closeBtn, "close control present: " + (document.body.querySelector(".im-order-inventory-dialog")?.outerHTML ?? "no dialog").slice(0, 260));
-  await click(closeBtn);
-  await until(() => !document.body.querySelector(".im-order-inventory-dialog"), "closed by the button");
-  await until(() => document.activeElement === node.querySelector('[data-action="order-open-inventory"]'), "focus returns to the trigger");
-
-  await click(node.querySelector('[data-action="order-open-inventory"]'));
-  await until(() => document.body.querySelector(".im-order-inventory-dialog"), "reopens after a full close");
-  const dialogEl = document.body.querySelector(".im-order-inventory-dialog");
-  await act(async () => { dialogEl.dispatchEvent(new browser.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); });
-  await settle();
-  assert.ok(!document.body.querySelector(".im-order-inventory-dialog"), "Escape closes the list dialog too");
-
-  // Switching orders must never leave another order's list on screen.
-  await click(node.querySelector('[data-action="order-open-inventory"]'));
-  await until(() => document.body.querySelector(".im-order-inventory-dialog"), "opened again");
-  await act(async () => rows(node)[1].click());
-  await until(() => !document.body.querySelector(".im-order-inventory-dialog"), "selecting another order closes it");
-  await until(() => node.querySelector('[data-action="order-open-inventory"]'), "the new order's rail is loaded");
-  await act(async () => rows(node)[0].click());
-  await until(() => node.querySelector(".im-wb-chat-title").textContent.includes("ZZ20261011008842"), "returned to the first order");
-  assert.equal(document.body.querySelector(".im-order-inventory-dialog"), null, "A-B-A cannot resurrect an old dialog without an explicit open");
-  await act(async () => rows(node)[1].click());
-  await until(() => node.querySelector(".im-wb-chat-title").textContent.includes("ZZ20261010007710"), "selected the second order again");
-  await click(node.querySelector('[data-action="order-open-inventory"]'));
-  await until(() => document.body.querySelector(".im-order-inventory-dialog"), "reopened for the new order");
-  assert.match(document.body.querySelector(".im-order-inventory-dialog").textContent, /ZZ20261010007710/, "the dialog follows the order that is now selected");
-});
-
-test("a long inventory stays summarized in the rail and complete in its dialog", async (t) => {
-  const { node, until } = await mount(t, "inventory-many");
-  await until(() => node.querySelector('[data-action="order-open-inventory"]'), "inventory ready");
-  assert.equal(node.querySelectorAll("#im-order-details .im-order-table tbody tr").length, 4, "the rail shows a bounded summary");
-  assert.match(node.querySelector("#im-order-details").textContent, /共 24 项/);
-  await click(node.querySelector('[data-action="order-open-inventory"]'));
-  await until(() => document.body.querySelector(".im-order-inventory-dialog"), "inventory opened");
-  const dialog = document.body.querySelector(".im-order-inventory-dialog");
-  assert.equal(dialog.querySelectorAll("tbody tr").length, 24, "full inventory is retained");
-  assert.match(dialog.textContent, /按数量计价/);
-  assert.doesNotMatch(dialog.textContent, /FIXED_UNIT|PER_UNIT|HAFF_RATIO/, "the main view speaks the business language");
-  assert.ok(dialog.querySelector(".im-order-inventory-scroll"), "only the inventory body owns scrolling");
-});
-
-test("late clipboard success cannot mark another order as copied", async (t) => {
+test("the frozen inventory summary stays compact and links the existing order detail page", async (t) => {
   const { node, until } = await mount(t, "ready-three");
-  await until(() => node.querySelector('[aria-label="复制稳定账号ID"]'), "copy ready");
-  const previous = Object.getOwnPropertyDescriptor(browser.navigator, "clipboard");
-  let release;
-  const gate = new Promise(resolve => { release = resolve; });
-  Object.defineProperty(browser.navigator, "clipboard", { configurable: true, value: { writeText: () => gate } });
-  t.after(() => { if (previous) Object.defineProperty(browser.navigator, "clipboard", previous); else delete browser.navigator.clipboard; });
-  await click(node.querySelector('[aria-label="复制稳定账号ID"]'));
+  await until(() => node.querySelector('[data-action="order-open-inventory"]'), "inventory summary");
+  assert.equal(document.body.querySelector(".im-order-inventory-dialog"), null, "the rail does not mount a second full inventory view");
+  const link = node.querySelector('[data-action="order-open-inventory"]');
+  assert.equal(link.tagName, "A", "the full list is a link, not a local dialog");
+  assert.equal(link.getAttribute("href"), "/orders/order-8842", "the link targets the existing order detail page");
+  assert.match(link.textContent, /查看完整清单/);
+  const aside = node.querySelector("#im-order-details");
+  assert.match(aside.textContent, /冻结清单 · 2 项/);
+  assert.equal(aside.querySelectorAll(".im-rail-value-item").length, 1, "only the visible resource rows are summarized");
+  assert.match(aside.textContent, /装备箱/);
+  assert.match(aside.textContent, /3 件/);
+  assert.doesNotMatch(aside.textContent, /计价口径|按数量计价|HAFF_RATIO|FIXED_UNIT/, "the rail keeps business language");
+
   await act(async () => rows(node)[1].click());
   await until(() => node.querySelector(".im-wb-chat-title").textContent.includes("ZZ20261010007710"), "another order selected");
-  await act(async () => release());
-  assert.equal(node.querySelector(".im-rail-copy-status"), null, "old clipboard completion is not applied to the new value");
-  await click(node.querySelector('[aria-label="复制稳定账号ID"]'));
-  await until(() => /已复制稳定账号ID/.test(node.querySelector(".im-rail-copy-status")?.textContent ?? ""), "current copy confirmed");
+  await until(() => node.querySelector('[data-action="order-open-inventory"]')?.getAttribute("href") === "/orders/order-7710", "the link follows the selected order");
+  await act(async () => rows(node)[0].click());
+  await until(() => node.querySelector('[data-action="order-open-inventory"]').getAttribute("href") === "/orders/order-8842", "returning to the first order restores its link");
+});
+
+test("a long inventory stays a bounded summary instead of expanding every row", async (t) => {
+  const { node, until } = await mount(t, "inventory-many");
+  await until(() => node.querySelector('[data-action="order-open-inventory"]'), "inventory ready");
+  const aside = node.querySelector("#im-order-details");
+  assert.equal(aside.querySelectorAll(".im-rail-value-item").length, 3, "the rail caps the visible resource rows");
+  assert.match(aside.textContent, /物品资源 · 24 项/);
+  assert.match(aside.textContent, /另有 21 项物品资源/, "the rest stays collapsed");
+  assert.match(aside.textContent, /冻结清单 · 24 项/);
+  assert.doesNotMatch(aside.textContent, /合成资源项目 4/, "the fourth row is not expanded");
+  assert.equal(node.querySelector('[data-action="order-open-inventory"]').getAttribute("href"), "/orders/order-8842");
+});
+
+test("the rail treats zero-quantity inventory as absent and sums only frozen quote amounts", async (t) => {
+  const base = fixtureById("ready-three");
+  const terms = {
+    viewerParty: "STAFF", basis: "QUOTE", currency: "CNY", scale: 2, version: "quote-v1", rentalAmount: null, depositAmount: null, paidTotal: null,
+    lines: [
+      { itemId: "item_haff", name: "哈夫币", quantity: "10000000", unitPrice: null, amount: null, buyerUnitPrice: "1", ownerUnitPrice: "0.8", buyerAmount: "10000000", ownerAmount: "8000000", platformContribution: "2000000" },
+      { itemId: "item_case", name: "装备箱", quantity: "3", unitPrice: null, amount: null, buyerUnitPrice: "6000", ownerUnitPrice: "5000", buyerAmount: "18000", ownerAmount: "15000", platformContribution: "3000" },
+    ],
+  };
+  const fixture = {
+    ...base,
+    info: {
+      ...base.info, terms,
+      frozenInventory: [
+        { itemId: "item_haff", quantity: "10000000", unit: "HAFF_BASE", pricingKind: "HAFF_RATIO", name: "哈夫币" },
+        { itemId: "item_case", quantity: "3", unit: "PIECE", pricingKind: "FIXED_UNIT", name: "装备箱" },
+        { itemId: "item_empty", quantity: "0", unit: "PIECE", pricingKind: "FIXED_UNIT", name: "零号弹匣" },
+      ],
+    },
+  };
+  const { node, until } = await mount(t, "ready-three-zero", { fixture });
+  await until(() => node.querySelector("#im-order-details .im-rail-value"), "value loaded");
+  const aside = node.querySelector("#im-order-details");
+  assert.match(aside.textContent, /10,000,000 哈夫币/, "havoc total comes from the frozen inventory");
+  assert.match(aside.textContent, /¥100,000.00/, "havoc amount comes from the frozen quote line");
+  assert.match(aside.textContent, /物品资源 · 1 项/);
+  assert.match(aside.textContent, /¥180.00/, "item total is the exact sum of the frozen line amounts");
+  assert.doesNotMatch(aside.textContent, /零号弹匣/, "quantity 0 is absent, not an exception");
+  assert.doesNotMatch(aside.textContent, /异常/, "zero is never reported as abnormal");
+  assert.match(aside.textContent, /冻结清单 · 2 项/, "the count only includes present rows");
+  assert.doesNotMatch(aside.textContent, /account-8842|tenant-account|owner-account|10001|20002|30003/, "no account or user UUIDs");
+  assert.doesNotMatch(aside.textContent, /复制|已复制/, "the removed copy controls do not come back");
+  assert.doesNotMatch(aside.textContent, /买家合计|号主合计|平台贡献/, "no settlement split is repeated");
 });
 
 test("an image failure is scoped to the selected order", async (t) => {
   const { node, until } = await mount(t, "ready-three");
   await until(() => node.querySelector(".im-wb-thumb img"), "image ready");
   await act(async () => node.querySelector(".im-wb-thumb img").dispatchEvent(new Event("error")));
-  await until(() => node.querySelector(".im-wb-thumb-failed"), "image failure shown");
+  await until(() => node.querySelector(".message-image-failed"), "image failure shown");
   await act(async () => rows(node)[1].click());
   await until(() => node.querySelector(".im-wb-chat-title").textContent.includes("ZZ20261010007710"), "another order selected");
-  assert.equal(node.querySelector(".im-wb-thumb-failed"), null, "a failed image from the previous order does not poison the new order");
+  assert.equal(node.querySelector(".message-image-failed"), null, "a failed image from the previous order does not poison the new order");
 });
 
 test("a new identity returns the narrow workbench to its selectable list", async (t) => {
@@ -315,4 +400,246 @@ test("a new identity returns the narrow workbench to its selectable list", async
   await until(() => node.querySelectorAll(".im-wb-queue .im-wb-row").length === 3, "new scoped directory");
   assert.equal(node.querySelector(".order-team-grid").getAttribute("data-pane"), "list", "the new session can choose a group instead of being trapped in the old chat pane");
   assert.equal(node.querySelector('[aria-label="搜索订单群"]').value, "", "old scoped search text is cleared");
+});
+
+test("the admin custom conversation renders an order-stage card with both sides", async (t) => {
+  const base = fixtureById("ready-three");
+  const copied = [];
+  Object.defineProperty(browser.navigator, "clipboard", { configurable: true, value: { writeText: async (text) => { copied.push(text); } } });
+  t.after(() => { delete browser.navigator.clipboard; });
+  const terms = {
+    viewerParty: "STAFF", basis: "QUOTE", currency: "CNY", scale: 2, version: "quote-v1", rentalAmount: null, depositAmount: null, paidTotal: null,
+    lines: [
+      { itemId: "item_haff", name: "哈夫币", quantity: "10000000", unitPrice: null, amount: null, buyerUnitPrice: "1", ownerUnitPrice: "0.8", buyerAmount: "10000000", ownerAmount: "8000000", platformContribution: "2000000" },
+      { itemId: "item_case", name: "装备箱", quantity: "3", unitPrice: null, amount: null, buyerUnitPrice: "6000", ownerUnitPrice: "5000", buyerAmount: "18000", ownerAmount: "15000", platformContribution: "3000" },
+      { itemId: "item_zero", name: "零号弹匣", quantity: "0", unitPrice: null, amount: null, buyerUnitPrice: "7000", ownerUnitPrice: "6000", buyerAmount: "0", ownerAmount: "0", platformContribution: "0" },
+      { itemId: "item_unknown_qty", name: "神秘物资", quantity: "待核对", unitPrice: null, amount: null, buyerUnitPrice: "0", ownerUnitPrice: "0", buyerAmount: "0", ownerAmount: "0", platformContribution: "0" },
+    ],
+    staff: { buyerRentalAmount: "10018000", ownerRentalAmount: "8015000", buyerTotal: "10018000", ownerTotal: "8015000", platformContribution: "2003000" },
+  };
+  const fixture = {
+    ...base,
+    info: { ...base.info, openingState: "PARTIAL", openingAcks: { renter: true, owner: false }, terms },
+    history: [...base.history, {
+      messageClientId: "m-card", messageServerId: "srv-card", senderId: "tenant-account", receiverId: "team-8842",
+      createTime: Date.parse("2026-10-11T01:34:00Z"), messageType: 0, text: "",
+      card: { kind: "ORDER_OPENING", orderId: "order-8842", cardId: "card-1" },
+    }],
+  };
+  const { node, until } = await mount(t, "ready-three-card", { fixture });
+  await until(() => node.querySelector(".im-wb-msg .order-card"), "stage card rendered");
+  const card = node.querySelector(".im-wb-msg .order-card");
+  assert.equal(card.getAttribute("data-kind"), "ORDER_OPENING", "the shared card keeps its kind");
+  assert.equal(card.getAttribute("data-party"), "STAFF", "the admin workbench reads the staff projection");
+  assert.equal(card.querySelector(".order-card-head .order-card-title").textContent, "开租确认", "the dark header names the stage");
+  assert.ok(card.querySelector(".order-card-head .order-card-icon"), "the header keeps its document icon");
+  const acks = [...card.querySelectorAll(".order-card-ack")].map(ack => [ack.querySelector(".order-card-ack-name").textContent, ack.getAttribute("data-state"), ack.querySelector(".order-card-ack-state").textContent, Boolean(ack.querySelector(".order-card-ack-mark svg"))]);
+  assert.deepEqual(acks, [["租客", "confirmed", "已确认", true], ["号主", "pending", "待确认", false]], "both party steps are shown with their marks");
+  assert.match(card.querySelector(".order-card-account").textContent, /满配六套 · 资源账号（含安全箱）/);
+  assert.equal(card.querySelector(".order-card-game").textContent, "三角洲行动");
+  assert.doesNotMatch(card.textContent, /account-8842|稳定 ID/, "no account stable id is rendered");
+  const figures = Object.fromEntries([...card.querySelectorAll(".order-card-figure")]
+    .map(figure => [figure.querySelector("dt").textContent, figure.querySelector("dd").textContent]));
+  assert.deepEqual(figures, { 租客合计: "¥100,180.00", 号主合计: "¥80,150.00" }, "staff sees both sides");
+  assert.equal(card.querySelector(".order-card-platform strong").textContent, "¥20,030.00", "staff sees the platform contribution");
+  const itemToggle = card.querySelector(".order-card-items-toggle");
+  assert.match(itemToggle.querySelector(".order-card-row-label").textContent, /物品清单（2 项）/, "quantity 0 is not counted but an unreadable quantity stays");
+  assert.equal(itemToggle.querySelector(".order-card-row-value").textContent, "租客 ¥180.00 · 号主 ¥150.00");
+  await act(async () => itemToggle.click());
+  assert.deepEqual([...card.querySelectorAll(".order-card-line")].map(line => line.querySelector(".order-card-line-name").textContent), ["装备箱", "神秘物资"], "only positive or unreadable items are listed");
+  const unknownLine = [...card.querySelectorAll(".order-card-line")].find(line => line.textContent.includes("神秘物资"));
+  assert.match(unknownLine.querySelector(".order-card-line-qty").textContent, /数量待核对/, "an unreadable quantity is never shown as 0");
+  assert.doesNotMatch(card.textContent, /零号弹匣/, "quantity 0 never renders a row");
+  assert.match(card.querySelector(".order-card-no").textContent, /订单 ZZ20261011008842/, "the footer carries only the order display number");
+  const copy = card.querySelector('button[aria-label="复制订单号 ZZ20261011008842"]');
+  assert.ok(copy, "the copy control names the order number");
+  await act(async () => copy.click());
+  await until(() => copied.length === 1, "order number copied");
+  assert.deepEqual(copied, ["ZZ20261011008842"], "the clipboard receives the display number");
+  assert.match(card.querySelector(".order-card-copy-state").textContent, /已复制/, "the copy result is announced");
+  assert.equal(card.querySelector(".order-card-action").tagName, "BUTTON", "the footer action keeps the admin callback");
+  assert.equal(card.closest(".im-wb-bub"), null, "the card replaces the text bubble instead of nesting inside it");
+  assert.equal(card.closest(".im-wb-msg-body").getAttribute("data-card"), "true", "the message body is widened for the card");
+
+  const row = card.closest("[data-message-id]");
+  assert.ok(row, "the card stays a message row");
+  await act(async () => row.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 160, clientY: 180 })));
+  await until(() => document.querySelector('.message-action-menu[role="menu"]'), "card menu");
+  const labels = [...document.querySelectorAll('.message-action-menu [role="menuitem"]')].map((item) => item.textContent.trim());
+  assert.ok(labels.includes("删除"), "delete stays available on a card row");
+  assert.ok(labels.includes("回复"), "reply is still offered");
+  await act(async () => document.dispatchEvent(new browser.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+  await until(() => !document.querySelector(".message-action-menu"), "menu closed");
+});
+
+test("quoted replies are visible on the admin side and revoked messages stay explicit", async (t) => {
+  const base = fixtureById("ready-three");
+  const fixture = {
+    ...base,
+    history: [...base.history,
+      { messageClientId: "m-quote", messageServerId: "srv-quote", senderId: "viewer", receiverId: "team-8842",
+        createTime: Date.parse("2026-10-11T01:40:00Z"), messageType: 0, text: "123",
+        reply: { messageId: "srv-1", senderId: "tenant-account", text: "你好，付款后从哪里交接？" } },
+      { messageClientId: "m-revoked", messageServerId: "srv-revoked", senderId: "viewer", receiverId: "team-8842",
+        createTime: Date.parse("2026-10-11T01:41:00Z"), messageType: 0, text: "", revoked: true },
+    ],
+  };
+  const { node, until } = await mount(t, "ready-three", { fixture });
+  await until(() => node.querySelector(".im-wb-bub .message-quoted"), "quoted reply rendered");
+  const quote = node.querySelector(".im-wb-bub .message-quoted");
+  assert.match(quote.textContent, /小林：你好，付款后从哪里交接？/);
+  await act(async () => quote.dispatchEvent(new browser.MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: 360, clientY: 260 })));
+  await until(() => browser.document.querySelector('.message-action-menu [data-action="jump"]'), "quote jump menu");
+  await act(async () => browser.document.querySelector('.message-action-menu [data-action="jump"]').click());
+  await until(() => node.querySelector(".message-quote-target"), "jumped message highlighted");
+  const revoked = node.querySelector('.im-wb-bub[data-revoked="true"]');
+  assert.ok(revoked, "revoked message keeps an explicit state");
+  assert.match(revoked.textContent, /消息已撤回/);
+  assert.equal(revoked.closest(".im-wb-msg").querySelector(".im-wb-msg-status"), null, "a revoked message does not claim 已发送");
+});
+
+test("the group settings drawer groups users and staff, marks the responsible admin and renders no identifiers", async (t) => {
+  browser.localStorage.clear();
+  const { node, until } = await mount(t, "multi-staff");
+  await until(() => /成员 6/.test(node.querySelector(".im-wb-chat-actions")?.textContent ?? ""), "six members");
+  const drawer = await openGroupSettings(node, until);
+  assert.equal(drawer.getAttribute("role"), "dialog");
+  assert.equal(drawer.getAttribute("data-settings-drawer"), "true");
+  assert.ok(drawer.closest(".im-og-settings-dialog"), "settings render in their own dialog surface");
+  assert.equal(drawer.closest("#im-order-details"), null, "settings are never layered over the live order rail");
+  assert.match(drawer.textContent, /满配六套 · 资源账号/);
+  assert.match(drawer.textContent, /群成员 6 · 用户 2 · 客服 4/);
+
+  const userGroup = drawer.querySelector('[data-member-group="USER"]');
+  const staffGroup = drawer.querySelector('[data-member-group="STAFF"]');
+  assert.ok(userGroup, "user members have their own group");
+  assert.ok(staffGroup, "staff members have their own group");
+  assert.equal(userGroup.querySelectorAll(".im-og-member").length, 2);
+  assert.match(userGroup.textContent, /租客/);
+  assert.match(userGroup.textContent, /号主/);
+  assert.match(userGroup.textContent, /只读/);
+  assert.equal(staffGroup.querySelectorAll(".im-og-member").length, 4);
+  assert.match(staffGroup.textContent, /负责客服/);
+  assert.match(staffGroup.textContent, /协作客服/);
+  assert.equal(staffGroup.querySelectorAll('[data-relation="responsible"]').length, 1, "only one responsible marker");
+  assert.doesNotMatch(drawer.textContent, /10001|20002|30003|30004|30005|30006|tenant-account|owner-account|staff-b-account|staff-c-account/, "no user or account UUID reaches the drawer");
+  assert.doesNotMatch(drawer.textContent, /用户编号|稳定账号ID|account-8842/, "administrative identifiers stay out of the group settings");
+  assert.doesNotMatch(drawer.textContent, /我的群昵称/, "there is no my-group-nickname editor");
+  assert.equal(drawer.querySelector('input[placeholder*="昵称"], input[aria-label*="昵称"]'), null);
+
+  await act(async () => drawer.dispatchEvent(new browser.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+  await until(() => !node.querySelector('[data-settings-drawer="true"]'), "drawer closed");
+  assert.ok(node.querySelector("#im-order-details .im-rail-value"), "the existing order rail still renders after closing settings");
+});
+
+test("admin invites use the order-scoped bounded picker and report permission, unavailable and wired success", async (t) => {
+  browser.localStorage.clear();
+  const targets = Array.from({ length: 12 }, (_, index) => ({ adminUserId: `admin-candidate-${index}`, displayName: `候选管理员${index}` }));
+  const reads = [];
+  const writes = [];
+  let readMode = "denied";
+  const { node, root, until, settle, props } = await mount(t, "ready-three", {
+    request: (base) => async (path, body) => {
+      if (path.startsWith("/orders/order-8842/member-candidates")) {
+        reads.push(path);
+        if (readMode === "denied") throw Object.assign(new Error("synthetic forbidden"), { status: 403 });
+        if (readMode === "unavailable") throw Object.assign(new Error("synthetic unavailable"), { status: 503 });
+        return { targets, limit: 50 };
+      }
+      if (path === "/orders/order-8842/members" && body) {
+        writes.push({ path, body });
+        return { status: "JOINED", members: [] };
+      }
+      return base(path);
+    },
+  });
+  const drawer = await openGroupSettings(node, until);
+  await click(drawer.querySelector('[data-action="open-admin-invite"]'));
+  await until(() => /当前账号无权读取可邀请成员/.test(drawer.textContent), "permission is named without raw identifiers");
+  assert.equal(drawer.querySelectorAll('[data-action="invite-admin-candidate"]').length, 0);
+  assert.match(reads[0], /^\/orders\/order-8842\/member-candidates\?limit=50$/, "the picker uses the scoped bounded read");
+
+  readMode = "unavailable";
+  await click(drawer.querySelector('[data-action="retry-invite-candidates"]'));
+  await until(() => /服务端未就绪：成员邀请暂不可用/.test(drawer.textContent), "missing endpoint is explicit");
+  assert.equal(drawer.querySelectorAll('[data-action="invite-admin-candidate"]').length, 0);
+
+  readMode = "ready";
+  await click(drawer.querySelector('[data-action="retry-invite-candidates"]'));
+  await until(() => drawer.querySelectorAll('[data-action="invite-admin-candidate"]').length > 0, "bounded admin candidates");
+  const candidates = [...drawer.querySelectorAll('[data-action="invite-admin-candidate"]')];
+  assert.equal(candidates.length, 8, "the picker never renders the whole candidate pool");
+  assert.match(drawer.textContent, /可邀请现有管理员/, "any administrator can invite, not only the responsible one");
+  assert.doesNotMatch(drawer.textContent, /admin-candidate-0|admin-candidate-1/, "no admin UUID is rendered");
+  const target = [...drawer.querySelectorAll(".im-og-candidate")].find((item) => item.textContent.includes("候选管理员1"));
+  assert.ok(target, "candidate remains selectable by name");
+  await click(target.querySelector('[data-action="invite-admin-candidate"]'));
+  await until(() => writes.length === 1, "invite reaches the contract path");
+  assert.deepEqual(writes[0], { path: "/orders/order-8842/members", body: { adminUserId: "admin-candidate-1" } }, "the write body only carries the chosen admin id");
+  await until(() => /已邀请 候选管理员1/.test(drawer.textContent), "success is shown only after the server accepts");
+
+  const overridden = [];
+  await act(async () => root.render(createElement(OrderWorkbenchPane, {
+    ...props, inviteGroupMember: async (orderId, adminUserId) => { overridden.push([orderId, adminUserId]); },
+  })));
+  const second = [...drawer.querySelectorAll(".im-og-candidate")].find((item) => item.textContent.includes("候选管理员2"));
+  await click(second.querySelector('[data-action="invite-admin-candidate"]'));
+  await until(() => overridden.length === 1, "a typed callback overrides the default transport");
+  assert.deepEqual(overridden[0], ["order-8842", "admin-candidate-2"]);
+  assert.equal(writes.length, 1, "the overridden transport is the only writer");
+  await settle();
+});
+
+test("pin, mute and local hide are per-admin preferences and hiding never leaves the group", async (t) => {
+  browser.localStorage.clear();
+  const { node, root, deps, until, props } = await mount(t, "ready-three");
+  await until(() => rows(node).length === 3, "three loaded groups");
+  await act(async () => rows(node)[1].click());
+  await until(() => node.querySelector(".im-wb-chat-title")?.textContent.includes("ZZ20261010007710"), "second order selected");
+
+  const drawer = await openGroupSettings(node, until);
+  assert.match(drawer.textContent, /只隐藏本机列表/);
+  await click(drawer.querySelector('[data-pref="pin"]'));
+  await until(() => rows(node)[0].textContent.includes("置顶"), "pinned row moved first locally");
+  await click(drawer.querySelector('[data-pref="mute"]'));
+  await until(() => rows(node)[0].textContent.includes("免打扰"), "muted marker is local");
+
+  let leaveCalls = 0;
+  deps.client.leave = () => { leaveCalls += 1; return Promise.resolve(); };
+  await click(drawer.querySelector('[data-pref="hide"]'));
+  await until(() => rows(node).length === 2, "hidden row disappears from the local list");
+  assert.equal(leaveCalls, 0, "hiding never calls NIM leave");
+  assert.equal(deps.writes.length, 0, "hiding never writes to the order or settlement API");
+  const stored = JSON.parse(browser.localStorage.getItem("zzsh.im-support.order-group-prefs.admin-fixture"));
+  assert.deepEqual(stored["order-7710"], { pinned: true, muted: true, hidden: true }, "preferences persist under the admin user id");
+
+  await act(async () => root.render(createElement(OrderWorkbenchPane, { ...props, adminUserId: "admin-other" })));
+  await until(() => rows(node).length === 3, "another admin keeps their own unfiltered list");
+  await act(async () => root.render(createElement(OrderWorkbenchPane, { ...props, adminUserId: "admin-fixture" })));
+  await until(() => rows(node).length === 2, "the original admin preference is restored");
+  await click(node.querySelector('[data-action="restore-hidden-order-groups"]'));
+  await until(() => rows(node).length === 3, "restore only clears the local hide marker");
+});
+
+test("staff preview cards are platform-support cards without user profile fields or UUIDs", async (t) => {
+  browser.localStorage.clear();
+  const { node, until } = await mount(t, "multi-staff");
+  const drawer = await openGroupSettings(node, until);
+  const userGroup = drawer.querySelector('[data-member-group="USER"]');
+  const staffGroup = drawer.querySelector('[data-member-group="STAFF"]');
+  assert.equal(userGroup.querySelector('[aria-label^="预览客服信息"]'), null, "user members do not get the admin card");
+  const preview = staffGroup.querySelector('[aria-label="预览客服信息 小周"]');
+  assert.ok(preview, "staff name/avatar exposes the shared hover-card trigger");
+  assert.ok(staffGroup.querySelector('[data-slot="hover-card-trigger"]'), "the existing admin hover-card primitive is reused");
+
+  await click(preview);
+  await until(() => document.body.querySelector('[aria-label^="平台客服预览"]'), "admin card opened");
+  const card = document.body.querySelector('[aria-label^="平台客服预览"]');
+  assert.match(card.textContent, /小周/);
+  assert.match(card.textContent, /平台客服/);
+  assert.match(card.textContent, /负责客服/);
+  assert.doesNotMatch(card.textContent, /会员|信用分|脱敏手机|实名状态|用户编号|风险/, "user profile facts never enter the admin card");
+  assert.doesNotMatch(card.textContent, /30003|viewer|10001|20002/, "no member or account UUID is rendered");
+  assert.doesNotMatch(card.textContent, /可接待|已暂停|未上线/, "presence is not invented when the projection has none");
+  assert.equal(document.body.querySelector('[aria-label^="用户预览"]'), null, "the user preview card is not used for an administrator");
 });

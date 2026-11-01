@@ -4,6 +4,10 @@ import type { DistributionEarningStore } from "../finance/distribution-earning-s
 import { listUnifiedUserOrders, parseUnifiedOrderQuery } from "./unified-user-order-read";
 import { getUserLegacyOrder, listUserLegacyOrders, parseLegacyUserOrderQuery } from "./legacy-user-order-read";
 import type { OrderImSdkRouteBindings } from "../config/config";
+import type { ImMessageTransport } from "../im/im-contract";
+import type { YunxinOrderTeamApi } from "../im/yunxin-provider";
+import { assertOrderTeamInviteAccess, inviteOrderTeamAdmin, listOrderTeamInviteTargets } from "../im/order-team-invite";
+import { assertManualCloseAccess, manualCloseOrder } from "./manual-close";
 import { readOrderTeamAccess, listJoinedOrderTeams } from "../im/order-team-access";
 import { parseRfc3339Timestamp } from "../content/content";
 import { queryAdminReadOrders, getAdminReadOrder, parseOrderOrigin, type OrderReadFilters } from "./admin-order-read";
@@ -13,8 +17,8 @@ import { assertGameScopeUsable, gameScopeSignature, readAdminGameScope } from ".
 import { readAdminContext, assertAdminContextInTransaction, type AuthSecurityOptions } from "../auth/auth-security";
 import { readUserContext } from "../auth/user-identity";
 import { readPersonalNativeRefunds } from "../finance/personal-refund-read";
-import { withTransaction } from "../auth/security-core";
-import { ensureApiV1RequestId } from "../contracts/api-v1";
+import { withTransaction, SecurityApiError } from "../auth/security-core";
+import { ensureApiV1RequestId, API_V1_ERROR_CODES } from "../contracts/api-v1";
 import { humanText } from "../supply/content-hash";
 import { unknownSupplyGate, type SupplyGateReader } from "../supply/publishing";
 import { readOrderAccountViews } from "../supply/admin-supervision-read";
@@ -42,6 +46,7 @@ import {
 } from "../supply/supply-routes";
 import { handleSettlementAdminRoute, handleSettlementUserRoute } from "./settlement-routes";
 import { handlePrestartTerminationRoute } from "./prestart-termination-routes";
+import { handleSupportCancelAdminRoute } from "./support-cancel-routes";
 import { handleLegacyContinuationRoute } from "./legacy-continuation-routes";
 import type { LegacyDutyFinalizationReader } from "./legacy-continuation-model";
 import {
@@ -69,8 +74,12 @@ export type OrderRuntimeOptions = AuthSecurityOptions & {
   legacyPublicAdmission?: LegacyPublicAdmission;
   legacyPublicAdmissionDetail?: LegacyPublicAdmissionDetailIndex;
   orderImSdkRouteBindings?: OrderImSdkRouteBindings;
+  /** Present only when order Teams are configured; the invite path never creates a Team. */
+  orderTeamMembers?: { appId: string; provider: Pick<YunxinOrderTeamApi, "readOrderTeam"|"addSupportTeamMember"> };
   /** Explicit controlled-test switch. Production leaves it unset. */
   settlementRecordingEnabled?: boolean;
+  /** Local/test system text seam; a production NIM implementation remains later work. */
+  systemMessageTransport?: Pick<ImMessageTransport, "sendText">;
 };
 
 export type OrderResponse = SupplyResponse;
@@ -302,6 +311,64 @@ export async function handleOrderAdminRoute(
     if (await handleLegacyContinuationRoute(request, response, options, "admin")) return;
     if (await handlePrestartTerminationRoute(request, response, options, "admin")) return;
     if (await handleSettlementAdminRoute(request, response, options)) return;
+    const supportCancel = /^\/([A-Za-z0-9._:-]+)\/support-cancel$/.exec(path);
+    if (supportCancel) {
+      await handleSupportCancelAdminRoute(request, response, options, decodeId(supportCancel[1]!), query, method);
+      return;
+    }
+    const memberInvite = /^\/([A-Za-z0-9._:-]+)\/members$/.exec(path);
+    if (method === "POST" && memberInvite) {
+      if (!requireOrigin(request, response, options, requestId)) return;
+      if (!options.orderTeamMembers) throw new SecurityApiError(503, API_V1_ERROR_CODES.IM_UNAVAILABLE, "Order Team settings are unavailable");
+      const orderId = decodeId(memberInvite[1]!);
+      const body = bodyOf(request);
+      ensureOnlyFields(body, ["adminUserId"]);
+      const targetAdminId = idField(body.adminUserId, "adminUserId");
+      const context = await readAdminContext(request, options);
+      const actor = { userId: context.userId, sessionId: context.sessionId };
+      const teamMembers = options.orderTeamMembers;
+      await runIdempotentWrite(options, request, response, requestId,
+        { principalId: actor.userId, operation: "im.order.team.member.invite", resourceId: orderId },
+        { realm: "admin", id: actor.userId, sessionId: actor.sessionId },
+        { orderId, adminUserId: targetAdminId },
+        async (client) => { await assertOrderTeamInviteAccess(client, actor, teamMembers.appId, orderId); },
+        async (client) => ({ status: 200, body: await inviteOrderTeamAdmin(client, teamMembers, actor, orderId, targetAdminId, requestId) }));
+      return;
+    }
+    const manualClose = /^\/([A-Za-z0-9._:-]+)\/manual-close$/.exec(path);
+    if (method === "POST" && manualClose) {
+      if (!requireOrigin(request, response, options, requestId)) return;
+      const orderId = decodeId(manualClose[1]!);
+      const body = bodyOf(request);
+      ensureOnlyFields(body, ["remark"]);
+      const remark = typeof body.remark === "string" ? body.remark.trim() : "";
+      if (remark.length < 3 || remark.length > 200) throw invalid("Remark is invalid", "remark");
+      if ([...remark].some((ch) => { const code = ch.codePointAt(0)!; return code < 32 || code === 127; })) throw invalid("Remark is invalid", "remark");
+      const context = await readAdminContext(request, options);
+      const actor = { userId: context.userId, sessionId: context.sessionId };
+      await runIdempotentWrite(options, request, response, requestId,
+        { principalId: actor.userId, operation: "order.manual_close", resourceId: orderId },
+        { realm: "admin", id: actor.userId, sessionId: actor.sessionId }, { remark },
+        async (client) => { await assertManualCloseAccess(client, orderId, actor); },
+        (client) => manualCloseOrder(client, orderId, actor, remark, requestId),
+        undefined,
+        async () => {
+          const transport = options.systemMessageTransport;
+          if (!transport) return;
+          const group = (await options.pool.query<{ teamId: string; systemAccount: string }>(
+            `SELECT g.team_id AS "teamId", m.account_id AS "systemAccount"
+               FROM zzsh_order.im_order_group g JOIN zzsh_iam.im_identity_mapping m ON m.id = g.system_identity_id
+              WHERE g.order_id = $1 AND g.team_state = 'READY' AND g.team_id IS NOT NULL LIMIT 1`, [orderId])).rows[0];
+          if (!group) return;
+          try {
+            await transport.sendText({ conversationId: `${group.systemAccount}|2|${group.teamId}`,
+              senderAccountId: group.systemAccount, receiverAccountId: group.teamId,
+              text: "客服已手动结束本单。如对处理有疑问，请联系客服。",
+              messageClientId: `manual_close_${orderId}` });
+          } catch { /* The close and audit are committed; notification is best-effort in the fake seam. */ }
+        });
+      return;
+    }
     if (method !== "GET") throw notFound();
     const context = await readAdminContext(request, options);
     await withTransaction(options.pool, async (client) => {
@@ -309,10 +376,28 @@ export async function handleOrderAdminRoute(
       await assertAdminContextInTransaction(client, context);
       if(path==="/im-groups"){
         const cursor=query.get("cursor");if(cursor&&!ID_TOKEN.test(cursor))throw invalid("Cursor is invalid");
-        sendJson(response,200,await listJoinedOrderTeams(client,{...context,realm:"admin"},cursor,parseLimit(query.get("limit"))),requestId);return;
+        let groups: Awaited<ReturnType<typeof listJoinedOrderTeams>>;
+        try {
+          groups = await listJoinedOrderTeams(client,{...context,realm:"admin"},cursor,parseLimit(query.get("limit")),options.orderTeamMembers?.appId??"");
+        } catch (error) {
+          // 订单群列表 500 曾无堆栈可查；这里把请求上下文与原始错误一起打出来。
+          console.error(JSON.stringify({ event: "order.im_groups.failed", requestId,
+            appId: options.orderTeamMembers?.appId ?? null, error: error instanceof Error ? error.message : String(error) }));
+          throw error;
+        }
+        sendJson(response,200,groups,requestId);return;
       }
       const teamMatch=/^\/([A-Za-z0-9._:-]+)\/im$/.exec(path);
       if(teamMatch){const operation=query.get("operation")??"read";if(operation!=="read"&&operation!=="send")throw invalid("Operation is invalid");sendJson(response,200,await readOrderTeamAccess(client,{...context,realm:"admin"},decodeId(teamMatch[1]!),operation,options.orderImSdkRouteBindings),requestId);return;}
+      const candidateMatch=/^\/([A-Za-z0-9._:-]+)\/member-candidates$/.exec(path);
+      if(candidateMatch){
+        for(const key of query.keys())if(key!=="limit"||query.getAll(key).length!==1)throw invalid("Query is invalid",key);
+        const raw=query.get("limit");const limit=raw===null?20:Number(raw);
+        if(!Number.isInteger(limit)||limit<1||limit>50)throw invalid("Limit is invalid","limit");
+        if(!options.orderTeamMembers)throw new SecurityApiError(503,API_V1_ERROR_CODES.IM_UNAVAILABLE,"Order Team settings are unavailable");
+        sendJson(response,200,await listOrderTeamInviteTargets(client,{userId:context.userId,sessionId:context.sessionId},
+          options.orderTeamMembers.appId,decodeId(candidateMatch[1]!),limit),requestId);return;
+      }
       const access = await requireAdminAccess(client, context.userId);
       requirePermission(access, ADMIN_PERMISSION.orderRead);
       const gameScope = await readAdminGameScope(client, context.userId);

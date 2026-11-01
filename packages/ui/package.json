@@ -9,19 +9,27 @@
     "./content-document": "./src/content-document.tsx",
     "./content-document.css": "./src/content-document.css",
     "./content-markdown": "./src/content-markdown.tsx",
-    "./content-markdown.css": "./src/content-markdown.css"
+    "./content-markdown.css": "./src/content-markdown.css",
+    "./order-card": "./src/order-card.tsx",
+    "./order-card.css": "./src/order-card.css",
+    "./message-actions": "./src/message-actions.tsx",
+    "./message-actions.css": "./src/message-actions.css",
+    "./message-media": "./src/message-media.tsx",
+    "./message-media.css": "./src/message-media.css"
   },
   "dependencies": {
-    "@zzsh/im-client": "0.0.0",
     "@zzsh/content": "0.0.0",
+    "@zzsh/im-client": "0.0.0",
     "react-markdown": "10.1.0",
+    "rehype-sanitize": "6.0.0",
     "remark-gfm": "4.0.1",
-    "rehype-sanitize": "6.0.0"
+    "yet-another-react-lightbox": "3.33.0"
   },
   "peerDependencies": {
-    "react": "19.2.8"
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
   },
   "scripts": {
-    "test": "node --experimental-strip-types --test test/content-markdown.test.mjs"
+    "test": "node --experimental-strip-types --test test/content-markdown.test.mjs test/order-team-empty.test.mjs"
   }
 }

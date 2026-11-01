@@ -49,6 +49,7 @@ function loadComponent(relativePath, session, extra) {
     if (name === "@/lib/account-title") return loadComponent("apps/web/src/lib/account-title.ts", session);
     if (name === "@/lib/listing-filters" || name === "./listing-filters") return loadComponent("apps/web/src/lib/listing-filters.ts", session);
     if (name === "@/lib/supply-games" || name === "./supply-games.ts") return loadComponent("apps/web/src/lib/supply-games.ts", session);
+    if (name === "./order-aftersale") return {OrderAftersale:()=>null};
     if (name.endsWith(".css")) return {};
     return requireFromTree(name);
   };
@@ -465,6 +466,8 @@ test("F2: an unknown settlement submit retries with the original key and body", 
 
 test("F2: an unknown payment retries the original key and never double-charges", async () => {
   await withDom(async (window) => {
+    const opened = [];
+    window.addEventListener("zzsh:order-groups", (event) => opened.push(event.detail));
     const log = [];
     let payCalls = 0;
     const pendingOrder = { ...paidOrder, status: "PENDING_PAYMENT" };
@@ -482,6 +485,7 @@ test("F2: an unknown payment retries the original key and never double-charges",
     assert.ok(pays.every(entry => entry.url.endsWith("/payment-requests")));
     assert.equal(pays[0].key, pays[1].key);
     assert.ok(probe.host.textContent.includes("支付已接纳"));
+    assert.deepEqual(opened, [{ party: "renter", orderId: "order_A" }], "a successful payment opens the order group once");
     await probe.dispose(() => intents.clearIntent("user_A", "order.payment", "order_A"));
   });
 });

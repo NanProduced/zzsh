@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { Window } from "happy-dom";
@@ -330,4 +331,82 @@ test("a manual refresh that started earlier cannot reset a newly write-locked co
   await dispatch(button("解除写入锁"), "click");
   await dispatch(button("刷新当前页"), "click");
   assert.equal(h.host.querySelector('[data-write-test-page="content"]').getAttribute("data-refresh-nonce"), "1");
+});
+
+async function mountSupportWriteShell(t) {
+  const tab = tabFromLocation("/support/settings");
+  const snapshot = { authenticated: true, adminUserId: `support-write-admin-${++shellSerial}`, user: { name: "测试运营", username: "ZZ1" }, security: { status: "ACTIVE", isBoss: false }, session: { id: `support-write-session-${shellSerial}`, pinConfigured: false, locked: false }, permissions: ["im.support.management.read", "im.support.read", "im.support.configure", "im.support.integration.configure", "admin.role.read"] };
+  browser.history.replaceState({}, "", tab.path);
+  persistTabs(snapshot.adminUserId, { tabs: [tabFromLocation("/workbench"), tab, tabFromLocation("/roles")], activeId: tab.id });
+  let refreshes = 0;
+  const props = { ...shellProps(snapshot), onRefresh: async () => { refreshes += 1; return snapshot; } };
+  const host = await mount(t, createElement(WorkspaceApp, props));
+  return { host, snapshot, props, tab, refreshes: () => refreshes };
+}
+
+test("support-settings write lock blocks navigation, close, refresh, history and unload", async t => {
+  const h = await mountSupportWriteShell(t);
+  await dispatch(button("标记写入中"), "click");
+  assert.ok(h.host.textContent.includes("内容操作正在处理或等待结果核对"));
+  await dispatch(tabButton("roles"), "click");
+  await dispatch(button(`关闭 ${h.tab.title}`), "click");
+  await dispatch(tabButton(h.tab.id), "contextmenu", { button: 2 });
+  await dispatch(item("关闭其他标签页"), "click");
+  assert.ok(tabButton(h.tab.id));
+  assert.equal(tabButton(h.tab.id).getAttribute("aria-selected"), "true");
+  assert.equal(browser.document.querySelector('[role="alertdialog"]'), null, "hard lock is not confirmable dirty text");
+  assert.equal(button("刷新当前页").disabled, true);
+  await dispatch(button("刷新当前页"), "click");
+  assert.equal(h.refreshes(), 0);
+  browser.history.pushState({}, "", "/roles");
+  await act(async () => browser.dispatchEvent(new browser.PopStateEvent("popstate"))); await settle();
+  assert.equal(browser.location.pathname + browser.location.search, h.tab.path);
+  const unload = new browser.Event("beforeunload", { cancelable: true });
+  await act(async () => browser.dispatchEvent(unload));
+  assert.equal(unload.defaultPrevented, true, "native unload receives the existing browser warning");
+  await dispatch(button("解除写入锁"), "click");
+  await dispatch(tabButton("workbench"), "click");
+  assert.equal(tabButton("workbench").getAttribute("aria-selected"), "true");
+});
+
+test("the app-shell write-lock whitelist includes both support kinds without widening content", async () => {
+  const source = readFileSync(path.join(adminRoot, "src/workspace/app-shell.tsx"), "utf8");
+  assert.match(source, /kind === "content"/);
+  assert.match(source, /kind === "support-settings"/);
+  assert.match(source, /kind === "support-management"/);
+});
+
+test("a pending dirty discard cannot bypass a support-settings write lock acquired before confirmation", async t => {
+  const h = await mountSupportWriteShell(t);
+  await dispatch(button("标记未保存"), "click");
+  await dispatch(tabButton("roles"), "click");
+  assert.ok(browser.document.querySelector('[role="alertdialog"]'));
+  await act(async () => lockCallbacks.at(-1).callback(true)); await settle();
+  await dispatch(button("放弃修改并离开"), "click");
+  assert.equal(tabButton("support-settings").getAttribute("aria-selected"), "true");
+  await dispatch(button("解除写入锁"), "click");
+  await dispatch(tabButton("roles"), "click");
+  assert.ok(browser.document.querySelector('[role="alertdialog"]'), "rejecting the hard-locked intent retains dirty state");
+  await dispatch(button("继续编辑"), "click");
+});
+
+test("a support-settings write lock does not prevent permission revocation from removing the page", async t => {
+  const h = await mountSupportWriteShell(t);
+  const old = lockCallbacks.at(-1).callback;
+  await dispatch(button("标记写入中"), "click");
+  const revoked = { ...h.snapshot, permissions: h.snapshot.permissions.filter(permission => permission !== "im.support.management.read") };
+  await h.host.render(createElement(WorkspaceApp, { ...h.props, snapshot: revoked }));
+  assert.equal(tabButton("support-settings"), null);
+  assert.equal(browser.location.pathname, "/workbench");
+  await act(async () => old(true)); await settle();
+  assert.equal(button("刷新当前页").disabled, false, "a disposed page cannot lock the replacement page");
+});
+
+test("ordinary dirty support settings can still be explicitly discarded without a write lock", async t => {
+  await mountSupportWriteShell(t);
+  await dispatch(button("标记未保存"), "click");
+  await dispatch(tabButton("workbench"), "click");
+  assert.ok(browser.document.querySelector('[role="alertdialog"]'));
+  await dispatch(button("放弃修改并离开"), "click");
+  assert.equal(tabButton("workbench").getAttribute("aria-selected"), "true");
 });

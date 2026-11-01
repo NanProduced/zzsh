@@ -293,7 +293,7 @@ function blockerText(code: string): string {
 }
 
 function localizedErrorMessage(message: string): string {
-  const messages: Record<string, string> = { ...supplyBlockerMessages, RULE_INPUT_MISSING: "当前资料不满足核价规则，请检查账号属性、库存和出租比例", TERM_UNDETERMINED: "暂不能确定租期，请检查每日消耗和哈夫币数量" };
+  const messages: Record<string, string> = { ...supplyBlockerMessages, RENTAL_COMPLETED: "该账号已有已完成租约，当前规则不允许重新发布；请选择其他账号或联系客服。", RULE_INPUT_MISSING: "当前资料不满足核价规则，请检查账号属性、库存和出租比例", TERM_UNDETERMINED: "暂不能确定租期，请检查每日消耗和哈夫币数量" };
   const codes = message.split(",").map((code) => code.trim()).filter(Boolean);
   if (codes.length > 0 && codes.every((code) => code in messages)) {
     return codes.map((code) => messages[code]).join("；");

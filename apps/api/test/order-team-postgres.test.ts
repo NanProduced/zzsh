@@ -6,6 +6,8 @@ import { Logger } from "@nestjs/common";
 import { withTransaction } from "../src/auth/security-core";
 import { createApp } from "../src/app";
 import { createControlledPaymentSource,confirmOrderPayment } from "../src/order/payment-confirmation";
+import { orderHasPaidState } from "../src/order/order";
+import { manualCloseOrder } from "../src/order/manual-close";
 import { dispatchPaidOrders } from "../src/im/order-dispatch";
 import { advanceOrderTeam,prepareOrderTeam,reconcileOrderTeam,scanOrderTeams,OrderTeamLifecycle,type OrderTeamOptions } from "../src/im/order-team";
 import { readOrderTeamAccess,listJoinedOrderTeams } from "../src/im/order-team-access";
@@ -22,7 +24,7 @@ export async function runOrderTeamAcceptance(t:TestContext,o:Parameters<typeof r
   const {pool,ownerPool,migrationPool}=o,run=randomUUID().replaceAll("-","").slice(0,8),appId=`order_team_${run}`,staff=`team_staff_${run}`;
   const identityKey=(kind:"USER"|"ADMIN",id:string,app=appId):ImIdentityKey=>({provider:"yunxin",appId:app,realm:kind.toLowerCase(),kind,platformSubjectId:id});
   await seedAdmin(pool,staff,`${staff}_s`,run,false);await seedIdentity(pool,identityKey("ADMIN",staff),run);
-  for(const permission of ["im.support.read","im.support.accept","im.support.presence","im.support.transfer"])
+  for(const permission of ["im.support.read","im.support.accept","im.support.presence","im.support.transfer","order.settlement.write"])
     await pool.query(`INSERT INTO zzsh_iam.admin_user_permission(admin_user_id,permission_code,effect) VALUES($1,$2,'ALLOW')`,[staff,permission]);
   await pool.query(`INSERT INTO zzsh_iam.im_support_presence(app_id,admin_user_id,availability,connection_state,last_connected_at) VALUES($1,$2,'AVAILABLE','CONNECTED',clock_timestamp())`,[appId,staff]);
   let gameId="";const fixtureApps=new Set([appId]);
@@ -57,6 +59,31 @@ export async function runOrderTeamAcceptance(t:TestContext,o:Parameters<typeof r
       assert.equal((await pool.query(`SELECT count(*)::int AS n FROM zzsh_order.im_order_member WHERE order_id=$1 AND state='JOINED'`,[legacy.orderId])).rows[0].n,3);
       assert.equal((await op(legacy.orderId)).state,"SUCCEEDED");
       assert.match((await group(legacy.orderId)).team_name,/^三角洲行动\|订单:ZZ/);
+    });
+    await t.test("T01b manual close is status-only, audited and idempotent",async()=>{
+      const f=await makePaid("手动结单");
+      await advanceOrderTeam(options,f.orderId);
+      if((await group(f.orderId)).team_state!=="READY"){
+        await pool.query(`UPDATE zzsh_iam.im_identity_mapping SET next_retry_at=clock_timestamp() WHERE app_id=$1 AND status='PENDING'`,[appId]);
+        await advanceOrderTeam(options,f.orderId);
+      }
+      assert.equal((await group(f.orderId)).team_state,"READY");
+      const sessionId=(await pool.query(`SELECT id FROM zzsh_auth_admin."session" WHERE "userId"=$1 ORDER BY "createdAt" DESC LIMIT 1`,[staff])).rows[0].id as string;
+      const actor={userId:staff,sessionId};
+      const first=await withTransaction(pool,c=>manualCloseOrder(c,f.orderId,actor,"异常订单，线下核对资金",`req_${randomUUID()}`));
+      assert.equal(first.status,200);
+      assert.equal(first.body.status,"CANCELLED");
+      assert.equal(first.body.cancelReason,"MANUAL_CLOSE");
+      assert.equal(first.body.localFundsEffect,"NONE");
+      const row=(await pool.query(`SELECT status,cancel_reason,paid_confirmation_id FROM zzsh_order.rental_order WHERE id=$1`,[f.orderId])).rows[0];
+      assert.equal(row.status,"CANCELLED");
+      assert.equal(row.cancel_reason,"MANUAL_CLOSE");
+      assert.ok(row.paid_confirmation_id,"the original applied payment stays on the order");
+      assert.equal(orderHasPaidState(row.status,row.cancel_reason),true);
+      assert.equal((await pool.query(`SELECT count(*)::int AS n FROM zzsh_iam.audit_event WHERE object_id=$1 AND action='order.manual_close'`,[f.orderId])).rows[0].n,1);
+      const second=await withTransaction(pool,c=>manualCloseOrder(c,f.orderId,actor,"再次点击",`req_${randomUUID()}`));
+      assert.equal(second.body.alreadyClosed,true);
+      assert.equal((await pool.query(`SELECT count(*)::int AS n FROM zzsh_iam.audit_event WHERE object_id=$1 AND action='order.manual_close'`,[f.orderId])).rows[0].n,1,"repeat close does not duplicate the audit");
     });
     await t.test("T02 exact readback failures preserve candidates and never create twice",async()=>{
       for(const [name,tweak] of [
