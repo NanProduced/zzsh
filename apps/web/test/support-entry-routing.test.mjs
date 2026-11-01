@@ -170,3 +170,12 @@ test('the rail never navigates to a support route of its own', async () => {
     assert.deepEqual(p.router.replaces, [], 'opening the window must not replace a route');
   } finally { await p.close(); }
 });
+
+test('the rail complaint button preserves its intent while using the shared support window',async()=>{
+  const p=await mountAuthComponent(coordinator,'AuthOverlayProvider',{}, {url:'http://127.0.0.1:4200/help',pathname:'/help',child:rail,initialStatus:'authenticated',forceDialogMount:true});
+  try{
+    const complaint=[...p.host.querySelectorAll('button')].find(button=>button.textContent==='投诉建议');assert.ok(complaint);
+    await p.React.act(async()=>complaint.click());await p.settle();
+    assert.equal(p.host.querySelector('[data-support-entry-type]')?.getAttribute('data-support-entry-type'),'COMPLAINT');
+  }finally{await p.close();}
+});

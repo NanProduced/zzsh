@@ -87,7 +87,7 @@ test("0120 adds the waiting-assignment facts without backfilling old rounds", ()
   const journal = JSON.parse(readFileSync(resolve("migrations/business/meta/_journal.json"), "utf8"));
   const entry = journal.entries.find((item: { idx: number }) => item.idx === 120);
   assert.deepEqual(entry && { tag: entry.tag, when: entry.when }, { tag: "0120_im_waiting_assignment", when: 1793184009000 });
-  assert.equal(journal.entries.length, 126, "one appended entry per formal migration");
+  assert.equal(journal.entries.length, 128, "one appended entry per formal migration");
   const supportCancel = journal.entries.find((item: { idx: number }) => item.idx === 121);
   assert.deepEqual(supportCancel && { tag: supportCancel.tag, when: supportCancel.when }, { tag: "0121_support_cancel", when: 1793184010000 });
   const activity = journal.entries.find((item: { idx: number }) => item.idx === 122);
@@ -267,14 +267,14 @@ test("a user message marks the first user message and wakes auto-assign exactly 
   const routes = readFileSync(resolve("src/im/yunxin-routes.ts"), "utf8");
   const userSection = routes.slice(routes.indexOf("async function handleUserMessages"), routes.indexOf("async function handleAdminMessages"));
   const adminSection = routes.slice(routes.indexOf("async function handleAdminMessages"), routes.indexOf("async function handleImage"));
-  assert.equal((userSection.match(/wakeConsultationAutoAssign\(options\)/g) ?? []).length, 3, "text, media and image trigger one wake");
+  assert.equal((userSection.match(/wakeConsultationAutoAssign\(options\)/g) ?? []).length, 4, "text, media, image and verified real receipt each trigger one wake");
   assert.doesNotMatch(adminSection, /wakeConsultationAutoAssign|autoAssignWaitingConsultations/, "agent messages never start assignment");
   assert.match(userSection, /recordSupportPreview\(options, input\.conversationId, input\.text, true\)/);
   assert.match(userSection, /MEDIA_MESSAGE_PREVIEW\[media\.kind\], true\)/);
   assert.match(userSection, /"\[图片\]", true\)/);
   assert.match(routes, /if \(!consultation\?\.autoAssignConsultations\) return;\s*\n\s*void autoAssignWaitingConsultations\(consultation, 5\)\.catch\(\(\) => undefined\);/);
   // 只有真实咨询线程命中摘要才唤醒分配；订单群消息改记最后活动时间，不触发分配。
-  assert.match(routes, /if \(await recordSupportThreadMessage\(options\.consultation, conversationId, preview, fromUser\)\) return true;/);
+  assert.match(routes, /if \(await recordSupportThreadMessage\(options\.consultation, conversationId, preview, fromUser\)\) \{ if\(actor\)await recordLocalAdminMessageSuccess/);
   assert.match(routes, /recordOrderGroupMessage\(options\.consultation\.pool, options\.consultation\.appId, conversationId, preview\)/);
 
   // 行为断言：真实的用户发送路由把 fromUser=true 写入摘要，并唤醒一次自动分配。

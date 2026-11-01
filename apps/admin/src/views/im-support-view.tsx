@@ -1,4 +1,10 @@
+import { orderReferenceSummary } from "@zzsh/im-client/nim-web-client";
 "use client";
+import { formatSubjectRef } from "./im-support-vocabulary";
+import { NIM_RECEIPT_PENDING, nimMessageView, oldestNimMessage } from "@zzsh/im-client/nim-web-client";
+import { SupportMessageBody } from "./im-support-message-body";
+import { AftersaleInbox } from "./im-aftersale-inbox";
+import type { AftersaleRecord } from "@zzsh/im-client/aftersale";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent as ReactClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { ArrowDown, Bell, BellOff, CalendarClock, Check, ChevronLeft, CircleAlert, FileText, Headphones, Images, MessageSquareText, MoreHorizontal, Pin, ReceiptText, Search, ShieldCheck, Smile, UserRound, Video, X } from "lucide-react";
@@ -6,8 +12,8 @@ import { MessageScroller as MessageScrollerPrimitive } from "@shadcn/react/messa
 import { ImClientLifecycle, ImLifecycleSupersededError } from "@zzsh/im-client/lifecycle";
 import { createLocalFakeNimWebClientFactory, createNimWebClientFactory, NIM_IMAGE_MAX_BYTES, NimImageSendError, NimMediaSendError, NimTextSendError, validateNimImageFile, validateNimMediaFile, type NimMessageLike, type NimMessageMedia, type NimWebClientLike, type NimWebConnectionState } from "@zzsh/im-client/nim-web-client";
 import { decodeImSystemNotice, mergeImMessages } from "@zzsh/im-client/message-state";
-import { CHAT_EMOJIS, MessageActionMenu, MessageQuoted, MessageReplyQuote, useMessageLongPress, type MessageActionId, type MessageActionItem } from "@zzsh/ui/message-actions";
-import { MediaDraftBar, MediaMessage, mediaMessageOf, mediaSummaryOf, type MessageMediaDraft } from "@zzsh/ui/message-media";
+import { CHAT_EMOJIS, MessageActionMenu, MessageReplyQuote, useMessageLongPress, type MessageActionId, type MessageActionItem } from "@zzsh/ui/message-actions";
+import { MediaDraftBar, mediaMessageOf, mediaSummaryOf, type MessageMediaDraft } from "@zzsh/ui/message-media";
 import "@zzsh/ui/message-media.css";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip";
@@ -28,7 +34,6 @@ import { formatDuration } from "./im-support-management-model";
 import { dayKeyOf, dayLabelOf, formatBytes, formatListTime, formatMonthDay, formatTime, initialOf } from "./im-support-format";
 import { Dialog, DialogContent } from "../components/ui/dialog";
 import { Button } from "../components/ui/button";
-import { Bubble, BubbleContent } from "../components/ui/bubble";
 import { Marker, MarkerContent } from "../components/ui/marker";
 import { Message, MessageAvatar, MessageContent, MessageFooter, MessageHeader } from "../components/ui/message";
 import { Attachment, AttachmentAction, AttachmentContent, AttachmentDescription, AttachmentGroup, AttachmentMedia, AttachmentTitle } from "../components/ui/attachment";
@@ -81,7 +86,7 @@ type SupportMessage = {
   revoked?: boolean;
   /** Raw channel message kept intact so reply/revoke/delete address the original. */
   source?: NimMessageLike;
-  image?: { imageId: string; url?: string; name: string; mimeType: string; size: number };
+  image?: { imageId: string; url?: string; thumbnailUrl?: string; name: string; mimeType: string; size: number };
   media?: NimMessageMedia;
 };
 type ImToken = { appKey: string; accountId: string; token: string; transport: "nim" | "local-fake" };
@@ -111,13 +116,35 @@ type FailedText = { consultationId: string; conversationId: string; text: string
 
 const MAX_STAGED_IMAGES = 6;
 // 固定的业务常用语：只提供可复用句式，不代填任何订单、账号或处理结论。
-const SUPPORT_QUICK_REPLIES = [
+export const SUPPORT_QUICK_REPLIES = [
   { label: "首次回复", text: "您好，很高兴为您服务，请问有什么可以帮您？" },
   { label: "核对账号", text: "您好，请提供需要处理的账号和验证码，我们马上为您核对。" },
   { label: "核验等待", text: "正在为您核实账号信息，请稍等片刻，处理好后第一时间回复您。" },
   { label: "核验完成", text: "账号已核验完成，请确认账号和密码无误；如有问题随时联系我们。" },
   { label: "结束说明", text: "如暂无其他问题，本次服务就先到这里，后续有问题随时发在这里。" },
 ] as const;
+
+export type QuickReplyItem = { label: string; text: string };
+
+export function readSupportQuickReplies(adminUserId: string): QuickReplyItem[] {
+  if (typeof window === "undefined" || !adminUserId) return [...SUPPORT_QUICK_REPLIES];
+  try {
+    const raw = window.localStorage.getItem(`zzsh-support-quick-replies:${adminUserId}`);
+    if (!raw) return [...SUPPORT_QUICK_REPLIES];
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      return parsed.filter((item): item is QuickReplyItem => Boolean(item && typeof item.label === "string" && typeof item.text === "string"));
+    }
+  } catch {
+    // fallback
+  }
+  return [...SUPPORT_QUICK_REPLIES];
+}
+
+export function storeSupportQuickReplies(adminUserId: string, items: QuickReplyItem[]): void {
+  if (typeof window === "undefined" || !adminUserId) return;
+  window.localStorage.setItem(`zzsh-support-quick-replies:${adminUserId}`, JSON.stringify(items));
+}
 // 预设状态写入失败的两种可见结果：版本冲突不是错误，而是"别的窗口已经改过"，
 // 所以重新读取后只给中性说明；真正的保存失败不能留在旧显示上假装成功。
 const PRESENCE_CONFLICT_NOTICE = "另一窗口已更新接待状态，已刷新为最新状态。";
@@ -131,6 +158,17 @@ const REPLY_UNCERTAIN_NOTICE = "回复结果未确认，请刷新确认后再发
 // 本轮结束结果未知时的说明。不复述"仍进行中/已结束"这类推断：平台当前没有按咨询读取本轮
 // 结果的接口，目录缺席、分页、转交、失权都证明不了远端到底有没有执行这次结束本轮。
 const CLOSE_OUTCOME_UNKNOWN_NOTICE = "本轮结束结果未确认：这次结束本轮可能已生效也可能没有。平台目前没有按咨询读取本轮结果的接口，本页无法确认，也不会重复提交；请由平台侧核对后再处理。";
+const ROUND_CLOSED_NOTICE = "本轮已结束，聊天记录保留；用户再次咨询会在同一会话开启新一轮。";
+type SupportHistoryPage={messages:NimMessageLike[];hasMore:boolean;anchor?:NimMessageLike|string};
+async function readConsultationHistory(client:NimWebClientLike,conversationId:string,before?:NimMessageLike|string):Promise<SupportHistoryPage>{
+  if(client.transport==="local-fake"){
+    const messages=await client.getMessageHistory(conversationId,50,typeof before==="object"?before:undefined);
+    return {messages,hasMore:messages.length===50,anchor:oldestNimMessage(messages)};
+  }
+  const query=new URLSearchParams({mode:"member",conversationId,limit:"50"});if(typeof before==="string")query.set("cursor",before);
+  const page=await adminRequest<{messages:NimMessageLike[];hasMore:boolean;nextCursor:string|null}>(`/im/messages?${query}`);
+  return {messages:page.messages.map(nimMessageView).filter((message):message is NimMessageLike=>message!==null),hasMore:page.hasMore,anchor:page.nextCursor??undefined};
+}
 
 // 「案件进度」stepper 与「下一步 / 轮到你回复」已移除：assignedAdmin + messageScopeState
 // 只能证明当前的接待关系与远端就绪状态，证明不了处理轮次，也证明不了历史阶段时间。
@@ -174,8 +212,9 @@ function imageOf(message: NimMessageLike): SupportMessage["image"] | undefined {
   if (message.messageType !== 1 || !message.attachment || typeof message.attachment !== "object") return undefined;
   const attachment = message.attachment;
   const imageId = typeof attachment.imageId === "string" ? attachment.imageId : "";
-  const url = typeof attachment.url === "string" ? attachment.url : typeof attachment.thumbUrl === "string" ? attachment.thumbUrl : undefined;
-  return { imageId, url, name: typeof attachment.name === "string" ? attachment.name : "图片", mimeType: typeof attachment.mimeType === "string" ? attachment.mimeType : "image/jpeg", size: typeof attachment.size === "number" ? attachment.size : 0 };
+  const url = supportedImageUrl(attachment.url) ?? supportedImageUrl(attachment.thumbUrl);
+  const thumbnailUrl = supportedImageUrl(attachment.thumbUrl) ?? url;
+  return { imageId, ...(url ? { url } : {}), ...(thumbnailUrl ? { thumbnailUrl } : {}), name: typeof attachment.name === "string" ? attachment.name : "图片", mimeType: typeof attachment.mimeType === "string" ? attachment.mimeType : "image/jpeg", size: typeof attachment.size === "number" ? attachment.size : 0 };
 }
 export function messageFromNim(message: NimMessageLike, accountId: string, peerAccountId?: string | null): SupportMessage | null {
   if (typeof message.senderId !== "string" || !message.senderId) return null;
@@ -208,9 +247,6 @@ export function messageFromNim(message: NimMessageLike, accountId: string, peerA
   const from: SupportMessage["from"] = self || (peerAccountId ? message.senderId !== peerAccountId : false) ? "agent" : "customer";
   return { ...base, from, text, ...(image === undefined ? {} : { image }), ...(media === undefined ? {} : { media }) };
 }
-function oldestOf(messages: NimMessageLike[]): NimMessageLike | undefined {
-  return messages.reduce<NimMessageLike | undefined>((oldest, item) => (!oldest || (item.createTime ?? 0) < (oldest.createTime ?? 0) ? item : oldest), undefined);
-}
 function httpStatus(error: unknown): number | undefined {
   if (error instanceof AdminApiError) return error.status;
   return error && typeof error === "object" && "status" in error && typeof (error as { status?: unknown }).status === "number" ? (error as { status: number }).status : undefined;
@@ -234,7 +270,7 @@ async function readConsultations(): Promise<Consultation[]> {
   return value.consultations as Consultation[];
 }
 
-export function ImSupportView({ snapshot, initialSection = "consultation", initialConsultationId, initialOrderId, initialUnifiedType = "ALL", workspaceQuery = {}, onQueryChange, onRefresh, onOpenPath }: {
+export function ImSupportView({ snapshot, initialSection = "consultation", initialConsultationId, initialOrderId, initialUnifiedType = "ALL", workspaceQuery = {}, onQueryChange, onRefresh, onOpenPath, onDirtyChange }: {
   snapshot: Extract<SessionSnapshot, { authenticated: true }>;
   initialSection?: "consultation" | "orders";
   initialConsultationId?: string;
@@ -244,6 +280,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   onQueryChange?: (query: Record<string, string>) => void;
   onRefresh: () => Promise<SessionSnapshot>;
   onOpenPath?: (path: string, title?: string) => void;
+  onDirtyChange?: (dirty:boolean)=>void;
 }) {
   const [section, setSection] = useState<SupportSection>(initialSection);
   useEffect(() => setSection(initialSection), [initialSection]);
@@ -267,6 +304,13 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   const canTransfer = hasPermission(snapshot, "im.support.transfer");
   const canPresence = canRead && hasPermission(snapshot, "im.support.presence");
   const readClientKey = createReadClientKey({ adminUserId: snapshot.adminUserId, sessionId: snapshot.session.id, locked: snapshot.session.locked, canRead });
+  const aftersaleScope=`${readClientKey}:${snapshot.security.isBoss}:${snapshot.permissions.slice().sort().join("|")}`;
+  const aftersaleScopeRef=useRef(aftersaleScope);aftersaleScopeRef.current=aftersaleScope;
+  const [aftersaleOpen,setAftersaleOpen]=useState(false),[aftersaleDirty,setAftersaleDirty]=useState(false);
+  const [activeAftersale,setActiveAftersale]=useState<{id:string;orderId:string;orderDisplayNo:string|null;threadId:string}|null>(null);
+  useEffect(()=>{setActiveAftersale(null);},[aftersaleScope]);
+  useEffect(()=>{onDirtyChange?.(aftersaleDirty);},[aftersaleDirty,onDirtyChange]);
+  useEffect(()=>()=>onDirtyChange?.(false),[onDirtyChange]);
   const sendCapabilityKey = createSendCapabilityKey({ canAccept, canComplaint });
 
   const [queue, setQueue] = useState<Consultation[]>([]);
@@ -282,6 +326,11 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [quickReplyOpen, setQuickReplyOpen] = useState(false);
+  const [quickReplies, setQuickReplies] = useState<QuickReplyItem[]>(() => readSupportQuickReplies(snapshot.adminUserId));
+  const [editingQuickReplies, setEditingQuickReplies] = useState(false);
+  const [quickReplyDrafts, setQuickReplyDrafts] = useState<QuickReplyItem[]>([]);
+  const [quickReplyError, setQuickReplyError] = useState("");
+  useEffect(() => { setQuickReplies(readSupportQuickReplies(snapshot.adminUserId)); }, [snapshot.adminUserId]);
   // Below this width a third column leaves the chat unusable, so the case column
 // starts collapsed and the operator opens it deliberately.
   const [detailsOpen, setDetailsOpen] = useState(() => !(typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(max-width:1439px)").matches));
@@ -319,9 +368,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   const mediaDraftsRef = useRef(mediaDrafts);
   mediaDraftsRef.current = mediaDrafts;
   const mediaFlights = useRef(new Map<string, MessageMediaDraft>());
-  const [viewer, setViewer] = useState<{ url: string; name: string } | null>(null);
   const [historyRetryToken, setHistoryRetryToken] = useState(0);
-  const [imageErrors, setImageErrors] = useState<Record<string, number>>({});
   // Message actions live per consultation, like drafts: quoting in A must never
   // leak a quote into B, and a late action receipt still belongs to A.
   const [messageMenu, setMessageMenu] = useState<{ key: string; id: string; x: number; y: number; row: HTMLElement | null } | null>(null);
@@ -384,7 +431,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   const selectedIdRef = useRef(selectedId);
   const sectionRef = useRef(section);
   const queueRef = useRef(queue);
-  const historyAnchorRef = useRef<Record<string, NimMessageLike>>({});
+  const historyAnchorRef = useRef<Record<string, NimMessageLike|string>>({});
   // Parent-level in-flight image lock keyed by conversation: switching away and
   // back must not release it, otherwise the original send can be re-issued.
   const imageFlights = useRef(new Map<string, DraftImage>());
@@ -506,7 +553,6 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     textFlightRef.current.clear();
     setStaged({});
     setPending({});
-    setViewer(null);
     imageFlights.current.clear();
     sendingRef.current = false;
     setSending(false);
@@ -564,8 +610,10 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
       const factory = createNimWebClientFactory({
         appKey: token.appKey,
         accountId: token.accountId,
-        messageAuthorization: async ({ conversationId, operation }) => {
-          const value = await adminRequest<{ authorized?: unknown }>(messageAccessPath(conversationId, operation));
+        messageReceiptEndpoint:"/api/bff/admin/im/messages",
+        onReceiptStatus:({pending,failed,persistent})=>{if(pending&&(failed||!persistent))setNotice(NIM_RECEIPT_PENDING+(!persistent?"本地恢复记录未保存，请在离开前恢复登记。":""));else if(!pending)setNotice(current=>current?.startsWith(NIM_RECEIPT_PENDING)?undefined:current);},
+        messageAuthorization: async ({ conversationId, operation,...intent }) => {
+          const value = await adminRequest<{ authorized?: unknown }>(messageAccessPath(conversationId, operation,intent));
           if (value.authorized !== true) throw new Error("当前咨询未获授权");
         },
         tokenProvider: async (accountId) => {
@@ -841,7 +889,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     const last = history?.length ? history[history.length - 1] : undefined;
     const lastMessageAt = item.lastMessageAt ? Date.parse(item.lastMessageAt) : Number.NaN;
     // 后端 best-effort 写入的最近消息摘要；没有历史时用它，避免未打开的 ACTIVE 行只显示“打开查看”。
-    const preview = item.lastMessagePreview?.trim() || null;
+    const preview = item.lastMessagePreview ? orderReferenceSummary(item.lastMessagePreview).trim() || null : null;
     // R1 重写时把这里的措辞缩短成了「待人工核验」，丢掉了「远端结果未知」这个
     // 关键差异（会读成普通待办）。恢复 HEAD 的完整措辞，队列行不得让 FAILED
     // 看起来像正常会话。
@@ -921,7 +969,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
           tag: "",
           tone: "neutral" as const,
           snippet: typeof row.lastMessagePreview === "string" && row.lastMessagePreview.trim()
-            ? row.lastMessagePreview.trim()
+            ? orderReferenceSummary(row.lastMessagePreview).trim()
             : row.lastMessageAt ? "有新消息" : "暂无消息",
           state, stateTone: orderStageTone(row),
           // 到期只对正在租用/待结束的订单有意义；已完成的历史群不再占用列表宽度。
@@ -1034,9 +1082,9 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   const sendBlocked = sending || imageInFlight || mediaInFlight || selectedPending?.state === "UNKNOWN" || selectedPending?.state === "SENDING" || selectedMedia?.state === "UNKNOWN";
 
   /* ---------- platform message menu: copy / reply / revoke / delete ---------- */
-  const replySummaryOf = (message: SupportMessage): string => message.image ? "[图片]" : mediaSummaryOf(message) ?? (message.text.trim() ? message.text.trim().slice(0, 120) : "消息");
+  const replySummaryOf = (message: SupportMessage): string => message.image ? "[图片]" : mediaSummaryOf(message) ?? (message.text.trim() ? orderReferenceSummary(message.text).trim().slice(0, 120) : "消息");
   const copyableTextOf = (message: SupportMessage): string | null => !message.revoked && message.from !== "system" && !message.image && !message.media
-    && (message.messageType === undefined || message.messageType === 0) && message.text.trim() ? message.text : null;
+    && (message.messageType === undefined || message.messageType === 0) && message.text.trim() ? orderReferenceSummary(message.text) : null;
   const clearReplyFor = (key: string) => {
     setReplyTargets((current) => (current[key] ? { ...current, [key]: null } : current));
     setReplyUncertain((current) => (current[key] ? { ...current, [key]: false } : current));
@@ -1073,7 +1121,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     } catch (cause) {
       if (generation !== operatorGenerationRef.current || operatorRef.current !== operator) return;
       const status = httpStatus(cause);
-      setNotice(status === 409 ? "已超过可撤回时间" : status === 403 ? "无权撤回此消息" : "撤回失败，请重试");
+      setNotice(cause instanceof Error && "unknown" in cause && cause.unknown === true ? "撤回结果未确认，请由平台核对，勿重复提交。" : status === 409 ? "当前消息无法撤回，请核对后处理" : status === 403 ? "无权撤回此消息" : "撤回失败，请重试");
     }
   };
   const deleteSupportMessage = async (key: string, message: SupportMessage) => {
@@ -1091,7 +1139,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
       setNotice(undefined);
     } catch (cause) {
       if (generation !== operatorGenerationRef.current || operatorRef.current !== operator) return;
-      setNotice(httpStatus(cause) === 403 ? "无权删除此消息" : "删除失败，消息仍保留");
+      setNotice(cause instanceof Error && "code" in cause && cause.code==="IM_DELETE_UNAVAILABLE" ? cause.message : httpStatus(cause) === 403 ? "无权删除此消息" : "删除失败，消息仍保留");
     }
   };
   const selectMessageAction = (action: MessageActionId) => {
@@ -1160,13 +1208,12 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     const operator = readClientKey;
     let cancelled = false;
     setHistoryState((current) => ({ ...current, [consultation.id]: "loading" }));
-    void client.getMessageHistory(consultation.conversationId!, 50).then((history) => {
+    void readConsultationHistory(client,consultation.conversationId!).then((page) => {
       if (cancelled || generation !== operatorGenerationRef.current || operatorRef.current !== operator || clientRef.current !== client || selectedIdRef.current !== consultation.id) return;
-      const rows = history.map((item) => messageFromNim(item, client.accountId, consultation.peerAccountId)).filter((item): item is SupportMessage => Boolean(item));
+      const rows = page.messages.map((item) => messageFromNim(item, client.accountId, consultation.peerAccountId)).filter((item): item is SupportMessage => Boolean(item));
       setMessages((current) => ({ ...current, [consultation.id]: mergeImMessages(current[consultation.id] ?? [], rows) }));
-      const oldest = oldestOf(history);
-      if (oldest) historyAnchorRef.current[consultation.id] = oldest;
-      setHistoryMore((current) => ({ ...current, [consultation.id]: history.length === 50 }));
+      if(page.anchor)historyAnchorRef.current[consultation.id]=page.anchor;
+      setHistoryMore((current) => ({ ...current, [consultation.id]: page.hasMore }));
       setHistoryState((current) => ({ ...current, [consultation.id]: "ready" }));
     }).catch((cause) => {
       if (cancelled || generation !== operatorGenerationRef.current || operatorRef.current !== operator || selectedIdRef.current !== consultation.id) return;
@@ -1174,7 +1221,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
       setHistoryState((current) => ({ ...current, [consultation.id]: httpStatus(cause) === 403 ? "forbidden" : "error" }));
     });
     return () => { cancelled = true; };
-  }, [canRead, connection, readClientKey, selected?.conversationId, selected?.id, historyRetryToken]);
+  }, [canRead, connection, readClientKey, selected?.conversationId, selected?.id, selected?.state, selected?.assignedAdmin?.id, selected?.messageScopeState, historyRetryToken]);
 
   // 负责客服打开 ACTIVE 轮次且历史已成功加载后上报平台已读；新消息改变历史版本时再次推进。
   // 非负责、非 ACTIVE、历史失败或会话不在前台都不发。失败静默，已读只能来自服务端。
@@ -1215,13 +1262,12 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     if (!anchor) { setHistoryMore((current) => ({ ...current, [consultation.id]: false })); return; }
     setHistoryLoading(true);
     try {
-      const older = await client.getMessageHistory(consultation.conversationId!, 50, anchor);
+      const page = await readConsultationHistory(client,consultation.conversationId!,anchor);
       if (generation !== operatorGenerationRef.current || operatorRef.current !== operator || clientRef.current !== client || selectedIdRef.current !== consultation.id) return;
-      const rows = older.map((item) => messageFromNim(item, client.accountId, consultation.peerAccountId)).filter((item): item is SupportMessage => Boolean(item));
+      const rows = page.messages.map((item) => messageFromNim(item, client.accountId, consultation.peerAccountId)).filter((item): item is SupportMessage => Boolean(item));
       setMessages((current) => ({ ...current, [consultation.id]: mergeImMessages(current[consultation.id] ?? [], rows) }));
-      const oldest = oldestOf(older);
-      if (oldest) historyAnchorRef.current[consultation.id] = oldest;
-      setHistoryMore((current) => ({ ...current, [consultation.id]: older.length === 50 }));
+      if(page.anchor)historyAnchorRef.current[consultation.id]=page.anchor;
+      setHistoryMore((current) => ({ ...current, [consultation.id]: page.hasMore }));
     } catch {
       if (generation === operatorGenerationRef.current && operatorRef.current === operator) setNotice("更早的消息读取失败，请重试。");
     } finally {
@@ -1253,7 +1299,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     } catch (cause) {
       const current = currentRequestKey();
       if (current && isCurrentImRequest(requestKey, current)) {
-        setNotice(httpStatus(cause) === 503 ? "会话暂时无法接入：云信群或接待状态尚未就绪，请刷新后重试。" : friendlyError(cause));
+        setNotice(friendlyError(cause));
       }
     } finally { endBusy(busyOwner); }
   };
@@ -1295,7 +1341,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
       setCloseOpen(false);
       setSelectedId(result.consultation.id);
       // 只结束本轮：线程与同一 Team 的聊天记录保留，用户再次咨询会在同一线程开启新一轮。
-      setNotice("本轮已结束，聊天记录保留；用户再次咨询会在同一会话开启新一轮。");
+      setNotice(ROUND_CLOSED_NOTICE);
     } catch (cause) {
       await blockCurrentConsultationOnForbidden(cause, requestKey);
       if (!sameOperation()) return;
@@ -1696,15 +1742,6 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
             : replyTarget
               ? await client.replyText(conversationId, text, replyTarget.source!)
               : await client.sendText(conversationId, text);
-          // 真实通道下客服正文由 NIM 直连发出，服务端不会自动得知。补一条只登记预览的上报，
-          // 否则会话摘要会一直停在上一条用户消息（T5）。失败不影响已发出的消息。
-          if ((client as { transport?: string }).transport !== "local-fake") {
-            void fetch("/api/bff/admin/im/messages", {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ conversationId, text }),
-            }).catch(() => undefined);
-          }
           // 收敛已发出的原操作：只按原身份代次/操作者匹配。撤销接待权限不改变身份代次
           // （readClientKey 只含 adminUserId/session/locked/canRead），所以这里不比较发送
           // 能力——否则单独撤权会把已经发出去的文字回执连同责任一起丢掉。
@@ -1807,12 +1844,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     else form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
   };
 
-  useEffect(() => {
-    if (!viewer) return;
-    const dialog = document.querySelector<HTMLDialogElement>(".im-wb-lightbox");
-    dialog?.showModal();
-    return () => dialog?.close();
-  }, [viewer]);
+
 
   if (snapshot.session.locked) return <section className="im-wb-root" aria-hidden="true" />;
 
@@ -1866,6 +1898,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     const grouped = Boolean(previous && previous.from !== "system" && previous.senderId === message.senderId && (message.createTime ?? 0) - (previous.createTime ?? 0) < GROUP_WINDOW_MS);
     const author = authorFor(message);
     const imageUrl = message.image ? supportedImageUrl(message.image.url) : null;
+    const imageThumbnailUrl = message.image ? supportedImageUrl(message.image.thumbnailUrl) : null;
     const mine = message.self === true;
     nodes.push(<MessageScrollerPrimitive.Item key={message.id} messageId={message.id} scrollAnchor={message.from === "customer"} tabIndex={-1} onContextMenu={onMessageContextMenu} {...messageLongPress}>
       <Message align={mine ? "end" : "start"} className="im-wb-msg" data-message-id={message.id} data-from={message.from} data-self={mine} data-grouped={grouped}>
@@ -1877,18 +1910,10 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
             ? <EntityPreviewTrigger enableTouchButton={false} side="right" align="start" touchLabel={`预览用户 ${author.name}`} className="im-wb-author-preview"
                 trigger={<button type="button" className="im-wb-author-name-trigger"><b>{author.name}</b></button>} content={userHoverCard} />
             : <b>{author.name}</b>}<span className="im-wb-role-tag" data-role={author.role}>{author.role}</span>{mine ? null : <time>{message.time}</time>}</MessageHeader>}
-          <Bubble align={mine ? "end" : "start"} variant={mine ? "default" : "secondary"}>
-            <BubbleContent className="im-wb-bub" data-revoked={message.revoked ? "true" : undefined}>
-              {message.revoked ? "消息已撤回" : <>
-                {message.media ? <MediaMessage media={message.media} /> : message.image ? (imageUrl
-                  ? (imageErrors[message.id]
-                    ? <button type="button" className="im-wb-thumb im-wb-thumb-failed" data-action="retry-image" onClick={() => setImageErrors((current) => { const next = { ...current }; delete next[message.id]; return next; })} aria-label={`重新加载图片 ${message.image.name}`} title={`重新加载图片 ${message.image.name}`}>图片加载失败 · 点击重试</button>
-                    : <button type="button" className="im-wb-thumb" onClick={() => setViewer({ url: imageUrl, name: message.image!.name })} aria-label={`查看图片 ${message.image.name}`} title={`查看图片 ${message.image.name}`}><img key={imageErrors[message.id] ?? imageUrl} src={imageUrl} alt={message.image.name} loading="lazy" onError={() => setImageErrors((current) => ({ ...current, [message.id]: Date.now() }))} /></button>)
-                  : <span className="im-wb-thumb-missing">图片暂不可预览</span>) : message.text}
-                {message.source?.reply ? <MessageQuoted text={message.source.reply.text ?? "消息"} senderName={(() => { const target = selectedMessages.find((item) => item.id === message.source!.reply!.messageId || item.source?.messageServerId === message.source!.reply!.messageId || item.source?.messageClientId === message.source!.reply!.messageId); return target ? authorFor(target).name : null; })()} onJump={() => jumpToMessage(message.source!.reply!.messageId)} /> : null}
-              </>}
-            </BubbleContent>
-          </Bubble>
+          <SupportMessageBody message={{ ...message.source, text: message.text, media: message.media, revoked: message.revoked }}
+            image={message.image ? { url: imageUrl, thumbnailUrl: imageThumbnailUrl, name: message.image.name } : null}
+            replySenderName={(() => { const target = selectedMessages.find((item) => item.id === message.source?.reply?.messageId || item.source?.messageServerId === message.source?.reply?.messageId || item.source?.messageClientId === message.source?.reply?.messageId); return target ? authorFor(target).name : null; })()}
+            onJump={jumpToMessage} onOpenOrder={onOpenPath ? id => onOpenPath(`/orders/${encodeURIComponent(id)}`, "订单详情") : undefined} align={mine ? "end" : "start"} />
           {mine && !message.revoked ? <MessageFooter className="im-wb-msg-status"><time>{message.time}</time><Check size={11} />已发送</MessageFooter> : null}
         </MessageContent>
       </Message>
@@ -1939,13 +1964,14 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
         </div>
       </header>
       {readOnlyReason ? <p className="im-wb-scope-note" data-tone="readonly" data-action="support-readonly" role="status"><ShieldCheck size={13} />{readOnlyReason}</p> : null}
-      {notice ? <p className="im-wb-notice" role="status"><CircleAlert size={14} />{notice}</p> : null}
+      {activeAftersale&&selected?.threadId===activeAftersale.threadId?<p className="im-wb-notice" role="status">当前跟进售后：订单 {activeAftersale.orderDisplayNo??"—"} · {activeAftersale.id}<button type="button" className="im-wb-link" onClick={()=>setAftersaleOpen(true)}>查看售后记录</button>{onOpenPath?<button type="button" className="im-wb-link" onClick={()=>onOpenPath(`/orders/${activeAftersale.orderId}`)}>订单详情</button>:null}</p>:null}
+      {notice && (notice !== ROUND_CLOSED_NOTICE || selected?.state === "CLOSED") ? <p className="im-wb-notice" role="status"><CircleAlert size={14} />{notice}</p> : null}
       {selected && closeOutcomeUnknown[selected.id] ? <p className="im-wb-notice" data-tone="warn" role="status"><CircleAlert size={14} />{CLOSE_OUTCOME_UNKNOWN_NOTICE}</p> : null}
       <div className="im-wb-stream-wrap">
         {selected?.messageScopeState === "FAILED" ? <div className="im-wb-empty"><CircleAlert size={22} /><strong>会话待人工核验</strong><span>请先完成核验再回复。</span>{selected.assignedAdmin?.id === snapshot.adminUserId && canTransfer ? <button type="button" className="im-wb-btn" data-action="reconcile-consultation" onClick={() => void reconcile()} disabled={busy}>核验并恢复</button> : null}</div>
           : <MessageScrollerPrimitive.Provider autoScroll defaultScrollPosition="last-anchor">
             <MessageScrollerPrimitive.Root className="im-wb-scroller">
-              <MessageScrollerPrimitive.Viewport className="im-wb-viewport" aria-label="会话消息" onContextMenu={onMessageContextMenu}><MessageScrollerPrimitive.Content className="im-wb-content">
+              <MessageScrollerPrimitive.Viewport preserveScrollOnPrepend className="im-wb-viewport" aria-label="会话消息" onContextMenu={onMessageContextMenu}><MessageScrollerPrimitive.Content className="im-wb-content">
                 {selectedMessages.length ? <>
                   {selected && historyMore[selected.id] ? <MessageScrollerPrimitive.Item messageId="load-earlier"><div className="im-wb-history-more"><button type="button" onClick={() => void loadEarlier()} disabled={historyLoading}>{historyLoading ? "正在读取更早消息…" : "更早的消息"}</button></div></MessageScrollerPrimitive.Item> : null}
                   {timelineItems}
@@ -1984,12 +2010,137 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
             <TooltipProvider delay={200}>
               <Popover open={quickReplyOpen} onOpenChange={setQuickReplyOpen}>
                 <PopoverTrigger render={<button type="button" className="im-wb-tool" data-action="quick-replies" aria-label="常用语" title="常用语" disabled={!canEdit || sendBlocked} />}><MessageSquareText size={15} /></PopoverTrigger>
-                <PopoverContent side="top" align="start" className="w-auto p-0">
-                  <div className="im-wb-quick-replies" role="group" aria-label="常用语">
-                    {SUPPORT_QUICK_REPLIES.map((item) => <button key={item.label} type="button" data-action="insert-quick-reply" onClick={() => insertQuickReply(item.text)}>
-                      <strong>{item.label}</strong><span>{item.text}</span>
-                    </button>)}
-                  </div>
+                <PopoverContent side="top" align="start" className="w-80 p-0">
+                  {editingQuickReplies ? (
+                    <div className="p-3 space-y-2 text-xs" data-panel="quick-replies-editor">
+                      <div className="flex items-center justify-between border-b pb-1.5 font-medium">
+                        <span>编辑个人常用语</span>
+                        <span className="text-[11px] text-muted-foreground">{quickReplyDrafts.length}/15</span>
+                      </div>
+                      <div className="max-h-60 overflow-y-auto space-y-2 pr-1">
+                        {quickReplyDrafts.map((item, index) => (
+                          <div key={index} className="flex flex-col gap-1 rounded border p-1.5 bg-muted/30">
+                            <div className="flex items-center justify-between gap-1">
+                              <input
+                                className="h-6 flex-1 rounded border px-1.5 text-xs bg-background"
+                                placeholder="标签（≤10字）"
+                                maxLength={10}
+                                value={item.label}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setQuickReplyDrafts((prev) => prev.map((q, i) => i === index ? { ...q, label: val } : q));
+                                }}
+                              />
+                              <button
+                                type="button"
+                                className="text-destructive hover:underline px-1"
+                                onClick={() => setQuickReplyDrafts((prev) => prev.filter((_, i) => i !== index))}
+                              >
+                                删除
+                              </button>
+                            </div>
+                            <textarea
+                              className="w-full rounded border p-1 text-xs resize-none bg-background"
+                              rows={2}
+                              placeholder="回复内容（≤200字）"
+                              maxLength={200}
+                              value={item.text}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setQuickReplyDrafts((prev) => prev.map((q, i) => i === index ? { ...q, text: val } : q));
+                              }}
+                            />
+                          </div>
+                        ))}
+                        {quickReplyDrafts.length < 15 ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="xs"
+                            className="w-full"
+                            onClick={() => setQuickReplyDrafts((prev) => [...prev, { label: "", text: "" }])}
+                          >
+                            + 添加常用语
+                          </Button>
+                        ) : null}
+                      </div>
+                      {quickReplyError ? <p className="text-destructive text-[11px]">{quickReplyError}</p> : null}
+                      <div className="flex items-center justify-between pt-1 border-t">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="xs"
+                          onClick={() => {
+                            setQuickReplyDrafts([...SUPPORT_QUICK_REPLIES]);
+                            setQuickReplyError("");
+                          }}
+                        >
+                          恢复默认
+                        </Button>
+                        <div className="flex gap-1.5">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="xs"
+                            onClick={() => {
+                              setEditingQuickReplies(false);
+                              setQuickReplyError("");
+                            }}
+                          >
+                            取消
+                          </Button>
+                          <Button
+                            type="button"
+                            size="xs"
+                            onClick={() => {
+                              const cleaned = quickReplyDrafts
+                                .map((q) => ({ label: q.label.trim(), text: q.text.trim() }))
+                                .filter((q) => q.label && q.text);
+                              if (!cleaned.length) {
+                                setQuickReplyError("至少保留一条有效常用语");
+                                return;
+                              }
+                              try {
+                                storeSupportQuickReplies(snapshot.adminUserId, cleaned);
+                                setQuickReplies(cleaned);
+                                setEditingQuickReplies(false);
+                                setQuickReplyError("");
+                              } catch {
+                                setQuickReplyError("保存到本地失败，请检查浏览器存储空间");
+                              }
+                            }}
+                          >
+                            保存
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="im-wb-quick-replies" role="group" aria-label="常用语">
+                        {quickReplies.map((item) => (
+                          <button key={item.label} type="button" data-action="insert-quick-reply" onClick={() => insertQuickReply(item.text)}>
+                            <strong>{item.label}</strong><span>{item.text}</span>
+                          </button>
+                        ))}
+                      </div>
+                      <div className="border-t px-3 py-1.5 text-[11px] text-muted-foreground flex items-center justify-between">
+                        <span>仅本机保存</span>
+                        <button
+                          type="button"
+                          className="text-xs text-primary hover:underline"
+                          data-action="manage-quick-replies"
+                          onClick={() => {
+                            setQuickReplyDrafts(quickReplies);
+                            setQuickReplyError("");
+                            setEditingQuickReplies(true);
+                          }}
+                        >
+                          管理常用语
+                        </button>
+                      </div>
+                    </>
+                  )}
                 </PopoverContent>
               </Popover>
               <Popover open={emojiOpen} onOpenChange={setEmojiOpen}>
@@ -2040,9 +2191,19 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     </aside>
   </div>;
 
+  const contactedAftersale=(record:AftersaleRecord,id:string,threadId:string)=>{
+    const expected=aftersaleScope;
+    void readConsultations().then(rows=>{if(aftersaleScopeRef.current!==expected)return;
+      setQueue(rows);setSection("consultation");setSelectedId(id);setMobilePane("chat");setDetailsOpen(false);
+      setActiveAftersale({id:record.id,orderId:record.orderId,orderDisplayNo:record.orderDisplayNo,threadId});
+      persistQuery({section:"consultation",consultation:threadId});
+    }).catch(cause=>{if(aftersaleScopeRef.current===expected)setNotice(friendlyError(cause));});
+  };
   return <div className="im-wb-root" data-unified="true">
+    <AftersaleInbox key={aftersaleScope} open={aftersaleOpen&&canRead} onOpenChange={setAftersaleOpen} scope={aftersaleScope} adminId={snapshot.adminUserId} canHandle={canRead&&canAccept} canTakeover={Boolean(snapshot.security.isBoss||snapshot.permissions.includes("im.support.audit.takeover"))} onContact={contactedAftersale} onDirtyChange={setAftersaleDirty}/>
     <nav className="im-wb-bar" aria-label="沟通类型">
       <div className="im-wb-bar-title"><strong>客服工作台</strong><span>咨询与订单群按最近消息排序</span></div>
+      <button type="button" className="im-wb-btn im-wb-btn-outline" disabled={!canRead} onClick={()=>setAftersaleOpen(true)}>售后记录</button>
       <div className="im-wb-seg" role="group">
         <button type="button" aria-pressed={section === "consultation"} onClick={() => { setSection("consultation"); persistQuery({ section: "consultation" }); }}>咨询与投诉<b>{displayQueue.length}</b></button>
         <button type="button" aria-pressed={section === "orders"} onClick={() => { setSection("orders"); persistQuery({ section: "orders" }); }}>订单沟通</button>
@@ -2137,7 +2298,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
         {canRead ? <div className="im-wb-pane im-wb-pane--orders" hidden={section !== "orders"}><OrderWorkbenchPane identity={readClientKey} adminUserId={snapshot.adminUserId} operatorName={operatorName}
           client={clientRef.current} connection={connection} active={section === "orders"} sendAllowed={canAccept} selectedOrderId={orderSelection}
           canManualClose={snapshot.security.isBoss || snapshot.permissions.includes("order.settlement.write")} request={adminRequest} onAuthError={() => { void onRefresh(); }}
-          onOpenProfile={(id) => onOpenPath?.(`/users/${encodeURIComponent(id)}`, "用户资料")} /></div> : null}
+          onOpenProfile={profileScope.profile ? (id) => onOpenPath?.(`/users/${encodeURIComponent(id)}`, "用户资料") : undefined} onOpenPath={onOpenPath} /></div> : null}
       </div>
     </div>
     <Dialog open={transferOpen} onOpenChange={setTransferOpen}>
@@ -2193,7 +2354,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
         <div className="im-wb-dialog-head"><div><strong>结束本轮</strong><span>{closeTarget ? `${typeLabel(closeTarget.type)} · ${roundTagOf(closeTarget)}${roundTagOf(closeTarget) ? " · " : ""}${closeTarget.user?.name || closeTarget.user?.username || "平台用户"}` : "当前轮次"}</span></div><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setCloseOpen(false)} aria-label="关闭结束本轮确认" title="关闭结束本轮确认"><X size={14} /></button></div>
         {closeTarget ? <dl className="im-wb-confirm">
           <div><dt>{closeTarget.type === "COMPLAINT" ? "本轮处理" : "本轮接待"}</dt><dd>{closeTarget.assignedAdmin?.name || "尚未分配"}</dd></div>
-          <div><dt>关联对象</dt><dd>{closeTarget.subjectRef || "未关联商品或订单"}</dd></div>
+          <div><dt>关联对象</dt><dd>{formatSubjectRef(closeTarget.subjectRef)}</dd></div>
         </dl> : null}
         <p className="im-wb-dialog-hint">结束后只结束当前这一轮接待：客服状态恢复为空闲，聊天记录保留在同一会话，用户再次咨询会开启新一轮并重新匹配客服。本轮结束不可撤销，平台当前没有恢复本轮接待的入口。</p>
         <div className="im-wb-dialog-actions">
@@ -2202,8 +2363,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
         </div>
       </DialogContent>
     </Dialog>
-    {viewer ? <dialog className="im-wb-lightbox" aria-label="图片预览" onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setViewer(null); } }} onCancel={(event) => { event.preventDefault(); setViewer(null); }}>
-      <button type="button" onClick={() => setViewer(null)} autoFocus>关闭图片</button><img src={viewer.url} alt={viewer.name} /></dialog> : null}
+
     {messageMenu && menuMessage ? <MessageActionMenu key={`${messageMenu.key}:${messageMenu.id}`} x={messageMenu.x} y={messageMenu.y} items={messageMenuItems}
       onSelect={selectMessageAction} onClose={() => setMessageMenu(null)} returnFocus={messageMenu.row} /> : null}
   </div>;

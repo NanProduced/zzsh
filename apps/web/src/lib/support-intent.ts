@@ -5,7 +5,7 @@ const MAX_AGE_MS = 10 * 60 * 1_000;
 
 export type SupportType = "SERVICE" | "COMPLAINT";
 
-/** 投诉已并入普通客服：入口与旧意图统一落到唯一的 SERVICE 线程。 */
+/** Thread lookup is unified; the separately stored entry intent still chooses the welcome. */
 export function normalizeSupportType(type: SupportType): SupportType {
   return type === "COMPLAINT" ? "SERVICE" : type;
 }
@@ -37,13 +37,13 @@ export function parseSupportIntent(value: unknown, now = Date.now()): SupportInt
   if (!validType(candidate.type) || typeof candidate.source !== "string" || !safeReturnTo(candidate.source)) return null;
   if (typeof candidate.createdAt !== "number" || !Number.isSafeInteger(candidate.createdAt)) return null;
   if (candidate.createdAt > now + 30_000 || now - candidate.createdAt > MAX_AGE_MS) return null;
-  return { type: normalizeSupportType(candidate.type), source: candidate.source, createdAt: candidate.createdAt };
+  return { type: candidate.type, source: candidate.source, createdAt: candidate.createdAt };
 }
 
 export function saveSupportIntent(intent: Omit<SupportIntent, "createdAt">, storage = browserStorage(), now = Date.now()): void {
   const source = safeReturnTo(intent.source);
   if (!storage || !source || !validType(intent.type)) return;
-  const type = normalizeSupportType(intent.type);
+  const type = intent.type;
   try {
     storage.setItem(SUPPORT_INTENT_STORAGE_KEY, JSON.stringify({ type, source, createdAt: now }));
   } catch {
@@ -83,4 +83,16 @@ export function consumeSupportIntent(storage = browserStorage(), now = Date.now(
     try { storage.removeItem(SUPPORT_INTENT_STORAGE_KEY); } catch { /* ignore unavailable storage */ }
   }
   return intent;
+}
+
+/** Explicit references survive entry from either order details or the public account page. */
+export function supportSubjectRefFromUrl(value: string): string | null {
+  let url: URL;
+  try { url = new URL(value); } catch { return null; }
+  const order = url.searchParams.get("orderId");
+  const listing = url.searchParams.get("listingId");
+  const account = url.searchParams.get("accountId") ?? /^\/accounts\/([^/]+)\/?$/.exec(url.pathname)?.[1];
+  const ref = order ?? listing ?? account;
+  return ref && /^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/.test(ref)
+    ? `${order ? "order" : listing ? "listing" : "account"}:${ref}` : null;
 }

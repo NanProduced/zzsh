@@ -245,5 +245,8 @@
   "dist/test/im-support-message-state.test.js",
   "dist/test/order-opening-auto-confirm.test.js",
   "dist/test/im-local-persistence.test.js",
-  "dist/test/yunxin-transport.test.js"
+  "dist/test/yunxin-transport.test.js",
+  "dist/test/im-message-receipts.test.js",
+  "dist/test/im-aftersale.test.js",
+  "dist/test/im-read-copy.test.js"
 ]

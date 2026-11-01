@@ -218,7 +218,8 @@ test("ending a consultation closes only the current round and says so", async (t
   assert.doesNotMatch(dialog.textContent, /结束咨询/, "the action never claims the whole consultation/history is closed");
   assert.match(dialog.textContent, /第 2 轮/, "the dialog names the round being ended");
   assert.match(dialog.textContent, /客服 A/, "the dialog names the current assignee");
-  assert.match(dialog.textContent, /listing-9/, "the dialog names the linked subject");
+  assert.match(dialog.textContent, /已关联对象/, "the dialog acknowledges the subject without exposing its raw reference");
+  assert.doesNotMatch(dialog.textContent,/listing-9/);
   assert.match(dialog.textContent, /不可撤销/, "the dialog states the consequence");
   assert.match(dialog.textContent, /聊天记录保留在同一会话/, "the dialog keeps the thread history honest");
   assert.match(dialog.textContent, /用户再次咨询会开启新一轮/, "reopening is described as the user's next round");
@@ -387,6 +388,25 @@ test("a close that returns UNKNOWN after a send-only revoke keeps the original i
   assert.doesNotMatch(rootNode.textContent, /仍进行中|可以重新结束/);
 });
 
+test("assignment reloads history on the same waiting round without a manual retry", async (t) => {
+  const {rootNode}=await mount(t);
+  threadHistory=[{messageClientId:"old",messageServerId:"old",conversationId:"team-a",senderId:"user-a",createTime:1,messageType:0,text:"existing history"}];
+  reopenedRound={id:"round-waiting",roundId:"round-waiting",threadId:"thread-a",state:"WAITING",threadState:"WAITING",assignedAdmin:null,canSend:false};
+  const refresh=async()=>{
+    for(const entry of intervalCallbacks.filter(item=>item.active&&item.delay===5_000))await act(async()=>{entry.callback();await Promise.resolve();});
+    await settle();
+  };
+  await refresh();
+  const row=consultationRows(rootNode).find(item=>item.textContent.includes("用户 A"));assert.ok(row);
+  await act(async()=>{row.click();});await waitFor(()=>rootNode.textContent.includes("existing history"));
+  const reads=()=>requests.filter(item=>item.method==="GET"&&item.path.includes("/im/messages?")&&item.path.includes("limit=50")).length;
+  const before=reads();
+  threadHistory=[...threadHistory,{messageClientId:"first",messageServerId:"first",conversationId:"team-a",senderId:"user-a",createTime:2,messageType:0,text:"opening after assignment"}];
+  reopenedRound={...reopenedRound,state:"ACTIVE",threadState:"ACTIVE",assignedAdmin:{id:"admin-a",name:"客服 A"},canSend:true};
+  await refresh();await waitFor(()=>rootNode.textContent.includes("opening after assignment"));
+  assert.ok(reads()>before,"assignment triggers a fresh history read for the unchanged round id");
+});
+
 test("ending one round keeps the same thread history for the next round", async (t) => {
   const { rootNode } = await mount(t);
   threadHistory = [{ messageClientId: "hist-1", messageServerId: "hist-1", conversationId: "team-a", senderId: "user-a", receiverId: "admin-a", createTime: Date.parse("2026-09-17T00:01:00.000Z"), messageType: 0, text: "同一线程的历史消息" }];
@@ -413,4 +433,5 @@ test("ending one round keeps the same thread history for the next round", async 
   await waitFor(() => rootNode.textContent.includes("同一线程的历史消息"));
   assert.match(rootNode.querySelector(".im-wb-chat-title span").textContent, /第 3 轮接待 · 客服 A/);
   assert.match(rootNode.textContent, /同一线程的历史消息/, "the same Team history is still readable in the next round");
+  assert.doesNotMatch(rootNode.textContent, /本轮已结束，聊天记录保留/, "the old close receipt must not label the reopened round as ended");
 });

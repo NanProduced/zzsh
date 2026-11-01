@@ -49,6 +49,7 @@ function loadComponent(relativePath, session, extra) {
     if (name === "@/lib/account-title") return loadComponent("apps/web/src/lib/account-title.ts", session);
     if (name === "@/lib/listing-filters" || name === "./listing-filters") return loadComponent("apps/web/src/lib/listing-filters.ts", session);
     if (name === "@/lib/supply-games" || name === "./supply-games.ts") return loadComponent("apps/web/src/lib/supply-games.ts", session);
+    if (name === "./order-aftersale") return {OrderAftersale:()=>null};
     if (name.endsWith(".css")) return {};
     return requireFromTree(name);
   };

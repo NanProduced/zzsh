@@ -30,6 +30,7 @@ const LARGE_IM_MESSAGE_PATHS = new Set([
   "/api/bff/admin/im/messages",
 ]);
 const ORDER_IM_CALLBACK_PATHS = new Set([
+  "/api/v1/im/read-events/copy",
   "/api/v1/im/order-events/copy",
   "/api/v1/im/order-events/pre-send",
 ]);

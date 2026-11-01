@@ -5,7 +5,7 @@ import { noGameScopeError, readAdminGameScope, scopeAllowsGame, scopeIsEmpty } f
 import { recordAudit, setAuditContext, SecurityApiError } from "../auth/security-core";
 import { API_V1_ERROR_CODES } from "../contracts/api-v1";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId, type ImIdentityKey } from "./identity-lifecycle";
-import { readOrderTeamMemberRows, projectOrderTeamMembers, type OrderTeamMemberView } from "./order-team-access";
+import { readOrderTeamAccess, readOrderTeamMemberRows, projectOrderTeamMembers, type OrderTeamMemberView } from "./order-team-access";
 import { ORDER_TEAM_CONFIGURATION, type YunxinOrderTeamApi, type YunxinOrderTeamState } from "./yunxin-provider";
 
 export type OrderTeamInviteActor = { userId: string; sessionId: string };
@@ -56,7 +56,11 @@ async function assertAccess(c: Pick<PoolClient, "query">, actor: OrderTeamInvite
     if (scopeIsEmpty(gameScope, false)) throw noGameScopeError();
     if (!scopeAllowsGame(gameScope, false, scope.game_id)) throw forbidden();
   }
-  if (scope.order_status !== "PAID") throw conflict("Order is not active");
+  if (scope.order_status !== "PAID") {
+    if (!["COMPLETED", "CANCELLED"].includes(scope.order_status)) throw conflict("Order is not active");
+    const access = await readOrderTeamAccess(c as PoolClient,{...actor,realm:"admin"},orderId);
+    if (access.terminalSendAllowed !== true) throw conflict("Order Team communication window has ended");
+  }
   if (scope.team_state !== "READY" || !scope.team_id || !scope.team_name || !scope.members_limit) throw conflict("Order Team is not ready");
   return scope;
 }
@@ -158,8 +162,8 @@ export async function inviteOrderTeamAdmin(
 ): Promise<OrderTeamInviteResult> {
   await assertAccess(c, actor, options.appId, orderId);
   await lockOrderTeam(c, orderId);
-  const scope = await readScope(c, options.appId, orderId);
-  if (!scope || scope.team_state !== "READY" || !scope.team_id || scope.order_status !== "PAID") throw conflict("Order Team is not ready");
+  const scope = await assertAccess(c, actor, options.appId, orderId);
+  if (!scope.team_id) throw conflict("Order Team is not ready");
   const target = await readTarget(c, targetAdminId);
   const identity = await readIdentity(c, options.appId, target.admin_user_id);
   const systemAccount = assertSystemOwner(scope);

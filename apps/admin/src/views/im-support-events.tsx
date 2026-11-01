@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { CircleAlert, History, ShieldCheck } from "lucide-react";
 import { AdminApiError } from "../api";
 import { formatDateTime } from "./im-support-format";
+import { CONSULTATION_EVENT_VOCABULARY, formatEventMovement, formatVocabulary } from "./im-support-vocabulary";
 
 /**
  * 处理记录时间线：im_consultation_event 的只读投影（GET …/consultations/:id/events）。
@@ -30,17 +31,6 @@ const EVENT_PAGE_LIMIT = 20;
 // 折叠时只露出最近两条；上屏顺序仍是升序，最近两条就是列表尾部。
 const COLLAPSED_EVENT_COUNT = 2;
 
-// 与 im/consultation.ts 的 EVENT_TYPES 对齐。服务端会把未知类型归一为 UNKNOWN；
-// 前端仍对表外类型按原码兜底显示，任何一端新增类型都不会崩或丢事件。
-const EVENT_TYPE_LABELS: Record<string, string> = {
-  CREATED: "发起咨询",
-  ASSIGNED: "系统分配",
-  CLAIMED: "客服接入",
-  TRANSFERRED: "转交",
-  CLOSED: "结束咨询",
-  REOPENED: "重新开启",
-  UNKNOWN: "未知类型",
-};
 
 type LoadStatus = "loading" | "ready" | "error" | "forbidden" | "missing" | "expired";
 
@@ -152,10 +142,12 @@ export function ConsultationEventsCard({ consultationId, request, onSummary }: {
         <ol className="im-wb-events">
           {events.map((event, index) => (
             <li key={event.id} className="im-wb-event" hidden={!expanded && index < events.length - COLLAPSED_EVENT_COUNT} data-type={typeof event.type === "string" ? event.type : "UNKNOWN"}>
-              <span className="im-wb-event-tag">{EVENT_TYPE_LABELS[event.type] ?? event.type}</span>
+              <span className="im-wb-event-tag">{formatVocabulary(CONSULTATION_EVENT_VOCABULARY, event.type, event.type)}</span>
               <time>{formatDateTime(event.occurredAt)}</time>
               <span className="im-wb-event-actor">{event.actor?.displayName ?? "未知"}</span>
-              {event.from?.displayName || event.to?.displayName ? <span className="im-wb-event-move">{event.from?.displayName ?? ""} → {event.to?.displayName ?? ""}</span> : null}
+              {formatEventMovement(event.from?.displayName, event.to?.displayName) ? (
+                <span className="im-wb-event-move">{formatEventMovement(event.from?.displayName, event.to?.displayName)}</span>
+              ) : null}
             </li>
           ))}
         </ol>

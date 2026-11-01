@@ -430,3 +430,12 @@
   .order-fulfillment-steps { padding-bottom: 4px; }
 }
 
+
+.order-aftersale { display:grid; gap:12px; min-width:0; }
+.order-aftersale form { display:grid; gap:8px; }
+.order-aftersale textarea { width:100%; min-height:96px; padding:10px 12px; border:1px solid var(--color-border-default); border-radius:var(--functional-radius); color:var(--color-text-primary); background:var(--color-bg-surface); font:inherit; resize:vertical; }
+.order-aftersale textarea:focus-visible { outline:2px solid var(--color-accent-brand); outline-offset:2px; }
+.order-aftersale-record { display:grid; gap:8px; min-width:0; padding-top:12px; border-top:1px solid var(--color-border-subtle); }
+.order-aftersale-record p { margin:0; overflow-wrap:anywhere; }
+.order-aftersale-text { white-space:pre-wrap; }
+.order-aftersale-actions { display:flex; flex-wrap:wrap; gap:8px; }

@@ -523,7 +523,7 @@ test("the case column reads the account profile only through its own permission"
   assert.doesNotMatch(aside.textContent, /user-a/, "the user UUID is never rendered in the rail");
   assert.match(aside.textContent, /已实名/);
   assert.match(aside.textContent, /138.{4}8000 · 未验证/, "the phone arrives pre-masked with its own verification state");
-  assert.match(aside.textContent, /邮箱未绑定/, "an absent email says absent instead of disappearing");
+  assert.doesNotMatch(aside.textContent, /邮箱/, "email row is removed per privacy requirements");
   assert.match(aside.textContent, /进行中订单需「订单读取」权限/, "a denied summary is a permission fact, never a count of zero");
   assert.match(aside.textContent, /名下资源账号需「资源账号读取」权限/, "each summary names the capability it actually needs");
   await act(async () => aside.querySelector('[aria-label="查看进行中订单读取权限"]').click());
@@ -708,9 +708,9 @@ test("user/risk summary names freeze and internal risk while keeping contacts ma
   await waitFor(() => /账号受限/.test(rootNode.textContent));
   const aside = rootNode.querySelector(".im-wb-details");
   assert.match(aside.textContent, /已冻结/, "suspension is named on its own, not folded into a friendlier status");
-  assert.match(aside.textContent, /内部高危/, "only an explicit risk flag is shown; unflagged is never called safe");
+  assert.match(aside.textContent, /高风险账号/, "only an explicit risk flag is shown; unflagged is never called safe");
   assert.match(aside.textContent, /138\*\*\*\*8000/);
-  assert.match(aside.textContent, /a\*\*\*@example\.com/);
+  assert.doesNotMatch(aside.textContent, /a\*\*\*@example\.com|邮箱/, "email is not rendered per privacy rules");
   assert.match(aside.textContent, /进行中订单18 单/);
   assert.match(aside.textContent, /名下资源账号4 个/);
   assert.doesNotMatch(aside.textContent, /user-a/, "risk facts do not add the UUID back");
@@ -1024,7 +1024,7 @@ test("revoke asks for a second confirmation, replaces the content and maps 409/4
   await settle();
   assert.equal(document.querySelector(".message-action-menu"), null, "a revoked message has no menu");
 
-  for (const [status, copy] of [[409, "已超过可撤回时间"], [403, "无权撤回此消息"]]) {
+  for (const [status, copy] of [[409, "当前消息无法撤回，请核对后处理"], [403, "无权撤回此消息"]]) {
     const failing = await mountMenu(t, { post: () => new browser.Response("{}", { status }) });
     await waitForMenuHistory(failing.rootNode);
     await openMenu(failing.rootNode, "srv-own");
@@ -1267,4 +1267,18 @@ test("composer quick replies insert one template into the draft without sending"
   assert.equal(document.querySelector(".im-wb-quick-replies"), null, "choosing one closes the list");
   assert.equal(posts, 0, "a template is never sent automatically");
   assert.equal(rootNode.querySelector(".im-wb-send").textContent, "发送", "the agent still confirms the send");
+});
+
+test("quick reply editor keeps its draft visible when browser storage rejects saving",async t=>{
+  fixture={consultations:[activeConsultation],history:[],post:null};
+  const {rootNode}=await mount(t,{snapshot:snapshot(["im.support.read","im.support.accept"])});
+  await selectFirst(rootNode);await waitFor(()=>!rootNode.querySelector("textarea").disabled);
+  await act(async()=>rootNode.querySelector('[data-action="quick-replies"]').click());await settle();
+  const edit=[...document.querySelectorAll('button')].find(b=>b.getAttribute('data-action')==='manage-quick-replies');assert.ok(edit);
+  await act(async()=>edit.click());await settle();
+  t.mock.method(browser.localStorage,'setItem',()=>{throw new browser.DOMException('blocked','QuotaExceededError');});
+  const save=[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='保存');assert.ok(save);
+  await act(async()=>save.click());await settle();
+  assert.match(document.body.textContent,/保存到本地失败/);
+  assert.match(document.body.textContent,/编辑个人常用语/);
 });

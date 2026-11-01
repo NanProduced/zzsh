@@ -174,22 +174,26 @@ export function projectOrderFulfillment(f:{orderStatus:string;hasGroup:boolean;p
   return {stage,rentalStartedAt,dueAt,openingState,endState};
 }
 export type OrderTeamMemberRow={party:"BUYER"|"OWNER"|"STAFF";state:"PLANNED"|"JOINED";platform_subject_id:string;
-  identity_kind:"USER"|"ADMIN";realm:"user"|"admin";account_id:string;status:string;identity_marker:string;name:string|null;avatar:string|null};
+  identity_kind:"USER"|"ADMIN";realm:"user"|"admin";account_id:string;status:string;identity_marker:string;name:string|null;avatar:string|null;availability?:"AVAILABLE"|"PAUSED"|"OFF_DUTY"|null};
 export type OrderTeamMemberView={platformId:string;accountId:string;party:OrderTeamMemberRow["party"];name:string|null;avatar:string|null;
-  responsible:boolean;membershipStatus?:"UNKNOWN";identityStatus?:"UNKNOWN"};
+  responsible:boolean;availability?:"AVAILABLE"|"PAUSED"|"OFF_DUTY";membershipStatus?:"UNKNOWN";identityStatus?:"UNKNOWN"};
 /** One member query and one projection shape for every order Team reader. */
 export async function readOrderTeamMemberRows(c:Pick<PoolClient,"query">,orderId:string,appId:string):Promise<OrderTeamMemberRow[]>{
   return (await c.query<OrderTeamMemberRow>(`SELECT mm.party,mm.state,m.platform_subject_id,m.identity_kind,m.realm,m.account_id,m.status,m.identity_marker,
     CASE WHEN m.realm='user' THEN u.name ELSE a.name END AS name,
-    CASE WHEN m.realm='user' THEN u.image ELSE a.image END AS avatar
+    CASE WHEN m.realm='user' THEN u.image ELSE a.image END AS avatar,
+    CASE WHEN m.realm='admin' THEN presence.availability END AS availability
     FROM zzsh_order.im_order_member mm JOIN zzsh_iam.im_identity_mapping m ON m.id=mm.identity_id
     LEFT JOIN zzsh_auth_user."user" u ON m.realm='user' AND u.id=m.platform_subject_id
-    LEFT JOIN zzsh_auth_admin."user" a ON m.realm='admin' AND a.id=m.platform_subject_id WHERE mm.order_id=$1 AND mm.app_id=$2`,[orderId,appId])).rows;
+    LEFT JOIN zzsh_auth_admin."user" a ON m.realm='admin' AND a.id=m.platform_subject_id
+    LEFT JOIN zzsh_iam.im_support_presence presence ON m.realm='admin' AND presence.admin_user_id=m.platform_subject_id AND presence.app_id=mm.app_id
+    WHERE mm.order_id=$1 AND mm.app_id=$2`,[orderId,appId])).rows;
 }
 export function projectOrderTeamMembers(members:OrderTeamMemberRow[],responsibleAdminId:string|null|undefined,viewerRealm:"user"|"admin"):OrderTeamMemberView[]{
   return members.filter(m=>m.state==="JOINED").map(m=>({platformId:m.platform_subject_id,accountId:m.account_id,party:m.party,name:m.name,
     avatar:typeof m.avatar==="string"&&/^https?:\/\//.test(m.avatar)?m.avatar:null,
     responsible:m.party==="STAFF"&&m.platform_subject_id===responsibleAdminId,
+    ...(viewerRealm==="admin"&&m.party==="STAFF"&&m.availability?{availability:m.availability}:{}),
     ...(viewerRealm==="admin"&&m.realm==="user"?{membershipStatus:"UNKNOWN" as const,identityStatus:"UNKNOWN" as const}:{})}));
 }
 /** Same checks for every JOINED staff member; responsibility is not an exclusive grant. */
@@ -236,7 +240,8 @@ export async function readOrderTeamAccess(c:PoolClient,actor:OrderTeamActor,orde
       WHERE order_id=$1 AND state='APPROVED' ORDER BY approved_at DESC NULLS LAST,id DESC LIMIT 1`,[orderId])).rows[0];
     if(termination)refundCompletedAt=(await readPrestartRefundProgress(c,termination.id,termination.payment_basis,false)).completedLocallyAt??null;
   }
-  const window=terminalSendWindow({orderStatus:g.order_status,cancelReason:g.order_cancel_reason??null,cancelledAt:g.order_cancelled_at??null,
+  const serverNow = Date.now();
+  const window=terminalSendWindow({now:serverNow,orderStatus:g.order_status,cancelReason:g.order_cancel_reason??null,cancelledAt:g.order_cancelled_at??null,
     settlementPostedAt:g.settlement_posted_at??null,refundCompletedAt});
   const orderEndedAt=window.orderEndedAt;
   const sendUntil=window.sendUntil;
@@ -275,7 +280,7 @@ export async function readOrderTeamAccess(c:PoolClient,actor:OrderTeamActor,orde
     teamState:g.team_state??null,openingStatus:g.opening_status??null,openingConfirmedAt:g.opening_confirmed_at??null,
     openingAcked:openingAcks.renter||openingAcks.owner,termSeconds:g.term_seconds,
     intakeOpen:g.intake_open===true,currentSettlement:g.settlement_current===true,posted:g.settlement_posted_at!=null});
-  const summary={orderId,displayNo:g.display_no,orderStatus:g.order_status,stageCards,cancelReason:g.order_cancel_reason??null,orderEndedAt,sendUntil,refundPending:window.refundPending,refundCompletedAt:window.refundCompletedAt,...fulfillment,openingAcks,openingAckSources,
+  const summary={serverNow:new Date(serverNow).toISOString(),terminalSendAllowed:window.terminalSendAllowed,orderId,displayNo:g.display_no,orderStatus:g.order_status,stageCards,cancelReason:g.order_cancel_reason??null,orderEndedAt,sendUntil,refundPending:window.refundPending,refundCompletedAt:window.refundCompletedAt,...fulfillment,openingAcks,openingAckSources,
     openingId:g.opening_id??null,openingVersion:Number.isInteger(g.opening_version_no)?Number(g.opening_version_no):null,
     openingConfirmDueAt:g.opening_confirm_due_at?new Date(g.opening_confirm_due_at).toISOString():null,
     openingConfirmSource,terms,gameName:g.game_name,account:{id:g.account_id,title:g.title},assignmentState:g.provision_state??null,

@@ -11,6 +11,13 @@ import {
 const APP_KEY = "test-app-key";
 const APP_SECRET = "test-app-secret";
 
+test("single-message verification preserves an unquoted 64-bit ID and keeps order callbacks free of message text",async()=>{
+  const api=new YunxinServerApiClient({appKey:APP_KEY,appSecret:APP_SECRET,fetch:async()=>new Response('{"code":200,"data":{"message_server_id":4301644928884146185,"message_client_id":"cid","sender_id":"sender","team_id":64099504484,"create_time":1793447398308,"message_type":0,"text":"confirmed A"}}',{status:200})});
+  const input={teamId:"64099504484",operatorAccountId:"manager",messageServerId:"4301644928884146185",messageTime:1793447398308};
+  const receipt=await api.readSupportMessage(input);assert.equal(receipt?.messageServerId,input.messageServerId);assert.equal(receipt?.text,"confirmed A");
+  const order=await api.readTeamMessage(input);assert.equal(order?.messageServerId,input.messageServerId);assert.equal("text" in order!,false);
+});
+
 test("creates the short-lived dynamic token payload required by Web login", () => {
   const issuedAt = 1_700_000_000_000;
   const token = createYunxinDynamicToken({
@@ -50,6 +57,22 @@ function jsonResponse(body: unknown, status = 200): Response {
     headers: { "content-type": "application/json" },
   });
 }
+
+test("former-member history uses the viewer account and precise cursor without restoring hidden messages",async()=>{
+  let calls=0;
+  const api=new YunxinServerApiClient({appKey:APP_KEY,appSecret:APP_SECRET,fetch:async(_url,init)=>{
+    calls++;const body=new URLSearchParams(String(init?.body));
+    assert.equal(body.get("accid"),"staff-1");assert.equal(body.get("checkTeamValid"),"false");assert.equal(body.get("includeNoSenseMsg"),"false");
+    assert.equal(body.get("excludeMsgid"),"4301564702653153303");assert.equal(body.get("endtime"),"30");
+    return new Response('{"code":200,"msgs":[{"msgid":4301564702653153302,"from":"user-1","sendtime":20,"type":1,"body":{"url":"https://nos.example/image.png","w":32,"h":24,"size":100}},{"msgid":4301564702653153301,"from":"staff-1","sendtime":19,"type":0,"body":{"msg":"reply"}}]}',{status:200});
+  }});
+  const rows=await api.readSupportMemberHistory({teamId:"123",accountId:"staff-1",limit:50,before:{id:"4301564702653153303",time:30}});
+  assert.deepEqual(rows.map(row=>row.messageServerId),["4301564702653153302","4301564702653153301"]);
+  assert.equal(rows[0]!.attachment!.width,32);assert.equal(rows[0]!.attachment!.height,24);assert.equal(rows[1]!.text,"reply");
+  await assert.rejects(api.readSupportMemberHistory({teamId:"123",accountId:"staff-1",limit:101}));
+  await assert.rejects(api.readSupportMemberHistory({teamId:"123",accountId:"staff-1",limit:50,before:{id:"invalid",time:30}}));
+  assert.equal(calls,1);
+});
 
 test("signs Server API requests without putting AppSecret in the request", async () => {
   let requestUrl = "";
@@ -743,4 +766,15 @@ test("rejects duplicate or extra team objects in a single-team query", async () 
     api.getSupportTeam("2366886326"),
     (error: unknown) => error instanceof YunxinApiError && error.operation === "get-support-team" && !error.retryable,
   );
+});
+
+test("automatic Team text forwards its stable id through the official message field",async()=>{
+  const bodies:unknown[]=[];
+  const api=new YunxinServerApiClient({appKey:APP_KEY,appSecret:APP_SECRET,fetch:async(_url,init)=>{
+    bodies.push(JSON.parse(String(init?.body)));
+    return new Response(JSON.stringify({code:200,data:{sender_id:"review_sender",conversation_type:2,message_type:0,create_time:1793447398308,receiver_id:"900001"}}),{status:200});
+  }});
+  const input={teamId:"900001",senderAccountId:"review_sender",text:"自动通知",messageClientId:"support_notice_original"};
+  await api.sendSupportTeamText(input);await api.sendSupportTeamText(input);
+  assert.deepEqual(bodies,[{message:{message_type:0,text:input.text,message_client_id:input.messageClientId}},{message:{message_type:0,text:input.text,message_client_id:input.messageClientId}}]);
 });

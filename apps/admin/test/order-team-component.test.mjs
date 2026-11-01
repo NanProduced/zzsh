@@ -648,8 +648,6 @@ test('order panel gates image decoding and rejects blob history URLs',async(t)=>
   Object.defineProperty(globalThis,'Image',{value:ControlledImage,configurable:true});
   Object.defineProperty(browser,'Image',{value:ControlledImage,configurable:true});
   const oldCreate=globalThis.URL.createObjectURL,oldRevoke=globalThis.URL.revokeObjectURL;let previewId=0;
-  const showModal=browser.HTMLDialogElement.prototype.showModal;let modalCalls=0;
-  browser.HTMLDialogElement.prototype.showModal=function(){modalCalls++;return showModal.call(this);};
   globalThis.URL.createObjectURL=()=>`blob:preview-${++previewId}`;globalThis.URL.revokeObjectURL=()=>{};
   const {createRoot}=await import('react-dom/client');
   const rootPath=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
@@ -663,7 +661,7 @@ test('order panel gates image decoding and rejects blob history URLs',async(t)=>
   const access={orderId:'a',displayNo:'ZZ-a',orderStatus:'PAID',assignmentState:'ASSIGNED',teamState:'READY',appId:'app',teamId:'1',name:'订单a',gameName:'三角洲行动',account:{id:'account-a',title:'账号a'},viewerAccountId:'viewer',conversationId:'viewer|2|1',canRead:true,canSend:true,supportEscalation:{firstResponseAt:null,remindDueAt:'2026-09-21T09:30:00.000Z',addRound:1,state:'RUNNING',needsManualReview:false,noEligibleStaff:false},members:[{platformId:'buyer',accountId:'viewer',party:'BUYER',name:'买家甲',avatar:null}]};
   const history=[
     {messageClientId:'blob-history',messageServerId:'blob-history',conversationId:'viewer|2|1',senderId:'viewer',receiverId:'1',createTime:1,messageType:1,attachment:{imageId:'blob',url:'blob:http://127.0.0.1:4311/unsafe',name:'不可信图片',mimeType:'image/png',size:3}},
-    {messageClientId:'safe-history',messageServerId:'safe-history',conversationId:'viewer|2|1',senderId:'viewer',receiverId:'1',createTime:2,messageType:1,attachment:{imageId:'safe',url:'/api/im/images/safe',name:'安全图片',mimeType:'image/png',size:3}},
+    {messageClientId:'safe-history',messageServerId:'safe-history',conversationId:'viewer|2|1',senderId:'viewer',receiverId:'1',createTime:2,messageType:1,attachment:{imageId:'safe',url:'/api/im/images/safe',thumbUrl:'/api/im/images/safe-thumb',name:'安全图片',mimeType:'image/png',size:3}},
   ];
   let sendCalls=0,lastDimensions;const request=async url=>url.includes('/im?')?access:{items:[{id:'a',title:'账号a',displayNo:'ZZ-a',status:'PAID',teamState:'READY'}],nextCursor:null};
   const client={accountId:'viewer',transport:'local-fake',onMessages:()=>()=>{},async getMessageHistory(cid,_limit,_anchor,authorize){await authorize({conversationId:cid,operation:'read'});return history;},async sendText(){throw new Error('text should not be used');},async sendImage(cid,file,options){await options.authorize({conversationId:cid,operation:'send'});sendCalls+=1;lastDimensions={width:options.width,height:options.height,name:file.name};return {...history[1],messageClientId:`sent-${sendCalls}`,messageServerId:`sent-${sendCalls}`};}};
@@ -673,19 +671,7 @@ test('order panel gates image decoding and rejects blob history URLs',async(t)=>
   await act(async()=>root.render(createElement(OrderTeamPanel,props)));await until(()=>node.textContent.includes('ZZ-a'));await act(async()=>[...node.querySelectorAll('button')].find(b=>b.textContent.includes('ZZ-a')).click());await until(()=>node.textContent.includes('图片暂不可预览'));
   assert.equal(node.querySelector('img[src^="blob:"]'),null);
   const imageButton=node.querySelector('.order-team-image');assert.ok(imageButton);
-  await act(async()=>{imageButton.focus();imageButton.click();});
-  assert.equal(modalCalls,1,'preview must enter the native modal stack for Escape and focus containment');
-  const dialog=node.querySelector('dialog');assert.ok(dialog?.open);
-  const closeButton=dialog.querySelector('button');assert.ok(closeButton);
-  for(const shiftKey of [false,true]){let tab;await act(async()=>{tab=new browser.KeyboardEvent('keydown',{key:'Tab',shiftKey,bubbles:true,cancelable:true});closeButton.dispatchEvent(tab);});assert.equal(tab.defaultPrevented,true);assert.equal(document.activeElement,closeButton);}
-  let escapeBubbled=false;const watchEscape=event=>{if(event.key==='Escape')escapeBubbled=true;};document.addEventListener('keydown',watchEscape);
-  let escape;await act(async()=>{escape=new browser.KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true});closeButton.dispatchEvent(escape);});document.removeEventListener('keydown',watchEscape);
-  assert.equal(escape.defaultPrevented,true);assert.equal(escapeBubbled,false,'Escape must not reach the order panel');
-  await until(()=>node.querySelector('dialog')===null&&document.activeElement===imageButton);
-  await act(async()=>{imageButton.focus();imageButton.click();});await until(()=>node.querySelector('dialog')?.open);assert.equal(modalCalls,2);
-  const cancelDialog=node.querySelector('dialog');
-  await act(async()=>cancelDialog.dispatchEvent(new browser.Event('cancel',{bubbles:true,cancelable:true})));
-  await until(()=>node.querySelector('dialog')===null&&document.activeElement===imageButton);
+  assert.equal(imageButton.querySelector('img').getAttribute('src'),'/api/im/images/safe-thumb','the row uses the thumbnail');
   const input=node.querySelector('input[type=file]');const file=new browser.File([new Uint8Array([0xff,0xd8,0xff])],'proof.png',{type:'image/png'});Object.defineProperty(input,'files',{configurable:true,value:[file]});await act(async()=>input.dispatchEvent(new Event('change',{bubbles:true})));await until(()=>pendingImages.length===1);
   const submit=node.querySelector('form button[type=submit]');assert.equal(submit.disabled,true);await act(async()=>node.querySelector('form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));assert.equal(sendCalls,0);
   const decoder=pendingImages.shift();decoder.naturalWidth=640;decoder.naturalHeight=360;decoder.onload();await until(()=>!submit.disabled);await act(async()=>submit.click());await until(()=>sendCalls===1);assert.deepEqual(lastDimensions,{width:640,height:360,name:'proof.png'});
@@ -1212,4 +1198,47 @@ test('read-only send permission hides reply and revoke but keeps copy and delete
   await act(async()=>h.node.querySelector('.order-team-messages li[data-message-id="srv-own"]').dispatchEvent(new globalThis.window.MouseEvent('contextmenu',{bubbles:true,cancelable:true})));
   await h.settle();
   assert.deepEqual([...document.querySelectorAll('.message-action-menu [role=menuitem]')].map(b=>b.textContent.trim()),['复制','删除']);
+});
+
+test('history failure blocks order sending, is not an empty conversation and can recover',async t=>{
+  let fail=true, sends=0;
+  const h=await mountOrderSender(t,{
+    async getMessageHistory(cid,_limit,_anchor,authorize){await authorize({conversationId:cid,operation:'read'});if(fail)throw Object.assign(new Error('history unavailable'),{status:503});return[];},
+    async sendText(){sends++;return{};}
+  });
+  await h.until(()=>h.node.textContent.includes('消息暂未加载'));
+  assert.doesNotMatch(h.node.textContent,/还没有消息/);
+  assert.equal(h.node.querySelector('textarea'),null);
+  assert.equal(sends,0);
+  fail=false;await h.click('重新加载消息');await h.until(()=>h.node.querySelector('textarea'));
+  assert.match(h.node.textContent,/还没有消息/);assert.equal(sends,0);
+});
+
+test('custom order conversation shares the initial history send gate and recovers explicitly',async t=>{
+  let fail=true,sends=0,h,view;
+  h=await mountOrderSender(t,{
+    async getMessageHistory(cid,_limit,_anchor,authorize){await authorize({conversationId:cid,operation:'read'});if(fail)throw Object.assign(new Error('history unavailable'),{status:503});return[];},
+    async sendText(cid,text,authorize){await authorize({conversationId:cid,operation:'send'});sends++;return h.sent(cid,text,'recovered-message');}
+  });
+  await h.until(()=>h.node.textContent.includes('消息暂未加载'));
+  await h.render({renderConversation:next=>{view=next;return createElement('form',{onSubmit:next.onSubmit},
+    createElement('textarea',{value:next.draft,onChange:e=>next.setDraft(e.target.value)}),
+    createElement('button',{type:'submit',disabled:!next.canSend},'自定义发送'));}});
+  assert.equal(view.canSend,false);assert.equal(view.info.canSend,false);
+  await h.type('不会提前发送');await h.submit();assert.equal(sends,0);
+  fail=false;await act(async()=>view.onRefresh());await h.until(()=>view.canSend);
+  await h.type('恢复后发送');await h.submit();await h.until(()=>sends===1);
+});
+
+test('order media renders a one-layer file card and an unframed caption',async t=>{
+  const media={mediaId:'media-file-1',kind:'file',name:'订单附件说明.pdf',mimeType:'application/pdf',size:4096,url:'/api/im/media/media-file-1'};
+  const history=[{messageClientId:'media-file',messageServerId:'srv-media-file',conversationId:'viewer|2|1',senderId:'buyer',receiverId:'viewer',createTime:10,messageType:6,text:'请查收订单附件',media}];
+  const h=await mountOrderSender(t,{async getMessageHistory(cid,_limit,_anchor,authorize){await authorize({conversationId:cid,operation:'read'});return history;}});
+  await h.until(()=>h.node.querySelector('a.message-media-file'));
+  const card=h.node.querySelector('a.message-media-file');
+  assert.equal(card.closest('[data-slot="bubble"]'),null);assert.equal(card.querySelector('a,p'),null);
+  assert.match(card.textContent,/点击下载/);
+  const caption=h.node.querySelector('.message-media-caption-text');
+  assert.ok(caption,'the media caption is rendered');assert.equal(caption.closest('[data-slot="bubble"]'),null,'the caption is not framed');
+  assert.match(caption.textContent,/请查收订单附件/);
 });

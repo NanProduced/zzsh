@@ -36,6 +36,7 @@ type SubjectProjection = {
   title?: unknown;
   target?: unknown;
   rawRef?: unknown;
+  party?: unknown;
 };
 type ContextView = {
   consultationId: string;
@@ -51,6 +52,7 @@ export type UserProfileScope = { profile: boolean; orders: boolean; resources: b
 type SubjectView = {
   label: string;
   value: string;
+  party?: string | null;
   /** 只有服务端给出业务展示号（且类型可识别）时才出现；其余分支不渲染任何跳转入口。 */
   resolved?: UserCardSubject;
 };
@@ -77,7 +79,7 @@ function subjectView(context: ContextView | null, state: ContextState): SubjectV
   if (subject.status === "absent") return { label: "关联对象", value: "尚未关联商品或订单" };
   if (subject.status === "unresolved") {
     // rawRef 没有持久化类型，也没有业务单号；裸引用（可能是 UUID）不直接上屏。
-    return { label: "关联对象 · 类型待识别", value: "已关联引用（类型未识别）" };
+    return { label: "关联对象", value: "关联对象暂未识别" };
   }
   if (subject.status === "resolved") {
     const kind = subject.kind === "ORDER" ? "ORDER" : subject.kind === "ACCOUNT" ? "ACCOUNT" : null;
@@ -86,9 +88,13 @@ function subjectView(context: ContextView | null, state: ContextState): SubjectV
     if (!kind || !displayNo) return { label: "关联对象", value: "关联对象类型暂未确认" };
     const target = subjectTargetOf(subject.target);
     const title = typeof subject.title === "string" && subject.title.trim() ? subject.title.trim() : null;
+    const party = "party" in subject && typeof subject.party === "string"
+      ? (subject.party === "RENTER" ? "租客" : subject.party === "OWNER" ? "号主" : null)
+      : null;
     return {
       label: `关联对象 · ${SUBJECT_KIND_LABEL[kind]}`,
       value: displayNo,
+      party,
       resolved: { kind, id: target?.kind === kind ? target.id : "", displayNo, title },
     };
   }
@@ -246,12 +252,11 @@ export function ConsultationUserCard({ consultationId, rowUserId, fallbackName, 
               <Badge variant={account?.tone ?? "outline"}>{account?.label ?? "账号状态未知"}</Badge>
               {facts.suspended && facts.accountStatus !== "FROZEN" ? <Badge variant="destructive">已冻结</Badge> : null}
               <Badge variant={identityStatus === "VERIFIED" ? "secondary" : "outline"}>{IDENTITY_STATUS[identityStatus] ?? IDENTITY_STATUS.UNKNOWN}</Badge>
-              <Badge variant={ageStatus === "MINOR" ? "destructive" : "outline"}>{AGE_STATUS[ageStatus] ?? AGE_STATUS.UNKNOWN}</Badge>
-              {facts.riskFlag === true ? <Badge variant="destructive">内部高危</Badge> : null}
+              {ageStatus === "MINOR" ? <Badge variant="destructive">未成年</Badge> : ageStatus === "UNKNOWN" ? <Badge variant="outline">年龄状态未知</Badge> : null}
+              {facts.riskFlag === true ? <Badge variant="destructive">高风险账号</Badge> : null}
             </div>
             <ItemSeparator />
             <Fact label="手机号" value={facts.maskedPhone ? `${facts.maskedPhone} · ${facts.phoneNumberVerified ? "已验证" : facts.phoneNumberVerified === false ? "未验证" : "验证状态未知"}` : "未绑定"} />
-            <Fact label="脱敏邮箱" value={facts.maskedEmail || "未绑定"} />
             <Fact label="进行中订单" value={summaryText(facts.orderSummary, "单", scope.orders, PERMISSION.orders)} permission={!scope.orders || facts.orderSummary?.state === "denied" ? PERMISSION.orders : undefined} />
             <Fact label="名下资源账号" value={summaryText(facts.resourceSummary, "个", scope.resources, PERMISSION.resources)} permission={!scope.resources || facts.resourceSummary?.state === "denied" ? PERMISSION.resources : undefined} />
           </> : null}
@@ -262,7 +267,7 @@ export function ConsultationUserCard({ consultationId, rowUserId, fallbackName, 
         {state === "error" || profileState === "error" ? <div className="im-rail-retry"><Button variant="outline" size="sm" onClick={() => setAttempt((value) => value + 1)}><RefreshCw aria-hidden="true" />重读资料</Button></div> : null}
       </CardContent>
       {showSubject ? <CardFooter className="justify-between gap-3 border-t px-4 py-2.5">
-        <span className="shrink-0 text-xs text-muted-foreground">{subject.label}</span>
+        <span className="shrink-0 text-xs text-muted-foreground">{subject.label}{subject.party ? `（${subject.party}）` : ""}</span>
         <span className="grid min-w-0 justify-items-end gap-0.5 text-right" data-subject-status={subject.resolved ? "resolved" : undefined} data-subject-kind={subject.resolved?.kind}>
           {subject.resolved && subject.resolved.id && onOpenSubject
             ? <Button variant="link" size="sm" className="h-auto max-w-full px-0 text-sm font-medium" data-action="open-subject"

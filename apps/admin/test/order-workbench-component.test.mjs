@@ -381,10 +381,10 @@ test("an image failure is scoped to the selected order", async (t) => {
   const { node, until } = await mount(t, "ready-three");
   await until(() => node.querySelector(".im-wb-thumb img"), "image ready");
   await act(async () => node.querySelector(".im-wb-thumb img").dispatchEvent(new Event("error")));
-  await until(() => node.querySelector(".im-wb-thumb-failed"), "image failure shown");
+  await until(() => node.querySelector(".message-image-failed"), "image failure shown");
   await act(async () => rows(node)[1].click());
   await until(() => node.querySelector(".im-wb-chat-title").textContent.includes("ZZ20261010007710"), "another order selected");
-  assert.equal(node.querySelector(".im-wb-thumb-failed"), null, "a failed image from the previous order does not poison the new order");
+  assert.equal(node.querySelector(".message-image-failed"), null, "a failed image from the previous order does not poison the new order");
 });
 
 test("a new identity returns the narrow workbench to its selectable list", async (t) => {

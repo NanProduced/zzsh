@@ -10,6 +10,7 @@ import { reserveSupportCandidateOutcome, resolveSupportConcurrencyLimit } from "
 import { createImScopeLease, onLeaseConnection } from "../src/im/scope-lease";
 import { scanOrderTeams } from "../src/im/order-team";
 import { handleAdminBff } from "../src/bff/admin-bff";
+import { SecurityApiError } from "../src/auth/security-core";
 
 test("order Team scanning stops on a global database failure instead of trying every object", async () => {
   const failure=Object.assign(new Error("private connection detail"),{code:"08006"});
@@ -280,7 +281,8 @@ function consultationReadFixture() {
     row: { id: "cons_a", appId: "app_a", userId: "user_a", userName: "用户甲", userUsername: "name",
       kind: "SERVICE", state: "ACTIVE", assignedAdminId: "admin_a", adminName: "客服甲",
       subjectRef: null as string | null, version: 3, messageScopeState: "READY" },
-    subjectMatches: [] as { kind: string; id: string; displayNo: string | null; title: string | null }[],
+    subjectMatches: [] as { kind: string; id: string; displayNo: string | null; title: string | null; related?: boolean; versionId?: string | null }[],
+    publicVersionId: null as string | null, publicFailure: null as Error | null, publicReads: [] as string[],
     events: [
       { id: "event_c", type: "TRANSFERRED", actorType: "admin", actorId: "missing_admin", fromAdminId: "admin_a", toAdminId: "admin_b", createdAt: "2026-10-11T08:19:04.123457Z" },
       { id: "event_b", type: "ASSIGNED", actorType: "system", actorId: "user_a", fromAdminId: null, toAdminId: "admin_a", createdAt: "2026-10-11T08:19:04.123456Z" },
@@ -325,11 +327,21 @@ function consultationReadFixture() {
     }
     if (sql.includes('SELECT "image" FROM "zzsh_auth_user"."user"')) return { rows: [{ image: state.image }] };
     if (sql.includes('FROM "zzsh_auth_user"."user"')) return { rows: [{ id: "user_a", name: "用户甲" }] };
-    if (sql.includes('FROM "zzsh_order"."rental_order" o')) return { rows: state.subjectMatches };
+    if (sql.includes('FROM "zzsh_order"."rental_order" o')) {
+      assert.equal(values[2],state.row.userId);
+      assert.match(sql,/o\."renter_user_id"=\$3 OR o\."owner_user_id"=\$3/);
+      assert.match(sql,/own_order\.renter_user_id=\$3 OR own_order\.owner_user_id=\$3/);
+      assert.doesNotMatch(sql,/own_order\.status|o\."status"/);
+      return { rows: state.subjectMatches.map(row=>({...row,related:row.related===true,versionId:row.versionId??null})) };
+    }
     throw new Error("Unexpected SQL in consultation read test: " + sql);
   };
   const pool = { query, connect: async () => ({ query, release() {} }) };
-  const options = { pool, appId: "app_a" } as never;
+  const options = { pool, appId: "app_a", readPublicAccount: async (_client:unknown,id:string) => {
+    state.publicReads.push(id);if(state.publicFailure)throw state.publicFailure;
+    if(!state.publicVersionId)throw new SecurityApiError(404,"NOT_FOUND","Not found");
+    return {versionId:state.publicVersionId};
+  } } as never;
   const actor = { userId: "admin_a", sessionId: "session_a" } as never;
   return { state, calls, pool, options, actor };
 }
@@ -368,7 +380,7 @@ test("context distinguishes absent and untyped subject without granting director
   // 关联对象只查业务单表，不碰身份映射，也不写任何表。
   assert.ok(!f.calls.some(({ sql }) => /im_identity_mapping|\b(INSERT|UPDATE|DELETE)\b/.test(sql)));
   // 唯一命中才 resolved，且必须带业务展示号；标题可为 null。
-  f.state.subjectMatches = [{ kind: "ORDER", id: "rental_order_1", displayNo: "DD20261031001", title: "三角洲行动账号" }];
+  f.state.subjectMatches = [{ kind: "ORDER", id: "rental_order_1", displayNo: "DD20261031001", title: "三角洲行动账号", related:true }];
   assert.deepEqual((await readConsultationContext(f.options, f.actor, "cons_a")).subject, {
     status: "resolved", kind: "ORDER", displayNo: "DD20261031001", title: "三角洲行动账号",
     target: { kind: "ORDER", id: "rental_order_1" },
@@ -386,6 +398,45 @@ test("context distinguishes absent and untyped subject without granting director
     f.state.image = image;
     assert.equal((await readConsultationContext(f.options, f.actor, "cons_a")).user.avatar, null);
   }
+});
+
+test("subjects reject unrelated orders across aliases and retain related orders without a status gate",async()=>{
+  const f=consultationReadFixture();
+  for(const ref of ["order:other","ORDER:DD20261031001","other"]){
+    f.state.row.subjectRef=ref;
+    f.state.subjectMatches=[{kind:"ORDER",id:"other",displayNo:"DD20261031001",title:"private",related:false}];
+    const view=await readConsultationContext(f.options,f.actor,"cons_a");
+    assert.equal(view.subject.status,"unresolved");assert.doesNotMatch(JSON.stringify(view.subject),/private|DD20261031001.*title/);
+  }
+  f.state.subjectMatches[0]!.related=true;
+  assert.equal((await readConsultationContext(f.options,f.actor,"cons_a")).subject.status,"resolved");
+  assert.equal(f.state.publicReads.length,0);
+});
+
+test("account subjects preserve owned/order-related and public DETAIL visibility but not hidden version aliases",async()=>{
+  const f=consultationReadFixture();f.state.row.subjectRef="account:acct";
+  f.state.subjectMatches=[{kind:"ACCOUNT",id:"acct",displayNo:"AC0000000001",title:null,related:true}];
+  assert.equal((await readConsultationContext(f.options,f.actor,"cons_a")).subject.status,"resolved");
+  f.state.subjectMatches[0]!.related=false;
+  assert.equal((await readConsultationContext(f.options,f.actor,"cons_a")).subject.status,"unresolved");
+  f.state.publicVersionId="published-version";
+  assert.equal((await readConsultationContext(f.options,f.actor,"cons_a")).subject.status,"resolved");
+  f.state.row.subjectRef="listing:hidden-version";f.state.subjectMatches[0]!.versionId="hidden-version";
+  assert.equal((await readConsultationContext(f.options,f.actor,"cons_a")).subject.status,"unresolved");
+  f.state.subjectMatches[0]!.versionId="published-version";
+  assert.equal((await readConsultationContext(f.options,f.actor,"cons_a")).subject.status,"resolved");
+  f.state.publicFailure=new Error("database unavailable");
+  await assert.rejects(readConsultationContext(f.options,f.actor,"cons_a"),/database unavailable/);
+});
+
+test("subject collisions remain unresolved before permission filtering and historical references are rechecked",async()=>{
+  const f=consultationReadFixture();f.state.row.subjectRef="collision";
+  f.state.subjectMatches=[{kind:"ORDER",id:"foreign",displayNo:null,title:null,related:false},{kind:"ACCOUNT",id:"mine",displayNo:"AC0000000001",title:null,related:true}];
+  assert.equal((await readConsultationContext(f.options,f.actor,"cons_a")).subject.status,"unresolved");
+  f.state.subjectMatches=[{kind:"ACCOUNT",id:"mine",displayNo:"AC0000000001",title:null,related:true}];
+  assert.equal((await readConsultationContext(f.options,f.actor,"cons_a")).subject.status,"resolved");
+  f.state.subjectMatches[0]!.related=false;
+  assert.equal((await readConsultationContext(f.options,f.actor,"cons_a")).subject.status,"unresolved");
 });
 
 test("read projections recheck session and current read/object grants inside their transaction", async () => {

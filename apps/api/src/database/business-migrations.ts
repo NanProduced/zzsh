@@ -193,6 +193,12 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   if ((await pool.query(`SELECT to_regclass('zzsh_iam.user_rental_membership') AS relation`)).rows[0]?.relation) {
     await pool.query(`GRANT SELECT,INSERT ON zzsh_iam.user_rental_membership TO ${runtimeUser}; REVOKE UPDATE,DELETE,TRUNCATE ON zzsh_iam.user_rental_membership FROM ${runtimeUser}; GRANT UPDATE (tier,version,source_ref,updated_by_admin_id) ON zzsh_iam.user_rental_membership TO ${runtimeUser}`);
   }
+  for (const table of ["im_support_settings", "im_aftersale_record", "im_read_copy_settings", "im_read_copy_position"]) {
+    if ((await pool.query(`SELECT to_regclass('zzsh_iam.${table}') AS relation`)).rows[0]?.relation) {
+      await pool.query(`GRANT SELECT,INSERT,UPDATE ON zzsh_iam.${table} TO ${runtimeUser};
+        REVOKE DELETE,TRUNCATE ON zzsh_iam.${table} FROM ${runtimeUser}`);
+    }
+  }
   // OIM-4B facts arrive with 0043; the runtime role writes the first-response pointer
   // and appends delivery/approval evidence with status-only updates.
   if ((await pool.query(`SELECT to_regclass('zzsh_order.im_order_event') AS relation`)).rows[0]?.relation) {

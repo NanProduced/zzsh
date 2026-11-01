@@ -45,11 +45,12 @@ const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const AUDIT_KINDS = new Set(["CONSULTATION", "ORDER_GROUP"]);
 
 /** 北京时间自然日窗口；dateParam 是 SQL 参数占位符（$2 或 $3）。 */
-function dayBounds(dateParam: string): string {
+function dayBounds(dateParam: string, endDateParam = dateParam): string {
   const date = `COALESCE(${dateParam}::date, (now() AT TIME ZONE 'Asia/Shanghai')::date)`;
+  const endDate = `COALESCE(${endDateParam}::date, ${date})`;
   return `
   SELECT (${date}::timestamp AT TIME ZONE 'Asia/Shanghai') AS day_start,
-         ((${date}::timestamp + interval '1 day') AT TIME ZONE 'Asia/Shanghai') AS day_end`;
+         ((${endDate}::timestamp + interval '1 day') AT TIME ZONE 'Asia/Shanghai') AS day_end`;
 }
 
 export type SupportDayCounts = { seconds: number; sessions: number; users: number };
@@ -95,6 +96,7 @@ export type SupportQualityView = {
   /** sampleCount 是样本数（分母），null 均值 = 无样本，不是 0。 */
   firstResponse: {
     slaSeconds: number;
+    askedCount: number;
     averageSeconds: number | null;
     sampleCount: number;
     breached: number;
@@ -113,6 +115,9 @@ export type SupportRatingOverview = {
 };
 
 export type SupportOverview = {
+  reportDate?: string;
+  serverNow?: string;
+  period: SupportReportPeriod;
   /** 满载排队事实：与“没人接待”区分。 */
   queue: SupportQueueView;
   quality: SupportQualityView;
@@ -145,11 +150,15 @@ export type SupportAuditItem =
     id: string;
     type: string;
     state: string;
-    user: { id: string; name: string };
+    user: { id: string; name: string; avatar?: string | null };
     assignedAdmin: { id: string; name: string } | null;
     lastMessageAt: string | null;
     updatedAt: string;
     conversationId: string | null;
+    firstUserMessageAt?: string | null;
+    userUnreadCount?: number;
+    adminUnreadCount?: number;
+    historyState?: "AVAILABLE" | "NOT_ESTABLISHED" | "LEGACY_UNAVAILABLE" | "RECOVERING";
   }
   | {
     kind: "ORDER_GROUP";
@@ -188,10 +197,32 @@ function nullableAverage(value: string | number | null | undefined): number | nu
 
 export function parseSupportDate(value: string | null | undefined): string | null {
   if (value === undefined || value === null) return null;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw invalid("Date is invalid");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || value.startsWith("0000")) throw invalid("Date is invalid");
   const parsed = new Date(`${value}T00:00:00.000Z`);
   if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) throw invalid("Date is invalid");
   return value;
+}
+
+export const SUPPORT_REPORT_MAX_DAYS = 366;
+export type SupportReportPeriod = { dateFrom: string; dateTo: string; days: number; timeZone: "Asia/Shanghai"; trendFrom: string; trendTo: string };
+export function parseSupportRange(fromValue: string | null | undefined, toValue?: string | null) {
+  const dateFrom = parseSupportDate(fromValue), dateTo = toValue === undefined ? dateFrom : parseSupportDate(toValue);
+  if (toValue !== undefined && (!dateFrom || !dateTo)) throw invalid("Date range requires both dates");
+  const days = dateFrom && dateTo ? (Date.parse(dateTo) - Date.parse(dateFrom)) / 86400000 + 1 : 1;
+  if (days < 1 || days > SUPPORT_REPORT_MAX_DAYS) throw invalid("Date range must contain 1–366 days");
+  return { dateFrom, dateTo, explicit: toValue !== undefined };
+}
+async function readSupportReportClock(client: PoolClient, range: ReturnType<typeof parseSupportRange>) {
+  const clock = (await client.query<{ reportDate: string; serverNow: string }>(
+    `SELECT to_char(COALESCE($2::date,$1::date,(now() AT TIME ZONE 'Asia/Shanghai')::date),'YYYY-MM-DD') AS "reportDate",
+      to_char(now() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "serverNow"`, [range.dateFrom, range.dateTo],
+  )).rows[0];
+  if (!clock || !parseSupportDate(clock.reportDate) || !Number.isFinite(Date.parse(clock.serverNow))) throw new Error("Support report clock unavailable");
+  const dateFrom = range.dateFrom ?? clock.reportDate, dateTo = range.dateTo ?? clock.reportDate;
+  const trendFrom = range.explicit ? dateFrom : new Date(Math.max(Date.parse("0001-01-01"), Date.parse(dateTo) - 6 * 86400000)).toISOString().slice(0, 10);
+  const period: SupportReportPeriod = { dateFrom, dateTo, days: (Date.parse(dateTo) - Date.parse(dateFrom)) / 86400000 + 1,
+    timeZone: "Asia/Shanghai", trendFrom, trendTo: dateTo };
+  return { ...clock, period };
 }
 
 export function parseHandoverNote(value: unknown): string | null {
@@ -219,11 +250,11 @@ function parseAuditLimit(value: string | null | undefined): number {
   return limit;
 }
 
-export function encodeSupportAuditCursor(sortAt: string, kind: "CONSULTATION" | "ORDER_GROUP", id: string): string {
-  return Buffer.from(JSON.stringify([sortAt, kind, id])).toString("base64url");
+export function encodeSupportAuditCursor(sortAt: string, kind: "CONSULTATION" | "ORDER_GROUP", id: string, filterScope?: string): string {
+  return Buffer.from(JSON.stringify(filterScope ? [sortAt, kind, id, filterScope] : [sortAt, kind, id])).toString("base64url");
 }
 
-export function decodeSupportAuditCursor(value: string): { sortAt: string; kind: "CONSULTATION" | "ORDER_GROUP"; id: string } {
+export function decodeSupportAuditCursor(value: string): { sortAt: string; kind: "CONSULTATION" | "ORDER_GROUP"; id: string; filterScope?: string } {
   if (value.length > 1024 || !/^[A-Za-z0-9_-]+$/.test(value)) throw invalid("Cursor is invalid");
   let parsed: unknown;
   try {
@@ -231,14 +262,14 @@ export function decodeSupportAuditCursor(value: string): { sortAt: string; kind:
   } catch {
     throw invalid("Cursor is invalid");
   }
-  if (!Array.isArray(parsed) || parsed.length !== 3 || typeof parsed[0] !== "string" || typeof parsed[1] !== "string" || typeof parsed[2] !== "string") {
+  if (!Array.isArray(parsed) || ![3,4].includes(parsed.length) || (parsed.length===4 && (typeof parsed[3]!=="string" || !parsed[3])) || typeof parsed[0] !== "string" || typeof parsed[1] !== "string" || typeof parsed[2] !== "string") {
     throw invalid("Cursor is invalid");
   }
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,6}Z$/.test(parsed[0]) || !AUDIT_KINDS.has(parsed[1]) || !ID_PATTERN.test(parsed[2])) throw invalid("Cursor is invalid");
   const date = new Date(`${parsed[0].slice(0, 19)}.000Z`);
   if (parsed[0].startsWith("0000") || !Number.isFinite(date.getTime()) || date.toISOString().slice(0, 19) !== parsed[0].slice(0, 19)
-    || encodeSupportAuditCursor(parsed[0], parsed[1] as "CONSULTATION" | "ORDER_GROUP", parsed[2]) !== value) throw invalid("Cursor is invalid");
-  return { sortAt: parsed[0], kind: parsed[1] as "CONSULTATION" | "ORDER_GROUP", id: parsed[2] };
+    || encodeSupportAuditCursor(parsed[0], parsed[1] as "CONSULTATION" | "ORDER_GROUP", parsed[2], parsed[3]) !== value) throw invalid("Cursor is invalid");
+  return { sortAt: parsed[0], kind: parsed[1] as "CONSULTATION" | "ORDER_GROUP", id: parsed[2], ...(parsed.length===4?{filterScope:parsed[3]}:{}) };
 }
 
 export function requireSupportManagementRead(access: EffectiveAdminAccess | null): void {
@@ -254,12 +285,12 @@ export function requireSupportAuditTakeover(access: EffectiveAdminAccess | null)
   }
 }
 
-function supportTodaySql(dateParam: string): string {
+function supportTodaySql(dateParam: string, endDateParam = dateParam): string {
   return `
-  WITH bounds AS (${dayBounds(dateParam)}),
+  WITH bounds AS (${dayBounds(dateParam, endDateParam)}),
   seconds AS (
     SELECT FLOOR(COALESCE(SUM(GREATEST(EXTRACT(EPOCH FROM (
-             LEAST(COALESCE(s."ended_at", clock_timestamp()), b.day_end) - GREATEST(s."started_at", b.day_start)
+             LEAST(COALESCE(s."ended_at", CASE WHEN s."last_heartbeat_at" < clock_timestamp() - interval '2 minutes' THEN s."last_heartbeat_at" ELSE clock_timestamp() END), b.day_end) - GREATEST(s."started_at", b.day_start)
            )), 0)), 0))::bigint AS value
       FROM "zzsh_iam"."im_support_presence_session" s CROSS JOIN bounds b
      WHERE s."app_id" = $1 AND s."admin_user_id" = $2
@@ -297,9 +328,10 @@ export async function readSupportToday(
   appId: string,
   adminUserId: string,
   date: string | null = null,
+  endDate?: string | null,
 ): Promise<SupportDayCounts> {
   const row = (await client.query<{ seconds: string | number; sessions: string | number; users: string | number }>(
-    supportTodaySql("$3"), [appId, adminUserId, date],
+    supportTodaySql("$3", "$4"), [appId, adminUserId, date, endDate ?? date],
   )).rows[0];
   return { seconds: integer(row?.seconds), sessions: integer(row?.sessions), users: integer(row?.users) };
 }
@@ -352,9 +384,9 @@ export async function readLatestHandoverNote(
 }
 
 const SUPPORT_OVERVIEW_ON_DUTY_SQL = `
-  WITH bounds AS (${dayBounds("$2")}),
+  WITH bounds AS (${dayBounds("$2", "$3")}),
   day_sessions AS (
-    SELECT s."admin_user_id", s."started_at", s."ended_at"
+    SELECT s."admin_user_id", s."started_at", s."ended_at", s."last_heartbeat_at"
       FROM "zzsh_iam"."im_support_presence_session" s CROSS JOIN bounds b
      WHERE s."app_id" = $1 AND s."started_at" < b.day_end AND COALESCE(s."ended_at", b.day_end) > b.day_start
   ),
@@ -377,7 +409,7 @@ const SUPPORT_OVERVIEW_ON_DUTY_SQL = `
   session_seconds AS (
     SELECT s."admin_user_id",
            FLOOR(COALESCE(SUM(GREATEST(EXTRACT(EPOCH FROM (
-             LEAST(COALESCE(s."ended_at", clock_timestamp()), b.day_end) - GREATEST(s."started_at", b.day_start)
+             LEAST(COALESCE(s."ended_at", CASE WHEN s."last_heartbeat_at" < clock_timestamp() - interval '2 minutes' THEN s."last_heartbeat_at" ELSE clock_timestamp() END), b.day_end) - GREATEST(s."started_at", b.day_start)
            )), 0)), 0))::bigint AS "seconds"
       FROM day_sessions s CROSS JOIN bounds b
      GROUP BY s."admin_user_id"
@@ -416,6 +448,15 @@ const SUPPORT_OVERVIEW_ON_DUTY_SQL = `
       ) x
      WHERE x."admin_user_id" IS NOT NULL
      GROUP BY x."admin_user_id"
+  ),
+  roster AS (
+    SELECT p.* FROM presence_rows p
+    UNION ALL
+    SELECT cc."admin_user_id", COALESCE(p."availability", 'OFF_DUTY'), COALESCE(p."connection_state", 'DISCONNECTED'),
+           COALESCE(p."active_load", 0), COALESCE(NULLIF(btrim(u."name"), ''), u."username", cc."admin_user_id")
+      FROM consult_counts cc JOIN "zzsh_auth_admin"."user" u ON u."id"=cc."admin_user_id"
+      LEFT JOIN "zzsh_iam"."im_support_presence" p ON p."app_id"=$1 AND p."admin_user_id"=cc."admin_user_id"
+     WHERE NOT EXISTS(SELECT 1 FROM presence_rows existing WHERE existing."admin_user_id"=cc."admin_user_id")
   )
   SELECT p."admin_user_id" AS "adminUserId", p."name", p."availability",
          p."connection_state" AS "connectionState", p."active_load" AS "activeLoad",
@@ -424,14 +465,14 @@ const SUPPORT_OVERVIEW_ON_DUTY_SQL = `
          COALESCE(cc."sessions", 0) AS "todaySessions",
          COALESCE(cc."users", 0) AS "todayUsers",
          COALESCE(oc."groups", 0) AS "currentOrderGroups"
-    FROM presence_rows p
+    FROM roster p
     LEFT JOIN session_seconds ss ON ss."admin_user_id" = p."admin_user_id"
     LEFT JOIN consult_counts cc ON cc."admin_user_id" = p."admin_user_id"
     LEFT JOIN order_counts oc ON oc."admin_user_id" = p."admin_user_id"
    ORDER BY p."admin_user_id"`;
 
 const SUPPORT_OVERVIEW_TOTALS_SQL = `
-  WITH bounds AS (${dayBounds("$2")}),
+  WITH bounds AS (${dayBounds("$2", "$3")}),
   touched AS (
     SELECT e."consultation_id"
       FROM "zzsh_iam"."im_consultation_event" e
@@ -449,9 +490,11 @@ const SUPPORT_OVERVIEW_TOTALS_SQL = `
   )
   SELECT
     (SELECT COUNT(*)::int FROM "zzsh_iam"."im_support_presence" p
-      WHERE p."app_id" = $1 AND p."availability" = 'AVAILABLE' AND p."connection_state" = 'CONNECTED') AS "onDutyCount",
+      WHERE p."app_id" = $1 AND p."availability" = 'AVAILABLE' AND p."connection_state" = 'CONNECTED'
+        AND p."last_connected_at" > clock_timestamp() - interval '2 minutes') AS "onDutyCount",
     (SELECT COUNT(*)::int FROM "zzsh_iam"."im_consultation" c
-      WHERE c."app_id" = $1 AND c."state" = 'WAITING') AS "waitingConsultations",
+      WHERE c."app_id" = $1 AND c."state" = 'WAITING' AND c."assigned_admin_id" IS NULL
+        AND c."first_user_message_at" IS NOT NULL) AS "waitingConsultations",
     (SELECT COUNT(DISTINCT t."consultation_id")::int FROM touched t) AS "todaySessions",
     (SELECT COUNT(DISTINCT c."user_id")::int FROM touched t
       JOIN "zzsh_iam"."im_consultation" c ON c."id" = t."consultation_id" AND c."app_id" = $1) AS "todayUsers",
@@ -466,8 +509,8 @@ const SUPPORT_OVERVIEW_TOTALS_SQL = `
 const SUPPORT_OVERVIEW_TREND_SQL = `
   WITH days AS (
     SELECT generate_series(
-      (COALESCE($2::date, (now() AT TIME ZONE 'Asia/Shanghai')::date) - 6)::timestamp,
-      COALESCE($2::date, (now() AT TIME ZONE 'Asia/Shanghai')::date)::timestamp,
+      $2::date::timestamp,
+      $3::date::timestamp,
       interval '1 day'
     )::date AS day
   )
@@ -485,13 +528,13 @@ const SUPPORT_OVERVIEW_TREND_SQL = `
    ORDER BY d.day`;
 
 const SUPPORT_OVERVIEW_HOURLY_SQL = `
-  WITH bounds AS (${dayBounds("$2")}),
+  WITH bounds AS (${dayBounds("$2", "$3")}),
   hours AS (SELECT generate_series(0, 23) AS "hour")
   SELECT h."hour", COUNT(DISTINCT c."id")::int AS "sessions"
     FROM hours h
     LEFT JOIN bounds b ON TRUE
     LEFT JOIN "zzsh_iam"."im_consultation_event" e
-      ON e."event_type" = 'CREATED'
+      ON e."event_type" IN ('CREATED','REOPENED')
      AND e."created_at" >= b.day_start
      AND e."created_at" < b.day_end
      AND EXTRACT(HOUR FROM e."created_at" AT TIME ZONE 'Asia/Shanghai')::int = h."hour"
@@ -500,24 +543,27 @@ const SUPPORT_OVERVIEW_HOURLY_SQL = `
    ORDER BY h."hour"`;
 
 const SUPPORT_OVERVIEW_RATING_SQL = `
+  WITH bounds AS (${dayBounds("$2", "$3")})
   SELECT COUNT(*)::int AS "count", AVG("score") AS "average",
          COUNT(*) FILTER (WHERE "score" = 1)::int AS "score1",
          COUNT(*) FILTER (WHERE "score" = 2)::int AS "score2",
          COUNT(*) FILTER (WHERE "score" = 3)::int AS "score3",
          COUNT(*) FILTER (WHERE "score" = 4)::int AS "score4",
          COUNT(*) FILTER (WHERE "score" = 5)::int AS "score5"
-    FROM "zzsh_iam"."im_support_round_rating"
+    FROM "zzsh_iam"."im_support_round_rating" CROSS JOIN bounds b
    WHERE "app_id" = $1 AND "submitted_at" IS NOT NULL
-     AND ("submitted_at" AT TIME ZONE 'Asia/Shanghai')::date = COALESCE($2::date, (now() AT TIME ZONE 'Asia/Shanghai')::date)`;
+     AND "submitted_at" >= b.day_start AND "submitted_at" < b.day_end`;
 
 const SUPPORT_OVERVIEW_RATING_AGENTS_SQL = `
+  WITH bounds AS (${dayBounds("$2", "$3")})
   SELECT r."assigned_admin_id" AS "adminUserId",
          COALESCE(NULLIF(btrim(au."name"), ''), au."username", r."assigned_admin_id") AS "name",
          COUNT(*)::int AS "count", AVG(r."score") AS "average"
     FROM "zzsh_iam"."im_support_round_rating" r
     LEFT JOIN "zzsh_auth_admin"."user" au ON au."id" = r."assigned_admin_id"
+    CROSS JOIN bounds b
    WHERE r."app_id" = $1 AND r."submitted_at" IS NOT NULL
-     AND (r."submitted_at" AT TIME ZONE 'Asia/Shanghai')::date = COALESCE($2::date, (now() AT TIME ZONE 'Asia/Shanghai')::date)
+     AND r."submitted_at" >= b.day_start AND r."submitted_at" < b.day_end
    GROUP BY r."assigned_admin_id",
             COALESCE(NULLIF(btrim(au."name"), ''), au."username", r."assigned_admin_id")
    ORDER BY "average" DESC, "count" DESC, "adminUserId"`;
@@ -545,14 +591,14 @@ export async function readConsultationFirstResponse(
 }
 
 const SUPPORT_OVERVIEW_FIRST_RESPONSE_ROUNDS_SQL = `
-  WITH bounds AS (${dayBounds("$2")})
+  WITH bounds AS (${dayBounds("$2", "$3")})
   SELECT c."id" AS "roundId", c."state", c."first_user_message_at" AS "askedAt"
     FROM "zzsh_iam"."im_consultation" c CROSS JOIN bounds b
    WHERE c."app_id" = $1 AND c."first_user_message_at" >= b.day_start AND c."first_user_message_at" < b.day_end
    ORDER BY c."first_user_message_at", c."id"`;
 
 const SUPPORT_OVERVIEW_RESOLUTION_SQL = `
-  WITH bounds AS (${dayBounds("$2")}),
+  WITH bounds AS (${dayBounds("$2", "$3")}),
   lifecycle AS (
     SELECT e."consultation_id" AS id,
            min(e."created_at") FILTER (WHERE e."event_type" IN ('ASSIGNED', 'CLAIMED')) AS taken_at,
@@ -597,12 +643,13 @@ async function readSupportFirstResponseQuality(
   client: PoolClient,
   appId: string,
   date: string | null,
+  endDate: string | null,
   slaSeconds: number,
 ): Promise<SupportQualityView["firstResponse"]> {
   const rounds = (await client.query<{ roundId: string; state: string; askedAt: Date | string }>(
-    SUPPORT_OVERVIEW_FIRST_RESPONSE_ROUNDS_SQL, [appId, date],
+    SUPPORT_OVERVIEW_FIRST_RESPONSE_ROUNDS_SQL, [appId, date, endDate],
   )).rows;
-  if (!rounds.length) return { slaSeconds, averageSeconds: null, sampleCount: 0, breached: 0, pending: 0, overdue: 0 };
+  if (!rounds.length) return { slaSeconds, askedCount: 0, averageSeconds: null, sampleCount: 0, breached: 0, pending: 0, overdue: 0 };
   const facts = await readConsultationFirstResponse(client, appId, rounds.map((row) => row.roundId));
   const now = Date.now();
   let answered = 0, breached = 0, pending = 0, overdue = 0, totalSeconds = 0;
@@ -621,13 +668,13 @@ async function readSupportFirstResponseQuality(
     if (seconds > slaSeconds) breached += 1;
   }
   return {
-    slaSeconds, sampleCount: answered, breached, pending, overdue,
+    slaSeconds, askedCount: rounds.length, sampleCount: answered, breached, pending, overdue,
     averageSeconds: answered ? Math.round(totalSeconds / answered) : null,
   };
 }
 
 /**
- * 运营看板只读投影：统计表、今日汇总、近 7 天咨询趋势、今日每小时新咨询。
+ * 客服统计只读投影：期间汇总与趋势；当前队列/负载保持实时，旧单日保留7天趋势。
  * 数据不足时 trend/hourly 返回空数组，不画伪造的零趋势。
  */
 export async function readSupportOverview(
@@ -635,19 +682,22 @@ export async function readSupportOverview(
   context: AdminContext,
   dateValue: string | null | undefined,
   limits: { capacityLimit?: number | null; firstResponseSeconds?: number | null } = {},
+  dateToValue?: string | null,
 ): Promise<SupportOverview> {
-  const date = parseSupportDate(dateValue);
+  const range = parseSupportRange(dateValue, dateToValue);
+  const date = range.dateFrom, endDate = range.dateTo;
   const capacityLimit = resolveSupportConcurrencyLimit(limits.capacityLimit);
   const firstResponseSeconds = resolveFirstResponseSeconds(limits.firstResponseSeconds);
   return withTransaction(options.pool, async (client) => {
     await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
     await assertAdminContextInTransaction(client, context);
     requireSupportManagementRead(await loadEffectiveAdminAccess(client, context.userId));
+    const clock = await readSupportReportClock(client, range);
     const onDuty = (await client.query<{
       adminUserId: string; name: string; availability: SupportAvailability; connectionState: SupportConnectionState;
       activeLoad: string | number; todaySeconds: string | number; todaySessions: string | number;
       todayUsers: string | number; currentOrderGroups: string | number; totalLoad: string | number;
-    }>(SUPPORT_OVERVIEW_ON_DUTY_SQL, [options.appId, date])).rows.map((row) => ({
+    }>(SUPPORT_OVERVIEW_ON_DUTY_SQL, [options.appId, date, endDate])).rows.map((row) => ({
       adminUserId: row.adminUserId,
       name: row.name,
       availability: row.availability,
@@ -665,19 +715,19 @@ export async function readSupportOverview(
       onDutyCount: string | number; waitingConsultations: string | number;
       todaySessions: string | number; todayUsers: string | number;
       transfersToday: string | number; handoversToday: string | number;
-    }>(SUPPORT_OVERVIEW_TOTALS_SQL, [options.appId, date])).rows[0];
+    }>(SUPPORT_OVERVIEW_TOTALS_SQL, [options.appId, date, endDate])).rows[0];
     const trendRows = (await client.query<{ date: string; sessions: string | number; users: string | number }>(
-      SUPPORT_OVERVIEW_TREND_SQL, [options.appId, date],
+      SUPPORT_OVERVIEW_TREND_SQL, [options.appId, clock.period.trendFrom, clock.period.trendTo],
     )).rows.map((row) => ({ date: row.date, sessions: integer(row.sessions), users: integer(row.users) }));
     const hourlyRows = (await client.query<{ hour: number; sessions: string | number }>(
-      SUPPORT_OVERVIEW_HOURLY_SQL, [options.appId, date],
+      SUPPORT_OVERVIEW_HOURLY_SQL, [options.appId, date, endDate],
     )).rows.map((row) => ({ hour: integer(row.hour), sessions: integer(row.sessions) }));
     const ratingRow = (await client.query<{
       count: string | number; average: string | number | null;
       score1: string | number; score2: string | number; score3: string | number; score4: string | number; score5: string | number;
-    }>(SUPPORT_OVERVIEW_RATING_SQL, [options.appId, date])).rows[0];
+    }>(SUPPORT_OVERVIEW_RATING_SQL, [options.appId, date, endDate])).rows[0];
     const ratingAgents = (await client.query<{ adminUserId: string; name: string; count: string | number; average: string | number }>(
-      SUPPORT_OVERVIEW_RATING_AGENTS_SQL, [options.appId, date],
+      SUPPORT_OVERVIEW_RATING_AGENTS_SQL, [options.appId, date, endDate],
     )).rows.flatMap((row) => {
       const average = nullableAverage(row.average);
       return average === null ? [] : [{ adminUserId: row.adminUserId, name: row.name, count: integer(row.count), average }];
@@ -702,15 +752,16 @@ export async function readSupportOverview(
         : withFreeSlot > 0 ? "CAPACITY_AVAILABLE"
         : atCapacity > 0 ? "ALL_AT_CAPACITY" : "NO_ONLINE_STAFF",
     };
-    const firstResponse = await readSupportFirstResponseQuality(client, options.appId, date, firstResponseSeconds);
+    const firstResponse = await readSupportFirstResponseQuality(client, options.appId, date, endDate, firstResponseSeconds);
     const resolutionRow = (await client.query<{ closed: string | number; averageSeconds: string | number | null }>(
-      SUPPORT_OVERVIEW_RESOLUTION_SQL, [options.appId, date],
+      SUPPORT_OVERVIEW_RESOLUTION_SQL, [options.appId, date, endDate],
     )).rows[0];
     const quality: SupportQualityView = {
       firstResponse,
       resolution: { sampleCount: integer(resolutionRow?.closed), averageSeconds: nullableAverage(resolutionRow?.averageSeconds) },
     };
     return {
+      ...clock,
       queue,
       quality,
       onDuty,
@@ -809,8 +860,8 @@ async function auditViewerAccount(client: PoolClient, appId: string, adminUserId
         AND "identity_kind" = 'ADMIN' AND "platform_subject_id" = $2 AND "status" = 'READY'`,
     [appId, adminUserId],
   )).rows[0];
-  if (!row) return null;
   const key = { provider: "yunxin" as const, appId, realm: "admin" as const, kind: "ADMIN" as const, platformSubjectId: adminUserId };
+  if (!row) return deriveYunxinAccountId(key);
   return row.accountId === deriveYunxinAccountId(key) && row.identityMarker === buildYunxinIdentityMarker(key) ? row.accountId : null;
 }
 
@@ -821,22 +872,28 @@ const AUDIT_CONVERSATIONS_SQL = `
            jsonb_build_object(
              'kind', 'CONSULTATION', 'id', c."id", 'type', c."kind", 'state', c."state",
              'user', jsonb_build_object('id', c."user_id",
-               'name', COALESCE(NULLIF(btrim(u."name"), ''), u."username", c."user_id")),
+               'name', COALESCE(NULLIF(btrim(u."name"), ''), u."username", '平台用户'), 'avatar', u.image),
              'assignedAdmin', CASE WHEN c."assigned_admin_id" IS NULL THEN NULL ELSE jsonb_build_object(
                'id', c."assigned_admin_id",
-               'name', COALESCE(NULLIF(btrim(au."name"), ''), au."username", c."assigned_admin_id")) END,
+               'name', COALESCE(NULLIF(btrim(au."name"), ''), '平台客服')) END,
              'lastMessageAt', to_char(c."last_message_at" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+             'firstUserMessageAt', to_char(c."first_user_message_at" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+             'userUnreadCount', c."user_unread_count", 'adminUnreadCount', c."admin_unread_count",
+             'historyState', CASE WHEN c."message_scope_state" = 'READY' AND c."message_scope_id" IS NOT NULL THEN 'AVAILABLE'
+               WHEN c."state" = 'CLOSED' THEN 'LEGACY_UNAVAILABLE'
+               WHEN c."message_scope_state" IN ('PENDING','NONE') THEN 'NOT_ESTABLISHED' ELSE 'RECOVERING' END,
              'updatedAt', to_char(c."updated_at" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
-             'conversationId', CASE WHEN c."state" = 'ACTIVE' AND c."message_scope_state" = 'READY'
+             'conversationId', CASE WHEN c."message_scope_state" = 'READY'
                AND c."message_scope_id" IS NOT NULL AND $2::text IS NOT NULL
                THEN $2 || '|2|' || c."message_scope_id" ELSE NULL END
            ) AS payload
       FROM "zzsh_iam"."im_consultation" c
       JOIN "zzsh_auth_user"."user" u ON u."id" = c."user_id"
       LEFT JOIN "zzsh_auth_admin"."user" au ON au."id" = c."assigned_admin_id"
-     WHERE c."app_id" = $1
+     WHERE c."app_id" = $1 AND ($7::text IS NULL OR c."kind" = $7)
+       AND ($8::text IS NULL OR c."assigned_admin_id" = $8)
     UNION ALL
-    SELECT COALESCE(g."team_ready_at", o."created_at") AS sort_at,
+    SELECT COALESCE(activity.last_message_at, g."team_ready_at", o."created_at") AS sort_at,
            'ORDER_GROUP'::text AS item_kind, o."id" AS item_id,
            jsonb_build_object(
              'kind', 'ORDER_GROUP', 'id', o."id", 'displayNo', o."display_no", 'title', o."title",
@@ -847,7 +904,7 @@ const AUDIT_CONVERSATIONS_SQL = `
                                      WHERE u."id" = COALESCE(g."responsible_admin_id", g."assigned_admin_id")), '未分配'),
              'state', CASE WHEN o."status" IN ('COMPLETED','CANCELLED') THEN 'CLOSED'
                            WHEN g."team_state" = 'READY' THEN 'ACTIVE' ELSE 'WAITING' END,
-             'lastMessageAt', NULL::text,
+             'lastMessageAt', to_char(COALESCE(activity.last_message_at, g."team_ready_at", o."created_at") AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
              'firstResponseAt', to_char((to_jsonb(g)->>'first_response_at')::timestamptz AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
              'remindDueAt', to_char((to_jsonb(g)->>'remind_due_at')::timestamptz AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
              'addRound', COALESCE((to_jsonb(g)->>'add_round')::int, 0),
@@ -858,7 +915,9 @@ const AUDIT_CONVERSATIONS_SQL = `
       FROM "zzsh_order"."im_order_group" g
       JOIN "zzsh_order"."rental_order" o ON o."id" = g."order_id"
       JOIN "zzsh_supply"."game" game ON game."id" = o."game_id"
-     WHERE g."app_id" = $1
+      LEFT JOIN "zzsh_order"."im_order_activity" activity ON activity."order_id" = g."order_id" AND activity."app_id" = g."app_id"
+     WHERE g."app_id" = $1 AND ($7::text IS NULL OR $7::text = 'ORDER')
+       AND ($8::text IS NULL OR COALESCE(g."responsible_admin_id", g."assigned_admin_id") = $8)
   )
   SELECT to_char(sort_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "sortAt",
          item_kind AS "kind", item_id AS "id", payload
@@ -876,9 +935,15 @@ export async function listAuditConversations(
   context: AdminContext,
   limitValue: string | null | undefined,
   cursorValue: string | null | undefined,
+  filters: { type?: string | null; adminUserId?: string | null } = {},
 ): Promise<SupportAuditPage> {
+  const type = filters.type ?? null, adminUserId = filters.adminUserId ?? null;
+  if (type !== null && !["SERVICE", "COMPLAINT", "ORDER"].includes(type)) throw invalid("Audit type is invalid");
+  if (adminUserId !== null && !ID_PATTERN.test(adminUserId)) throw invalid("Administrator identifier is invalid");
   const limit = parseAuditLimit(limitValue);
   const cursor = cursorValue === undefined || cursorValue === null ? null : decodeSupportAuditCursor(cursorValue);
+  const filterScope = type || adminUserId ? JSON.stringify([options.appId,context.userId,type,adminUserId]) : undefined;
+  if (cursor && cursor.filterScope !== filterScope) throw invalid("Cursor does not match audit filters");
   return withTransaction(options.pool, async (client) => {
     await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
     await assertAdminContextInTransaction(client, context);
@@ -886,13 +951,19 @@ export async function listAuditConversations(
     const viewerAccountId = await auditViewerAccount(client, options.appId, context.userId);
     const rows = (await client.query<{ sortAt: string; kind: "CONSULTATION" | "ORDER_GROUP"; id: string; payload: Record<string, unknown> }>(
       AUDIT_CONVERSATIONS_SQL,
-      [options.appId, viewerAccountId, cursor?.sortAt ?? null, cursor?.kind ?? null, cursor?.id ?? null, limit + 1],
+      [options.appId, viewerAccountId, cursor?.sortAt ?? null, cursor?.kind ?? null, cursor?.id ?? null, limit + 1, type, adminUserId],
     )).rows;
     const hasMore = rows.length > limit;
     const page = hasMore ? rows.slice(0, limit) : rows;
     return {
-      items: page.map((row) => row.payload as unknown as SupportAuditItem),
-      nextCursor: hasMore && page.length > 0 ? encodeSupportAuditCursor(page[page.length - 1]!.sortAt, page[page.length - 1]!.kind, page[page.length - 1]!.id) : null,
+      items: page.map((row) => {
+        const payload=row.payload as unknown as SupportAuditItem;
+        if(payload.kind==="CONSULTATION" && payload.user.avatar){
+          try{const url=new URL(payload.user.avatar);payload.user.avatar=['https:','http:'].includes(url.protocol)?url.href:null;}catch{payload.user.avatar=null;}
+        }
+        return payload;
+      }),
+      nextCursor: hasMore && page.length > 0 ? encodeSupportAuditCursor(page[page.length - 1]!.sortAt, page[page.length - 1]!.kind, page[page.length - 1]!.id, filterScope) : null,
     };
   });
 }
@@ -931,4 +1002,70 @@ export async function readPatrolOrderTeamAccess(
     peerAccountId: input.teamId,
     scope: { appId: input.appId, orderId: group.orderId, teamId: input.teamId },
   };
+}
+
+export async function readPatrolConsultationAccess(client:PoolClient,input:{appId:string;teamId:string;conversationId:string;requestId:string},actor:{userId:string;sessionId:string}):Promise<{viewerAccountId:string;peerAccountId:string}|null>{
+  await assertAdminContextInTransaction(client,actor);
+  const access=await loadEffectiveAdminAccess(client,actor.userId);requireSupportManagementRead(access);
+  const row=(await client.query<{id:string;user_account_id:string}>(`SELECT c.id,t.user_account_id FROM zzsh_iam.im_support_thread t
+    JOIN zzsh_iam.im_consultation c ON c.thread_id=t.id AND c.app_id=t.app_id
+    WHERE t.app_id=$1 AND ((t.message_scope_id=$2 AND t.message_scope_state='READY')
+      OR (c.message_scope_id=$2 AND c.message_scope_state='READY' AND c.state='CLOSED'))
+    ORDER BY (c.state<>'CLOSED') DESC,c.created_at DESC,c.id DESC LIMIT 1`,[input.appId,input.teamId])).rows[0];
+  if(!row)return null;
+  const viewerAccountId=await auditViewerAccount(client,input.appId,actor.userId);
+  if(!viewerAccountId||input.conversationId!==`${viewerAccountId}|2|${input.teamId}`)return null;
+  await recordAudit(client,{actorType:"admin",actorId:actor.userId,sessionId:actor.sessionId,action:"im.audit.conversation_viewed",objectType:"im_consultation",objectId:row.id,outcome:"SUCCESS",requestId:input.requestId,details:{mode:"PATROL_READ",teamId:input.teamId}});
+  return {viewerAccountId,peerAccountId:row.user_account_id};
+}
+
+/** Self-only statistics: no caller-supplied employee identity and no management-read grant. */
+export async function readOwnSupportStatistics(options: { pool: Pool; appId: string }, context: AdminContext,
+  dateValue?: string | null, dateToValue?: string | null) {
+  const range = parseSupportRange(dateValue, dateToValue);
+  return withTransaction(options.pool, async client => {
+    await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    await assertAdminContextInTransaction(client, context);
+    const access = await loadEffectiveAdminAccess(client, context.userId);
+    if (!hasPermission(access, ADMIN_PERMISSION.imSupportRead)) throw new SecurityApiError(403,"FORBIDDEN","Permission required");
+    const clock = await readSupportReportClock(client, range);
+    const today = await readSupportToday(client, options.appId, context.userId, range.dateFrom, range.dateTo);
+    const row = (await client.query<{ active:number; orderGroups:number; unread:number; oldestPendingAt:string|null }>(`
+      SELECT (SELECT count(*)::int FROM zzsh_iam.im_consultation c WHERE c.app_id=$1 AND c.assigned_admin_id=$2 AND c.state='ACTIVE') AS active,
+        (SELECT count(*)::int FROM zzsh_order.im_order_group g JOIN zzsh_order.rental_order o ON o.id=g.order_id
+          WHERE g.app_id=$1 AND COALESCE(g.responsible_admin_id,g.assigned_admin_id)=$2 AND o.status='PAID') AS "orderGroups",
+        (SELECT COALESCE(sum(c.admin_unread_count),0)::int FROM zzsh_iam.im_consultation c
+          WHERE c.app_id=$1 AND c.assigned_admin_id=$2 AND c.state='ACTIVE') AS unread,
+        (SELECT to_char(min(c.first_user_message_at) AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+          FROM zzsh_iam.im_consultation c WHERE c.app_id=$1 AND c.assigned_admin_id=$2 AND c.state='ACTIVE'
+          AND c.admin_unread_count>0) AS "oldestPendingAt"`, [options.appId,context.userId])).rows[0];
+    const rating = (await client.query<{ count:number; average:string|null; distribution:number[] }>(`
+      WITH bounds AS (${dayBounds("$3", "$4")})
+      SELECT count(*)::int AS count, avg(score) AS average,
+        ARRAY[count(*) FILTER (WHERE score=1),count(*) FILTER (WHERE score=2),count(*) FILTER (WHERE score=3),
+          count(*) FILTER (WHERE score=4),count(*) FILTER (WHERE score=5)]::int[] AS distribution
+        FROM zzsh_iam.im_support_round_rating r CROSS JOIN bounds b
+        WHERE r.app_id=$1 AND r.assigned_admin_id=$2 AND r.submitted_at>=b.day_start AND r.submitted_at<b.day_end`,[options.appId,context.userId,range.dateFrom,range.dateTo])).rows[0];
+    if (!row || !rating) throw new Error("Support statistics are incomplete");
+    const rounds = (await client.query<{ roundId:string; askedAt:Date|string }>(`
+      WITH bounds AS (${dayBounds("$4", "$5")})
+      SELECT c.id AS "roundId", c.first_user_message_at AS "askedAt"
+        FROM zzsh_iam.im_consultation c CROSS JOIN bounds b
+        WHERE c.app_id=$1 AND c.first_user_message_at IS NOT NULL AND EXISTS (
+          SELECT 1 FROM zzsh_iam.audit_event a WHERE a.object_type='im_consultation' AND a.object_id=c.id
+            AND a.action=$3 AND a.actor_id=$2 AND a.occurred_at>=b.day_start AND a.occurred_at<b.day_end)
+      `,[options.appId,context.userId,SUPPORT_FIRST_RESPONSE_ACTION,range.dateFrom,range.dateTo])).rows;
+    const facts = await readConsultationFirstResponse(client,options.appId,rounds.map(r=>r.roundId));
+    const seconds = rounds.flatMap(r => {
+      const fact = facts.get(r.roundId);
+      return fact?.answeredAt && fact.answeredByAdminId===context.userId
+        ? [Math.max(0,Math.round((new Date(fact.answeredAt).getTime()-new Date(r.askedAt).getTime())/1000))] : [];
+    });
+    return {
+      ...clock, today,
+      current:{consultations:integer(row.active),orderGroups:integer(row.orderGroups),unread:integer(row.unread),oldestPendingAt:row.oldestPendingAt},
+      ratings:{count:integer(rating.count),average:nullableAverage(rating.average),distribution:rating.distribution},
+      firstResponse:{sampleCount:seconds.length,averageSeconds:seconds.length?Math.round(seconds.reduce((a,b)=>a+b,0)/seconds.length):null},
+    };
+  });
 }

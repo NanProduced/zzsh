@@ -79,7 +79,7 @@ test("admin support responses are bound to operator and selected consultation, w
 
 test("formal NIM clients preauthorize history and send through the same-origin BFF", () => {
   assert.match(webSource, /api\/im\/message-access\?conversationId=/);
-  assert.match(adminSource, /messageAccessPath\(conversationId, operation\)/);
+  assert.match(adminSource, /messageAccessPath\(conversationId, operation,intent\)/);
   assert.match(adminGuardSource, /\/im\/message-access\?conversationId=/);
 });
 

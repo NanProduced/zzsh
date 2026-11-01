@@ -8,6 +8,7 @@ import { handleAdminBff, type AdminBffOptions } from "../src/bff/admin-bff";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId, type ImIdentityKey } from "../src/im/identity-lifecycle";
 import { inviteOrderTeamAdmin, listOrderTeamInviteTargets } from "../src/im/order-team-invite";
 import { ORDER_TEAM_CONFIGURATION, YunxinTransportError, type YunxinOrderTeamState } from "../src/im/yunxin-provider";
+import * as orderTeamAccess from "../src/im/order-team-access";
 import * as orderRoutes from "../src/order/order-routes";
 
 const APP = "app_order_invite";
@@ -233,6 +234,7 @@ test("invite target validation rejects missing, suspended and identity-pending a
 });
 
 test("object and game scope denial fail closed before any provider or member write", async t => {
+  t.mock.method(orderTeamAccess,"readOrderTeamAccess",async()=>({terminalSendAllowed:false}));
   const fixture = () => new InviteDatabase();
   const request = async (db: InviteDatabase, provider: FakeTeamProvider) => invoke(db, provider).catch(error => error);
 
@@ -263,6 +265,7 @@ test("object and game scope denial fail closed before any provider or member wri
   t.mock.restoreAll();
 
   mockAccess(t);
+  t.mock.method(orderTeamAccess,"readOrderTeamAccess",async()=>({terminalSendAllowed:false}));
   db = fixture(); db.group = { ...db.group!, order_status: "COMPLETED" }; provider = new FakeTeamProvider();
   assert.equal((await request(db, provider)).status, 409);
   assert.equal(provider.reads, 0);
@@ -371,4 +374,14 @@ test("admin BFF forwards only the exact POST member invite path", async t => {
   await handleAdminBff({ method: "POST", url: `/orders/${ORDER}/members/extra`, originalUrl: `/orders/${ORDER}/members/extra`,
     headers: { origin: ADMIN_ORIGIN }, body: {} } as never, extra.response as never, bffOptions());
   assert.equal(extra.result().status, 404);
+});
+
+test("terminal orders may invite an operator only inside the authoritative communication window",async t=>{
+  mockAccess(t);
+  let allowed=true,checks=0;
+  t.mock.method(orderTeamAccess,"readOrderTeamAccess",async(_c:unknown,actor:{userId:string;sessionId:string;realm:string},id:string)=>{checks++;assert.deepEqual(actor,{...ACTOR,realm:"admin"});assert.equal(id,ORDER);return {terminalSendAllowed:allowed};});
+  const db=new InviteDatabase(),provider=new FakeTeamProvider();db.group!.order_status="COMPLETED";
+  assert.equal((await invoke(db,provider)).status,"JOINED");assert.ok(checks>0);
+  allowed=false;const expired=new InviteDatabase(),untouched=new FakeTeamProvider();expired.group!.order_status="COMPLETED";
+  await assert.rejects(invoke(expired,untouched),statusIs(409));assert.equal(untouched.reads,0);assert.equal(expired.writes.length,0);
 });

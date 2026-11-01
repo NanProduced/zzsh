@@ -69,6 +69,8 @@ const agent = (overrides = {}) => ({
 });
 
 const fullOverview = (overrides = {}) => ({
+  reportDate: "2026-10-31",
+  serverNow: "2026-10-31T04:00:00.000Z",
   onDuty: [agent()],
   totals: { onDutyCount: 1, waitingConsultations: 3, todaySessions: 12, todayUsers: 9, transfersToday: 4, handoversToday: 6 },
   trend: [],
@@ -98,8 +100,13 @@ test("quality / totals / capacity / queue 按契约解析；缺失保持 null �
   assert.equal(parsed.queue.oldestWaitSeconds, 640);
 
   const sparse = model.parseSupportOverview({
-    onDuty: [{ adminUserId: "admin-b", name: "客服 B", activeLoad: 1 }],
-    totals: { waitilngConsultations: 0, waitingConsultations: 2, todaySessions: 1, todayUsers: 1 },
+    reportDate: "2026-10-31",
+    serverNow: "2026-10-31T04:00:00.000Z",
+    onDuty: [{ adminUserId: "admin-b", name: "客服 B", activeLoad: 1, todaySeconds: 0, todaySessions: 0, todayUsers: 0, currentOrderGroups: 0 }],
+    totals: { onDutyCount: 0, waitilngConsultations: 0, waitingConsultations: 2, todaySessions: 1, todayUsers: 1 },
+    trend: [],
+    hourly: [],
+    ratings: { count: 0, average: null, distribution: [0, 0, 0, 0, 0], agents: [] },
   });
   assert.equal(sparse.quality, null, "整段缺失 → null，UI 才挂缺口");
   assert.equal(sparse.queue, null);
@@ -113,13 +120,16 @@ test("quality / totals / capacity / queue 按契约解析；缺失保持 null �
 test("0 秒均值是真样本：有无样本看 sampleCount，不看 averageSeconds 是否为 0", () => {
   const parsed = model.parseSupportOverview(fullOverview({
     quality: { firstResponse: { slaSeconds: 120, averageSeconds: 0, sampleCount: 5, breached: 0, pending: 1, overdue: 0 }, resolution: { averageSeconds: 0, sampleCount: 2 } },
-    ratings: { count: 0, average: 0, distribution: [0, 0, 0, 0, 0], agents: [] },
+    ratings: { count: 0, average: null, distribution: [0, 0, 0, 0, 0], agents: [] },
   }));
   assert.equal(parsed.quality.firstResponse.averageSeconds, 0, "0 秒是四舍五入后的真样本，不能当缺失");
   assert.equal(parsed.quality.firstResponse.sampleCount, 5);
   assert.equal(parsed.quality.resolution.averageSeconds, 0);
   assert.equal(model.formatSlaDuration(0), "<1 秒", "0 秒显示成 <1 秒，不显示 0 秒");
-  assert.equal(parsed.ratings.average, null, "评分均值 0 分仍然非法，照旧当缺失");
+  assert.equal(parsed.ratings.average, null);
+  assert.throws(() => model.parseSupportOverview(fullOverview({
+    ratings: { count: 0, average: 0, distribution: [0, 0, 0, 0, 0], agents: [] },
+  })), /客服统计数据不完整/, "评分均值 0 分不是合法值");
 
   const noSample = model.parseSupportOverview(fullOverview({
     quality: { firstResponse: { slaSeconds: 120, averageSeconds: null, sampleCount: 0, breached: 0, pending: 4, overdue: 2 }, resolution: { averageSeconds: null, sampleCount: 0 } },
@@ -185,7 +195,15 @@ test("摘要用服务端事实：首响/解决/转交/排队都是真数，缺�
 });
 
 test("没有 quality 时摘要明说未提供，不编一个平均时长", () => {
-  const parsed = model.parseSupportOverview({ onDuty: [], totals: { onDutyCount: 0, waitingConsultations: 0, todaySessions: 0, todayUsers: 0 } });
+  const parsed = model.parseSupportOverview({
+    reportDate: "2026-10-31",
+    serverNow: "2026-10-31T04:00:00.000Z",
+    onDuty: [],
+    totals: { onDutyCount: 0, waitingConsultations: 0, todaySessions: 0, todayUsers: 0 },
+    trend: [],
+    hourly: [],
+    ratings: { count: 0, average: null, distribution: [0, 0, 0, 0, 0], agents: [] },
+  });
   const text = model.handoverSummaryText({ totals: parsed.totals, agents: [], handovers: [], quality: parsed.quality, queue: parsed.queue });
   assert.match(text, /首响：服务端未提供聚合事实/);
   assert.match(text, /解决：服务端未提供聚合事实/);
@@ -213,14 +231,9 @@ test("看板把服务端事实换成数字：首响 47 秒、解决 30 分 30 �
   assert.match(metrics.resolution.textContent, /30 分 30 秒/);
   assert.equal(metrics.resolution.dataset.missing, undefined);
   assert.match(metrics.transfer.textContent, /4/);
-  assert.match(metrics.transfer.textContent, /服务端 TRANSFERRED 事件今日计数（全量）/);
-  assert.equal(metrics["support-cancel"].dataset.missing, "true", "客服取消仍无口径，继续挂缺口");
-  assert.deepEqual([...panel.querySelectorAll("[data-sla-gap]")].map((node) => node.dataset.slaGap), ["support-cancel"]);
-
-  const queue = rootNode.querySelector("[data-queue]");
-  assert.ok(queue, "服务端给了排队段就要显示");
-  assert.match(queue.textContent, /排队 3 条/);
-  assert.match(queue.textContent, /最久 10 分 40 秒/);
-  assert.equal(queue.dataset.queueReason, "ALL_AT_CAPACITY");
-  assert.match(rootNode.querySelector('[data-panel="handover-summary"]').textContent, /全部满载/);
+  assert.match(metrics.transfer.textContent, /今日转交/);
+  assert.equal(metrics["support-cancel"], undefined, "简化统计页不再展示客服取消指标");
+  assert.deepEqual([...panel.querySelectorAll("[data-sla-gap]")], []);
+  assert.equal(rootNode.querySelector("[data-queue]"), null, "简化统计页把排队事实放在当前排队指标，不重复画队列面板");
+  assert.equal(rootNode.querySelector('[data-panel="handover-summary"]'), null, "简化统计页不重复画交接摘要");
 });

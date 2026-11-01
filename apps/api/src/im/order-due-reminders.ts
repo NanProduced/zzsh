@@ -195,6 +195,7 @@ async function deliver(options: OrderDueReminderOptions, row: DueRow): Promise<v
   if (!isBucket(row.bucket)) throw codedError("INVALID_BUCKET");
   if (row.order_status !== "PAID" || row.ended_intake || row.ended_settlement || row.ended_posting) throw codedError("ORDER_ENDED");
   if (!row.due_at) throw codedError("DUE_UNKNOWN");
+  if (dueReminderBucket(row.due_at, Date.now()) !== row.bucket) throw codedError("STALE_BUCKET");
   const systemAccount = systemAccountOf(options.appId, row);
   await options.transport.sendText({
     conversationId: `${systemAccount}|2|${row.team_id}`,
@@ -227,7 +228,7 @@ export async function scanOrderDueReminders(options: OrderDueReminderOptions, li
       await finish(options, row, tokenHash, "SENT", null);
     } catch (error) {
       const code = failureClass(error);
-      if (code === "ORDER_ENDED" || code === "DUE_UNKNOWN") await finish(options, row, tokenHash, "SKIPPED", code);
+      if (code === "ORDER_ENDED" || code === "DUE_UNKNOWN" || code === "STALE_BUCKET") await finish(options, row, tokenHash, "SKIPPED", code);
       else await retry(options, row, tokenHash, code);
     }
   }

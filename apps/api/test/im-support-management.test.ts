@@ -12,6 +12,7 @@ import {
   presenceSessionAction,
   presenceSessionEndReason,
   readAdminMessageAccess,
+  recordConfirmedConsultationMessage,
   readOwnPresence,
   supportManagerIdentityKey,
   takeoverConsultation,
@@ -26,9 +27,12 @@ import {
   parseHandoverLimit,
   parseHandoverNote,
   parseSupportDate,
+  parseSupportRange,
+  SUPPORT_FIRST_RESPONSE_ACTION,
   readConsultationFirstResponse,
   readPatrolOrderTeamAccess,
   readSupportOverview,
+  readOwnSupportStatistics,
   readSupportToday,
   resolveFirstResponseSeconds,
   recordSupportHandover,
@@ -70,6 +74,7 @@ function adminContextHandler(input: {
   const permissions = input.permissions ?? [];
   return (sql: string, values: unknown[]): QueryResult => {
     if (TRANSACTION_SQL.has(sql)) return { rows: [] };
+    if (sql.includes('AS "reportDate"') && !sql.includes('AS active')) return {rows:[{reportDate:values[1]??values[0]??"2026-11-01",serverNow:"2026-11-01T00:00:00.000000Z"}]};
     if (sql.includes('FROM "zzsh_auth_admin"."session"')) return { rows: [{ locked: false, twoFactorEnabled: true, suspended: false }] };
     if (sql.includes('FROM "zzsh_iam"."admin_security"')) return { rows: [{ status: "ACTIVE", isBoss: boss, passwordChangeRequired: false }] };
     if (sql.includes("WITH role_permissions AS")) return { rows: permissions.map((permissionCode) => ({ permissionCode })) };
@@ -80,6 +85,43 @@ function adminContextHandler(input: {
 }
 
 const adminContext = { userId: "admin_a", sessionId: "session_a", credentials: {}, security: { status: "ACTIVE", isBoss: false, passwordChangeRequired: false }, sessionLocked: false } as never;
+
+test("support report range uses inclusive Beijing dates, validates leap days and limits one request to 366 days", () => {
+  assert.deepEqual(parseSupportRange(undefined), {dateFrom:null,dateTo:null,explicit:false});
+  assert.deepEqual(parseSupportRange("2026-10-01","2026-10-31"), {dateFrom:"2026-10-01",dateTo:"2026-10-31",explicit:true});
+  assert.equal(parseSupportRange("2024-01-01","2024-12-31").dateTo,"2024-12-31");
+  for (const [from,to] of [[null,"2026-10-31"],["2026-10-31","2026-10-01"],["2024-01-01","2025-01-01"],["2026-02-29","2026-03-01"],["0000-01-01","0000-01-02"],["2026-10-01",""]])
+    assert.throws(()=>parseSupportRange(from,to));
+});
+
+test("monthly overview applies one interval to historical metrics and keeps queue/live presence separate", async () => {
+  const f = fakePool(overviewHandler({onDuty:[],totals:{onDutyCount:2,waitingConsultations:3,todaySessions:2,todayUsers:1},
+    trend:[{date:"2026-10-01",sessions:1,users:1},{date:"2026-10-02",sessions:1,users:1}],hourly:[]}));
+  const data = await readSupportOverview({pool:f.pool,appId:APP_ID} as never,adminContext,"2026-10-01",{},"2026-10-31");
+  assert.deepEqual(data.period,{dateFrom:"2026-10-01",dateTo:"2026-10-31",days:31,timeZone:"Asia/Shanghai",trendFrom:"2026-10-01",trendTo:"2026-10-31"});
+  assert.equal(data.reportDate,"2026-10-31");assert.equal(data.totals.todayUsers,1);assert.equal(data.trend.reduce((sum,p)=>sum+p.users,0),2);
+  const metrics=f.calls.filter(c=>c.sql.includes('"currentOrderGroups"')||c.sql.includes('"waitingConsultations"')||c.sql.includes('generate_series(')||c.sql.includes('"im_support_round_rating"')||c.sql.includes('AS "askedAt"')||c.sql.includes('FROM lifecycle l'));
+  assert.ok(metrics.length>=8);for(const call of metrics)assert.deepEqual(call.values,[APP_ID,"2026-10-01","2026-10-31"]);
+  const queue=f.calls.find(c=>c.sql.includes('FROM queued q'))!;assert.deepEqual(queue.values,[APP_ID,3]);
+  assert.ok(f.calls.some(c=>c.sql.includes('COUNT(DISTINCT c."user_id")')));
+  const invalid=fakePool(()=>{throw new Error('must not connect');});
+  await assert.rejects(readSupportOverview({pool:invalid.pool,appId:APP_ID} as never,adminContext,"2026-10-31",{},"2026-10-01"),{status:400});assert.equal(invalid.calls.length,0);
+  const earliest=await readSupportOverview({pool:f.pool,appId:APP_ID} as never,adminContext,"0001-01-01");
+  assert.equal(earliest.period.trendFrom,"0001-01-01");
+});
+
+test("personal report range stays bound to the current admin while live pending work is not date-filtered", async () => {
+  const f=fakePool(adminContextHandler({permissions:["im.support.read"],extras:(sql,values)=>{
+    if(sql.includes('counts.sessions')){assert.deepEqual(values,[APP_ID,"admin_a","2026-10-01","2026-10-31"]);return {rows:[{seconds:7200,sessions:2,users:1}]};}
+    if(sql.includes('AS active')){assert.deepEqual(values,[APP_ID,"admin_a"]);return {rows:[{active:4,orderGroups:2,unread:7,oldestPendingAt:null}]};}
+    if(sql.includes('AS distribution')){assert.deepEqual(values,[APP_ID,"admin_a","2026-10-01","2026-10-31"]);return {rows:[{count:3,average:11/3,distribution:[1,0,0,0,2]}]};}
+    if(sql.includes('AS "askedAt"')){assert.deepEqual(values,[APP_ID,"admin_a", SUPPORT_FIRST_RESPONSE_ACTION, "2026-10-01","2026-10-31"]);return {rows:[]};}
+    return null;
+  }}));
+  const data=await readOwnSupportStatistics({pool:f.pool,appId:APP_ID} as never,adminContext,"2026-10-01","2026-10-31");
+  assert.equal(data.period.days,31);assert.equal(data.today.users,1);assert.equal(data.current.unread,7);assert.equal(data.ratings.count,3);
+  assert.ok(f.calls.filter(c=>c.sql.includes('WITH bounds')&&c.sql.includes('assigned_admin_id=$2')).every(c=>c.values[1]==='admin_a'));
+});
 
 test("support date, handover note and limit follow the strict server contract", () => {
   assert.equal(parseSupportDate(undefined), null);
@@ -162,9 +204,10 @@ test("0108 creates one open interval per admin and records both permissions", ()
 
 test("today seconds intersect the Beijing day and truncate STALE at the last heartbeat", async () => {
   const f = fakePool((sql, values) => {
-    assert.deepEqual(values, [APP_ID, "admin_a", "2026-10-29"]);
+    assert.deepEqual(values, [APP_ID, "admin_a", "2026-10-29", "2026-10-29"]);
     assert.match(sql, /Asia\/Shanghai/);
-    assert.match(sql, /LEAST\(COALESCE\(s\."ended_at", clock_timestamp\(\)\), b\.day_end\)/);
+    assert.match(sql, /LEAST\(COALESCE\(s\."ended_at", CASE WHEN s\."last_heartbeat_at"/);
+    assert.match(sql, /THEN s\."last_heartbeat_at" ELSE clock_timestamp\(\) END\), b\.day_end\)/);
     assert.match(sql, /e\."event_type" IN \('ASSIGNED', 'CLAIMED', 'TRANSFERRED'\)/);
     assert.match(sql, /e\."event_type" = 'CLOSED' AND e\."actor_type" = 'admin'/);
     return { rows: [{ seconds: "5400", sessions: 4, users: 3 }] };
@@ -264,12 +307,14 @@ test("overview keeps zeros out of fabricated trends and exposes the documented f
   }));
   const overview = await readSupportOverview({ pool: f.pool, appId: APP_ID } as never, adminContext, "2026-10-29");
   assert.deepEqual(overview, {
+    reportDate:"2026-10-29", serverNow:"2026-11-01T00:00:00.000000Z",
+    period:{dateFrom:"2026-10-29",dateTo:"2026-10-29",days:1,timeZone:"Asia/Shanghai",trendFrom:"2026-10-23",trendTo:"2026-10-29"},
     queue: {
       queued: 2, oldestQueuedAt: "2026-10-29T08:00:00.000000Z", oldestWaitSeconds: 300,
       onDuty: 1, withFreeSlot: 0, atCapacity: 1, capacityLimit: 3, reason: "ALL_AT_CAPACITY",
     },
     quality: {
-      firstResponse: { slaSeconds: 120, averageSeconds: null, sampleCount: 0, breached: 0, pending: 0, overdue: 0 },
+      firstResponse: { slaSeconds: 120, askedCount:0, averageSeconds: null, sampleCount: 0, breached: 0, pending: 0, overdue: 0 },
       resolution: { sampleCount: 3, averageSeconds: 1830.4 },
     },
     onDuty: [{
@@ -573,6 +618,12 @@ test("admin BFF forwards the new support-management routes with strict methods",
   };
   // No authenticated session: reaching 401 proves forwarding past the 404 gate.
   assert.equal((await run("/im/support-overview?date=2026-10-29")).status, 401);
+  for(const endpoint of ["support-overview","my-support-statistics"]){
+    assert.equal((await run(`/im/${endpoint}?dateFrom=2026-10-01&dateTo=2026-10-31`)).status,401);
+    for(const query of ["dateFrom=2026-10-01","dateTo=2026-10-31","date=2026-10-01&dateFrom=2026-10-01&dateTo=2026-10-31",
+      "dateFrom=2026-10-01&dateFrom=2026-10-02&dateTo=2026-10-31","dateFrom=2026-10-01&dateTo=2026-10-31&adminUserId=other"])
+      assert.equal((await run(`/im/${endpoint}?${query}`)).status,400);
+  }
   assert.equal((await run("/im/handovers?limit=20")).status, 401);
   assert.equal((await run("/im/audit/conversations?limit=20")).status, 401);
   assert.equal((await run("/im/presence/heartbeat", "POST")).status, 503);
@@ -665,7 +716,7 @@ test("first response SLA seconds default to two minutes and reject out-of-range 
     assert.throws(() => resolveFirstResponseSeconds(bad), /Invalid first response SLA seconds/, String(bad));
   }
 });
-test("send authorization records the first human reply fact once per round", async () => {
+test("authorization and revoke probes do not count; only a confirmed send records the first human reply once", async () => {
   const key = { provider: "yunxin" as const, appId: APP_ID, realm: "admin" as const, kind: "ADMIN" as const, platformSubjectId: "admin_a" };
   const accountId = deriveYunxinAccountId(key);
   const row = {
@@ -677,27 +728,77 @@ test("send authorization records the first human reply fact once per round", asy
     threadId: "im_thread_1", roundSeq: 1, threadState: "ACTIVE", threadScopeId: "900001",
     threadScopeState: "READY", threadPeerAccountId: accountId,
   };
+  const stored=new Map<string,unknown>();
   const handler = () => adminContextHandler({
     boss: true,
-    extras: (sql) => {
+    extras: (sql,values) => {
       if (sql.includes('FROM "zzsh_iam"."im_identity_mapping"')) {
         return { rows: [{ accountId, identityMarker: buildYunxinIdentityMarker(key), status: "READY" }] };
       }
       if (sql.includes('FROM "zzsh_iam"."im_consultation" c')) return { rows: [row] };
+      if(sql.startsWith("INSERT INTO zzsh_iam.audit_event")){if(stored.has(String(values[0])))return {rows:[],rowCount:0};stored.set(String(values[0]),JSON.parse(String(values.at(-1))));return {rows:[{id:values[0]}],rowCount:1};}
+      if(sql.startsWith("SELECT details FROM zzsh_iam.audit_event"))return {rows:stored.has(String(values[0]))?[{details:stored.get(String(values[0]))}]:[]};
+      if(sql.startsWith("UPDATE zzsh_iam.im_consultation SET")){assert.equal(values[1],"im_consult_1");assert.equal(values[3],"[视频]");return {rows:[],rowCount:1};}
       if (sql.includes('INSERT INTO "zzsh_iam"."audit_event"')) return { rows: [] };
       return null;
     },
   });
   const send = fakePool(handler());
   await readAdminMessageAccess({ pool: send.pool, appId: APP_ID } as never, adminContext, `${accountId}|2|900001`, true, "req_send");
+  assert.equal(send.calls.filter(({sql})=>sql.includes('INSERT INTO "zzsh_iam"."audit_event"')).length,0,"permission checks and revoke authorization are not actual sends");
+  await readAdminMessageAccess({pool:send.pool,appId:APP_ID} as never,adminContext,`${accountId}|2|900001`,true,"req_intent",{messageClientId:"cid",messageType:3});
+  const message={messageClientId:"cid",messageServerId:"4301564702653153301",conversationId:`${accountId}|2|900001`,senderId:accountId,createTime:20,messageType:3};
+  assert.equal(await recordConfirmedConsultationMessage({pool:send.pool,appId:APP_ID} as never,{userId:"admin_a",sessionId:"session_a",realm:"admin"},message,"[视频]"),true);
+  assert.equal(await recordConfirmedConsultationMessage({pool:send.pool,appId:APP_ID} as never,{userId:"admin_a",sessionId:"session_a",realm:"admin"},message,"[视频]"),false);
   const facts = send.calls.filter(({ sql }) => sql.includes('INSERT INTO "zzsh_iam"."audit_event"'));
   assert.equal(facts.length, 1);
   assert.ok(facts[0]!.values.includes("im.consultation.first_response"));
   assert.ok(facts[0]!.values.includes("im_consult_1"));
+  assert.equal(facts[0]!.values[7],20,"SLA uses the verified message time, including delayed registration");
   assert.match(facts[0]!.sql, /NOT EXISTS/);
 
   // 读取（不发送）不落首响事实。
   const read = fakePool(handler());
   await readAdminMessageAccess({ pool: read.pool, appId: APP_ID } as never, adminContext, `${accountId}|2|900001`, false, "req_read");
   assert.ok(!read.calls.some(({ sql }) => sql.includes('INSERT INTO "zzsh_iam"."audit_event"')));
+});
+
+test("audit filters reach both SQL branches and reject invalid filters before reading", async () => {
+  const actorKey={provider:"yunxin" as const,appId:APP_ID,realm:"admin" as const,kind:"ADMIN" as const,platformSubjectId:"admin_a"};
+  let selection:unknown[]=[];
+  const f=fakePool(adminContextHandler({boss:true,extras:(sql,values)=>{
+    if(sql.includes('FROM "zzsh_iam"."im_identity_mapping"'))return {rows:[{accountId:deriveYunxinAccountId(actorKey),identityMarker:buildYunxinIdentityMarker(actorKey)}]};
+    if(sql.includes("WITH items AS")){
+      selection=values;
+      assert.match(sql,/c\."kind" = \$7/);assert.match(sql,/COALESCE\(g\."responsible_admin_id", g\."assigned_admin_id"\) = \$8/);
+      assert.match(sql,/'lastMessageAt', to_char\(COALESCE\(activity.last_message_at/);
+      assert.doesNotMatch(sql,/c\."state" = 'ACTIVE'\s+AND c\."message_scope_state"/);
+      return {rows:[]};
+    }
+    return null;
+  }}));
+  await listAuditConversations({pool:f.pool,appId:APP_ID} as never,adminContext,null,null,{type:"ORDER",adminUserId:"admin_b"});
+  assert.equal(selection[6],"ORDER");assert.equal(selection[7],"admin_b");
+  for(const filters of [{type:"ALL"},{type:""},{adminUserId:""},{adminUserId:"bad id"}])await assert.rejects(
+    listAuditConversations({pool:f.pool,appId:APP_ID} as never,adminContext,null,null,filters),e=>(e as {status:number}).status===400);
+});
+
+test("my support statistics are actor-bound and never require management read or return another employee", async()=>{
+  let permissions=["im.support.read"], observed=false;
+  const f=fakePool(adminContextHandler({permissions,extras:(sql,values)=>{
+    assert.equal(values[0],APP_ID);
+    assert.equal(values[1],"admin_a");
+    if(sql.includes("counts.sessions"))return {rows:[{seconds:120,sessions:2,users:1}]};
+    if(sql.includes("AS active")){observed=true;return {rows:[{reportDate:"2026-11-01",serverNow:"2026-11-01T00:00:00.000000Z",active:1,orderGroups:2,unread:3,oldestPendingAt:null}]};}
+    if(sql.includes("ARRAY[count"))return {rows:[{count:0,average:null,distribution:[0,0,0,0,0]}]};
+    if(sql.includes('AS "askedAt"'))return {rows:[]};
+    return null;
+  }}));
+  const result=await readOwnSupportStatistics({pool:f.pool,appId:APP_ID} as never,adminContext);
+  assert.ok(observed);assert.deepEqual(result.current,{consultations:1,orderGroups:2,unread:3,oldestPendingAt:null});
+  assert.equal(result.firstResponse.averageSeconds,null);assert.equal(result.ratings.average,null);
+  assert.equal(JSON.stringify(result).includes("admin_b"),false);
+  const denied=fakePool(adminContextHandler({permissions:[]}));
+  await assert.rejects(readOwnSupportStatistics({pool:denied.pool,appId:APP_ID} as never,adminContext),e=>(e as {status:number}).status===403);
+  assert.equal(denied.calls.some(c=>c.sql.includes("AS active")),false);
 });

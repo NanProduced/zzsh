@@ -64,7 +64,7 @@ function accountTitleText(order: Order): string {
   return basic||(order.accountDisplayNo?`账号 ${order.accountDisplayNo}`:'')||order.title||'标题待核';
 }
 const ORDER_STATES: Record<string,string> = {current:'进行中',PENDING_PAYMENT:'待付款',PAID:'已付款',COMPLETED:'已完成',CANCELLED:'已取消'};
-const auditLabels:Record<string,string> = {'user.account.frozen':'冻结账号','user.account.unfrozen':'解冻账号','user.account.restored':'恢复账号（历史）','user.account.deactivated':'停用账号（历史）','user.account.cancelled':'注销账号','user.identity.verification':'实名验证','user.legacy_owner.migrated':'旧平台迁入','user.note.create':'添加备注','user.note.delete':'删除备注','user.risk.flag.changed':'修改高危标记','user.identity.sensitive.read':'查看敏感资料'};
+const auditLabels:Record<string,string> = {'user.account.frozen':'冻结账号','user.account.unfrozen':'解冻账号','user.account.restored':'恢复账号（历史）','user.account.deactivated':'停用账号（历史）','user.account.cancelled':'注销账号','user.identity.verification':'实名验证','user.legacy_owner.migrated':'旧平台迁入','user.note.create':'添加备注','user.note.delete':'删除备注','user.risk.flag.changed':'修改高危标记','user.identity.sensitive.read':'查看敏感资料','user.phone.support.read':'客服读取手机号'};
 
 function DetailLoading() { return <div className="udv-skeleton" aria-busy="true" role="status" aria-label="正在读取用户信息"><Skeleton className="h-16 w-80"/><Skeleton className="h-24 w-full"/><Skeleton className="h-10 w-full"/><Skeleton className="h-64 w-full"/></div>; }
 

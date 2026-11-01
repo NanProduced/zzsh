@@ -87,7 +87,7 @@ export function SupportRoundRating({ roundId, onResolved }: { roundId: string; o
   };
 
   return <section className="support-rating-card" aria-labelledby={titleId} aria-busy={busy}>
-    <button type="button" className="support-rating-close" aria-label="不评价" title="不评价" disabled={busy} onClick={() => void dismiss()}><X size={14} aria-hidden="true" /></button>
+    <button type="button" className="support-rating-close" aria-label="不评价" title="不评价" disabled={busy} onClick={() => void dismiss()}><span className="support-rating-skip-text">跳过</span><X size={13} aria-hidden="true" /></button>
     <strong id={titleId} className="support-rating-title">您对本次服务满意吗？</strong>
     <div className="support-rating-options" role="group" aria-label="服务满意度">
       {RATING_LEVELS.map((level) => <button

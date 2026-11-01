@@ -1,5 +1,5 @@
 .support-rating-card { position:relative; display:flex; flex-direction:column; align-items:center; gap:10px; width:min(360px,100%); margin:10px auto 4px; padding:15px 16px 11px; border:1px solid var(--color-border-subtle); border-radius:14px; background:var(--color-bg-surface); }
-.support-rating-close { position:absolute; top:3px; right:3px; display:flex; align-items:center; justify-content:center; width:32px; height:32px; padding:0; border:0; border-radius:50%; background:transparent; color:var(--color-text-muted); cursor:pointer; }
+.support-rating-close { position:absolute; top:4px; right:6px; display:inline-flex; align-items:center; gap:2px; height:24px; padding:0 6px; border:1px solid var(--color-border-subtle); border-radius:4px; background:var(--color-bg-elevated); color:var(--color-text-muted); font-size:11px; cursor:pointer; }
 .support-rating-close:hover:not(:disabled) { background:var(--color-bg-elevated); color:var(--color-text-primary); }
 .support-rating-close:disabled { cursor:not-allowed; opacity:.5; }
 .support-rating-close:focus-visible { outline:2px solid var(--color-accent-brand); outline-offset:1px; }

@@ -574,12 +574,12 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
   const imReadSub = /^\/im\/consultations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(events|context)$/.test(path);
   const imAuditTakeover = /^\/im\/audit\/consultations\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/takeover$/.test(path);
   const imGetOrPost = path === "/im/consultations" || path === "/im/messages";
-  const imGetOnly = path === "/im/token" || path === "/im/identities" || path === "/im/support-overview"
+  const imGetOnly = path === "/im/aftersales" || path === "/im/token" || path === "/im/identities" || path === "/im/support-overview" || path === "/im/my-support-statistics"
     || path === "/im/handovers" || path === "/im/audit/conversations" || path === "/im/transfer-targets"
     || path === "/im/message-access" || imImage || imMedia || imReadSub;
-  const imPostOnly = Boolean(imAction) || imOrderRead || path === "/im/presence/heartbeat" || imAuditTakeover;
-  const imPathAllowed = imGetOrPost || imGetOnly || imPostOnly || path === "/im/presence";
-  const imMethodAllowed = path === "/im/presence"
+  const imPostOnly = Boolean(imAction) || /^\/im\/aftersales\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(claim|contact|resolve)$/.test(path) || imOrderRead || path === "/im/presence/heartbeat" || imAuditTakeover;
+  const imPathAllowed = imGetOrPost || imGetOnly || imPostOnly || path === "/im/presence" || path === "/im/support-settings" || path === "/im/read-copy-settings";
+  const imMethodAllowed = path === "/im/presence" || path === "/im/support-settings" || path === "/im/read-copy-settings"
     ? method === "GET" || method === "PUT"
     : imGetOrPost
       ? method === "GET" || method === "POST"

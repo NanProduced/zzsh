@@ -6,7 +6,7 @@ import { assertAdminContextInTransaction, readAdminContext, type AuthSecurityOpt
 import { normalizeMainlandPhone } from "./phone-number";
 import { sanitizeDetail } from "./admin-audit";
 import { withDirectoryRead, withDirectoryReadTransaction } from "./user-directory-read";
-import { withTransaction } from "./security-core";
+import { recordAudit, withTransaction } from "./security-core";
 import { parseUserRiskFlagBody, writeUserRiskFlag } from "./user-directory-risk";
 import { parseUserNoteBody, parseUserNotePage, listUserNotes, readUserNote, createUserNote, deleteUserNote } from "./user-directory-notes";
 import { readUserSensitiveProfile } from "./user-directory-sensitive";
@@ -170,6 +170,7 @@ export async function handleUserDirectoryAdmin(
     await withDirectoryRead(options.pool, request, response, async (signal) => {
     const context = await readAdminContext(request, options);
     let dataToSend: unknown;
+    let disclosedPhoneUserId: string | undefined;
     if (noteWrite || sensitiveRead) {
       const userId = decodeId((noteMatch ?? sensitiveMatch)![1]!);
       const actor = { adminId: context.userId, sessionId: context.sessionId, requestId };
@@ -318,6 +319,7 @@ export async function handleUserDirectoryAdmin(
         await enableLegacyRead();
         const detail = await readUserDirectoryDetail(client, viewer, userId, registrationTime ?? undefined);
         if (!detail) throw notFound();
+        if (detail.phoneRevealed === true && typeof detail.maskedPhone === "string") disclosedPhoneUserId = userId;
         dataToSend = { user: detail };
         return;
       }
@@ -353,6 +355,17 @@ export async function handleUserDirectoryAdmin(
       requirePermission(access, ADMIN_PERMISSION.auditRead);
       dataToSend = await listUserAuditEvents(client, viewer, userId, { limit, ...(cursor !== undefined ? { cursor } : {}) }, sanitizeDetail);
     }, registrationTime === "ORIGINAL");
+    signal.throwIfAborted();
+    // Keep the directory snapshot read-only; commit disclosure audit before returning plaintext.
+    if (disclosedPhoneUserId) await withTransaction(options.pool, async client => {
+      await assertAdminContextInTransaction(client, context);
+      const access = await requireAdminAccess(client, context.userId);
+      requirePermission(access, ADMIN_PERMISSION.userDirectoryRead);
+      if (!access.permissions.has("im.support.read")) throw forbidden("Support phone access was revoked");
+      await recordAudit(client, { actorType: "admin", actorId: context.userId, sessionId: context.sessionId,
+        requestId, action: "user.phone.support.read", objectType: "user", objectId: disclosedPhoneUserId,
+        outcome: "SUCCESS", details: { fields: ["phoneNumber"], source: "directory_detail" } });
+    });
     signal.throwIfAborted();
     sendJson(response, 200, dataToSend, requestId);
     });

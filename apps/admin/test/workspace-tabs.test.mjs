@@ -230,3 +230,12 @@ test('return context approval open and close preserves only the bounded membersh
     tabFromLocation('/orders/order-one', '?from=membership-growth&fromTab=policy'),
   ]) assert.deepEqual(upsertTab([workbench, member], next).find(tab => tab.id === member.id), original, 'other origins/kinds/invalid subtabs do not change membership context');
 });
+
+test("customer statistics keeps its canonical route and refreshes old persisted titles",()=>{
+  const memory=new Map();globalThis.window={};globalThis.sessionStorage={getItem:key=>memory.get(key)??null,setItem:(key,value)=>memory.set(key,value)};
+  const current=tabFromLocation("/support/overview"),legacy=tabFromLocation("/support/management");
+  assert.equal(current.title,"客服统计");assert.equal(legacy.path,current.path);assert.equal(legacy.id,current.id);
+  persistTabs("rename-support",{tabs:[tabFromLocation("/workbench"),{...current,title:"运营看板"}],activeId:current.id});
+  const restored=restoreTabs("rename-support",nav);assert.equal(restored.tabs.find(tab=>tab.id===current.id).title,"客服统计");
+  assert.equal(restored.activeId,current.id);
+});

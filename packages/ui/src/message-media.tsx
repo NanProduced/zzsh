@@ -1,4 +1,5 @@
 "use client";
+import { Component, lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { parseNimMessageMedia, type NimMessageLike, type NimMessageMedia } from "@zzsh/im-client/nim-web-client";
 
 /**
@@ -69,37 +70,110 @@ function Unavailable() {
   return <span className="message-media-unavailable" role="status">媒体暂不可用</span>;
 }
 
+export type MediaPreviewItem = {
+  kind: "image" | "video";
+  url: string;
+  name: string;
+  width?: number;
+  height?: number;
+  size?: number;
+  mimeType?: string;
+};
+
+// The viewer (library + zoom/video/fullscreen plugins + CSS) stays out of the
+// message list until a preview is actually opened.
+const loadMediaLightbox = () => import("./media-lightbox");
+const warmMediaLightbox = () => { void loadMediaLightbox().catch(() => {}); };
+
+class PreviewErrorBoundary extends Component<{ children: ReactNode; fallback: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  render() { return this.state.failed ? this.props.fallback : this.props.children; }
+}
+
+function PreviewPending({ failed = false, onClose, onRetry, returnFocus }: {
+  failed?: boolean; onClose: () => void; onRetry?: () => void; returnFocus?: HTMLElement | null;
+}) {
+  const dialog = useRef<HTMLDialogElement | null>(null);
+  const close = () => {
+    onClose();
+    requestAnimationFrame(() => { if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true }); });
+  };
+  const closeRef = useRef(close); closeRef.current = close;
+  useLayoutEffect(() => {
+    const node = dialog.current;
+    node?.showModal();
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault(); event.stopImmediatePropagation(); closeRef.current();
+    };
+    window.addEventListener("keydown", escape, true);
+    return () => { window.removeEventListener("keydown", escape, true); node?.close(); };
+  }, []);
+  return <dialog ref={dialog} className="message-lightbox message-lightbox-loading" aria-label="媒体预览" aria-modal="true" onCancel={event => { event.preventDefault(); close(); }}>
+    <p role={failed ? "alert" : "status"}>{failed ? "预览组件加载失败，请重试。" : "正在打开媒体…"}</p>
+    <div className="message-lightbox-loading-actions">
+      {failed ? <button type="button" onClick={onRetry}>重新加载</button> : null}
+      <button type="button" onClick={close}>关闭预览</button>
+    </div>
+  </dialog>;
+}
+
+export function MediaPreview({ item, onClose, returnFocus }: {
+  item: MediaPreviewItem | null; onClose: () => void; returnFocus?: HTMLElement | null;
+}) {
+  const [attempt, setAttempt] = useState(0);
+  const MediaLightbox = useMemo(() => lazy(loadMediaLightbox), [attempt, item?.url]);
+  if (!item) return null;
+  return <PreviewErrorBoundary key={`${item.url}:${attempt}`} fallback={<PreviewPending failed onClose={onClose} returnFocus={returnFocus} onRetry={() => setAttempt(value => value + 1)} />}>
+    <Suspense fallback={<PreviewPending onClose={onClose} returnFocus={returnFocus} />}>
+      <MediaLightbox item={item} sizeLabel={item.size ? formatMediaBytes(item.size) : null} onClose={onClose} returnFocus={returnFocus} />
+    </Suspense>
+  </PreviewErrorBoundary>;
+}
+
+export function MessageImage({ url, thumbnailUrl, name, className = "" }: { url: string | null; thumbnailUrl?: string | null; name: string; className?: string }) {
+  const [failed, setFailed] = useState(false), [retry, setRetry] = useState(0), [open, setOpen] = useState(false);
+  const trigger = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => { setFailed(false); setOpen(false); }, [url, thumbnailUrl]);
+  if (!url) return <span className="message-media-unavailable" role="status">图片暂不可预览</span>;
+  return <><button ref={trigger} type="button" className={`message-image ${className}${failed ? " message-image-failed" : ""}`}
+    onPointerEnter={warmMediaLightbox} onFocus={warmMediaLightbox}
+    aria-label={`${failed ? "重新加载图片" : "查看图片"} ${name}`} onClick={() => { if (failed) { setRetry(n => n + 1); setFailed(false); } else setOpen(true); }}>
+    {failed ? "图片加载失败 · 点击重试" : <img key={`${url}:${thumbnailUrl ?? ""}:${retry}`} src={thumbnailUrl || url} alt={name} loading="lazy" onError={() => setFailed(true)} />}
+  </button><MediaPreview item={open ? { kind: "image", url, name } : null} returnFocus={trigger.current} onClose={() => setOpen(false)} /></>;
+}
+
 export function MediaMessage({ media }: { media: NimMessageMedia }) {
+  const [preview, setPreview] = useState(false), [videoFailed, setVideoFailed] = useState(false);
+  const trigger = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => { setPreview(false); setVideoFailed(false); }, [media.mediaId, media.url]);
   if (media.kind === "video") {
     return <figure className="message-media message-media-video" data-kind="video">
-      {media.url
-        ? <video className="message-media-video-player" controls preload="metadata" playsInline src={media.url} aria-label={media.name} />
-        : <span className="message-media-video-missing"><Unavailable /></span>}
+      {media.url ? <button ref={trigger} type="button" className="message-media-video-open" onPointerEnter={warmMediaLightbox} onFocus={warmMediaLightbox} aria-label={videoFailed ? `预览视频 ${media.name}（加载失败）` : `预览视频 ${media.name}`} onClick={() => setPreview(true)}>
+        {videoFailed
+          ? <span className="message-media-video-missing message-media-video-failed">视频加载失败 · 点击查看</span>
+          : <><video className="message-media-video-player" preload="metadata" muted playsInline src={media.url} aria-hidden="true" tabIndex={-1} onError={() => setVideoFailed(true)} />
+            <span className="message-media-play" aria-hidden="true"><svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="m9 5 11 7-11 7z" /></svg></span></>}
+      </button> : <span className="message-media-video-missing"><Unavailable /></span>}
       <MediaCaption media={media} />
+      <MediaPreview item={preview && media.url ? { kind: "video", url: media.url, name: media.name, width: media.width, height: media.height, size: media.size, mimeType: media.mimeType } : null} returnFocus={trigger.current} onClose={() => setPreview(false)} />
     </figure>;
   }
   if (media.kind === "audio") {
+    const duration = durationLabel(media.durationMs);
     return <div className="message-media message-media-audio" data-kind="audio" role="group" aria-label={`语音 ${media.name}`}>
-      {media.url
-        ? <audio className="message-media-audio-player" controls preload="metadata" src={media.url} aria-label={media.name} />
-        : <Unavailable />}
-      <span className="message-media-audio-copy">
-        <span className="message-media-name" title={media.name}>{media.name}</span>
-        <span className="message-media-size">{formatMediaBytes(media.size)}{durationLabel(media.durationMs) ? ` · ${durationLabel(media.durationMs)}` : ""}</span>
-      </span>
+      {media.url ? <audio className="message-media-audio-player" controls preload="metadata" src={media.url} aria-label={media.name} /> : <Unavailable />}
+      <span className="message-media-audio-copy"><span className="message-media-name" title={media.name}>{media.name}</span><span className="message-media-size">{formatMediaBytes(media.size)}{duration ? ` · ${duration}` : ""}</span></span>
     </div>;
   }
-  return <div className="message-media message-media-file" data-kind="file" role="group" aria-label={`文件 ${media.name}`}>
-    <span className="message-media-file-icon" data-ext={fileExtension(media.name)} aria-hidden="true">{fileExtension(media.name)}</span>
-    <span className="message-media-file-copy">
-      <span className="message-media-name" title={media.name}>{media.name}</span>
-      <span className="message-media-size">{formatMediaBytes(media.size)}</span>
-      {media.url ? null : <Unavailable />}
-    </span>
-    {media.url
-      ? <a className="message-media-download" href={media.url} download={media.name} aria-label={`下载 ${media.name}`}>下载</a>
-      : null}
-  </div>;
+  const extension = fileExtension(media.name);
+  const content = <><span className="message-media-file-icon" data-ext={extension} aria-hidden="true">{extension}</span>
+    <span className="message-media-file-copy"><span className="message-media-name" title={media.name}>{media.name}</span><span className="message-media-size">{extension} · {formatMediaBytes(media.size)}{media.url ? " · 点击下载" : ""}</span>{media.url ? null : <Unavailable />}</span>
+    {media.url ? <span className="message-media-file-action" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M12 3v12m-5-5 5 5 5-5M5 16v5h14v-5" /></svg></span> : null}</>;
+  return media.url
+    ? <a className="message-media message-media-file message-media-download" data-kind="file" href={media.url} download={media.name} target="_blank" rel="noopener noreferrer" aria-label={`下载 ${media.name}`} title={`下载 ${media.name}`}>{content}</a>
+    : <div className="message-media message-media-file" data-kind="file" role="group" aria-label={`文件 ${media.name}`}>{content}</div>;
 }
 
 function draftStatus(draft: MessageMediaDraft): string {

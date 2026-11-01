@@ -60,8 +60,8 @@ function runRail(nodeEnv, search) {
       removeEventListener() {},
     }, { querySelector() { return null; } });
     exports.SupportRail();
-    // SupportRail 的 useState 顺序：supportOpen(0)、requestedType(1)、preview(2)…
-    return states[2];
+    // SupportRail 的 useState 顺序：supportOpen(0)、requestedType(1)、orderContext(2)、preview(3)…
+    return states[3];
   } finally {
     process.env.NODE_ENV = previous;
   }

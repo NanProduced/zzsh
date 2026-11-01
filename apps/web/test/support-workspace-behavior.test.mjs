@@ -18,6 +18,9 @@ globalThis.document = browser.document;
 globalThis.HTMLElement = browser.HTMLElement;
 globalThis.Element = browser.Element;
 globalThis.Node = browser.Node;
+globalThis.NodeFilter = browser.NodeFilter;
+globalThis.HTMLInputElement = browser.HTMLInputElement;
+globalThis.MutationObserver = browser.MutationObserver;
 globalThis.Event = browser.Event;
 Object.defineProperty(globalThis, "navigator", { value: browser.navigator, configurable: true });
 globalThis.CustomEvent = browser.CustomEvent;
@@ -37,7 +40,7 @@ const vite = await createServer({
       { find: /^@\//, replacement: `${path.join(webRoot, "src")}/` },
     ],
   },
-  server: { middlewareMode: true, hmr: false },
+  server: { middlewareMode: true, hmr: false, ws: false },
 });
 const workspaceModule = await vite.ssrLoadModule("/src/components/support/customer-support-workspace.tsx");
 const { CustomerSupportWorkspace, messageFromNim } = workspaceModule;
@@ -1466,7 +1469,7 @@ async function mountSupportDirectory(t, consultations, props = {}) {
       if ((init.method ?? "GET") === "POST") {
         const body = JSON.parse(String(init.body));
         creates.push(body);
-        return new Response(JSON.stringify({ consultation: { id: "created-1", type: body.type, state: "WAITING", conversationId: null, assignedAdmin: null, messageScopeState: "READY" } }));
+        return new Response(JSON.stringify({ consultation: { id: "created-1", type: body.type==="COMPLAINT"?"SERVICE":body.type, state: "WAITING", conversationId: null, assignedAdmin: null, messageScopeState: "READY" } }));
       }
       return new Response(JSON.stringify({ consultations }));
     }
@@ -1520,7 +1523,7 @@ test("the complaint entry stays visible and starts the unified SERVICE chat dire
   assert.ok(complaint, "the complaint entry is not removed");
   await act(async () => { complaint.click(); });
   await until(() => creates.length === 1, "complaint entry starts the consultation");
-  assert.equal(creates[0].type, "SERVICE", "the complaint entry creates the unified SERVICE thread");
+  assert.equal(creates[0].type, "COMPLAINT", "the request preserves complaint intent; the API returns the unified SERVICE thread");
 });
 
 test("opening selects the live SERVICE consultation", async (t) => {
@@ -1541,7 +1544,7 @@ test("a legacy COMPLAINT login intent creates the SERVICE thread", async (t) => 
   t.after(() => window.sessionStorage.removeItem(storageKey));
   const { host, creates, until } = await mountSupportDirectory(t, []);
   await until(() => creates.length === 1, "legacy intent creates one consultation");
-  assert.equal(creates[0].type, "SERVICE", "the legacy COMPLAINT intent is normalized before the POST");
+  assert.equal(creates[0].type, "COMPLAINT", "the POST preserves entry intent; the API unifies the thread");
   await until(() => host.querySelector('.support-unified'), "the created SERVICE thread opens");
   assert.match(host.querySelector(".support-conversation-identity h3").textContent, /平台客服/);
   assert.equal(window.sessionStorage.getItem(storageKey), null, "a submitted intent is cleared");
@@ -2502,7 +2505,7 @@ test("support revoke confirms in place, merges the revoked message and keeps 409
   await page.open("srv-own");
   assert.equal(browser.document.querySelector(".message-action-menu"), null, "a revoked message has no menu");
 
-  for (const [status, copy] of [[409, "已超过可撤回时间"], [403, "无权撤回此消息"]]) {
+  for (const [status, copy] of [[409, "当前消息无法撤回"], [403, "无权撤回此消息"]]) {
     const failing = await mountSupportActions(t, { revokeStatus: status });
     await failing.open("srv-own");
     await failing.pick("撤回");
@@ -2776,7 +2779,7 @@ async function mountSupportMedia(t, options = {}) {
   const onMedia = options.onMedia ?? (() => ({}));
   globalThis.fetch = async (input, init = {}) => {
     const url = String(input);
-    if (url.startsWith("/api/orders/")) return new Response(JSON.stringify({ items: [], nextCursor: null }));
+    if (url.startsWith("/api/orders/")) return new Response(JSON.stringify({ items: options.orders ?? [], nextCursor: null }));
     if (url.includes("/im/token")) return new Response(JSON.stringify({ appKey: "synthetic", accountId: "preview-user", token: "synthetic", transport: "local-fake" }));
     if (url.includes("/im/consultations")) return new Response(JSON.stringify({ consultations: options.consultations ?? userMediaConsultations }));
     if (url.includes("/im/message-access")) return new Response(JSON.stringify({ authorized: true }));
@@ -2853,7 +2856,7 @@ test("user video and file stage per consultation and dispatch after the text in 
   await page.until(() => page.posts.length === 3, "a staged file sends without text");
   assert.equal(page.posts[2].media?.kind, "file");
   assert.equal(host.querySelector(".message-media-draft"), null, "the file draft clears only after success");
-  await page.until(() => host.querySelector('.support-message .message-media[data-kind="file"] .message-media-download'), "file bubble rendered");
+  await page.until(() => host.querySelector('.support-message .message-media[data-kind="file"].message-media-download'), "file bubble rendered");
   assert.equal(page.mediaPosts().length, 2, "one video and one file were sent, no duplicates");
 });
 
@@ -2922,6 +2925,28 @@ function userMediaHistory() {
   ];
 }
 
+function userImageHistory() {
+  return [{
+    conversationId: "team-1", receiverId: "preview-user", senderId: "staff-a",
+    messageClientId: "image-full", messageServerId: "srv-image-full", createTime: 1_700_000_014_000, messageType: 1, text: "这张截图是合成样例。",
+    attachment: { imageId: "img-full", url: "/api/im/images/img-full", thumbUrl: "/api/im/images/img-thumb", name: "聊天截图.png", mimeType: "image/png", size: 100 },
+  }];
+}
+
+test("user consultation uses the thumbnail in the row and keeps the image caption accessible", async (t) => {
+  const page = await mountSupportMedia(t, { history: userImageHistory() });
+  const { host } = page;
+  await page.until(() => page.row("srv-image-full")?.querySelector(".support-message-image"), "image history rendered");
+  const image = page.row("srv-image-full").querySelector(".support-message-image");
+  assert.equal(image.querySelector("img").getAttribute("src"), "/api/im/images/img-thumb");
+  assert.equal(image.closest(".support-message-bubble"), null, "image is not wrapped in a second bubble");
+  const caption = page.row("srv-image-full").querySelector(".message-media-caption-text");
+  assert.ok(caption);assert.equal(caption.closest(".support-message-bubble"), null, "the image caption is unframed");
+  assert.ok(caption.closest(".support-message-media"), "media, caption and quote share a vertical stack");
+  assert.match(caption.textContent, /这张截图是合成样例/);
+  assert.match(image.getAttribute("aria-label"), /聊天截图\.png/);
+});
+
 test("media history renders video, file and audio, falls back when the URL is missing, and is not copyable", async (t) => {
   const page = await mountSupportMedia(t, { history: userMediaHistory() });
   const { host } = page;
@@ -2931,8 +2956,14 @@ test("media history renders video, file and audio, falls back when the URL is mi
   assert.match(video.querySelector(".message-media-caption").textContent, /clip\.mp4/);
   const file = page.row("srv-media-file");
   assert.equal(file.querySelector(".message-media-download").getAttribute("href"), "/api/im/media/media-file-1");
-  assert.equal(file.querySelector(".message-media-download").textContent, "下载");
+  assert.equal(file.querySelector(".message-media-download").getAttribute("aria-label"), "下载 contract.pdf");
+  assert.equal(file.querySelector(".message-media-download").closest(".support-message-bubble"), null, "file card is not nested in a second bubble");
+  assert.equal(file.querySelector("p"), null, "the file card is one link, not a paragraph inside another card");
   assert.match(file.querySelector(".message-media-name").textContent, /contract\.pdf/);
+  assert.match(file.textContent, /点击下载/, "the single card states the download action");
+  const videoTrigger = video.querySelector(".message-media-video-open");
+  assert.ok(videoTrigger, "the message video is a preview trigger");
+  assert.match(videoTrigger.getAttribute("aria-label"), /clip\.mp4/);
   const audio = page.row("srv-media-audio");
   assert.equal(audio.querySelector("audio").getAttribute("src"), "/api/im/media/media-audio-1");
   const missing = page.row("srv-media-missing");
@@ -2980,4 +3011,77 @@ test("a long item list folds and a card row still opens the message menu", async
   await act(async () => browser.document.dispatchEvent(new browser.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
   await settle();
   assert.equal(browser.document.querySelector(".message-action-menu"), null, "Escape closes the menu");
+});
+
+test("order card sends on selection, preserves draft through UNKNOWN and retries original message", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const rows = [{ id: "c-1", type: "SERVICE", state: "ACTIVE", messageScopeState: "READY", conversationId: "team-1", assignedAdmin: { id: "admin-a", name: "客服 A" }, updatedAt: "2026-09-26T00:00:00Z" }];
+  const sends = [];
+  let failNext = true;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if(url.startsWith("/api/orders/"))return new Response(JSON.stringify({items:[{id:"order-card-1",displayNo:"ZZ-CARD-1",title:"卡片订单样本",party:"renter",status:"PAID",fulfillmentAssignment:{state:"ASSIGNED",teamState:"READY"}}],nextCursor:null}));
+    if (url.includes("/im/token")) return new Response(JSON.stringify({ appKey: "synthetic", accountId: "preview-user", token: "synthetic", transport: "local-fake" }), { headers: { "content-type": "application/json" } });
+    if (url.includes("/im/consultations")) return new Response(JSON.stringify({ consultations: rows }), { headers: { "content-type": "application/json" } });
+    if (url.includes("/im/message-access")) return new Response(JSON.stringify({ authorized: true }), { headers: { "content-type": "application/json" } });
+    if (url.includes("/im/messages")) {
+      if ((init.method ?? "GET") === "POST") {
+        const body = JSON.parse(String(init.body));
+        sends.push(body);
+        if (failNext) { failNext = false; return new Response(JSON.stringify({ error: { code: "INTERNAL_ERROR" } }), { status: 500, headers: { "content-type": "application/json" } }); }
+        return new Response(JSON.stringify({ message: { messageClientId: "retried", messageServerId: "retried", conversationId: body.conversationId, senderId: "preview-user", receiverId: "team-1", createTime: 3, text: body.text, messageType: 0 } }), { headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ messages: [] }), { headers: { "content-type": "application/json" } });
+    }
+    throw new Error(`unexpected user fetch ${url}`);
+  };
+  const host = browser.document.createElement("div"); host.className = "support-dialog-content"; browser.document.body.appendChild(host);
+  const root = createRoot(host);
+  t.after(async () => { await act(async () => root.unmount()); host.remove(); globalThis.fetch = originalFetch; });
+  await act(async () => root.render(renderPreview({ preview: false, embedded: true, onClose: () => {} })));
+  await settle(); await settle();
+  const until = async (predicate) => { for (let index = 0; index < 120; index += 1) { if (predicate()) return; await settle(); } throw new Error("user unknown condition timed out"); };
+  await until(() => Boolean(host.querySelector("textarea") && !host.querySelector("textarea").disabled));
+  const type = async (value) => {
+    await act(async () => {
+      const element = host.querySelector("textarea");
+      Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype, "value").set.call(element, value);
+      element.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  };
+  await type("first");
+  await act(async()=>host.querySelector('[aria-label="关联订单"]').click()); await settle();
+  const pick=[...document.querySelectorAll(".support-verified-order-item")].find(item=>item.textContent.includes("卡片订单样本"));
+  assert.ok(pick); await act(async()=>{pick.click();pick.click();}); await settle();
+  assert.equal(sends.length,1,"selection sends immediately and double click cannot duplicate the send");
+  assert.equal(host.querySelector('[aria-label="待发送的订单卡"]'),null);
+  assert.equal(host.querySelector("textarea").value,"first","sending the card does not consume the text draft");
+  await until(() => host.textContent.includes("发送结果未确认"));
+  await type("second");
+  await act(async () => { host.querySelector('button[type="submit"]').click(); });
+  await until(() => sends.length === 2);
+  assert.match(sends[0].text,/^【关联订单卡】/);
+  assert.match(sends[0].text,/ZZ-CARD-1/);
+  assert.doesNotMatch(sends[0].text,/first|second/,"card sends separately from the text draft");
+  assert.equal(sends[1].messageClientId,sends[0].messageClientId,"retry preserves the original message id");
+  assert.equal(sends[1].text, sends[0].text, "the normal button replays the original message, not the newer draft");
+  assert.equal(host.querySelector("textarea").value, "second", "newer typing survives the original retry");
+  assert.equal(host.querySelector('[aria-label="待发送的订单卡"]'),null);
+  const card=host.querySelector('[aria-label="关联订单卡片"]');assert.ok(card);
+  assert.equal(card.querySelector('a').getAttribute('href'),'/orders/order-card-1');
+  assert.match(card.textContent,/ZZ-CARD-1/);
+  assert.ok(!card.closest('[data-slot="bubble"]'),"card is not nested inside a text bubble");
+});
+
+
+
+test("order card cannot bypass media UNKNOWN and READY attachments remain staged",async t=>{
+ const order={id:"order-media-guard",title:"媒体守卫订单",displayNo:"ZZ-GUARD",party:"renter",status:"PAID",fulfillmentAssignment:{state:"ASSIGNED",teamState:"READY"}};
+ let unknown=true;
+ const page=await mountSupportMedia(t,{orders:[order],onMedia:async()=>unknown?new Response(JSON.stringify({error:{code:"INTERNAL_ERROR"}}),{status:500}):{}});
+ await page.stage("file");
+ const sendCard=async()=>{await act(async()=>page.host.querySelector('[aria-label="关联订单"]').click());await settle();const pick=[...document.querySelectorAll('.support-verified-order-item')].find(item=>item.textContent.includes(order.title));assert.ok(pick);await act(async()=>pick.click());await settle();};
+ await sendCard();assert.equal(page.posts.length,1);assert.match(page.posts[0].text,/关联订单卡/);assert.equal(page.draftState(),"READY","card does not send or clear an existing file");
+ await page.submit();await page.until(()=>page.draftState()==="UNKNOWN");const before=page.posts.length;
+ await sendCard();assert.equal(page.posts.length,before,"UNKNOWN media blocks a new order card");assert.equal(page.draftState(),"UNKNOWN");
 });

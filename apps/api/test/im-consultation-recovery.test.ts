@@ -619,7 +619,8 @@ test("hardening: create returns after committing the round even when the welcome
   const created = await pending;
   assert.equal(created.consultation.state, "WAITING");
   assert.equal(fixture.inserts.length, 1, "the round is committed before the welcome runs");
-  assert.deepEqual(welcomes, [`support_welcome_${created.consultation.id}_1`], "the first welcome is attempted once");
+  await flush();
+  assert.deepEqual(welcomes, [`support_welcome_${created.consultation.id}_1`], "the first welcome is attempted once after loading settings");
   assert.equal(fixture.previewUpdates.length, 0, "the message preview lands only after the transport resolves");
   assert.equal(fixture.autoAssignCalls, 0, "opening a round never scans the assignment queue");
   releaseWelcome();
@@ -843,6 +844,7 @@ function transferFixture(input: { failSend?: boolean } = {}) {
 function claimFixture(input: {
   opState: string;
   opTarget: string;
+  automatic?: boolean;
   pendingOrders?: boolean;
   /** No eligible candidate: the agent went offline or lost the reception grant. */
   offline?: boolean;
@@ -918,6 +920,7 @@ function claimFixture(input: {
   });
 
   const f = fakePool((sql, values) => {
+    if (sql.includes("AS automatic")) return {rows:[{automatic:input.automatic===true}]};
     if (input.permissions && sql.includes('FROM "zzsh_iam"."admin_security"') && sql.includes('"is_boss"')) {
       return { rows: [{ status: "ACTIVE", isBoss: false, passwordChangeRequired: false }] };
     }
@@ -1113,3 +1116,21 @@ function createConsultationFixture(transport: { sendText: (input: { messageClien
   });
   return { f, inserts, previewUpdates, transport, get autoAssignCalls() { return autoAssignCalls; } };
 }
+
+test("automatic reception records ASSIGNED once after membership confirmation",async()=>{
+  const fixture=claimFixture({opState:"NEEDS_REVIEW",opTarget:"admin_a",automatic:true});
+  const options={pool:fixture.f.pool,appId:APP_ID,provider:fixture.provider,supportManager:managerOptions(fixture.provider)} as never;
+  await claimConsultation(options,adminContext("admin_a"),"consult_2","req_auto_fact");
+  const events=fixture.f.calls.filter(c=>c.sql.includes('INSERT INTO "zzsh_iam"."im_consultation_event"'));
+  const assigned=events.filter(c=>c.values[2]==="ASSIGNED");assert.equal(assigned.length,1);assert.equal(assigned[0]!.values[3],"system");assert.equal(assigned[0]!.values[6],"admin_a");
+  await claimConsultation(options,adminContext("admin_a"),"consult_2","req_auto_fact_retry");
+  assert.equal(fixture.f.calls.filter(c=>c.sql.includes('INSERT INTO "zzsh_iam"."im_consultation_event"')&&c.values[2]==="ASSIGNED").length,1);
+});
+
+test("a later round records REOPENED rather than another first-time creation",async()=>{
+  const fixture=createConsultationFixture({sendText:async()=>{}});
+  await createOrResumeUserConsultation({pool:fixture.f.pool,appId:APP_ID,provider:{} as never,
+    supportManager:managerOptions(new FakeSupportScopeProvider()),messageTransport:{sendText:fixture.transport.sendText}} as never,userContext,"SERVICE",null,"req_reopened_fact");
+  const events=fixture.f.calls.filter(c=>c.sql.includes('INSERT INTO "zzsh_iam"."im_consultation_event"'));
+  assert.ok(events.some(c=>c.values[2]==="REOPENED"));assert.equal(events.some(c=>c.values[2]==="CREATED"),false);
+});

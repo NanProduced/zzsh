@@ -93,3 +93,8 @@
 .order-card-note svg{flex:none;margin-top:2px;opacity:.8}
 @media(max-width:520px){.order-card{max-width:none;width:calc(100% - 24px)}}
 @media(prefers-reduced-motion:reduce){.order-card-chevron{transition:none}}
+.order-reference-card{width:360px;max-width:100%;box-shadow:none}
+.order-reference-party{margin-left:auto;flex:none;font-size:12px;opacity:.85}
+.order-reference-card .order-card-account{padding:18px}
+.order-reference-card .order-card-account strong{display:block;font-size:16px;line-height:1.5;overflow-wrap:anywhere}
+.order-reference-card .order-card-no b{white-space:normal;overflow-wrap:anywhere}

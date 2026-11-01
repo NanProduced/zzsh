@@ -149,7 +149,12 @@ export type YunxinSupportTeamExistenceLookup =
   | { status: "AMBIGUOUS" };
 
 /** The small server-only surface used to isolate one consultation from another. */
+export type YunxinSupportOpeningMessage = { messageServerId: string; messageClientId: string; senderId: string; createTime: number; text: string };
+export type YunxinSupportHistoryMessage = Omit<YunxinSupportOpeningMessage,"text"> & { messageType: number; text?: string; attachment?: Record<string,unknown> };
 export type YunxinSupportScopeApi = {
+  readSupportMessage?(input:{teamId:string;operatorAccountId:string;messageServerId:string;messageTime?:number}):Promise<(YunxinTeamMessageFact&{text?:string})|null>;
+  revokeSupportMessage?(input:{teamId:string;senderId:string;messageServerId:string;createTime:number}):Promise<void>;
+  readSupportMemberHistory?(input: { teamId: string; accountId: string; limit: number; before?: { id: string; time: number } }): Promise<YunxinSupportHistoryMessage[]>;
   createSupportTeam(input: YunxinSupportTeamCreateInput): Promise<{ teamId: string }>;
   addSupportTeamMember(teamId: string, operatorAccountId: string, memberAccountId: string): Promise<void>;
   removeSupportTeamMember(teamId: string, operatorAccountId: string, memberAccountId: string): Promise<void>;
@@ -645,6 +650,27 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
     return { statuses, failed };
   }
 
+  /** The route authorizes each read; the server owner supplies the full persistent Team stream. */
+  async readSupportMemberHistory(input: { teamId: string; accountId: string; limit: number; before?: { id: string; time: number } }): Promise<YunxinSupportHistoryMessage[]> {
+    const teamId=normalizeTeamId(input.teamId),account=normalizeAccountId(input.accountId);
+    if (!Number.isInteger(input.limit)||input.limit<1||input.limit>100) throw new Error("Invalid support history limit");
+    if (input.before&&(!messageIdFromUnknown(input.before.id)||!Number.isSafeInteger(input.before.time)||input.before.time<=0)) throw new Error("Invalid support history anchor");
+    const body=new URLSearchParams({tid:teamId,accid:account,begintime:"0",endtime:String(input.before?.time??this.now()),limit:String(input.limit),reverse:"2",checkTeamValid:"false",includeNoSenseMsg:"false"});
+    if(input.before)body.set("excludeMsgid",input.before.id);
+    const result=await this.request("read-support-member-history","POST","/nimserver/history/queryTeamMsg.action",body);
+    if(!isRecord(result)||!Array.isArray(result.msgs)||result.msgs.length>input.limit)throw new YunxinApiError("read-support-member-history",null,false);
+    return result.msgs.map(value=>{
+      if(!isRecord(value))throw new YunxinApiError("read-support-member-history",null,false);
+      const id=messageIdFromUnknown(value.msgid),time=asNumber(value.sendtime),type=asNumber(value.type),sender=asString(value.from);
+      if(!id||!sender||time===undefined||!Number.isSafeInteger(time)||type===undefined||!Number.isInteger(type))throw new YunxinApiError("read-support-member-history",null,false);
+      const attachment=isRecord(value.body)?value.body:undefined;
+      if ((type===0&&(!attachment||asString(attachment.msg)===undefined))||([1,2,3,6].includes(type)&&!attachment)) throw new YunxinApiError("read-support-member-history",null,false);
+      return {messageServerId:id,messageClientId:asString(value.msgidclient)||id,senderId:normalizeAccountId(sender),createTime:time,messageType:type,
+        ...(type===0?{text:attachment?asString(attachment.msg)??"":""}:{}),
+        ...(attachment&&type!==0?{attachment:{...attachment,width:attachment.width??attachment.w,height:attachment.height??attachment.h,duration:attachment.duration??attachment.dur}}:{})};
+    });
+  }
+
   async createSupportTeam(input: YunxinSupportTeamCreateInput): Promise<{ teamId: string }> {
     const ownerAccountId = normalizeAccountId(input.ownerAccountId);
     const memberAccountIds = input.memberAccountIds.map(normalizeAccountId);
@@ -715,7 +741,7 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
     const conversationId = `${sender}|2|${team}`;
     const data = responseData(await this.request("send-support-team-text", "POST",
       `/im/v2/conversations/${encodeURIComponent(conversationId)}/messages`, {
-        message: { message_type: 0, text },
+        message: { message_type: 0, text, message_client_id: input.messageClientId },
       }, "", "v2"));
     const returnedSender = asString(field(data, "sender_id"));
     const conversationType = asNumber(field(data, "conversation_type"));
@@ -808,8 +834,21 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
     throw new YunxinApiError("read-order-team-members",null,false);
   }
 
-  /** Narrow single-message read for order first-response verification. Never a general history proxy. */
+  async revokeSupportMessage(input:{teamId:string;senderId:string;messageServerId:string;createTime:number}):Promise<void>{
+    const team=normalizeTeamId(input.teamId),sender=normalizeAccountId(input.senderId),id=messageIdFromUnknown(input.messageServerId);
+    if(!id||!Number.isSafeInteger(input.createTime)||input.createTime<=0)throw new Error("Invalid revoke reference");
+    await this.request("revoke-support-message","POST","/nimserver/msg/recall.action",new URLSearchParams({deleteMsgid:id,timetag:String(input.createTime),type:"8",from:sender,to:team,msg:"消息已撤回"}));
+  }
+
+  /** Order verification deliberately does not retain message contents. */
   async readTeamMessage(input: { teamId: string; operatorAccountId: string; messageServerId: string; messageTime?: number }): Promise<YunxinTeamMessageFact | null> {
+    const result=await this.readSupportMessage(input);
+    if(!result)return null;
+    const {text,...fact}=result;
+    return fact;
+  }
+
+  async readSupportMessage(input: { teamId: string; operatorAccountId: string; messageServerId: string; messageTime?: number }): Promise<(YunxinTeamMessageFact&{text?:string}) | null> {
     const teamId = normalizeTeamId(input.teamId);
     const operator = normalizeAccountId(input.operatorAccountId);
     const serverId = messageIdFromUnknown(input.messageServerId);
@@ -840,7 +879,8 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
       throw new YunxinApiError("read-team-message", null, false);
     }
     return { messageServerId: returnedServerId, messageClientId: clientId && clientId.length > 0 ? clientId : null,
-      senderId: normalizeAccountId(senderId), teamId: returnedTeamId, messageType, createTime };
+      senderId: normalizeAccountId(senderId), teamId: returnedTeamId, messageType, createTime,
+      ...(typeof data.text==="string"?{text:data.text}:{}) };
   }
 
   async removeSupportTeamMember(teamId: string, operatorAccountId: string, memberAccountId: string): Promise<void> {
@@ -1020,7 +1060,12 @@ export class YunxinServerApiClient implements YunxinServerApi, YunxinSupportScop
     }
     let payload: unknown;
     try {
-      payload = await response.json();
+      payload = JSON.parse(await response.text(), (key: string, value: unknown, context?: { source: string }) => {
+          // Cloud history and V2 single-message responses both use unquoted 64-bit identifiers.
+          if (!["msgid","message_server_id","messageServerId","team_id","teamId","tid"].includes(key) || typeof value !== "number" || Number.isSafeInteger(value)) return value;
+          if (!context?.source || !/^[0-9]{1,20}$/.test(context.source)) throw new Error("Invalid provider identifier");
+          return context.source;
+        });
     } catch {
       throw new YunxinApiError(operation, null, response.status >= 500 || response.status === 429, response.status);
     }

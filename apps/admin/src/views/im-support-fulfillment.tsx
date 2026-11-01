@@ -225,7 +225,7 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
         return;
       }
       setPhase("UNKNOWN");
-      setNotice("检测到上次未确认的履约操作；请查看当前状态或按原请求重放（同一幂等键）。");
+      setNotice("检测到上次未确认的履约操作；请查看当前状态或按原请求重试。");
     } catch {
       setStorageBlocked(true);
     }
@@ -478,15 +478,15 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
         return <label key={line.itemId ?? "line"}><span>{facts.name ?? "物资"}{facts.unit ? ` · ${UNIT_LABELS[facts.unit] ?? facts.unit}` : ""}</span><output>{line.remainingQuantity ?? line.openingQuantity ?? "—"}</output></label>;
       })}
     </div> : null}
-    {amountRows(currentAmounts).length > 0 ? <dl>{amountRows(currentAmounts).map((row) => <div key={row.key}><dt>{row.label}</dt><dd>{row.text}</dd></div>)}</dl> : <small>服务端未返回金额明细。</small>}
+    {amountRows(currentAmounts).length > 0 ? <dl>{amountRows(currentAmounts).map((row) => <div key={row.key}><dt>{row.label}</dt><dd>{row.text}</dd></div>)}</dl> : <small>暂无金额明细。</small>}
   </div> : null;
 
   const statusMessages = <>
     {error ? <Alert variant="destructive"><CircleAlert /><AlertDescription>{error}</AlertDescription></Alert> : null}
     {notice ? <Alert variant="info" role="status"><Info /><AlertDescription>{notice}</AlertDescription></Alert> : null}
-    {storageBlocked ? <Alert variant="destructive"><CircleAlert /><AlertTitle>本地写入已暂停</AlertTitle><AlertDescription>{phase === "ACCEPTED_READBACK_PENDING" ? ACCEPTED_STORAGE_WARNING : "本地无法保存操作意图，已阻止新写入；请刷新后重试。"}</AlertDescription></Alert> : null}
+    {storageBlocked ? <Alert variant="destructive"><CircleAlert /><AlertTitle>本地暂存不可用</AlertTitle><AlertDescription>{phase === "ACCEPTED_READBACK_PENDING" ? ACCEPTED_STORAGE_WARNING : "本地无法保存操作记录，已阻止新操作；请刷新后重试。"}</AlertDescription></Alert> : null}
     {phase !== "IDLE" ? <Alert role="status" variant="warning"><TriangleAlert /><AlertTitle>{phase === "SENDING" ? "本次操作正在发送" : phase === "AUTH" ? "登录状态已变化，原责任仍保留" : phase === "ACCEPTED_READBACK_PENDING" ? "操作已受理，等待最新状态" : "本次操作结果未确认"}</AlertTitle><AlertDescription>
-      {phase === "SENDING" ? "请求尚未返回，请勿重复提交。" : phase === "AUTH" ? "原操作责任仍保留（同一幂等键）。" : phase === "ACCEPTED_READBACK_PENDING" ? "操作已受理，等待读取最新状态；不会重复提交。" : "原幂等键与责任已保留。"}
+      {phase === "SENDING" ? "请求尚未返回，请勿重复提交。" : phase === "AUTH" ? "原操作记录仍保留。" : phase === "ACCEPTED_READBACK_PENDING" ? "操作已受理，等待读取最新状态；不会重复提交。" : "原操作记录与责任已保留。"}
     </AlertDescription><AlertAction>
       <Button variant="outline" size="xs" onClick={() => void observeCurrent()} disabled={loading || busy}>查看当前状态</Button>
       {phase !== "SENDING" && phase !== "ACCEPTED_READBACK_PENDING" ? <Button variant="outline" size="xs" onClick={() => void replay()} disabled={busy || loading}>按原请求重放</Button> : null}
@@ -668,11 +668,11 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
 const SUPPORT_CANCEL_REASON_TEXT: Record<string, string> = {
   ORDER_COMPLETED: "结算已生成或订单已完成，不能在这里取消；请走财务/售后退款。",
   ORDER_NOT_PAID: "订单当前不是已付款可取消状态；请刷新后核对。",
-  PAYMENT_BASIS_UNAVAILABLE: "原 JoinPay 支付单不可用，不能安全发起原路退款。",
+  PAYMENT_BASIS_UNAVAILABLE: "原支付单不可用，不能安全发起原路退款。",
   SETTLEMENT_ALREADY_POSTED: "结算已落账，不能在这里取消；请走财务/售后退款。",
   SETTLEMENT_DRAFT_EXISTS: "存在结算草稿或受理单，请先处理或关闭结算后再取消。",
   MANUAL_ADJUSTMENT_REVIEW: "存在待处理金额调整，请先处理后再取消。",
-  DISTRIBUTION_RECONCILIATION_REQUIRED: "存在未冲销的佣金/分销收益，请先转财务核对。",
+  DISTRIBUTION_RECONCILIATION_REQUIRED: "存在待核对的佣金/分销收益，请先转财务核对。",
   REFUND_PENDING: "本单已有未完成的退款申请，请先处理退款。",
   TERMINATION_PENDING: "本单已有未处理的终止申请，请先处理。",
   ALREADY_CANCELLED: "订单已取消。",

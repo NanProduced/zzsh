@@ -883,6 +883,27 @@
       "when": 1793184014000,
       "tag": "0125_im_order_group_welcome",
       "breakpoints": true
+    },
+    {
+      "idx": 126,
+      "version": "7",
+      "when": 1793440000000,
+      "tag": "0126_im_support_settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 127,
+      "version": "7",
+      "when": 1793440001000,
+      "tag": "0127_im_aftersale_record",
+      "breakpoints": true
+    },
+    {
+      "idx": 128,
+      "version": "7",
+      "when": 1793526400000,
+      "tag": "0128_im_read_copy",
+      "breakpoints": true
     }
   ]
 }

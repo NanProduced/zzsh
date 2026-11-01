@@ -5,6 +5,7 @@ import { ChevronLeft, CircleAlert, EyeOff, Eye, RefreshCw, Search, UserPlus, X }
 import { EntityPreviewTrigger, PreviewCardShell } from "../components/admin-preview";
 import { orderTeamMemberRole, type OrderTeamAccess, type OrderTeamMember } from "@zzsh/ui/order-team-panel";
 import { initialOf } from "./im-support-format";
+import "./im-support-group-settings.css";
 
 /**
  * Admin order-group settings. The drawer is presented over the existing order
@@ -70,16 +71,16 @@ type StaffAvailability = "AVAILABLE" | "PAUSED" | "OFF_DUTY";
 type MemberView = OrderTeamMember & { availability?: StaffAvailability | null };
 const AVAILABILITY_LABEL: Record<StaffAvailability, string> = { AVAILABLE: "可接待", PAUSED: "已暂停", OFF_DUTY: "未上线" };
 
-function availabilityOf(member: MemberView): string | null {
+function availabilityOf(member: Pick<MemberView, "availability">): string | null {
   const value = member.availability;
   return value && value in AVAILABILITY_LABEL ? AVAILABILITY_LABEL[value] : null;
 }
 
-function relationOf(member: OrderTeamMember): string {
+function relationOf(member: Pick<OrderTeamMember, "responsible">): string {
   return member.responsible ? "负责客服" : "协作客服";
 }
 
-function MemberAvatar({ member, name }: { member: OrderTeamMember; name: string }) {
+function MemberAvatar({ member, name }: { member: Pick<OrderTeamMember, "avatar">; name: string }) {
   const avatar = typeof member.avatar === "string" && member.avatar.trim() ? member.avatar : null;
   return <span className="im-og-avatar" aria-hidden="true">
     {avatar ? <img src={avatar} alt="" loading="lazy" onError={(event) => { event.currentTarget.hidden = true; }} /> : initialOf(name)}
@@ -87,7 +88,7 @@ function MemberAvatar({ member, name }: { member: OrderTeamMember; name: string 
 }
 
 /** Admin-only lightweight card: platform-support role and relation, never user profile facts. */
-function AdminMemberPreviewCard({ member, name }: { member: MemberView; name: string }) {
+export function AdminMemberPreviewCard({ member, name, displayUsername, orderContext = true }: { member: Pick<MemberView, "avatar" | "availability" | "responsible">; name: string; displayUsername?: string; orderContext?: boolean }) {
   const availability = availabilityOf(member);
   return <PreviewCardShell ariaLabel={`平台客服预览：${name}`} header={<>
     <MemberAvatar member={member} name={name} />
@@ -96,11 +97,12 @@ function AdminMemberPreviewCard({ member, name }: { member: MemberView; name: st
       <span>平台客服</span>
     </div>
   </>}>
-    <dl className="im-og-card-facts">
-      <div><dt>本单角色</dt><dd>平台客服</dd></div>
-      <div><dt>本单关系</dt><dd>{relationOf(member)}</dd></div>
+    {orderContext || availability || displayUsername ? <dl className="im-og-card-facts">
+      {displayUsername ? <div><dt>管理员账号</dt><dd>{displayUsername}</dd></div> : null}
+      {orderContext ? <><div><dt>本单角色</dt><dd>平台客服</dd></div>
+      <div><dt>本单关系</dt><dd>{relationOf(member)}</dd></div></> : null}
       {availability ? <div><dt>接待状态</dt><dd>{availability}</dd></div> : null}
-    </dl>
+    </dl> : null}
   </PreviewCardShell>;
 }
 
@@ -252,10 +254,10 @@ export function AdminOrderGroupSettingsDrawer({ info, request, preferences, onPr
           {pickerOpen && !ended ? <div className="im-og-picker" aria-label="邀请管理员">
             <label className="im-og-search"><Search size={13} aria-hidden="true" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索管理员姓名" aria-label="搜索管理员姓名" /></label>
             <p className="im-og-note">可邀请现有管理员。</p>
-            {!inviteMember ? <p className="im-og-status" data-tone="warn" role="status">服务端未就绪：邀请接口尚未提供，当前不会发送邀请。</p> : null}
+            {!inviteMember ? <p className="im-og-status" data-tone="warn" role="status">暂不可用：当前暂不支持直接发送邀请。</p> : null}
             {directoryState === "loading" ? <p className="im-og-empty">正在读取可邀请管理员…</p> : null}
             {directoryState === "denied" ? <div className="im-og-status" data-tone="warn" role="status"><CircleAlert size={13} />当前账号无权读取可邀请成员。<button type="button" data-action="retry-invite-candidates" onClick={() => void loadDirectory()}><RefreshCw size={12} />重试</button></div> : null}
-            {directoryState === "unavailable" ? <div className="im-og-status" data-tone="warn" role="status"><CircleAlert size={13} />服务端未就绪：成员邀请暂不可用，当前不会发送邀请。<button type="button" data-action="retry-invite-candidates" onClick={() => void loadDirectory()}><RefreshCw size={12} />重试</button></div> : null}
+            {directoryState === "unavailable" ? <div className="im-og-status" data-tone="warn" role="status"><CircleAlert size={13} />服务端未就绪：成员邀请暂不可用，当前无法发送邀请。<button type="button" data-action="retry-invite-candidates" onClick={() => void loadDirectory()}><RefreshCw size={12} />重试</button></div> : null}
             {directoryState === "error" ? <div className="im-og-status" data-tone="warn" role="status"><CircleAlert size={13} />可邀请成员暂时读不到。<button type="button" data-action="retry-invite-candidates" onClick={() => void loadDirectory()}><RefreshCw size={12} />重试</button></div> : null}
             {directoryState === "ready" ? <>
               {candidates.length ? <ul className="im-og-candidates">
@@ -267,7 +269,7 @@ export function AdminOrderGroupSettingsDrawer({ info, request, preferences, onPr
                     <span className="im-og-avatar" aria-hidden="true">{initialOf(name)}</span>
                     <span className="im-og-candidate-copy"><b>{name}</b><small>平台管理员</small></span>
                     <button type="button" className="im-og-candidate-invite" data-action="invite-admin-candidate" disabled={!inviteMember || sending || invited}
-                      title={!inviteMember ? "邀请接口服务端未就绪" : undefined} onClick={() => void invite(candidate)}>{sending ? "邀请中…" : invited ? "已邀请" : inviteMember ? "邀请" : "服务端未就绪"}</button>
+                      title={!inviteMember ? "邀请功能暂不可用" : undefined} onClick={() => void invite(candidate)}>{sending ? "邀请中…" : invited ? "已邀请" : inviteMember ? "邀请" : "暂不可用"}</button>
                   </li>;
                 })}
               </ul> : <p className="im-og-empty">没有符合条件的可邀请管理员。</p>}

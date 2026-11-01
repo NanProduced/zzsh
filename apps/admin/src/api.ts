@@ -859,6 +859,9 @@ export function friendlyError(error: unknown): string {
   const auth = error.path === undefined || error.path.startsWith("/auth/");
   const reference = error.requestId ? ` 请求编号：${error.requestId}` : "";
   if (!auth) {
+    if (error.code === "IM_UNAVAILABLE" && error.reason === "AFTERSALE_CONTACT_PENDING") return "咨询通道尚未就绪，售后记录已保留，请稍后重试。" + reference;
+    if (error.code === "CONFLICT" && error.reason === "AFTERSALE_USER_UNAVAILABLE") return "对方账号当前不可联系，请保留售后记录并人工跟进。" + reference;
+    if (error.code === "IM_UNAVAILABLE" && error.reason === "SUPPORT_AT_CAPACITY") return "当前客服已满接待上限，请先处理现有会话。" + reference;
     if (error.status === 400) return "查询或输入有误，请检查条件后重试。" + reference;
     if (error.status === 401) return "会话已失效，请重新登录后继续。" + reference;
     if (error.status === 403) return "当前账号没有访问此内容或执行此操作的权限。" + reference;

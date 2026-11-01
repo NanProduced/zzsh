@@ -2,10 +2,11 @@
  * 客服管理（看板/巡视）的纯数据层。
  *
  * 服务端契约可能先于前端落地，或被裁剪；这里只做“容错读取 + 不算假数”：
- * 字段缺失保持 0/空/—，数组缺失保持空数组，未知枚举保留原值由 UI 中文化。
- * 统计口径（北京时间自然日）由服务端决定，前端不推断。
+ * 统计必需字段缺失直接判为不完整，不能适配成真实 0；quality/queue/period 等
+ * 可选旧兼容字段才保持 null。统计口径（北京时间自然日）由服务端决定，前端不推断。
  */
-import type { NimMessageLike } from "@zzsh/im-client/nim-web-client";
+import { mergeImMessages } from "@zzsh/im-client/message-state";
+import { nimMessageView, type NimMessageLike } from "@zzsh/im-client/nim-web-client";
 import { BEIJING_TIME_ZONE, beijingTodayStart } from "../workspace/beijing-time";
 
 export type SupportOverviewAgent = {
@@ -31,18 +32,19 @@ export type SupportTotals = {
   waitingConsultations: number;
   todaySessions: number;
   todayUsers: number;
-  /** TRANSFERRED 事件今日计数；未提供时 null（不是 0）。 */
+  /** TRANSFERRED 事件所选期间计数；未提供时 null（不是 0）。 */
   transfersToday: number | null;
-  /** im_support_handover 今日 DB 全量计数；未提供时 null（不是 0，也不受列表单页上限影响）。 */
+  /** im_support_handover 所选期间 DB 全量计数；未提供时 null（不是 0，也不受列表单页上限影响）。 */
   handoversToday: number | null;
 };
 
 export type SupportFirstResponseQuality = {
   /** 服务端的首响 SLA 阈值（秒）；未提供时 null。 */
   slaSeconds: number | null;
-  /** 今日样本平均首响；无样本时 null（不是 0）。 */
+  /** 所选期间样本平均首响；无样本时 null（不是 0）。 */
   averageSeconds: number | null;
   sampleCount: number;
+  askedCount?: number;
   breached: number;
   pending: number;
   overdue: number;
@@ -71,6 +73,14 @@ export type SupportQueueSnapshot = {
 
 export type SupportTrendPoint = { date: string; sessions: number; users: number };
 export type SupportHourlyPoint = { hour: number; sessions: number };
+export type SupportReportPeriod = {
+  dateFrom: string;
+  dateTo: string;
+  days: number;
+  timeZone: "Asia/Shanghai";
+  trendFrom: string;
+  trendTo: string;
+};
 export type SupportRatingAgent = { adminUserId: string; name: string; count: number; average: number | null };
 export type SupportRatings = {
   count: number;
@@ -80,6 +90,9 @@ export type SupportRatings = {
   agents: SupportRatingAgent[];
 };
 export type SupportOverview = {
+  reportDate: string;
+  serverNow: string;
+  period: SupportReportPeriod | null;
   onDuty: SupportOverviewAgent[];
   totals: SupportTotals;
   trend: SupportTrendPoint[];
@@ -90,8 +103,6 @@ export type SupportOverview = {
   /** 排队与容量投影；服务端未提供时为 null。 */
   queue: SupportQueueSnapshot | null;
 };
-
-const EMPTY_DISTRIBUTION: SupportRatings["distribution"] = [0, 0, 0, 0, 0];
 
 export type SupportHandover = {
   id: string;
@@ -110,6 +121,7 @@ export type AuditConversation = {
   type: AuditConversationType;
   title: string;
   userName: string;
+  userAvatar?: string | null;
   adminUserId: string | null;
   adminName: string;
   state: string;
@@ -117,10 +129,18 @@ export type AuditConversation = {
   conversationId: string | null;
   displayNo: string | null;
   gameName: string | null;
+  adminUnreadCount?: number;
+  userUnreadCount?: number;
+  firstUserMessageAt?: string | null;
+  historyState?: "AVAILABLE" | "NOT_ESTABLISHED" | "LEGACY_UNAVAILABLE" | "RECOVERING" | string;
+  firstResponseAt?: string | null;
+  remindDueAt?: string | null;
+  addRound?: number;
+  escalationState?: string | null;
 };
 
 export type AuditPage<T> = { items: T[]; nextCursor: string | null };
-export type AuditMessagePage = { messages: NimMessageLike[]; nextCursor: string | null };
+export type AuditMessagePage = { messages: AuditMessage[]; nextCursor: string | null };
 
 export type AuditTimeFilter = "all" | "today" | "7d";
 
@@ -150,6 +170,7 @@ function parseFirstResponse(value: unknown): SupportFirstResponseQuality | null 
     slaSeconds: maybeCount(row.slaSeconds),
     averageSeconds: maybeSeconds(row.averageSeconds),
     sampleCount: count(row.sampleCount),
+    askedCount: maybeCount(row.askedCount) ?? undefined,
     breached: count(row.breached),
     pending: count(row.pending),
     overdue: count(row.overdue),
@@ -199,20 +220,57 @@ export function todaySecondsOf(presence: unknown): number | null {
   return typeof today.seconds === "number" && Number.isFinite(today.seconds) && today.seconds >= 0 ? today.seconds : null;
 }
 
+function isSupportDay(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || value.startsWith("0000")) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+function requiredCount(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new Error(`客服统计数据不完整：${field}`);
+  return value;
+}
+
+/** 区间元数据是可选旧兼容字段；存在时必须完整、可核对，不能拿缺失值猜区间。 */
+export function parseSupportPeriod(value: unknown): SupportReportPeriod | null {
+  if (value === undefined || value === null) return null;
+  const row = recordOf(value);
+  const dateFrom = text(row.dateFrom);
+  const dateTo = text(row.dateTo);
+  const trendFrom = text(row.trendFrom);
+  const trendTo = text(row.trendTo);
+  const days = row.days;
+  if (!isSupportDay(dateFrom) || !isSupportDay(dateTo) || !isSupportDay(trendFrom) || !isSupportDay(trendTo)) {
+    throw new Error("客服统计数据不完整：period 日期");
+  }
+  if (row.timeZone !== "Asia/Shanghai") throw new Error("客服统计数据不完整：period 时区");
+  const computedDays = Math.round((Date.parse(`${dateTo}T00:00:00.000Z`) - Date.parse(`${dateFrom}T00:00:00.000Z`)) / 86_400_000) + 1;
+  if (computedDays < 1 || computedDays > 366 || days !== computedDays || dateFrom > dateTo || trendFrom > trendTo) {
+    throw new Error("客服统计数据不完整：period 区间");
+  }
+  return { dateFrom, dateTo, days: computedDays, timeZone: "Asia/Shanghai", trendFrom, trendTo };
+}
+
 function parseAgent(value: unknown): SupportOverviewAgent {
   const row = recordOf(value);
-  const activeLoad = count(row.activeLoad);
+  const adminUserId = text(row.adminUserId);
+  if (!adminUserId) throw new Error("客服统计数据不完整：客服身份");
+  const activeLoad = requiredCount(row.activeLoad, "客服当前接待");
+  const todaySeconds = requiredCount(row.todaySeconds, "客服期间时长");
+  const todaySessions = requiredCount(row.todaySessions, "客服期间会话");
+  const todayUsers = requiredCount(row.todayUsers, "客服期间用户");
+  const currentOrderGroups = requiredCount(row.currentOrderGroups, "客服负责订单群");
   const totalLoad = maybeCount(row.totalLoad);
   return {
-    adminUserId: text(row.adminUserId),
+    adminUserId,
     name: text(row.name) || "未命名客服",
     availability: text(row.availability) || "UNKNOWN",
     connectionState: text(row.connectionState) || "UNKNOWN",
     activeLoad,
-    todaySeconds: count(row.todaySeconds),
-    todaySessions: count(row.todaySessions),
-    todayUsers: count(row.todayUsers),
-    currentOrderGroups: count(row.currentOrderGroups),
+    todaySeconds,
+    todaySessions,
+    todayUsers,
+    currentOrderGroups,
     capacityLimit: maybeCount(row.capacityLimit),
     totalLoad: totalLoad === null ? activeLoad : totalLoad,
     atCapacity: typeof row.atCapacity === "boolean" ? row.atCapacity : null,
@@ -247,11 +305,17 @@ function parseRatingAgent(value: unknown): SupportRatingAgent | null {
 
 function parseRatings(value: unknown): SupportRatings {
   const root = recordOf(value);
-  const rawDistribution = Array.isArray(root.distribution) ? root.distribution : [];
-  const distribution = EMPTY_DISTRIBUTION.map((_, index) => count(rawDistribution[index])) as SupportRatings["distribution"];
+  if (!Object.keys(root).length) throw new Error("客服统计数据不完整：评价");
+  const countValue = requiredCount(root.count, "评价数");
+  if (root.average !== null && (typeof root.average !== "number" || !Number.isFinite(root.average) || root.average < 1 || root.average > 5)) {
+    throw new Error("客服统计数据不完整：评价平均分");
+  }
+  if (!Array.isArray(root.distribution) || root.distribution.length !== 5) throw new Error("客服统计数据不完整：评价分布");
+  const distribution = root.distribution.map((item, index) => requiredCount(item, `评价分布第 ${index + 1} 档`)) as SupportRatings["distribution"];
+  if (root.agents !== undefined && !Array.isArray(root.agents)) throw new Error("客服统计数据不完整：按客服评价");
   return {
-    count: count(root.count),
-    average: ratingAverage(root.average),
+    count: countValue,
+    average: root.average as number | null,
     distribution,
     agents: Array.isArray(root.agents)
       ? root.agents.map(parseRatingAgent).filter((agent): agent is SupportRatingAgent => agent !== null)
@@ -266,21 +330,29 @@ export function formatRatingAverage(average: number | null | undefined): string 
 
 export function parseSupportOverview(value: unknown): SupportOverview {
   const root = recordOf(value);
+  if (!Object.keys(root).length) throw new Error("客服统计数据不完整：缺少响应");
+  const reportDate = text(root.reportDate);
+  const serverNow = text(root.serverNow);
+  if (!isSupportDay(reportDate)) throw new Error("客服统计数据不完整：报表日期");
+  if (!Number.isFinite(Date.parse(serverNow))) throw new Error("客服统计数据不完整：服务器时间");
+  if (!Object.keys(recordOf(root.totals)).length) throw new Error("客服统计数据不完整：汇总");
+  if (!Array.isArray(root.onDuty)) throw new Error("客服统计数据不完整：客服列表");
+  if (!Array.isArray(root.trend)) throw new Error("客服统计数据不完整：趋势");
+  if (!Array.isArray(root.hourly)) throw new Error("客服统计数据不完整：时段");
   const totals = recordOf(root.totals);
-  const onDuty = Array.isArray(root.onDuty) ? root.onDuty.map(parseAgent) : [];
-  const trend = Array.isArray(root.trend)
-    ? root.trend.map(parseTrend).filter((point): point is SupportTrendPoint => point !== null)
-    : [];
-  const hourly = Array.isArray(root.hourly)
-    ? root.hourly.map(parseHourly).filter((point): point is SupportHourlyPoint => point !== null)
-    : [];
+  const onDuty = root.onDuty.map(parseAgent);
+  const trend = root.trend.map(parseTrend).filter((point): point is SupportTrendPoint => point !== null);
+  const hourly = root.hourly.map(parseHourly).filter((point): point is SupportHourlyPoint => point !== null);
   return {
+    reportDate,
+    serverNow,
+    period: parseSupportPeriod(root.period),
     onDuty,
     totals: {
-      onDutyCount: count(totals.onDutyCount),
-      waitingConsultations: count(totals.waitingConsultations),
-      todaySessions: count(totals.todaySessions),
-      todayUsers: count(totals.todayUsers),
+      onDutyCount: requiredCount(totals.onDutyCount, "当前可接待客服"),
+      waitingConsultations: requiredCount(totals.waitingConsultations, "当前排队咨询"),
+      todaySessions: requiredCount(totals.todaySessions, "期间有动作咨询"),
+      todayUsers: requiredCount(totals.todayUsers, "期间接待用户"),
       transfersToday: maybeCount(totals.transfersToday),
       handoversToday: maybeCount(totals.handoversToday),
     },
@@ -342,18 +414,32 @@ function parseConversation(value: unknown): AuditConversation | null {
         ? "CLOSED"
         : row.teamState === "READY" ? "ACTIVE" : "WAITING")
     : rawState || "UNKNOWN";
+  const conversationId = text(row.conversationId) || null;
+  // Order DTOs have no historyState; the server only emits a team cid when READY.
+  const historyState = type === "ORDER"
+    ? text(row.historyState) || (conversationId ? "AVAILABLE" : state === "CLOSED" ? "LEGACY_UNAVAILABLE" : "NOT_ESTABLISHED")
+    : text(row.historyState) || undefined;
   return {
     id,
     type,
     title: text(row.title) || displayNo || userName || "未命名会话",
     userName,
+    userAvatar: typeof recordOf(row.user).avatar === "string" ? recordOf(row.user).avatar as string : null,
     adminUserId: text(row.adminUserId) || text(assigned.id) || null,
     adminName: text(row.adminName) || personName(row.assignedAdmin) || "未分配",
     state,
     lastMessageAt: text(row.lastMessageAt) || null,
-    conversationId: text(row.conversationId) || null,
+    conversationId,
     displayNo,
     gameName,
+    adminUnreadCount: maybeCount(row.adminUnreadCount) ?? undefined,
+    userUnreadCount: maybeCount(row.userUnreadCount) ?? undefined,
+    firstUserMessageAt: text(row.firstUserMessageAt) || null,
+    historyState,
+    firstResponseAt: text(row.firstResponseAt) || text(recordOf(row.supportEscalation).firstResponseAt) || null,
+    remindDueAt: text(row.remindDueAt) || text(recordOf(row.supportEscalation).remindDueAt) || null,
+    addRound: typeof row.addRound === "number" ? row.addRound : typeof recordOf(row.supportEscalation).addRound === "number" ? (recordOf(row.supportEscalation).addRound as number) : 0,
+    escalationState: text(row.escalationState) || text(recordOf(row.supportEscalation).state) || null,
   };
 }
 
@@ -365,6 +451,8 @@ export function parseAuditConversations(value: unknown): AuditPage<AuditConversa
   return { items, nextCursor: text(root.nextCursor) || null };
 }
 
+export type AuditMessage = NimMessageLike & { sender?: { displayName: string; avatar: string | null; role: "USER" | "ADMIN" | "SYSTEM"; platformId?: string; displayUsername?: string } };
+
 const CARD_KINDS = ["ORDER_OPENING", "ORDER_ENDING", "ORDER_SETTLED", "ORDER_PRICE_CHANGE"] as const;
 const AUDIT_MESSAGE_TYPES = ["CONSULTATION", "ORDER"] as const;
 
@@ -374,7 +462,7 @@ function parseCard(value: unknown): NimMessageLike["card"] | undefined {
   return kind ? { kind, orderId: text(row.orderId), cardId: text(row.cardId) } : undefined;
 }
 
-function parseMessage(value: unknown): NimMessageLike | null {
+function parseMessage(value: unknown): AuditMessage | null {
   const row = recordOf(value);
   const senderId = text(row.senderId);
   const createTime = row.createTime;
@@ -392,22 +480,43 @@ function parseMessage(value: unknown): NimMessageLike | null {
     ...(messageServerId ? { messageServerId } : {}),
     ...(typeof row.text === "string" ? { text: row.text } : {}),
     ...(typeof row.messageType === "number" ? { messageType: row.messageType } : {}),
+    ...(row.media !== undefined ? { media: row.media as NimMessageLike["media"] } : {}),
     ...(Object.keys(attachment).length ? { attachment: attachment as NimMessageLike["attachment"] } : {}),
     ...(Object.keys(reply).length && typeof reply.messageClientId === "string"
       ? { reply: reply as NimMessageLike["reply"] }
       : {}),
     ...(row.revoked === true ? { revoked: true } : {}),
   };
-  return card ? { ...base, card } : base;
+  const normalized = nimMessageView(base);
+  if (!normalized) return null;
+  const author = recordOf(row.sender);
+  const role: NonNullable<AuditMessage["sender"]>["role"] | null = author.role === "USER" || author.role === "ADMIN" || author.role === "SYSTEM" ? author.role : null;
+  const platformId = role !== "SYSTEM" && /^[A-Za-z0-9._:-]{1,128}$/.test(text(author.platformId)) ? text(author.platformId) : null;
+  const publicLogin = text(author.displayUsername).trim().toUpperCase();
+  const displayUsername = role === "ADMIN" && /^ZZ\d{1,19}$/.test(publicLogin) ? publicLogin : null;
+  const sender = role ? { displayName: text(author.displayName).trim(), avatar: text(author.avatar) || null, role, ...(platformId ? { platformId } : {}), ...(displayUsername ? { displayUsername } : {}) } : undefined;
+  return { ...normalized, ...(card ? { card } : {}), ...(sender ? { sender } : {}) };
 }
 
 /** 只读历史：字段缺失的消息直接跳过，不渲染半条消息。 */
+export function mergeAuditMessages(current: readonly AuditMessage[], incoming: readonly AuditMessage[]): AuditMessage[] {
+  const key = (message: AuditMessage) => message.messageServerId || message.messageClientId;
+  return mergeImMessages(current.map(message => ({ ...message, id: key(message) })), incoming.map(message => ({ ...message, id: key(message) })))
+    .sort((a, b) => {
+      const time = a.createTime - b.createTime;
+      if (time) return time;
+      const left = a.messageServerId, right = b.messageServerId;
+      if (left && right && /^[0-9]{1,20}$/.test(left) && /^[0-9]{1,20}$/.test(right)) return BigInt(left) < BigInt(right) ? -1 : BigInt(left) > BigInt(right) ? 1 : 0;
+      return key(a).localeCompare(key(b));
+    });
+}
+
 export function parseAuditMessages(value: unknown): AuditMessagePage {
   const root = recordOf(value);
   const messages = Array.isArray(root.messages)
-    ? root.messages.map(parseMessage).filter((message): message is NimMessageLike => message !== null)
+    ? root.messages.map(parseMessage).filter((message): message is AuditMessage => message !== null)
     : [];
-  return { messages, nextCursor: text(root.nextCursor) || null };
+  return { messages: mergeAuditMessages([], messages), nextCursor: text(root.nextCursor) || null };
 }
 
 export function auditConversationsPath(input: { type?: string; adminUserId?: string; cursor?: string | null }): string {
@@ -424,8 +533,8 @@ export function auditMessageType(type: AuditConversationType): (typeof AUDIT_MES
 }
 
 export function auditMessagesPath(conversationId: string, before?: string | null): string {
-  const params = new URLSearchParams({ conversationId });
-  if (before) params.set("before", before);
+  const params = new URLSearchParams({ conversationId, mode: "patrol" });
+  if (before) params.set("cursor", before);
   return `/im/messages?${params.toString()}`;
 }
 
@@ -433,14 +542,14 @@ export function auditTypeLabel(type: AuditConversationType): string {
   if (type === "SERVICE") return "咨询";
   if (type === "COMPLAINT") return "投诉";
   if (type === "ORDER") return "订单群";
-  return "其他";
+  return "暂无法识别，请刷新核对";
 }
 
 export function auditStateLabel(state: string): string {
   if (state === "WAITING") return "待接入";
   if (state === "ACTIVE") return "处理中";
   if (state === "CLOSED") return "已结束";
-  return state && state !== "UNKNOWN" ? state : "状态未知";
+  return "暂无法识别，请刷新核对";
 }
 
 /** 状态（可用/暂停/离线）沿用工作台现有文案；可接待但通道未连时不能只说“可接待”。 */
@@ -576,14 +685,14 @@ export function attentionSignals(input: { agents: SupportOverviewAgent[]; totals
         id: "no-support",
         level: "high",
         title: "无在岗可接待客服",
-        detail: `排队 ${queue.queued} 条；服务端排队原因为 NO_ONLINE_STAFF。`,
+        detail: `排队 ${queue.queued} 条；暂无在线可接待客服。`,
       });
     } else if (queue.reason === "ALL_AT_CAPACITY") {
       signals.push({
         id: "at-capacity",
         level: "high",
         title: "全部客服已达容量上限",
-        detail: `排队 ${queue.queued} 条，满载 ${queue.atCapacity} 人${queue.capacityLimit !== null ? `（上限 ${queue.capacityLimit} 条/人）` : ""}；服务端排队原因为 ALL_AT_CAPACITY。`,
+        detail: `排队 ${queue.queued} 条，满载 ${queue.atCapacity} 人${queue.capacityLimit !== null ? `（上限 ${queue.capacityLimit} 条/人）` : ""}；全员已达接待上限。`,
       });
     } else if (queue.reason === "CAPACITY_AVAILABLE" && queue.queued > 0) {
       signals.push({
@@ -598,7 +707,7 @@ export function attentionSignals(input: { agents: SupportOverviewAgent[]; totals
         id: "queue-oldest",
         level: queue.oldestWaitSeconds >= 300 ? "high" : "watch",
         title: "有久等中的咨询",
-        detail: `最久已等 ${formatSlaDuration(queue.oldestWaitSeconds)}（服务端 oldestWaitSeconds）；300 秒分级为本页关注线，不是 SLA 承诺值。`,
+        detail: `最久已等 ${formatSlaDuration(queue.oldestWaitSeconds)}；超过 5 分钟关注线。`,
       });
     }
   }
@@ -632,7 +741,7 @@ export function attentionSignals(input: { agents: SupportOverviewAgent[]; totals
       id: "at-capacity-agent",
       level: "watch",
       title: "有客服达到容量上限",
-      detail: `${capped.map((agent) => `${agent.name}（${agent.totalLoad}${agent.capacityLimit !== null ? `/${agent.capacityLimit}` : ""}）`).join("、")}；容量上限来自服务端。`,
+      detail: `${capped.map((agent) => `${agent.name}（${agent.totalLoad}${agent.capacityLimit !== null ? `/${agent.capacityLimit}` : ""}）`).join("、")}。`,
     });
   } else if (input.agents.every((agent) => agent.atCapacity === null || agent.atCapacity === undefined)) {
     const loaded = input.agents.filter((agent) => agent.activeLoad >= SUPPORT_ATTENTION_LOAD_LINE);
@@ -641,7 +750,7 @@ export function attentionSignals(input: { agents: SupportOverviewAgent[]; totals
         id: "load-line",
         level: "watch",
         title: "接待量达关注线",
-        detail: `${loaded.map((agent) => `${agent.name} ${agent.activeLoad} 条`).join("、")}；关注线 ${SUPPORT_ATTENTION_LOAD_LINE} 条为本页口径，服务端未提供容量上限。`,
+        detail: `${loaded.map((agent) => `${agent.name} ${agent.activeLoad} 条`).join("、")}；超过 ${SUPPORT_ATTENTION_LOAD_LINE} 条关注线。`,
       });
     }
   }

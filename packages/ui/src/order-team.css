@@ -123,3 +123,5 @@
   .order-team-emoji-grid{grid-template-columns:repeat(8,36px);gap:4px;padding:8px;max-width:calc(100vw - 24px);overflow-x:auto}
   .order-team-panel .order-team-emoji-item{width:36px;height:36px;font-size:20px}
 }
+
+.order-team-user-members{font-size:12px;color:var(--color-text-secondary,#64748b);padding:6px 12px;display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--color-border-subtle,rgba(0,0,0,0.06))}.order-team-members-label{font-weight:500;color:var(--color-text-muted,#94a3b8)}

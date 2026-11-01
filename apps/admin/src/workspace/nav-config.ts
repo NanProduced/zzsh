@@ -1,9 +1,12 @@
 import {
   WalletIcon,
+  BotIcon,
   BoxesIcon,
   CrosshairIcon,
   ClipboardCheckIcon,
   CrownIcon,
+  EyeIcon,
+  HeadphonesIcon,
   ImageIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
@@ -41,8 +44,15 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
   const supportManagementVisible = has("im.support.management.read") || nav.isBoss;
   if (supportVisible || supportManagementVisible) {
     items.push({ label: "客户服务", isTitle: true });
-    if (supportVisible) items.push({ label: "客服工作台", icon: MessagesSquareIcon, path: "/support", kind: "support" });
-    if (supportManagementVisible) items.push({ label: "客服管理", icon: ChartNoAxesCombinedIcon, path: "/support/management", kind: "support-management" });
+    if (supportVisible) {
+      items.push({ label: "客服工作台", icon: MessagesSquareIcon, path: "/support", kind: "support" });
+      items.push({ label: "我的接待", icon: HeadphonesIcon, path: "/support/mine", kind: "support-mine" });
+    }
+    if (supportManagementVisible) {
+      items.push({ label: "客服统计", icon: ChartNoAxesCombinedIcon, path: "/support/overview", kind: "support-overview" });
+      items.push({ label: "会话巡视", icon: EyeIcon, path: "/support/patrol", kind: "support-patrol" });
+      items.push({ label: "助手设置", icon: BotIcon, path: "/support/settings", kind: "support-settings" });
+    }
   }
 
   const membershipOps = nav.isBoss || ["membership.policy.draft", "membership.policy.publish", "membership.growth.read.summary"].some(has)
@@ -140,7 +150,10 @@ export function titleForPath(pathname: string): string {
   if (pathname === "/settings") return "设置";
   if (pathname === "/account") return "账号安全";
   if (pathname === "/support") return "客服工作台";
-  if (pathname === "/support/management") return "客服管理";
+  if (pathname === "/support/mine") return "我的接待";
+  if (pathname === "/support/overview" || pathname === "/support/management") return "客服统计";
+  if (pathname === "/support/patrol") return "会话巡视";
+  if (pathname === "/support/settings") return "助手设置";
   if (pathname === "/membership-growth") return "会员与礼遇";
   if (pathname === "/distribution-policy") return "分销管理";
   return "工作台";
@@ -164,7 +177,11 @@ export function normalizeSearchString(str: string): string {
 export const PAGE_SEARCH_KEYWORDS: Record<string, string[]> = {
   "/workbench": ["工作台", "首页", "workbench", "gzt"],
   "/support": ["客服工作台", "客服", "履约", "消息", "im", "support", "kf", "ly"],
-  "/support/management": ["客服管理", "看板", "巡视", "统计", "交接", "客服", "im"],
+  "/support/mine": ["我的接待", "个人接待", "接待统计", "客服", "mine", "wdjd"],
+  "/support/overview": ["客服统计", "运营看板", "客服看板", "数据看板", "统计", "overview", "kb", "yykb"],
+  "/support/patrol": ["会话巡视", "巡视", "会话抽查", "质检", "patrol", "xs"],
+  "/support/settings": ["助手设置", "客服设置", "自动回复", "欢迎语", "bot"],
+  "/support/management": ["客服管理", "客服统计", "运营看板", "看板", "巡视", "统计", "客服", "im"],
   "/distribution-policy": ["分销管理", "分销", "邀请", "政策", "distribution", "fx"],
   "/membership-growth": ["会员与礼遇", "会员成长", "礼遇", "会员", "增长", "策略", "membership", "hy", "cz"],
   "/admins": ["管理员管理", "管理员", "账号", "staff", "admins", "gly", "zh"],

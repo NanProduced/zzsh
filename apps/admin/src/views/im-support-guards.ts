@@ -1,8 +1,8 @@
 export type ImMessageOperation = "read" | "send";
 export type ImRequestKey = { generation: number; operator: string; consultationId: string; conversationId: string | null; sendCapability?: string };
 
-export function messageAccessPath(conversationId: string, operation: ImMessageOperation): string {
-  return `/im/message-access?conversationId=${encodeURIComponent(conversationId)}&operation=${operation}`;
+export function messageAccessPath(conversationId: string, operation: ImMessageOperation, intent?:{messageClientId?:string;messageType?:number}): string {
+  return `/im/message-access?conversationId=${encodeURIComponent(conversationId)}&operation=${operation}${intent?.messageClientId?`&messageClientId=${encodeURIComponent(intent.messageClientId)}&messageType=${intent.messageType}`:""}`;
 }
 
 /** 同源 HTTP 仅允许当前 origin；显式非法 rawUrl 不得回退到 imageId 绕过校验。 */

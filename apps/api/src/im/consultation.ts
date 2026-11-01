@@ -1,6 +1,8 @@
 import { createImScopeLease, onLeaseConnection, lockTeamBinding, type ScopeLease } from "./scope-lease";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
+import { storeImSendIntent, readImSendIntent, insertImSentFact, type ImSendIntent, type ImReceiptActor, type ImReceiptMessage } from "./message-receipts";
+import { readSupportWelcome } from "./support-settings";
 import { Injectable, Logger, type BeforeApplicationShutdown } from "@nestjs/common";
 
 import {
@@ -12,6 +14,7 @@ import {
 import { assertAdminContextInTransaction, type AdminContext } from "../auth/auth-security";
 import { recordAudit, SecurityApiError, setAuditContext, withTransaction } from "../auth/security-core";
 import { assertUserContextInTransaction, type UserContext } from "../auth/user-identity";
+import { assertAftersaleUserActive } from "./aftersale";
 import {
   buildYunxinIdentityMarker,
   deriveYunxinAccountId,
@@ -53,6 +56,8 @@ export type SupportAvailability = "OFF_DUTY" | "AVAILABLE" | "PAUSED";
 export type SupportConnectionState = "DISCONNECTED" | "CONNECTING" | "CONNECTED" | "RECONNECTING" | "KICKED" | "AUTH_FAILED";
 
 export type ConsultationRouteOptions = {
+  /** Public DETAIL visibility is supplied by the existing publishing read path. */
+  readPublicAccount?: (client: PoolClient, accountId: string) => Promise<Record<string, unknown>>;
   pool: Pool;
   appId: string;
   wakeDispatch?: () => void;
@@ -582,7 +587,7 @@ async function createWaitingRound(
   );
   await writeEvent(client, {
     consultationId: id,
-    eventType: "CREATED",
+    eventType: nextSeq > 1 ? "REOPENED" : "CREATED",
     actorType: input.actorType,
     actorId: input.actorId,
     details: { type: thread.kind, roundSeq: nextSeq, reopened: nextSeq > 1 },
@@ -622,7 +627,7 @@ async function afterRoundOpened(
   }
   if (input.created && options.supportManager) {
     // 欢迎语按入口场景选择文案，仍由平台账号发送；失败不影响轮次与后续分配。
-    const texts = SUPPORT_WELCOME_TEXTS[input.entryIntent];
+    const texts = await withTransaction(options.pool,client=>readSupportWelcome(client,options.appId,input.entryIntent));
     for (const [index, text] of texts.entries()) {
       await sendSupportText(options, teamId, supportManagerAccount(options).accountId,
         text, `support_welcome_${input.roundId}_${index + 1}`);
@@ -658,16 +663,6 @@ async function reserveEligibleAdmin(client: PoolClient, appId: string, locked: L
   return { candidate: outcome.candidate, reason: outcome.reason };
 }
 
-const SUPPORT_WELCOME_TEXTS: Record<ConsultationEntryIntent, readonly string[]> = {
-  SERVICE: [
-    "您好，欢迎光临洲洲商行，很高兴为您服务～",
-    "账号、订单或售后问题都可以直接发在这里，客服会尽快为您处理。",
-  ],
-  COMPLAINT: [
-    "抱歉给您带来不好的体验，您的反馈已记录。",
-    "请把具体情况发在这里，客服会尽快跟进处理。",
-  ],
-};
 /** 本轮确定没有可用客服时平台账号的兜底；每轮最多一次，由 no_support_notice_at 保证。 */
 const NO_SUPPORT_NOTICE_TEXT = "抱歉，当前暂无在线客服，请先留言，客服上线后我们会第一时间联系您！";
 /** 满载排队：客服在线但都满了，不能让用户以为没人值班；不暴露任何具体客服信息。 */
@@ -1683,7 +1678,12 @@ async function completeClaimRecovery(
         [options.appId, claim.consultationId, claim.targetAdminId, claim.targetAdminAccountId, teamId],
       );
       if (updated.rowCount !== 1) throw new ScopeOperationFailure("DB_WRITEBACK_UNKNOWN", "claim writeback is unknown");
-      await writeEvent(client, { consultationId: claim.consultationId, eventType: "CLAIMED", actorType: "admin", actorId: claim.targetAdminId, toAdminId: claim.targetAdminId, peerAccountId: claim.targetAdminAccountId, details: { threadId } });
+      const automatic = (await client.query<{automatic:boolean}>(`SELECT EXISTS(SELECT 1 FROM zzsh_iam.audit_event
+        WHERE action='im.consultation.auto_assign.requested' AND object_type='im_consultation'
+          AND object_id=$1 AND request_id=$2) AS automatic`,[claim.consultationId,claim.id])).rows[0]?.automatic === true;
+      await writeEvent(client, { consultationId: claim.consultationId, eventType: automatic ? "ASSIGNED" : "CLAIMED",
+        actorType: automatic ? "system" : "admin", actorId: automatic ? claim.ownerAccountId : claim.targetAdminId,
+        toAdminId: claim.targetAdminId, peerAccountId: claim.targetAdminAccountId, details: { threadId } });
       await recordAudit(client, { actorType: "admin", actorId: claim.targetAdminId, action: "im.consultation.claimed", objectType: "im_consultation", objectId: claim.consultationId, outcome: "SUCCESS", requestId: `im_scope_${claim.id}`, details: { threadId, roundSeq: row.roundSeq } });
     }
     // Re-applying the thread projection also repairs a crash after the round writeback.
@@ -2290,24 +2290,24 @@ export async function recordSupportThreadMessage(
  * 首响事实：本轮首条人工回复只记一次，落在 append-only 的 audit_event。
  * ponytail: 0120 只加了 first_user_message_at，事件类型又受 0032 的 CHECK 约束，暂不新增列/新事件类型；
  * 写入封在本函数、读取封在 support-management.ts::readConsultationFirstResponse，将来补正列只改这两处。
- * 口径差异：这里是“平台放行首条人工发送”，不是 NIM 送达回执；重发不会重复计。
+ * 口径差异：这里是“平台确认人工发送成功”，由云信核验 SDK 结果；不代表对方已读，重试不重复计。
  */
 async function recordSupportFirstResponse(
   client: PoolClient,
   row: ConsultationRow,
-  context: AdminContext,
+  context: Pick<AdminContext,"userId"|"sessionId">,
   requestId?: string,
+  sentAt?: number,
 ): Promise<void> {
-  if (row.state !== "ACTIVE" || row.assignedAdminId !== context.userId) return;
   await client.query(
     `INSERT INTO "zzsh_iam"."audit_event"
        ("id","actor_type","actor_id","session_id","action","object_type","object_id","outcome","request_id","occurred_at","details")
-     SELECT $1,'admin',$2,$3,$4,'im_consultation',$5,'SUCCESS',$6,clock_timestamp(),$7::jsonb
+     SELECT $1,'admin',$2,$3,$4,'im_consultation',$5,'SUCCESS',$6,COALESCE(to_timestamp($8::double precision/1000),clock_timestamp()),$7::jsonb
       WHERE NOT EXISTS (SELECT 1 FROM "zzsh_iam"."audit_event"
                          WHERE "action" = $4 AND "object_type" = 'im_consultation' AND "object_id" = $5)`,
     [`audit_${randomUUID().replaceAll("-", "")}`, context.userId, context.sessionId, SUPPORT_FIRST_RESPONSE_ACTION,
       row.id, requestId ?? `im_first_response_${row.id}`,
-      JSON.stringify({ threadId: row.threadId ?? null, roundSeq: row.roundSeq ?? null, adminUserId: context.userId })],
+      JSON.stringify({ threadId: row.threadId ?? null, roundSeq: row.roundSeq ?? null, adminUserId: context.userId }),sentAt??null],
   );
 }
 
@@ -2358,6 +2358,8 @@ export async function readUserMessageAccess(
   context: UserContext,
   conversationId: string,
   send = false,
+  intent?: ImSendIntent,
+  entryIntent:ConsultationEntryIntent="SERVICE",
 ): Promise<ImConversationAccess> {
   const result = await withTransaction(options.pool, async (client) => {
     await assertUserContextInTransaction(client, context);
@@ -2372,6 +2374,7 @@ export async function readUserMessageAccess(
     )).rows[0];
     if (!thread) throw new SecurityApiError(403, "FORBIDDEN", "Consultation is not authorized");
     let opened: WaitingRound | null = null;
+    let roundId: string | null = null;
     if (send) {
       const open = (await client.query<{ id: string; state: ConsultationState }>(
         `SELECT "id", "state" FROM "zzsh_iam"."im_consultation"
@@ -2382,7 +2385,7 @@ export async function readUserMessageAccess(
         if (thread.state === "ACTIVE") throw unavailable("IM support thread state is inconsistent");
         // 消息入口没有场景参数；重开轮次按普通客服咨询欢迎。真正的分配由调用方在
         // 消息落库（first_user_message_at）后触发。
-        opened = await createWaitingRound(client, options, thread, { subjectRef: null, entryIntent: "SERVICE", actorType: "user", actorId: context.userId });
+        opened = await createWaitingRound(client, options, thread, { subjectRef: null, entryIntent, actorType: "user", actorId: context.userId });
       } else if (thread.state === "IDLE") {
         await client.query(
           `UPDATE "zzsh_iam"."im_support_thread"
@@ -2391,6 +2394,7 @@ export async function readUserMessageAccess(
           [options.appId, thread.id, open.state === "ACTIVE" ? "ACTIVE" : "WAITING"],
         );
       }
+      roundId = opened?.id ?? open?.id ?? null;
     }
     let peerAccountId = thread.peerAccountId;
     if (!peerAccountId) {
@@ -2398,6 +2402,7 @@ export async function readUserMessageAccess(
       // platform-side member while no agent is responsible.
       peerAccountId = deriveYunxinAccountId(supportManagerIdentityKey(options.appId));
     }
+    if (send && intent && roundId) await storeImSendIntent(client,{...intent,appId:options.appId,threadId:thread.id,roundId,conversationId,accountId:viewerAccountId,actorId:context.userId,realm:"user"},{...context,realm:"user"});
     return { access: { viewerAccountId, peerAccountId }, threadId: thread.id, threadMessageScopeId: thread.messageScopeId, opened };
   });
   // 只有本次调用真正打开了新轮次才执行欢迎和自动分配；普通发送不会重复触发。
@@ -2409,7 +2414,7 @@ export async function readUserMessageAccess(
       threadScopeReady: result.opened.threadScopeReady,
       threadMessageScopeId: result.threadMessageScopeId,
       created: result.opened.created,
-      entryIntent: "SERVICE",
+      entryIntent,
     }).catch(() => undefined);
   }
   return result.access;
@@ -2421,6 +2426,7 @@ export async function readAdminMessageAccess(
   conversationId: string,
   requireSendPermission = false,
   requestId?: string,
+  intent?: ImSendIntent,
 ): Promise<ImConversationAccess> {
   return withTransaction(options.pool, async (client) => {
     await assertAdminContextInTransaction(client, context);
@@ -2437,6 +2443,7 @@ export async function readAdminMessageAccess(
     }
     const access = await loadEffectiveAdminAccess(client, context.userId);
     const assigned = matching.assignedAdminId === context.userId;
+    if(!hasPermission(access,ADMIN_PERMISSION.imSupportRead)&&!hasPermission(access,ADMIN_PERMISSION.imSupportManagementRead))throw new SecurityApiError(403,"FORBIDDEN","Permission required");
     if (assigned) {
       if (matching.peerAccountId !== viewerAccountId) throw new SecurityApiError(403, "FORBIDDEN", "Consultation is not authorized");
       // One responsible agent per round: only the ACTIVE assignee may send.
@@ -2462,10 +2469,45 @@ export async function readAdminMessageAccess(
     // rechecks the current type-specific reception grant in this transaction.
     if (requireSendPermission) {
       requireSupportAccess(access, matching.kind);
-      // 首响事实只在本人 ACTIVE 轮的发送前置授权里落一次：BOT 欢迎/兜底不走这里。
-      await recordSupportFirstResponse(client, matching, context, requestId);
+      if (intent && matching.threadId) await storeImSendIntent(client,{...intent,appId:options.appId,threadId:matching.threadId,roundId:matching.id,conversationId,accountId:viewerAccountId,actorId:context.userId,realm:"admin"},{...context,realm:"admin"});
     }
     return { viewerAccountId, peerAccountId: matching.userAccountId };
+  });
+}
+
+/** A verified SDK success consumes the original authorization, never the currently selected round. */
+export async function recordConfirmedConsultationMessage(options:ConsultationRouteOptions,actor:ImReceiptActor,message:ImReceiptMessage,preview:string|null):Promise<boolean>{
+  return withTransaction(options.pool,async client=>{
+    if(actor.realm==="user")await assertUserContextInTransaction(client,actor);
+    else {
+      await assertAdminContextInTransaction(client,actor);
+      const access=await loadEffectiveAdminAccess(client,actor.userId);
+      if(!hasPermission(access,ADMIN_PERMISSION.imSupportRead))throw new SecurityApiError(403,"FORBIDDEN","Permission required");
+    }
+    const accountId=await readyAccount(client,identityKey(options.appId,actor.realm,actor.realm==="user"?"USER":"ADMIN",actor.userId));
+    if(accountId!==message.senderId)throw new SecurityApiError(403,"FORBIDDEN","Message sender mismatch");
+    const intent=await readImSendIntent(client,options.appId,accountId,message.messageClientId);
+    if(!intent||intent.actorId!==actor.userId||intent.realm!==actor.realm||intent.conversationId!==message.conversationId||intent.messageType!==message.messageType)throw invalid("Message authorization is missing");
+    const row=(await client.query<ConsultationRow>(`${CONSULTATION_SELECT} WHERE c."app_id"=$1 AND c."id"=$2 AND c."thread_id"=$3 FOR UPDATE OF c`,[options.appId,intent.roundId,intent.threadId])).rows[0];
+    if(!row||row.threadScopeId!==TEAM_CONVERSATION_PATTERN.exec(message.conversationId)?.[1]||(actor.realm==="user"&&row.userId!==actor.userId))throw new SecurityApiError(403,"FORBIDDEN","Message scope mismatch");
+    if(!await insertImSentFact(client,options.appId,accountId,actor,message,row.id))return false;
+    await client.query(`UPDATE zzsh_iam.im_consultation SET
+      last_message_preview=CASE WHEN last_message_at IS NULL OR last_message_at<=to_timestamp($3/1000.0) THEN $4 ELSE last_message_preview END,
+      last_message_at=greatest(last_message_at,to_timestamp($3/1000.0)),
+      admin_unread_count=CASE WHEN $5 AND (admin_read_at IS NULL OR admin_read_at<to_timestamp($3/1000.0)) THEN least(admin_unread_count+1,999) ELSE admin_unread_count END,
+      user_unread_count=CASE WHEN NOT $5 AND EXISTS(SELECT 1 FROM zzsh_iam.im_support_thread read_thread WHERE read_thread.id=im_consultation.thread_id AND (read_thread.user_read_at IS NULL OR read_thread.user_read_at<to_timestamp($3/1000.0))) THEN least(user_unread_count+1,999) ELSE user_unread_count END,
+      first_user_message_at=CASE WHEN $5 THEN least(first_user_message_at,greatest(created_at,to_timestamp($3/1000.0))) ELSE first_user_message_at END,updated_at=clock_timestamp()
+      WHERE app_id=$1 AND id=$2 AND state<>'CLOSED'`,[options.appId,row.id,message.createTime,supportMessagePreview(preview),actor.realm==="user"]);
+    if(actor.realm==="admin")await recordSupportFirstResponse(client,row,actor,undefined,message.createTime);
+    return true;
+  });
+}
+
+export async function recordLocalAdminMessageSuccess(options:ConsultationRouteOptions,actor:Pick<AdminContext,"userId"|"sessionId">,conversationId:string):Promise<void>{
+  await withTransaction(options.pool,async client=>{
+    await assertAdminContextInTransaction(client,actor);
+    const row=(await client.query<ConsultationRow>(`${CONSULTATION_SELECT} WHERE c."app_id"=$1 AND t."message_scope_id"=$2 AND c."state"='ACTIVE' AND c."assigned_admin_id"=$3 FOR UPDATE OF c`,[options.appId,TEAM_CONVERSATION_PATTERN.exec(conversationId)?.[1],actor.userId])).rows[0];
+    if(row)await recordSupportFirstResponse(client,row,actor);
   });
 }
 
@@ -2488,6 +2530,11 @@ export async function createOrResumeUserConsultation(
         WHERE "app_id" = $1 AND "thread_id" = $2 AND "state" <> 'CLOSED' FOR UPDATE`,
       [options.appId, thread.id],
     )).rows[0];
+    if (open && subjectRef) {
+      await client.query(`UPDATE "zzsh_iam"."im_consultation" SET "subject_ref"=$3,
+        "version"="version"+1,"updated_at"=clock_timestamp() WHERE "app_id"=$1 AND "id"=$2
+        AND "subject_ref" IS DISTINCT FROM $3`, [options.appId, open.id, subjectRef]);
+    }
     const round = open
       ? { id: open.id, state: open.state, created: false, threadScopeReady: thread.messageScopeState === "READY" }
       : await createWaitingRound(client, options, thread, { subjectRef, entryIntent, actorType: "user", actorId: context.userId, requestId });
@@ -2516,6 +2563,38 @@ export async function createOrResumeUserConsultation(
     entryIntent,
   }).catch(() => undefined);
   return view;
+}
+
+/** A pending, assigned aftersale is the authority to prepare this user's existing SERVICE thread. */
+export async function prepareAftersaleConsultation(options:ConsultationRouteOptions,context:AdminContext,recordId:string,requestId:string):Promise<{id:string;state:ConsultationState;assignedAdminId:string|null}> {
+  const result=await withTransaction(options.pool,async client=>{
+    await assertAdminContextInTransaction(client,context);
+    const first=(await client.query<{requester_user_id:string}>(`SELECT requester_user_id FROM zzsh_iam.im_aftersale_record WHERE app_id=$1 AND id=$2 AND state='PENDING'`,[options.appId,recordId])).rows[0];
+    if(!first)throw new SecurityApiError(404,"NOT_FOUND","Aftersale record not found");
+    await lockSupportMutation(client,options.appId,[first.requester_user_id],[context.userId]);
+    await assertAdminContextInTransaction(client,context);
+    const access=await loadEffectiveAdminAccess(client,context.userId);
+    if(!hasPermission(access,ADMIN_PERMISSION.imSupportRead)||!hasPermission(access,ADMIN_PERMISSION.imSupportAccept))throw new SecurityApiError(403,"FORBIDDEN","Permission required");
+    await assertAftersaleUserActive(client,first.requester_user_id);
+    const record=(await client.query<{requester_user_id:string;order_id:string;handler_admin_id:string|null}>(`SELECT a.requester_user_id,a.order_id,a.handler_admin_id FROM zzsh_iam.im_aftersale_record a
+      JOIN zzsh_order.rental_order o ON o.id=a.order_id AND (o.renter_user_id=a.requester_user_id OR o.owner_user_id=a.requester_user_id)
+      WHERE a.app_id=$1 AND a.id=$2 AND a.state='PENDING' FOR UPDATE OF a`,[options.appId,recordId])).rows[0];
+    if(!record||record.requester_user_id!==first.requester_user_id)throw new SecurityApiError(404,"NOT_FOUND","Aftersale record not found");
+    const manager=Boolean(access?.isBoss||hasPermission(access,ADMIN_PERMISSION.imSupportAuditTakeover));
+    const accountId=await readyAccount(client,identityKey(options.appId,"user","USER",record.requester_user_id));
+    const thread=await ensureThread(client,options.appId,record.requester_user_id,"SERVICE",accountId);
+    const open=(await client.query<{id:string;state:ConsultationState;assignedAdminId:string|null}>(`SELECT id,state,assigned_admin_id AS "assignedAdminId" FROM zzsh_iam.im_consultation WHERE app_id=$1 AND thread_id=$2 AND state<>'CLOSED' FOR UPDATE`,[options.appId,thread.id])).rows[0];
+    const owner=open?.state==="ACTIVE"?open.assignedAdminId:record.handler_admin_id;
+    if(owner&&owner!==context.userId&&!manager)throw new SecurityApiError(403,"FORBIDDEN","Aftersale contact belongs to another agent");
+    if(!owner||owner===context.userId||open?.state!=="ACTIVE"){
+      await client.query(`UPDATE zzsh_iam.im_aftersale_record SET handler_admin_id=$3,version=version+CASE WHEN handler_admin_id IS DISTINCT FROM $3 THEN 1 ELSE 0 END,updated_at=clock_timestamp() WHERE app_id=$1 AND id=$2`,[options.appId,recordId,context.userId]);
+    }
+    const round=open??{...await createWaitingRound(client,options,thread,{subjectRef:`order:${record.order_id}`,entryIntent:"SERVICE",actorType:"admin",actorId:context.userId,requestId}),assignedAdminId:null};
+    await recordAudit(client,{actorType:"admin",actorId:context.userId,sessionId:context.sessionId,action:"im.aftersale.contact.prepared",objectType:"im_aftersale_record",objectId:recordId,outcome:"SUCCESS",requestId,details:{threadId:thread.id,consultationId:round.id,created:!open}});
+    return {id:round.id,state:round.state,assignedAdminId:round.assignedAdminId,opened:!open,threadId:thread.id,scopeReady:thread.messageScopeState==="READY",scopeId:thread.messageScopeId};
+  });
+  if(result.opened)await afterRoundOpened(options,{roundId:result.id,threadId:result.threadId,threadScopeReady:result.scopeReady,threadMessageScopeId:result.scopeId,created:true,entryIntent:"SERVICE"});
+  return {id:result.id,state:result.state,assignedAdminId:result.assignedAdminId};
 }
 
 export async function listAdminConsultations(
@@ -2758,7 +2837,7 @@ const UNRESOLVED_SCOPE_OPERATION_STATES = "('PENDING','RUNNING','UNKNOWN','NEEDS
  * confirmed remotely; a second admin cannot slip in because the active
  * operation and the row lock serialise the intent.
  */
-async function beginClaimMembership(options: ConsultationRouteOptions, context: AdminContext, consultationId: string, requestId: string): Promise<ClaimPlan> {
+async function beginClaimMembership(options: ConsultationRouteOptions, context: AdminContext, consultationId: string, requestId: string, aftersaleId?:string): Promise<ClaimPlan> {
   const plan = await withTransaction(options.pool, async (client) => {
     const locked = await lockSupportMutation(client, options.appId, [], [context.userId]);
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
@@ -2767,6 +2846,10 @@ async function beginClaimMembership(options: ConsultationRouteOptions, context: 
     if (!hasPermission(currentAccess, ADMIN_PERMISSION.imSupportRead)) throw new SecurityApiError(403, "FORBIDDEN", "Permission required");
     const row = await readConsultation(client, options.appId, consultationId);
     requireSupportAccess(currentAccess, row.kind);
+    if(aftersaleId){
+      const record=(await client.query<{requester_user_id:string;handler_admin_id:string|null}>(`SELECT requester_user_id,handler_admin_id FROM zzsh_iam.im_aftersale_record WHERE app_id=$1 AND id=$2 AND state='PENDING' FOR UPDATE`,[options.appId,aftersaleId])).rows[0];
+      if(!record||row.kind!=="SERVICE"||record.requester_user_id!==row.userId||record.handler_admin_id!==context.userId)throw new SecurityApiError(403,"FORBIDDEN","Aftersale contact is not assigned to this agent");
+    }
     if (row.state === "ACTIVE" && row.assignedAdminId === context.userId) return { kind: "ALREADY_ASSIGNED" as const, roundId: row.id };
     if (row.state !== "WAITING" || row.assignedAdminId) throw conflict("Consultation is already assigned");
     if (!row.threadId) throw new ScopeOperationFailure("REMOTE_MISMATCH", "consultation has no support thread", true);
@@ -2832,9 +2915,9 @@ async function beginClaimMembership(options: ConsultationRouteOptions, context: 
     }
     const reservation = await reserveSupportCandidateOutcome(client, options.appId, row.kind, eligible, context.userId, options.supportConcurrency);
     if (!reservation.candidate) {
-      throw unavailable(reservation.reason === "ALL_AT_CAPACITY"
+      throw Object.assign(unavailable(reservation.reason === "ALL_AT_CAPACITY"
         ? "当前客服已满接待上限，请先处理现有会话"
-        : "当前客服不可接待新咨询");
+        : "当前客服不可接待新咨询"),reservation.reason==="ALL_AT_CAPACITY"?{reason:"SUPPORT_AT_CAPACITY"}:{});
     }
     const candidate = reservation.candidate;
     const operationId = scopeOperationId();
@@ -3018,10 +3101,11 @@ async function beginTransfer(
     if (activeOperation) throw unavailable("IM message scope operation is being recovered");
     const targetAccess = await loadEffectiveAdminAccess(client, targetAdminId);
     if (!hasPermission(targetAccess, ADMIN_PERMISSION.imSupportAccept)) throw new SecurityApiError(403, "FORBIDDEN", "Target administrator is not authorized");
-    // 转交要占目标客服的接待容量（是他接下来要处理的新会话）；管理接管不增加系统总负载，放行。
-    const reservation = await reserveEligibleAdmin(client, options.appId, locked, row.kind, targetAdminId, options.supportConcurrency, kind === "TRANSFER");
+    // 转交与接管都会增加目标客服的个人负载，使用相同接待上限。
+    const reservation = await reserveEligibleAdmin(client, options.appId, locked, row.kind, targetAdminId, options.supportConcurrency);
     if (!reservation.candidate) {
-      throw unavailable(reservation.reason === "ALL_AT_CAPACITY" ? "目标客服已满接待上限" : "目标客服当前不可接待");
+      throw Object.assign(unavailable(reservation.reason === "ALL_AT_CAPACITY" ? "目标客服已满接待上限" : "目标客服当前不可接待"),
+        reservation.reason === "ALL_AT_CAPACITY" ? { reason: "SUPPORT_AT_CAPACITY" } : {});
     }
     const target = reservation.candidate;
     const updated = await client.query<{ messageScopeVersion: string | number }>(
@@ -3228,21 +3312,21 @@ async function completeLocalClose(options: ConsultationRouteOptions, context: Ad
   });
 }
 
-export async function claimConsultation(options: ConsultationRouteOptions, context: AdminContext, id: string, requestId: string): Promise<{ consultation: ConsultationView }> {
+export async function claimConsultation(options: ConsultationRouteOptions, context: AdminContext, id: string, requestId: string, aftersaleId?:string): Promise<{ consultation: ConsultationView }> {
   // Auto-assignment is the primary path. Manual claim is a management fallback;
   // enforce it server-side so hiding the button is not the only control.
   const access = await withTransaction(options.pool, async (client) => {
     await assertAdminContextInTransaction(client, context);
     return loadEffectiveAdminAccess(client, context.userId);
   });
-  if (!(access?.isBoss || hasPermission(access, ADMIN_PERMISSION.imSupportAuditTakeover))) {
+  if (!aftersaleId && !(access?.isBoss || hasPermission(access, ADMIN_PERMISSION.imSupportAuditTakeover))) {
     throw new SecurityApiError(403, "FORBIDDEN", "Manual takeover requires a management grant");
   }
-  let plan = await beginClaimMembership(options, context, id, requestId);
+  let plan = await beginClaimMembership(options, context, id, requestId, aftersaleId);
   if (plan.kind === "NEEDS_TEAM") {
     // First use after close/reopen may still need the thread Team; create it before adding the agent.
     await ensureThreadTeam(options, plan.threadId, id);
-    plan = await beginClaimMembership(options, context, id, requestId);
+    plan = await beginClaimMembership(options, context, id, requestId, aftersaleId);
   }
   const claimedNow = plan.kind === "OPERATION";
   const reservedNew = plan.kind === "OPERATION" && plan.reservedNew;
@@ -3624,6 +3708,7 @@ export type ConsultationSubjectView =
     displayNo: string;
     title: string | null;
     target: { kind: ConsultationSubjectKind; id: string };
+    party?: "RENTER" | "OWNER";
   };
 
 export type ConsultationContextView = {
@@ -3655,36 +3740,54 @@ function splitSubjectRef(value: string): { ref: string; kind: ConsultationSubjec
 async function resolveConsultationSubject(
   client: PoolClient,
   subjectRef: string | null,
+  userId: string,
+  readPublicAccount: ConsultationRouteOptions["readPublicAccount"],
 ): Promise<ConsultationSubjectView> {
   if (!subjectRef) return { status: "absent" };
   const { ref, kind } = splitSubjectRef(subjectRef);
   if (!ref) return { status: "unresolved", rawRef: subjectRef };
   const rows = (await client.query<{
-    kind: ConsultationSubjectKind; id: string; displayNo: string | null; title: string | null;
+    kind: ConsultationSubjectKind; id: string; displayNo: string | null; title: string | null; related: boolean; versionId: string | null; party: "RENTER" | "OWNER" | null;
   }>(
-    `SELECT 'ORDER'::text AS "kind", o."id", o."display_no" AS "displayNo", o."title"
+    `SELECT 'ORDER'::text AS "kind", o."id", o."display_no" AS "displayNo", o."title",
+            (o."renter_user_id"=$3 OR o."owner_user_id"=$3) AS "related", NULL::text AS "versionId",
+            CASE WHEN o."renter_user_id"=$3 THEN 'RENTER' WHEN o."owner_user_id"=$3 THEN 'OWNER' END AS "party"
        FROM "zzsh_order"."rental_order" o
       WHERE ($2::text IS NULL OR $2::text = 'ORDER') AND (o."id" = $1 OR o."display_no" = $1)
      UNION ALL
-     SELECT 'ACCOUNT'::text, a."id", a."display_no", NULL
+      SELECT 'ACCOUNT'::text, a."id", a."display_no", NULL,
+             (a."owner_user_id"=$3 OR EXISTS(SELECT 1 FROM zzsh_order.rental_order own_order WHERE own_order.account_id=a.id AND (own_order.renter_user_id=$3 OR own_order.owner_user_id=$3))),NULL::text,NULL::text
        FROM "zzsh_supply"."rental_account" a
       WHERE ($2::text IS NULL OR $2::text = 'ACCOUNT') AND (a."id" = $1 OR a."display_no" = $1)
      UNION ALL
-     SELECT 'ACCOUNT'::text, a."id", a."display_no", NULL
+      SELECT 'ACCOUNT'::text, a."id", a."display_no", NULL,
+             (a."owner_user_id"=$3 OR EXISTS(SELECT 1 FROM zzsh_order.rental_order own_order WHERE own_order.account_id=a.id AND (own_order.renter_user_id=$3 OR own_order.owner_user_id=$3))),l.id,NULL::text
        FROM "zzsh_supply"."listing_version" l
        JOIN "zzsh_supply"."rental_account" a ON a."id" = l."account_id"
       WHERE ($2::text IS NULL OR $2::text = 'ACCOUNT') AND l."id" = $1`,
-    [ref, kind],
-  )).rows.filter((row) => Boolean(row.displayNo));
+    [ref, kind, userId],
+  )).rows;
   const unique = new Map(rows.map((row) => [`${row.kind}:${row.id}`, row]));
   if (unique.size !== 1) return { status: "unresolved", rawRef: subjectRef };
   const resolved = [...unique.values()][0]!;
+  if (!resolved.displayNo) return { status: "unresolved", rawRef: subjectRef };
+  if (!resolved.related) {
+    if (resolved.kind !== "ACCOUNT" || !readPublicAccount) return { status: "unresolved", rawRef: subjectRef };
+    try {
+      const publicAccount = await readPublicAccount(client, resolved.id);
+      if (resolved.versionId && publicAccount.versionId !== resolved.versionId) return { status: "unresolved", rawRef: subjectRef };
+    } catch (error) {
+      if (error instanceof SecurityApiError && error.status === 404) return { status: "unresolved", rawRef: subjectRef };
+      throw error;
+    }
+  }
   return {
     status: "resolved",
     kind: resolved.kind,
     displayNo: resolved.displayNo!,
     title: resolved.title,
     target: { kind: resolved.kind, id: resolved.id },
+    ...(resolved.kind === "ORDER" && resolved.related && resolved.party ? { party: resolved.party } : {}),
   };
 }
 
@@ -3727,7 +3830,7 @@ export async function readConsultationContext(
       },
       // subject_ref 本身没有类型列：先按显式前缀/唯一命中解析成业务单号，解析不了就是 unresolved，
       // 绝不把裸引用猜成订单；业务展示号缺失时同样不上屏。
-      subject: await resolveConsultationSubject(client, subjectRef),
+      subject: await resolveConsultationSubject(client, subjectRef, row.userId, options.readPublicAccount),
       // This tree carries no membership read dependency; absence is not "ordinary member".
       membership: { status: "unavailable", reason: "membership_projection_not_integrated" },
     };

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { createServer } from "node:http";
 import sharp from "sharp";
 
 import { mountAuthHandlers } from "../src/auth/auth-runtime";
@@ -8,8 +9,49 @@ import { YunxinIdentityRepository } from "../src/im/yunxin-identity-repository";
 import { handleYunxinRoute, parseMessageBody, type YunxinRouteOptions } from "../src/im/yunxin-routes";
 import { MAX_MEDIA_BYTES } from "../src/supply/media";
 import { InMemoryMessageTransport } from "./im-local-fixtures";
+import { imFactId } from "../src/im/message-receipts";
 
 const APP_ID = "provider-test";
+
+test("real patrol pages the full Team stream without an IM identity, preserves an empty hidden page and scopes its cursor",async()=>{
+  const viewer=deriveYunxinAccountId({provider:"yunxin",appId:APP_ID,realm:"admin",kind:"ADMIN",platformSubjectId:"admin-1"});
+  const managerKey={provider:"yunxin" as const,appId:APP_ID,realm:"system",kind:"SYSTEM" as const,platformSubjectId:"manager"};
+  const manager=deriveYunxinAccountId(managerKey),conversationId=viewer+"|2|9001";
+  let permissions=["im.support.management.read"],providerCalls=0,order=false,markerApp=APP_ID,adminDisplay="ZZ0002";
+  const rows=Array.from({length:125},(_,i)=>({messageServerId:(4301564702653153301n+BigInt(i)).toString(),messageClientId:"cid"+i,senderId:"user-1",createTime:1000+Math.floor(i/70),messageType:0,text:"secret-"+i})).reverse();
+  const hidden=new Set(rows.slice(0,50).map(m=>m.messageServerId)),revoked=rows[60]!.messageServerId;
+  rows[65]!.senderId="staff-1";
+  const query=async(sql:string,v:any[]=[])=>{
+    const result=(rows:unknown[])=>({rows,rowCount:rows.length});
+    if(sql.includes('"zzsh_iam"."admin_security"'))return result([{status:"ACTIVE",isBoss:false,passwordChangeRequired:false}]);
+    if(sql.includes('"zzsh_auth_admin"."session"'))return result([{locked:false,twoFactorEnabled:true,suspended:false}]);
+    if(sql.includes("WITH role_permissions"))return result(permissions.map(permissionCode=>({permissionCode})));
+    if(sql.includes('g."order_id" AS "orderId"'))return result(order?[{orderId:"order-1",teamState:"READY"}]:[]);
+    if(sql.includes("SELECT c.id,t.user_account_id"))return result([{id:"round-latest",user_account_id:"user-1"}]);
+    if(sql.includes("SELECT id FROM zzsh_iam.im_support_thread"))return result([{id:"thread-1"}]);
+    if(sql.includes('m.account_id AS "accountId"')){assert.equal(v[0],APP_ID);assert.ok(v[1].every((id:string)=>["user-1","staff-1"].includes(id)));assert.match(sql,/m.app_id=\$1/);assert.match(sql,/THEN u.id WHEN m.identity_kind='ADMIN' THEN a.id/);return result(v[1].map((id:string)=>id==="staff-1"?{accountId:id,kind:"ADMIN",platformId:"platform-admin-1",displayUsername:adminDisplay,name:"客服测试",image:null}:{accountId:id,kind:"USER",platformId:"platform-user-1",name:"咨询用户",image:"javascript:alert(1)"}));}
+    if(sql.includes("SELECT id,object_id FROM zzsh_iam.audit_event"))return result(rows.flatMap(m=>hidden.has(m.messageServerId)?[{id:imFactId("hidden",APP_ID,viewer,m.messageServerId),object_id:m.messageServerId}]:m.messageServerId===revoked?[{id:imFactId("revoked",APP_ID,"system",m.messageServerId),object_id:m.messageServerId}]:[]).filter(r=>v[0].includes(r.id)));
+    return result([]);
+  };
+  const pool={query,connect:async()=>({query,release(){}})} as never;
+  const provider={getSupportTeam:async()=>({ownerAccountId:manager,serverExtension:JSON.stringify(order?{schema:"zzsh.im-order.v1",appId:markerApp,orderId:"order-1"}:{schema:"zzsh.im-consultation.v1",appId:markerApp,consultationId:"thread-1"})}),readSupportMemberHistory:async(input:any)=>{
+    providerCalls++;assert.equal(input.accountId,manager);
+    return rows.filter(m=>!input.before||m.createTime<input.before.time||m.createTime===input.before.time&&BigInt(m.messageServerId)<BigInt(input.before.id)).slice(0,input.limit);
+  }};
+  const options=userRouteOptions({security:{...userRouteOptions().security,pool,adminAuth:{api:{getSession:async()=>({user:{id:"admin-1",twoFactorEnabled:true},session:{id:"session-admin-1",locked:false}})}}} as never,consultation:{pool,appId:APP_ID,provider,supportManager:{key:managerKey}} as never});
+  const get=async(cursor?:string,conv=conversationId)=>{const response=responseCapture(),query=new URLSearchParams({mode:"patrol",conversationId:conv,limit:"50"});if(cursor)query.set("cursor",cursor);const url="/api/v1/im/admin/messages?"+query;await handleYunxinRoute({method:"GET",url,originalUrl:url,headers:{origin:"http://127.0.0.1:3101"}},response,options);return response;};
+  const first=await get();assert.equal(first.statusCode,200,JSON.stringify(first.body));assert.deepEqual((first.body as any).messages,[]);assert.equal((first.body as any).hasMore,true);
+  const second=await get((first.body as any).nextCursor);assert.equal(second.statusCode,200);assert.equal((second.body as any).messages.length,50);const tombstone=(second.body as any).messages.find((m:any)=>m.messageServerId===revoked);assert.equal(tombstone.revoked,true);assert.equal(tombstone.text,"");assert.deepEqual(tombstone.sender,{displayName:"咨询用户",avatar:null,role:"USER",platformId:"platform-user-1"});
+  const staff=(second.body as any).messages.find((m:any)=>m.sender?.role==="ADMIN");assert.deepEqual(staff.sender,{displayName:"客服测试",avatar:null,role:"ADMIN",platformId:"platform-admin-1",displayUsername:"ZZ0002"});
+  const third=await get((second.body as any).nextCursor);assert.equal((third.body as any).messages.length,25);assert.equal((third.body as any).hasMore,false);
+  assert.equal(new Set([...((second.body as any).messages),...((third.body as any).messages)].map((m:any)=>m.messageServerId)).size,75);
+  for (const privateLogin of ["boss@example.test", "13812345678"]) { adminDisplay=privateLogin;const page=await get((first.body as any).nextCursor);const sender=(page.body as any).messages.find((m:any)=>m.sender?.role==="ADMIN").sender;assert.equal("displayUsername" in sender,false,"contacts must not become a public staff account"); }
+  adminDisplay="ZZ0002";
+  const calls=providerCalls;assert.equal((await get((first.body as any).nextCursor,viewer+"|2|9002")).statusCode,400);assert.equal(providerCalls,calls);
+  order=true;assert.equal((await get()).statusCode,200);
+  markerApp="foreign";assert.equal((await get()).statusCode,403);markerApp=APP_ID;
+  permissions=["im.support.read"];assert.equal((await get()).statusCode,403);
+});
 
 function key(kind: ImIdentityKey["kind"], subject: string): ImIdentityKey {
   return { provider: "yunxin", appId: APP_ID, realm: kind === "ADMIN" ? "admin" : "user", kind, platformSubjectId: subject };
@@ -831,6 +873,45 @@ test("user media routes reject unauthenticated, out-of-scope and malformed sends
   assert.equal(harness.transport.calls.sendMedia, 0);
 });
 
+test("support history checks App/Team and current assignee, then rechecks read after the provider call", async () => {
+  const adminAccount=deriveYunxinAccountId(key("ADMIN","admin-1"));
+  for(const kind of ["opening","history"]){
+  for(const mode of ["allow","closed","denied","revoke","no-round"]){
+    let revoked=mode==="denied",providerCalls=0;
+    const query=async(text:string,values:unknown[]=[])=>{
+      const rows=(value:unknown[])=>({rows:value,rowCount:value.length});
+      if(text.includes('"zzsh_iam"."admin_security"')) return rows([{status:"ACTIVE",isBoss:false,passwordChangeRequired:false}]);
+      if(text.includes('"zzsh_auth_admin"."session"')) return rows([{locked:false,twoFactorEnabled:true,suspended:false}]);
+      if(text.includes('WITH role_permissions')) return rows(revoked?[]:[{permissionCode:"im.support.read"}]);
+      if(text.includes('"zzsh_iam"."im_identity_mapping"')) return rows([dbRow(key("ADMIN","admin-1"))]);
+      if(text.includes('"zzsh_iam"."im_consultation" c')) return rows(mode==="no-round"?[]:[{...consultationRow("user-1","9001"),state:mode==="closed"?"CLOSED":"ACTIVE",assignedAdminId:"admin-1",peerAccountId:adminAccount}]);
+      if(text.includes('SELECT id FROM zzsh_iam.im_support_thread'))return rows([{id:"thread-1"}]);
+      if(text.includes('SELECT c.assigned_admin_id'))return rows(mode==="no-round"?[]:[{assigned_admin_id:"admin-1"}]);
+      return rows([]);
+    };
+    const pool={query,connect:async()=>({query,release(){}})} as never;
+    const respond=()=>{
+      providerCalls++;
+      if(mode==="revoke")revoked=true;
+      return [{messageServerId:"4301564702653153301",messageClientId:"first",senderId:"user-1",createTime:20,text:"opening text"}];
+    };
+    const managerKey={provider:"yunxin",appId:APP_ID,realm:"admin",kind:"SYSTEM",platformSubjectId:"support-manager"};
+    const managerAccount=deriveYunxinAccountId(managerKey as never);
+    const provider={getSupportTeam:async()=>({ownerAccountId:managerAccount,serverExtension:JSON.stringify({schema:"zzsh.im-consultation.v1",appId:APP_ID,consultationId:"thread-1"})}),readSupportMemberHistory:async(input:unknown)=>{
+      assert.deepEqual(input,{teamId:"9001",accountId:managerAccount,limit:51});return respond().map(row=>({...row,messageType:0}));
+    }};
+    const options=userRouteOptions({security:{...userRouteOptions().security,pool,adminAuth:{api:{getSession:async()=>({user:{id:"admin-1",twoFactorEnabled:true},session:{id:"session-admin-1",locked:false}})}}} as never,
+      consultation:{pool,appId:APP_ID,provider,supportManager:{key:managerKey}} as never});
+    const response=responseCapture();const path=`/api/v1/im/admin/messages?${kind}=true&conversationId=${encodeURIComponent(adminAccount+"|2|9001")}`;
+    await handleYunxinRoute({method:"GET",url:path,originalUrl:path,headers:{origin:"http://127.0.0.1:3101",cookie:"zzsh_admin.session_token=opaque"}},response,options);
+    assert.equal(response.statusCode,mode==="denied"||mode==="revoke"||mode==="no-round"?403:200,JSON.stringify(response.body));
+    assert.equal(providerCalls,mode==="denied"||mode==="no-round"?0:1);
+    if(mode==="allow"||mode==="closed")assert.equal((response.body as any).messages[0].receiverId,"9001");
+    else assert.doesNotMatch(JSON.stringify(response.body),/opening text/);
+  }
+  }
+});
+
 test("admin media send fails closed without im.support.read", async () => {
   const transport = new InMemoryMessageTransport();
   const query = async (text: string) => {
@@ -857,4 +938,34 @@ test("admin media send fails closed without im.support.read", async () => {
   assert.equal(response.statusCode, 403);
   assert.equal(errorOf(response).code, "FORBIDDEN");
   assert.equal(transport.calls.sendMedia, 0);
+});
+
+test("patrol filters cross a real HTTP route instead of being implemented by a UI mock",async t=>{
+  const observed:unknown[][]=[];
+  const viewerKey=key("ADMIN","admin-1");
+  const query=async(sql:string,values:unknown[]=[])=>{
+    let rows:unknown[]=[];
+    if(sql.includes("WITH items AS")){observed.push(values);rows=[];}
+    else if(sql.includes('FROM "zzsh_auth_admin"."user"'))rows=[{suspended:false}];
+    else if(sql.includes('FROM "zzsh_auth_admin"."session"'))rows=[{locked:false,twoFactorEnabled:true,suspended:false}];
+    else if(sql.includes('FROM "zzsh_iam"."admin_security"'))rows=[{status:"ACTIVE",isBoss:true,passwordChangeRequired:false}];
+    else if(sql.includes('FROM "zzsh_iam"."im_identity_mapping"'))rows=[{accountId:deriveYunxinAccountId(viewerKey),identityMarker:buildYunxinIdentityMarker(viewerKey)}];
+    return {rows,rowCount:rows.length};
+  };
+  const base=userRouteOptions(),pool={query,connect:async()=>({query,release(){}})} as never;
+  const options=userRouteOptions({security:{...base.security,pool,adminAuth:{api:{getSession:async()=>({user:{id:"admin-1",twoFactorEnabled:true},session:{id:"session-admin-1",locked:false}})}}} as never});
+  const server=createServer((req,res)=>{
+    const response=Object.assign(res,{status(code:number){res.statusCode=code;return response;},json(value:unknown){res.setHeader("content-type","application/json");res.end(JSON.stringify(value));}});
+    void handleYunxinRoute(req as never,response as never,options).catch(()=>{res.statusCode=500;res.end();});
+  });
+  t.after(()=>new Promise<void>((resolve,reject)=>server.close(e=>e?reject(e):resolve())));
+  await new Promise<void>(resolve=>server.listen(0,"127.0.0.1",resolve));
+  const address=server.address();assert.ok(address&&typeof address!=="string");
+  const get=(suffix:string)=>fetch(`http://127.0.0.1:${address.port}/api/v1/im/admin/audit/conversations${suffix}`,{headers:{origin:"http://127.0.0.1:3101"}});
+  const filtered=await get("?type=ORDER&adminUserId=admin-2");assert.equal(filtered.status,200,await filtered.text());
+  assert.equal(observed[0]![6],"ORDER");assert.equal(observed[0]![7],"admin-2");
+  for(const suffix of ["?type=INVALID","?type=ORDER&type=SERVICE","?adminUserId=","?unexpected=1"]){
+    const response=await get(suffix);assert.equal(response.status,400,await response.text());
+  }
+  assert.equal(observed.length,1,"bad query never executes the read projection");
 });

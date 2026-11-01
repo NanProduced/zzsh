@@ -124,10 +124,13 @@ const historyMessage = {
 };
 
 const baseOverview = () => ({
+  reportDate: "2026-10-29",
+  serverNow: "2026-10-29T04:00:00.000Z",
   onDuty: [],
   totals: { onDutyCount: 0, waitingConsultations: 0, todaySessions: 0, todayUsers: 0 },
   trend: [],
   hourly: [],
+  ratings: { count: 0, average: null, distribution: [0, 0, 0, 0, 0], agents: [] },
 });
 
 const requests = [];
@@ -460,16 +463,16 @@ test("the dashboard renders today's rating count, average, distribution and per-
 
   const panel = rootNode.querySelector('[data-panel="ratings"]');
   assert.equal(panel.dataset.count, "7");
-  assert.match(panel.querySelector('[data-rating-metric="count"]').textContent, /^7今日评价数$/);
+  assert.match(panel.querySelector('[data-rating-metric="count"]').textContent, /^7评价数$/);
   assert.match(panel.querySelector('[data-rating-metric="average"]').textContent, /^4\.6平均分$/, "the average keeps one decimal");
   assert.doesNotMatch(panel.textContent, /今日暂无评价/);
 
   // 星级分布只在一处画：看板的「今日评分分布」图。卡内 CSS 条形已合并删除，避免两套渲染漂移。
   assert.equal(panel.querySelectorAll("[data-rating-score]").length, 0, "卡内不再重复画分布");
-  assert.match(panel.textContent, /星级分布在下方/);
+  assert.equal(panel.querySelectorAll('[data-chart="rating-distribution"]').length, 1, "one distribution is included with its rating summary");
   const chart = rootNode.querySelector('[data-chart="rating-distribution"]');
   assert.equal(chart.dataset.count, "7", "图表读的是同一份服务端计数");
-  const summary = chart.querySelector('[role="img"]').getAttribute("aria-label");
+  const summary = chart.getAttribute("aria-label");
   assert.match(summary, /5 星 5 条/, "图表自带无障碍数值，删掉条形也不丢数字");
   assert.match(summary, /3 星 1 条/);
   assert.match(summary, /1 星 0 条/);
@@ -495,12 +498,12 @@ test("no ratings today shows 今日暂无评价 without a fabricated average", a
   assert.equal(panel.querySelector('[data-rating-empty]')?.textContent, "今日暂无评价");
   assert.equal(panel.querySelectorAll("[data-rating-metric]").length, 0, "no average or count metric is invented");
   assert.equal(panel.querySelectorAll("[data-rating-score]").length, 0, "没有评价就不画分布行");
-  assert.match(rootNode.querySelector('[data-chart="rating-distribution"]').textContent, /今日暂无评价/);
+  assert.equal(rootNode.querySelector('[data-chart="rating-distribution"]'), null, "no empty rating graph duplicates the no-rating summary");
   assert.equal(panel.querySelectorAll("[data-rating-agent]").length, 0);
   assert.doesNotMatch(panel.textContent, /0\.0|平均分/);
 });
 
-test("ratings ride on the same Beijing-dated overview request", async (t) => {
+test("ratings use the overview server day without a browser-supplied date", async (t) => {
   resetFixture({ overview: ratedOverview() });
   const { rootNode } = await mountManagement(t);
   await waitFor(() => rootNode.querySelector('[data-panel="ratings"]'));
@@ -508,17 +511,18 @@ test("ratings ride on the same Beijing-dated overview request", async (t) => {
   const overviewRequests = requests.filter((request) => request.path.includes("/im/support-overview"));
   assert.equal(overviewRequests.length, 1, "ratings do not add a second stats request");
   const date = new URL(overviewRequests[0].path, "http://localhost").searchParams.get("date");
-  assert.equal(date, beijingCalendarDate(), "the selected Beijing calendar date is forwarded to the server");
+  assert.equal(date, null, "the server owns today; the browser clock is not sent");
 });
 
 /* ------------------------------ 纯模型 ------------------------------ */
 
 test("rating parsing keeps valid values and refuses out-of-range averages", () => {
   const parsed = model.parseSupportOverview({
+    ...baseOverview(),
     ratings: {
       count: 3,
       average: 4.666,
-      distribution: [1, "2", -3, 0, 2],
+      distribution: [1, 0, 0, 0, 2],
       agents: [
         { adminUserId: "a", name: "客服 A", count: 2, average: 4.5 },
         { adminUserId: "b", count: 1, average: 0 },
@@ -534,11 +538,11 @@ test("rating parsing keeps valid values and refuses out-of-range averages", () =
   assert.equal(parsed.ratings.agents[1].name, "未命名客服");
   assert.equal(parsed.ratings.agents[1].average, null, "0 is not a valid 1..5 average");
 
-  const missing = model.parseSupportOverview({});
-  assert.equal(missing.ratings.count, 0);
-  assert.equal(missing.ratings.average, null);
-  assert.deepEqual(missing.ratings.distribution, [0, 0, 0, 0, 0]);
-  assert.deepEqual(missing.ratings.agents, []);
+  assert.throws(() => model.parseSupportOverview({}), /客服统计数据不完整/);
+  assert.throws(() => model.parseSupportOverview({
+    ...baseOverview(),
+    ratings: { count: 1, average: 5, distribution: [1, 2], agents: [] },
+  }), /客服统计数据不完整/);
   assert.equal(model.formatRatingAverage(null), "—");
   assert.equal(model.formatRatingAverage(4.666), "4.7");
 });

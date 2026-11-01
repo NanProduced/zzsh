@@ -26,6 +26,50 @@ async function route(path:string,pool:DirectorySqlFixture,method='GET',body?:unk
   return output.result();
 }
 
+test('support phone detail commits a value-free disclosure audit after the read-only snapshot',async()=>{
+  const pool=new DirectorySqlFixture();
+  const result=await route('/api/v1/admin/users/user_normal',pool);
+  assert.equal(result.status,200);
+  assert.equal(result.body.user.maskedPhone,pool.users[0]!.phoneNumber);
+  const audit=pool.queries.find(q=>q.sql.includes('INSERT INTO "zzsh_iam"."audit_event"'))!;
+  assert.ok(audit);
+  assert.equal(audit.values[4],'user.phone.support.read');
+  assert.equal(audit.values[2],pool.actorId);
+  assert.equal(audit.values[6],'user_normal');
+  assert.doesNotMatch(JSON.stringify(audit.values),/18800001101/);
+  assert.deepEqual(JSON.parse(String(audit.values[10])),{fields:['phoneNumber'],source:'directory_detail'});
+  const auditIndex=pool.queries.indexOf(audit);
+  assert.ok(pool.queries.slice(0,auditIndex).some(q=>q.sql.startsWith('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')));
+  assert.ok(pool.queries.slice(0,auditIndex).some(q=>q.sql==='BEGIN'));
+  assert.equal(pool.queries.at(-1)!.sql,'COMMIT');
+});
+
+test('disclosure audit failure or a permission revoke prevents a plaintext detail response',async()=>{
+  const failed=new DirectorySqlFixture();failed.fault='phone-audit';
+  const failure=await route('/api/v1/admin/users/user_normal',failed);
+  assert.equal(failure.status,500);
+  assert.doesNotMatch(JSON.stringify(failure.body),/18800001101/);
+  assert.equal(failed.queries.at(-1)!.sql,'ROLLBACK');
+  const revoked=new DirectorySqlFixture(),query=revoked.query.bind(revoked);let reads=0;
+  revoked.query=async(sql,values=[])=>{
+    if(sql.includes('WITH role_permissions')&&++reads===2) revoked.permissions=revoked.permissions.filter(p=>p!=='im.support.read');
+    return query(sql,values);
+  };
+  const refusal=await route('/api/v1/admin/users/user_normal',revoked);
+  assert.equal(refusal.status,403);
+  assert.doesNotMatch(JSON.stringify(refusal.body),/18800001101/);
+  assert.equal(revoked.queries.filter(q=>q.sql.includes('INSERT INTO "zzsh_iam"."audit_event"')).length,0);
+});
+
+test('masked details and absent phone facts do not produce support phone disclosures',async()=>{
+  const masked=new DirectorySqlFixture();masked.permissions=masked.permissions.filter(p=>p!=='im.support.read');
+  const result=await route('/api/v1/admin/users/user_normal',masked);
+  assert.equal(result.status,200);assert.equal(result.body.user.phoneRevealed,false);
+  assert.notEqual(result.body.user.maskedPhone,masked.users[0]!.phoneNumber);
+  const absent=new DirectorySqlFixture();assert.equal((await route('/api/v1/admin/users/user_dual',absent)).status,200);
+  for(const pool of [masked,absent]) assert.equal(pool.queries.filter(q=>q.sql.includes('INSERT INTO "zzsh_iam"."audit_event"')).length,0);
+});
+
 test('published summary is separate from archives and shared by list and detail without per-user requests',async()=>{
   const pool=new DirectorySqlFixture();Object.assign(pool.users[0]!,{resourceAccountCount:5,resourcePublishedCount:2});
   const list:any=await listUserDirectory(client(pool),viewer,{search:'林舟',limit:20});

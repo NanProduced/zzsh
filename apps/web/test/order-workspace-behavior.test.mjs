@@ -47,6 +47,7 @@ function loadWorkspace(session, router) {
         if (local === "order-trade-actions") return { OrderTradeActions: () => null };
         return loadOrderComponent(`${local}.tsx`);
       }
+      if (local === "order-aftersale") return {OrderAftersale:()=>null};
       if (name.endsWith(".css")) return {};
       return requireFromTree(name);
     };

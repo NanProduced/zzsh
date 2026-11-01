@@ -2,6 +2,7 @@
 import { useState } from "react";
 import type { NimMessageLike } from "@zzsh/im-client/nim-web-client";
 import type { OrderTeamAccess, OrderTeamTerms } from "./order-team-panel";
+import type { OrderReference } from "@zzsh/im-client/nim-web-client";
 import "./order-card.css";
 
 /** Order-stage cards travel as ordinary chat messages; every fact is read from the
@@ -117,6 +118,18 @@ function CopyIcon() {
 }
 function InfoIcon() {
   return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 11v5" /><path d="M12 8h.01" /></svg>;
+}
+
+/** Display-only shared reference; the destination authorizes access to order facts. */
+export function OrderReferenceMessage({ order, onOpenOrder }: { order: OrderReference; onOpenOrder?: (id: string) => void }) {
+  const action = <><span>查看订单</span><ArrowIcon className="order-card-action-chevron" /></>;
+  return <article className="order-card order-reference-card" aria-label="关联订单卡片">
+    <header className="order-card-head"><DocIcon /><strong>关联订单</strong><span className="order-reference-party">{order.party === "owner" ? "出租订单" : "租入订单"}</span></header>
+    <div className="order-card-account"><strong>{order.title}</strong></div>
+    <footer className="order-card-foot"><span className="order-card-no">订单号 <b>{order.displayNo}</b></span>
+      {onOpenOrder ? <button type="button" className="order-card-action" onClick={() => onOpenOrder(order.id)}>{action}</button> : <a className="order-card-action" href={`/orders/${encodeURIComponent(order.id)}`}>{action}</a>}
+    </footer>
+  </article>;
 }
 
 /**
@@ -351,7 +364,7 @@ export function OrderCardMessage({ message, info, onOpenOrder, onConfirmOpening,
         <strong className="order-card-dialog-title">{confirmTarget.mode === "PARTY" ? "确认开租" : `代${partyText(confirmTarget.party)}确认开租`}</strong>
         <p className="order-card-dialog-order">订单 {info.displayNo} · {accountTitle}</p>
         <p className="order-card-dialog-copy">{confirmTarget.mode === "PARTY"
-          ? "请核对账号、押金与物品清单。提交确认后等待另一方确认；双方确认或 40 分钟到期后开始租期，起租时间以服务端记录为准。"
+          ? "请核对账号、押金与物品清单。提交确认后等待另一方确认；双方确认或 40 分钟到期后开始租期，起租时间以平台确认信息为准。"
           : `将以客服身份代${partyText(confirmTarget.party)}确认；该操作会记录审计，且只补齐未确认方，不会覆盖已确认记录。`}</p>
         {confirmError ? <p className="order-card-dialog-error" role="alert">{confirmError}</p> : null}
         <div className="order-card-dialog-actions">

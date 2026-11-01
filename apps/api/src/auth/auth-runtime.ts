@@ -29,7 +29,7 @@ import { readCreditGuaranteeEnabled, preflightCreditGuarantee } from "../credit/
 import { ensureCreditAccount } from "../credit/credit-guarantee";
 import type { ConfirmationKey } from "../order/confirmation-token";
 import type { ConfirmationFundingReader } from "../order/personal-confirmation";
-import { unknownSupplyGate, type SupplyGateReader } from "../supply/publishing";
+import { readPublicListing, readPublishingAccount, unknownSupplyGate, type SupplyGateReader } from "../supply/publishing";
 import { createProductionConfirmationFundingReader, createProductionSupplyGateReader, readFormalSupplyGate } from "../supply/funding-authority";
 import type { INestApplication } from "@nestjs/common";
 import { createHash, randomInt, randomUUID } from "node:crypto";
@@ -67,6 +67,7 @@ import { YunxinServerApiClient, type YunxinServerApi, type YunxinSupportScopeApi
 import type { ImMessageTransport } from "../im/im-contract";
 import { createYunxinDueReminderTransport, createYunxinStageCardTransport, createYunxinSystemMessageTransport, type YunxinTeamTextSender } from "../im/yunxin-transport";
 import { mountYunxinHandlers } from "../im/yunxin-routes";
+import { mountReadCopyHandler } from "../im/read-copy";
 import { mountOrderImEventHandlers, OrderImEventRecoveryLifecycle, orderImEventsActivateApp } from "../im/order-im-events";
 
 import { assertLocalDistributionAssembly, type LocalDistributionScope } from '../finance/distribution-policy-store';
@@ -1098,9 +1099,11 @@ export async function mountAuthHandlers(
       options.orderImEvents.recoveryIntervalMs === undefined ? undefined : options.orderImEvents.recoveryIntervalMs);
   }
   if (yunxinRuntime) {
+    mountReadCopyHandler(app, { pool: options.pool, appId: options.yunxin!.appId, appSecret: options.yunxin!.appSecret });
     mountYunxinHandlers(app, {
       security: securityOptions,
       appId: options.yunxin!.appId,
+      readCopyReceiverReady: true,
       repository: yunxinRuntime.repository,
       provisioner: yunxinRuntime.provisioner,
       tokenService: yunxinRuntime.tokenService,
@@ -1116,6 +1119,8 @@ export async function mountAuthHandlers(
   const fundingReader = options.testConfirmationFundingReader ?? createProductionConfirmationFundingReader({ creditGuaranteeEnabled: options.creditGuaranteeEnabled === true });
   const baseSupplyGateReader = options.testSupplyGateReader ?? (options.testConfirmationFundingReader ? unknownSupplyGate : options.creditGuaranteeEnabled === true ? createProductionSupplyGateReader({ creditGuaranteeEnabled: true }) : readFormalSupplyGate);
   const supplyGateReader=composeSupplyGateWithOrderOccupancy(baseSupplyGateReader);
+  if (yunxinConsultation) yunxinConsultation.readPublicAccount = async (client, id) =>
+    readPublicListing(client, await readPublishingAccount(client, id), supplyGateReader, legacyPublicAdmission, false, "DETAIL", legacyPublicAdmissionDetail);
   const mediaStorage = options.mediaStorage ?? createLocalMediaStorage(join(process.cwd(), "uploads"));
   const orderHoldSeconds = options.orderHoldSeconds ?? (() => {
     const raw = process.env.ORDER_HOLD_SECONDS?.trim();
@@ -1170,6 +1175,7 @@ export async function mountAuthHandlers(
       yunxin: {
         security: securityOptions,
         appId: options.yunxin!.appId,
+        readCopyReceiverReady: true,
         repository: yunxinRuntime.repository,
         provisioner: yunxinRuntime.provisioner,
         tokenService: yunxinRuntime.tokenService,

@@ -81,6 +81,8 @@ export const ADMIN_PERMISSION = {
   imSupportTransfer: "im.support.transfer",
   imSupportPresence: "im.support.presence",
   imSupportManagementRead: "im.support.management.read",
+  imSupportConfigure: "im.support.configure",
+  imSupportIntegrationConfigure: "im.support.integration.configure",
   imSupportAuditTakeover: "im.support.audit.takeover",
 } as const;
 

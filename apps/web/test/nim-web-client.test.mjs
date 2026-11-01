@@ -8,9 +8,18 @@ import {
   NimMediaSendError,
   NimTextSendError,
   parseNimMessageMedia,
+  oldestNimMessage,
   resolveNimSdkModule,
   validateNimMediaFile,
 } from "../src/lib/nim-web-client.ts";
+
+test("history anchor keeps adjacent 64-bit IDs in order when their millisecond timestamps tie",()=>{
+  const newer={messageClientId:"newer",messageServerId:"4301644928884146185",createTime:1000};
+  const older={...newer,messageClientId:"older",messageServerId:"4301644928884146184"};
+  assert.equal(oldestNimMessage([newer,older]),older);
+  assert.equal(oldestNimMessage([]),undefined);
+  const earlier={...newer,createTime:999};assert.equal(oldestNimMessage([older,earlier]),earlier);
+});
 import { ImLifecycleSupersededError } from "../src/lib/im-client-lifecycle.ts";
 
 function deferred() {
@@ -126,7 +135,7 @@ test("order-scoped authorization guards the shared SDK and forwards an exact his
     await assert.rejects(handle.client.sendText(anchor.conversationId,"text",deny),{status:403});
     assert.equal(reads+sends+defaultCalls,0);
     await handle.client.getMessageHistory(anchor.conversationId,50,anchor,async()=>undefined);
-    assert.deepEqual(seen,{conversationId:anchor.conversationId,limit:50,anchorMessage:anchor});
+    assert.deepEqual(seen,{conversationId:anchor.conversationId,limit:50,direction:0,anchorMessage:anchor});
     const gate=deferred();const pending=handle.client.sendText(anchor.conversationId,"text",()=>gate.promise);
     state.supersede();gate.resolve();await assert.rejects(pending,ImLifecycleSupersededError);assert.equal(sends,0);
   }finally{await handle.dispose();}
@@ -238,7 +247,7 @@ test("routes authorized P2P messages through the SDK and removes the receive lis
   const messageService = {
     on(eventName, listener) { messageListeners.set(eventName, listener); },
     off(eventName, listener) { if (messageListeners.get(eventName) === listener) messageListeners.delete(eventName); },
-    async getMessageList(options) { assert.deepEqual(options, { conversationId: "customer-4|1|agent-1", limit: 20 }); return history; },
+    async getMessageList(options) { assert.deepEqual(options, { conversationId: "customer-4|1|agent-1", limit: 20, direction: 0 }); return history; },
     async sendMessage(message, conversationId) { sent.push({ message, conversationId }); return { message: { ...history[0], messageClientId: "sent-1", senderId: "customer-4", text: message.text } }; },
   };
   const { sdk } = fakeSdk({
@@ -265,7 +274,7 @@ test("routes authorized P2P messages through the SDK and removes the receive lis
   assert.deepEqual(sent, [{ message: { messageClientId: "text-client-1", text: "收到", messageType: 0 }, conversationId: "customer-4|1|agent-1" }]);
   assert.deepEqual(authorizations, [
     { conversationId: "customer-4|1|agent-1", operation: "read" },
-    { conversationId: "customer-4|1|agent-1", operation: "send" },
+    { conversationId: "customer-4|1|agent-1", operation: "send", messageClientId:"text-client-1", messageType:0 },
   ]);
   unsubscribe();
   await handle.dispose();
@@ -376,8 +385,8 @@ test("formal image adapter uses the installed V2 image creator, reports progress
   ]);
   assert.equal(created.length, 1);
   assert.deepEqual(authorizations, [
-    { conversationId: "customer-image|2|9001", operation: "send" },
-    { conversationId: "customer-image|2|9001", operation: "send" },
+    { conversationId: "customer-image|2|9001", operation: "send", messageClientId:"image-client-1", messageType:1 },
+    { conversationId: "customer-image|2|9001", operation: "send", messageClientId:"image-client-1", messageType:1 },
   ]);
   assert.deepEqual(progress, [0, 42, 0, 42, 100]);
   await handle.dispose();
@@ -706,7 +715,7 @@ test("real adapter calls replyMessage/revokeMessage/deleteMessage behind authori
     const replyTo = sampleMessage({ conversationId: "customer-real|2|9001", senderId: "peer-1", text: "长".repeat(200) });
     const reply = await handle.client.replyText("customer-real|2|9001", "回复", replyTo, authorize);
     assert.equal(calls.reply.length, 1);
-    assert.equal(calls.reply[0][1], replyTo);
+    assert.deepEqual(calls.reply[0][1], {...replyTo,conversationType:2});
     assert.equal(calls.reply[0].length, 2);
     assert.equal(reply.reply.messageId, "s1");
     assert.equal(reply.reply.senderId, "peer-1");
@@ -714,13 +723,13 @@ test("real adapter calls replyMessage/revokeMessage/deleteMessage behind authori
 
     const message = sampleMessage({ conversationId: "customer-real|2|9001", senderId: "customer-real", attachment: { imageId: "ignored" } });
     const revoked = await handle.client.revokeMessage("customer-real|2|9001", message, authorize);
-    assert.deepEqual(calls.revoke, [message]);
+    assert.deepEqual(calls.revoke, [{...message,conversationType:2}]);
     assert.equal(revoked.revoked, true);
     assert.equal(revoked.text, "");
     assert.equal(revoked.attachment, undefined);
 
     await handle.client.deleteMessage("customer-real|2|9001", message, authorize);
-    assert.deepEqual(calls.delete, [message]);
+    assert.deepEqual(calls.delete, [{...message,conversationType:2}]);
     assert.deepEqual(operations, ["send", "send", "read"]);
 
     const deny = async () => { throw Object.assign(new Error("denied"), { status: 403 }); };
@@ -730,6 +739,9 @@ test("real adapter calls replyMessage/revokeMessage/deleteMessage behind authori
     assert.equal(calls.reply.length, 1);
     assert.equal(calls.revoke.length, 1);
     assert.equal(calls.delete.length, 1);
+
+    messageService.deleteMessage=async()=>{throw {code:107335};};
+    await assert.rejects(handle.client.deleteMessage("customer-real|2|9001",message,authorize),error=>error.code==="IM_DELETE_UNAVAILABLE"&&error.status===503&&error.message.includes("消息仍保留"));
 
     assert.ok(listeners.has("onReceiveMessagesModified"));
     assert.ok(listeners.has("onMessageRevokeNotifications"));
@@ -943,7 +955,7 @@ test("real media adapter calls the V2 creators, reports progress, and retries th
   assert.equal(created[0].file, video);
   assert.equal(created[0].name, "clip.mp4");
   assert.equal(created[0].sceneName, undefined);
-  assert.equal(created[0].duration, 2, "milliseconds are passed to NIM as whole seconds");
+  assert.equal(created[0].duration, 1_500, "creator duration stays in milliseconds");
   assert.equal(created[0].width, 640);
   assert.equal(created[0].height, 360);
 
@@ -969,7 +981,7 @@ test("real media adapter calls the V2 creators, reports progress, and retries th
   const audioReply = await handle.client.sendMedia(conversationId, audio, "audio", { authorize, durationMs: 4_200 });
   assert.equal(created[1].kind, "audio");
   assert.equal(created[1].file, audio);
-  assert.equal(created[1].duration, 4);
+  assert.equal(created[1].duration, 4_200);
   assert.equal(created[1].width, undefined);
   assert.equal(audioReply.messageType, 2);
   assert.deepEqual(audioReply.media, {
@@ -998,10 +1010,10 @@ test("real media adapter calls the V2 creators, reports progress, and retries th
     url: "https://nos.example/uploads/file-client-3",
   });
   assert.deepEqual(authorizations, [
-    { conversationId, operation: "send" },
-    { conversationId, operation: "send" },
-    { conversationId, operation: "send" },
-    { conversationId, operation: "send" },
+    {conversationId,operation:"send",messageClientId:"video-client-1",messageType:3},
+    {conversationId,operation:"send",messageClientId:"video-client-1",messageType:3},
+    {conversationId,operation:"send",messageClientId:"audio-client-2",messageType:2},
+    {conversationId,operation:"send",messageClientId:"file-client-3",messageType:6},
   ]);
   await assert.rejects(handle.client.retryMedia(conversationId, "missing-media"), (error) => error instanceof NimMediaSendError && error.kind === "FAILED");
   await handle.dispose();
@@ -1023,10 +1035,10 @@ test("real NIM audio/video/file messages map into the safe media envelope and un
   const videoUrl = "https://nos.example/uploads/in-video";
   const audioUrl = "https://nos.example/uploads/in-audio";
   const fileUrl = "https://nos.example/uploads/in-file";
-  const video = { ...base, messageClientId: "in-video", messageType: 3, attachment: { name: "clip.MP4", size: 3, ext: "mp4", url: videoUrl, width: 640, height: 360, duration: 1.5, md5: "0123456789abcdef0123456789abcdef" } };
+  const video = { ...base, messageClientId: "in-video", messageType: 3, attachment: { name: "clip.MP4", size: 3, ext: "mp4", url: videoUrl, width: 640, height: 360, duration: 1500, md5: "0123456789abcdef0123456789abcdef" } };
   const messages = [
     video,
-    { ...base, messageClientId: "in-audio", messageType: 2, attachment: { name: "voice.aac", size: 2, ext: "aac", url: audioUrl, duration: 3 } },
+    { ...base, messageClientId: "in-audio", messageType: 2, attachment: { name: "voice.aac", size: 2, ext: "aac", url: audioUrl, duration: 3000 } },
     { ...base, messageClientId: "in-file", messageType: 6, attachment: { name: "report.PDF", size: 10, ext: "pdf", url: fileUrl } },
     { ...base, messageClientId: "in-image", messageType: 1, attachment: { imageId: "img-1", url: "https://nos.example/uploads/image" } },
     { ...base, messageClientId: "bad-http", messageType: 3, attachment: { name: "clip.mp4", size: 3, ext: "mp4", url: "http://nos.example/x", width: 1, height: 1, duration: 1 } },
@@ -1037,7 +1049,7 @@ test("real NIM audio/video/file messages map into the safe media envelope and un
     { ...base, messageClientId: "bad-size", messageType: 6, attachment: { name: "x.pdf", size: 50 * 1024 * 1024 + 1, ext: "pdf", url: fileUrl } },
     { ...base, messageClientId: "bad-dim", messageType: 3, attachment: { name: "clip.mp4", size: 3, ext: "mp4", url: videoUrl, width: 9_000, height: 360, duration: 1 } },
     { ...base, messageClientId: "bad-partial-dim", messageType: 3, attachment: { name: "clip.mp4", size: 3, ext: "mp4", url: videoUrl, width: 640, duration: 1 } },
-    { ...base, messageClientId: "bad-duration", messageType: 2, attachment: { name: "voice.aac", size: 2, ext: "aac", url: audioUrl, duration: 86_401 } },
+    { ...base, messageClientId: "bad-duration", messageType: 2, attachment: { name: "voice.aac", size: 2, ext: "aac", url: audioUrl, duration: 86_400_001 } },
     { ...base, messageClientId: "bad-ext", messageType: 6, attachment: { name: "run.exe", size: 3, ext: "exe", url: fileUrl } },
   ];
   listeners.get("onReceiveMessages")(messages);
