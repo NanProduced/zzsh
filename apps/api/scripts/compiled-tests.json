@@ -274,5 +274,6 @@
   "dist/test/im-aftersale.test.js",
   "dist/test/im-read-copy.test.js",
   "dist/test/im-migration-integration.test.js",
-  "dist/test/im-merge-contracts.test.js"
+  "dist/test/im-merge-contracts.test.js",
+  "dist/test/profile-avatar-mounted.test.js"
 ]

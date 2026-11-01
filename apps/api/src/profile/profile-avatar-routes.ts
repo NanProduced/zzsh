@@ -40,7 +40,7 @@ const TOKEN = "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}";
 const AVATAR_VERSION = /^(?:0|[1-9]\d{0,18})$/;
 
 function pathOf(request: SupplyNodeRequest, prefix: string): { path: string; query: URLSearchParams } {
-  const raw = request.url ?? request.originalUrl ?? "/";
+  const raw = request.originalUrl ?? request.url ?? "/";
   const index = raw.indexOf("?");
   const path = (index >= 0 ? raw.slice(0, index) : raw) === prefix ? "/" : (index >= 0 ? raw.slice(0, index) : raw).slice(prefix.length) || "/";
   return { path, query: new URLSearchParams(index >= 0 ? raw.slice(index + 1) : "") };
