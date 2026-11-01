@@ -7,6 +7,7 @@ import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
 import { ADMIN_PERMISSION, requirePermission } from "./admin-authorization";
 import { lockActor } from "./admin-directory";
 import { recordAudit, SecurityApiError, setAuditContext, withTransaction } from "./security-core";
+import { resetAvatarOnCancellation } from "../profile/profile-avatar";
 import type { AuthSecurityNodeRequest, AuthSecurityNodeResponse, AuthSecurityOptions } from "./auth-security";
 
 export const FAKE_REAL_NAME_SCENARIOS = [
@@ -457,6 +458,7 @@ async function changeAccountState(
           WHERE "id" = $1`,
         [context.userId],
       );
+      await resetAvatarOnCancellation(client, context.userId, requestId);
     }
     await client.query(
       `INSERT INTO "zzsh_iam"."user_identity_state"

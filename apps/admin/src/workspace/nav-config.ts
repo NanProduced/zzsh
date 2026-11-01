@@ -128,6 +128,7 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
 
   const users: WorkspaceMenuItem[] = [];
   if (has("user.directory.read")) users.push({ label: "用户管理", icon: UsersRoundIcon, path: "/users", kind: "users" });
+  if (has("profile.avatar.review") || nav.isBoss) users.push({ label: "头像审核", icon: ImageIcon, path: "/avatar-reviews", kind: "avatar-review" });
   if (users.length > 0) {
     items.push({ label: "用户与会员", isTitle: true }, ...users);
   }
@@ -158,6 +159,7 @@ export function titleForPath(pathname: string): string {
   if (pathname === "/audit") return "账号与权限审计";
   if (pathname === "/operation-log") return "操作日志";
   if (pathname === "/users") return "用户管理";
+  if (pathname === "/avatar-reviews") return "头像审核";
   if (pathname.startsWith("/users/")) return "用户详情";
   if (pathname === "/supply/catalog") return "目录维护";
   if (pathname === "/supply/gunsmith") return "改枪码目录";
@@ -218,6 +220,7 @@ export const PAGE_SEARCH_KEYWORDS: Record<string, string[]> = {
   "/finance/period": ["期间核对", "对账", "核对", "period", "dz"],
   "/orders": ["订单", "交易", "orders", "dd"],
   "/users": ["用户管理", "用户", "users", "yh"],
+  "/avatar-reviews": ["头像审核", "头像", "avatar", "review", "txsh"],
   "/approvals": ["审批与审计", "审批", "待办", "工单", "approvals", "sp"],
   "/audit": ["账号与权限审计", "审计", "安全日志", "audit", "sj"],
   "/operation-log": ["操作日志", "全部日志", "审计日志", "operation", "log", "czrz", "rz"],

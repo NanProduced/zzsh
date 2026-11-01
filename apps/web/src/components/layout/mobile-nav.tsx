@@ -82,7 +82,7 @@ function MobileSessionEntry({ onSignIn }: { onSignIn: () => void }) {
     <div className="sheet-user-card" data-testid="sheet-user-card">
       <div className="sheet-user-hero">
         <div className="sheet-user-avatar" aria-hidden="true">
-          {monogram ?? <UserRound size={22} />}
+          {session.avatarUrl ? <img src={session.avatarUrl} alt="" /> : monogram ?? <UserRound size={22} />}
         </div>
         <div className="sheet-user-info">
           <div className="sheet-user-name-row">

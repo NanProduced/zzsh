@@ -1,5 +1,6 @@
 import type { PoolClient } from "pg";
 import { readUserDirectoryBusinessSummaries, type CreditSummary, type MembershipSummary, type UserDirectoryBusinessViewer } from "./user-directory-business-summary";
+import { managedProfileImagePath } from "../profile/profile-avatar";
 
 export type DirectoryUserSummary = { name: string; image: string | null; maskedPhone: string | null; riskFlag?: boolean; membershipSummary?: MembershipSummary; creditSummary?: CreditSummary };
 
@@ -22,7 +23,7 @@ export async function readDirectoryUserSummaries(client: PoolClient, userIds: re
       FROM zzsh_auth_user."user" u LEFT JOIN zzsh_iam.user_risk_flag r ON r.user_id=u.id WHERE u.id=ANY($1::text[])`
       : `SELECT id,name,image,"phoneNumber" AS phone FROM zzsh_auth_user."user" WHERE id=ANY($1::text[])`, [ids],
   )).rows;
-  for (const row of rows) if (ids.includes(row.id)) summaries.set(row.id, { name: row.name, image: row.image, maskedPhone: maskPhoneNumber(row.phone), ...(viewer ? {riskFlag: row.riskFlag === true} : {}) });
+  for (const row of rows) if (ids.includes(row.id)) summaries.set(row.id, { name: row.name, image: managedProfileImagePath(row.image), maskedPhone: maskPhoneNumber(row.phone), ...(viewer ? {riskFlag: row.riskFlag === true} : {}) });
   if (viewer && summaries.size) {
     const business = await readUserDirectoryBusinessSummaries(client, {
       ...viewer,

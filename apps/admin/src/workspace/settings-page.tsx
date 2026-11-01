@@ -35,7 +35,7 @@ type Props = ComponentProps<typeof SettingsView> & {
 };
 
 // 本人资料改名尚未开放：精确说明只读范围，不宣称读取未接通。
-const WRITE_DISABLED = "个人资料仅供查看。";
+const WRITE_DISABLED = "显示名称修改暂未开放；头像可在下方更换。";
 
 export function SettingsWorkspace(props: Props) {
   const { query, snapshot, onOpenPath, onDirtyChange, onQueryChange } = props;
@@ -83,7 +83,7 @@ export function SettingsWorkspace(props: Props) {
   />;
   else if (preview && !examples) content = <p className="p-6 text-sm text-muted-foreground" role="status">正在打开示例布局…</p>;
   else if (section === "profile") content = <ProfileView {...common}
-    load={preview ? examples!.readProfile : readProfile} writeDisabledReason={WRITE_DISABLED} />;
+    load={preview ? examples!.readProfile : readProfile} writeDisabledReason={WRITE_DISABLED} avatarEditor={!preview} />;
   else if (section === "sessions") content = <SessionsView {...common}
     load={preview ? examples!.readSessions : readSessions}
     {...(preview ? { writeDisabledReason: "示例布局不会注销任何真实会话。" } : { revokeSession, revokeOtherSessions })} />;

@@ -23,6 +23,7 @@ import {
   type ReadFailure,
 } from "./model";
 import { SettingsGroup, SettingsNotice, SettingsPageHeader, SettingsRow } from "./settings-shell";
+import { AdminAvatarEditor } from "./avatar-editor";
 
 export type ProfileViewProps = {
   /** 资料读写都绑定到这一身份；切换时清理草稿与旧响应。 */
@@ -35,6 +36,8 @@ export type ProfileViewProps = {
   /** 缺少该回调即表示本人资料写合同未接入：界面给出原因并禁用，不放一个必然失败的按钮。 */
   saveDisplayName?: (input: { displayName: string }) => Promise<unknown>;
   writeDisabledReason?: string;
+  /** 真实资料页才挂载头像读写；示例预览和合同测试不触发头像网络请求。 */
+  avatarEditor?: boolean;
   /** 既有会话快照刷新回调；合同 §1.2 说明 admin realm 无缓存，刷新即可看到新名称。 */
   onSessionRefresh?: () => Promise<unknown> | unknown;
   onDirtyChange?: (dirty: boolean) => void;
@@ -63,6 +66,7 @@ export function ProfileView({
   load,
   saveDisplayName,
   writeDisabledReason,
+  avatarEditor = false,
   onSessionRefresh,
   onDirtyChange,
 }: ProfileViewProps) {
@@ -339,7 +343,7 @@ export function ProfileView({
           ) : null}
           {refreshFailure ? <SettingsNotice tone="warning">{refreshFailure}</SettingsNotice> : null}
 
-          <SettingsGroup title="身份标识" description="由平台分配与维护，本页只读。">
+          <SettingsGroup title="身份标识" description="由平台分配与维护；头像可自行更换，登录编号只读。">
             <div className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center">
               <Avatar className="size-14">
                 {facts.avatarUrl ? <AvatarImage src={facts.avatarUrl} alt="" /> : null}
@@ -348,10 +352,23 @@ export function ProfileView({
               <div className="min-w-0 flex-1">
                 <div className="text-sm font-medium text-foreground break-words [overflow-wrap:anywhere]">{facts.displayName}</div>
                 <p className="text-muted-foreground mt-0.5 text-xs">
-                  {facts.avatarUrl ? "头像来自服务端已返回的资料；本页不修改头像。" : "未返回头像，按姓名首字显示。"}
+                  {facts.avatarUrl ? "头像来自服务端已返回的资料；默认头像即时生效，自定义头像先审后显。" : "未返回头像，按姓名首字显示。"}
                 </p>
               </div>
             </div>
+            {avatarEditor ? <AdminAvatarEditor
+              adminUserId={adminUserId}
+              sessionId={sessionId}
+              fallbackInitial={initial}
+              disabledReason={locked ? "当前会话已锁定，解锁后可更换头像。" : accountStatus !== "ACTIVE" ? "账号状态不允许修改头像。" : undefined}
+              onSessionRefresh={async () => {
+                try {
+                  await onSessionRefresh?.();
+                } finally {
+                  await read({ silent: true });
+                }
+              }}
+            /> : null}
             <SettingsRow
               title="ZZ 登录编号"
               description="用于工单与线下核对的稳定编号；不是内部标识，也不随登录邮箱变化。"

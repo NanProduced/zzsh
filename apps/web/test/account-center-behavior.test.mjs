@@ -75,6 +75,7 @@ function loadCenter(session) {
     if (name === "./controlled-withdrawal") return { ControlledWithdrawal: () => null };
     // 昵称编辑入口迁到总览后由其专属用例覆盖（test/nickname-edit.test.mjs）；本文件只桩掉渲染。
     if (name === "./nickname-edit") return { NicknameEditEntry: () => null };
+    if (name === "./avatar-edit") return { AvatarEditEntry: () => null };
     if (name === "@/components/auth/auth-form") return {
       WebAuthError: class WebAuthError extends Error { constructor(status) { super("AUTH_ERROR"); this.status = status; } },
       webAuthRequest: async (path, _body, signal) => {

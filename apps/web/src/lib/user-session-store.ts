@@ -6,13 +6,15 @@ export type UserSessionSnapshot = {
   userId: string | null;
   /** Presentation name of the confirmed user (never a guest placeholder). */
   displayName: string | null;
+  /** Server-managed avatar path; null keeps the monogram fallback. */
+  avatarUrl: string | null;
   /** Bumped only when the confirmed user actually changes; same-user refresh keeps it. */
   identityVersion: number;
   /** Bumped on every state transition, including re-confirmation of the same user. */
   revision: number;
 };
 
-export type UserSessionResult = { userId: string | null; displayName?: string | null };
+export type UserSessionResult = { userId: string | null; displayName?: string | null; avatarUrl?: string | null };
 export interface UserSessionTransport {
   session(signal: AbortSignal): Promise<UserSessionResult>;
 }
@@ -35,6 +37,7 @@ export class UserSessionStore {
   #userId: string | null = null;
   #confirmedUserId: string | null = null;
   #displayName: string | null = null;
+  #avatarUrl: string | null = null;
   #identityVersion = 0;
   #revision = 0;
   #requestSeq = 0;
@@ -52,6 +55,7 @@ export class UserSessionStore {
       status: this.#status,
       userId: authenticated ? this.#userId : null,
       displayName: authenticated ? this.#displayName : null,
+      avatarUrl: authenticated ? this.#avatarUrl : null,
       identityVersion: this.#identityVersion,
       revision: this.#revision,
     };
@@ -83,6 +87,7 @@ export class UserSessionStore {
     this.#status = "loading";
     this.#userId = null;
     this.#displayName = null;
+    this.#avatarUrl = null;
     this.#emit();
     let result: UserSessionResult;
     try {
@@ -100,6 +105,7 @@ export class UserSessionStore {
     }
     this.#userId = result.userId;
     this.#displayName = result.displayName ?? null;
+    this.#avatarUrl = result.avatarUrl ?? null;
     this.#status = result.userId ? "authenticated" : "guest";
     this.#emit();
     return this.#status;

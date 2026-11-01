@@ -77,6 +77,7 @@ test("page search only lists implemented pages in the current permission set", (
     "/supply/gunsmith",
     "/content",
     "/orders",
+    "/avatar-reviews",
     "/approvals",
     "/audit",
     "/settings?section=security",

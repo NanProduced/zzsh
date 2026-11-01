@@ -251,5 +251,8 @@
   "dist/test/distribution-reversal-scope.test.js",
   "dist/test/distribution-maintenance-batch.test.js",
   "dist/test/distribution-due-worker.test.js",
-  "dist/test/distribution-discovery-pagination.test.js"
+  "dist/test/distribution-discovery-pagination.test.js",
+  "dist/test/profile-avatar.test.js",
+  "dist/test/profile-avatar-presets.test.js",
+  "dist/test/profile-avatar-route-writes.test.js"
 ]

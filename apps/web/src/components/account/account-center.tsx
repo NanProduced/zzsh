@@ -29,6 +29,7 @@ import { orderTermLabel, orderUrl } from "@/components/order/order-presentation"
 import { orderAccountTitle, orderAmountFacts } from "@/lib/order-display";
 import { EntitlementBadge, formatScopeName, GrowthMemberCardArt, GROWTH_TIER_LABELS, MembershipCenterView } from "./membership-center";
 import { NicknameEditEntry } from "./nickname-edit";
+import { AvatarEditEntry } from "./avatar-edit";
 import type { SecurityNicknameDraft, SecurityPendingWrite } from "./account-security-controls";
 import "./account-center.css";
 
@@ -190,13 +191,14 @@ export function AccountGrowthHeader({
       <div className="account-growth-header">
         <div className="account-growth-user-col">
           <span className="account-growth-avatar" aria-hidden="true">
-            {monogram ?? <UserRound size={32} />}
+            {session.avatarUrl ? <img src={session.avatarUrl} alt="" /> : monogram ?? <UserRound size={32} />}
           </span>
           <div className="account-growth-user-info">
             <span className="account-growth-welcome">欢迎回来</span>
             <div className="account-growth-name-row">
             <h2 className="account-growth-name" title={name}>{name}</h2>
             {/* 昵称编辑已从账号安全页迁到此处（Owner 裁定）：头像/昵称旁的轻量“编辑资料”入口。 */}
+            {userId ? <AvatarEditEntry userId={userId} /> : null}
             {userId ? <NicknameEditEntry userId={userId} nicknameDraft={nicknameDraft} pendingWrite={pendingWrite} /> : null}
             <div className="account-growth-tier-row">
               {growthState.status === "ready" && tier ? (

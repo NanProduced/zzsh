@@ -23,3 +23,16 @@ OSS 目标使用 `OSS_BUCKET`、`OSS_REGION`、`OSS_ENDPOINT`、`OSS_OBJECT_PREF
 每次初始化保留：代码版本、源/目标数据库快照标识、Bucket/前缀、对象与引用清单及其 SHA256、逐对象上传/复用/失败/读回结果、完整数量与字节数、执行时间、运行身份引用及回退目标。记录不含凭据或签名 URL。复制完成后仍保留源 Bucket 与本地恢复副本，删除由单独清理决定负责。
 
 最后在同版本应用上验证目录/账号/内容显示、正式上传与原键重试、私有原图授权与跨身份拒绝、素材撤回后公开 URL 拒绝、重启后读取及所选凭据的持续可用性。对象复制成功、数据库迁移成功和业务页面验收分别记录。
+
+## 默认头像对象
+
+四个默认头像是预审、内容寻址的 256×256 WebP 衍生图，清单与对象字节在 `apps/api/assets/profile-avatars/`。它们和其他媒体共用同一个 backend，不需要原图上传：
+
+```bash
+npm run profile:avatar-presets -w @zzsh/api -- check
+npm run profile:avatar-presets -w @zzsh/api -- upload
+```
+
+`check` 只读并逐项校验本地清单 SHA、解码尺寸和对象读回；`upload` 只写入缺失对象，不删除、不覆盖未知同键内容。命令的逐 preset 输出包含 `presetId`、版本、`storageKey`、SHA、MIME、尺寸、字节数、backend 和 `PRESENT/UPLOADED/FAILED`；任一失败退出码为 1。未执行初始化或对象缺失时，默认头像公开读取返回 404，不得把头像称为已上线；配置 OSS 后也不会因为没有对象而回退 local。
+
+头像原图与自定义待审图只走私有审核读取；公开接口只返回已审核且仍为当前绑定的公开衍生图。默认头像对象的初始化不替代私有权限、上传、CDN 和重启后读取验收。

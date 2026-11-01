@@ -19,7 +19,11 @@ export const ALLOWED_IMAGE_MIMES = ["image/jpeg", "image/png", "image/webp"] as 
 export type ImageMime = (typeof ALLOWED_IMAGE_MIMES)[number];
 
 export class MediaValidationError extends Error {}
-export class MediaStorageError extends Error {}
+export class MediaStorageError extends Error {
+  constructor(message: string, readonly code: "MEDIA_OBJECT_NOT_FOUND" | "MEDIA_STORAGE_UNAVAILABLE" = "MEDIA_STORAGE_UNAVAILABLE") {
+    super(message);
+  }
+}
 
 export type ImageInfo = { mime: ImageMime; width: number; height: number };
 
@@ -126,8 +130,9 @@ export function createLocalMediaStorage(root: string): MediaStorage {
       if (!STORAGE_KEY_PATTERN.test(storageKey)) throw new MediaStorageError("storage key is invalid");
       try {
         return await readFile(join(root, storageKey.slice(0, 2), storageKey));
-      } catch {
-        throw new MediaStorageError("stored media is unavailable");
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        throw new MediaStorageError("stored media is unavailable", code === "ENOENT" ? "MEDIA_OBJECT_NOT_FOUND" : "MEDIA_STORAGE_UNAVAILABLE");
       }
     },
   };
@@ -169,8 +174,15 @@ export async function createMediaUploadIntent(
   let accountId: string | null = null;
   let ownerUserId: string | null = null;
   let purpose: string;
-  if (actor.realm === "admin") {
+  let ownershipKind: "PLATFORM_CATALOG" | "PLATFORM_CONTENT" | "USER_SUPPLY" | "USER_AVATAR" | "ADMIN_AVATAR";
+  if (input.purpose === "AVATAR") {
+    if (input.gameId !== undefined || input.accountId !== undefined) throw invalid("Avatar uploads cannot target a game or rental account");
+    purpose = "AVATAR";
+    ownershipKind = actor.realm === "admin" ? "ADMIN_AVATAR" : "USER_AVATAR";
+    ownerUserId = actor.realm === "user" ? actor.userId! : null;
+  } else if (actor.realm === "admin") {
     purpose = input.purpose;
+    ownershipKind = purpose === "CONTENT_MEDIA" ? "PLATFORM_CONTENT" : "PLATFORM_CATALOG";
     if (input.accountId !== undefined) throw invalid("Platform uploads cannot target a rental account");
     if (purpose === "CONTENT_MEDIA") {
       // Platform-level content media has no game affiliation.
@@ -192,6 +204,7 @@ export async function createMediaUploadIntent(
     const row = account.rows[0];
     if (!row || row.gameId !== input.gameId || row.ownerUserId !== actor.userId) throw notFound();
     purpose = input.purpose;
+    ownershipKind = "USER_SUPPLY";
     if (!["ACCOUNT_EVIDENCE", "ACCOUNT_DISPLAY"].includes(purpose)) throw invalid("Purpose is not allowed");
     accountId = input.accountId;
     ownerUserId = actor.userId!;
@@ -211,7 +224,7 @@ export async function createMediaUploadIntent(
       input.gameId ?? null,
       accountId,
       purpose,
-      actor.realm === "admin" ? (purpose === "CONTENT_MEDIA" ? "PLATFORM_CONTENT" : "PLATFORM_CATALOG") : "USER_SUPPLY",
+      ownershipKind,
       ownerUserId,
       actor.realm,
       actor.realm === "user" ? actor.userId : null,
@@ -422,6 +435,7 @@ type MediaAssetRow = {
   technicalState: string;
   reviewReason: string | null;
   revision: string;
+  createdAt: Date;
 };
 
 export async function loadMediaAsset(
@@ -433,7 +447,7 @@ export async function loadMediaAsset(
     `SELECT "id", "game_id" AS "gameId", "account_id" AS "accountId", "purpose", "ownership_kind" AS "ownershipKind", "owner_user_id" AS "ownerUserId",
             "uploaded_by_realm" AS "uploadedByRealm", "uploaded_by_user_id" AS "uploadedByUserId", "uploaded_by_admin_id" AS "uploadedByAdminId",
             "storage_key" AS "storageKey", "public_storage_key" AS "publicStorageKey", "content_hash" AS "contentHash", "mime", "byte_size"::text AS "byteSize",
-            "width", "height", "access_class" AS "accessClass", "review_state" AS "reviewState", "technical_state" AS "technicalState", "review_reason" AS "reviewReason", "revision"::text AS "revision"
+            "width", "height", "access_class" AS "accessClass", "review_state" AS "reviewState", "technical_state" AS "technicalState", "review_reason" AS "reviewReason", "revision"::text AS "revision", "created_at" AS "createdAt"
        FROM "zzsh_supply"."media_asset" WHERE "id" = $1${forUpdate ? " FOR UPDATE" : ""}`,
     [assetId],
   );
@@ -493,7 +507,7 @@ export async function listAdminMediaReviews(
 ): Promise<{ items: Record<string, unknown>[]; nextCursor: string | null; limit: number }> {
   assertGameScopeUsable(await readAdminGameScope(client, query.adminId), query.isBoss);
   const parameters: unknown[] = [query.state];
-  const conditions = [`a."review_state" = $1`];
+  const conditions = [`a."review_state" = $1`, `a."purpose" <> 'AVATAR'`];
   if (query.ownershipKind) {
     parameters.push(query.ownershipKind);
     conditions.push(`a."ownership_kind" = $${parameters.length}`);
@@ -582,9 +596,11 @@ export async function reviewMediaAsset(
   const asset = await lockMediaAsset(client, assetId, lockPublishingAccount);
   await assertLockedAccountMediaContext(client, asset, input);
   // Platform content media has no game scope; its authorization is the content
-  // permission checked by the route. Catalog/user media keeps the game scope check.
+  // permission checked by the route. Avatar media has no game scope either and
+  // is authorized by the separate profile.avatar.review permission there.
   if (asset.gameId === null) {
-    if (asset.ownershipKind !== "PLATFORM_CONTENT" || asset.purpose !== "CONTENT_MEDIA") throw notFound();
+    const avatar = asset.purpose === "AVATAR" && (asset.ownershipKind === "USER_AVATAR" || asset.ownershipKind === "ADMIN_AVATAR");
+    if (!avatar && (asset.ownershipKind !== "PLATFORM_CONTENT" || asset.purpose !== "CONTENT_MEDIA")) throw notFound();
   } else {
     await assertGameScope(client, adminUserId, isBoss, asset.gameId);
   }
@@ -596,14 +612,18 @@ export async function reviewMediaAsset(
   if (input.decision === "APPROVE" && asset.ownershipKind === "USER_SUPPLY" && asset.purpose === "ACCOUNT_DISPLAY" && asset.technicalState !== "READY") {
     throw conflict("Media must pass technical validation before recovery");
   }
+  if (input.decision === "APPROVE" && asset.purpose === "AVATAR" && asset.technicalState !== "READY") {
+    throw conflict("Media must pass technical validation before approval");
+  }
   const nextState = input.decision === "APPROVE" ? "APPROVED" : input.decision === "REJECT" ? "REJECTED" : "QUARANTINED";
   const visibility = input.visibility ?? "PRIVATE_REVIEW";
   if (visibility !== "PUBLIC_DISPLAY" && visibility !== "PRIVATE_REVIEW") throw invalid("Visibility is invalid");
   if (visibility === "PUBLIC_DISPLAY") {
     if (nextState !== "APPROVED") throw invalid("Only approved media can be public");
-    if (asset.ownershipKind !== "PLATFORM_CATALOG" && asset.ownershipKind !== "PLATFORM_CONTENT" && asset.purpose !== "ACCOUNT_DISPLAY") throw invalid("Only display images can be public");
+    if (asset.ownershipKind !== "PLATFORM_CATALOG" && asset.ownershipKind !== "PLATFORM_CONTENT" && asset.purpose !== "ACCOUNT_DISPLAY" && asset.purpose !== "AVATAR") throw invalid("Only display images can be public");
     if (asset.ownershipKind === "USER_SUPPLY" && asset.purpose === "ACCOUNT_DISPLAY" && asset.technicalState !== "READY") throw conflict("Media is not technically ready for public display");
     if (!asset.publicStorageKey) throw conflict("A validated public derivative is required; upload the image again");
+    if (asset.purpose === "AVATAR" && asset.technicalState !== "READY") throw conflict("Media is not technically ready for public display");
   }
   await client.query(
     `UPDATE "zzsh_supply"."media_asset"

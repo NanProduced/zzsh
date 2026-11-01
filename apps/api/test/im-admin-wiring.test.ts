@@ -19,11 +19,18 @@ type Harness = {
 
 function harness(): Harness {
   const state: Harness["state"] = { phase: "idle", commits: 0, rollbacks: 0, adminInserts: 0, intentWrites: 0 };
+  let profile: Record<string, unknown> | null = null;
   const client = {
-    async query(text: string): Promise<{ rows: unknown[] }> {
+    async query(text: string, values: unknown[] = []): Promise<{ rows: unknown[] }> {
       if (text === "BEGIN") { state.phase = "transaction"; return { rows: [] }; }
       if (text === "COMMIT") { state.phase = "committed"; state.commits += 1; return { rows: [] }; }
-      if (text === "ROLLBACK") { state.phase = "rolled-back"; state.rollbacks += 1; return { rows: [] }; }
+      if (text === "ROLLBACK") { profile = null; state.phase = "rolled-back"; state.rollbacks += 1; return { rows: [] }; }
+      if (text.includes('FROM "zzsh_supply"."profile_avatar"')) return { rows: profile ? [profile] : [] };
+      if (text.startsWith('INSERT INTO "zzsh_supply"."profile_avatar"')) {
+        if (profile) return { rows: [] };
+        profile = {realm:String(values[0]),subjectId:String(values[1]),defaultPresetId:String(values[2]),currentKind:"DEFAULT",currentPresetId:String(values[3]),currentAssetId:null,pendingAssetId:null,latestUploadIntentId:null,revision:"1",currentVersion:"1",lastReviewAssetId:null,lastReviewState:null,lastReviewReason:null,lastReviewedAt:null,lastReviewApplied:false,updatedAt:new Date("2026-11-01T00:00:00Z")};
+        return { rows: [profile] };
+      }
       if (text.includes('INSERT INTO "zzsh_auth_admin"."user"')) state.adminInserts += 1;
       if (text.includes('FROM "zzsh_iam"."admin_security"')) {
         return { rows: [{ status: "ACTIVE", isBoss: true, passwordChangeRequired: false }] };

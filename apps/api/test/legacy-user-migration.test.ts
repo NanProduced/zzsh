@@ -58,6 +58,7 @@ class FakeClient {
   readonly users = new Map<string, UserRow>();
   readonly credentials = new Map<string, CredentialRow>();
   readonly identities = new Map<string, IdentityRow>();
+  readonly profileAvatars = new Map<string, Record<string, unknown>>();
   readonly audits: Array<{ object_id: string; action: string; details: Record<string, unknown> }> = [];
   readonly idempotency = new Map<string, { requestFingerprint: string; responseStatus: number; responseBody: unknown; publishRequired: boolean }>();
   readonly maps = new Map<string, MapRow>();
@@ -145,6 +146,20 @@ class FakeClient {
     }
     if (sql.startsWith("INSERT INTO zzsh_iam.audit_event") || sql.startsWith('INSERT INTO "zzsh_iam"."audit_event"')) {
       this.audits.push({ object_id: String(values[6]), action: String(values[4]), details: JSON.parse(String(values[10])) });
+      return { rows: [], rowCount: 1 };
+    }
+    if (sql.includes('FROM "zzsh_supply"."profile_avatar"')) {
+      const row = this.profileAvatars.get(JSON.stringify(values.slice(0, 2)));
+      return { rows: row ? [row as T] : [], rowCount: row ? 1 : 0 };
+    }
+    if (sql.startsWith('INSERT INTO "zzsh_supply"."profile_avatar"')) {
+      const key = JSON.stringify(values.slice(0, 2));
+      if (this.profileAvatars.has(key)) return { rows: [], rowCount: 0 };
+      const row = {realm:String(values[0]),subjectId:String(values[1]),defaultPresetId:String(values[2]),currentKind:"DEFAULT",currentPresetId:String(values[3]),currentAssetId:null,pendingAssetId:null,latestUploadIntentId:null,revision:"1",currentVersion:"1",lastReviewAssetId:null,lastReviewState:null,lastReviewReason:null,lastReviewedAt:null,lastReviewApplied:false,updatedAt:new Date("2026-11-01T00:00:00Z")};
+      this.profileAvatars.set(key, row);
+      return { rows: [row as T], rowCount: 1 };
+    }
+    if (sql.startsWith('UPDATE "zzsh_auth_user"."user" SET "image"')) {
       return { rows: [], rowCount: 1 };
     }
     if (sql.startsWith('INSERT INTO "zzsh_auth_user"."user"')) {

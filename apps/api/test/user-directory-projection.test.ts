@@ -150,14 +150,14 @@ test('order snapshots retain paid cancellation and missing paid timestamps; inte
 
 test('current user summaries require explicit directory permission, batch stable IDs and contain only masked fields',async()=>{
   const queries:{sql:string;values:unknown[]}[]=[];
-  const c={query:async(sql:string,values:unknown[]=[])=>{queries.push({sql,values});return {rows:[{id:'u1',name:'当前昵称',image:'https://example.test/avatar.png',phone:'+8613800138000',identityNumber:'fixture-private',availableCents:'999'}]};}} as unknown as PoolClient;
+  const c={query:async(sql:string,values:unknown[]=[])=>{queries.push({sql,values});return {rows:[{id:'u1',name:'当前昵称',image:'/api/v1/profile/avatars/user/u1/1',phone:'+8613800138000',identityNumber:'fixture-private',availableCents:'999'}]};}} as unknown as PoolClient;
   for(const permissions of [undefined,new Set<string>()])assert.equal((await readDirectoryUserSummaries(c,['u1'],permissions)).size,0);
   const allowed=new Set(['user.directory.read']);
   assert.equal((await readDirectoryUserSummaries(c,[],allowed)).size,0);assert.equal(queries.length,0);
   const summaries=await readDirectoryUserSummaries(c,['u1','u1','missing'],allowed);
   assert.equal(queries.length,1);assert.deepEqual(queries[0]!.values,[['u1','missing']]);
   assert.match(queries[0]!.sql,/WHERE id=ANY\(\$1::text\[\]\)/);
-  assert.deepEqual(summaries.get('u1'),{name:'当前昵称',image:'https://example.test/avatar.png',maskedPhone:'+86138****8000'});
+  assert.deepEqual(summaries.get('u1'),{name:'当前昵称',image:'/api/v1/profile/avatars/user/u1/1',maskedPhone:'+86138****8000'});
   assert.equal(summaries.has('missing'),false);
   assert.equal(JSON.stringify([...summaries.values()]).includes('fixture-private'),false);
   assert.equal(JSON.stringify([...summaries.values()]).includes('999'),false);
