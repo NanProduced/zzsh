@@ -388,9 +388,9 @@ test('user detail order link carries role and status and return path preserves t
 });
 
 test('finance origin link and return navigation preserves user detail section', async (t) => {
-  const { registerFinanceOrigin } = await vite.ssrLoadModule('/src/views/admin-finance-view.tsx');
+  const { registerFinanceOrigin, financeContextIdentity } = await vite.ssrLoadModule('/src/views/admin-finance-view.tsx');
   const snap = snapshot(['finance.read', 'user.directory.read']);
-  const identity = `${snap.adminUserId}:${snap.session.id}:${[...snap.permissions].sort().join('|')}`;
+  const identity = financeContextIdentity(snap);
   const token = registerFinanceOrigin('/users/user_normal?section=finance', identity);
   const financeTab = { id: 'finance-user', title: '资金详情', path: '/finance/users/user_normal', query: { origin: token }, closable: true, kind: 'finance-user', objectId: 'user_normal' };
   const h = await mount(t, financeTab, snap);

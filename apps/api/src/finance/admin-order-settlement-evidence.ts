@@ -12,6 +12,7 @@ export type AdminOrderSettlementEvidence={
  captured:OrderSettlementMoney;ownerNet:OrderSettlementMoney;refundPayable:OrderSettlementMoney;refunded:OrderSettlementMoney;historicalRefund:OrderSettlementMoney;
  /** The verified posting's platform component. It is not net profit and excludes distribution/channel costs. */
  platformContribution:OrderSettlementMoney;
+ platformComponents?:{code:string;cents:string;payer:'OWNER'|'RENTER'|'NONE'|null;feeBase:string|null;feeRate:string|null}[];
  refundDueAt:string|null;channel:{state:'UNKNOWN';reference:null};
  dutyRefs:{documentRef:string|null;kind:string;state:string;amount:OrderSettlementMoney}[];reasonCodes:string[];
 };
@@ -42,7 +43,11 @@ function nativeReceipt(order:FinanceOrderFact,entries:readonly FinanceEntry[],ba
   }catch{balanced=false;}
  }
  if(!balanced)return{...base,reasonCodes:['SETTLEMENT_ORIGINAL_RECEIPT_INCONSISTENT']};
- return{...base,posting:{state:'POSTED',ref:postingId,postedAt},captured,ownerNet,refundPayable,platformContribution:platform,refundDueAt,reasonCodes:['REFUND_PAYABLE_NOT_CHANNEL_PAYMENT','PLATFORM_CONTRIBUTION_IS_NOT_NET_PROFIT']};
+ return{...base,posting:{state:'POSTED',ref:postingId,postedAt},captured,ownerNet,refundPayable,platformContribution:platform,refundDueAt,
+  platformComponents:rows.filter(row=>row.accountCode?.startsWith('PLATFORM_')).map(row=>({code:row.accountCode!,cents:exactCents(row.deltaCents),
+   payer:['OWNER','RENTER','NONE'].includes(row.evidence.feePayer??'')?row.evidence.feePayer as 'OWNER'|'RENTER'|'NONE':null,
+   feeBase:row.evidence.feeBase??null,feeRate:row.evidence.feeRate??null})),
+  reasonCodes:['REFUND_PAYABLE_NOT_CHANNEL_PAYMENT','PLATFORM_CONTRIBUTION_IS_NOT_NET_PROFIT']};
 }
 /** No quote recalculation, current policy lookup, financial write or channel result inference. */
 export function projectAdminOrderSettlementEvidence(order:FinanceOrderFact,entries:readonly FinanceEntry[],legacy?:OrderSettlementFacts):AdminOrderSettlementEvidence{

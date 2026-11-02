@@ -7,6 +7,8 @@ import { parseLegacyReadSnapshot, type LegacyReadSnapshot } from "../supply/lega
 import { normalizeLegacyObservationInput, type LegacyObservationInput } from "../supply/legacy-observation";
 import { legacyOwnerEvidenceDigest, legacyOwnerUserId, normalizeLegacyOwnerInput, type LegacyOwnerEvidence, type LegacyOwnerMigrationInput } from "../supply/legacy-user-migration";
 import { legacyAccountId, type LegacyAccountCreationInput } from "./legacy-account-seam";
+import { normalizeMainlandPhone } from "../auth/phone-number";
+import { planLegacyContactProjections, type LegacyContactProjection } from "./legacy-contact-projection";
 
 export const USER_ORDER_PLAN_MODE = "PLAN_ONLY" as const;
 const DIGEST = /^[a-f0-9]{64}$/;
@@ -47,7 +49,9 @@ export function projectIdentityStatus(status: { deleted: boolean; disabled: bool
 
 export type UserSourceRow = {
   id: string;
-  mobile: string;
+  mobile: string | null;
+  sn?: string;
+  contactProjection?: LegacyContactProjection;
   nickname: string;
   is_delete: unknown;
   is_disable: unknown;
@@ -97,6 +101,7 @@ export function planLegacyUser(row: UserSourceRow, seenMobiles: ReadonlySet<stri
     evidenceRef: row.evidenceRef,
     nickname: row.nickname,
     mobile: row.mobile,
+    ...(row.contactProjection ? { contactProjection: row.contactProjection } : {}),
     sourceCreatedAt: sourceTimestamp(row.createTime),
     sourceUpdatedAt: sourceTimestamp(row.updateTime),
     status: { realNameBound: flags.realNameBound, ageAdult: row.ageAdult, disabled: flags.disabled, deleted: flags.deleted },
@@ -110,7 +115,7 @@ export function planLegacyUser(row: UserSourceRow, seenMobiles: ReadonlySet<stri
     const writerInput: LegacyOwnerMigrationInput = { evidence, evidenceDigest };
     const normalized = normalizeLegacyOwnerInput(writerInput);
     const canonicalMobile = normalized.evidence.mobile;
-    if (seenMobiles.has(canonicalMobile)) return { parameterReady: false, disposition: "ISOLATED" as const, reason: "MOBILE_DUPLICATE", writeAllowed: false as const, writes: 0 };
+    if (!normalized.evidence.contactProjection && canonicalMobile !== null && seenMobiles.has(canonicalMobile)) return { parameterReady: false, disposition: "ISOLATED" as const, reason: "MOBILE_DUPLICATE", writeAllowed: false as const, writes: 0 };
     // Not writer-ready, but the row still holds its phone so the winner stays the smallest source id.
     if (flags.highRisk === null) return { parameterReady: false, disposition: "ISOLATED" as const, reason: "FIELD_NOT_EXTRACTED:is_high_risk", claimedMobile: canonicalMobile, writeAllowed: false as const, writes: 0 };
     const projected = projectIdentityStatus(normalized.evidence.status);
@@ -149,11 +154,32 @@ export function planLegacyUserBatch(rows: readonly UserSourceRow[], seenMobiles:
   });
   const results = ordered.map(row => {
     const item = planLegacyUser(row, planned);
-    if (item.disposition === "PARAMETER_READY") planned.add(item.writerInput.evidence.mobile);
+    if (item.disposition === "PARAMETER_READY" && item.writerInput.evidence.mobile !== null) planned.add(item.writerInput.evidence.mobile);
     else if ("claimedMobile" in item && typeof item.claimedMobile === "string") planned.add(item.claimedMobile);
     return item;
   });
   return { mode: USER_ORDER_PLAN_MODE, writes: 0, parameterReady: results.filter(item => item.parameterReady).length, isolated: results.filter(item => item.disposition === "ISOLATED").length, results };
+}
+
+/** Separates real business subjects from authentication contact ownership without changing V1 frozen plans. */
+export function planLegacyUserContactBatch(rows: readonly (UserSourceRow & { sn: string })[]) {
+  const contacts = planLegacyContactProjections(rows.map(row => ({
+    legacyId: row.id, sourceSn: row.sn, sourceDigest: row.sourceDigest,
+    mobile: row.mobile, deleted: binaryFlag(row.is_delete, "is_delete"), disabled: binaryFlag(row.is_disable, "is_disable"),
+    sourceContactRef: row.evidenceRef + ":mobile", sourceContactDigest: sha256(canonicalizeContact(row.id, row.mobile, row.sourceDigest)),
+  })));
+  const results = [...rows].sort((a, b) => sourceKey(a.id) < sourceKey(b.id) ? -1 : sourceKey(a.id) > sourceKey(b.id) ? 1 : 0).map(row => {
+    const normalized = normalizeMainlandPhone(row.mobile);
+    return planLegacyUser({ ...row, mobile: normalized === null ? null : normalized.slice(3), contactProjection: contacts.get(row.id)! }, new Set());
+  });
+  return { mode: USER_ORDER_PLAN_MODE, contract: "legacy-contact-projection-v1" as const, writes: 0, writeAllowed: false as const,
+    parameterReady: results.filter(r => r.parameterReady).length, isolated: results.filter(r => r.disposition === "ISOLATED").length,
+    contacts, results };
+}
+
+function canonicalizeContact(legacyId: string, mobile: string | null, sourceDigest: string) {
+  // A reference/digest retains original contact evidence; no raw contact enters the target audit.
+  return JSON.stringify(["legacy_mysql_restore", "la_user", legacyId, sourceDigest, "mobile", mobile]);
 }
 
 export function publicUserPlan(planned: ReturnType<typeof planLegacyUser>) {

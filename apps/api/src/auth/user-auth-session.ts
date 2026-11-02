@@ -6,7 +6,7 @@ import { normalizeMainlandPhone } from "./phone-number";
 import { SecurityApiError, verifyUserCredentialInTransaction, withTransaction } from "./auth-security";
 import { parsePlatformLegalAcceptance, recordPlatformAcceptances, verifyPlatformLegalAcceptance } from "../legal/legal-documents";
 import { z } from "zod";
-import { hasLegacyPhoneConflict } from "./legacy-login";
+import { hasLegacyPhoneConflict, resolveLegacyNumberLogin } from "./legacy-login";
 
 type AuthEndpoint = Parameters<typeof import("better-auth/cookies").setSessionCookie>[0];
 
@@ -86,5 +86,43 @@ export function buildTransactionalPhoneSignIn(
     });
     await setSessionCookie(ctx, authenticated);
     return ctx.json({ status: true, userId: authenticated.user.id });
+  });
+}
+
+/** Internal dispatch only: the public allowlist deliberately excludes this SDK endpoint. */
+export function buildTransactionalLegacyNumberSignIn(
+  pool: Pool, createAuthEndpoint: typeof import("better-auth/api").createAuthEndpoint,
+  APIError: typeof import("better-auth/api").APIError,
+  setSessionCookie: typeof import("better-auth/cookies").setSessionCookie,
+) {
+  return createAuthEndpoint("/sign-in/legacy-number", {
+    method: "POST", metadata: { noStore: true },
+    body: z.object({ identifier: z.string().min(1).max(128), password: z.string().min(1), legalAcceptance: z.unknown().optional() }).strict(),
+  }, async (ctx) => {
+    const identifier=ctx.body.identifier;
+    if (identifier !== identifier.trim() || /[\x00-\x1f\x7f]/.test(identifier)) throw new APIError("BAD_REQUEST", { message: "Invalid authentication request" });
+    const rejected=()=>new APIError("UNAUTHORIZED", { message: "Invalid account number or password" });
+    const authenticated=await withTransaction(pool,async(client)=>{
+      const target=await resolveLegacyNumberLogin(client,identifier);
+      if (!target) throw rejected();
+      const locked=await client.query<{id:string}>(`SELECT id FROM zzsh_auth_user."user" WHERE id=$1 FOR UPDATE`,[target.userId]);
+      // Recheck the exact public-number projection after obtaining the same user lock as phone sign-in.
+      const current=await resolveLegacyNumberLogin(client,identifier);
+      if (locked.rows.length!==1 || current?.userId!==target.userId) throw rejected();
+      const requestId=ctx.headers?.get("x-request-id")??"auth-legacy-number-sign-in";
+      if (await verifyUserCredentialInTransaction(client,(value,hash)=>ctx.context.password.verify({password:value,hash}),ctx.context.password.hash,
+        {userId:target.userId},ctx.body.password,requestId,"sign-in")!=="retry") throw rejected();
+      const legal=await verifyPlatformLegalAcceptance(client,ctx.body.legalAcceptance);
+      const acceptance=legal.required?parsePlatformLegalAcceptance(ctx.body.legalAcceptance):undefined;
+      const result=await createTransactionalUserSession(client,ctx,target.userId);
+      if (acceptance){await verifyPlatformLegalAcceptance(client,acceptance);await recordPlatformAcceptances(client,result.user.id,acceptance,"LOGIN",requestId);}
+      return result;
+    }).catch((error:unknown)=>{
+      if(error instanceof SecurityApiError){const status=error.status===400?"BAD_REQUEST":error.status===403?"FORBIDDEN":error.status===409?"CONFLICT":error.status===503?"SERVICE_UNAVAILABLE":"INTERNAL_SERVER_ERROR";
+        throw new APIError(status,{code:error.code,message:error.status>=500?"Authentication dependency unavailable":error.message});}
+      throw error;
+    });
+    await setSessionCookie(ctx,authenticated);
+    return ctx.json({status:true,userId:authenticated.user.id});
   });
 }

@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { parseAdminFinanceFilters, resolveFinanceLookup, projectAdminFinanceLedger, projectAdminFinanceObservation, financeDocuments, financeOrderDocuments, readAdminFinanceDocument, financePeriodProjection, filterAdminFinanceEntries, financeSnapshot, type FinanceFacts } from "../src/finance/admin-finance-read";
 import { generateAdminFinanceCsv } from "../src/finance/admin-finance-export";
 import { matchFinanceOrderReference, type FinanceOrderFact } from "../src/finance/admin-finance-order-read";
+import { FinanceSqlFixture } from "./admin-finance-fixture";
+import { loadFinanceOrderFacts } from "../src/finance/admin-finance-order-read";
 import { loadAdminFinanceFacts } from "../src/finance/admin-finance-read";
 import {readAdminFinancePeriodBalances} from '../src/finance/admin-finance-read';
 import type { PoolClient } from "pg";
@@ -27,6 +29,13 @@ test('period totals bind the same scope and filters, close exactly, and keep boo
  assert.equal(result.ledgerOpeningBalance,'999999999999999999999990');assert.equal(result.ledgerClosingBalance,'999999999999999999999999');assert.equal(result.ledgerDifference,'0');assert.equal(result.openingBalance,null);assert.equal(result.knowledge,'UNKNOWN');assert.equal(result.scope,'CURRENT_LEDGER_ONLY');assert(result.reasonCodes.includes('PERIOD_BALANCE_PROOF_NOT_AVAILABLE'));
  const q=seen[1];assert(q.sql.includes('r.subject_id'));assert(q.args.includes('u1'));assert(q.args.includes('AVAILABLE'));assert(q.args.includes('SETTLEMENT'));assert(q.args.some((s:any)=>typeof s==='string'&&s.includes('literal')));assert(!/\b(INSERT|UPDATE|DELETE)\b/.test(q.sql));
  assert.throws(()=>financePeriodProjection(entries,[{...balances[0]!,movement:'8'}]),(e:any)=>e.status===503);
+});
+
+test('period state filtering admits formal withdrawal state only after observing that source relation',async()=>{
+ const sqls:string[]=[],client={query:async(sql:string)=>{sqls.push(sql);return sql.includes('finance period optional sources')?{rows:[{native_distribution:false,withdrawals:false,joinpay_withdrawals:true}]}:{rows:[]};}};
+ await readAdminFinancePeriodBalances(client as any,{...filters,state:'REVIEW_REQUIRED'});
+ assert.match(sqls[0]!,/joinpay_withdrawal_intent/);assert.match(sqls[1]!,/LEFT JOIN zzsh_order\.joinpay_withdrawal_intent j/);
+ assert.match(sqls[1]!,/j\.state/);
 });
 
 for (const disposition of ["PAYOUT_POSTED", "RELEASE_POSTED", "RESERVED"] as const) test(`C1 ${disposition}: late conflict preserves original disposition across document, period and CSV`, async () => {
@@ -135,4 +144,34 @@ test('admin finance snapshot rejects a noncanonical alias of the valid signature
  assert.notEqual(alias,sig);assert.deepEqual(Buffer.from(alias,'base64url'),Buffer.from(sig,'base64url'));
  assert.equal(financeSnapshot(facts(),filters,actor,key,token,2000).asOf,facts().asOf);
  assert.throws(()=>financeSnapshot(facts(),filters,actor,key,payload+'.'+alias,2000),(error:any)=>error.status===400);
+});
+
+test('finance documents preserve the zero-net owner and distinguish accepted payment from posting', () => {
+ const f=facts();f.subjects=[{id:'owner_zero',name:'号主'},{id:'u1',name:'租客'}];
+ const order={ref:'ORDER:o',id:'o',number:'ZZ-TEST',sourceType:'NATIVE',sourceSystem:'zzsh',sourceId:'o',sourceDigest:null,kind:'SETTLEMENT',state:'ORDER_RECORDED',occurredAt:f.asOf,importedAt:f.asOf,ownerId:'owner_zero',renterId:'u1',accountId:'a',dueCents:'400000',recordedPaidCents:null,depositCents:'40000',originalOrderStatus:'PAID',originalPaymentStatus:null,
+  payment:{state:'SITE_ACCEPTED',amountCents:'368686',confirmedAt:f.asOf,hasReviewPayment:false},postingState:'NOT_POSTED'} as const;
+ f.orders=[order];f.entries=[];
+ const document=readAdminFinanceDocument(f,order.ref).document;
+ assert.equal(document.orderLifecycle?.payment.amountCents,'368686');assert.equal(document.orderLifecycle?.postingState,'NOT_POSTED');
+ assert.equal(document.entryCount,0);assert.equal(document.requestedAmountCents,null);
+ assert.deepEqual(document.subjects.map(s=>s.id).sort(),['owner_zero','u1']);
+ assert.equal(financeOrderDocuments(f,{...filters,period:false})[0]?.orderLifecycle?.payment.state,'SITE_ACCEPTED');
+ f.entries=[{...line(),documentRef:order.ref,documentNumber:order.number}];
+ assert.ok(readAdminFinanceDocument(f,order.ref).document.subjects.some(s=>s.id==='owner_zero'));
+});
+
+test('finance actual relational payment projection uses current APPLIED, isolates REVIEW, and keeps no-payment unknown amount', async () => {
+ const fixture=new FinanceSqlFixture({native:[
+  {id:'o_applied',display_no:'ZZ1',owner_user_id:'u1',renter_user_id:'u2',account_id:'a',game_id:'g',status:'PAID',revision:'2',paid_confirmation_id:'p1',paid_at:'2026-10-03T01:00:00.000000Z',rental_amount_cents:'328686',deposit_amount_cents:'40000',created_at:'2026-10-03T00:00:00.000000Z'},
+  {id:'o_review',display_no:'ZZ2',owner_user_id:'u1',renter_user_id:'u2',account_id:'b',game_id:'g',status:'CANCELLED',revision:'2',rental_amount_cents:'500',deposit_amount_cents:'100',created_at:'2026-10-03T00:00:00.000000Z'},
+  {id:'o_empty',display_no:'ZZ3',owner_user_id:'u1',renter_user_id:'u2',account_id:'c',game_id:'g',status:'CANCELLED',revision:'2',rental_amount_cents:'500',deposit_amount_cents:'100',created_at:'2026-10-03T00:00:00.000000Z'},
+ ],payments:[{id:'p1',order_id:'o_applied',disposition:'APPLIED',amount_cents:'368686',currency:'CNY'},{id:'p2',order_id:'o_review',disposition:'REVIEW_REQUIRED',amount_cents:'600',currency:'CNY'}]});
+ try{
+  const client={query:async(sql:string,values:unknown[])=>fixture.query(sql,values)};
+  const rows=await loadFinanceOrderFacts(client as never,{native_orders:true});
+  assert.equal(rows.find(row=>row.id==='o_applied')?.payment?.amountCents,'368686');
+  assert.equal(rows.find(row=>row.id==='o_applied')?.postingState,'NOT_POSTED');
+  assert.equal(rows.find(row=>row.id==='o_review')?.payment?.state,'REVIEW_REQUIRED');assert.equal(rows.find(row=>row.id==='o_review')?.payment?.amountCents,null);
+  assert.equal(rows.find(row=>row.id==='o_empty')?.payment?.state,'NO_ACCEPTED_PAYMENT');assert.equal(rows.find(row=>row.id==='o_empty')?.payment?.amountCents,null);
+ }finally{fixture.close();}
 });

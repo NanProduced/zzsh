@@ -239,3 +239,14 @@ test("customer statistics keeps its canonical route and refreshes old persisted 
   const restored=restoreTabs("rename-support",nav);assert.equal(restored.tabs.find(tab=>tab.id===current.id).title,"客服统计");
   assert.equal(restored.activeId,current.id);
 });
+
+test('finance has four independent entrances and restores old lookup tabs without losing filters',()=>{
+ const read={isBoss:false,permissions:['finance.read','finance.document.read']};
+ assert.equal(tabFromLocation('/finance').kind,'finance-overview');assert.equal(tabFromLocation('/finance','range=30d').kind,'finance-overview');assert.equal(tabFromLocation('/finance','q=OLD-ORDER&page=2').path,'/finance/search');
+ assert.equal(tabFromLocation('/finance/channels').kind,'finance-channels');assert.equal(tabFromLocation('/finance/period').kind,'finance-period');
+ const store=new Map();globalThis.sessionStorage={getItem:key=>store.get(key)??null,setItem:(key,value)=>store.set(key,value)};
+ const old={...tabFromLocation('/finance/search'),path:'/finance',query:{q:'OLD-ORDER',kind:'SETTLEMENT',page:'2',financeReturn:'/finance?range=30d'}};
+ persistTabs('finance-tabs',{activeId:old.id,tabs:[tabFromLocation('/workbench'),old]});const result=restoreTabs('finance-tabs',read);assert.equal(result.activeId,old.id);assert.equal(result.tabs.find(tab=>tab.id===old.id).path,'/finance/search');assert.deepEqual(result.tabs.find(tab=>tab.id===old.id).query,old.query);
+ assert.equal(canOpenKind('finance-overview',{isBoss:true,permissions:['finance.document.read']}),false);assert.equal(canOpenKind('finance-lookup',{isBoss:false,permissions:['finance.document.read']}),true);assert.equal(canOpenKind('finance-document',{isBoss:false,permissions:['finance.read']}),false);assert.equal(sanitizeFinanceReturn('/finance?range=30d'),'/finance?range=30d');
+ delete globalThis.sessionStorage;
+});

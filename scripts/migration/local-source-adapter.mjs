@@ -28,21 +28,41 @@ export function sourceAdultEvidence(card, updatedAt) {
     return a === b ? a : null;
 }
 /** Transformation of original source fields, not a new identity-verification assertion. */
-export function sourceUserPlan(raw, modules, sourceRef, seenPhones) {
+export function sourceUserPlanningRow(raw, modules, sourceRef) {
     const canonical = modules.contentHash.canonicalize(raw);
     const row = {
-        id: raw.id, mobile: raw.mobile, nickname: raw.nickname,
+        id: raw.id, sn: raw.sn, mobile: raw.mobile, nickname: raw.nickname,
         is_delete: raw.is_delete, is_disable: raw.is_disable, is_bind_id: raw.is_bind_id, is_high_risk: raw.is_high_risk,
         ageAdult: sourceAdultEvidence(raw.id_card, raw.update_time), createTime: raw.create_time, updateTime: raw.update_time,
         sourceDigest: digest(canonical), evidenceRef: `${sourceRef}:la_user:${raw.id}`,
         legacyPassword: raw.password === null || raw.password === "" ? null : { version: "legacy-md5-v1", md5: raw.password.toLowerCase(), salt: raw.salt ?? "" },
     };
+    return row;
+}
+export function sourceUserPlan(raw, modules, sourceRef, seenPhones, contactProjections) {
+    const row = sourceUserPlanningRow(raw, modules, sourceRef);
+    if (contactProjections) {
+        const contactProjection = contactProjections.get(raw.id);
+        if (!contactProjection) throw new Error("WHOLE_SOURCE_CONTACT_PROJECTION_MISSING");
+        row.contactProjection = contactProjection;
+    }
     const plan = modules.planner.planLegacyUser(row, seenPhones);
-    if (plan.disposition === "PARAMETER_READY")
-        seenPhones.add(plan.writerInput.evidence.mobile);
-    else if (typeof plan.claimedMobile === "string")
+    if (plan.disposition === "PARAMETER_READY") {
+        if (plan.writerInput.evidence.mobile !== null) seenPhones.add(plan.writerInput.evidence.mobile);
+    } else if (typeof plan.claimedMobile === "string")
         seenPhones.add(plan.claimedMobile);
     return plan;
+}
+export function sourceContactPlanningRow(raw, modules, sourceRef) {
+    const sourceDigest = digest(modules.contentHash.canonicalize(raw));
+    return { legacyId: raw.id, sourceSn: raw.sn, sourceDigest, mobile: raw.mobile === "" ? null : raw.mobile,
+        deleted: flag(raw.is_delete), disabled: flag(raw.is_disable),
+        sourceContactRef: `${sourceRef}:la_user:${raw.id}:mobile`,
+        sourceContactDigest: digest(JSON.stringify(["legacy_mysql_restore", "la_user", raw.id, sourceDigest, "mobile", raw.mobile === "" ? null : raw.mobile])) };
+}
+/** Only the new explicitly reviewed contact-aware package uses whole-source contact ownership. */
+export function sourceUserContactBatch(rawRows, modules, sourceRef) {
+    return modules.planner.planLegacyUserContactBatch(rawRows.map(raw => sourceUserPlanningRow(raw, modules, sourceRef)));
 }
 export function sourceAccountPlan(raw, users, modules, sourceRef, games) {
     if (!/^[1-9][0-9]*$/.test(raw.id ?? ""))

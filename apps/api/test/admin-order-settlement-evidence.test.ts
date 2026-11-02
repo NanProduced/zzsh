@@ -33,6 +33,16 @@ test('native proved zero stays known while a missing receipt or contradictory he
  const partial=facts();partial.entries=partial.entries.filter(row=>row.subjectId==='renter');assert.equal(evidence(partial).refundPayable.cents,null);assert.equal(evidence(partial).platformContribution.cents,null);
  const wrongParty=facts();wrongParty.entries.find(row=>row.accountCode==='OWNER_AVAILABLE')!.subjectId='other';assert.equal(evidence(wrongParty).ownerNet.cents,null);
 });
+
+test('platform component payer and decimal terms come only from that frozen line, not a page constant',()=>{
+ for(const payer of ['OWNER','RENTER','NONE'] as const){
+  const lines=entries(),fee=lines.find(row=>row.accountCode==='PLATFORM_HAFF_SPREAD')!;
+  fee.accountCode='PLATFORM_COMPENSATION_FEE';Object.assign(fee.evidence,{feePayer:payer,feeBase:'238.50',feeRate:'0.08'});
+  const read=evidence(facts(false,lines));assert.deepEqual(read.platformComponents,[{code:'PLATFORM_COMPENSATION_FEE',cents:'1908',payer,feeBase:'238.50',feeRate:'0.08'}]);
+ }
+ const noPayer=evidence(facts(false,entries()));assert.equal(noPayer.platformComponents[0].payer,null);
+ const absent=evidence(facts(false,[]));assert.equal(absent.platformComponents,undefined);
+});
 test('object scope withholds only the new projection and leaves the existing finance document untouched',()=>{
  const f=facts();f.orders![0]!.objectReadable=false;const read=readAdminFinanceDocument(f,'ORDER:order1') as any;
  assert.equal(read.orderSettlement,undefined);assert.equal(read.entries.length,4);

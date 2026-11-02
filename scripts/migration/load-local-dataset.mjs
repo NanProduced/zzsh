@@ -22,7 +22,15 @@ const manifestBytes = readFileSync(join(dataset, "manifest.json"));
 if (sha(manifestBytes) !== option("--dataset-sha"))
     throw new Error("DATASET_MANIFEST_SHA_MISMATCH");
 const manifest = JSON.parse(manifestBytes);
-if (manifest.status !== "FULL_SOURCE_DATASET_PREPARED_TARGET_NOT_RUN")
+const contactAppend = args.includes("--contact-append"), numberOnly = args.includes("--legacy-number-only");
+if (contactAppend && numberOnly) throw new Error("ONE_ADDITIVE_PHASE_PER_EXECUTION");
+if (contactAppend || numberOnly) {
+    if (manifest.format !== "zzsh.legacy-contact-append-plan.v1" || manifest.status !== "SOURCE_CLOSED_PENDING_ROOT_REVIEW_AND_FRESH_TARGET_CAS"
+        || !/^[a-f0-9]{64}$/.test(manifest.sourceDatasetSha256 ?? "") || !option("--source-review-ref")) throw new Error("ROOT_REVIEWED_CONTACT_APPEND_REQUIRED");
+    if (contactAppend) for (const name of ["display-plan", "holding-source", "skin-dictionary"]) {
+        if (!option("--" + name) || !/^[a-f0-9]{64}$/.test(option("--" + name + "-sha") ?? "")) throw new Error("CONTACT_APPEND_DISPLAY_AND_HOLDING_BINDINGS_REQUIRED");
+    }
+} else if (manifest.status !== "FULL_SOURCE_DATASET_PREPARED_TARGET_NOT_RUN")
     throw new Error("DATASET_NOT_PREPARED");
 async function* readRows(file) { const stream = createReadStream(file); const reader = createInterface({ input: stream, crlfDelay: Infinity }); try {
     for await (const line of reader)
@@ -66,7 +74,7 @@ state ??= { schema: "zzsh.local-legacy-load.v1", binding, status: "STARTED", sta
 const displayOnly = args.includes("--enrich-display");
 const openingOnly = args.includes("--import-openings");
 const holdingsOnly = args.includes("--enrich-holdings");
-if ([displayOnly, openingOnly, holdingsOnly].filter(Boolean).length > 1) throw new Error("ONE_ADDITIVE_PHASE_PER_EXECUTION");
+if ([displayOnly, openingOnly, holdingsOnly, contactAppend, numberOnly].filter(Boolean).length > 1) throw new Error("ONE_ADDITIVE_PHASE_PER_EXECUTION");
 if (displayOnly && !args.includes("--recover") && !["LOCAL_DATASET_CORE_AND_FINANCIAL_DOMAINS_COMMITTED_REVIEW_REQUIRED", "LOCAL_DATASET_DISPLAY_ENRICHMENT_COMMITTED_REVIEW_REQUIRED", "LOCAL_DATASET_STORED_OPENINGS_COMMITTED_REVIEW_REQUIRED", "LOCAL_DATASET_SKIN_HOLDINGS_COMMITTED_REVIEW_REQUIRED", "FAILED_STOPPED"].includes(state.status))
     throw new Error("CORE_DATASET_KNOWN_CHECKPOINT_REQUIRED");
 if (displayOnly && !["users", "accounts", "orders"].every(domain => state.phases[domain]?.complete === true))
@@ -107,6 +115,7 @@ async function checkpointBatch(domain, batch, start, body) {
                 await client.query("RELEASE SAVEPOINT source_row");
             }
             catch (error) {
+                if (contactAppend || numberOnly) throw error;
                 if (error?.status !== 400 && error?.status !== 409)
                     throw error;
                 await client.query("ROLLBACK TO SAVEPOINT source_row");
@@ -202,6 +211,15 @@ async function applyAccounts() { await runPhase("accounts", async (row) => { con
     throw new Error("TARGET_GAME_NOT_BOUND"); const input = { sourceSystem: "legacy_mysql_restore", sourceEntity: "la_rental_accounts", legacyId: row.sourceId, sourceDigest: row.sourceDigest, evidenceRef: row.evidenceRef, owner: { legacyId: row.ownerLegacyId, sourceDigest: row.ownerSourceDigest }, gameId }; const result = await mod("legacy-load/legacy-account-seam").createLegacyOwnerRentalAccount(client, input, actor); const observationVersionId = await mod("supply/legacy-observation").recordLegacyObservation(client, result.accountId, { sourceSystem: input.sourceSystem, sourceEntity: input.sourceEntity, legacyId: input.legacyId, sourceDigest: input.sourceDigest, evidenceRef: input.evidenceRef, inventory: [] }, actor); if (row.snapshot && row.sourceUpdatedAt && mod("supply/legacy-listing-read").legacyReadSourceAllowed(Number(row.sourceStatus), row.sourceDeleted))
     await mod("supply/legacy-listing-read").recordLegacyReadSnapshot(client, result.accountId, { observationVersionId, sourceSystem: input.sourceSystem, sourceEntity: input.sourceEntity, legacyId: input.legacyId, sourceDigest: input.sourceDigest, sourceStatus: Number(row.sourceStatus), sourceDeleted: row.sourceDeleted, sourceUpdatedAt: row.sourceUpdatedAt, evidenceRef: input.evidenceRef, snapshot: row.snapshot }, actor); return result; }); }
 async function applyOrders() { await runPhase("orders", async (row) => { const gameId = gameIds.get(row.gameCode), accountId = mod("legacy-load/legacy-account-seam").legacyAccountId("legacy_mysql_restore", "la_rental_accounts", row.account.legacyId); const input = { source: row.source, account: { ...row.account, accountId, gameId }, owner: row.owner, renter: row.renter }; return mod("order/legacy-order-read").importLegacyOrderRead(client, input, actor); }); }
+function protectDataset(resourceState, status) {
+    if (contactAppend || numberOnly) {
+        if (resourceState.protectedDataset?.manifestSha256 !== manifest.sourceDatasetSha256 || resourceState.protectedDataset?.epoch?.oid !== expectedOid
+            || resourceState.protectedDataset?.epoch?.nonce !== expectedNonce) throw new Error("CONTACT_APPEND_PARENT_DATASET_NOT_PROTECTED");
+        resourceState.protectedDataset.additiveReports ??= {};
+        resourceState.protectedDataset.additiveReports[state.binding.datasetSha256 + (numberOnly ? ":public-numbers" : ":contact-append")] = { status, report: statePath, sourceReviewRef: option("--source-review-ref") };
+    } else resourceState.protectedDataset={manifestSha256:state.binding.datasetSha256,epoch:{oid:expectedOid,nonce:expectedNonce},reason:"REHEARSAL_REVIEW",status,report:statePath};
+    return resourceState;
+}
 resetRunCleanup();
 try {
     await maintenance.connect();
@@ -243,10 +261,20 @@ try {
         state.status = "RUNNING";
         const startingResource=JSON.parse(readFileSync(join(dirname(resolve(credentialFile)),"resource.json")));
         if(startingResource.oid!==expectedOid||startingResource.nonce!==expectedNonce)throw new Error("PROTECTED_DATASET_RESOURCE_DRIFT");
-        startingResource.protectedDataset={manifestSha256:state.binding.datasetSha256,epoch:{oid:expectedOid,nonce:expectedNonce},reason:"REHEARSAL_REVIEW",status:"BUILDING",report:statePath};
+        protectDataset(startingResource, "BUILDING");
         writeFileSync(join(dirname(resolve(credentialFile)),"resource.json"),JSON.stringify(startingResource,null,2)+"\n");
         save();
-        if (holdingsOnly) {
+        if (contactAppend || numberOnly) {
+            const { applyContactAppend, applyNumberBindings } = await import("./local-target-contact-append.mjs");
+            const ctx = { client, actor, mod, manifest, state, output, domainFile, readRows, runItems, save, event };
+            if (numberOnly) await applyNumberBindings(ctx);
+            else {
+                await applyContactAppend(ctx, { applyUsers, applyAccounts, applyOrders, display: { directory: option("--display-plan"), sha256: option("--display-plan-sha") },
+                    holdings: { source: option("--holding-source"), sourceSha256: option("--holding-source-sha"), dictionary: option("--skin-dictionary"), dictionarySha256: option("--skin-dictionary-sha") } });
+            }
+            state.status = numberOnly ? "LOCAL_DATASET_PUBLIC_NUMBERS_COMMITTED_REVIEW_REQUIRED" : "LOCAL_DATASET_CONTACT_APPEND_COMMITTED_REVIEW_REQUIRED";
+        }
+        else if (holdingsOnly) {
             const { applyHoldingDomain } = await import("./local-target-holdings.mjs");
             await applyHoldingDomain({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, save, event }, { source: option("--holding-source"), sourceSha256: option("--holding-source-sha"), dictionary: option("--skin-dictionary"), dictionarySha256: option("--skin-dictionary-sha") });
             state.status = "LOCAL_DATASET_SKIN_HOLDINGS_COMMITTED_REVIEW_REQUIRED";
@@ -308,7 +336,7 @@ finally {
     if(checkpointOwned && (Object.values(state.phases).some(phase=>phase.nextIndex>0)||["COMMIT_UNKNOWN","ROLLBACK_UNKNOWN"].includes(state.status))){
         const registryPath=join(dirname(resolve(credentialFile)),"resource.json");const resourceState=JSON.parse(readFileSync(registryPath));
         if(resourceState.oid!==expectedOid||resourceState.nonce!==expectedNonce)throw new Error("PROTECTED_DATASET_RESOURCE_DRIFT");
-        resourceState.protectedDataset={manifestSha256:state.binding.datasetSha256,epoch:{oid:expectedOid,nonce:expectedNonce},reason:"REHEARSAL_REVIEW",status:state.status,report:statePath};
+        protectDataset(resourceState, state.status);
         writeFileSync(registryPath,JSON.stringify(resourceState,null,2)+"\n");state.protectionRecorded=true;
     }
     state.updatedAt = new Date().toISOString();

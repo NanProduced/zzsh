@@ -54,6 +54,7 @@ const buttons = () => [...browser.document.querySelectorAll("button")];
 const button = name => buttons().find(e => (e.getAttribute("aria-label") || e.textContent.trim()) === name);
 const item = name => [...browser.document.querySelectorAll('[role="menuitem"]')].find(e => e.textContent === name);
 const tabButton = id => browser.document.querySelector(`[data-tab-id="${id}"]`);
+const financeTabId = tabFromLocation("/finance").id;
 async function dispatch(element, type, options = {}) {
   assert.ok(element, `missing ${type} target`);
   await act(async () => element.dispatchEvent(type === "keydown" ? new browser.KeyboardEvent(type, { bubbles: true, cancelable: true, ...options }) : new browser.MouseEvent(type, { bubbles: true, cancelable: true, ...options })));
@@ -171,7 +172,7 @@ async function mountDirtyShell(t) {
   return { host, snapshot };
 }
 async function beginCloseOthers() {
-  await dispatch(tabButton("finance-lookup"), "contextmenu", { button: 2 });
+  await dispatch(tabButton(financeTabId), "contextmenu", { button: 2 });
   await dispatch(item("关闭其他标签页"), "click");
   assert.ok(browser.document.querySelector('[role="alertdialog"]'));
 }
@@ -183,10 +184,10 @@ async function confirmOnlyIfStillPending() {
 test("finance failure invalidates pending close-others and cannot revive a removed tab", async t => {
   await mountDirtyShell(t); await beginCloseOthers();
   await act(async () => browser.dispatchEvent(new browser.CustomEvent("zzsh-admin-finance-access-failure"))); await settle();
-  assert.equal(tabButton("finance-lookup"), null);
+  assert.equal(tabButton(financeTabId), null);
   assert.equal(browser.document.querySelector('[role="alertdialog"]'), null);
   await confirmOnlyIfStillPending();
-  assert.equal(tabButton("finance-lookup"), null);
+  assert.equal(tabButton(financeTabId), null);
   assert.ok(tabButton("admins"), "revocation does not discard the dirty source");
   assert.equal(browser.location.pathname, "/workbench");
 });
@@ -201,7 +202,7 @@ for (const boundary of ["identity", "session", "lock", "permissions"]) {
     await host.render(createElement(WorkspaceApp, shellProps(changed)));
     assert.equal(browser.document.querySelector('[role="alertdialog"]'), null);
     await confirmOnlyIfStillPending(); assert.ok(tabButton("admins"));
-    if (boundary === "permissions") assert.equal(tabButton("finance-lookup"), null);
+    if (boundary === "permissions") assert.equal(tabButton(financeTabId), null);
     if (boundary === "lock") await host.render(createElement(WorkspaceApp, shellProps({ ...changed, session: { ...changed.session, locked: false } })));
     await dispatch(tabButton("roles"), "click");
     assert.ok(browser.document.querySelector('[role="alertdialog"]'), "cancelled consent did not silently clear dirty state");
@@ -213,7 +214,7 @@ test("pending path navigation cannot recreate finance after its access failure",
   await mountDirtyShell(t); await dispatch(button("打开资金"), "click");
   assert.ok(browser.document.querySelector('[role="alertdialog"]'));
   await act(async () => browser.dispatchEvent(new browser.CustomEvent("zzsh-admin-finance-access-failure"))); await settle();
-  await confirmOnlyIfStillPending(); assert.equal(tabButton("finance-lookup"), null);
+  await confirmOnlyIfStillPending(); assert.equal(tabButton(financeTabId), null);
   assert.equal(browser.location.pathname, "/workbench");
 });
 
@@ -223,7 +224,7 @@ test("pending browser-history navigation is cancelled with revoked finance conte
   await act(async () => browser.dispatchEvent(new browser.PopStateEvent("popstate"))); await settle();
   assert.ok(browser.document.querySelector('[role="alertdialog"]'));
   await act(async () => browser.dispatchEvent(new browser.CustomEvent("zzsh-admin-finance-access-failure"))); await settle();
-  await confirmOnlyIfStillPending(); assert.equal(tabButton("finance-lookup"), null);
+  await confirmOnlyIfStillPending(); assert.equal(tabButton(financeTabId), null);
   assert.equal(browser.location.pathname, "/workbench");
 });
 
@@ -249,7 +250,7 @@ test("content hard write lock blocks navigation, aggregate close, history and re
   await dispatch(item("关闭其他标签页"), "click");
   assert.ok(tabButton("content"));
   assert.equal(tabButton("content").getAttribute("aria-selected"), "true");
-  assert.equal(tabButton("finance-lookup"), null);
+  assert.equal(tabButton(financeTabId), null);
   assert.equal(browser.document.querySelector('[role="alertdialog"]'), null, "a hard lock is not confirmable dirty text");
   assert.equal(button("刷新当前页").disabled, true);
   await dispatch(button("刷新当前页"), "click");

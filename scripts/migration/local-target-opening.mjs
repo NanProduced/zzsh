@@ -48,7 +48,7 @@ export async function applyOpeningDomain(ctx, directory, manifestSha256) {
       throw error;
     }
   }, 20);
-  const actual = (await ctx.client.query("SELECT count(*)::int subjects,count(*) FILTER(WHERE available_cents>0)::int positive,count(*) FILTER(WHERE available_cents=0)::int zero,sum(available_cents)::text amount FROM zzsh_order.finance_opening_basis WHERE source_system='legacy_mysql_restore'")).rows[0];
+  const actual = (await ctx.client.query("SELECT count(*)::int subjects,count(*) FILTER(WHERE available_cents>0)::int positive,count(*) FILTER(WHERE available_cents=0)::int zero,sum(available_cents)::text amount FROM zzsh_order.finance_opening_basis WHERE source_system='legacy_mysql_restore'" + (ctx.openingSubjectIds ? " AND user_id=ANY($1::text[])" : ""), ctx.openingSubjectIds ? [ctx.openingSubjectIds] : [])).rows[0];
   const isolatedAmountsNotZeroed = expected.isolated.length === plan.stats.reviewRequired;
   const phase = ctx.state.phases.storedOpening;
   const report = { expected: { ...expected, amountCents: expected.amountCents.toString() }, actual, flowSum: "NOT_COMPUTED", sourceMoneySeparateNotAdded: true, isolatedAmountsNotZeroed, runtimeQuarantined: phase.quarantined, sourceCutoff: ctx.manifest.sourceCutoff, bankArrivalVerified: false };

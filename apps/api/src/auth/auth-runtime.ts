@@ -48,8 +48,8 @@ import { normalizeMainlandPhone } from "./phone-number";
 import { mountAuthSecurityHandlers, preflightAuthRealmSecurity, type AdminSecurityNotification, type AuthSecurityOptions } from "./auth-security";
 import { buildAdminSelfSecurityPlugin, ADMIN_SELF_SECURITY_MESSAGES } from "./admin-self-security-plugin";
 import { adminSecurityCommandId, deriveAdminSecurityCommandKey } from "./admin-security-commands";
-import { createTransactionalUserSession, buildTransactionalPhoneSignIn } from "./user-auth-session";
-import { hasLegacyPhoneConflict, readUserPasswordState, type UserPasswordState } from "./legacy-login";
+import { createTransactionalUserSession, buildTransactionalPhoneSignIn, buildTransactionalLegacyNumberSignIn } from "./user-auth-session";
+import { hasLegacyPhoneConflict, readUserPasswordState, resolveLegacyNumberLogin, type UserPasswordState } from "./legacy-login";
 import { buildUserSecurityPlugin, type UserSecurityDelivery } from "./user-security";
 import { createFakeRealNameProvider, handleUserIdentityRoute, type RealNameProvider, type UserObligationReader } from "./user-identity";
 import { mountAdminSelfSettingsHandlers } from "./admin-self-settings";
@@ -536,7 +536,7 @@ function buildPhoneRegistrationPlugin(
   outbox: Map<string, { code: string; sentAt: string; purpose: "phone-verification" | "password-reset" | "phone-registration" }>,
   fakeSmsEnabled: boolean,
   localSmsMock: boolean,
-  signInIdentifier: { dispatch?: (identifier: string, password: string, headers: Headers, kind?: "phone" | "username", legalAcceptance?: unknown) => Promise<Response> },
+  signInIdentifier: { dispatch?: (identifier: string, password: string, headers: Headers, kind?: "phone" | "legacy-number", legalAcceptance?: unknown) => Promise<Response> },
   nativeWalletOrigin?: NativeOriginResource,
   creditGuaranteeEnabled = false,
   distributionScope?: LocalDistributionScope,
@@ -588,7 +588,7 @@ function buildPhoneRegistrationPlugin(
         if (!identifier || identifier.length > 128 || !signInIdentifier.dispatch) {
           throw new APIError("BAD_REQUEST", { message: "Invalid authentication request" });
         }
-        const kind = body.kind === undefined ? undefined : body.kind === "phone" ? body.kind : null;
+        const kind = body.kind === undefined ? undefined : body.kind === "phone" || body.kind === "legacy-number" ? body.kind : null;
         if (kind === null) throw new APIError("BAD_REQUEST", { message: "Invalid authentication request" });
         return await signInIdentifier.dispatch(identifier, password, ctx.headers ?? new Headers(), kind, body.legalAcceptance);
         } catch (error) { return authDomainError(error); }
@@ -1032,7 +1032,7 @@ export async function mountAuthHandlers(
     },
   } : undefined;
   // Filled right after the user auth instance exists; the after hook only runs at request time.
-  const signInIdentifier: { dispatch?: (identifier: string, password: string, headers: Headers, kind?: "phone" | "username", legalAcceptance?: unknown) => Promise<Response> } = {};
+  const signInIdentifier: { dispatch?: (identifier: string, password: string, headers: Headers, kind?: "phone" | "legacy-number", legalAcceptance?: unknown) => Promise<Response> } = {};
   const common = {
     baseURL: options.apiOrigin,
     trustedOrigins,
@@ -1063,12 +1063,16 @@ export async function mountAuthHandlers(
     secret: options.userSecret,
     database: drizzleAdapter(userDatabase, { provider: "pg", schema: userSchema, transaction: true }),
     session: { ...common.session, expiresIn: USER_SESSION_EXPIRES_IN_SECONDS },
-    user: common.user,
+    user: { ...common.user, additionalFields: { ...common.user.additionalFields,
+      // Read-only alias lets a lost legacy-number login confirm the same subject without resubmitting credentials.
+      username: { type: "string", required: false, input: false },
+    } },
     emailAndPassword: { ...common.emailAndPassword, minPasswordLength: 12, maxPasswordLength: 128 },
     plugins: [
       bearer(),
       buildFakePhoneNumberPlugin(phoneNumber, fakeSmsOutbox, options.localSmsMock === true, buildTransactionalPhoneSignIn(options.pool, createAuthEndpoint, APIError, setSessionCookie)),
       buildPhoneRegistrationPlugin(createAuthEndpoint, APIError, setSessionCookie, options.pool, fakeSmsOutbox, options.fakeSmsOutbox !== undefined || options.localSmsMock === true, options.localSmsMock === true, signInIdentifier, options.nativeWalletOrigin, options.creditGuaranteeEnabled === true, options.distributionScope, userThrottle, options.userSmsSender),
+      { id: "legacy-number-compatibility", endpoints: { signInLegacyNumber: buildTransactionalLegacyNumberSignIn(options.pool, createAuthEndpoint, APIError, setSessionCookie) } },
       userSecurityPlugin,
     ],
     advanced: {
@@ -1124,8 +1128,9 @@ export async function mountAuthHandlers(
   });
 
   signInIdentifier.dispatch = async (identifier, password, headers, kind, legalAcceptance) => {
+    if (kind === "legacy-number") return await userAuth.api.signInLegacyNumber({ body: { identifier, password, ...(legalAcceptance === undefined ? {} : { legalAcceptance }) }, headers, asResponse: true }) as Response;
     const phoneNumber = normalizeMainlandPhone(identifier);
-    if (!phoneNumber || kind === "username") throw new APIError("BAD_REQUEST", { message: "Phone authentication required" });
+    if (!phoneNumber) throw new APIError("BAD_REQUEST", { message: "Phone authentication required" });
     const response = await userAuth.api.signInPhoneNumber({ body: { phoneNumber, password, ...(legalAcceptance === undefined ? {} : { legalAcceptance }) }, headers, asResponse: true });
     return response as Response;
   };
@@ -1198,7 +1203,7 @@ export async function mountAuthHandlers(
     },
   });
 
-  const userWebHandler = (request: Request) => safeWebAuthHandler(withUserAuthThrottle(userAuth.handler, userThrottle, throttleKey), request);
+  const userWebHandler = (request: Request) => safeWebAuthHandler(withUserAuthThrottle(userAuth.handler, userThrottle, throttleKey, { resolveLegacyNumberSubject: async identifier => (await resolveLegacyNumberLogin(options.pool, identifier))?.throttleSubject ?? null }), request);
   const adminSelfSecurityInterceptor = buildAdminSelfSecurityInterceptor(adminAuth as unknown as AdminSelfSecurityApi);
   const adminWebHandler = withAdminBruteForce((request: Request) => safeWebAuthHandler(adminAuth.handler, request, adminSelfSecurityInterceptor), adminBruteForce);
   const userNodeHandler = toNodeHandler(userWebHandler) as unknown as AuthHandler;

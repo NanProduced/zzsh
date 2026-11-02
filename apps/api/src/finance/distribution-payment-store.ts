@@ -1,9 +1,29 @@
 import {createHash} from 'node:crypto';import type {PoolClient} from 'pg';
+import type {AppConfig} from '../config/config';
 import {SecurityApiError,recordAudit} from '../auth/security-core';import {conflict,invalid,notFound} from '../supply/supply-util';import {canonicalize,withoutContentHash} from '../supply/content-hash';import {sourceYuanToCents} from './personal-finance-read';
 import {readDistributionPolicyRowInTransaction} from './distribution-policy-store';import {readDistributionParentInTransaction} from './invitation-store';import {freezePaymentDistributionBasis,readOriginalPaymentDistributionBasis,type PaymentDistributionBasis,type PaymentReferralFacts} from './distribution-payment-basis';
 import {readFormalCollectionAdmission,assertFormalInitialAdmission,type FormalCollectionAdmission} from '../order/joinpay-collection-profile';
+import {REGRESSION_DATABASE,REGRESSION_MARKER,REGRESSION_RUNTIME_USER} from '../config/test-resource';
+import {createControlledRegressionResource,assertControlledRegressionResource,type ControlledRegressionBinding,type ControlledRegressionResource} from './controlled-regression-resource';
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex'),ID=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 export type DistributionOrderScope={resourceSet:string;resourceOid:number;approvalDigest:string;allowedOrderIds:readonly string[]};
+const regressionScopes=new WeakMap<DistributionOrderScope,ControlledRegressionResource>();
+export function createControlledRegressionDistributionScope(input:{config:AppConfig;binding:ControlledRegressionBinding;approvalDigest:string;allowedOrderIds:readonly string[]}):DistributionOrderScope{
+ const resource=createControlledRegressionResource(input.config,input.binding,'DISTRIBUTION');
+ if(!/^[a-f0-9]{64}$/.test(input.approvalDigest)||!input.allowedOrderIds.length||input.allowedOrderIds.length>10
+  ||input.allowedOrderIds.some(id=>!ID.test(id))||new Set(input.allowedOrderIds).size!==input.allowedOrderIds.length)throw invalid('Exact controlled distribution order allowlist required');
+ const scope=Object.freeze({resourceSet:'regression',resourceOid:input.binding.resourceOid,approvalDigest:input.approvalDigest,allowedOrderIds:Object.freeze([...input.allowedOrderIds])});regressionScopes.set(scope,resource);return scope;
+}
+export function distributionOrderScopeIdentity(scope:DistributionOrderScope){
+ if(scope.resourceSet==='regression'){if(!regressionScopes.has(scope))throw invalid('Controlled distribution scope is not bound');return{name:REGRESSION_DATABASE,role:REGRESSION_RUNTIME_USER,marker:REGRESSION_MARKER};}
+ return{name:'zzsh_test_order_'+scope.resourceSet,role:'zzsh_order_'+scope.resourceSet+'_r',marker:'zzsh:order-reservation-test:v1'};
+}
+export async function assertDistributionOrderScopeResource(c:PoolClient,scope:DistributionOrderScope){
+ const identity=distributionOrderScopeIdentity(scope),regression=regressionScopes.get(scope);
+ if(regression)await assertControlledRegressionResource(c,regression,'DISTRIBUTION');
+ const r=(await c.query("SELECT d.oid,current_database() AS name,current_user AS role,shobj_description(d.oid,'pg_database') AS marker FROM pg_database d WHERE datname=current_database()")).rows[0];
+ if(!r||Number(r.oid)!==scope.resourceOid||r.name!==identity.name||r.role!==identity.role||r.marker!==identity.marker)throw conflict('Distribution payment resource differs');
+}
 type Prepared={orderId:string};
 /** Candidate integration seam. Caller is the verified payment gate on its original transaction.
  * No route or default scope. Null means no admission; explicit composition must reject it.
@@ -20,13 +40,14 @@ export function assertNativePaymentDistributionStore(store:unknown,admissionSha2
 function paymentStore(scope:DistributionOrderScope|null,formal?:FormalCollectionAdmission){
  const native=formal?readFormalCollectionAdmission(formal):null;
  if(!native&&(!scope||!/^[a-z][a-z0-9_]{0,20}$/.test(scope.resourceSet)||!Number.isSafeInteger(scope.resourceOid)||scope.resourceOid<=0||!/^[0-9a-f]{64}$/.test(scope.approvalDigest)||!scope.allowedOrderIds.length||scope.allowedOrderIds.some(id=>!ID.test(id))))throw invalid('Exact reviewed order resource and allowlist required');
- const allowed=new Set(scope?.allowedOrderIds??[]),name=native?.database??'zzsh_test_order_'+scope!.resourceSet,role=native?.runtimeUser??'zzsh_order_'+scope!.resourceSet+'_r',prepared=new WeakMap<object,{client:PoolClient;transactionId:string;input:Omit<Parameters<typeof freezePaymentDistributionBasis>[0],'confirmationId'|'acceptedAt'|'paymentDigest'>}>();
- async function resource(c:PoolClient){const r=(await c.query("SELECT d.oid,current_database() AS name,current_user AS role,shobj_description(d.oid,'pg_database') AS marker FROM pg_database d WHERE datname=current_database()")).rows[0];if(!r||r.name!==name||r.role!==role||!native&&(Number(r.oid)!==scope!.resourceOid||r.marker!=='zzsh:order-reservation-test:v1'))throw conflict('Distribution payment resource differs');}
+ const localIdentity=scope?distributionOrderScopeIdentity(scope):null;
+ const allowed=new Set(scope?.allowedOrderIds??[]),name=native?.database??localIdentity!.name,role=native?.runtimeUser??localIdentity!.role,prepared=new WeakMap<object,{client:PoolClient;transactionId:string;input:Omit<Parameters<typeof freezePaymentDistributionBasis>[0],'confirmationId'|'acceptedAt'|'paymentDigest'>}>();
+ async function resource(c:PoolClient){if(scope)return assertDistributionOrderScopeResource(c,scope);const r=(await c.query("SELECT d.oid,current_database() AS name,current_user AS role,shobj_description(d.oid,'pg_database') AS marker FROM pg_database d WHERE datname=current_database()")).rows[0];if(!r||r.name!==name||r.role!==role)throw conflict('Distribution payment resource differs');}
  async function prepare(c:PoolClient,orderId:string):Promise<Prepared|null>{
   if(!native&&!allowed.has(orderId))return null;await resource(c);
   const complete=(await c.query(`SELECT to_regclass('zzsh_order.distribution_order_admission') IS NOT NULL AND to_regclass('zzsh_order.payment_distribution_basis') IS NOT NULL AND to_regclass('zzsh_order.distribution_policy_head') IS NOT NULL AND to_regclass('zzsh_order.distribution_participant') IS NOT NULL AND to_regclass('zzsh_order.invitation_relation') IS NOT NULL AS complete`)).rows[0]?.complete;if(!complete)return null;
   const admission=native?(await c.query(`SELECT * FROM zzsh_order.distribution_order_admission WHERE order_id=$1 AND mode='NATIVE' AND active AND resource_name=$2 AND resource_oid=(SELECT oid FROM pg_database WHERE datname=current_database()) AND admitted_at<=clock_timestamp()`,[orderId,name])).rows[0]
-   :(await c.query(`SELECT * FROM zzsh_order.distribution_order_admission WHERE order_id=$1 AND active AND resource_oid=$2 AND resource_name=$3 AND resource_marker='zzsh:order-reservation-test:v1' AND approval_digest=$4 AND admitted_at<=clock_timestamp() AND expires_at>clock_timestamp()`,[orderId,scope!.resourceOid,name,scope!.approvalDigest])).rows[0];if(!admission)return null;
+   :(await c.query(`SELECT * FROM zzsh_order.distribution_order_admission WHERE order_id=$1 AND mode='LOCAL_CONTROLLED' AND active AND resource_oid=$2 AND resource_name=$3 AND resource_marker=$5 AND approval_digest=$4 AND admitted_at<=clock_timestamp() AND expires_at>clock_timestamp()`,[orderId,scope!.resourceOid,name,scope!.approvalDigest,localIdentity!.marker])).rows[0];if(!admission)return null;
   if(native)assertFormalInitialAdmission(formal!,admission.source_admission_ref,admission.approval_digest);
   await c.query("SELECT pg_advisory_xact_lock(hashtextextended('zzsh:invitation-graph:v1',0))");
   const order=(await c.query('SELECT id,renter_user_id,owner_user_id,game_id,currency,quote_snapshot FROM zzsh_order.rental_order WHERE id=$1',[orderId])).rows[0];if(!order)throw notFound();

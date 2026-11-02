@@ -37,7 +37,7 @@ export function sanitizeLocalHref(href: string): string {
 /** 同级独立页面不能被父级前缀吞掉：有自己入口与权限的同级页不算父级的详情。 */
 const SIBLING_ROUTES: Record<string, readonly string[]> = {
   "/settings": ["/settings?section=security"],
-  "/finance": ["/finance/period"],
+  "/finance": ["/finance/search", "/finance/period", "/finance/channels"],
 };
 
 function blockedBySibling(pathname: string, current: string): boolean {
@@ -72,8 +72,13 @@ export function navEntryRank(
   const { pathname, query } = splitNavPath(path);
   const href = sanitizeLocalHref(`${location.pathname}${location.search ?? ""}`);
   const [currentPath = "/", currentSearch = ""] = href.split("?");
-  const current = normalizeNavPath(currentPath);
+  const legacyFinanceSearch = currentPath === '/finance' && ['scope','q','kind','bucket','state','period','entry','from','to','page'].some(key => new URLSearchParams(currentSearch).has(key));
+  const current = normalizeNavPath(legacyFinanceSearch ? '/finance/search' : currentPath);
   const carriesQuery = query.size > 0;
+  if (/^\/finance\/(documents|users)\//.test(current)) {
+    if (pathname === '/finance') return null;
+    if (pathname === '/finance/search' && !carriesQuery) return { exact: false, carriesQuery: false, depth: pathname.length };
+  }
 
   if (current === pathname) {
     if (carriesQuery && !navQueryMatches(query, new URLSearchParams(currentSearch))) return null;

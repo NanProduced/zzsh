@@ -22,7 +22,7 @@ const boundJson = (path, expected) => { const bytes = readFileSync(path); if (ha
 const manifest = boundJson(join(dataset, "manifest.json"), option("--dataset-sha"));
 const captured = boundJson(join(supplement, "receipt.json"), option("--supplement-sha"));
 const base = boundJson(join(manifest.source, "receipt.json"), manifest.sourceReceiptSha256);
-if (manifest.status !== "FULL_SOURCE_DATASET_PREPARED_TARGET_NOT_RUN" || captured.status !== "CAPTURED_READ_ONLY" || !captured.rollbackConfirmed || !captured.clientClosed || captured.containerId !== base.containerId || captured.database !== base.database || !captured.files.accountDisplay) throw new Error("SOURCE_SUPPLEMENT_NOT_BOUND");
+if (!["FULL_SOURCE_DATASET_PREPARED_TARGET_NOT_RUN", "SOURCE_CLOSED_PENDING_ROOT_REVIEW_AND_FRESH_TARGET_CAS"].includes(manifest.status) || captured.status !== "CAPTURED_READ_ONLY" || !captured.rollbackConfirmed || !captured.clientClosed || captured.containerId !== base.containerId || captured.database !== base.database || !captured.files.accountDisplay) throw new Error("SOURCE_SUPPLEMENT_NOT_BOUND");
 async function* rows(path) { const input = createReadStream(path), reader = createInterface({ input, crlfDelay: Infinity }); try { for await (const line of reader) if (line) yield JSON.parse(line); } finally { reader.close(); input.destroy(); } }
 async function checkedFile(dir, entry) { if (!entry || entry.file !== basename(entry.file)) throw new Error("SOURCE_FILE_PATH_INVALID"); const path = join(dir, entry.file), digest = createHash("sha256"); for await (const bytes of createReadStream(path)) digest.update(bytes); if (digest.digest("hex") !== entry.sha256) throw new Error("SOURCE_FILE_SHA_MISMATCH"); return path; }
 const basePath = await checkedFile(manifest.source, base.files.accounts), displayPath = await checkedFile(supplement, captured.files.accountDisplay), accountPath = await checkedFile(dataset, manifest.files.accounts);
@@ -34,7 +34,7 @@ for await (const row of rows(displayPath)) {
   compared++; displays.set(row.id, row);
 }
 if (compared !== raw.size) throw new Error("SUPPLEMENT_SOURCE_DENOMINATOR_CHANGED");
-const display = require(join(root, "apps/api/dist/src/supply/legacy-display-snapshot.js"));
+const display = require(join(resolve(option("--api-dist") ?? join(root, "apps/api/dist/src")), "supply/legacy-display-snapshot.js"));
 const sid = /S-1-5-[0-9-]+/.exec(spawnSync("whoami", ["/user", "/fo", "csv", "/nh"], { encoding: "utf8", windowsHide: true }).stdout)?.[0];
 if (!sid) throw new Error("SID_REQUIRED");
 mkdirSync(out); if (spawnSync("icacls", [out, "/inheritance:r", "/grant:r", `*${sid}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"], { windowsHide: true }).status !== 0) throw new Error("OUTPUT_ACL_FAILED");

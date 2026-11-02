@@ -25,6 +25,7 @@ export type AuthPendingWrite = {
   proofId: string;
   subject: string;
   userId: string | null;
+  identifierKind?: "phone" | "legacy-number";
 };
 
 type Props = { next?: string; inviteCode?: string; onSuccess?: () => void | Promise<void>; autoFocus?: boolean; pendingWrite?: { current: AuthPendingWrite | null } };
@@ -40,7 +41,8 @@ export function AuthForm({ next, inviteCode: initialInviteCode, onSuccess, autoF
   const sessionStore = useUserSessionStore();
   const restored = pendingWrite?.current ?? null;
   const [mode, setMode] = useState<"login" | "recover">(restored?.mode ?? "login");
-  const [method, setMethod] = useState<"sms" | "password">("sms");
+  const [method, setMethod] = useState<"sms" | "password">(restored?.identifierKind === "legacy-number" ? "password" : "sms");
+  const [passwordIdentifier, setPasswordIdentifier] = useState<"phone" | "legacy-number">(restored?.identifierKind ?? "phone");
   const [channel, setChannel] = useState<"phone" | "email">("phone");
   const [contact, setContact] = useState(restored?.contact ?? "");
   const [code, setCode] = useState("");
@@ -87,14 +89,14 @@ export function AuthForm({ next, inviteCode: initialInviteCode, onSuccess, autoF
   const legalAcceptance = legalRequired && legalDocs?.terms && legalDocs.privacy
     ? { terms: { versionId: legalDocs.terms.id, digest: legalDocs.terms.digest }, privacy: { versionId: legalDocs.privacy.id, digest: legalDocs.privacy.digest } }
     : undefined;
-  const loginSubject = useRef<{ phone: string; userId: string | null } | null>(restored?.mode === "login" ? { phone: restored.subject, userId: restored.userId } : null);
+  const loginSubject = useRef<{ identifier: string; kind: "phone" | "legacy-number"; userId: string | null } | null>(restored?.mode === "login" ? { identifier: restored.subject, kind: restored.identifierKind ?? "phone", userId: restored.userId } : null);
   const formRef = useRef<HTMLFormElement | null>(null);
   const restoredNext = useRef<string | undefined | null>(null);
   useEffect(() => { if (invalidField && !busy && !sending) formRef.current?.querySelector<HTMLElement>("#" + invalidField)?.focus(); }, [invalidField, busy, sending]);
   useEffect(() => () => { generation.current++; abort.current?.abort(); }, []);
   const recordWrite = (state: "accepted" | "unknown") => {
     if (!pendingWrite) return;
-    pendingWrite.current = { mode, outcome: state, contact, challengeId, proofId, subject: normalized(), userId: loginSubject.current?.userId ?? null };
+    pendingWrite.current = { mode, outcome: state, contact, challengeId, proofId, subject: normalized(), userId: loginSubject.current?.userId ?? null, identifierKind: legacyNumber ? "legacy-number" : "phone" };
   };
   const clearWrite = () => { writeLock.current = false; if (pendingWrite) pendingWrite.current = null; };
   useEffect(() => {
@@ -109,11 +111,12 @@ export function AuthForm({ next, inviteCode: initialInviteCode, onSuccess, autoF
   useEffect(() => { if (cooldownUntil <= Date.now()) return; const timer = window.setInterval(() => setNow(Date.now()), 250); return () => window.clearInterval(timer); }, [cooldownUntil]);
   const begin = () => { abort.current?.abort(); const controller = new AbortController(); abort.current = controller; return { id: ++generation.current, controller }; };
   const current = (id: number) => generation.current === id;
-  const normalized = () => mode === "recover" && channel === "email" ? contact.trim().toLowerCase() : compactPhone(contact);
-  const validContact = () => mode === "recover" && channel === "email" ? /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized()) : /^1[3-9]\d{9}$/.test(normalized());
+  const legacyNumber = mode === "login" && method === "password" && passwordIdentifier === "legacy-number";
+  const normalized = () => legacyNumber ? contact.trim() : mode === "recover" && channel === "email" ? contact.trim().toLowerCase() : compactPhone(contact);
+  const validContact = () => legacyNumber ? normalized().length > 0 && normalized().length <= 128 && !/[\x00-\x1f\x7f]/.test(normalized()) : mode === "recover" && channel === "email" ? /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized()) : /^1[3-9]\d{9}$/.test(normalized());
   const clearProof = () => { setCode(""); setPassword(""); setConfirmation(""); setChallengeId(""); setProofId(""); setSentFor(""); setError(undefined); setNotice(undefined); setInvalidField(undefined); };
   const validationError = (message: string, id: string) => { setError(message); setInvalidField(id); formRef.current?.querySelector<HTMLElement>("#" + id)?.focus(); };
-  const changeMode = (value: "login" | "recover") => { if (busy || sending || outcome !== "idle") return; generation.current++; abort.current?.abort(); clearProof(); setMode(value); setAcceptedTerms(false); };
+  const changeMode = (value: "login" | "recover") => { if (busy || sending || outcome !== "idle") return; generation.current++; abort.current?.abort(); clearProof(); if (legacyNumber) setContact(""); setPasswordIdentifier("phone"); setMode(value); setAcceptedTerms(false); };
   const confirmLogin = async (id: number) => {
     const status = await session.confirm();
     if (!current(id)) return;
@@ -137,15 +140,15 @@ export function AuthForm({ next, inviteCode: initialInviteCode, onSuccess, autoF
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); if (busy || sending || writeLock.current) return;
     setError(undefined); setNotice(undefined); setInvalidField(undefined);
-    if (!validContact() || mode === "login" && !acceptedTerms) { validationError(!validContact() ? "请填写有效的联系方式。" : "请先阅读并同意服务协议与隐私政策。", !validContact() ? "auth-identifier" : "auth-terms"); return; }
+    if (!validContact() || mode === "login" && !acceptedTerms) { validationError(!validContact() ? legacyNumber ? "请填写旧平台公开账号编号。" : "请填写有效的联系方式。" : "请先阅读并同意服务协议与隐私政策。", !validContact() ? "auth-identifier" : "auth-terms"); return; }
     const needsCode = mode === "recover" ? !proofId : method === "sms";
     if (needsCode && (sentFor !== normalized() || !/^\d{6}$/.test(code))) { validationError("请先获取当前联系方式的验证码，并填写 6 位数字。", "phone-registration-code"); return; }
     if (mode === "login" && method === "password" && !password) { validationError("请输入现有密码。", "auth-password"); return; }
     if (mode === "login" && method === "sms" && inviteCode.trim() && !/^[A-Za-z0-9_-]{1,30}$/.test(inviteCode.trim())) { validationError("邀请码仅支持30位以内的字母、数字、下划线和连字符。", "auth-invite-code"); return; }
     if (mode === "recover" && proofId && (password.length < 12 || password.length > 128 || password !== confirmation)) { validationError("新密码需要 12–128 位，两次输入须完全一致。", password.length < 12 || password.length > 128 ? "auth-password" : "auth-password-confirm"); return; }
     const request = begin(); setBusy(true);
+    if (mode === "login") loginSubject.current = { identifier: normalized(), kind: legacyNumber ? "legacy-number" : "phone", userId: null };
     const writesIdentity = mode === "login" || Boolean(proofId); if (writesIdentity) { writeLock.current = true; recordWrite("unknown"); }
-    if (mode === "login") loginSubject.current = { phone: normalized(), userId: null };
     let accepted = false;
     try {
       if (mode === "recover" && !proofId) {
@@ -162,10 +165,10 @@ export function AuthForm({ next, inviteCode: initialInviteCode, onSuccess, autoF
         setProofId(""); setChallengeId(""); setMode("login"); setMethod("password"); if (channel === "email") setContact(""); setChannel("phone"); setAcceptedTerms(false);
         clearWrite(); setNotice("密码已重置，旧会话已退出。请使用手机号和新密码登录。");
       } else {
-        const result = await webAuthWithCaptcha<{ status: boolean; userId: string }>(method === "sms" ? "/phone-registration/complete" : "/sign-in/identifier", method === "sms" ? { phoneNumber: normalized(), code, acceptedTerms: true, loginOrRegister: true, ...(inviteCode.trim() ? { inviteCode: inviteCode.trim() } : {}), ...(legalAcceptance ? { legalAcceptance } : {}) } : { identifier: normalized(), password, kind: "phone", ...(legalAcceptance ? { legalAcceptance } : {}) }, request.controller.signal, () => current(request.id));
+        const result = await webAuthWithCaptcha<{ status: boolean; userId: string }>(method === "sms" ? "/phone-registration/complete" : "/sign-in/identifier", method === "sms" ? { phoneNumber: normalized(), code, acceptedTerms: true, loginOrRegister: true, ...(inviteCode.trim() ? { inviteCode: inviteCode.trim() } : {}), ...(legalAcceptance ? { legalAcceptance } : {}) } : { identifier: normalized(), password, kind: legacyNumber ? "legacy-number" : "phone", ...(legalAcceptance ? { legalAcceptance } : {}) }, request.controller.signal, () => current(request.id));
         accepted = true; if (!current(request.id)) return; setOutcome("accepted");
         if (result.status !== true || typeof result.userId !== "string" || !result.userId) throw new WebAuthError(502, "RESPONSE_UNCONFIRMED", true);
-        loginSubject.current = { phone: normalized(), userId: result.userId }; recordWrite("accepted");
+        loginSubject.current = { identifier: normalized(), kind: legacyNumber ? "legacy-number" : "phone", userId: result.userId }; recordWrite("accepted");
         await confirmLogin(request.id);
       }
     } catch (failure) {
@@ -174,7 +177,7 @@ export function AuthForm({ next, inviteCode: initialInviteCode, onSuccess, autoF
       if (uncertain) { const knownAccepted = accepted || failure instanceof WebAuthError && failure.accepted; setPassword(""); setConfirmation(""); setCode(""); setOutcome(knownAccepted ? "accepted" : "unknown"); recordWrite(knownAccepted ? "accepted" : "unknown"); setError(knownAccepted ? "操作已接受，后续状态暂未读到。请重新确认，勿重复提交。" : "结果暂时无法确认，请先查询状态，勿重复提交。"); }
       else {
         clearWrite();
-        const message = authErrorMessage(failure, mode === "login" && method === "password" ? "login" : "verify");
+        const message = legacyNumber && failure instanceof WebAuthError && failure.status === 401 ? "账号编号或密码不正确。" : authErrorMessage(failure, mode === "login" && method === "password" ? "login" : "verify");
         if (failure instanceof WebAuthError && (failure.status === 400 || failure.status === 401) && (mode === "login" || !proofId)) validationError(message, mode === "login" && method === "password" ? "auth-password" : "phone-registration-code");
         else setError(message);
       }
@@ -196,9 +199,9 @@ export function AuthForm({ next, inviteCode: initialInviteCode, onSuccess, autoF
           const expected = loginSubject.current;
           if (!expected) throw new Error("Login subject unavailable");
           if (!expected.userId) {
-            const value = await webAuthRequest<{ user: { id: string; phoneNumber?: string } } | null>("/get-session", undefined, request.controller.signal);
+            const value = await webAuthRequest<{ user: { id: string; phoneNumber?: string; username?: string } } | null>("/get-session", undefined, request.controller.signal);
             if (!current(request.id)) return;
-            if (!value?.user?.id || compactPhone(value.user.phoneNumber ?? "") !== expected.phone) throw new Error("Login subject differs");
+            if (!value?.user?.id || (expected.kind === "legacy-number" ? value.user.username !== expected.identifier : compactPhone(value.user.phoneNumber ?? "") !== expected.identifier)) throw new Error("Login subject differs");
             expected.userId = value.user.id;
           }
           if (sessionStore.getSnapshot().userId !== expected.userId) throw new Error("Login identity changed");
@@ -214,9 +217,11 @@ export function AuthForm({ next, inviteCode: initialInviteCode, onSuccess, autoF
   const locked = busy || sending || outcome !== "idle";
   return <section className="auth-form" data-mode={mode} data-auth-form-next={next ?? ""} aria-label="账户认证">
     <h2 className="sr-only">{mode === "recover" ? "找回密码" : "登录洲洲商行"}</h2>
-    <div className="auth-methods" aria-label={mode === "recover" ? "找回方式" : "登录方式"}>{mode === "recover" ? (["phone", "email"] as const).map(value => <button key={value} type="button" aria-pressed={channel === value} disabled={locked} onClick={() => { clearProof(); setContact(""); setChannel(value); }}>{value === "phone" ? "手机验证" : "邮箱验证"}</button>) : (["sms", "password"] as const).map(value => <button key={value} type="button" aria-pressed={method === value} disabled={locked} onClick={() => { clearProof(); setMethod(value); }}>{value === "sms" ? "验证码登录" : "密码登录"}</button>)}</div>
+    <div className="auth-methods" aria-label={mode === "recover" ? "找回方式" : "登录方式"}>{mode === "recover" ? (["phone", "email"] as const).map(value => <button key={value} type="button" aria-pressed={channel === value} disabled={locked} onClick={() => { clearProof(); setContact(""); setChannel(value); }}>{value === "phone" ? "手机验证" : "邮箱验证"}</button>) : (["sms", "password"] as const).map(value => <button key={value} type="button" aria-pressed={method === value} disabled={locked} onClick={() => { clearProof(); if (legacyNumber) setContact(""); setPasswordIdentifier("phone"); setMethod(value); }}>{value === "sms" ? "验证码登录" : "密码登录"}</button>)}</div>
+    {mode === "login" && method === "password" && <div className="auth-methods" role="group" aria-label="密码登录标识">{(["phone", "legacy-number"] as const).map(value => <button key={value} type="button" aria-pressed={passwordIdentifier === value} disabled={locked} onClick={() => { clearProof(); setContact(""); setPasswordIdentifier(value); }}>{value === "phone" ? "手机号" : "旧平台账号编号"}</button>)}</div>}
     <form ref={formRef} className="auth-fields" onSubmit={submit} noValidate>
-      <div className="auth-field"><label className="sr-only" htmlFor="auth-identifier">{mode === "recover" && channel === "email" ? "已绑定邮箱" : "手机号"}</label><input id="auth-identifier" aria-invalid={invalidField === "auth-identifier" || undefined} name="identifier" autoFocus={autoFocus} type={mode === "recover" && channel === "email" ? "email" : "tel"} inputMode={mode === "recover" && channel === "email" ? "email" : "tel"} autoComplete={mode === "recover" && channel === "email" ? "email" : "tel"} placeholder={mode === "recover" && channel === "email" ? "已绑定并验证的邮箱" : "大陆手机号"} value={contact} disabled={locked || Boolean(proofId)} onChange={event => { setContact(event.target.value); clearProof(); }} aria-describedby={error ? "auth-status" : undefined} /></div>
+      <div className="auth-field"><label className="sr-only" htmlFor="auth-identifier">{legacyNumber ? "旧平台公开账号编号" : mode === "recover" && channel === "email" ? "已绑定邮箱" : "手机号"}</label><input id="auth-identifier" aria-invalid={invalidField === "auth-identifier" || undefined} name="identifier" autoFocus={autoFocus} type={legacyNumber ? "text" : mode === "recover" && channel === "email" ? "email" : "tel"} inputMode={legacyNumber ? "text" : mode === "recover" && channel === "email" ? "email" : "tel"} autoComplete={legacyNumber ? "username" : mode === "recover" && channel === "email" ? "email" : "tel"} placeholder={legacyNumber ? "旧平台公开账号编号" : mode === "recover" && channel === "email" ? "已绑定并验证的邮箱" : "大陆手机号"} value={contact} disabled={locked || Boolean(proofId)} onChange={event => { setContact(event.target.value); clearProof(); }} aria-describedby={error ? "auth-status" : undefined} /></div>
+      {legacyNumber && <p className="auth-field-help">使用旧平台的账号编号和原密码登录；未设置密码请使用绑定的手机号或邮箱找回。</p>}
       {(mode === "login" && method === "sms" || mode === "recover" && !proofId) && <div className="auth-code-field"><label className="sr-only" htmlFor="phone-registration-code">验证码</label><div className="auth-code-row"><input id="phone-registration-code" aria-invalid={invalidField === "phone-registration-code" || undefined} name="otp" autoComplete="one-time-code" inputMode="numeric" maxLength={6} value={code} disabled={locked} placeholder="6 位验证码" onChange={event => setCode(event.target.value)} aria-describedby={error ? "auth-status" : undefined} /><button type="button" className="button secondary" disabled={locked || remaining > 0} onClick={() => void sendOtp()}>{sending ? "发送中…" : remaining > 0 ? remaining + "s 后重发" : "获取验证码"}</button></div></div>}
       {mode === "login" && method === "sms" && <p className="auth-field-help">未注册的手机号验证后自动注册，密码可稍后设置。</p>}
       {mode === "login" && method === "sms" && initialInviteCode !== undefined && <div className="auth-field"><label htmlFor="auth-invite-code">邀请码（选填）</label><input id="auth-invite-code" value={inviteCode} maxLength={30} autoComplete="off" disabled={locked} aria-invalid={invalidField === "auth-invite-code" || undefined} onChange={event => setInviteCode(event.target.value)} /><p className="auth-field-help">仅用于新账号注册来源。登录已有账号不会更改邀请关系。</p></div>}
@@ -231,7 +236,7 @@ export function AuthForm({ next, inviteCode: initialInviteCode, onSuccess, autoF
       {consentPending && <p id="auth-consent-hint" className="auth-consent-hint">请先阅读并同意《平台服务协议》和《用户隐私政策》。</p>}
       {(error || notice) && <p id="auth-status" className={"auth-status " + (error ? "is-error" : "is-success")} role={error ? "alert" : "status"}>{error ?? notice}</p>}
       {outcome !== "idle" && <button type="button" className="button secondary" disabled={busy} onClick={() => void readResult()}>重新确认结果</button>}
-      {guestConfirmed && <button type="button" className="button secondary" disabled={busy} onClick={() => { clearProof(); setOutcome("idle"); clearWrite(); setGuestConfirmed(false); setMethod("sms"); }}>使用新的验证码登录</button>}
+      {guestConfirmed && <button type="button" className="button secondary" disabled={busy} onClick={() => { clearProof(); if (legacyNumber) setContact(""); setPasswordIdentifier("phone"); setOutcome("idle"); clearWrite(); setGuestConfirmed(false); setMethod("sms"); }}>使用新的验证码登录</button>}
     </form>
   </section>;
 }

@@ -1,7 +1,7 @@
 import {createHash} from 'node:crypto';import type {Pool,PoolClient} from 'pg';
 import {Logger} from '@nestjs/common';
 import {withTransaction,recordAudit,SecurityApiError} from '../auth/security-core';import {canonicalize} from '../supply/content-hash';import {conflict,invalid,notFound} from '../supply/supply-util';
-import {createPaymentDistributionStore,createNativePaymentDistributionStore,type DistributionOrderScope} from './distribution-payment-store';import {prepareAccrualFromFrozenPayment,type CompletedDistributionFacts} from './distribution-accrual';import {transitionRentalEarning,earningEconomicKey,type RentalEarning,type EarningLedgerPlan} from './distribution-mechanism';
+import {createPaymentDistributionStore,createNativePaymentDistributionStore,distributionOrderScopeIdentity,assertDistributionOrderScopeResource,type DistributionOrderScope} from './distribution-payment-store';import {prepareAccrualFromFrozenPayment,type CompletedDistributionFacts} from './distribution-accrual';import {transitionRentalEarning,earningEconomicKey,type RentalEarning,type EarningLedgerPlan} from './distribution-mechanism';
 import {assertFormalInitialAdmission,readFormalCollectionAdmission,type FormalCollectionAdmission} from '../order/joinpay-collection-profile';
 import {createMaintenanceBatchRunner} from './distribution-maintenance-batch';
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex');
@@ -67,7 +67,7 @@ export function createNativeDistributionEarningStore(admission:FormalCollectionA
 function earningStore(resource:Resource):DistributionEarningStore{
  const local=resource.kind==='LOCAL_CONTROLLED'?resource.scope:null,allowed=new Set(local?.allowedOrderIds??[]),scopeLabel=local?'LOCAL_CONTROLLED' as const:'NATIVE' as const;
  const approvalDigest=resource.kind==='NATIVE'?resource.admissionSha256:local!.approvalDigest;
- const name=resource.kind==='NATIVE'?resource.database:'zzsh_test_order_'+local!.resourceSet,role=resource.kind==='NATIVE'?resource.runtimeUser:'zzsh_order_'+local!.resourceSet+'_r';
+ const name=resource.kind==='NATIVE'?resource.database:distributionOrderScopeIdentity(local!).name,role=resource.kind==='NATIVE'?resource.runtimeUser:distributionOrderScopeIdentity(local!).role;
  const payment=resource.kind==='NATIVE'?createNativePaymentDistributionStore(resource.admission):createPaymentDistributionStore(resource.scope);
  if(!approvalDigest)throw invalid('Exact reviewed earning resource required');
  async function ready(c:PoolClient){
@@ -75,8 +75,9 @@ function earningStore(resource:Resource):DistributionEarningStore{
    const r=(await c.query(`SELECT current_database() AS name,current_user AS role,to_regclass('zzsh_order.rental_referral_earning') IS NOT NULL AND to_regclass('zzsh_order.rental_referral_transition') IS NOT NULL AND to_regclass('zzsh_order.rental_referral_reversal_source') IS NOT NULL AS complete`)).rows[0];
    if(!r||r.name!==name||r.role!==role||r.complete!==true)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Typed earning schema/resource not installed');return;
   }
+  if(local!.resourceSet==='regression')await assertDistributionOrderScopeResource(c,local!);
   const r=(await c.query("SELECT d.oid,current_database() AS name,current_user AS role,shobj_description(d.oid,'pg_database') AS marker,to_regclass('zzsh_order.rental_referral_earning') IS NOT NULL AND to_regclass('zzsh_order.rental_referral_transition') IS NOT NULL AS complete FROM pg_database d WHERE d.datname=current_database()")).rows[0];
-  if(!r||Number(r.oid)!==local!.resourceOid||r.name!==name||r.role!==role||r.marker!=='zzsh:order-reservation-test:v1'||!r.complete)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Typed earning schema/resource not installed');
+  if(!r||Number(r.oid)!==local!.resourceOid||r.name!==name||r.role!==role||r.marker!==distributionOrderScopeIdentity(local!).marker||!r.complete)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Typed earning schema/resource not installed');
  }
  async function orderLock(c:PoolClient,orderId:string){if(local&&!allowed.has(orderId))throw notFound();await c.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))",['zzsh:earning-order:'+orderId]);}
  async function wallet(c:PoolClient,userId:string){const covered=(await c.query('SELECT 1 FROM zzsh_order.wallet_coverage WHERE user_id=$1',[userId])).rowCount;if(!covered)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Wallet origin coverage not closed');const r=(await c.query(`SELECT ledger_revision::text AS revision,COALESCE((SELECT sum(credit_cents-debit_cents) FROM zzsh_order.settlement_ledger_entry WHERE counterparty_user_id=$1 AND account_code IN('OWNER_AVAILABLE','WALLET_AVAILABLE')),0)::text AS available FROM zzsh_order.wallet_revision WHERE user_id=$1`,[userId])).rows[0];if(!r||BigInt(r.available)<0n)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Wallet requires reconciliation');return r;}

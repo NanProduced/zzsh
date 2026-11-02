@@ -48,6 +48,36 @@ test("proposal constants and native SMS path allowlist keep their declared value
   assert.equal(isUserAuthPathAllowed("/phone-number/request-password-reset"), false);
   assert.equal(isUserAuthPathAllowed("/security/captcha/challenge"), true);
   assert.equal(isUserAuthPathAllowed("/sign-in/identifier"), true);
+  assert.equal(isUserAuthPathAllowed("/sign-in/username"), false);
+  assert.equal(isUserAuthPathAllowed("/sign-in/legacy-number"), false);
+});
+
+test('phone and both source-bound legacy aliases share the same candidate failure/captcha bucket',async()=>{
+ let calls=0;const store=createMemoryUserAuthThrottle({hmacKey:KEY,mode:'candidate',policy:{...policy,ipMax:30,pairMax:10},captchaCost:1});
+ const wrapped=withUserAuthThrottle(async()=>{calls++;return Response.json({},{status:401});},store,KEY,{resolveLegacyNumberSubject:async value=>['000019','ZZ000019'].includes(value)?PHONE:null});
+ assert.equal((await wrapped(signInRequest({phoneNumber:PHONE,password:'wrong'}))).status,401);
+ assert.equal((await wrapped(signInRequest({identifier:'000019',kind:'legacy-number',password:'wrong'},IP,'/sign-in/identifier'))).status,401);
+ const third=await wrapped(signInRequest({identifier:'ZZ000019',kind:'legacy-number',password:'wrong'},IP,'/sign-in/identifier'));assert.equal(third.status,401);assert.equal((await third.json()).error.reason,'CAPTCHA_REQUIRED');
+ assert.equal((await wrapped(signInRequest({phoneNumber:PHONE,password:'right'}))).status,403);assert.equal(calls,3);
+});
+test('a successful legacy alias preserves the response/cookie and clears the same phone failure bucket',async()=>{
+ const store=createMemoryUserAuthThrottle({hmacKey:KEY,mode:'candidate',policy:{...policy,ipMax:30,pairMax:10},captchaCost:1});
+ const wrapped=withUserAuthThrottle(async request=>{const b=await request.json();return Response.json({ok:b.password==='correct'},{status:b.password==='correct'?200:401,headers:{'set-cookie':'session=synthetic; HttpOnly'}});},store,KEY,{resolveLegacyNumberSubject:async()=>PHONE});
+ for(let i=0;i<2;i++)assert.equal((await wrapped(signInRequest({phoneNumber:PHONE,password:'wrong'}))).status,401);
+ const success=await wrapped(signInRequest({identifier:'ZZ000019',kind:'legacy-number',password:'correct'},IP,'/sign-in/identifier'));assert.equal(success.status,200);assert.equal(success.headers.get('set-cookie'),'session=synthetic; HttpOnly');
+ for(let i=0;i<2;i++){const r=await wrapped(signInRequest({phoneNumber:PHONE,password:'wrong'}));assert.equal(r.status,401);assert.equal((await r.json()).error,undefined);}
+});
+test('unresolved legacy numbers still consume the shared IP allowance and broken resolver never dispatches credentials',async()=>{
+ const store=createMemoryUserAuthThrottle({hmacKey:KEY,mode:'candidate',policy:{...policy,ipMax:2,accountCaptchaAfter:99,pairMax:10},captchaCost:1});let calls=0;
+ const wrapped=withUserAuthThrottle(async()=>{calls++;return Response.json({},{status:401});},store,KEY,{resolveLegacyNumberSubject:async()=>null});
+ for(let i=0;i<2;i++)assert.equal((await wrapped(signInRequest({identifier:'unknown'+i,kind:'legacy-number',password:'wrong'},IP,'/sign-in/identifier'))).status,401);
+ assert.equal((await wrapped(signInRequest({identifier:'unknown3',kind:'legacy-number',password:'wrong'},IP,'/sign-in/identifier'))).status,429);assert.equal(calls,2);
+ for(const resolver of [undefined,async()=>{throw Error('private database failure');},async()=>'' as string]){const wrapped=withUserAuthThrottle(async()=>{throw Error('MUST_NOT_DISPATCH');},throttle(),KEY,{resolveLegacyNumberSubject:resolver});const r=await wrapped(signInRequest({identifier:'ZZ000019',kind:'legacy-number',password:'wrong'},IP,'/sign-in/identifier'));assert.equal(r.status,503);assert.equal((await r.json()).error.reason,'AUTH_DEPENDENCY_UNAVAILABLE');}
+});
+test('base keeps the existing IP-only thresholds and never performs a legacy alias lookup',async()=>{
+ let calls=0,lookups=0;const wrapped=withUserAuthThrottle(async()=>{calls++;return Response.json({},{status:401});},createMemoryUserAuthThrottle({hmacKey:KEY,mode:'base'}),KEY,{resolveLegacyNumberSubject:async()=>{lookups++;throw Error('NOT_NEEDED_IN_BASE');}});
+ for(let i=0;i<3;i++)assert.equal((await wrapped(signInRequest({identifier:'ZZ000019',kind:'legacy-number',password:'wrong'},IP,'/sign-in/identifier'))).status,401);
+ assert.equal((await wrapped(signInRequest({identifier:'ZZ000019',kind:'legacy-number',password:'wrong'},IP,'/sign-in/identifier'))).status,429);assert.equal(calls,3);assert.equal(lookups,0);
 });
 
 test("client ip ignores forged headers, walks trusted hops, and does not use the proxy as a bucket", () => {
@@ -252,9 +282,11 @@ test("Root: committed sign-in and SMS responses survive a later throttle settlem
   try {
     const loginStore = { realm: "user", mode: "candidate", admitSignIn: async () => ({ decision: "allow", ticket: "original" }), settleSignIn: async () => { throw new Error("meter down"); } } as any;
     const original = new Response(JSON.stringify({ status: true }), { status: 200, headers: { "set-cookie": "zzsh_user.session_token=SYNTHETIC; HttpOnly" } });
-    const login = withUserAuthThrottle(async () => original, loginStore, KEY);
-    const response = await login(signInRequest({ phoneNumber: PHONE, password: "correct" }));
-    assert.equal(response, original); assert.match(response.headers.get("set-cookie")!, /SYNTHETIC/);
+    const login = withUserAuthThrottle(async () => original, loginStore, KEY, { resolveLegacyNumberSubject: async () => PHONE });
+    for (const [path, body] of [["/sign-in/phone-number", { phoneNumber: PHONE, password: "correct" }], ["/sign-in/identifier", { identifier: "ZZ000019", kind: "legacy-number", password: "correct" }]] as const) {
+      const response = await login(signInRequest(body, IP, path));
+      assert.equal(response, original); assert.match(response.headers.get("set-cookie")!, /SYNTHETIC/);
+    }
     const smsStore = { realm: "user", mode: "candidate", admitSmsIp: async () => ({ decision: "allow", ticket: "original_sms" }), settleSmsIp: async () => { throw new Error("meter down"); } } as any;
     const sent = Response.json({ status: true, challengeId: "challenge_original" });
     const sms = withUserAuthThrottle(async () => sent, smsStore, KEY);

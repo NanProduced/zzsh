@@ -5,7 +5,7 @@ import { canonicalize } from "../supply/content-hash";
 import { invalid, notFound } from "../supply/supply-util";
 import { requireListingCursorKey, type ListingCursorKey } from "../supply/listing-cursor";
 import { exactCents, sourceYuanToCents, sourceSignedYuanToCents, readPersonalWallet,OPENING_OBSERVATION_JOIN,FINANCE_LEDGER_POSTED_AT_SQL } from "./personal-finance-read";
-import { loadFinanceOrderFacts, type FinanceOrderFact } from "./admin-finance-order-read";
+import { financeOrderLifecycle, loadFinanceOrderFacts, type FinanceOrderFact } from "./admin-finance-order-read";
 import { scopedFinanceSql, financeVersionSql, financeScopedVersionSql, financeLookupPageSql,FINANCE_LEDGER_BUCKET_SQL, type FinanceLoadScope, type FinanceVersionScope } from "./admin-finance-query";
 import {prepareOwnerGuaranteeHistory} from './owner-guarantee-history';
 import { historicalObservationDisplay,enrichHistoricalObservations,resolveHistoricalReverseLinks,type HistoricalFinanceDisplay,type HistoricalRelationAccess } from './legacy-observation-display';
@@ -86,7 +86,7 @@ function cents(value: unknown, yuan = false): string | null {
   try { return yuan ? sourceYuanToCents(value) : exactCents(value); } catch { return null; }
 }
 function signedSourceCents(value: unknown): string | null { try { return sourceSignedYuanToCents(value); } catch { return null; } }
-function displayName(value: unknown, fallback: string): string { return typeof value !== "string" ? fallback : /^1[3-9]\d{9}$/.test(value) ? value.slice(0, 3) + "****" + value.slice(-4) : value; }
+export function displayName(value: unknown, fallback: string): string { return typeof value !== "string" || !value.trim() ? fallback : /^1[3-9]\d{9}$/.test(value) ? value.slice(0, 3) + "****" + value.slice(-4) : value; }
 function bucketOf(code: string): FinanceBucket {
   if (["OWNER_AVAILABLE", "WALLET_AVAILABLE"].includes(code)) return "AVAILABLE";
   if (code==='WALLET_RESERVED') return "RESERVED";
@@ -101,7 +101,10 @@ export const ADMIN_FINANCE_LEDGER_SQL = `SELECT l.id,l.account_code,l.counterpar
   ${utc(FINANCE_LEDGER_POSTED_AT_SQL)} AS at,${utc("l.created_at")} AS recorded_at,l.finance_event_id,l.posting_id,e.kind AS event_kind,r.source_kind,r.source_type,r.source_system,r.source_entity,r.source_id,r.source_digest,
   r.basis_id,r.id AS economic_root_id,r.beneficiary_role,COALESCE(p.order_id,re.order_id) AS order_id,o.display_no,o.account_id,b.source_cutoff::text AS opening_cutoff,b.covered_count::text AS covered_count,
   re.state AS earning_state,re.beneficiary_role AS earning_role,re.amount_cents::text AS earning_amount,re.funds_disposition AS earning_disposition,re.recovery_required_cents::text AS earning_recovery,${utc("re.due_at")} AS earning_due_at,re.version::text AS earning_version,
-  p.payment_confirmation_id,p.settlement_version_id,p.version_hash,p.captured_cents::text,p.owner_net_cents::text,p.renter_refund_cents::text,p.platform_contribution_cents::text,${utc("p.refund_due_at")} AS refund_due_at
+  p.payment_confirmation_id,p.settlement_version_id,p.version_hash,p.captured_cents::text,p.owner_net_cents::text,p.renter_refund_cents::text,p.platform_contribution_cents::text,${utc("p.refund_due_at")} AS refund_due_at,
+  l.details->>'payer' AS fee_payer,
+  CASE WHEN jsonb_typeof(l.details->'base')='object' AND l.details#>>'{base,currency}'='CNY'
+    AND jsonb_typeof(l.details#>'{base,amount}')='string' THEN l.details#>>'{base,amount}' END AS fee_base,l.details->>'rate' AS fee_rate
   FROM zzsh_order.settlement_ledger_entry l LEFT JOIN zzsh_auth_user."user" u ON u.id=l.counterparty_user_id
   LEFT JOIN zzsh_order.finance_event e ON e.id=l.finance_event_id LEFT JOIN zzsh_order.finance_economic_root r ON r.id=e.economic_root_id
   LEFT JOIN zzsh_order.finance_opening_basis b ON b.id=r.basis_id
@@ -173,6 +176,9 @@ export function projectAdminFinanceLedger(row: Raw): FinanceEntry {
         prestartOriginalCents:cents(row.prestart_amount_cents),prestartApprovedAt:row.prestart_approved_at??null,prestartSourceDigest:row.source_digest??null,
         localFundsEffect:'REFUND_LIABILITY_RECOGNIZED',prestartBankArrival:'UNKNOWN'}:{}),
       postingCapturedCents: cents(row.captured_cents), postingOwnerNetCents:cents(row.owner_net_cents),
+      ...(['OWNER','RENTER','NONE'].includes(row.fee_payer)?{feePayer:row.fee_payer}:{}),
+      ...(typeof row.fee_base==='string'&&/^(0|[1-9]\d*)(\.\d+)?$/.test(row.fee_base)?{feeBase:row.fee_base}:{}),
+      ...(typeof row.fee_rate==='string'&&/^(0|[1-9]\d*)(\.\d+)?$/.test(row.fee_rate)?{feeRate:row.fee_rate}:{}),
       refundPayableCents: cents(row.renter_refund_cents), refundDueAt: row.refund_due_at ?? null, ...(type === "REFUND" ? { refundPaidCents: null, refundPaymentReference: null } : {}), ...(earning?{earningRole:row.earning_role??null,earningAmountCents:cents(row.earning_amount),earningFundsDisposition:row.earning_disposition??null,recoveryRequiredCents:cents(row.earning_recovery),dueAt:row.earning_due_at??null,earningVersion:row.earning_version??null}:{}),postedPlatformContributionCents: cents(row.platform_contribution_cents) },
     related: [...(row.order_id ? [{ ref: `ORDER:${row.order_id}`, label: "原订单", path: `/orders/${encodeURIComponent(row.order_id)}` }] : []), ...(row.account_id ? [{ ref: row.account_id, label: "资源账号", path: `/supply/accounts/${encodeURIComponent(row.account_id)}` }] : [])] };
 }
@@ -461,20 +467,27 @@ export function financeDocuments(entries: FinanceEntry[],summaryScope:'DOCUMENT'
       ...(lines.length===1&&lines[0]!.historical?{historical:lines[0]!.historical}:{})};
   });
 }
+export function withFinanceOrderContext<T extends { subjects: { id: string; name: string }[] }>(document: T, order: FinanceOrderFact | undefined, subjects: readonly {id:string;name:string}[]): T & {orderLifecycle?:ReturnType<typeof financeOrderLifecycle>;parties?:{owner:{id:string;name:string};renter:{id:string;name:string}}} {
+ if(!order)return document;
+ const party=(id:string,fallback:string)=>({id,name:subjects.find(subject=>subject.id===id)?.name??fallback});
+ const parties={owner:party(order.ownerId,'号主'),renter:party(order.renterId,'租客')};
+ return {...document,orderLifecycle:financeOrderLifecycle(order),parties,
+  subjects:[...new Map([...document.subjects,parties.owner,parties.renter].map(subject=>[subject.id,subject])).values()]};
+}
 export function financeOrderDocuments(facts: FinanceFacts, filter: FinanceFilters) {
   const query = filter.q.toLocaleLowerCase("zh-CN"), from = Date.parse(filter.from + "T00:00:00+08:00"), end = Date.parse(filter.to + "T00:00:00+08:00") + 86400_000;
   return (facts.orders ?? []).filter(order => (filter.scope === "ALL" || [order.ownerId, order.renterId].includes(filter.scope)) && filter.bucket === "ALL" && ["ALL", "SETTLEMENT"].includes(filter.kind) && ["ALL", order.state].includes(filter.state)
     && (!filter.period || !order.occurredAt || Date.parse(order.occurredAt) >= from && Date.parse(order.occurredAt) < end)
     && (filter.q.startsWith("ORDER_LINK:") ? order.id === filter.q.slice(11) : !query || [order.ref, order.number, order.id, order.sourceId, order.ownerId, order.renterId, ...facts.subjects.filter(subject => subject.id === order.ownerId || subject.id === order.renterId).map(subject => subject.name)].some(value => value.toLocaleLowerCase("zh-CN").includes(query))))
-    .map(order => ({ ref: order.ref, number: order.number, kind: order.kind, state: order.state, occurredAt: order.occurredAt, requestedAmountCents: null,
-      subjects: [order.ownerId, order.renterId].map(id => ({ id, name: facts.subjects.find(subject => subject.id === id)?.name ?? id })), entryCount: 0,ledgerEntryCount:0,summaryScope:'DOCUMENT' as const,subjectEntryCount:null,documentEntryCount:0, amounts: [] }));
+    .map(order => withFinanceOrderContext({ ref: order.ref, number: order.number, kind: order.kind, state: order.state, occurredAt: order.occurredAt, requestedAmountCents: null,
+      subjects: [order.ownerId, order.renterId].map(id => ({ id, name: facts.subjects.find(subject => subject.id === id)?.name ?? id })), entryCount: 0,ledgerEntryCount:0,summaryScope:'DOCUMENT' as const,subjectEntryCount:null,documentEntryCount:0, amounts: [] },order,facts.subjects));
 }
 export type FinancePeriodBalance={bucket:FinanceBucket;opening:string;closing:string;movement:string};
 /** Complete DB-side ledger aggregates, scoped like the rows. These are book balances, not source/channel completeness. */
 export async function readAdminFinancePeriodBalances(client:PoolClient,filters:FinanceFilters){
- const ready=(await client.query(`/* finance period optional sources */ SELECT to_regclass('zzsh_order.rental_referral_earning') IS NOT NULL AS native_distribution,to_regclass('zzsh_order.withdrawal_intent') IS NOT NULL AS withdrawals`)).rows[0];
+ const ready=(await client.query(`/* finance period optional sources */ SELECT to_regclass('zzsh_order.rental_referral_earning') IS NOT NULL AS native_distribution,to_regclass('zzsh_order.withdrawal_intent') IS NOT NULL AS withdrawals,to_regclass('zzsh_order.joinpay_withdrawal_intent') IS NOT NULL AS joinpay_withdrawals,to_regclass('zzsh_order.prestart_termination') IS NOT NULL AS prestart`)).rows[0];
  if(typeof ready?.native_distribution!=='boolean'||typeof ready?.withdrawals!=='boolean')throw unavailable('Finance period source metadata unavailable');
- const source=scopedFinanceSql(adminFinanceLedgerSql(ready.native_distribution),'ledger',{filters:{...filters,period:false}},null,ready.withdrawals,ready.joinpay_withdrawals===true),start=`${filters.from}T00:00:00+08:00`,end=new Date(Date.parse(`${filters.to}T00:00:00+08:00`)+86400000).toISOString();
+ const source=scopedFinanceSql(adminFinanceLedgerSql(ready.native_distribution,ready.prestart===true),'ledger',{filters:{...filters,period:false}},null,ready.withdrawals,ready.joinpay_withdrawals===true),start=`${filters.from}T00:00:00+08:00`,end=new Date(Date.parse(`${filters.to}T00:00:00+08:00`)+86400000).toISOString();
  const values=[...source.values,start,end],a='$'+(values.length-1),b='$'+values.length;
  const rows=(await client.query(`/* finance period complete ledger balances */ WITH period_rows AS (${source.text}) SELECT ${FINANCE_LEDGER_BUCKET_SQL} AS bucket,
   COALESCE(sum(r.delta::numeric) FILTER(WHERE r.at::timestamptz<${a}::timestamptz),0)::text AS opening,
@@ -494,7 +507,7 @@ export function financePeriodProjection(entries: FinanceEntry[],balances?:Financ
     return { bucket, knownInflows: inflows.toString(),
       knownOutflows: movements.filter(entry => BigInt(entry.deltaCents!) < 0n).reduce((sum, entry) => sum - BigInt(entry.deltaCents!), 0n).toString(),
       migrationMovement: known.filter(entry => entry.classification === "OPENING").reduce((sum, entry) => sum + BigInt(entry.deltaCents!), 0n).toString(),
-      ledgerOpeningBalance:balance?.opening??null,ledgerClosingBalance:balance?.closing??null,ledgerDifference:balance?'0':null,...(balanceBasis?{balanceBasis}:{}),
+      ledgerOpeningBalance:balance?.opening??null,ledgerClosingBalance:balance?.closing??null,ledgerDifference:balance?'0':null,externalDifference:null,externalState:'NOT_RECONCILED' as const,...(balanceBasis?{balanceBasis}:{}),
       openingBalance:proved?balance.opening:null,closingBalance:proved?balance.closing:null,difference:proved?'0':null,knowledge:proved?'KNOWN':'UNKNOWN',scope:'CURRENT_LEDGER_ONLY',
       reasonCodes:!balanceBasis?["PERIOD_BALANCE_PROOF_NOT_AVAILABLE"]:balanceBasis.knowledge==='UNKNOWN'?balanceBasis.reasonCodes:balance&&!proved?['POSTED_EVENT_AMOUNT_OR_TIME_UNAVAILABLE']:balance?["CURRENT_LEDGER_EXCLUDES_UNADMITTED_LEGACY","CHANNEL_ARRIVAL_NOT_PROVED"]:["PERIOD_BALANCE_PROOF_NOT_AVAILABLE"],
       unknownCount: posted.length - known.length, unknownTimeCount: lines.filter(entry => entry.occurredAt === null).length,
@@ -511,7 +524,8 @@ export function readAdminFinanceDocument(facts: FinanceFacts, ref: string, entry
   const entries = facts.entries.filter(entry => entry.documentRef === ref);
   const order = facts.orders?.find(row => row.ref === ref);
   if (!entries.length && !order || entryId && !entries.some(entry => entry.id === entryId)) throw notFound();
-  const document = financeDocuments(entries)[0] ?? { ref, number: order!.number, kind: order!.kind, state: order!.state, occurredAt: order!.occurredAt, requestedAmountCents: null, subjects: [order!.ownerId, order!.renterId].map(id => ({ id, name: facts.subjects.find(subject => subject.id === id)?.name ?? id })), entryCount: 0,ledgerEntryCount:0,summaryScope:'DOCUMENT' as const,subjectEntryCount:null,documentEntryCount:0, amounts: [] };
+  const bareDocument = financeDocuments(entries)[0] ?? { ref, number: order!.number, kind: order!.kind, state: order!.state, occurredAt: order!.occurredAt, requestedAmountCents: null, subjects: [order!.ownerId, order!.renterId].map(id => ({ id, name: facts.subjects.find(subject => subject.id === id)?.name ?? id })), entryCount: 0,ledgerEntryCount:0,summaryScope:'DOCUMENT' as const,subjectEntryCount:null,documentEntryCount:0, amounts: [] };
+  const document = withFinanceOrderContext(bareDocument,order,facts.subjects);
   const evidence=Object.fromEntries([...new Set(entries.flatMap(entry=>Object.keys(entry.evidence)))].map(name=>[name,singleText(entries.map(entry=>entry.evidence[name]))]));
   const reverse=facts.historicalLinks?.[ref];
   const related = [...new Map([...entries.flatMap(entry => entry.related),...(reverse?.related??[])].map(link => [link.ref, link])).values()].filter(link => link.ref !== ref || link.path);
@@ -526,5 +540,6 @@ export function readAdminFinanceDocument(facts: FinanceFacts, ref: string, entry
   return { document, entries, evidence, related: [...new Map(related.map(link => [link.ref + (link.path ?? ""), link])).values()], reasonCodes: [...new Set([...entries.flatMap(entry => entry.reasonCodes),...(reverse?.reasonCodes??[]),...(facts.localSourceLimits??[]), ...(order ? ["ORDER_RECORD_NOT_CHANNEL_RESULT", ...(!entries.length ? ["ORDER_NO_CURRENT_POSTING"] : [])] : [])])],
     ...(orderSettlement?{orderSettlement}:{}),
     ...(facts.distributionCalculation?{distributionCalculation:facts.distributionCalculation}:{}),
-    platform: { postedComponents: entries.filter(entry => entry.bucket === "PLATFORM").map(entry => ({ accountCode: entry.accountCode, deltaCents: entry.deltaCents })), beforeDistributionCents: null, distributionExpenseCents: null, retainedCents: null, channelCostCents: null, netProfitCents: null, reasonCodes: ["DISTRIBUTION_AND_CHANNEL_COST_NOT_ADMITTED"] } };
+    platform: { postedComponents: entries.filter(entry => entry.bucket === "PLATFORM").map(entry => ({ accountCode: entry.accountCode, deltaCents: entry.deltaCents,
+      payer:entry.evidence.feePayer??null,feeBase:entry.evidence.feeBase??null,feeRate:entry.evidence.feeRate??null })), beforeDistributionCents: null, distributionExpenseCents: null, retainedCents: null, channelCostCents: null, netProfitCents: null, reasonCodes: ["DISTRIBUTION_AND_CHANNEL_COST_NOT_ADMITTED"] } };
 }

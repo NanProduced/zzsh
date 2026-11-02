@@ -8,9 +8,10 @@ import {readFormalCollectionAdmission,type FormalCollectionAdmission} from '../o
 export type LocalDistributionScope=Readonly<{kind:'LOCAL_CONTROLLED_DISTRIBUTION'|'NATIVE_DISTRIBUTION'}>;
 export type DistributionPolicyScopeKind='LOCAL_CONTROLLED'|'NATIVE';
 type CreationReceipt={database:string;resourceOid:number;owner:string;marker:string;migrationRole:string;runtimeRole:string;ownerOid?:number;migrationRoleOid?:number;runtimeRoleOid?:number};
+type DistributionOrigins=Readonly<{apiOrigin:string;userOrigin:string;adminOrigin:string}>;
 const localName='zzsh_test_order_credit_admin_batch2',localRuntime='zzsh_order_credit_admin_batch2_r',localMigration='zzsh_order_credit_admin_batch2_m',localMarker='zzsh:order-reservation-test:v1';
 const milestoneName='zzsh_test_order_milestone_real_1',milestoneRuntime='zzsh_order_milestone_real_1_r',milestoneMigration='zzsh_order_milestone_real_1_m';
-const localProofs=new WeakMap<LocalDistributionScope,Readonly<CreationReceipt&{readOnly:boolean}>>();
+const localProofs=new WeakMap<LocalDistributionScope,Readonly<CreationReceipt&{readOnly:boolean;origins?:DistributionOrigins}>>();
 const nativeProofs=new WeakMap<LocalDistributionScope,Readonly<{kind:'NATIVE';database:string;runtimeUser:string;admissionSha256:string}>>();
 /** Formal NATIVE scope comes only from the reviewed formal collection admission; no receipt or env shortcut. */
 export function createNativeDistributionPolicyScope(admission:FormalCollectionAdmission):LocalDistributionScope{
@@ -26,6 +27,23 @@ export function createLocalDistributionScope(config:AppConfig,receipt:CreationRe
 export function createLocalDistributionReadScope(config:AppConfig,receipt:CreationReceipt):LocalDistributionScope{
  return createScope(config,receipt,true);
 }
+/** Server-registered receipt only; this capability admits GETs on the exact resource and origins, never writes. */
+export function createRegisteredLocalDistributionReadScope(config:AppConfig,receipt:Required<CreationReceipt>,origins:DistributionOrigins&{secureCookies:boolean}):LocalDistributionScope{
+ const oid=(value:number)=>Number.isSafeInteger(value)&&value>0&&value<=4294967295;
+ const localOrigin=(value:string)=>{try{const url=new URL(value);return url.protocol==='http:'&&url.hostname==='127.0.0.1'&&Boolean(url.port)&&url.origin===value;}catch{return false;}};
+ if(!['test','dev'].includes(config.profile)||config.provider!=='fake'||config.host!=='127.0.0.1'
+  ||config.database.target!=='local-compose'||config.database.host!=='127.0.0.1'||config.database.port!==55432
+  ||config.database.name!==receipt.database||config.database.user!==receipt.runtimeRole||config.database.runtimeUser!==receipt.runtimeRole
+  ||!['database','owner','runtimeRole','migrationRole'].every(key=>{const value=receipt[key as keyof CreationReceipt];return typeof value==='string'&&value.length>0&&value.length<=63&&value===value.trim()&&!/[\x00-\x1f\x7f]/.test(value);})
+  ||typeof receipt.marker!=='string'||!receipt.marker.length||receipt.marker.length>1024||/[\x00-\x1f\x7f]/.test(receipt.marker)
+  ||![receipt.resourceOid,receipt.ownerOid,receipt.runtimeRoleOid,receipt.migrationRoleOid].every(oid)
+  ||receipt.runtimeRole===receipt.owner||receipt.runtimeRole===receipt.migrationRole||receipt.runtimeRoleOid===receipt.ownerOid||receipt.runtimeRoleOid===receipt.migrationRoleOid
+  ||(receipt.owner===receipt.migrationRole)!==(receipt.ownerOid===receipt.migrationRoleOid)
+  ||origins.secureCookies!==false||![origins.apiOrigin,origins.userOrigin,origins.adminOrigin].every(localOrigin)
+  ||new Set([origins.apiOrigin,origins.userOrigin,origins.adminOrigin]).size!==3||origins.apiOrigin!==`http://127.0.0.1:${config.port}`)throw new ConfigurationError('Exact registered local fake distribution read receipt and origins required');
+ const value=Object.freeze({kind:'LOCAL_CONTROLLED_DISTRIBUTION' as const});
+ localProofs.set(value,Object.freeze({...receipt,readOnly:true,origins:Object.freeze({apiOrigin:origins.apiOrigin,userOrigin:origins.userOrigin,adminOrigin:origins.adminOrigin})}));return value;
+}
 function createScope(config:AppConfig,receipt:CreationReceipt,readOnly:boolean):LocalDistributionScope{
  const milestone=receipt.database===milestoneName,name=milestone?milestoneName:localName,runtime=milestone?milestoneRuntime:localRuntime,migration=milestone?milestoneMigration:localMigration;
  if(config.profile!=='test'||config.provider!=='fake'||!readOnly&&!config.testOperationsEnabled||readOnly&&!milestone
@@ -35,7 +53,7 @@ function createScope(config:AppConfig,receipt:CreationReceipt,readOnly:boolean):
   ||receipt.owner!=='zzsh'||receipt.marker!==localMarker||!Number.isSafeInteger(receipt.resourceOid)||receipt.resourceOid<=0||receipt.resourceOid>4294967295
   ||milestone&&(receipt.resourceOid!==952624||receipt.ownerOid!==10||receipt.migrationRoleOid!==952625||receipt.runtimeRoleOid!==952626)
   ||[793252,878001,893390,881699,820148,833000,869754].includes(receipt.resourceOid))throw new ConfigurationError('Exact local test/fake distribution creation receipt required');
- const value=Object.freeze({kind:'LOCAL_CONTROLLED_DISTRIBUTION' as const});localProofs.set(value,Object.freeze({...receipt,readOnly}));return value;
+ const value=Object.freeze({kind:'LOCAL_CONTROLLED_DISTRIBUTION' as const});localProofs.set(value,Object.freeze({...receipt,readOnly,origins:undefined}));return value;
 }
 export function assertLocalDistributionAssembly(binding:LocalDistributionScope|undefined,options:{testOperationsEnabled:boolean;secureCookies:boolean;apiOrigin:string;userOrigin:string;adminOrigin:string}){
  if(binding===undefined)return;
@@ -46,8 +64,9 @@ export function assertLocalDistributionAssembly(binding:LocalDistributionScope|u
   return;
  }
  const receipt=localProofs.get(binding),port=receipt?.database===milestoneName?4220:4280;
+ const origins=receipt?.origins??{apiOrigin:`http://127.0.0.1:${port+2}`,userOrigin:`http://127.0.0.1:${port}`,adminOrigin:`http://127.0.0.1:${port+1}`};
  if(!localProofs.has(binding)||!receipt?.readOnly&&!options.testOperationsEnabled||options.secureCookies||process.env.NODE_ENV==='production'
-  ||options.apiOrigin!==`http://127.0.0.1:${port+2}`||options.userOrigin!==`http://127.0.0.1:${port}`||options.adminOrigin!==`http://127.0.0.1:${port+1}`)throw new ConfigurationError('Local distribution scope requires its explicit test API assembly');
+  ||options.apiOrigin!==origins.apiOrigin||options.userOrigin!==origins.userOrigin||options.adminOrigin!==origins.adminOrigin)throw new ConfigurationError('Local distribution scope requires its explicit test API assembly');
 }
 export const DISTRIBUTION_POLICY_PERMISSION={read:'personal.distribution.policy.read',manage:'personal.distribution.policy.manage'} as const;
 type Actor={userId:string;sessionId:string;requestId:string};const sha=(s:string)=>createHash('sha256').update(s).digest('hex'),scope='LOCAL_CONTROLLED';
@@ -69,11 +88,13 @@ async function resource(c:PoolClient, allowUnadmitted=false,binding?:LocalDistri
   const roles=maintenanceOwner&&proof.database===milestoneName?[proof.owner]:proof.readOnly?[proof.runtimeRole]:[proof.runtimeRole,proof.migrationRole];
   if(proof.readOnly&&!readOnly||!r||maintenanceOwner&&proof.database!==milestoneName||r.name!==proof.database||Number(r.oid)!==proof.resourceOid||r.marker!==proof.marker||!roles.includes(r.role)||r.complete!==true)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Bound distribution resource differs');
   const shape=(await c.query(`SELECT pg_get_userbyid(d.datdba) AS owner,d.datdba::int AS "ownerOid",r.oid::int AS "roleOid",r.rolsuper,r.rolbypassrls,
+   ${proof.origins?'m.oid::int AS "migrationRoleOid",m.rolsuper AS "migrationSuper",m.rolbypassrls AS "migrationBypass",':''}
    to_regclass('zzsh_order.distribution_participant') IS NOT NULL AND to_regclass('zzsh_order.distribution_invite_code') IS NOT NULL AND to_regclass('zzsh_order.invitation_relation') IS NOT NULL AS complete
-   FROM pg_database d JOIN pg_roles r ON r.rolname=current_user WHERE d.datname=current_database()`)).rows[0];
+   FROM pg_database d JOIN pg_roles r ON r.rolname=current_user ${proof.origins?'LEFT JOIN pg_roles m ON m.rolname=$1':''} WHERE d.datname=current_database()`,proof.origins?[proof.migrationRole]:[])).rows[0];
   const expectedRole=maintenanceOwner?proof.ownerOid:r.role===proof.runtimeRole?proof.runtimeRoleOid:proof.migrationRoleOid;
   if(!shape||shape.owner!==proof.owner||!maintenanceOwner&&(shape.rolsuper!==false||shape.rolbypassrls!==false)||shape.complete!==true
-   ||proof.database===milestoneName&&(shape.ownerOid!==proof.ownerOid||shape.roleOid!==expectedRole))throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Bound distribution schema or role unavailable');
+   ||(proof.database===milestoneName||proof.origins)&&(shape.ownerOid!==proof.ownerOid||shape.roleOid!==expectedRole)
+   ||proof.origins&&(shape.migrationRoleOid!==proof.migrationRoleOid||shape.migrationSuper!==false||shape.migrationBypass!==false))throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Bound distribution schema or role unavailable');
   return true;
  }
  const resources=[['zzsh_test_m2_auth_auth_compat',820148,'zzsh_m2_auth_compat_','zzsh:m2-auth-test:v1'],['zzsh_test_m2_auth_auth_compat_ui',833000,'zzsh_m2_auth_compat_ui_','zzsh:m2-auth-test:v1'],['zzsh_test_order_personal_finance',869754,'zzsh_order_personal_finance_','zzsh:order-reservation-test:v1']] as const;

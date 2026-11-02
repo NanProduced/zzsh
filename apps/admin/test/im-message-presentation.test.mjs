@@ -12,7 +12,7 @@ Object.assign(globalThis,{window:browser,document:browser.document,HTMLElement:b
 Object.defineProperty(globalThis,"navigator",{value:browser.navigator,configurable:true});
 globalThis.requestAnimationFrame=browser.requestAnimationFrame.bind(browser);globalThis.cancelAnimationFrame=browser.cancelAnimationFrame.bind(browser);
 const {createRoot}=await import("react-dom/client");
-const vite=await createServer({root:repo,configFile:false,plugins:[react()],resolve:{alias:{"@":path.join(repo,"apps/admin/src")}},server:{middlewareMode:true,hmr:false,ws:false}});
+const vite=await createServer({root:repo,configFile:false,plugins:[react()],resolve:{alias:{"@":path.join(repo,"apps/admin/src")}},server:{middlewareMode:true,hmr:false,ws:false,watch:null}});
 const {MediaMessage}=await vite.ssrLoadModule("/packages/ui/src/message-media.tsx");
 const model=await vite.ssrLoadModule("/apps/admin/src/views/im-support-management-model.ts");
 const {SupportMessageBody}=await vite.ssrLoadModule("/apps/admin/src/views/im-support-message-body.tsx");
@@ -21,7 +21,7 @@ after(async()=>{await vite.close();await browser.happyDOM.abort();});
 test("preview chunk loading and failure keep the workspace, isolate Escape and can retry",async t=>{
  const chunks=[],uncaught=[],caught=[];let parentEscapes=0,closed=0;
  globalThis.__mediaPreviewChunkLoad=()=>new Promise((resolve,reject)=>chunks.push({resolve,reject}));
- const faulty=await createServer({root:repo,configFile:false,plugins:[{name:"media-chunk-fault",enforce:"pre",transform(code,id){if(id.replaceAll("\\","/").endsWith("/packages/ui/src/message-media.tsx"))return code.replace('import("./media-lightbox")','globalThis.__mediaPreviewChunkLoad()');}},react()],resolve:{alias:{"@":path.join(repo,"apps/admin/src")}},optimizeDeps:{noDiscovery:true,include:[]},server:{middlewareMode:true,hmr:false,ws:false}});
+ const faulty=await createServer({root:repo,configFile:false,plugins:[{name:"media-chunk-fault",enforce:"pre",transform(code,id){if(id.replaceAll("\\","/").endsWith("/packages/ui/src/message-media.tsx"))return code.replace('import("./media-lightbox")','globalThis.__mediaPreviewChunkLoad()');}},react()],resolve:{alias:{"@":path.join(repo,"apps/admin/src")}},optimizeDeps:{noDiscovery:true,include:[]},server:{middlewareMode:true,hmr:false,ws:false,watch:null}});
  const {MediaPreview}=await faulty.ssrLoadModule("/packages/ui/src/message-media.tsx");
  const host=document.createElement("div");document.body.append(host);const root=createRoot(host,{onUncaughtError:error=>uncaught.push(error),onCaughtError:error=>caught.push(error)});
  t.after(async()=>{await act(async()=>root.unmount());host.remove();await faulty.close();delete globalThis.__mediaPreviewChunkLoad;});

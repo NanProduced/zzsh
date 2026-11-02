@@ -1756,13 +1756,12 @@ async function completeRecovery(request: NodeRequest, response: NodeResponse, re
 
 export type LegacyCredentialOutcome = "retry" | "none";
 
-export type LegacyCredentialLookup = { username: string } | { phoneNumber: string };
+export type LegacyCredentialLookup = { username: string } | { phoneNumber: string } | { userId: string };
 
 /**
- * Server-side legacy password compatibility, invoked only after the standard sign-in endpoint
- * has already rejected the credentials. That position guarantees Better Auth's rate limiter and
- * body validation ran first, so an invalid body or a rate-limited request can never reach this
- * function. It returns "retry" when the standard sign-in should be executed once more:
+ * Server-side password compatibility, behind the normal sign-in body validation and throttle.
+ * The userId lookup is only for a server-resolved source-bound legacy public number, never a public userId field.
+ * It returns "retry" when the verified subject may continue through normal session creation:
  * - the account still carries a recognized legacy MD5 credential and the supplied password
  *   verifies: the current hash is written, the legacy columns are cleared and the audit row is
  *   committed in one transaction, serialized on the account row; or
@@ -1802,9 +1801,9 @@ export async function verifyUserCredentialInTransaction(
          FROM "zzsh_auth_user"."account" a
          JOIN "zzsh_auth_user"."user" u ON u."id" = a."userId"
          LEFT JOIN "zzsh_iam"."user_identity_state" s ON s."user_id" = u."id"
-        WHERE ${"username" in lookup ? 'u."username" = $1' : 'u."phoneNumber" = $1'} AND a."providerId" = 'credential'
+        WHERE ${"userId" in lookup ? 'u."id" = $1' : "username" in lookup ? 'u."username" = $1' : 'u."phoneNumber" = $1'} AND a."providerId" = 'credential'
         FOR UPDATE OF a`,
-      ["username" in lookup ? lookup.username : lookup.phoneNumber],
+      ["userId" in lookup ? lookup.userId : "username" in lookup ? lookup.username : lookup.phoneNumber],
     );
     const row = account.rows[0];
     if (!row) return "none";

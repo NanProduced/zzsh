@@ -18,7 +18,7 @@
 
 | 规则ID | MySQL源字段及转换 | PostgreSQL目标与双端消费 |
 | --- | --- | --- |
-| IO-ID-01/02 | `la_user.id/mobile/nickname/is_delete/is_disable`；确定性`legacyOwnerUserId`映射，删除优先CANCELLED、停用→FROZEN（0103 前为DEACTIVATED）。旧实名事实不冒充新渠道核验，未知年龄不补成年。 | `zzsh_auth_user."user"`、`zzsh_iam.user_identity_state`及迁移审计；本人身份接口→账户/安全页，Admin用户目录。源口令及旧token不进入公开DTO。 |
+| IO-ID-01/02 | `la_user.id/sn/mobile/nickname/is_delete/is_disable`；确定性`legacyOwnerUserId`映射，删除优先CANCELLED、停用→FROZEN（0103 前为DEACTIVATED）。旧实名事实不冒充新渠道核验，未知年龄不补成年。 | `zzsh_auth_user."user"`、`zzsh_iam.user_identity_state`及迁移审计；本人身份接口→账户/安全页，Admin用户目录。源口令及旧token不进入公开DTO。 |
 | IO-ID-04/05 | `la_system_auth_admin/role/perm/menu`的人员、角色、菜单关系保来源；旧菜单ID不直接成为新权限。 | 管理realm独立；`zzsh_iam.admin_user_role/admin_role_permission/admin_user_permission`及`zzsh_supply.admin_supply_scope`按受审映射。Admin导航或按钮可见不构成授权，旧人员提取不等于已建新身份/授权。 |
 | SUP-SOURCE-001/002 | `la_rental_accounts.id/user_id/game_id`核目标关联；同一13列原行重算原12列投影及含`is_full_payout`的摘要，flag只接受原0/1。 | `zzsh_supply.rental_account`、`legacy_supply_map`及不可变read/display snapshot；包赔声明另写`listing_version.attributes`，不伪造号主接受。用户列表/详情/上架与Admin监管复用同源绑定。 |
 | SUP-QTY-004/005 | `haff`的恢复M数量×1000000一次；`level6_bullet_num`原组数×60一次；AWM/Barrett保发数，甲/盔/咖啡保件数。已归一化base输入不能再乘。 | `zzsh_supply.legacy_listing_display_snapshot.snapshot.resources`、正式`inventory_line(version_id,item_id).quantity`绑定`billable_item`单位；卡片/详情/上架与Admin目录/价格。旧订单实际消耗另走订单合同。 |
@@ -45,6 +45,12 @@
 受控旧目录身份确认经`confirmLegacySkinIdentity`服务入口：本地已审artifact引用、SHA和`legacyCatalogRecordDigest`绑定code、原source tuple及owner/baseName。三角洲独立近战必须显式传`ownerRef:null`、`ownerKind:"MELEE_TYPE"`和纯baseName；record包含`ownerId:null`，displayName即baseName，不查询、创建或重新启用刀型父级。`importLegacySkinOwner`拒绝三角洲MELEE_TYPE父级导入；其他游戏MELEE_TYPE及AGENT/FIREARM同游戏所属约束保持。旧父级封包不得改算、重签或静默解释为独立模型；历史读取、原封包恢复与新写准入分别处理。
 
 机械改名沿同一入口的显式normalization：记录再绑定`previousBaseName`，要求VERIFIED、所属不变、旧base逐字匹配和预期catalogRevision。版本检查/CAS及审计在调用方原事务内完成，仅改名称/基础名/aliases并保留旧name及全部aliases，不改所属、来源、可见状态、历史观察、持有映射或冻结旧快照。审计失败须随调用方事务回滚；源码支持不等于实际转换或真实数据库验收，也不将本地差集称为官方命名证明。
+
+## 旧用户主体、编号与联系方式
+
+旧用户业务UID与认证联系方式分别承接。V2转换在原次导入中持久化真实`la_user.sn`到唯一`username/displayUsername`，同时以原来源tuple和整行摘要审计；旧公开编号不能按内部`la_user.id`猜号，也不靠本机源文件提供在线认证。已有V1数据通过受审、同来源、明确当前字段CAS的追加阶段绑定编号，不覆盖原迁入回执、身份状态或凭据。
+
+手机号归属按完整来源组内未注销主体判断，FROZEN仍占用归属：只有一个未注销主体时可绑定其真实号码；已注销号码只保留来源联系证据；多个未注销主体不任选一人。空号码或冲突号码不阻断真实主体、账号与旧单关系的保全，但不能伪绑定认证。已有新核验号码、已变化字段或外来编号占用必须拒绝自动更正。缺少旧密码者进入合法恢复，不能捏造密码；注销和冻结不因迁移重新激活。财务历史与原期初另按正式来源证明准入，不因补主体而重放支付、合并钱包或补造余额。
 
 ## 旧公共内容（CONTENT-HISTORY-020）
 

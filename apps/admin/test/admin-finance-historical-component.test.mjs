@@ -60,6 +60,7 @@ test('document shows raw fee, net and old balance separately from channels and k
   for(const label of ['原流水号','原金额','变动后余额（旧）','手续费','净额'])assert.ok(facts.textContent.includes(label),label);
   for(const value of ['SYNTHETIC-LOG-11437','734.00 元','502.00 元','1.00 元','733.00 元'])assert.ok(facts.textContent.includes(value),value);
   assert.match(facts.textContent,/旧平台记为成功/);assert.match(facts.textContent,/渠道未核/);assert.match(ui.host.textContent,/不改变当前钱包/);assert.doesNotMatch(ui.host.textContent,/渠道已到账|已成功到账/);
+  await click([...ui.host.querySelectorAll('button')].find(button=>button.textContent.startsWith('相关历史记录')));
   const original=ui.host.querySelector('[data-finance-focus="history:synthetic-log"]');await click(original);
   const target=new URL(ui.opened.at(-1)[0],browser.location.href);assert.equal(decodeURIComponent(target.pathname.slice('/finance/documents/'.length)),debit.ref);assert.equal(target.searchParams.get('entry'),entry.id);
   assert.equal(ui.opened.at(-1)[1],'提现申请扣款 · SYNTHETIC-LOG-11437','workspace titles retain the specific record alongside its purpose');

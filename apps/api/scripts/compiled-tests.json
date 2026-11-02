@@ -281,5 +281,8 @@
   "dist/test/legacy-account-seam.test.js",
   "dist/test/aliyun-user-providers.test.js",
   "dist/test/identity-verification-attempt.test.js",
-  "dist/test/user-provider-runtime.test.js"
+  "dist/test/user-provider-runtime.test.js",
+  "dist/test/admin-finance-overview.test.js",
+  "dist/test/legacy-contact-projection.test.js",
+  "dist/test/admin-finance-obligation-queues.test.js"
 ]

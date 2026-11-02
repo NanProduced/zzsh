@@ -697,7 +697,7 @@ function baseRule(path: string): { windowSeconds: number; max: number; path: str
   return { ...(USER_AUTH_BASE_RULES[path] ?? USER_AUTH_BASE_DEFAULT), path };
 }
 
-export function withUserAuthThrottle(handler: (request: Request) => Promise<Response>, throttle: UserAuthThrottle, hmacKey: string, options: { requireResolvedIp?: boolean } = {}): (request: Request) => Promise<Response> {
+export function withUserAuthThrottle(handler: (request: Request) => Promise<Response>, throttle: UserAuthThrottle, hmacKey: string, options: { requireResolvedIp?: boolean; resolveLegacyNumberSubject?: (identifier: string) => Promise<string | null> } = {}): (request: Request) => Promise<Response> {
   const requireResolvedIp = options.requireResolvedIp ?? process.env.NODE_ENV === "production";
   return async (request) => {
     const path = authPath(request.url);
@@ -747,10 +747,19 @@ export function withUserAuthThrottle(handler: (request: Request) => Promise<Resp
     const forward = () => handler(new Request(request.url, { method: "POST", headers, body: JSON.stringify(body) }));
     try {
       if (SIGN_IN.has(path)) {
-        const phone = phoneFrom(path, body);
+        let subject = phoneFrom(path, body);
         const password = typeof body.password === "string" && body.password.length > 0;
-        if (!phone || !password) return forward();
-        const subjects = signInSubjects(hmacKey, phone, ip, throttle.realm);
+        if (path === "/sign-in/identifier" && body.kind === "legacy-number" && password) {
+          const identifier = typeof body.identifier === "string" ? body.identifier.trim() : "";
+          if (!identifier || identifier.length > 128 || /[\x00-\x1f\x7f]/.test(identifier)) return forward();
+          if (!options.resolveLegacyNumberSubject) throw new ThrottleDependencyError();
+          let resolved: string | null;
+          try { resolved = await options.resolveLegacyNumberSubject(identifier); } catch { throw new ThrottleDependencyError(); }
+          if (resolved !== null && (typeof resolved !== "string" || !resolved || resolved.length > 512 || /[\x00-\x1f\x7f]/.test(resolved))) throw new ThrottleDependencyError();
+          subject = resolved ?? `legacy-number:unresolved:${identifier}`;
+        }
+        if (!subject || !password) return forward();
+        const subjects = signInSubjects(hmacKey, subject, ip, throttle.realm);
         const admitted = await throttle.admitSignIn(subjects, captchaPayload);
         if (admitted.decision === "limited") {
           return controlled(429, errorBody(429, API_V1_ERROR_CODES.RATE_LIMITED, "尝试次数过多，请稍后再试", requestId, { reason: "RATE_LIMITED" }), admitted.retryAfter);

@@ -3,7 +3,7 @@ import type { PoolClient } from "pg";
 import { recordAudit, SecurityApiError } from "../auth/security-core";
 import { API_V1_ERROR_CODES, validateIdempotencyKey } from "../contracts/api-v1";
 import { conflict, fingerprintRequest, invalid, notFound } from "../supply/supply-util";
-import { assertSyntheticChannelRequestCapability, wireAmountForCents } from "./channel-payment-store";
+import { assertSyntheticChannelRequestCapability, assertSyntheticChannelRequestOrder, wireAmountForCents } from "./channel-payment-store";
 import { readFormalRefundAdmission, describeRefundProfile, assertFormalRefundProfile, assertRefundStart, assertInitialRefundAdmission, assertRefundBinding,
   type BoundRefundProfile, type FormalRefundAdmission, type RefundBinding } from "./joinpay-refund-profile";
 
@@ -102,6 +102,7 @@ export async function createNativeRefundIntent(client: PoolClient, input: {
   await admitted(client, input.capability);
   const basis = await readRefundBasis(client,input.postingId);
   if (!basis) throw notFound();
+  assertSyntheticChannelRequestOrder(input.capability, basis.order_id);
   if (basis.source !== "CONTROLLED" || basis.currency !== "CNY") {
     throw new SecurityApiError(503, API_V1_ERROR_CODES.EVIDENCE_UNAVAILABLE, "Refund payment source unavailable");
   }
@@ -141,6 +142,7 @@ export async function claimRefundIntent(client: PoolClient, input: {
   await admitted(client, input.capability);
   const row = (await client.query<RefundRow>(`SELECT ${COLUMNS} FROM zzsh_order.channel_refund_intent WHERE id=$1 AND payment_source='CONTROLLED' FOR UPDATE`, [input.intentId])).rows[0];
   if (!row || row.payment_source!=="CONTROLLED") throw notFound();
+  assertSyntheticChannelRequestOrder(input.capability, row.order_id);
   const next = (await client.query<RefundRow>(`UPDATE zzsh_order.channel_refund_intent SET
       state=CASE WHEN state='READY' THEN 'SUBMITTING' ELSE 'UNKNOWN' END,
       lease_version=lease_version+1,lease_owner=$2,lease_until=clock_timestamp()+make_interval(secs=>$3),revision=revision+1
@@ -158,7 +160,9 @@ export async function readRecoverableRefundIntent(client: PoolClient, intentId: 
   if (!validId(intentId)) throw invalid();
   await admitted(client, capability);
   const row = (await client.query<RefundRow>(`SELECT ${COLUMNS} FROM zzsh_order.channel_refund_intent WHERE id=$1 AND payment_source='CONTROLLED'`, [intentId])).rows[0];
-  return row?.payment_source==="CONTROLLED" ? view(row) : null;
+  if (row?.payment_source!=="CONTROLLED") return null;
+  assertSyntheticChannelRequestOrder(capability, row.order_id);
+  return view(row);
 }
 
 export type RefundTransportFailure = "TIMEOUT" | "HTTP_NON_200" | "CONNECTION_LOST" | "RESPONSE_TRUNCATED" | "LOCAL_FAILURE";
@@ -172,6 +176,7 @@ export async function recordRefundTransportFailure(client: PoolClient, input: {
   await admitted(client, input.capability);
   const row = (await client.query<RefundRow>(`SELECT ${COLUMNS} FROM zzsh_order.channel_refund_intent WHERE id=$1 AND payment_source='CONTROLLED' FOR UPDATE`, [input.intentId])).rows[0];
   if (!row || row.payment_source!=="CONTROLLED") throw notFound();
+  assertSyntheticChannelRequestOrder(input.capability, row.order_id);
   // 取得行锁后另发 UPDATE，以此时 PG 时钟检查租约，等待期间过期也只能记 STALE。
   const changed = (await client.query<RefundRow>(`UPDATE zzsh_order.channel_refund_intent SET state='UNKNOWN',revision=revision+1
     WHERE id=$1 AND state IN ('SUBMITTING','UNKNOWN') AND lease_version=$2::bigint AND lease_owner=$3

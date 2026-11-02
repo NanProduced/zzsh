@@ -3,7 +3,8 @@ import { beijingCalendarDate } from "../workspace/beijing-time";
 import { findPhoneClue } from "../workspace/tab-model";
 
 export const FINANCE_ACCESS_FAILURE_EVENT = "zzsh-admin-finance-access-failure";
-export const bucketLabels: Record<string, string> = { AVAILABLE: "用户可用", RESERVED: "提现预留", GUARANTEE_HELD: "号主上架保证金", REFUND_PAYABLE: "退款应付", PENDING_EARNINGS: "待结算收益", PLATFORM: "平台分项", CLEARING: "对照科目" };
+export const bucketLabels: Record<string, string> = { AVAILABLE: "用户可用", RESERVED: "提现预留", GUARANTEE_HELD: "号主上架保证金", REFUND_PAYABLE: "退款应付", PENDING_EARNINGS: "待结算收益", PLATFORM: "平台权益", CLEARING: "支付清算过渡" };
+export const bucketNature: Record<string, string> = { AVAILABLE: "用户负债", RESERVED: "用户负债", GUARANTEE_HELD: "保证金责任", REFUND_PAYABLE: "退款责任", PENDING_EARNINGS: "收益责任", PLATFORM: "平台权益", CLEARING: "清算过渡" };
 export const kindLabels: Record<string, string> = { OPENING: "迁移期初", SETTLEMENT: "订单结算", WITHDRAWAL: "提现", EARNINGS: "历史流水", DISTRIBUTION: "分销", GUARANTEE: "上架保证金" };
 kindLabels.REFUND = "退款责任";
 export const stateLabels: Record<string, string> = { POSTED: "已入账", RESERVED: "已预留", SUBMITTING: "提交中", PROCESSING: "处理中", UNKNOWN: "结果未知", SUCCEEDED: "本地成功记录", FAILED: "失败", RECONCILIATION_REQUIRED: "结果冲突待核", HISTORICAL_OBSERVED: "历史观察" };
@@ -86,7 +87,8 @@ export function historicalFinanceFacts(historical: HistoricalFinanceDisplay): [s
     ['手续费', financeMoney(historical.feeCents)], ['净额', financeMoney(historical.netCents)], ['原用途码', historical.changeType ?? '未取得'], ['原状态码', historical.originalStatus ?? '未取得']];
 }
 export type FinanceEntry = { id: string; documentRef: string; documentNumber: string; subjectId: string; subjectName: string; bucket: string; direction: string; deltaCents: string | null; knowledge: string; kind: string; state: string; classification: string; affectsCurrentWallet: boolean; affectsCurrentLedger: boolean; occurredAt: string | null; importedAt: string; sourceType: string; sourceEntity: string; sourceSystem: string; sourceId: string; sourceDigest: string | null; basisId: string | null; reasonCodes: string[]; accountCode: string | null; evidence: Record<string, string | null>; historical?: HistoricalFinanceDisplay };
-export type FinanceDocument = { ref: string; number: string; kind: string; state: string; occurredAt: string | null; requestedAmountCents: string | null; subjects: { id: string; name: string }[]; entryCount: number; ledgerEntryCount?: number; summaryScope?: 'DOCUMENT' | 'SUBJECT'; subjectEntryCount?: number; documentEntryCount?: number | null; amounts: { bucket: string; knownNetCents: string; unknownCount: number }[]; historical?: HistoricalFinanceDisplay };
+export type FinanceOrderLifecycle = { origin: 'NATIVE' | 'LEGACY_MYSQL'; orderStatus: string; payment: { state: 'SITE_ACCEPTED' | 'REVIEW_REQUIRED' | 'NO_ACCEPTED_PAYMENT' | 'LEGACY_RECORDED' | 'UNAVAILABLE'; amountCents: string | null; confirmedAt: string | null; source?: string | null; hasReviewPayment: boolean | null }; postingState: 'POSTED' | 'NOT_POSTED' | 'LEGACY_OBSERVATION' | 'UNAVAILABLE' };
+export type FinanceDocument = { ref: string; number: string; kind: string; state: string; occurredAt: string | null; requestedAmountCents: string | null; subjects: { id: string; name: string }[]; entryCount: number; ledgerEntryCount?: number; summaryScope?: 'DOCUMENT' | 'SUBJECT'; subjectEntryCount?: number; documentEntryCount?: number | null; amounts: { bucket: string; knownNetCents: string; unknownCount: number }[]; historical?: HistoricalFinanceDisplay; orderLifecycle?: FinanceOrderLifecycle; parties?: { owner: { id: string; name: string }; renter: { id: string; name: string } } };
 export function financeEntryScope(document: FinanceDocument): string {
   if (["PAYMENT_REQUEST","REFUND_INTENT"].includes(sourceFamily(document)) || sourceFamily(document)==="JOINPAY_WITHDRAWAL" && document.ledgerEntryCount===0) return "业务记录 · 不计账内收支";
   if (sourceFamily(document)==="JOINPAY_WITHDRAWAL" && document.ledgerEntryCount===undefined) return `${document.entryCount} 条记录 · 过账依据待核`;
@@ -100,10 +102,12 @@ export function financeEntryEvent(entry: FinanceEntry): string {
   return ({EARNING_PENDING:'分销计提',EARNING_SETTLED:'分销转可用'} as Record<string,string>)[evidence.eventKind??'']??'分销事件待核';
 }
 export type OrderSettlementMoney = { knowledge: 'KNOWN' | 'UNKNOWN'; cents: string | null; reasonCodes: string[] };
+export type FinancePlatformComponent = { code: string; cents: string; payer: 'OWNER' | 'RENTER' | 'NONE' | null; feeBase: string | null; feeRate: string | null };
 export type OrderSettlementEvidence = {
   schema: 'admin-order-settlement-evidence.v1'; documentRef: string; readiness: 'READY' | 'UNAVAILABLE';
   posting: { state: 'POSTED' | 'FINALIZED_ZERO' | 'NOT_POSTED' | 'UNKNOWN'; ref: string | null; postedAt: string | null };
   captured: OrderSettlementMoney; ownerNet: OrderSettlementMoney; refundPayable: OrderSettlementMoney;
+  platformContribution?: OrderSettlementMoney; platformComponents?: FinancePlatformComponent[];
   refunded: OrderSettlementMoney; historicalRefund: OrderSettlementMoney; refundDueAt: string | null;
   channel: { state: 'UNKNOWN'; reference: null };
   dutyRefs: { documentRef: string | null; kind: string; state: string; amount: OrderSettlementMoney }[];
@@ -116,12 +120,34 @@ export type FinanceResponse = {
   wallet?: { buckets: Record<string, { amountCents: string | null; knowledge: string; scope?: string }>; withdrawable: { amountCents: string | null; reasonCodes: string[] }; coverage: { knowledge: string; origin?: string; cutoff?: string; coverageVersion?: string; reason?: string }; snapshotVersion: string };
   distributionCalculation?: { knowledge: 'KNOWN' | 'UNKNOWN'; policyVersion: string | null; levelCode: string | null; percent: string | null; baseCents: string | null; formula: string | null; reasonCodes: string[] };
   orderSettlement?: OrderSettlementEvidence;
+  platform?: { postedComponents: { accountCode: string | null; deltaCents: string | null; payer: string | null; feeBase: string | null; feeRate: string | null }[]; beforeDistributionCents: string | null; distributionExpenseCents: string | null; retainedCents: string | null; channelCostCents: string | null; netProfitCents: string | null; reasonCodes: string[] };
   documentCount?: number; subjectCount?: number; entryCount?: number; page?: number; pageSize?: number; hasMore?: boolean; reasonCodes?: string[]; gaps?: string[];
   reconciliation?: { bucket: string; openingBalance: string | null; knownInflows: string; knownOutflows: string; migrationMovement: string; closingBalance: string | null; difference: string | null; ledgerOpeningBalance?: string | null; ledgerClosingBalance?: string | null; ledgerDifference?: string | null; balanceBasis?: { knowledge: 'KNOWN' | 'UNKNOWN'; origin: string | null; sourceCutoff: string | null; openingPostedAt: string | null; reasonCodes: string[] }; knowledge: string; reasonCodes: string[]; unknownCount: number; unknownTimeCount: number; coveredHistoricalCount: number; uncoveredHistoricalCount: number }[];
 };
 export function financeRead(route: string, filters: FinanceFilters, signal: AbortSignal, extras: Record<string, string> = {}) {
   const query = financeQuery(filters); for (const [key, value] of Object.entries(extras)) if (value) query.set(key, value);
   return adminRequest<FinanceResponse>(`/finance/${route}?${query}`, undefined, "GET", {}, signal);
+}
+export type FinanceOverviewQueue = {
+  knowledge: 'KNOWN' | 'PARTIAL' | 'UNAVAILABLE'; count: string | null; amountCents: string | null; unknownCount: string | null; overdueCount?: string | null; overdueAmountCents?: string | null; unknownDueCount?: string | null;
+  items: { id: string; number?: string | null; source?: string; status?: string; recordedAmountCents?: string | null; documentRef?: string | null; amountCents?: string | null; dueAt?: string | null; overdue?: boolean | null; reasonCodes?: string[] }[];
+  hasMore: boolean; reasonCodes: string[]; bankArrival?: 'UNKNOWN';
+};
+export type FinanceOverview = {
+  version: 'admin.finance-overview.v1'; asOf: string; period: { range: 'today' | '7d' | '30d'; from: string; to: string; timeZone: string };
+  confirmedPayments: { count: string; amountCents: string; controlledAmountCents: string; channelAmountCents: string; source: string; timeBasis: string; scope: string; reasonCodes: string[] };
+  settlements: { count: string; capturedCents: string; ownerNetCents: string; refundPayableCents: string; platformContributionCents: string; timeBasis: string; reasonCodes: string[] };
+  pendingSettlement: { count: string; amountCents: string; hasMore: boolean; items: { id: string; number: string; status: string; amountCents: string; paidAt: string; documentRef: string | null }[]; reasonCodes: string[] };
+  ledgerBalances: { bucket: string; balanceCents: string; state: string; source: string }[];
+  coverage: { registeredSubjects: string; totalCurrentSubjects: string; globalProof: string; reasonCodes: string[] };
+  queues: { refunds: FinanceOverviewQueue; withdrawals: FinanceOverviewQueue };
+  reviewPayments: { sourceScope: 'ORIGINAL_REVIEW_RECORDS'; currentOutstandingOnly: false; count: string; amountCents: string; unknownCount: string; items: { id: string; number: string | null; amountCents: string | null; confirmedAt: string | null; reasonCode: string; source: string; documentRef: string | null }[]; hasMore: boolean; reasonCodes: string[] };
+  recentSettlements: { id: string; number: string; owner: { id: string; name: string }; renter: { id: string; name: string }; capturedCents: string; ownerNetCents: string; refundPayableCents: string; platformContributionCents: string; postedAt: string; documentRef: string | null }[];
+  costs: { netContributionCents: string | null; channelCostState: string; reasonCodes: string[] };
+  channels: { state: string };
+};
+export function financeOverviewRead(range: FinanceOverview['period']['range'], signal: AbortSignal) {
+  return adminRequest<FinanceOverview>(`/finance/overview?range=${range}`, undefined, 'GET', {}, signal);
 }
 export async function downloadFinanceCsv(filters: FinanceFilters, snapshot: string, signal: AbortSignal) {
   const query = financeQuery(filters); query.set("snapshot", snapshot);

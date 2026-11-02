@@ -1030,6 +1030,13 @@
       "when": 1793566800004,
       "tag": "0146_audit_event_object_lookup",
       "breakpoints": true
+    },
+    {
+      "idx": 147,
+      "version": "7",
+      "when": 1793566801004,
+      "tag": "0147_controlled_regression_finance",
+      "breakpoints": true
     }
   ]
 }

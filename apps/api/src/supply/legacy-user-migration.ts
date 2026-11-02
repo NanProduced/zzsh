@@ -1,15 +1,19 @@
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { withTransaction } from "../auth/security-core";
+import { assertAdminContextInTransaction } from "../auth/auth-security";
+import { assertAdminCommandAuthorizedInTransaction } from "../auth/admin-auth-session";
 
 import { loadEffectiveAdminAccess, requirePermission } from "../auth/admin-authorization";
-import { recordAudit } from "../auth/security-core";
+import { recordAudit, setAuditContext } from "../auth/security-core";
 import { ensureInitialProfileAvatar } from "../profile/profile-avatar";
 import { canonicalize } from "./content-hash";
 import { normalizeMainlandPhone } from "../auth/phone-number";
 import { lockLegacySource } from "./legacy-observation";
+import { parseLegacyContactProjection, type LegacyContactProjection } from "../legacy-load/legacy-contact-projection";
 import {
   conflict,
+  forbidden,
   fingerprintRequest,
   invalid,
   sha256Hex,
@@ -44,7 +48,9 @@ export type LegacyOwnerEvidence = {
   sourceDigest: string;
   evidenceRef: string;
   nickname: string;
-  mobile: string;
+  mobile: string | null;
+  /** Only a reviewed whole-source projection may separate contact from authentication. V1 remains unchanged. */
+  contactProjection?: LegacyContactProjection;
   sourceCreatedAt: string | null;
   sourceUpdatedAt: string | null;
   status: LegacyOwnerStatusEvidence;
@@ -164,6 +170,12 @@ function normalizeEvidence(value: unknown): LegacyOwnerEvidence {
   if (typeof value.nickname !== "string") throw invalid("Legacy owner nickname is invalid");
   const nickname = value.nickname;
   if (nickname.trim().length === 0) throw invalid("Legacy owner nickname is invalid");
+  const status = normalizeStatus(value.status);
+  const projected = value.contactProjection === undefined ? undefined : parseLegacyContactProjection(value.contactProjection, {
+    legacyId: String(value.legacyId), sourceDigest: String(value.sourceDigest),
+    mobile: value.mobile === null || value.mobile === "" ? null : normalizeMobile(value.mobile), deleted: status.deleted, disabled: status.disabled,
+  });
+  if (projected && (value.sourceSystem !== MIGRATED_PROVIDER || value.sourceEntity !== "la_user")) throw invalid("Legacy contact projection source is not supported");
   return {
     sourceSystem: String(value.sourceSystem),
     sourceEntity: String(value.sourceEntity),
@@ -171,10 +183,11 @@ function normalizeEvidence(value: unknown): LegacyOwnerEvidence {
     sourceDigest: String(value.sourceDigest),
     evidenceRef: String(value.evidenceRef),
     nickname,
-    mobile: normalizeMobile(value.mobile),
+    mobile: projected ? value.mobile === null || value.mobile === "" ? null : normalizeMobile(value.mobile) : normalizeMobile(value.mobile),
+    ...(projected ? { contactProjection: projected } : {}),
     sourceCreatedAt: normalizeTimestamp(value.sourceCreatedAt),
     sourceUpdatedAt: normalizeTimestamp(value.sourceUpdatedAt),
-    status: normalizeStatus(value.status),
+    status,
     legacyPassword: normalizeLegacyPassword(value.legacyPassword),
   };
 }
@@ -201,6 +214,14 @@ export function legacyOwnerUserId(sourceSystem: string, sourceEntity: string, le
   return `user_${sha256Hex(JSON.stringify(["legacy-owner", sourceSystem, sourceEntity, legacyId])).slice(0, 40)}`;
 }
 
+export function legacyOwnerMigrationKey(evidence: Pick<LegacyOwnerEvidence, "sourceSystem" | "sourceEntity" | "legacyId">) {
+  return sha256Hex(JSON.stringify([OPERATION_MIGRATE, evidence.sourceSystem, evidence.sourceEntity, evidence.legacyId]));
+}
+
+export function legacyOwnerContactCorrectionKey(evidence: Pick<LegacyOwnerEvidence, "sourceSystem" | "sourceEntity" | "legacyId">) {
+  return sha256Hex(JSON.stringify(["supply.legacy.contact-projection", evidence.sourceSystem, evidence.sourceEntity, evidence.legacyId]));
+}
+
 function derivedStatusValues(status: LegacyOwnerStatusEvidence): { accountStatus: string; identityStatus: string; ageStatus: string } {
   return {
     accountStatus: status.deleted ? "CANCELLED" : status.disabled ? "FROZEN" : "ACTIVE",
@@ -217,6 +238,14 @@ async function authorizeLegacyMigrationAdmin(
   requirePermission(access, "supply.catalog.manage");
 }
 
+async function authorizeLegacyContactMigrationAdmin(client: PoolClient, actor: LegacyOwnerMigrationActor, lock = false) {
+  if (lock) await assertAdminCommandAuthorizedInTransaction(client, { userId: actor.id, sessionId: actor.sessionId });
+  else await assertAdminContextInTransaction(client, { userId: actor.id, sessionId: actor.sessionId });
+  const access = await loadEffectiveAdminAccess(client, actor.id);
+  requirePermission(access, "supply.catalog.manage");
+  if (!access?.isBoss || access.status !== "ACTIVE" || access.passwordChangeRequired) throw forbidden("Active Boss required for legacy authentication projection");
+}
+
 /**
  * Controlled migration seam for one real legacy user. The caller must already
  * own a transaction; there is intentionally no public route around this method.
@@ -231,9 +260,7 @@ export async function migrateLegacyOwner(
   const normalized = normalizeLegacyOwnerInput(input);
   const { evidence, evidenceDigest } = normalized;
   const status = derivedStatusValues(evidence.status);
-  const idempotencyKey = sha256Hex(
-    JSON.stringify([OPERATION_MIGRATE, evidence.sourceSystem, evidence.sourceEntity, evidence.legacyId]),
-  );
+  const idempotencyKey = legacyOwnerMigrationKey(evidence);
   const result = await withIdempotency(
     client,
     { realm: "admin", principalId: actor.id, operation: OPERATION_MIGRATE },
@@ -241,20 +268,21 @@ export async function migrateLegacyOwner(
     fingerprintRequest(OPERATION_MIGRATE, undefined, evidence),
     async () => {
       await authorizeLegacyMigrationAdmin(client, actor);
+      if (evidence.contactProjection) await authorizeLegacyContactMigrationAdmin(client, actor, true);
     },
     async () => {
       await lockLegacySource(client, evidence);
       const userId = legacyOwnerUserId(evidence.sourceSystem, evidence.sourceEntity, evidence.legacyId);
-      const phoneNumber = `+86${evidence.mobile}`;
-      const email = `phone-${sha256Hex(phoneNumber)}@phone.zzsh.invalid`;
+      const projection = evidence.contactProjection;
+      const phoneNumber = projection ? projection.authenticationPhone : `+86${evidence.mobile}`;
+      const email = projection ? `legacy-${sha256Hex(userId)}@phone.zzsh.invalid` : `phone-${sha256Hex(phoneNumber!)}@phone.zzsh.invalid`;
       const providerReference = `${evidence.sourceEntity}:${evidence.legacyId}`;
-      const existing = (
-        await client.query<{ id: string; name: string; email: string; phoneNumber: string; phoneNumberVerified: boolean; suspended: boolean }>(
-          `SELECT "id","name","email","phoneNumber","phoneNumberVerified","suspended" FROM "zzsh_auth_user"."user"
-            WHERE "id"=$1 OR "phoneNumber"=$2 FOR UPDATE`,
-          [userId, phoneNumber],
-        )
-      ).rows;
+      const existing = (await client.query<{ id: string; name: string; email: string; phoneNumber: string | null; phoneNumberVerified: boolean; suspended: boolean; username?: string | null }>(
+        projection
+          ? `SELECT "id","name","email","phoneNumber","phoneNumberVerified","suspended","username" FROM "zzsh_auth_user"."user" WHERE "id"=$1 OR ($2::text IS NOT NULL AND "phoneNumber"=$2) OR "username"=$3 FOR UPDATE`
+          : `SELECT "id","name","email","phoneNumber","phoneNumberVerified","suspended" FROM "zzsh_auth_user"."user" WHERE "id"=$1 OR "phoneNumber"=$2 FOR UPDATE`,
+        projection ? [userId, phoneNumber, projection.sourceSn] : [userId, phoneNumber],
+      )).rows;
       if (existing.length > 0) {
         const row = existing[0]!;
         const userMatches =
@@ -263,6 +291,7 @@ export async function migrateLegacyOwner(
           row.name === evidence.nickname &&
           row.email === email &&
           row.phoneNumber === phoneNumber &&
+          (!projection || row.username === projection.sourceSn) &&
           row.phoneNumberVerified === false &&
           row.suspended === false;
         if (!userMatches) throw conflict("The legacy owner conflicts with an existing local user");
@@ -326,11 +355,10 @@ export async function migrateLegacyOwner(
         return { status: 200, body: { userId } };
       }
       const now = new Date();
-      await client.query(
-        `INSERT INTO "zzsh_auth_user"."user" ("id","name","email","emailVerified","createdAt","updatedAt","phoneNumber","phoneNumberVerified","suspended")
-         VALUES ($1,$2,$3,false,$4,$4,$5,false,false)`,
-        [userId, evidence.nickname, email, now, phoneNumber],
-      );
+      await client.query(projection
+        ? `INSERT INTO "zzsh_auth_user"."user" ("id","name","email","emailVerified","createdAt","updatedAt","phoneNumber","phoneNumberVerified","suspended","username","displayUsername") VALUES ($1,$2,$3,false,$4,$4,$5,false,false,$6,$6)`
+        : `INSERT INTO "zzsh_auth_user"."user" ("id","name","email","emailVerified","createdAt","updatedAt","phoneNumber","phoneNumberVerified","suspended") VALUES ($1,$2,$3,false,$4,$4,$5,false,false)`,
+        projection ? [userId, evidence.nickname, email, now, phoneNumber, projection.sourceSn] : [userId, evidence.nickname, email, now, phoneNumber]);
       await ensureInitialProfileAvatar(client, "user", userId, actor.requestId);
       if (evidence.legacyPassword) {
         await client.query(
@@ -377,6 +405,7 @@ export async function migrateLegacyOwner(
           hasLegacyPassword: Boolean(evidence.legacyPassword),
           legacyPasswordVersion: evidence.legacyPassword?.version ?? null,
           phoneNumberVerified: false,
+          ...(projection ? { contactProjection: { ...projection, authenticationPhone: undefined, authenticationPhoneBound: phoneNumber !== null } } : {}),
           result: "MIGRATED",
         },
       });
@@ -384,4 +413,120 @@ export async function migrateLegacyOwner(
     },
   );
   return { userId: (result.body as { userId: string }).userId, replayed: result.replayed };
+}
+
+export type LegacyOwnerContactTarget = {
+  id: string; username: string | null; displayUsername: string | null; phoneNumber: string | null; phoneNumberVerified: boolean | null;
+  email: string; suspended: boolean; updatedAt: string;
+  accountStatus: string; identityStatus: string; ageStatus: string; identityVersion: string;
+  provider: string; providerReference: string; migrationSourceDigest: string | null; migrationLegacyId: string | null;
+};
+
+export function legacyOwnerContactTargetDigest(target: LegacyOwnerContactTarget): string {
+  return sha256Hex(canonicalize(target));
+}
+
+/** Maintenance-only fresh CAS input. Contact values stay in the private execution package, not public reports. */
+export async function readLegacyOwnerContactTarget(client: PoolClient, userId: string, actor: LegacyOwnerMigrationActor, lock = false): Promise<LegacyOwnerContactTarget> {
+  const row = (await readLegacyOwnerContactTargets(client, [userId], actor, lock))[0];
+  if (!row) throw conflict("Legacy contact target is not present");
+  return row;
+}
+
+export async function readLegacyOwnerContactTargets(client: PoolClient, userIds: readonly string[], actor: LegacyOwnerMigrationActor, lock = false): Promise<LegacyOwnerContactTarget[]> {
+  if (!userIds.length || userIds.length > 1000 || userIds.some(id => typeof id !== "string" || !ID_PATTERN.test(id)) || new Set(userIds).size !== userIds.length) throw invalid("Bounded exact legacy contact targets required");
+  await authorizeLegacyContactMigrationAdmin(client, actor, lock);
+  return (await client.query<LegacyOwnerContactTarget>(`SELECT u.id,u.username,u."phoneNumber",u."phoneNumberVerified",u."displayUsername",u.email,u.suspended,
+      to_char(u."updatedAt" AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "updatedAt",
+      i.account_status AS "accountStatus",i.identity_status AS "identityStatus",i.age_status AS "ageStatus",i.version::text AS "identityVersion",
+      i.provider,i.provider_reference AS "providerReference",a.details->>'sourceDigest' AS "migrationSourceDigest",a.details->>'legacyId' AS "migrationLegacyId"
+    FROM zzsh_auth_user."user" u JOIN zzsh_iam.user_identity_state i ON i.user_id=u.id
+    LEFT JOIN LATERAL (SELECT details FROM zzsh_iam.audit_event WHERE object_id=u.id AND action='user.legacy_owner.migrated' AND outcome='SUCCESS'
+      AND details->>'sourceSystem'='legacy_mysql_restore' AND details->>'sourceEntity'='la_user' ORDER BY occurred_at DESC LIMIT 1) a ON true
+    WHERE u.id=ANY($1::text[]) ORDER BY u.id${lock ? " FOR UPDATE OF u,i" : ""}`, [userIds])).rows;
+}
+
+export type LegacyOwnerContactCorrectionInput = LegacyOwnerMigrationInput & { expectedTargetDigest: string };
+
+export type LegacyOwnerNumberInput = {
+  sourceSystem: "legacy_mysql_restore"; sourceEntity: "la_user"; legacyId: string;
+  sourceDigest: string; sourceSn: string; expectedTargetDigest: string;
+};
+
+export function legacyOwnerNumberBindingKey(input: Pick<LegacyOwnerNumberInput, "sourceSystem" | "sourceEntity" | "legacyId">) {
+  return sha256Hex(JSON.stringify(["supply.legacy.number-bind", input.sourceSystem, input.sourceEntity, input.legacyId]));
+}
+
+/** Source SN is an authentication alias, never a guess at the internal source UID. */
+export async function bindLegacyOwnerNumber(client: PoolClient, input: LegacyOwnerNumberInput, actor: LegacyOwnerMigrationActor) {
+  if (!input || Object.keys(input).sort().join(",") !== "expectedTargetDigest,legacyId,sourceDigest,sourceEntity,sourceSn,sourceSystem"
+    || input.sourceSystem !== MIGRATED_PROVIDER || input.sourceEntity !== "la_user" || !/^[1-9]\d{0,23}$/.test(input.legacyId)
+    || !DIGEST_PATTERN.test(input.sourceDigest) || !DIGEST_PATTERN.test(input.expectedTargetDigest)
+    || typeof input.sourceSn !== "string" || !input.sourceSn.length || input.sourceSn.length > 128 || /[\x00-\x1f\x7f]/.test(input.sourceSn)) throw invalid("Exact reviewed legacy number and fresh target required");
+  const userId = legacyOwnerUserId(input.sourceSystem, input.sourceEntity, input.legacyId), operation = "supply.legacy.number-bind";
+  return withIdempotency(client, { realm: "admin", principalId: actor.id, operation, resourceId: userId }, legacyOwnerNumberBindingKey(input),
+    fingerprintRequest(operation, userId, input), () => authorizeLegacyContactMigrationAdmin(client, actor, true), async () => {
+      await lockLegacySource(client, input);
+      const current = await readLegacyOwnerContactTarget(client, userId, actor, true);
+      if (legacyOwnerContactTargetDigest(current) !== input.expectedTargetDigest || current.migrationSourceDigest !== input.sourceDigest || current.migrationLegacyId !== input.legacyId) throw conflict("Legacy number source or target changed");
+      if (current.username !== null && current.username !== input.sourceSn || current.displayUsername !== null && current.displayUsername !== input.sourceSn) throw conflict("Current username is not the reviewed legacy number");
+      const occupied = (await client.query("SELECT id FROM zzsh_auth_user.\"user\" WHERE id<>$1 AND username=$2 FOR UPDATE", [userId, input.sourceSn])).rows;
+      if (occupied.length) throw conflict("Legacy public number is occupied by another identity");
+      await setAuditContext(client, "admin", actor.id, actor.sessionId, actor.requestId);
+      const updated = await client.query(`UPDATE zzsh_auth_user."user" SET username=$2,"displayUsername"=$2,"updatedAt"=clock_timestamp()
+        WHERE id=$1 AND "updatedAt"=$3::timestamptz AND username IS NOT DISTINCT FROM $4::text`, [userId, input.sourceSn, current.updatedAt, current.username]);
+      if (updated.rowCount !== 1) throw conflict("Legacy number compare-and-set failed");
+      await recordAudit(client, { actorType: "admin", actorId: actor.id, sessionId: actor.sessionId, requestId: actor.requestId,
+        action: "user.legacy_number.bound", objectType: "user", objectId: userId, outcome: "SUCCESS",
+        reason: "按原来源摘要绑定旧公开编号；联系方式、凭据、身份状态和资金不变", details: {
+          sourceSystem: input.sourceSystem, sourceEntity: input.sourceEntity, legacyId: input.legacyId, sourceDigest: input.sourceDigest, sourceSn: input.sourceSn,
+          originalTargetDigest: input.expectedTargetDigest, beforeUsername: current.username, authenticationPhoneUnchanged: true,
+          identityAndCredentialUnchanged: true, financialEffects: false,
+        } });
+      return { status: 200, body: { userId, sourceSn: input.sourceSn, sourceDigest: input.sourceDigest, financialEffects: false } };
+    });
+}
+
+/** Corrects only authentication projection after reviewed source planning; business identity and money do not move. */
+export async function reconcileLegacyOwnerContactProjection(client: PoolClient, input: LegacyOwnerContactCorrectionInput, actor: LegacyOwnerMigrationActor) {
+  if (!input || Object.keys(input).sort().join(",") !== "evidence,evidenceDigest,expectedTargetDigest" || !DIGEST_PATTERN.test(input.expectedTargetDigest)) throw invalid("Fresh contact target CAS required");
+  const normalized = normalizeLegacyOwnerInput({ evidence: input.evidence, evidenceDigest: input.evidenceDigest });
+  const e = normalized.evidence, projection = e.contactProjection;
+  if (!projection) throw invalid("Contact-aware source contract required");
+  const userId = legacyOwnerUserId(e.sourceSystem, e.sourceEntity, e.legacyId);
+  const operation = "supply.legacy.contact-projection";
+  const key = legacyOwnerContactCorrectionKey(e);
+  return withIdempotency(client, { realm: "admin", principalId: actor.id, operation, resourceId: userId }, key,
+    fingerprintRequest(operation, userId, input), async () => { await authorizeLegacyContactMigrationAdmin(client, actor, true); }, async () => {
+      await lockLegacySource(client, e);
+      const current = await readLegacyOwnerContactTarget(client, userId, actor, true);
+      if (legacyOwnerContactTargetDigest(current) !== input.expectedTargetDigest) throw conflict("Legacy contact target changed after fresh read");
+      const status = derivedStatusValues(e.status);
+      if (current.provider !== MIGRATED_PROVIDER || current.providerReference !== `${e.sourceEntity}:${e.legacyId}` || current.migrationSourceDigest !== e.sourceDigest || current.migrationLegacyId !== e.legacyId
+        || current.accountStatus !== status.accountStatus || current.identityStatus !== status.identityStatus || current.ageStatus !== status.ageStatus || current.suspended)
+        throw conflict("Legacy contact source identity or state changed");
+      if (current.phoneNumberVerified === true) throw conflict("Verified current contact cannot be replaced by legacy projection");
+      if (current.username !== null && current.username !== projection.sourceSn || current.displayUsername !== null && current.displayUsername !== projection.sourceSn) throw conflict("Current username is not the reviewed legacy number");
+      const sourcePhone = e.mobile === null ? null : normalizeMainlandPhone(e.mobile);
+      if (current.phoneNumber !== null && current.phoneNumber !== sourcePhone) throw conflict("Current contact no longer matches the frozen source");
+      // A freeze is never an opportunity to hand a phone to another ACTIVE identity.
+      if (current.accountStatus === "FROZEN" && current.phoneNumber !== projection.authenticationPhone) throw conflict("Frozen legacy authentication contact requires separate review");
+      const occupied = (await client.query<{ id: string }>(`SELECT id FROM zzsh_auth_user."user" WHERE id<>$1 AND (username=$2 OR ($3::text IS NOT NULL AND "phoneNumber"=$3)) FOR UPDATE`, [userId, projection.sourceSn, projection.authenticationPhone])).rows;
+      if (occupied.length) throw conflict("Reviewed legacy authentication projection is occupied by another identity");
+      await setAuditContext(client, "admin", actor.id, actor.sessionId, actor.requestId);
+      const update = await client.query(`UPDATE zzsh_auth_user."user" SET "phoneNumber"=$2,"phoneNumberVerified"=false,username=$3,"displayUsername"=$3,"updatedAt"=clock_timestamp()
+        WHERE id=$1 AND "updatedAt"=$4::timestamptz AND username IS NOT DISTINCT FROM $5::text AND "phoneNumber" IS NOT DISTINCT FROM $6::text AND "phoneNumberVerified" IS NOT DISTINCT FROM $7::boolean`,
+        [userId, projection.authenticationPhone, projection.sourceSn, current.updatedAt, current.username, current.phoneNumber, current.phoneNumberVerified]);
+      if (update.rowCount !== 1) throw conflict("Legacy contact compare-and-set failed");
+      await recordAudit(client, { actorType: "admin", actorId: actor.id, sessionId: actor.sessionId, requestId: actor.requestId,
+        action: "user.legacy_contact.projected", objectType: "user", objectId: userId, outcome: "SUCCESS",
+        reason: "旧业务主体与认证联系方式分离；原状态、原凭据和资金关系不变", details: {
+          sourceSystem: e.sourceSystem, sourceEntity: e.sourceEntity, legacyId: e.legacyId, sourceDigest: e.sourceDigest,
+          sourceContactRef: projection.sourceContactRef, sourceContactDigest: projection.sourceContactDigest, groupDigest: projection.groupDigest,
+          decision: projection.decision, sourceSn: projection.sourceSn, originalTargetDigest: input.expectedTargetDigest,
+          before: { authenticationPhoneBound: current.phoneNumber !== null, username: current.username, accountStatus: current.accountStatus },
+          after: { authenticationPhoneBound: projection.authenticationPhone !== null, username: projection.sourceSn, accountStatus: current.accountStatus },
+          identityAndCredentialUnchanged: true, financialEffects: false, result: "AUTHENTICATION_CONTACT_PROJECTED" } });
+      return { status: 200, body: { userId, sourceDigest: e.sourceDigest, projectionDigest: sha256Hex(canonicalize(projection)), authenticationPhoneBound: projection.authenticationPhone !== null, financialEffects: false } };
+    });
 }

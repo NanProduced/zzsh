@@ -12,7 +12,7 @@ const money = (value: OrderSettlementMoney | undefined) => financeMoney(value?.k
 const dutyKinds: Record<string, string> = { RENTER_REFUND: '租客退款责任', OWNER_CREDIT: '号主收益责任', COMMISSION: '分销责任', DEPOSIT_COMPENSATION: '押金补偿责任' };
 const dutyStates: Record<string, string> = { PENDING: '原责任待处理', MATURED: '原责任已成熟', SETTLED: '原责任已终定', VOID: '原责任已作废' };
 function moneyRows(evidence: OrderSettlementEvidence): [string, OrderSettlementMoney][] {
-  const platform = (evidence as OrderSettlementEvidence & { platformContribution?: OrderSettlementMoney }).platformContribution;
+  const platform = evidence.platformContribution;
   return [[evidence.posting.state === 'FINALIZED_ZERO' ? '原收款依据金额' : '原入账基数', evidence.captured], [evidence.documentRef.startsWith('LEGACY_ORDER:') ? '号主租赁收益责任' : '号主结算净额', evidence.ownerNet], ['租客应退责任', evidence.refundPayable], ['退款出款记录', evidence.refunded],
     ...(platform ? [['本单已记平台结算贡献（非净利润）', platform] as [string, OrderSettlementMoney]] : []),
     ...(evidence.documentRef.startsWith('LEGACY_ORDER:') ? [['历史应退记录', evidence.historicalRefund] as [string, OrderSettlementMoney]] : [])];
@@ -35,12 +35,15 @@ export function AdminOrderSettlementEvidence({ state = 'ready', evidence, reques
     return <section data-order-settlement-evidence className="space-y-3"><h2 className="text-base font-semibold">{title}</h2><Alert variant={warning ? 'warning' : 'destructive'} role={warning ? 'status' : 'alert'}><CircleAlert aria-hidden /><AlertTitle>{message}</AlertTitle><AlertDescription><p>本次未取得完整依据，不能判断为没有过账、金额为零或退款完成。</p>{requestId ? <p className="break-all font-mono text-xs">请求编号：{requestId}</p> : null}</AlertDescription>{onRetry && state !== 'forbidden' ? <AlertAction><Button variant="outline" size="sm" onClick={onRetry}>重新读取资金依据</Button></AlertAction> : null}</Alert></section>;
   }
   const rows = moneyRows(evidence), reasons = [...new Set([...(evidence.reasonCodes ?? []), ...rows.flatMap(([, value]) => value?.reasonCodes ?? [])])];
-  const visibleRows = evidence.posting.state === 'NOT_POSTED' ? rows.filter(([, value]) => value?.knowledge === 'KNOWN') : rows;
+  const allocated = evidence.readiness === 'READY' && evidence.posting.state === 'POSTED' && [evidence.captured, evidence.ownerNet, evidence.refundPayable, evidence.platformContribution].every(value => value?.knowledge === 'KNOWN' && value.cents !== null);
+  const visibleRows = allocated ? rows.filter(([, value]) => value === evidence.refunded || value === evidence.historicalRefund && evidence.documentRef.startsWith('LEGACY_ORDER:')) : evidence.posting.state === 'NOT_POSTED' ? rows.filter(([, value]) => value?.knowledge === 'KNOWN') : rows;
   const noPosting = evidence.posting.state === 'NOT_POSTED';
   return <section data-order-settlement-evidence className={shell}>
     <div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-base font-semibold">{title}</h2><Badge variant={evidence.posting.state === 'UNKNOWN' ? 'warning' : 'outline'}>{postingLabel(evidence)}</Badge></div>
     {evidence.readiness !== 'READY' ? <p className="text-sm text-muted-foreground">部分资金依据暂未就绪，以下只展示已取得的独立事实。</p> : null}
-    {visibleRows.length ? <dl className="space-y-3 text-sm">{visibleRows.map(([label, value]) => <div key={label} className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1"><dt className="text-muted-foreground">{label}</dt><dd className="font-medium tabular-nums">{money(value)}</dd></div>)}</dl> : <p className="text-sm text-muted-foreground">当前未查到过账记录，没有已证实的实际结算金额；不以 0 或预付金额替代。</p>}
+    {allocated ? <div className="finance-allocation" aria-label="本单已核结算分配等式">{[['原入账基数', evidence.captured], ['号主结算净额', evidence.ownerNet], ['租客应退责任', evidence.refundPayable], ['平台结算贡献', evidence.platformContribution!]].map(([label, value], index) => <div key={String(label)}><span aria-hidden>{index === 0 ? '' : index === 1 ? '=' : '+'}</span><dl><dt>{String(label)}</dt><dd>{money(value as OrderSettlementMoney)}</dd></dl></div>)}</div> : null}
+    {allocated ? <h3 className="text-sm font-medium">退款责任与记录</h3> : null}
+    {visibleRows.length ? <dl className="space-y-3 text-sm">{visibleRows.map(([label, value]) => <div key={label} className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1"><dt className="text-muted-foreground">{label}</dt><dd className="font-medium tabular-nums">{money(value)}</dd></div>)}</dl> : !allocated ? <p className="text-sm text-muted-foreground">当前未查到过账记录，没有已证实的实际结算金额；不以 0 或预付金额替代。</p> : null}
     <dl className="space-y-3 text-sm">
       <div className="flex flex-wrap justify-between gap-x-4 gap-y-1"><dt className="text-muted-foreground">{evidence.posting.state === 'FINALIZED_ZERO' ? '责任终定时间' : '原过账时间'}</dt><dd>{financeTime(['POSTED', 'FINALIZED_ZERO'].includes(evidence.posting.state) ? evidence.posting.postedAt : null)}</dd></div>
       {!noPosting ? <div className="flex flex-wrap justify-between gap-x-4 gap-y-1"><dt className="text-muted-foreground">退款责任到期</dt><dd>{financeTime(evidence.refundDueAt)}</dd></div> : null}

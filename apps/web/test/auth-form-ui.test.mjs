@@ -35,6 +35,39 @@ test("phone password login preserves a short exact string and supports a passwor
     assert.ok(call.body.password === " old "); assert.equal(call.body.kind, "phone"); assert.equal(call.body.identifier, "13800138000"); assert.equal(p.successes, 1);
   } finally { await p.close(); }
 });
+
+test("legacy public number is an explicit password-only choice, never guessed from a numeric identifier", async () => {
+  const p = await mountAuthComponent(file, "AuthForm");
+  try {
+    await p.click("密码登录");await p.input("auth-identifier", "00012345");await p.input("auth-password", " old ");await p.input("auth-terms", true);await p.submit();
+    assert.equal(p.calls.filter(call=>call.url.endsWith("/sign-in/identifier")).length,0);
+    await p.click("旧平台账号编号");assert.equal(p.host.querySelector("#auth-identifier").value, "");
+    await p.input("auth-identifier", "00012345");await p.input("auth-password", " old ");await p.submit();
+    const call=p.calls.find(call=>call.url.endsWith("/sign-in/identifier"));assert.equal(call.body.kind,"legacy-number");assert.equal(call.body.identifier,"00012345");assert.equal(call.body.password," old ");assert.equal(p.successes,1);
+    assert.equal(p.calls.filter(call=>call.url.includes("/sign-in/legacy-number")).length,0);
+  } finally { await p.close(); }
+});
+
+test("switching from a legacy number to OTP or recovery clears the alias and password", async () => {
+  const p=await mountAuthComponent(file,"AuthForm");
+  try {
+    await p.click("密码登录");await p.click("旧平台账号编号");await p.input("auth-identifier","00012345");await p.input("auth-password","existing");
+    await p.click("验证码登录");assert.equal(p.host.querySelector("#auth-identifier").value,"");assert.equal(p.host.querySelector("#auth-password"),null);
+    await p.click("密码登录");assert.equal(p.host.querySelector("#auth-identifier").type,"tel");
+    await p.click("旧平台账号编号");await p.input("auth-identifier","00012345");await p.click("忘记密码");
+    assert.equal(p.host.querySelector("#auth-identifier").value,"");assert.equal(p.host.querySelector("#auth-identifier").type,"tel");
+    assert.equal(p.calls.filter(call=>call.method==='POST').length,0);
+  } finally { await p.close(); }
+});
+
+test("lost legacy login restores its original identifier kind and only accepts the same session public number", async () => {
+  const slot={current:null};
+  const first=await mountAuthComponent(file,"AuthForm",{pendingWrite:slot},{fetch:async url=>{if(url.endsWith('/sign-in/identifier'))throw new Error('lost');return reply();}});
+  try{await first.click("密码登录");await first.click("旧平台账号编号");await first.input("auth-identifier","00012345");await first.input("auth-password","existing");await first.input("auth-terms",true);await first.submit();assert.equal(slot.current.identifierKind,'legacy-number');assert.equal(slot.current.subject,'00012345');}finally{await first.close();}
+  let same=false;
+  const restored=await mountAuthComponent(file,"AuthForm",{pendingWrite:slot},{fetch:async url=>url.endsWith('/get-session')?Response.json({user:{id:'user_A',username:same?'00012345':'different',phoneNumber:'13800138000'}}):reply()});
+  try{assert.equal(restored.host.querySelector('#auth-identifier').value,'00012345');assert.equal(restored.host.querySelector('#auth-password').value,'');await restored.submit();await restored.click('重新确认结果');assert.equal(restored.successes,0);same=true;await restored.click('重新确认结果');assert.equal(restored.successes,1);assert.equal(restored.calls.filter(call=>call.url.endsWith('/sign-in/identifier')).length,0);}finally{await restored.close();}
+});
 test("invitation link passes the displayed code only through unified phone registration, never password login", async () => {
   const p = await mountAuthComponent(file, "AuthForm", {inviteCode:"fxOriginal"}, {fetch:async()=>reply()});
   try { assert.equal(p.host.querySelector("#auth-invite-code").value,"fxOriginal");await fillSms(p);await p.submit();assert.equal(p.calls.find(item=>item.url.endsWith("/phone-registration/complete")).body.inviteCode,"fxOriginal");assert.match(p.host.textContent,/登录已有账号不会更改邀请关系/); } finally { await p.close(); }
@@ -72,6 +105,34 @@ test("a different confirmed user cannot complete the previous login intent", asy
   const p = await mountAuthComponent(file, "AuthForm", {}, { confirmUserId: "user_B" });
   try { await fillSms(p); await p.submit(); assert.equal(p.successes, 0); assert.match(p.host.textContent, /操作已接受/); }
   finally { await p.close(); }
+});
+
+test("a new legacy login clears the previous receipt subject before its response can be lost", async () => {
+  const slot = { current: { mode: "login", outcome: "accepted", contact: "OLD0001", subject: "OLD0001", identifierKind: "legacy-number", userId: "previous_user", challengeId: "", proofId: "" } };
+  const gate = deferred();
+  const p = await mountAuthComponent(file, "AuthForm", { pendingWrite: slot }, { confirm: async () => "guest", fetch: async url => {
+    if (url.endsWith("/sign-in/identifier")) await gate.promise;
+    return reply();
+  } });
+  try {
+    await p.click("重新确认结果"); await p.click("使用新的验证码登录");
+    await p.click("密码登录"); await p.click("旧平台账号编号");
+    await p.input("auth-identifier", "NEW0002"); await p.input("auth-password", "existing"); await p.input("auth-terms", true); await p.submit();
+    assert.equal(p.calls.filter(call => call.url.endsWith("/sign-in/identifier")).length, 1);
+    assert.equal(slot.current.subject, "NEW0002"); assert.equal(slot.current.identifierKind, "legacy-number");
+    assert.equal(slot.current.userId, null, "closing now must preserve only the new, unresolved subject");
+  } finally { await p.close(); gate.resolve(); }
+});
+
+test("an accepted legacy receipt cannot be completed by a different session after reopening", async () => {
+  const slot = { current: { mode: "login", outcome: "accepted", contact: "SN0001", subject: "SN0001", identifierKind: "legacy-number", userId: "user_A", challengeId: "", proofId: "" } };
+  const p = await mountAuthComponent(file, "AuthForm", { pendingWrite: slot }, { confirmUserId: "user_B" });
+  try {
+    await p.click("重新确认结果"); await p.submit(); await p.click("重新确认结果");
+    assert.equal(p.successes, 0); assert.equal(slot.current.userId, "user_A");
+    assert.equal(p.calls.filter(call => call.method === "POST").length, 0);
+    assert.equal(p.host.querySelector("#auth-identifier").disabled, true);
+  } finally { await p.close(); }
 });
 
 test("changing return intent or unmounting discards a late login callback", async () => {

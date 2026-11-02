@@ -9,7 +9,7 @@ export class FinanceSqlFixture {
   readonly db = new DatabaseSync(":memory:");
   readonly reads: { family: string; rows: number }[] = [];
   clusterSnapshot = "100:100:";
-  constructor(data: { ledger?: Row[]; history?: Row[]; native?: Row[]; legacy?: Row[]; subjects?: Row[]; withdrawals?: Row[]; operations?: Row[];earnings?:Row[];earningTransitions?:Row[];financeEvents?:Row[];guaranteeHistory?:Row[];legacyDutyFacts?:Row[];legacyDuties?:Row[] } = {}) {
+  constructor(data: { ledger?: Row[]; history?: Row[]; native?: Row[]; payments?:Row[]; legacy?: Row[]; subjects?: Row[]; withdrawals?: Row[]; operations?: Row[];earnings?:Row[];earningTransitions?:Row[];financeEvents?:Row[];guaranteeHistory?:Row[];legacyDutyFacts?:Row[];legacyDuties?:Row[] } = {}) {
     this.db.function("regexp", (pattern, value) => typeof value === "string" && new RegExp(String(pattern)).test(value) ? 1 : 0);
     // SQLite floating SUM cannot represent the 24-digit cents contract. The relational FILTER runs in SQL;
     // only PG numeric aggregation is substituted with exact BigInt, still not a PG numeric/plan proof.
@@ -25,7 +25,8 @@ export class FinanceSqlFixture {
     this.table('zzsh_order.rental_referral_transition','id earning_id action expected_version result_version finance_event_id source_digest',data.earningTransitions??[]);
     this.table('zzsh_order.legacy_owner_guarantee_observation','id user_id account_id legacy_account_id source_canonical source_digest source_cutoff imported_at',data.guaranteeHistory??[]);
     this.table('zzsh_order.legacy_owner_guarantee_coverage','id body_digest',[]);
-    this.table("zzsh_order.rental_order", "id display_no owner_user_id renter_user_id account_id game_id status revision rental_amount_cents deposit_amount_cents created_at", data.native ?? []);
+    this.table("zzsh_order.rental_order", "id display_no owner_user_id renter_user_id account_id game_id status revision paid_confirmation_id paid_at rental_amount_cents deposit_amount_cents created_at", data.native ?? []);
+    this.table("zzsh_order.payment_confirmation","id order_id source disposition amount_cents currency accepted_at",data.payments??[]);
     this.table("zzsh_order.legacy_order_read_snapshot", "id source_system source_entity legacy_id source_digest binding_digest original_order_no owner_user_id renter_user_id account_id game_id source_snapshot source_completed_at due_amount_cents recorded_paid_amount_cents deposit_amount_cents source_order_status source_pay_status source_created_at imported_at", data.legacy ?? []);
     this.table('zzsh_auth_user."user"', "id name", data.subjects ?? [{ id: "u1", name: "用户一" }, { id: "u2", name: "用户二" }]);
     this.table("zzsh_order.withdrawal_intent", "id state operation_version funds_disposition last_provider_fact_id", data.withdrawals??[]);
@@ -68,7 +69,7 @@ export class FinanceSqlFixture {
       .replace(/left\(([^,]+),3\)/g, "substr($1,1,3)").replace(/right\(([^,]+),4\)/g, "substr($1,-4)")
       .replaceAll(' COLLATE "C"', "");
     const bindings = Object.fromEntries(values.map((value, index) => ["$" + (index + 1), Array.isArray(value) ? JSON.stringify(value) : typeof value==='boolean'?Number(value):value as string | number]));
-    const rows = this.db.prepare(text).all(bindings).map(raw=>{const row:Record<string,any>={...raw};for(const field of ['extra_evidence','source_snapshot'])if(typeof row[field]==='string')row[field]=JSON.parse(row[field]);return sql.includes('finance period complete ledger balances')?{...row,opening:String(row.opening),closing:String(row.closing),movement:String(row.movement)}:Object.hasOwn(row,"included_in_opening")?{...row,included_in_opening:row.included_in_opening==="1"}:row;});
+    const rows = this.db.prepare(text).all(bindings).map(raw=>{const row:Record<string,any>={...raw};for(const flag of ['has_review_payment','has_posting'])if(Object.hasOwn(row,flag))row[flag]=row[flag]===1||row[flag]==='1';for(const field of ['extra_evidence','source_snapshot'])if(typeof row[field]==='string')row[field]=JSON.parse(row[field]);return sql.includes('finance period complete ledger balances')?{...row,opening:String(row.opening),closing:String(row.closing),movement:String(row.movement)}:Object.hasOwn(row,"included_in_opening")?{...row,included_in_opening:row.included_in_opening==="1"}:row;});
     this.reads.push({ family: sql.startsWith("WITH finance_lookup") ? "keys" : sql.startsWith("WITH finance_order") ? "orders" : "entries", rows: rows.length });
     return { rows, rowCount: rows.length };
   }

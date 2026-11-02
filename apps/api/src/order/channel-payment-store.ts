@@ -14,6 +14,7 @@ import {
 import { confirmOrderPayment, type PaymentResult } from "./payment-confirmation";
 import { describeCollectionProfile, type BoundCollectionProfile } from "./joinpay-collection-profile";
 import { readVerifiedJoinpayFactScope, type FormalJoinpayPaymentFact } from "./joinpay-collection-source";
+import { createControlledRegressionResource, assertControlledRegressionResource, type ControlledRegressionBinding, type ControlledRegressionResource } from "../finance/controlled-regression-resource";
 
 /**
  * PAY-03A：持久请求、只追加观察与资金归属锚点（payment_request / payment_channel_observation /
@@ -60,20 +61,25 @@ export function wireAmountForCents(amountCents: string): string {
 }
 
 // ---------- 合成请求能力：仅显式 test/fake 隔离资源，进程内对象，无环境开关 ----------
-const requestCapabilities = new WeakMap<object, { database: string; runtimeUser: string }>();
+const requestCapabilities = new WeakMap<object, { database: string; runtimeUser: string; regression?: ControlledRegressionResource; orderIds?: ReadonlySet<string> }>();
 export type SyntheticRequestCapability = Readonly<{ evidenceLevel: "SYNTHETIC_PROTOCOL" | "CONTROLLED_TEST" }>;
 
-export function createSyntheticChannelRequestCapability(options: { config: AppConfig; resourceSet: string; evidenceLevel: SyntheticRequestCapability["evidenceLevel"] }): SyntheticRequestCapability {
+export function createSyntheticChannelRequestCapability(options: { config: AppConfig; resourceSet: string; evidenceLevel: SyntheticRequestCapability["evidenceLevel"]; regression?: ControlledRegressionBinding; allowedOrderIds?: readonly string[] }): SyntheticRequestCapability {
   const { config, resourceSet } = options;
+  const regression = resourceSet === "regression";
+  const resource = regression && options.regression ? createControlledRegressionResource(config, options.regression, "CHANNEL_REQUEST") : undefined;
   if (config.profile !== "test" || config.provider !== "fake" || !config.testOperationsEnabled
     || config.database.target !== "local-compose" || config.database.host !== "127.0.0.1" || config.database.port !== 55432
     || !/^[a-z][a-z0-9_]{0,20}$/.test(resourceSet)
-    || config.database.name !== `zzsh_test_order_${resourceSet}` || config.database.user !== `zzsh_order_${resourceSet}_r`
+    || (regression ? !resource || options.evidenceLevel !== "CONTROLLED_TEST" || !options.allowedOrderIds?.length || options.allowedOrderIds.length > 10
+      || options.allowedOrderIds.some(id => !ID.test(id)) || new Set(options.allowedOrderIds).size !== options.allowedOrderIds.length
+      : config.database.name !== `zzsh_test_order_${resourceSet}` || config.database.user !== `zzsh_order_${resourceSet}_r`)
     || (options.evidenceLevel !== "SYNTHETIC_PROTOCOL" && options.evidenceLevel !== "CONTROLLED_TEST")) {
     throw new ConfigurationError("Synthetic channel request requires an explicit isolated test/fake resource");
   }
   const capability = Object.freeze({ evidenceLevel: options.evidenceLevel });
-  requestCapabilities.set(capability, { database: config.database.name, runtimeUser: config.database.user });
+  requestCapabilities.set(capability, { database: config.database.name, runtimeUser: config.database.user,
+    ...(resource ? { regression: resource, orderIds: new Set(options.allowedOrderIds) } : {}) });
   return capability;
 }
 
@@ -88,9 +94,15 @@ const closed = () => requestFailure("PAYMENT_CHANNEL_NOT_ENABLED", "Channel paym
 export async function assertSyntheticChannelRequestCapability(client: PoolClient, capability: unknown): Promise<SyntheticRequestCapability["evidenceLevel"]> {
   const scope = capability && typeof capability === "object" ? requestCapabilities.get(capability) : undefined;
   if (!scope) throw closed();
+  if (scope.regression) await assertControlledRegressionResource(client, scope.regression, "CHANNEL_REQUEST");
   const identity = (await client.query(`SELECT current_database() AS db, current_user AS actor`)).rows[0];
   if (identity?.db !== scope.database || identity?.actor !== scope.runtimeUser) throw closed();
   return (capability as SyntheticRequestCapability).evidenceLevel;
+}
+
+export function assertSyntheticChannelRequestOrder(capability: unknown, orderId: string): void {
+  const scope = capability && typeof capability === "object" ? requestCapabilities.get(capability) : undefined;
+  if (!scope || scope.orderIds && !scope.orderIds.has(orderId)) throw closed();
 }
 
 // ---------- 持久请求 ----------
@@ -134,6 +146,7 @@ export async function createPaymentRequest(client: PoolClient, input: {
 }): Promise<IdempotentResult> {
   return createRequest(client, input, ["SYNTHETIC_PROTOCOL", "CONTROLLED_TEST"], async () => {
     const evidenceLevel = await assertSyntheticChannelRequestCapability(client, input.capability);
+    assertSyntheticChannelRequestOrder(input.capability, input.orderId);
     checkBinding(input.binding);
     if ((input.binding.channel === "JOINPAY") !== (evidenceLevel === "SYNTHETIC_PROTOCOL")) throw closed();
     return { binding: input.binding, evidenceLevel };

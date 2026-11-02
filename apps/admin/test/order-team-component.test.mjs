@@ -10,13 +10,14 @@ import {readFileSync} from 'node:fs';
 import ts from 'typescript';
 
 // Real component + controlled SDK: receipts may arrive after switching orders or permissions.
+// SSR fixtures do not watch the monorepo or its temporary build trees.
 async function mountOrderSender(t, methods={}, options={}) {
   const browser=new Window({url:'http://127.0.0.1:4311'});
   Object.assign(globalThis,{window:browser,document:browser.document,HTMLElement:browser.HTMLElement,Node:browser.Node,Event:browser.Event,requestAnimationFrame:browser.requestAnimationFrame.bind(browser),IS_REACT_ACT_ENVIRONMENT:true});
   Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
   const {createRoot}=await import('react-dom/client');
   const rootPath=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
-  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false,ws:false}});
+  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false,ws:false,watch:null}});
   const {OrderTeamPanel}=await vite.ssrLoadModule('/packages/ui/src/order-team-panel.tsx');
   const errors=await vite.ssrLoadModule('/packages/im-client/src/nim-web-client.ts');
   const {ImLifecycleSupersededError}=await vite.ssrLoadModule('/packages/im-client/src/im-client-lifecycle.ts');
@@ -216,7 +217,7 @@ test('order chat routes the normal send to the original message after an unknown
   Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
   const {createRoot}=await import('react-dom/client');
   const rootPath=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
-  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false}});
+  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false,watch:null}});
   const {OrderTeamPanel}=await vite.ssrLoadModule('/packages/ui/src/order-team-panel.tsx');
   const {NimTextSendError}=await vite.ssrLoadModule('/packages/im-client/src/nim-web-client.ts');
   const node=document.createElement('div');document.body.append(node);const root=createRoot(node);
@@ -253,7 +254,7 @@ test('order chat text UNKNOWN with staged images keeps text retry, does not fail
   Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
   const {createRoot}=await import('react-dom/client');
   const rootPath=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
-  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false}});
+  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false,watch:null}});
   const {OrderTeamPanel}=await vite.ssrLoadModule('/packages/ui/src/order-team-panel.tsx');
   const {NimTextSendError}=await vite.ssrLoadModule('/packages/im-client/src/nim-web-client.ts');
   const node=document.createElement('div');document.body.append(node);const root=createRoot(node);
@@ -317,7 +318,7 @@ test('formal order panel isolates orders, authorization, drafts, late SDK work a
   Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
   const {createRoot}=await import('react-dom/client');
   const rootPath=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
-  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false}});
+  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false,watch:null}});
   const {OrderTeamPanel}=await vite.ssrLoadModule('/packages/ui/src/order-team-panel.tsx');
   const node=document.createElement('div');document.body.append(node);const root=createRoot(node);
   const timers=[];const interval=globalThis.setInterval,clear=globalThis.clearInterval;
@@ -402,7 +403,7 @@ test('order list refresh reconciles status, membership, pagination, identity and
   Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
   const {createRoot}=await import('react-dom/client');
   const rootPath=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
-  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false}});
+  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false,watch:null}});
   const {OrderTeamPanel}=await vite.ssrLoadModule('/packages/ui/src/order-team-panel.tsx');
   const activeTimers=new Map();let timerId=0;const oldSet=globalThis.setInterval,oldClear=globalThis.clearInterval;
   globalThis.setInterval=(fn,ms)=>{assert.equal(ms,5000);const id=++timerId;activeTimers.set(id,fn);return id;};
@@ -493,7 +494,7 @@ test('order list refresh rebases a loaded 20+5 cursor window and advances bounde
   Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
   const {createRoot}=await import('react-dom/client');
   const rootPath=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
-  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false}});
+  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false,watch:null}});
   const {OrderTeamPanel}=await vite.ssrLoadModule('/packages/ui/src/order-team-panel.tsx');
   const timers=new Map();let timerId=0;const oldSet=globalThis.setInterval,oldClear=globalThis.clearInterval;
   globalThis.setInterval=(fn,ms)=>{assert.equal(ms,5000);timers.set(++timerId,fn);return timerId;};globalThis.clearInterval=id=>timers.delete(id);
@@ -547,7 +548,7 @@ test('load-more and scheduled refresh serialize and recompute the page cursor',a
   Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
   const {createRoot}=await import('react-dom/client');
   const rootPath=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
-  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false}});
+  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false,watch:null}});
   const {OrderTeamPanel}=await vite.ssrLoadModule('/packages/ui/src/order-team-panel.tsx');
   const timers=new Map();let timerId=0;const oldSet=globalThis.setInterval,oldClear=globalThis.clearInterval;
   globalThis.setInterval=(fn,ms)=>{assert.equal(ms,5000);timers.set(++timerId,fn);return timerId;};globalThis.clearInterval=id=>timers.delete(id);
@@ -582,7 +583,7 @@ test('pending paginated refresh cannot continue or queue more orders after true 
   Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
   const {createRoot}=await import('react-dom/client');
   const rootPath=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
-  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false}});
+  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false,watch:null}});
   const {OrderTeamPanel}=await vite.ssrLoadModule('/packages/ui/src/order-team-panel.tsx');
   const timers=new Map();let timerId=0,unmounted=false,hold=false,release=null;
   const oldSet=globalThis.setInterval,oldClear=globalThis.clearInterval;
@@ -616,7 +617,7 @@ test('a refresh queued behind in-flight load-more cannot start after true unmoun
   Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
   const {createRoot}=await import('react-dom/client');
   const rootPath=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
-  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false}});
+  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false,watch:null}});
   const {OrderTeamPanel}=await vite.ssrLoadModule('/packages/ui/src/order-team-panel.tsx');
   const timers=new Map();let timerId=0,unmounted=false,hold=false,release=null;
   const oldSet=globalThis.setInterval,oldClear=globalThis.clearInterval;
@@ -651,7 +652,7 @@ test('order panel gates image decoding and rejects blob history URLs',async(t)=>
   globalThis.URL.createObjectURL=()=>`blob:preview-${++previewId}`;globalThis.URL.revokeObjectURL=()=>{};
   const {createRoot}=await import('react-dom/client');
   const rootPath=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
-  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false}});
+  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false,watch:null}});
   const {OrderTeamPanel}=await vite.ssrLoadModule('/packages/ui/src/order-team-panel.tsx');
   const node=document.createElement('div');document.body.append(node);const root=createRoot(node);
   const timers=[];const interval=globalThis.setInterval,clear=globalThis.clearInterval;
@@ -683,7 +684,7 @@ test('admin fulfillment slot receives the frozen order inventory projection',asy
   Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
   const {createRoot}=await import('react-dom/client');
   const rootPath=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
-  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false}});
+  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false,watch:null}});
   const {OrderTeamPanel}=await vite.ssrLoadModule('/packages/ui/src/order-team-panel.tsx');
   const node=document.createElement('div');document.body.append(node);const root=createRoot(node);
   const interval=globalThis.setInterval,clear=globalThis.clearInterval;
@@ -709,7 +710,7 @@ async function checkReturningDuringImageSend(t, outcome){
   Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
   const {createRoot}=await import('react-dom/client');
   const rootPath=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
-  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false}});
+  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false,watch:null}});
   const {OrderTeamPanel}=await vite.ssrLoadModule('/packages/ui/src/order-team-panel.tsx');
   const {NimImageSendError}=await vite.ssrLoadModule('/packages/im-client/src/nim-web-client.ts');
   const node=document.createElement('div');document.body.append(node);const root=createRoot(node);
@@ -816,7 +817,7 @@ test('closing window with visible=false pauses sequential image queue without dr
   Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
   const {createRoot}=await import('react-dom/client');
   const rootPath=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
-  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false}});
+  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false,watch:null}});
   const {OrderTeamPanel}=await vite.ssrLoadModule('/packages/ui/src/order-team-panel.tsx');
   const node=document.createElement('div');document.body.append(node);const root=createRoot(node);
   const interval=globalThis.setInterval,clear=globalThis.clearInterval;
@@ -882,7 +883,7 @@ test('async image decoding interleaving: selecting or removing during in-flight 
   Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
   const {createRoot}=await import('react-dom/client');
   const rootPath=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
-  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false}});
+  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false,watch:null}});
   const {OrderTeamPanel}=await vite.ssrLoadModule('/packages/ui/src/order-team-panel.tsx');
   const node=document.createElement('div');document.body.append(node);const root=createRoot(node);
   const interval=globalThis.setInterval,clear=globalThis.clearInterval;
@@ -947,7 +948,7 @@ test('zero accessible orders render one whole-area state and never a dead split,
   Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
   const {createRoot}=await import('react-dom/client');
   const rootPath=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
-  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false}});
+  const vite=await createServer({configFile:false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } },root:rootPath,plugins:[react()],server:{middlewareMode:true,hmr:false,watch:null}});
   const {OrderTeamPanel}=await vite.ssrLoadModule('/packages/ui/src/order-team-panel.tsx');
   const node=document.createElement('div');document.body.append(node);const root=createRoot(node);
   const interval=globalThis.setInterval,clear=globalThis.clearInterval;

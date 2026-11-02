@@ -101,7 +101,7 @@ export async function applyHoldingDomain(ctx, options) {
     const result = await writer.recordLegacySkinHoldings(ctx.client, prepared.accountId, prepared.input, ctx.actor, admission);
     return { ...result, replayed: existing };
   }, 50);
-  const actual = (await ctx.client.query("SELECT count(*)::int count FROM zzsh_supply.legacy_skin_holding WHERE evidence_ref LIKE $1", [ctx.manifest.sourceRef + ":skin-holdings:%"])).rows[0].count;
+  const actual = (await ctx.client.query("SELECT count(*)::int count FROM zzsh_supply.legacy_skin_holding WHERE evidence_ref LIKE $1" + (ctx.holdingAccountIds ? " AND account_id=ANY($2::text[])" : ""), ctx.holdingAccountIds ? [ctx.manifest.sourceRef + ":skin-holdings:%", ctx.holdingAccountIds] : [ctx.manifest.sourceRef + ":skin-holdings:%"])).rows[0].count;
   const phase = ctx.state.phases.skinHoldings;
   ctx.state.skinHoldingsReconciliation = { expectedComplete: ready.length, actual, runtimeQuarantined: phase.quarantined, onlyCompleteDeclarationsAttached: true, noCatalogAliasOrIdentityChanges: true, neverRestoredTradingEligibility: true };
   ctx.save();

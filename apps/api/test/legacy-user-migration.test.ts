@@ -6,9 +6,14 @@ import {
   legacyOwnerUserId,
   migrateLegacyOwner,
   normalizeLegacyOwnerInput,
+  reconcileLegacyOwnerContactProjection,
+  readLegacyOwnerContactTarget,
+  legacyOwnerContactTargetDigest,
+  bindLegacyOwnerNumber,
   type LegacyOwnerEvidence,
   type LegacyOwnerMigrationInput,
 } from "../src/supply/legacy-user-migration";
+import { planLegacyContactProjections, type LegacyContactProjection } from "../src/legacy-load/legacy-contact-projection";
 
 const ACTOR = { id: "admin-1", sessionId: "session-1", requestId: "request-1" };
 const MOBILE = "19900000001";
@@ -41,7 +46,7 @@ function input(overrides: Partial<LegacyOwnerEvidence> = {}): LegacyOwnerMigrati
 const ACCOUNT_ID = "account-1";
 const STANDIN = "user-standin";
 
-type UserRow = { id: string; name: string; email: string; phoneNumber: string | null; phoneNumberVerified: boolean | null; suspended: boolean };
+type UserRow = { id: string; name: string; email: string; phoneNumber: string | null; phoneNumberVerified: boolean | null; suspended: boolean; username?: string | null; displayUsername?: string | null; updatedAt?: string };
 type CredentialRow = { id: string; userId: string; providerId: string; password: string | null; legacyPasswordMd5: string | null; legacyPasswordSalt: string | null; legacyPasswordVersion: string | null; legacyPasswordUpgradedAt: string | null };
 type IdentityRow = { user_id: string; account_status: string; identity_status: string; age_status: string; provider: string; provider_reference: string; verified_at: string | null };
 type MapRow = { source_system: string; source_entity: string; legacy_id: string; source_digest: string; account_id: string; version_id: string; evidence_ref: string };
@@ -73,6 +78,8 @@ class FakeClient {
   readonly objectCounts = new Map<string, number>();
   readonly queries: string[] = [];
   permission = true;
+  isBoss = false;
+  sessionLocked = false;
   scope = true;
   failNextIdempotencyRead = false;
 
@@ -93,6 +100,9 @@ class FakeClient {
     const sql = text.replace(/\s+/g, " ").trim();
     this.queries.push(sql);
     if (sql.includes("pg_advisory_xact_lock") || sql.startsWith("SELECT set_config")) return { rows: [], rowCount: 0 };
+    if (sql.startsWith('SELECT s."locked",u."twoFactorEnabled"')) return { rows: [{ locked: this.sessionLocked, twoFactorEnabled: true, suspended: false } as T], rowCount: 1 };
+    if (sql.startsWith('SELECT "status" FROM "zzsh_iam"."admin_security"')) return { rows: [{ status: "ACTIVE" } as T], rowCount: 1 };
+    if (sql.startsWith('SELECT s."locked" AS "locked"')) return { rows: [{ locked: this.sessionLocked, pinHash: null, pinFailures: 0, expiresAt: new Date(Date.now() + 3600000), suspended: false, twoFactorEnabled: true } as T], rowCount: 1 };
     if (sql.includes("idempotency_record") && sql.startsWith("SELECT")) {
       if (this.failNextIdempotencyRead) {
         this.failNextIdempotencyRead = false;
@@ -105,7 +115,7 @@ class FakeClient {
       return { rows: [{ mode: this.scope ? "ALL_GAMES" : "SELECTED_GAMES", gameIds: [] } as T], rowCount: 1 };
     }
     if (sql.startsWith('SELECT "status", "is_boss"')) {
-      return { rows: [{ status: "ACTIVE", isBoss: false, passwordChangeRequired: false } as T], rowCount: 1 };
+      return { rows: [{ status: "ACTIVE", isBoss: this.isBoss, passwordChangeRequired: false } as T], rowCount: 1 };
     }
     if (sql.includes("role_permissions") || sql.includes("admin_user_permission")) {
       return { rows: this.permission ? [{ permissionCode: "supply.catalog.manage" } as T] : [], rowCount: this.permission ? 1 : 0 };
@@ -114,6 +124,35 @@ class FakeClient {
     if (sql.startsWith('SELECT "id","name","email","phoneNumber","phoneNumberVerified","suspended" FROM "zzsh_auth_user"."user"')) {
       const rows = [...this.users.values()].filter((row) => row.id === values[0] || row.phoneNumber === values[1]);
       return { rows: rows as T[], rowCount: rows.length };
+    }
+    if (sql.startsWith('SELECT "id","name","email","phoneNumber","phoneNumberVerified","suspended","username"')) {
+      const rows = [...this.users.values()].filter(row => row.id === values[0] || values[1] !== null && row.phoneNumber === values[1] || row.username === values[2]);
+      return { rows: rows as T[], rowCount: rows.length };
+    }
+    if (sql.startsWith('SELECT u.id,u.username,u."phoneNumber"')) {
+      const id = Array.isArray(values[0]) ? values[0][0] : values[0];
+      const row = this.users.get(String(id)), state = this.identities.get(String(id));
+      const audit = [...this.audits].reverse().find(a => a.object_id === id && a.action === "user.legacy_owner.migrated");
+      return { rows: row && state ? [{ id: row.id, username: row.username ?? null, displayUsername: row.displayUsername ?? null, phoneNumber: row.phoneNumber, phoneNumberVerified: row.phoneNumberVerified,
+        email: row.email, suspended: row.suspended, updatedAt: row.updatedAt ?? "2026-11-02T00:00:00.000000Z", accountStatus: state.account_status,
+        identityStatus: state.identity_status, ageStatus: state.age_status, identityVersion: "1", provider: state.provider, providerReference: state.provider_reference,
+        migrationSourceDigest: audit?.details.sourceDigest ?? null, migrationLegacyId: audit?.details.legacyId ?? null } as T] : [], rowCount: row && state ? 1 : 0 };
+    }
+    if (sql.startsWith('SELECT id FROM zzsh_auth_user."user" WHERE id<>$1')) {
+      const rows = [...this.users.values()].filter(row => row.id !== values[0] && (row.username === values[1] || values.length > 2 && values[2] !== null && row.phoneNumber === values[2]));
+      return { rows: rows.map(row => ({ id: row.id } as T)), rowCount: rows.length };
+    }
+    if (sql.startsWith('UPDATE zzsh_auth_user."user" SET username=')) {
+      const row = this.users.get(String(values[0]));
+      if (!row || (row.updatedAt ?? "2026-11-02T00:00:00.000000Z") !== values[2] || (row.username ?? null) !== values[3]) return { rows: [], rowCount: 0 };
+      row.username = String(values[1]); row.displayUsername = row.username; row.updatedAt = "2026-11-02T00:00:01.000000Z";
+      return { rows: [], rowCount: 1 };
+    }
+    if (sql.startsWith('UPDATE zzsh_auth_user."user" SET "phoneNumber"')) {
+      const row = this.users.get(String(values[0]));
+      if (!row || (row.updatedAt ?? "2026-11-02T00:00:00.000000Z") !== values[3] || (row.username ?? null) !== values[4] || row.phoneNumber !== values[5] || row.phoneNumberVerified !== values[6]) return { rows: [], rowCount: 0 };
+      row.phoneNumber = values[1] as string | null; row.phoneNumberVerified = false; row.username = String(values[2]); row.displayUsername = row.username; row.updatedAt = "2026-11-02T00:00:01.000000Z";
+      return { rows: [], rowCount: 1 };
     }
     if (sql.startsWith('SELECT "id","suspended" FROM "zzsh_auth_user"."user" WHERE "id"=$1')) {
       const row = this.users.get(String(values[0]));
@@ -163,7 +202,8 @@ class FakeClient {
       return { rows: [], rowCount: 1 };
     }
     if (sql.startsWith('INSERT INTO "zzsh_auth_user"."user"')) {
-      const row: UserRow = { id: String(values[0]), name: String(values[1]), email: String(values[2]), phoneNumber: String(values[4]), phoneNumberVerified: false, suspended: false };
+      const row: UserRow = { id: String(values[0]), name: String(values[1]), email: String(values[2]), phoneNumber: values[4] === null ? null : String(values[4]), phoneNumberVerified: false, suspended: false,
+        ...(values.length > 5 ? { username: String(values[5]) } : {}) };
       this.users.set(row.id, row);
       return { rows: [], rowCount: 1 };
     }
@@ -238,6 +278,78 @@ function upgradeCredential(fake: FakeClient, userId: string) {
   fake.audits.push({ object_id: row.id, action: "user.legacy_password.upgraded", details: { actorId: userId, actorType: "user", objectType: "auth_account" } });
 }
 
+function contactEvidence(base: LegacyOwnerEvidence, sourceSn = "OLD" + base.legacyId): LegacyOwnerEvidence {
+  const projection = planLegacyContactProjections([{ legacyId: base.legacyId, sourceDigest: base.sourceDigest, sourceSn,
+    deleted: base.status.deleted, disabled: base.status.disabled, mobile: base.mobile, sourceContactRef: base.evidenceRef + ":mobile", sourceContactDigest: "d".repeat(64) }]).get(base.legacyId)!;
+  return { ...base, contactProjection: projection };
+}
+
+test("contact-aware importer persists a phone-null real subject and exact legacy alias without inventing a credential", async () => {
+  const fake = new FakeClient(); fake.isBoss = true;
+  const payload = contactEvidence(evidence({ mobile: null, status: { realNameBound: true, ageAdult: null, disabled: false, deleted: false } }));
+  const body = { evidence: payload, evidenceDigest: legacyOwnerEvidenceDigest(payload) };
+  const result = await migrateLegacyOwner(asClient(fake), body, ACTOR);
+  assert.equal(fake.users.get(result.userId)!.phoneNumber, null); assert.equal(fake.users.get(result.userId)!.username, "OLD" + OWNER_LEGACY_ID);
+  assert.equal(fake.credentials.size, 0); assert.equal(fake.identities.get(result.userId)!.age_status, "UNKNOWN");
+  assert.equal(fake.identities.get(result.userId)!.identity_status, "VERIFIED");
+  assert.equal((await migrateLegacyOwner(asClient(fake), body, ACTOR)).replayed, true);
+  assert.equal(fake.queries.some(q => /finance_opening|ledger_entry|rental_order/.test(q)), false);
+});
+
+test("a contact-aware write requires an active Boss and rejects an occupied original number", async () => {
+  const payload = contactEvidence(evidence({ mobile: null })), body = { evidence: payload, evidenceDigest: legacyOwnerEvidenceDigest(payload) };
+  await assert.rejects(() => migrateLegacyOwner(asClient(new FakeClient()), body, ACTOR), /Boss/);
+  const fake = new FakeClient(); fake.isBoss = true;
+  fake.users.set("another", { id: "another", name: "another", email: "another@x.invalid", phoneNumber: null, phoneNumberVerified: false, suspended: false, username: payload.contactProjection!.sourceSn });
+  await assert.rejects(() => migrateLegacyOwner(asClient(fake), body, ACTOR), /conflicts with an existing/);
+  assert.equal(fake.identities.size, 0);
+});
+
+test("cancelled authentication projection is exact CAS, audited and idempotent without touching status, credential or money", async () => {
+  const fake = new FakeClient(); fake.isBoss = true;
+  const original = input({ status: { realNameBound: true, ageAdult: null, disabled: false, deleted: true }, legacyPassword: { version: "legacy-md5-v1", md5: "c".repeat(32), salt: "OldSalt" } });
+  const user = await migrateLegacyOwner(asClient(fake), original, ACTOR), before = await readLegacyOwnerContactTarget(asClient(fake), user.userId, ACTOR);
+  const payload = contactEvidence(original.evidence), body = { evidence: payload, evidenceDigest: legacyOwnerEvidenceDigest(payload), expectedTargetDigest: legacyOwnerContactTargetDigest(before) };
+  const credentialBefore = structuredClone([...fake.credentials.values()]), identityBefore = structuredClone(fake.identities.get(user.userId));
+  const applied = await reconcileLegacyOwnerContactProjection(asClient(fake), body, ACTOR);
+  assert.equal(applied.replayed, false); assert.equal(fake.users.get(user.userId)!.phoneNumber, null); assert.equal(fake.users.get(user.userId)!.username, payload.contactProjection!.sourceSn);
+  assert.deepEqual([...fake.credentials.values()], credentialBefore); assert.deepEqual(fake.identities.get(user.userId), identityBefore);
+  assert.equal((await reconcileLegacyOwnerContactProjection(asClient(fake), body, ACTOR)).replayed, true);
+  assert.equal(fake.audits.filter(a => a.action === "user.legacy_contact.projected").length, 1);
+  assert.equal(JSON.stringify(fake.audits).includes(MOBILE), false);
+  const stale = { ...body, expectedTargetDigest: "0".repeat(64) };
+  await assert.rejects(() => reconcileLegacyOwnerContactProjection(asClient(fake), stale, ACTOR), /Idempotency key was reused/);
+});
+
+test("fresh target drift and a verified current phone are never overwritten by the source projection", async () => {
+  for (const verified of [false, true]) {
+    const fake = new FakeClient(); fake.isBoss = true;
+    const original = input({ status: { realNameBound: true, ageAdult: null, disabled: false, deleted: true } });
+    const user = await migrateLegacyOwner(asClient(fake), original, ACTOR), before = await readLegacyOwnerContactTarget(asClient(fake), user.userId, ACTOR);
+    fake.users.get(user.userId)!.phoneNumberVerified = verified;
+    if (!verified) fake.users.get(user.userId)!.updatedAt = "2026-11-02T00:01:00.000000Z";
+    const payload = contactEvidence(original.evidence), digest = verified ? legacyOwnerContactTargetDigest(await readLegacyOwnerContactTarget(asClient(fake), user.userId, ACTOR)) : legacyOwnerContactTargetDigest(before);
+    await assert.rejects(() => reconcileLegacyOwnerContactProjection(asClient(fake), { evidence: payload, evidenceDigest: legacyOwnerEvidenceDigest(payload), expectedTargetDigest: digest }, ACTOR), verified ? /Verified current contact/ : /changed after fresh read/);
+    assert.equal(fake.users.get(user.userId)!.phoneNumber, "+86" + MOBILE);
+  }
+});
+
+test("a frozen existing contact is never released to an ACTIVE peer by contact reconciliation", async () => {
+  const fake = new FakeClient(); fake.isBoss = true;
+  const original = input({ status: { realNameBound: true, ageAdult: null, disabled: true, deleted: false } });
+  const user = await migrateLegacyOwner(asClient(fake), original, ACTOR);
+  const members = [
+    { legacyId: OWNER_LEGACY_ID, sourceSn: "OLD" + OWNER_LEGACY_ID, sourceDigest: SOURCE_DIGEST, deleted: false, disabled: true, mobile: MOBILE, sourceContactRef: "source:one", sourceContactDigest: "d".repeat(64) },
+    { legacyId: "99999", sourceSn: "OLD99999", sourceDigest: "b".repeat(64), deleted: false, disabled: false, mobile: MOBILE, sourceContactRef: "source:two", sourceContactDigest: "e".repeat(64) },
+  ];
+  const payload = { ...original.evidence, contactProjection: planLegacyContactProjections(members).get(OWNER_LEGACY_ID)! };
+  assert.equal(payload.contactProjection.authenticationPhone, null);
+  const before = await readLegacyOwnerContactTarget(asClient(fake), user.userId, ACTOR);
+  await assert.rejects(() => reconcileLegacyOwnerContactProjection(asClient(fake), { evidence: payload, evidenceDigest: legacyOwnerEvidenceDigest(payload), expectedTargetDigest: legacyOwnerContactTargetDigest(before) }, ACTOR), /Frozen legacy authentication contact/);
+  assert.equal(fake.users.get(user.userId)!.phoneNumber, "+86" + MOBILE);
+  assert.equal(fake.identities.get(user.userId)!.account_status, "FROZEN");
+});
+
 test("legacy owner evidence is strict and its digest binds every status flag", () => {
   const payload = evidence();
   assert.equal(legacyOwnerEvidenceDigest(payload), legacyOwnerEvidenceDigest(evidence({ mobile: "+86 199-0000-0001" })));
@@ -246,6 +358,37 @@ test("legacy owner evidence is strict and its digest binds every status flag", (
   assert.throws(() => normalizeLegacyOwnerInput(input({ mobile: "12345" })), /mobile/);
   assert.throws(() => normalizeLegacyOwnerInput(input({ legacyPassword: { version: "legacy-md5-v1", md5: "XYZ", salt: "s" } })), /password evidence/);
   assert.throws(() => normalizeLegacyOwnerInput(input({ sourceDigest: "short" })), /source reference/);
+});
+
+test("legacy public number CAS preserves verified contact, new provider, state and credential", async () => {
+  const fake = new FakeClient(); fake.isBoss = true;
+  const created = await migrateLegacyOwner(asClient(fake), input({ legacyPassword: { version: "legacy-md5-v1", md5: "a".repeat(32), salt: "salt" } }), ACTOR);
+  const row = fake.users.get(created.userId)!; row.phoneNumberVerified = true;
+  fake.identities.get(created.userId)!.provider = "reviewed_native_provider";
+  const originalPhone = row.phoneNumber, identity = JSON.stringify(fake.identities.get(created.userId)), credential = JSON.stringify([...fake.credentials]);
+  const target = await readLegacyOwnerContactTarget(asClient(fake), created.userId, ACTOR);
+  const body = { sourceSystem: "legacy_mysql_restore" as const, sourceEntity: "la_user" as const, legacyId: OWNER_LEGACY_ID, sourceDigest: SOURCE_DIGEST, sourceSn: "007654", expectedTargetDigest: legacyOwnerContactTargetDigest(target) };
+  await bindLegacyOwnerNumber(asClient(fake), body, ACTOR);
+  assert.equal(row.username, "007654");
+  assert.equal(row.phoneNumber, originalPhone); assert.equal(row.phoneNumberVerified, true);
+  assert.equal(JSON.stringify(fake.identities.get(created.userId)), identity); assert.equal(JSON.stringify([...fake.credentials]), credential);
+  assert.equal((await bindLegacyOwnerNumber(asClient(fake), body, ACTOR)).replayed, true);
+  const audit = fake.audits.find(a => a.action === "user.legacy_number.bound")!;
+  assert.equal(audit.details.sourceSn, "007654"); assert.equal(audit.details.sourceDigest, SOURCE_DIGEST);
+});
+
+test("legacy public number rejects foreign username, source drift and stale CAS", async () => {
+  const fake = new FakeClient(); fake.isBoss = true;
+  const created = await migrateLegacyOwner(asClient(fake), input(), ACTOR);
+  const target = await readLegacyOwnerContactTarget(asClient(fake), created.userId, ACTOR);
+  const body = { sourceSystem: "legacy_mysql_restore" as const, sourceEntity: "la_user" as const, legacyId: OWNER_LEGACY_ID, sourceDigest: SOURCE_DIGEST, sourceSn: "007654", expectedTargetDigest: legacyOwnerContactTargetDigest(target) };
+  fake.users.set("occupied", { id: "occupied", name: "other", email: "other@example.invalid", phoneNumber: null, phoneNumberVerified: false, suspended: false, username: body.sourceSn });
+  await assert.rejects(() => bindLegacyOwnerNumber(asClient(fake), body, ACTOR), /occupied/);
+  fake.users.delete("occupied");
+  await assert.rejects(() => bindLegacyOwnerNumber(asClient(fake), { ...body, sourceDigest: "b".repeat(64) }, ACTOR), /source or target changed/);
+  fake.users.get(created.userId)!.updatedAt = "2026-11-02T10:00:00.000000Z";
+  await assert.rejects(() => bindLegacyOwnerNumber(asClient(fake), body, ACTOR), /source or target changed/);
+  assert.equal(fake.users.get(created.userId)!.username, undefined);
 });
 test("migrateLegacyOwner writes evidence-driven statuses and never invents a password", async () => {
   const fake = new FakeClient();

@@ -34,9 +34,12 @@ function activeEntries(pathname, search = "", nav = boss) {
 test("每条目标路由只有唯一活动入口，不再按前缀点亮父级", () => {
   const cases = [
     ["/finance", "", ["/finance"]],
+    ["/finance", "?q=OLD-ORDER", ["/finance/search"]],
     ["/finance/period", "", ["/finance/period"]],
-    ["/finance/documents/doc_1", "", ["/finance"]],
-    ["/finance/users/user_1", "", ["/finance"]],
+    ["/finance/search", "", ["/finance/search"]],
+    ["/finance/channels", "", ["/finance/channels"]],
+    ["/finance/documents/doc_1", "", ["/finance/search"]],
+    ["/finance/users/user_1", "", ["/finance/search"]],
     ["/users", "", ["/users"]],
     ["/users/restore", "", ["/users"]],
     ["/users/user_1", "?section=orders", ["/users"]],
@@ -87,7 +90,7 @@ test("侧栏菜单保留全部既有入口与分组命名一致性", () => {
   }
   assert.equal(items.find((item) => item.path === "/approvals").label, "审批中心", "侧栏与页内审批命名一致");
   const paths = menuPaths(boss);
-  assert.equal(paths.length, 32, "真实Boss入口并集：保留Root系统/操作日志/头像/规则分区，以及IM五个客服子功能");
+  assert.equal(paths.length, 34, "真实Boss入口并集：保留既有入口，资金增加独立总览与渠道工具");
   assert.equal(paths.includes("/users/restore"), false, "账号恢复入口已移除");
   for (const path of ["/system","/distribution-policy","/supply/media","/finance/period","/settings?section=security","/support","/support/mine","/support/overview","/support/patrol","/support/settings","/avatar-reviews"]) {
     assert.ok(paths.includes(path), `保留既有入口 ${path}`);

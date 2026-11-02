@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { authorizeAdminFinance, handleAdminFinanceRead, type AdminFinanceOptions } from "../src/finance/admin-finance-routes";
 import { FinanceSqlFixture, legacyFinanceOrder } from "./admin-finance-fixture";
 import { financeSnapshot } from "../src/finance/admin-finance-read";
+import * as overview from "../src/finance/admin-finance-overview";
 
 function environment(permissions = ["finance.read", "finance.document.read"], financeSql?: FinanceSqlFixture) {
   const state = { permissions, isBoss: false, gameIds: ["game1"], connected: 0, auditFailure: false, revokeOnPrepare: false, schemaReady: true, locked: false, passwordChangeRequired: false, authenticated: true, withdrawalsReady: false, versionSqlOverride:undefined as string|undefined, beforeSecondTransaction:undefined as (()=>void)|undefined, operations: [] as Record<string, unknown>[], subjects: [{ id: "u1", name: "用户一" }, { id: "u2", name: "用户二" }], extraLedger: [] as Record<string, unknown>[], audits: [] as Record<string, unknown>[], statements: [] as string[] };
@@ -46,18 +47,33 @@ function environment(permissions = ["finance.read", "finance.document.read"], fi
     if (sql.startsWith("SELECT c.origin,")||sql.startsWith('SELECT ledger_revision::text AS "ledgerRevision"')) return {rows:[],rowCount:0};
     if (sql.includes('AS available')&&sql.includes('FROM zzsh_order.settlement_ledger_entry')) return {rows:[{available:"999",reserved:'0',pending:'0',refund:'0'}],rowCount:1};
     if (/^(BEGIN|COMMIT|ROLLBACK|SET TRANSACTION)/.test(sql)) return { rows: [], rowCount: 0 };
+    if(sql.includes("set_config('statement_timeout'"))return{rows:[{}],rowCount:1};
     throw Error("Unexpected query in boundary test");
   };
-  const pool = { query, connect: async () => { state.connected++; if(state.connected===2)state.beforeSecondTransaction?.();if (state.revokeOnPrepare && state.connected > 1) state.permissions = []; return { query, release() {} }; } };
+  const pool = { query, connect: async () => { state.connected++; if(state.connected===2)state.beforeSecondTransaction?.();if (state.revokeOnPrepare && state.connected > 1) state.permissions = []; return { query, release() {},on(){},off(){},getTransactionStatus(){return 'I';} }; } };
   const options = { pool, apiOrigin: "http://127.0.0.1:4242", adminOrigin: "http://127.0.0.1:4241", userOrigin: "http://127.0.0.1:4240", adminAuth: { api: { getSession: async () => state.authenticated ? { user: { id: "admin1", twoFactorEnabled: true }, session: { id: "session1", locked: state.locked } } : null } }, listingCursorKey: { keyId: "read1", secret: "k".repeat(64) } } as unknown as AdminFinanceOptions;
   return { options, state };
 }
 async function request(options: AdminFinanceOptions, route: string, query = "") {
   const result = { status: 200, json: undefined as any, bytes: undefined as Buffer | undefined, headers: {} as Record<string, string>, events: new Map<string, () => void>() };
   const response = { headersSent: false, status(code: number) { result.status = code; return this; }, setHeader(name: string, value: string | string[]) { result.headers[name] = Array.isArray(value) ? value.join(",") : value; return this; }, json(body: unknown) { result.json = body; }, send(body: unknown) { assert.ok(Buffer.isBuffer(body)); result.bytes = body; }, end() {}, once(event: string, callback: () => void) { result.events.set(event, callback); } };
-  await handleAdminFinanceRead({ method: "GET", originalUrl: `/api/v1/admin/finance/${route}?from=2026-10-03&to=2026-10-03${query ? "&" + query : ""}`, headers: { origin: options.adminOrigin } }, response, options);
+  const parameters=route==='overview'?query:`from=2026-10-03&to=2026-10-03${query ? "&" + query : ""}`;
+  await handleAdminFinanceRead({ method: "GET", originalUrl: `/api/v1/admin/finance/${route}?${parameters}`, headers: { origin: options.adminOrigin } }, response, options);
   return result;
 }
+
+test('finance overview is pure read-only, finance.read scoped, bounded, and reauthorizes before delivery',async t=>{
+ let reads=0;t.mock.method(overview,'readAdminFinanceOverview',async()=>{reads++;return{version:'admin.finance-overview.v1',confirmedPayments:{amountCents:'123'}};});
+ const denied=environment(['finance.document.read']);assert.equal((await request(denied.options,'overview')).status,403);assert.equal(reads,0);
+ const anonymous=environment();anonymous.state.authenticated=false;assert.equal((await request(anonymous.options,'overview')).status,401);assert.equal(reads,0);
+ const allowed=environment(['finance.read']),response=await request(allowed.options,'overview','range=7d');
+ assert.equal(response.status,200);assert.equal(response.json.confirmedPayments.amountCents,'123');assert.equal(reads,1);
+ assert.ok(allowed.state.statements.includes('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY'));assert.ok(allowed.state.statements.includes('ROLLBACK'));
+ assert.ok(allowed.state.statements.every(sql=>!/^\s*(?:INSERT|UPDATE|DELETE|TRUNCATE)\b/.test(sql)));
+ assert.equal((await request(allowed.options,'overview','range=all')).status,400);assert.equal(reads,1);
+ const revoked=environment();revoked.state.revokeOnPrepare=true;const stopped=await request(revoked.options,'overview');
+ assert.equal(stopped.status,403);assert.equal(stopped.json.confirmedPayments,undefined);assert.equal(reads,2);
+});
 test("finance authorization passes independent relation capabilities from the same context", async () => {
   const env=environment(["finance.read"]);
   const client=await env.options.pool.connect();

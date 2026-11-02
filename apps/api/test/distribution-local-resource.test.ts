@@ -4,7 +4,8 @@ import {createHash} from 'node:crypto';
 import type {Pool,PoolClient} from 'pg';
 import type {INestApplication} from '@nestjs/common';
 import type {AppConfig} from '../src/config/config';
-import {createLocalDistributionScope,createLocalDistributionReadScope,assertLocalDistributionAssembly,assertReviewedDistributionMaintenanceResource,readDistributionPolicy,readActiveDistributionPolicyInTransaction,readRegistrationDistributionPolicyInTransaction,configureDistributionPolicy,type LocalDistributionScope} from '../src/finance/distribution-policy-store';
+import {createLocalDistributionScope,createLocalDistributionReadScope,createRegisteredLocalDistributionReadScope,assertLocalDistributionAssembly,assertReviewedDistributionMaintenanceResource,assertDistributionPolicyWriteReadyInTransaction,applyApprovedDistributionPolicyInTransaction,initializeApprovedDistributionPolicyInTransaction,readDistributionPolicy,readActiveDistributionPolicyInTransaction,readRegistrationDistributionPolicyInTransaction,configureDistributionPolicy,type LocalDistributionScope} from '../src/finance/distribution-policy-store';
+import {validateDistributionPolicySubmission} from '../src/finance/distribution-policy-approval';
 import {initializeNewDistributionRegistration} from '../src/finance/distribution-registration';
 import {readMyInvitations,bindMyDistributionLeader} from '../src/finance/invitation-store';
 import {mountDistributionPolicyRoutes} from '../src/finance/distribution-policy-routes';
@@ -63,6 +64,62 @@ const milestoneConfig={...config,database:{...config.database,name:milestoneRece
 const milestoneAssembly={...assembly,apiOrigin:'http://127.0.0.1:4222',userOrigin:'http://127.0.0.1:4220',adminOrigin:'http://127.0.0.1:4221'};
 const milestoneBinding=()=>createLocalDistributionScope(milestoneConfig,milestoneReceipt);
 const milestoneReadBinding=()=>createLocalDistributionReadScope({...milestoneConfig,testOperationsEnabled:false},milestoneReceipt);
+
+const registeredReceipt={database:'zzsh_test_registered_read',resourceOid:1300001,owner:'zzsh',ownerOid:10,marker:'zzsh:registered-read:synthetic',migrationRole:'registered_read_m',migrationRoleOid:1300002,runtimeRole:'registered_read_r',runtimeRoleOid:1300003};
+const registeredConfig={...config,host:'127.0.0.1',port:4522,testOperationsEnabled:false,database:{...config.database,name:registeredReceipt.database,user:registeredReceipt.runtimeRole,runtimeUser:registeredReceipt.runtimeRole}} as AppConfig;
+const registeredAssembly={...assembly,testOperationsEnabled:false,apiOrigin:'http://127.0.0.1:4522',userOrigin:'http://127.0.0.1:4520',adminOrigin:'http://127.0.0.1:4521'};
+const registeredBinding=()=>createRegisteredLocalDistributionReadScope(registeredConfig,registeredReceipt,registeredAssembly);
+
+test('registered read allows a database owned by its exact non-runtime migration role without granting writes',async()=>{
+ const receipt={...registeredReceipt,owner:registeredReceipt.migrationRole,ownerOid:registeredReceipt.migrationRoleOid};
+ const scope=createRegisteredLocalDistributionReadScope(registeredConfig,receipt,registeredAssembly);
+ const p=registeredProbe({shape:{owner:receipt.owner,ownerOid:receipt.ownerOid}});
+ assert.equal((await readDistributionPolicy(p.pool,actor,scope)).knowledge,'KNOWN');
+ await assert.rejects(assertReviewedDistributionMaintenanceResource(p.c,scope));
+ assert.throws(()=>createRegisteredLocalDistributionReadScope(registeredConfig,{...receipt,ownerOid:registeredReceipt.ownerOid},registeredAssembly));
+ assert.throws(()=>createRegisteredLocalDistributionReadScope(registeredConfig,{...receipt,runtimeRole:receipt.owner,runtimeRoleOid:receipt.ownerOid},registeredAssembly));
+ assert(!p.seen.some(q=>/^(INSERT|UPDATE|DELETE)/.test(q.sql)));
+});
+const registeredProbe=(options:Parameters<typeof probe>[0]={})=>probe({...options,identity:{name:registeredReceipt.database,oid:registeredReceipt.resourceOid,role:registeredReceipt.runtimeRole,marker:registeredReceipt.marker,...options.identity},shape:{ownerOid:registeredReceipt.ownerOid,roleOid:registeredReceipt.runtimeRoleOid,migrationRoleOid:registeredReceipt.migrationRoleOid,migrationSuper:false,migrationBypass:false,...options.shape}});
+
+test('registered read capability freezes its exact server receipt and three local origins for test or dev',()=>{
+ for(const profile of ['test','dev'] as const)assertLocalDistributionAssembly(createRegisteredLocalDistributionReadScope({...registeredConfig,profile},registeredReceipt,registeredAssembly),registeredAssembly);
+ const copiedReceipt={...registeredReceipt},origins={...registeredAssembly},scope=createRegisteredLocalDistributionReadScope(registeredConfig,copiedReceipt,origins);
+ assert(Object.isFrozen(scope));copiedReceipt.runtimeRole='changed';origins.adminOrigin='http://127.0.0.1:4999';assertLocalDistributionAssembly(scope,registeredAssembly);
+ // No port is inferred from a database name, and non-adjacent explicit local origins remain exact.
+ const alternate={...registeredAssembly,userOrigin:'http://127.0.0.1:4600',adminOrigin:'http://127.0.0.1:4701'};
+ assertLocalDistributionAssembly(createRegisteredLocalDistributionReadScope(registeredConfig,registeredReceipt,alternate),alternate);
+ for(const key of Object.keys(registeredReceipt))assert.throws(()=>createRegisteredLocalDistributionReadScope(registeredConfig,{...registeredReceipt,[key]:undefined} as any,registeredAssembly));
+ for(const patch of [{resourceOid:0},{ownerOid:1.5},{runtimeRoleOid:4294967296},{migrationRoleOid:-1},{runtimeRole:registeredReceipt.owner},{runtimeRoleOid:registeredReceipt.ownerOid},{migrationRole:registeredReceipt.runtimeRole},{migrationRoleOid:registeredReceipt.runtimeRoleOid},{marker:''}])assert.throws(()=>createRegisteredLocalDistributionReadScope(registeredConfig,{...registeredReceipt,...patch},registeredAssembly));
+ for(const patch of [{profile:'production'},{profile:'migration'},{profile:'provider-test'},{provider:'real'},{host:'localhost'},{port:4523}])assert.throws(()=>createRegisteredLocalDistributionReadScope({...registeredConfig,...patch} as AppConfig,registeredReceipt,registeredAssembly));
+ for(const patch of [{target:'remote'},{host:'localhost'},{host:'10.0.0.1'},{port:5432},{name:'other'},{user:registeredReceipt.migrationRole},{runtimeUser:registeredReceipt.migrationRole}])assert.throws(()=>createRegisteredLocalDistributionReadScope({...registeredConfig,database:{...registeredConfig.database,...patch}} as AppConfig,registeredReceipt,registeredAssembly));
+ for(const patch of [{secureCookies:true},{apiOrigin:'http://127.0.0.1:4523'},{userOrigin:'https://127.0.0.1:4520'},{userOrigin:'http://localhost:4520'},{adminOrigin:'http://example.invalid:4521'},{adminOrigin:'http://127.0.0.1:4521/path'},{adminOrigin:'http://127.0.0.1:65536'},{adminOrigin:registeredAssembly.userOrigin}])assert.throws(()=>createRegisteredLocalDistributionReadScope(registeredConfig,registeredReceipt,{...registeredAssembly,...patch}));
+ for(const patch of [{secureCookies:true},{apiOrigin:assembly.apiOrigin},{userOrigin:assembly.userOrigin},{adminOrigin:assembly.adminOrigin}])assert.throws(()=>assertLocalDistributionAssembly(scope,{...registeredAssembly,...patch}));
+ for(const forged of [{kind:'LOCAL_CONTROLLED_DISTRIBUTION'} as const,{...scope},Object.create(scope)])assert.throws(()=>assertLocalDistributionAssembly(forged,registeredAssembly));
+ const legacy=createLocalDistributionScope(config,{...receipt,origins:registeredAssembly} as any);assertLocalDistributionAssembly(legacy,assembly);assert.throws(()=>assertLocalDistributionAssembly(legacy,registeredAssembly));
+});
+
+test('registered resource GETs verify every live identity field, role OID and non-privileged runtime/migration role',async()=>{
+ const scope=registeredBinding(),p=registeredProbe();const policy=await readDistributionPolicy(p.pool,actor,scope,scope);
+ assert.equal(policy.knowledge,'KNOWN');assert.equal(policy.changeContext.writeAssemblyReady,false);
+ assert.equal((await readMyInvitations(p.pool,actor,scope)).canBindLeader,false);
+ const shape=p.seen.find(q=>q.sql.includes('LEFT JOIN pg_roles m'));assert(shape);assert.deepEqual(shape.args,[registeredReceipt.migrationRole]);
+ const absent=await readDistributionPolicy(registeredProbe({policy:false}).pool,actor,scope);assert.equal(absent.knowledge,'UNKNOWN');assert.equal(absent.policy,null);
+ for(const identity of [{name:'other'},{oid:1300004},{role:registeredReceipt.migrationRole},{role:registeredReceipt.owner},{marker:'other'},{complete:false}])await assert.rejects(readDistributionPolicy(registeredProbe({identity}).pool,actor,scope));
+ for(const shape of [{owner:'other'},{ownerOid:11},{roleOid:1300004},{migrationRoleOid:1300004},{migrationRoleOid:null},{rolsuper:true},{rolbypassrls:true},{migrationSuper:true},{migrationBypass:true},{complete:false}])await assert.rejects(readDistributionPolicy(registeredProbe({shape}).pool,actor,scope));
+ await assert.rejects(readDistributionPolicy(registeredProbe({permissions:[]}).pool,actor,scope),e=>(e as {status:number}).status===403);
+ for(const forged of [{kind:'LOCAL_CONTROLLED_DISTRIBUTION'} as const,{...scope},Object.create(scope)])await assert.rejects(readDistributionPolicy(registeredProbe().pool,actor,forged));
+ assert(!p.seen.some(q=>/^\s*(INSERT|UPDATE|DELETE)/.test(q.sql)));
+});
+
+test('registered read capability cannot authorize registration, bind, policy submit/execute, or owner maintenance',async()=>{
+ const scope=registeredBinding(),p=registeredProbe(),initial={schema:'distribution-policy-initialize.v1' as const,config:{enabled:true,accountModes:['ordinary' as const],minimumAccrualCents:'1',settlementDelayDays:0,renterPercent:'0',ownerPercent:'10'},reason:'Synthetic read only rejection'},update={schema:'distribution-policy-change.v1' as const,expectedPolicyId:'policy_test',expectedRevision:'1',expectedPolicyDigest:sha(canonicalize(policyConfig)),changes:{enabled:false},reason:'Synthetic read only rejection'},approval={approvalRequestId:'synthetic_request',payloadHash:'a'.repeat(64)};
+ const writers=[()=>initializeNewDistributionRegistration(p.c,{userId:'self',requestId:'req_registered_read'},scope),()=>readRegistrationDistributionPolicyInTransaction(p.c,scope),()=>readActiveDistributionPolicyInTransaction(p.c,false,scope),()=>bindMyDistributionLeader(p.pool,actor,{code:'FX_PARENT',policyVersion:'policy_test',expectedParticipantRevision:'1'},'registered_read_bind',scope),()=>configureDistributionPolicy(p.pool,actor,{expectedRevision:'1',config:policyConfig,reason:'Read only rejection'},'registered_read_policy',scope),()=>assertDistributionPolicyWriteReadyInTransaction(p.c,scope),()=>validateDistributionPolicySubmission(p.c,initial,scope),()=>applyApprovedDistributionPolicyInTransaction(p.c,actor,update,approval,scope),()=>initializeApprovedDistributionPolicyInTransaction(p.c,actor,initial,approval,scope),()=>assertReviewedDistributionMaintenanceResource(p.c,scope)];
+ for(const run of writers)await assert.rejects(run(),e=>(e as {status:number}).status===503);
+ const owner=registeredProbe({identity:{role:registeredReceipt.owner},shape:{roleOid:registeredReceipt.ownerOid,rolsuper:true,rolbypassrls:true}});
+ await assert.rejects(assertReviewedDistributionMaintenanceResource(owner.c,scope));
+ assert(!p.seen.some(q=>/^\s*(INSERT|UPDATE|DELETE)/.test(q.sql)));assert(!owner.seen.some(q=>/^\s*(INSERT|UPDATE|DELETE)/.test(q.sql)));
+});
 
 test('milestone read scope works with test writes off and admits no other resource or assembly',()=>{
  assertLocalDistributionAssembly(milestoneReadBinding(),{...milestoneAssembly,testOperationsEnabled:false});

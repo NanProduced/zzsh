@@ -2,6 +2,8 @@ import type { PoolClient } from 'pg';
 import { ConfigurationError, type AppConfig } from '../config/config';
 import { SecurityApiError } from '../auth/security-core';
 import { conflict, invalid } from '../supply/supply-util';
+import { REGRESSION_MARKER } from '../config/test-resource';
+import { createControlledRegressionResource, assertControlledRegressionResource, type ControlledRegressionBinding, type ControlledRegressionResource } from './controlled-regression-resource';
 
 export type NativeWithdrawalBinding = Readonly<{
   userId: string;
@@ -11,7 +13,7 @@ export type NativeWithdrawalBinding = Readonly<{
   payoutKey: string;
 }>;
 export type NativeWithdrawalScope = Readonly<{ kind: 'NATIVE_LOCAL_CONTROLLED_WITHDRAWAL' }>;
-type Proof = Readonly<{ name: string; role: string; oid: number; bindings: readonly NativeWithdrawalBinding[] }>;
+type Proof = Readonly<{ name: string; role: string; oid: number; bindings: readonly NativeWithdrawalBinding[]; regression?: ControlledRegressionResource }>;
 const proofs = new WeakMap<object, Proof>();
 const id = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const marker = 'zzsh:order-reservation-test:v1';
@@ -23,17 +25,20 @@ export function createNativeWithdrawalScope(options: {
   resourceSet: string;
   resourceOid: number;
   bindings: readonly NativeWithdrawalBinding[];
+  regression?: ControlledRegressionBinding;
 }): NativeWithdrawalScope {
   const { config, resourceSet, resourceOid } = options;
   const name = config.database.name, role = config.database.user;
+  const regression = resourceSet === 'regression' && options.regression ? createControlledRegressionResource(config, options.regression, 'WITHDRAWAL') : undefined;
   if (config.profile !== 'test' || config.provider !== 'fake' || !config.testOperationsEnabled
     || config.database.target !== 'local-compose' || config.database.host !== '127.0.0.1'
     || config.database.port !== 55432 || !/^[a-z][a-z0-9_]{0,20}$/.test(resourceSet)
-    || name !== `zzsh_test_order_${resourceSet}` || role !== `zzsh_order_${resourceSet}_r`
+    || (resourceSet === 'regression' ? !regression || options.regression!.resourceOid !== resourceOid
+      : name !== `zzsh_test_order_${resourceSet}` || role !== `zzsh_order_${resourceSet}_r`)
     || !Number.isSafeInteger(resourceOid) || resourceOid <= 0) {
     throw new ConfigurationError('Native withdrawal requires explicit local test/fake resource and runtime role');
   }
-  if (!Array.isArray(options.bindings) || options.bindings.length === 0) throw invalid('Exact native withdrawal bindings required');
+  if (!Array.isArray(options.bindings) || options.bindings.length === 0 || regression && options.bindings.length > 10) throw invalid('Exact native withdrawal bindings required');
   const bindings = options.bindings.map(b => Object.freeze({
     userId: b.userId, admissionId: b.admissionId, destinationId: b.destinationId,
     intentId: b.intentId, payoutKey: b.payoutKey,
@@ -44,7 +49,7 @@ export function createNativeWithdrawalScope(options: {
     if (new Set(bindings.map(selector)).size !== bindings.length) throw invalid('Native withdrawal binding is ambiguous');
   }
   const token = Object.freeze({ kind: 'NATIVE_LOCAL_CONTROLLED_WITHDRAWAL' as const });
-  proofs.set(token, Object.freeze({ name, role, oid: resourceOid, bindings: Object.freeze(bindings) }));
+  proofs.set(token, Object.freeze({ name, role, oid: resourceOid, bindings: Object.freeze(bindings), ...(regression ? { regression } : {}) }));
   return token;
 }
 
@@ -56,6 +61,7 @@ function proof(scope: NativeWithdrawalScope): Proof {
 
 export async function assertNativeWithdrawalResource(client: PoolClient, scope: NativeWithdrawalScope) {
   const expected = proof(scope);
+  if (expected.regression) await assertControlledRegressionResource(client, expected.regression, 'WITHDRAWAL');
   const row = (await client.query(`SELECT d.oid::int AS oid,current_database() AS name,current_user AS role,
     shobj_description(d.oid,'pg_database') AS marker,r.rolsuper,r.rolbypassrls,
     to_regclass('zzsh_order.withdrawal_intent') IS NOT NULL
@@ -65,10 +71,10 @@ export async function assertNativeWithdrawalResource(client: PoolClient, scope: 
     AND to_regclass('zzsh_order.controlled_payout_operation') IS NOT NULL AS complete
     FROM pg_database d JOIN pg_roles r ON r.rolname=current_user WHERE d.datname=current_database()`)).rows[0];
   if (!row || Number(row.oid) !== expected.oid || row.name !== expected.name || row.role !== expected.role
-    || row.marker !== marker || row.rolsuper !== false || row.rolbypassrls !== false) throw unavailable('NATIVE_WITHDRAWAL_RESOURCE_NOT_ADMITTED');
+    || row.marker !== (expected.regression ? REGRESSION_MARKER : marker) || row.rolsuper !== false || row.rolbypassrls !== false) throw unavailable('NATIVE_WITHDRAWAL_RESOURCE_NOT_ADMITTED');
   if (row.complete !== true) throw unavailable('CONTROLLED_WITHDRAWAL_SCHEMA_UNAVAILABLE');
   // Debt-schema availability is checked only for new quote/reserve, not recovery.
-  return { name: expected.name, oid: expected.oid, marker };
+  return { name: expected.name, oid: expected.oid, marker: expected.regression ? REGRESSION_MARKER : marker };
 }
 
 export function nativeWithdrawalBindings(scope: NativeWithdrawalScope, userId: string): readonly NativeWithdrawalBinding[] {

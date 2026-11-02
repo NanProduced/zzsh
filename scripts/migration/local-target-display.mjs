@@ -28,7 +28,7 @@ export async function applyDisplayDomain(ctx, directory, manifestSha256) {
     if (original.source_digest !== row.baseSourceDigest || original.source_updated_at !== row.sourceUpdatedAt) throw new Error("TARGET_ACCOUNT_SNAPSHOT_SOURCE_DRIFT");
     return writer(ctx.client, id, { observationVersionId: original.observation_version_id, baseSourceDigest: row.baseSourceDigest, extractSha256: manifest.extractSha256, sourceUpdatedAt: row.sourceUpdatedAt, evidenceRef: `legacy-display-v1:${manifest.extractSha256}:${row.sourceId}`, snapshot: row.snapshot }, ctx.actor);
   });
-  const actual = (await ctx.client.query("SELECT count(*)::int n FROM zzsh_supply.legacy_listing_display_snapshot WHERE extract_sha256=$1", [manifest.extractSha256])).rows[0].n;
+  const actual = (await ctx.client.query("SELECT count(*)::int n FROM zzsh_supply.legacy_listing_display_snapshot WHERE extract_sha256=$1" + (ctx.displayAccountIds ? " AND account_id=ANY($2::text[])" : ""), ctx.displayAccountIds ? [manifest.extractSha256, ctx.displayAccountIds] : [manifest.extractSha256])).rows[0].n;
   const phase = ctx.state.phases.accountDisplay;
   if (actual !== phase.created + phase.replayed || actual + phase.quarantined !== manifest.rows) throw new Error("DISPLAY_TARGET_DENOMINATOR_MISMATCH");
   ctx.state.displayReconciliation = { sourceRows: manifest.rows, targetRows: actual, quarantined: phase.quarantined, sourceRowsCompared: manifest.sourceRowsCompared, commonFieldDifferences: 0, targetFinancialEffects: 0 };

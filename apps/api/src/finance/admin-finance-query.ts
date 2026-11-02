@@ -65,7 +65,9 @@ function versionRelations(ready: FinanceVersionReady): { name: string; sql: stri
     { name: "event", sql: `SELECT id,economic_root_id,kind,subject_user_id,created_at FROM zzsh_order.finance_event` },
     { name: "posting", sql: `SELECT id,order_id,payment_confirmation_id,settlement_version_id,version_hash,early,manual_reason,captured_cents::text,owner_net_cents::text,renter_refund_cents::text,platform_contribution_cents::text,compensation_fee_cents::text,refund_due_at,posted_at FROM zzsh_order.settlement_posting` },
   ];
-  if (ready.native_orders) relations.push({ name: "native_order", sql: `SELECT id,revision::text,status FROM zzsh_order.rental_order` });
+  if (ready.native_orders) relations.push(
+    {name:"native_order",sql:`SELECT id,revision::text,status,paid_confirmation_id,paid_at FROM zzsh_order.rental_order`},
+    {name:"order_payment",sql:`SELECT id,order_id,source,disposition,amount_cents::text,currency,accepted_at FROM zzsh_order.payment_confirmation`});
   if (ready.legacy_orders) relations.push({ name: "legacy_order", sql: `SELECT id,source_system,source_entity,legacy_id,source_digest,binding_digest,original_order_no,owner_user_id,renter_user_id,account_id,game_id,source_snapshot->>'return_order_money' AS historical_refund FROM zzsh_order.legacy_order_read_snapshot` });
   if (ready.native_distribution) {
     relations.push({ name: "earning", sql: `SELECT id,economic_root_id,version::text,state,funds_disposition,recovery_required_cents::text,canonical_seed,seed_digest,basis_digest,posting_digest,economic_key,posting_id,payment_confirmation_id,beneficiary_user_id,beneficiary_role,amount_cents::text,order_id,created_at,due_at FROM zzsh_order.rental_referral_earning` });
@@ -189,6 +191,7 @@ export function financeScopedVersionSql(ready: FinanceVersionReady, scope: Finan
   };
   // Legacy history can be admitted by a later opening; keep its complete global proof.
   if (!clause) return null;
+  if(ready.native_orders)clause.order_payment=`order_id IN(SELECT id FROM zzsh_order.rental_order WHERE ${clause.native_order??none})`;
   const selected: string[] = [];
   for (const relation of versionRelations(ready)) {
     if (relation.name === "marker") {

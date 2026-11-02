@@ -21,15 +21,18 @@ test("C04B-02-R1 all supported scopes remain exact with one outer WHERE per rela
   }
 });
 
-test("C04B-02-R1 orders without refund readiness never reference refund relations", () => {
+test("C04B-02-R1 orders without refund readiness version their payment lifecycle without refund dependencies", () => {
   const scoped = financeScopedVersionSql({ native_orders: true }, { mode: "document", documentRef: "ORDER:order_1" })!.text;
   const global = financeVersionSql({ native_orders: true });
   for (const text of [scoped, global]) {
     assert.doesNotMatch(text, /channel_refund_intent/);
-    assert.doesNotMatch(text, /FROM zzsh_order\.payment_confirmation/);
+    assert.match(text, /SELECT id,order_id,source,disposition,amount_cents::text,currency,accepted_at FROM zzsh_order\.payment_confirmation/);
+    assert.doesNotMatch(text, /merchant_scope_id|provider_transaction_id|joinpay_evidence_id/);
     assert.doesNotMatch(text, /joinpay_refund_attempt/);
     assert.doesNotMatch(text, /zzsh_iam\.audit_event/);
   }
+  assert.match(scoped,/FROM zzsh_order\.payment_confirmation WHERE order_id IN\(SELECT id FROM zzsh_order\.rental_order WHERE id=\$1\)/);
+  assert.doesNotMatch(financeVersionSql({native_orders:false}),/FROM zzsh_order\.payment_confirmation/);
 });
 
 test("C04B-02-R1 refund intent scope includes original confirmation, attempts and blocked audit", () => {

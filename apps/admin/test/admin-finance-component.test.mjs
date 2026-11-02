@@ -18,7 +18,7 @@ const settle = () => act(async () => { await new Promise(resolve => setTimeout(r
 let sharedVite;
 after(async()=>{await sharedVite?.close();});
 async function until(predicate) { for (let i = 0; i < 100; i++) { if (predicate()) return; await settle(); } throw Error("Finance component condition timed out"); }
-async function setup(t, key, tabPath = "/finance", permissions = ["finance.read", "finance.document.read"]) {
+async function setup(t, key, tabPath = "/finance", permissions = ["finance.read", "finance.document.read"], overview = false) {
   const browser = new Window({ url: "http://127.0.0.1:4311" + tabPath });
   Object.assign(globalThis, { window: browser, document: browser.document, HTMLElement: browser.HTMLElement, Element: browser.Element, Node: browser.Node, Event: browser.Event, CustomEvent: browser.CustomEvent, MutationObserver: browser.MutationObserver, ResizeObserver: browser.ResizeObserver, CSS: browser.CSS, IS_REACT_ACT_ENVIRONMENT: true });
   globalThis.getComputedStyle=browser.getComputedStyle.bind(browser);globalThis.requestAnimationFrame=browser.requestAnimationFrame.bind(browser);globalThis.cancelAnimationFrame=browser.cancelAnimationFrame.bind(browser);
@@ -27,10 +27,11 @@ async function setup(t, key, tabPath = "/finance", permissions = ["finance.read"
   const tree = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
   const vite = sharedVite ??= await createServer({ configFile: false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } }, root: tree, cacheDir: path.resolve(tree, "tmp/admin-test-cache/admin-finance"), plugins: [react()], optimizeDeps:{noDiscovery:true,include:[]}, server: { middlewareMode: true, hmr: false, ws:false, watch:null } });
   const { AdminFinanceView, clearFinanceContexts, registerFinanceOrigin, financeOriginPath, financeContextIdentity } = await vite.ssrLoadModule("/apps/admin/src/views/admin-finance-view.tsx");
+  const Component = overview ? (await vite.ssrLoadModule('/apps/admin/src/views/finance-overview.tsx')).FinanceOverviewView : AdminFinanceView;
   const formats=await vite.ssrLoadModule('/apps/admin/src/views/admin-finance-api.ts');
   const node = browser.document.createElement("div"); browser.document.body.append(node); const root = createRoot(node);
   const opened = [], queries = [], props = { tab: { id: key, path: tabPath, kind: "unknown", title: "资金", query: {}, closable: true }, snapshot: { ...baseSnapshot, adminUserId: key, session: { ...baseSnapshot.session, id: key }, permissions }, onOpenPath: (...args) => opened.push(args), onQueryChange: query => queries.push(query), onRefresh: async () => props.snapshot, refreshNonce: 0 };
-  const render = async () => act(async () => root.render(createElement(AdminFinanceView, props)));
+  const render = async () => act(async () => root.render(createElement(Component, props)));
   t.after(async () => { clearFinanceContexts(); await act(async () => root.unmount()); browser.happyDOM.abort(); });
   return { props, node, render, opened, queries, browser, formats, registerFinanceOrigin, financeOriginPath, financeContextIdentity, clearFinanceContexts };
 }
@@ -90,8 +91,8 @@ test('historical balance proof stays unknown beside known ledger flow and proved
   const row={bucket:'AVAILABLE',openingBalance:'0',knownInflows:'18000',knownOutflows:'0',migrationMovement:'0',closingBalance:'18000',difference:'0',ledgerOpeningBalance:'0',ledgerClosingBalance:'18000',ledgerDifference:'0',knowledge:'UNKNOWN',balanceBasis:{knowledge:'UNKNOWN',origin:null,sourceCutoff:null,openingPostedAt:null,reasonCodes:['PERIOD_BALANCE_PROOF_NOT_AVAILABLE']},reasonCodes:[],unknownCount:0,unknownTimeCount:0,coveredHistoricalCount:45,uncoveredHistoricalCount:0};
   globalThis.fetch=async url=>response(payload(url,{entries:[],gaps:[],reconciliation:[row,{...row,bucket:'RESERVED',knownInflows:'0',closingBalance:'0',knowledge:'KNOWN',balanceBasis:{...row.balanceBasis,knowledge:'KNOWN',origin:'NATIVE_GENESIS'}}]}));
   const ui=await setup(t,'honest-balances','/finance/period');await ui.render();await until(()=>ui.node.textContent.includes('部分期间余额尚未核定'));
-  const rows=[...ui.node.querySelectorAll('tbody tr')];assert.match(rows[0].textContent,/余额未核定/);assert.equal(rows[0].children[1].textContent,'未核定');assert.match(rows[0].children[2].textContent,/180\.00/);assert.equal(rows[0].children[4].textContent,'未核定');assert.equal(rows[0].children[5].textContent,'未核定');
-  assert.equal(rows[1].children[1].textContent,'0.00 元');assert.equal(rows[1].children[5].textContent,'0.00 元');assert.match(ui.node.textContent,/单次最多367天/);
+  const rows=[...ui.node.querySelectorAll('tbody tr')];assert.match(rows[0].textContent,/余额未核定/);assert.equal(rows[0].children[1].textContent,'0.00 元已核余额 未核定');assert.match(rows[0].children[2].textContent,/180\.00/);assert.equal(rows[0].children[4].textContent,'180.00 元已核余额 未核定');assert.equal(rows[0].children[5].textContent,'0.00 元已核差额 未核定');
+  assert.equal(rows[1].children[1].textContent,'0.00 元已核余额 0.00 元');assert.equal(rows[1].children[5].textContent,'0.00 元已核差额 0.00 元');assert.match(ui.node.textContent,/单次最多367天/);assert.match(ui.node.textContent,/外部差异：未取得对账依据，未计算/);
 });
 test('withdrawal document shows only application, fee, payable, target/source and never upgrades local success to bank arrival', async t => {
   const entry = { id: 'w-entry', documentRef: 'WITHDRAWAL:w1', documentNumber: '申请一', subjectId: 'u1', subjectName: '用户一', bucket: 'RESERVED', direction: 'OUT', deltaCents: '-20000', knowledge: 'KNOWN', kind: 'WITHDRAWAL', state: 'SUCCEEDED', classification: 'POSTED', occurredAt: '2026-10-03T01:00:00Z', evidence: {}, reasonCodes: [], sourceType: 'LOCAL_CONTROLLED', sourceSystem: 'zzsh_order', sourceEntity: 'withdrawal_intent', sourceId: 'internal-intent-id' };
@@ -151,7 +152,7 @@ test('period subject does not leak a phone and an invalid date range does not is
 test('distribution event is separate from current state and planned due time, missing frozen evidence stays unknown',async t=>{
   const entry={id:'l1',documentRef:'DISTRIBUTION:e1',documentNumber:'D1',subjectId:'u1',subjectName:'用户一',bucket:'PENDING_EARNINGS',direction:'IN',deltaCents:'95',knowledge:'KNOWN',kind:'DISTRIBUTION',state:'SETTLED',classification:'POSTED',occurredAt:'2026-10-03T01:00:00Z',evidence:{eventAction:'ACCRUE'},reasonCodes:[]};
   globalThis.fetch=async url=>response(payload(url,{document:{...document,ref:'DISTRIBUTION:e1',kind:'DISTRIBUTION',state:'SETTLED'},entries:[entry],evidence:{dueAt:'2026-10-05T01:00:00Z'},related:[],reasonCodes:[]}));
-  const ui=await setup(t,'distribution','/finance/documents/DISTRIBUTION%3Ae1');await ui.render();await until(()=>ui.node.textContent.includes('冻结计佣依据未核定'));assert.match(ui.node.textContent,/分销计提/);assert.match(ui.node.textContent,/当前收益状态：已结算/);assert.match(ui.node.textContent,/计划转可用时间/);assert.doesNotMatch(ui.node.textContent,/结算日期/);
+  const ui=await setup(t,'distribution','/finance/documents/DISTRIBUTION%3Ae1');await ui.render();await until(()=>ui.node.textContent.includes('冻结计佣依据未核定'));await act(async()=>[...ui.node.querySelectorAll('button')].find(x=>x.textContent.startsWith('凭证分录')).click());assert.match(ui.node.textContent,/分销计提/);assert.match(ui.node.textContent,/当前收益状态：已结算/);assert.match(ui.node.textContent,/计划转可用时间/);assert.doesNotMatch(ui.node.textContent,/结算日期/);
   assert.equal(ui.formats.financeEntryEvent({...entry,evidence:{eventAction:'RECOVER'}}),'分销追偿');assert.equal(ui.formats.financeEntryEvent({...entry,evidence:{eventAction:'FUTURE',eventKind:'EARNING_PENDING'}}),'分销事件待核');
 });
 test('origin context returns original filters and is invalid for another identity',async t=>{
@@ -199,7 +200,7 @@ test('object header names the business type and localizes the raw original order
   const documentValue = { ...document, ref: 'ORDER:o1', number: 'ORDER-1', kind: 'SETTLEMENT', state: 'POSTED', entryCount: 1, subjects: [{ id: 'u1', name: '用户一' }] };
   globalThis.fetch = async url => response(payload(url, { document: documentValue, entries: [entry], evidence: { originalOrderStatus: 'COMPLETED', postedPlatformContributionCents: '1908' }, orderSettlement: settlement, related: [], reasonCodes: [] }));
   const ui = await setup(t, 'object-header', '/finance/documents/ORDER%3Ao1'); await ui.render();
-  await until(() => ui.node.textContent.includes('本单已记平台结算贡献'));
+  await until(() => ui.node.querySelector('[aria-label="本单已核结算分配等式"]'));
   const applied = ui.node.querySelector('.finance-applied').textContent;
   assert.match(applied, /订单结算/);
   assert.match(applied, /已入账/);
@@ -219,4 +220,55 @@ test('unposted cancelled original is named as an original and its order state is
   await until(() => ui.node.textContent.includes('订单原单（未结算）'));
   assert.match(ui.node.textContent, /已取消/);
   assert.equal(ui.node.textContent.includes('订单结算'), false);
+});
+
+const unavailableQueue = {knowledge:'UNAVAILABLE',count:null,amountCents:null,unknownCount:null,items:[],hasMore:false,reasonCodes:[]};
+function overviewPayload(range='7d',extra={}) { return {version:'admin.finance-overview.v1',asOf:'2026-11-02T08:00:00Z',period:{range,from:'2026-10-27T16:00:00Z',to:'2026-11-02T08:00:00Z',timeZone:'Asia/Shanghai'},confirmedPayments:{count:'2',amountCents:'51000',controlledAmountCents:'51000',channelAmountCents:'0',timeBasis:'paid_at',scope:'NATIVE_ORDER_ORIGINAL_ONLY',reasonCodes:[]},settlements:{count:'1',capturedCents:'10000',ownerNetCents:'0',refundPayableCents:'8000',platformContributionCents:'2000',timeBasis:'posted_at',reasonCodes:[]},pendingSettlement:{count:'1',amountCents:'41000',hasMore:false,items:[{id:'paid',number:'PAID-ORDER',status:'PAID',amountCents:'41000',paidAt:'2026-11-01T03:00:00Z',documentRef:'ORDER:paid'}],reasonCodes:[]},ledgerBalances:[{bucket:'AVAILABLE',balanceCents:'12345',state:'KNOWN',source:'POSTED_LEDGER_ONLY'},{bucket:'CLEARING',balanceCents:'-12345',state:'KNOWN',source:'POSTED_LEDGER_ONLY'}],coverage:{registeredSubjects:'2',totalCurrentSubjects:'3',globalProof:'UNPROVEN',reasonCodes:[]},queues:{refunds:unavailableQueue,withdrawals:unavailableQueue},reviewPayments:{sourceScope:'ORIGINAL_REVIEW_RECORDS',currentOutstandingOnly:false,count:'1',amountCents:'3100',unknownCount:'0',items:[{id:'review',number:'CANCELLED-LATE',amountCents:'3100',confirmedAt:'2026-11-01T03:00:00Z',reasonCode:'LATE',source:'CONTROLLED',documentRef:'ORDER:review'}],hasMore:false,reasonCodes:[]},recentSettlements:[{id:'posting',number:'SETTLED-ORDER',owner:{id:'owner',name:'零额号主'},renter:{id:'renter',name:'租客甲'},capturedCents:'10000',ownerNetCents:'0',refundPayableCents:'8000',platformContributionCents:'2000',postedAt:'2026-10-30T02:00:00Z',documentRef:'ORDER:posting'}],costs:{netContributionCents:null,channelCostState:'NOT_ADMITTED',reasonCodes:[]},channels:{state:'NOT_CONFIGURED'},...extra}; }
+
+test('overview uses one server aggregate, separates payment and allocation clocks, and preserves zero owner',async t=>{
+ const calls=[];globalThis.fetch=async url=>{calls.push(String(url));return response(overviewPayload());};const ui=await setup(t,'overview-clocks','/finance',undefined,true);await ui.render();await until(()=>ui.node.textContent.includes('SETTLED-ORDER'));
+ assert.equal(calls.length,1);assert.match(calls[0],/\/finance\/overview\?range=7d$/);assert.match(ui.node.textContent,/510\.00 元/);assert.match(ui.node.textContent,/按付款确认时间/);assert.match(ui.node.textContent,/按结算入账时间/);assert.match(ui.node.textContent,/零额号主/);assert.match(ui.node.textContent,/号主净额0\.00 元/);assert.match(ui.node.textContent,/−123\.45 元/);assert.match(ui.node.textContent,/成本依据不完整，未计算/);assert.match(ui.node.textContent,/CANCELLED-LATE/);assert.doesNotMatch(ui.node.textContent,/银行已到账|净贡献200\.00/);
+ const link=[...ui.node.querySelectorAll('button')].find(x=>x.textContent.includes('SETTLED-ORDER'));await act(async()=>link.click());const target=new URL(ui.opened.at(-1)[0],'http://local');assert.equal(target.pathname,'/finance/documents/ORDER%3Aposting');assert.equal(target.searchParams.get('financeReturn'),'/finance?range=7d');
+});
+test('overview refuses bulk read without finance.read and old responses cannot paint a changed identity',async t=>{
+ let calls=0,release;globalThis.fetch=async()=>{calls++;return new Promise(resolve=>release=()=>resolve(response(overviewPayload())));};const ui=await setup(t,'overview-denied','/finance',['finance.document.read'],true);await ui.render();await settle();assert.equal(calls,0);assert.match(ui.node.textContent,/没有完整资金读取能力/);
+ ui.props.snapshot={...ui.props.snapshot,permissions:['finance.read']};await ui.render();await until(()=>calls===1);ui.props.snapshot={...ui.props.snapshot,adminUserId:'other',permissions:[]};await ui.render();await act(async()=>release());await settle();assert.doesNotMatch(ui.node.textContent,/PAID-ORDER|510\.00/);
+});
+test('overview read failure remains distinct from an empty period and refresh clears private data',async t=>{
+ let mode='error';globalThis.fetch=async()=>mode==='error'?response({error:{code:'NOT_FOUND'}},404):response(overviewPayload('7d',{confirmedPayments:{...overviewPayload().confirmedPayments,count:'0',amountCents:'0'},recentSettlements:[]}));const ui=await setup(t,'overview-empty','/finance',undefined,true);await ui.render();await until(()=>ui.node.textContent.includes('当前服务尚未提供'));assert.doesNotMatch(ui.node.textContent,/0\.00 元/);
+ mode='empty';await act(async()=>[...ui.node.querySelectorAll('button')].find(x=>x.textContent==='重新读取').click());await until(()=>ui.node.textContent.includes('本期没有结算分配记录'));assert.match(ui.node.textContent,/0\.00 元/);ui.props.refreshNonce++;mode='error';await ui.render();await until(()=>ui.node.textContent.includes('当前服务尚未提供'));assert.doesNotMatch(ui.node.textContent,/PAID-ORDER/);
+});
+test('overview partial responsibilities show known subtotal and unknown count without claiming bank result',async t=>{
+ globalThis.fetch=async()=>response(overviewPayload('7d',{queues:{refunds:{...unavailableQueue,knowledge:'PARTIAL',count:'3',amountCents:'5000',unknownCount:'2',overdueCount:'1',items:[{id:'duty',source:'LEGACY_DUTY',status:'PENDING',amountCents:null,recordedAmountCents:'2000',documentRef:'LEGACY_ORDER:one',dueAt:null}],hasMore:true},withdrawals:unavailableQueue}}));const ui=await setup(t,'overview-partial','/finance',undefined,true);await ui.render();await until(()=>ui.node.textContent.includes('已知金额小计'));assert.match(ui.node.textContent,/已知金额小计 50\.00 元/);assert.match(ui.node.textContent,/2 笔金额待核/);assert.match(ui.node.textContent,/已到期 1 笔/);assert.match(ui.node.textContent,/待办依据尚未取得，不能判断为0笔/);assert.doesNotMatch(ui.node.textContent,/未退款|银行未退|已退款/);
+});
+test('native detail shows APPLIED payment without posting and uses frozen owner versus renter fee payers',async t=>{
+ const lifecycle={origin:'NATIVE',orderStatus:'PAID',payment:{state:'SITE_ACCEPTED',amountCents:'368686',confirmedAt:'2026-10-30T01:00:00Z',source:'CONTROLLED',hasReviewPayment:true},postingState:'NOT_POSTED'};
+ const doc={...document,ref:'ORDER:paid',number:'PAID-ZERO-POSTING',kind:'SETTLEMENT',entryCount:0,requestedAmountCents:null,orderLifecycle:lifecycle,parties:{owner:{id:'owner',name:'零额号主'},renter:{id:'renter',name:'租客甲'}},subjects:[{id:'owner',name:'零额号主'},{id:'renter',name:'租客甲'}]};
+ let owner=true;globalThis.fetch=async url=>response(payload(url,{document:doc,entries:[],evidence:{},related:[],orderSettlement:{schema:'admin-order-settlement-evidence.v1',documentRef:'ORDER:paid',readiness:'READY',posting:{state:'NOT_POSTED',ref:null,postedAt:null},captured:{knowledge:'UNKNOWN',cents:null,reasonCodes:[]},ownerNet:{knowledge:'UNKNOWN',cents:null,reasonCodes:[]},refundPayable:{knowledge:'UNKNOWN',cents:null,reasonCodes:[]},refunded:{knowledge:'UNKNOWN',cents:null,reasonCodes:[]},historicalRefund:{knowledge:'UNKNOWN',cents:null,reasonCodes:[]},platformContribution:{knowledge:'UNKNOWN',cents:null,reasonCodes:[]},platformComponents:[{code:'PLATFORM_COMPENSATION_FEE',cents:'12016',payer:owner?'OWNER':'RENTER',feeBase:'1502.00',feeRate:'0.08'}],refundDueAt:null,channel:{state:'UNKNOWN',reference:null},dutyRefs:[],reasonCodes:[]},platform:{distributionExpenseCents:null,channelCostCents:null,netProfitCents:null}}));
+ const ui=await setup(t,'native-payment','/finance/documents/ORDER%3Apaid');await ui.render();await until(()=>ui.node.textContent.includes('实际接纳付款金额'));assert.match(ui.node.textContent,/3,686\.86 元/);assert.match(ui.node.textContent,/无分录不等于未收款/);assert.match(ui.node.textContent,/零额号主/);assert.match(ui.node.textContent,/额外异常收款原始记录/);assert.match(ui.node.textContent,/号主承担 · 冻结基数 1502\.00 元 · 冻结比例 0\.08/);assert.match(ui.node.textContent,/成本依据不完整，未计算/);assert.equal(ui.node.querySelector('[aria-label="本单已核结算分配等式"]'),null);
+ await act(async()=>[...ui.node.querySelectorAll('button')].find(x=>x.textContent==='复制摘要').click());assert.match(ui.node.querySelector('textarea[aria-label="核对摘要"]').value,/本站接纳付款：3,686\.86 元/);assert.match(ui.node.querySelector('textarea[aria-label="核对摘要"]').value,/号主：零额号主/);
+ owner=false;ui.props.refreshNonce++;await ui.render();await until(()=>ui.node.textContent.includes('租客承担'));assert.doesNotMatch(ui.node.textContent,/号主承担/);
+});
+
+test('cancelled accepted and late review orders never become pending settlement or no-funds claims',async t=>{
+ const ui=await setup(t,'cancelled-lifecycle');const {financeOrderState}=await sharedVite.ssrLoadModule('/apps/admin/src/views/finance-order-facts.tsx');
+ const order=(orderStatus,state)=>({...document,orderLifecycle:{origin:'NATIVE',orderStatus,payment:{state,amountCents:state==='SITE_ACCEPTED'?'1000':null,confirmedAt:null,hasReviewPayment:state==='REVIEW_REQUIRED'},postingState:'NOT_POSTED'}});
+ assert.match(financeOrderState(order('PAID','SITE_ACCEPTED')),/待结算分配/);
+ for(const state of ['SITE_ACCEPTED','REVIEW_REQUIRED','NO_ACCEPTED_PAYMENT']){const text=financeOrderState(order('CANCELLED',state));assert.match(text,/已取消/);assert.match(text,/未产生结算分配，退款责任另核/);assert.doesNotMatch(text,/待结算分配|无资金|未收款/);}
+ assert.match(financeOrderState(order('CANCELLED','SITE_ACCEPTED')),/本站已确认付款/);assert.match(financeOrderState(order('CANCELLED','REVIEW_REQUIRED')),/异常收款原始记录，当前责任另核/);
+});
+
+test('overview range switch discards late data and a scope-denied refresh clears all prior values',async t=>{
+ let releaseOld,mode='initial';const calls=[];globalThis.fetch=async url=>{const range=new URL(url,'http://local').searchParams.get('range');calls.push(range);if(mode==='initial')return new Promise(resolve=>releaseOld=()=>resolve(response(overviewPayload('7d'))));return mode==='denied'?response({error:{code:'FORBIDDEN'}},403):response(overviewPayload(range,{pendingSettlement:{...overviewPayload().pendingSettlement,items:[]}}));};
+ const ui=await setup(t,'overview-scope','/finance',undefined,true);await ui.render();await until(()=>calls.length===1);mode='ready';ui.props.tab={...ui.props.tab,query:{range:'30d'}};await ui.render();await until(()=>ui.node.textContent.includes('近30天'));await until(()=>calls.at(-1)==='30d');await act(async()=>releaseOld());await settle();assert.doesNotMatch(ui.node.textContent,/PAID-ORDER/);
+ mode='denied';ui.props.refreshNonce++;await ui.render();await until(()=>ui.node.textContent.includes('财务总览暂不可读取'));assert.doesNotMatch(ui.node.textContent,/SETTLED-ORDER|510\.00/);
+});
+
+test('written-off review receipts remain original records outside current responsibility tasks',async t=>{
+ const empty={...unavailableQueue,knowledge:'KNOWN',count:'0',amountCents:'0',unknownCount:'0',overdueCount:'0',items:[]};const original=overviewPayload();
+ globalThis.fetch=async()=>response(overviewPayload('7d',{queues:{refunds:empty,withdrawals:{...empty,overdueCount:null}},pendingSettlement:{...original.pendingSettlement,count:'0',amountCents:'0',items:[]},reviewPayments:{...original.reviewPayments,sourceScope:'ORIGINAL_REVIEW_RECORDS',currentOutstandingOnly:false,reasonCodes:['REVIEW_RECORD_MAY_HAVE_BEEN_WRITTEN_OFF']}}));
+ const ui=await setup(t,'review-written-off','/finance',undefined,true);await ui.render();await until(()=>ui.node.textContent.includes('异常收款原始记录'));
+ const tasks=ui.node.querySelector('section[aria-labelledby="finance-current-tasks-title"]'),records=ui.node.querySelector('section[aria-labelledby="finance-review-records-title"]');
+ assert.match(tasks.textContent,/0 笔 · 0\.00 元/);assert.doesNotMatch(tasks.textContent,/CANCELLED-LATE|31\.00|异常款待核/);
+ assert.match(records.textContent,/1 笔原始记录 · 已知记录金额 31\.00 元/);assert.match(records.textContent,/原记录可能已核销；当前待处理以退款责任队列为准/);assert.match(records.textContent,/不代表当前待办或未核销责任/);assert.equal(tasks.contains(records),false);
 });

@@ -55,6 +55,8 @@ export type WorkspaceRouteKind =
   | "order-object"
   | "resource-object"
   | "finance-lookup"
+  | "finance-overview"
+  | "finance-channels"
   | "finance-period"
   | "finance-document"
   | "finance-user"
@@ -152,8 +154,8 @@ export function sanitizeFinanceReturn(value: string | undefined): string | undef
   try {
     const url = new URL(value, 'https://workspace.invalid');
     const route=parseWorkspacePath(url.pathname);
-    if (url.origin !== 'https://workspace.invalid' || url.searchParams.has('financeReturn') || !['finance-lookup','finance-period','finance-document','finance-user','order-object','orders','user-object','users'].includes(route.kind) || route.objectId&&findPhoneClue(route.objectId)) return undefined;
-    const allowed = new Set(['scope','from','to','period','bucket','kind','state','q','page','pageSize','size','section','role','status','publication','sort','fromUserId','fromUserSection','fromUserRole','fromUserStatus','fromOrderId','entry','draft','financeFrom','financeTo']);
+    if (url.origin !== 'https://workspace.invalid' || url.searchParams.has('financeReturn') || !['finance-overview','finance-lookup','finance-channels','finance-period','finance-document','finance-user','order-object','orders','user-object','users'].includes(route.kind) || route.objectId&&findPhoneClue(route.objectId)) return undefined;
+    const allowed = new Set(['range','scope','from','to','period','bucket','kind','state','q','page','pageSize','size','section','role','status','publication','sort','fromUserId','fromUserSection','fromUserRole','fromUserStatus','fromOrderId','entry','draft','financeFrom','financeTo']);
     const query: Record<string,string> = {};
     for (const [key,item] of url.searchParams) {
       if (findPhoneClue(item) || SENSITIVE_QUERY.test(key) || SENSITIVE_QUERY.test(item)) return undefined;
@@ -228,7 +230,9 @@ export function parseWorkspacePath(pathname: string): { kind: WorkspaceRouteKind
     const objectId = decodeURIComponent(orderObject[1] ?? "");
     return { kind: "order-object", objectType: "order", objectId, tabId: `order:${objectId}`, path, title: objectId };
   }
-  if (path === "/finance") return {kind:"finance-lookup",tabId:"finance-lookup",path,title:"资金查找"};
+  if (path === "/finance") return {kind:"finance-overview",tabId:"finance-overview",path,title:"财务总览"};
+  if (path === "/finance/search") return {kind:"finance-lookup",tabId:"finance-lookup",path,title:"资金查找"};
+  if (path === "/finance/channels") return {kind:"finance-channels",tabId:"finance-channels",path,title:"渠道工具"};
   if (path === "/finance/period") return {kind:"finance-period",tabId:"finance-period",path,title:"期间核对"};
   const financeObject=/^\/finance\/(documents|users)\/([^/]+)$/.exec(path);
   if(financeObject){let objectId="INVALID_REFERENCE";try{objectId=decodeURIComponent(financeObject[2]!);}catch{}const kind=financeObject[1]==="documents"?"finance-document":"finance-user";return {kind,objectType:kind,objectId,tabId:kind+":"+objectId,path,title:kind==="finance-document"?"资金单据":"用户资金"};}
@@ -237,8 +241,9 @@ export function parseWorkspacePath(pathname: string): { kind: WorkspaceRouteKind
 }
 
 export function tabFromLocation(pathname: string, search = ""): WorkspaceTab {
-  const parsed = parseWorkspacePath(pathname);
   const query = sanitizeTabQuery(new URLSearchParams(search.startsWith("?") ? search.slice(1) : search));
+  const legacyFinanceQuery = pathname === "/finance" && ["scope", "q", "kind", "bucket", "state", "period", "entry", "from", "to", "page"].some(key => Object.hasOwn(query, key));
+  const parsed = parseWorkspacePath(legacyFinanceQuery ? "/finance/search" : pathname);
   const base = LIST_TABS[parsed.tabId];
   if (base) return { ...base, query };
   return {
@@ -273,6 +278,7 @@ export function canOpenKind(kind: WorkspaceRouteKind, nav: NavPermission): boole
   if (kind === "workbench" || kind === "account" || kind === "settings") return true;
   if (kind === "system-configuration") return nav.isBoss;
   if(kind==="finance-lookup")return has("finance.read")||has("finance.document.read");
+  if(kind==="finance-overview"||kind==="finance-channels")return has("finance.read");
   if(kind==="finance-period"||kind==="finance-user")return has("finance.read");
   if(kind==="finance-document")return has("finance.document.read");
   if (kind === "support" || kind === "support-mine") return has("im.support.read") || nav.isBoss;
@@ -379,6 +385,7 @@ export function restoreTabs(adminUserId: string, nav: NavPermission): { tabs: Wo
     let normalized: WorkspaceTab[] = [];
     for (const tab of stored) {
       let candidate = tab;
+      if (candidate.kind === "finance-lookup" && candidate.path === "/finance") candidate = { ...candidate, path: "/finance/search", title: "资金查找" };
       if (candidate.kind === "support-management" || candidate.id === "support-management" || candidate.path === "/support/overview" || candidate.path === "/support/management" || candidate.title === "运营看板" || candidate.title === "客服管理") {
         candidate = { ...candidate, id: "support-overview", kind: "support-overview", path: "/support/overview", title: "客服统计" };
       }

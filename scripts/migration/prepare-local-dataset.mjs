@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { sourceUserPlan, sourceAccountPlan, sourceOrderPlan, sourceFinanceObservation, sourceContinuation } from "./local-source-adapter.mjs";
+import { sourceUserPlan, sourceContactPlanningRow, sourceAccountPlan, sourceOrderPlan, sourceFinanceObservation, sourceContinuation } from "./local-source-adapter.mjs";
 const require = createRequire(import.meta.url), ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const args = process.argv.slice(2), option = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
 if (!args.includes("--prepare")) {
@@ -77,6 +77,10 @@ const append = (map, key, row) => { if (!map.has(key))
     map.set(key, []); map.get(key).push(row); };
 const policy = { advanceOrderSetRatio: null, expend: {} };
 try {
+    const contactSources = [];
+    for await (const raw of rows(join(source, sourceReceipt.files.users.file))) contactSources.push(sourceContactPlanningRow(raw, modules, report.sourceRef));
+    const contacts = mod("legacy-load/legacy-contact-projection").planLegacyContactProjections(contactSources);
+    report.userContactProjection = { schema: "legacy-contact-projection-v1", sourceSubjects: contacts.size, writtenWithOriginalImport: true, winner: "UNIQUE_NON_CANCELLED_ONLY", frozenRetainsClaim: true };
     for await (const row of rows(join(source, sourceReceipt.files.games.file))) {
         if (row.id === "1" && row.game_name === "三角洲行动" && row.is_delete === "0")
             games.set(row.id, "delta");
@@ -118,7 +122,7 @@ try {
             isolate("balances", raw.id, "STORED_AMOUNT_INVALID");
         }
         try {
-            const p = sourceUserPlan(raw, modules, report.sourceRef, seenPhones);
+            const p = sourceUserPlan(raw, modules, report.sourceRef, seenPhones, contacts);
             if (p.disposition !== "PARAMETER_READY") {
                 report.domains.users.isolated++;
                 isolate("users", raw.id, p.reason ?? "NOT_READY");

@@ -13,8 +13,10 @@ import { forbidden, invalid, notFound, sendJson, type SupplyNodeRequest } from "
 import { safely, type SupplyResponse } from "../supply/supply-routes";
 import { ensureApiV1RequestId } from "../contracts/api-v1";
 import type { ListingCursorKey } from "../supply/listing-cursor";
-import { ADMIN_FINANCE_VERSION, parseAdminFinanceFilters, resolveFinanceLookup, loadAdminFinanceFacts, filterAdminFinanceEntries, financeSnapshot, financeDocuments, financeOrderDocuments, financePeriodProjection,readAdminFinancePeriodBalances,readAdminFinancePeriodBasis, readAdminFinanceSubject, readAdminFinanceDocument } from "./admin-finance-read";
+import { ADMIN_FINANCE_VERSION, parseAdminFinanceFilters, resolveFinanceLookup, loadAdminFinanceFacts, filterAdminFinanceEntries, financeSnapshot, financeDocuments, financeOrderDocuments, withFinanceOrderContext, financePeriodProjection,readAdminFinancePeriodBalances,readAdminFinancePeriodBasis, readAdminFinanceSubject, readAdminFinanceDocument } from "./admin-finance-read";
 import { generateAdminFinanceCsv, prepareAdminFinanceExport, observeAdminFinanceDelivery } from "./admin-finance-export";
+import { parseFinanceOverviewRange, readAdminFinanceOverview } from "./admin-finance-overview";
+import { withDirectoryRead, withDirectoryReadTransaction } from "../auth/user-directory-read";
 
 export type AdminFinanceOptions = AuthSecurityOptions & { listingCursorKey?: ListingCursorKey; joinpayAccountRead?: JoinpayAccountReadAccess };
 function pageNumber(query: URLSearchParams, name: string, fallback: number, max: number): number {
@@ -31,10 +33,23 @@ export async function handleAdminFinanceRead(request: SupplyNodeRequest, respons
   const requestId = ensureApiV1RequestId(request);
   await safely(response, requestId, async () => {
     const url = new URL(request.originalUrl ?? request.url ?? "", options.apiOrigin);
-    const match = /^\/api\/(?:v1\/admin|bff\/admin)\/finance\/(lookup|period|export|subjects\/[^/]+|documents\/[^/]+|merchant-accounts\/[^/]+|channel-evidence\/orders\/[^/]+|channel-evidence\/withdrawals\/[^/]+\/[^/]+|channel-evidence\/originals\/[^/]+)$/.exec(url.pathname);
+    const match = /^\/api\/(?:v1\/admin|bff\/admin)\/finance\/(overview|lookup|period|export|subjects\/[^/]+|documents\/[^/]+|merchant-accounts\/[^/]+|channel-evidence\/orders\/[^/]+|channel-evidence\/withdrawals\/[^/]+\/[^/]+|channel-evidence\/originals\/[^/]+)$/.exec(url.pathname);
     if ((request.method ?? "GET") !== "GET" || !match) throw notFound();
     const origin = request.headers.origin;
     if (origin !== undefined && origin !== options.adminOrigin && origin !== options.apiOrigin || request.headers["sec-fetch-site"] === "cross-site") throw forbidden();
+    if (match[1] === "overview") {
+      const range = parseFinanceOverviewRange(url.searchParams), context = await readAdminContext(request, options);
+      await withDirectoryRead(options.directoryReadPool ?? options.pool, request, response, async signal => {
+        const result = await withDirectoryReadTransaction(options.directoryReadPool ?? options.pool, signal, async client => {
+          const actor = await authorizeAdminFinance(client, context, "complete");
+          return { actor, body: await readAdminFinanceOverview(client, range, actor.relations.financeDocumentRead, options.joinpayAccountRead !== undefined) };
+        });
+        const current = await withTransaction(options.pool, client => authorizeAdminFinance(client, context, "complete"));
+        if (current.authorizationKey !== result.actor.authorizationKey) throw forbidden("Finance access changed; reload");
+        signal.throwIfAborted(); sendJson(response, 200, { ...result.body, contextKey: current.authorizationKey }, requestId);
+      });
+      return;
+    }
     const route = match[1]!, merchant = route.startsWith('merchant-accounts/'), channel = route.startsWith('channel-evidence/'), complete = merchant || route === "period" || route === "export" || route.startsWith("subjects/");
     if(merchant&&url.searchParams.size)throw invalid('Merchant account reads do not accept query parameters');
     const operation = complete ? "complete" : route.startsWith("documents/") ? "document" : "lookup";
@@ -60,7 +75,7 @@ export async function handleAdminFinanceRead(request: SupplyNodeRequest, respons
       if (route === "lookup") {
         const byRef = new Map([...financeOrderDocuments(facts, filters), ...documents].map(document => [document.ref, document]));
         documents = facts.lookupPage!.refs.map(ref => {
-          const document=byRef.get(ref);if(!document)throw new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","Finance page projection unavailable");return document;
+          const document=byRef.get(ref);if(!document)throw new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","Finance page projection unavailable");const order=facts.orders?.find(order=>order.ref===ref);return order?withFinanceOrderContext(document,order,facts.subjects):document;
         });
       }
       const start = (page - 1) * pageSize;
