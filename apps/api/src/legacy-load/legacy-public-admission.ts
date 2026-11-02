@@ -3,6 +3,7 @@ import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import type { Pool } from "pg";
 import { canonicalize } from "../supply/content-hash";
+import { identityAllowsProtectedTrade } from "../auth/identity-eligibility";
 
 /**
  * Public display admission for frozen legacy account snapshots.
@@ -32,9 +33,9 @@ export function legacyHoldDisplayable(hold: unknown): hold is LegacyDisplayHoldS
   return typeof hold === "string" && (LEGACY_DISPLAY_HOLD_STATES as readonly string[]).includes(hold);
 }
 
-/** Core identity evidence pending outside ADULT is not publicly displayed. */
-export function coreIdentityDisplayable(ageStatus: unknown): boolean {
-  return ageStatus === "ADULT";
+/** Explicit legacy verification may retain unknown age; all other unknown identity evidence stays pending. */
+export function coreIdentityDisplayable(ageStatus: unknown, identityStatus?: string, provider?: string): boolean {
+  return ageStatus === "ADULT" || identityAllowsProtectedTrade({ ageStatus: typeof ageStatus === "string" ? ageStatus : null, identityStatus, provider });
 }
 
 /**
@@ -44,7 +45,8 @@ export function coreIdentityDisplayable(ageStatus: unknown): boolean {
 
 export function legacyEvidenceReferenceValid(evidenceRef: unknown): boolean {
   return typeof evidenceRef === "string"
-    && /^legacy-migration-preflight-\d{8}:la_rental_accounts:[0-9]+$/.test(evidenceRef);
+    && (/^legacy-migration-preflight-\d{8}:la_rental_accounts:[0-9]+$/.test(evidenceRef)
+      || /^local-frozen-source:[a-f0-9]{64}:la_rental_accounts:[0-9]+$/.test(evidenceRef));
 }
 
 export type LegacyPublicRecord = {
@@ -271,6 +273,8 @@ export type PublicDisplayCaseInput = {
     suspended: boolean;
     accountStatus: string;
     ageStatus?: string;
+    identityStatus?: string;
+    provider?: string;
   };
   flags: {
     highRiskOwner: boolean;
@@ -311,7 +315,7 @@ export function classifyPublicDisplay(input: PublicDisplayCaseInput): PublicDisp
   // C. Pending review: safe text is withheld until the fact is resolved.
   if (account.legacyHold === "ACTIVE_LEGACY") return pending("LEGACY_HOLD_ACTIVE_LEGACY");
   if (flags.privacyCodes.length) return pending("CORE_IDENTITY_PRIVACY_PENDING");
-  if (!coreIdentityDisplayable(owner.ageStatus)) return pending("OWNER_AGE_IDENTITY_PENDING");
+  if (!coreIdentityDisplayable(owner.ageStatus, owner.identityStatus, owner.provider)) return pending("OWNER_AGE_IDENTITY_PENDING");
   if (flags.highRiskOwner) return pending("OWNER_HIGH_RISK_PENDING_DECISION");
   // D. Minimal hold compatibility: 'NONE' and 'UNRESOLVED' may be displayed;
   //    publish/edit/order keep their own 'NONE' requirement.

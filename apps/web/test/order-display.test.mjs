@@ -11,6 +11,34 @@ const display = requireFromTree(path.join(tree, "apps/web/src/lib/order-display.
 
 const yuan = (amount) => ({ currency: "CNY", unit: "yuan", scale: 2, amount });
 
+test("order facts name historical, frozen or current sources without pretending current facts are snapshots", () => {
+  assert.equal(display.orderListingSourceLabel({ source: { origin: "LEGACY" } }), "历史订单");
+  assert.equal(display.orderListingSourceLabel({ listingFacts: { source: "ORDER_VERSION" } }), "下单时账号资料");
+  assert.equal(display.orderListingSourceLabel({ listingFacts: { source: "ACCOUNT_CURRENT" } }), "当前账号资料");
+  assert.equal(display.orderListingSourceLabel({ listingFactsUnknownReason: "UNREADABLE" }), "账号资料待核实");
+  assert.equal(display.orderListingSourceLabel({}), null);
+});
+
+test("server opening and renting stages stay distinct, while rejection stays explicit", () => {
+  assert.equal(display.orderSettlementStageLabel({ stage: { code: "NONE", label: null } }), null);
+  assert.equal(display.orderSettlementStageLabel({ stage: { code: "UNKNOWN", label: "待核对" } }), null);
+  assert.equal(display.orderSettlementStageLabel({ stage: { code: "RENTING", label: "租赁中" } }), "租赁中");
+  assert.equal(display.orderSettlementStageLabel({ stage: { code: "OPENING_PENDING", label: "待确认开租" } }), "待确认开租");
+  assert.equal(display.orderSettlementStageLabel({ stage: { code: "DECISION_REJECTED", label: "结算方案未达成一致" } }), "结算方案未达成一致");
+  assert.match(display.orderFulfillmentSummary({ stage: "ENDING" }, { ending: "REJECTED" }), /本版已拒绝/);
+});
+
+test("owner projections and historical owner records never borrow renter money", () => {
+  const native = { amounts: { ownerExpectedIncome: yuan("135.00"), totalDue: null }, quote: { ownerTotal: null } };
+  assert.equal(display.orderAmountFacts(native, "owner").main, "135.00 元");
+  const legacy = { readOnly: true, source: { origin: "LEGACY" }, legacyAmounts: { paid: yuan("900.00"), deposit: yuan("300.00") }, payment: { state: "RECORDED_PAID" } };
+  const facts = display.orderAmountFacts(legacy, "owner");
+  assert.equal(facts.main, "待核定");
+  assert.deepEqual(facts.secondary, []);
+  assert.doesNotMatch(JSON.stringify(facts), /900|300|租客实付/);
+  assert.equal(display.orderAmountFacts({ ...legacy, legacyAmounts: null }, "owner").main, "待核定");
+});
+
 test("order titles come from frozen facts, never from a stored listing title",()=>{
  const legacy={source:{origin:'LEGACY'},account:{readable:true},title:'PRIVATE ACCOUNT TITLE'};
  assert.equal(display.orderAccountTitle(legacy),'租赁账号');
@@ -33,6 +61,14 @@ test("haff quantities keep the exact integer and the exact M helper", () => {
   assert.equal(display.quantityText("PIECE", "10"), "10 件");
   assert.equal(display.quantityText("ROUND", "1020"), "1,020 发");
   assert.equal(display.quantityText("PIECE", "not-a-number"), "not-a-number");
+});
+
+test("bill quantities are compact and exact while missing quantities remain unknown", () => {
+  assert.equal(display.orderLineQuantityText({ name: "哈夫币", unit: "HAFF_BASE", quantity: "1680000000" }), "1,680 M");
+  assert.equal(display.orderLineQuantityText({ name: "哈夫币", unit: "HAFF_BASE", quantity: "1500001" }), "1.500001 M");
+  assert.equal(display.orderLineQuantityText({ name: "保险（天）", unit: "DAY", quantity: "3" }), "3");
+  assert.equal(display.orderLineQuantityText({ name: "保险卡", unit: "DAY", quantity: "3" }), "3 天");
+  assert.equal(display.orderLineQuantityText({ name: "哈夫币", unit: "HAFF_BASE" }), "数量待确认");
 });
 
 test("party amounts expose the concrete values and fee payer without internal profit fields", () => {
@@ -151,7 +187,7 @@ test("a short order summary names omitted nonzero resources and detail retains e
   ]);
 });
 
-test("legacy amount facts share renter evidence across parties and never rename it as owner income", () => {
+test("legacy amount facts keep renter evidence private instead of relabelling it as owner income", () => {
   const order = {
     readOnly: true, source: { origin: "LEGACY" }, status: "CANCELLED",
     payment: { state: "RECORDED_PAID" },
@@ -160,13 +196,13 @@ test("legacy amount facts share renter evidence across parties and never rename 
   const renter = display.orderAmountFacts(order, "renter");
   const owner = display.orderAmountFacts(order, "owner");
   assert.equal(renter.main, "66.00 元");
-  assert.equal(owner.main, "66.00 元");
+  assert.equal(owner.main, "待核定");
   assert.equal(renter.caption, "已付金额记录");
-  assert.equal(owner.caption, "租客实付记录");
-  assert.deepEqual(owner.secondary, ["押金 0.00 元"]);
-  assert.ok(!owner.secondary.some((line) => line.includes("号主") || line.includes("结算收入")));
+  assert.equal(owner.caption, "历史收益请查看收益记录");
+  assert.deepEqual(owner.secondary, []);
+  assert.doesNotMatch(JSON.stringify(owner), /66\.00|租客实付/);
   const unknown = display.orderAmountFacts({ ...order, legacyAmounts: { required: null, paid: null, deposit: null, refund: null }, payment: { state: "UNKNOWN" } }, "owner");
-  assert.equal(unknown.main, "待确认");
+  assert.equal(unknown.main, "待核定");
   assert.deepEqual(unknown.secondary, []);
 });
 
@@ -179,11 +215,12 @@ test("a historical refund figure is labelled as the original record, never as th
     legacyAmounts: { required: yuan("66.00"), paid: yuan("66.00"), deposit: yuan("57.00"), refund: yuan("87.00") },
     orderFacts: { resources: [], rentalDeadlineAt: null },
   };
-  for (const party of ["renter", "owner"]) {
+  for (const party of ["renter"]) {
     const facts = display.orderAmountFacts(order, party);
     assert.deepEqual(facts.secondary, ["押金 57.00 元", "原退款金额记录 87.00 元"]);
     assert.ok(!facts.secondary.some((line) => /应退责任|仍欠|已到账|净/.test(line)), `${party} must not read the record as a live duty`);
   }
+  assert.deepEqual(display.orderAmountFacts(order, "owner").secondary, [], "the owner does not receive the renter refund record");
   assert.ok(!JSON.stringify(display.orderAmountFacts(order, "renter")).includes("82.00"), "no net is derived from the record");
   // REFUND_RECORD_EXISTS keeps only the record: no duty row is invented and nothing claims settlement.
   const recordOnly = display.orderAmountFacts({ ...order, payment: { state: "RECORDED_UNPAID" } }, "renter");
@@ -240,4 +277,13 @@ test("ORDER-A: unit price keeps eight decimals and the snapshot's real unit pair
 test("ORDER-A: the fee total names the resource subtotal, never the deposit or owner income", () => {
   assert.equal(display.orderLinesTotalLabel("renter"), "资源合计（不含押金）");
   assert.equal(display.orderLinesTotalLabel("owner"), "号主报价合计");
+});
+
+test("historical owner income is shown only with explicit original-net evidence", () => {
+  const order = { readOnly: true, source: { origin: "LEGACY" }, ownerIncomeSource: { source: "LEGACY_ORDER_SNAPSHOT", sourceLabel: "旧平台原单净收益记录" }, amounts: { ownerRecordedIncome: yuan("87.00") } };
+  const facts = display.orderAmountFacts(order, "owner");
+  assert.equal(facts.main, "87.00 元"); assert.equal(facts.caption, "原单净收益记录");
+  assert.match(facts.secondary[0], /不代表当前应收或到账/);
+  assert.equal(display.orderAmountFacts({ ...order, ownerIncomeSource: undefined }, "owner").main, "待核定");
+  assert.equal(display.orderAmountFacts({ ...order, amounts: { ownerRecordedIncome: null } }, "owner").main, "待核定");
 });

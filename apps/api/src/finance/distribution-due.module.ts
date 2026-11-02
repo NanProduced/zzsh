@@ -1,15 +1,13 @@
 import { DynamicModule, Inject, Injectable, Module, OnApplicationShutdown, OnModuleInit } from '@nestjs/common';
 import type { Pool, PoolClient } from 'pg';
-import { ConfigurationError } from '../config/config';
+import { businessFeatureEnabled, ConfigurationError } from '../config/config';
 import type { DistributionEarningStore, MaintenanceOperator } from './distribution-earning-store';
 
 export type DistributionDueModuleOptions = { pool: Pool; store: DistributionEarningStore; intervalMs: number; batchLimit: number; workerId: string };
 const LOCK_KEY = '806007';
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 export function loadDistributionDueRuntime(pool: Pool | undefined, store: DistributionEarningStore | undefined, env: NodeJS.ProcessEnv = process.env): DistributionDueModuleOptions | undefined {
-  const enabled = env.DISTRIBUTION_DUE_WORKER_ENABLED?.trim() ?? 'false';
-  if (enabled !== 'true' && enabled !== 'false') throw new ConfigurationError('DISTRIBUTION_DUE_WORKER_ENABLED must be true or false');
-  if (enabled === 'false') return undefined;
+  if (!businessFeatureEnabled(env, 'DISTRIBUTION_DUE_WORKER_ENABLED')) return undefined;
   if (!pool || !store) throw new ConfigurationError('DISTRIBUTION_DUE_WORKER_ENABLED=true requires explicit NATIVE distribution assembly');
   const intervalMs = Number(env.DISTRIBUTION_DUE_INTERVAL_MS ?? '300000'), batchLimit = Number(env.DISTRIBUTION_DUE_BATCH_LIMIT ?? '20');
   const workerId = env.DISTRIBUTION_DUE_WORKER_ID?.trim() ?? 'main';

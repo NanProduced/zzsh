@@ -918,7 +918,8 @@ test("F4 & F5: pending tasks handles loading, errors, expired cancellations, and
     pendingCard = probe.host.querySelector(".account-pending-card");
     // ord_valid should be present
     assert.match(pendingCard.textContent, /VAL-02/);
-    assert.match(pendingCard.textContent, /正常待付租赁/);
+    assert.match(pendingCard.textContent, /租赁账号/);
+    assert.doesNotMatch(pendingCard.textContent, /正常待付租赁/, "stored titles are not substituted for frozen account facts");
     // ord_expired should NOT be in pending tasks
     assert.doesNotMatch(pendingCard.textContent, /EXP-01/);
     assert.doesNotMatch(pendingCard.textContent, /已过期租赁/);
@@ -1091,7 +1092,9 @@ test("F4: pending summary exposes the bounded recent page when there is a cursor
   try {
     await probe.render(React.createElement(probe.center.AccountOverview, { scope: "user_A:1" }));
     const pending = probe.host.querySelector(".account-pending-card");
-    assert.equal(pending, null);
+    assert.ok(pending, "an incomplete recent page does not assert there are no older tasks");
+    assert.match(pending.textContent, /已读取的近期订单暂无待处理事项/);
+    assert.match(pending.textContent, /仅汇总每类最近 3 笔订单/);
     assert.match(probe.host.textContent, /还有更多订单/);
   } finally { await probe.dispose(); }
 });
@@ -1709,4 +1712,25 @@ test("E-R1-06 every in-repo /account?view= link is a known view, params survive,
   assert.equal(acc.get("accountId"), "acc_9");
   const leased = new URLSearchParams(accountSectionHref("leased", { view: "leased", accountId: "acc_2", orderId: "order_B", status: "IN_SERVICE" }).split("?")[1]);
   assert.deepEqual([leased.get("view"), leased.get("accountId"), leased.get("orderId"), leased.get("status")], ["leased", "acc_2", "order_B", "IN_SERVICE"]);
+});
+
+test('recent tasks consume only server-authorized opening and settlement decisions for the correct party', async () => {
+  const p = await createProbe(async () => json(emptyPage));
+  try {
+    const { AccountPendingTasks: PendingTasks } = p.center;
+    assert.equal(typeof PendingTasks, 'function');
+    await p.render(React.createElement(PendingTasks, { renterStatus: 'ready', ownerStatus: 'ready', renterOrders: [
+      { id: 'r_open', displayNo: 'R-OPEN', status: 'PAID', viewerParty: 'renter', stage: { code: 'OPENING_PENDING', label: '待确认开租', viewerActionRequired: true } },
+      { id: 'r_wait', status: 'PAID', stage: { code: 'DECISION_WAITING', viewerActionRequired: false } },
+    ], ownerOrders: [
+      { id: 'o_end', displayNo: 'O-END', status: 'PAID', viewerParty: 'owner', stage: { code: 'DECISION_PENDING', label: '待你确认结算', viewerActionRequired: true } },
+      { id: 'o_guess', status: 'PAID' },
+      { id: 'old_fake', status: 'PAID', readOnly: true, source: { origin: 'LEGACY' }, stage: { code: 'OPENING_PENDING', viewerActionRequired: true } },
+    ] }));
+    const card = p.host.querySelector('.account-pending-card');
+    assert.match(card.textContent, /R-OPEN|待你确认开租/); assert.match(card.textContent, /O-END|待你确认结算/);
+    assert.equal(card.querySelectorAll('.account-pending-row').length, 2);
+    const links = [...card.querySelectorAll('.account-pending-btn')].map(node => node.getAttribute('href'));
+    assert.deepEqual(links, ['/account?view=rentals&orderId=r_open', '/account?view=leased&orderId=o_end']);
+  } finally { await p.dispose(); }
 });

@@ -10,9 +10,10 @@ const document = (): BankBindingRuntimeDocument => ({ database: context.database
   currentKeyVersion: "unit_storage_key", keyVariables: { unit_storage_key: "WITHDRAWAL_BANK_KEY_01" } });
 const environment = (d = document()): NodeJS.ProcessEnv => ({ WITHDRAWAL_BANK_BINDING_ENABLED: "true", WITHDRAWAL_BANK_BINDING_CONFIG: JSON.stringify(d), WITHDRAWAL_BANK_KEY_01: Buffer.alloc(32, 17).toString("base64url") });
 const rejected = (f: () => unknown, message: string) => assert.throws(f, { name: "ConfigurationError", message });
-test("默认关闭不读配置/钥；非法开关和认证/runtime错误先拒绝", () => {
+test("默认只读不读配置/钥；非法开关和认证/runtime错误先拒绝", () => {
   const reads: string[] = [], env = new Proxy({}, { get(_target, p) { reads.push(String(p)); if (p !== "WITHDRAWAL_BANK_BINDING_ENABLED") throw Error(); return undefined; } });
-  assert.equal(loadWithdrawalBankBindingRuntime(context, env), undefined); assert.deepEqual(reads, ["WITHDRAWAL_BANK_BINDING_ENABLED"]);
+  assert.deepEqual(loadWithdrawalBankBindingRuntime(context, env),{database:context.database.name,runtimeUser:context.database.runtimeUser}); assert.deepEqual(reads, ["WITHDRAWAL_BANK_BINDING_ENABLED"]);
+  assert.equal(loadWithdrawalBankBindingRuntime({...context,authEnabled:false},{}),undefined);
   for (const v of ["", "TRUE", " true", "1"]) rejected(() => loadWithdrawalBankBindingRuntime(context, { WITHDRAWAL_BANK_BINDING_ENABLED: v }), "BANK_BINDING_ENABLED_INVALID");
   for (const c of [{ ...context, authEnabled: false }, { ...context, database: { ...context.database, user: "unit_migration" } }])
     rejected(() => loadWithdrawalBankBindingRuntime(c, { WITHDRAWAL_BANK_BINDING_ENABLED: "true" }), "BANK_BINDING_CONTEXT_INVALID");

@@ -3,6 +3,8 @@ node_modules/
 dist/
 build/
 .next/
+# Named Next build directories must also stay outside Tailwind's automatic source scan.
+/apps/web/.next-*/
 out/
 coverage/
 .turbo/

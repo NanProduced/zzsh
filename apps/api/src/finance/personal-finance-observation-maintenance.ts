@@ -3,7 +3,7 @@ import type {Pool,PoolClient} from 'pg';
 import {recordAudit,setAuditContext,withTransaction} from '../auth/security-core';
 import {canonicalize} from '../supply/content-hash';
 import {conflict,ensureOnlyFields,fingerprintRequest,invalid,withIdempotency} from '../supply/supply-util';
-import {authorizeFinanceMaintenance,assertFinanceMaintenanceResource,type FinanceOpeningReview} from './personal-finance-maintenance';
+import {authorizeFinanceMaintenance,assertFinanceMaintenanceResource,isReviewedFinanceMaintenanceResource,type FinanceOpeningReview} from './personal-finance-maintenance';
 import {prepareHistoricalObservation} from './personal-finance-read';
 import {prepareObservationCoverage,assertFinanceSingleCutoff,type ObservationCoverageInput} from './personal-finance-coverage';
 
@@ -55,9 +55,9 @@ export async function bindReviewedFinanceObservationAdmission(client:PoolClient,
  ensureOnlyFields(review.actor,['userId','sessionId']);ensureOnlyFields(review.resource,['host','port','database','oid','owner','marker','role','roleOid']);
  const r=copy(review);
  if(![r.ref,r.attempt,r.actor.userId,r.actor.sessionId,r.userId].every(x=>typeof x==='string'&&identifier.test(x))
-  ||r.resource.host!=='127.0.0.1'||r.resource.port!==55432||!/^zzsh_test_order_[a-z][a-z0-9_]{0,20}$/.test(r.resource.database)
+  ||r.resource.host!=='127.0.0.1'||r.resource.port!==55432||!isReviewedFinanceMaintenanceResource(r.resource)
   ||![r.resource.owner,r.resource.role].every(x=>typeof x==='string'&&/^[a-zA-Z_][a-zA-Z0-9_]{0,62}$/.test(x))
-  ||r.resource.marker!=='zzsh:order-reservation-test:v1'||![r.resource.oid,r.resource.roleOid].every(x=>Number.isSafeInteger(x)&&x>0)
+  ||![r.resource.oid,r.resource.roleOid].every(x=>Number.isSafeInteger(x)&&x>0)
   ||![r.inputSha256,r.bodyDigest].every(x=>typeof x==='string'&&digest.test(x))
   ||!['HISTORICAL_EARNINGS_LOG','HISTORICAL_DISTRIBUTION','HISTORICAL_WITHDRAWAL'].includes(r.sourceKind)
   ||![r.notBefore,r.expiresAt,r.cutoff].every(x=>typeof x==='string'&&/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(x)&&Number.isFinite(Date.parse(x)))

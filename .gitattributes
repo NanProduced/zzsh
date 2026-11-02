@@ -12,6 +12,8 @@
 apps/api/migrations/business/0055_skin_identity_contract.sql -text !eol whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 # Applied content update migration also has a frozen CRLF checksum.
 apps/api/migrations/business/0111_platform_updates.sql -text !eol whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+# Frozen initial parts may contain CRLF inside function bodies; preserve their manifest hashes.
+apps/api/migrations/initial/**/*.sql -text !eol whitespace=blank-at-eol,-blank-at-eof,space-before-tab,cr-at-eol
 *.sh text eol=lf
 *.ps1 text eol=lf
 *.png binary

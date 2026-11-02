@@ -372,3 +372,19 @@ test("declarations stay tri-state and an empty draft skin selection does not rev
   assert.equal(line.name, "巴雷特");
   assert.equal(line.ownerAmount, "0.40");
 });
+
+test("legacy skin read distinguishes missing admission from a complete zero and never revives a frozen array", () => {
+  const base = { origin: "LEGACY_OBSERVATION", presentation: { skins: [{ id: "old", name: "旧冻结皮肤" }] }, declaration: { skins: [] } };
+  for (const legacySkinHolding of [undefined, { state: "UNKNOWN", admittedCount: null, items: null, withheldCount: null }, { state: "ADMITTED", admittedCount: 2, items: [{ id: "new", name: "当前皮肤" }], withheldCount: 0 }]) {
+    const version = { ...base, legacySkinHolding }, facts = skinFacts(version);
+    assert.equal(facts.source, "LEGACY_UNKNOWN"); assert.equal(facts.admittedCount, null); assert.deepEqual(facts.rows, []);
+    assert.equal(skinsText(version), "旧平台皮肤资料待承接，数量未知");
+  }
+  const admitted = { ...base, legacySkinHolding: { state: "ADMITTED", admittedCount: 3, items: [{ id: "new", name: "当前皮肤" }], withheldCount: 2 } };
+  assert.equal(skinFacts(admitted).admittedCount, 3); assert.equal(skinFacts(admitted).withheld, 2);
+  assert.deepEqual(skinFacts(admitted).rows.map(skin => skin.name), ["当前皮肤"]);
+  assert.match(skinsText(admitted), /已承接 3 项.*2 项当前不可展示/); assert.doesNotMatch(skinsText(admitted), /旧冻结皮肤/);
+  const zero = { ...base, legacySkinHolding: { state: "ADMITTED", admittedCount: 0, items: [], withheldCount: 0 } };
+  assert.equal(skinFacts(zero).source, "LEGACY_ADMITTED"); assert.equal(skinFacts(zero).admittedCount, 0);
+  assert.equal(skinsText(zero), "已承接 0 项旧平台皮肤");
+});

@@ -1,8 +1,9 @@
 import { SecurityApiError } from "../auth/security-core";
 import { formatDecimalExact, formatDecimalAtScale, parseNonNegativeDecimal } from "./decimal";
 import { projectDeltaQuote, type InternalQuote, type QuoteAmount, type QuoteUnitAmount } from "./pricing";
+import type { DeltaProjectedQuote } from "./delta-rental";
 
-type PublicQuote = ReturnType<typeof projectDeltaQuote>;
+type PublicQuote = DeltaProjectedQuote;
 export type TenantPriceLine = Pick<PublicQuote["lines"][number], "itemId" | "quantity" | "unit" | "unitQuantity" | "buyerUnitAmount" | "buyerAmount">;
 export type TenantPriceQuote = {
   schemaVersion: 1 | 2;

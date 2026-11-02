@@ -22,3 +22,31 @@ test("full target binding changes cannot be mistaken for a replay",()=>{
  const snapshot=structuredClone(original);snapshot.source.row.pay_money="1.00";assert.throws(()=>normalizeLegacyOrderReadInput(snapshot));
  const quantity=structuredClone(original);quantity.source.row.level6_bullet_num="1.5";quantity.source.digest=sha256Hex(canonicalize(quantity.source.row));assert.throws(()=>normalizeLegacyOrderReadInput(quantity));
 });
+
+test("full frozen source retains optional deletion fact without changing money or accepting malformed flags", () => {
+ const original = input(), before = normalizeLegacyOrderReadInput(original);
+ for (const is_delete of ["0", "1"]) {
+  const changed = structuredClone(original); changed.source.row.is_delete = is_delete;
+  changed.source.digest = sha256Hex(canonicalize(changed.source.row));
+  const normalized = normalizeLegacyOrderReadInput(changed);
+  assert.equal(normalized.paidCents, before.paidCents); assert.equal(normalized.dueCents, before.dueCents);
+  assert.notEqual(normalized.bindingDigest, before.bindingDigest); assert.equal(changed.source.row.is_delete, is_delete);
+ }
+ for (const is_delete of ["2", "true", "", null]) {
+  const changed = structuredClone(original); changed.source.row.is_delete = is_delete;
+  changed.source.digest = sha256Hex(canonicalize(changed.source.row));
+  assert.throws(() => normalizeLegacyOrderReadInput(changed), (error: unknown) => (error as { status?: number }).status === 400);
+ }
+});
+
+test("source detain amount remains exact and frozen, never subtracted from historical gross refund display", () => {
+ const changed = input(); changed.source.row.detain_money = "5.00"; changed.source.row.return_order_money = "87.00";
+ changed.source.digest = sha256Hex(canonicalize(changed.source.row));
+ assert.equal(normalizeLegacyOrderReadInput(changed).paidCents,"6600");
+ assert.equal(changed.source.row.return_order_money,"87.00"); assert.equal(changed.source.row.detain_money,"5.00");
+ for (const detain_money of ["1.234", "1e2", "NaN", "01.00"]) {
+  const malformed=structuredClone(changed);malformed.source.row.detain_money=detain_money;
+  malformed.source.digest=sha256Hex(canonicalize(malformed.source.row));
+  assert.throws(()=>normalizeLegacyOrderReadInput(malformed));
+ }
+});

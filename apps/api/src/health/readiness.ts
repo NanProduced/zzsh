@@ -262,6 +262,7 @@ function createPostgresHealthDependency(
     port: config.database.port,
     user: config.database.user,
     password: config.database.password,
+    ssl: config.database.ssl,
     database: config.database.name,
     application_name: "zzsh-api-readiness",
     max: 1,
@@ -298,8 +299,10 @@ function createRedisHealthDependency(
       port: config.redis.port,
       connectTimeout: timeoutMs,
       reconnectStrategy: false,
+      ...(config.redis.tls ? { tls: true as const, ...config.redis.tls } : {}),
     },
     password: config.redis.password,
+    username: config.redis.username,
     disableOfflineQueue: true,
   });
   client.on("error", () => undefined);

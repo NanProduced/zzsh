@@ -42,8 +42,42 @@ export class BusinessMigrationHistoryError extends Error {
   }
 }
 
+export const BUSINESS_INITIAL_FOLDER = resolve(__dirname, "../../../migrations/initial/release_0141");
+export const BUSINESS_INITIAL_ROOT = resolve(__dirname, "../../../migrations/initial");
+
+type BusinessMigrationOptions = { runtimeUser: string; migrationsFolder?: string; initialInstall?: boolean };
+async function migrationSource(pool: Pick<Pool, "query">, options: Pick<BusinessMigrationOptions, "migrationsFolder" | "initialInstall">) {
+  const canonical = options.migrationsFolder ?? BUSINESS_MIGRATIONS_FOLDER;
+  if (options.migrationsFolder && !options.initialInstall) return { folder: canonical, cleanup: () => {} };
+  const { readBusinessInitialRegistry, prepareBusinessInitial } = await import("./business-initial");
+  const registry = readBusinessInitialRegistry(BUSINESS_INITIAL_ROOT);
+  if (!registry.supported.length) {
+    if (options.initialInstall) throw new Error("BUSINESS_INITIAL_UNAVAILABLE");
+    return { folder: canonical, cleanup: () => {} };
+  }
+  const present = (await pool.query("SELECT to_regclass('zzsh_business_meta.migrations') IS NOT NULL AS present")).rows[0]?.present;
+  if (typeof present !== "boolean") throw new BusinessMigrationHistoryError("HISTORY_UNAVAILABLE");
+  const first = present ? (await pool.query('SELECT hash,created_at::text AS "createdAt" FROM zzsh_business_meta.migrations ORDER BY id LIMIT 1')).rows[0] : undefined;
+  const existing = first ? registry.supported.find(entry => entry.manifest.migrationHash === first.hash) : undefined;
+  if (!options.initialInstall && !existing) return { folder: canonical, cleanup: () => {} };
+  if (first && !existing) throw new BusinessMigrationHistoryError("NOT_EXACT_PREFIX", 0);
+  if (!first) {
+    const occupied = (await pool.query("SELECT count(*)::int AS count FROM pg_namespace WHERE nspname = ANY($1::text[])", [[...BUSINESS_SCHEMAS, "zzsh_credit"]])).rows[0]?.count;
+    if (occupied !== 0) throw new Error("BUSINESS_INITIAL_REQUIRES_EMPTY_DATABASE");
+  }
+  const selected = existing ?? registry.supported.find(entry => entry.name === registry.active);
+  if (!selected) throw new Error("BUSINESS_INITIAL_UNAVAILABLE");
+  return prepareBusinessInitial(canonical, selected.folder);
+}
+
 /** Drizzle checks only the newest timestamp; a divergent journal needs reviewed adoption. */
 export async function assertBusinessMigrationPrefix(pool: Pick<Pool, "query">, migrationsFolder = BUSINESS_MIGRATIONS_FOLDER): Promise<void> {
+  if (migrationsFolder === BUSINESS_MIGRATIONS_FOLDER) {
+    const selected = await migrationSource(pool, {});
+    if (selected.folder !== migrationsFolder) {
+      try { return await assertBusinessMigrationPrefix(pool, selected.folder); } finally { selected.cleanup(); }
+    }
+  }
   const local = readMigrationFiles({ migrationsFolder });
   if (!local.length || local.some((m, i) => !Number.isSafeInteger(m.folderMillis) || m.folderMillis <= 0 ||
     i > 0 && m.folderMillis <= local[i - 1]!.folderMillis)) throw new BusinessMigrationHistoryError("INVALID_LOCAL_CHAIN");
@@ -61,9 +95,12 @@ export async function assertBusinessMigrationPrefix(pool: Pick<Pool, "query">, m
   }
 }
 
-export async function runBusinessMigrations(pool: Pool, options: { runtimeUser: string; migrationsFolder?: string }): Promise<void> {
-  await assertBusinessMigrationPrefix(pool, options.migrationsFolder);
-  await migrate(drizzle(pool), { ...BUSINESS_MIGRATION_CONFIG, ...(options.migrationsFolder ? { migrationsFolder: options.migrationsFolder } : {}) });
+export async function runBusinessMigrations(pool: Pool, options: BusinessMigrationOptions): Promise<void> {
+  const selected = await migrationSource(pool, options);
+  try {
+    await assertBusinessMigrationPrefix(pool, selected.folder);
+    await migrate(drizzle(pool), { ...BUSINESS_MIGRATION_CONFIG, migrationsFolder: selected.folder });
+  } finally { selected.cleanup(); }
   // Drizzle owns its migration transaction; all subsequent broad and narrow grants share this client.
   let client: PoolClient;
   try { client = await pool.connect(); }
@@ -358,6 +395,9 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   // Admission rows are provisioning facts: the runtime never reads or writes them directly.
   const nativeAdmission=(await pool.query("SELECT to_regclass('zzsh_order.native_origin_resource_admission') IS NOT NULL AS present")).rows[0];
   if(nativeAdmission?.present===true)await pool.query(`REVOKE ALL ON TABLE zzsh_order.native_origin_resource_admission FROM ${runtimeUser};`);
+  await configureIdentityDisplaySourcePrivileges(pool, runtimeRole);
+  await configureIdentitySubjectPrivileges(pool, runtimeRole);
+  await configureNativeIdentityPrivileges(pool, runtimeRole);
   await configureAdminSecurityCommandPrivileges(pool, runtimeRole);
   await configureMembershipGrowthPrivileges(pool, runtimeRole);
   await configureLegacyGrowthCoveragePrivileges(pool, runtimeRole);
@@ -371,8 +411,72 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   await configureJoinpayFinancialPrivileges(pool, runtimeRole);
 }
 
+export async function configureIdentitySubjectPrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
+  if ((await pool.query("SELECT to_regclass('zzsh_iam.user_identity_subject') IS NOT NULL AS present")).rows[0]?.present !== true) return;
+  const runtime = quoteIdentifier(runtimeRole);
+  await pool.query(`DO $identity_subject_acl$ DECLARE target_role text; owner_name text;
+    BEGIN
+      SELECT pg_get_userbyid(relowner) INTO STRICT owner_name FROM pg_class WHERE oid='zzsh_iam.user_identity_subject'::regclass;
+      FOR target_role IN SELECT rolname FROM pg_roles UNION ALL SELECT 'PUBLIC' LOOP
+        IF target_role<>owner_name THEN
+          EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE zzsh_iam.user_identity_subject FROM %s',CASE WHEN target_role='PUBLIC' THEN 'PUBLIC' ELSE quote_ident(target_role) END);
+          EXECUTE format('REVOKE ALL PRIVILEGES (user_id,subject_digest,source,recorded_at) ON TABLE zzsh_iam.user_identity_subject FROM %s',CASE WHEN target_role='PUBLIC' THEN 'PUBLIC' ELSE quote_ident(target_role) END);
+        END IF;
+      END LOOP;
+    END $identity_subject_acl$;
+    GRANT SELECT ON TABLE zzsh_iam.user_identity_subject TO ${runtime};
+    GRANT INSERT(user_id,subject_digest,source),UPDATE(subject_digest,source,recorded_at) ON TABLE zzsh_iam.user_identity_subject TO ${runtime};`);
+}
+
+/** Native masks and charge-attempt receipts are private, with no runtime deletion or identity reassignment. */
+export async function configureNativeIdentityPrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
+  const runtime = quoteIdentifier(runtimeRole);
+  const tables = [
+    { name: "user_identity_verified_profile", columns: "user_id,subject_digest,name_hmac,name_mask,document_mask,provider,provider_reference,verified_at,recorded_at",
+      insert: "user_id,subject_digest,name_hmac,name_mask,document_mask,provider,provider_reference,verified_at",
+      update: "subject_digest,name_hmac,name_mask,document_mask,provider,provider_reference,verified_at,recorded_at" },
+    { name: "user_identity_verification_attempt", columns: "user_id,key_digest,request_digest,state,privacy_version_id,privacy_digest,disclosure_version,disclosure_digest,consented_at,provider_result,result,created_at,updated_at",
+      insert: "user_id,key_digest,request_digest,state,privacy_version_id,privacy_digest,disclosure_version,disclosure_digest,consented_at",
+      update: "state,provider_result,result,updated_at" },
+  ];
+  for (const table of tables) {
+    const relation = `zzsh_iam.${table.name}`;
+    if ((await pool.query("SELECT to_regclass($1) IS NOT NULL AS present", [relation])).rows[0]?.present !== true) continue;
+    await pool.query(`DO $native_identity_acl$ DECLARE target_role text; owner_name text;
+      BEGIN
+        SELECT pg_get_userbyid(relowner) INTO STRICT owner_name FROM pg_class WHERE oid='${relation}'::regclass;
+        FOR target_role IN SELECT rolname FROM pg_roles UNION ALL SELECT 'PUBLIC' LOOP
+          IF target_role<>owner_name THEN
+            EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE ${relation} FROM %s',CASE WHEN target_role='PUBLIC' THEN 'PUBLIC' ELSE quote_ident(target_role) END);
+            EXECUTE format('REVOKE ALL PRIVILEGES (${table.columns}) ON TABLE ${relation} FROM %s',CASE WHEN target_role='PUBLIC' THEN 'PUBLIC' ELSE quote_ident(target_role) END);
+          END IF;
+        END LOOP;
+      END $native_identity_acl$;
+      GRANT SELECT ON TABLE ${relation} TO ${runtime};
+      GRANT INSERT(${table.insert}),UPDATE(${table.update}) ON TABLE ${relation} TO ${runtime};`);
+  }
+}
+
 /** Optional schema (ADM-SECURITY-BACKEND-1): command identity rows never need UPDATE/DELETE;
  *  backup-code generation is one row per admin whose UPSERT needs three specific columns only. */
+/** 0105's frozen legacy grant must not authorize a different runtime on a new installation. */
+export async function configureIdentityDisplaySourcePrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
+  const runtime = quoteIdentifier(runtimeRole);
+  await pool.query(`DO $identity_display_acl$
+  DECLARE owner_name text; columns_sql text; target_role text;
+  BEGIN
+    SELECT pg_get_userbyid(relowner) INTO STRICT owner_name FROM pg_class WHERE oid='zzsh_iam.user_identity_display_source'::regclass;
+    SELECT string_agg(quote_ident(attname), ', ' ORDER BY attnum) INTO STRICT columns_sql FROM pg_attribute WHERE attrelid='zzsh_iam.user_identity_display_source'::regclass AND attnum>0 AND NOT attisdropped;
+    FOREACH target_role IN ARRAY ARRAY['PUBLIC', '${runtimeRole}', 'zzsh_order_milestone_real_1_r'] LOOP
+      IF target_role <> owner_name AND (target_role='PUBLIC' OR EXISTS(SELECT 1 FROM pg_roles WHERE rolname=target_role)) THEN
+        EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE zzsh_iam.user_identity_display_source FROM %s', CASE WHEN target_role='PUBLIC' THEN 'PUBLIC' ELSE quote_ident(target_role) END);
+        EXECUTE format('REVOKE ALL PRIVILEGES (%s) ON TABLE zzsh_iam.user_identity_display_source FROM %s', columns_sql, CASE WHEN target_role='PUBLIC' THEN 'PUBLIC' ELSE quote_ident(target_role) END);
+      END IF;
+    END LOOP;
+  END $identity_display_acl$;
+  GRANT SELECT ON TABLE zzsh_iam.user_identity_display_source TO ${runtime};`);
+}
+
 export async function configureAdminSecurityCommandPrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
   const role = quoteIdentifier(runtimeRole);
   const tables = ["zzsh_iam.admin_security_command", "zzsh_iam.admin_backup_code_generation"];

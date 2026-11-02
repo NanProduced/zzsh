@@ -70,6 +70,8 @@ async function probe({ rows = [], detail = null, identityStatus = "UNVERIFIED", 
     if (name === "./account/personal-wallet") return { PersonalWallet: () => null };
     if (name === "./account/personal-invitations") return { PersonalInvitations: () => null };
     if (name === "./account/credit-center") return { CreditCenter: () => null };
+    // The form's real transport/storage/consent behavior is exercised in identity-verification-form.
+    if (name === "./account/identity-verification-form") return { IdentityVerificationForm: () => null };
     if (name === "@heroui/react") return { Chip: ({ children }) => React.createElement("span", null, children) };
     if (name === "./session/user-session-provider") return { useUserSession: () => session, useUserSessionStore: () => store, publishUserSessionChange() {} };
     if (name === "./layout/service-shell") return { ServiceShell: ({ children }) => React.createElement("main", null, children) };

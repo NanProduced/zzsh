@@ -1,4 +1,7 @@
-import { pgIdentityDisplayStore, readIdentityDisplay } from "./identity-display";
+import { pgIdentityDisplayStore, readIdentityDisplay,recordNativeIdentityDisplay,assertNativeIdentityDisplayReady } from "./identity-display";
+import { identityAllowsProtectedTrade } from "./identity-eligibility";
+import { assertIdentitySubjectCapacity, assertPublicIdentitySubjectContinuity,normalizeIdentityDocument, recordVerifiedIdentitySubject } from "./identity-subject";
+export { identityAllowsProtectedTrade } from "./identity-eligibility";
 import { createHash } from "node:crypto";
 import type { UserObligationFinding, UserObligationKind } from "./user-obligation-reader";
 import type { Pool, PoolClient } from "pg";
@@ -9,6 +12,9 @@ import { lockActor } from "./admin-directory";
 import { recordAudit, SecurityApiError, setAuditContext, withTransaction } from "./security-core";
 import { resetAvatarOnCancellation } from "../profile/profile-avatar";
 import type { AuthSecurityNodeRequest, AuthSecurityNodeResponse, AuthSecurityOptions } from "./auth-security";
+import {beginIdentityVerification,completeIdentityVerification,identityVerificationAttempt,identityVerificationKey,IdentityVerificationRateError,
+  observeIdentityVerification,readIdentityVerification,readIdentityVerificationPrivacy,parseIdentityVerificationConsent,IDENTITY_PROVIDER_DISCLOSURE,type AttemptRead,type IdentityVerificationReceipt} from "./identity-verification-attempt";
+import {legalDigest} from "../legal/legal-documents";
 
 export const FAKE_REAL_NAME_SCENARIOS = [
   "VERIFIED_ADULT",
@@ -32,12 +38,14 @@ export type RealNameProviderInput = {
 export type RealNameVerificationResult = {
   status: "VERIFIED" | "REJECTED" | "UNKNOWN";
   ageStatus: AgeStatus;
-  provider: "fake";
+  provider: "fake" | "aliyun-id2meta";
   providerReference: string | null;
   reasonCode?: "provider_rejected" | "provider_unknown";
 };
 
 export type RealNameProvider = {
+  provider?:"fake"|"aliyun-id2meta";
+  available?:boolean;
   verify: (input: RealNameProviderInput) => Promise<RealNameVerificationResult>;
 };
 
@@ -56,6 +64,7 @@ export type UserIdentityState = {
 
 export function createFakeRealNameProvider(scenario: FakeRealNameScenario): RealNameProvider {
   return {
+    provider:"fake",available:true,
     async verify(input) {
       if (!input.userId || !input.fullName || !input.documentNumber) throw new Error("fake real-name input is incomplete");
       if (scenario === "FAULT") throw new Error("fake real-name provider fault");
@@ -277,15 +286,33 @@ async function verifyIdentity(
   context: UserContext,
 ): Promise<void> {
   const body = bodyOf(request);
-  if (Object.keys(body).some((field) => field !== "fullName" && field !== "documentNumber")) {
+  if (Object.keys(body).some((field) => field !== "fullName" && field !== "documentNumber"&&field!=="privacyAcceptance")) {
     throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Only identity fields are accepted");
   }
-  const fullName = stringField(body, "fullName", 120);
-  const documentNumber = stringField(body, "documentNumber", 64);
+  const fullName = stringField(body, "fullName", 120).trim().normalize("NFC");
+  const documentNumber = normalizeIdentityDocument(stringField(body, "documentNumber", 64));
+  const native=options.realNameProvider.provider==="aliyun-id2meta";
+  if(native&&(!fullName||fullName.length>64||/[\p{Cc}\p{Cs}]/u.test(fullName)||!/^\d{17}[0-9X]$/.test(documentNumber)))throw new SecurityApiError(400,"INVALID_ARGUMENT","实名资料格式不正确");
+  const attempt=native?identityVerificationAttempt(context.userId,identityVerificationKey(request.headers),fullName,documentNumber,options.userIdentitySubjectKey,parseIdentityVerificationConsent(body.privacyAcceptance)):null;
+  const preflight=await withTransaction(options.pool, async client => {
+    await assertActiveInTransaction(client, context.userId);
+    const checks=async()=>{
+      if(native)await assertPublicIdentitySubjectContinuity(client,context.userId,documentNumber,options.userIdentitySubjectKey);
+      await assertIdentitySubjectCapacity(client, context.userId, documentNumber, options.userIdentitySubjectKey, false);
+      if(native)await assertNativeIdentityDisplayReady(client);
+    };
+    if(attempt)return beginIdentityVerification(client,attempt,options.userRealNamePolicy,checks);
+    await checks();return{fresh:true as const};
+  });
+  if(!preflight.fresh){sendIdentityAttempt(response,preflight,requestId);return;}
   let result: RealNameVerificationResult;
   try {
     result = await options.realNameProvider.verify({ userId: context.userId, fullName, documentNumber });
   } catch {
+    if(attempt){
+      await withTransaction(options.pool,client=>observeIdentityVerification(client,attempt,null)).catch(()=>undefined);
+      sendIdentityAttempt(response,{fresh:false,state:"UNKNOWN",result:null},requestId);return;
+    }
     await withTransaction(options.pool, async (client) => {
       await setAuditContext(client, "user", context.userId, context.sessionId, requestId);
       await recordAudit(client, {
@@ -302,10 +329,28 @@ async function verifyIdentity(
     });
     throw new SecurityApiError(503, API_V1_ERROR_CODES.INTERNAL_ERROR, "实名服务暂时无法确认，请稍后重试");
   }
+  if(attempt){
+    try{await withTransaction(options.pool,client=>observeIdentityVerification(client,attempt,result));}
+    catch{sendIdentityAttempt(response,{fresh:false,state:"UNKNOWN",result:null},requestId);return;}
+    if(result.status==="UNKNOWN"){sendIdentityAttempt(response,{fresh:false,state:"UNKNOWN",result:null},requestId);return;}
+  }
 
-  const state = await withTransaction(options.pool, async (client) => {
+  let receipt:IdentityVerificationReceipt;
+  try{receipt = await withTransaction(options.pool, async (client) => {
     await setAuditContext(client, "user", context.userId, context.sessionId, requestId);
     await assertActiveInTransaction(client, context.userId);
+    const previous=await readState(client,context.userId);
+    if(previous?.identityStatus==="VERIFIED"&&result.status!=="VERIFIED"){
+      await recordAudit(client,{actorType:"user",actorId:context.userId,sessionId:context.sessionId,action:"user.identity.verification",
+        objectType:"user_identity_state",objectId:context.userId,outcome:"FAILURE",reason:result.reasonCode,requestId,
+        details:{provider:result.provider,status:result.status,ageStatus:result.ageStatus,previousIdentityPreserved:true}});
+      const preserved=identityVerificationReceipt(result,previous);
+      if(attempt)await completeIdentityVerification(client,attempt,preserved);
+      return preserved;
+    }
+    if(native&&result.status==="VERIFIED")await assertPublicIdentitySubjectContinuity(client,context.userId,documentNumber,options.userIdentitySubjectKey);
+    const subjectDigest = result.status === "VERIFIED"
+      ? await assertIdentitySubjectCapacity(client, context.userId, documentNumber, options.userIdentitySubjectKey, true) : null;
     const verifiedAt = result.status === "VERIFIED" ? new Date() : null;
     const saved = await client.query<UserIdentityState>(
       `INSERT INTO "zzsh_iam"."user_identity_state"
@@ -322,6 +367,12 @@ async function verifyIdentity(
        RETURNING "account_status" AS "accountStatus", "identity_status" AS "identityStatus", "age_status" AS "ageStatus", "provider", "version"`,
       [context.userId, result.status, result.ageStatus, result.provider, result.providerReference, verifiedAt],
     );
+    if (subjectDigest) await recordVerifiedIdentitySubject(client, context.userId, subjectDigest, "NATIVE_VERIFICATION");
+    if(subjectDigest&&result.provider==="aliyun-id2meta"){
+      if(!result.providerReference)throw new SecurityApiError(503,"IDENTITY_DEPENDENCY_UNAVAILABLE","Verified identity reference is missing");
+      await recordNativeIdentityDisplay(client,{userId:context.userId,subjectDigest,fullName,documentNumber,provider:result.provider,
+        providerReference:result.providerReference},options.userIdentitySubjectKey);
+    }
     await recordAudit(client, {
       actorType: "user",
       actorId: context.userId,
@@ -334,13 +385,32 @@ async function verifyIdentity(
       requestId,
       details: { provider: result.provider, status: result.status, ageStatus: result.ageStatus },
     });
-    return saved.rows[0]!;
-  });
+    const completed=identityVerificationReceipt(result,saved.rows[0]!);
+    if(attempt)await completeIdentityVerification(client,attempt,completed);
+    return completed;
+  });}catch(error){
+    if(!attempt)throw error;
+    sendIdentityAttempt(response,{fresh:false,state:"UNKNOWN",result:null},requestId);return;
+  }
+  sendJson(response,200,{...receipt,...(attempt?{verificationAttempt:{state:"COMPLETED",replayed:false}}:{})},requestId);
+}
 
+export function identityVerificationReceipt(result:RealNameVerificationResult,state:UserIdentityState):IdentityVerificationReceipt{
   const message = result.status === "VERIFIED"
     ? (result.ageStatus === "ADULT" ? "实名校验已通过。" : "实名已通过，但未满足受保护交易的年龄要求。")
     : result.status === "REJECTED" ? "实名服务拒绝了本次校验，请检查资料后重试。" : "实名服务暂时无法确认，请稍后重试。";
-  sendJson(response, 200, { status: state.identityStatus, ageStatus: state.ageStatus, version: state.version, message }, requestId);
+  const previousIdentityPreserved=state.identityStatus==="VERIFIED"&&result.status!=="VERIFIED";
+  return { status: result.status, ageStatus: result.ageStatus, version: state.version,
+    ...(previousIdentityPreserved?{previousIdentityPreserved:true as const,currentIdentity:{status:"VERIFIED" as const,ageStatus:state.ageStatus}}:{}),
+    message:previousIdentityPreserved?`${message} 原有实名信息及资格保持不变。`:message };
+}
+
+function sendIdentityAttempt(response:AuthSecurityNodeResponse,attempt:AttemptRead,requestId:string):void{
+  if(attempt.state==="COMPLETED"&&attempt.result){
+    sendJson(response,200,{...attempt.result,verificationAttempt:{state:"COMPLETED",replayed:true}},requestId);return;
+  }
+  sendJson(response,202,{status:"UNKNOWN",ageStatus:"UNKNOWN",verificationAttempt:{state:attempt.state,noReissue:true},
+    message:"实名请求状态尚未确认，请保留原请求键查询，不要重新提交或更换请求键。"},requestId);
 }
 
 async function checkProtectedTradeEligibility(
@@ -358,7 +428,7 @@ async function checkProtectedTradeEligibility(
   if (!state || state.identityStatus !== "VERIFIED") {
     throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "请先完成实名校验后再进行受保护交易");
   }
-  if (state.ageStatus !== "ADULT") {
+  if (!identityAllowsProtectedTrade(state)) {
     throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "当前账号不满足受保护交易的年龄要求");
   }
   sendJson(response, 200, { action: "protected_trade_eligibility_check", eligible: true, execution: "NOT_PERFORMED" }, requestId);
@@ -503,6 +573,7 @@ export async function handleUserIdentityRoute(
   const supported = new Set([
     "/identity/status",
     "/identity/verify",
+    "/identity/verification-attempt",
     "/trade-eligibility/check",
     "/account/cancel",
   ]);
@@ -513,7 +584,7 @@ export async function handleUserIdentityRoute(
     return true;
   }
   const method = request.method?.toUpperCase() ?? "";
-  const readOnlyPath = path === "/identity/status";
+  const readOnlyPath = path === "/identity/status"||path==="/identity/verification-attempt";
   const writePath = path === "/identity/verify" || path === "/trade-eligibility/check" || path === "/account/cancel";
   if ((readOnlyPath && method !== "GET") || (writePath && method !== "POST")) {
     sendError(response, new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found"), requestId);
@@ -521,10 +592,17 @@ export async function handleUserIdentityRoute(
   }
   try {
     const context = await readUserContext(request, options);
+    if(path==="/identity/verification-attempt"){
+      if(options.realNameProvider.provider!=="aliyun-id2meta")throw new SecurityApiError(404,"NOT_FOUND","实名请求读取未开放");
+      sendIdentityAttempt(response,await readIdentityVerification(options.pool,context.userId,identityVerificationKey(request.headers),options.userIdentitySubjectKey),requestId);
+      return true;
+    }
     if (readOnlyPath) {
       const state = await readState(options.pool, context.userId);
       // B5: self-only masked display, derived from the session userId only (no client-supplied id).
       const display = await readIdentityDisplay(pgIdentityDisplayStore(options.pool), context.userId, state?.identityStatus);
+      const real=options.realNameProvider.provider==="aliyun-id2meta";
+      const privacy=real?await withTransaction(options.pool,readIdentityVerificationPrivacy):null;
       response.setHeader("Cache-Control", "no-store");
       sendJson(response, 200, {
         ...display,
@@ -532,7 +610,13 @@ export async function handleUserIdentityRoute(
         identityStatus: state?.identityStatus ?? "UNVERIFIED",
         ageStatus: state?.ageStatus ?? "UNKNOWN",
         provider: state?.provider ?? "none",
-        eligibleForProtectedTrade: state?.identityStatus === "VERIFIED" && state.ageStatus === "ADULT",
+        eligibleForProtectedTrade: identityAllowsProtectedTrade(state),
+        verificationCapability:{
+          available:options.realNameProvider.available===true&&(options.userIdentitySubjectKey?.length??0)>=32
+            &&(real?Boolean(options.userRealNamePolicy)&&privacy!==null:options.testOperationsEnabled),
+          real,idempotencyRequired:real,privacy,
+          ...(real?{disclosure:{...IDENTITY_PROVIDER_DISCLOSURE,digest:legalDigest(IDENTITY_PROVIDER_DISCLOSURE.body)}}:{}),
+        },
       }, requestId);
       return true;
     }
@@ -541,6 +625,7 @@ export async function handleUserIdentityRoute(
     else await changeAccountState(request, response, requestId, options, context, "CANCELLED");
     return true;
   } catch (error) {
+    if(error instanceof IdentityVerificationRateError)response.setHeader("Retry-After",String(error.retryAfter));
     if (error instanceof SecurityApiError) sendError(response, error, requestId);
     else sendInternalError(response, requestId);
     return true;

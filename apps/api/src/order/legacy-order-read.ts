@@ -28,9 +28,9 @@ export type LegacyOrderReadInput = {
   owner: PartyBinding;
   renter: PartyBinding;
 };
-const MONEY_FIELDS = ["money", "goods_money", "expend_pay_money", "need_pay_money", "pay_money", "deposit_amount", "return_order_money", "sale_earnings", "commission_money", "full_payout_money"];
+const MONEY_FIELDS = ["money", "goods_money", "expend_pay_money", "need_pay_money", "pay_money", "deposit_amount", "return_order_money", "detain_money", "sale_earnings", "commission_money", "full_payout_money"];
 const QUANTITY_FIELDS = ["awm_bullet_num", "level6_bullet_num", "level6_helmet_num", "level6_armor_num", "top_insure_card_num", "barrett_bullet_num", "coffee_num"];
-const ROW_FIELDS = ["id", "order_sn", "user_id", "sale_user_id", "accounts_id", "order_type", "order_source", "order_status", "pay_is", "is_settle", "create_time", "update_time", "pay_time", "confirm_time", "cancel_time", "tenancy_deadline", "express_is", "express_time", "expend_haff", ...MONEY_FIELDS, ...QUANTITY_FIELDS, "awm_bullet_price", "level6_bullet_price", "level6_helmet_price", "level6_armor_price", "top_insure_card_price", "barrett_bullet_price", "coffee_price"];
+export const LEGACY_ORDER_READ_SOURCE_FIELDS = ["id", "order_sn", "user_id", "sale_user_id", "accounts_id", "order_type", "order_source", "order_status", "pay_is", "is_settle", "is_delete", "create_time", "update_time", "pay_time", "confirm_time", "cancel_time", "tenancy_deadline", "express_is", "express_time", "expend_haff", ...MONEY_FIELDS, ...QUANTITY_FIELDS, "awm_bullet_price", "level6_bullet_price", "level6_helmet_price", "level6_armor_price", "top_insure_card_price", "barrett_bullet_price", "coffee_price"];
 const MONEY = /^-?(0|[1-9]\d{0,22})\.\d{2}$/;
 const INTEGER = /^(0|[1-9]\d{0,23})$/;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -56,8 +56,9 @@ export function normalizeLegacyOrderReadInput(input: LegacyOrderReadInput) {
   for (const party of [input.owner, input.renter]) ensureOnlyFields(party, ["userId", "legacyId", "businessNo", "sourceDigest"]);
   const row = input.source.row;
   if (!row || typeof row !== "object" || Array.isArray(row)) throw invalid("Legacy source row is invalid");
-  ensureOnlyFields(row, ROW_FIELDS);
+  ensureOnlyFields(row, LEGACY_ORDER_READ_SOURCE_FIELDS);
   for (const value of Object.values(row)) if (value !== null && (typeof value !== "string" || value.length > 255)) throw invalid("Legacy source value is invalid");
+  if (Object.hasOwn(row,"is_delete") && row.is_delete !== "0" && row.is_delete !== "1") throw invalid("Legacy deletion flag is invalid");
   for (const value of [input.source.legacyId, input.account.legacyId, input.owner.legacyId, input.renter.legacyId, input.account.accountId, input.account.gameId]) bindingId(value);
   for (const binding of [input.account, input.owner, input.renter]) {
     if (!DIGEST.test(binding.sourceDigest) || (binding.businessNo !== null && (typeof binding.businessNo !== "string" || binding.businessNo.length > 255))) throw invalid("Legacy source binding is invalid");

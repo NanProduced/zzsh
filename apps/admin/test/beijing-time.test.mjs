@@ -1,7 +1,22 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { beijingCalendarDate, inBeijingRange, persistTimeRange } from "../src/workspace/beijing-time.ts";
+import { beijingCalendarDate, formatBeijingDateTime, inBeijingRange, persistTimeRange } from "../src/workspace/beijing-time.ts";
+
+test("approval expiry crosses to the correct Beijing day independently of the browser time zone", () => {
+  const previous = process.env.TZ;
+  process.env.TZ = "UTC";
+  try {
+    const value = "2026-09-10T16:30:00.000Z";
+    const expected = new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Shanghai" }).format(new Date(value));
+    assert.equal(formatBeijingDateTime(value), expected);
+    assert.match(expected, /11.*00:30/);
+    assert.notEqual(formatBeijingDateTime(value), new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" }).format(new Date(value)));
+    assert.equal(formatBeijingDateTime(null), "未提供");
+    assert.equal(formatBeijingDateTime("invalid"), "时间未知");
+    assert.equal(formatBeijingDateTime(value, { timeZone: "UTC", hour: "2-digit", minute: "2-digit", hour12: false }), "00:30");
+  } finally { if (previous === undefined) delete process.env.TZ; else process.env.TZ = previous; }
+});
 
 test("today is Beijing calendar date, not the browser offset", () => {
   const beforeMidnight = new Date("2026-09-10T15:59:59.000Z");

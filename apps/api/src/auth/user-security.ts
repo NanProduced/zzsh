@@ -6,6 +6,7 @@ import { recordAudit, setAuditContext, withTransaction } from "./security-core";
 import { createTransactionalUserSession } from "./user-auth-session";
 import { hasLegacyPhoneConflict, readUserPasswordState } from "./legacy-login";
 import { ThrottleDependencyError, type UserAuthThrottle } from "./user-auth-throttle";
+import type { UserSmsSender } from "./aliyun-user-providers";
 
 export type UserSecurityDelivery = { code: string; target: string; channel: "phone" | "email"; purpose: string; sentAt: string };
 type Purpose = "password" | "email" | "phone" | "recovery";
@@ -30,7 +31,7 @@ export function normalizeContactEmail(value: unknown): string | null {
   return email;
 }
 
-export async function buildUserSecurityPlugin(options: { pool: Pool; outbox?: Map<string, UserSecurityDelivery>; localMock: boolean; smsThrottle?: UserAuthThrottle }) {
+export async function buildUserSecurityPlugin(options: { pool: Pool; outbox?: Map<string, UserSecurityDelivery>; localMock: boolean; smsThrottle?: UserAuthThrottle; smsSender?: UserSmsSender }) {
   const { APIError, createAuthEndpoint, getSessionFromCtx } = await import("better-auth/api");
   const { setSessionCookie, deleteSessionCookie } = await import("better-auth/cookies");
   type Context = Parameters<typeof setSessionCookie>[0];
@@ -79,8 +80,8 @@ export async function buildUserSecurityPlugin(options: { pool: Pool; outbox?: Ma
     ...endpointOptions, method: "POST",
     body: z.object({ purpose: purposeSchema, channel: channelSchema, stage: z.enum(["current", "target"]).default("current"), target: z.string().max(254).optional(), contact: z.string().max(254).optional(), proofId: idSchema.optional() }).strict(),
   }, async (ctx) => {
-    if (!options.outbox && !options.localMock) reject("NOT_IMPLEMENTED", "Verification delivery unavailable");
     const { purpose, channel, stage } = ctx.body;
+    if (!options.outbox && !options.localMock && !(channel === "phone" && options.smsSender)) reject("NOT_IMPLEMENTED", "Verification delivery unavailable");
     const id = proofId();
     const code = options.localMock ? "888888" : String(randomInt(0, 1_000_000)).padStart(6, "0");
     const now = new Date();
@@ -157,7 +158,13 @@ export async function buildUserSecurityPlugin(options: { pool: Pool; outbox?: Ma
       if (phoneRejection && options.smsThrottle) await options.smsThrottle.recordRejection(phoneRejection).catch(() => undefined);
       throw error;
     });
-    if (delivery.data.userId) options.outbox?.set(id, { code, target: delivery.data.recipient, channel, purpose, sentAt: now.toISOString() });
+    if(channel==="phone"&&options.smsSender&&delivery.data.userId){
+      try{await options.smsSender(delivery.data.recipient,code);}
+      catch{
+        ctx.setHeader("Retry-After",String(Math.max(1,Math.ceil((now.getTime()+COOLDOWN-Date.now())/1000))));
+        throw new APIError("SERVICE_UNAVAILABLE",{code:"AUTH_DEPENDENCY_UNAVAILABLE",message:"Verification delivery is uncertain; keep the current challenge and wait for its cooldown"});
+      }
+    }else if (delivery.data.userId) options.outbox?.set(id, { code, target: delivery.data.recipient, channel, purpose, sentAt: now.toISOString() });
     return ctx.json({ status: true, challengeId: id, cooldownUntil: new Date(now.getTime() + COOLDOWN).toISOString(), expiresAt: delivery.expiresAt.toISOString() });
   });
 

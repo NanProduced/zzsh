@@ -8,6 +8,7 @@ import { invalid, notFound } from "../supply/supply-util";
 import { cancelExpiredReservation, lockOrderPartiesInOrder } from "./order";
 import { readVerifiedJoinpayFactScope, type FormalJoinpayPaymentFact } from "./joinpay-collection-source";
 import { assertNativePaymentDistributionStore } from "../finance/distribution-payment-store";
+import { REGRESSION_DATABASE, REGRESSION_MARKER, REGRESSION_RUNTIME_USER } from "../config/test-resource";
 
 export type PaymentInput = Readonly<{
   orderId: string;
@@ -20,7 +21,7 @@ export type PaymentInput = Readonly<{
 }>;
 type ControlledPaymentFact = PaymentInput & { readonly source: "CONTROLLED"; readonly merchantScopeId: string };
 type VerifiedPaymentFact = ControlledPaymentFact | FormalJoinpayPaymentFact;
-const verifiedFacts = new WeakMap<object, { appId: string; database: string; runtimeUser: string }>();
+const verifiedFacts = new WeakMap<object, { appId: string; database: string; runtimeUser: string; regressionOid?: number }>();
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const INPUT_KEYS = ["orderId", "merchantOrderNo", "providerTransactionId", "amountCents", "currency", "providerPaidAt", "requestId"];
 
@@ -31,19 +32,25 @@ export function createControlledPaymentSource(options: {
   appId: string;
   merchantScopeId: string;
   allowedOrderIds: readonly string[];
+  resourceOid?: number;
 }): (input: PaymentInput) => ControlledPaymentFact {
   const { config, resourceSet, appId, merchantScopeId } = options;
+  const regression = resourceSet === "regression";
+  const resourceMatches = regression
+    ? config.database.name === REGRESSION_DATABASE && config.database.user === REGRESSION_RUNTIME_USER
+      && Number.isSafeInteger(options.resourceOid) && options.resourceOid! > 0 && options.allowedOrderIds.length <= 100 && process.env.NODE_ENV !== "production"
+    : config.database.name === `zzsh_test_order_${resourceSet}` && config.database.user === `zzsh_order_${resourceSet}_r`;
   if (config.profile !== "test" || config.provider !== "fake" || !config.testOperationsEnabled
     || config.database.target !== "local-compose" || config.database.host !== "127.0.0.1" || config.database.port !== 55432
     || !/^[a-z][a-z0-9_]{0,20}$/.test(resourceSet)
-    || config.database.name !== `zzsh_test_order_${resourceSet}`
-    || config.database.user !== `zzsh_order_${resourceSet}_r`
+    || !resourceMatches
     || !ID.test(appId) || !ID.test(merchantScopeId) || !options.allowedOrderIds.length
     || options.allowedOrderIds.some((id) => !ID.test(id))) {
     throw new ConfigurationError("Controlled payment requires an explicit isolated test/fake resource and order allowlist");
   }
   const allowed = new Set(options.allowedOrderIds);
-  const scope = Object.freeze({ appId, database: config.database.name, runtimeUser: config.database.user });
+  const scope = Object.freeze({ appId, database: config.database.name, runtimeUser: config.database.user,
+    ...(regression ? { regressionOid: options.resourceOid } : {}) });
   return (input) => {
     if (!input || Object.keys(input).some((key) => !INPUT_KEYS.includes(key))
       || !allowed.has(input.orderId)
@@ -58,6 +65,20 @@ export function createControlledPaymentSource(options: {
     verifiedFacts.set(fact, scope);
     return fact;
   };
+}
+
+/** Only the original process-local fact can authorize service-level checks on the one regression resource. */
+export async function assertControlledSettlementResource(client: PoolClient, fact: unknown, orderId: string): Promise<void> {
+  const scope = fact && typeof fact === "object" ? verifiedFacts.get(fact) : undefined;
+  if (!scope?.regressionOid || (fact as PaymentInput).orderId !== orderId || process.env.NODE_ENV === "production") throw invalid("Controlled settlement fact is not bound");
+  await assertRegressionPaymentResource(client,scope);
+}
+
+async function assertRegressionPaymentResource(client: PoolClient, scope: { database: string; runtimeUser: string; regressionOid?: number }): Promise<void> {
+  const row = (await client.query(`SELECT d.oid::int AS oid,current_database() AS database,current_user AS role,
+    shobj_description(d.oid,'pg_database') AS marker FROM pg_database d WHERE datname=current_database()`)).rows[0];
+  if (!row || row.oid !== scope.regressionOid || row.database !== REGRESSION_DATABASE || row.database !== scope.database
+    || row.role !== REGRESSION_RUNTIME_USER || row.role !== scope.runtimeUser || row.marker !== REGRESSION_MARKER) throw invalid("Controlled regression resource mismatch");
 }
 
 /** Stable namespace reserved for OIM-2B's order/consultation dispatch gate. */
@@ -75,8 +96,10 @@ export type PaymentResult = {
 /** Caller owns one transaction; audit failure rolls back the entire acceptance. */
 export async function confirmOrderPayment(client: PoolClient, fact: VerifiedPaymentFact, distribution?: PaymentDistributionStore): Promise<PaymentResult> {
   const formalScope = fact?.source === "JOINPAY" ? await readVerifiedJoinpayFactScope(client, fact) : null;
-  const scope = formalScope ?? (fact && verifiedFacts.get(fact));
+  const controlledScope = fact && verifiedFacts.get(fact);
+  const scope = formalScope ?? controlledScope;
   if (!scope) throw invalid("Payment fact is not verified");
+  if (controlledScope?.regressionOid !== undefined) await assertRegressionPaymentResource(client,controlledScope);
   if (formalScope) assertNativePaymentDistributionStore(distribution, formalScope.admissionSha256);
   const identity = (await client.query(`SELECT current_database() AS db, current_user AS actor`)).rows[0];
   if (identity.db !== scope.database || identity.actor !== scope.runtimeUser) throw invalid("Payment resource mismatch");

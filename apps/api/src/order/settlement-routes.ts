@@ -21,6 +21,7 @@ import {
   recordOpening,
   reviewSettlement,
   settlementSurfaceOpen,
+  settlementReadIdentity,
   submitSettlement,
 } from "./settlement-record";
 
@@ -29,7 +30,7 @@ type Request = Parameters<typeof requestPath>[0];
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 function settlementPostCommit(options:Options,orderId:string,actor:{realm:'user'|'admin';userId:string;sessionId:string},requestId:string){
-  const growth=membershipGrowthPostCommitCallback(options.pool,orderId,actor,requestId);
+  const growth=membershipGrowthPostCommitCallback(options.pool,orderId,{realm:actor.realm,userId:actor.userId,sessionId:actor.sessionId},requestId);
   const distribution=distributionSettlementPostCommitCallback(options.pool,orderId,requestId,options.distributionEarnings);
   if(!growth&&!distribution)return undefined;
   return async()=>{try{await growth?.();}finally{await distribution?.();}};
@@ -69,14 +70,14 @@ export async function handleSettlementUserRoute(request: Request, response: Supp
   const opening = /^\/([A-Za-z0-9._:-]+)\/openings\/([A-Za-z0-9._:-]+)\/confirm$/.exec(path);
   const read = /^\/([A-Za-z0-9._:-]+)\/settlement$/.exec(path);
   if (!preview && !submit && !decision && !opening && !read) return false;
-  if (!settlementSurfaceOpen(options.settlementRecordingEnabled)) throw notFound();
+  if (!(method==="GET"&&read)&&!settlementSurfaceOpen(options.settlementRecordingEnabled, options.settlementAdmission)) throw notFound();
   const requestId = ensureApiV1RequestId(request);
   response.setHeader("X-Request-Id", requestId);
   if (method !== "GET" && !requireOrigin(request, response, options, requestId)) return true;
   const context = await readUserContext(request, options);
-  const actor = { realm: "user" as const, userId: context.userId, sessionId: context.sessionId };
+  const actor = { realm: "user" as const, userId: context.userId, sessionId: context.sessionId, settlementAdmission: options.settlementAdmission,settlementReadIdentity:settlementReadIdentity(options.pool) };
   if (method === "GET" && read) {
-    const result = await withTransaction(options.pool, async (client) => projectSettlementResponse(client, actor, await readSettlement(client, idOf(read[1]!), actor)));
+    const result = await withTransaction(options.pool, async (client) => projectSettlementResponse(client, actor, await readSettlement(client, idOf(read[1]!), actor), idOf(read[1]!)));
     sendJson(response, result.status, result.body, requestId);
     return true;
   }
@@ -84,7 +85,7 @@ export async function handleSettlementUserRoute(request: Request, response: Supp
     const body = bodyOf(request);
     ensureOnlyFields(body, ["lines"]);
     const result = await withTransaction(options.pool, async (client) => projectSettlementResponse(
-      client, actor, await previewSettlement(client, idOf(preview[1]!), actor, linesOf(body, "remainingQuantity")),
+      client, actor, await previewSettlement(client, idOf(preview[1]!), actor, linesOf(body, "remainingQuantity")), idOf(preview[1]!),
     ));
     sendJson(response, result.status, result.body, requestId);
     return true;
@@ -100,7 +101,7 @@ export async function handleSettlementUserRoute(request: Request, response: Supp
       { realm: "user", id: actor.userId, sessionId: actor.sessionId }, { lines: remaining, acceptedHash, ...(body.termsAccepted === undefined ? {} : { termsAccepted: body.termsAccepted }) },
       async (client) => { await recheckSettlement(client, orderId, actor); },
       (client) => submitSettlement(client, orderId, actor, remaining, acceptedHash, requestId, body.termsAccepted === true),
-      (client, result) => projectSettlementResponse(client, actor, result));
+      (client, result) => projectSettlementResponse(client, actor, result, orderId));
     return true;
   }
   if (method === "POST" && decision) {
@@ -119,7 +120,7 @@ export async function handleSettlementUserRoute(request: Request, response: Supp
       { realm: "user", id: actor.userId, sessionId: actor.sessionId }, { action: body.action, versionHash, reason, ...(body.termsAccepted === undefined ? {} : { termsAccepted: body.termsAccepted }) },
       async (client, replay) => { await recheckSettlement(client, orderId, actor, replay !== null); },
       (client) => decideSettlement(client, orderId, versionId, actor, body.action as "CONFIRM" | "REJECT", versionHash, reason, requestId, body.termsAccepted === true),
-      (client, result) => projectSettlementResponse(client, actor, result),
+      (client, result) => projectSettlementResponse(client, actor, result, orderId),
       settlementPostCommit(options, orderId, actor, requestId));
     return true;
   }
@@ -132,7 +133,7 @@ export async function handleSettlementUserRoute(request: Request, response: Supp
       { realm: "user", id: actor.userId, sessionId: actor.sessionId }, { versionNo: body.versionNo },
       async (client) => { await recheckSettlement(client, orderId, actor); },
       (client) => confirmOpening(client, orderId, openingId, body.versionNo as number, actor, requestId),
-      (client, result) => projectSettlementResponse(client, actor, result));
+      (client, result) => projectSettlementResponse(client, actor, result, orderId));
     return true;
   }
   throw notFound();
@@ -149,12 +150,12 @@ export async function handleSettlementAdminRoute(request: Request, response: Sup
   const review = /^\/([A-Za-z0-9._:-]+)\/settlements\/([A-Za-z0-9._:-]+)\/review$/.exec(path);
   const adjust = /^\/([A-Za-z0-9._:-]+)\/settlements\/adjustments$/.exec(path);
   if (!read && !preview && !openings && !openingConfirm && !classify && !review && !adjust) return false;
-  if (!settlementSurfaceOpen(options.settlementRecordingEnabled)) throw notFound();
+  if (!(method==="GET"&&read)&&!settlementSurfaceOpen(options.settlementRecordingEnabled, options.settlementAdmission)) throw notFound();
   const requestId = ensureApiV1RequestId(request);
   response.setHeader("X-Request-Id", requestId);
   if (method !== "GET" && !requireOrigin(request, response, options, requestId)) return true;
   const context = await readAdminContext(request, options);
-  const actor = { realm: "admin" as const, userId: context.userId, sessionId: context.sessionId };
+  const actor = { realm: "admin" as const, userId: context.userId, sessionId: context.sessionId, settlementAdmission: options.settlementAdmission,settlementReadIdentity:settlementReadIdentity(options.pool) };
   const orderId = idOf((read ?? preview ?? openings ?? openingConfirm ?? classify ?? review ?? adjust)![1]!);
   if (method === "POST" && preview) {
     const body = bodyOf(request);
@@ -185,7 +186,7 @@ export async function handleSettlementAdminRoute(request: Request, response: Sup
       { realm: "admin", id: actor.userId, sessionId: actor.sessionId }, { lines },
       async (client) => { await recheckSettlement(client, orderId, actor); },
       (client) => recordOpening(client, orderId, actor, lines, requestId),
-      (client, result) => projectSettlementResponse(client, actor, result));
+      (client, result) => projectSettlementResponse(client, actor, result, orderId));
     return true;
   }
   if (method === "POST" && openingConfirm) {
@@ -200,7 +201,7 @@ export async function handleSettlementAdminRoute(request: Request, response: Sup
       { realm: "admin", id: actor.userId, sessionId: actor.sessionId }, { party, versionNo: body.versionNo },
       async (client) => { await recheckSettlement(client, orderId, actor); },
       (client) => confirmOpeningOnBehalf(client, orderId, openingId, body.versionNo as number, party, actor, requestId),
-      (client, result) => projectSettlementResponse(client, actor, result));
+      (client, result) => projectSettlementResponse(client, actor, result, orderId));
     return true;
   }
   if (method === "POST" && classify) {
@@ -213,7 +214,7 @@ export async function handleSettlementAdminRoute(request: Request, response: Sup
       { realm: "admin", id: actor.userId, sessionId: actor.sessionId }, { lines: remaining, endReason: body.endReason, acceptedHash },
       async (client) => { await recheckSettlement(client, orderId, actor); },
       (client) => classifySettlement(client, orderId, actor, remaining, body.endReason as "TENANT_VOLUNTARY_EARLY" | "OWNER_OR_ACCOUNT_EARLY", acceptedHash, requestId),
-      (client, result) => projectSettlementResponse(client, actor, result));
+      (client, result) => projectSettlementResponse(client, actor, result, orderId));
     return true;
   }
   if (method === "POST" && review) {
@@ -225,7 +226,7 @@ export async function handleSettlementAdminRoute(request: Request, response: Sup
       { realm: "admin", id: actor.userId, sessionId: actor.sessionId }, { versionHash },
       async (client, replay) => { await recheckSettlement(client, orderId, actor, replay !== null); },
       (client) => reviewSettlement(client, orderId, versionId, actor, versionHash, requestId),
-      (client, result) => projectSettlementResponse(client, actor, result),
+      (client, result) => projectSettlementResponse(client, actor, result, orderId),
       settlementPostCommit(options, orderId, actor, requestId));
     return true;
   }
@@ -249,7 +250,7 @@ export async function handleSettlementAdminRoute(request: Request, response: Sup
         remaining, endReason, proposedOwnerNet: body.proposedOwnerNet as string, proposedRenterRefund: body.proposedRenterRefund as string,
         reason: (body.reason as string).trim(), acceptedHash, requestId,
       }),
-      (client, result) => projectSettlementResponse(client, actor, result));
+      (client, result) => projectSettlementResponse(client, actor, result, orderId));
     return true;
   }
   throw notFound();

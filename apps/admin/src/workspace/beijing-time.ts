@@ -9,6 +9,14 @@ const formatter = new Intl.DateTimeFormat("en-CA", {
   day: "2-digit",
 });
 
+/** Business timestamps use Beijing time even when an operator's browser is elsewhere. */
+export function formatBeijingDateTime(value: string | null | undefined, options: Intl.DateTimeFormatOptions = { dateStyle: "medium", timeStyle: "short" }): string {
+  if (!value) return "未提供";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "时间未知"
+    : new Intl.DateTimeFormat("zh-CN", { ...options, timeZone: BEIJING_TIME_ZONE }).format(date);
+}
+
 export function beijingCalendarDate(now = new Date()): string {
   return formatter.format(now);
 }

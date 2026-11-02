@@ -54,6 +54,7 @@ import {
   WalletCell,
   errorText,
   isDirectoryInputError,
+  time,
   useDirectoryRequest,
   type PageProps,
   type UserDirectoryData,
@@ -66,7 +67,8 @@ export function EnumSelect({ label, value, onChange, options }: { label: string;
 const TIER_OPTIONS: [string, string][] = [['PENDING', '等级待核'], ['STANDARD', '普通会员'], ['SILVER', '银卡会员'], ['GOLD', '金卡会员'], ['PLATINUM', '铂金会员'], ['DIAMOND', '钻石会员'], ['BLACK_GOLD', '黑金会员']];
 const ENTITLEMENT_OPTIONS: [string, string][] = [['ANY', '有有效礼遇'], ['FRIEND', '挚友礼遇'], ['PRESTIGE', '尊享礼遇'], ['NONE', '无有效礼遇']];
 const RISK_OPTIONS: [string, string][] = [['FLAGGED', '高危'], ['NOT_FLAGGED', '非高危']];
-const DRAFT_FILTER_KEYS = ['status', 'from', 'to', 'identity', 'tier', 'entitlement', 'creditMin', 'creditMax', 'risk'] as const;
+const DRAFT_FILTER_KEYS = ['status', 'from', 'to', 'identity', 'tier', 'entitlement', 'creditMin', 'creditMax', 'risk', 'registrationTime', 'registeredFrom', 'registeredTo'] as const;
+const directoryQueryKey = (query: Record<string, string>) => JSON.stringify([...Object.keys(EMPTY_FILTERS).sort().map(key => query[key] ?? ''), query.page ?? '', query.pageSize ?? '', query.cursor ?? '']);
 const SORT_LABEL: Record<string, string> = {
   active_orders_desc: '活跃订单优先',
   registered_desc: '注册时间新→旧', registered_asc: '注册时间旧→新',
@@ -83,7 +85,7 @@ const isoDay = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() +
  * 注册日期区间：起始日含当日，结束日含当日；只改草稿，查询时才提交。
  * 区间选完直接回到草稿，不再多一层“确定→查询”。
  */
-function RegistrationDateRange({ from, to, onChange }: { from: string; to: string; onChange: (patch: Partial<Filters>) => void }) {
+function RegistrationDateRange({ from, to, onChange, localFiling = false }: { from: string; to: string; onChange: (patch: Partial<Filters>) => void; localFiling?: boolean }) {
   const mobile = useIsMobile();
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<DateSelectorValue>({
@@ -108,9 +110,9 @@ function RegistrationDateRange({ from, to, onChange }: { from: string; to: strin
 
   const label = from || to ? `${from || '不限'} 至 ${to || '不限'}` : '不限';
   return (
-    <Field label="注册日期" className="ud-field">
+    <Field label={localFiling ? "建档日期" : "注册日期"} className="ud-field">
       <Popover open={open} onOpenChange={setOpen}>
-        <PopoverTrigger render={<Button type="button" variant="outline" className="ud-date-trigger" aria-label="注册日期" />}>
+        <PopoverTrigger render={<Button type="button" variant="outline" className="ud-date-trigger" aria-label={localFiling ? "建档日期" : "注册日期"} />}>
           <CalendarDaysIcon size={15} aria-hidden />
           {label}
         </PopoverTrigger>
@@ -294,7 +296,7 @@ function FilterFields({ filters, change, variant }: { filters: Filters; change: 
       {variant !== 'rest' ? (
         <>
           <ListToolbarEnumSelect label="账号状态" value={filters.status} onChange={status => change({ status })} options={Object.entries(STATUS_LABEL).filter(([key]) => key !== 'UNKNOWN')} />
-          <RegistrationDateRange from={filters.from} to={filters.to} onChange={change} />
+          <RegistrationDateRange from={filters.from} to={filters.to} localFiling={filters.registrationTime === 'LOCAL'} onChange={patch => change({ ...patch, registeredFrom: '', registeredTo: '' })} />
         </>
       ) : null}
       {variant !== 'primary' ? (
@@ -387,8 +389,8 @@ function BusinessSortHeader({ sort, onSort }: { sort: string; onSort: (next: str
 }
 
 /** 窄屏复用同一组表头排序，当前排序保持可见。 */
-function MobileSortRow({ sort, onSort }: { sort: string; onSort: (next: string) => void }) {
-  const columns: [string, string][] = [['registered', '注册时间'], ['balance', '可用余额'], ['credit', '信用'], ['renter_current', '租入'], ['owner_current', '出租'], ['published', '上架']];
+function MobileSortRow({ sort, onSort, localFiling = false }: { sort: string; onSort: (next: string) => void; localFiling?: boolean }) {
+  const columns: [string, string][] = [['registered', localFiling ? '本地建档时间' : '注册时间'], ['balance', '可用余额'], ['credit', '信用'], ['renter_current', '租入'], ['owner_current', '出租'], ['published', '上架']];
   return (
     <div className="ud-mobile-sorts" role="group" aria-label="排序">
       {columns.map(([column, label]) => {
@@ -440,6 +442,19 @@ export function UserList({ adapter, tab, onQueryChange, onOpenPath, refreshNonce
 
   const callback = useRef(onQueryChange);
   callback.current = onQueryChange;
+  const incomingQueryKey = directoryQueryKey(tab.query);
+  const previousQueryKey = useRef(incomingQueryKey);
+
+  useEffect(() => {
+    if (previousQueryKey.current === incomingQueryKey) return;
+    previousQueryKey.current = incomingQueryKey;
+    const next = { ...EMPTY_FILTERS, ...Object.fromEntries(Object.entries(tab.query).filter(([key]) => key in EMPTY_FILTERS)), sort: tab.query.sort ? normalizeRegistrationSort(tab.query.sort) : defaultSort };
+    setAppliedFilters(next); setDraftFilters(next); setDraftInput(next.q);
+    setPage(tab.query.page && /^[1-9]\d*$/.test(tab.query.page) ? Number(tab.query.page) : 1);
+    setPageSize(tab.query.pageSize && /^[1-9]\d*$/.test(tab.query.pageSize) ? Number(tab.query.pageSize) : 20);
+    setCursor(tab.query.cursor); contextKeyRef.current = undefined; recoveringContext.current = false;
+    setNotice('已按地址栏恢复当前筛选范围。');
+  }, [incomingQueryKey, defaultSort, tab.query]);
 
   useEffect(() => {
     const query: Record<string, string> = { ...safeFilters(appliedFilters) };
@@ -451,6 +466,7 @@ export function UserList({ adapter, tab, onQueryChange, onOpenPath, refreshNonce
       }
       if (pageSize !== 20) query.pageSize = String(pageSize);
     }
+    previousQueryKey.current = directoryQueryKey(query);
     callback.current(query);
   }, [filterKey, page, pageSize, cursor]);
 
@@ -617,12 +633,16 @@ export function UserList({ adapter, tab, onQueryChange, onOpenPath, refreshNonce
         ) : null}
       </ListToolbar>
 
+      {appliedFilters.registeredFrom || appliedFilters.registeredTo ? <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground" role="note"><span>经营概览下钻 · {appliedFilters.registrationTime === 'LOCAL' ? '本地建档' : '原注册'}时段：{appliedFilters.registeredFrom ? time(appliedFilters.registeredFrom) : '不限'} 至 {appliedFilters.registeredTo ? time(appliedFilters.registeredTo) : '本次读取'}</span><Button type="button" variant="ghost" size="xs" onClick={() => handleFilterChange({ registeredFrom: '', registeredTo: '' })}>清除时段</Button></div> : null}
+
       <div className="ud-list-status" role="status" aria-live="polite">
         <div className="ud-status-left">
           {result.state === 'loading' ? (
             <span>{rows ? '更新中，暂保留原结果' : '正在加载用户'}</span>
           ) : draftPending ? (
             <span>条件已更改，点击查询应用</span>
+          ) : appliedFilters.registrationTime === 'LOCAL' ? (
+            <span>按本地建档时间最新优先；含导入记录，不代表旧平台首次注册时间。</span>
           ) : appliedFilters.sort !== defaultSort ? (
             <div className="ud-active-sort-info">
               <span>当前排序：</span>
@@ -662,7 +682,7 @@ export function UserList({ adapter, tab, onQueryChange, onOpenPath, refreshNonce
       {rows?.length ? (
         mobile ? (
           <>
-            <MobileSortRow sort={appliedFilters.sort} onSort={applySort} />
+            {appliedFilters.registrationTime === 'LOCAL' ? <p className="text-xs text-muted-foreground">本地建档最新优先</p> : <MobileSortRow sort={appliedFilters.sort} onSort={applySort} />}
             <div className="ud-mobile-list">
             {rows.map(user => (
               <section className="ud-mobile-row" key={user.id} aria-label={`用户 ${user.name}`}>
@@ -686,7 +706,7 @@ export function UserList({ adapter, tab, onQueryChange, onOpenPath, refreshNonce
                       />
                     </dd>
                   </div>
-                  <div><dt>注册时间</dt><dd><RegistrationCell user={user} /></dd></div>
+                  <div><dt>{appliedFilters.registrationTime === 'LOCAL' ? '本地建档时间' : '注册时间'}</dt><dd><RegistrationCell user={user} /></dd></div>
                 </dl>
                 <div className="ud-mobile-actions">
                   <Button variant="outline" size="sm" aria-label={`快速核对用户 ${user.name}`} onClick={() => setSelected(user.id)}>快速核对</Button>
@@ -704,10 +724,15 @@ export function UserList({ adapter, tab, onQueryChange, onOpenPath, refreshNonce
                   <TableHead>用户</TableHead>
                   <TableHead>账号与实名</TableHead>
                   <TableHead>会员与礼遇</TableHead>
-                  <SortHeader label="信用" column="credit" sort={appliedFilters.sort} onSort={applySort} hint="低于80分需关注，低于60分为高风险。" />
-                  <SortHeader label="可用余额" column="balance" sort={appliedFilters.sort} onSort={applySort} hint="当前可用余额，不含已申请提现部分。" />
-                  <BusinessSortHeader sort={appliedFilters.sort} onSort={applySort} />
-                  <SortHeader label="注册时间" column="registered" sort={appliedFilters.sort} onSort={applySort} hint={HEADER_HINTS['注册时间']} />
+                  {appliedFilters.registrationTime === 'LOCAL' ? <>
+                    <TableHead>信用</TableHead><TableHead>可用余额</TableHead><TableHead>当前业务</TableHead>
+                    <TableHead aria-sort="descending">本地建档时间<ArrowDownIcon className="ml-1 inline" size={12} aria-hidden /></TableHead>
+                  </> : <>
+                    <SortHeader label="信用" column="credit" sort={appliedFilters.sort} onSort={applySort} hint="80分为当前号主保证金的信用门槛，具体准入以服务端规则为准。" />
+                    <SortHeader label="可用余额" column="balance" sort={appliedFilters.sort} onSort={applySort} hint="当前可用余额，不含已申请提现部分。" />
+                    <BusinessSortHeader sort={appliedFilters.sort} onSort={applySort} />
+                    <SortHeader label="注册时间" column="registered" sort={appliedFilters.sort} onSort={applySort} hint={HEADER_HINTS['注册时间']} />
+                  </>}
                   <TableHead>操作</TableHead>
                 </TableRow>
               </TableHeader>

@@ -9,9 +9,9 @@ export class WebAuthError extends Error {
     this.challenge = challenge;
   }
 }
-export async function webAuthRequest<T>(path: string, body?: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
+export async function webAuthRequest<T>(path: string, body?: Record<string, unknown>, signal?: AbortSignal, extraHeaders: Record<string, string> = {}): Promise<T> {
   let response: Response;
-  try { response = await fetch("/api/auth/user" + path, { method: body === undefined ? "GET" : "POST", credentials: "same-origin", cache: "no-store", headers: body === undefined ? undefined : { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body), signal }); }
+  try { response = await fetch("/api/auth/user" + path, { method: body === undefined ? "GET" : "POST", credentials: "same-origin", cache: "no-store", headers: body === undefined ? Object.keys(extraHeaders).length ? extraHeaders : undefined : { ...extraHeaders, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body), signal }); }
   catch { throw new WebAuthError(0, "NETWORK_ERROR"); }
   let payload: unknown;
   try { payload = await response.json(); } catch { throw new WebAuthError(response.status, "RESPONSE_UNCONFIRMED", response.ok); }
@@ -20,7 +20,7 @@ export async function webAuthRequest<T>(path: string, body?: Record<string, unkn
     const error = record?.error;
     const retry = Number(response.headers.get("retry-after"));
     const challenge = record?.challenge?.parameters?.nonce ? record.challenge : undefined;
-    throw new WebAuthError(response.status, error?.code ?? "INTERNAL_ERROR", error?.accepted === true, response.status === 429 && retry > 0 ? Date.now() + retry * 1000 : undefined, error?.reason, challenge);
+    throw new WebAuthError(response.status, error?.code ?? "INTERNAL_ERROR", error?.accepted === true, response.status === 429 && Number.isFinite(retry) && retry > 0 ? Date.now() + retry * 1000 : undefined, error?.reason, challenge);
   }
   if (payload === null && path === "/get-session" && body === undefined) return payload as T;
   if (!payload || typeof payload !== "object") throw new WebAuthError(response.status, "RESPONSE_UNCONFIRMED", true);

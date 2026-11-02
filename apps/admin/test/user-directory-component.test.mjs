@@ -1036,8 +1036,8 @@ test('ADM-SUMMARY: the credit score boundaries follow the agreed tones and a zer
   assert.equal(tone(rows[0]), 'success', '80 is the normal tone');
   assert.equal(tone(rows[1]), 'warning', '79 is the warning tone');
   assert.equal(tone(rows[2]), 'warning', '60 is the warning tone');
-  assert.equal(tone(rows[3]), 'destructive', '59 is the danger tone');
-  assert.equal(tone(rows[4]), 'destructive', 'a real zero stays zero and is not softened');
+  assert.equal(tone(rows[3]), 'warning', '59 does not invent a second business threshold');
+  assert.equal(tone(rows[4]), 'warning', 'a real zero remains visible without inventing a 60-point policy');
   assert.ok(rows[4].textContent.includes('0 分'));
 });
 
@@ -1366,4 +1366,48 @@ test('credit range sends inclusive bounds and rejects a reversed range without a
   await input(browser.document.querySelector('[aria-label="最低信用分"]'),'80');
   await click(namedButton('确定'));await waitFor(()=>browser.document.querySelector('[role="alert"]'));
   assert.equal(calls.length,before);assert.ok(browser.document.querySelector('[role="alert"]').textContent.includes('最低分不能大于最高分'));
+});
+
+test('BLACK_GOLD effective tier is a known lifetime qualification in the directory', async t => {
+  const row = { ...user, userId: 'black_gold_user', membershipSummary: { state: 'ready', growth: { knowledge: 'KNOWN', effectiveTier: 'BLACK_GOLD' }, entitlements: [] } };
+  await mount(t, { permissions: [...permissions, 'membership.growth.read.summary'], fetch: async () => json({ items: [row], total: 1, nextCursor: null, limit: 20 }) });
+  await waitFor(() => browser.document.querySelector('tbody tr'));
+  const content = browser.document.querySelector('tbody tr .ud-growth-cell').textContent;
+  assert.match(content, /黑金会员·终身/); assert.doesNotMatch(content, /等级待核/);
+});
+
+test('phone disclosure and sensitive-source availability are displayed without treating unread as missing identity', async t => {
+  const profile = { userId: 'user_normal', phoneNumber: '13800000000', realName: null, identityNumber: null, availability: { phoneNumber: 'AVAILABLE', realName: 'NOT_RECORDED', identityNumber: 'NOT_RECORDED' } };
+  const { calls } = await mount(t, { path: '/users/user_normal?section=security', permissions: [...permissions, 'user.identity.sensitive.read'], fetch: async address => {
+    if (address.pathname.endsWith('/sensitive-profile')) return json(profile);
+    if (address.pathname.endsWith('/audit-events')) return json({ items: [], nextCursor: null });
+    return json({ user: { ...detail, phoneRevealed: true, maskedPhone: '13800000000' } });
+  } });
+  await waitFor(() => browser.document.body.textContent.includes('联系电话（已授权）'));
+  await click(namedButton('展开实名与联系方式'));
+  await waitFor(() => browser.document.querySelector('.udv-identity-fields'));
+  assert.match(browser.document.querySelector('.udv-identity-fields').textContent, /尚未读取/);
+  await click(namedButton('查看明文'));
+  await waitFor(() => browser.document.querySelector('.udv-identity-fields').textContent.includes('当前资料源未收录'));
+  const fields = browser.document.querySelector('.udv-identity-fields').textContent;
+  assert.match(fields, /联系电话（已授权）13800000000/);
+  assert.doesNotMatch(fields, /暂无资料|未实名/);
+  assert.equal(calls.filter(call => call.url.endsWith('/sensitive-profile')).length, 1);
+});
+
+test('overview filing drilldown uses local created time instead of the ordinary original-registration predicate', async t => {
+  const from = '2026-10-27T16:00:00.000Z', to = '2026-11-02T02:00:00.000Z';
+  const { calls } = await mount(t, { path: '/users?registrationTime=LOCAL&registeredFrom=' + encodeURIComponent(from) + '&registeredTo=' + encodeURIComponent(to), fetch: async address => {
+    if (address.searchParams.get('sort') !== 'created' || address.searchParams.has('registrationTime')) return json({ error: { code: 'INVALID_ARGUMENT' } }, 400);
+    return json({ paginationMode: 'page', items: [{ ...user, registeredAtSource: 'LOCAL' }], total: 1, page: 1, pageSize: 20, contextKey: 'a'.repeat(64), nextCursor: null, limit: 20 });
+  } });
+  await waitFor(() => browser.document.querySelector('tbody tr'));
+  const request = new URL(calls.find(call => call.url.includes('/users?')).url, browser.location.href);
+  assert.equal(request.searchParams.has('registrationTime'), false, 'LOCAL is the API default, not an unsupported enum');
+  assert.equal(request.searchParams.get('registeredFrom'), from); assert.equal(request.searchParams.get('registeredTo'), to);
+  assert.equal(request.searchParams.has('registeredBefore'), false);
+  assert.equal(request.searchParams.get('sort'), 'created', 'LOCAL only supports the existing local-created descending contract');
+  assert.equal(Boolean(namedButton('按信用排序')), false); assert.equal(Boolean(namedButton('按可用余额排序')), false);
+  assert.match(browser.document.body.textContent, /本地建档时间最新优先/);
+  assert.match(browser.document.body.textContent, /本地建档时间|本地建档时段/);
 });

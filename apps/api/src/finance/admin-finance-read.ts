@@ -436,7 +436,7 @@ export function financeSnapshot(facts: FinanceFacts, filters: FinanceFilters, ac
       if (token.length > 4096 || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/.test(token)) throw Error();
       const [payload, signature] = token.split(".") as [string, string];
       const expected = createHmac("sha256", key.secret).update(payload).digest(), actual = Buffer.from(signature, "base64url");
-      if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw Error();
+      if (actual.toString("base64url") !== signature || Buffer.from(payload, "base64url").toString("base64url") !== payload || actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw Error();
       snapshot = JSON.parse(Buffer.from(payload, "base64url").toString()) as Snapshot;
       if (snapshot.audience !== binding.audience || snapshot.keyId !== binding.keyId || !Number.isFinite(snapshot.expiresAt) || snapshot.expiresAt <= now || snapshot.expiresAt > now + 600_000 || typeof snapshot.asOf !== "string" || !Number.isFinite(Date.parse(snapshot.asOf))) throw stale();
       for (const [name, value] of Object.entries(binding)) if (snapshot[name as keyof Snapshot] !== value) throw stale();

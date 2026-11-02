@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { withTransaction } from "../src/auth/security-core";
 import { describePayoutProfile, readWithdrawalAdmission } from "../src/finance/joinpay-payout-profile";
 import { saveWithdrawalBankBinding } from "../src/finance/withdrawal-bank-binding";
-import { createBankBoundWithdrawalOptions, JOINPAY_BANK_PASSTHROUGH_IMPLEMENTATION } from "../src/finance/joinpay-withdrawal-bank-source";
+import { createBankBoundWithdrawalOptions, JOINPAY_BANK_PASSTHROUGH_IMPLEMENTATION,readUnavailableWithdrawalContext } from "../src/finance/joinpay-withdrawal-bank-source";
 import { actor, input, fixture } from "./fixtures/withdrawal-bank-binding-model";
 
 // SYNTHETIC_SOURCE_COMPONENT：资格行和profile是内存假设，绝非真实KYC/银行验证/出款证据。
@@ -11,6 +11,21 @@ import { configuration, verified, bound } from "./fixtures/joinpay-withdrawal-ba
 import { quoteNativeWithdrawalInTransaction, reserveNativeWithdrawalInTransaction, readNativeWithdrawalRecovery } from "../src/finance/native-withdrawal-store";
 import * as wallet from "../src/finance/personal-finance-read";
 import * as recovery from "../src/finance/distribution-recovery-gate";
+
+test("without payout assembly, options preserve local masked bank/identity but never invent a policy, quota or authority",async()=>{
+ const {f}=await bound(),keys=f.keys(),before=f.state.queries.length;
+ const result=await withTransaction(f.pool,c=>readUnavailableWithdrawalContext(c,actor));
+ assert.equal(result.bankBinding.binding?.cardMask,"**** **** 0015");assert.equal(result.bankBinding.binding?.ownershipVerification,"NOT_VERIFIED");
+ assert.equal(result.identity?.identityStatus,"UNVERIFIED");assert.equal(result.canQuote,false);
+ assert.equal(result.policy,null);assert.equal(result.quota,null);assert.ok(result.reasonCodes.includes("WITHDRAWAL_CHANNEL_NOT_CONFIGURED"));
+ assert.equal(f.keys(),keys);assert.equal(f.state.queries.slice(before).some(q=>/^(INSERT|UPDATE|DELETE|ALTER)/.test(q.sql)),false);
+ const empty=fixture();const none=await withTransaction(empty.pool,c=>readUnavailableWithdrawalContext(c,actor));
+ assert.equal(none.bankBinding.binding,null);assert.equal(none.bankBinding.expectedRevision,"0");assert.ok(none.reasonCodes.includes("BANK_BINDING_REQUIRED"));
+ empty.state.integrated=false;const missing=await withTransaction(empty.pool,c=>readUnavailableWithdrawalContext(c,actor));
+ assert.equal(missing.bankBinding.integration,"NOT_INTEGRATED");assert.equal(missing.bankBinding.expectedRevision,null);
+ assert.equal(missing.canQuote,false);assert.ok(missing.reasonCodes.includes("BANK_BINDING_NOT_INTEGRATED"));
+ empty.state.authenticated=false;await assert.rejects(withTransaction(empty.pool,c=>readUnavailableWithdrawalContext(c,actor)));
+});
 test("fake/未核身份不解密银行资料、不生成出款资格；上下文保留真实未知原因", async () => {
   const { f, id } = await bound(), o = createBankBoundWithdrawalOptions(configuration(f)), keys = f.keys();
   await assert.rejects(withTransaction(f.pool, async c => o.loadAdmission!(c, actor.userId, { destinationId: id, policyVersion: "unit_policy" })), /IDENTITY_NOT_VERIFIED/);

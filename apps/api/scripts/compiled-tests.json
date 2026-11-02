@@ -275,5 +275,11 @@
   "dist/test/im-read-copy.test.js",
   "dist/test/im-migration-integration.test.js",
   "dist/test/im-merge-contracts.test.js",
-  "dist/test/profile-avatar-mounted.test.js"
+  "dist/test/profile-avatar-mounted.test.js",
+  "dist/test/admin-overview.test.js",
+  "dist/test/business-initial.test.js",
+  "dist/test/legacy-account-seam.test.js",
+  "dist/test/aliyun-user-providers.test.js",
+  "dist/test/identity-verification-attempt.test.js",
+  "dist/test/user-provider-runtime.test.js"
 ]

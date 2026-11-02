@@ -1,4 +1,6 @@
 import {test} from 'node:test';import {strict as assert} from 'node:assert';import {createHash} from 'node:crypto';import type {Pool} from 'pg';import type {AppConfig} from '../src/config/config';import {canonicalize} from '../src/supply/content-hash';import {createDeclaredControlledPaymentReader} from '../src/finance/controlled-payment-source';
+import type {PoolClient} from 'pg';
+import {createControlledPaymentSource,assertControlledSettlementResource} from '../src/order/payment-confirmation';
 const input={orderId:'order',merchantOrderNo:'ZZ001',providerTransactionId:'transaction',amountCents:'10000',currency:'CNY',providerPaidAt:'2026-10-04T00:00:00.000Z',requestId:'request'},canonical=canonicalize(input),digest=createHash('sha256').update(canonical).digest('hex'),opts={config:{profile:'test',provider:'fake',testOperationsEnabled:true,database:{target:'local-compose',host:'127.0.0.1',port:55432,name:'zzsh_test_order_existing_order',user:'zzsh_order_existing_order_r'}} as AppConfig,resourceSet:'existing_order',resourceOid:12345,appId:'app',merchantScopeId:'merchant',allowedOrderIds:['order'],approvalDigest:'a'.repeat(64),allowedSourceIds:['source']};
 function probe(patch:Record<string,unknown>={},complete=true,payment:Record<string,unknown>|null=null){const sqls:string[]=[],pool={connect:async()=>({release(){},query:async(sql:string)=>{sqls.push(sql);if(sql.startsWith('SELECT d.oid'))return{rows:[{oid:12345,name:opts.config.database.name,role:opts.config.database.user,marker:'zzsh:order-reservation-test:v1',complete}]};if(sql.startsWith('SELECT *'))return{rows:[{id:'source',mode:'LOCAL_CONTROLLED_DECLARED_PAYMENT',app_id:'app',merchant_scope_id:'merchant',approval_digest:opts.approvalDigest,resource_oid:12345,canonical_payment:canonical,payment_digest:digest,order_id:'order',provider_transaction_id:'transaction',merchant_order_no:'ZZ001',source_event_key:'original-event',...patch}]};if(sql.startsWith('SELECT id,order_id,disposition'))return{rows:payment?[payment]:[]};return{rows:[]};}})} as unknown as Pool;return{pool,sqls};}
 test('new reader reconstructs the original bounded payment capability solely from durable declared source, without writes',async()=>{const p=probe(),a=await createDeclaredControlledPaymentReader(p.pool,opts).read('source'),b=await createDeclaredControlledPaymentReader(p.pool,opts).read('source');assert.deepEqual(a.fact,b.fact);assert.equal(a.fact.providerTransactionId,'transaction');assert.equal(a.sourceDigest,digest);assert(!p.sqls.some(q=>/^INSERT|^UPDATE|^DELETE/.test(q)));});
@@ -8,5 +10,21 @@ test('absence of original acceptance remains UNKNOWN responsibility and never au
 const accepted={id:'payment',order_id:input.orderId,merchant_order_no:input.merchantOrderNo,amount_cents:input.amountCents,currency:input.currency,provider_paid_at:input.providerPaidAt,disposition:'APPLIED'};
 test('same transaction key cannot recover a different original amount, currency, time, merchant number or order',async()=>{for(const changed of [{order_id:'different'},{merchant_order_no:'ZZ002'},{amount_cents:'10001'},{currency:'USD'},{provider_paid_at:'2026-10-04T00:00:00.001Z'}]){const p=probe({},true,{...accepted,...changed});await assert.rejects(createDeclaredControlledPaymentReader(p.pool,opts).recover('source'),e=>(e as {status?:number}).status===409);assert(!p.sqls.some(q=>/^(INSERT|UPDATE|DELETE)/.test(q)));}});
 test('matching original APPLIED payment without basis stays explicit UNKNOWN and cannot reapply',async()=>{const p=probe({},true,accepted),result=await createDeclaredControlledPaymentReader(p.pool,opts).recover('source');assert.equal(result.acceptanceKnowledge,'KNOWN');assert.equal(result.disposition,'APPLIED');assert.equal(result.basisKnowledge,'UNKNOWN_MISSING_ORIGINAL_BASIS');assert.equal(result.mayReapply,false);});
+
+test('canonical regression payment fact is bounded to current OID, marker, runtime and original order',async()=>{
+ const config={...opts.config,database:{...opts.config.database,name:'zzsh_test_regression',user:'zzsh_regression_runtime'}};
+ const binding={...opts,config,resourceSet:'regression',resourceOid:77};
+ const fact=createControlledPaymentSource(binding)(input);
+ let queries=0;
+ const client=(changed:Record<string,unknown>={})=>({query:async()=>{queries++;return{rows:[{oid:77,database:'zzsh_test_regression',role:'zzsh_regression_runtime',marker:'zzsh:regression-test:v1',...changed}]};}} as unknown as PoolClient);
+ await assertControlledSettlementResource(client(),fact,input.orderId);
+ for(const changed of [{oid:78},{database:'zzsh_dev_daily'},{role:'zzsh_regression_migration'},{marker:'other'}])await assert.rejects(assertControlledSettlementResource(client(changed),fact,input.orderId));
+ const before=queries;
+ await assert.rejects(assertControlledSettlementResource(client(),{...fact},input.orderId));
+ await assert.rejects(assertControlledSettlementResource(client(),fact,'different'));
+ assert.equal(queries,before,'a copied fact or other order cannot reach the resource query');
+ assert.throws(()=>createControlledPaymentSource({...binding,resourceOid:undefined}));
+ assert.throws(()=>createControlledPaymentSource({...binding,config:{...config,provider:'real'}}));
+});
 
 

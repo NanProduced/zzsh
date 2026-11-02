@@ -5,6 +5,31 @@ import {getAdminReadOrder,projectAdminReadOrder,queryAdminReadOrders,orderReadRe
 import {LEGACY_ORDER_STATUS_SQL} from "../src/order/legacy-order-read";
 import {parseAdminOrderPageQuery} from "../src/order/order-routes";
 const viewer={adminId:"test-reader",isBoss:false,internalQuote:false,authorizationKey:"a".repeat(64)};
+
+test('overview drilldowns bind APPLIED native payment events and open holds before counting',async()=>{
+ const from='2026-11-01T00:00:00.000000Z',to='2026-11-02T00:00:00.123457Z';
+ const query=new URLSearchParams({origin:'NATIVE',paymentConfirmedFrom:from,paymentConfirmedTo:to,paymentOpen:'true'});
+ const filters=parseAdminOrderPageQuery(query);
+ assert.equal(filters.paymentConfirmedFrom,from);assert.equal(filters.paymentConfirmedTo,to);assert.equal(filters.paymentOpen,true);
+ for(const bad of ['paymentOpen=false','paymentOpen=1','paymentOpen=true&paymentOpen=true','origin=LEGACY&paymentOpen=true','paymentConfirmedFrom=invalid',`paymentConfirmedFrom=${encodeURIComponent(to)}&paymentConfirmedTo=${encodeURIComponent(from)}`])assert.throws(()=>parseAdminOrderPageQuery(new URLSearchParams(bad)));
+ const f=orderClient({keys:[],total:'0'});await queryAdminReadOrders(f.client,viewer,filters);
+ const statement=f.statements.find(row=>row.sql.includes('AS keys'))!;
+ assert.match(statement.sql,/game_scope_mode/);assert.match(statement.sql,/payable\.hold_until>transaction_timestamp\(\)/);
+ assert.match(statement.sql,/p\.id=paid\.paid_confirmation_id/);assert.match(statement.sql,/p\.disposition='APPLIED'/);
+ assert.match(statement.sql,/p\.currency='CNY'/);assert.match(statement.sql,/paid\.paid_at>=\$/);assert.match(statement.sql,/paid\.paid_at<\$/);
+ assert.ok(statement.values.includes(from));assert.ok(statement.values.includes(to));
+ assert.equal(f.statements.some(row=>/^(INSERT|UPDATE|DELETE)/.test(row.sql.trim())),false);
+});
+test('historical manual-close resolution queue keeps native cancellation and game scope before paging',async()=>{
+ assert.equal(parseAdminOrderPageQuery(new URLSearchParams('fundsResolution=MANUAL_CLOSE')).fundsResolution,'MANUAL_CLOSE');
+ for(const q of ['fundsResolution=UNKNOWN','fundsResolution=MANUAL_CLOSE&fundsResolution=MANUAL_CLOSE'])assert.throws(()=>parseAdminOrderPageQuery(new URLSearchParams(q)));
+ const f=orderClient();await queryAdminReadOrders(f.client,viewer,{page:1,pageSize:20,fundsResolution:'MANUAL_CLOSE'});
+ const sql=f.statements.find(row=>row.sql.includes('AS keys'))!.sql;
+ assert.match(sql,/x\.origin='NATIVE' AND x\.status='CANCELLED' AND x\.cancel_reason='MANUAL_CLOSE'/);
+ assert.match(sql,/admin_supply_scope/);
+ const item=projectAdminReadOrder('NATIVE',{...native,status:'CANCELLED',cancel_reason:'MANUAL_CLOSE'},viewer);
+ assert.equal(item.fundsResolution.status,'REVIEW_REQUIRED');
+});
 test('participant restriction combines with origin-bound page keys before either source expands',()=>{
  for(const ready of [false,true]){
   const restrict={nativeIds:'$4',legacyIds:'$5',participantUserId:'$1'};
@@ -80,8 +105,8 @@ function orderClient(options:{keys?:Key[];total?:string;records?:Array<{origin:s
  }} as unknown as PoolClient;
  return {client,statements};
 }
-test("legacy recorded paid amount requires finance read like native",()=>{
- for(const financeReadable of [undefined,false]){const row=projectAdminReadOrder("LEGACY",record,{...viewer,financeReadable});assert.equal(row.payment.state,"RECORDED_PAID");assert.equal(row.payment.recordedAmount,null);assert.equal(row.legacyAmounts.paid,null);}
+test("authorized order readers retain contractual paid amounts without global finance permission",()=>{
+ for(const financeReadable of [undefined,false]){const row=projectAdminReadOrder("LEGACY",record,{...viewer,financeReadable});assert.equal(row.payment.state,"RECORDED_PAID");assert.equal(row.payment.recordedAmount.amount,"66.00");assert.equal(row.legacyAmounts.paid.amount,"66.00");}
  const ok=projectAdminReadOrder("LEGACY",record,{...viewer,financeReadable:true});assert.equal(ok.payment.recordedAmount.amount,"66.00");assert.equal(ok.legacyAmounts.paid.amount,"66.00");
 });
 test("list money is fully withheld without finance read",()=>{
@@ -90,6 +115,17 @@ test("list money is fully withheld without finance read",()=>{
  assert.equal(row.amountsRestricted,"FINANCE_PERMISSION_REQUIRED");assert.equal(row.amounts.totalDue,null);assert.equal(row.amounts.rental,null);assert.equal(row.amounts.deposit,null);
  assert.equal(row.legacyAmounts,null);assert.equal(row.payment.recordedAmount,null);assert.equal(row.prepaymentReconciliation,null);assert.equal(row.extra.nested[0].price,null);
  assert.equal(JSON.stringify(row).includes('"amount":'),false,"no money object remains");
+});
+
+test("authorized list and detail expose the same order contract without granting channel evidence access", async () => {
+ const records=[{origin:"LEGACY",id:record.id,record}];
+ const list=await queryAdminReadOrders(orderClient({keys:[{origin:"LEGACY",id:record.id}],records}).client,
+   {...viewer,financeReadable:false},{page:1,pageSize:20,view:"list"});
+ const detail=await getAdminReadOrder(orderClient({records}).client,{...viewer,financeReadable:false},record.id);
+ assert.deepEqual(list.items[0]!.amounts,detail.order.amounts);
+ assert.deepEqual(list.items[0]!.legacyAmounts,detail.order.legacyAmounts);
+ assert.equal(list.items[0]!.amountsRestricted,undefined);
+ assert.equal(list.items[0]!.payment.recordedAmount.amount,"66.00");
 });
 test("legacy cancellation, payment and missing time remain separate facts",()=>{
  const paid=projectAdminReadOrder("LEGACY",record,{...viewer,financeReadable:true});assert.equal(paid.status,"CANCELLED");assert.equal(paid.payment.state,"RECORDED_PAID");assert.equal(paid.payment.recordedAt,null);assert.equal(paid.payment.recordedAmount.amount,"66.00");assert.equal(paid.amounts.deposit.amount,"0.00");assert.equal(paid.legacyAmounts.refund,null);assert.equal(paid.legacyAmounts.refundChannelState,"UNKNOWN");
@@ -284,7 +320,7 @@ test("原生实付仅来自原APPLIED付款；金额权限、原ID、币种与�
  assert.equal(paid.payment.recordedAmount.amount,'159.08');assert.equal(paid.payment.recordedAmount.currency,'CNY');
  assert.equal(paid.source.origin,'NATIVE');assert.equal(paid.payment.state,'RECORDED_PAID');
  assert.equal('native_payment_record' in paid,false);
- for(const financeReadable of [undefined,false])assert.equal(projectAdminReadOrder('NATIVE',row,{...viewer,financeReadable}).payment.recordedAmount,null);
+ for(const financeReadable of [undefined,false])assert.equal(projectAdminReadOrder('NATIVE',row,{...viewer,financeReadable}).payment.recordedAmount.amount,'159.08');
  for(const change of [{id:'other'},{order_id:'other'},{source:'JOINPAY_CANDIDATE'},{source:'UNKNOWN'},{disposition:'REVIEW_REQUIRED'},
   {currency:'USD'},{amount_cents:'-1'},{amount_cents:'1.5'},{amount_cents:15908},{amount_cents:'01'},{amount_cents:'9'.repeat(26)}])
   assert.equal(projectAdminReadOrder('NATIVE',{...row,native_payment_record:{...payment,...change}},{...viewer,financeReadable:true}).payment.recordedAmount,null);
@@ -297,7 +333,7 @@ test("正式JOINPAY原实付在新收款关闭后仍可读，但权限和原绑�
  const payment={id:'payment_joinpay',order_id:native.id,source:'JOINPAY',disposition:'APPLIED',amount_cents:'15908',currency:'CNY'};
  const row={...native,paid_confirmation_id:payment.id,native_payment_record:payment};
  assert.equal(projectAdminReadOrder('NATIVE',row,{...viewer,financeReadable:true}).payment.recordedAmount.amount,'159.08');
- assert.equal(projectAdminReadOrder('NATIVE',row,{...viewer,financeReadable:false}).payment.recordedAmount,null);
+ assert.equal(projectAdminReadOrder('NATIVE',row,{...viewer,financeReadable:false}).payment.recordedAmount.amount,'159.08');
  for(const change of [{id:'other'},{order_id:'other'},{currency:'USD'},{disposition:'REVIEW_REQUIRED'},{source:'UNKNOWN'}])
   assert.equal(projectAdminReadOrder('NATIVE',{...row,native_payment_record:{...payment,...change}},{...viewer,financeReadable:true}).payment.recordedAmount,null);
 });
@@ -661,9 +697,9 @@ test('clarity: 原生冻结报价闭合才 RECONCILED；未知拆分不闭合',(
  const broken=prepaymentNative();broken.rental_amount_cents='10001';
  assert.deepEqual(projectAdminReadOrder('NATIVE',broken,viewer).prepaymentReconciliation,{state:'NOT_VERIFIED',basis:'INSUFFICIENT_FACTS',arithmetic:'UNKNOWN',closed:false});
 });
-test('clarity: 无 finance.read 时原生实付金额为 null，不写 0',()=>{
+test('clarity: 授权订单读取保留实收合同，不依赖全局财务权限',()=>{
  const paid={...native,status:'PAID',paid_at:native.created_at,paid_confirmation_id:'pc-1',native_payment_record:{id:'pc-1',order_id:native.id,source:'CONTROLLED',disposition:'APPLIED',amount_cents:'100',currency:'CNY'}};
- assert.equal(projectAdminReadOrder('NATIVE',paid,viewer).payment.recordedAmount,null);
+ assert.equal(projectAdminReadOrder('NATIVE',paid,viewer).payment.recordedAmount.amount,'1.00');
  assert.equal(projectAdminReadOrder('NATIVE',paid,{...viewer,financeReadable:true}).payment.recordedAmount.amount,'1.00');
 });
 test('clarity: 旧单原单资源复用旧用户资源校验，单位未记录不猜 M，零值保留；账号摘要不再写“原单资源记录”',()=>{
@@ -738,7 +774,7 @@ test('未开租已付终止保留原付款；普通未付取消不提升，金�
  const paid=projectAdminReadOrder('NATIVE',row,{...viewer,financeReadable:true});
  assert.equal(paid.payment.state,'RECORDED_PAID');assert.equal(paid.payment.recordedAmount.amount,'220.00');assert.equal(paid.paidAt,row.paid_at);
  assert.equal(paid.paymentOpen,false);assert.equal(paid.cancelOpen,false);
- for(const financeReadable of [false,undefined])assert.equal(projectAdminReadOrder('NATIVE',row,{...viewer,financeReadable}).payment.recordedAmount,null);
+ for(const financeReadable of [false,undefined])assert.equal(projectAdminReadOrder('NATIVE',row,{...viewer,financeReadable}).payment.recordedAmount.amount,'220.00');
  for(const disposition of ['REVIEW_REQUIRED','REJECTED'])assert.equal(projectAdminReadOrder('NATIVE',{...row,native_payment_record:{...payment,disposition}},{...viewer,financeReadable:true}).payment.recordedAmount,null);
  for(const cancel_reason of ['USER','TIMEOUT',null]){
   const unpaid=projectAdminReadOrder('NATIVE',{...row,cancel_reason,paid_at:null,paid_confirmation_id:null,native_payment_record:null},{...viewer,financeReadable:true});

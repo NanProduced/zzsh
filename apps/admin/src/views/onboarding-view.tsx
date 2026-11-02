@@ -1,4 +1,5 @@
 import { useState, useEffect, type FormEvent } from "react";
+import { formatBeijingDateTime } from "../workspace/beijing-time";
 import { QRCodeSVG } from "qrcode.react";
 import { Icons } from "../components/icons";
 import { Button, PasswordInput, StatusMessage } from "../components/ui-elements";
@@ -115,10 +116,7 @@ export function OnboardingView({
 
   const downloadBackupCodesFile = () => {
     if (backupCodes.length === 0) return;
-    const content = `洲洲商行管理平台 - 一次性备份码\n账号: ${accountIdentifier}\n生成时间: ${new Intl.DateTimeFormat(
-      "zh-CN",
-      { dateStyle: "long", timeStyle: "medium" }
-    ).format(new Date())}\n\n注意：每枚备份码仅可单次使用，请保存在离线或安全密码管理器中。\n\n${backupCodes.join(
+    const content = `洲洲商行管理平台 - 一次性备份码\n账号: ${accountIdentifier}\n生成时间（北京时间）: ${formatBeijingDateTime(new Date().toISOString(), { dateStyle: "long", timeStyle: "medium" })}\n\n注意：每枚备份码仅可单次使用，请保存在离线或安全密码管理器中。\n\n${backupCodes.join(
       "\n"
     )}\n`;
 

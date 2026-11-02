@@ -41,6 +41,7 @@ export type OrderStageFacts = {
   postedAt: string | null;
   openingVersionNo: string | null;
   settlementVersionNo: string | null;
+  rejectedBy?: string | null;
   openingConfirmedAt: string | null;
   myAck: boolean;
   otherAck: boolean;
@@ -875,14 +876,15 @@ function stageFacts(data: OrderSettlement, opening: SettlementOpening | null, pa
   const current = data.settlement ?? null;
   const request = data.currentRequest ?? null;
   const myDecision = current ? (current.decisions ?? []).find((decision) => decision.party === myParty) : undefined;
+  const rejection = current?.decisions?.find(decision => decision.action === "REJECT");
   const phase: OrderStageFacts["phase"] = posting
     ? "POSTED"
     : request?.kind === "INTAKE" && request.status === "OPEN"
       ? "INTAKE_PENDING"
-      : current && !myDecision
-        ? "DECISION_PENDING"
-        : current && myDecision?.action === "REJECT"
-          ? "DECISION_REJECTED"
+      : rejection
+        ? "DECISION_REJECTED"
+        : current && !myDecision
+          ? "DECISION_PENDING"
           : current
             ? "DECISION_WAITING"
             : "RENTING";
@@ -893,6 +895,7 @@ function stageFacts(data: OrderSettlement, opening: SettlementOpening | null, pa
     postedAt: posting?.postedAt ?? null,
     openingVersionNo: opening?.versionNo ?? null,
     settlementVersionNo: current?.versionNo ?? null,
+    rejectedBy: rejection?.party ?? null,
     openingConfirmedAt: opening?.confirmedAt ?? null,
     myAck: (opening?.acks ?? []).some((ack) => ack.party === myParty),
     otherAck: (opening?.acks ?? []).some((ack) => ack.party !== myParty),
@@ -1005,6 +1008,7 @@ function SettlementAction({ order, party, onChanged, onStageFacts }: { order: Or
   const myDecision = current ? (current.decisions ?? []).find((decision) => decision.party === myParty) : undefined;
   const posting = data.posting ?? null;
   const openIntake = data.currentRequest?.kind === "INTAKE" && data.currentRequest.status === "OPEN";
+  const rejected = current?.decisions?.some(decision => decision.action === "REJECT") === true;
   return <section className="order-detail-section order-trade-panel" aria-label="开租与结算">
     <div className="order-trade-heading"><h2 className="order-section-title">开租与结算</h2><button type="button" className="button quiet button--sm" onClick={refresh}><RefreshCw size={14} aria-hidden="true" />刷新</button></div>
     {!opening ? <div className="order-trade-block"><h3>期初库存</h3><p className="order-muted">等待受权客服按实际交付录入期初库存后，双方在同一条目上确认并开始计租。付款与建群都不会自动开租。</p></div>
@@ -1012,12 +1016,11 @@ function SettlementAction({ order, party, onChanged, onStageFacts }: { order: Or
     {opening && data.rentalStarted ? <>
       {posting ? <PostingResult data={data} order={order} party={party} posting={posting} /> :
         openIntake ? <div className="order-trade-block"><h3>结束申请待客服处理</h3><p className="order-muted">已提交期末数据，等待受权客服核实原因并复核；复核与双方确认完成后结算生效。期间不会重复受理同一份结束申请。</p></div> :
-          current && !myDecision ? <DecisionPanel version={current} party={party} order={order} onChanged={refresh} /> :
-            current && myDecision?.action === "REJECT" ? <div className="order-trade-block">
-              <h3>你已拒绝第{current.versionNo}版</h3>
+          current && rejected ? <div className="order-trade-block">
+              <h3>{myDecision?.action === "REJECT" ? "你已拒绝" : "未达成一致的结算"}第{current.versionNo}版</h3>
               <p className="order-muted">拒绝不会使这一版生效；服务端会按新的期末数据或人工调整生成新版本，请按最新版本重新核对后再决定。</p>
               <AmountTable rows={decisionAmountRows(party, current)} caption={`被拒绝版本金额明细（${party === "renter" ? "租客口径" : "号主口径"}${isAdjustedVersion(current) ? "，含人工调整" : ""}）`} />
-            </div> :
+            </div> : current && !myDecision ? <DecisionPanel version={current} party={party} order={order} onChanged={refresh} /> :
               current && myDecision ? <div className="order-trade-block"><h3>等待对方确认 <span className="order-trade-tag">第{current.versionNo}版</span></h3><p className="order-muted">你已在这一版结算上完成操作；金额变化会生成新版本并要求重新确认。</p>
                 <AmountTable rows={decisionAmountRows(party, current)} caption={`当前版本金额明细（${party === "renter" ? "租客口径" : "号主口径"}${isAdjustedVersion(current) ? "，含人工调整" : ""}）`} />
                 <RecordList title="结算记录" records={(current.decisions ?? []).map((decision) => ({ label: `${partyLabel(decision.party)}${decision.action === "CONFIRM" ? "已确认" : "已拒绝"}`, time: decision.createdAt ?? null }))} />

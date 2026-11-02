@@ -87,7 +87,8 @@ test("0133 adds the waiting-assignment facts without backfilling old rounds", ()
   const journal = JSON.parse(readFileSync(resolve("migrations/business/meta/_journal.json"), "utf8"));
   const entry = journal.entries.find((item: { idx: number }) => item.idx === 133);
   assert.deepEqual(entry && { tag: entry.tag, when: entry.when }, { tag: "0133_im_waiting_assignment", when: 1793184013009 });
-  assert.equal(journal.entries.length, 142, "one appended entry per formal migration");
+  assert.ok(journal.entries.length >= 142, "the accepted IM migration prefix is retained");
+  assert.equal(new Set(journal.entries.map((item: { tag: string }) => item.tag)).size, journal.entries.length, "each formal migration is registered once");
   const supportCancel = journal.entries.find((item: { idx: number }) => item.idx === 134);
   assert.deepEqual(supportCancel && { tag: supportCancel.tag, when: supportCancel.when }, { tag: "0134_support_cancel", when: 1793184013010 });
   const activity = journal.entries.find((item: { idx: number }) => item.idx === 135);

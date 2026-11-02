@@ -9,8 +9,11 @@ const id = (v: unknown): v is string => typeof v === "string" && /^[A-Za-z0-9][A
 export function loadWithdrawalBankBindingRuntime(context: Context, env: NodeJS.ProcessEnv = process.env, workingDirectory = process.cwd()): WithdrawalBankBindingOptions | undefined {
   const enabled = env.WITHDRAWAL_BANK_BINDING_ENABLED ?? "false";
   if (enabled !== "true" && enabled !== "false") return fail("BANK_BINDING_ENABLED_INVALID");
-  if (enabled === "false") return undefined;
+  if (enabled === "false" && !context.authEnabled) return undefined;
   if (!context.authEnabled || context.database.user !== context.database.runtimeUser) return fail("BANK_BINDING_CONTEXT_INVALID");
+  if (![context.database.name,context.database.user].every(v=>typeof v==="string"&&/^[a-z][a-z0-9_]{0,62}$/.test(v)))return fail("BANK_BINDING_CONTEXT_INVALID");
+  // Masked self reads are independent of enabling encrypted writes or external payout.
+  if(enabled==="false")return{database:context.database.name,runtimeUser:context.database.user};
   let d: BankBindingRuntimeDocument;
   try {
     const raw = readSecret(env, "WITHDRAWAL_BANK_BINDING_CONFIG", "WITHDRAWAL_BANK_BINDING_CONFIG_FILE", workingDirectory);

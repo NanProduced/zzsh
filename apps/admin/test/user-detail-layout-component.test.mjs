@@ -110,7 +110,7 @@ test('missing identity details and registration facts stay unavailable rather th
   const h = await mount(t, { user: { registeredAt: null, registeredAtSource: 'UNKNOWN', walletSummary: { state: 'unknown' }, membershipSummary: { state: 'ready', growth: { knowledge: 'UNKNOWN', effectiveTier: null }, entitlements: [] } } });
   await click(namedButton('展开实名与联系方式'));
   await waitFor(() => h.host.querySelector('.udv-identity'));
-  const identity = h.host.querySelector('.udv-identity'); assert.equal(identity.querySelectorAll('dd')[0].textContent, '暂无资料'); assert.equal(identity.querySelectorAll('dd')[1].textContent, '暂无资料');
+  const identity = h.host.querySelector('.udv-identity'); assert.equal(identity.querySelectorAll('dd')[0].textContent, '无查看权限'); assert.equal(identity.querySelectorAll('dd')[1].textContent, '无查看权限');
   assert.match(identity.textContent, /188\*\*\*\*1101/); assert.equal(namedButton('查看明文'), undefined); assert.match(h.host.querySelector('.udv-user-header').textContent, /待核/);
   assert.equal(h.host.querySelector('.udv-user-header').textContent.includes('2026'), false); assert.equal(h.host.querySelector('.udv-wallet strong').textContent, '待核'); assert.equal(h.host.textContent.includes('普通会员'), false);
 });

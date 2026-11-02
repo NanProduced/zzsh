@@ -212,13 +212,14 @@ export function RiskBadge({ flagged }: { flagged: boolean }) {
   return <Badge variant="destructive" className="ud-risk-badge"><TriangleAlertIcon size={12} aria-hidden />高危</Badge>;
 }
 
-/** 正式等级名：普通、银卡、金卡、铂金、钻石；黑金是独立资格事实，不写作会员档位。 */
+/** 显示服务端effectiveTier；黑金资格不在这里推导成另一计价政策档位。 */
 export const TIER_LABEL: Record<string, string> = {
   STANDARD: '普通会员',
   SILVER: '银卡会员',
   GOLD: '金卡会员',
   PLATINUM: '铂金会员',
   DIAMOND: '钻石会员',
+  BLACK_GOLD: '黑金会员·终身',
   UNKNOWN: '等级待核',
 };
 export const SOURCE_STATE_LABEL: Record<string, string> = {
@@ -270,7 +271,7 @@ export function MembershipSummaryCell({ summary }: { summary?: User['membershipS
 }
 
 /** 信用分颜色只做提示，不替代分数文字，也不改变交易准入。 */
-export const creditTone = (score: number) => score >= 80 ? 'success' : score >= 60 ? 'warning' : 'destructive';
+export const creditTone = (score: number) => score >= 80 ? 'success' : 'warning';
 export function CreditSummaryCell({ summary }: { summary?: User['creditSummary'] }) {
   if (summary?.state === 'denied') {
     if (summary.reason === 'NO_GAME_SCOPE') return <span className="ud-muted">未分配业务范围</span>;

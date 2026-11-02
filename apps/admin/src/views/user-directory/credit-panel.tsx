@@ -153,7 +153,7 @@ export function CreditPanel({ adapter, user, refreshNonce, active = true, change
   };
   const open = (value: 'deduct' | CreditEntry) => { setAmount(''); setExplanation(''); setDialog(value); };
   const tone = score === null ? 'unknown' : creditTone(score);
-  const scoreColor = tone === 'success' ? 'text-emerald-800 dark:text-emerald-300' : tone === 'warning' ? 'text-amber-900 dark:text-amber-300' : tone === 'destructive' ? 'text-destructive' : 'text-muted-foreground';
+  const scoreColor = tone === 'success' ? 'text-emerald-800 dark:text-emerald-300' : tone === 'warning' ? 'text-amber-900 dark:text-amber-300' : 'text-muted-foreground';
 
   return <div className="ud-credit-panel">
     {notice ? <Message title="信用操作提示">{notice}</Message> : null}
@@ -164,8 +164,8 @@ export function CreditPanel({ adapter, user, refreshNonce, active = true, change
     </Message> : null}
     <section aria-label="当前信用分" className="rounded-xl border bg-card p-4 sm:p-5">
       <div className="flex flex-wrap items-center justify-between gap-3"><h3 className="text-base font-semibold">当前信用分</h3>{canWrite ? <Button size="sm" disabled={busy || score === null || score === 0 || !knownRevision} onClick={() => open('deduct')}>手动扣分</Button> : null}</div>
-      <div className="mt-4 flex flex-wrap items-center gap-3"><strong className={`text-4xl font-semibold tabular-nums ${scoreColor}`}>{score ?? '—'}{score !== null ? <span className="ml-1 text-sm font-normal">分</span> : null}</strong><Badge variant={tone}>{score === null ? '未评分' : score >= 80 ? '信用良好' : score >= 60 ? '需注意' : '信用较低'}</Badge></div>
-      <p className="mt-3 text-sm text-muted-foreground">{score === null ? '暂未建立信用记录，不能进行扣分。' : '80 分及以上为良好，60–79 分需注意，低于 60 分信用较低。'}</p>
+      <div className="mt-4 flex flex-wrap items-center gap-3"><strong className={`text-4xl font-semibold tabular-nums ${scoreColor}`}>{score ?? '—'}{score !== null ? <span className="ml-1 text-sm font-normal">分</span> : null}</strong><Badge variant={tone}>{score === null ? '未评分' : score >= 80 ? '信用良好' : '需关注'}</Badge></div>
+      <p className="mt-3 text-sm text-muted-foreground">{score === null ? '暂未建立信用记录，不能进行扣分。' : '80 分为当前号主保证金的信用门槛；实际保证金要求以服务端核定为准。'}</p>
     </section>
     <section aria-label="信用记录" className="min-w-0 rounded-xl border bg-card">
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 p-4 sm:px-5"><h3 className="text-base font-semibold">信用记录</h3><span className="text-sm text-muted-foreground">说明对用户可见</span></div>

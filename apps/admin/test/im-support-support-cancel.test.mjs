@@ -46,15 +46,15 @@ async function waitFor(predicate, timeout = 2_000) {
     await settle();
   }
 }
-const settlement = { orderId: "order-A", rentalStarted: true, openings: [], settlement: null, ready: false, reasons: ["SETTLEMENT_VERSION_MISSING"] };
+const settlement = { orderId: "order-A", rentalStarted: false, openings: [], settlement: null, ready: false, reasons: ["SETTLEMENT_VERSION_MISSING"] };
 const preview = {
   contractVersion: "admin-support-cancel.v1", orderId: "order-A", orderRevision: "1", orderStatus: "PAID", cancelReason: null, cancelledAt: null,
-  eligibility: { allowed: true, reason: null, refundCents: "15908", openingConfirmed: true }, openingConfirmed: true,
+  eligibility: { allowed: true, reason: null, refundCents: "15908", openingConfirmed: false }, openingConfirmed: false,
   supportCancellation: null, refund: null, existing: false, channel: null,
 };
 const success = {
   ...preview, orderRevision: "2", orderStatus: "CANCELLED", cancelReason: "SUPPORT_CANCELLED_REFUND", cancelledAt: "2026-10-30T00:00:00.000000Z",
-  eligibility: { allowed: false, reason: "ALREADY_CANCELLED", refundCents: "15908", openingConfirmed: true },
+  eligibility: { allowed: false, reason: "ALREADY_CANCELLED", refundCents: "15908", openingConfirmed: false },
   supportCancellation: { terminationId: "pterm_1", state: "APPROVED", reason: "客服核实后取消", reviewReason: "客服核实后取消",
     approvedAt: "2026-10-30T00:00:00.000000Z", requestedByAdminUserId: "admin-A", refundCents: "15908", currency: "CNY", liabilityRecognized: true },
   refund: { integration: "INTEGRATED", intents: [], totals: { originalCents: "15908", allocatedCents: "0", consumedCents: "0", releasedCents: "0", remainingCents: "15908", totalsComplete: true }, bankArrival: "UNKNOWN" },
@@ -103,7 +103,9 @@ test("取消订单入口用 alert dialog 二次确认：金额/原因必填/幂�
   const card = host.querySelector('[data-support-cancel="true"]');
   assert.ok(card, "support cancellation card is visible for paid orders with support write permission");
   assert.match(card.textContent, /全额原路退款/);
-  assert.match(card.textContent, /不按已用时间扣费/);
+  assert.match(card.textContent, /仅限尚未确认开租/);
+  assert.match(card.textContent, /已开租订单请使用正常或提前结算/);
+  assert.doesNotMatch(card.textContent, /开租前和开租后都|不按已用时间扣费/);
   await click(button(host, "取消订单"));
   await waitFor(() => document.body.querySelector('[aria-label="取消订单确认"]'));
   assert.match(document.body.textContent, /退款金额：¥159\.08/);

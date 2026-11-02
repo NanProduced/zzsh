@@ -502,7 +502,7 @@ export function normalizeDeltaAttributes(value: Record<string, unknown>): Record
   return normalized;
 }
 
-export type DeltaQuoteViewer = "public" | "owner" | "admin";
+export type DeltaQuoteViewer = "public" | "owner" | "support" | "admin";
 
 type DeltaProjectedLine = {
   itemId: string;
@@ -537,6 +537,10 @@ export type DeltaProjectedQuote = {
   roundingPolicy?: string;
 };
 
+export type DeltaOwnerProjectedQuote = Omit<DeltaProjectedQuote, "lines" | "resourceTotal" | "tenantDeposit" | "tenantPayableTotal"> & {
+  lines: Array<Omit<DeltaProjectedLine, "buyerUnitAmount" | "buyerAmount">>;
+};
+
 function tenantPayableTotal(resourceTotal: QuoteAmount, tenantDeposit: QuoteAmount | null | undefined): QuoteAmount | null {
   if (tenantDeposit == null) return null;
   const resourceCents = parseNonNegativeDecimal(resourceTotal.amount, 2, "resource total").value;
@@ -544,7 +548,32 @@ function tenantPayableTotal(resourceTotal: QuoteAmount, tenantDeposit: QuoteAmou
   return yuanAmountObject(resourceCents + depositCents);
 }
 
-export function projectDeltaQuote(quote: InternalQuote | DeltaProjectedQuote, viewer: DeltaQuoteViewer): DeltaProjectedQuote {
+export function projectDeltaQuote(quote: InternalQuote | DeltaProjectedQuote, viewer: "owner"): DeltaOwnerProjectedQuote;
+export function projectDeltaQuote(quote: InternalQuote | DeltaProjectedQuote, viewer: "public" | "support" | "admin"): DeltaProjectedQuote;
+export function projectDeltaQuote(quote: InternalQuote | DeltaProjectedQuote, viewer: DeltaQuoteViewer): DeltaProjectedQuote | DeltaOwnerProjectedQuote;
+export function projectDeltaQuote(quote: InternalQuote | DeltaProjectedQuote, viewer: DeltaQuoteViewer): DeltaProjectedQuote | DeltaOwnerProjectedQuote {
+  const shared = {
+    schemaVersion: quote.schemaVersion,
+    currency: quote.currency,
+    ruleReleaseId: quote.ruleReleaseId,
+    termSeconds: quote.termSeconds,
+    expiryDisclosures: quote.expiryDisclosures,
+    unitAmountsInformational: quote.unitAmountsInformational,
+    ...(quote.schemaVersion === 2 ? { rentalMode: quote.pricingInputs?.compatibility?.rentalMode ?? (quote as DeltaProjectedQuote).rentalMode } : {}),
+  };
+  const ownerRatio = quote.pricingInputs?.compatibility?.ownerRatioB ?? (quote as DeltaProjectedQuote).ownerHaffRatio;
+  const ownerFields = {
+    ownerTotal: quote.ownerTotal,
+    ...(ownerRatio === undefined ? {} : { ownerHaffRatio: ownerRatio }),
+    publisherBailRequirement: quote.publisherBailRequirement,
+    contentHash: quote.contentHash,
+  };
+  if (viewer === "owner") {
+    return { ...shared, ...ownerFields, lines: quote.lines.map(line => ({
+      itemId: line.itemId, quantity: line.quantity, unit: line.unit, unitQuantity: line.unitQuantity,
+      ownerUnitAmount: line.ownerUnitAmount, ownerAmount: line.ownerAmount,
+    })) };
+  }
   const lines: DeltaProjectedLine[] = quote.lines.map((line) => {
     const projected: DeltaProjectedLine = {
       itemId: line.itemId,
@@ -554,7 +583,7 @@ export function projectDeltaQuote(quote: InternalQuote | DeltaProjectedQuote, vi
       buyerUnitAmount: line.buyerUnitAmount,
       buyerAmount: line.buyerAmount,
     };
-    if (viewer === "owner" || viewer === "admin") {
+    if (viewer === "support" || viewer === "admin") {
       projected.ownerUnitAmount = line.ownerUnitAmount;
       projected.ownerAmount = line.ownerAmount;
     }
@@ -562,25 +591,13 @@ export function projectDeltaQuote(quote: InternalQuote | DeltaProjectedQuote, vi
     return projected;
   });
   const projected: DeltaProjectedQuote = {
-    schemaVersion: quote.schemaVersion,
-    currency: quote.currency,
-    ruleReleaseId: quote.ruleReleaseId,
+    ...shared,
     lines,
     resourceTotal: quote.resourceTotal,
     tenantDeposit: quote.tenantDeposit,
     tenantPayableTotal: tenantPayableTotal(quote.resourceTotal, quote.tenantDeposit),
-    termSeconds: quote.termSeconds,
-    expiryDisclosures: quote.expiryDisclosures,
-    unitAmountsInformational: quote.unitAmountsInformational,
-    ...(quote.schemaVersion === 2 ? { rentalMode: quote.pricingInputs?.compatibility?.rentalMode ?? (quote as DeltaProjectedQuote).rentalMode } : {}),
   };
-  if (viewer === "owner" || viewer === "admin") {
-    projected.ownerTotal = quote.ownerTotal;
-    const ownerRatio = quote.pricingInputs?.compatibility?.ownerRatioB ?? (quote as DeltaProjectedQuote).ownerHaffRatio;
-    if (ownerRatio !== undefined) projected.ownerHaffRatio = ownerRatio;
-    projected.publisherBailRequirement = quote.publisherBailRequirement;
-    projected.contentHash = quote.contentHash;
-  }
+  if (viewer === "support" || viewer === "admin") Object.assign(projected, ownerFields);
   if (viewer === "admin") {
     projected.platformFullProfit = quote.platformFullProfit;
     projected.pricingInputs = quote.pricingInputs;

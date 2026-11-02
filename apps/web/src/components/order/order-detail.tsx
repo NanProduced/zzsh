@@ -7,7 +7,7 @@ import { ArrowLeft, Check, CheckCircle2, CircleSlash, Clock3, Copy, Gamepad2, Me
 import { formatOrderMoney, formatOrderTime as timeText, orderApi, OrderRequestError, type Order, type OrderImProjection, type OrderParty, type OrderStatusFilter, type PersonalAbnormalResponsibility, type PersonalFirstSubmit, type PersonalRefundBasis, type PersonalRefundIntent, type PersonalRefundRead } from "@/lib/order-client";
 import { useUserSession } from "@/components/session/user-session-provider";
 import { useIdentityReset } from "@/components/session/identity-reset";
-import { ORDER_FULFILLMENT_STEPS, orderFulfillmentStepStates, orderFulfillmentSummary, orderLinesTotalLabel, orderRentalModeLabel, orderUnitPriceText, unitHint, unitLabel, orderAccountTitle } from "@/lib/order-display";
+import { ORDER_FULFILLMENT_STEPS, orderFulfillmentStepStates, orderFulfillmentSummary, orderLineQuantityText, orderLinesTotalLabel, orderListingSourceLabel, orderRentalModeLabel, orderSettlementStageLabel, orderUnitPriceText, unitLabel, orderAccountTitle } from "@/lib/order-display";
 import { OrderTradeActions, type OrderStageFacts } from "@/components/order/order-trade-actions";
 import { OrderAftersale } from "./order-aftersale";
 import { PrestartTerminationPanel } from "@/components/order/prestart-termination-panel";
@@ -20,10 +20,13 @@ type DetailState = { status: "loading" } | { status: "ready"; order: Order | nul
 type Attention = { tone: "info" | "warning"; title: string; note: string; actions: Array<"retry" | "group" | "browse" | "manage"> } | null;
 
 function attentionFor(order: Order, facts: OrderStageFacts | null, readFailed: boolean, party: OrderParty): Attention {
+  if (order.fundsResolution?.code === "HISTORICAL_MANUAL_CLOSE") return {
+    tone: "warning", title: "订单已关闭，资金处理待核实", note: "原人工关闭没有自动完成结算或退款。请联系平台核对原付款与资金处理记录，勿将订单关闭理解为退款已到账。", actions: ["group"],
+  };
   if (facts?.phase === "DECISION_REJECTED") {
     return {
       tone: "warning",
-      title: `你已拒绝第${facts.settlementVersionNo ?? "?"}版结算`,
+      title: facts.rejectedBy && facts.rejectedBy !== party.toUpperCase() ? `第${facts.settlementVersionNo ?? "?"}版结算未达成一致` : `你已拒绝第${facts.settlementVersionNo ?? "?"}版结算`,
       note: "拒绝不会使这一版生效；服务端会按新的期末数据或人工调整生成新版本，之后再按最新版本重新核对。",
       actions: ["group"],
     };
@@ -42,7 +45,7 @@ function attentionFor(order: Order, facts: OrderStageFacts | null, readFailed: b
       tone: "info",
       title: order.cancelReason === "PRESTART_TERMINATED" ? "未开租订单已终止" : order.cancelReason === "MANUAL_CLOSE" ? "客服已手动结束本单" : "账号占用已解除",
       note: order.cancelReason === "PRESTART_TERMINATED" ? "账号占用已解除，退款处理进度见下方记录。终止订单不代表退款已到账。"
-        : order.cancelReason === "MANUAL_CLOSE" ? "已收款不会自动结算或退款；资金处理以客服通知与对账为准。订单群保留 72 小时沟通窗口。" : "本单不再产生新的交易动作；已确认的订单信息仍可查看。",
+        : order.cancelReason === "MANUAL_CLOSE" ? "已收款不会自动结算或退款；资金处理以客服通知与对账为准，沟通权限以订单群当前提示为准。" : "本单不再产生新的交易动作；已确认的订单信息仍可查看。",
       actions: [party === "renter" ? "browse" : "manage"],
     };
   }
@@ -108,6 +111,7 @@ function FulfillmentStageBar({ order, party, facts }: { order: Order; party: Ord
   const visible = state.scope === scope ? state : { scope, status: "loading" as const, projection: null };
   const projection = visible.status === "ready" ? visible.projection : null;
   const ending = facts?.phase === "DECISION_PENDING" ? "PENDING" as const
+    : facts?.phase === "DECISION_REJECTED" ? "REJECTED" as const
     : facts?.phase === "DECISION_WAITING" ? "WAITING" as const
     : facts?.phase === "INTAKE_PENDING" ? "SERVICE" as const
     : null;
@@ -186,7 +190,7 @@ function OrderLines({ order, party }: { order: Order; party: OrderParty }) {
           const unitPrice = orderUnitPriceText(party === "owner" ? line.ownerUnitAmount : line.buyerUnitAmount, line.unitQuantity, line.unit);
           return <tr key={`${line.itemId ?? line.name ?? line.unit ?? "line"}-${index}`}>
             <td data-label="资源"><span>{line.name ?? unitLabel(line.unit) ?? "资源待确认"}</span>{unitPrice ? <small className="order-line-unit">{unitPrice}</small> : null}</td>
-            <td data-label="数量">{line.quantity ?? line.unitQuantity ?? "数量待确认"}{unitHint(line.name ?? "", line.unit) ? ` ${unitHint(line.name ?? "", line.unit)}` : ""}</td>
+            <td data-label="数量">{orderLineQuantityText(line)}</td>
             <td data-label={party === "owner" ? "号主报价" : "金额"}>{formatOrderMoney(party === "owner" ? line.ownerAmount : line.buyerAmount)}</td>
           </tr>;
         })}</tbody>
@@ -226,14 +230,14 @@ function AmountCard({ order, party, facts, readFailed }: { order: Order; party: 
 
   if (party === "owner") {
     return <section className="order-side-card order-amount-block">
-      <h2 className="order-section-title">号主侧金额</h2>
+      <h2 className="order-section-title">我的出租收入</h2>
       {posted
         ? <><strong className="order-amount-total">{posted.text}</strong><p className="order-amount-label">{posted.label}</p></>
         : settledUnread
           ? <><strong className="order-amount-total is-unknown">{readFailed ? "结算金额暂时无法读取" : facts ? "暂无可用结算金额" : "正在读取结算金额"}</strong><p className="order-amount-label">下单时的费用记录仍可查看</p></>
-          : <><strong className="order-amount-total">{formatOrderMoney(order.quote?.ownerTotal)}</strong><p className="order-amount-label">下单时号主报价</p></>}
+          : <><strong className="order-amount-total">{formatOrderMoney(order.amounts?.ownerExpectedIncome ?? order.quote?.ownerTotal)}</strong><p className="order-amount-label">下单时号主报价</p></>}
       {posted || settledUnread ? <dl className="order-facts order-amount-rows">
-        <div><dt>下单时号主报价</dt><dd>{formatOrderMoney(order.quote?.ownerTotal)}</dd></div>
+        <div><dt>下单时号主报价</dt><dd>{formatOrderMoney(order.amounts?.ownerExpectedIncome ?? order.quote?.ownerTotal)}</dd></div>
       </dl> : null}
       <p className="order-muted">{posted ? "最终以结算记录为准；报价不代表已赚取或可提现。" : "按上架时约定的报价展示，不代表已赚取或可提现。"}</p>
     </section>;
@@ -244,7 +248,7 @@ function AmountCard({ order, party, facts, readFailed }: { order: Order; party: 
     text: formatOrderMoney(amounts?.totalDue),
   };
   return <section className="order-side-card order-amount-block">
-    <h2 className="order-section-title">租客侧金额</h2>
+    <h2 className="order-section-title">我的订单费用</h2>
     {lead ? <><strong className="order-amount-total">{lead.text}</strong><p className="order-amount-label">{lead.label}</p></>
       : <><strong className="order-amount-total is-unknown">{readFailed ? "结算金额暂时无法读取" : facts ? "暂无可用结算金额" : "正在读取结算金额"}</strong><p className="order-amount-label">下单时的费用记录仍可查看</p></>}
     {posted || settledUnread ? <dl className="order-facts order-amount-rows">
@@ -271,7 +275,7 @@ function ContactCard({ order, onChanged, quiet }: { order: Order; onChanged: () 
       ? ended
         ? order.cancelReason === "PRESTART_TERMINATED"
           ? "本单未开租终止；退款处理期间订单群仍可沟通，窗口以群内提示为准。"
-          : "本单已结束，订单群只保留历史记录；如需核对请联系客服。"
+          : "本单已结束，沟通权限以订单群当前提示为准；如需进一步核对请联系客服。"
         : "订单群已就绪，可在订单群中与客服、对方核对交付事项。"
     : value.state === "ASSIGNED" ? "客服已分配，订单群准备中。" : "履约状态待确认。";
   return <section className="order-side-card">
@@ -444,8 +448,13 @@ function OrderRefundSection({ order }: { order: Order }) {
   if (!read) return null;
   const outcome = refundOutcomeCopy[read.outcome];
   const responsibility = read.responsibility;
+  const awaitingSettlement = read.outcome === "RESPONSIBILITY_NOT_POSTED" && read.intents.length === 0 && !read.abnormalResponsibilities?.length;
+  const attentionRequired = ["UNKNOWN", "REVIEW_REQUIRED", "TRUNCATED", "CONFLICT"].includes(read.outcome);
   return <section className="order-detail-section order-refund-block" aria-label="退款责任与本地退款记录" data-outcome={read.outcome}>
-    <div className="order-refund-heading"><h2 className="order-section-title">退款责任</h2>{refresh}</div>
+    <div className="order-refund-heading"><h2 className="order-section-title">退款进度</h2>{refresh}</div>
+    <details className="order-secondary-details order-refund-details" open={attentionRequired}>
+      <summary><strong>{awaitingSettlement ? "结算后查看应退金额" : outcome.label}</strong><span>{awaitingSettlement ? "如有重复付款或异常收款，平台会单独核实处理。" : "查看应退金额、处理记录与待核对事项"}</span></summary>
+      <div className="order-refund-detail-content">
     <div className="order-refund-summary">
       <strong>{outcome.label}</strong>
       <p>{outcome.note}</p>
@@ -473,6 +482,8 @@ function OrderRefundSection({ order }: { order: Order }) {
     <div className="order-refund-intents-heading"><h3>退款申请记录</h3><span>{read.returnedIntentCount} 笔{read.intentsTruncated ? "（不完整）" : ""}</span></div>
     {read.intents.length === 0 ? <p className="order-muted">{refundEmptyCopy(read)}</p> : <ul className="order-refund-intents">{read.intents.map((intent) => <RefundIntentCard key={intent.intentId} intent={intent} />)}</ul>}
     {read.reasonCodes.length || read.unknowns.length ? <details className="order-refund-reasons"><summary>查看原因代码与未核对项</summary><p>{[...read.reasonCodes, ...read.unknowns].join("、")}</p></details> : null}
+      </div>
+    </details>
   </section>;
 }
 
@@ -488,7 +499,7 @@ function OrderEntitlements({ order }: { order: Order }) {
     <h2 className="order-section-title">订单权益</h2>
     <dl className="order-facts order-entitlements">
       {list.map((item) => <div key={item.id}>
-        <dt>{item.name?.trim() || "权益名称待确认"}</dt>
+        <dt>{item.name?.trim() || "权益名称待确认"}{item.nameSource === "CURRENT_CATALOG" ? <small className="order-source-note">名称取自当前目录</small> : item.nameSource === "UNKNOWN" ? <small className="order-source-note">名称尚未核定</small> : null}</dt>
         <dd>{item.expiryKind === "PERMANENT" ? "长期有效" : item.expiresAt ? `至 ${timeText(item.expiresAt, { timeZoneName: false })}` : "期限待确认"}{item.fullTermGuaranteed === false ? " · 不保证覆盖完整租期" : ""}</dd>
       </div>)}
     </dl>
@@ -507,15 +518,20 @@ export function OrderDetail({ party, status, accountId, orderId, state, onRetry,
 }) {
   const backHref = orderUrl(party, status, accountId);
   const title = party === "renter" ? "租入订单" : "出租订单";
-  const [read, setRead] = useState<{ facts: OrderStageFacts | null; failed: boolean }>({ facts: null, failed: false });
-  const facts = read.facts;
+  const session = useUserSession();
+  const readScope = `${session.status === "authenticated" ? session.userId : ""}:${party}:${orderId}`;
+  const [read, setRead] = useState<{ scope: string; facts: OrderStageFacts | null; failed: boolean }>({ scope: "", facts: null, failed: false });
+  const facts = read.scope === readScope ? read.facts : null;
+  const readFailed = read.scope === readScope && read.failed;
   const back = <Link className="order-detail-back" href={backHref} scroll={false}><ArrowLeft size={16} aria-hidden="true" />返回{title}</Link>;
   if (state.status === "loading") return <section className="order-detail-view" data-testid="order-detail-loading" aria-busy="true" role="status"><div className="order-detail-loading account-module-card"><span /><span /><span /></div></section>;
   if (state.status === "error" && state.error) return <section className="order-detail-view">{back}<OrderError error={state.error} first={false} onRetry={onRetry} onLogin={onLogin} label="订单详情暂时无法读取" /></section>;
   if (state.status !== "ready" || !state.order) return <section className="order-detail-view">{back}<section className="order-error-block" role="status"><XCircle size={24} aria-hidden="true" /><h3>订单不可用</h3><p>当前身份没有这笔订单的可用详情，未展示另一方私人资料。</p></section></section>;
   const order = state.order;
   const modeLabel = orderRentalModeLabel(order);
-  const attention = attentionFor(order, facts, read.failed, party);
+  const sourceLabel = orderListingSourceLabel(order);
+  const stageLabel = orderSettlementStageLabel(order);
+  const attention = attentionFor(order, facts, readFailed, party);
   return <section className="order-detail-view" data-testid="order-detail">
     {back}
     {/* Identity band: the account is the subject, the order number identifies the transaction, and the
@@ -527,28 +543,33 @@ export function OrderDetail({ party, status, accountId, orderId, state, onRetry,
           {order.accountDisplayNo ? <span className="order-detail-account-no">账号 {order.accountDisplayNo}</span> : null}
           <span className="order-detail-no">订单 {order.displayNo ?? "待确认"}<CopyOrderNo value={order.displayNo} /></span>
           {party === "owner" ? <span>租客：{order.renterName ?? "暂不显示"}</span> : null}
-          <span>下单 {timeText(order.createdAt)}</span>
+          <span>下单 {timeText(order.createdAt, { timeZoneName: false })}</span>
           <span>{orderTermLabel(order)}</span>
           {!order.listingFacts && order.listingFactsUnknownReason ? <span>账号资料待核实</span> : null}
           {modeLabel ? <span className="order-detail-mode" data-mode={order.quote?.rentalMode}>{modeLabel}</span> : null}
+          {sourceLabel ? <span className="order-source-note">{sourceLabel}</span> : null}
         </p>
         <div className="order-detail-status">
           <OrderStatusBadge order={order} />
-          {order.stage?.label && order.stage.code !== "NONE" ? <span className={`order-stage-label${order.stage.viewerActionRequired ? " is-action" : ""}`}>{order.stage.label}</span> : null}
+          {stageLabel ? <span className={`order-stage-label${order.stage?.viewerActionRequired ? " is-action" : ""}`}>{stageLabel}</span> : null}
         </div>
       </div>
     </header>
     {order.source?.origin !== "LEGACY" && !order.readOnly && order.status !== "PENDING_PAYMENT" ? <FulfillmentStageBar order={order} party={party} facts={facts} /> : null}
     <BusinessUpdateNotices surface="orders" />
     <AttentionBlock attention={attention} party={party} orderId={order.id} onRetry={onChanged} />
+    <div className="order-detail-overview">
+      <AmountCard order={order} party={party} facts={facts} readFailed={readFailed} />
+      <ContactCard order={order} onChanged={onChanged} quiet={Boolean(attention)} />
+    </div>
     <div className="order-detail-body">
       <div className="order-detail-main">
         {order.source?.origin!=="LEGACY"&&order.stage?.code==="POSTED"?<OrderAftersale key={`aftersale:${order.id}`} orderId={order.id} orderDisplayNo={order.displayNo??null}/>:null}
-        {order.status !== "CANCELLED" ? <OrderTradeActions order={order} party={party} onChanged={onChanged} onStageFacts={(next, failed) => setRead({ facts: next, failed })} /> : null}
+        {order.status !== "CANCELLED" ? <OrderTradeActions order={order} party={party} onChanged={onChanged} onStageFacts={(next, failed) => setRead({ scope: readScope, facts: next, failed })} /> : null}
         <PrestartTerminationPanel key={`prestart:${order.id}:${order.status}`} order={order} party={party} onChanged={onChanged}/>
         {party === "renter" && order.source?.origin !== "LEGACY" && !order.readOnly ? <OrderRefundSection key={`${order.id}:${order.status}:${facts?.phase ?? "NONE"}`} order={order} /> : null}
         <section className="order-detail-section order-lines">
-          <details open={order.status === "PENDING_PAYMENT" || order.status === "PAID"}>
+          <details open={order.status === "PENDING_PAYMENT"}>
             <summary><h2 className="order-section-title">下单时费用明细</h2><span className="order-lines-summary">{linesSummary(order, party)}</span></summary>
             <OrderLines order={order} party={party} />
           </details>
@@ -556,10 +577,6 @@ export function OrderDetail({ party, status, accountId, orderId, state, onRetry,
         <OrderEntitlements order={order} />
         <OrderTimeline order={order} facts={facts} party={party} />
       </div>
-      <aside className="order-detail-aside">
-        <AmountCard order={order} party={party} facts={facts} readFailed={read.failed} />
-        <ContactCard order={order} onChanged={onChanged} quiet={Boolean(attention)} />
-      </aside>
     </div>
   </section>;
 }

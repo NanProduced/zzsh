@@ -127,3 +127,12 @@ test("CSV is all matching rows, exact integer columns, unknown blank and text fo
   assert.throws(() => generateAdminFinanceCsv([{ ...known, deltaCents: "=1+1" }], filters, facts().asOf, facts().version));
   assert.equal(line({ delta: "0" }).deltaCents, "0");
 });
+
+test('admin finance snapshot rejects a noncanonical alias of the valid signature', () => {
+ const token=financeSnapshot(facts(),filters,actor,key,undefined,1000).token;
+ const [payload,sig]=token.split('.') as [string,string], alphabet='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+ const alias=sig.slice(0,-1)+alphabet[alphabet.indexOf(sig.at(-1)!)|1];
+ assert.notEqual(alias,sig);assert.deepEqual(Buffer.from(alias,'base64url'),Buffer.from(sig,'base64url'));
+ assert.equal(financeSnapshot(facts(),filters,actor,key,token,2000).asOf,facts().asOf);
+ assert.throws(()=>financeSnapshot(facts(),filters,actor,key,payload+'.'+alias,2000),(error:any)=>error.status===400);
+});

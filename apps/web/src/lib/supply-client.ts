@@ -166,6 +166,15 @@ export const supplyBlockerMessages: Record<string, string> = {
   CONFIRMATION_OR_MEDIA_REQUIRED: "需完成规则确认或图片技术校验",
   PUBLICATION_REQUIRED: "公开发布事实尚未形成",
   HISTORICAL_VERSION: "这是历史版本",
+  RENTED: "账号正在出租中",
+  PENDING_PAYMENT: "有租客待付款，请查看关联订单",
+  UNDER_REVIEW: "账号资料审核中，请等待审核结果",
+  NOT_PUBLISHED: "账号尚未上架，请补全资料后提交",
+  STATE_UNKNOWN: "账号状态待核对，请重新读取",
+  QUOTE_REQUIRED: "请按当前规则重新核算报价",
+  ACCEPTANCE_REQUIRED: "请确认本次报价对应的规则与协议",
+  MEDIA_REQUIRED: "请补充账号图片并完成校验",
+  TITLE_REVIEW_REQUIRED: "账号名称需核对，请更新资料后重新提交",
 };
 export class SupplyRequestError extends Error {
   status: number;

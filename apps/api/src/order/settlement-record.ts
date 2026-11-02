@@ -17,6 +17,9 @@ import { readEarlySettlementDisclosure, recordDocumentAcceptance } from "../lega
 import { assertSupportOrderAccess } from "./manual-close";
 import { openingConfirmStep, type OpeningConfirmParty } from "./opening-auto-confirm";
 import {frozenPersonalGrowthV4Valid} from './personal-growth-confirmation';
+import { readFormalCollectionAdmission, type FormalCollectionAdmission } from "./joinpay-collection-profile";
+import { assertControlledSettlementResource } from "./payment-confirmation";
+import { assertBusinessRuntimeIdentity } from "../database/business";
 import {
   computeSettlement,
   settlementConfirmationReady,
@@ -33,7 +36,8 @@ export const SETTLEMENT_ADJUST_OPERATION = "order.settlement.adjust";
 export const SETTLEMENT_ADJUST_TRIGGER = "manual-net";
 const EARLY_REASONS = ["TENANT_VOLUNTARY_EARLY", "OWNER_OR_ACCOUNT_EARLY"] as const;
 type EarlyReason = (typeof EARLY_REASONS)[number];
-type Actor = { realm: "user" | "admin"; userId: string; sessionId: string };
+type SettlementReadIdentity=Readonly<{database:string;runtimeUser:string}>;
+type Actor = { realm: "user" | "admin"; userId: string; sessionId: string; settlementAdmission?: FormalCollectionAdmission; controlledPaymentFact?: unknown;settlementReadIdentity?:SettlementReadIdentity };
 export type SettlementActor = Actor;
 type LineQty = { itemId: string; quantity: string };
 type Command = { status: number; body: Record<string, unknown> };
@@ -53,8 +57,22 @@ type LockedOrder = {
   revision: string;
 };
 
-export function settlementSurfaceOpen(flag: boolean | undefined): boolean {
-  return flag === true && process.env.ZZSH_SETTLEMENT_RECORDING === "controlled" && process.env.NODE_ENV !== "production";
+export function settlementSurfaceOpen(flag: boolean | undefined, admission?: FormalCollectionAdmission): boolean {
+  if (flag !== true) return false;
+  if (admission !== undefined) { readFormalCollectionAdmission(admission); return true; }
+  return process.env.ZZSH_SETTLEMENT_RECORDING === "controlled" && process.env.NODE_ENV !== "production";
+}
+
+/** Connection configuration is server-owned; browser fields never select the read resource. */
+export function settlementReadIdentity(pool:unknown):SettlementReadIdentity|undefined{
+  const config=(pool as{options?:{database?:unknown;user?:unknown}}|null)?.options;
+  if(typeof config?.database!=="string"||typeof config.user!=="string"||![config.database,config.user].every(v=>/^[a-z][a-z0-9_]{0,62}$/.test(v)))return undefined;
+  return Object.freeze({database:config.database,runtimeUser:config.user});
+}
+
+export async function assertSettlementReadDatabase(client:PoolClient,identity:SettlementReadIdentity):Promise<void>{
+  try{await assertBusinessRuntimeIdentity(client,{database:{name:identity.database,user:identity.runtimeUser,runtimeUser:identity.runtimeUser}});}
+  catch{throw new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","Settlement read resource is unavailable");}
 }
 
 /** Existing v2 orders predate the new disclosure and retain their original contract. */
@@ -84,7 +102,18 @@ function done(body: Record<string, unknown>, orderStatus: string, posted = false
   return { status: 200, body: { ...body, postingAuthorized: posted, feeDeducted, orderStatus } };
 }
 
-async function assertSettlementDatabase(client: PoolClient): Promise<void> {
+export async function assertSettlementDatabase(client: PoolClient, admission?: FormalCollectionAdmission): Promise<void> {
+  if (admission !== undefined) {
+    const bound = readFormalCollectionAdmission(admission);
+    try{
+      await assertBusinessRuntimeIdentity(client,{database:{name:bound.database,user:bound.runtimeUser,runtimeUser:bound.runtimeUser}});
+      // Routine owners can change protected financial helpers even without table/schema ownership.
+      const row=(await client.query(`SELECT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+        WHERE p.proowner=(SELECT oid FROM pg_roles WHERE rolname=current_user) AND n.nspname LIKE 'zzsh_%') AS "ownsBusinessFunctions"`)).rows[0];
+      if(row?.ownsBusinessFunctions!==false)throw Error("unsafe runtime routine ownership");
+    }catch{throw new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","Settlement resource admission is unavailable");}
+    return;
+  }
   const row = (await client.query<{ db: string; actor: string }>(`SELECT current_database() AS db, current_user AS actor`)).rows[0];
   if (!row || !/^zzsh_test_order_[a-z][a-z0-9_]{0,40}$/.test(row.db) || !/^zzsh_order_[a-z][a-z0-9_]{0,40}_r$/.test(row.actor)) throw notFound();
 }
@@ -93,7 +122,9 @@ async function assertSettlementDatabase(client: PoolClient): Promise<void> {
  * Dispatch gate, then the acting admin, then party users, then game, account and order.
  * Admin before users matches restoreDeactivatedUserAccount, which locks the actor and then the user. */
 export async function lockSettlement(client: PoolClient, orderId: string, actor: Actor, write: boolean | "PRESTART_TERMINATION", allowCompletedReplay = false): Promise<LockedOrder> {
-  await assertSettlementDatabase(client);
+  if(!write&&actor.settlementReadIdentity!==undefined)await assertSettlementReadDatabase(client,actor.settlementReadIdentity);
+  else if (actor.controlledPaymentFact !== undefined) await assertControlledSettlementResource(client,actor.controlledPaymentFact,orderId);
+  else await assertSettlementDatabase(client, actor.settlementAdmission);
   const located = (await client.query<{ renterUserId: string; ownerUserId: string; accountId: string; gameId: string; appId: string | null }>(
     `SELECT o.renter_user_id AS "renterUserId", o.owner_user_id AS "ownerUserId", o.account_id AS "accountId",
             o.game_id AS "gameId", g.app_id AS "appId"
@@ -818,7 +849,26 @@ function projectPosting(value: unknown): Record<string, unknown> {
   return posting;
 }
 
-function projectSettlementBody(value: unknown): unknown {
+type SettlementViewer = "RENTER" | "OWNER" | "SUPPORT";
+
+function isolateSettlementParty(value: unknown, viewer: SettlementViewer): unknown {
+  if (viewer === "SUPPORT" || value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(child => isolateSettlementParty(child, viewer));
+  const item = value as Record<string, unknown>;
+  const withheld = new Set(viewer === "OWNER" ? [
+    "capturedAmount", "capturedCents", "depositAmount", "haffConsumedBuyer", "itemConsumedBuyer", "unusedItemRefund", "unusedHaffRefund",
+    "renterCharge", "renterRefund", "depositRefund", "systemRenterRefund", "proposedRenterRefund", "systemRenterRefundCents", "postedRenterRefundCents", "refund",
+  ] : [
+    "haffConsumedOwner", "itemConsumedOwner", "ownerGross", "ownerNet", "systemOwnerNet", "proposedOwnerNet",
+    "systemOwnerNetCents", "postedOwnerNetCents", "owner",
+  ]);
+  if (item.feePayer !== viewer) for (const field of ["feeBase", "feeRate", "feeAmount"]) withheld.add(field);
+  if ((item.amounts as Record<string, unknown> | null)?.feePayer !== viewer) withheld.add("compensationFeeCents");
+  return Object.fromEntries(Object.entries(item).filter(([key]) => !withheld.has(key))
+    .map(([key, child]) => [key, isolateSettlementParty(child, viewer)]));
+}
+
+function projectSettlementBody(value: unknown, viewer: SettlementViewer): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
   const body = pickFields(value, [
     "error", "orderId", "revision", "rentalStarted", "openings", "intakes", "versions", "currentRequest", "settlement", "posting",
@@ -846,7 +896,7 @@ function projectSettlementBody(value: unknown): unknown {
     if (Array.isArray(consumed.items)) consumed.items = consumed.items.map((line) => pickFields(line, ["itemId", "consumed", "remaining"]));
     body.consumed = consumed;
   }
-  return body;
+  return isolateSettlementParty(body, viewer);
 }
 
 /** One actor-aware projection for reads, previews and both fresh/cached write receipts. */
@@ -854,12 +904,25 @@ export async function projectSettlementResponse(
   client: PoolClient,
   actor: Actor,
   result: { status: number; body: unknown },
+  orderId?: string,
 ): Promise<{ status: number; body: unknown }> {
   if (actor.realm === "admin") {
     const access = await loadEffectiveAdminAccess(client, actor.userId);
     if (access?.permissions.has(ADMIN_PERMISSION.supplyQuoteInternalRead)) return result;
   }
-  return { ...result, body: projectSettlementBody(result.body) };
+  let viewer: SettlementViewer = "SUPPORT";
+  if (actor.realm === "user") {
+    const resultOrderId = (result.body as Record<string, unknown> | null)?.orderId;
+    if (orderId !== undefined && resultOrderId !== undefined && resultOrderId !== orderId) throw notFound();
+    const boundId = orderId ?? resultOrderId;
+    if (typeof boundId !== "string") throw notFound();
+    const row = (await client.query<{ ownerUserId: string; renterUserId: string }>(
+      `SELECT owner_user_id AS "ownerUserId", renter_user_id AS "renterUserId" FROM zzsh_order.rental_order WHERE id=$1`, [boundId],
+    )).rows[0];
+    if (!row || row.ownerUserId !== actor.userId && row.renterUserId !== actor.userId) throw notFound();
+    viewer = row.renterUserId === actor.userId ? "RENTER" : "OWNER";
+  }
+  return { ...result, body: projectSettlementBody(result.body, viewer) };
 }
 
 async function audit(client: PoolClient, actor: Actor, action: string, orderId: string, requestId: string, details: Record<string, unknown>, outcome: AuditOutcome = "SUCCESS"): Promise<void> {
@@ -1688,15 +1751,16 @@ export async function reviewSettlement(client: PoolClient, orderId: string, vers
 
 
 /* ---- B3: per-page settlement stage summary (no amounts). Shared by list + single detail. ---- */
-export type SettlementStageCode = "NONE" | "RENTING" | "INTAKE_PENDING" | "DECISION_PENDING" | "DECISION_WAITING" | "POSTED" | "UNKNOWN";
+export type SettlementStageCode = "NONE" | "OPENING_PENDING" | "RENTING" | "INTAKE_PENDING" | "DECISION_PENDING" | "DECISION_WAITING" | "DECISION_REJECTED" | "POSTED" | "UNKNOWN";
 export interface SettlementStage { code: SettlementStageCode; label: string | null; viewerActionRequired: boolean; settlementVersionNo: number | null }
 export interface SettlementStageFacts {
   orderStatus: string; viewerParty: "RENTER" | "OWNER" | null; posted: boolean; intakeOpen: boolean;
   currentVersionNo: number | null; renterAction: string | null; ownerAction: string | null;
+  rentalStarted?: boolean; openingActionRequired?: boolean;
 }
 const STAGE_LABELS: Record<SettlementStageCode, string | null> = {
-  NONE: null, RENTING: "租赁中", INTAKE_PENDING: "结算受理中", DECISION_PENDING: "待你确认结算",
-  DECISION_WAITING: "等待对方或平台确认", POSTED: "已结算", UNKNOWN: "状态待核实",
+  NONE: null, OPENING_PENDING: "待确认开租", RENTING: "租赁中", INTAKE_PENDING: "结算受理中", DECISION_PENDING: "待你确认结算",
+  DECISION_WAITING: "等待对方或平台确认", DECISION_REJECTED: "结算方案未达成一致", POSTED: "已结算", UNKNOWN: "状态待核实",
 };
 function stage(code: SettlementStageCode, versionNo: number | null, viewerActionRequired = false): SettlementStage {
   return { code, label: STAGE_LABELS[code], viewerActionRequired, settlementVersionNo: versionNo };
@@ -1710,14 +1774,20 @@ export function settlementStageOf(f: SettlementStageFacts): SettlementStage {
   if (v !== null) {
     const mine = f.viewerParty === "RENTER" ? f.renterAction : f.viewerParty === "OWNER" ? f.ownerAction : "N/A";
     const rejected = f.renterAction === "REJECT" || f.ownerAction === "REJECT";
+    if (rejected) return stage("DECISION_REJECTED", v);
     if (f.viewerParty && mine === null && !rejected) return stage("DECISION_PENDING", v, true);
     return stage("DECISION_WAITING", v);
   }
+  if (f.orderStatus === "PAID" && f.rentalStarted === false) return stage("OPENING_PENDING", null, f.openingActionRequired === true);
   return f.orderStatus === "PAID" ? stage("RENTING", null) : stage("UNKNOWN", null);
 }
 export const SETTLEMENT_STAGES_SQL = `/* user-settlement-stage-batch */
 SELECT o.id, o.status AS "orderStatus",
        CASE WHEN o.renter_user_id = $2 THEN 'RENTER' WHEN o.owner_user_id = $2 THEN 'OWNER' END AS "viewerParty",
+       EXISTS (SELECT 1 FROM zzsh_order.rental_opening op WHERE op.order_id=o.id AND op.status='CONFIRMED') AS "rentalStarted",
+       EXISTS (SELECT 1 FROM zzsh_order.rental_opening op WHERE op.order_id=o.id AND op.status='DRAFT'
+         AND NOT EXISTS (SELECT 1 FROM zzsh_order.rental_opening_ack ack WHERE ack.opening_id=op.id
+           AND ack.party=CASE WHEN o.renter_user_id=$2 THEN 'RENTER' WHEN o.owner_user_id=$2 THEN 'OWNER' END)) AS "openingActionRequired",
        EXISTS (SELECT 1 FROM zzsh_order.settlement_posting p WHERE p.order_id = o.id) AS posted,
        COALESCE((SELECT i.status = 'OPEN' FROM zzsh_order.settlement_intake i WHERE i.order_id = o.id ORDER BY i.version_no DESC LIMIT 1), false) AS "intakeOpen",
        cv.version_no AS "currentVersionNo",
@@ -1733,10 +1803,14 @@ export function settlementStageFactsFromView(body: Record<string, unknown>, view
   const versions = (body.versions ?? []) as Array<{ versionNo: number; supersededAt: string | null; decisions: Array<{ party: string; action: string }> }>;
   const current = versions.filter((v) => v.supersededAt === null).sort((a, b) => b.versionNo - a.versionNo)[0] ?? null;
   const action = (party: string) => current?.decisions.find((d) => d.party === party)?.action ?? null;
+  const openings = (body.openings ?? []) as Array<{ status: string; acks?: Array<{ party: string }> }>;
   return {
     orderStatus: String(body.orderStatus ?? ""), viewerParty, posted: body.posting !== null && body.posting !== undefined,
     intakeOpen: intakes.at(-1)?.status === "OPEN", currentVersionNo: current ? Number(current.versionNo) : null,
     renterAction: action("RENTER"), ownerAction: action("OWNER"),
+    rentalStarted: body.rentalStarted === true,
+    openingActionRequired: viewerParty !== null && openings.some(opening => opening.status === "DRAFT"
+      && !opening.acks?.some(ack => ack.party === viewerParty)),
   };
 }
 /** Single-order stage via the same settlementStageOf used by readSettlementStages. */

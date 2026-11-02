@@ -19,8 +19,8 @@ export const CREDIT_GUARANTEE_PERMISSION = { read: 'credit.guarantee.read', mana
 export type Domain = keyof typeof PERMISSION;
 export type Part<T> = { state: 'ready'; data: T; count?: number; publishedCount?: number; current?: number; nextCursor?: string | null } | { state: 'denied'; permission: string; reason?: string };
 /** The age filter is no longer offered: the server gate and the DTO stay, the operator surface drops it. */
-export type Filters = { q: string; status: string; from: string; to: string; identity: string; sort: string; tier: string; entitlement: string; creditMin: string; creditMax: string; risk: string };
-export const EMPTY_FILTERS: Filters = { q: '', status: '', from: '', to: '', identity: '', sort: 'active_orders_desc', tier: '', entitlement: '', creditMin: '', creditMax: '', risk: '' };
+export type Filters = { q: string; status: string; from: string; to: string; identity: string; sort: string; tier: string; entitlement: string; creditMin: string; creditMax: string; risk: string; registrationTime: string; registeredFrom: string; registeredTo: string };
+export const EMPTY_FILTERS: Filters = { q: '', status: '', from: '', to: '', identity: '', sort: 'active_orders_desc', tier: '', entitlement: '', creditMin: '', creditMax: '', risk: '', registrationTime: '', registeredFrom: '', registeredTo: '' };
 /** The directory always reads the server-declared original registration time; the local filing date is a different fact. */
 export const REGISTRATION_TIME_ORIGINAL = 'ORIGINAL';
 export const REGISTRATION_SORT = { desc: 'registered_desc', asc: 'registered_asc' } as const;
@@ -54,7 +54,7 @@ const nextCalendarDay = (value: string) => {
 export const PHONE_LIKE = /(?:\+?86[\s-]*)?1[3-9](?:[\s-]*\d){9}/;
 export const STATUS_LABEL: Record<string,string> = { ACTIVE: '正常', RESTRICTED: '受限', FROZEN: '已冻结', CANCELLED: '已注销', UNKNOWN: '未知' };
 export const FILTER_VALUE_LABEL:Record<string,string>={VERIFIED:'已实名',UNVERIFIED:'未实名',REJECTED:'未通过',MIGRATED:'旧平台用户',LOCAL:'未关联旧平台来源'};
-export const safeFilters = (filters: Filters) => Object.fromEntries(Object.entries(filters).filter(([key,value])=>value && !(key==='q' && PHONE_LIKE.test(value))));
+export const safeFilters = (filters: Filters) => Object.fromEntries(Object.entries(filters).filter(([key,value])=>value && !(key==='q' && PHONE_LIKE.test(value)) && !(key==='sort' && filters.registrationTime==='LOCAL')));
 export const sourceLabel = (provider?: string) => provider==='legacy_mysql_restore' ? '旧平台用户' : provider==='none' ? '未关联旧平台来源' : '来源未知';
 export const identityLabel = (value: string) => ({ VERIFIED:'已实名',UNVERIFIED:'未实名',REJECTED:'未通过',UNKNOWN:'未知' }[value] ?? '未知');
 export const ageLabel = (value: string) => ({ ADULT:'成年',MINOR:'未成年',UNKNOWN:'未知' }[value] ?? '未知');
@@ -71,6 +71,7 @@ export type User = {
   username: string;
   displayUsername: string;
   phoneMasked: string;
+  phoneRevealed?: boolean;
   emailMasked: string | null;
   image: string | null;
   legacyId?: string;
@@ -141,6 +142,7 @@ function project(row: UserDirectoryItem | UserDirectoryDetail, has:(permission:s
     username: row.username ?? '',
     displayUsername: row.displayUsername ?? '',
     phoneMasked: row.maskedPhone ?? '未绑定手机号',
+    phoneRevealed: typeof detail?.phoneRevealed === 'boolean' ? detail.phoneRevealed : undefined,
     emailMasked: detail?.maskedEmail ?? null,
     image: row.image ?? null,
     legacyId: row.source.legacyId,
@@ -257,9 +259,10 @@ export class UserDirectoryBff {
 
     const buildFilterParams = () => {
       const p = new URLSearchParams();
-      // R1: the directory always asks for the server-declared original registration time.
-      p.set('registrationTime', REGISTRATION_TIME_ORIGINAL);
-      p.set('sort', normalizeRegistrationSort(filters.sort));
+      // Ordinary directory reads retain original registration; overview filing counts use the API's LOCAL default.
+      const localFiling = filters.registrationTime === 'LOCAL';
+      if (!localFiling) p.set('registrationTime', REGISTRATION_TIME_ORIGINAL);
+      p.set('sort', localFiling ? 'created' : normalizeRegistrationSort(filters.sort));
       if (filters.q) p.set(phone ? 'phone' : 'q', filters.q);
       for (const [key, value] of Object.entries({
         accountStatus: filters.status,
@@ -275,13 +278,20 @@ export class UserDirectoryBff {
       if ([filters.creditMin, filters.creditMax].some(value => value !== '' && !/^(0|[1-9]\d?|100)$/.test(value))
         || filters.creditMin !== '' && filters.creditMax !== '' && Number(filters.creditMin) > Number(filters.creditMax)) throw new Error('信用分范围应为 0–100，最低分不能大于最高分');
       // The range is inclusive of the end day; the server bound is exclusive, so the upper bound is the next day's zero hour.
-      if (filters.from) {
+      if (filters.registeredFrom) {
+        if (!Number.isFinite(Date.parse(filters.registeredFrom)) || !/T.*(?:Z|[+-]\d{2}:\d{2})$/.test(filters.registeredFrom)) throw new Error('建档时段无效');
+        p.set('registeredFrom', filters.registeredFrom);
+      } else if (filters.from) {
         if (!isCalendarDay(filters.from)) throw new Error('注册日期无效');
         p.set('registeredFrom', `${filters.from}T00:00:00+08:00`);
       }
-      if (filters.to) {
+      if (filters.registeredTo) {
+        if (!Number.isFinite(Date.parse(filters.registeredTo)) || !/T.*(?:Z|[+-]\d{2}:\d{2})$/.test(filters.registeredTo)) throw new Error('建档时段无效');
+        p.set('registeredTo', filters.registeredTo);
+      } else if (filters.to) {
         if (!isCalendarDay(filters.to)) throw new Error('注册日期无效');
-        p.set('registeredBefore', `${nextCalendarDay(filters.to)}T00:00:00+08:00`);
+        if (localFiling) p.set('registeredTo', `${filters.to}T23:59:59.999999+08:00`);
+        else p.set('registeredBefore', `${nextCalendarDay(filters.to)}T00:00:00+08:00`);
       }
       if (filters.from && filters.to && filters.from > filters.to)
         throw new Error('注册起始日期不能晚于结束日期');

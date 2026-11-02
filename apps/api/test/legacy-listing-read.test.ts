@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import type { PoolClient } from "pg";
-import { parseLegacyReadSnapshot,buildLegacyListingCandidates,buildMixedListingCandidates,legacyListingSortLabel,legacyReadSourceAllowed,legacySnapshotConflicts,legacySnapshotReplaySql,legacyHistoricalReadSql,projectLegacyHistoricalRead,withoutLegacyResourceNo,LEGACY_NATIVE_TAKEOVER_GUARD } from "../src/supply/legacy-listing-read";
+import { readLegacySkinHolding,parseLegacyReadSnapshot,buildLegacyListingCandidates,buildMixedListingCandidates,legacyListingSortLabel,legacyReadSourceAllowed,legacySnapshotConflicts,legacySnapshotReplaySql,legacyHistoricalReadSql,projectLegacyHistoricalRead,withoutLegacyResourceNo,LEGACY_NATIVE_TAKEOVER_GUARD } from "../src/supply/legacy-listing-read";
 import { publicFilterMetadata,validateConfigCatalog,validateListingQuery } from "../src/supply/listing-filter-config";
 import { parseFilterConfig,type ListingQueryV2 } from "../src/supply/listing-filter-contract";
 
@@ -160,4 +160,25 @@ test("configured legacy mode survives zero visible rows and still returns an aut
     assert.equal(metadata.reasonCode, null);
     await validateListingQuery(stub(visibleRows), baseQuery, state);
   }
+});
+
+test('legacy holdings distinguish absent admission from an admitted empty set without altering snapshots', async () => {
+ let calls=0;
+ const client={query:async(_sql:string,args:unknown[])=>{calls++;assert.deepEqual(args,['account','observation','game']);return{rows:[]};}} as unknown as PoolClient;
+ assert.equal(await readLegacySkinHolding(client,'account','new-draft','game','NATIVE'),undefined);assert.equal(calls,0);
+ assert.deepEqual(await readLegacySkinHolding(client,'account','observation','game','LEGACY_OBSERVATION'),{state:'UNKNOWN',admittedCount:null,items:null,withheldCount:null});
+ const empty={query:async()=>({rows:[{skinIds:[]}]})} as unknown as PoolClient;
+ assert.deepEqual(await readLegacySkinHolding(empty,'account','observation','game','LEGACY_OBSERVATION'),{state:'ADMITTED',admittedCount:0,items:[],withheldCount:0});
+});
+test('legacy holdings keep admitted count while withholding currently private or missing catalog references', async () => {
+ let calls=0;
+ const client={query:async()=>({rows:++calls===1?[{skinIds:['visible','private','missing']}]:[
+  {id:'visible',name:'可见皮肤',isPublic:true,defaultState:'UNKNOWN'},
+  {id:'private',name:'不可泄露的名称',isPublic:false,defaultState:'UNKNOWN'},
+ ]})} as unknown as PoolClient;
+ const result=await readLegacySkinHolding(client,'account','observation','game','LEGACY_OBSERVATION');
+ assert.equal(result?.state,'ADMITTED');assert.equal(result?.admittedCount,3);assert.equal(result?.withheldCount,2);
+ assert.deepEqual(result?.items?.map(item=>item.id),['visible']);assert.doesNotMatch(JSON.stringify(result),/不可泄露|private|missing/);
+ const broken={query:async()=>({rows:[{skinIds:['duplicate','duplicate']}]})} as unknown as PoolClient;
+ assert.equal((await readLegacySkinHolding(broken,'account','observation','game','LEGACY_OBSERVATION'))?.state,'UNKNOWN');
 });

@@ -2,6 +2,7 @@ import type { INestApplication } from "@nestjs/common";
 
 import { handleAdminSelfSettingsRoute } from "../auth/admin-self-settings";
 import { getWorkspaceLayout, saveWorkspaceLayout } from "../auth/admin-workspace-layout";
+import { handleAdminOverview } from "../auth/admin-overview";
 import {
   getAdminSessionSnapshot,
   handleAdminSecurity,
@@ -430,6 +431,10 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
       if (error instanceof SecurityApiError) sendError(response, error.status, error.code, error.message, requestId);
       else sendError(response, 500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);
     }
+    return;
+  }
+  if (path === "/workspace/overview") {
+    await handleAdminOverview(request, response, { ...options.adminSecurityOptions, imAppId: options.yunxin?.appId });
     return;
   }
   if (path === "/workspace/layout") {

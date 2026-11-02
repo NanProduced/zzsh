@@ -1,5 +1,5 @@
 import type { AppConfig } from '../config/config';
-import { ConfigurationError } from '../config/config';
+import { businessFeatureEnabled, ConfigurationError } from '../config/config';
 import { readFormalCollectionAdmission, type FormalCollectionAdmission } from '../order/joinpay-collection-profile';
 import { createNativeDistributionPolicyScope } from './distribution-policy-store';
 import { createNativeDistributionEarningStore } from './distribution-earning-store';
@@ -27,9 +27,9 @@ export function loadNativeDistributionRuntime(input: {
   admission: FormalCollectionAdmission | undefined;
   env?: NodeJS.ProcessEnv;
 }) {
-  const enabled = (input.env ?? process.env).DISTRIBUTION_NATIVE_ENABLED ?? 'false';
-  if (enabled !== 'true' && enabled !== 'false') throw new ConfigurationError('DISTRIBUTION_NATIVE_ENABLED_INVALID');
-  if (enabled === 'false') return undefined;
+  const env = input.env ?? process.env;
+  if (env.DISTRIBUTION_NATIVE_ENABLED !== undefined && !['true','false'].includes(env.DISTRIBUTION_NATIVE_ENABLED)) throw new ConfigurationError('DISTRIBUTION_NATIVE_ENABLED_INVALID');
+  if (!businessFeatureEnabled(env, 'DISTRIBUTION_NATIVE_ENABLED')) return undefined;
   if (!input.authEnabled || input.config.provider !== 'real' || input.config.database.user !== input.config.database.runtimeUser) {
     throw new ConfigurationError('DISTRIBUTION_NATIVE_RUNTIME_CONTEXT_INVALID');
   }

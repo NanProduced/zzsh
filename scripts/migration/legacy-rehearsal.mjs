@@ -1545,7 +1545,7 @@ function commandSelftest(args) {
   add("plan-exit-0", planRun.status === 0, { status: planRun.status, stderr: planRun.stderr.slice(0, 800) });
   const planOutput = parseJsonOutput(planRun.stdout);
   add("plan-json", Boolean(planOutput?.ok), planOutput);
-  const aliasRun = runChild(["--plan", "--out", join(outDir, "plan-alias"), ...apiArgs]);
+  const aliasRun = runChild(["--plan", "--manifest", manifest,"--out", join(outDir, "plan-alias"), ...apiArgs]);
   add("plan-flag-alias", aliasRun.status === 0 && parseJsonOutput(aliasRun.stdout)?.command === "plan", { status: aliasRun.status, stderr: aliasRun.stderr.slice(0, 500) });
   const plan = planOutput ? readJson(resolve(planDir, "plan.json"), "selftest-plan").value : null;
   if (plan) {
@@ -1571,14 +1571,14 @@ function commandSelftest(args) {
   }
 
   const positiveDir = join(outDir, "reconcile-positive");
-  const positiveRun = runChild(["reconcile", "--plan", join(planDir, "plan.json"), "--target", join(HERE, "fixtures", "target-readback.positive.json"), "--out", positiveDir]);
+  const positiveRun = runChild(["reconcile", "--plan", join(planDir, "plan.json"), "--target", join(args["fixture-dir"]??join(HERE,"fixtures"), "target-readback.positive.json"), "--out", positiveDir]);
   const positive = positiveRun.status === 0 ? readJson(resolve(positiveDir, "reconcile.json"), "selftest-positive").value : null;
   add("reconcile-positive-exit-0", positiveRun.status === 0, { status: positiveRun.status, stderr: positiveRun.stderr.slice(0, 800) });
   add("reconcile-positive-conserved", positive?.summary?.conserved === true, positive?.summary ?? null);
   add("reconcile-positive-amounts", positive?.summary?.amountConserved === true && positive?.conservation?.duties?.sourceCents === positive?.conservation?.duties?.targetCents && positive?.conservation?.openings?.sourceCents === positive?.conservation?.openings?.targetCents, positive?.conservation ?? null);
 
   const negativeDir = join(outDir, "reconcile-negative");
-  const negativeRun = runChild(["reconcile", "--plan", join(planDir, "plan.json"), "--target", join(HERE, "fixtures", "target-readback.negative.json"), "--out", negativeDir]);
+  const negativeRun = runChild(["reconcile", "--plan", join(planDir, "plan.json"), "--target", join(args["fixture-dir"]??join(HERE,"fixtures"), "target-readback.negative.json"), "--out", negativeDir]);
   const negative = readJson(resolve(negativeDir, "reconcile.json"), "selftest-negative").value;
   add("reconcile-negative-exit-2", negativeRun.status === 2, { status: negativeRun.status, stderr: negativeRun.stderr.slice(0, 800) });
   add("reconcile-negative-changed", negative?.summary?.changed >= 3, negative?.summary ?? null);

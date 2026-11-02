@@ -43,6 +43,20 @@ const approvedFixture = () => ({
   records: [{ accountId: "account_1", ownerUserId: "owner_1", gameId: "game-1", observationVersionId: "version-1", sourceSystem: "legacy_mysql_restore", sourceEntity: "la_rental_accounts", legacyId: "34418", sourceDigest: "b".repeat(64), evidenceRef: EVIDENCE, sourceUpdatedAt: "2026-01-01T00:00:00.000Z", snapshot: { resourceNo: "A-1" }, title: "历史资料", description: null, attributes: {} }],
 });
 
+test("frozen-source evidence syntax still requires the exact reviewed capability and target", async () => {
+  const evidenceRef="local-frozen-source:"+"d".repeat(64)+":la_rental_accounts:34418";
+  assert.equal(legacyEvidenceReferenceValid(evidenceRef),true);
+  for(const ref of [evidenceRef.replace(":la_rental_accounts:",":la_order:"),evidenceRef.replace("d".repeat(64),"d".repeat(63)),evidenceRef+":extra"])
+    assert.equal(legacyEvidenceReferenceValid(ref),false);
+  const input=approvedFixture();input.records[0]!.evidenceRef=evidenceRef;
+  const parsed=parseLegacyPublicAdmission(input);
+  assert.equal(legacyAdmissionSql(undefined,()=>"$1",false),"FALSE");
+  const sql=legacyAdmissionSql(parsed,()=>"$1",false);
+  assert.match(sql,/approved\."sourceDigest"=h\.source_digest/);
+  assert.match(sql,/approved\."observationVersionId"=h\.observation_version_id/);
+  await assert.rejects(()=>assertLegacyPublicAdmissionTarget({query:async()=>({rows:[{...parsed.resource,oid:999}]})} as never,parsed),/TARGET_MISMATCH/);
+});
+
 test("reviewed capability rejects malformed/empty records and binds the actual database", async () => {
   const input=approvedFixture(), parsed=parseLegacyPublicAdmission(input);
   input.records[0]!.sourceDigest="c".repeat(64);
@@ -139,6 +153,9 @@ test("hold and identity helpers never fold unknown values into a default class",
   for (const value of [null, undefined, "", 0, "none", { toString: () => "NONE" }])
     assert.equal(legacyHoldDisplayable(value as never), false, String(value));
   assert.equal(coreIdentityDisplayable("ADULT"), true);
+  assert.equal(coreIdentityDisplayable("UNKNOWN", "VERIFIED", "legacy_mysql_restore"), true);
+  assert.equal(coreIdentityDisplayable("MINOR", "VERIFIED", "legacy_mysql_restore"), false);
+  assert.equal(coreIdentityDisplayable("UNKNOWN", "UNVERIFIED", "legacy_mysql_restore"), false);
   for (const value of ["MINOR", "UNKNOWN", null, undefined, "adult"])
     assert.equal(coreIdentityDisplayable(value), false, String(value));
 });

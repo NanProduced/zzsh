@@ -1,3 +1,5 @@
+import { formatBeijingDateTime } from "./workspace/beijing-time";
+
 export const API_ROOT = "/api/bff/admin";
 export const CHANNEL_NAME = "zzsh-admin-security";
 export const EVENT_KEY = `${CHANNEL_NAME}:event`;
@@ -218,6 +220,7 @@ export type UserDirectoryPage = { items?: UserDirectoryItem[]; total?: number; n
 export type UserDirectoryListResponse = UserDirectoryNumberedPage | UserDirectoryPage;
 
 export type UserDirectoryDetail = Omit<UserDirectoryItem, "source"> & {
+  phoneRevealed?: boolean;
   riskRevision?: number;
   phoneNumberVerified: boolean | null;
   maskedEmail: string | null;
@@ -928,9 +931,7 @@ export function friendlyError(error: unknown): string {
 }
 
 export function formatDate(value: string | null): string {
-  if (!value) return "未提供";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "时间未知" : new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(date);
+  return formatBeijingDateTime(value);
 }
 
 export function readTotpSecret(uri: string): string {

@@ -163,12 +163,15 @@ export type OrderQuote = {
   lines?: OrderLine[];
   unitAmountsInformational?: boolean;
   ownerTotal?: Money | null;
+  ownerHaffRatio?: string | null;
 };
 
 export type OrderAmounts = {
   rental?: Money | null;
   deposit?: Money | null;
   totalDue?: Money | null;
+  ownerExpectedIncome?: Money | null;
+  ownerRecordedIncome?: Money | null;
   currency?: string;
 };
 
@@ -200,7 +203,7 @@ export type OrderEntitlement = {
   fullTermGuaranteed: boolean | null;
 };
 export type OrderStage = {
-  code: "NONE" | "RENTING" | "INTAKE_PENDING" | "DECISION_PENDING" | "DECISION_WAITING" | "POSTED" | "UNKNOWN";
+  code: "NONE" | "OPENING_PENDING" | "RENTING" | "INTAKE_PENDING" | "DECISION_PENDING" | "DECISION_REJECTED" | "DECISION_WAITING" | "POSTED" | "UNKNOWN";
   label: string | null;
   viewerActionRequired: boolean;
   settlementVersionNo: number | null;
@@ -242,6 +245,9 @@ export type Order = {
   orderFacts?: LegacyOrderFacts;
   termSeconds?: string | null;
   amounts?: OrderAmounts | null;
+  amountsPerspective?: "OWNER" | "RENTER";
+  ownerIncomeSource?: { source: "LEGACY_ORDER_SNAPSHOT"; sourceLabel: string };
+  fundsResolution?: { status: "REVIEW_REQUIRED"; code: "HISTORICAL_MANUAL_CLOSE"; sourceLabel: string };
   createdAt?: string | null;
   holdUntil?: string | null;
   expiredAwaitingCancel?: boolean;
@@ -266,9 +272,11 @@ export type LegacyOrder = {
   id: string; displayNo: string; status: OrderStatus | "UNKNOWN"; party: OrderParty; title: string | null; gameId: string;
   source: { origin: "LEGACY"; ruleOrigin: "LEGACY_ORDER"; originalStatus: number; originalPayStatus: number; statusLabel: string };
   createdAt: string | null; paidAt: string | null; cancelledAt: string | null; completedAt: string | null;
-  amounts: { rental: Money | null; deposit: Money | null; totalDue: Money | null; currency: "CNY" };
+  amounts: { rental: Money | null; deposit: Money | null; totalDue: Money | null; currency: "CNY"; ownerExpectedIncome?: Money | null; ownerRecordedIncome?: Money | null };
+  amountsPerspective?: "OWNER" | "RENTER";
+  ownerIncomeSource?: { source: "LEGACY_ORDER_SNAPSHOT"; sourceLabel: string };
   payment: { state: "RECORDED_PAID" | "RECORDED_UNPAID" | "UNKNOWN"; recordedAt: string | null; recordedAmount: Money | null };
-  legacyAmounts: { required: Money | null; paid: Money | null; deposit: Money | null; refund: Money | null; refundChannelState: "UNKNOWN" };
+  legacyAmounts: { required: Money | null; paid: Money | null; deposit: Money | null; refund: Money | null; refundChannelState: "UNKNOWN" } | null;
   account: { id: string | null; displayNo: string | null; readable: boolean };
   orderFacts?: LegacyOrderFacts;
   readOnly: true; paymentOpen: false; cancelOpen: false; continuationCount: 0; actions: never[];

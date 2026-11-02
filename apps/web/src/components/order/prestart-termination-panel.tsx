@@ -42,7 +42,7 @@ export function PrestartTerminationPanel({order,party,onChanged}:{order:Order;pa
   else{setPending(inspectIntent(userId,'order.prestart.request',order.id).state!=='NONE');setNote(out.status==='unknown'||out.status==='blocked'?out.message:
    out.status==='unauthorized'?'登录身份已变化，原请求已保留':out.status==='recovery-unresolved'?'原请求尚未查明，已保留原键，请重读后恢复':out.error.message);}
  };
- return <section className="order-detail-section" aria-label="未开租结束申请"><h2 className="order-section-title">未开租结束</h2>
+ return <section className="order-detail-section order-prestart-section" aria-label="未开租结束申请"><details className="order-secondary-details" open={Boolean(read?.request || pending || note || visible?.error)}><summary><h2 className="order-section-title">未开租结束</h2><span>{read?.request ? stateText[read.request.state] : '尚未开租需要取消？查看申请条件与处理入口'}</span></summary><div className="order-prestart-content">
   <p className="order-muted">双方尚未正式开租时可申请，由受权客服核实交付、使用和争议。无争议且无其他受审调整时核定全额应退；申请与银行到账分开。</p>
   {!visible||!visible.read&&!visible.error?<p role="status" className="order-muted">正在读取本单依据…</p>:visible.error?<p role="alert">本单结束依据暂不可用，不能据此判断没有申请。{visible.error.requestId?` 查询编号：${visible.error.requestId}`:''}</p>:null}
   {read?.request?<><p role="status">{stateText[read.request.state]}</p><p className="order-muted">{read.request.reason}{read.request.reviewReason?` · 客服核实：${read.request.reviewReason}`:''}</p>
@@ -61,5 +61,5 @@ export function PrestartTerminationPanel({order,party,onChanged}:{order:Order;pa
    <button type="submit" className="button secondary button--sm" disabled={busy||!read||!pending&&reason.trim().length<3}>{busy?'正在提交…':pending?'按原键恢复申请':'申请未开租结束'}</button>
   </form>:read&&!read.request?<p className="order-muted">{blockedText[read.eligibility.reason??'']??'当前依据未核定'}</p>:null}
   {note?<p role="status" className="order-muted">{note}</p>:null}<button type="button" className="button quiet button--sm" disabled={busy} onClick={()=>refresh(n=>n+1)}>重读本地记录</button>
- </section>;
+ </div></details></section>;
 }

@@ -15,7 +15,7 @@ import { readDirectoryUserSummaries, type DirectoryUserSummary } from "../auth/u
 import { legacyUserOrderResources } from "./legacy-user-order-read";
 
 export type OrderReadViewer = { adminId: string; isBoss: boolean; internalQuote: boolean; authorizationKey: string; financeReadable?: boolean; permissions?: ReadonlySet<string> };
-export type OrderReadFilters = { page: number; pageSize: number; status?: string; origin?: "NATIVE" | "LEGACY"; displayNo?: string; accountId?: string; renterUserId?: string; ownerUserId?: string; createdFrom?: string; createdTo?: string; qKind?: "order" | "account" | "party" | "renter" | "owner"; qValue?: string; restoreKey?: string; view?: "list" };
+export type OrderReadFilters = { page: number; pageSize: number; status?: string; origin?: "NATIVE" | "LEGACY"; displayNo?: string; accountId?: string; renterUserId?: string; ownerUserId?: string; createdFrom?: string; createdTo?: string; paymentConfirmedFrom?: string; paymentConfirmedTo?: string; paymentOpen?: true; qKind?: "order" | "account" | "party" | "renter" | "owner"; qValue?: string; restoreKey?: string; view?: "list"; fundsResolution?: "MANUAL_CLOSE" };
 /** Strict source filter: omitted means both; repeated or unknown values are rejected, never coerced. */
 export function parseOrderOrigin(query: URLSearchParams): "NATIVE" | "LEGACY" | undefined {
  const values = query.getAll("origin");
@@ -36,9 +36,9 @@ const CONTINUATION_COMPLETED_AT = `COALESCE((SELECT created_at FROM zzsh_order.l
  *  numbers) and the record (the JSON projection the admin list returns). */
 const NATIVE_HEAD = `o.id,o.created_at,o.game_id,o.owner_user_id,o.renter_user_id,o.account_id,o.display_no,o.status`;
 const LEGACY_HEAD = `l.id,l.source_created_at,l.game_id,l.owner_user_id,l.renter_user_id,l.account_id,l.original_order_no`;
-const NATIVE_FILTER = `a.display_no AS account_no,NULL::text AS renter_no,NULL::text AS owner_no,ou.name AS owner_name,ru.name AS renter_name,ou.username AS owner_username,ru.username AS renter_username,'NATIVE'::text AS origin,NULL::text AS legacy_account_no`;
+const NATIVE_FILTER = `a.display_no AS account_no,NULL::text AS renter_no,NULL::text AS owner_no,ou.name AS owner_name,ru.name AS renter_name,ou.username AS owner_username,ru.username AS renter_username,'NATIVE'::text AS origin,NULL::text AS legacy_account_no,o.cancel_reason`;
 // 旧单迁入后账号即新平台账号：账号检索列用 ZZ 编号，旧编号单列仅供检索
-const LEGACY_FILTER = `a.display_no,l.legacy_renter_no,l.legacy_owner_no,ou.name,ru.name,ou.username,ru.username,'LEGACY'::text,l.legacy_account_no`;
+const LEGACY_FILTER = `a.display_no,l.legacy_renter_no,l.legacy_owner_no,ou.name,ru.name,ou.username,ru.username,'LEGACY'::text,l.legacy_account_no,NULL::text AS cancel_reason`;
 const NATIVE_RECORD = `to_jsonb(o)||jsonb_build_object('rental_amount_cents',o.rental_amount_cents::text,'deposit_amount_cents',o.deposit_amount_cents::text,
     'term_seconds',o.term_seconds::text,'revision',o.revision::text,'created_at',${utc('o.created_at')},'hold_until',${utc('o.hold_until')},'paid_at',${utc('o.paid_at')},'cancelled_at',${utc('o.cancelled_at')},
     'native_payment_record',(SELECT jsonb_build_object('id',p.id,'order_id',p.order_id,'source',p.source,'disposition',p.disposition,
@@ -199,9 +199,9 @@ function accountTitleFact(snapshotTitle: unknown, currentTitle: unknown, resourc
   return { title: titles.orderTitle, accountTitle: { source: titles.currentAccountSource, title: titles.currentAccountTitle, neutralSummary: titles.neutralSummary } };
 }
 // 只投影精确绑定的原APPLIED付款；报价不能补出实收，确认也不代表结算或到账。
-function nativeRecordedAmount(r:Record<string,any>,viewer:OrderReadViewer){
+function nativeRecordedAmount(r:Record<string,any>){
  const p=r.native_payment_record;
- return viewer.financeReadable===true&&orderHasPaidState(r.status,r.cancel_reason)&&p&&p.id===r.paid_confirmation_id&&p.order_id===r.id
+ return orderHasPaidState(r.status,r.cancel_reason)&&p&&p.id===r.paid_confirmation_id&&p.order_id===r.id
   &&p.disposition==='APPLIED'&&['CONTROLLED','JOINPAY'].includes(p.source)&&p.currency==='CNY'&&p.currency===r.currency
   &&typeof p.amount_cents==='string'&&/^(0|[1-9]\d{0,24})$/.test(p.amount_cents)?centsToYuan(p.amount_cents):null;
 }
@@ -211,7 +211,7 @@ export function projectAdminReadOrder(origin:string,r:Record<string,any>,viewer:
   const result=projectOrder(row,'admin',{internalQuote:viewer.internalQuote});const paid=orderHasPaidState(r.status,r.cancel_reason);
   const titles = accountTitleFact(r.title, null, frozenQuoteSummary(r.quote_snapshot));
   const breakdown=nativePrepaymentBreakdown(r,result.amounts);
-  return {...result,...titles,haffRatio:orderHaffRatio(r.quote_snapshot),prepaymentBreakdown:breakdown,prepaymentReconciliation:nativeReconciliation(breakdown),source:{origin:'NATIVE',ruleOrigin:'NATIVE_ORDER'},accountDisplayNo:r.account_no,payment:{state:paid?'RECORDED_PAID':'RECORDED_UNPAID',recordedAt:r.paid_at,recordedAmount:nativeRecordedAmount(r,viewer)}};
+  return {...result,...titles,haffRatio:orderHaffRatio(r.quote_snapshot),prepaymentBreakdown:breakdown,prepaymentReconciliation:nativeReconciliation(breakdown),source:{origin:'NATIVE',ruleOrigin:'NATIVE_ORDER'},accountDisplayNo:r.account_no,payment:{state:paid?'RECORDED_PAID':'RECORDED_UNPAID',recordedAt:r.paid_at,recordedAmount:nativeRecordedAmount(r)}};
  }
  const raw=r.source_snapshot,paid=r.source_pay_status===1,unpaid=r.source_pay_status===0;
  const state=legacyOrderReadState(r.continuation_stage??r.source_order_status,r.source_pay_status),status=state.status;
@@ -222,9 +222,9 @@ export function projectAdminReadOrder(origin:string,r:Record<string,any>,viewer:
   haffRatio:LEGACY_HAFF_RATIO,prepaymentBreakdown:legacyPrepaymentBreakdown(goodsRead,itemsRead),prepaymentReconciliation:legacyReconciliation(goodsRead,itemsRead,r.deposit_amount_cents,r.due_amount_cents),legacyResources:resources,
   createdAt:r.source_created_at,paidAt:r.source_paid_at,cancelledAt:r.source_cancelled_at,completedAt:r.source_completed_at,holdUntil:null,expiredAwaitingCancel:false,paymentOpen:false,cancelOpen:false,
   ownerUserId:r.owner_user_id,renterUserId:r.renter_user_id,ownerName:r.owner_name,renterName:r.renter_name,ownerBusinessNo:r.legacy_owner_no,renterBusinessNo:r.legacy_renter_no,
-  payment:{state:paid?'RECORDED_PAID':unpaid?'RECORDED_UNPAID':'UNKNOWN',recordedAt:r.source_paid_at,recordedAmount:paid&&viewer.financeReadable===true?money(r.recorded_paid_amount_cents):null},
+  payment:{state:paid?'RECORDED_PAID':unpaid?'RECORDED_UNPAID':'UNKNOWN',recordedAt:r.source_paid_at,recordedAmount:paid?money(r.recorded_paid_amount_cents):null},
   source:{origin:'LEGACY',ruleOrigin:'LEGACY_ORDER',originalStatus:r.source_order_status,statusLabel:state.statusLabel,originalPayStatus:r.source_pay_status},
-  legacyAmounts:{required:money(r.due_amount_cents),paid:paid&&viewer.financeReadable===true?money(r.recorded_paid_amount_cents):null,deposit:money(r.deposit_amount_cents),refund:money(legacyMoneyCents(raw.return_order_money)),refundChannelState:'UNKNOWN'},quote:null};
+  legacyAmounts:{required:money(r.due_amount_cents),paid:paid?money(r.recorded_paid_amount_cents):null,deposit:money(r.deposit_amount_cents),refund:money(legacyMoneyCents(raw.return_order_money)),refundChannelState:'UNKNOWN'},quote:null};
 }
 export type AdminOrderProgress={
  asOfUtc:string|null;
@@ -391,7 +391,7 @@ function slimListItem(item:Record<string,any>){
  const total=frozen.materials.length;
  item.frozenAccount={...frozen,materials:frozen.materials.slice(0,LIST_MATERIALS_LIMIT),materialsTotal:total,materialsTruncated:total>LIST_MATERIALS_LIMIT};
 }
-/** 列表金额权限：无财务读权限（finance.read）时列表不下发订单金额及其分项，前端按权限受限显示「—」；详情另行按原口径处理。 */
+/** Legacy explicit redaction helper; ordinary authorized order reads retain contractual amounts. */
 export function restrictListMoney(item:Record<string,any>){
  item.amounts={...(item.amounts??{}),rental:null,deposit:null,totalDue:null};
  if(item.prepaymentBreakdown)item.prepaymentBreakdown={...item.prepaymentBreakdown,haffRental:null,materialsPrepay:null};
@@ -406,9 +406,17 @@ export function restrictListMoney(item:Record<string,any>){
 export async function queryAdminReadOrders(client:PoolClient,viewer:OrderReadViewer,filter:OrderReadFilters,accountViews?:OrderAccountViewReader){
  if(filter.restoreKey&&filter.restoreKey!==viewer.authorizationKey)throw conflict('Authorization context changed');
  const values:unknown[]=[viewer.isBoss,viewer.adminId],where=[gameScopeSql("x.game_id","$2","$1")];
+ if(filter.fundsResolution==='MANUAL_CLOSE')where.push("x.origin='NATIVE' AND x.status='CANCELLED' AND x.cancel_reason='MANUAL_CLOSE'");
  const exact=(field:string,value:string|undefined)=>{if(value!==undefined)where.push(`${field}=$${values.push(value)}`);};
  exact('x.status',filter.status);exact('x.origin',filter.origin);exact('x.display_no',filter.displayNo);exact('x.account_id',filter.accountId);exact('x.renter_user_id',filter.renterUserId);exact('x.owner_user_id',filter.ownerUserId);
  if(filter.createdFrom)where.push(`x.created_at>=$${values.push(filter.createdFrom)}::timestamptz`);if(filter.createdTo)where.push(`x.created_at<$${values.push(filter.createdTo)}::timestamptz`);
+ if(filter.paymentOpen)where.push("x.origin='NATIVE' AND EXISTS(SELECT 1 FROM zzsh_order.rental_order payable WHERE payable.id=x.id AND payable.status='PENDING_PAYMENT' AND payable.hold_until>transaction_timestamp())");
+ if(filter.paymentConfirmedFrom||filter.paymentConfirmedTo){
+  const paid=["paid.id=x.id","p.id=paid.paid_confirmation_id","p.order_id=paid.id","p.disposition='APPLIED'","p.currency='CNY'"];
+  if(filter.paymentConfirmedFrom)paid.push(`paid.paid_at>=$${values.push(filter.paymentConfirmedFrom)}::timestamptz`);
+  if(filter.paymentConfirmedTo)paid.push(`paid.paid_at<$${values.push(filter.paymentConfirmedTo)}::timestamptz`);
+  where.push(`x.origin='NATIVE' AND EXISTS(SELECT 1 FROM zzsh_order.rental_order paid JOIN zzsh_order.payment_confirmation p ON p.order_id=paid.id WHERE ${paid.join(' AND ')})`);
+ }
  if(filter.qValue){const q=filter.qValue,p='$'+values.push(q);if(filter.qKind==='order')where.push(`x.display_no=${p}`);else if(filter.qKind==='account')where.push(`x.account_no=${p} OR x.account_id=${p} OR x.legacy_account_no=${p}`);else{
   if(/^(?:\+?86[\s-]*)?1[3-9](?:[\s-]*\d){9}$/.test(q))throw invalid('Phone lookup must use the user lookup contract');
   const pattern='$'+values.push('%'+escapeLike(q)+'%'),party=(role:string)=>`(x.${role}_user_id=${p} OR x.${role}_no=${p} OR x.${role}_name ILIKE ${pattern} ESCAPE '\\' OR x.${role}_username ILIKE ${pattern} ESCAPE '\\')`;
@@ -433,7 +441,7 @@ export async function queryAdminReadOrders(client:PoolClient,viewer:OrderReadVie
   }
  }
  await attachAdminOrderExtras(client,items,viewer,accountViews);
- if(filter.view==='list')for(const item of items){slimListItem(item);if(viewer.financeReadable!==true)restrictListMoney(item);}
+ if(filter.view==='list')for(const item of items)slimListItem(item);
  return {items,page:filter.page,pageSize:filter.pageSize,total:Number(page.total),contextKey:viewer.authorizationKey};
 }
 export async function getAdminReadOrder(client:PoolClient,viewer:OrderReadViewer,id:string,paymentReadOptions?:ChannelPaymentReadOptions,accountViews?:OrderAccountViewReader){

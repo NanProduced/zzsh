@@ -48,6 +48,13 @@ async function forward(request: Request, { params }: { params: Promise<{ path: s
   let headers: Headers;
   try { headers = buildUserAuthUpstreamHeaders(request, { requestId, webOrigin: WEB_ORIGIN }); }
   catch { return errorResponse(503, "INTERNAL_ERROR", requestId, undefined, false, "AUTH_DEPENDENCY_UNAVAILABLE"); }
+  if (authPath === "/identity/verify" || authPath === "/identity/verification-attempt") {
+    const key = request.headers.get("idempotency-key");
+    if (key !== null) {
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(key)) return errorResponse(400, "INVALID_ARGUMENT", requestId);
+      headers.set("Idempotency-Key", key);
+    }
+  }
   const cookie = userCookies(request.headers.get("cookie"));
   if (cookie) headers.set("Cookie", cookie);
   const contentType = request.headers.get("content-type");

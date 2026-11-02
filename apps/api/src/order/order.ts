@@ -6,7 +6,7 @@ import type { Pool, PoolClient } from "pg";
 import { API_V1_ERROR_CODES } from "../contracts/api-v1";
 import { gameScopeSql } from "../auth/admin-scope";
 import { recordAudit, SecurityApiError, withTransaction } from "../auth/security-core";
-import { assertActiveInTransaction } from "../auth/user-identity";
+import { assertActiveInTransaction, identityAllowsProtectedTrade } from "../auth/user-identity";
 import { normalizeQuote } from "../supply/content-hash";
 import {
   evaluatePublication,
@@ -138,7 +138,7 @@ export function projectOrder(
   party: OrderParty,
   options?: { internalQuote?: boolean },
 ): Record<string, unknown> {
-  const projectSnapshot = (viewer: "public" | "owner" | "admin") => {
+  const projectSnapshot = (viewer: "public" | "owner" | "support" | "admin") => {
     const projected = projectDeltaQuote(row.quoteSnapshot, viewer);
     if (row.quoteSnapshot.quoteKind === "ORDER_CONFIRMATION" && viewer !== "admin") delete projected.publisherBailRequirement;
     return projected;
@@ -176,6 +176,8 @@ export function projectOrder(
     ...(row.status === ORDER_STATUS.CANCELLED
       ? { cancelReason: row.cancelReason, cancelledAt: row.cancelledAt }
       : {}),
+    ...(row.status === ORDER_STATUS.CANCELLED && row.cancelReason === "MANUAL_CLOSE"
+      ? { fundsResolution: { status: "REVIEW_REQUIRED", code: "HISTORICAL_MANUAL_CLOSE", sourceLabel: "原人工关闭，资金处理待核实" } } : {}),
   };
   if (party === "renter") {
     return { ...base, quote: projectSnapshot("public") };
@@ -183,6 +185,8 @@ export function projectOrder(
   if (party === "owner") {
     return {
       ...base,
+      amounts: { rental: null, deposit: null, totalDue: null, currency: "CNY", ownerExpectedIncome: row.quoteSnapshot.ownerTotal ?? null },
+      amountsPerspective: "OWNER",
       renterName: row.renterName,
       quote: projectSnapshot("owner"),
     };
@@ -197,7 +201,7 @@ export function projectOrder(
     releaseId: row.releaseId,
     contentHash: row.contentHash,
     revision: row.revision,
-    quote: projectSnapshot(options?.internalQuote ? "admin" : "owner"),
+    quote: projectSnapshot(options?.internalQuote ? "admin" : "support"),
     ...(row.teamState === "READY" ? { supportEscalation: {
       firstResponseAt: row.firstResponseAt,
       remindDueAt: row.remindDueAt,
@@ -255,9 +259,10 @@ async function assertOrderPartiesAuthorized(client: PoolClient, context: OrderUs
       accountStatus: string;
       identityStatus: string | null;
       ageStatus: string | null;
+      provider: string | null;
     }>(
       `SELECT u.id, u.suspended, COALESCE(s.account_status, 'ACTIVE') AS "accountStatus",
-              s.identity_status AS "identityStatus", s.age_status AS "ageStatus"
+              s.identity_status AS "identityStatus", s.age_status AS "ageStatus", s.provider
          FROM zzsh_auth_user."user" u
          LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id = u.id
         WHERE u.id = ANY($1::text[])`,
@@ -275,7 +280,7 @@ async function assertOrderPartiesAuthorized(client: PoolClient, context: OrderUs
   if (!session.rowCount) {
     throw new SecurityApiError(401, API_V1_ERROR_CODES.UNAUTHENTICATED, "Authentication required");
   }
-  if (renter.identityStatus !== "VERIFIED" || renter.ageStatus !== "ADULT") {
+  if (!identityAllowsProtectedTrade(renter)) {
     throw forbidden("请先完成实名校验后再进行受保护交易");
   }
   return { ownerUserId: account.ownerUserId, gameId: account.gameId };

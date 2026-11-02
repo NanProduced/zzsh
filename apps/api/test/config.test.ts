@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { loadAuthRuntimeConfig } from "../src/auth/auth-runtime";
-import { ConfigurationError, loadConfig, OrderImSdkRouteBindings, OrderImSdkRouteError, orderImSdkRouteFor } from "../src/config/config";
+import { businessFeatureEnabled, ConfigurationError, loadConfig, OrderImSdkRouteBindings, OrderImSdkRouteError, orderImSdkRouteFor } from "../src/config/config";
+import { createBusinessPool } from "../src/database/business";
+import { readAdminAltchaHmacKey } from "../src/auth/admin-brute-force";
 
 const secret = "test-only-secret-that-must-not-be-logged";
 
@@ -24,7 +26,7 @@ function validEnv(profile = "dev"): NodeJS.ProcessEnv {
     REDIS_PASSWORD: secret,
     ...(profile === "provider-test" ? { PROVIDER_TEST_SCOPE: "local-fake" } : {}),
     ...(profile === "ecs-test"
-      ? { ECS_TEST_TARGET: "zzsh-ecs-test", ECS_TEST_TARGET_CONFIRMED: "true" }
+      ? { NODE_ENV: "production", REDIS_USER: "zzsh_app", YUNXIN_APP_KEY: "team-preview", YUNXIN_APP_SECRET: secret, ORDER_TEAMS_MEMBERS_LIMIT: "200" }
       : {}),
   };
   if (profile === "migration") {
@@ -114,7 +116,7 @@ test("rejects database targets outside the selected profile boundary", () => {
   );
   assert.throws(
     () => loadConfig({ ...validEnv("ecs-test"), DB_TARGET: "local-compose" }),
-    (error: unknown) => error instanceof ConfigurationError && /APP_PROFILE=ecs-test/.test(error.message),
+    (error: unknown) => error instanceof ConfigurationError && /DB_TARGET/.test(error.message),
   );
   assert.throws(
     () => loadConfig({ ...validEnv("migration"), MIGRATION_TARGET_PROFILE: "test", MIGRATION_TARGET_DB_NAME: "zzsh_dev" }),
@@ -126,22 +128,47 @@ test("rejects database targets outside the selected profile boundary", () => {
   );
 });
 
-test("retains ecs-test but fails closed until a real target is registered", () => {
-  const unconfirmed = validEnv("ecs-test");
-  delete unconfirmed.ECS_TEST_TARGET_CONFIRMED;
-  assert.throws(
-    () => loadConfig(unconfirmed),
-    (error: unknown) => error instanceof ConfigurationError && /APP_PROFILE=ecs-test/.test(error.message),
-  );
+test("deployed targets require exact profile, verified transport and real assembly without connecting", async () => {
+  const env = validEnv("ecs-test");
+  const config = loadConfig(env);
+  assert.equal(config.provider, "real");
+  assert.deepEqual(config.database.ssl, { rejectUnauthorized: true });
+  assert.deepEqual(config.redis.tls, { rejectUnauthorized: true });
+  assert.equal(config.redis.username, "zzsh_app");
+  assert.equal(config.orderTeams?.membersLimit, 200);
+  assert.equal(config.supportDispatch?.appId, "team-preview");
+  const pool = createBusinessPool(config);
+  assert.deepEqual(pool.options.ssl, { rejectUnauthorized: true });
+  assert.equal(pool.totalCount, 0);
+  await pool.end();
+  for (const invalid of [
+    { NODE_ENV: "development" }, { DB_TARGET: "local-compose" }, { DB_NAME: "zzsh_dev_daily" },
+    { DB_TLS_MODE: "disable" }, { REDIS_TLS_MODE: "disable" }, { REDIS_USER: "" },
+    { PROVIDER_MODE: "fake" }, { READINESS_MODE: "fake" }, { AUTH_LOCAL_SMS_MOCK: "true" },
+    { AUTH_ENABLED: "false" }, { ORDER_TEAMS_ENABLED: "false" }, { SUPPORT_DISPATCH_ENABLED: "false" },
+    { ENABLE_TEST_OPERATIONS: "true" },
+  ]) assert.throws(() => loadConfig({ ...env, ...invalid }), ConfigurationError);
+  for (const profile of [" ecs-test", "ecs-test ", " production "]) {
+    assert.throws(() => loadConfig({ ...env, APP_PROFILE: profile, NODE_ENV: "development", AUTH_ENABLED: "false", PROVIDER_MODE: "fake" }), ConfigurationError);
+    assert.equal(businessFeatureEnabled({ APP_PROFILE: profile }, "AUTH_ENABLED"), true);
+    assert.throws(() => businessFeatureEnabled({ APP_PROFILE: profile, AUTH_ENABLED: "false" }, "AUTH_ENABLED"), /local fixtures/);
+  }
+  const migration = loadConfig({ ...validEnv("migration"), DB_TARGET: "ecs-test", MIGRATION_TARGET_PROFILE: "ecs-test",
+    MIGRATION_TARGET_DB_NAME: "zzsh_ecs_test", REDIS_USER: "zzsh_app" });
+  assert.equal(migration.database.user, "zzsh_migration");
+  assert.deepEqual(migration.database.ssl, { rejectUnauthorized: true });
+  assert.equal(migration.provider, "fake");
+});
 
-  const exampleTarget = validEnv("ecs-test");
-  assert.equal(exampleTarget.ECS_TEST_TARGET_CONFIRMED, "true");
-  assert.equal(exampleTarget.DB_HOST, "db.zzsh-ecs-test.internal");
-  assert.equal(exampleTarget.REDIS_HOST, "redis.zzsh-ecs-test.internal");
-  assert.throws(
-    () => loadConfig(exampleTarget),
-    (error: unknown) => error instanceof ConfigurationError && /APP_PROFILE=ecs-test/.test(error.message),
-  );
+test("deployed business capabilities are on, old switches are fixture-only", () => {
+  for (const key of ["AUTH_ENABLED", "CREDIT_GUARANTEE_ENABLED", "ZZSH_MEMBERSHIP_GROWTH_ENABLED",
+    "ORDER_SETTLEMENT_RECORDING_ENABLED", "DISTRIBUTION_NATIVE_ENABLED", "DISTRIBUTION_DUE_WORKER_ENABLED"]) {
+    assert.equal(businessFeatureEnabled({ APP_PROFILE: "ecs-test" }, key), true);
+    assert.equal(businessFeatureEnabled({ APP_PROFILE: "production" }, key), true);
+    assert.equal(businessFeatureEnabled({ APP_PROFILE: "test", [key]: "false" }, key), false);
+    assert.throws(() => businessFeatureEnabled({ APP_PROFILE: "ecs-test", [key]: "false" }, key), /local fixtures/);
+    assert.throws(() => businessFeatureEnabled({ APP_PROFILE: "test", [key]: "yes" }, key), /true or false/);
+  }
 });
 
 test("keeps real providers behind provider-test scope and disables them for test and migration", () => {
@@ -410,4 +437,34 @@ test("fixed SMS mock is explicit and rejects non-local/production targets", () =
     { DB_TARGET: "ecs-test" }, { AUTH_USER_ORIGIN: "https://example.com" },
     { AUTH_LOCAL_SMS_MOCK: "yes" },
   ]) assert.throws(() => loadAuthRuntimeConfig({ ...env, AUTH_LOCAL_SMS_MOCK: "true", ...override }), ConfigurationError);
+});
+
+test("identity binding secret stays stable when authentication secrets rotate", () => {
+  const env = { AUTH_USER_SECRET: "u".repeat(32), AUTH_ADMIN_SECRET: "a".repeat(32), USER_IDENTITY_SUBJECT_HMAC_KEY: "i".repeat(64) };
+  const initial = loadAuthRuntimeConfig(env).userIdentitySubjectKey;
+  assert.equal(initial?.length, 32);
+  assert.deepEqual(loadAuthRuntimeConfig({ ...env, AUTH_USER_SECRET: "v".repeat(32), AUTH_ADMIN_SECRET: "b".repeat(32) }).userIdentitySubjectKey, initial);
+  assert.equal(loadAuthRuntimeConfig({ AUTH_USER_SECRET: env.AUTH_USER_SECRET, AUTH_ADMIN_SECRET: env.AUTH_ADMIN_SECRET }).userIdentitySubjectKey, undefined);
+  for (const key of ["short", env.AUTH_USER_SECRET, env.AUTH_ADMIN_SECRET]) {
+    assert.throws(() => loadAuthRuntimeConfig({ ...env, USER_IDENTITY_SUBJECT_HMAC_KEY: key }), /stable independent secret/);
+  }
+});
+
+test("formal settlement has an explicit deployment switch, never a permissive string fallback", () => {
+  const env = { AUTH_USER_SECRET: "u".repeat(32), AUTH_ADMIN_SECRET: "a".repeat(32) };
+  assert.equal(loadAuthRuntimeConfig(env).settlementRecordingEnabled, false);
+  assert.equal(loadAuthRuntimeConfig({ ...env, ORDER_SETTLEMENT_RECORDING_ENABLED: "true" }).settlementRecordingEnabled, true);
+  assert.equal(loadAuthRuntimeConfig({ ...env, ORDER_SETTLEMENT_RECORDING_ENABLED: "false" }).settlementRecordingEnabled, false);
+  assert.throws(() => loadAuthRuntimeConfig({ ...env, ORDER_SETTLEMENT_RECORDING_ENABLED: "yes" }), /must be true or false/);
+});
+
+test("administrator proof key uses the existing bounded file-secret reader", () => {
+  const directory = mkdtempSync(join(tmpdir(), "zzsh-proof-key-"));
+  mkdirSync(join(directory, ".secrets"));
+  try {
+    writeFileSync(join(directory, ".secrets", "admin-proof"), "h".repeat(48));
+    assert.equal(readAdminAltchaHmacKey({ ADMIN_ALTCHA_HMAC_KEY_FILE: ".secrets/admin-proof", ADMIN_ALTCHA_HMAC_KEY: "ignored" }, directory), "h".repeat(48));
+    assert.throws(() => readAdminAltchaHmacKey({ ADMIN_ALTCHA_HMAC_KEY_FILE: "../outside" }, directory), /inside .secrets/);
+    assert.throws(() => readAdminAltchaHmacKey({ ADMIN_ALTCHA_HMAC_KEY_FILE: join(directory, ".secrets", "admin-proof") }, directory), /relative/);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });

@@ -1,15 +1,29 @@
 import { readFileSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 
-export const CONFIG_PROFILES = ["dev", "test", "provider-test", "migration", "ecs-test"] as const;
+export const CONFIG_PROFILES = ["dev", "test", "provider-test", "migration", "ecs-test", "production"] as const;
 export type ConfigProfile = (typeof CONFIG_PROFILES)[number];
-export const MIGRATION_TARGET_PROFILES = ["dev", "test", "provider-test"] as const;
+export const MIGRATION_TARGET_PROFILES = ["dev", "test", "provider-test", "ecs-test", "production"] as const;
 export type MigrationTargetProfile = (typeof MIGRATION_TARGET_PROFILES)[number];
 
 export const PROVIDER_MODES = ["fake", "real"] as const;
 export type ProviderMode = (typeof PROVIDER_MODES)[number];
 
-type DatabaseTarget = "local-compose" | "ecs-test";
+type DatabaseTarget = "local-compose" | "ecs-test" | "production";
+export type VerifiedTlsConfig = { rejectUnauthorized: true; ca?: string };
+
+export function isDeployedProfile(env: NodeJS.ProcessEnv): boolean {
+  const profile = env.APP_PROFILE?.trim();
+  return profile === "ecs-test" || profile === "production";
+}
+
+/** 部署运行完整业务；旧开关仅保留给隔离夹具，不作为正式环境的半功能部署方式。 */
+export function businessFeatureEnabled(env: NodeJS.ProcessEnv, key: string, localDefault = false): boolean {
+  const value = env[key]?.trim() ?? (isDeployedProfile(env) || localDefault ? "true" : "false");
+  if (value !== "true" && value !== "false") throw new ConfigurationError(`${key} must be true or false`);
+  if (isDeployedProfile(env) && value === "false") throw new ConfigurationError(`${key}=false is only available to local fixtures`);
+  return value === "true";
+}
 
 export type YunxinConfig = {
   enabled: boolean;
@@ -152,11 +166,14 @@ export type AppConfig = {
     user: string;
     password: string;
     runtimeUser: string;
+    ssl?: VerifiedTlsConfig;
   };
   redis: {
     host: string;
     port: number;
     password: string;
+    username?: string;
+    tls?: VerifiedTlsConfig;
   };
   providerTestScope?: string;
   yunxin: YunxinConfig;
@@ -182,6 +199,7 @@ const PROFILE_DATABASE_PREFIX: Record<ConfigProfile, string> = {
   "provider-test": "zzsh_provider_test",
   migration: "zzsh_migration",
   "ecs-test": "zzsh_ecs_test",
+  production: "zzsh_prod",
 };
 
 function required(env: NodeJS.ProcessEnv, key: string): string {
@@ -337,7 +355,7 @@ function assertWorkersDisabled(env: NodeJS.ProcessEnv, enabledKey: string, depen
 }
 
 function loadOrderTeamsConfig(env: NodeJS.ProcessEnv, yunxin: YunxinConfig): OrderTeamsWorkerConfig | undefined {
-  const enabled = parseStrictBoolean(env, "ORDER_TEAMS_ENABLED", false);
+  const enabled = businessFeatureEnabled(env, "ORDER_TEAMS_ENABLED");
   if (!enabled) {
     assertWorkersDisabled(env, "ORDER_TEAMS_ENABLED", [
       "ORDER_TEAMS_MEMBERS_LIMIT", "ORDER_TEAMS_INTERVAL_MS", "ORDER_TEAMS_BATCH_LIMIT", "ORDER_TEAMS_ESCALATION_ENABLED",
@@ -357,7 +375,7 @@ function loadOrderTeamsConfig(env: NodeJS.ProcessEnv, yunxin: YunxinConfig): Ord
 }
 
 function loadSupportDispatchConfig(env: NodeJS.ProcessEnv, yunxin: YunxinConfig): SupportDispatchWorkerConfig | undefined {
-  const enabled = parseStrictBoolean(env, "SUPPORT_DISPATCH_ENABLED", false);
+  const enabled = businessFeatureEnabled(env, "SUPPORT_DISPATCH_ENABLED");
   if (!enabled) {
     assertWorkersDisabled(env, "SUPPORT_DISPATCH_ENABLED", [
       "SUPPORT_DISPATCH_INTERVAL_MS", "SUPPORT_DISPATCH_BATCH_LIMIT", "SUPPORT_DISPATCH_AUTO_ASSIGN_CONSULTATIONS",
@@ -444,11 +462,13 @@ export function loadConfig(
     throw new ConfigurationError("APP_PROFILE is invalid");
   }
   const profile = profileValue as ConfigProfile;
-  if (profile === "ecs-test") {
-    throw new ConfigurationError("APP_PROFILE=ecs-test is disabled until an isolated target is confirmed and registered");
-  }
+  const deployed = isDeployedProfile(env);
+  const targetProfile = profile === "migration" ? migrationTargetProfile(env) : profile;
+  const deployedTarget = targetProfile === "ecs-test" || targetProfile === "production";
+  if (deployed && env.NODE_ENV !== "production") throw new ConfigurationError("Deployed profiles require NODE_ENV=production");
+  if (deployed) businessFeatureEnabled(env, "AUTH_ENABLED");
 
-  const providerValue = env.PROVIDER_MODE === undefined ? "fake" : env.PROVIDER_MODE.trim();
+  const providerValue = env.PROVIDER_MODE === undefined ? (deployed ? "real" : "fake") : env.PROVIDER_MODE.trim();
   if (!PROVIDER_MODES.includes(providerValue as ProviderMode)) {
     throw new ConfigurationError("PROVIDER_MODE is invalid");
   }
@@ -456,22 +476,21 @@ export function loadConfig(
 
   const host = env.HOST === undefined ? LOCAL_HOST : env.HOST.trim();
   if (host === "") throw new ConfigurationError("HOST is required");
-  if (host !== LOCAL_HOST) {
+  if (host !== LOCAL_HOST && !deployed) {
     throw new ConfigurationError("HOST must remain loopback outside ecs-test");
   }
   const port = parsePort(env, "PORT", 3102);
 
   const target = required(env, "DB_TARGET") as DatabaseTarget;
-  if (target !== "local-compose" && target !== "ecs-test") {
+  if (target !== "local-compose" && target !== "ecs-test" && target !== "production") {
     throw new ConfigurationError("DB_TARGET is invalid");
   }
-  if (target !== "local-compose") {
+  if (target !== (deployedTarget ? targetProfile : "local-compose")) {
     throw new ConfigurationError("DB_TARGET does not match APP_PROFILE");
   }
 
   const databaseHost = required(env, "DB_HOST").trim();
   const databasePort = parsePort(env, "DB_PORT");
-  const targetProfile = profile === "migration" ? migrationTargetProfile(env) : profile;
   const databaseNameKey = profile === "migration" ? "MIGRATION_TARGET_DB_NAME" : "DB_NAME";
   const databaseName = required(env, databaseNameKey).trim();
   const databaseUserKey = profile === "migration" ? "MIGRATION_DB_USER" : "DB_USER";
@@ -495,6 +514,26 @@ export function loadConfig(
   const redisHost = required(env, "REDIS_HOST").trim();
   const redisPort = parsePort(env, "REDIS_PORT");
   const redisPassword = readSecret(env, "REDIS_PASSWORD", "REDIS_PASSWORD_FILE", workingDirectory);
+  const tlsConfig = (prefix: "DB" | "REDIS"): VerifiedTlsConfig | undefined => {
+    const mode = env[`${prefix}_TLS_MODE`]?.trim() ?? (deployedTarget ? "verify-full" : "disable");
+    if (mode !== "disable" && mode !== "verify-full" || deployedTarget && mode !== "verify-full") {
+      throw new ConfigurationError(`${prefix}_TLS_MODE must verify-full for deployed targets`);
+    }
+    if (mode === "disable") {
+      if (env[`${prefix}_TLS_CA_FILE`] !== undefined) throw new ConfigurationError(`${prefix}_TLS_CA_FILE requires TLS`);
+      return undefined;
+    }
+    const ca = env[`${prefix}_TLS_CA_FILE`] !== undefined
+      ? readSecret(env, `${prefix}_TLS_CA`, `${prefix}_TLS_CA_FILE`, workingDirectory) : undefined;
+    if (ca !== undefined && !ca.includes("-----BEGIN CERTIFICATE-----")) throw new ConfigurationError(`${prefix}_TLS_CA_FILE must contain a PEM certificate`);
+    return { rejectUnauthorized: true, ...(ca === undefined ? {} : { ca }) };
+  };
+  const databaseSsl = tlsConfig("DB"), redisTls = tlsConfig("REDIS");
+  const redisUsername = env.REDIS_USER?.trim();
+  if (deployedTarget && !redisUsername) throw new ConfigurationError("REDIS_USER is required for deployed targets");
+  if (deployed && (env.AUTH_LOCAL_SMS_MOCK === "true" || env.READINESS_MODE === "fake")) {
+    throw new ConfigurationError("Deployed profiles reject fixed SMS and fake readiness");
+  }
 
   if (target === "local-compose") {
     if (databaseHost !== LOCAL_HOST || redisHost !== LOCAL_HOST) {
@@ -512,7 +551,8 @@ export function loadConfig(
   if ((profile === "test" || profile === "migration") && provider !== "fake") {
     throw new ConfigurationError(`${profile} requires PROVIDER_MODE=fake`);
   }
-  if (provider === "real" && profile !== "provider-test") {
+  if (deployed && provider !== "real") throw new ConfigurationError("Deployed profiles require PROVIDER_MODE=real");
+  if (provider === "real" && profile !== "provider-test" && !deployed) {
     throw new ConfigurationError("PROVIDER_MODE=real is only allowed in provider-test");
   }
   const testOperationsValue = env.ENABLE_TEST_OPERATIONS?.trim() || "false";
@@ -543,8 +583,10 @@ export function loadConfig(
       user: databaseUser,
       password: databasePassword,
       runtimeUser,
+      ...(databaseSsl ? { ssl: databaseSsl } : {}),
     },
-    redis: { host: redisHost, port: redisPort, password: redisPassword },
+    redis: { host: redisHost, port: redisPort, password: redisPassword,
+      ...(redisUsername ? { username: redisUsername } : {}), ...(redisTls ? { tls: redisTls } : {}) },
     providerTestScope,
     yunxin,
     ...(orderTeams ? { orderTeams } : {}),

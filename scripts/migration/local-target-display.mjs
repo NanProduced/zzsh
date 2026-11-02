@@ -1,0 +1,36 @@
+import { createHash } from "node:crypto";
+import { createReadStream, readFileSync } from "node:fs";
+import { resolve, join, basename } from "node:path";
+
+const hash = bytes => createHash("sha256").update(bytes).digest("hex");
+
+/** Supplemental display facts are additive; original account and money facts stay immutable. */
+export async function applyDisplayDomain(ctx, directory, manifestSha256) {
+  const path = resolve(directory ?? "");
+  if (!path.toLowerCase().startsWith("e:\\zzsh-local-state\\restricted\\") || !/^[a-f0-9]{64}$/.test(manifestSha256 ?? "")) throw new Error("BOUND_DISPLAY_INPUT_REQUIRED");
+  const bytes = readFileSync(join(path, "manifest.json"));
+  if (hash(bytes) !== manifestSha256) throw new Error("DISPLAY_MANIFEST_SHA_MISMATCH");
+  const manifest = JSON.parse(bytes);
+  if (manifest.status !== "DISPLAY_SUPPLEMENT_PREPARED_TARGET_NOT_RUN" || manifest.datasetSha256 !== ctx.state.binding.datasetSha256 || manifest.commonFieldDifferences !== 0 || manifest.file !== basename(manifest.file) || !/^[a-f0-9]{64}$/.test(manifest.extractSha256 ?? "")) throw new Error("DISPLAY_SOURCE_NOT_BOUND");
+  const file = join(path, manifest.file), digest = createHash("sha256");
+  for await (const bytes of createReadStream(file)) digest.update(bytes);
+  if (digest.digest("hex") !== manifest.sha256) throw new Error("DISPLAY_INPUT_SHA_MISMATCH");
+  ctx.state.additiveInputs ??= {};
+  if (ctx.state.additiveInputs.display && ctx.state.additiveInputs.display.manifestSha256 !== manifestSha256) throw new Error("DISPLAY_CHECKPOINT_INPUT_CHANGED");
+  ctx.state.additiveInputs.display = { directory: path, manifestSha256, extractSha256: manifest.extractSha256, rows: manifest.rows };
+  ctx.save();
+  const accountId = ctx.mod("legacy-load/legacy-account-seam").legacyAccountId;
+  const writer = ctx.mod("supply/legacy-listing-read").recordLegacyDisplaySnapshot;
+  await ctx.runItems("accountDisplay", ctx.readRows(file), async row => {
+    const id = accountId("legacy_mysql_restore", "la_rental_accounts", row.sourceId);
+    const original = (await ctx.client.query("SELECT observation_version_id,source_digest,to_char(source_updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') source_updated_at FROM zzsh_supply.legacy_listing_read_snapshot WHERE account_id=$1", [id])).rows[0];
+    if (!original) { const error = new Error("TARGET_ACCOUNT_SNAPSHOT_NOT_MAPPED"); error.status = 409; error.code = "TARGET_ACCOUNT_SNAPSHOT_NOT_MAPPED"; throw error; }
+    if (original.source_digest !== row.baseSourceDigest || original.source_updated_at !== row.sourceUpdatedAt) throw new Error("TARGET_ACCOUNT_SNAPSHOT_SOURCE_DRIFT");
+    return writer(ctx.client, id, { observationVersionId: original.observation_version_id, baseSourceDigest: row.baseSourceDigest, extractSha256: manifest.extractSha256, sourceUpdatedAt: row.sourceUpdatedAt, evidenceRef: `legacy-display-v1:${manifest.extractSha256}:${row.sourceId}`, snapshot: row.snapshot }, ctx.actor);
+  });
+  const actual = (await ctx.client.query("SELECT count(*)::int n FROM zzsh_supply.legacy_listing_display_snapshot WHERE extract_sha256=$1", [manifest.extractSha256])).rows[0].n;
+  const phase = ctx.state.phases.accountDisplay;
+  if (actual !== phase.created + phase.replayed || actual + phase.quarantined !== manifest.rows) throw new Error("DISPLAY_TARGET_DENOMINATOR_MISMATCH");
+  ctx.state.displayReconciliation = { sourceRows: manifest.rows, targetRows: actual, quarantined: phase.quarantined, sourceRowsCompared: manifest.sourceRowsCompared, commonFieldDifferences: 0, targetFinancialEffects: 0 };
+  ctx.save();
+}

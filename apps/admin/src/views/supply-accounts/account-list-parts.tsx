@@ -303,7 +303,7 @@ export function QuickView({ row, canRead, onClose, onOpenFull }: QuickProps) {
   const attrs = v ? attributeFacts(v) : [];
   const verdict = facts.newOrders === null ? "新单资格待核" : facts.newOrders ? "可接新单" : "不可接新单";
   const declaredAttribute = v ? Object.values(v.declaration.attributes).some(value => value !== null && value !== undefined && value !== "" && !(Array.isArray(value) && value.length === 0)) : false;
-  const emptyDraft = Boolean(v && !declaredAttribute && !v.declaration.inventory.length && !v.declaration.entitlements.length && !v.declaration.skins.length && !v.termOption?.displayName);
+  const emptyDraft = Boolean(v && v.origin !== "LEGACY_OBSERVATION" && !v.legacySkinHolding && !declaredAttribute && !v.declaration.inventory.length && !v.declaration.entitlements.length && !v.declaration.skins.length && !v.termOption?.displayName);
   const releaseId = v?.releaseId ?? null;
   const ratio = v?.quote?.baseRenterHaffRatioWanPerYuan ?? null;
   const fees = v ? versionBaseFeeRows(v, publicDefault?.baseDeposit?.amountCents) : rowBaseFeeRows(viewed);

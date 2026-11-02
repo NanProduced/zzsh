@@ -28,6 +28,7 @@ import {
 } from "../api";
 import { StatusMessage } from "../components/ui-elements";
 import { BossGreeting } from "./boss-touches";
+import { WorkspaceOverview } from "./overview";
 
 import { timeRangeLabel } from "./beijing-time";
 import { listWasTruncated, previewItems } from "./truncated-list";
@@ -686,6 +687,7 @@ export function WorkbenchPage({
   if (!layout) {
     return (
       <div className="space-y-3">
+        <WorkspaceOverview snapshot={snapshot} onNavigate={onNavigate} refreshNonce={refreshNonce} />
         <StatusMessage error={error} />
         {error ? <Button type="button" size="sm" variant="outline" onClick={() => void load(true).catch((failure) => setError(friendlyError(failure)))}>重试</Button> : <p className="text-sm text-muted-foreground">正在读取个人工作台…</p>}
       </div>
@@ -704,7 +706,7 @@ export function WorkbenchPage({
         ) : (
           <div>
             <h2 className="text-2xl font-semibold">工作台</h2>
-            <p className="text-muted-foreground text-sm mt-2">处理审批、管理团队与账号安全。</p>
+            <p className="text-muted-foreground text-sm mt-2">查看当前范围内的业务与待办，接续日常处理。</p>
           </div>
         )}
         <div className="flex flex-wrap items-center gap-2">
@@ -752,6 +754,7 @@ export function WorkbenchPage({
       {editing && narrow ? <p className="text-xs text-muted-foreground">窗口过窄，拖动与缩放仅在桌面宽度下可用；可先保存或取消。</p> : null}
 
       <WorkbenchCardsContext.Provider value={cardsContext}>
+        <WorkspaceOverview snapshot={snapshot} onNavigate={onNavigate} refreshNonce={refreshNonce} />
         {widgets.length === 0 ? (
           <Card>
             <CardHeader>

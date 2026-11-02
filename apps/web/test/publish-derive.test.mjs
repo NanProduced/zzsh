@@ -165,3 +165,8 @@ test('ratio ranges and deposit declarations derive from server payloads only', (
   assert.equal(fullPayoutSelected({ full_payout_declaration: { schema: 'full-payout-declaration-v1', selected: true } }), true);
   assert.equal(fullPayoutSelected({}), null);
 });
+
+test('yuanFromCents rejects missing and non-string cents without manufacturing a zero', () => {
+  for (const value of [null, undefined, ['0'], {}, '', '-1', '1.5', 'x']) assert.equal(yuanFromCents(value), null);
+  assert.equal(yuanFromCents('0'), '0.00');
+});

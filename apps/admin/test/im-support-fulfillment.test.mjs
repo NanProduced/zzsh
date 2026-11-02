@@ -689,12 +689,12 @@ test("the rail card keeps the action and leaves stage and status facts to the he
   assert.match(document.body.querySelector(".im-order-panel").textContent, /待核对期初/, "the check panel owns the stage facts");
 });
 
-test("manual close is offered only with permission, warns that funds stay offline, and reports success", async (t) => {
+test("an original manual-close receipt stays readable without claiming settlement or refund", async (t) => {
   let posted = null;
   globalThis.fetch = async (url, init) => {
     if (String(url).includes("/manual-close")) {
       posted = { url: String(url), method: init?.method, key: new Headers(init?.headers).get("idempotency-key"), body: JSON.parse(String(init?.body)) };
-      return response({ orderId: "order-A", status: "CANCELLED", cancelReason: "MANUAL_CLOSE", cancelledAt: "2026-10-29T13:30:00.000Z", localFundsEffect: "NONE", financeHandling: "OFFLINE_REQUIRED" });
+      return response({ orderId: "order-A", status: "CANCELLED", cancelReason: "MANUAL_CLOSE", cancelledAt: "2026-10-29T13:30:00.000Z", localFundsEffect: "NONE", financeHandling: "OFFLINE_REQUIRED", alreadyClosed: true });
     }
     return response(confirmedOpening);
   };
@@ -704,11 +704,11 @@ test("manual close is offered only with permission, warns that funds stay offlin
   await waitFor(() => host.querySelector('[data-action="manual-close-open"]'));
 
   const card = host.querySelector('[data-manual-close="true"]');
-  assert.match(card.textContent, /不生成结算或退款/);
-  assert.match(card.textContent, /财务线下核对/);
-  await click(host, "手动结单");
+  assert.match(card.textContent, /不能跳过结算与退款/);
+  assert.match(card.textContent, /原人工关闭记录仍须核对资金/);
+  await click(host, "核对结束方式");
   await waitFor(() => document.body.querySelector('[aria-label="手动结单"]'));
-  assert.match(document.body.textContent, /资金不会被自动处理/);
+  assert.match(document.body.textContent, /先核对本单办理路径/);
 
   assert.equal(document.body.querySelector('[data-action="manual-close-submit"]').disabled, true, "an empty remark cannot submit");
   const textarea = document.body.querySelector('textarea[aria-label="手动结单处理备注"]');
@@ -716,7 +716,7 @@ test("manual close is offered only with permission, warns that funds stay offlin
   setter.call(textarea, "异常订单，线下核对资金");
   await act(async () => { textarea.dispatchEvent(new browser.Event("input", { bubbles: true })); });
   await settle();
-  await click(host, "确认手动结单");
+  await click(host, "核对办理路径");
   await waitFor(() => host.querySelector('[data-manual-close="true"]').textContent.includes("已手动结单"));
 
   assert.equal(posted.method, "POST");
@@ -724,5 +724,35 @@ test("manual close is offered only with permission, warns that funds stay offlin
   assert.equal(posted.body.remark, "异常订单，线下核对资金");
   assert.ok(posted.key, "the idempotency key is sent");
   assert.equal(host.querySelector('[data-action="manual-close-open"]'), null, "a closed order hides the action");
-  assert.match(host.textContent, /资金未自动结算或退款/);
+  assert.match(host.textContent, /原记录未自动结算或退款/);
+});
+
+for (const code of ['PRESTART_REFUND_REQUIRED', 'SETTLEMENT_REQUIRED']) test(`manual close ${code} routes to the existing formal flow without closing or dispatching funds`, async t => {
+  const posts = [];
+  globalThis.fetch = async (url, init = {}) => {
+    if (init.method === 'POST') {
+      posts.push(String(url));
+      return response({ error: { code: 'CONFLICT', reason: code }, status: 'PAID', orderUnchanged: true, resolution: { code, readPath: '/api/v1/admin/orders/order-A/' + (code === 'PRESTART_REFUND_REQUIRED' ? 'support-cancel' : 'settlement') } }, 409);
+    }
+    return response(code === 'PRESTART_REFUND_REQUIRED' ? paidNoOpening : confirmedOpening);
+  };
+  const { host, root } = mount(); t.after(async () => { await act(async () => root.unmount()); host.remove(); });
+  await render(root, host, { orderStatus: 'PAID', canManualClose: true });
+  await act(async () => document.body.querySelector('[aria-label="关闭核对面板"]').click());
+  await click(host, '核对结束方式');
+  const textarea = document.body.querySelector('textarea[aria-label="手动结单处理备注"]');
+  Object.getOwnPropertyDescriptor(browser.HTMLTextAreaElement.prototype, 'value').set.call(textarea, '按实际开租状态处理');
+  await act(async () => textarea.dispatchEvent(new browser.Event('input', { bubbles: true })));
+  await click(host, '核对办理路径');
+  await waitFor(() => host.textContent.includes('订单未关闭，请完成正式处理'));
+  assert.deepEqual(posts, ['/api/bff/admin/orders/order-A/manual-close']);
+  assert.doesNotMatch(host.textContent, /已手动结单（原办理记录）|已取消并登记全额退款/);
+  if (code === 'PRESTART_REFUND_REQUIRED') {
+    assert.equal(host.querySelector('[data-manual-close="true"] a').getAttribute('href'), '#support-cancel-order-A');
+    assert.match(host.textContent, /尚未确认开租/);
+  } else {
+    await click(host, '前往结算处理');
+    await waitFor(() => document.body.querySelector('.im-order-panel'));
+    assert.equal(posts.length, 1, 'opening the settlement form does not submit a money command');
+  }
 });

@@ -30,7 +30,7 @@ export function centsText(cents: bigint): string {
 }
 
 export function yuanFromCents(cents: string): string | null {
-  if (!/^\d+$/.test(cents)) return null;
+  if (typeof cents !== "string" || !/^\d+$/.test(cents)) return null;
   return centsText(BigInt(cents));
 }
 

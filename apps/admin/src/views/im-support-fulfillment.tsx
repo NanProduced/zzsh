@@ -687,7 +687,7 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
       </DialogContent>
     </Dialog>
   </Card>
-  {canManualClose && orderStatus === "PAID" ? <ManualCloseCard orderId={orderId} displayNo={displayNo} /> : null}
+  {canManualClose && orderStatus === "PAID" ? <ManualCloseCard orderId={orderId} displayNo={displayNo} onSettlement={() => { void load(); setPanelOpen(true); }} /> : null}
   {canManualClose && orderStatus === "PAID" ? <SupportCancelCard orderId={orderId} displayNo={displayNo} /> : null}
   </>;
 }
@@ -792,10 +792,10 @@ function SupportCancelCard({ orderId, displayNo }: { orderId: string; displayNo:
 
   const refundCents = result?.supportCancellation?.refundCents ?? preview?.eligibility.refundCents ?? null;
   const blocked = preview !== null && !preview.eligibility.allowed && !preview.supportCancellation;
-  return <Card className="im-support-fulfillment im-order-card" data-support-cancel="true" aria-label="客服取消订单退款">
+  return <Card id={`support-cancel-${orderId}`} tabIndex={-1} className="im-support-fulfillment im-order-card" data-support-cancel="true" aria-label="客服取消订单退款">
     <CardContent className="grid gap-2 p-4">
       <CardTitle className="flex items-center gap-2 text-sm"><TriangleAlert className="size-4 shrink-0 text-destructive" />取消订单（全额原路退款）</CardTitle>
-      <CardDescription className="text-xs leading-relaxed">结算落账前可取消；开租前和开租后都按原支付金额全额原路退回，不按已用时间扣费。结算已生成、佣金未冲销或存在未处理退款时不可用。</CardDescription>
+      <CardDescription className="text-xs leading-relaxed">仅限尚未确认开租的订单，核实未使用且无争议后登记全额原路退款。已开租订单请使用正常或提前结算；退款是否到账需另行核对。</CardDescription>
       {result ? <Alert><ShieldCheck /><AlertTitle>已取消并登记全额退款</AlertTitle><AlertDescription>
         退款金额 {formatFundingCents(refundCents)}（原支付金额）。{supportCancelRefundText(result)} 订单已取消，群聊保留；退款处理结果以渠道与财务核对为准。
       </AlertDescription></Alert>
@@ -826,12 +826,13 @@ function SupportCancelCard({ orderId, displayNo }: { orderId: string; displayNo:
   </Card>;
 }
 
-function ManualCloseCard({ orderId, displayNo }: { orderId: string; displayNo: string }) {
+function ManualCloseCard({ orderId, displayNo, onSettlement }: { orderId: string; displayNo: string; onSettlement: () => void }) {
   const [open, setOpen] = useState(false);
   const [remark, setRemark] = useState("");
   const [phase, setPhase] = useState<"IDLE" | "SENDING" | "UNKNOWN">("IDLE");
   const [result, setResult] = useState<ManualCloseResult | null>(null);
   const [error, setError] = useState("");
+  const [resolution, setResolution] = useState<"PRESTART_REFUND_REQUIRED" | "SETTLEMENT_REQUIRED" | null>(null);
   const keyRef = useRef("");
   const valid = remark.trim().length >= 3 && remark.trim().length <= 200
     && ![...remark].some((ch) => { const code = ch.codePointAt(0)!; return code < 32 || code === 127; });
@@ -843,6 +844,9 @@ function ManualCloseCard({ orderId, displayNo }: { orderId: string; displayNo: s
       const closed = await sendManualClose(orderId, remark.trim(), keyRef.current);
       setResult(closed); setPhase("IDLE"); setOpen(false);
     } catch (cause) {
+      if (cause instanceof AdminApiError && cause.status === 409 && (cause.reason === "PRESTART_REFUND_REQUIRED" || cause.reason === "SETTLEMENT_REQUIRED")) {
+        setResolution(cause.reason); setPhase("IDLE"); setOpen(false); setError(""); return;
+      }
       if (cause instanceof AdminApiError && (cause.status === 0 || cause.status === 429 || cause.status >= 500)) {
         setPhase("UNKNOWN");
         setError("结果未确认，请刷新订单核对；不要用新备注重复提交，可保留本页重试同一请求。");
@@ -858,24 +862,25 @@ function ManualCloseCard({ orderId, displayNo }: { orderId: string; displayNo: s
   return <Card className="im-support-fulfillment im-order-card" data-manual-close="true" aria-label="异常处理">
     <CardContent className="grid gap-2 p-4">
       <CardTitle className="flex items-center gap-2 text-sm"><TriangleAlert className="size-4 shrink-0 text-destructive" />异常处理</CardTitle>
-      <CardDescription className="text-xs leading-relaxed">手动结单只改订单状态，不生成结算或退款；已收款由财务线下核对。必须填写备注并通知双方。</CardDescription>
-      {result ? <Alert><ShieldCheck /><AlertTitle>已手动结单</AlertTitle><AlertDescription>资金未自动结算或退款，请财务线下核对。订单群保留，72 小时沟通窗口从结单时间开始。</AlertDescription></Alert>
+      <CardDescription className="text-xs leading-relaxed">结束订单不能跳过结算与退款。请提交实际情况，系统核对后引导到适用的正式流程；原人工关闭记录仍须核对资金。</CardDescription>
+      {resolution ? <Alert variant="warning"><TriangleAlert /><AlertTitle>订单未关闭，请完成正式处理</AlertTitle><AlertDescription>{resolution === "PRESTART_REFUND_REQUIRED" ? "本单尚未确认开租，请核实未使用与无争议后办理未开租取消。" : "本单已确认开租，请核对实际消耗，通过正常或提前结算处理应收应退。"}</AlertDescription><AlertAction>{resolution === "PRESTART_REFUND_REQUIRED" ? <a className="text-sm underline underline-offset-4" href={`#${encodeURIComponent(`support-cancel-${orderId}`)}`}>前往未开租取消</a> : <Button type="button" variant="outline" size="sm" onClick={onSettlement}>前往结算处理</Button>}</AlertAction></Alert>
+        : result ? <Alert><ShieldCheck /><AlertTitle>已手动结单（原办理记录）</AlertTitle><AlertDescription>原记录未自动结算或退款，资金处理待核实；沟通权限以订单群当前提示为准。</AlertDescription></Alert>
         : <div className="im-support-fulfillment-actions">
-          <Button variant="outline" size="sm" data-action="manual-close-open" onClick={() => { setError(""); setOpen(true); }}>手动结单</Button>
+          <Button variant="outline" size="sm" data-action="manual-close-open" onClick={() => { setError(""); setOpen(true); }}>核对结束方式</Button>
         </div>}
       {error && !open ? <p className="im-support-fulfillment-error" role="alert"><CircleAlert size={14} />{error}</p> : null}
     </CardContent>
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent className="im-wb-dialog" aria-label="手动结单" showCloseButton={false}>
-        <div className="im-wb-dialog-head"><div><strong>手动结单</strong><span>订单 {displayNo} · 只改状态</span></div><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setOpen(false)} disabled={phase === "SENDING"} aria-label="关闭手动结单"><X size={14} /></button></div>
-        <Alert variant="warning"><TriangleAlert /><AlertTitle>资金不会被自动处理</AlertTitle><AlertDescription>本操作不生成结算、退款责任或银行到账；已收款由财务线下核对。提交后订单变为已取消，订单群保留 72 小时沟通窗口。</AlertDescription></Alert>
+        <div className="im-wb-dialog-head"><div><strong>核对结束方式</strong><span>订单 {displayNo}</span></div><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setOpen(false)} disabled={phase === "SENDING"} aria-label="关闭手动结单"><X size={14} /></button></div>
+        <Alert variant="warning"><TriangleAlert /><AlertTitle>先核对本单办理路径</AlertTitle><AlertDescription>未开租取消与已开租结算是不同流程，本入口不会跳过应收应退责任。提交后请按系统返回的办理路径继续；不代表订单已关闭或退款到账。</AlertDescription></Alert>
         <label className="im-wb-dialog-note"><span>处理备注（必填，3–200 字）<em>{remark.length}/200</em></span>
           <Textarea value={remark} maxLength={200} rows={3} aria-label="手动结单处理备注" placeholder="说明异常原因与后续资金处理方式" disabled={phase === "SENDING" || phase === "UNKNOWN"} onChange={(event) => { setRemark(event.target.value); setError(""); }} />
         </label>
         {error ? <p className="im-wb-dialog-error" role="alert"><CircleAlert size={14} />{error}</p> : null}
         <div className="im-wb-dialog-actions">
           <Button variant="ghost" size="sm" onClick={() => setOpen(false)} disabled={phase === "SENDING"}>取消</Button>
-          <Button variant="destructive" size="sm" data-action="manual-close-submit" onClick={() => void submit()} disabled={!valid || phase === "SENDING" || Boolean(result)}>{phase === "SENDING" ? "提交中…" : phase === "UNKNOWN" ? "重试同一请求" : "确认手动结单"}</Button>
+          <Button variant="outline" size="sm" data-action="manual-close-submit" onClick={() => void submit()} disabled={!valid || phase === "SENDING" || Boolean(result)}>{phase === "SENDING" ? "提交中…" : phase === "UNKNOWN" ? "重试同一请求" : "核对办理路径"}</Button>
         </div>
       </DialogContent>
     </Dialog>

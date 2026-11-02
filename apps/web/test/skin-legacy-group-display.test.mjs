@@ -103,6 +103,23 @@ test('SK7-R1-01 owner workspace facet shows only verified type/quality, never th
 
 const oldDraftSkin = { ...fixtures.verifiedAgent, id: 'OLD_FROZEN_SKIN', name: '旧冻结外观' };
 const currentDraftSkin = { ...fixtures.verifiedAgent, id: 'CURRENT_DRAFT_SKIN', name: '当前草稿外观' };
+
+test('legacy holding without exact admission stays unknown instead of zero or an old frozen fallback', () => {
+  for (const legacySkinHolding of [undefined, { state: 'UNKNOWN', admittedCount: null, items: null, withheldCount: null }, { state: 'ADMITTED', admittedCount: 2, items: [currentDraftSkin], withheldCount: 0 }]) {
+    const html = renderOwner(oldDraftSkin, { origin: 'LEGACY_OBSERVATION', legacySkinHolding });
+    assert.match(html, /旧平台皮肤资料待承接，数量未知/);
+    assert.doesNotMatch(html, /0 项皮肤|还没有申报皮肤|旧冻结外观|当前草稿外观/);
+  }
+});
+
+test('a complete admitted legacy holding uses its own visible items and preserves withheld count', () => {
+  const html = renderOwner(oldDraftSkin, { origin: 'LEGACY_OBSERVATION', legacySkinHolding: { state: 'ADMITTED', admittedCount: 3, items: [currentDraftSkin], withheldCount: 2 } });
+  assert.match(html, /3 项已承接皮肤/); assert.match(html, /当前草稿外观/); assert.match(html, /另有 2 项已承接皮肤当前不可展示/);
+  assert.doesNotMatch(html, /旧冻结外观|还没有申报皮肤|数量未知/);
+  const empty = renderOwner(oldDraftSkin, { origin: 'LEGACY_OBSERVATION', legacySkinHolding: { state: 'ADMITTED', admittedCount: 0, items: [], withheldCount: 0 } });
+  assert.match(empty, /0 项已承接皮肤/); assert.match(empty, /已承接的旧持有记录中没有皮肤/);
+  assert.doesNotMatch(empty, /旧冻结外观|数量未知|还没有申报皮肤/);
+});
 test('public detail and current owner draft forward poster kind without changing old snapshots', () => {
   const observed = [];
   previewObserver = skin => observed.push(structuredClone(skin));

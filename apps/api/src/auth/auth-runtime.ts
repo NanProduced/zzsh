@@ -57,6 +57,10 @@ import { mountAdminBffHandlers } from "../bff/admin-bff";
 import { createLocalMediaStorage, type MediaStorage } from "../supply/media";
 import { resolveMediaStorage } from "../supply/media-oss";
 import { mountSystemConfigurationHandlers } from "../system/system-configuration-routes";
+import { mountAdminOverview } from "./admin-overview";
+import { deriveIdentitySubjectKey } from "./identity-subject";
+import { loadUserProviderRuntime } from "./user-provider-runtime";
+import type { UserSmsSender } from "./aliyun-user-providers";
 import { loadLegacyPublicAdmission, loadLegacyPublicAdmissionManifest, parseLegacyPublicAdmission, assertLegacyPublicAdmissionTarget, assertLegacyPublicAdmissionManifestTarget, type LegacyPublicAdmission, type LegacyPublicAdmissionManifest } from "../legacy-load/legacy-public-admission";
 import { mountSupplyHandlers } from "../supply/supply-routes";
 import { mountProfileAvatarHandlers } from "../profile/profile-avatar-routes";
@@ -68,7 +72,7 @@ import { mountOrderHandlers, mountUserOrderBff, type OrderRuntimeOptions } from 
 import { createTradePublicActivityReaders, loadTradePublicActivityBindings, type TradeActivityBindings } from "../order/public-trade-activity";
 import { readLegacyDutyFinalization } from "../finance/legacy-duty-finance-store";
 import { composeSupplyGateWithOrderOccupancy } from "../order/order";
-import { ConfigurationError, OrderImSdkRouteBindings, readSecret, type OrderImSdkRouteConfig } from "../config/config";
+import { businessFeatureEnabled, isDeployedProfile, ConfigurationError, OrderImSdkRouteBindings, readSecret, type OrderImSdkRouteConfig } from "../config/config";
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
 import { SecurityApiError, setAuditContext, recordAudit, withTransaction } from "./security-core";
 import { createUserAuthThrottle, readUserThrottleHmacKey, readUserThrottleMode, ThrottleDependencyError, withUserAuthThrottle, type UserAuthThrottle, type UserThrottleMode } from "./user-auth-throttle";
@@ -85,7 +89,7 @@ import { mountOrderImEventHandlers, OrderImEventRecoveryLifecycle, orderImEvents
 
 import { assertLocalDistributionAssembly, type LocalDistributionScope } from '../finance/distribution-policy-store';
 import { initializeNewDistributionRegistration } from "../finance/distribution-registration";
-import { initializeNativeWalletOrigin, type NativeOriginResource } from "../finance/native-wallet-origin";
+import { initializeNativeWalletOrigin, assertNativeWalletOriginAssembly, type NativeOriginResource } from "../finance/native-wallet-origin";
 import { assertLocalControlledPaymentAssembly, mountLocalControlledPayments, type LocalControlledPaymentOptions } from "../order/local-payment-routes";
 import { mountChannelPayments, channelPaymentReadOptions, type ChannelPaymentCollectionAssembly } from "../order/channel-payment-routes";
 import { mountAdminNativeRefunds } from "../order/native-refund-routes";
@@ -105,6 +109,9 @@ type AuthRuntimeConfig = {
   userOrigin: string;
   adminOrigin: string;
   userSecret: string;
+  userIdentitySubjectKey?: Buffer;
+  userSmsSender?: UserSmsSender;
+  userRealNamePolicy?: { dailyLimit: number; minIntervalSeconds: number };
   adminSecret: string;
   adminBootstrapSecret?: string;
   secureCookies: boolean;
@@ -121,6 +128,8 @@ export type AuthRuntimeCapabilities = {
 };
 
 export type AuthRuntimeOptions = AuthRuntimeConfig & {
+  /** Explicit formal resource capability and deployment switch; does not enable collection requests. */
+  settlementRecordingEnabled?: boolean;
   /** Explicit local capability only; never read from environment or HTTP. */
   nativeWithdrawalScope?: NativeWithdrawalScope;
   /** Exact local creation-receipt capability; absent in ordinary configuration. */
@@ -242,6 +251,7 @@ export function isUserAuthPathAllowed(path: string): boolean {
 }
 
 const USER_SECURITY_PATHS = new Set([
+  "/identity/verification-attempt",
   "/identity/status",
   "/identity/verify",
   "/trade-eligibility/check",
@@ -531,6 +541,7 @@ function buildPhoneRegistrationPlugin(
   creditGuaranteeEnabled = false,
   distributionScope?: LocalDistributionScope,
   smsThrottle?: UserAuthThrottle,
+  smsSender?: UserSmsSender,
 ) {
   const authDomainError = (error: unknown): never => {
     if (error instanceof SecurityApiError) {
@@ -583,7 +594,7 @@ function buildPhoneRegistrationPlugin(
         } catch (error) { return authDomainError(error); }
       }),
       sendPhoneRegistrationOTP: createAuthEndpoint("/phone-registration/send-otp", { method: "POST", metadata: noStore }, async (ctx) => {
-        if (!fakeSmsEnabled) throw new APIError("NOT_IMPLEMENTED", { message: "SMS provider is not configured" });
+        if (!fakeSmsEnabled && !smsSender) throw new APIError("NOT_IMPLEMENTED", { message: "SMS provider is not configured" });
         const phoneNumber = phoneFrom(bodyOf(ctx.body, ["phoneNumber"]));
         const identifier = phoneRegistrationIdentifier(phoneNumber);
         const code = localSmsMock ? "888888" : registrationOtp();
@@ -623,7 +634,10 @@ function buildPhoneRegistrationPlugin(
           if (phoneRejection && smsThrottle) await smsThrottle.recordRejection(phoneRejection).catch(() => undefined);
           throw error;
         }
-        outbox.set(identifier, { code, sentAt: now.toISOString(), purpose: "phone-registration" });
+        if (smsSender) {
+          try { await smsSender(phoneNumber, code); }
+          catch { throw new APIError("SERVICE_UNAVAILABLE", { code: "AUTH_DEPENDENCY_UNAVAILABLE", message: "SMS delivery is not confirmed; keep the original challenge and cooldown" }); }
+        } else outbox.set(identifier, { code, sentAt: now.toISOString(), purpose: "phone-registration" });
         return ctx.json({ status: true, cooldownUntil: new Date(now.getTime() + PHONE_REGISTRATION_OTP_COOLDOWN_MS).toISOString() });
       }),
       completePhoneRegistration: createAuthEndpoint("/phone-registration/complete", { method: "POST", metadata: noStore }, async (ctx) => {
@@ -746,6 +760,7 @@ export function loadAuthRuntimeConfig(
 ): Omit<AuthRuntimeOptions, "pool"> {
   const creditGuaranteeEnabled = readCreditGuaranteeEnabled(env);
   const publicTradeActivityBindings = loadTradePublicActivityBindings(env, workingDirectory);
+  const settlementEnabled = businessFeatureEnabled(env, "ORDER_SETTLEMENT_RECORDING_ENABLED");
   const apiOrigin = env.AUTH_API_ORIGIN?.trim() || `http://127.0.0.1:${env.PORT?.trim() || "3102"}`;
   const userOrigin = env.AUTH_USER_ORIGIN?.trim() || "http://127.0.0.1:3100";
   const adminOrigin = env.AUTH_ADMIN_ORIGIN?.trim() || "http://127.0.0.1:3101";
@@ -759,6 +774,7 @@ export function loadAuthRuntimeConfig(
     if (url.protocol !== "http:" && url.protocol !== "https:" || url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
       throw new ConfigurationError(`${key} must be an absolute http(s) origin`);
     }
+    if (isDeployedProfile(env) && (env[key] === undefined || url.protocol !== "https:")) throw new ConfigurationError(`${key} requires an explicit HTTPS origin for deployment`);
   }
 
   const userSecret = readSecret(env, "AUTH_USER_SECRET", "AUTH_USER_SECRET_FILE", workingDirectory);
@@ -779,10 +795,11 @@ export function loadAuthRuntimeConfig(
   let userClientIp: UserClientIpConfig;
   try { userClientIp = parseUserClientIpConfig(env); }
   catch (error) { throw new ConfigurationError(error instanceof Error ? error.message : "USER client IP configuration is invalid"); }
-  const userAuthThrottleStore = env.USER_AUTH_THROTTLE_STORE?.trim() || "memory";
+  const userAuthThrottleStore = env.USER_AUTH_THROTTLE_STORE?.trim() || (isDeployedProfile(env) ? "postgres" : "memory");
   if (userAuthThrottleStore !== "memory" && userAuthThrottleStore !== "postgres") {
     throw new ConfigurationError("USER_AUTH_THROTTLE_STORE must be memory or postgres");
   }
+  if (isDeployedProfile(env) && userAuthThrottleStore !== "postgres") throw new ConfigurationError("Deployed auth throttling requires postgres");
   const userAuthThrottleMode = readUserThrottleMode(env);
   const adminBootstrapSecret = env.AUTH_ADMIN_BOOTSTRAP_SECRET !== undefined || env.AUTH_ADMIN_BOOTSTRAP_SECRET_FILE !== undefined
     ? readSecret(env, "AUTH_ADMIN_BOOTSTRAP_SECRET", "AUTH_ADMIN_BOOTSTRAP_SECRET_FILE", workingDirectory)
@@ -808,6 +825,23 @@ export function loadAuthRuntimeConfig(
     throw new ConfigurationError("AUTH_SECURE_COOKIES=true is required in production");
   }
   const userThrottleHmacKey = readUserThrottleHmacKey(env, workingDirectory, { userSecret, adminSecret });
+  const identityMasterKey = env.USER_IDENTITY_SUBJECT_HMAC_KEY || env.USER_IDENTITY_SUBJECT_HMAC_KEY_FILE
+    ? readSecret(env, "USER_IDENTITY_SUBJECT_HMAC_KEY", "USER_IDENTITY_SUBJECT_HMAC_KEY_FILE", workingDirectory) : undefined;
+  if (isDeployedProfile(env) && !identityMasterKey) throw new ConfigurationError("Deployed identity requires a stable USER_IDENTITY_SUBJECT_HMAC_KEY or _FILE");
+  if (identityMasterKey !== undefined && (identityMasterKey.length < 32 || [userSecret, adminSecret, userThrottleHmacKey].includes(identityMasterKey))) {
+    throw new ConfigurationError("Identity subject HMAC requires a stable independent secret of at least 32 characters");
+  }
+  const userProviders = loadUserProviderRuntime(env, workingDirectory);
+  if (userProviders.realNameProvider && identityMasterKey === undefined) throw new ConfigurationError("Real name verification requires USER_IDENTITY_SUBJECT_HMAC_KEY or _FILE");
+  const identityLimit = (name: string, maximum: number): number => {
+    const value = env[name]?.trim();
+    if (!value || !/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) > maximum) throw new ConfigurationError(`${name} must be an explicit positive integer no greater than ${maximum}`);
+    return Number(value);
+  };
+  const userRealNamePolicy = userProviders.realNameProvider ? {
+    dailyLimit: identityLimit("USER_REAL_NAME_DAILY_LIMIT", 100),
+    minIntervalSeconds: identityLimit("USER_REAL_NAME_MIN_INTERVAL_SECONDS", 86400),
+  } : undefined;
   // Supplier event ingress is explicit and default-closed; missing configuration mounts nothing.
   const orderImEventsSetting = env.ORDER_IM_EVENTS_ENABLED?.trim() || "false";
   if (orderImEventsSetting !== "true" && orderImEventsSetting !== "false") {
@@ -830,6 +864,7 @@ export function loadAuthRuntimeConfig(
     }
     orderImEvents = { appKey, appSecret, ...(freshnessMs === undefined ? {} : { freshnessMs }) };
   }
+  const adminAltchaHmacKey = readAdminAltchaHmacKey(env, workingDirectory);
   return {
     creditGuaranteeEnabled,
     legacyPublicAdmission: loadLegacyPublicAdmission(env, workingDirectory),
@@ -841,6 +876,10 @@ export function loadAuthRuntimeConfig(
     userOrigin,
     adminOrigin,
     userSecret,
+    userIdentitySubjectKey: identityMasterKey === undefined ? undefined : deriveIdentitySubjectKey(identityMasterKey),
+    ...userProviders,
+    ...(userRealNamePolicy ? { userRealNamePolicy } : {}),
+    settlementRecordingEnabled: settlementEnabled,
     adminSecret,
     adminBootstrapSecret,
     secureCookies,
@@ -855,7 +894,7 @@ export function loadAuthRuntimeConfig(
     // identity or payment providers into real mode.
     mediaStorage: resolveMediaStorage(env, workingDirectory),
     adminClientIp: parseAdminClientIpConfig(env),
-    ...(readAdminAltchaHmacKey(env) ? { adminAltchaHmacKey: readAdminAltchaHmacKey(env) } : {}),
+    ...(adminAltchaHmacKey ? { adminAltchaHmacKey } : {}),
   };
 }
 
@@ -866,6 +905,7 @@ export async function mountAuthHandlers(
   if (options.localControlledPayments && options.joinpayCollection) {
     throw new ConfigurationError("Controlled and formal collection assemblies are exclusive");
   }
+  assertNativeWalletOriginAssembly(options.nativeWalletOrigin, options.joinpayCollection?.admission);
   const recovery = options.joinpayCollection?.recovery;
   if (recovery !== undefined) {
     const collection = options.joinpayCollection, execution = collection?.routes?.execution;
@@ -936,7 +976,7 @@ export async function mountAuthHandlers(
       });
     },
   });
-  const userSecurityPlugin = await buildUserSecurityPlugin({ pool: options.pool, outbox: options.fakeUserSecurityOutbox, localMock: options.localSmsMock === true, smsThrottle: userThrottle });
+  const userSecurityPlugin = await buildUserSecurityPlugin({ pool: options.pool, outbox: options.fakeUserSecurityOutbox, localMock: options.localSmsMock === true, smsThrottle: userThrottle, smsSender: options.userSmsSender });
   const adminSelfSecurityPlugin = await buildAdminSelfSecurityPlugin({ pool: options.pool, adminSecret: options.adminSecret });
   const adminSchema = createAuthSchema("zzsh_auth_admin");
   const userDatabase = drizzle(options.pool);
@@ -1028,7 +1068,7 @@ export async function mountAuthHandlers(
     plugins: [
       bearer(),
       buildFakePhoneNumberPlugin(phoneNumber, fakeSmsOutbox, options.localSmsMock === true, buildTransactionalPhoneSignIn(options.pool, createAuthEndpoint, APIError, setSessionCookie)),
-      buildPhoneRegistrationPlugin(createAuthEndpoint, APIError, setSessionCookie, options.pool, fakeSmsOutbox, options.fakeSmsOutbox !== undefined || options.localSmsMock === true, options.localSmsMock === true, signInIdentifier, options.nativeWalletOrigin, options.creditGuaranteeEnabled === true, options.distributionScope, userThrottle),
+      buildPhoneRegistrationPlugin(createAuthEndpoint, APIError, setSessionCookie, options.pool, fakeSmsOutbox, options.fakeSmsOutbox !== undefined || options.localSmsMock === true, options.localSmsMock === true, signInIdentifier, options.nativeWalletOrigin, options.creditGuaranteeEnabled === true, options.distributionScope, userThrottle, options.userSmsSender),
       userSecurityPlugin,
     ],
     advanced: {
@@ -1183,7 +1223,10 @@ export async function mountAuthHandlers(
     // ponytail: process-local failure buckets are the minimum BFF guard; use a shared limiter before multi-instance rollout.
     rateLimitState: options.rateLimitState ?? new Map(),
     securityVerificationBudget: options.securityVerificationBudget ?? { inFlight: 0 },
-    realNameProvider: options.realNameProvider ?? createFakeRealNameProvider("UNKNOWN"),
+    realNameProvider: options.realNameProvider ?? { ...createFakeRealNameProvider("UNKNOWN"), available: false },
+    userIdentitySubjectKey: options.userIdentitySubjectKey,
+    userRealNamePolicy: options.userRealNamePolicy,
+    settlementAdmission: options.joinpayCollection?.admission,
     userObligationReader: async (userId,client) => {
       const pending=await client.query("SELECT 1 FROM zzsh_supply.rental_account a JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id WHERE a.owner_user_id=$1 AND v.review_state IN ('SUBMITTED','APPROVED','PUBLISHED') LIMIT 1",[userId]);
       if(pending.rowCount) return "PENDING";
@@ -1288,8 +1331,11 @@ export async function mountAuthHandlers(
   const paymentReadOptions = channelPaymentReadOptions(collection?.routes, Boolean(collection?.notifications
     && collection.notifications.admission === collection.routes?.initial?.admission
     && collection.notifications.admission === collection.routes?.execution?.formal?.admission));
-  const settlementRecordingEnabled = options.testOperationsEnabled === true
-    && process.env.ZZSH_SETTLEMENT_RECORDING === "controlled" && process.env.NODE_ENV !== "production";
+  if (options.settlementRecordingEnabled === true && !options.joinpayCollection?.admission) {
+    throw new ConfigurationError("Formal settlement recording requires the bound collection resource admission");
+  }
+  const settlementRecordingEnabled = options.settlementRecordingEnabled === true || (options.testOperationsEnabled === true
+    && process.env.ZZSH_SETTLEMENT_RECORDING === "controlled" && process.env.NODE_ENV !== "production");
   const orderOptions: OrderRuntimeOptions = {
     ...securityOptions,
     channelPaymentReadOptions: paymentReadOptions,
@@ -1351,6 +1397,7 @@ export async function mountAuthHandlers(
   mountProfileAvatarHandlers(app, { ...securityOptions, mediaStorage });
   mountLegalHandlers(app, securityOptions);
   mountSystemConfigurationHandlers(app, { ...securityOptions, mediaStorage, supplyGateReader });
+  mountAdminOverview(app, { ...securityOptions, imAppId: options.yunxin?.appId });
   mountContentHandlers(app, {
     ...securityOptions,
     mediaStorage,

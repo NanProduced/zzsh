@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 
 import { API_V1_ERROR_CODES } from "../contracts/api-v1";
-import { ConfigurationError } from "../config/config";
+import { ConfigurationError, readSecret } from "../config/config";
 import { recordAudit, SecurityApiError, setAuditContext, withTransaction } from "./security-core";
 import { ADMIN_CLIENT_IP_FORWARD_HEADER, DEFAULT_ADMIN_CLIENT_IP_CONFIG, type AdminClientIpConfig } from "./admin-client-ip";
 
@@ -242,8 +242,9 @@ export function createAdminCaptcha(hmacKey: string, store: AdminAuthThrottleStor
 }
 
 /** ADMIN_ALTCHA_HMAC_KEY：生产必填（≥32 字符）；非生产缺省时启动时随机生成，仅存内存、不打印。 */
-export function readAdminAltchaHmacKey(env: NodeJS.ProcessEnv): string | undefined {
-  const value = env.ADMIN_ALTCHA_HMAC_KEY;
+export function readAdminAltchaHmacKey(env: NodeJS.ProcessEnv, workingDirectory = process.cwd()): string | undefined {
+  const value = env.ADMIN_ALTCHA_HMAC_KEY_FILE !== undefined
+    ? readSecret(env, "ADMIN_ALTCHA_HMAC_KEY", "ADMIN_ALTCHA_HMAC_KEY_FILE", workingDirectory) : env.ADMIN_ALTCHA_HMAC_KEY;
   if (value === undefined || value === "") {
     if (env.NODE_ENV === "production") throw new ConfigurationError("ADMIN_ALTCHA_HMAC_KEY is required in production");
     return undefined;

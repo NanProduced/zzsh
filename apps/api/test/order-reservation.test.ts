@@ -593,6 +593,7 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
       // The periodic sweep is pushed out so deterministic recovery tests own their own calls.
       orderImEvents: { appKey: ORDER_IM_EVENT_APP, appSecret: ORDER_IM_EVENT_SECRET, recoveryIntervalMs: 3_600_000, escalationEnabled: true },
       realNameProvider: createFakeRealNameProvider("VERIFIED_ADULT"),
+      userIdentitySubjectKey: randomBytes(32),
       orderHoldSeconds: HOLD_SECONDS,
       ...(RESOURCE_SET === "trade_settlement" || RESOURCE_SET === "pub_direct" ? {
         testConfirmationFundingReader: createControlledConfirmationFundingReader({
@@ -634,7 +635,6 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     const operator = await createStaff("订单供给运营", [
       "supply.catalog.manage",
       "supply.rules.edit",
-      "supply.rules.activate",
       "supply.review.read",
       "supply.review.decide",
       "supply.quote.internal.read",
@@ -663,7 +663,7 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
       const id = session.body?.user?.id as string;
       assert.ok(id);
       await maintenanceDataPool!.query(`UPDATE zzsh_auth_user."user" SET name=$2, username=$3, email=$4 WHERE id=$1`, [id, name, username, `${username}@example.invalid`]);
-      const verify = await request(base, "/api/auth/user/identity/verify", { fullName: name, documentNumber: "110101199001010000" }, jar, USER_ORIGIN);
+      const verify = await request(base, "/api/auth/user/identity/verify", { fullName: name, documentNumber: "110101199001" + String(phoneSeq).padStart(6,"0") }, jar, USER_ORIGIN);
       assert.equal(verify.response.status, 200, JSON.stringify(verify.body));
       return jar;
     };

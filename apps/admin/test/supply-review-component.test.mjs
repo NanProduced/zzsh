@@ -11,6 +11,15 @@ const tick=async h=>{for(let i=0;i<5;i++)await h.settle();};
 async function prepare(t,fetchImpl,options={}){const h=await mountHarness(t,{permissions,initialAccountId:'a',initialQuery:{context:'review'},fetchImpl,strict:true,...options});await tick(h);await h.fillReason('fixture: verify account/version and retain independent blockers');await h.click(h.btn('核对后确认运营限制'));await tick(h);return h;}
 const confirm=h=>h.click(h.btn('确认'+ '施加运营限制'));
 
+test('legacy account detail says holding admission is unknown instead of no declaration or a stale skin', async t => {
+  const value=workDetail(); value.version.origin='LEGACY_OBSERVATION'; value.version.declaration.skins=[];
+  value.version.presentation.skins=[{id:'OLD_FROZEN',name:'旧冻结外观'}];
+  value.version.legacySkinHolding={state:'UNKNOWN',admittedCount:null,items:null,withheldCount:null};
+  const h=await mountHarness(t,{permissions,initialAccountId:'a',fetchImpl:async()=>json(value)}); await tick(h);
+  assert.match(h.el.textContent,/旧平台皮肤资料待承接，数量未知/);
+  assert.doesNotMatch(h.el.textContent,/未申报皮肤|旧冻结外观/); assert.equal(h.writes.length,0);
+});
+
 test('owner review: one account profile contains image blocking; legacy changes deep links lead to records', async t => {
   const value=workDetail();
   value.version.quote.baseRenterHaffRatioWanPerYuan='39';

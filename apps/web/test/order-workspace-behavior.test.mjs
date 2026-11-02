@@ -496,7 +496,8 @@ test("one list includes both sources and old deep links return to the same filte
   try {
     await probe.render({status:"PAID",accountId:"acct_9"});
     assert.equal(probe.host.querySelectorAll(".order-row").length,2);
-    assert.doesNotMatch(probe.host.textContent,/历史订单|当前订单|旧平台|新平台|统一入口尚未完成/);
+    assert.doesNotMatch(probe.host.textContent,/旧平台|新平台|统一入口尚未完成/);
+    assert.deepEqual([...probe.host.querySelectorAll(".order-row-source")].map(node=>node.textContent),["历史订单"],"historical identity is visible inside the same unified list");
     assert.match(probe.host.textContent,/6级子弹 60 · 顶级保险卡 7 天/);
     assert.match(probe.host.textContent,/租赁截止/);
     // U5-R1-02: the historical refund figure is labelled as the original record in the list row.
@@ -539,7 +540,7 @@ test("a closed order detail drops the payment prompt and names the figure as a s
     assert.match(detail.querySelector(".order-attention-copy h2").textContent, /账号占用已解除/);
     assert.doesNotMatch(detail.textContent, /提交支付前请核对金额/);
     assert.doesNotMatch(detail.textContent, /支付不等于交付/);
-    assert.match(detail.querySelector(".order-amount-block .order-section-title").textContent, /租客侧金额/);
+    assert.match(detail.querySelector(".order-amount-block .order-section-title").textContent, /我的订单费用/);
     assert.match(detail.querySelector(".order-amount-label").textContent, /下单金额/);
     assert.doesNotMatch(detail.querySelector(".order-amount-block").textContent, /应付/);
     // The consequence of closure is stated once, and the state itself lives only in the status pill.
@@ -550,7 +551,7 @@ test("a closed order detail drops the payment prompt and names the figure as a s
   }
 });
 
-test("ORDER-A: list shows the frozen mode and never asks the reader to distinguish platform origin", async () => {
+test("ORDER-A: one list shows the frozen mode and a historical identity without separate platform navigation", async () => {
   const fast = { ...pricedOrder, id: "fast_order", title: "极速快照账号", quote: { rentalMode: "fast", lines: [] } };
   const v1 = { ...pricedOrder, id: "v1_order", title: "旧版快照账号", quote: { lines: [] } };
   const legacy = { ...legacyOrder, id: "legacy_order" };
@@ -560,8 +561,8 @@ test("ORDER-A: list shows the frozen mode and never asks the reader to distingui
     const row = (id) => probe.host.querySelector(`[data-order-id="${id}"]`)?.closest(".order-row");
     assert.match(row("fast_order").querySelector(".order-row-tag[data-mode=fast]").textContent, /极速出租/);
     assert.equal(row("v1_order").querySelector(".order-row-tag"), null, "a missing v1 mode is not guessed as ordinary");
-    assert.equal(row("legacy_order").querySelector(".order-row-tag"), null, "legacy rows carry no platform-origin label");
-    assert.doesNotMatch(probe.host.textContent, /历史订单|旧平台|新平台/);
+    assert.equal(row("legacy_order").querySelector(".order-row-source")?.textContent, "历史订单", "a historical row is identifiable inside the same list");
+    assert.doesNotMatch(probe.host.textContent, /旧平台|新平台/);
     assert.ok(row("legacy_order").querySelector("a[data-order-id='legacy_order']"), "the record remains openable for supported continuation");
   } finally {
     await probe.dispose();
@@ -760,7 +761,7 @@ test("the detail renders the six-stage bar from the IM projection and keeps the 
     });
     assert.deepEqual(opened, [{ party: "renter", orderId: order.id }]);
     // The read-only bar leaves the existing amount and refresh actions in place.
-    assert.match(detail.querySelector(".order-amount-block").textContent, /租客侧金额/);
+    assert.match(detail.querySelector(".order-amount-block").textContent, /我的订单费用/);
     assert.match(detail.textContent, /刷新订单/);
   } finally { await probe.dispose(); }
 });

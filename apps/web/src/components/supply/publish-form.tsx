@@ -2195,7 +2195,8 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
         const v2 = result.recommendationSchema === "deposit-recommendation-v2" || result.inputs.skinFacts !== undefined;
         const factsMatch = !v2 || await verifyRecommendationSkinFacts(result.inputs.skinFacts, requestBinding, { ...context, accountId: id }, controller.signal);
         if (!currentContext({ ...context, accountId: id }, controller.signal)) return;
-        const mismatch = !factsMatch || (result.recommendationSchema !== undefined && !["deposit-recommendation-v1", "deposit-recommendation-v2"].includes(result.recommendationSchema)) || result.accountId !== requestBinding.accountId ||
+        const resultAmount = yuanFromCents(result.amountCents);
+        const mismatch = resultAmount === null || !factsMatch || (result.recommendationSchema !== undefined && !["deposit-recommendation-v1", "deposit-recommendation-v2"].includes(result.recommendationSchema)) || result.accountId !== requestBinding.accountId ||
           result.accountRevision !== requestBinding.accountRevision ||
           result.versionId !== requestBinding.versionId ||
           result.versionRevision !== requestBinding.versionRevision ||
@@ -2204,9 +2205,9 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
         setRecommendation(result);
         setRecommendationBinding({ ...requestBinding, inputs: { ...requestBinding.inputs, ...(v2 ? { skinFacts: result.inputs.skinFacts } : {}) }, mismatch });
         setRecommendationAdopted(false);
-        setNotice(mismatch
+        setNotice(resultAmount === null ? "推荐金额暂不可用，请重新读取；不会按零元采用。" : mismatch
           ? "推荐结果与当前账号、版本或规则不匹配，已标记过期；请重新查看推荐押金。"
-          : `推荐押金 ${yuanFromCents(result.amountCents) ?? "0.00"} 元，依据当前版本资料计算；点击“采用推荐”才会填入申报。`);
+          : `推荐押金 ${resultAmount} 元，依据当前版本资料计算；点击“采用推荐”才会填入申报。`);
       } finally {
         finishRequest(controller);
       }
@@ -2221,8 +2222,10 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const recommendationFacts = recommendationBinding?.inputs.skinFacts;
   const recommendationCatalogFresh = !recommendationFacts || (skinCatalogRevision?.gameId === gameId && skinCatalogRevision.revision === recommendationFacts.catalogRevision &&
     recommendationFacts.skins.every((fact) => knownSkins[fact.skinId]?.catalogRevision === recommendationFacts.catalogRevision && knownSkins[fact.skinId]?.ownerKind === fact.ownerKind && knownSkins[fact.skinId]?.rarityCode === fact.rarityCode));
+  const recommendationAmountYuan = recommendation?.available ? yuanFromCents(recommendation.amountCents) : null;
   const recommendationFresh = Boolean(
     recommendation?.available &&
+    recommendationAmountYuan !== null &&
     recommendationBinding &&
     !recommendationBinding.mismatch &&
     recommendationCatalogFresh &&
@@ -3466,7 +3469,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                 </details>
                 </div></div>
 
-                <div className="publish-term-row"><label className="publish-term-label" htmlFor="publish-deposit">基础租客押金</label><div className="publish-term-control"><div className="supply-deposit-input-group"><div className="supply-deposit-input-wrap"><Input id="publish-deposit" data-first-field inputMode="decimal" value={depositInput} disabled={formDisabled} onChange={(event) => changeDeposit(event.target.value)} placeholder="填写押金金额" aria-invalid={Boolean(depositProblem())} /><span className="supply-deposit-unit">元</span></div><button type="button" className="button secondary supply-recommend-btn" disabled={formDisabled || recommendationBusy} onClick={() => void recommendDeposit()}>{recommendationBusy ? "计算中…" : "查看推荐押金"}</button></div><div className="publish-deposit-guidance"><Info size={15} aria-hidden="true" /><p>结合账号价值设置押金，不计入你的收入；推荐金额点击“采用”后填入。</p></div><FieldError text={depositProblem()?.message} />{recommendation?.available ? <div className="supply-recommend-result"><small>{recommendationAdopted && recommendationCatalogFresh ? `已采用推荐 ${moneyText({ amount: yuanFromCents(recommendation.amountCents) ?? "0.00" })}。` : recommendationBinding?.mismatch ? "推荐结果与当前账号、版本或规则不匹配，已过期；请重新查看。" : recommendationFresh ? `推荐 ${moneyText({ amount: yuanFromCents(recommendation.amountCents) ?? "0.00" })}（依据当前版本资料）。` : `推荐 ${moneyText({ amount: yuanFromCents(recommendation.amountCents) ?? "0.00" })}已过期：资料已修改，请重新查看。`}</small><button type="button" className="button quiet" disabled={formDisabled || recommendationBusy || !recommendationFresh || recommendationAdopted} onClick={() => void adoptRecommendation()}>{recommendationBusy ? "核对中…" : recommendationAdopted && recommendationCatalogFresh ? "已采用" : "采用推荐"}</button></div> : recommendation && !recommendation.available ? <small className="supply-recommend-result">{recommendation.reason === "FUNDING_POLICY_UNCONFIGURED" ? "当前规则未配置推荐依据，可自行填写。" : "补全账号能力与皮肤后可查看推荐。"}</small> : null}</div></div>
+                <div className="publish-term-row"><label className="publish-term-label" htmlFor="publish-deposit">基础租客押金</label><div className="publish-term-control"><div className="supply-deposit-input-group"><div className="supply-deposit-input-wrap"><Input id="publish-deposit" data-first-field inputMode="decimal" value={depositInput} disabled={formDisabled} onChange={(event) => changeDeposit(event.target.value)} placeholder="填写押金金额" aria-invalid={Boolean(depositProblem())} /><span className="supply-deposit-unit">元</span></div><button type="button" className="button secondary supply-recommend-btn" disabled={formDisabled || recommendationBusy} onClick={() => void recommendDeposit()}>{recommendationBusy ? "计算中…" : "查看推荐押金"}</button></div><div className="publish-deposit-guidance"><Info size={15} aria-hidden="true" /><p>结合账号价值设置押金，不计入你的收入；推荐金额点击“采用”后填入。</p></div><FieldError text={depositProblem()?.message} />{recommendation?.available ? <div className="supply-recommend-result"><small>{recommendationAmountYuan === null ? "推荐金额待确认，请重新读取；不会按零元采用。" : recommendationAdopted && recommendationCatalogFresh ? `已采用推荐 ${moneyText({ amount: recommendationAmountYuan })}。` : recommendationBinding?.mismatch ? "推荐结果与当前账号、版本或规则不匹配，已过期；请重新查看。" : recommendationFresh ? `推荐 ${moneyText({ amount: recommendationAmountYuan })}（依据当前版本资料）。` : `推荐 ${moneyText({ amount: recommendationAmountYuan })}已过期：资料已修改，请重新查看。`}</small><button type="button" className="button quiet" disabled={formDisabled || recommendationBusy || !recommendationFresh || recommendationAdopted} onClick={() => void adoptRecommendation()}>{recommendationBusy ? "核对中…" : recommendationAdopted && recommendationCatalogFresh ? "已采用" : "采用推荐"}</button></div> : recommendation && !recommendation.available ? <small className="supply-recommend-result">{recommendation.reason === "FUNDING_POLICY_UNCONFIGURED" ? "当前规则未配置推荐依据，可自行填写。" : "补全账号能力与皮肤后可查看推荐。"}</small> : null}</div></div>
               </section>
 
               <section className="publish-term-section publish-term-note-section">

@@ -33,13 +33,13 @@ export type PublicQuote = {
   }>;
   unitAmountsInformational: boolean;
 };
-export type OwnerQuote = Omit<PublicQuote, "lines"> & {
+export type OwnerQuote = Omit<PublicQuote, "lines" | "baseRenterHaffRatioWanPerYuan" | "resourceTotal" | "tenantDeposit" | "tenantPayableTotal"> & {
   ownerTotal: Money;
   ownerHaffRatio?: string;
   publisherBailRequirement: Money | null;
   contentHash?: string;
   lines: Array<
-    PublicQuote["lines"][number] & {
+    Omit<PublicQuote["lines"][number], "buyerUnitAmount" | "buyerAmount"> & {
       ownerUnitAmount: UnitAmount;
       ownerAmount: Money;
     }
@@ -635,6 +635,12 @@ export type MySupply = {
       catalogRevision: string;
       items: PublicListingSkin[];
       withheld: number;
+    };
+    legacySkinHolding?: {
+      state: "ADMITTED" | "UNKNOWN";
+      admittedCount: number | null;
+      items: PublicListingSkin[] | null;
+      withheldCount: number | null;
     };
     quote: OwnerQuote | null;
   };

@@ -63,6 +63,19 @@ function identityReason(row: IdentityRow | undefined, p: WithdrawalBankPolicy, e
   return null;
 }
 
+/** No channel/policy capability is minted: preserve known local facts while explicitly refusing new payout. */
+export async function readUnavailableWithdrawalContext(c:PoolClient,actor:NativeWithdrawalActor,channelConfigured=false){
+  const resource=(await c.query<{database:string;runtime_user:string}>("SELECT current_database() AS database,current_user AS runtime_user")).rows[0];
+  if(!resource)throw unavailable("WITHDRAWAL_CONTEXT_RESOURCE_UNAVAILABLE");
+  const bank=await readWithdrawalBankBinding(c,actor,{database:resource.database,runtimeUser:resource.runtime_user}),row=await identity(c,actor.userId);
+  return{contractVersion:"withdrawal-request-context.v1",bankBinding:bank,
+    identity:row?{identityStatus:row.identityStatus,ageStatus:row.ageStatus,verifiedAt:row.verifiedAt}:null,
+    policy:null,quota:null,canQuote:false,
+    reasonCodes:[channelConfigured?"WITHDRAWAL_REQUESTS_NOT_CONFIGURED":"WITHDRAWAL_CHANNEL_NOT_CONFIGURED","WITHDRAWAL_POLICY_UNAVAILABLE",
+      ...(bank.integration!=="INTEGRATED"?["BANK_BINDING_NOT_INTEGRATED"]:!bank.binding?["BANK_BINDING_REQUIRED"]:[])],
+    bankOwnershipVerification:"NOT_VERIFIED",bankArrival:"UNKNOWN"};
+}
+
 /** 消费真实身份行及本人版本化绑卡；不新增银行卡要素验证服务或每用户运行白名单。 */
 export function createBankBoundWithdrawalOptions(input: SourceOptions): NativeWithdrawalOptions {
   const p = definition(input.policy), scope = assertPayoutProfile(input.scope, input.profile, "SUBMIT"), descriptor = describePayoutProfile(input.profile, "SUBMIT");

@@ -14,6 +14,7 @@ export function deferred() { let resolve, reject; const promise = new Promise((y
 export async function mountAuthComponent(relativePath, componentName, props = {}, options = {}) {
   const startUrl = options.url ?? "http://127.0.0.1:4200/account";
   const window = new Window({ url: startUrl });
+  for (const [key, value] of Object.entries(options.initialSessionStorage ?? {})) window.sessionStorage.setItem(key, value);
   const startLocation = new URL(startUrl);
   const nav = { pathname: options.pathname ?? startLocation.pathname };
   const router = { pushes: [], replaces: [], push: target => { router.pushes.push(target); }, replace: target => { router.replaces.push(target); } };

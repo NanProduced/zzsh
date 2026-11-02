@@ -29,4 +29,8 @@ test("cancellation feedback distinguishes pending obligations from unknown check
   assert.match(cancellationFailureMessage(409, "CONFLICT"), /仍有未完成事项/);
   assert.match(cancellationFailureMessage(503, "INTERNAL_ERROR"), /无法确认未完成事项/);
   assert.equal(accountStatusLabel("CANCELLED"), "账号已注销");
+  assert.equal(accountStatusLabel("FROZEN"), "账号已冻结");
+  assert.equal(accountStatusLabel("FUTURE_UNKNOWN"), "账号状态待确认");
+  assert.equal(identityStatusLabel("FUTURE_UNKNOWN"), "实名状态待确认");
+  assert.equal(ageStatusLabel("FUTURE_UNKNOWN"), "年龄状态待确认");
 });

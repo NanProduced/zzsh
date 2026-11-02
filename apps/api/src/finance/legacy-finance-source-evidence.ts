@@ -120,7 +120,7 @@ export function validateReviewedOpeningSources(input:Input,subject:Subject):bool
     const net=BigInt(sourceYuanToCents(value.sale_earnings))-BigInt(sourceYuanToCents(value.full_payout_money));if(net<0n)return false;amount=net.toString();eventAt=value.confirm_time;action=1;
    }else if(source.sourceKind==='LEGACY_WITHDRAWAL'&&source.sourceEntity==='la_withdraw_apply'&&source.beneficiaryRole==='WALLET_HOLDER'){
     if(String(log.sourceId)!==source.sourceId||String(value.userId)!==subject.legacyUserId||!['3','4'].includes(String(value.status))||log.changeType!==1002)return false;
-    if(String(value.status)==='3'&&!atCutoff(value.payment_time))incomplete=true;
+    // Opening covers the original debit at create_time, independently of bank-arrival evidence.
     amount=withdrawalAmount(value);eventAt=value.create_time;action=2;
    }else if(source.sourceKind==='LEGACY_WITHDRAWAL_RETURN'&&source.sourceEntity==='la_log_earnings'&&source.beneficiaryRole==='WALLET_HOLDER'){
     if(source.sourceId!==observationId||source.sourceCanonical!==canonicalize(log)||![1003,1004].includes(Number(log.changeType)))return false;

@@ -252,7 +252,7 @@ export async function sendFulfillmentIntent(intent: FulfillmentIntent, replay = 
   }
 }
 
-/** O-03 status-only close. The key must survive an unknown result and be replayed unchanged. */
+/** Legacy receipts remain recoverable; current PAID orders return the formal resolution in a 409. */
 export async function sendManualClose(orderId: string, remark: string, key: string): Promise<ManualCloseResult> {
   return adminRequest<ManualCloseResult>(`${orderBase(orderId)}/manual-close`, { remark }, "POST", { "idempotency-key": key });
 }

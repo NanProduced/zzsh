@@ -257,6 +257,7 @@ export type PublicationFact = {
 };
 
 export type Version = {
+  origin?: string | null;
   management?: { infoSource: { value: string; name: string } | null };
   id: string;
   sequence: string;
@@ -274,6 +275,7 @@ export type Version = {
   presentation: Presentation;
   catalogItems?: Array<{ id: string; code?: string; name?: string; unit?: string }>;
   draftSkinSummary?: { source?: string; items?: PresentationSkin[]; withheld?: number } | null;
+  legacySkinHolding?: { state: "ADMITTED" | "UNKNOWN"; admittedCount: number | null; items: PresentationSkin[] | null; withheldCount: number | null };
   quote: {
     resourceTotal: { amount: string };
     termSeconds: string;
@@ -775,9 +777,13 @@ export function entitlementTermText(item: { expiresAt?: string | null; expiryKno
   return "期限未提供";
 }
 
-export function skinFacts(version: Pick<Version, "draftSkinSummary" | "presentation" | "declaration">): { source: "CURRENT_DRAFT_SELECTION" | "PRESENTATION"; withheld: number | null; rows: Array<{ id: string; name: string; category: string; portrait: boolean; rarity: string; rarityLabel: string; collectible: string; state: string; text: string; mediaId: string | null }> } {
+export function skinFacts(version: Pick<Version, "origin" | "legacySkinHolding" | "draftSkinSummary" | "presentation" | "declaration">): { source: "CURRENT_DRAFT_SELECTION" | "PRESENTATION" | "LEGACY_ADMITTED" | "LEGACY_UNKNOWN"; admittedCount: number | null; withheld: number | null; rows: Array<{ id: string; name: string; category: string; portrait: boolean; rarity: string; rarityLabel: string; collectible: string; state: string; text: string; mediaId: string | null }> } {
   const draft = version.draftSkinSummary;
-  const source = draft && Array.isArray(draft.items) ? draft.items : version.presentation.skins ?? [];
+  const legacy = version.legacySkinHolding, legacyVersion = version.origin === "LEGACY_OBSERVATION" || Boolean(legacy);
+  const admitted = legacy?.state === "ADMITTED" && Number.isSafeInteger(legacy.admittedCount) && legacy.admittedCount! >= 0
+    && Array.isArray(legacy.items) && legacy.items.every(skin => skin && typeof skin.id === "string" && typeof skin.name === "string")
+    && Number.isSafeInteger(legacy.withheldCount) && legacy.withheldCount! >= 0 && legacy.items.length + legacy.withheldCount! === legacy.admittedCount;
+  const source = legacyVersion ? admitted ? legacy!.items! : [] : draft && Array.isArray(draft.items) ? draft.items : version.presentation.skins ?? [];
   const map = (skin: PresentationSkin) => {
     const category = skin.ownerKind === "AGENT" ? "干员" : skin.ownerKind === "FIREARM" ? "枪械" : skin.ownerKind === "MELEE_TYPE" ? "近战外观" : skin.categoryName || "分类未知";
     const rarity = skin.rarityName ? skin.rarityName + (skin.rarityBasis === "PLATFORM_REFERENCE" ? "（平台参考）" : "") : "品质未知";
@@ -786,7 +792,7 @@ export function skinFacts(version: Pick<Version, "draftSkinSummary" | "presentat
     const mediaId = typeof skin.mediaId === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(skin.mediaId) ? skin.mediaId : null;
     return { id: skin.id, name: skin.name || "名称未知", category, portrait: skin.ownerKind === "AGENT", rarity, rarityLabel: skin.rarityName || "品质未知", collectible, state, text: [category, skin.name || "名称未知", rarity, collectible, state].join(" · "), mediaId };
   };
-  return { source: draft && Array.isArray(draft.items) ? "CURRENT_DRAFT_SELECTION" : "PRESENTATION", withheld: draft && Array.isArray(draft.items) && typeof draft.withheld === "number" ? draft.withheld : null, rows: source.map(map) };
+  return { source: legacyVersion ? admitted ? "LEGACY_ADMITTED" : "LEGACY_UNKNOWN" : draft && Array.isArray(draft.items) ? "CURRENT_DRAFT_SELECTION" : "PRESENTATION", admittedCount: legacyVersion && admitted ? legacy!.admittedCount : null, withheld: legacyVersion ? admitted ? legacy!.withheldCount : null : draft && Array.isArray(draft.items) && typeof draft.withheld === "number" ? draft.withheld : null, rows: source.map(map) };
 }
 
 export function quoteLineFacts(version: Version): Array<{ itemId: string; name: string; quantity: string; amount: string | null; ownerAmount: string | null; unitQuantity: string | null; buyerUnitAmount: string | null }> {
@@ -802,6 +808,11 @@ export function quoteLineFacts(version: Version): Array<{ itemId: string; name: 
 }
 
 export function skinsText(version: Version): string {
+  if (version.origin === "LEGACY_OBSERVATION" || version.legacySkinHolding) {
+    const holding = skinFacts(version);
+    if (holding.source === "LEGACY_UNKNOWN") return "旧平台皮肤资料待承接，数量未知";
+    return `已承接 ${holding.admittedCount} 项旧平台皮肤` + (holding.rows.length ? `：${holding.rows.map(skin => skin.text).join("、")}` : "") + (holding.withheld ? `；${holding.withheld} 项当前不可展示` : "");
+  }
   return (
     version.presentation.skins
       ?.map(skin => {

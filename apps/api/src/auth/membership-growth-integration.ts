@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
+import { businessFeatureEnabled } from "../config/config";
 import { readAdminGameScope, scopeAllowsGame } from "./admin-scope";
 
 import {
@@ -46,7 +47,7 @@ import { ADMIN_PERMISSION, hasPermission, loadEffectiveAdminAccess } from "./adm
 
 export const MEMBERSHIP_GROWTH_FEATURE_ENV = "ZZSH_MEMBERSHIP_GROWTH_ENABLED";
 export function membershipGrowthEnabled(): boolean {
-  return process.env[MEMBERSHIP_GROWTH_FEATURE_ENV] === "true";
+  return businessFeatureEnabled(process.env, MEMBERSHIP_GROWTH_FEATURE_ENV);
 }
 
 export type GrowthKnowledge = "KNOWN" | "UNKNOWN";

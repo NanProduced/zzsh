@@ -19,12 +19,13 @@ import { OrderWorkspace } from "./order/order-workspace";
 import { AccountCenterFrame, AccountMembershipCenter, AccountOverview, accountSectionHref, accountViewTitle, isKnownAccountView, resolveAccountView } from "./account/account-center";
 import { PersonalWallet } from "./account/personal-wallet";
 import { PersonalInvitations } from "./account/personal-invitations";
+import { IdentityVerificationForm } from "./account/identity-verification-form";
 import { CreditCenter } from "./account/credit-center";
 import { AccountSecurityControls, type SecurityNicknameDraft, type SecurityPendingWrite } from "./account/account-security-controls";
 import { ConfirmAlertDialog } from "./ui/alert-dialog";
 import { CONDITION_LABELS, booleanDeclarationText, conditionLines, haffMillionsLabel, skinTypeLabel, termLabel, unitLabel, type ResourceLine } from "../lib/listing-view";
 import { deriveAccountTitle } from "../lib/account-title";
-import { supplyApi, SupplyRequestError, uncertainSupplyWriteFailure } from "../lib/supply-client";
+import { supplyApi, SupplyRequestError, supplyBlockerMessages, uncertainSupplyWriteFailure } from "../lib/supply-client";
 import { loadSupplyIntent, prepareSupplyIntent, acceptSupplyIntent, retainUncertainSupplyIntent, clearSupplyIntent, sameSupplyIntent, SupplyIntentStorageError, type SupplyWriteIntent } from "../lib/supply-write-intent";
 import { IdentityPauseGate, isCurrentQuery, mergePageById } from "../lib/supply-workspace-guards";
 import type { MyAccountRow, MySupply, RentalState } from "../lib/supply-types";
@@ -97,25 +98,7 @@ const REVIEW_BADGE_TONE: Record<string, string | undefined> = {
 };
 
 function blockerText(code: string): string {
-  return ({
-    OWNER_UNAVAILABLE: "号主账号暂不可用",
-    IDENTITY_REQUIRED: "请先完成实名验证",
-    ADULT_REQUIRED: "需确认成年资格",
-    GAME_UNAVAILABLE: "游戏暂不可发布",
-    GAME_SERVICE_UNAVAILABLE: "该游戏暂未开放出租服务",
-    RULE_CHANGED: "规则已更新，请重新预览并确认",
-    ACCOUNT_NOT_PUBLISHABLE: "账号资料需先处理",
-    PUBLISHER_BAIL_UNCONFIRMED: "发布保证金资格尚未确认",
-    FUNDING_UNKNOWN: "押金与赔付依据尚未确认",
-    OCCUPIED: "账号当前被占用",
-    OCCUPANCY_UNKNOWN: "暂不能确认账号是否空闲",
-    REVIEW_REQUIRED: "等待资料审核",
-    OWNER_PAUSED: "号主已暂停接单",
-    STAFF_RESTRICTED: "客服限制尚未解除",
-    CONFIRMATION_OR_MEDIA_REQUIRED: "需完成规则确认或图片技术校验",
-    PUBLICATION_REQUIRED: "公开发布事实尚未形成",
-    HISTORICAL_VERSION: "这是较早版本",
-  } as Record<string, string>)[code] ?? "当前资料暂不能继续，请读取最新状态或稍后重试。";
+  return supplyBlockerMessages[code] ?? "当前资料暂不能继续，请读取最新状态或稍后重试。";
 }
 
 type AccountRow = MyAccountRow;
@@ -308,14 +291,16 @@ function useAccountIdentityRead(errorMessage: string) {
 }
 
 function AccountIdentityPanel() {
-  const { profile, identity, loading, error, load } = useAccountIdentityRead("实名认证信息暂时无法读取，请重试。");
+  const { profile, identity, loading, error, load, proof, isAuthorized } = useAccountIdentityRead("实名认证信息暂时无法读取，请重试。");
+  const session = useUserSession(), noticeScope = `${session.userId}:${session.identityVersion}`;
+  const [verificationNotice, setVerificationNotice] = useState<{ scope: string; message: string } | null>(null);
   const isVerified = identity?.identityStatus === "VERIFIED";
-  const summary = identity ? { UNVERIFIED: "尚未完成实名认证", VERIFIED: "实名认证已验证", REJECTED: "实名认证未通过", UNKNOWN: "实名状态暂无法确认" }[identity.identityStatus] : "实名状态暂无法确认";
+  const summary = identity ? { UNVERIFIED: "尚未完成实名认证", VERIFIED: "实名认证已验证", REJECTED: "实名认证未通过", UNKNOWN: "实名状态暂无法确认" }[identity.identityStatus] ?? "实名状态暂无法确认" : "实名状态暂无法确认";
   return <section className="account-module" aria-labelledby="account-identity-heading">
     <header className="account-module-heading">
       <div>
         <h2 id="account-identity-heading">实名认证</h2>
-        <p>查看已有实名认证结果。</p>
+        <p>查看已有结果，按当前可用服务完成本人核验。</p>
       </div>
       <button
         type="button"
@@ -328,6 +313,7 @@ function AccountIdentityPanel() {
         <span>刷新</span>
       </button>
     </header>
+    {verificationNotice?.scope === noticeScope ? <p className="account-module-note" role="status">{verificationNotice.message}</p> : null}
     {loading ? <div className="account-module-card account-empty-state" aria-busy="true" role="status"><ShieldCheck size={28} aria-hidden="true" /><h3>正在读取认证状态</h3><p>请稍候。</p></div> : error && !profile ? <div className="account-module-card account-empty-state" role="alert"><AlertCircle size={28} aria-hidden="true" /><h3>认证信息暂时无法读取</h3><p>{error}</p><button type="button" className="button secondary" onClick={() => void load()}>重试</button></div> : <section className="account-module-card sec-card sec-identity-card">
       {error ? <p className="account-module-note is-error" role="alert">{error}</p> : null}
       <div className="sec-identity-summary" data-state={isVerified ? "verified" : "pending"}>
@@ -345,7 +331,7 @@ function AccountIdentityPanel() {
               <span className="sec-badge sec-badge--neutral">待确认</span>
             )}
           </div>
-          <p className="sec-identity-summary-desc">{identity?.provider === "none" ? "线上实名服务暂未开放，当前无法提交新的认证。" : "认证结果会影响部分受保护交易操作。"}</p>
+          <p className="sec-identity-summary-desc">{identity?.ageStatus === "MINOR" ? "实名资料已核验，但当前未满足交易年龄要求，不能上架或下单；如有疑问请联系客服。" : identity?.verificationCapability?.available === true ? identity.verificationCapability.real ? "可提交本人信息进行本次核验，原请求结果未确认时不会重复核验。" : "当前只提供本地模拟校验，请勿填写真实身份资料。" : "线上实名服务暂未开放，当前仅展示已有状态。"}</p>
         </div>
       </div>
       <div className="sec-rows sec-identity-rows">
@@ -376,7 +362,7 @@ function AccountIdentityPanel() {
             </div>
             <div className="sec-row-main">
               <strong className="sec-row-title">真实姓名</strong>
-              <span className="sec-row-desc">已核验的实名信息。</span>
+              <span className="sec-row-desc">{identity?.identityDisplaySource === "NATIVE_PROVIDER" ? "当前实名服务核验后的脱敏资料。" : identity?.identityDisplaySource === "RECORDED_SOURCE" ? "原有核验留存的脱敏资料，并非本次重新核验。" : "已留存的脱敏资料。"}</span>
             </div>
             <div className="sec-row-state-col">
               <strong className="sec-row-value">{display.realNameMasked}</strong>
@@ -405,12 +391,13 @@ function AccountIdentityPanel() {
         </>; })()}
       </div>
       <div className="sec-identity-notes">
-        <p className="account-module-note">本页展示已有状态，暂不提供证件提交或认证资料修改。</p>
+        {identity?.verificationCapability?.available !== true ? <p className="account-module-note">本页保留已有认证状态；新的核验入口仅在服务与必要文书就绪后开放。</p> : null}
         {isVerified && !identity?.identityDisplay && identity?.identityDisplayReason === "NOT_RECORDED" ? <p className="account-module-note">实名已验证；证件信息暂未记录。</p> : null}
         {isVerified && !identity?.identityDisplay && identity?.identityDisplayReason === "STORE_UNAVAILABLE" ? <p className="account-module-note">实名已验证；证件信息暂不可用。</p> : null}
         {isVerified && !identity?.identityDisplay && !identity?.identityDisplayReason ? <p className="account-module-note">实名已验证；证件信息暂未记录。</p> : null}
         {identity?.provider === "fake" ? <p className="account-module-note">当前为本地测试结果，不代表真实身份核验。</p> : null}
       </div>
+      {profile && identity ? <IdentityVerificationForm key={noticeScope} userId={profile.id} identityStatus={identity.identityStatus} capability={identity.verificationCapability} canAct={() => isAuthorized(proof)} onCompleted={message => { setVerificationNotice({ scope: noticeScope, message }); void load(); }} /> : null}
     </section>}
   </section>;
 }
@@ -1189,8 +1176,14 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
   const cover = galleryMedia.find((item) => item.publiclyReadable !== false) ?? null;
   const unconfirmedNativeDraft = version?.origin === "NATIVE" && version.reviewState === "DRAFT" && version.contentHash === null;
   const draftSkinSummary = unconfirmedNativeDraft && version.draftSkinSummary?.source === "CURRENT_DRAFT_SELECTION" ? version.draftSkinSummary : null;
-  const skins = draftSkinSummary ? draftSkinSummary.items : version?.presentation?.skins ?? [];
-  const withheldSkins = draftSkinSummary?.withheld ?? 0;
+  const legacyHolding = version?.legacySkinHolding;
+  const legacySkinVersion = version?.origin === "LEGACY_OBSERVATION" || Boolean(legacyHolding);
+  const legacySkinAdmitted = legacyHolding?.state === "ADMITTED" && Number.isSafeInteger(legacyHolding.admittedCount) && legacyHolding.admittedCount! >= 0
+    && Array.isArray(legacyHolding.items) && legacyHolding.items.every(skin => skin && typeof skin.id === "string" && typeof skin.name === "string")
+    && Number.isSafeInteger(legacyHolding.withheldCount) && legacyHolding.withheldCount! >= 0
+    && legacyHolding.items.length + legacyHolding.withheldCount! === legacyHolding.admittedCount;
+  const skins = legacySkinVersion ? legacySkinAdmitted ? legacyHolding!.items! : [] : draftSkinSummary ? draftSkinSummary.items : version?.presentation?.skins ?? [];
+  const withheldSkins = legacySkinVersion ? legacySkinAdmitted ? legacyHolding!.withheldCount! : 0 : draftSkinSummary?.withheld ?? 0;
   const entitlementNames = new Map((version?.presentation?.entitlements ?? []).map((entry) => [entry.id, entry.name]));
   const entitlements = (declaration?.entitlements ?? []).map((entry) => {
     const disclosure = quote?.expiryDisclosures?.find((item) => item.entitlementId === entry.entitlementId);
@@ -1301,11 +1294,12 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
           <p className="supply-block-text">{declaration.description}</p>
         </section> : null}
 
-        <details className="supply-block supply-block--fold" data-skin-summary-source={draftSkinSummary?.source}>
-          <summary><strong>{draftSkinSummary ? "草稿已选皮肤" : "皮肤与权益"}</strong><span>{draftSkinSummary ? `${skins.length + withheldSkins} 项已选皮肤` : `${skins.length} 项皮肤`} · {entitlements.length} 项权益</span><ChevronDown size={16} aria-hidden="true" /></summary>
+        <details className="supply-block supply-block--fold" data-skin-summary-source={legacySkinVersion ? legacySkinAdmitted ? "LEGACY_ADMITTED" : "LEGACY_UNKNOWN" : draftSkinSummary?.source}>
+          <summary><strong>{draftSkinSummary ? "草稿已选皮肤" : "皮肤与权益"}</strong><span>{legacySkinVersion ? legacySkinAdmitted ? `${legacyHolding!.admittedCount} 项已承接皮肤` : "皮肤数量未知" : draftSkinSummary ? `${skins.length + withheldSkins} 项已选皮肤` : `${skins.length} 项皮肤`} · {entitlements.length} 项权益</span><ChevronDown size={16} aria-hidden="true" /></summary>
           <div className="supply-fold-body">
+            {legacySkinVersion ? <p className="supply-block-empty">{legacySkinAdmitted ? "旧平台完整持有记录已承接；此处不是当前游戏内实时库存。" : "旧平台皮肤资料待承接，数量未知。"}</p> : null}
             {draftSkinSummary ? <p className="supply-block-empty">当前草稿的已选目录摘要，尚未冻结或公开上架。</p> : unconfirmedNativeDraft ? <p className="supply-block-empty">当前草稿的皮肤摘要暂未取得；已有展示信息请进入编辑核对。</p> : null}
-            {withheldSkins > 0 ? <p className="supply-block-empty">另有 {withheldSkins} 项已选皮肤当前不可展示，已选关系保留；请进入编辑核对。</p> : null}
+            {withheldSkins > 0 ? <p className="supply-block-empty">{legacySkinVersion ? `另有 ${withheldSkins} 项已承接皮肤当前不可展示，持有关系保留。` : `另有 ${withheldSkins} 项已选皮肤当前不可展示，已选关系保留；请进入编辑核对。`}</p> : null}
             {skins.length ? <ul className="supply-skin-list">{skins.map((skin, index) => <li key={`${skin.id}-${index}`} data-skin-id={skin.id}>
               <SkinMediaPreview skin={skin} triggerClassName="skin-media-preview-trigger supply-skin-preview" mediaClassName="supply-skin-thumb" fallbackClassName="supply-skin-thumb-empty" iconSize={22} />
               <span>{skinCardTitle(skin)}</span>
@@ -1313,7 +1307,7 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
               <SkinMetadata skin={skin} />
             </li>)}</ul> : null}
             {entitlements.length ? <ul className="supply-entitlement-list">{entitlements.map((entry, index) => <li key={`${entry.name}-${index}`}><strong>{entry.name}</strong><span>{entry.term}</span></li>)}</ul> : null}
-            {!skins.length && !entitlements.length && !withheldSkins ? <p className="supply-block-empty">{draftSkinSummary ? "草稿尚未选择皮肤。" : "还没有申报皮肤或权益。"}</p> : null}
+            {!skins.length && !entitlements.length && !withheldSkins && (!legacySkinVersion || legacySkinAdmitted) ? <p className="supply-block-empty">{legacySkinVersion ? "已承接的旧持有记录中没有皮肤。" : draftSkinSummary ? "草稿尚未选择皮肤。" : "还没有申报皮肤或权益。"}</p> : null}
           </div>
         </details>
 

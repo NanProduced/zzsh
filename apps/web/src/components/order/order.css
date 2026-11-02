@@ -14,6 +14,10 @@
 .order-workspace-heading h2 { margin: 0; color: var(--color-text-primary); font-size: var(--type-page-title-size); font-weight: var(--type-page-title-weight); line-height: var(--type-page-title-leading); }
 .order-workspace-heading p { max-width: 64ch; margin: 8px 0 0; color: var(--color-text-secondary); font-size: var(--type-helper-size); line-height: var(--type-helper-leading); }
 .order-workspace-actions { display: flex; align-items: center; gap: 12px; flex: 0 0 auto; }
+.order-party-switch { display: flex; gap: 24px; border-bottom: 1px solid var(--color-border-subtle); }
+.order-party-switch a { display: inline-flex; align-items: center; min-height: 44px; padding: 0 2px 10px; color: var(--color-text-secondary); font-size: 14px; font-weight: 600; text-decoration: none; border-bottom: 2px solid transparent; }
+.order-party-switch a[aria-current="page"] { color: var(--color-accent-brand); border-bottom-color: currentColor; }
+.order-party-switch a:focus-visible { outline: 2px solid var(--color-accent-brand); outline-offset: 3px; }
 .order-workspace .button:focus-visible,
 .order-detail-view .button:focus-visible,
 .order-filter:focus-visible,
@@ -114,7 +118,7 @@
 .order-detail-hero-copy { min-width: 0; flex: 1 1 auto; }
 .order-detail-title { margin: 0; color: var(--color-text-primary); font-size: 26px; font-weight: 700; line-height: 1.25; letter-spacing: -0.02em; overflow-wrap: anywhere; }
 .order-detail-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin: 10px 0 0; color: var(--color-text-secondary); font-size: 13px; font-variant-numeric: tabular-nums; }
-.order-detail-meta > span + span::before { content: "·"; margin-right: 12px; }
+.order-detail-meta > span + span::before { content: none; }
 .order-detail-no { display: inline-flex; align-items: center; gap: 6px; color: var(--color-text-primary); font-weight: 600; }
 .order-detail-status { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 16px 0 0; }
 .order-copy-button { display: inline-flex; align-items: center; gap: 4px; min-height: 32px; padding: 0 10px; border: 1px solid var(--color-border-default); border-radius: 10px; color: var(--color-text-secondary); background: var(--color-bg-surface); font-size: 11px; cursor: pointer; }
@@ -124,8 +128,20 @@
 .order-detail-loading span:first-child { width: 58%; height: 32px; }
 .order-detail-loading span:last-child { width: 84%; height: 160px; }
 /* Two columns only when both can keep their width; below that the money rail drops under the content. */
-.order-detail-body { display: grid; gap: 32px; margin-top: 32px; align-items: start; }
-.order-detail-main { display: grid; gap: 32px; min-width: 0; }
+.order-detail-overview { display: grid; gap: 16px; margin: 4px 0; align-items: start; }
+.order-detail-body { display: grid; gap: 24px; align-items: start; min-width: 0; }
+.order-detail-main { display: grid; gap: 24px; min-width: 0; }
+.order-source-note { display: block; margin-top: 3px; color: var(--color-text-muted); font-size: 11px; font-weight: 400; }
+.order-detail-meta .order-source-note { display: inline; margin: 0; }
+.order-secondary-details { min-width: 0; }
+.order-secondary-details > summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 16px; min-height: 44px; padding: 4px 0; color: var(--color-text-primary); cursor: pointer; list-style: none; }
+.order-secondary-details > summary::-webkit-details-marker { display: none; }
+.order-secondary-details > summary::after { content: "展开"; grid-column: 2; grid-row: 1; align-self: center; color: var(--color-text-secondary); font-size: 12px; }
+.order-secondary-details[open] > summary::after { content: "收起"; }
+.order-secondary-details > summary > span { grid-column: 1 / -1; color: var(--color-text-secondary); font-size: 13px; font-weight: 400; line-height: 1.7; }
+.order-secondary-details > summary:focus-visible { outline: 2px solid var(--color-accent-brand); outline-offset: 4px; border-radius: 4px; }
+.order-refund-detail-content, .order-prestart-content { display: grid; gap: 14px; padding-top: 16px; }
+.order-prestart-section { padding: 18px 20px; border: 1px solid var(--color-border-subtle); border-radius: var(--functional-radius); background: var(--color-bg-card); }
 .order-detail-aside { display: grid; gap: 24px; min-width: 0; position: sticky; top: 24px; }
 .order-section-title { margin: 0; color: var(--color-text-primary); font-size: 16px; font-weight: 650; letter-spacing: -0.005em; }
 
@@ -295,17 +311,17 @@
   .order-row-amount-sub > span + span::before { content: none; }
 }
 
-@media (min-width: 1440px) {
-  .order-detail-body { grid-template-columns: minmax(0, 1fr) 320px; }
+@media (min-width: 900px) {
+  .order-detail-overview { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 }
 @media (max-width: 1439px) {
   .order-detail-aside { position: static; }
 }
 
-@media (min-width: 1281px) {
-  .order-list-columns { display: grid; grid-template-columns: minmax(0, 1fr) 190px 210px 148px; gap: 16px; padding: 0 6px 10px; border-bottom: 1px solid var(--color-border-default); color: var(--color-text-muted); font-size: 12px; }
+@media (min-width: 1440px) {
+  .order-list-columns { display: grid; grid-template-columns: minmax(0, 1fr) 140px 150px 112px; gap: 16px; padding: 0 6px 10px; border-bottom: 1px solid var(--color-border-default); color: var(--color-text-muted); font-size: 12px; }
   .order-list-columns > span:nth-child(3), .order-list-columns > span:nth-child(4) { text-align: right; }
-  .order-row { grid-template-columns: minmax(0, 1fr) 190px 210px 148px; grid-template-areas: "account state amount action"; gap: 10px 16px; align-items: start; }
+  .order-row { grid-template-columns: minmax(0, 1fr) 140px 150px 112px; grid-template-areas: "account state amount action"; gap: 10px 16px; align-items: start; }
   .order-row-state, .order-row-amount, .order-row-action { align-self: start; }
   /* Money and the row action lock to the right edge so the column scans like a ledger. */
   .order-row-amount { justify-items: end; text-align: right; }
@@ -320,6 +336,7 @@
 
 @media (max-width: 599px) {
   .order-workspace-heading { align-items: flex-start; flex-wrap: wrap; }
+  .order-detail-title { font-size: 22px; line-height: 1.4; }
 
   .order-workspace-actions { width: 100%; justify-content: space-between; }
   .order-list-panel, .order-detail-card, .order-trade-panel, .order-side-card { padding: 16px; }
@@ -339,6 +356,7 @@
   .order-trade-actions .button { flex: 1 1 auto; }
   .order-contact-actions .button { flex: 1 1 auto; }
   .order-refund-block { padding: 14px; }
+  .order-prestart-section { padding: 14px; }
   .order-refund-amounts { padding: 2px 12px; }
   .order-refund-intent { padding: 11px 12px; }
 }

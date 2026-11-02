@@ -7,6 +7,7 @@ import type {INestApplication} from '@nestjs/common';import type {AuthSecurityOp
 import {bodyOf,ensureOnlyFields,invalid,notFound,sendJson,type SupplyNodeRequest} from '../supply/supply-util';import {decodeId,requireOrigin,requestPath,safely,type SupplyResponse} from '../supply/supply-routes';
 import {createControlledWithdrawal,readControlledWithdrawals,readControlledWithdrawalQuote,recoverControlledWithdrawal} from './controlled-withdrawal-store';
 import {readPersonalWithdrawals,parsePersonalWithdrawalQuery,parsePersonalWithdrawalDetailPath} from './personal-withdrawal-read';
+import {readUnavailableWithdrawalContext} from './joinpay-withdrawal-bank-source';
 export function mountControlledWithdrawalRoutes(app:INestApplication,options:AuthSecurityOptions & {nativeWithdrawalScope?:NativeWithdrawalScope;listingCursorKey?:ListingCursorKey}){app.getHttpAdapter().getInstance().use('/api/v1/users/me/withdrawals',(request:SupplyNodeRequest,response:SupplyResponse)=>{
  const requestId=ensureApiV1RequestId(request);return safely(response,requestId,async()=>{const {path,query}=requestPath(request,'/api/v1/users/me/withdrawals'),method=(request.method??'GET').toUpperCase();
   if(!['GET','POST'].includes(method))throw notFound();if(!requireOrigin(request,response,{...options,adminOrigin:options.userOrigin},requestId))return;const context={...await readUserContext(request,options),requestId};
@@ -29,7 +30,7 @@ export function mountChannelWithdrawalRoutes(app:INestApplication,options:AuthSe
    const actor={...await readUserContext(request,options),requestId};
    if(method==='GET'&&path==='/options'){
     if(query.size)throw invalid('Unexpected withdrawal context query');const channel=options.joinpayWithdrawal;
-    if(!channel?.readContext)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Withdrawal context is not integrated');
+    if(!channel?.readContext){sendJson(response,200,await withTransaction(options.pool,c=>readUnavailableWithdrawalContext(c,actor,Boolean(channel))),requestId);return;}
     sendJson(response,200,await withTransaction(options.pool,c=>channel.readContext!(c,actor)),requestId);return;
    }
    let selector:{key:string}|{intentId:string}|undefined;

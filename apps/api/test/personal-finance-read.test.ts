@@ -60,3 +60,15 @@ test('wallet route authenticates first and never accepts a client subject header
  assert.equal((await call('/api/v1/users/me/wallet/entries/history:foreign')).statusCode,404);
  assert(seen.filter(r=>r.args?.[0]).every(r=>r.args[0]==='trusted-user'||r.args[0]==='trusted-session'));
 });
+
+// Node accepts non-zero unused base64url bits; the signed wire token has one canonical spelling.
+test('wallet cursor rejects a noncanonical alias of the exact same valid signature', () => {
+ const key={keyId:'fixture',secret:'controlled-fixture-secret-not-production-0001'};
+ const binding={userId:'u1',sessionHash:'h1',snapshotVersion:'1:1:1',bucket:'ALL'};
+ const at='2026-10-03T00:00:00.000000Z', token=encodeFinanceCursor({at,id:'history:a'},at,binding,key);
+ const [payload,sig]=token.split('.') as [string,string], alphabet='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+ const alias=sig.slice(0,-1)+alphabet[alphabet.indexOf(sig.at(-1)!)|1];
+ assert.notEqual(alias,sig);assert.deepEqual(Buffer.from(alias,'base64url'),Buffer.from(sig,'base64url'));
+ assert.equal(decodeFinanceCursor(token,binding,key).position.id,'history:a');
+ assert.throws(()=>decodeFinanceCursor(payload+'.'+alias,binding,key),(error:any)=>error.status===400);
+});

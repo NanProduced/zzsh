@@ -4,19 +4,15 @@ import { assertAdminContextInTransaction } from "../auth/auth-security";
 import { ADMIN_PERMISSION, hasPermission, loadEffectiveAdminAccess } from "../auth/admin-authorization";
 import { assertGameScopeUsable, readAdminGameScope, scopeAllowsGame } from "../auth/admin-scope";
 import { recordAudit, SecurityApiError } from "../auth/security-core";
+import type { FormalCollectionAdmission } from "./joinpay-collection-profile";
 
 const conflict = (message: string) => new SecurityApiError(409, "CONFLICT", message);
 const forbidden = (message = "Access denied") => new SecurityApiError(403, "FORBIDDEN", message);
 const missing = () => new SecurityApiError(404, "NOT_FOUND", "Order not found");
 const CONTEXT = (actor: { userId: string; sessionId: string }) => ({ realm: "admin" as const, userId: actor.userId, sessionId: actor.sessionId });
 
-export type ManualCloseActor = { userId: string; sessionId: string };
+export type ManualCloseActor = { userId: string; sessionId: string; settlementAdmission?: FormalCollectionAdmission };
 
-/**
- * O-03 status-only close. The original applied payment stays on the order and
- * no settlement/refund liability is created; finance reconciles the captured
- * funds offline. The order guard enforces the same shape in the database.
- */
 /**
  * Shared support command boundary: active admin with order settlement write,
  * game scope, and a joined STAFF identity on this order's READY team.
@@ -55,32 +51,26 @@ export async function manualCloseOrder(
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   await assertManualCloseAccess(client, orderId, actor);
   const order = (await client.query<{
-    status: string; cancelReason: string | null; paidConfirmationId: string | null; cancelledAt: string | null;
+    status: string; cancelReason: string | null; paidConfirmationId: string | null; cancelledAt: string | null; openingConfirmed: boolean;
   }>(`SELECT status, cancel_reason AS "cancelReason", paid_confirmation_id AS "paidConfirmationId",
-             cancelled_at::text AS "cancelledAt"
-        FROM zzsh_order.rental_order WHERE id = $1 FOR UPDATE`, [orderId])).rows[0];
+             cancelled_at::text AS "cancelledAt",
+             EXISTS(SELECT 1 FROM zzsh_order.rental_opening op WHERE op.order_id=o.id AND op.status='CONFIRMED') AS "openingConfirmed"
+        FROM zzsh_order.rental_order o WHERE id = $1 FOR UPDATE`, [orderId])).rows[0];
   if (!order) throw missing();
   if (order.status === "CANCELLED" && order.cancelReason === "MANUAL_CLOSE") {
     return { status: 200, body: { orderId, status: "CANCELLED", cancelReason: "MANUAL_CLOSE", cancelledAt: order.cancelledAt,
       localFundsEffect: "NONE", financeHandling: "OFFLINE_REQUIRED", alreadyClosed: true } };
   }
   if (order.status !== "PAID" || !order.paidConfirmationId) throw conflict("ORDER_NOT_CLOSABLE");
-  const closed = (await client.query<{ cancelledAt: string }>(
-    `UPDATE zzsh_order.rental_order
-        SET status = 'CANCELLED', cancel_reason = 'MANUAL_CLOSE', cancelled_at = clock_timestamp(),
-            revision = revision + 1, updated_at = clock_timestamp()
-      WHERE id = $1 AND status = 'PAID' AND paid_confirmation_id = $2
-      RETURNING cancelled_at::text AS "cancelledAt"`,
-    [orderId, order.paidConfirmationId],
-  )).rows[0];
-  if (!closed) throw conflict("ORDER_CHANGED");
+  if(typeof order.openingConfirmed!=="boolean")throw new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","Opening facts are unavailable");
+  const resolution=order.openingConfirmed
+    ?{code:"SETTLEMENT_REQUIRED",readPath:`/api/v1/admin/orders/${orderId}/settlement`,message:"请按实际消耗完成结算后结束订单。"}
+    :{code:"PRESTART_REFUND_REQUIRED",readPath:`/api/v1/admin/orders/${orderId}/support-cancel`,message:"请办理未开租客服取消，确认原款应退责任后结束订单。"};
   await recordAudit(client, {
-    actorType: "admin", actorId: actor.userId, sessionId: actor.sessionId, action: "order.manual_close",
-    objectType: "rental_order", objectId: orderId, outcome: "SUCCESS", requestId,
-    details: { remark, previousStatus: "PAID", cancelReason: "MANUAL_CLOSE",
-      paidConfirmationId: order.paidConfirmationId, localFundsEffect: "NONE",
-      financeHandling: "OFFLINE_REQUIRED", channelResult: "NOT_SUBMITTED", bankArrival: "UNKNOWN" },
+    actorType: "admin", actorId: actor.userId, sessionId: actor.sessionId, action: "order.manual_close.rejected",
+    objectType: "rental_order", objectId: orderId, outcome: "FAILURE", requestId,reason:"LEGAL_RESOLUTION_REQUIRED",
+    details: {remark,orderStatus:"PAID",resolution:resolution.code,moneyUnchanged:true},
   });
-  return { status: 200, body: { orderId, status: "CANCELLED", cancelReason: "MANUAL_CLOSE", cancelledAt: closed.cancelledAt,
-    localFundsEffect: "NONE", financeHandling: "OFFLINE_REQUIRED" } };
+  return {status:409,body:{error:{code:"CONFLICT",message:resolution.message,reason:resolution.code},orderId,status:"PAID",resolution,
+    localFundsEffect:"NONE",orderUnchanged:true}};
 }

@@ -1,26 +1,32 @@
 export type UserIdentitySnapshot = {
-  accountStatus: "ACTIVE" | "DEACTIVATED" | "CANCELLED";
+  accountStatus: "ACTIVE" | "FROZEN" | "DEACTIVATED" | "CANCELLED";
   identityStatus: "UNVERIFIED" | "VERIFIED" | "REJECTED" | "UNKNOWN";
   ageStatus: "UNKNOWN" | "ADULT" | "MINOR";
   provider: string;
   eligibleForProtectedTrade: boolean;
   /** Masked display fields are optional for older APIs; never log or cache these values. */
   identityDisplay?: { realNameMasked: string; idCardMasked: string; maskingVersion: string } | null;
+  identityDisplaySource?: "NATIVE_PROVIDER" | "RECORDED_SOURCE";
+  verificationCapability?: {
+    available: boolean; real: boolean; idempotencyRequired: boolean;
+    privacy?: { versionId: string; digest: string; title: string; bodyPath: string } | null;
+    disclosure?: { versionId: string; digest: string; body: string };
+  };
   identityDisplayReason?: "NOT_RECORDED" | "NOT_VERIFIED" | "STORE_UNAVAILABLE" | null;
   realNameMasked?: string | null;
   idCardMasked?: string | null;
 };
 
 export function accountStatusLabel(status: UserIdentitySnapshot["accountStatus"]): string {
-  return { ACTIVE: "账号正常", DEACTIVATED: "账号已停用", CANCELLED: "账号已注销" }[status];
+  return { ACTIVE: "账号正常", FROZEN: "账号已冻结", DEACTIVATED: "账号已停用", CANCELLED: "账号已注销" }[status] ?? "账号状态待确认";
 }
 
 export function identityStatusLabel(status: UserIdentitySnapshot["identityStatus"]): string {
-  return { UNVERIFIED: "尚未验证", VERIFIED: "实名已验证", REJECTED: "实名未通过", UNKNOWN: "暂无法确认" }[status];
+  return { UNVERIFIED: "尚未验证", VERIFIED: "实名已验证", REJECTED: "实名未通过", UNKNOWN: "暂无法确认" }[status] ?? "实名状态待确认";
 }
 
 export function ageStatusLabel(status: UserIdentitySnapshot["ageStatus"]): string {
-  return { UNKNOWN: "年龄未确认", ADULT: "已确认成年人", MINOR: "未满足年龄要求" }[status];
+  return { UNKNOWN: "年龄未确认", ADULT: "已确认成年人", MINOR: "未满足年龄要求" }[status] ?? "年龄状态待确认";
 }
 
 export function providerAvailability(snapshot: Pick<UserIdentitySnapshot, "provider" | "identityStatus">): string {

@@ -158,6 +158,10 @@ export type AuthSecurityOptions = {
   rateLimitState: Map<string, { failures: number; resetAt: number }>;
   securityVerificationBudget: { inFlight: number };
   realNameProvider: RealNameProvider;
+  /** Stable identity-only HMAC key; independent from rotating authentication secrets. */
+  userIdentitySubjectKey?: Buffer;
+  userRealNamePolicy?: { dailyLimit: number; minIntervalSeconds: number };
+  settlementAdmission?: import("../order/joinpay-collection-profile").FormalCollectionAdmission;
   userObligationReader: UserObligationReader;
   accountCancelObligationReader: AccountCancelObligationReader;
   testOperationsEnabled: boolean;

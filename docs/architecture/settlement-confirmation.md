@@ -4,15 +4,19 @@
 
 管理端的已记录结算凭证独立使用资金单据读取：`GET /api/bff/admin/finance/documents/ORDER:<id>`、`LEGACY_ORDER:<id>` 及 `LEGACY_DUTY:<id>`（引用须URL编码）。读取要求 `finance.document.read`；新增 `orderSettlement` 投影还要求该订单在当前 `order.read` 与游戏/对象范围内可读。普通查询复用原资金reader与旧责任完整验证，不调用结算操作的用户/账号/订单行锁、付款/退款命令或供应商补查。无当前过账记录不代表已证实未结算，金额缺依据保持未知，旧退款记录、当前应退责任、实际已退与渠道结果分别保留；本地责任过账不证明退款到账。该读取不改变下述受控操作开关。
 
-开租与结算接口仅在受控测试配置下开放：`ENABLE_TEST_OPERATIONS=true`、`ZZSH_SETTLEMENT_RECORDING=controlled`、测试 profile、fake provider，且当前库是 `zzsh_test_order_*`、运行角色是 `zzsh_order_*_r`。不满足时返回404，生产默认关闭。
+开租与结算默认关闭。正式装配须显式设置 `ORDER_SETTLEMENT_RECORDING_ENABLED=true`，并由受信服务端注入已品牌化的收款资源 admission；仅有配置字符串或序列化对象不能授权。每次操作核对 admission 绑定的数据库与 runtime 身份，拒绝超级用户、bypass、数据库 owner/其成员以及业务表或函数 owner。历史订单结算不依赖新收款是否开放；装配本身不发送渠道请求。原受控测试入口仍要求 `ENABLE_TEST_OPERATIONS=true`、`ZZSH_SETTLEMENT_RECORDING=controlled`、非生产，并限定 `zzsh_test_order_*`/`zzsh_order_*_r`，不以正式准入替换或放宽该入口。
 
 `ready: true` 只表示这一版结算单具备提交生效的条件，不是永久过账许可。最后一方确认正常结算时，或客服复核已确认的提前结算时，服务端在同一事务内重新核验当前订单、收款、开租、费用版本、intake、确认和所需批准，并写入唯一过账记录及平衡账务批次、号主可用余额和租客退款应付款，随后将订单置为 `COMPLETED`，归档本单稳定账号并记录冻结订单关联审计。归档或审计失败使整个生效事务失败；完单释放活跃占用不代表账号可再次出租。`postingAuthorized` 与 `feeDeducted` 只反映已记录的生效事实；相同幂等键和请求体重放原成功回执，不重复记账。
+
+新已付订单不能通过 `manual-close` 仅改取消状态。服务端保留PAID并返回409：未确认开租为 `PRESTART_REFUND_REQUIRED`，已确认开租为 `SETTLEMENT_REQUIRED`，分别读取现有客服取消或结算入口。不会代填原因、消耗和退款金额。历史已记录 `MANUAL_CLOSE` 仍保留原付款及回执，其 `fundsResolution=REVIEW_REQUIRED` 不是退款已完成；相关队列需核对原资金事实，不反向恢复PAID或篡改旧账。
 
 结算批次引用唯一的本地付款事实并将其作为资金来源分录。数据库守卫在初次生效事务中校验来源、交易方、科目方向、分类金额及冻结快照；订单进入 `COMPLETED` 后拒绝对原批次追加或改写分录。未来更正须使用独立关联批次，本接口不执行更正。金额仍取自已确认结算快照，不在账务层重算费用。号主净收益在生效时进入可用余额；退款只形成应付款，正常结算生效时到期，提前结算在数据库生效时间后 7×24 小时到期。此处不是渠道清算或退款到账事实，也不启动提现/退款 worker；本地受控收款依据不代表真实支付验收。生产写链路仍默认关闭。
 
 买家和号主使用 `/api/v1/orders/:orderId/...`。有本单资格的客服使用 `/api/v1/admin/orders/:orderId/...`。用户 BFF `/api/bff/user/orders/...` 和管理 BFF `/api/bff/admin/orders/...` 转发到同一业务函数。写请求需要 `Idempotency-Key`。
 
-结算读取、预览、写成功响应与幂等回执使用同一身份投影。当事人获得确认所需的消耗、金额、费用承担、版本、决定和必要调整说明；完整账务分录、平台收益分类、资金来源内部引用及审批材料仅在当前管理员具有 `supply.quote.internal.read` 时返回。幂等重放按当前权限重新投影历史成功结果，不重复执行过账；撤销内部读取权限后，重放也不会继续暴露内部字段。
+结算读取、预览、写成功响应与幂等回执使用同一服务端身份投影，按当前订单当事人确定 viewer，不接受客户端自选角色。租客获得自身计耗、应付/应退、押金退回和本方费用；号主获得自身计耗、毛/净收入和本方费用，不获得租客实付、押金及退款金额。历史版本、预览快照、人工调整与过账结果沿同一边界裁剪，原冻结金额和账务不变；必要费用披露不扩展为防反推设计。授权客服获得本单履约详单；完整账务分录、平台收益分类、资金来源内部引用及审批材料仍要求当前管理员具有 `supply.quote.internal.read`。普通订单读取不因此授予钱包、银行卡或渠道原号权限。幂等重放按当前权限重新投影历史成功结果，不重复执行过账。
+
+列表与详情的结算阶段共用服务端投影：付款但未确认开租是 `OPENING_PENDING`，不能显示成租赁中；当前版本任一方拒绝时是 `DECISION_REJECTED`，保留拒绝记录并等待重新处理，不显示“等待确认”。状态、下一步和金额各有独立事实；`POSTED` 表示本地结算生效，不表示退款或银行到账。
 
 - 客服 `POST .../openings` 提交期初数量。数量必须与已付款订单的冻结报价行一致，否则不保存。受权 `GET .../settlement` 返回每一版清单的数量、冻结报价上的单位和计价类型，以及报价/收款摘要。买卖双方凭读到的版本号 `POST .../openings/:openingId/confirm`。付款、建群、首响和消息不会开租。已确认清单不能覆盖。
 - `POST .../settlement-preview` 返回服务端明细和 `versionHash`。这个 hash 绑定当前结算版本、决定进展，以及最新 intake 的 `id`、单调 `versionNo`、状态和关联费用版；没有申请时绑定 `null`。因此同数量的新申请、`OPEN` 转为 `CLASSIFIED`/`SUPERSEDED` 或新申请替代旧申请都会使旧 hash 失效。`POST .../settlements` 必须带回刚读到的 hash。正常结算由服务端按消耗比例判定；发起方这次提交就是自己的确认，另一方 `POST .../settlements/:versionId/decision`。

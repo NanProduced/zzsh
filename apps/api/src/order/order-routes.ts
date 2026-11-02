@@ -103,7 +103,7 @@ function parseLimit(raw: string | null): number {
   return limit;
 }
 
-const ORDER_PAGE_QUERY_KEYS = ["page","pageSize","status","origin","createdFrom","createdTo","qKind","qValue","restoreKey","view"] as const;
+const ORDER_PAGE_QUERY_KEYS = ["page","pageSize","status","origin","createdFrom","createdTo","paymentConfirmedFrom","paymentConfirmedTo","paymentOpen","qKind","qValue","restoreKey","view","fundsResolution"] as const;
 /** The numbered list is the admin read contract: every filter is parsed before the count/page query. */
 export function parseAdminOrderPageQuery(query: URLSearchParams): OrderReadFilters {
   for (const key of query.keys()) if (!ORDER_PAGE_QUERY_KEYS.includes(key as typeof ORDER_PAGE_QUERY_KEYS[number]) || query.getAll(key).length !== 1) throw invalid("Unsupported order page query", key);
@@ -112,8 +112,15 @@ export function parseAdminOrderPageQuery(query: URLSearchParams): OrderReadFilte
   if(!["order","account","party","renter","owner"].includes(qKind))throw invalid("Lookup kind is invalid");
   const qValue=query.get("qValue");if(qValue!==null&&(!qValue.trim()||qValue.length>255||/[\x00-\x1f\x7f]/.test(qValue)))throw invalid("Lookup value is invalid");
   const view=query.get("view");if(view!==null&&view!=="list")throw invalid("View is invalid","view");
+  const fundsResolution=query.get("fundsResolution");if(fundsResolution!==null&&fundsResolution!=="MANUAL_CLOSE")throw invalid("Funds resolution is invalid","fundsResolution");
+  const paymentOpen=query.get("paymentOpen");if(paymentOpen!==null&&paymentOpen!=="true")throw invalid("Payment-open filter is invalid","paymentOpen");
+  const paidFromRaw=query.get("paymentConfirmedFrom"),paidToRaw=query.get("paymentConfirmedTo");
+  const paidFrom=paidFromRaw===null?undefined:parseRfc3339Timestamp(paidFromRaw,"paymentConfirmedFrom");
+  const paidTo=paidToRaw===null?undefined:parseRfc3339Timestamp(paidToRaw,"paymentConfirmedTo");
+  if(paidFrom&&paidTo&&paidFrom.date.getTime()>=paidTo.date.getTime())throw invalid("Payment-confirmed range is invalid");
+  if(query.get("origin")==="LEGACY"&&(paymentOpen||paidFrom||paidTo))throw invalid("Payment filters apply to native orders only");
   const restoreKey=query.get("restoreKey");if(restoreKey!==null&&!/^[a-f0-9]{64}$/.test(restoreKey))throw invalid("Restore key is invalid");
-  return {page:positive("page",1,1000000),pageSize:positive("pageSize",20,100),qKind:qKind as OrderReadFilters["qKind"],...(qValue!==null?{qValue:qValue.trim()}:{}),...parseCreatedRange(query),...(query.has("status")?{status:parseStatus(query.get("status"))}:{}),...(query.has("origin")?{origin:parseOrderOrigin(query)}:{}) ,...(restoreKey?{restoreKey}:{}),...(view==="list"?{view:"list" as const}:{})};
+  return {page:positive("page",1,1000000),pageSize:positive("pageSize",20,100),qKind:qKind as OrderReadFilters["qKind"],...(qValue!==null?{qValue:qValue.trim()}:{}),...parseCreatedRange(query),...(query.has("status")?{status:parseStatus(query.get("status"))}:{}),...(query.has("origin")?{origin:parseOrderOrigin(query)}:{}) ,...(restoreKey?{restoreKey}:{}),...(view==="list"?{view:"list" as const}:{}),...(fundsResolution?{fundsResolution:"MANUAL_CLOSE" as const}:{}),...(paymentOpen?{paymentOpen:true as const}:{}),...(paidFrom?{paymentConfirmedFrom:paidFrom.text}:{}),...(paidTo?{paymentConfirmedTo:paidTo.text}:{})};
 }
 function parseCreatedRange(query: URLSearchParams): { createdFrom?: string; createdTo?: string } {
   const fromRaw = query.get("createdFrom");
@@ -358,6 +365,7 @@ export async function handleOrderAdminRoute(
           const group = (await options.pool.query<{ teamId: string; systemAccount: string }>(
             `SELECT g.team_id AS "teamId", m.account_id AS "systemAccount"
                FROM zzsh_order.im_order_group g JOIN zzsh_iam.im_identity_mapping m ON m.id = g.system_identity_id
+               JOIN zzsh_order.rental_order o ON o.id=g.order_id AND o.status='CANCELLED' AND o.cancel_reason='MANUAL_CLOSE'
               WHERE g.order_id = $1 AND g.team_state = 'READY' AND g.team_id IS NOT NULL LIMIT 1`, [orderId])).rows[0];
           if (!group) return;
           try {

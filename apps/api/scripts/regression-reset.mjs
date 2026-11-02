@@ -25,6 +25,7 @@ const sha = (b) => createHash("sha256").update(b).digest("hex");
 const fail = (message) => { throw new Error(message); };
 
 function verifyAuthorization() {
+  if (existsSync(STATE_PATH) && JSON.parse(readFileSync(STATE_PATH, "utf8"))?.protectedDataset) fail("regression dataset is protected for rehearsal review; explicit owner disposition is required");
   // The permanent developer entry is guarded by the local server identity, the registered
   // resource name/marker/OID and the explicit creation flag below. A task shell may additionally
   // bind a time-boxed authorization file; it is never required by the ordinary reset path.

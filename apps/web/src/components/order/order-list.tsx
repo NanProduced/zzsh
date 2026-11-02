@@ -4,7 +4,7 @@ import Link from "next/link";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { AlertCircle, ChevronRight, Info, RefreshCw } from "lucide-react";
 import { orderItemKey, formatOrderTime as timeText, type FulfillmentAssignment, type Order, type OrderLine, type OrderPage, type OrderParty, type OrderRequestError, type OrderStatusFilter } from "@/lib/order-client";
-import { groupedInteger, orderAccountTitle, orderAmountFacts, orderListFulfillmentTag, orderRentalModeLabel, paymentEntryOpen } from "@/lib/order-display";
+import { groupedInteger, orderAccountTitle, orderAmountFacts, orderListFulfillmentTag, orderListingSourceLabel, orderRentalModeLabel, orderSettlementStageLabel, paymentEntryOpen } from "@/lib/order-display";
 import { OrderError, OrderStatusBadge, orderTermLabel, orderUrl, STATUS_LABELS } from "@/components/order/order-presentation";
 import "./order.css";
 
@@ -96,8 +96,9 @@ function resourceSummary(order: Order, includeHaff = true): string | null {
  */
 function statusHint(order: Order): string | null {
   if (order.readOnly) return order.status === "PAID" ? "进度以订单记录为准" : null;
-  if (order.stage?.label && order.stage.code !== "NONE") {
-    return order.stage.viewerActionRequired ? `${order.stage.label} · 需要你处理` : order.stage.label;
+  const stage = orderSettlementStageLabel(order);
+  if (stage) {
+    return order.stage?.viewerActionRequired ? `${stage} · 需要你处理` : stage;
   }
   if (order.status === "PENDING_PAYMENT") {
     if (order.expiredAwaitingCancel) return "已到期，取消处理中";
@@ -116,15 +117,17 @@ function ListRow({ party, order, status, accountId, onOpen }: { party: OrderPart
   const title = orderAccountTitle(order);
   const resources = order.source?.origin === "LEGACY" ? null : resourceSummary(order, !title.includes("哈夫币"));
   const modeLabel = orderRentalModeLabel(order);
+  const sourceLabel = orderListingSourceLabel(order);
   // Only the renter, and only while the server still offers the payment entry, is invited to pay.
   const pending = party === "renter" && paymentEntryOpen(order);
-  return <li className="order-row" data-order-status={order.status}>
+  return <li className="order-row" data-order-status={order.status} data-action-required={order.stage?.viewerActionRequired || pending ? "true" : undefined}>
     <div className="order-row-account">
       {/* The title link is the row's single focusable target; its click surface covers the whole row. */}
       <div className="order-row-title-line">
         <Link className="order-row-title" href={orderUrl(party, status, accountId, order.id, order.source?.origin)} scroll={false} data-order-id={order.id} data-order-key={orderItemKey(order)} onClick={(event) => onOpen(orderItemKey(order), event)}>{title}</Link>
         {stageTag ? <span className="order-row-tag order-row-stage" data-fulfillment-stage={stageTag.code}>{stageTag.label}</span> : null}
         {modeLabel ? <span className="order-row-tag" data-mode={order.quote?.rentalMode}>{modeLabel}</span> : null}
+        {sourceLabel && sourceLabel !== "下单时账号资料" ? <span className="order-row-tag order-row-source">{sourceLabel}</span> : null}
         {!order.listingFacts && order.listingFactsUnknownReason ? <span className="order-row-tag">资料待核实</span> : null}
       </div>
       {resources ? <p className="order-row-resources">{resources}</p> : null}
@@ -148,7 +151,7 @@ function ListRow({ party, order, status, accountId, onOpen }: { party: OrderPart
       <span className="order-row-amount-label">{facts.caption}</span>
       {facts.secondary.length ? <span className="order-row-amount-sub">{facts.secondary.map((line) => <span key={line}>{line}</span>)}</span> : null}
     </div>
-    <span className={`order-row-action${pending ? " is-primary" : ""}`} aria-hidden="true">{pending ? "查看并付款" : "查看订单"}<ChevronRight size={15} /></span>
+    <span className={`order-row-action${pending || order.stage?.viewerActionRequired ? " is-primary" : ""}`} aria-hidden="true">{pending ? "查看并付款" : order.stage?.viewerActionRequired ? "查看并处理" : "查看订单"}<ChevronRight size={15} /></span>
   </li>;
 }
 
@@ -200,6 +203,10 @@ export function OrderListPanel({ party, status, accountId, state, onRefresh, onR
         <button type="button" className="button quiet" onClick={onRefresh} disabled={state.refreshing}><RefreshCw size={15} aria-hidden="true" />{state.refreshing ? "刷新中…" : "刷新"}</button>
       </div>
     </div>
+    <nav className="order-party-switch" aria-label="订单身份">
+      <Link href={orderUrl("renter", "")} scroll={false} aria-current={party === "renter" ? "page" : undefined}>我租的</Link>
+      <Link href={orderUrl("owner", "")} scroll={false} aria-current={party === "owner" ? "page" : undefined}>我出租的</Link>
+    </nav>
     <nav className="order-filter-bar" aria-label={`${title}状态`}>
       {ORDER_LIST_FILTERS.map((filter) => <Link key={filter.value || "all"} className="order-filter" href={orderUrl(party, filter.value, accountId)} scroll={false} replace aria-current={status === filter.value ? "page" : undefined}>{filter.label}</Link>)}
     </nav>

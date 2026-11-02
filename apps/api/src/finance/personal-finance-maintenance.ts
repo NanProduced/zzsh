@@ -8,6 +8,7 @@ import {canonicalize} from '../supply/content-hash';
 import {prepareHistoricalObservation,sourceYuanToCents,sourceSignedYuanToCents} from './personal-finance-read';
 import {assertFinanceSingleCutoff} from './personal-finance-coverage';
 import {isStoredEconomicSource,reviewedOpeningCoveredSet,validateReviewedOpeningSources,type FinanceSourceProof} from './legacy-finance-source-evidence';
+import {REGRESSION_DATABASE,REGRESSION_MARKER,REGRESSION_MIGRATION_USER} from '../config/test-resource';
 
 type Actor={userId:string;sessionId:string;requestId:string};
 export type OpeningMaintenanceInput={inputSha256:string;cutoff:string;proof:{userId:string;source:{sourceSystem:string;sourceEntity:string;sourceId:string;identityDigest:string};availableCents:string;sourceDigest:string;coveredCount:number;coveredDigest:string;coveredSet:string[][]};observations:Record<string,unknown>[];admissions:{sourceEntity:string;sourceId:string;sourceDigest:string;sourceEventAt:string;included:boolean}[]};
@@ -23,6 +24,12 @@ export type StoredOpeningInput=OpeningMaintenanceInput&{sourceCanonical:string;s
 export type StoredOpeningReview=FinanceOpeningReview&{coveredCount:number;observationCount:number;admissionDigest:string;sourceProofDigest?:string};
 const admissions=new WeakMap<object,{review:FinanceOpeningReview;recoveryOnly:boolean;stored?:Pick<StoredOpeningReview,'coveredCount'|'observationCount'|'admissionDigest'|'sourceProofDigest'>}>();
 const digest=/^[a-f0-9]{64}$/,identifier=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+/** Resource names do not grant authority: the exact reviewed OID/actor/role/table owner/time are checked at every use. */
+export function isReviewedFinanceMaintenanceResource(resource: FinanceOpeningReview['resource']): boolean {
+ return resource.database===REGRESSION_DATABASE
+  ? resource.marker===REGRESSION_MARKER&&resource.owner==='zzsh'&&resource.role===REGRESSION_MIGRATION_USER
+  : /^zzsh_test_order_[a-z][a-z0-9_]{0,20}$/.test(resource.database)&&resource.marker==='zzsh:order-reservation-test:v1';
+}
 function admission(value:FinanceOpeningAdmission){const p=admissions.get(value);if(!p)throw invalid('Finance opening admission is not internally bound');return p;}
 async function assertAdmission(client:PoolClient,actor:Actor,scope:FinanceOpeningAdmission,recover=false){
  const p=admission(scope);
@@ -49,8 +56,8 @@ export async function bindReviewedFinanceOpeningAdmission(client:PoolClient,acto
  ensureOnlyFields(review.actor,['userId','sessionId']);ensureOnlyFields(review.resource,['host','port','database','oid','owner','marker','role','roleOid']);
  ensureOnlyFields(review.subject,['userId','sourceId','identityDigest','sourceDigest','availableCents','coveredDigest']);
  if(![review.ref,review.attempt,review.actor.userId,review.actor.sessionId,review.subject.userId].every(x=>typeof x==='string'&&identifier.test(x))
- ||review.resource.host!=='127.0.0.1'||review.resource.port!==55432||!/^zzsh_test_order_[a-z][a-z0-9_]{0,20}$/.test(review.resource.database)
- ||![review.resource.owner,review.resource.role].every(x=>typeof x==='string'&&/^[a-zA-Z_][a-zA-Z0-9_]{0,62}$/.test(x))||review.resource.marker!=='zzsh:order-reservation-test:v1'
+ ||review.resource.host!=='127.0.0.1'||review.resource.port!==55432||!isReviewedFinanceMaintenanceResource(review.resource)
+ ||![review.resource.owner,review.resource.role].every(x=>typeof x==='string'&&/^[a-zA-Z_][a-zA-Z0-9_]{0,62}$/.test(x))
  ||![review.resource.oid,review.resource.roleOid].every(x=>Number.isSafeInteger(x)&&x>0)||typeof review.subject.sourceId!=='string'||!/^[1-9]\d{0,23}$/.test(review.subject.sourceId)
  ||typeof review.subject.availableCents!=='string'||!/^(0|[1-9]\d{0,23})$/.test(review.subject.availableCents)||!['execute','recover'].includes(mode)
  ||![review.inputSha256,review.bodyDigest,review.subject.identityDigest,review.subject.sourceDigest,review.subject.coveredDigest].every(x=>typeof x==='string'&&digest.test(x))

@@ -25,7 +25,7 @@ export async function handleSupportCancelAdminRoute(
   response.setHeader("X-Request-Id", requestId);
   if (method === "GET") {
     const context = await readAdminContext(request, options);
-    const actor = { userId: context.userId, sessionId: context.sessionId };
+    const actor = { userId: context.userId, sessionId: context.sessionId, settlementAdmission: options.settlementAdmission };
     const body = await withTransaction(options.pool, async client => {
       await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
       return readSupportCancellation(client, actor, orderId);
@@ -36,7 +36,7 @@ export async function handleSupportCancelAdminRoute(
   if (method !== "POST") throw notFound();
   if (!requireOrigin(request, response, options, requestId)) return true;
   const context = await readAdminContext(request, options);
-  const actor = { userId: context.userId, sessionId: context.sessionId };
+  const actor = { userId: context.userId, sessionId: context.sessionId, settlementAdmission: options.settlementAdmission };
   const body = bodyOf(request);
   ensureOnlyFields(body, ["expectedOrderRevision", "reason"]);
   const frozen = assertSupportCancelInput(body);

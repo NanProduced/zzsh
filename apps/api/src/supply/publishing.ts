@@ -3,7 +3,7 @@ import { assertFullPayoutTermsAccepted, readFullPayoutTerms } from "./full-payou
 import type { LegacyPublicAdmission, LegacyPublicAdmissionDetailIndex } from "../legacy-load/legacy-public-admission";
 import type { Pool, PoolClient } from "pg";
 import { SecurityApiError, withTransaction } from "../auth/security-core";
-import { assertActiveInTransaction } from "../auth/user-identity";
+import { assertActiveInTransaction, identityAllowsProtectedTrade } from "../auth/user-identity";
 import {
   computeContentHash,
   normalizeContentPayload,
@@ -48,7 +48,7 @@ import { readFundingPolicyForRelease } from "./funding-authority";
 import { computeDepositRecommendation, validateOwnerDepositAmount, validateOwnerDepositDeclaration } from "./funding-policy";
 import type { DepositSkinFacts } from "./deposit-recommendation";
 import { assignAccountNumber, publicAccountNumber } from "./account-number";
-import { readLegacyListing } from "./legacy-listing-read";
+import { readLegacyListing, readLegacySkinHolding } from "./legacy-listing-read";
 import { publicSkinCategoryCteSql, publicSkinMediaIdSql, publicSkinMetadataSql, publicSkinOwnerNameSql, publicSkinRarityNameSql } from "./catalog";
 export type SupplyGate = {
   publisherBail: "SATISFIED" | "NOT_REQUIRED" | "PENDING" | "UNKNOWN";
@@ -508,14 +508,14 @@ export async function publicationBlockers(
   const reasons: string[] = [];
   const user = (
     await client.query(
-      `SELECT u.suspended, COALESCE(s.account_status,'ACTIVE') AS account_status,s.identity_status,s.age_status FROM zzsh_auth_user."user" u LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id=u.id WHERE u.id=$1`,
+      `SELECT u.suspended, COALESCE(s.account_status,'ACTIVE') AS account_status,s.identity_status,s.age_status,s.provider FROM zzsh_auth_user."user" u LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id=u.id WHERE u.id=$1`,
       [a.owner_user_id],
     )
   ).rows[0];
   if (!user || user.suspended || user.account_status !== "ACTIVE")
     reasons.push("OWNER_UNAVAILABLE");
   if (user?.identity_status !== "VERIFIED") reasons.push("IDENTITY_REQUIRED");
-  if (user?.age_status !== "ADULT") reasons.push("ADULT_REQUIRED");
+  if (user?.age_status !== "ADULT" && !identityAllowsProtectedTrade({ identityStatus: user?.identity_status, ageStatus: user?.age_status, provider: user?.provider })) reasons.push("ADULT_REQUIRED");
   const game = shared
     ? await shared.game(a.game_id)
     : (
@@ -2120,6 +2120,7 @@ export async function listingDetail(
       declaration,
       catalogItems,
       ...(draftSkinSummary ? { draftSkinSummary } : {}),
+      ...(v.origin === "LEGACY_OBSERVATION" ? { legacySkinHolding: await readLegacySkinHolding(client, a.id, v.id, a.game_id, v.origin) } : {}),
       presentation,
       quote,
     },

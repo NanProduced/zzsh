@@ -48,6 +48,7 @@ export function createBusinessPool(config: {
     name: string;
     user: string;
     password: string;
+    ssl?: PoolConfig["ssl"];
   };
 }, limits: Pick<PoolConfig, "max" | "maxUses"> = {}): Pool {
   const pool = new Pool({
@@ -56,6 +57,7 @@ export function createBusinessPool(config: {
     database: config.database.name,
     user: config.database.user,
     password: config.database.password,
+    ssl: config.database.ssl,
     application_name: "zzsh-api-business",
     connectionTimeoutMillis: 2_000,
     idleTimeoutMillis: 30_000,
@@ -94,7 +96,7 @@ type DatabaseIdentityConfig = {
 
 const BUSINESS_SCHEMA_NAMES = ["zzsh_business_meta", "zzsh_iam", "zzsh_auth_user", "zzsh_auth_admin", "zzsh_supply", "zzsh_content", "zzsh_order", "zzsh_credit"] as const;
 
-export async function assertBusinessRuntimeIdentity(pool: Pool, config: DatabaseIdentityConfig): Promise<void> {
+export async function assertBusinessRuntimeIdentity(pool: Pick<Pool, "query">, config: DatabaseIdentityConfig): Promise<void> {
   const identity = await pool.query<{
     databaseName: string;
     currentUser: string;

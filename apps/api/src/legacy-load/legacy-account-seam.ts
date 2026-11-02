@@ -94,7 +94,9 @@ export async function createLegacyOwnerRentalAccount(
           [ownerUserId],
         )
       ).rows[0];
-      if (!owner || owner.provider !== MIGRATED_PROVIDER || owner.provider_reference !== `la_user:${normalizedInput.owner.legacyId}` || owner.account_status !== "ACTIVE" || owner.suspended)
+      // Importing an unpublished historical holding does not restore the owner's trading eligibility.
+      if (!owner || owner.provider !== MIGRATED_PROVIDER || owner.provider_reference !== `la_user:${normalizedInput.owner.legacyId}`
+        || !["ACTIVE","FROZEN","CANCELLED"].includes(owner.account_status) || typeof owner.suspended !== "boolean")
         throw conflict("The target account owner is not the migrated legacy owner");
       const migrated = await client.query(
         `SELECT 1 FROM zzsh_iam.audit_event

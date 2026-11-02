@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import type { PoolClient } from "pg";
-import { getUserLegacyOrder, listUserLegacyOrders, parseLegacyUserOrderQuery, projectUserLegacyOrder } from "../src/order/legacy-user-order-read";
+import { getUserLegacyOrder, listUserLegacyOrders, parseLegacyUserOrderQuery, projectUserLegacyOrder, legacyUserOrderFrom } from "../src/order/legacy-user-order-read";
 import { legacyOrderReadState } from "../src/order/legacy-order-read";
 
 // OFFLINE_FIXTURE_ONLY. No source transactions are manufactured for missing branches.
@@ -15,11 +15,18 @@ const row = {
   dueCents:"6600", paidCents:"6600", depositCents:"0", goodsYuan:"60.00", itemsYuan:"6.00", refundYuan:null,
   source_snapshot:{phone:"private",password:"private"},evidence_ref:"private",owner_phone:"private",
 };
+test("soft-deleted old records never reappear in user list/detail after migration", () => {
+ for(const sourceDeletedFlag of ["1","2",""]) assert.throws(()=>projectUserLegacyOrder({...row,sourceDeletedFlag},"renter"),
+  (error:unknown)=>(error as{status?:number}).status===404);
+ assert.equal(projectUserLegacyOrder({...row,sourceDeletedFlag:"0"},"renter").id,row.id);
+ for(const ready of [false,true]) assert.match(legacyUserOrderFrom(ready),/WHERE COALESCE\(source_snapshot->>'is_delete','0'\)='0'/);
+});
+
 test("user historical projection preserves paid cancellation, unknown refund and removes private facts",()=>{
   const result=projectUserLegacyOrder(row,"renter");
   assert.equal(result.status,"CANCELLED");assert.equal(result.party,"renter");assert.equal(result.payment.state,"RECORDED_PAID");
   assert.equal(result.payment.recordedAmount!.amount,"66.00");assert.equal(result.paidAt,null);assert.equal(result.amounts.rental!.amount,"66.00");
-  assert.equal(result.legacyAmounts.refund,null);assert.equal(result.legacyAmounts.refundChannelState,"UNKNOWN");
+  assert.equal(result.legacyAmounts!.refund,null);assert.equal(result.legacyAmounts!.refundChannelState,"UNKNOWN");
   assert.equal(result.account.id,null);assert.equal(result.account.displayNo,null);assert.equal(result.account.readable,false);
   assert.equal(result.readOnly,true);assert.equal(result.paymentOpen,false);assert.equal(result.cancelOpen,false);assert.equal(result.continuationCount,0);assert.deepEqual(result.actions,[]);
   for(const key of ["ownerUserId","renterUserId","source_snapshot","evidence_ref","owner_phone","quote","accountId"])assert.equal(Object.hasOwn(result,key),false);
@@ -32,13 +39,25 @@ test("shared normalization covers completed, in-flight, unpaid and unknown witho
     assert.equal(result.status,expected);assert.deepEqual(result.actions,[]);assert.equal(result.cancelOpen,false);assert.equal(result.paymentOpen,false);
     if(pay!==1)assert.equal(result.payment.recordedAmount,null);
   }
-  const refunded=projectUserLegacyOrder({...row,refundYuan:"12.34"},"renter");assert.equal(refunded.legacyAmounts.refund!.amount,"12.34");assert.equal(refunded.legacyAmounts.refundChannelState,"UNKNOWN");
+  const refunded=projectUserLegacyOrder({...row,refundYuan:"12.34"},"renter");assert.equal(refunded.legacyAmounts!.refund!.amount,"12.34");assert.equal(refunded.legacyAmounts!.refundChannelState,"UNKNOWN");
 });
 test("owner account navigation follows the separate read authorization and nonparties get 404",()=>{
   const result=projectUserLegacyOrder({...row,accountReadable:true},"owner");assert.equal(result.party,"owner");assert.equal(result.account.id,"account");
   assert.throws(()=>projectUserLegacyOrder(row,"stranger"),(e:unknown)=>(e as {status:number}).status===404);
   const unknown=projectUserLegacyOrder({...row,goodsYuan:null,dueCents:null,depositCents:null,sourcePayStatus:9},"owner");assert.equal(unknown.amounts.rental,null);assert.equal(unknown.amounts.totalDue,null);assert.equal(unknown.amounts.deposit,null);assert.equal(unknown.payment.state,"UNKNOWN");
-  const exact=projectUserLegacyOrder({...row,dueCents:"999999999999999999999"},"owner");assert.equal(exact.amounts.totalDue!.amount,"9999999999999999999.99");
+  const exact=projectUserLegacyOrder({...row,dueCents:"999999999999999999999"},"owner");assert.equal(exact.amounts.totalDue,null);assert.equal(exact.amounts.ownerExpectedIncome,null);assert.equal(exact.legacyAmounts,null);assert.equal(exact.payment.recordedAmount,null);
+});
+
+test("legacy owner may read original completed net income without renter price or invented current responsibility", () => {
+ const original = { ...row, sourceOrderStatus: 4, saleEarningsYuan: "80.00", fullPayoutFeeYuan: "3.00" };
+ const owner = projectUserLegacyOrder(original, "owner");
+ assert.equal(owner.amounts.ownerRecordedIncome?.amount,"77.00"); assert.equal(owner.ownerIncomeSource?.sourceLabel,"旧平台原单净收益记录");
+ assert.equal(owner.amounts.ownerExpectedIncome,null); assert.equal(owner.amounts.totalDue,null); assert.equal(owner.payment.recordedAmount,null);
+ const renter = projectUserLegacyOrder(original,"renter"); assert.equal("ownerRecordedIncome" in renter.amounts,false); assert.equal("ownerIncomeSource" in renter,false);
+ for (const changed of [{sourceOrderStatus:8,continuationStage:4},{sourcePayStatus:0},{saleEarningsYuan:null},{fullPayoutFeeYuan:null},
+  {saleEarningsYuan:"1.00"},{saleEarningsYuan:"bad"}]) {
+  assert.equal(projectUserLegacyOrder({...original,...changed},"owner").amounts.ownerRecordedIncome,null);
+ }
 });
 test("list input is bounded and never accepts a caller-selected user",()=>{
   assert.deepEqual(parseLegacyUserOrderQuery(new URLSearchParams()),{party:"renter",page:1,pageSize:20});
@@ -69,7 +88,7 @@ test("historical party permission does not expose the current private account ti
   const owned=projectUserLegacyOrder({...row,title:"MY_ACCOUNT_TITLE",accountReadable:true},"owner");assert.equal(owned.title,"MY_ACCOUNT_TITLE");
 });
 test("effective continuation stage updates the list while original source status and recorded payment remain unchanged",()=>{
- const result=projectUserLegacyOrder({...row,sourceOrderStatus:8,continuationStage:4,completedAt:"2026-10-16T00:00:00.123456Z"},"renter");assert.equal(result.status,"COMPLETED");assert.equal(result.source.originalStatus,8);assert.equal(result.payment.state,"RECORDED_PAID");assert.equal(result.completedAt,"2026-10-16T00:00:00.123456Z");assert.equal(result.legacyAmounts.refundChannelState,"UNKNOWN");
+ const result=projectUserLegacyOrder({...row,sourceOrderStatus:8,continuationStage:4,completedAt:"2026-10-16T00:00:00.123456Z"},"renter");assert.equal(result.status,"COMPLETED");assert.equal(result.source.originalStatus,8);assert.equal(result.payment.state,"RECORDED_PAID");assert.equal(result.completedAt,"2026-10-16T00:00:00.123456Z");assert.equal(result.legacyAmounts!.refundChannelState,"UNKNOWN");
 });
 
 test("unreadable legacy accounts expose neither old nor canonical account numbers",()=>{
@@ -120,8 +139,8 @@ test("API projection feeds the shared web display with honest titles and record-
   assert.equal(display.orderUsesResourceSummary(projection), true);
   // U5-R1-02 counterexample: gross 87 / detain 5 / verified net 82 — only the source record exists here.
   for (const party of ["renter", "owner"] as const) {
-    const facts = display.orderAmountFacts(projection, party);
-    assert.deepEqual(facts.secondary, ["押金 57.00 元", "原退款金额记录 87.00 元"]);
+    const facts = display.orderAmountFacts(projectUserLegacyOrder(chainRow, party), party);
+    assert.deepEqual(facts.secondary, party === "renter" ? ["押金 57.00 元", "原退款金额记录 87.00 元"] : []);
     assert.ok(!facts.secondary.some((line) => /应退责任|仍欠|已到账|净/.test(line)));
   }
   assert.ok(!JSON.stringify(display.orderAmountFacts(projection, "renter")).includes("82.00"), "no net is derived from the gross record");

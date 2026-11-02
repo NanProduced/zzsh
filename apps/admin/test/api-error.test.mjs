@@ -2,8 +2,15 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
-const code=ts.transpileModule(readFileSync(new URL('../src/api.ts',import.meta.url),'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText;
-const { AdminApiError, adminRequest, friendlyError }=await import('data:text/javascript;base64,'+Buffer.from(code).toString('base64'));
+const timeCode=ts.transpileModule(readFileSync(new URL('../src/workspace/beijing-time.ts',import.meta.url),'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText;
+const timeModule='data:text/javascript;base64,'+Buffer.from(timeCode).toString('base64');
+const code=ts.transpileModule(readFileSync(new URL('../src/api.ts',import.meta.url),'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText.replace('"./workspace/beijing-time"',JSON.stringify(timeModule));
+const { AdminApiError, adminRequest, friendlyError, formatDate }=await import('data:text/javascript;base64,'+Buffer.from(code).toString('base64'));
+
+test('shared API timestamp display uses the Beijing expiry day and keeps unknown distinct from missing', () => {
+  assert.match(formatDate('2026-09-10T16:30:00.000Z'), /11.*00:30/);
+  assert.equal(formatDate(null),'未提供'); assert.equal(formatDate('invalid'),'时间未知');
+});
 
 test('business errors name the actual failure and retain the request reference', () => {
   for (const [status, pattern] of [[400,/输入有误/],[401,/会话已失效/],[403,/没有访问/],[404,/未找到.*无权/],[500,/服务暂时/],[503,/服务暂时/]]) {

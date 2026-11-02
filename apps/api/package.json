@@ -6,7 +6,7 @@
     "dev": "npm run build && concurrently --kill-others \"tsc --watch --preserveWatchOutput\" \"node --watch --env-file-if-exists=.env dist/src/main.js\"",
     "build": "tsc -p tsconfig.json",
     "start": "node --env-file-if-exists=.env dist/src/main.js",
-    "start:prod": "node --env-file-if-exists=.env dist/src/main.js",
+    "start:prod": "node dist/src/main.js",
     "migrate:business": "npm run build && node --env-file-if-exists=.env dist/src/database/migrate-business-cli.js",
     "profile:avatar-presets": "npm run build && node --env-file-if-exists=.env dist/src/profile/profile-avatar-presets-cli.js",
     "security:disaster-recovery": "npm run build && node --env-file-if-exists=.env dist/src/auth/disaster-recovery-cli.js",
@@ -31,15 +31,21 @@
     "test:compiled": "node scripts/run-compiled-tests.mjs",
     "test:db:reset": "node --env-file-if-exists=.env scripts/regression-reset.mjs",
     "test:db:rounds": "node --env-file-if-exists=.env scripts/run-regression-suites.mjs",
-    "test:db:lock": "node --env-file-if-exists=.env scripts/regression-lock-check.mjs"
+    "test:db:lock": "node --env-file-if-exists=.env scripts/regression-lock-check.mjs",
+    "test:user-identity-subject:pg": "node --env-file-if-exists=.env -e \"require('node:assert/strict').ok(process.env.USER_IDENTITY_SUBJECT_PG==='1' && /^[0-9]+$/.test(process.env.ZZSH_REGRESSION_DB_OID||'') && /^[a-z0-9_]{12,40}$/.test(process.env.ZZSH_REGRESSION_RUN||''),'Required: USER_IDENTITY_SUBJECT_PG=1 plus current regression OID/nonce')\" && npm run build && node --env-file-if-exists=.env --test dist/test/user-identity-subject-postgres.test.js"
   },
   "dependencies": {
+    "@alicloud/cloudauth20190307": "3.14.0",
+    "@alicloud/dysmsapi20170525": "4.6.0",
+    "@alicloud/openapi-core": "1.0.8",
     "@better-auth/core": "1.7.3",
     "@better-auth/drizzle-adapter": "1.7.3",
+    "@darabonba/typescript": "1.0.5",
     "@nestjs/common": "11.2.3",
     "@nestjs/core": "11.2.3",
     "@nestjs/platform-express": "11.2.3",
     "@nestjs/swagger": "11.4.7",
+    "@zzsh/content": "0.0.0",
     "ali-oss": "6.23.0",
     "altcha-lib": "2.8.0",
     "better-auth": "1.7.3",
@@ -49,8 +55,7 @@
     "reflect-metadata": "0.2.2",
     "rxjs": "7.8.2",
     "sharp": "0.35.4",
-    "zod": "4.6.1",
-    "@zzsh/content": "0.0.0"
+    "zod": "4.6.1"
   },
   "devDependencies": {
     "@types/pg": "8.23.1"

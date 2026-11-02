@@ -22,12 +22,13 @@ export const USER_AUTH_PATHS = new Set([
   "/security/captcha/challenge",
   "/identity/status",
   "/identity/verify",
+  "/identity/verification-attempt",
   "/trade-eligibility/check",
   "/account/deactivate",
   "/account/cancel",
 ]);
 
-export const USER_AUTH_READ_PATHS = ["/get-session", "/identity/status", "/security/overview", "/security/sessions", "/security/captcha/challenge"];
+export const USER_AUTH_READ_PATHS = ["/get-session", "/identity/status", "/identity/verification-attempt", "/security/overview", "/security/sessions", "/security/captcha/challenge"];
 
 export function buildUserAuthUpstreamHeaders(request: Request, input: { requestId: string; webOrigin: string; apiOrigin?: string; env?: NodeJS.ProcessEnv }): Headers {
   const env = input.env ?? process.env;

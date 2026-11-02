@@ -30,12 +30,12 @@ export async function handlePrestartTerminationRoute(request:Request,response:Su
   const context=realm==='user'?await readUserContext(request,options):await readAdminContext(request,options);
   const result=await withTransaction(options.pool,async client=>{
    await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
-   return readPrestartTermination(client,{...context,realm},read[1]!);
+   return readPrestartTermination(client,{...context,realm,settlementAdmission:options.settlementAdmission},read[1]!);
   });sendJson(response,200,result,requestId);return true;
  }
  if(method!=='POST'||!create&&!review)throw notFound();
  if(!requireOrigin(request,response,options,requestId))return true;
- const context=realm==='user'?await readUserContext(request,options):await readAdminContext(request,options),actor={...context,realm};
+ const context=realm==='user'?await readUserContext(request,options):await readAdminContext(request,options),actor={...context,realm,settlementAdmission:options.settlementAdmission};
  const body=bodyOf(request),orderId=(create??review)![1]!;
  async function command(operation:string,resourceId:string,frozen:unknown,action:(c:PoolClient)=>Promise<{status:number;body:unknown}>){
   let actionCompleted=false;

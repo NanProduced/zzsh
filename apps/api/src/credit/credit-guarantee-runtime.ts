@@ -1,5 +1,5 @@
 import type { Pool } from "pg";
-import { ConfigurationError } from "../config/config";
+import { businessFeatureEnabled, ConfigurationError } from "../config/config";
 
 export const CREDIT_TABLES = [
   "zzsh_credit.user_credit_state", "zzsh_credit.credit_event", "zzsh_credit.credit_recovery_request",
@@ -9,9 +9,7 @@ export const CREDIT_TABLES = [
 
 /** Command/registration/funding capability; pure reads do not depend on this switch. */
 export function readCreditGuaranteeEnabled(env: NodeJS.ProcessEnv): boolean {
-  const value = env.CREDIT_GUARANTEE_ENABLED ?? "false";
-  if (value !== "true" && value !== "false") throw new ConfigurationError("CREDIT_GUARANTEE_ENABLED must be true or false");
-  return value === "true";
+  return businessFeatureEnabled(env, "CREDIT_GUARANTEE_ENABLED");
 }
 
 /** Formal reads always require the reviewed schema and SELECT privileges. */

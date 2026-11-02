@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {groupForField,supplyRecovery,SupplyRequestError,supplyRequest,supplyApi,editableDeclaration,mergeInventory,inventoryEditorRows,inventoryPriceHint} from '../src/lib/supply-client.ts';
+import {groupForField,supplyRecovery,SupplyRequestError,supplyRequest,supplyApi,supplyBlockerMessages,editableDeclaration,mergeInventory,inventoryEditorRows,inventoryPriceHint} from '../src/lib/supply-client.ts';
 test('draft inventory keeps exact quantities and shows unpriced lines',()=>{
   const catalog={items:[{id:'priced',name:'哈夫币',unit:'HAFF_BASE',required:true,priced:true}]};
   const inventory=[{itemId:'priced',quantity:'0'},{itemId:'extra',quantity:'0'},{itemId:'unknown',quantity:null}];
@@ -129,4 +129,13 @@ test('myAccountsQuery preserves the signed cursor and the legacy after cursor', 
   assert.equal(String(myAccountsQuery(new URLSearchParams({ cursor: 'signed-1' }))), 'cursor=signed-1');
   assert.equal(String(myAccountsQuery(new URLSearchParams({ after: 'a2' }))), 'after=a2');
   assert.equal(String(myAccountsQuery(new URLSearchParams({ cursor: 'signed-1', rentalState: 'RENTED' }))), 'cursor=signed-1&rentalState=RENTED');
+});
+
+test('all current owner and publication blockers have specific recovery copy', () => {
+  for (const code of ['RENTED','PENDING_PAYMENT','UNDER_REVIEW','NOT_PUBLISHED','STATE_UNKNOWN','QUOTE_REQUIRED','ACCEPTANCE_REQUIRED','MEDIA_REQUIRED','TITLE_REVIEW_REQUIRED']) {
+    assert.equal(typeof supplyBlockerMessages[code], 'string', code);
+    assert.doesNotMatch(supplyBlockerMessages[code], /暂不能继续|稍后重试/, code);
+  }
+  assert.match(supplyBlockerMessages.PENDING_PAYMENT, /关联订单/);
+  assert.match(supplyBlockerMessages.ACCEPTANCE_REQUIRED, /规则与协议/);
 });

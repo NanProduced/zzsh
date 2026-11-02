@@ -132,11 +132,22 @@ test('missing supplementary source fields stay unknown; altered original bytes, 
  assert.throws(()=>prepareStoredOpeningCandidate({...x,sourceEvidence:[],covered:[...x.covered,...unrelated.covered],observations:[...x.observations,...unrelated.observations],included:[...x.included,...unrelated.included],logBindings:[...x.logBindings,...unrelated.logBindings]}),/another economic source/);
 });
 
-test('a success mark without its extracted payment time does not prove failure or a return',()=>{
+test('an exact original withdrawal debit covers the stored opening without claiming bank arrival or a return',()=>{
  const x=withdrawalReturnFixture(),value=JSON.parse(x.covered[0]!.sourceCanonical);value.status=3;value.payment_time=0;
  x.covered.length=1;x.observations.length=1;x.logBindings.length=1;x.included.length=1;
  x.covered[0]!.sourceCanonical=canonicalize(value);x.covered[0]!.sourceDigest=createHash('sha256').update(canonicalize(value)).digest('hex');x.logBindings[0]!.sourceDigest=x.covered[0]!.sourceDigest;
- assert.equal(prepareStoredOpeningCandidate(x).state,'REVIEW_REQUIRED');
+ const before=canonicalize(x.observations),result=prepareStoredOpeningCandidate(x);
+ assert.equal(result.state,'CANDIDATE');
+ if(result.state==='CANDIDATE'){
+  assert.equal(result.input.proof.availableCents,'110','the original balance is not reconstructed from the withdrawal');
+  assert.equal(result.input.sourceProof?.sources.length,1);
+  assert.equal(result.input.sourceProof?.sources[0]?.sourceKind,'LEGACY_WITHDRAWAL');
+  assert.equal(canonicalize(result.input.observations),before);
+ }
+ for(const mutate of [
+  (v:typeof x)=>{v.logBindings[0]!.sourceDigest='0'.repeat(64);},
+  (v:typeof x)=>{v.logBindings[0]!.observationDigest='0'.repeat(64);},
+ ]){const broken=structuredClone(x);mutate(broken);assert.throws(()=>prepareStoredOpeningCandidate(broken));}
 });
 
 test('withdrawal proof retains exact cents beyond safe-integer precision while the opening remains the independent original balance',()=>{

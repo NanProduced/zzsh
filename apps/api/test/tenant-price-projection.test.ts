@@ -4,6 +4,7 @@ import { computeDeltaQuote, projectDeltaQuote, type InternalQuote, type QuoteInp
 import { applyTotalDiscountToQuote } from "../src/auth/membership-total-discount";
 import { publishedBaseRenterHaffRatioWanPerYuan, projectTenantPriceQuote } from "../src/supply/tenant-price-projection";
 import { compatRule } from "./pricing-compat-fixture";
+import { projectOrder, type OrderRow } from "../src/order/order";
 
 function input(mode: "SPREAD" | "PERCENT" = "SPREAD", tier: QuoteInput["customerTier"] = "STANDARD", v2 = true): QuoteInput {
   return { priceVersionId: "price-ratio-fixture", mode, commissionRate: "0.1", customerTier: tier, roundingPolicy: "HALF_UP_CENT_V1",
@@ -82,4 +83,27 @@ test("zero amounts keep declared stock, unknown deposits remain null and unitQua
   assert.equal(projected.tenantDeposit, null); assert.equal(projected.tenantPayableTotal, null);
   (internal.lines[0] as unknown as Record<string, unknown>).unitQuantity = undefined;
   assert.throws(() => projectTenantPriceQuote(internal, internal), (error: unknown) => (error as { status?: number }).status === 503);
+});
+
+test("owner quote and order expose own frozen income without renter private prices", () => {
+  const internal = quote();
+  const before = JSON.stringify(internal);
+  const owner = projectDeltaQuote(internal, "owner");
+  assert.equal(owner.ownerTotal, internal.ownerTotal);
+  for (const key of ["resourceTotal", "tenantDeposit", "tenantPayableTotal", "platformFullProfit", "pricingInputs"]) assert.equal(key in owner, false, key);
+  for (const line of owner.lines) {
+    assert.equal("buyerAmount" in line, false); assert.equal("buyerUnitAmount" in line, false);
+    assert.ok(line.ownerAmount); assert.ok(line.ownerUnitAmount);
+  }
+  const row = { id: "order-1", quoteSnapshot: internal, status: "PAID", rentalAmountCents: "12345", depositAmountCents: "54321" } as OrderRow;
+  const owned = projectOrder(row, "owner") as Record<string, any>;
+  assert.deepEqual(owned.amounts, { rental: null, deposit: null, totalDue: null, currency: "CNY", ownerExpectedIncome: internal.ownerTotal });
+  assert.equal(owned.amountsPerspective, "OWNER");
+  const rented = projectOrder(row, "renter") as Record<string, any>;
+  assert.equal(rented.amounts.rental.amount, "123.45");
+  assert.equal(rented.quote.ownerTotal, undefined);
+  const support = projectOrder(row, "admin") as Record<string, any>;
+  assert.ok(support.quote.lines[0].buyerAmount); assert.ok(support.quote.lines[0].ownerAmount);
+  assert.equal(support.quote.pricingInputs, undefined);
+  assert.equal(JSON.stringify(internal), before);
 });

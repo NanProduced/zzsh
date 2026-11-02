@@ -12,17 +12,21 @@
 - [多游戏计价与结算策略抽取（已暂缓）](architecture/game-strategy-extraction-deferred.md)
 - [新旧交易与结算行为对照](architecture/legacy-business-behavior-diff.md)（测试用预期变更、保留行为与证据边界）
 - [旧数据转换与字段映射](architecture/legacy-data-mapping.md)（源字段、目标、接口及双端消费；规则变更对照）
-- [数据库结构导航](architecture/database-navigation.md)（源码 142 份业务迁移 0000–0141、实际执行状态分别核验）
+- [数据库结构导航](architecture/database-navigation.md)（源码 147 份业务迁移 0000–0146、实际执行状态分别核验）
+- [业务数据库新装基线](operations/database-initial.md)（已封存0141基线、canonical增量及后续中文版本）
 - [用户供给表单数据契约](architecture/supply-form-contract.md)
 - [租赁会员、个人确认与建单](architecture/personal-confirmation.md)
 - [协议、规则披露与接受](architecture/agreements-acceptance.md)
 - [公开交易统计读取](architecture/public-trade-activity.md)
 - [内容管理、资源格式与存储](architecture/content-management.md)
 - [系统配置、媒体存储与新环境初始化](operations/media-storage.md)
+- [部署配置与第三方凭据准备](operations/deployment-prerequisites.md)
+- [线上团队测试服务器准备](operations/team-test-server.md)
 - [旧交易续办与责任边界](architecture/legacy-trade-continuation.md)
 - [会员成长与人工礼遇](architecture/membership-growth.md)
 - [信用与号主保证金运行合同](architecture/credit-guarantee.md)
 - [管理端用户详情与权限边界](architecture/admin-user-directory.md)
+- [管理工作台经营概览](architecture/admin-workspace-overview.md)
 - [分销与本地提现](architecture/distribution-and-withdrawal.md)
 - [开租与结算确认](architecture/settlement-confirmation.md)
 - [公开列表组合筛选与配置](architecture/listing-query.md)

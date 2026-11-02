@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { formatBeijingDateTime } from "../../workspace/beijing-time";
 import type React from "react";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../../components/ui/collapsible";
 import type { PriceVersionRecord, RulesResponse } from "../../api";
@@ -26,7 +27,7 @@ export function savedLabel(d: PriceVersionRecord): string {
   const at = map[d.id]!.at;
   return at ? `保存于 ${fmtTime(at)}` : `创建于 ${fmtTime(d.createdAt)}`;
 }
-export const fmtTime = (iso: string | null | undefined) => iso ? new Date(iso).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
+export const fmtTime = (iso: string | null | undefined) => iso ? formatBeijingDateTime(iso, { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
 
 /** 四种状态统一用彩色小标签：未保存 / 已保存草稿 / 待 Boss 生效 / 已生效。 */
 export function StageBadge({ stage, at }: { stage: PublishStage; at?: string | null }) {
@@ -285,4 +286,4 @@ export function MutedDetails({ label = "详情", children, className = "" }: { l
 }
 
 /** 版本列表里的时间：提交时间，没有就用创建时间。 */
-export const versionTime = (v: { createdAt?: string | null; sealedAt?: string | null }) => { const at = v.sealedAt ?? v.createdAt; return at ? new Date(at).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : ""; };
+export const versionTime = (v: { createdAt?: string | null; sealedAt?: string | null }) => fmtTime(v.sealedAt ?? v.createdAt);

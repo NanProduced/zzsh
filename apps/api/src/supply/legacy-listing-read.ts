@@ -217,8 +217,8 @@ export const LEGACY_NATIVE_TAKEOVER_GUARD = `NOT EXISTS (SELECT 1 FROM zzsh_supp
 // publish/edit/order keep their own 'NONE' requirement in publishing.ts.
 // 'ACTIVE_LEGACY' stays hidden as pending review.
 export const LEGACY_DISPLAY_HOLD_SQL = `a.legacy_hold IN ('NONE','UNRESOLVED')`;
-// Core identity evidence pending outside ADULT is not publicly displayed.
-export const LEGACY_DISPLAY_IDENTITY_SQL = `COALESCE(us.age_status,'UNKNOWN')='ADULT'`;
+// Explicit minors stay blocked; trusted legacy verification retains its original trading eligibility.
+export const LEGACY_DISPLAY_IDENTITY_SQL = `(COALESCE(us.age_status,'UNKNOWN')='ADULT' OR (us.identity_status='VERIFIED' AND us.provider='legacy_mysql_restore' AND us.age_status='UNKNOWN'))`;
 // Display is bound to the adjudicated frozen source batch; evidence outside it
 // fails closed (legacy-load/legacy-public-admission).
 const VISIBLE_BASE = `g.enabled AND gs.enabled AND a.lifecycle='ACTIVE' AND ${LEGACY_DISPLAY_HOLD_SQL} AND NOT a.staff_restricted
@@ -260,23 +260,7 @@ export async function readLegacyListing(client: PoolClient, accountId: string, a
   // Delta uses individual skin visibility; other games retain legacy ancestor visibility.
   // Other unavailable declared references are withheld by count only; their name, id
   // and image never leave the server.
-  const declaredSkins=(await client.query<{id:string;name:string;baseName:string|null;ownerName:string|null;ownerKind:string|null;rarityCode:string|null;rarityName:string|null;rarityBasis:string|null;isCollectible:boolean|null;defaultState:string;mediaKind:"PORTRAIT_CARD"|"MODEL_IMAGE"|"PROMO_POSTER"|null;mediaId:string|null;categoryCode:string|null;categoryName:string|null;isPublic:boolean}>(`WITH RECURSIVE ${publicSkinCategoryCteSql("$2")}
-    SELECT s.id,s.name,s.base_name AS "baseName",${publicSkinOwnerNameSql("s")} AS "ownerName",s.owner_kind AS "ownerKind",s.rarity_code AS "rarityCode",${publicSkinRarityNameSql("s")} AS "rarityName",${publicSkinMetadataSql("s")},${publicSkinMediaIdSql("s")} AS "mediaId",
-    c.code AS "categoryCode",c.name AS "categoryName",(s.game_id=$2 AND s.enabled AND s.form_visible AND ((SELECT code FROM zzsh_supply.game WHERE id=$2)='delta' OR s.category_id IN (SELECT "id" FROM visible))) AS "isPublic"
-    FROM (
-      SELECT unnest(h.skin_ids) AS skin_id
-      FROM zzsh_supply.legacy_skin_holding h
-      WHERE h.observation_version_id = $1
-      UNION ALL
-      SELECT ls.skin_id
-      FROM zzsh_supply.listing_skin ls
-      WHERE ls.version_id = $1
-        AND NOT EXISTS (
-          SELECT 1 FROM zzsh_supply.legacy_skin_holding h2
-          WHERE h2.observation_version_id = $1
-        )
-    ) ls JOIN zzsh_supply.skin s ON s.id=ls.skin_id LEFT JOIN zzsh_supply.skin_category c ON c.id=s.category_id
-    ORDER BY c.sort_order,c.id,s.sort_order,s.id`,[r.version_id,r.game_id])).rows;
+  const declaredSkins=await readLegacyDeclaredSkins(client,r.version_id,r.game_id);
   const skins=declaredSkins.filter(x=>x.isPublic===true);
   // Counts only target references already on this version; it says nothing about un-extracted legacy holdings.
   const skinsWithheld=declaredSkins.length-skins.length;
@@ -299,7 +283,7 @@ export async function readLegacyListing(client: PoolClient, accountId: string, a
     ...(extra ? {rentalMode:extra.rentalMode,displaySchema:extra.schema} : {}),
     quote:null,historicalQuote:{haffRent:amount(snapshot.haffRentYuan),goods:amount(snapshot.goodsYuan),deposit:amount(snapshot.depositYuan),termDays:snapshot.termDays},
     inventory:resources.map(x=>({itemId:x.id,quantity:x.quantity,unit:x.unit})),
-    presentation:{items:resources.map(({quantity,...x})=>x),skins:skins.map(x=>({id:x.id,name:x.name,baseName:x.baseName??null,ownerName:x.ownerName??null,ownerKind:x.ownerKind??null,rarityCode:x.rarityCode??null,rarityName:x.rarityName??null,rarityBasis:x.rarityBasis??null,isCollectible:x.isCollectible??null,defaultState:x.defaultState??"UNKNOWN",mediaKind:x.mediaKind??null,mediaId:x.mediaId??null,...(x.categoryCode?{categoryCode:x.categoryCode}:{}),...(x.categoryName?{categoryName:x.categoryName}:{})})),...(skinsWithheld>0?{skinsWithheld}:{}),entitlements:[]},
+    presentation:{items:resources.map(({quantity,...x})=>x),skins:skins.map(projectLegacyDeclaredSkin),...(skinsWithheld>0?{skinsWithheld}:{}),entitlements:[]},
     media:media.map(m=>({assetId:m.assetId,position:m.position,url:`/api/v1/supply/listings/${r.id}/media/${m.assetId}`})),publishedAt:null};
 }
 
@@ -383,4 +367,48 @@ export function withoutLegacyResourceNo<T extends Record<string, unknown>>(row: 
   if (!row) return null;
   const { resourceNo: _hidden, legacyId: _sourceId, ...rest } = row;
   return rest;
+}
+
+/** Same catalog visibility for the legacy public projection and authenticated holding summary. */
+export async function readLegacyDeclaredSkins(client: PoolClient, versionId: string, gameId: string) {
+  return (await client.query<{id:string;name:string;baseName:string|null;ownerName:string|null;ownerKind:string|null;rarityCode:string|null;rarityName:string|null;rarityBasis:string|null;isCollectible:boolean|null;defaultState:string;mediaKind:"PORTRAIT_CARD"|"MODEL_IMAGE"|"PROMO_POSTER"|null;mediaId:string|null;categoryCode:string|null;categoryName:string|null;isPublic:boolean}>(`WITH RECURSIVE ${publicSkinCategoryCteSql("$2")}
+    SELECT s.id,s.name,s.base_name AS "baseName",${publicSkinOwnerNameSql("s")} AS "ownerName",s.owner_kind AS "ownerKind",s.rarity_code AS "rarityCode",${publicSkinRarityNameSql("s")} AS "rarityName",${publicSkinMetadataSql("s")},${publicSkinMediaIdSql("s")} AS "mediaId",
+    c.code AS "categoryCode",c.name AS "categoryName",(s.game_id=$2 AND s.enabled AND s.form_visible AND ((SELECT code FROM zzsh_supply.game WHERE id=$2)='delta' OR s.category_id IN (SELECT "id" FROM visible))) AS "isPublic"
+    FROM (
+      SELECT unnest(h.skin_ids) AS skin_id
+      FROM zzsh_supply.legacy_skin_holding h
+      WHERE h.observation_version_id = $1
+      UNION ALL
+      SELECT ls.skin_id
+      FROM zzsh_supply.listing_skin ls
+      WHERE ls.version_id = $1
+        AND NOT EXISTS (
+          SELECT 1 FROM zzsh_supply.legacy_skin_holding h2
+          WHERE h2.observation_version_id = $1
+        )
+    ) ls JOIN zzsh_supply.skin s ON s.id=ls.skin_id LEFT JOIN zzsh_supply.skin_category c ON c.id=s.category_id
+    ORDER BY c.sort_order,c.id,s.sort_order,s.id`,[versionId,gameId])).rows;
+}
+function projectLegacyDeclaredSkin(x: Awaited<ReturnType<typeof readLegacyDeclaredSkins>>[number]) {
+  return ({id:x.id,name:x.name,baseName:x.baseName??null,ownerName:x.ownerName??null,ownerKind:x.ownerKind??null,rarityCode:x.rarityCode??null,rarityName:x.rarityName??null,rarityBasis:x.rarityBasis??null,isCollectible:x.isCollectible??null,defaultState:x.defaultState??"UNKNOWN",mediaKind:x.mediaKind??null,mediaId:x.mediaId??null,...(x.categoryCode?{categoryCode:x.categoryCode}:{}),...(x.categoryName?{categoryName:x.categoryName}:{})});
+}
+
+/** Missing late admission says nothing about the original holding count; never derive zero from an empty snapshot. */
+export async function readLegacySkinHolding(client: PoolClient, accountId: string, versionId: string, gameId: string, origin: string) {
+  if (origin !== 'LEGACY_OBSERVATION') return undefined;
+  const unknown={state:'UNKNOWN' as const,admittedCount:null,items:null,withheldCount:null};
+  const holding=(await client.query<{skinIds:string[]}>(`SELECT h.skin_ids AS "skinIds"
+    FROM zzsh_supply.legacy_skin_holding h
+    JOIN zzsh_supply.legacy_supply_map m ON m.account_id=h.account_id AND m.version_id=h.observation_version_id
+      AND m.source_system=h.source_system AND m.source_entity=h.source_entity AND m.legacy_id=h.legacy_id AND m.source_digest=h.source_digest
+    JOIN zzsh_supply.listing_version v ON v.id=h.observation_version_id AND v.account_id=h.account_id AND v.origin='LEGACY_OBSERVATION'
+    JOIN zzsh_supply.rental_account a ON a.id=v.account_id AND a.game_id=$3
+    WHERE h.account_id=$1 AND h.observation_version_id=$2`,[accountId,versionId,gameId])).rows[0];
+  if(!holding) return unknown;
+  if(!Array.isArray(holding.skinIds)||holding.skinIds.some(id=>typeof id!=='string')||new Set(holding.skinIds).size!==holding.skinIds.length) return unknown;
+  if(!holding.skinIds.length) return {state:'ADMITTED' as const,admittedCount:0,items:[],withheldCount:0};
+  const rows=await readLegacyDeclaredSkins(client,versionId,gameId);
+  const ids=new Set(holding.skinIds);
+  const items=rows.filter(row=>ids.has(row.id)&&row.isPublic===true).map(projectLegacyDeclaredSkin);
+  return {state:'ADMITTED' as const,admittedCount:holding.skinIds.length,items,withheldCount:holding.skinIds.length-items.length};
 }

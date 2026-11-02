@@ -8,7 +8,7 @@
 
 本地测试库按[PostgreSQL使用规范](local-postgresql.md)登记、复用及清理。新任务先查主检出tmp/postgresql-resources.md；已结束测试不按返修轮次保留成批随机数据库。
 
-标准鉴权启动会组合已有的待付款到期清扫器：每5秒最多取消25个已过期原生占用，沿用账号→订单锁与精确截止CAS，不触碰已付款单。`ORDER_SWEEP_ENABLED=false`仅用于明确不运行交易后台任务的预览；直接调用`createApp`的测试仍须显式传入清扫选项。个人确认另需明确开启`ZZSH_MEMBERSHIP_GROWTH_ENABLED`并具备已批准政策及完整主体来源；关闭或UNKNOWN不自动降为标准价格。
+标准鉴权启动会组合已有的待付款到期清扫器：每5秒最多取消25个已过期原生占用，沿用账号→订单锁与精确截止CAS，不触碰已付款单。`ORDER_SWEEP_ENABLED=false`仅供隔离本地预览；部署环境认证、成长、信用、结算、分销与客服分发默认装配，不逐项打开旧开发开关。直接调用`createApp`的测试仍显式传能力；已批准政策、完整来源、资源与权限仍必须满足，UNKNOWN不降为标准价格或零减免。部署配置和外部凭据见[部署准备](operations/deployment-prerequisites.md)。
 
 Node.js 24.20.0 / npm 11.19.0，版本见 `.node-version` 和根 package.json。使用根目录的单一 package-lock.json。
 
@@ -53,7 +53,7 @@ PostgreSQL 主机 TCP 使用 SCRAM，Redis 使用密码认证；容器内 socket
 
 API 启动前校验 `APP_PROFILE`、数据库/Redis 目标和 provider 模式；缺失 `.env`、凭据文件或越界目标会在连接前失败。默认 provider 为 fake，`test`/`migration` 禁止 real；`provider-test` 必须提供显式范围，但范围配置不等于 Owner 的真实渠道授权。云信（IM）改由凭据驱动：填好 AppKey 与 AppSecret 即启用真实 provider，都不填则保持离线；显式关闭与凭据并存会启动失败。默认绑定本机。主环境端口被占用时核对归属，不自行换号；分支环境按登记分配端口，Vite须使用--strictPort，不结束身份不明进程。非资金测试执行器默认关闭，只有显式 `ENABLE_TEST_OPERATIONS=true` 且同时为 `APP_PROFILE=test`、`PROVIDER_MODE=fake` 时才会把能力传入核心；请求体不能覆盖该能力。
 
-凭据来源有明确优先级：设置 `DB_PASSWORD_FILE`/`REDIS_PASSWORD_FILE` 时，文件路径优先于对应环境变量；路径必须位于 `.secrets/` 内，文件内容会去除首尾空白且不能全空白，路径缺失、文件不可读或内容为空都会失败，不能回退到环境变量。未设置 file 变量时才读取环境变量，同样拒绝全空白并去除首尾空白。不要把两类凭据写进仓库。`ecs-test` profile 保留用于未来测试 ECS，但当前没有已确认并登记的真实目标，启动始终失败关闭；示例域名、确认标记或本地环境变量不能绕过这一限制。待提供真实目标后，须另行设计和审核接入，不自动创建云资源或目标注册服务。
+凭据来源有明确优先级：设置 `DB_PASSWORD_FILE`/`REDIS_PASSWORD_FILE` 时，文件路径优先于对应环境变量；路径必须位于 `.secrets/` 内，文件内容会去除首尾空白且不能全空白，路径缺失、文件不可读或内容为空都会失败，不能回退到环境变量。未设置file变量时才读环境变量。`ecs-test`与`production`要求匹配的独立目标（分别`zzsh_ecs_test*`/`zzsh_prod*`）、`NODE_ENV=production`、real provider模式、TLS证书校验与认证；原先无条件拒绝ecs-test的开发限制已撤下。迁移仍使用独立DDL身份与明确的`MIGRATION_TARGET_PROFILE`，不使用运行时身份执行schema变更；示例占位符不证明云资源可用。真实目标与部署尚待实际验证，代码不自动创建云资源。
 
 ## 检查与迁移
 

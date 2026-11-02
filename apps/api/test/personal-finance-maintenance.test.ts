@@ -15,6 +15,14 @@ const api=maintenance as any,sha=(value:unknown)=>createHash('sha256').update(ty
 const actor={userId:'fixture-boss',sessionId:'fixture-session',requestId:'fixture-request'};
 const resource={host:'127.0.0.1',port:55432,database:'zzsh_test_order_cf1_fixture',oid:42,owner:'fixture_owner',marker:'zzsh:order-reservation-test:v1',role:'fixture_owner',roleOid:43};
 const cutoff='2026-09-13T13:31:22.000Z';
+test('reviewed finance maintenance admits only the canonical regression role pair without weakening identity binding',()=>{
+ const target={...resource,database:'zzsh_test_regression',marker:'zzsh:regression-test:v1',owner:'zzsh',role:'zzsh_regression_migration'};
+ assert.equal(maintenance.isReviewedFinanceMaintenanceResource(target as any),true);
+ for(const mismatch of [{database:'zzsh_dev_daily'},{database:'zzsh_test_order_im_paid_1',marker:'zzsh:im-paid-clone-20261030:v1'},
+  {marker:'wrong'},{owner:'zzsh_regression_migration'},{role:'zzsh_regression_runtime'},{role:'zzsh'}]){
+  assert.equal(maintenance.isReviewedFinanceMaintenanceResource({...target,...mismatch} as any),false);
+ }
+});
 function legacyMaintenance(){
  // Frozen pre-admission implementation; only its unchanged shared dependencies come from this build.
  const source=execFileSync('git',['show','2be66f7619ede1c684c442fd4faf2c42274d11ba:apps/api/src/finance/personal-finance-maintenance.ts'],{cwd:resolve(__dirname,'../../../..')});

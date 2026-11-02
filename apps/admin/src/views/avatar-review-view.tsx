@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { formatBeijingDateTime } from "../workspace/beijing-time";
 import { CheckIcon, RefreshCw, ShieldAlertIcon, ShieldXIcon, XIcon } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -185,8 +186,7 @@ function messageOf(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
 function formatTime(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", { hour12: false });
+  return formatBeijingDateTime(value, { year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", second: "numeric", hour12: false });
 }
 function formatBytes(value: string): string {
   const bytes = Number(value);

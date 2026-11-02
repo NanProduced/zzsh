@@ -2198,3 +2198,15 @@ html:not(.dark) {
 .avatar-upload-preview { width: 80px; height: 80px; margin-top: 10px; border-radius: 50%; object-fit: cover; border: 1px solid var(--color-border-default); }
 .avatar-upload-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 @media (max-width: 520px) { .avatar-dialog { padding: 16px; } .avatar-preset-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .avatar-current { flex-wrap: wrap; } .avatar-current > button { margin-left: 0; } }
+
+.identity-verification-form { display: grid; gap: 12px; margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--color-border-subtle); }
+.identity-verification-form h3 { margin: 0; color: var(--color-text-primary); font-size: 16px; font-weight: 650; }
+.identity-verification-form form { display: grid; gap: 14px; max-width: 580px; }
+.identity-verification-form a { color: var(--color-accent-brand); font-size: 13px; text-underline-offset: 4px; text-decoration: underline; }
+.identity-verification-field { display: grid; gap: 7px; color: var(--color-text-secondary); font-size: 13px; }
+.identity-verification-field input { width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid var(--color-border-default); border-radius: 8px; color: var(--color-text-primary); background: var(--color-bg-surface); font: inherit; }
+.identity-verification-field input:focus-visible, .identity-verification-consent input:focus-visible { outline: 2px solid var(--color-accent-brand); outline-offset: 3px; }
+.identity-verification-consent { display: flex; align-items: flex-start; gap: 10px; color: var(--color-text-secondary); font-size: 12px; line-height: 1.8; }
+.identity-verification-consent input { width: 17px; height: 17px; flex: 0 0 auto; margin-top: 3px; accent-color: var(--color-accent-brand); }
+.identity-verification-disclosure { white-space: pre-wrap; }
+.identity-verification-form .button { justify-self: start; }

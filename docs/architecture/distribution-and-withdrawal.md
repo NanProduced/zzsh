@@ -38,13 +38,13 @@
 
 ## 正式 NATIVE 装配与维护
 
-正式进程不再按测试库名、端口或未满 100 单名单挂载分销。`loadNativeDistributionRuntime` 只由显式 `DISTRIBUTION_NATIVE_ENABLED=true` 开启，并要求真实的汇聚正式准入（同一 database/runtimeUser）、Authentication 打开、`provider=real`；它只从该准入构造 NATIVE 政策 scope 与收益 store，不创建政策、比例、身份或准入。缺失接管、上下文不符或本地 `createLocalDistributionRuntime` 同时存在时拒绝装配。LOCAL_CONTROLLED 工厂保留给测试，NATIVE 与 LOCAL 的支付依据、政策 scope、账本 `details.scope`、冲回来源 scope 各自标记，不能互相别名。
+正式进程不再按测试库名、端口或未满100单名单挂载分销。`ecs-test`/`production`默认装配NATIVE，旧 `DISTRIBUTION_NATIVE_ENABLED` 只供隔离本地夹具；仍要求真实汇聚正式准入（同一database/runtimeUser）、认证、`provider=real`。它只从准入构造NATIVE政策scope与收益store，不创建政策、比例、身份或准入。缺失或上下文不符、与本地受控装配混用时拒绝。LOCAL_CONTROLLED保留给测试，两种scope的支付依据、政策、账本和冲回来源不能互相别名。
 
 维护命令走 `GET/POST /api/v1/admin/distribution/maintenance`：GET `/accruals?limit=` 只读检查已过账但缺失/冲突的 Original 经济根；POST `/accruals/replay` 以 1–100 个原订单重放同一 `accrue`；POST `/due-settlements` 以 1–100 上界执行 `settleDue`。三者都要求 `personal.distribution.policy.manage`、有效管理员和游戏对象范围；不接受全表调度器，也不在页面 GET 中写钱。GET 只报告 `MISSING/PARTIAL/CONFLICT/SKIPPED/UNKNOWN`，不代替修复。
 
 场景口径：未付款取消没有冻结 basis 或 posting，不计佣；未开租终止在存在正额佣金时 fail-closed（现有 `earning_count` 校验），不先 VOID 绕过；正常结算退款只核销租客应退责任，不改变 posting 的平台贡献，因此不重复扣佣；结算后退款/更正若需要部分冲回，当前合同只支持“同一原根全额 REVOKE/RECOVER”，部分比例更正尚未定义，不能以任意全额 REVOKE 代替。已入账追偿继续走原 `rental_referral_reversal_source` → `REVOKE`（余额不足转 `RECOVERY_REQUIRED`）→ 原来源 `RECOVER`，冲回声明仍只允许维护 owner 角色执行。
 
-v2 UNIFORM 的数据库前向结构、支付依据推导、NATIVE 账本/冲回 scope 尚未安装：源码已登记0121–0123，见[前向迁移与验收合同](../../apps/api/migrations/candidates/distribution-business-closure-1/README.md)（已进入源码journal，实库安装、ACL与业务验收仍未完成）。在这些结构安装并验收前，正式 v2 政策提交、NATIVE basis 冻结、NATIVE 计提/冲回都应保持不可用，不能以源码存在视为经营开放。
+v2 UNIFORM、支付依据推导和NATIVE账本/冲回scope要求目标已安装0121–0123及最终runtime ACL，见[前向迁移与验收合同](../../apps/api/migrations/candidates/distribution-business-closure-1/README.md)。源码登记不替代目标的结构/权限/业务验收，已安装也不等于有获批经营政策；未满足时不得开放政策提交或资金处理。
 
 ## 旧关系与旧佣金承接
 

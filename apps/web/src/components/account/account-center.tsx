@@ -26,7 +26,7 @@ import { readMyCredit, CreditRequestError, type CreditOverview, type CreditGuara
 import { readMyWallet, walletMoney, WalletRequestError, type WalletRead } from "@/lib/personal-wallet-client";
 import { formatOrderTime, orderApi, orderItemKey, OrderRequestError, type Order, type OrderPage, type OrderParty } from "@/lib/order-client";
 import { orderTermLabel, orderUrl } from "@/components/order/order-presentation";
-import { orderAccountTitle, orderAmountFacts } from "@/lib/order-display";
+import { orderAccountTitle, orderAmountFacts, orderListingSourceLabel, orderSettlementStageLabel } from "@/lib/order-display";
 import { EntitlementBadge, formatScopeName, GrowthMemberCardArt, GROWTH_TIER_LABELS, MembershipCenterView } from "./membership-center";
 import { NicknameEditEntry } from "./nickname-edit";
 import { AvatarEditEntry } from "./avatar-edit";
@@ -136,6 +136,8 @@ function coreStatus(order: Order): string {
   if (order.status === "PENDING_PAYMENT" && order.expiredAwaitingCancel) return "已到期 · 取消处理中";
   if (order.status === "CANCELLED" && order.cancelReason === "TIMEOUT") return "已取消 · 到期未支付";
   if (order.status === "CANCELLED" && order.cancelReason === "USER") return "已取消 · 租客取消";
+  const stage = orderSettlementStageLabel(order);
+  if (order.status === "PAID" && stage) return stage;
   return STATUS_LABELS[order.status] ?? "状态待确认";
 }
 
@@ -567,7 +569,7 @@ export function AccountPendingTasks({
   renterStatus = "ready",
   ownerStatus = "ready",
   renterOrders,
-  ownerOrders: _ownerOrders,
+  ownerOrders,
   hasMore = false,
   onRetry,
 }: {
@@ -588,14 +590,27 @@ export function AccountPendingTasks({
         type: "renter",
         tagLabel: "租入",
         title: `订单待付款${order.displayNo ? ` · ${order.displayNo}` : ""}`,
-        description: `完成付款后继续订单 · ${order.title ?? "账号租赁"}`,
+        description: `完成付款后继续订单 · ${orderAccountTitle(order)}`,
         buttonText: "去付款",
         href: accountSectionHref("rentals", { view: "rentals", orderId: order.id, status: order.status }),
       });
     }
   }
 
-  // Owner PAID orders are not added as delivery confirmation tasks because list DTO does not provide delivery verification facts.
+  for (const [party, orders, status] of [["renter", renterOrders, renterStatus], ["owner", ownerOrders, ownerStatus]] as const) {
+    if (status !== "ready") continue;
+    for (const order of orders) {
+      if (order.readOnly || order.source?.origin === "LEGACY" || order.status !== "PAID" || order.stage?.viewerActionRequired !== true) continue;
+      if (order.viewerParty && order.viewerParty !== party) continue;
+      const opening = order.stage.code === "OPENING_PENDING";
+      if (!opening && order.stage.code !== "DECISION_PENDING") continue;
+      items.push({ id: `${party}-${order.id}-decision`, type: party, tagLabel: party === "renter" ? "租入" : "出租",
+        title: `${opening ? "待你确认开租" : "待你确认结算"}${order.displayNo ? ` · ${order.displayNo}` : ""}`,
+        description: opening ? "核对同一版期初库存后确认；付款与建群不等于已开租。" : "核对本版消耗与本人费用后决定，不以聊天回复代替确认。",
+        buttonText: opening ? "核对开租" : "核对结算", href: orderUrl(party, "", undefined, order.id),
+      });
+    }
+  }
 
   const isLoading = renterStatus === "loading" || ownerStatus === "loading";
   const hasError = renterStatus === "error" || ownerStatus === "error";
@@ -603,7 +618,7 @@ export function AccountPendingTasks({
     ? "待处理事项暂时无法读取。"
     : `${renterStatus === "error" ? "租入" : "出租"}订单暂时无法读取，待处理事项尚未完整确认。`;
 
-  if (!isLoading && !hasError && items.length === 0) return null;
+  if (!isLoading && !hasError && items.length === 0 && !hasMore) return null;
 
   return (
     <section className={`account-pending-card${!isLoading && !hasError && items.length === 0 ? " is-empty" : ""}`} aria-labelledby="pending-tasks-heading">
@@ -816,6 +831,7 @@ export function OrderSummaryCard({
                       {order.displayNo ? <span>单号 {order.displayNo}</span> : null}
                       {order.createdAt ? <time dateTime={order.createdAt} title={formatOrderTime(order.createdAt)} aria-label={formatOrderTime(order.createdAt)}>{summaryOrderTime(order.createdAt)}</time> : null}
                       <span>{orderTermLabel(order)}</span>
+                      {orderListingSourceLabel(order) === "历史订单" || orderListingSourceLabel(order) === "当前账号资料" ? <span>{orderListingSourceLabel(order)}</span> : null}
                     </div>
                   </div>
                   <div className="account-order-row-money">

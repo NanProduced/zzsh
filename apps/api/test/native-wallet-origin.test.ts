@@ -1,4 +1,4 @@
-import {test} from 'node:test';import {strict as assert} from 'node:assert';import type {PoolClient} from 'pg';import {initializeNativeWalletOrigin} from '../src/finance/native-wallet-origin';
+import {test} from 'node:test';import {strict as assert} from 'node:assert';import type {PoolClient} from 'pg';import {initializeNativeWalletOrigin,createProvisionedNativeWalletOriginResource,assertNativeWalletOriginAssembly} from '../src/finance/native-wallet-origin';
 const resource={resourceSet:'personal_finance',resourceOid:869754};
 function probe(installed:boolean,proof:any=null,result:any=null,templateError:any=null){
  const seen:{sql:string;args:any[]}[]=[],c={query:async(sql:string,args:any[]=[])=>{seen.push({sql,args});
@@ -57,4 +57,33 @@ test('every database-side template failure propagates and aborts the registratio
   const p=probe(true,admittedProof,knownResult,failure);
   await assert.rejects(initializeNativeWalletOrigin(p.c,'new_user','request',resource));
  }
+});
+
+test('provisioned native genesis is independent of merchants and cannot promote a test or migration resource',async()=>{
+ const config={profile:'dev',provider:'fake',database:{name:'zzsh_dev_daily',user:'zzsh_daily_r',runtimeUser:'zzsh_daily_r',targetProfile:'dev'}} as any;
+ const provisioned=createProvisionedNativeWalletOriginResource(config);assert.equal(assertNativeWalletOriginAssembly(provisioned,undefined),false);
+ config.database.name='changed_after_construction';
+ const role={databaseName:'zzsh_dev_daily',currentUser:'zzsh_daily_r',owner:'zzsh',...Object.fromEntries([
+  'isSuperuser','canCreateRole','canCreateDb','canReplicate','canBypassRls','canCreateDatabase','canCreateIamSchema','canCreateUserSchema',
+  'canCreateAdminSchema','canCreateSupplySchema','canCreateContentSchema','canCreateOrderSchema','canUpdateAudit','canDeleteAudit','canTruncateAudit',
+ ].map(key=>[key,false]))};
+ const make=(changes:Record<string,unknown>={},proof=true,ownerRow=true,error?:Error)=>{let calls=0;
+  const c={query:async(sql:string)=>{
+   if(sql.startsWith('SELECT to_regprocedure'))return{rows:[{installed:true,oid:42,name:'zzsh_dev_daily',role:'zzsh_daily_r',marker:'actual-owner-marker',...changes}]};
+   if(sql.includes('AS "databaseName"'))return{rows:[role]};
+   if(sql.includes('AS "ownsBusinessSchema"'))return{rows:[{ownsBusinessSchema:false,ownsBusinessRelation:false,hasPrivilegedMembership:false}]};
+   if(sql.startsWith('SELECT u.id'))return{rows:proof?[admittedProof]:[]};
+   if(sql.startsWith('SELECT zzsh_order.initialize')){calls++;if(error)throw error;return{rows:[{result:ownerRow?knownResult:{knowledge:'UNKNOWN',reason:'NATIVE_ORIGIN_RESOURCE_NOT_ADMITTED'}}]};}
+   throw Error('Unexpected resource-only origin query');
+  }} as unknown as PoolClient;return{c,calls:()=>calls};
+ };
+ const good=make();assert.equal((await initializeNativeWalletOrigin(good.c,'new_user','request',provisioned)).knowledge,'KNOWN');assert.equal(good.calls(),1);
+ for(const changes of [{name:'zzsh_dev_other'},{role:'zzsh_daily_m'}]){const bad=make(changes);assert.equal((await initializeNativeWalletOrigin(bad.c,'new_user','request',provisioned)).knowledge,'UNKNOWN');assert.equal(bad.calls(),0);}
+ const absent=make({},true,false);assert.equal((await initializeNativeWalletOrigin(absent.c,'new_user','request',provisioned)).knowledge,'UNKNOWN');
+ const old=make({},false);await assert.rejects(initializeNativeWalletOrigin(old.c,'old_user','request',provisioned));assert.equal(old.calls(),0);
+ const copied=make();assert.equal((await initializeNativeWalletOrigin(copied.c,'new_user','request',{...provisioned})).knowledge,'UNKNOWN');assert.equal(copied.calls(),0);
+ const fault=make({},true,true,Object.assign(new Error('synthetic transaction failure'),{code:'40001'}));await assert.rejects(initializeNativeWalletOrigin(fault.c,'new_user','request',provisioned));
+ for(const profile of ['test','provider-test','migration'])assert.throws(()=>createProvisionedNativeWalletOriginResource({...config,profile,database:{...config.database,targetProfile:profile}}));
+ assert.throws(()=>createProvisionedNativeWalletOriginResource({...config,database:{...config.database,name:'zzsh_test_regression'}}));
+ assert.throws(()=>createProvisionedNativeWalletOriginResource({...config,database:{...config.database,user:'migration'}}));
 });

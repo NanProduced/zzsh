@@ -10,7 +10,7 @@ async function main(): Promise<void> {
   const pool = createBusinessPool(config);
   try {
     await assertBusinessMigrationIdentity(pool, config);
-    await runBusinessMigrations(pool, { runtimeUser: config.database.runtimeUser });
+    await runBusinessMigrations(pool, { runtimeUser: config.database.runtimeUser, initialInstall: process.argv.includes("--initial") });
   } finally {
     await pool.end();
   }

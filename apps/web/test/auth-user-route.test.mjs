@@ -207,3 +207,18 @@ test("Root R1: captcha GET validates and forwards only one allowed action", asyn
     assert.equal(calls.at(-1).url.search, "", "unrelated query forwarding stays unchanged");
   } finally { globalThis.fetch = original; }
 });
+
+test('identity verification and its read-only recovery preserve the original key through the BFF', async () => {
+  const original = globalThis.fetch, seen = [];
+  globalThis.fetch = async (url, init) => { seen.push({ url: String(url), method: init.method, key: new Headers(init.headers).get('idempotency-key'), body: init.body }); return Response.json({ status: 'UNKNOWN', verificationAttempt: { state: 'UNKNOWN', noReissue: true } }, { status: 202 }); };
+  try {
+    const key = 'identity_original-key-1';
+    const post = await POST(request(['identity','verify'], { method: 'POST', body: JSON.stringify({ fullName: '合成姓名', documentNumber: '110101200001010000' }), headers: { 'content-type': 'application/json', 'idempotency-key': key } }), routeContext(['identity','verify']));
+    assert.equal(post.status, 202); assert.equal(seen[0].key, key); assert.equal(seen[0].method, 'POST');
+    const read = await GET(request(['identity','verification-attempt'], { headers: { 'idempotency-key': key } }), routeContext(['identity','verification-attempt']));
+    assert.equal(read.status, 202); assert.equal(seen[1].key, key); assert.equal(seen[1].method, 'GET'); assert.equal(seen[1].body, undefined);
+    const bad = await GET(request(['identity','verification-attempt'], { headers: { 'idempotency-key': 'invalid key' } }), routeContext(['identity','verification-attempt']));
+    assert.equal(bad.status, 400); assert.equal(seen.length, 2);
+    assert.equal((await POST(request(['identity','verification-attempt'], { method: 'POST', body: '{}', headers: { 'content-type': 'application/json' } }), routeContext(['identity','verification-attempt']))).status, 404);
+  } finally { globalThis.fetch = original; }
+});

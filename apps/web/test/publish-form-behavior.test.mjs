@@ -2708,3 +2708,18 @@ test("RENTAL_COMPLETED is explained instead of exposing the raw code in the publ
   const source = fs.readFileSync(path.join(tree, "apps/web/src/components/supply/publish-form.tsx"), "utf8");
   assert.match(source, /RENTAL_COMPLETED: "该账号已有已完成租约/);
 });
+
+test('malformed recommended cents remain unknown instead of a zero display or an adoptable value', async () => {
+  for (const amountCents of [null, undefined, '', 'not-cents', '-100', ['0']]) {
+    const value = recommendationV2([]); value.recommendationSchema = 'deposit-recommendation-v1'; delete value.inputs.skinFacts; value.amountCents = amountCents;
+    const p = await probe({ accountId: 'account_1', mine: () => supplyOf(declaration()), catalogValue: recommendationCatalog('1', []), depositRecommendation: () => value });
+    try {
+      await p.render(); await p.clickButton('查看推荐押金');
+      assert.equal(await p.waitFor(() => p.text().includes('推荐金额暂不可用')), true);
+      assert.doesNotMatch(p.host.querySelector('.supply-recommend-result').textContent, /推荐 0\.00|推荐押金 0\.00/);
+      assert.equal([...p.host.querySelectorAll('button')].find(button => button.textContent === '采用推荐').disabled, true);
+      assert.equal(p.host.querySelector('#publish-deposit').value, '');
+      assert.equal(p.calls.some(call => call.op === 'saveDraft'), false);
+    } finally { await p.close(); }
+  }
+});

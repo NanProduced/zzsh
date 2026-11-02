@@ -1,10 +1,23 @@
 import { formatOrderMoney, formatOrderTime } from "./order-client.ts";
-import type { Order, OrderImProjection, OrderImStage, OrderParty, PersonalRentalQuote, SettlementOpening, SettlementPosting, SettlementPreview, SettlementVersion } from "./order-client";
+import type { Order, OrderImProjection, OrderImStage, OrderLine, OrderParty, PersonalRentalQuote, SettlementOpening, SettlementPosting, SettlementPreview, SettlementVersion } from "./order-client";
 
 /** The frozen order snapshot's rental mode; older v1 orders carry no mode and stay unlabeled. */
 export function orderRentalModeLabel(order: Pick<Order, "quote">): string | null {
   const mode = order.quote?.rentalMode;
   return mode === "ordinary" ? "普通出租" : mode === "custom" ? "自定义出租" : mode === "fast" ? "极速出租" : null;
+}
+
+/** Current catalog facts remain useful, but must not look like the frozen order contract. */
+export function orderListingSourceLabel(order: Pick<Order, "source" | "listingFacts" | "listingFactsUnknownReason">): string | null {
+  if (order.source?.origin === "LEGACY") return "历史订单";
+  if (order.listingFacts?.source === "ACCOUNT_CURRENT") return "当前账号资料";
+  if (order.listingFacts?.source === "ORDER_VERSION") return "下单时账号资料";
+  return order.listingFactsUnknownReason ? "账号资料待核实" : null;
+}
+
+/** Opening and settlement stages come from the server; absence never becomes a renting label. */
+export function orderSettlementStageLabel(order: Pick<Order, "stage">): string | null {
+  return order.stage && !["NONE", "UNKNOWN"].includes(order.stage.code) ? order.stage.label : null;
 }
 
 /** The six fulfillment steps, in the order the server projects them. */
@@ -44,7 +57,7 @@ export function orderFulfillmentStepStates(stage: OrderImStage | null | undefine
 }
 
 /** The viewer's own settlement decision refines the ending copy; it never changes the stage itself. */
-export type OrderFulfillmentEnding = "PENDING" | "WAITING" | "SERVICE" | null;
+export type OrderFulfillmentEnding = "PENDING" | "WAITING" | "SERVICE" | "REJECTED" | null;
 
 function fulfillmentWindowText(sendUntil: string | null, canSend: boolean, now: number): string {
   if (!sendUntil) return "仅可查看";
@@ -81,6 +94,7 @@ export function orderFulfillmentSummary(
       return due < now ? `租用中 · 已到期 ${when}` : `租用中 · 到期 ${when}`;
     }
     case "ENDING":
+      if (options.ending === "REJECTED") return "结束确认 · 本版已拒绝，等待重新核对";
       if (options.ending === "PENDING") return "结束确认 · 待你确认";
       if (options.ending === "WAITING") return "结束确认 · 待对方确认";
       if (options.ending === "SERVICE") return "结束确认 · 待客服核实";
@@ -242,10 +256,13 @@ export type OrderAmountFacts = { main: string; caption: string; secondary: strin
 /** The main amount is the renter's actual order record; an owner view never relabels it as owner income. */
 export function orderAmountFacts(order: Order, party: OrderParty): OrderAmountFacts {
   if (order.readOnly && order.source?.origin === "LEGACY") {
+    if (party === "owner") return order.ownerIncomeSource?.source === "LEGACY_ORDER_SNAPSHOT" && order.amounts?.ownerRecordedIncome
+      ? { main: formatOrderMoney(order.amounts.ownerRecordedIncome), caption: "原单净收益记录", secondary: ["原记录，不代表当前应收或到账"] }
+      : { main: "待核定", caption: "历史收益请查看收益记录", secondary: [] };
     const paid = order.payment?.state === "RECORDED_PAID";
     return {
       main: formatOrderMoney(paid ? order.legacyAmounts?.paid : order.legacyAmounts?.required),
-      caption: party === "owner" ? (paid ? "租客实付记录" : "租客应付") : (paid ? "已付金额记录" : "订单应付"),
+      caption: paid ? "已付金额记录" : "订单应付",
       secondary: [
         ...(order.legacyAmounts?.deposit ? [`押金 ${formatOrderMoney(order.legacyAmounts.deposit)}`] : []),
         ...(order.legacyAmounts?.refund ? [`原退款金额记录 ${formatOrderMoney(order.legacyAmounts.refund)}`] : []),
@@ -255,7 +272,7 @@ export function orderAmountFacts(order: Order, party: OrderParty): OrderAmountFa
   const amounts = order.amounts;
   const settled = order.status === "COMPLETED";
   if (party === "owner") {
-    const quote = order.quote?.ownerTotal;
+    const quote = order.amounts?.ownerExpectedIncome ?? order.quote?.ownerTotal;
     return quote
       ? { main: formatOrderMoney(quote), caption: "下单时号主报价", secondary: [] }
       : { main: "待确认", caption: "号主报价暂不可用", secondary: [] };
@@ -304,6 +321,18 @@ export function quantityText(unit: string | null | undefined, quantity: string):
     return `${groupedInteger(quantity)} 哈夫币（${millions} M）`;
   }
   return `${groupedInteger(quantity)}${label ? ` ${label}` : ""}`;
+}
+
+/** The original bill uses the exact M quantity; full base units remain in settlement records. */
+export function orderLineQuantityText(line: OrderLine): string {
+  const quantity = line.quantity ?? line.unitQuantity;
+  if (quantity === null || quantity === undefined || quantity === "") return "数量待确认";
+  if (line.unit === "HAFF_BASE" && /^\d+$/.test(quantity)) {
+    const value = BigInt(quantity);
+    const fraction = (value % 1_000_000n).toString().padStart(6, "0").replace(/0+$/, "");
+    return `${groupedInteger((value / 1_000_000n).toString())}${fraction ? `.${fraction}` : ""} M`;
+  }
+  return quantityText(unitHint(line.name ?? "", line.unit) ? line.unit : undefined, quantity);
 }
 
 export function resourceName(order: Order, itemId: string): string {

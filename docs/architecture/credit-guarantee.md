@@ -1,6 +1,6 @@
 # 信用与号主保证金运行合同
 
-信用/保证金纯读在正式认证应用中常态挂载。`CREDIT_GUARANTEE_ENABLED`只接受`true`或`false`，默认`false`；继续控制信用/保证金命令、新用户注册初始化及正式资金gate接线。关闭命令不隐藏既有读取，也不表示既有责任消失或可以清理；供给仍保留原G0政策/proof门禁。
+信用/保证金纯读在认证应用中常态挂载。部署profile默认装配信用/保证金命令与新用户初始化；`CREDIT_GUARANTEE_ENABLED=false`仅供隔离本地夹具。能力装配不代表有已发布政策、可用资金或渠道授权；供给仍核原G0政策/proof门禁，既有责任不会因预览关闭命令而消失。
 
 正式应用必须已完成迁移`0067_credit_guarantee_contract`和`applyRuntimePrivileges`。启动始终检查七张表可读、`zzsh_credit.runtime_contract_version()=1`及runtime不能CREATE该schema；缺失/部分部署/权限错误阻止启动，不因命令关闭而跳过。运行中依赖故障维持UNKNOWN并拒绝新发布/确认/建单，不退回免缴；读取装配不执行迁移、赋权或回填。
 

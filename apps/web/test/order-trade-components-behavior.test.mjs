@@ -1876,7 +1876,7 @@ test("M3-F7: a named resource keeps its unit and never repeats it", async () => 
     assert.match(quantity, /10/);
     const mixed = await detailProbe(window, { ...paidOrder, status: "CANCELLED" }, "renter");
     const cells = [...mixed.host.querySelectorAll(".order-lines tbody tr td:nth-child(2)")].map((node) => node.textContent);
-    assert.equal(cells[0], "1000", "a name that already carries the unit is not repeated");
+    assert.equal(cells[0], "0.001 M", "the bill uses an exact M quantity without repeating the resource name");
     assert.equal(cells[1], "10 件", "PIECE keeps its existing label");
     await probe.dispose();
     await mixed.dispose();
@@ -2394,4 +2394,46 @@ test('paid prestart termination keeps payment wording and time; unpaid cancellat
   assert.match(unpaid.host.textContent??'',/下单金额/);assert.doesNotMatch(unpaid.host.textContent??'',/租客已付/);
   await unpaid.dispose();
  });
+});
+
+test("core experience: own money and contact precede the long trade and refund records", async () => {
+  await withDom(async window => {
+    const probe = await detailProbe(window, paidOrder, "renter");
+    const overview = probe.host.querySelector(".order-detail-overview"), body = probe.host.querySelector(".order-detail-body");
+    assert.ok(overview.querySelector(".order-amount-block"));
+    assert.ok(overview.compareDocumentPosition(body) & window.Node.DOCUMENT_POSITION_FOLLOWING);
+    const refunds = probe.host.querySelector(".order-refund-details");
+    assert.equal(refunds.open, false, "no posted refund does not open technical accounting by default");
+    assert.match(refunds.querySelector("summary").textContent, /结算后查看应退金额/);
+    assert.match(refunds.textContent, /不代表渠道未收款/, "complete evidence remains available on expansion");
+    assert.equal(probe.host.querySelector(".order-lines details").open, false);
+    await probe.dispose();
+  });
+});
+
+test("core experience: refund conflicts stay expanded and owner null projections never display renter amounts", async () => {
+  await withDom(async window => {
+    const conflict = refundRead("order_A", { outcome: "CONFLICT", reasonCodes: ["LEDGER_BINDING_MISMATCH"] });
+    const renter = await detailProbe(window, { ...paidOrder, status: "COMPLETED" }, "renter", postedSettlement, conflict);
+    assert.equal(renter.host.querySelector(".order-refund-details").open, true);
+    await renter.dispose();
+    const owner = await detailProbe(window, { ...paidOrder, status: "PENDING_PAYMENT", amountsPerspective: "OWNER", amounts: { rental: null, deposit: null, totalDue: null, ownerExpectedIncome: money("123.45") }, quote: { ownerTotal: money("123.45"), lines: [] } }, "owner");
+    assert.match(owner.host.querySelector(".order-amount-block").textContent, /123\.45/);
+    assert.doesNotMatch(owner.host.querySelector(".order-amount-block").textContent, /租客已付|租客应付|押金/);
+    await owner.dispose();
+  });
+});
+
+test("the other party rejecting a version stops stale confirmation prompts and does not claim I rejected", async () => {
+  await withDom(async window => {
+    const rejected = { ...manualVersion, decisions: [{ party: 'OWNER', action: 'REJECT', reason: '数量需重核' }] };
+    const data = { ...manualSettlement, versions: [rejected], settlement: rejected, currentRequest: { kind: 'SETTLEMENT_VERSION', id: rejected.id, versionNo: rejected.versionNo } };
+    const probe = await detailProbe(window, paidOrder, 'renter', data);
+    try {
+      assert.match(probe.host.querySelector('.order-attention-copy h2').textContent, /第2版结算未达成一致/);
+      assert.doesNotMatch(probe.host.textContent, /你已拒绝|待你确认结算|等待对方确认/);
+      assert.equal([...probe.host.querySelectorAll('button')].some(button => /确认本版结算|拒绝本版/.test(button.textContent)), false);
+      assert.match(probe.host.querySelector('.order-trade-panel').textContent, /新的期末数据或人工调整生成新版本/);
+    } finally { await probe.dispose(); }
+  });
 });

@@ -71,6 +71,6 @@
 
 0041及后续0051纠正守卫校验消费ID/快照绑定、期限、规则/资料引用和不可变性，沿用0036的`guard_rental_order`与付款FK、占用索引，不替换PAID转换。v2持久化personal严格11个根字段、不含嵌套quote；guarantee仅status/reference，funding九字段。规范化quote位于订单快照root，旧订单不回填。新列继承既有订单INSERT/SELECT权限，写后改动由不可变触发器拒绝，包含取消/超时后的记录。旧快照不回填或重算。
 
-订单renter/owner/admin投影继续白名单输出。个人订单的会员sourceRef、资金内部事实、token/签名不透传；租客与号主不获得个人订单内部保证金要求，价差仍限原专用管理权限。状态、排序/游标、取消与IM最小元数据合同不变；本实现不执行付款、群操作、退款或结算。
+订单renter/owner/admin投影继续白名单输出。租客读取本人资源费、押金、总应付和买家行，不读取号主私有价目；号主只读取冻结的 `quote.ownerTotal`、owner行/比例，`amounts.ownerExpectedIncome`用于自身预期资源收入，租客的 `amounts.rental/deposit/totalDue`及 `buyer*`/`tenant*` 字段不向号主下发。历史出租单的 `ownerRecordedIncome`仅来自原已完成已付单的 `sale_earnings-full_payout_money`，注明“旧平台原单净收益记录”，不代替当前责任或到账；缺证保持未知。已授权Admin订单读取保留本单合同及原APPLIED已收明细，列表与详情一致，金融原号/商户等继续独立授权。个人订单的会员sourceRef、资金内部事实、token/签名不透传；内部价差与平台算法仍限专用管理权限。本实现不执行付款、群操作、退款或结算。
 
 部署须按正式迁移器应用目标版本的连续迁移前缀及runtime授权；v2守卫依赖0051纠正，有效直发布事实依赖0052，不能仅应用0040/0041即运行最新代码。正式政策/依据读取及核定依赖0053/0054；独立包赔版本与接受列、证明到期最终INSERT检查须另行按连续前缀部署，不把未应用的SQL草案视为生效。签发和首次建单已有末端正式reader重核；成功重放不重核当前到期或补签条款。新包赔digest通过不可变条款引用及funding.sourceRef后缀绑定至既有v2/v3摘要，不改变旧快照字段/hash，也不在token中暴露资金内部事实。配置页面、推荐/披露接线与真实渠道仍未形成完整交易闭环；API/PG/协议级证据不等于浏览器业务或生产渠道验收。

@@ -818,3 +818,32 @@ test('unknown payment time does not imply an observed payment occurred', async t
  const record=node.querySelector('.oc-records').textContent;
  assert.match(record,/支付事实与时间待核/);assert.equal(record.includes('支付发生时间未记录'),false);
 });
+
+test('original manual-close queue sends the exact approved filter and marks unresolved funds', async t => {
+  const { root, node, AdminOrderChainView } = await setup(t), calls = [];
+  const row = { ...chainOrder, source: { origin: 'NATIVE' }, cancelReason: 'MANUAL_CLOSE', fundsResolution: { status: 'REVIEW_REQUIRED', code: 'HISTORICAL_MANUAL_CLOSE', sourceLabel: '原人工关闭，资金处理待核实' } };
+  globalThis.fetch = async input => { calls.push(new URL(String(input), 'http://localhost')); return response(chainPage([row])); };
+  await act(async () => root.render(createElement(AdminOrderChainView, { ...chainProps('manual-funds-queue'), initialQuery: { fundsResolution: 'MANUAL_CLOSE', origin: 'NATIVE' } })));
+  await until(() => node.textContent.includes('原人工关闭，资金处理待核实'));
+  assert.equal(calls.at(-1).searchParams.get('fundsResolution'), 'MANUAL_CLOSE');
+  assert.equal(calls.at(-1).searchParams.get('origin'), 'NATIVE');
+  assert.doesNotMatch(node.textContent, /退款已到账|资金已处理完成/);
+});
+
+test('overview order drilldowns keep exact creation/payment periods and effective pending-payment predicates', async t => {
+  const { root, node, AdminOrderChainView } = await setup(t), calls = [];
+  globalThis.fetch = async input => { calls.push(new URL(String(input), 'http://localhost')); return response(chainPage([chainOrder])); };
+  const from = '2026-10-27T16:00:00.000Z', to = '2026-11-02T02:00:00.000Z';
+  for (const [mode, query] of [
+    ['created', { origin: 'NATIVE', createdFrom: from, createdTo: to }],
+    ['payment', { origin: 'NATIVE', paymentConfirmedFrom: from, paymentConfirmedTo: to }],
+    ['pending', { origin: 'NATIVE', status: 'PENDING_PAYMENT', paymentOpen: 'true' }],
+  ]) {
+    await act(async () => root.render(createElement(AdminOrderChainView, { ...chainProps('overview-' + mode), initialQuery: query })));
+    await until(() => node.textContent.includes(chainOrder.displayNo));
+    const request = calls.at(-1);
+    for (const [key, value] of Object.entries(query)) assert.equal(request.searchParams.get(key), value, key);
+    if (mode === 'payment') assert.match(node.textContent, /收款确认时段/);
+    if (mode === 'pending') assert.match(node.textContent, /仅有效待付款/);
+  }
+});
