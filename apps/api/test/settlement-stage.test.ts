@@ -108,3 +108,26 @@ test("settlement fresh and replay projections isolate each party by current serv
   const rented = (await projectSettlementResponse(client, { realm: "user", userId: "renter", sessionId: "s" }, { status: 200, body: renterFee }, "route-order-id")).body as Record<string, any>;
   assert.equal(rented.amounts.feeAmount.amount, "12.34"); assert.equal(rented.posting.compensationFeeCents, "1234");
 });
+
+test("party isolation preserves database dates through JSON without exposing the other party's money", async () => {
+  const createdAt = new Date("2026-10-30T08:00:00.000Z"), confirmedAt = new Date("2026-10-30T08:02:00.000Z");
+  const body = { orderId: "date-order", openings: [{ id: "opening", createdAt, confirmedAt,
+    acks: [{ party: "OWNER", createdAt }, { party: "RENTER", createdAt: confirmedAt }] }],
+    intakes: [{ id: "intake", createdAt: new Date(NaN) }],
+    versions: [{ id: "v1", decisions: [{ party: "OWNER", action: "CONFIRM", createdAt }] }],
+    posting: { id: "posting", postedAt: confirmedAt, refundDueAt: null,
+      owner: { availableCents: "87654" }, refund: { payableCents: "23456" } } };
+  const client = { query: async () => ({ rows: [{ ownerUserId: "owner", renterUserId: "renter" }] }) } as unknown as PoolClient;
+  for (const userId of ["owner", "renter"]) {
+    const out = await projectSettlementResponse(client, { realm: "user", userId, sessionId: "s" }, { status: 200, body }, "date-order");
+    const json = JSON.parse(JSON.stringify(out.body));
+    assert.equal(json.openings[0].createdAt, createdAt.toISOString());
+    assert.equal(json.openings[0].confirmedAt, confirmedAt.toISOString());
+    assert.deepEqual(json.openings[0].acks.map((ack: { createdAt: string }) => ack.createdAt), [createdAt.toISOString(), confirmedAt.toISOString()]);
+    assert.equal(json.versions[0].decisions[0].createdAt, createdAt.toISOString());
+    assert.equal(json.posting.postedAt, confirmedAt.toISOString());
+    assert.equal(json.intakes[0].createdAt, null);assert.equal(json.posting.refundDueAt, null);
+    assert.equal(json.posting[userId === "owner" ? "refund" : "owner"], undefined);
+  }
+  assert.equal(body.openings[0]!.createdAt, createdAt, "projection does not change stored facts");
+});

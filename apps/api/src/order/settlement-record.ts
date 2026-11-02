@@ -853,6 +853,7 @@ type SettlementViewer = "RENTER" | "OWNER" | "SUPPORT";
 
 function isolateSettlementParty(value: unknown, viewer: SettlementViewer): unknown {
   if (viewer === "SUPPORT" || value === null || typeof value !== "object") return value;
+  if (value instanceof Date) return value;
   if (Array.isArray(value)) return value.map(child => isolateSettlementParty(child, viewer));
   const item = value as Record<string, unknown>;
   const withheld = new Set(viewer === "OWNER" ? [
