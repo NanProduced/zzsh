@@ -2,7 +2,10 @@ import { BeijingDateTimeField } from "@/components/beijing-datetime-field";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { ArrowLeft, CheckCircle2, CircleAlert, Clock3, ExternalLink, FileText, Search, ShieldAlert } from "lucide-react";
 
-import { Button, StatusMessage } from "../components/ui-elements";
+import { Button } from "@/components/ui/button";
+import { StatusMessage } from "../components/ui-elements";
+import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { BEIJING_TIME_ZONE } from "../workspace/beijing-time";
@@ -135,20 +138,14 @@ function statusText(order: Pick<AdminOrder, "status" | "expiredAwaitingCancel" |
   return order.cancelReason === "TIMEOUT" ? "已取消 · 超时" : "已取消";
 }
 
-function statusClasses(status: AdminOrder["status"]): string {
-  if (status === "COMPLETED") return "border-emerald-500/30 bg-emerald-500/10 text-emerald-400";
-  if (status === "PAID") return "border-sky-500/30 bg-sky-500/10 text-sky-400";
-  if (status === "PENDING_PAYMENT") return "border-amber-500/30 bg-amber-500/10 text-amber-400";
-  return "border-border bg-surface-raised text-muted-foreground";
-}
-
 function StatusBadge({ order }: { order: Pick<AdminOrder, "status" | "expiredAwaitingCancel" | "cancelReason"> }) {
   const Icon = order.status === "COMPLETED" ? CheckCircle2 : order.status === "PENDING_PAYMENT" ? Clock3 : CircleAlert;
+  const variant = order.status === "COMPLETED" ? "success" : order.status === "PAID" ? "info" : order.status === "PENDING_PAYMENT" ? "warning" : "secondary";
   return (
-    <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-[11px] font-medium ${statusClasses(order.status)}`}>
+    <Badge variant={variant} className="gap-1.5 py-0.5 text-[11px] font-medium">
       <Icon size={12} aria-hidden="true" />
       {statusText(order)}
-    </span>
+    </Badge>
   );
 }
 
@@ -460,9 +457,9 @@ function OrderListView({
                 <SelectContent>{ORDER_STATUS_ITEMS.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}</SelectContent>
               </Select>
           </label>
-          <label className="min-w-44 flex-1 space-y-1 text-xs"><span className="block text-muted-foreground">订单编号</span><input value={filters.displayNo} onChange={(event) => setFilters((current) => ({ ...current, displayNo: event.target.value }))} autoComplete="off" className="h-9 w-full rounded border border-border bg-surface-raised px-3 font-mono text-xs" placeholder="精确匹配" /></label>
-          <label className="min-w-44 flex-1 space-y-1 text-xs"><span className="block text-muted-foreground">租客稳定 ID</span><input value={filters.renterUserId} onChange={(event) => setFilters((current) => ({ ...current, renterUserId: event.target.value }))} autoComplete="off" className="h-9 w-full rounded border border-border bg-surface-raised px-3 font-mono text-xs" placeholder="不支持姓名/手机号" /></label>
-          <label className="min-w-44 flex-1 space-y-1 text-xs"><span className="block text-muted-foreground">号主稳定 ID</span><input value={filters.ownerUserId} onChange={(event) => setFilters((current) => ({ ...current, ownerUserId: event.target.value }))} autoComplete="off" className="h-9 w-full rounded border border-border bg-surface-raised px-3 font-mono text-xs" placeholder="不支持姓名/手机号" /></label>
+          <label className="min-w-44 flex-1 space-y-1 text-xs"><span className="block text-muted-foreground">订单编号</span><Input value={filters.displayNo} onChange={(event) => setFilters((current) => ({ ...current, displayNo: event.target.value }))} autoComplete="off" className="h-9 font-mono text-xs" placeholder="精确匹配" /></label>
+          <label className="min-w-44 flex-1 space-y-1 text-xs"><span className="block text-muted-foreground">租客稳定 ID</span><Input value={filters.renterUserId} onChange={(event) => setFilters((current) => ({ ...current, renterUserId: event.target.value }))} autoComplete="off" className="h-9 font-mono text-xs" placeholder="不支持姓名/手机号" /></label>
+          <label className="min-w-44 flex-1 space-y-1 text-xs"><span className="block text-muted-foreground">号主稳定 ID</span><Input value={filters.ownerUserId} onChange={(event) => setFilters((current) => ({ ...current, ownerUserId: event.target.value }))} autoComplete="off" className="h-9 font-mono text-xs" placeholder="不支持姓名/手机号" /></label>
           <div className="min-w-44 flex-1"><BeijingDateTimeField label="下单起" value={filters.createdFrom} onChange={(value) => setFilters((current) => ({ ...current, createdFrom: value }))} /></div>
           <div className="min-w-44 flex-1"><BeijingDateTimeField label="下单止（不含）" value={filters.createdTo} onChange={(value) => setFilters((current) => ({ ...current, createdTo: value }))} /></div>
           <div className="flex gap-2"><Button type="submit" size="sm" loading={loading && items.length === 0}>查询</Button><Button type="button" size="sm" variant="ghost" onClick={reset}>重置</Button></div>

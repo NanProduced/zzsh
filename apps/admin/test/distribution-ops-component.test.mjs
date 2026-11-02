@@ -53,7 +53,12 @@ test('late old actor POST cannot reload or replace the new actor draft; original
 });
 
 test('commission states distinguish source, due date, local funds and channel arrival',async()=>{
- const h=await setup();try{const m=await h.loader.ssrLoadModule('/src/views/distribution-workspace.tsx');assert.equal(m.distributionState({origin:'NATIVE',state:'SETTLED',fundsDisposition:'SETTLED'}),'已转入可用资金');assert.equal(m.distributionState({origin:'LEGACY_MYSQL',state:'SETTLED',fundsDisposition:'HISTORICAL_STATUS_ONLY'}),'旧平台已结算记录');assert.equal(m.distributionState({origin:'NATIVE',state:'FUTURE',fundsDisposition:'UNKNOWN'}),'当前状态待核');
+ const h=await setup();try{const m=await h.loader.ssrLoadModule('/src/views/distribution-workspace.tsx');const settledNative=m.distributionState({origin:'NATIVE',state:'SETTLED',fundsDisposition:'SETTLED'});
+  const settledLegacy=m.distributionState({origin:'LEGACY_MYSQL',state:'SETTLED',fundsDisposition:'HISTORICAL_STATUS_ONLY'});
+   assert.equal(settledNative,'已结算');assert.equal(settledLegacy,'已结算');
+   assert.equal(m.distributionState({origin:'LEGACY_MYSQL',state:'PENDING',fundsDisposition:'HISTORICAL_STATUS_ONLY'}),'状态待确认');
+  assert.doesNotMatch(settledNative,/转入可用|已入账|已到账/);
+  assert.equal(m.distributionState({origin:'NATIVE',state:'FUTURE',fundsDisposition:'UNKNOWN'}),'状态暂不识别，请刷新后核对');
   assert.throws(()=>m.parseDistributionOrder({schema:'admin-distribution-order.v1',knowledge:'KNOWN',coverage:'THIS_AUTHORIZED_ORDER_ONLY',order:{id:'order_1',origin:'NATIVE'},items:[{origin:'NATIVE',amountCents:0}],truncated:false,currentLegacyCommissions:[]}));
  }finally{await h.close();}
 });
@@ -102,9 +107,9 @@ test('distribution dashboard model formats exact cents and keeps source/role/sta
   assert.equal(m.money('0'),'¥0.00');
   assert.equal(m.dashboardMoney({knowledge:'UNKNOWN',cents:null,count:null,reasonCodes:['LEGACY_SOURCE_NOT_INSTALLED']}),'未核定');
   assert.equal(m.dashboardMoney({knowledge:'KNOWN',cents:'95',count:'1',reasonCodes:[]}),'¥0.95');
-  assert.equal(m.roleLabel('OWNER_REFERRAL'),'号主来源');
+    assert.equal(m.roleLabel('OWNER_REFERRAL'),'邀请号主出租');
   assert.equal(m.sourceLabel('LEGACY'),'历史观察');
-  assert.equal(m.stateLabel('RECOVERY_REQUIRED'),'待追偿');
+  assert.equal(m.stateLabel('RECOVERY_REQUIRED'),'待追回');
   const f=m.defaultDashboardFilters();
   assert.match(f.from,/^\d{4}-\d{2}-\d{2}$/);assert.equal(f.page,1);assert.equal(f.pageSize,20);
  }finally{await h.close();}

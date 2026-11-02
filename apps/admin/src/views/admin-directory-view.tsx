@@ -1,7 +1,7 @@
 import { StepUpCaptcha } from "../components/altcha-field";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 
-import { Button as UiButton } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -14,7 +14,7 @@ import { ArrowDown, ArrowUp, ArrowUpDown, CircleHelp, Eye, KeyRound, Lock, LogOu
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { Button, PasswordInput, StatusMessage } from "../components/ui-elements";
+import { PasswordInput, StatusMessage } from "../components/ui-elements";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "../components/ui/alert";
 import {
   AdminApiError,
@@ -470,9 +470,9 @@ function SecurityActionDialog({
           ) : null}
         </div>
         <DialogFooter className="shrink-0 border-t border-border/60 px-6 py-3">
-          <UiButton type="button" variant="outline" disabled={busy} onClick={onClose}>
+          <Button type="button" variant="outline" disabled={busy} onClick={onClose}>
             取消
-          </UiButton>
+          </Button>
           <Button type="button" size="sm" variant={copy.danger ? "danger" : "primary"} loading={busy} disabled={!ready || Boolean(pending || blockedReason)} onClick={() => void submit()}>
             {copy.confirm}
           </Button>
@@ -1786,7 +1786,7 @@ export function AdminDirectoryView({
                         <td className="whitespace-nowrap">
                           <div className="flex items-center justify-start gap-0.5" onClick={(event) => event.stopPropagation()}>
                             <Tooltip>
-                              <TooltipTrigger render={<UiButton type="button" variant="ghost" size="icon-sm" aria-label={`查看 ${item.name} 的信息`} onClick={() => openDetail(item.username, item.name)} />}>
+                              <TooltipTrigger render={<Button type="button" variant="ghost" size="icon-sm" aria-label={`查看 ${item.name} 的信息`} onClick={() => openDetail(item.username, item.name)} />}>
                                 <Eye size={16} aria-hidden />
                               </TooltipTrigger>
                               <TooltipContent>查看信息</TooltipContent>
@@ -1794,7 +1794,7 @@ export function AdminDirectoryView({
                             <Tooltip>
                               <TooltipTrigger
                                 render={
-                                  <UiButton
+                                  <Button
                                     type="button"
                                     variant="ghost"
                                     size="icon-sm"
@@ -1809,7 +1809,7 @@ export function AdminDirectoryView({
                               <TooltipContent>{writeLocked("profile", item.username) ? "上一次提交结果未确认" : actionReason("update", item) ?? "修改显示名称"}</TooltipContent>
                             </Tooltip>
                             <DropdownMenu>
-                              <DropdownMenuTrigger render={<UiButton type="button" variant="ghost" size="icon-sm" aria-label={`${item.name} 的更多操作`} />}>
+                              <DropdownMenuTrigger render={<Button type="button" variant="ghost" size="icon-sm" aria-label={`${item.name} 的更多操作`} />}>
                                 <MoreHorizontal size={16} aria-hidden />
                               </DropdownMenuTrigger>
                               <DropdownMenuContent align="end">
@@ -2018,9 +2018,9 @@ export function AdminDirectoryView({
                 ) : null}
               </div>
               <div className="flex shrink-0 items-center justify-end gap-3 border-t border-border/70 bg-surface px-6 py-3">
-                <UiButton type="button" variant="outline" disabled={loading} onClick={() => setCreateOpen(false)}>
+                <Button type="button" variant="outline" disabled={loading} onClick={() => setCreateOpen(false)}>
                   取消
-                </UiButton>
+                </Button>
                 <Button type="submit" size="sm" loading={loading} disabled={!createScopeSupported || Boolean(scopeChoiceError(createScopeChoice, createScopeGameIds)) || Boolean(createPending) || createUndelivered !== undefined || !createName.trim()}>
                   创建管理员
                 </Button>

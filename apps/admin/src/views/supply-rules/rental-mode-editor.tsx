@@ -4,7 +4,7 @@ import type { RulesResponse } from "../../api";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
-import { Checkbox } from "../../components/ui/checkbox";
+import { Switch } from "../../components/ui/switch";
 import { SupplySelect } from "../../components/supply/supply-select";
 import { draftCommand, type useRulesWrite } from "./rules-write";
 import { DraftFastTrial } from "./rental-mode-trial-panel";
@@ -121,8 +121,8 @@ export function RentalModeEditor({ rules, command, canEdit, onDirtyChange, draft
       <div className="grid gap-4 lg:grid-cols-2">
         <fieldset className="space-y-3.5 rounded-lg border border-border/80 bg-card/60 p-4 shadow-2xs">
           <legend className="px-1 text-sm font-semibold text-foreground">自定义模式</legend>
-          <label className="flex items-center gap-2 text-sm font-medium">
-            <Checkbox aria-label="启用自定义模式" checked={draft.custom.enabled} disabled={locked} onCheckedChange={(v) => set((d) => ({ ...d, custom: { ...d.custom, enabled: v === true } }))} />
+          <label className="flex items-center gap-2.5 text-sm font-medium cursor-pointer select-none">
+            <Switch aria-label="启用自定义模式" checked={draft.custom.enabled} disabled={locked} onCheckedChange={(v) => set((d) => ({ ...d, custom: { ...d.custom, enabled: v === true } }))} />
             <span>启用自定义模式</span>
           </label>
           {draft.custom.enabled ? (
@@ -136,8 +136,8 @@ export function RentalModeEditor({ rules, command, canEdit, onDirtyChange, draft
         </fieldset>
         <fieldset className="space-y-3.5 rounded-lg border border-border/80 bg-card/60 p-4 shadow-2xs">
           <legend className="px-1 text-sm font-semibold text-foreground">极速模式</legend>
-          <label className="flex items-center gap-2 text-sm font-medium">
-            <Checkbox aria-label="启用极速模式" checked={draft.fast.enabled} disabled={locked} onCheckedChange={(v) => set((d) => ({ ...d, fast: { ...d.fast, enabled: v === true } }))} />
+          <label className="flex items-center gap-2.5 text-sm font-medium cursor-pointer select-none">
+            <Switch aria-label="启用极速模式" checked={draft.fast.enabled} disabled={locked} onCheckedChange={(v) => set((d) => ({ ...d, fast: { ...d.fast, enabled: v === true } }))} />
             <span>启用极速模式</span>
           </label>
           {draft.fast.enabled ? <>

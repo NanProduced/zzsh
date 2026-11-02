@@ -28,11 +28,22 @@ async function setup(t, answer, options = {}) {
   const render = async binding => { await act(async () => root.render(createElement(AdminNativeRefundPanel, { orderId: 'order_synthetic', canWrite: true, binding }))); await act(async () => new Promise(setImmediate)); };
   await render(options.binding);
   t.after(async () => { await act(async () => root.unmount()); await source.close(); await w.happyDOM.abort(); });
-  const input = host.querySelector('[aria-label="退款金额（分）"]');
-  await act(async () => { Object.getOwnPropertyDescriptor(w.HTMLInputElement.prototype, 'value').set.call(input, '100'); input.dispatchEvent(new w.Event('input', { bubbles: true })); });
+  const input = host.querySelector('[aria-label="退款金额（元）"]');
+  await act(async () => { Object.getOwnPropertyDescriptor(w.HTMLInputElement.prototype, 'value').set.call(input, '1.00'); input.dispatchEvent(new w.Event('input', { bubbles: true })); });
   const submit = async () => { await act(async () => host.querySelector('form').dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }))); await act(async () => { await new Promise(setImmediate); }); };
   return { host, calls, submit, render, module, storage:w.sessionStorage, pending: () => JSON.parse(w.sessionStorage.getItem(options.binding ? `${storageKey}.${JSON.stringify([options.binding.adminUserId,options.binding.sessionId])}` : storageKey)) };
 }
+
+test('yuan display retains the original positive sixteen-digit cents command domain', async t => {
+  const ui = await setup(t, () => response(null));
+  const input = ui.host.querySelector('[aria-label="退款金额（元）"]');
+  for (const value of ['0', '100000000000000']) {
+    await act(async () => { Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(input, value);input.dispatchEvent(new window.Event('input', { bubbles: true })); });
+    await ui.submit();assert.equal(ui.calls.length, 0);assert.equal(ui.pending(), null);
+  }
+  await act(async () => { Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(input, '99999999999999.99');input.dispatchEvent(new window.Event('input', { bubbles: true })); });
+  await ui.submit();assert.equal(JSON.parse(ui.calls[0].body).amountCents, '9999999999999999');assert.equal(ui.pending().amount, '9999999999999999');
+});
 
 test('invalid successful HTTP response keeps the original refund recovery key', async t => {
   const ui = await setup(t, () => response(null)); await ui.submit();
@@ -71,7 +82,7 @@ test('malformed original recovery data never becomes a new refund request', asyn
 test('a different administrator gets a fresh scope while the original recovery remains intact', async t => {
   const binding={adminUserId:'admin_A',sessionId:'session_A'},ui=await setup(t,()=>response(null),{binding});await ui.submit();
   const original=ui.pending();assert.ok(original?.key);await ui.render({adminUserId:'admin_B',sessionId:'session_B'});
-  assert.equal(ui.host.querySelector('[aria-label="退款金额（分）"]').value,'');assert.equal(ui.pending().key,original.key);
+  assert.equal(ui.host.querySelector('[aria-label="退款金额（元）"]').value,'');assert.equal(ui.pending().key,original.key);
   assert.doesNotMatch(ui.host.textContent,/存在结果未知的申请/);
 });
 

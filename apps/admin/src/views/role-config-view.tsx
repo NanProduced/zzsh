@@ -17,7 +17,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Icons } from "../components/icons";
-import { Button, StatusMessage } from "../components/ui-elements";
+import { Button } from "@/components/ui/button";
+import { StatusMessage } from "../components/ui-elements";
 import {
   adminRequest,
   friendlyError,

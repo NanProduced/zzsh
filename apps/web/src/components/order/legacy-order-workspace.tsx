@@ -28,8 +28,9 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
     const request = orderId ? orderApi.legacyDetail(orderId, abort.signal) : orderApi.listLegacy({ party, page, pageSize: 20, ...(accountId ? { accountId } : {}) }, abort.signal);
     request.then(data => {
       if (abort.signal.aborted) return;
-      const rows = "items" in data ? data.items : [data];
-      if (!Array.isArray(rows) || rows.some(row => row.readOnly !== true || row.source?.origin !== "LEGACY" || typeof row.id !== "string" || row.party !== party)) throw new Error("Invalid historical projection");
+      const isList = "items" in data;
+      const rows = isList ? data.items : [data];
+      if (!Array.isArray(rows) || rows.some(row => row.readOnly !== true || row.source?.origin !== "LEGACY" || typeof row.id !== "string" || !["renter", "owner"].includes(row.party) || (isList ? row.party !== party : row.id !== orderId))) throw new Error("Invalid historical projection");
       setState({ scope, loading: false, data, error: "" });
     }).catch(error => {
       if (abort.signal.aborted) return;
@@ -43,6 +44,10 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
   if (!current || current.loading) return <p role="status" aria-busy="true">正在读取订单…</p>;
   if (current.error || !current.data) return <section role="alert" className="order-error-block"><h2>订单暂不可用</h2><p>{current.error}</p><button className="button secondary" onClick={() => setReload(n => n + 1)}>重试读取</button></section>;
   const data = current.data;
+  if (!("items" in data) && data.party !== party) {
+    const actualTitle = data.party === "owner" ? "出租订单" : "租入订单";
+    return <section className="order-detail-view" data-testid="legacy-order-party-mismatch"><Link href={orderUrl(party, status, accountId)} scroll={false}>返回订单列表</Link><section className="order-error-block" role="status"><h2>本单属于你的{actualTitle}</h2><p>请按服务端确认的交易身份查看金额与处理事项。</p><Link className="button primary" href={orderUrl(data.party, "", undefined, data.id, "LEGACY")} scroll={false}>查看我的{actualTitle}</Link></section></section>;
+  }
   const recordedIncome = !("items" in data) && data.ownerIncomeSource?.source === "LEGACY_ORDER_SNAPSHOT" ? data.amounts?.ownerRecordedIncome : null;
   const notice = <p className="order-muted">金额按订单记录展示；可办理事项以本单核定结果为准。原退款金额记录是原单记录的金额，不是当前应退责任，也不代表资金已到账。</p>;
   if ("items" in data) return <section className="order-detail-view">
@@ -68,7 +73,7 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
       {orderResourceLines(data).map(resource => <div key={resource.code}><dt>{resource.name}</dt><dd>{resource.value}</dd></div>)}
     </dl></section> : null}
     {notice}
-    <section className="account-module-card"><h3>{party === "owner" ? "我的历史收益" : "金额记录"}</h3>{party === "owner" ? <>{recordedIncome ? <><p className="order-amount-total">{formatOrderMoney(recordedIncome)}</p><p className="order-muted">原单净收益记录，保留旧平台完成时的收益事实，不代表当前应收、钱包可用金额或渠道到账。</p></> : <p className="order-muted">历史收益金额尚未核定，不以租客付款替代；请查看本人收益记录及本单可办理事项。</p>}<Link href="/account?view=invite#personal-earnings-heading" scroll={false}>查看我的收益</Link></> : <dl className="order-facts">
+    <section className="account-module-card"><h3>{party === "owner" ? "我的历史收益" : "金额记录"}</h3>{party === "owner" ? <>{recordedIncome ? <><p className="order-amount-total">{formatOrderMoney(recordedIncome)}</p><p className="order-muted">原单净收益记录，保留旧平台完成时的收益事实，不代表当前应收、钱包可用金额或渠道到账。</p></> : <p className="order-muted">历史收益金额尚未核定，不以租客付款替代；请核对钱包记录及本单可办理事项。</p>}<Link href="/account?view=wallet" scroll={false}>查看钱包记录</Link></> : <dl className="order-facts">
       <div><dt>应付金额</dt><dd>{formatOrderMoney(data.legacyAmounts?.required)}</dd></div>
       <div><dt>已付金额</dt><dd>{formatOrderMoney(data.legacyAmounts?.paid)}</dd></div>
       <div><dt>押金</dt><dd>{formatOrderMoney(data.legacyAmounts?.deposit)}</dd></div>

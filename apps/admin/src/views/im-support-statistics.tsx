@@ -8,7 +8,7 @@
  * - 区间选择只把用户明确选择的日期发给服务端；默认“今日”不发送浏览器日期。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Bar, BarChart, CartesianGrid, LabelList, Line, LineChart, ResponsiveContainer, Tooltip as ChartTooltip, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, CartesianGrid, LabelList, Line, LineChart, Tooltip as ChartTooltip, XAxis, YAxis } from "recharts";
 import { CircleAlert, ShieldCheck } from "lucide-react";
 import { AdminApiError, friendlyError } from "../api";
 import { Badge } from "../components/ui/badge";
@@ -16,6 +16,7 @@ import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { TooltipProvider } from "../components/ui/tooltip";
+import { ChartContainer, type ChartConfig } from "../components/ui/chart";
 import { formatDateTime } from "./im-support-format";
 import {
   availabilityLabel, formatDayLabel, formatDuration, formatRatingAverage,
@@ -313,6 +314,23 @@ function RatingCard({ ratings, scopeWord, demo = false }: { ratings: SupportRati
   </Card>;
 }
 
+const trendConfig: ChartConfig = {
+  sessions: { label: "会话", color: "var(--mgmt-chart-1)" },
+  users: { label: "用户", color: "var(--mgmt-chart-2)" },
+};
+
+const hourlyConfig: ChartConfig = {
+  sessions: { label: "新咨询", color: "var(--mgmt-chart-1)" },
+};
+
+const workloadConfig: ChartConfig = {
+  hours: { label: "接待时长", color: "var(--mgmt-chart-3)" },
+};
+
+const ratingConfig: ChartConfig = {
+  count: { label: "评价", color: "var(--mgmt-chart-2)" },
+};
+
 function trendBounds(points: SupportTrendPoint[], period: SupportReportPeriod | null): { from: string | null; to: string | null } {
   return {
     from: period?.trendFrom ?? points[0]?.date ?? null,
@@ -339,7 +357,7 @@ function TrendChart({ points, period, demo = false }: { points: SupportTrendPoin
     <CardContent>
       <div className="im-wb-mgmt-legend"><span data-series="sessions">会话</span><span data-series="users">用户</span></div>
       {hasTrendData(points) ? <div className="im-wb-mgmt-chartbox" role="img" tabIndex={0} aria-label={`接待趋势：${label}`}>
-        <ResponsiveContainer width="100%" height={220}>
+        <ChartContainer config={trendConfig} label={`接待趋势：${label}`} height={220}>
           {long ? <LineChart data={data} margin={{ top: 8, right: 8, left: -18, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
             <XAxis dataKey="date" tickFormatter={(date) => crossesYear ? String(date).slice(0, 7) : formatDayLabel(String(date))} interval="preserveStartEnd" minTickGap={32} tick={{ fill: "var(--muted-foreground)", fontSize: 11 }} axisLine={false} tickLine={false} tickMargin={8} />
@@ -359,7 +377,7 @@ function TrendChart({ points, period, demo = false }: { points: SupportTrendPoin
             <Bar dataKey="sessions" fill="url(#mgmt-trend-sessions)" radius={[5, 5, 0, 0]} maxBarSize={26} />
             <Bar dataKey="users" fill="url(#mgmt-trend-users)" radius={[5, 5, 0, 0]} maxBarSize={26} />
           </BarChart>}
-        </ResponsiveContainer>
+        </ChartContainer>
       </div> : <p className="im-wb-mgmt-chart-empty" role="status">暂无趋势数据</p>}
     </CardContent>
   </Card>;
@@ -379,7 +397,7 @@ function HourlyChart({ hourly, scopeWord, demo = false }: { hourly: ReturnType<t
     </CardHeader>
     <CardContent>
       {hasHourlyData(slots) ? <div className="im-wb-mgmt-chartbox" role="img" tabIndex={0} aria-label={`${scopeWord}每小时新咨询量`}>
-        <ResponsiveContainer width="100%" height={220}>
+        <ChartContainer config={hourlyConfig} label={`${scopeWord}每小时新咨询量`} height={220}>
           <BarChart data={data} margin={{ top: 8, right: 8, left: -18, bottom: 0 }} barCategoryGap="18%">
             <defs><linearGradient id="mgmt-hourly" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="var(--mgmt-chart-1)" stopOpacity={0.95} /><stop offset="100%" stopColor="var(--mgmt-chart-1)" stopOpacity={0.35} /></linearGradient></defs>
             <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
@@ -388,7 +406,7 @@ function HourlyChart({ hourly, scopeWord, demo = false }: { hourly: ReturnType<t
             <ChartTooltip wrapperStyle={{ pointerEvents: "none" }} cursor={{ fill: "color-mix(in oklab, var(--foreground) 6%, transparent)" }} contentStyle={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }} labelStyle={{ color: "var(--foreground)" }} labelFormatter={(value) => `${value}:00`} formatter={(value) => [`${value}`, "新咨询"]} />
             <Bar dataKey="sessions" name="sessions" fill="url(#mgmt-hourly)" radius={[4, 4, 0, 0]} maxBarSize={18} />
           </BarChart>
-        </ResponsiveContainer>
+        </ChartContainer>
       </div> : <p className="im-wb-mgmt-chart-empty" role="status">暂无时段数据</p>}
     </CardContent>
   </Card>;
@@ -417,7 +435,7 @@ function AgentWorkloadChart({ agents, scopeWord, demo = false }: { agents: Suppo
     <CardContent>
       <div className="im-wb-mgmt-legend"><span data-series="seconds">接待时长（小时）</span></div>
       {hasWorkloadData(agents) ? <div className="im-wb-mgmt-chartbox" role="img" tabIndex={0} aria-label={`${scopeWord}各客服接待时长`}>
-        <ResponsiveContainer width="100%" height={Math.max(180, data.length * 48)}>
+        <ChartContainer config={workloadConfig} label={`${scopeWord}各客服接待时长`} height={Math.max(180, data.length * 48)}>
           <BarChart data={data} layout="vertical" margin={{ top: 4, right: 24, left: 8, bottom: 4 }}>
             <defs><linearGradient id="mgmt-workload" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stopColor="var(--mgmt-chart-3)" stopOpacity={0.45} /><stop offset="100%" stopColor="var(--mgmt-chart-3)" stopOpacity={0.95} /></linearGradient></defs>
             <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" horizontal={false} />
@@ -426,7 +444,7 @@ function AgentWorkloadChart({ agents, scopeWord, demo = false }: { agents: Suppo
             <ChartTooltip wrapperStyle={{ pointerEvents: "none" }} cursor={{ fill: "color-mix(in oklab, var(--foreground) 6%, transparent)" }} contentStyle={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }} formatter={(value, _name, item) => [`${(item.payload as { display?: string }).display ?? `${value}h`} · ${(item.payload as { sessions?: number }).sessions ?? 0} 会话`, "接待"]} />
             <Bar dataKey="hours" name="hours" fill="url(#mgmt-workload)" radius={[0, 5, 5, 0]} maxBarSize={18} />
           </BarChart>
-        </ResponsiveContainer>
+        </ChartContainer>
       </div> : <p className="im-wb-mgmt-chart-empty" role="status">暂无数据</p>}
     </CardContent>
   </Card>;
@@ -484,7 +502,7 @@ export function SupportRatingBars({ distribution, count, emptyLabel = "今日暂
   // API distribution 索引 0 是 1 星；按 1→5 展示，避免倒序造成读数错位。
   const data = [1, 2, 3, 4, 5].map(score => ({ label: `${score} 星`, count: distribution[score - 1] ?? 0 }));
   return <div className="im-wb-mgmt-rating-chart" data-chart="rating-distribution" data-count={count} role="img" tabIndex={0} aria-label={`评分分布：${data.map(point => `${point.label} ${point.count} 条`).join("、")}`}>
-    <ResponsiveContainer width="100%" height={180}>
+    <ChartContainer config={ratingConfig} label="评分分布" height={180}>
       <BarChart data={data} layout="vertical" margin={{ top: 4, right: 30, left: 0, bottom: 0 }}>
         <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" horizontal={false} />
         <XAxis type="number" allowDecimals={false} tick={{ fill: "var(--muted-foreground)", fontSize: 11 }} axisLine={false} tickLine={false} />
@@ -494,6 +512,6 @@ export function SupportRatingBars({ distribution, count, emptyLabel = "今日暂
           <LabelList dataKey="count" position="right" fill="var(--muted-foreground)" fontSize={11} />
         </Bar>
       </BarChart>
-    </ResponsiveContainer>
+    </ChartContainer>
   </div>;
 }

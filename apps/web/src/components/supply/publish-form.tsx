@@ -3439,7 +3439,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                       <output className="publish-calc-value" data-state={displayEstimateDuration ? "ready" : "pending"} aria-label="预计租期">{durationResult}</output>
                     </div>
                     <div className="publish-calc-item">
-                      <span className="publish-calc-label">出租比例<FieldHelp label="出租比例">每收入 1 元对应的哈夫币数量；普通比例由平台按账号配置与日耗核定，自定义比例需在允许范围内。</FieldHelp></span>
+                      <span className="publish-calc-label">出租比例<FieldHelp label="出租比例">每收入 1 元可兑换多少万哈夫币（1 万＝10,000 哈夫币）；普通比例由平台按账号配置与日耗核定，自定义比例需在允许范围内。</FieldHelp></span>
                       <output className="publish-calc-value" data-state={ratioKnown ? "ready" : "pending"} aria-label="测算出租比例">{ratioResult}</output>
                     </div>
                     <small className="publish-calc-note">根据余额、日耗与出租方案自动核算；修改后需重新核对报价。</small>

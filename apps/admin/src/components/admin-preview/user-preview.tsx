@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
+import { ActionTooltip } from '@/components/ui/tooltip';
 import { Phone } from 'lucide-react';
 import { PreviewCardShell, PreviewCopyButton, PreviewFooterAction } from './preview-card';
 import type { DirectoryUserPreview } from '@/api';
@@ -94,9 +95,11 @@ export function UserPreviewCard({
       </Avatar>
       <div className="min-w-0 flex-1 space-y-1">
         <div className="flex items-center justify-between gap-1.5">
-          <span className="font-semibold text-sm text-foreground truncate" title={name}>
-            {name}
-          </span>
+          <ActionTooltip content={name}>
+            <span className="font-semibold text-sm text-foreground truncate cursor-default" title={name}>
+              {name}
+            </span>
+          </ActionTooltip>
           {businessNo || userId ? <PreviewCopyButton value={businessNo || userId || ''} tooltip={businessNo ? '复制用户编号' : '复制用户 ID'} /> : null}
         </div>
         {businessNo && <p className="text-xs text-muted-foreground font-mono break-all">编号 {businessNo}</p>}

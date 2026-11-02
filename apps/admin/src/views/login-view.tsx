@@ -1,7 +1,8 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { readRememberedAdminIdentifier, saveRememberedAdminIdentifier } from "../lib/login-preference";
 import { Icons } from "../components/icons";
-import { Button, PasswordInput, StatusMessage } from "../components/ui-elements";
+import { Button } from "@/components/ui/button";
+import { PasswordInput, StatusMessage } from "../components/ui-elements";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useAuthTypingImpulse } from "../components/devl/auth-shell";
 import { bumpParticleTypingImpulse } from "../components/devl/particle-field";

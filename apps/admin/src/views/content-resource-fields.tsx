@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ImagePlus, Upload } from "lucide-react";
 import { adminRequest, friendlyError, type ContentMediaOption, type ContentMediaOptionsPage, type UploadedAssetResponse } from "../api";
-import { Button, StatusMessage } from "../components/ui-elements";
+import { Button } from "@/components/ui/button";
+import { StatusMessage } from "../components/ui-elements";
 import { Field } from "../components/ui/field";
 import { Input } from "../components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";

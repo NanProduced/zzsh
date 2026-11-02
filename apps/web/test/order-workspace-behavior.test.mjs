@@ -151,6 +151,20 @@ const money = { amount: "0.00", currency: "CNY", unit: "yuan", scale: 2 };
 const orderA = { id: "order_A", displayNo: "A-001", title: "PRIVATE_ORDER_A", status: "PENDING_PAYMENT", amounts: { rental: money, deposit: money, totalDue: money } };
 const orderB = { id: "order_B", displayNo: "B-001", title: "PRIVATE_ORDER_B", status: "PAID", amounts: { rental: money, deposit: money, totalDue: money } };
 
+test('a known server viewer party corrects an opposite-view deep link without rendering wrong-side money or actions',async()=>{
+ for(const [routeParty,viewerParty] of [['owner','renter'],['renter','owner']]){
+  const calls=[],order={...orderB,viewerParty,accountId:'account_A'},probe=await createProbe(async(url,init={})=>{calls.push({path:String(url),method:init.method??'GET'});return Response.json(String(url).split('?')[0].endsWith('/order_B')?{order}:{items:[],nextCursor:null,limit:20});});
+  try{await probe.render({party:routeParty,orderId:order.id,status:'PAID',accountId:'unrelated_filter'});assert.equal(Boolean(probe.host.querySelector('[data-testid="order-party-mismatch"]')),true);assert.equal(Boolean(probe.host.querySelector('[data-testid="order-detail"]')),false);assert.doesNotMatch(probe.host.textContent,/PRIVATE_ORDER_B|0\.00|确认开租|发起结束租用/);const correct=[...probe.host.querySelectorAll('a')].find(link=>link.textContent===`查看我的${viewerParty==='owner'?'出租':'租入'}订单`);assert.ok(correct);assert.equal(correct.getAttribute('href'),`/account?view=${viewerParty==='owner'?'leased':'rentals'}&orderId=${order.id}`);assert.equal(probe.session.revalidations,0);assert(calls.every(call=>call.method==='GET'&&!/settlement|refund|\/im\?/.test(call.path)));}finally{await probe.dispose();}
+ }
+});
+
+test('native account navigation reuses owned-account and stable public detail readers with distinct wording',async()=>{
+ for(const party of ['owner','renter']){
+  const order={...orderB,viewerParty:party,accountId:'account_A'},probe=await createProbe(async url=>Response.json(String(url).split('?')[0].endsWith('/order_B')?{order}:{items:[],nextCursor:null,limit:20}));
+  try{await probe.render({party,orderId:order.id});const label=party==='owner'?'查看本人账号':'查看当前公开资料',link=[...probe.host.querySelectorAll('a')].find(node=>node.textContent===label);assert.ok(link);assert.equal(link.getAttribute('href'),party==='owner'?'/account?view=accounts&accountId=account_A':'/accounts/account_A');}finally{await probe.dispose();}
+ }
+});
+
 test("integrated order detail opens its exact order in the main support host", async () => {
   const order = { ...orderB, fulfillmentAssignment: { state: "ASSIGNED", teamReady: true } };
   const probe = await createProbe(async url => Response.json(String(url).includes("/order_B") ? { order } : { items: [order], nextCursor: null, limit: 20 }));

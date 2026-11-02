@@ -1,5 +1,6 @@
 import * as React from 'react';
 import { Badge } from '@/components/ui/badge';
+import { ActionTooltip } from '@/components/ui/tooltip';
 import { Gamepad2 } from 'lucide-react';
 import { PreviewCardShell, PreviewCopyButton, PreviewFooterAction } from './preview-card';
 
@@ -76,9 +77,11 @@ export function AccountPreviewCard({
       </div>
       <div className="min-w-0 flex-1 space-y-1">
         <div className="flex items-center justify-between gap-1.5">
-          <span className="font-semibold text-sm font-mono text-foreground break-all" title={numberText}>
-            {numberText}
-          </span>
+          <ActionTooltip content={numberText}>
+            <span className="font-semibold text-sm font-mono text-foreground break-all cursor-default" title={numberText}>
+              {numberText}
+            </span>
+          </ActionTooltip>
           {(displayNo || accountId) && <PreviewCopyButton value={displayNo || accountId || ''} tooltip={displayNo ? '复制账号编号' : '复制账号 ID'} />}
           {legacy && <Badge variant="outline" className="text-[10px] h-4.5 px-1.5 py-0 font-normal shrink-0">旧平台迁入</Badge>}
           {tag && (
@@ -107,9 +110,11 @@ export function AccountPreviewCard({
       }
     >
       {title && (
-        <div className="text-sm text-foreground line-clamp-2 leading-relaxed break-words" title={title}>
-          {title}
-        </div>
+        <ActionTooltip content={title}>
+          <div className="text-sm text-foreground line-clamp-2 leading-relaxed break-words cursor-default" title={title}>
+            {title}
+          </div>
+        </ActionTooltip>
       )}
 
       {priceRows && priceRows.length > 0 && <div className="rounded-md border border-border bg-muted/30 px-2.5 py-2">

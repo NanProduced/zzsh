@@ -492,14 +492,25 @@ function benefitItems(selected: TrackTier, actual: TrackTier | null, data: Membe
   };
 }
 
+/** 应付比例 × 10^8 ＝ 实付百分比 × 10^6：一次换算，同时给出“折”的简写和精确百分比。 */
+function entitlementDiscountParts(payableRatio: string): { label: string; percent: string } {
+  const [integer = "0", fraction = ""] = payableRatio.split(".");
+  const scaled = BigInt(`${integer}${fraction.padEnd(8, "0")}`);
+  const percentWhole = scaled / 1_000_000n;
+  const percentFraction = (scaled % 1_000_000n).toString().padStart(6, "0").replace(/0+$/, "");
+  const percent = `${percentWhole}${percentFraction ? `.${percentFraction}` : ""}%`;
+  if (scaled === 100_000_000n) return { label: "原价", percent };
+  const hundredths = (scaled + 50_000n) / 100_000n;
+  const exact = scaled % 100_000n === 0n;
+  const zheWhole = hundredths / 100n;
+  const zheFraction = (hundredths % 100n).toString().padStart(2, "0").replace(/0+$/, "");
+  return { label: `${exact ? "" : "约"}${zheWhole}${zheFraction ? `.${zheFraction}` : ""}折`, percent };
+}
+
 function entitlementDiscountLabel(summary: MembershipGrowthData["entitlements"][number]["pricingSummary"]): string {
   if (summary?.knowledge === "LEGACY") return "旧版计价合同";
-  if (summary?.knowledge !== "KNOWN") return "折扣待核";
-  const [integer = "0", fraction = ""] = summary.payableRatio.split(".");
-  const scaled = BigInt(`${integer}${fraction.padEnd(8, "0")}`);
-  if (scaled === 100_000_000n) return "原价";
-  const decimal = (scaled % 10_000_000n).toString().padStart(7, "0").replace(/0+$/, "");
-  return `${scaled / 10_000_000n}${decimal ? `.${decimal}` : ""}折`;
+  if (summary?.knowledge !== "KNOWN" || !summary.payableRatio) return "折扣还没核对";
+  return entitlementDiscountParts(summary.payableRatio).label;
 }
 
 function entitlementScopeLabel(summary: MembershipGrowthData["entitlements"][number]["pricingSummary"]): string {
@@ -589,6 +600,7 @@ function EntitlementSection({ data, entitlements }: { data?: MembershipGrowthDat
                       <div><dt>生效时间</dt><dd>{formatBeijingDateTime(item.startsAt)}</dd></div>
                       <div><dt>到期时间</dt><dd>{formatBeijingDateTime(item.endsAt)}</dd></div>
                       <div><dt>租赁优惠</dt><dd>{entitlementDiscountLabel(item.pricingSummary)}</dd></div>
+                      {item.pricingSummary?.knowledge === "KNOWN" && item.pricingSummary.payableRatio ? <div><dt>实付比例</dt><dd>{entitlementDiscountParts(item.pricingSummary.payableRatio).percent}（精确值，下单价以服务端报价为准）</dd></div> : null}
                       {item.pricingSummary?.knowledge === "KNOWN" ? <div><dt>适用范围</dt><dd>{entitlementScopeLabel(item.pricingSummary)}</dd></div> : null}
                       <div><dt>租客押金</dt><dd>{
                         item.depositWaived

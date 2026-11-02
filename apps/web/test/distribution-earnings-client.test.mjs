@@ -44,6 +44,21 @@ test('current responsibility is additive: original amount/state stay and VOID/MA
 const record=(entry=old,patch={})=>({id:entry.id,key:'commission:'+'b'.repeat(64),effectiveState:entry.state,amountCents:entry.amount.amountCents,occurredAt:at,stateKnowledge:'KNOWN',detail:{source:{type:entry.origin,system:'frozen-source',entity:'commission',id:'source-one'},stateBasis:'SOURCE_RECORD',originalState:entry.state,originalAmountCents:entry.amount.amountCents,currentResponsibility:{knowledge:'UNKNOWN',reason:'LEGACY_RESPONSIBILITY_NOT_ADMITTED'},currentFinance:{knowledge:'UNKNOWN',reason:'LEGACY_FINANCE_NOT_ADMITTED_OR_NOT_FINALIZED'},accountingEffect:'OBSERVATION_ONLY_NO_NEW_CREDIT',bankArrival:'UNKNOWN',reasonCodes:[]},...patch});
 const recordSummary=(patch={})=>({scope:'COMMISSION_RECORDS',knowledge:'KNOWN',count:'1',mappedRecordCount:'1',amountCents:'1234',knownSubtotalCents:'1234',unknownStateCount:'0',unclassifiedRecordCount:'0',states:[{state:'SETTLED',count:'1',amountCents:'1234'}],coverage:{knowledge:'KNOWN',cutoff:at,reasonCodes:[]},reasonCodes:[],...patch});
 const v2=(items=[old],patch={})=>({...page,projectionVersion:2,amountsByOrigin:{scope:'SOURCE_RECORDS_ONLY',native:{knowledge:'UNKNOWN',amountCents:null},historical:{knowledge:'UNKNOWN',amountCents:null},mappedHistoricalAmountCents:'1234'},items,...patch});
+test('MCA001: v2 source amount coverage and current-state completeness remain independent knowledge dimensions',()=>{
+ for(const knowledge of ['KNOWN','UNKNOWN'])for(const totalAmountKnowledge of ['KNOWN','UNKNOWN']){
+  const amountsByOrigin={scope:'SOURCE_RECORDS_ONLY',native:{knowledge:totalAmountKnowledge==='KNOWN'?'KNOWN':'UNKNOWN',amountCents:totalAmountKnowledge==='KNOWN'?'0':null},historical:{knowledge:'KNOWN',amountCents:'1234'},mappedHistoricalAmountCents:'1234'};
+  const result=earningsPage(v2([old],{knowledge,count:knowledge==='KNOWN'?'1':null,totalAmountKnowledge,amountsByOrigin}),'self','ALL',2);
+  assert.equal(result.knowledge,knowledge);assert.equal(result.count,knowledge==='KNOWN'?'1':null);assert.equal(result.totalAmountKnowledge,totalAmountKnowledge);assert.deepEqual(result.amountsByOrigin,amountsByOrigin);
+ }
+ assert.throws(()=>earningsPage({...page,totalAmountKnowledge:'KNOWN'},'self','ALL',1),'v1 retains its original unknown-total contract');
+ assert.throws(()=>earningsPage(v2([old],{totalAmountKnowledge:'KNOWN'}),'self','ALL',2),'known source totals still require each source coverage proof');
+});
+test('MCA001: known original amounts do not close four unknown current commission states or synthesize totals',()=>{
+ const pending={...old,state:'PENDING'},r=record(pending,{effectiveState:'UNKNOWN',stateKnowledge:'UNKNOWN'});r.detail={...r.detail,stateBasis:'UNKNOWN'};
+ const summary=recordSummary({knowledge:'UNKNOWN',count:null,mappedRecordCount:'4',amountCents:null,knownSubtotalCents:'4936',unknownStateCount:'4',unclassifiedRecordCount:'4',states:[{state:'UNKNOWN',count:'4',amountCents:'4936'}]});
+ const result=earningsPage(v2([{...pending,record:r}],{mappedRecordCount:'4',totalAmountKnowledge:'KNOWN',amountsByOrigin:{scope:'SOURCE_RECORDS_ONLY',native:{knowledge:'KNOWN',amountCents:'0'},historical:{knowledge:'KNOWN',amountCents:'4936'},mappedHistoricalAmountCents:'4936'},recordSummary:summary,nextCursor:'original-signed-cursor'}),'self','ALL',2);
+ assert.equal(result.knowledge,'UNKNOWN');assert.equal(result.count,null);assert.equal(result.totalAmountKnowledge,'KNOWN');assert.equal(result.recordSummary.knowledge,'UNKNOWN');assert.equal(result.recordSummary.amountCents,null);assert.equal(result.recordSummary.knownSubtotalCents,'4936');assert.equal(result.recordSummary.unclassifiedRecordCount,'4');assert.equal(result.items[0].record.effectiveState,'UNKNOWN');assert.equal(result.items[0].record.amountCents,'1234');assert.equal(result.nextCursor,'original-signed-cursor');
+});
 test('unified record keeps one economic key through responsibility revisions and preserves original facts',()=>{
  const duty={knowledge:'KNOWN',dutyId:'duty',orderId:'order',state:'MATURED',amountCents:'900',currency:'CNY',revision:'2',revised:true,maturityAt:at,settledBy:null};
  const first=record(old,{effectiveState:'MATURED',amountCents:'900'});first.detail={...first.detail,stateBasis:'CURRENT_RESPONSIBILITY',currentResponsibility:duty};

@@ -162,7 +162,7 @@ const SHORT_NOTES: Record<string, string> = {
   settledContribution: "过账分量 · 非净利润",
   paidOrders: "本期已付款原生订单",
   ordersPendingPayment: "未过期待付款",
-  ordersPaid: "当前 PAID",
+  ordersPaid: "已付款，待完成订单处理",
   listingsPendingReview: "等待审核",
   supportWaiting: "当前排队咨询",
   supportMine: "分配给我的咨询",

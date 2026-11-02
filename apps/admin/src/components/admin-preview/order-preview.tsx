@@ -1,5 +1,6 @@
 import * as React from 'react';
 import { Badge } from '@/components/ui/badge';
+import { ActionTooltip } from '@/components/ui/tooltip';
 import { Receipt } from 'lucide-react';
 import { PreviewCardShell, PreviewCopyButton, PreviewFooterAction } from './preview-card';
 
@@ -60,9 +61,11 @@ export function OrderPreviewCard({
       </div>
       <div className="min-w-0 flex-1 space-y-0.5">
         <div className="flex items-center justify-between gap-1.5">
-          <span className="font-semibold text-sm font-mono text-foreground truncate" title={numberText}>
-            {numberText}
-          </span>
+          <ActionTooltip content={numberText}>
+            <span className="font-semibold text-sm font-mono text-foreground truncate cursor-default" title={numberText}>
+              {numberText}
+            </span>
+          </ActionTooltip>
           {statusLabel && (
             <Badge
               variant={isPaid ? 'secondary' : isPending ? 'outline' : 'outline'}
@@ -98,9 +101,11 @@ export function OrderPreviewCard({
       }
     >
       {title && (
-        <div className="text-[11px] text-foreground font-medium line-clamp-1" title={title}>
-          {title}
-        </div>
+        <ActionTooltip content={title}>
+          <div className="text-[11px] text-foreground font-medium line-clamp-1 cursor-default" title={title}>
+            {title}
+          </div>
+        </ActionTooltip>
       )}
 
       {(renterName || ownerName || counterpartyName) && (

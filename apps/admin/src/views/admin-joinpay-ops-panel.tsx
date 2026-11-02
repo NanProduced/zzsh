@@ -1,8 +1,11 @@
 import { useCallback, useState } from "react";
 import { adminRequest, friendlyError, AdminApiError } from "../api";
-import { Button } from "../components/ui-elements";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { formatFundingCents } from "./supply-review/model";
+import { formatCentsToYuan } from "./membership-entitlement-form";
+import { parseYuanToCents, yuanInputHint } from "@zzsh/ui/display-money";
 
 type NativeRefundItem = { intentId: string; postingId: string | null; refundOrderNo: string; amountCents: string; state: string; budgetDisposition: string;
   requiresReview: boolean; completedAt: string | null; postingResponsibility: { frozenCents: string | null; allocatedCents: string | null; remainingCents: string | null };
@@ -83,28 +86,29 @@ function NativeRefundForm({ orderId, canWrite, basis, binding }: RefundProps) {
   const [storageBlocked,setStorageBlocked]=useState(recovery.blocked);
   const [confirmed, setConfirmed] = useState(false);
   const closedNew = basis !== undefined && !basis.eligible;
-  const [amount, setAmount] = useState(saved?.amount ?? ""), [reason, setReason] = useState(saved?.reason ?? ""), [note, setNote] = useState(recovery.blocked ? "原请求恢复资料不可读或冲突，已阻止覆盖或新提交" : saved ? "存在结果未知的申请：只能按原键恢复提交" : ""), [busy, setBusy] = useState(false);
+  const [amount, setAmount] = useState(saved?.amount ? formatCentsToYuan(saved.amount) : ""), [reason, setReason] = useState(saved?.reason ?? ""), [note, setNote] = useState(recovery.blocked ? "原请求恢复资料不可读或冲突，已阻止覆盖或新提交" : saved ? "存在结果未知的申请：只能按原键恢复提交" : ""), [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<string | null>(saved?.key ?? null);
   const load = useCallback((signal?: AbortSignal) => adminRequest<{ items: NativeRefundItem[] }>(`/orders/${encodeURIComponent(orderId)}/refunds`, undefined, "GET", {}, signal)
     .then(r => setItems(Array.isArray(r?.items) ? r.items : null), e => { if (!signal?.aborted) { setItems(null); setNote(friendlyError(e)); } }), [orderId]);
   const submit = async () => {
     if(!canWrite||busy||storageBlocked)return;
-    if (!CENTS.test(amount)) { setNote("请输入以分为单位的正整数金额"); return; }
+    const amountCents = parseYuanToCents(amount);
+    if (amountCents === null || !CENTS.test(amountCents)) { setNote(`请输入大于 0 且在允许范围内的退款金额。${yuanInputHint(basis?.refundPayableCents ? formatCentsToYuan(basis.refundPayableCents) : null)}`); return; }
     if (pending === null && closedNew) { setNote(`不能发起普通退款：${basis!.reason}`); return; }
     if (pending === null && basis?.eligible && !confirmed) { setNote("请先核对并确认原单过账责任、到期与申请额"); return; }
-    if (pending === null && basis?.refundPayableCents && BigInt(amount) > BigInt(basis.refundPayableCents)) { setNote("申请额超过已核应退责任"); return; }
+    if (pending === null && basis?.refundPayableCents && BigInt(amountCents) > BigInt(basis.refundPayableCents)) { setNote("申请额超过已核应退责任"); return; }
     const key = pending ?? newKey();
-    try { sessionStorage.setItem(keyStore(orderId,binding), JSON.stringify({ key, amount, reason, orderId, adminUserId: binding?.adminUserId ?? null, sessionId: binding?.sessionId ?? null })); }
+    try { sessionStorage.setItem(keyStore(orderId,binding), JSON.stringify({ key, amount: amountCents, reason, orderId, adminUserId: binding?.adminUserId ?? null, sessionId: binding?.sessionId ?? null })); }
     catch { setStorageBlocked(true);setNote('无法保存原请求，已阻止退款提交');return; }
     setPending(key);
     const recovering = pending !== null;
     setBusy(true);
     try {
-      const receipt = await adminRequest<NativeRefundReceipt | null>(`/orders/${encodeURIComponent(orderId)}/refunds`, { amountCents: amount, ...(reason.trim() ? { reason: reason.trim() } : {}) }, "POST", { "idempotency-key": key });
+      const receipt = await adminRequest<NativeRefundReceipt | null>(`/orders/${encodeURIComponent(orderId)}/refunds`, { amountCents, ...(reason.trim() ? { reason: reason.trim() } : {}) }, "POST", { "idempotency-key": key });
       if (receipt?.contractVersion !== "admin-native-refund.v1" || typeof receipt.replayed !== "boolean"
         || typeof receipt.intentId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(receipt.intentId)
         || typeof receipt.refundOrderNo !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(receipt.refundOrderNo)
-        || receipt.amountCents !== amount || receipt.currency !== "CNY" || !["READY", "SUBMITTING", "UNKNOWN", "PROCESSING", "REVIEW_REQUIRED", "SUCCEEDED", "FAILED"].includes(receipt.state)
+        || receipt.amountCents !== amountCents || receipt.currency !== "CNY" || !["READY", "SUBMITTING", "UNKNOWN", "PROCESSING", "REVIEW_REQUIRED", "SUCCEEDED", "FAILED"].includes(receipt.state)
         || !["ALLOCATED", "CONSUMED", "RELEASED"].includes(receipt.budgetDisposition)
         || receipt.channel?.result !== (receipt.replayed ? "UNKNOWN" : "NOT_SUBMITTED") || receipt.channel?.bankArrival !== "UNKNOWN") throw new AdminApiError(0, "INVALID_REFUND_RECEIPT");
       clearSaved(orderId,binding,key);
@@ -131,8 +135,8 @@ function NativeRefundForm({ orderId, canWrite, basis, binding }: RefundProps) {
     {canWrite && basis ? <p className="oc-fact-note" data-refund-basis={basis.eligible ? "eligible" : "closed"}>原单 {orderId} · 过账 {basis.postingRef ?? "未知"} · 已核应退责任 {cents(basis.refundPayableCents)} · 责任到期 {basis.refundDueAt ?? "未知"} · 预算以申请回执为准{basis.eligible ? "" : ` · 普通退款关闭：${basis.reason}`} · 异常退款不在此开放</p> : null}
     {canWrite && (!closedNew || pending) ? <form className="flex flex-wrap items-end gap-2" onSubmit={e => { e.preventDefault(); void submit(); }}>
       {basis?.eligible && !pending ? <label className="flex items-center gap-2 text-xs cursor-pointer select-none"><Checkbox name="confirmed" aria-label="确认过账责任" checked={confirmed} disabled={busy} onCheckedChange={checked => setConfirmed(checked === true)} /><span>已核对原单、过账责任、到期与申请额</span></label> : null}
-      <label>金额（分）<input aria-label="退款金额（分）" value={amount} disabled={busy || !!pending} onChange={e => setAmount(e.target.value.trim())} inputMode="numeric" /></label>
-      <label>原因<input aria-label="退款原因" value={reason} disabled={busy || !!pending} maxLength={120} onChange={e => setReason(e.target.value)} /></label>
+      <label>金额（元）<Input aria-label="退款金额（元）" value={amount} disabled={busy || !!pending} onChange={e => setAmount(e.target.value.trim())} inputMode="decimal" maxLength={18} /></label>
+      <label className="flex items-center gap-1.5 text-xs"><span className="text-muted-foreground shrink-0">原因</span><Input aria-label="退款原因" value={reason} disabled={busy || !!pending} maxLength={120} onChange={e => setReason(e.target.value)} className="h-8 w-48 text-xs" /></label>
       <Button size="sm" type="submit" disabled={busy||storageBlocked}>{pending ? "按原键恢复提交" : "发起退款申请"}</Button>
     </form> : canWrite ? <p className="oc-fact-note">普通退款未开放（资格未证明）。</p> : <p className="oc-fact-note">发起退款需要订单结算命令权限。</p>}
     {note ? <p className="oc-fact-note" role="status">{note}</p> : null}
@@ -157,7 +161,7 @@ export function AdminWithdrawalQueryBox() {
     catch (e) { setText(e instanceof AdminApiError && e.status === 503 ? "提现补查暂不可用（未装配）" : friendlyError(e)); }
     finally { setBusy(false); }
   };
-  return <div className="flex gap-2" role="group" aria-label="提现按原号补查"><input aria-label="提现单号" value={id} onChange={e => setId(e.target.value.trim())} placeholder="原提现单号" />
+  return <div className="flex items-center gap-2" role="group" aria-label="提现按原号补查"><Input aria-label="提现单号" value={id} onChange={e => setId(e.target.value.trim())} placeholder="原提现单号" className="h-8 w-44 text-xs font-mono" />
     <Button size="sm" type="button" variant="secondary" disabled={busy} onClick={() => void run()}>按原号同步提现结果</Button>
     {text ? <span role="status">{text}</span> : null}<span className="oc-fact-note">查询可能触发本站账务处理；查询成功不等于银行到账。</span></div>;
 }
@@ -179,7 +183,7 @@ export function AdminCollectionQueryBox({ canWrite }: { canWrite: boolean }) {
     catch (e) { setText(e instanceof AdminApiError && e.status === 503 ? "收款补查暂不可用（未装配）" : friendlyError(e)); }
     finally { setBusy(false); }
   };
-  return <div className="flex gap-2" role="group" aria-label="收款按原号补查"><input aria-label="收款请求号" value={id} onChange={e => setId(e.target.value.trim())} placeholder="原收款请求号" />
+  return <div className="flex items-center gap-2" role="group" aria-label="收款按原号补查"><Input aria-label="收款请求号" value={id} onChange={e => setId(e.target.value.trim())} placeholder="原收款请求号" className="h-8 w-44 text-xs font-mono" />
     <Button size="sm" type="button" variant="secondary" disabled={busy} onClick={() => void run()}>按原号补查收款</Button>
     {text ? <span role="status">{text}</span> : null}<span className="oc-fact-note">只补查原单，不发起新收款；查询成功不等于银行到账。</span></div>;
 }
@@ -197,7 +201,7 @@ export function AdminJoinpayOpsPanel({ canRead, canWithdrawalQuery = false }: { 
   return <section className="finance-joinpay-ops space-y-2 text-sm" data-joinpay-ops><h2 className="font-semibold">渠道运行与商户账户</h2>
     {workers === undefined ? <Button size="sm" variant="secondary" onClick={() => void readWorkers()}>读取补查任务状态</Button> : workers === null ? <p>补查任务状态不可用</p>
       : <ul><li>退款补查：{workerText(workers.refund)}</li><li>提现补查：{workerText(workers.payout)}</li><li>收款补查：{workerText(workers.collection)}</li></ul>}
-    <div className="flex gap-2" role="group" aria-label="商户账户摘要读取"><input aria-label="商户标识" value={merchant} onChange={e => setMerchant(e.target.value.trim())} placeholder="商户标识" /><Button size="sm" type="button" onClick={() => void lookup()}>读取账户摘要</Button></div>
+    <div className="flex items-center gap-2" role="group" aria-label="商户账户摘要读取"><Input aria-label="商户标识" value={merchant} onChange={e => setMerchant(e.target.value.trim())} placeholder="商户标识" className="h-8 w-36 text-xs font-mono" /><Button size="sm" type="button" onClick={() => void lookup()}>读取账户摘要</Button></div>
     {account ? <p>可用账户：{accountText(account.available)} · 收款账户：{accountText(account.collection)} · 资产合计：未核定（渠道余额不是资产）· 银行到账未核定</p> : null}
     {note ? <p role="status">{note}</p> : null}
     {canWithdrawalQuery ? <AdminWithdrawalQueryBox /> : null}

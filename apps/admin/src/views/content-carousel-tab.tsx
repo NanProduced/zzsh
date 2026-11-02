@@ -9,7 +9,8 @@ import {
   type ContentMediaOption,
   type ContentMediaOptionsPage,
 } from "../api";
-import { Button, StatusMessage } from "../components/ui-elements";
+import { Button } from "@/components/ui/button";
+import { StatusMessage } from "../components/ui-elements";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Textarea } from "@/components/ui/textarea";
 

@@ -131,3 +131,10 @@ test('user-finance table shares the same historical facts while the current wall
   const applicationRow=table.querySelectorAll('tbody tr')[1];assert.match(applicationRow.textContent,/原申请 734\.00 元/);assert.doesNotMatch(applicationRow.textContent,/历史变动/,'the application is not presented as another wallet debit');
   await click(table.querySelector('[data-historical-association] button'));const target=new URL(opened.at(-1)[0],browser.location.href);assert.equal(target.pathname,association.path);assert.ok(target.searchParams.get('origin'));
 });
+
+test('withdrawal application points to its balance debit, while debit points to the application',async t=>{
+ const reverse={...historical,changeType:null,purposeCode:'WITHDRAWAL_APPLICATION',purposeLabel:'提现申请记录',association:{...association,documentRef:debit.ref,number:'SYNTHETIC-LOG-11437',path:'/finance/documents/HISTORY_EARNINGS%3Asynthetic-log'}};
+ const host=browser.document.createElement('div');browser.document.body.append(host);const root=createRoot(host),opened=[];t.after(async()=>{await act(async()=>root.unmount());host.remove();});
+ await act(async()=>root.render(createElement(HistoricalFinanceDetail,{historical:reverse,recordKind:'WITHDRAWAL',orderRead:true,documentRead:true,onOpenPath:(...args)=>opened.push(args)})));await settle();
+ assert.match(host.textContent,/关联余额扣款流水：SYNTHETIC-LOG-11437/);assert.doesNotMatch(host.textContent,/关联提现单：/);await click(host.querySelector('[data-historical-association] button'));assert.match(opened[0][0],/HISTORY_EARNINGS/);
+});

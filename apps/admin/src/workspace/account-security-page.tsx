@@ -2,7 +2,8 @@ import { directoryScopeOf, readAdminDirectoryShared } from "./admin-directory-re
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { Icons } from "../components/icons";
-import { Button, PasswordInput, StatusMessage } from "../components/ui-elements";
+import { Button } from "@/components/ui/button";
+import { PasswordInput, StatusMessage } from "../components/ui-elements";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import {

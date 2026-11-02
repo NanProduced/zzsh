@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { Icons } from "../components/icons";
-import { Button, StatusMessage } from "../components/ui-elements";
+import { Button } from "@/components/ui/button";
+import { StatusMessage } from "../components/ui-elements";
 import { useAuthTypingImpulse } from "../components/devl/auth-shell";
 import { bumpParticleTypingImpulse } from "../components/devl/particle-field";
 import {

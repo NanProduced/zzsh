@@ -1,7 +1,8 @@
 import { StepUpCaptcha } from "../components/altcha-field";
 import { useState, useEffect, useRef, type FormEvent } from "react";
 import { Icons } from "../components/icons";
-import { Button, PasswordInput, StatusMessage } from "../components/ui-elements";
+import { Button } from "@/components/ui/button";
+import { PasswordInput, StatusMessage } from "../components/ui-elements";
 
 type LockScreenProps = {
   mobile: boolean;

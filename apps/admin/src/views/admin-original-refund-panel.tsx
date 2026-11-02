@@ -1,6 +1,7 @@
 import { useEffect,useRef,useState } from "react";
 import { adminRequest,AdminApiError,friendlyError } from "../api";
-import { Button } from "../components/ui-elements";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Textarea } from "@/components/ui/textarea";
 
@@ -59,7 +60,7 @@ export function AdminOriginalRefundPanel({orderId,basis,reference,canWrite,bindi
  if(!canWrite)return null;
  return <div className="space-y-2 text-sm" aria-label={basis==='REVIEW_CONFIRMATION'?'异常原款退款复核':'未开租全额原路退款'}>
   <p>{basis==='REVIEW_CONFIRMATION'?'异常款仅支持人工复核后的全额原笔退款；同原商户号多流水时保持复核。':'只分配核准的全额原款责任；已有活跃意图时禁止重复分配，明确失败释放后才可新键重提。'}</p>
-  {!reference?<label className="block">原付款确认编号<input aria-label="异常原付款确认编号" value={id} onChange={e=>setId(e.target.value)} disabled={busy||!!pending} maxLength={128}/></label>:null}
+  {!reference?<label className="block text-xs text-muted-foreground">原付款确认编号<Input aria-label="异常原付款确认编号" value={id} onChange={e=>setId(e.target.value)} disabled={busy||!!pending} maxLength={128} className="h-8 mt-1 text-xs font-mono" /></label>:null}
   {basis==='REVIEW_CONFIRMATION'?<label className="block">复核依据<Textarea aria-label="异常原款复核依据" value={reason} onChange={e=>setReason(e.target.value)} disabled={busy||!!pending} maxLength={150} rows={2} className="min-h-16 text-xs mt-1" /></label>:null}
   <label className="flex gap-2 items-center cursor-pointer select-none"><Checkbox name="reviewed" checked={reviewed} onCheckedChange={checked=>setReviewed(checked===true)} disabled={busy||!!pending}/><span>{basis==='REVIEW_CONFIRMATION'?'已核实本单重复/迟到原款，只全额原路退回，不改收款人。':'已核对本单核准终止责任与原退款记录；不覆盖原UNKNOWN。'}</span></label>
   <Button size="sm" disabled={busy||blocked||!pending&&(!reviewed||!ID.test(id)||basis==='REVIEW_CONFIRMATION'&&reason.trim().length<3)} onClick={()=>void submit()}>

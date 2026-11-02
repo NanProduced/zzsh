@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { ActionTooltip } from "@/components/ui/tooltip";
 import {
   Select,
   SelectContent,
@@ -205,14 +206,16 @@ export function ListPagination(props: ListPaginationProps) {
       aria-label="分页导航"
     >
       <div className="admin-list-pagination-left">
-        <span title={rangeLabel}>
-          {safeTotal === 0 ? (
-            `共 0 ${itemLabel} · 暂无分页`
-          ) : (
-            `共 ${safeTotal} ${itemLabel} · 第 ${page} / ${totalPages} 页`
-          )}
-          {loading ? " · 正在翻页" : ""}
-        </span>
+        <ActionTooltip content={rangeLabel}>
+          <span title={rangeLabel} className="cursor-default">
+            {safeTotal === 0 ? (
+              `共 0 ${itemLabel} · 暂无分页`
+            ) : (
+              `共 ${safeTotal} ${itemLabel} · 第 ${page} / ${totalPages} 页`
+            )}
+            {loading ? " · 正在翻页" : ""}
+          </span>
+        </ActionTooltip>
         <Select
           value={String(pageSize)}
           onValueChange={handleSizeChange}

@@ -311,7 +311,7 @@
 .workspace-root .im-wb-row-foot em[data-tone="warn"] { color:var(--destructive); }
 .workspace-root .im-wb-row-foot small { color:var(--muted-foreground); font-size:11px; font-variant-numeric:tabular-nums; }
 .workspace-root .im-wb-row-foot em[data-state="处理中"] { color:var(--im-accent-strong); }
-.workspace-root .im-wb-row-foot em[data-state="待核验"],.workspace-root .im-wb-row-foot em[data-state="待接入"] { color:var(--destructive); }
+.workspace-root .im-wb-row-foot em[data-state="通道异常"],.workspace-root .im-wb-row-foot em[data-state="待接入"] { color:var(--destructive); }
 .workspace-root .im-wb-unread { display:grid; min-width:17px; height:17px; place-items:center; padding:0 5px; border-radius:999px; color:#fff; background:var(--destructive); font-size:10px; font-style:normal; font-weight:600; line-height:1; }
 .workspace-root .im-wb-row[data-active="true"] .im-wb-unread { box-shadow:0 0 0 2px var(--card); }
 .workspace-root .im-wb-list-empty { display:flex; min-height:170px; flex-direction:column; align-items:center; justify-content:center; gap:6px; padding:18px 16px; color:var(--muted-foreground); text-align:center; }

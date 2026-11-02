@@ -477,7 +477,7 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
             <InputGroupTextarea ref={orderComposerRef} value={view.draft} onChange={(event) => view.setDraft(event.target.value)} onKeyDown={onComposerKeyDown}
               onCompositionStart={() => { composingRef.current = true; }} onCompositionEnd={() => { composingRef.current = false; }}
               aria-label="输入订单群消息" rows={3} maxLength={4000}
-              placeholder={!view.canSend ? "当前只可阅读，草稿会保留" : view.connection !== "CONNECTED" ? "云信通道未连接，草稿会保留" : "输入消息…"}
+              placeholder={!view.canSend ? "当前只可阅读，草稿会保留" : view.connection !== "CONNECTED" ? "消息通道未连接，草稿会保留" : "输入消息…"}
               disabled={!view.canSend} />
             <InputGroupAddon align="block-end" className="im-wb-composer-tools">
               <TooltipProvider delay={200}>

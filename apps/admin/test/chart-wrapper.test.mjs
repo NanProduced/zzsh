@@ -16,8 +16,8 @@ async function mount(t,name,props,{width=719}={}){
   const original=browser.HTMLElement.prototype.getBoundingClientRect;
   browser.HTMLElement.prototype.getBoundingClientRect=function(){return this.classList.contains('chart-plot')?new browser.DOMRect(0,0,plotWidth,240):original.call(this)};
   class Observer{constructor(callback){this.callback=callback;observers.add(this)}observe(){}unobserve(){}disconnect(){observers.delete(this)}}globalThis.ResizeObserver=Observer;browser.ResizeObserver=Observer;
-  const source=await createOfflineAdminSource({root:ROOT}),shared=await source.ssrLoadModule('/apps/admin/src/components/dashboard/dashboard-components.tsx'),chart=await source.ssrLoadModule('/apps/admin/src/components/ui/chart.tsx'),{createRoot}=await import('react-dom/client');
-  const host=browser.document.createElement('div');browser.document.body.append(host);const root=createRoot(host),component=shared[name]??chart[name];
+  const source=await createOfflineAdminSource({root:ROOT}),shared=await source.ssrLoadModule('/apps/admin/src/components/dashboard/dashboard-components.tsx'),chart=await source.ssrLoadModule('/apps/admin/src/components/ui/chart.tsx'),tooltip=await source.ssrLoadModule('/apps/admin/src/components/ui/tooltip.tsx'),{createRoot}=await import('react-dom/client');
+  const host=browser.document.createElement('div');browser.document.body.append(host);const root=createRoot(host),component=shared[name]??chart[name]??tooltip[name];
   const render=async value=>{await act(async()=>root.render(createElement(component,value)));await act(async()=>{await new Promise(resolve=>setTimeout(resolve,0))})};
   t.after(async()=>{await act(async()=>root.unmount());host.remove();await source.close();await browser.happyDOM.abort()});await render(props);
   return{host,browser,chart,shared,render,resize:async value=>{plotWidth=value;await act(async()=>{for(const observer of observers)observer.callback([])})}};
@@ -80,4 +80,16 @@ test('recent empty/partial/forbidden knowledge states stay distinct and use Card
 test('selected upstream MIT/source records and scoped width/theme rules ship with the actual primitives',()=>{
   const vendor=fs.readFileSync(new URL('../src/vendor/evilcharts/recharts-core.tsx',import.meta.url),'utf8'),license=fs.readFileSync(new URL('../src/vendor/evilcharts/LICENSE',import.meta.url),'utf8'),copying=fs.readFileSync(new URL('../src/vendor/evilcharts/COPYING.md',import.meta.url),'utf8');assert.match(license,/2026 Gurbinder/);assert.match(copying,/4c2dd7c9bae780703244265c9a4b509d40c055ad/);assert.match(vendor,/getPayloadConfigFromPayload/);assert.doesNotMatch(vendor,/Math\.random|getLoadingData|frosted-glass/);
   const css=fs.readFileSync(new URL('../src/components/dashboard/dashboard.css',import.meta.url),'utf8');assert.match(css,/repeat\(2, minmax\(0, 1fr\)\)/);assert.match(css,/dashboard-stat-card--long/);
+});
+
+test('static action tooltips are keyboard reachable without overriding explicit or hidden triggers',async t=>{
+  const props={content:'完整账号名称',delay:0,children:createElement('span',{'data-probe':'text'},'截断名称')},h=await mount(t,'ActionTooltip',props);
+  const text=h.host.querySelector('[data-probe="text"]');assert.equal(text.tabIndex,0);
+  // HappyDOM does not implement keyboard-modality :focus-visible matching.
+  const matches=text.matches.bind(text);text.matches=selector=>selector===':focus-visible'?h.browser.document.activeElement===text:matches(selector);
+  await act(async()=>{h.browser.document.dispatchEvent(new h.browser.KeyboardEvent('keydown',{key:'Tab',bubbles:true}));text.focus();await new Promise(resolve=>setTimeout(resolve,0))});
+  await act(async()=>new Promise(setImmediate));assert.equal(h.browser.document.activeElement,text);assert.match(h.browser.document.querySelector('[data-slot="tooltip-content"]')?.textContent??'',/完整账号名称/);
+  await h.render({...props,children:createElement('span',{'data-probe':'explicit',tabIndex:-1},'显式排除')});assert.equal(h.host.querySelector('[data-probe="explicit"]').tabIndex,-1);
+  await h.render({...props,children:createElement('span',{'data-probe':'hidden','aria-hidden':true},'装饰')});assert.equal(h.host.querySelector('[data-probe="hidden"]').tabIndex,-1);
+  let clicks=0;await h.render({...props,children:createElement('button',{type:'button',onClick:()=>clicks++},'动作')});await act(async()=>h.host.querySelector('button').click());assert.equal(clicks,1);assert.equal(h.host.querySelectorAll('button').length,1);assert.equal(h.host.querySelectorAll('button button').length,0);
 });

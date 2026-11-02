@@ -1,5 +1,6 @@
 import { AdminApiError, adminRequest, type SessionSnapshot } from '../api';
 import { beijingCalendarDate } from '../workspace/beijing-time';
+import { UNRECOGNIZED_STATE_LABEL, commissionRoleLabel, commissionStateLabel } from '@zzsh/ui/display-distribution';
 
 export type DashboardSource = 'ALL' | 'NATIVE' | 'LEGACY';
 export type DashboardState = 'ALL' | 'PENDING' | 'SETTLED' | 'REVOKED' | 'RECOVERY_REQUIRED' | 'EXPIRED';
@@ -60,15 +61,15 @@ export function metricReason(metric: DashboardMetric | null | undefined) {
 }
 export function reasonLabel(reason: string) {
   return ({
-    LEGACY_SOURCE_NOT_INSTALLED: '旧分销来源尚未装配',
+    LEGACY_SOURCE_NOT_INSTALLED: '旧平台分销记录还没接入',
     GLOBAL_RELATION_SCOPE_UNAVAILABLE: '当前游戏范围无法读取全平台关系网络',
-    LEGACY_RELATION_NOT_ADMITTED: '旧关系尚未承接，不能按 0 处理',
-    SOURCE_COVERAGE_NOT_ADMITTED: '来源覆盖尚未核定',
-  } as Record<string, string>)[reason] ?? reason;
+    LEGACY_RELATION_NOT_ADMITTED: '旧平台关系还没转入，不能当成没有',
+    SOURCE_COVERAGE_NOT_ADMITTED: '来源覆盖还没核对，不能按 0 处理',
+  } as Record<string, string>)[reason] ?? UNRECOGNIZED_STATE_LABEL;
 }
 export function sourceLabel(source: string) { return source === 'NATIVE' ? '本平台' : source === 'LEGACY' ? '历史观察' : '全部来源'; }
-export function roleLabel(role: string) { return ({ RENTER_REFERRAL: '租客来源', OWNER_REFERRAL: '号主来源', TASK_REFERRAL: '历史任务', ALL: '全部角色' } as Record<string, string>)[role] ?? '来源待核'; }
-export function stateLabel(state: string) { return ({ ALL: '全部状态', PENDING: '待结算', SETTLED: '已结算', REVOKED: '已撤销', RECOVERY_REQUIRED: '待追偿', EXPIRED: '历史失效', UNKNOWN: '状态待核' } as Record<string, string>)[state] ?? state; }
+export function roleLabel(role: string) { return commissionRoleLabel(role); }
+export function stateLabel(state: string) { return state === 'ALL' ? '全部状态' : commissionStateLabel(state); }
 export function eligibilityLabel(value: string) { return value === 'ELIGIBLE' ? '参与中' : value === 'INELIGIBLE' ? '不参与' : '资格待核'; }
 
 async function read<T>(path: string, query: URLSearchParams, signal?: AbortSignal): Promise<T> {

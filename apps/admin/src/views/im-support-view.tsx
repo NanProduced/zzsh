@@ -1,6 +1,6 @@
 import { orderReferenceSummary } from "@zzsh/im-client/nim-web-client";
 "use client";
-import { formatSubjectRef } from "./im-support-vocabulary";
+import { formatSubjectRef, messageScopeLabel } from "./im-support-vocabulary";
 import { NIM_RECEIPT_PENDING, nimMessageView, oldestNimMessage } from "@zzsh/im-client/nim-web-client";
 import { SupportMessageBody } from "./im-support-message-body";
 import { AftersaleInbox } from "./im-aftersale-inbox";
@@ -38,6 +38,7 @@ import { Marker, MarkerContent } from "../components/ui/marker";
 import { Message, MessageAvatar, MessageContent, MessageFooter, MessageHeader } from "../components/ui/message";
 import { Attachment, AttachmentAction, AttachmentContent, AttachmentDescription, AttachmentGroup, AttachmentMedia, AttachmentTitle } from "../components/ui/attachment";
 import { InputGroup, InputGroupAddon, InputGroupTextarea } from "../components/ui/input-group";
+
 import { Kbd } from "../components/ui/kbd";
 import { Textarea } from "../components/ui/textarea";
 
@@ -93,7 +94,7 @@ type ImToken = { appKey: string; accountId: string; token: string; transport: "n
 type PresenceToday = { seconds: number; sessions: number; users: number };
 type Presence = { adminUserId: string; availability: "OFF_DUTY" | "AVAILABLE" | "PAUSED"; connectionState: string; activeLoad: number; version: number; today?: PresenceToday };
 type SupportSection = "consultation" | "orders";
-type QueueRow = { id: string; type: SupportType; title: string; snippet: string; time: string; sortAt: number; state: "待接入" | "接待中" | "已结束" | "待核验"; unreadCount: number; consultation?: Consultation };
+type QueueRow = { id: string; type: SupportType; title: string; snippet: string; time: string; sortAt: number; state: "待接入" | "接待中" | "已结束" | "通道异常"; unreadCount: number; consultation?: Consultation };
 type UnifiedRow = {
   kind: "consultation" | "order";
   id: string;
@@ -189,7 +190,7 @@ function roundHeadlineOf(consultation: Consultation): string {
   return `${round}尚未分配接待`;
 }
 function stateLabel(state: ConsultationState): QueueRow["state"] { return state === "ACTIVE" ? "接待中" : state === "WAITING" ? "待接入" : "已结束"; }
-function scopeStateLabel(consultation: Consultation): QueueRow["state"] { return consultation.messageScopeState === "FAILED" ? "待核验" : stateLabel(consultation.state); }
+function scopeStateLabel(consultation: Consultation): QueueRow["state"] { return consultation.messageScopeState === "FAILED" ? "通道异常" : stateLabel(consultation.state); }
 function stageLabelOf(row: OrderTeamListItem): string {
   switch (row.stage) {
     case "WAITING_STAFF": return "待分配";
@@ -203,7 +204,7 @@ function stageLabelOf(row: OrderTeamListItem): string {
   }
 }
 function stageToneOf(state: string): "good" | "warn" | "neutral" {
-  return state === "接待中" || state === "租用中" ? "good" : state === "待接入" || state === "待核验" || state === "已取消" ? "warn" : "neutral";
+  return state === "接待中" || state === "租用中" ? "good" : state === "待接入" || state === "通道异常" || state === "已取消" ? "warn" : "neutral";
 }
 function connectionForPresence(state: NimWebConnectionState | "idle" | "error"): Presence["connectionState"] {
   return state === "idle" ? "DISCONNECTED" : state === "error" ? "AUTH_FAILED" : state;
@@ -894,7 +895,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     // 关键差异（会读成普通待办）。恢复 HEAD 的完整措辞，队列行不得让 FAILED
     // 看起来像正常会话。
     const snippet = item.messageScopeState === "FAILED"
-      ? "云信远端结果待人工核验，已暂停接待"
+      ? "消息通道远端结果待人工核验，已暂停接待"
       : closeOutcomeUnknown[item.id]
         ? "结束结果未确认，待平台核对"
         : last
@@ -918,7 +919,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
 
   const counts = useMemo(() => ({
     waiting: displayQueue.filter((row) => row.state === "待接入").length,
-    mine: displayQueue.filter((row) => row.state === "接待中" || row.state === "待核验").length,
+    mine: displayQueue.filter((row) => row.state === "接待中" || row.state === "通道异常").length,
   }), [displayQueue]);
   const notificationRows = useMemo(() => displayQueue.map((row) => ({
     id: row.id,
@@ -1048,7 +1049,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   );  const filteredQueue = useMemo(() => {
     const text = query.trim().toLowerCase();
     return displayQueue.filter((row) => {
-      const inFilter = filter === "waiting" ? row.state === "待接入" : row.state === "接待中" || row.state === "待核验";
+      const inFilter = filter === "waiting" ? row.state === "待接入" : row.state === "接待中" || row.state === "通道异常";
       if (!inFilter) return false;
       if (!text) return true;
       return `${row.title} ${row.snippet} ${typeLabel(row.type)}`.toLowerCase().includes(text);
@@ -1621,7 +1622,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
         if (next) setMessages((current) => ({ ...current, [key]: mergeImMessages(current[key] ?? [], [next]) }));
       }
     } catch (cause) {
-      if (cause instanceof NimMediaSendError && cause.kind === "UNSUPPORTED") setNotice("当前云信通道暂不支持发送视频或文件，未发送。");
+      if (cause instanceof NimMediaSendError && cause.kind === "UNSUPPORTED") setNotice("消息通道暂不支持发送视频或文件，未发送。");
       else setNotice(cause instanceof NimMediaSendError && cause.kind === "UNKNOWN" ? "媒体结果仍未确认" : cause instanceof Error ? cause.message : "媒体发送失败，可重试。");
     } finally {
       if (generation === operatorGenerationRef.current) { sendingRef.current = false; setSending(false); endBusy(busyOwner); }
@@ -1804,7 +1805,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
           setNotice(isUnknown ? "图片结果未确认，原图片已保留" : cause instanceof Error ? cause.message : "图片发送失败，可重试。");
         } else {
           const mediaError = cause instanceof NimMediaSendError ? cause : null;
-          setNotice(mediaError?.kind === "UNSUPPORTED" ? "当前云信通道暂不支持发送视频或文件，未发送。" : mediaError?.kind === "UNKNOWN" ? "视频/文件结果未确认，原文件已保留" : cause instanceof Error ? cause.message : "视频/文件发送失败，可重试。");
+          setNotice(mediaError?.kind === "UNSUPPORTED" ? "消息通道暂不支持发送视频或文件，未发送。" : mediaError?.kind === "UNKNOWN" ? "视频/文件结果未确认，原文件已保留" : cause instanceof Error ? cause.message : "视频/文件发送失败，可重试。");
         }
       }
     } finally {
@@ -2004,7 +2005,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
           <InputGroupTextarea ref={composerRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={onComposerKeyDown} onPaste={onComposerPaste}
             onCompositionStart={() => { composingRef.current = true; }} onCompositionEnd={() => { composingRef.current = false; }}
             aria-label="输入客服消息" rows={3}
-            placeholder={!selected ? "从左侧选择会话" : selected.state === "WAITING" ? "接入会话后可回复" : selected.state === "ACTIVE" && !isMine ? readOnlyPlaceholder ?? "仅负责客服可发送消息" : selected.messageScopeState === "FAILED" ? "云信会话待人工核验，暂不可回复" : connection !== "CONNECTED" ? "云信通道未连接，草稿会保留" : "输入回复…"}
+            placeholder={!selected ? "从左侧选择会话" : selected.state === "WAITING" ? "接入会话后可回复" : selected.state === "ACTIVE" && !isMine ? readOnlyPlaceholder ?? "仅负责客服可发送消息" : selected.messageScopeState === "FAILED" ? messageScopeLabel("FAILED") : connection !== "CONNECTED" ? "消息通道未连接，草稿会保留" : "输入回复…"}
             disabled={!canEdit} />
           <InputGroupAddon align="block-end" className="im-wb-composer-tools">
             <TooltipProvider delay={200}>

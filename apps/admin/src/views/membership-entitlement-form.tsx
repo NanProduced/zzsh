@@ -82,15 +82,9 @@ export function formatDiscountRangeLabel(min?:string,max?:string):string {
   const left=formatDiscountLabel(min),right=formatDiscountLabel(max);
   return left==='原价'&&right==='原价'?'原价':`${left} – ${right}`;
 }
-/** Strict RMB yuan string to integer cents string without float: "200" -> "20000", "0" -> "0". */
-export function parseYuanToCents(yuan: string | undefined): string | null {
-  if (typeof yuan !== 'string') return null;
-  const trimmed = yuan.trim();
-  if (!trimmed || !/^(0|[1-9]\d*)(\.\d{1,2})?$/.test(trimmed)) return null;
-  const [whole = '0', fraction = ''] = trimmed.split('.');
-  const cents = BigInt(whole) * 100n + BigInt(fraction.padEnd(2, '0'));
-  return cents.toString();
-}
+/** 元→分精确解析器与用户端共用同一出口；本文件再导出以保持既有调用方不变。 */
+import { parseYuanToCents } from '@zzsh/ui/display-money';
+export { parseYuanToCents };
 /** Strict integer cents string to yuan text: "20000" -> "200", "0" -> "0". */
 export function formatCentsToYuan(cents: string | undefined): string {
   if (!cents || !/^(0|[1-9]\d*)$/.test(cents)) return '0';

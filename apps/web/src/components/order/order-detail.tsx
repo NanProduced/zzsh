@@ -240,6 +240,7 @@ function AmountCard({ order, party, facts, readFailed }: { order: Order; party: 
         <div><dt>下单时号主报价</dt><dd>{formatOrderMoney(order.amounts?.ownerExpectedIncome ?? order.quote?.ownerTotal)}</dd></div>
       </dl> : null}
       <p className="order-muted">{posted ? "最终以结算记录为准；报价不代表已赚取或可提现。" : "按上架时约定的报价展示，不代表已赚取或可提现。"}</p>
+      {posted ? <p className="order-side-link"><WalletCards size={14} aria-hidden="true" /><Link href="/account?view=wallet" scroll={false}>查看钱包记录</Link>，可用余额与提现结果分别核对。</p> : null}
     </section>;
   }
 
@@ -528,6 +529,10 @@ export function OrderDetail({ party, status, accountId, orderId, state, onRetry,
   if (state.status === "error" && state.error) return <section className="order-detail-view">{back}<OrderError error={state.error} first={false} onRetry={onRetry} onLogin={onLogin} label="订单详情暂时无法读取" /></section>;
   if (state.status !== "ready" || !state.order) return <section className="order-detail-view">{back}<section className="order-error-block" role="status"><XCircle size={24} aria-hidden="true" /><h3>订单不可用</h3><p>当前身份没有这笔订单的可用详情，未展示另一方私人资料。</p></section></section>;
   const order = state.order;
+  if (order.viewerParty && order.viewerParty !== party) {
+    const actualTitle = order.viewerParty === "owner" ? "出租订单" : "租入订单";
+    return <section className="order-detail-view" data-testid="order-party-mismatch">{back}<section className="order-error-block" role="status"><h2>本单属于你的{actualTitle}</h2><p>请按服务端确认的交易身份查看金额与处理事项。</p><Link className="button primary" href={orderUrl(order.viewerParty, "", undefined, order.id)} scroll={false}>查看我的{actualTitle}</Link></section></section>;
+  }
   const modeLabel = orderRentalModeLabel(order);
   const sourceLabel = orderListingSourceLabel(order);
   const stageLabel = orderSettlementStageLabel(order);
@@ -541,6 +546,7 @@ export function OrderDetail({ party, status, accountId, orderId, state, onRetry,
         <h1 className="order-detail-title">{orderAccountTitle(order)}</h1>
         <p className="order-detail-meta">
           {order.accountDisplayNo ? <span className="order-detail-account-no">账号 {order.accountDisplayNo}</span> : null}
+          {order.accountId ? <Link className="account-inline-link" href={party === "owner" ? `/account?view=accounts&accountId=${encodeURIComponent(order.accountId)}` : `/accounts/${encodeURIComponent(order.accountId)}`} scroll={false}>{party === "owner" ? "查看本人账号" : "查看当前公开资料"}</Link> : null}
           <span className="order-detail-no">订单 {order.displayNo ?? "待确认"}<CopyOrderNo value={order.displayNo} /></span>
           {party === "owner" ? <span>租客：{order.renterName ?? "暂不显示"}</span> : null}
           <span>下单 {timeText(order.createdAt, { timeZoneName: false })}</span>

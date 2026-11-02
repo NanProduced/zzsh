@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { DEFAULT_RESOURCES, type ContentResource, type ResourceDefinition } from "@zzsh/content";
 import type { ContentMediaOption } from "../api";
-import { Button, StatusMessage } from "../components/ui-elements";
+import { Button } from "@/components/ui/button";
+import { StatusMessage } from "../components/ui-elements";
 import { Badge } from "../components/ui/badge";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from "../components/ui/dialog";
 import { ContentMediaField } from "./content-resource-fields";

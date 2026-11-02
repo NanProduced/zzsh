@@ -240,7 +240,8 @@ test("guarantee groups deduplicate account contexts without adding money or hidi
     assert.match(groups[1].textContent, /该账号暂无可显示的公开名称/);
     assert.doesNotMatch(groups[1].textContent, /account-2/);
     assert.equal(groups[0].querySelector("a").getAttribute("href"), "/account?view=accounts&accountId=account-1");
-    assert.match(groups[1].textContent, /当前责任无需缴纳，不代表已缴或已退/);
+    // 术语收口：NOT_REQUIRED 只说明“不需要缴”，不再叠加免责句（避免与“已缴/已退”混读）。
+    assert.match(groups[1].textContent, /该账号当前不需要缴保证金/);
     assert.equal([...mounted.host.querySelectorAll("button")].filter((b) => !b.closest(".owner-guarantee-history")).length, 1, "credit commands only; F history retry is separate");
     const headings = [...mounted.host.querySelectorAll("h3")].map(item => item.textContent);
     assert.deepEqual(headings, ["当前信用", "信用变动明细", "出租账号保证金", "收款与原路退还进度", "我的信用恢复申请", "号主上架保证金"], "F history section is hosted last and independent of credit readiness");

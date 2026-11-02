@@ -7,6 +7,12 @@ import { useUserSession, useUserSessionStore } from "../session/user-session-pro
 import { Callout, RecoveryAlert, RecordStatus, SkeletonBlock } from "@/components/ui/information";
 import { supplyApi, SupplyRequestError } from "../../lib/supply-client";
 import { formatOrderTime } from "../../lib/order-client";
+import {
+  creditEventLabel, creditRecoveryDecisionLabel, guaranteeResponsibilityLabel,
+  guaranteePaymentAttemptLabel, guaranteeRefundAttemptLabel, guaranteeProviderRequestLabel,
+  guaranteeReleasePolicyLabel,
+  UNRECOGNIZED_STATE_LABEL,
+} from "@zzsh/ui/display-credit";
 import { CreditRequestError, creditMoney, loadCreditWriteIntent, readMyCredit, type CreditGuarantee, type CreditOverview, type CreditWriteIntent } from "../../lib/credit-guarantee-client";
 import { OwnerGuaranteeHistory } from "./owner-guarantee-history";
 import "./credit-center.css";
@@ -18,9 +24,6 @@ type AccountSummaryState = { scope: string; entries: Record<string, AccountSumma
 const SUMMARY_PAGE_LIMIT = "50";
 const SUMMARY_MAX_PAGES = 6;
 
-const eventLabels: Record<string, string> = { INITIALIZED: "初始信用", BREACH_CONFIRMED: "确认违约", BREACH_REVERSED: "撤销误判", RECOVERY_APPROVED: "审核恢复", MANUAL_DEDUCTION: "人工扣分", MANUAL_DEDUCTION_REVERSED: "扣分更正" };
-const guaranteeLabels: Record<string, string> = { NOT_REQUIRED: "当前绑定无需缴纳", REQUIRED: "当前保证金责任待满足", PAYMENT_PENDING: "支付结果待确认", SATISFIED: "当前责任已覆盖", REFUND_REQUESTED: "退还申请待处理", REFUND_PROCESSING: "原路退还处理中", REFUNDED: "当前责任已退还", FAILED: "状态失败，需核对", UNKNOWN: "当前责任待确认" };
-const recoveryLabels = { PENDING: "待处理", APPROVED: "已通过", REJECTED: "已驳回" };
 /** 状态语义由服务端枚举决定，不从金额正负或字符串猜。 */
 const guaranteeTone: Record<string, "success" | "info" | "warning" | "error" | "neutral" | "unknown"> = {
   NOT_REQUIRED: "neutral", REQUIRED: "warning", PAYMENT_PENDING: "info", SATISFIED: "success",
@@ -34,13 +37,11 @@ function recordTime(value: unknown): string {
   return typeof value === "string" && Number.isFinite(Date.parse(value)) ? formatOrderTime(value, { timeZoneName: false }) : "时间暂未提供";
 }
 function attemptStatus(value: unknown, refund = false): string {
-  const labels: Record<string, string> = refund
-    ? { REQUESTED: "已申请退还", ACCEPTED: "退还已受理", PROCESSING: "原路退还处理中", SUCCEEDED: "服务端已确认本次退还", FAILED: "本次退还失败", UNKNOWN: "退还结果待确认" }
-    : { REQUESTED: "已记录支付请求", ACCEPTED: "支付已受理", PROCESSING: "支付处理中", CONFIRMED: "服务端已确认收款", FAILED: "本次支付失败", UNKNOWN: "支付结果待确认" };
-  return typeof value === "string" ? labels[value] ?? "状态待确认" : "状态待确认";
+  if (typeof value !== "string") return UNRECOGNIZED_STATE_LABEL;
+  return refund ? guaranteeRefundAttemptLabel(value) : guaranteePaymentAttemptLabel(value);
 }
 function channelStatus(value: unknown): string {
-  return ({ NOT_SUBMITTED: "尚未提交通道", SUBMITTING: "正在提交通道", SUBMITTED: "已提交通道", ACCEPTED: "通道已受理", PROCESSING: "通道处理中", UNKNOWN: "通道结果待确认", FAILED: "通道提交失败", NOT_AUTHORIZED: "暂不可提交通道" } as Record<string, string>)[String(value)] ?? "通道状态待确认";
+  return guaranteeProviderRequestLabel("payment", typeof value === "string" ? value : "");
 }
 function observedMoney(value: unknown): string {
   return typeof value === "string" && /^(0|[1-9]\d{0,23})$/.test(value) ? creditMoney(value) : "待核定";
@@ -171,13 +172,13 @@ export function CreditCenter({ scope }: { scope: string }) {
         </div>
         <dl className="credit-summary-facts"><div><dt>保证金责任</dt><dd>按出租账号分别查看</dd><small>不与租客押金或钱包余额混用。</small></div><div><dt>交易准入</dt><dd>以具体业务核验为准</dd><small>信用分不代表可以交易或无需保证金。</small></div><div><dt>信用恢复</dt><dd>查看下方申请记录</dd><small>申请资格与可申请时间暂未提供。</small></div></dl>
       </section>
-      <section className="account-module-card credit-events"><div className="credit-card-heading"><div><h3>信用变动明细</h3><p>本人可见的原因、分数变化与记录状态。</p></div></div>{data.credit?.events.length ? <ul>{data.credit.events.map((item) => <li key={item.id}><div><strong>{eventLabels[item.eventType] ?? "信用事件"}</strong><span>{item.visibleReason}</span><small>{recordTime(item.createdAt)}</small></div><b>{item.scoreBefore} → {item.scoreAfter}</b><em data-state={item.reversed ? "reversed" : "active"}><RecordStatus tone={item.reversed ? "neutral" : "info"}>{item.reversed ? "已撤销" : "已记录"}</RecordStatus></em></li>)}</ul> : <p className="credit-muted">{data.credit ? "暂无信用变动记录。" : data.creditState === "NOT_INITIALIZED" ? "信用档案尚未初始化，变动记录暂不可用。" : "信用变动记录暂未确认。"}</p>}</section>
+      <section className="account-module-card credit-events"><div className="credit-card-heading"><div><h3>信用变动明细</h3><p>本人可见的原因、分数变化与记录状态。</p></div></div>{data.credit?.events.length ? <ul>{data.credit.events.map((item) => <li key={item.id}><div><strong>{creditEventLabel(item.eventType, "信用事件")}</strong><span>{item.visibleReason}</span><small>{recordTime(item.createdAt)}</small></div><b>{item.scoreBefore} → {item.scoreAfter}</b><em data-state={item.reversed ? "reversed" : "active"}><RecordStatus tone={item.reversed ? "neutral" : "info"}>{item.reversed ? "已撤销" : "已记录"}</RecordStatus></em></li>)}</ul> : <p className="credit-muted">{data.credit ? "暂无信用变动记录。" : data.creditState === "NOT_INITIALIZED" ? "还没有建立你的信用档案，暂时看不到变动记录。" : "信用变动记录暂未确认。"}</p>}</section>
       <section className="account-module-card credit-guarantees"><div className="credit-card-heading"><div><h3>出租账号保证金</h3><p>同一账号的责任放在一起查看，多项责任不代表多笔实缴。</p></div></div>
         {accountGroups.size ? <div className="credit-guarantee-list">{[...accountGroups].map(([accountId, group]) => { const heading = accountHeading(accountId); return <article key={accountId} data-account-id={accountId}>
           <header><h4><Link href={`/account?view=accounts&accountId=${encodeURIComponent(accountId)}`} scroll={false}>{heading.primary}</Link></h4><span className="credit-account-meta">{[heading.secondary, group.contexts.length > 1 ? `${group.contexts.length} 项保证金责任` : null].filter(Boolean).join(" · ")}</span></header>
           {group.contexts.map(item => <div className="credit-responsibility" key={`${item.versionId}:${item.priceVersionId}:${item.releaseId}`}>
-            <div className="credit-responsibility-heading"><strong><RecordStatus tone={guaranteeTone[item.state] ?? "unknown"}>{guaranteeLabels[item.state] ?? "状态未知"}</RecordStatus></strong><span>信用 {item.score ?? "待确认"}</span></div>
-            <dl><div><dt>计算基数</dt><dd>{creditMoney(item.baseCents)}</dd></div><div><dt>当前应缴要求</dt><dd>{item.state === "UNKNOWN" ? "待核定" : creditMoney(item.requiredCents)}</dd></div><div><dt>责任说明</dt><dd>{item.reasonCode === "PAYMENT_UNDERPAID" ? "已确认收款尚未覆盖当前要求" : item.state === "NOT_REQUIRED" ? "当前责任无需缴纳，不代表已缴或已退。" : item.state === "REQUIRED" ? "责任尚未满足，不代表已经扣款。" : item.state === "SATISFIED" ? "服务端已确认本责任覆盖，不代表钱包收入。" : guaranteeLabels[item.state] ?? "待确认"}</dd></div></dl>
+            <div className="credit-responsibility-heading"><strong><RecordStatus tone={guaranteeTone[item.state] ?? "unknown"}>{guaranteeResponsibilityLabel(item.state)}</RecordStatus></strong><span>信用 {item.score ?? "待确认"}</span></div>
+            <dl><div><dt>计算基数</dt><dd>{creditMoney(item.baseCents)}</dd></div><div><dt>当前应缴要求</dt><dd>{item.state === "UNKNOWN" ? "待核定" : creditMoney(item.requiredCents)}</dd></div><div><dt>责任说明</dt><dd>{item.reasonCode === "PAYMENT_UNDERPAID" ? "已收的款还不够当前要求" : item.state === "NOT_REQUIRED" ? "该账号当前不需要缴保证金。" : item.state === "REQUIRED" ? "还需缴纳保证金才能继续出租。" : item.state === "SATISFIED" ? "保证金已缴足，不计入你的可用余额。" : guaranteeResponsibilityLabel(item.state)}</dd></div></dl>
             {item.state === "PAYMENT_PENDING" ? <p className="credit-muted">{attemptStatus(item.paymentState)} · {channelStatus(item.paymentProviderState)}，支付结果仍待确认。</p> : null}
             {["REFUND_REQUESTED", "REFUND_PROCESSING"].includes(item.state) ? <p className="credit-muted">原路退还仍在处理，尚无到账确认。</p> : null}
             {item.state === "REFUNDED" ? <p className="credit-muted">服务端已记录本责任退还，不代表全部历史资金已退清。</p> : null}
@@ -198,7 +199,7 @@ export function CreditCenter({ scope }: { scope: string }) {
             <span><RecordStatus tone={attemptTone(attempt.status)}>{attemptStatus(attempt.status, true)}</RecordStatus></span>
             <div className="credit-attempt-amounts"><span>申请退还金额<strong>{creditMoney(attempt.amountCents)}</strong></span><span>已观测到账金额<strong>暂未提供</strong></span></div>
             <small>原支付业务单号：{businessNo(item.paymentHistory.find(payment => payment.id === attempt.paymentId)?.merchantOrderNo)}</small>
-            <small>退还审核：{({ OWNER_DECISION_REQUIRED: "等待处理", APPROVED: "已通过", REJECTED: "已驳回" } as Record<string, string>)[String(attempt.releasePolicyState)] ?? "待确认"} · 创建时间：{recordTime(attempt.createdAt)}</small>
+            <small>退还审核：{guaranteeReleasePolicyLabel(String(attempt.releasePolicyState ?? ""))} · 创建时间：{recordTime(attempt.createdAt)}</small>
             <small>用户退款单号、处理理由及完成时间暂未提供；创建时间不是到账时间。</small>
           </li>)}</ul></details> : <p className="credit-muted">暂无退还尝试记录。</p>}
         </li>)}</ul> : <p className="credit-muted">暂无收退款单据。</p>}
@@ -207,7 +208,7 @@ export function CreditCenter({ scope }: { scope: string }) {
         <div className="credit-card-heading"><h3 id="credit-recovery-records">我的信用恢复申请</h3></div><Callout title="恢复申请的范围">申请资格与可申请时间当前没有读取来源，本页不据此推算，也不提供提交入口。下方逐笔保留你提交的申请内容、处理理由与状态。</Callout>
         {data.recoveryRequests.length ? <ul>{data.recoveryRequests.map(item => <li key={item.id}>
           <div><strong>申请内容：{item.reason}</strong><span>处理理由：{item.status === "PENDING" ? "等待处理" : item.decisionReason ?? "暂未提供"}</span><small>申请时间：{recordTime(item.createdAt)}</small><small>处理时间：{item.status === "PENDING" ? "等待处理" : recordTime(item.decidedAt)}</small></div>
-          <em data-state={item.status}><RecordStatus tone={recoveryTone[item.status] ?? "unknown"}>{recoveryLabels[item.status]}</RecordStatus></em>
+          <em data-state={item.status}><RecordStatus tone={recoveryTone[item.status] ?? "unknown"}>{creditRecoveryDecisionLabel(item.status)}</RecordStatus></em>
         </li>)}</ul> : <p className="credit-muted">暂无恢复申请记录。</p>}
       </section>
     </> : null}

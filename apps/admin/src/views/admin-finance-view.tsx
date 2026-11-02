@@ -133,7 +133,7 @@ export function HistoricalFinanceDetail({ historical, recordKind, orderRead, doc
   const denied = association?.state === 'DENIED' || association?.state === 'MATCHED' && !relationAllowed;
   const matched = association?.state === 'MATCHED' && !denied;
   const path = historicalAssociationPath(historical, { orderRead, documentRead });
-  const relationLabel = matched ? ({ ORDER: '关联订单', WITHDRAWAL: '关联提现单', DISTRIBUTION: '关联分销记录', TASK: '关联任务', UNKNOWN: '关联记录' }[association.kind]) : denied ? '关联信息无权限' : association?.state === 'AMBIGUOUS' ? '存在多条关联候选，待核对' : '关联待核';
+  const relationLabel = matched ? association.kind === 'WITHDRAWAL' && historical.purposeCode === 'WITHDRAWAL_APPLICATION' ? '关联余额扣款流水' : ({ ORDER: '关联订单', WITHDRAWAL: '关联提现单', DISTRIBUTION: '关联分销记录', TASK: '关联任务', UNKNOWN: '关联记录' }[association.kind]) : denied ? '关联信息无权限' : association?.state === 'AMBIGUOUS' ? '存在多条关联候选，待核对' : '关联待核';
   const sameWithdrawal = matched && association.kind === 'WITHDRAWAL';
   return <div data-historical-finance className="mt-2 space-y-2 text-xs">
     <div className="flex flex-wrap items-center gap-2"><Badge variant="outline">{historical.purposeCode === 'WITHDRAWAL_APPLICATION' ? '提现申请记录' : historical.purposeCode === 'WITHDRAWAL_DEBIT' ? '余额扣款记录' : '旧平台记录'}</Badge><Badge variant="warning">渠道未核</Badge></div>

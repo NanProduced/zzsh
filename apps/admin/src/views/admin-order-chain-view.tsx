@@ -19,7 +19,7 @@ import { LegacyAdminContinuationPanel } from "./legacy-continuation-panel";
 import { AdminCollectionQueryBox, AdminNativeRefundPanel, normalRefundBasis } from "./admin-joinpay-ops-panel";
 import { AdminPrestartTerminationPanel } from "./admin-prestart-termination-panel";
 import { AdminOriginalRefundPanel } from "./admin-original-refund-panel";
-import { Button } from "../components/ui-elements";
+import { Button } from "@/components/ui/button";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { OrderStages as Stages, ORDER_STATUS_LABELS, type OrderProgress } from "./admin-order-stages";
 import { EntityPreviewTrigger, AccountPreviewCard, UserPreviewCard } from "../components/admin-preview";

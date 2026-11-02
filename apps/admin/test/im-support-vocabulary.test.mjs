@@ -20,7 +20,7 @@ test("im-support-vocabulary: standard mappings return correct business terms", (
   assert.equal(formatVocabulary(CONSULTATION_TYPE_VOCABULARY, "ORDER"), "订单群");
 
   assert.equal(formatVocabulary(CONSULTATION_STATE_VOCABULARY, "WAITING"), "待接入");
-  assert.equal(formatVocabulary(CONSULTATION_STATE_VOCABULARY, "ACTIVE"), "处理中");
+  assert.equal(formatVocabulary(CONSULTATION_STATE_VOCABULARY, "ACTIVE"), "接待中");
   assert.equal(formatVocabulary(CONSULTATION_STATE_VOCABULARY, "CLOSED"), "已结束");
 
   assert.equal(formatVocabulary(CONSULTATION_EVENT_VOCABULARY, "CREATED"), "发起咨询");

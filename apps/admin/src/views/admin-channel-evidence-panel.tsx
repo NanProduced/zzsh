@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { adminRequest, AdminApiError } from "../api";
-import { Button } from "../components/ui-elements";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { formatFundingCents } from "./supply-review/model";
 import { channelEvidenceErrorDisplay, channelEvidenceStatusDisplay, evidenceCents, type ChannelEvidenceDisplay } from "./admin-channel-evidence-model";
@@ -50,8 +51,8 @@ export function ChannelEvidenceLookup({ canRead, canSearch }: { canRead: boolean
   const search = () => valid ? void load(`/finance/channel-evidence/originals/${encodeURIComponent(merchant)}?${new URLSearchParams({ productFamily: family, merchantOrderNo: ref })}`, seq, setState) : setState({ display: { kind: "unknown", text: "商户标识或原号格式无效" } });
   const w = state?.body?.withdrawal as Section | undefined, s = state?.body?.search as Section | undefined;
   return <div className="finance-channel-evidence space-y-1 text-sm" data-channel-evidence="lookup" role="group" aria-label="渠道证据读取">
-    <div className="flex flex-wrap gap-2"><input aria-label="证据商户标识" placeholder="商户标识" value={merchant} onChange={e => { reset(); setMerchant(e.target.value.trim()); }}/>
-      <input aria-label="原申请或商户原号" placeholder="原申请/商户原号" value={ref} onChange={e => { reset(); setRef(e.target.value.trim()); }}/>
+    <div className="flex flex-wrap items-center gap-2"><Input aria-label="证据商户标识" placeholder="商户标识" value={merchant} onChange={e => { reset(); setMerchant(e.target.value.trim()); }} className="h-9 w-36 text-xs font-mono" />
+      <Input aria-label="原申请或商户原号" placeholder="原申请/商户原号" value={ref} onChange={e => { reset(); setRef(e.target.value.trim()); }} className="h-9 w-44 text-xs font-mono" />
       <Button size="sm" type="button" variant="secondary" onClick={withdrawal}>读取提现证据</Button>
       {canSearch ? <>
         <Select

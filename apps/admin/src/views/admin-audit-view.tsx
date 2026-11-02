@@ -11,7 +11,8 @@ import {
 
 import { Icons } from "../components/icons";
 import { AuditRetentionPanel } from "./audit-retention-panel";
-import { Button, StatusMessage } from "../components/ui-elements";
+import { Button } from "@/components/ui/button";
+import { StatusMessage } from "../components/ui-elements";
 import { EmptyState, EndOfFeed } from "../components/empty-state";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Skeleton } from "../components/ui/skeleton";

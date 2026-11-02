@@ -3,7 +3,8 @@ import { BookOpen, FileText, ImageOff, Plus, RefreshCw, Search } from "lucide-re
 import { type GuideResource } from "@zzsh/content";
 import { adminRequest, friendlyError, hasPermission, type ContentGame, type SessionSnapshot } from "../api";
 import { Badge } from "../components/ui/badge";
-import { Button, StatusMessage } from "../components/ui-elements";
+import { Button } from "@/components/ui/button";
+import { StatusMessage } from "../components/ui-elements";
 import { Input } from "../components/ui/input";
 import { Field } from "../components/ui/field";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from "../components/ui/dialog";

@@ -205,10 +205,29 @@ test('guarantee details preserve every payment and refund attempt without exposi
   const h = await mount(t, { adapter: a }); await waitFor(() => button('号主保证金与收退记录')); await click(button('号主保证金与收退记录'));
   await waitFor(() => button('支付尝试 2 笔')); await click(button('支付尝试 2 笔')); await click(button('退款尝试 2 笔'));
   for (const ref of ['synthetic-merchant-1', 'synthetic-merchant-2', 'synthetic-refund-1', 'synthetic-refund-2']) assert.ok(h.host.textContent.includes(ref), ref);
-  assert.match(h.host.textContent, /资格、收退记录与渠道到账分别核对/); assert.match(h.host.textContent, /待核/);
-  await click(button('恢复申请')); assert.match(h.host.textContent, /待审核/);
+  assert.match(h.host.textContent, /资格、收退记录与渠道到账分别核对/);
+  // 术语收口前，责任表被套用去解释尝试状态，已确认收款与结果未明的退款都读成“待核”。
+  const attemptCells = [...h.host.querySelectorAll('td')].map((cell) => cell.textContent.trim());
+  for (const expected of ['缴纳失败', '缴纳款已记录', '退还失败，需核对', '退还结果待确认']) assert.ok(attemptCells.includes(expected), expected);
+  assert.ok(!attemptCells.includes('待核'), '尝试状态不得再落回旧兜底');
+  await click(button('恢复申请')); assert.match(h.host.textContent, /恢复申请待审核/);
   for (const command of ['批准 +10', '驳回', '允许原路退还', '发起支付', '发起退款']) assert.equal(button(command), undefined, command);
   assert.equal(a.calls.write.length, 0); assert.equal(h.historyCalls.length, 1);
+});
+
+test('guarantee responsibility and unknown codes use their own words, never the shared 待核 fallback', async t => {
+  const a = adapter({ guaranteeRead: true });
+  a.data.guarantees = [
+    { accountId: 'synthetic-account', versionId: 'v1', priceVersionId: 'p1', displayNo: 'ZZ-SYNTH-1', state: 'SATISFIED', requiredCents: '50000' },
+    { accountId: 'synthetic-account-2', versionId: 'v2', priceVersionId: 'p2', displayNo: 'ZZ-SYNTH-2', state: 'REFUND_REQUESTED', requiredCents: '0' },
+    { accountId: 'synthetic-account-3', versionId: 'v3', priceVersionId: 'p3', displayNo: 'ZZ-SYNTH-3', state: 'FUTURE_STATE', requiredCents: '0' },
+  ];
+  const h = await mount(t, { adapter: a }); await waitFor(() => button('号主保证金与收退记录')); await click(button('号主保证金与收退记录'));
+  const cells = [...h.host.querySelectorAll('td')].map((cell) => cell.textContent.trim());
+  assert.ok(cells.includes('保证金已缴足'), 'SATISFIED');
+  assert.ok(cells.includes('已申请退还保证金'), 'REFUND_REQUESTED');
+  assert.ok(cells.includes('状态暂不识别，请刷新后核对'), '未登记值必须有诚实回退');
+  assert.ok(!cells.includes('待核'), '责任表不得再产生裸“待核”');
 });
 
 test('guarantee history remains independently readable after the credit reader fails, and denied roles do not fetch it', async t => {

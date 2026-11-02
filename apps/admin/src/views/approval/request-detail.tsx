@@ -3,7 +3,8 @@ import {
   Ban, Check, Clock, FilePlus2, Settings2, UserPlus, X, Play, TriangleAlert,
 } from "lucide-react";
 
-import { Button, PasswordInput } from "../../components/ui-elements";
+import { Button } from "@/components/ui/button";
+import { PasswordInput } from "../../components/ui-elements";
 import { StepUpCaptcha } from "../../components/altcha-field";
 import { Badge } from "../../components/ui/badge";
 import {

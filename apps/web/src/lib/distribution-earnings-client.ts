@@ -1,9 +1,10 @@
+import {commissionStateLabel as uiCommissionStateLabel} from '@zzsh/ui/display-distribution';
 import {WalletRequestError} from './personal-wallet-client.ts';
 const originalStates=['ALL','PENDING','SETTLED','REVOKED','RECOVERY_REQUIRED','EXPIRED'] as const;
 export const earningStates=['ALL','PENDING','MATURED','SETTLED','VOID','REVOKED','RECOVERY_REQUIRED','EXPIRED','UNKNOWN'] as const;
 export type EarningFilter=typeof earningStates[number];
 export type CommissionRecordState=Exclude<EarningFilter,'ALL'>;
-export function commissionStateLabel(state:EarningFilter):string{return({ALL:'全部记录',PENDING:'待结算',MATURED:'待入账',SETTLED:'已结算',VOID:'已取消',REVOKED:'已撤销',RECOVERY_REQUIRED:'待追回',EXPIRED:'已失效',UNKNOWN:'待核对'} as const)[state];}
+export function commissionStateLabel(state:EarningFilter):string{return state==='ALL'?'全部记录':uiCommissionStateLabel(state);}
 export type CurrentLegacyFinance={knowledge:'UNKNOWN';reason:string}|{knowledge:'KNOWN';state:'SETTLED';amountCents:string;zeroFinalization:boolean;reference:{type:'LEDGER_ENTRY'|'FINANCE_EVENT';id:string;digest:string}};
 export type CurrentLegacyResponsibility={knowledge:'UNKNOWN';reason:string}|{knowledge:'KNOWN';dutyId:string;orderId:string;state:'PENDING'|'MATURED'|'SETTLED'|'VOID';amountCents:string;currency:'CNY';revision:string;revised:boolean;maturityAt:string|null;settledBy:'FINANCE'|'LEGACY_RECORDS'|null};
 export type EarningCalculation={knowledge:'NOT_RECORDED'|'UNKNOWN';reason:string}|{knowledge:'KNOWN';policyVersion:string;beneficiaryLevelCode:string|null;rateMode?:'UNIFORM';percent:string;basis:'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE';baseDisclosure:'INTERNAL_SETTLEMENT_ONLY';rounding:'HALF_UP_CENT';cap:'COMBINED_ROLES_NOT_ABOVE_BASE';scope:'LOCAL_CONTROLLED'|'NATIVE';orderNumber:string|null};
@@ -80,7 +81,8 @@ export function earningsPage(value:unknown,userId:string,state:EarningFilter,exp
  if(count!==null&&count!==mapped||BigInt(mapped)<BigInt(items.length)||cursor&&!items.length||new Set(items.map((i:EarningItem)=>i.id)).size!==items.length||items.some((i:EarningItem)=>state!=='ALL'&&(version===2&&i.record?i.record.effectiveState:i.state)!==state))throw bad();
  const amount=(v:any):SourceAmount=>{const a=obj(v);if(!['KNOWN','UNKNOWN'].includes(a.knowledge)||(a.knowledge==='KNOWN')!==(a.amountCents!==null))throw bad();return{knowledge:a.knowledge,amountCents:a.amountCents===null?null:cents(a.amountCents)};};
  const amounts=version===2?(()=>{const a=obj(r.amountsByOrigin);if(a.scope!=='SOURCE_RECORDS_ONLY')throw bad();return{scope:'SOURCE_RECORDS_ONLY' as const,native:amount(a.native),historical:amount(a.historical),mappedHistoricalAmountCents:cents(a.mappedHistoricalAmountCents)};})():undefined;
- if(amounts&&((r.totalAmountKnowledge==='KNOWN')!==(amounts.native.knowledge==='KNOWN'&&amounts.historical.knowledge==='KNOWN')||r.totalAmountKnowledge==='KNOWN'&&r.knowledge!=='KNOWN'
+ // Source amount coverage does not close unclassified current responsibility states.
+ if(amounts&&((r.totalAmountKnowledge==='KNOWN')!==(amounts.native.knowledge==='KNOWN'&&amounts.historical.knowledge==='KNOWN')
   ||amounts.historical.amountCents!==null&&amounts.historical.amountCents!==amounts.mappedHistoricalAmountCents))throw bad();
  const recordSummary=version===2&&r.recordSummary!==undefined?commissionRecordSummary(r.recordSummary):undefined;
  if(recordSummary&&(recordSummary.mappedRecordCount!==mapped||state==='ALL'&&recordSummary.unclassifiedRecordCount!==undefined&&recordSummary.unclassifiedRecordCount!==recordSummary.unknownStateCount))throw bad();

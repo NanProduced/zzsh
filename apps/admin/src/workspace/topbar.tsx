@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { CheckIcon, LaptopIcon, LockIcon, MoonIcon, RefreshCwIcon, SunIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { ActionTooltip } from "@/components/ui/tooltip";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -85,9 +86,11 @@ export function WorkspaceTopbar({
             已临时应用，无法保存在此浏览器
           </span>
         )}
-        <Button variant="ghost" size="icon-sm" aria-label="刷新当前页" onClick={onRefresh} disabled={refreshing || refreshDisabled}>
-          <RefreshCwIcon className={refreshing ? "size-4 animate-spin" : "size-4"} />
-        </Button>
+        <ActionTooltip content="刷新当前页">
+          <Button variant="ghost" size="icon-sm" aria-label="刷新当前页" onClick={onRefresh} disabled={refreshing || refreshDisabled}>
+            <RefreshCwIcon className={refreshing ? "size-4 animate-spin" : "size-4"} />
+          </Button>
+        </ActionTooltip>
         {onSelectThemeMode ? (
           <DropdownMenu>
             <DropdownMenuTrigger
@@ -127,13 +130,17 @@ export function WorkspaceTopbar({
             </DropdownMenuContent>
           </DropdownMenu>
         ) : (
-          <Button variant="ghost" size="icon-sm" aria-label={theme === "dark" ? "切换到浅色主题" : "切换到深色主题"} onClick={onToggleTheme}>
-            {theme === "dark" ? <SunIcon className="size-4" /> : <MoonIcon className="size-4" />}
-          </Button>
+          <ActionTooltip content={theme === "dark" ? "切换到浅色主题" : "切换到深色主题"}>
+            <Button variant="ghost" size="icon-sm" aria-label={theme === "dark" ? "切换到浅色主题" : "切换到深色主题"} onClick={onToggleTheme}>
+              {theme === "dark" ? <SunIcon className="size-4" /> : <MoonIcon className="size-4" />}
+            </Button>
+          </ActionTooltip>
         )}
-        <Button variant="ghost" size="icon-sm" aria-label="锁定当前会话" onClick={onLock} disabled={!canLock} className="max-[1024px]:hidden">
-          <LockIcon className="size-4" />
-        </Button>
+        <ActionTooltip content="锁定当前会话">
+          <Button variant="ghost" size="icon-sm" aria-label="锁定当前会话" onClick={onLock} disabled={!canLock} className="max-[1024px]:hidden">
+            <LockIcon className="size-4" />
+          </Button>
+        </ActionTooltip>
       </div>
     </header>
   );

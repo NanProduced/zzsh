@@ -145,7 +145,11 @@ function RecordList({ title, records }: { title: string; records: Array<{ label:
   if (records.length === 0) return null;
   return <div className="order-records">
     <h3>{title}</h3>
-    <ul>{records.map((record, index) => <li key={`${record.label}-${index}`}><span className="order-record-mark" aria-hidden="true"><CheckCircle2 size={13} /></span><span>{record.label}</span>{record.time ? <time dateTime={record.time}>{new Date(record.time).toLocaleString("zh-CN")}</time> : <span className="order-muted">待确认</span>}</li>)}</ul>
+    <ul>{records.map((record, index) => {
+      const recordedAt = record.time;
+      const knownTime = typeof recordedAt === "string" && Number.isFinite(Date.parse(recordedAt));
+      return <li key={`${record.label}-${index}`}><span className="order-record-mark" aria-hidden="true"><CheckCircle2 size={13} /></span><span>{record.label}</span>{knownTime ? <time dateTime={recordedAt}>{formatOrderTime(recordedAt)}</time> : <span className="order-muted">时间待确认</span>}</li>;
+    })}</ul>
   </div>;
 }
 
@@ -545,7 +549,7 @@ function OpeningPanel({ opening, order, party, onChanged }: { opening: Settlemen
     {!confirmed && !acked && !unknown ? <button type="button" className="button" onClick={() => void confirm()} disabled={busy}>{busy ? "确认中…" : "确认期初并开租"}</button> : null}
     {!confirmed && acked ? <p className="order-muted"><Clock3 size={14} aria-hidden="true" /> 已提交确认；等待对方确认后正式开租。</p> : null}
     <RecordList title="确认记录" records={acks.map((ack) => ({ label: `${partyLabel(ack.party)}确认期初`, time: ack.createdAt ?? null }))} />
-    {opening.confirmedAt ? <p className="order-muted">开租时间：{new Date(opening.confirmedAt).toLocaleString("zh-CN")}</p> : null}
+    {opening.confirmedAt ? <p className="order-muted">开租时间：{formatOrderTime(opening.confirmedAt)}</p> : null}
   </div>;
 }
 
@@ -853,7 +857,7 @@ function DecisionPanel({ version, party, order, onChanged }: { version: Settleme
     {unknown ? <UnknownNotice label="结算决定结果未知" message={unknown} onQuery={() => void query()} onOpenOrder={onChanged} /> : null}
     {error ? <p className="order-inline-notice" role="alert">{error}</p> : null}
     {version.early && order.earlySettlementDisclosure && !decided && !locked ? <><p>{order.earlySettlementDisclosure.body}</p><label className="order-trade-consent"><input type="checkbox" checked={termsAccepted} disabled={busy !== null} onChange={(event) => setTermsAccepted(event.target.checked)} /><span>我已核对并接受本次提前结束的费用与退款安排</span></label></> : null}
-    {decided ? <p className="order-muted">{decided.action === "CONFIRM" ? "你已确认这一版结算" : "你已拒绝这一版结算"} · {decided.createdAt ? new Date(decided.createdAt).toLocaleString("zh-CN") : ""}</p> :
+    {decided ? <p className="order-muted">{decided.action === "CONFIRM" ? "你已确认这一版结算" : "你已拒绝这一版结算"} · {formatOrderTime(decided.createdAt)}</p> :
       locked ? null :
       <div className="order-trade-actions">
         {!confirmable ? <p className="order-inline-notice" role="status">这一版的拟调整金额暂时不可读，确认已暂时停用；可以刷新、拒绝，或先查询原请求。拒绝与查询不受影响。</p> : null}
@@ -915,7 +919,7 @@ function PostingResult({ data, order, party, posting }: { data: OrderSettlement;
   const fee = typeof posting.compensationFeeCents === "string" && /^\d+$/.test(posting.compensationFeeCents) ? moneyCents(posting.compensationFeeCents) : null;
   const adjustment = posting.manualAdjustment;
   // The posted snapshot carries the fee decision; the response-level amounts only exist on a preview.
-  const effectiveAmounts = posting.amounts ?? data.amounts ?? null;
+  const effectiveAmounts = posting.amounts ?? null;
   const feePayer = effectiveAmounts && typeof effectiveAmounts.feePayer === "string" ? effectiveAmounts.feePayer : null;
   const amountRows = postingAmountRows(party, posting);
   const captured = typeof posting.capturedCents === "string" && /^\d+$/.test(posting.capturedCents) ? moneyCents(posting.capturedCents) : "待确认";
@@ -932,10 +936,10 @@ function PostingResult({ data, order, party, posting }: { data: OrderSettlement;
         </> : <>
           <div><dt>本单净入账</dt><dd>{moneyCents(posting.owner?.availableCents)}</dd></div>
           <div><dt>本次毛收入</dt><dd>{moneyText(posting.owner?.gross)}</dd></div>
-          <div><dt>包赔费{feePayer ? `（${feePayer === "OWNER" ? "号主" : feePayer === "RENTER" ? "租客" : "平台"}承担）` : ""}</dt><dd>{fee ?? "待确认"}</dd></div>
+          {feePayer === "OWNER" ? <div><dt>包赔费（号主承担）</dt><dd>{fee ?? "待确认"}</dd></div> : null}
         </>}
-        <div><dt>原订单已付</dt><dd>{captured}</dd></div>
-        <div><dt>退款应付款时间</dt><dd>{posting.refundDueAt ? new Date(posting.refundDueAt).toLocaleString("zh-CN") : "待确认"}</dd></div>
+        {party === "renter" ? <><div><dt>原订单已付</dt><dd>{captured}</dd></div>
+        <div><dt>退款应付款时间</dt><dd>{formatOrderTime(posting.refundDueAt)}</dd></div></> : null}
       </dl>
       <p className="order-muted">{party === "owner" ? "本单净入账只表示这一笔订单的净额，不代表钱包全部余额或提现结果。" : "最终应退为已生效的应付金额；退款到账结果待确认，需以收款渠道的实际记录为准，可在我的钱包查看。"}</p>
       {amountRows.length ? <AmountTable rows={amountRows} caption={`生效结算金额明细（${party === "renter" ? "租客口径" : "号主口径"}）`} /> : null}
@@ -964,8 +968,8 @@ function VersionHistory({ versions, current }: { versions: SettlementVersion[]; 
     return <li key={version.id} data-state={version.supersededAt ? "superseded" : version.id === current?.id ? "current" : undefined}>
       <span className="order-version-no">第{version.versionNo}版</span>
       <span className="order-version-kind">{version.early ? "提前结算" : version.kind === "MANUAL_ADJUSTMENT" ? "人工调整" : "正常结算"}</span>
-      {version.supersededAt ? <span className="order-version-state">已被替换 · {new Date(version.supersededAt).toLocaleString("zh-CN")}</span> : <span className="order-version-state">当前版本</span>}
-      {decisions.length ? <span className="order-version-decisions">{decisions.map((decision) => `${partyLabel(decision.party)}${decision.action === "CONFIRM" ? "已确认" : "已拒绝"}${decision.createdAt ? ` ${new Date(decision.createdAt).toLocaleString("zh-CN")}` : ""}`).join(" · ")}</span> : null}
+      {version.supersededAt ? <span className="order-version-state">已被替换 · {formatOrderTime(version.supersededAt)}</span> : <span className="order-version-state">当前版本</span>}
+      {decisions.length ? <span className="order-version-decisions">{decisions.map((decision) => `${partyLabel(decision.party)}${decision.action === "CONFIRM" ? "已确认" : "已拒绝"}${decision.createdAt ? ` ${formatOrderTime(decision.createdAt)}` : ""}`).join(" · ")}</span> : null}
       {reason ? <span className="order-version-reason">说明：{reason}</span> : null}
       {version.supersededAt ? <span className="order-version-readonly">历史版本只读，不能再对其确认。</span> : null}
     </li>;

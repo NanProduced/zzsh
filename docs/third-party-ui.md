@@ -18,7 +18,7 @@ OTP 动效组件位于 components/smoothui/，基于 input-otp 与 motion；准�
 
 二维码使用 qrcode.react，在浏览器本地生成。Logo 为 Owner 提供的项目物料，见 assets/brand/README.md。未使用的模板演示页、备用图和旧粒子组件已移出应用源码。
 
-管理工作台改为三套固定编排，公共组件位于 `apps/admin/src/components/dashboard/`，底层继续复用 PaceUI 壳、Base UI 与现有 Card/Table/Badge；不引入 GridStack 或自由布局。页头构图参考 [devl Dashboard Header](https://devl.dev/blocks/dashboard-header)，未复制其coss等第三方组件；业务数据与空/未知由本仓处理。新图表通过唯一 `apps/admin/src/components/ui/chart.tsx` 使用Recharts 3.8.0，实际选择采用 [EvilCharts固定MIT源码](https://github.com/legions-developer/evilcharts/tree/4c2dd7c9bae780703244265c9a4b509d40c055ad) 的context、Area/Bar渐变核心、tooltip及legend映射；原文许可和逐文件/功能适配表在 [EvilCharts采用记录](../apps/admin/src/vendor/evilcharts/COPYING.md)。仅保留当前所需primitive，复用house Button与主题，没有整套compound、随机示例数据、第二引擎或Pro资源。旧图表逐步迁入该基座，不能把新基座存在当成全站迁移完成。Dashboardblocks/ReUI Pro整页未引入。
+管理工作台改为三套固定编排，公共组件位于 `apps/admin/src/components/dashboard/`，底层继续复用 PaceUI 壳、Base UI 与现有 Card/Table/Badge；不引入 GridStack 或自由布局。页头构图参考 [devl Dashboard Header](https://devl.dev/blocks/dashboard-header)，未复制其coss等第三方组件；业务数据与空/未知由本仓处理。新图表通过唯一 `apps/admin/src/components/ui/chart.tsx` 使用Recharts 3.8.0，实际选择采用 [EvilCharts固定MIT源码](https://github.com/legions-developer/evilcharts/tree/4c2dd7c9bae780703244265c9a4b509d40c055ad) 的context、Area/Bar渐变核心、tooltip及legend映射；原文许可和逐文件/功能适配表在 [EvilCharts采用记录](../apps/admin/src/vendor/evilcharts/COPYING.md)。仅保留当前所需primitive，复用house Button与主题，没有整套compound、随机示例数据、第二引擎或Pro资源。现有工作台、分销趋势及客服统计等存量图表已统一迁入该基座，全站图表收敛至单一 ChartContainer 与 EvilCharts recharts-core 测量闭环。Dashboardblocks/ReUI Pro整页未引入。
 
 用户端咨询浮层使用 @radix-ui/react-popover 1.1.23（MIT），复用现有Radix Dialog与Lucide；仅新增Popover基础依赖，未新增动画框架。联系方式为可配置的公开展示数据，当前占位不生成二维码。
 

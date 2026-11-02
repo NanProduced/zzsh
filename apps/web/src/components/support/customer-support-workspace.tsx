@@ -27,6 +27,7 @@ import { MediaDraftBar, MediaMessage, MessageImage, mediaMessageOf, mediaSummary
 import "@zzsh/ui/order-team.css";
 import "@zzsh/ui/message-actions.css";
 import "@zzsh/ui/message-media.css";
+import {messageScopeUserLabel} from "@zzsh/ui/display-im";
 
 async function orderRequest<T>(path:string, signal?: AbortSignal):Promise<T>{
   const response=await fetch(path,{credentials:"same-origin",cache:"no-store",signal});return readJson<T>(response,"订单请求未完成");
@@ -202,7 +203,7 @@ function normalizeConsultation(consultation: Consultation): Consultation {
 function composerBlockReason(conversation: Pick<Consultation, "state" | "messageScopeState" | "conversationId" | "canSend"> | null, canSend: boolean): string | null {
   if (canSend) return null;
   if (!conversation) return "创建或选择一个会话后可发送消息";
-  if (conversation.messageScopeState === "FAILED") return "客服会话待人工核验，暂不可发送";
+  if (conversation.messageScopeState === "FAILED") return messageScopeUserLabel("FAILED");
   if (conversation.canSend === false) return "当前会话暂不可继续，请稍后重试";
   // WAITING only means "no admin yet"; the team may still be provisioning in the channel.
   const scopeReady = Boolean(conversation.conversationId) && conversation.messageScopeState === "READY";
@@ -2265,7 +2266,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
         </div>
         <div className="support-message-area">
            {unresolvedText ? <div className="support-send-retry" role="alert"><CircleAlert size={15} /><span>{unresolvedText.unknown ? "发送结果未确认，内容已保留。" : "消息发送失败，内容已保留。"}</span><button type="button" onClick={() => void refreshHistory()}>刷新历史</button><button type="button" onClick={() => void retrySend()} disabled={busy || !canSend}>{unresolvedText.messageClientId ? "原消息重试" : "重试发送"}</button></div> : null}
-           {!preview && !activeConversation ? <div className="support-start-panel" data-state="initial"><Headphones size={27} /><strong>从这里开始你的咨询</strong><span>点击后立即开始，客服接入后会看到你的留言。</span><SupportTypePicker value={selectedType} onChange={setSelectedType} disabled={busy} onSelect={(type) => void startConsultation(type)} />{busy ? <span className="support-start-panel-status" role="status">正在创建咨询…</span> : null}</div> : !preview && activeConversation?.messageScopeState === "FAILED" ? <div className="support-start-panel"><CircleAlert size={27} /><strong>客服会话待人工核验</strong><span>平台暂时无法确认客服会话状态，已暂停发送和自动重试。请稍后再试或联系平台处理。</span></div> : <MessageScrollerPrimitive.Provider autoScroll defaultScrollPosition="last-anchor"><MessageScrollerPrimitive.Root className="support-message-scroller"><MessageScrollerPrimitive.Viewport preserveScrollOnPrepend className="support-message-viewport" aria-label="消息内容" onContextMenu={onSupportContextMenu}><MessageScrollerPrimitive.Content className="support-message-content">{timelineItems.length > 0 ? <>{historyMore[activeConversationKey] ? <MessageScrollerPrimitive.Item messageId="load-earlier"><div className="support-history-more"><button type="button" onClick={() => void loadEarlier()} disabled={historyLoading}>{historyLoading ? "正在读取更早消息…" : "更早的消息"}</button></div></MessageScrollerPrimitive.Item> : null}{timelineItems}</> : <MessageScrollerPrimitive.Item messageId="empty"><div className="support-message-empty"><Headphones size={24} /><strong>{activeConversation?.state === "WAITING" ? "咨询已提交" : "等待第一条消息"}</strong><span>{activeConversation?.state === "WAITING" ? (activeScopeReady ? "客服接入后会看到你的留言；现在也可以先发消息。" : "正在连接客服…已输入的内容会保留。") : preview ? "可以从下方快捷回复开始检查交互。" : "客服连接就绪后，消息会出现在这里。"}</span></div></MessageScrollerPrimitive.Item>}</MessageScrollerPrimitive.Content></MessageScrollerPrimitive.Viewport><MessageScrollerPrimitive.Button direction="end" className="support-jump-button" render={<button type="button" aria-label="跳到最新消息" title="跳到最新消息" />}><ArrowDown size={14} aria-hidden="true" /></MessageScrollerPrimitive.Button></MessageScrollerPrimitive.Root></MessageScrollerPrimitive.Provider>}
+           {!preview && !activeConversation ? <div className="support-start-panel" data-state="initial"><Headphones size={27} /><strong>从这里开始你的咨询</strong><span>点击后立即开始，客服接入后会看到你的留言。</span><SupportTypePicker value={selectedType} onChange={setSelectedType} disabled={busy} onSelect={(type) => void startConsultation(type)} />{busy ? <span className="support-start-panel-status" role="status">正在创建咨询…</span> : null}</div> : !preview && activeConversation?.messageScopeState === "FAILED" ? <div className="support-start-panel"><CircleAlert size={27} /><strong>{messageScopeUserLabel("FAILED")}</strong><span>平台暂时无法确认客服会话状态，已暂停发送和自动重试。请稍后再试或联系平台处理。</span></div> : <MessageScrollerPrimitive.Provider autoScroll defaultScrollPosition="last-anchor"><MessageScrollerPrimitive.Root className="support-message-scroller"><MessageScrollerPrimitive.Viewport preserveScrollOnPrepend className="support-message-viewport" aria-label="消息内容" onContextMenu={onSupportContextMenu}><MessageScrollerPrimitive.Content className="support-message-content">{timelineItems.length > 0 ? <>{historyMore[activeConversationKey] ? <MessageScrollerPrimitive.Item messageId="load-earlier"><div className="support-history-more"><button type="button" onClick={() => void loadEarlier()} disabled={historyLoading}>{historyLoading ? "正在读取更早消息…" : "更早的消息"}</button></div></MessageScrollerPrimitive.Item> : null}{timelineItems}</> : <MessageScrollerPrimitive.Item messageId="empty"><div className="support-message-empty"><Headphones size={24} /><strong>{activeConversation?.state === "WAITING" ? "咨询已提交" : "等待第一条消息"}</strong><span>{activeConversation?.state === "WAITING" ? (activeScopeReady ? "客服接入后会看到你的留言；现在也可以先发消息。" : "正在连接客服…已输入的内容会保留。") : preview ? "可以从下方快捷回复开始检查交互。" : "客服连接就绪后，消息会出现在这里。"}</span></div></MessageScrollerPrimitive.Item>}</MessageScrollerPrimitive.Content></MessageScrollerPrimitive.Viewport><MessageScrollerPrimitive.Button direction="end" className="support-jump-button" render={<button type="button" aria-label="跳到最新消息" title="跳到最新消息" />}><ArrowDown size={14} aria-hidden="true" /></MessageScrollerPrimitive.Button></MessageScrollerPrimitive.Root></MessageScrollerPrimitive.Provider>}
         </div>
         <div className="support-composer-wrap">
           {preview ? <div className="support-quick-replies" aria-label="快捷回复"><span>快捷回复</span>{["我先帮你确认一下", "请稍等，我正在核对"].map((reply) => <button key={reply} type="button" onClick={() => chooseQuickReply(reply)}>{reply}</button>)}</div> : null}
@@ -2491,7 +2492,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
               </div>
               <div className="support-composer-actions">
                 {(!canSend || activeConversation?.messageScopeState === "FAILED") ? (
-                  <span className="support-composer-status">{activeConversation?.messageScopeState === "FAILED" ? "客服会话核验中" : waitingProvisioning ? "正在连接客服…" : "当前不可发送"}</span>
+                  <span className="support-composer-status">{activeConversation?.messageScopeState === "FAILED" ? messageScopeUserLabel("FAILED") : waitingProvisioning ? "正在连接客服…" : "当前不可发送"}</span>
                 ) : (
                   <span className="support-composer-hint">
                     <kbd className="support-kbd">Enter</kbd> 发送 · <kbd className="support-kbd">Shift</kbd> + <kbd className="support-kbd">Enter</kbd> 换行
@@ -2583,7 +2584,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
             : previewSnippet
               ? previewSnippet
               : item.messageScopeState === "FAILED"
-                ? "客服会话核验中"
+                ? messageScopeUserLabel("FAILED")
                 : item.assignedAdmin?.name && threadState === "ACTIVE"
                   ? `由客服 ${item.assignedAdmin.name} 接待中`
                   : statusLabel || "暂无消息";

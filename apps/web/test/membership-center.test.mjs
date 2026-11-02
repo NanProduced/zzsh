@@ -353,9 +353,11 @@ test("personal entitlement rows show actual mode and exact discount independentl
     const rows = view.host.querySelectorAll(".mc-entitlement-list:not(.mc-entitlement-list--history) > li");
     assert.match(rows[0].textContent, /8\.5折.*自定义比例.*不含租客免押/);
     assert.match(rows[0].textContent, /2026\.01\.01.*2026\.12\.31/);
-    assert.match(rows[1].textContent, /1\.2345678折.*极速比例.*含租客免押/);
+    assert.match(rows[1].textContent, /约1\.23折.*极速比例.*含租客免押/);
+    await rows[1].querySelector("button").click();
+    assert.match(view.host.textContent, /实付比例12\.345678%/);
     assert.match(rows[2].textContent, /旧版计价合同/);
-    assert.match(rows[3].textContent, /折扣待核/);
+    assert.match(rows[3].textContent, /折扣还没核对/);
     assert.match(rows[4].textContent, /9\.5折.*全部已启用租赁方式统一/);
     assert.doesNotMatch(view.host.textContent, /PRIVATE_COST_REFERENCE|costBasisRef|内部成本/);
     const before = rows[0].textContent;

@@ -1,4 +1,5 @@
 import { Tooltip as TooltipPrimitive } from "@base-ui/react/tooltip"
+import { cloneElement } from "react"
 
 import { cn } from "@/lib/utils"
 import { workspacePortalContainer } from "@/lib/workspace-portal"
@@ -62,4 +63,36 @@ function TooltipContent({
   )
 }
 
-export { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider }
+function ActionTooltip({
+  content,
+  children,
+  side = "top",
+  align = "center",
+  delay = 150,
+  className,
+}: {
+  content: React.ReactNode;
+  children: React.ReactElement;
+  side?: "top" | "bottom" | "left" | "right";
+  align?: "center" | "start" | "end";
+  delay?: number;
+  className?: string;
+}) {
+  if (!content) return children;
+  const childProps = children.props as { tabIndex?: number; "aria-hidden"?: boolean };
+  const trigger = typeof children.type === "string" && ["span", "div", "strong"].includes(children.type)
+    && childProps.tabIndex == null && childProps["aria-hidden"] !== true
+    ? cloneElement(children as React.ReactElement<{ tabIndex?: number }>, { tabIndex: 0 }) : children;
+  return (
+    <TooltipProvider delay={delay}>
+      <Tooltip>
+        <TooltipTrigger render={trigger} />
+        <TooltipContent side={side} align={align} className={className}>
+          {content}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
+
+export { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider, ActionTooltip }

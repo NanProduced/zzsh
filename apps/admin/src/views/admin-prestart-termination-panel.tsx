@@ -1,6 +1,6 @@
 import { useEffect,useRef,useState } from "react";
 import { adminRequest,AdminApiError,friendlyError } from "../api";
-import { Button } from "../components/ui-elements";
+import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Textarea } from "@/components/ui/textarea";
 import { formatFundingCents } from "./supply-review/model";

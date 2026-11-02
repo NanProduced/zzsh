@@ -138,48 +138,4 @@ export const PasswordInput = forwardRef<
 
 PasswordInput.displayName = "PasswordInput";
 
-export const Button = forwardRef<
-  HTMLButtonElement,
-  ButtonHTMLAttributes<HTMLButtonElement> & {
-    variant?: "primary" | "secondary" | "ghost" | "danger";
-    loading?: boolean;
-    size?: "sm" | "md" | "lg";
-  }
->(({ children, variant = "primary", loading = false, size = "md", className = "", disabled, ...props }, ref) => {
-  const sizeClasses = {
-    sm: "h-8 px-3 text-xs",
-    md: "h-10 px-4 text-sm",
-    lg: "h-11 px-5 text-sm",
-  }[size];
-
-  const variantClasses = {
-    primary:
-      "bg-foreground text-background font-medium hover:opacity-90 active:scale-[0.99] transition-all shadow-sm focus-visible:ring-2 focus-visible:ring-ring",
-    secondary:
-      "bg-surface-raised text-foreground border border-border hover:bg-border/40 active:scale-[0.99] transition-all focus-visible:ring-2 focus-visible:ring-ring",
-    ghost:
-      "text-muted-foreground hover:text-foreground hover:bg-surface-raised transition-colors focus-visible:ring-2 focus-visible:ring-ring",
-    danger:
-      "bg-rose-600 text-white font-medium hover:bg-rose-700 active:scale-[0.99] transition-all focus-visible:ring-2 focus-visible:ring-rose-500",
-  }[variant];
-
-  return (
-    <button
-      ref={ref}
-      disabled={disabled || loading}
-      className={`relative inline-flex items-center justify-center gap-2 rounded-md font-medium select-none disabled:opacity-50 disabled:cursor-not-allowed disabled:pointer-events-none ${sizeClasses} ${variantClasses} ${className}`}
-      {...props}
-    >
-      {loading ? (
-        <>
-          <Icons.RefreshCw size={15} className="animate-spin" />
-          <span>处理中…</span>
-        </>
-      ) : (
-        children
-      )}
-    </button>
-  );
-});
-
-Button.displayName = "Button";
+export { Button } from "./ui/button";

@@ -1,4 +1,5 @@
 import type { InlineStatusTone } from "../../components/ui/badge";
+import { UNRECOGNIZED_STATE_LABEL } from "@zzsh/ui/display-credit";
 
 /**
  * 审批展示契约。字段名与枚举取自 apps/api/src/auth/approval-business.ts 与
@@ -264,7 +265,7 @@ const STATUS: Record<string, { label: string; tone: InlineStatusTone }> = {
 
 export function statusView(value: string | undefined | null): { label: string; tone: InlineStatusTone } {
   if (!value) return { label: "状态未提供", tone: "unknown" };
-  return STATUS[value] ?? { label: value, tone: "unknown" };
+  return Object.hasOwn(STATUS, value) ? STATUS[value]! : { label: UNRECOGNIZED_STATE_LABEL, tone: "unknown" };
 }
 
 const EXECUTION: Record<string, { label: string; tone: InlineStatusTone }> = {
@@ -274,7 +275,7 @@ const EXECUTION: Record<string, { label: string; tone: InlineStatusTone }> = {
 
 export function executionView(value: string | undefined | null): { label: string; tone: InlineStatusTone } {
   if (!value) return { label: "尚未执行", tone: "neutral" };
-  return EXECUTION[value] ?? { label: value, tone: "unknown" };
+  return Object.hasOwn(EXECUTION, value) ? EXECUTION[value]! : { label: "执行状态暂无法识别", tone: "unknown" };
 }
 
 export const ACTION_LABELS: Record<string, string> = {
@@ -318,7 +319,7 @@ const REASONS: Record<string, string> = {
 
 export function reasonLabel(code: string | undefined | null): string {
   if (!code) return "原因未提供";
-  return REASONS[code] ?? code;
+  return REASONS[code] ?? "原因暂不识别";
 }
 
 const NEXT_STEP: Record<string, string> = {
@@ -328,7 +329,7 @@ const NEXT_STEP: Record<string, string> = {
 
 export function nextStepLabel(code: string | undefined | null): string | null {
   if (!code) return null;
-  return NEXT_STEP[code] ?? code;
+  return NEXT_STEP[code] ?? null;
 }
 
 const PENDING_CONDITION: Record<string, string> = {
@@ -342,7 +343,7 @@ const PENDING_CONDITION: Record<string, string> = {
 };
 
 export function pendingConditionLabel(code: string): string {
-  return PENDING_CONDITION[code] ?? code;
+  return PENDING_CONDITION[code] ?? "发起条件暂不识别";
 }
 
 const ENTITLEMENT_STATE: Record<string, { label: string; tone: InlineStatusTone }> = {
@@ -360,7 +361,7 @@ const ENTITLEMENT_STATE: Record<string, { label: string; tone: InlineStatusTone 
 
 export function entitlementStateView(value: string | undefined | null): { label: string; tone: InlineStatusTone } {
   if (!value) return { label: "权益状态未提供", tone: "unknown" };
-  return ENTITLEMENT_STATE[value] ?? { label: value, tone: "unknown" };
+  return Object.hasOwn(ENTITLEMENT_STATE, value) ? ENTITLEMENT_STATE[value]! : { label: "权益状态暂无法识别", tone: "unknown" };
 }
 
 const POLICY_STATUS: Record<string, string> = {
@@ -370,7 +371,7 @@ const POLICY_STATUS: Record<string, string> = {
 
 export function policyStatusLabel(value: string | undefined | null): string {
   if (!value) return "状态未提供";
-  return POLICY_STATUS[value] ?? value;
+  return POLICY_STATUS[value] ?? UNRECOGNIZED_STATE_LABEL;
 }
 
 export const OBJECT_REF_LABELS: Record<string, string> = {

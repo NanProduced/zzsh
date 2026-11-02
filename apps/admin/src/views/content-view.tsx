@@ -14,7 +14,8 @@ import {
   type SessionSnapshot,
 } from "../api";
 import { Badge } from "../components/ui/badge";
-import { Button, StatusMessage } from "../components/ui-elements";
+import { Button } from "@/components/ui/button";
+import { StatusMessage } from "../components/ui-elements";
 import { Field } from "../components/ui/field";
 import { Input } from "../components/ui/input";
 import type { WorkspaceTab } from "../workspace/tab-model";

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, type FormEvent } from "react";
 import { Icons } from "../components/icons";
-import { Button, PasswordInput, StatusMessage } from "../components/ui-elements";
+import { Button } from "@/components/ui/button";
+import { PasswordInput, StatusMessage } from "../components/ui-elements";
 import {
   adminRequest,
   friendlyError,

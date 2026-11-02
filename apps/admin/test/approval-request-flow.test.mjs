@@ -58,7 +58,7 @@ test("unknown and missing projections remain unknown, without a client policy en
   assert.equal(step(policy, "approved").status, "unknown");
   assert.equal(step(policy, "review").facts.find(fact => fact.label === "本单可处理").value, "未提供");
   assert.equal(step(policy, "review").statusLabel, "决定记录未读到");
-  assert.equal(step(policy, "review").facts.find(fact => fact.label === "申请状态").value, "FUTURE_STATUS");
+  assert.equal(step(policy, "review").facts.find(fact => fact.label === "申请状态").value, "状态暂不识别，请刷新后核对");  // 未登记值不裸显代码，也不由客户端推断
   assert.equal("quorum" in step(policy, "review"), false);
   assert.equal("threshold" in policy, false);
   const missingEligibility = requestPolicy(detail({ candidates: [{ ...person }] }));

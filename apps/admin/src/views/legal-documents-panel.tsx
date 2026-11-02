@@ -3,7 +3,8 @@ import { FileText, Plus, RefreshCw, Save, ShieldCheck } from "lucide-react";
 
 import { adminRequest, friendlyError, hasPermission, type SessionSnapshot } from "../api";
 import { Badge } from "../components/ui/badge";
-import { Button, StatusMessage } from "../components/ui-elements";
+import { Button } from "@/components/ui/button";
+import { StatusMessage } from "../components/ui-elements";
 import { Field } from "../components/ui/field";
 import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";

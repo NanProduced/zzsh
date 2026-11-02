@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
-import { Button, StatusMessage } from "../../components/ui-elements";
+import { Button } from "@/components/ui/button";
+import { StatusMessage } from "../../components/ui-elements";
 import { Icons } from "../../components/icons";
 import {
   Dialog,

@@ -6,6 +6,10 @@
 
 export const VOCABULARY_UNKNOWN_FALLBACK = "暂无法识别，请刷新核对";
 
+/** 消息通道状态实现放在共享词表，本文件保留客服域统一入口，避免页面再抄一份。 */
+export { messageScopeLabel } from "@zzsh/ui/display-im";
+
+
 export const CONSULTATION_TYPE_VOCABULARY: Readonly<Record<string, string>> = Object.freeze({
   SERVICE: "普通咨询",
   COMPLAINT: "投诉建议",
@@ -14,7 +18,7 @@ export const CONSULTATION_TYPE_VOCABULARY: Readonly<Record<string, string>> = Ob
 
 export const CONSULTATION_STATE_VOCABULARY: Readonly<Record<string, string>> = Object.freeze({
   WAITING: "待接入",
-  ACTIVE: "处理中",
+  ACTIVE: "接待中",
   CLOSED: "已结束",
 });
 

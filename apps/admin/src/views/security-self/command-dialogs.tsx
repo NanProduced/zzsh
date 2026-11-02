@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { TriangleAlert, XIcon } from "lucide-react";
 
-import { Button, PasswordInput, StatusMessage } from "../../components/ui-elements";
+import { Button } from "@/components/ui/button";
+import { PasswordInput, StatusMessage } from "../../components/ui-elements";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "../../components/ui/alert";
 import { Icons } from "../../components/icons";
 import {

@@ -10,7 +10,8 @@ import {
   type UploadedAssetResponse,
 } from "../api";
 import { Badge } from "../components/ui/badge";
-import { Button, StatusMessage } from "../components/ui-elements";
+import { Button } from "@/components/ui/button";
+import { StatusMessage } from "../components/ui-elements";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from "../components/ui/dialog";
 import { Input } from "../components/ui/input";
 

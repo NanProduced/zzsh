@@ -1509,6 +1509,35 @@ const postedSettlement = {
   ready: true, reasons: [],
 };
 
+test('settlement records use Beijing time and malformed timestamps remain unknown without invalid HTML dates',async()=>{
+ await withDom(async window=>{
+  const current={...postedVersion,versionNo:'2',decisions:[{party:'RENTER',action:'CONFIRM',createdAt:{}},{party:'OWNER',action:'CONFIRM',createdAt:'2026-10-12T16:30:00Z'}]},bad={...postedSettlement,openings:[{...opening,confirmedAt:{},acks:[{party:'RENTER',createdAt:{}},{party:'OWNER',createdAt:'bad-time'}]}],settlement:current,versions:[{...postedVersion,id:'old',supersededAt:{},decisions:[{party:'RENTER',action:'REJECT',createdAt:{}}]},current],posting:{...postedSettlement.posting,refundDueAt:{}}};
+  const calls=[],Component=loadComponent('apps/web/src/components/order/order-trade-actions.tsx',session('user_A')).OrderTradeActions,probe=createProbe(window,Component,{order:{...paidOrder,status:'COMPLETED'},party:'renter',onChanged(){}},router([{match:'/settlement',method:'GET',respond:()=>json(bad)}],calls));
+  try{await probe.render();assert.doesNotMatch(probe.host.textContent,/Invalid Date|\[object Object\]/);assert.match(probe.host.textContent,/时间待确认/);assert.match(probe.host.textContent,/2026\/10\/13.*00:30/);assert([...probe.host.querySelectorAll('time')].every(node=>Number.isFinite(Date.parse(node.getAttribute('datetime')??''))));assert(calls.every(call=>call.method==='GET'));}finally{await probe.dispose();}
+ });
+});
+
+test('owner posting shows only own frozen fee and omits renter-private payment and refund rows',async()=>{
+ await withDom(async window=>{
+  const Component=loadComponent('apps/web/src/components/order/order-trade-actions.tsx',session('user_A')).OrderTradeActions;
+  for(const mode of ['NONE','MISSING','OWNER_ZERO']){
+   const amounts=mode==='MISSING'?undefined:{...postingAmounts,feePayer:mode==='OWNER_ZERO'?'OWNER':'NONE',feeAmount:money('0.00')},body={...postedSettlement,amounts:{...postingAmounts,feePayer:'OWNER',feeAmount:money('999.99')},posting:{...postedSettlement.posting,compensationFeeCents:mode==='OWNER_ZERO'?'0':'1464',amounts}};
+   const probe=createProbe(window,Component,{order:{...paidOrder,status:'COMPLETED'},party:'owner',onChanged(){}},router([{match:'/settlement',method:'GET',respond:()=>json(body)}],[]));
+   try{await probe.render();assert.doesNotMatch(probe.host.textContent,/平台承担|原订单已付|退款应付款时间|¥470\.00|999\.99/);assert.match(probe.host.textContent,/本单净入账/);if(mode==='OWNER_ZERO'){assert.match(probe.host.textContent,/包赔费（号主承担）/);assert.match(probe.host.textContent,/¥0\.00/);}else assert.doesNotMatch(probe.host.textContent,/包赔费（号主承担）/);}finally{await probe.dispose();}
+  }
+ });
+});
+
+test('legacy rental income points to wallet records rather than referral commission, preserving original income knowledge',async()=>{
+ await withDom(async window=>{
+  const Component=loadComponent('apps/web/src/components/order/legacy-order-workspace.tsx',session('user_A')).LegacyOrderWorkspace;
+  for(const known of [true,false]){
+   const row={id:'legacy_income',displayNo:'OLD-INCOME',party:'owner',status:'COMPLETED',readOnly:true,source:{origin:'LEGACY',statusLabel:'已完成'},account:{id:null,displayNo:null,readable:false},amounts:{ownerRecordedIncome:money('201.00')},...(known?{ownerIncomeSource:{source:'LEGACY_ORDER_SNAPSHOT',sourceLabel:'原单记录'}}:{}),legacyAmounts:{required:money('470.00'),paid:money('470.00'),deposit:money('100.00'),refund:null}},probe=createProbe(window,Component,{party:'owner',orderId:row.id},async()=>json({order:row}));
+   try{await probe.render();const link=[...probe.host.querySelectorAll('a')].find(node=>node.textContent==='查看钱包记录');assert.ok(link);assert.equal(link.getAttribute('href'),'/account?view=wallet');assert.equal(probe.host.querySelectorAll('a[href*="view=invite"]').length,0);assert.doesNotMatch(probe.host.textContent,/470\.00/);if(known){assert.match(probe.host.textContent,/201\.00/);assert.match(probe.host.textContent,/不代表当前应收、钱包可用金额或渠道到账/);}else{assert.doesNotMatch(probe.host.textContent,/201\.00/);assert.match(probe.host.textContent,/历史收益金额尚未核定/);}}finally{await probe.dispose();}
+  }
+ });
+});
+
 test("F5: a settled order shows the effective result, its records and no owner-side leak", async () => {
   await withDom(async (window) => {
     const log = [];
@@ -2059,6 +2088,24 @@ test("legacy unauthorized detail is an error rather than an empty successful lis
     const probe=createProbe(window,Legacy,{party:"renter",orderId:"other"},async()=>json({error:{code:"NOT_FOUND"}},404));
     try {await probe.render();assert.match(probe.host.textContent,/不存在或当前身份无法查看/);assert.doesNotMatch(probe.host.textContent,/暂无历史订单记录/);}finally{await probe.dispose();}
   });
+});
+test('MCA006: authorized legacy opposite-view details offer the server-confirmed view without private prices or actions',async()=>{
+ await withDom(async window=>{
+  const Component=loadComponent('apps/web/src/components/order/legacy-order-workspace.tsx',session('user_A')).LegacyOrderWorkspace;
+  for(const [party,actual] of [['renter','owner'],['owner','renter']]){
+   const row={id:'legacy_party',displayNo:'PRIVATE_OLD_NO',party:actual,status:'COMPLETED',readOnly:true,source:{origin:'LEGACY',statusLabel:'已完成'},title:'PRIVATE_ACCOUNT_TITLE',account:{id:'account_private',displayNo:'PRIVATE_ACCOUNT_NO',readable:true},ownerIncomeSource:{source:'LEGACY_ORDER_SNAPSHOT'},amounts:{ownerRecordedIncome:money('201.00')},legacyAmounts:{required:money('1009.00'),paid:money('1009.00'),deposit:money('0.00'),refund:money('798.20')}},calls=[],probe=createProbe(window,Component,{party,orderId:row.id,status:'CANCELLED',accountId:'wrong_filter'},async(url,init={})=>{calls.push({url:String(url),method:init.method??'GET'});return json({order:row});});
+   try{await probe.render();assert.match(probe.host.textContent,new RegExp(`本单属于你的${actual==='owner'?'出租':'租入'}订单`));const link=[...probe.host.querySelectorAll('a')].find(node=>node.textContent===`查看我的${actual==='owner'?'出租':'租入'}订单`);assert.ok(link);assert.equal(link.getAttribute('href'),`/account?view=${actual==='owner'?'leased':'rentals'}&orderId=legacy_party&source=legacy`);assert.doesNotMatch(probe.host.textContent,/PRIVATE_|201\.00|1009\.00|798\.20|0\.00|订单暂不可用/);assert.equal(probe.host.querySelectorAll('button').length,0);assert(calls.every(call=>call.method==='GET'));}finally{await probe.dispose();}
+  }
+ });
+});
+test('MCA006: denied, foreign-id or invalid-party legacy data cannot create a corrective private-view link',async()=>{
+ await withDom(async window=>{
+  const Component=loadComponent('apps/web/src/components/order/legacy-order-workspace.tsx',session('user_A')).LegacyOrderWorkspace;
+  for(const kind of ['403','404','wrong-id','invalid-party','wrong-list-party']){
+   const row={id:kind==='wrong-id'?'other_order':'legacy_party',party:kind==='invalid-party'?'support':'owner',readOnly:true,source:{origin:'LEGACY'},title:'PRIVATE_TITLE',legacyAmounts:{paid:money('1009.00')}},body=kind==='wrong-list-party'?{items:[row],total:1,pageSize:20}:{order:row},probe=createProbe(window,Component,{party:'renter',...(kind==='wrong-list-party'?{}:{orderId:'legacy_party'})},async()=>['403','404'].includes(kind)?json({error:{code:'DENIED'}},Number(kind)):json(body));
+   try{await probe.render();assert.match(probe.host.textContent,/订单暂不可用/);assert.doesNotMatch(probe.host.textContent,/PRIVATE_TITLE|1009\.00|查看我的出租订单/);assert.equal(probe.host.querySelectorAll('a').length,0);}finally{await probe.dispose();}
+  }
+ });
 });
 
 test("legacy detail exposes the complete frozen resource record after the short summary", async () => {

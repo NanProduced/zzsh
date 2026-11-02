@@ -4,6 +4,11 @@
   "private": true,
   "exports": {
     "./styles.css": "./src/styles.css",
+    "./display-credit": "./src/display-credit.ts",
+    "./display-distribution": "./src/display-distribution.ts",
+    "./display-funds": "./src/display-funds.ts",
+    "./display-im": "./src/display-im.ts",
+    "./display-money": "./src/display-money.ts",
     "./order-team-panel": "./src/order-team-panel.tsx",
     "./order-team.css": "./src/order-team.css",
     "./content-document": "./src/content-document.tsx",
@@ -30,6 +35,6 @@
     "react-dom": "19.2.8"
   },
   "scripts": {
-    "test": "node --experimental-strip-types --test test/content-markdown.test.mjs test/order-team-empty.test.mjs"
+    "test": "node --experimental-strip-types --test test/content-markdown.test.mjs test/display-labels.test.mjs test/order-team-empty.test.mjs"
   }
 }

@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
-import { Button } from "../../components/ui-elements";
+import { Button } from "@/components/ui/button";
 import { Icons } from "../../components/icons";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/select";
 import {

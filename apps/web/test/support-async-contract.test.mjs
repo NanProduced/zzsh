@@ -85,11 +85,16 @@ test("formal NIM clients preauthorize history and send through the same-origin B
 
 // Directory independence from SDK availability is covered by support-workspace-behavior.test.mjs.
 
-test("unknown remote scope is visible and cannot be presented as an active chat", () => {
+test("unknown remote scope is visible and cannot be presented as an active chat", async () => {
+  // FAILED 必须读成“消息通道异常”，不能被伪装成普通待办；两端措辞都由共享词表给出。
+  const { messageScopeLabel, messageScopeUserLabel } = await import("../../../packages/ui/src/display-im.ts");
+  assert.equal(messageScopeLabel("FAILED"), "消息通道异常，暂不可回复");
+  assert.match(messageScopeUserLabel("FAILED"), /消息通道异常/);
+  assert.doesNotMatch(messageScopeUserLabel("FAILED"), /禁止|收不到/);
   assert.match(webSource, /messageScopeState === "FAILED"/);
-  assert.match(webSource, /客服会话待人工核验/);
-  assert.match(webSource, /客服会话核验中/);
+  assert.match(webSource, /messageScopeUserLabel\("FAILED"\)/);
   assert.match(adminSource, /scopeStateLabel/);
-  assert.match(adminSource, /云信远端结果待人工核验/);
+  assert.match(adminSource, /"通道异常"/);
+  assert.match(adminSource, /消息通道远端结果待人工核验/);
   assert.match(adminSource, /messageScopeState !== "FAILED"/);
 });

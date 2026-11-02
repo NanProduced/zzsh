@@ -29,7 +29,7 @@ import { AdminOrderChainView, AdminResourceReadView } from "../views/admin-order
 
 import { parseWorkspacePath, type WorkspaceTab } from "./tab-model";
 import { DashboardPage } from "./dashboard/dashboard-page";
-import { Button } from "../components/ui-elements";
+import { Button } from "@/components/ui/button";
 
 export function WorkspacePageContent({
   tab,
