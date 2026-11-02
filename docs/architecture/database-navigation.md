@@ -177,7 +177,7 @@ DDL 与 ACL 是两个事务：`runBusinessMigrations` 先迁移，再单独开 A
 
 - **财务单据**：`apps/api/src/finance/admin-finance-routes.ts:58` 的 `documents/{ref}` 路由调 `readAdminFinanceDocument`（`apps/api/src/finance/admin-finance-read.ts:305`），对受权管理员返回 `document`、`entries`（含 `sourceDigest`、`basisId`、`reasonCodes`、`evidence`）、`evidence`、`related`、`reasonCodes`、`platform`。
 - **旧单续办**：`apps/api/src/order/legacy-continuation-evidence.ts` 的写入回执含 `evidenceId`；`legacy-continuation-model.ts:144` 的投影含 `revision` 与 `evidenceId`。
-- **仍缺的字段**：个人侧旧单读取（`legacy-user-order-read.ts`）只暴露 `continuationStage`，不给 `evidenceId`/`revision`；财务单据投影不含 `parameter_digest`/`facts_digest`；钱包观察不返回 `source_cutoff` 之外的完整证据链。争议单据的完整举证仍需组合多个出口或内部查询。
+- **当前投影边界与举证导航**：个人旧单快照只给续办阶段，独立续办接口另给`evidenceId`/`revision`与按当事人裁剪的金额；不能把前者未带内部ID判成后台无证据。受权财务单据、续办版本/审计和原键回执分别承载相关依据。争议举证需按角色组合这些出口，是否增加聚合证据包另行评估；不把含对方私价、受益人或内部原始参数的完整事实原样发给普通用户。
 
 转换规则 ID 与源字段映射以 `docs/architecture/legacy-data-mapping.md` 为权威，本文件不新增规则、不推算未知值。
 

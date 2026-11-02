@@ -7,7 +7,7 @@ import { bodyOf, ensureOnlyFields, invalid, notFound, sendJson, type SupplyNodeR
 import { decodeId, requireOrigin, requestPath, runIdempotentWrite, type SupplyResponse } from "../supply/supply-routes";
 import { authorizeLegacyContinuation, readLegacyContinuation, readLegacyContinuationBinding, readLegacyContinuationEvidence, readLegacyContinuationHead } from "./legacy-continuation-evidence";
 import { applyLegacyContinuationCommand, applyLegacyDutyCommand, authorizeLegacyMutation, legacyCommandOutcome, parseLegacyMutation, parseLegacyQuantities, type LegacyMutationKind,type LegacyMutationAuthority } from "./legacy-continuation-command";
-import { legacyOrderAdvisoryKey, previewLegacyContinuation, readSealedLegacyFacts, type LegacyContinuationActor, type LegacyDutyFinalizationReader } from "./legacy-continuation-model";
+import { legacyOrderAdvisoryKey, previewLegacyContinuation, projectLegacyCommandReceipt, readSealedLegacyFacts, type LegacyContinuationActor, type LegacyDutyFinalizationReader } from "./legacy-continuation-model";
 
 export type LegacyContinuationRouteOptions = AuthSecurityOptions & { legacyDutyFinalizationReader?: LegacyDutyFinalizationReader };
 export function parseLegacyContinuationPath(path: string) {
@@ -34,11 +34,11 @@ export async function handleLegacyContinuationRoute(request: SupplyNodeRequest, 
     const duty = command === "mature" || command === "void";
     if (duty ? realm !== "admin" || !dutyId || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(dutyId) : dutyId !== null) throw invalid("Invalid original duty");
     const data = await withTransaction(options.pool, async client => {
-      await authorizeLegacyMutation(client, actor, parsed.orderId,true);
+      const authority = await authorizeLegacyMutation(client, actor, parsed.orderId,true);
       if (duty && !(await client.query(`SELECT 1 FROM zzsh_order.legacy_order_duty WHERE id=$1 AND order_id=$2`, [dutyId, parsed.orderId])).rowCount) throw notFound();
       const operation = duty ? "order.legacy.duty." + command : "order.legacy.continuation." + command;
       const row = (await client.query<{ status: number; body: unknown; fingerprint: string }>(`SELECT response_status AS status,response_body AS body,request_fingerprint AS fingerprint FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=$2`, [JSON.stringify([realm, actor.userId, operation, duty ? dutyId : parsed.orderId]), key])).rows[0];
-      return row ? { state: row.status >= 200 && row.status < 300 ? "KNOWN_SUCCESS" : "KNOWN_REJECTED", status: row.status, receipt: row.body, fingerprint: row.fingerprint } : { state: "UNKNOWN" };
+      return row ? { state: row.status >= 200 && row.status < 300 ? "KNOWN_SUCCESS" : "KNOWN_REJECTED", status: row.status, receipt: projectLegacyCommandReceipt(authority.binding, actor, row.body), fingerprint: row.fingerprint } : { state: "UNKNOWN" };
     });
     sendJson(response, 200, data, requestId); return true;
   }
@@ -68,12 +68,14 @@ export async function handleLegacyContinuationRoute(request: SupplyNodeRequest, 
     const input = { dutyId: parsed.dutyId, kind: parsed.dutyCommand, expectedRevision: body.expectedRevision, sourceFactAuditId: body.sourceFactAuditId as string | undefined, reason: body.reason as string | undefined };
     let authority:LegacyMutationAuthority|undefined;
     await runIdempotentWrite(options, request, response, requestId, { principalId: actor.userId, operation: "order.legacy.duty." + input.kind, resourceId: input.dutyId }, { realm, id: actor.userId, sessionId: actor.sessionId }, input,
-      async(client,replay)=>{authority=await authorizeLegacyMutation(client,actor,parsed.orderId,!!replay);}, client => legacyCommandOutcome(client, actor, parsed.orderId, () => applyLegacyDutyCommand(client, actor, parsed.orderId, input,authority)));
+      async(client,replay)=>{authority=await authorizeLegacyMutation(client,actor,parsed.orderId,!!replay);}, client => legacyCommandOutcome(client, actor, parsed.orderId, () => applyLegacyDutyCommand(client, actor, parsed.orderId, input,authority)),
+      async (_client, result) => { if (!authority) throw invalid("Legacy authorization unavailable"); return { ...result, body: projectLegacyCommandReceipt(authority.binding, actor, result.body) }; });
     return true;
   }
   const input = parseLegacyMutation(parsed.command as LegacyMutationKind, body);
   let authority:LegacyMutationAuthority|undefined;
   await runIdempotentWrite(options, request, response, requestId, { principalId: actor.userId, operation: "order.legacy.continuation." + input.kind, resourceId: parsed.orderId }, { realm, id: actor.userId, sessionId: actor.sessionId }, input,
-    async(client,replay)=>{authority=await authorizeLegacyMutation(client,actor,parsed.orderId,!!replay);}, client => legacyCommandOutcome(client, actor, parsed.orderId, () => applyLegacyContinuationCommand(client, actor, parsed.orderId, input, options.legacyDutyFinalizationReader,authority)));
+    async(client,replay)=>{authority=await authorizeLegacyMutation(client,actor,parsed.orderId,!!replay);}, client => legacyCommandOutcome(client, actor, parsed.orderId, () => applyLegacyContinuationCommand(client, actor, parsed.orderId, input, options.legacyDutyFinalizationReader,authority)),
+    async (_client, result) => { if (!authority) throw invalid("Legacy authorization unavailable"); return { ...result, body: projectLegacyCommandReceipt(authority.binding, actor, result.body) }; });
   return true;
 }

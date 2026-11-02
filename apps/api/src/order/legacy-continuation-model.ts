@@ -127,6 +127,35 @@ export function deriveLegacyFacts(current: LegacyEffectiveFacts, plan: AmountPla
 export function legacyContinuationRole(binding: LegacyOrderBinding, actor: LegacyContinuationActor): "renter" | "owner" | "admin" | "other" {
   return actor.realm === "admin" ? "admin" : actor.userId === binding.renterUserId ? "renter" : actor.userId === binding.ownerUserId ? "owner" : "other";
 }
+const LEGACY_OWNER_AMOUNTS = ["saleEarnings", "ownerNet", "fullPayoutMoney", "divide2", "expendAccount", "depositCompensation"];
+const LEGACY_RENTER_AMOUNTS = ["payMoney", "returnOrderMoney", "refundGross", "refundNet", "detainMoney", "divide", "expendOrder"];
+/** Stored evidence and fingerprints stay complete; only the authenticated party's output is narrowed. */
+export function projectLegacyPartyAmounts<T>(binding: LegacyOrderBinding, actor: LegacyContinuationActor, amounts: Record<string, T>): Record<string, T> {
+  if (legacyContinuationRole(binding, actor) === "other") throw notFound();
+  if (actor.realm === "admin") return structuredClone(amounts);
+  const fields = new Set([...(actor.userId === binding.ownerUserId ? LEGACY_OWNER_AMOUNTS : []), ...(actor.userId === binding.renterUserId ? LEGACY_RENTER_AMOUNTS : [])]);
+  return Object.fromEntries(Object.entries(amounts).filter(([key]) => fields.has(key)));
+}
+/** Current command receipts contain IDs/status only; whitelist older cached bodies before sending them again. */
+export function projectLegacyCommandReceipt(binding: LegacyOrderBinding, actor: LegacyContinuationActor, body: unknown): unknown {
+  if (legacyContinuationRole(binding, actor) === "other") throw notFound();
+  if (actor.realm === "admin") return structuredClone(body);
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  const source = body as Record<string, unknown>, result: Record<string, unknown> = {};
+  for (const key of ["orderId", "command", "revision", "versionId", "inputEvidenceId", "resultEvidenceId", "evidenceId", "stage", "channelState", "outcome", "status"]) {
+    if (Object.hasOwn(source, key) && (source[key] === null || ["string", "number", "boolean"].includes(typeof source[key]))) result[key] = source[key];
+  }
+  for (const key of ["amounts", "previewAmounts", "proposalAmounts"]) {
+    const value = source[key];
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    result[key] = Object.fromEntries(Object.entries(projectLegacyPartyAmounts(binding, actor, value as Record<string, unknown>)).map(([name, amount]) => [name,
+      amount === null || typeof amount === "string" ? amount : amount && typeof amount === "object" && !Array.isArray(amount)
+        ? Object.fromEntries(Object.entries(amount).filter(([field, v]) => ["cents", "yuan"].includes(field) && typeof v === "string")) : null]));
+  }
+  const error = source.error;
+  if (error && typeof error === "object" && !Array.isArray(error)) result.error = Object.fromEntries(Object.entries(error).filter(([key, value]) => ["code", "message", "requestId"].includes(key) && typeof value === "string"));
+  return result;
+}
 export function legacyCapabilities(source: LegacyContinuationSource, role: "renter" | "owner" | "admin" | "other", canOperate: boolean, disposition: LegacyFinanceDisposition): string[] {
   if (role === "other") return [];
   if (role === "admin") {
@@ -145,7 +174,7 @@ export function projectLegacyContinuation(binding: LegacyOrderBinding, actor: Le
     duties: visibleDuties.map(d => ({ id: d.id, kind: d.kind, amountCents: d.amountCents, currency: d.currency, status: d.status, maturityAt: d.maturityAt, sourceStatus: d.sourceStatus, revision: d.revision, settledBy: d.settledBy })) };
   if (!evidence) return { ...base, availability: "NOT_IMPORTED", stage: null, isSettle: null, amounts: {}, quantities: null, capabilities: [], commandFingerprints: {}, reasons: ["NOT_IMPORTED"] };
   const facts = readSealedLegacyFacts(evidence), source = facts.evidence.source;
-  const amounts = Object.fromEntries(Object.entries(facts.amounts).map(([key, value]) => {
+  const amounts = Object.fromEntries(Object.entries(projectLegacyPartyAmounts(binding, actor, facts.amounts)).map(([key, value]) => {
     const cents = value === null ? null : legacyPlanYuanToCents(value);
     return [key, cents === null ? null : { cents, yuan: formatScaledInteger(BigInt(cents), 2) }];
   }));
@@ -180,5 +209,5 @@ export function previewLegacyContinuation(facts: LegacyEffectiveFacts, binding: 
   if (!plan.ok) throw conflict(plan.code);
   const proposal = planLegacyContinuation(facts.evidence, { kind: "propose", caller: { role, legacyUserId: role === "owner" ? binding.legacyOwnerId : binding.legacyRenterId }, quantities });
   if (!proposal.ok) throw conflict(proposal.code);
-  return { previewAmounts: plan.amounts, proposalAmounts: proposal.amounts, proposalFingerprint: proposal.fingerprint };
+  return { previewAmounts: projectLegacyPartyAmounts(binding, actor, plan.amounts), proposalAmounts: projectLegacyPartyAmounts(binding, actor, proposal.amounts), proposalFingerprint: proposal.fingerprint };
 }
