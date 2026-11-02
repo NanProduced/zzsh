@@ -146,8 +146,10 @@ async function probe({ rows = [], detail = null, identityStatus = "UNVERIFIED", 
     sessionChange() { for (const listener of [...identityListeners]) listener(); },
     // 滚动/焦点恢复走 requestAnimationFrame（下一帧），探针里真实推进定时器后才能断言。
     async frames() { await new Promise(setImmediate); await new Promise((resolve) => setTimeout(resolve, 40)); },
-    async waitFor(predicate, turns = 50) {
-      for (let index = 0; index < turns && !predicate(); index++) await React.act(async () => { await new Promise(setImmediate); });
+    async waitFor(predicate, timeoutMs = 2000) {
+      const deadline = performance.now() + timeoutMs;
+      // Read recovery can await a real retry timer; immediate-loop turns do not measure that wait.
+      while (!predicate() && performance.now() < deadline) await React.act(async () => { await new Promise(resolve => setTimeout(resolve, 5)); });
       assert.ok(predicate(), "component did not reach the expected state");
     },
     // Alert Dialog 弹层经 Portal 挂到 body（host 之外），查询与点击走 document。

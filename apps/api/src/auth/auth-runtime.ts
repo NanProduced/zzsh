@@ -58,6 +58,7 @@ import { createLocalMediaStorage, type MediaStorage } from "../supply/media";
 import { resolveMediaStorage } from "../supply/media-oss";
 import { mountSystemConfigurationHandlers } from "../system/system-configuration-routes";
 import { mountAdminOverview } from "./admin-overview";
+import { mountAdminDashboard } from "./admin-dashboard";
 import { deriveIdentitySubjectKey } from "./identity-subject";
 import { loadUserProviderRuntime } from "./user-provider-runtime";
 import type { UserSmsSender } from "./aliyun-user-providers";
@@ -1372,7 +1373,7 @@ export async function mountAuthHandlers(
     apiOrigin: options.apiOrigin,
     adminOrigin: options.adminOrigin,
     adminAuthHandler: adminWebHandler,
-    adminSecurityOptions: securityOptions,
+    adminSecurityOptions: { ...securityOptions, listingCursorKey: options.listingCursorKey },
     distributionScope: options.distributionScope,
     distributionReadScope: options.distributionReadScope,
     ...(options.distributionEarnings ? { distributionEarnings: options.distributionEarnings } : {}),
@@ -1403,6 +1404,7 @@ export async function mountAuthHandlers(
   mountLegalHandlers(app, securityOptions);
   mountSystemConfigurationHandlers(app, { ...securityOptions, mediaStorage, supplyGateReader });
   mountAdminOverview(app, { ...securityOptions, imAppId: options.yunxin?.appId });
+  mountAdminDashboard(app, { ...securityOptions, imAppId: options.yunxin?.appId });
   mountContentHandlers(app, {
     ...securityOptions,
     mediaStorage,
@@ -1419,7 +1421,7 @@ export async function mountAuthHandlers(
   mountUserDirectory(app,{...securityOptions,supplyGateReader,legacyPublicAdmission,legacyPublicAdmissionDetail});
   mountInvitationRoutes(app,{...securityOptions,listingCursorKey:options.listingCursorKey,distributionScope:options.distributionScope,distributionReadScope:options.distributionReadScope});
   mountDistributionPolicyRoutes(app,{...securityOptions,distributionScope:options.distributionScope,distributionReadScope:options.distributionReadScope});
-  mountAdminDistributionReadRoutes(app, securityOptions);
+  mountAdminDistributionReadRoutes(app, { ...securityOptions, listingCursorKey: options.listingCursorKey });
   if (options.distributionEarnings) mountAdminDistributionMaintenanceRoutes(app, { ...securityOptions, distributionEarnings: options.distributionEarnings });
   const payout=options.joinpayWithdrawal;
   const payoutReady=Boolean(payout?.execution&&payout.notifications===true&&payout.execution.scope===payout.routes.scope);

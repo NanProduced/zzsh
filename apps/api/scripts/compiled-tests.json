@@ -284,5 +284,8 @@
   "dist/test/user-provider-runtime.test.js",
   "dist/test/admin-finance-overview.test.js",
   "dist/test/legacy-contact-projection.test.js",
-  "dist/test/admin-finance-obligation-queues.test.js"
+  "dist/test/admin-finance-obligation-queues.test.js",
+  "dist/test/admin-distribution-dashboard.test.js",
+  "dist/test/admin-distribution-dashboard-routes.test.js",
+  "dist/test/admin-dashboard.test.js"
 ]

@@ -2,9 +2,7 @@
 .earnings-heading,.earnings-wallet-link { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:16px; }
 .earnings-heading h3 { margin:0 0 6px; }
 .earnings-heading p { margin:0; }
-.earnings-filters { display:flex; flex-wrap:wrap; gap:8px 20px; margin:20px 0 0; border-bottom:1px solid var(--color-border-subtle); }
-.earnings-filters button { min-height:44px; border:0; border-bottom:2px solid transparent; padding:8px 0; background:transparent; color:var(--color-text-secondary); font:inherit; font-size:13px; cursor:pointer; }
-.earnings-filters button[aria-pressed=true] { color:var(--account-accent); border-bottom-color:var(--account-accent); font-weight:600; }
+.earnings-filters { display:flex; flex-wrap:wrap; gap:8px 20px; margin:20px 0 8px; padding-bottom:12px; }
 .earnings-note,.earnings-empty { margin:0; padding:20px 0; }
 .earnings-records { list-style:none; padding:0; margin:0 0 16px; }
 .earning-record { display:flex; align-items:center; gap:16px; width:100%; min-height:76px; padding:18px 0; text-align:left; border:0; border-bottom:1px solid var(--color-border-subtle); background:transparent; color:var(--color-text-primary); font:inherit; cursor:pointer; }
@@ -28,3 +26,10 @@
 .personal-earnings .earnings-error p { color:var(--account-danger); }
 .earnings-wallet-link { padding-top:24px; margin-top:20px; border-top:1px solid var(--color-border-subtle); }
 @media(max-width:700px) { .earning-detail dl { grid-template-columns:minmax(0,1fr); }.earning-record { gap:10px; }.earning-record-value strong { max-width:15ch; }.earnings-wallet-link .button { width:100%; } }
+.earnings-filters label{display:flex;align-items:center;gap:12px;color:var(--color-text-secondary);font-size:13px}
+.earnings-filters select{min-height:44px;max-width:100%;padding:8px 32px 8px 12px;border:1px solid var(--color-border-default);border-radius:8px;background:var(--color-bg-elevated);color:var(--color-text-primary);font:inherit}
+.personal-earnings :is(select,summary):focus-visible{outline:2px solid var(--account-accent);outline-offset:3px}
+.earning-record-explanation{margin-top:24px;border-block:1px solid var(--color-border-subtle);padding:8px 0}
+.earning-record-explanation>summary{min-height:44px;display:flex;align-items:center;font-weight:600;cursor:pointer}
+.personal-earnings h3{scroll-margin-top:120px}
+@media(max-width:599px){.earnings-filters label{justify-content:space-between;width:100%}.earnings-filters select{min-width:160px}}

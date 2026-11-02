@@ -34,12 +34,13 @@ test("组件 CSS 自带 prefers-reduced-motion 兜底并被组件引入", () => 
 
 test("危险确认是克制危险色：描边＋文字，不是整块实心红", () => {
   assert.match(componentSource, /data-variant="danger"/);
-  const start = cssSource.indexOf('.ui-alert-dialog-confirm[data-variant="danger"] {');
-  assert.ok(start >= 0, "danger rule present");
-  const rule = cssSource.slice(start, cssSource.indexOf("}", start));
-  assert.match(rule, /background: transparent;/);
-  assert.match(rule, /color: var\(--color-status-error\);/);
-  assert.match(rule, /border-color: color-mix/);
+  const rules = [...cssSource.matchAll(/\.ui-alert-dialog-confirm\[data-variant="danger"\] \{([^}]*)\}/g)];
+  assert.ok(rules.length > 0, "danger rule present");
+  const declarations = Object.fromEntries(rules.flatMap(rule => rule[1].split(";").filter(value => value.includes(":"))
+    .map(value => [value.slice(0, value.indexOf(":")).trim(), value.slice(value.indexOf(":") + 1).trim()])));
+  assert.equal(declarations.background, "transparent");
+  assert.equal(declarations.color, "var(--account-danger)", "核对实际层叠生效的可读危险文字，而非已覆盖的亮色规则");
+  assert.match(declarations["border-color"], /^color-mix/);
 });
 
 test("默认焦点与焦点还原接在 Base UI 的 initialFocus/finalFocus 上", () => {

@@ -250,3 +250,12 @@ test('finance has four independent entrances and restores old lookup tabs withou
  assert.equal(canOpenKind('finance-overview',{isBoss:true,permissions:['finance.document.read']}),false);assert.equal(canOpenKind('finance-lookup',{isBoss:false,permissions:['finance.document.read']}),true);assert.equal(canOpenKind('finance-document',{isBoss:false,permissions:['finance.read']}),false);assert.equal(sanitizeFinanceReturn('/finance?range=30d'),'/finance?range=30d');
  delete globalThis.sessionStorage;
 });
+
+test('distribution legacy sections and complete filter queries restore into canonical independent tabs',()=>{
+ const oldStorage=globalThis.sessionStorage,values=new Map();globalThis.sessionStorage={getItem:key=>values.get(key)??null,setItem:(key,value)=>values.set(key,value)};
+ try{const query={section:'earnings',orderId:'old_order',origin:'LEGACY',from:'2026-10-01',to:'2026-10-19',state:'SETTLED',source:'LEGACY',role:'OWNER_REFERRAL',page:'2',pageSize:'10',q:'original'};
+ const legacy={...tabFromLocation('/distribution-policy'),path:'/distribution-policy',title:'分销管理',query};persistTabs('legacy-distribution',{activeId:legacy.id,tabs:[tabFromLocation('/workbench'),legacy,tabFromLocation('/distribution/earnings','?q=inactive')]});
+ const restored=restoreTabs('legacy-distribution',{isBoss:false,permissions:['distribution.dashboard.read']});assert.equal(restored.activeId,'distribution-earnings');const tabs=restored.tabs.filter(tab=>tab.kind==='distribution-earnings');assert.equal(tabs.length,1);assert.equal(tabs[0].path,'/distribution/earnings');assert.equal(tabs[0].query.section,undefined);for(const key of Object.keys(query).filter(key=>key!=='section'))assert.equal(tabs[0].query[key],query[key],key);
+ const relation=tabFromLocation('/distribution-policy','?section=relations&userId=user_one');assert.equal(relation.kind,'distribution-relations');assert.equal(relation.path,'/distribution/relations');assert.equal(relation.query.userId,'user_one');assert.equal(tabFromLocation('/distribution-policy').path,'/distribution/policy');
+ }finally{if(oldStorage===undefined)delete globalThis.sessionStorage;else globalThis.sessionStorage=oldStorage;}
+});

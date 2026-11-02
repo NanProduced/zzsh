@@ -5,6 +5,8 @@ import { ensureApiV1RequestId } from '../contracts/api-v1';
 import { invalid, notFound, sendJson, type SupplyNodeRequest } from '../supply/supply-util';
 import { requestPath, requireOrigin, safely, type SupplyResponse } from '../supply/supply-routes';
 import { readAdminDistributionOrder, readAdminDistributionRelations } from './admin-distribution-read';
+import { mountAdminDistributionDashboardRoutes } from './admin-distribution-dashboard-routes';
+import type { ListingCursorKey } from '../supply/listing-cursor';
 
 /** New read leaves only. Shared API/BFF mounting is an explicit Master hunk. */
 export async function handleAdminDistributionRead(request:SupplyNodeRequest,response:SupplyResponse,options:AuthSecurityOptions){
@@ -25,7 +27,8 @@ export async function handleAdminDistributionRead(request:SupplyNodeRequest,resp
   sendJson(response,200,body,requestId,'private, no-store');
  });
 }
-export function mountAdminDistributionReadRoutes(app:INestApplication,options:AuthSecurityOptions){
+export function mountAdminDistributionReadRoutes(app:INestApplication,options:AuthSecurityOptions & { listingCursorKey?: ListingCursorKey }){
+ mountAdminDistributionDashboardRoutes(app,options);
  app.getHttpAdapter().getInstance().use('/api/v1/admin/distribution',(request:SupplyNodeRequest,response:SupplyResponse,next:()=>void)=>{
   const {path}=requestPath(request,'/api/v1/admin/distribution');
   if(!path.startsWith('/orders/')&&!path.startsWith('/relations/'))return next();

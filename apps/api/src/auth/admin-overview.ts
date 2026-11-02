@@ -18,8 +18,20 @@ export type OverviewMetric = {
   drilldown: string | null;
 };
 export type AdminOverviewOptions = AuthSecurityOptions & { imAppId?: string };
-type OverviewViewer = { adminId: string; access: EffectiveAdminAccess; scope: AdminGameScope; imAppId?: string };
-type Trend = { date: string; orders: string; payments: string; confirmedCents: string | null };
+export type OverviewViewer = { adminId: string; access: EffectiveAdminAccess; scope: AdminGameScope; imAppId?: string };
+export type Trend = { date: string; orders: string; payments: string; confirmedCents: string | null };
+export type OverviewClock = {
+  observed_at: string;
+  starts_at: string;
+  exclusive_end: string;
+  previous_starts_at?: string;
+  previous_observed_at?: string;
+  previous_exclusive_end?: string;
+};
+
+export function overviewDays(range: OverviewRange): number {
+  return range === "today" ? 1 : range === "7d" ? 7 : 30;
+}
 
 export function parseOverviewRange(query: URLSearchParams): OverviewRange {
   for (const key of query.keys()) if (key !== "range" || query.getAll(key).length !== 1) throw invalid("Unsupported overview query", key);
@@ -28,8 +40,30 @@ export function parseOverviewRange(query: URLSearchParams): OverviewRange {
   return range;
 }
 
+/** One database clock for the current and comparable previous equal-duration window. */
+export async function readOverviewClock(client: PoolClient, days: number): Promise<OverviewClock> {
+  return (await client.query<OverviewClock>(
+    `WITH clock AS (
+       SELECT transaction_timestamp() AS observed_at,
+         (date_trunc('day',transaction_timestamp() AT TIME ZONE 'Asia/Shanghai') - ($1::int-1)*interval '1 day') AT TIME ZONE 'Asia/Shanghai' AS starts_at
+     )
+     SELECT to_char(observed_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS observed_at,
+       to_char(starts_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS starts_at,
+       to_char((observed_at+interval '1 microsecond') AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS exclusive_end,
+       to_char((starts_at-(observed_at-starts_at)) AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS previous_starts_at,
+       to_char((starts_at-interval '1 microsecond') AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS previous_observed_at,
+       to_char(starts_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS previous_exclusive_end
+     FROM clock`, [days],
+  )).rows[0]!;
+}
+
 /** All metrics describe this read snapshot; no provider query, ensure or command is run. */
-export async function readAdminOverview(client: PoolClient, viewer: OverviewViewer, range: OverviewRange) {
+export async function readAdminOverview(
+  client: PoolClient,
+  viewer: OverviewViewer,
+  range: OverviewRange,
+  options?: { clock?: OverviewClock; ordersOnly?: boolean },
+) {
   const { adminId, access, scope } = viewer;
   const permission = (code: string) => access.permissions.has(code);
   const emptyScope = scopeIsEmpty(scope, access.isBoss);
@@ -40,44 +74,41 @@ export async function readAdminOverview(client: PoolClient, viewer: OverviewView
     return { id, value, unit, state, drilldown: null };
   };
   const metrics: OverviewMetric[] = [];
-  const days = range === "today" ? 1 : range === "7d" ? 7 : 30;
-  const clock = (await client.query<{ observed_at: string; starts_at: string; exclusive_end: string }>(
-    `SELECT to_char(transaction_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS observed_at,
-       to_char(((date_trunc('day',transaction_timestamp() AT TIME ZONE 'Asia/Shanghai') - ($1::int-1)*interval '1 day') AT TIME ZONE 'Asia/Shanghai') AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS starts_at,
-       to_char((transaction_timestamp()+interval '1 microsecond') AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS exclusive_end`, [days],
-  )).rows[0]!;
+  const clock = options?.clock ?? await readOverviewClock(client, overviewDays(range));
   const parameters = [adminId, access.isBoss, clock.starts_at, clock.observed_at];
   const scopeSql = (column: string) => gameScopeSql(column, "$1", "$2");
 
-  if (permission(ADMIN_PERMISSION.userDirectoryRead) && globalScope) {
-    const row = (await client.query<{ total: string; recent: string }>(
-      `SELECT count(*)::text AS total,count(*) FILTER(WHERE "createdAt">=$1::timestamptz AND "createdAt"<=$2::timestamptz)::text AS recent FROM zzsh_auth_user."user"`,
-      [clock.starts_at, clock.observed_at],
-    )).rows[0]!;
-    metrics.push(metric("usersTotal", row.total), metric("usersNew", row.recent));
-  } else {
-    const state = permission(ADMIN_PERMISSION.userDirectoryRead) ? "NO_GAME_SCOPE" : "FORBIDDEN";
-    metrics.push(metric("usersTotal", null, state), metric("usersNew", null, state));
-  }
+  if (!options?.ordersOnly) {
+    if (permission(ADMIN_PERMISSION.userDirectoryRead) && globalScope) {
+      const row = (await client.query<{ total: string; recent: string }>(
+        `SELECT count(*)::text AS total,count(*) FILTER(WHERE "createdAt">=$1::timestamptz AND "createdAt"<=$2::timestamptz)::text AS recent FROM zzsh_auth_user."user"`,
+        [clock.starts_at, clock.observed_at],
+      )).rows[0]!;
+      metrics.push(metric("usersTotal", row.total), metric("usersNew", row.recent));
+    } else {
+      const state = permission(ADMIN_PERMISSION.userDirectoryRead) ? "NO_GAME_SCOPE" : "FORBIDDEN";
+      metrics.push(metric("usersTotal", null, state), metric("usersNew", null, state));
+    }
 
-  if (permission(ADMIN_PERMISSION.supplyRentalAccountRead) && !emptyScope) {
-    const row = (await client.query<{ total: string; published: string }>(
-      `SELECT count(*)::text AS total,count(*) FILTER(WHERE v.review_state='PUBLISHED')::text AS published
-         FROM zzsh_supply.rental_account a LEFT JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id AND v.account_id=a.id
-        WHERE ${scopeSql("a.game_id")}`, parameters.slice(0, 2),
-    )).rows[0]!;
-    metrics.push(metric("accountsTotal", row.total), metric("accountsPublished", row.published));
-  } else {
-    const state = permission(ADMIN_PERMISSION.supplyRentalAccountRead) ? "NO_GAME_SCOPE" : "FORBIDDEN";
-    metrics.push(metric("accountsTotal", null, state), metric("accountsPublished", null, state));
+    if (permission(ADMIN_PERMISSION.supplyRentalAccountRead) && !emptyScope) {
+      const row = (await client.query<{ total: string; published: string }>(
+        `SELECT count(*)::text AS total,count(*) FILTER(WHERE v.review_state='PUBLISHED')::text AS published
+           FROM zzsh_supply.rental_account a LEFT JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id AND v.account_id=a.id
+          WHERE ${scopeSql("a.game_id")}`, parameters.slice(0, 2),
+      )).rows[0]!;
+      metrics.push(metric("accountsTotal", row.total), metric("accountsPublished", row.published));
+    } else {
+      const state = permission(ADMIN_PERMISSION.supplyRentalAccountRead) ? "NO_GAME_SCOPE" : "FORBIDDEN";
+      metrics.push(metric("accountsTotal", null, state), metric("accountsPublished", null, state));
+    }
+    if (permission(ADMIN_PERMISSION.supplyReviewRead) && !emptyScope) {
+      const row = (await client.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM zzsh_supply.listing_version v JOIN zzsh_supply.rental_account a ON a.id=v.account_id AND a.current_version_id=v.id
+          WHERE v.review_state='SUBMITTED' AND ${scopeSql("a.game_id")}`, parameters.slice(0, 2),
+      )).rows[0]!;
+      metrics.push(metric("listingsPendingReview", row.count));
+    } else metrics.push(metric("listingsPendingReview", null, permission(ADMIN_PERMISSION.supplyReviewRead) ? "NO_GAME_SCOPE" : "FORBIDDEN"));
   }
-  if (permission(ADMIN_PERMISSION.supplyReviewRead) && !emptyScope) {
-    const row = (await client.query<{ count: string }>(
-      `SELECT count(*)::text AS count FROM zzsh_supply.listing_version v JOIN zzsh_supply.rental_account a ON a.id=v.account_id AND a.current_version_id=v.id
-        WHERE v.review_state='SUBMITTED' AND ${scopeSql("a.game_id")}`, parameters.slice(0, 2),
-    )).rows[0]!;
-    metrics.push(metric("listingsPendingReview", row.count));
-  } else metrics.push(metric("listingsPendingReview", null, permission(ADMIN_PERMISSION.supplyReviewRead) ? "NO_GAME_SCOPE" : "FORBIDDEN"));
 
   let trend: Trend[] = [];
   const finance = permission(ADMIN_PERMISSION.financeRead);
@@ -117,17 +148,19 @@ export async function readAdminOverview(client: PoolClient, viewer: OverviewView
     metrics.push(metric("confirmedCents", null, state, "CNY_CENTS"));
   }
 
-  const support = permission(ADMIN_PERMISSION.imSupportRead);
-  if (support && viewer.imAppId) {
-    const row = (await client.query<{ waiting: string; mine: string }>(
-      `SELECT ${globalScope ? "count(*) FILTER(WHERE state='WAITING')::text" : "NULL::text"} AS waiting,
-         count(*) FILTER(WHERE state='ACTIVE' AND assigned_admin_id=$2)::text AS mine
-       FROM zzsh_iam.im_consultation WHERE app_id=$1 AND (assigned_admin_id=$2 ${globalScope ? "OR state='WAITING'" : ""})`, [viewer.imAppId, adminId],
-    )).rows[0]!;
-    metrics.push(metric("supportWaiting", row.waiting, globalScope ? "KNOWN" : "NO_GAME_SCOPE"), metric("supportMine", row.mine));
-  } else {
-    const state = support ? "UNAVAILABLE" : "FORBIDDEN";
-    metrics.push(metric("supportWaiting", null, state), metric("supportMine", null, state));
+  if (!options?.ordersOnly) {
+    const support = permission(ADMIN_PERMISSION.imSupportRead);
+    if (support && viewer.imAppId) {
+      const row = (await client.query<{ waiting: string; mine: string }>(
+        `SELECT ${globalScope ? "count(*) FILTER(WHERE state='WAITING')::text" : "NULL::text"} AS waiting,
+           count(*) FILTER(WHERE state='ACTIVE' AND assigned_admin_id=$2)::text AS mine
+         FROM zzsh_iam.im_consultation WHERE app_id=$1 AND (assigned_admin_id=$2 ${globalScope ? "OR state='WAITING'" : ""})`, [viewer.imAppId, adminId],
+      )).rows[0]!;
+      metrics.push(metric("supportWaiting", row.waiting, globalScope ? "KNOWN" : "NO_GAME_SCOPE"), metric("supportMine", row.mine));
+    } else {
+      const state = support ? "UNAVAILABLE" : "FORBIDDEN";
+      metrics.push(metric("supportWaiting", null, state), metric("supportMine", null, state));
+    }
   }
 
   const path = (route: string, query: Record<string, string> = {}) => route + (Object.keys(query).length ? "?" + new URLSearchParams(query).toString() : "");

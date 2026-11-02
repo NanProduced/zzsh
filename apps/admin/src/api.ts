@@ -21,6 +21,8 @@ export type SessionSnapshot =
       security: { status: "PENDING_ENROLLMENT" | "ACTIVE" | "FROZEN"; isBoss: boolean; passwordChangeRequired: boolean; loginTwoFactorRequired?: boolean };
       session: { id: string; locked: boolean; pinConfigured: boolean; createdAt: string | null; expiresAt: string | null };
       permissions: string[];
+      gameScope?: { mode: "ALL_GAMES" | "SELECTED_GAMES"; gameIds: string[] };
+      dashboardPreset?: "BOSS" | "OPS" | "SUPPORT";
     };
 
 export type AdminStatus = "PENDING_ENROLLMENT" | "ACTIVE" | "FROZEN";
@@ -802,26 +804,6 @@ export class AdminApiError extends Error {
     this.name = "AdminApiError";
   }
 }
-
-export type WorkspaceTimeRange = "today" | "7d" | "30d";
-/** v2 布局契约：稳定组件 ID + 网格坐标 x/y（12 列）与宽高 w/h。历史 order+size 配置由服务端确定性转换。 */
-export type WorkspaceWidgetPlacement = {
-  id: string;
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  timeRange?: WorkspaceTimeRange;
-};
-export type WorkspaceLayoutPayload = {
-  layoutKind: "admin.workspace.layout";
-  /** 配置格式版本（当前为 2）；version 是并发更新版本，二者独立。 */
-  layoutVersion: number;
-  version: number;
-  widgets: WorkspaceWidgetPlacement[];
-  filteredWidgetIds: string[];
-  defaults: WorkspaceWidgetPlacement[];
-};
 
 /** 敏感操作复核（password + totpCode）的人机验证状态；由 adminRequest 自动附带与更新。 */
 type StepUpCaptchaSnapshot = { required: boolean; round: number };

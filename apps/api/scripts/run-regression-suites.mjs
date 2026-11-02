@@ -11,7 +11,6 @@ const SUITES = [
   "database-reset",
   "auth",
   "approval-audit",
-  "admin-workspace-layout",
   "supply-m3b",
   "content-foundation",
   "order-reservation",

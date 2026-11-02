@@ -34,16 +34,16 @@ const vite = await createServer({
         const fromPageContent = importer?.replaceAll("\\", "/").endsWith("/src/workspace/page-content.tsx");
         if (fromPageContent && id === './settings-page') return '\0settings-preview-host-stub';
         if (fromPageContent && id === './account-security-page') return '\0account-security-host-stub';
-        return (normalized.endsWith("/src/workspace/workbench.tsx") || ((id === "./workbench" || id === "./workbench.tsx") && fromPageContent)) ? "\0origin-links-workbench-stub" : undefined;
+        return (normalized.endsWith("/src/workspace/dashboard/dashboard-page.tsx") || (id === "./dashboard/dashboard-page" && fromPageContent)) ? "\0origin-links-dashboard-stub" : undefined;
       },
       load(id) {
         // Routing tests keep leaf UI isolated; their behavior has dedicated component suites.
         if (id === '\0settings-preview-host-stub') return 'import {createElement} from "react"; export function SettingsWorkspace(){return createElement("div",null,"新版设置五分区")}';
         if (id === '\0account-security-host-stub') return 'import {createElement} from "react"; export function AccountSecurityPage(p){return createElement("section",null,"修改登录密码",createElement("button",{onClick:p.onLock},"立即锁定当前会话"))}';
-        if (id !== "\0origin-links-workbench-stub") return undefined;
+        if (id !== "\0origin-links-dashboard-stub") return undefined;
         return `import { createElement } from "react";
-export function WorkbenchPage() { return createElement("div", { "data-stub": "workbench" }); }
-export default WorkbenchPage;`;
+export function DashboardPage() { return createElement("div", { "data-stub": "dashboard" }); }
+export default DashboardPage;`;
       },
     },
   ],

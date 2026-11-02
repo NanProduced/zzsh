@@ -34,7 +34,7 @@ const blank=(scope:string):View=>({scope,status:'loading',read:null,error:'',ope
 const errorText=(e:unknown)=>e instanceof AdminApiError?(e.status===403?'当前身份无权读取这项记录':e.status===409?'政策或可见范围已经变化，请刷新后核对':e.status===404||e.status===503?'分销接口尚未就绪，已有记录不会按零或默认比例补齐':'读取暂未完成，请保留当前输入后重试'):'读取暂未完成，请保留当前输入后重试';
 const requestPath=(id:string)=>'/approvals?'+new URLSearchParams({requestId:id,from:'distribution-policy'});
 
-export function DistributionPolicyPanel({snapshot,onOpenPath,onDirtyChange}:{snapshot:Snapshot;onOpenPath?:(path:string,title?:string)=>void;onDirtyChange?:(dirty:boolean)=>void}){
+export function DistributionPolicyPanel({snapshot,onOpenPath,onDirtyChange,onWriteAssemblyReady}:{snapshot:Snapshot;onOpenPath?:(path:string,title?:string)=>void;onDirtyChange?:(dirty:boolean)=>void;onWriteAssemblyReady?:(ready:boolean)=>void}){
  const identity=snapshot.adminUserId+'|'+snapshot.session.id,access=distributionPolicyAccess(snapshot),scope=directoryScopeOf(snapshot),subject=pendingWriteSubject(snapshot.adminUserId,snapshot.session.id,'',CREATE_OP);
  const live=useRef(scope);live.current=scope;const dirtyChange=useRef(onDirtyChange);dirtyChange.current=onDirtyChange;const generation=useRef(0),readSequence=useRef(0),sending=useRef(false);
  const [stored,setStored]=useState<View>(()=>blank(scope)),view=stored.scope===scope?stored:blank(scope);
@@ -70,6 +70,7 @@ export function DistributionPolicyPanel({snapshot,onOpenPath,onDirtyChange}:{sna
  },[scope]);
  useEffect(()=>{dirtyChange.current?.(draft!==null);},[draft]);
  const head=view.read?.knowledge==='KNOWN'?view.read.policy:null,context=view.read?.changeContext;
+ useEffect(()=>{onWriteAssemblyReady?.(view.status==='ready'&&context?.writeAssemblyReady===true);return()=>onWriteAssemblyReady?.(false);},[scope,view.status,context?.writeAssemblyReady,onWriteAssemblyReady]);
  const operationReady=view.operation?.initiation.allowed===true&&view.operation.triggers.some(t=>t.triggerCondition===TRIGGER);
  const canRequest=access.canManage&&hasPermission(snapshot,'approval.request.create')&&operationReady&&context?.state==='EMPTY'&&context.contractReady&&context.writeAssemblyReady&&pending.state==='absent';
  const canInitial=canRequest&&view.read?.knowledge==='UNKNOWN'&&(view.read.scope==='NATIVE'||view.read.scope==='LOCAL_CONTROLLED');

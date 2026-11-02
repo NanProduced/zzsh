@@ -36,7 +36,6 @@ const SUITES = [
   "database-reset.test.ts",
   "auth.test.ts",
   "approval-audit.test.ts",
-  "admin-workspace-layout.test.ts",
   "supply-m3b.test.ts",
   "content-foundation.test.ts",
   "order-reservation.test.ts",

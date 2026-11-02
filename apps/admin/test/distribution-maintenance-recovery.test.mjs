@@ -38,9 +38,17 @@ test('first 503 keeps the original batch reachable, blocks a new key and refresh
   await click('执行到期入账');await click('确认执行');
   assert.equal(posts,1);assert.ok(button('读原批次'));assert.ok(button('重试原批次'));
   assert.equal(button('执行到期入账').disabled,true);assert.equal(button('重放可恢复漏计提').disabled,true);
+  const scans=calls.filter(call=>call.path.endsWith('/accruals')).length;
+  await act(async()=>root.render(createElement(DistributionMaintenancePanel,{canExecute:false})));await settle();
+  assert.ok(button('读原批次'),'revoked execution keeps the original uncertain receipt reachable');
+  assert.equal(button('重试原批次').disabled,true);assert.equal(button('执行到期入账').disabled,true);assert.equal(button('重新检查').disabled,true);
+  assert.equal(calls.filter(call=>call.path.endsWith('/accruals')).length,scans);assert.equal(posts,1);
   await click('读原批次');assert.match(browser.document.body.textContent,/UNKNOWN/);assert.equal(posts,1);
+  await act(async()=>root.render(createElement(DistributionMaintenancePanel,{canExecute:true})));await settle();
   await click('重试原批次');assert.equal(posts,2);assert.equal(host.querySelector('[aria-label="原批次恢复"]'),null);
   assert.match(host.textContent,/COMPLETE/);assert.equal(button('重放可恢复漏计提').disabled,true,'latest rescan must replace old MISSING row');
   assert.equal(button('执行到期入账').disabled,false);
   assert.equal(new Set(calls.filter(call=>call.method==='POST').map(call=>JSON.parse(call.body).requestId)).size,1);
+  await act(async()=>root.render(createElement(DistributionMaintenancePanel,{canExecute:false})));await settle();
+  assert.ok(host.querySelector('[aria-label="原批次回执"]'),'completed original receipt remains visible after capability withdrawal');assert.equal(button('执行到期入账').disabled,true);
 });

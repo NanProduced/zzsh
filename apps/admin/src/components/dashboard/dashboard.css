@@ -1,0 +1,35 @@
+.dashboard-kpi-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.dashboard-stat-card { height:100%; min-width:0; }
+.dashboard-stat-content { display:flex; min-height:136px; flex-direction:column; justify-content:space-between; gap:8px; }
+.dashboard-stat-value { margin-top:12px; font-size:clamp(1rem,1.7vw,1.5rem); font-weight:600; line-height:1.25; letter-spacing:-.02em; overflow-wrap:anywhere; }
+.dashboard-stat-delta { flex-shrink:1; max-width:55%; white-space:normal; overflow-wrap:anywhere; font-size:10px; }
+.dashboard-stat-card--long { grid-column:span 2; }
+.dashboard-stat-card--long .dashboard-stat-value { font-size:clamp(.875rem,2vw,1.5rem); }
+.dashboard-stat-card[data-knowledge="FORBIDDEN"] .dashboard-stat-content,
+.dashboard-stat-card[data-knowledge="UNAVAILABLE"] .dashboard-stat-content,
+.dashboard-stat-card[data-knowledge="NO_GAME_SCOPE"] .dashboard-stat-content { min-height:104px; }
+
+@media (max-width:639px) {
+  .dashboard-kpi-grid { gap:12px; }
+  .dashboard-stat-content { min-height:124px; }
+  .dashboard-stat-value { margin-top:10px; font-size:1.125rem; }
+  .dashboard-stat-delta { max-width:100%; }
+  .dashboard-stat-card [data-slot="card-content"] > div > .flex { flex-wrap:wrap; }
+}
+
+@media (min-width: 640px) {
+  .dashboard-kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1180px) {
+  .dashboard-kpi-grid {
+    grid-template-columns: repeat(var(--dashboard-kpi-columns, 4), minmax(0, 1fr));
+  }
+}

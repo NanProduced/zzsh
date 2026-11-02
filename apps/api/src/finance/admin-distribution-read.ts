@@ -2,7 +2,7 @@ import type { PoolClient } from 'pg';
 import { createHash } from 'node:crypto';
 import { assertAdminContextInTransaction, type AdminContext } from '../auth/auth-security';
 import { ADMIN_PERMISSION, hasPermission, requirePermission } from '../auth/admin-authorization';
-import { assertGameScopeUsable, gameScopeSql, readAdminGameScope, gameScopeSignature } from '../auth/admin-scope';
+import { assertGameScopeUsable, gameScopeSql, readAdminGameScope, gameScopeSignature, isAllGamesScope } from '../auth/admin-scope';
 import { requireAdminAccess } from '../supply/supply-routes';
 import { invalid, notFound } from '../supply/supply-util';
 import { SecurityApiError } from '../auth/security-core';
@@ -74,7 +74,7 @@ export async function readAdminDistributionOrder(c:PoolClient,actor:Actor,input:
   const projected=earningProjection(row);
   const original=legacy?unknownCalculation('HISTORICAL_CALCULATION_NOT_RECORDED'):calculations.get(row.earning_id)??unknownCalculation('ORIGINAL_BASIS_UNAVAILABLE');
   const calculation=financial?original:{...original,baseCents:null,reasonCodes:[...original.reasonCodes,'INTERNAL_COMMISSION_BASE_REDACTED']};
-  return{id:projected.id,origin:projected.origin as 'NATIVE'|'LEGACY_MYSQL',beneficiary:{userId:userReadable?row.beneficiary_user_id:null,name:typeof row.beneficiary_name==='string'?row.beneficiary_name:null},role:projected.role,amountCents:projected.amount.amountCents,state:projected.state,fundsDisposition:projected.fundsDisposition,occurredAt:projected.occurredAt,dueAt:projected.dueAt,dueAtKnowledge:projected.dueAtKnowledge,calculation,channelArrival:'UNKNOWN' as const,documentRef:documentReadable?(legacy?`HISTORY_DISTRIBUTION:${row.id.slice('history:'.length)}`:`DISTRIBUTION:${row.earning_id}`):null,recoveryRequiredCents:projected.recoveryRequiredCents,events:events.get(row.earning_id)??[]};
+  return{id:projected.id,origin:projected.origin as 'NATIVE'|'LEGACY_MYSQL',beneficiary:{userId:userReadable?row.beneficiary_user_id:null,name:userReadable&&typeof row.beneficiary_name==='string'?row.beneficiary_name:null},role:projected.role,amountCents:projected.amount.amountCents,state:projected.state,fundsDisposition:projected.fundsDisposition,occurredAt:projected.occurredAt,dueAt:projected.dueAt,dueAtKnowledge:projected.dueAtKnowledge,calculation,channelArrival:'UNKNOWN' as const,documentRef:documentReadable?(legacy?`HISTORY_DISTRIBUTION:${row.id.slice('history:'.length)}`:`DISTRIBUTION:${row.earning_id}`):null,recoveryRequiredCents:projected.recoveryRequiredCents,events:events.get(row.earning_id)??[]};
  });
  const reasonCodes:string[]=[];let legacyTruncated=false;let currentLegacyCommissions:AdminDistributionOrder['currentLegacyCommissions']=[];
  if(legacy){
@@ -93,6 +93,8 @@ export type AdminDistributionRelations={schema:'admin-distribution-relations.v1'
 export async function readAdminDistributionRelations(c:PoolClient,actor:Actor,userId:string):Promise<AdminDistributionRelations>{
  key(userId);const access=await authorize(c,actor);requirePermission(access,ADMIN_PERMISSION.userDirectoryRead);
  if(!access.isBoss&&!access.permissions.has('personal.distribution.policy.read')&&!access.permissions.has('personal.distribution.policy.manage'))throw new SecurityApiError(403,'FORBIDDEN','Distribution relation read permission required');
+ const gameScope=await readAdminGameScope(c,actor.userId);assertGameScopeUsable(gameScope,access.isBoss);
+ if(!access.isBoss&&!isAllGamesScope(gameScope))throw new SecurityApiError(403,'FORBIDDEN','Global distribution network requires Boss or ALL_GAMES scope');
  if(!(await c.query('SELECT id FROM zzsh_auth_user."user" WHERE id=$1',[userId])).rows[0])throw notFound();
  const base:AdminDistributionRelations={schema:'admin-distribution-relations.v1',knowledge:'UNAVAILABLE',subjectId:userId,participant:{knowledge:'UNKNOWN',eligibility:'UNKNOWN',commissionFrozen:null,legacyLevelCode:null},relations:[],reasonCodes:[]};
  if(!await installed(c,['zzsh_order.distribution_participant','zzsh_order.invitation_relation']))return{...base,reasonCodes:['DISTRIBUTION_RELATION_SOURCE_NOT_INSTALLED']};

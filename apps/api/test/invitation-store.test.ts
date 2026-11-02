@@ -1,6 +1,10 @@
 import {test} from 'node:test';import {strict as assert} from 'node:assert';import type {Pool,PoolClient} from 'pg';import {readMyInvitations,bindMyDistributionLeader,readDistributionParentInTransaction,readMyInvitees,parseInviteesQuery,encodeInviteesCursor,decodeInviteesCursor,readMyLeaderBindingReceipt} from '../src/finance/invitation-store';
-import {createHash} from 'node:crypto';import {canonicalize} from '../src/supply/content-hash';import {readActiveDistributionPolicyInTransaction,type LocalDistributionScope} from '../src/finance/distribution-policy-store';
+import {createHash} from 'node:crypto';import {canonicalize} from '../src/supply/content-hash';import {readActiveDistributionPolicyInTransaction,type LocalDistributionScope} from '../src/finance/distribution-policy-store';import {projectInviteeCount} from '../src/finance/invitation-store';
 const actor={userId:'self',sessionId:'real-sdk-session',requestId:'req_invitation_test'};
+test('empty target relationships mean known zero only after source graph coverage is known',()=>{
+ for(const knowledge of [undefined,'UNKNOWN'])assert.deepEqual(projectInviteeCount(knowledge,'0'),{knowledge:'UNKNOWN',count:null,mappedRelationCount:'0',reason:'INVITEE_MAPPING_NOT_CLOSED'});
+ assert.deepEqual(projectInviteeCount('KNOWN','0'),{knowledge:'KNOWN',count:'0',mappedRelationCount:'0',reason:null});assert.throws(()=>projectInviteeCount('KNOWN',0));
+});
 test('leader binding locks deduplicated subjects in database order and rejects incomplete locks before auth or writes',async()=>{
  for(const missing of [false,true]){const seen:{sql:string;args:any[]}[]=[],pool={connect:async()=>({release(){},query:async(sql:string,args:any[]=[])=>{seen.push({sql,args});if(['BEGIN','ROLLBACK'].includes(sql)||sql.startsWith('SELECT pg_advisory'))return{rows:[]};if(sql.startsWith('SELECT to_regclass'))return{rows:[{complete:true}]};if(sql.startsWith('SELECT * FROM zzsh_order.distribution_invite_code'))return{rows:[{user_id:'self'}]};if(sql.startsWith('SELECT id FROM zzsh_auth_user."user" WHERE id=ANY'))return{rows:missing?[]:[{id:'self'}]};if(sql.startsWith('SELECT "suspended"'))throw Error('AUTH_BOUNDARY');throw Error('Unexpected query');}})} as unknown as Pool;
   await assert.rejects(bindMyDistributionLeader(pool,actor,{code:'FX1',policyVersion:'p',expectedParticipantRevision:'1'},'key'),e=>missing?(e as {status?:number}).status===404:(e as Error).message==='AUTH_BOUNDARY');const locked=seen.find(q=>q.sql.includes('WHERE id=ANY'));assert(locked);assert(locked.sql.includes('ORDER BY id FOR UPDATE'));assert.deepEqual(locked.args,[['self']]);assert.equal(seen.filter(q=>q.sql.startsWith('SELECT "suspended"')).length,missing?0:1);assert(!seen.some(q=>/^(INSERT|UPDATE|DELETE)/.test(q.sql)));
@@ -99,4 +103,10 @@ test("GAP-014 self terms: only own level/version, unknown stays unknown, no full
   assert.deepEqual(["INELIGIBLE", "COMMISSION_FROZEN"].map((r) => projectMyDistributionTerms("u1", policy, r === "INELIGIBLE" ? { eligibility: "INELIGIBLE", level_code: "L2" } : { eligibility: "ELIGIBLE", level_code: "L2", commission_frozen: true }).reason), ["INELIGIBLE", "COMMISSION_FROZEN"]);
   const disabled = projectMyDistributionTerms("u1", { knowledge: "KNOWN", policy: { versionId: "pv-2", config: { ...config, enabled: false } } }, { eligibility: "ELIGIBLE", level_code: "L1" });
   assert.deepEqual([disabled.applicable, disabled.reason], [false, "POLICY_DISABLED"]);
+});
+test('uniform v2 terms reuse actual policy and qualification without a legacy grade or default rate',async()=>{
+ const {projectMyDistributionTermsV2}=await import('../src/finance/invitation-store'),config={schema:'distribution-policy.v2',scope:'LOCAL_CONTROLLED',enabled:true,rateMode:'UNIFORM',renterPercent:'3',ownerPercent:'2',accountModes:['ordinary'],minimumAccrualCents:'1',settlementDelayDays:7} as any;
+ const policy={knowledge:'KNOWN' as const,policy:{versionId:'approved-uniform',config}},p={eligibility:'ELIGIBLE',level_code:null,commission_frozen:false,policy_version_id:'original-qualification'};
+ const r=projectMyDistributionTermsV2('self',policy,p);assert.equal(r.knowledge,'KNOWN');assert.equal(r.applicable,true);assert.equal(r.level,null);assert.deepEqual(r.rates,{renterPercent:'3',ownerPercent:'2'});
+ assert.equal(projectMyDistributionTermsV2('self',policy,undefined).knowledge,'UNKNOWN');assert.equal(projectMyDistributionTermsV2('self',{knowledge:'UNKNOWN',policy:null},p).knowledge,'UNKNOWN');
 });

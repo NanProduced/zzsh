@@ -23,12 +23,12 @@ import { SupportDashboard, SupportManagementPane, SupportPatrol } from "../views
 import { SupportAssistantSettings } from "../views/im-support-settings";
 import { MySupportStatisticsView } from "../views/my-support-statistics";
 import { MembershipGrowthAdminHost } from "../views/membership-growth-admin-host";
-import { DistributionWorkspace } from "../views/distribution-workspace";
+import { DistributionEarningsPage, DistributionOverviewPage, DistributionParticipantPage, DistributionParticipantsPage, DistributionPolicyPage, DistributionRelationsPage } from "../views/distribution-dashboard-pages";
 
 import { AdminOrderChainView, AdminResourceReadView } from "../views/admin-order-chain-view";
 
 import { parseWorkspacePath, type WorkspaceTab } from "./tab-model";
-import { WorkbenchPage } from "./workbench";
+import { DashboardPage } from "./dashboard/dashboard-page";
 import { Button } from "../components/ui-elements";
 
 export function WorkspacePageContent({
@@ -89,7 +89,7 @@ export function WorkspacePageContent({
   if(tab.kind === "finance-channels")return <FinanceChannels key={tab.id} snapshot={snapshot}/>;
   if(tab.kind.startsWith("finance-"))return <AdminFinanceView key={tab.id} tab={tab} snapshot={snapshot} onOpenPath={onOpenPath} onQueryChange={onQueryChange} onRefresh={onRefresh} refreshNonce={refreshNonce}/>;
   if (tab.kind === "workbench") {
-    return <WorkbenchPage key={tab.id} snapshot={snapshot} onNavigate={(path) => onOpenPath(path)} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
+    return <DashboardPage key={tab.id} snapshot={snapshot} onNavigate={(path) => onOpenPath(path)} refreshNonce={refreshNonce} />;
   }
   if (tab.kind === "system-configuration") return <SystemConfigurationView key={tab.id} snapshot={snapshot} refreshNonce={refreshNonce} />;
   if (tab.kind === "account") {
@@ -153,7 +153,12 @@ export function WorkspacePageContent({
     if (!canManageSupport) return null;
     return <div className="im-wb-mgmt-host"><SupportManagementPane key={[tab.id,snapshot.adminUserId,snapshot.session.id].join("|")} active request={adminRequest} onDirtyChange={onDirtyChange} onWriteLockChange={onWriteLockChange} canConfigure={snapshot.security.isBoss || snapshot.permissions.includes("im.support.configure")} canConfigureIntegration={snapshot.security.isBoss || snapshot.permissions.includes("im.support.integration.configure")} canTakeover={snapshot.security.isBoss || snapshot.permissions.includes("im.support.audit.takeover")} currentAdminUserId={snapshot.adminUserId} currentAdminName={snapshot.user.name || snapshot.user.username || snapshot.adminUserId} onOpenConsultation={()=>onOpenPath("/support?section=consultation")} onOpenProfile={snapshot.security.isBoss || snapshot.permissions.includes("user.directory.read") ? userId=>onOpenPath(`/users/${encodeURIComponent(userId)}`) : undefined} /></div>;
   }
-  if (tab.kind === "distribution-policy") return snapshot.authenticated ? <DistributionWorkspace key={tab.id} snapshot={snapshot} query={tab.query} onOpenPath={onOpenPath} onQueryChange={onQueryChange} onDirtyChange={onDirtyChange} /> : null;
+  if (tab.kind === "distribution-overview") return snapshot.authenticated ? <DistributionOverviewPage key={tab.id} snapshot={snapshot} onOpenPath={onOpenPath} query={tab.query} onQueryChange={onQueryChange} refreshNonce={refreshNonce} /> : null;
+  if (tab.kind === "distribution-earnings") return snapshot.authenticated ? <DistributionEarningsPage key={tab.id} snapshot={snapshot} onOpenPath={onOpenPath} query={tab.query} onQueryChange={onQueryChange} refreshNonce={refreshNonce} /> : null;
+  if (tab.kind === "distribution-participants") return snapshot.authenticated ? <DistributionParticipantsPage key={tab.id} snapshot={snapshot} onOpenPath={onOpenPath} query={tab.query} onQueryChange={onQueryChange} refreshNonce={refreshNonce} /> : null;
+  if (tab.kind === "distribution-participant") return snapshot.authenticated && tab.objectId ? <DistributionParticipantPage key={tab.id} snapshot={snapshot} userId={tab.objectId} onOpenPath={onOpenPath} refreshNonce={refreshNonce} /> : null;
+  if (tab.kind === "distribution-relations") return snapshot.authenticated ? <DistributionRelationsPage key={tab.id} snapshot={snapshot} onOpenPath={onOpenPath} query={tab.query} onQueryChange={onQueryChange} refreshNonce={refreshNonce} /> : null;
+  if (tab.kind === "distribution-policy") return snapshot.authenticated ? <DistributionPolicyPage key={tab.id} snapshot={snapshot} onOpenPath={onOpenPath} onDirtyChange={onDirtyChange} /> : null;
   if (tab.kind === "membership-growth") return <>{tab.query.fromUserId && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(tab.query.fromUserId) && (snapshot.security.isBoss || snapshot.permissions.includes("user.directory.read")) ? <Button variant="ghost" onClick={() => onOpenPath("/users/" + tab.query.fromUserId + "?section=growth")}>返回来源用户</Button> : null}<MembershipGrowthAdminHost key={tab.id} tab={tab} snapshot={snapshot} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} onOpenPath={onOpenPath} /></>;
   if (tab.kind === "admins" || tab.kind === "admin-object") {
     return (
@@ -256,5 +261,5 @@ export function WorkspacePageContent({
       </>
     );
   }
-  return <WorkbenchPage key={tab.id} snapshot={snapshot} onNavigate={(path) => onOpenPath(path)} onDirtyChange={onDirtyChange} refreshNonce={refreshNonce} />;
+  return <DashboardPage key={tab.id} snapshot={snapshot} onNavigate={(path) => onOpenPath(path)} refreshNonce={refreshNonce} />;
 }

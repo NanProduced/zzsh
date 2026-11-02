@@ -61,7 +61,13 @@ test("每条目标路由只有唯一活动入口，不再按前缀点亮父级",
     ["/roles", "", ["/roles"]],
     ["/roles/role_1", "", ["/roles"]],
     ["/membership-growth", "", ["/membership-growth"]],
-    ["/distribution-policy", "", ["/distribution-policy"]],
+    ["/distribution", "", ["/distribution"]],
+    ["/distribution/earnings", "", ["/distribution/earnings"]],
+    ["/distribution/participants", "", ["/distribution/participants"]],
+    ["/distribution/participants/user_1", "", ["/distribution/participants"]],
+    ["/distribution/relations", "", ["/distribution/relations"]],
+    ["/distribution/policy", "", ["/distribution/policy"]],
+    ["/distribution-policy", "", []],
     ["/content", "", ["/content"]],
     ["/support", "", ["/support"]],
     ["/workbench", "", ["/workbench"]],
@@ -84,15 +90,15 @@ test("带 query 的入口只在对应分区点亮，旧入口与分区入口互�
 test("侧栏菜单保留全部既有入口与分组命名一致性", () => {
   const items = workspaceMenuItems(boss);
   const titles = items.filter((item) => item.isTitle).map((item) => item.label);
-  assert.deepEqual(titles, ["工作区", "客户服务", "会员运营", "系统与安全", "供给与目录", "供给与规则", "三角洲行动", "运营内容", "资金", "交易", "用户与会员", "审批与审计", "个人"]);
+  assert.deepEqual(titles, ["工作区", "客户服务", "会员运营", "分销", "系统与安全", "供给与目录", "供给与规则", "三角洲行动", "运营内容", "资金", "交易", "用户与会员", "审批与审计", "个人"]);
   for (const title of titles) {
     assert.equal(items.filter((item) => item.path).some((item) => item.label === title), false, `组名不得与组内入口同名：${title}`);
   }
   assert.equal(items.find((item) => item.path === "/approvals").label, "审批中心", "侧栏与页内审批命名一致");
   const paths = menuPaths(boss);
-  assert.equal(paths.length, 34, "真实Boss入口并集：保留既有入口，资金增加独立总览与渠道工具");
+  assert.equal(paths.length, 38, "真实Boss入口并集：保留资金总览/查找/期间/渠道，分销拆为五个入口");
   assert.equal(paths.includes("/users/restore"), false, "账号恢复入口已移除");
-  for (const path of ["/system","/distribution-policy","/supply/media","/finance/period","/settings?section=security","/support","/support/mine","/support/overview","/support/patrol","/support/settings","/avatar-reviews"]) {
+  for (const path of ["/system","/distribution","/distribution/earnings","/distribution/participants","/distribution/relations","/distribution/policy","/supply/media","/finance/period","/settings?section=security","/support","/support/mine","/support/overview","/support/patrol","/support/settings","/avatar-reviews"]) {
     assert.ok(paths.includes(path), `保留既有入口 ${path}`);
   }
 });

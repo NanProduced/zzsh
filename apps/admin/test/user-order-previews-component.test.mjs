@@ -26,11 +26,11 @@ const vite = await createServer({
     resolveId(id, importer) {
       const parent = importer?.replaceAll('\\', '/');
       if (!parent?.endsWith('/src/workspace/page-content.tsx')) return;
-      if (['./settings-page', './account-security-page', './workbench', './workbench.tsx'].includes(id)) return '\0order-preview-leaf:' + id;
+      if (['./settings-page', './account-security-page', './dashboard/dashboard-page'].includes(id)) return '\0order-preview-leaf:' + id;
     },
     load(id) {
       if (!id.startsWith('\0order-preview-leaf:')) return;
-      return 'export function SettingsWorkspace(){return null;} export function AccountSecurityPage(){return null;} export function WorkbenchPage(){return null;}';
+      return 'export function SettingsWorkspace(){return null;} export function AccountSecurityPage(){return null;} export function DashboardPage(){return null;}';
     },
   }],
   resolve: { alias: { '@': path.join(rootPath, 'src'), '@brand': path.resolve(rootPath, '../../assets/brand') } },

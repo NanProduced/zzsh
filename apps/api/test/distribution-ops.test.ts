@@ -21,6 +21,7 @@ import { projectMyDistributionTerms, projectMyDistributionTermsV2 } from '../src
 import * as invitationStore from '../src/finance/invitation-store';
 import * as userIdentity from '../src/auth/user-identity';
 import { createPaymentDistributionStore } from '../src/finance/distribution-payment-store';
+import { prepareHistoricalObservation } from '../src/finance/personal-finance-read';
 
 const flat = { schema:'distribution-policy.v2',scope:'LOCAL_CONTROLLED',enabled:true,participation:'AUTO_AT_REGISTRATION',depth:1,selfRebate:false,accountModes:['ordinary','custom'],minimumAccrualCents:'1',settlementDelayDays:1,rateMode:'UNIFORM',renterPercent:'3',ownerPercent:'2' };
 const legacy = { schema:'distribution-policy.v1',scope:'LOCAL_CONTROLLED',enabled:false,participation:'AUTO_AT_REGISTRATION',depth:1,selfRebate:false,accountModes:['ordinary','custom'],minimumAccrualCents:'1',settlementDelayDays:1,levels:[{code:'BASE',rank:1,default:true,renterPercent:'3',ownerPercent:'2',upgrade:null}] };
@@ -173,10 +174,10 @@ test('submission readiness: legal preparation validates without changing the pol
  const c=submissionPreparationClient(),before=canonicalize(c.original),binding=policyStore.createLocalDistributionScope(submissionResourceConfig,submissionResourceReceipt);await validateDistributionPolicySubmission(c as any,change(),binding);assert.equal(canonicalize(c.original),before);assert(c.calls.some(s=>s.includes('pg_advisory_xact_lock')));assert(c.calls.some(s=>s.includes('FROM zzsh_iam.approval_request')));assert(c.calls.every(s=>s.startsWith('SELECT')));
 });
 
-async function withReadAccess(permissions:string[],fn:()=>Promise<void>,boss=false){
+async function withReadAccess(permissions:string[],fn:()=>Promise<void>,boss=false,gameScope:scopes.AdminGameScope={mode:'SELECTED_GAMES',gameIds:['game_1']}){
  const a=auth as any,s=supplyRoutes as any,g=scopes as any,e=earningRead as any,l=legacyFinance as any;
  const original=[a.assertAdminContextInTransaction,s.requireAdminAccess,g.readAdminGameScope,e.readAdminEarningCalculations,e.readAdminEarningEventActions,l.readAdminLegacyDutyFinances];
- a.assertAdminContextInTransaction=async()=>{};s.requireAdminAccess=async()=>access(permissions,boss);g.readAdminGameScope=async()=>({mode:'SELECTED_GAMES',gameIds:['game_1']});
+ a.assertAdminContextInTransaction=async()=>{};s.requireAdminAccess=async()=>access(permissions,boss);g.readAdminGameScope=async()=>gameScope;
  e.readAdminEarningCalculations=async()=>new Map([['earning_1',{knowledge:'KNOWN',policyVersion:'policy_1',levelCode:'BASE',percent:'3',baseCents:'10000',formula:'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE',reasonCodes:[]}]]);
  e.readAdminEarningEventActions=async()=>new Map([['event_1',{knowledge:'KNOWN',action:'ACCRUE',reasonCodes:[]}],['event_2',{knowledge:'KNOWN',action:'SETTLE',reasonCodes:[]}]]);
  l.readAdminLegacyDutyFinances=async()=>new Map([['duty_1',{dutyId:'duty_1',orderId:'legacy_1',kind:'COMMISSION',subjectId:'beneficiary_1',state:'SETTLED',knowledge:'KNOWN',amountCents:'0',finalization:'FINALIZED_ZERO',parentSourceId:'123',parentSourceDigest:'d'.repeat(64)}]]);
@@ -196,7 +197,7 @@ function readClient(options:{outside?:boolean;missing?:boolean;wrongOrder?:boole
 const actor={userId:'support_1',sessionId:'session_1'} as any;
 test('S3D23 order reader sees this commission without finance.read but private base/profile links stay redacted',async()=>withReadAccess(['order.read'],async()=>{
  const {c,calls}=readClient(),v=await readAdminDistributionOrder(c,actor,{orderId:'order_1',origin:'NATIVE'});
- assert.equal(v.items[0]!.amountCents,'300');assert.equal(v.items[0]!.calculation.percent,'3');assert.equal(v.items[0]!.calculation.baseCents,null);assert.equal(v.items[0]!.beneficiary.userId,null);assert.equal(v.items[0]!.documentRef,null);assert.equal(v.items[0]!.events.length,2);assert.equal(v.items[0]!.channelArrival,'UNKNOWN');
+ assert.equal(v.items[0]!.amountCents,'300');assert.equal(v.items[0]!.calculation.percent,'3');assert.equal(v.items[0]!.calculation.baseCents,null);assert.equal(v.items[0]!.beneficiary.userId,null);assert.equal(v.items[0]!.beneficiary.name,null);assert.equal(v.items[0]!.documentRef,null);assert.equal(v.items[0]!.events.length,2);assert.equal(v.items[0]!.channelArrival,'UNKNOWN');
  assert(calls.some(c=>c.sql.includes('game_scope_mode')&&c.values[1]==='support_1'));assert(calls.every(c=>! /\b(INSERT|UPDATE|DELETE|TRUNCATE)\b|FOR SHARE|pg_advisory/i.test(c.sql)));
 }));
 test('finance field authority never substitutes exact order/game authority',async()=>{
@@ -214,11 +215,41 @@ test('legacy exact tuple remains separate, finalized zero is a real typed respon
 }));
 test('relationship query keeps inviter and commission leader independent and requires directory authority',async()=>{
  await withReadAccess(['order.read'],async()=>{await assert.rejects(()=>readAdminDistributionRelations({query:async()=>{throw Error('must not query');}} as any,actor,'user_1'));});
- await withReadAccess(['user.directory.read','personal.distribution.policy.read'],async()=>{const c:any={query:async(sql:string)=>({rows:sql.startsWith('SELECT id FROM')?[{id:'user_1'}]:sql.includes('bool_and')?[{ready:true}]:sql.startsWith('SELECT eligibility')?[{eligibility:'ELIGIBLE',commission_frozen:false,level_code:'OLD_GOLD',inviter_knowledge:'KNOWN_PARENT',leader_knowledge:'UNKNOWN'}]:[{type:'INVITER',parent_user_id:'inviter_1',parent_name:'来源人',source_type:'NATIVE_REGISTRATION',policy_version_id:'old_policy'}]})};const v=await readAdminDistributionRelations(c,actor,'user_1');assert.equal(v.relations[0]!.knowledge,'KNOWN_PARENT');assert.equal(v.relations[1]!.knowledge,'UNKNOWN');assert.equal(v.relations[1]!.parentUserId,null);});
+ await withReadAccess(['user.directory.read','personal.distribution.policy.read'],async()=>{const c:any={query:async(sql:string)=>({rows:sql.startsWith('SELECT id FROM')?[{id:'user_1'}]:sql.includes('bool_and')?[{ready:true}]:sql.startsWith('SELECT eligibility')?[{eligibility:'ELIGIBLE',commission_frozen:false,level_code:'OLD_GOLD',inviter_knowledge:'KNOWN_PARENT',leader_knowledge:'UNKNOWN'}]:[{type:'INVITER',parent_user_id:'inviter_1',parent_name:'来源人',source_type:'NATIVE_REGISTRATION',policy_version_id:'old_policy'}]})};const v=await readAdminDistributionRelations(c,actor,'user_1');assert.equal(v.relations[0]!.knowledge,'KNOWN_PARENT');assert.equal(v.relations[1]!.knowledge,'UNKNOWN');assert.equal(v.relations[1]!.parentUserId,null);},false,{mode:'ALL_GAMES',gameIds:[]});
+});
+
+test('selected-game relationship readers reject before subject existence, qualification or parent SQL',async()=>{
+ for(const gameIds of [['game_1'],[]])await withReadAccess(['user.directory.read','personal.distribution.policy.read'],async()=>{
+  const calls:string[]=[],c:any={query:async(sql:string)=>{calls.push(sql);return{rows:[{id:'other_game_user'}]};}};
+  await assert.rejects(()=>readAdminDistributionRelations(c,actor,'other_game_user'),(error:any)=>error.status===403);
+  assert.deepEqual(calls,[]);
+ },false,{mode:'SELECTED_GAMES',gameIds});
+});
+
+test('Boss can read global relationships with an empty selected scope while ALL_GAMES still needs directory and policy authority',async()=>{
+ await withReadAccess([],async()=>{
+  const calls:string[]=[],c:any={query:async(sql:string)=>{calls.push(sql);if(sql.startsWith('SELECT id FROM'))return{rows:[{id:'user_1'}]};if(sql.includes('bool_and'))return{rows:[{ready:true}]};if(sql.startsWith('SELECT eligibility'))return{rows:[{eligibility:'ELIGIBLE',commission_frozen:false,inviter_knowledge:'KNOWN_NONE',leader_knowledge:'KNOWN_PARENT'}]};return{rows:[{type:'DISTRIBUTION_LEADER',parent_user_id:'leader_1',parent_name:'计佣上级',source_type:'NATIVE_REGISTRATION',policy_version_id:'policy_1'}]};}};
+  const result=await readAdminDistributionRelations(c,actor,'user_1');assert.equal(result.relations[1]!.parentUserId,'leader_1');assert.equal(result.relations[1]!.parentName,'计佣上级');assert(calls.every(sql=>/^SELECT/.test(sql)));
+ },true,{mode:'SELECTED_GAMES',gameIds:[]});
+ for(const permissions of [['distribution.dashboard.read'],['user.directory.read'],['personal.distribution.policy.read']])await withReadAccess(permissions,async()=>{
+  let calls=0;await assert.rejects(()=>readAdminDistributionRelations({query:async()=>{calls++;return{rows:[]};}} as any,actor,'user_1'),(error:any)=>error.status===403);assert.equal(calls,0);
+ },false,{mode:'ALL_GAMES',gameIds:[]});
+});
+
+test('directory identity and private base stay separate for both native and historical order commissions',async()=>{
+ for(const legacy of [false,true])for(const directory of [false,true])for(const financial of [false,true])await withReadAccess(['order.read',...(directory?['user.directory.read']:[]),...(financial?['finance.read']:[])],async()=>{
+  const {c,calls}=readClient({legacy});
+  if(legacy){const original=c.query,snapshot={kind:'historicalDistribution' as const,sourceId:1,sourceUserId:11,amount:'3.00',sourceStatus:2,sourceUpdatedAt:1791072000,level:2,orderId:123},prepared=prepareHistoricalObservation(snapshot,{userId:'beneficiary_1',legacyUserId:'11',sourceSystem:'legacy_source',basisId:null});
+   c.query=async(sql:string,values:any[]=[])=>sql.includes('FROM zzsh_order.personal_finance_observation')?{rows:[{id:'history:observation_1',origin:'LEGACY_MYSQL',user_id:'beneficiary_1',legacy_user_id:'11',source_system:'legacy_source',source_entity:prepared.sourceEntity,source_id:prepared.sourceId,source_digest:prepared.sourceDigest,source_canonical:prepared.sourceCanonical,snapshot,source_amount:'3.00',order_id:'123',beneficiary_user_id:'beneficiary_1',beneficiary_name:'受益人',role:'RENTER_REFERRAL',state:'SETTLED',occurred_at:prepared.sourceEventAt,due_at:null,funds_disposition:'HISTORICAL_STATUS_ONLY',recovery_required_cents:null,version:'0'}]}:original(sql,values);
+  }
+  const value=await readAdminDistributionOrder(c,actor,{orderId:legacy?'legacy_1':'order_1',origin:legacy?'LEGACY':'NATIVE'}),item=value.items[0]!;
+  assert.equal(item.amountCents,'300');assert.equal(item.beneficiary.userId,directory?'beneficiary_1':null);assert.equal(item.beneficiary.name,directory?'受益人':null);
+  assert.equal(item.calculation.baseCents,!legacy&&financial?'10000':null);assert.equal(item.documentRef,null);assert(calls.every(call=>! /\b(INSERT|UPDATE|DELETE|TRUNCATE)\b/i.test(call.sql)));
+ });
 });
 
 test('Boss keeps existing all-permission semantics while scoped support remains redacted',async()=>{
- await withReadAccess([],async()=>{const value=await readAdminDistributionOrder(readClient().c,actor,{orderId:'order_1',origin:'NATIVE'});assert.equal(value.items[0]!.calculation.baseCents,'10000');assert.equal(value.items[0]!.beneficiary.userId,'beneficiary_1');assert(value.items[0]!.documentRef);},true);
+ await withReadAccess([],async()=>{const value=await readAdminDistributionOrder(readClient().c,actor,{orderId:'order_1',origin:'NATIVE'});assert.equal(value.items[0]!.calculation.baseCents,'10000');assert.equal(value.items[0]!.beneficiary.userId,'beneficiary_1');assert.equal(value.items[0]!.beneficiary.name,'受益人');assert(value.items[0]!.documentRef);},true);
 });
 
 test('finance read does not by itself grant a document link, while document permission retains its own boundary',async()=>{

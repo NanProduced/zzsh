@@ -1,8 +1,8 @@
 import type { INestApplication } from "@nestjs/common";
 
 import { handleAdminSelfSettingsRoute } from "../auth/admin-self-settings";
-import { getWorkspaceLayout, saveWorkspaceLayout } from "../auth/admin-workspace-layout";
 import { handleAdminOverview } from "../auth/admin-overview";
+import { handleAdminDashboard } from "../auth/admin-dashboard";
 import {
   getAdminSessionSnapshot,
   handleAdminSecurity,
@@ -14,6 +14,7 @@ import {
   type AuthSecurityOptions,
 } from "../auth/auth-security";
 import { handleSupplyAdminRoute, type SupplyRuntimeOptions } from "../supply/supply-routes";
+import type { ListingCursorKey } from "../supply/listing-cursor";
 import { handleContentAdminRoute } from "../content/content-routes";
 import { handleProfileAvatarAdminReviewRoute, handleProfileAvatarAdminSelfRoute } from "../profile/profile-avatar-routes";
 import { handleSystemConfiguration } from "../system/system-configuration-routes";
@@ -22,6 +23,7 @@ import { handleOrderAdminRoute, type OrderRuntimeOptions } from "../order/order-
 import { handleRentalMembershipAdmin } from "../auth/rental-membership-routes";
 import { handleMembershipGrowthAdmin, handleMembershipGrowthPolicyAdmin } from "../auth/membership-growth-routes";
 import { handleAdminDistributionRead } from "../finance/admin-distribution-routes";
+import { handleAdminDistributionDashboard } from "../finance/admin-distribution-dashboard-routes";
 import { handleAdminDistributionMaintenance } from "../finance/admin-distribution-maintenance";
 import type { DistributionEarningStore } from "../finance/distribution-earning-store";
 import { handleDistributionPolicyAdmin } from "../finance/distribution-policy-routes";
@@ -52,7 +54,7 @@ export type AdminBffOptions = {
   apiOrigin: string;
   adminOrigin: string;
   adminAuthHandler: WebAuthHandler;
-  adminSecurityOptions: AuthSecurityOptions;
+  adminSecurityOptions: AuthSecurityOptions & { listingCursorKey?: ListingCursorKey };
   distributionScope?: LocalDistributionScope;
   distributionReadScope?: LocalDistributionScope;
   distributionEarnings?: DistributionEarningStore;
@@ -437,21 +439,8 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     await handleAdminOverview(request, response, { ...options.adminSecurityOptions, imAppId: options.yunxin?.appId });
     return;
   }
-  if (path === "/workspace/layout") {
-    if (method !== "GET" && method !== "PUT") {
-      sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);
-      return;
-    }
-    try {
-      const context = await readAdminContext(request, options.adminSecurityOptions);
-      const payload = method === "GET"
-        ? await getWorkspaceLayout(options.adminSecurityOptions.pool, context.userId)
-        : await saveWorkspaceLayout(options.adminSecurityOptions.pool, context.userId, request.body);
-      sendJson(response, 200, payload, requestId);
-    } catch (error) {
-      if (error instanceof SecurityApiError) sendError(response, error.status, error.code, error.message, requestId);
-      else sendError(response, 500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);
-    }
+  if (path === "/dashboard") {
+    await handleAdminDashboard(request, response, { ...options.adminSecurityOptions, imAppId: options.yunxin?.appId });
     return;
   }
   if (/^\/users\/[^/]+\/rental-membership$/.test(path)) {
@@ -476,6 +465,14 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
       if (error instanceof SecurityApiError) sendError(response, error.status, error.code, error.message, requestId);
       else sendError(response, 500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);
     }
+    return;
+  }
+  if (/^\/distribution\/(overview|earnings|participants(?:\/[A-Za-z0-9._:-]+)?)$/.test(path)) {
+    if (method !== "GET") { sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId); return; }
+    const targetPath = "/api/v1/admin" + path + requestQuery(request);
+    request.url = targetPath; request.originalUrl = targetPath;
+    request.headers = { ...request.headers, "x-request-id": requestId };
+    await handleAdminDistributionDashboard(request as Parameters<typeof handleAdminDistributionDashboard>[0], response as Parameters<typeof handleAdminDistributionDashboard>[1], options.adminSecurityOptions);
     return;
   }
   if (new RegExp("^/distribution/(orders/(NATIVE|LEGACY)|relations)/[A-Za-z0-9._:-]+$").test(path)) {

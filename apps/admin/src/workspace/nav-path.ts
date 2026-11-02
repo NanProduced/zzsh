@@ -38,10 +38,14 @@ export function sanitizeLocalHref(href: string): string {
 const SIBLING_ROUTES: Record<string, readonly string[]> = {
   "/settings": ["/settings?section=security"],
   "/finance": ["/finance/search", "/finance/period", "/finance/channels"],
+  "/distribution": ["/distribution/earnings", "/distribution/participants", "/distribution/relations", "/distribution/policy"],
 };
 
 function blockedBySibling(pathname: string, current: string): boolean {
-  return (SIBLING_ROUTES[pathname] ?? []).some((sibling) => (sibling.split("?")[0] ?? "") === current);
+  return (SIBLING_ROUTES[pathname] ?? []).some((sibling) => {
+    const base = sibling.split("?")[0] ?? "";
+    return current === base || current.startsWith(`${base}/`);
+  });
 }
 
 export function splitNavPath(path: string): { pathname: string; query: URLSearchParams } {

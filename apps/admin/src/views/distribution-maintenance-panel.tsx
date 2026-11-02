@@ -15,7 +15,7 @@ type Pending = { kind: 'replay' | 'due'; requestId: string; body: Record<string,
 const newRequestId = () => 'distmaint_' + (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}_${Math.random().toString(16).slice(2)}`).replaceAll('-', '');
 
 /** Operator-only, explicit commands. Opening the page never writes money. */
-export function DistributionMaintenancePanel() {
+export function DistributionMaintenancePanel({ canExecute = true }: { canExecute?: boolean } = {}) {
   const [scan, setScan] = useState<Scan | null>(null);
   const [orders, setOrders] = useState<OrderRow[]>([]);
   const [busy, setBusy] = useState(false);
@@ -26,7 +26,9 @@ export function DistributionMaintenancePanel() {
   const [batch, setBatch] = useState<Batch | null>(null);
   const pendingRef = useRef<Pending | null>(null);
   const active = useRef<AbortController | null>(null);
+  const execution = useRef(canExecute); execution.current = canExecute;
   const load = useCallback(async (cursor: string | null = null) => {
+    if (!execution.current) return;
     active.current?.abort();
     const controller = new AbortController();
     active.current = controller;
@@ -45,8 +47,9 @@ export function DistributionMaintenancePanel() {
       if (!controller.signal.aborted) setError(reason instanceof AdminApiError ? reason.message : '漏计提检查未能完成');
     }
   }, []);
-  useEffect(() => { void load(); return () => active.current?.abort(); }, [load]);
+  useEffect(() => { if (canExecute) void load(); return () => active.current?.abort(); }, [load, canExecute]);
   const send = async (value: Pending) => {
+    if (!execution.current) return;
     setBusy(true); setError(''); setNotice('');
     try {
       const result = await adminRequest<BatchResponse>(value.kind === 'replay' ? '/distribution/maintenance/accruals/replay' : '/distribution/maintenance/due-settlements', value.body, 'POST');
@@ -60,7 +63,7 @@ export function DistributionMaintenancePanel() {
     } finally { setBusy(false); }
   };
   const start = (kind: 'replay' | 'due') => {
-    if (pendingRef.current) return;
+    if (pendingRef.current || !execution.current) return;
     setBatch(null); setConfirm(null);
     const requestId = newRequestId();
     const value: Pending = kind === 'replay'
@@ -83,26 +86,28 @@ export function DistributionMaintenancePanel() {
   };
   const retry = () => { if (pending) void send(pending); };
   const recoverable = orders.filter(order => order.status === 'MISSING' || order.status === 'PARTIAL');
+  if (!canExecute && !pending && !batch) return null;
   return <section className="space-y-3 rounded-xl border p-4" aria-label="分销计提维护">
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div><h2 className="font-semibold">计提维护</h2><p className="mt-1 text-sm text-muted-foreground">按原 posting、basis 和经济根检查/重放；每次命令固定原批次，打开页面不写钱。</p></div>
-      <div className="flex flex-wrap gap-2"><Button variant="outline" disabled={busy} onClick={() => void load()}>重新检查</Button>
-        <Button variant="outline" disabled={busy || pending !== null || !recoverable.length} onClick={() => setConfirm('replay')}>重放可恢复漏计提</Button>
-        <Button disabled={busy || pending !== null} onClick={() => setConfirm('due')}>执行到期入账</Button></div>
+      <div className="flex flex-wrap gap-2"><Button variant="outline" disabled={!canExecute || busy} onClick={() => void load()}>重新检查</Button>
+        <Button variant="outline" disabled={!canExecute || busy || pending !== null || !recoverable.length} onClick={() => setConfirm('replay')}>重放可恢复漏计提</Button>
+        <Button disabled={!canExecute || busy || pending !== null} onClick={() => setConfirm('due')}>执行到期入账</Button></div>
     </div>
     {error ? <Alert variant="destructive"><AlertTitle>维护未完成</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> : null}
     {notice ? <Alert><AlertTitle>维护结果</AlertTitle><AlertDescription>{notice}</AlertDescription></Alert> : null}
     {batch ? <div className="text-xs text-muted-foreground" aria-label="原批次回执">批次 {batch.requestId} · {batch.state} · 指纹 {batch.fingerprint.slice(0, 12)}… · 未执行 {batch.notAttempted}
     </div> : null}
-    {pending ? <div className="text-xs text-muted-foreground" aria-label="原批次恢复">原请求 {pending.requestId}<Button variant="link" size="sm" disabled={busy} onClick={() => void recover()}>读原批次</Button><Button variant="link" size="sm" disabled={busy} onClick={retry}>重试原批次</Button></div> : null}
-    <p className="text-xs text-muted-foreground">本页已检查 {orders.length} 单 · {scan?.scope ?? '范围待核'}；CONFLICT/UNKNOWN 不自动修复。</p>
+    {pending ? <div className="text-xs text-muted-foreground" aria-label="原批次恢复">原请求 {pending.requestId}<Button variant="link" size="sm" disabled={busy} onClick={() => void recover()}>读原批次</Button><Button variant="link" size="sm" disabled={!canExecute || busy} onClick={retry}>重试原批次</Button></div> : null}
+    {!canExecute ? <p role="status" className="text-sm text-muted-foreground">维护执行能力尚未就绪，已暂停新命令；原批次仍可核对。</p> : null}
+    <p className="text-xs text-muted-foreground">{error || !scan ? '本次检查未完成，不能判断是否存在漏计提。' : `本页已检查 ${orders.length} 单 · ${scan.scope}；CONFLICT/UNKNOWN 不自动修复。`}</p>
     {orders.length ? <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>原订单</TableHead><TableHead>检查结果</TableHead><TableHead>原因</TableHead></TableRow></TableHeader><TableBody>
       {orders.map(order => <TableRow key={order.orderId}><TableCell className="font-mono text-xs">{order.orderId}</TableCell><TableCell>{order.status}</TableCell><TableCell className="text-xs text-muted-foreground">{order.reason ?? order.items.map(item => `${item.role}:${item.state}`).join(' · ')}</TableCell></TableRow>)}
-    </TableBody></Table></div> : <p className="text-sm text-muted-foreground">当前范围内没有可检查的结算过账。</p>}
-    {scan?.nextCursor ? <Button variant="outline" disabled={busy} onClick={() => void load(scan.nextCursor)}>继续检查更早记录</Button> : <p className="text-xs text-muted-foreground">已到达当前范围最早记录；没有下一页不等于没有漏计提，NEW 单需从最新重查。</p>}
+    </TableBody></Table></div> : scan && !error ? <p className="text-sm text-muted-foreground">当前范围内没有可检查的结算过账。</p> : null}
+    {scan?.nextCursor ? <Button variant="outline" disabled={!canExecute || busy} onClick={() => void load(scan.nextCursor)}>继续检查更早记录</Button> : scan && !error ? <p className="text-xs text-muted-foreground">已到达当前范围最早记录；没有下一页不等于没有漏计提，NEW 单需从最新重查。</p> : null}
     <Dialog open={confirm !== null} onOpenChange={value => { if (!value) setConfirm(null); }}>
       <DialogContent><DialogHeader><DialogTitle>{confirm === 'replay' ? '重放漏计提' : '执行到期入账'}</DialogTitle><DialogDescription>这会按原经济根写入分销账本；同一请求重试只恢复原批次，UNKNOWN 时先读原回执。</DialogDescription></DialogHeader>
-        <DialogFooter><Button variant="outline" onClick={() => setConfirm(null)}>取消</Button><Button disabled={busy} onClick={() => start(confirm!)}>确认执行</Button></DialogFooter></DialogContent>
+        <DialogFooter><Button variant="outline" onClick={() => setConfirm(null)}>取消</Button><Button disabled={!canExecute || busy} onClick={() => start(confirm!)}>确认执行</Button></DialogFooter></DialogContent>
     </Dialog>
   </section>;
 }

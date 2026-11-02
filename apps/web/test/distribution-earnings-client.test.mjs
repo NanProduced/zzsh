@@ -1,5 +1,5 @@
 import {test} from 'node:test';import {strict as assert} from 'node:assert';
-import {earningsPage,earningsDetail,readEarnings,readEarningDetail} from '../src/lib/distribution-earnings-client.ts';
+import {earningsPage,earningsDetail,readEarnings,readEarningDetail,commissionRecord,commissionRecordSummary,commissionRecordMoney} from '../src/lib/distribution-earnings-client.ts';
 const at='2026-10-04T00:00:00.000000Z',base={contractVersion:'distribution-earnings.read.v1',subjectId:'self',snapshotVersion:'source-v1',asOf:at};
 export const old={id:'history:old',origin:'LEGACY_MYSQL',state:'SETTLED',role:'RENTER_REFERRAL',amount:{currency:'CNY',unit:'cent',amountCents:'1234'},occurredAt:at,dueAt:null,dueAtKnowledge:'UNKNOWN',fundsDisposition:'HISTORICAL_STATUS_ONLY',recoveryRequiredCents:null,includedInOpening:true,version:null,accountingEffect:'OBSERVATION_ONLY_NO_NEW_CREDIT',businessReference:{type:'LEGACY_UNRESOLVED',id:'legacy'},channelArrivalKnowledge:'UNKNOWN'};
 const page={...base,state:'ALL',knowledge:'UNKNOWN',count:null,mappedRecordCount:'1',reason:'HISTORICAL_EARNINGS_COVERAGE_NOT_CLOSED',totalAmountKnowledge:'UNKNOWN',items:[old],nextCursor:null};
@@ -39,4 +39,47 @@ test('current responsibility is additive: original amount/state stay and VOID/MA
  assert.equal(earningsDetail({...base,projectionVersion:2,item:native},'self',native.id).item.currentResponsibility,null);
  assert.throws(()=>earningsDetail({...base,projectionVersion:2,item:{...native,currentResponsibility:responsibility()}},'self',native.id));
  assert.equal(earningsDetail({...base,item:old},'self',old.id).item.currentResponsibility,undefined);
+});
+
+const record=(entry=old,patch={})=>({id:entry.id,key:'commission:'+'b'.repeat(64),effectiveState:entry.state,amountCents:entry.amount.amountCents,occurredAt:at,stateKnowledge:'KNOWN',detail:{source:{type:entry.origin,system:'frozen-source',entity:'commission',id:'source-one'},stateBasis:'SOURCE_RECORD',originalState:entry.state,originalAmountCents:entry.amount.amountCents,currentResponsibility:{knowledge:'UNKNOWN',reason:'LEGACY_RESPONSIBILITY_NOT_ADMITTED'},currentFinance:{knowledge:'UNKNOWN',reason:'LEGACY_FINANCE_NOT_ADMITTED_OR_NOT_FINALIZED'},accountingEffect:'OBSERVATION_ONLY_NO_NEW_CREDIT',bankArrival:'UNKNOWN',reasonCodes:[]},...patch});
+const recordSummary=(patch={})=>({scope:'COMMISSION_RECORDS',knowledge:'KNOWN',count:'1',mappedRecordCount:'1',amountCents:'1234',knownSubtotalCents:'1234',unknownStateCount:'0',unclassifiedRecordCount:'0',states:[{state:'SETTLED',count:'1',amountCents:'1234'}],coverage:{knowledge:'KNOWN',cutoff:at,reasonCodes:[]},reasonCodes:[],...patch});
+const v2=(items=[old],patch={})=>({...page,projectionVersion:2,amountsByOrigin:{scope:'SOURCE_RECORDS_ONLY',native:{knowledge:'UNKNOWN',amountCents:null},historical:{knowledge:'UNKNOWN',amountCents:null},mappedHistoricalAmountCents:'1234'},items,...patch});
+test('unified record keeps one economic key through responsibility revisions and preserves original facts',()=>{
+ const duty={knowledge:'KNOWN',dutyId:'duty',orderId:'order',state:'MATURED',amountCents:'900',currency:'CNY',revision:'2',revised:true,maturityAt:at,settledBy:null};
+ const first=record(old,{effectiveState:'MATURED',amountCents:'900'});first.detail={...first.detail,stateBasis:'CURRENT_RESPONSIBILITY',currentResponsibility:duty};
+ const second={...first,effectiveState:'VOID',amountCents:'0',detail:{...first.detail,currentResponsibility:{...duty,state:'VOID',amountCents:'0',revision:'3'}}};
+ const a=earningsDetail({...base,projectionVersion:2,item:{...old,currentResponsibility:duty,record:first}},'self',old.id).item;
+ const b=earningsDetail({...base,projectionVersion:2,item:{...old,currentResponsibility:second.detail.currentResponsibility,record:second}},'self',old.id).item;
+ assert.equal(a.record.key,b.record.key);assert.equal(b.record.amountCents,'0');assert.equal(b.record.effectiveState,'VOID');assert.equal(b.amount.amountCents,'1234');assert.equal(b.state,'SETTLED');assert.equal(b.record.detail.bankArrival,'UNKNOWN');
+ for(const patch of [{id:'history:other'},{detail:{...first.detail,source:{...first.detail.source,type:'NATIVE'}}},{detail:{...first.detail,originalAmountCents:'0'}},{detail:{...first.detail,bankArrival:'PAID'}},{amountCents:'1e3'},{stateKnowledge:'UNKNOWN'}])assert.throws(()=>earningsDetail({...base,projectionVersion:2,item:{...old,record:{...first,...patch}}},'self',old.id));
+});
+test('v2 filtering uses effective UNKNOWN or MATURED while v1 remains original-state compatible',()=>{
+ const pending={...old,state:'PENDING'},unknown=record(pending,{effectiveState:'UNKNOWN',stateKnowledge:'UNKNOWN'});unknown.detail={...unknown.detail,stateBasis:'UNKNOWN'};
+ const payload=v2([{...pending,record:unknown}],{state:'UNKNOWN'});
+ assert.equal(earningsPage(payload,'self','UNKNOWN',2).items[0].state,'PENDING');assert.equal(earningsPage(payload,'self','UNKNOWN',2).items[0].record.effectiveState,'UNKNOWN');
+ assert.throws(()=>earningsPage({...payload,state:'PENDING'},'self','PENDING',2));
+ const duty={knowledge:'KNOWN',dutyId:'duty',orderId:'order',state:'MATURED',amountCents:'900',currency:'CNY',revision:'1',revised:false,maturityAt:at,settledBy:null},matured=record(old,{effectiveState:'MATURED',amountCents:'900'});matured.detail={...matured.detail,stateBasis:'CURRENT_RESPONSIBILITY',currentResponsibility:duty};
+ assert.equal(earningsPage(v2([{...old,currentResponsibility:duty,record:matured}],{state:'MATURED'}),'self','MATURED',2).items[0].record.amountCents,'900');
+ assert.throws(()=>earningsPage({...page,state:'UNKNOWN',items:[]},'self','UNKNOWN',1));
+ assert.equal(earningsPage({...page,state:'PENDING',items:[pending]},'self','PENDING',1).items[0].state,'PENDING');
+});
+test('record aggregates exceed single-amount bounds without floating-point loss and never become wallet money',()=>{
+ const sum='1000000000000000000001233',summary=recordSummary({count:'2',mappedRecordCount:'2',amountCents:sum,knownSubtotalCents:sum,states:[{state:'SETTLED',count:'2',amountCents:sum}]});
+ assert.equal(commissionRecordSummary(summary).amountCents,sum);assert.equal(commissionRecordMoney(sum),'¥10,000,000,000,000,000,000,012.33');assert.equal(commissionRecordMoney('9007199254740993'),'¥90,071,992,547,409.93');
+ assert.equal(commissionRecordMoney(null),'待核定');for(const value of ['-1','1e24','1.2','01',123])assert.throws(()=>commissionRecordMoney(value));
+ assert.throws(()=>commissionRecord(record(old,{amountCents:sum})));assert.throws(()=>commissionRecordSummary({...summary,knownSubtotalCents:'0'}));
+});
+test('partial record knowledge preserves null totals and reports global unclassified records on empty filters',()=>{
+ const summary=recordSummary({knowledge:'UNKNOWN',count:null,mappedRecordCount:'0',amountCents:null,knownSubtotalCents:'0',unclassifiedRecordCount:'1',states:[]});
+ assert.equal(commissionRecordSummary(summary).count,null);assert.equal(earningsPage(v2([],{state:'PENDING',mappedRecordCount:'0',recordSummary:summary}),'self','PENDING',2).recordSummary.unclassifiedRecordCount,'1');
+ assert.throws(()=>commissionRecordSummary({...summary,knowledge:'KNOWN',count:'0',amountCents:'0'}));
+ assert.throws(()=>commissionRecordSummary({...summary,unknownStateCount:'1'}));
+ assert.throws(()=>earningsPage(v2([],{mappedRecordCount:'0',recordSummary:summary}),'self','ALL',2));
+ assert.throws(()=>commissionRecordSummary({...summary,count:'0'}));
+});
+test('duplicate economic records or inconsistent summary totals fail closed instead of multiplying records',()=>{
+ const a={...old,record:record()},b={...old,id:'history:other',record:{...record(),id:'history:other'}};
+ assert.throws(()=>earningsPage(v2([a,b],{mappedRecordCount:'2'}),'self','ALL',2));
+ assert.throws(()=>earningsPage(v2([a],{recordSummary:recordSummary({mappedRecordCount:'2',count:'2',states:[{state:'SETTLED',count:'2',amountCents:'1234'}]})}),'self','ALL',2));
+ assert.throws(()=>commissionRecordSummary(recordSummary({states:[{state:'SETTLED',count:'1',amountCents:'1234'},{state:'SETTLED',count:'0',amountCents:'0'}]})));
 });

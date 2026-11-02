@@ -11,6 +11,8 @@ import {
   hasPermission,
   loadEffectiveAdminAccess,
 } from "./admin-authorization";
+import { deriveDashboardPreset, type DashboardPreset } from "./admin-dashboard-preset";
+import { readAdminGameScope, type AdminGameScope } from "./admin-scope";
 import {
   assignAdministratorAccess,
   assignAdministratorGameScope,
@@ -495,6 +497,8 @@ export type AdminSessionSnapshot =
       security: { status: AdminContext["security"]["status"]; isBoss: boolean; passwordChangeRequired: boolean; loginTwoFactorRequired?: boolean };
       session: { id: string; locked: boolean; pinConfigured: boolean; createdAt: string | null; expiresAt: string | null };
       permissions: string[];
+      gameScope?: AdminGameScope;
+      dashboardPreset: DashboardPreset;
     };
 
 function isoDate(value: unknown): string | null {
@@ -560,6 +564,13 @@ export async function getAdminSessionSnapshot(headers: Headers, options: AuthSec
       expiresAt: isoDate(current.session?.expiresAt),
     },
     permissions: access ? [...access.permissions].sort() : [],
+    gameScope: access?.isBoss ? { mode: "ALL_GAMES", gameIds: [] } : await readAdminGameScope(options.pool, userId),
+    dashboardPreset: deriveDashboardPreset(access ?? {
+      status: "ACTIVE",
+      isBoss: false,
+      passwordChangeRequired: false,
+      permissions: new Set<string>(),
+    }),
   };
 }
 

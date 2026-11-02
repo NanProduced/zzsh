@@ -69,10 +69,24 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
 
   const membershipOps = nav.isBoss || ["membership.policy.draft", "membership.policy.publish", "membership.growth.read.summary"].some(has)
     || has("approval.request.create") && has("membership.entitlement.request");
-  const distributionOps = nav.isBoss || ["order.read", "personal.distribution.policy.read", "personal.distribution.policy.manage"].some(has);
-  if (membershipOps || distributionOps) items.push({ label: "会员运营", isTitle: true });
-  if (membershipOps) items.push({ label: "会员与礼遇", icon: CrownIcon, path: "/membership-growth", kind: "membership-growth" });
-  if (distributionOps) items.push({ label: "分销管理", icon: NetworkIcon, path: "/distribution-policy", kind: "distribution-policy" });
+  if (membershipOps) {
+    items.push({ label: "会员运营", isTitle: true }, { label: "会员与礼遇", icon: CrownIcon, path: "/membership-growth", kind: "membership-growth" });
+  }
+  const distribution: WorkspaceMenuItem[] = [];
+  if (nav.isBoss || has("distribution.dashboard.read")) {
+    distribution.push(
+      { label: "分销概览", icon: ChartNoAxesCombinedIcon, path: "/distribution", kind: "distribution-overview" },
+      { label: "佣金明细", icon: BadgeDollarSignIcon, path: "/distribution/earnings", kind: "distribution-earnings" },
+      { label: "分销商", icon: UsersRoundIcon, path: "/distribution/participants", kind: "distribution-participants" },
+    );
+  }
+  if (nav.isBoss || has("user.directory.read") && has("personal.distribution.policy.read")) {
+    distribution.push({ label: "关系查询", icon: NetworkIcon, path: "/distribution/relations", kind: "distribution-relations" });
+  }
+  if (nav.isBoss || ["personal.distribution.policy.read", "personal.distribution.policy.manage"].some(has)) {
+    distribution.push({ label: "分销政策", icon: ScaleIcon, path: "/distribution/policy", kind: "distribution-policy" });
+  }
+  if (distribution.length) items.push({ label: "分销", isTitle: true }, ...distribution);
 
   const system: WorkspaceMenuItem[] = [];
   if (nav.isBoss) {
@@ -201,7 +215,12 @@ export function titleForPath(pathname: string): string {
   if (pathname === "/support/patrol") return "会话巡视";
   if (pathname === "/support/settings") return "助手设置";
   if (pathname === "/membership-growth") return "会员与礼遇";
-  if (pathname === "/distribution-policy") return "分销管理";
+  if (pathname === "/distribution") return "分销概览";
+  if (pathname === "/distribution/earnings") return "佣金明细";
+  if (pathname === "/distribution/participants") return "分销商";
+  if (pathname.startsWith("/distribution/participants/")) return "分销商详情";
+  if (pathname === "/distribution/relations") return "关系查询";
+  if (pathname === "/distribution/policy" || pathname === "/distribution-policy") return "分销政策";
   return "工作台";
 }
 
@@ -229,7 +248,12 @@ export const PAGE_SEARCH_KEYWORDS: Record<string, string[]> = {
   "/support/patrol": ["会话巡视", "巡视", "会话抽查", "质检", "patrol", "xs"],
   "/support/settings": ["助手设置", "客服设置", "自动回复", "欢迎语", "bot"],
   "/support/management": ["客服管理", "客服统计", "运营看板", "看板", "巡视", "统计", "客服", "im"],
-  "/distribution-policy": ["分销管理", "分销", "邀请", "政策", "distribution", "fx"],
+  "/distribution": ["分销概览", "分销", "佣金", "排行", "distribution", "fx"],
+  "/distribution/earnings": ["佣金明细", "分销", "佣金", "奖励", "distribution", "fx"],
+  "/distribution/participants": ["分销商", "分销", "邀请", "下级", "distribution", "fx"],
+  "/distribution/relations": ["关系查询", "分销", "邀请", "上级", "distribution", "fx"],
+  "/distribution/policy": ["分销政策", "分销", "政策", "比例", "distribution", "fx"],
+  "/distribution-policy": ["分销政策", "分销", "政策", "distribution", "fx"],
   "/membership-growth": ["会员与礼遇", "会员成长", "礼遇", "会员", "增长", "策略", "membership", "hy", "cz"],
   "/admins": ["管理员管理", "管理员", "账号", "staff", "admins", "gly", "zh"],
   "/roles": ["角色权限", "角色", "权限", "授权", "roles", "js", "qx"],

@@ -24,6 +24,7 @@ export const ADMIN_PERMISSION = {
   membershipGrowthBackfill: "membership.growth.backfill",
   distributionPolicyRead: "personal.distribution.policy.read",
   distributionPolicyManage: "personal.distribution.policy.manage",
+  distributionDashboardRead: "distribution.dashboard.read",
   userDirectoryRead: "user.directory.read",
   userPhoneLookup: "user.phone.lookup",
   userWalletRead: "user.wallet.read",

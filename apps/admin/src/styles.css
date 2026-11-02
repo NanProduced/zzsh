@@ -162,6 +162,10 @@
 
 /* PaceUI workspace tokens stay inside the authenticated shell and do not restyle auth pages. */
 .workspace-root {
+  --chart-receipts: #0284c7;
+  --chart-orders: #b45309;
+  --chart-quoted: #6d28d9;
+  --chart-settled: #047857;
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);
@@ -208,6 +212,10 @@
 }
 
 .workspace-root.dark {
+  --chart-receipts: #38bdf8;
+  --chart-orders: #fbbf24;
+  --chart-quoted: #a78bfa;
+  --chart-settled: #34d399;
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.205 0 0);
@@ -235,6 +243,22 @@
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.556 0 0);
 }
+
+/* One responsive/tooltip/legend foundation for dashboard chart consumers. */
+.workspace-root .chart-container { display:flex; flex-direction:column; gap:12px; width:100%; min-width:0; }
+.workspace-root .chart-plot { position:relative; width:100%; min-width:0; flex:none; }
+.workspace-root .chart-plot > .recharts-wrapper { max-width:100%; }
+.workspace-root .chart-plot .recharts-surface:focus-visible { outline:2px solid var(--ring); outline-offset:2px; border-radius:4px; }
+.workspace-root .chart-measuring { display:flex; height:100%; min-height:120px; align-items:center; justify-content:center; color:var(--muted-foreground); font-size:12px; }
+.workspace-root .chart-state { display:flex; min-height:104px; align-items:center; justify-content:center; padding:24px 16px; border:1px dashed var(--border); border-radius:8px; color:var(--muted-foreground); font-size:13px; text-align:center; }
+.workspace-root .chart-legend { display:flex; flex-wrap:wrap; align-items:center; gap:4px; }
+.workspace-root .chart-legend-label { display:inline-flex; align-items:center; gap:6px; font-size:12px; }
+.workspace-root .chart-legend-indicator { width:8px; height:8px; flex-shrink:0; border-radius:2px; }
+.workspace-root .chart-tooltip { display:grid; min-width:144px; gap:8px; border:1px solid var(--border); border-radius:8px; padding:10px 12px; background:var(--popover); color:var(--popover-foreground); box-shadow:0 4px 12px rgb(0 0 0 / 12%); font-size:12px; }
+.workspace-root .chart-tooltip-row { display:flex; align-items:center; gap:8px; }
+.workspace-root .chart-tooltip-row strong { margin-inline-start:auto; overflow-wrap:anywhere; }
+.workspace-root .chart-table-summary { display:inline-flex; min-height:32px; align-items:center; cursor:pointer; padding:4px 0; }
+.workspace-root .chart-table-summary:focus-visible { outline:2px solid var(--ring); outline-offset:3px; border-radius:4px; }
 
 * {
   box-sizing: border-box;
