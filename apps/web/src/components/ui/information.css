@@ -131,7 +131,7 @@
 
 .info-alert-body > svg {
   margin-top: 3px;
-  color: var(--color-status-info);
+  color: var(--color-status-info-ink);
 }
 
 .info-alert[data-tone="error"] {
@@ -147,7 +147,7 @@
 }
 
 .info-alert[data-tone="unknown"] .info-alert-body > svg {
-  color: var(--color-status-warning);
+  color: var(--color-status-warning-ink);
 }
 
 .info-alert[data-tone="success"] .info-alert-body > svg {
@@ -241,11 +241,11 @@
 }
 
 .info-record-status[data-tone="info"] {
-  color: var(--color-status-info);
+  color: var(--color-status-info-ink);
 }
 
 .info-record-status[data-tone="warning"] {
-  color: var(--color-status-warning);
+  color: var(--color-status-warning-ink);
 }
 
 .info-record-status[data-tone="error"] {
@@ -284,12 +284,12 @@
 }
 
 .info-status-badge[data-tone="info"] {
-  color: var(--color-status-info);
+  color: var(--color-status-info-ink);
   background: color-mix(in srgb, var(--color-status-info) 12%, var(--color-bg-card));
 }
 
 .info-status-badge[data-tone="warning"] {
-  color: var(--color-status-warning);
+  color: var(--color-status-warning-ink);
   background: color-mix(in srgb, var(--color-status-warning) 14%, var(--color-bg-card));
 }
 

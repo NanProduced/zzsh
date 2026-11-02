@@ -58,7 +58,7 @@
   border-radius: 50%;
   font-size: 15px;
   font-weight: 700;
-  color: var(--color-accent-brand);
+  color: var(--color-accent-brand-ink);
   background: color-mix(in srgb, var(--color-accent-brand) 12%, var(--color-bg-elevated));
   border: 1px solid color-mix(in srgb, var(--color-accent-brand) 25%, var(--color-border-subtle));
   overflow: hidden;

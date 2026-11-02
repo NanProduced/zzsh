@@ -3,7 +3,7 @@
   border-radius:8px; font:inherit; font-size:14px; min-height:44px; padding:10px 12px; outline:none; transition:border-color .15s,box-shadow .15s;
 }
 .form-integer-stepper { display:flex; align-items:center; min-width:0; min-height:44px; overflow:hidden; border:1px solid var(--color-border-default); border-radius:8px; background:var(--color-bg-surface); color:var(--color-text-primary); }
-.form-integer-stepper:focus-within { outline:2px solid color-mix(in srgb,var(--color-accent-brand) 55%,var(--color-text-primary)); outline-offset:2px; }
+.form-integer-stepper:focus-within { outline:2px solid color-mix(in srgb,var(--color-focus-ring) 55%,var(--color-text-primary)); outline-offset:2px; }
 .form-integer-stepper > button { display:inline-flex; justify-content:center; align-items:center; flex:0 0 42px; width:42px; min-height:44px; border:0; background:none; color:inherit; cursor:pointer; }
 .form-integer-stepper > button:hover:not(:disabled) { background:var(--color-bg-elevated); }
 .form-integer-stepper > button:disabled { opacity:.35; cursor:not-allowed; }
@@ -28,7 +28,7 @@
 .form-radio-group {display:flex;flex-wrap:wrap;gap:8px;}
 .form-radio-choice {display:flex!important;flex-direction:row!important;align-items:center!important;gap:9px!important;padding:11px 14px;border:1px solid var(--color-border-default);border-radius:8px;cursor:pointer;min-height:44px;font-weight:400!important;}
 .form-radio-choice.is-selected {border-color:var(--color-accent-brand);background:color-mix(in srgb,var(--color-accent-brand) 10%,var(--color-bg-surface));}
-.form-radio-choice:focus-within {outline:2px solid var(--color-accent-brand);outline-offset:2px;}
+.form-radio-choice:focus-within {outline:2px solid var(--color-focus-ring);outline-offset:2px;}
 .form-radio-choice>span {display:grid;gap:4px;}
 .form-radio-choice small {font-size:12px;color:var(--color-text-secondary);line-height:1.5;}
 .form-radio-control {display:flex;align-items:center;justify-content:center;width:16px;height:16px;flex-shrink:0;border:1px solid var(--color-text-secondary);border-radius:50%;background:var(--color-bg-surface);padding:0;}
@@ -47,5 +47,5 @@
 .form-calendar {z-index:1100;border:1px solid var(--color-border-default);border-radius:12px;background:var(--color-bg-surface);color:var(--color-text-primary);box-shadow:0 10px 30px #0002;padding:16px;}
 .form-calendar .rdp-root {--rdp-accent-color:#8d5b0b;--rdp-accent-background-color:#fff2d6;font-size:14px;}
 .dark .form-calendar .rdp-root {--rdp-accent-color:#f3b64a;--rdp-accent-background-color:#342919;}
-.form-calendar button:focus-visible {outline:2px solid var(--color-accent-brand);outline-offset:2px;}
+.form-calendar button:focus-visible {outline:2px solid var(--color-focus-ring);outline-offset:2px;}
 @media(max-width:600px){.form-select-trigger,.form-input{font-size:16px;}.form-radio-choice{padding:10px 12px;}.form-calendar{max-width:calc(100vw - 24px);padding:10px;}}

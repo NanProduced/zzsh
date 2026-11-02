@@ -418,7 +418,7 @@
 .help-empty-icon {
   margin-inline: auto;
   margin-bottom: 14px;
-  color: var(--color-accent-brand);
+  color: var(--color-accent-brand-ink);
   opacity: 0.85;
 }
 
@@ -645,7 +645,7 @@
 }
 
 .help-article .content-markdown li::marker {
-  color: var(--color-accent-brand) !important;
+  color: var(--color-accent-brand-ink) !important;
 }
 
 .help-article .content-markdown li > p {
@@ -759,7 +759,7 @@
 }
 
 .help-callout--warning svg {
-  color: var(--color-status-warning);
+  color: var(--color-status-warning-ink);
 }
 
 /* 表格容器 */
@@ -1008,7 +1008,7 @@
 
 .help-pager-link:hover .help-pager-icon-box {
   background: color-mix(in srgb, var(--color-accent-brand) 16%, var(--color-bg-surface));
-  color: var(--color-accent-brand);
+  color: var(--color-accent-brand-ink);
   border-color: color-mix(in srgb, var(--color-accent-brand) 40%, transparent);
 }
 
@@ -1167,11 +1167,11 @@
 }
 
 .help-toc-copy[data-state="done"] {
-  color: var(--color-status-success);
+  color: var(--color-status-success-ink);
 }
 
 .help-toc-copy[data-state="error"] {
-  color: var(--color-status-error);
+  color: var(--color-status-error-ink);
 }
 
 /* 中屏内联目录：桌面默认隐藏 */

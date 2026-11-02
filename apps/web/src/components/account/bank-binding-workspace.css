@@ -8,7 +8,7 @@
 .bank-binding-workspace .bank-action { min-height: 44px; padding: 9px 13px; border-radius: 8px; font-family: var(--font-sans); font-size: 14px; font-weight: 600; line-height: 1.5; white-space: normal; }
 .bank-binding-workspace .bank-action>svg { flex: none; }
 .bank-binding-workspace .bank-primary,.bank-withdrawal-confirm .ui-alert-dialog-confirm { background: var(--account-accent, var(--color-accent-brand)); color: var(--color-accent-brand-text); border-color: transparent; }
-.bank-binding-workspace .bank-action:focus-visible,.bank-withdrawal-confirm .ui-alert-dialog-confirm:focus-visible { outline: 2px solid var(--account-accent, var(--color-accent-brand)); outline-offset: 3px; }
+.bank-binding-workspace .bank-action:focus-visible,.bank-withdrawal-confirm .ui-alert-dialog-confirm:focus-visible { outline: 2px solid var(--account-accent, var(--color-focus-ring)); outline-offset: 3px; }
 .bank-binding-workspace .bank-action[disabled],.bank-binding-workspace .bank-action[data-disabled] { opacity: .55; cursor: not-allowed; }
 .bank-help { margin: 9px 0 16px; color: var(--color-text-secondary); font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; }
 .bank-meta { margin: 10px 0 16px; color: var(--color-text-secondary); font-size: 12px; line-height: 1.6; }
@@ -28,7 +28,7 @@
 .bank-binding-form>.bank-help { margin: -4px 0 0; }
 .bank-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .bank-feedback { margin: 14px 0 0; padding: 10px 0 0; border-top: 1px solid var(--color-border-subtle); color: var(--color-text-secondary); font-size: 13px; line-height: 1.65; }
-.bank-form-error { margin: 0; color: var(--color-status-error); font-size: 13px; line-height: 1.6; }
+.bank-form-error { margin: 0; color: var(--color-status-error-ink); font-size: 13px; line-height: 1.6; }
 .bank-eligibility { margin: 15px 0 0; }
 .bank-eligibility .bank-help { margin: 8px 0 0; }
 .bank-quote-note { margin: 0; }

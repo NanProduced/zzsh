@@ -56,11 +56,11 @@
   .portal-home .home-fast-fees { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
   .portal-home .home-fast-fees dt { color:var(--color-text-secondary); font-size:12px; line-height:20px; }
   .portal-home .home-fast-fees dd { margin:0; font-size:16px; line-height:24px; font-weight:650; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
-  .portal-home .home-fast-fees > div:last-child dd { color:var(--color-accent-brand); }
+  .portal-home .home-fast-fees > div:last-child dd { color:var(--color-accent-brand-ink); }
   .portal-home .home-fast-row-footer { display:flex; align-items:center; justify-content:space-between; gap:8px; }
   .portal-home .home-fast-row-footer > span { min-width:0; color:var(--color-text-secondary); font-size:11px; line-height:18px; overflow-wrap:anywhere; }
-  .portal-home .home-fast-row-footer > a { display:inline-flex; align-items:center; justify-content:center; gap:4px; flex-shrink:0; min-height:44px; padding-left:12px; color:var(--color-accent-brand); font-size:14px; }
-  .portal-home .home-fast-row a:focus-visible { outline:2px solid var(--color-accent-brand); outline-offset:2px; border-radius:4px; }
+  .portal-home .home-fast-row-footer > a { display:inline-flex; align-items:center; justify-content:center; gap:4px; flex-shrink:0; min-height:44px; padding-left:12px; color:var(--color-accent-brand-ink); font-size:14px; }
+  .portal-home .home-fast-row a:focus-visible { outline:2px solid var(--color-focus-ring); outline-offset:2px; border-radius:4px; }
   .portal-home .home-fast-row a:active { color:var(--color-text-primary); }
   .portal-home .home-fast-row-skeleton { display:grid; gap:12px; padding:18px 0; border-bottom:1px solid var(--color-border-default); }
   .portal-home .home-fast-row-skeleton span { height:24px; background:var(--color-bg-elevated); border-radius:4px; }

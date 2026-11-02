@@ -126,10 +126,9 @@ export const PasswordInput = forwardRef<
       />
       <button
         type="button"
-        tabIndex={-1}
         onClick={() => setShow((v) => !v)}
         aria-label={show ? "隐藏密码" : "显示密码"}
-        className="absolute right-2.5 p-1 text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none"
+        className="absolute right-2.5 rounded p-1 text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
       >
         {show ? <Icons.EyeOff size={16} /> : <Icons.Eye size={16} />}
       </button>

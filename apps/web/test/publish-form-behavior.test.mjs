@@ -2723,3 +2723,15 @@ test('malformed recommended cents remain unknown instead of a zero display or an
     } finally { await p.close(); }
   }
 });
+
+test('the publish group map is visible and provides a real focus-return target without saving or quoting', async () => {
+  const p = await probe({ accountId: 'account_1', mine: () => supplyOf(declaration()) });
+  try {
+    await p.render(); const outline = p.host.querySelector('#publish-outline');
+    assert.ok(outline); assert.equal(outline.classList.contains('sr-only'), false); assert.equal(outline.classList.contains('publish-outline'), true);
+    const target = p.window.document.querySelector('.publish-outline a'); assert.ok(target);
+    target.focus(); assert.equal(p.window.document.activeElement, target);
+    assert.ok(target.getAttribute('href').startsWith('#publish-group-'));
+    assert.equal(p.calls.some(call => ['saveDraft', 'quote', 'accept', 'submit'].includes(call.op)), false);
+  } finally { await p.close(); }
+});

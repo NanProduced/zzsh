@@ -77,7 +77,7 @@
   border-bottom: 1px solid var(--color-border-subtle);
 }
 .mra-row:hover { background: var(--color-bg-card-hover); }
-.mra-row:focus-within { outline: 2px solid var(--color-accent-brand); outline-offset: -2px; }
+.mra-row:focus-within { outline: 2px solid var(--color-focus-ring); outline-offset: -2px; }
 /* 行结构：div 行容器 ＋ 标题区唯一主导航链（标题＋副行整体可点、单一焦点）＋ 装饰「查看详情 ›」。 */
 .mra-row-main {
   display: block;
@@ -96,8 +96,8 @@
   text-decoration: none;
   overflow-wrap: anywhere;
 }
-.mra-row-main:hover .mra-row-title { color: var(--color-accent-brand); text-decoration: underline; }
-.mra-row-main:focus-visible { outline: 2px solid var(--color-accent-brand); outline-offset: 3px; border-radius: 4px; }
+.mra-row-main:hover .mra-row-title { color: var(--color-accent-brand-ink); text-decoration: underline; }
+.mra-row-main:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 3px; border-radius: 4px; }
 .mra-row-sub {
   display: block;
   margin-top: 5px;
@@ -134,8 +134,8 @@
    警告/信息在浅色底与正文色 color-mix 加深（#996b1d 4.69:1、#335c9f 6.62:1），不新增字面色；边框与文字同色。 */
 .mra-badge[data-tone="success"] { color: var(--account-success); border-color: var(--account-success); }
 .mra-badge[data-tone="error"] { color: var(--account-danger); border-color: var(--account-danger); }
-.mra-badge[data-tone="warning"] { color: var(--color-status-warning); border-color: var(--color-status-warning); }
-.mra-badge[data-tone="info"] { color: var(--color-status-info); border-color: var(--color-status-info); }
+.mra-badge[data-tone="warning"] { color: var(--color-status-warning-ink); border-color: var(--color-status-warning); }
+.mra-badge[data-tone="info"] { color: var(--color-status-info-ink); border-color: var(--color-status-info); }
 html[data-theme="light"] .mra-badge[data-tone="warning"], html:not(.dark) .mra-badge[data-tone="warning"] {
   color: color-mix(in srgb, var(--color-status-warning) 55%, var(--color-text-primary));
   border-color: color-mix(in srgb, var(--color-status-warning) 55%, var(--color-text-primary));
@@ -150,7 +150,7 @@ html[data-theme="light"] .mra-badge[data-tone="info"], html:not(.dark) .mra-badg
   display: inline-flex;
   align-items: center;
   min-height: 24px;
-  color: var(--color-accent-brand);
+  color: var(--color-accent-brand-ink);
   font-family: var(--font-sans);
   font-size: var(--type-meta-size);
   line-height: var(--type-meta-leading);
@@ -228,7 +228,7 @@ html[data-theme="light"] .mra-row-anchor, html:not(.dark) .mra-row-anchor { colo
 /* ---- 详情增量 ---------------------------------------------------------- */
 
 /* 冲突/阻塞/退回的锚点容器：仅提供 #blockers 落点与键盘焦点，不改变原有块样式。 */
-.supply-blockers-group:focus-visible { outline: 2px solid var(--color-accent-brand); outline-offset: 4px; border-radius: 6px; }
+.supply-blockers-group:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 4px; border-radius: 6px; }
 /* 客服限制的服务端原因承接为限制文案的补充行。 */
 .supply-blocker-reason { display: block; margin-top: 3px; overflow-wrap: anywhere; }
 

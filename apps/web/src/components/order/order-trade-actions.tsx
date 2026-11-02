@@ -103,19 +103,19 @@ export async function performGuardedWrite<T>(
 function panelError(error: unknown): PanelError {
   if (error instanceof OrderRequestError) {
     if (error.status === 0) return { message: "网络中断，结果未知。原请求可安全重试，不会重复扣款或重复记账。", retryable: true };
-    if (error.status === 401 || error.code === "UNAUTHENTICATED") return { message: "登录状态已变化；原请求与幂等键已保留，确认身份后可恢复。", retryable: false };
+    if (error.status === 401 || error.code === "UNAUTHENTICATED") return { message: "登录状态已变化；原申请已保留，确认身份后可恢复。", retryable: false };
     if (error.status === 403) return { message: "当前身份没有这项操作权限。", retryable: false };
     if (error.status === 404) return { message: "当前对象不存在或当前环境未开启这项交易操作。", retryable: false };
-    if (error.status === 409) return { message: "服务端状态与本次请求不一致；已按权威状态刷新，请按最新结果操作。", retryable: false };
+    if (error.status === 409) return { message: "服务端状态与本次请求不一致；已按最新处理状态刷新，请按最新结果操作。", retryable: false };
     if (error.status === 503) return { message: error.message || "依赖的服务端依据暂不可用。", retryable: true };
     return { message: error.message || "操作未完成，请稍后重试。", retryable: true };
   }
   return { message: "操作未完成，请稍后重试。", retryable: true };
 }
 
-const AUTH_MESSAGE = "登录状态已变化；原请求与幂等键已保留。正在确认身份，确认后可在本页恢复。";
+const AUTH_MESSAGE = "登录状态已变化；原申请已保留。正在确认身份，确认后可在本页恢复。";
 const BLOCKED_MESSAGE = "浏览器会话存储不可用，无法保存原请求恢复信息；已阻止提交。请启用会话存储后重试。";
-const STALE_MESSAGE = "该原请求已超出自动查询窗口；请先刷新权威状态核对，确认未生效后再重新操作。";
+const STALE_MESSAGE = "这笔申请已超过自动查询期限。请先刷新页面并联系客服核对原申请，请勿重复提交。";
 
 function partyLabel(party: string): string {
   if (party === "RENTER") return "租客";
@@ -296,7 +296,7 @@ function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendi
     && view.dataOrigin === "JOINPAY_CANDIDATE" && view.capability.channelEnabled === true && view.capability.productionPaymentCapability === true
     && ["ACTION_READY", "PROCESSING_UNCONFIRMED"].includes(view.request.state) && view.projection?.actionBlockedReason === null && !url);
   return <div className="order-channel-payment" aria-busy={busy || reading}>
-    <p role="status">{applied ? "渠道付款已接纳" : view?.dataOrigin === "LOCAL_CONTROLLED" ? "当前付款记录属于本地受控测试" : view?.request && view.dataOrigin === "SYNTHETIC_PROTOCOL" ? "协议测试记录，不代表真实付款" : view?.payment?.disposition === "REVIEW_REQUIRED" ? "支付需要人工核对" : view?.payment?.disposition === "APPLIED" ? "付款依据待确认" : view?.request ? channelStateLabels[view.request.state] ?? "支付状态待确认" : "请选择支付方式"}</p>
+    <p role="status">{applied ? "渠道付款已接纳" : view?.dataOrigin === "LOCAL_CONTROLLED" ? "当前付款记录属于本地测试支付" : view?.request && view.dataOrigin === "SYNTHETIC_PROTOCOL" ? "协议测试记录，不代表真实付款" : view?.payment?.disposition === "REVIEW_REQUIRED" ? "支付需要人工核对" : view?.payment?.disposition === "APPLIED" ? "付款依据待确认" : view?.request ? channelStateLabels[view.request.state] ?? "支付状态待确认" : "请选择支付方式"}</p>
     {view?.request ? <p className="order-muted">本次请求金额：{channelMoneyText(view.request.amount)}。支付方式与原请求保持一致。</p> : null}
     {url ? <figure className="order-channel-code"><QRCodeSVG value={url} size={176} level="M" marginSize={4} role="img" aria-label="本单支付二维码" /><figcaption className="order-muted">请使用{view?.request?.method === "WEIXIN_NATIVE" ? "微信" : "支付宝"}扫描本单二维码。二维码有效期未确认，请以渠道提示为准。</figcaption></figure> : null}
     {capabilityOff ? <p className="order-inline-notice" role="status">当前环境未开放真实渠道支付；本页不会生成支付参数，也不会自动改用其他收款方式。</p> : null}
@@ -339,9 +339,9 @@ function PaymentAction({ order, party, onChanged }: { order: Order; party: Order
   useEffect(() => {
     if (!userId) return;
     const payment = loadIntent(userId, "order.payment", order.id);
-    if (payment) setUnknown(isIntentStale(payment) ? STALE_MESSAGE : "检测到本订单有一笔结果未知的支付请求；原幂等键已冻结。");
+    if (payment) setUnknown(isIntentStale(payment) ? STALE_MESSAGE : "检测到本订单有一笔结果未知的支付请求；原申请已保留，请勿重复提交。");
     const cancel = loadIntent(userId, "order.cancel", order.id);
-    if (cancel) setCancelUnknown(isIntentStale(cancel) ? STALE_MESSAGE : "检测到本订单有一笔结果未知的取消请求；原幂等键已冻结。");
+    if (cancel) setCancelUnknown(isIntentStale(cancel) ? STALE_MESSAGE : "检测到本订单有一笔结果未知的取消请求；原申请已保留，请勿重复提交。");
   }, [userId, order.id]);
   const applyOutcome = (acting: string, outcome: WriteOutcome<{ payment: { confirmationId: string; disposition: string; reasonCode?: string | null; replay: boolean } }>, kind: "pay" | "cancel") => {
     const fail = (typed: OrderRequestError) => {
@@ -371,11 +371,11 @@ function PaymentAction({ order, party, onChanged }: { order: Order; party: Order
       const observed = authority.payment
         ? `服务端已有付款记录（${authority.payment.disposition}）`
         : `当前订单状态 ${authority.order.status}，暂未观察到付款记录`;
-      const message = `原${label}请求仍未取得确定回执（原幂等键保留）。${observed}；读取结果不构成“已生效/未生效”证明，请稍后再次查询或联系客服核对。`;
+      const message = `原${label}请求仍未取得确定回执（原申请保留）。${observed}；当前页面状态不能确定这笔申请是否生效，请稍后再次查询或联系客服核对。`;
       if (kind === "pay") setUnknown(message); else setCancelUnknown(message);
     } catch {
       if (isCurrent(acting)) {
-        const message = `原${label}请求仍未取得确定回执；权威状态暂时无法读取（${typed.message || "读取失败"}）。原请求保留，请稍后再次查询。`;
+        const message = `原${label}请求仍未取得确定回执；最新处理状态暂时无法读取（${typed.message || "读取失败"}）。原请求保留，请稍后再次查询。`;
         if (kind === "pay") setUnknown(message); else setCancelUnknown(message);
       }
     }
@@ -429,19 +429,19 @@ function PaymentAction({ order, party, onChanged }: { order: Order; party: Order
     {receipt?.disposition === "APPLIED" ? <div className="order-notice is-success" role="status"><CheckCircle2 size={17} aria-hidden="true" /><div><strong>支付已接纳{receipt.replay ? "（原回执重放）" : ""}</strong><span>订单状态以服务端记录为准；支付不等于交付、建群或开租。</span></div></div> : null}
     {order.status === "PENDING_PAYMENT" && order.holdUntil ? <p className="order-trade-deadline">{expired ? "原支付保留截止" : "支付保留至"} {formatOrderTime(order.holdUntil)}；到期后是否取消以服务端订单状态为准。</p> : null}
     {expired ? <div className="order-notice is-warning" role="status"><Clock3 size={17} aria-hidden="true" /><div><strong>已到期，取消处理中</strong><span>占用时间以订单记录为准；系统正在按序释放该账号，不再接受新的支付。</span></div></div> : null}
-    {party === "renter" ? <p className="order-muted">订单的支付与取消都会冻结原请求：结果未知时只能查询原请求，不会重复提交；两个动作互斥，未决期间同时锁定。</p> : null}
+    {party === "renter" ? <p className="order-muted">付款或取消后，请先确认处理结果。结果尚未确认时，请查询原申请，不要重复操作；确认前暂不能付款或取消。</p> : null}
     {receipt?.disposition === "REVIEW_REQUIRED" ? <div className="order-notice is-warning" role="status"><AlertCircle size={17} aria-hidden="true" /><div><strong>支付结果需要人工核对</strong><span>原因：{receipt.reasonCode ?? "待确认"}。未重复扣款；不再新发起支付，等待平台核对。</span></div></div> : null}
     {unknown ? <UnknownNotice label="支付结果未知" message={unknown} onQuery={() => void queryPayment()} onOpenOrder={onChanged} /> : null}
     {cancelUnknown ? <UnknownNotice label="取消结果未知" message={cancelUnknown} onQuery={() => void queryCancel()} onOpenOrder={onChanged} /> : null}
     {error ? <p className="order-inline-notice" role="alert">{error.message}</p> : null}
     {party === "renter" ? <div className="order-trade-actions">
       <ChannelPaymentAction order={order} blocked={payLocked || cancelArmed} onChanged={onChanged} onModeChange={setChannelMode} onPendingChange={setChannelPending}>{paymentOpen ? <button type="button" className="button" onClick={() => void pay()} disabled={payLocked}>
-        <WalletCards size={15} aria-hidden="true" />{busy ? "提交支付请求…" : "提交支付（本地受控测试）"}
+        <WalletCards size={15} aria-hidden="true" />{busy ? "提交支付请求…" : "提交支付（本地测试支付）"}
       </button> : <p className="order-muted">当前订单不可继续支付；请刷新查看最新订单记录。</p>}</ChannelPaymentAction>
       {cancelOpen ? (!cancelArmed ? <button type="button" className="button quiet" onClick={() => setCancelArmed(true)} disabled={cancelLocked}>取消订单</button> :
         <span className="order-trade-confirm">确认取消该订单？账号占用将释放。<button type="button" className="button secondary button--sm" onClick={() => void cancel()} disabled={cancelLocked}>{busy ? "取消中…" : "确认取消"}</button><button type="button" className="button quiet button--sm" onClick={() => setCancelArmed(false)} disabled={busy}>保留订单</button></span>) : null}
     </div> : <p className="order-muted">等待租客完成支付；订单不提供代付或代为接单操作。</p>}
-    {!channelMode ? <p className="order-trade-note">当前为本地受控收款入口：服务端生成本地收款依据，不代表真实渠道扣款。</p> : null}
+    {!channelMode ? <p className="order-trade-note">当前为本地测试支付入口，测试付款记录不代表支付渠道已扣款。</p> : null}
   </section>;
 }
 
@@ -463,7 +463,7 @@ function OpeningPanel({ opening, order, party, onChanged }: { opening: Settlemen
   useEffect(() => {
     if (!userId) return;
     const intent = loadIntent(userId, "opening.confirm", order.id);
-    if (intent) setUnknown(isIntentStale(intent) ? STALE_MESSAGE : "检测到一条结果未知的期初确认；原幂等键已冻结。");
+    if (intent) setUnknown(isIntentStale(intent) ? STALE_MESSAGE : "检测到一条结果未知的期初确认；原申请已保留，请勿重复提交。");
   }, [userId, order.id]);
   const myParty = party.toUpperCase();
   const acks = opening.acks ?? [];
@@ -502,9 +502,9 @@ function OpeningPanel({ opening, order, party, onChanged }: { opening: Settlemen
         return;
       }
       const observed = target ? `原目标期初当前状态 ${target.status}` : "未在原结算记录中找到该期初版本";
-      setUnknown(`原期初确认仍未取得确定回执（原幂等键保留）。${observed}；读取结果不构成“已生效/未生效”证明，请稍后再次查询或联系客服核对。`);
+      setUnknown(`原开租确认申请仍未取得确定回执（原申请保留）。${observed}；当前页面状态不能确定这笔申请是否生效，请稍后再次查询或联系客服核对。`);
     } catch {
-      if (isCurrent(acting)) setUnknown("原期初确认仍未取得确定回执；权威结算状态暂时无法读取。原请求保留，请稍后再次查询。");
+      if (isCurrent(acting)) setUnknown("原开租确认申请仍未取得确定回执；最新结算状态暂时无法读取。原请求保留，请稍后再次查询。");
     }
   };
   const confirm = async () => {
@@ -607,7 +607,7 @@ function EndingForm({ opening, order, party, onChanged }: { opening: SettlementO
     if (!userId) return;
     const intent = loadIntent(userId, "settlement.submit", order.id);
     if (intent) {
-      setUnknown(isIntentStale(intent) ? STALE_MESSAGE : "检测到一条结果未知的结束提交；原幂等键与内容已冻结。");
+      setUnknown(isIntentStale(intent) ? STALE_MESSAGE : "检测到一条结果未知的结束提交；原申请内容已保留，请勿重复提交。");
       setExpanded(true);
     }
   }, [userId, order.id]);
@@ -678,9 +678,9 @@ function EndingForm({ opening, order, party, onChanged }: { opening: SettlementO
         : authority.settlement
           ? `当前结算版本 ${authority.settlement.versionNo}`
           : "当前没有可读的申请或结算版本";
-      setUnknown(`原结束提交仍未取得确定回执（原幂等键保留）。${observed}；读取结果不构成“已生效/未生效”证明，请稍后再次查询或联系客服核对。`);
+      setUnknown(`原结束提交仍未取得确定回执（原申请保留）。${observed}；当前页面状态不能确定这笔申请是否生效，请稍后再次查询或联系客服核对。`);
     } catch {
-      if (isCurrent(acting)) setUnknown("原结束提交仍未取得确定回执；权威结算状态暂时无法读取。原请求保留，请稍后再次查询。");
+      if (isCurrent(acting)) setUnknown("原结束提交仍未取得确定回执；最新结算状态暂时无法读取。原请求保留，请稍后再次查询。");
     }
   };
   const submit = async () => {
@@ -757,7 +757,7 @@ function DecisionPanel({ version, party, order, onChanged }: { version: Settleme
   useEffect(() => {
     if (!userId) return;
     const intent = loadIntent(userId, "settlement.decision", order.id);
-    if (intent) setUnknown(isIntentStale(intent) ? STALE_MESSAGE : "检测到一条结果未知的结算决定；原幂等键与内容已冻结。");
+    if (intent) setUnknown(isIntentStale(intent) ? STALE_MESSAGE : "检测到一条结果未知的结算决定；原申请内容已保留，请勿重复提交。");
   }, [userId, order.id]);
   useEffect(() => { setTermsAccepted(false); }, [version.id, version.versionHash]);
   const myParty = party.toUpperCase();
@@ -795,9 +795,9 @@ function DecisionPanel({ version, party, order, onChanged }: { version: Settleme
         return;
       }
       const observed = target ? `原目标版本当前状态（版本 ${target.versionNo}，你的决定未记录）` : "未在原结算记录中找到该版本";
-      setUnknown(`原结算决定仍未取得确定回执（原幂等键保留）。${observed}；读取结果不构成“已生效/未生效”证明，请稍后再次查询或联系客服核对。`);
+      setUnknown(`原结算决定仍未取得确定回执（原申请保留）。${observed}；当前页面状态不能确定这笔申请是否生效，请稍后再次查询或联系客服核对。`);
     } catch {
-      if (isCurrent(acting)) setUnknown("原结算决定仍未取得确定回执；权威结算状态暂时无法读取。原请求保留，请稍后再次查询。");
+      if (isCurrent(acting)) setUnknown("原结算决定仍未取得确定回执；最新结算状态暂时无法读取。原请求保留，请稍后再次查询。");
     }
   };
   const decide = async (action: "CONFIRM" | "REJECT") => {

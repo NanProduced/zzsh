@@ -790,8 +790,9 @@ test('order detail separates unformed payment from missing time and sums refund 
  assert.match(text,/逐笔退款申请：0 笔/);
  assert.match(text,/银行到账：未核定/);
  const record=node.querySelector('.oc-records').textContent;
- assert.match(record,/未支付/);
- assert.match(record,/未形成支付/);
+ assert.match(record,/本站尚未确认付款/);
+ assert.match(record,/暂无已接纳付款时间/);
+ assert.doesNotMatch(record,/未形成支付|未支付事实/);
  assert.equal(record.includes('未支付未支付'),false);
 });
 
@@ -806,6 +807,25 @@ test('compact order progress keeps only the furthest key stage while detail keep
  await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('compact-progress-detail'),objectOnly:true,initialOrderId:value.id})));await until(()=>node.textContent.includes('关键费用'));
  const detail=[...node.querySelectorAll('.oc-main-facts>.oc-section:first-child .oc-stage-name')].map(item=>item.textContent);
  assert.deepEqual(detail,['创建','支付','已开租','已过账']);
+});
+
+test('payment absence labels distinguish unaccepted native pointers, old source records and unknown facts', async t => {
+  for (const [origin, state, expected, forbidden] of [
+    ['NATIVE', 'RECORDED_UNPAID', '本站尚未确认付款', '未形成支付'],
+    ['LEGACY', 'RECORDED_UNPAID', '原系统记录未付，渠道结果另核', '本站尚未确认付款'],
+    ['NATIVE', 'UNKNOWN', '支付事实待核', '本站尚未确认付款'],
+    ['NATIVE', 'RECORDED_PAID', '支付已记录', '本站尚未确认付款'],
+  ]) await t.test(`${origin}/${state}`, async child => {
+    const { root, node, AdminOrderChainView } = await setup(child);
+    const value = { ...chainOrder, id: 'payment-language', displayNo: 'PAYMENT-LANGUAGE', source: { origin, statusLabel: '原记录状态' }, status: state === 'RECORDED_PAID' ? 'PAID' : 'CANCELLED', payment: { state, recordedAt: null, recordedAmount: null } };
+    globalThis.fetch = async url => String(url).includes('readMode=combined') ? response({ order: value }) : response({});
+    await act(async () => root.render(createElement(AdminOrderChainView, { ...chainProps('payment-language'), objectOnly: true, initialOrderId: value.id })));
+    await until(() => node.querySelector('.oc-records'));
+    const record = node.querySelector('.oc-records').textContent;
+    assert.match(record, new RegExp(expected)); assert.equal(record.includes(forbidden), false);
+    if (state === 'RECORDED_UNPAID' && origin === 'NATIVE') assert.match(record, /暂无已接纳付款时间/);
+    if (state === 'RECORDED_PAID') assert.match(record, /支付时间待确认/);
+  });
 });
 
 

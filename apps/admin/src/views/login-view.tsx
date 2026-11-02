@@ -1,4 +1,5 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
+import { readRememberedAdminIdentifier, saveRememberedAdminIdentifier } from "../lib/login-preference";
 import { Icons } from "../components/icons";
 import { Button, PasswordInput, StatusMessage } from "../components/ui-elements";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -32,12 +33,16 @@ export function LoginView({
 }: LoginViewProps) {
   const [altcha, setAltcha] = useState<string | undefined>(undefined);
   const [password, setPassword] = useState("");
-  const [remember, setRemember] = useState(false);
+  const [remembered] = useState(readRememberedAdminIdentifier);
+  const [remember, setRemember] = useState(Boolean(remembered));
+  const [preferenceNotice, setPreferenceNotice] = useState("");
+  useEffect(() => { if (remembered && !identifier.trim()) onIdentifier(remembered); }, []);
   const typingImpulse = useAuthTypingImpulse();
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (identifier.trim() && password && (!captchaRequired || altcha)) {
+      if (!saveRememberedAdminIdentifier(remember ? identifier : null)) setPreferenceNotice("浏览器未能更新记住账号的选择，本次仍可登录；公共设备请检查并清除已保存的登录标识。");
       const payload = captchaRequired ? altcha : undefined;
       setAltcha(undefined);
       onSubmit(identifier.trim(), password, payload);
@@ -98,7 +103,7 @@ export function LoginView({
           />
         </div>
 
-        <div className="flex items-center justify-between pt-0.5">
+        <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 pt-0.5">
           <label
             htmlFor="remember-account"
             className="inline-flex items-center gap-2 text-xs text-muted-foreground select-none cursor-pointer hover:text-foreground transition-colors"
@@ -106,7 +111,7 @@ export function LoginView({
             <Checkbox
               id="remember-account"
               checked={remember}
-              onCheckedChange={(checked) => setRemember(checked === true)}
+              onCheckedChange={(checked) => { const next = checked === true; setRemember(next); if (!next && !saveRememberedAdminIdentifier(null)) setPreferenceNotice("浏览器未能清除已记住的账号，请检查此设备的站点存储；本次不会保存密码。"); else setPreferenceNotice(""); }}
             />
             <span>记住账号</span>
           </label>
@@ -114,6 +119,8 @@ export function LoginView({
             公共设备请勿勾选
           </span>
         </div>
+
+        {preferenceNotice ? <p className="text-xs text-muted-foreground" role="status">{preferenceNotice}</p> : null}
 
         {captchaRequired ? <AltchaField key={captchaRound} onPayload={setAltcha} hint={captchaRetry ? "请重新完成人机验证。" : "多次登录失败，请先完成人机验证。"} /> : null}
 

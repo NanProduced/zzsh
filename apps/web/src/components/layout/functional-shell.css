@@ -230,7 +230,7 @@
 .functional-shell .gunsmith-filters input:focus-visible,
 .functional-shell .gunsmith-filters select:focus-visible {
   border-color: var(--color-accent-brand);
-  outline: 2px solid color-mix(in srgb, var(--color-accent-brand) 52%, transparent);
+  outline: 2px solid color-mix(in srgb, var(--color-focus-ring) 52%, transparent);
   outline-offset: 1px;
 }
 
@@ -500,7 +500,7 @@
   font-size: 12px;
   font-weight: 600;
   background: color-mix(in srgb, var(--color-accent-brand) 15%, var(--color-bg-surface));
-  color: var(--color-accent-brand);
+  color: var(--color-accent-brand-ink);
   border: 1px solid color-mix(in srgb, var(--color-accent-brand) 30%, transparent);
 }
 .functional-shell .publish-status-chip {
@@ -549,7 +549,7 @@
   height: 36px;
   place-items: center;
   border-radius: 9px;
-  color: var(--color-accent-brand);
+  color: var(--color-accent-brand-ink);
   background: color-mix(in srgb, var(--color-accent-brand) 12%, var(--color-bg-canvas));
   border: 1px solid color-mix(in srgb, var(--color-accent-brand) 26%, var(--color-border-subtle));
   flex-shrink: 0;
@@ -679,7 +679,7 @@
 }
 .functional-shell .shadcn-select-item.is-selected {
   background: color-mix(in srgb, var(--color-accent-brand) 12%, var(--color-bg-canvas));
-  color: var(--color-accent-brand);
+  color: var(--color-accent-brand-ink);
   font-weight: 600;
 }
 .functional-shell .shadcn-select-item.is-disabled {
@@ -696,7 +696,7 @@
   font-size: 11px;
 }
 .functional-shell .shadcn-select-check {
-  color: var(--color-accent-brand);
+  color: var(--color-accent-brand-ink);
   flex-shrink: 0;
 }
 
@@ -781,7 +781,7 @@
   font-size: 11px;
   font-weight: 600;
   background: color-mix(in srgb, var(--color-accent-brand) 15%, var(--color-bg-canvas));
-  color: var(--color-accent-brand);
+  color: var(--color-accent-brand-ink);
   border: 1px solid color-mix(in srgb, var(--color-accent-brand) 25%, transparent);
 }
 
@@ -842,7 +842,7 @@
 .functional-shell .supply-deposit-input-wrap { position: relative; flex: 1 1 auto; display: flex; align-items: center; }
 .functional-shell .supply-deposit-input-wrap input { width: 100%; padding-right: 32px; }
 .functional-shell .supply-deposit-unit { position: absolute; right: 12px; color: var(--color-text-muted); font-size: 13px; pointer-events: none; }
-.functional-shell .supply-recommend-btn { flex: none; white-space: nowrap; border-color: var(--color-accent-brand); color: var(--color-accent-brand); }
+.functional-shell .supply-recommend-btn { flex: none; white-space: nowrap; border-color: var(--color-accent-brand); color: var(--color-accent-brand-ink); }
 
 /* Unified Ratio Mode Selector inside Terms */
 .functional-shell .supply-ratio-mode-group { display: flex; flex-direction: column; gap: 8px; }
@@ -882,7 +882,7 @@
   border-radius: 6px;
   background: color-mix(in srgb, var(--color-accent-brand) 12%, var(--color-bg-canvas));
   border: 1px solid color-mix(in srgb, var(--color-accent-brand) 30%, transparent);
-  color: var(--color-accent-brand);
+  color: var(--color-accent-brand-ink);
   font-size: 13px;
   font-weight: 600;
   width: fit-content;
@@ -916,7 +916,7 @@
   border-radius: 50%;
   border: 1.5px solid var(--color-border-default);
   flex-shrink: 0;
-  color: var(--color-accent-brand);
+  color: var(--color-accent-brand-ink);
 }
 .functional-shell .payout-card.is-active .payout-radio-indicator { border-color: var(--color-accent-brand); }
 .functional-shell .payout-badge {
@@ -938,7 +938,7 @@
   grid-column: 1 / -1;
   background: transparent;
   border: 0;
-  color: var(--color-accent-brand);
+  color: var(--color-accent-brand-ink);
   font-size: 12.5px;
   cursor: pointer;
   text-align: left;
@@ -968,8 +968,8 @@ html[data-theme="light"] .functional-shell .publish-rail-kicker-badge { backgrou
 .functional-shell .supply-radio input[type="radio"] { width: 16px; height: 16px; min-height: 16px; margin: 0; padding: 0; flex: none; accent-color: var(--color-accent-brand); cursor: pointer; }
 .functional-shell .supply-radio-field > small { flex-basis: 100%; color: var(--color-text-muted); font-size: 12px; line-height: 1.5; margin-top: 4px; }
 .functional-shell .supply-pricing-block { margin-top: 0; padding: 0; border: 0; background: transparent; }
-.functional-shell .supply-ratio-locked { display: inline-flex; align-items: center; gap: 7px; min-height: 40px; padding: 8px 14px; border: 1px dashed color-mix(in srgb, var(--color-accent-brand) 55%, var(--color-border-default)); border-radius: 9px; color: var(--color-accent-brand); background: color-mix(in srgb, var(--color-accent-brand) 9%, transparent); font-size: 13px; font-weight: 700; }
-.functional-shell .supply-ratio-locked.is-disabled { color: var(--color-status-warning); border-color: color-mix(in srgb, var(--color-status-warning) 55%, var(--color-border-default)); background: color-mix(in srgb, var(--color-status-warning) 8%, transparent); }
+.functional-shell .supply-ratio-locked { display: inline-flex; align-items: center; gap: 7px; min-height: 40px; padding: 8px 14px; border: 1px dashed color-mix(in srgb, var(--color-accent-brand) 55%, var(--color-border-default)); border-radius: 9px; color: var(--color-accent-brand-ink); background: color-mix(in srgb, var(--color-accent-brand) 9%, transparent); font-size: 13px; font-weight: 700; }
+.functional-shell .supply-ratio-locked.is-disabled { color: var(--color-status-warning-ink); border-color: color-mix(in srgb, var(--color-status-warning) 55%, var(--color-border-default)); background: color-mix(in srgb, var(--color-status-warning) 8%, transparent); }
 .functional-shell .supply-recommend-result { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
 .functional-shell .supply-ratio-input { display: flex; flex-direction: column; gap: 7px; margin-top: 8px; color: var(--color-text-secondary); font-size: 13px; }
 .functional-shell .supply-ratio-value { display: flex; align-items: stretch; }
@@ -979,12 +979,12 @@ html[data-theme="light"] .functional-shell .publish-rail-kicker-badge { backgrou
 .functional-shell .supply-recommend small { color: var(--color-text-muted); font-size: 13px; line-height: 1.5; }
 .functional-shell .supply-time-range { display: flex; align-items: center; gap: 8px; }
 .functional-shell .supply-time-range input { flex: 1 1 auto; min-width: 0; }
-.functional-shell .supply-toolbar .is-warning { color: var(--color-status-warning); }
+.functional-shell .supply-toolbar .is-warning { color: var(--color-status-warning-ink); }
 
 .functional-shell .publish-rail { position: sticky; top: 108px; display: grid; gap: 16px; align-content: start; min-width: 0; padding: 20px; border: 1px solid var(--color-border-default); border-radius: var(--functional-radius); background: linear-gradient(160deg, color-mix(in srgb, var(--color-accent-brand) 8%, var(--color-bg-surface)), var(--color-bg-surface) 46%); box-shadow: var(--shadow-sm); }
 .functional-shell .publish-rail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; color: var(--color-text-muted); }
 .functional-shell .publish-rail-head > div { display: grid; gap: 4px; }
-.functional-shell .publish-rail-kicker { color: var(--color-accent-brand); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.functional-shell .publish-rail-kicker { color: var(--color-accent-brand-ink); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
 .functional-shell .publish-rail-head h2 { margin: 0; font-size: 19px; }
 .functional-shell .publish-rail-lines { display: grid; gap: 2px; margin: 0; }
 .functional-shell .publish-rail-lines > div { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 7px 0; }
@@ -992,7 +992,7 @@ html[data-theme="light"] .functional-shell .publish-rail-kicker-badge { backgrou
 .functional-shell .publish-rail-lines dd { margin: 0; color: var(--color-text-primary); font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .functional-shell .publish-rail-lines .is-total { margin-top: 2px; padding-top: 10px; border-top: 1px solid var(--color-border-subtle); }
 .functional-shell .publish-rail-lines .is-total dt { color: var(--color-text-primary); font-weight: 700; }
-.functional-shell .publish-rail-lines .is-total dd { color: var(--color-accent-brand); font-size: 21px; }
+.functional-shell .publish-rail-lines .is-total dd { color: var(--color-accent-brand-ink); font-size: 21px; }
 .functional-shell .publish-rail-deposits { padding-top: 8px; border-top: 1px solid var(--color-border-subtle); }
 .functional-shell .publish-rail-deposits dd { color: var(--color-text-secondary); font-weight: 600; }
 .functional-shell .publish-rail-note,
@@ -1009,7 +1009,7 @@ html[data-theme="light"] .functional-shell .publish-rail-kicker-badge { backgrou
 .functional-shell .publish-terms summary { padding: 11px 12px; cursor: pointer; color: var(--color-text-secondary); font-size: 12px; font-weight: 600; }
 .functional-shell .publish-terms-body { max-height: 220px; overflow: auto; padding: 0 12px 12px; white-space: pre-wrap; color: var(--color-text-secondary); font-size: 12px; line-height: 1.7; }
 .functional-shell .publish-success { justify-items: start; padding: 14px; border: 1px solid color-mix(in srgb, var(--color-status-success) 45%, var(--color-border-default)); border-radius: 12px; background: color-mix(in srgb, var(--color-status-success) 9%, var(--color-bg-card)); }
-.functional-shell .publish-success svg { color: var(--color-status-success); }
+.functional-shell .publish-success svg { color: var(--color-status-success-ink); }
 .functional-shell .publish-success p { margin: 0; color: var(--color-text-secondary); font-size: 12px; line-height: 1.6; }
 .functional-shell .publish-mobile-actions { display: none; }
 
@@ -1042,7 +1042,7 @@ html[data-theme="light"] .functional-shell .publish-rail-kicker-badge { backgrou
 .functional-shell--account .supply-list-heading h2,
 .functional-shell--account .supply-detail-heading h2 { font-size: 19px; }
 .functional-shell--account .supply-account-row { min-height: 68px; align-items: center; padding-block: 14px; }
-.functional-shell--account .supply-account-row:hover { color: var(--color-accent-brand); }
+.functional-shell--account .supply-account-row:hover { color: var(--color-accent-brand-ink); }
 .functional-shell--account .account-security,
 .functional-shell--account .account-guest { max-width: none; border-radius: var(--functional-radius); box-shadow: var(--shadow-sm); }
 
@@ -1166,7 +1166,7 @@ html[data-theme="light"] .functional-shell .publish-rail-kicker-badge { backgrou
 .functional-shell.functional-shell--browse .market-context-copy > span,
 .functional-shell.functional-shell--browse .market-kicker {
   display: block;
-  color: var(--color-accent-brand);
+  color: var(--color-accent-brand-ink);
   font-size: 10px;
   font-weight: 800;
   letter-spacing: .08em;

@@ -309,7 +309,7 @@ test("Native readiness never relabels an existing controlled payment as provider
  await withDom(async window=>{
   let reads=0;const Component=loadComponent("apps/web/src/components/order/order-trade-actions.tsx",session("user_A")).OrderTradeActions;
   const probe=createProbe(window,Component,{order:channelOrder,party:"renter",onChanged(){}},async()=>{reads++;return json(channelView("order_A",{dataOrigin:"LOCAL_CONTROLLED",payment:{confirmationId:"controlled_fact",disposition:"APPLIED",amount:{cents:"125",currency:"CNY"}}}));});
-  try{await probe.render();assert.equal(reads,1);assert.match(probe.host.textContent,/本地受控收款入口/);assert.doesNotMatch(probe.host.textContent,/渠道付款已接纳/);assert.equal(probe.buttons().some(t=>t.includes("获取支付参数")),false);}
+  try{await probe.render();assert.equal(reads,1);assert.match(probe.host.textContent,/本地测试支付入口/);assert.doesNotMatch(probe.host.textContent,/渠道付款已接纳/);assert.equal(probe.buttons().some(t=>t.includes("获取支付参数")),false);}
   finally{await probe.dispose();}
  });
 });
@@ -1226,7 +1226,8 @@ test("R3: an aged intent is not auto-replayed and stays available for an explici
     const OrderTradeActions = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A")).OrderTradeActions;
     const probe = createProbe(window, OrderTradeActions, { order: { ...paidOrder, status: "PENDING_PAYMENT" }, party: "renter", onChanged() {} }, fetchImpl);
     await probe.render();
-    assert.ok(probe.host.textContent.includes("超出自动查询窗口"), probe.host.textContent.slice(0, 300));
+    assert.ok(probe.host.textContent.includes("超过自动查询期限"), probe.host.textContent.slice(0, 300));
+    assert.match(probe.host.textContent, /联系客服核对原申请|请勿重复提交/);
     assert.equal(log.filter(entry => entry.method === "POST").length, 0, "an aged intent must not be replayed automatically");
     await probe.click("查询原请求结果");
     const writes = log.filter(entry => entry.method === "POST");

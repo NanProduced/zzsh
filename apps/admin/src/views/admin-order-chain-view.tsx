@@ -70,10 +70,10 @@ const TIER_LABELS:Record<string,string>={STANDARD:"标准价",VIP:"VIP 价",SVIP
 const ratioText=(o:Order)=>o.haffRatio?.state==="KNOWN"&&o.haffRatio.wanPerYuan?(o.haffRatio.source==="ACCOUNT_PUBLIC_VERSION"?"账号比例 ":"")+`1元=${o.haffRatio.wanPerYuan}万哈夫币`:"比例未知";
 const tierText=(o:Order)=>o.haffRatio?.customerTier?TIER_LABELS[o.haffRatio.customerTier]??"档位待核":null;
 const money=(v:AdminOrderMoney|null|undefined)=>v?`¥${v.amount}`:"未知",time=(v:string|null|undefined)=>v&&Number.isFinite(Date.parse(v))?new Intl.DateTimeFormat("zh-CN",{timeZone:BEIJING_TIME_ZONE,dateStyle:"medium",timeStyle:"short"}).format(new Date(v)):"时间未提供";
-const paymentLabel=(o:Order)=>o.payment.state==="RECORDED_PAID"?"支付已记录":o.payment.state==="RECORDED_UNPAID"?"未支付":"支付事实待核";
-const paymentTime=(o:Order)=>o.payment.state==="RECORDED_PAID"?o.payment.recordedAt?time(o.payment.recordedAt):"支付时间待确认":o.payment.state==="RECORDED_UNPAID"?"未形成支付":"支付事实待核";
+const paymentLabel=(o:Order)=>o.payment.state==="RECORDED_PAID"?"支付已记录":o.payment.state==="RECORDED_UNPAID"?(o.source.origin==="LEGACY"?"原系统记录未付，渠道结果另核":"本站尚未确认付款"):"支付事实待核";
+const paymentTime=(o:Order)=>o.payment.state==="RECORDED_PAID"?o.payment.recordedAt?time(o.payment.recordedAt):"支付时间待确认":o.payment.state==="RECORDED_UNPAID"?(o.source.origin==="LEGACY"?"原系统未记录付款时间，渠道结果另核":"暂无已接纳付款时间"):"支付事实待核";
 /** 履约记录不再重复支付状态；未知与未发生分开。 */
-const paymentRecordTime=(o:Order)=>o.payment.state==="RECORDED_PAID"?paymentTime(o):o.payment.state==="RECORDED_UNPAID"?"未形成支付":"支付事实与时间待核";
+const paymentRecordTime=(o:Order)=>o.payment.state==="RECORDED_PAID"?paymentTime(o):o.payment.state==="RECORDED_UNPAID"?paymentTime(o):"支付事实与时间待核";
 const refundLocalStateLabels:Record<string,string>={READY:"待提交",SUBMITTING:"提交中",UNKNOWN:"结果未知",PROCESSING:"处理中",REVIEW_REQUIRED:"需人工复核",SUCCEEDED:"本地退款成功记录",FAILED:"本地失败"};
 const refundLocalStateText=(state:string)=>{const text=refundLocalStateLabels[state]??"状态待核";return text.startsWith("本地")?text:"本地 "+text;};
 /** 账号摘要：原生单取本单冻结版本，迁入单取账号公开版本（与账号页一致）；缺源保持未提供。 */

@@ -36,7 +36,7 @@
 .favorites-chip[aria-pressed="true"] {
   border-color: var(--color-accent-brand);
   background: var(--color-accent-brand-muted);
-  color: var(--color-accent-brand);
+  color: var(--color-accent-brand-ink);
   font-weight: 600;
 }
 html[data-theme="light"] .favorites-chip[aria-pressed="true"], html:not(.dark) .favorites-chip[aria-pressed="true"] { color: var(--color-accent-brand-text); }
@@ -130,7 +130,7 @@ html[data-theme="light"] .favorites-chip[aria-pressed="true"], html:not(.dark) .
   border-color: var(--color-status-warning);
   border-style: dashed;
 }
-.favorite-summary-fault .account-unavailable-body > svg { color: var(--color-status-warning); }
+.favorite-summary-fault .account-unavailable-body > svg { color: var(--color-status-warning-ink); }
 
 .favorites-fault-notice {
   display: flex;

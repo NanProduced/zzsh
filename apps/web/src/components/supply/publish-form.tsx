@@ -3068,7 +3068,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
       <p className="publish-form-guidance"><Info size={15} aria-hidden="true" />可先保存草稿；核对报价前会检查必填项，其余上架条件以本次规则和服务端检查为准。</p>
       <button ref={noticeTriggerRef} type="button" className="button quiet publish-header-notice-btn" onClick={() => { noticeManualRef.current = true; setReadingNotice(true); }}><FileText size={16} aria-hidden="true" />上架须知</button>
     </div>
-    <nav id="publish-outline" className="sr-only" aria-label="填写分组">
+    <nav id="publish-outline" className="publish-outline" aria-label="填写分组">
       <div className="publish-outline-groups">{(Object.keys(groupMeta) as PublishGroupId[]).map(id => <a key={id} href={`#publish-group-${id}`}>{groupMeta[id].title}</a>)}</div>
     </nav>
 

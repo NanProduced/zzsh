@@ -179,7 +179,7 @@
   --destructive: oklch(0.577 0.245 27.325);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
+  --ring: oklch(0.53 0 0);
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.145 0 0);
   --sidebar-primary: oklch(0.205 0 0);
@@ -187,7 +187,7 @@
   --sidebar-accent: oklch(0.97 0 0);
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --sidebar-ring: var(--ring);
   --admin-bg: var(--background);
   --admin-fg: var(--foreground);
   --admin-surface: var(--card);
@@ -291,6 +291,11 @@ body {
 /* Base Accessibility & Form defaults */
 button, input, select, textarea {
   font-family: inherit;
+}
+
+input::placeholder, textarea::placeholder {
+  color: var(--admin-muted-fg);
+  opacity: 1;
 }
 
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
@@ -601,13 +606,13 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
 .status-badge.success {
   background: rgba(16, 185, 129, 0.12);
-  color: #34d399;
+  color: var(--success-foreground);
   border: 1px solid rgba(16, 185, 129, 0.25);
 }
 
 .status-badge.warning {
   background: rgba(245, 158, 11, 0.12);
-  color: #fbbf24;
+  color: var(--warning-foreground);
   border: 1px solid rgba(245, 158, 11, 0.25);
 }
 

@@ -110,6 +110,7 @@ export function ParticleField({
   const srcRef = useRef(src);
   srcRef.current = src;
   const updateImageRef = useRef<((s: string) => void) | null>(null);
+  const redrawRef = useRef<(() => void) | null>(null);
 
   const sampleStepRef = useRef(sampleStep);
   sampleStepRef.current = sampleStep;
@@ -153,6 +154,13 @@ export function ParticleField({
     let currentImg: HTMLImageElement | null = null;
     let seq = 0;
     let animId = 0;
+    const motionPreference = window.matchMedia('(prefers-reduced-motion: reduce)');
+    let reducedMotion = motionPreference.matches;
+    let inView = true;
+    const canPaint = () => {
+      const rect = container.getBoundingClientRect();
+      return !stopped && document.visibilityState !== 'hidden' && inView && rect.width > 0 && rect.height > 0;
+    };
 
     const resizeCanvas = () => {
       const rect = container.getBoundingClientRect();
@@ -316,7 +324,8 @@ export function ParticleField({
     };
 
     const loop = () => {
-      if (stopped) return;
+      animId = 0;
+      if (!canPaint()) return;
       time += 0.016;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.fillStyle = colorRef.current;
@@ -340,6 +349,15 @@ export function ParticleField({
       for (let i = 0; i < particles.length; i++) {
         const p = particles[i];
         if (!p) continue;
+        if (reducedMotion) {
+          if (p.fading) continue;
+          p.x = p.ox; p.y = p.oy; p.vx = 0; p.vy = 0; p.appear = 1;
+          ctx.globalAlpha = p.alpha;
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); ctx.fill();
+          if (activeCount !== i) particles[activeCount] = p;
+          activeCount++;
+          continue;
+        }
         const dx = p.ox - p.x;
         const dy = p.oy - p.y;
         const k = sp * p.springJitter;
@@ -398,8 +416,19 @@ export function ParticleField({
         particles.length = activeCount;
       }
       ctx.globalAlpha = 1;
-      animId = requestAnimationFrame(loop);
+      if (!reducedMotion) animId = requestAnimationFrame(loop);
     };
+
+    const requestDraw = () => {
+      if (animId) cancelAnimationFrame(animId);
+      animId = canPaint() ? requestAnimationFrame(loop) : 0;
+    };
+    redrawRef.current = requestDraw;
+    const onMotionChange = () => { reducedMotion = motionPreference.matches; requestDraw(); };
+    const onVisibilityChange = () => requestDraw();
+    const visibilityObserver = typeof IntersectionObserver === 'function' ? new IntersectionObserver(entries => {
+      inView = entries.some(entry => entry.isIntersecting); requestDraw();
+    }) : null;
 
     const onPointerMove = (e: PointerEvent) => {
       const rect = container.getBoundingClientRect();
@@ -419,6 +448,7 @@ export function ParticleField({
       resizeTimer = requestAnimationFrame(() => {
         if (currentImg) {
           initParticles(currentImg);
+          requestDraw();
         }
       });
     });
@@ -431,15 +461,19 @@ export function ParticleField({
       img.onload = () => {
         if (stopped || curSeq !== seq) return;
         currentImg = img;
-        if (isMorph) morphParticles(img);
+        if (isMorph && !reducedMotion) morphParticles(img);
         else initParticles(img);
+        requestDraw();
       };
       img.src = url;
     };
 
     updateImageRef.current = (url: string) => loadImage(url, true);
     ro.observe(container);
-    animId = requestAnimationFrame(loop);
+    visibilityObserver?.observe(container);
+    motionPreference.addEventListener('change', onMotionChange);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    requestDraw();
     loadImage(srcRef.current, false);
 
     container.addEventListener('pointermove', onPointerMove);
@@ -450,11 +484,17 @@ export function ParticleField({
       cancelAnimationFrame(animId);
       if (resizeTimer) cancelAnimationFrame(resizeTimer);
       ro.disconnect();
+      visibilityObserver?.disconnect();
+      motionPreference.removeEventListener('change', onMotionChange);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
       container.removeEventListener('pointermove', onPointerMove);
       container.removeEventListener('pointerleave', onPointerLeave);
       updateImageRef.current = null;
+      redrawRef.current = null;
     };
   }, [typingImpulseRef]);
+
+  useEffect(() => { redrawRef.current?.(); }, [isDark, color, adaptToTheme]);
 
   const lastSrcRef = useRef(src);
   useEffect(() => {

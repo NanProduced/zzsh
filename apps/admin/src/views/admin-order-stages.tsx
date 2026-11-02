@@ -78,10 +78,10 @@ export function cancelReasonText(reason: string | null | undefined): string {
   return CANCEL_ACTOR_MAP[reason] || reason;
 }
 
-export function orderPaymentLabel(payment?: OrderStagesPayment | null): string {
+export function orderPaymentLabel(payment?: OrderStagesPayment | null, origin?: string): string {
   if (!payment) return '支付事实待核';
   if (payment.state === 'RECORDED_PAID') return '支付已记录';
-  if (payment.state === 'RECORDED_UNPAID') return '未支付';
+  if (payment.state === 'RECORDED_UNPAID') return origin === 'LEGACY' ? '原系统记录未付，渠道结果另核' : '本站尚未确认付款';
   return '支付事实待核';
 }
 
@@ -154,7 +154,7 @@ export function OrderStages({
         ];
 
   const sourceLabel = legacy ? `${o.source?.statusLabel ?? '历史状态待核'} · ` : '';
-  const paymentText = orderPaymentLabel(p);
+  const paymentText = orderPaymentLabel(p, o.source?.origin);
   const refundText = o.status === 'CANCELLED' && pState === 'RECORDED_PAID' ? ' · 退款待核' : '';
   const cancelText = o.status === 'CANCELLED' && o.cancelReason ? ` · ${cancelReasonText(o.cancelReason)}` : '';
   const compactText = o.status === 'CANCELLED' ? null : progress

@@ -45,9 +45,9 @@ type Stage =
   | { kind: "review"; orderId: string; reason: string | null }
   | { kind: "notice"; message: string; canRequote: boolean; orderId?: string; action?: "orders" | "refresh" | "back" };
 
-const AUTH_MESSAGE = "登录状态已变化。原创建请求与幂等键已保留；正在确认身份，确认后可在本页恢复。";
+const AUTH_MESSAGE = "登录状态已变化。原下单申请已保留；正在确认身份，确认后可在本页恢复。";
 const BLOCKED_MESSAGE = "浏览器会话存储不可用，无法保存原请求恢复信息；已阻止创建，避免产生不可恢复的订单。";
-const STALE_MESSAGE = "该原创建请求已超出自动查询窗口；请先查询权威订单列表核对，不要重新确认或重复下单。";
+const STALE_MESSAGE = "该原创建请求已超出自动查询窗口；请先查询订单列表中的最新状态核对，不要重新确认或重复下单。";
 
 function errorOf(error: unknown): OrderRequestError {
   return error instanceof OrderRequestError ? error : new OrderRequestError(0, null);
@@ -522,7 +522,7 @@ export function RentalConfirmPanel({
   useEffect(() => {
     if (!userId) return;
     const intent = loadIntent(userId, "order.create.v2", accountId);
-    if (intent) setStage({ kind: "create-unknown", context: (intent.context ?? {}) as StoredContext, message: isIntentStale(intent) ? STALE_MESSAGE : "检测到一笔结果未知的创建请求；原凭据与幂等键已冻结。", stale: isIntentStale(intent) });
+    if (intent) setStage({ kind: "create-unknown", context: (intent.context ?? {}) as StoredContext, message: isIntentStale(intent) ? STALE_MESSAGE : "检测到一笔结果未知的创建请求；原申请内容已保留，请勿重复下单。", stale: isIntentStale(intent) });
   }, [userId, accountId]);
 
   useEffect(() => {
@@ -647,7 +647,7 @@ export function RentalConfirmPanel({
         return;
       }
       if (typed.status === 0 || typed.status >= 500) {
-        setStage({ kind: "create-unknown", context, message: "创建请求的结果未知。原凭据与幂等键已冻结，请查询原结果；不要重新确认或重复下单。", stale: false });
+        setStage({ kind: "create-unknown", context, message: "创建请求的结果未知。原申请内容已保留，请勿重复下单，请查询原结果；不要重新确认或重复下单。", stale: false });
         return;
       }
       // A fresh key with a server 4xx is a definitive non-commit.
@@ -701,7 +701,7 @@ export function RentalConfirmPanel({
         observed = "订单列表暂时无法读取";
       }
       if (isCurrent(acting)) {
-        setStage({ kind: "create-unknown", context: (intent.context ?? {}) as StoredContext, message: `原创建请求仍未取得确定回执（服务端返回「${typed.message || "拒绝"}」，原凭据与幂等键保留）。${observed}；读取结果不构成“已生效/未生效”证明，请稍后再次查询或联系客服核对。`, stale: false });
+        setStage({ kind: "create-unknown", context: (intent.context ?? {}) as StoredContext, message: `原创建请求仍未取得确定回执（服务端返回「${typed.message || "拒绝"}」，原申请内容保留）。${observed}；当前页面状态不能确定这笔申请是否生效，请稍后再次查询或联系客服核对。`, stale: false });
       }
     }
   }, [accountId, userId, isCurrent, session]);
@@ -726,9 +726,9 @@ export function RentalConfirmPanel({
       const observed = authority.payment
         ? `服务端已有付款记录（${authority.payment.disposition}）`
         : `当前订单状态 ${authority.order.status}，暂未观察到付款记录`;
-      setStage({ kind: "pay-unknown", orderId, message: `原支付请求仍未取得确定回执（原幂等键保留）。${observed}；读取结果不构成“已生效/未生效”证明，请稍后再次查询或联系客服核对。` });
+      setStage({ kind: "pay-unknown", orderId, message: `原支付请求仍未取得确定回执（原申请保留）。${observed}；当前页面状态不能确定这笔申请是否生效，请稍后再次查询或联系客服核对。` });
     } catch {
-      if (isCurrent(acting)) setStage({ kind: "pay-unknown", orderId, message: "原支付请求仍未取得确定回执；权威付款状态暂时无法读取。原请求保留，请稍后再次查询。" });
+      if (isCurrent(acting)) setStage({ kind: "pay-unknown", orderId, message: "原支付请求仍未取得确定回执；最新付款记录暂时无法读取。原请求保留，请稍后再次查询。" });
     }
   }, [isCurrent]);
 
@@ -871,7 +871,7 @@ export function RentalConfirmPanel({
 
     if (stage.kind === "create-unknown") return <div className="rental-confirm rental-confirm--unknown" role="status">
       <p className="rental-confirm-heading"><Clock3 size={15} aria-hidden="true" />创建请求结果未知</p>
-      <p className="detail-stage-note">原确认凭据与幂等键已冻结：{stage.context.payable ? `预计合计 ¥${stage.context.payable}、` : ""}{stage.context.tier ? `档位 ${stage.context.tier}` : ""}。请先查询原请求结果，不要重新确认、重复下单或改价。</p>
+      <p className="detail-stage-note">本次申请的报价与内容已保留：{stage.context.payable ? `预计合计 ¥${stage.context.payable}、` : ""}{stage.context.tier ? `档位 ${stage.context.tier}` : ""}。请先查询原请求结果，不要重新确认、重复下单或改价。</p>
       <p className="rental-confirm-error"><AlertCircle size={14} aria-hidden="true" />{stage.message}</p>
       <div className="rental-confirm-actions">
         <div className="rental-confirm-primary-action">{dockPrice}<button type="button" className="button rental-confirm-primary" onClick={() => void recoverCreate()}>查询原创建结果</button></div>
@@ -880,7 +880,7 @@ export function RentalConfirmPanel({
     </div>;
 
     if (stage.kind === "paid") return <div className="rental-confirm rental-confirm--done" role="status">
-      <p className="rental-confirm-success"><CheckCircle2 size={15} aria-hidden="true" />支付已接纳（本地受控收款依据，不代表真实到账）</p>
+      <p className="rental-confirm-success"><CheckCircle2 size={15} aria-hidden="true" />支付已接纳（本地测试付款记录，不代表真实到账）</p>
       <Link className="button secondary button--sm" href={orderHref(stage.orderId)}>查看订单与开租进度</Link>
     </div>;
 
@@ -891,7 +891,7 @@ export function RentalConfirmPanel({
 
     if (stage.kind === "pay-unknown") return <div className="rental-confirm rental-confirm--unknown" role="status">
       <p className="rental-confirm-heading"><Clock3 size={15} aria-hidden="true" />支付请求结果未知</p>
-      <p className="detail-stage-note">请使用同一请求查询原结果（幂等重放），不会重复扣款。</p>
+      <p className="detail-stage-note">请查询本次支付申请的原结果，不要重复提交支付。</p>
       <p className="rental-confirm-error"><AlertCircle size={14} aria-hidden="true" />{stage.message}</p>
       <div className="rental-confirm-actions">
         <div className="rental-confirm-primary-action">{dockPrice}<button type="button" className="button rental-confirm-primary" onClick={() => void recoverPayment(stage.orderId)}>查询原支付结果</button></div>
@@ -908,10 +908,10 @@ export function RentalConfirmPanel({
       return <div className="rental-confirm rental-confirm--quote">
         <div className="rental-confirm-head"><strong>订单已创建</strong><span className="rental-confirm-tier">{orderId}</span></div>
         {stage.kind === "created" ? <p className="rental-confirm-total-line">预计合计 {formatMoneyLabel(stage.quote.quote?.tenantPayableTotal ?? null) ?? "以服务端确认为准"}</p> : null}
-        <p className="detail-stage-note">请在订单中选择当前可用的支付方式。下方本地受控测试只生成本地收款依据，不代表真实渠道到账；付款不等于交付或开租。</p>
+        <p className="detail-stage-note">请在订单中选择当前可用的支付方式。下方本地测试支付只生成本地收款依据，不代表真实渠道到账；付款不等于交付或开租。</p>
         <div className="rental-confirm-actions">
           <div className="rental-confirm-primary-action">{dockPrice}<Link className="button rental-confirm-primary" href={orderHref(orderId)}>前往订单支付</Link><button type="button" className="button secondary button--sm" onClick={() => void pay(orderId)} disabled={stage.kind === "paying"}>
-            {stage.kind === "paying" ? "提交支付请求…" : "提交本地受控支付"}
+            {stage.kind === "paying" ? "提交支付请求…" : "提交本地测试支付"}
           </button></div>
         </div>
       </div>;
