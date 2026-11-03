@@ -1,0 +1,823 @@
+{
+  "format": "zzsh.business-initial.v1",
+  "baseline": "release_0151",
+  "migrationTag": "0151_initial_release_0151",
+  "migrationHash": "8963dce7b06425ca5ae275d88b61782a21376e3b7ac4ace61489a45eafd473e6",
+  "when": 1793681783926,
+  "sourceCount": 152,
+  "journalSha256": "8291e602e4b665685889fdce3b3679fba88ca8fb1bc96b519993d488729fb13e",
+  "journalPrefixSha256": "47cc6e141b9016fb51c8aa8cac540fd13200790c2daf92132c7b056c4a679f59",
+  "sourceChain": [
+    {
+      "tag": "0000_m2_auth",
+      "when": 1788998400000,
+      "sha256": "1287f638f898a7be81b87746e0eb75c11660dee5e960c232f5fa4b9f0b015f95"
+    },
+    {
+      "tag": "0001_m2_account_security",
+      "when": 1789010245000,
+      "sha256": "c17bcb8a5bef6161411943d8da776d4599d06361404c57906b0c223e4b9a3cf6"
+    },
+    {
+      "tag": "0002_m2_recovery_credential",
+      "when": 1789010246000,
+      "sha256": "8ed407671eaa566147f607cf679b2523e9b5e47e28f705129f4d17f0e2936c6d"
+    },
+    {
+      "tag": "0003_m2_recovery_safety",
+      "when": 1789010247000,
+      "sha256": "a49457d68167fbb01448c6c3183b84d9163b0bd9d41cb0214f53c32cf7aee5f6"
+    },
+    {
+      "tag": "0004_m2_first_activation_evidence",
+      "when": 1789010248000,
+      "sha256": "9f1f498b383653939fd66ebc8edd926f2abed860bb455da0b42a4582fefeac08"
+    },
+    {
+      "tag": "0005_m2_first_activation_state_fix",
+      "when": 1789010249000,
+      "sha256": "7be46216d6caee1bfaf49090ebab355b42c6cebb7d75b85416a55ae1454a8f40"
+    },
+    {
+      "tag": "0006_m2_disaster_recovery_outbox",
+      "when": 1789010250000,
+      "sha256": "98701d4e1d6a68dd8548ddf33815db5b53a816eeab808ed51c0bf235dba98675"
+    },
+    {
+      "tag": "0007_m2_admin_identity_password_gate",
+      "when": 1789050000000,
+      "sha256": "1cd4bee4089dc58a19c5fb25692b5a978538658f727a43803ad3143919002dc7"
+    },
+    {
+      "tag": "0008_m2_admin_permissions",
+      "when": 1789053600000,
+      "sha256": "515306f20716110b3232be1dbf9679df8e49587f1fb99fe87e2d9075b8c05e83"
+    },
+    {
+      "tag": "0009_m2_approval_audit",
+      "when": 1789120800000,
+      "sha256": "321bcf71378a826d3e317db4b7a6791ab7e6b2c24d6525c6679742e5a60a3831"
+    },
+    {
+      "tag": "0010_m2_identity_gates",
+      "when": 1789124400000,
+      "sha256": "649282ea42577fb79cea55ede959ab3a3c080dae706f9d57167fd8c580f9392b"
+    },
+    {
+      "tag": "0011_m2_identity_legacy_columns",
+      "when": 1789124401000,
+      "sha256": "041a798eba5f64a7c62d0a59c086cef42289e360117c3dc2af83c3226b5b103b"
+    },
+    {
+      "tag": "0012_m2_admin_audit_query",
+      "when": 1789124402000,
+      "sha256": "1fe41c03ab9ca7713150adef082f5bd49eb8d41e962961a96003398a7cf126a1"
+    },
+    {
+      "tag": "0013_m2_user_account_restore",
+      "when": 1789124403000,
+      "sha256": "6e0ab2bcca827f772ba8b852d40e4804814551b6debc1cd322f5e9d21e756580"
+    },
+    {
+      "tag": "0014_m2_admin_workspace_layout",
+      "when": 1789124404000,
+      "sha256": "c8b4afb641bfd762770959a4d3f0a9ea1707fbef1732d0e36df272608984c25c"
+    },
+    {
+      "tag": "0015_m3_supply_catalog_rules_media",
+      "when": 1789124405000,
+      "sha256": "6c1b282870e3a1fb1daba017d7e5859f1c7fa1c4be14c91eee124aa2dc9a814f"
+    },
+    {
+      "tag": "0016_m3b_review_guards",
+      "when": 1789124406000,
+      "sha256": "cbe608a3f648e8616d67ea78d76084e41e316adb3914b29070b11aa86f905dba"
+    },
+    {
+      "tag": "0017_m3b_idempotency_realm",
+      "when": 1789124407000,
+      "sha256": "e7e6622fecf7ab782148aa66fd04bd69a938b9ae870944ebd4cb56e4a9b7012a"
+    },
+    {
+      "tag": "0018_m3c_listing_publication",
+      "when": 1789124408000,
+      "sha256": "cba45dc5e1f37e7e412a4faecc5f5b8a06eff2935772b725e1f4581ad6fcef79"
+    },
+    {
+      "tag": "0019_m3c_identity_commitments",
+      "when": 1789124409000,
+      "sha256": "8871ed0c1f866123d51c49f0ed8ff597ffd44beb6b0612f85a52ba5140580cc9"
+    },
+    {
+      "tag": "0020_m3c_actor_shape",
+      "when": 1789124410000,
+      "sha256": "c5dbca27889403b8096745784e501bc6b5d427fc63f02abe45be72abafd2fb57"
+    },
+    {
+      "tag": "0021_m3c_content_schema",
+      "when": 1789124411000,
+      "sha256": "7c5a9b5f7dc48705d4862a58cc5eb931fbca824317147a98efe1e72139437345"
+    },
+    {
+      "tag": "0022_m3d_favorites",
+      "when": 1789124412000,
+      "sha256": "9452f4785eac1bac8aae5c1fc1c73b7e311095dd7e1a58a0b0304ebac264abe4"
+    },
+    {
+      "tag": "0023_m3_media_item_binding",
+      "when": 1789210813000,
+      "sha256": "81751d8a6d582132b39b28ac00bef0989eb2d6b5d0ff68ab8d85343e362d91dc"
+    },
+    {
+      "tag": "0024_m3_content_foundation",
+      "when": 1789300000000,
+      "sha256": "f1624339b555aaaa000c33152ac21b3f2f288f1c1f5789ce506eb7e29b538494"
+    },
+    {
+      "tag": "0025_m3_content_idempotency_publish_flag",
+      "when": 1789386400000,
+      "sha256": "9fe2553e18b00a91c295dfbb81d1b9c9f7b2b6fb79a372b7953df5cd19291770"
+    },
+    {
+      "tag": "0026_m3e_game_gunsmith",
+      "when": 1789472800000,
+      "sha256": "cc2b8e600d6d41198066af67f91c4375ad264e008171d2ffc011e79402d90361"
+    },
+    {
+      "tag": "0027_m3e_gunsmith_source_note",
+      "when": 1789476400000,
+      "sha256": "091514a5452168e50b562eb37001aa6794f7869310e95e41bf055197ccb1e562"
+    },
+    {
+      "tag": "0028_m3e_gunsmith_code_unique",
+      "when": 1789478200000,
+      "sha256": "9281d2bb0f24c05d5b844ab9c3e95d95cbcd4cb4b79a37c51b13dafd624f15c3"
+    },
+    {
+      "tag": "0029_m3e_source_identity_unique",
+      "when": 1789481800000,
+      "sha256": "13b5bb88e24ce0613955e9194a35e81a9f3ba5b5dc2f5b4c2df6809b1cfa7d54"
+    },
+    {
+      "tag": "0030_m4_order_reservation",
+      "when": 1789488200000,
+      "sha256": "2dd037e0a554e8cbe0266092c75d5860ba742b3013ffd3ff6d9ba9a58d49899c"
+    },
+    {
+      "tag": "0031_yunxin_identity_mapping",
+      "when": 1789490000000,
+      "sha256": "6ea52c996c28bd8d50eb89d3b936c6f5aa18143e124f130bb960bb19010c22db"
+    },
+    {
+      "tag": "0032_yunxin_consultation",
+      "when": 1789490001000,
+      "sha256": "87142580b9a758a4ee194a20c9d00c4460a2ebd47b9a84c840deac158cc09314"
+    },
+    {
+      "tag": "0033_yunxin_consultation_message_scope",
+      "when": 1789490002000,
+      "sha256": "1765f721ec133aaab82e9522c329ee6d4f60078cd840151e4c7e1701990e783c"
+    },
+    {
+      "tag": "0034_yunxin_consultation_recovery",
+      "when": 1789490003000,
+      "sha256": "5b41e915b89d911cfcf12baccf581c943383a619e7393caa6b45c8ca469c8eaa"
+    },
+    {
+      "tag": "0035_supply_day_unit",
+      "when": 1789490004000,
+      "sha256": "11546956c53be6830a1954bffcaaa635852dd03fd3334dc776b8a1cb2679387c"
+    },
+    {
+      "tag": "0036_oim_order_payment",
+      "when": 1789490005000,
+      "sha256": "eef961aee0991376d15fb046618aca064fad11b61c9b35380a37dda01a7e0a3d"
+    },
+    {
+      "tag": "0037_oim_support_dispatch",
+      "when": 1789490006000,
+      "sha256": "acf697c41a6b4990dd49756b0f53df7ec7c7111d9e0b26fd84beaa5cc847b3ae"
+    },
+    {
+      "tag": "0038_oim_order_team",
+      "when": 1789490007000,
+      "sha256": "ac6dff473dd4e47314ed813878dd825e95a9687a8062efc9601c5ff23213eb15"
+    },
+    {
+      "tag": "0039_supply_pricing_compat",
+      "when": 1789490008000,
+      "sha256": "5fa51a37c7e20bd5837cb91f463216545fa3c24103f838614eb01f0d99395576"
+    },
+    {
+      "tag": "0040_user_rental_membership",
+      "when": 1789490009000,
+      "sha256": "41c42238956372710aa7af7a1d55fa144b83dbf46fc7bc19a5e332396222d470"
+    },
+    {
+      "tag": "0041_order_personal_confirmation",
+      "when": 1789490010000,
+      "sha256": "4e5110f8f80431f9a81dae850299ab718aeeab165b478e8713870d555fd70cce"
+    },
+    {
+      "tag": "0042_supply_listing_query",
+      "when": 1789490011000,
+      "sha256": "711166152bfe641687fd113681b82d59bd6b314eacf6e947902a0f90765d108b"
+    },
+    {
+      "tag": "0043_oim_order_first_response",
+      "when": 1789490012000,
+      "sha256": "9d75d2e004130510cd517ae50d641c341ef847e4f1fb4edf340b8f12f4f7b4e6"
+    },
+    {
+      "tag": "0044_oim_order_first_response_guards",
+      "when": 1789490013000,
+      "sha256": "affee3a8d6c5184e328d95dac646edda6cb7b1c1bd056fa1b3dc851ddaeca103"
+    },
+    {
+      "tag": "0045_oim_order_escalation",
+      "when": 1789490014000,
+      "sha256": "c0ebe45d65f33ceddeaf8bb8d0a08e8149d250c9d363735c46278c2e7f982708"
+    },
+    {
+      "tag": "0046_order_settlement_confirmation",
+      "when": 1789490015000,
+      "sha256": "07055942eea45da6fbd2e1c0d16fe7294bda8eb625ab3b9b7e97e8eca138bb88"
+    },
+    {
+      "tag": "0047_order_settlement_intake",
+      "when": 1789490016000,
+      "sha256": "a03efaca91cf156fe8e6be1e08ba0b144f83ab41c43a64fd5e642c1073426c69"
+    },
+    {
+      "tag": "0048_order_settlement_posting",
+      "when": 1789490017000,
+      "sha256": "a889e0403f153e201a1b97ef8d7bbcc99c47276d27d48e3c0182bdfca1444e45"
+    },
+    {
+      "tag": "0049_order_settlement_posting_guards",
+      "when": 1789490018000,
+      "sha256": "e34a96e946fa30698e88139246f8cd6ef94e22d9b8168f61d599ad38fff24f9e"
+    },
+    {
+      "tag": "0050_order_personal_quote_v2_guard",
+      "when": 1789490019000,
+      "sha256": "feb5482099c0d40815d485c5abfcfd041ec40a1086090589e07e12834386104d"
+    },
+    {
+      "tag": "0051_order_personal_quote_v2_guard_fix",
+      "when": 1789490020000,
+      "sha256": "2c2696191d0f3ef0409ae367d000b835baaa3e9fedb10137f4eb1ba75266cab8"
+    },
+    {
+      "tag": "0052_supply_direct_publication",
+      "when": 1789490021000,
+      "sha256": "98743367c12120819ed068c04c613da8d9b49d10957be18a7508ba41006e1e7b"
+    },
+    {
+      "tag": "0053_supply_funding_authority",
+      "when": 1789490022000,
+      "sha256": "396ae76a1352ba1f6cb9e7b83ace658263ac9ddcdb6203ba181cde4ce80aea1a"
+    },
+    {
+      "tag": "0054_supply_funding_guard_correction",
+      "when": 1789490023000,
+      "sha256": "08147c5d90d577eb61cdadc937647955b73680f229bac2780f3c23465ab65e16"
+    },
+    {
+      "tag": "0055_skin_identity_contract",
+      "when": 1789490024000,
+      "sha256": "23a4d1660a57d1d92a195777325d26bc04a9e28371496809e1ce1d7c7b4dadc5"
+    },
+    {
+      "tag": "0056_legacy_listing_read_snapshot",
+      "when": 1789490025000,
+      "sha256": "b88b4d1086599983a412c0f62614e0aae196ec6b7db0aef7b78158a8c32cbaec"
+    },
+    {
+      "tag": "0057_admin_order_read_compat",
+      "when": 1789490026000,
+      "sha256": "07eccdfdc2863bab2eed60cb9b0c542c8a86a013b80fd28feaa8618f01da1b40"
+    },
+    {
+      "tag": "0058_personal_finance_read_foundation",
+      "when": 1789490027000,
+      "sha256": "b630bf0875e588a7c1d603ba79846eec6fc156bcabd2ebb7b9f3156aa6d1ce4a"
+    },
+    {
+      "tag": "0059_controlled_withdrawal",
+      "when": 1789490028000,
+      "sha256": "be19fe55ea325439b553380a487af0fc5df827f442ac39b9c9b48c0d10cf1a27"
+    },
+    {
+      "tag": "0060_controlled_withdrawal_observation",
+      "when": 1789490029000,
+      "sha256": "08305767d6606e403f28eec0b00effd5f3c5f291f05b9f5fe415d94a08aff820"
+    },
+    {
+      "tag": "0061_distribution_policy_and_relations",
+      "when": 1789490030000,
+      "sha256": "cf2d83e8efd2ecaa5b055479a9736cf4ad0323591a105573c2d9e24b5e0e8ce5"
+    },
+    {
+      "tag": "0062_native_wallet_origin",
+      "when": 1789490031000,
+      "sha256": "2d15a3ac9e37e99ae55e5f55e646002ccd5834939ab3d162ecc2231692d65ea4"
+    },
+    {
+      "tag": "0063_distribution_payment_and_earnings",
+      "when": 1789490032000,
+      "sha256": "09860a267fbe722def0b6cbaa81eac0ce88cba12bfe5127d56437bc678b8b34e"
+    },
+    {
+      "tag": "0064_referral_ledger_source_semantics",
+      "when": 1789490033000,
+      "sha256": "23b403bbd91a213535a178f42eda24a5b7d1e7a5ff59aaa5a3f32e444fb3cd93"
+    },
+    {
+      "tag": "0065_native_origin_resource_admission",
+      "when": 1789490034000,
+      "sha256": "8eceb7e089c3f4150ca8aed63579d8760b5d84c4234ef0a669f7b5e0945086d1"
+    },
+    {
+      "tag": "0066_native_origin_admission_contract",
+      "when": 1789490035000,
+      "sha256": "82d3fa11df8e38a35618d822bcf33b7f20e37f1262702b2ce202a4c01a37ce81"
+    },
+    {
+      "tag": "0067_credit_guarantee_contract",
+      "when": 1789490036000,
+      "sha256": "6936631af0577741f51defc96e131633971e0ef26fdb91a46af440026dfb0921"
+    },
+    {
+      "tag": "0068_membership_growth_contract",
+      "when": 1789490037000,
+      "sha256": "c0087c5fb388aaa31066b6d86f8274b8476f90ca60796ec35115e78b8e60e34f"
+    },
+    {
+      "tag": "0069_legacy_read_snapshot_source_status",
+      "when": 1789490038000,
+      "sha256": "05e31f7e283f9026ffb3b7a49e0fd0f0322c551bd4723b1d5ecdd1e8f107f33e"
+    },
+    {
+      "tag": "0070_admin_game_scope",
+      "when": 1789490039000,
+      "sha256": "8ee341564c89c29199b913070b66bef0981e5b70511c0f19b80674548dd72065"
+    },
+    {
+      "tag": "0071_supply_backend_closeout",
+      "when": 1789490040000,
+      "sha256": "e3f96846e7de6f81eeb0115066ef928b99f2078efb6a15959e52bac523048b28"
+    },
+    {
+      "tag": "0072_legacy_listing_display_snapshot",
+      "when": 1789490041000,
+      "sha256": "72acadfc57df16f5c44bf933f1547ff3e61e8bcb6a3393e319c0812c33bc97f6"
+    },
+    {
+      "tag": "0073_admin_self_security_commands",
+      "when": 1792085353599,
+      "sha256": "df3a9746f35f3c906c5a1fdd18b25088878e860df43a0be7caf5e66ece06996c"
+    },
+    {
+      "tag": "0074_legacy_trade_continuation",
+      "when": 1792147352612,
+      "sha256": "0afd676ab9f0fd3b9be88718a6202ce38d6ffcc8a966d5605437c1baf41d7dbd"
+    },
+    {
+      "tag": "0075_finance_history_coverage",
+      "when": 1792147352613,
+      "sha256": "baa49729f2353aa510e77074a4c028e75ddaa6d5cc972c2601a4609f78768c4b"
+    },
+    {
+      "tag": "0076_finance_stored_opening",
+      "when": 1792147352614,
+      "sha256": "4f8873e8a735ecbed6e0f5a7d4d118483912819df23a2dc1c844ebbf96ae3fd6"
+    },
+    {
+      "tag": "0077_legacy_duty_finance",
+      "when": 1792147352615,
+      "sha256": "53b5c224912f4b0350640a9664918c8e34147359dc1ecff263331e80f628e82e"
+    },
+    {
+      "tag": "0078_personal_quote_v4",
+      "when": 1792147352616,
+      "sha256": "8ff7829a5dd35a6f54ff9f4ad45c46406135a2223e39508310ae392ef29e1109"
+    },
+    {
+      "tag": "0079_owner_guarantee_history",
+      "when": 1792147352617,
+      "sha256": "55d55ce489661f0aea6641d3b9378907fe6a03eb941726eb03000865b2300044"
+    },
+    {
+      "tag": "0080_membership_growth_legacy_coverage",
+      "when": 1792147352618,
+      "sha256": "3c4a1c60f048bd2eafdc8a6889632c7bc6d73a2d8e2f5dede7c43ab659583dbb"
+    },
+    {
+      "tag": "0081_account_public_numbers",
+      "when": 1792147352619,
+      "sha256": "df2185745add553afb9b021020ba1697630dfc615d5af79f11d594038d244970"
+    },
+    {
+      "tag": "0082_supply_pricing_compat_disabled_modes",
+      "when": 1792252801803,
+      "sha256": "1f3892fb42ed734980dd3fa3b172b29605c3e9ac2b6df1fd154d76cef1283ee7"
+    },
+    {
+      "tag": "0083_account_date_numbers",
+      "when": 1792281600000,
+      "sha256": "ab0595eea8d00c34fe099f70e3d40db812c7caf8e3627cdf1076b8156e2d1120"
+    },
+    {
+      "tag": "0084_stored_opening_input_decode",
+      "when": 1792281600001,
+      "sha256": "afde5d1381c5c7541fa2a9751dde88920c06cc2e91e4b13e5d4c07aadde16015"
+    },
+    {
+      "tag": "0085_membership_total_discount",
+      "when": 1792281600002,
+      "sha256": "d40777ad45832019d9ccb0d0c954df349e1156d6c310ccdcba53f18d7675bb01"
+    },
+    {
+      "tag": "0086_legacy_skin_holding",
+      "when": 1792281600003,
+      "sha256": "3689d65173edf67d3e1b93122006683859cd75d38afac8ea7911b5ccc5df6652"
+    },
+    {
+      "tag": "0087_legacy_duty_audit_alias",
+      "when": 1792281600004,
+      "sha256": "59de391a82ee84e25a634ee328252d95d44b589f31fd2f2ccfcdc2b00afc50c9"
+    },
+    {
+      "tag": "0088_skin_catalog_metadata",
+      "when": 1792454400000,
+      "sha256": "d7b272f29872f098f63d5fb9cea22ce888e004d2ddcb5f26e32f377f816b026a"
+    },
+    {
+      "tag": "0089_skin_deposit_recommendation",
+      "when": 1792454400001,
+      "sha256": "f3f70a37079a58f66973f67b5f48eb5a61c6bf352f169249b2b9b0eff0714e12"
+    },
+    {
+      "tag": "0090_personal_finance_read_indexes",
+      "when": 1792540800000,
+      "sha256": "73c5c078134249ce0fab086bd3159837deb9278054bd8a563763ed0de70d4b71"
+    },
+    {
+      "tag": "0091_admin_user_directory_list",
+      "when": 1792627200000,
+      "sha256": "f52fac9f2b678e37e1a558c75a80d4963786251328169cd240675a8e65900472"
+    },
+    {
+      "tag": "0092_user_registration_read_projection",
+      "when": 1792627200001,
+      "sha256": "5fde61702ca5dfd9cce0e52c71d054b539de066b4f508dc4853849688c2919cd"
+    },
+    {
+      "tag": "0093_user_detail_operations",
+      "when": 1792627200002,
+      "sha256": "b22de453bb0e157e05b5c6b76ee09c98b66b5178ae10d3bab55d7351f55b290b"
+    },
+    {
+      "tag": "0094_user_subject_finance_permission",
+      "when": 1792627200003,
+      "sha256": "49998a377ce26c052fcf47928dc11635f18b4a559860c42f4fb588c179cc3459"
+    },
+    {
+      "tag": "0095_approval_final_payload",
+      "when": 1792627200004,
+      "sha256": "58a308d65baf6ab2678a85f295d2d621bdd092ec23f0940c1b4ce036b046a332"
+    },
+    {
+      "tag": "0096_membership_deposit_allowance",
+      "when": 1792713600000,
+      "sha256": "8712d5dc96cf08f7a5b3a84bf354ee5bf9539d10907e612806ebd78221991a8e"
+    },
+    {
+      "tag": "0097_joinpay_collection_core",
+      "when": 1792877354027,
+      "sha256": "94db09092e4a67e24ec5fe1bcf85362564c5597818078e220081a4f468416496"
+    },
+    {
+      "tag": "0098_joinpay_rental_refund",
+      "when": 1792877354028,
+      "sha256": "331dfea4212796dd4abbaa7c435a2a0a2384eecae051f2fa0e1c7ec7c9a2b40c"
+    },
+    {
+      "tag": "0099_joinpay_native_payout",
+      "when": 1792877354029,
+      "sha256": "dfbb080cde5d8ed33df33f27f3c0f40a9454e5c58077cd229ce72193c2ed3ef4"
+    },
+    {
+      "tag": "0100_joinpay_merchant_accounts",
+      "when": 1792877354030,
+      "sha256": "398d0f5789fdce9a069c055ef1b63e4347632f8ecf3251c90b368d8a25f176ab"
+    },
+    {
+      "tag": "0101_withdrawal_bank_binding",
+      "when": 1792925740528,
+      "sha256": "310c9cffcff8c850a1255bfdd77cb8ef2461e4439f0c5e8ed81822f5bfaf3c48"
+    },
+    {
+      "tag": "0102_supply_pricing_compat_optional_max",
+      "when": 1792925800528,
+      "sha256": "519e4843227267860034b454010fa750e48ea2c4d422f51d103f2d453b9de2ff"
+    },
+    {
+      "tag": "0103_user_account_freeze",
+      "when": 1793170000000,
+      "sha256": "35b1ab9873cf165d13f713fd1275eaec786881d00992600167bc699a361005e6"
+    },
+    {
+      "tag": "0104_finance_withdrawal_query_permission",
+      "when": 1793170060000,
+      "sha256": "8aabf2213b180f8808123be2f2e3fb45f0c1589f145704a9e709a156b9a6f6e3"
+    },
+    {
+      "tag": "0105_identity_display_source",
+      "when": 1793170120000,
+      "sha256": "79e87fb9ec32eb80d6dc29bdef9b348edd87dab495d018d865c9eace16cb609e"
+    },
+    {
+      "tag": "0106_joinpay_abnormal_refund_basis",
+      "when": 1793170180000,
+      "sha256": "eb2cda717a1fcb2a5f234426352c2ca59651a30a5af87b91b1f59f95a4a1b529"
+    },
+    {
+      "tag": "0107_prestart_termination",
+      "when": 1793170240000,
+      "sha256": "b3e949a65dee31b0d260a8bbb6900b02fb4d31deb734358657f6b78418b8cc56"
+    },
+    {
+      "tag": "0108_legacy_finance_source_proof",
+      "when": 1793170300000,
+      "sha256": "36a5e25c0749609798d6d73df2548d77ed248956298fb7b8ca1884222ecf7eff"
+    },
+    {
+      "tag": "0109_content_management",
+      "when": 1793183880000,
+      "sha256": "d9620735b56c7dc63f000290d42b19761eb6f08f949d06e548fec4499fd00981"
+    },
+    {
+      "tag": "0110_content_draft_history_shape",
+      "when": 1793183940000,
+      "sha256": "59413870b9647510e893f3533706ff1e58ffb6232ecb318924b61ee303dbf11b"
+    },
+    {
+      "tag": "0111_platform_updates",
+      "when": 1793184000000,
+      "sha256": "99c1cd0acad4223fc9bcceacc4cb8348cfb452984ea5af091837a14fa55501f1"
+    },
+    {
+      "tag": "0112_legal_documents",
+      "when": 1793184001000,
+      "sha256": "f226e87a7589fb42aeb353893fad0ebd7cee00cdf6bd8330b4a98eb592010b90"
+    },
+    {
+      "tag": "0113_admin_permission_finance_phone_seed",
+      "when": 1793184002000,
+      "sha256": "98000f2ac58fd4282cbdb8702e8697c90efb97f0bee590418553775d91dbf996"
+    },
+    {
+      "tag": "0114_admin_role_preset_grants",
+      "when": 1793184003000,
+      "sha256": "345de7b31dce0c2d72273e7a9e14f1e969e8f0e9ffb0b295ccc5f391f33a2409"
+    },
+    {
+      "tag": "0115_admin_login_two_factor_preference",
+      "when": 1793184004000,
+      "sha256": "e3826759de3d6e72b15f752c44729ab9b0dd4963e8d5bb3a04dac6fe7c048b82"
+    },
+    {
+      "tag": "0116_admin_auth_throttle",
+      "when": 1793184005000,
+      "sha256": "d662e3a03def3b7e9f068cafa72f1f1cfe2ce5b351c603acf8d46c26139e3b82"
+    },
+    {
+      "tag": "0117_approval_default_templates",
+      "when": 1793184006000,
+      "sha256": "b2ba5cc5daa811933ce005df7376638f1a20b84fbdfc8402c81daa626b86f730"
+    },
+    {
+      "tag": "0118_ops_preset_account_admin",
+      "when": 1793184007000,
+      "sha256": "b072df64eae7c932894772546fd87b5afdbe5ecdcbd9c78dbdbdfec71b210a5c"
+    },
+    {
+      "tag": "0119_admin_session_last_active",
+      "when": 1793184008000,
+      "sha256": "07646c5fb6698bae9183366ab1d220271ff5acd0d08dbfcefc43844736874eaf"
+    },
+    {
+      "tag": "0120_admin_audit_noise_retention",
+      "when": 1793184009000,
+      "sha256": "1661fa6e49c1c392053c29e6b0a7ebadeb237891f53454e52c8162fe7fa262c4"
+    },
+    {
+      "tag": "0121_distribution_uniform_policy_basis",
+      "when": 1793184010000,
+      "sha256": "2754b72c117b58200dc968fd59820feb20a7181edf32e0eacdb81f486a8e7d0b"
+    },
+    {
+      "tag": "0122_distribution_native_earning_scope",
+      "when": 1793184011000,
+      "sha256": "89de9d65643e62c317ab8f1fbc6748a89356fccc9dffcdf1dbe62dd40b7c6c01"
+    },
+    {
+      "tag": "0123_distribution_participant_contract",
+      "when": 1793184012000,
+      "sha256": "0f3576625cc0bb42574ed3d3235804e9c8b072c30d9e8d95d6763fb14bd0beac"
+    },
+    {
+      "tag": "0124_profile_avatars",
+      "when": 1793184013000,
+      "sha256": "652d459413fd43cf3bd2b50d58d5c5707ec73acd0dddc0ffc06a79682f0a4aec"
+    },
+    {
+      "tag": "0125_im_support_management",
+      "when": 1793184013001,
+      "sha256": "a35ddf6aab7100349c283f16f328296206a617f8b34f0ad0cdfef0321da86aba"
+    },
+    {
+      "tag": "0126_ops_support_management_grants",
+      "when": 1793184013002,
+      "sha256": "3423ad5a7e24693e308f492bf429dd49e8394d691c4c5f4bd60aea3811e9f80a"
+    },
+    {
+      "tag": "0127_im_order_stage_card",
+      "when": 1793184013003,
+      "sha256": "70c72a74cb6b4cfc38e816ca6802137a8ff4582b9e158e9a01b894b55bf2a6f1"
+    },
+    {
+      "tag": "0128_im_order_due_reminder",
+      "when": 1793184013004,
+      "sha256": "2623b79d70ea9b65442618e088a43d456c8d741bcbe5ef967d633b54931daf7c"
+    },
+    {
+      "tag": "0129_manual_close",
+      "when": 1793184013005,
+      "sha256": "0b621aeca9cb3d5f21602a3ab3e5440f7a4c3368f8bf344aa2ba50d88d4ec6ef"
+    },
+    {
+      "tag": "0130_im_support_thread",
+      "when": 1793184013006,
+      "sha256": "edbd5a6501ada60ca660c755756388bf2c77f875f1c6f7ebf6b979bd0a1a0061"
+    },
+    {
+      "tag": "0131_im_round_rating",
+      "when": 1793184013007,
+      "sha256": "e8fc4b5db40bc23b963f6e7c62682dde907b7b70186b906f53614461c2ea9039"
+    },
+    {
+      "tag": "0132_im_message_state",
+      "when": 1793184013008,
+      "sha256": "d9fa5017c1e778340530a032b51c55b3b0cd5bb2df20585f19bf0288c563ad11"
+    },
+    {
+      "tag": "0133_im_waiting_assignment",
+      "when": 1793184013009,
+      "sha256": "26376562bb8a38948063dde5f67e092289bad5a27a1bbe2a2b3f83c93db7df61"
+    },
+    {
+      "tag": "0134_support_cancel",
+      "when": 1793184013010,
+      "sha256": "8f90992659c5e1532db8caa86ae26330765ad686978458e4235a419bf5b9db9d"
+    },
+    {
+      "tag": "0135_im_conversation_activity",
+      "when": 1793184013011,
+      "sha256": "c6eb98c8ad00b908a76e1288ae95968c0c8d680ba5701ce08b8f9ebd1c544162"
+    },
+    {
+      "tag": "0136_im_order_unread",
+      "when": 1793184013012,
+      "sha256": "39804a0aa8a3eecbdba1e28cccbde389cef83b8557074f9f3802b16d61b555a5"
+    },
+    {
+      "tag": "0137_opening_confirmation",
+      "when": 1793184013013,
+      "sha256": "4ab90ebef1f5f4a6a0a36f2d1b1b7c345c3d1579749155080ef0fcdff7c38e42"
+    },
+    {
+      "tag": "0138_im_order_group_welcome",
+      "when": 1793184013014,
+      "sha256": "166e14199a6fd9125ad0be782d7173cafc8848f00e99a5373a5586e606c006d8"
+    },
+    {
+      "tag": "0139_im_support_settings",
+      "when": 1793184013015,
+      "sha256": "c957112ce3f20660df66bd0bcfd265e049b7439a4fd0371c0c1cce2f99cfa36b"
+    },
+    {
+      "tag": "0140_im_aftersale_record",
+      "when": 1793184013016,
+      "sha256": "e7775574be0ceba0a28ab1a35d9c0c60da1a3de4d2635316c44f2b6ca90b40e9"
+    },
+    {
+      "tag": "0141_im_read_copy",
+      "when": 1793184013017,
+      "sha256": "c8a7d1056d2f9fa0eb5850b34b6a84811ea134c63f4adc04fa7caf1f3bdf68db"
+    },
+    {
+      "tag": "0142_user_identity_subject",
+      "when": 1793566800000,
+      "sha256": "65f78056309067a4c235715e529b47004cd0f63f6474346977b98982827a7041"
+    },
+    {
+      "tag": "0143_native_origin_formal_resource",
+      "when": 1793566800001,
+      "sha256": "82b1294852b621d3ded686eb8e1058326264ca834bddb2a75f7ba7ec0abd013e"
+    },
+    {
+      "tag": "0144_native_identity_profile",
+      "when": 1793566800002,
+      "sha256": "64abf2c4146861f8f616c237910a44f45178066da8548935d6a1965cbe1a4513"
+    },
+    {
+      "tag": "0145_identity_verification_attempt",
+      "when": 1793566800003,
+      "sha256": "968fc7da7eb6d73f0bad6cb15cf0a222e5d7e1e3b40d4db257a1626f2b90d04f"
+    },
+    {
+      "tag": "0146_audit_event_object_lookup",
+      "when": 1793566800004,
+      "sha256": "62dbcfdb67875467e1ff412c992de347cd1004f9e2e28def21cb3b623c0c9031"
+    },
+    {
+      "tag": "0147_controlled_regression_finance",
+      "when": 1793566801004,
+      "sha256": "58cf64a5c1492532f18b8ed44c8eb1c8292eeac9da9bc670cf2400cf03ed6085"
+    },
+    {
+      "tag": "0148_distribution_dashboard_permission",
+      "when": 1793566801005,
+      "sha256": "f747c84bee22e0441022e40f28e85049b8fe99e469eab9c0aa4ecccda6ac5949"
+    },
+    {
+      "tag": "0149_local_financial_sandbox",
+      "when": 1793666651095,
+      "sha256": "7ab8d69b97c16e68dc5f056d50d8b6b3bc923740b5f4467de4f1fcf5be55884b"
+    },
+    {
+      "tag": "0150_membership_growth_read_admission",
+      "when": 1793667810814,
+      "sha256": "326fefa05f5df56e1a9d42eb2dbc6169c4b8809e718ed7e3c67f3288e1a657d9"
+    },
+    {
+      "tag": "0151_profile_avatar_policy",
+      "when": 1793681783926,
+      "sha256": "4c8a3ccb9ed3a1b1ad532cade0f33c1280332d99ea53ccb3a47bb8efcf78a6b7"
+    }
+  ],
+  "parts": [
+    {
+      "file": "01-structure.sql",
+      "sha256": "584f91c3e95bbdc2dd593fa1d2197ec3ecf5b9b3bfdeae77b555b439988568d4"
+    },
+    {
+      "file": "02-required-data.sql",
+      "sha256": "e22362d731baaddc43305a8633435454316319933d58b53efd0f362d181be43e"
+    },
+    {
+      "file": "03-constraints-triggers.sql",
+      "sha256": "b21088f934a800842187a491a32aeafc6fac1c988e72b0319f78db117064b845"
+    },
+    {
+      "file": "04-public-privileges.sql",
+      "sha256": "13ef164f38c6739c9b34d2cc80b6cd3ec5a8d7f4b0f4f6e767917c9d826dcb8b"
+    }
+  ],
+  "documents": [
+    {
+      "file": "README.md",
+      "sha256": "a5aeb401a0d6e6e5391ca03f8ef44fa2178ef3eedd5af8024bc189545d99e081"
+    },
+    {
+      "file": "NAVIGATION.md",
+      "sha256": "927dbefdd28ae67b92c4a2a878a84043f5822585fb619f839558b29536c07a7a"
+    }
+  ],
+  "seedCounts": [
+    {
+      "table": "zzsh_iam.admin_permission",
+      "count": 84
+    },
+    {
+      "table": "zzsh_iam.admin_role",
+      "count": 2
+    },
+    {
+      "table": "zzsh_iam.admin_role_permission",
+      "count": 86
+    },
+    {
+      "table": "zzsh_iam.approval_template",
+      "count": 6
+    },
+    {
+      "table": "zzsh_supply.profile_avatar_policy",
+      "count": 1
+    }
+  ],
+  "notes": "仅新装基线；原canonical SQL/journal保持升级历史。中文注释不改对象和函数体；新增COMMENT须先纳入canonical。runtime权限由applyRuntimePrivileges安装。"
+}

@@ -9,12 +9,12 @@ const require = createRequire(import.meta.url);
 const { Client } = require('pg');
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const SCHEMAS = ['zzsh_iam', 'zzsh_auth_user', 'zzsh_auth_admin', 'zzsh_supply', 'zzsh_content', 'zzsh_order', 'zzsh_credit'];
-const SEEDS = new Set(['zzsh_iam.admin_permission', 'zzsh_iam.admin_role', 'zzsh_iam.admin_role_permission', 'zzsh_iam.approval_template']);
+const SEEDS = new Set(['zzsh_iam.admin_permission', 'zzsh_iam.admin_role', 'zzsh_iam.admin_role_permission', 'zzsh_iam.approval_template', 'zzsh_supply.profile_avatar_policy']);
 const sha = b => createHash('sha256').update(b).digest('hex');
 const args = process.argv.slice(2);
 const opt = n => { const i = args.indexOf(n); return i < 0 ? null : args[i + 1]; };
 if (!args.includes('--execute')) {
-    console.log(JSON.stringify({ action: 'PLAN', database: 'zzsh_test_regression', required: ['--execute', '--oid', '--baseline <new-release-name>', '--source-count <frozen-canonical-count>', 'DB_PASSWORD_FILE'], writes: 'new, exclusive migrations/initial baseline only; no database writes or replacement of release_0141', pgConnections: 0, privateReads: 0 }));
+    console.log(JSON.stringify({ action: 'PLAN', database: 'zzsh_test_regression', required: ['--execute', '--oid', '--baseline <new-release-name>', '--source-count <frozen-canonical-count>', 'ZZSH_REGRESSION_RUN', 'DB_PASSWORD_FILE'], writes: 'new, exclusive migrations/initial baseline only; no database writes or replacement of release_0141', pgConnections: 0, privateReads: 0 }));
     process.exit(0);
 }
 if (process.version !== 'v24.20.0')
@@ -27,6 +27,8 @@ if (!/^release_[a-zA-Z0-9_]{1,60}$/.test(baseline ?? '')) throw Error('NEW_BASEL
 if (!Number.isSafeInteger(sourceCount) || sourceCount < 1) throw Error('FROZEN_SOURCE_COUNT_REQUIRED');
 const target = join(ROOT, 'apps/api/migrations/initial', baseline);
 if (existsSync(target)) throw Error('INITIAL_OUTPUT_ALREADY_EXISTS');
+const expectedNonce = process.env.ZZSH_REGRESSION_RUN;
+if (!/^[a-z0-9_]{12,40}$/.test(expectedNonce ?? '')) throw Error('REGRESSION_NONCE_REQUIRED');
 const passwordFile = process.env.DB_PASSWORD_FILE;
 if (!passwordFile)
     throw Error('DB_PASSWORD_FILE_REQUIRED');
@@ -42,8 +44,8 @@ try {
     await c.connect();
     await c.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
     begun = true;
-    const id = (await c.query("SELECT d.oid::text,pg_get_userbyid(d.datdba) owner,shobj_description(d.oid,'pg_database') marker FROM pg_database d WHERE datname=current_database()")).rows[0];
-    if (id.oid !== expectedOid || id.owner !== 'zzsh' || id.marker !== 'zzsh:regression-test:v1')
+    const id = (await c.query("SELECT d.oid::text,pg_get_userbyid(d.datdba) owner,shobj_description(d.oid,'pg_database') marker,current_setting('zzsh.regression_run',true) nonce FROM pg_database d WHERE datname=current_database()")).rows[0];
+    if (id.oid !== expectedOid || id.owner !== 'zzsh' || id.marker !== 'zzsh:regression-test:v1' || id.nonce !== expectedNonce)
         throw Error('REGRESSION_IDENTITY_MISMATCH');
     const journal = JSON.parse(readFileSync(join(ROOT, 'apps/api/migrations/business/meta/_journal.json')));
     if (journal.entries.length < sourceCount)
@@ -60,6 +62,11 @@ try {
             throw Error('BUSINESS_DATA_MUST_NOT_ENTER_INITIAL:' + t.schema + '.' + t.name);
         if (n)
             seedCounts.push({ table: t.schema + '.' + t.name, count: n });
+    }
+    if (tables.some(t => t.schema === 'zzsh_supply' && t.name === 'profile_avatar_policy')) {
+      const policy = (await c.query('SELECT singleton,requires_review,revision::text,updated_by_admin_id FROM zzsh_supply.profile_avatar_policy')).rows;
+      if (policy.length !== 1 || policy[0].singleton !== true || policy[0].requires_review !== true || policy[0].revision !== '1' || policy[0].updated_by_admin_id !== null)
+        throw Error('AVATAR_POLICY_MUST_BE_CANONICAL_DEFAULT');
     }
     const snapshot = (await c.query('SELECT pg_export_snapshot() id')).rows[0].id;
     function dump(extra) { const r = spawnSync('docker', ['exec', '--env', 'PGPASSWORD', 'zzsh-rebuild-local-postgres-1', 'pg_dump', '-h', '127.0.0.1', '-U', 'zzsh', '-d', 'zzsh_test_regression', '--snapshot=' + snapshot, '--no-owner', ...SCHEMAS.map(s => '--schema=' + s), ...extra], { env: { ...process.env, PGPASSWORD: password }, encoding: 'utf8', timeout: 60000, maxBuffer: 20 * 1024 * 1024 }); if (r.status !== 0)
@@ -98,7 +105,7 @@ UNION ALL SELECT 'TYPE',format('%I.%I',n.nspname,t.typname),a.privilege_type,a.i
     ];
     const sections = [
       ['01-structure.sql', '最终结构', 'schema、类型、表、序列与函数按原依赖顺序建立；不重排函数体或改变安全属性。', pre],
-      ['02-required-data.sql', '必要静态种子', '仅权限、内置角色、角色权限和审批模板；禁止导入用户、凭据、会话或交易数据。', data],
+      ['02-required-data.sql', '必要静态种子', '仅canonical权限、内置角色、角色权限、审批模板与头像审核默认单例；禁止导入用户、凭据、会话或交易数据。', data],
       ['03-constraints-triggers.sql', '约束、索引与触发器', '保留唯一性、外键、资金守卫、时序及不可变约束；不关闭触发器或放宽表达式。', post],
       ['04-public-privileges.sql', 'PUBLIC权限边界', '逐对象恢复已核PUBLIC语义；runtime窄权仍由统一applyRuntimePrivileges安装，不绑定本机角色。', acl],
     ].map(([file, title, purpose, sql]) => {
@@ -113,7 +120,7 @@ UNION ALL SELECT 'TYPE',format('%I.%I',n.nspname,t.typname),a.privilege_type,a.i
     ].map(([file, text]) => { writeFileSync(join(target, file), text, { flag: 'wx' }); return { file, sha256: sha(text) }; });
     const combined = sections.map(([, sql]) => sql).join('\n--> statement-breakpoint\n');
     const journalBytes = readFileSync(join(ROOT, 'apps/api/migrations/business/meta/_journal.json'));
-    const manifest = { format: 'zzsh.business-initial.v1', baseline, migrationTag: sourceChain.at(-1).tag.slice(0, 4) + '_initial_' + baseline, migrationHash: sha(combined), when: sourceChain.at(-1).when, sourceCount, journalSha256: sha(journalBytes), sourceChain, parts, documents, seedCounts, sourceDatabase: { oid: expectedOid, connectionRole: 'zzsh', schemaOwner: 'zzsh_regression_migration' }, notes: '仅新装基线；原canonical SQL/journal保持升级历史。中文注释不改对象和函数体；新增COMMENT须先纳入canonical。runtime权限由applyRuntimePrivileges安装。' };
+    const manifest = { format: 'zzsh.business-initial.v1', baseline, migrationTag: sourceChain.at(-1).tag.slice(0, 4) + '_initial_' + baseline, migrationHash: sha(combined), when: sourceChain.at(-1).when, sourceCount, journalSha256: sha(journalBytes), journalPrefixSha256: sha(JSON.stringify(journal.entries.slice(0, sourceCount))), sourceChain, parts, documents, seedCounts, notes: '仅新装基线；原canonical SQL/journal保持升级历史。中文注释不改对象和函数体；新增COMMENT须先纳入canonical。runtime权限由applyRuntimePrivileges安装。' };
     writeFileSync(join(target, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n', { flag: 'wx' });
     console.log(JSON.stringify({ status: 'INITIAL_GENERATED', sourceCount, baseline, parts: parts.length, seedCounts, migrationHash: manifest.migrationHash, bytes: Buffer.byteLength(combined) }));
     await c.query('ROLLBACK');
@@ -135,10 +142,10 @@ async function loadInitialNotes(client) {
   const columns = (await client.query(`SELECT n.nspname AS schema,c.relname AS "table",a.attname AS name,format_type(a.atttypid,a.atttypmod) AS type
     FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace
     WHERE n.nspname=ANY($1::text[]) AND c.relkind IN ('r','p') AND a.attnum>0 AND NOT a.attisdropped ORDER BY 1,2,a.attnum`, [SCHEMAS])).rows;
-  const constraints = (await client.query(`SELECT n.nspname AS schema,c.relname AS "table",co.contype,pg_get_constraintdef(co.oid) AS def
+  const constraints = (await client.query(`SELECT n.nspname AS schema,c.relname AS "table",co.conname AS name,co.contype,pg_get_constraintdef(co.oid) AS def
     FROM pg_constraint co JOIN pg_class c ON c.oid=co.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace
-    WHERE n.nspname=ANY($1::text[]) AND co.contype IN ('p','f')`, [SCHEMAS])).rows;
-  const functions = (await client.query(`SELECT n.nspname AS schema,p.proname AS name,pg_get_function_identity_arguments(p.oid) AS args,p.provolatile AS volatile,p.prosecdef AS definer
+    WHERE n.nspname=ANY($1::text[]) AND co.contype IN ('p','f','c') ORDER BY 1,2,co.conname`, [SCHEMAS])).rows;
+  const functions = (await client.query(`SELECT n.nspname AS schema,p.proname AS name,pg_get_function_identity_arguments(p.oid) AS args,pg_get_function_arguments(p.oid) AS "dumpArgs",p.provolatile AS volatile,p.prosecdef AS definer
     FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=ANY($1::text[]) ORDER BY 1,2,3`, [SCHEMAS])).rows;
   const triggers = (await client.query(`SELECT n.nspname AS schema,c.relname AS "table",t.tgname AS name,pn.nspname AS "functionSchema",p.proname AS "functionName"
     FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace
@@ -148,7 +155,7 @@ async function loadInitialNotes(client) {
   const tables = new Map();
   for (const column of columns) {
     const key = column.schema + '.' + column.table;
-    const table = tables.get(key) ?? { schema: column.schema, name: column.table, columns: [], primaryKey: [], foreignKeys: [] };
+    const table = tables.get(key) ?? { schema: column.schema, name: column.table, columns: [], primaryKey: [], foreignKeys: [], checks: [] };
     table.columns.push({ name: column.name, type: column.type });
     tables.set(key, table);
   }
@@ -157,6 +164,7 @@ async function loadInitialNotes(client) {
     if (!table) continue;
     if (constraint.contype === 'p') table.primaryKey = [...constraint.def.matchAll(/\(([^)]*)\)/g)].at(-1)?.[1].split(',').map(item => item.trim()) ?? [];
     if (constraint.contype === 'f') table.foreignKeys.push(constraint.def);
+    if (constraint.contype === 'c') table.checks.push({ name: constraint.name, def: constraint.def });
   }
   return { tables: [...tables.values()], functions, triggers, indexes };
 }

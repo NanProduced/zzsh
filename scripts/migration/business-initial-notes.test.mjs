@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { annotateDump, navigationMarkdown } from './business-initial-notes.mjs';
+import { readFileSync, readdirSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { annotateDump, commentForTable, navigationMarkdown } from './business-initial-notes.mjs';
 
 const notes = {
   tables: [{ schema: 'zzsh_order', name: 'rental_order', columns: [{ name: 'amount_cents', type: 'bigint' }, { name: 'status', type: 'text' }, { name: 'ratio', type: 'numeric' }], primaryKey: ['id'], foreignKeys: ['FOREIGN KEY (account_id) REFERENCES zzsh_supply.rental_account(id)'] }],
@@ -29,4 +32,42 @@ test('notes describe money, keys and guards without changing statements', () => 
   const navigation = navigationMarkdown('release_0151', notes, annotated);
   assert.match(navigation, /01-structure\.sql:\d+/);
   assert.match(navigation, /rental_order_pkey/);
+});
+
+test('annotation leaves dollar-quoted function bodies byte-for-byte unchanged', () => {
+  const body = ['    AS $body$', 'CREATE TABLE zzsh_order.rental_order (id text);', 'CREATE TRIGGER guard_row BEFORE UPDATE ON zzsh_order.rental_order EXECUTE FUNCTION zzsh_order.guard_wallet();', '$body$;'].join('\n');
+  const definition = 'CREATE FUNCTION zzsh_order.guard_wallet() RETURNS trigger\n' + body;
+  const annotated = annotateDump(definition, notes);
+  assert.equal(annotated.slice(annotated.indexOf('CREATE FUNCTION')), definition);
+});
+
+test('multiline catalog CHECK text remains line comments', () => {
+  const table = { ...notes.tables[0], checks:[{name:'multiline',def:"CHECK (status <> 'a\nb')"}] };
+  const comments = commentForTable(table).join('\n');
+  assert.match(comments,/CHECK multiline：CHECK \(status <> 'a\n-- b'\)/);
+  assert.ok(comments.split('\n').every(line=>line.startsWith('--')));
+});
+
+test('every canonical table has its own Chinese purpose rather than only a schema fallback', () => {
+  const folder = new URL('../../apps/api/migrations/business/', import.meta.url);
+  for (const file of readdirSync(folder).filter(file => file.endsWith('.sql'))) {
+    const sql = readFileSync(new URL(file, folder), 'utf8');
+    for (const match of sql.matchAll(/CREATE TABLE (?:IF NOT EXISTS )?([^\s(]+)/ig)) {
+      const [schema, name] = match[1].replaceAll('"', '').split('.');
+      const comment = commentForTable({ schema, name, columns: [], primaryKey: [], foreignKeys: [] })[0];
+      assert.doesNotMatch(comment, /当前业务行|身份、权限或审批对象|供给目录或出租账号对象|订单、履约或资金相邻对象|旧平台来源事实或只读快照/, `${schema}.${name}`);
+    }
+  }
+});
+
+test('navigation matches the complete table name and quoted auth names', () => {
+  const tables = ['rental_order', 'rental_order_extra'].map(name => ({ ...notes.tables[0], name }));
+  const navigation = navigationMarkdown('release_0151', { ...notes, tables }, 'CREATE TABLE zzsh_order.rental_order_extra (\n);\nCREATE TABLE zzsh_order.rental_order (');
+  assert.match(navigation, /### zzsh_order.rental_order\n[\s\S]*?最终定义：01-structure.sql:3/);
+});
+
+test('generation requires a fresh nonce before reading any secret or connecting', () => {
+  const env = { ...process.env, DB_PASSWORD_FILE: 'must-not-be-read' }; delete env.ZZSH_REGRESSION_RUN;
+  const result = spawnSync(process.execPath, [fileURLToPath(new URL('./build-business-initial.mjs', import.meta.url)), '--execute', '--oid', '1', '--baseline', 'release_nonce_negative', '--source-count', '152'], { env, encoding:'utf8', timeout:5000 });
+  assert.notEqual(result.status, 0); assert.match(result.stderr, /REGRESSION_NONCE_REQUIRED/); assert.doesNotMatch(result.stderr, /ENOENT|ECONN/);
 });

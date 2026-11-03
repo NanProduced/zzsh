@@ -64,7 +64,11 @@ export function prepareBusinessInitial(canonicalFolder: string, initialFolder: s
   }
   if (manifest.when !== manifest.sourceChain.at(-1)?.when) reject();
   const journalSha = (manifest as { journalSha256?: string }).journalSha256;
-  if (journalSha !== undefined && sha(readFileSync(join(canonicalFolder, "meta/_journal.json"))) !== journalSha) reject();
+  const prefixSha = (manifest as { journalPrefixSha256?: string }).journalPrefixSha256;
+  if (prefixSha !== undefined && sha(JSON.stringify(journal.entries.slice(0, manifest.sourceCount))) !== prefixSha) reject();
+  // Appended canonical entries change the journal bytes; the sealed sourceChain still verifies every covered SQL.
+  if (journalSha !== undefined && (!/^[a-f0-9]{64}$/.test(journalSha) || journal.entries.length === manifest.sourceCount
+    && sha(readFileSync(join(canonicalFolder, "meta/_journal.json"))) !== journalSha)) reject();
   const names = new Set<string>();
   const parts = manifest.parts.map((part) => {
     if (!leaf(part.file) || names.has(part.file)) reject();

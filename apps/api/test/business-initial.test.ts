@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readMigrationFiles } from "drizzle-orm/migrator";
 import { prepareBusinessInitial, readBusinessInitialRegistry, resolveBusinessInitialSelection, type BusinessInitialManifest } from "../src/database/business-initial";
+import { runBusinessMigrations } from "../src/database/business-migrations";
 const sha = (input: string) => createHash("sha256").update(input).digest("hex");
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "zzsh-initial-test-"));
@@ -68,6 +69,14 @@ test("an installed baseline stays on its own hash when a newer baseline is activ
   assert.equal(resolveBusinessInitialSelection(registry, { initialInstall: false }).kind, "canonical");
   assert.equal(resolveBusinessInitialSelection(registry, { initialInstall: true, installedHash: "canonical-hash" }).kind, "not-baseline");
 });
+
+test("initial refuses an occupied unregistered schema before DDL or ACL", async () => {
+  const queries: string[] = [];
+  const pool = { query: async (sql: string) => { queries.push(sql); return { rows: sql.includes('to_regclass') ? [{ present: false }] : [{ count: 1 }] }; },
+    connect: async () => { throw new Error('DDL_OR_ACL_REACHED'); } };
+  await assert.rejects(runBusinessMigrations(pool as any, { runtimeUser: 'runtime', initialInstall: true }), /BUSINESS_INITIAL_REQUIRES_EMPTY_DATABASE/);
+  assert.equal(queries.length, 2);
+});
 test("initial baseline is one distinct journal entry followed by unchanged future canonical SQL", () => {
   const f = fixture(); try {
     const prepared = prepareBusinessInitial(f.canonical, f.initial); try {
@@ -88,10 +97,28 @@ for (const [name, mutate] of [
   ["path traversal", (f: ReturnType<typeof fixture>) => { f.manifest.parts[0]!.file = "../outside.sql"; f.seal(); }],
   ["duplicate parts", (f: ReturnType<typeof fixture>) => { f.manifest.parts[1] = f.manifest.parts[0]!; f.seal(); }],
   ["missing source entry", (f: ReturnType<typeof fixture>) => { f.manifest.sourceChain.pop(); f.seal(); }],
-  ["changed journal bytes", (f: ReturnType<typeof fixture>) => { (f.manifest as BusinessInitialManifest & { journalSha256: string }).journalSha256 = "f".repeat(64); f.seal(); }],
+  ["changed journal bytes at the frozen checkpoint", (f: ReturnType<typeof fixture>) => { const file = join(f.canonical, "meta/_journal.json"); const journal = JSON.parse(readFileSync(file, "utf8")); journal.entries = journal.entries.slice(0, 2); writeFileSync(file, JSON.stringify(journal)); (f.manifest as BusinessInitialManifest & { journalSha256: string }).journalSha256 = "f".repeat(64); f.seal(); }],
   ["changed navigation document", (f: ReturnType<typeof fixture>) => { writeFileSync(join(f.initial, "NAVIGATION.md"), "changed\n"); (f.manifest as BusinessInitialManifest & { documents: { file: string; sha256: string }[] }).documents = [{ file: "NAVIGATION.md", sha256: "1".repeat(64) }]; f.seal(); }],
 ] as const) {
   test(`initial rejects ${name} before preparing migration SQL`, () => {
     const f = fixture(); try { mutate(f); assert.throws(() => prepareBusinessInitial(f.canonical, f.initial), /BUSINESS_INITIAL_MANIFEST_INVALID/); } finally { f.cleanup(); }
   });
 }
+
+test("a sealed full journal admits a later canonical tail without rewriting the baseline", () => {
+  const f = fixture(); try {
+    const file = join(f.canonical, "meta/_journal.json"), full = readFileSync(file, "utf8"), journal = JSON.parse(full);
+    journal.entries = journal.entries.slice(0, 2); writeFileSync(file, JSON.stringify(journal));
+    (f.manifest as BusinessInitialManifest & { journalSha256: string }).journalSha256 = sha(readFileSync(file, "utf8")); f.seal();
+    (f.manifest as BusinessInitialManifest & { journalPrefixSha256: string }).journalPrefixSha256 = sha(JSON.stringify(journal.entries)); f.seal();
+    const atCheckpoint = prepareBusinessInitial(f.canonical, f.initial); atCheckpoint.cleanup();
+    writeFileSync(file, full);
+    const upgraded = prepareBusinessInitial(f.canonical, f.initial); try {
+      const migrations = readMigrationFiles({ migrationsFolder: upgraded.folder });
+      assert.equal(migrations.length, 2); assert.equal(migrations[0]!.hash, f.manifest.migrationHash);
+      assert.equal(migrations[1]!.hash, sha("SELECT 2;"));
+    } finally { upgraded.cleanup(); }
+    const altered = JSON.parse(full); altered.entries[0].breakpoints = false; writeFileSync(file, JSON.stringify(altered));
+    assert.throws(() => prepareBusinessInitial(f.canonical, f.initial), /BUSINESS_INITIAL_MANIFEST_INVALID/);
+  } finally { f.cleanup(); }
+});
