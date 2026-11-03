@@ -2,8 +2,10 @@
 // binding, named reuse-only exceptions, the maintenance-database outer lock, an FK-closed shared
 // cleanup list, and the FND fixture marker preparation for the shared target.
 import { strict as assert } from "node:assert";
+import { createHash } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
+import { createContext, runInContext } from "node:vm";
 import test from "node:test";
 
 import type { Pool, PoolClient } from "pg";
@@ -31,16 +33,11 @@ import {
 } from "./database-test-support";
 import { loadFnd004TestConfig, prepareFndFixtureMarker } from "../src/database/reset";
 
-const SUITES = [
-  "database.test.ts",
-  "database-reset.test.ts",
-  "auth.test.ts",
-  "approval-audit.test.ts",
-  "supply-m3b.test.ts",
-  "content-foundation.test.ts",
-  "order-reservation.test.ts",
-  "user-directory.test.ts",
-];
+const REGISTERED_SUITES: unknown = JSON.parse(readFileSync(resolve(process.cwd(), "scripts/regression-suites.json"), "utf8"));
+assert.ok(Array.isArray(REGISTERED_SUITES) && REGISTERED_SUITES.length > 0 &&
+  new Set(REGISTERED_SUITES).size === REGISTERED_SUITES.length &&
+  REGISTERED_SUITES.every((suite) => typeof suite === "string" && /^[a-z][a-z0-9-]*$/.test(suite)), "valid regression registry required");
+const SUITES = (REGISTERED_SUITES as string[]).map((suite) => `${suite}.test.ts`);
 
 const admission: TestDatabaseAdmission = {
   exists: false,
@@ -235,7 +232,7 @@ test("no daily configuration grants the regression creation permission", () => {
 
 test("every shared-database suite resolves through the registry and keeps no private default", () => {
   for (const file of SUITES) {
-    const source = readFileSync(resolve(__dirname, "../../test", file), "utf8");
+    const source = readFileSync(resolve(process.cwd(), "test", file), "utf8");
     assert.match(source, /REGRESSION_DATABASE/, `${file} must reuse the regression database`);
     assert.match(source, /REGRESSION_ALLOW_NEW_RESOURCE/, `${file} must reuse the regression create permission`);
     assert.match(source, /databaseOid: \S+\.rows\[0\]\?\.databaseOid/, `${file} must read the database OID`);
@@ -246,13 +243,73 @@ test("every shared-database suite resolves through the registry and keeps no pri
     assert.doesNotMatch(source, /_TEST_DB_NAME\?|_TEST_MIGRATION_USER\?|_TEST_RUNTIME_USER\?/, `${file} must not accept a free database or role override`);
   }
   for (const file of ["auth.test.ts", "content-foundation.test.ts", "supply-m3b.test.ts", "order-reservation.test.ts", "user-directory.test.ts"]) {
-    assert.match(readFileSync(resolve(__dirname, "../../test", file), "utf8"), /registeredException\(/, `${file} must resolve exceptions through the registry`);
+    assert.match(readFileSync(resolve(process.cwd(), "test", file), "utf8"), /registeredException\(/, `${file} must resolve exceptions through the registry`);
   }
 });
 
 test("the regression suites are declared serial because they share one database", () => {
-  const pkg = JSON.parse(readFileSync(resolve(__dirname, "../../package.json"), "utf8")) as { scripts: Record<string, string> };
+  const pkg = JSON.parse(readFileSync(resolve(process.cwd(), "package.json"), "utf8")) as { scripts: Record<string, string> };
   const script = pkg.scripts["test:db:compiled"] ?? "";
   assert.ok(script.includes("scripts/run-regression-suites.mjs"), "the default database entry must use the controlled serial reset runner");
   assert.ok(script.includes("dist/test/database-safety.test.js"), "keep the original offline safety gate before any PostgreSQL suites");
+});
+
+test("serial runner receipts accept only the complete registered set in two successful rounds", () => {
+  const source = readFileSync(resolve(process.cwd(), "scripts/run-regression-suites.mjs"), "utf8");
+  // Run the real main body; replace only its imported fs/spawn boundaries before it can reset anything.
+  const body = source.replace(/^import[^\n]*\r?\n/gm, "").replace('new URL("./regression-suites.json", import.meta.url)', '"registry-fixture"');
+  const probe = (argv: string[] = [], options: { failAt?: number; resetFails?: boolean; mutate?: string } = {}) => {
+    let written: any;
+    const effects = { resets: 0, suites: 0, writes: 0 };
+    const fakeProcess = { argv: [process.execPath, "run-regression-suites.mjs", ...argv], env: { REGRESSION_RECEIPT_DIR: "/offline/receipts" }, execPath: process.execPath, cwd: () => "/offline/apps/api", exitCode: 0,
+      stderr: { write: () => {
+        if (options.mutate && effects.suites === runInContext("SUITES.length * 2", context)) runInContext(options.mutate, context);
+      } } };
+    const context = createContext({ createHash, resolve,
+      mkdirSync: () => undefined,
+      readFileSync: (file: string) => { if (file === "registry-fixture") return JSON.stringify(REGISTERED_SUITES); assert.ok(file.endsWith("fixture.js")); return "offline build fixture"; },
+      readdirSync: () => ["fixture.js"],
+      lstatSync: () => ({ isSymbolicLink: () => false, isDirectory: () => false }),
+      writeFileSync: (_file: string, text: string, flags: { flag: string }) => { assert.equal(flags.flag, "wx"); written = JSON.parse(text); effects.writes++; },
+      spawnSync: (command: string, args: string[], opts?: { env: Record<string, string> }) => {
+        if (command === "git") return { status: 0, stdout: "offline-head" };
+        if (args.includes("scripts/regression-reset.mjs")) {
+          effects.resets++;
+          return { status: options.resetFails ? 1 : 0, stdout: JSON.stringify({ reset: "READY", oid: "700100", nonce: "offline-regression-run" }) };
+        }
+        effects.suites++;
+        if (args.includes("--test")) { assert.equal(opts?.env.ZZSH_REGRESSION_DB_OID, "700100"); assert.equal(opts?.env.ZZSH_REGRESSION_RUN, "offline-regression-run"); }
+        return { status: effects.suites === options.failAt || args.includes("-e") ? 3 : 0, stdout: "offline suite result" };
+      }, process: fakeProcess, console: { log: () => undefined } });
+    runInContext(body, context, { timeout: 1000 });
+    assert.equal(effects.writes, 1);
+    return { receipt: written, registered: [...runInContext("SUITES", context)] as string[], effects, exitCode: fakeProcess.exitCode };
+  };
+  const full = probe();
+  assert.equal(full.receipt.fullSuiteAcceptance, true);
+  assert.equal(full.receipt.scope, "FULL_REGISTERED_TWO_ROUND");
+  assert.equal(full.effects.resets, full.registered.length * 2);
+  assert.equal(full.receipt.suiteCount, full.registered.length);
+  assert.ok(Number.isFinite(full.receipt.wallMs));
+  assert.ok(full.receipt.rounds.every((round: any) => Number.isFinite(round.wallMs) && round.suites.every((suite: any) =>
+    Number.isFinite(suite.resetWallMs) && Number.isFinite(suite.wallMs) && suite.wallMs === suite.ms)));
+  for (const round of full.receipt.rounds) assert.deepEqual(round.suites.map((s: { suite: string }) => s.suite), full.registered);
+  for (const suites of [full.registered, [...full.registered].reverse()]) {
+    const explicit = probe(["--suites", suites.join(",")]);
+    assert.equal(explicit.receipt.fullSuiteAcceptance, true);
+    assert.equal(explicit.receipt.scope, "FULL_REGISTERED_TWO_ROUND");
+  }
+  for (const result of [
+    probe(["--rounds", "1"]), probe(["--suites", full.registered[0]!]),
+    probe([], { failAt: 1 }), probe(["--continue"], { failAt: 1 }), probe([], { resetFails: true }),
+    probe([], { mutate: "receipt.rounds[0].suites.pop()" }),
+    probe([], { mutate: "receipt.rounds[0].suites[1] = receipt.rounds[0].suites[0]" }),
+    probe([], { mutate: "receipt.rounds.pop()" }), probe([], { mutate: "receipt.rounds[1].round = 1" }),
+    probe(["--suites", "__fail__"]),
+  ]) {
+    assert.equal(result.receipt.fullSuiteAcceptance, false);
+    assert.equal(result.receipt.scope, "TARGETED_DIAGNOSTIC");
+    assert.equal(result.exitCode, result.receipt.failed ? 1 : 0);
+  }
+  assert.throws(() => probe(["--suites", `${full.registered[0]},${full.registered[0]}`]), /unique registered suites/);
 });

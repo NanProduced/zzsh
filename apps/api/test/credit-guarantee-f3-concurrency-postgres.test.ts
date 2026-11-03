@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import test from "node:test";
 import { Pool, type PoolClient } from "pg";
 import {
@@ -12,7 +13,7 @@ import {
 } from "../src/credit/credit-guarantee";
 
 type Credentials = { host: string; port: number; database: string; oid: string; marker: string; runtime: { role: string; password: string } };
-const credentialPath = process.env.CREDIT_GUARANTEE_CREDENTIALS_FILE ?? "E:/zzsh/zzsh/apps/api/.secrets/local-postgresql/credit_guarantee/credentials.json";
+const credentialPath = process.env.CREDIT_GUARANTEE_CREDENTIALS_FILE ?? resolve(process.cwd(), ".secrets/local-postgresql/credit_guarantee/credentials.json");
 const enabled = process.env.CREDIT_GUARANTEE_CONCURRENCY_PG === "1";
 
 function loadCredentials(): Credentials {

@@ -1,0 +1,10 @@
+[
+  "database",
+  "database-reset",
+  "auth",
+  "approval-audit",
+  "supply-m3b",
+  "content-foundation",
+  "order-reservation",
+  "user-directory"
+]

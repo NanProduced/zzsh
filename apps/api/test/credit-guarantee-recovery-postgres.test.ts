@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import test from "node:test";
 import { Pool, type PoolClient } from "pg";
 
@@ -15,7 +16,7 @@ const DATABASE = "zzsh_test_credit_guarantee";
 const RUNTIME_ROLE = "zzsh_credit_guarantee_r";
 const OWNER_ROLE = "zzsh";
 const CREDENTIAL_FILE = process.env.CREDIT_GUARANTEE_CREDENTIALS_FILE
-  ?? "E:/zzsh/zzsh/apps/api/.secrets/local-postgresql/credit_guarantee/credentials.json";
+  ?? resolve(process.cwd(), ".secrets/local-postgresql/credit_guarantee/credentials.json");
 const BOSS_ID = "admin_80768cba2f044bce8c86c04442d8dd95";
 
 function hash(value: unknown): string {

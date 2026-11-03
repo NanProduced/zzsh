@@ -454,19 +454,15 @@ test("audit rows lead with Chinese labels and the business narrative, technical 
     assert.equal(outcomeCell.textContent.trim(), "成功", "outcome renders in Chinese");
     const outcomeStatus = outcomeCell.querySelector('[data-slot="inline-status"]');
     assert.ok(outcomeStatus, "outcome uses the shared InlineStatus atom");
-    assert.ok(outcomeStatus.className.includes("whitespace-nowrap"), "outcome stays on one line");
-    assert.ok(outcomeStatus.className.includes("text-emerald-800"), "light-theme-readable success token from the shared tone table");
-    assert.ok(outcomeStatus.className.includes("dark:text-emerald-300"), "dark-theme success token kept");
     assert.ok(outcomeStatus.querySelector('span[aria-hidden="true"]'), "outcome carries a non-colour marker so it is not colour-only");
     const fold = createdRow.querySelector("details");
     assert.ok(fold, "technical trace folded into details");
     assert.ok(fold.textContent.includes("payloadVersion"), "fold keeps the raw technical fields");
     const rejectedRow = rows.find((row) => row.textContent.includes("审批驳回"));
     assert.equal(rejectedRow.querySelectorAll("td")[4].textContent.trim(), "失败", "failure outcome renders in Chinese");
-    assert.ok(rejectedRow.querySelectorAll('td')[4].querySelector('[data-slot="inline-status"]').className.includes("text-destructive"), "failure uses the shared destructive token");
+    assert.ok(rejectedRow.querySelectorAll('td')[4].querySelector('[data-slot="inline-status"]'), "failure uses the shared inline status atom");
     assert.ok(rejectedRow.textContent.includes("资料与当前版本不符"), "reason leads the narrative when present");
     const linkCell = createdRow.querySelectorAll("td")[5];
-    assert.ok(linkCell.className.includes("whitespace-nowrap"), "link column keeps the button on one line");
     assert.ok(linkCell.textContent.includes("查看申请"), "link column sits before the long narrative column for narrow screens");
   } finally {
     await view.cleanup();

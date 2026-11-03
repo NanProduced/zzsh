@@ -37,7 +37,7 @@ const DATABASE = "zzsh_test_credit_guarantee";
 const RUNTIME_ROLE = "zzsh_credit_guarantee_r";
 const OWNER_ROLE = "zzsh";
 const CREDENTIAL_FILE = process.env.CREDIT_GUARANTEE_CREDENTIALS_FILE
-  ?? "E:/zzsh/zzsh/apps/api/.secrets/local-postgresql/credit_guarantee/credentials.json";
+  ?? resolve(process.cwd(), ".secrets/local-postgresql/credit_guarantee/credentials.json");
 
 type CookieJar = { values: Map<string, string>; update: (response: Response) => void; header: () => string };
 type Staff = {
@@ -109,7 +109,7 @@ function loadAdminProfile(path: string): AdminProfile {
   assert.equal(stableAuth.env.AUTH_API_ORIGIN, API_ORIGIN);
   assert.equal(stableAuth.env.AUTH_USER_ORIGIN, USER_ORIGIN);
   assert.equal(stableAuth.env.AUTH_ADMIN_ORIGIN, ADMIN_ORIGIN);
-  assert.equal(resolve(stableAuth.workingDirectory).toLowerCase(), resolve("E:/zzsh/zzsh/apps/api").toLowerCase());
+  assert.equal(resolve(stableAuth.workingDirectory).toLowerCase(), resolve(process.cwd()).toLowerCase());
   for (const binding of Object.values(stableAuth.bindings ?? {}) as Array<{ path: string; sha256: string }>) {
     const boundPath = isAbsolute(binding.path) ? binding.path : resolve(stableAuth.workingDirectory, binding.path);
     assert.equal(createHash("sha256").update(readFileSync(boundPath)).digest("hex"), binding.sha256.toLowerCase());

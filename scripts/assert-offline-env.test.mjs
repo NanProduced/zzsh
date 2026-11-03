@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 const guard = new URL("./assert-offline-env.mjs", import.meta.url).href;
 test("offline preload rejects inherited PG switches before importing a test body, without printing values", () => {
   const env = { ...process.env };
-  const keys = ["REAL_SOURCE_5_CREDENTIALS_FILE", "ADM_FINANCE_QUERY_PG", "ADMIN_READ_PG_CREDENTIALS"];
+  const keys = ["REAL_SOURCE_5_CREDENTIALS_FILE", "ADM_FINANCE_QUERY_PG", "ADMIN_FINANCE_PG", "ADMIN_READ_PG_CREDENTIALS"];
   for (const key of keys) delete env[key];
   const run = (extra) => spawnSync(process.execPath, ["--import", guard, "-e", "console.log('TEST_BODY_ENTERED')"], { env: { ...env, ...extra }, encoding: "utf8" });
   const clean = run({});
@@ -21,6 +21,7 @@ test("dedicated PG entries fail without their explicit opt-in, before compilatio
   const { scripts } = JSON.parse(await readFile(new URL("../apps/api/package.json", import.meta.url), "utf8"));
   const required = {
     "test:admin-finance:pg": { ADM_FINANCE_QUERY_PG: "admin_order_read" },
+    "test:admin-finance-filter:pg": { ADMIN_FINANCE_PG: "1", ADMIN_FINANCE_PG_DATABASE: "zzsh_test_regression", ZZSH_REGRESSION_DB_OID: "700100", ZZSH_REGRESSION_RUN: "synthetic_run_01" },
     "test:admin-supervision:pg": { ADMIN_READ_PG_CREDENTIALS: "fixture-path" },
     "test:legacy-observation:pg": { REAL_SOURCE_5_CREDENTIALS_FILE: "fixture-path" },
     "test:credit-guarantee:concurrency:pg": { CREDIT_GUARANTEE_CONCURRENCY_PG: "1" },
@@ -115,6 +116,14 @@ test("regression runner inventory reads literal suites and rejects unknown selec
     for (const args of [" --suites forged", " --suites auth,auth", " --rounds 3", " --continue", " --suites", " --rounds 1 --rounds 2"]) assert.deepEqual(read(args), []);
     for (const source of ['const SUITES = ["auth", "auth"];', 'const SUITES = ["../foreign"];', 'const SUITES = makeSuites();']) {
       await writeFile(file, source); assert.deepEqual(read(""), []);
+    }
+    await writeFile(file, 'const SUITES = ["ignored"]; throw new Error("must not execute");');
+    await writeFile(join(root, "scripts/regression-suites.json"), '["auth"]');
+    assert.deepEqual(read("")[0].files, ["dist/test/auth.test.js"]);
+    await writeFile(join(root, "scripts/regression-suites.json"), '["auth", "auth"]');
+    assert.deepEqual(read(""), []);
+    for (const invalid of ['["_private"]', '["Auth"]', '[false]']) {
+      await writeFile(join(root, "scripts/regression-suites.json"), invalid); assert.deepEqual(read(""), []);
     }
   } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -225,7 +234,7 @@ test("the 5 order PG helpers are helpers, not unregistered default suites", asyn
     assert.ok(row.importedBy.includes("order-reservation.test.ts"), `${name} imported by order-reservation`);
     assert.equal(row.defaultReachable, false, `${name} is not in check:offline`);
     assert.equal(row.checkReachable, true, `${name} is in the additional root check DB entry`);
-    assert.deepEqual(row.reachedFrom, ["@zzsh/api:test:db:compiled", "@zzsh/api:test:db:rounds"], name);
+    assert.deepEqual(row.reachedFrom, ["@zzsh/api:test:db:compiled", "@zzsh/api:test:db:rounds", "@zzsh/api:test:db:once"], name);
   }
   // The real repository has no unregistered executable suite.
   assert.deepEqual(findUnregistered(rows).map(r => `${r.workspace}:${r.file}`), []);

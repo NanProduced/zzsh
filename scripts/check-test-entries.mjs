@@ -96,12 +96,19 @@ function parseScript(script, packageDir) {
       const nodeArgs = args.filter(arg => !arg.startsWith("--env-file-if-exists="));
       if (nodeArgs[0] === "scripts/run-regression-suites.mjs") {
         try {
-          const tree = parseSource(readFileSync(join(packageDir, nodeArgs[0]), "utf8"));
-          const list = tree.statements.filter(ts.isVariableStatement).flatMap(s => [...s.declarationList.declarations])
-            .find(d => ts.isIdentifier(d.name) && d.name.text === "SUITES")?.initializer;
-          if (tree.parseDiagnostics.length || !list || !ts.isArrayLiteralExpression(list) || !list.elements.length ||
-              list.elements.some(e => !ts.isStringLiteral(e) || !/^[\w-]+$/.test(e.text))) throw new Error("invalid suites");
-          const registered = list.elements.map(e => e.text);
+          const registry = join(packageDir, "scripts/regression-suites.json");
+          let registered;
+          if (existsSync(registry)) {
+            registered = JSON.parse(readFileSync(registry, "utf8"));
+          } else {
+            const tree = parseSource(readFileSync(join(packageDir, nodeArgs[0]), "utf8"));
+            const list = tree.statements.filter(ts.isVariableStatement).flatMap(s => [...s.declarationList.declarations])
+              .find(d => ts.isIdentifier(d.name) && d.name.text === "SUITES")?.initializer;
+            if (tree.parseDiagnostics.length || !list || !ts.isArrayLiteralExpression(list) || !list.elements.length ||
+                list.elements.some(e => !ts.isStringLiteral(e) || !/^[\w-]+$/.test(e.text))) throw new Error("invalid suites");
+            registered = list.elements.map(e => e.text);
+          }
+          if (!Array.isArray(registered) || !registered.length || registered.some(s => typeof s !== "string" || !/^[a-z][a-z0-9-]*$/.test(s))) throw new Error("invalid suites");
           if (new Set(registered).size !== registered.length) throw new Error("duplicate suites");
           let selected = registered;
           const seen = new Set();

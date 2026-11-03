@@ -12,7 +12,9 @@
 
 ## 命名与复用
 
-回归/迁移/清理类测试的默认入口只有一个资源组，写在 `apps/api/src/config/test-resource.ts`：库 `zzsh_test_regression`、marker `zzsh:regression-test:v1`、角色 `zzsh_regression_migration`/`zzsh_regression_runtime`、advisory lock `806006`、创建许可 `REGRESSION_TEST_ALLOW_NEW_RESOURCE`。九个 compiled PostgreSQL 套件（`database`、`database-reset`、`auth`、`approval-audit`、`admin-workspace-layout`、`supply-m3b`、`content-foundation`、`order-reservation`、`user-directory`）全部从这里取值，不再各自持有默认库名、marker、锁和许可；实际解析出的库名/角色/marker/锁/OID 由 `test/regression-resource.test.ts` 离线守卫，任何套件重新引入私有默认名、自由库名/角色覆盖或私有许可都会失败。`npm run test:db` 先跑 database-safety，再由 `scripts/run-regression-suites.mjs` 串行复位并运行九个套件；runner 自己从受控复位取得并绑定 OID/nonce，覆盖准备、迁移、断言与清理全程。
+回归/迁移/清理类测试的默认入口只有一个资源组，写在 `apps/api/src/config/test-resource.ts`：库 `zzsh_test_regression`、marker `zzsh:regression-test:v1`、角色 `zzsh_regression_migration`/`zzsh_regression_runtime`、advisory lock `806006`、创建许可 `REGRESSION_TEST_ALLOW_NEW_RESOURCE`。当前8个 compiled PostgreSQL 套件（`database`、`database-reset`、`auth`、`approval-audit`、`supply-m3b`、`content-foundation`、`order-reservation`、`user-directory`，以`apps/api/scripts/regression-suites.json`登记为准）全部从这里取值，不再各自持有默认库名、marker、锁和许可；实际解析出的库名/角色/marker/锁/OID 由 `test/regression-resource.test.ts` 离线守卫，任何套件重新引入私有默认名、自由库名/角色覆盖或私有许可都会失败。`npm run test:db` 先跑 database-safety，再由 `scripts/run-regression-suites.mjs` 串行复位并运行登记套件；runner 自己从受控复位取得并绑定 OID/nonce，覆盖准备、迁移、断言与清理全程。
+
+只有实际登记全集在两轮中每项恰一次且全部成功，回执才记`fullSuiteAcceptance:true`及`FULL_REGISTERED_TWO_ROUND`；显式`--suites`列满或重排全集适用同一判定。子集、单轮、缺漏、重复或失败均为`TARGETED_DIAGNOSTIC`。旧回执中的`FULL_NINE_TWO_ROUND`保留历史原值，不改写为当前登记结果。
 
 `806006` 必须取在维护库 `postgres` 的同一会话上：advisory lock 按数据库隔离，锁在测试库里即使号码相同也不会排斥另一个进程。该外层锁从任何建库/改角色密码之前开始，一直持到清理和连接收尾；FND 的 `804004` lease 只是内层锁，不代替外层互斥。
 
@@ -45,7 +47,7 @@
 
 | 测试入口 | 首次创建开关 |
 |---|---|
-| 九个 compiled PostgreSQL 套件的默认目标（`zzsh_test_regression`） | `REGRESSION_TEST_ALLOW_NEW_RESOURCE` |
+| 当前登记 compiled PostgreSQL 套件的默认目标（`zzsh_test_regression`） | `REGRESSION_TEST_ALLOW_NEW_RESOURCE` |
 | 上述套件的历史 `*_TEST_RESOURCE_SET` 入口 | 已退出，不可复用或创建；历史材料仅作冷恢复证据，重新验证使用回归组 |
 | im-postgres（IM 线自有资源，不并入回归组） | `IM_TEST_ALLOW_NEW_RESOURCE` |
 
@@ -53,7 +55,7 @@
 
 共用 `admitTestDatabase` 校验已有库的 owner、marker、可连接与非模板属性；历史无标记 fixture 必须实读为 `null`，未读取不能代替无标记。既有角色、对象和锁校验继续执行。创建开关仅用于明确批准的准备过程，不长期写入日常配置。
 
-九套件通过 runner 在每套开始前复位同一个回归库，并核对本次 OID/nonce；不在已安装的业务表上绕过不可变保护做全表清理。失败时保留现场并退出，显式选择继续后才进入下一次复位。历史例外只允许读取或按其原合同复验，不自动进入回归库的复位流程。
+登记套件通过 runner 在每套开始前复位同一个回归库，并核对本次 OID/nonce；不在已安装的业务表上绕过不可变保护做全表清理。失败时保留现场并退出，显式选择继续后才进入下一次复位。历史例外只允许读取或按其原合同复验，不自动进入回归库的复位流程。
 
 ## 登记是使用前提
 
