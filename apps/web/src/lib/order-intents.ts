@@ -12,6 +12,7 @@ export type IntentKind =
   | "order.create.v2"
   | "order.payment"
   | "order.channel-payment"
+  | "order.local-checkout"
   | "order.cancel"
   | "order.prestart.request"
   | "opening.confirm"

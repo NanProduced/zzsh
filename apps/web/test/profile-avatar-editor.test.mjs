@@ -12,6 +12,30 @@ async function file(p){await p.click('上传图片');const oldCreate=URL.createO
 // Crop bytes are a boundary fixture here; actual canvas/zoom/pixel output is checked in Chromium.
 const cropBoundary={AvatarCropper:({file,onConfirm,onCancel})=>createElement('div',{'aria-label':'裁剪头像'},createElement('button',{type:'button',onClick:()=>onConfirm(file)},'完成裁剪'),createElement('button',{type:'button',onClick:onCancel},'返回选择'))};
 const mount=(overrides,props={})=>mountAuthComponent('apps/web/src/components/account/avatar-edit.tsx','AvatarEditEntry',{userId:'user_A',...props},{initialStatus:'authenticated',stubModules:{'@zzsh/ui/avatar-crop':cropBoundary,'@/lib/profile-avatar-client':{...api,readAvatarState:async()=>state(),...overrides}}});
+const policy=requiresReview=>({requiresReview,available:true,revision:'2'});
+const appliedState=(assetId='asset_policy')=>({...state('user_A','avatar-strike','3'),current:{kind:'CUSTOM',assetId,presetId:null,url:'/api/v1/profile/avatars/user/user_A/3',currentVersion:'3'},policy:policy(false),lastReview:{assetId,state:'APPROVED',reason:null,reviewedAt:'2026-11-03T00:00:00Z',applied:true,source:'SYSTEM_POLICY',policyRevision:'2'}});
+const uploadResult=(review,assetId='asset_policy')=>({assetId,avatarSubmission:{disposition:review?'PENDING_REVIEW':'APPLIED_BY_POLICY',requiresReview:review,approvalSource:review?'MANUAL_REVIEW_REQUIRED':'SYSTEM_POLICY',policyRevision:'2'}});
+
+test('policy-off upload only announces an update after the returned asset is current',async()=>{
+ let submitted=false;const p=await mount({readAvatarState:async()=>submitted?appliedState():{...state(),policy:policy(false)},createAvatarUploadIntent:async()=>({intentId:'new_intent',uploadToken:'memory_only'}),uploadAvatar:async()=>{submitted=true;return uploadResult(false)}});let restore=()=>{};
+ try{await p.click('更换头像');restore=await file(p);assert.match(p.host.textContent,/确认保存后生效/);await p.click('保存头像');assert.equal(p.host.querySelector('[role=dialog]'),null);assert.deepEqual(p.profileNotices,[{userId:'user_A',kind:'avatar'}])}finally{await p.close();restore()}
+});
+
+test('a policy toggle during upload follows the final result, not the earlier button label',async()=>{
+ for(const startedReview of [false,true]){let submitted=false;const after=startedReview?appliedState():{...state(),policy:policy(true),pending:{assetId:'asset_policy',submittedAt:null,reviewState:'PENDING',width:512,height:512,byteSize:'3'}};const p=await mount({readAvatarState:async()=>submitted?after:{...state(),policy:policy(startedReview)},createAvatarUploadIntent:async()=>({intentId:'new_intent',uploadToken:'memory_only'}),uploadAvatar:async()=>{submitted=true;return uploadResult(!startedReview)}});let restore=()=>{};
+  try{await p.click('更换头像');restore=await file(p);await p.click(startedReview?'上传并提交审核':'保存头像');if(startedReview){assert.equal(p.host.querySelector('[role=dialog]'),null);assert.equal(p.profileNotices.length,1)}else{assert.match(p.host.textContent,/已提交审核/);assert.match(p.host.textContent,/新头像审核中/);assert.equal(p.profileNotices.length,0);assert(p.host.querySelector('[role=dialog]'))}}finally{await p.close();restore()}
+ }
+});
+
+test('disabling review does not approve an existing pending avatar or mislabel a newer current selection',async()=>{
+ let writes=0,submitted=false;const oldPending={assetId:'asset_old_pending',submittedAt:null,reviewState:'PENDING',width:256,height:256,byteSize:'3'},p=await mount({readAvatarState:async()=>submitted?appliedState('asset_newer_device'):{...state(),policy:policy(false),pending:oldPending},createAvatarUploadIntent:async()=>({intentId:'new_intent',uploadToken:'memory_only'}),uploadAvatar:async()=>{writes++;submitted=true;return uploadResult(false)}});let restore=()=>{};
+ try{await p.click('更换头像');assert.match(p.host.textContent,/新头像审核中/);assert.equal(writes,0);restore=await file(p);await p.click('保存头像');assert.equal(writes,1);assert.equal(p.profileNotices.length,0);assert.match(p.host.textContent,/已读取当前头像状态/);assert(p.host.querySelector('[role=dialog]'))}finally{await p.close();restore()}
+});
+
+test('a successful upload with a failed follow-up read offers only state refresh, not another byte upload',async()=>{
+ let reads=0,writes=0;const p=await mount({readAvatarState:async()=>{reads++;if(reads===2)throw new Error('read unavailable');return reads>2?appliedState():{...state(),policy:policy(false)}},createAvatarUploadIntent:async()=>({intentId:'new_intent',uploadToken:'memory_only'}),uploadAvatar:async()=>{writes++;return uploadResult(false)}});let restore=()=>{};
+ try{await p.click('更换头像');restore=await file(p);await p.click('保存头像');assert.equal(writes,1);assert.equal(p.profileNotices.length,0);assert(p.findButton('重新读取头像状态'));assert.equal([...p.host.querySelectorAll('button')].some(b=>b.textContent==='重试上传'),false);await p.click('重新读取头像状态');assert.equal(writes,1)}finally{await p.close();restore()}
+});
 
 test('avatar picture itself is the named edit control, without a second text action',async()=>{
  const p=await mount({}, {children:createElement('span',{'data-hero-avatar':true},'头像画面')});

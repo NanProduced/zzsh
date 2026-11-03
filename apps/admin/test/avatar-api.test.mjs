@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { AdminAvatarError, parseAdminAvatarState, readAdminAvatarReviews, reviewAdminAvatar } from "../src/views/self-settings/avatar-api.ts";
+import { AdminAvatarError, parseAdminAvatarState, parseAdminAvatarUploadResult, readAdminAvatarReviews, reviewAdminAvatar } from "../src/views/self-settings/avatar-api.ts";
 
 const PRESETS = [
   { presetId: "avatar-strike", version: 1, url: "/api/v1/profile/avatars/presets/avatar-strike/1/content", width: 256, height: 256 },
@@ -18,6 +18,23 @@ const STATE = {
   pending: null,
   lastReview: { assetId: "asset_1", state: "APPROVED", reason: null, reviewedAt: "2026-11-01T00:00:00.000Z", applied: true },
 };
+
+test('admin avatar policy safely falls back to review and preserves system source without calling it human',()=>{
+ for(const policy of [undefined,null,{requiresReview:false,available:false,revision:'2'},{requiresReview:'false',available:true,revision:'2'},{requiresReview:false,available:true,revision:'0'}])assert.deepEqual(parseAdminAvatarState({...STATE,policy}).policy,{requiresReview:true,available:false,revision:'0'});
+ assert.equal(parseAdminAvatarState({...STATE,policy:{requiresReview:false,available:true,revision:'2'}}).policy.requiresReview,false);
+ const review=parseAdminAvatarState({...STATE,lastReview:{...STATE.lastReview,source:'SYSTEM_POLICY',policyRevision:'2'}}).lastReview;assert.equal(review.source,'SYSTEM_POLICY');assert.equal(review.policyRevision,'2');
+});
+
+test('admin upload receipt refuses a fake or unbound automatic approval',()=>{
+ const result={assetId:'asset_new',avatarSubmission:{disposition:'APPLIED_BY_POLICY',requiresReview:false,policyRevision:'2',approvalSource:'SYSTEM_POLICY'}};
+ assert.equal(parseAdminAvatarUploadResult(result).avatarSubmission.disposition,'APPLIED_BY_POLICY');assert.equal(parseAdminAvatarUploadResult({assetId:'legacy_asset'}).avatarSubmission,null);
+ for(const bad of [{...result,assetId:null},{...result,avatarSubmission:{...result.avatarSubmission,requiresReview:true}},{...result,avatarSubmission:{...result.avatarSubmission,approvalSource:'HUMAN_REVIEW'}},{...result,avatarSubmission:{...result.avatarSubmission,policyRevision:'0'}}])assert.throws(()=>parseAdminAvatarUploadResult(bad),AdminAvatarError);
+});
+
+test('review queue keeps only known approval sources and a real policy revision',async()=>{
+ const old=globalThis.fetch;globalThis.fetch=async()=>Response.json({items:[{assetId:'asset_system',mime:'image/webp',reviewState:'APPROVED',width:512,height:512,byteSize:'1200',realm:'user',subjectId:'user_A',submittedAt:'2026-11-03T00:00:00Z',revision:'2',approvalSource:'SYSTEM_POLICY',policyRevision:'2'},{assetId:'asset_unknown',mime:'image/webp',reviewState:'APPROVED',width:512,height:512,byteSize:'1200',realm:'user',subjectId:'user_A',submittedAt:'2026-11-03T00:00:00Z',revision:'2',approvalSource:'mystery',policyRevision:'unknown'}],nextCursor:null});
+ try{const result=await readAdminAvatarReviews('APPROVED',null);assert.equal(result.items[0].approvalSource,'SYSTEM_POLICY');assert.equal(result.items[0].policyRevision,'2');assert.equal(result.items[1].approvalSource,undefined);assert.equal(result.items[1].policyRevision,null)}finally{globalThis.fetch=old}
+});
 
 test("admin avatar state parsing keeps the current custom avatar and review result distinct", () => {
   const state = parseAdminAvatarState(STATE);

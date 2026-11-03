@@ -1,8 +1,9 @@
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
-import { ADMIN_FINANCE_LEDGER_SQL, ADMIN_FINANCE_OBSERVATION_SQL,adminFinanceLedgerSql } from "../src/finance/admin-finance-read";
+import { ADMIN_FINANCE_LEDGER_SQL, ADMIN_FINANCE_OBSERVATION_SQL,ADMIN_FINANCE_LOOKUP_OBSERVATION_SQL,adminFinanceLedgerSql } from "../src/finance/admin-finance-read";
 
 type Row = Record<string, unknown>;
+const HISTORY_COLUMNS="id subject_id subject_name source_kind source_type source_system source_entity source_id source_digest basis_id included_in_opening at imported_at amount action source_status reference_id reference_no net fee balance_after observation_origin extra_evidence";
 // Execute the actual filter/rank/page SQL in memory. Only fixture sources and PG scalar syntax are adapted.
 // This checks relational behavior, not PostgreSQL syntax, MVCC, query plans or numeric arithmetic.
 export class FinanceSqlFixture {
@@ -11,6 +12,7 @@ export class FinanceSqlFixture {
   clusterSnapshot = "100:100:";
   constructor(data: { ledger?: Row[]; history?: Row[]; native?: Row[]; payments?:Row[]; legacy?: Row[]; subjects?: Row[]; withdrawals?: Row[]; operations?: Row[];earnings?:Row[];earningTransitions?:Row[];financeEvents?:Row[];guaranteeHistory?:Row[];legacyDutyFacts?:Row[];legacyDuties?:Row[] } = {}) {
     this.db.function("regexp", (pattern, value) => typeof value === "string" && new RegExp(String(pattern)).test(value) ? 1 : 0);
+    this.db.function("md5", value => value===null?null:createHash('md5').update(String(value)).digest('hex'));
     // SQLite floating SUM cannot represent the 24-digit cents contract. The relational FILTER runs in SQL;
     // only PG numeric aggregation is substituted with exact BigInt, still not a PG numeric/plan proof.
     this.db.aggregate('exact_cents_sum',{start:'0',step:(sum,value)=>(BigInt(String(sum))+BigInt(String(value))).toString()});
@@ -19,7 +21,7 @@ export class FinanceSqlFixture {
     this.table('zzsh_supply.admin_supply_scope','admin_user_id game_id',[]);
     const ledger=(data.ledger??[]).map(row=>{const delta=typeof row.delta==="string"&&/^-?\d+$/.test(row.delta)?BigInt(row.delta):null;return {...row,counterparty_user_id:row.subject_id,credit_cents:delta===null?null:delta>=0n?String(delta):"0",debit_cents:delta===null?null:delta<0n?String(-delta):"0",finance_event_id:row.finance_event_id??row.event_kind,created_at:row.at};});
     this.table("zzsh_order.fixture_ledger", "id account_code subject_id subject_name delta at posting_id event_kind source_kind source_type source_system source_entity source_id source_digest basis_id order_id display_no account_id opening_cutoff covered_count payment_confirmation_id settlement_version_id version_hash captured_cents owner_net_cents renter_refund_cents platform_contribution_cents refund_due_at counterparty_user_id credit_cents debit_cents finance_event_id details created_at economic_root_id beneficiary_role earning_state earning_role earning_amount earning_disposition earning_recovery earning_due_at earning_version", ledger);
-    this.table("zzsh_order.fixture_history", "id subject_id subject_name source_kind source_type source_system source_entity source_id source_digest basis_id included_in_opening at imported_at amount action source_status reference_id reference_no net fee balance_after observation_origin extra_evidence", (data.history ?? []).map(r=>({observation_origin:'LEGACY_MYSQL',...r})));
+    this.table("zzsh_order.fixture_history", HISTORY_COLUMNS, (data.history ?? []).map(r=>({observation_origin:'LEGACY_MYSQL',...r})));
     this.table('zzsh_order.rental_referral_earning','id economic_root_id beneficiary_user_id beneficiary_role amount_cents state funds_disposition recovery_required_cents version canonical_seed seed_digest basis_digest posting_digest economic_key posting_id payment_confirmation_id order_id created_at due_at',data.earnings??[]);
     this.table('zzsh_order.payment_distribution_basis','id order_id payment_confirmation_id canonical_basis basis_digest',[]);
     this.table('zzsh_order.rental_referral_transition','id earning_id action expected_version result_version finance_event_id source_digest',data.earningTransitions??[]);
@@ -54,6 +56,7 @@ export class FinanceSqlFixture {
     if(sql.includes("AS finance_version"))return {rows:[{finance_version:this.sourceVersion(sql, values)}],rowCount:1};
     const base = (source: string) => source.replace(/\s+ORDER BY [lo]\.id COLLATE "C" LIMIT \$1\s*$/, "");
     const text = sql.replaceAll(base(ADMIN_FINANCE_LEDGER_SQL), "SELECT * FROM fixture_ledger").replaceAll(base(adminFinanceLedgerSql(false)),"SELECT * FROM fixture_ledger")
+      .replaceAll(base(ADMIN_FINANCE_LOOKUP_OBSERVATION_SQL),"SELECT "+HISTORY_COLUMNS.split(' ').map(c=>c==='extra_evidence'?"extra_evidence->'snapshot' AS extra_evidence":c).join(',')+" FROM fixture_history")
       .replaceAll(base(ADMIN_FINANCE_OBSERVATION_SQL), "SELECT * FROM fixture_history")
       // SQLite has no LATERAL. The same correlated receipt proof is grouped against the fixture's exact earning root.
       .replace(/LEFT JOIN LATERAL \(SELECT([\s\S]*?)\) accrual ON TRUE/g,(_,body:string)=>`LEFT JOIN (SELECT t.earning_id,${body.replace('FROM zzsh_order.rental_referral_transition t LEFT JOIN','FROM zzsh_order.rental_referral_transition t LEFT JOIN zzsh_order.rental_referral_earning origin_e ON origin_e.id=t.earning_id LEFT JOIN').replace("WHERE t.earning_id=e.id AND t.action='ACCRUE'","WHERE t.action='ACCRUE' GROUP BY t.earning_id").replace(/\be\./g,'origin_e.')}) accrual ON accrual.earning_id=e.id`)
@@ -62,7 +65,7 @@ export class FinanceSqlFixture {
       .replace(/::text\b/g, "")
       .replace(/::boolean\b/g, "")
       .replace(/::jsonb\b/g, "").replaceAll('jsonb_build_object(','json_object(').replaceAll('jsonb_array_length(','json_array_length(')
-      .replaceAll("r.extra_evidence->'snapshot'->>'legacyChangeType'","CAST(r.extra_evidence->'snapshot'->>'legacyChangeType' AS TEXT)")
+      .replace(/r\.extra_evidence(?:->'snapshot')?->>'(?:legacyChangeType|legacyLogNumber)'/g,match=>`CAST(${match} AS TEXT)`)
       .replaceAll('sum(r.delta::numeric)','exact_cents_sum(r.delta)').replace(/::numeric\b/g, "")
       .replace(/to_char\(([\w.]+) AT TIME ZONE 'UTC','[^']*'\)/g, "$1")
       .replace(/([\w.]+) ~ ('[^']*')/g, "regexp($2,$1)")
@@ -81,9 +84,14 @@ export class FinanceSqlFixture {
     const bindings = Object.fromEntries(values.map((value, index) => ["$" + (index + 1), Array.isArray(value) ? JSON.stringify(value) : value as string | number]));
     // The real generated SELECTs determine membership and fields; PG JSONB serialization/cost remain NOT_RUN.
     return md5(relations.map(relation=>{
-      const text=relation.replace(/::text\b/g,"");
+      let text=relation.replace(/::text\b/g,"");
+      // PG whole-row JSON binds every fixture intent column; adapt its syntax, not its membership.
+      if(text.includes('to_jsonb(i)')){
+        const columns=this.db.prepare('PRAGMA zzsh_order.table_info(channel_refund_intent)').all().map(row=>String(row.name));
+        text=text.replaceAll('to_jsonb(i)','json_object('+columns.map(c=>"'"+c+"',i.\""+c+"\"").join(',')+')');
+      }
       const used=Object.fromEntries(Object.entries(bindings).filter(([name])=>text.includes(name)));
-      const rows=this.db.prepare(text+" ORDER BY id").all(used);
+      const rows=this.db.prepare('SELECT * FROM ('+text+') version_rows ORDER BY id').all(used);
       return md5(rows.map(row=>md5(JSON.stringify(Object.fromEntries(Object.entries(row).sort(([a],[b])=>a<b?-1:a>b?1:0))))).join(""));
     }).join("|"));
   }

@@ -7,6 +7,8 @@ import { Dialog, DialogContent, DialogTitle } from "../components/ui/dialog";
 import { SettingsNotice } from "./self-settings/settings-shell";
 import { AdminAvatarError, adminAvatarReviewContentUrl, assertAvatarReviewReceipt, clearPendingAdminAvatar, readAdminAvatarOperationResult, readAdminAvatarReviews, readPendingAdminAvatar, reviewAdminAvatar, savePendingAdminAvatar, withdrawAdminAvatar, type AdminAvatarReviewItem, type PendingAdminAvatar } from "./self-settings/avatar-api";
 
+import { AvatarPolicyPanel } from "./avatar-policy-panel";
+
 const STATES = ["PENDING", "APPROVED", "REJECTED", "QUARANTINED"] as const;
 type State = typeof STATES[number];
 type Action = { kind: "APPROVE" | "REJECT" | "QUARANTINE" | "WITHDRAW"; item: AdminAvatarReviewItem } | null;
@@ -14,9 +16,10 @@ type ReviewProps = { snapshot: { adminUserId: string; security: { isBoss: boolea
 export function AvatarReviewView(props: ReviewProps) {
   const {snapshot}=props;
   const allowed=snapshot.security.status === "ACTIVE" && snapshot.session?.locked !== true && (snapshot.security.isBoss || snapshot.permissions.includes("profile.avatar.review"));
-  return <AvatarReviewBody key={snapshot.adminUserId + ":" + (snapshot.session?.id ?? "") + ":" + allowed} {...props} allowed={allowed} />;
+  const policyAllowed=snapshot.security.status === "ACTIVE" && snapshot.session?.locked !== true && (snapshot.security.isBoss || snapshot.permissions.includes("profile.avatar.policy.manage"));
+  return <AvatarReviewBody key={snapshot.adminUserId + ":" + (snapshot.session?.id ?? "") + ":" + allowed + ":" + policyAllowed} {...props} allowed={allowed} policyAllowed={policyAllowed} />;
 }
-function AvatarReviewBody({ snapshot, refreshNonce, allowed }: ReviewProps & {allowed:boolean}) {
+function AvatarReviewBody({ snapshot, refreshNonce, allowed, policyAllowed }: ReviewProps & {allowed:boolean;policyAllowed:boolean}) {
   const [state, setState] = useState<State>("PENDING");
   const [items, setItems] = useState<AdminAvatarReviewItem[]>([]), [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true), [loadingMore, setLoadingMore] = useState(false);
@@ -85,18 +88,19 @@ function AvatarReviewBody({ snapshot, refreshNonce, allowed }: ReviewProps & {al
   };
 
   const empty = useMemo(() => !loading && !error && items.length === 0, [loading, error, items.length]);
-  if (!allowed) return <div className="p-6"><SettingsNotice tone="warning" role="alert">当前账号没有头像审核权限（profile.avatar.review）。</SettingsNotice></div>;
+  if (!allowed && !policyAllowed) return <div className="p-6"><SettingsNotice tone="warning" role="alert">当前账号没有头像审核权限（profile.avatar.review）。</SettingsNotice></div>;
 
   return (
     <div className="mx-auto max-w-5xl space-y-5 p-4 sm:p-6 lg:p-8">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <p className="text-muted-foreground text-xs font-medium tracking-wide uppercase">用户与会员</p>
           <h1 className="text-xl font-semibold">头像审核</h1>
           <p className="text-muted-foreground mt-1 max-w-2xl text-sm leading-6">审核用户与管理员本人上传的头像。默认头像为预审资源，不在此队列；本权限不包含目录素材或其他身份资料。</p>
         </div>
-        <Button type="button" variant="secondary" onClick={() => void load()} disabled={loading || loadingMore || busy}><RefreshCw />刷新</Button>
+        <Button type="button" variant="secondary" onClick={() => void load()} disabled={!allowed || loading || loadingMore || busy}><RefreshCw />刷新</Button>
       </div>
+      <AvatarPolicyPanel actorId={snapshot.adminUserId} sessionId={snapshot.session?.id ?? ""} mayManage={policyAllowed} refreshNonce={refreshNonce} />
+      {allowed ? <>
       {error ? <SettingsNotice tone="danger" role="alert">{error}</SettingsNotice> : null}
       {notice ? <SettingsNotice tone="success" role="status">{notice}</SettingsNotice> : null}
       {storageBlocked ? <SettingsNotice tone="danger">原审核操作记录不可读，暂不能发起新审核。</SettingsNotice> : null}
@@ -125,6 +129,7 @@ function AvatarReviewBody({ snapshot, refreshNonce, allowed }: ReviewProps & {al
               </div>
               <p className="text-muted-foreground truncate font-mono text-[11px]">{item.subjectId}</p>
               <p className="text-muted-foreground text-xs">{formatTime(item.submittedAt)} · {item.width}×{item.height} · {formatBytes(item.byteSize)}</p>
+              {item.approvalSource === "SYSTEM_POLICY" && typeof item.policyRevision === "string" && /^[1-9]\d{0,18}$/.test(item.policyRevision) ? <p className="text-xs text-muted-foreground">系统政策免人工审核 · 策略版本 {item.policyRevision}</p> : null}
               {item.reviewReason ? <p className="text-muted-foreground line-clamp-2 text-xs">原因：{item.reviewReason}</p> : null}
               {item.reviewState === "PENDING" ? (
                 <div className="flex flex-wrap gap-1.5 pt-1">
@@ -171,6 +176,7 @@ function AvatarReviewBody({ snapshot, refreshNonce, allowed }: ReviewProps & {al
           ) : null}
         </DialogContent>
       </Dialog>
+      </> : <p className="text-sm text-muted-foreground">当前账号可管理审核设置，没有头像审核队列权限。</p>}
     </div>
   );
 }

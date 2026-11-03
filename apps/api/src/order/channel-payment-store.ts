@@ -15,6 +15,7 @@ import { confirmOrderPayment, type PaymentResult } from "./payment-confirmation"
 import { describeCollectionProfile, type BoundCollectionProfile } from "./joinpay-collection-profile";
 import { readVerifiedJoinpayFactScope, type FormalJoinpayPaymentFact } from "./joinpay-collection-source";
 import { createControlledRegressionResource, assertControlledRegressionResource, type ControlledRegressionBinding, type ControlledRegressionResource } from "../finance/controlled-regression-resource";
+import { assertLocalFinancialSandboxResource, ensureLocalSandboxOrderAdmission, localFinancialSandboxRegistration, type LocalFinancialSandbox } from "../finance/local-financial-sandbox-resource";
 
 /**
  * PAY-03A：持久请求、只追加观察与资金归属锚点（payment_request / payment_channel_observation /
@@ -61,7 +62,7 @@ export function wireAmountForCents(amountCents: string): string {
 }
 
 // ---------- 合成请求能力：仅显式 test/fake 隔离资源，进程内对象，无环境开关 ----------
-const requestCapabilities = new WeakMap<object, { database: string; runtimeUser: string; regression?: ControlledRegressionResource; orderIds?: ReadonlySet<string> }>();
+const requestCapabilities = new WeakMap<object, { database: string; runtimeUser: string; regression?: ControlledRegressionResource; orderIds?: ReadonlySet<string>; sandbox?: LocalFinancialSandbox }>();
 export type SyntheticRequestCapability = Readonly<{ evidenceLevel: "SYNTHETIC_PROTOCOL" | "CONTROLLED_TEST" }>;
 
 export function createSyntheticChannelRequestCapability(options: { config: AppConfig; resourceSet: string; evidenceLevel: SyntheticRequestCapability["evidenceLevel"]; regression?: ControlledRegressionBinding; allowedOrderIds?: readonly string[] }): SyntheticRequestCapability {
@@ -83,6 +84,27 @@ export function createSyntheticChannelRequestCapability(options: { config: AppCo
   return capability;
 }
 
+export function createSandboxChannelRequestCapability(sandbox: LocalFinancialSandbox): SyntheticRequestCapability {
+  const proof = localFinancialSandboxRegistration(sandbox), capability = Object.freeze({ evidenceLevel: "CONTROLLED_TEST" as const });
+  requestCapabilities.set(capability, { database: proof.registration.resource.database, runtimeUser: proof.registration.resource.runtimeRole, sandbox }); return capability;
+}
+
+export function sandboxChannelBinding(capability: unknown): ChannelBinding | null {
+  const sandbox = capability && typeof capability === "object" ? requestCapabilities.get(capability)?.sandbox : undefined;
+  if (!sandbox) return null;
+  const digest = localFinancialSandboxRegistration(sandbox).digest;
+  return Object.freeze({ channel: "CONTROLLED", merchantIdentityId: "local_sandbox_" + digest.slice(0, 32),
+    configProfileId: "local_sandbox_" + digest.slice(0, 32), protocolVersion: "LOCAL_SANDBOX_V1", keyVersionRef: "NO_REAL_PROVIDER" });
+}
+export function sandboxForChannelRequestCapability(capability:unknown):LocalFinancialSandbox|undefined{
+  return capability&&typeof capability==='object'?requestCapabilities.get(capability)?.sandbox:undefined;
+}
+
+export function assertSandboxOriginalPayment(capability: unknown, payment: { source: string; merchant_scope_id: string }): void {
+  const binding = sandboxChannelBinding(capability);
+  if (binding && (payment.source !== "CONTROLLED" || payment.merchant_scope_id !== binding.merchantIdentityId)) throw closed();
+}
+
 export type PaymentRequestFailureReason = "PAYMENT_CHANNEL_NOT_ENABLED" | "PAYMENT_REQUEST_EXISTS" | "ORDER_NOT_PAYABLE";
 function requestFailure(paymentReason: PaymentRequestFailureReason, message: string): SecurityApiError & { paymentReason: PaymentRequestFailureReason } {
   const disabled = paymentReason === "PAYMENT_CHANNEL_NOT_ENABLED";
@@ -95,6 +117,7 @@ export async function assertSyntheticChannelRequestCapability(client: PoolClient
   const scope = capability && typeof capability === "object" ? requestCapabilities.get(capability) : undefined;
   if (!scope) throw closed();
   if (scope.regression) await assertControlledRegressionResource(client, scope.regression, "CHANNEL_REQUEST");
+  if (scope.sandbox) await assertLocalFinancialSandboxResource(client, scope.sandbox);
   const identity = (await client.query(`SELECT current_database() AS db, current_user AS actor`)).rows[0];
   if (identity?.db !== scope.database || identity?.actor !== scope.runtimeUser) throw closed();
   return (capability as SyntheticRequestCapability).evidenceLevel;
@@ -147,6 +170,12 @@ export async function createPaymentRequest(client: PoolClient, input: {
   return createRequest(client, input, ["SYNTHETIC_PROTOCOL", "CONTROLLED_TEST"], async () => {
     const evidenceLevel = await assertSyntheticChannelRequestCapability(client, input.capability);
     assertSyntheticChannelRequestOrder(input.capability, input.orderId);
+    const local = sandboxChannelBinding(input.capability);
+    if (local) {
+      const sandbox = requestCapabilities.get(input.capability as object)!.sandbox!;
+      if (input.binding && JSON.stringify(input.binding) !== JSON.stringify(local)) throw closed();
+      return { binding: local, evidenceLevel, afterOrderLock: async () => { await ensureLocalSandboxOrderAdmission(client, sandbox, input.orderId); } };
+    }
     checkBinding(input.binding);
     if ((input.binding.channel === "JOINPAY") !== (evidenceLevel === "SYNTHETIC_PROTOCOL")) throw closed();
     return { binding: input.binding, evidenceLevel };
@@ -170,7 +199,7 @@ export async function createCollectionPaymentRequest(client: PoolClient, input: 
 
 async function createRequest(client: PoolClient, input: {
   actor: PaymentActor; orderId: string; idempotencyKey: unknown; method: string;
-}, allowedEvidence: readonly string[], admit: () => Promise<{ binding: ChannelBinding; evidenceLevel: string }>): Promise<IdempotentResult> {
+}, allowedEvidence: readonly string[], admit: () => Promise<{ binding: ChannelBinding; evidenceLevel: string; afterOrderLock?: () => Promise<void> }>): Promise<IdempotentResult> {
   const key = validateIdempotencyKey(input.idempotencyKey);
   if (!input.actor || !ID.test(input.actor.userId) || !ID.test(input.orderId)) throw invalid();
   if (!(METHODS as readonly string[]).includes(input.method)) throw invalid("Unsupported payment method", "method");
@@ -189,7 +218,7 @@ async function createRequest(client: PoolClient, input: {
       if (existing.method !== input.method) throw requestFailure("PAYMENT_REQUEST_EXISTS", "Payment request already exists for a different method");
       return { status: 200, body: view(existing, true) };
     }
-    const { binding, evidenceLevel } = await admit();
+    const { binding, evidenceLevel, afterOrderLock } = await admit();
     const order = (await client.query(`SELECT renter_user_id, status, display_no, currency,
         (rental_amount_cents+deposit_amount_cents)::text AS total
         FROM zzsh_order.rental_order o WHERE id=$1 FOR UPDATE OF o`, [orderId])).rows[0];
@@ -200,6 +229,7 @@ async function createRequest(client: PoolClient, input: {
         FROM zzsh_order.rental_order o WHERE id=$1`, [orderId])).rows[0];
     if (order.status !== "PENDING_PAYMENT" || timing?.open !== true || timing.has_confirmation === true) throw requestFailure("ORDER_NOT_PAYABLE", "Order is not payable");
     if (order.currency !== "CNY") throw invalid("Unsupported payment currency");
+    if (afterOrderLock) await afterOrderLock();
     const channelOrderNo = mapChannelOrderNo(binding.channel, order.display_no);
     let wire: string;
     try { wire = wireAmountForCents(order.total); } catch (error) {

@@ -12,6 +12,7 @@ import {
   readMyDistributionSummary,
   readAdminDistributionEarnings,
   readAdminDistributionOverview,
+  readUnifiedDistributionOverview,
   readAdminDistributionParticipants,
   stockMetrics,
   type DashboardFilters,
@@ -73,13 +74,14 @@ test("hidden directory names cannot participate in dashboard list searches; ID s
     if (sql.includes("WITH visible_earnings AS")) return { rows: [{ native: "n" }] };
     if (sql.includes("clock_timestamp")) return { rows: [{ at: "2026-11-02T00:00:00Z" }] };
     if(sql.includes("count(*)::text AS total"))return {rows:[{total:"0"}]};
+    if(sql.startsWith('WITH legacy_records'))return {rows:[unifiedAggregate()]};
     return { rows: [] };
   } } as any;
   const f = parseDashboardFilters(new URLSearchParams("q=user-1"));
   await readAdminDistributionEarnings(client, dashboardContext(false), f);
   const list = calls.find(x => x.sql.includes("WITH rows AS"))!.sql;
   assert.doesNotMatch(list.slice(list.indexOf("FROM rows WHERE")), /beneficiary_name/);
-  assert.match(list, /lo\.id AS order_id/);
+  assert.match(list, /lo\.id AS allowed_order_id/);
   assert.doesNotMatch(list, /::bigint/);
   await readAdminDistributionParticipants(client, dashboardContext(false), f);
   const participants = calls.filter(x => x.sql.includes("ORDER BY p.user_id LIMIT")).at(-1)!.sql;
@@ -94,16 +96,43 @@ test("period ranking binds timestamps before scope and missing historical source
     if (sql.includes("to_regclass")) return { rows: [{ native: true, legacy: false }] };
     if (sql.includes("WITH visible_earnings AS")) return { rows: [{ native: "n" }] };
     if (sql.includes("clock_timestamp")) return { rows: [{ at: "2026-11-02T00:00:00Z" }] };
+    if(sql.startsWith('WITH legacy_records'))return {rows:[unifiedAggregate()]};
     if(sql.includes("count(*)::text AS total"))return {rows:[{total:"0"}]};
     return { rows: [] };
   } } as any;
   const f = parseDashboardFilters(new URLSearchParams("from=2026-10-01&to=2026-10-31&rankingBasis=PERIOD_SETTLED_FLOW"));
   const result = await readAdminDistributionOverview(client, dashboardContext(), f);
-  const ranking = calls.find(x => x.sql.includes("array_agg(DISTINCT e.beneficiary_role)"))!;
-  assert.deepEqual(ranking.values, ["2026-10-01T00:00:00+08:00", "2026-11-01T00:00:00+08:00", "admin-1", true]);
-  assert.equal(result.legacy.settled.knowledge, "UNKNOWN");
+  const ranking = calls.find(x => x.sql.startsWith('WITH legacy_records'))!;
+  assert.deepEqual(ranking.values, ["admin-1", true,"2026-10-01T00:00:00+08:00", "2026-11-01T00:00:00+08:00"]);
+  assert.equal(result.current.settled.knowledge, "UNKNOWN");
   assert.equal(calls.filter(x => x.sql.includes("WITH visible_earnings AS")).length, 1);
   assert.equal(calls.some(x => /FROM zzsh_order\.personal_finance_observation/.test(x.sql)), false);
+});
+
+// Synthetic SQL response contract; this is not a PostgreSQL or migration acceptance fixture.
+function unifiedAggregate(patch: Record<string,unknown> = {}) {
+  return {count:'0',legacy_count:'0',record_amount_cents:'0',unknown_state_count:'0',record_states:[],recovery_cents:'0',
+    accrued_cents:'0',accrued_count:'0',settled_cents:'0',settled_count:'0',orders:'0',unconfirmed_credit_count:'0',unconfirmed_occurred_count:'0',trend:[],ranking:[],recent:[],...patch};
+}
+
+test('unified overview preserves unknown responsibilities, actual recovery, one ranking and exact amounts', async()=>{
+  const calls:{sql:string;values:unknown[]}[]=[],large='9007199254740993';
+  const client={query:async(sql:string,values:unknown[])=>{calls.push({sql,values});return{rows:[unifiedAggregate({count:'4',record_amount_cents:(BigInt(large)+550n).toString(),unknown_state_count:'1',
+    record_states:[{state:'SETTLED',count:'1',amountCents:large},{state:'PENDING',count:'1',amountCents:'100'},{state:'UNKNOWN',count:'1',amountCents:'400'},{state:'RECOVERY_REQUIRED',count:'1',amountCents:'50'}],recovery_cents:'20',
+    accrued_cents:'100',accrued_count:'1',settled_cents:'95',settled_count:'1',orders:'1',unconfirmed_credit_count:'1',unconfirmed_occurred_count:'2',
+    ranking:[{user_id:'second',cents:'100',roles:[]},{user_id:'first',cents:large,roles:[]}],
+    recent:[{id:'history:one',source:'LEGACY',amount_cents:large,state:'UNKNOWN',occurred_at:null}]})]};}} as any;
+  const read=await readUnifiedDistributionOverview(client,dashboardContext(false),filtersForTest(),{legacy:true,duties:true});
+  assert.equal(read.current.settled.cents,large);assert.equal(read.current.pending.cents,'100');assert.equal(read.current.needsReview.count,'1');assert.equal(read.current.recovery.cents,'20');
+  assert.equal(read.recordSummary.knowledge,'UNKNOWN');assert.equal(read.flow.unconfirmedCreditCount,'1');assert.equal(read.recent[0]?.occurredAt,null);
+  assert.deepEqual(read.earningsRanking.map(x=>x.userId),['first','second']);
+  const sql=calls[0]!.sql;
+  assert.match(sql,/DISTINCT ON\(p.source_system,p.source_entity,p.source_id,p.user_id,p.snapshot->>'level'\)/);
+  assert.match(sql,/sourceOrderType'='1'/);assert.match(sql,/d.order_id=p.allowed_order_id/);assert.match(sql,/source_record_id=p.source_id/);
+  assert.match(sql,/legacyChangeType'='1001'.*action'='1'/s);assert.match(sql,/credit.n=1/);assert.match(sql,/rawSource/);assert.match(sql,/legacy_credit_keys AS MATERIALIZED/);assert.match(sql,/k.amount=l.snapshot->>'amount'/);assert.match(sql,/k.original_at=l.snapshot->>'createdAt'/);assert.doesNotMatch(sql,/LATERAL/);
+  assert.doesNotMatch(sql,/sourceUpdatedAt|FOR UPDATE|\bINSERT\b|\bUPDATE\b|\bDELETE\b/);
+  const empty=await readUnifiedDistributionOverview({query:async()=>({rows:[unifiedAggregate()]})} as any,dashboardContext(),filtersForTest(),{legacy:true,duties:false});
+  assert.equal(empty.current.settled.cents,'0');assert.equal(empty.current.pending.count,'0');assert.equal(empty.recordSummary.knowledge,'KNOWN');
 });
 
 function summaryRecordRows(){

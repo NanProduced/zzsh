@@ -1,7 +1,7 @@
 import {createHash} from 'node:crypto';import type {Pool,PoolClient} from 'pg';
 import {Logger} from '@nestjs/common';
 import {withTransaction,recordAudit,SecurityApiError} from '../auth/security-core';import {canonicalize} from '../supply/content-hash';import {conflict,invalid,notFound} from '../supply/supply-util';
-import {createPaymentDistributionStore,createNativePaymentDistributionStore,distributionOrderScopeIdentity,assertDistributionOrderScopeResource,type DistributionOrderScope} from './distribution-payment-store';import {prepareAccrualFromFrozenPayment,type CompletedDistributionFacts} from './distribution-accrual';import {transitionRentalEarning,earningEconomicKey,type RentalEarning,type EarningLedgerPlan} from './distribution-mechanism';
+import {createPaymentDistributionStore,createNativePaymentDistributionStore,distributionOrderScopeIdentity,assertDistributionOrderScopeResource,isSandboxDistributionOrderScope,assertSandboxDistributionOrder,type DistributionOrderScope} from './distribution-payment-store';import {prepareAccrualFromFrozenPayment,type CompletedDistributionFacts} from './distribution-accrual';import {transitionRentalEarning,earningEconomicKey,type RentalEarning,type EarningLedgerPlan} from './distribution-mechanism';
 import {assertFormalInitialAdmission,readFormalCollectionAdmission,type FormalCollectionAdmission} from '../order/joinpay-collection-profile';
 import {createMaintenanceBatchRunner} from './distribution-maintenance-batch';
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex');
@@ -66,6 +66,7 @@ export function createNativeDistributionEarningStore(admission:FormalCollectionA
 }
 function earningStore(resource:Resource):DistributionEarningStore{
  const local=resource.kind==='LOCAL_CONTROLLED'?resource.scope:null,allowed=new Set(local?.allowedOrderIds??[]),scopeLabel=local?'LOCAL_CONTROLLED' as const:'NATIVE' as const;
+ const sandbox=local!==null&&isSandboxDistributionOrderScope(local);
  const approvalDigest=resource.kind==='NATIVE'?resource.admissionSha256:local!.approvalDigest;
  const name=resource.kind==='NATIVE'?resource.database:distributionOrderScopeIdentity(local!).name,role=resource.kind==='NATIVE'?resource.runtimeUser:distributionOrderScopeIdentity(local!).role;
  const payment=resource.kind==='NATIVE'?createNativePaymentDistributionStore(resource.admission):createPaymentDistributionStore(resource.scope);
@@ -75,11 +76,11 @@ function earningStore(resource:Resource):DistributionEarningStore{
    const r=(await c.query(`SELECT current_database() AS name,current_user AS role,to_regclass('zzsh_order.rental_referral_earning') IS NOT NULL AND to_regclass('zzsh_order.rental_referral_transition') IS NOT NULL AND to_regclass('zzsh_order.rental_referral_reversal_source') IS NOT NULL AS complete`)).rows[0];
    if(!r||r.name!==name||r.role!==role||r.complete!==true)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Typed earning schema/resource not installed');return;
   }
-  if(local!.resourceSet==='regression')await assertDistributionOrderScopeResource(c,local!);
+  if(local!.resourceSet==='regression'||sandbox)await assertDistributionOrderScopeResource(c,local!);
   const r=(await c.query("SELECT d.oid,current_database() AS name,current_user AS role,shobj_description(d.oid,'pg_database') AS marker,to_regclass('zzsh_order.rental_referral_earning') IS NOT NULL AND to_regclass('zzsh_order.rental_referral_transition') IS NOT NULL AS complete FROM pg_database d WHERE d.datname=current_database()")).rows[0];
   if(!r||Number(r.oid)!==local!.resourceOid||r.name!==name||r.role!==role||r.marker!==distributionOrderScopeIdentity(local!).marker||!r.complete)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Typed earning schema/resource not installed');
  }
- async function orderLock(c:PoolClient,orderId:string){if(local&&!allowed.has(orderId))throw notFound();await c.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))",['zzsh:earning-order:'+orderId]);}
+ async function orderLock(c:PoolClient,orderId:string){if(sandbox)await assertSandboxDistributionOrder(c,local!,orderId);else if(local&&!allowed.has(orderId))throw notFound();await c.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))",['zzsh:earning-order:'+orderId]);}
  async function wallet(c:PoolClient,userId:string){const covered=(await c.query('SELECT 1 FROM zzsh_order.wallet_coverage WHERE user_id=$1',[userId])).rowCount;if(!covered)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Wallet origin coverage not closed');const r=(await c.query(`SELECT ledger_revision::text AS revision,COALESCE((SELECT sum(credit_cents-debit_cents) FROM zzsh_order.settlement_ledger_entry WHERE counterparty_user_id=$1 AND account_code IN('OWNER_AVAILABLE','WALLET_AVAILABLE')),0)::text AS available FROM zzsh_order.wallet_revision WHERE user_id=$1`,[userId])).rows[0];if(!r||BigInt(r.available)<0n)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Wallet requires reconciliation');return r;}
  async function append(c:PoolClient,root:RentalEarning,plan:EarningLedgerPlan,revision:string){const eventId='earning_event_'+sha(canonicalize([root.economicKey,plan.kind])).slice(0,40);await c.query('INSERT INTO zzsh_order.finance_event(id,economic_root_id,kind,subject_user_id,expected_ledger_revision) VALUES($1,$2,$3,$4,$5)',[eventId,root.id,plan.kind,root.beneficiaryUserId,revision]);for(const[n,line]of plan.lines.entries())await c.query(`INSERT INTO zzsh_order.settlement_ledger_entry(id,finance_event_id,line_no,account_code,debit_cents,credit_cents,counterparty_user_id,source_payment_confirmation_id,details) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)`,['earning_line_'+sha(canonicalize([eventId,n+1])).slice(0,40),eventId,n+1,line.accountCode,line.debitCents,line.creditCents,line.counterpartyUserId,null,JSON.stringify({earningId:root.id,earningRole:root.role,scope:scopeLabel})]);return eventId;}
  async function posting(c:PoolClient,orderId:string){const row=(await c.query(`SELECT p.id,p.order_id,p.payment_confirmation_id,p.version_hash,p.early,p.manual_reason,p.captured_cents::text,p.owner_net_cents::text,p.renter_refund_cents::text,p.platform_contribution_cents::text,p.compensation_fee_cents::text,to_char(p.posted_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS posted_at FROM zzsh_order.settlement_posting p WHERE order_id=$1`,[orderId])).rows[0];if(!row)return null;return{row,facts:completedFacts(row,orderId)};}
@@ -123,13 +124,14 @@ function earningStore(resource:Resource):DistributionEarningStore{
   if(local&&allowed.size>100||!Number.isSafeInteger(limit)||limit<1||limit>100||typeof requestId!=='string'||!ID.test(requestId))throw invalid('Bounded due batch and request required');const games=scopeIds(gameIds);
   const due=await withTransaction(pool,async c=>{
    await ready(c);
-   if(local)return(await c.query(`SELECT id,version::text AS version FROM zzsh_order.rental_referral_earning
+   if(local&&!sandbox)return(await c.query(`SELECT id,version::text AS version FROM zzsh_order.rental_referral_earning
     WHERE order_id=ANY($1::text[]) AND state='PENDING' AND due_at<=clock_timestamp() ORDER BY due_at,id LIMIT $2`,
     [[...allowed],limit])).rows as {id:string;version:string}[];
    return(await c.query(`SELECT e.id,e.version::text AS version FROM zzsh_order.rental_referral_earning e JOIN zzsh_order.rental_order o ON o.id=e.order_id
     WHERE e.state='PENDING' AND e.due_at<=clock_timestamp() AND ($1::text[] IS NULL OR o.game_id=ANY($1))
+    ${sandbox?"AND EXISTS(SELECT 1 FROM zzsh_order.distribution_order_admission a WHERE a.order_id=e.order_id AND a.mode='LOCAL_CONTROLLED' AND a.resource_oid=$3 AND a.approval_digest=$4 AND a.active)":""}
     ORDER BY e.due_at,e.id LIMIT $2`,
-    [games,limit])).rows as {id:string;version:string}[];
+    sandbox?[games,limit,local!.resourceOid,local!.approvalDigest]:[games,limit])).rows as {id:string;version:string}[];
   });
   const results:({earningId:string;status:'SETTLED';currentState:RentalEarning['state'];replayed:boolean}|{earningId:string;status:'UNKNOWN';errorCode:string})[]=[];
   for(const row of due){
@@ -156,7 +158,8 @@ function earningStore(resource:Resource):DistributionEarningStore{
     FROM zzsh_order.settlement_posting p JOIN zzsh_order.rental_order o ON o.id=p.order_id
     WHERE ($1::text[] IS NULL OR p.order_id=ANY($1)) AND ($2::text[] IS NULL OR o.game_id=ANY($2))
      AND ($4::timestamptz IS NULL OR (p.posted_at,p.id)<($4::timestamptz,$5))
-    ORDER BY p.posted_at DESC,p.id DESC LIMIT $3`,[local?[...allowed]:null,games,input.limit,before?.postedAt??null,before?.id??null])).rows;
+     ${sandbox?"AND EXISTS(SELECT 1 FROM zzsh_order.distribution_order_admission a WHERE a.order_id=p.order_id AND a.mode='LOCAL_CONTROLLED' AND a.resource_oid=$6 AND a.approval_digest=$7 AND a.active)":""}
+    ORDER BY p.posted_at DESC,p.id DESC LIMIT $3`,[local&&!sandbox?[...allowed]:null,games,input.limit,before?.postedAt??null,before?.id??null,...(sandbox?[local!.resourceOid,local!.approvalDigest]:[])])).rows;
    const orders:MissingAccrualOrder[]=[];
    for(const row of rows){
     // game_id is only for admin scope; the immutable posting digest must use the same columns as accrual.
@@ -180,7 +183,7 @@ function earningStore(resource:Resource):DistributionEarningStore{
  }
  async function replay(pool:Pool,orderIds:readonly string[],requestId:string){
   if(!Array.isArray(orderIds)||!orderIds.length||orderIds.length>100||new Set(orderIds).size!==orderIds.length||orderIds.some(id=>!ID.test(id))||typeof requestId!=='string'||!ID.test(requestId))throw invalid('One bounded unique order cohort required');
-  if(local&&orderIds.some(id=>!allowed.has(id)))throw notFound();
+  if(local&&!sandbox&&orderIds.some(id=>!allowed.has(id)))throw notFound();
   const results:({orderId:string;status:'ACCRUED'|'REPLAYED';earningIds:string[]}|{orderId:string;status:'UNKNOWN';reason:string})[]=[];
   for(const orderId of orderIds){
    try{
@@ -193,7 +196,7 @@ function earningStore(resource:Resource):DistributionEarningStore{
  }
  async function readOrder(pool:Pool,orderId:string){return withTransaction(pool,async c=>{
   await c.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
-  await ready(c);if(local&&!allowed.has(orderId))throw notFound();
+  await ready(c);if(sandbox)await assertSandboxDistributionOrder(c,local!,orderId);else if(local&&!allowed.has(orderId))throw notFound();
   const rows=(await c.query(`SELECT e.*,to_char(e.due_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS due_exact
    FROM zzsh_order.rental_referral_earning e WHERE order_id=$1 ORDER BY id`,[orderId])).rows;
   const items=[];
@@ -203,8 +206,8 @@ function earningStore(resource:Resource):DistributionEarningStore{
   }
   return{scope:scopeLabel,orderId,items};
  });}
- const batchRunner=createMaintenanceBatchRunner({local:Boolean(local),allowedOrderIds:[...allowed],accrue:accrueOn,transition:transitionOn});
- return{accrue,accrueOn,transition,transitionOn,settleDue,readOrder,discover,replay,...batchRunner,admitsOrder:(orderId:string)=>!local||allowed.has(orderId)};
+ const batchRunner=createMaintenanceBatchRunner({local:Boolean(local),allowedOrderIds:[...allowed],...(sandbox?{registeredAdmission:{resourceOid:local!.resourceOid,approvalDigest:local!.approvalDigest}}:{}),accrue:accrueOn,transition:transitionOn});
+ return{accrue,accrueOn,transition,transitionOn,settleDue,readOrder,discover,replay,...batchRunner,admitsOrder:(orderId:string)=>sandbox?ID.test(orderId):!local||allowed.has(orderId)};
 }
 export function distributionFailureCode(error:unknown){
  const code=(error as {code?:unknown}|null)?.code;

@@ -316,10 +316,33 @@ export function verifyLegacyCoverageRecord(record: LegacyCoverageRecord): boolea
  * that must be verified separately; unverified increments keep BACKFILL_PENDING, never COMPLETE, and are never filtered
  * away and trusted.
  */
+const parsedVerifiedCoverageRecords = new WeakSet<LegacyCoverageRecord>();
+/** Own the parsed object: caller objects are never frozen or branded, and no tier is retained. */
+export function parseVerifiedLegacyCoverageRecord(canonical: string, digest: string): LegacyCoverageRecord | null {
+  try {
+    const record = JSON.parse(canonical) as LegacyCoverageRecord;
+    if (sha(canonical) !== digest || canonicalize(record) !== canonical || !record.executionKey || !verifyLegacyCoverageRecord(record)) return null;
+    const receipt = JSON.parse(record.receiptCanonical) as { expectedSourceKeys: string[]; refundReviewEvidenceRefs: string[] };
+    if (!Array.isArray(receipt.expectedSourceKeys) || !Array.isArray(receipt.refundReviewEvidenceRefs)
+      || canonicalize([...receipt.expectedSourceKeys].sort()) !== canonicalize([...record.expectedSourceKeys].sort())
+      || canonicalize(receipt.refundReviewEvidenceRefs) !== canonicalize(record.refundReviewEvidenceRefs)
+      || sha(canonicalize({ subjectUserId: record.subjectUserId, cutoff: record.cutoff, fromExclusive: record.fromExclusive, expectedSourceKeys: [...record.expectedSourceKeys].sort() })) !== record.sourceSetSha256
+      || record.correctionProofDigests.some(d => !record.refundReviewEvidenceRefs.some(ref => ref === d || ref.endsWith(`:${d}`)))) return null;
+    const pending: object[] = [record];
+    while (pending.length) {
+      const value = pending.pop()!;
+      for (const child of Object.values(value)) if (child !== null && typeof child === "object") pending.push(child);
+      Object.freeze(value);
+    }
+    parsedVerifiedCoverageRecords.add(record);
+    return record;
+  } catch { return null; }
+}
+
 export function assessLegacyCoverageRecord(record: LegacyCoverageRecord | null, storedLegacyRows: readonly StoredLegacyRow[], increments: "VERIFIED" | "UNVERIFIED" = "UNVERIFIED"): { state: "COMPLETE" | "BACKFILL_PENDING" | "SOURCE_CONFLICT"; reasons: string[]; incrementRows: StoredLegacyRow[] } {
   const rows = storedLegacyRows.filter((r) => r.status !== "PENDING");
   if (!record) return { state: "BACKFILL_PENDING", reasons: ["LEGACY_COVERAGE_RECEIPT_MISSING"], incrementRows: rows };
-  if (!verifyLegacyCoverageRecord(record)) return { state: "SOURCE_CONFLICT", reasons: ["LEGACY_COVERAGE_RECORD_INVALID"], incrementRows: [] };
+  if (!parsedVerifiedCoverageRecords.has(record) && !verifyLegacyCoverageRecord(record)) return { state: "SOURCE_CONFLICT", reasons: ["LEGACY_COVERAGE_RECORD_INVALID"], incrementRows: [] };
   if (rows.some((r) => !r.sourceDigest)) return { state: "SOURCE_CONFLICT", reasons: ["LEGACY_ROW_DIGEST_MISSING"], incrementRows: [] };
   const want = new Map(record.factKeys.map((k) => [`${k.sourceKey}\u0000${k.revision}`, k.sourceDigest]));
   const seenOld = new Set<string>(); const incrementRows: StoredLegacyRow[] = [];

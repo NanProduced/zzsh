@@ -13,6 +13,7 @@ type Operation = 'ACCRUALS_REPLAY' | 'DUE_SETTLE';
 type Callbacks = {
   local: boolean;
   allowedOrderIds: readonly string[];
+  registeredAdmission?: { resourceOid: number; approvalDigest: string };
   accrue: (client: PoolClient, orderId: string, requestId: string, operator?: MaintenanceOperator) => Promise<any>;
   transition: (client: PoolClient, earningId: string, action: 'SETTLE', expectedVersion: string, requestId: string, reversalSourceId: string | undefined, operator?: MaintenanceOperator) => Promise<any>;
 };
@@ -107,12 +108,14 @@ async function plan(client: PoolClient, operation: Operation, input: CommandInpu
     if (!Number.isSafeInteger(input.limit) || (input.limit as number) < 1 || (input.limit as number) > 100) throw invalid('Bounded due batch required');
     const rows = (await client.query(`SELECT e.id,e.version::text AS version FROM zzsh_order.rental_referral_earning e JOIN zzsh_order.rental_order o ON o.id=e.order_id
       WHERE e.state='PENDING' AND e.due_at<=clock_timestamp() AND ($1::text[] IS NULL OR e.order_id=ANY($1)) AND ($2::text[] IS NULL OR o.game_id=ANY($2))
-      ORDER BY e.due_at,e.id LIMIT $3`, [callbacks.local ? [...callbacks.allowedOrderIds] : null, gameScope, input.limit])).rows;
+      ${callbacks.registeredAdmission?"AND EXISTS(SELECT 1 FROM zzsh_order.distribution_order_admission a WHERE a.order_id=e.order_id AND a.mode='LOCAL_CONTROLLED' AND a.resource_oid=$4 AND a.approval_digest=$5 AND a.active)":""}
+      ORDER BY e.due_at,e.id LIMIT $3`, [callbacks.local&&!callbacks.registeredAdmission ? [...callbacks.allowedOrderIds] : null, gameScope, input.limit,...(callbacks.registeredAdmission?[callbacks.registeredAdmission.resourceOid,callbacks.registeredAdmission.approvalDigest]:[])])).rows;
     planValue = { earningIds: rows.map((row: any) => ({ earningId: row.id, version: String(row.version) })) };
   } else {
     const orderIds = [...(input.orderIds ?? [])];
     if (!orderIds.length || orderIds.length > 100 || new Set(orderIds).size !== orderIds.length || orderIds.some(id => !ID.test(id))) throw invalid('One bounded unique order cohort required');
-    if (callbacks.local && orderIds.some(id => !callbacks.allowedOrderIds.includes(id))) throw notFound();
+    if (callbacks.local && !callbacks.registeredAdmission && orderIds.some(id => !callbacks.allowedOrderIds.includes(id))) throw notFound();
+    if(callbacks.registeredAdmission){const rows=(await client.query("SELECT order_id FROM zzsh_order.distribution_order_admission WHERE order_id=ANY($1::text[]) AND mode='LOCAL_CONTROLLED' AND resource_oid=$2 AND approval_digest=$3 AND active",[orderIds,callbacks.registeredAdmission.resourceOid,callbacks.registeredAdmission.approvalDigest])).rows;if(rows.length!==orderIds.length)throw notFound();}
     if (gameScope) {
       const rows = (await client.query('SELECT id,game_id FROM zzsh_order.rental_order WHERE id=ANY($1::text[])', [orderIds])).rows;
       if (rows.length !== orderIds.length || rows.some(row => !gameScope.includes(row.game_id))) throw notFound();

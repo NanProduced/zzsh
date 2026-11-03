@@ -6,7 +6,7 @@ import { invalid, notFound } from "../supply/supply-util";
 import { requireListingCursorKey, type ListingCursorKey } from "../supply/listing-cursor";
 import { exactCents, sourceYuanToCents, sourceSignedYuanToCents, readPersonalWallet,OPENING_OBSERVATION_JOIN,FINANCE_LEDGER_POSTED_AT_SQL } from "./personal-finance-read";
 import { financeOrderLifecycle, loadFinanceOrderFacts, type FinanceOrderFact } from "./admin-finance-order-read";
-import { scopedFinanceSql, financeVersionSql, financeScopedVersionSql, financeLookupPageSql,FINANCE_LEDGER_BUCKET_SQL, type FinanceLoadScope, type FinanceVersionScope } from "./admin-finance-query";
+import { scopedFinanceSql, financeVersionSql, financeScopedVersionSql, financeLookupPageSql,FINANCE_LEDGER_BUCKET_SQL,FINANCE_GLOBAL_READ_PREAMBLE_SQL, type FinanceLoadScope, type FinanceVersionScope } from "./admin-finance-query";
 import {prepareOwnerGuaranteeHistory} from './owner-guarantee-history';
 import { historicalObservationDisplay,enrichHistoricalObservations,resolveHistoricalReverseLinks,type HistoricalFinanceDisplay,type HistoricalRelationAccess } from './legacy-observation-display';
 import type {FinancePeriodBasis} from './admin-finance-period-basis';
@@ -126,15 +126,18 @@ export function adminFinanceLedgerSql(nativeDistribution:boolean,prestart=false)
     pt.payment_basis->>'amountCents' AS prestart_amount_cents,${utc('pt.approved_at')} AS prestart_approved_at,r.basis_id,r.id AS economic_root_id`);
  }
  return sql;}
+const observationEvidenceSql="jsonb_build_object('snapshot',o.snapshot,'canonical',o.source_canonical,'legacyUserId',o.legacy_user_id)";
 export const ADMIN_FINANCE_OBSERVATION_SQL = `SELECT o.id,o.user_id AS subject_id,COALESCE(u.name,o.user_id) AS subject_name,o.source_kind,o.source_type,o.source_system,o.source_entity,o.source_id,o.source_digest,COALESCE(oa.basis_id,o.basis_id) AS basis_id,COALESCE(oa.included_in_opening,o.included_in_opening) AS included_in_opening,
   ${utc("o.source_event_at")} AS at,${utc("o.imported_at")} AS imported_at,
   o.snapshot->>'amount' AS amount,o.snapshot->>'action' AS action,o.snapshot->>'sourceStatus' AS source_status,
   o.snapshot->>'referenceId' AS reference_id,o.snapshot->>'referenceSn' AS reference_no,
-  o.snapshot->>'net' AS net,o.snapshot->>'fee' AS fee,o.snapshot->>'leftAmount' AS balance_after,'LEGACY_MYSQL'::text AS observation_origin,jsonb_build_object('snapshot',o.snapshot,'canonical',o.source_canonical,'legacyUserId',o.legacy_user_id) AS extra_evidence
+  o.snapshot->>'net' AS net,o.snapshot->>'fee' AS fee,o.snapshot->>'leftAmount' AS balance_after,'LEGACY_MYSQL'::text AS observation_origin,${observationEvidenceSql} AS extra_evidence
   FROM zzsh_order.personal_finance_observation o ${OPENING_OBSERVATION_JOIN} LEFT JOIN zzsh_auth_user."user" u ON u.id=o.user_id ORDER BY o.id COLLATE "C" LIMIT $1`;
-export function adminFinanceObservationSql(ready:{native_distribution?:boolean;earning_transitions?:boolean;legacy_duty_finance?:boolean;guarantee_history?:boolean}){
- if(!ready.native_distribution&&!ready.legacy_duty_finance&&!ready.guarantee_history)return ADMIN_FINANCE_OBSERVATION_SQL;
- const history=ADMIN_FINANCE_OBSERVATION_SQL.replace(/\s+ORDER BY o\.id COLLATE "C" LIMIT \$1\s*$/,'');
+export const ADMIN_FINANCE_LOOKUP_OBSERVATION_SQL=ADMIN_FINANCE_OBSERVATION_SQL.replace(observationEvidenceSql,'o.snapshot');
+export function adminFinanceObservationSql(ready:{native_distribution?:boolean;earning_transitions?:boolean;legacy_duty_finance?:boolean;guarantee_history?:boolean},lookupKeysOnly=false){
+ const original=lookupKeysOnly?ADMIN_FINANCE_LOOKUP_OBSERVATION_SQL:ADMIN_FINANCE_OBSERVATION_SQL;
+ if(!ready.native_distribution&&!ready.legacy_duty_finance&&!ready.guarantee_history)return original;
+ const history=original.replace(/\s+ORDER BY o\.id COLLATE "C" LIMIT \$1\s*$/,'');
  // Only a unique original ACCRUE receipt proves the zero fact's event clock; the root INSERT is trace data.
  const accrual=ready.earning_transitions!==false?`LEFT JOIN LATERAL (SELECT
    CASE WHEN count(*)=1 AND count(fe.id)=1 THEN min(fe.created_at) END AS posted_at,
@@ -144,17 +147,17 @@ export function adminFinanceObservationSql(ready:{native_distribution?:boolean;e
     AND fe.economic_root_id=e.id AND e.economic_root_id=e.id AND fe.subject_user_id=e.beneficiary_user_id AND fe.kind='EARNING_PENDING'
    WHERE t.earning_id=e.id AND t.action='ACCRUE') accrual ON TRUE`:`LEFT JOIN (SELECT NULL::timestamptz AS posted_at,NULL::text AS event_id) accrual ON TRUE`;
  const native=ready.native_distribution?` UNION ALL SELECT 'zero_earning:'||e.id,e.beneficiary_user_id,COALESCE(u.name,e.beneficiary_user_id),'NATIVE_RENTAL_REFERRAL','NATIVE','zzsh','rental_referral_earning',e.id,e.seed_digest,NULL::text,false,
-  ${utc('accrual.posted_at')},${utc('e.created_at')},'0'::text,e.beneficiary_role,e.state,e.order_id,NULL::text,NULL::text,NULL::text,NULL::text,'NATIVE_EARNING_ZERO',jsonb_build_object('earningRole',e.beneficiary_role,'earningFundsDisposition',e.funds_disposition,'earningVersion',e.version::text,'dueAt',${utc('e.due_at')},
-   'eventId',accrual.event_id,'eventAction',CASE WHEN accrual.posted_at IS NOT NULL THEN 'ACCRUE' END,'eventKind',CASE WHEN accrual.posted_at IS NOT NULL THEN 'EARNING_PENDING' END,'postedAt',${utc('accrual.posted_at')},'recordedAt',${utc('e.created_at')})
+  ${utc('accrual.posted_at')},${utc('e.created_at')},'0'::text,e.beneficiary_role,e.state,e.order_id,NULL::text,NULL::text,NULL::text,NULL::text,'NATIVE_EARNING_ZERO',${lookupKeysOnly?'NULL::jsonb':`jsonb_build_object('earningRole',e.beneficiary_role,'earningFundsDisposition',e.funds_disposition,'earningVersion',e.version::text,'dueAt',${utc('e.due_at')},
+   'eventId',accrual.event_id,'eventAction',CASE WHEN accrual.posted_at IS NOT NULL THEN 'ACCRUE' END,'eventKind',CASE WHEN accrual.posted_at IS NOT NULL THEN 'EARNING_PENDING' END,'postedAt',${utc('accrual.posted_at')},'recordedAt',${utc('e.created_at')})`}
   FROM zzsh_order.rental_referral_earning e LEFT JOIN zzsh_auth_user."user" u ON u.id=e.beneficiary_user_id ${accrual} WHERE e.amount_cents=0`:'';
  const legacy=ready.legacy_duty_finance?` UNION ALL SELECT 'zero_duty:'||f.duty_id,f.subject_user_id,COALESCE(u.name,f.subject_user_id),'LEGACY_CONTINUATION_DUTY','LEGACY_CONTINUATION','zzsh','legacy_order_duty',f.duty_id,f.facts_digest,NULL::text,false,
-  ${utc('e.created_at')},${utc('f.created_at')},'0'::text,f.kind,'SETTLED',f.order_id,NULL::text,NULL::text,NULL::text,NULL::text,'LEGACY_DUTY_ZERO',jsonb_build_object('zeroFinalReferenceType',f.ref_type,'zeroFinalReferenceId',f.ref_id,'finalFactsDigest',f.facts_digest,
-   'eventId',e.id,'eventKind',e.kind,'postedAt',${utc('e.created_at')},'recordedAt',${utc('f.created_at')})
+  ${utc('e.created_at')},${utc('f.created_at')},'0'::text,f.kind,'SETTLED',f.order_id,NULL::text,NULL::text,NULL::text,NULL::text,'LEGACY_DUTY_ZERO',${lookupKeysOnly?'NULL::jsonb':`jsonb_build_object('zeroFinalReferenceType',f.ref_type,'zeroFinalReferenceId',f.ref_id,'finalFactsDigest',f.facts_digest,
+   'eventId',e.id,'eventKind',e.kind,'postedAt',${utc('e.created_at')},'recordedAt',${utc('f.created_at')})`}
   FROM zzsh_order.legacy_duty_finance_fact f JOIN zzsh_order.finance_event e ON e.id=f.event_id AND e.economic_root_id=f.root_id AND e.kind='LEGACY_DUTY_SETTLED'
   JOIN zzsh_order.legacy_order_duty d ON d.id=f.duty_id AND d.status='SETTLED' AND d.settled_by='FINANCE' AND d.settled_ref_type='FINANCE_EVENT' AND d.settled_ref_id=f.event_id AND d.settled_ref_digest=f.facts_digest
   LEFT JOIN zzsh_auth_user."user" u ON u.id=f.subject_user_id WHERE f.amount_cents=0 AND f.zero_finalization AND NOT EXISTS(SELECT 1 FROM zzsh_order.settlement_ledger_entry l WHERE l.finance_event_id=f.event_id)`:'';
  const guarantee=ready.guarantee_history?` UNION ALL SELECT 'guarantee_source:'||g.id,g.user_id,COALESCE(u.name,g.user_id),'OWNER_GUARANTEE_HISTORY','LEGACY_MYSQL','legacy_mysql_restore','la_rental_accounts',g.legacy_account_id,g.source_digest,NULL::text,false,
-  NULL::text,${utc('g.imported_at')},NULL::text,'GUARANTEE_HISTORY','HISTORICAL_OBSERVED',NULL::text,g.legacy_account_id,NULL::text,NULL::text,NULL::text,'LEGACY_GUARANTEE_HISTORY',jsonb_build_object('canonical',g.source_canonical,'accountId',g.account_id)
+  NULL::text,${utc('g.imported_at')},NULL::text,'GUARANTEE_HISTORY','HISTORICAL_OBSERVED',NULL::text,g.legacy_account_id,NULL::text,NULL::text,NULL::text,'LEGACY_GUARANTEE_HISTORY',${lookupKeysOnly?'NULL::jsonb':"jsonb_build_object('canonical',g.source_canonical,'accountId',g.account_id)"}
   FROM zzsh_order.legacy_owner_guarantee_observation g LEFT JOIN zzsh_auth_user."user" u ON u.id=g.user_id
   WHERE jsonb_array_length(g.source_canonical::jsonb->'payOrders')>0 OR(g.source_canonical::jsonb->'source'->>'pay_money')::numeric>0`:'';
  return`SELECT o.* FROM (${history}${native}${legacy}${guarantee}) o ORDER BY o.id COLLATE "C" LIMIT $1`;
@@ -275,7 +278,9 @@ export async function readFinanceSourceVersion(client: PoolClient, scope?: Finan
     to_regclass('zzsh_order.prestart_termination') IS NOT NULL AND to_regprocedure('zzsh_order.prestart_liability_complete(text)') IS NOT NULL AS prestart_termination`)).rows[0];
   if (!ready?.ready) throw unavailable("Finance read foundation is not available");
   const scoped = scope ? financeScopedVersionSql(ready, scope) : null;
-  const version=(await client.query(scoped?.text ?? financeVersionSql(ready), scoped?.values ?? [])).rows[0]?.finance_version;
+  // The global batch has no bind parameters, so pg uses the simple protocol and returns one result per statement.
+  const result=await client.query(scoped?.text ?? FINANCE_GLOBAL_READ_PREAMBLE_SQL+'\n'+financeVersionSql(ready),scoped?.values??[]);
+  const version=(Array.isArray(result)?result.at(-1):result)?.rows?.[0]?.finance_version;
   if(typeof version!=="string")throw unavailable("Finance version evidence unavailable");
   const asOf=(await client.query(`SELECT ${utc("clock_timestamp()")} AS at`)).rows[0].at;
   return {ready,version,asOf};
@@ -323,7 +328,7 @@ export async function loadAdminFinanceFacts(client: PoolClient, scope: FinanceLo
   const {ready,version,asOf}=await readFinanceSourceVersion(client, versionScope);
   let lookupPage: FinanceFacts["lookupPage"], entryScope = scope;const ledgerSource=adminFinanceLedgerSql(ready.native_distribution===true,ready.prestart_termination===true),historySource=adminFinanceObservationSql(ready);
   if(scope.lookup){
-    const query=financeLookupPageSql(ledgerSource,historySource,ready,scope), rows=(await client.query(query.text,query.values)).rows, row=rows[0];
+    const query=financeLookupPageSql(ledgerSource,adminFinanceObservationSql(ready,true),ready,scope,true), rows=(await client.query(query.text,query.values)).rows, row=rows[0];
     if(!row||![row.document_count,row.entry_count].every(value=>Number.isSafeInteger(Number(value))&&Number(value)>=0))throw unavailable("Finance page evidence unavailable");
     lookupPage={refs:rows.flatMap(row=>row.ref===null?[]:[String(row.ref)]),documentCount:Number(row.document_count),entryCount:Number(row.entry_count)};
     entryScope={...scope,filters:undefined,documentRefs:lookupPage.refs};

@@ -82,6 +82,7 @@ export const ADMIN_PERMISSION = {
   imSupportTransfer: "im.support.transfer",
   imSupportPresence: "im.support.presence",
   profileAvatarReview: "profile.avatar.review",
+  profileAvatarPolicyManage: "profile.avatar.policy.manage",
   imSupportManagementRead: "im.support.management.read",
   imSupportConfigure: "im.support.configure",
   imSupportIntegrationConfigure: "im.support.integration.configure",

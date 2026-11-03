@@ -334,7 +334,7 @@ export async function runMediaUpload(
     bytes: Buffer;
     authorize: (client: PoolClient) => Promise<void>;
     beforeFinalize?: (client: PoolClient) => Promise<void>;
-    afterFinalize?: (client: PoolClient, asset: UploadedAsset) => Promise<void>;
+    afterFinalize?: (client: PoolClient, asset: UploadedAsset) => Promise<UploadedAsset | void>;
     lockPublishingAccount?: (client: PoolClient, accountId: string) => Promise<unknown>;
   },
 ): Promise<void> {
@@ -368,20 +368,24 @@ export async function runMediaUpload(
         await input.beforeFinalize?.(client);
         if (!prepared) throw new SecurityApiError(500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Media upload was not prepared");
         const asset = await finalizeMediaUpload(client, input.mediaActor, prepared, input.lockPublishingAccount);
-        await input.afterFinalize?.(client, asset);
+        const created = { ...asset };
+        const finalized = (await input.afterFinalize?.(client, asset)) ?? asset;
+        for (const field of ["assetId", "gameId", "purpose", "ownershipKind", "mime", "byteSize", "width", "height", "contentHash"] as const) {
+          if (finalized[field] !== created[field]) throw new SecurityApiError(500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Media finalization changed asset identity");
+        }
         await recordAudit(client, {
           actorType: input.actor.realm,
           actorId: input.actor.id,
           sessionId: input.actor.sessionId,
           action: "supply.media.uploaded",
           objectType: "media_asset",
-          objectId: asset.assetId,
+          objectId: created.assetId,
           outcome: "SUCCESS",
           requestId,
           reason: "supply.media.upload",
-          details: { gameId: asset.gameId, before: null, after: { ...asset, revision: "1" }, result: "CREATED" },
+          details: { gameId: created.gameId, before: null, after: { ...created, revision: "1" }, result: "CREATED" },
         });
-        return { status: 200, body: asset };
+        return { status: 200, body: finalized };
       },
     );
   } catch (error) {

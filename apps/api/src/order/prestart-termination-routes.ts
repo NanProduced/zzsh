@@ -8,6 +8,7 @@ import { bodyOf, ensureOnlyFields, forbidden, invalid, notFound, sendJson } from
 import { requireOrigin, requestPath, runIdempotentWrite, type SupplyResponse } from "../supply/supply-routes";
 import { assertPrestartDecision } from "./prestart-termination-model";
 import { authorizePrestartWrite, readPrestartTermination, requestPrestartTermination, reviewPrestartTermination } from "./prestart-termination";
+import type {LocalFinancialSandbox} from '../finance/local-financial-sandbox-resource';
 
 type Request=Parameters<typeof requestPath>[0];
 type Realm="user"|"admin";
@@ -17,7 +18,7 @@ const CREATE=new RegExp(`^/(${ID})/prestart-termination/requests$`);
 const REVIEW=new RegExp(`^/(${ID})/prestart-termination/(${ID})/review$`);
 
 /** 由已有订单router承接；GET不领取、不触发渠道或补建责任。 */
-export async function handlePrestartTerminationRoute(request:Request,response:SupplyResponse,options:AuthSecurityOptions,realm:Realm):Promise<boolean>{
+export async function handlePrestartTerminationRoute(request:Request,response:SupplyResponse,options:AuthSecurityOptions&{localFinancialSandbox?:LocalFinancialSandbox},realm:Realm):Promise<boolean>{
  const prefix=realm==='user'?'/api/v1/orders':'/api/v1/admin/orders';
  const {path,query}=requestPath(request,prefix),read=READ.exec(path),create=realm==='user'?CREATE.exec(path):null,review=realm==='admin'?REVIEW.exec(path):null;
  if(!read&&!create&&!review)return false;
@@ -30,12 +31,12 @@ export async function handlePrestartTerminationRoute(request:Request,response:Su
   const context=realm==='user'?await readUserContext(request,options):await readAdminContext(request,options);
   const result=await withTransaction(options.pool,async client=>{
    await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
-   return readPrestartTermination(client,{...context,realm,settlementAdmission:options.settlementAdmission},read[1]!);
+   return readPrestartTermination(client,{...context,realm,settlementAdmission:options.settlementAdmission,localFinancialSandbox:options.localFinancialSandbox},read[1]!);
   });sendJson(response,200,result,requestId);return true;
  }
  if(method!=='POST'||!create&&!review)throw notFound();
  if(!requireOrigin(request,response,options,requestId))return true;
- const context=realm==='user'?await readUserContext(request,options):await readAdminContext(request,options),actor={...context,realm,settlementAdmission:options.settlementAdmission};
+ const context=realm==='user'?await readUserContext(request,options):await readAdminContext(request,options),actor={...context,realm,settlementAdmission:options.settlementAdmission,localFinancialSandbox:options.localFinancialSandbox};
  const body=bodyOf(request),orderId=(create??review)![1]!;
  async function command(operation:string,resourceId:string,frozen:unknown,action:(c:PoolClient)=>Promise<{status:number;body:unknown}>){
   let actionCompleted=false;

@@ -34,7 +34,7 @@ export async function handleAdminNativeRefundRoute(request: SupplyNodeRequest, r
     if (method === "POST") { if (!requireOrigin(request, response, security, requestId)) return; }
     const context = await readAdminContext(request, security), orderId = match[1]!;
     if (method === "GET") {
-      sendJson(response, 200, await readAdminNativeRefunds(security.pool, { actor: context, orderId }), requestId);
+      sendJson(response, 200, await readAdminNativeRefunds(security.pool, { actor: context, orderId,execution:options.refund }), requestId);
       return;
     }
     const refund = options.refund ?? {};

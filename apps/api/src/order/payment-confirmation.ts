@@ -3,12 +3,16 @@ import { createHash, randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 
 import { recordAudit, SecurityApiError } from "../auth/security-core";
+import { assertUserContextInTransaction } from "../auth/user-identity";
 import { ConfigurationError, type AppConfig } from "../config/config";
-import { invalid, notFound } from "../supply/supply-util";
+import { conflict, invalid, notFound } from "../supply/supply-util";
 import { cancelExpiredReservation, lockOrderPartiesInOrder } from "./order";
 import { readVerifiedJoinpayFactScope, type FormalJoinpayPaymentFact } from "./joinpay-collection-source";
 import { assertNativePaymentDistributionStore } from "../finance/distribution-payment-store";
 import { REGRESSION_DATABASE, REGRESSION_MARKER, REGRESSION_RUNTIME_USER } from "../config/test-resource";
+import { assertLocalSandboxOrderAdmission, localFinancialSandboxRegistration, type LocalFinancialSandbox } from "../finance/local-financial-sandbox-resource";
+import { canonicalize } from "../supply/content-hash";
+import { localSandboxPaymentAnchor } from "./local-sandbox-checkout-crypto";
 
 export type PaymentInput = Readonly<{
   orderId: string;
@@ -21,7 +25,8 @@ export type PaymentInput = Readonly<{
 }>;
 type ControlledPaymentFact = PaymentInput & { readonly source: "CONTROLLED"; readonly merchantScopeId: string };
 type VerifiedPaymentFact = ControlledPaymentFact | FormalJoinpayPaymentFact;
-const verifiedFacts = new WeakMap<object, { appId: string; database: string; runtimeUser: string; regressionOid?: number }>();
+type ControlledScope = { appId: string; database: string; runtimeUser: string; regressionOid?: number; sandbox?: LocalFinancialSandbox; payerUserId?: string; payerSessionId?: string; checkoutExpiresAt?: string };
+const verifiedFacts = new WeakMap<object, ControlledScope>();
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const INPUT_KEYS = ["orderId", "merchantOrderNo", "providerTransactionId", "amountCents", "currency", "providerPaidAt", "requestId"];
 
@@ -51,9 +56,24 @@ export function createControlledPaymentSource(options: {
   const allowed = new Set(options.allowedOrderIds);
   const scope = Object.freeze({ appId, database: config.database.name, runtimeUser: config.database.user,
     ...(regression ? { regressionOid: options.resourceOid } : {}) });
+  return controlledPaymentIssuer(scope, merchantScopeId, allowed);
+}
+
+/** The local environment admits objects through the original payer/order/audit kernel, not a bounded fixture list. */
+export function createSandboxControlledPaymentSource(options: { sandbox: LocalFinancialSandbox; payerUserId: string; payerSessionId: string; checkoutExpiresAt: string; appId: string }): (input: PaymentInput) => ControlledPaymentFact {
+  const proof = localFinancialSandboxRegistration(options.sandbox), resource = proof.registration.resource;
+  if (![options.payerUserId,options.payerSessionId,options.appId].every(value=>typeof value==='string'&&ID.test(value))
+    || typeof options.checkoutExpiresAt !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(options.checkoutExpiresAt)
+    || !Number.isFinite(Date.parse(options.checkoutExpiresAt)) || new Date(options.checkoutExpiresAt).toISOString() !== options.checkoutExpiresAt) throw invalid("Original local payer, session and checkout deadline required");
+  return controlledPaymentIssuer({ appId: options.appId, database: resource.database, runtimeUser: resource.runtimeRole,
+    sandbox: options.sandbox, payerUserId: options.payerUserId, payerSessionId: options.payerSessionId,
+    checkoutExpiresAt: options.checkoutExpiresAt }, "local_sandbox_" + proof.digest.slice(0, 32));
+}
+
+function controlledPaymentIssuer(scope: ControlledScope, merchantScopeId: string, allowed?: ReadonlySet<string>): (input: PaymentInput) => ControlledPaymentFact {
   return (input) => {
     if (!input || Object.keys(input).some((key) => !INPUT_KEYS.includes(key))
-      || !allowed.has(input.orderId)
+      || (allowed !== undefined && !allowed.has(input.orderId))
       || ![input.orderId, input.merchantOrderNo, input.providerTransactionId, input.requestId].every((value) => typeof value === "string" && ID.test(value))
       || typeof input.amountCents !== "string" || !/^(0|[1-9]\d{0,24})$/.test(input.amountCents)
       || typeof input.currency !== "string" || !/^[A-Z]{3}$/.test(input.currency)
@@ -70,6 +90,7 @@ export function createControlledPaymentSource(options: {
 /** Only the original process-local fact can authorize service-level checks on the one regression resource. */
 export async function assertControlledSettlementResource(client: PoolClient, fact: unknown, orderId: string): Promise<void> {
   const scope = fact && typeof fact === "object" ? verifiedFacts.get(fact) : undefined;
+  if (scope?.sandbox && (fact as PaymentInput).orderId === orderId) { await assertLocalSandboxOrderAdmission(client, scope.sandbox, orderId); return; }
   if (!scope?.regressionOid || (fact as PaymentInput).orderId !== orderId || process.env.NODE_ENV === "production") throw invalid("Controlled settlement fact is not bound");
   await assertRegressionPaymentResource(client,scope);
 }
@@ -93,6 +114,28 @@ export type PaymentResult = {
   replay: boolean;
 };
 
+/** Initial declarations are written only after the original graph/users/account/order locks.
+ * Replays merely verify the immutable source. No FK write may precede a later graph lock. */
+async function sandboxPaymentDeclaration(client: PoolClient, scope: ControlledScope, fact: VerifiedPaymentFact, create = false) {
+  if (!scope.sandbox) throw invalid("Original sandbox scope required");
+  const admissionId = await assertLocalSandboxOrderAdmission(client, scope.sandbox, fact.orderId);
+  const proof = localFinancialSandboxRegistration(scope.sandbox), anchor = localSandboxPaymentAnchor(scope.sandbox, fact.orderId);
+  if (fact.source !== 'CONTROLLED' || fact.merchantScopeId !== anchor.merchantScopeId || fact.providerTransactionId !== anchor.providerTransactionId
+    || fact.requestId !== anchor.requestId) throw invalid("Original sandbox payment anchor differs");
+  const input = Object.fromEntries(INPUT_KEYS.map(key => [key, Reflect.get(fact,key)])), canonical = canonicalize(input);
+  const digest = createHash('sha256').update(canonical).digest('hex');
+  if (create) await client.query(`INSERT INTO zzsh_order.controlled_payment_declaration(id,mode,source_event_key,resource_oid,app_id,merchant_scope_id,
+    admission_id,admission_revision,order_id,merchant_order_no,provider_transaction_id,canonical_payment,payment_digest,approval_digest,created_by_admin_id,reason)
+    VALUES($1,'LOCAL_CONTROLLED_DECLARED_PAYMENT',$2,$3,$4,$5,$6,1,$7,$8,$9,$10,$11,$12,$13,'Signed local sandbox checkout; no bank transfer') ON CONFLICT(id) DO NOTHING`,
+  [anchor.declarationId,'local-controlled-payment:'+anchor.declarationId,proof.registration.resource.resourceOid,scope.appId,anchor.merchantScopeId,
+    admissionId,fact.orderId,fact.merchantOrderNo,anchor.providerTransactionId,canonical,digest,proof.digest,proof.registration.approvedByAdminId]);
+  const original = (await client.query(`SELECT canonical_payment,payment_digest,approval_digest,resource_oid,app_id
+    FROM zzsh_order.controlled_payment_declaration WHERE order_id=$1 AND merchant_scope_id=$2 AND provider_transaction_id=$3`,
+  [fact.orderId,fact.merchantScopeId,fact.providerTransactionId])).rows[0];
+  if (!original || original.canonical_payment !== canonical || original.payment_digest !== digest || original.approval_digest !== proof.digest
+    || Number(original.resource_oid) !== proof.registration.resource.resourceOid || original.app_id !== scope.appId) throw invalid("Original local sandbox payment event unavailable");
+}
+
 /** Caller owns one transaction; audit failure rolls back the entire acceptance. */
 export async function confirmOrderPayment(client: PoolClient, fact: VerifiedPaymentFact, distribution?: PaymentDistributionStore): Promise<PaymentResult> {
   const formalScope = fact?.source === "JOINPAY" ? await readVerifiedJoinpayFactScope(client, fact) : null;
@@ -100,6 +143,12 @@ export async function confirmOrderPayment(client: PoolClient, fact: VerifiedPaym
   const scope = formalScope ?? controlledScope;
   if (!scope) throw invalid("Payment fact is not verified");
   if (controlledScope?.regressionOid !== undefined) await assertRegressionPaymentResource(client,controlledScope);
+  if (controlledScope?.sandbox) {
+    await assertLocalSandboxOrderAdmission(client, controlledScope.sandbox, fact.orderId);
+    const payer = (await client.query("SELECT renter_user_id FROM zzsh_order.rental_order WHERE id=$1", [fact.orderId])).rows[0];
+    if (!payer || payer.renter_user_id !== controlledScope.payerUserId) throw notFound();
+    await assertUserContextInTransaction(client, { userId: controlledScope.payerUserId!, sessionId: controlledScope.payerSessionId! }, "READ");
+  }
   if (formalScope) assertNativePaymentDistributionStore(distribution, formalScope.admissionSha256);
   const identity = (await client.query(`SELECT current_database() AS db, current_user AS actor`)).rows[0];
   if (identity.db !== scope.database || identity.actor !== scope.runtimeUser) throw invalid("Payment resource mismatch");
@@ -120,6 +169,7 @@ export async function confirmOrderPayment(client: PoolClient, fact: VerifiedPaym
       WHERE source=$1 AND merchant_scope_id=$2 AND provider_transaction_id=$3`,
   [fact.source, fact.merchantScopeId, fact.providerTransactionId])).rows[0];
   if (existing) {
+    if (controlledScope?.sandbox) await sandboxPaymentDeclaration(client, controlledScope, fact);
     const differences = (["orderId", "merchantOrderNo", "amountCents", "currency", "providerPaidAt"] as const)
       .filter((key) => existing[key] !== fact[key]);
     if (differences.length) {
@@ -142,6 +192,8 @@ export async function confirmOrderPayment(client: PoolClient, fact: VerifiedPaym
   const located = (await client.query(`SELECT account_id, renter_user_id, owner_user_id FROM zzsh_order.rental_order WHERE id=$1`, [fact.orderId])).rows[0];
   if (!located) throw notFound();
   await lockOrderPartiesInOrder(client, located.renter_user_id, located.owner_user_id);
+  if (controlledScope?.sandbox) await assertUserContextInTransaction(client,
+    { userId: controlledScope.payerUserId!, sessionId: controlledScope.payerSessionId! }, "READ");
   await client.query(`SELECT id FROM zzsh_supply.rental_account WHERE id=$1 FOR UPDATE`, [located.account_id]);
   const order = (await client.query(`SELECT status, display_no, currency,
       (rental_amount_cents+deposit_amount_cents)::text AS total,
@@ -149,10 +201,15 @@ export async function confirmOrderPayment(client: PoolClient, fact: VerifiedPaym
       FROM zzsh_order.rental_order WHERE id=$1 FOR UPDATE`, [fact.orderId])).rows[0];
   // Capture the decision clock AFTER waiting for row locks. Provider time never revives an expired hold.
   const timing = (await client.query(`SELECT to_char(t AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS accepted,
-      t < $1::timestamptz AS open FROM (SELECT clock_timestamp() AS t) clock`, [order.hold])).rows[0];
+      t < $1::timestamptz AS open${controlledScope?.sandbox ? ",t < $2::timestamptz AS checkout_open" : ""}
+      FROM (SELECT clock_timestamp() AS t) clock`, controlledScope?.sandbox ? [order.hold,controlledScope.checkoutExpiresAt] : [order.hold])).rows[0];
   const mismatch = (formalScope ? formalScope.merchantOrderNo : order.display_no) !== fact.merchantOrderNo || order.currency !== fact.currency || order.total !== fact.amountCents;
   const reasonCode = mismatch ? "BINDING_MISMATCH" : order.status === "PAID" ? "DUPLICATE_PAYMENT"
     : order.status !== "PENDING_PAYMENT" || !timing.open ? "LATE_PAYMENT" : null;
+  if (controlledScope?.sandbox) {
+    if (timing.checkout_open !== true || reasonCode !== null) throw conflict("Signed local checkout is no longer payable; read original payment status");
+    await sandboxPaymentDeclaration(client, controlledScope, fact, true);
+  }
   if (order.status === "PENDING_PAYMENT" && !timing.open) {
     await cancelExpiredReservation(client, fact.orderId, order.hold, fact.requestId);
   }

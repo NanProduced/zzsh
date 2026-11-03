@@ -1,4 +1,6 @@
 export type AdminAvatarPreset = { presetId: string; version: number; url: string; width: number; height: number };
+export type AdminAvatarUploadPolicy = { requiresReview: boolean; revision: string; available: boolean };
+export type AdminAvatarUploadResult = { assetId: string | null; avatarSubmission: { disposition: 'PENDING_REVIEW' | 'APPLIED_BY_POLICY'; requiresReview: boolean; policyRevision: string; approvalSource: 'MANUAL_REVIEW_REQUIRED' | 'SYSTEM_POLICY' } | null };
 export type AdminAvatarState = {
   revision: string;
   updatedAt: string | null;
@@ -6,7 +8,8 @@ export type AdminAvatarState = {
   defaultPresetId: string;
   presets: AdminAvatarPreset[];
   pending: { assetId: string; submittedAt: string | null; reviewState: string; width: number; height: number; byteSize: string } | null;
-  lastReview: { assetId: string; state: "APPROVED" | "REJECTED" | "QUARANTINED" | "WITHDRAWN"; reason: string | null; reviewedAt: string; applied: boolean } | null;
+  lastReview: { assetId: string; state: "APPROVED" | "REJECTED" | "QUARANTINED" | "WITHDRAWN"; reason: string | null; reviewedAt: string; applied: boolean; source?: 'HUMAN_REVIEW' | 'SYSTEM_POLICY'; policyRevision?: string | null } | null;
+  policy?: AdminAvatarUploadPolicy;
   changed?: boolean;
 };
 export type AdminAvatarReviewItem = {
@@ -23,6 +26,8 @@ export type AdminAvatarReviewItem = {
   accessClass: string;
   reviewReason: string | null;
   revision: string;
+  approvalSource?: 'SYSTEM_POLICY' | 'HUMAN_REVIEW' | 'MANUAL_REVIEW_REQUIRED';
+  policyRevision?: string | null;
 };
 
 export class AdminAvatarError extends Error {
@@ -52,6 +57,19 @@ function rev(value: unknown): string {
   if (typeof value !== "string" || !/^(?:0|[1-9]\d{0,18})$/.test(value)) throw new AdminAvatarError("头像版本不正确", 0, "CONTRACT");
   return value;
 }
+function uploadPolicy(value: unknown): AdminAvatarUploadPolicy {
+  const row = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  if (row.available !== true || typeof row.requiresReview !== 'boolean' || typeof row.revision !== 'string' || !/^[1-9]\d{0,18}$/.test(row.revision)) return { requiresReview: true, revision: '0', available: false };
+  return { requiresReview: row.requiresReview, revision: row.revision, available: true };
+}
+export function parseAdminAvatarUploadResult(value: unknown): AdminAvatarUploadResult {
+  const body = obj(value), assetId = typeof body.assetId === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(body.assetId) ? body.assetId : null;
+  if (body.avatarSubmission === undefined) return { assetId, avatarSubmission: null };
+  const row = obj(body.avatarSubmission), pending = row.disposition === 'PENDING_REVIEW' && row.requiresReview === true && row.approvalSource === 'MANUAL_REVIEW_REQUIRED';
+  const applied = row.disposition === 'APPLIED_BY_POLICY' && row.requiresReview === false && row.approvalSource === 'SYSTEM_POLICY';
+  if (!assetId || !pending && !applied || typeof row.policyRevision !== 'string' || !/^(0|[1-9]\d{0,18})$/.test(row.policyRevision) || applied && row.policyRevision === '0') throw new AdminAvatarError('头像上传回执无法确认', 0, 'CONTRACT');
+  return { assetId, avatarSubmission: { disposition: row.disposition as 'PENDING_REVIEW' | 'APPLIED_BY_POLICY', requiresReview: row.requiresReview as boolean, policyRevision: row.policyRevision, approvalSource: row.approvalSource as 'MANUAL_REVIEW_REQUIRED' | 'SYSTEM_POLICY' } };
+}
 function preset(value: unknown): AdminAvatarPreset {
   const row = obj(value);
   if (typeof row.version !== "number" || !Number.isInteger(row.version) || row.version < 1 || typeof row.width !== "number" || typeof row.height !== "number") throw new AdminAvatarError("默认头像清单不正确", 0, "CONTRACT");
@@ -69,9 +87,9 @@ export function parseAdminAvatarState(value: unknown): AdminAvatarState {
   const lastReview = body.lastReview == null ? null : (() => {
     const row = obj(body.lastReview), state = String(row.state);
     if (!["APPROVED", "REJECTED", "QUARANTINED", "WITHDRAWN"].includes(state)) throw new AdminAvatarError("审核结果状态不正确", 0, "CONTRACT");
-    return { assetId: str(row.assetId, "lastReview.assetId"), state: state as AdminAvatarState["lastReview"] extends null ? never : "APPROVED" | "REJECTED" | "QUARANTINED" | "WITHDRAWN", reason: typeof row.reason === "string" ? row.reason : null, reviewedAt: str(row.reviewedAt, "lastReview.reviewedAt"), applied: row.applied === true };
+    return { assetId: str(row.assetId, "lastReview.assetId"), state: state as AdminAvatarState["lastReview"] extends null ? never : "APPROVED" | "REJECTED" | "QUARANTINED" | "WITHDRAWN", reason: typeof row.reason === "string" ? row.reason : null, reviewedAt: str(row.reviewedAt, "lastReview.reviewedAt"), applied: row.applied === true, ...(row.source === 'SYSTEM_POLICY' || row.source === 'HUMAN_REVIEW' ? { source: row.source as 'SYSTEM_POLICY' | 'HUMAN_REVIEW' } : {}), policyRevision: typeof row.policyRevision === 'string' && /^[1-9]\d{0,18}$/.test(row.policyRevision) ? row.policyRevision : null };
   })();
-  return { revision: rev(body.revision), updatedAt: typeof body.updatedAt === "string" ? body.updatedAt : null, current: { kind: current.kind, assetId: typeof current.assetId === "string" ? current.assetId : null, presetId: typeof current.presetId === "string" ? current.presetId : null, url: avatarUrl(current.url), currentVersion: rev(current.currentVersion) }, defaultPresetId: str(body.defaultPresetId, "defaultPresetId"), presets, pending, lastReview, ...(typeof body.changed === "boolean" ? { changed: body.changed } : {}) };
+  return { revision: rev(body.revision), updatedAt: typeof body.updatedAt === "string" ? body.updatedAt : null, current: { kind: current.kind, assetId: typeof current.assetId === "string" ? current.assetId : null, presetId: typeof current.presetId === "string" ? current.presetId : null, url: avatarUrl(current.url), currentVersion: rev(current.currentVersion) }, defaultPresetId: str(body.defaultPresetId, "defaultPresetId"), presets, pending, lastReview, policy: uploadPolicy(body.policy), ...(typeof body.changed === "boolean" ? { changed: body.changed } : {}) };
 }
 
 async function errorOf(response: Response): Promise<AdminAvatarError> {
@@ -99,8 +117,8 @@ export async function createAdminAvatarUploadIntent(file: File, key: string, exp
   const row = obj(await request("/api/bff/admin/profile/avatar/upload-intents", { method: "POST", headers: { "content-type": "application/json", "idempotency-key": key }, body: JSON.stringify({ mime: file.type, size: file.size, expectedRevision }) }, signal));
   return { intentId: str(row.intentId, "intentId"), uploadToken: str(row.uploadToken, "uploadToken") };
 }
-export async function uploadAdminAvatar(intentId: string, token: string, file: File, key: string, signal?: AbortSignal): Promise<void> {
-  await request(`/api/bff/admin/profile/avatar/uploads/${encodeURIComponent(intentId)}`, { method: "PUT", headers: { "content-type": file.type, "x-upload-token": token, "idempotency-key": key }, body: file }, signal);
+export async function uploadAdminAvatar(intentId: string, token: string, file: File, key: string, signal?: AbortSignal): Promise<AdminAvatarUploadResult> {
+  return parseAdminAvatarUploadResult(await request(`/api/bff/admin/profile/avatar/uploads/${encodeURIComponent(intentId)}`, { method: "PUT", headers: { "content-type": file.type, "x-upload-token": token, "idempotency-key": key }, body: file }, signal));
 }
 export function adminAvatarPreviewUrl(assetId: string): string {
   return `/api/bff/admin/profile/avatar/preview?v=${encodeURIComponent(assetId)}`;
@@ -121,6 +139,8 @@ export async function readAdminAvatarReviews(state: string, cursor: string | nul
       byteSize: typeof row.byteSize === "string" ? row.byteSize : "0", mime: str(row.mime, "mime"), reviewState: str(row.reviewState, "reviewState"),
       accessClass: typeof row.accessClass === "string" ? row.accessClass : "PRIVATE_REVIEW",
       reviewReason: typeof row.reviewReason === "string" ? row.reviewReason : null, revision: str(row.revision, "revision"),
+      ...(['SYSTEM_POLICY','HUMAN_REVIEW','MANUAL_REVIEW_REQUIRED'].includes(String(row.approvalSource)) ? { approvalSource: row.approvalSource as AdminAvatarReviewItem['approvalSource'] } : {}),
+      policyRevision: typeof row.policyRevision === 'string' && /^[1-9]\d{0,18}$/.test(row.policyRevision) ? row.policyRevision : null,
     };
   }) : [];
   return { items, nextCursor: typeof body.nextCursor === "string" ? body.nextCursor : null };

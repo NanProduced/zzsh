@@ -164,6 +164,49 @@ function router(routes, log) {
 
 const session = (userId) => ({ status: "authenticated", userId, identityVersion: 1, revalidate() {}, confirm: async () => "authenticated", signOut: async () => undefined });
 
+const localAvailability=()=>({contractVersion:'local-sandbox-checkout-availability.v1',scope:'LOCAL_CONTROLLED',orderId:'order_A',checkoutEnabled:true,observedAt:new Date().toISOString(),productionPaymentCapability:false,bankArrival:'UNKNOWN'});
+const localCheckout=key=>({contractVersion:'local-sandbox-checkout.v1',scope:'LOCAL_CONTROLLED',dataOrigin:'LOCAL_CONTROLLED',orderId:'order_A',productionPaymentCapability:false,checkout:{id:'sandbox_checkout_one',displayNo:'ZZ-1',amount:{cents:'47000',currency:'CNY'},expiresAt:new Date(Date.now()+120000).toISOString(),url:`http://127.0.0.1:4222/api/v1/orders/order_A/local-checkouts/page?${new URLSearchParams({key})}`,ticket:'SIGNED_TICKET_MUST_NOT_ENTER_STORAGE',completeKey:'completion-key'}});
+const localProps=extra=>({order:{...paidOrder,status:'PENDING_PAYMENT'},blocked:false,onChanged(){},onModeChange(){},onPendingChange(){},children:React.createElement('button',{type:'button'},'旧受控入口'),...extra});
+
+test('local checkout is explicitly discovered, keeps its own issue key and only opens a validated API page',async()=>withDom(async window=>{
+ window.happyDOM.setURL('http://127.0.0.1:4220/account');const actor=session('user_A'),{LocalSandboxPaymentAction}=loadComponent('apps/web/src/components/order/order-trade-actions.tsx',actor);let posts=0,refreshes=0,originalKey;
+ const probe=createProbe(window,LocalSandboxPaymentAction,localProps({onChanged(){refreshes++}}),async(url,init={})=>{
+  assert.equal(new Headers(init.headers).get('x-zzsh-expected-user-id'),'user_A');assert.match(String(url),/\/api\/orders\/order_A\/local-checkouts$/);
+  if(init.method==='POST'){posts++;originalKey=new Headers(init.headers).get('idempotency-key');assert.deepEqual(JSON.parse(init.body),{});assert.equal(intents.loadIntent('user_A','order.local-checkout','order_A').key,originalKey);return json(localCheckout(originalKey))}return json(localAvailability());
+ });
+ try{await probe.render();assert.equal(posts,0);assert.doesNotMatch(probe.host.textContent,/旧受控入口/);assert.match(probe.host.textContent,/不会向银行或支付机构发起真实支付/);await probe.click('获取本地模拟付款凭据');assert.equal(posts,1);assert.equal(intents.loadIntent('user_A','order.local-checkout','order_A'),null);const a=probe.host.querySelector('a');assert.equal(new URL(a.href).searchParams.get('key'),originalKey);assert.equal(a.target,'_blank');assert.equal(a.rel,'noopener noreferrer');assert.match(probe.host.textContent,/470\.00/);assert.doesNotMatch(probe.host.textContent,/SIGNED_TICKET/);assert.doesNotMatch(JSON.stringify(window.sessionStorage),/SIGNED_TICKET/);await probe.click('返回后刷新原订单');assert.equal(refreshes,1);assert.equal(posts,1)}finally{await probe.dispose(()=>intents.clearIntent('user_A','order.local-checkout','order_A'))}
+}));
+
+test('an unknown local issue is recovered by GET with the same key and is never resubmitted',async()=>withDom(async window=>{
+ window.happyDOM.setURL('http://127.0.0.1:4220/account');const {LocalSandboxPaymentAction}=loadComponent('apps/web/src/components/order/order-trade-actions.tsx',session('user_A'));let posts=0,key,known=false,reads=0;
+ const probe=createProbe(window,LocalSandboxPaymentAction,localProps(),async(url,init={})=>{
+  if(init.method==='POST'){posts++;key=new Headers(init.headers).get('idempotency-key');throw new Error('transport ended after dispatch')}
+  if(String(url).includes('/receipt?')){reads++;assert.equal(new URL(String(url),'http://local').searchParams.get('key'),key);return json({scope:'LOCAL_CONTROLLED',knowledge:known?'KNOWN':'UNKNOWN',receipt:known?localCheckout(key):null,mayReapply:false})}return json(localAvailability());
+ });
+ try{await probe.render();await probe.click('获取本地模拟付款凭据');assert.equal(posts,1);assert.match(probe.host.textContent,/查询原申请/);assert.equal(probe.buttons().some(x=>x==='获取本地模拟付款凭据'),false);const before=intents.loadIntent('user_A','order.local-checkout','order_A');await probe.click('查询原本地凭据申请');assert.equal(intents.loadIntent('user_A','order.local-checkout','order_A').key,before.key);assert.deepEqual(before.body,{});known=true;await probe.click('查询原本地凭据申请');assert.equal(reads,2);assert.equal(posts,1);assert.equal(intents.loadIntent('user_A','order.local-checkout','order_A'),null);assert.ok(probe.host.querySelector('a'))}finally{await probe.dispose(()=>intents.clearIntent('user_A','order.local-checkout','order_A'))}
+}));
+
+test('local checkout absence falls back, but unavailable or malformed capability cannot expose an entry',async()=>withDom(async window=>{
+ window.happyDOM.setURL('http://127.0.0.1:4220/account');const {LocalSandboxPaymentAction}=loadComponent('apps/web/src/components/order/order-trade-actions.tsx',session('user_A'));
+ for(const [status,body,expected]of[[404,{code:'NOT_FOUND'},'旧受控入口'],[503,{code:'EVIDENCE_UNAVAILABLE'},'暂无法确认'],[200,{...localAvailability(),scope:'NATIVE'},'暂无法确认'],[200,{...localAvailability(),productionPaymentCapability:true},'暂无法确认']]){
+  let posts=0;const p=createProbe(window,LocalSandboxPaymentAction,localProps(),async(_url,init={})=>{if(init.method==='POST')posts++;return json(body,status)});
+  try{await p.render();assert.ok(p.host.textContent.includes(expected));assert.equal(posts,0);if(status!==404){assert.doesNotMatch(p.host.textContent,/旧受控入口/);assert.equal(p.host.querySelector('a'),null);assert.equal(p.buttons().some(x=>x==='获取本地模拟付款凭据'),false)}}finally{await p.dispose()}
+ }
+}));
+
+test('local checkout rejects foreign URLs, altered original money/key and formal capability without retaining tickets',()=>{
+ const key='original-key',valid=localCheckout(key),expected={orderId:'order_A',displayNo:'ZZ-1',amountCents:'47000',key,origin:'http://127.0.0.1:4220'};
+ const safe=orderClient.parseLocalCheckout(valid,expected);assert.equal(safe.ticket,undefined);assert.equal(safe.completeKey,undefined);
+ const changes=[v=>({...v,scope:'NATIVE'}),v=>({...v,productionPaymentCapability:true}),v=>({...v,orderId:'other'}),v=>({...v,checkout:{...v.checkout,displayNo:'OTHER'}}),v=>({...v,checkout:{...v.checkout,amount:{cents:'47001',currency:'CNY'}}}),...['https://evil.invalid/api/v1/orders/order_A/local-checkouts/page?key=original-key','http://user:password@127.0.0.1:4222/api/v1/orders/order_A/local-checkouts/page?key=original-key','http://127.0.0.1:4222/api/v1/orders/other/local-checkouts/page?key=original-key','http://127.0.0.1:4222/api/v1/orders/order_A/local-checkouts/page?key=changed','http://127.0.0.1:4222/api/v1/orders/order_A/local-checkouts/page?key=original-key&key=original-key','http://127.0.0.1:4222/api/v1/orders/order_A/local-checkouts/page?key=original-key#secret','http://127.0.0.1/api/v1/orders/order_A/local-checkouts/page?key=original-key'].map(url=>v=>({...v,checkout:{...v.checkout,url}}))];
+ for(const change of changes)assert.throws(()=>orderClient.parseLocalCheckout(change(valid),expected),OrderRequestError);assert.throws(()=>orderClient.parseLocalCheckout(valid,{...expected,origin:'https://production.invalid'}),OrderRequestError);
+});
+
+test('late local checkout replies cannot follow an identity switch or leak the old receipt',async()=>withDom(async window=>{
+ window.happyDOM.setURL('http://127.0.0.1:4220/account');const actor=session('user_A'),{LocalSandboxPaymentAction}=loadComponent('apps/web/src/components/order/order-trade-actions.tsx',actor),pending=deferred();let first=true,key;
+ const p=createProbe(window,LocalSandboxPaymentAction,localProps(),async(_url,init={})=>{if(init.method==='POST'){key=new Headers(init.headers).get('idempotency-key');return pending.promise}if(first){first=false;return json(localAvailability())}return json({...localAvailability(),checkoutEnabled:false})});
+ try{await p.render();const button=[...p.host.querySelectorAll('button')].find(x=>x.textContent==='获取本地模拟付款凭据');await React.act(async()=>{button.click();await tick()});actor.userId='user_B';actor.identityVersion++;await p.render();await React.act(async()=>{pending.resolve(json(localCheckout(key)));await tick()});assert.equal(p.host.querySelector('a'),null);assert.doesNotMatch(p.host.textContent,/470\.00|ZZ-1/);assert.equal(intents.loadIntent('user_A','order.local-checkout','order_A'),null);assert.equal(intents.loadIntent('user_B','order.local-checkout','order_A'),null)}finally{await p.dispose(()=>intents.clearIntent('user_A','order.local-checkout','order_A'))}
+}));
+
 test('未开租结束组件只读原责任/未知退款，不显示正常结算或银行到账成功',async()=>withDom(async window=>{
  const current=session('user_A'),{PrestartTerminationPanel}=loadComponent('apps/web/src/components/order/prestart-termination-panel.tsx',current),calls=[];
  const at='2026-10-28T00:00:00.000000Z',read={contractVersion:'order-prestart-termination.v1',orderId:'order_A',orderRevision:'2',eligibility:{allowed:false,reason:'ORDER_NOT_PAID',refundCents:null},

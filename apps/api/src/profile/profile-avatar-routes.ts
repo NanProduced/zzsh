@@ -1,7 +1,7 @@
 import type { INestApplication } from "@nestjs/common";
 import type { PoolClient } from "pg";
 
-import { ADMIN_PERMISSION, requirePermission } from "../auth/admin-authorization";
+import { ADMIN_PERMISSION, hasPermission, requirePermission } from "../auth/admin-authorization";
 import { assertAdminContextInTransaction, readAdminContext } from "../auth/auth-security";
 import { recordAudit, SecurityApiError, withTransaction } from "../auth/security-core";
 import { assertUserContextInTransaction, readUserContext } from "../auth/user-identity";
@@ -13,7 +13,6 @@ import {
   applyAvatarReview,
   avatarImagePath,
   avatarSubjectOfAsset,
-  bindPendingAvatar,
   isAvatarAsset,
   isAvatarAssetPubliclyEligible,
   listAvatarReviews,
@@ -31,6 +30,8 @@ import {
   profileAvatarPreset,
   type ProfileAvatarRealm,
 } from "./profile-avatar-presets";
+import { readAvatarUploadPolicy, updateAvatarUploadPolicy } from "./avatar-policy";
+import { finalizeAvatarSubmission } from "./avatar-submission";
 
 export type ProfileAvatarRuntimeOptions = SupplyRuntimeOptions & { mediaStorage: MediaStorage };
 
@@ -249,7 +250,7 @@ async function uploadAvatar(
       await requireAvatarUploadIntent(client, { realm, id: subjectId }, intentId);
     },
     afterFinalize: async (client, asset) => {
-      await bindPendingAvatar(client, realm, subjectId, asset.assetId, intentId, { realm, id: subjectId, sessionId: actor.sessionId }, requestIdValue);
+      return finalizeAvatarSubmission(client, realm, subjectId, asset, intentId, { realm, id: subjectId, sessionId: actor.sessionId }, requestIdValue);
     },
   });
 }
@@ -291,7 +292,7 @@ async function selectAvatarDefault(
       }
       await lockAvatarSubject(client, realm, subjectId);
       const result = await selectDefaultAvatar(client, realm, subjectId, normalized, { realm, id: subjectId, sessionId: actor.sessionId }, requestIdValue);
-      return { status: 200, body: { changed: result.changed, ...result.state } };
+      return { status: 200, body: { changed: result.changed, ...result.state, policy: await readAvatarUploadPolicy(client) } };
     },
   );
 }
@@ -301,10 +302,10 @@ async function readAvatarState(options: ProfileAvatarRuntimeOptions, request: Su
   return withTransaction(options.pool, async (client) => {
     if (realm === "user") {
       await assertUserContextInTransaction(client, context as { userId: string; sessionId: string }, "READ");
-      return profileAvatarWithPending(client, "user", context.userId);
+      return { ...await profileAvatarWithPending(client, "user", context.userId), policy: await readAvatarUploadPolicy(client) };
     }
     await assertAdminContextInTransaction(client, { userId: context.userId, sessionId: context.sessionId });
-    return profileAvatarWithPending(client, "admin", context.userId);
+    return { ...await profileAvatarWithPending(client, "admin", context.userId), policy: await readAvatarUploadPolicy(client) };
   });
 }
 
@@ -482,6 +483,43 @@ export async function handleProfileAvatarAdminReviewRoute(request: SupplyNodeReq
   try {
     if (method === "POST" || method === "PUT") idempotencyKey(request);
     if (!requireOrigin(request, response, options, requestIdValue)) return;
+    if (path === "/policy" && method === "GET") {
+      if (query.size) throw invalid("Avatar policy does not accept filters");
+      const context = await readAdminContext(request, options);
+      const result = await withTransaction(options.pool, async client => {
+        await assertAdminContextInTransaction(client, context);
+        const access = await requireAdminAccess(client, context.userId);
+        const canManage = hasPermission(access, ADMIN_PERMISSION.profileAvatarPolicyManage);
+        if (!canManage) requirePermission(access, ADMIN_PERMISSION.profileAvatarReview);
+        return { policy: await readAvatarUploadPolicy(client), canManage };
+      });
+      sendJson(response, 200, result, requestIdValue); return;
+    }
+    if (path === "/policy/operation-result" && method === "GET") {
+      if ([...query.keys()].some(k => !["requiresReview", "expectedRevision"].includes(k) || query.getAll(k).length !== 1)) throw invalid("Policy recovery query is invalid");
+      const raw = query.get("requiresReview"), expectedRevision = query.get("expectedRevision");
+      if (!["true", "false"].includes(raw ?? "") || !/^[1-9]\d{0,18}$/.test(expectedRevision ?? "")) throw invalid("Original policy request is required");
+      const normalized = { requiresReview: raw === "true", expectedRevision: expectedRevision! }, context = await readAdminContext(request, options);
+      const result = await withTransaction(options.pool, async client => {
+        await assertAdminContextInTransaction(client, context); const access = await requireAdminAccess(client, context.userId);
+        requirePermission(access, ADMIN_PERMISSION.profileAvatarPolicyManage);
+        return readAvatarOperationReceipt(client, { realm: "admin", id: context.userId }, "profile.avatar.policy.update", "global",
+          fingerprintRequest("profile.avatar.policy.update", "global", normalized), idempotencyKey(request));
+      });
+      sendJson(response, 200, result, requestIdValue); return;
+    }
+    if (path === "/policy" && method === "POST") {
+      if (query.size) throw invalid("Avatar policy does not accept query parameters");
+      const body = bodyOf(request); ensureOnlyFields(body, ["requiresReview", "expectedRevision"]);
+      if (typeof body.requiresReview !== "boolean") throw invalid("requiresReview must be boolean", "requiresReview");
+      const normalized = { requiresReview: body.requiresReview, expectedRevision: avatarRevision(body) }, context = await readAdminContext(request, options);
+      const actor: WriteActor = { realm: "admin", id: context.userId, sessionId: context.sessionId };
+      await runIdempotentWrite(options, request, response, requestIdValue,
+        { principalId: context.userId, operation: "profile.avatar.policy.update", resourceId: "global" }, actor, normalized,
+        async client => { await assertAdminContextInTransaction(client, context); const access=await requireAdminAccess(client,context.userId); requirePermission(access,ADMIN_PERMISSION.profileAvatarPolicyManage); },
+        async client => ({ status: 200, body: await updateAvatarUploadPolicy(client, { id: context.userId, sessionId: context.sessionId }, normalized, requestIdValue) }));
+      return;
+    }
     if (path === "/" && method === "GET") {
       const context = await readAdminContext(request, options);
       const state = query.get("state") ?? "PENDING";

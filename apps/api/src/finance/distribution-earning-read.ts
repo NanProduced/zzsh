@@ -12,6 +12,9 @@ import {readOriginalPaymentDistributionBasis,type PaymentDistributionBasis} from
 import {distributionPolicyRates,referralPercent,validateDistributionPolicy} from './distribution-policy';
 import {prepareAccrualFromFrozenPayment} from './distribution-accrual';
 
+// Legacy task and rental IDs share a numeric space; only explicit rental provenance may join an order.
+export const legacyRentalDistributionPredicate=(alias:'o'|'p')=>`${alias}.source_kind='HISTORICAL_DISTRIBUTION' AND ${alias}.source_entity='la_distribution_order' AND ${alias}.snapshot->>'sourceOrderType'='1'`;
+
 const states=['ALL','PENDING','SETTLED','REVOKED','RECOVERY_REQUIRED','EXPIRED'] as const;
 const recordStates=['PENDING','MATURED','SETTLED','VOID','REVOKED','RECOVERY_REQUIRED','EXPIRED','UNKNOWN'] as const;
 export type CommissionRecordState=typeof recordStates[number];

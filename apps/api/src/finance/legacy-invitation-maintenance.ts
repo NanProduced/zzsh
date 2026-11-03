@@ -7,6 +7,8 @@ import {legacyOwnerUserId} from '../supply/legacy-user-migration';
 import {ensureOnlyFields,invalid,conflict,withIdempotency,fingerprintRequest} from '../supply/supply-util';
 import {validateDistributionPolicy} from './distribution-policy';
 import {assertReviewedDistributionMaintenanceResource,type LocalDistributionScope} from './distribution-policy-store';
+export {prepareLegacyInvitationFacts,planLegacyInvitationFacts,type LegacyInvitationFactsInput,type LegacyInvitationRawFact,type LegacyInvitationFactSource} from './legacy-invitation-facts';
+export {bindReviewedLegacyInvitationFacts,planReviewedLegacyInvitationFactsTarget,importReviewedLegacyInvitationFacts,closeReviewedLegacyInvitationCounts,recoverReviewedLegacyInvitationFacts,type LegacyInvitationFactsReview,type LegacyInvitationFactsAdmission} from './legacy-invitation-facts-maintenance';
 
 type Actor={userId:string;sessionId:string;requestId:string};
 type Counts={all:number;inPlan:number};

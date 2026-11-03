@@ -32,6 +32,38 @@ export type ChannelPaymentQueryReceipt = {
   query: { kind: "OBSERVED"; event: string; result: string } | { kind: "TERMINAL" | "NOT_DISPATCHED" | "THROTTLED" | "PENDING_ACCEPTANCE" | "UNKNOWN_COMMIT" };
 };
 
+export type LocalCheckoutAvailability = {
+  contractVersion: "local-sandbox-checkout-availability.v1"; scope: "LOCAL_CONTROLLED"; orderId: string;
+  checkoutEnabled: boolean; observedAt: string; productionPaymentCapability: false; bankArrival: "UNKNOWN";
+};
+/** Only the safe page link is consumed here; signed tickets stay on the API checkout page. */
+export type LocalCheckout = { id: string; displayNo: string; amount: { cents: string; currency: "CNY" }; expiresAt: string; url: string };
+
+export function parseLocalCheckoutAvailability(value: unknown, orderId: string): LocalCheckoutAvailability {
+  const v = value as LocalCheckoutAvailability | null;
+  if (!v || v.contractVersion !== "local-sandbox-checkout-availability.v1" || v.scope !== "LOCAL_CONTROLLED" || v.orderId !== orderId
+    || typeof v.checkoutEnabled !== "boolean" || v.productionPaymentCapability !== false || v.bankArrival !== "UNKNOWN"
+    || typeof v.observedAt !== "string" || !Number.isFinite(Date.parse(v.observedAt))) throw new OrderRequestError(502, null);
+  return v;
+}
+
+export function parseLocalCheckout(value: unknown, expected: { orderId: string; displayNo: string; amountCents: string; key: string; origin: string }): LocalCheckout {
+  const v = value as { contractVersion?: unknown; scope?: unknown; dataOrigin?: unknown; orderId?: unknown; productionPaymentCapability?: unknown; checkout?: LocalCheckout } | null;
+  const c = v?.checkout;
+  if (!v || v.contractVersion !== "local-sandbox-checkout.v1" || v.scope !== "LOCAL_CONTROLLED" || v.dataOrigin !== "LOCAL_CONTROLLED"
+    || v.orderId !== expected.orderId || v.productionPaymentCapability !== false || !c || typeof c.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(c.id)
+    || c.displayNo !== expected.displayNo || c.amount?.currency !== "CNY" || c.amount.cents !== expected.amountCents
+    || !/^(0|[1-9]\d{0,23})$/.test(c.amount.cents) || typeof c.expiresAt !== "string" || !Number.isFinite(Date.parse(c.expiresAt))
+    || typeof c.url !== "string" || /[\s\\]/.test(c.url)) throw new OrderRequestError(502, null);
+  let here: URL, target: URL;
+  try { here = new URL(expected.origin); target = new URL(c.url); } catch { throw new OrderRequestError(502, null); }
+  if (here.protocol !== "http:" || here.hostname !== "127.0.0.1" || !here.port || here.username || here.password
+    || target.protocol !== "http:" || target.hostname !== "127.0.0.1" || !target.port || target.username || target.password || target.hash
+    || target.pathname !== `/api/v1/orders/${encodeURIComponent(expected.orderId)}/local-checkouts/page`
+    || target.searchParams.size !== 1 || target.searchParams.getAll("key").length !== 1 || target.searchParams.get("key") !== expected.key) throw new OrderRequestError(502, null);
+  return { id: c.id, displayNo: c.displayNo, amount: { cents: c.amount.cents, currency: "CNY" }, expiresAt: c.expiresAt, url: target.href };
+}
+
 export type PersonalRefundOutcome =
   | "RESPONSIBILITY_NOT_POSTED" | "ZERO_RESPONSIBILITY" | "NOT_DUE" | "NO_INTENT" | "PARTIALLY_ALLOCATED" | "FULLY_ALLOCATED"
   | "PARTIALLY_CONSUMED" | "FULLY_CONSUMED" | "RELEASED" | "PROCESSING" | "UNKNOWN" | "REVIEW_REQUIRED" | "TRUNCATED" | "CONFLICT";
@@ -826,6 +858,12 @@ export const orderApi = {
     requestJson<ChannelPaymentView>(`/api/orders/${encodeURIComponent(orderId)}/channel-payment-requests`, { signal, expectedUserId: userId }),
   queryChannelPayment: (userId: string, orderId: string, signal?: AbortSignal) =>
     requestWrite<ChannelPaymentQueryReceipt>(`/api/orders/${encodeURIComponent(orderId)}/channel-payment-requests/query`, { body: {}, signal, expectedUserId: userId }),
+  localCheckoutAvailability: (userId: string, orderId: string, signal?: AbortSignal) =>
+    requestJson<unknown>(`/api/orders/${encodeURIComponent(orderId)}/local-checkouts`, { signal, expectedUserId: userId }).then(value => parseLocalCheckoutAvailability(value, orderId)),
+  issueLocalCheckout: (userId: string, orderId: string, key: string) =>
+    requestWrite<unknown>(`/api/orders/${encodeURIComponent(orderId)}/local-checkouts`, { body: {}, key, expectedUserId: userId }),
+  localCheckoutReceipt: (userId: string, orderId: string, key: string, signal?: AbortSignal) =>
+    requestJson<{ scope: string; knowledge: string; mayReapply: boolean; receipt: unknown }>(`/api/orders/${encodeURIComponent(orderId)}/local-checkouts/receipt?${new URLSearchParams({ key })}`, { signal, expectedUserId: userId }),
   settlement: (orderId: string, signal?: AbortSignal) =>
     requestJson<OrderSettlement>(`/api/orders/${encodeURIComponent(orderId)}/settlement`, { signal }),
   settlementPreview: (orderId: string, body: { lines: Array<{ itemId: string; remainingQuantity: string }>; endReason?: string }, signal?: AbortSignal) =>

@@ -4,7 +4,7 @@
 
 ## 迁移基线与结构事实
 
-业务迁移位于 `apps/api/migrations/business/`，源码共 **149 份 SQL**，`meta/_journal.json` **149 条**登记（idx 0…148，tag 与文件名一一对应）。源码登记不表示数据库已经执行；实际链与权限须分别核验。独立的新装`release_0141`基线覆盖原0000–0141，只记一条明确baseline后接后续原编号增量，不能把这一条冒称142次历史执行，见[新装基线](../operations/database-initial.md)。另有一条独立正式迁移线 `apps/api/migrations/0000_fnd004_test_metadata.sql`（`zzsh_meta.database_marker`，journal 1 条）。两条线分别由 `apps/api/src/database/migrations.ts` 与 `business-migrations.ts` 执行，记账 schema 分别为 `zzsh_meta` 与 `zzsh_business_meta`（后者不在任何 SQL 中 CREATE，由 migrator 自建）。
+业务迁移位于 `apps/api/migrations/business/`，源码共 **152份SQL**，`meta/_journal.json` **152条**登记（idx 0…151，tag与文件名一一对应）。源码登记不表示数据库已经执行；实际链与权限须分别核验。独立的新装`release_0141`基线覆盖原0000–0141，只记一条明确baseline后接后续原编号增量，不能把这一条冒称142次历史执行，见[新装基线](../operations/database-initial.md)。另有一条独立正式迁移线 `apps/api/migrations/0000_fnd004_test_metadata.sql`（`zzsh_meta.database_marker`，journal 1 条）。两条线分别由 `apps/api/src/database/migrations.ts` 与 `business-migrations.ts` 执行，记账 schema 分别为 `zzsh_meta` 与 `zzsh_business_meta`（后者不在任何 SQL 中 CREATE，由 migrator 自建）。
 
 0102 支持极速比例仅设下限；0103 增加用户冻结状态及权限；0104 增加提现查单权限；0105 保存本人实名展示来源；0106 增加异常原款退款责任，0107 增加未开租终止与全额原款应退。0105 的 runtime 权限由正式 `migrate:business` 后置 ACL 收敛为仅 SELECT，不能把 `GRANT SELECT` 当作撤销 schema 默认写权限。升级保留已执行 SQL 字节与 journal 时间；新的迁移须使用未占用编号和晚于现有链的时间。
 
@@ -63,6 +63,9 @@
 | 0146 | 审计按对象/操作/结果读取的复合索引；已存在同名索引须严格同定义才接纳 |
 | 0147 | 唯一登记回归资源复用受控LOCAL资金验收；NATIVE及真实渠道边界保持 |
 | 0148 | 分销看板独立读取权限；仅登记目录，不自动赋予角色 |
+| 0149 | 准确登记的本地资金沙箱与原号恢复；不开放真实渠道或改写旧付款依据 |
+| 0150 | M维护的不可变零成长读取准入；runtime只读，新增贡献或订单会排除快速路径 |
+| 0151 | 头像上传审核全局策略，默认须审；系统批准来源与人工审核分开记录 |
 
 ### 按 schema 查对象（0000–0090 历史静态基线）
 

@@ -1,11 +1,12 @@
 import type { PoolClient } from "pg";
 import type { GrowthContribution } from "./membership-growth";
 import { growthContributionSourceDigest, normalizeGrowthInstant } from "./membership-growth-integration";
-import { assessLegacyCoverageRecord, legacyGrowthVersionHash, verifyLegacyCoverageRecord, type LegacyCoveragePort, type LegacyCoverageRecord } from "./membership-growth-legacy";
+import { assessLegacyCoverageRecord, legacyGrowthVersionHash, parseVerifiedLegacyCoverageRecord, type LegacyCoveragePort, type LegacyCoverageRecord } from "./membership-growth-legacy";
 import { canonicalize } from "../supply/content-hash";
 import { sha256Hex } from "../supply/supply-util";
 import { SecurityApiError } from "./security-core";
 import { LEGACY_GROWTH_LIVE_COLUMNS, LEGACY_GROWTH_LIVE_FROM, prepareLegacyConfirmGrowth, type LegacyGrowthLiveSource } from "./membership-growth-legacy-live";
+import { hasLegacyZeroReadAdmission, type LegacyZeroReadAdmission } from "./membership-growth-read-admission";
 
 const TABLE = "zzsh_iam.membership_growth_legacy_coverage";
 type Client = Pick<PoolClient, "query">;
@@ -15,17 +16,9 @@ const unavailable = () => new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Leg
 
 function decode(row: StoredRecord | undefined): LegacyCoverageRecord | null {
   if (!row) return null;
-  try {
-    const record = JSON.parse(row.canonical) as LegacyCoverageRecord;
-    if (sha256Hex(row.canonical) !== row.digest || canonicalize(record) !== row.canonical || !record.executionKey || !verifyLegacyCoverageRecord(record)) throw unavailable();
-    const receipt = JSON.parse(record.receiptCanonical) as { expectedSourceKeys: string[]; refundReviewEvidenceRefs: string[] };
-    if (!Array.isArray(receipt.expectedSourceKeys) || !Array.isArray(receipt.refundReviewEvidenceRefs)
-      || canonicalize([...receipt.expectedSourceKeys].sort()) !== canonicalize([...record.expectedSourceKeys].sort())
-      || canonicalize(receipt.refundReviewEvidenceRefs) !== canonicalize(record.refundReviewEvidenceRefs)
-      || sha256Hex(canonicalize({ subjectUserId: record.subjectUserId, cutoff: record.cutoff, fromExclusive: record.fromExclusive, expectedSourceKeys: [...record.expectedSourceKeys].sort() })) !== record.sourceSetSha256
-      || record.correctionProofDigests.some(d => !record.refundReviewEvidenceRefs.some(ref => ref === d || ref.endsWith(`:${d}`)))) throw unavailable();
-    return record;
-  } catch { throw unavailable(); }
+  const record = parseVerifiedLegacyCoverageRecord(row.canonical, row.digest);
+  if (!record) throw unavailable();
+  return record;
 }
 
 /** Owner INSERT and runtime SELECT share the same immutable version shape; no pool or hidden transaction. */
@@ -67,7 +60,7 @@ function isLegacy(row: LegacyGrowthStoredContribution): boolean {
 type CoverageAssessment = ReturnType<typeof assessLegacyCoverageRecord>;
 const pendingCoverage = (reason: string): CoverageAssessment => ({ state: "BACKFILL_PENDING", reasons: [reason], incrementRows: [] });
 
-async function readCoverageSchema(client: Client): Promise<{ coverage: boolean; sources: boolean }> {
+export async function readCoverageSchema(client: Client): Promise<{ coverage: boolean; sources: boolean }> {
   const installed = (await client.query<{ coverage: boolean; sources: boolean }>(`SELECT /* legacy-growth-schema */
     to_regclass('${TABLE}') IS NOT NULL AS coverage,
     to_regclass('zzsh_order.legacy_order_read_snapshot') IS NOT NULL AND to_regclass('zzsh_order.legacy_continuation_version') IS NOT NULL AS sources`)).rows[0];
@@ -147,31 +140,49 @@ async function assessReadCoverage(subject: string, contributions: readonly Legac
   return assessLegacyCoverageRecord(base, atThisTime, "VERIFIED");
 }
 
+export const LEGACY_GROWTH_BATCH_SQL = {
+  versions: `SELECT /* legacy-growth-batch-versions */ subject_user_id AS "userId",record_canonical AS canonical,record_digest AS digest
+    FROM ${TABLE} WHERE subject_user_id=ANY($1::text[]) AND cutoff<=$2::timestamptz
+    ORDER BY subject_user_id,cutoff DESC,created_at DESC,id COLLATE "C" DESC`,
+  sources: `SELECT /* legacy-growth-batch-live-sources */ o.renter_user_id AS "userId", ${LEGACY_GROWTH_LIVE_COLUMNS}
+    ${LEGACY_GROWTH_LIVE_FROM}
+    WHERE o.renter_user_id=ANY($1::text[]) AND o.source_system='legacy_mysql_restore' AND o.source_entity='la_order' AND o.source_pay_status=1
+      AND ((o.source_order_status=4 AND (o.source_completed_at IS NULL OR o.source_completed_at<=$2::timestamptz)) OR v.id IS NOT NULL)
+    ORDER BY o.renter_user_id,o.id,v.revision`,
+} as const;
+
+export type LegacyGrowthCoverageSnapshot = {
+  installed: { coverage: boolean; sources: boolean };
+  versions: Array<StoredRecord & { userId: string }>;
+  sources: Array<LegacyGrowthLiveSource & { userId: string }>;
+  zeroReadAdmission?: LegacyZeroReadAdmission | null;
+};
+
 /** All subjects use the original receipt/source checks; SQL count does not grow with page length. */
-export async function readLegacyGrowthCoverageAssessments(client: Client, contributions: ReadonlyMap<string, readonly LegacyGrowthStoredContribution[]>, asOfUtc = new Date().toISOString()): Promise<Map<string, CoverageAssessment>> {
+export async function readLegacyGrowthCoverageAssessments(client: Client, contributions: ReadonlyMap<string, readonly LegacyGrowthStoredContribution[]>, asOfUtc = new Date().toISOString(), snapshot?: LegacyGrowthCoverageSnapshot): Promise<Map<string, CoverageAssessment>> {
   const ids = [...contributions.keys()], results = new Map<string, CoverageAssessment>();
   if (ids.length === 0) return results;
-  const asOf = normalizeGrowthInstant(asOfUtc), installed = await readCoverageSchema(client);
+  const asOf = normalizeGrowthInstant(asOfUtc), installed = snapshot?.installed ?? await readCoverageSchema(client);
+  if (typeof installed.coverage !== "boolean" || typeof installed.sources !== "boolean") throw unavailable();
   if (!installed.coverage || !installed.sources) {
     for (const id of ids) results.set(id, pendingCoverage(!installed.coverage ? "LEGACY_COVERAGE_SCHEMA_NOT_INSTALLED" : "LEGACY_GROWTH_SOURCES_NOT_INSTALLED"));
     return results;
   }
   const versions = new Map<string, LegacyCoverageRecord[]>();
-  for (const row of (await client.query<StoredRecord & { userId: string }>(`SELECT /* legacy-growth-batch-versions */ subject_user_id AS "userId",record_canonical AS canonical,record_digest AS digest
-    FROM ${TABLE} WHERE subject_user_id=ANY($1::text[]) AND cutoff<=$2::timestamptz
-    ORDER BY subject_user_id,cutoff DESC,created_at DESC,id COLLATE "C" DESC`, [ids, asOf])).rows) {
+  for (const row of snapshot?.versions ?? (await client.query<StoredRecord & { userId: string }>(LEGACY_GROWTH_BATCH_SQL.versions, [ids, asOf])).rows) {
     const record = decode(row)!;
     if (!contributions.has(row.userId) || record.subjectUserId !== row.userId) throw unavailable();
     const records = versions.get(row.userId) ?? []; records.push(record); versions.set(row.userId, records);
   }
   const sources = new Map<string, LegacyGrowthLiveSource[]>();
-  for (const row of (await client.query<LegacyGrowthLiveSource & { userId: string }>(`SELECT /* legacy-growth-batch-live-sources */ o.renter_user_id AS "userId", ${LEGACY_GROWTH_LIVE_COLUMNS}
-    ${LEGACY_GROWTH_LIVE_FROM}
-    WHERE o.renter_user_id=ANY($1::text[]) AND o.source_system='legacy_mysql_restore' AND o.source_entity='la_order' AND o.source_pay_status=1
-      AND ((o.source_order_status=4 AND (o.source_completed_at IS NULL OR o.source_completed_at<=$2::timestamptz)) OR v.id IS NOT NULL)
-    ORDER BY o.renter_user_id,o.id,v.revision`, [ids, asOf])).rows) {
+  for (const row of snapshot?.sources ?? (await client.query<LegacyGrowthLiveSource & { userId: string }>(LEGACY_GROWTH_BATCH_SQL.sources, [ids, asOf])).rows) {
     const group = sources.get(row.userId) ?? []; group.push(row); sources.set(row.userId, group);
   }
-  for (const [id, rows] of contributions) results.set(id, await assessReadCoverage(id, rows, asOf, versions.get(id) ?? [], async () => sources.get(id) ?? []));
+  for (const [id, rows] of contributions) {
+    const certifiedZero = hasLegacyZeroReadAdmission(snapshot?.zeroReadAdmission, client as PoolClient, asOf, id);
+    if (certifiedZero && rows.length === 0 && !(versions.get(id)?.length) && !(sources.get(id)?.length)) {
+      results.set(id, { state: "COMPLETE", reasons: [], incrementRows: [] });
+    } else results.set(id, await assessReadCoverage(id, rows, asOf, versions.get(id) ?? [], async () => sources.get(id) ?? []));
+  }
   return results;
 }

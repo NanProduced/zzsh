@@ -1,6 +1,7 @@
 import { readOrderPaymentSummary, type ChannelPaymentReadOptions } from "./channel-payment-read";
 import type { INestApplication } from "@nestjs/common";
 import type { DistributionEarningStore } from "../finance/distribution-earning-store";
+import type {LocalFinancialSandbox} from '../finance/local-financial-sandbox-resource';
 import { listUnifiedUserOrders, parseUnifiedOrderQuery } from "./unified-user-order-read";
 import { getUserLegacyOrder, listUserLegacyOrders, parseLegacyUserOrderQuery } from "./legacy-user-order-read";
 import type { OrderImSdkRouteBindings } from "../config/config";
@@ -65,6 +66,8 @@ import {
 /** 订单读注入账号视图读取：同一事务快照内按账号页口径读公开版本 */
 const orderAccountViews=(options:OrderRuntimeOptions):OrderAccountViewReader=>(client,ids)=>readOrderAccountViews(client,ids,options.supplyGateReader??unknownSupplyGate,options.legacyPublicAdmission,options.legacyPublicAdmissionDetail);
 export type OrderRuntimeOptions = AuthSecurityOptions & {
+  /** Explicit server-only local capability; never parsed from client actors/bodies. */
+  localFinancialSandbox?:LocalFinancialSandbox;
   channelPaymentReadOptions?: ChannelPaymentReadOptions;
   distributionEarnings?: DistributionEarningStore;
   legacyDutyFinalizationReader?: LegacyDutyFinalizationReader;
@@ -284,7 +287,7 @@ export async function handleOrderUserRoute(
       const context = await readUserContext(request, options), orderId = decodeId(refundMatch[1]!);
       const data = await withTransaction(options.pool, async client => {
         await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
-        return readPersonalNativeRefunds(client, context, { orderId });
+        return readPersonalNativeRefunds(client, context, { orderId },options.localFinancialSandbox);
       });
       sendJson(response, 200, data, requestId); return;
     }

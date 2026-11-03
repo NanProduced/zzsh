@@ -346,9 +346,7 @@ export function ProfileView({
               </Avatar>
               <div className="min-w-0 flex-1">
                 <div className="text-sm font-medium text-foreground break-words [overflow-wrap:anywhere]">{facts.displayName}</div>
-                <p className="text-muted-foreground mt-0.5 text-xs">
-                  {facts.avatarUrl ? "默认头像确认后生效，自定义头像先审后显。" : "未返回头像，按姓名首字显示。"}
-                </p>
+                {!facts.avatarUrl ? <p className="text-muted-foreground mt-0.5 text-xs">暂未设置头像</p> : null}
               </div>
             {avatarEditor ? <AdminAvatarEditor
               adminUserId={adminUserId}

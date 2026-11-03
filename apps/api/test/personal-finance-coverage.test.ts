@@ -21,13 +21,15 @@ test('native history proof survives real-name verification but never proves migr
  const read=()=>hasProvedNativeHistoryAbsence(c,'user','HISTORICAL_WITHDRAWAL');
  try{
   assert.equal(await read(),true);
-  db.exec("UPDATE zzsh_iam.user_identity_state SET provider='fake'");
-  assert.equal(await read(),true,'real-name verification preserves an existing native birth proof');
+  for(const provider of ['fake','aliyun-id2meta']){
+   db.prepare('UPDATE zzsh_iam.user_identity_state SET provider=?').run(provider);
+   assert.equal(await read(),true,'real-name verification preserves an existing native birth proof');
+  }
   for(const provider of ['legacy_mysql_restore','',null]){
    db.prepare('UPDATE zzsh_iam.user_identity_state SET provider=?').run(provider);
    assert.equal(await read(),false);
   }
-  db.exec("UPDATE zzsh_iam.user_identity_state SET provider='fake'; INSERT INTO zzsh_iam.audit_event VALUES('user','user.legacy_owner.migrated','SUCCESS')");
+  db.exec("UPDATE zzsh_iam.user_identity_state SET provider='aliyun-id2meta'; INSERT INTO zzsh_iam.audit_event VALUES('user','user.legacy_owner.migrated','SUCCESS')");
   assert.equal(await read(),false,'a migration audit survives provider replacement');
   db.exec('DELETE FROM zzsh_iam.audit_event; DELETE FROM zzsh_order.native_user_insert_proof');
   assert.equal(await read(),false,'no birth proof means no confirmed empty history');

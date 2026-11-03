@@ -1,5 +1,6 @@
+import { DatabaseSync } from 'node:sqlite';
 import {test} from 'node:test';import {strict as assert} from 'node:assert';import type {Pool} from 'pg';
-import {parseEarningsQuery,parseEarningsDetailQuery,decodeEarningDetailId,earningProjection,commissionRecordSummaryProjection,readMyDistributionEarnings,readMyDistributionEarningsInTransaction,readEarningCalculation} from '../src/finance/distribution-earning-read';
+import {legacyRentalDistributionPredicate,parseEarningsQuery,parseEarningsDetailQuery,decodeEarningDetailId,earningProjection,commissionRecordSummaryProjection,readMyDistributionEarnings,readMyDistributionEarningsInTransaction,readEarningCalculation} from '../src/finance/distribution-earning-read';
 import {createHash} from 'node:crypto';
 import {canonicalize} from '../src/supply/content-hash';
 import {freezePaymentDistributionBasis} from '../src/finance/distribution-payment-basis';
@@ -165,3 +166,12 @@ test('a current responsibility version change rejects the old page cursor',async
  await assert.rejects(readMyDistributionEarnings(after.pool,actor,{state:'ALL',limit:1,cursor:first.nextCursor!,projectionVersion:2},key),(e:any)=>e.status===409);
  const same=await readMyDistributionEarnings(before.pool,actor,{state:'ALL',limit:1,cursor:first.nextCursor!,projectionVersion:2},key);assert.equal(same.items![0]?.id,'native:a');
 });
+
+ test('legacy task IDs cannot claim a rental order or its game scope',()=>{
+ const db=new DatabaseSync(':memory:');try{
+ db.exec(`CREATE TABLE observations(id TEXT,source_kind TEXT,source_entity TEXT,source_system TEXT,snapshot TEXT);CREATE TABLE orders(id TEXT,legacy_id TEXT,source_system TEXT,game_id TEXT);INSERT INTO orders VALUES('rent-A','71','source-A','game-A'),('rent-B','71','source-B','game-B');`);
+ const insert=db.prepare('INSERT INTO observations VALUES(?,?,?,?,?)');for(const [id,type,system,kind,entity] of [['rental','1','source-A','HISTORICAL_DISTRIBUTION','la_distribution_order'],['task','2','source-A','HISTORICAL_DISTRIBUTION','la_distribution_order'],['unknown',null,'source-A','HISTORICAL_DISTRIBUTION','la_distribution_order'],['other-system','1','source-C','HISTORICAL_DISTRIBUTION','la_distribution_order'],['other-entity','1','source-A','HISTORICAL_DISTRIBUTION','la_log_earnings']] as const)insert.run(id,kind,entity,system,JSON.stringify({orderId:71,...(type===null?{}:{sourceOrderType:type})}));
+ const rows=db.prepare(`SELECT o.id,lo.id order_id,lo.game_id FROM observations o LEFT JOIN orders lo ON lo.legacy_id=CAST(o.snapshot->>'orderId' AS TEXT) AND lo.source_system=o.source_system AND (${legacyRentalDistributionPredicate('o')}) ORDER BY o.id`).all();
+ assert.deepEqual(rows.map(r=>[r.id,r.order_id,r.game_id]),[['other-entity',null,null],['other-system',null,null],['rental','rent-A','game-A'],['task',null,null],['unknown',null,null]]);
+ }finally{db.close();}
+ });

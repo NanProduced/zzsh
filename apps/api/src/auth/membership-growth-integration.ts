@@ -656,14 +656,18 @@ function dtoFromProjection(projection: GrowthProjection | null, asOfUtc: string,
   return { schema: "membership-growth-v1", knowledge: "KNOWN", sourceState, benefitsState, asOfUtc: projection.asOf, windowStartUtc: projection.windowStart, rollingPoints: projection.rollingPoints, lifetimePoints: projection.lifetimePoints, normalTier: projection.normalTier, effectiveTier: projection.effectiveTier, blackGold: projection.blackGold, grace: projection.grace, nextExpiryAtUtc: projection.nextExpiryAt, nextTier: nextTierFor(projection), benefits: summaries.benefits, comparison: summaries.comparison, contributions: contributionSummaries(projection, rows), pendingCount: projection.pending.length, pending: projection.pending, excluded: projection.excluded };
 }
 
-function projectMembershipGrowth(userId: string, rows: StoredContribution[], storedState: StoredGrowthState | null, completeness: GrowthSourceCompleteness | null, policy: StoredGrowthPolicy | undefined, entitlements: StoredEntitlement[], asOfUtc: string): GrowthReaderResponse {
+function membershipGrowthState(userId: string, rows: StoredContribution[], storedState: StoredGrowthState | null, asOfUtc: string): GrowthProjection {
   const previousTier = storedState && (NORMAL_GROWTH_TIERS as readonly string[]).includes(storedState.normalTier) ? storedState.normalTier as GrowthProjection["normalTier"] : undefined;
-  const projection = replayGrowthProjection({
+  return replayGrowthProjection({
     userId, asOf: asOfUtc, contributions: rows,
     ...(previousTier ? { previousTier } : {}),
     ...(storedState?.lastTierDropAt ? { lastTierDropAt: normalizeGrowthInstant(storedState.lastTierDropAt, "lastTierDropAt") } : {}),
     ...(storedState && (storedState.effectiveTier === "BLACK_GOLD" || storedState.blackGoldState === "QUALIFIED" || storedState.blackGoldState === "REVIEW_REQUIRED") ? { existingBlackGold: true } : {}),
   });
+}
+
+function projectMembershipGrowth(userId: string, rows: StoredContribution[], storedState: StoredGrowthState | null, completeness: GrowthSourceCompleteness | null, policy: StoredGrowthPolicy | undefined, entitlements: StoredEntitlement[], asOfUtc: string): GrowthReaderResponse {
+  const projection = membershipGrowthState(userId, rows, storedState, asOfUtc);
   return {
     subjectId: userId,
     growth: dtoFromProjection(projection, asOfUtc, policy ? "CONFIGURED" : "NOT_CONFIGURED", completeness?.state ?? "READ_FAILED", completeness?.state === "COMPLETE" && projection.effectiveTier !== "UNKNOWN", policy?.policyPayload ?? null, policy?.version ?? null, rows, policy ? sealedEnabledRentalModes(policy.haffRule) : null),
@@ -723,53 +727,96 @@ function groupGrowthRows<T extends { userId: string }>(rows: readonly T[]): Map<
 }
 
 /** Directory pages share the single-subject projection without one SQL round trip per user. */
-export async function readMembershipGrowthBatch(client: PoolClient, userIds: readonly string[], asOfUtc = new Date().toISOString()): Promise<Map<string, GrowthReaderResponse>> {
-  const ids = [...new Set(userIds)], results = new Map<string, GrowthReaderResponse>();
-  if (ids.length === 0) return results;
-  const asOf = normalizeGrowthInstant(asOfUtc);
-  const subjects = (await client.query<StoredGrowthState & { userId: string; sourceRef: string | null; migrated: boolean }>(
-    `SELECT /* directory-growth-subjects */ u.id AS "userId", m.source_ref AS "sourceRef",
+export const MEMBERSHIP_GROWTH_BATCH_SQL = {
+  subjects: `SELECT /* directory-growth-subjects */ u.id AS "userId", m.source_ref AS "sourceRef",
        s.normal_tier AS "normalTier", s.effective_tier AS "effectiveTier", s.black_gold_state AS "blackGoldState", s.last_tier_drop_at::text AS "lastTierDropAt",
        COALESCE(p.migrated,false) AS migrated
      FROM zzsh_auth_user."user" u LEFT JOIN zzsh_iam.user_rental_membership m ON m.user_id=u.id
      LEFT JOIN zzsh_iam.membership_growth_state s ON s.user_id=u.id
      LEFT JOIN (SELECT DISTINCT e.object_id, true AS migrated FROM zzsh_iam.audit_event e
          WHERE e.action='user.legacy_owner.migrated' AND e.outcome='SUCCESS' AND e.object_id=ANY($1::text[])) p ON p.object_id=u.id
-     WHERE u.id=ANY($1::text[])`, [ids],
-  )).rows;
-  const contributions = groupGrowthRows((await client.query<StoredContribution>(
-    `SELECT /* directory-growth-contributions */ user_id AS "userId", game_id AS "gameId", source_key AS "sourceKey", source_type AS "sourceType", source_id AS "sourceId",
+     WHERE u.id=ANY($1::text[])`,
+  contributions: `SELECT /* directory-growth-contributions */ user_id AS "userId", game_id AS "gameId", source_key AS "sourceKey", source_type AS "sourceType", source_id AS "sourceId",
        settlement_version AS "settlementVersion", effective_at::text AS "effectiveAt", recorded_at::text AS "recordedAt", amount_cents::text AS "amountCents",
        state AS status, eligible, revision, previous_amount_cents::text AS "previousAmountCents", correction_of_source_key AS "correctionOf", correction_mode AS "correctionMode", source_digest AS "sourceDigest"
-     FROM zzsh_iam.membership_growth_contribution WHERE user_id=ANY($1::text[]) ORDER BY effective_at,source_key,revision`, [ids],
-  )).rows.map(normalizeStoredContribution));
-  const sources = groupGrowthRows((await client.query<StoredSettlementSource>(
-    `SELECT /* directory-growth-sources */ v.id AS "settlementVersionId", v.version_no AS "versionNo", v.version_hash AS "versionHash", o.renter_user_id AS "userId", o.game_id AS "gameId", v.input_snapshot AS "inputSnapshot"
+     FROM zzsh_iam.membership_growth_contribution WHERE user_id=ANY($1::text[]) ORDER BY effective_at,source_key,revision`,
+  sources: `SELECT /* directory-growth-sources */ v.id AS "settlementVersionId", v.version_no AS "versionNo", v.version_hash AS "versionHash", o.renter_user_id AS "userId", o.game_id AS "gameId", v.input_snapshot AS "inputSnapshot"
      FROM zzsh_order.rental_order o JOIN zzsh_order.settlement_posting p ON p.order_id=o.id
      JOIN zzsh_order.settlement_version v ON v.id=p.settlement_version_id AND v.order_id=o.id
-     WHERE o.renter_user_id=ANY($1::text[]) AND v.superseded_at IS NULL ORDER BY v.id`, [ids],
-  )).rows);
-  const policy = (await client.query<StoredGrowthPolicy>(
-    `SELECT /* directory-growth-policy */ pol.id,pol.version::text AS version,pol.policy_payload AS "policyPayload",p.haff_rule AS "haffRule"
+     WHERE o.renter_user_id=ANY($1::text[]) AND v.superseded_at IS NULL ORDER BY v.id`,
+  policy: `SELECT /* directory-growth-policy */ pol.id,pol.version::text AS version,pol.policy_payload AS "policyPayload",p.haff_rule AS "haffRule"
      FROM zzsh_iam.membership_growth_policy pol LEFT JOIN zzsh_supply.rule_release r ON r.id=pol.rule_release_id
      LEFT JOIN zzsh_supply.price_version p ON p.id=r.price_version_id
-     WHERE pol.status='APPROVED' AND pol.effective_at<=$1 ORDER BY pol.version DESC LIMIT 1`, [asOf],
-  )).rows[0];
-  const entitlements = groupGrowthRows((await client.query<StoredEntitlement & { userId: string }>(
-    `SELECT /* directory-growth-entitlements */ ranked.user_id AS "userId",ranked.id,ranked.kind,ranked.scope_key AS "scopeKey",ranked.game_id AS "gameId",g.name AS "gameName",ranked.starts_at::text AS "startsAt",ranked.ends_at::text AS "endsAt",ranked.status,ranked.deposit_waived AS "depositWaived",ranked.deposit_allowance_cents::text AS "depositAllowanceCents",ranked.pricing_payload AS "pricingPayload"
+     WHERE pol.status='APPROVED' AND pol.effective_at<=$1 ORDER BY pol.version DESC LIMIT 1`,
+  entitlements: `SELECT /* directory-growth-entitlements */ ranked.user_id AS "userId",ranked.id,ranked.kind,ranked.scope_key AS "scopeKey",ranked.game_id AS "gameId",g.name AS "gameName",ranked.starts_at::text AS "startsAt",ranked.ends_at::text AS "endsAt",ranked.status,ranked.deposit_waived AS "depositWaived",ranked.deposit_allowance_cents::text AS "depositAllowanceCents",ranked.pricing_payload AS "pricingPayload"
      FROM (SELECT e.*,row_number() OVER(PARTITION BY user_id ORDER BY starts_at DESC,id DESC) AS row_no
        FROM zzsh_iam.membership_entitlement e WHERE user_id=ANY($1::text[])) ranked
      LEFT JOIN zzsh_supply.game g ON g.id=ranked.game_id
-     WHERE ranked.row_no<=100 ORDER BY ranked.user_id,ranked.starts_at DESC,ranked.id DESC`, [ids],
+     WHERE ranked.row_no<=100 ORDER BY ranked.user_id,ranked.starts_at DESC,ranked.id DESC`,
+} as const;
+
+/** Request-local facts streamed on the caller's same RR snapshot; proofs still pass the original codec and replay. */
+export type MembershipGrowthBatchSnapshot = {
+  asOfUtc: string;
+  subjects: Array<StoredGrowthState & { userId: string; sourceRef: string | null; migrated: boolean }>;
+  contributions: StoredContribution[];
+  sources: StoredSettlementSource[];
+  policy: StoredGrowthPolicy | undefined;
+  entitlements: Array<StoredEntitlement & { userId: string }>;
+  legacy: import("./membership-growth-legacy-store").LegacyGrowthCoverageSnapshot;
+};
+
+export function readMembershipGrowthBatch(client: PoolClient, userIds: readonly string[], asOfUtc = new Date().toISOString(), snapshot?: MembershipGrowthBatchSnapshot): Promise<Map<string, GrowthReaderResponse>> {
+  return readGrowthBatch(client, userIds, asOfUtc, snapshot, true, projectMembershipGrowth);
+}
+
+export type GrowthTierReaderResponse = { subjectId: string; growth: Pick<GrowthProjectionDto, "knowledge" | "asOfUtc" | "effectiveTier"> };
+export function readMembershipGrowthTierBatch(client: PoolClient, userIds: readonly string[], asOfUtc = new Date().toISOString(), snapshot?: MembershipGrowthBatchSnapshot): Promise<Map<string, GrowthTierReaderResponse>> {
+  return readGrowthBatch(client, userIds, asOfUtc, snapshot, false, projectMembershipGrowthTier);
+}
+
+function projectMembershipGrowthTier(userId: string, rows: StoredContribution[], state: StoredGrowthState | null, completeness: GrowthSourceCompleteness, _policy: StoredGrowthPolicy | undefined, _entitlements: StoredEntitlement[], asOf: string): GrowthTierReaderResponse {
+  const projection = membershipGrowthState(userId, rows, state, asOf), known = completeness.state === "COMPLETE" && projection.effectiveTier !== "UNKNOWN";
+  return { subjectId: userId, growth: { knowledge: known ? "KNOWN" : "UNKNOWN", asOfUtc: known ? projection.asOf : asOf, effectiveTier: known ? projection.effectiveTier : null } };
+}
+
+/** Only for an admitted no-source cohort with no current state/events; reuse the exact full-reader tier projection. */
+export function projectAdmittedEmptyGrowthTier(subjectUserId: string, asOfUtc: string): GrowthTierReaderResponse {
+  return projectMembershipGrowthTier(subjectUserId, [], null, { state: "COMPLETE", expectedSourceKeys: [], presentSourceKeys: [], missingSourceKeys: [], reasons: [] }, undefined, [], normalizeGrowthInstant(asOfUtc));
+}
+
+async function readGrowthBatch<T>(client: PoolClient, userIds: readonly string[], asOfUtc: string, snapshot: MembershipGrowthBatchSnapshot | undefined, benefits: boolean, project: (userId: string, rows: StoredContribution[], state: StoredGrowthState | null, completeness: GrowthSourceCompleteness, policy: StoredGrowthPolicy | undefined, entitlements: StoredEntitlement[], asOf: string) => T): Promise<Map<string, T>> {
+  const ids = [...new Set(userIds)], results = new Map<string, T>();
+  if (ids.length === 0) return results;
+  const asOf = normalizeGrowthInstant(asOfUtc);
+  if (snapshot) {
+    const wanted = new Set(ids);
+    if (normalizeGrowthInstant(snapshot.asOfUtc) !== asOf || [snapshot.subjects, snapshot.contributions, snapshot.sources, snapshot.entitlements, snapshot.legacy.versions, snapshot.legacy.sources].some(rows => !Array.isArray(rows) || rows.some(row => !wanted.has(row.userId)))) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Growth snapshot facts do not match the requested population");
+  }
+  const subjects = snapshot?.subjects ?? (await client.query<StoredGrowthState & { userId: string; sourceRef: string | null; migrated: boolean }>(
+    MEMBERSHIP_GROWTH_BATCH_SQL.subjects, [ids],
+  )).rows;
+  const contributions = groupGrowthRows((snapshot?.contributions ?? (await client.query<StoredContribution>(
+    MEMBERSHIP_GROWTH_BATCH_SQL.contributions, [ids],
+  )).rows).map(normalizeStoredContribution));
+  const sources = groupGrowthRows(snapshot?.sources ?? (await client.query<StoredSettlementSource>(
+    MEMBERSHIP_GROWTH_BATCH_SQL.sources, [ids],
+  )).rows);
+  const policy = !benefits ? undefined : snapshot ? snapshot.policy : (await client.query<StoredGrowthPolicy>(
+    MEMBERSHIP_GROWTH_BATCH_SQL.policy, [asOf],
+  )).rows[0];
+  const entitlements = groupGrowthRows(!benefits ? [] as Array<StoredEntitlement & { userId: string }> : snapshot?.entitlements ?? (await client.query<StoredEntitlement & { userId: string }>(
+    MEMBERSHIP_GROWTH_BATCH_SQL.entitlements, [ids],
   )).rows);
   const migrated = subjects.filter(subject => subject.migrated);
   const { readLegacyGrowthCoverageAssessments } = await import("./membership-growth-legacy-store");
-  const legacy = await readLegacyGrowthCoverageAssessments(client, new Map(migrated.map(subject => [subject.userId, contributions.get(subject.userId) ?? []])), asOf);
+  const migratedIds = new Set(migrated.map(subject => subject.userId));
+  const legacy = await readLegacyGrowthCoverageAssessments(client, new Map(migrated.map(subject => [subject.userId, contributions.get(subject.userId) ?? []])), asOf, snapshot ? { installed: snapshot.legacy.installed, versions: snapshot.legacy.versions.filter(row => migratedIds.has(row.userId)), sources: snapshot.legacy.sources.filter(row => migratedIds.has(row.userId)), zeroReadAdmission: snapshot.legacy.zeroReadAdmission } : undefined);
   for (const subject of subjects) {
     const rows = contributions.get(subject.userId) ?? [];
     if (typeof subject.migrated !== "boolean" || subject.migrated && !legacy.has(subject.userId)) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Growth source proof is unavailable");
     const completeness = await readGrowthSourceCompleteness(client, subject.userId, rows, subject.sourceRef, legacy.get(subject.userId), asOf, { sourceRows: sources.get(subject.userId) ?? [], migrated: subject.migrated });
-    results.set(subject.userId, projectMembershipGrowth(subject.userId, rows, subject.normalTier ? subject : null, completeness, policy, entitlements.get(subject.userId) ?? [], asOf));
+    results.set(subject.userId, project(subject.userId, rows, subject.normalTier ? subject : null, completeness, policy, entitlements.get(subject.userId) ?? [], asOf));
   }
   return results;
 }

@@ -12,13 +12,14 @@ const ledgerSubject = `COALESCE(r.subject_id,CASE WHEN (${FINANCE_LEDGER_BUCKET_
 const ledgerDocument = `CASE WHEN r.event_kind='OPENING' THEN 'OPENING:'||r.basis_id WHEN r.source_entity='withdrawal_intent' THEN 'WITHDRAWAL:'||r.source_id WHEN r.source_entity='joinpay_withdrawal_intent' THEN 'JOINPAY_WITHDRAWAL:'||r.source_id WHEN r.source_kind='NATIVE_RENTAL_REFERRAL' THEN 'DISTRIBUTION:'||r.economic_root_id WHEN r.source_kind='LEGACY_CONTINUATION_DUTY' THEN 'LEGACY_DUTY:'||r.source_id WHEN r.source_entity='owner_guarantee_payment' THEN 'GUARANTEE_PAYMENT:'||r.source_id WHEN r.source_entity='owner_guarantee_refund' THEN 'GUARANTEE_REFUND:'||r.source_id WHEN r.order_id IS NOT NULL THEN 'ORDER:'||r.order_id ELSE 'POSTING:'||COALESCE(r.posting_id,r.id) END`;
 
 /** The same scope is applied in SQL before the matched-result ceiling. Values never become SQL. */
-export function scopedFinanceSql(source: string, family: "ledger" | "history", scope: FinanceLoadScope, limit: number | null, withdrawalsReady: boolean, joinpayReady = false) {
+export function scopedFinanceSql(source: string, family: "ledger" | "history", scope: FinanceLoadScope, limit: number | null, withdrawalsReady: boolean, joinpayReady = false, historySnapshotRaw = false) {
   const values: unknown[] = [], conditions: string[] = [], bind = (value: unknown) => `$${values.push(value)}`;
   const bucket = family === "ledger" ? FINANCE_LEDGER_BUCKET_SQL : historyBucket;
-  const kind = family === "ledger" ? ledgerKind : historyKind;
+  const snapshot = historySnapshotRaw ? "r.extra_evidence" : "r.extra_evidence->'snapshot'";
+  const kind = family === "ledger" ? ledgerKind : historyKind.replaceAll("r.extra_evidence->'snapshot'",snapshot);
   const subject = family === "ledger" ? ledgerSubject : "r.subject_id";
   const document = family === "ledger" ? ledgerDocument : historyDocument;
-  const number = family === "ledger" ? "COALESCE(r.display_no,CASE WHEN r.event_kind='OPENING' THEN r.basis_id ELSE r.source_id END,r.posting_id,r.id)" : "COALESCE(CASE WHEN r.source_entity='la_log_earnings' THEN NULLIF(r.extra_evidence->'snapshot'->>'legacyLogNumber','') END,r.reference_no,r.source_id)";
+  const number = family === "ledger" ? "COALESCE(r.display_no,CASE WHEN r.event_kind='OPENING' THEN r.basis_id ELSE r.source_id END,r.posting_id,r.id)" : `COALESCE(CASE WHEN r.source_entity='la_log_earnings' THEN NULLIF(${snapshot}->>'legacyLogNumber','') END,r.reference_no,r.source_id)`;
   const state = family === "history" ? "CASE WHEN r.observation_origin IN('NATIVE_EARNING_ZERO','LEGACY_DUTY_ZERO') THEN r.source_status ELSE 'HISTORICAL_OBSERVED' END" : `CASE${withdrawalsReady ? " WHEN r.source_entity='withdrawal_intent' AND i.id IS NOT NULL THEN i.state" : ""}${joinpayReady ? " WHEN r.source_entity='joinpay_withdrawal_intent' AND j.id IS NOT NULL THEN j.state" : ""} WHEN r.source_kind='NATIVE_RENTAL_REFERRAL' THEN COALESCE(r.earning_state,'UNKNOWN') WHEN r.source_kind='NATIVE_PRESTART_REFUND' OR r.account_code='RENTER_REFUND_PAYABLE' THEN 'REFUND_PAYABLE_RECORDED' ELSE 'POSTED' END`;
   if (scope.documentRefs) conditions.push(`(${document})=ANY(${bind(scope.documentRefs)}::text[])`);
   if (scope.documentRef) conditions.push(`(${document})=${bind(scope.documentRef)}`);
@@ -45,7 +46,9 @@ export function scopedFinanceSql(source: string, family: "ledger" | "history", s
 }
 
 /** List, period and export stay on this domain. Document and subject reads do not. */
-export const FINANCE_GLOBAL_VERSION_DOMAIN = "admin-finance-proof.r2";
+export const FINANCE_GLOBAL_VERSION_DOMAIN = "admin-finance-proof.r6.narrow";
+// PG16's presorted aggregates sort the wide input before hashing; these flags are transaction-local.
+export const FINANCE_GLOBAL_READ_PREAMBLE_SQL="SET LOCAL jit=off; SET LOCAL enable_presorted_aggregate=off;";
 export const FINANCE_DOCUMENT_VERSION_DOMAIN = "admin-finance-proof.r3.document";
 export const FINANCE_SUBJECT_VERSION_DOMAIN = "admin-finance-proof.r3.subject";
 export type FinanceVersionReady = { withdrawals?: boolean; native_orders?: boolean; legacy_orders?: boolean; native_distribution?: boolean; earning_basis?: boolean; earning_transitions?: boolean; history_coverage?: boolean; legacy_duty_finance?: boolean; guarantee_history?: boolean; payment_requests?: boolean; refund_intents?: boolean; refund_read_dependencies?: boolean; joinpay_withdrawals?: boolean };
@@ -98,12 +101,28 @@ function versionRelations(ready: FinanceVersionReady): { name: string; sql: stri
   if (ready.joinpay_withdrawals) relations.push({ name: "joinpay_withdrawal", sql: `SELECT id,user_id,merchant_identity_id,merchant_order_no,platform_serial_no,state,funds_disposition,gross_cents::text,net_cents::text,fee_cents::text,provider_fee_cents::text,operation_version::text,destination_id,destination_revision FROM zzsh_order.joinpay_withdrawal_intent` });
   return relations;
 }
-function versionDigest(relations: string[]): string {
-  return `SELECT md5(concat_ws('|',${relations.map(relation => `(SELECT md5(COALESCE(string_agg(md5(to_jsonb(v)::text),'' ORDER BY v.id COLLATE "C"),'')) FROM (${relation}) v)`).join(",")})) AS finance_version`;
+function versionDigest(relations: string[],compact=false): string {
+  return `SELECT md5(concat_ws('|',${relations.map(relation => `(SELECT md5(COALESCE(string_agg(md5(${compact?'v::text':'to_jsonb(v)::text'}),'' ORDER BY v.id COLLATE "C"),'')) FROM (${relation}) v)`).join(",")})) AS finance_version`;
+}
+/** Canonical guards freeze these bodies; their strong digests and per-row revisions already bind legal changes. */
+function compactVersionProjection(relation:{name:string;sql:string}){
+  const frozen:Record<string,string[]>={ledger:['details'],observation:['source_canonical','snapshot'],opening:['native_origin_canonical'],earning:['canonical_seed'],basis:['canonical_basis'],duty_fact:['facts_canonical'],legacy_order:["source_snapshot->>'return_order_money' AS historical_refund"]};
+  let sql=relation.sql;
+  for(const field of frozen[relation.name]??[]){
+    const escaped=field.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),pattern=new RegExp(`,\\s*${escaped}(?=,| FROM )`);
+    if(!pattern.test(sql))throw new Error('Finance content projection changed');
+    sql=sql.replace(pattern,'');
+  }
+  if(relation.name==='refund_block')sql=sql.replace('a.details','md5(a.details::text) AS details')+" AND a.object_id IN (SELECT id FROM zzsh_order.channel_refund_intent)";
+  if(relation.name==='payment_request')sql=sql.replace('SELECT id,','SELECT id,revision::text,');
+  if(relation.name==='refund_intent')sql=sql.replace('SELECT i.id,','SELECT i.id,i.revision::text,').replace(',to_jsonb(i) AS doc','');
+  return sql;
 }
 /** A DB-side digest, not a second ledger/version store. New rows outside a page also invalidate it. */
 export function financeVersionSql(ready: FinanceVersionReady): string {
-  return versionDigest(versionRelations(ready).map(relation => relation.sql));
+  const relations=versionRelations(ready);
+  relations[0]!.sql+=`, '${relations.map(relation=>relation.name).join('|')}' AS capabilities`;
+  return versionDigest(relations.map(compactVersionProjection),true);
 }
 const orderPostings = `SELECT id FROM zzsh_order.settlement_posting WHERE order_id=$1`;
 const orderEvents = `SELECT finance_event_id FROM zzsh_order.settlement_ledger_entry WHERE posting_id IN (${orderPostings})`;
@@ -230,13 +249,13 @@ function exactFinanceSourceKeys(ready: FinanceVersionReady, scope: FinanceLoadSc
   return keys;
 }
 /** Select document keys before loading payloads; ledger documents override their order-only counterpart. */
-export function financeLookupPageSql(ledger: string, history: string, ready: FinanceVersionReady, scope: FinanceLoadScope) {
+export function financeLookupPageSql(ledger: string, history: string, ready: FinanceVersionReady, scope: FinanceLoadScope, historySnapshotRaw=false) {
   const values: unknown[] = [], include = (query: {text: string; values: unknown[]}) => {
     const offset = values.length; values.push(...query.values);
     return query.text.replace(/\$(\d+)/g, (_, n: string) => `$${Number(n) + offset}`);
   }, bind = (value: unknown) => `$${values.push(value)}`;
   const ledgerSql = include(scopedFinanceSql(ledger, "ledger", scope, null, !!ready.withdrawals, !!ready.joinpay_withdrawals));
-  const historySql = include(scopedFinanceSql(history, "history", scope, null, !!ready.withdrawals));
+  const historySql = include(scopedFinanceSql(history, "history", scope, null, !!ready.withdrawals,false,historySnapshotRaw));
   const exactSourceKeys = exactFinanceSourceKeys(ready, scope, bind);
   const orderKeys = [false, true].filter(legacy => legacy ? ready.legacy_orders : ready.native_orders).map(legacy => {
     const sql = include(financeOrderSql(legacy, scope, [], null));

@@ -401,6 +401,7 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   await configureAdminSecurityCommandPrivileges(pool, runtimeRole);
   await configureMembershipGrowthPrivileges(pool, runtimeRole);
   await configureLegacyGrowthCoveragePrivileges(pool, runtimeRole);
+  await configureLegacyGrowthReadAdmissionPrivileges(pool, runtimeRole);
   // The marker is present only after the separately approved uniform-policy schema installation.
   if ((await pool.query("SELECT to_regprocedure('zzsh_order.distribution_policy_contract_version()') IS NOT NULL AS present")).rows[0]?.present === true)
     await pool.query(`GRANT EXECUTE ON FUNCTION zzsh_order.distribution_policy_contract_version() TO ${runtimeUser};`);
@@ -409,6 +410,8 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   await configureContinuityFinancePrivileges(pool, runtimeRole);
   await configureChannelRefundPrivileges(pool, runtimeRole);
   await configureJoinpayFinancialPrivileges(pool, runtimeRole);
+  await configureProfileAvatarPolicyPrivileges(pool, runtimeRole);
+  await configureLocalFinancialSandboxPrivileges(pool, runtimeRole);
 }
 
 export async function configureIdentitySubjectPrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
@@ -593,6 +596,32 @@ async function resetRuntimeTablePrivileges(pool: Pick<Pool, "query">, table: str
       ${options.select === false ? "" : `GRANT SELECT ON TABLE ${table} TO ${role}`}`);
 }
 
+/** Optional avatar policy; validate the complete group before clearing inherited table/column grants. */
+export async function configureProfileAvatarPolicyPrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
+  const role = quoteIdentifier(runtimeRole), table = "zzsh_supply.profile_avatar_policy";
+  const tableRows = (await pool.query("SELECT to_regclass('zzsh_supply.profile_avatar_policy') IS NOT NULL AS present")).rows;
+  const assetRows = (await pool.query(`SELECT count(*)=1 AS ready FROM pg_attribute
+    WHERE attrelid=to_regclass('zzsh_supply.media_asset') AND attname='avatar_policy_revision' AND attnum>0 AND NOT attisdropped`)).rows;
+  if (tableRows.length !== 1 || typeof tableRows[0]?.present !== "boolean" || assetRows.length !== 1 || typeof assetRows[0]?.ready !== "boolean")
+    throw new Error("Profile avatar policy inventory is incomplete");
+  const functions = ["zzsh_supply.guard_profile_avatar_policy()", "zzsh_supply.guard_avatar_policy_asset()"], present: boolean[] = [];
+  for (const name of functions) {
+    const rows = (await pool.query("SELECT to_regprocedure($1) IS NOT NULL AS present", [name])).rows;
+    if (rows.length !== 1 || typeof rows[0]?.present !== "boolean") throw new Error("Profile avatar policy function inventory is incomplete");
+    present.push(rows[0].present);
+  }
+  if (!tableRows[0].present && !assetRows[0].ready && present.every(value => !value)) return;
+  if (!tableRows[0].present || !assetRows[0].ready || present.some(value => !value)) throw new Error("Profile avatar policy is partially deployed");
+  const columns = (await pool.query("SELECT attname FROM pg_attribute WHERE attrelid=$1::regclass AND attnum>0 AND NOT attisdropped ORDER BY attnum", [table])).rows.map(row => row.attname as string);
+  const expected = ["singleton", "requires_review", "revision", "updated_by_admin_id", "updated_at"];
+  if (columns.length !== expected.length || new Set(columns).size !== columns.length || expected.some(name => !columns.includes(name)))
+    throw new Error("Profile avatar policy column inventory differs");
+  await resetRuntimeTablePrivileges(pool, table, "PUBLIC", { columns, select: false });
+  await resetRuntimeTablePrivileges(pool, table, role, { columns });
+  await pool.query(`GRANT UPDATE(requires_review,revision,updated_by_admin_id,updated_at) ON ${table} TO ${role};
+    REVOKE ALL ON FUNCTION ${functions.join(",")} FROM PUBLIC, ${role};`);
+}
+
 /** Optional membership schema; immutable policy/contribution rows never need runtime UPDATE. */
 export async function configureMembershipGrowthPrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
   const role = quoteIdentifier(runtimeRole);
@@ -621,6 +650,16 @@ export async function configureLegacyGrowthCoveragePrivileges(pool: Pick<Pool, "
   if (!found[0].present) return;
   await resetRuntimeTablePrivileges(pool, name, role);
   await pool.query(`REVOKE ALL ON FUNCTION zzsh_iam.guard_legacy_growth_coverage() FROM ${role}`);
+}
+
+/** Verified zero read admissions are maintenance-owned; runtime never declares them. */
+export async function configureLegacyGrowthReadAdmissionPrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
+  const name = "zzsh_iam.membership_growth_legacy_read_admission", role = quoteIdentifier(runtimeRole);
+  const found = (await pool.query<{ name: string; present: boolean }>("SELECT name,to_regclass(name) IS NOT NULL AS present FROM unnest($1::text[]) AS t(name)", [[name]])).rows;
+  if (found.length !== 1 || found[0]?.name !== name || typeof found[0].present !== "boolean") throw new Error("Legacy growth read admission inventory is incomplete");
+  if (!found[0].present) return;
+  await resetRuntimeTablePrivileges(pool, name, role);
+  await pool.query(`REVOKE ALL ON FUNCTION zzsh_iam.guard_legacy_growth_read_admission() FROM ${role}`);
 }
 
 /** New continuity tables are narrowed after all broad/default grants. Exact role comes from migration config. */
@@ -720,6 +759,37 @@ export async function configureChannelRefundPrivileges(pool: Pick<Pool, "query">
 }
 
 /** Optional collection/refund/payout/account/bank groups; verify every metadata group before changing ACL. */
+/** Local metadata is never a real-channel capability; registration mutations remain owner-only. */
+export async function configureLocalFinancialSandboxPrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
+  const role = quoteIdentifier(runtimeRole);
+  const tables = ["zzsh_order.local_financial_sandbox_registration", "zzsh_order.local_controlled_refund_operation", "zzsh_order.local_controlled_refund_evidence"];
+  const found = (await pool.query<{ name: string; present: boolean }>(
+    "SELECT name,to_regclass(name) IS NOT NULL AS present FROM unnest($1::text[]) AS t(name)", [tables],
+  )).rows;
+  if (found.length !== tables.length || new Set(found.map(row => row.name)).size !== tables.length
+    || found.some(row => !tables.includes(row.name) || typeof row.present !== "boolean")) throw new Error("Local financial sandbox inventory is incomplete");
+  if (found.every(row => !row.present)) return;
+  if (found.some(row => !row.present)) throw new Error("Local financial sandbox is partially deployed");
+  const functions = ["zzsh_order.local_financial_sandbox_matches(text,text,boolean)", "zzsh_order.local_controlled_refund_liability_complete(text)", "zzsh_order.local_controlled_refund_terminal_complete(text)"];
+  const routines = (await pool.query<{ name: string; present: boolean }>(
+    "SELECT name,to_regprocedure(name) IS NOT NULL AS present FROM unnest($1::text[]) AS f(name)", [functions],
+  )).rows;
+  if (routines.length !== functions.length || new Set(routines.map(row => row.name)).size !== functions.length
+    || routines.some(row => !functions.includes(row.name) || row.present !== true)) throw new Error("Local financial sandbox routines are incomplete");
+  for (const table of tables) {
+    await resetRuntimeTablePrivileges(pool, table, role);
+    await pool.query(`REVOKE ALL ON TABLE ${table} FROM PUBLIC`);
+  }
+  await pool.query(`
+    -- PostgreSQL row locking needs an UPDATE privilege; the owner-only trigger rejects every runtime mutation.
+    GRANT UPDATE(active) ON zzsh_order.local_financial_sandbox_registration TO ${role};
+    GRANT INSERT ON zzsh_order.local_controlled_refund_operation,zzsh_order.local_controlled_refund_evidence TO ${role};
+    GRANT INSERT(sandbox_registration_ref) ON zzsh_order.channel_refund_intent TO ${role};
+    REVOKE ALL ON FUNCTION ${functions.join(",")} FROM PUBLIC, ${role};
+    GRANT EXECUTE ON FUNCTION ${functions.join(",")} TO ${role};
+  `);
+}
+
 export async function configureJoinpayFinancialPrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
   const role = quoteIdentifier(runtimeRole), words = (value = "") => value.split(" ").filter(Boolean);
   type Table = { name: string; insert: string; update?: string; metadata: string; select?: string };
@@ -752,12 +822,16 @@ export async function configureJoinpayFinancialPrivileges(pool: Pick<Pool, "quer
       update:'state revision last_reason approved_at updated_at liability_root_id liability_event_id',metadata:'created_at approved_xid'},
     {name:'zzsh_order.prestart_termination_decision',insert:'id termination_id result_revision decision assessment reason admin_user_id session_id request_id',metadata:'created_xid created_at'},
   ];
-  const optional = [...collection.slice(0,7), ...refund.slice(1), ...payout, ...account, ...bank,...prestart].map(t => t.name);
+  const sandboxNames = ["zzsh_order.local_financial_sandbox_registration", "zzsh_order.local_controlled_refund_operation", "zzsh_order.local_controlled_refund_evidence"];
+  const optional = [...collection.slice(0,7), ...refund.slice(1), ...payout, ...account, ...bank,...prestart].map(t => t.name).concat(sandboxNames);
   const found = (await pool.query<{ name: string; present: boolean }>("SELECT name,to_regclass(name) IS NOT NULL AS present FROM unnest($1::text[]) AS t(name) /* joinpay financial optional tables */", [optional])).rows;
   const validInventory = (rows: typeof found, names: string[]) => rows.length === names.length && new Set(rows.map(r => r.name)).size === names.length && rows.every(r => names.includes(r.name) && typeof r.present === "boolean");
   if (!validInventory(found, optional)) throw new Error("JoinPay financial inventory is incomplete");
   const complete = (tables: Table[]) => { const rows = tables.map(t => found.find(r => r.name === t.name)!); if (rows.every(r => !r.present)) return false; if (rows.some(r => !r.present)) throw new Error("JoinPay financial group is partially deployed"); return true; };
   const hasCollection = complete(collection.slice(0,7)), hasRefund = complete(refund.slice(1)), hasPayout = complete(payout), hasAccount = complete(account), hasBank = complete(bank),hasPrestart=complete(prestart);
+  const sandboxRows = found.filter(row => sandboxNames.includes(row.name));
+  if (sandboxRows.some(row => row.present) && sandboxRows.some(row => !row.present)) throw new Error("Local financial sandbox is partially deployed");
+  const hasSandbox = sandboxRows.every(row => row.present);
   if (!hasCollection && !hasRefund && !hasPayout && !hasAccount && !hasBank&&!hasPrestart) return;
   if (hasPayout && !hasRefund) throw new Error("JoinPay payout requires the complete formal refund parent");
   if(hasPrestart&&!hasRefund)throw new Error('Prestart termination requires the complete refund parent');
@@ -786,6 +860,8 @@ export async function configureJoinpayFinancialPrivileges(pool: Pick<Pool, "quer
   const basisCount=columns.filter(c=>c.name===refund[0]!.name&&basisColumns.includes(c.attname)).length;
   if(basisCount!==0&&basisCount!==3||hasPrestart&&basisCount!==3)throw new Error('Refund liability extension is partially deployed');
   if(basisCount===3){refund[0]!.insert+=' '+basisColumns.join(' ');functions.push('zzsh_order.native_abnormal_refund_liability_complete(text)','zzsh_order.native_abnormal_refund_terminal_complete(text)');}
+  // This column belongs to the separately checked local group, not the formal provider's write surface.
+  if (hasSandbox) refund[0]!.metadata += ' sandbox_registration_ref';
   const identity = (await pool.query(`/* joinpay financial runtime role */ SELECT r.oid::text AS "roleOid",r.rolsuper AS superuser,r.rolbypassrls AS "bypassRls",r.rolcreaterole AS "createRole",r.rolcreatedb AS "createDb",r.rolreplication AS replication,
     EXISTS(SELECT 1 FROM pg_auth_members m WHERE m.member=r.oid) AS "memberRights",
     EXISTS(SELECT 1 FROM (SELECT c.relowner AS owner_id FROM pg_class c WHERE c.oid IN(SELECT to_regclass(name) FROM unnest($2::text[]) AS t(name))

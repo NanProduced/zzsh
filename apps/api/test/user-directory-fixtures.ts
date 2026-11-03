@@ -32,19 +32,32 @@ export class DirectorySqlFixture extends EventEmitter {
   scenario='normal';fault='';
   // Optional in-memory execution of the real narrow filter/page SQL; not a PostgreSQL proof.
   filterSql?: (sql:string,values:unknown[])=>Record<string,any>[];
+  private membershipPortals=new Map<string,{rows:Record<string,any>[];offset:number}>();
   walletCoverage:{userId:string;origin:string;sourceKind:string|null;openingAmount:string|null;coveredCount:number|null}[]=[];
   walletLedger:{userId:string;availableCents:string|null}[]=[];
   async connect(){return this;} release(){}
   getTransactionStatus(){return "I" as const;}
   async query(sql:string,values:unknown[]=[]):Promise<any> {
-    if(sql.includes("to_regclass('zzsh_order.legacy_order_read_snapshot')"))return {rows:[{present:false}],rowCount:1};
+    if(sql.includes("to_regclass('zzsh_order.legacy_order_read_snapshot')")&&!sql.includes('legacy-growth-schema'))return {rows:[{present:false}],rowCount:1};
     this.queries.push({sql,values});
     const result=(rows:unknown[])=>({rows,rowCount:rows.length});
     if(sql.includes('INSERT INTO "zzsh_iam"."audit_event"')) {
       if(this.fault==='phone-audit')throw new Error('Injected disclosure audit failure');
       return {rows:[],rowCount:1};
     }
-    if(sql.startsWith('WITH membership_candidates AS MATERIALIZED'))return result(this.filterSql?this.filterSql(sql,values):[]);
+    const declaration=sql.match(/^DECLARE (directory_growth_\w+) NO SCROLL CURSOR FOR ([\s\S]+)$/);
+    if(declaration) {
+      let ids=this.filterSql?this.filterSql('SELECT u.id FROM zzsh_auth_user."user" u ORDER BY u.id COLLATE "C"',[]).map(row=>String(row.id)):this.users.map(row=>row.id);
+      if(declaration[1]==='directory_growth_subjects'&&declaration[2]!.includes('NOT(u.id=ANY($1::text[]))')){const excluded=new Set(values[0] as string[]);ids=ids.filter(id=>!excluded.has(id));}
+      const params=/_(versions|live)$/.test(declaration[1]!)?[ids,values[0]]:[ids];
+      let rows=(await this.query(declaration[2]!,params)).rows.sort((a:any,b:any)=>Buffer.compare(Buffer.from(a.userId),Buffer.from(b.userId)));
+      if(declaration[1]==='directory_growth_versions'&&Array.isArray(values[1])){const excluded=new Set(values[1] as string[]);rows=rows.filter((row:any)=>!excluded.has(row.userId));}
+      this.membershipPortals.set(declaration[1]!,{rows,offset:0});return result([]);
+    }
+    const fetch=sql.match(/^FETCH FORWARD 500 FROM (directory_growth_\w+)$/);
+    if(fetch) {const portal=this.membershipPortals.get(fetch[1]!);if(!portal)throw Error('MISSING_FIXTURE_PORTAL');const rows=portal.rows.slice(portal.offset,portal.offset+500);portal.offset+=rows.length;return result(rows);}
+    const close=sql.match(/^CLOSE (directory_growth_\w+)$/);
+    if(close) {this.membershipPortals.delete(close[1]!);return result([]);}
     if(this.filterSql&&sql.startsWith('SELECT u.id FROM zzsh_auth_user."user" u'))return result(this.filterSql(sql,values));
     if(this.filterSql&&sql.includes('directory-credit-summaries'))return result(this.filterSql(sql,values));
     if(sql.includes('FROM zzsh_supply.legacy_listing_read_snapshot h'))return result([]);
@@ -57,6 +70,10 @@ export class DirectorySqlFixture extends EventEmitter {
     if(sql.startsWith('SELECT game_id AS'))return result(this.gameIds.map(gameId=>({gameId})));
     if(sql.includes('SELECT 1 FROM zzsh_auth_user'))return result(this.users.some(row=>row.id===values[0])?[{exists:1}]:[]);
     if(sql.includes('directory-user-summaries')||sql.includes('SELECT id,name,image,"phoneNumber" AS phone FROM zzsh_auth_user."user" WHERE id=ANY'))return result(this.users.filter(row=>(values[0] as string[]).includes(row.id)).map(row=>({id:row.id,name:row.name,image:row.image,phone:row.phoneNumber,riskFlag:row.riskFlag})));
+    if(sql.includes('directory-growth-subjects'))return result(this.users.filter(row=>(values[0] as string[]).includes(row.id)).map(row=>({userId:row.id,sourceRef:null,migrated:row.provider==='legacy_mysql_restore',normalTier:null,effectiveTier:null,blackGoldState:null,lastTierDropAt:null})));
+    if(/directory-growth-(contributions|sources|policy|entitlements)/.test(sql))return result([]);
+    if(sql.includes('legacy-growth-schema'))return result([{coverage:false,sources:false}]);
+    if(sql.includes('legacy-growth-zero-read-schema'))return result([{present:false}]);
     if(sql.includes('FROM zzsh_auth_user."user" u')) {
       const combined=sql.includes('AS directory_rows');
       const counting=!combined&&sql.includes('SELECT count(*)::int AS total FROM');
@@ -136,11 +153,6 @@ export class DirectorySqlFixture extends EventEmitter {
       if(sql.includes("o.status IN ('PENDING_PAYMENT','PAID')"))rows=rows.filter(row=>['PENDING_PAYMENT','PAID'].includes(row.status));
       return result(rows);
     }
-    if(sql.includes('directory-growth-subjects'))return result([]);
-    if(sql.includes('directory-growth-contributions'))return result([]);
-    if(sql.includes('directory-growth-policy'))return result([]);
-    if(sql.includes('directory-growth-entitlements'))return result([]);
-    if(sql.includes('directory-growth-sources'))return result([]);
     if(sql.includes('zzsh_iam.membership_growth_legacy_coverage'))return result([]);
     if(sql.includes('zzsh_iam.membership_growth_contribution'))return result([]);
     if(sql.includes('zzsh_iam.membership_entitlement'))return result([]);

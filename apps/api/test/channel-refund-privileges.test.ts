@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Pool } from "pg";
-import { applyRuntimePrivileges, configureChannelRefundPrivileges } from "../src/database/business-migrations";
+import { applyRuntimePrivileges, configureChannelRefundPrivileges, configureLocalFinancialSandboxPrivileges } from "../src/database/business-migrations";
 
 const INTENT = "zzsh_order.channel_refund_intent", OBSERVATION = "zzsh_order.channel_refund_observation";
 const NAMES = [INTENT, OBSERVATION];
@@ -124,7 +124,7 @@ test("common path converges refund last after broad/default and other narrow hel
   const refund = f.seen.findIndex(q => q.sql.startsWith("SELECT name,to_regclass") && (q.args[0] as string[]).includes(INTENT));
   assert(broad >= 0 && defaults > broad && previousNarrow > defaults && refund > previousNarrow);
   const exactGrant = f.seen.findIndex(q => q.sql.includes("GRANT INSERT(id,intent_id,event"));
-  assert(exactGrant > refund); assert(f.seen.at(-1)!.sql.includes("joinpay financial optional tables"));
+  assert(exactGrant > refund); assert(f.seen.some(q => q.sql.includes("joinpay financial optional tables")));
   assert(!f.seen.slice(exactGrant + 1).some(q => /^\s*(GRANT|REVOKE|ALTER DEFAULT)/.test(q.sql)));
   assert(!f.seen.slice(refund).some(q => q.sql.includes("ON ALL TABLES") || q.sql.includes("ALTER DEFAULT")));
   assert.deepEqual(sorted(f.rights.get(INTENT)!.table), ["SELECT"]);
@@ -133,6 +133,13 @@ test("common path converges refund last after broad/default and other narrow hel
 test("common caller stays compatible when the optional refund schema is absent", async () => {
   const f = fixture(false); await applyRuntimePrivileges(f.pool, "runtime_role");
   const refund = f.seen.findIndex(q => q.sql.startsWith("SELECT name,to_regclass") && (q.args[0] as string[]).includes(INTENT));
-  assert.equal(refund, f.seen.length - 2); assert(f.seen.at(-1)!.sql.includes("joinpay financial optional tables")); assert.equal(f.seen.filter(q => q.sql.startsWith("REVOKE ALL ON TABLE zzsh_order.channel_refund_")).length, 0);
+  assert(refund >= 0); assert(f.seen.slice(refund).some(q => q.sql.includes("joinpay financial optional tables"))); assert.equal(f.seen.filter(q => q.sql.startsWith("REVOKE ALL ON TABLE zzsh_order.channel_refund_")).length, 0);
   const first = f.seen.map(q => q.sql); f.seen.length = 0; await applyRuntimePrivileges(f.pool, "runtime_role"); assert.deepEqual(f.seen.map(q => q.sql), first);
+});
+
+test('sandbox ACL keeps owner-only enrollment while admitting row locks and immutable local evidence',async()=>{
+ const tables=['zzsh_order.local_financial_sandbox_registration','zzsh_order.local_controlled_refund_operation','zzsh_order.local_controlled_refund_evidence'];
+ for(const mode of ['absent','partial','missing-routine','installed'] as const){const seen:string[]=[],pool={query:async(sql:string,args:unknown[]=[])=>{seen.push(sql);const names=args[0] as string[];if(sql.startsWith('SELECT name,to_regclass'))return{rows:names.map((name,i)=>({name,present:mode==='absent'?false:mode==='partial'?i===0:true}))};if(sql.startsWith('SELECT name,to_regprocedure'))return{rows:names.map((name,i)=>({name,present:mode!=='missing-routine'||i!==1}))};if(sql.startsWith('SELECT attname'))return{rows:['id','reference','active','canonical_registration'].map(attname=>({attname}))};return{rows:[]};}} as unknown as Pick<Pool,'query'>;
+ if(mode==='partial'||mode==='missing-routine'){await assert.rejects(configureLocalFinancialSandboxPrivileges(pool,'runtime_role'),/incomplete|partially/);assert(!seen.some(sql=>/^(GRANT|REVOKE)/.test(sql.trim())));continue;}await configureLocalFinancialSandboxPrivileges(pool,'runtime_role');if(mode==='absent'){assert.equal(seen.length,1);continue;}const grants=seen.filter(sql=>sql.includes('GRANT')).join('\n');assert.match(grants,/GRANT UPDATE\(active\) ON zzsh_order\.local_financial_sandbox_registration/);assert.doesNotMatch(grants,/GRANT INSERT[^;]* ON zzsh_order\.local_financial_sandbox_registration/);assert(grants.includes('GRANT INSERT(sandbox_registration_ref) ON zzsh_order.channel_refund_intent'));assert(grants.includes('local_controlled_refund_terminal_complete(text)'));assert(grants.includes('local_controlled_refund_liability_complete(text)'));for(const table of tables)assert(seen.some(sql=>sql.includes('REVOKE ALL ON TABLE '+table)));
+ }
 });

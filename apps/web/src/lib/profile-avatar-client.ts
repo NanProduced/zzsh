@@ -1,4 +1,6 @@
 export type AvatarPreset = { presetId: string; version: number; url: string; width: number; height: number };
+export type AvatarUploadPolicy = { requiresReview: boolean; revision: string; available: boolean };
+export type AvatarUploadResult = { assetId: string | null; avatarSubmission: { disposition: 'PENDING_REVIEW' | 'APPLIED_BY_POLICY'; requiresReview: boolean; policyRevision: string; approvalSource: 'MANUAL_REVIEW_REQUIRED' | 'SYSTEM_POLICY' } | null };
 
 export type AvatarState = {
   revision: string;
@@ -7,7 +9,8 @@ export type AvatarState = {
   defaultPresetId: string;
   presets: AvatarPreset[];
   pending: { assetId: string; submittedAt: string | null; reviewState: string; width: number; height: number; byteSize: string } | null;
-  lastReview: { assetId: string; state: "APPROVED" | "REJECTED" | "QUARANTINED" | "WITHDRAWN"; reason: string | null; reviewedAt: string; applied: boolean } | null;
+  lastReview: { assetId: string; state: "APPROVED" | "REJECTED" | "QUARANTINED" | "WITHDRAWN"; reason: string | null; reviewedAt: string; applied: boolean; source?: 'HUMAN_REVIEW' | 'SYSTEM_POLICY'; policyRevision?: string | null } | null;
+  policy?: AvatarUploadPolicy;
   changed?: boolean;
 };
 
@@ -44,6 +47,19 @@ function text(value: unknown, label: string): string {
 function revision(value: unknown): string {
   if (typeof value !== "string" || !/^(?:0|[1-9]\d{0,18})$/.test(value)) throw new ProfileAvatarError("头像版本不正确", 0, "CONTRACT");
   return value;
+}
+function uploadPolicy(value: unknown): AvatarUploadPolicy {
+  const row = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  if (row.available !== true || typeof row.requiresReview !== 'boolean' || typeof row.revision !== 'string' || !/^[1-9]\d{0,18}$/.test(row.revision)) return { requiresReview: true, revision: '0', available: false };
+  return { requiresReview: row.requiresReview, revision: row.revision, available: true };
+}
+export function parseAvatarUploadResult(value: unknown): AvatarUploadResult {
+  const body = record(value), assetId = typeof body.assetId === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(body.assetId) ? body.assetId : null;
+  if (body.avatarSubmission === undefined) return { assetId, avatarSubmission: null };
+  const row = record(body.avatarSubmission), pending = row.disposition === 'PENDING_REVIEW' && row.requiresReview === true && row.approvalSource === 'MANUAL_REVIEW_REQUIRED';
+  const applied = row.disposition === 'APPLIED_BY_POLICY' && row.requiresReview === false && row.approvalSource === 'SYSTEM_POLICY';
+  if (!assetId || !pending && !applied || typeof row.policyRevision !== 'string' || !/^(0|[1-9]\d{0,18})$/.test(row.policyRevision) || applied && row.policyRevision === '0') throw new ProfileAvatarError('头像上传回执无法确认', 0, 'CONTRACT');
+  return { assetId, avatarSubmission: { disposition: row.disposition as 'PENDING_REVIEW' | 'APPLIED_BY_POLICY', requiresReview: row.requiresReview as boolean, policyRevision: row.policyRevision, approvalSource: row.approvalSource as 'MANUAL_REVIEW_REQUIRED' | 'SYSTEM_POLICY' } };
 }
 
 function preset(value: unknown): AvatarPreset {
@@ -88,6 +104,8 @@ export function parseAvatarState(value: unknown): AvatarState {
       reason: typeof row.reason === "string" ? row.reason : null,
       reviewedAt: text(row.reviewedAt, "lastReview.reviewedAt"),
       applied: row.applied === true,
+      ...(row.source === 'SYSTEM_POLICY' || row.source === 'HUMAN_REVIEW' ? { source: row.source as 'SYSTEM_POLICY' | 'HUMAN_REVIEW' } : {}),
+      policyRevision: typeof row.policyRevision === 'string' && /^[1-9]\d{0,18}$/.test(row.policyRevision) ? row.policyRevision : null,
     };
   })();
   return {
@@ -104,6 +122,7 @@ export function parseAvatarState(value: unknown): AvatarState {
     presets,
     pending,
     lastReview,
+    policy: uploadPolicy(body.policy),
     ...(typeof body.changed === "boolean" ? { changed: body.changed } : {}),
   };
 }
@@ -155,12 +174,12 @@ export async function createAvatarUploadIntent(file: File, key: string, expected
   return { intentId: text(response.intentId, "intentId"), uploadToken: text(response.uploadToken, "uploadToken") };
 }
 
-export async function uploadAvatar(intentId: string, uploadToken: string, file: File, key: string, signal?: AbortSignal): Promise<void> {
-  await request(`/api/v1/profile/avatar/uploads/${encodeURIComponent(intentId)}`, {
+export async function uploadAvatar(intentId: string, uploadToken: string, file: File, key: string, signal?: AbortSignal): Promise<AvatarUploadResult> {
+  return parseAvatarUploadResult(await request(`/api/v1/profile/avatar/uploads/${encodeURIComponent(intentId)}`, {
     method: "PUT",
     headers: { "content-type": file.type, "x-upload-token": uploadToken, "idempotency-key": key },
     body: file,
-  }, signal);
+  }, signal));
 }
 
 export async function readAvatarOperationResult(key: string, presetId: string, expectedRevision: string, signal?: AbortSignal): Promise<unknown> {

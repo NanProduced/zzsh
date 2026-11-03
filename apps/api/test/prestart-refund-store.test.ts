@@ -9,6 +9,8 @@ import * as profiles from '../src/order/joinpay-refund-profile';
 import {createPrestartFormalRefundIntent,readPrestartRefundGate,readPrestartRefundProgress,allocatePrestartJoinpayRefunds,PrestartRefundAllocationUnknown} from '../src/order/prestart-refund-store';
 import {executeJoinpayRefund} from '../src/order/joinpay-refund-attempt';
 import * as store from '../src/order/channel-refund-store';
+import {sandboxFixture,sandboxClient} from './local-financial-sandbox-fixture';
+import {localFinancialSandboxRegistration} from '../src/finance/local-financial-sandbox-resource';
 
 const fields={orderId:'order_1',renterUserId:'renter_1',ownerUserId:'owner_1',paymentConfirmationId:'pc_1',source:'JOINPAY' as const,
  merchantIdentityId:'merchant_1',merchantOrderNo:'ORIGINAL_1',channelTrxNo:'TRX_1',amountCents:'15908',currency:'CNY' as const};
@@ -97,6 +99,29 @@ test('只读进度明确区分释放/未知/核销和保存证据；不调渠道
 test('只读截断及多重活跃分配不给完整合计；原责任不按重试次数相乘',async t=>{
  const f=fixture(t);await createPrestartFormalRefundIntent(f.c,input);const row={...f.original,complete:true,dispatched:false};
  f.rows(Array.from({length:51},(_,n)=>({...row,id:`refund_${n}`})));const p=await readPrestartRefundProgress(f.c,term.id,b,true);assert.equal(p.truncated,true);assert.equal(p.totals,null);assert.equal(p.intents?.length,50);
+});
+test('退款schema未装配永远没有本地完成时间，不能结束退款后IM窗口',async()=>{
+ const seen:string[]=[],c={query:async(sql:string)=>{seen.push(sql);return{rows:[{ready:false}]};}} as unknown as PoolClient;
+ const result=await readPrestartRefundProgress(c,term.id,b,false);
+ assert.equal(result.integration,'NOT_INTEGRATED');assert.equal(result.completedLocallyAt,null);assert.equal(result.totals,null);assert.equal(result.intents,null);
+ assert.equal(seen.length,1);assert(!seen.some(sql=>/INSERT|UPDATE|DELETE/.test(sql)));
+});
+test('registered CONTROLLED prestart close remains local accounting, never saved real-channel evidence',async()=>{
+ const sandbox=sandboxFixture(),base=sandboxClient(sandbox),p=localFinancialSandboxRegistration(sandbox),{digest:_,...oldFields}=b;
+ const fields={...oldFields,source:'CONTROLLED' as const,merchantIdentityId:'local_sandbox_'+p.digest.slice(0,32)};
+ const localBasis={...fields,digest:hashApprovalPayload({schema:'prestart-payment-basis.v1',...fields}).hash};
+ const row={id:'local_refund_1',order_id:localBasis.orderId,renter_user_id:localBasis.renterUserId,payment_confirmation_id:localBasis.paymentConfirmationId,
+  basis_kind:'PRESTART_TERMINATION',payment_source:'CONTROLLED',evidence_level:'CONTROLLED_TEST',merchant_identity_id:localBasis.merchantIdentityId,
+  original_payment_order_no:localBasis.merchantOrderNo,original_payment_trx_no:localBasis.channelTrxNo,amount_cents:localBasis.amountCents,currency:'CNY',responsibility_version_hash:localBasis.digest,
+  refund_order_no:'RF'+'a'.repeat(28),state:'SUCCEEDED',budget_disposition:'CONSUMED',requires_review:false,complete:true,dispatched:true,blocked_reason:null,
+  updated_at:'2026-11-02T10:00:00.000000Z',saved_terminal:'SUCCEEDED',saved_trx:'local_trx',saved_completed_at:'2026-11-02T10:00:00.000000Z',saved_at:'2026-11-02T10:00:00.000000Z',local_written_off_at:'2026-11-02T10:00:00.000000Z',terminal_evidence_id:'local_evidence',terminal_root_id:'local_root',terminal_event_id:'local_event'};
+ const seen:string[]=[],c={query:async(sql:string,v:any[]=[])=>{seen.push(sql);if(sql.includes('to_regprocedure'))return{rows:[{ready:true}]};
+  if(sql.includes('FROM zzsh_order.channel_refund_intent i LEFT JOIN'))return{rows:[row]};return base.query(sql,v);}} as unknown as PoolClient;
+ const local=await readPrestartRefundProgress(c,term.id,localBasis,true,sandbox);
+ assert.equal(local.integration,'INTEGRATED');assert.equal(local.totals?.consumedCents,localBasis.amountCents);assert.equal(local.completedLocallyAt,row.local_written_off_at);
+ assert.equal(local.intents?.[0]?.savedChannelEvidence,null);assert.equal(local.channelRecordsChecked,false);assert.equal(local.bankArrival,'UNKNOWN');
+ const unscoped=await readPrestartRefundProgress(c,term.id,localBasis,true);assert.equal(unscoped.integration,'UNAVAILABLE');assert.equal(unscoped.completedLocallyAt,null);
+ assert(!seen.some(sql=>/^(INSERT|UPDATE|DELETE)/.test(sql)||sql.includes('FOR UPDATE')));
 });
 test('无SUBMIT配置不扫描未开租责任，非法批量在连接前拒绝',async()=>{
  let connects=0;const o={pool:{connect:async()=>{connects++;throw Error('NO_IO');}}} as any;

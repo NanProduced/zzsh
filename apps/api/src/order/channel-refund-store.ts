@@ -3,7 +3,10 @@ import type { PoolClient } from "pg";
 import { recordAudit, SecurityApiError } from "../auth/security-core";
 import { API_V1_ERROR_CODES, validateIdempotencyKey } from "../contracts/api-v1";
 import { conflict, fingerprintRequest, invalid, notFound } from "../supply/supply-util";
-import { assertSyntheticChannelRequestCapability, assertSyntheticChannelRequestOrder, wireAmountForCents } from "./channel-payment-store";
+import { assertSyntheticChannelRequestCapability, assertSyntheticChannelRequestOrder, assertSandboxOriginalPayment, sandboxForChannelRequestCapability, wireAmountForCents } from "./channel-payment-store";
+import { localFinancialSandboxRegistration } from "../finance/local-financial-sandbox-resource";
+import { verifyPrestartRefundLiability } from "../finance/prestart-refund-liability";
+import type { PrestartPaymentBasis } from "./prestart-termination";
 import { readFormalRefundAdmission, describeRefundProfile, assertFormalRefundProfile, assertRefundStart, assertInitialRefundAdmission, assertRefundBinding,
   type BoundRefundProfile, type FormalRefundAdmission, type RefundBinding } from "./joinpay-refund-profile";
 
@@ -11,31 +14,33 @@ import { readFormalRefundAdmission, describeRefundProfile, assertFormalRefundPro
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 export type RefundIntentState = "READY" | "SUBMITTING" | "UNKNOWN";
 type RefundRow = {
-  id: string; posting_id: string; order_id: string; payment_confirmation_id: string; renter_user_id: string;
+  id: string; posting_id: string|null; order_id: string; payment_confirmation_id: string; renter_user_id: string;
   payment_source: "CONTROLLED"; merchant_identity_id: string; original_payment_trx_no: string; original_payment_order_no: string;
   responsibility_version_hash: string; refund_order_no: string; amount_cents: string; currency: "CNY";
-  idempotency_key: string; request_fingerprint: string; state: RefundIntentState; revision: string;
+  idempotency_key: string; request_fingerprint: string; state: RefundIntentState|'SUCCEEDED'|'FAILED'; revision: string;
+  budget_disposition?:'ALLOCATED'|'CONSUMED'|'RELEASED';
   lease_version: string; lease_owner: string | null; due_at: string;
 };
 const COLUMNS = `id, posting_id, order_id, payment_confirmation_id, renter_user_id, payment_source, merchant_identity_id,
   original_payment_trx_no, original_payment_order_no, responsibility_version_hash, refund_order_no,
   amount_cents::text AS amount_cents, currency, idempotency_key, request_fingerprint, state,
   revision::text AS revision, lease_version::text AS lease_version, lease_owner,
-  to_char(due_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS due_at`;
+  to_char(due_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS due_at,
+  COALESCE(to_jsonb(channel_refund_intent)->>'budget_disposition','ALLOCATED') AS budget_disposition`;
 
 export type RefundIntent = Readonly<{
-  intentId: string; postingId: string; orderId: string; paymentConfirmationId: string; renterUserId: string;
+  intentId: string; postingId: string|null; orderId: string; paymentConfirmationId: string; renterUserId: string;
   originalPayment: { source: "CONTROLLED"; merchantIdentityId: string; transactionNo: string; orderNo: string };
   responsibilityVersionHash: string; refundOrderNo: string; amountCents: string; currency: "CNY"; dueAt: string;
-  state: RefundIntentState; revision: string; leaseVersion: string; evidenceLevel: "CONTROLLED_TEST";
-  budgetDisposition: "ALLOCATED"; formalRefund: false; sendable: false;
+  state: RefundRow['state']; revision: string; leaseVersion: string; evidenceLevel: "CONTROLLED_TEST";
+  budgetDisposition: 'ALLOCATED'|'CONSUMED'|'RELEASED'; formalRefund: false; sendable: false;
 }>;
 const view = (r: RefundRow): RefundIntent => ({
   intentId: r.id, postingId: r.posting_id, orderId: r.order_id, paymentConfirmationId: r.payment_confirmation_id,
   renterUserId: r.renter_user_id, originalPayment: { source: r.payment_source, merchantIdentityId: r.merchant_identity_id,
     transactionNo: r.original_payment_trx_no, orderNo: r.original_payment_order_no }, responsibilityVersionHash: r.responsibility_version_hash,
   refundOrderNo: r.refund_order_no, amountCents: r.amount_cents, currency: r.currency, dueAt: r.due_at, state: r.state,
-  revision: r.revision, leaseVersion: r.lease_version, evidenceLevel: "CONTROLLED_TEST", budgetDisposition: "ALLOCATED",
+  revision: r.revision, leaseVersion: r.lease_version, evidenceLevel: "CONTROLLED_TEST", budgetDisposition: r.budget_disposition??"ALLOCATED",
   formalRefund: false, sendable: false,
 });
 
@@ -74,7 +79,7 @@ export async function lockRefundFunds(client:PoolClient,source:string,merchantId
     [source,merchantIdentityId,trx]);
 
 }
-async function assertRefundBudget(client:PoolClient,basis:RefundBasis,postingId:string,amountCents:string){
+async function assertRefundBudget(client:PoolClient,basis:RefundBasis,postingId:string|null,amountCents:string){
   const totals = (await client.query<{ paid_allocated: string; responsibility_allocated: string }>(
     `SELECT COALESCE(sum(amount_cents),0)::text AS paid_allocated,
       COALESCE(sum(amount_cents) FILTER (WHERE posting_id=$4),0)::text AS responsibility_allocated
@@ -103,6 +108,7 @@ export async function createNativeRefundIntent(client: PoolClient, input: {
   const basis = await readRefundBasis(client,input.postingId);
   if (!basis) throw notFound();
   assertSyntheticChannelRequestOrder(input.capability, basis.order_id);
+  assertSandboxOriginalPayment(input.capability, basis);
   if (basis.source !== "CONTROLLED" || basis.currency !== "CNY") {
     throw new SecurityApiError(503, API_V1_ERROR_CODES.EVIDENCE_UNAVAILABLE, "Refund payment source unavailable");
   }
@@ -120,16 +126,86 @@ export async function createNativeRefundIntent(client: PoolClient, input: {
   }
   await assertRefundBudget(client,basis,input.postingId,input.amountCents);
   const refundNo = refundNumber(basis,input.postingId,key);
+  const sandbox=sandboxForChannelRequestCapability(input.capability),reference=sandbox?localFinancialSandboxRegistration(sandbox).registration.reference:undefined;
   const row = (await client.query<RefundRow>(`INSERT INTO zzsh_order.channel_refund_intent
     (id,posting_id,order_id,payment_confirmation_id,renter_user_id,payment_source,merchant_identity_id,
      original_payment_trx_no,original_payment_order_no,responsibility_version_hash,refund_order_no,
-     amount_cents,currency,idempotency_key,request_fingerprint,due_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'CNY',$13,$14,$15) RETURNING ${COLUMNS}`,
+     amount_cents,currency,idempotency_key,request_fingerprint,due_at${reference?',sandbox_registration_ref':''})
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'CNY',$13,$14,$15${reference?',$16':''}) RETURNING ${COLUMNS}`,
     [freshId("refund"), input.postingId, basis.order_id, basis.payment_confirmation_id, basis.renter_user_id, basis.source,
       basis.merchant_scope_id, basis.provider_transaction_id, basis.merchant_order_no, basis.version_hash, refundNo,
-      input.amountCents, key, fingerprint, basis.due_at])).rows[0]!;
+      input.amountCents, key, fingerprint, basis.due_at,...(reference?[reference]:[])])).rows[0]!;
   await audit(client, row.id, "order.refund.intent.allocated", input.requestId, { postingId: row.posting_id, amountCents: row.amount_cents });
   return { replayed: false, intent: view(row) };
+}
+
+/** Reuses the original approved CONTROLLED prestart liability and shared funds budget. There is
+ * no client amount/provider target and no formal admission/profile fallback in this branch. */
+export async function createSandboxPrestartRefundIntent(client:PoolClient,input:{terminationId:string;idempotencyKey:unknown;requestId:string;capability:unknown}){
+  const key=validateIdempotencyKey(input.idempotencyKey),sandbox=sandboxForChannelRequestCapability(input.capability);
+  if(!sandbox||!validId(input.terminationId)||!validId(input.requestId))throw invalid();
+  await admitted(client,input.capability);
+  const p=localFinancialSandboxRegistration(sandbox);
+  const term=(await client.query<{id:string;payment_basis:PrestartPaymentBasis;basis_digest:string;approved_at:string;liability_root_id:string;liability_event_id:string}>(
+    `SELECT id,payment_basis,basis_digest,approved_at::text,liability_root_id,liability_event_id FROM zzsh_order.prestart_termination WHERE id=$1 AND state='APPROVED'`,[input.terminationId])).rows[0];
+  if(!term)throw notFound();const b=term.payment_basis;
+  if(!b||b.source!=='CONTROLLED'||b.digest!==term.basis_digest)throw invalid('Original local prestart payment differs');
+  assertSyntheticChannelRequestOrder(input.capability,b.orderId);
+  assertSandboxOriginalPayment(input.capability,{source:b.source,merchant_scope_id:b.merchantIdentityId});
+  await lockRefundFunds(client,'CONTROLLED',b.merchantIdentityId,b.channelTrxNo);
+  if((await client.query('SELECT id FROM zzsh_auth_user."user" WHERE id=$1 FOR UPDATE',[b.renterUserId])).rowCount!==1)throw notFound();
+  await verifyPrestartRefundLiability(client,term.id,b,term.liability_root_id,term.liability_event_id);
+  const fingerprint=fingerprintRequest('prestart.refund.intent',term.id,{confirmationId:b.paymentConfirmationId,amountCents:b.amountCents,basisDigest:b.digest});
+  const extra=',basis_kind,liability_root_id,liability_event_id,sandbox_registration_ref';
+  const old=(await client.query<RefundRow&{basis_kind:string;liability_root_id:string;liability_event_id:string;sandbox_registration_ref:string}>(
+    `SELECT ${COLUMNS}${extra} FROM zzsh_order.channel_refund_intent WHERE payment_confirmation_id=$1 AND idempotency_key=$2`,[b.paymentConfirmationId,key])).rows[0];
+  if(old){
+    if(old.payment_source!=='CONTROLLED'||old.basis_kind!=='PRESTART_TERMINATION'||old.request_fingerprint!==fingerprint
+      ||old.sandbox_registration_ref!==p.registration.reference||old.posting_id!==null||old.order_id!==b.orderId||old.amount_cents!==b.amountCents
+      ||old.liability_root_id!==term.liability_root_id||old.liability_event_id!==term.liability_event_id)throw conflict('Original local refund key has different facts');
+    return{kind:'REPLAYED' as const,intentId:old.id,refundOrderNo:old.refund_order_no,state:old.state,budgetDisposition:old.budget_disposition??'ALLOCATED'};
+  }
+  const original=(await client.query(`SELECT count(*)::text AS n,bool_and(c.id=$3 AND c.disposition='APPLIED' AND o.paid_confirmation_id=c.id
+      AND o.status='CANCELLED' AND c.amount_cents=$4::numeric AND c.currency='CNY') AS bound
+    FROM zzsh_order.payment_confirmation c JOIN zzsh_order.rental_order o ON o.id=c.order_id
+    WHERE c.source='CONTROLLED' AND c.merchant_scope_id=$1 AND c.merchant_order_no=$2`,[b.merchantIdentityId,b.merchantOrderNo,b.paymentConfirmationId,b.amountCents])).rows[0];
+  if(original?.n!=='1'||original.bound!==true)throw conflict('Original local prestart payment is ambiguous');
+  const basis:RefundBasis={order_id:b.orderId,payment_confirmation_id:b.paymentConfirmationId,renter_user_id:b.renterUserId,
+    version_hash:b.digest,due_at:term.approved_at,source:'CONTROLLED',merchant_scope_id:b.merchantIdentityId,provider_transaction_id:b.channelTrxNo,
+    merchant_order_no:b.merchantOrderNo,paid_cents:b.amountCents,responsibility_cents:b.amountCents,currency:'CNY'};
+  await assertRefundBudget(client,basis,null,b.amountCents);
+  const number=refundNumber(basis,term.id,key);
+  const row=(await client.query<RefundRow>(`INSERT INTO zzsh_order.channel_refund_intent
+    (id,posting_id,order_id,payment_confirmation_id,renter_user_id,payment_source,merchant_identity_id,original_payment_trx_no,original_payment_order_no,
+      responsibility_version_hash,refund_order_no,amount_cents,currency,idempotency_key,request_fingerprint,due_at,basis_kind,liability_root_id,liability_event_id,sandbox_registration_ref)
+    VALUES($1,NULL,$2,$3,$4,'CONTROLLED',$5,$6,$7,$8,$9,$10,'CNY',$11,$12,$13,'PRESTART_TERMINATION',$14,$15,$16) RETURNING ${COLUMNS}`,
+  [freshId('refund'),b.orderId,b.paymentConfirmationId,b.renterUserId,b.merchantIdentityId,b.channelTrxNo,b.merchantOrderNo,b.digest,number,
+    b.amountCents,key,fingerprint,term.approved_at,term.liability_root_id,term.liability_event_id,p.registration.reference])).rows[0];
+  if(!row)throw conflict('Local prestart refund allocation unavailable');
+  await audit(client,row.id,'order.refund.prestart.allocated',input.requestId,{terminationId:term.id,paymentConfirmationId:b.paymentConfirmationId,amountCents:b.amountCents,currency:'CNY',channelResult:'NOT_SUBMITTED'});
+  return{kind:'ALLOCATED' as const,intentId:row.id,refundOrderNo:row.refund_order_no,state:row.state,budgetDisposition:row.budget_disposition??'ALLOCATED'};
+}
+
+async function lockControlledRefundContext(client: PoolClient, capability: unknown, intentId: string): Promise<RefundRow> {
+  const sql = `SELECT ${COLUMNS} FROM zzsh_order.channel_refund_intent WHERE id=$1 AND payment_source='CONTROLLED'`;
+  const sandbox = sandboxForChannelRequestCapability(capability);
+  const original = sandbox ? (await client.query<RefundRow>(sql, [intentId])).rows[0] : undefined;
+  if (sandbox) {
+    if (!original) throw notFound();
+    assertSyntheticChannelRequestOrder(capability, original.order_id);
+    assertSandboxOriginalPayment(capability, { source: original.payment_source, merchant_scope_id: original.merchant_identity_id });
+    // The sandbox UPDATE guard also takes funds; match submit/terminal funds -> user -> intent order.
+    await lockRefundFunds(client, original.payment_source, original.merchant_identity_id, original.original_payment_trx_no);
+    if ((await client.query('SELECT id FROM zzsh_auth_user."user" WHERE id=$1 FOR UPDATE', [original.renter_user_id])).rowCount !== 1) throw notFound();
+  }
+  const row = (await client.query<RefundRow>(`${sql} FOR UPDATE`, [intentId])).rows[0];
+  if (!row || row.payment_source !== "CONTROLLED") throw notFound();
+  assertSyntheticChannelRequestOrder(capability, row.order_id);
+  assertSandboxOriginalPayment(capability, { source: row.payment_source, merchant_scope_id: row.merchant_identity_id });
+  if (original && (["order_id", "posting_id", "payment_confirmation_id", "renter_user_id", "payment_source", "merchant_identity_id",
+    "original_payment_trx_no", "original_payment_order_no", "responsibility_version_hash", "refund_order_no", "amount_cents", "currency"] as const)
+    .some(key => row[key] !== original[key])) throw conflict("Original local refund binding changed while acquiring its locks");
+  return row;
 }
 
 export type RefundLease = Readonly<{ intent: RefundIntent; owner: string; version: string; operation: "SUBMIT" | "QUERY" }>;
@@ -140,9 +216,7 @@ export async function claimRefundIntent(client: PoolClient, input: {
   if (!validId(input.intentId) || !validId(input.owner) || !validId(input.requestId)
     || !Number.isSafeInteger(input.ttlSeconds) || input.ttlSeconds < 1 || input.ttlSeconds > 3600) throw invalid();
   await admitted(client, input.capability);
-  const row = (await client.query<RefundRow>(`SELECT ${COLUMNS} FROM zzsh_order.channel_refund_intent WHERE id=$1 AND payment_source='CONTROLLED' FOR UPDATE`, [input.intentId])).rows[0];
-  if (!row || row.payment_source!=="CONTROLLED") throw notFound();
-  assertSyntheticChannelRequestOrder(input.capability, row.order_id);
+  const row = await lockControlledRefundContext(client, input.capability, input.intentId);
   const next = (await client.query<RefundRow>(`UPDATE zzsh_order.channel_refund_intent SET
       state=CASE WHEN state='READY' THEN 'SUBMITTING' ELSE 'UNKNOWN' END,
       lease_version=lease_version+1,lease_owner=$2,lease_until=clock_timestamp()+make_interval(secs=>$3),revision=revision+1
@@ -162,6 +236,7 @@ export async function readRecoverableRefundIntent(client: PoolClient, intentId: 
   const row = (await client.query<RefundRow>(`SELECT ${COLUMNS} FROM zzsh_order.channel_refund_intent WHERE id=$1 AND payment_source='CONTROLLED'`, [intentId])).rows[0];
   if (row?.payment_source!=="CONTROLLED") return null;
   assertSyntheticChannelRequestOrder(capability, row.order_id);
+  assertSandboxOriginalPayment(capability, { source: row.payment_source, merchant_scope_id: row.merchant_identity_id });
   return view(row);
 }
 
@@ -174,9 +249,7 @@ export async function recordRefundTransportFailure(client: PoolClient, input: {
     || !/^[1-9]\d{0,18}$/.test(input.version) || BigInt(input.version) > 9223372036854775807n
     || !["TIMEOUT", "HTTP_NON_200", "CONNECTION_LOST", "RESPONSE_TRUNCATED", "LOCAL_FAILURE"].includes(input.reason)) throw invalid();
   await admitted(client, input.capability);
-  const row = (await client.query<RefundRow>(`SELECT ${COLUMNS} FROM zzsh_order.channel_refund_intent WHERE id=$1 AND payment_source='CONTROLLED' FOR UPDATE`, [input.intentId])).rows[0];
-  if (!row || row.payment_source!=="CONTROLLED") throw notFound();
-  assertSyntheticChannelRequestOrder(input.capability, row.order_id);
+  const row = await lockControlledRefundContext(client, input.capability, input.intentId);
   // 取得行锁后另发 UPDATE，以此时 PG 时钟检查租约，等待期间过期也只能记 STALE。
   const changed = (await client.query<RefundRow>(`UPDATE zzsh_order.channel_refund_intent SET state='UNKNOWN',revision=revision+1
     WHERE id=$1 AND state IN ('SUBMITTING','UNKNOWN') AND lease_version=$2::bigint AND lease_owner=$3

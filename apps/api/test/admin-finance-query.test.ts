@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import {Pool} from "pg";
 import {scopedFinanceSql,financeVersionSql,financeScopedVersionSql,financeLookupPageSql,FINANCE_GLOBAL_VERSION_DOMAIN} from "../src/finance/admin-finance-query";
-import {parseAdminFinanceFilters,adminFinanceObservationSql,ADMIN_FINANCE_LEDGER_SQL,projectAdminFinanceObservation,projectAdminFinanceLedger,projectUnpostedFinanceSource,financeDocuments,readAdminFinanceSubject,financeSnapshot,financePeriodProjection} from "../src/finance/admin-finance-read";
+import {parseAdminFinanceFilters,adminFinanceObservationSql,ADMIN_FINANCE_LEDGER_SQL,ADMIN_FINANCE_LOOKUP_OBSERVATION_SQL,projectAdminFinanceObservation,projectAdminFinanceLedger,projectUnpostedFinanceSource,financeDocuments,readAdminFinanceSubject,financeSnapshot,financePeriodProjection} from "../src/finance/admin-finance-read";
 import {FinanceSqlFixture} from './admin-finance-fixture';
 import {prepareOwnerGuaranteeHistory} from '../src/finance/owner-guarantee-history';
 
@@ -11,24 +11,22 @@ test("query selection is before the matched ceiling and restored content digest 
  const filters=parseAdminFinanceFilters(new URLSearchParams("scope=u1&q=%25_%5C&from=2026-10-03&to=2026-10-03"));
  const query=scopedFinanceSql("SELECT * FROM input ORDER BY l.id COLLATE \"C\" LIMIT $1","ledger",{filters},20001,false);
  assert.ok(query.text.indexOf("WHERE")<query.text.lastIndexOf("LIMIT"));assert.ok(query.values.includes("u1"));assert.equal(query.values.at(-1),20001);assert.ok(query.values.some(value=>typeof value==="string"&&value.includes("\\%\\_\\\\")));
- const version=financeVersionSql({withdrawals:true,native_orders:true,legacy_orders:true});assert.ok(!/LIMIT|pg_current_snapshot|current_database|count\(|max\(/i.test(version));assert.match(version,/string_agg/);assert.match(version,/controlled_payout_operation/);assert.match(version,/wallet_revision/);assert.match(version,/legacy_order_read_snapshot/);
+ const version=financeVersionSql({withdrawals:true,native_orders:true,legacy_orders:true});assert.ok(!/pg_current_snapshot|current_database/i.test(version));assert.match(version,/string_agg/);assert.match(version,/controlled_payout_operation/);assert.match(version,/wallet_revision/);assert.match(version,/legacy_order_read_snapshot/);
 });
 
-test('restored finance content changes for original responsibility evidence, not unrelated cluster activity',()=>{
+test('global finance content binds revised duties and appended frozen facts, not unrelated cluster activity',()=>{
  const fixture=new FinanceSqlFixture({ledger:[{id:'line1',subject_id:'u1',delta:'100',at:'2026-10-03T01:00:00Z',details:{legacyDutyId:'duty1'}}],legacy:[{id:'old1',source_snapshot:{return_order_money:'1.00',unrelatedNote:'before'}}],legacyDutyFacts:[{duty_id:'duty1',order_id:'old1',facts_canonical:'original',facts_digest:'a'.repeat(64)}],legacyDuties:[{id:'duty1',order_id:'old1',counterparty_user_id:'u1',amount_cents:'100',maturity_at:'2026-10-03T01:00:00Z'}]});
  try{
-  fixture.db.exec("INSERT INTO zzsh_order.settlement_posting(id,settlement_version_id,refund_due_at) VALUES('posting1','version1','2026-10-03T01:00:00Z')");
+  fixture.db.exec("INSERT INTO zzsh_order.settlement_posting(id,settlement_version_id,refund_due_at) VALUES('posting1','version1','2026-10-03T01:00:00Z'); UPDATE zzsh_order.legacy_order_duty SET revision='1' WHERE id='duty1'; INSERT INTO zzsh_order.legacy_order_duty(id,revision) VALUES('unchanged-max','99')");
   const sql=financeVersionSql({legacy_orders:true,legacy_duty_finance:true}),version=()=>fixture.query(sql,[]).rows[0]!.finance_version;
   let previous=version();fixture.clusterSnapshot='200:300:201';assert.equal(version(),previous);
-  fixture.db.prepare("UPDATE zzsh_order.legacy_order_read_snapshot SET source_snapshot=? WHERE id='old1'").run(JSON.stringify({return_order_money:'1.00',unrelatedNote:'after'}));assert.equal(version(),previous);
   for(const statement of [
-   "UPDATE zzsh_order.settlement_posting SET settlement_version_id='version2' WHERE id='posting1'",
-   "UPDATE zzsh_order.settlement_posting SET refund_due_at='2026-10-04T01:00:00Z' WHERE id='posting1'",
-   "UPDATE zzsh_order.legacy_order_duty SET maturity_at='2026-10-05T01:00:00Z' WHERE id='duty1'",
-   "UPDATE zzsh_order.legacy_order_duty SET counterparty_user_id='u2' WHERE id='duty1'",
-   "UPDATE zzsh_order.legacy_duty_finance_fact SET facts_canonical='changed' WHERE duty_id='duty1'",
-   "UPDATE zzsh_order.fixture_ledger SET details='{}' WHERE id='line1'",
-   "UPDATE zzsh_order.legacy_order_read_snapshot SET source_snapshot='{\"return_order_money\":\"2.00\"}' WHERE id='old1'"
+   "UPDATE zzsh_order.legacy_order_duty SET maturity_at='2026-10-05T01:00:00Z',revision='2' WHERE id='duty1'",
+   "UPDATE zzsh_order.legacy_order_duty SET amount_cents='101',revision='3' WHERE id='duty1'",
+   "INSERT INTO zzsh_order.settlement_posting(id,settlement_version_id,refund_due_at) VALUES('posting2','version2','2026-10-04T01:00:00Z')",
+   "INSERT INTO zzsh_order.legacy_duty_finance_fact(duty_id,facts_digest) VALUES('duty2','second-frozen-digest')",
+   "INSERT INTO zzsh_order.fixture_ledger(id,credit_cents,details) VALUES('line2','101','{}')",
+   "INSERT INTO zzsh_order.legacy_order_read_snapshot(id,source_digest,binding_digest) VALUES('old2','second-source','second-binding')"
   ]){fixture.db.exec(statement);const next=version();assert.notEqual(next,previous,statement);previous=next;}
  }finally{fixture.close();}
 });
@@ -101,6 +99,7 @@ test('actual native zero source branch remains visible as its distribution docum
   const filters=parseAdminFinanceFilters(new URLSearchParams('scope=u1&kind=DISTRIBUTION&state=SETTLED&from=2026-10-03&to=2026-10-03')),source=adminFinanceObservationSql({native_distribution:true}),q=scopedFinanceSql(source,'history',{filters},20,false),rows=fixture.query(q.text,q.values).rows;assert.equal(rows.length,1);
   const row=projectAdminFinanceObservation(rows[0]!);assert.equal(row.documentRef,'DISTRIBUTION:zero-earning');assert.equal(row.deltaCents,'0');assert.equal(row.affectsCurrentLedger,false);assert.equal(row.classification,'ZERO_AMOUNT_FACT');
   const page=financeLookupPageSql(ADMIN_FINANCE_LEDGER_SQL,source,{}, {filters,lookup:{exact:false},page:1,pageSize:20}),keys=fixture.query(page.text,page.values).rows;assert.equal(keys[0]!.ref,'DISTRIBUTION:zero-earning');
+  const light=financeLookupPageSql(ADMIN_FINANCE_LEDGER_SQL,adminFinanceObservationSql({native_distribution:true},true),{},{filters,lookup:{exact:false},page:1,pageSize:20},true);assert.deepEqual(fixture.query(light.text,light.values).rows,keys);assert.match(light.text,/t\.action='ACCRUE'/);assert.doesNotMatch(light.text,/'earningRole',e\.beneficiary_role/);
   const empty=scopedFinanceSql(source,'history',{filters:{...filters,scope:'u2'}},20,false);assert.equal(fixture.query(empty.text,empty.values).rows.length,0);
   const version=financeVersionSql({native_distribution:true});assert(version.includes('rental_referral_earning'));assert.match(fixture.query(version,[]).rows[0]!.finance_version as string,/^[a-f0-9]{32}$/);
  }finally{fixture.close();}
@@ -111,6 +110,7 @@ test('actual guarantee history SQL uses its own source document and never adds p
  try{const filters=parseAdminFinanceFilters(new URLSearchParams('scope=u1&kind=GUARANTEE&from=2026-10-03&to=2026-10-03')),source=adminFinanceObservationSql({guarantee_history:true}),q=scopedFinanceSql(source,'history',{filters},20,false),rows=fixture.query(q.text,q.values).rows;assert.equal(rows.length,1);
   const row=projectAdminFinanceObservation(rows[0]!);assert.equal(row.documentRef,'GUARANTEE_SOURCE:guarantee_source:guarantee-fixture');assert.equal(row.deltaCents,null);assert.equal(row.knowledge,'UNKNOWN');assert.equal(row.evidence.sourcePaidRecordCents,'500');assert.equal(row.evidence.currentLiabilityCents,null);assert.equal(row.affectsCurrentLedger,false);assert.equal(row.affectsCurrentWallet,false);assert.equal(row.related.length,0);assert(!JSON.stringify(row).includes('ORIGINAL-MERCHANT'));
   const page=financeLookupPageSql(ADMIN_FINANCE_LEDGER_SQL,source,{}, {filters,lookup:{exact:false},page:1,pageSize:20});assert.equal(fixture.query(page.text,page.values).rows[0]!.ref,row.documentRef);
+  const light=financeLookupPageSql(ADMIN_FINANCE_LEDGER_SQL,adminFinanceObservationSql({guarantee_history:true},true),{},{filters,lookup:{exact:false},page:1,pageSize:20},true);assert.deepEqual(fixture.query(light.text,light.values).rows,fixture.query(page.text,page.values).rows);assert.match(light.text,/jsonb_array_length\(g\.source_canonical/);assert.doesNotMatch(light.text,/jsonb_build_object\('canonical'/);
   const other=scopedFinanceSql(source,'history',{filters:{...filters,scope:'u2'}},20,false);assert.equal(fixture.query(other.text,other.values).rows.length,0);
   assert.throws(()=>projectAdminFinanceObservation({...rows[0],subject_id:'u2'}),(e:any)=>e.status===503);
  }finally{fixture.close();}
@@ -138,7 +138,7 @@ test("document and subject digests ignore unrelated rows and still change when t
   fixture.db.exec("INSERT INTO zzsh_order.settlement_posting(id,order_id,version_hash,captured_cents) VALUES('post-1','order-1','hash-1','100'),('post-2','order-2','hash-2','900')");
   const ready={native_orders:true},global=()=>financeVersionSql(ready),scoped=()=>financeScopedVersionSql(ready,{mode:"document",documentRef:"ORDER:order-1"}),subject=()=>financeScopedVersionSql(ready,{mode:"subject",subjectId:"u1"});
   assert.equal(financeScopedVersionSql(ready,{mode:"document",documentRef:"POSTING:post-1"}),null);
-  assert.match(global(),/admin-finance-proof\.r2/);assert.doesNotMatch(global(),/\$1|pg_current_snapshot|count\(|max\(/i);
+  assert.match(global(),/admin-finance-proof\.r6\.narrow/);assert.doesNotMatch(global(),/\$1|pg_current_snapshot/i);
   const digest=(query:{text:string;values:string[]}|null)=>fixture.query(query!.text,query!.values).rows[0]!.finance_version;
   const beforeGlobal=digest({text:global(),values:[]}),beforeDoc=digest(scoped()),beforeSubject=digest(subject());
   const ledgerRows=(query:{text:string;values:string[]}|null)=>[...query!.text.matchAll(/FROM \((SELECT[\s\S]*?)\) v/g)].map(match=>match[1]!).filter(sql=>sql.startsWith("SELECT id,account_code")).map(sql=>fixture.query(sql,query!.values).rows.length);
@@ -165,7 +165,7 @@ test("document and subject digests ignore unrelated rows and still change when t
   const key={keyId:"read1",secret:"x".repeat(64)},filters=parseAdminFinanceFilters(new URLSearchParams("from=2026-10-03&to=2026-10-03")),actor={userId:"admin1",sessionId:"session1",authorizationKey:"access1"};
   const token=financeSnapshot({entries:[],subjects:[],revisions:[],withdrawalsReady:false,asOf:"2026-10-03T00:00:00.000000Z",version:String(beforeDoc)},filters,actor,key).token;
   assert.throws(()=>financeSnapshot({entries:[],subjects:[],revisions:[],withdrawalsReady:false,asOf:"2026-10-03T00:00:00.000000Z",version:String(beforeGlobal)},filters,actor,key,token),(error:any)=>error.status===409);
-  assert.equal(FINANCE_GLOBAL_VERSION_DOMAIN,"admin-finance-proof.r2");
+  assert.equal(FINANCE_GLOBAL_VERSION_DOMAIN,"admin-finance-proof.r6.narrow");
   assert.doesNotMatch(readFileSync("src/finance/admin-finance-export.ts","utf8"),/financeScopedVersionSql/);
   assert.match(readFileSync("src/finance/admin-finance-export.ts","utf8"),/readFinanceSourceVersion\(client\)/);
   assert.doesNotMatch(readFileSync("src/finance/admin-finance-routes.ts","utf8"),/SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY/);
@@ -173,7 +173,7 @@ test("document and subject digests ignore unrelated rows and still change when t
   assert.ok(financeScopedVersionSql(full,{mode:"document",documentRef:"ORDER:order-1"}));
   assert.ok(financeScopedVersionSql(full,{mode:"subject",subjectId:"u1"}));
   assert.match(financeVersionSql(full),/payment_request/);assert.match(financeVersionSql(full),/channel_refund_intent/);assert.match(financeVersionSql(full),/joinpay_withdrawal_intent/);
-  assert.doesNotMatch(financeVersionSql(full),/receiver_account_no_enc|admission_canonical|key_version_ref|count\(|max\(|pg_current_snapshot/i);
+  assert.doesNotMatch(financeVersionSql(full),/receiver_account_no_enc|admission_canonical|key_version_ref|pg_current_snapshot/i);
  }finally{fixture.close();}
 });
 test("exact local source numbers stay separate per merchant and are not ledger income",()=>{
@@ -210,6 +210,94 @@ test('legacy order keeps global history admission proof instead of an incomplete
  assert.equal(financeScopedVersionSql(ready,{mode:'document',documentRef:'LEGACY_ORDER:old-1'}),null);
  assert.match(financeVersionSql(ready),/wallet_coverage/);assert.match(financeVersionSql(ready),/finance_opening_basis/);
  assert.ok(financeScopedVersionSql(ready,{mode:'document',documentRef:'ORDER:native-1'}),'native scope stays narrow');
+});
+
+test('global proof uses frozen source digests and per-row CAS while scoped proofs keep their encoding',()=>{
+ const fixture=new FinanceSqlFixture({ledger:[{id:'l',subject_id:'u1',delta:'100',details:{original:'first'}}],history:[{id:'h',subject_id:'u1',source_entity:'la_log_earnings',source_id:'1',source_digest:'source',extra_evidence:{canonical:'x'.repeat(100000),snapshot:{amount:'1.00',legacyChangeType:1002,legacyLogNumber:'FLOW-1'}}}],earnings:[{id:'e',beneficiary_user_id:'u1',amount_cents:'95',state:'PENDING',funds_disposition:'PENDING',canonical_seed:'seed',seed_digest:'seed-digest',version:'1'}],legacyDutyFacts:[{duty_id:'d',facts_canonical:'duty-facts',facts_digest:'duty-digest'}]});
+ try{
+  fixture.db.exec("INSERT INTO zzsh_order.finance_opening_basis(id,user_id,native_origin_canonical,source_digest,available_cents) VALUES('b','u1','origin','source','100'); INSERT INTO zzsh_order.wallet_revision VALUES('u1','1','1'); INSERT INTO zzsh_order.wallet_coverage VALUES('u1','LEGACY_IMPORT','b','event','1'); INSERT INTO zzsh_order.payment_distribution_basis VALUES('basis','order','payment','canonical','digest')");
+  const sql=financeVersionSql({native_distribution:true,legacy_duty_finance:true});
+  for(const field of ['source_canonical','snapshot','native_origin_canonical','canonical_seed','canonical_basis','facts_canonical','details'])assert(!sql.includes(field),field+' is immutable and covered by its source digest or frozen row');
+  for(const field of ['source_digest','seed_digest','basis_digest','facts_digest','version::text','revision::text'])assert(sql.includes(field),field+' remains part of the complete row set');
+  const version=()=>fixture.query(sql,[]).rows[0]!.finance_version;let before=version();
+  for(const [statement,args]of [
+   ["UPDATE zzsh_order.wallet_revision SET read_revision='2' WHERE user_id='u1'",[]],
+   ["UPDATE zzsh_order.rental_referral_earning SET state='SETTLED',funds_disposition='SETTLED',version='2' WHERE id='e'",[]],
+   ["UPDATE zzsh_order.rental_referral_earning SET state='RECOVERY_REQUIRED',version='3',recovery_required_cents='95' WHERE id='e'",[]],
+   ["UPDATE zzsh_auth_user.\"user\" SET name='changed-in-place' WHERE id='u1'",[]],
+   ["INSERT INTO zzsh_order.payment_distribution_basis VALUES('basis2','order2','payment2','frozen-canonical','second-digest')",[]],
+   ["INSERT INTO zzsh_order.legacy_duty_finance_fact(duty_id,facts_digest) VALUES('d2','second-facts-digest')",[]],
+   ["INSERT INTO zzsh_order.fixture_history(id,subject_id,source_digest) VALUES('h2','u1','second-source-digest')",[]],
+  ] as Array<[string,string[]]>){fixture.db.prepare(statement).run(...args);const after=version();assert.notEqual(after,before,statement);before=after;}
+  fixture.clusterSnapshot='999:1000:999';assert.equal(version(),before);
+  const scoped=financeScopedVersionSql({},{mode:'subject',subjectId:'u1'})!;assert.match(scoped.text,/md5\(to_jsonb\(v\)::text\)/);assert.doesNotMatch(scoped.text,/md5\(v::text\)|md5\(details::text\)/);
+ }finally{fixture.close();}
+});
+
+test('lookup raw snapshot keys are equivalent to full evidence across filters, priorities, null times and every page',()=>{
+ const fixture=new FinanceSqlFixture({
+  ledger:[{id:'l1',subject_id:'u1',subject_name:'用户一',account_code:'WALLET_AVAILABLE',delta:'999999999999999999999999',at:'2026-10-03T01:00:00.000000Z',order_id:'o1',display_no:'ORDER-ONE',source_entity:'settlement_posting',posting_id:'post1'},
+   {id:'l2',subject_id:'u1',subject_name:'用户一',account_code:'WALLET_AVAILABLE',delta:'-100',at:'2026-10-03T02:00:00.000000Z',order_id:'o1',display_no:'ORDER-ONE',source_entity:'settlement_posting',posting_id:'post2'}],
+  history:[{id:'h1',subject_id:'u1',subject_name:'用户一',source_type:'LEGACY_MYSQL',source_system:'legacy',source_entity:'la_log_earnings',source_id:'41',amount:'1.00',action:'2',at:'2026-10-03T01:00:00.000000Z',extra_evidence:{canonical:'never-search-this-canonical'.repeat(1000),snapshot:{legacyChangeType:1002,legacyLogNumber:'FLOW-1'}}},
+   {id:'h2',subject_id:'u2',subject_name:'用户二',source_type:'LEGACY_MYSQL',source_system:'legacy',source_entity:'la_distribution_order',source_id:'42',amount:'2.00',at:null},
+   {id:'h3',subject_id:'u1',subject_name:'用户一',source_type:'LEGACY_MYSQL',source_system:'legacy',source_entity:'la_log_earnings',source_id:'43',amount:'3.00',action:'1',at:null,extra_evidence:{canonical:'kept-in-full-payload',snapshot:{legacyChangeType:1001,legacyLogNumber:'literal%_\\'}}}],
+  native:[{id:'o1',display_no:'ORDER-ONE',owner_user_id:'u1',renter_user_id:'u2',created_at:'2026-10-03T23:00:00.000000Z',status:'PAID'},
+   {id:'o2',display_no:'UNPAID-ORDER',owner_user_id:'u1',renter_user_id:'u2',created_at:'2026-10-03T03:00:00.000000Z',status:'PENDING_PAYMENT'}],
+  legacy:[{id:'old1',legacy_id:'1',original_order_no:'OLD-ORDER',owner_user_id:'u2',renter_user_id:'u1',source_created_at:null,source_snapshot:{private:'not a lookup clue'}}]
+ });
+ try{
+  let comparisons=0;for(const q of ['', 'FLOW-1','literal%_\\','never-search-this-canonical','UNPAID-ORDER','ORDER_LINK:o1','用户一'])for(const scope of ['ALL','u1','u2'])for(const kind of ['ALL','WITHDRAWAL','DISTRIBUTION','SETTLEMENT'])for(const page of [1,2,8]){
+   const filters=parseAdminFinanceFilters(new URLSearchParams({q,scope,kind,period:'0'}),new Date(),false),load={filters,lookup:{exact:false},page,pageSize:2},ready={native_orders:true,legacy_orders:true};
+   const old=financeLookupPageSql(ADMIN_FINANCE_LEDGER_SQL,adminFinanceObservationSql({}),ready,load),next=financeLookupPageSql(ADMIN_FINANCE_LEDGER_SQL,adminFinanceObservationSql({},true),ready,load,true);
+   assert.deepEqual(fixture.query(next.text,next.values).rows,fixture.query(old.text,old.values).rows,JSON.stringify({q,scope,kind,page}));comparisons++;
+  }
+  const filters=parseAdminFinanceFilters(new URLSearchParams('period=0'),new Date(),false),query=financeLookupPageSql(ADMIN_FINANCE_LEDGER_SQL,adminFinanceObservationSql({},true),{native_orders:true,legacy_orders:true},{filters,lookup:{exact:false},page:1,pageSize:20},true),rows=fixture.query(query.text,query.values).rows;
+  assert.equal(comparisons,252);assert(rows.some(r=>r.ref==='ORDER:o2'),'an unposted unpaid order remains a real document');assert.equal(rows.filter(r=>r.ref==='ORDER:o1').length,1);assert.equal(Number(rows[0]!.entry_count),5);
+  for(const exact of [false,true])for(const period of ['0','1'])for(const bucket of ['ALL','AVAILABLE','PENDING_EARNINGS'])for(const state of ['ALL','HISTORICAL_OBSERVED','ORDER_RECORDED']){
+   const f=parseAdminFinanceFilters(new URLSearchParams({q:'FLOW-1',period,bucket,state,from:'2026-10-03',to:'2026-10-03'}),new Date(),false),scope={filters:f,lookup:{exact},page:1,pageSize:2};
+   const old=financeLookupPageSql(ADMIN_FINANCE_LEDGER_SQL,adminFinanceObservationSql({}),{native_orders:true,legacy_orders:true},scope),next=financeLookupPageSql(ADMIN_FINANCE_LEDGER_SQL,adminFinanceObservationSql({},true),{native_orders:true,legacy_orders:true},scope,true);
+   assert.deepEqual(fixture.query(next.text,next.values).rows,fixture.query(old.text,old.values).rows,JSON.stringify({exact,period,bucket,state}));
+  }
+  assert.doesNotMatch(query.text,/canonical',o\.source_canonical|legacyUserId/);assert.match(ADMIN_FINANCE_LOOKUP_OBSERVATION_SQL,/o\.snapshot AS extra_evidence/);assert.match(adminFinanceObservationSql({}),/'canonical',o\.source_canonical/);
+ }finally{fixture.close();}
+});
+
+test('global refund block proof owns exact existing intent IDs, including in-place audit changes',()=>{
+ const fixture=new FinanceSqlFixture();try{
+  fixture.db.exec("CREATE TABLE zzsh_iam.audit_event(id TEXT,action TEXT,object_id TEXT,occurred_at TEXT,details TEXT); CREATE TABLE zzsh_order.channel_refund_intent(id TEXT,revision TEXT,order_id TEXT,renter_user_id TEXT,posting_id TEXT,payment_confirmation_id TEXT,payment_source TEXT,state TEXT,budget_disposition TEXT,amount_cents TEXT); CREATE TABLE zzsh_order.joinpay_refund_attempt(id TEXT,intent_id TEXT,operation TEXT,lease_version TEXT,created_at TEXT)");
+  for(const c of ['reason_code','merchant_scope_id','provider_transaction_id','merchant_order_no','joinpay_request_id','joinpay_evidence_id','joinpay_anchor_id'])fixture.db.exec('ALTER TABLE zzsh_order.payment_confirmation ADD COLUMN '+c+' TEXT');
+  fixture.db.exec("INSERT INTO zzsh_iam.audit_event VALUES('a1','order.refund.abnormal.first_submit.blocked','r1','2026-11-02','first'),('a2','order.refund.abnormal.first_submit.blocked','r2','2026-11-02','unrelated')");
+  const sql=financeVersionSql({refund_intents:true,refund_read_dependencies:true}),relation=sql.match(/FROM \((SELECT a\.id,a\.action,a\.object_id,a\.occurred_at,[\s\S]*? FROM zzsh_iam\.audit_event a WHERE[\s\S]*?)\) v/)?.[1];assert(relation);
+  const rows=()=>fixture.db.prepare(relation.replace(/::text\b/g,'')+' ORDER BY a.id').all(),version=()=>fixture.query(sql,[]).rows[0]!.finance_version;
+  assert.deepEqual(rows(),[],'no intent means no related blocked evidence');const withoutIntent=version();
+  fixture.db.exec("INSERT INTO zzsh_order.channel_refund_intent(id,revision,payment_confirmation_id,state,amount_cents) VALUES('r1','1','p1','UNKNOWN','100')");assert.deepEqual(rows().map(r=>r.id),['a1']);const before=version();assert.notEqual(before,withoutIntent);
+  fixture.db.exec("UPDATE zzsh_iam.audit_event SET details='changed-unrelated' WHERE id='a2'");assert.equal(version(),before);
+  fixture.db.exec("UPDATE zzsh_iam.audit_event SET details='changed-related' WHERE id='a1'");assert.notEqual(version(),before);
+  fixture.db.exec("INSERT INTO zzsh_order.channel_refund_intent(id,payment_confirmation_id) VALUES('r3','p1')");assert.deepEqual(rows().map(r=>r.id),['a1'],'shared payment never pulls in another intent audit');const beforeSecond=version();
+  fixture.db.exec("INSERT INTO zzsh_order.channel_refund_intent(id,payment_confirmation_id,state) VALUES('r2',NULL,'SUBMITTING')");assert.deepEqual(rows().map(r=>r.id),['a1','a2'],'a newly relevant intent enters the full proof even without a confirmation');assert.notEqual(version(),beforeSecond);
+  const beforeReview=version();fixture.db.exec("UPDATE zzsh_order.channel_refund_intent SET revision='2' WHERE id='r1'");assert.notEqual(version(),beforeReview,'a legal review transition advances the per-row revision even if listed state is unchanged');
+ }finally{fixture.close();}
+});
+
+test('global narrow proof catches non-max CAS, first payment and complete capability identity',()=>{
+ const fixture=new FinanceSqlFixture({native:[{id:'order',revision:'1',status:'PENDING_PAYMENT'}],withdrawals:[{id:'w1',operation_version:'1',state:'RESERVED'},{id:'w99',operation_version:'99',state:'RESERVED'}]});
+ try{
+  fixture.db.exec("CREATE TABLE zzsh_order.payment_request(id TEXT,revision TEXT,order_id TEXT,channel TEXT,merchant_identity_id TEXT,platform_order_no TEXT,channel_order_no TEXT,state TEXT,amount_cents TEXT,currency TEXT,evidence_level TEXT,updated_at TEXT); CREATE TABLE zzsh_order.channel_refund_intent(id TEXT,revision TEXT,order_id TEXT,renter_user_id TEXT,posting_id TEXT,payment_confirmation_id TEXT,payment_source TEXT,state TEXT,budget_disposition TEXT)");
+  fixture.db.exec("INSERT INTO zzsh_order.payment_request(id,revision,state) VALUES('p1','1','READY'),('p99','99','READY'); INSERT INTO zzsh_order.channel_refund_intent(id,revision,state) VALUES('r1','1','ALLOCATED'),('r99','99','ALLOCATED')");
+  const ready={native_orders:true,payment_requests:true,refund_intents:true,withdrawals:true},sql=financeVersionSql(ready),version=()=>fixture.query(sql,[]).rows[0]!.finance_version;
+  let before=version();
+  for(const statement of [
+   "UPDATE zzsh_order.payment_request SET revision='2' WHERE id='p1'",
+   "UPDATE zzsh_order.channel_refund_intent SET revision='2' WHERE id='r1'",
+   "UPDATE zzsh_order.withdrawal_intent SET operation_version='2' WHERE id='w1'",
+   "UPDATE zzsh_order.rental_order SET status='PAID',paid_confirmation_id='payment',paid_at='2026-11-02T01:00:00Z' WHERE id='order'",
+   "INSERT INTO zzsh_auth_user.\"user\"(id,name) VALUES('outside-page','另一用户')"
+  ]){fixture.db.exec(statement);const next=version();assert.notEqual(next,before,statement);before=next;}
+  assert.equal(fixture.db.prepare('SELECT MAX(CAST(revision AS INTEGER)) AS revision FROM zzsh_order.payment_request').get()!.revision,99);
+  assert.equal(fixture.db.prepare('SELECT MAX(CAST(revision AS INTEGER)) AS revision FROM zzsh_order.channel_refund_intent').get()!.revision,99);
+  assert.equal(fixture.db.prepare('SELECT MAX(CAST(operation_version AS INTEGER)) AS revision FROM zzsh_order.withdrawal_intent').get()!.revision,99);
+  const empty=new FinanceSqlFixture();try{assert.notEqual(empty.query(financeVersionSql({native_orders:true}),[]).rows[0]!.finance_version,empty.query(financeVersionSql({guarantee_history:true}),[]).rows[0]!.finance_version);}finally{empty.close();}
+ }finally{fixture.close();}
 });
 
 test('exact payment refund and payout keys honor Beijing half-open dates without prefix matches',()=>{

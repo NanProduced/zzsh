@@ -5,13 +5,14 @@ import {validateDistributionPolicy,type DistributionPolicyConfig} from './distri
 import {prepareDistributionPolicyChange,initialDistributionPolicyConfig,isInitialPolicyChange,type DistributionPolicyChange,type DistributionPolicyUpdate,type DistributionPolicyInitial} from './distribution-policy-change';
 import {ConfigurationError,type AppConfig} from '../config/config';
 import {readFormalCollectionAdmission,type FormalCollectionAdmission} from '../order/joinpay-collection-profile';
+import {assertLocalFinancialSandboxAssembly,assertLocalFinancialSandboxResource,localFinancialSandboxRegistration,type LocalFinancialSandbox} from './local-financial-sandbox-resource';
 export type LocalDistributionScope=Readonly<{kind:'LOCAL_CONTROLLED_DISTRIBUTION'|'NATIVE_DISTRIBUTION'}>;
 export type DistributionPolicyScopeKind='LOCAL_CONTROLLED'|'NATIVE';
 type CreationReceipt={database:string;resourceOid:number;owner:string;marker:string;migrationRole:string;runtimeRole:string;ownerOid?:number;migrationRoleOid?:number;runtimeRoleOid?:number};
 type DistributionOrigins=Readonly<{apiOrigin:string;userOrigin:string;adminOrigin:string}>;
 const localName='zzsh_test_order_credit_admin_batch2',localRuntime='zzsh_order_credit_admin_batch2_r',localMigration='zzsh_order_credit_admin_batch2_m',localMarker='zzsh:order-reservation-test:v1';
 const milestoneName='zzsh_test_order_milestone_real_1',milestoneRuntime='zzsh_order_milestone_real_1_r',milestoneMigration='zzsh_order_milestone_real_1_m';
-const localProofs=new WeakMap<LocalDistributionScope,Readonly<CreationReceipt&{readOnly:boolean;origins?:DistributionOrigins}>>();
+const localProofs=new WeakMap<LocalDistributionScope,Readonly<CreationReceipt&{readOnly:boolean;origins?:DistributionOrigins;sandbox?:LocalFinancialSandbox}>>();
 const nativeProofs=new WeakMap<LocalDistributionScope,Readonly<{kind:'NATIVE';database:string;runtimeUser:string;admissionSha256:string}>>();
 /** Formal NATIVE scope comes only from the reviewed formal collection admission; no receipt or env shortcut. */
 export function createNativeDistributionPolicyScope(admission:FormalCollectionAdmission):LocalDistributionScope{
@@ -26,6 +27,11 @@ export function createLocalDistributionScope(config:AppConfig,receipt:CreationRe
 /** Exact milestone GET capability; it cannot admit registration, policy or relation writes. */
 export function createLocalDistributionReadScope(config:AppConfig,receipt:CreationReceipt):LocalDistributionScope{
  return createScope(config,receipt,true);
+}
+/** Uses the existing policy/approval/relationship rules; environment enrollment never creates a policy or participant. */
+export function createSandboxDistributionPolicyScope(sandbox:LocalFinancialSandbox):LocalDistributionScope{
+ const registration=localFinancialSandboxRegistration(sandbox).registration,value=Object.freeze({kind:'LOCAL_CONTROLLED_DISTRIBUTION' as const});
+ localProofs.set(value,Object.freeze({...registration.resource,readOnly:false,origins:registration.origins,sandbox}));return value;
 }
 /** Server-registered receipt only; this capability admits GETs on the exact resource and origins, never writes. */
 export function createRegisteredLocalDistributionReadScope(config:AppConfig,receipt:Required<CreationReceipt>,origins:DistributionOrigins&{secureCookies:boolean}):LocalDistributionScope{
@@ -42,7 +48,7 @@ export function createRegisteredLocalDistributionReadScope(config:AppConfig,rece
   ||origins.secureCookies!==false||![origins.apiOrigin,origins.userOrigin,origins.adminOrigin].every(localOrigin)
   ||new Set([origins.apiOrigin,origins.userOrigin,origins.adminOrigin]).size!==3||origins.apiOrigin!==`http://127.0.0.1:${config.port}`)throw new ConfigurationError('Exact registered local fake distribution read receipt and origins required');
  const value=Object.freeze({kind:'LOCAL_CONTROLLED_DISTRIBUTION' as const});
- localProofs.set(value,Object.freeze({...receipt,readOnly:true,origins:Object.freeze({apiOrigin:origins.apiOrigin,userOrigin:origins.userOrigin,adminOrigin:origins.adminOrigin})}));return value;
+ localProofs.set(value,Object.freeze({...receipt,readOnly:true,origins:Object.freeze({apiOrigin:origins.apiOrigin,userOrigin:origins.userOrigin,adminOrigin:origins.adminOrigin}),sandbox:undefined}));return value;
 }
 function createScope(config:AppConfig,receipt:CreationReceipt,readOnly:boolean):LocalDistributionScope{
  const milestone=receipt.database===milestoneName,name=milestone?milestoneName:localName,runtime=milestone?milestoneRuntime:localRuntime,migration=milestone?milestoneMigration:localMigration;
@@ -53,7 +59,7 @@ function createScope(config:AppConfig,receipt:CreationReceipt,readOnly:boolean):
   ||receipt.owner!=='zzsh'||receipt.marker!==localMarker||!Number.isSafeInteger(receipt.resourceOid)||receipt.resourceOid<=0||receipt.resourceOid>4294967295
   ||milestone&&(receipt.resourceOid!==952624||receipt.ownerOid!==10||receipt.migrationRoleOid!==952625||receipt.runtimeRoleOid!==952626)
   ||[793252,878001,893390,881699,820148,833000,869754].includes(receipt.resourceOid))throw new ConfigurationError('Exact local test/fake distribution creation receipt required');
- const value=Object.freeze({kind:'LOCAL_CONTROLLED_DISTRIBUTION' as const});localProofs.set(value,Object.freeze({...receipt,readOnly,origins:undefined}));return value;
+ const value=Object.freeze({kind:'LOCAL_CONTROLLED_DISTRIBUTION' as const});localProofs.set(value,Object.freeze({...receipt,readOnly,origins:undefined,sandbox:undefined}));return value;
 }
 export function assertLocalDistributionAssembly(binding:LocalDistributionScope|undefined,options:{testOperationsEnabled:boolean;secureCookies:boolean;apiOrigin:string;userOrigin:string;adminOrigin:string}){
  if(binding===undefined)return;
@@ -64,6 +70,7 @@ export function assertLocalDistributionAssembly(binding:LocalDistributionScope|u
   return;
  }
  const receipt=localProofs.get(binding),port=receipt?.database===milestoneName?4220:4280;
+ if(receipt?.sandbox){assertLocalFinancialSandboxAssembly(receipt.sandbox,options);return;}
  const origins=receipt?.origins??{apiOrigin:`http://127.0.0.1:${port+2}`,userOrigin:`http://127.0.0.1:${port}`,adminOrigin:`http://127.0.0.1:${port+1}`};
  if(!localProofs.has(binding)||!receipt?.readOnly&&!options.testOperationsEnabled||options.secureCookies||process.env.NODE_ENV==='production'
   ||options.apiOrigin!==origins.apiOrigin||options.userOrigin!==origins.userOrigin||options.adminOrigin!==origins.adminOrigin)throw new ConfigurationError('Local distribution scope requires its explicit test API assembly');
@@ -85,6 +92,7 @@ async function resource(c:PoolClient, allowUnadmitted=false,binding?:LocalDistri
  if(binding!==undefined){
   const proof=localProofs.get(binding);
   if(!proof)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Bound distribution resource differs');
+  if(proof.sandbox){if(maintenanceOwner)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Sandbox is not a legacy maintenance authority');const checked=await assertLocalFinancialSandboxResource(c,proof.sandbox,readOnly||allowUnadmitted?'READ_ORIGINAL':'WRITE');return allowUnadmitted?checked.active:true;}
   const roles=maintenanceOwner&&proof.database===milestoneName?[proof.owner]:proof.readOnly?[proof.runtimeRole]:[proof.runtimeRole,proof.migrationRole];
   if(proof.readOnly&&!readOnly||!r||maintenanceOwner&&proof.database!==milestoneName||r.name!==proof.database||Number(r.oid)!==proof.resourceOid||r.marker!==proof.marker||!roles.includes(r.role)||r.complete!==true)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Bound distribution resource differs');
   const shape=(await c.query(`SELECT pg_get_userbyid(d.datdba) AS owner,d.datdba::int AS "ownerOid",r.oid::int AS "roleOid",r.rolsuper,r.rolbypassrls,

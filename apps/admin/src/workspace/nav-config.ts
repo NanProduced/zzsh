@@ -160,7 +160,7 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
 
   const users: WorkspaceMenuItem[] = [];
   if (has("user.directory.read")) users.push({ label: "用户管理", icon: UsersRoundIcon, path: "/users", kind: "users" });
-  if (has("profile.avatar.review") || nav.isBoss) users.push({ label: "头像审核", icon: ImageIcon, path: "/avatar-reviews", kind: "avatar-review" });
+  if (has("profile.avatar.review") || has("profile.avatar.policy.manage") || nav.isBoss) users.push({ label: "头像审核", icon: ImageIcon, path: "/avatar-reviews", kind: "avatar-review" });
   if (users.length > 0) {
     items.push({ label: "用户与会员", isTitle: true }, ...users);
   }

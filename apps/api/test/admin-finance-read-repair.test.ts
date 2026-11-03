@@ -1,11 +1,18 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {financeDocuments,financePeriodProjection,projectAdminFinanceLedger,projectAdminFinanceObservation,parseAdminFinanceFilters,ADMIN_FINANCE_LEDGER_SQL,adminFinanceObservationSql,filterAdminFinanceEntries,loadAdminFinanceFacts,readAdminFinanceDocument} from '../src/finance/admin-finance-read';
+import {financeDocuments,financePeriodProjection,projectAdminFinanceLedger,projectAdminFinanceObservation,parseAdminFinanceFilters,ADMIN_FINANCE_LEDGER_SQL,adminFinanceObservationSql,filterAdminFinanceEntries,loadAdminFinanceFacts,readAdminFinanceDocument,readFinanceSourceVersion} from '../src/finance/admin-finance-read';
 import {generateAdminFinanceCsv} from '../src/finance/admin-finance-export';
-import {financeVersionSql,scopedFinanceSql,financeLookupPageSql} from '../src/finance/admin-finance-query';
+import {financeVersionSql,scopedFinanceSql,financeLookupPageSql,FINANCE_GLOBAL_VERSION_DOMAIN,FINANCE_GLOBAL_READ_PREAMBLE_SQL} from '../src/finance/admin-finance-query';
 import {FinanceSqlFixture,legacyFinanceOrder} from './admin-finance-fixture';
 
 const line=(overrides:Record<string,unknown>={})=>projectAdminFinanceLedger({id:'refund',account_code:'RENTER_REFUND_PAYABLE',subject_id:'renter',subject_name:'租客',delta:'5000',at:'2026-10-19T11:51:00.000000Z',recorded_at:'2026-10-19T11:51:00.002000Z',posting_id:'posting',order_id:'order',display_no:'ZZ-1',source_entity:'settlement_posting',...overrides});
+
+test('global source reads apply only transaction-local planner flags and decode pg simple-protocol results',async()=>{
+ const seen:{sql:string;values:unknown[]}[]=[],client={query:async(sql:string,values:unknown[]=[])=>{seen.push({sql,values});if(sql.includes('to_regclass'))return{rows:[{ready:true}]};if(sql.includes('AS finance_version'))return sql.startsWith('SET LOCAL')?[{command:'SET',rows:[]},{command:'SET',rows:[]},{command:'SELECT',rows:[{finance_version:'a'.repeat(32)}]}]:{rows:[{finance_version:'b'.repeat(32)}]};if(sql.includes('clock_timestamp()'))return{rows:[{at:'2026-11-02T17:00:00.000000Z'}]};throw Error('unexpected source-version read');}};
+ const global=await readFinanceSourceVersion(client as never);assert.equal(global.version,'a'.repeat(32));const batch=seen.find(q=>q.sql.includes('AS finance_version'))!;assert.ok(batch.sql.startsWith(FINANCE_GLOBAL_READ_PREAMBLE_SQL));assert.deepEqual(batch.values,[]);assert.doesNotMatch(batch.sql,/statement_timeout|lock_timeout|work_mem|ALTER SYSTEM/);
+ seen.length=0;const subject=await readFinanceSourceVersion(client as never,{mode:'subject',subjectId:'u1'});assert.equal(subject.version,'b'.repeat(32));const scoped=seen.find(q=>q.sql.includes('AS finance_version'))!;assert.ok(!scoped.sql.startsWith('SET LOCAL'));assert.deepEqual(scoped.values,['u1']);
+ const malformed={query:async(sql:string)=>sql.includes('to_regclass')?{rows:[{ready:true}]}:[{command:'SET',rows:[]}]};await assert.rejects(readFinanceSourceVersion(malformed as never),(e:any)=>e.status===503);
+});
 
 test('未开租责任两侧都归原订单退款，不伪造posting或可提现余额',()=>{
  for(const [account,delta,subject]of [['CAPTURED_PAYMENT_SOURCE','-15908',null],['RENTER_REFUND_PAYABLE','15908','renter']]){
@@ -70,7 +77,7 @@ test('R1 formatted and NFKC phone tokens are refused by finance GET without matc
  for(const q of ['备注user_aa13812345678bb0123456789abcdef012345678','http://13812345678.example/users/user_aa13812345678bb0123456789abcdef012345678','http://127.0.0.1:4221/users/user_aa13812345678bb0123456789abcdef012345678?q=13812345678'])assert.throws(()=>parseAdminFinanceFilters(new URLSearchParams({q})),(e:any)=>e.status===400,q);
 });
 test('R2 changed read semantics invalidate before-r2 content versions even when every source table is unchanged',()=>{
- const fixture=new FinanceSqlFixture();try{const current=financeVersionSql({});assert(current.includes("'admin-finance-proof.r2'"));const old=current.replace("'admin-finance-proof.r2'","'admin-finance-proof.before-r2'");assert.notEqual(fixture.query(current,[]).rows[0]!.finance_version,fixture.query(old,[]).rows[0]!.finance_version);}finally{fixture.close();}
+ const fixture=new FinanceSqlFixture();try{const current=financeVersionSql({});assert(current.includes("'"+FINANCE_GLOBAL_VERSION_DOMAIN+"'"));const old=current.replace("'"+FINANCE_GLOBAL_VERSION_DOMAIN+"'","'admin-finance-proof.before-r5'");assert.notEqual(fixture.query(current,[]).rows[0]!.finance_version,fixture.query(old,[]).rows[0]!.finance_version);}finally{fixture.close();}
 });
 test('R1 omitted period basis remains UNKNOWN despite complete book arithmetic',()=>{
  const row=financePeriodProjection([],[{bucket:'AVAILABLE',opening:'0',closing:'0',movement:'0'}]).find(row=>row.bucket==='AVAILABLE')!;assert.equal(row.knowledge,'UNKNOWN');assert.equal(row.openingBalance,null);assert.equal(row.closingBalance,null);assert.equal(row.difference,null);assert.equal(row.ledgerDifference,'0');
@@ -126,8 +133,8 @@ test('raw legacy IDs do not derive order search membership; exact links remain i
  try{for(const q of ['OLD-NUMBER','ORDER_LINK:old-order']){const f=parseAdminFinanceFilters(new URLSearchParams({q,period:'0'}),new Date(),false),sql=scopedFinanceSql('SELECT * FROM fixture_history','history',{filters:f},20001,false);assert.deepEqual(fixture.query(sql.text,sql.values).rows.map(r=>r.id),[]);}}
  finally{fixture.close();}
 });
-test('source-content version includes event clock, actual frozen basis and transitions without unrelated cluster state',()=>{
- const sql=financeVersionSql({native_distribution:true});for(const text of ['finance_event','created_at','posted_at','canonical_seed','canonical_basis','rental_referral_transition','opening_event_id','native_origin_canonical'])assert(sql.includes(text));assert(!/pg_current_snapshot|count\(|max\(/i.test(sql));
+test('source-content version includes event clocks, frozen source digests and transitions without unrelated cluster state',()=>{
+ const sql=financeVersionSql({native_distribution:true});for(const text of ['finance_event','created_at','posted_at','seed_digest','basis_digest','rental_referral_transition','opening_event_id','source_digest'])assert(sql.includes(text));assert(!/pg_current_snapshot/i.test(sql));
 });
 test('loaded native roots batch their event receipts once, expose calculation only on detail and never choose one document-level event',async()=>{
  const seen:string[]=[],rows=['pending-a','pending-b','settled-a','settled-b'].map((id,n)=>({id,account_code:n<2?'WALLET_PENDING_EARNINGS':'WALLET_AVAILABLE',subject_id:'referrer',subject_name:'推荐人',delta:n%2===0?'-95':'95',at:'2026-10-19T11:51:00.000000Z',finance_event_id:n<2?'event-accrue':'event-settle',event_kind:n<2?'EARNING_PENDING':'EARNING_SETTLED',source_kind:'NATIVE_RENTAL_REFERRAL',source_type:'NATIVE',source_entity:'rental_order',source_id:'order',economic_root_id:'earning-1',order_id:'order',earning_state:'SETTLED',earning_role:'OWNER_REFERRAL',earning_amount:'95',earning_due_at:'2026-10-19T11:51:00.000000Z'}));

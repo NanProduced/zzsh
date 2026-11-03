@@ -24,6 +24,7 @@ function AvatarEditor({ userId, session, avatar }: { userId: string; session: Re
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [needsRefresh, setNeedsRefresh] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const [pendingDefault, setPendingDefault] = useState<PendingAvatarDefault | null>(null);
@@ -69,7 +70,7 @@ function AvatarEditor({ userId, session, avatar }: { userId: string; session: Re
     const id = ++sequence.current; setLoading(true); setError("");
     try {
       const next = await readAvatarState(controller.signal); assertAvatarSubject(next, userId);
-      if (current() && sequence.current === id) { setState(next); if (refreshGlobal) refreshSession(); }
+      if (current() && sequence.current === id) { setState(next); setNeedsRefresh(false); if (refreshGlobal) refreshSession(); return next; }
     } catch (failure) { if (!controller.signal.aborted && current() && sequence.current === id) setError(messageOf(failure, "头像状态读取失败")); }
     finally { if (current() && sequence.current === id) setLoading(false); }
   }
@@ -90,7 +91,7 @@ function AvatarEditor({ userId, session, avatar }: { userId: string; session: Re
     finally { finishWrite(run.id); }
   }
   async function choosePreset(presetId: string) {
-    if (!state || busy || loading || storageBlocked) return;
+    if (!state || busy || loading || storageBlocked || needsRefresh) return;
     const run = beginWrite(); if (!run) return;
     let command: PendingAvatarDefault | null = null;
     try {
@@ -113,13 +114,13 @@ function AvatarEditor({ userId, session, avatar }: { userId: string; session: Re
     } finally { finishWrite(run.id); }
   }
   function chooseFile(next: File | null) {
-    if (!next || writing.current || pendingDefault || storageBlocked || uploadCommand.current) return;
+    if (!next || writing.current || pendingDefault || storageBlocked || uploadCommand.current || needsRefresh) return;
     setError(''); setNotice('');
     if (!ALLOWED.has(next.type) || next.size <= 0 || next.size > MAX_BYTES) { setError('请选择不超过 10 MiB 的 JPEG、PNG 或 WebP 图片。'); return; }
     setCropSource(next);
   }
   async function submitUpload() {
-    if (!state || !file || busy || pendingDefault || storageBlocked) return;
+    if (!state || !file || busy || pendingDefault || storageBlocked || needsRefresh) return;
     if (!ALLOWED.has(file.type)) { setError("仅支持 JPEG、PNG 或 WebP 图片。"); return; }
     if (file.size <= 0 || file.size > MAX_BYTES) { setError("图片需大于 0 且不超过 10 MiB。"); return; }
     const run = beginWrite(); if (!run) return;
@@ -131,10 +132,16 @@ function AvatarEditor({ userId, session, avatar }: { userId: string; session: Re
         if (!activeWrite(run.id)) return;
         Object.assign(command, created); setIntent({ ...created, intentKey: command.intentKey, uploadKey: command.uploadKey });
       }
-      await uploadAvatar(command.intentId!, command.uploadToken!, file, command.uploadKey, run.signal);
+      const uploaded = await uploadAvatar(command.intentId!, command.uploadToken!, file, command.uploadKey, run.signal);
       if (!activeWrite(run.id)) return;
       clearFile(); setIntent(null); uploadCommand.current = null;
-      setNotice("已提交审核。审核期间继续显示当前头像。"); await load();
+      const latest = await load();
+      if (!activeWrite(run.id)) return;
+      if (latest?.current.kind === 'CUSTOM' && uploaded?.assetId && latest.current.assetId === uploaded.assetId) {
+        publishProfileUpdateNotice(userId, 'avatar'); setOpen(false); refreshSession();
+      } else if (!latest) { setNotice('上传已完成，当前状态待读取。'); setNeedsRefresh(true); }
+      else if (uploaded?.avatarSubmission?.disposition === 'PENDING_REVIEW' || latest.pending) setNotice('已提交审核。');
+      else setNotice('上传已处理，已读取当前头像状态。');
     } catch (failure) {
       if (!activeWrite(run.id)) return;
       if (failure instanceof ProfileAvatarError && failure.status === 409) {
@@ -145,6 +152,7 @@ function AvatarEditor({ userId, session, avatar }: { userId: string; session: Re
     finally { finishWrite(run.id); }
   }
   const review = state?.lastReview;
+  const requiresReview = !(state?.policy?.available === true && state.policy.requiresReview === false);
   return (
     <>
       <button ref={triggerRef} type="button" className="account-avatar-control" aria-label="更换头像" onClick={() => { dismissProfileUpdateNotice(userId); setSelectedPreset(null); setTab(uploadCommand.current ? 'upload' : 'default'); setOpen(true); void load(); }}>
@@ -169,6 +177,7 @@ function AvatarEditor({ userId, session, avatar }: { userId: string; session: Re
             {storageBlocked ? <p className="avatar-dialog-alert" role="alert">原头像操作记录不可读，暂不能再次提交。</p> : null}
             {!state && error ? <button type="button" className="button secondary" onClick={() => void load()} disabled={loading}>重新读取</button> : null}
             {notice ? <p className="avatar-dialog-notice" role="status">{notice}</p> : null}
+            {needsRefresh ? <button type="button" className="button secondary" disabled={busy || loading} onClick={() => void load(true)}>重新读取头像状态</button> : null}
             {pendingDefault ? <div className="avatar-dialog-notice" role="status"><p>上次头像选择结果待确认，请先读取原操作。</p><button type="button" className="button secondary" disabled={busy} onClick={() => void recoverDefault()}>读取原头像结果</button></div> : null}
             {loading && !state ? <p className="avatar-dialog-muted" role="status">正在读取头像状态…</p> : null}
 
@@ -194,7 +203,7 @@ function AvatarEditor({ userId, session, avatar }: { userId: string; session: Re
                 ) : null}
 
                 {tab === 'default' ? <><div className="avatar-selection-preview"><img src={state.presets.find(item => item.presetId === selectedPreset)?.url ?? state.current.url} alt="所选头像预览"/></div>
-                <fieldset className="avatar-preset-fieldset" disabled={busy || loading || Boolean(pendingDefault) || storageBlocked || Boolean(uploadCommand.current)}>
+                <fieldset className="avatar-preset-fieldset" disabled={busy || loading || Boolean(pendingDefault) || storageBlocked || Boolean(uploadCommand.current) || needsRefresh}>
                   <legend className="sr-only">选择默认头像</legend>
                   <div className="avatar-preset-grid">
                     {state.presets.map((preset, index) => {
@@ -216,13 +225,13 @@ function AvatarEditor({ userId, session, avatar }: { userId: string; session: Re
                   </div>
                 </fieldset>
                 {state.pending ? <p className="avatar-dialog-muted">改用默认头像后，将以本次选择为准。</p> : null}
-                <div className="avatar-dialog-actions"><button type="button" className="button secondary" onClick={() => { setOpen(false); cancelWork(); }}>取消</button><button type="button" className="button primary" disabled={busy || loading || storageBlocked || Boolean(pendingDefault) || Boolean(uploadCommand.current) || !selectedPreset || selectedPreset === state.current.presetId && !state.pending} onClick={() => selectedPreset && void choosePreset(selectedPreset)}>{busy ? '正在保存…' : '使用此头像'}</button></div></> : cropSource ? <AvatarCropper file={cropSource} onCancel={() => setCropSource(null)} onConfirm={cropped => { setFile(cropped); setPreview(URL.createObjectURL(cropped)); setCropSource(null); }} /> : <div className="avatar-upload">
-                  {preview ? <><img className="avatar-upload-preview" src={preview} alt="待上传头像预览"/><p className="avatar-upload-policy">审核通过后生效，期间保留原头像。</p></> : <button type="button" className="avatar-upload-dropzone" aria-label="选择图片" disabled={busy || Boolean(pendingDefault) || storageBlocked || Boolean(uploadCommand.current)} onClick={() => inputRef.current?.click()} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); if (!writing.current && event.dataTransfer.files.length !== 1) setError('每次请选择一张图片。'); else chooseFile(event.dataTransfer.files[0] ?? null); }}><Upload size={28} aria-hidden/><strong>选择图片</strong><span>或将图片拖到这里</span></button>}
+                <div className="avatar-dialog-actions"><button type="button" className="button secondary" onClick={() => { setOpen(false); cancelWork(); }}>取消</button><button type="button" className="button primary" disabled={busy || loading || storageBlocked || Boolean(pendingDefault) || Boolean(uploadCommand.current) || needsRefresh || !selectedPreset || selectedPreset === state.current.presetId && !state.pending} onClick={() => selectedPreset && void choosePreset(selectedPreset)}>{busy ? '正在保存…' : '使用此头像'}</button></div></> : cropSource ? <AvatarCropper file={cropSource} onCancel={() => setCropSource(null)} onConfirm={cropped => { setFile(cropped); setPreview(URL.createObjectURL(cropped)); setCropSource(null); }} /> : <div className="avatar-upload">
+                  {preview ? <><img className="avatar-upload-preview" src={preview} alt="待上传头像预览"/><p className="avatar-upload-policy">{requiresReview ? '审核通过后生效，期间保留原头像。' : '确认保存后生效。'}</p></> : <button type="button" className="avatar-upload-dropzone" aria-label="选择图片" disabled={busy || Boolean(pendingDefault) || storageBlocked || Boolean(uploadCommand.current) || needsRefresh} onClick={() => inputRef.current?.click()} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); if (!writing.current && event.dataTransfer.files.length !== 1) setError('每次请选择一张图片。'); else chooseFile(event.dataTransfer.files[0] ?? null); }}><Upload size={28} aria-hidden/><strong>选择图片</strong><span>或将图片拖到这里</span></button>}
                   {!file ? <p className="avatar-upload-format">JPEG、PNG、WebP · 最大 10 MiB</p> : null}
                   <input ref={inputRef} type="file" accept="image/jpeg,image/png,image/webp" className="sr-only" onChange={(event) => { chooseFile(event.target.files?.[0] ?? null); event.target.value = ""; }} />
                   <div className="avatar-upload-actions">
-                    {file ? <button type="button" className="button secondary" onClick={() => inputRef.current?.click()} disabled={busy || Boolean(pendingDefault) || storageBlocked || Boolean(uploadCommand.current)}>重新选择</button> : null}
-                    {file ? <button type="button" className="button primary" onClick={() => void submitUpload()} disabled={busy}>{busy ? "上传中…" : intent ? "重试上传" : "上传并提交审核"}</button> : null}
+                    {file ? <button type="button" className="button secondary" onClick={() => inputRef.current?.click()} disabled={busy || Boolean(pendingDefault) || storageBlocked || Boolean(uploadCommand.current) || needsRefresh}>重新选择</button> : null}
+                    {file ? <button type="button" className="button primary" onClick={() => void submitUpload()} disabled={busy}>{busy ? "上传中…" : intent ? "重试上传" : requiresReview ? "上传并提交审核" : '保存头像'}</button> : null}
                     <button type="button" className="button quiet" onClick={() => { setOpen(false); cancelWork(); }}>取消</button>
                   </div>
                 </div>}

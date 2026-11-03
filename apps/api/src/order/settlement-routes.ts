@@ -1,4 +1,5 @@
 import type { AuthSecurityOptions } from "../auth/auth-security";
+import type { LocalFinancialSandbox } from "../finance/local-financial-sandbox-resource";
 import { readAdminContext } from "../auth/auth-security";
 import { readUserContext } from "../auth/user-identity";
 import { withTransaction } from "../auth/security-core";
@@ -25,7 +26,7 @@ import {
   submitSettlement,
 } from "./settlement-record";
 
-type Options = AuthSecurityOptions & { settlementRecordingEnabled?: boolean; distributionEarnings?: DistributionEarningStore };
+type Options = AuthSecurityOptions & { settlementRecordingEnabled?: boolean; distributionEarnings?: DistributionEarningStore; localFinancialSandbox?:LocalFinancialSandbox };
 type Request = Parameters<typeof requestPath>[0];
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
@@ -70,12 +71,12 @@ export async function handleSettlementUserRoute(request: Request, response: Supp
   const opening = /^\/([A-Za-z0-9._:-]+)\/openings\/([A-Za-z0-9._:-]+)\/confirm$/.exec(path);
   const read = /^\/([A-Za-z0-9._:-]+)\/settlement$/.exec(path);
   if (!preview && !submit && !decision && !opening && !read) return false;
-  if (!(method==="GET"&&read)&&!settlementSurfaceOpen(options.settlementRecordingEnabled, options.settlementAdmission)) throw notFound();
+  if (!(method==="GET"&&read)&&!settlementSurfaceOpen(options.settlementRecordingEnabled, options.settlementAdmission,options.localFinancialSandbox)) throw notFound();
   const requestId = ensureApiV1RequestId(request);
   response.setHeader("X-Request-Id", requestId);
   if (method !== "GET" && !requireOrigin(request, response, options, requestId)) return true;
   const context = await readUserContext(request, options);
-  const actor = { realm: "user" as const, userId: context.userId, sessionId: context.sessionId, settlementAdmission: options.settlementAdmission,settlementReadIdentity:settlementReadIdentity(options.pool) };
+  const actor = { realm: "user" as const, userId: context.userId, sessionId: context.sessionId, settlementAdmission: options.settlementAdmission,settlementReadIdentity:settlementReadIdentity(options.pool),localFinancialSandbox:options.localFinancialSandbox };
   if (method === "GET" && read) {
     const result = await withTransaction(options.pool, async (client) => projectSettlementResponse(client, actor, await readSettlement(client, idOf(read[1]!), actor), idOf(read[1]!)));
     sendJson(response, result.status, result.body, requestId);
@@ -150,12 +151,12 @@ export async function handleSettlementAdminRoute(request: Request, response: Sup
   const review = /^\/([A-Za-z0-9._:-]+)\/settlements\/([A-Za-z0-9._:-]+)\/review$/.exec(path);
   const adjust = /^\/([A-Za-z0-9._:-]+)\/settlements\/adjustments$/.exec(path);
   if (!read && !preview && !openings && !openingConfirm && !classify && !review && !adjust) return false;
-  if (!(method==="GET"&&read)&&!settlementSurfaceOpen(options.settlementRecordingEnabled, options.settlementAdmission)) throw notFound();
+  if (!(method==="GET"&&read)&&!settlementSurfaceOpen(options.settlementRecordingEnabled, options.settlementAdmission,options.localFinancialSandbox)) throw notFound();
   const requestId = ensureApiV1RequestId(request);
   response.setHeader("X-Request-Id", requestId);
   if (method !== "GET" && !requireOrigin(request, response, options, requestId)) return true;
   const context = await readAdminContext(request, options);
-  const actor = { realm: "admin" as const, userId: context.userId, sessionId: context.sessionId, settlementAdmission: options.settlementAdmission,settlementReadIdentity:settlementReadIdentity(options.pool) };
+  const actor = { realm: "admin" as const, userId: context.userId, sessionId: context.sessionId, settlementAdmission: options.settlementAdmission,settlementReadIdentity:settlementReadIdentity(options.pool),localFinancialSandbox:options.localFinancialSandbox };
   const orderId = idOf((read ?? preview ?? openings ?? openingConfirm ?? classify ?? review ?? adjust)![1]!);
   if (method === "POST" && preview) {
     const body = bodyOf(request);

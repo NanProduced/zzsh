@@ -4,6 +4,7 @@ import { recordAudit, SecurityApiError } from "../auth/security-core";
 import { assertJoinpayRefundTerminalFact, type NativeRefundTerminalFact } from "../order/joinpay-refund-source";
 import { verifyPrestartRefundLiability } from "./prestart-refund-liability";
 import type { PrestartPaymentBasis } from "../order/prestart-termination";
+import { assertLocalSandboxRefundTerminalFact, persistLocalSandboxRefundTerminalFact } from "../order/local-sandbox-refund-source";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/;
 const SHA = /^[a-f0-9]{64}$/;
@@ -14,17 +15,21 @@ const conflict = (message: string) => new SecurityApiError(409, "CONFLICT", mess
 const hash = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
 
 /** 纯账务计划没有准入能力；虚构输入只能验证分录守恒，不能产生退款事实。 */
-export function planNativeRentalRefundJournal(input: {
+type RefundJournalInput = {
   intentId: string; postingId: string | null; basisKind?: "PRESTART_TERMINATION"; paymentConfirmationId: string; renterUserId: string;
-  refundOrderNo: string; amountCents: string; factsDigest: string;
-}) {
+  refundOrderNo: string; amountCents: string; factsDigest: string;orderId?:string;
+};
+export function planNativeRentalRefundJournal(input: RefundJournalInput) { return planRentalRefundJournal(input,false); }
+export function planLocalSandboxRentalRefundJournal(input: RefundJournalInput&{orderId:string}) { return planRentalRefundJournal(input,true); }
+function planRentalRefundJournal(input: RefundJournalInput, local: boolean) {
   if (![input.intentId, input.paymentConfirmationId, input.renterUserId, input.refundOrderNo].every(v => typeof v === "string" && ID.test(v))
     || (input.postingId===null?input.basisKind!=="PRESTART_TERMINATION":!ID.test(input.postingId))
-    || !cents(input.amountCents) || !SHA.test(input.factsDigest)) throw conflict("Invalid native refund journal basis");
+    || !cents(input.amountCents) || !SHA.test(input.factsDigest)||local&&(typeof input.orderId!=='string'||!ID.test(input.orderId))) throw conflict("Invalid native refund journal basis");
   const key = hash(input.intentId).slice(0, 40);
-  const rootId = `native_refund_root_${key}`, eventId = `native_refund_paid_${key}`;
-  const details = Object.freeze({ nativeRefundIntentId: input.intentId, postingId: input.postingId,
-    paymentConfirmationId: input.paymentConfirmationId, refundOrderNo: input.refundOrderNo, factsDigest: input.factsDigest });
+  const rootId = `${local?'local':'native'}_refund_root_${key}`, eventId = `${local?'local':'native'}_refund_paid_${key}`;
+  const details = Object.freeze({ [local?'localRefundIntentId':'nativeRefundIntentId']: input.intentId, postingId: input.postingId,
+    paymentConfirmationId: input.paymentConfirmationId, refundOrderNo: input.refundOrderNo, factsDigest: input.factsDigest,
+    ...(local?{dataOrigin:'LOCAL_CONTROLLED' as const,orderId:input.orderId}:{}) });
   return Object.freeze({ evidenceLevel: "PLAN_ONLY" as const, rootId, eventId,
     lines: Object.freeze([
       Object.freeze({ id: `${eventId}_1`, line: 1, account: "RENTER_REFUND_PAYABLE" as const,
@@ -49,14 +54,15 @@ const columns = `id,posting_id,order_id,payment_confirmation_id,renter_user_id,m
   terminal_evidence_id,terminal_root_id,terminal_event_id,provider_refund_trx_no,completed_at::text,revision::text,
   basis_kind,liability_root_id,liability_event_id`;
 
-function assertBinding(row: IntentRow, fact: NativeRefundTerminalFact) {
+function assertBinding(row: IntentRow, fact: NativeRefundTerminalFact, local: boolean) {
   const kind = row.basis_kind ?? "POSTING";
   if (row.id !== fact.intentId || row.posting_id !== fact.postingId || row.order_id !== fact.orderId
     || row.payment_confirmation_id !== fact.paymentConfirmationId || row.renter_user_id !== fact.renterUserId
     || row.merchant_identity_id !== fact.merchantIdentityId || row.original_payment_trx_no !== fact.originalPaymentTrxNo
     || row.original_payment_order_no !== fact.originalPaymentOrderNo || row.responsibility_version_hash !== fact.responsibilityVersionHash
     || row.refund_order_no !== fact.refundOrderNo || row.amount_cents !== fact.amountCents || row.currency !== "CNY"
-    || fact.currency !== "CNY" || row.payment_source !== "JOINPAY" || row.evidence_level !== "JOINPAY_FORMAL"
+    || fact.currency !== "CNY" || row.payment_source !== (local?'CONTROLLED':'JOINPAY') || row.evidence_level !== (local?'CONTROLLED_TEST':'JOINPAY_FORMAL')
+    || local&&kind==='REVIEW_CONFIRMATION'
     || kind === "POSTING" && (row.posting_id === null || fact.postingId !== row.posting_id)
     || !["POSTING","REVIEW_CONFIRMATION","PRESTART_TERMINATION"].includes(kind)
     || kind !== "POSTING" && (row.posting_id !== null || fact.postingId !== null || fact.basisKind !== kind
@@ -89,6 +95,18 @@ export function planAbnormalNativeRentalRefundJournal(input: {
 export async function consumeNativeRentalRefundTerminal(client: PoolClient, input: { fact: unknown; requestId: string }) {
   if (typeof input.requestId !== "string" || !ID.test(input.requestId)) throw conflict("Invalid refund request ID");
   const fact = await assertJoinpayRefundTerminalFact(client, input.fact);
+  return consumeRentalRefundTerminal(client,{fact,requestId:input.requestId},false);
+}
+
+/** Distinct verified local source; it never acquires formal merchant/profile authority. */
+export async function consumeLocalSandboxRentalRefundTerminal(client:PoolClient,input:{fact:unknown;requestId:string}){
+  if(typeof input.requestId!=='string'||!ID.test(input.requestId))throw conflict('Invalid refund request ID');
+  const fact=await assertLocalSandboxRefundTerminalFact(client,input.fact);
+  return consumeRentalRefundTerminal(client,{fact,requestId:input.requestId},true);
+}
+
+async function consumeRentalRefundTerminal(client:PoolClient,input:{fact:NativeRefundTerminalFact;requestId:string},local:boolean){
+  const fact=input.fact;
   if (!cents(fact.amountCents) || !SHA.test(fact.factsDigest)
     || !["SUCCEEDED", "FAILED_NO_EXECUTION"].includes(fact.terminal)
     || (fact.terminal === "SUCCEEDED" && (!fact.refundTransactionNo || !fact.completedAt))) {
@@ -96,7 +114,7 @@ export async function consumeNativeRentalRefundTerminal(client: PoolClient, inpu
   }
   // 所有原路退款调用者共同采用此锁序；不能先取intent锁再反向取得用户锁。
   await client.query(`SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array(
-    'zzsh:refund-funds:v1','JOINPAY',$1::text,$2::text)::text,0))`, [fact.merchantIdentityId, fact.originalPaymentTrxNo]);
+    'zzsh:refund-funds:v1','${local?'CONTROLLED':'JOINPAY'}',$1::text,$2::text)::text,0))`, [fact.merchantIdentityId, fact.originalPaymentTrxNo]);
   if ((await client.query(`SELECT id FROM zzsh_auth_user."user" WHERE id=$1 FOR UPDATE`, [fact.renterUserId])).rowCount !== 1) {
     throw unavailable("Original refund renter is unavailable");
   }
@@ -105,15 +123,16 @@ export async function consumeNativeRentalRefundTerminal(client: PoolClient, inpu
   if (!revision || !/^[0-9]+$/.test(revision.ledger_revision)) throw unavailable("Original posting wallet revision is unavailable");
   const row = (await client.query<IntentRow>(`SELECT ${columns} FROM zzsh_order.channel_refund_intent WHERE id=$1 FOR UPDATE`, [fact.intentId])).rows[0];
   if (!row) throw unavailable("Original refund intent is unavailable");
-  assertBinding(row, fact);
+  assertBinding(row, fact, local);
+  if(local)await assertLocalSandboxRefundTerminalFact(client,fact);
   const kind = row.basis_kind ?? "POSTING";
   if (fact.refundTransactionNo) await client.query(`SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array(
-    'zzsh:refund-transaction:v1','JOINPAY',$1::text,$2::text)::text,0))`, [fact.merchantIdentityId, fact.refundTransactionNo]);
+    'zzsh:refund-transaction:v1','${local?'CONTROLLED':'JOINPAY'}',$1::text,$2::text)::text,0))`, [fact.merchantIdentityId, fact.refundTransactionNo]);
   let basisValid = false;
   if (kind === "PRESTART_TERMINATION") {
     const terms=(await client.query<{id:string;payment_basis:PrestartPaymentBasis}>(`SELECT id,payment_basis FROM zzsh_order.prestart_termination
       WHERE state='APPROVED' AND order_id=$1 AND payment_basis->>'paymentConfirmationId'=$2`,[row.order_id,row.payment_confirmation_id])).rows;
-    if(terms.length!==1||terms[0]!.payment_basis.amountCents!==row.amount_cents||terms[0]!.payment_basis.digest!==row.responsibility_version_hash)throw unavailable("Original prestart refund liability is unavailable");
+    if(terms.length!==1||terms[0]!.payment_basis.source!==(local?'CONTROLLED':'JOINPAY')||terms[0]!.payment_basis.amountCents!==row.amount_cents||terms[0]!.payment_basis.digest!==row.responsibility_version_hash)throw unavailable("Original prestart refund liability is unavailable");
     await verifyPrestartRefundLiability(client,terms[0]!.id,terms[0]!.payment_basis,row.liability_root_id,row.liability_event_id);basisValid=true;
   } else if (kind === "REVIEW_CONFIRMATION") {
     const basis = (await client.query<{ valid: boolean }>(`/* abnormal review refund original immutable liability */ SELECT EXISTS(
@@ -150,7 +169,7 @@ export async function consumeNativeRentalRefundTerminal(client: PoolClient, inpu
       AND p.currency='CNY' AND p.currency=c.currency AND p.captured_cents=c.amount_cents
       AND p.renter_refund_cents>=i.amount_cents AND p.refund_due_at<=clock_timestamp() AND p.refund_due_at=i.due_at
       AND o.status='COMPLETED' AND o.paid_confirmation_id=c.id AND o.renter_user_id=i.renter_user_id
-      AND c.order_id=o.id AND c.source='JOINPAY' AND c.disposition='APPLIED'
+      AND c.order_id=o.id AND c.source='${local?'CONTROLLED':'JOINPAY'}' AND c.disposition='APPLIED'
       AND c.merchant_scope_id=i.merchant_identity_id AND c.provider_transaction_id=i.original_payment_trx_no
       AND c.merchant_order_no=i.original_payment_order_no
       AND EXISTS(SELECT 1 FROM zzsh_order.settlement_ledger_entry l WHERE l.posting_id=p.id
@@ -170,7 +189,7 @@ export async function consumeNativeRentalRefundTerminal(client: PoolClient, inpu
         objectId: row.id, outcome: "SUCCESS", requestId: input.requestId, details: { evidenceId: fact.evidenceId, originalTerminal: terminal, budgetDisposition: row.budget_disposition } });
       return { event: "CONFLICT" as const, intentId: row.id, terminal, budgetDisposition: row.budget_disposition, rootId: row.terminal_root_id, eventId: row.terminal_event_id };
     }
-    const complete = (await client.query<{ complete: boolean }>(`SELECT zzsh_order.${kind === "REVIEW_CONFIRMATION" ? "native_abnormal_refund_terminal_complete" : kind === "PRESTART_TERMINATION" ? "native_prestart_refund_terminal_complete" : "native_refund_terminal_complete"}($1) AS complete`, [row.id])).rows[0];
+    const complete = (await client.query<{ complete: boolean }>(`SELECT zzsh_order.${local?'local_controlled_refund_terminal_complete':kind === "REVIEW_CONFIRMATION" ? "native_abnormal_refund_terminal_complete" : kind === "PRESTART_TERMINATION" ? "native_prestart_refund_terminal_complete" : "native_refund_terminal_complete"}($1) AS complete`, [row.id])).rows[0];
     if (complete?.complete !== true) throw unavailable("Original refund terminal batch is incomplete");
     return { event: "REPLAYED" as const, intentId: row.id, terminal, budgetDisposition: row.budget_disposition, rootId: row.terminal_root_id, eventId: row.terminal_event_id };
   }
@@ -178,16 +197,17 @@ export async function consumeNativeRentalRefundTerminal(client: PoolClient, inpu
     throw unavailable("Refund requires review and keeps its liability allocation");
   }
   if (!["SUBMITTING", "UNKNOWN", "PROCESSING"].includes(row.state)) throw conflict("Refund terminal is not executable from this state");
+  if(local)await persistLocalSandboxRefundTerminalFact(client,fact);
   const plan = kind === "REVIEW_CONFIRMATION"
     ? planAbnormalNativeRentalRefundJournal({ intentId: row.id, paymentConfirmationId: row.payment_confirmation_id,
       renterUserId: row.renter_user_id, refundOrderNo: row.refund_order_no, amountCents: row.amount_cents, factsDigest: fact.factsDigest })
-    : planNativeRentalRefundJournal({ intentId: row.id, postingId: row.posting_id, ...(kind === "PRESTART_TERMINATION" ? {basisKind:"PRESTART_TERMINATION" as const} : {}), paymentConfirmationId: row.payment_confirmation_id,
-      renterUserId: row.renter_user_id, refundOrderNo: row.refund_order_no, amountCents: row.amount_cents, factsDigest: fact.factsDigest });
+    : planRentalRefundJournal({ intentId: row.id, postingId: row.posting_id, ...(kind === "PRESTART_TERMINATION" ? {basisKind:"PRESTART_TERMINATION" as const} : {}), paymentConfirmationId: row.payment_confirmation_id,
+      renterUserId: row.renter_user_id, refundOrderNo: row.refund_order_no, amountCents: row.amount_cents, factsDigest: fact.factsDigest,...(local?{orderId:row.order_id}:{}) },local);
   const succeeded = fact.terminal === "SUCCEEDED";
   if (succeeded) {
     await client.query(`INSERT INTO zzsh_order.finance_economic_root
       (id,basis_id,source_kind,source_type,source_system,source_entity,source_id,subject_user_id,beneficiary_role,source_digest)
-      VALUES($1,NULL,'NATIVE_RENTAL_REFUND','NATIVE','zzsh','channel_refund_intent',$2,$3,'RENTER',$4)`,
+      VALUES($1,NULL,'${local?'LOCAL_CONTROLLED_RENTAL_REFUND':'NATIVE_RENTAL_REFUND'}','NATIVE','${local?'zzsh-local-controlled':'zzsh'}','channel_refund_intent',$2,$3,'RENTER',$4)`,
     [plan.rootId, row.id, row.renter_user_id, fact.factsDigest]);
     await client.query(`INSERT INTO zzsh_order.finance_event(id,economic_root_id,kind,subject_user_id,expected_ledger_revision)
       VALUES($1,$2,'REFUND_PAID',$3,$4)`, [plan.eventId, plan.rootId, row.renter_user_id, revision.ledger_revision]);
@@ -206,7 +226,7 @@ export async function consumeNativeRentalRefundTerminal(client: PoolClient, inpu
     objectType: "channel_refund_intent", objectId: row.id, outcome: "SUCCESS", requestId: input.requestId,
     details: { evidenceId: fact.evidenceId, postingId: row.posting_id, paymentConfirmationId: row.payment_confirmation_id,
       amountCents: row.amount_cents, currency: "CNY", factsDigest: fact.factsDigest,
-      budgetDisposition: succeeded ? "CONSUMED" : "RELEASED", channelArrival: "UNKNOWN" } });
+      budgetDisposition: succeeded ? "CONSUMED" : "RELEASED", channelArrival: "UNKNOWN",...(local?{dataOrigin:'LOCAL_CONTROLLED',formalRefund:false}:{}) } });
   return { event: succeeded ? "CONSUMED" as const : "RELEASED" as const, intentId: row.id, terminal: fact.terminal,
     budgetDisposition: succeeded ? "CONSUMED" as const : "RELEASED" as const,
     rootId: succeeded ? plan.rootId : null, eventId: succeeded ? plan.eventId : null };

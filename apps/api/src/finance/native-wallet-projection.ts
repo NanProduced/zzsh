@@ -19,7 +19,7 @@ export async function readNativeWalletBuckets(c:PoolClient,userId:string){
 
 /** Debt knowledge is finite. Passing this check only permits requesting a fresh quote. */
 export async function readNativeReservationStatus(c:PoolClient,userId:string,scope:NativeWithdrawalScope){
- await assertNativeWithdrawalResource(c,scope);const subjectInScope=nativeWithdrawalSubjectInScope(scope,userId);
+ const resource=await assertNativeWithdrawalResource(c,scope,'READ_ORIGINAL');const subjectInScope=resource.active!==false&&nativeWithdrawalSubjectInScope(scope,userId);
  let recovery:Awaited<ReturnType<typeof readReferralRecovery>>;try{recovery=await readReferralRecovery(c,userId);}catch(error){if(!(error instanceof SecurityApiError&&error.status===503))throw error;recovery={knowledge:'UNKNOWN',outstandingCents:null,earningCount:null,reason:'REFERRAL_RECOVERY_REQUIRES_RECONCILIATION'};}
  const reservationState=!subjectInScope?'NOT_IN_SCOPE':recovery.knowledge!=='KNOWN'?'UNKNOWN':recovery.earningCount!=='0'||recovery.outstandingCents!=='0'?'BLOCKED_BY_RECOVERY':'REQUIRES_CURRENT_QUOTE';
  return{scope:'NATIVE_REFERRAL_OBLIGATIONS_ONLY' as const,subjectInScope,recovery,reservationState,globalWithdrawable:'UNKNOWN' as const};

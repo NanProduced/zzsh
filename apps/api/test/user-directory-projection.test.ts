@@ -9,10 +9,11 @@ import { sanitizeDetail } from '../src/auth/admin-audit';
 import { DirectorySqlFixture,directorySecurityFixture,fixtureOrderRows } from './user-directory-fixtures';
 import { readDirectoryUserSummaries } from '../src/auth/user-directory-summary';
 import { prepareLegacyGrowthBackfill } from '../src/auth/membership-growth-legacy';
-import { growthContributionSourceDigest } from '../src/auth/membership-growth-integration';
+import { growthContributionSourceDigest, readMembershipGrowthBatch, readMembershipGrowthTierBatch, MEMBERSHIP_GROWTH_BATCH_SQL, type MembershipGrowthBatchSnapshot } from '../src/auth/membership-growth-integration';
+import { LEGACY_GROWTH_BATCH_SQL } from '../src/auth/membership-growth-legacy-store';
 import { canonicalize } from '../src/supply/content-hash';
 import { sha256Hex } from '../src/supply/supply-util';
-import { readKnownMembershipTiers } from '../src/auth/user-directory-membership';
+import { readKnownMembershipTiers,readDirectoryMembershipDistribution } from '../src/auth/user-directory-membership';
 import { convertLegacyDisplayFields, legacyDisplayDigest } from '../src/supply/legacy-display-snapshot';
 
 const viewer:AdminDirectoryViewer={adminId:'admin-fixture',isBoss:false,phoneLookup:true,resourceRead:true,orderRead:true,auditRead:true,authorizationKey:'scope-one'};
@@ -914,6 +915,7 @@ function directoryFilterFixture(t:TestContext){
   const contribution={userId:'user_long',gameId:'delta',sourceKey:'RENTAL_SETTLEMENT:s1:haff',sourceType:'RENTAL_SETTLEMENT' as const,sourceId:'s1:haff',settlementVersion:'1',effectiveAt:'2026-10-20T00:00:00.000000Z',recordedAt:'2026-10-20T00:00:00.000000Z',amountCents:'1000000',status:'SETTLED' as const,eligible:true,revision:0};
   const query=pool.query.bind(pool);
   pool.query=async(sql,values=[])=>{
+    if(/^(DECLARE|FETCH|CLOSE) directory_growth_|^FETCH FORWARD/.test(sql))return query(sql,values);
     if(sql.includes('directory-growth-subjects'))return {rows:(values[0] as string[]).map(userId=>({userId,sourceRef:migrated.has(userId)?null:'registration:v1',migrated:migrated.has(userId),normalTier:null,effectiveTier:null,blackGoldState:null,lastTierDropAt:null}))};
     if(sql.includes('directory-growth-contributions'))return {rows:(values[0] as string[]).includes('user_long')?[{...contribution,revision:'0',sourceDigest:growthContributionSourceDigest('a'.repeat(64),'delta',contribution)}]:[]};
     if(sql.includes('directory-growth-sources'))return {rows:(values[0] as string[]).includes('user_long')?[{settlementVersionId:'s1',versionNo:1,versionHash:'a'.repeat(64),userId:'user_long',gameId:'delta',inputSnapshot:{amounts:{haffConsumedBuyer:'10000.00',itemConsumedBuyer:'0.00'}}}]:[]};
@@ -940,8 +942,8 @@ test('member filters execute the formal coverage column and retain known native 
     pool.queries.length=0;
     const single:any=await listUserDirectory(client(pool),boss,{limit:2,page:1,userId,membershipTier});
     assert.equal(single.total,1);assert.deepEqual(single.items.map((row:any)=>row.userId),[userId]);
-    const candidate=pool.queries.find(query=>query.sql.startsWith('WITH membership_candidates AS MATERIALIZED'));
-    assert.deepEqual(candidate?.values,[userId],'the existing stable-ID directory filter bounds every membership candidate source');
+    const candidate=pool.queries.find(query=>query.sql.startsWith('SELECT u.id FROM zzsh_auth_user."user" u WHERE u.id=$1'));
+    assert.deepEqual(candidate?.values,[userId],'the existing stable-ID directory filter stays bound before projection');
   }
   const detail:any=await readUserDirectoryDetail(client(pool),boss,'user_unknown');assert.equal(detail.membershipSummary.growth.knowledge,'KNOWN');assert.equal(detail.membershipSummary.growth.effectiveTier,'STANDARD');
   await assert.rejects(listUserDirectory(client(pool),boss,{limit:2,page:2,membershipTier:'GOLD',contextKey:standard.contextKey}),{status:409});
@@ -982,34 +984,122 @@ test('no-scope credit filters bind no unused PostgreSQL parameters in count or p
   }
 });
 
-test('membership source-union candidates preserve the old set and bound explicit user queries before projection',async t=>{
-  const pool=directoryFilterFixture(t);
-  pool.filterFixtureDb.exec(`INSERT INTO zzsh_iam.membership_growth_contribution VALUES('user_normal'),('user_normal'),('user_legacy'),('orphan-contribution');
-    INSERT INTO zzsh_iam.membership_growth_legacy_coverage VALUES('user_dual'),('user_dual'),('orphan-coverage');
-    INSERT INTO zzsh_iam.user_rental_membership VALUES('user_legacy','registration:v1'),('orphan-registration','registration:v1');
-    INSERT INTO zzsh_iam.audit_event VALUES('user_dual','user.legacy_owner.migrated','SUCCESS'),('user_normal','user.legacy_owner.migrated','FAILURE');
-    INSERT INTO zzsh_auth_user.user VALUES('only-migrated','fixture',NULL,0),('not-registration','fixture',NULL,0),('failed-migration','fixture',NULL,0);
-    INSERT INTO zzsh_iam.user_rental_membership VALUES('only-migrated','registration:v1'),('not-registration','other-source'),('failed-migration','registration:v1');
-    INSERT INTO zzsh_iam.audit_event VALUES('only-migrated','user.legacy_owner.migrated','SUCCESS'),('failed-migration','user.legacy_owner.migrated','FAILURE');`);
-  const prior=`SELECT u.id FROM zzsh_auth_user."user" u WHERE EXISTS(SELECT 1 FROM zzsh_iam.membership_growth_contribution c WHERE c.user_id=u.id)
-    OR EXISTS(SELECT 1 FROM zzsh_iam.membership_growth_legacy_coverage l WHERE l.subject_user_id=u.id)
-    OR (NOT EXISTS(SELECT 1 FROM zzsh_iam.audit_event e WHERE e.object_id=u.id AND e.action='user.legacy_owner.migrated' AND e.outcome='SUCCESS')
-      AND EXISTS(SELECT 1 FROM zzsh_iam.user_rental_membership m WHERE m.user_id=u.id AND m.source_ref='registration:v1'))`;
-  const expected=pool.filterSql!(prior,[]).map(row=>row.id).sort();
-  const queries:{sql:string;values:unknown[]}[]=[];
-  const c={query:async(sql:string,values:unknown[]=[])=>{queries.push({sql,values});return {rows:queries.length===1?pool.filterSql!(sql,values):[]};}} as unknown as PoolClient;
-  const read:(client:PoolClient,asOf:string,userId?:string)=>Promise<{candidateCount:number}>=readKnownMembershipTiers;
-  const global=await read(c,'2026-10-22T00:00:00.000Z');
-  assert.equal(global.candidateCount,expected.length);assert.deepEqual(pool.filterSql!(queries[0]!.sql,queries[0]!.values).map(row=>row.id).sort(),expected);
-  assert.match(queries[0]!.sql,/\bUNION\b/,'candidate sources must be combined before the auth-user intersection');
-  assert.equal((queries[0]!.sql.match(/\bUNION\b/g)??[]).length,2);assert.match(queries[0]!.sql,/JOIN zzsh_auth_user\."user" u/);
-  assert.equal(new Set(expected).size,expected.length);assert.equal(expected.some(id=>id.startsWith('orphan-')),false);
-  assert.equal(expected.includes('only-migrated'),false);assert.equal(expected.includes('not-registration'),false);assert.equal(expected.includes('failed-migration'),true);
+test('membership population includes a formally settled native zero without a registration row and keeps unknown separate',async t=>{
+  const pool=directoryFilterFixture(t),query=pool.query.bind(pool);
+  pool.query=async(sql,values=[])=>{
+    if(/^(DECLARE|FETCH|CLOSE) directory_growth_|^FETCH FORWARD/.test(sql))return query(sql,values);
+    if(sql.includes('directory-growth-subjects'))return {rows:(await query(sql,values)).rows.map((row:any)=>row.userId==='user_dual'?{...row,sourceRef:null}:row)};
+    if(sql.includes('directory-growth-sources'))return {rows:[...(await query(sql,values)).rows,...((values[0] as string[]).includes('user_dual')?[{settlementVersionId:'formal-zero',versionNo:1,versionHash:'c'.repeat(64),userId:'user_dual',gameId:'delta',inputSnapshot:{schema:'settlement-version-v2',amounts:{haffConsumedBuyer:'0.00',itemConsumedBuyer:'0.00'}}}]:[])]};
+    return query(sql,values);
+  };
+  const global=await readKnownMembershipTiers(client(pool),'2026-10-22T00:00:00.000Z');
+  assert.equal(global.candidateCount,pool.users.length);assert.equal(global.known.get('user_dual'),'STANDARD');assert.equal(global.known.has('user_legacy'),false);
+  const stats=await readDirectoryMembershipDistribution(client(pool),'2026-10-22T00:00:00.000Z');
+  assert.equal(stats.total,8);assert.deepEqual(stats.counts,{PENDING:1,STANDARD:6,SILVER:0,GOLD:1,PLATINUM:0,DIAMOND:0,BLACK_GOLD:0});assert.equal('known' in stats,false);
   for(const userId of ['user_unknown','no-such-user',"missing' OR true --"]){
-    queries.length=0;const scoped=await read(c,'2026-10-22T00:00:00.000Z',userId);
-    assert.equal(scoped.candidateCount,expected.includes(userId)?1:0);assert.deepEqual(queries[0]!.values,[userId]);
-    assert.equal((queries[0]!.sql.match(/=\$1::text/g)??[]).length,3,'each source is constrained by the same bound stable ID');
+    pool.queries.length=0;const scoped=await readKnownMembershipTiers(client(pool),'2026-10-22T00:00:00.000Z',userId);
+    assert.equal(scoped.candidateCount,pool.users.some(row=>row.id===userId)?1:0);assert.deepEqual(pool.queries[0]!.values,[userId]);
+    assert.equal(pool.queries.some(query=>query.sql.startsWith('DECLARE')),false);
   }
-  let calls=0;const oversized={query:async()=>{calls++;return {rows:Array.from({length:50001},(_,i)=>({id:'candidate-'+i}))};}} as unknown as PoolClient;
-  await assert.rejects(read(oversized,'2026-10-22T00:00:00.000Z'),error=>(error as any).code==='EVIDENCE_UNAVAILABLE');assert.equal(calls,1,'the candidate ceiling rejects before growth expansion');
+});
+
+test('more than fifty thousand membership subjects are projected in bounded batches without a fake population ceiling',async()=>{
+  const ids=Array.from({length:50001},(_,i)=>'native-'+String(i).padStart(5,'0'));let at=0,maxBatch=0,batches=0,closed=false;
+  const c={query:async(sql:string,values:unknown[]=[])=>{
+    if(sql.startsWith("SELECT set_config("))return {rows:[]};
+    if(sql.startsWith('DECLARE'))return {rows:[]};
+    if(sql==='FETCH FORWARD 500 FROM directory_growth_subjects'){const rows=ids.slice(at,at+500).map(userId=>({userId,sourceRef:'registration:v1',migrated:false,normalTier:null,effectiveTier:null,blackGoldState:null,lastTierDropAt:null}));at+=rows.length;maxBatch=Math.max(maxBatch,rows.length);batches++;return {rows};}
+    if(sql.startsWith('FETCH'))return {rows:[]};
+    if(sql.startsWith('CLOSE')){closed=true;return {rows:[]};}
+    if(sql.includes('legacy-growth-schema'))return {rows:[{coverage:false,sources:false}]};
+    if(sql.includes('directory-growth-policy'))return {rows:[]};
+    throw Error('UNEXPECTED_MEMBERSHIP_FIXTURE_SQL');
+  }} as unknown as PoolClient;
+  const result=await readKnownMembershipTiers(c,'2026-10-22T00:00:00.000Z');
+  assert.equal(result.candidateCount,50001);assert.equal(result.known.size,50001);assert.equal(result.known.get(ids.at(-1)!),'STANDARD');assert.equal(maxBatch,500);assert.equal(batches,101);assert.equal(closed,true);
+});
+
+test('membership cursor failure propagates to the outer rollback without returning a partial count or issuing cleanup SQL',async()=>{
+  const statements:string[]=[];const c={query:async(sql:string)=>{statements.push(sql);if(sql.startsWith('DECLARE'))return {rows:[]};if(sql.startsWith('FETCH'))return {rows:[{id:'broken'}]};throw Error('MEMBERSHIP_EVIDENCE_UNAVAILABLE');}} as unknown as PoolClient;
+  await assert.rejects(readDirectoryMembershipDistribution(c,'2026-10-22T00:00:00.000Z'),/MEMBERSHIP_EVIDENCE_UNAVAILABLE/);
+  assert.equal(statements.some(sql=>/^(CLOSE|COMMIT)/.test(sql)),false);
+});
+
+test('ordered membership source portals keep proof-bearing users across the 500-subject boundary and plan each relation once',async t=>{
+  const pool=directoryFilterFixture(t);
+  for(let i=0;i<600;i++){
+    const id='000-stream-'+String(i).padStart(3,'0');pool.users.push({...pool.users[0]!,id});
+    pool.filterFixtureDb.prepare('INSERT INTO zzsh_auth_user.user VALUES(?,?,?,?)').run(id,'synthetic','2026-10-01T00:00:00.000000Z',0);
+    pool.filterFixtureDb.prepare('INSERT INTO zzsh_iam.user_rental_membership VALUES(?,?)').run(id,'registration:v1');
+  }
+  const result=await readDirectoryMembershipDistribution(client(pool),'2026-10-22T00:00:00.000000Z');
+  assert.equal(result.total,608);assert.deepEqual(result.counts,{PENDING:1,STANDARD:606,SILVER:0,GOLD:1,PLATINUM:0,DIAMOND:0,BLACK_GOLD:0});
+  const names=['subjects','contributions','sources','versions','live'];
+  for(const name of names){assert.equal(pool.queries.filter(row=>row.sql.startsWith(`DECLARE directory_growth_${name} `)).length,1,name);assert.equal(pool.queries.filter(row=>row.sql===`CLOSE directory_growth_${name}`).length,1,name);}
+  assert.equal(pool.queries.filter(row=>row.sql==='FETCH FORWARD 500 FROM directory_growth_subjects').length,2);
+});
+
+async function membershipProjectionSnapshot(pool:DirectorySqlFixture,ids:string[],asOf:string):Promise<MembershipGrowthBatchSnapshot>{
+  const rows=async(sql:string,args:unknown[]) => (await pool.query(sql,args)).rows;
+  return {asOfUtc:asOf,subjects:await rows(MEMBERSHIP_GROWTH_BATCH_SQL.subjects,[ids]),contributions:await rows(MEMBERSHIP_GROWTH_BATCH_SQL.contributions,[ids]),sources:await rows(MEMBERSHIP_GROWTH_BATCH_SQL.sources,[ids]),policy:(await rows(MEMBERSHIP_GROWTH_BATCH_SQL.policy,[asOf]))[0],entitlements:await rows(MEMBERSHIP_GROWTH_BATCH_SQL.entitlements,[ids]),legacy:{installed:{coverage:true,sources:true},versions:await rows(LEGACY_GROWTH_BATCH_SQL.versions,[ids,asOf]),sources:await rows(LEGACY_GROWTH_BATCH_SQL.sources,[ids,asOf])}};
+}
+
+test('streamed snapshot projection is the original batch projection and never bypasses canonical proof validation',async t=>{
+  const pool=directoryFilterFixture(t),ids=pool.users.map(row=>row.id),asOf='2026-10-22T00:00:00.000000Z';
+  const snapshot=await membershipProjectionSnapshot(pool,ids,asOf);
+  const expected=await readMembershipGrowthBatch(client(pool),ids,asOf);let queries=0;const noQueries={query:async()=>{queries++;throw Error('PRELOADED_PROJECTION_ISSUED_SQL');}} as unknown as PoolClient;
+  assert.deepEqual(await readMembershipGrowthBatch(noQueries,ids,asOf,snapshot),expected);assert.equal(queries,0);
+  const changed=structuredClone(snapshot),record=JSON.parse(changed.legacy.versions[0]!.canonical);record.sourceSetSha256='f'.repeat(64);changed.legacy.versions[0]!.canonical=canonicalize(record);changed.legacy.versions[0]!.digest=sha256Hex(changed.legacy.versions[0]!.canonical);
+  await assert.rejects(readMembershipGrowthBatch(noQueries,ids,asOf,changed),error=>(error as any).code==='EVIDENCE_UNAVAILABLE');
+  await assert.rejects(readMembershipGrowthBatch(noQueries,ids,asOf,{...snapshot,asOfUtc:'2026-10-23T00:00:00.000000Z'}),error=>(error as any).code==='EVIDENCE_UNAVAILABLE');
+  const foreign=structuredClone(snapshot);foreign.legacy.versions[0]!.userId='foreign';await assert.rejects(readMembershipGrowthBatch(noQueries,ids,asOf,foreign),error=>(error as any).code==='EVIDENCE_UNAVAILABLE');assert.equal(queries,0);
+});
+
+test('narrow directory tier equals full effective growth tier across policies, gifts, grace, black gold and unknown history',async t=>{
+  const pool=directoryFilterFixture(t),ids=pool.users.map(row=>row.id),asOf='2026-10-22T00:00:00.000000Z',base=await membershipProjectionSnapshot(pool,ids,asOf);
+  const noQueries={query:async()=>{throw Error('NARROW_SNAPSHOT_MUST_NOT_QUERY');}} as unknown as PoolClient;
+  for(const mode of ['NO_POLICY','POLICY_AND_GIFTS','POLICY_OTHER','GRACE','BLACK_GOLD'] as const){
+    const snapshot=structuredClone(base);
+    if(mode!=='NO_POLICY'){
+      snapshot.policy={id:'policy-1',version:'1',policyPayload:{tiers:{STANDARD:{tenantDeposit:'ACCOUNT_BASE',depositAllowanceCents:'0'},GOLD:{tenantDeposit:'WAIVED',depositAllowanceCents:'0'}}},haffRule:{}};
+      snapshot.entitlements=[{id:'friend',userId:'user_normal',kind:'FRIEND',scopeKey:'game:delta',gameId:'delta',startsAt:'2026-10-01T00:00:00.000000Z',endsAt:'2026-11-01T00:00:00.000000Z',status:'ACTIVE',depositWaived:true,depositAllowanceCents:'0'},{id:'expired',userId:'user_long',kind:'PRESTIGE',scopeKey:'game:delta',gameId:'delta',startsAt:'2026-10-01T00:00:00.000000Z',endsAt:asOf,status:'ACTIVE',depositWaived:false,depositAllowanceCents:'0'}];
+      if(mode==='POLICY_OTHER'){snapshot.policy.version='2';snapshot.policy.policyPayload={tiers:{STANDARD:{tenantDeposit:'WAIVED',depositAllowanceCents:'0'},GOLD:{tenantDeposit:'ACCOUNT_BASE',depositAllowanceCents:'0'}}};}
+    }
+    if(mode==='GRACE')Object.assign(snapshot.subjects.find(row=>row.userId==='user_long')!,{normalTier:'DIAMOND',effectiveTier:'DIAMOND',lastTierDropAt:'2026-10-21T00:00:00.000000Z'});
+    if(mode==='BLACK_GOLD'){
+      const row=snapshot.contributions.find(row=>row.userId==='user_long')!;row.amountCents='5000000';row.sourceDigest=growthContributionSourceDigest('a'.repeat(64),'delta',{...row,revision:0});snapshot.sources.find(row=>row.userId==='user_long')!.inputSnapshot={amounts:{haffConsumedBuyer:'50000.00',itemConsumedBuyer:'0.00'}};
+    }
+    const full=await readMembershipGrowthBatch(noQueries,ids,asOf,snapshot),narrow=await readMembershipGrowthTierBatch(noQueries,ids,asOf,snapshot);
+    assert.equal(full.get('user_normal')!.growth.benefitsState,mode==='NO_POLICY'?'NOT_CONFIGURED':'CONFIGURED');
+    if(mode!=='NO_POLICY'){assert.equal(full.get('user_normal')!.entitlements[0]!.status,'ACTIVE');assert.equal(full.get('user_long')!.entitlements[0]!.status,'EXPIRED');}
+    for(const id of ids){const expected=full.get(id)!;assert.deepEqual(narrow.get(id),{subjectId:expected.subjectId,growth:{knowledge:expected.growth.knowledge,asOfUtc:expected.growth.asOfUtc,effectiveTier:expected.growth.effectiveTier}},`${mode}:${id}`);}
+    assert.equal(narrow.get('user_legacy')!.growth.knowledge,'UNKNOWN');assert.equal(narrow.get('user_normal')!.growth.effectiveTier,'STANDARD','a manual gift is not a growth tier');
+    if(mode==='GRACE')assert.equal(narrow.get('user_long')!.growth.effectiveTier,'DIAMOND','directory consumes the effective/grace tier, not the base GOLD tier');
+    if(mode==='BLACK_GOLD')assert.equal(narrow.get('user_long')!.growth.effectiveTier,'BLACK_GOLD');
+  }
+});
+
+test('a later source portal failure rejects the whole membership fold without a partial result or cleanup on an aborted transaction',async t=>{
+  const pool=directoryFilterFixture(t),query=pool.query.bind(pool);
+  pool.query=async(sql,args=[])=>{if(sql==='FETCH FORWARD 500 FROM directory_growth_versions')throw Error('SOURCE_PORTAL_FAILURE');return query(sql,args);};
+  await assert.rejects(readDirectoryMembershipDistribution(client(pool),'2026-10-22T00:00:00.000000Z'),/SOURCE_PORTAL_FAILURE/);
+  assert.equal(pool.queries.some(row=>row.sql.startsWith('CLOSE directory_growth_')),false);
+});
+
+test('admitted empty subjects share the formal zero replay while full-source users retain exact filters, pages and totals',async t=>{
+  const pool=directoryFilterFixture(t),asOf='2026-10-22T00:00:00.000000Z',expected=await readKnownMembershipTiers(client(pool),asOf),query=pool.query.bind(pool);
+  Object.defineProperty(pool,'getTransactionStatus',{value:()=> 'T'});
+  pool.query=async(sql,args=[])=>{
+    if(sql.includes('legacy-growth-zero-read-schema'))return {rows:[{present:true,readOnly:'on',isolation:'repeatable read'}]};
+    if(sql.includes('legacy-growth-zero-read-admissions'))return {rows:[{userId:'user_unknown'}]};
+    return query(sql,args);
+  };
+  const actual=await readKnownMembershipTiers(client(pool),asOf);assert.deepEqual(actual,expected);
+  const population=pool.queries.find(row=>row.sql.startsWith('DECLARE directory_growth_subjects ')&&row.values.length>0);
+  assert.deepEqual(population?.values,[['user_unknown']],'the full subject portal receives the certified exclusion set');
+  const boss={...viewer,isBoss:true,membershipSummaryRead:true};const pages=[];
+  for(let page=1;page<=3;page++){const data:any=await listUserDirectory(client(pool),boss,{limit:2,page,membershipTier:'STANDARD'});assert.equal(data.total,6);pages.push(...data.items.map((row:any)=>row.userId));}
+  assert.equal(new Set(pages).size,6);assert(pages.includes('user_unknown'));
+  const pending:any=await listUserDirectory(client(pool),boss,{limit:20,page:1,membershipTier:'PENDING'});assert.equal(pending.total,1);assert.deepEqual(pending.items.map((row:any)=>row.userId),['user_legacy']);
+  const frozen:any=await listUserDirectory(client(pool),boss,{limit:20,page:1,accountStatus:'FROZEN',membershipTier:'STANDARD'});assert.equal(frozen.total,1);assert.equal(frozen.items[0].userId,'user_restore');
 });

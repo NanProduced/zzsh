@@ -93,6 +93,8 @@ import { assertLocalDistributionAssembly, type LocalDistributionScope } from '..
 import { initializeNewDistributionRegistration } from "../finance/distribution-registration";
 import { initializeNativeWalletOrigin, assertNativeWalletOriginAssembly, type NativeOriginResource } from "../finance/native-wallet-origin";
 import { assertLocalControlledPaymentAssembly, mountLocalControlledPayments, type LocalControlledPaymentOptions } from "../order/local-payment-routes";
+import { assertLocalFinancialSandboxRuntimeAssembly, preflightLocalFinancialSandboxRuntime, type LocalFinancialSandboxAssembly } from "../finance/local-financial-sandbox-runtime";
+import { mountLocalFinancialSandboxRoutes } from "../finance/local-financial-sandbox-routes";
 import { mountChannelPayments, channelPaymentReadOptions, type ChannelPaymentCollectionAssembly } from "../order/channel-payment-routes";
 import { mountAdminNativeRefunds } from "../order/native-refund-routes";
 import { mountAdminJoinpayQuery } from "../order/admin-joinpay-query-routes";
@@ -130,6 +132,8 @@ export type AuthRuntimeCapabilities = {
 };
 
 export type AuthRuntimeOptions = AuthRuntimeConfig & {
+  /** Explicit branded dev/fake local composition; no environment or HTTP installer. */
+  localFinancialSandbox?: LocalFinancialSandboxAssembly;
   /** Explicit formal resource capability and deployment switch; does not enable collection requests. */
   settlementRecordingEnabled?: boolean;
   /** Explicit local capability only; never read from environment or HTTP. */
@@ -904,6 +908,10 @@ export async function mountAuthHandlers(
   app: INestApplication,
   options: AuthRuntimeOptions,
 ): Promise<AuthSecurityOptions & { settlementRecordingEnabled: boolean }> {
+  if (options.localFinancialSandbox) {
+    assertLocalFinancialSandboxRuntimeAssembly(options.localFinancialSandbox, options);
+    await preflightLocalFinancialSandboxRuntime(options.pool, options.localFinancialSandbox);
+  }
   if (options.localControlledPayments && options.joinpayCollection) {
     throw new ConfigurationError("Controlled and formal collection assemblies are exclusive");
   }
@@ -931,7 +939,7 @@ export async function mountAuthHandlers(
   }
   assertLocalDistributionAssembly(options.distributionScope, options);
   assertLocalDistributionAssembly(options.distributionReadScope, options);
-  if(options.distributionEarnings && !assertNativeDistributionEarningAssembly(
+  if(options.distributionEarnings && !options.localFinancialSandbox && !assertNativeDistributionEarningAssembly(
     options.distributionEarnings, options.distributionScope, options.joinpayCollection?.admission,
   )){
     if(!options.localControlledPayments||!options.distributionScope)throw new ConfigurationError('Distribution earnings require explicit local payment and distribution capabilities');
@@ -1338,7 +1346,7 @@ export async function mountAuthHandlers(
   const paymentReadOptions = channelPaymentReadOptions(collection?.routes, Boolean(collection?.notifications
     && collection.notifications.admission === collection.routes?.initial?.admission
     && collection.notifications.admission === collection.routes?.execution?.formal?.admission));
-  if (options.settlementRecordingEnabled === true && !options.joinpayCollection?.admission) {
+  if (options.settlementRecordingEnabled === true && !options.joinpayCollection?.admission && !options.localFinancialSandbox) {
     throw new ConfigurationError("Formal settlement recording requires the bound collection resource admission");
   }
   const settlementRecordingEnabled = options.settlementRecordingEnabled === true || (options.testOperationsEnabled === true
@@ -1346,6 +1354,7 @@ export async function mountAuthHandlers(
   const orderOptions: OrderRuntimeOptions = {
     ...securityOptions,
     channelPaymentReadOptions: paymentReadOptions,
+    localFinancialSandbox: options.localFinancialSandbox?.sandbox,
     distributionEarnings: options.distributionEarnings,
     orderHoldSeconds,
     legacyDutyFinalizationReader: readLegacyDutyFinalization,
@@ -1364,7 +1373,9 @@ export async function mountAuthHandlers(
   // generic BFF fallbacks, which otherwise turn unknown credit paths into 404.
   mountCreditGuaranteeRoutes(app, { ...securityOptions, listingCursorKey: options.listingCursorKey }, options.creditGuaranteeEnabled === true);
   // 退款路径先于通用Admin BFF挂载：只接管/refunds，其余请求仍交给BFF。
-  mountAdminNativeRefunds(app, securityOptions, { pool: options.pool, ...(options.joinpayRefund ? { refund: options.joinpayRefund } : {}) });
+  mountAdminNativeRefunds(app, securityOptions, { pool: options.pool, ...(options.localFinancialSandbox
+    ? { refund: { localSandbox: options.localFinancialSandbox.refund } }
+    : options.joinpayRefund ? { refund: options.joinpayRefund } : {}) });
   // QUERY-only仅显式装配可用，提现仍须finance.withdrawal.query；状态不把默认空生命周期当成已装配。
   { const queryCollection = collection?.routes?.execution?.formal && collection.notifications?.admission === collection.routes.execution.formal.admission ? collection.routes.execution : undefined;
     mountAdminJoinpayQuery(app, securityOptions, { ...(options.joinpayRefund ? { refund: options.joinpayRefund } : {}), ...(queryCollection ? { collection: queryCollection } : {}), ...(options.joinpayWithdrawal?.execution ? { payout: options.joinpayWithdrawal.execution } : {}),
@@ -1414,6 +1425,7 @@ export async function mountAuthHandlers(
       ? createTradePublicActivityReaders({ pool: options.pool, gate: supplyGateReader, bindings: options.publicTradeActivityBindings })
       : undefined,
   });
+  if (options.localFinancialSandbox) mountLocalFinancialSandboxRoutes(app, { ...securityOptions, secureCookies: options.secureCookies }, options.localFinancialSandbox.checkout);
   if (options.localControlledPayments) mountLocalControlledPayments(app, securityOptions, options.localControlledPayments);
   else mountChannelPayments(app, securityOptions, collection?.routes, paymentReadOptions);
   if (collection?.notifications) mountJoinpayCollectionNotifications(app, { pool: options.pool, source: collection.notifications });

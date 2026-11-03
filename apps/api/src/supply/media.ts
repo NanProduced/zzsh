@@ -434,6 +434,8 @@ type MediaAssetRow = {
   reviewState: string;
   technicalState: string;
   reviewReason: string | null;
+  avatarPolicyRevision?: string | null;
+  reviewedByAdminId?: string | null;
   revision: string;
   createdAt: Date;
 };
@@ -447,7 +449,7 @@ export async function loadMediaAsset(
     `SELECT "id", "game_id" AS "gameId", "account_id" AS "accountId", "purpose", "ownership_kind" AS "ownershipKind", "owner_user_id" AS "ownerUserId",
             "uploaded_by_realm" AS "uploadedByRealm", "uploaded_by_user_id" AS "uploadedByUserId", "uploaded_by_admin_id" AS "uploadedByAdminId",
             "storage_key" AS "storageKey", "public_storage_key" AS "publicStorageKey", "content_hash" AS "contentHash", "mime", "byte_size"::text AS "byteSize",
-            "width", "height", "access_class" AS "accessClass", "review_state" AS "reviewState", "technical_state" AS "technicalState", "review_reason" AS "reviewReason", "revision"::text AS "revision", "created_at" AS "createdAt"
+            "width", "height", "access_class" AS "accessClass", "review_state" AS "reviewState", "technical_state" AS "technicalState", "review_reason" AS "reviewReason", "avatar_policy_revision"::text AS "avatarPolicyRevision", "reviewed_by_admin_id" AS "reviewedByAdminId", "revision"::text AS "revision", "created_at" AS "createdAt"
        FROM "zzsh_supply"."media_asset" WHERE "id" = $1${forUpdate ? " FOR UPDATE" : ""}`,
     [assetId],
   );

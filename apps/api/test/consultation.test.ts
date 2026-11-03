@@ -301,7 +301,7 @@ function consultationReadFixture() {
       return { rows: [{ accountId: deriveYunxinAccountId(key), identityMarker: buildYunxinIdentityMarker(key), status: "READY" }] };
     }
     if (sql.includes('FROM "zzsh_iam"."im_consultation" c') && sql.includes('ORDER BY CASE WHEN c."assigned_admin_id" = $2')) {
-      const row = state.row;
+      const row = { ...state.row, userImage: state.image };
       const visible = row.appId === values[0] && row.state !== "CLOSED"
         && (row.assignedAdminId === values[1] || (!row.assignedAdminId && Boolean(values[2])));
       return { rows: visible ? [row] : [] };
@@ -309,7 +309,7 @@ function consultationReadFixture() {
     if (sql.includes('FROM "zzsh_iam"."im_consultation" c')) {
       assert.match(sql, /c\."id" = \$2/);
       assert.doesNotMatch(sql, /c\."kind" = 'COMPLAINT'/);
-      const row = state.row;
+      const row = { ...state.row, userImage: state.image };
       const own = row.assignedAdminId === values[2];
       const unassigned = !row.assignedAdminId && Boolean(values[3]);
       return { rows: row.appId === values[0] && row.id === values[1] && row.state !== "CLOSED" && (own || unassigned) ? [row] : [] };
@@ -325,7 +325,6 @@ function consultationReadFixture() {
       assert.deepEqual(values[0], [...new Set(values[0] as string[])]);
       return { rows: [{ id: "admin_a", name: "客服甲" }, { id: "admin_b", name: "客服乙" }] };
     }
-    if (sql.includes('SELECT "image" FROM "zzsh_auth_user"."user"')) return { rows: [{ image: state.image }] };
     if (sql.includes('FROM "zzsh_auth_user"."user"')) return { rows: [{ id: "user_a", name: "用户甲" }] };
     if (sql.includes('FROM "zzsh_order"."rental_order" o')) {
       assert.equal(values[2],state.row.userId);
@@ -371,6 +370,7 @@ test("context distinguishes absent and untyped subject without granting director
   f.state.permissions = ["im.support.read"];
   const value = await readConsultationContext(f.options, f.actor, "cons_a");
   assert.deepEqual(value.user, { status: "available", publicId: "user_a", displayName: "用户甲", avatar: f.state.image });
+  assert.ok(!f.calls.some(({ sql }) => sql.includes('SELECT "image" FROM')), "avatar reuses the authorized consultation join");
   assert.deepEqual(value.subject, { status: "absent" });
   assert.equal(value.membership.status, "unavailable");
   assert.doesNotMatch(JSON.stringify(value), /phone|email|identityStatus|accountId|details|普通会员/);

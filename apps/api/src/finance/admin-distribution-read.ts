@@ -7,7 +7,7 @@ import { requireAdminAccess } from '../supply/supply-routes';
 import { invalid, notFound } from '../supply/supply-util';
 import { SecurityApiError } from '../auth/security-core';
 import { canonicalize } from '../supply/content-hash';
-import { earningProjection, readAdminEarningCalculations, readAdminEarningEventActions, type AdminEarningCalculation } from './distribution-earning-read';
+import { legacyRentalDistributionPredicate, earningProjection, readAdminEarningCalculations, readAdminEarningEventActions, type AdminEarningCalculation } from './distribution-earning-read';
 import { readAdminLegacyDutyFinances } from './legacy-duty-finance-store';
 
 type Actor = AdminContext;
@@ -53,7 +53,7 @@ export async function readAdminDistributionOrder(c:PoolClient,actor:Actor,input:
    o.snapshot->>'amount' AS source_amount,${utc('o.source_event_at')} AS occurred_at,NULL::text AS due_at,'HISTORICAL_STATUS_ONLY'::text AS funds_disposition,NULL::text AS recovery_required_cents,o.included_in_opening AS included,'0'::text AS version,o.snapshot->>'orderId' AS order_id,
    o.user_id AS beneficiary_user_id,u.name AS beneficiary_name
    FROM zzsh_order.personal_finance_observation o LEFT JOIN zzsh_auth_user."user" u ON u.id=o.user_id
-   WHERE o.source_kind='HISTORICAL_DISTRIBUTION' AND o.source_entity='la_distribution_order' AND o.source_system=$1 AND o.snapshot->>'orderId'=$2
+   WHERE (${legacyRentalDistributionPredicate('o')}) AND o.source_system=$1 AND o.snapshot->>'orderId'=$2
    ORDER BY o.source_event_at DESC,o.id COLLATE "C" DESC LIMIT 101`,[order.source_system,String(order.legacy_id)])).rows
   :(await c.query(`SELECT 'native:'||e.id AS id,'NATIVE'::text AS origin,e.id AS earning_id,e.order_id,e.beneficiary_user_id,u.name AS beneficiary_name,e.beneficiary_role AS role,e.state,e.amount_cents::text AS source_amount,
    ${utc('e.created_at')} AS occurred_at,${utc('e.due_at')} AS due_at,e.funds_disposition,e.recovery_required_cents::text,e.version::text

@@ -37,6 +37,7 @@
 | GF-MEMBER-002 / GF-CREDIT-007 | 旧四档人工资格不自动变新成长等级或礼遇；初始信用100是新政策，不从旧等级/余额折算。 | 新等级按成长，`zzsh_iam.membership_entitlement`独立审批/期限/范围；`zzsh_credit.user_credit_state/credit_event`沿既有初始化runner，保留已有档案。会员/信用/保证金各自事实独立，见[信用与保证金](credit-guarantee.md)。 |
 | GF-HISTORY-008/OPENING-009 | `la_log_earnings.change_amount/left_amount/action`分别为变动元额/历史余额/方向；提取`amount/leftAmount`是别名。`la_user.earnings`受审映可用期初，`money`不相加。 | `zzsh_order.personal_finance_observation`与coverage保观察；`finance_opening_basis/finance_economic_root/finance_covered_event/finance_observation_admission`核期初覆盖；实际账务走event/ledger。Web钱包/收益、Admin财务读取overlay，历史观察不再次入账。 |
 | GF-WITHDRAW-010/DISTRIBUTION-011 | `la_withdraw_apply`金额/费用/旧状态/时间保原；`la_distribution`资格、邀请关系与6级比例保原文本，旧FLOAT不经parseFloat近似。 | 提现仅历史观察、不再扣款，渠道UNKNOWN；新分销政策/资格/关系与历史佣金分别准入。Web本人条款/收益/提现与Admin分销/财务不把旧状态当新渠道成功，用户不获全局比例表。 |
+| INV-FACT-012 v2 | `la_user.code`取真实原值，全量含注销/冻结主体做 ASCII 大写占用核验；`inviter_id`与`first_leader`分别为注册邀请人与直属分销上级，原0、缺源和非零父分开。`la_distribution`原资格、冻结、grade及用户来源摘要独立留存；不从SN、旧等级或展示页反推邀请码/新费率。 | `legacy-invitation-facts.v2`通过现有参与者、邀请码和一级关系表及不可变审计承接事实，不要求先发布经营政策。无政策时level/policy均null，资格仅UNKNOWN或有明确原否定依据的INELIGIBLE；显式绑定正确已发布v2时才按原资格flags合同承接，不创建政策、不重算佣金/钱包。缺资格或关系闭包保未知，二/三级来源只存证不恢复多层计佣。 |
 
 后补皮肤持有采用规则 `SUP-SKIN-020`：服务端受信上下文绑定封存四列、来源截点、来源与目标摘要、映射规则及目录版本，写入前重算完整集合，并核对实际账号和观察版本。附加事实保存在 `zzsh_supply.legacy_skin_holding`，不修改不可变观察的子表；合法空集合覆盖旧关联，缺列、歧义或未核词条保持未知。同观察版本存在附加持有事实时，公开详情、ANY/ALL筛选与新草稿继承共同采用该完整集合（含合法空）；不存在时才回退原listing_skin，原生版本仍读取自身关系。新草稿后续按正常声明合同编辑；目录配图仍不证明持有。数据库约束和运行权限须随对应迁移部署，不能只更新读取代码。
 
@@ -49,6 +50,8 @@
 ## 旧用户主体、编号与联系方式
 
 旧用户业务UID与认证联系方式分别承接。V2转换在原次导入中持久化真实`la_user.sn`到唯一`username/displayUsername`，同时以原来源tuple和整行摘要审计；旧公开编号不能按内部`la_user.id`猜号，也不靠本机源文件提供在线认证。已有V1数据通过受审、同来源、明确当前字段CAS的追加阶段绑定编号，不覆盖原迁入回执、身份状态或凭据。
+
+旧邀请事实使用独立、显式版本合同，不改`legacy-invitations.v1`原键或已执行回执。每包新增主体与既导父锚点合计最多5000，父锚点必须核原导入key/body及不可变来源，目标主体/代码/关系冲突拒绝覆盖。原用户tuple/digest、真实code与原资格行保存在不可变审计正文，导入时间不充当历史绑定时间。首次导入不因尚未承接的子关系查询为空而补完整0；全部原一级关系集合经计数与set digest对账后，另用同来源的计数闭合阶段更新invitees覆盖，缺件仍UNKNOWN。执行、只读目标计划及原键恢复分别校验准确本地目标/表owner/当前Boss/时窗；没有原回执返回UNKNOWN，不换键掩盖未知提交。源码合同支持不代表实际批次已写入或同版页面已验收。
 
 手机号归属按完整来源组内未注销主体判断，FROZEN仍占用归属：只有一个未注销主体时可绑定其真实号码；已注销号码只保留来源联系证据；多个未注销主体不任选一人。空号码或冲突号码不阻断真实主体、账号与旧单关系的保全，但不能伪绑定认证。已有新核验号码、已变化字段或外来编号占用必须拒绝自动更正。缺少旧密码者进入合法恢复，不能捏造密码；注销和冻结不因迁移重新激活。财务历史与原期初另按正式来源证明准入，不因补主体而重放支付、合并钱包或补造余额。
 

@@ -11,6 +11,7 @@ function fixture(targetRealm: "user" | "admin" = "user") {
   const real = createRequire(resolve(__dirname, "../src/profile/profile-avatar-routes.js"));
   const supply = real("../supply/supply-routes"), util = real("../supply/supply-util");
   const receipts = new Map<string, any>();
+  let policy={requiresReview:true,revision:"1"};
   let profile: any = null, image: string | null = null;
   const queries: Array<{sql:string; values:any[]}> = [];
   let reads = 0;
@@ -20,6 +21,9 @@ function fixture(targetRealm: "user" | "admin" = "user") {
   const client:any = {
     async query(sql:string, values:any[] = []) {
       queries.push({sql,values});
+      if(sql.includes("to_regclass('zzsh_supply.profile_avatar_policy')"))return {rows:[{available:true}]};
+      if(sql.includes("FROM zzsh_supply.profile_avatar_policy"))return {rows:[{...policy}]};
+      if(sql.startsWith("UPDATE zzsh_supply.profile_avatar_policy")){policy={requiresReview:values[0],revision:String(BigInt(policy.revision)+1n)};return {rows:[{...policy}]};}
       if (/^(BEGIN|COMMIT|ROLLBACK)$/.test(sql) || sql.includes("pg_advisory_xact_lock") || sql.includes("set_config") || sql.startsWith('INSERT INTO "zzsh_iam"."audit_event"')) return {rows:[],rowCount:0};
       if (sql.includes('FROM "zzsh_supply"."idempotency_record"')) { const found=receipts.get(JSON.stringify(values));return {rows:found?[found]:[],rowCount:found?1:0}; }
       if (sql.startsWith('INSERT INTO "zzsh_supply"."idempotency_record"')) {receipts.set(JSON.stringify(values.slice(0,2)),{requestFingerprint:values[2],responseStatus:values[3],responseBody:JSON.parse(values[4]),publishRequired:values[5]});return {rows:[],rowCount:1};}
@@ -35,7 +39,7 @@ function fixture(targetRealm: "user" | "admin" = "user") {
     }, release() {},
   };
   const pool:any={connect:async()=>client,query:client.query.bind(client)};
-  const access={status:"ACTIVE",isBoss:true,permissions:new Set(["profile.avatar.review"])};
+  const access={status:"ACTIVE",isBoss:true,permissions:new Set(["profile.avatar.review","profile.avatar.policy.manage"])};
   const identity={readAdminContext:async()=>({userId:"admin_1",sessionId:"admin_session"}),assertAdminContextInTransaction:async()=>undefined};
   const exports:Record<string,any>={};
   const load=(id:string)=>id==="../auth/auth-security"?identity:id==="../auth/user-identity"?{readUserContext:async()=>({userId:"user_1",sessionId:"user_session"}),assertUserContextInTransaction:async()=>undefined}:id==="../supply/supply-routes"?{...supply,requireAdminAccess:async()=>access}:real(id);
@@ -49,7 +53,7 @@ function fixture(targetRealm: "user" | "admin" = "user") {
     return {status:response.statusCode,body:JSON.parse(JSON.stringify(response.body)),url:request.url};
   }
   const seed=(operation:string,resource:string|null,body:unknown,result:unknown,key:string)=>{const scope=JSON.stringify(["admin","admin_1",operation,resource]);receipts.set(JSON.stringify([scope,key]),{requestFingerprint:util.fingerprintRequest(operation,resource??undefined,body),responseStatus:200,responseBody:result,publishRequired:false});};
-  return {call,queries,receipts,seed,get profile(){return profile;},get image(){return image;},get reads(){return reads;}};
+  return {access,call,queries,receipts,seed,get profile(){return profile;},get image(){return image;},get reads(){return reads;}};
 }
 
 test("actual user/default route accepts revision zero and reads the same original receipt",async()=>{
@@ -101,4 +105,32 @@ test("admin-target review replay locks both admin subjects in sorted order befor
  assert(adminIndex>=0);assert.deepEqual([...f.queries[adminIndex]!.values[0]],["admin_0","admin_1"]);
  const assetIndex=f.queries.findIndex(q=>q.sql.includes('FROM "zzsh_supply"."media_asset"')&&q.sql.includes("FOR UPDATE"));
  assert(assetIndex>adminIndex);assert.equal(f.queries.filter(q=>/^(INSERT|UPDATE|DELETE)/.test(q.sql)).length,0);
+});
+
+
+test("avatar policy update uses original CAS and exact-key recovery without reapplying after policy changes",async()=>{
+ const f=fixture(),body={requiresReview:false,expectedRevision:"1"},key="avatar-policy-original-01";
+ const first=await f.call("review","POST","/api/v1/admin/profile-avatars/policy",body,key);
+ assert.equal(first.status,200);assert.equal(first.body.policy.requiresReview,false);assert.equal(first.body.policy.revision,"2");
+ assert.equal((await f.call("review","POST","/api/v1/admin/profile-avatars/policy",{requiresReview:true,expectedRevision:"2"},"avatar-policy-second-01")).status,200);
+ const replay=await f.call("review","POST","/api/v1/admin/profile-avatars/policy",body,key);assert.equal(replay.body.policy.revision,"2");assert.equal(replay.body.policy.requiresReview,false);
+ const recovered=await f.call("review","GET","/api/v1/admin/profile-avatars/policy/operation-result?requiresReview=false&expectedRevision=1",undefined,key);
+ assert.equal(recovered.status,200);assert.equal(recovered.body.receipt,"RECORDED");assert.equal(recovered.body.result.policy.revision,"2");
+ assert.equal(f.queries.filter(q=>q.sql.startsWith("UPDATE zzsh_supply.profile_avatar_policy")).length,2);
+ assert.equal((await f.call("review","GET","/api/v1/admin/profile-avatars/policy/operation-result?requiresReview=true&expectedRevision=1",undefined,key)).status,409);
+});
+test("avatar reviewer can read policy but cannot change it; delegated policy manager has no review grant",async()=>{
+ const f=fixture();f.access.isBoss=false;f.access.permissions=new Set(["profile.avatar.review"]);
+ assert.equal((await f.call("review","GET","/api/v1/admin/profile-avatars/policy")).body.canManage,false);
+ assert.equal((await f.call("review","POST","/api/v1/admin/profile-avatars/policy",{requiresReview:false,expectedRevision:"1"})).status,403);
+ f.access.permissions=new Set(["profile.avatar.policy.manage"]);
+ assert.equal((await f.call("review","GET","/api/v1/admin/profile-avatars/policy")).body.canManage,true);
+ assert.equal((await f.call("review","GET","/api/v1/admin/profile-avatars")).status,403);
+ assert.equal((await f.call("review","POST","/api/v1/admin/profile-avatars/policy",{requiresReview:false,expectedRevision:"1"},"avatar-policy-delegated-01")).status,200);
+});
+test("avatar policy rejects missing CAS, forged fields and stale revisions before mutation",async()=>{
+ const f=fixture();for(const body of [{requiresReview:false},{requiresReview:false,expectedRevision:"1",approved:true},{requiresReview:false,expectedRevision:"0"}])assert.equal((await f.call("review","POST","/api/v1/admin/profile-avatars/policy",body)).status,400);
+ assert.equal((await f.call("review","POST","/api/v1/admin/profile-avatars/policy",{requiresReview:false,expectedRevision:"9"})).status,409);
+ for(const forged of [{requiresReview:false},{approved:true},{approvalSource:"SYSTEM_POLICY"}])assert.equal((await f.call("user","POST","/api/v1/profile/avatar/upload-intents",{mime:"image/webp",size:32,expectedRevision:"0",...forged})).status,400);
+ assert.equal(f.queries.filter(q=>q.sql.startsWith("UPDATE zzsh_supply.profile_avatar_policy")).length,0);
 });

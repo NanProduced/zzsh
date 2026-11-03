@@ -5,9 +5,19 @@ import {readDistributionPolicyRowInTransaction} from './distribution-policy-stor
 import {readFormalCollectionAdmission,assertFormalInitialAdmission,type FormalCollectionAdmission} from '../order/joinpay-collection-profile';
 import {REGRESSION_DATABASE,REGRESSION_MARKER,REGRESSION_RUNTIME_USER} from '../config/test-resource';
 import {createControlledRegressionResource,assertControlledRegressionResource,type ControlledRegressionBinding,type ControlledRegressionResource} from './controlled-regression-resource';
+import {assertLocalFinancialSandboxResource,assertLocalSandboxOrderAdmission,localFinancialSandboxRegistration,type LocalFinancialSandbox} from './local-financial-sandbox-resource';
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex'),ID=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 export type DistributionOrderScope={resourceSet:string;resourceOid:number;approvalDigest:string;allowedOrderIds:readonly string[]};
 const regressionScopes=new WeakMap<DistributionOrderScope,ControlledRegressionResource>();
+const sandboxScopes=new WeakMap<DistributionOrderScope,LocalFinancialSandbox>();
+export function createSandboxDistributionOrderScope(sandbox:LocalFinancialSandbox):DistributionOrderScope{
+ const proof=localFinancialSandboxRegistration(sandbox),scope=Object.freeze({resourceSet:'registered_daily',resourceOid:proof.registration.resource.resourceOid,approvalDigest:proof.digest,allowedOrderIds:Object.freeze([] as string[])});
+ sandboxScopes.set(scope,sandbox);return scope;
+}
+export function isSandboxDistributionOrderScope(scope:DistributionOrderScope){return sandboxScopes.has(scope);}
+export async function assertSandboxDistributionOrder(c:PoolClient,scope:DistributionOrderScope,orderId:string){
+ const sandbox=sandboxScopes.get(scope);if(!sandbox)throw invalid('Registered distribution scope is not bound');await assertLocalSandboxOrderAdmission(c,sandbox,orderId);
+}
 export function createControlledRegressionDistributionScope(input:{config:AppConfig;binding:ControlledRegressionBinding;approvalDigest:string;allowedOrderIds:readonly string[]}):DistributionOrderScope{
  const resource=createControlledRegressionResource(input.config,input.binding,'DISTRIBUTION');
  if(!/^[a-f0-9]{64}$/.test(input.approvalDigest)||!input.allowedOrderIds.length||input.allowedOrderIds.length>10
@@ -15,10 +25,12 @@ export function createControlledRegressionDistributionScope(input:{config:AppCon
  const scope=Object.freeze({resourceSet:'regression',resourceOid:input.binding.resourceOid,approvalDigest:input.approvalDigest,allowedOrderIds:Object.freeze([...input.allowedOrderIds])});regressionScopes.set(scope,resource);return scope;
 }
 export function distributionOrderScopeIdentity(scope:DistributionOrderScope){
+ if(scope.resourceSet==='registered_daily'){const sandbox=sandboxScopes.get(scope);if(!sandbox)throw invalid('Registered distribution scope is not bound');const resource=localFinancialSandboxRegistration(sandbox).registration.resource;return{name:resource.database,role:resource.runtimeRole,marker:resource.marker};}
  if(scope.resourceSet==='regression'){if(!regressionScopes.has(scope))throw invalid('Controlled distribution scope is not bound');return{name:REGRESSION_DATABASE,role:REGRESSION_RUNTIME_USER,marker:REGRESSION_MARKER};}
  return{name:'zzsh_test_order_'+scope.resourceSet,role:'zzsh_order_'+scope.resourceSet+'_r',marker:'zzsh:order-reservation-test:v1'};
 }
 export async function assertDistributionOrderScopeResource(c:PoolClient,scope:DistributionOrderScope){
+ const sandbox=sandboxScopes.get(scope);if(sandbox){await assertLocalFinancialSandboxResource(c,sandbox);return;}
  const identity=distributionOrderScopeIdentity(scope),regression=regressionScopes.get(scope);
  if(regression)await assertControlledRegressionResource(c,regression,'DISTRIBUTION');
  const r=(await c.query("SELECT d.oid,current_database() AS name,current_user AS role,shobj_description(d.oid,'pg_database') AS marker FROM pg_database d WHERE datname=current_database()")).rows[0];
@@ -39,12 +51,16 @@ export function assertNativePaymentDistributionStore(store:unknown,admissionSha2
 }
 function paymentStore(scope:DistributionOrderScope|null,formal?:FormalCollectionAdmission){
  const native=formal?readFormalCollectionAdmission(formal):null;
- if(!native&&(!scope||!/^[a-z][a-z0-9_]{0,20}$/.test(scope.resourceSet)||!Number.isSafeInteger(scope.resourceOid)||scope.resourceOid<=0||!/^[0-9a-f]{64}$/.test(scope.approvalDigest)||!scope.allowedOrderIds.length||scope.allowedOrderIds.some(id=>!ID.test(id))))throw invalid('Exact reviewed order resource and allowlist required');
+ const sandbox=scope?sandboxScopes.get(scope):undefined;
+ if(!native&&(!scope||!/^[a-z][a-z0-9_]{0,20}$/.test(scope.resourceSet)||!Number.isSafeInteger(scope.resourceOid)||scope.resourceOid<=0||!/^[0-9a-f]{64}$/.test(scope.approvalDigest)||(!sandbox&&!scope.allowedOrderIds.length)||scope.allowedOrderIds.some(id=>!ID.test(id))))throw invalid('Exact reviewed order resource and allowlist required');
  const localIdentity=scope?distributionOrderScopeIdentity(scope):null;
  const allowed=new Set(scope?.allowedOrderIds??[]),name=native?.database??localIdentity!.name,role=native?.runtimeUser??localIdentity!.role,prepared=new WeakMap<object,{client:PoolClient;transactionId:string;input:Omit<Parameters<typeof freezePaymentDistributionBasis>[0],'confirmationId'|'acceptedAt'|'paymentDigest'>}>();
  async function resource(c:PoolClient){if(scope)return assertDistributionOrderScopeResource(c,scope);const r=(await c.query("SELECT d.oid,current_database() AS name,current_user AS role,shobj_description(d.oid,'pg_database') AS marker FROM pg_database d WHERE datname=current_database()")).rows[0];if(!r||r.name!==name||r.role!==role)throw conflict('Distribution payment resource differs');}
  async function prepare(c:PoolClient,orderId:string):Promise<Prepared|null>{
-  if(!native&&!allowed.has(orderId))return null;await resource(c);
+  if(!native&&!sandbox&&!allowed.has(orderId))return null;await resource(c);
+  // Admission was created in the request/checkout ISSUE transaction while it owned the order lock.
+  // A new FK write here would invert order KEY SHARE -> invitation graph.
+  if(sandbox)await assertLocalSandboxOrderAdmission(c,sandbox,orderId);
   const complete=(await c.query(`SELECT to_regclass('zzsh_order.distribution_order_admission') IS NOT NULL AND to_regclass('zzsh_order.payment_distribution_basis') IS NOT NULL AND to_regclass('zzsh_order.distribution_policy_head') IS NOT NULL AND to_regclass('zzsh_order.distribution_participant') IS NOT NULL AND to_regclass('zzsh_order.invitation_relation') IS NOT NULL AS complete`)).rows[0]?.complete;if(!complete)return null;
   const admission=native?(await c.query(`SELECT * FROM zzsh_order.distribution_order_admission WHERE order_id=$1 AND mode='NATIVE' AND active AND resource_name=$2 AND resource_oid=(SELECT oid FROM pg_database WHERE datname=current_database()) AND admitted_at<=clock_timestamp()`,[orderId,name])).rows[0]
    :(await c.query(`SELECT * FROM zzsh_order.distribution_order_admission WHERE order_id=$1 AND mode='LOCAL_CONTROLLED' AND active AND resource_oid=$2 AND resource_name=$3 AND resource_marker=$5 AND approval_digest=$4 AND admitted_at<=clock_timestamp() AND expires_at>clock_timestamp()`,[orderId,scope!.resourceOid,name,scope!.approvalDigest,localIdentity!.marker])).rows[0];if(!admission)return null;

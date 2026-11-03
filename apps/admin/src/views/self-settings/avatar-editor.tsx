@@ -19,6 +19,7 @@ function AvatarEditorBody({ adminUserId, disabledReason, onSessionRefresh }: Edi
   const [state, setState] = useState<AdminAvatarState | null>(null);
   const [loading, setLoading] = useState(true), [busy, setBusy] = useState(false);
   const [error, setError] = useState(""), [notice, setNotice] = useState("");
+  const [needsRefresh, setNeedsRefresh] = useState(false);
   const [file, setFile] = useState<File | null>(null), [preview, setPreview] = useState<string | null>(null);
   const [intent, setIntent] = useState<{ intentId: string; uploadToken: string; uploadKey: string } | null>(null);
   const [pendingDefault, setPendingDefault] = useState<PendingAdminAvatar | null>(null), [storageBlocked, setStorageBlocked] = useState(false);
@@ -35,7 +36,7 @@ function AvatarEditorBody({ adminUserId, disabledReason, onSessionRefresh }: Edi
     try {
       const next = await readAdminAvatarState(controller.signal); assertAdminAvatarSubject(next, adminUserId);
       if (!current() || sequence.current !== seq) return;
-      setState(next); if (refreshGlobal) await refreshSession();
+      setState(next); setNeedsRefresh(false); if (refreshGlobal) await refreshSession(); return next;
     } catch (failure) { if (!controller.signal.aborted && current() && sequence.current === seq) setError(messageOf(failure, "头像状态读取失败")); }
     finally { if (current() && sequence.current === seq) setLoading(false); }
   };
@@ -78,7 +79,7 @@ function AvatarEditorBody({ adminUserId, disabledReason, onSessionRefresh }: Edi
     finally { finishWrite(run.id); }
   }
   async function choosePreset(presetId: string) {
-    if (!state || busy || loading || disabledReason || storageBlocked) return;
+    if (!state || busy || loading || disabledReason || storageBlocked || needsRefresh) return;
     const run = beginWrite(); if (!run) return;
     let command: PendingAdminAvatar | null = null;
     try {
@@ -99,13 +100,13 @@ function AvatarEditorBody({ adminUserId, disabledReason, onSessionRefresh }: Edi
     } finally { finishWrite(run.id); }
   }
   function chooseFile(next: File | null) {
-    if (!next || writing.current || disabledReason || pendingDefault || storageBlocked || uploadCommand.current) return;
+    if (!next || writing.current || disabledReason || pendingDefault || storageBlocked || uploadCommand.current || needsRefresh) return;
     setError(''); setNotice('');
     if (!ALLOWED.has(next.type) || next.size <= 0 || next.size > MAX_BYTES) { setError('请选择不超过 10 MiB 的 JPEG、PNG 或 WebP 图片。'); return; }
     setCropSource(next);
   }
   async function submitUpload() {
-    if (!state || !file || busy || disabledReason || pendingDefault || storageBlocked) return;
+    if (!state || !file || busy || disabledReason || pendingDefault || storageBlocked || needsRefresh) return;
     if (!ALLOWED.has(file.type)) { setError("仅支持 JPEG、PNG 或 WebP 图片。"); return; }
     if (file.size <= 0 || file.size > MAX_BYTES) { setError("图片需大于 0 且不超过 10 MiB。"); return; }
     const run = beginWrite(); if (!run) return;
@@ -117,10 +118,16 @@ function AvatarEditorBody({ adminUserId, disabledReason, onSessionRefresh }: Edi
         if (!activeWrite(run.id)) return;
         Object.assign(command, created); setIntent({ ...created, uploadKey: command.uploadKey });
       }
-      await uploadAdminAvatar(command.intentId!, command.uploadToken!, file, command.uploadKey, run.signal);
+      const uploaded = await uploadAdminAvatar(command.intentId!, command.uploadToken!, file, command.uploadKey, run.signal);
       if (!activeWrite(run.id)) return;
       clearFile(); setIntent(null); uploadCommand.current = null;
-      setNotice("已提交审核。审核期间继续显示当前头像。"); await load();
+      const latest = await load();
+      if (!activeWrite(run.id)) return;
+      if (latest?.current.kind === 'CUSTOM' && uploaded?.assetId && latest.current.assetId === uploaded.assetId) {
+        setToast('头像已更新'); setOpen(false); await refreshSession();
+      } else if (!latest) { setNotice('上传已完成，当前状态待读取。'); setNeedsRefresh(true); }
+      else if (uploaded?.avatarSubmission?.disposition === 'PENDING_REVIEW' || latest.pending) setNotice('已提交审核。');
+      else setNotice('上传已处理，已读取当前头像状态。');
     } catch (failure) {
       if (!activeWrite(run.id)) return;
       if (failure instanceof AdminAvatarError && failure.status === 409) {
@@ -132,6 +139,7 @@ function AvatarEditorBody({ adminUserId, disabledReason, onSessionRefresh }: Edi
   }
 
   const review = state?.lastReview;
+  const requiresReview = !(state?.policy?.available === true && state.policy.requiresReview === false);
   return (
     <><Button ref={triggerRef} type="button" size="sm" variant="outline" disabled={Boolean(disabledReason)} onClick={() => { setToast(''); setSelectedPreset(null); setTab(uploadCommand.current ? 'upload' : 'default'); setOpen(true); void load(); }}><Camera className="size-4"/>更换头像</Button>
     <Dialog open={open} onOpenChange={next => { if (!next) closeEditor(); }}><DialogContent size="md" finalFocus={triggerRef} closeLabel="关闭头像设置" className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-[560px]">
@@ -143,6 +151,7 @@ function AvatarEditorBody({ adminUserId, disabledReason, onSessionRefresh }: Edi
       {storageBlocked ? <SettingsNotice tone="danger">原头像操作记录不可读，暂不能再次提交。</SettingsNotice> : null}
       {pendingDefault ? <SettingsNotice tone="warning"><p>上次头像选择结果待确认，请先读取原操作。</p><Button type="button" variant="secondary" disabled={busy || Boolean(disabledReason)} onClick={() => void recoverDefault()}>读取原头像结果</Button></SettingsNotice> : null}
       {notice ? <SettingsNotice tone="success" role="status">{notice}</SettingsNotice> : null}
+      {needsRefresh ? <Button type="button" size="sm" variant="secondary" disabled={busy || loading} onClick={() => void load(true)}>重新读取头像状态</Button> : null}
       {loading && !state ? <p className="text-muted-foreground text-sm" role="status">正在读取头像状态…</p> : null}
 
       {state ? (
@@ -161,7 +170,7 @@ function AvatarEditorBody({ adminUserId, disabledReason, onSessionRefresh }: Edi
           ) : null}
 
           {tab === 'default' ? <><div className="grid justify-items-center py-3"><img className="size-32 rounded-full object-cover" src={state.presets.find(p => p.presetId === selectedPreset)?.url ?? state.current.url} alt="所选头像预览"/></div>
-          <fieldset className="space-y-2" disabled={busy || loading || Boolean(disabledReason) || Boolean(pendingDefault) || storageBlocked || Boolean(uploadCommand.current)}>
+          <fieldset className="space-y-2" disabled={busy || loading || Boolean(disabledReason) || Boolean(pendingDefault) || storageBlocked || Boolean(uploadCommand.current) || needsRefresh}>
             <legend className="sr-only">选择默认头像</legend>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
               {state.presets.map((preset, index) => {
@@ -177,12 +186,12 @@ function AvatarEditorBody({ adminUserId, disabledReason, onSessionRefresh }: Edi
             </div>
           </fieldset>
           {state.pending ? <p className="text-muted-foreground text-xs">改用默认头像后，将以本次选择为准。</p> : null}
-          <div className="flex gap-3 pt-2"><Button type="button" variant="outline" className="flex-1" onClick={closeEditor}>取消</Button><Button type="button" className="flex-1" loading={busy} disabled={busy || loading || storageBlocked || Boolean(disabledReason) || Boolean(pendingDefault) || Boolean(uploadCommand.current) || !selectedPreset || selectedPreset === state.current.presetId && !state.pending} onClick={() => selectedPreset && void choosePreset(selectedPreset)}>使用此头像</Button></div></> : cropSource ? <AvatarCropper file={cropSource} onCancel={() => setCropSource(null)} onConfirm={cropped => { setFile(cropped); setPreview(URL.createObjectURL(cropped)); setCropSource(null); }} /> : <div className="space-y-3 pt-2">
-            {preview ? <div className="grid justify-items-center gap-3 py-2"><img className="size-28 rounded-full object-cover" src={preview} alt="待上传头像预览"/><p className="text-muted-foreground text-xs">审核通过后生效，期间保留原头像。</p></div> : <><Button type="button" variant="outline" aria-label="选择图片" className="h-auto min-h-40 w-full flex-col gap-2 border-dashed py-7" disabled={busy || Boolean(disabledReason) || Boolean(uploadCommand.current)} onClick={() => inputRef.current?.click()} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); if (!writing.current && event.dataTransfer.files.length !== 1) setError('每次请选择一张图片。'); else chooseFile(event.dataTransfer.files[0] ?? null); }}><Upload className="size-7!" aria-hidden/><span>选择图片</span><span className="text-muted-foreground text-xs font-normal">或将图片拖到这里</span></Button><p className="text-muted-foreground text-center text-xs">JPEG、PNG、WebP · 最大 10 MiB</p></>}
+          <div className="flex gap-3 pt-2"><Button type="button" variant="outline" className="flex-1" onClick={closeEditor}>取消</Button><Button type="button" className="flex-1" loading={busy} disabled={busy || loading || storageBlocked || Boolean(disabledReason) || Boolean(pendingDefault) || Boolean(uploadCommand.current) || needsRefresh || !selectedPreset || selectedPreset === state.current.presetId && !state.pending} onClick={() => selectedPreset && void choosePreset(selectedPreset)}>使用此头像</Button></div></> : cropSource ? <AvatarCropper file={cropSource} onCancel={() => setCropSource(null)} onConfirm={cropped => { setFile(cropped); setPreview(URL.createObjectURL(cropped)); setCropSource(null); }} /> : <div className="space-y-3 pt-2">
+            {preview ? <div className="grid justify-items-center gap-3 py-2"><img className="size-28 rounded-full object-cover" src={preview} alt="待上传头像预览"/><p className="text-muted-foreground text-xs">{requiresReview ? '审核通过后生效，期间保留原头像。' : '确认保存后生效。'}</p></div> : <><Button type="button" variant="outline" aria-label="选择图片" className="h-auto min-h-40 w-full flex-col gap-2 border-dashed py-7" disabled={busy || Boolean(disabledReason) || Boolean(uploadCommand.current) || needsRefresh} onClick={() => inputRef.current?.click()} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); if (!writing.current && event.dataTransfer.files.length !== 1) setError('每次请选择一张图片。'); else chooseFile(event.dataTransfer.files[0] ?? null); }}><Upload className="size-7!" aria-hidden/><span>选择图片</span><span className="text-muted-foreground text-xs font-normal">或将图片拖到这里</span></Button><p className="text-muted-foreground text-center text-xs">JPEG、PNG、WebP · 最大 10 MiB</p></>}
             <input ref={inputRef} type="file" accept="image/jpeg,image/png,image/webp" className="sr-only" onChange={(event) => { chooseFile(event.target.files?.[0] ?? null); event.target.value = ""; }} />
             <div className="flex flex-wrap gap-2">
-              {file ? <Button type="button" size="sm" variant="secondary" onClick={() => inputRef.current?.click()} disabled={busy || Boolean(disabledReason) || Boolean(uploadCommand.current)}>重新选择</Button> : null}
-              {file ? <Button type="button" size="sm" onClick={() => void submitUpload()} disabled={busy || Boolean(disabledReason)}>{busy ? "上传中…" : intent ? "重试上传" : "上传并提交审核"}</Button> : null}
+              {file ? <Button type="button" size="sm" variant="secondary" onClick={() => inputRef.current?.click()} disabled={busy || Boolean(disabledReason) || Boolean(uploadCommand.current) || needsRefresh}>重新选择</Button> : null}
+              {file ? <Button type="button" size="sm" onClick={() => void submitUpload()} disabled={busy || Boolean(disabledReason)}>{busy ? "上传中…" : intent ? "重试上传" : requiresReview ? "上传并提交审核" : '保存头像'}</Button> : null}
               <Button type="button" size="sm" variant="ghost" onClick={closeEditor}>取消</Button>
             </div>
           </div>}

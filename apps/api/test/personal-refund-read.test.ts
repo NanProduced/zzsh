@@ -3,6 +3,8 @@ import { test } from "node:test";
 import type { PoolClient } from "pg";
 import { SecurityApiError } from "../src/auth/security-core";
 import { readPersonalNativeRefunds } from "../src/finance/personal-refund-read";
+import {sandboxFixture,sandboxClient} from './local-financial-sandbox-fixture';
+import type {LocalFinancialSandbox} from '../src/finance/local-financial-sandbox-resource';
 
 // SYNTHETIC_READER_COMPONENT: real projection and real auth/session checks; no socket, database, channel or key.
 const USER = "user_renter_01";
@@ -30,10 +32,13 @@ type State = {
   abnormalIntentRows?: Record<string, unknown>[];
   liabilityRows?: Record<string, unknown>[];
   ledgerRows?: Record<string, unknown>[];
+  localSandbox?:LocalFinancialSandbox;
+  localComplete?:boolean;
 };
 
 function fake(state: State = {}) {
   const trace: Query[] = [];
+  const sandbox=state.localSandbox?sandboxClient(state.localSandbox):undefined;
   const query = async (sql: string, values: unknown[] = []): Promise<Result> => {
     trace.push({ sql, values });
     if (sql.startsWith('SELECT "suspended"')) return { rows: [{ suspended: state.suspended === true }], rowCount: 1 };
@@ -52,6 +57,8 @@ function fake(state: State = {}) {
     if (sql.startsWith("SELECT i.id,i.posting_id,i.order_id")) return { rows: state.intentRows ?? [] };
     if (sql.startsWith("SELECT e.id AS event_id,e.kind AS event_kind")) return { rows: state.liabilityRows ?? [] };
     if (sql.startsWith("SELECT e.id AS event_id")) return { rows: state.ledgerRows ?? [] };
+    if(sql.startsWith('SELECT i.id,zzsh_order.local_controlled_refund_terminal_complete'))return{rows:state.localComplete?[{id:INTENT_ID,complete:true}]:[]};
+    if(sandbox)return sandbox.query(sql,values);
     throw new Error("Unexpected SQL: " + sql);
   };
   return { trace, client: { query } as unknown as PoolClient };
@@ -153,6 +160,20 @@ test("本人正常读取：全部分摊、精确金额、本地记账与渠道�
   const all = trace.map(entry => entry.sql).join("\n");
   for (const forbidden of ["INSERT", "UPDATE ", "DELETE", "FOR UPDATE", "raw_body", "profile_canonical", "key_version",
     "pg_advisory", "BEGIN", "COMMIT", "legacy_order"]) assert(!all.includes(forbidden), forbidden);
+});
+
+test('explicit registered local close is known local accounting only; an unbranded/unfinished CONTROLLED terminal remains CONFLICT',async()=>{
+ const row=consumed({payment_source:'CONTROLLED',evidence_level:'CONTROLLED_TEST',latest_source:'CONTROLLED',latest_event:'UNKNOWN',latest_evidence_level:null,
+  evidence_terminal:null,evidence_trx_no:null,evidence_completed_at:null,terminal_evidence_level:null});
+ const state={intentRows:[row],ledgerRows:[ledger('10000',{root_source_kind:'LOCAL_CONTROLLED_RENTAL_REFUND'})]};
+ assert.equal((await read(state).result).outcome,'CONFLICT');
+ const sandbox=sandboxFixture(),f=fake({...state,localSandbox:sandbox,localComplete:true});
+ const found=await readPersonalNativeRefunds(f.client,{userId:USER,sessionId:'session_01'},{orderId:ORDER},sandbox);
+ assert.equal(found.outcome,'FULLY_CONSUMED');assert.equal(found.intents[0]?.source,'LOCAL_CONTROLLED');assert.equal(found.intents[0]?.savedChannelEvidence,null);
+ assert.equal(found.localFundsEffect.writtenOffCents,'10000');assert.equal(found.actualChannelRefund.amountCents,null);assert.equal(found.actualChannelRefund.bankArrival,'UNKNOWN');
+ const broken=fake({...state,localSandbox:sandbox,localComplete:false});
+ assert.equal((await readPersonalNativeRefunds(broken.client,{userId:USER,sessionId:'session_01'},{orderId:ORDER},sandbox)).outcome,'CONFLICT');
+ assert(!f.trace.some(call=>/^(INSERT|UPDATE|DELETE)/.test(call.sql)||call.sql.includes('FOR UPDATE')));
 });
 
 test("跨租户订单与其它租户意图都不暴露：404 / CONFLICT 且不含他人金额", async () => {

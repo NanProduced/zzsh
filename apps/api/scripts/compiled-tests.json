@@ -289,5 +289,15 @@
   "dist/test/admin-distribution-dashboard-routes.test.js",
   "dist/test/admin-dashboard.test.js",
   "dist/test/admin-domain-summary.test.js",
-  "dist/test/admin-domain-summary-routes.test.js"
+  "dist/test/admin-domain-summary-routes.test.js",
+  "dist/test/legacy-invitation-facts.test.js",
+  "dist/test/local-financial-sandbox-resource.test.js",
+  "dist/test/local-financial-sandbox-routes.test.js",
+  "dist/test/local-sandbox-checkout.test.js",
+  "dist/test/local-sandbox-refund.test.js",
+  "dist/test/local-sandbox-target-adoption.test.js",
+  "dist/test/membership-growth-read-admission.test.js",
+  "dist/test/avatar-policy.test.js",
+  "dist/test/avatar-upload-policy-replay.test.js",
+  "dist/test/profile-avatar-policy-privileges.test.js"
 ]

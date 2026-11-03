@@ -2,6 +2,7 @@ import type { PoolClient } from "pg";
 import { assertUserContextInTransaction, type UserContext } from "../auth/user-identity";
 import { SecurityApiError } from "../auth/security-core";
 import { invalid, notFound } from "../supply/supply-util";
+import {assertLocalFinancialSandboxResource,localFinancialSandboxRegistration,type LocalFinancialSandbox} from './local-financial-sandbox-resource';
 
 export const PERSONAL_REFUND_READ_VERSION = "personal-native-refunds.v1";
 const INTENT_LIMIT = 50;
@@ -435,6 +436,7 @@ type IntentDraft = {
   reasons: string[];
   writeOff: PersonalRefundIntent["localAccounting"]["writeOff"];
   release: PersonalRefundIntent["localAccounting"]["release"];
+  localRegisteredTerminal:boolean;
 };
 
 const FIRST_SUBMIT_REASONS = ["ORIGINAL_ORDER_NO_AMBIGUOUS", "ABNORMAL_BASIS_REVIEW"] as const;
@@ -468,7 +470,7 @@ function firstSubmitOf(raw: Row, state: PersonalRefundIntentState, reasons: Set<
 
 function parseIntentRow(raw: Row, ctx: { actorId: string; orderId: string; basis: PersonalRefundBasis;
   expectedPostingId: string | null; responsibilityCents: string | null; responsibilityDigest?: string | null; asOf: string;
-  conflict: (reason: string) => void; onForeign: () => void }): IntentDraft | null {
+  conflict: (reason: string) => void; onForeign: () => void;localRegisteredTerminal?:boolean }): IntentDraft | null {
   const { conflict, basis, expectedPostingId, responsibilityCents } = ctx;
   const reasons = new Set<string>();
   const intentId = typeof raw.id === "string" && ID.test(raw.id) ? raw.id : null;
@@ -545,11 +547,15 @@ function parseIntentRow(raw: Row, ctx: { actorId: string; orderId: string; basis
 
   let savedChannelEvidence: PersonalRefundIntent["savedChannelEvidence"] = null;
   const terminalState = state === "SUCCEEDED" || state === "FAILED";
+  const localRegisteredTerminal=source==='LOCAL_CONTROLLED'&&ctx.localRegisteredTerminal===true&&state==='SUCCEEDED'&&disposition==='CONSUMED';
   if (terminalState) {
     if (state === "SUCCEEDED" && disposition !== "CONSUMED") { conflict("SUCCEEDED_WITHOUT_CONSUMED_BUDGET"); reasons.add("SUCCEEDED_WITHOUT_CONSUMED_BUDGET"); }
     if (state === "FAILED" && disposition !== "RELEASED") { conflict("FAILED_WITHOUT_RELEASED_BUDGET"); reasons.add("FAILED_WITHOUT_RELEASED_BUDGET"); }
     if (terminalEvidenceId === null || terminalEvidenceId === undefined) {
       conflict("TERMINAL_EVIDENCE_MISSING"); reasons.add("TERMINAL_EVIDENCE_MISSING");
+    } else if(localRegisteredTerminal){
+      // A proved local accounting close is never presented as saved evidence from a real channel.
+      if(!completedAt||!intentTrxNo){conflict('LOCAL_TERMINAL_INCOMPLETE');reasons.add('LOCAL_TERMINAL_INCOMPLETE');}
     } else if (source !== "JOINPAY_FORMAL") {
       conflict("TERMINAL_EVIDENCE_OUTSIDE_JOINPAY"); reasons.add("TERMINAL_EVIDENCE_OUTSIDE_JOINPAY");
     } else if (state === "SUCCEEDED" && evidenceTerminal !== "SUCCEEDED"
@@ -576,7 +582,7 @@ function parseIntentRow(raw: Row, ctx: { actorId: string; orderId: string; basis
       conflict("BUDGET_TERMINAL_WITHOUT_TERMINAL_STATE"); reasons.add("BUDGET_TERMINAL_WITHOUT_TERMINAL_STATE");
     }
   }
-  if (source === "LOCAL_CONTROLLED" && (requiresReview || terminalEvidenceId !== null && terminalEvidenceId !== undefined)) {
+  if (source === "LOCAL_CONTROLLED" && (requiresReview || terminalEvidenceId !== null && terminalEvidenceId !== undefined&&!localRegisteredTerminal)) {
     conflict("CONTROLLED_INTENT_SHAPE_CONFLICT"); reasons.add("CONTROLLED_INTENT_SHAPE_CONFLICT");
   }
 
@@ -603,7 +609,7 @@ function parseIntentRow(raw: Row, ctx: { actorId: string; orderId: string; basis
     merchantIdentityId: typeof raw.merchant_identity_id === "string" ? raw.merchant_identity_id : null,
     originalPaymentTrxNo: typeof raw.original_payment_trx_no === "string" ? raw.original_payment_trx_no : null,
     originalPaymentOrderNo: typeof raw.original_payment_order_no === "string" ? raw.original_payment_order_no : null,
-    reasons: [...reasons], writeOff: null, release };
+    reasons: [...reasons], writeOff: null, release,localRegisteredTerminal };
 }
 
 function emptyProjection(order: PersonalRefundReadProjection["order"], asOf: string, status: "AVAILABLE" | "NOT_APPLICABLE",
@@ -819,7 +825,7 @@ async function applyWriteOffs(client: PoolClient, drafts: IntentDraft[], actorId
     const line2Credit = abnormal ? row?.unallocated_credit : row?.clearing_credit;
     const line2Lines = abnormal ? row?.unallocated_lines : row?.clearing_lines;
     const bindingValid = row && row.economic_root_id === draft.terminalRootId && row.root_id === draft.terminalRootId
-      && row.root_source_kind === "NATIVE_RENTAL_REFUND" && row.root_source_id === draft.intent.intentId && row.root_subject_user_id === actorId;
+      && row.root_source_kind === (draft.localRegisteredTerminal?'LOCAL_CONTROLLED_RENTAL_REFUND':"NATIVE_RENTAL_REFUND") && row.root_source_id === draft.intent.intentId && row.root_subject_user_id === actorId;
     const valid = row && bindingValid && row.subject_user_id === actorId
       && draft.amountCents !== null
       && row.payable_debit === draft.amountCents && row.payable_credit === "0" && row.payable_lines === "1"
@@ -970,7 +976,7 @@ function mergeAbnormalProjection(base: PersonalRefundReadProjection, abnormal: A
 
 /** 只读本人原生订单的本地退款投影；不重验渠道原件、不读商户钥、不执行退款或资金动作。 */
 export async function readPersonalNativeRefunds(client: PoolClient, actor: UserContext,
-  input: { orderId: unknown }): Promise<PersonalRefundReadProjection> {
+  input: { orderId: unknown },sandbox?:LocalFinancialSandbox): Promise<PersonalRefundReadProjection> {
   if (!input || typeof input.orderId !== "string" || !ORDER_ID.test(input.orderId)) throw invalid("Invalid order identifier");
   await assertUserContextInTransaction(client, actor, "READ");
   const { asOf } = await preflight(client);
@@ -1031,6 +1037,15 @@ export async function readPersonalNativeRefunds(client: PoolClient, actor: UserC
     ? (dueMs <= asOfMs ? "DUE" : "NOT_DUE") : "UNKNOWN";
 
   const rawRows = (await client.query<Row>(INTENT_SQL, [postingId])).rows;
+  const localTerminals=new Set<string>();
+  if(sandbox){
+    await assertLocalFinancialSandboxResource(client,sandbox,'READ_ORIGINAL');
+    const reference=localFinancialSandboxRegistration(sandbox).registration.reference;
+    const local=(await client.query<{id:string;complete:boolean}>(`SELECT i.id,zzsh_order.local_controlled_refund_terminal_complete(i.id) AS complete
+      FROM zzsh_order.channel_refund_intent i WHERE i.order_id=$1 AND i.renter_user_id=$2 AND i.sandbox_registration_ref=$3
+       AND i.payment_source='CONTROLLED' AND i.evidence_level='CONTROLLED_TEST' AND i.state='SUCCEEDED' LIMIT 51`,[orderId,actor.userId,reference])).rows;
+    for(const row of local)if(row.complete===true)localTerminals.add(row.id);
+  }
   const truncated = rawRows.length > INTENT_LIMIT;
   if (truncated) aggregateReasons.add("INTENT_LIST_TRUNCATED");
   const drafts: IntentDraft[] = [];
@@ -1038,7 +1053,7 @@ export async function readPersonalNativeRefunds(client: PoolClient, actor: UserC
 
   for (const raw of rawRows.slice(0, INTENT_LIMIT)) {
     const draft = parseIntentRow(raw, { actorId: actor.userId, orderId, basis: "POSTING", expectedPostingId: postingId,
-      responsibilityCents: null, asOf, conflict, onForeign: () => { foreignIntentCount += 1; } });
+      responsibilityCents: null, asOf, conflict, onForeign: () => { foreignIntentCount += 1; },localRegisteredTerminal:localTerminals.has(String(raw.id)) });
     if (draft) drafts.push(draft);
   }
   await applyWriteOffs(client, drafts, actor.userId, conflict);

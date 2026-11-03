@@ -77,3 +77,19 @@ test('public card/detail map the frozen base ratio exactly and absence stays nul
   const history = { ...listing(null), source: 'LEGACY_READ_ONLY', canCreateOrder: false, availability: { state: 'LEGACY_READ_ONLY' }, inventory: [], historicalQuote: { haffRent: money('1.00'), goods: money('0.00'), deposit: money('100.00'), termDays: '1' } };
   assert.equal(toListingCard(history).baseRenterHaffRatioWanPerYuan, null);
 });
+
+test('local checkout BFF rechecks the captured user and only forwards exact JSON leaves',async()=>{
+ const original=globalThis.fetch,calls=[];globalThis.fetch=async(input,init)=>{calls.push({url:String(input),init});return Response.json(String(input).endsWith('/get-session')?{user:{id:'checkout-user'}}:{scope:'LOCAL_CONTROLLED',knowledge:'KNOWN'});};
+ const headers={origin:'http://127.0.0.1:3100',cookie:'zzsh_user.session_token=fixture-user; zzsh_admin.session_token=must-not-forward','x-zzsh-expected-user-id':'checkout-user','content-type':'application/json','idempotency-key':'original-issue'};
+ try{for(const method of ['GET','POST']){const response=await forwardOrderRequest(new Request('http://127.0.0.1:3100/api/orders/order-local/local-checkouts',{method,headers,...(method==='POST'?{body:'{}'}:{})}),{params:Promise.resolve({path:['order-local','local-checkouts']})});assert.equal(response.status,200);const forwarded=calls.at(-1);assert.equal(forwarded.init.method,method);assert.equal(forwarded.init.headers.get('cookie'),'zzsh_user.session_token=fixture-user');assert(!forwarded.init.headers.get('cookie').includes('admin'));if(method==='POST'){assert.equal(forwarded.init.headers.get('idempotency-key'),'original-issue');assert.equal(new TextDecoder().decode(forwarded.init.body),'{}');}}assert.equal(calls.filter(c=>c.url.endsWith('/get-session')).length,2);
+ }finally{globalThis.fetch=original;}
+});
+test('local checkout receipt preserves the original key and rejects query or identity drift without command retry',async()=>{
+ const original=globalThis.fetch,calls=[];globalThis.fetch=async(input,init)=>{calls.push({url:String(input),init});return Response.json(String(input).endsWith('/get-session')?{user:{id:'checkout-user'}}:{knowledge:'UNKNOWN'});};
+ const headers={origin:'http://127.0.0.1:3100','x-zzsh-expected-user-id':'checkout-user'},go=(query,identity='checkout-user')=>forwardOrderRequest(new Request('http://127.0.0.1:3100/api/orders/order-local/local-checkouts/receipt'+query,{headers:{...headers,'x-zzsh-expected-user-id':identity}}),{params:Promise.resolve({path:['order-local','local-checkouts','receipt']})});
+ try{assert.equal((await go('?key=original-issue')).status,200);assert(calls.at(-1).url.endsWith('/local-checkouts/receipt?key=original-issue'));for(const query of ['','?key=first&key=second','?key=first&mode=COMPLETE'])assert.equal((await go(query)).status,400);const before=calls.length;assert.equal((await go('?key=original-issue','other-user')).status,401);assert.equal(calls.length,before+1);assert.equal(calls.filter(c=>c.init.method==='POST').length,0);
+ }finally{globalThis.fetch=original;}
+});
+test('local checkout HTML and completion cannot be tunneled through the JSON BFF',async()=>{
+ const original=globalThis.fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('must not fetch');};try{for(const leaf of ['page','complete','complete/receipt'])for(const method of ['GET','POST']){const response=await forwardOrderRequest(new Request('http://127.0.0.1:3100/api/orders/order-local/local-checkouts/'+leaf,{method,headers:{origin:'http://127.0.0.1:3100','content-type':'application/json'},...(method==='POST'?{body:'{}'}:{})}),{params:Promise.resolve({path:['order-local','local-checkouts',...leaf.split('/')]})});assert.equal(response.status,404);}assert.equal(calls,0);}finally{globalThis.fetch=original;}
+});

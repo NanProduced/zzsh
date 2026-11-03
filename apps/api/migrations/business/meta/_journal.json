@@ -1044,6 +1044,27 @@
       "when": 1793566801005,
       "tag": "0148_distribution_dashboard_permission",
       "breakpoints": true
+    },
+    {
+      "idx": 149,
+      "version": "7",
+      "when": 1793666651095,
+      "tag": "0149_local_financial_sandbox",
+      "breakpoints": true
+    },
+    {
+      "idx": 150,
+      "version": "7",
+      "when": 1793667810814,
+      "tag": "0150_membership_growth_read_admission",
+      "breakpoints": true
+    },
+    {
+      "idx": 151,
+      "version": "7",
+      "when": 1793681783926,
+      "tag": "0151_profile_avatar_policy",
+      "breakpoints": true
     }
   ]
 }

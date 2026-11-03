@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import { readMigrationFiles } from "drizzle-orm/migrator";
 import { canonicalize } from "../src/supply/content-hash";
 import { sha256Hex as sha } from "../src/supply/supply-util";
-import { prepareLegacyGrowthBackfill, type LegacyCoverageRecord } from "../src/auth/membership-growth-legacy";
+import { prepareLegacyGrowthBackfill, parseVerifiedLegacyCoverageRecord, verifyLegacyCoverageRecord, assessLegacyCoverageRecord, type LegacyCoverageRecord } from "../src/auth/membership-growth-legacy";
 import { createLegacyGrowthCoveragePort, readLegacyGrowthCoverageAssessment, type LegacyGrowthStoredContribution } from "../src/auth/membership-growth-legacy-store";
 import { growthContributionSourceDigest, readMembershipGrowth } from "../src/auth/membership-growth-integration";
 import { legacyGrowthVersionHash } from "../src/auth/membership-growth-legacy";
@@ -82,6 +82,25 @@ test("coverage port rejects duplicated source metadata that no longer agrees wit
   const changed = { ...record(prepared()), expectedSourceKeys: [] }, f = fixture([]);
   await assert.rejects(createLegacyGrowthCoveragePort().persist(f.client, changed), (e: any) => e.code === "EVIDENCE_UNAVAILABLE");
   assert.equal(f.inserted(), 0);
+});
+
+test("parsed coverage owns a deeply frozen object while ordinary caller records remain mutable", () => {
+  const p=prepared(),caller=record(p),canonical=canonicalize(caller),parsed=parseVerifiedLegacyCoverageRecord(canonical,sha(canonical));
+  assert(parsed);assert.notEqual(parsed,caller);assert.equal(verifyLegacyCoverageRecord(caller),true);assert.equal(Object.isFrozen(caller),false);assert.equal(Object.isFrozen(caller.factKeys),false);
+  const pending:object[]=[parsed];while(pending.length){const value=pending.pop()!;assert.equal(Object.isFrozen(value),true);for(const child of Object.values(value))if(child!==null&&typeof child==='object')pending.push(child);}
+  assert.throws(()=>parsed.factKeys.push({sourceKey:'forged',revision:0,sourceDigest:'f'.repeat(64)}),TypeError);
+  assert.equal(assessLegacyCoverageRecord(parsed,rows(p)).state,'COMPLETE');
+  const copy={...parsed,receiptDigest:'0'.repeat(64)};assert.equal(assessLegacyCoverageRecord(copy,rows(p)).state,'SOURCE_CONFLICT');
+  const shallow=Object.freeze(JSON.parse(canonical));shallow.factKeys.push({sourceKey:'forged',revision:0,sourceDigest:'f'.repeat(64)});assert.equal(assessLegacyCoverageRecord(shallow,rows(p)).state,'SOURCE_CONFLICT');
+});
+
+test("a new coverage read revalidates canonical, digest and receipt lineage instead of sharing a version cache", () => {
+  const value=record(prepared()),canonical=canonicalize(value),first=parseVerifiedLegacyCoverageRecord(canonical,sha(canonical));assert(first);
+  const second=parseVerifiedLegacyCoverageRecord(canonical,sha(canonical));assert(second);assert.notEqual(first,second);
+  assert.equal(parseVerifiedLegacyCoverageRecord(canonical,'f'.repeat(64)),null);
+  const altered=canonicalize({...value,expectedSourceKeys:[]});assert.equal(parseVerifiedLegacyCoverageRecord(altered,sha(altered)),null);
+  assert.equal(parseVerifiedLegacyCoverageRecord(canonical.replace('COMPLETE','BACKFILL_PENDING'),sha(canonical)),null);
+  assert.equal(verifyLegacyCoverageRecord(value),true);
 });
 test("full base survives a later partial of the same source; stored actual amounts are rehashed", async () => {
   const full = prepared(), partial = prepared([], [sourceKey], "c".repeat(64)), f = fixture([record(partial, "fixture-later-partial"), record(full)]);

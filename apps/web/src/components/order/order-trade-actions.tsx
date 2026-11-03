@@ -10,7 +10,10 @@ import {
   formatOrderTime,
   orderApi,
   orderIntentKey,
+  parseLocalCheckout,
   OrderRequestError,
+  type LocalCheckout,
+  type LocalCheckoutAvailability,
   type Order,
   type OrderParty,
   type ChannelPaymentView,
@@ -321,6 +324,83 @@ function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendi
   </div>;
 }
 
+export function LocalSandboxPaymentAction({ order, blocked, onChanged, onModeChange, onPendingChange, children }: {
+  order: Order; blocked: boolean; onChanged: () => void; onModeChange: (active: boolean) => void; onPendingChange: (pending: boolean) => void; children: ReactNode;
+}) {
+  const session = useUserSession();
+  const [discovery, setDiscovery] = useState<'NOT_INSTALLED' | 'CHECKING' | 'LOCAL' | 'FAILED'>('NOT_INSTALLED');
+  const [view, setView] = useState<LocalCheckoutAvailability | null>(null), [checkout, setCheckout] = useState<LocalCheckout | null>(null);
+  const [busy, setBusy] = useState(false), [notice, setNotice] = useState<string | null>(null);
+  const reset = useCallback(() => { setView(null); setCheckout(null); setBusy(false); setNotice(null); }, []);
+  const { userId, isCurrent } = useIdentityReset(session, reset);
+  const latest = useRef({ orderId: order.id, isCurrent, onChanged }); latest.current = { orderId: order.id, isCurrent, onChanged };
+  const mounted = useRef(false);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const [visibleOrder, setVisibleOrder] = useState(order.id);
+  if (visibleOrder !== order.id) { setVisibleOrder(order.id); reset(); }
+  const isLocal = typeof window !== 'undefined' && window.location.protocol === 'http:' && window.location.hostname === '127.0.0.1' && !!window.location.port;
+  const pending = userId && isLocal ? inspectIntent(userId, 'order.local-checkout', order.id) : { state: 'NONE' as const, intent: null };
+  const active = isLocal && discovery !== 'NOT_INSTALLED';
+  useEffect(() => { onModeChange(active); onPendingChange(active && (busy || pending.state !== 'NONE')); }, [active, busy, pending.state, onModeChange, onPendingChange]);
+  useEffect(() => () => { onModeChange(false); onPendingChange(false); }, [onModeChange, onPendingChange]);
+  useEffect(() => {
+    if (!isLocal || !userId) { setDiscovery('NOT_INSTALLED'); return; }
+    const controller = new AbortController(), acting = userId, expected = order.id;
+    setDiscovery('CHECKING'); setView(null); setCheckout(null);
+    void orderApi.localCheckoutAvailability(acting, expected, controller.signal).then(next => {
+      if (!controller.signal.aborted && latest.current.isCurrent(acting) && latest.current.orderId === expected) { setView(next); setDiscovery('LOCAL'); }
+    }).catch(error => {
+      if (!controller.signal.aborted && latest.current.isCurrent(acting) && latest.current.orderId === expected) {
+        setDiscovery(error instanceof OrderRequestError && error.status === 404 ? 'NOT_INSTALLED' : 'FAILED');
+      }
+    });
+    return () => controller.abort();
+  }, [isLocal, userId, order.id]);
+  const expected = (key: string) => {
+    const amount = order.amounts?.totalDue;
+    if (!order.displayNo || !amount || amount.currency !== 'CNY' || amount.unit !== 'yuan' || amount.scale !== 2 || !/^(0|[1-9]\d{0,21})\.\d{2}$/.test(amount.amount)) throw new OrderRequestError(502, null);
+    return { orderId: order.id, displayNo: order.displayNo, amountCents: BigInt(amount.amount.replace('.', '')).toString(), key, origin: window.location.origin };
+  };
+  const issue = async () => {
+    if (!userId || busy || blocked || !view?.checkoutEnabled || pending.state !== 'NONE') return;
+    const acting = userId, orderId = order.id; setBusy(true); setNotice(null); setCheckout(null);
+    const result = await performGuardedWrite(acting, 'order.local-checkout', orderId, {}, undefined, async (key, body) => {
+      if (Object.keys(body).length) throw new OrderRequestError(409, null);
+      const binding = expected(key);
+      return parseLocalCheckout(await orderApi.issueLocalCheckout(acting, orderId, key), binding);
+    });
+    if (!mounted.current || !isCurrent(acting) || latest.current.orderId !== orderId) return;
+    setBusy(false);
+    if (result.status === 'ok') setCheckout(result.value);
+    else { setNotice(result.status === 'blocked' ? BLOCKED_MESSAGE : result.status === 'definitive' ? '本次未取得本地凭据；请刷新原订单，核对当前可操作状态。' : '本地凭据申请结果尚未确认；请查询原申请，不要重新提交。'); if (result.status === 'unauthorized') void session.confirm(); }
+  };
+  const recover = async () => {
+    if (!userId || busy || blocked || pending.state !== 'VALID' || !pending.intent) return;
+    const acting = userId, orderId = order.id, original = pending.intent; setBusy(true); setNotice(null);
+    try {
+      if (Object.keys(original.body).length) throw new OrderRequestError(409, null);
+      const binding = expected(original.key), result = await orderApi.localCheckoutReceipt(acting, orderId, original.key);
+      if (!mounted.current || !isCurrent(acting) || latest.current.orderId !== orderId) return;
+      if (result.scope !== 'LOCAL_CONTROLLED' || result.mayReapply !== false || result.knowledge !== 'KNOWN') throw new OrderRequestError(503, null);
+      const safe = parseLocalCheckout(result.receipt, binding); clearIntent(acting, 'order.local-checkout', orderId); setCheckout(safe);
+    } catch { if (mounted.current && isCurrent(acting) && latest.current.orderId === orderId) setNotice('原申请尚未取得确定回执，原标识已保留；请稍后再查询，不会重新发起。'); }
+    finally { if (mounted.current && isCurrent(acting) && latest.current.orderId === orderId) setBusy(false); }
+  };
+  if (!active) return children;
+  return <div className="order-local-checkout" aria-label="本地模拟付款">
+    <p className="order-inline-notice">本地模拟付款仅用于当前隔离联调环境，不会向银行或支付机构发起真实支付。</p>
+    {discovery === 'CHECKING' ? <p role="status">正在确认本单本地模拟入口…</p> : discovery === 'FAILED' ? <p role="alert">本地模拟入口暂无法确认；请刷新原订单，不会自动改用其他支付方式。</p> : !view?.checkoutEnabled ? <p role="status">本单当前不可发起本地模拟，请刷新原订单查看最新结果。</p> : null}
+    {pending.state === 'UNREADABLE' ? <p role="alert">原本地凭据申请无法读取，已停止提交，请保留本页并联系平台核对。</p> : notice ? <p role="status">{notice}</p> : null}
+    {checkout ? <><p>原订单 {checkout.displayNo} · 本次模拟 {moneyCents(checkout.amount.cents)} · 凭据有效至 {formatOrderTime(checkout.expiresAt)}</p><a className="button" href={checkout.url} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">打开本地模拟确认页</a></> : null}
+    <div className="order-trade-actions">
+      {view?.checkoutEnabled && pending.state === 'NONE' ? <button type="button" className="button" disabled={busy || blocked} onClick={() => void issue()}>{busy ? '正在申请本地凭据…' : checkout ? '重新获取本地凭据' : '获取本地模拟付款凭据'}</button> : null}
+      {pending.state === 'VALID' ? <button type="button" className="button secondary" disabled={busy || blocked} onClick={() => void recover()}>查询原本地凭据申请</button> : null}
+      <button type="button" className="button secondary" disabled={busy || !userId} onClick={onChanged}>返回后刷新原订单</button>
+    </div>
+    <p className="order-trade-note">取得或打开凭据不代表付款已接纳；请在确认页核对原单，并返回刷新订单。后续客服与开租仍按订单流程处理。</p>
+  </div>;
+}
+
 function PaymentAction({ order, party, onChanged }: { order: Order; party: OrderParty; onChanged: () => void }) {
   const session = useUserSession();
   const [busy, setBusy] = useState(false);
@@ -330,6 +410,7 @@ function PaymentAction({ order, party, onChanged }: { order: Order; party: Order
   const [cancelArmed, setCancelArmed] = useState(false);
   const [cancelUnknown, setCancelUnknown] = useState<string | null>(null);
   const [channelMode, setChannelMode] = useState(false), [channelPending, setChannelPending] = useState(false);
+  const [localMode, setLocalMode] = useState(false), [localPending, setLocalPending] = useState(false);
   const autoOpenedGroup = useRef(false);
   useEffect(() => {
     if (party !== "renter" || receipt?.disposition !== "APPLIED" || autoOpenedGroup.current) return;
@@ -424,7 +505,7 @@ function PaymentAction({ order, party, onChanged }: { order: Order; party: Order
     applyOutcome(acting, outcome as WriteOutcome<{ payment: { confirmationId: string; disposition: string; reasonCode?: string | null; replay: boolean } }>, "cancel");
   };
   const payLocked = busy || receipt !== null || unknown !== null || cancelUnknown !== null;
-  const cancelLocked = busy || receipt !== null || unknown !== null || cancelUnknown !== null || channelPending;
+  const cancelLocked = busy || receipt !== null || unknown !== null || cancelUnknown !== null || channelPending || localPending;
   const paymentOpen = paymentEntryOpen(order);
   const cancelOpen = cancelEntryOpen(order);
   const expired = order.status === "PENDING_PAYMENT" && order.expiredAwaitingCancel === true;
@@ -439,13 +520,13 @@ function PaymentAction({ order, party, onChanged }: { order: Order; party: Order
     {cancelUnknown ? <UnknownNotice label="取消结果未知" message={cancelUnknown} onQuery={() => void queryCancel()} onOpenOrder={onChanged} /> : null}
     {error ? <p className="order-inline-notice" role="alert">{error.message}</p> : null}
     {party === "renter" ? <div className="order-trade-actions">
-      <ChannelPaymentAction order={order} blocked={payLocked || cancelArmed} onChanged={onChanged} onModeChange={setChannelMode} onPendingChange={setChannelPending}>{paymentOpen ? <button type="button" className="button" onClick={() => void pay()} disabled={payLocked}>
+      <ChannelPaymentAction order={order} blocked={payLocked || cancelArmed} onChanged={onChanged} onModeChange={setChannelMode} onPendingChange={setChannelPending}><LocalSandboxPaymentAction order={order} blocked={payLocked || cancelArmed} onChanged={onChanged} onModeChange={setLocalMode} onPendingChange={setLocalPending}>{paymentOpen ? <button type="button" className="button" onClick={() => void pay()} disabled={payLocked}>
         <WalletCards size={15} aria-hidden="true" />{busy ? "提交支付请求…" : "提交支付（本地测试支付）"}
-      </button> : <p className="order-muted">当前订单不可继续支付；请刷新查看最新订单记录。</p>}</ChannelPaymentAction>
+      </button> : <p className="order-muted">当前订单不可继续支付；请刷新查看最新订单记录。</p>}</LocalSandboxPaymentAction></ChannelPaymentAction>
       {cancelOpen ? (!cancelArmed ? <button type="button" className="button quiet" onClick={() => setCancelArmed(true)} disabled={cancelLocked}>取消订单</button> :
         <span className="order-trade-confirm">确认取消该订单？账号占用将释放。<button type="button" className="button secondary button--sm" onClick={() => void cancel()} disabled={cancelLocked}>{busy ? "取消中…" : "确认取消"}</button><button type="button" className="button quiet button--sm" onClick={() => setCancelArmed(false)} disabled={busy}>保留订单</button></span>) : null}
     </div> : <p className="order-muted">等待租客完成支付；订单不提供代付或代为接单操作。</p>}
-    {!channelMode ? <p className="order-trade-note">当前为本地测试支付入口，测试付款记录不代表支付渠道已扣款。</p> : null}
+    {!channelMode && !localMode ? <p className="order-trade-note">当前为本地测试支付入口，测试付款记录不代表支付渠道已扣款。</p> : null}
   </section>;
 }
 

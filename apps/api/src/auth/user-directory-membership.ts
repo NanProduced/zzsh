@@ -1,58 +1,64 @@
 import type { PoolClient } from "pg";
-
 import { SecurityApiError } from "./security-core";
-import { readMembershipGrowthBatch } from "./membership-growth-integration";
+import { normalizeGrowthInstant, readMembershipGrowthTierBatch, projectAdmittedEmptyGrowthTier } from "./membership-growth-integration";
+import { streamDirectoryMembershipFacts } from "./user-directory-membership-stream";
+import { legacyZeroReadSubjectIds, hasLegacyZeroReadAdmission, type LegacyZeroReadAdmission } from "./membership-growth-read-admission";
 
-/** 目录显示的会员等级：与详情/快速核对使用同一投影、同一 asOf。 */
-export type DirectoryMembershipTier =
-  | "STANDARD" | "SILVER" | "GOLD" | "PLATINUM" | "DIAMOND" | "BLACK_GOLD" | "UNKNOWN";
-
-/** 等级筛选值：PENDING 表示投影未确知（不是普通会员）。 */
+export type DirectoryMembershipTier = "STANDARD" | "SILVER" | "GOLD" | "PLATINUM" | "DIAMOND" | "BLACK_GOLD" | "UNKNOWN";
 export const DIRECTORY_MEMBERSHIP_TIERS = ["PENDING", "STANDARD", "SILVER", "GOLD", "PLATINUM", "DIAMOND", "BLACK_GOLD"] as const;
 export type DirectoryMembershipTierFilter = (typeof DIRECTORY_MEMBERSHIP_TIERS)[number];
+export type KnownMembershipTiers = { known: Map<string, DirectoryMembershipTier>; candidateCount: number };
+export type DirectoryMembershipDistribution = { asOfUtc: string; total: number; counts: Record<DirectoryMembershipTierFilter, number> };
+const unavailable = () => new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Membership projection evidence is unavailable");
 
-/**
- * 可能“已确知”等级的用户集合：原生零贡献注册用户、持久化了旧源覆盖回执的用户、有成长贡献的用户。
- * 其余用户按同一完备性判定只能是待核，因此这个集合是投影可能返回 KNOWN 的全集。
- */
-function candidateSql(userId?: string): string {
-  return `WITH membership_candidates AS MATERIALIZED (
-    SELECT c.user_id AS id FROM zzsh_iam.membership_growth_contribution c${userId ? " WHERE c.user_id=$1::text" : ""}
-    UNION
-    SELECT l.subject_user_id AS id FROM zzsh_iam.membership_growth_legacy_coverage l${userId ? " WHERE l.subject_user_id=$1::text" : ""}
-    UNION
-    SELECT m.user_id AS id FROM zzsh_iam.user_rental_membership m
-      WHERE m.source_ref = 'registration:v1'${userId ? " AND m.user_id=$1::text" : ""}
-        AND NOT EXISTS (SELECT 1 FROM zzsh_iam.audit_event e WHERE e.object_id = m.user_id AND e.action = 'user.legacy_owner.migrated' AND e.outcome = 'SUCCESS')
-  ) SELECT u.id FROM membership_candidates candidate JOIN zzsh_auth_user."user" u ON u.id = candidate.id`;
+/** The caller retains the existing directory RR/READ ONLY transaction, permissions and cancellation guard. */
+async function visitDirectoryMembership(client: PoolClient, asOfUtc: string, visit: (id: string, tier: DirectoryMembershipTierFilter) => void, userId?: string): Promise<number> {
+  const asOf = normalizeGrowthInstant(asOfUtc);
+  let total = 0;
+  let fastAdmission: LegacyZeroReadAdmission | null = null;
+  const consume = async (ids: string[], snapshot?: Parameters<typeof readMembershipGrowthTierBatch>[3]) => {
+    if (ids.length === 0) return;
+    const projections = await readMembershipGrowthTierBatch(client, ids, asOf, snapshot);
+    if (projections.size !== ids.length) throw unavailable();
+    for (const id of ids) {
+      const projection = projections.get(id);
+      if (!projection || projection.subjectId !== id || normalizeGrowthInstant(projection.growth.asOfUtc) !== asOf) throw unavailable();
+      const tier = projection.growth.knowledge === "KNOWN" ? projection.growth.effectiveTier : "PENDING";
+      if (tier === null || !(DIRECTORY_MEMBERSHIP_TIERS as readonly string[]).includes(tier)) throw unavailable();
+      visit(id, tier as DirectoryMembershipTierFilter);
+      total++;
+    }
+  };
+  if (userId !== undefined) {
+    await consume((await client.query<{ id: string }>('SELECT u.id FROM zzsh_auth_user."user" u WHERE u.id=$1', [userId])).rows.map(row => row.id));
+    return total;
+  }
+  for await (const chunk of streamDirectoryMembershipFacts(client, asOf)) {
+    if ("kind" in chunk) {
+      const ids = legacyZeroReadSubjectIds(chunk.admission, client, asOf);
+      if (fastAdmission || !ids.length || normalizeGrowthInstant(chunk.asOfUtc) !== asOf) throw unavailable();
+      fastAdmission = chunk.admission;
+      const sample = projectAdmittedEmptyGrowthTier(ids[0]!, asOf), tier = sample.growth.effectiveTier;
+      if (sample.growth.knowledge !== "KNOWN" || tier === null || tier === "UNKNOWN" || !(DIRECTORY_MEMBERSHIP_TIERS as readonly string[]).includes(tier)) throw unavailable();
+      for (const id of ids) { visit(id, tier); total++; }
+    } else {
+      if (chunk.subjects.some(row => hasLegacyZeroReadAdmission(fastAdmission, client, asOf, row.userId))) throw unavailable();
+      await consume(chunk.subjects.map(row => row.userId), chunk);
+    }
+  }
+  return total;
 }
 
-/** 投影规模上限：超出说明投影还没有可查询的等价层，本包不静默降级成全量逐人读取。 */
-export const DIRECTORY_MEMBERSHIP_CANDIDATE_LIMIT = 50_000;
-
-export type KnownMembershipTiers = {
-  /** 已确知等级：userId -> 等级。 */
-  known: Map<string, DirectoryMembershipTier>;
-  /** 候选规模。 */
-  candidateCount: number;
-};
-
-/**
- * 计算目录中已确知会员等级的用户与等级，使用与列表/快速核对/详情完全相同的批量投影。
- * 不逐用户调用完整 reader，也不使用旧的 growth_state 字段绕过完备性判定。
- */
+/** Skinny server-only map for the existing directory count/sort/page SQL; no full projections survive a batch. */
 export async function readKnownMembershipTiers(client: PoolClient, asOfUtc: string, userId?: string): Promise<KnownMembershipTiers> {
-  const candidates = (await client.query<{ id: string }>(candidateSql(userId), userId ? [userId] : [])).rows.map((row) => row.id);
   const known = new Map<string, DirectoryMembershipTier>();
-  if (candidates.length === 0) return { known, candidateCount: 0 };
-  if (candidates.length > DIRECTORY_MEMBERSHIP_CANDIDATE_LIMIT) {
-    throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Membership tier filter is not available at the current projection size");
-  }
-  const projections = await readMembershipGrowthBatch(client, candidates, asOfUtc);
-  for (const [userId, projection] of projections) {
-    if (projection.growth.knowledge !== "KNOWN") continue;
-    const tier = projection.growth.effectiveTier;
-    known.set(userId, (tier ?? "UNKNOWN") as DirectoryMembershipTier);
-  }
-  return { known, candidateCount: candidates.length };
+  const candidateCount = await visitDirectoryMembership(client, asOfUtc, (id, tier) => { if (tier !== "PENDING") known.set(id, tier); }, userId);
+  return { known, candidateCount };
+}
+
+/** Growth tier distribution only. Policy benefits and current manual entitlements remain separate contracts. */
+export async function readDirectoryMembershipDistribution(client: PoolClient, asOfUtc: string, userId?: string): Promise<DirectoryMembershipDistribution> {
+  const counts = Object.fromEntries(DIRECTORY_MEMBERSHIP_TIERS.map(tier => [tier, 0])) as Record<DirectoryMembershipTierFilter, number>;
+  const total = await visitDirectoryMembership(client, asOfUtc, (_id, tier) => { counts[tier]++; }, userId);
+  return { asOfUtc: normalizeGrowthInstant(asOfUtc), total, counts };
 }

@@ -14,6 +14,7 @@ import {
 } from "./profile-avatar-presets";
 
 export type ProfileAvatarActor = { realm: ProfileAvatarRealm; id: string; sessionId?: string };
+type AvatarReviewer = ProfileAvatarActor | { realm: "system"; policyRevision: string };
 export type ProfileAvatarDecision = "APPROVE" | "REJECT" | "QUARANTINE" | "WITHDRAW";
 
 type ProfileAvatarRow = {
@@ -283,6 +284,7 @@ export async function bindPendingAvatar(
   intentId: string,
   actor: ProfileAvatarActor,
   requestId: string,
+  submissionResult: "PENDING_REVIEW" | "SUBMITTED" = "PENDING_REVIEW",
 ): Promise<void> {
   const asset = await loadMediaAsset(client, assetId);
   if (!asset || !isAvatarAsset(asset) || asset.ownershipKind !== ownershipForAvatarRealm(realm) || avatarSubjectOfAsset(asset)?.subjectId !== subjectId) throw notFound();
@@ -301,11 +303,11 @@ export async function bindPendingAvatar(
     assetId,
     before: { pendingAssetId: row.pendingAssetId, revision: row.revision },
     after: { pendingAssetId: assetId },
-    result: "PENDING_REVIEW",
+    result: submissionResult,
   });
 }
 
-export function lastReviewView(row: ProfileAvatarRow | null) {
+export function lastReviewView(row: ProfileAvatarRow | null, asset?: AvatarAssetRow) {
   if (!row?.lastReviewAssetId || !row.lastReviewState || !row.lastReviewedAt) return null;
   return {
     assetId: row.lastReviewAssetId,
@@ -313,6 +315,8 @@ export function lastReviewView(row: ProfileAvatarRow | null) {
     reason: row.lastReviewReason,
     reviewedAt: row.lastReviewedAt.toISOString(),
     applied: row.lastReviewApplied,
+    ...(asset ? { source: row.lastReviewState === "APPROVED" && asset.avatarPolicyRevision && asset.reviewedByAdminId === null ? "SYSTEM_POLICY" as const : "HUMAN_REVIEW" as const,
+      policyRevision: row.lastReviewState === "APPROVED" && asset.avatarPolicyRevision && asset.reviewedByAdminId === null ? asset.avatarPolicyRevision : null } : {}),
   };
 }
 
@@ -323,9 +327,10 @@ export async function applyAvatarReview(
   assetId: string,
   decision: ProfileAvatarDecision,
   reason: string | null,
-  reviewer: ProfileAvatarActor,
+  reviewer: AvatarReviewer,
   requestId: string,
 ): Promise<{ applied: boolean; fallback: boolean; revision: string }> {
+  if (reviewer.realm === "system" && (decision !== "APPROVE" || !/^[1-9]\d{0,18}$/.test(reviewer.policyRevision))) throw invalid("System avatar review requires a policy approval");
   const row = await loadProfileAvatar(client, realm, subjectId, true);
   if (!row) {
     await auditAvatarReviewWithoutState(client, reviewer, requestId, subjectId, assetId, decision, reason, false, false);
@@ -341,6 +346,7 @@ export async function applyAvatarReview(
     const nextVersion = (BigInt(row.currentVersion) + 1n).toString();
     const asset = await loadMediaAsset(client, assetId);
     if (!asset || !isAvatarAssetPubliclyEligible(asset)) throw conflict("Approved avatar is not publicly eligible");
+    if (reviewer.realm === "system" && (asset.avatarPolicyRevision !== reviewer.policyRevision || asset.reviewedByAdminId !== null)) throw conflict("System approval policy source is not proved");
     await client.query(
       `UPDATE "zzsh_supply"."profile_avatar"
           SET "current_kind" = 'CUSTOM', "current_preset_id" = NULL, "current_asset_id" = $3,
@@ -379,22 +385,22 @@ export async function applyAvatarReview(
   return { applied: disposition.apply, fallback: disposition.fallback, revision: nextRevision };
 }
 
-async function auditAvatarReview(client: PoolClient, reviewer: ProfileAvatarActor, requestId: string, subjectId: string, assetId: string, decision: ProfileAvatarDecision, reason: string | null, applied: boolean, fallback: boolean): Promise<void> {
+async function auditAvatarReview(client: PoolClient, reviewer: AvatarReviewer, requestId: string, subjectId: string, assetId: string, decision: ProfileAvatarDecision, reason: string | null, applied: boolean, fallback: boolean): Promise<void> {
   await recordAudit(client, {
-    actorType: "admin",
-    actorId: reviewer.id,
-    sessionId: reviewer.sessionId,
-    action: decision === "WITHDRAW" ? "profile.avatar.withdrawn" : "profile.avatar.reviewed",
+    actorType: reviewer.realm === "system" ? "system" : "admin",
+    ...(reviewer.realm === "system" ? {} : { actorId: reviewer.id, sessionId: reviewer.sessionId }),
+    action: reviewer.realm === "system" ? "profile.avatar.policy.applied" : decision === "WITHDRAW" ? "profile.avatar.withdrawn" : "profile.avatar.reviewed",
     objectType: "profile_avatar",
     objectId: subjectId,
     outcome: "SUCCESS",
     requestId,
     ...(reason ? { reason } : {}),
-    details: { assetId, decision, applied, fallback, result: applied ? "APPLIED" : fallback ? "FALLBACK" : "RECORDED" },
+    details: { assetId, decision, applied, fallback, result: applied ? "APPLIED" : fallback ? "FALLBACK" : "RECORDED",
+      ...(reviewer.realm === "system" ? { approvalSource: "SYSTEM_POLICY", policyRevision: reviewer.policyRevision } : {}) },
   });
 }
 
-async function auditAvatarReviewWithoutState(client: PoolClient, reviewer: ProfileAvatarActor, requestId: string, subjectId: string, assetId: string, decision: ProfileAvatarDecision, reason: string | null, applied: boolean, fallback: boolean): Promise<void> {
+async function auditAvatarReviewWithoutState(client: PoolClient, reviewer: AvatarReviewer, requestId: string, subjectId: string, assetId: string, decision: ProfileAvatarDecision, reason: string | null, applied: boolean, fallback: boolean): Promise<void> {
   await auditAvatarReview(client, reviewer, requestId, subjectId, assetId, decision, reason, applied, fallback);
 }
 
@@ -405,6 +411,7 @@ export async function profileAvatarWithPending(
 ): Promise<ProfileAvatarState> {
   const row = await loadProfileAvatar(client, realm, subjectId);
   const pending = row?.pendingAssetId ? await loadMediaAsset(client, row.pendingAssetId) : null;
+  const lastAsset = row?.lastReviewAssetId ? row.lastReviewAssetId === pending?.id ? pending : await loadMediaAsset(client, row.lastReviewAssetId) : null;
   return {
     ...profileAvatarStateView(row, realm, subjectId),
     pending: pending && isAvatarAsset(pending)
@@ -417,7 +424,7 @@ export async function profileAvatarWithPending(
           byteSize: pending.byteSize,
         }
       : null,
-    lastReview: lastReviewView(row),
+    lastReview: lastReviewView(row, lastAsset),
   };
 }
 
@@ -461,14 +468,14 @@ export async function listAvatarReviews(
   const rows = await client.query<{
     assetId: string; realm: ProfileAvatarRealm; subjectId: string; subjectName: string | null;
     createdAt: Date; width: number; height: number; byteSize: string; mime: string; reviewState: string;
-    accessClass: string; reviewReason: string | null; revision: string;
+    accessClass: string; reviewReason: string | null; policyRevision: string | null; reviewedByAdminId: string | null; revision: string;
   }>(
     `SELECT a."id" AS "assetId",
             CASE WHEN a."ownership_kind" = 'USER_AVATAR' THEN 'user' ELSE 'admin' END AS "realm",
             COALESCE(a."owner_user_id", a."uploaded_by_admin_id") AS "subjectId",
             COALESCE(u."name", au."name") AS "subjectName",
             a."created_at" AS "createdAt", a."width", a."height", a."byte_size"::text AS "byteSize", a."mime",
-            a."review_state" AS "reviewState", a."access_class" AS "accessClass", a."review_reason" AS "reviewReason", a."revision"::text AS "revision"
+            a."review_state" AS "reviewState", a."access_class" AS "accessClass", a."review_reason" AS "reviewReason", a."avatar_policy_revision"::text AS "policyRevision", a."reviewed_by_admin_id" AS "reviewedByAdminId", a."revision"::text AS "revision"
        FROM "zzsh_supply"."media_asset" a
        LEFT JOIN "zzsh_auth_user"."user" u ON a."ownership_kind" = 'USER_AVATAR' AND u."id" = a."owner_user_id"
        LEFT JOIN "zzsh_auth_admin"."user" au ON a."ownership_kind" = 'ADMIN_AVATAR' AND au."id" = a."uploaded_by_admin_id"
@@ -494,6 +501,8 @@ export async function listAvatarReviews(
       reviewState: row.reviewState,
       accessClass: row.accessClass,
       reviewReason: row.reviewReason,
+      approvalSource: row.reviewState === "PENDING" ? "MANUAL_REVIEW_REQUIRED" : row.reviewState === "APPROVED" && row.policyRevision && row.reviewedByAdminId === null ? "SYSTEM_POLICY" : "HUMAN_REVIEW",
+      policyRevision: row.policyRevision ?? null,
       revision: row.revision,
     })),
     nextCursor: hasMore && last

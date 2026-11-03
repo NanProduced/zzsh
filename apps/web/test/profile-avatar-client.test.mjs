@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { parseAvatarState, ProfileAvatarError, readAvatarState, selectDefaultAvatar, uploadAvatar } from "../src/lib/profile-avatar-client.ts";
+import { parseAvatarState, parseAvatarUploadResult, ProfileAvatarError, readAvatarState, selectDefaultAvatar, uploadAvatar } from "../src/lib/profile-avatar-client.ts";
 
 const PRESETS = [
   { presetId: "avatar-strike", version: 1, url: "/api/v1/profile/avatars/presets/avatar-strike/1/content", width: 256, height: 256 },
@@ -18,6 +18,20 @@ const STATE = {
   pending: { assetId: "asset_1", submittedAt: "2026-11-01T00:01:00.000Z", reviewState: "PENDING", width: 256, height: 256, byteSize: "15002" },
   lastReview: { assetId: "asset_0", state: "REJECTED", reason: "不清晰", reviewedAt: "2026-10-31T00:00:00.000Z", applied: false },
 };
+
+test('avatar policy only enables direct display with an available boolean policy and positive revision',()=>{
+ for(const policy of [undefined,null,{requiresReview:false,available:false,revision:'2'},{requiresReview:'false',available:true,revision:'2'},{requiresReview:false,available:true,revision:'0'}])assert.deepEqual(parseAvatarState({...STATE,policy}).policy,{requiresReview:true,available:false,revision:'0'});
+ assert.deepEqual(parseAvatarState({...STATE,policy:{requiresReview:false,available:true,revision:'2'}}).policy,{requiresReview:false,available:true,revision:'2'});
+ const review=parseAvatarState({...STATE,lastReview:{...STATE.lastReview,state:'APPROVED',reason:null,applied:true,source:'SYSTEM_POLICY',policyRevision:'2'}}).lastReview;assert.equal(review.source,'SYSTEM_POLICY');assert.equal(review.policyRevision,'2');
+});
+
+test('upload dispositions retain server truth and reject contradictory or unbound policy approvals',()=>{
+ const applied={assetId:'asset_new',avatarSubmission:{disposition:'APPLIED_BY_POLICY',requiresReview:false,policyRevision:'2',approvalSource:'SYSTEM_POLICY'}};
+ assert.equal(parseAvatarUploadResult(applied).avatarSubmission.disposition,'APPLIED_BY_POLICY');
+ assert.equal(parseAvatarUploadResult({assetId:'asset_old'}).avatarSubmission,null);
+ assert.equal(parseAvatarUploadResult({...applied,avatarSubmission:{disposition:'PENDING_REVIEW',requiresReview:true,policyRevision:'0',approvalSource:'MANUAL_REVIEW_REQUIRED'}}).avatarSubmission.disposition,'PENDING_REVIEW');
+ for(const bad of [{...applied,assetId:null},{...applied,avatarSubmission:{...applied.avatarSubmission,requiresReview:true}},{...applied,avatarSubmission:{...applied.avatarSubmission,approvalSource:'HUMAN_REVIEW'}},{...applied,avatarSubmission:{...applied.avatarSubmission,policyRevision:'0'}}])assert.throws(()=>parseAvatarUploadResult(bad),ProfileAvatarError);
+});
 
 test("avatar state parsing keeps version and pending facts separate from the current image", () => {
   const state = parseAvatarState(STATE);

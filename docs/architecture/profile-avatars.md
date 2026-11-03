@@ -1,6 +1,6 @@
 # 个人头像
 
-用户与管理员均可选择四个预审默认头像，或上传自定义头像。默认选项只作预览，点击“使用此头像”后才提交并生效；自定义头像在本地选择、裁剪并预览后提交审核，审核期间继续显示当前头像，待审图被拒绝、隔离或上传失败时保留当前头像；已生效的自定义头像被撤回或隔离时退回持久化默认头像。头像不是客服/Boss 身份认证，也不改变登录、角色、实名或认证策略。
+用户与管理员均可选择四个预审默认头像，或上传自定义头像。默认选项只作预览，点击“使用此头像”后才提交并生效；自定义头像在本地选择、裁剪并预览后按全局上传审核策略处理。默认须人工审核，期间继续显示当前头像；关闭审核时，仅随后完成提交的新头像按系统政策生效，不自动通过已有待审图片。重新开启不撤下已生效图片，人工隔离及撤回仍有效。待审图被拒绝、隔离或上传失败时保留当前头像；已生效的自定义头像被撤回或隔离时退回持久化默认头像。头像不是客服/Boss 身份认证，也不改变登录、角色、实名或认证策略。
 
 用户侧通过头像画面和昵称旁的编辑图标分别打开弹窗。默认页只显示预览、预设与确认动作；审核说明在准备提交自定义头像时提示，失败与未知结果按实际状态展示。
 
@@ -24,11 +24,13 @@
 | `/api/v1/profile/avatar` | GET | 用户本人当前头像、四个预设、待审提交和最近审核结果。 |
 | `/api/v1/profile/avatar/default` | POST | 选择默认头像；body `{presetId, expectedRevision}`，需 `Idempotency-Key`。 |
 | `/api/v1/profile/avatar/upload-intents` | POST | 创建头像上传意图；body `{mime, size, expectedRevision}`，需 `Idempotency-Key`。 |
-| `/api/v1/profile/avatar/uploads/:intentId` | PUT | 上传字节；`X-Upload-Token` 与 `Idempotency-Key`。成功提交待审，不改变当前头像。 |
+| `/api/v1/profile/avatar/uploads/:intentId` | PUT | 上传字节；`X-Upload-Token` 与 `Idempotency-Key`。最终回执区分待审与系统政策生效，客户端不能指定批准状态。 |
 | `/api/v1/profile/avatar/preview` | GET | 本人待审衍生图，私有 `no-store`。 |
 | `/api/v1/profile/avatar/operation-result` | GET | 按原幂等键、预设和期望版本查询默认选择写回执。 |
 | `/api/v1/admin/profile-avatar` | GET | 管理员本人头像状态；另有 `/default`、`/upload-intents`、`/uploads/:id`、`/preview`、`/operation-result` 同形状入口。 |
 | `/api/v1/admin/profile-avatars` | GET | 头像审核队列；需要 `profile.avatar.review`。 |
+| `/api/v1/admin/profile-avatars/policy` | GET / POST | 读取或修改全局审核策略；写入须 `profile.avatar.policy.manage`、原幂等键及期望修订。 |
+| `/api/v1/admin/profile-avatars/policy/operation-result` | GET | 用原幂等键及原参数读取策略写入结果；结果未知时不换键重提。 |
 | `/api/v1/admin/profile-avatars/:assetId/content` | GET | 审核用原图，私有 `no-store`。 |
 | `/api/v1/admin/profile-avatars/:assetId/review` | POST | 通过/拒绝/隔离；body `{decision, reason?, expectedRevision}`。 |
 | `/api/v1/admin/profile-avatars/:assetId/withdraw` | POST | 撤回已通过头像的公开读取；body `{reason, expectedRevision}`。 |
@@ -59,4 +61,6 @@ Web 侧经 `/api/v1/profile/...` 同源路由转发；管理站经 `/api/bff/adm
 
 API发布包必须同时携带`dist/`和`assets/profile-avatars/`；默认资源读取相对于API包定位，不依赖本机Temp、E盘或过程目录。回填候选使用UTF-8的SHA256摘要第4字节模4，与读侧UInt32BE模4一致，避免回填前后默认头像变化；候选仍默认ROLLBACK，真实执行另行授权。
 
-部署顺序必须先应用 0124 并初始化四个预设对象，再启动包含头像初始化的 API；缺表时注册/迁入/管理员创建会失败，不将旧表结构称为兼容通过。
+部署顺序必须先应用 0124 并初始化四个预设对象；包含审核策略的版本还须先应用0151及对应窄runtime ACL。策略缺表只可安全显示为需审核且不可编辑，不退回环境变量或内存开关；缺少头像基础表时注册/迁入/管理员创建会失败。
+
+审核策略与最终上传在数据库中锁定同一单例并按修订生效，策略修改使用CAS、幂等及审计；只seed管理权限，不自动授予审核员或运营。系统批准保留正政策修订及独立系统审计，不伪造人工审核者。最终上传回执与当前assetId共同确认本次是否生效，提交前读取的策略不作为成功证据；已知上传成功而后续读取失败只恢复读取，传输结果未知继续保留原文件与原键。

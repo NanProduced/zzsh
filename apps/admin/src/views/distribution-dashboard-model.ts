@@ -3,7 +3,7 @@ import { beijingCalendarDate } from '../workspace/beijing-time';
 import { UNRECOGNIZED_STATE_LABEL, commissionRoleLabel, commissionStateLabel } from '@zzsh/ui/display-distribution';
 
 export type DashboardSource = 'ALL' | 'NATIVE' | 'LEGACY';
-export type DashboardState = 'ALL' | 'PENDING' | 'SETTLED' | 'REVOKED' | 'RECOVERY_REQUIRED' | 'EXPIRED';
+export type DashboardState = 'ALL' | 'PENDING' | 'MATURED' | 'SETTLED' | 'VOID' | 'REVOKED' | 'RECOVERY_REQUIRED' | 'EXPIRED' | 'UNKNOWN';
 export type DashboardRole = 'ALL' | 'RENTER_REFERRAL' | 'OWNER_REFERRAL' | 'TASK_REFERRAL';
 export type DashboardMetric = { knowledge: 'KNOWN' | 'UNKNOWN'; cents: string | null; count: string | null; reasonCodes: string[] };
 export type DashboardScope = { isBoss: boolean; games: 'ALL_GAMES' | 'SELECTED_GAMES' | 'NO_SCOPE'; gameIds: string[]; network: 'AVAILABLE' | 'UNAVAILABLE'; reasonCodes: string[] };
@@ -12,12 +12,12 @@ export type DashboardEarning = { id: string; source: 'NATIVE' | 'LEGACY'; benefi
 export type DashboardRanking = { rank: number; userId: string | null; name: string | null; cents: string; roles: string[]; count: string | null };
 export type DashboardOverview = {
   contractVersion: string; asOf: string; timezone: string; snapshotVersion: string; applied: DashboardFilters; scope: DashboardScope;
-  native: { settled: DashboardMetric; pending: DashboardMetric; recovery: DashboardMetric; revoked: DashboardMetric; orders: DashboardMetric };
-  legacy: { settled: DashboardMetric; pending: DashboardMetric; expired: DashboardMetric; orders: DashboardMetric; coverage: string };
-  flow: { accrued: DashboardMetric; settled: DashboardMetric; reversed: DashboardMetric; recovered: DashboardMetric };
-  trend: { date: string; cents: string; knowledge: 'KNOWN' | 'UNKNOWN' }[];
+  current: { settled: DashboardMetric; pending: DashboardMetric; recovery: DashboardMetric; needsReview: DashboardMetric };
+  recordSummary: { knowledge: 'KNOWN' | 'UNKNOWN'; mappedRecordCount: string; coverage: { knowledge: string }; reasonCodes: string[] };
+  flow: { accrued: DashboardMetric; settled: DashboardMetric; orders: DashboardMetric; unconfirmedCreditCount: string; unconfirmedOccurredCount: string };
+  trend: { date: string; cents: string; accruedCents: string; knowledge: 'KNOWN' | 'UNKNOWN' }[];
   participants: { participants: DashboardMetric; eligible: DashboardMetric; frozen: DashboardMetric; inviter: DashboardMetric; leader: DashboardMetric };
-  rankings: { nativeEarnings: DashboardRanking[]; legacyEarnings: DashboardRanking[]; directInvites: { items: DashboardRanking[]; knowledge: 'KNOWN' | 'UNKNOWN'; reasonCodes: string[] } };
+  rankings: { earnings: DashboardRanking[]; directInvites: { items: DashboardRanking[]; knowledge: 'KNOWN' | 'UNKNOWN'; reasonCodes: string[] } };
   recent: DashboardEarning[];
   reasonCodes: string[];
 };
@@ -36,7 +36,7 @@ export function dashboardFiltersFromQuery(query: Record<string, string> = {}): D
   const defaults = defaultDashboardFilters();
   return { ...defaults, from: query.from ?? defaults.from, to: query.to ?? defaults.to, q: query.q ?? '',
     source: ['ALL','NATIVE','LEGACY'].includes(query.source ?? '') ? query.source as DashboardSource : defaults.source,
-    state: ['ALL','PENDING','SETTLED','REVOKED','RECOVERY_REQUIRED','EXPIRED'].includes(query.state ?? '') ? query.state as DashboardState : defaults.state,
+    state: ['ALL','PENDING','MATURED','SETTLED','VOID','REVOKED','RECOVERY_REQUIRED','EXPIRED','UNKNOWN'].includes(query.state ?? '') ? query.state as DashboardState : defaults.state,
     role: ['ALL','RENTER_REFERRAL','OWNER_REFERRAL','TASK_REFERRAL'].includes(query.role ?? '') ? query.role as DashboardRole : defaults.role,
     page: /^[1-9]\d{0,5}$/.test(query.page ?? '') ? Number(query.page) : defaults.page,
     pageSize: /^([1-9]|[1-9]\d|100)$/.test(query.pageSize ?? '') ? Number(query.pageSize) : defaults.pageSize,

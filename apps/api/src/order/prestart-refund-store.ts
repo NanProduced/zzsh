@@ -8,38 +8,42 @@ import { FORMAL_REFUND_COLUMNS,lockRefundFunds,assertRefundResource,type FormalR
 import { assertFormalRefundProfile,assertRefundStart,assertRefundBinding,describeRefundProfile,type FormalRefundAdmission,type BoundRefundProfile } from "./joinpay-refund-profile";
 import type { PrestartPaymentBasis } from "./prestart-termination";
 import type { RefundExecution } from "./joinpay-refund-attempt";
+import {assertLocalFinancialSandboxResource,localFinancialSandboxRegistration,type LocalFinancialSandbox} from '../finance/local-financial-sandbox-resource';
 
 const ID=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 type Term={id:string;order_id:string;state:string;requested_by_party:string;payment_basis:PrestartPaymentBasis;basis_digest:string;approved_at:string;liability_root_id:string;liability_event_id:string};
 const unavailable=()=>new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","Original prestart refund admission unavailable");
 
 /** 只投影持久原责任和退款结果；saved evidence未重新验签，不推断银行到账。 */
-export async function readPrestartRefundProgress(client:PoolClient,terminationId:string,b:PrestartPaymentBasis,moneyReadable:boolean){
- const ready=(await client.query(`SELECT to_regprocedure('zzsh_order.native_prestart_refund_terminal_complete(text)') IS NOT NULL
-  AND to_regprocedure('zzsh_order.native_prestart_refund_liability_complete(text)') IS NOT NULL AS ready`)).rows[0]?.ready;
+export async function readPrestartRefundProgress(client:PoolClient,terminationId:string,b:PrestartPaymentBasis,moneyReadable:boolean,sandbox?:LocalFinancialSandbox){
+ const controlled=b.source==='CONTROLLED'&&sandbox!==undefined;
+ if(controlled)await assertLocalFinancialSandboxResource(client,sandbox,'READ_ORIGINAL');
+ const reference=controlled?localFinancialSandboxRegistration(sandbox).registration.reference:undefined;
+ const ready=(await client.query(`SELECT to_regprocedure('zzsh_order.${controlled?'local_controlled_refund_terminal_complete':'native_prestart_refund_terminal_complete'}(text)') IS NOT NULL
+  AND to_regprocedure('zzsh_order.${controlled?'local_controlled_refund_liability_complete':'native_prestart_refund_liability_complete'}(text)') IS NOT NULL AS ready`)).rows[0]?.ready;
  if(ready!==true)return {integration:'NOT_INTEGRATED' as const,intents:null,truncated:false,totals:null,reason:'REFUND_SCHEMA_NOT_DEPLOYED' as const,
-  channelRecordsChecked:false as const,bankArrival:'UNKNOWN' as const};
+  completedLocallyAt:null,channelRecordsChecked:false as const,bankArrival:'UNKNOWN' as const};
  const rows=(await client.query(`SELECT i.id,i.order_id,i.renter_user_id,i.payment_confirmation_id,i.basis_kind,i.payment_source,i.evidence_level,
    i.merchant_identity_id,i.original_payment_order_no,i.original_payment_trx_no,i.amount_cents::text,i.currency,i.responsibility_version_hash,
    i.refund_order_no,i.state,i.budget_disposition,i.requires_review,i.terminal_evidence_id,i.terminal_root_id,i.terminal_event_id,
    to_char(i.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at,
-   CASE WHEN i.state IN('SUCCEEDED','FAILED') THEN zzsh_order.native_prestart_refund_terminal_complete(i.id)
-     ELSE zzsh_order.native_prestart_refund_liability_complete(i.id) END AS complete,
-   EXISTS(SELECT 1 FROM zzsh_order.joinpay_refund_attempt a WHERE a.intent_id=i.id AND a.operation='SUBMIT') AS dispatched,
+   CASE WHEN i.state IN('SUCCEEDED','FAILED') THEN zzsh_order.${controlled?'local_controlled_refund_terminal_complete':'native_prestart_refund_terminal_complete'}(i.id)
+     ELSE zzsh_order.${controlled?'local_controlled_refund_liability_complete':'native_prestart_refund_liability_complete'}(i.id) END AS complete,
+   EXISTS(SELECT 1 FROM zzsh_order.${controlled?'local_controlled_refund_operation':'joinpay_refund_attempt'} a WHERE a.intent_id=i.id${controlled?'':" AND a.operation='SUBMIT'"}) AS dispatched,
    (SELECT a.details->>'gateReason' FROM zzsh_iam.audit_event a WHERE a.object_type='channel_refund_intent' AND a.object_id=i.id
      AND a.action='order.refund.prestart.first_submit.blocked' AND a.outcome='FAILURE' ORDER BY a.occurred_at DESC,a.id DESC LIMIT 1) AS blocked_reason,
    e.terminal AS saved_terminal,e.refund_transaction_no AS saved_trx,
    to_char(le.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS local_written_off_at,
    to_char(e.completed_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS saved_completed_at,
    to_char(e.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS saved_at
-  FROM zzsh_order.channel_refund_intent i LEFT JOIN zzsh_order.joinpay_refund_evidence e ON e.id=i.terminal_evidence_id AND e.intent_id=i.id
+  FROM zzsh_order.channel_refund_intent i LEFT JOIN zzsh_order.${controlled?'local_controlled_refund_evidence':'joinpay_refund_evidence'} e ON e.id=i.terminal_evidence_id AND e.intent_id=i.id
   LEFT JOIN zzsh_order.finance_event le ON le.id=i.terminal_event_id AND le.kind='REFUND_PAID'
-  WHERE i.payment_confirmation_id=$1 AND i.basis_kind='PRESTART_TERMINATION'
-  ORDER BY i.created_at,i.id COLLATE "C" LIMIT 51`,[b.paymentConfirmationId])).rows;
+  WHERE i.payment_confirmation_id=$1 AND i.basis_kind='PRESTART_TERMINATION'${controlled?' AND i.sandbox_registration_ref=$2':''}
+  ORDER BY i.created_at,i.id COLLATE "C" LIMIT 51`,[b.paymentConfirmationId,...(reference?[reference]:[])])).rows;
  let allocated=0n,consumed=0n,released=0n,valid=true;
  const intents=rows.slice(0,50).map(r=>{
   const bound=r.order_id===b.orderId&&r.renter_user_id===b.renterUserId&&r.payment_confirmation_id===b.paymentConfirmationId
-   &&r.payment_source==='JOINPAY'&&r.evidence_level==='JOINPAY_FORMAL'&&r.basis_kind==='PRESTART_TERMINATION'
+   &&r.payment_source===(controlled?'CONTROLLED':'JOINPAY')&&r.evidence_level===(controlled?'CONTROLLED_TEST':'JOINPAY_FORMAL')&&r.basis_kind==='PRESTART_TERMINATION'
    &&r.merchant_identity_id===b.merchantIdentityId&&r.original_payment_order_no===b.merchantOrderNo&&r.original_payment_trx_no===b.channelTrxNo
    &&r.amount_cents===b.amountCents&&r.currency==='CNY'&&r.responsibility_version_hash===b.digest&&r.complete===true
    &&['READY','SUBMITTING','UNKNOWN','PROCESSING','REVIEW_REQUIRED','SUCCEEDED','FAILED'].includes(r.state)
@@ -52,7 +56,7 @@ export async function readPrestartRefundProgress(client:PoolClient,terminationId
    state:bound?r.state:'CONFLICT',budgetDisposition:bound?r.budget_disposition:null,amountCents:bound&&moneyReadable?r.amount_cents:null,
    requiresReview:!bound||r.requires_review,updatedAt:bound?r.updated_at:null,
    firstSubmit:bound?r.dispatched?'DISPATCHED':'NEVER_DISPATCHED':'UNKNOWN',blockedReason:bound&&r.blocked_reason==='ORIGINAL_ORDER_NO_AMBIGUOUS'?r.blocked_reason:null,
-   savedChannelEvidence:bound&&r.saved_terminal&&moneyReadable?{terminal:r.saved_terminal,channelRefundTrxNo:r.saved_trx,
+   savedChannelEvidence:!controlled&&bound&&r.saved_terminal&&moneyReadable?{terminal:r.saved_terminal,channelRefundTrxNo:r.saved_trx,
      completedAt:r.saved_completed_at,observedAt:r.saved_at,trust:'SAVED_EVIDENCE_NOT_REVALIDATED' as const}:null,
    terminalEvidenceId:bound&&moneyReadable?r.terminal_evidence_id??null:null,terminalRootId:bound&&moneyReadable?r.terminal_root_id??null:null,
    terminalEventId:bound&&moneyReadable?r.terminal_event_id??null:null,
@@ -63,9 +67,9 @@ export async function readPrestartRefundProgress(client:PoolClient,terminationId
  return {integration:valid&&!budgetConflict?'INTEGRATED' as const:'UNAVAILABLE' as const,intents,truncated:rows.length>50,
   totals:complete&&moneyReadable?{originalCents:b.amountCents,allocatedCents:allocated.toString(),consumedCents:consumed.toString(),
     releasedCents:released.toString(),remainingCents:(BigInt(b.amountCents)-allocated).toString(),totalsComplete:true}:null,
-  reason:!valid?'REFUND_BINDING_CONFLICT' as const:budgetConflict?'REFUND_BUDGET_CONFLICT' as const:rows.length>50?'REFUND_LIST_TRUNCATED' as const:b.source==='CONTROLLED'?'LOCAL_CONTROLLED_ONLY' as const:null,
+  reason:!valid?'REFUND_BINDING_CONFLICT' as const:budgetConflict?'REFUND_BUDGET_CONFLICT' as const:rows.length>50?'REFUND_LIST_TRUNCATED' as const:b.source==='CONTROLLED'&&!controlled?'LOCAL_CONTROLLED_ONLY' as const:null,
   completedLocallyAt:complete&&consumed===BigInt(b.amountCents)?intents.find(i=>i.localWriteOff==='RECORDED')?.localWrittenOffAt??null:null,
-  channelRecordsChecked:false as const,bankArrival:'UNKNOWN' as const};
+  channelRecordsChecked:false as const,bankArrival:'UNKNOWN' as const,...(controlled?{dataOrigin:'LOCAL_CONTROLLED' as const}:{})};
 }
 
 /** 调用方已持有共同资金→原号→用户→intent锁；首派前再次核同原号唯一性。 */

@@ -201,3 +201,11 @@ test('退款前向迁移按0106后0107登记，来源证明由后继0108独立�
  assert.equal(j.entries.filter((e:any)=>e.tag==='0108_legacy_finance_source_proof').length,1);
  assert(readFileSync(resolve('migrations/business/0106_joinpay_abnormal_refund_basis.sql'),'utf8').includes('ADD COLUMN basis_kind'));
 });
+
+test('sandbox extension is accepted only as a complete optional group and never widens the formal insert columns',async()=>{
+ const names=['zzsh_order.local_financial_sandbox_registration','zzsh_order.local_controlled_refund_operation','zzsh_order.local_controlled_refund_evidence'];
+ const valid=fixture(['REFUND']);for(const name of names)valid.state.present.add(name);valid.state.catalog.get(intent)!.push('sandbox_registration_ref');await configure(valid.pool);assert.equal(valid.can(intent,'INSERT','sandbox_registration_ref'),false);assert.equal(valid.can(intent,'UPDATE','sandbox_registration_ref'),false);
+ const partial=fixture(['REFUND']);partial.state.present.add(names[0]!);partial.state.catalog.get(intent)!.push('sandbox_registration_ref');await assert.rejects(configure(partial.pool),/partially deployed/);assert.equal(mutations(partial).length,0);
+ const unsupported=fixture(['REFUND']);unsupported.state.catalog.get(intent)!.push('sandbox_registration_ref');await assert.rejects(configure(unsupported.pool),/column inventory differs/);assert.equal(mutations(unsupported).length,0);
+ const missingColumn=fixture(['REFUND']);for(const name of names)missingColumn.state.present.add(name);await assert.rejects(configure(missingColumn.pool),/column inventory differs/);assert.equal(mutations(missingColumn).length,0);
+});
