@@ -1,4 +1,5 @@
 import {exactCents} from './finance-money';
+import {readReferralRecovery} from './distribution-recovery-gate';
 export {exactCents} from './finance-money';
 import {readNativeWalletBuckets,readNativeReservationStatus} from './native-wallet-projection';
 import type {NativeWithdrawalScope} from './native-withdrawal-resource';
@@ -55,10 +56,32 @@ async function ready(client:PoolClient,userId:string){
   if(schema?.ready!==true)throw new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","Wallet read schema is not available");
   if(!(await client.query(`SELECT id FROM zzsh_auth_user."user" WHERE id=$1 FOR SHARE`,[userId])).rowCount)throw notFound();
 }
+/** Available already excludes reserved ledger money. This amount never grants KYC, target or channel eligibility. */
+async function readWalletWithdrawalAmount(client:PoolClient,userId:string,input:{coverageKnown:boolean;revisionKnown:boolean;available:string|null;reserved:string|null},knownRecovery?:Awaited<ReturnType<typeof readReferralRecovery>>){
+ const unknown=(reason:string)=>({...money(null),reasonCodes:[reason]});
+ if(!input.coverageKnown||input.available===null||input.reserved===null)return unknown('SOURCE_COVERAGE_UNKNOWN');
+ if(!input.revisionKnown)return unknown('WALLET_REVISION_UNAVAILABLE');
+ const installed=(await client.query(`/* wallet withdrawal amount schema */ SELECT to_regclass('zzsh_order.withdrawal_intent') IS NOT NULL AS controlled,
+  to_regclass('zzsh_order.joinpay_withdrawal_intent') IS NOT NULL AS channel`)).rows[0];
+ if(installed?.controlled!==true||installed.channel!==true)return unknown('WITHDRAWAL_RESERVATION_SOURCE_NOT_INSTALLED');
+ const reservation=(await client.query(`/* wallet withdrawal amount reservations */ SELECT COALESCE(sum(gross_cents),0)::text AS reserved,
+  count(*) FILTER(WHERE gross_cents IS NULL OR gross_cents<=0)::text AS invalid FROM (
+   SELECT gross_cents FROM zzsh_order.withdrawal_intent WHERE user_id=$1 AND funds_disposition='RESERVED'
+   UNION ALL SELECT gross_cents FROM zzsh_order.joinpay_withdrawal_intent WHERE user_id=$1 AND funds_disposition='RESERVED'
+  ) active`,[userId])).rows[0];
+ if(!reservation||reservation.invalid!=='0'||typeof reservation.reserved!=='string'||! /^(0|[1-9]\d{0,23})$/.test(reservation.reserved)||reservation.reserved!==input.reserved)return unknown('WITHDRAWAL_RESERVATION_REQUIRES_RECONCILIATION');
+ let recovery:Awaited<ReturnType<typeof readReferralRecovery>>;
+ try{recovery=knownRecovery??await readReferralRecovery(client,userId);}catch(error){if(!(error instanceof SecurityApiError&&error.status===503))throw error;return unknown('WITHDRAWAL_RECOVERY_REQUIRES_RECONCILIATION');}
+ if(recovery.knowledge!=='KNOWN')return unknown(recovery.reason);
+ // The existing writer blocks a fresh withdrawal while any confirmed referral recovery remains; no debt is silently debited here.
+ const blocked=recovery.outstandingCents!=='0'||recovery.earningCount!=='0';
+ return {...money(blocked?'0':input.available,'POSTED_LEDGER_ONLY'),reasonCodes:[...(blocked?['WITHDRAWAL_BLOCKED_BY_RECOVERY']:[]),'CURRENT_APPLICATION_CHECKS_REQUIRED']};
+}
 export async function readPersonalWallet(client:PoolClient,userId:string,nativeScope?:NativeWithdrawalScope){
   await ready(client,userId);
   const c=(await client.query(`SELECT c.origin,b.source_cutoff AS "cutoff",b.source_digest AS "sourceDigest",b.covered_set_digest AS "coveredSetDigest",c.coverage_version::text AS "coverageVersion" FROM zzsh_order.wallet_coverage c JOIN zzsh_order.finance_opening_basis b ON b.id=c.basis_id AND b.user_id=c.user_id WHERE c.user_id=$1`,[userId])).rows[0];
-  const r=(await client.query(`SELECT ledger_revision::text AS "ledgerRevision",read_revision::text AS "readRevision" FROM zzsh_order.wallet_revision WHERE user_id=$1`,[userId])).rows[0]??{ledgerRevision:"0",readRevision:"0"};
+  const revision=(await client.query(`SELECT ledger_revision::text AS "ledgerRevision",read_revision::text AS "readRevision" FROM zzsh_order.wallet_revision WHERE user_id=$1`,[userId])).rows[0];
+  const r=revision??{ledgerRevision:"0",readRevision:"0"};
   /* A native genesis subject uses the stricter native bucket aggregate instead; never scan the ledger twice. */
   const native=c?.origin==='NATIVE_GENESIS'?await readNativeWalletBuckets(client,userId):null;
   if(c?.origin==='NATIVE_GENESIS'&&!native)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Native wallet origin is not closed');
@@ -70,7 +93,8 @@ export async function readPersonalWallet(client:PoolClient,userId:string,nativeS
   if(!native){if(!totals)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Wallet ledger aggregate unavailable');
   if(c)for(const k of ['available','reserved','pending','refund'])if(BigInt(exactCents(totals[k]))<0n)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Wallet ledger requires reconciliation');}
   const nativeWithdrawal=nativeScope?await readNativeReservationStatus(client,userId,nativeScope):undefined;
-  return {...(nativeScope?{nativeWithdrawal}:{}),contractVersion:FINANCE_READ_VERSION,subjectId:userId,asOf:new Date().toISOString(),currency:"CNY",coverage:c?{knowledge:"KNOWN",...c}:{knowledge:"UNKNOWN",reason:"SOURCE_COVERAGE_NOT_ADMITTED"},...r,snapshotVersion:`${r.ledgerRevision}:${r.readRevision}:${c?.coverageVersion??"0"}`,buckets:native??{available:money(c?exactCents(totals.available):null,c?'POSTED_LEDGER_ONLY':undefined),reserved:money(c?exactCents(totals.reserved):null,c?'POSTED_LEDGER_ONLY':undefined),restricted:money(null),pendingEarnings:money(c?exactCents(totals.pending):null,c?'POSTED_LEDGER_ONLY':undefined),refundPayable:money(c?exactCents(totals.refund):null,c?'POSTED_LEDGER_ONLY':undefined)},withdrawable:{...money(null),reasonCodes:[c?"WITHDRAWAL_POLICY_NOT_ACTIVE":"SOURCE_COVERAGE_UNKNOWN"]}};
+  const withdrawable=await readWalletWithdrawalAmount(client,userId,{coverageKnown:!!c,revisionKnown:!!revision,available:native?.available.amountCents??(c?exactCents(totals.available):null),reserved:native?.reserved.amountCents??(c?exactCents(totals.reserved):null)},nativeWithdrawal?.recovery);
+  return {...(nativeScope?{nativeWithdrawal}:{}),contractVersion:FINANCE_READ_VERSION,subjectId:userId,asOf:new Date().toISOString(),currency:"CNY",coverage:c?{knowledge:"KNOWN",...c}:{knowledge:"UNKNOWN",reason:"SOURCE_COVERAGE_NOT_ADMITTED"},...r,snapshotVersion:`${r.ledgerRevision}:${r.readRevision}:${c?.coverageVersion??"0"}`,buckets:native??{available:money(c?exactCents(totals.available):null,c?'POSTED_LEDGER_ONLY':undefined),reserved:money(c?exactCents(totals.reserved):null,c?'POSTED_LEDGER_ONLY':undefined),restricted:money(null),pendingEarnings:money(c?exactCents(totals.pending):null,c?'POSTED_LEDGER_ONLY':undefined),refundPayable:money(c?exactCents(totals.refund):null,c?'POSTED_LEDGER_ONLY':undefined)},withdrawable};
 }
 export type FinanceQuery={limit:number;cursor:string|null;bucket:"AVAILABLE"|"REFUND_PAYABLE"|"RESERVED"|"PENDING_EARNINGS"|"ALL";projectionVersion?:2};
 export function parseFinanceProjectionVersion(q:URLSearchParams):1|2{const values=q.getAll('projectionVersion');if(values.length>1||values.length===1&&!['1','2'].includes(values[0]!))throw invalid('Unsupported finance projection version');return values[0]==='2'?2:1;}

@@ -52,11 +52,13 @@ node E:/zzsh/zzsh/scripts/local-auth.mjs login --resource supply_experience_cata
 
 `ensure` 幂等登记现有账号，不创建数据库、不创建或提升管理员。相同配置重复运行直接复用，不同配置拒绝覆盖；维护者确需更换账号或端口时编辑工具输出的私密 profile，并重新登录。新环境仅首次由其准备脚本创建并激活测试身份、保存凭据，再登记；不要为登录问题重跑整个 seed/reset。
 
+已有合法缓存、但没有目标环境可用密码的迁入 fixture 可登记 `cacheOnly:true`。该身份只需要 `realm`、`origin`、真实 `userId` 和此布尔字段；不得包含 `password`，也不需要用户名或管理员TOTP。已有 `<actor>.storage-state.json` 与 `<actor>.binding.json` 必须绑定同一 origin/realm/userId，由环境维护者核验后承接；`ensure` 不生成或迁移会话。`cacheOnly` 只接受布尔值，省略或 `false` 保留原密码登录方式。
+
 默认凭据集中保存在 **主检出** `apps/api/.secrets/local-auth/<resource>/profile.json`。跨 worktree 调用通过 Git 查找主检出，避免删工作树后丢凭据。每个资源集有独立账号、端口和状态文件。环境创建脚本须保持同一管理员 realm secret：它用于解密 TOTP，不能每次启动随机替换。保留密码、TOTP、数据库与稳定的服务端认证配置；停止服务不得删除这些输入。临时浏览器状态可以删除，环境退役时再一并清理凭据。
 
 ## 浏览器直接进入业务页
 
-`login` 输出 `authenticated:true` 及 `storageState` 的绝对路径，不输出 Cookie。有效缓存先经服务端确认身份再复用；过期则自动重新登录。管理员须为 ACTIVE、完成改密和 2FA、会话未锁定。用户登录使用密码，不调用短信。
+`login` 输出 `authenticated:true` 及 `storageState` 的绝对路径，不输出 Cookie。有效缓存先经服务端确认身份再复用；普通身份过期后自动密码登录。`cacheOnly:true` 身份只验证已有缓存，缺失、过期、主体不符或读取失败都拒绝，不尝试密码/TOTP、不调用短信，并保留原state/binding供排查；成功输出额外的 `cacheOnly:true`。管理员仍须为 ACTIVE、完成改密和 2FA、会话未锁定。
 
 agent-browser 使用新独立会话，并在第一次打开页面前加载状态：
 
@@ -73,7 +75,7 @@ agent-browser --session my-task-admin snapshot -i
 npm run local:auth -- otp --resource example_test --actor service-a --clipboard
 ```
 
-将剪贴板验证码粘贴到管理端，使用后清空剪贴板；省略 `--clipboard` 会在本地终端显示当前验证码。`local:admin` 是同一命令的别名。`login --fresh` 强制重新通过密码/TOTP；普通业务验收优先复用会话。
+将剪贴板验证码粘贴到管理端，使用后清空剪贴板；省略 `--clipboard` 会在本地终端显示当前验证码。`local:admin` 是同一命令的别名。普通身份的 `login --fresh` 强制重新通过密码/TOTP；cache-only身份拒绝 `--fresh` 和 `otp`，不能借此恢复或重设目标密码。普通业务验收优先复用会话。
 
 ## 失败处理
 
@@ -85,6 +87,7 @@ npm run local:auth -- otp --resource example_test --actor service-a --clipboard
 | ADMIN_ENROLLMENT_REQUIRED | 该测试账号尚未初始化，维护者只完成该账号改密/绑定/激活并保存最终凭据 |
 | ADMIN_SESSION_LOCKED | 认证专项保留锁态；普通业务验收可用 --fresh 创建新会话，不改账号或其他会话 |
 | SESSION_IDENTITY_MISMATCH | 端口/账号映射错误，停止使用该状态；不能自动换成 Boss |
+| CACHE_ONLY_SESSION_REQUIRED / CACHE_ONLY_* | 该身份仅支持已有缓存；核对原state/binding、服务归属及会话是否有效。不得自动试旧source密码、重设凭据或初始化账号；需要新认证时另走目标环境正式恢复流程 |
 | 网络错误 / 503 | 核服务归属与代理；不能重置数据库解决服务未启动 |
 
 工具只有本地 CLI，不安装到前端、不新增免鉴权接口；只连接显式 `http://127.0.0.1:<port>`，拒绝重定向。测试身份保留实际角色和对象权限，不把所有账号变成 Boss。Owner 已授权本地业务验收使用本方法，无须每轮重复申请“跳过手工认证”；生产和认证专项不使用此快捷流程。

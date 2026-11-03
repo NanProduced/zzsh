@@ -299,5 +299,7 @@
   "dist/test/membership-growth-read-admission.test.js",
   "dist/test/avatar-policy.test.js",
   "dist/test/avatar-upload-policy-replay.test.js",
-  "dist/test/profile-avatar-policy-privileges.test.js"
+  "dist/test/profile-avatar-policy-privileges.test.js",
+  "dist/test/owner-guarantee-unified-read.test.js",
+  "dist/test/personal-wallet-withdrawal-amount.test.js"
 ]

@@ -45,3 +45,11 @@ test('wallet BFF preserves authoritative timestamps including explicit unknown a
   assert.equal((await GET(new Request(root+'/entries/ledger%3Atime'),context(['entries','ledger:time']))).status,502);
  }finally{globalThis.fetch=previous;}
 });
+
+test('guarantee BFF explicitly admits unified v2, strips source-only fields and refuses a mismatched old assembly',async()=>{
+ const previous=globalThis.fetch,at='2026-10-04T00:00:00.000000Z',v2={contractVersion:'owner-guarantee-history.read.v2',projectionVersion:2,subjectId:'self',asOf:at,snapshotVersion:'unified-v2',items:[],nextCursor:null,coverage:{knowledge:'KNOWN',count:'0',mappedRecordCount:'0',reason:'ALL_BOUND_GUARANTEE_SOURCES',cutoff:null},sources:{native:{knowledge:'KNOWN',count:'0'},legacy:{knowledge:'KNOWN',count:'0',reason:'PROVED_NATIVE_BIRTH_ABSENCE'}},unknownTimeCount:'0',postedHeld:history.postedHeld,liability:history.liability,channelArrival:'UNKNOWN',privateEvidence:'SECRET'};let received;
+ try{globalThis.fetch=async(url)=>{received=String(url);return Response.json(v2);};const r=await GET(new Request(root+'/guarantees?projectionVersion=2'),context(['guarantees'])),body=await r.json();assert.equal(r.status,200);assert.equal(body.projectionVersion,2);assert.equal(body.coverage.count,'0');assert.equal(body.postedHeld.amountCents,'0');assert(!JSON.stringify(body).includes('SECRET'));assert.equal(new URL(received).searchParams.get('projectionVersion'),'2');
+  globalThis.fetch=async()=>Response.json(history);assert.equal((await GET(new Request(root+'/guarantees?projectionVersion=2'),context(['guarantees']))).status,502);
+  let calls=0;globalThis.fetch=async()=>{calls++;throw Error();};for(const query of ['projectionVersion=3','projectionVersion=2&projectionVersion=2'])assert.equal((await GET(new Request(root+'/guarantees?'+query),context(['guarantees']))).status,400);assert.equal(calls,0);
+ }finally{globalThis.fetch=previous;}
+});

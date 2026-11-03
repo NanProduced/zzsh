@@ -4,3 +4,4 @@
 .guarantee-history-records li p{margin:5px 0}
 .owner-guarantee-history>.account-fact-list{margin-top:16px}
 @media(max-width:600px){.guarantee-history-records summary{flex-direction:column;gap:5px}.owner-guarantee-history .wallet-section-heading{align-items:flex-start}}
+.guarantee-history-event summary p{margin:4px 0 0}.guarantee-event-amount{font-variant-numeric:tabular-nums;white-space:nowrap}.guarantee-history-event .account-fact-list{margin-top:14px}

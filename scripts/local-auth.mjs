@@ -40,10 +40,12 @@ export function validateProfile(p) {
   for (const [alias, actor] of Object.entries(p.actors)) {
     identifier(alias);
     if (!['admin', 'user'].includes(actor.realm)) fail('INVALID_REALM');
+    if (actor.cacheOnly !== undefined && typeof actor.cacheOnly !== 'boolean') fail('CACHE_ONLY_BOOLEAN_REQUIRED');
     if (actor.kind !== undefined && !['phone', 'username'].includes(actor.kind)) fail('INVALID_IDENTIFIER_KIND');
     localOrigin(actor.origin);
-    if (![actor.userId, actor.username, actor.password].every(v => typeof v === 'string' && v.length)) fail('ACTOR_CREDENTIALS_REQUIRED');
-    if (actor.realm === 'admin') totp(actor.totp ?? {});
+    if (!(actor.cacheOnly ? [actor.userId] : [actor.userId, actor.username, actor.password]).every(v => typeof v === 'string' && v.length)) fail('ACTOR_CREDENTIALS_REQUIRED');
+    if (actor.cacheOnly && Object.hasOwn(actor, 'password')) fail('CACHE_ONLY_PASSWORD_NOT_ALLOWED');
+    if (actor.realm === 'admin' && !actor.cacheOnly) totp(actor.totp ?? {});
   }
   return p;
 }
@@ -150,9 +152,12 @@ export function ready(actor, response) {
 }
 
 export async function authenticate(actor, { state, fresh = false, fetcher = fetch } = {}) {
+  if (actor.cacheOnly !== undefined && typeof actor.cacheOnly !== 'boolean') fail('CACHE_ONLY_BOOLEAN_REQUIRED');
+  if (actor.cacheOnly && fresh) fail('CACHE_ONLY_FRESH_NOT_ALLOWED');
   const session = new LocalSession(actor.origin, actor.realm, fresh ? [] : state?.cookies, fetcher);
   const sessionPath = actor.realm === 'admin' ? '/api/bff/admin/session' : '/api/auth/user/get-session';
   if (!fresh && session.cookies.length && ready(actor, await session.request(sessionPath))) return { state: session.state(), reused: true };
+  if (actor.cacheOnly) fail('CACHE_ONLY_SESSION_REQUIRED');
   session.cookies = [];
   if (actor.realm === 'admin') {
     const signIn = await session.request('/api/bff/admin/auth/sign-in/username', { username: actor.username, password: actor.password });
@@ -191,28 +196,36 @@ export async function main(args = process.argv.slice(2)) {
   const profile = validateProfile(readJson(profilePath));
   if (profile.resource !== v.resource) fail('RESOURCE_MISMATCH');
   if (command === 'ensure' || command === 'list') {
-    console.log(JSON.stringify({ resource: profile.resource, profile: profilePath, actors: Object.entries(profile.actors).map(([alias, a]) => ({ alias, realm: a.realm, origin: a.origin })) })); return;
+    console.log(JSON.stringify({ resource: profile.resource, profile: profilePath, actors: Object.entries(profile.actors).map(([alias, a]) => ({ alias, realm: a.realm, origin: a.origin, ...(a.cacheOnly ? { cacheOnly: true } : {}) })) })); return;
   }
   identifier(v.actor);
   const actor = profile.actors[v.actor];
   if (!actor) fail('ACTOR_NOT_REGISTERED');
   if (command === 'otp') {
+    if (actor.cacheOnly) fail('CACHE_ONLY_TOTP_NOT_AVAILABLE');
     if (actor.realm !== 'admin') fail('USER_DOES_NOT_REQUIRE_TOTP');
     const code = totp(actor.totp);
     if (v.clipboard) { execFileSync('clip.exe', [], { input: code, windowsHide: true }); console.log('TOTP copied to clipboard'); }
     else console.log(code);
     return;
   }
+  if (actor.cacheOnly && v.fresh) fail('CACHE_ONLY_FRESH_NOT_ALLOWED');
   const statePath = join(directory, `${v.actor}.storage-state.json`);
   const stampPath = join(directory, `${v.actor}.binding.json`);
   const binding = { origin: actor.origin, realm: actor.realm, userId: actor.userId };
-  const canReuse = existsSync(stampPath) && JSON.stringify(readJson(stampPath)) === JSON.stringify(binding);
+  let canReuse;
+  try { canReuse = existsSync(stampPath) && JSON.stringify(readJson(stampPath)) === JSON.stringify(binding); }
+  catch (error) { if (actor.cacheOnly) fail('CACHE_ONLY_STATE_UNREADABLE'); throw error; }
   try {
     const result = await authenticate(actor, { state: canReuse && existsSync(statePath) ? readJson(statePath) : undefined, fresh: v.fresh });
     writePrivate(statePath, result.state);
     writePrivate(stampPath, binding);
-    console.log(JSON.stringify({ authenticated: true, resource: profile.resource, actor: v.actor, realm: actor.realm, origin: actor.origin, reused: result.reused, storageState: statePath }));
+    console.log(JSON.stringify({ authenticated: true, resource: profile.resource, actor: v.actor, realm: actor.realm, origin: actor.origin, reused: result.reused, storageState: statePath, ...(actor.cacheOnly ? { cacheOnly: true } : {}) }));
   } catch (error) {
+    if (actor.cacheOnly) {
+      const code = /^[A-Z][A-Z0-9_]+$/.test(error.message ?? '') ? error.message : 'STATE_REJECTED';
+      fail(code.startsWith('CACHE_ONLY_') ? code : `CACHE_ONLY_${code}`);
+    }
     if (existsSync(statePath)) rmSync(statePath);
     throw error;
   }

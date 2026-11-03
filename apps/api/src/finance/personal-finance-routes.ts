@@ -12,6 +12,7 @@ import { readPersonalWallet, readPersonalFinanceEntries, readPersonalFinanceEntr
 import { mountChannelWithdrawalRoutes, mountControlledWithdrawalRoutes } from "./controlled-withdrawal-routes";
 import type { NativeWithdrawalOptions } from './native-withdrawal-store';
 import {readOwnerGuaranteeHistory} from './owner-guarantee-history';
+import {readUnifiedOwnerGuaranteeHistory} from './owner-guarantee-unified-read';
 export function mountPersonalFinanceRead(app:INestApplication,options:AuthSecurityOptions & {listingCursorKey?:ListingCursorKey;nativeWithdrawalScope?:NativeWithdrawalScope;joinpayWithdrawal?:NativeWithdrawalOptions}){
   mountChannelWithdrawalRoutes(app,options);
   mountControlledWithdrawalRoutes(app,options);
@@ -21,7 +22,20 @@ export function mountPersonalFinanceRead(app:INestApplication,options:AuthSecuri
       if(request.method!=="GET"||!/^\/api\/v1\/users\/me\/wallet(?:\/entries(?:\/[^/]+)?|\/guarantees)?$/.test(path))throw notFound();
       const origin=request.headers.origin;if(origin!==undefined&&origin!==options.userOrigin&&origin!==options.apiOrigin)throw forbidden();
       const context=await readUserContext(request,options);
-      const body=await withTransaction(options.pool,async client=>{if(path.includes('/entries')&&url.searchParams.get('projectionVersion')==='2')await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');await assertReplayAuthorization(client,context);if(path.endsWith('/guarantees')){for(const k of url.searchParams.keys())if(k!=='cursor'||url.searchParams.getAll(k).length!==1)throw notFound();return readOwnerGuaranteeHistory(client,context,url.searchParams.get('cursor'),options.listingCursorKey);}if(path.endsWith('/wallet')){if(url.search)throw notFound();return {wallet:await readPersonalWallet(client,context.userId,options.nativeWithdrawalScope)};}if(path.endsWith('/entries'))return await readPersonalFinanceEntries(client,context,parseFinanceQuery(url.searchParams),options.listingCursorKey);for(const k of url.searchParams.keys())if(k!=='projectionVersion')throw invalid('Unsupported wallet detail query');return await readPersonalFinanceEntry(client,context.userId,decodeFinanceEntryId(path.split('/').at(-1)!),parseFinanceProjectionVersion(url.searchParams));});
+      const body=await withTransaction(options.pool,async client=>{
+        if((path.includes('/entries')||path.endsWith('/guarantees'))&&url.searchParams.get('projectionVersion')==='2')await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+        await assertReplayAuthorization(client,context);
+        if(path.endsWith('/guarantees')){
+          for(const k of url.searchParams.keys())if(!['cursor','projectionVersion'].includes(k)||url.searchParams.getAll(k).length!==1)throw invalid('Unsupported guarantee history query');
+          return parseFinanceProjectionVersion(url.searchParams)===2
+            ?readUnifiedOwnerGuaranteeHistory(client,context,url.searchParams.get('cursor'),options.listingCursorKey)
+            :readOwnerGuaranteeHistory(client,context,url.searchParams.get('cursor'),options.listingCursorKey);
+        }
+        if(path.endsWith('/wallet')){if(url.search)throw notFound();return {wallet:await readPersonalWallet(client,context.userId,options.nativeWithdrawalScope)};}
+        if(path.endsWith('/entries'))return await readPersonalFinanceEntries(client,context,parseFinanceQuery(url.searchParams),options.listingCursorKey);
+        for(const k of url.searchParams.keys())if(k!=='projectionVersion')throw invalid('Unsupported wallet detail query');
+        return await readPersonalFinanceEntry(client,context.userId,decodeFinanceEntryId(path.split('/').at(-1)!),parseFinanceProjectionVersion(url.searchParams));
+      });
       sendJson(response,200,body,requestId);
     });
   });

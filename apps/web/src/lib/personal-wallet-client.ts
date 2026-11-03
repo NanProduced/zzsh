@@ -51,3 +51,10 @@ export async function readMyWalletEntry(userId: string, id: string, signal?: Abo
 /** No Number conversion: 24-digit accounting integers remain exact on screen. */
 export function walletMoney(c: string | null, signed = false): string { if (c === null) return "待确认"; const n = BigInt(cents(c)), abs = n < 0n ? -n : n; return (n < 0n ? "− " : signed && n > 0n ? "+ " : "") + "¥" + (abs / 100n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",") + "." + (abs % 100n).toString().padStart(2, "0"); }
 export function financeEntryLabel(e: WalletEntry): string { return e.sourceKind === "OPENING" ? "余额记录" : e.kind === "HISTORICAL" ? "余额记录" : e.sourceKind === "CONTROLLED_WITHDRAWAL_RESERVE" ? "提现资金冻结" : e.sourceKind === "CONTROLLED_WITHDRAWAL_RELEASE" ? "提现资金释放" : e.sourceKind==='CONTROLLED_WITHDRAWAL_PAYOUT'?'提现资金出账':e.bucket === "REFUND_PAYABLE" ? "订单应退款" : e.sourceKind === "NATIVE_SETTLEMENT" ? "出租结算" : e.sourceKind === "NATIVE_REFERRAL_EARNING_PENDING"?'收益进入待结算':e.sourceKind === "NATIVE_REFERRAL_EARNING_SETTLED" ? e.bucket==='PENDING_EARNINGS'?'待结算收益转出':"收益转入余额" : e.sourceKind === "NATIVE_REFERRAL_EARNING_REVOKED" ? "收益更正" : e.sourceKind === "LEGACY_DUTY_SETTLED" ? "旧单责任入账" : "资金记录"; }
+
+/** Financial amount is independent of the current application's identity, target, policy and channel checks. */
+export function walletWithdrawalNote(wallet:WalletRead):string {
+ if(wallet.withdrawable.reasonCodes.includes('WITHDRAWAL_BLOCKED_BY_RECOVERY'))return '当前有待处理的收益追回记录，暂不能发起新提现；余额没有因此扣减。';
+ if(wallet.withdrawable.knowledge!=='KNOWN')return '可申请金额仍在核对，余额不因此变为零；你仍可查看提现记录。';
+ return '可申请提现：'+walletMoney(wallet.withdrawable.amountCents)+'。申请时需核对收款资料与提现条件，到账以银行结果为准。';
+}

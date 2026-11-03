@@ -153,7 +153,7 @@ test('wallet keeps opening-balance facts without exposing platform source labels
 
 test('BIND-03 wallet entry renders the new workspace independently of unreadable wallet money and keeps legacy recovery reachable',async()=>{const p=await probe(async()=>reply({error:{code:'EVIDENCE_UNAVAILABLE'}},503),'wallet=withdraw');try{localStorage.setItem(withdrawalMarker,JSON.stringify({version:1,userId:'user_A',key:'original-key',body:{amountCents:'200',destinationId:'bank',policyVersion:'server_policy',expectedWalletVersion:'1'}}));await p.render();assert(p.host.querySelector('[data-testid="bank-binding-workspace"]'));assert.equal(p.host.querySelector('[data-testid="bank-binding-workspace"]').dataset.scope,'user_A:1');assert.match(p.host.textContent,/银行卡与提现/);assert(p.host.querySelector('a[href*="wallet=withdraw-local"]'));assert(!p.host.querySelector('.controlled-withdrawal'));}finally{localStorage.removeItem(withdrawalMarker);await p.close();}});
 
-test('guarantee history points to other records while the unified reader is incomplete',async()=>{
+test('guarantee records remain independently reachable when wallet money is unavailable',async()=>{
  const p=await probe(async()=>reply({error:{code:'EVIDENCE_UNAVAILABLE'}},503),'wallet=guarantees');
- try{await p.render();assert.match(p.host.textContent,/其他收退记录/);assert(p.host.querySelector('a[href="/account?view=credit"]'));assert.equal(p.host.querySelector('.account-module-heading button'),null);}finally{await p.close();}
+ try{await p.render();assert.match(p.host.textContent,/上架保证金/);assert.doesNotMatch(p.host.textContent,/其他收退记录/);assert(p.host.querySelector('a[href="/account?view=credit"]'));assert.equal(p.host.querySelector('.account-module-heading button'),null);}finally{await p.close();}
 });

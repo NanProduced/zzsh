@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { authenticate, LocalSession, localOrigin, ready, totp, validateProfile, main } from './local-auth.mjs';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, relative } from 'node:path';
 
@@ -106,6 +106,109 @@ test('ensure preserves credentials across repeats and refuses silent replacement
     assert.ok(output.every(line => !line.includes(actor.password) && !line.includes(actor.totp.secret)));
   } finally {
     console.log = originalLog;
+    const child = relative(resolve(tmpdir()), resolve(root));
+    if (child.startsWith('zzsh-local-auth-test-') && !child.includes('/') && !child.includes('\\')) rmSync(root, { recursive: true });
+  }
+});
+
+const cacheActor = { realm: 'user', origin: 'http://127.0.0.1:4310', userId: 'legacy-user', cacheOnly: true };
+const cacheState = { cookies: [{ name: 'zzsh_user.session_token', value: 'existing-cache', domain: '127.0.0.1', path: '/', expires: -1, httpOnly: true, secure: false, sameSite: 'Lax' }], origins: [] };
+const userSnapshot = { user: { id: cacheActor.userId }, session: { id: 'existing-session' } };
+
+test('cache-only profiles need a subject but store no password; boolean inputs remain strict', () => {
+  const profile = entry => ({ version: 1, localTest: true, resource: 'cache_fixture', actors: { legacy: entry } });
+  assert.equal(validateProfile(profile(cacheActor)).actors.legacy.cacheOnly, true);
+  assert.equal(validateProfile(profile({ realm: 'admin', origin: actor.origin, userId: actor.userId, cacheOnly: true })).actors.legacy.realm, 'admin');
+  for (const cacheOnly of ['true', 'false', null, 0, 1, {}, []]) assert.throws(() => validateProfile(profile({ ...cacheActor, cacheOnly })), /CACHE_ONLY_BOOLEAN_REQUIRED/);
+  for (const password of ['old-source-password', '', null, undefined]) assert.throws(() => validateProfile(profile({ ...cacheActor, password })), /CACHE_ONLY_PASSWORD_NOT_ALLOWED/);
+  assert.throws(() => validateProfile(profile({ ...cacheActor, userId: '' })), /ACTOR_CREDENTIALS_REQUIRED/);
+  assert.throws(() => validateProfile(profile({ ...cacheActor, cacheOnly: false })), /ACTOR_CREDENTIALS_REQUIRED/);
+  assert.equal(validateProfile(profile({ ...actor, cacheOnly: false })).actors.legacy.password, actor.password);
+});
+
+test('cache-only authentication verifies one existing user/admin session and sends no password', async () => {
+  for (const [entry, state, body] of [[cacheActor, cacheState, userSnapshot],
+    [{ realm: 'admin', origin: actor.origin, userId: actor.userId, cacheOnly: true }, { ...cacheState, cookies: cacheState.cookies.map(c => ({ ...c, name: 'zzsh_admin.session_token' })) }, snapshot]]) {
+    const calls = [];
+    const result = await authenticate(entry, { state, fetcher: async (url, options) => {
+      calls.push(url.pathname); assert.equal(options.method, 'GET'); assert.equal(options.body, undefined);
+      return response(body);
+    } });
+    assert.equal(result.reused, true);
+    assert.equal(calls.length, 1);
+    assert.match(calls[0], /session$/);
+  }
+});
+
+test('missing/expired cache and --fresh reject before any request', async () => {
+  let calls = 0;
+  const fetcher = async () => { calls++; throw Error('must not request'); };
+  for (const state of [undefined, { cookies: [] }, { cookies: cacheState.cookies.map(c => ({ ...c, expires: 1 })) },
+    { cookies: cacheState.cookies.map(c => ({ ...c, name: 'zzsh_admin.session_token' })) }]) {
+    await assert.rejects(authenticate(cacheActor, { state, fetcher }), /CACHE_ONLY_SESSION_REQUIRED/);
+  }
+  await assert.rejects(authenticate(cacheActor, { state: cacheState, fresh: true, fetcher }), /CACHE_ONLY_FRESH_NOT_ALLOWED/);
+  await assert.rejects(authenticate({ ...cacheActor, cacheOnly: 'true' }, { state: cacheState, fetcher }), /CACHE_ONLY_BOOLEAN_REQUIRED/);
+  assert.equal(calls, 0);
+});
+
+test('a rejected cache is never followed by password/TOTP or a replacement session', async () => {
+  for (const reply of [response(null), response({}, [], 401), response({}, [], 403), response({ ...userSnapshot, user: { id: 'other-user' } }),
+    response({ ...userSnapshot, user: { id: cacheActor.userId, suspended: true } })]) {
+    let calls = 0;
+    await assert.rejects(authenticate(cacheActor, { state: cacheState, fetcher: async (_url, options) => { calls++; assert.equal(options.method, 'GET'); return reply; } }));
+    assert.equal(calls, 1);
+  }
+  let calls = 0;
+  await assert.rejects(authenticate(cacheActor, { state: cacheState, fetcher: async () => { calls++; throw Error('private transport diagnostic'); } }), /AUTH_NETWORK_OR_REDIRECT_ERROR/);
+  assert.equal(calls, 1);
+});
+
+test('ordinary actors still fall back from an expired server session to password login', async () => {
+  const user = { ...cacheActor, cacheOnly: false, username: 'existing-user', password: 'correct-password' }, calls = [];
+  const result = await authenticate(user, { state: cacheState, fetcher: async (url, options) => {
+    calls.push({ path: url.pathname, method: options.method });
+    if (calls.length === 1) return response(null, [], 401);
+    if (calls.length === 2) { assert.equal(JSON.parse(options.body).password, user.password); return response({}, ['zzsh_user.session_token=renewed; Path=/; HttpOnly']); }
+    return response(userSnapshot);
+  } });
+  assert.equal(result.reused, false);
+  assert.deepEqual(calls.map(c => c.method), ['GET', 'POST', 'GET']);
+});
+
+test('CLI cache-only mode is listed, reuses exact binding and preserves rejected state bytes', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'zzsh-local-auth-test-')), store = join(root, 'store'), directory = join(store, 'cache_fixture');
+  const input = join(root, 'fixture.json'), statePath = join(directory, 'legacy.storage-state.json'), stampPath = join(directory, 'legacy.binding.json');
+  const binding = { origin: cacheActor.origin, realm: cacheActor.realm, userId: cacheActor.userId };
+  const originalLog = console.log, originalFetch = globalThis.fetch, output = [];
+  let requests = 0;
+  console.log = value => output.push(JSON.parse(value));
+  try {
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(input, JSON.stringify({ version: 1, localTest: true, resource: 'cache_fixture', actors: { legacy: cacheActor } }));
+    await main(['ensure', '--resource', 'cache_fixture', '--input', input, '--store', store]);
+    assert.equal(output.at(-1).actors[0].cacheOnly, true);
+    const login = ['login', '--resource', 'cache_fixture', '--actor', 'legacy', '--store', store];
+    writeFileSync(statePath, JSON.stringify(cacheState)); writeFileSync(stampPath, JSON.stringify(binding));
+    globalThis.fetch = async (_url, options) => { requests++; assert.equal(options.method, 'GET'); return response(userSnapshot); };
+    await main(login);
+    assert.equal(output.at(-1).authenticated, true); assert.equal(output.at(-1).cacheOnly, true); assert.equal(output.at(-1).reused, true); assert.equal(requests, 1);
+    for (const kind of ['fresh', 'otp', 'missing-binding', 'wrong-binding', 'wrong-origin', 'wrong-realm', 'unreadable-binding', 'unreadable-state', 'expired', '401', 'wrong-subject', 'network']) {
+      writeFileSync(statePath, kind === 'unreadable-state' ? '{' : JSON.stringify(kind === 'expired' ? { cookies: cacheState.cookies.map(c => ({ ...c, expires: 1 })) } : cacheState));
+      const nextBinding = kind === 'wrong-binding' ? { ...binding, userId: 'other-user' } : kind === 'wrong-origin' ? { ...binding, origin: 'http://127.0.0.1:4312' } : kind === 'wrong-realm' ? { ...binding, realm: 'admin' } : binding;
+      writeFileSync(stampPath, kind === 'unreadable-binding' ? '{' : JSON.stringify(nextBinding));
+      if (kind === 'missing-binding') rmSync(stampPath);
+      const before = readFileSync(statePath, 'utf8'), stamp = existsSync(stampPath) ? readFileSync(stampPath, 'utf8') : null;
+      requests = 0;
+      globalThis.fetch = async (_url, options) => { requests++; assert.equal(options.method, 'GET'); if (kind === 'network') throw Error('private error'); return response(kind === 'wrong-subject' ? { ...userSnapshot, user: { id: 'other-user' } } : null, [], kind === '401' ? 401 : 200); };
+      const args = kind === 'fresh' ? [...login, '--fresh'] : kind === 'otp' ? ['otp', ...login.slice(1)] : login;
+      await assert.rejects(main(args), /CACHE_ONLY_/);
+      assert.equal(readFileSync(statePath, 'utf8'), before, kind);
+      assert.equal(existsSync(stampPath) ? readFileSync(stampPath, 'utf8') : null, stamp, kind);
+      assert.equal(requests, ['401', 'wrong-subject', 'network'].includes(kind) ? 1 : 0, kind);
+    }
+  } finally {
+    console.log = originalLog; globalThis.fetch = originalFetch;
     const child = relative(resolve(tmpdir()), resolve(root));
     if (child.startsWith('zzsh-local-auth-test-') && !child.includes('/') && !child.includes('\\')) rmSync(root, { recursive: true });
   }
