@@ -1,4 +1,6 @@
 "use client";
+import { ProfileImage } from "@zzsh/ui/profile-image";
+
 
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { ChevronLeft, CircleAlert, EyeOff, Eye, RefreshCw, Search, UserPlus, X } from "lucide-react";
@@ -26,7 +28,7 @@ export const ORDER_GROUP_SETTINGS_EVENT = "zzsh:im-order-group-settings";
 export type InviteOrderGroupMember = (orderId: string, adminUserId: string) => Promise<void>;
 
 type StoredPreference = Partial<Record<keyof OrderGroupPreference, unknown>>;
-type AdminInviteTarget = { adminUserId: string; displayName: string };
+type AdminInviteTarget = { adminUserId: string; displayName: string; avatar?: string | null };
 type AdminInviteTargetRead = { targets?: AdminInviteTarget[] };
 type ReadState = "idle" | "loading" | "ready" | "denied" | "unavailable" | "error";
 type InvitePhase = { key: string; name: string; state: "SENDING" | "SENT" | "FAILED" | "UNAVAILABLE" };
@@ -83,7 +85,7 @@ function relationOf(member: Pick<OrderTeamMember, "responsible">): string {
 function MemberAvatar({ member, name }: { member: Pick<OrderTeamMember, "avatar">; name: string }) {
   const avatar = typeof member.avatar === "string" && member.avatar.trim() ? member.avatar : null;
   return <span className="im-og-avatar" aria-hidden="true">
-    {avatar ? <img src={avatar} alt="" loading="lazy" onError={(event) => { event.currentTarget.hidden = true; }} /> : initialOf(name)}
+    <ProfileImage src={avatar} fallback={initialOf(name)} loading="lazy" />
   </span>;
 }
 
@@ -266,7 +268,7 @@ export function AdminOrderGroupSettingsDrawer({ info, request, preferences, onPr
                   const sending = invitePhase?.state === "SENDING" && invitePhase.key === candidate.adminUserId;
                   const invited = invitePhase?.state === "SENT" && invitePhase.key === candidate.adminUserId;
                   return <li className="im-og-candidate" key={candidate.adminUserId}>
-                    <span className="im-og-avatar" aria-hidden="true">{initialOf(name)}</span>
+                    <span className="im-og-avatar" aria-hidden="true"><ProfileImage src={candidate.avatar} fallback={initialOf(name)} /></span>
                     <span className="im-og-candidate-copy"><b>{name}</b><small>平台管理员</small></span>
                     <button type="button" className="im-og-candidate-invite" data-action="invite-admin-candidate" disabled={!inviteMember || sending || invited}
                       title={!inviteMember ? "邀请功能暂不可用" : undefined} onClick={() => void invite(candidate)}>{sending ? "邀请中…" : invited ? "已邀请" : inviteMember ? "邀请" : "暂不可用"}</button>

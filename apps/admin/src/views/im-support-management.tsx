@@ -1,4 +1,6 @@
 "use client";
+import { ProfileImage } from "@zzsh/ui/profile-image";
+
 
 /**
  * 客服管理入口：看板组件独立在 im-support-statistics.tsx，本文件保留子页入口与只读巡视。
@@ -474,10 +476,10 @@ export function SupportPatrol({ active, request, currentAdminUserId, onOpenProfi
         {listState === "error" ? <div className="im-wb-list-empty"><CircleAlert size={20} aria-hidden="true" /><strong>会话列表读取失败</strong><span>{listError}</span><Button variant="outline" size="sm" onClick={refreshList}>重新读取</Button></div> : null}
         {visibleItems.map((item) => {
           const name = safeIdentityName(item.title) ?? "会话成员";
-          const avatar = item.type === "ORDER" ? null : supportedImageUrl(item.userAvatar);
+
           return <button type="button" key={item.id} className="im-wb-row" data-active={selectedId === item.id} aria-current={selectedId === item.id ? "page" : undefined}
           onClick={() => setSelectedId(item.id)}>
-          <span className="im-wb-row-av" aria-hidden="true">{avatar ? <img src={avatar} alt="" /> : initialOf(name)}</span>
+          <span className="im-wb-row-av" aria-hidden="true"><ProfileImage src={item.userAvatar} fallback={initialOf(name)} /></span>
           <span className="im-wb-row-copy">
             <span className="im-wb-row-top">
               <b>{name}</b>
@@ -515,7 +517,7 @@ export function SupportPatrol({ active, request, currentAdminUserId, onOpenProfi
     <section className="im-wb-chat im-wb-mgmt-chat" aria-label="只读会话">
       {!selected ? <div className="im-wb-mgmt-chat-empty"><Headphones size={22} aria-hidden="true" /><strong>选择一条会话巡视</strong><span>打开即只读查看，不填写原因，也不发送消息。</span></div> : <>
         <header className="im-wb-chat-head">
-          <span className="im-wb-chat-av" aria-hidden="true">{selected.userAvatar && supportedImageUrl(selected.userAvatar) ? <img src={supportedImageUrl(selected.userAvatar)!} alt="" /> : initialOf(selectedName ?? "会话成员")}</span>
+          <span className="im-wb-chat-av" aria-hidden="true"><ProfileImage src={selected.userAvatar} fallback={initialOf(selectedName ?? "会话成员")} /></span>
           <div className="im-wb-chat-title">
             <h2>{selectedName}</h2>
             <span>{auditTypeLabel(selected.type)} · {auditStateLabel(selected.state)} · 当前接待：{selected.adminName}</span>
@@ -612,13 +614,13 @@ function AuditTimeline({ messages, request, onOpenProfile }: { messages: AuditMe
     const platform = sender?.role === "ADMIN", assistant = sender?.role === "SYSTEM";
     const name = safeIdentityName(sender?.displayName, message.senderId) ?? "会话成员";
     const grouped = Boolean(!assistant && previous && previous.senderId === message.senderId && message.createTime - previous.createTime < GROUP_WINDOW_MS);
-    const avatar = sender?.avatar ? supportedImageUrl(sender.avatar) : null;
+
     const role = roleLabel(sender?.role);
     const cardText = message.card ? `${CARD_LABELS[message.card.kind] ?? "订单动态"}${message.text ? `\n${message.text}` : ""}` : message.text;
     const key = messageKey(message);
     nodes.push(<MessageScrollerPrimitive.Item key={key} messageId={key}>
       <Message align={platform ? "end" : "start"} className="im-wb-msg" data-self={platform} data-grouped={grouped} data-message-id={key}>
-        <SenderPreview sender={sender} name={name} request={request} onOpenProfile={onOpenProfile} avatar><MessageAvatar className="im-wb-av" aria-hidden="true">{assistant ? <img src="/art/zhouzhou/avatar.webp" alt="" /> : avatar ? <img src={avatar} alt="" /> : initialOf(name)}</MessageAvatar></SenderPreview>
+        <SenderPreview sender={sender} name={name} request={request} onOpenProfile={onOpenProfile} avatar><MessageAvatar className="im-wb-av" aria-hidden="true">{assistant ? <img src="/art/zhouzhou/avatar.webp" alt="" /> : <ProfileImage src={sender?.avatar} fallback={initialOf(name)} />}</MessageAvatar></SenderPreview>
         <MessageContent className="im-wb-msg-body" data-card={message.card ? "true" : undefined}>
           {grouped ? null : <MessageHeader className="im-wb-msg-meta"><SenderPreview sender={sender} name={name} request={request} onOpenProfile={onOpenProfile}><b>{name}</b></SenderPreview>{role ? <span className="im-wb-role-tag" data-role={role}>{role}</span> : null}<time>{formatTime(message.createTime)}</time></MessageHeader>}
           <SupportMessageBody message={{...message,text:cardText}} image={imageOf(message)} replySenderName={safeIdentityName(messages.find(item => item.messageClientId === message.reply?.messageId || item.messageServerId === message.reply?.messageId)?.sender?.displayName)} align={platform ? "end" : "start"} />

@@ -41,7 +41,7 @@ const vite = await createServer({
   root: adminRoot,
   plugins: [react()],
   resolve: { alias: { "@": path.join(adminRoot, "src") } },
-  server: { middlewareMode: true, hmr: false },
+  server: { middlewareMode: true, hmr: false, ws: false },
 });
 const { ImSupportView } = await vite.ssrLoadModule("/src/views/im-support-view.tsx");
 const notifications = await vite.ssrLoadModule("/src/views/im-support-notifications.ts");
@@ -73,7 +73,7 @@ globalThis.fetch = async (input, init = {}) => {
   if (url.pathname.endsWith("/im/message-access")) return json({ authorized: true });
   if (url.pathname.endsWith("/context")) {
     if (contextStatus !== 200) return new browser.Response("{}", { status: contextStatus });
-    return json({ consultationId: "c-1", version: 1, service: { type: "SERVICE", state: "ACTIVE", messageScopeState: "READY", handler: null }, user: { status: "available", publicId: "user-a", displayName: "测试用户甲", avatar: null }, subject: contextSubject, membership: { status: "unavailable", reason: "membership_projection_not_integrated" } });
+    return json({ consultationId: "c-1", version: 1, service: { type: "SERVICE", state: "ACTIVE", messageScopeState: "READY", handler: null }, user: { status: "available", publicId: "user-a", displayName: "测试用户甲", avatar: fixture.contextAvatar ?? null }, subject: contextSubject, membership: { status: "unavailable", reason: "membership_projection_not_integrated" } });
   }
   if (url.pathname.includes("/users/")) { if (profileGate) await profileGate; return json(profileFixture); }
   if (url.pathname.includes("/events")) return json({ events: fixture.events ?? [], nextCursor: null });
@@ -175,6 +175,22 @@ test("chat header and queue follow the real selected consultation", async (t) =>
   assert.equal(rootNode.querySelector(".im-wb-chat-title h2").textContent, "用户 B · 平台咨询");
   assert.match(rootNode.querySelector(".im-wb-chat-title span").textContent, /第 1 轮接待 · 等待客服接入/);
   assert.equal(rootNode.querySelector("textarea").disabled, true, "a waiting consultation cannot be replied to");
+});
+
+test("managed avatars reach the consultation queue, both speakers and the related user card", async (t) => {
+  const user = "/api/v1/profile/avatars/user/user-a/1", admin = "/api/v1/profile/avatars/admin/admin-a/2";
+  fixture = { consultations: [{ ...activeConsultation, user: { ...activeConsultation.user, avatar: user } }], contextAvatar: user, post: null,
+    history: [{ messageClientId: "avatar-peer", messageServerId: "avatar-peer", conversationId: "conv-a", senderId: "user-a", createTime: Date.now() - 1000, messageType: 0, text: "头像提问" },
+      { messageClientId: "avatar-self", messageServerId: "avatar-self", conversationId: "conv-a", senderId: "admin-a", createTime: Date.now(), messageType: 0, text: "头像回复" }] };
+  const actor = snapshot(["im.support.read", "im.support.accept", "user.directory.read"]); actor.user.image = admin;
+  const { rootNode } = await mount(t, { snapshot: actor }); await selectFirst(rootNode);
+  await waitFor(() => rootNode.querySelectorAll(".im-wb-msg").length === 2);
+  assert.equal(rootNode.querySelector(".im-wb-row-av img").getAttribute("src"), user);
+  assert.equal(rootNode.querySelector(".im-wb-chat-av img").getAttribute("src"), user);
+  assert.equal(rootNode.querySelector('.im-wb-msg[data-self="true"] .im-wb-av img').getAttribute("src"), admin);
+  assert.equal(rootNode.querySelector('.im-wb-msg[data-from="customer"] .im-wb-av img').getAttribute("src"), user);
+  await waitFor(() => rootNode.querySelector(".im-wb-avatar img"));
+  assert.equal(rootNode.querySelector(".im-wb-avatar img").getAttribute("src"), user);
 });
 
 test("the empty waiting filter explains automatic assignment and keeps manual claim available", async (t) => {
@@ -578,7 +594,7 @@ test("an unknown subject status fails closed instead of exposing a bare referenc
   assert.doesNotMatch(rootNode.querySelector(".im-wb-details").textContent, /order-secret/);
 });
 
-const FULL_PROFILE = { user: { userId: "user-a", image: "https://cdn.example/avatar-a.png", maskedPhone: "138****8000", phoneNumberVerified: true, maskedEmail: "a***@example.com", accountStatus: "ACTIVE", suspended: false, identity: { status: "VERIFIED", ageStatus: "ADULT", provider: "local-fixture", verifiedAt: null }, identityStatus: "VERIFIED", ageStatus: "ADULT", source: { kind: "MIGRATED" }, registeredAt: "2026-01-05T00:00:00.000Z", resourceSummary: { state: "ready", count: 4 }, orderSummary: { state: "ready", currentCount: 18 }, lastBusinessActivity: { state: "not_connected", domains: ["ORDER"] } } };
+const FULL_PROFILE = { user: { userId: "user-a", image: "/api/v1/profile/avatars/user/user-a/1", maskedPhone: "138****8000", phoneNumberVerified: true, maskedEmail: "a***@example.com", accountStatus: "ACTIVE", suspended: false, identity: { status: "VERIFIED", ageStatus: "ADULT", provider: "local-fixture", verifiedAt: null }, identityStatus: "VERIFIED", ageStatus: "ADULT", source: { kind: "MIGRATED" }, registeredAt: "2026-01-05T00:00:00.000Z", resourceSummary: { state: "ready", count: 4 }, orderSummary: { state: "ready", currentCount: 18 }, lastBusinessActivity: { state: "not_connected", domains: ["ORDER"] } } };
 const IM_BASE = ["im.support.read", "im.support.accept"];
 
 async function rerender(root, permissions) {

@@ -1,4 +1,6 @@
 "use client";
+import { ProfileImage, managedProfileImage } from "@zzsh/ui/profile-image";
+
 
 import { useEffect, useRef, useState } from "react";
 import { CircleAlert, Info, RefreshCw } from "lucide-react";
@@ -185,7 +187,7 @@ export function ConsultationUserCard({ consultationId, rowUserId, fallbackName, 
   // profile whenever the capability set or subject changes, so a non-null profile is current.
   const facts = scope.profile ? profile : null;
   const displayName = context?.user.displayName || fallbackName;
-  const avatar = context?.user.avatar || facts?.image || null;
+  const avatar = managedProfileImage(context?.user.avatar) || managedProfileImage(facts?.image);
   const subject = subjectView(context, state);
   const identityStatus = facts?.identity?.status || facts?.identityStatus || "UNKNOWN";
   const ageStatus = facts?.identity?.ageStatus || facts?.ageStatus || "UNKNOWN";
@@ -195,7 +197,7 @@ export function ConsultationUserCard({ consultationId, rowUserId, fallbackName, 
 
   const identityBody = <>
     <ItemMedia variant="icon" className="im-wb-avatar" aria-hidden="true">
-      {avatar ? <img src={avatar} alt="" /> : initialOf(displayName)}
+      <ProfileImage src={avatar} fallback={initialOf(displayName)} />
     </ItemMedia>
     <div className="im-wb-user-copy grid min-w-0 flex-1 gap-1 text-left">
       <CardTitle className="im-wb-user-identity-name line-clamp-2 text-sm leading-snug font-medium">{displayName}</CardTitle>

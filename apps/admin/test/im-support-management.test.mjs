@@ -652,14 +652,14 @@ test("patrol shows projected names, avatars and roles without provider accounts 
     conversations: {
       items: [patrolConversation("identity", {
         title: "林晓", userName: "", conversationId: "conv-identity",
-        user: { id: "user-current", name: "林晓", avatar: "https://example.test/avatar-user.png" },
+        user: { id: "user-current", name: "林晓", avatar: "/api/v1/profile/avatars/user/user-current/1" },
       })],
       nextCursor: null,
     },
   });
   fixture.messages = {
     messages: [
-      patrolMessage("1", "user-current", "租客消息", at, { sender: { displayName: "林晓", avatar: "https://example.test/avatar-user.png", role: "USER" } }),
+      patrolMessage("1", "user-current", "租客消息", at, { sender: { displayName: "林晓", avatar: "/api/v1/profile/avatars/user/user-current/1", role: "USER" } }),
       patrolMessage("2", "admin-current", "当前客服", at + 1_000, { sender: { displayName: "陈晨", avatar: null, role: "ADMIN" } }),
       patrolMessage("3", "admin-old", "转交前客服", at + 2_000, { sender: { displayName: "王悦", avatar: null, role: "ADMIN" } }),
       patrolMessage("4", "bot", "助手消息", at + 3_000, { sender: { displayName: "洲洲助手", avatar: null, role: "SYSTEM" } }),

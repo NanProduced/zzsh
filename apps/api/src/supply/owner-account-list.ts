@@ -62,7 +62,7 @@ export const OWNER_ACCOUNT_LIST_SQL = `SELECT /* owner-account-list */ * FROM (
    u.name AS owner_name,g.name AS game_name,v.payload,v.presentation->'items' AS presentation_items,
    (v.rule_release_id IS NOT DISTINCT FROM g.current_release_id) AS rule_current,
    ao.id AS ao_id,ao.display_no AS ao_display_no,ao.status AS ao_status,ru.name AS ao_renter_name,ao.term_seconds::text AS ao_term_seconds,
-   ${utc("ao.paid_at")} AS ao_started_at,${utc("(ao.paid_at + make_interval(secs => ao.term_seconds))")} AS ao_deadline_at,
+   ${utc("opening.confirmed_at")} AS ao_started_at,${utc("(opening.confirmed_at + make_interval(secs => ao.term_seconds))")} AS ao_deadline_at,
    ao.quote_snapshot->'ownerTotal' AS ao_owner_amount,
    ${RENTAL_STATE_SQL} AS rental_state
   FROM zzsh_supply.rental_account a
@@ -71,6 +71,7 @@ export const OWNER_ACCOUNT_LIST_SQL = `SELECT /* owner-account-list */ * FROM (
   JOIN zzsh_auth_user."user" u ON u.id=a.owner_user_id
   JOIN zzsh_supply.game g ON g.id=a.game_id
   LEFT JOIN LATERAL (SELECT o.* FROM zzsh_order.rental_order o WHERE o.account_id=a.id AND o.owner_user_id=a.owner_user_id AND o.status IN ('PENDING_PAYMENT','PAID') ORDER BY o.created_at DESC LIMIT 1) ao ON true
+  LEFT JOIN zzsh_order.rental_opening opening ON opening.order_id=ao.id AND opening.status='CONFIRMED'
   LEFT JOIN zzsh_auth_user."user" ru ON ru.id=ao.renter_user_id
   WHERE a.owner_user_id=$1 AND a.id>$2
 ) t WHERE ($3::text IS NULL OR t.rental_state=$3) ORDER BY t.id LIMIT $4`;

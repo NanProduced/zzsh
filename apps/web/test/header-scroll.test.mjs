@@ -14,6 +14,8 @@ function render(stage,home=true){
   if(name==='react')return {...React,useEffect:()=>{},useState:()=>{const i=hook++;return [[true,stage,true,false][i],value=>{if(i===1)updates.push(value);}];}};
   if(name==='motion/react')return {useScroll:()=>({scrollY:{}}),useMotionValueEvent:(_,__,fn)=>{listener=fn;},motion:{div:({initial,animate,transition,...props})=>React.createElement('div',props)}};
   if(name==='next/link')return {default:props=>React.createElement('a',props)};
+  // Guest-only scroll surface; the shared image tests exercise authenticated avatar rendering.
+  if(name==='@zzsh/ui/profile-image')return {ProfileImage:()=>null};
   if(name.includes('user-session-provider'))return {useUserSession:()=>({status:'guest'})};
   if(name.includes('auth-overlay-provider'))return {useAuthOverlay:()=>({open(){}})};
   if(name.includes('brand-logo'))return {BrandLogo:()=>null};

@@ -118,6 +118,18 @@ test("thread views keep history and sending after the round is closed, and never
   assert.equal(dismissed.threadState, "IDLE");
 });
 
+test("consultation projections keep managed user/admin avatars and discard external legacy images", () => {
+  const user = "/api/v1/profile/avatars/user/user_a/1", admin = "/api/v1/profile/avatars/admin/admin_a/2";
+  const row = contextRow({ userImage: user, adminImage: admin });
+  const staff = toView(row, identityFor("ADMIN", "admin_a").accountId, true, "admin_a");
+  assert.equal(staff.user?.avatar, user); assert.equal(staff.assignedAdmin?.avatar, admin);
+  assert.equal(toView(row, identityFor("USER", "user_a").accountId).assignedAdmin?.avatar, admin);
+  for (const image of ["https://legacy.invalid/avatar.jpg", "data:image/png,private", "//external.invalid/a", "/api/v1/profile/avatars/user/user_a/1?redirect=x"]) {
+    const value = toView(contextRow({ userImage: image, adminImage: image }), identityFor("ADMIN", "admin_a").accountId, true, "admin_a");
+    assert.equal(value.user?.avatar, undefined); assert.equal(value.assignedAdmin?.avatar, undefined);
+  }
+});
+
 test("user read stays authorized across rounds while a missing thread Team fails closed", async () => {
   const f = fakePool((sql, values) => {
     const auth = userAuth()(sql);

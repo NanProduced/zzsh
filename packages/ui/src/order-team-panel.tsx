@@ -1,4 +1,5 @@
 "use client";
+import { ProfileImage } from "./profile-image";
 import { Fragment, useCallback, useEffect, useRef, useState, type ChangeEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { ImLifecycleSupersededError } from "@zzsh/im-client/lifecycle";
 import { mergeImMessages } from "@zzsh/im-client/message-state";
@@ -646,7 +647,7 @@ export function OrderTeamPanel({identity,realm,client,connection,active,visible=
   </header>:null;
   const orderEscalation=info?(compact?<details className="support-order-summary"><summary>{orderTeamLabel(info)} · 查看订单摘要</summary><p>{info.gameName} · {info.account.title?.trim()||"账号"}</p><a href={orderDetailPath(info,party)}>前往订单核对</a><OrderTeamEscalation value={info.supportEscalation}/></details>:<OrderTeamEscalation value={info.supportEscalation}/>):null;
   const orderFulfillment=info&&realm==="admin"&&renderFulfillment?<div className="order-team-fulfillment-slot">{renderFulfillment({orderId:info.orderId,displayNo:info.displayNo,teamState:info.teamState,canSend:info.canSend,...(info.frozenInventory?{frozenInventory:info.frozenInventory}:{})})}</div>:null;
-  const orderMembers=info?<ul className="order-team-members" aria-label="群成员">{info.members.map(m=><li key={m.accountId}>{m.avatar?<img src={m.avatar} alt="" width={28} height={28} onError={e=>{e.currentTarget.hidden=true;}}/>:<span aria-hidden="true">●</span>}<span>{m.name?.trim()||role(m)}<small>{role(m)}</small>{realm==="admin"&&m.party!=="STAFF"?<small>用户编号 {m.platformId} · 会员：未知 · 实名：未知</small>:null}</span></li>)}</ul>:null;
+  const orderMembers=info?<ul className="order-team-members" aria-label="群成员">{info.members.map(m=><li key={m.accountId}><ProfileImage src={m.avatar} fallback={<span aria-hidden="true">{Array.from(m.name?.trim()||role(m))[0]||"用"}</span>} width={28} height={28}/><span>{m.name?.trim()||role(m)}<small>{role(m)}</small>{realm==="admin"&&m.party!=="STAFF"?<small>用户编号 {m.platformId} · 会员：未知 · 实名：未知</small>:null}</span></li>)}</ul>:null;
   const orderAsideNodes=info?<>{realm==="admin"?orderEscalation:null}{orderFulfillment}{orderMembers}</>:null;
   const orderAside=info?(renderAside?renderAside({info,fulfillment:orderFulfillment,escalation:orderEscalation,members:orderMembers}):<aside className="order-team-aside">{orderAsideNodes}</aside>):null;
   const confirmOpeningWithRefresh=onConfirmOpening?async(target:OrderTeamAccess)=>{
@@ -1229,7 +1230,7 @@ function OrderConversation({
       return <Fragment key={message.id}>
         {showDay?<li className="order-team-day" role="separator"><span>{chatDayLabel(message.createTime)}</span></li>:null}
         <li data-message-id={message.id} tabIndex={-1} data-self={self} data-grouped={grouped} data-card={card||undefined}>
-        <span className="order-team-msg-avatar" aria-hidden="true">{bot?<img src="/art/zhouzhou/avatar.webp" alt=""/>:avatar?<img src={avatar} alt="" loading="lazy" onError={(event)=>{event.currentTarget.hidden=true;}}/>:label.slice(0,1)}</span>
+        <span className="order-team-msg-avatar" aria-hidden="true">{bot?<img src="/art/zhouzhou/avatar.webp" alt=""/>:<ProfileImage src={avatar} fallback={Array.from(label)[0]||"用"} loading="lazy"/>}</span>
         <div className="order-team-msg-body">
           <small className="order-team-msg-meta"><b>{label}</b>{member?<em className="order-team-msg-role">{role(member)}</em>:null}<time>{chatTimeLabel(new Date(message.createTime).toString())}</time></small>
           {content}

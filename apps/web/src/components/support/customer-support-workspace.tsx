@@ -1,5 +1,6 @@
 "use client";
 import { NIM_RECEIPT_PENDING, oldestNimMessage } from "@zzsh/im-client/nim-web-client";
+import { ProfileImage } from "@zzsh/ui/profile-image";
 import { SessionLoading } from "../auth/session-loading";
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ChangeEvent, type ClipboardEvent as ReactClipboardEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
@@ -44,7 +45,7 @@ type Consultation = {
   type: SupportType;
   state: "WAITING" | "ACTIVE" | "CLOSED";
   subjectRef: string | null;
-  assignedAdmin: { id: string; name: string } | null;
+  assignedAdmin: { id: string; name: string; avatar?: string | null } | null;
   peerAccountId: string | null;
   /** 平台“洲洲助手（Bot）”账号；与接待客服的 peerAccountId 不同。 */
   botAccountId?: string | null;
@@ -458,7 +459,7 @@ function SupportTypePicker({ value, onChange, disabled = false, onSelect }: { va
   </div>;
 }
 
-function MessageRow({ message, agentMeta, peerAccountId, botAccountId = null, grouped = false, adminReadAt = null, roundStart = null, replySenderName, onJumpToMessage, onOpenOrder }: { message: SupportMessage; grouped?: boolean; agentMeta?: { name: string; role: string }; peerAccountId?: string | null; botAccountId?: string | null; adminReadAt?: number | null; roundStart?: number | null; replySenderName?: string | null; onJumpToMessage?: (messageId: string) => void; onOpenOrder: (orderId: string) => void }) {
+function MessageRow({ message, agentMeta, selfAvatar, peerAccountId, botAccountId = null, grouped = false, adminReadAt = null, roundStart = null, replySenderName, onJumpToMessage, onOpenOrder }: { message: SupportMessage; grouped?: boolean; agentMeta?: { name: string; role: string; avatar?: string | null }; selfAvatar?: string | null; peerAccountId?: string | null; botAccountId?: string | null; adminReadAt?: number | null; roundStart?: number | null; replySenderName?: string | null; onJumpToMessage?: (messageId: string) => void; onOpenOrder: (orderId: string) => void }) {
   if (message.from === "system") return <div className="support-message-marker" role="note"><span>{message.text}</span><time>{message.time}</time></div>;
   const outgoing = message.self === true;
   // 平台已读是轮次级事实：adminReadAt 只覆盖本轮起点之后的真实 createTime；持久线程里上一轮的消息不算已读。
@@ -482,7 +483,7 @@ function MessageRow({ message, agentMeta, peerAccountId, botAccountId = null, gr
     ? <MessageQuoted text={message.reply.text ?? "消息"} senderName={replySenderName} onJump={onJumpToMessage ? () => onJumpToMessage(message.reply!.messageId) : undefined} />
     : null;
   return <article className="support-message" data-from={message.from} data-self={outgoing} data-grouped={grouped}>
-    <div className="support-message-avatar" aria-hidden="true">{isBot ? <img src="/art/zhouzhou/avatar.webp" alt="" /> : message.from === "agent" ? <Headphones size={14} /> : <UserRound size={14} />}</div>
+    <div className="support-message-avatar" aria-hidden="true">{isBot ? <img src="/art/zhouzhou/avatar.webp" alt="" /> : <ProfileImage src={outgoing ? selfAvatar : isAssignedPeer ? agentMeta?.avatar : null} fallback={message.from === "agent" ? <Headphones size={14} /> : <UserRound size={14} />} />}</div>
     <div className="support-message-body">
       <div className="support-message-meta">
         <span className={outgoing ? "sr-only" : "support-sender-name"}>{senderName}</span>
@@ -1211,7 +1212,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     if (next) copy[key] = next; else delete copy[key];
     return copy;
   });
-  const agentMeta = activeConversation?.assignedAdmin?.name ? { name: activeConversation.assignedAdmin.name, role: "客服" } : undefined;
+  const agentMeta = activeConversation?.assignedAdmin?.name ? { name: activeConversation.assignedAdmin.name, role: "客服", avatar: activeConversation.assignedAdmin.avatar } : undefined;
 
   let timelineDay = "";
   const timelineItems: ReactNode[] = activeMessages.map((message,index) => {
@@ -1226,7 +1227,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
       timelineDay = dayKey;
       items.push(<MessageScrollerPrimitive.Item key={`day-${dayKey}`} messageId={`day-${dayKey}`}><div className="support-day-divider">{dayLabelOf(dayKey)}</div></MessageScrollerPrimitive.Item>);
     }
-    items.push(<MessageScrollerPrimitive.Item key={message.id} messageId={message.id} scrollAnchor={message.from === "customer"} tabIndex={-1} onContextMenu={onSupportContextMenu} {...supportLongPress}><MessageRow message={message} grouped={grouped} agentMeta={message.from === "agent" ? agentMeta : undefined} peerAccountId={activeConversation?.peerAccountId} botAccountId={activeConversation?.botAccountId} adminReadAt={adminReadAtMs} roundStart={roundStartMs} replySenderName={replySenderName} onJumpToMessage={jumpToSupportMessage} onOpenOrder={openReferencedOrder} /></MessageScrollerPrimitive.Item>);
+    items.push(<MessageScrollerPrimitive.Item key={message.id} messageId={message.id} scrollAnchor={message.from === "customer"} tabIndex={-1} onContextMenu={onSupportContextMenu} {...supportLongPress}><MessageRow message={message} selfAvatar={session.status === "authenticated" ? session.avatarUrl : null} grouped={grouped} agentMeta={message.from === "agent" ? agentMeta : undefined} peerAccountId={activeConversation?.peerAccountId} botAccountId={activeConversation?.botAccountId} adminReadAt={adminReadAtMs} roundStart={roundStartMs} replySenderName={replySenderName} onJumpToMessage={jumpToSupportMessage} onOpenOrder={openReferencedOrder} /></MessageScrollerPrimitive.Item>);
     return items;
   }).flat();
 
@@ -1234,7 +1235,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     timelineItems.push(
       <MessageScrollerPrimitive.Item key="failed-send-msg" messageId="failed-send" scrollAnchor={true}>
         <article className="support-message support-message-failed" data-from="customer" data-self={true}>
-          <div className="support-message-avatar" aria-hidden="true"><UserRound size={14} /></div>
+          <div className="support-message-avatar" aria-hidden="true"><ProfileImage src={session.status === "authenticated" ? session.avatarUrl : null} fallback={<UserRound size={14} />} /></div>
           <div className="support-message-body">
             <div className="support-message-bubble-row">
               <button
@@ -2616,7 +2617,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
               }}
             >
               <span className="support-conversation-avatar" data-kind="consultation" aria-hidden="true">
-                {item.type === "COMPLAINT" ? <ShieldCheck size={16} /> : <Headphones size={16} />}
+                <ProfileImage src={item.assignedAdmin?.avatar} fallback={item.type === "COMPLAINT" ? <ShieldCheck size={16} /> : <Headphones size={16} />} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
               </span>
               <span className="support-conversation-copy">
                 <strong title={typeLabel(item.type)}>

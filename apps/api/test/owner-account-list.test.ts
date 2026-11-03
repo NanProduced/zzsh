@@ -29,7 +29,10 @@ test("B1 rentalState precedence lives in SQL and filters server-side", () => {
   assert.match(OWNER_ACCOUNT_LIST_SQL, /o\.owner_user_id=a\.owner_user_id/);
   assert.match(OWNER_ACCOUNT_LIST_SQL, /LEFT JOIN LATERAL/);
   // AT TIME ZONE must bind to the timestamp sum, not the interval inside make_interval.
-  assert.match(OWNER_ACCOUNT_LIST_SQL, /\(ao\.paid_at \+ make_interval\(secs => ao\.term_seconds\)\) AT TIME ZONE 'UTC'/);
+  assert.match(OWNER_ACCOUNT_LIST_SQL, /LEFT JOIN zzsh_order\.rental_opening opening ON opening\.order_id=ao\.id AND opening\.status='CONFIRMED'/);
+  assert.match(OWNER_ACCOUNT_LIST_SQL, /opening\.confirmed_at AT TIME ZONE 'UTC'/);
+  assert.match(OWNER_ACCOUNT_LIST_SQL, /\(opening\.confirmed_at \+ make_interval\(secs => ao\.term_seconds\)\) AT TIME ZONE 'UTC'/);
+  assert.doesNotMatch(OWNER_ACCOUNT_LIST_SQL, /ao\.paid_at/);
 });
 
 test("B1 projection: titleFacts, available, blockers; unquoted owner total is null not 0", () => {
@@ -50,7 +53,15 @@ test("B1 projection: titleFacts, available, blockers; unquoted owner total is nu
   assert.deepEqual(noVersion.blockers, ["STATE_UNKNOWN"]);
   const rented = projectOwnerAccount({ ...base, rental_state: "RENTED", ao_id: "o1", ao_display_no: "R1", ao_status: "PAID", ao_renter_name: "r", ao_term_seconds: "86400", ao_started_at: "2026-10-28T00:00:00.000000Z", ao_deadline_at: "2026-10-29T00:00:00.000000Z", ao_owner_amount: { currency: "CNY", unit: "yuan", amount: "10.00", scale: 2 } } as any) as any;
   assert.equal(rented.activeOrder.id, "o1"); assert.equal(rented.activeOrder.ownerAmount.amount, "10.00");
+  assert.equal(rented.activeOrder.startedAt, "2026-10-28T00:00:00.000000Z");
+  assert.equal(rented.activeOrder.rentalDeadlineAt, "2026-10-29T00:00:00.000000Z");
   assert.equal(rented.available, false); assert.deepEqual(rented.blockers, ["RENTED"]);
+  const notStarted = projectOwnerAccount({ ...base, rental_state: "RENTED", ao_id: "o2", ao_display_no: "R2", ao_status: "PAID", ao_term_seconds: "14515200", ao_owner_amount: rented.activeOrder.ownerAmount } as any) as any;
+  assert.equal(notStarted.rentalState, "RENTED"); assert.equal(notStarted.available, false);
+  assert.deepEqual(notStarted.blockers, ["RENTED"]);
+  assert.equal(notStarted.activeOrder.termSeconds, "14515200");
+  assert.equal(notStarted.activeOrder.startedAt, null); assert.equal(notStarted.activeOrder.rentalDeadlineAt, null);
+  assert.deepEqual(notStarted.activeOrder.ownerAmount, rented.activeOrder.ownerAmount);
 });
 
 test("B1 signed cursor binds owner and filter; LIMIT n+1 without N+1 queries", async () => {

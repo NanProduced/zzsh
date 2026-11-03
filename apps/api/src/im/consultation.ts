@@ -116,7 +116,7 @@ export type ConsultationView = {
   type: SupportType;
   state: ConsultationState;
   subjectRef: string | null;
-  assignedAdmin: { id: string; name: string } | null;
+  assignedAdmin: { id: string; name: string; avatar?: string | null } | null;
   peerAccountId: string | null;
   /** 平台“洲洲助手（Bot）”云信账号；欢迎语与自动卡片由它发出。 */
   botAccountId: string | null;
@@ -146,7 +146,7 @@ export type ConsultationView = {
   rating: SupportRoundRatingView;
   createdAt: string;
   updatedAt: string;
-  user?: { id: string; name: string; username: string | null };
+  user?: { id: string; name: string; username: string | null; avatar?: string | null };
 };
 
 export type MessageScopeState = "PENDING" | "PROVISIONING" | "READY" | "FAILED" | "TRANSFERRING" | "REVOKING" | "REVOKED";
@@ -204,7 +204,9 @@ type ConsultationRow = {
   updatedAt: Date | string;
   userName: string;
   userUsername: string | null;
+  userImage?: string | null;
   adminName: string | null;
+  adminImage?: string | null;
   appId: string | null;
   messageScopeType: "TEAM";
   messageScopeId: string | null;
@@ -369,7 +371,7 @@ const CONSULTATION_SELECT = `
          c."user_unread_count" AS "userUnreadCount", c."admin_unread_count" AS "adminUnreadCount",
          c."created_at" AS "createdAt",
          c."updated_at" AS "updatedAt", u."name" AS "userName", u."username" AS "userUsername",
-         au."name" AS "adminName"
+         u."image" AS "userImage", au."name" AS "adminName", au."image" AS "adminImage"
     FROM "zzsh_iam"."im_consultation" c
     JOIN "zzsh_iam"."im_support_thread" t ON t."id" = c."thread_id"
     JOIN "zzsh_auth_user"."user" u ON u."id" = c."user_id"
@@ -391,7 +393,7 @@ const USER_THREAD_SELECT = `
          c."user_unread_count" AS "userUnreadCount", c."admin_unread_count" AS "adminUnreadCount",
          c."created_at" AS "createdAt",
          c."updated_at" AS "updatedAt", u."name" AS "userName", u."username" AS "userUsername",
-         au."name" AS "adminName"
+         u."image" AS "userImage", au."name" AS "adminName", au."image" AS "adminImage"
     FROM (
       SELECT DISTINCT ON (c."thread_id") c.*
         FROM "zzsh_iam"."im_consultation" c
@@ -453,7 +455,7 @@ export function toView(row: ConsultationRow, viewerAccountId: string, includeUse
     type: row.kind,
     state: row.state,
     subjectRef: row.subjectRef,
-    assignedAdmin: row.assignedAdminId && row.adminName ? { id: row.assignedAdminId, name: row.adminName } : null,
+    assignedAdmin: row.assignedAdminId && row.adminName ? { id: row.assignedAdminId, name: row.adminName, ...(managedProfileImagePath(row.adminImage) ? { avatar: managedProfileImagePath(row.adminImage) } : {}) } : null,
     peerAccountId: includeUser ? row.userAccountId : row.threadPeerAccountId ?? row.peerAccountId,
     botAccountId: null,
     conversationType: "TEAM",
@@ -477,7 +479,7 @@ export function toView(row: ConsultationRow, viewerAccountId: string, includeUse
     rating: { available: false, submitted: false, dismissed: false, score: null },
     createdAt: iso(row.createdAt) ?? new Date(0).toISOString(),
     updatedAt: iso(row.updatedAt) ?? new Date(0).toISOString(),
-    ...(includeUser ? { user: { id: row.userId, name: row.userName, username: row.userUsername } } : {}),
+    ...(includeUser ? { user: { id: row.userId, name: row.userName, username: row.userUsername, ...(managedProfileImagePath(row.userImage) ? { avatar: managedProfileImagePath(row.userImage) } : {}) } } : {}),
   };
 }
 
@@ -3801,10 +3803,7 @@ export async function readConsultationContext(
     await assertAdminContextInTransaction(client, context);
     const row = await readAuthorizedAdminConsultation(client, context, options.appId, consultationId);
     const subjectRef = row.subjectRef;
-    const image = (await client.query<{ image: string | null }>(
-      `SELECT "image" FROM "zzsh_auth_user"."user" WHERE "id" = $1`, [row.userId],
-    )).rows[0]?.image;
-    const avatar = managedProfileImagePath(image);
+    const avatar = managedProfileImagePath(row.userImage);
     return {
       consultationId: row.id,
       version: numberValue(row.version),

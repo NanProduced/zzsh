@@ -409,7 +409,7 @@ test("audit list includes closed consultations and order groups without a JOINED
   })();
   const consultation = {
     kind: "CONSULTATION", id: "im_consult_1", type: "SERVICE", state: "CLOSED",
-    user: { id: "user_a", name: "用户甲" }, assignedAdmin: { id: "admin_b", name: "客服乙" },
+    user: { id: "user_a", name: "用户甲", avatar: "/api/v1/profile/avatars/user/user_a/1" }, assignedAdmin: { id: "admin_b", name: "客服乙" },
     lastMessageAt: "2026-10-29T07:00:00.000000Z", updatedAt: "2026-10-29T07:01:00.000000Z", conversationId: null,
   };
   const group = {
@@ -440,10 +440,14 @@ test("audit list includes closed consultations and order groups without a JOINED
   const page = await listAuditConversations({ pool: f.pool, appId: APP_ID } as never, adminContext, "1", null);
   assert.equal(page.items.length, 1);
   assert.deepEqual(page.items[0], consultation);
+  assert.equal((page.items[0] as { user: { avatar: string | null } }).user.avatar, "/api/v1/profile/avatars/user/user_a/1");
   assert.ok(page.nextCursor);
   assert.deepEqual(decodeSupportAuditCursor(page.nextCursor!), { sortAt: "2026-10-29T07:01:00.000000Z", kind: "CONSULTATION", id: "im_consult_1" });
   const second = await listAuditConversations({ pool: f.pool, appId: APP_ID } as never, adminContext, "5", page.nextCursor);
   assert.equal(second.nextCursor, null);
+  consultation.user.avatar = "https://legacy.invalid/avatar.jpg";
+  const external = await listAuditConversations({ pool: f.pool, appId: APP_ID } as never, adminContext, "1", null);
+  assert.equal((external.items[0] as { user: { avatar: string | null } }).user.avatar, null);
 });
 
 test("audit list and patrol message reads fail closed without management read", async () => {

@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { motion, useMotionValueEvent, useScroll } from "motion/react";
+import { ProfileImage } from "@zzsh/ui/profile-image";
 import { Search, UserRound, X } from "lucide-react";
 import { BrandLogo } from "@/components/brand/brand-logo";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -30,7 +31,7 @@ function SessionEntry() {
       <Tooltip>
         <TooltipTrigger asChild>
           <Link className="site-login" href="/account">
-            {session.avatarUrl ? <img className="site-session-avatar" src={session.avatarUrl} alt="" /> : <UserRound size={18} aria-hidden="true" />}
+            <ProfileImage className="site-session-avatar" src={session.avatarUrl} fallback={<UserRound size={18} aria-hidden="true" />} />
             <span className="site-session-name">{session.displayName ?? "个人中心"}</span>
           </Link>
         </TooltipTrigger>

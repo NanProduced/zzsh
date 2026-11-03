@@ -8,6 +8,7 @@ import { buildYunxinIdentityMarker, deriveYunxinAccountId, type ImIdentityKey } 
 import { readOrderTeamAccess, readOrderTeamMemberRows, projectOrderTeamMembers, type OrderTeamMemberView } from "./order-team-access";
 import { lockSupportMutation } from "./support-dispatch";
 import { ORDER_TEAM_CONFIGURATION, type YunxinOrderTeamApi, type YunxinOrderTeamState } from "./yunxin-provider";
+import { managedProfileImagePath } from "../profile/profile-avatar";
 
 export type OrderTeamInviteActor = { userId: string; sessionId: string };
 export type OrderTeamInviteOptions = {
@@ -15,7 +16,7 @@ export type OrderTeamInviteOptions = {
   provider: Pick<YunxinOrderTeamApi, "readOrderTeam" | "addSupportTeamMember">;
 };
 export type OrderTeamInviteResult = { status: "JOINED"|"ALREADY_JOINED"; members: OrderTeamMemberView[] };
-export type OrderTeamInviteTargets = { targets: { adminUserId: string; displayName: string }[] };
+export type OrderTeamInviteTargets = { targets: { adminUserId: string; displayName: string; avatar?: string | null }[] };
 
 type SettingsScope = {
   order_id: string; app_id: string; game_id: string; account_id: string; order_status: string;
@@ -247,7 +248,7 @@ export async function listOrderTeamInviteTargets(
 ): Promise<OrderTeamInviteTargets> {
   if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Limit is invalid");
   const scope = await assertAccess(c, actor, appId, orderId);
-  const rows = (await c.query<{ adminUserId: string; displayName: string }>(`SELECT u.id AS "adminUserId",u.name AS "displayName"
+  const rows = (await c.query<{ adminUserId: string; displayName: string; image?: string | null }>(`SELECT u.id AS "adminUserId",u.name AS "displayName",u.image
     FROM zzsh_auth_admin."user" u
     JOIN zzsh_iam.admin_security s ON s.admin_user_id=u.id AND s.status='ACTIVE'
     JOIN zzsh_iam.im_identity_mapping m ON m.provider='yunxin' AND m.app_id=$2 AND m.realm='admin'
@@ -259,7 +260,8 @@ export async function listOrderTeamInviteTargets(
     ORDER BY u.name,u.id LIMIT $3`,[orderId,appId,limit,scope.assigned_admin_id,scope.responsible_admin_id])).rows;
   const targets: OrderTeamInviteTargets["targets"] = [];
   for (const row of rows) {
-    if (await targetCanSupportGame(c, row.adminUserId, scope.game_id)) targets.push(row);
+    if (await targetCanSupportGame(c, row.adminUserId, scope.game_id)) targets.push({ adminUserId: row.adminUserId, displayName: row.displayName,
+      ...(managedProfileImagePath(row.image) ? { avatar: managedProfileImagePath(row.image) } : {}) });
   }
   return { targets };
 }

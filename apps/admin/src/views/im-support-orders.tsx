@@ -1,4 +1,6 @@
 "use client";
+import { ProfileImage } from "@zzsh/ui/profile-image";
+
 
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { ArrowDown, ChevronLeft, ChevronRight, CircleAlert, FileText, Headphones, Images, MoreHorizontal, ReceiptText, Search, Settings, Smile, Video } from "lucide-react";
@@ -72,10 +74,10 @@ function imageOf(message: NimMessageLike): { url: string | null; thumbnailUrl: s
 /** 发送者署名只认成员表：映射缺失时中性降级，绝不借用当前接待者或租客的身份。 */
 function authorOf(info: OrderTeamAccess, senderId: string, accountId: string, operatorName: string) {
   const member = info.members.find((item) => item.accountId === senderId);
-  if (senderId === accountId) return { name: member?.name?.trim() || operatorName, role: member ? orderTeamMemberRole(member) : "平台客服" };
-  if (info.botAccountId && senderId === info.botAccountId) return { name: "洲洲助手（Bot）", role: "机器人" };
-  if (!member) return { name: "未署名成员", role: null as string | null };
-  return { name: member.name?.trim() || orderTeamMemberRole(member), role: orderTeamMemberRole(member) };
+  if (senderId === accountId) return { name: member?.name?.trim() || operatorName, role: member ? orderTeamMemberRole(member) : "平台客服", avatar: member?.avatar };
+  if (info.botAccountId && senderId === info.botAccountId) return { name: "洲洲助手（Bot）", role: "机器人", avatar: null };
+  if (!member) return { name: "未署名成员", role: null as string | null, avatar: null };
+  return { name: member.name?.trim() || orderTeamMemberRole(member), role: orderTeamMemberRole(member), avatar: member.avatar };
 }
 
 /** 终态订单的阶段文案只说明“已结束”，不退回过分配/匹配等过程词。 */
@@ -408,7 +410,7 @@ export function OrderWorkbenchPane({ identity, adminUserId, operatorName, client
       const text = typeof message.text === "string" && message.text.trim() ? message.text : message.messageType === 0 || image || media ? "" : "暂不支持展示的消息类型";
       nodes.push(<MessageScrollerPrimitive.Item key={message.id} messageId={message.id} scrollAnchor={!self}>
         <Message align={self ? "end" : "start"} className="im-wb-msg" data-self={self} data-grouped={grouped} data-message-id={message.id} onContextMenu={view.menuHandlers.onContextMenu} {...view.menuHandlers.longPress}>
-          <MessageAvatar className="im-wb-av" aria-hidden="true">{author.role === "机器人" ? <img src="/art/zhouzhou/avatar.webp" alt="" /> : initialOf(author.name)}</MessageAvatar>
+          <MessageAvatar className="im-wb-av" aria-hidden="true">{author.role === "机器人" ? <img src="/art/zhouzhou/avatar.webp" alt="" /> : <ProfileImage src={author.avatar} fallback={initialOf(author.name)} />}</MessageAvatar>
           <MessageContent className="im-wb-msg-body" data-card={card ? "true" : undefined}>
             {grouped ? null : <MessageHeader className="im-wb-msg-meta"><b>{author.name}</b>{author.role ? <span className="im-wb-role-tag" data-role={author.role}>{author.role}</span> : null}{self ? null : <time>{formatTime(message.createTime)}</time>}</MessageHeader>}
             {card && !revoked ? <OrderCardMessage message={message} info={info} onConfirmOpeningOnBehalf={confirmOnBehalf} onOpenOrder={() => { if (onOpenPath) { onOpenPath(`/orders/${encodeURIComponent(info.orderId)}`, `订单 ${info.displayNo ?? info.orderId}`); } else { window.location.assign(`/orders/${encodeURIComponent(info.orderId)}`); } }} /> : <SupportMessageBody message={message} image={image ? {url:image.url,thumbnailUrl:image.thumbnailUrl,name:image.name} : null}

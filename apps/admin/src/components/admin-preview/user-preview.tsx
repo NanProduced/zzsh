@@ -1,3 +1,4 @@
+import { managedProfileImage } from "@zzsh/ui/profile-image";
 import * as React from 'react';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
@@ -37,7 +38,7 @@ function loginTime(value: string | null | undefined): string | null {
 }
 
 export function hasUsefulUserPreview(summary: UserPreviewSummary | null | undefined, rowName: string): boolean {
-  return !!(summary?.image?.trim() || summary?.maskedPhone?.trim() || summary?.name?.trim() && summary.name.trim() !== rowName.trim()
+  return !!(managedProfileImage(summary?.image) || summary?.maskedPhone?.trim() || summary?.name?.trim() && summary.name.trim() !== rowName.trim()
     || summary?.membershipSummary?.state==='ready' || summary?.creditSummary?.state==='ready' || summary?.riskFlag===true
     || summary?.businessNo?.trim() || summary?.accountStatus?.trim() || summary?.realNameStatus?.trim() || loginTime(summary?.lastLoginAt));
 }
@@ -88,7 +89,7 @@ export function UserPreviewCard({
   const header = (
     <>
       <Avatar size="default" className="size-9 border border-border shrink-0">
-        {image ? <AvatarImage src={image} alt="" /> : null}
+        {managedProfileImage(image) ? <AvatarImage src={managedProfileImage(image)!} alt="" /> : null}
         <AvatarFallback className="bg-primary/10 text-primary font-bold text-xs">
           {initial}
         </AvatarFallback>

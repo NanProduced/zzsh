@@ -1,3 +1,4 @@
+import { ProfileImage } from "@zzsh/ui/profile-image";
 import { orderReferenceSummary } from "@zzsh/im-client/nim-web-client";
 "use client";
 import { formatSubjectRef, messageScopeLabel } from "./im-support-vocabulary";
@@ -54,7 +55,7 @@ type Consultation = {
   type: SupportType;
   state: ConsultationState;
   subjectRef: string | null;
-  assignedAdmin: { id: string; name: string } | null;
+  assignedAdmin: { id: string; name: string; avatar?: string | null } | null;
   peerAccountId: string | null;
   /** 平台“洲洲助手（Bot）”账号；欢迎语与自动卡片由它发出。 */
   botAccountId?: string | null;
@@ -71,7 +72,7 @@ type Consultation = {
   adminUnreadCount?: number;
   createdAt: string;
   updatedAt: string;
-  user?: { id: string; name: string; username: string | null };
+  user?: { id: string; name: string; username: string | null; avatar?: string | null };
 };
 type SupportMessage = {
   id: string;
@@ -97,6 +98,7 @@ type SupportSection = "consultation" | "orders";
 type QueueRow = { id: string; type: SupportType; title: string; snippet: string; time: string; sortAt: number; state: "待接入" | "接待中" | "已结束" | "通道异常"; unreadCount: number; consultation?: Consultation };
 type UnifiedRow = {
   kind: "consultation" | "order";
+  avatar?: string | null;
   id: string;
   title: string;
   tag: string;
@@ -949,7 +951,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     const consultations: UnifiedRow[] = displayQueue
       .filter((row) => unifiedType === "ALL" || (unifiedType !== "ORDER" && row.type === unifiedType))
       .map((row): UnifiedRow => ({
-        kind: "consultation", id: row.id, title: row.title,
+        kind: "consultation", id: row.id, title: row.title, avatar: row.consultation?.user?.avatar,
         tag: row.type === "COMPLAINT" ? "投诉" : "咨询",
         tone: row.type === "COMPLAINT" ? "warn" : "neutral",
         snippet: row.snippet, state: row.state, stateTone: stageToneOf(row.state),
@@ -1860,12 +1862,12 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
           : <div className="im-wb-empty"><Headphones size={22} /><strong>{hasSelection ? "等待第一条消息" : "尚未选择会话"}</strong><span>{hasSelection ? "该会话暂时没有可读消息。" : "从左侧队列选择会话。"}</span></div>);
 
   const authorFor = (message: SupportMessage) => {
-    if (message.self) return { name: operatorName, role: "平台客服" };
-    if (selected?.peerAccountId && message.senderId === selected.peerAccountId) return { name: selected.user?.name || selected.user?.username || "平台用户", role: "平台用户" };
+    if (message.self) return { name: operatorName, role: "平台客服", avatar: snapshot.user.image };
+    if (selected?.peerAccountId && message.senderId === selected.peerAccountId) return { name: selected.user?.name || selected.user?.username || "平台用户", role: "平台用户", avatar: selected.user?.avatar };
     // Historical senders we cannot map stay neutral instead of borrowing the
     // current assignee's identity.
-    if (message.from === "agent" && selected?.botAccountId && message.senderId === selected.botAccountId) return { name: "洲洲助手（Bot）", role: "机器人" };
-    return message.from === "agent" ? { name: "客服", role: "平台客服" } : { name: selected?.user?.name || selected?.user?.username || "平台用户", role: "平台用户" };
+    if (message.from === "agent" && selected?.botAccountId && message.senderId === selected.botAccountId) return { name: "洲洲助手（Bot）", role: "机器人", avatar: null };
+    return message.from === "agent" ? { name: "客服", role: "平台客服", avatar: null } : { name: selected?.user?.name || selected?.user?.username || "平台用户", role: "平台用户", avatar: null };
   };
   const userHoverCard = selected ? <div className="im-wb-author-hover">
     <ConsultationUserCard consultationId={selected.id} rowUserId={selected.user?.id ?? ""} fallbackName={selected.user?.name || selected.user?.username || "平台用户"}
@@ -1904,8 +1906,8 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     nodes.push(<MessageScrollerPrimitive.Item key={message.id} messageId={message.id} scrollAnchor={message.from === "customer"} tabIndex={-1} onContextMenu={onMessageContextMenu} {...messageLongPress}>
       <Message align={mine ? "end" : "start"} className="im-wb-msg" data-message-id={message.id} data-from={message.from} data-self={mine} data-grouped={grouped}>
         {author.role === "平台用户" && userHoverCard ? <EntityPreviewTrigger enableTouchButton={false} side="right" align="start" touchLabel={`预览用户 ${author.name}`} className="im-wb-author-preview"
-          trigger={<button type="button" className="im-wb-av-button" aria-label={`查看用户 ${author.name}`} title={`查看用户 ${author.name}`}><MessageAvatar className="im-wb-av" aria-hidden="true">{initialOf(author.name)}</MessageAvatar></button>}
-          content={userHoverCard} /> : <MessageAvatar className="im-wb-av" aria-hidden="true">{author.role === "机器人" ? <img src="/art/zhouzhou/avatar.webp" alt="" /> : initialOf(author.name)}</MessageAvatar>}
+          trigger={<button type="button" className="im-wb-av-button" aria-label={`查看用户 ${author.name}`} title={`查看用户 ${author.name}`}><MessageAvatar className="im-wb-av" aria-hidden="true"><ProfileImage src={author.avatar} fallback={initialOf(author.name)} /></MessageAvatar></button>}
+          content={userHoverCard} /> : <MessageAvatar className="im-wb-av" aria-hidden="true">{author.role === "机器人" ? <img src="/art/zhouzhou/avatar.webp" alt="" /> : <ProfileImage src={author.avatar} fallback={initialOf(author.name)} />}</MessageAvatar>}
         <MessageContent className="im-wb-msg-body">
           {grouped ? null : <MessageHeader className="im-wb-msg-meta">{author.role === "平台用户" && userHoverCard
             ? <EntityPreviewTrigger enableTouchButton={false} side="right" align="start" touchLabel={`预览用户 ${author.name}`} className="im-wb-author-preview"
@@ -1938,7 +1940,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
             setNotice(undefined);
             persistQuery({ section: "consultation", consultation: row.consultation?.threadId ?? row.id });
           }}>
-          <span className="im-wb-row-av" aria-hidden="true">{initialOf(row.title)}</span>
+          <span className="im-wb-row-av" aria-hidden="true"><ProfileImage src={row.consultation?.user?.avatar} fallback={initialOf(row.title)} /></span>
           <span className="im-wb-row-copy"><span className="im-wb-row-top"><b>{row.title}</b><i className="im-wb-tag" data-tone={row.type === "COMPLAINT" ? "warn" : "neutral"}>{row.type === "COMPLAINT" ? "投诉" : "咨询"}</i><time>{row.time}</time></span>
             <span className="im-wb-row-snip">{row.snippet}</span>
             <span className="im-wb-row-foot"><em data-tone={stageToneOf(row.state)}>{row.state}</em>{row.unreadCount > 0 ? <i className="im-wb-unread" aria-label={`${row.unreadCount} 条未读`}>{row.unreadCount > 99 ? "99+" : row.unreadCount}</i> : null}</span></span>
@@ -1951,7 +1953,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     <main className="im-wb-chat">
       <header className="im-wb-chat-head" ref={chatHeadingRef} tabIndex={-1} data-focus-target="chat">
         <button type="button" className="im-wb-back" data-action="back-to-queue" onClick={() => setMobilePane("queue")}><ChevronLeft size={14} />队列</button>
-        <span className="im-wb-chat-av" aria-hidden="true">{initialOf(selected?.user?.name || selected?.user?.username || "客")}</span>
+        <span className="im-wb-chat-av" aria-hidden="true"><ProfileImage src={selected?.user?.avatar} fallback={initialOf(selected?.user?.name || selected?.user?.username || "客")} /></span>
         <div className="im-wb-chat-title">
           <h2>{selected ? `${selected.user?.name || selected.user?.username || "平台用户"} · ${typeLabel(selected.type)}` : "选择一条会话"}</h2>
           <span className="im-wb-chat-sub">{!selected ? "等待用户咨询" : roundHeadlineOf(selected)}</span>
@@ -2260,7 +2262,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
                 }
                 setMobilePane("chat");
               }}>
-              <span className="im-wb-row-av" data-kind={row.kind} aria-hidden="true">{row.kind === "order" ? <ReceiptText size={17} /> : initialOf(row.title)}</span>
+              <span className="im-wb-row-av" data-kind={row.kind} aria-hidden="true">{row.kind === "order" ? <ReceiptText size={17} /> : <ProfileImage src={row.avatar} fallback={initialOf(row.title)} />}</span>
               <span className="im-wb-row-copy">
                 <span className="im-wb-row-top">
                   <b>{row.title}</b>

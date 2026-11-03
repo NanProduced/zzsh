@@ -82,6 +82,7 @@ export function orderFulfillmentSummary(
     case "WAITING_STAFF": return "已付款 · 待客服接入";
     case "TEAM_PENDING": return "已付款 · 订单群准备中";
     case "OPENING_CONFIRM": {
+      if (projection.openingState === "NONE") return "账号与开租确认 · 待客服录入开租清单";
       const acks = projection.openingAcks;
       if (!acks) return "账号与开租确认";
       return `账号与开租确认 · 租客${acks.renter ? "已确认" : "待确认"} · 号主${acks.owner ? "已确认" : "待确认"}`;

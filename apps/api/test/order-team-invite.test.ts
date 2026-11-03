@@ -57,6 +57,7 @@ type Write = { kind: "INSERT"|"UPDATE"; party: string; state: string; identityId
 type Statement = { sql: string; values: unknown[] };
 
 class InviteDatabase {
+  readonly avatars = new Map<string, string>();
   group: Record<string, unknown> | null;
   target: Record<string, unknown> | null = { admin_user_id: TARGET, display_name: "客服二号", suspended: false, security_status: "ACTIVE" };
   targetIdentity: Record<string, unknown> | null = { id: "im_admin_target_invite", account_id: targetAccount.accountId,
@@ -101,7 +102,7 @@ class InviteDatabase {
       const rows = this.admins
         .filter(item => item.id !== "admin_no_im_invite" && item.id !== assigned && item.id !== responsible && !joined.has(item.id))
         .slice(0, limit)
-        .map(item => ({ adminUserId: item.id, displayName: item.name }));
+        .map(item => ({ adminUserId: item.id, displayName: item.name, image: this.avatars.get(item.id) ?? null }));
       return { rows: orderId === ORDER && appId === APP ? rows : [] };
     }
     if (sql.includes("LEFT JOIN zzsh_auth_user")) return { rows: this.members };
@@ -343,6 +344,16 @@ test("invite targets are narrow, bounded and exclude existing staff", async t =>
   t.mock.restoreAll();
   mockAccess(t, ["im.support.read"], { mode: "SELECTED_GAMES", gameIds: ["other_game"] });
   await assert.rejects(listOrderTeamInviteTargets(new InviteDatabase() as unknown as Pick<PoolClient, "query">, ACTOR, APP, ORDER, 10), statusIs(403));
+});
+
+test("invite target avatars share the existing bounded join and never expose external or raw image fields", async t => {
+  mockAccess(t); const db = new InviteDatabase(), avatar = `/api/v1/profile/avatars/admin/${TARGET}/1`;
+  db.avatars.set(TARGET, avatar); db.avatars.set(OTHER, "https://legacy.invalid/old-avatar.jpg");
+  const value = await listOrderTeamInviteTargets(client(db), ACTOR, APP, ORDER, 10);
+  assert.equal(value.targets.find(item => item.adminUserId === TARGET)?.avatar, avatar);
+  assert.equal(value.targets.find(item => item.adminUserId === OTHER)?.avatar, undefined);
+  assert(value.targets.every(item => !("image" in item)));
+  assert.equal(db.statements.filter(item => item.sql.includes('SELECT u.id AS "adminUserId"')).length, 1);
 });
 
 const ADMIN_ORIGIN = "http://127.0.0.1:4291";

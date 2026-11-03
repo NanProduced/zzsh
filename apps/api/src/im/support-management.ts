@@ -12,6 +12,7 @@ import { recordAudit, SecurityApiError, withTransaction } from "../auth/security
 import { buildYunxinIdentityMarker, deriveYunxinAccountId } from "./identity-lifecycle";
 import type { SupportAvailability, SupportConnectionState } from "./consultation";
 import { resolveSupportConcurrencyLimit } from "./support-dispatch";
+import { managedProfileImagePath } from "../profile/profile-avatar";
 
 export const SUPPORT_HANDOVER_NOTE_MAX = 200;
 export const SUPPORT_HANDOVER_DEFAULT_LIMIT = 20;
@@ -958,9 +959,7 @@ export async function listAuditConversations(
     return {
       items: page.map((row) => {
         const payload=row.payload as unknown as SupportAuditItem;
-        if(payload.kind==="CONSULTATION" && payload.user.avatar){
-          try{const url=new URL(payload.user.avatar);payload.user.avatar=['https:','http:'].includes(url.protocol)?url.href:null;}catch{payload.user.avatar=null;}
-        }
+        if(payload.kind==="CONSULTATION") payload.user.avatar=managedProfileImagePath(payload.user.avatar);
         return payload;
       }),
       nextCursor: hasMore && page.length > 0 ? encodeSupportAuditCursor(page[page.length - 1]!.sortAt, page[page.length - 1]!.kind, page[page.length - 1]!.id, filterScope) : null,
