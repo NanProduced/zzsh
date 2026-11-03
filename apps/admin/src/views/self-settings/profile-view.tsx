@@ -300,11 +300,6 @@ export function ProfileView({
               账号已冻结：资料修改当前不可用。读取仍按本人范围进行。
             </SettingsNotice>
           ) : null}
-          {writeUnavailable ? (
-            <SettingsNotice tone="warning">
-              {writeDisabledReason ?? "资料修改暂未开放，当前仅支持查看。"}
-            </SettingsNotice>
-          ) : null}
           {saveState.phase === "unknown" ? (
             <SettingsNotice
               tone="warning"
@@ -352,10 +347,9 @@ export function ProfileView({
               <div className="min-w-0 flex-1">
                 <div className="text-sm font-medium text-foreground break-words [overflow-wrap:anywhere]">{facts.displayName}</div>
                 <p className="text-muted-foreground mt-0.5 text-xs">
-                  {facts.avatarUrl ? "头像来自服务端已返回的资料；默认头像即时生效，自定义头像先审后显。" : "未返回头像，按姓名首字显示。"}
+                  {facts.avatarUrl ? "默认头像确认后生效，自定义头像先审后显。" : "未返回头像，按姓名首字显示。"}
                 </p>
               </div>
-            </div>
             {avatarEditor ? <AdminAvatarEditor
               adminUserId={adminUserId}
               sessionId={sessionId}
@@ -369,6 +363,7 @@ export function ProfileView({
                 }
               }}
             /> : null}
+            </div>
             <SettingsRow
               title="ZZ 登录编号"
               description="用于工单与线下核对的稳定编号；不是内部标识，也不随登录邮箱变化。"
@@ -405,8 +400,8 @@ export function ProfileView({
             />
           </SettingsGroup>
 
-          <SettingsGroup title="可维护资料" description="同事在列表、审批与客服上下文中看到的名称。">
-            <form className="space-y-4 p-4" onSubmit={(event) => void submit(event)} noValidate>
+          <SettingsGroup title="显示信息" description="同事在列表、审批与客服上下文中看到的名称。">
+            {writeUnavailable ? <SettingsRow title="显示名称" description={writeDisabledReason ?? '用于在平台中显示的名称。'} status={{ label: '暂未开放修改', tone: 'neutral' }} action={<span className="max-w-[36ch] break-words text-sm font-medium text-foreground [overflow-wrap:anywhere]">{facts.displayName}</span>}/> : <form className="space-y-4 p-4" onSubmit={(event) => void submit(event)} noValidate>
               <Field
                 label="显示名称"
                 hint={`最多 ${DISPLAY_NAME_MAX_CODE_POINTS} 个字符（按 Unicode 码点计），不能包含控制字符；服务端按同一规则校验并以其为准。`}
@@ -434,7 +429,7 @@ export function ProfileView({
                 </Button>
                 {!changed && saveState.phase === "idle" ? <span className="text-muted-foreground text-xs">没有改动，无需保存。</span> : null}
               </div>
-            </form>
+            </form>}
           </SettingsGroup>
         </>
       ) : null}

@@ -187,20 +187,17 @@ export function AccountGrowthHeader({
   const tierClass = `tier-${safeTier.toLowerCase().replace("_", "-")}`;
 
   const activeEntitlement = (data?.entitlements ?? (growthState.status === "unknown" ? growthState.entitlements ?? [] : [])).find((e) => e.state === "ACTIVE");
+  const avatar = <span className="account-growth-avatar" aria-hidden="true">{session.avatarUrl ? <img src={session.avatarUrl} alt="" /> : monogram ?? <UserRound size={32} />}</span>;
 
   return (
     <div className={`account-growth-header-wrap ${tierClass}`}>
       <div className="account-growth-header">
         <div className="account-growth-user-col">
-          <span className="account-growth-avatar" aria-hidden="true">
-            {session.avatarUrl ? <img src={session.avatarUrl} alt="" /> : monogram ?? <UserRound size={32} />}
-          </span>
+          {userId ? <AvatarEditEntry userId={userId}>{avatar}</AvatarEditEntry> : avatar}
           <div className="account-growth-user-info">
             <span className="account-growth-welcome">欢迎回来</span>
             <div className="account-growth-name-row">
             <h2 className="account-growth-name" title={name}>{name}</h2>
-            {/* 昵称编辑已从账号安全页迁到此处（Owner 裁定）：头像/昵称旁的轻量“编辑资料”入口。 */}
-            {userId ? <AvatarEditEntry userId={userId} /> : null}
             {userId ? <NicknameEditEntry userId={userId} nicknameDraft={nicknameDraft} pendingWrite={pendingWrite} /> : null}
             <div className="account-growth-tier-row">
               {growthState.status === "ready" && tier ? (

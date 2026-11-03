@@ -1,19 +1,24 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { Camera, RefreshCw, Upload, X } from "lucide-react";
-import { useUserSession, publishUserSessionChange } from "@/components/session/user-session-provider";
+import { Camera, Check, RefreshCw, Upload, X } from "lucide-react";
+import { AvatarCropper } from "@zzsh/ui/avatar-crop";
+import "@zzsh/ui/avatar-crop.css";
+import { useUserSession, publishUserSessionChange, publishProfileUpdateNotice, dismissProfileUpdateNotice } from "@/components/session/user-session-provider";
 import { assertAvatarSubject, clearPendingAvatarDefault, createAvatarUploadIntent, parseAvatarReceipt, ProfileAvatarError, readAvatarOperationResult, readAvatarState, readPendingAvatarDefault, savePendingAvatarDefault, selectDefaultAvatar, uploadAvatar, type AvatarState, type PendingAvatarDefault } from "@/lib/profile-avatar-client";
 
 const MAX_BYTES = 10 * 1024 * 1024;
 const ALLOWED = new Set(["image/jpeg", "image/png", "image/webp"]);
 
-export function AvatarEditEntry({ userId }: { userId: string }) {
+export function AvatarEditEntry({ userId, children }: { userId: string; children?: ReactNode }) {
   const session = useUserSession();
-  return <AvatarEditor key={`${userId}:${session.identityVersion}`} userId={userId} session={session} />;
+  return <AvatarEditor key={`${userId}:${session.identityVersion}`} userId={userId} session={session} avatar={children} />;
 }
-function AvatarEditor({ userId, session }: { userId: string; session: ReturnType<typeof useUserSession> }) {
+function AvatarEditor({ userId, session, avatar }: { userId: string; session: ReturnType<typeof useUserSession>; avatar?: ReactNode }) {
   const [open, setOpen] = useState(false);
+  const [tab, setTab] = useState<'default' | 'upload'>('default');
+  const [selectedPreset, setSelectedPreset] = useState<string | null>(null);
+  const [cropSource, setCropSource] = useState<File | null>(null);
   const [state, setState] = useState<AvatarState | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -27,7 +32,7 @@ function AvatarEditor({ userId, session }: { userId: string; session: ReturnType
   const uploadCommand = useRef<{ file: File; intentKey: string; uploadKey: string; expectedRevision: string; intentId?: string; uploadToken?: string } | null>(null);
   const alive = useRef(true), writing = useRef(false), writeSequence = useRef(0);
   const sequence = useRef(0), abort = useRef<AbortController | null>(null), writeAbort = useRef<AbortController | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null), triggerRef = useRef<HTMLButtonElement>(null);
   const current = () => alive.current;
 
   useEffect(() => {
@@ -43,7 +48,9 @@ function AvatarEditor({ userId, session }: { userId: string; session: ReturnType
     sequence.current++; writeSequence.current++;
     abort.current?.abort(); writeAbort.current?.abort();
     writing.current = false; setBusy(false); setLoading(false);
-    clearFile(); setIntent(null); uploadCommand.current = null;
+    setCropSource(null); setSelectedPreset(null);
+    // An unresolved upload keeps its original file/keys across a closed dialog; closing is not a withdrawal.
+    if (!uploadCommand.current) { clearFile(); setIntent(null); }
   }
   function beginWrite() {
     if (writing.current) return null;
@@ -93,8 +100,8 @@ function AvatarEditor({ userId, session }: { userId: string; session: ReturnType
       savePendingAvatarDefault(command); setPendingDefault(command);
       const next = await selectDefaultAvatar(presetId, state.revision, command.key, run.signal); assertAvatarSubject(next, userId);
       if (!activeWrite(run.id)) return;
-      setState(next); refreshSession();
-      try { releaseDefault(command); setNotice("默认头像已保存，正在刷新页面头像。"); }
+      setState(next); publishProfileUpdateNotice(userId, 'avatar'); refreshSession();
+      try { releaseDefault(command); clearFile(); setCropSource(null); setNotice("默认头像已保存，正在刷新页面头像。"); setOpen(false); }
       catch (failure) { setNotice("默认头像已保存；本地记录待清理，请读取原操作结果。"); setError(messageOf(failure, "本地记录尚未清除")); }
     } catch (failure) {
       if (!activeWrite(run.id)) return;
@@ -106,9 +113,10 @@ function AvatarEditor({ userId, session }: { userId: string; session: ReturnType
     } finally { finishWrite(run.id); }
   }
   function chooseFile(next: File | null) {
-    if (writing.current || pendingDefault || storageBlocked) return;
-    setError(""); setNotice(""); setIntent(null); uploadCommand.current = null;
-    setPreview(next ? URL.createObjectURL(next) : null); setFile(next);
+    if (!next || writing.current || pendingDefault || storageBlocked || uploadCommand.current) return;
+    setError(''); setNotice('');
+    if (!ALLOWED.has(next.type) || next.size <= 0 || next.size > MAX_BYTES) { setError('请选择不超过 10 MiB 的 JPEG、PNG 或 WebP 图片。'); return; }
+    setCropSource(next);
   }
   async function submitUpload() {
     if (!state || !file || busy || pendingDefault || storageBlocked) return;
@@ -139,19 +147,19 @@ function AvatarEditor({ userId, session }: { userId: string; session: ReturnType
   const review = state?.lastReview;
   return (
     <>
-      <button type="button" className="button quiet button--xs account-edit-profile" onClick={() => { setOpen(true); void load(); }}>
-        <Camera size={13} aria-hidden="true" />
-        <span>更换头像</span>
+      <button ref={triggerRef} type="button" className="account-avatar-control" aria-label="更换头像" onClick={() => { dismissProfileUpdateNotice(userId); setSelectedPreset(null); setTab(uploadCommand.current ? 'upload' : 'default'); setOpen(true); void load(); }}>
+        {avatar ?? <span className="account-growth-avatar" aria-hidden>{session.avatarUrl ? <img src={session.avatarUrl} alt=""/> : <Camera size={24}/>}</span>}
+        <span className="account-avatar-camera" aria-hidden><Camera size={16}/></span>
       </button>
       <Dialog.Root open={open} onOpenChange={(next) => { setOpen(next); if (next) void load(); else cancelWork() }}>
         <Dialog.Portal>
           <Dialog.Overlay className="modal-overlay" />
-          <Dialog.Content className="avatar-dialog" aria-describedby="avatar-dialog-description">
+          <Dialog.Content className="avatar-dialog" aria-describedby="avatar-dialog-description" onCloseAutoFocus={event => { event.preventDefault(); triggerRef.current?.focus(); }}>
             <div className="avatar-dialog-head">
               <div>
                 <Dialog.Title className="avatar-dialog-title">更换头像</Dialog.Title>
-                <Dialog.Description id="avatar-dialog-description" className="avatar-dialog-desc">
-                  默认头像即时生效；自定义头像上传后先审核，期间保留当前头像。
+                <Dialog.Description id="avatar-dialog-description" className="sr-only">
+                  选择默认头像，或上传并裁剪图片。
                 </Dialog.Description>
               </div>
               <Dialog.Close asChild><button type="button" className="avatar-dialog-close" aria-label="关闭头像设置"><X size={18} /></button></Dialog.Close>
@@ -166,22 +174,15 @@ function AvatarEditor({ userId, session }: { userId: string; session: ReturnType
 
             {state ? (
               <>
-                <div className="avatar-current">
-                  <span className="avatar-current-image">
-                    {state.current.url ? <img src={state.current.url} alt="" /> : null}
-                  </span>
-                  <div>
-                    <strong>当前头像</strong>
-                    <p>{state.current.kind === "CUSTOM" ? "自定义头像（已审核）" : "默认头像"}</p>
-                    {state.pending ? <p className="avatar-pending-label">新头像审核中，当前继续显示这张。</p> : null}
-                  </div>
-                  <button type="button" className="button secondary button--xs" onClick={() => void load(true)} disabled={loading || busy}><RefreshCw size={12} />刷新</button>
+                <div className="avatar-dialog-tabs" role="group" aria-label="头像来源">
+                  <button type="button" aria-pressed={tab === 'default'} disabled={busy} onClick={() => setTab('default')}>默认头像</button>
+                  <button type="button" aria-pressed={tab === 'upload'} disabled={busy} onClick={() => setTab('upload')}>上传图片</button>
                 </div>
-
                 {state.pending ? (
                   <div className="avatar-pending">
                     <img src={`/api/v1/profile/avatar/preview?v=${encodeURIComponent(state.pending.assetId)}`} alt="待审核头像预览" />
-                    <span>审核中 · 提交于 {formatTime(state.pending.submittedAt)}</span>
+                    <span>新头像审核中 · {formatTime(state.pending.submittedAt)}（北京时间）</span>
+                    <button type="button" className="button quiet button--xs" onClick={() => void load(true)} disabled={loading || busy}><RefreshCw size={12}/>刷新审核状态</button>
                   </div>
                 ) : review && (review.state === "REJECTED" || review.state === "QUARANTINED") ? (
                   <div className="avatar-review-result is-rejected" role="status">
@@ -192,11 +193,12 @@ function AvatarEditor({ userId, session }: { userId: string; session: ReturnType
                   <div className="avatar-review-result" role="status"><strong>先前的自定义头像已撤回</strong><p>{review.reason ?? "公开读取已停止，当前回退到默认头像。"}</p></div>
                 ) : null}
 
-                <fieldset className="avatar-preset-fieldset" disabled={busy || loading || Boolean(pendingDefault) || storageBlocked}>
-                  <legend>选择默认头像</legend>
+                {tab === 'default' ? <><div className="avatar-selection-preview"><img src={state.presets.find(item => item.presetId === selectedPreset)?.url ?? state.current.url} alt="所选头像预览"/></div>
+                <fieldset className="avatar-preset-fieldset" disabled={busy || loading || Boolean(pendingDefault) || storageBlocked || Boolean(uploadCommand.current)}>
+                  <legend className="sr-only">选择默认头像</legend>
                   <div className="avatar-preset-grid">
                     {state.presets.map((preset, index) => {
-                      const selected = state.current.kind === "DEFAULT" && state.current.presetId === preset.presetId && !state.pending;
+                      const selected = (selectedPreset ?? (state.current.kind === 'DEFAULT' ? state.current.presetId : null)) === preset.presetId;
                       return (
                         <button
                           key={preset.presetId}
@@ -204,29 +206,26 @@ function AvatarEditor({ userId, session }: { userId: string; session: ReturnType
                           className={`avatar-preset${selected ? " is-selected" : ""}`}
                           aria-pressed={selected}
                           aria-label={`选择默认头像 ${index + 1}`}
-                          onClick={() => void choosePreset(preset.presetId)}
+                          onClick={() => { setSelectedPreset(preset.presetId); setError(''); setNotice(''); }}
                         >
                           <img src={preset.url} alt="" width={preset.width} height={preset.height} />
-                          <span>{selected ? "当前头像" : "选择"}</span>
+                          {selected ? <span className="avatar-preset-mark" aria-hidden><Check size={12}/></span> : null}
                         </button>
                       );
                     })}
                   </div>
                 </fieldset>
-
-                <div className="avatar-upload">
-                  <div>
-                    <strong>上传自定义头像</strong>
-                    <p>JPEG / PNG / WebP，≤10 MiB。上传成功后进入审核，不改变当前头像。</p>
-                  </div>
-                  {preview ? <img className="avatar-upload-preview" src={preview} alt="待上传头像预览" /> : null}
+                {state.pending ? <p className="avatar-dialog-muted">改用默认头像后，将以本次选择为准。</p> : null}
+                <div className="avatar-dialog-actions"><button type="button" className="button secondary" onClick={() => { setOpen(false); cancelWork(); }}>取消</button><button type="button" className="button primary" disabled={busy || loading || storageBlocked || Boolean(pendingDefault) || Boolean(uploadCommand.current) || !selectedPreset || selectedPreset === state.current.presetId && !state.pending} onClick={() => selectedPreset && void choosePreset(selectedPreset)}>{busy ? '正在保存…' : '使用此头像'}</button></div></> : cropSource ? <AvatarCropper file={cropSource} onCancel={() => setCropSource(null)} onConfirm={cropped => { setFile(cropped); setPreview(URL.createObjectURL(cropped)); setCropSource(null); }} /> : <div className="avatar-upload">
+                  {preview ? <><img className="avatar-upload-preview" src={preview} alt="待上传头像预览"/><p className="avatar-upload-policy">审核通过后生效，期间保留原头像。</p></> : <button type="button" className="avatar-upload-dropzone" aria-label="选择图片" disabled={busy || Boolean(pendingDefault) || storageBlocked || Boolean(uploadCommand.current)} onClick={() => inputRef.current?.click()} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); if (!writing.current && event.dataTransfer.files.length !== 1) setError('每次请选择一张图片。'); else chooseFile(event.dataTransfer.files[0] ?? null); }}><Upload size={28} aria-hidden/><strong>选择图片</strong><span>或将图片拖到这里</span></button>}
+                  {!file ? <p className="avatar-upload-format">JPEG、PNG、WebP · 最大 10 MiB</p> : null}
                   <input ref={inputRef} type="file" accept="image/jpeg,image/png,image/webp" className="sr-only" onChange={(event) => { chooseFile(event.target.files?.[0] ?? null); event.target.value = ""; }} />
                   <div className="avatar-upload-actions">
-                    <button type="button" className="button secondary" onClick={() => inputRef.current?.click()} disabled={busy || Boolean(pendingDefault) || storageBlocked}><Upload size={14} />选择图片</button>
+                    {file ? <button type="button" className="button secondary" onClick={() => inputRef.current?.click()} disabled={busy || Boolean(pendingDefault) || storageBlocked || Boolean(uploadCommand.current)}>重新选择</button> : null}
                     {file ? <button type="button" className="button primary" onClick={() => void submitUpload()} disabled={busy}>{busy ? "上传中…" : intent ? "重试上传" : "上传并提交审核"}</button> : null}
-                    {file ? <button type="button" className="button ghost" onClick={() => { clearFile(); setIntent(null); }} disabled={busy}>移除</button> : null}
+                    <button type="button" className="button quiet" onClick={() => { setOpen(false); cancelWork(); }}>取消</button>
                   </div>
-                </div>
+                </div>}
               </>
             ) : null}
           </Dialog.Content>
@@ -244,5 +243,5 @@ function messageOf(error: unknown, fallback: string): string {
 function formatTime(value: string | null): string {
   if (!value) return "未知时间";
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "未知时间" : date.toLocaleString("zh-CN", { hour12: false });
+  return Number.isNaN(date.getTime()) ? "未知时间" : date.toLocaleString("zh-CN", { timeZone: 'Asia/Shanghai', hour12: false });
 }

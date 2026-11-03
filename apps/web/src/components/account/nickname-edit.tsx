@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import Link from "next/link";
 import { Pencil, X } from "lucide-react";
-import { useUserSession, useUserSessionStore, publishUserSessionChange } from "@/components/session/user-session-provider";
+import { useUserSession, useUserSessionStore, publishUserSessionChange, publishProfileUpdateNotice, dismissProfileUpdateNotice } from "@/components/session/user-session-provider";
 import { authErrorMessage, webAuthRequest, WebAuthError } from "@/lib/web-auth-request";
 import { FieldGroup, RecoveryAlert } from "@/components/ui/information";
 import type { SecurityNicknameDraft, SecurityPendingWrite } from "./account-security-controls";
@@ -44,6 +44,8 @@ export function NicknameEditEntry({
   const initialDraft = nicknameDraft?.current?.userId === userId ? nicknameDraft.current.value : null;
 
   const [open, setOpen] = useState(false);
+  const [discardOpen, setDiscardOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null), inputRef = useRef<HTMLInputElement>(null);
   const [value, setValue] = useState(initialDraft ?? "");
   // 编辑入口只在服务端概况读取成功后出现；null=未读到（含读取失败），此时不渲染入口。
   const [serverNickname, setServerNickname] = useState<string | null>(null);
@@ -112,6 +114,7 @@ export function NicknameEditEntry({
 
   // 身份绑定读取：换身份/重挂载都会重启；401 走共享会话刷新，入口随概况事实一起撤下。
   useEffect(() => {
+    setOpen(false); setDiscardOpen(false);
     const draft = nicknameDraft?.current?.userId === userId ? nicknameDraft.current.value : null;
     edited.current = draft !== null;
     setValue(draft ?? "");
@@ -175,6 +178,7 @@ export function NicknameEditEntry({
       writeLock.current = false;
       setOpen(false);
       setNotice("昵称已更新。");
+      publishProfileUpdateNotice(userId, 'nickname');
       publishUserSessionChange();
     } catch (failure) {
       if (!active(request.id)) return;
@@ -229,6 +233,7 @@ export function NicknameEditEntry({
       setOpen(false);
       setError("");
       setNotice("操作结果已确认。");
+      publishProfileUpdateNotice(userId, 'nickname');
       publishUserSessionChange();
     } catch (failure) {
       if (!active(request.id)) return;
@@ -252,17 +257,30 @@ export function NicknameEditEntry({
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!value.trim() || [...value].length > 64) {
+    if (!value.trim() || [...value].length > 64 || /[\u0000-\u001f\u007f]/.test(value)) {
       setInvalidField("profile-nickname");
       setError("昵称需要 1–64 个字符。");
       return;
     }
+    if (formLocked || value === serverNickname) return;
     setInvalidField("");
     void save();
   };
 
   const locked = busy || Boolean(pending) || writeLock.current;
   const formLocked = locked || Boolean(foreignWrite);
+  const valid = value.trim().length > 0 && [...value].length <= 64 && !/[\u0000-\u001f\u007f]/.test(value);
+  const requestClose = () => {
+    if (busy) return;
+    if (discardOpen) { setDiscardOpen(false); requestAnimationFrame(() => inputRef.current?.focus()); return; }
+    if (!pending && value !== serverNickname) { setDiscardOpen(true); return; }
+    setOpen(false);
+  };
+  const discard = () => {
+    setValue(serverNickname ?? ''); edited.current = false;
+    if (nicknameDraft?.current?.userId === userId) nicknameDraft.current = null;
+    setDiscardOpen(false); setOpen(false); setError(''); setInvalidField('');
+  };
   const showPendingNotice = Boolean(pending) && !open;
   const showForeignNotice = Boolean(foreignWrite) && !pending && !open;
   const showWithdrawnNotice = serverNickname === null && !pending && !open && Boolean(error);
@@ -292,32 +310,37 @@ export function NicknameEditEntry({
       {serverNickname === null ? null : (
         <button
           type="button"
-          className="button quiet button--xs account-edit-profile"
+          className="account-nickname-trigger"
+          aria-label="修改昵称"
           data-testid="edit-profile"
+          ref={triggerRef}
           disabled={busy}
           onClick={() => {
+            dismissProfileUpdateNotice(userId);
             setError("");
             setNotice("");
+            setDiscardOpen(false);
             setOpen(true);
           }}
         >
-          <Pencil size={13} aria-hidden="true" />
-          编辑资料
+          <Pencil size={15} aria-hidden="true" />
         </button>
       )}
 
-      <Dialog.Root open={open} onOpenChange={(next) => { if (!next) setOpen(false); }}>
+      <Dialog.Root open={open} onOpenChange={(next) => { if (!next) requestClose(); }}>
         <Dialog.Portal>
           <Dialog.Overlay className="modal-overlay" />
-          <Dialog.Content className="sec-dialog profile-dialog">
-            <Dialog.Title>编辑资料</Dialog.Title>
+          <Dialog.Content className="sec-dialog profile-dialog" onOpenAutoFocus={event => { event.preventDefault(); inputRef.current?.focus(); }} onCloseAutoFocus={event => { event.preventDefault(); triggerRef.current?.focus(); }} onEscapeKeyDown={event => { if (busy) event.preventDefault(); }}>
+            <Dialog.Title>{discardOpen ? '放弃修改？' : '修改昵称'}</Dialog.Title>
             <Dialog.Description asChild>
-              <p className="sec-dialog-desc">对外展示的昵称，仅用于展示，不影响登录方式。</p>
+              <p className={discardOpen ? 'sec-dialog-desc' : 'sr-only'}>{discardOpen ? '昵称修改尚未保存。放弃后保留当前昵称。' : '修改对外展示的昵称。'}</p>
             </Dialog.Description>
-            <form aria-label="修改昵称" className="auth-fields" onSubmit={submit} noValidate>
-              <FieldGroup id="profile-nickname" label="昵称" helper="1–64 个字符，仅用于对外展示。" required>
+            {discardOpen ? <div className="sec-dialog-actions"><button type="button" className="button secondary" onClick={() => { setDiscardOpen(false); requestAnimationFrame(() => inputRef.current?.focus()); }}>继续编辑</button><button type="button" className="button primary" onClick={discard}>放弃修改</button></div> : <form aria-label="修改昵称" className="auth-fields" onSubmit={submit} noValidate>
+              <FieldGroup id="profile-nickname" label="昵称" helper={<span aria-live="polite">{[...value].length}/64</span>}>
                 <input
                   id="profile-nickname"
+                  aria-required="true"
+                  ref={inputRef}
                   aria-describedby={["profile-nickname-helper", invalidField === "profile-nickname" ? "profile-nickname-result" : ""].filter(Boolean).join(" ")}
                   aria-invalid={invalidField === "profile-nickname" || undefined}
                   value={value}
@@ -357,15 +380,15 @@ export function NicknameEditEntry({
                 </p>
               )}
               <div className="sec-dialog-actions">
-                <button type="button" className="button quiet" disabled={busy} onClick={() => setOpen(false)}>
+                <button type="button" className="button quiet" disabled={busy} onClick={requestClose}>
                   取消
                 </button>
-                <button type="submit" className="button primary" disabled={formLocked}>
-                  保存昵称
+                <button type="submit" aria-label="保存昵称" className="button primary" disabled={formLocked || !valid || value === serverNickname}>
+                  {busy ? '保存中…' : '保存'}
                 </button>
               </div>
-            </form>
-            <Dialog.Close className="icon-button dialog-close" aria-label="关闭对话框">
+            </form>}
+            <Dialog.Close className="icon-button dialog-close" aria-label="关闭对话框" disabled={busy}>
               <X size={18} aria-hidden="true" />
             </Dialog.Close>
           </Dialog.Content>

@@ -3,6 +3,8 @@
   "version": "0.0.0",
   "private": true,
   "exports": {
+    "./avatar-crop": "./src/avatar-crop.tsx",
+    "./avatar-crop.css": "./src/avatar-crop.css",
     "./styles.css": "./src/styles.css",
     "./display-credit": "./src/display-credit.ts",
     "./display-distribution": "./src/display-distribution.ts",
@@ -20,7 +22,8 @@
     "./message-actions": "./src/message-actions.tsx",
     "./message-actions.css": "./src/message-actions.css",
     "./message-media": "./src/message-media.tsx",
-    "./message-media.css": "./src/message-media.css"
+    "./message-media.css": "./src/message-media.css",
+    "./profile-image": "./src/profile-image.tsx"
   },
   "dependencies": {
     "@zzsh/content": "0.0.0",
@@ -35,6 +38,6 @@
     "react-dom": "19.2.8"
   },
   "scripts": {
-    "test": "node --experimental-strip-types --test test/content-markdown.test.mjs test/display-labels.test.mjs test/order-team-empty.test.mjs"
+    "test": "node --experimental-strip-types --test test/content-markdown.test.mjs test/display-labels.test.mjs test/order-team-empty.test.mjs test/avatar-crop.test.mjs test/profile-image.test.mjs"
   }
 }

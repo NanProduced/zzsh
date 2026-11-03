@@ -6,9 +6,11 @@ import {
   useEffect,
   useMemo,
   useRef,
+  useState,
   useSyncExternalStore,
   type ReactNode,
 } from "react";
+import { CheckCircle2, X } from 'lucide-react';
 import { UserSessionStore, type UserSessionSnapshot, type UserSessionStatus } from "@/lib/user-session-store";
 import {
   USER_SESSION_CHANNEL,
@@ -18,6 +20,13 @@ import {
 } from "@/lib/user-session-client";
 
 export { USER_SESSION_CHANNEL, publishUserSessionChange };
+const PROFILE_NOTICE = 'zzsh-profile-update-notice';
+export function publishProfileUpdateNotice(userId: string, kind: 'avatar' | 'nickname'): void {
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(PROFILE_NOTICE, { detail: { userId, kind } }));
+}
+export function dismissProfileUpdateNotice(userId: string): void {
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(PROFILE_NOTICE, { detail: { userId, kind: null } }));
+}
 
 export type UserSessionApi = UserSessionSnapshot & {
   /** Re-reads the server session; a client broadcast only triggers this, never replaces it. */
@@ -49,6 +58,20 @@ export function UserSessionProvider({ children }: { children: ReactNode }) {
   if (!storeRef.current) storeRef.current = createBrowserUserSessionStore();
   const store = storeRef.current;
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
+  const [profileNotice, setProfileNotice] = useState<{ userId: string; kind: 'avatar' | 'nickname' } | null>(null);
+  useEffect(() => {
+    const show = (event: Event) => {
+      const value = (event as CustomEvent).detail, current = store.getSnapshot();
+      if (current.status === 'authenticated' && value?.userId === current.userId) {
+        if (value.kind === null) setProfileNotice(null);
+        else if (value.kind === 'avatar' || value.kind === 'nickname') setProfileNotice({ userId: value.userId, kind: value.kind });
+      }
+    };
+    window.addEventListener(PROFILE_NOTICE, show); return () => window.removeEventListener(PROFILE_NOTICE, show);
+  }, [store]);
+  useEffect(() => { if (!profileNotice) return; const timer = setTimeout(() => setProfileNotice(null), 6000); return () => clearTimeout(timer); }, [profileNotice]);
+  useEffect(() => { if (snapshot.status === 'guest' || snapshot.status === 'authenticated' && profileNotice && snapshot.userId !== profileNotice.userId) setProfileNotice(null); }, [snapshot.status, snapshot.userId, profileNotice]);
+  const showProfileNotice = profileNotice && (snapshot.status === 'loading' || snapshot.status === 'error' || snapshot.status === 'authenticated' && snapshot.userId === profileNotice.userId);
 
   useEffect(() => {
     const revalidate = () => { void store.confirm(); };
@@ -79,5 +102,5 @@ export function UserSessionProvider({ children }: { children: ReactNode }) {
     signOut,
   }), [snapshot, confirm, signOut]);
 
-  return <UserSessionStoreContext.Provider value={store}><UserSessionContext.Provider value={api}>{children}</UserSessionContext.Provider></UserSessionStoreContext.Provider>;
+  return <UserSessionStoreContext.Provider value={store}><UserSessionContext.Provider value={api}>{children}{showProfileNotice ? <div className="profile-change-toast" role="status"><CheckCircle2 size={18} aria-hidden/><span>{profileNotice.kind === 'avatar' ? '头像已更新' : '昵称已更新'}</span><button type="button" aria-label="关闭资料更新提示" onClick={() => setProfileNotice(null)}><X size={16}/></button></div> : null}</UserSessionContext.Provider></UserSessionStoreContext.Provider>;
 }

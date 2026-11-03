@@ -35,7 +35,7 @@ type Props = ComponentProps<typeof SettingsView> & {
 };
 
 // 本人资料改名尚未开放：精确说明只读范围，不宣称读取未接通。
-const WRITE_DISABLED = "显示名称修改暂未开放；头像可在下方更换。";
+const WRITE_DISABLED = "显示名称修改暂未开放；头像可通过“更换头像”按钮修改。";
 
 export function SettingsWorkspace(props: Props) {
   const { query, snapshot, onOpenPath, onDirtyChange, onQueryChange } = props;

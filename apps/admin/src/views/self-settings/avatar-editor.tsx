@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { Camera, RefreshCw, Upload } from "lucide-react";
+import { Camera, Check, CheckCircle2, RefreshCw, Upload, X } from "lucide-react";
+import { AvatarCropper } from "@zzsh/ui/avatar-crop";
+import "@zzsh/ui/avatar-crop.css";
 import { Button } from "../../components/ui/button";
-import { Avatar, AvatarFallback, AvatarImage } from "../../components/ui/avatar";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "../../components/ui/dialog";
 import { SettingsNotice } from "./settings-shell";
 import { AdminAvatarError, adminAvatarPreviewUrl, assertAdminAvatarSubject, clearPendingAdminAvatar, createAdminAvatarUploadIntent, readAdminAvatarOperationResult, readAdminAvatarState, readPendingAdminAvatar, savePendingAdminAvatar, selectAdminDefaultAvatar, uploadAdminAvatar, type AdminAvatarState, type PendingAdminAvatar } from "./avatar-api";
 
@@ -11,7 +13,9 @@ type EditorProps = { adminUserId: string; sessionId: string; fallbackInitial: st
 export function AdminAvatarEditor(props: EditorProps) {
   return <AvatarEditorBody key={props.adminUserId + ":" + props.sessionId} {...props} />;
 }
-function AvatarEditorBody({ adminUserId, fallbackInitial, disabledReason, onSessionRefresh }: EditorProps) {
+function AvatarEditorBody({ adminUserId, disabledReason, onSessionRefresh }: EditorProps) {
+  const [open, setOpen] = useState(false), [tab, setTab] = useState<'default' | 'upload'>('default');
+  const [selectedPreset, setSelectedPreset] = useState<string | null>(null), [cropSource, setCropSource] = useState<File | null>(null), [toast, setToast] = useState('');
   const [state, setState] = useState<AdminAvatarState | null>(null);
   const [loading, setLoading] = useState(true), [busy, setBusy] = useState(false);
   const [error, setError] = useState(""), [notice, setNotice] = useState("");
@@ -20,6 +24,7 @@ function AvatarEditorBody({ adminUserId, fallbackInitial, disabledReason, onSess
   const [pendingDefault, setPendingDefault] = useState<PendingAdminAvatar | null>(null), [storageBlocked, setStorageBlocked] = useState(false);
   const alive = useRef(true), writing = useRef(false), writeSequence = useRef(0), sequence = useRef(0);
   const readAbort = useRef<AbortController | null>(null), writeAbort = useRef<AbortController | null>(null), inputRef = useRef<HTMLInputElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const uploadCommand = useRef<{ file: File; intentKey: string; uploadKey: string; expectedRevision: string; intentId?: string; uploadToken?: string } | null>(null);
   const current = () => alive.current;
   const activeWrite = (id: number) => current() && writeSequence.current === id;
@@ -35,14 +40,19 @@ function AvatarEditorBody({ adminUserId, fallbackInitial, disabledReason, onSess
     finally { if (current() && sequence.current === seq) setLoading(false); }
   };
   useEffect(() => {
-    alive.current = true; void load();
+    alive.current = true;
     try { setPendingDefault(readPendingAdminAvatar(adminUserId, "default")); }
     catch (failure) { setStorageBlocked(true); setError(messageOf(failure, "原头像操作记录不可读")); }
     return () => { alive.current = false; sequence.current++; writeSequence.current++; readAbort.current?.abort(); writeAbort.current?.abort(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [adminUserId]);
   useEffect(() => () => { if (preview) URL.revokeObjectURL(preview); }, [preview]);
+  useEffect(() => { if (!toast) return; const timer = setTimeout(() => setToast(''), 6000); return () => clearTimeout(timer); }, [toast]);
   function clearFile() { setFile(null); setPreview(null); }
+  function closeEditor() {
+    setOpen(false); sequence.current++; writeSequence.current++; readAbort.current?.abort(); writeAbort.current?.abort(); writing.current = false; setBusy(false); setLoading(false); setCropSource(null); setSelectedPreset(null);
+    if (!uploadCommand.current) { clearFile(); setIntent(null); }
+  }
   function beginWrite() {
     if (writing.current || disabledReason) return null;
     writing.current = true; setBusy(true); setError(""); setNotice("");
@@ -79,7 +89,7 @@ function AvatarEditorBody({ adminUserId, fallbackInitial, disabledReason, onSess
       const next = await selectAdminDefaultAvatar(presetId, state.revision, command.key, run.signal); assertAdminAvatarSubject(next, adminUserId);
       if (!activeWrite(run.id)) return;
       setState(next); setNotice("默认头像已保存。");
-      try { releaseDefault(command); } catch (failure) { setNotice("头像已保存；本地记录待清理，请读取原操作结果。"); setError(messageOf(failure, "本地记录尚未清除")); }
+      try { releaseDefault(command); clearFile(); setCropSource(null); setToast('头像已更新'); setOpen(false); } catch (failure) { setNotice("头像已保存；本地记录待清理，请读取原操作结果。"); setError(messageOf(failure, "本地记录尚未清除")); }
       await refreshSession();
     } catch (failure) {
       if (!activeWrite(run.id)) return;
@@ -89,9 +99,10 @@ function AvatarEditorBody({ adminUserId, fallbackInitial, disabledReason, onSess
     } finally { finishWrite(run.id); }
   }
   function chooseFile(next: File | null) {
-    if (writing.current || disabledReason || pendingDefault || storageBlocked) return;
-    setError(""); setNotice(""); setIntent(null); uploadCommand.current = null;
-    setPreview(next ? URL.createObjectURL(next) : null); setFile(next);
+    if (!next || writing.current || disabledReason || pendingDefault || storageBlocked || uploadCommand.current) return;
+    setError(''); setNotice('');
+    if (!ALLOWED.has(next.type) || next.size <= 0 || next.size > MAX_BYTES) { setError('请选择不超过 10 MiB 的 JPEG、PNG 或 WebP 图片。'); return; }
+    setCropSource(next);
   }
   async function submitUpload() {
     if (!state || !file || busy || disabledReason || pendingDefault || storageBlocked) return;
@@ -122,23 +133,11 @@ function AvatarEditorBody({ adminUserId, fallbackInitial, disabledReason, onSess
 
   const review = state?.lastReview;
   return (
-    <div className="space-y-4 p-4">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
-        <Avatar className="size-16">
-          {state?.current.url ? <AvatarImage src={state.current.url} alt="" /> : null}
-          <AvatarFallback>{fallbackInitial}</AvatarFallback>
-        </Avatar>
-        <div className="min-w-0 flex-1">
-          <div className="text-sm font-medium text-foreground">当前头像</div>
-          <p className="text-muted-foreground mt-0.5 text-xs">
-            {state?.current.kind === "CUSTOM" ? "自定义头像（已审核公开）" : "默认头像。默认头像即时生效；自定义头像先审后显。"}
-          </p>
-        </div>
-        <Button type="button" size="sm" variant="secondary" onClick={() => void load(true)} disabled={loading || busy}>
-          <RefreshCw />刷新
-        </Button>
-      </div>
-
+    <><Button ref={triggerRef} type="button" size="sm" variant="outline" disabled={Boolean(disabledReason)} onClick={() => { setToast(''); setSelectedPreset(null); setTab(uploadCommand.current ? 'upload' : 'default'); setOpen(true); void load(); }}><Camera className="size-4"/>更换头像</Button>
+    <Dialog open={open} onOpenChange={next => { if (!next) closeEditor(); }}><DialogContent size="md" finalFocus={triggerRef} closeLabel="关闭头像设置" className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-[560px]">
+      <DialogTitle>更换头像</DialogTitle><DialogDescription className="sr-only">选择默认头像，或上传并裁剪图片。</DialogDescription>
+      <div role="group" aria-label="头像来源" className="flex border-b border-border"><Button type="button" variant="ghost" aria-pressed={tab === 'default'} disabled={busy} onClick={() => setTab('default')} className={tab === 'default' ? 'flex-1 border-b-2 border-primary rounded-none' : 'flex-1 rounded-none'}>默认头像</Button><Button type="button" variant="ghost" aria-pressed={tab === 'upload'} disabled={busy} onClick={() => setTab('upload')} className={tab === 'upload' ? 'flex-1 border-b-2 border-primary rounded-none' : 'flex-1 rounded-none'}>上传图片</Button></div>
+    <div className="space-y-4">
       {disabledReason ? <SettingsNotice tone="warning">{disabledReason}</SettingsNotice> : null}
       {error ? <SettingsNotice tone="danger" role="alert">{error}</SettingsNotice> : null}
       {storageBlocked ? <SettingsNotice tone="danger">原头像操作记录不可读，暂不能再次提交。</SettingsNotice> : null}
@@ -151,7 +150,7 @@ function AvatarEditorBody({ adminUserId, fallbackInitial, disabledReason, onSess
           {state.pending ? (
             <div className="flex items-center gap-3 rounded-lg border border-border bg-muted/40 p-3 text-xs" role="status">
               <img className="size-11 rounded-full object-cover" src={adminAvatarPreviewUrl(state.pending.assetId)} alt="待审核头像预览" />
-              <span>新头像审核中，当前继续显示原头像。</span>
+              <span className="flex-1">新头像审核中</span><Button type="button" size="sm" variant="ghost" disabled={loading || busy} onClick={() => void load(true)}><RefreshCw className="size-3"/>刷新审核状态</Button>
             </div>
           ) : review && (review.state === "REJECTED" || review.state === "QUARANTINED") ? (
             <SettingsNotice tone="danger" role="status">
@@ -161,38 +160,36 @@ function AvatarEditorBody({ adminUserId, fallbackInitial, disabledReason, onSess
             <SettingsNotice tone="warning" role="status">先前的自定义头像已撤回：{review.reason ?? "公开读取已停止，当前回退到默认头像。"}</SettingsNotice>
           ) : null}
 
-          <fieldset className="space-y-2" disabled={busy || loading || Boolean(disabledReason) || Boolean(pendingDefault) || storageBlocked}>
-            <legend className="text-sm font-medium">选择默认头像</legend>
+          {tab === 'default' ? <><div className="grid justify-items-center py-3"><img className="size-32 rounded-full object-cover" src={state.presets.find(p => p.presetId === selectedPreset)?.url ?? state.current.url} alt="所选头像预览"/></div>
+          <fieldset className="space-y-2" disabled={busy || loading || Boolean(disabledReason) || Boolean(pendingDefault) || storageBlocked || Boolean(uploadCommand.current)}>
+            <legend className="sr-only">选择默认头像</legend>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
               {state.presets.map((preset, index) => {
-                const selected = state.current.kind === "DEFAULT" && state.current.presetId === preset.presetId && !state.pending;
+                const selected = (selectedPreset ?? (state.current.kind === 'DEFAULT' ? state.current.presetId : null)) === preset.presetId;
                 return (
-                  <button key={preset.presetId} type="button" aria-pressed={selected} aria-label={`选择默认头像 ${index + 1}`} onClick={() => void choosePreset(preset.presetId)}
-                    className={`flex flex-col items-center gap-1 rounded-lg border p-2 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${selected ? "border-primary bg-accent text-accent-foreground" : "border-border text-muted-foreground hover:bg-accent/60"}`}>
+                  <button key={preset.presetId} type="button" aria-pressed={selected} aria-label={`选择默认头像 ${index + 1}`} onClick={() => { setSelectedPreset(preset.presetId); setError(''); setNotice(''); }}
+                    className={`relative flex flex-col items-center rounded-lg border p-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${selected ? "border-primary bg-accent text-accent-foreground" : "border-border text-muted-foreground hover:bg-accent/60"}`}>
                     <img className="aspect-square w-full max-w-20 rounded-full object-cover" src={preset.url} alt="" width={preset.width} height={preset.height} />
-                    <span>{selected ? "当前头像" : "选择"}</span>
+                    {selected ? <span className="absolute top-1 right-1 grid size-5 place-items-center rounded-full bg-primary text-primary-foreground" aria-hidden><Check className="size-3"/></span> : null}
                   </button>
                 );
               })}
             </div>
           </fieldset>
-
-          <div className="space-y-3 border-t border-border pt-4">
-            <div>
-              <div className="flex items-center gap-2 text-sm font-medium"><Camera className="size-4" aria-hidden />上传自定义头像</div>
-              <p className="text-muted-foreground mt-1 text-xs">JPEG / PNG / WebP，≤10 MiB。上传成功进入审核，期间不改变当前头像。</p>
-            </div>
-            {preview ? <img className="size-20 rounded-full border border-border object-cover" src={preview} alt="待上传头像预览" /> : null}
+          {state.pending ? <p className="text-muted-foreground text-xs">改用默认头像后，将以本次选择为准。</p> : null}
+          <div className="flex gap-3 pt-2"><Button type="button" variant="outline" className="flex-1" onClick={closeEditor}>取消</Button><Button type="button" className="flex-1" loading={busy} disabled={busy || loading || storageBlocked || Boolean(disabledReason) || Boolean(pendingDefault) || Boolean(uploadCommand.current) || !selectedPreset || selectedPreset === state.current.presetId && !state.pending} onClick={() => selectedPreset && void choosePreset(selectedPreset)}>使用此头像</Button></div></> : cropSource ? <AvatarCropper file={cropSource} onCancel={() => setCropSource(null)} onConfirm={cropped => { setFile(cropped); setPreview(URL.createObjectURL(cropped)); setCropSource(null); }} /> : <div className="space-y-3 pt-2">
+            {preview ? <div className="grid justify-items-center gap-3 py-2"><img className="size-28 rounded-full object-cover" src={preview} alt="待上传头像预览"/><p className="text-muted-foreground text-xs">审核通过后生效，期间保留原头像。</p></div> : <><Button type="button" variant="outline" aria-label="选择图片" className="h-auto min-h-40 w-full flex-col gap-2 border-dashed py-7" disabled={busy || Boolean(disabledReason) || Boolean(uploadCommand.current)} onClick={() => inputRef.current?.click()} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); if (!writing.current && event.dataTransfer.files.length !== 1) setError('每次请选择一张图片。'); else chooseFile(event.dataTransfer.files[0] ?? null); }}><Upload className="size-7!" aria-hidden/><span>选择图片</span><span className="text-muted-foreground text-xs font-normal">或将图片拖到这里</span></Button><p className="text-muted-foreground text-center text-xs">JPEG、PNG、WebP · 最大 10 MiB</p></>}
             <input ref={inputRef} type="file" accept="image/jpeg,image/png,image/webp" className="sr-only" onChange={(event) => { chooseFile(event.target.files?.[0] ?? null); event.target.value = ""; }} />
             <div className="flex flex-wrap gap-2">
-              <Button type="button" size="sm" variant="secondary" onClick={() => inputRef.current?.click()} disabled={busy || Boolean(disabledReason)}><Upload />选择图片</Button>
+              {file ? <Button type="button" size="sm" variant="secondary" onClick={() => inputRef.current?.click()} disabled={busy || Boolean(disabledReason) || Boolean(uploadCommand.current)}>重新选择</Button> : null}
               {file ? <Button type="button" size="sm" onClick={() => void submitUpload()} disabled={busy || Boolean(disabledReason)}>{busy ? "上传中…" : intent ? "重试上传" : "上传并提交审核"}</Button> : null}
-              {file ? <Button type="button" size="sm" variant="ghost" onClick={() => { clearFile(); setIntent(null); }} disabled={busy}>移除</Button> : null}
+              <Button type="button" size="sm" variant="ghost" onClick={closeEditor}>取消</Button>
             </div>
-          </div>
+          </div>}
         </>
       ) : null}
-    </div>
+    </div></DialogContent></Dialog>
+    {toast ? <div role="status" className="fixed top-5 right-5 z-[70] flex max-w-[calc(100vw-2rem)] items-center gap-3 rounded-xl border border-border bg-popover px-4 py-3 text-sm text-popover-foreground shadow-lg"><CheckCircle2 className="size-4 text-success"/><span>{toast}</span><Button type="button" size="icon-sm" variant="ghost" aria-label="关闭头像更新提示" onClick={() => setToast('')}><X className="size-4"/></Button></div> : null}</>
   );
 }
 

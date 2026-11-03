@@ -262,12 +262,11 @@ test("master: 路由404但目标仍在时不能宣称注销成功", async () => 
   }finally{view.unmount();}
 });
 
-test("master: 预览模式可查看资料表单与会话确认，不能提交写", async () => {
+test("master: 无资料writer时只读展示名称；会话预览仍不能提交写", async () => {
   const profile=mount(ProfileView,profileProps({saveDisplayName:undefined,writeDisabledReason:"只预览，不保存"}));
   try{
-    await settle();await type(profile,input(profile),"预览名字");
-    assert.equal(buttonByText(profile,"保存显示名称").disabled,true);
-    await act(async()=>profile.el.querySelector("form").dispatchEvent(new window.Event("submit",{bubbles:true,cancelable:true})));
+    await settle();assert.equal(profile.el.querySelector('input'),null);assert.equal(profile.el.querySelector('form'),null);
+    assert.equal([...profile.el.querySelectorAll('button')].some(b=>b.textContent==='保存显示名称'),false);
     assert.equal(byText(profile,"显示名称已保存。"),false);
   }finally{profile.unmount();}
   const sessions=mount(SessionsView,sessionProps({revokeSession:undefined,revokeOtherSessions:undefined,writeDisabledReason:"只预览，不注销"}));
@@ -438,8 +437,8 @@ test("profile: 400 保留输入并说明拒绝；5xx 归入未知态；缺写回
   const offline = mount(ProfileView, { adminUserId: PROFILE.adminUserId, sessionId: "s", accountStatus: "ACTIVE", locked: false, load: async () => ({ ...PROFILE }) });
   await settle();
   assert.ok(byText(offline, "暂未开放"), "缺写合同必须说明而不是摆出必然失败的按钮");
-  assert.equal(buttonByText(offline, "保存显示名称").disabled, true);
-  assert.equal(input(offline).disabled, true);
+  assert.equal([...offline.el.querySelectorAll('button')].some(b=>b.textContent==='保存显示名称'),false);
+  assert.equal(offline.el.querySelector('input'),null);
   offline.unmount();
 });
 

@@ -23,6 +23,7 @@ export async function mountAuthComponent(relativePath, componentName, props = {}
   window.confirm = () => true;
   const originalFetch = globalThis.fetch;
   const calls = [];
+  const profileNotices = [];
   globalThis.fetch = async (url, init = {}) => {
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ url, body, method: init.method });
@@ -55,7 +56,7 @@ export async function mountAuthComponent(relativePath, componentName, props = {}
     Trigger: ({ children }) => children,
     Portal: ({ children }) => children,
     Overlay: () => null,
-    Content: ({ children, onOpenAutoFocus, onCloseAutoFocus, ...rest }) => React.createElement("div", { ...rest, role: "dialog", "aria-modal": true }, children),
+    Content: ({ children, onOpenAutoFocus, onCloseAutoFocus, onEscapeKeyDown, ...rest }) => React.createElement("div", { ...rest, role: "dialog", "aria-modal": true }, children),
     Title: ({ children }) => React.createElement("h2", null, children),
     Description: ({ children, asChild }) => asChild ? children : React.createElement("p", null, children),
     Close: ({ children, onClick, ...rest }) => {
@@ -74,7 +75,7 @@ export async function mountAuthComponent(relativePath, componentName, props = {}
     const module = new Module(file); module.filename = file; module.paths = Module._nodeModulePaths(path.dirname(file)); cache.set(file, module);
     module.require = (name) => {
       if (Object.hasOwn(options.stubModules ?? {}, name)) return options.stubModules[name];
-      if (name === "@/components/session/user-session-provider" || name === "./session/user-session-provider") return { useUserSession: () => session, useUserSessionStore: () => store, publishUserSessionChange() {} };
+      if (name === "@/components/session/user-session-provider" || name === "./session/user-session-provider") return { useUserSession: () => session, useUserSessionStore: () => store, publishUserSessionChange() {}, dismissProfileUpdateNotice() {}, publishProfileUpdateNotice(userId,kind) { profileNotices.push({userId,kind}); } };
       if (name === "@/lib/web-auth-request") return load(path.join(rootPath, "apps/web/src/lib/web-auth-request.ts"));
       if (name === "../auth/auth-form" || name === "./auth-form") return load(path.join(rootPath, "apps/web/src/components/auth/auth-form.tsx"));
       // The support rail's own children: the workspace pulls in Radix popover, the IM client and
@@ -83,6 +84,7 @@ export async function mountAuthComponent(relativePath, componentName, props = {}
       if (name === "./contact-popover") return { ContactPopover: () => null };
       if (name === "./customer-support-workspace") return { CustomerSupportWorkspace: props => React.createElement("div", {"data-support-entry-type": props.initialType}) };
       if (name.endsWith(".css")) return {};
+      if (name === '@zzsh/ui/avatar-crop') return load(path.join(rootPath, 'packages/ui/src/avatar-crop.tsx'));
       // Sibling imports inside src/ resolve like a bundler would; the two stubs above still win.
       if (name.startsWith("./") || name.startsWith("../")) {
         const base = path.resolve(path.dirname(module.filename), name);
@@ -129,5 +131,5 @@ export async function mountAuthComponent(relativePath, componentName, props = {}
     }); await settle();
   };
   const submit = async (selector = "form") => { const form = host.querySelector(selector); assert.ok(form); await React.act(async () => form.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }))); await settle(); };
-  return { loadSource: relativePath => load(path.join(rootPath, relativePath)), host, window, calls, identity, get session() { return session; }, store, nav, router, render, click, input, submit, findButton, settle, React, get confirmations() { return confirmations; }, get successes() { return successes; }, async close() { await React.act(async () => root.unmount()); await window.happyDOM.abort(); globalThis.fetch = originalFetch; } };
+  return { loadSource: relativePath => load(path.join(rootPath, relativePath)), host, window, calls, profileNotices, identity, get session() { return session; }, store, nav, router, render, click, input, submit, findButton, settle, React, get confirmations() { return confirmations; }, get successes() { return successes; }, async close() { await React.act(async () => root.unmount()); await window.happyDOM.abort(); globalThis.fetch = originalFetch; } };
 }

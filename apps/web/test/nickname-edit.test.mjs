@@ -25,6 +25,15 @@ const mount = (options = {}, props = {}) =>
 const writes = p => p.calls.filter(item => item.url.endsWith("/profile/nickname"));
 const dialog = p => p.host.querySelector('[role="dialog"]');
 
+test('nickname uses an accessible pencil action and one counter rather than duplicate instructions',async()=>{
+ const p=await mount();try{await p.settle();const trigger=p.findButton('修改昵称');assert(trigger.querySelector('svg'));assert.equal(trigger.textContent,'');await p.click('修改昵称');assert.equal(dialog(p).querySelectorAll('#profile-nickname-helper').length,1);assert.match(dialog(p).querySelector('#profile-nickname-helper').textContent,/\/64$/);assert.doesNotMatch(dialog(p).textContent,/1–64 个字符，仅用于对外展示/)}finally{await p.close()}
+});
+
+test('unchanged and invalid names cannot save; cancelling a draft requires explicit discard',async()=>{
+ const nicknameDraft={current:null},p=await mount({}, {nicknameDraft});
+ try{await p.settle();await p.click('修改昵称');assert.equal(p.findButton('保存昵称').disabled,true);for(const value of ['','  ','超'.repeat(65),'坏\u0001昵称']){await p.input('profile-nickname',value);assert.equal(p.findButton('保存昵称').disabled,true)}await p.input('profile-nickname','新的昵称');assert.equal(p.findButton('保存昵称').disabled,false);assert.match(dialog(p).textContent,/4\/64/);await p.click('取消');assert.match(dialog(p).textContent,/放弃修改/);await p.click('继续编辑');assert.equal(p.host.querySelector('#profile-nickname').value,'新的昵称');await p.click('取消');await p.click('放弃修改');assert.equal(dialog(p),null);assert.equal(nicknameDraft.current,null);assert.equal(writes(p).length,0);await p.click('修改昵称');assert.equal(p.host.querySelector('#profile-nickname').value,overview.nickname)}finally{await p.close()}
+});
+
 test("概况读取成功后才出现编辑入口；读取失败与401都不出现（对齐安全页F1）", async () => {
   let mode = "ok";
   const p = await mount({ read: () => mode === "ok" ? response(overview) : Response.json({ error: { code: "FORBIDDEN" } }, { status: 403 }) });
@@ -58,7 +67,7 @@ test("昵称校验沿用 1–64 规则，错误逐字段绑定", async () => {
   const p = await mount();
   try {
     await p.settle();
-    await p.click("编辑资料");
+    await p.click("修改昵称");
     await p.input("profile-nickname", "   ");
     await p.submit('form[aria-label="修改昵称"]');
     assert.match(p.host.querySelector("#profile-nickname-result").textContent, /1–64/);
@@ -77,7 +86,7 @@ test("保存成功只发一次写入、回读确认后关闭并清空草稿", as
   const p = await mount({ committed: () => committed ? "新昵称" : overview.nickname, write: async () => { committed = true; return response({ status: true }); } }, { nicknameDraft });
   try {
     await p.settle();
-    await p.click("编辑资料");
+    await p.click("修改昵称");
     assert.equal(p.host.querySelector("#profile-nickname").value, overview.nickname, "打开时采用服务端昵称");
     await p.input("profile-nickname", "新昵称");
     assert.equal(nicknameDraft.current.value, "新昵称", "草稿写入共享容器");
@@ -87,7 +96,7 @@ test("保存成功只发一次写入、回读确认后关闭并清空草稿", as
     assert.equal(dialog(p), null, "确认成功后关闭");
     assert.equal(nicknameDraft.current, null, "成功后清空草稿");
     // 重新打开采用服务端已确认的新昵称。
-    await p.click("编辑资料");
+    await p.click("修改昵称");
     assert.equal(p.host.querySelector("#profile-nickname").value, "新昵称");
   } finally { await p.close(); }
 });
@@ -101,7 +110,7 @@ test("未知写入保留待确认意图：弹窗内可恢复，关闭后入口�
   }, { pendingWrite, nicknameDraft });
   try {
     await p.settle();
-    await p.click("编辑资料");
+    await p.click("修改昵称");
     await p.input("profile-nickname", "新昵称");
     await p.submit('form[aria-label="修改昵称"]');
     assert.match(p.host.textContent, /操作结果待确认/);
@@ -127,18 +136,18 @@ test("同主体重挂载保留未保存草稿；换主体丢弃草稿并读取�
   const p = await mount({ read: () => response({ ...overview, userId: id }) }, { nicknameDraft });
   try {
     await p.settle();
-    await p.click("编辑资料");
+    await p.click("修改昵称");
     await p.input("profile-nickname", "尚未保存的私人草稿");
     await p.render({ key: "same-user-confirmed" });
     await p.settle();
-    await p.click("编辑资料");
+    await p.click("修改昵称");
     assert.equal(p.host.querySelector("#profile-nickname").value, "尚未保存的私人草稿");
     await p.click("取消");
     // 换主体：共享草稿按 userId 隔离，输入回落到新主体的服务端昵称。
     id = "user_B"; p.identity.userId = "user_B"; nicknameDraft.current = null;
     await p.render({ key: "changed-user", userId: "user_B" });
     await p.settle();
-    await p.click("编辑资料");
+    await p.click("修改昵称");
     assert.equal(p.host.querySelector("#profile-nickname").value, overview.nickname);
     assert.doesNotMatch(p.host.textContent, /尚未保存的私人草稿/);
   } finally { await p.close(); }
@@ -155,7 +164,7 @@ for (const [label, mutate] of [
   const p = await mount({}, { pendingWrite });
   try {
     await p.settle();
-    await p.click("编辑资料");
+    await p.click("修改昵称");
     await p.input("profile-nickname", "新昵称");
     mutate(p.identity);
     await p.submit('form[aria-label="修改昵称"]');
@@ -186,7 +195,7 @@ test("F3 保存403撤下编辑入口与旧概况，明确说明且不残留意�
   const p = await mount({ write: async () => Response.json({ error: { code: "FORBIDDEN" } }, { status: 403 }) }, { pendingWrite });
   try {
     await p.settle();
-    await p.click("编辑资料");
+    await p.click("修改昵称");
     await p.input("profile-nickname", "新昵称");
     await p.submit('form[aria-label="修改昵称"]');
     await p.settle();
@@ -207,7 +216,7 @@ test("F3 先成功再失权：确认读取403撤下入口但保留已接受意�
   }, { pendingWrite });
   try {
     await p.settle();
-    await p.click("编辑资料");
+    await p.click("修改昵称");
     await p.input("profile-nickname", "新昵称");
     await p.submit('form[aria-label="修改昵称"]');
     await p.settle();
@@ -235,7 +244,7 @@ test("F2 安全侧未决写入暂停昵称修改：说明、返回恢复入口�
     await p.settle();
     assert.match(p.host.textContent, /其他操作结果待确认/, "给出暂停说明");
     assert.ok(p.host.querySelector('a[href="/account?view=security"]'), "返回安全页的恢复入口");
-    await p.click("编辑资料");
+    await p.click("修改昵称");
     assert.match(dialog(p).textContent, /其他操作结果待确认/, "弹窗内同样给出说明");
     assert.ok(p.findButton("保存昵称").disabled, "表单与提交同步锁定");
     await p.submit('form[aria-label="修改昵称"]');
@@ -257,7 +266,7 @@ test("F2 他类意图在渲染之后到达也在调用时同步阻止新写", as
   const p = await mount({}, { pendingWrite });
   try {
     await p.settle();
-    await p.click("编辑资料");
+    await p.click("修改昵称");
     await p.input("profile-nickname", "新昵称");
     // 安全页写入随后落入共享容器，本组件尚未重渲染。
     pendingWrite.current = { userId: "user_A", intent: { action: "password", operationId: "a".repeat(32) }, accepted: false, target: "" };
