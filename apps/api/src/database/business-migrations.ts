@@ -45,11 +45,11 @@ export class BusinessMigrationHistoryError extends Error {
 export const BUSINESS_INITIAL_FOLDER = resolve(__dirname, "../../../migrations/initial/release_0141");
 export const BUSINESS_INITIAL_ROOT = resolve(__dirname, "../../../migrations/initial");
 
-type BusinessMigrationOptions = { runtimeUser: string; migrationsFolder?: string; initialInstall?: boolean };
-async function migrationSource(pool: Pick<Pool, "query">, options: Pick<BusinessMigrationOptions, "migrationsFolder" | "initialInstall">) {
+type BusinessMigrationOptions = { runtimeUser: string; migrationsFolder?: string; initialInstall?: boolean; initialBaseline?: string };
+async function migrationSource(pool: Pick<Pool, "query">, options: Pick<BusinessMigrationOptions, "migrationsFolder" | "initialInstall" | "initialBaseline">) {
   const canonical = options.migrationsFolder ?? BUSINESS_MIGRATIONS_FOLDER;
   if (options.migrationsFolder && !options.initialInstall) return { folder: canonical, cleanup: () => {} };
-  const { readBusinessInitialRegistry, prepareBusinessInitial } = await import("./business-initial");
+  const { readBusinessInitialRegistry, prepareBusinessInitial, resolveBusinessInitialSelection } = await import("./business-initial");
   const registry = readBusinessInitialRegistry(BUSINESS_INITIAL_ROOT);
   if (!registry.supported.length) {
     if (options.initialInstall) throw new Error("BUSINESS_INITIAL_UNAVAILABLE");
@@ -58,14 +58,16 @@ async function migrationSource(pool: Pick<Pool, "query">, options: Pick<Business
   const present = (await pool.query("SELECT to_regclass('zzsh_business_meta.migrations') IS NOT NULL AS present")).rows[0]?.present;
   if (typeof present !== "boolean") throw new BusinessMigrationHistoryError("HISTORY_UNAVAILABLE");
   const first = present ? (await pool.query('SELECT hash,created_at::text AS "createdAt" FROM zzsh_business_meta.migrations ORDER BY id LIMIT 1')).rows[0] : undefined;
-  const existing = first ? registry.supported.find(entry => entry.manifest.migrationHash === first.hash) : undefined;
-  if (!options.initialInstall && !existing) return { folder: canonical, cleanup: () => {} };
-  if (first && !existing) throw new BusinessMigrationHistoryError("NOT_EXACT_PREFIX", 0);
+  const decision = resolveBusinessInitialSelection(registry, { initialInstall: options.initialInstall === true, requestedBaseline: options.initialBaseline, installedHash: first?.hash });
+  if (decision.kind === "canonical" || decision.kind === "not-baseline" && !options.initialInstall) return { folder: canonical, cleanup: () => {} };
+  if (decision.kind === "not-baseline") throw new BusinessMigrationHistoryError("NOT_EXACT_PREFIX", 0);
+  if (decision.kind === "conflict") throw new Error("BUSINESS_INITIAL_BASELINE_CONFLICT");
+  if (decision.kind === "missing") throw new Error("BUSINESS_INITIAL_UNAVAILABLE");
   if (!first) {
     const occupied = (await pool.query("SELECT count(*)::int AS count FROM pg_namespace WHERE nspname = ANY($1::text[])", [[...BUSINESS_SCHEMAS, "zzsh_credit"]])).rows[0]?.count;
     if (occupied !== 0) throw new Error("BUSINESS_INITIAL_REQUIRES_EMPTY_DATABASE");
   }
-  const selected = existing ?? registry.supported.find(entry => entry.name === registry.active);
+  const selected = registry.supported.find(entry => entry.name === decision.name);
   if (!selected) throw new Error("BUSINESS_INITIAL_UNAVAILABLE");
   return prepareBusinessInitial(canonical, selected.folder);
 }

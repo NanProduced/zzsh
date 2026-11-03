@@ -10,7 +10,13 @@ async function main(): Promise<void> {
   const pool = createBusinessPool(config);
   try {
     await assertBusinessMigrationIdentity(pool, config);
-    await runBusinessMigrations(pool, { runtimeUser: config.database.runtimeUser, initialInstall: process.argv.includes("--initial") });
+    const initialInstall = process.argv.includes("--initial");
+    const baselineFlag = process.argv.find(arg => arg.startsWith("--baseline="));
+    const baselineIndex = process.argv.indexOf("--baseline");
+    const initialBaseline = baselineFlag ? baselineFlag.slice("--baseline=".length) : baselineIndex >= 0 ? process.argv[baselineIndex + 1] : undefined;
+    if (initialBaseline && !initialInstall) throw new ConfigurationError("--baseline requires --initial");
+    if (initialBaseline && !/^release_[a-zA-Z0-9_]{1,60}$/.test(initialBaseline)) throw new ConfigurationError("baseline name is invalid");
+    await runBusinessMigrations(pool, { runtimeUser: config.database.runtimeUser, initialInstall, initialBaseline });
   } finally {
     await pool.end();
   }

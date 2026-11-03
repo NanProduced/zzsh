@@ -4,6 +4,7 @@ import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { annotateDump, navigationMarkdown, readmeMarkdown } from './business-initial-notes.mjs';
 const require = createRequire(import.meta.url);
 const { Client } = require('pg');
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -63,9 +64,10 @@ try {
     const snapshot = (await c.query('SELECT pg_export_snapshot() id')).rows[0].id;
     function dump(extra) { const r = spawnSync('docker', ['exec', '--env', 'PGPASSWORD', 'zzsh-rebuild-local-postgres-1', 'pg_dump', '-h', '127.0.0.1', '-U', 'zzsh', '-d', 'zzsh_test_regression', '--snapshot=' + snapshot, '--no-owner', ...SCHEMAS.map(s => '--schema=' + s), ...extra], { env: { ...process.env, PGPASSWORD: password }, encoding: 'utf8', timeout: 60000, maxBuffer: 20 * 1024 * 1024 }); if (r.status !== 0)
         throw Error('PG_DUMP_FAILED:' + String(r.stderr).slice(0, 180)); return r.stdout.split(String.fromCharCode(10)).filter(line => !line.startsWith(String.fromCharCode(92) + 'restrict ') && !line.startsWith(String.fromCharCode(92) + 'unrestrict ') && !['statement_timeout', 'lock_timeout', 'idle_in_transaction_session_timeout'].some(setting => line.startsWith('SET ' + setting + ' = 0;'))).join(String.fromCharCode(10)); }
-    const pre = dump(['--section=pre-data', '--no-privileges']);
+    const notes = await loadInitialNotes(c);
+    const pre = annotateDump(dump(['--section=pre-data', '--no-privileges']), notes);
     const data = dump(['--section=data', '--no-privileges', '--inserts', '--column-inserts']);
-    const post = dump(['--section=post-data', '--no-privileges']);
+    const post = annotateDump(dump(['--section=post-data', '--no-privileges']), notes);
     const publicObjects = (await c.query(`SELECT 'SCHEMA' kind,quote_ident(n.nspname) object,a.privilege_type privilege,a.is_grantable FROM pg_namespace n LEFT JOIN LATERAL aclexplode(coalesce(n.nspacl,acldefault('n',n.nspowner))) a ON a.grantee=0 WHERE n.nspname=ANY($1::text[])
 UNION ALL SELECT CASE WHEN c.relkind='S' THEN 'SEQUENCE' ELSE 'TABLE' END,format('%I.%I',n.nspname,c.relname),a.privilege_type,a.is_grantable FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace LEFT JOIN LATERAL aclexplode(coalesce(c.relacl,acldefault((CASE WHEN c.relkind='S' THEN 'S' ELSE 'r' END)::"char",c.relowner))) a ON a.grantee=0 WHERE n.nspname=ANY($1::text[]) AND c.relkind IN ('r','p','v','m','S','f')
 UNION ALL SELECT 'FUNCTION',format('%I.%I(%s)',n.nspname,p.proname,pg_get_function_identity_arguments(p.oid)),a.privilege_type,a.is_grantable FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace LEFT JOIN LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a ON a.grantee=0 WHERE n.nspname=ANY($1::text[])
@@ -105,8 +107,13 @@ UNION ALL SELECT 'TYPE',format('%I.%I',n.nspname,t.typname),a.privilege_type,a.i
     });
     mkdirSync(target);
     const parts = sections.map(([file, sql]) => { writeFileSync(join(target, file), sql, { flag: 'wx' }); return { file, sha256: sha(sql) }; });
+    const documents = [
+      ['README.md', readmeMarkdown(baseline, sourceCount, sourceChain.at(-1).tag)],
+      ['NAVIGATION.md', navigationMarkdown(baseline, notes, sections[0][1])],
+    ].map(([file, text]) => { writeFileSync(join(target, file), text, { flag: 'wx' }); return { file, sha256: sha(text) }; });
     const combined = sections.map(([, sql]) => sql).join('\n--> statement-breakpoint\n');
-    const manifest = { format: 'zzsh.business-initial.v1', baseline, migrationTag: sourceChain.at(-1).tag.slice(0, 4) + '_initial_' + baseline, migrationHash: sha(combined), when: sourceChain.at(-1).when, sourceCount, sourceChain, parts, seedCounts, sourceDatabase: { oid: expectedOid, connectionRole: 'zzsh', schemaOwner: 'zzsh_regression_migration' }, notes: '仅新装基线；原canonical SQL/journal保持升级历史。中文注释不改对象和函数体；新增COMMENT须先纳入canonical。runtime权限由applyRuntimePrivileges安装。' };
+    const journalBytes = readFileSync(join(ROOT, 'apps/api/migrations/business/meta/_journal.json'));
+    const manifest = { format: 'zzsh.business-initial.v1', baseline, migrationTag: sourceChain.at(-1).tag.slice(0, 4) + '_initial_' + baseline, migrationHash: sha(combined), when: sourceChain.at(-1).when, sourceCount, journalSha256: sha(journalBytes), sourceChain, parts, documents, seedCounts, sourceDatabase: { oid: expectedOid, connectionRole: 'zzsh', schemaOwner: 'zzsh_regression_migration' }, notes: '仅新装基线；原canonical SQL/journal保持升级历史。中文注释不改对象和函数体；新增COMMENT须先纳入canonical。runtime权限由applyRuntimePrivileges安装。' };
     writeFileSync(join(target, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n', { flag: 'wx' });
     console.log(JSON.stringify({ status: 'INITIAL_GENERATED', sourceCount, baseline, parts: parts.length, seedCounts, migrationHash: manifest.migrationHash, bytes: Buffer.byteLength(combined) }));
     await c.query('ROLLBACK');
@@ -122,4 +129,34 @@ finally {
     if (held && !(await maintenance.query('SELECT pg_advisory_unlock(806006::bigint) ok')).rows[0].ok)
         throw Error('REGRESSION_UNLOCK_UNKNOWN');
     await maintenance.end();
+}
+
+async function loadInitialNotes(client) {
+  const columns = (await client.query(`SELECT n.nspname AS schema,c.relname AS "table",a.attname AS name,format_type(a.atttypid,a.atttypmod) AS type
+    FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+    WHERE n.nspname=ANY($1::text[]) AND c.relkind IN ('r','p') AND a.attnum>0 AND NOT a.attisdropped ORDER BY 1,2,a.attnum`, [SCHEMAS])).rows;
+  const constraints = (await client.query(`SELECT n.nspname AS schema,c.relname AS "table",co.contype,pg_get_constraintdef(co.oid) AS def
+    FROM pg_constraint co JOIN pg_class c ON c.oid=co.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+    WHERE n.nspname=ANY($1::text[]) AND co.contype IN ('p','f')`, [SCHEMAS])).rows;
+  const functions = (await client.query(`SELECT n.nspname AS schema,p.proname AS name,pg_get_function_identity_arguments(p.oid) AS args,p.provolatile AS volatile,p.prosecdef AS definer
+    FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=ANY($1::text[]) ORDER BY 1,2,3`, [SCHEMAS])).rows;
+  const triggers = (await client.query(`SELECT n.nspname AS schema,c.relname AS "table",t.tgname AS name,pn.nspname AS "functionSchema",p.proname AS "functionName"
+    FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+    JOIN pg_proc p ON p.oid=t.tgfoid JOIN pg_namespace pn ON pn.oid=p.pronamespace
+    WHERE n.nspname=ANY($1::text[]) AND NOT t.tgisinternal ORDER BY 1,2,3`, [SCHEMAS])).rows;
+  const indexes = (await client.query(`SELECT schemaname AS schema,tablename AS "table",indexname AS name FROM pg_indexes WHERE schemaname=ANY($1::text[]) ORDER BY 1,2,3`, [SCHEMAS])).rows;
+  const tables = new Map();
+  for (const column of columns) {
+    const key = column.schema + '.' + column.table;
+    const table = tables.get(key) ?? { schema: column.schema, name: column.table, columns: [], primaryKey: [], foreignKeys: [] };
+    table.columns.push({ name: column.name, type: column.type });
+    tables.set(key, table);
+  }
+  for (const constraint of constraints) {
+    const table = tables.get(constraint.schema + '.' + constraint.table);
+    if (!table) continue;
+    if (constraint.contype === 'p') table.primaryKey = [...constraint.def.matchAll(/\(([^)]*)\)/g)].at(-1)?.[1].split(',').map(item => item.trim()) ?? [];
+    if (constraint.contype === 'f') table.foreignKeys.push(constraint.def);
+  }
+  return { tables: [...tables.values()], functions, triggers, indexes };
 }

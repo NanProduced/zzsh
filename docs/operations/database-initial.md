@@ -18,4 +18,10 @@ npm run migrate:business -w @zzsh/api -- --initial
 
 后续生成必须显式给新`--baseline`名称及已冻结的`--source-count`，目标目录已存在即拒绝，不覆盖`release_0141`或任何已记账文件。中文版本由生成器写入总说明、四段用途和七个schema的模块导览；保留原依赖顺序及函数体，不用注释改造重排SQL。需要写入数据库的对象`COMMENT`应先作为canonical前向迁移，再随新基线导出，保证原链与新装的元数据也一致。新的中文基线在真实等价验证及维护者选择前不自动代替当前版本；已装旧baseline继续沿其原hash承接后续增量。
 
+`release_0151` 由同一生成器覆盖冻结canonical 0000–0151。命令是 `node scripts/migration/build-business-initial.mjs --execute --oid <现场OID> --baseline release_0151 --source-count 152`，目标目录已存在则拒绝，不覆盖 `release_0141`。生成结果含四段SQL、`NAVIGATION.md`、`README.md` 和绑定152份源SQL、journal字节与各段hash的manifest。中文说明是SQL行注释和导航；不在initial里新增数据库 `COMMENT`。
+
+registry 的 active 在等价验证通过并由维护者改写之前保持 `release_0141`。空库默认 `--initial` 仍装旧基线。要装新基线必须同时给出 `--initial --baseline release_0151`，并且该目录已经登记在 `supported`。已装 `release_0141` 的库即使请求 0151 也拒绝换基线，继续按已安装hash承接 0142 及之后的原编号增量。canonical库不带 `--initial` 时仍按原链升级。一条baseline记账不是152次历史执行。
+
+在空canonical回归库完成原链安装、initial安装和未放宽的结构/种子/ACL比较之前，`release_0151` 不得标为已验收，也不得改成默认基线。
+
 更新基线须重新核验原链和initial新装的表/有效列顺序、类型/default/identity/generated、约束和函数体、触发器、索引、种子逐行内容、序列和有效ACL，以及关键业务行为。物理DROP COLUMN遗留attnum空洞与新表压缩不是业务列序变化，原始目录快照需保留；不剥括号或放宽表达式比较。新装等价不代替已有数据升级、真实旧数据转换或渠道验收。

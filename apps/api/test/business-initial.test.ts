@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readMigrationFiles } from "drizzle-orm/migrator";
-import { prepareBusinessInitial, readBusinessInitialRegistry, type BusinessInitialManifest } from "../src/database/business-initial";
+import { prepareBusinessInitial, readBusinessInitialRegistry, resolveBusinessInitialSelection, type BusinessInitialManifest } from "../src/database/business-initial";
 const sha = (input: string) => createHash("sha256").update(input).digest("hex");
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "zzsh-initial-test-"));
@@ -49,6 +49,25 @@ for (const [name, registry] of [
   try { writeFileSync(join(root, "registry.json"), JSON.stringify({ format: "zzsh.business-initial-registry.v1", ...registry })); assert.throws(() => readBusinessInitialRegistry(root), /BUSINESS_INITIAL_MANIFEST_INVALID/); }
   finally { rmSync(root, { recursive: true }); }
 });
+test("an installed baseline stays on its own hash when a newer baseline is active", () => {
+  const registry = { active: "release_0151", supported: [
+    { name: "release_0141", manifest: { migrationHash: "a" } },
+    { name: "release_0151", manifest: { migrationHash: "b" } },
+  ] };
+  const installed = resolveBusinessInitialSelection(registry, { initialInstall: false, installedHash: "a" });
+  const fresh = resolveBusinessInitialSelection(registry, { initialInstall: true });
+  const explicitOld = resolveBusinessInitialSelection(registry, { initialInstall: true, requestedBaseline: "release_0141" });
+  assert.equal(installed.kind, "installed");
+  assert.equal(fresh.kind, "selected");
+  assert.equal(explicitOld.kind, "selected");
+  if (installed.kind === "installed") assert.equal(installed.name, "release_0141");
+  if (fresh.kind === "selected") assert.equal(fresh.name, "release_0151");
+  if (explicitOld.kind === "selected") assert.equal(explicitOld.name, "release_0141");
+  assert.equal(resolveBusinessInitialSelection(registry, { initialInstall: true, requestedBaseline: "release_missing" }).kind, "missing");
+  assert.equal(resolveBusinessInitialSelection(registry, { initialInstall: true, requestedBaseline: "release_0151", installedHash: "a" }).kind, "conflict");
+  assert.equal(resolveBusinessInitialSelection(registry, { initialInstall: false }).kind, "canonical");
+  assert.equal(resolveBusinessInitialSelection(registry, { initialInstall: true, installedHash: "canonical-hash" }).kind, "not-baseline");
+});
 test("initial baseline is one distinct journal entry followed by unchanged future canonical SQL", () => {
   const f = fixture(); try {
     const prepared = prepareBusinessInitial(f.canonical, f.initial); try {
@@ -69,6 +88,8 @@ for (const [name, mutate] of [
   ["path traversal", (f: ReturnType<typeof fixture>) => { f.manifest.parts[0]!.file = "../outside.sql"; f.seal(); }],
   ["duplicate parts", (f: ReturnType<typeof fixture>) => { f.manifest.parts[1] = f.manifest.parts[0]!; f.seal(); }],
   ["missing source entry", (f: ReturnType<typeof fixture>) => { f.manifest.sourceChain.pop(); f.seal(); }],
+  ["changed journal bytes", (f: ReturnType<typeof fixture>) => { (f.manifest as BusinessInitialManifest & { journalSha256: string }).journalSha256 = "f".repeat(64); f.seal(); }],
+  ["changed navigation document", (f: ReturnType<typeof fixture>) => { writeFileSync(join(f.initial, "NAVIGATION.md"), "changed\n"); (f.manifest as BusinessInitialManifest & { documents: { file: string; sha256: string }[] }).documents = [{ file: "NAVIGATION.md", sha256: "1".repeat(64) }]; f.seal(); }],
 ] as const) {
   test(`initial rejects ${name} before preparing migration SQL`, () => {
     const f = fixture(); try { mutate(f); assert.throws(() => prepareBusinessInitial(f.canonical, f.initial), /BUSINESS_INITIAL_MANIFEST_INVALID/); } finally { f.cleanup(); }

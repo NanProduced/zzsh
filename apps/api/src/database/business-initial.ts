@@ -17,6 +17,21 @@ export type BusinessInitialManifest = {
 const sha = (input: string | Buffer) => createHash("sha256").update(input).digest("hex");
 const reject = (): never => { throw new Error("BUSINESS_INITIAL_MANIFEST_INVALID"); };
 const leaf = (name: string) => typeof name === "string" && name === basename(name) && /^[a-zA-Z0-9_-]+\.(sql|json)$/.test(name);
+const docName = (name: string) => typeof name === "string" && name === basename(name) && /^[A-Za-z0-9._-]+\.(md|json)$/.test(name);
+
+/** An installed baseline keeps its own tail. A name is used only for an empty database. */
+export function resolveBusinessInitialSelection(registry: { active: string; supported: { name: string; manifest: { migrationHash: string } }[] }, input: { initialInstall: boolean; requestedBaseline?: string; installedHash?: string }) {
+  if (!input.initialInstall && !input.installedHash) return { kind: "canonical" as const };
+  if (input.installedHash) {
+    const installed = registry.supported.find(entry => entry.manifest.migrationHash === input.installedHash);
+    if (!installed) return { kind: "not-baseline" as const };
+    if (input.requestedBaseline && input.requestedBaseline !== installed.name) return { kind: "conflict" as const, installed: installed.name };
+    return { kind: "installed" as const, name: installed.name };
+  }
+  const name = input.requestedBaseline || registry.active;
+  if (!registry.supported.some(entry => entry.name === name)) return { kind: "missing" as const, name };
+  return { kind: "selected" as const, name };
+}
 
 /** A new default does not rewrite the hash of an already installed older baseline. */
 export function readBusinessInitialRegistry(initialRoot: string) {
@@ -48,6 +63,8 @@ export function prepareBusinessInitial(canonicalFolder: string, initialFolder: s
     if (!actual || actual.tag !== item.tag || actual.when !== item.when || !leaf(item.tag + ".sql") || sha(readFileSync(join(canonicalFolder, item.tag + ".sql"))) !== item.sha256) reject();
   }
   if (manifest.when !== manifest.sourceChain.at(-1)?.when) reject();
+  const journalSha = (manifest as { journalSha256?: string }).journalSha256;
+  if (journalSha !== undefined && sha(readFileSync(join(canonicalFolder, "meta/_journal.json"))) !== journalSha) reject();
   const names = new Set<string>();
   const parts = manifest.parts.map((part) => {
     if (!leaf(part.file) || names.has(part.file)) reject();
@@ -60,6 +77,17 @@ export function prepareBusinessInitial(canonicalFolder: string, initialFolder: s
   });
   const sql = parts.join("\n--> statement-breakpoint\n");
   if (sha(sql) !== manifest.migrationHash) reject();
+  const documents = (manifest as { documents?: { file: string; sha256: string }[] }).documents;
+  if (documents !== undefined) {
+    if (!Array.isArray(documents)) reject();
+    const seen = new Set<string>();
+    for (const doc of documents) {
+      if (!docName(doc.file) || seen.has(doc.file) || !/^[a-f0-9]{64}$/.test(doc.sha256)) reject();
+      seen.add(doc.file);
+      const file = join(initialFolder, doc.file);
+      if (lstatSync(file).isSymbolicLink() || sha(readFileSync(file)) !== doc.sha256) reject();
+    }
+  }
   const folder = mkdtempSync(join(tmpdir(), "zzsh-business-initial-"));
   const cleanup = () => {
     if (resolve(folder).startsWith(resolve(tmpdir()) + "\\") || resolve(folder).startsWith(resolve(tmpdir()) + "/")) rmSync(folder, { recursive: true, force: false });
