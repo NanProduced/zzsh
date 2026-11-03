@@ -287,5 +287,7 @@
   "dist/test/admin-finance-obligation-queues.test.js",
   "dist/test/admin-distribution-dashboard.test.js",
   "dist/test/admin-distribution-dashboard-routes.test.js",
-  "dist/test/admin-dashboard.test.js"
+  "dist/test/admin-dashboard.test.js",
+  "dist/test/admin-domain-summary.test.js",
+  "dist/test/admin-domain-summary-routes.test.js"
 ]

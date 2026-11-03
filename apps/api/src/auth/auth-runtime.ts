@@ -28,6 +28,7 @@ import { assertNativeDistributionEarningAssembly } from '../finance/distribution
 import { mountAdminDistributionMaintenanceRoutes } from "../finance/admin-distribution-maintenance";
 import { membershipGrowthEnabled, readMembershipGrowthQuoteCandidates } from "./membership-growth-integration";
 import { mountUserDirectory } from "./user-directory-routes";
+import { mountAdminDomainSummary } from "./admin-domain-summary-routes";
 import { mountPersonalConfirmations } from "../order/confirmation-routes";
 import { mountPersonalOrders } from "../order/personal-order-routes";
 import { mountCreditGuaranteeRoutes } from "../credit/credit-guarantee-routes";
@@ -1416,6 +1417,7 @@ export async function mountAuthHandlers(
   if (options.localControlledPayments) mountLocalControlledPayments(app, securityOptions, options.localControlledPayments);
   else mountChannelPayments(app, securityOptions, collection?.routes, paymentReadOptions);
   if (collection?.notifications) mountJoinpayCollectionNotifications(app, { pool: options.pool, source: collection.notifications });
+  mountAdminDomainSummary(app, securityOptions);
   mountOrderHandlers(app, orderOptions);
   mountUserOrderBff(app, orderOptions);
   mountUserDirectory(app,{...securityOptions,supplyGateReader,legacyPublicAdmission,legacyPublicAdmissionDetail});

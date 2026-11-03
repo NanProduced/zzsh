@@ -34,6 +34,7 @@ import {
   USER_DIRECTORY_CREDIT_STATES,
   USER_DIRECTORY_RISK_STATES,
   type UserDirectoryStatusFilter,
+  type UserDirectoryFilter,
   type UserDirectorySource,
   type UserDirectorySort,
 } from "./user-directory";
@@ -108,6 +109,78 @@ function parseTrimmed(raw: string | null, max: number, label: string): string | 
   if (value.length === 0) return undefined;
   if (value.length > max) throw invalid(`${label} is invalid`);
   return value;
+}
+
+/** Shared list/summary parser; callers still enforce fresh field permissions in the read transaction. */
+export function parseUserDirectoryFilter(query: URLSearchParams, phoneLookup: boolean): UserDirectoryFilter {
+  for (const key of REGISTRATION_KEYS) if (query.getAll(key).length > 1) throw invalid("Registration argument is repeated", key);
+  const registrationTime = query.get("registrationTime");
+  if (registrationTime !== null && registrationTime !== "ORIGINAL") throw invalid("Registration time mode is invalid");
+  const pagination = parseDirectoryPage(query, true);
+  const limit = pagination?.pageSize ?? parseLimit(query.get("limit"));
+  const cursor = query.get("cursor") ?? undefined;
+  const userIdFilter = parseTrimmed(query.get("userId"), 128, "User id");
+  const legacyIdFilter = parseTrimmed(query.get("legacyId"), LEGACY_ID_MAX, "Legacy id");
+  const identifierFilter = parseTrimmed(query.get("identifier"), USERNAME_SEARCH_MAX, "Identifier");
+  const search = parseTrimmed(query.get("q"), USERNAME_SEARCH_MAX, "Search");
+  if ([identifierFilter, search].some(value => value && /(?:\+?86[\s-]*)?1[3-9](?:[\s-]*\d){9}/.test(value))) throw invalid("Phone lookup must use a request body");
+  const identityStatus = parseTrimmed(query.get("identityStatus"), 16, "Identity status");
+  if (identityStatus && !["UNKNOWN", "UNVERIFIED", "VERIFIED", "REJECTED"].includes(identityStatus)) throw invalid("Identity status is invalid");
+  const verified = query.get("identityVerified");
+  if (verified !== null && (!["true", "false"].includes(verified) || identityStatus !== undefined)) throw invalid("Identity verified filter is invalid");
+  const identityVerified = verified === null ? undefined : verified === "true";
+  const creditMin = parseCreditScore(query.get("creditMin"));
+  const creditMax = parseCreditScore(query.get("creditMax"));
+  if (creditMin !== undefined && creditMax !== undefined && creditMin > creditMax) throw invalid("Credit range is reversed");
+  const ageStatus = parseTrimmed(query.get("ageStatus"), 16, "Age status");
+  if (ageStatus && !["UNKNOWN", "ADULT", "MINOR"].includes(ageStatus)) throw invalid("Age status is invalid");
+  const sort = query.get("sort");
+  if (registrationTime === "ORIGINAL" ? sort !== null && !USER_DIRECTORY_SORTS.includes(sort as UserDirectorySort) : sort !== null && sort !== "created") throw invalid("Registration sort is invalid");
+  const accountStatusFilter = parseAccountStatus(query.get("accountStatus"));
+  const sourceFilter = parseSource(query.get("source"));
+  const membershipTier = parseEnum(query.get("membershipTier"), DIRECTORY_MEMBERSHIP_TIERS, "Membership tier");
+  const entitlement = parseEnum(query.get("entitlement"), USER_DIRECTORY_ENTITLEMENTS, "Entitlement");
+  const creditState = parseEnum(query.get("creditState"), USER_DIRECTORY_CREDIT_STATES, "Credit state");
+  const riskState = parseEnum(query.get("riskState"), USER_DIRECTORY_RISK_STATES, "Risk state");
+  const registeredFrom = parseTimestamp(query.get("registeredFrom"), "Registered from");
+  const registeredTo = parseTimestamp(query.get("registeredTo"), "Registered to");
+  const registeredBefore = parseTimestamp(query.get("registeredBefore"), "Registered before");
+  if (registeredFrom && registeredTo && Date.parse(registeredFrom) > Date.parse(registeredTo)) throw invalid("Registered range is reversed");
+  if (registeredBefore && (registrationTime !== "ORIGINAL" || registeredTo || registeredFrom && Date.parse(registeredFrom) >= Date.parse(registeredBefore))) throw invalid("Registered before is incompatible or not after the lower bound");
+  const phoneRaw = parseTrimmed(query.get("phone"), 32, "Phone");
+  let phone: string | undefined;
+  if (phoneRaw !== undefined) {
+    if (!phoneLookup) throw forbidden("Phone search requires explicit permission");
+    const normalized = normalizeMainlandPhone(phoneRaw);
+    if (!normalized) throw invalid("Phone is invalid");
+    phone = normalized;
+  }
+  return {
+    ...(userIdFilter !== undefined ? { userId: userIdFilter } : {}),
+    ...(legacyIdFilter !== undefined ? { legacyId: legacyIdFilter } : {}),
+    ...(identifierFilter !== undefined ? { identifier: identifierFilter } : {}),
+    ...(search !== undefined ? { search } : {}),
+    ...(identityStatus !== undefined ? { identityStatus } : {}),
+    ...(identityVerified !== undefined ? { identityVerified } : {}),
+    ...(ageStatus !== undefined ? { ageStatus } : {}),
+    ...(phone !== undefined ? { phone } : {}),
+    ...(accountStatusFilter !== undefined ? { accountStatus: accountStatusFilter } : {}),
+    ...(sourceFilter !== undefined ? { source: sourceFilter } : {}),
+    ...(membershipTier !== undefined ? { membershipTier } : {}),
+    ...(entitlement !== undefined ? { entitlement } : {}),
+    ...(creditState !== undefined ? { creditState } : {}),
+    ...(creditMin !== undefined ? { creditMin } : {}),
+    ...(creditMax !== undefined ? { creditMax } : {}),
+    ...(riskState !== undefined ? { riskState } : {}),
+    ...(registeredFrom !== undefined ? { registeredFrom } : {}),
+    ...(registeredTo !== undefined ? { registeredTo } : {}),
+    ...(registrationTime !== null ? { registrationTime } : {}),
+    ...(sort !== null && USER_DIRECTORY_SORTS.includes(sort as UserDirectorySort) ? { sort: sort as UserDirectorySort } : {}),
+    ...(registeredBefore !== undefined ? { registeredBefore } : {}),
+    limit,
+    ...(cursor !== undefined ? { cursor } : {}),
+    ...(pagination ? { page: pagination.page, ...(pagination.contextKey !== undefined ? { contextKey: pagination.contextKey } : {}) } : {}),
+  };
 }
 
 /** 用户目录路由选项：注入迁入公开准入，订单预览账号资料与账号页同一口径 */
@@ -244,69 +317,9 @@ export async function handleUserDirectoryAdmin(
 
       if (path === "/" || lookup) {
         requirePermission(access, ADMIN_PERMISSION.userDirectoryRead);
-        const userIdFilter = parseTrimmed(query.get("userId"), 128, "User id");
-        const legacyIdFilter = parseTrimmed(query.get("legacyId"), LEGACY_ID_MAX, "Legacy id");
-        const identifierFilter = parseTrimmed(query.get("identifier"), USERNAME_SEARCH_MAX, "Identifier");
-        const search = parseTrimmed(query.get("q"), USERNAME_SEARCH_MAX, "Search");
-        if ([identifierFilter, search].some(value => value && /(?:\+?86[\s-]*)?1[3-9](?:[\s-]*\d){9}/.test(value))) throw invalid("Phone lookup must use a request body");
-        const identityStatus = parseTrimmed(query.get("identityStatus"), 16, "Identity status");
-        if (identityStatus && !["UNKNOWN", "UNVERIFIED", "VERIFIED", "REJECTED"].includes(identityStatus)) throw invalid("Identity status is invalid");
-        const verified = query.get("identityVerified");
-        if (verified !== null && (!["true", "false"].includes(verified) || identityStatus !== undefined)) throw invalid("Identity verified filter is invalid");
-        const identityVerified = verified === null ? undefined : verified === "true";
-        const creditMin = parseCreditScore(query.get("creditMin"));
-        const creditMax = parseCreditScore(query.get("creditMax"));
-        if (creditMin !== undefined && creditMax !== undefined && creditMin > creditMax) throw invalid("Credit range is reversed");
-        const ageStatus = parseTrimmed(query.get("ageStatus"), 16, "Age status");
-        if (ageStatus && !["UNKNOWN", "ADULT", "MINOR"].includes(ageStatus)) throw invalid("Age status is invalid");
-        const sort = query.get("sort");
-        if (registrationTime === "ORIGINAL" ? sort !== null && !USER_DIRECTORY_SORTS.includes(sort as UserDirectorySort) : sort !== null && sort !== "created") throw invalid("Registration sort is invalid");
-        const accountStatusFilter = parseAccountStatus(query.get("accountStatus"));
-        const sourceFilter = parseSource(query.get("source"));
-        const membershipTier = parseEnum(query.get("membershipTier"), DIRECTORY_MEMBERSHIP_TIERS, "Membership tier");
-        const entitlement = parseEnum(query.get("entitlement"), USER_DIRECTORY_ENTITLEMENTS, "Entitlement");
-        const creditState = parseEnum(query.get("creditState"), USER_DIRECTORY_CREDIT_STATES, "Credit state");
-        const riskState = parseEnum(query.get("riskState"), USER_DIRECTORY_RISK_STATES, "Risk state");
-        const registeredFrom = parseTimestamp(query.get("registeredFrom"), "Registered from");
-        const registeredTo = parseTimestamp(query.get("registeredTo"), "Registered to");
-        const registeredBefore = parseTimestamp(query.get("registeredBefore"), "Registered before");
-        if (registeredFrom && registeredTo && Date.parse(registeredFrom) > Date.parse(registeredTo)) throw invalid("Registered range is reversed");
-        if (registeredBefore && (registrationTime !== "ORIGINAL" || registeredTo || registeredFrom && Date.parse(registeredFrom) >= Date.parse(registeredBefore))) throw invalid("Registered before is incompatible or not after the lower bound");
-        const phoneRaw = parseTrimmed(query.get("phone"), 32, "Phone");
-        let phone: string | undefined;
-        if (phoneRaw !== undefined) {
-          if (!viewer.phoneLookup) throw forbidden("Phone search requires explicit permission");
-          const normalized = normalizeMainlandPhone(phoneRaw);
-          if (!normalized) throw invalid("Phone is invalid");
-          phone = normalized;
-        }
+        const filter = parseUserDirectoryFilter(query, viewer.phoneLookup);
         await enableLegacyRead();
-        const data = await listUserDirectory(client, viewer, {
-          ...(userIdFilter !== undefined ? { userId: userIdFilter } : {}),
-          ...(legacyIdFilter !== undefined ? { legacyId: legacyIdFilter } : {}),
-          ...(identifierFilter !== undefined ? { identifier: identifierFilter } : {}),
-          ...(search !== undefined ? { search } : {}),
-          ...(identityStatus !== undefined ? { identityStatus } : {}),
-          ...(identityVerified !== undefined ? { identityVerified } : {}),
-          ...(ageStatus !== undefined ? { ageStatus } : {}),
-          ...(phone !== undefined ? { phone } : {}),
-          ...(accountStatusFilter !== undefined ? { accountStatus: accountStatusFilter } : {}),
-          ...(sourceFilter !== undefined ? { source: sourceFilter } : {}),
-          ...(membershipTier !== undefined ? { membershipTier } : {}),
-          ...(entitlement !== undefined ? { entitlement } : {}),
-          ...(creditState !== undefined ? { creditState } : {}),
-          ...(creditMin !== undefined ? { creditMin } : {}),
-          ...(creditMax !== undefined ? { creditMax } : {}),
-          ...(riskState !== undefined ? { riskState } : {}),
-          ...(registeredFrom !== undefined ? { registeredFrom } : {}),
-          ...(registeredTo !== undefined ? { registeredTo } : {}),
-          ...(registrationTime !== null ? { registrationTime } : {}),
-          ...(sort !== null && USER_DIRECTORY_SORTS.includes(sort as UserDirectorySort) ? { sort: sort as UserDirectorySort } : {}),
-          ...(registeredBefore !== undefined ? { registeredBefore } : {}),
-          limit,
-          ...(cursor !== undefined ? { cursor } : {}),
-          ...(pagination ? { page: pagination.page, ...(pagination.contextKey !== undefined ? { contextKey: pagination.contextKey } : {}) } : {}),
-        });
+        const data = await listUserDirectory(client, viewer, filter);
         dataToSend = data;
         return;
       }

@@ -4,6 +4,7 @@ import { handleAdminBff, type AdminBffOptions } from "../src/bff/admin-bff";
 import * as orderRoutes from '../src/order/order-routes';
 import * as legalRoutes from "../src/legal/legal-routes";
 import * as yunxinRoutes from '../src/im/yunxin-routes';
+import * as domainSummary from '../src/auth/admin-domain-summary-routes';
 
 const ADMIN_ORIGIN = "http://127.0.0.1:4291";
 const API_ORIGIN = "http://127.0.0.1:4292";
@@ -134,3 +135,10 @@ test("admin BFF keeps rejecting cross-origin and bearer requests before any IM f
   );
   assert.equal(bearer.result().status, 400);
 });
+
+ test('domain summary BFF admits only the two exact GET leaves and preserves list filters',async t=>{
+ const calls:string[]=[];t.mock.method(domainSummary,'handleAdminDomainSummary',async(request:any,response:any)=>{calls.push(request.originalUrl);response.status(200).json({state:'KNOWN'});});
+ for(const domain of ['users','orders'])assert.equal((await route('/'+domain+'/overview-stats?accountStatus=ACTIVE')).status,200);
+ assert.deepEqual(calls,['/api/v1/admin/users/overview-stats?accountStatus=ACTIVE','/api/v1/admin/orders/overview-stats?accountStatus=ACTIVE']);
+ assert.equal((await route('/users/overview-stats','POST')).status,404);assert.equal((await route('/orders/overview-stats','DELETE')).status,404);assert.equal(calls.length,2);
+ });

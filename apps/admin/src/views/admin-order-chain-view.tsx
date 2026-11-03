@@ -1,4 +1,6 @@
 import { AdminOrderPaymentSummary } from './admin-order-payment-summary';
+import { DomainSummaryBlock } from "../components/dashboard/domain-summary-block";
+import { readDomainSummary } from "../components/dashboard/domain-summary-model";
 import { OrderChannelEvidence } from './admin-channel-evidence-panel';
 import type { AdminOrderPaymentSummary as PaymentSummary } from '../api';
 import { SupplyListingReviewView } from "./supply-listing-review-view";
@@ -161,6 +163,10 @@ function OrderDateRange({from,to,onChange}:{from:string;to:string;onChange:(from
   </Popover>
  </Field>;
 }
+export function adminOrderListQuery(active:Filters,page:number,size:number,restoreKey?:string):URLSearchParams{
+  const q=new URLSearchParams({page:String(page),pageSize:String(size),view:"list"});if(active.fundsResolution)q.set("fundsResolution",active.fundsResolution);if(active.status)q.set("status",active.status);if(active.origin)q.set("origin",active.origin);if(active.q.trim()){q.set("qKind",active.kind);q.set("qValue",active.q.trim());}if(active.from&&!active.createdFrom)q.set("createdFrom",active.from+"T00:00:00+08:00");if(active.to&&!active.createdTo)q.set("createdTo",nextIsoDay(active.to)+"T00:00:00+08:00");for(const key of ORDER_EXACT_PERIOD_KEYS)if(active[key])q.set(key,active[key]);if(active.paymentOpen)q.set("paymentOpen",active.paymentOpen);if(restoreKey)q.set("restoreKey",restoreKey);
+  return q;
+}
 function OrderList({snapshot,onOpenPath,refreshNonce,initialQuery,onQueryChange}:{snapshot:Snapshot;onOpenPath:(path:string,title?:string)=>void;refreshNonce:number;initialQuery?:Record<string,string>;onQueryChange?:(query:Record<string,string>)=>void;}){
  const identity=keyOf(snapshot);const previous=saved.get(identity);
  // 同地址返回才恢复本地线索；新地址仍独立决定公共筛选和分页。
@@ -192,7 +198,7 @@ function OrderList({snapshot,onOpenPath,refreshNonce,initialQuery,onQueryChange}
  },[active,incomingKey,onQueryChange,page,size]);
  useLayoutEffect(()=>{const rememberScroll=()=>{if(ready.current)state.current.scroll=pageScroller()?.scrollTop??0;};window.addEventListener("scroll",rememberScroll,true);return()=>{window.removeEventListener("scroll",rememberScroll,true);if(currentIdentity===identity)saved.set(identity,state.current);};},[identity]);
  useEffect(()=>{const controller=new AbortController(),n=++sequence.current;ready.current=false;setData(undefined);setError(undefined);
-  const q=new URLSearchParams({page:String(page),pageSize:String(size),view:"list"});if(active.fundsResolution)q.set("fundsResolution",active.fundsResolution);if(active.status)q.set("status",active.status);if(active.origin)q.set("origin",active.origin);if(active.q.trim()){q.set("qKind",active.kind);q.set("qValue",active.q.trim());}if(active.from&&!active.createdFrom)q.set("createdFrom",active.from+"T00:00:00+08:00");if(active.to&&!active.createdTo)q.set("createdTo",nextIsoDay(active.to)+"T00:00:00+08:00");for(const key of ORDER_EXACT_PERIOD_KEYS)if(active[key])q.set(key,active[key]);if(active.paymentOpen)q.set("paymentOpen",active.paymentOpen);if(state.current.context)q.set("restoreKey",state.current.context);
+  const q=adminOrderListQuery(active,page,size,state.current.context);
   void adminRequest<Page>(`/orders?${q}`,undefined,"GET",{},controller.signal).then(value=>{if(controller.signal.aborted||sequence.current!==n)return;state.current.context=value.contextKey;setData(value);requestAnimationFrame(()=>{if(controller.signal.aborted||sequence.current!==n)return;const scroller=pageScroller();if(scroller)scroller.scrollTop=state.current.scroll;ready.current=true;if(state.current.selected)[...document.querySelectorAll<HTMLElement>(`[data-order-focus="${CSS.escape(state.current.selected)}"]`)].find(element=>element.getClientRects().length>0)?.focus({preventScroll:true});});}).catch(e=>{if(controller.signal.aborted||sequence.current!==n)return;if(e instanceof AdminApiError&&e.status===409){state.current.context=undefined;state.current.scroll=0;setPage(1);setNotice("可见范围已变化，正在重新读取第一页。");setNonce(v=>v+1);return;}setError(friendlyError(e));});return()=>controller.abort();
  },[identity,active,page,size,refreshNonce,nonce]);
  const open=(o:Order)=>{state.current.selected=o.id;state.current.scroll=pageScroller()?.scrollTop??0;saved.set(identity,state.current);onOpenPath(`/orders/${o.id}`,o.displayNo);};
@@ -203,9 +209,12 @@ function OrderList({snapshot,onOpenPath,refreshNonce,initialQuery,onQueryChange}
  const applyNow=(next:Partial<Filters>)=>{setFilters(f=>({...f,...next}));const merged={...filters,...next};if(merged.from&&merged.to&&merged.from>merged.to){setInputError("起始日期不能晚于截止日期，请修正。");return;}setInputError(undefined);state.current.context=undefined;state.current.scroll=0;setPage(1);setActive(a=>({...a,...next}));};
  const submitSearch=()=>{if(filters.from&&filters.to&&filters.from>filters.to){setInputError("起始日期不能晚于截止日期，请修正后查询。");return;}setInputError(undefined);state.current.context=undefined;state.current.scroll=0;setPage(1);setActive({...filters});};
  const resetSearch=()=>{state.current.context=undefined;state.current.scroll=0;setInputError(undefined);setFilters(empty);setActive({...empty});setPage(1);};
+ const summaryQuery=adminOrderListQuery(active,1,size).toString();
+ const readSummary=useCallback((signal:AbortSignal)=>readDomainSummary("ORDERS",new URLSearchParams(summaryQuery),signal),[summaryQuery]);
  const changePage=(next:number)=>{state.current.scroll=0;setPage(next);};
  const changeSize=(next:number)=>{state.current.scroll=0;setSize(next);setPage(1);};
  return <div className="oc-design"><div className="oc-heading"><div><h1>订单</h1><p>凭订单号、账号编号或交易双方线索定位并核对。</p></div><span className="oc-scope">当前授权游戏范围 · 北京时间</span></div>
+ <DomainSummaryBlock domain="ORDERS" identity={identity} queryKey={summaryQuery} read={readSummary} onStatus={status=>applyNow({status})} refreshNonce={refreshNonce+nonce} enabled={!!data||!!error}/>
  <ListToolbar noValidate className="oc-search" onSubmit={e=>{e.preventDefault();submitSearch();}} onReset={resetSearch}>
    <div className="oc-search-main">
      <div className="oc-search-group" role="group" aria-label="关键字查询"><Select value={filters.kind} onValueChange={kind=>setFilters(f=>({...f,kind:kind||"order"}))} items={[["order","订单号"],["account","账号编号"],["party","交易双方"],["renter","租客"],["owner","号主"]].map(([value,label])=>({value,label}))}><SelectTrigger aria-label="查找方式" className="oc-search-kind h-9 min-w-[104px] text-xs"><SelectValue/></SelectTrigger><SelectContent className="min-w-[120px]">{[["order","订单号"],["account","账号编号"],["party","交易双方"],["renter","租客"],["owner","号主"]].map(([value,label])=><SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent></Select>

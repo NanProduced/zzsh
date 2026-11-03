@@ -3,6 +3,7 @@ import type { INestApplication } from "@nestjs/common";
 import { handleAdminSelfSettingsRoute } from "../auth/admin-self-settings";
 import { handleAdminOverview } from "../auth/admin-overview";
 import { handleAdminDashboard } from "../auth/admin-dashboard";
+import { handleAdminDomainSummary } from "../auth/admin-domain-summary-routes";
 import {
   getAdminSessionSnapshot,
   handleAdminSecurity,
@@ -433,6 +434,13 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
       if (error instanceof SecurityApiError) sendError(response, error.status, error.code, error.message, requestId);
       else sendError(response, 500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);
     }
+    return;
+  }
+  if (path === "/users/overview-stats" || path === "/orders/overview-stats") {
+    if (method !== "GET") { sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId); return; }
+    const targetPath = `/api/v1/admin${path}${requestQuery(request)}`;
+    request.url = targetPath; request.originalUrl = targetPath;
+    await handleAdminDomainSummary(request, response, options.adminSecurityOptions);
     return;
   }
   if (path === "/workspace/overview") {

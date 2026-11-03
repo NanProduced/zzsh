@@ -403,7 +403,7 @@ export function restrictListMoney(item:Record<string,any>){
  for(const k of Object.keys(item))item[k]=sweep(item[k]);
  item.amountsRestricted='FINANCE_PERMISSION_REQUIRED';
 }
-export async function queryAdminReadOrders(client:PoolClient,viewer:OrderReadViewer,filter:OrderReadFilters,accountViews?:OrderAccountViewReader){
+export function adminOrderReadPredicatePlan(viewer:OrderReadViewer,filter:OrderReadFilters):{values:unknown[];where:string[]}{
  if(filter.restoreKey&&filter.restoreKey!==viewer.authorizationKey)throw conflict('Authorization context changed');
  const values:unknown[]=[viewer.isBoss,viewer.adminId],where=[gameScopeSql("x.game_id","$2","$1")];
  if(filter.fundsResolution==='MANUAL_CLOSE')where.push("x.origin='NATIVE' AND x.status='CANCELLED' AND x.cancel_reason='MANUAL_CLOSE'");
@@ -422,6 +422,10 @@ export async function queryAdminReadOrders(client:PoolClient,viewer:OrderReadVie
   const pattern='$'+values.push('%'+escapeLike(q)+'%'),party=(role:string)=>`(x.${role}_user_id=${p} OR x.${role}_no=${p} OR x.${role}_name ILIKE ${pattern} ESCAPE '\\' OR x.${role}_username ILIKE ${pattern} ESCAPE '\\')`;
   where.push(filter.qKind==='renter'?party('renter'):filter.qKind==='owner'?party('owner'):`(${party('renter')} OR ${party('owner')})`);
  }}
+ return {values,where};
+}
+export async function queryAdminReadOrders(client:PoolClient,viewer:OrderReadViewer,filter:OrderReadFilters,accountViews?:OrderAccountViewReader){
+ const {values,where}=adminOrderReadPredicatePlan(viewer,filter);
  const pageSize='$'+values.push(filter.pageSize),offset='$'+values.push((filter.page-1)*filter.pageSize);
  const continuationReady=await legacyContinuationReady(client);
  // Authorization, filtering, counting and key selection run on the narrow

@@ -235,6 +235,49 @@ export type MembershipGrowthRead = {
 
 type Page<T> = { items: T[]; total?: number; nextCursor: string | null; limit: number };
 type Snapshot = Extract<SessionSnapshot,{authenticated:true}>;
+/** Shared by the paged list and its full-set summary; retain identical time and field predicates. */
+export function userDirectoryFilterQuery(filters: Filters): URLSearchParams {
+  const phone = PHONE_LIKE.test(filters.q);
+  const p = new URLSearchParams();
+  // Ordinary directory reads retain original registration; overview filing counts use the API's LOCAL default.
+  const localFiling = filters.registrationTime === 'LOCAL';
+  if (!localFiling) p.set('registrationTime', REGISTRATION_TIME_ORIGINAL);
+  p.set('sort', localFiling ? 'created' : normalizeRegistrationSort(filters.sort));
+  if (filters.q) p.set(phone ? 'phone' : 'q', filters.q);
+  for (const [key, value] of Object.entries({
+    accountStatus: filters.status,
+    identityVerified: filters.identity ? String(filters.identity === 'VERIFIED') : '',
+    membershipTier: filters.tier,
+    entitlement: filters.entitlement,
+    creditMin: filters.creditMin,
+    creditMax: filters.creditMax,
+    riskState: filters.risk,
+  })) {
+    if (value) p.set(key, value);
+  }
+  if ([filters.creditMin, filters.creditMax].some(value => value !== '' && !/^(0|[1-9]\d?|100)$/.test(value))
+    || filters.creditMin !== '' && filters.creditMax !== '' && Number(filters.creditMin) > Number(filters.creditMax)) throw new Error('信用分范围应为 0–100，最低分不能大于最高分');
+  // The range is inclusive of the end day; the server bound is exclusive, so the upper bound is the next day's zero hour.
+  if (filters.registeredFrom) {
+    if (!Number.isFinite(Date.parse(filters.registeredFrom)) || !/T.*(?:Z|[+-]\d{2}:\d{2})$/.test(filters.registeredFrom)) throw new Error('建档时段无效');
+    p.set('registeredFrom', filters.registeredFrom);
+  } else if (filters.from) {
+    if (!isCalendarDay(filters.from)) throw new Error('注册日期无效');
+    p.set('registeredFrom', `${filters.from}T00:00:00+08:00`);
+  }
+  if (filters.registeredTo) {
+    if (!Number.isFinite(Date.parse(filters.registeredTo)) || !/T.*(?:Z|[+-]\d{2}:\d{2})$/.test(filters.registeredTo)) throw new Error('建档时段无效');
+    p.set('registeredTo', filters.registeredTo);
+  } else if (filters.to) {
+    if (!isCalendarDay(filters.to)) throw new Error('注册日期无效');
+    if (localFiling) p.set('registeredTo', `${filters.to}T23:59:59.999999+08:00`);
+    else p.set('registeredBefore', `${nextCalendarDay(filters.to)}T00:00:00+08:00`);
+  }
+  if (filters.from && filters.to && filters.from > filters.to)
+    throw new Error('注册起始日期不能晚于结束日期');
+  return p;
+}
+
 export class UserDirectoryBff {
   readonly scroll = new Map<string,number>();
   private readonly cursors = new Map<string,{ previous?:string;offset:number }>();
@@ -257,46 +300,7 @@ export class UserDirectoryBff {
     const pageNum = isPageMode ? opts.page : undefined;
     const pageSizeNum = opts.pageSize ?? 20;
 
-    const buildFilterParams = () => {
-      const p = new URLSearchParams();
-      // Ordinary directory reads retain original registration; overview filing counts use the API's LOCAL default.
-      const localFiling = filters.registrationTime === 'LOCAL';
-      if (!localFiling) p.set('registrationTime', REGISTRATION_TIME_ORIGINAL);
-      p.set('sort', localFiling ? 'created' : normalizeRegistrationSort(filters.sort));
-      if (filters.q) p.set(phone ? 'phone' : 'q', filters.q);
-      for (const [key, value] of Object.entries({
-        accountStatus: filters.status,
-        identityVerified: filters.identity ? String(filters.identity === 'VERIFIED') : '',
-        membershipTier: filters.tier,
-        entitlement: filters.entitlement,
-        creditMin: filters.creditMin,
-        creditMax: filters.creditMax,
-        riskState: filters.risk,
-      })) {
-        if (value) p.set(key, value);
-      }
-      if ([filters.creditMin, filters.creditMax].some(value => value !== '' && !/^(0|[1-9]\d?|100)$/.test(value))
-        || filters.creditMin !== '' && filters.creditMax !== '' && Number(filters.creditMin) > Number(filters.creditMax)) throw new Error('信用分范围应为 0–100，最低分不能大于最高分');
-      // The range is inclusive of the end day; the server bound is exclusive, so the upper bound is the next day's zero hour.
-      if (filters.registeredFrom) {
-        if (!Number.isFinite(Date.parse(filters.registeredFrom)) || !/T.*(?:Z|[+-]\d{2}:\d{2})$/.test(filters.registeredFrom)) throw new Error('建档时段无效');
-        p.set('registeredFrom', filters.registeredFrom);
-      } else if (filters.from) {
-        if (!isCalendarDay(filters.from)) throw new Error('注册日期无效');
-        p.set('registeredFrom', `${filters.from}T00:00:00+08:00`);
-      }
-      if (filters.registeredTo) {
-        if (!Number.isFinite(Date.parse(filters.registeredTo)) || !/T.*(?:Z|[+-]\d{2}:\d{2})$/.test(filters.registeredTo)) throw new Error('建档时段无效');
-        p.set('registeredTo', filters.registeredTo);
-      } else if (filters.to) {
-        if (!isCalendarDay(filters.to)) throw new Error('注册日期无效');
-        if (localFiling) p.set('registeredTo', `${filters.to}T23:59:59.999999+08:00`);
-        else p.set('registeredBefore', `${nextCalendarDay(filters.to)}T00:00:00+08:00`);
-      }
-      if (filters.from && filters.to && filters.from > filters.to)
-        throw new Error('注册起始日期不能晚于结束日期');
-      return p;
-    };
+
 
     const projectRows = (items: UserDirectoryItem[]) => {
       const rows = items.map((row) => {
@@ -324,7 +328,7 @@ export class UserDirectoryBff {
     };
 
     const doRequest = async (currentContextKey?: string, overridePage?: number) => {
-      const baseParams = buildFilterParams();
+      const baseParams = userDirectoryFilterQuery(filters);
       if (isPageMode) {
         const targetPage = overridePage ?? pageNum!;
         baseParams.set('page', String(targetPage));
@@ -367,7 +371,7 @@ export class UserDirectoryBff {
     validateCursor(data);
     // Old services can ignore page/pageSize and return their default first page.
     if (isPageMode && (pageNum !== 1 || data.limit !== pageSizeNum)) {
-      const params = buildFilterParams();
+      const params = userDirectoryFilterQuery(filters);
       params.set('limit', String(pageSizeNum));
       data = await this.request<any>(phone ? '/users/lookup' : '/users?' + params.toString(), signal, phone ? Object.fromEntries(params) : undefined);
       validateCursor(data);

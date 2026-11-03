@@ -287,11 +287,7 @@ function filterConsultsMigrationAudit(filter: UserDirectoryFilter): boolean {
     || filter.registrationTime === "ORIGINAL");
 }
 
-export async function listUserDirectory(
-  client: PoolClient,
-  viewer: AdminDirectoryViewer,
-  filter: UserDirectoryFilter,
-): Promise<Record<string, unknown>> {
+function directoryFilterPlan(viewer: AdminDirectoryViewer, filter: UserDirectoryFilter) {
   const original = filter.registrationTime === "ORIGINAL";
   if (filter.registrationTime !== undefined && !original) throw invalid("Registration time mode or sort is invalid");
   if (filter.sort !== undefined && (!original || !USER_DIRECTORY_SORTS.includes(filter.sort))) throw invalid("Registration sort is invalid");
@@ -316,50 +312,11 @@ export async function listUserDirectory(
   if (sort.startsWith("published_") && viewer.resourceRead !== true) throw forbidden("Published sort requires supply.rental_account.read");
   if (sort.startsWith("balance_") && viewer.walletRead !== true) throw forbidden("Balance sort requires user.wallet.read");
   if (sort.startsWith("credit_") && viewer.creditRead !== true) throw forbidden("Credit sort requires credit.read");
-  // 列表、详情与快速核对共用同一 asOf，筛选结果与展示的会员投影因此同口径。
-  const asOfUtc = new Date().toISOString();
-  const numbered = filter.page !== undefined;
-  if (numbered && (!Number.isSafeInteger(filter.page) || filter.page! < 1 || filter.page! > USER_DIRECTORY_MAX_PAGE
-    || !Number.isSafeInteger(filter.limit) || filter.limit < 1 || filter.limit > 100 || filter.cursor !== undefined)) throw invalid("Directory page is invalid");
-  if (!numbered && filter.contextKey !== undefined) throw invalid("Page context requires numbered pagination");
-  const filterKey = sha256Hex(
-    JSON.stringify({
-      scope: numbered ? "admin-user-directory-page" : "admin-user-directory",
-      principal: viewer.adminId,
-      phoneLookup: viewer.phoneLookup,
-      isBoss: viewer.isBoss,
-      authorizationKey: viewer.authorizationKey ?? null,
-      resourceRead: viewer.resourceRead === true,
-      orderRead: viewer.orderRead === true,
-      membershipSummaryRead: viewer.membershipSummaryRead === true,
-      creditRead: viewer.creditRead === true,
-      walletRead: viewer.walletRead === true,
-      businessScopeUsable: viewer.businessScopeUsable !== false,
-      userId: filter.userId ?? null,
-      legacyId: filter.legacyId ?? null,
-      identifier: filter.identifier ?? null,
-      search: filter.search ?? null,
-      identityStatus: filter.identityStatus ?? null,
-      identityVerified: filter.identityVerified ?? null,
-      ageStatus: filter.ageStatus ?? null,
-      phone: filter.phone ? sha256Hex(filter.phone) : null,
-      accountStatus: filter.accountStatus ?? null,
-      source: filter.source ?? null,
-      membershipTier: filter.membershipTier ?? null,
-      entitlement: filter.entitlement ?? null,
-      creditState: filter.creditState ?? null,
-      creditMin: filter.creditMin ?? null,
-      creditMax: filter.creditMax ?? null,
-      riskState: filter.riskState ?? null,
-      registeredFrom: filter.registeredFrom ?? null,
-      registeredTo: filter.registeredTo ?? null,
-      limit: filter.limit,
-      ...(original ? { registrationTime: "ORIGINAL", sort: filter.sort ?? "registered_desc", registeredBefore: filter.registeredBefore ?? null } : {}),
-    }),
-  );
-  if (filter.contextKey !== undefined && filter.contextKey !== filterKey) throw conflict("Directory query or authorisation changed; return to the first page");
-  const cursor = parseKeysetCursor(filter.cursor, filterKey, original);
+  return { original, sort, registeredSort, materializeDates, direction, timeColumn, order };
+}
 
+async function directoryPredicatePlan(client: PoolClient, viewer: AdminDirectoryViewer, filter: UserDirectoryFilter, asOfUtc: string) {
+  const timeColumn = filter.registrationTime === "ORIGINAL" ? "registration.registered_at" : 'u."createdAt"';
   const resourceRead = viewer.resourceRead === true && viewer.businessScopeUsable !== false;
   const orderRead = viewer.orderRead === true && viewer.businessScopeUsable !== false;
   const values: unknown[] = [viewer.isBoss, viewer.adminId, resourceRead, orderRead];
@@ -435,6 +392,69 @@ export async function listUserDirectory(
   }
   if (filter.registeredBefore) conditions.push(`${timeColumn} < $${values.push(filter.registeredBefore)}::timestamptz`);
   const dateConditions = conditions.slice(membershipConditions.length);
+  return { resourceRead, orderRead, values, conditions, needsIdentity, membershipConditions, dateConditions };
+}
+
+function directoryMigrationRelation(original: boolean, pageOnly: boolean): string {
+  return original ? `SELECT fact.user_id AS object_id,fact.legacy_id,fact.registered_at
+      FROM zzsh_iam.user_registration_fact fact ${pageOnly ? "JOIN page candidate ON candidate.id=fact.user_id" : ""}` : `SELECT DISTINCT ON (e.object_id) e.object_id,e.details->>'legacyId' AS legacy_id
+      FROM zzsh_iam.audit_event e
+      ${pageOnly ? "JOIN page candidate ON candidate.id = e.object_id" : ""}
+     WHERE e.action = '${LEGACY_MIGRATION_ACTION}' AND e.object_type = 'user'
+     ORDER BY e.object_id, e.occurred_at DESC, e.id DESC`;
+}
+
+export async function listUserDirectory(
+  client: PoolClient,
+  viewer: AdminDirectoryViewer,
+  filter: UserDirectoryFilter,
+): Promise<Record<string, unknown>> {
+  const { original, sort, registeredSort, materializeDates, direction, timeColumn, order } = directoryFilterPlan(viewer, filter);
+  // 列表、详情与快速核对共用同一 asOf，筛选结果与展示的会员投影因此同口径。
+  const asOfUtc = new Date().toISOString();
+  const numbered = filter.page !== undefined;
+  if (numbered && (!Number.isSafeInteger(filter.page) || filter.page! < 1 || filter.page! > USER_DIRECTORY_MAX_PAGE
+    || !Number.isSafeInteger(filter.limit) || filter.limit < 1 || filter.limit > 100 || filter.cursor !== undefined)) throw invalid("Directory page is invalid");
+  if (!numbered && filter.contextKey !== undefined) throw invalid("Page context requires numbered pagination");
+  const filterKey = sha256Hex(
+    JSON.stringify({
+      scope: numbered ? "admin-user-directory-page" : "admin-user-directory",
+      principal: viewer.adminId,
+      phoneLookup: viewer.phoneLookup,
+      isBoss: viewer.isBoss,
+      authorizationKey: viewer.authorizationKey ?? null,
+      resourceRead: viewer.resourceRead === true,
+      orderRead: viewer.orderRead === true,
+      membershipSummaryRead: viewer.membershipSummaryRead === true,
+      creditRead: viewer.creditRead === true,
+      walletRead: viewer.walletRead === true,
+      businessScopeUsable: viewer.businessScopeUsable !== false,
+      userId: filter.userId ?? null,
+      legacyId: filter.legacyId ?? null,
+      identifier: filter.identifier ?? null,
+      search: filter.search ?? null,
+      identityStatus: filter.identityStatus ?? null,
+      identityVerified: filter.identityVerified ?? null,
+      ageStatus: filter.ageStatus ?? null,
+      phone: filter.phone ? sha256Hex(filter.phone) : null,
+      accountStatus: filter.accountStatus ?? null,
+      source: filter.source ?? null,
+      membershipTier: filter.membershipTier ?? null,
+      entitlement: filter.entitlement ?? null,
+      creditState: filter.creditState ?? null,
+      creditMin: filter.creditMin ?? null,
+      creditMax: filter.creditMax ?? null,
+      riskState: filter.riskState ?? null,
+      registeredFrom: filter.registeredFrom ?? null,
+      registeredTo: filter.registeredTo ?? null,
+      limit: filter.limit,
+      ...(original ? { registrationTime: "ORIGINAL", sort: filter.sort ?? "registered_desc", registeredBefore: filter.registeredBefore ?? null } : {}),
+    }),
+  );
+  if (filter.contextKey !== undefined && filter.contextKey !== filterKey) throw conflict("Directory query or authorisation changed; return to the first page");
+  const cursor = parseKeysetCursor(filter.cursor, filterKey, original);
+
+  const { resourceRead, orderRead, values, conditions, needsIdentity, membershipConditions, dateConditions } = await directoryPredicatePlan(client, viewer, filter, asOfUtc);
   // Count uses the identical filter predicates, without the four projection-only parameters or cursor.
   const countValues = values.slice(4);
   const countConditions = conditions.map(condition => condition.replace(/\$(\d+)/g, (_, index: string) => `$${Number(index) - 4}`));
@@ -502,12 +522,7 @@ export async function listUserDirectory(
   const consultsMigration = materializeDates || filterConsultsMigrationAudit({ ...filter, registrationTime: undefined });
   const countConsultsMigration = Boolean(filter.legacyId || filter.search
     || (filter.source !== undefined && filter.source !== USER_DIRECTORY_SOURCE.MIGRATED));
-  const migrationQuery = original ? `SELECT fact.user_id AS object_id,fact.legacy_id,fact.registered_at
-      FROM zzsh_iam.user_registration_fact fact ${consultsMigration ? "" : "JOIN page candidate ON candidate.id=fact.user_id"}` : `SELECT DISTINCT ON (e.object_id) e.object_id,e.details->>'legacyId' AS legacy_id
-      FROM zzsh_iam.audit_event e
-      ${consultsMigration ? "" : "JOIN page candidate ON candidate.id = e.object_id"}
-     WHERE e.action = '${LEGACY_MIGRATION_ACTION}' AND e.object_type = 'user'
-     ORDER BY e.object_id, e.occurred_at DESC, e.id DESC`;
+  const migrationQuery = directoryMigrationRelation(original, !consultsMigration);
   // The validated timestamp is expensive; materialise narrow facts once before applying both bounds and sorting.
   const registrationFactsSql = () => `SELECT u.id,u."createdAt" AS created_at,${originalRegistrationSql("mig", true)} AS registered_at,mig.legacy_id AS migration_legacy_id,
        COALESCE(risk_flag.flagged,false) AS risk_flag${plan.joins ? `,${plan.key} AS sort_value` : ""}
@@ -1171,5 +1186,26 @@ export async function listUserAuditEvents(
     })),
     nextCursor: hasMore && last ? encodeKeysetCursor(filterKey, { sortAt: last.occurredAt, id: last.id }) : null,
     limit: page.limit,
+  };
+}
+
+/** Counts the same directory filter set, with no page, cursor, projection or sensitive columns. */
+export async function userDirectoryStatusCountQuery(client: PoolClient, viewer: AdminDirectoryViewer, filter: UserDirectoryFilter, asOfUtc: string): Promise<{ text: string; values: unknown[] }> {
+  const { original } = directoryFilterPlan(viewer, filter);
+  // shortcut: the existing tier filter materialises all memberships in Node; no aggregate until it has a SQL predicate.
+  if (filter.membershipTier !== undefined) throw invalid("Membership tier aggregate is not supported");
+  const plan = await directoryPredicatePlan(client, viewer, filter, asOfUtc);
+  const migration = filterConsultsMigrationAudit(filter);
+  const conditions = plan.conditions.map(condition => condition.replace(/\$(\d+)/g, (_, index: string) => `$${Number(index) - 4}`));
+  const statuses = USER_DIRECTORY_STATUS_FILTER.map(status => `count(*) FILTER (WHERE (${ACCOUNT_STATUS_SQL})='${status}')::text AS "${status}"`).join(", ");
+  return {
+    text: `${migration ? `WITH migration AS MATERIALIZED (${directoryMigrationRelation(original, false)})` : ""}
+      SELECT count(*)::text AS total, ${statuses}
+      FROM zzsh_auth_user."user" u
+      LEFT JOIN zzsh_iam.user_identity_state s ON s.user_id=u.id
+      ${migration ? "LEFT JOIN migration mig ON mig.object_id=u.id" : ""}
+      ${original && plan.dateConditions.length ? `LEFT JOIN LATERAL (SELECT ${originalRegistrationSql("mig", true)} AS registered_at) registration ON true` : ""}
+      WHERE ${conditions.join(" AND ") || "TRUE"}`,
+    values: plan.values.slice(4),
   };
 }

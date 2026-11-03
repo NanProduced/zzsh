@@ -828,6 +828,7 @@ test('R1: a restored date condition queries the original registration range inst
 test('MASTER: a failed context recovery stops after one attempt and removes stale rows', async t => {
   let failed=0;
   const {calls}=await mount(t,{fetch:async address=>{
+    if(address.pathname.endsWith('/overview-stats'))return failure(503);
     if(address.searchParams.get('contextKey')||failed>0){failed++;return failure(409);}
     return json({paginationMode:'page',items:[user],total:60,page:1,pageSize:20,contextKey:'a'.repeat(64),nextCursor:null,limit:20});
   }});

@@ -162,12 +162,14 @@ test("ADM-R1-03a：有线索时翻第二页仍写 page2，线索不落 URL", asy
   await h.until(() => view.element.textContent.includes("ORDER_R1"));
   await h.change(view.element, "查找线索", "PRIVATE_CLUE_PROBE");
   await h.click(view.element, "查询");
-  await h.until(() => h.requests.at(-1)?.includes("qValue=PRIVATE_CLUE_PROBE"));
+  const lastOrderList = () => h.requests.filter(url => url.split("?", 1)[0] === "/api/bff/admin/orders").at(-1);
+  await h.until(() => lastOrderList()?.includes("qValue=PRIVATE_CLUE_PROBE"));
+  await h.until(() => !view.element.querySelector('[aria-label="下一页"]')?.disabled);
   await h.click(view.element, "下一页", true);
-  await h.until(() => h.requests.at(-1)?.includes("page=2"));
+  await h.until(() => lastOrderList()?.includes("page=2"));
   await h.until(() => queries.some((query) => query.page === "2"), `queries=${JSON.stringify(queries)}`);
   assert.deepEqual(queries.at(-1), { page: "2" }, "只投影 page，线索不参与也不写入");
-  assert.ok(h.requests.at(-1).includes("qValue=PRIVATE_CLUE_PROBE"), "线索仍随请求发送");
+  assert.ok(lastOrderList().includes("qValue=PRIVATE_CLUE_PROBE"), "线索仍随订单列表请求发送");
   assert.equal(JSON.stringify(queries).includes("PRIVATE_CLUE_PROBE"), false, "线索不出现在任何 URL 写回里");
   await view.close();
 });

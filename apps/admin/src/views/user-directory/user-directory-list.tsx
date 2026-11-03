@@ -1,6 +1,8 @@
+import { DomainSummaryBlock } from "../../components/dashboard/domain-summary-block";
+import { readDomainSummary } from "../../components/dashboard/domain-summary-model";
 import { UserQuickCheck } from './user-quick-check';
 import { AdminApiError } from '../../api';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowDownIcon, ArrowUpIcon, ArrowUpDownIcon, ArrowUpRightIcon, CalendarDaysIcon, ChevronDownIcon, FilterIcon, RotateCcwIcon, XIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -32,6 +34,7 @@ import {
   STATUS_LABEL,
   normalizeRegistrationSort,
   safeFilters,
+  userDirectoryFilterQuery,
   type Filters,
   type User,
   type UserDirectoryListResult,
@@ -430,6 +433,13 @@ export function UserList({ adapter, tab, onQueryChange, onOpenPath, refreshNonce
   const feedback = useRef<HTMLDivElement>(null);
   const [notice, setNotice] = useState('');
 
+  const summaryQuery = (() => {
+    if (PHONE_LIKE.test(appliedFilters.q)) return null;
+    try { return userDirectoryFilterQuery(appliedFilters).toString(); }
+    catch { return null; } // The existing list presents invalid filter feedback.
+  })();
+  const readSummary = useCallback((signal: AbortSignal) => readDomainSummary("USERS", new URLSearchParams(summaryQuery ?? ""), signal), [summaryQuery]);
+  const summaryIdentity = JSON.stringify([adapter.snapshot.adminUserId, adapter.snapshot.session.id, adapter.snapshot.session.locked, adapter.snapshot.security.isBoss, adapter.snapshot.security.status, adapter.snapshot.security.passwordChangeRequired, [...adapter.snapshot.permissions].sort()]);
   const filterKey = JSON.stringify(appliedFilters);
   // 只有草稿与已生效条件不同才提示“尚未应用”。
   const draftPending = draftInput.trim() !== appliedFilters.q
@@ -591,6 +601,8 @@ export function UserList({ adapter, tab, onQueryChange, onOpenPath, refreshNonce
           <p>定位用户，核对账号及关联业务，进入对应业务处理。</p>
         </div>
       </div>
+
+      {summaryQuery !== null ? <DomainSummaryBlock domain="USERS" identity={summaryIdentity} queryKey={summaryQuery} read={readSummary} onStatus={status => handleFilterChange({ status })} refreshNonce={refreshNonce} enabled={result.state !== 'loading'} /> : null}
 
       <ListToolbar noValidate onSubmit={() => submitQuery()} onReset={handleReset}>
         <div className="admin-list-toolbar-row ud-search-row">
