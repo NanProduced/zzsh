@@ -21,14 +21,14 @@ async function pickAccountStatus(h, label) {
 }
 
 test('authoritative business states agree across list, mobile cards, quick view and full account detail', async t => {
-  const cases = [['LISTED', '上架中'], ['IN_PROGRESS', '订单进行中待付款'], ['OFFLINE', '下架'], ['COMPLETED', '完成租用'], [null, '状态待核']];
+  const cases = [['LISTED', '上架中'], ['IN_PROGRESS', '订单进行中待付款占用'], ['OFFLINE', '下架'], ['COMPLETED', '完成租用'], [null, '状态待核']];
   const rows = cases.map(([businessState], index) => ({ ...row, id: 'state-' + index, accountId: 'state-' + index, displayNo: 'STATE-' + index, facts: { ...facts, businessState, publicVisible: true, newOrders: true, staffRestricted: false, ownerPaused: false, reasons: [], primaryReasonCode: null, occupancy: 'FREE', occupancyKind: businessState === 'IN_PROGRESS' ? 'PENDING_PAYMENT' : null } }));
   const values = new Map(rows.map(item => { const value = workDetail(); value.account.id = item.id; value.account.display_no = item.displayNo; value.version.id = 'v-' + item.id; value.supervision.facts = item.facts; return [item.id, value]; }));
   const h = await mountHarness(t, { permissions, fetchImpl: async url => url.pathname.endsWith('/listing-reviews') ? json({ ...page, items: rows }) : json(values.get(url.pathname.split('/').at(-1))) }); await tick(h);
   for (let index = 0; index < rows.length; index++) for (const prefix of ['#supply-open-', '#supply-card-']) assert.equal(h.el.querySelector(prefix + rows[index].id + ' [data-account-status]').textContent, cases[index][1]);
   const pending = h.el.querySelector('#supply-open-state-1 [data-account-status]'); assert.doesNotMatch(pending.textContent, /已租|租用中/);
   await h.click(h.el.querySelector('#supply-open-state-1')); await tick(h);
-  assert.equal(h.el.querySelector('[data-slot="dialog-content"] [data-account-status]').textContent, '订单进行中待付款');
+  assert.equal(h.el.querySelector('[data-slot="dialog-content"] [data-account-status]').textContent, '订单进行中待付款占用');
   h.browser.document.dispatchEvent(new h.browser.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await tick(h);
   await h.render('admin', permissions, 'state-3', { context: 'situation' }); await tick(h);
   assert.equal(h.el.querySelector('header [data-account-status]').textContent, '完成租用'); assert.equal(h.writes.length, 0);

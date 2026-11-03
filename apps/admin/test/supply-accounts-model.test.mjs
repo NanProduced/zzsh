@@ -166,8 +166,8 @@ test('unknown axes stay unknown instead of collapsing into 已下架', () => {
   }
   assert.equal(rowListingStatus(rowOf({ facts: facts({ staffRestricted: true, reasons: ['STAFF_RESTRICTED'] }) })).label, '运营限制');
   assert.equal(rowListingStatus(rowOf({ facts: facts({ occupancy: 'OCCUPIED', publicVisible: true }) })).label, '订单进行中');
-  assert.equal(rowListingStatus(rowOf({ facts: facts({ occupancy: 'OCCUPIED', occupancyKind: 'PENDING_PAYMENT', publicVisible: true, newOrders: false }) })).detail, '待付款');
-  assert.equal(rowListingStatus(rowOf({ facts: facts({ occupancy: 'OCCUPIED', occupancyKind: 'RENTED', publicVisible: true, newOrders: false }) })).detail, '租用中');
+  assert.equal(rowListingStatus(rowOf({ facts: facts({ occupancy: 'OCCUPIED', occupancyKind: 'PENDING_PAYMENT', publicVisible: true, newOrders: false }) })).detail, '待付款占用');
+  assert.equal(rowListingStatus(rowOf({ facts: facts({ occupancy: 'OCCUPIED', occupancyKind: 'RENTED', publicVisible: true, newOrders: false }) })).detail, '已付款占用');
   assert.equal(rowListingStatus(rowOf({ facts: facts({ publicVisible: true, newOrders: false, occupancy: 'FREE' }) })).label, '状态待核');
   assert.notEqual(rowListingStatus(rowOf({ facts: facts({ publicVisible: true, newOrders: false }) })).label, '上架中');
   assert.equal(rowListingStatus(rowOf({ facts: facts({ publicVisible: true, newOrders: true, occupancy: 'FREE' }) })).label, '上架中');

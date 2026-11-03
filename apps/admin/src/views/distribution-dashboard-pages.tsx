@@ -80,7 +80,7 @@ function PageHeader({ title, description, actions }: { title: string; descriptio
   return <header className="flex flex-wrap items-start justify-between gap-3"><div><h1 className="text-xl font-semibold">{title}</h1><p className="mt-1 text-sm text-muted-foreground">{description}</p></div>{actions ? <div className="flex flex-wrap gap-2">{actions}</div> : null}</header>;
 }
 function Card({ children, className = '' }: { children: ReactNode; className?: string }) {
-  return <div className={`rounded-xl border border-border bg-card p-4 text-card-foreground ${className}`}>{children}</div>;
+  return <div className={`min-w-0 rounded-xl border border-border bg-card p-4 text-card-foreground ${className}`}>{children}</div>;
 }
 function MetricCard({ label, metric, note, countOnly = false }: { label: string; metric: { knowledge: 'KNOWN' | 'UNKNOWN'; cents: string | null; count: string | null; reasonCodes: string[] }; note?: string; countOnly?: boolean }) {
   return <div className="min-w-0 px-4 py-3"><dt className="text-sm text-muted-foreground">{label}</dt><dd className="mt-1 break-words text-xl font-semibold tabular-nums">{countOnly ? (metric.knowledge === 'UNKNOWN' || metric.count === null ? '未核定' : BigInt(metric.count).toLocaleString('zh-CN')) : dashboardMoney(metric)}</dd>{note || metric.knowledge === 'UNKNOWN' ? <dd className="mt-1 text-xs text-muted-foreground">{metric.knowledge === 'UNKNOWN' ? metricReason(metric) : note}</dd> : null}</div>;
