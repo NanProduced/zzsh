@@ -61,14 +61,14 @@ test("account business state is authoritative; pending payment is a substate and
   const facts = { publicVisible: true, newOrders: false, occupancy: "FREE", ownerPaused: false, staffRestricted: false, reasons: [], sources: [], legacyNumbers: [], lifecycle: "ARCHIVED" };
   assert.deepEqual(ACCOUNT_BUSINESS_STATES.map(state => state.label), ["上架中", "订单进行中", "下架", "完成租用"]);
   for (const state of ACCOUNT_BUSINESS_STATES) assert.equal(accountBusinessStatus({ ...facts, businessState: state.value, newOrders: true, staffRestricted: true }).label, state.label, "authoritative state wins independent flags");
-  assert.deepEqual(accountBusinessStatus({ ...facts, businessState: "IN_PROGRESS", occupancyKind: "PENDING_PAYMENT" }), { label: "订单进行中", tone: "info", detail: "待付款" });
-  assert.equal(accountBusinessStatus({ ...facts, businessState: "IN_PROGRESS", occupancyKind: "RENTED" }).detail, "租用中");
+  assert.deepEqual(accountBusinessStatus({ ...facts, businessState: "IN_PROGRESS", occupancyKind: "PENDING_PAYMENT" }), { label: "订单进行中", tone: "info", detail: "待付款占用" });
+  assert.equal(accountBusinessStatus({ ...facts, businessState: "IN_PROGRESS", occupancyKind: "RENTED" }).detail, "已付款占用");
   assert.equal(accountBusinessStatus({ ...facts, businessState: "COMPLETED", occupancyKind: "PENDING_PAYMENT" }).detail, undefined);
   for (const businessState of [null, "bad-state"]) assert.equal(accountBusinessStatus({ ...facts, businessState, newOrders: true, occupancy: "OCCUPIED", occupancyKind: "RENTED" }).label, "状态待核");
   assert.equal(accountBusinessStatus({ ...facts, businessState: null, publicVisible: false }, "DRAFT").label, "未上架");
   assert.equal(accountBusinessStatus({ ...facts, businessState: null, publicVisible: false }, "IMPORTED_UNVERIFIED").label, "状态待核");
   assert.equal(accountBusinessStatus({ ...facts, newOrders: true }).label, "上架中");
-  assert.equal(accountBusinessStatus({ ...facts, occupancy: "OCCUPIED", occupancyKind: "PENDING_PAYMENT" }).detail, "待付款");
+  assert.equal(accountBusinessStatus({ ...facts, occupancy: "OCCUPIED", occupancyKind: "PENDING_PAYMENT" }).detail, "待付款占用");
   assert.equal(accountBusinessStatus({ ...facts, ownerPaused: true }).label, "号主暂停");
   assert.equal(accountBusinessStatus({ ...facts, staffRestricted: true }).label, "运营限制");
   assert.equal(accountBusinessStatus(facts).label, "状态待核", "lifecycle or unrelated order history cannot create a completed state");

@@ -14,10 +14,14 @@
 .order-workspace-heading h2 { margin: 0; color: var(--color-text-primary); font-size: var(--type-page-title-size); font-weight: var(--type-page-title-weight); line-height: var(--type-page-title-leading); }
 .order-workspace-heading p { max-width: 64ch; margin: 8px 0 0; color: var(--color-text-secondary); font-size: var(--type-helper-size); line-height: var(--type-helper-leading); }
 .order-workspace-actions { display: flex; align-items: center; gap: 12px; flex: 0 0 auto; }
-.order-party-switch { display: flex; gap: 24px; border-bottom: 1px solid var(--color-border-subtle); }
-.order-party-switch a { display: inline-flex; align-items: center; min-height: 44px; padding: 0 2px 10px; color: var(--color-text-secondary); font-size: 14px; font-weight: 600; text-decoration: none; border-bottom: 2px solid transparent; }
-.order-party-switch a[aria-current="page"] { color: var(--color-accent-brand-ink); border-bottom-color: currentColor; }
-.order-party-switch a:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 3px; }
+.order-search-filters { display:flex; flex-wrap:wrap; align-items:end; gap:10px; }
+.order-search-filters label { display:grid; gap:6px; flex:1 1 145px; min-width:0; color:var(--color-text-secondary); font-size:var(--type-label-size); }
+.order-search-filters>label { flex: 1 1 240px; max-width: 360px; }
+.order-search-extra { display: flex; flex: 1 1 100%; flex-wrap: wrap; gap: 10px; padding-top: 4px; }
+.order-search-extra[hidden] { display: none; }
+.order-search-filters input,.order-search-filters select { width:100%; min-width:0; min-height:40px; padding:8px 10px; border:1px solid var(--color-border-subtle); border-radius:8px; background:var(--color-bg-surface); color:var(--color-text-primary); }
+.order-search-filters input:focus-visible,.order-search-filters select:focus-visible { outline:2px solid var(--color-focus-ring); outline-offset:2px; }
+.order-search-filters [role="alert"] { flex-basis:100%; margin:0; color:var(--color-text-primary); }
 .order-workspace .button:focus-visible,
 .order-detail-view .button:focus-visible,
 .order-filter:focus-visible,
@@ -27,7 +31,7 @@
 
 /* ---------- 状态筛选 ---------- */
 .order-filter-bar { display: flex; align-items: center; gap: 4px; width: fit-content; max-width: 100%; padding: 5px; overflow-x: auto; border: 1px solid var(--color-border-subtle); border-radius: 11px; background: var(--color-bg-surface); }
-.order-filter { display: inline-flex; align-items: center; flex: 0 0 auto; min-height: 38px; padding: 0 16px; border-radius: 8px; color: var(--color-text-secondary); font-size: 13px; text-decoration: none; white-space: nowrap; }
+.order-filter { display: inline-flex; align-items: center; flex: 0 0 auto; min-height: 38px; padding: 0 16px; border-radius: 8px; color: var(--color-text-secondary); font-size: var(--type-label-size); text-decoration: none; white-space: nowrap; }
 .order-filter:hover { color: var(--color-text-primary); }
 .order-filter[aria-current="page"] { color: var(--color-text-primary); background: var(--color-bg-elevated); font-weight: 600; }
 .account-filter-context { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--color-border-subtle); border-radius: 9px; color: var(--color-text-secondary); font-size: 12px; }
@@ -98,19 +102,19 @@
 @keyframes order-skeleton { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
 
 /* ---------- 错误与身份守卫 ---------- */
-.order-error-block { display: grid; justify-items: start; gap: 8px; padding: 28px; border: 1px dashed var(--color-border-default); border-radius: var(--functional-radius); color: var(--color-text-secondary); background: var(--color-bg-card); }
+.order-error-block { display: grid; justify-items: start; gap: 8px; padding: 28px; border: 1px dashed var(--color-border-default); border-radius: var(--functional-radius, 14px); color: var(--color-text-secondary); background: var(--color-bg-card); }
 .order-error-block svg { color: var(--color-status-warning-ink); }
 .order-error-block h3, .order-error-block p { margin: 0; }
 .order-error-block h3 { color: var(--color-text-primary); font-size: 18px; }
 .order-error-block p { font-size: 13px; line-height: 1.7; }
-.order-session-guard { display: grid; justify-items: start; gap: 8px; max-width: 620px; padding: 28px; border: 1px dashed var(--color-border-default); border-radius: var(--functional-radius); color: var(--color-text-muted); background: var(--color-bg-card); }
+.order-session-guard { display: grid; justify-items: start; gap: 8px; max-width: 620px; padding: 28px; border: 1px dashed var(--color-border-default); border-radius: var(--functional-radius, 14px); color: var(--color-text-muted); background: var(--color-bg-card); }
 .order-session-guard h2, .order-session-guard p { margin: 0; }
 .order-session-guard h2 { color: var(--color-text-primary); font-size: 19px; }
 .order-session-guard p { color: var(--color-text-secondary); font-size: 13px; }
 .order-muted { margin: 0; color: var(--color-text-muted); font-size: 13px; line-height: 1.7; }
 
 /* ---------- 详情 ---------- */
-.order-detail-card { padding: 20px; border: 1px solid var(--color-border-subtle); border-radius: var(--functional-radius); background: var(--color-bg-card); box-shadow: var(--shadow-sm); }
+.order-detail-card { padding: 20px; border: 1px solid var(--color-border-subtle); border-radius: var(--functional-radius, 14px); background: var(--color-bg-card); box-shadow: var(--shadow-sm); }
 .order-detail-back { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; width: fit-content; color: var(--color-text-secondary); font-size: 13px; text-decoration: none; }
 .order-detail-back:hover { color: var(--color-accent-brand-ink); }
 /* Identity band. Type scale matches the account detail: title 26 / section 16 / body 14 / caption 12. */
@@ -141,7 +145,7 @@
 .order-secondary-details > summary > span { grid-column: 1 / -1; color: var(--color-text-secondary); font-size: 13px; font-weight: 400; line-height: 1.7; }
 .order-secondary-details > summary:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 4px; border-radius: 4px; }
 .order-refund-detail-content, .order-prestart-content { display: grid; gap: 14px; padding-top: 16px; }
-.order-prestart-section { padding: 18px 20px; border: 1px solid var(--color-border-subtle); border-radius: var(--functional-radius); background: var(--color-bg-card); }
+.order-prestart-section { padding: 18px 20px; border: 1px solid var(--color-border-subtle); border-radius: var(--functional-radius, 14px); background: var(--color-bg-card); }
 .order-detail-aside { display: grid; gap: 24px; min-width: 0; position: sticky; top: 24px; }
 .order-section-title { margin: 0; color: var(--color-text-primary); font-size: 16px; font-weight: 650; letter-spacing: -0.005em; }
 
@@ -168,7 +172,7 @@
 .order-timeline time { color: var(--color-text-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 
 /* ---------- 详情侧栏 ---------- */
-.order-side-card { display: grid; gap: 12px; padding: 20px; border: 1px solid var(--color-border-subtle); border-radius: var(--functional-radius); background: var(--color-bg-card); box-shadow: var(--shadow-sm); }
+.order-side-card { display: grid; gap: 12px; padding: 20px; border: 1px solid var(--color-border-subtle); border-radius: var(--functional-radius, 14px); background: var(--color-bg-card); box-shadow: none; }
 .order-amount-block { gap: 10px; }
 /* The outcome leads; the parts sit under it. A 30px order-time quote was stealing the page. */
 .order-amount-total { color: var(--color-text-primary); font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -0.015em; overflow-wrap: anywhere; }
@@ -198,7 +202,7 @@
 .order-facts dd { max-width: 62%; margin: 0; color: var(--color-text-primary); font-size: 13px; text-align: right; overflow-wrap: anywhere; }
 .order-detail-section { display: grid; gap: 12px; }
 /* ---------- 退款责任（只读本地登记） ---------- */
-.order-refund-block { padding: 18px; border: 1px solid var(--color-border-subtle); border-radius: var(--functional-radius); background: var(--color-bg-card); }
+.order-refund-block { padding: 18px; border: 1px solid var(--color-border-subtle); border-radius: var(--functional-radius, 14px); background: var(--color-bg-card); }
 .order-refund-heading, .order-refund-intents-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; }
 .order-refund-summary { display: grid; gap: 4px; padding: 12px 14px; border: 1px solid var(--color-border-subtle); border-radius: 10px; background: var(--color-bg-surface); }
 .order-refund-summary strong { color: var(--color-text-primary); font-size: 14px; }
@@ -222,7 +226,7 @@
 .order-refund-reasons { color: var(--color-text-muted); font-size: 12px; }
 .order-refund-reasons summary { width: fit-content; cursor: pointer; }
 .order-refund-reasons p { margin: 6px 0 0; line-height: 1.7; overflow-wrap: anywhere; }
-.order-lines > details > summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 4px 16px; padding: 13px 18px; border: 1px solid var(--color-border-subtle); border-radius: var(--functional-radius); background: var(--color-bg-card); cursor: pointer; list-style: none; }
+.order-lines > details > summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 4px 16px; padding: 13px 18px; border: 1px solid var(--color-border-subtle); border-radius: var(--functional-radius, 14px); background: var(--color-bg-card); cursor: pointer; list-style: none; }
 .order-lines > details > summary::-webkit-details-marker { display: none; }
 /* Title and the toggle share one line; the long money summary wraps beneath them instead of squeezing
    the title and the toggle into narrow vertical columns. */
@@ -231,7 +235,7 @@
 .order-lines > details[open] > summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; border-bottom-color: transparent; }
 .order-lines > details[open] > summary::after { content: "收起"; }
 .order-lines-summary { grid-column: 1 / -1; grid-row: 2; color: var(--color-text-secondary); font-size: 12px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-.order-lines > details > *:not(summary) { padding: 0 18px 18px; border: 1px solid var(--color-border-subtle); border-top: 0; border-radius: 0 0 var(--functional-radius) var(--functional-radius); background: var(--color-bg-card); }
+.order-lines > details > *:not(summary) { padding: 0 18px 18px; border: 1px solid var(--color-border-subtle); border-top: 0; border-radius: 0 0 var(--functional-radius, 14px) var(--functional-radius, 14px); background: var(--color-bg-card); }
 .order-table-wrap { overflow-x: auto; }
 .order-table-wrap table { width: 100%; border-collapse: collapse; min-width: 480px; }
 .order-table-wrap th, .order-table-wrap td { padding: 10px 12px; border-bottom: 1px solid var(--color-border-subtle); color: var(--color-text-secondary); font-size: 12px; text-align: left; vertical-align: top; }
@@ -254,7 +258,7 @@
 .order-notice.is-success { color: var(--color-status-success-ink); background: color-mix(in srgb, var(--color-status-success) 7%, transparent); }
 
 /* ---------- 交易面板 ---------- */
-.order-trade-panel { padding: 20px; border: 1px solid var(--color-border-subtle); border-radius: var(--functional-radius); background: var(--color-bg-card); box-shadow: var(--shadow-sm); }
+.order-trade-panel { padding: 20px; border: 1px solid var(--color-border-subtle); border-radius: var(--functional-radius, 14px); background: var(--color-bg-card); box-shadow: var(--shadow-sm); }
 .order-trade-heading { align-items: center; }
 .order-trade-block { display: grid; gap: 10px; padding: 14px 15px; border: 1px solid var(--color-border-subtle); border-radius: 11px; background: var(--color-bg-surface); }
 .order-trade-block h3 { margin: 0; color: var(--color-text-primary); font-size: 14px; }
@@ -425,7 +429,7 @@
 .order-row-stage[data-fulfillment-stage="WAITING_STAFF"],
 .order-row-stage[data-fulfillment-stage="TEAM_PENDING"] { border-color: color-mix(in srgb, var(--color-status-info) 32%, var(--color-border-default)); color: color-mix(in srgb, var(--color-status-info) 54%, var(--color-text-primary)); }
 .order-row-stage[data-fulfillment-stage="CHECK"] { border-style: dashed; color: var(--color-text-muted); }
-.order-fulfillment-stage { display: grid; gap: 9px; margin-top: 16px; padding: 12px 16px; border: 1px solid var(--color-border-subtle); border-radius: var(--functional-radius); background: var(--color-bg-card); }
+.order-fulfillment-stage { display: grid; gap: 9px; margin-top: 16px; padding: 12px 16px; border: 1px solid var(--color-border-subtle); border-radius: var(--functional-radius, 14px); background: var(--color-bg-card); }
 .order-fulfillment-head { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 12px; min-width: 0; }
 .order-fulfillment-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--color-status-info); }
 .order-fulfillment-stage[data-tone="done"] .order-fulfillment-dot { background: var(--color-status-success); }
@@ -453,7 +457,7 @@
 
 .order-aftersale { display:grid; gap:12px; min-width:0; }
 .order-aftersale form { display:grid; gap:8px; }
-.order-aftersale textarea { width:100%; min-height:96px; padding:10px 12px; border:1px solid var(--color-border-default); border-radius:var(--functional-radius); color:var(--color-text-primary); background:var(--color-bg-surface); font:inherit; resize:vertical; }
+.order-aftersale textarea { width:100%; min-height:96px; padding:10px 12px; border:1px solid var(--color-border-default); border-radius:var(--functional-radius, 14px); color:var(--color-text-primary); background:var(--color-bg-surface); font:inherit; resize:vertical; }
 .order-aftersale textarea:focus-visible { outline:2px solid var(--color-focus-ring); outline-offset:2px; }
 .order-aftersale-record { display:grid; gap:8px; min-width:0; padding-top:12px; border-top:1px solid var(--color-border-subtle); }
 .order-aftersale-record p { margin:0; overflow-wrap:anywhere; }

@@ -39,26 +39,26 @@ test("wire parsing strips private source, refuses inconsistent money and does no
   assert.equal(parseLegacyContinuation(view({availability:"NOT_IMPORTED",quantities:null,capabilities:[],amounts:{}})).quantities,null);
 });
 test("original body/key is retained before POST, uncertain result reads receipt and retries only original bytes",async t=>{
-  const p=await setup(t);await p.render();await p.click("确认本次结算");await p.click("确认提交");
+  const p=await setup(t);await p.render();await p.click("确认结算方案");await p.click("确认提交");
   assert.equal(p.calls.length,1);const original=p.intents.inspectIntent("user_A","legacy.continuation",id);assert.equal(original.state,"VALID");assert.equal(original.intent.key,"ORIGINAL_KEY");assert.deepEqual(p.calls[0].slice(1),["confirm",original.intent.body,"ORIGINAL_KEY"]);
-  await p.click("核对原请求结果");await p.click("重试原请求");assert.equal(p.calls.length,2);assert.deepEqual(p.calls[1],p.calls[0]);assert.equal(p.intents.inspectIntent("user_A","legacy.continuation",id).state,"VALID");
-  p.client.receipt=async()=>({state:"KNOWN_REJECTED",status:409,fingerprint:digest,receipt:{outcome:"REJECTED"}});await p.click("核对原请求结果");assert.equal(p.intents.inspectIntent("user_A","legacy.continuation",id).state,"VALID");await p.click("刷新后重新核对");assert.equal(p.intents.inspectIntent("user_A","legacy.continuation",id).state,"NONE");
+  await p.click("查询处理进度");await p.click("继续提交上次申请");assert.equal(p.calls.length,2);assert.deepEqual(p.calls[1],p.calls[0]);assert.equal(p.intents.inspectIntent("user_A","legacy.continuation",id).state,"VALID");
+  p.client.receipt=async()=>({state:"KNOWN_REJECTED",status:409,fingerprint:digest,receipt:{outcome:"REJECTED"}});await p.click("查询处理进度");assert.equal(p.intents.inspectIntent("user_A","legacy.continuation",id).state,"VALID");await p.click("刷新后重新核对");assert.equal(p.intents.inspectIntent("user_A","legacy.continuation",id).state,"NONE");
 });
 test("bad pending bytes block mutations while history remains readable",async t=>{
   const p=await setup(t), key=`zzsh.order-intent.v1:user_A:legacy.continuation:${id}`;p.browser.sessionStorage.setItem(key,"{BROKEN_PENDING");await p.render();
-  assert(p.host.textContent.includes("82.00"));assert(p.host.textContent.includes("原请求记录暂时无法读取"));assert.equal(p.browser.sessionStorage.getItem(key),"{BROKEN_PENDING");
-  assert([...p.host.querySelectorAll("button")].find(b=>b.textContent==="确认本次结算").disabled);assert.equal(p.calls.length,0);
+  assert(p.host.textContent.includes("82.00"));assert(p.host.textContent.includes("暂时无法确认上次操作"));assert.equal(p.browser.sessionStorage.getItem(key),"{BROKEN_PENDING");
+  assert([...p.host.querySelectorAll("button")].find(b=>b.textContent==="确认结算方案").disabled);assert.equal(p.calls.length,0);
 });
 test("scope render hides private amounts and confirmation before passive clearing, late old read cannot repaint",async t=>{
   let resolveOld;const late = new Promise(resolve=>{resolveOld=resolve;});let reads=0;
   const p=await setup(t,{read:async()=>++reads===1?view({amounts:{refundNet:{cents:"123456",yuan:"1234.56"}}}):reads===2?late:view({amounts:{payMoney:{cents:"200",yuan:"2.00"}}})});
   const commits=[];function Probe({scope}){React.useLayoutEffect(()=>{commits.push({scope,text:p.host.textContent});},[scope]);return React.createElement(p.LegacyContinuationPanel,{orderId:id,party:"owner"});}
-  await p.render(React.createElement(Probe,{scope:"A"}));await p.click("确认本次结算");assert(p.host.textContent.includes("1234.56"));
+  await p.render(React.createElement(Probe,{scope:"A"}));await p.click("确认结算方案");assert(p.host.textContent.includes("1234.56"));
   p.session.userId="user_B";p.session.identityVersion++;await p.render(React.createElement(Probe,{scope:"B"}));const first=commits.find(c=>c.scope==="B");assert(first);assert(!first.text.includes("1234.56"));assert(!first.text.includes("确认提交"));
   p.session.userId="user_C";p.session.identityVersion++;await p.render(React.createElement(Probe,{scope:"C"}));await React.act(async()=>{resolveOld(view({amounts:{refundNet:{cents:"999999",yuan:"9999.99"}}}));await tick();});
   // A late B response cannot repaint the current C identity.
   assert(!p.host.textContent.includes("1234.56"));assert(!p.host.textContent.includes("9999.99"));assert.equal(p.calls.length,0);
 });
 test("read errors and isolated facts remain distinct from empty or successful continuation",async t=>{
-  const p=await setup(t,{read:async()=>{throw new Error("missing schema");}});await p.render();assert(p.host.textContent.includes("暂不可用"));assert(!p.host.textContent.includes("正在核对续办资料"));assert.equal(p.calls.length,0);
+  const p=await setup(t,{read:async()=>{throw new Error("missing schema");}});await p.render();assert(p.host.textContent.includes("暂时无法查看办理信息"));assert(!p.host.textContent.includes("正在核对续办资料"));assert.equal(p.calls.length,0);
 });

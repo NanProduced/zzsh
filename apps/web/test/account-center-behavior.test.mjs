@@ -301,6 +301,23 @@ test("missing account view opens the overview and order links keep the current o
   assert.equal(accountSectionHref("leased", { view: "rentals", orderId: "order_A", status: "PAID" }), "/account?view=leased");
 });
 
+test('same-order navigation preserves legacy origin and the exact active query filters',()=>{
+ const {accountSectionHref}=loadCenter({}),current={view:'rentals',accountId:'account_A',orderId:'old_order_1',status:'COMPLETED',source:'legacy',orderFilters:{orderNo:'OLD-123',createdFrom:'2026-09-01',createdTo:'2026-10-01',stage:'POSTED'}};
+ const q=new URL(accountSectionHref('rentals',current),'http://fixture').searchParams;assert.equal(q.get('source'),'legacy');for(const[key,value]of Object.entries(current.orderFilters))assert.equal(q.get(key),value);assert.equal(q.get('orderId'),'old_order_1');
+ assert.equal(accountSectionHref('leased',current),'/account?view=leased');assert.equal(accountSectionHref('wallet',current),'/account?view=wallet');
+ const native=new URL(accountSectionHref('rentals',{...current,source:'unrecognized'}),'http://fixture');assert.equal(native.searchParams.get('source'),null);
+});
+
+test('account navigation retains the account status and canonicalizes the old rented alias without losing context',()=>{
+ const {accountSectionHref}=loadCenter({});let q=new URL(accountSectionHref('accounts',{view:'accounts',accountId:'account_A',status:'PAUSED'}),'http://fixture').searchParams;assert.equal(q.get('status'),'PAUSED');assert.equal(q.get('accountId'),'account_A');
+ q=new URL(accountSectionHref('accounts',{view:'rented',accountId:'account_A'}),'http://fixture').searchParams;assert.equal(q.get('status'),'RENTED');assert.equal(q.get('accountId'),'account_A');
+ assert.equal(accountSectionHref('rentals',{view:'accounts',accountId:'account_A',status:'PAUSED'}),'/account?view=rentals');
+});
+
+test('the rendered account frame passes its current legacy/filter context to the sidebar link',async()=>{
+ const p=await createProbe(async()=>json(emptyPage));try{await p.render(React.createElement(p.center.AccountCenterFrame,{active:'rentals',scope:'user_A:1',accountId:'account_A',orderId:'old_order_1',status:'COMPLETED',source:'legacy',orderFilters:{orderNo:'OLD-123',stage:'POSTED'}},React.createElement('p',null,'当前详情')));const link=p.host.querySelector('.account-nav[aria-label="个人中心"] a[aria-current="page"]'),q=new URL(link.getAttribute('href'),'http://fixture').searchParams;assert.equal(q.get('source'),'legacy');assert.equal(q.get('orderNo'),'OLD-123');assert.equal(q.get('stage'),'POSTED')}finally{await p.dispose()}
+});
+
 test("empty orders show the next step and no invented count", async () => {
   const calls = [];
   const probe = await createProbe(async (input) => {
@@ -465,7 +482,7 @@ test("membership card uses the confirmed tier and a missing field is not invente
     assert.equal(probe.host.querySelector("[data-testid=membership-card]").getAttribute("data-tier"), null);
 
     const nav = [...probe.host.querySelectorAll(".account-nav a")];
-    assert.equal(nav.length, 12);
+    assert.equal(nav.length, 11);
     assert.ok(nav.every((link) => link.tagName === "A" && link.getAttribute("href")?.startsWith("/account?view=")));
     assert.equal(probe.host.querySelector(".account-nav a[aria-current=page]").textContent.includes("总览"), true);
     const membershipNav = nav.find((link) => link.getAttribute("href") === "/account?view=membership");
@@ -584,6 +601,7 @@ test("a membership read failure can retry and does not remove the order summarie
 test("a late response from the previous identity cannot replace the current one", async () => {
   const pendingOrders = deferred();
   const pendingGrowth = deferred();
+  const orderSubjects = [];
   let phase = "A";
   const standardGrowth = {
     status: "ready",
@@ -617,8 +635,9 @@ test("a late response from the previous identity cannot replace the current one"
       pendingCount: 0,
     },
   };
-  const probe = await createProbe(async (input) => {
+  const probe = await createProbe(async (input, init) => {
     const url = String(input);
+    if (url.startsWith('/api/orders/unified?')) orderSubjects.push(new Headers(init?.headers).get('x-zzsh-expected-user-id'));
     if (url.includes("party=renter")) return phase === "A" ? pendingOrders.promise : json({ items: [orderB], nextCursor: null, limit: 100 });
     return json(emptyPage);
   }, {
@@ -639,6 +658,8 @@ test("a late response from the previous identity cannot replace the current one"
     assert.doesNotMatch(probe.host.textContent, /用户甲|A-001|钻石会员/);
     assert.equal(probe.host.querySelector("[data-testid=membership-tier]").textContent, "普通会员");
     assert.match(probe.host.textContent, /B-001/);
+    assert(orderSubjects.includes('user_A'));assert(orderSubjects.includes('user_B'));
+    assert(orderSubjects.every(subject=>subject==='user_A'||subject==='user_B'));
   } finally {
     await probe.dispose();
   }
@@ -1449,8 +1470,8 @@ test("M1C: navigation grouping, labels, and independent membership view route", 
     // Route resolution
     assert.equal(resolveAccountView("membership"), "membership");
     assert.equal(accountSectionLabels.membership, "会员中心");
-    assert.equal(accountSectionLabels.accounts, "上架账号");
-    assert.equal(accountSectionLabels.rented, "出租账号");
+    assert.equal(accountSectionLabels.accounts, "我的账号");
+    assert.equal(accountSectionLabels.rented, "我的账号");
     assert.equal(accountSectionLabels.invite, "邀请与佣金");
 
     // 4 groups
@@ -1460,7 +1481,9 @@ test("M1C: navigation grouping, labels, and independent membership view route", 
     assert.equal(NAV_GROUPS[1].title, "租赁管理");
     assert.equal(NAV_GROUPS[2].title, "资产与收益");
     assert.equal(NAV_GROUPS[3].title, "账号设置");
-    assert.equal(NAV_ITEMS.length, 12);
+    assert.equal(NAV_ITEMS.length, 11);
+    assert.equal(NAV_ITEMS.filter(item => item.section === 'accounts').length, 1);
+    assert.equal(NAV_ITEMS.some(item => item.section === 'rented'), false);
 
     // Sidebar renders group titles
     await probe.render(React.createElement(AccountCenterFrame, { active: "membership", scope: "user_nav_test:1" }, React.createElement("div", null, "content")));

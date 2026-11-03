@@ -50,6 +50,14 @@ test('historical statuses and exact source evidence stay observations, never arr
  for(let status=1;status<=5;status++){const value=historicalWithdrawalProjection(observation('obs_z',status));assert.equal(value.sourceStatus,status);assert.equal(value.amountCents,'10000');assert.equal(value.netCents,'9900');assert.equal(value.feeCents,'100');assert.equal(value.channelArrivalKnowledge,'UNKNOWN');assert.equal(value.accountingEffect,'OBSERVATION_ONLY_NO_NEW_DEBIT');assert(!JSON.stringify(value).includes('PRIVATE_ACCOUNT'));}
  for(const patch of [{source_digest:'0'.repeat(64)},{source_entity:'la_log_earnings'},{snapshot:{...observation().snapshot,amount:'100.001'}},{included_in_opening:true}])assert.throws(()=>historicalWithdrawalProjection({...observation(),...patch}),(e:any)=>e.status===503);
 });
+test('original withdrawal number is projected only from the validated source snapshot',()=>{
+ const source=observation(),snapshot={...source.snapshot,referenceSn:'旧提现_2026-001'};
+ const prepared=prepareHistoricalObservation(snapshot,{userId:source.user_id,legacyUserId:source.legacy_user_id,sourceSystem:source.source_system,basisId:null});
+ const value=historicalWithdrawalProjection({...source,snapshot,source_digest:prepared.sourceDigest,source_canonical:prepared.sourceCanonical});
+ assert.equal(value.originalNumber,'旧提现_2026-001');
+ assert.equal(historicalWithdrawalProjection(observation()).originalNumber,null);
+ assert.throws(()=>historicalWithdrawalProjection({...source,snapshot}),(e:any)=>e.status===503);
+});
 test('withdrawal query and encoded detail contracts reject ignored filters and cross-source cursor combinations',()=>{
  assert.deepEqual(parsePersonalWithdrawalQuery(new URLSearchParams()),query);
  for(const raw of ['source=HISTORICAL&state=SUCCEEDED','source=LOCAL_CONTROLLED&state=2','source=ALL&state=2','source=ALL&cursor=anything','limit=101','limit=0','limit=2&limit=3','userId=other','cursor='])assert.throws(()=>parsePersonalWithdrawalQuery(new URLSearchParams(raw)));

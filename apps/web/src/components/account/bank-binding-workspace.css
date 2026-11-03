@@ -30,6 +30,11 @@
 .bank-feedback { margin: 14px 0 0; padding: 10px 0 0; border-top: 1px solid var(--color-border-subtle); color: var(--color-text-secondary); font-size: 13px; line-height: 1.65; }
 .bank-form-error { margin: 0; color: var(--color-status-error-ink); font-size: 13px; line-height: 1.6; }
 .bank-eligibility { margin: 15px 0 0; }
+.bank-available { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-top: 14px; }
+.bank-available span { color: var(--color-text-secondary); font-size: var(--type-label-size); }
+.bank-available strong { color: var(--color-text-primary); font-size: 20px; font-variant-numeric: tabular-nums; }
+.bank-eligibility>summary { width: fit-content; min-height: 40px; align-content: center; color: var(--account-accent); cursor: pointer; }
+.bank-eligibility>summary:focus-visible { outline: 2px solid var(--account-accent); outline-offset: 3px; }
 .bank-eligibility .bank-help { margin: 8px 0 0; }
 .bank-quote-note { margin: 0; }
 .bank-policy { display: grid; gap: 7px; margin: 15px 0 0; padding: 12px 0; border-block: 1px solid var(--color-border-subtle); color: var(--color-text-secondary); font-size: 13px; line-height: 1.6; }

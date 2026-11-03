@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { adminRequest, friendlyError, AdminApiError } from "../api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -76,11 +76,11 @@ function validQueryResult(r: QueryResult | null, expected?: QueryBinding): r is 
 }
 
 /** 普通退款：复用GET/POST /orders/:id/refunds；未知结果冻结原幂等键只用于恢复。QUERY-only只按原号补查。 */
-type RefundProps={ orderId: string; canWrite: boolean; basis?: NormalRefundBasis; binding?: RefundBinding };
+type RefundProps={ orderId: string; canWrite: boolean; basis?: NormalRefundBasis; binding?: RefundBinding; onAttentionChange?: (attention: boolean) => void };
 export function AdminNativeRefundPanel(props:RefundProps){
   return <NativeRefundForm key={JSON.stringify([props.orderId,props.binding?.adminUserId,props.binding?.sessionId])} {...props}/>;
 }
-function NativeRefundForm({ orderId, canWrite, basis, binding }: RefundProps) {
+function NativeRefundForm({ orderId, canWrite, basis, binding, onAttentionChange }: RefundProps) {
   const [items, setItems] = useState<NativeRefundItem[] | null | undefined>();
   const [recovery] = useState(() => readSaved(orderId, binding)),saved=recovery.value;
   const [storageBlocked,setStorageBlocked]=useState(recovery.blocked);
@@ -88,6 +88,7 @@ function NativeRefundForm({ orderId, canWrite, basis, binding }: RefundProps) {
   const closedNew = basis !== undefined && !basis.eligible;
   const [amount, setAmount] = useState(saved?.amount ? formatCentsToYuan(saved.amount) : ""), [reason, setReason] = useState(saved?.reason ?? ""), [note, setNote] = useState(recovery.blocked ? "原请求恢复资料不可读或冲突，已阻止覆盖或新提交" : saved ? "存在结果未知的申请：只能按原键恢复提交" : ""), [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<string | null>(saved?.key ?? null);
+  useEffect(() => { onAttentionChange?.(canWrite && Boolean(pending || storageBlocked)); return () => onAttentionChange?.(false); }, [canWrite, pending, storageBlocked, onAttentionChange]);
   const load = useCallback((signal?: AbortSignal) => adminRequest<{ items: NativeRefundItem[] }>(`/orders/${encodeURIComponent(orderId)}/refunds`, undefined, "GET", {}, signal)
     .then(r => setItems(Array.isArray(r?.items) ? r.items : null), e => { if (!signal?.aborted) { setItems(null); setNote(friendlyError(e)); } }), [orderId]);
   const submit = async () => {

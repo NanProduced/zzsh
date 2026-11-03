@@ -53,9 +53,10 @@ export async function forwardOrderRequest(
   const channelPayment = resource === "orders" && path.includes("/channel-payment-requests");
   const refundRead = resource === "orders" && method === "GET" && path.endsWith("/refunds");
   const prestart = resource === "orders" && path.includes("/prestart-termination");
+  const unifiedList = resource === "orders" && method === "GET" && path === "/unified";
   if ((refundRead || prestart) && new URL(request.url).search) return error(400, "INVALID_ARGUMENT", requestId);
   const expectedUserId = request.headers.get("x-zzsh-expected-user-id");
-  if ((channelPayment || refundRead || prestart) && (!expectedUserId || !new RegExp(`^${id}$`).test(expectedUserId)))
+  if ((channelPayment || refundRead || prestart || unifiedList) && (!expectedUserId || !new RegExp(`^${id}$`).test(expectedUserId)))
     return error(400, "INVALID_ARGUMENT", requestId);
   if (resource === "rental-price-preview") {
     const url = new URL(request.url), refs = ["accountId", "versionId", "releaseId"];
@@ -90,7 +91,7 @@ export async function forwardOrderRequest(
   }
   let upstream: Response;
   try {
-    if (channelPayment || refundRead || prestart) {
+    if (channelPayment || refundRead || prestart || unifiedList) {
       const authHeaders = new Headers({ origin: webOrigin, "x-request-id": requestId });
       if (cookies) authHeaders.set("cookie", cookies);
       // 同一份捕获Cookie核身份，旧标签页不能借新账号会话提交或读取渠道请求。
@@ -131,6 +132,7 @@ export async function forwardOrderRequest(
   try {
     const bytes = await readBoundedBody(upstream, 2 * 1024 * 1024, deadline);
     const payload = JSON.parse(new TextDecoder().decode(bytes));
+    if (unifiedList && upstream.ok && (payload?.subjectId !== expectedUserId || !Array.isArray(payload?.items))) return error(502, "INTERNAL_ERROR", requestId);
     if (refundRead && upstream.ok && (payload?.contractVersion !== "personal-native-refunds.v1" || payload?.subjectId !== expectedUserId || payload?.order?.orderId !== segments?.[0])) return error(502, "INTERNAL_ERROR", requestId);
     return Response.json(sanitizeResponse(payload), {
       status: upstream.status,

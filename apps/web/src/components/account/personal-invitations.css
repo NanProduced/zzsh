@@ -1,5 +1,5 @@
 .personal-invitations { display:grid; min-width:0; gap:24px; }
-.invitation-workbench { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.2fr); gap:20px; }
+.invitation-workbench { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.2fr); align-items:start; gap:20px; }
 .personal-invitations h3 { margin:0 0 14px; font-size:16px; font-weight:600; }
 .invitation-code>strong { display:block; font-size:26px; line-height:1.5; letter-spacing:.015em; overflow-wrap:anywhere; }
 .personal-invitations p { color:var(--color-text-secondary); font-size:13px; line-height:1.75; }

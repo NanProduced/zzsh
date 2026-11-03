@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useUserSession } from "@/components/session/user-session-provider";
-import { orderApi, formatOrderMoney, formatOrderTime, OrderRequestError, type LegacyOrder, type LegacyOrderPage, type OrderParty, type OrderStatusFilter } from "@/lib/order-client";
+import { orderApi, formatOrderMoney, formatOrderTime, OrderRequestError, type LegacyOrder, type LegacyOrderPage, type OrderParty, type OrderStatusFilter, type OrderSearchFilters } from "@/lib/order-client";
 import { orderTermLabel, orderUrl } from "@/components/order/order-presentation";
 import "./order.css";
 import { LegacyContinuationPanel } from "./legacy-continuation-panel";
@@ -15,7 +15,7 @@ export function legacyOrderHref(party: OrderParty, page = 1, orderId?: string, a
   return `/account?${q}`;
 }
 
-export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId, status = "" }: { party: OrderParty; orderId?: string; page?: string; accountId?: string; status?: OrderStatusFilter }) {
+export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId, status = "", filters }: { party: OrderParty; orderId?: string; page?: string; accountId?: string; status?: OrderStatusFilter; filters?: OrderSearchFilters }) {
   const session = useUserSession();
   const page = pageText && /^[1-9]\d{0,6}$/.test(pageText) ? Number(pageText) : 1;
   const scope = `${session.status}:${session.userId}:${session.identityVersion}:${party}:${page}:${orderId ?? ""}:${accountId ?? ""}`;
@@ -46,10 +46,10 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
   const data = current.data;
   if (!("items" in data) && data.party !== party) {
     const actualTitle = data.party === "owner" ? "出租订单" : "租入订单";
-    return <section className="order-detail-view" data-testid="legacy-order-party-mismatch"><Link href={orderUrl(party, status, accountId)} scroll={false}>返回订单列表</Link><section className="order-error-block" role="status"><h2>本单属于你的{actualTitle}</h2><p>请按服务端确认的交易身份查看金额与处理事项。</p><Link className="button primary" href={orderUrl(data.party, "", undefined, data.id, "LEGACY")} scroll={false}>查看我的{actualTitle}</Link></section></section>;
+    return <section className="order-detail-view" data-testid="legacy-order-party-mismatch"><Link href={orderUrl(party, status, accountId, undefined, undefined, filters)} scroll={false}>返回订单列表</Link><section className="order-error-block" role="status"><h2>本单属于你的{actualTitle}</h2><p>请切换到对应订单查看金额和进度。</p><Link className="button primary" href={orderUrl(data.party, "", undefined, data.id, "LEGACY")} scroll={false}>查看我的{actualTitle}</Link></section></section>;
   }
   const recordedIncome = !("items" in data) && data.ownerIncomeSource?.source === "LEGACY_ORDER_SNAPSHOT" ? data.amounts?.ownerRecordedIncome : null;
-  const notice = <p className="order-muted">金额按订单记录展示；可办理事项以本单核定结果为准。原退款金额记录是原单记录的金额，不是当前应退责任，也不代表资金已到账。</p>;
+  const notice = party === "renter" ? <p className="order-muted">退款记录金额仅供查看，实际到账请以收款记录为准。</p> : null;
   if ("items" in data) return <section className="order-detail-view">
     <header className="account-module-heading"><div><h2>{party === "owner" ? "出租" : "租入"}订单</h2><p>查看订单进展与金额记录。</p></div><button className="button secondary" onClick={() => setReload(n => n + 1)}>刷新</button></header>
     {notice}
@@ -66,24 +66,24 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
     </div>
   </section>;
   return <section className="order-detail-view">
-    <Link href={orderUrl(party, status, accountId)} scroll={false}>返回订单列表</Link>
+    <Link href={orderUrl(party, status, accountId, undefined, undefined, filters)} scroll={false}>返回订单列表</Link>
     <header><h2>{data.displayNo || "订单"}</h2><p>{orderAccountTitle(data)}</p><p>{orderTermLabel(data)}</p><strong>{data.source.statusLabel || "状态待确认"}</strong></header>
-    {orderUsesResourceSummary(data) ? <p className="order-muted">账号摘要按本单资源记录整理，不是原账号标题；数量沿原订单单位，保险按天。</p> : null}
+    {orderUsesResourceSummary(data) ? <p className="order-muted">账号资料来自本单记录。</p> : null}
     {orderResourceLines(data).length ? <section className="account-module-card"><h3>本单资源记录</h3><dl className="order-facts">
       {orderResourceLines(data).map(resource => <div key={resource.code}><dt>{resource.name}</dt><dd>{resource.value}</dd></div>)}
     </dl></section> : null}
     {notice}
-    <section className="account-module-card"><h3>{party === "owner" ? "我的历史收益" : "金额记录"}</h3>{party === "owner" ? <>{recordedIncome ? <><p className="order-amount-total">{formatOrderMoney(recordedIncome)}</p><p className="order-muted">原单净收益记录，保留旧平台完成时的收益事实，不代表当前应收、钱包可用金额或渠道到账。</p></> : <p className="order-muted">历史收益金额尚未核定，不以租客付款替代；请核对钱包记录及本单可办理事项。</p>}<Link href="/account?view=wallet" scroll={false}>查看钱包记录</Link></> : <dl className="order-facts">
+    <section className="account-module-card"><h3>{party === "owner" ? "出租收益记录" : "金额记录"}</h3>{party === "owner" ? <>{recordedIncome ? <><p className="order-amount-total">{formatOrderMoney(recordedIncome)}</p><p className="order-muted">记录金额仅供查看，余额请以钱包为准。</p></> : <p className="order-muted">收益金额待确认。</p>}<Link href="/account?view=wallet" scroll={false}>查看钱包记录</Link></> : <dl className="order-facts">
       <div><dt>应付金额</dt><dd>{formatOrderMoney(data.legacyAmounts?.required)}</dd></div>
       <div><dt>已付金额</dt><dd>{formatOrderMoney(data.legacyAmounts?.paid)}</dd></div>
       <div><dt>押金</dt><dd>{formatOrderMoney(data.legacyAmounts?.deposit)}</dd></div>
-      <div><dt>原退款金额记录</dt><dd>{formatOrderMoney(data.legacyAmounts?.refund)}</dd></div>
+      <div><dt>退款记录金额</dt><dd>{formatOrderMoney(data.legacyAmounts?.refund)}</dd></div>
     </dl>}</section>
     <LegacyContinuationPanel orderId={data.id} party={party}/>
     <section className="account-module-card"><h3>订单信息</h3><dl className="order-facts">
       <div><dt>创建时间</dt><dd>{formatOrderTime(data.createdAt)}</dd></div><div><dt>支付记录时间</dt><dd>{formatOrderTime(data.paidAt)}</dd></div>
       <div><dt>完成时间</dt><dd>{formatOrderTime(data.completedAt)}</dd></div><div><dt>取消时间</dt><dd>{formatOrderTime(data.cancelledAt)}</dd></div>
-      {data.account.readable ? <div><dt>账号编号</dt><dd>{data.account.displayNo ?? "编号待分配"}</dd></div> : null}
+      {data.account.readable ? <div><dt>账号编号</dt><dd>{data.account.displayNo ?? "暂未提供"}</dd></div> : null}
     </dl>{data.account.readable && data.account.id && party === "owner" ? <Link href={`/account?view=accounts&accountId=${encodeURIComponent(data.account.id)}`}>查看本人账号</Link> : null}</section>
   </section>;
 }

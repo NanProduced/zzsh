@@ -24,7 +24,7 @@ import { accountStatusLabel, identityStatusLabel, type UserIdentitySnapshot } fr
 import { MembershipGrowthRequestError, readMyMembershipGrowth, type GrowthTier, type MembershipGrowthViewState } from "@/lib/membership-growth-client";
 import { readMyCredit, CreditRequestError, type CreditOverview, type CreditGuarantee } from "@/lib/credit-guarantee-client";
 import { readMyWallet, walletMoney, WalletRequestError, type WalletRead } from "@/lib/personal-wallet-client";
-import { formatOrderTime, orderApi, orderItemKey, OrderRequestError, type Order, type OrderPage, type OrderParty } from "@/lib/order-client";
+import { formatOrderTime, orderApi, orderItemKey, OrderRequestError, type Order, type OrderPage, type OrderParty, type OrderSearchFilters } from "@/lib/order-client";
 import { orderTermLabel, orderUrl } from "@/components/order/order-presentation";
 import { orderAccountTitle, orderAmountFacts, orderListingSourceLabel, orderSettlementStageLabel } from "@/lib/order-display";
 import { EntitlementBadge, formatScopeName, GrowthMemberCardArt, GROWTH_TIER_LABELS, MembershipCenterView } from "./membership-center";
@@ -37,8 +37,8 @@ export const accountSectionLabels = {
   membership: "会员中心",
   rentals: "租入订单",
   leased: "出租订单",
-  rented: "出租账号",
-  accounts: "上架账号",
+  rented: "我的账号",
+  accounts: "我的账号",
   credit: "信用与保证金",
   identity: "实名认证",
   favorites: "我的收藏",
@@ -80,8 +80,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { section: "rentals", label: "租入订单", icon: FileText },
       { section: "leased", label: "出租订单", icon: House },
-      { section: "rented", label: "出租账号", icon: House },
-      { section: "accounts", label: "上架账号", icon: ClipboardList },
+      { section: "accounts", label: "我的账号", icon: ClipboardList },
     ],
   },
   {
@@ -105,10 +104,11 @@ export const NAV_ITEMS: NavItem[] = NAV_GROUPS.flatMap((g) => g.items);
 
 /** 面包屑第三段用的当前页面名称：以导航项标签为准，未知回落“总览”。 */
 export function accountViewTitle(view: AccountView): string {
+  if (view === "rented") return accountSectionLabels.accounts;
   return NAV_ITEMS.find((item) => item.section === view)?.label ?? "总览";
 }
 
-export type AccountLocation = { view: AccountView; accountId?: string; orderId?: string; status?: string };
+export type AccountLocation = { view: AccountView; accountId?: string; orderId?: string; status?: string; source?: string; orderFilters?: OrderSearchFilters };
 
 /** web.account.unsupported: a view outside the known sections is reported, never silently mapped to another business page. */
 export function isKnownAccountView(view: string): boolean {
@@ -124,10 +124,12 @@ export function accountSectionHref(section: AccountView, current: AccountLocatio
   const query = new URLSearchParams();
   query.set("view", section);
   const sameOrder = (section === "rentals" || section === "leased") && current.view === section;
-  const sameAccountSection = (section === "accounts" || section === "rented") && current.view === section;
+  const sameAccountSection = (section === "accounts" || section === "rented") && (current.view === "accounts" || current.view === "rented");
   if ((sameAccountSection || sameOrder) && current.accountId) query.set("accountId", current.accountId);
-  if (sameOrder && current.status) query.set("status", current.status);
-  if (sameOrder && current.orderId) query.set("orderId", current.orderId);
+  if ((sameOrder || sameAccountSection) && current.status) query.set("status", current.status);
+  else if (sameAccountSection && current.view !== section) query.set("status", current.view === "rented" ? "RENTED" : "ALL");
+  if (sameOrder && current.orderId) { query.set("orderId", current.orderId); if (current.source === 'legacy') query.set('source', 'legacy'); }
+  if (sameOrder) for (const key of ['orderNo','createdFrom','createdTo','stage'] as const) if (current.orderFilters?.[key]) query.set(key, current.orderFilters[key]!);
   return `/account?${query.toString()}`;
 }
 
@@ -731,7 +733,8 @@ export function OrderSummaryCard({
     const controller = new AbortController();
     setState({ scope, status: "loading", page: null, error: null });
     onStatusChangeRef.current?.("loading", [], false);
-    orderApi.listUnified({ party, limit: 3 }, controller.signal).then(
+    if (session.status !== "authenticated" || !session.userId) return () => controller.abort();
+    orderApi.listUnified(session.userId, { party, limit: 3 }, controller.signal).then(
       (page) => {
         if (!controller.signal.aborted && current === sequence.current) {
           setState({ scope, status: "ready", page, error: null });
@@ -747,7 +750,7 @@ export function OrderSummaryCard({
       }
     );
     return () => controller.abort();
-  }, [party, scope, reload, refreshVersion, revalidate]);
+  }, [party, scope, reload, refreshVersion, revalidate, session.status, session.userId]);
 
   const page = state.page;
   const items = page?.items.slice(0, 3) ?? [];
@@ -1063,6 +1066,8 @@ export function AccountCenterFrame({
   accountId,
   orderId,
   status,
+  source,
+  orderFilters,
   scope: _scope,
   breadcrumbs = [],
   children,
@@ -1071,11 +1076,13 @@ export function AccountCenterFrame({
   accountId?: string;
   orderId?: string;
   status?: string;
+  source?: string;
+  orderFilters?: OrderSearchFilters;
   scope: string;
   breadcrumbs?: readonly AccountBreadcrumbItem[];
   children: ReactNode;
 }) {
-  const current = { view: active, accountId, orderId, status };
+  const current: AccountLocation = { view: active, accountId, orderId, status, source, orderFilters };
   const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
   const previousActiveRef = useRef(active);
 
@@ -1182,7 +1189,7 @@ export function AccountCenterFrame({
                             href={accountSectionHref(item.section, current)}
                             scroll={false}
                             aria-label={item.badge ? `${item.label}，${item.badge}说明` : undefined}
-                            aria-current={active === item.section ? "page" : undefined}
+                            aria-current={active === item.section || active === "rented" && item.section === "accounts" ? "page" : undefined}
                             onClick={() => onTabClick(item.section)}
                           >
                             <Icon size={16} aria-hidden="true" />
@@ -1217,7 +1224,7 @@ export function AccountCenterFrame({
                         scroll={false}
                         aria-label={item.badge ? `${item.label}，${item.badge}说明` : undefined}
                         onClick={() => onTabClick(item.section)}
-                        aria-current={active === item.section ? "page" : undefined}
+                        aria-current={active === item.section || active === "rented" && item.section === "accounts" ? "page" : undefined}
                       >
                         <Icon size={16} aria-hidden="true" />
                         <span>{item.label}</span>

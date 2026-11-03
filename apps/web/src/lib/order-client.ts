@@ -283,7 +283,8 @@ export type LegacyOrder = {
 };
 export type LegacyOrderPage = { items: LegacyOrder[]; page: number; pageSize: number; total: number };
 
-export type OrderPage = { items: Order[]; nextCursor: string | null; limit: number };
+export type OrderPage = { items: Order[]; nextCursor: string | null; limit: number; scanIncomplete?: boolean; stageUnknownObserved?: boolean };
+export type OrderSearchFilters = { orderNo?: string; createdFrom?: string; createdTo?: string; stage?: string };
 
 export type RentalPricePreviewInput = { accountId: string; versionId: string; releaseId: string };
 /** Read-only price view. It is not a transaction confirmation or an order credential. */
@@ -772,11 +773,15 @@ export function orderIntentKey(): string {
   return "op_" + crypto.randomUUID().replaceAll("-", "");
 }
 
-type OrderListInput = { party: OrderParty; status?: OrderStatus; accountId?: string; limit?: number; cursor?: string };
+type OrderListInput = { party: OrderParty; status?: OrderStatus; accountId?: string; limit?: number; cursor?: string } & OrderSearchFilters;
 function orderListQuery(input: OrderListInput): string {
   const query = new URLSearchParams({ party: input.party, limit: String(input.limit ?? 20) });
   if (input.status) query.set("status", input.status);
   if (input.accountId) query.set("accountId", input.accountId);
+  if (input.orderNo) query.set("orderNo", input.orderNo);
+  if (input.createdFrom) query.set("createdFrom", input.createdFrom);
+  if (input.createdTo) query.set("createdTo", input.createdTo);
+  if (input.stage) query.set("stage", input.stage);
   if (input.cursor) query.set("cursor", input.cursor);
   return query.toString();
 }
@@ -792,8 +797,8 @@ export const orderApi = {
     (await requestJson<{ order: LegacyOrder }>(`/api/orders/legacy/${encodeURIComponent(orderId)}`, { signal })).order,
   list: (input: OrderListInput, signal?: AbortSignal) =>
     requestJson<OrderPage>(`/api/orders?${orderListQuery(input)}`, { signal }),
-  listUnified: (input: OrderListInput, signal?: AbortSignal) =>
-    requestJson<OrderPage>(`/api/orders/unified?${orderListQuery(input)}`, { signal }),
+  listUnified: (userId: string, input: OrderListInput, signal?: AbortSignal) =>
+    requestJson<OrderPage>(`/api/orders/unified?${orderListQuery(input)}`, { signal, expectedUserId: userId }),
   detail: (orderId: string, signal?: AbortSignal) =>
     requestJson<{ order: Order }>(`/api/orders/${encodeURIComponent(orderId)}`, { signal }).then(unwrapOrder),
   /** Read-only fulfillment projection; same authorization and same-origin read as the order group. */

@@ -336,7 +336,7 @@ test('U1 order filters use shared controls, send exact server predicates and res
 });
 test('numbered lookup, later pages and invalid dates retain the executed query and expose a correct current page', async t => {
   const {browser,root,node,AdminOrderChainView} = await setup(t); const calls=[],changed=[];
-  globalThis.fetch = async url => { calls.push(new URL(String(url),browser.location.href)); return response(chainPage([chainOrder],{total:200})); };
+  globalThis.fetch = async url => {if(String(url).includes('/orders/overview-stats'))return response({error:{code:'EVIDENCE_UNAVAILABLE'}},503); calls.push(new URL(String(url),browser.location.href)); return response(chainPage([chainOrder],{total:200})); };
   await act(async () => root.render(createElement(AdminOrderChainView,{...chainProps('chain-pages'),onQueryChange:q=>changed.push(q)})));
   await until(() => node.textContent.includes(chainOrder.displayNo));
   await changeField(browser,node,'查找方式','交易双方'); await changeField(browser,node,'查找线索','测试用户线索');
@@ -426,7 +426,7 @@ test('progress nodes expose Beijing times by keyboard/aria and never mark unevid
 test('master: list requests the bounded projection and keeps the true material count', async t => {
   const {root,node,AdminOrderChainView}=await setup(t),calls=[];
   const item={...chainOrder,id:'bounded-materials',displayNo:'BOUNDED-MATERIALS',frozenAccount:{source:'ORDER_VERSION',haff:null,materials:[{code:'one',name:'物资甲',quantity:'1',unit:'PIECE'},{code:'two',name:'物资乙',quantity:'2',unit:'PIECE'},{code:'three',name:'物资丙',quantity:'3',unit:'PIECE'}],materialsTotal:6,materialsTruncated:true,termDays:null,termSeconds:null,loginMethodText:null}};
-  globalThis.fetch=async url=>{calls.push(new URL(String(url),'http://localhost'));return response(chainPage([item]));};
+  globalThis.fetch=async url=>{if(String(url).includes('/orders/overview-stats'))return response({error:{code:'EVIDENCE_UNAVAILABLE'}},503);calls.push(new URL(String(url),'http://localhost'));return response(chainPage([item]));};
   await act(async()=>root.render(createElement(AdminOrderChainView,chainProps('bounded-materials'))));await until(()=>node.textContent.includes('BOUNDED-MATERIALS'));
   assert.equal(calls[0].searchParams.get('view'),'list');assert.match(node.textContent,/等 6 项/);assert.equal(calls.length,1);
 });
@@ -442,9 +442,28 @@ test('master: order detail separates lack of permission, unknown parts and verif
   assert.match(node.textContent,/账号资料（与账号页一致）/);assert.doesNotMatch(node.textContent,/历史账号|旧单资源数量/);
   assert.match(node.textContent,/原单记录，合计尚未核对/);assert.match(node.textContent,/完整构成仍待核对/);assert.match(node.textContent,/未记录付款/);assert.doesNotMatch(node.textContent,/本单冻结账号摘要 · 历史/);
 });
+
+test('order detail exposes pending original-refund recovery above tabs and keeps its original key on navigation', async t => {
+  const {browser,root,node,AdminOrderChainView}=await setup(t),calls=[];
+  const previousStorage=globalThis.sessionStorage;globalThis.sessionStorage=browser.sessionStorage;t.after(()=>{globalThis.sessionStorage=previousStorage;});
+  const id='pending-refund',snap=snapshotFor('pending-refund-admin'),value={...chainOrder,id,displayNo:'PENDING-REFUND',status:'PAID',source:{origin:'NATIVE'}};
+  snap.permissions=[...snap.permissions,'order.settlement.write'];
+  const scope=JSON.stringify([snap.adminUserId,snap.session.id,id,'REVIEW_CONFIRMATION',null]),storageKey=`zzsh.admin.original-refund.${scope}`;
+  const pending={scope,key:'original-key-1',reference:'confirmation-1',body:{confirmationId:'confirmation-1',reason:'已核对原款'}};
+  browser.sessionStorage.setItem(storageKey,JSON.stringify(pending));
+  globalThis.fetch=async(url,init={})=>{calls.push({url:String(url),method:init.method??'GET'});if(String(url).includes('readMode=combined'))return response({order:value});if(String(url).endsWith('/refunds'))return response({items:[]});return response({error:{code:'NOT_FOUND'}},404);};
+  await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('pending-refund-admin'),snapshot:snap,objectOnly:true,initialOrderId:id})));
+  await until(()=>node.textContent.includes('本单有退款记录或原请求需要核对'));
+  assert.match(node.textContent,/本单账号和双方/);assert.match(node.textContent,/关键费用/);
+  await act(async()=>buttonNamed(node,'查看资金与退款').click());
+  await until(()=>node.querySelector('.oc-exception')?.open===true);
+  assert.match(node.querySelector('.oc-exception').textContent,/存在原请求待恢复/);
+  assert.equal(browser.sessionStorage.getItem(storageKey),JSON.stringify(pending));
+  assert(calls.every(call=>call.method==='GET'));
+});
 test('first, refresh and page read errors remain failures; expired restore context rereads page one', async t => {
   const {root,node,AdminOrderChainView} = await setup(t);const calls=[];let mode='first-failure';
-  globalThis.fetch = async url => {const parsed=new URL(String(url),'http://localhost');calls.push(parsed);return mode.endsWith('failure')?response({error:{code:'INTERNAL_ERROR'}},500):mode==='conflict'&&parsed.searchParams.has('restoreKey')?response({error:{code:'CONFLICT'}},409):response(chainPage([chainOrder],{total:50}));};
+  globalThis.fetch = async url => {if(String(url).includes('/orders/overview-stats'))return response({error:{code:'EVIDENCE_UNAVAILABLE'}},503);const parsed=new URL(String(url),'http://localhost');calls.push(parsed);return mode.endsWith('failure')?response({error:{code:'INTERNAL_ERROR'}},500):mode==='conflict'&&parsed.searchParams.has('restoreKey')?response({error:{code:'CONFLICT'}},409):response(chainPage([chainOrder],{total:50}));};
   const props=chainProps('chain-failures');await act(async () => root.render(createElement(AdminOrderChainView,props)));
   await until(() => node.textContent.includes('读取暂不可用'));assert(!node.textContent.includes('暂无订单'));
   mode='ready';await act(async () => buttonNamed(node,'重试').click());await until(() => node.textContent.includes(chainOrder.displayNo));
@@ -506,7 +525,7 @@ test('frozen account summary is displayed from the existing order payload withou
   const {root,node,AdminOrderChainView}=await setup(t); let calls=0;
   const frozen={source:'ORDER_VERSION',haff:{code:'haff',name:'哈夫币',quantity:'98080000',unit:'HAFF_BASE'},materials:[{code:'barrett',name:'巴雷特子弹',quantity:'2',unit:'ROUND'}],termDays:'1',termSeconds:'86400',loginMethodText:'QQ扫码'};
   const item={...chainOrder,id:'frozen-order',displayNo:'FROZEN-ORDER',source:{origin:'NATIVE'},frozenAccount:frozen};
-  globalThis.fetch=async()=>{calls++;return response(chainPage([item]));};
+  globalThis.fetch=async url=>{if(String(url).includes('/orders/overview-stats'))return response({error:{code:'EVIDENCE_UNAVAILABLE'}},503);calls++;return response(chainPage([item]));};
   await act(async()=>root.render(createElement(AdminOrderChainView,chainProps('frozen'))));
   await until(()=>node.textContent.includes('FROZEN-ORDER'));
   assert(node.textContent.includes('本单冻结'));

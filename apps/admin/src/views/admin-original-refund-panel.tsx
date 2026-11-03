@@ -25,8 +25,8 @@ export function originalRefundReceipt(value:unknown,basis:Basis,expected:{orderI
 }
 
 /** 全额原笔命令没有客户端金额/目标；未知时冻结原引用、原body与原键。 */
-export function AdminOriginalRefundPanel({orderId,basis,reference,canWrite,binding,onRecorded}:{orderId:string;basis:Basis;reference?:string;
- canWrite:boolean;binding:{adminUserId:string;sessionId:string};onRecorded?:()=>void}){
+export function AdminOriginalRefundPanel({orderId,basis,reference,canWrite,binding,onRecorded,onAttentionChange}:{orderId:string;basis:Basis;reference?:string;
+ canWrite:boolean;binding:{adminUserId:string;sessionId:string};onRecorded?:()=>void;onAttentionChange?:(attention:boolean)=>void}){
  const scope=JSON.stringify([binding.adminUserId,binding.sessionId,orderId,basis,reference??null]),live=useRef(scope);live.current=scope;
  const store=`zzsh.admin.original-refund.${scope}`;
  const[id,setId]=useState(reference??''),[reason,setReason]=useState(''),[reviewed,setReviewed]=useState(false),[pending,setPending]=useState<Pending|null>(null),
@@ -40,6 +40,7 @@ export function AdminOriginalRefundPanel({orderId,basis,reference,canWrite,bindi
    setPending(p);setId(p.reference);setReason(p.body.reason??'');setNote('存在原请求待恢复；禁止换原款或换键。');}}
   catch{setBlocked(true);setNote('原退款请求资料不可读，禁止新建或覆盖。');}
  },[scope,store,basis,reference]);
+ useEffect(()=>{onAttentionChange?.(canWrite&&Boolean(pending||blocked));return()=>onAttentionChange?.(false);},[canWrite,pending,blocked,onAttentionChange]);
  async function submit(){
   if(busy||blocked||!canWrite)return;
   if(!pending&&(!ID.test(id)||!reviewed||basis==='REVIEW_CONFIRMATION'&&reason.trim().length<3))return;

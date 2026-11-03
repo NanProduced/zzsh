@@ -119,7 +119,7 @@ test("read page preserves accepted intent across refresh and never replays or cl
   let reads = 0;
   const mounted = await mount(async (_url, init) => { assert.equal(init?.method, "GET"); reads += 1; return new Response(JSON.stringify(overview())); });
   try {
-    assert.match(mounted.host.textContent, /原操作已接受/);
+    assert.match(mounted.host.textContent, /上次操作已受理/);
     assert.equal(mounted.host.querySelector("textarea"), null);
     const reread = [...mounted.host.querySelectorAll("button")].find((item) => item.textContent.includes("刷新"));
     await React.act(async () => reread.dispatchEvent(new mounted.browser.MouseEvent("click", { bubbles: true })));
@@ -144,12 +144,35 @@ test("CreditCenter renders every payment and refund attempt", async () => {
   setupStorage(false);
   const mounted = await mount(async (_url, init) => new Response(JSON.stringify(init?.method === "POST" ? {} : historyOverview()), { status: 200 }));
   try {
-    assert.match(mounted.host.textContent, /支付尝试 2 笔/);
-    assert.match(mounted.host.textContent, /退款尝试 2 笔/);
+    assert.match(mounted.host.textContent, /缴纳记录 2 笔/);
+    assert.match(mounted.host.textContent, /退还记录 2 笔/);
     assert.match(mounted.host.textContent, /merchant-1/);
     assert.match(mounted.host.textContent, /退还结果待确认/);
     assert.doesNotMatch(mounted.host.textContent, /refund-2|provider-2|event-2|line-2/);
-    assert.match(mounted.host.textContent, /已观察收款金额\s*待核定/);
+    assert.match(mounted.host.textContent, /已记录金额\s*待核定/);
+  } finally { await React.act(async () => mounted.root.unmount()); await mounted.browser.happyDOM.abort(); }
+});
+
+test("a required guarantee with payment records links to the records without inferring their relationship", async () => {
+  setupStorage(false);
+  const data = historyOverview();
+  data.guarantees = [{ accountId: "account-1", displayNo: "ZZ-001", gameId: "delta", versionId: "v1", priceVersionId: "p1", releaseId: "r1", baseCents: "10000", requiredCents: "500", score: 70, state: "REQUIRED", reference: null }];
+  data.transactions[0].refundStatus = null;
+  data.transactions[0].refundHistory = [];
+  const mounted = await mount(async () => Response.json(data));
+  try {
+    const account = mounted.host.querySelector('[data-account-id="account-1"]');
+    assert.match(account.textContent, /待缴保证金/);
+    assert.match(account.textContent, /此账号有缴纳记录/);
+    assert.doesNotMatch(account.textContent, /已缴足|无需再次支付/);
+    const link = account.querySelector('a[href="#credit-transactions"]');
+    assert.ok(link);
+    const details = mounted.host.querySelector('#credit-transactions');
+    assert.equal(details.open, false);
+    await React.act(async () => link.dispatchEvent(new mounted.browser.MouseEvent('click', { bubbles: true, cancelable: true })));
+    assert.equal(details.open, true);
+    assert.match(details.textContent, /暂无可显示的退还记录/);
+    assert.doesNotMatch(details.textContent, /最近退还：状态暂不识别/);
   } finally { await React.act(async () => mounted.root.unmount()); await mounted.browser.happyDOM.abort(); }
 });
 
@@ -232,7 +255,7 @@ test("guarantee groups deduplicate account contexts without adding money or hidi
     const groups = mounted.host.querySelectorAll(".credit-guarantee-list article");
     assert.equal(groups.length, 2);
     assert.equal(groups[0].querySelectorAll(".credit-responsibility").length, 2);
-    assert.match(groups[0].textContent, /2 项保证金责任/);
+    assert.match(groups[0].textContent, /2 项保证金要求/);
     assert.match(groups[0].textContent, /¥5\.00/); assert.match(groups[0].textContent, /¥6\.00/);
     assert.doesNotMatch(groups[0].textContent, /¥11\.00|private-hash|private-requirement/);
     assert.equal(groups[0].querySelector("a").textContent, "公开账号88");
@@ -244,7 +267,9 @@ test("guarantee groups deduplicate account contexts without adding money or hidi
     assert.match(groups[1].textContent, /该账号当前不需要缴保证金/);
     assert.equal([...mounted.host.querySelectorAll("button")].filter((b) => !b.closest(".owner-guarantee-history")).length, 1, "credit commands only; F history retry is separate");
     const headings = [...mounted.host.querySelectorAll("h3")].map(item => item.textContent);
-    assert.deepEqual(headings, ["当前信用", "信用变动明细", "出租账号保证金", "收款与原路退还进度", "我的信用恢复申请", "号主上架保证金"], "F history section is hosted last and independent of credit readiness");
+    assert.deepEqual(headings, ["当前信用", "信用变动明细", "出租账号保证金", "我的信用恢复申请", "保证金记录"]);
+    assert.equal(mounted.host.querySelector('a[href="/account?view=wallet&wallet=guarantees"]').textContent, "查看保证金记录");
+    assert.equal(mounted.host.querySelector('.owner-guarantee-history'), null, "historical guarantee panel is not duplicated in credit");
   } finally { await React.act(async () => mounted.root.unmount()); await mounted.browser.happyDOM.abort(); }
 });
 
@@ -253,8 +278,8 @@ test("UNKNOWN guarantee placeholder zero remains unknown while NOT_REQUIRED zero
   const guarantee = { accountId: "account-unknown", displayNo: null, gameId: "delta", versionId: null, priceVersionId: "price", releaseId: "release", baseCents: null, requiredCents: "0", score: null, state: "UNKNOWN", reference: null, reasonCode: "CREDIT_UNINITIALIZED" };
   const mounted = await mount(async () => new Response(JSON.stringify({ ...overview(), guarantees: [guarantee, { ...guarantee, accountId: "account-no-quote", reasonCode: "STANDARD_QUOTE_UNAVAILABLE" }, { ...guarantee, accountId: "account-not-required", state: "NOT_REQUIRED", score: 100, baseCents: "10000" }] })));
   try {
-    const requirements = [...mounted.host.querySelectorAll(".credit-responsibility dl")].map(list => [...list.querySelectorAll("div")].find(row => row.querySelector("dt")?.textContent === "当前应缴要求").querySelector("dd").textContent);
-    assert.deepEqual(requirements, ["待核定", "待核定", "¥0.00"]);
+    const requirements = [...mounted.host.querySelectorAll(".credit-responsibility dl")].map(list => [...list.querySelectorAll("div")].find(row => row.querySelector("dt")?.textContent === "保证金要求").querySelector("dd").textContent);
+    assert.deepEqual(requirements, ["待确认", "待确认", "¥0.00"]);
   } finally { await React.act(async () => mounted.root.unmount()); await mounted.browser.happyDOM.abort(); }
 });
 
@@ -511,7 +536,7 @@ test("F1-t: 首页已覆盖所需账号即停，不继续翻页", async () => {
   } finally { await cleanup(mounted); }
 });
 
-test("E-F-016 owner guarantee history stays readable when the main credit read fails", async () => {
+test("E-F-016 failed credit read still links directly to independent wallet guarantee history", async () => {
   const original = globalThis.fetch;
   const urls = [];
   const history = { contractVersion: "owner-guarantee-history.read.v1", subjectId: "user-A", asOf: "2026-10-01T00:00:00Z", snapshotVersion: "snap-1", items: [], nextCursor: null, coverage: { knowledge: "UNKNOWN", count: null, mappedRecordCount: null, reason: "SOURCE_PENDING", cutoff: null }, postedHeld: { knowledge: "UNKNOWN", amountCents: null, scope: "POSTED_LEDGER_ONLY", reason: "NOT_POSTED" }, liability: { knowledge: "UNKNOWN", amountCents: null }, channelArrival: "UNKNOWN" };
@@ -522,9 +547,9 @@ test("E-F-016 owner guarantee history stays readable when the main credit read f
       return new Response(JSON.stringify({ error: { code: "INTERNAL_ERROR", message: "x" } }), { status: 500 });
     }, { history: true });
     await React.act(async () => { await new Promise((r) => setTimeout(r, 20)); });
-    assert.ok(urls.some((u) => u.includes("/api/account/wallet/guarantees")), "history read is issued independently");
-    assert.match(host.textContent, /号主上架保证金/);
-    assert.match(host.textContent, /待核定/, "unknown liability is shown as pending, not zero");
+    assert.equal(urls.some((u) => u.includes("/api/account/wallet/guarantees")), false, "credit does not duplicate the full history read");
+    assert.equal(host.querySelector('a[href="/account?view=wallet&wallet=guarantees"]').textContent, "查看保证金记录");
+    assert.match(host.textContent, /信用.*暂时无法读取/);
     await React.act(async () => root.unmount());
   } finally { globalThis.fetch = original; }
 });

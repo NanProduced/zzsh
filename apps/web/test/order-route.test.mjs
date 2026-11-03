@@ -7,6 +7,33 @@ const {POST:CREATE_V2}=await import('../src/app/api/v2/orders/route.ts');
 const ctx=path=>({params:Promise.resolve({path})});
 const input=(path,init={},query='')=>new Request('http://127.0.0.1:3100/api/orders/'+path.join('/')+query,{...init,headers:{origin:'http://127.0.0.1:3100',...init.headers}});
 
+test('unified list rejects missing or changed expected identity before reading another user orders',async()=>{
+ const before=globalThis.fetch,calls=[];
+ globalThis.fetch=async(url,options)=>{calls.push({url:String(url),options});return Response.json({user:{id:'user_b'}});};
+ try{
+  for(const expected of [undefined,'invalid/user']){
+   const headers=expected?{'x-zzsh-expected-user-id':expected}:{};
+   assert.equal((await GET(input(['unified'],{headers}),ctx(['unified']))).status,400);
+  }
+  assert.equal(calls.length,0);
+  const response=await GET(input(['unified'],{headers:{cookie:'zzsh_user.session_token=cookie_b','x-zzsh-expected-user-id':'user_a'}},'?party=owner'),ctx(['unified']));
+  assert.equal(response.status,401);assert.equal((await response.json()).error.code,'IDENTITY_CHANGED');
+  assert.equal(calls.length,1);assert.match(calls[0].url,/get-session$/);
+ }finally{globalThis.fetch=before;}
+});
+
+test('unified list uses the same captured user cookie and only exposes a matching response subject',async()=>{
+ const before=globalThis.fetch,calls=[];let subject='user_a';
+ globalThis.fetch=async(url,options)=>{calls.push({url:String(url),options});return Response.json(String(url).endsWith('/get-session')?{user:{id:'user_a'}}:{subjectId:subject,items:[{id:'private_order'}],nextCursor:null,limit:3});};
+ try{
+  const request=()=>input(['unified'],{headers:{cookie:'zzsh_user.session_token=original_a; zzsh_admin.session_token=admin','x-zzsh-expected-user-id':'user_a'}},'?party=owner&limit=3&orderNo=ORDER-1');
+  const response=await GET(request(),ctx(['unified']));assert.equal(response.status,200);assert.equal((await response.json()).subjectId,'user_a');
+  assert.equal(calls.length,2);for(const call of calls){assert.equal(call.options.headers.get('cookie'),'zzsh_user.session_token=original_a');assert.equal(call.options.headers.has('x-zzsh-expected-user-id'),false);}
+  assert.match(calls[1].url,/unified\?party=owner&limit=3&orderNo=ORDER-1$/);
+  for(const changed of ['user_b',undefined]){subject=changed;const rejected=await GET(request(),ctx(['unified']));assert.equal(rejected.status,502);assert.doesNotMatch(await rejected.text(),/private_order|user_b/);}
+ }finally{globalThis.fetch=before;}
+});
+
 test('未开租结束GET/申请保持本人Cookie身份预检；不代理Admin审核或隐式渠道query',async()=>{
  const old=globalThis.fetch,calls=[];globalThis.fetch=async(url,options)=>{calls.push({url:String(url),options});
   return Response.json(String(url).includes('get-session')?{user:{id:'renter_1'},session:{id:'session_1'}}:{orderId:'order_1'});};

@@ -173,8 +173,17 @@ test('未开租结束组件只读原责任/未知退款，不显示正常结算�
    intents:[{intentId:'refund_1',refundOrderNo:'RF'+'a'.repeat(28),state:'UNKNOWN',amountCents:'15908',firstSubmit:'DISPATCHED',blockedReason:null,localWriteOff:'NOT_RECORDED',savedChannelEvidence:null,bankArrival:'UNKNOWN'}]},
   coverage:'LOCAL_REGISTERED_ONLY',asOf:at,localAcceptanceObservedAt:at,unknowns:['BANK_ARRIVAL_NOT_VERIFIED'],bankArrival:'UNKNOWN'};
  const probe=createProbe(window,PrestartTerminationPanel,{order:{...paidOrder,status:'CANCELLED'},party:'renter',onChanged(){}},async(url,init)=>{calls.push({url,init});return json(read);});
- try{await probe.render();assert.equal(calls.length,1);assert.match(probe.host.textContent,/159\.08/);assert.match(probe.host.textContent,/按原号恢复/);assert.match(probe.host.textContent,/尚未分配/);assert.match(probe.host.textContent,/银行到账未核定/);assert.equal(probe.host.querySelector('form'),null);assert(calls.every(c=>!c.init?.method||c.init.method==='GET'));}
+ try{await probe.render();assert.equal(calls.length,1);assert.match(probe.host.textContent,/159\.08/);assert.match(probe.host.textContent,/结果待确认/);assert.match(probe.host.textContent,/到账情况请以收款记录为准/);assert.doesNotMatch(probe.host.textContent,/退款已到账|本地核销|原键/);assert.equal(probe.host.querySelector('form'),null);assert(calls.every(c=>!c.init?.method||c.init.method==='GET'));}
  finally{await probe.dispose();}
+}));
+
+test('unreviewed prestart requests describe the payment basis without claiming a refund amount',async()=>withDom(async window=>{
+ const current=session('user_A'),{PrestartTerminationPanel}=loadComponent('apps/web/src/components/order/prestart-termination-panel.tsx',current),at='2026-10-28T00:00:00.000000Z';
+ for(const state of ['REQUESTED','REVIEW_REQUIRED','REJECTED']){
+  const read={contractVersion:'order-prestart-termination.v1',orderId:'order_A',orderRevision:'2',eligibility:{allowed:false,reason:'PRESTART_FACTS_UNAVAILABLE',refundCents:null},request:{id:'term_1',revision:'2',state,requestedByParty:'RENTER',reason:'尚未交付',reviewReason:null,createdAt:at,updatedAt:at,approvedAt:null,fullRefundCents:'15908',currency:'CNY',dataOrigin:'JOINPAY_LOCAL_ACCEPTANCE',liabilityRecognized:false,channelSubmission:'NOT_REPORTED',bankArrival:'UNKNOWN'},refund:null,coverage:'LOCAL_REGISTERED_ONLY',asOf:at,localAcceptanceObservedAt:at,unknowns:['BANK_ARRIVAL_NOT_VERIFIED'],bankArrival:'UNKNOWN'};
+  const probe=createProbe(window,PrestartTerminationPanel,{order:paidOrder,party:'renter',onChanged(){}},async()=>json(read));
+  try{await probe.render();assert.match(probe.host.textContent,/原付款记录金额：¥159\.08/);assert.match(probe.host.textContent,/退款情况以审核结果为准/);assert.doesNotMatch(probe.host.textContent,/申请退款金额|退款已到账/);}finally{await probe.dispose();}
+ }
 }));
 test('未开租申请202未知保留同一原键/body，恢复不按编辑内容重建',async()=>withDom(async window=>{
  const current=session('user_A'),{PrestartTerminationPanel}=loadComponent('apps/web/src/components/order/prestart-termination-panel.tsx',current),posts=[];
@@ -1533,7 +1542,7 @@ test('legacy rental income points to wallet records rather than referral commiss
   const Component=loadComponent('apps/web/src/components/order/legacy-order-workspace.tsx',session('user_A')).LegacyOrderWorkspace;
   for(const known of [true,false]){
    const row={id:'legacy_income',displayNo:'OLD-INCOME',party:'owner',status:'COMPLETED',readOnly:true,source:{origin:'LEGACY',statusLabel:'已完成'},account:{id:null,displayNo:null,readable:false},amounts:{ownerRecordedIncome:money('201.00')},...(known?{ownerIncomeSource:{source:'LEGACY_ORDER_SNAPSHOT',sourceLabel:'原单记录'}}:{}),legacyAmounts:{required:money('470.00'),paid:money('470.00'),deposit:money('100.00'),refund:null}},probe=createProbe(window,Component,{party:'owner',orderId:row.id},async()=>json({order:row}));
-   try{await probe.render();const link=[...probe.host.querySelectorAll('a')].find(node=>node.textContent==='查看钱包记录');assert.ok(link);assert.equal(link.getAttribute('href'),'/account?view=wallet');assert.equal(probe.host.querySelectorAll('a[href*="view=invite"]').length,0);assert.doesNotMatch(probe.host.textContent,/470\.00/);if(known){assert.match(probe.host.textContent,/201\.00/);assert.match(probe.host.textContent,/不代表当前应收、钱包可用金额或渠道到账/);}else{assert.doesNotMatch(probe.host.textContent,/201\.00/);assert.match(probe.host.textContent,/历史收益金额尚未核定/);}}finally{await probe.dispose();}
+   try{await probe.render();const link=[...probe.host.querySelectorAll('a')].find(node=>node.textContent==='查看钱包记录');assert.ok(link);assert.equal(link.getAttribute('href'),'/account?view=wallet');assert.equal(probe.host.querySelectorAll('a[href*="view=invite"]').length,0);assert.doesNotMatch(probe.host.textContent,/470\.00/);if(known){assert.match(probe.host.textContent,/201\.00/);assert.match(probe.host.textContent,/记录金额仅供查看，余额请以钱包为准/);}else{assert.doesNotMatch(probe.host.textContent,/201\.00/);assert.match(probe.host.textContent,/收益金额待确认/);}}finally{await probe.dispose();}
   }
  });
 });
@@ -1829,7 +1838,7 @@ test("M3-F4: each side reads only its own money, and an unpaid figure never clai
     // discounts apply), so the owner's card must not carry the renter's figure at all.
     const ownerUnpaid = await detailProbe(window, { ...paidOrder, status: "PENDING_PAYMENT", paidAt: null }, "owner");
     const ownerCard = ownerUnpaid.host.querySelector(".order-amount-block").textContent;
-    assert.match(ownerCard, /下单时号主报价/, "the owner reads their own listing quote");
+    assert.match(ownerCard, /下单时的出租报价/, "the owner reads their own listing quote");
     assert.doesNotMatch(ownerCard, /租客已付|租客应付/, "the owner never sees the renter's payable or captured amount");
     await ownerUnpaid.dispose();
 
@@ -1840,7 +1849,7 @@ test("M3-F4: each side reads only its own money, and an unpaid figure never clai
     await renterUnpaid.dispose();
 
     const renterPaid = await detailProbe(window, { ...paidOrder, status: "COMPLETED", paidAt: "2026-10-12T01:00:00Z" }, "renter");
-    assert.ok([...renterPaid.host.querySelectorAll("dt")].some((node) => node.textContent === "租客已付"), "a captured payment is still named as paid");
+    assert.ok([...renterPaid.host.querySelectorAll("dt")].some((node) => node.textContent === "下单金额"), "the order amount is not promoted to an independently verified payment");
     await renterPaid.dispose();
   });
 });
@@ -1895,6 +1904,20 @@ test("M3-F6: a missing owner total stays unknown in the fee summary", async () =
     assert.match(renter.host.querySelector(".order-lines-summary").textContent, /资源合计（不含押金） 170\.00 元/, "the renter keeps its own total");
     await probe.dispose();
     await renter.dispose();
+  });
+});
+
+test("missing fee lines do not make a known order total look unknown or discard other drafts", async () => {
+  await withDom(async window => {
+    const order = { ...paidOrder, quote: { lines: [] } };
+    const probe = await detailProbe(window, order, "renter");
+    try {
+      assert.match(probe.host.querySelector(".order-amount-block").textContent, /下单金额/);
+      assert.match(probe.host.querySelector(".order-lines-summary").textContent, /明细待确认/);
+      assert.doesNotMatch(probe.host.querySelector(".order-lines-summary").textContent, /合计待确认/);
+      assert.match(probe.host.querySelector(".order-lines").textContent, /稍后查看或联系客服/);
+      assert.equal(probe.host.querySelector(".order-lines button"), null);
+    } finally { await probe.dispose(); }
   });
 });
 
@@ -2077,7 +2100,7 @@ test("legacy orders remain read-only and only owners get authorized account navi
       const Legacy = loadComponent("apps/web/src/components/order/legacy-order-workspace.tsx", session("user_A")).LegacyOrderWorkspace;
       const log=[]; const fetchImpl=async (url,init={}) => {log.push(init.method??"GET");return json({order:row});};
       const probe=createProbe(window,Legacy,{party,orderId:"legacy_1"},fetchImpl);
-      try { await probe.render();assert.match(probe.host.textContent,/原退款金额记录/);assert.doesNotMatch(probe.host.textContent,/应退金额（到账待确认）|应退责任 /);assert.equal(probe.host.querySelectorAll("button").length,0);assert.equal(Boolean(probe.host.querySelector('a[href*="view=accounts"]')),party==="owner");assert.ok(log.every(m=>m==="GET")); } finally {await probe.dispose();}
+      try { await probe.render();if(party==="renter")assert.match(probe.host.textContent,/退款记录金额/);else assert.doesNotMatch(probe.host.textContent,/退款记录金额/);assert.doesNotMatch(probe.host.textContent,/应退金额（到账待确认）|应退责任 /);assert.equal(probe.host.querySelectorAll("button").length,0);assert.equal(Boolean(probe.host.querySelector('a[href*="view=accounts"]')),party==="owner");assert.ok(log.every(m=>m==="GET")); } finally {await probe.dispose();}
     }
   });
 });
@@ -2189,18 +2212,28 @@ test("C02: renter refund section separates frozen responsibility, local write-of
     });
     const probe = await detailProbe(window, { ...paidOrder, status: "COMPLETED" }, "renter", postedSettlement, read);
     try {
+      assert.match(probe.host.textContent, /退款到期时间.*已到期/);
+      assert.match(probe.host.textContent, /到期不代表退款已处理或到账/);
+      assert.doesNotMatch(probe.host.textContent, /预计处理时间/);
       const section = probe.host.querySelector(".order-refund-block");
       assert.ok(section, "the refund section renders for a renter native order");
-      assert.match(section.textContent, /本地已全部核销/);
-      assert.match(section.textContent, /过账退款责任/);
+      assert.match(section.textContent, /本次结算应退/);
       assert.match(section.textContent, /¥280\.00/);
-      assert.match(section.textContent, /本地核销/);
-      assert.match(section.textContent, /本地保存的渠道回执（未重验）/);
-      assert.match(section.textContent, /渠道成功/);
-      assert.match(section.textContent, /实际渠道退款、退款去向与银行到账均未核验/);
-      assert.doesNotMatch(section.textContent, /退款成功|退款已到账|银行已到账/);
-      assert.deepEqual([...section.querySelectorAll("button")].map((button) => button.textContent.trim()), ["重新读取"], "refund area is read-only");
+      assert.match(section.textContent, /退款申请/);
+      assert.match(section.textContent, /到账待确认/);
+      assert.doesNotMatch(section.textContent, /退款成功|退款已到账|银行已到账|核销|过账|渠道回执/);
+      assert.deepEqual([...section.querySelectorAll("button")].map((button) => button.textContent.trim()), ["刷新"], "refund area is read-only");
     } finally { await probe.dispose(); }
+  });
+});
+
+test("refund due time never promises processing when no application is present", async () => {
+  await withDom(async window => {
+    for (const [dueState,outcome,expected] of [["NOT_DUE","NOT_DUE","未到期"],["DUE","NO_INTENT","已到期"],["UNKNOWN","UNKNOWN","状态待确认"]]) {
+      const read=refundRead("order_A",{status:"AVAILABLE",outcome,responsibility:{state:"POSTED",postingId:"posting_1",originalCents:"28000",allocatedCents:"0",consumedCents:"0",releasedCents:"0",remainingCents:"28000",totalsComplete:true,dueAt:"2026-10-19T04:30:00Z",dueState}});
+      const probe=await detailProbe(window,{...paidOrder,status:"COMPLETED"},"renter",postedSettlement,read);
+      try{const section=probe.host.querySelector('.order-refund-block');assert.match(section.textContent,new RegExp(`退款到期时间.*${expected}`));assert.match(section.textContent,/到期不代表退款已处理或到账/);assert.doesNotMatch(section.textContent,/预计处理时间|退款已到账/);}finally{await probe.dispose();}
+    }
   });
 });
 
@@ -2211,8 +2244,8 @@ test("C02: cancelled and pending renter orders still read local responsibility, 
       try {
         const section = probe.host.querySelector(".order-refund-block");
         assert.ok(section, `refund section renders for ${status}`);
-        assert.match(section.textContent, /本地尚无过账退款责任/);
-        assert.match(section.textContent, /不代表渠道未收款/);
+        assert.match(section.textContent, /退款金额待确认/);
+        assert.doesNotMatch(section.textContent, /无需退款|退款已到账/);
         assert.doesNotMatch(section.textContent, /没有退款记录/);
       } finally { await probe.dispose(); }
     }
@@ -2234,9 +2267,8 @@ test("C02: a legitimate renter's unexpected 404/503 is unavailable with its requ
         await probe.render();
         const section = probe.host.querySelector(".order-refund-block");
         assert.ok(section);
-        assert.match(section.textContent, /暂时无法读取|暂时不可用/);
+        assert.match(section.textContent, /暂时无法查看/);
         assert.match(section.textContent, new RegExp(`查询编号：${requestId}`));
-        assert.match(section.textContent, /不代表没有退款/);
         assert.doesNotMatch(section.textContent, /本地尚无过账退款责任|没有退款记录/);
       } finally { await probe.dispose(); }
     }
@@ -2256,9 +2288,8 @@ test("C02: truncated or conflicting refund reads never present a complete total"
       const probe = await detailProbe(window, { ...paidOrder, status: "COMPLETED" }, "renter", postedSettlement, read);
       try {
         const section = probe.host.querySelector(".order-refund-block");
-        assert.match(section.textContent, /不完整/);
-        assert.match(section.textContent, /缺失项不会按 0 计算/);
-        assert.match(section.textContent, outcome === "TRUNCATED" ? /仅列出已返回的部分/ : /存在冲突/);
+        assert.match(section.textContent, /仍在核对|待确认/);
+        assert.match(section.textContent, /可能不完整/);
         assert.doesNotMatch(section.querySelector(".order-refund-amounts").textContent, /¥280\.00/, "intent amounts never become a responsibility total");
         assert.match(section.querySelector(".order-refund-amounts").textContent, /待确认/);
       } finally { await probe.dispose(); }
@@ -2318,16 +2349,14 @@ test("C04B: a cancelled order with no posting still shows abnormal responsibilit
     const probe = await detailProbe(window, { ...paidOrder, status: "CANCELLED", paidAt: null }, "renter", settlementBody, read);
     try {
       const section = probe.host.querySelector(".order-refund-block");
-      assert.match(section.textContent, /异常收款责任/);
-      assert.match(section.textContent, /迟到的支付/);
-      assert.match(section.textContent, /原款责任/);
+      assert.match(section.textContent, /其他付款处理/);
+      assert.match(section.textContent, /支付时间异常/);
+      assert.match(section.textContent, /相关金额/);
       assert.match(section.textContent, /¥50\.00/);
-      assert.match(section.textContent, /尚未分配/);
-      assert.match(section.textContent, /本地复核：异常原款复核，从未派发/);
-      assert.match(section.textContent, /唯一责任合计/);
-      assert.match(section.textContent, /正常过账责任/);
+      assert.match(section.textContent, /暂时无法提交/);
+      assert.doesNotMatch(section.textContent, /本次结算应退/, "no posting is invented");
       assert.doesNotMatch(section.textContent, /没有退款记录|渠道已收到|银行已到账|退款已到账/);
-      assert.deepEqual([...section.querySelectorAll("button")].map((button) => button.textContent.trim()), ["重新读取"]);
+      assert.deepEqual([...section.querySelectorAll("button")].map((button) => button.textContent.trim()), ["刷新"]);
     } finally { await probe.dispose(); }
   });
 });
@@ -2350,10 +2379,10 @@ test("C04B: one conflicting original does not hide the valid posting or the othe
     try {
       const section = probe.host.querySelector(".order-refund-block");
       assert.equal(section.querySelectorAll(".order-refund-abnormal-item").length, 2);
-      assert.match(section.textContent, /该原款关联异常或合计不完整，金额\/合计不可用/);
-      assert.match(section.textContent, /唯一责任合计不完整/);
+      assert.match(section.querySelectorAll(".order-refund-abnormal-item")[1].textContent, /待确认/);
+      assert.match(section.textContent, /部分退款信息仍在核对/);
       assert.match(section.querySelector(".order-refund-amounts").textContent, /¥280\.00/, "the valid posting responsibility remains readable");
-      assert.match(section.textContent, /异常原款复核|本地复核/);
+      assert.match(section.textContent, /暂时无法提交/);
     } finally { await probe.dispose(); }
   });
 });
@@ -2377,9 +2406,10 @@ test("C04B: released retries keep one original responsibility and never sum inte
       const section = probe.host.querySelector(".order-refund-block");
       assert.equal(section.querySelectorAll(".order-refund-abnormal-item").length, 1, "one original responsibility, not one per retry");
       assert.equal(section.querySelectorAll(".order-refund-intent").length, 3, "one abnormal responsibility plus two intent records");
-      assert.match(section.querySelector(".order-refund-abnormal-item").textContent, /原款责任/);
+      assert.match(section.querySelector(".order-refund-abnormal-item").textContent, /相关金额/);
       assert.doesNotMatch(section.textContent, /¥100\.00|100\.00/, "intent amounts are not summed into a responsibility");
-      assert.match(section.textContent, /本地已释放/);
+      assert.match(section.textContent, /待确认/);
+      assert.equal(section.querySelector('[aria-label="退款申请记录"] .order-refund-state')?.textContent, '申请处理失败');
     } finally { await probe.dispose(); }
   });
 });
@@ -2399,9 +2429,8 @@ test("C04B: merged truncation marks both lists incomplete but leaves valid posti
     const probe = await detailProbe(window, { ...paidOrder, status: "COMPLETED" }, "renter", settlementBody, read);
     try {
       const section = probe.host.querySelector(".order-refund-block");
-      assert.match(section.textContent, /异常原款记录不完整/);
-      assert.match(section.textContent, /唯一责任合计不完整/);
-      assert.match(section.textContent, /退款申请记录范围不完整/);
+      assert.match(section.textContent, /部分退款信息仍在核对/);
+      assert.match(section.textContent, /部分记录待确认/);
       assert.match(section.querySelector(".order-refund-amounts").textContent, /¥280\.00/, "the posting basis can remain complete");
       assert.equal(section.querySelectorAll(".order-refund-abnormal-item").length, 2);
     } finally { await probe.dispose(); }
@@ -2424,8 +2453,8 @@ test("C04B: dispatched and unknown first-submit facts are stated without claimin
     const probe = await detailProbe(window, { ...paidOrder, status: "COMPLETED" }, "renter", settlementBody, read);
     try {
       const section = probe.host.querySelector(".order-refund-block");
-      assert.match(section.textContent, /已有提交尝试，是否送达\/到账未核实/);
-      assert.match(section.textContent, /提交状态未知/);
+      assert.match(section.textContent, /退款结果待确认/);
+      assert.equal(section.querySelectorAll(".order-refund-abnormal-item").length, 2);
       assert.doesNotMatch(section.textContent, /渠道已收到|渠道处理中|银行已到账|退款已到账/);
     } finally { await probe.dispose(); }
   });
@@ -2435,7 +2464,7 @@ test('paid prestart termination keeps payment wording and time; unpaid cancellat
  await withDom(async window=>{
   const paid=await detailProbe(window,{...paidOrder,status:'CANCELLED',cancelReason:'PRESTART_TERMINATED',paidAt:'2026-10-28T09:00:00.000000Z',cancelledAt:'2026-10-28T09:10:00.000000Z'},'renter');
   const text=paid.host.textContent??'';
-  assert.match(text,/租客已付/);assert.match(text,/未开租订单已终止/);
+  assert.match(text,/下单金额/);assert.match(text,/未开租订单已终止/);
   assert.doesNotMatch(text,/本金额为下单时的订单快照，不代表已扣款或应退款/);
   await paid.dispose();
   const unpaid=await detailProbe(window,{...paidOrder,status:'CANCELLED',cancelReason:'TIMEOUT',paidAt:null},'renter');
@@ -2452,8 +2481,8 @@ test("core experience: own money and contact precede the long trade and refund r
     assert.ok(overview.compareDocumentPosition(body) & window.Node.DOCUMENT_POSITION_FOLLOWING);
     const refunds = probe.host.querySelector(".order-refund-details");
     assert.equal(refunds.open, false, "no posted refund does not open technical accounting by default");
-    assert.match(refunds.querySelector("summary").textContent, /结算后查看应退金额/);
-    assert.match(refunds.textContent, /不代表渠道未收款/, "complete evidence remains available on expansion");
+    assert.match(refunds.querySelector("summary").textContent, /退款金额待确认/);
+    assert.doesNotMatch(refunds.textContent, /无需退款|退款已到账/, "unknown is not turned into a financial conclusion");
     assert.equal(probe.host.querySelector(".order-lines details").open, false);
     await probe.dispose();
   });

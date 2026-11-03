@@ -1,5 +1,5 @@
 import { AlertCircle, LockKeyhole, RefreshCw } from "lucide-react";
-import { formatOrderTime, type Order, OrderRequestError, type OrderParty, type OrderStatus, type OrderStatusFilter } from "@/lib/order-client";
+import { formatOrderTime, type Order, OrderRequestError, type OrderParty, type OrderStatus, type OrderStatusFilter, type OrderSearchFilters } from "@/lib/order-client";
 
 export const STATUS_LABELS: Record<OrderStatus, string> = {
   PENDING_PAYMENT: "待支付",
@@ -34,12 +34,13 @@ function orderView(party: OrderParty): "rentals" | "leased" {
   return party === "renter" ? "rentals" : "leased";
 }
 
-export function orderUrl(party: OrderParty, status: OrderStatusFilter, accountId?: string, orderId?: string, source?: "NATIVE" | "LEGACY"): string {
+export function orderUrl(party: OrderParty, status: OrderStatusFilter, accountId?: string, orderId?: string, source?: "NATIVE" | "LEGACY", filters?: OrderSearchFilters): string {
   const query = new URLSearchParams({ view: orderView(party) });
   if (status) query.set("status", status);
   if (accountId) query.set("accountId", accountId);
   if (orderId) query.set("orderId", orderId);
   if (orderId && source === "LEGACY") query.set("source", "legacy");
+  for (const key of ["orderNo", "createdFrom", "createdTo", "stage"] as const) if (filters?.[key]) query.set(key, filters[key]!);
   return `/account?${query.toString()}`;
 }
 

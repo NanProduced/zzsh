@@ -115,6 +115,15 @@ test('missing identity details and registration facts stay unavailable rather th
   assert.equal(h.host.querySelector('.udv-user-header').textContent.includes('2026'), false); assert.equal(h.host.querySelector('.udv-wallet strong').textContent, '待核'); assert.equal(h.host.textContent.includes('普通会员'), false);
 });
 
+for (const [phoneRevealed, expected] of [[true, /联系方式已授权展示/], [false, /联系方式已脱敏/], [undefined, /实名资料按需查看/]]) {
+  test(`contact description follows disclosure flag ${phoneRevealed}`, async t => {
+    const h = await mount(t, { user: { phoneRevealed } });
+    const text = h.host.querySelector('.udv-identity-trigger-bar').textContent;
+    assert.match(text, expected);
+    if (phoneRevealed === undefined) assert.doesNotMatch(text, /已授权展示|已脱敏/);
+  });
+}
+
 test('legacy overview query normalizes to orders and notes tab keeps comments read-only', async t => {
   const h = await mount(t, { section: 'overview' });
   await waitFor(() => region('订单记录')?.querySelector('tbody tr'));

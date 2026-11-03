@@ -107,17 +107,24 @@ const currentDraftSkin = { ...fixtures.verifiedAgent, id: 'CURRENT_DRAFT_SKIN', 
 test('legacy holding without exact admission stays unknown instead of zero or an old frozen fallback', () => {
   for (const legacySkinHolding of [undefined, { state: 'UNKNOWN', admittedCount: null, items: null, withheldCount: null }, { state: 'ADMITTED', admittedCount: 2, items: [currentDraftSkin], withheldCount: 0 }]) {
     const html = renderOwner(oldDraftSkin, { origin: 'LEGACY_OBSERVATION', legacySkinHolding });
-    assert.match(html, /旧平台皮肤资料待承接，数量未知/);
+    assert.match(html, /皮肤资料暂未确认/);
+    assert.match(html, /皮肤数量待确认/);
     assert.doesNotMatch(html, /0 项皮肤|还没有申报皮肤|旧冻结外观|当前草稿外观/);
   }
 });
 
+test('missing skin and entitlement projections do not become zero counts', () => {
+  const html = renderOwner(oldDraftSkin, { presentation: undefined, declaration: { title: '测试账号', attributes: {}, mediaBindings: [] } });
+  assert.match(html, /皮肤数量待确认/);
+  assert.doesNotMatch(html, /0 项皮肤|0 项权益|还没有申报皮肤/);
+});
+
 test('a complete admitted legacy holding uses its own visible items and preserves withheld count', () => {
   const html = renderOwner(oldDraftSkin, { origin: 'LEGACY_OBSERVATION', legacySkinHolding: { state: 'ADMITTED', admittedCount: 3, items: [currentDraftSkin], withheldCount: 2 } });
-  assert.match(html, /3 项已承接皮肤/); assert.match(html, /当前草稿外观/); assert.match(html, /另有 2 项已承接皮肤当前不可展示/);
+  assert.match(html, /3 项皮肤/); assert.match(html, /当前草稿外观/); assert.match(html, /另有 2 项皮肤暂时无法显示/);
   assert.doesNotMatch(html, /旧冻结外观|还没有申报皮肤|数量未知/);
   const empty = renderOwner(oldDraftSkin, { origin: 'LEGACY_OBSERVATION', legacySkinHolding: { state: 'ADMITTED', admittedCount: 0, items: [], withheldCount: 0 } });
-  assert.match(empty, /0 项已承接皮肤/); assert.match(empty, /已承接的旧持有记录中没有皮肤/);
+  assert.match(empty, /0 项皮肤/); assert.match(empty, /账号记录中没有皮肤/);
   assert.doesNotMatch(empty, /旧冻结外观|数量未知|还没有申报皮肤/);
 });
 test('public detail and current owner draft forward poster kind without changing old snapshots', () => {
@@ -144,7 +151,7 @@ test('owner unconfirmed native draft prefers current skin selection over a stale
   assert.ok(html.includes('草稿已选皮肤'));
   assert.ok(html.includes('当前草稿外观'));
   assert.equal(html.includes('旧冻结外观'), false);
-  assert.ok(html.includes('尚未冻结或公开上架'));
+  assert.ok(html.includes('尚未公开上架'));
   assert.ok(html.includes('data-skin-summary-source="CURRENT_DRAFT_SELECTION"'));
 });
 
@@ -155,7 +162,7 @@ test('owner draft legal empty selection overrides stale skins and withheld selec
   assert.ok(empty.includes('草稿尚未选择皮肤'));
   const partial = renderOwner(oldDraftSkin, { origin: 'NATIVE', contentHash: null, declaration: draftDeclaration([currentDraftSkin.id, 'WITHHELD']), draftSkinSummary: draftSkinSummary([currentDraftSkin], 1) });
   assert.ok(partial.includes('2 项已选皮肤'));
-  assert.ok(partial.includes('另有 1 项已选皮肤当前不可展示'));
+  assert.ok(partial.includes('另有 1 项已选皮肤暂时无法显示'));
   assert.ok(partial.includes('当前草稿外观'));
   assert.equal(partial.includes('WITHHELD'), false, 'withheld names/IDs are not fabricated into the visible list');
   const allWithheld = renderOwner(oldDraftSkin, { origin: 'NATIVE', contentHash: null, declaration: draftDeclaration(['WITHHELD']), draftSkinSummary: draftSkinSummary([], 1) });
@@ -166,7 +173,8 @@ test('owner draft legal empty selection overrides stale skins and withheld selec
 test('owner older service and frozen/non-native versions keep their original presentation', () => {
   const oldService = renderOwner(oldDraftSkin, { origin: 'NATIVE', contentHash: null });
   assert.ok(oldService.includes('旧冻结外观'));
-  assert.ok(oldService.includes('皮肤摘要暂未取得'));
+  assert.ok(oldService.includes('草稿的皮肤资料暂不可用'));
+  assert.ok(oldService.includes('皮肤数量待确认'));
   assert.equal(oldService.includes('草稿已选皮肤'), false);
   for (const patch of [
     { origin: 'NATIVE', reviewState: 'DRAFT', contentHash: 'frozen_hash' },

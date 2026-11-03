@@ -83,8 +83,8 @@ test("historical order client uses independent read routes and keeps failures vi
 
 test("unified browsing has its own read endpoint and never changes native recovery reads", async () => {
  const before=globalThis.fetch;const calls=[];
- globalThis.fetch=async url=>{calls.push(String(url));return Response.json({items:[],nextCursor:null,limit:20});};
- try{await orderApi.listUnified({party:"renter"});await orderApi.list({party:"renter"});assert.deepEqual(calls,["/api/orders/unified?party=renter&limit=20","/api/orders?party=renter&limit=20"]);}finally{globalThis.fetch=before;}
+ globalThis.fetch=async(url,init)=>{calls.push({url:String(url),init});return Response.json({items:[],nextCursor:null,limit:20});};
+ try{await orderApi.listUnified("user_a",{party:"renter"});await orderApi.list({party:"renter"});assert.deepEqual(calls.map(call=>call.url),["/api/orders/unified?party=renter&limit=20","/api/orders?party=renter&limit=20"]);assert.equal(new Headers(calls[0].init.headers).get("x-zzsh-expected-user-id"),"user_a");assert.equal(new Headers(calls[1].init.headers).has("x-zzsh-expected-user-id"),false);}finally{globalThis.fetch=before;}
 });
 test("order pagination retains equal ids from different internal sources", () => {
  const current={id:"same",source:{origin:"NATIVE"}},old={id:"same",source:{origin:"LEGACY"},readOnly:true};

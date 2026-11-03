@@ -288,7 +288,7 @@ export function UserDetail({adapter,snapshot,tab,onOpenPath,onQueryChange,refres
         <div className="flex items-center gap-2">
           <ShieldCheckIcon size={15} className="text-muted-foreground" aria-hidden="true" />
           <span className="text-sm font-semibold">实名与联系方式</span>
-          <span className="udv-muted">（默认脱敏，按需查看）</span>
+          <span className="udv-muted">{user.phoneRevealed === true ? '（联系方式已授权展示，实名资料按需查看）' : user.phoneRevealed === false ? '（联系方式已脱敏，实名资料按需查看）' : '（实名资料按需查看）'}</span>
         </div>
         <CollapsibleTrigger render={<Button variant="ghost" size="sm"/>}>
           <span className="text-xs">{identityOpen ? '收起实名与联系方式' : '展开实名与联系方式'}</span>

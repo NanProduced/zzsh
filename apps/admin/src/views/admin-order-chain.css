@@ -9,12 +9,35 @@
 .oc-design .oc-main-facts>.oc-section:first-child .oc-stages .oc-stage-node{width:30px;height:30px}
 .oc-design .oc-main-facts>.oc-section:first-child .oc-stages .oc-stage-line{left:36px;top:15px;width:18px}
 .oc-design .oc-main-facts>.oc-section:first-child .oc-stages .oc-stage-name{font-size:12px;color:var(--foreground)}
+.oc-design .oc-main-facts>.oc-section:first-child{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);column-gap:24px}
+.oc-design .oc-main-facts>.oc-section:first-child>h2,.oc-design .oc-main-facts>.oc-section:first-child>.oc-next-step{grid-column:1/-1}
+.oc-design .oc-main-facts>.oc-section:first-child>.oc-fact-list{margin-top:0}
 .oc-design details.oc-section{border:0;border-top:1px solid var(--border);border-radius:0;background:transparent;padding:14px 0 0;margin:16px 0 0}
 .oc-design .oc-refund-summary{margin-top:8px}
+.oc-design .oc-overview-grid{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);align-items:start;gap:16px;margin-bottom:18px}
+.oc-design .oc-overview-grid>.oc-section{margin:0}
+.oc-design .oc-party-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.oc-design .oc-party-grid .oc-related-person{min-width:0;padding:0;border:0;overflow-wrap:anywhere}
+.oc-design .oc-party-grid .oc-related-person>small{margin-bottom:5px}
+.oc-design .oc-overview-grid .oc-fact-note{margin:12px 0 0}
+.oc-design .oc-overview-grid .oc-money-list>div{padding:7px 0}
+.oc-design .oc-detail-tabs>[data-slot=tabs-list]{overflow-x:auto;gap:24px}
+.oc-design .oc-detail-tabs>[data-slot=tabs-content]{min-width:0}
+.oc-design .oc-detail-tabs>[data-slot=tabs-content][hidden]{display:none}
+.oc-design .oc-attention{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px 16px;margin-bottom:16px;border:1px solid var(--border);border-radius:8px;background:var(--surface-raised)}
+.oc-design .oc-command{margin-top:18px;padding-top:14px;border-top:1px solid var(--border)}
+.oc-design .oc-command h3{font-weight:600}
+.oc-design details.oc-exception{border:1px solid var(--border);border-radius:8px;background:var(--surface);padding:16px 20px}
+.oc-design .oc-exception>summary{cursor:pointer;font-weight:600}
+.oc-design .oc-exception>div{margin-top:14px}
+@media(max-width:1100px){.oc-design .oc-overview-grid{grid-template-columns:minmax(0,1fr)}}
 @media(max-width:760px){
  .oc-design .oc-mobile-list footer{flex-wrap:wrap}
  .oc-design .oc-mobile-list footer>span{flex:1 1 100%}
+ .oc-design .oc-main-facts>.oc-section:first-child{display:block}
+ .oc-design .oc-main-facts>.oc-section:first-child>.oc-fact-list{margin-top:20px}
  .oc-design .oc-main-facts>.oc-section:first-child .oc-stages ol{gap:18px}
+ .oc-design .oc-party-grid{grid-template-columns:minmax(0,1fr);gap:14px}
 }
 
 /* 未形成支付：保留文字，降低视觉权重 */

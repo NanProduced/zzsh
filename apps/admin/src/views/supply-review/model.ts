@@ -360,7 +360,7 @@ export function newOrdersStatus(facts: Pick<SupplyFacts, "newOrders">): { label:
 /** Server business state wins; an absent legacy field may fall back to known independent facts, never order history. */
 export function accountBusinessStatus(facts: SupplyFacts, reviewState?: string | null): { label: string; tone: InlineStatusTone; detail?: string } {
   const authoritative = ACCOUNT_BUSINESS_STATES.find(state => state.value === facts.businessState);
-  const occupancy = facts.occupancyKind === "PENDING_PAYMENT" ? "待付款" : facts.occupancyKind === "RENTED" ? "租用中" : undefined;
+  const occupancy = facts.occupancyKind === "PENDING_PAYMENT" ? "待付款占用" : facts.occupancyKind === "RENTED" ? "已付款占用" : undefined;
   if (authoritative) return { label: authoritative.label, tone: authoritative.tone, ...(authoritative.value === "IN_PROGRESS" && occupancy ? { detail: occupancy } : {}) };
   if (facts.businessState === undefined) {
     if (facts.occupancy === "OCCUPIED") return { label: "订单进行中", tone: "info", ...(occupancy ? { detail: occupancy } : {}) };

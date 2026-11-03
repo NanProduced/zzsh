@@ -4,7 +4,7 @@ import { BusinessUpdateNotices } from "@/components/content/platform-update-noti
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowLeft, Check, CheckCircle2, CircleSlash, Clock3, Copy, Gamepad2, MessageCircle, RefreshCw, UserRound, WalletCards, XCircle } from "lucide-react";
-import { formatOrderMoney, formatOrderTime as timeText, orderApi, OrderRequestError, type Order, type OrderImProjection, type OrderParty, type OrderStatusFilter, type PersonalAbnormalResponsibility, type PersonalFirstSubmit, type PersonalRefundBasis, type PersonalRefundIntent, type PersonalRefundRead } from "@/lib/order-client";
+import { formatOrderMoney, formatOrderTime as timeText, orderApi, OrderRequestError, type Order, type OrderImProjection, type OrderParty, type OrderStatusFilter, type OrderSearchFilters, type PersonalAbnormalResponsibility, type PersonalRefundIntent, type PersonalRefundRead } from "@/lib/order-client";
 import { useUserSession } from "@/components/session/user-session-provider";
 import { useIdentityReset } from "@/components/session/identity-reset";
 import { ORDER_FULFILLMENT_STEPS, orderFulfillmentStepStates, orderFulfillmentSummary, orderLineQuantityText, orderLinesTotalLabel, orderListingSourceLabel, orderRentalModeLabel, orderSettlementStageLabel, orderUnitPriceText, unitLabel, orderAccountTitle } from "@/lib/order-display";
@@ -27,7 +27,7 @@ function attentionFor(order: Order, facts: OrderStageFacts | null, readFailed: b
     return {
       tone: "warning",
       title: facts.rejectedBy && facts.rejectedBy !== party.toUpperCase() ? `第${facts.settlementVersionNo ?? "?"}版结算未达成一致` : `你已拒绝第${facts.settlementVersionNo ?? "?"}版结算`,
-      note: "拒绝不会使这一版生效；服务端会按新的期末数据或人工调整生成新版本，之后再按最新版本重新核对。",
+      note: "拒绝后，当前方案不会生效。新方案生成后，请重新核对。",
       actions: ["group"],
     };
   }
@@ -181,7 +181,7 @@ function CopyOrderNo({ value }: { value: string | null | undefined }) {
 
 function OrderLines({ order, party }: { order: Order; party: OrderParty }) {
   const lines = order.quote?.lines ?? [];
-  if (lines.length === 0) return <p className="order-muted">费用明细暂时无法读取。</p>;
+  if (lines.length === 0) return <p className="order-muted">暂无可展示的费用明细，可稍后查看或联系客服。</p>;
   const total = party === "owner" ? order.quote?.ownerTotal : order.amounts?.rental;
   return <>
     <div className="order-table-wrap">
@@ -203,9 +203,10 @@ function OrderLines({ order, party }: { order: Order; party: OrderParty }) {
 
 /** Each party sees its own quoted amounts; a missing owner total stays unknown instead of borrowing the renter's. */
 function linesSummary(order: Order, party: OrderParty): string {
-  if (party === "owner") return order.quote?.ownerTotal ? `号主报价合计 ${formatOrderMoney(order.quote.ownerTotal)}` : "号主报价 · 合计待确认";
   const count = order.quote?.lines?.length ?? 0;
-  return count ? `费用 ${count} 项 · ${orderLinesTotalLabel(party)} ${formatOrderMoney(order.amounts?.rental)}` : "合计待确认";
+  if (!count) return "明细待确认";
+  if (party === "owner") return order.quote?.ownerTotal ? `号主报价合计 ${formatOrderMoney(order.quote.ownerTotal)}` : "号主报价 · 合计待确认";
+  return `费用 ${count} 项 · ${orderLinesTotalLabel(party)} ${formatOrderMoney(order.amounts?.rental)}`;
 }
 
 /**
@@ -217,8 +218,7 @@ function linesSummary(order: Order, party: OrderParty): string {
  */
 /** The renter-side figure's name for the reading party, never implying a charge that did not happen. */
 function renterFigureLabel(order: Order): string {
-  if (order.status === "CANCELLED" && order.cancelReason !== "PRESTART_TERMINATED" && order.cancelReason !== "MANUAL_CLOSE") return "下单时租客金额";
-  return order.paidAt ? "租客已付" : "租客应付";
+  return order.status === "PENDING_PAYMENT" ? "待支付金额" : "下单金额";
 }
 
 function AmountCard({ order, party, facts, readFailed }: { order: Order; party: OrderParty; facts: OrderStageFacts | null; readFailed: boolean }) {
@@ -230,22 +230,22 @@ function AmountCard({ order, party, facts, readFailed }: { order: Order; party: 
 
   if (party === "owner") {
     return <section className="order-side-card order-amount-block">
-      <h2 className="order-section-title">我的出租收入</h2>
+      <h2 className="order-section-title">{posted || settledUnread ? "本单结算" : "下单时的出租报价"}</h2>
       {posted
         ? <><strong className="order-amount-total">{posted.text}</strong><p className="order-amount-label">{posted.label}</p></>
         : settledUnread
           ? <><strong className="order-amount-total is-unknown">{readFailed ? "结算金额暂时无法读取" : facts ? "暂无可用结算金额" : "正在读取结算金额"}</strong><p className="order-amount-label">下单时的费用记录仍可查看</p></>
-          : <><strong className="order-amount-total">{formatOrderMoney(order.amounts?.ownerExpectedIncome ?? order.quote?.ownerTotal)}</strong><p className="order-amount-label">下单时号主报价</p></>}
+          : <strong className="order-amount-total">{formatOrderMoney(order.amounts?.ownerExpectedIncome ?? order.quote?.ownerTotal)}</strong>}
       {posted || settledUnread ? <dl className="order-facts order-amount-rows">
-        <div><dt>下单时号主报价</dt><dd>{formatOrderMoney(order.amounts?.ownerExpectedIncome ?? order.quote?.ownerTotal)}</dd></div>
+        <div><dt>下单时的出租报价</dt><dd>{formatOrderMoney(order.amounts?.ownerExpectedIncome ?? order.quote?.ownerTotal)}</dd></div>
       </dl> : null}
-      <p className="order-muted">{posted ? "最终以结算记录为准；报价不代表已赚取或可提现。" : "按上架时约定的报价展示，不代表已赚取或可提现。"}</p>
-      {posted ? <p className="order-side-link"><WalletCards size={14} aria-hidden="true" /><Link href="/account?view=wallet" scroll={false}>查看钱包记录</Link>，可用余额与提现结果分别核对。</p> : null}
+      {!posted ? <p className="order-muted">实际收入以结算结果为准。</p> : null}
+      {posted ? <p className="order-side-link"><WalletCards size={14} aria-hidden="true" /><Link href="/account?view=wallet" scroll={false}>查看钱包</Link></p> : null}
     </section>;
   }
 
   const lead = settledUnread ? null : posted ?? {
-    label: closed && !((order.cancelReason === "PRESTART_TERMINATED" || order.cancelReason === "MANUAL_CLOSE") && paid) ? "下单金额" : order.status === "PENDING_PAYMENT" ? "待支付" : "租客已付",
+    label: order.status === "PENDING_PAYMENT" ? "待支付" : "下单金额",
     text: formatOrderMoney(amounts?.totalDue),
   };
   return <section className="order-side-card order-amount-block">
@@ -259,10 +259,9 @@ function AmountCard({ order, party, facts, readFailed }: { order: Order; party: 
       <div><dt>{paid && !closed ? "租赁预付" : "租赁费用"}</dt><dd>{formatOrderMoney(amounts?.rental)}</dd></div>
       <div><dt>租客押金</dt><dd>{formatOrderMoney(amounts?.deposit)}</dd></div>
     </dl>
-    {closed ? <p className="order-muted">{order.cancelReason === "PRESTART_TERMINATED" && paid ? "原付款记录保留；退款处理以本单记录为准，不代表已到账。"
-      : order.cancelReason === "MANUAL_CLOSE" && paid ? "原付款记录保留；本操作不生成结算或退款，资金处理以客服通知与对账为准。"
-      : "本金额为下单时的订单快照，不代表已扣款或应退款。"}</p> : null}
-    {paid || order.status === "COMPLETED" ? <p className="order-side-link"><WalletCards size={14} aria-hidden="true" />退款到账结果待确认时，可在<Link href="/account?view=wallet" scroll={false}>我的钱包</Link>查看实际记录。</p> : null}
+    {closed ? <p className="order-muted">{order.cancelReason === "PRESTART_TERMINATED" && paid ? "退款进度请查看本页。"
+      : order.cancelReason === "MANUAL_CLOSE" && paid ? "退款进度请联系客服核对。"
+      : "这是下单时的金额，实际扣费和退款请查看订单进度。"}</p> : null}
   </section>;
 }
 
@@ -293,42 +292,29 @@ function ContactCard({ order, onChanged, quiet }: { order: Order; onChanged: () 
 }
 
 const refundOutcomeCopy: Record<PersonalRefundRead["outcome"], { label: string; note: string }> = {
-  RESPONSIBILITY_NOT_POSTED: { label: "本地尚无过账退款责任", note: "这只表示本地尚未形成过账退款责任，不代表渠道未收款、订单无需退款或已经退款。" },
-  ZERO_RESPONSIBILITY: { label: "本地退款责任为 0", note: "过账记录的租客退款责任为 0 元；这不代表已经退款或银行已到账。" },
-  NOT_DUE: { label: "退款责任尚未到期", note: "责任已过账但尚未到到期日；未到期不代表退款处理中。" },
-  NO_INTENT: { label: "本地尚无退款申请记录", note: "已到期仍有剩余责任，但本地登记范围没有退款申请；这不代表渠道没有记录。" },
-  PARTIALLY_ALLOCATED: { label: "部分责任已分配", note: "只表示本地已为退款申请分配责任，不代表渠道退款或银行到账。" },
-  FULLY_ALLOCATED: { label: "责任已全部分配", note: "只表示本地已为退款申请分配责任，不代表退款已执行或到账。" },
-  PARTIALLY_CONSUMED: { label: "本地已部分核销", note: "只表示本地账务已有核销记录，不代表渠道退款或银行到账。" },
-  FULLY_CONSUMED: { label: "本地已全部核销", note: "只表示本地账务核销等于原责任，不代表渠道退款或银行到账。" },
-  RELEASED: { label: "本地分摊已释放", note: "本地记录为未执行且已释放分摊；不代表退款失败已关闭或无需退款。" },
-  PROCESSING: { label: "退款申请处理中", note: "本地存在处理中的退款申请，结果尚未确认。" },
-  UNKNOWN: { label: "退款申请结果未知", note: "本地存在结果未知的退款申请，不能视为成功或失败。" },
-  REVIEW_REQUIRED: { label: "退款记录需要人工核对", note: "本地记录需要人工核对，不代表已经退款。" },
-  TRUNCATED: { label: "退款申请记录不完整", note: "本地退款申请超过展示上限；以下记录与合计不能当作全部。" },
-  CONFLICT: { label: "退款记录存在冲突", note: "本地记录存在冲突或不可读项；受影响的合计与字段不可用，其他合法过账或异常原款仍分别展示。" },
+  RESPONSIBILITY_NOT_POSTED: { label: "退款金额待确认", note: "如有退款，进度会显示在这里。" },
+  ZERO_RESPONSIBILITY: { label: "本次结算应退为零", note: "其他退款事项会单独显示。" },
+  NOT_DUE: { label: "退款尚未到期", note: "到期不代表退款已处理或到账。" },
+  NO_INTENT: { label: "退款进度待确认", note: "如有疑问，请联系客服。" },
+  PARTIALLY_ALLOCATED: { label: "退款进度待确认", note: "到账情况请以收款记录为准。" },
+  FULLY_ALLOCATED: { label: "退款进度待确认", note: "到账情况请以收款记录为准。" },
+  PARTIALLY_CONSUMED: { label: "退款进度待确认", note: "到账情况请以收款记录为准。" },
+  FULLY_CONSUMED: { label: "退款进度待确认", note: "到账情况请以收款记录为准。" },
+  RELEASED: { label: "退款进度待确认", note: "如有疑问，请联系客服。" },
+  PROCESSING: { label: "退款处理中", note: "到账情况请以收款记录为准。" },
+  UNKNOWN: { label: "退款结果待确认", note: "请稍后查看，或联系客服。" },
+  REVIEW_REQUIRED: { label: "退款需要核对", note: "如有疑问，请联系客服。" },
+  TRUNCATED: { label: "部分退款记录待确认", note: "当前显示的记录可能不完整。" },
+  CONFLICT: { label: "退款记录需要核对", note: "部分金额暂时无法确认，请联系客服。" },
 };
 const refundIntentStateLabel: Record<PersonalRefundIntent["state"], string> = {
-  READY: "待提交", SUBMITTING: "正在提交", UNKNOWN: "结果未知", PROCESSING: "处理中", REVIEW_REQUIRED: "需要人工核对", SUCCEEDED: "本地成功记录", FAILED: "本地失败记录", UNRECOGNIZED: "状态未知",
+  READY: "等待处理", SUBMITTING: "提交中", UNKNOWN: "结果待确认", PROCESSING: "处理中",
+  REVIEW_REQUIRED: "需要核对", SUCCEEDED: "到账待确认", FAILED: "申请处理失败", UNRECOGNIZED: "状态待确认",
 };
-const refundDispositionLabel: Record<PersonalRefundIntent["budgetDisposition"], string> = { ALLOCATED: "已分配", CONSUMED: "已核销", RELEASED: "已释放", UNRECOGNIZED: "分摊状态未知" };
-const refundSourceLabel: Record<PersonalRefundIntent["source"], string> = { LOCAL_CONTROLLED: "本地受控", JOINPAY_FORMAL: "汇聚正式", UNRECOGNIZED: "来源未知" };
-const refundBasisLabel: Record<PersonalRefundBasis, string> = { POSTING: "正常过账", REVIEW_CONFIRMATION: "异常收款确认" };
-const abnormalReasonLabel: Record<PersonalAbnormalResponsibility["reasonCode"], string> = { DUPLICATE_PAYMENT: "重复支付", LATE_PAYMENT: "迟到的支付", UNKNOWN_REASON: "异常原因未知" };
+const abnormalReasonLabel: Record<PersonalAbnormalResponsibility["reasonCode"], string> = { DUPLICATE_PAYMENT: "重复支付", LATE_PAYMENT: "支付时间异常", UNKNOWN_REASON: "其他付款" };
 const abnormalStateLabel: Record<PersonalAbnormalResponsibility["state"], string> = {
-  NO_INTENT: "尚无退款申请", READY: "待处理", PROCESSING: "处理中", UNKNOWN: "状态未知", CONSUMED: "本地已核销", RELEASED: "本地已释放", REVIEW_REQUIRED: "需要人工核对", CONFLICT: "关联异常",
+  NO_INTENT: "待处理", READY: "待处理", PROCESSING: "处理中", UNKNOWN: "待确认", CONSUMED: "到账待确认", RELEASED: "待确认", REVIEW_REQUIRED: "需要核对", CONFLICT: "需要核对",
 };
-const firstSubmitLabel: Record<NonNullable<PersonalFirstSubmit["blockedReason"]>, string> = {
-  ORIGINAL_ORDER_NO_AMBIGUOUS: "原订单号不唯一", ABNORMAL_BASIS_REVIEW: "异常原款复核",
-};
-
-function firstSubmitText(value: PersonalFirstSubmit | null | undefined): string | null {
-  if (!value) return null;
-  if (value.dispatch === "DISPATCHED") return "已有提交尝试，是否送达/到账未核实";
-  if (value.dispatch === "UNKNOWN") return "提交状态未知";
-  if (value.blockedReason) return `本地复核：${firstSubmitLabel[value.blockedReason]}，从未派发${value.blockedAt ? `（${timeText(value.blockedAt, { timeZoneName: false })}）` : ""}`;
-  return "待派发，尚未向渠道提交";
-}
 
 function refundMoney(cents: string | null): string {
   if (cents === null) return "待确认";
@@ -336,76 +322,23 @@ function refundMoney(cents: string | null): string {
   return `¥${(value / 100n).toLocaleString("zh-CN")}.${(value % 100n).toString().padStart(2, "0")}`;
 }
 
-function refundDueLabel(dueState: PersonalRefundRead["responsibility"]["dueState"]): string {
-  return dueState === "DUE" ? "已到期" : dueState === "NOT_DUE" ? "未到期" : "到期状态待确认";
-}
-
-function refundEmptyCopy(read: PersonalRefundRead): string {
-  if (read.outcome === "RESPONSIBILITY_NOT_POSTED") return "本地尚无过账退款责任，因此没有可展示的退款申请记录。";
-  if (read.outcome === "ZERO_RESPONSIBILITY") return "本地退款责任为 0，因此没有退款申请记录。";
-  if (read.outcome === "NOT_DUE") return "退款责任尚未到期，本地暂无退款申请记录。";
-  if (read.outcome === "NO_INTENT") return "本地登记范围内没有退款申请记录；这不表示渠道没有记录。";
-  return "本地登记范围内没有可展示的退款申请记录。";
-}
-
 function AbnormalResponsibilityCard({ item }: { item: PersonalAbnormalResponsibility }) {
-  const submit = firstSubmitText(item.firstSubmit);
-  const amountsReadable = item.totalsComplete && item.originalCents !== null;
   return <li className="order-refund-intent order-refund-abnormal-item">
-    <div className="order-refund-intent-head">
-      <strong>异常原款 · {abnormalReasonLabel[item.reasonCode]}</strong>
-      <span className="order-refund-state">{abnormalStateLabel[item.state]}</span>
-    </div>
-    {amountsReadable ? <dl className="order-facts order-refund-intent-facts">
-      <div><dt>原款责任</dt><dd>{refundMoney(item.originalCents)}</dd></div>
-      <div><dt>已分配</dt><dd>{refundMoney(item.allocatedCents)}</dd></div>
-      <div><dt>本地已核销</dt><dd>{refundMoney(item.consumedCents)}</dd></div>
-      <div><dt>已释放</dt><dd>{refundMoney(item.releasedCents)}</dd></div>
-      <div><dt>尚未分配</dt><dd>{refundMoney(item.remainingCents)}</dd></div>
-      <div><dt>本地申请</dt><dd>{item.intentIds.length ? `${item.intentIds.length} 笔` : "尚无申请"}</dd></div>
-    </dl> : <p className="order-muted">该原款关联异常或合计不完整，金额/合计不可用；其他合法原款仍分别展示。</p>}
-    {submit ? <p className="order-refund-submit">{submit}</p> : null}
-    {item.reasonCodes.length ? <details className="order-refund-reasons"><summary>查看这笔责任的原因代码</summary><p>{item.reasonCodes.join("、")}</p></details> : null}
+    <div className="order-refund-intent-head"><strong>{abnormalReasonLabel[item.reasonCode]}</strong><span className="order-refund-state">{abnormalStateLabel[item.state]}</span></div>
+    <dl className="order-facts order-refund-intent-facts"><div><dt>相关金额</dt><dd>{item.totalsComplete ? refundMoney(item.originalCents) : "待确认"}</dd></div></dl>
+    {item.firstSubmit?.dispatch === "NEVER_DISPATCHED" && item.firstSubmit.blockedReason ? <p className="order-muted">暂时无法提交，请联系客服。</p> : null}
   </li>;
 }
 
-function ResponsibilityTotals({ read }: { read: PersonalRefundRead }) {
-  const totals = read.responsibilityTotals;
-  if (!totals) return null;
-  return <section className="order-refund-totals" aria-label="唯一责任合计">
-    <div className="order-refund-intents-heading"><h3>唯一责任合计</h3><span>{totals.totalsComplete ? "本地登记范围" : "合计不完整"}</span></div>
-    {totals.totalsComplete ? <dl className="order-facts order-refund-amounts">
-      <div><dt>唯一原责任</dt><dd>{refundMoney(totals.originalCents)}</dd></div>
-      <div><dt>已分配（含已核销）</dt><dd>{refundMoney(totals.allocatedCents)}</dd></div>
-      <div><dt>本地已核销</dt><dd>{refundMoney(totals.consumedCents)}</dd></div>
-      <div><dt>已释放</dt><dd>{refundMoney(totals.releasedCents)}</dd></div>
-      <div><dt>尚未分配</dt><dd>{refundMoney(totals.remainingCents)}</dd></div>
-      <div><dt>其中过账 / 异常原款</dt><dd>{totals.postingOriginalCents === null ? "未形成过账责任" : refundMoney(totals.postingOriginalCents)} / {totals.abnormalOriginalCents === null ? "未登记异常责任" : refundMoney(totals.abnormalOriginalCents)}（{totals.abnormalConfirmationCount} 笔异常）</dd></div>
-    </dl> : <div className="order-notice is-warning" role="alert"><CircleSlash size={17} aria-hidden="true" /><div><strong>唯一责任合计不完整</strong><span>缺失或冲突项不按 0 计算；请查看下方每个正常过账或异常原款的独立状态，不能把局部金额当完整应退。</span></div></div>}
-  </section>;
-}
-
 function RefundIntentCard({ intent }: { intent: PersonalRefundIntent }) {
-  const evidence = intent.savedChannelEvidence;
-  const reasons = [...new Set([...intent.reasonCodes, ...intent.localAccounting.reasonCodes, ...intent.channelFacts.reasonCodes])];
   return <li className="order-refund-intent">
-    <div className="order-refund-intent-head">
-      <strong>{intent.refundOrderNo ?? "原退款号未提供"}</strong>
-      <span className="order-refund-state">{refundIntentStateLabel[intent.state]}</span>
-    </div>
+    <div className="order-refund-intent-head"><strong>{intent.refundOrderNo ?? "退款申请"}</strong><span className="order-refund-state">{refundIntentStateLabel[intent.state]}</span></div>
     <dl className="order-facts order-refund-intent-facts">
       <div><dt>申请金额</dt><dd>{intent.amount ? refundMoney(intent.amount.cents) : "待确认"}</dd></div>
-      <div><dt>本地分摊</dt><dd>{refundDispositionLabel[intent.budgetDisposition]}</dd></div>
-      <div><dt>来源</dt><dd>{refundSourceLabel[intent.source]}{intent.evidenceLevel ? ` · ${intent.evidenceLevel}` : ""}</dd></div>
-      {intent.basisKind ? <div><dt>责任依据</dt><dd>{refundBasisLabel[intent.basisKind]}</dd></div> : null}
-      {intent.firstSubmit ? <div><dt>提交状态</dt><dd>{firstSubmitText(intent.firstSubmit)}</dd></div> : null}
-      {intent.requiresReview ? <div><dt>人工核对</dt><dd>需要</dd></div> : null}
-      {evidence ? <div><dt>本地保存的渠道回执（未重验）</dt><dd>{evidence.terminal === "SUCCEEDED" ? "渠道成功" : "渠道未执行"}{evidence.providerRefundTrxNo ? ` · ${evidence.providerRefundTrxNo}` : ""}{evidence.completedAt ? ` · ${timeText(evidence.completedAt, { timeZoneName: false })}` : ""}</dd></div> : null}
-      {intent.localAccounting.writeOff ? <div><dt>本地核销</dt><dd>{refundMoney(intent.localAccounting.writeOff.amountCents)} · 本地账务</dd></div> : null}
-      {intent.localAccounting.release ? <div><dt>本地释放</dt><dd>仅有申请记录，无资金分录</dd></div> : null}
-      {intent.latestFailure ? <div><dt>最近失败观察</dt><dd>{intent.latestFailure.failureReason ?? intent.latestFailure.event} · {timeText(intent.latestFailure.observedAt, { timeZoneName: false })}</dd></div> : null}
+      {intent.createdAt ? <div><dt>申请时间</dt><dd>{timeText(intent.createdAt, { timeZoneName: false })}</dd></div> : null}
     </dl>
-    {reasons.length ? <details className="order-refund-reasons"><summary>查看这笔申请的原因代码</summary><p>{reasons.join("、")}</p></details> : null}
+    {intent.source === "LOCAL_CONTROLLED" ? <p className="order-muted">测试记录，不代表真实退款。</p> : null}
+    {intent.requiresReview ? <p className="order-muted">这笔退款需要核对，请联系客服。</p> : null}
   </li>;
 }
 
@@ -434,55 +367,35 @@ function OrderRefundSection({ order }: { order: Order }) {
     return () => controller.abort();
   }, [order.id, order.status, reload, scope, userId]);
   if (!userId) return null;
-  const refresh = <button type="button" className="button quiet button--sm" disabled={visible.status === "loading"} onClick={() => setReload((value) => value + 1)}><RefreshCw size={14} aria-hidden="true" />重新读取</button>;
-  if (visible.status === "loading") return <section className="order-detail-section order-refund-block" aria-label="退款责任与本地退款记录"><div className="order-refund-heading"><h2 className="order-section-title">退款责任</h2></div><p className="order-muted" role="status">正在读取退款责任与本地退款记录…</p></section>;
+  const refresh = <button type="button" className="button quiet button--sm" disabled={visible.status === "loading"} onClick={() => setReload(value => value + 1)}><RefreshCw size={14} aria-hidden="true" />刷新</button>;
+  if (visible.status === "loading") return <section className="order-detail-section order-refund-block" aria-label="退款进度"><h2 className="order-section-title">退款进度</h2><p className="order-muted" role="status">正在加载退款进度…</p></section>;
   if (visible.status === "error") {
     const error = visible.error ?? new OrderRequestError(0, null);
-    const copy = error.status === 401 || error.code === "UNAUTHENTICATED"
-      ? "登录状态已变化，正在重新确认身份；确认前不会展示退款记录。"
-      : error.status === 503 ? "退款依据暂时不可用；这不代表没有退款，也不代表渠道未收款。"
-        : error.status === 404 ? "退款责任与本地记录暂时无法读取；这不代表没有退款，也不代表渠道未收款。"
-          : "退款责任与本地记录暂时无法读取；这不代表没有退款。";
-    return <section className="order-detail-section order-refund-block" aria-label="退款责任与本地退款记录"><div className="order-refund-heading"><h2 className="order-section-title">退款责任</h2>{refresh}</div><div className="order-notice is-warning" role="alert"><CircleSlash size={17} aria-hidden="true" /><div><strong>{copy}</strong><details className="order-refund-diagnostic"><summary>查看查询信息</summary><span>错误代码：{error.code}{error.requestId ? <><br />查询编号：{error.requestId}</> : null}</span></details></div></div></section>;
+    const copy = error.status === 401 || error.code === "UNAUTHENTICATED" ? "登录状态已变化，请重新登录后查看。" : "退款进度暂时无法查看，请稍后重试。";
+    return <section className="order-detail-section order-refund-block" aria-label="退款进度"><div className="order-refund-heading"><h2 className="order-section-title">退款进度</h2>{refresh}</div><div className="order-notice is-warning" role="alert"><CircleSlash size={17} aria-hidden="true" /><div><strong>{copy}</strong>{error.requestId ? <span>查询编号：{error.requestId}</span> : null}</div></div></section>;
   }
   const read = visible.read;
   if (!read) return null;
-  const outcome = refundOutcomeCopy[read.outcome];
-  const responsibility = read.responsibility;
-  const awaitingSettlement = read.outcome === "RESPONSIBILITY_NOT_POSTED" && read.intents.length === 0 && !read.abnormalResponsibilities?.length;
+  const outcome = refundOutcomeCopy[read.outcome], responsibility = read.responsibility;
   const attentionRequired = ["UNKNOWN", "REVIEW_REQUIRED", "TRUNCATED", "CONFLICT"].includes(read.outcome);
-  return <section className="order-detail-section order-refund-block" aria-label="退款责任与本地退款记录" data-outcome={read.outcome}>
+  const incomplete = read.responsibilitiesTruncated || read.intentsTruncated || !read.coverage.intentsComplete || Boolean(read.responsibilityTotals && !read.responsibilityTotals.totalsComplete) || responsibility.state === "POSTED" && !responsibility.totalsComplete;
+  return <section className="order-detail-section order-refund-block" aria-label="退款进度" data-outcome={read.outcome}>
     <div className="order-refund-heading"><h2 className="order-section-title">退款进度</h2>{refresh}</div>
     <details className="order-secondary-details order-refund-details" open={attentionRequired}>
-      <summary><strong>{awaitingSettlement ? "结算后查看应退金额" : outcome.label}</strong><span>{awaitingSettlement ? "如有重复付款或异常收款，平台会单独核实处理。" : "查看应退金额、处理记录与待核对事项"}</span></summary>
+      <summary><strong>{outcome.label}</strong><span>{outcome.note}</span></summary>
       <div className="order-refund-detail-content">
-    <div className="order-refund-summary">
-      <strong>{outcome.label}</strong>
-      <p>{outcome.note}</p>
-    </div>
-    <p className="order-muted">仅读取本地已登记记录；本次未核对渠道全量记录。实际渠道退款、退款去向与银行到账均未核验。读取于 {timeText(read.asOf, { timeZoneName: false })}。</p>
-    <ResponsibilityTotals read={read} />
-    {read.responsibilitiesTruncated ? <div className="order-notice is-warning" role="alert"><CircleSlash size={17} aria-hidden="true" /><div><strong>异常原款记录不完整</strong><span>本地异常原款超过展示上限，仅显示已返回的部分；唯一责任合计不可用，不能当作全部。</span></div></div> : null}
-    {read.abnormalResponsibilities?.length ? <section className="order-refund-abnormal" aria-label="异常收款责任">
-      <div className="order-refund-intents-heading"><h3>异常收款责任</h3><span>{read.abnormalResponsibilities.length} 个原款{read.responsibilitiesTruncated ? "（不完整）" : ""}</span></div>
-      <p className="order-muted">每个异常原款只计一次责任；释放重试不增加新责任；本地申请金额相加不等于应退，也不等于渠道或银行结果。</p>
-      <ul className="order-refund-intents">{read.abnormalResponsibilities.map((item) => <AbnormalResponsibilityCard key={item.confirmationId} item={item} />)}</ul>
-    </section> : null}
-    {read.intentsTruncated || !read.coverage.intentsComplete ? <div className="order-notice is-warning" role="alert"><CircleSlash size={17} aria-hidden="true" /><div><strong>{read.abnormalResponsibilities ? "退款申请记录范围不完整" : "以下记录与合计不完整"}</strong><span>{read.abnormalResponsibilities ? "不能把申请列表当全部；每个正常过账或异常原款仍按自身完整性分别显示。" : read.intentsTruncated ? "本地退款申请超过展示上限，仅列出已返回的部分；请勿把当前金额当作完整责任或全部退款记录。" : "请勿把当前金额当作完整责任或全部退款记录。"}</span></div></div> : null}
-    {read.abnormalResponsibilities ? <div className="order-refund-intents-heading"><h3>正常过账责任</h3><span>正常结算责任</span></div> : null}
-    {responsibility.state === "NOT_POSTED" ? <p className="order-muted">本地尚未形成正常过账退款责任；异常原款责任请查看独立记录，不能据此认定渠道未收款或无需退款。</p> : <dl className="order-facts order-refund-amounts">
-      <div><dt>过账退款责任</dt><dd>{refundMoney(responsibility.originalCents)}</dd></div>
-      <div><dt>已分配（含已核销）</dt><dd>{refundMoney(responsibility.allocatedCents)}</dd></div>
-      <div><dt>本地已核销</dt><dd>{refundMoney(responsibility.consumedCents)}</dd></div>
-      <div><dt>已释放</dt><dd>{refundMoney(responsibility.releasedCents)}</dd></div>
-      <div><dt>尚未分配</dt><dd>{refundMoney(responsibility.remainingCents)}</dd></div>
-      <div><dt>责任到期</dt><dd>{responsibility.dueAt ? timeText(responsibility.dueAt, { timeZoneName: false }) : "待确认"} · {refundDueLabel(responsibility.dueState)}</dd></div>
-    </dl>}
-    {responsibility.state === "POSTED" && !responsibility.totalsComplete ? <p className="order-muted">{read.abnormalResponsibilities ? "过账责任合计不完整" : "合计不完整"}：缺失项不会按 0 计算，以上金额不能当作完整责任或总额。</p> : null}
-    <p className="order-refund-funds">本地账务合计：{read.localFundsEffect && (read.localFundsEffect.writtenOffCents !== null || read.localFundsEffect.releasedCents !== null) ? `核销 ${refundMoney(read.localFundsEffect.writtenOffCents)} · 释放 ${refundMoney(read.localFundsEffect.releasedCents)}` : "暂不可用"}。本地核销、渠道回执与银行到账是不同层次。</p>
-    <div className="order-refund-intents-heading"><h3>退款申请记录</h3><span>{read.returnedIntentCount} 笔{read.intentsTruncated ? "（不完整）" : ""}</span></div>
-    {read.intents.length === 0 ? <p className="order-muted">{refundEmptyCopy(read)}</p> : <ul className="order-refund-intents">{read.intents.map((intent) => <RefundIntentCard key={intent.intentId} intent={intent} />)}</ul>}
-    {read.reasonCodes.length || read.unknowns.length ? <details className="order-refund-reasons"><summary>查看原因代码与未核对项</summary><p>{[...read.reasonCodes, ...read.unknowns].join("、")}</p></details> : null}
+        {incomplete ? <p className="order-inline-notice" role="status">部分退款信息仍在核对，当前记录可能不完整。</p> : null}
+        {responsibility.state === "POSTED" ? <dl className="order-facts order-refund-amounts">
+          <div><dt>本次结算应退</dt><dd>{refundMoney(responsibility.originalCents)}</dd></div>
+          {responsibility.dueAt ? <div><dt>退款到期时间</dt><dd>{timeText(responsibility.dueAt, { timeZoneName: false })}{responsibility.dueState === "DUE" ? "（已到期）" : responsibility.dueState === "NOT_DUE" ? "（未到期）" : "（状态待确认）"}</dd></div> : null}
+        </dl> : null}
+        {responsibility.state === "POSTED" && responsibility.dueAt ? <p className="order-muted">到期不代表退款已处理或到账。</p> : null}
+        {read.abnormalResponsibilities?.length ? <section className="order-refund-abnormal" aria-label="其他付款处理">
+          <div className="order-refund-intents-heading"><h3>其他付款处理</h3></div>
+          <ul className="order-refund-intents">{read.abnormalResponsibilities.map(item => <AbnormalResponsibilityCard key={item.confirmationId} item={item} />)}</ul>
+        </section> : null}
+        {read.intents.length ? <section aria-label="退款申请记录"><div className="order-refund-intents-heading"><h3>退款申请</h3><span>{read.intentsTruncated || !read.coverage.intentsComplete ? "部分记录待确认" : `${read.returnedIntentCount} 笔`}</span></div><ul className="order-refund-intents">{read.intents.map(intent => <RefundIntentCard key={intent.intentId} intent={intent} />)}</ul></section> : null}
+        <p className="order-muted">到账情况请以收款记录为准。</p>
       </div>
     </details>
   </section>;
@@ -507,9 +420,10 @@ function OrderEntitlements({ order }: { order: Order }) {
   </section>;
 }
 
-export function OrderDetail({ party, status, accountId, orderId, state, onRetry, onLogin, onChanged }: {
+export function OrderDetail({ party, status, accountId, orderId, filters, state, onRetry, onLogin, onChanged }: {
   party: OrderParty;
   status: OrderStatusFilter;
+  filters?: OrderSearchFilters;
   accountId?: string;
   orderId: string;
   state: DetailState;
@@ -517,7 +431,7 @@ export function OrderDetail({ party, status, accountId, orderId, state, onRetry,
   onLogin: () => void;
   onChanged: () => void;
 }) {
-  const backHref = orderUrl(party, status, accountId);
+  const backHref = orderUrl(party, status, accountId, undefined, undefined, filters);
   const title = party === "renter" ? "租入订单" : "出租订单";
   const session = useUserSession();
   const readScope = `${session.status === "authenticated" ? session.userId : ""}:${party}:${orderId}`;
@@ -531,7 +445,7 @@ export function OrderDetail({ party, status, accountId, orderId, state, onRetry,
   const order = state.order;
   if (order.viewerParty && order.viewerParty !== party) {
     const actualTitle = order.viewerParty === "owner" ? "出租订单" : "租入订单";
-    return <section className="order-detail-view" data-testid="order-party-mismatch">{back}<section className="order-error-block" role="status"><h2>本单属于你的{actualTitle}</h2><p>请按服务端确认的交易身份查看金额与处理事项。</p><Link className="button primary" href={orderUrl(order.viewerParty, "", undefined, order.id)} scroll={false}>查看我的{actualTitle}</Link></section></section>;
+    return <section className="order-detail-view" data-testid="order-party-mismatch">{back}<section className="order-error-block" role="status"><h2>本单属于你的{actualTitle}</h2><p>请切换到对应订单查看金额和进度。</p><Link className="button primary" href={orderUrl(order.viewerParty, "", undefined, order.id)} scroll={false}>查看我的{actualTitle}</Link></section></section>;
   }
   const modeLabel = orderRentalModeLabel(order);
   const sourceLabel = orderListingSourceLabel(order);

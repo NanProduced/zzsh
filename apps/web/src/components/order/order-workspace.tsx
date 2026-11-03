@@ -1,14 +1,15 @@
 "use client";
 
 import { useAuthOverlay } from "@/components/auth/auth-overlay-provider";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { LockKeyhole } from "lucide-react";
 import { useUserSession } from "@/components/session/user-session-provider";
-import { mergeOrderItems, orderApi, type Order, type OrderPage, type OrderParty, type OrderRequestError, type OrderStatusFilter } from "@/lib/order-client";
+import { mergeOrderItems, orderApi, type Order, type OrderPage, type OrderParty, type OrderRequestError, type OrderStatusFilter, type OrderSearchFilters } from "@/lib/order-client";
 import { LegacyOrderWorkspace } from "@/components/order/legacy-order-workspace";
 import { OrderDetail } from "@/components/order/order-detail";
 import { OrderListPanel, type OrderListState } from "@/components/order/order-list";
-import { errorFrom, isAbortError, isAuthenticationFailure, isOrderStatus, isPrivateBoundary } from "@/components/order/order-presentation";
+import { errorFrom, isAbortError, isAuthenticationFailure, isOrderStatus, isPrivateBoundary, orderUrl } from "@/components/order/order-presentation";
 import "./order.css";
 
 type DetailState = { scope: string; orderId: string | null; status: "loading" | "ready" | "error"; order: Order | null; error: OrderRequestError | null };
@@ -23,12 +24,14 @@ function emptyListState(scope: string): ListState {
  * current identity, party, filter and account context. Rendering is delegated to the list and
  * detail views so that neither can grow its own read state.
  */
-export function OrderWorkspace({ party, orderId, status: statusParam, accountId, source }: { party: OrderParty; orderId?: string; status?: string; accountId?: string; source?: string }) {
+export function OrderWorkspace({ party, orderId, status: statusParam, accountId, source, filters = {} }: { party: OrderParty; orderId?: string; status?: string; accountId?: string; source?: string; filters?: OrderSearchFilters }) {
   const auth = useAuthOverlay();
+  const router = useRouter();
   const session = useUserSession();
+  const { orderNo, createdFrom, createdTo, stage } = filters;
   const status: OrderStatusFilter = isOrderStatus(statusParam) ? statusParam : "";
   const identityScope = session.status === "authenticated" && session.userId ? `${session.userId}:${session.identityVersion}` : "unauthenticated";
-  const listScope = `${identityScope}:${party}:${status}:${accountId ?? ""}`;
+  const listScope = JSON.stringify([identityScope,party,status,accountId ?? "",orderNo ?? "",createdFrom ?? "",createdTo ?? "",stage ?? ""]);
   const detailScope = `${identityScope}:${party}:${source ?? ""}:${orderId ?? ""}`;
   const [listState, setListState] = useState<ListState>(() => emptyListState(listScope));
   const [detailState, setDetailState] = useState<DetailState>(() => ({ scope: detailScope, orderId: orderId ?? null, status: orderId ? "loading" : "ready", order: null, error: null }));
@@ -41,6 +44,15 @@ export function OrderWorkspace({ party, orderId, status: statusParam, accountId,
   const detailSequence = useRef(0);
   const positionRef = useRef<{ orderId: string; scrollY: number } | null>(null);
   const previousOrderId = useRef(orderId);
+
+  const invalidateListReads = useCallback(() => {
+    listSequence.current += 1;
+    moreSequence.current += 1;
+    listController.current?.abort();
+    moreController.current?.abort();
+    listController.current = null;
+    moreController.current = null;
+  }, []);
 
   const loadFirst = useCallback(async (preserve: boolean, notice = "") => {
     listController.current?.abort();
@@ -58,12 +70,16 @@ export function OrderWorkspace({ party, orderId, status: statusParam, accountId,
       return;
     }
     try {
-      const page = await orderApi.listUnified({ party, ...(status ? { status } : {}), ...(accountId ? { accountId } : {}) }, controller.signal);
+      const page = await orderApi.listUnified(session.userId, { party, ...(status ? { status } : {}), ...(accountId ? { accountId } : {}), orderNo, createdFrom, createdTo, stage }, controller.signal);
       if (controller.signal.aborted || sequence !== listSequence.current) return;
       setListState({ scope: listScope, page, loading: false, refreshing: false, loadingMore: false, error: null, moreError: null, notice });
     } catch (error) {
       if (controller.signal.aborted || sequence !== listSequence.current || isAbortError(error)) return;
       const typed = errorFrom(error);
+      if (isPrivateBoundary(typed)) {
+        invalidateListReads();
+        if (isAuthenticationFailure(typed)) session.revalidate();
+      }
       setListState((previous) => {
         const discard = isPrivateBoundary(typed);
         return discard || !preserve || !previous.page
@@ -73,7 +89,7 @@ export function OrderWorkspace({ party, orderId, status: statusParam, accountId,
     } finally {
       if (listController.current === controller) listController.current = null;
     }
-  }, [accountId, listScope, party, session.status, session.userId, status]);
+  }, [accountId, invalidateListReads, listScope, party, session.revalidate, session.status, session.userId, status, orderNo, createdFrom, createdTo, stage]);
 
   useEffect(() => {
     void loadFirst(false);
@@ -101,12 +117,7 @@ export function OrderWorkspace({ party, orderId, status: statusParam, accountId,
       if (controller.signal.aborted || sequence !== detailSequence.current || isAbortError(error)) return;
       const typed = errorFrom(error);
       if (isAuthenticationFailure(typed)) {
-        listController.current?.abort();
-        moreController.current?.abort();
-        listController.current = null;
-        moreController.current = null;
-        listSequence.current += 1;
-        moreSequence.current += 1;
+        invalidateListReads();
         setListState({ ...emptyListState(listScope), notice: "登录状态已变化，正在重新确认身份。" });
         session.revalidate();
       }
@@ -116,7 +127,7 @@ export function OrderWorkspace({ party, orderId, status: statusParam, accountId,
       controller.abort();
       if (detailController.current === controller) detailController.current = null;
     };
-  }, [detailReload, detailScope, listScope, orderId, session.revalidate, session.status, session.userId, source]);
+  }, [detailReload, detailScope, invalidateListReads, listScope, orderId, session.revalidate, session.status, session.userId, source]);
 
   useEffect(() => {
     const previous = previousOrderId.current;
@@ -142,15 +153,17 @@ export function OrderWorkspace({ party, orderId, status: statusParam, accountId,
     moreController.current = controller;
     setListState((previous) => previous.scope === listScope ? { ...previous, loadingMore: true, moreError: null } : previous);
     try {
-      const next = await orderApi.listUnified({ party, ...(status ? { status } : {}), ...(accountId ? { accountId } : {}), cursor: page.nextCursor }, controller.signal);
+      const next = await orderApi.listUnified(session.userId, { party, ...(status ? { status } : {}), ...(accountId ? { accountId } : {}), orderNo, createdFrom, createdTo, stage, cursor: page.nextCursor }, controller.signal);
       if (controller.signal.aborted || sequence !== listSequence.current || more !== moreSequence.current) return;
-      setListState((previous) => previous.scope !== listScope || !previous.page ? previous : { ...previous, page: { ...next, items: mergeOrderItems(previous.page.items, next.items) }, loadingMore: false, moreError: null });
+      setListState((previous) => previous.scope !== listScope || !previous.page ? previous : { ...previous, page: { ...next, stageUnknownObserved: Boolean(previous.page.stageUnknownObserved || next.stageUnknownObserved), items: mergeOrderItems(previous.page.items, next.items) }, loadingMore: false, moreError: null });
     } catch (error) {
       if (controller.signal.aborted || sequence !== listSequence.current || more !== moreSequence.current || isAbortError(error)) return;
       const typed = errorFrom(error);
       if (typed.status === 409) {
         await loadFirst(true, "筛选或分页状态已变化，已重新读取。");
       } else if (isPrivateBoundary(typed)) {
+        invalidateListReads();
+        if (isAuthenticationFailure(typed)) session.revalidate();
         setListState({ scope: listScope, page: null, loading: false, refreshing: false, loadingMore: false, error: typed, moreError: null, notice: "" });
       } else {
         setListState((previous) => previous.scope === listScope ? { ...previous, loadingMore: false, moreError: typed } : previous);
@@ -158,7 +171,7 @@ export function OrderWorkspace({ party, orderId, status: statusParam, accountId,
     } finally {
       if (moreController.current === controller) moreController.current = null;
     }
-  }, [accountId, listScope, listState, loadFirst, party, session.status, session.userId, status]);
+  }, [accountId, invalidateListReads, listScope, listState, loadFirst, party, session.revalidate, session.status, session.userId, status, orderNo, createdFrom, createdTo, stage]);
 
   /** Remember where the reader clicked from so returning restores the same scroll position and focus. */
   const onOpen = (nextOrderId: string, event: ReactMouseEvent<HTMLAnchorElement>) => {
@@ -174,7 +187,7 @@ export function OrderWorkspace({ party, orderId, status: statusParam, accountId,
     : null;
 
   if (session.status !== "authenticated" || !session.userId) return <section className="order-session-guard" role="status"><LockKeyhole size={22} aria-hidden="true" /><h2>正在确认订单身份</h2><p>确认期间不会展示上一位用户的订单数据。</p></section>;
-  if (orderId && source === "legacy") return <LegacyOrderWorkspace party={party} orderId={orderId} accountId={accountId} status={status} />;
-  if (orderId && detail) return <OrderDetail party={party} status={status} accountId={accountId} orderId={orderId} state={detail} onRetry={() => setDetailReload((value) => value + 1)} onLogin={login} onChanged={() => setDetailReload((value) => value + 1)} />;
-  return <OrderListPanel party={party} status={status} accountId={accountId} state={visibleListState} onRefresh={retryList} onRetryList={retryList} onLoadMore={() => void loadMore()} onLogin={login} onReauthorize={() => session.revalidate()} onOpen={onOpen} />;
+  if (orderId && source === "legacy") return <LegacyOrderWorkspace party={party} orderId={orderId} accountId={accountId} status={status} filters={filters} />;
+  if (orderId && detail) return <OrderDetail party={party} status={status} accountId={accountId} orderId={orderId} filters={filters} state={detail} onRetry={() => setDetailReload((value) => value + 1)} onLogin={login} onChanged={() => setDetailReload((value) => value + 1)} />;
+  return <OrderListPanel party={party} status={status} accountId={accountId} filters={filters} onApplyFilters={next=>router.push(orderUrl(party,status,accountId,undefined,undefined,next),{scroll:false})} state={visibleListState} onRefresh={retryList} onRetryList={retryList} onLoadMore={() => void loadMore()} onLogin={login} onReauthorize={() => session.revalidate()} onOpen={onOpen} />;
 }

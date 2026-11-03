@@ -95,7 +95,8 @@ async function createProbe(fetchImpl, options = {}) {
     revalidate() { this.revalidations += 1; },
     ...options.session,
   };
-  const router = { push() {}, replace() {} };
+  const navigation = [];
+  const router = { push(href) { navigation.push(href); }, replace(href) { navigation.push(href); } };
   const previousFetch = globalThis.fetch;
   globalThis.fetch = fetchImpl;
   const components = loadWorkspace(session, router);
@@ -144,12 +145,38 @@ async function createProbe(fetchImpl, options = {}) {
     return anchor;
   }
 
-  return { window, host, session, router, commits, components, render, clickButton, clickAnchor, dispose };
+  return { window, host, session, router, navigation, commits, components, render, clickButton, clickAnchor, dispose };
 }
 
 const money = { amount: "0.00", currency: "CNY", unit: "yuan", scale: 2 };
 const orderA = { id: "order_A", displayNo: "A-001", title: "PRIVATE_ORDER_A", status: "PENDING_PAYMENT", amounts: { rental: money, deposit: money, totalDue: money } };
 const orderB = { id: "order_B", displayNo: "B-001", title: "PRIVATE_ORDER_B", status: "PAID", amounts: { rental: money, deposit: money, totalDue: money } };
+
+test('advanced order filters stay available without crowding the default search',async()=>{
+ const probe=await createProbe(async()=>Response.json({items:[],nextCursor:null,limit:20}));
+ try{await probe.render({});const extra=probe.host.querySelector('#order-more-filters');assert(extra.hidden);const toggle=[...probe.host.querySelectorAll('button')].find(button=>button.textContent.includes('更多筛选'));assert.equal(toggle.getAttribute('aria-expanded'),'false');await probe.clickButton('更多筛选');assert.equal(extra.hidden,false);assert.equal(toggle.getAttribute('aria-expanded'),'true');const select=extra.querySelector('select');await React.act(async()=>{select.value='RENTING';select.dispatchEvent(new probe.window.Event('change',{bubbles:true}));});await React.act(async()=>probe.host.querySelector('.order-search-filters').dispatchEvent(new probe.window.Event('submit',{bubbles:true,cancelable:true})));assert.equal(new URL(probe.navigation.at(-1),'http://fixture').searchParams.get('stage'),'RENTING');}finally{await probe.dispose();}
+});
+
+test('order search forwards filters to the unified reader and continues an incomplete stage scan',async()=>{
+ const requests=[];
+ const probe=await createProbe(async(url,init={})=>{const parsed=new URL(String(url),'http://local');requests.push({query:parsed.searchParams,method:init.method??'GET'});return Response.json(parsed.searchParams.has('cursor')?{items:[orderB],nextCursor:null,limit:20,stageUnknownObserved:true}:{items:[],nextCursor:'signed-next',limit:20,scanIncomplete:true,stageUnknownObserved:true});});
+ try{
+  await probe.render({party:'owner',filters:{orderNo:'旧_%单',createdFrom:'2026-09-01',createdTo:'2026-11-03',stage:'RENTING'}});
+  const first=requests[0].query;assert.equal(first.get('party'),'owner');assert.equal(first.get('orderNo'),'旧_%单');assert.equal(first.get('createdFrom'),'2026-09-01');assert.equal(first.get('createdTo'),'2026-11-03');assert.equal(first.get('stage'),'RENTING');
+  assert.match(probe.host.textContent,/北京时间/);assert.match(probe.host.textContent,/部分订单的进度尚未确认/);assert.doesNotMatch(probe.host.textContent,/没有符合筛选条件的订单/);
+  await probe.clickButton('继续查找订单');assert.equal(requests.at(-1).query.get('cursor'),'signed-next');assert.equal(requests.at(-1).query.get('stage'),'RENTING');assert.match(probe.host.textContent,/B-001/);assert(requests.every(request=>request.method==='GET'));
+ }finally{await probe.dispose();}
+});
+
+test('an empty stage search with unclassified orders stays qualified',async()=>{
+ const probe=await createProbe(async()=>Response.json({items:[],nextCursor:null,limit:20,stageUnknownObserved:true}));
+ try{await probe.render({party:'renter',filters:{stage:'RENTING'}});assert.match(probe.host.textContent,/没有找到已确认符合条件的订单/);assert.match(probe.host.textContent,/部分订单的进度尚未确认/);}finally{await probe.dispose();}
+});
+
+test('generic order links include the public order number in their accessible name',async()=>{
+ const probe=await createProbe(async()=>Response.json({items:[{...orderA,title:null},{...orderB,title:null}],nextCursor:null,limit:20}));
+ try{await probe.render({party:'renter'});const links=[...probe.host.querySelectorAll('a[data-order-id]')];assert.equal(links.length,2);assert.match(links[0].getAttribute('aria-label'),/查看.*订单号 A-001/);assert.match(links[1].getAttribute('aria-label'),/查看.*订单号 B-001/);assert.notEqual(links[0].getAttribute('aria-label'),links[1].getAttribute('aria-label'));assert.doesNotMatch(links.map(link=>link.getAttribute('aria-label')).join(' '),/order_A|order_B/);}finally{await probe.dispose();}
+});
 
 test('a known server viewer party corrects an opposite-view deep link without rendering wrong-side money or actions',async()=>{
  for(const [routeParty,viewerParty] of [['owner','renter'],['renter','owner']]){
@@ -303,6 +330,38 @@ test("refresh failure keeps rows and more failure keeps the cursor for an in-pla
   }
 });
 
+test('unified list binds each identity and ignores a previous identity late page',async()=>{
+ const pending=deferred(),subjects=[];
+ const probe=await createProbe(async(_input,init)=>{const subject=new Headers(init.headers).get('x-zzsh-expected-user-id');subjects.push(subject);return subject==='user_A'?pending.promise:Response.json({items:[orderB],nextCursor:null,limit:20});});
+ try{
+  await probe.render({});probe.session.userId='user_B';probe.session.identityVersion=2;
+  await probe.render({},'identity-B');assert.match(probe.host.textContent,/B-001/);
+  await React.act(async()=>{pending.resolve(Response.json({items:[orderA],nextCursor:null,limit:20}));await tick();});
+  assert.deepEqual(subjects,['user_A','user_B']);assert.doesNotMatch(probe.host.textContent,/A-001|PRIVATE_ORDER_A/);
+ }finally{await probe.dispose();}
+});
+
+test('list or pagination private rejection invalidates the opposite late read before it can revive private rows',async()=>{
+ for(const status of [401,403])for(const denied of ['FIRST','MORE']){
+  const refresh=deferred(),more=deferred(),requests=[];let first=0;
+  const failure=()=>Response.json({error:{code:status===401?'IDENTITY_CHANGED':'FORBIDDEN'}},{status});
+  const probe=await createProbe(async(input,init)=>{
+   requests.push(init);if(String(input).includes('cursor='))return denied==='MORE'?failure():more.promise;
+   if(++first===1)return Response.json({items:[orderA],nextCursor:'cursor_1',limit:20});return refresh.promise;
+  });
+  try{
+   await probe.render({});await probe.clickButton('刷新');await probe.clickButton('加载更多订单');
+   if(denied==='FIRST')await React.act(async()=>{refresh.resolve(failure());await tick();});
+   assert.doesNotMatch(probe.host.textContent,/A-001|B-001/);
+   await React.act(async()=>{(denied==='FIRST'?more:refresh).resolve(Response.json({items:[orderB],nextCursor:null,limit:20}));await tick();});
+   assert.doesNotMatch(probe.host.textContent,/A-001|B-001|PRIVATE_ORDER_B/);
+   assert.equal(probe.session.revalidations,status===401?1:0);
+   assert(requests.every(init=>new Headers(init.headers).get('x-zzsh-expected-user-id')==='user_A'));
+   assert(requests[denied==='FIRST'?2:1].signal.aborted,'opposite request must be invalidated, even if its transport still resolves');
+  }finally{await probe.dispose();}
+ }
+});
+
 const legacyOrder = {
   id: "legacy_A", displayNo: "OLD-1", title: "旧单记录", status: "PAID", party: "renter",
   source: { origin: "LEGACY", statusLabel: "旧单进行中" },
@@ -328,17 +387,17 @@ test("each party's list states its own money basis and never substitutes the oth
   try {
     await probe.render({ party: "renter" }, "renter");
     assert.equal(probe.host.querySelector(".order-row-amount strong").textContent, "528.00 元");
-    // A settled order is labelled by what the figure is, never as an amount still owed.
-    assert.match(probe.host.querySelector(".order-row-amount-label").textContent, /实付/);
+    // The list amount is the order price; it is not promoted to an independently verified payment.
+    assert.match(probe.host.querySelector(".order-row-amount-label").textContent, /下单金额/);
     assert.doesNotMatch(probe.host.querySelector(".order-row-amount-label").textContent, /应付/);
     const breakdown = [...probe.host.querySelectorAll(".order-row-amount-sub > span")].map((node) => node.textContent);
     assert.deepEqual(breakdown, ["租赁 328.00 元", "押金 200.00 元"]);
     assert.doesNotMatch(probe.host.textContent, /号主报价/);
-    assert.match(probe.host.textContent, /已加载 1 条/);
+    assert.match(probe.host.textContent, /已显示 1 条/);
 
     await probe.render({ party: "owner" }, "owner");
     assert.equal(probe.host.querySelector(".order-row-amount strong").textContent, "240.00 元");
-    assert.match(probe.host.querySelector(".order-row-amount-label").textContent, /号主报价/);
+    assert.match(probe.host.querySelector(".order-row-amount-label").textContent, /出租报价/);
     // The renter's actual payment is a different number (rental discounts apply), so the owner's row
     // states only the owner's own figure and never borrows the renter's.
     assert.ok(!probe.host.querySelector(".order-row-amount-sub"), "the owner row states only its own figure");
@@ -511,22 +570,22 @@ test("one list includes both sources and old deep links return to the same filte
     await probe.render({status:"PAID",accountId:"acct_9"});
     assert.equal(probe.host.querySelectorAll(".order-row").length,2);
     assert.doesNotMatch(probe.host.textContent,/旧平台|新平台|统一入口尚未完成/);
-    assert.deepEqual([...probe.host.querySelectorAll(".order-row-source")].map(node=>node.textContent),["历史订单"],"historical identity is visible inside the same unified list");
+    assert.equal(probe.host.querySelectorAll(".order-row-source").length,0,"source generations do not split the list");
     assert.match(probe.host.textContent,/6级子弹 60 · 顶级保险卡 7 天/);
     assert.match(probe.host.textContent,/租赁截止/);
     // U5-R1-02: the historical refund figure is labelled as the original record in the list row.
-    assert.match(probe.host.textContent,/原退款金额记录/);
+    assert.match(probe.host.textContent,/退款记录金额/);
     assert.doesNotMatch(probe.host.textContent,/应退金额（到账待确认）|应退责任 /);
     const links=[...probe.host.querySelectorAll("a[data-order-id]")];
     assert.equal(new Set(links.map(a=>a.dataset.orderKey)).size,2);
     assert.ok(links.some(a=>a.href.includes("source=legacy")));
     await probe.render({status:"PAID",accountId:"acct_9",orderId:orderA.id,source:"legacy"});
-    assert.match(probe.host.textContent,/可办理事项以本单核定结果为准/);
-    assert.match(probe.host.textContent,/不是原账号标题/);
-    assert.match(probe.host.textContent,/保险按天/);
+    assert.match(probe.host.textContent,/退款记录金额仅供查看/);
+    assert.match(probe.host.textContent,/账号资料来自本单记录/);
+    assert.match(probe.host.textContent,/顶级保险卡 7 天/);
     assert.match(probe.host.textContent,/租赁截止/);
     // U5-R1-02: the detail keeps the original refund record wording and never calls it the current duty.
-    assert.match(probe.host.textContent,/原退款金额记录/);
+    assert.match(probe.host.textContent,/退款记录金额/);
     assert.doesNotMatch(probe.host.textContent,/应退金额（到账待确认）|应退责任 /);
     assert.doesNotMatch(probe.host.textContent,/历史|旧平台|新平台|旧单记录/);
     const back=[...probe.host.querySelectorAll("a")].find(a=>a.textContent==="返回订单列表");
@@ -565,7 +624,7 @@ test("a closed order detail drops the payment prompt and names the figure as a s
   }
 });
 
-test("ORDER-A: one list shows the frozen mode and a historical identity without separate platform navigation", async () => {
+test("ORDER-A: one list keeps the order mode and old deep link without exposing platform generations", async () => {
   const fast = { ...pricedOrder, id: "fast_order", title: "极速快照账号", quote: { rentalMode: "fast", lines: [] } };
   const v1 = { ...pricedOrder, id: "v1_order", title: "旧版快照账号", quote: { lines: [] } };
   const legacy = { ...legacyOrder, id: "legacy_order" };
@@ -575,9 +634,9 @@ test("ORDER-A: one list shows the frozen mode and a historical identity without 
     const row = (id) => probe.host.querySelector(`[data-order-id="${id}"]`)?.closest(".order-row");
     assert.match(row("fast_order").querySelector(".order-row-tag[data-mode=fast]").textContent, /极速出租/);
     assert.equal(row("v1_order").querySelector(".order-row-tag"), null, "a missing v1 mode is not guessed as ordinary");
-    assert.equal(row("legacy_order").querySelector(".order-row-source")?.textContent, "历史订单", "a historical row is identifiable inside the same list");
+    assert.equal(row("legacy_order").querySelector(".order-row-source"), null);
     assert.doesNotMatch(probe.host.textContent, /旧平台|新平台/);
-    assert.ok(row("legacy_order").querySelector("a[data-order-id='legacy_order']"), "the record remains openable for supported continuation");
+    assert.match(row("legacy_order").querySelector("a[data-order-id='legacy_order']").href,/source=legacy/, "the record remains openable for supported continuation");
   } finally {
     await probe.dispose();
   }

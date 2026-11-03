@@ -4,11 +4,11 @@ import {useUserSession,useUserSessionStore} from '@/components/session/user-sess
 import {readMyOwnerGuaranteeHistory,type OwnerGuaranteeHistoryPage} from '@/lib/owner-guarantee-history-client';
 import {walletMoney,WalletRequestError} from '@/lib/personal-wallet-client';
 import {formatOrderTime} from '@/lib/order-client';
-import {Callout,LocalRetry} from '@/components/ui/information';
+import {LocalRetry} from '@/components/ui/information';
 import './owner-guarantee-history.css';
 
-const labels:Record<string,string>={ZERO_AMOUNT_PAID_MARK:'旧记录标记已付，当前字段为零',ZERO_AMOUNT_RETURN_MARK:'旧记录标记退还，当前字段为零',HISTORICAL_TRACE_UNKNOWN:'有历史处理时间，收退待核',NO_PAYMENT_EVIDENCE_UNKNOWN:'当前未取得支付凭证',PAID_MARK_WITHOUT_PAY_ORDER_UNKNOWN:'有已付标记，支付凭证待核',SOURCE_RETURN_MARK_CHANNEL_UNKNOWN:'有历史退还标记，到账待核',PAID_RECORD_RESET_REFUND_UNKNOWN:'有历史付款，后续退还待核',SOURCE_PAID_REFUND_UNKNOWN:'有历史付款，当前责任待核'};
-const at=(s:string|null)=>s?formatOrderTime(s,{timeZoneName:false}):'原记录未提供';
+const labels:Record<string,string>={ZERO_AMOUNT_PAID_MARK:'缴纳金额待确认',ZERO_AMOUNT_RETURN_MARK:'退还金额待确认',HISTORICAL_TRACE_UNKNOWN:'收退情况待确认',NO_PAYMENT_EVIDENCE_UNKNOWN:'缴纳情况待确认',PAID_MARK_WITHOUT_PAY_ORDER_UNKNOWN:'缴纳情况待确认',SOURCE_RETURN_MARK_CHANNEL_UNKNOWN:'退还进度待确认',PAID_RECORD_RESET_REFUND_UNKNOWN:'退还进度待确认',SOURCE_PAID_REFUND_UNKNOWN:'收退情况待确认'};
+const at=(s:string|null)=>s?formatOrderTime(s,{timeZoneName:false}):'未记录';
 /** Independently readable when wallet coverage is missing. This component has no payment or refund command. */
 export function OwnerGuaranteeHistory({scope}:{scope:string}){
  const session=useUserSession(),store=useUserSessionStore(),live=useRef(scope);live.current=scope;
@@ -31,17 +31,16 @@ export function OwnerGuaranteeHistory({scope}:{scope:string}){
  // eslint-disable-next-line react-hooks/exhaustive-deps
  },[scope,reload]);
  const page=visible.value;
- return <section className="owner-guarantee-history" aria-label="号主上架保证金" aria-busy={visible.busy||undefined}>
-  <div className="wallet-section-heading"><h3>号主上架保证金</h3><button className="button secondary" type="button" disabled={visible.busy} onClick={()=>setReload(n=>n+1)}>重新读取</button></div>
-  <Callout title="与订单押金分开">这里记录号主上架保证金。历史付款与当前在押责任分开核对，不计入普通钱包可用余额。</Callout>
-  {page?<><dl className="account-fact-list"><div><dt>当前已入账在押</dt><dd>{walletMoney(page.postedHeld.amountCents)}</dd></div><div><dt>历史资金责任</dt><dd>待核定</dd></div></dl><p className="account-module-note">已入账金额仅反映当前账内收退；历史付款、退还标记和银行到账须分别核对。</p>
-   {page.items.length?<div className="guarantee-history-records">{page.items.map(item=><details className="account-module-card" key={item.id} data-guarantee-history={item.id}><summary><strong>账号 {item.accountNumber??item.legacyAccountId}</strong><span>历史已付记录 {walletMoney(item.paidRecordCents)}</span></summary><p>{labels[item.classification]??'历史收退待核'}</p><dl className="account-fact-list"><div><dt>原账号金额字段</dt><dd>{walletMoney(item.accountFieldCents)}</dd></div><div><dt>原已付尝试数</dt><dd>{item.paidRecordCount}</dd></div><div><dt>原处理时间</dt><dd>{at(item.sourcePaidAt)}</dd></div><div><dt>当前可退金额</dt><dd>待核定</dd></div></dl>
-    {item.conflicts.includes('MULTIPLE_PAID_ATTEMPTS')?<p>存在多笔历史已付记录，须逐笔核对。</p>:null}{item.conflicts.includes('CURRENT_AMOUNT_DIFFERS_FROM_PAID_ATTEMPT')?<p>账号金额字段与原付款记录不一致，原付款记录仍保留。</p>:null}
-    <h4>原支付尝试</h4>{item.payments.length?<ol>{item.payments.map(p=><li key={p.source.id}><strong>{p.sourceStatus==='1'?'来源标记已付':'来源未付尝试'} · {walletMoney(p.amountCents)}</strong><p>原商户单号：{p.merchantOrderNumber??'未提供'}</p><p>创建于 {at(p.sourceCreatedAt)} · 原支付时间 {at(p.sourcePaidAt)}</p><small>渠道到账待核，不按历史状态推定收退完成。</small></li>)}</ol>:<p>没有关联的类型明确支付记录，不能据此认定从未缴款。</p>}
-   </details>)}</div>:<p role="status">{page.coverage.knowledge==='KNOWN'?'已核定的来源范围内没有历史记录。':'历史来源尚未完成核对，当前没有可展示的记录。'}</p>}
-   <p className="account-module-note">{page.coverage.count===null?`已读取 ${page.coverage.mappedRecordCount??'待核定'} 条，完整范围待核对`:`已显示 ${page.items.length} / ${page.coverage.count} 条`}</p>
-   {page.nextCursor?<button type="button" className="button secondary" disabled={visible.busy} onClick={()=>void load(page.nextCursor)}>加载更多记录</button>:null}
-  </>:visible.busy?<p role="status">正在读取保证金记录…</p>:null}
-  {visible.error?<LocalRetry message={visible.error.status===401?'登录身份已变化，请重新确认。':visible.error.status===403?'当前身份无权读取这些资金记录。':visible.error.status===409?'记录已变化，请重新读取。':'保证金记录暂时无法读取，未确认金额不按零展示。'} actionLabel="重试读取" onRetry={()=>setReload(n=>n+1)}/>:null}
+ return <section className="owner-guarantee-history" aria-label="保证金记录" aria-busy={visible.busy||undefined}>
+  <div className="wallet-section-heading"><h3>保证金记录</h3><button className="button secondary" type="button" disabled={visible.busy} onClick={()=>setReload(n=>n+1)}>刷新</button></div>
+  {page?<>{page.coverage.knowledge==='UNKNOWN'?<p className="account-module-note" role="status">部分记录仍在核对，当前只显示已确认的记录。</p>:null}
+   {page.items.length?<div className="guarantee-history-records">{page.items.map(item=><details className="account-module-card" key={item.id} data-guarantee-history={item.id}><summary><strong>{item.accountNumber?'账号 '+item.accountNumber:'账号信息待确认'}</strong><span>{labels[item.classification]??'收退情况待确认'}</span></summary>
+    {item.conflicts.length?<p>部分缴纳记录有差异，请联系客服核对。</p>:null}
+    {item.payments.length?<ol>{item.payments.map(payment=><li key={payment.source.id}><strong>{payment.sourceStatus==='1'?'记录显示已支付，结果待确认':'支付状态待确认'} · {walletMoney(payment.amountCents)}</strong><p>支付单号：{payment.merchantOrderNumber??'未记录'}</p><p>记录时间：{at(payment.sourceCreatedAt)}{payment.sourcePaidAt?' · 记录付款时间：'+at(payment.sourcePaidAt):''}</p><small>到账情况请以收款记录为准。</small></li>)}</ol>:<p>暂时没有可显示的缴纳记录。</p>}
+   </details>)}</div>:<p role="status">{page.coverage.knowledge==='KNOWN'?'当前没有可显示的记录。':'记录仍在核对，请稍后查看。'}</p>}
+   <p className="account-module-note">{'已显示 '+page.items.length+' 条'+(page.coverage.count===null?'，部分记录仍在核对。':'')}</p>
+   {page.nextCursor?<button type="button" className="button secondary" disabled={visible.busy} onClick={()=>void load(page.nextCursor)}>加载更多</button>:null}
+  </>:visible.busy?<p role="status">正在加载保证金记录…</p>:null}
+  {visible.error?<LocalRetry message={visible.error.status===401?'登录状态已变化，请重新登录。':visible.error.status===403?'当前账号暂时无法查看这些记录。':visible.error.status===409?'记录已更新，请刷新后查看。':'保证金记录暂时无法查看，请稍后重试。'} actionLabel="重试" onRetry={()=>setReload(n=>n+1)}/>:null}
  </section>;
 }
