@@ -1,17 +1,17 @@
-import {createHash} from 'node:crypto';
+import {createHash,randomUUID} from 'node:crypto';
 import type {Pool,PoolClient} from 'pg';
 import {recordAudit,setAuditContext,withTransaction} from '../auth/security-core';
 import {canonicalize} from '../supply/content-hash';
 import {conflict,ensureOnlyFields,fingerprintRequest,invalid,withIdempotency} from '../supply/supply-util';
 import {authorizeFinanceMaintenance,assertFinanceMaintenanceResource,isReviewedFinanceMaintenanceResource,type FinanceOpeningReview} from './personal-finance-maintenance';
 import {prepareHistoricalObservation} from './personal-finance-read';
-import {prepareObservationCoverage,assertFinanceSingleCutoff,type ObservationCoverageInput} from './personal-finance-coverage';
+import {OBSERVATION_ENTITIES,prepareObservationCoverage,assertFinanceSingleCutoff,type ObservationCoverageInput} from './personal-finance-coverage';
 
 type Actor={userId:string;sessionId:string;requestId:string};
 export type ObservationImportInput={coverage:ObservationCoverageInput;observations:Record<string,unknown>[]};
 export type ObservationImportReview=Pick<FinanceOpeningReview,'ref'|'attempt'|'actor'|'resource'|'notBefore'|'expiresAt'|'inputSha256'|'cutoff'|'bodyDigest'>&{userId:string;sourceKind:ObservationCoverageInput['sourceKind']};
 export type ObservationImportAdmission=Readonly<{kind:'REVIEWED_FINANCE_OBSERVATIONS'}>;
-const admitted=new WeakMap<object,{review:ObservationImportReview;recoveryOnly:boolean}>();
+const admitted=new WeakMap<object,{review:ObservationImportReview;recoveryOnly:boolean;emptyBatchDigest?:string}>();
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex');
 const digest=/^[a-f0-9]{64}$/;
 const identifier=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/;
@@ -26,7 +26,7 @@ export function planFinanceObservations(input:ObservationImportInput){
  const seen=new Set<string>();
  const observations=input.observations.map(snapshot=>{
   const p=prepareHistoricalObservation(snapshot,{userId:c.userId,legacyUserId:c.legacyUserId,sourceSystem:c.sourceSystem,basisId:null});
-  if(p.sourceKind!==c.sourceKind||expected.get(p.sourceId)!==p.sourceDigest||seen.has(p.sourceId)||p.sourceEventAt>c.cutoff)throw invalid('Observation tuple/digest/cutoff differs from reviewed coverage');
+  if(p.sourceKind!==c.sourceKind||p.sourceEntity!==c.sourceEntity||expected.get(p.sourceId)!==p.sourceDigest||seen.has(p.sourceId)||p.sourceEventAt>c.cutoff)throw invalid('Observation tuple/digest/cutoff differs from reviewed coverage');
   seen.add(p.sourceId);return{...p,id:'history_'+sha(canonicalize([p.sourceSystem,p.sourceEntity,p.sourceId])).slice(0,40),snapshot};
  });
  return{coverage:c,observations,bodyDigest:sha(canonicalize(input)),key:'history-import-'+sha(canonicalize([c.userId,c.sourceSystem,c.sourceKind,c.cutoff])).slice(0,40)};
@@ -48,8 +48,7 @@ async function authorize(client:PoolClient,actor:Actor,scope:ObservationImportAd
  return r;
 }
 
-/** Only a separately reviewed internal runner may supply this out-of-band binding. No HTTP entry. */
-export async function bindReviewedFinanceObservationAdmission(client:PoolClient,actor:Actor,review:ObservationImportReview,mode:'execute'|'recover'='execute'):Promise<ObservationImportAdmission>{
+function validateObservationImportReview(review:ObservationImportReview,mode:'execute'|'recover'){
  if(!review||typeof review!=='object'||!review.actor||!review.resource)throw invalid('Exact internal observation review required');
  ensureOnlyFields(review,['ref','attempt','actor','resource','notBefore','expiresAt','inputSha256','cutoff','bodyDigest','userId','sourceKind']);
  ensureOnlyFields(review.actor,['userId','sessionId']);ensureOnlyFields(review.resource,['host','port','database','oid','owner','marker','role','roleOid']);
@@ -59,9 +58,15 @@ export async function bindReviewedFinanceObservationAdmission(client:PoolClient,
   ||![r.resource.owner,r.resource.role].every(x=>typeof x==='string'&&/^[a-zA-Z_][a-zA-Z0-9_]{0,62}$/.test(x))
   ||![r.resource.oid,r.resource.roleOid].every(x=>Number.isSafeInteger(x)&&x>0)
   ||![r.inputSha256,r.bodyDigest].every(x=>typeof x==='string'&&digest.test(x))
-  ||!['HISTORICAL_EARNINGS_LOG','HISTORICAL_DISTRIBUTION','HISTORICAL_WITHDRAWAL'].includes(r.sourceKind)
+  ||!Object.hasOwn(OBSERVATION_ENTITIES,r.sourceKind)
   ||![r.notBefore,r.expiresAt,r.cutoff].every(x=>typeof x==='string'&&/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(x)&&Number.isFinite(Date.parse(x)))
   ||Date.parse(r.notBefore)>=Date.parse(r.expiresAt)||Date.parse(r.cutoff)>Date.parse(r.notBefore)||!['execute','recover'].includes(mode))throw invalid('Exact observation resource/window required');
+ return r;
+}
+
+/** Only a separately reviewed internal runner may supply this out-of-band binding. No HTTP entry. */
+export async function bindReviewedFinanceObservationAdmission(client:PoolClient,actor:Actor,review:ObservationImportReview,mode:'execute'|'recover'='execute'):Promise<ObservationImportAdmission>{
+ const r=validateObservationImportReview(review,mode);
  const token=Object.freeze({kind:'REVIEWED_FINANCE_OBSERVATIONS' as const});admitted.set(token,{review:copy(r),recoveryOnly:mode==='recover'});
  try{await authorizeFinanceMaintenance(client,actor);await assertFinanceMaintenanceResource(client,actor,r,{recover:mode==='recover',recoveryOnly:mode==='recover'});return token;}
  catch(e){admitted.delete(token);throw e;}
@@ -75,6 +80,15 @@ function exactObservation(row:Record<string,any>,expected:ReturnType<typeof plan
   &&Number.isFinite(at.getTime())&&at.toISOString()===expected.sourceEventAt;
 }
 
+async function existingObservations(client:PoolClient,plan:ReturnType<typeof planFinanceObservations>){
+ if(!plan.observations.length)return new Map<string,Record<string,any>>();
+ const {sourceSystem,sourceEntity}=plan.coverage;
+ const rows=(await client.query(`/* finance history existing observation */ SELECT * FROM zzsh_order.personal_finance_observation
+   WHERE source_type='LEGACY_MYSQL' AND source_system=$1 AND source_entity=$2 AND source_id=ANY($3::text[])`,
+ [sourceSystem,sourceEntity,plan.observations.map(o=>o.sourceId)])).rows;
+ return new Map<string,Record<string,any>>(rows.map(row=>[row.source_id,row]));
+}
+
 /** Caller owns the transaction. Observations/coverage do not create opening, ledger, eligibility or a withdrawal. */
 export async function importReviewedFinanceObservations(client:PoolClient,actor:Actor,input:ObservationImportInput,scope:ObservationImportAdmission){
  input=copy(input);const plan=planFinanceObservations(input),c=plan.coverage;
@@ -83,8 +97,9 @@ export async function importReviewedFinanceObservations(client:PoolClient,actor:
   await client.query(`SELECT id FROM zzsh_auth_user."user" WHERE id=$1 FOR UPDATE`,[c.userId]);
   if(c.sourceKind==='HISTORICAL_EARNINGS_LOG')await assertFinanceSingleCutoff(client,{userId:c.userId,cutoff:c.cutoff,write:'OBSERVATION'});
   await setAuditContext(client,'admin',actor.userId,actor.sessionId,actor.requestId);
+  const prior=await existingObservations(client,plan);
   for(const o of plan.observations){
-   const existing=(await client.query(`/* finance history existing observation */ SELECT * FROM zzsh_order.personal_finance_observation WHERE source_type='LEGACY_MYSQL' AND source_system=$1 AND source_entity=$2 AND source_id=$3`,[o.sourceSystem,o.sourceEntity,o.sourceId])).rows[0];
+   const existing=prior.get(o.sourceId);
    if(existing){if(!exactObservation(existing,o))throw conflict('Original observation changed; reconciliation required');continue;}
    await client.query(`INSERT INTO zzsh_order.personal_finance_observation(id,user_id,basis_id,source_kind,source_type,source_system,legacy_user_id,source_entity,source_id,source_digest,source_canonical,source_event_at,included_in_opening,snapshot)
     VALUES($1,$2,NULL,$3,'LEGACY_MYSQL',$4,$5,$6,$7,$8,$9,$10::timestamptz,false,$11::jsonb)`,[o.id,o.userId,o.sourceKind,o.sourceSystem,o.legacyUserId,o.sourceEntity,o.sourceId,o.sourceDigest,o.sourceCanonical,o.sourceEventAt,JSON.stringify(o.snapshot)]);
@@ -117,9 +132,78 @@ export async function recoverReviewedFinanceObservations(client:PoolClient,actor
  if(row.fingerprint!==fingerprintRequest(operation,c.id,input)||row.status!==200||row.body?.coverageId!==c.id||row.body?.subjectId!==c.userId||row.body?.sourceKind!==c.sourceKind||row.body?.bodyDigest!==plan.bodyDigest||row.body?.importedCount!==c.importedCount||row.body?.isolatedCount!==c.isolatedCount||row.body?.financialEffect!=='NONE')throw conflict('Historical recovery differs from original receipt');
  const coverage=(await client.query(`/* finance history recovery coverage */ SELECT body_digest FROM zzsh_order.personal_finance_observation_coverage WHERE id=$1 AND user_id=$2`,[c.id,c.userId])).rows[0];
  if(coverage?.body_digest!==c.bodyDigest)throw conflict('Historical recovery lacks original coverage');
- for(const o of plan.observations){const actual=(await client.query(`/* finance history existing observation */ SELECT * FROM zzsh_order.personal_finance_observation WHERE source_type='LEGACY_MYSQL' AND source_system=$1 AND source_entity=$2 AND source_id=$3`,[o.sourceSystem,o.sourceEntity,o.sourceId])).rows[0];if(!actual||!exactObservation(actual,o))throw conflict('Historical recovery observation differs from original input');}
+ const prior=await existingObservations(client,plan);
+ for(const o of plan.observations){const actual=prior.get(o.sourceId);if(!actual||!exactObservation(actual,o))throw conflict('Historical recovery observation differs from original input');}
  const audit=await client.query(`/* finance history recovery audit */ SELECT 1 FROM zzsh_iam.audit_event WHERE action='finance.history.imported' AND object_type='personal_finance_observation_coverage' AND object_id=$1 AND actor_type='admin' AND actor_id=$2 AND session_id=$3 AND outcome='SUCCESS' AND details->>'bodyDigest'=$4 AND details->>'approvalRef'=$5 AND details->>'attempt'=$6`,[c.id,actor.userId,actor.sessionId,plan.bodyDigest,r.ref,r.attempt]);
  if(audit.rowCount!==1)throw conflict('Historical recovery audit is incomplete');
  await authorize(client,actor,scope,input,true);
  return{knowledge:'KNOWN' as const,key:plan.key,receipt:{status:row.status,body:row.body},originalImportVerified:true,financialEffect:'NONE' as const};
+}
+
+function emptyPlans(inputs:ObservationImportInput[]){
+ if(!Array.isArray(inputs)||inputs.length<1||inputs.length>400)throw invalid('Bounded proved-empty coverage batch required');
+ const plans=inputs.map(input=>({input,plan:planFinanceObservations(input)}));
+ if(plans.some(({plan})=>plan.coverage.sourceCount!==0||plan.coverage.importedCount!==0||plan.coverage.isolatedCount!==0||plan.observations.length!==0)||new Set(plans.map(p=>p.plan.coverage.id)).size!==plans.length)throw invalid('Every empty coverage must prove an exact zero source set');
+ return plans.sort((a,b)=>{const left=a.plan.coverage.userId+':'+a.plan.coverage.id,right=b.plan.coverage.userId+':'+b.plan.coverage.id;return left<right?-1:left>right?1:0;});
+}
+
+/** Same per-subject source contract and original keys; only actor/resource checks are shared by one bounded transaction. */
+export async function bindReviewedEmptyFinanceObservationBatch(client:PoolClient,actor:Actor,inputs:ObservationImportInput[],reviews:ObservationImportReview[],mode:'execute'|'recover'='execute'){
+ const plans=emptyPlans(inputs);if(!Array.isArray(reviews)||reviews.length!==inputs.length)throw invalid('Every empty coverage needs its original exact review');
+ const first=validateObservationImportReview(reviews[0]!,mode);
+ for(let i=0;i<inputs.length;i++){
+  const review=validateObservationImportReview(reviews[i]!,mode),input=inputs[i]!;
+  if(review.bodyDigest!==sha(canonicalize(input))||review.userId!==input.coverage.userId||review.sourceKind!==input.coverage.sourceKind||review.cutoff!==input.coverage.cutoff||review.inputSha256!==input.coverage.inputSha256||['ref','attempt','actor','resource','notBefore','expiresAt','inputSha256','cutoff'].some(key=>canonicalize(review[key as keyof ObservationImportReview])!==canonicalize(first[key as keyof ObservationImportReview])))throw invalid('Empty batch changed its reviewed source, actor or resource');
+ }
+ const scope=await bindReviewedFinanceObservationAdmission(client,actor,first,mode);binding(scope).emptyBatchDigest=sha(canonicalize(inputs));
+ return scope;
+}
+
+async function emptyReceiptFacts(client:PoolClient,actor:Actor,plans:ReturnType<typeof emptyPlans>,r:ObservationImportReview,lock=false){
+ const scopeKey=JSON.stringify(['admin',actor.userId,operation,null]);
+ const receipts=(await client.query(`/* finance empty original receipts */ SELECT key,request_fingerprint,response_status,response_body FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=ANY($2::text[])${lock?' FOR UPDATE':''}`,[scopeKey,plans.map(p=>p.plan.key)])).rows;
+ const facts=(await client.query(`/* finance empty original coverage audit */ SELECT c.id,c.body_digest,c.source_canonical,(SELECT count(*)::text FROM zzsh_order.personal_finance_observation o WHERE o.user_id=c.user_id AND o.source_system=c.source_system AND o.source_kind=c.source_kind AND o.source_event_at<=c.source_cutoff) AS actual_count,a.actor_id,a.session_id,a.details FROM zzsh_order.personal_finance_observation_coverage c LEFT JOIN zzsh_iam.audit_event a ON a.object_id=c.id AND a.action='finance.history.imported' AND a.object_type='personal_finance_observation_coverage' AND a.outcome='SUCCESS' WHERE c.id=ANY($1::text[])`,[plans.map(p=>p.plan.coverage.id)])).rows;
+ return plans.map(({input,plan})=>{
+  const c=plan.coverage,receipt=receipts.find(row=>row.key===plan.key),body={coverageId:c.id,subjectId:c.userId,sourceKind:c.sourceKind,bodyDigest:plan.bodyDigest,importedCount:0,isolatedCount:0,financialEffect:'NONE'};
+  if(!receipt){if(facts.some(row=>row.id===c.id))throw conflict('Empty coverage exists without its original receipt');return{plan,input,body,knowledge:'UNKNOWN' as const};}
+  const original=facts.filter(row=>row.id===c.id),fact=original[0];
+  if(receipt.request_fingerprint!==fingerprintRequest(operation,c.id,input)||receipt.response_status!==200||canonicalize(receipt.response_body)!==canonicalize(body)||original.length!==1||fact.actual_count!=='0'||fact.body_digest!==c.bodyDigest||fact.source_canonical!==c.canonical||fact.actor_id!==actor.userId||fact.session_id!==actor.sessionId||fact.details?.bodyDigest!==plan.bodyDigest||fact.details?.approvalRef!==r.ref||fact.details?.attempt!==r.attempt)throw conflict('Empty coverage original receipt, source or audit differs');
+  return{plan,input,body,knowledge:'KNOWN' as const};
+ });
+}
+
+/** Caller owns the transaction. Coverage triggers, original per-subject receipts and audits remain active. */
+export async function importReviewedEmptyFinanceObservationBatch(client:PoolClient,actor:Actor,inputs:ObservationImportInput[],scope:ObservationImportAdmission){
+ inputs=copy(inputs);const bound=binding(scope),plans=emptyPlans(inputs);
+ if(bound.emptyBatchDigest!==sha(canonicalize(inputs)))throw invalid('Empty batch differs from its exact internal review');
+ const r=await authorize(client,actor,scope,inputs[0]!);
+ const scopeKey=JSON.stringify(['admin',actor.userId,operation,null]);
+ await client.query(`/* finance empty original key locks */ SELECT pg_advisory_xact_lock(hashtextextended(k,0)) FROM unnest($1::text[]) WITH ORDINALITY keys(k,n) ORDER BY n`,[plans.map(p=>JSON.stringify(['supply-idempotency',scopeKey,p.plan.key]))]);
+ const subjects=[...new Set(plans.map(p=>p.plan.coverage.userId))].sort();
+ if((await client.query(`/* finance empty subject locks */ SELECT id FROM zzsh_auth_user."user" WHERE id=ANY($1::text[]) ORDER BY id COLLATE "C" FOR UPDATE`,[subjects])).rowCount!==subjects.length)throw conflict('Empty batch subject is not mapped');
+ const sourceRows=plans.map(({plan:{coverage:c}})=>({user_id:c.userId,legacy_user_id:c.legacyUserId,identity_digest:c.identityDigest}));
+ const invalidSubjects=await client.query(`/* finance empty exact source identities */ SELECT x.user_id FROM jsonb_to_recordset($1::jsonb) x(user_id text,legacy_user_id text,identity_digest text) WHERE (SELECT count(*) FROM zzsh_iam.audit_event a WHERE a.object_id=x.user_id AND a.action='user.legacy_owner.migrated' AND a.outcome='SUCCESS' AND a.details->>'sourceSystem'='legacy_mysql_restore' AND a.details->>'sourceEntity'='la_user' AND a.details->>'legacyId'=x.legacy_user_id AND a.details->>'sourceDigest'=x.identity_digest)<>1`,[JSON.stringify(sourceRows)]);
+ if(invalidSubjects.rows.length)throw conflict('Empty batch original source identity changed');
+ const earnings=plans.filter(p=>p.plan.coverage.sourceKind==='HISTORICAL_EARNINGS_LOG').map(p=>p.plan.coverage.userId);
+ const cutoff=(await client.query(`/* finance empty single cutoff */ SELECT EXISTS(SELECT 1 FROM zzsh_order.finance_opening_basis b WHERE b.user_id=ANY($1::text[]) AND b.source_kind='LEGACY_OPENING' AND b.source_system='legacy_mysql_restore' AND b.source_cutoff<>$2::timestamptz) OR EXISTS(SELECT 1 FROM zzsh_order.personal_finance_observation_coverage c WHERE c.user_id=ANY($1::text[]) AND c.source_system='legacy_mysql_restore' AND c.source_kind='HISTORICAL_EARNINGS_LOG' AND c.source_entity='la_log_earnings' AND c.source_cutoff<>$2::timestamptz) AS differs`,[earnings,r.cutoff])).rows[0];
+ if(typeof cutoff?.differs!=='boolean'||cutoff.differs)throw conflict('Empty earnings coverage and original opening cutoffs differ');
+ const original=await emptyReceiptFacts(client,actor,plans,r,true),fresh=original.filter(p=>p.knowledge==='UNKNOWN');
+ await setAuditContext(client,'admin',actor.userId,actor.sessionId,actor.requestId);
+ if(fresh.length){
+  const rows=fresh.map(({plan:{coverage:c}})=>({id:c.id,user_id:c.userId,source_system:c.sourceSystem,legacy_user_id:c.legacyUserId,source_kind:c.sourceKind,source_entity:c.sourceEntity,source_cutoff:c.cutoff,input_sha256:c.inputSha256,identity_digest:c.identityDigest,source_count:0,imported_count:0,isolated_count:0,source_set_digest:c.sourceSetDigest,imported_set_digest:c.importedSetDigest,isolated_set_digest:c.isolatedSetDigest,body_digest:c.bodyDigest,source_canonical:c.canonical}));
+  await client.query(`/* finance empty coverage insert */ INSERT INTO zzsh_order.personal_finance_observation_coverage(id,user_id,source_system,legacy_user_id,source_kind,source_entity,source_cutoff,input_sha256,identity_digest,source_count,imported_count,isolated_count,source_set_digest,imported_set_digest,isolated_set_digest,body_digest,source_canonical) SELECT id,user_id,source_system,legacy_user_id,source_kind,source_entity,source_cutoff,input_sha256,identity_digest,source_count,imported_count,isolated_count,source_set_digest,imported_set_digest,isolated_set_digest,body_digest,source_canonical FROM jsonb_populate_recordset(NULL::zzsh_order.personal_finance_observation_coverage,$1::jsonb) ORDER BY user_id COLLATE "C",id COLLATE "C"`,[JSON.stringify(rows)]);
+  const audit=fresh.map(({plan:{coverage:c},plan})=>({id:'audit_'+randomUUID().replaceAll('-',''),object_id:c.id,details:{bodyDigest:plan.bodyDigest,inputSha256:c.inputSha256,coverageBodyDigest:c.bodyDigest,subjectId:c.userId,sourceKind:c.sourceKind,sourceCount:0,importedCount:0,isolatedCount:0,approvalRef:r.ref,attempt:r.attempt,financialEffect:'NONE'}}));
+  await client.query(`/* finance empty original audit insert */ INSERT INTO zzsh_iam.audit_event(id,actor_type,actor_id,session_id,action,object_type,object_id,outcome,request_id,reason,occurred_at,details) SELECT x.id,'admin',$2,$3,'finance.history.imported','personal_finance_observation_coverage',x.object_id,'SUCCESS',$4,NULL,clock_timestamp(),x.details FROM jsonb_to_recordset($1::jsonb) x(id text,object_id text,details jsonb)`,[JSON.stringify(audit),actor.userId,actor.sessionId,actor.requestId]);
+  await client.query(`/* finance empty original receipt insert */ INSERT INTO zzsh_supply.idempotency_record(scope_key,key,request_fingerprint,response_status,response_body,publish_required) SELECT $2,x.key,x.fingerprint,200,x.body,false FROM jsonb_to_recordset($1::jsonb) x(key text,fingerprint text,body jsonb)`,[JSON.stringify(fresh.map(({plan,input,body})=>({key:plan.key,fingerprint:fingerprintRequest(operation,plan.coverage.id,input),body}))),scopeKey]);
+ }
+ await authorize(client,actor,scope,inputs[0]!);
+ return{status:200,body:{coverageCount:plans.length,created:fresh.length,replayed:plans.length-fresh.length,financialEffect:'NONE'}};
+}
+
+/** Read-only original-key recovery; absence stays UNKNOWN and never mints a new receipt. */
+export async function recoverReviewedEmptyFinanceObservationBatch(client:PoolClient,actor:Actor,inputs:ObservationImportInput[],scope:ObservationImportAdmission){
+ if(binding(scope).emptyBatchDigest!==sha(canonicalize(inputs)))throw invalid('Empty recovery batch changed');
+ const r=await authorize(client,actor,scope,inputs[0]!,true),facts=await emptyReceiptFacts(client,actor,emptyPlans(inputs),r);
+ await authorize(client,actor,scope,inputs[0]!,true);
+ return facts.map(p=>({key:p.plan.key,coverageId:p.plan.coverage.id,knowledge:p.knowledge,receipt:p.knowledge==='KNOWN'?{status:200,body:p.body}:null,financialEffect:'NONE' as const}));
 }

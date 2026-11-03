@@ -12,6 +12,7 @@ import type { PoolClient } from "pg";
 
 import { loadEffectiveAdminAccess, requirePermission } from "../auth/admin-authorization";
 import { recordAudit } from "../auth/security-core";
+import { assignAccountNumber } from "../supply/account-number";
 import { GAME_SERVICE, requireWritableGameService } from "../supply/game-services";
 import { lockLegacySource } from "../supply/legacy-observation";
 import { legacyOwnerUserId } from "../supply/legacy-user-migration";
@@ -86,27 +87,23 @@ export async function createLegacyOwnerRentalAccount(
       await requireWritableGameService(client, normalizedInput.gameId, GAME_SERVICE.ACCOUNT_RENTAL);
       await assertGameScope(client, actor.id, access!.isBoss, normalizedInput.gameId);
       const owner = (
-        await client.query<{ provider: string; provider_reference: string; account_status: string; suspended: boolean }>(
-          `SELECT i.provider, i.provider_reference, i.account_status, u.suspended
+        await client.query<{ provider: string; provider_reference: string; account_status: string; suspended: boolean; migration_proven: boolean }>(
+          `SELECT i.provider, i.provider_reference, i.account_status, u.suspended,
+                  EXISTS (SELECT 1 FROM zzsh_iam.audit_event
+                    WHERE object_id=u.id AND action='user.legacy_owner.migrated' AND outcome='SUCCESS'
+                      AND details->>'sourceSystem'=$2 AND details->>'sourceEntity'='la_user'
+                      AND details->>'legacyId'=$3 AND details->>'sourceDigest'=$4) AS migration_proven
              FROM zzsh_auth_user."user" u
              JOIN zzsh_iam.user_identity_state i ON i.user_id = u.id
             WHERE u.id = $1`,
-          [ownerUserId],
+          [ownerUserId, normalizedInput.sourceSystem, normalizedInput.owner.legacyId, normalizedInput.owner.sourceDigest],
         )
       ).rows[0];
       // Importing an unpublished historical holding does not restore the owner's trading eligibility.
       if (!owner || owner.provider !== MIGRATED_PROVIDER || owner.provider_reference !== `la_user:${normalizedInput.owner.legacyId}`
         || !["ACTIVE","FROZEN","CANCELLED"].includes(owner.account_status) || typeof owner.suspended !== "boolean")
         throw conflict("The target account owner is not the migrated legacy owner");
-      const migrated = await client.query(
-        `SELECT 1 FROM zzsh_iam.audit_event
-          WHERE object_id=$1 AND action='user.legacy_owner.migrated' AND outcome='SUCCESS'
-            AND details->>'sourceSystem'=$2 AND details->>'sourceEntity'='la_user'
-            AND details->>'legacyId'=$3 AND details->>'sourceDigest'=$4
-          LIMIT 1`,
-        [ownerUserId, normalizedInput.sourceSystem, normalizedInput.owner.legacyId, normalizedInput.owner.sourceDigest],
-      );
-      if (!migrated.rowCount) throw conflict("The target account owner has no matching migration evidence");
+      if (!owner.migration_proven) throw conflict("The target account owner has no matching migration evidence");
       return false;
     },
     async () => {
@@ -153,5 +150,6 @@ export async function createLegacyOwnerRentalAccount(
       return { status: 200, body: { accountId } };
     },
   );
+  await assignAccountNumber(client, accountId);
   return { accountId, replayed: result.replayed };
 }

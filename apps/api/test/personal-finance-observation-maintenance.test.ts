@@ -29,7 +29,7 @@ function fixture(){
   if(sql.includes('finance single cutoff admission'))return{rows:[{openingDiffers:state.cutoffGate.openingDiffers,coverageDiffers:state.cutoffGate.coverageDiffers}],rowCount:1};
   if(sql.includes('"requestFingerprint"')){const r=state.receipts.get(args[1]);return{rows:r?[{requestFingerprint:r.fingerprint,responseStatus:r.status,responseBody:r.body,publishRequired:false}]:[]};}
   if(sql.includes('request_fingerprint AS fingerprint')){if(state.readError)throw Error('FIXTURE_READBACK_UNKNOWN');const r=state.receipts.get(args[1]);return{rows:r?[r]:[]};}
-  if(sql.includes('finance history existing observation')){const row=state.observations.get(args.join(':'));return{rows:row?[row]:[]};}
+  if(sql.includes('finance history existing observation'))return{rows:args[2].flatMap((id:string)=>{const row=state.observations.get([args[0],args[1],id].join(':'));return row?[row]:[];})};
   if(sql.startsWith('INSERT INTO zzsh_order.personal_finance_observation(')){
    state.observations.set([args[3],args[5],args[6]].join(':'),{id:args[0],user_id:args[1],basis_id:null,source_kind:args[2],source_type:'LEGACY_MYSQL',source_system:args[3],legacy_user_id:args[4],source_entity:args[5],source_id:args[6],source_digest:args[7],source_canonical:args[8],source_event_at:args[9],snapshot:JSON.parse(args[10]),included_in_opening:false});return{rows:[]};
   }

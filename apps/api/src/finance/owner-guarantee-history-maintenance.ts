@@ -3,7 +3,7 @@ import {createHash} from 'node:crypto';
 import {canonicalize} from '../supply/content-hash';
 import {recordAudit,setAuditContext} from '../auth/security-core';
 import {conflict,ensureOnlyFields,fingerprintRequest,invalid,withIdempotency} from '../supply/supply-util';
-import {assertFinanceMaintenanceResource,authorizeFinanceMaintenance,type FinanceOpeningReview} from './personal-finance-maintenance';
+import {assertFinanceMaintenanceResource,authorizeFinanceMaintenance,isReviewedFinanceMaintenanceResource,type FinanceOpeningReview} from './personal-finance-maintenance';
 import {planOwnerGuaranteeHistoryBatch,type OwnerGuaranteeHistoryBatch} from './owner-guarantee-history';
 type Actor={userId:string;sessionId:string;requestId:string};
 export type GuaranteeHistoryReview=Pick<FinanceOpeningReview,'ref'|'attempt'|'actor'|'resource'|'notBefore'|'expiresAt'>&{userId:string;inputSha256:string;bodyDigest:string;cutoff:string;sourceCount:number};
@@ -25,7 +25,7 @@ export async function bindReviewedOwnerGuaranteeHistory(c:PoolClient,a:Actor,rev
   ||![r.inputSha256,r.bodyDigest].every(s=>typeof s==='string'&&/^[a-f0-9]{64}$/.test(s))||!Number.isSafeInteger(r.sourceCount)||r.sourceCount<0||r.sourceCount>50000
   ||![r.notBefore,r.expiresAt,r.cutoff].every(s=>typeof s==='string'&&/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(s)&&Number.isFinite(Date.parse(s)))
   ||Date.parse(r.cutoff)>Date.parse(r.notBefore)||Date.parse(r.notBefore)>=Date.parse(r.expiresAt)||r.resource.host!=='127.0.0.1'||r.resource.port!==55432
-  ||!/^zzsh_test_order_[a-z][a-z0-9_]{0,20}$/.test(r.resource.database)||r.resource.marker!=='zzsh:order-reservation-test:v1'
+  ||!isReviewedFinanceMaintenanceResource(r.resource)
   ||![r.resource.oid,r.resource.roleOid].every(n=>Number.isSafeInteger(n)&&n>0)||![r.resource.role,r.resource.owner].every(s=>/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(s)))throw invalid('Exact guarantee source/resource/window required');
  const token=Object.freeze({kind:'REVIEWED_OWNER_GUARANTEE_HISTORY' as const});bindings.set(token,{review:r,recoveryOnly:mode==='recover'});try{await authorize(c,a,token,undefined,mode==='recover');return token;}catch(e){bindings.delete(token);throw e;}
 }
@@ -37,8 +37,14 @@ export async function importReviewedOwnerGuaranteeHistory(c:PoolClient,a:Actor,i
  input=copy(input);const plan=planOwnerGuaranteeHistoryBatch(input),r=await authorize(c,a,s,input);await mappedIdentity(c,input);
  const result=await withIdempotency(c,{realm:'admin',principalId:a.userId,operation},plan.key,fingerprintRequest(operation,input.userId,input),async()=>{await authorize(c,a,s,input);await mappedIdentity(c,input);},async()=>{
   await c.query(`SELECT id FROM zzsh_auth_user."user" WHERE id=$1 FOR UPDATE`,[input.userId]);await setAuditContext(c,'admin',a.userId,a.sessionId,a.requestId);
+  const mapped=plan.rows.filter(row=>row.accountId!==null);
+  if(mapped.length){
+   const matches=await c.query(`SELECT 1 FROM unnest($1::text[],$2::text[]) AS requested(legacy_id,account_id)
+     JOIN zzsh_supply.legacy_supply_map m ON m.source_system='legacy_mysql_restore' AND m.source_entity='la_rental_accounts'
+       AND m.legacy_id=requested.legacy_id AND m.account_id=requested.account_id`,[mapped.map(row=>row.sourceId),mapped.map(row=>row.accountId)]);
+   if(matches.rowCount!==mapped.length)throw conflict('Original guarantee account mapping changed');
+  }
   for(const row of plan.rows){
-   if(row.accountId!==null){const map=await c.query(`SELECT 1 FROM zzsh_supply.legacy_supply_map WHERE source_system='legacy_mysql_restore' AND source_entity='la_rental_accounts' AND legacy_id=$1 AND account_id=$2`,[row.sourceId,row.accountId]);if(map.rowCount!==1)throw conflict('Original guarantee account mapping changed');}
    await c.query(`INSERT INTO zzsh_order.legacy_owner_guarantee_observation(id,user_id,legacy_user_id,account_id,legacy_account_id,source_cutoff,input_sha256,identity_digest,source_canonical,source_digest)
     VALUES($1,$2,$3,$4,$5,$6::timestamptz,$7,$8,$9,$10)`,['guarantee_history_'+sha(canonicalize([input.userId,row.sourceId,input.cutoff])).slice(0,40),input.userId,input.legacyUserId,row.accountId,row.sourceId,input.cutoff,input.inputSha256,input.identityDigest,row.sourceCanonical,row.sourceDigest]);
   }

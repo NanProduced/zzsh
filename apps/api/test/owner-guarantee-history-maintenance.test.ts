@@ -4,6 +4,7 @@ import {createHash} from 'node:crypto';
 import {canonicalize} from '../src/supply/content-hash';
 import {bindReviewedOwnerGuaranteeHistory,importReviewedOwnerGuaranteeHistory,recoverReviewedOwnerGuaranteeHistory,type GuaranteeHistoryReview} from '../src/finance/owner-guarantee-history-maintenance';
 import {planOwnerGuaranteeHistoryBatch,type OwnerGuaranteeHistoryBatch} from '../src/finance/owner-guarantee-history';
+import {REGRESSION_DATABASE,REGRESSION_MARKER,REGRESSION_MIGRATION_USER} from '../src/config/test-resource';
 const sha=(v:unknown)=>createHash('sha256').update(canonicalize(v)).digest('hex'),actor={userId:'fixture-boss',sessionId:'fixture-session',requestId:'fixture-request'};
 function fixture(zero=false){
  const input:OwnerGuaranteeHistoryBatch={userId:'fixture-owner',legacyUserId:'11',identityDigest:'a'.repeat(64),inputSha256:'b'.repeat(64),cutoff:'2026-09-13T13:31:22.000Z',sourceCount:zero?0:1,rows:zero?[]:[{userId:'fixture-owner',legacyUserId:'11',accountId:'fixture-account',source:{id:'101',user_id:'11',no:'FIXTURE',pay_money:'0.00',pay_is:'0',pay_time:null,return_is:null},payOrders:[{id:'501',order_id:'101',order_type:'2',pay_money:'5.00',pay_is:'1',create_time:'1779469700',pay_time:'1779469800',pay_order_sn:'FIXTURE-MERCHANT'}]}],isolated:[]};
@@ -16,7 +17,7 @@ function fixture(zero=false){
   if(sql.includes('admin_security'))return{rows:[{status:'ACTIVE',isBoss:true,passwordChangeRequired:false}],rowCount:1};
   if(sql.includes('SELECT suspended'))return{rows:[{suspended:false}],rowCount:1};
   if(sql.includes('owner guarantee maintenance schema'))return{rows:[{ready:true,owner:resource.role}],rowCount:1};
-  if(sql.includes('guarantee history source identity')||sql.includes('FROM zzsh_supply.legacy_supply_map'))return{rows:state.mapped?[{}]:[],rowCount:state.mapped?1:0};
+  if(sql.includes('guarantee history source identity')||sql.includes('JOIN zzsh_supply.legacy_supply_map'))return{rows:state.mapped?[{}]:[],rowCount:state.mapped?1:0};
   if(sql.includes('"requestFingerprint"'))return{rows:state.receipt?[{requestFingerprint:state.receipt.fingerprint,responseStatus:state.receipt.status,responseBody:state.receipt.body,publishRequired:false}]:[],rowCount:state.receipt?1:0};
   if(sql.includes('request_fingerprint AS fingerprint'))return{rows:state.receipt?[state.receipt]:[],rowCount:state.receipt?1:0};
   if(sql.includes('INSERT INTO zzsh_order.legacy_owner_guarantee_observation'))state.observations.push({id:args[4],digest:args[9],canonical:args[8]});
@@ -37,6 +38,12 @@ test('actual guarantee history importer records only observations/coverage/audit
  const count=writes.length;await importReviewedOwnerGuaranteeHistory(f.c,actor,f.input,s);assert.equal(f.state.queries.filter(q=>/^INSERT|^UPDATE|^DELETE/.test(q.sql)).length,count);
  const recovered=await recoverReviewedOwnerGuaranteeHistory(f.c,actor,f.input,s);assert.equal(recovered.knowledge,'KNOWN');assert.equal(recovered.financialEffect,'NONE');
  f.state.badRow=true;await assert.rejects(recoverReviewedOwnerGuaranteeHistory(f.c,actor,f.input,s),(e:any)=>e.status===409);
+});
+
+test('guarantee history reuses the exact registered regression maintenance gate and still rejects other databases',async()=>{
+ const f=fixture();Object.assign(f.review.resource,{database:REGRESSION_DATABASE,marker:REGRESSION_MARKER,owner:'zzsh',role:REGRESSION_MIGRATION_USER});Object.assign(f.c.connectionParameters,{database:REGRESSION_DATABASE,user:REGRESSION_MIGRATION_USER});
+ const scope=await bindReviewedOwnerGuaranteeHistory(f.c,actor,f.review);const result=await importReviewedOwnerGuaranteeHistory(f.c,actor,f.input,scope);assert.equal((result.body as any).financialEffect,'NONE');assert.equal(f.state.observations.length,1);
+ for(const change of [{database:'zzsh_dev_daily'},{marker:'different'},{role:'arbitrary_role'}]){const g=fixture();await assert.rejects(bindReviewedOwnerGuaranteeHistory(g.c,actor,{...g.review,resource:{...f.review.resource,...change}}));assert.equal(g.state.observations.length,0);}
 });
 test('proved zero source universe keeps its coverage; missing receipt and changed binding never initialize funds or replay',async()=>{
  const f=fixture(true),s=await bindReviewedOwnerGuaranteeHistory(f.c,actor,f.review);assert.equal((await recoverReviewedOwnerGuaranteeHistory(f.c,actor,f.input,s)).knowledge,'UNKNOWN');assert.equal(f.state.queries.filter(q=>/^INSERT/.test(q.sql)).length,0);
