@@ -24,7 +24,7 @@ const ledgerSubject = `COALESCE(r.subject_id,CASE WHEN (${FINANCE_LEDGER_BUCKET_
 const ledgerDocument = `CASE WHEN r.event_kind='OPENING' THEN 'OPENING:'||r.basis_id WHEN r.source_entity='withdrawal_intent' THEN 'WITHDRAWAL:'||r.source_id WHEN r.source_entity='joinpay_withdrawal_intent' THEN 'JOINPAY_WITHDRAWAL:'||r.source_id WHEN r.source_kind='NATIVE_RENTAL_REFERRAL' THEN 'DISTRIBUTION:'||r.economic_root_id WHEN r.source_kind='LEGACY_CONTINUATION_DUTY' THEN 'LEGACY_DUTY:'||r.source_id WHEN r.source_entity='owner_guarantee_payment' THEN 'GUARANTEE_PAYMENT:'||r.source_id WHEN r.source_entity='owner_guarantee_refund' THEN 'GUARANTEE_REFUND:'||r.source_id WHEN r.order_id IS NOT NULL THEN 'ORDER:'||r.order_id ELSE 'POSTING:'||COALESCE(r.posting_id,r.id) END`;
 
 /** The same scope is applied in SQL before the matched-result ceiling. Values never become SQL. */
-export function scopedFinanceSql(source: string, family: "ledger" | "history", scope: FinanceLoadScope, limit: number | null, withdrawalsReady: boolean, joinpayReady = false, historySnapshotRaw = false, foldWithdrawalChildren = false) {
+export function scopedFinanceSql(source: string, family: "ledger" | "history", scope: FinanceLoadScope, limit: number | null, withdrawalsReady: boolean, joinpayReady = false, historySnapshotRaw = false, foldWithdrawalChildren = false, excludeOpening = false) {
   const values: unknown[] = [], conditions: string[] = [], bind = (value: unknown) => `$${values.push(value)}`;
   const bucket = family === "ledger" ? FINANCE_LEDGER_BUCKET_SQL : historyBucket;
   const snapshot = historySnapshotRaw ? "r.extra_evidence" : "r.extra_evidence->'snapshot'";
@@ -46,6 +46,7 @@ export function scopedFinanceSql(source: string, family: "ledger" | "history", s
     if (f.scope !== "ALL") conditions.push(`(${subject})=${bind(f.scope)}`);
     if (f.bucket !== "ALL") conditions.push(`(${bucket})=${bind(f.bucket)}`);
     if (f.kind !== "ALL") conditions.push(`(${kind})=${bind(f.kind)}`);
+    else if (excludeOpening) conditions.push(`(${kind})<>'OPENING'`);
     if (f.state !== "ALL") conditions.push(`(${state})=${bind(f.state)}`);
     if (f.period) { const start = bind(`${f.from}T00:00:00+08:00`), end = bind(new Date(Date.parse(`${f.to}T00:00:00+08:00`) + 86400_000).toISOString()); conditions.push(`(r.at IS NULL OR (r.at::timestamptz>=${start}::timestamptz AND r.at::timestamptz<${end}::timestamptz))`); }
     if (f.q.startsWith("ORDER_LINK:")) conditions.push(family==='ledger'?`r.order_id=${bind(f.q.slice(11))}`:'FALSE');
@@ -325,10 +326,10 @@ export function financeLookupPageSql(ledger: string, history: string, ready: Fin
     const offset = values.length; values.push(...query.values);
     return query.text.replace(/\$(\d+)/g, (_, n: string) => `$${Number(n) + offset}`);
   }, bind = (value: unknown) => `$${values.push(value)}`;
-  const ledgerSql = include(scopedFinanceSql(ledger, "ledger", scope, null, !!ready.withdrawals, !!ready.joinpay_withdrawals));
+  const ledgerSql = include(scopedFinanceSql(ledger, "ledger", scope, null, !!ready.withdrawals, !!ready.joinpay_withdrawals, false, false, true));
   // A-3: the paged/lookup document list counts one row per business document, so a withdrawal
   // application's technical postings fold into it instead of doubling the withdrawal口径.
-  const historySql = include(scopedFinanceSql(history, "history", scope, null, !!ready.withdrawals, false, historySnapshotRaw, true));
+  const historySql = include(scopedFinanceSql(history, "history", scope, null, !!ready.withdrawals, false, historySnapshotRaw, true, true));
   const exactSourceKeys = exactFinanceSourceKeys(ready, scope, bind);
   const orderKeys = [false, true].filter(legacy => legacy ? ready.legacy_orders : ready.native_orders).map(legacy => {
     const sql = include(financeOrderSql(legacy, scope, [], null));
