@@ -107,6 +107,16 @@ test('not-integrated binding is not displayed as no bank and cannot create a quo
   try { await p.render(); assert.match(p.host.textContent, /暂时无法查看收款资料/); assert.doesNotMatch(p.host.textContent, /尚未绑定收款银行卡/); assert.equal([...p.host.querySelectorAll('button')].some(x => x.textContent === '绑定银行卡'), false); await p.fill('.bank-withdraw-form input', '100'); assert.equal(p.host.querySelector('.bank-withdraw-form button').disabled, true); assert.equal(p.calls.filter(x => x.method === 'quote').length, 0); } finally { await p.close(); }
 });
 
+test('unavailable bank information stays unknown in the withdrawal steps', async () => {
+  const p=await probe({bank:{readBankBinding:async()=>unavailableBank},channel:{readChannelWithdrawalOptions:async()=>options(unavailableBank,false)}});
+  try { await p.render(); const steps=p.host.querySelector('[aria-label="提现指引流程"]'); assert.match(steps.textContent,/收款资料待确认/);assert.doesNotMatch(p.host.textContent,/自动解锁|极速审核到账|尚未绑定收款银行卡/); } finally { await p.close(); }
+});
+
+test('filling a large balance preserves every cent without promising withdrawal eligibility', async () => {
+  const p=await probe({availableBalance:'9007199254740993'});
+  try { await p.render(); await p.click('填写余额'); assert.equal(p.host.querySelector('.bank-withdraw-form input').value,'90071992547409.93'); assert.doesNotMatch(p.host.textContent,/全部提现|随时将账户余额提现到账/); assert.equal(p.calls.filter(call=>call.method==='quote').length,0); } finally { await p.close(); }
+});
+
 test('editing never prefills previous name/card and saved data is not bank verification', async () => {
   const p = await probe();
   try { await p.render(); await p.click('修改收款资料'); assert.equal(p.host.querySelector('[name="bank-holder-name"]').value, ''); assert.equal(p.host.querySelector('[name="bank-card-number"]').value, ''); assert.match(p.host.textContent, /银行卡归属尚未核验/); assert.doesNotMatch(p.host.querySelector('.bank-saved .info-status-badge').textContent, /验证/); } finally { await p.close(); }

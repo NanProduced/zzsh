@@ -20,14 +20,15 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { ListPagination } from '@/components/admin-list/list-pagination';
 import "./admin-finance.css";
 import { AdminOrderSettlementEvidence, ORDER_SETTLEMENT_FLAT_KEYS, orderSettlementSummary } from './admin-order-settlement-evidence';
+import type { ChannelSearchClue } from "./admin-channel-evidence-panel";
 import { sourceFamilyText } from './admin-channel-evidence-model';
-import { FinanceOrderPayment, FinanceOrderCosts, financeOrderState, FinanceLifecycleProgress } from './finance-order-facts';
+import { FinanceOrderPayment, FinanceOrderCosts, financeOrderState } from './finance-order-facts';
 import { beijingCalendarDate, beijingRangeStart } from '../workspace/beijing-time';
 
 const quickKinds = [
   { key: 'ALL', label: '全部业务' },
-  { key: 'PAYMENT', label: '订单支付' },
-  { key: 'SETTLEMENT', label: '完结结算' },
+  { key: 'PAYMENT', label: '付款记录' },
+  { key: 'SETTLEMENT', label: '结算记录' },
   { key: 'REFUND', label: '用户退款' },
   { key: 'WITHDRAWAL', label: '余额提现' },
   { key: 'GUARANTEE', label: '上架保证金' },
@@ -39,9 +40,8 @@ function getAvailableStates(kind: string): Record<string, string> {
   if (kind === 'PAYMENT') {
     return {
       ALL: '全部支付状态',
-      SITE_ACCEPTED: '已确认付款 (成功)',
-      REVIEW_REQUIRED: '异常收款待核',
-      NO_ACCEPTED_PAYMENT: '尚未确认付款',
+      POSTED: '已入账',
+      HISTORICAL_OBSERVED: '历史记录',
     };
   }
   if (kind === 'WITHDRAWAL') {
@@ -49,8 +49,9 @@ function getAvailableStates(kind: string): Record<string, string> {
       ALL: '全部提现状态',
       SUBMITTING: '提交中',
       PROCESSING: '处理中',
-      SUCCEEDED: '本地受控成功',
+      SUCCEEDED: '本地成功记录',
       FAILED: '出款失败',
+      HISTORICAL_OBSERVED: '历史记录',
       UNKNOWN: '结果未知',
     };
   }
@@ -59,13 +60,15 @@ function getAvailableStates(kind: string): Record<string, string> {
       ALL: '全部结算状态',
       POSTED: '已完结入账',
       PENDING: '履约中待结算',
-      CANCELLED: '已取消未结算',
+      ORDER_RECORDED: '新平台订单记录',
+      HISTORICAL_ORDER_RECORDED: '旧平台订单记录',
     };
   }
   if (kind === 'REFUND') {
     return {
       ALL: '全部退款状态',
       REFUND_PAYABLE_RECORDED: '应退责任已记录',
+      HISTORICAL_OBSERVED: '历史记录',
       POSTED: '已入账退款',
     };
   }
@@ -148,21 +151,24 @@ function statusDot(state: string) {
 
 type Snapshot = Extract<SessionSnapshot, { authenticated: true }>;
 type SavedView = { applied: FinanceFilters; draft: FinanceFilters; page: number; pageSize?: number; scroll: number; focus?: string; snapshot?: string };
-type Origin = { path: string; parent?: string };
+type Origin = { path: string; parent?: string; channelSearch?: ChannelSearchClue };
 const savedViews = new Map<string, SavedView>(), origins = new Map<string, Origin>();
 let currentIdentity = "";
-export function financeContextIdentity(snapshot: Snapshot): string { return `${snapshot.adminUserId}:${snapshot.session.id}:${snapshot.security.status}:${snapshot.security.passwordChangeRequired}:${snapshot.session.locked}:${[...snapshot.permissions].sort().join("|")}`; }
+export function financeContextIdentity(snapshot: Snapshot): string { return `${snapshot.adminUserId}:${snapshot.session.id}:${snapshot.security.isBoss}:${snapshot.security.status}:${snapshot.security.passwordChangeRequired}:${snapshot.session.locked}:${[...snapshot.permissions].sort().join("|")}`; }
 export function clearFinanceContexts(): void { savedViews.clear(); origins.clear(); currentIdentity = ""; }
-export function registerFinanceOrigin(path: string, identity?: string): string {
+export function registerFinanceOrigin(path: string, identity?: string, channelSearch?: ChannelSearchClue): string {
   if (identity && identity !== currentIdentity) { clearFinanceContexts(); currentIdentity = identity; }
-  const origin = crypto.randomUUID(); origins.set(origin, { path }); return origin;
+  const origin = crypto.randomUUID(); origins.set(origin, { path, channelSearch }); return origin;
 }
 export function financeOriginPath(origin: string | undefined, snapshot: Snapshot, fallback?: string): string | undefined {
-  const path = financeContextIdentity(snapshot) === currentIdentity && origin ? origins.get(origin)?.path : undefined;
-  if (path) return path;
+  const source = financeContextIdentity(snapshot) === currentIdentity && origin ? origins.get(origin) : undefined;
+  if (source) return source.channelSearch ? source.path + (source.path.includes('?') ? '&' : '?') + new URLSearchParams({ evidenceOrigin: origin! }) : source.path;
   const safe = sanitizeFinanceReturn(fallback);
   const target = safe ? new URL(safe,'https://workspace.invalid') : undefined;
   return target && canOpenKind(tabFromLocation(target.pathname,target.search).kind,{permissions:snapshot.permissions,isBoss:snapshot.security.isBoss}) ? safe : undefined;
+}
+export function financeChannelSearch(origin: string | undefined, snapshot: Snapshot): ChannelSearchClue | undefined {
+  return financeContextIdentity(snapshot) === currentIdentity && origin ? origins.get(origin)?.channelSearch : undefined;
 }
 function FinanceSelect({ label, value, options, onChange }: { label: string; value: string; options: Record<string, string>; onChange: (value: string) => void }) {
   return (
@@ -229,7 +235,7 @@ function historicalRelationDenied(historical: HistoricalFinanceDisplay | undefin
 function visibleEvidence(evidence: FinanceResponse['evidence'], historical: HistoricalFinanceDisplay | undefined, orderRead: boolean, documentRead: boolean, settlement?: FinanceResponse['orderSettlement']) {
   const denied = historicalRelationDenied(historical, orderRead, documentRead);
   const identityKeys = new Set(['originalReference', 'originalNumber', 'originalOrderNumber', 'originalOrderId', 'ownerSubjectId', 'renterSubjectId', 'intentId', 'paymentConfirmationId', 'settlementVersionId', 'accountId', 'legacyAccountId']);
-  return Object.entries(evidence ?? {}).filter(([key]) => evidenceLabels[key] && !(settlement && ORDER_SETTLEMENT_FLAT_KEYS.has(key)) && !(denied && identityKeys.has(key)));
+  return Object.entries(evidence ?? {}).filter(([key]) => evidenceLabels[key] && !(settlement && ORDER_SETTLEMENT_FLAT_KEYS.has(key)) && !(settlement?.business && key === 'recordedPaidCents') && !(denied && identityKeys.has(key)));
 }
 
 const withdrawalStateText: Record<string,string> = { SUCCEEDED: '本地受控成功（非银行到账）', FAILED: '本地失败', PAYOUT_POSTED: '本地出款已记录', RELEASE_POSTED: '本地释放已记录', PROCESSING: '本地处理中', SUBMITTING: '提交中', UNKNOWN: '结果未知' };
@@ -318,6 +324,8 @@ export function AdminFinanceView({ tab, snapshot, onOpenPath, onQueryChange, onR
   const requestKey = JSON.stringify([tab.path, applied, page, pageSize, tab.query.entry ?? ""]);
   const body = !externalNavigationChanged && read?.identity === identity && read.requestKey === requestKey ? read.body : undefined;
   const settlementEvidence = body?.orderSettlement?.schema === 'admin-order-settlement-evidence.v1' && body.orderSettlement.documentRef === body.document?.ref ? body.orderSettlement : undefined;
+  const channelOrders = (body?.related ?? []).filter(link => link.path?.startsWith('/orders/'));
+  const channelOrderId = channelOrders.length === 1 ? tabFromLocation(channelOrders[0]!.path!).objectId : undefined;
   const documentAllowed = has(snapshot, "finance.document.read");
   const active = snapshot.security.status === 'ACTIVE' && !snapshot.security.passwordChangeRequired && !snapshot.session.locked;
   const allowed = active && (documentId !== null ? documentAllowed : period || subjectId ? has(snapshot, "finance.read") : has(snapshot, "finance.read") || documentAllowed);
@@ -466,7 +474,8 @@ export function AdminFinanceView({ tab, snapshot, onOpenPath, onQueryChange, onR
     const historical = body.document.historical;
     const relationVisible = historical?.association?.state === 'MATCHED' && !historicalRelationDenied(historical, has(snapshot, 'order.read'), documentAllowed);
     const text = [financeRecordNumber(body.document, body.document.number), `${financeDocumentLabel(body.document)} · ${recordState(body.document)} · ${financeEntryScope(body.document)}`, `截至：${financeTime(body.asOf)}`,
-      ...(body.document.orderLifecycle ? [`${body.document.orderLifecycle.origin === 'NATIVE' ? '本站接纳付款' : '旧记录付款'}：${financeMoney(['SITE_ACCEPTED','LEGACY_RECORDED'].includes(body.document.orderLifecycle.payment.state) ? body.document.orderLifecycle.payment.amountCents : null)}`, `确认付款时间：${financeTime(body.document.orderLifecycle.payment.state === 'SITE_ACCEPTED' ? body.document.orderLifecycle.payment.confirmedAt : null)}`, ...(body.document.parties ? [`号主：${body.document.parties.owner.name}`, `租客：${body.document.parties.renter.name}`] : [])] : []),
+      ...(body.document.orderLifecycle && !settlementEvidence?.business ? [`${body.document.orderLifecycle.origin === 'NATIVE' ? '本站接纳付款' : '旧记录付款'}：${financeMoney(['SITE_ACCEPTED','LEGACY_RECORDED'].includes(body.document.orderLifecycle.payment.state) ? body.document.orderLifecycle.payment.amountCents : null)}`, `确认付款时间：${financeTime(body.document.orderLifecycle.payment.state === 'SITE_ACCEPTED' ? body.document.orderLifecycle.payment.confirmedAt : null)}`] : []),
+      ...(body.document.parties ? [`号主：${body.document.parties.owner.name}`, `租客：${body.document.parties.renter.name}`] : []),
       ...(body.entries ?? []).map(entry => `${entry.subjectName} / ${financeIsHistorical(entry) ? '历史变动' : bucketLabels[entry.bucket]}：${financeMoney(entry.deltaCents)}，${entryClass(entry)}，${entry.id}`),
       ...(historical ? ['历史记录不改变当前钱包；渠道未核。', ...historicalFinanceFacts(historical).map(([name, value]) => `${name}：${value}`), ...(relationVisible && historical.association.number ? [`关联业务号：${historical.association.number}`, ...(historical.association.kind==='WITHDRAWAL'?['提现申请与余额扣款属于同一笔业务，不重复汇总。']:[])] : [])] : []),
       ...(settlementEvidence ? orderSettlementSummary(settlementEvidence) : []),
@@ -498,7 +507,7 @@ export function AdminFinanceView({ tab, snapshot, onOpenPath, onQueryChange, onR
     const isOpening = document.kind === 'OPENING';
     const displayLabel = !financeIsHistorical(document) ? `${financeDocumentLabel(document)}` : "历史记录";
     const linkTitle = financeIsHistorical(document) ? `${financeDocumentLabel(document)} · ${document.historical?.originalLogNumber || document.number}` : isOpening ? `期初承接凭证 (${document.subjects.map(s => s.name).join(' / ') || '主体'})` : financeRecordNumber(document, document.number);
-    return <TableRow key={document.ref}><TableCell><div className="flex items-center gap-2 mb-1">{kindBadge(document)}<span className="text-xs text-muted-foreground">{displayLabel}</span></div><Button variant="link" className="finance-object-link p-0 h-auto font-medium text-sm leading-normal text-left" disabled={!documentAllowed} title={!documentAllowed?"需要单据资金读取能力":undefined} data-finance-focus={document.ref} onClick={() => open(documentPath(document), linkTitle, document.ref)}>{linkTitle}<ArrowUpRight size={13} className="shrink-0 ml-1 text-muted-foreground"/></Button>{financeIsHistorical(document) ? <small className="block text-muted-foreground text-xs mt-1">{financeRecordNumber(document, document.number)}</small> : isOpening ? <small className="block font-mono text-[11px] text-muted-foreground/75 mt-0.5 truncate max-w-[280px]" title={document.number}>批次：{document.number}</small> : null}</TableCell><TableCell><span className="text-sm font-medium">{document.subjects.map(subject => subject.name).join(" / ")}</span></TableCell><TableCell><div className="flex items-center text-sm">{statusDot(document.state)}<span>{recordState(document)}</span></div><small className="block text-muted-foreground text-xs mt-1">{financeEntryScope(document)}</small>{historicalDetail(document.historical, document.kind, document.ref)}</TableCell><TableCell className="numeric">{document.orderLifecycle?.payment.state === 'SITE_ACCEPTED' ? <strong className="block text-sm text-emerald-600 dark:text-emerald-400">+{financeMoney(document.orderLifecycle.payment.amountCents)}</strong> : null}{document.requestedAmountCents !== null ? <strong className="block text-sm">{financeIsHistorical(document) ? '原申请 ' : ''}{financeMoney(document.requestedAmountCents)}</strong> : financeIsHistorical(document) ? document.amounts.map(amount => <strong key={amount.bucket} className="block text-sm">历史变动 {amount.unknownCount ? '待核' : financeMoney(amount.knownNetCents)}</strong>) : document.amounts.map(amount=><span key={amount.bucket} className="block text-xs text-muted-foreground">{bucketLabels[amount.bucket]??'科目待核'} <strong className="text-sm text-foreground tabular-nums ml-1 font-semibold">{amount.unknownCount?'未核定':financeMoney(amount.knownNetCents)}</strong></span>)}</TableCell><TableCell><small className="text-xs text-muted-foreground block whitespace-nowrap">{financeTime(document.occurredAt)}</small></TableCell><TableCell className="text-right"><Button variant="ghost" size="sm" className="h-8 px-2.5 text-xs gap-1 hover:text-primary" disabled={!documentAllowed} title={!documentAllowed?"需要单据资金读取能力":undefined} onClick={() => open(documentPath(document), linkTitle, document.ref)}>查看<ArrowUpRight size={13} /></Button></TableCell></TableRow>;
+    return <TableRow key={document.ref}><TableCell><div className="flex items-center gap-2 mb-1">{kindBadge(document)}<span className="text-xs text-muted-foreground">{displayLabel}</span></div><Button variant="link" className="finance-object-link p-0 h-auto font-medium text-sm leading-normal text-left" disabled={!documentAllowed} title={!documentAllowed?"需要单据资金读取能力":undefined} data-finance-focus={document.ref} onClick={() => open(documentPath(document), linkTitle, document.ref)}>{linkTitle}<ArrowUpRight size={13} className="shrink-0 ml-1 text-muted-foreground"/></Button>{financeIsHistorical(document) ? <small className="block text-muted-foreground text-xs mt-1">{financeRecordNumber(document, document.number)}</small> : isOpening ? <small className="block font-mono text-[11px] text-muted-foreground/75 mt-0.5 truncate max-w-[280px]" title={document.number}>批次：{document.number}</small> : null}</TableCell><TableCell><span className="text-sm font-medium">{document.subjects.map(subject => subject.name).join(" / ")}</span></TableCell><TableCell><div className="flex items-center text-sm">{statusDot(document.state)}<span>{recordState(document)}</span></div><small className="block text-muted-foreground text-xs mt-1">{financeEntryScope(document)}</small>{historicalDetail(document.historical, document.kind, document.ref)}</TableCell><TableCell className="numeric">{document.orderLifecycle && ['SITE_ACCEPTED', 'LEGACY_RECORDED'].includes(document.orderLifecycle.payment.state) ? <strong className="block text-sm">{financeMoney(document.orderLifecycle.payment.amountCents)}<small>{document.orderLifecycle.origin === 'NATIVE' ? '本站确认实付' : '旧单付款原记'}</small></strong> : null}{document.requestedAmountCents !== null ? <strong className="block text-sm">{financeIsHistorical(document) ? '原申请 ' : ''}{financeMoney(document.requestedAmountCents)}</strong> : financeIsHistorical(document) ? document.amounts.map(amount => <strong key={amount.bucket} className="block text-sm">历史变动 {amount.unknownCount ? '待核' : financeMoney(amount.knownNetCents)}</strong>) : document.amounts.map(amount=><span key={amount.bucket} className="block text-xs text-muted-foreground">{bucketLabels[amount.bucket]??'科目待核'} <strong className="text-sm text-foreground tabular-nums ml-1 font-semibold">{amount.unknownCount?'未核定':financeMoney(amount.knownNetCents)}</strong></span>)}</TableCell><TableCell><small className="text-xs text-muted-foreground block whitespace-nowrap">{financeTime(document.occurredAt)}</small></TableCell><TableCell className="text-right"><Button variant="ghost" size="sm" className="h-8 px-2.5 text-xs gap-1 hover:text-primary" disabled={!documentAllowed} title={!documentAllowed?"需要单据资金读取能力":undefined} onClick={() => open(documentPath(document), linkTitle, document.ref)}>查看<ArrowUpRight size={13} /></Button></TableCell></TableRow>;
   })}</TableBody></Table></div></div>;
   const entries = (lines: FinanceEntry[]) => <div className="finance-table"><Table className="entries-table"><TableHeader><TableRow><TableHead>用途 / 记录 / 主体</TableHead><TableHead>记录性质</TableHead><TableHead>状态 / 分类</TableHead><TableHead className="numeric">变动金额</TableHead><TableHead>核对</TableHead></TableRow></TableHeader><TableBody>{lines.map(entry => <TableRow key={entry.id}><TableCell><strong>{financeEntryEvent(entry)}</strong><span>{financeRecordNumber(entry, entry.documentNumber)}</span><span>{entry.subjectName}</span><small>{financeTime(entry.occurredAt)}</small>{historicalDetail(entry.historical, entry.kind, entry.id)}</TableCell><TableCell>{financeIsHistorical(entry) ? ['WITHDRAWAL_APPLICATION','PAYMENT_RECORD','REFUND_RECORD','DISTRIBUTION_INCOME'].includes(entry.historical?.purposeCode??'') ? '历史业务记录' : '历史余额变动' : accountLabels[entry.accountCode??''] ?? bucketLabels[entry.bucket] ?? "类别待核"}<small>{entry.classification === "LOCAL_SOURCE_WITHOUT_POSTING" ? "不计账内收支" : entry.direction === "IN" ? "增加" : entry.direction === "OUT" ? "减少" : "方向待核"}</small>{financeIsHistorical(entry) ? <small>{entry.historical?.purposeCode === 'WITHDRAWAL_APPLICATION' ? '申请记录，不另计扣款' : '不改变当前钱包'}</small> : null}</TableCell><TableCell>{entry.kind === 'DISTRIBUTION' ? financeEntryEvent(entry) : recordState(entry)}{entry.kind === 'DISTRIBUTION' ? <small>当前收益状态：{recordState(entry)}</small> : null}<small>{entryClass(entry)}</small></TableCell><TableCell className="numeric"><strong className="amount">{entry.classification === "LOCAL_SOURCE_WITHOUT_POSTING" ? "尚未过账" : financeMoney(entry.deltaCents)}</strong></TableCell><TableCell><Button variant="ghost" size="sm" disabled={!documentAllowed} title={!documentAllowed?"需要单据资金读取能力":undefined} data-finance-focus={entry.id} onClick={() => open(`/finance/documents/${encodeURIComponent(entry.documentRef)}?entry=${encodeURIComponent(entry.id)}`, financeIsHistorical(entry) ? `${financeBusinessLabel(entry)} · ${entry.historical?.originalLogNumber || entry.documentNumber}` : entry.documentNumber, entry.id)}>查看<ArrowUpRight size={14} /></Button></TableCell></TableRow>)}</TableBody></Table></div>;
 
@@ -618,7 +627,7 @@ export function AdminFinanceView({ tab, snapshot, onOpenPath, onQueryChange, onR
       </form> : null}
       {error ? <Alert variant={resultLimit || (error instanceof AdminApiError && error.status === 409) ? "warning" : "destructive"} role={resultLimit || (error instanceof AdminApiError && error.status === 409) ? "status" : "alert"}><CircleAlert aria-hidden /><AlertTitle>{resultLimit ? "当前匹配结果过多" : error instanceof AdminApiError && error.status === 409 ? "本批数据已变化" : "资金读取暂不可用"}</AlertTitle><AlertDescription>{resultLimit ? "请缩小主体、期间或业务条件后应用。当前结果超过有界读取或文件上限，未返回截断文件。" : error instanceof AdminApiError && error.status === 409 ? "请重新查询，避免拼接两个时点。" : friendlyError(error)}</AlertDescription><AlertAction><Button variant="outline" onClick={retry}>重新查询</Button></AlertAction></Alert> : needsLookup ? <div className="finance-empty"><h2>输入单据编号或用户线索</h2><p>查找后选择要核对的单据。</p></div> : !body ? <div className="finance-loading" role="status" aria-busy="true"><p>正在读取资金依据…</p><Skeleton className="h-10 w-64"/><Skeleton className="h-28 w-full"/><Skeleton className="h-28 w-full"/></div> : <>
         <div className="finance-applied"><strong>{object ? body.document ? financeDocumentLabel(body.document) : "当前对象" : period ? body.applied.scope === "ALL" ? "全平台" : `主体 ${body.applied.scope}` : "已应用线索"}</strong><span>{!object && body.applied.period ? `${body.applied.from} 至 ${body.applied.to} · 北京时间` : !object ? `${body.applied.kind !== 'ALL' ? (quickKinds.find(k => k.key === body.applied.kind)?.label ?? body.applied.kind) + ' · ' : ''}${body.applied.q.replace(/^ORDER_LINK:/,"订单链接 · ") || "最近业务"}${body.applied.state !== 'ALL' ? ` · 状态: ${stateLabels[body.applied.state] ?? body.applied.state}` : ''}` : body.document ? `${recordState(body.document)} · ${body.document.entryCount ?? 0} 条分录${body.document.subjects.length ? ` · ${body.document.subjects.map(subject => subject.name).join(" / ")}` : ""}` : `${body.documents?.length ?? 0} 张关联单据`}</span><small>数据截止 {financeTime(body.asOf)}</small></div>
-        {!object && !period ? <>{body.subjects?.length ? <section><h2>用户候选</h2><div className="finance-user-candidates">{body.subjects.map(subject => <Button variant="outline" key={subject.id} data-finance-focus={subject.id} onClick={() => open(`/finance/users/${encodeURIComponent(subject.id)}`, subject.name, subject.id)}>{subject.name}<ArrowUpRight size={14} /></Button>)}</div></section> : null}<h2>业务单据</h2>{body.documents?.length ? candidates(body.documents) : <div className="finance-empty"><h2>没有匹配单据</h2><p>可核对编号或调整查询条件。</p></div>}{pagination}</> : null}
+        {!object && !period ? <>{body.subjects?.length ? <section><h2>用户候选</h2><div className="finance-user-candidates">{body.subjects.map(subject => <Button variant="outline" key={subject.id} data-finance-focus={subject.id} onClick={() => open(`/finance/users/${encodeURIComponent(subject.id)}`, subject.name, subject.id)}>{subject.name}<ArrowUpRight size={14} /></Button>)}</div></section> : null}<h2>业务单据</h2>{body.documents?.length ? candidates(body.documents) : <div className="finance-empty"><h2>没有匹配单据</h2><p>可核对编号或调整查询条件。未入账的渠道申请可在全部业务、全部状态下按精确原号查找。</p></div>}{pagination}</> : null}
         {period ? <><section className="finance-reconciliation">
           <div className="finance-section-heading"><h2>期间账内合计与余额证明</h2><div className="finance-page-actions"><Button variant="outline" size="sm" onClick={()=>shiftPeriod(-1)}>上一期间</Button><Button variant="outline" size="sm" onClick={()=>shiftPeriod(1)}>下一期间</Button></div></div>
           <div className="finance-status-chips flex flex-wrap items-center gap-2 mb-3">
@@ -648,10 +657,9 @@ export function AdminFinanceView({ tab, snapshot, onOpenPath, onQueryChange, onR
         </div><div className="finance-page-actions"><Button onClick={()=>{const next={...defaultFinanceFilters(true),scope:body.subject!.id};open(`/finance/period?${financeQuery(next)}`,'期间核对','finance-title');}}>核对该用户期间</Button>{has(snapshot,'credit.guarantee.read')&&has(snapshot,'user.directory.read')?<Button variant="outline" onClick={()=>openAssociated(`/users/${encodeURIComponent(body.subject!.id)}?section=credit`,'保证金与信用')}>核对保证金来源</Button>:null}</div><FinanceDisclosure title="可提现与来源缺项" className="finance-help"><p>可提现 {financeMoney(body.wallet.withdrawable.amountCents)}</p>{[...(body.wallet.withdrawable.reasonCodes??[]),...(body.gaps??[])].map(reason=><p key={reason}>{label(reason)}</p>)}</FinanceDisclosure><h2>关联业务</h2>{candidates(body.documents??[])}</>:null}
         {body.document ? <>
           <div className="finance-detail-layout"><div>
-            {!withdrawal && body.document.requestedAmountCents !== null ? <h2 className="finance-document-result">{financeIsHistorical(body.document) ? '原申请 ' : '申请 '}{financeMoney(body.document.requestedAmountCents)}</h2> : null}
-            <FinanceLifecycleProgress document={body.document}/>
+            {!withdrawal && !settlementEvidence?.business && body.document.requestedAmountCents !== null ? <h2 className="finance-document-result">{financeIsHistorical(body.document) ? '原申请 ' : '申请 '}{financeMoney(body.document.requestedAmountCents)}</h2> : null}
             {historicalDetail(body.document.historical, body.document.kind, body.document.ref, true)}
-            <FinanceOrderPayment document={body.document}/>
+            {!settlementEvidence?.business ? <FinanceOrderPayment document={body.document}/> : null}
             {settlementEvidence ? <AdminOrderSettlementEvidence evidence={settlementEvidence} onOpenDocument={(ref,title)=>open('/finance/documents/'+encodeURIComponent(ref),title??'责任资金依据',ref)}/> : null}
             <FinanceOrderCosts body={body}/>
             {withdrawal ? <WithdrawalEvidence document={body.document} evidence={body.evidence} entries={body.entries}/> : body.document.historical ? <Collapsible><CollapsibleTrigger render={<Button variant="ghost" size="sm"/>}>原始来源字段<ChevronDown aria-hidden size={12}/></CollapsibleTrigger><CollapsibleContent><dl className="finance-fact-list">{visibleEvidence(body.evidence, body.document.historical, has(snapshot, 'order.read'), documentAllowed,settlementEvidence).map(([key, value]) => <div key={key}><dt>{evidenceLabels[key]}</dt><dd>{evidenceValue(key, value)}</dd></div>)}</dl></CollapsibleContent></Collapsible> : <dl className="finance-fact-list">{visibleEvidence(body.evidence, undefined, has(snapshot, 'order.read'), documentAllowed,settlementEvidence).filter(([key])=>!technicalEvidenceKeys.has(key)).map(([key, value]) => <div key={key}><dt>{evidenceLabels[key]}</dt><dd>{evidenceValue(key, value)}</dd></div>)}</dl>}
@@ -662,6 +670,7 @@ export function AdminFinanceView({ tab, snapshot, onOpenPath, onQueryChange, onR
           </div><aside className="finance-related"><h2>关联</h2>
             {body.document.subjects.filter(subject => subject.id !== "PLATFORM" && subject.id !== "SYSTEM" && has(snapshot, "finance.read")).map(subject => <Button variant="outline" key={subject.id} data-finance-focus={`user:${subject.id}`} onClick={() => open(`/finance/users/${encodeURIComponent(subject.id)}`, subject.name, `user:${subject.id}`)}>{subject.name}<ArrowUpRight size={14} /></Button>)}
             {body.related?.filter(link => !settlementEvidence?.dutyRefs.some(duty=>duty.documentRef===link.ref) && (!body.document?.historical || body.document.historical.association?.state === 'MATCHED' && !historicalRelationDenied(body.document.historical, has(snapshot, 'order.read'), documentAllowed)) && (!link.path || (link.path.startsWith("/orders/") ? has(snapshot, "order.read") : link.path.startsWith('/finance/documents/') ? documentAllowed : has(snapshot, "supply.rental_account.read")))).map(link => <Button variant="outline" key={link.ref+(link.path??"")} data-finance-focus={link.ref} onClick={() => link.path ? link.path.startsWith('/finance/documents/') ? open(link.path,link.label,link.ref) : openAssociated(link.path,link.label,link.ref) : open("/finance/documents/"+encodeURIComponent(link.ref),link.label,link.ref)}>{link.label}<ArrowUpRight size={14} /></Button>)}
+            {channelOrderId && (snapshot.security.isBoss || has(snapshot, 'order.read')) && has(snapshot, 'finance.read') ? <Button variant="outline" onClick={() => open('/finance/channels?' + new URLSearchParams({fromOrderId:channelOrderId}), '汇聚对账', 'finance-title')}>在汇聚对账查看本单<ArrowUpRight aria-hidden size={14}/></Button> : null}
           </aside></div><FinanceDisclosure key={'entries:'+(tab.query.entry??'')} title={financeIsHistorical(body.document) ? '相关历史记录' : `凭证分录${body.entries ? `（${body.entries.length} 条）` : ''}`} defaultOpen={Boolean(tab.query.entry)}>{body.entries ? entries(body.entries) : <p>本次未取得分录，不能按零处理。</p>}</FinanceDisclosure>
         </> : null}
         {summary && body.document ? <Textarea className="finance-copy-box" aria-label="核对摘要" readOnly value={summary} rows={10} /> : null}

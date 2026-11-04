@@ -103,7 +103,19 @@ export function financeEntryEvent(entry: FinanceEntry): string {
 }
 export type OrderSettlementMoney = { knowledge: 'KNOWN' | 'UNKNOWN'; cents: string | null; reasonCodes: string[] };
 export type FinancePlatformComponent = { code: string; cents: string; payer: 'OWNER' | 'RENTER' | 'NONE' | null; feeBase: string | null; feeRate: string | null };
+export type OrderFinanceTransaction = {
+  documentRef: string; number: string; kind: 'PAYMENT' | 'REFUND'; source: 'NATIVE' | 'LEGACY_MYSQL';
+  state: string; amountCents: string | null; occurredAt: string | null; channelArrival: 'UNKNOWN';
+  refundAttempts?: HistoricalFinanceDisplay['refundAttempts']; sourceRefundFlags?: string[];
+};
+export type OrderFinanceBusiness = {
+  payment: { state: 'SITE_ACCEPTED' | 'LEGACY_RECORDED_PAID' | 'UNPAID' | 'REVIEW_REQUIRED' | 'UNKNOWN'; amount: OrderSettlementMoney; occurredAt: string | null };
+  settlementState: 'POSTED' | 'FINALIZED_ZERO' | 'NOT_SETTLED' | 'LEGACY_RECORDED_COMPLETE' | 'UNKNOWN';
+  legacyCompletedAmounts: { ownerEarnings: OrderSettlementMoney; refundAmount: OrderSettlementMoney } | null;
+  paymentAttempts: OrderFinanceTransaction[]; refundOrders: OrderFinanceTransaction[]; reasonCodes: string[];
+};
 export type OrderSettlementEvidence = {
+  business?: OrderFinanceBusiness;
   schema: 'admin-order-settlement-evidence.v1'; documentRef: string; readiness: 'READY' | 'UNAVAILABLE';
   posting: { state: 'POSTED' | 'FINALIZED_ZERO' | 'NOT_POSTED' | 'UNKNOWN'; ref: string | null; postedAt: string | null };
   captured: OrderSettlementMoney; ownerNet: OrderSettlementMoney; refundPayable: OrderSettlementMoney;
@@ -131,21 +143,13 @@ export function financeRead(route: string, filters: FinanceFilters, signal: Abor
   const query = financeQuery(filters); for (const [key, value] of Object.entries(extras)) if (value) query.set(key, value);
   return adminRequest<FinanceResponse>(`/finance/${route}?${query}`, undefined, "GET", {}, signal);
 }
-export type FinanceOverviewQueue = {
-  knowledge: 'KNOWN' | 'PARTIAL' | 'UNAVAILABLE'; count: string | null; amountCents: string | null; unknownCount: string | null; overdueCount?: string | null; overdueAmountCents?: string | null; unknownDueCount?: string | null;
-  items: { id: string; number?: string | null; source?: string; status?: string; recordedAmountCents?: string | null; documentRef?: string | null; amountCents?: string | null; dueAt?: string | null; overdue?: boolean | null; reasonCodes?: string[] }[];
-  sources?: { source: string; count: string; unknownCount: string; amountCents: string }[];
-  hasMore: boolean; reasonCodes: string[]; bankArrival?: 'UNKNOWN';
-};
 export type FinanceOverview = {
   version: 'admin.finance-overview.v1'; asOf: string; period: { range: 'today' | '7d' | '30d'; from: string; to: string; timeZone: string };
   confirmedPayments: { count: string; amountCents: string; controlledAmountCents: string; channelAmountCents: string; source: string; timeBasis: string; scope: string; reasonCodes: string[] };
   settlements: { count: string; capturedCents: string; ownerNetCents: string; refundPayableCents: string; platformContributionCents: string; timeBasis: string; reasonCodes: string[] };
-  pendingSettlement: { count: string; amountCents: string; hasMore: boolean; items: { id: string; number: string; status: string; amountCents: string; paidAt: string; documentRef: string | null }[]; reasonCodes: string[] };
+  legacyOrderPayments?: { state: 'RECORDED' | 'UNAVAILABLE'; count: string | null; knownAmountCents: string | null; missingAmountCount: string | null; sourceUndatedCount: string | null; timeBasis: 'source_paid_at' };
   ledgerBalances: { bucket: string; balanceCents: string; state: string; source: string }[];
   coverage: { registeredSubjects: string; totalCurrentSubjects: string; globalProof: string; reasonCodes: string[] };
-  queues: { refunds: FinanceOverviewQueue; withdrawals: FinanceOverviewQueue };
-  reviewPayments: { sourceScope: 'ORIGINAL_REVIEW_RECORDS'; currentOutstandingOnly: false; count: string; amountCents: string; unknownCount: string; items: { id: string; number: string | null; amountCents: string | null; confirmedAt: string | null; reasonCode: string; source: string; documentRef: string | null }[]; hasMore: boolean; reasonCodes: string[] };
   recentSettlements: { id: string; number: string; owner: { id: string; name: string }; renter: { id: string; name: string }; capturedCents: string; ownerNetCents: string; refundPayableCents: string; platformContributionCents: string; postedAt: string; documentRef: string | null }[];
   costs: { netContributionCents: string | null; channelCostState: string; reasonCodes: string[] };
   channels: { state: string };

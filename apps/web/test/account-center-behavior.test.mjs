@@ -139,6 +139,7 @@ function loadCenter(session) {
       return child.exports;
     }
     if (name === "@/lib/personal-wallet-client") return requireFromTree(path.join(tree, "apps/web/src/lib/personal-wallet-client.ts"));
+    if (name === "@/lib/withdrawal-bank-binding-client") return requireFromTree(path.join(tree, "apps/web/src/lib/withdrawal-bank-binding-client.ts"));
     if (name === "@/lib/credit-guarantee-client") {
       const child = new Module(path.join(tree, "credit-probe.cjs"));
       child.filename = path.join(tree, "credit-probe.cjs");

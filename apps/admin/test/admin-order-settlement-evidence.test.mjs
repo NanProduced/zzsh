@@ -87,3 +87,33 @@ test('FINALIZED_ZERO is a zero responsibility finalization without ledger postin
  globalThis.fetch=async url=>response(String(url).includes('/finance/')?finance(url,zero):{order:legacy});const ui=await setup(t);ui.props.initialOrderId=legacy.id;await ui.render();await until(()=>ui.node.textContent.includes('零额责任已终定'));const card=ui.node.querySelector('[data-order-settlement-evidence]');assert.match(card.textContent,/号主租赁收益责任/);assert.match(card.textContent,/责任终定时间/);assert.match(card.textContent,/0\.00 元/);assert.match(card.textContent,/退款出款记录[\s\S]*未核定/);assert.match(card.textContent,/渠道到账[\s\S]*未核定/);assert.doesNotMatch(card.textContent,/原过账|原入账基数|已退款|已到账|渠道已付|号主结算净额/);
  await act(async()=>button(card,'依据与待核项').click());assert.match(card.textContent,/原责任依据/);assert.doesNotMatch(card.textContent,/原过账/);const {orderSettlementSummary}=await ui.source.ssrLoadModule('/apps/admin/src/views/admin-order-settlement-evidence.tsx');const summary=orderSettlementSummary(zero).join('\n');assert.match(summary,/责任终定：零额责任已终定/);assert.match(summary,/号主租赁收益责任：0\.00 元/);assert.doesNotMatch(summary,/原过账|原入账|结算过账|渠道已付|已退款|已到账/);
 });
+
+test('business funds keep old order payment singular while preserving attempts and partial refunds',async t=>{
+ const legacy={...native,id:'legacy_order_business',source:{...native.source,origin:'LEGACY'}};
+ const at='2026-10-01T03:00:00Z';
+ const payment=(id,state,cents)=>({documentRef:'HISTORY_PAYMENT:'+id,number:id,kind:'PAYMENT',source:'LEGACY_MYSQL',state,amountCents:cents,occurredAt:at,channelArrival:'UNKNOWN'});
+ const refund=(id,cents)=>({documentRef:'HISTORY_REFUND:'+id,number:id,kind:'REFUND',source:'LEGACY_MYSQL',state:'RECORDED_SUCCESS',amountCents:cents,occurredAt:at,channelArrival:'UNKNOWN'});
+ const evidence=facts('LEGACY_ORDER:'+legacy.id,{posting:{state:'NOT_POSTED',ref:null,postedAt:null},captured:unknown(),ownerNet:unknown(),refundPayable:unknown(),business:{
+  payment:{state:'LEGACY_RECORDED_PAID',amount:known('92345'),occurredAt:at},
+  settlementState:'NOT_SETTLED',legacyCompletedAmounts:null,
+  paymentAttempts:[payment('first-attempt','RECORDED_UNPAID','92345'),payment('second-attempt','RECORDED_PAID','92345')],
+  refundOrders:[refund('first-refund','2000'),refund('second-refund','3000')],reasonCodes:[],
+ }});
+ globalThis.fetch=async url=>response(String(url).includes('/finance/')?finance(url,evidence,{legacyOrderObservations:[...evidence.business.paymentAttempts,...evidence.business.refundOrders]}):{order:legacy});
+ const ui=await setup(t,['order.read','finance.read','finance.document.read']);ui.props.initialOrderId=legacy.id;ui.props.initialQuery={section:'finance'};
+ await ui.render();await until(()=>ui.node.textContent.includes('923.45 元'));
+ const card=ui.node.querySelector('[data-order-settlement-evidence]');
+ assert.equal(card.textContent.split('923.45 元').length-1,1);
+ assert.match(card.textContent,/订单实付923\.45 元旧平台记录已付/);
+ assert.match(card.textContent,/未结算/);
+ assert.doesNotMatch(card.textContent,/first-attempt|first-refund|银行已到账|0\.00 元/);
+ await act(async()=>[...card.querySelectorAll('button')].find(b=>b.textContent.includes('付款尝试')).click());
+ await until(()=>card.textContent.includes('second-attempt'));
+ assert.match(card.textContent,/first-attempt原状态未付款[\s\S]*second-attempt原状态已付款/);
+ await act(async()=>[...card.querySelectorAll('button')].find(b=>b.textContent.includes('退款单据')).click());
+ await until(()=>card.textContent.includes('second-refund'));
+ assert.match(card.textContent,/first-refund原状态退款成功20\.00 元[\s\S]*second-refund原状态退款成功30\.00 元/);
+ await act(async()=>[...ui.node.querySelectorAll('button')].find(b=>b.textContent==='在汇聚对账查看本单').click());
+ const channel = new URL(ui.opened.at(-1)[0],'http://local');
+ assert.equal(channel.pathname,'/finance/channels');assert.equal(channel.searchParams.get('fromOrderId'),legacy.id);assert.equal(channel.searchParams.get('financeReturn'),'/orders/'+legacy.id+'?section=finance');
+});

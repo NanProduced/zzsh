@@ -6,6 +6,7 @@ import { ArrowLeft, CheckCircle2, ChevronRight, Clock3, CreditCard, FileText, In
 import { useUserSession, useUserSessionStore } from "@/components/session/user-session-provider";
 import { formatOrderTime } from "@/lib/order-client";
 import { walletWithdrawalNote, financeEntryLabel, walletSourceStatus,refundAttemptStatus,walletOriginalType, readMyWallet, readMyWalletEntries, readMyWalletEntry, walletMoney, WalletRequestError, type EntryBucket, type WalletRead, type WalletEntry, type WalletEntryPage, type WalletEntryDetail } from "@/lib/personal-wallet-client";
+import { readBankBinding, type BankBinding } from "@/lib/withdrawal-bank-binding-client";
 import { Amount, LocalRetry, RecordStatus, SkeletonBlock, StatusBadge } from "@/components/ui/information";
 import "./personal-wallet.css";
 import {ControlledWithdrawal} from './controlled-withdrawal';
@@ -39,6 +40,15 @@ const href = (pane = "overview", entry?: string, bucket: EntryBucket = "ALL") =>
 const bucketLabel = (b: Exclude<EntryBucket,'ALL'>) => ({AVAILABLE:'余额',REFUND_PAYABLE:'待退款',RESERVED:'提现处理中',PENDING_EARNINGS:'待结算收益'})[b];
 const errorText = (e: WalletRequestError | null) => e?.status === 401 ? "登录状态已变化，请重新登录。" : e?.status === 403 ? "暂时无法查看钱包，请确认账号状态。" : e?.status === 409 ? "流水已更新，请刷新后查看。" : "钱包暂时无法查看，请稍后重试。";
 function entryDisplayTime(e:WalletEntry){return e.kind==='HISTORICAL'?{label:'发生时间',at:e.occurredAt}:Object.hasOwn(e,'postedAt')?{label:'入账时间',at:e.postedAt??null}:{label:'记录时间',at:e.occurredAt};}
+function entryNature(e: WalletEntry) {
+  if (e.kind === "HISTORICAL") return e.sourceDetails
+    ? { reference: true, label: "业务存据 · 仅供查验", note: "原单存据 · 不变动余额" }
+    : { reference: true, label: e.includedInOpening ? "历史流水 · 已纳入期初" : "历史流水 · 未纳入期初", note: e.includedInOpening ? "历史记录 · 不重复入账" : "历史记录 · 不影响当前余额" };
+  if (e.bucket !== "AVAILABLE") return { reference: false, label: `${bucketLabel(e.bucket)}记账`, note: "不等于可用余额" };
+  return e.sourceKind === "OPENING"
+    ? { reference: false, label: "余额期初", note: "已纳入可用余额" }
+    : { reference: false, label: "可用余额变动", note: "已记账" };
+}
 function BankChipSvg() {
   return (
     <svg className="bank-chip-svg" width="34" height="26" viewBox="0 0 36 28" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -56,45 +66,24 @@ function BankChipSvg() {
   );
 }
 
-function useUserBankBinding(scope: string, userId?: string) {
-  const [binding, setBinding] = useState<{ cardMask: string; holderNameMask: string } | null>(null);
-  const [loading, setLoading] = useState(true);
+function useUserBankBinding(scope: string, enabled: boolean, userId: string | null | undefined, reload: number) {
+  const session = useUserSession(), store = useUserSessionStore();
+  const [state, setState] = useState<{ scope: string; status: "loading" | "ready" | "unknown"; binding: BankBinding | null }>({ scope, status: "loading", binding: null });
   useEffect(() => {
-    let active = true;
-    if (!userId) {
-      setLoading(false);
-      setBinding(null);
-      return;
-    }
-    setLoading(true);
-    fetch("/api/account/withdrawal-bank-binding", {
-      headers: { "x-zzsh-expected-user-id": userId },
-      credentials: "same-origin"
-    })
-      .then(res => (res.ok ? res.json() : null))
-      .then(data => {
-        if (!active) return;
-        if (data?.binding?.cardMask) {
-          setBinding({
-            cardMask: data.binding.cardMask,
-            holderNameMask: data.binding.holderNameMask ?? "持卡人"
-          });
-        } else {
-          setBinding(null);
-        }
-        setLoading(false);
-      })
-      .catch(() => {
-        if (active) {
-          setBinding(null);
-          setLoading(false);
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, [scope, userId]);
-  return { binding, loading };
+    const abort = new AbortController();
+    const current = () => { const latest = store.getSnapshot(); return latest.status === "authenticated" && latest.userId === userId && `${latest.userId}:${latest.identityVersion}` === scope; };
+    setState({ scope, status: "loading", binding: null });
+    if (enabled && userId && current()) readBankBinding(userId, abort.signal).then(value => {
+      if (!abort.signal.aborted && current()) setState({ scope, status: value.integration === "INTEGRATED" ? "ready" : "unknown", binding: value.binding });
+    }, error => {
+      if (!abort.signal.aborted && current()) { setState({ scope, status: "unknown", binding: null }); if (error?.status === 401) session.revalidate(); }
+    });
+    return () => abort.abort();
+  // The scope binds the identity; re-entering the overview rereads the saved card.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scope, userId, enabled, reload]);
+  const latest = store.getSnapshot();
+  return state.scope === scope && latest.status === "authenticated" && latest.userId === userId && `${latest.userId}:${latest.identityVersion}` === scope ? state : { scope, status: "loading" as const, binding: null };
 }
 
 function EntryRows({ items, bucket, onOpen }: { items: WalletEntry[]; bucket: EntryBucket; onOpen: (id: string) => void }) {
@@ -102,12 +91,11 @@ function EntryRows({ items, bucket, onOpen }: { items: WalletEntry[]; bucket: En
     <div className="wallet-records">
       {items.map(e => {
         const display = entryDisplayTime(e);
-        const isReference = Boolean(e.sourceDetails);
-        const isRealBalance = e.kind === "POSTED" || (e.kind === "HISTORICAL" && e.includedInOpening);
+        const nature = entryNature(e);
         return (
           <Link
             key={e.id}
-            className={`wallet-record ${isReference ? "is-reference" : "is-balance"}`}
+            className={`wallet-record ${nature.reference ? "is-reference" : "is-balance"}`}
             data-wallet-entry={e.id}
             href={href("entry", e.id, bucket)}
             scroll={false}
@@ -122,14 +110,10 @@ function EntryRows({ items, bucket, onOpen }: { items: WalletEntry[]; bucket: En
                 "待确认"
               )}
             </span>
-            <span className="wallet-record-copy">
+            <div className="wallet-record-copy">
               <div className="wallet-record-title-row">
                 <strong>{financeEntryLabel(e)}</strong>
-                {isReference ? (
-                  <span className="wallet-type-tag reference-tag">业务存据 · 仅供查验</span>
-                ) : (
-                  <span className="wallet-type-tag balance-tag">实际余额变动</span>
-                )}
+                <span className={`wallet-type-tag ${nature.reference ? "reference-tag" : "balance-tag"}`}>{nature.label}</span>
               </div>
               <small>
                 {e.sourceDetails ? "业务往来" : bucketLabel(e.bucket)}
@@ -143,7 +127,7 @@ function EntryRows({ items, bucket, onOpen }: { items: WalletEntry[]; bucket: En
                   {refundAttemptStatus(a.originalStatus)}
                 </small>
               ))}
-            </span>
+            </div>
             <div className="wallet-delta-container">
               <strong
                 className="wallet-delta"
@@ -157,11 +141,7 @@ function EntryRows({ items, bucket, onOpen }: { items: WalletEntry[]; bucket: En
               >
                 {walletMoney(e.sourceDetails?.recordedAmountCents ?? e.deltaCents, !e.sourceDetails)}
               </strong>
-              {isReference ? (
-                <small className="wallet-delta-sub reference">原单存据 · 不变动余额</small>
-              ) : isRealBalance ? (
-                <small className="wallet-delta-sub balance">计入当前余额</small>
-              ) : null}
+              <small className={`wallet-delta-sub ${nature.reference ? "reference" : "balance"}`}>{nature.note}</small>
             </div>
             <RecordStatus tone={e.kind === "HISTORICAL" ? "neutral" : "success"}>
               {e.kind === "HISTORICAL" ? (e.includedInOpening ? "已计入余额" : "仅供查看") : "已记账"}
@@ -177,7 +157,8 @@ function EntryRows({ items, bucket, onOpen }: { items: WalletEntry[]; bucket: En
 export function PersonalWallet({ scope }: { scope: string }) {
   const params = useSearchParams(), paneRaw = params.get("wallet"), pane = ["entries", "entry", "withdraw", "withdraw-local", "guarantees"].includes(paneRaw ?? "") ? paneRaw! : "overview", entryId = params.get("entry") ?? "", filterRaw = params.get("bucket"), bucket: EntryBucket = ['AVAILABLE','REFUND_PAYABLE','RESERVED','PENDING_EARNINGS'].includes(filterRaw??'') ? filterRaw as EntryBucket : "ALL";
   const read = useWalletRead(scope), heading = useRef<HTMLHeadingElement>(null), root = useRef<HTMLElement>(null), scopeRef = useRef(scope); scopeRef.current = scope;
-  const bankCard = useUserBankBinding(scope, read.session.userId);
+  const [bankReload, setBankReload] = useState(0);
+  const bankCard = useUserBankBinding(scope, pane === "overview", read.session.userId, bankReload);
   const [detailReload, setDetailReload] = useState(0);
   const [filterOnlyReal, setFilterOnlyReal] = useState(false);
   const [timeRange, setTimeRange] = useState<"ALL" | "7D" | "30D">("ALL");
@@ -219,20 +200,18 @@ export function PersonalWallet({ scope }: { scope: string }) {
     return () => abort.abort();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scope, pane, entryId, read.wallet, detailReload]);
-  const refresh = () => { pageRequest.current?.abort(); detailRequest.current?.abort(); setPage({ scope, bucket, value: null, error: null, busy: true }); setDetail({ scope, id: entryId, value: null, error: null }); read.refresh(); };
+  const refresh = () => { pageRequest.current?.abort(); detailRequest.current?.abort(); setPage({ scope, bucket, value: null, error: null, busy: true }); setDetail({ scope, id: entryId, value: null, error: null }); setBankReload(n => n + 1); read.refresh(); };
   const title = pane === "entries" ? "余额流水" : pane === "entry" ? "流水详情" : pane === "withdraw" ? "银行卡与提现" : pane === "withdraw-local" ? "提现申请" : pane === "guarantees" ? "上架保证金" : "我的钱包";
   const w = read.wallet, records = visiblePage.value;
   const recordsComplete = records?.listCoverage.knowledge === "KNOWN" && records.listCoverage.scope !== "POSTED_LEDGER_ONLY";
   const rawItems = records?.items ?? [];
   const displayItems = rawItems.filter(e => {
-    if (filterOnlyReal && !(e.kind === "POSTED" || (e.kind === "HISTORICAL" && e.includedInOpening))) return false;
+    if (filterOnlyReal && !(e.kind === "POSTED" && e.bucket === "AVAILABLE" && e.sourceKind !== "OPENING")) return false;
     if (timeRange !== "ALL") {
-      const rawTime = e.occurredAt ?? (Object.hasOwn(e, "postedAt") ? (e as { postedAt?: string | null }).postedAt : null);
-      if (rawTime) {
-        const diffDays = (Date.now() - new Date(rawTime).getTime()) / (1000 * 3600 * 24);
-        if (timeRange === "7D" && diffDays > 7) return false;
-        if (timeRange === "30D" && diffDays > 30) return false;
-      }
+      const at = entryDisplayTime(e).at;
+      if (!at) return false;
+      const diffDays = (Date.now() - new Date(at).getTime()) / (1000 * 3600 * 24);
+      if (!Number.isFinite(diffDays) || diffDays < 0 || diffDays > (timeRange === "7D" ? 7 : 30)) return false;
     }
     return true;
   });
@@ -272,7 +251,7 @@ export function PersonalWallet({ scope }: { scope: string }) {
               <div className="wallet-available">
                 <Amount label="余额" size="hero" value={walletMoney(w.buckets.available.amountCents)} knowledge={w.buckets.available.knowledge === "UNKNOWN" ? "UNKNOWN" : "KNOWN"} testId="wallet-available-amount" data-wallet-bucket="available" note={w.buckets.available.knowledge === "UNKNOWN" ? "余额暂未确认，请稍后查看。" : undefined} />
               </div>
-              <p className="wallet-balance-subhint">支持提现至本人借记卡 · 银联渠道清算</p>
+              <p className="wallet-balance-subhint">提现条件与费用以申请时核对结果为准</p>
               <div className="wallet-card-actions">
                 <Link className="button primary wallet-withdraw-btn" href={href("withdraw")} scroll={false}>提现</Link>
                 <Link className="button secondary wallet-entries-btn" href={href("entries")} scroll={false}>查看流水</Link>
@@ -288,14 +267,16 @@ export function PersonalWallet({ scope }: { scope: string }) {
                 <span className="wallet-card-title">收款银行卡</span>
               </div>
               <Link href={href("withdraw")} scroll={false} className="wallet-card-header-link">
-                {bankCard.binding ? "管理卡片" : "去绑卡"}
+                {bankCard.status !== "ready" ? "查看资料" : bankCard.binding ? "管理卡片" : "去绑卡"}
               </Link>
             </div>
             <div className="wallet-bank-card-body">
-              {bankCard.loading ? (
+              {bankCard.status === "loading" ? (
                 <div className="bank-card-skeleton">
                   <SkeletonBlock label="正在核对收款银行卡" lines={2} />
                 </div>
+              ) : bankCard.status === "unknown" ? (
+                <div className="bank-card-unbound-slot" role="status">收款资料暂时无法确认，请稍后查看。</div>
               ) : bankCard.binding ? (
                 <div className="bank-card-realistic">
                   <svg className="bank-card-waves" viewBox="0 0 320 200" fill="none" preserveAspectRatio="none" aria-hidden="true">
@@ -310,7 +291,7 @@ export function PersonalWallet({ scope }: { scope: string }) {
                     </defs>
                   </svg>
                   <div className="bank-card-top">
-                    <span className="bank-card-network">银联借记卡</span>
+                    <span className="bank-card-network">收款银行卡</span>
                     <BankChipSvg />
                   </div>
                   <div className="bank-card-number">{bankCard.binding.cardMask}</div>
@@ -319,7 +300,7 @@ export function PersonalWallet({ scope }: { scope: string }) {
                       <span className="bank-card-label">持卡人</span>
                       <span className="bank-card-name">{bankCard.binding.holderNameMask}</span>
                     </div>
-                    <span className="bank-card-bound-badge">已绑定托管</span>
+                    <span className="bank-card-bound-badge">资料已保存</span>
                   </div>
                 </div>
               ) : (
@@ -329,7 +310,7 @@ export function PersonalWallet({ scope }: { scope: string }) {
                   </div>
                   <div className="unbound-slot-copy">
                     <strong>尚未绑定收款银行卡</strong>
-                    <p>绑定本人借记卡后，余额可快速提现到账</p>
+                    <p>保存收款资料后，还需核对提现条件。</p>
                   </div>
                   <Link href={href("withdraw")} scroll={false} className="button primary unbound-slot-cta">
                     立即绑定银行卡
@@ -390,7 +371,7 @@ export function PersonalWallet({ scope }: { scope: string }) {
                 className={`wallet-toggle-chip ${filterOnlyReal ? "active" : ""}`}
                 onClick={() => setFilterOnlyReal(v => !v)}
               >
-                仅看实际变动
+                仅看可用余额变动
               </button>
               <button
                 type="button"
@@ -418,6 +399,7 @@ export function PersonalWallet({ scope }: { scope: string }) {
         </div>
         {records ? <>
           {!recordsComplete ? <p className="account-module-note" role="status">部分流水仍在核对，当前只显示已确认的记录。</p> : null}
+          {filterOnlyReal || timeRange !== "ALL" ? <p className="account-module-note">仅筛选已加载的记录；{timeRange !== "ALL" ? "时间未知的记录不在时间筛选中。" : "可继续加载更多。"}</p> : null}
           <div className="account-module-card wallet-table-card">
             <div className="wallet-table-header" aria-hidden="true">
               <span className="th-col th-time">时间</span>
@@ -427,11 +409,11 @@ export function PersonalWallet({ scope }: { scope: string }) {
               <span className="th-col th-action"></span>
             </div>
             <div className="wallet-table-body">
-              {displayItems.length ? <EntryRows items={displayItems} bucket={records.bucket} onOpen={rememberList} /> : <div className="account-empty-state"><FileText size={28} /><h3>{recordsComplete ? "暂无流水" : "流水仍在核对"}</h3><p>{recordsComplete ? "可以切换其他类型查看。" : "请稍后再来查看。"}</p></div>}
+              {displayItems.length ? <EntryRows items={displayItems} bucket={records.bucket} onOpen={rememberList} /> : <div className="account-empty-state"><FileText size={28} /><h3>{filterOnlyReal || timeRange !== "ALL" ? "已加载记录中没有符合条件的流水" : recordsComplete && !records.nextCursor ? "暂无流水" : "流水仍在核对"}</h3><p>{records.nextCursor ? "可继续加载更多记录。" : recordsComplete ? "可以切换其他类型查看。" : "请稍后再来查看。"}</p></div>}
             </div>
           </div>
           <div className="wallet-records-footer">
-            <p className="account-module-note">{!recordsComplete ? "已显示 " + displayItems.length + " 条，部分记录仍在核对。" : "共 " + displayItems.length + " 条记录"}</p>
+            <p className="account-module-note">{!recordsComplete ? "已显示 " + displayItems.length + " 条，部分记录仍在核对。" : records.nextCursor || filterOnlyReal || timeRange !== "ALL" ? "已显示 " + displayItems.length + " 条" : "共 " + displayItems.length + " 条记录"}</p>
             {records?.nextCursor ? <button className="button secondary wallet-load-more" disabled={visiblePage.busy} onClick={() => void loadPage(records.nextCursor)}>{visiblePage.busy ? "正在加载…" : "加载更多流水记录"}</button> : null}
           </div>
         </> : visiblePage.busy ? <p role="status">正在加载流水…</p> : null}
@@ -443,16 +425,16 @@ export function PersonalWallet({ scope }: { scope: string }) {
 }
 function EntryDetail({ detail }: { detail: WalletEntryDetail }) {
  const e=detail.entry,display=entryDisplayTime(e);
- const isReference = Boolean(e.sourceDetails);
+ const nature = entryNature(e);
  const note=e.kind==='HISTORICAL'?(e.includedInOpening?'这笔记录已包含在余额中，不会重复计算。':'这笔记录仅供查看，不会改变余额。'):null;
  return <article className="account-module-card wallet-entry-detail">
    <div className="wallet-entry-detail-header">
      <StatusBadge tone={e.kind === "HISTORICAL" ? "neutral" : "success"}>{e.kind === "HISTORICAL" ? e.includedInOpening ? "已计入余额" : "仅供查看" : "已记账"}</StatusBadge>
-     {isReference ? <span className="wallet-type-tag reference-tag">业务存据 · 仅供查验</span> : <span className="wallet-type-tag balance-tag">实际余额变动</span>}
+     <span className={`wallet-type-tag ${nature.reference ? "reference-tag" : "balance-tag"}`}>{nature.label}</span>
    </div>
    <h3>{financeEntryLabel(e)}</h3>
    <strong className="wallet-main-amount">{walletMoney(e.sourceDetails?.recordedAmountCents??e.deltaCents, !e.sourceDetails)}</strong>
-   {isReference ? <p className="wallet-detail-nature-hint">此记录为历史业务发生凭证，原单金额不影响或重复计入当前可用余额。</p> : null}
+   {e.sourceDetails ? <p className="wallet-detail-nature-hint">此记录为历史业务发生凭证，原单金额不影响或重复计入当前可用余额。</p> : null}
    <dl className="account-fact-list">
      <div><dt>记录类型</dt><dd>{e.sourceDetails?'业务往来':bucketLabel(e.bucket)}</dd></div>
      <div><dt>{display.label}</dt><dd>{display.at?formatOrderTime(display.at, { timeZoneName: false }):'待确认'}</dd></div>

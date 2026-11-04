@@ -250,7 +250,7 @@ export function parseWorkspacePath(pathname: string): { kind: WorkspaceRouteKind
   }
   if (path === "/finance") return {kind:"finance-overview",tabId:"finance-overview",path,title:"财务总览"};
   if (path === "/finance/search") return {kind:"finance-lookup",tabId:"finance-lookup",path,title:"资金查找"};
-  if (path === "/finance/channels") return {kind:"finance-channels",tabId:"finance-channels",path,title:"渠道工具"};
+  if (path === "/finance/channels") return {kind:"finance-channels",tabId:"finance-channels",path,title:"汇聚对账"};
   if (path === "/finance/period") return {kind:"finance-period",tabId:"finance-period",path,title:"期间核对"};
   const financeObject=/^\/finance\/(documents|users)\/([^/]+)$/.exec(path);
   if(financeObject){let objectId="INVALID_REFERENCE";try{objectId=decodeURIComponent(financeObject[2]!);}catch{}const kind=financeObject[1]==="documents"?"finance-document":"finance-user";return {kind,objectType:kind,objectId,tabId:kind+":"+objectId,path,title:kind==="finance-document"?"资金单据":"用户资金"};}

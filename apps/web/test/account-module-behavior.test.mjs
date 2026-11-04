@@ -31,7 +31,7 @@ function loadAccountTitle() {
 }
 const accountTitle = loadAccountTitle();
 
-async function probe({ rows = [], detail = null, identityStatus = "UNVERIFIED", authRead, confirm = () => false, writeReply, pages = null, mine = null, viaFetch = null, initialStorage = {} } = {}) {
+async function probe({ rows = [], detail = null, identityStatus = "UNVERIFIED", authRead, confirm = () => false, writeReply, pages = null, mine = null, listing = null, viaFetch = null, initialStorage = {} } = {}) {
   const window = new Window({ url: "http://127.0.0.1:3100/account" });
   for (const [key, value] of Object.entries(initialStorage)) window.sessionStorage.setItem(key, value);
   Object.assign(globalThis, { window, document: window.document, HTMLElement: window.HTMLElement, HTMLInputElement: window.HTMLInputElement, Element: window.Element, Node: window.Node, Event: window.Event, MouseEvent: window.MouseEvent, KeyboardEvent: window.KeyboardEvent, CustomEvent: window.CustomEvent, FocusEvent: window.FocusEvent, DOMException: window.DOMException, getComputedStyle: window.getComputedStyle.bind(window), requestAnimationFrame: window.requestAnimationFrame.bind(window), cancelAnimationFrame: window.cancelAnimationFrame.bind(window), IS_REACT_ACT_ENVIRONMENT: true });
@@ -62,6 +62,7 @@ async function probe({ rows = [], detail = null, identityStatus = "UNVERIFIED", 
     if (name.endsWith(".css")) return {};
     if (name === "next/link") return ({ scroll: _scroll, ...props }) => React.createElement("a", props);
     if (name === "next/navigation") return { useRouter: () => router };
+    if (name === "@zzsh/ui/legacy-account-image") return { LegacyAccountImage: props => React.createElement("img", props) };
     if (name === "./auth/auth-overlay-provider") return { useAuthOverlay: () => ({ open() {} }) };
     // This suite tests the parent's identity/data boundary; shared state visuals have separate coverage.
     if (name === "./auth/session-loading") return { SessionLoading: ({ label, layout }) => React.createElement("section", { className: "session-loading", "data-layout": layout, "aria-busy": true }, React.createElement("p", { role: "status" }, label)) };
@@ -130,6 +131,7 @@ async function probe({ rows = [], detail = null, identityStatus = "UNVERIFIED", 
           if (mine) return mine(accountId);
           return detail ? { ...detail, account: { ...detail.account, id: accountId } } : detail;
         },
+        listing: async (accountId, signal) => { if (listing) return listing(accountId, signal); throw Error("no public listing fixture"); },
       } };
     }
     if (name.startsWith("../lib/")) return require(path.join(tree, "apps/web/src/lib", `${name.slice(7)}.ts`));
@@ -198,7 +200,7 @@ test("a submitted account detail links to its orders and offers withdrawal befor
   try {
     await p.render("accounts", "account_A");
     assert.equal(p.host.querySelector(".supply-account-list"), null);
-    assert.equal(p.host.querySelector(".account-record-links a").getAttribute("href"), "/account?view=leased&accountId=account_A");
+    assert.equal(p.host.querySelector(".supply-side-order-btn").getAttribute("href"), "/account?view=leased&accountId=account_A");
     assert.equal(p.host.querySelector("a[href^='/publish?']"), null);
     assert.match(p.host.textContent, /撤回审核/);
     assert.match(p.host.textContent, /上架报价待确认/);
@@ -801,6 +803,9 @@ test("historical account detail renders saved display facts and refreshes its li
     assert.match(p.host.textContent, /咖啡豆：数量待核/);
     assert.match(p.host.textContent, /历史资料，请以当前上架信息和状态为准/);
     assert.match(p.host.textContent, /部分属性未提供或尚待核实/);
+    assert.match(p.host.textContent, /人脸声明未提供/);
+    assert.match(p.host.textContent, /封禁记录声明未提供/);
+    assert.doesNotMatch(p.host.textContent, /本人人脸实名|无封号记录|信用良好/);
     await p.render("accounts");
     assert.doesNotMatch(p.host.textContent, /历史资料已读取|历史记录|编号待分配/);
     assert.match(p.host.textContent, /AC0000000019/);
@@ -809,6 +814,28 @@ test("historical account detail renders saved display facts and refreshes its li
     assert.equal(p.calls.mine.length, 1);
     assert.equal(p.writes, 0);
   } finally { await p.close(); }
+});
+
+test("account quote keeps owner total and guarantee separate and never invents unavailable values", async () => {
+  const detail=detailOf('acc-truth');
+  detail.version.quote={lines:[],ownerTotal:{currency:'CNY',unit:'yuan',amount:'280.00',scale:2},ownerHaffRatio:'50',publisherBailRequirement:{currency:'CNY',unit:'yuan',amount:'300.00',scale:2}};
+  const p=await probe({detail});
+  try{await p.render('accounts','acc-truth');const revenue=p.host.querySelector('.supply-side-revenue-card'),duty=p.host.querySelector('.supply-side-duty-card');
+    assert.match(revenue.textContent,/上架报价280\.00 元/);assert.match(revenue.textContent,/1 元 = 50 万哈夫币/);assert.doesNotMatch(revenue.textContent,/押金记录|300\.00/);assert.match(duty.textContent,/上架时保证金要求300\.00 元/);assert.equal(revenue.querySelector('a').getAttribute('href'),'/account?view=leased&accountId=acc-truth');assert.doesNotMatch(p.host.textContent,/信用良好|已核对/);
+  }finally{await p.close();}
+  const empty=await probe({detail:detailOf('acc-empty')});
+  try{await empty.render('accounts','acc-empty');assert.match(empty.host.querySelector('.supply-side-revenue-card').textContent,/上架报价待确认/);assert.match(empty.host.querySelector('.supply-side-duty-card').textContent,/上架时保证金要求待确认/);assert.doesNotMatch(empty.host.textContent,/0\.00 元|信用良好|已核对/);}finally{await empty.close();}
+});
+
+test("late public gallery from an earlier account cannot replace the selected account's media", async () => {
+  const gate=deferred(),seen=[];
+  const mine=id=>{const d=detailOf(id);d.version.declaration.mediaBindings=[{assetId:`display-${id}`,purpose:'ACCOUNT_DISPLAY',category:'SHOWCASE',publicDisplayEligible:true}];return d;};
+  const old={id:'acc-A',displayNo:'A',title:'',description:'',attributes:{},media:[{assetId:'old-image',position:0,url:'/old-image'}],presentation:{items:[],skins:[],entitlements:[]},quote:{schemaVersion:2,lines:[],resourceTotal:{currency:'CNY',unit:'yuan',amount:'0.00',scale:2},tenantDeposit:null,tenantPayableTotal:null,termSeconds:'86400',expiryDisclosures:[]}};
+  const p=await probe({mine,listing:async id=>{seen.push(id);return id==='acc-A'?gate.promise:old;}});
+  try{await p.render('accounts','acc-A');await p.waitFor(()=>p.host.querySelector('.supply-gallery-hero-img')?.getAttribute('src')?.includes('display-acc-A'));
+    await p.render('accounts','acc-B');await p.waitFor(()=>p.host.querySelector('.supply-gallery-hero-img')?.getAttribute('src')?.includes('display-acc-B'));
+    await React.act(async()=>{gate.resolve(old);await new Promise(setImmediate);});assert.match(p.host.querySelector('.supply-gallery-hero-img').getAttribute('src'),/display-acc-B/);assert.doesNotMatch(p.host.innerHTML,/old-image|display-acc-A/);assert.deepEqual(seen,['acc-A','acc-B']);
+  }finally{gate.resolve(old);await p.close();}
 });
 
 test("missing base, missing display and a corrupt-source response never become zero resource facts", async () => {

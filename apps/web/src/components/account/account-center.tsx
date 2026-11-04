@@ -828,7 +828,6 @@ export function OrderSummaryCard({
                 <Link key={orderItemKey(order)} className="account-order-row" href={orderHref} scroll={false}>
                   <div className="account-order-row-main">
                     <div className="account-order-row-badges">
-                      <span className="account-order-game-tag">三角洲行动</span>
                       {loginMethod ? <span className="account-order-login-tag">{loginMethod}</span> : null}
                       <strong className="account-order-row-title">{orderAccountTitle(order)}</strong>
                     </div>
@@ -837,6 +836,7 @@ export function OrderSummaryCard({
                       {order.displayNo ? <span>单号 {order.displayNo}</span> : null}
                       {order.createdAt ? <time dateTime={order.createdAt} title={formatOrderTime(order.createdAt)} aria-label={formatOrderTime(order.createdAt)}>{summaryOrderTime(order.createdAt)}</time> : null}
                       <span>{orderTermLabel(order)}</span>
+                      {orderListingSourceLabel(order) === "历史订单" || orderListingSourceLabel(order)?.startsWith("当前账号资料") ? <span>{orderListingSourceLabel(order)}</span> : null}
                     </div>
                   </div>
                   <div className="account-order-row-money">

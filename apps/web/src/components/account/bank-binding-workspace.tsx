@@ -84,7 +84,7 @@ function BankChipSvg() {
 }
 
 function BankBindingPanel({ scope, onChanged, onLocked, onIdentityFailure, onBoundChange }: {
-  scope: string; onChanged: () => void; onLocked: (locked: boolean) => void; onIdentityFailure?: IdentityFailure; onBoundChange?: (bound: boolean) => void;
+  scope: string; onChanged: () => void; onLocked: (locked: boolean) => void; onIdentityFailure?: IdentityFailure; onBoundChange?: (bound: boolean | null) => void;
 }) {
   const identity = useWithdrawalIdentity(scope, onIdentityFailure), ids = useId();
   const [read, setRead] = useState<ReadState<BankBindingRead>>({ scope, value: null, busy: true, error: null });
@@ -104,7 +104,7 @@ function BankBindingPanel({ scope, onChanged, onLocked, onIdentityFailure, onBou
   const activeRecovery = selectedRecovery ?? pending;
   const isLocked = Boolean(activeRecovery) || storageBlocked || (read.scope === scope && writing);
   useEffect(() => { lockedRef.current(isLocked); }, [isLocked, scope]);
-  useEffect(() => { onBoundChange?.(Boolean(visible.value?.binding)); }, [visible.value?.binding, onBoundChange]);
+  useEffect(() => { onBoundChange?.(visible.busy || visible.error || visible.value?.integration !== "INTEGRATED" ? null : Boolean(visible.value.binding)); }, [visible.busy, visible.error, visible.value, onBoundChange]);
   const syncPending = () => {
     if (!identity.current() || !identity.userId) return null;
     try { const p = pendingBankBinding(identity.userId); setPending(p); setStorageBlocked(false); return p; }
@@ -210,7 +210,7 @@ function BankBindingPanel({ scope, onChanged, onLocked, onIdentityFailure, onBou
             </defs>
           </svg>
           <div className="bank-card-top">
-            <span className="bank-card-network">银联借记卡</span>
+            <span className="bank-card-network">收款银行卡</span>
             <BankChipSvg />
           </div>
           <div className="bank-card-number">{visible.value.binding.cardMask}</div>
@@ -229,10 +229,7 @@ function BankBindingPanel({ scope, onChanged, onLocked, onIdentityFailure, onBou
       <div className="bank-empty-visual" aria-hidden="true"><span className="bank-card-ghost"><CreditCard size={32} /></span></div>
       <div className="bank-empty-copy">
         <p className="bank-empty-title">尚未绑定收款银行卡。</p>
-        <p className="bank-empty-desc">绑定本人借记卡后，即可随时将账户余额提现到账。支持银联借记卡，实名安全托管。</p>
-      </div>
-      <div className="bank-supported-banks" aria-hidden="true">
-        <span>工商银行</span><span>建设银行</span><span>招商银行</span><span>农业银行</span><span>银联借记卡</span>
+        <p className="bank-empty-desc">保存收款资料后，还需核对身份、提现条件和费用。</p>
       </div>
       {!form.open && !activeRecovery && !storageBlocked ? <Button variant="primary" className="bank-action bank-primary bank-bind-cta" onPress={beginEdit}>绑定银行卡</Button> : null}
     </div>}
@@ -365,7 +362,7 @@ function ChannelWithdrawalPanel({ scope, refreshKey, bindingLocked, availableBal
     <div className="bank-available"><span>余额</span><strong>{walletMoney(availableBalance)}</strong></div>
     {storageBlocked ? <RecoveryAlert tone="unknown" title="原申请信息暂时无法读取" problem="无法确认是否已有提交，已暂停新申请。请保留当前浏览器状态。" /> : pending ? <RecoveryAlert tone="unknown" title="上次提现结果待确认" problem="请先查询处理结果，确认前无法再次申请。" action={<div className="bank-actions"><Button variant="primary" className="bank-action bank-primary" isDisabled={busy} onPress={() => void recover()}>{busy ? "正在查询…" : "查询提现进度"}</Button><Button variant="secondary" className="bank-action" isDisabled={busy} onPress={() => void readLocalRecovery()}>查看申请记录</Button></div>} /> : null}
     {read.busy ? <SkeletonBlock label="正在确认提现条件" lines={2} /> : read.error ? <RecoveryAlert tone="error" title="暂时无法确认提现条件" problem={errorCopy(read.error)} details={{ summary: "查看查询信息", body: <ErrorDetails error={read.error} /> }} /> : options && !options.canQuote ? <>
-      {!options.bankBinding.binding ? <div className="bank-onboarding-callout" role="note"><p><strong>提现第一步：请先绑定收款银行卡</strong></p><small>绑定本人借记卡后，此提现表单与手续费实时试算将自动解锁。</small></div> : null}
+      {options.bankBinding.integration === "INTEGRATED" && !options.bankBinding.binding ? <div className="bank-onboarding-callout" role="note"><p><strong>请先保存收款银行卡</strong></p><small>保存后仍需核对其他提现条件与费用。</small></div> : null}
       <RecoveryAlert tone="unknown" title="当前暂不可申请提现" problem={[...new Set(options.reasonCodes.map(code => reasonLabel[code] ?? "暂不满足提现条件"))].join("；") || "当前提现条件尚未确认。"} />
     </> : null}
     {options ? <details className="bank-eligibility" aria-label="提现资格与次数"><summary>查看提现条件</summary><dl className="bank-facts">
@@ -382,10 +379,11 @@ function ChannelWithdrawalPanel({ scope, refreshKey, bindingLocked, availableBal
       {canEditAmount && availableBalance && BigInt(availableBalance) > 0n ? (
         <div className="bank-quick-amounts" aria-label="快捷金额选择">
           <Button type="button" variant="tertiary" className="bank-quick-chip" onPress={() => {
-            const yuan = (Number(availableBalance) / 100).toFixed(2);
+            const cents = BigInt(availableBalance);
+            const yuan = `${cents / 100n}.${(cents % 100n).toString().padStart(2, "0")}`;
             setAmount({ scope, value: yuan });
             setQuote(null); setConfirmOpen(false); setNotice("");
-          }}>全部提现 ({walletMoney(availableBalance)})</Button>
+          }}>填写余额 ({walletMoney(availableBalance)})</Button>
           <Button type="button" variant="tertiary" className="bank-quick-chip" onPress={() => {
             setAmount({ scope, value: "100" });
             setQuote(null); setConfirmOpen(false); setNotice("");
@@ -501,27 +499,29 @@ function WithdrawalHistorySection({ scope, refreshKey, onIdentityFailure }: { sc
 export function BankBindingWorkspace({ scope, availableBalance = null, onWalletChanged, onIdentityFailure }: { scope: string; availableBalance?: string | null; onWalletChanged: () => void; onIdentityFailure?: IdentityFailure }) {
   const identity = useWithdrawalIdentity(scope, onIdentityFailure);
   const [bindingRefresh, setBindingRefresh] = useState(0), [historyRefresh, setHistoryRefresh] = useState(0), [bindingLock, setBindingLock] = useState({ scope, value: false });
-  const [isBankBound, setIsBankBound] = useState(false);
+  const [bound, setBound] = useState<{ scope: string; value: boolean | null }>({ scope, value: null });
+  const onBoundChange = useCallback((value: boolean | null) => setBound({ scope, value }), [scope]);
+  const isBankBound = bound.scope === scope ? bound.value : null;
   if (!identity.ready) return identity.session.status === "guest" ? <RecoveryAlert tone="info" title="登录后查看提现信息" problem="银行卡资料与提现记录仅本人可见。" action={<Link className="button primary" href="/login?next=%2Faccount%3Fview%3Dwallet%26wallet%3Dwithdraw">去登录</Link>} /> : <SkeletonBlock label="正在确认登录身份" lines={3} />;
   return <div className="bank-binding-workspace" data-testid="bank-binding-workspace" data-scope={scope}>
     <div className="bank-onboarding-stepper" aria-label="提现指引流程">
-      <div className={`onboarding-step ${isBankBound ? 'step-done' : 'step-active'}`}>
+      <div className={`onboarding-step ${isBankBound === true ? 'step-done' : isBankBound === false ? 'step-active' : 'step-waiting'}`}>
         <span className="step-badge">{isBankBound ? '✓' : '1'}</span>
-        <div className="step-copy"><strong>{isBankBound ? '已绑定银行卡' : '第 1 步：绑定银行卡'}</strong><small>{isBankBound ? '银联借记卡已就绪' : '添加本人收款储蓄卡'}</small></div>
+        <div className="step-copy"><strong>{isBankBound === null ? '收款资料待确认' : isBankBound ? '收款资料已保存' : '第 1 步：保存收款资料'}</strong><small>{isBankBound === true ? '银行卡归属尚未核验' : '填写收款银行卡资料'}</small></div>
       </div>
       <span className="onboarding-step-arrow" aria-hidden="true">→</span>
       <div className={`onboarding-step ${isBankBound ? 'step-active' : 'step-waiting'}`}>
         <span className="step-badge">2</span>
-        <div className="step-copy"><strong>第 2 步：金额与试算</strong><small>{isBankBound ? '填写提现金额即时核算' : '完成绑卡后自动解锁'}</small></div>
+        <div className="step-copy"><strong>第 2 步：金额与费用</strong><small>按当前条件核对申请</small></div>
       </div>
       <span className="onboarding-step-arrow" aria-hidden="true">→</span>
       <div className="onboarding-step step-waiting">
         <span className="step-badge">3</span>
-        <div className="step-copy"><strong>第 3 步：极速审核到账</strong><small>系统受托流转处理</small></div>
+        <div className="step-copy"><strong>第 3 步：查看处理进度</strong><small>到账情况以收款记录为准</small></div>
       </div>
     </div>
     <div className="bank-withdrawal-grid">
-      <BankBindingPanel scope={scope} onChanged={() => setBindingRefresh(value => value + 1)} onLocked={value => setBindingLock({ scope, value })} onIdentityFailure={onIdentityFailure} onBoundChange={setIsBankBound} />
+      <BankBindingPanel scope={scope} onChanged={() => setBindingRefresh(value => value + 1)} onLocked={value => setBindingLock({ scope, value })} onIdentityFailure={onIdentityFailure} onBoundChange={onBoundChange} />
       <ChannelWithdrawalPanel scope={scope} refreshKey={bindingRefresh} bindingLocked={bindingLock.scope === scope && bindingLock.value} availableBalance={availableBalance} onWalletChanged={() => { setHistoryRefresh(value => value + 1); onWalletChanged(); }} onIdentityFailure={onIdentityFailure} />
     </div>
     <WithdrawalHistorySection scope={scope} refreshKey={historyRefresh} onIdentityFailure={onIdentityFailure} />

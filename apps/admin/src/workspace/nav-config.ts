@@ -152,7 +152,7 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
     items.push({ label: "资金", isTitle: true });
     if (has("finance.read")) items.push({ label: "财务总览", icon: WalletIcon, path: "/finance", kind: "finance-overview" });
     items.push({ label: "资金查找", icon: SearchIcon, path: "/finance/search", kind: "finance-lookup" });
-    if (has("finance.read")) items.push({ label: "期间核对", icon: CalculatorIcon, path: "/finance/period", kind: "finance-period" }, { label: "渠道工具", icon: WalletIcon, path: "/finance/channels", kind: "finance-channels" });
+    if (has("finance.read")) items.push({ label: "期间核对", icon: CalculatorIcon, path: "/finance/period", kind: "finance-period" }, { label: "汇聚对账", icon: WalletIcon, path: "/finance/channels", kind: "finance-channels" });
   }
   if (has("order.read") || nav.isBoss) {
     items.push({ label: "交易", isTitle: true }, { label: "订单", icon: ShoppingBagIcon, path: "/orders", kind: "orders" });
@@ -201,7 +201,7 @@ export function titleForPath(pathname: string): string {
   if (pathname === "/content") return "内容管理";
   if(pathname==="/finance")return "财务总览";
   if(pathname==="/finance/search")return "资金查找";
-  if(pathname==="/finance/channels")return "渠道工具";
+  if(pathname==="/finance/channels")return "汇聚对账";
   if(pathname==="/finance/period")return "期间核对";
   if(pathname.startsWith("/finance/documents/"))return "资金单据";
   if(pathname.startsWith("/finance/users/"))return "用户资金";
@@ -271,7 +271,7 @@ export const PAGE_SEARCH_KEYWORDS: Record<string, string[]> = {
   "/content": ["内容管理", "运营内容", "content", "nr"],
   "/finance": ["财务总览", "资金", "待核", "余额", "finance", "zj"],
   "/finance/search": ["资金查找", "流水", "单据", "finance", "zj"],
-  "/finance/channels": ["渠道工具", "商户", "渠道证据", "channels"],
+  "/finance/channels": ["汇聚对账", "渠道工具", "商户", "渠道证据", "channels"],
   "/finance/period": ["期间核对", "对账", "核对", "period", "dz"],
   "/orders": ["订单", "交易", "orders", "dd"],
   "/users": ["用户管理", "用户", "users", "yh"],

@@ -144,7 +144,6 @@ function ListRow({ party, order, status, accountId, filters, onOpen }: { party: 
     <div className="order-row-account">
       {/* The title link is the row's single focusable target; its click surface covers the whole row. */}
       <div className="order-row-title-line">
-        <span className="order-row-tag order-row-game">三角洲行动</span>
         {loginMethod ? <span className="order-row-tag order-row-login">{loginMethod}</span> : null}
         <Link className="order-row-title" href={orderUrl(party, status, accountId, order.id, order.source?.origin, filters)} scroll={false} data-order-id={order.id} data-order-key={orderItemKey(order)} aria-label={[action, order.displayNo ? `订单号 ${order.displayNo}` : null, title].filter(Boolean).join("，")} onClick={(event) => onOpen(orderItemKey(order), event)}>{title}</Link>
         {stageTag ? <span className="order-row-tag order-row-stage" data-fulfillment-stage={stageTag.code}>{stageTag.label}</span> : null}

@@ -1,26 +1,40 @@
 import type { SessionSnapshot } from "../api";
 import { AdminJoinpayOpsPanel, AdminWithdrawalQueryBox, AdminCollectionQueryBox } from "./admin-joinpay-ops-panel";
-import { ChannelEvidenceLookup } from "./admin-channel-evidence-panel";
+import { ChannelEvidenceLookup, OrderChannelEvidence, type ChannelSearchClue } from "./admin-channel-evidence-panel";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import type { WorkspaceTab } from "../workspace/tab-model";
+import { financeChannelSearch, financeContextIdentity, financeOriginPath, registerFinanceOrigin } from "./admin-finance-view";
 import "./admin-finance.css";
 
 type Snapshot = Extract<SessionSnapshot, { authenticated: true }>;
 
 /** Existing explicit commands retain their own permissions, original keys and recovery contracts. */
-export function FinanceChannels({ snapshot }: { snapshot: Snapshot }) {
+export function FinanceChannels({ snapshot, tab, onOpenPath }: { snapshot: Snapshot; tab: WorkspaceTab; onOpenPath: (path: string, title?: string) => void }) {
   const active = snapshot.security.status === "ACTIVE" && !snapshot.security.passwordChangeRequired && !snapshot.session.locked;
   const canRead = active && snapshot.permissions.includes("finance.read");
   const canWithdrawalQuery = active && (snapshot.security.isBoss || snapshot.permissions.includes("finance.withdrawal.query"));
   const canCollectionWrite = active && (snapshot.security.isBoss || snapshot.permissions.includes("order.settlement.write"));
-  const scope = [snapshot.adminUserId, snapshot.session.id, active, snapshot.permissions.slice().sort().join(",")].join("|");
+  const scope = [snapshot.adminUserId, snapshot.session.id, active, snapshot.security.isBoss, snapshot.permissions.slice().sort().join(",")].join("|");
+
+  const canOrderRead = canRead && (snapshot.security.isBoss || snapshot.permissions.includes('order.read'));
+  const orderId = canOrderRead && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(tab.query.fromOrderId ?? '') ? tab.query.fromOrderId : undefined;
+  const returnPath = financeOriginPath(tab.query.origin, snapshot, tab.query.financeReturn);
+  const initialSearch = financeChannelSearch(tab.query.evidenceOrigin, snapshot);
+  function openOrder(id: string, clue: ChannelSearchClue) {
+    const source = '/finance/channels' + (orderId ? '?' + new URLSearchParams({fromOrderId:orderId}) : '');
+    const origin = registerFinanceOrigin(source, financeContextIdentity(snapshot), clue);
+    onOpenPath('/orders/' + encodeURIComponent(id) + '?' + new URLSearchParams({section:'finance', financeOrigin:origin, financeReturn:source}));
+  }
 
   return <section className="finance-page finance-channels" aria-labelledby="finance-channels-title">
     <header className="finance-page-header">
       <div>
-        <h1 id="finance-channels-title">渠道工具</h1>
-        <p>核对商户、原单号及本站已保存的渠道证据；支持按原单主动向渠道核实状态。</p>
+        <h1 id="finance-channels-title">汇聚对账</h1>
+        <p>核对商户原单号、渠道流水及本站已保存的收款、退款和出款证据；支持按原单主动向渠道核实状态。</p>
       </div>
+      {canRead && returnPath && (!returnPath.startsWith('/orders/') || canOrderRead) ? <Button variant="outline" onClick={() => onOpenPath(returnPath)}>返回来源</Button> : null}
     </header>
     {!canRead ? <p role="status">当前无权读取渠道资金资料，请联系有权限的财务人员核对。</p> : <div key={scope} className="space-y-6">
       {/* 分组一：查看已保存证据（只读） */}
@@ -35,11 +49,12 @@ export function FinanceChannels({ snapshot }: { snapshot: Snapshot }) {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
-          <AdminJoinpayOpsPanel canRead canWithdrawalQuery={false} />
-          <div className="pt-4 border-t border-border/50">
-            <h3 className="font-semibold text-sm mb-2">已登记单据与提现证据</h3>
-            <ChannelEvidenceLookup canRead canSearch />
+          {orderId ? <section className="space-y-2"><h3 className="font-semibold text-sm">关联订单的渠道证据</h3><OrderChannelEvidence key={orderId} orderId={orderId} canRead autoLoad/></section> : null}
+          <div>
+            <h3 className="font-semibold text-sm mb-2">检索已登记渠道交易</h3>
+            <ChannelEvidenceLookup key={tab.query.evidenceOrigin ?? ""} canRead canSearch initialSearch={initialSearch} onOpenOrder={canOrderRead ? openOrder : undefined} />
           </div>
+          <AdminJoinpayOpsPanel canRead canWithdrawalQuery={false} />
         </CardContent>
       </Card>
 

@@ -689,7 +689,7 @@ test("ORDER-A: one list keeps the order mode and old deep link without exposing 
     await probe.render({ party: "renter" }, "order-a-tags");
     const row = (id) => probe.host.querySelector(`[data-order-id="${id}"]`)?.closest(".order-row");
     assert.match(row("fast_order").querySelector(".order-row-tag[data-mode=fast]").textContent, /极速出租/);
-    assert.equal(row("v1_order").querySelector(".order-row-tag"), null, "a missing v1 mode is not guessed as ordinary");
+    assert.equal(row("v1_order").querySelector(".order-row-tag[data-mode]"), null, "a missing v1 mode is not guessed as ordinary");
     assert.equal(row("legacy_order").querySelector(".order-row-source"), null);
     assert.doesNotMatch(probe.host.textContent, /旧平台|新平台/);
     assert.match(row("legacy_order").querySelector("a[data-order-id='legacy_order']").href,/source=legacy/, "the record remains openable for supported continuation");

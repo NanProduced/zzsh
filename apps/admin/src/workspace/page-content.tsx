@@ -86,7 +86,7 @@ export function WorkspacePageContent({
     onOpenPath(pathname+"?"+params,title);
   };
   if(tab.kind === "finance-overview")return <FinanceOverviewView key={tab.id} tab={tab} snapshot={snapshot} onOpenPath={onOpenPath} onQueryChange={onQueryChange} onRefresh={onRefresh} refreshNonce={refreshNonce}/>;
-  if(tab.kind === "finance-channels")return <FinanceChannels key={tab.id} snapshot={snapshot}/>;
+  if(tab.kind === "finance-channels")return <FinanceChannels key={tab.id} snapshot={snapshot} tab={tab} onOpenPath={onOpenPath}/>;
   if(tab.kind.startsWith("finance-"))return <AdminFinanceView key={tab.id} tab={tab} snapshot={snapshot} onOpenPath={onOpenPath} onQueryChange={onQueryChange} onRefresh={onRefresh} refreshNonce={refreshNonce}/>;
   if (tab.kind === "workbench") {
     return <DashboardPage key={tab.id} snapshot={snapshot} onNavigate={(path) => onOpenPath(path)} refreshNonce={refreshNonce} />;

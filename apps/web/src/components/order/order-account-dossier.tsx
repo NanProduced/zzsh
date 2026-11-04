@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import Link from "next/link";
 import {
@@ -14,7 +14,6 @@ import {
   Crosshair,
   LogIn,
   MapPin,
-  CheckCircle2,
   Sparkles,
   Clock,
   ExternalLink,
@@ -23,19 +22,18 @@ import {
   ShieldAlert,
 } from "lucide-react";
 import { LegacyAccountImage } from "@zzsh/ui/legacy-account-image";
-import { supplyApi, SupplyRequestError } from "@/lib/supply-client";
+import { supplyApi } from "@/lib/supply-client";
 import { toListingDetail, type ListingDetailData } from "@/lib/listing-view";
 import type { OrderListingFacts, OrderParty } from "@/lib/order-client";
 
 type DossierState =
-  | { status: "loading" }
-  | { status: "ready"; data: ListingDetailData }
-  | { status: "fallback" };
+  | { accountId: string | null; status: "loading" }
+  | { accountId: string | null; status: "ready"; data: ListingDetailData }
+  | { accountId: string | null; status: "fallback" };
 
 export function OrderAccountDossier({
   accountId,
   accountDisplayNo,
-  party,
   listingFacts,
 }: {
   accountId?: string | null;
@@ -43,37 +41,38 @@ export function OrderAccountDossier({
   party: OrderParty;
   listingFacts?: OrderListingFacts | null;
 }) {
-  const [state, setState] = useState<DossierState>({ status: "loading" });
+  const [savedState, setState] = useState<DossierState>({ accountId: accountId ?? null, status: "loading" });
+  const state: DossierState = savedState.accountId === (accountId ?? null) ? savedState : { accountId: accountId ?? null, status: "loading" };
   const [activeImageIdx, setActiveImageIdx] = useState(0);
   const [lightboxOpen, setLightboxOpen] = useState(false);
-  const lightboxIdxRef = useRef(activeImageIdx);
-  lightboxIdxRef.current = activeImageIdx;
 
   // Load listing details
   useEffect(() => {
     const controller = new AbortController();
-    setState({ status: "loading" });
+    const target = accountId ?? null;
+    setState({ accountId: target, status: "loading" });
+    setActiveImageIdx(0);
+    setLightboxOpen(false);
 
     const fetcher = accountId
       ? supplyApi.listing(accountId, controller.signal)
-      : accountDisplayNo
-      ? supplyApi.lookupListing(accountDisplayNo, null, controller.signal)
-      : Promise.reject(new Error("No account identifier provided"));
+      : Promise.reject(new Error("No linked account identifier"));
 
     fetcher
       .then((listing) => {
         if (!controller.signal.aborted) {
-          setState({ status: "ready", data: toListingDetail(listing) });
+          if (listing.id !== target) throw new Error("Listing identity mismatch");
+          setState({ accountId: target, status: "ready", data: toListingDetail(listing) });
         }
       })
       .catch((_err) => {
         if (!controller.signal.aborted) {
-          setState({ status: "fallback" });
+          setState({ accountId: target, status: "fallback" });
         }
       });
 
     return () => controller.abort();
-  }, [accountId, accountDisplayNo]);
+  }, [accountId]);
 
   // Keyboard navigation for lightbox
   useEffect(() => {
@@ -94,7 +93,7 @@ export function OrderAccountDossier({
   }, [lightboxOpen, state]);
 
   // Fallback rendering when public listing is not available
-  if (state.status === "fallback" || (!accountId && !accountDisplayNo)) {
+  if (state.status === "fallback" || !accountId) {
     const safeBox = listingFacts?.attributeDisplay?.safeBox;
     const grading = listingFacts?.attributeDisplay?.grading;
     const loginMethod = listingFacts?.attributeDisplay?.loginMethod;
@@ -106,6 +105,7 @@ export function OrderAccountDossier({
           <div className="order-dossier-header-title">
             <span className="order-dossier-tag">账号档案</span>
             <h3>关联游戏账号基本规格</h3>
+            <span>{listingFacts?.source === "ORDER_VERSION" ? "下单时账号资料" : listingFacts?.source === "LEGACY_ACCOUNT_SNAPSHOT" ? "当前账号资料（迁入时记录）" : "当前账号资料"}</span>
           </div>
           {accountDisplayNo ? (
             <span className="order-dossier-acc-badge">编号：{accountDisplayNo}</span>
@@ -140,7 +140,7 @@ export function OrderAccountDossier({
       <section className="account-module-card order-account-dossier-card is-loading" aria-busy="true">
         <div className="order-dossier-loading-text">
           <Gamepad2 size={16} className="animate-spin" aria-hidden="true" />
-          <span>正在获取游戏账号完整档案与实机截图…</span>
+          <span>正在读取账号当前公开资料…</span>
         </div>
       </section>
     );
@@ -157,11 +157,11 @@ export function OrderAccountDossier({
     conditionMap.set(c.key, c.value);
   }
 
-  const safeBox = conditionMap.get("safe_box_code") || listingFacts?.attributeDisplay?.safeBox;
-  const grading = conditionMap.get("grading_code") || listingFacts?.attributeDisplay?.grading;
+  const safeBox = conditionMap.get("safe_box_code");
+  const grading = conditionMap.get("grading_code");
   const charLevel = conditionMap.get("character_level");
   const secretKd = conditionMap.get("secret_kd");
-  const loginMethod = conditionMap.get("login_method_code") || listingFacts?.attributeDisplay?.loginMethod;
+  const loginMethod = conditionMap.get("login_method_code");
   const province = conditionMap.get("region_province");
   const city = conditionMap.get("region_city");
   const regionText = province && city ? `${province} · ${city}` : province || city;
@@ -171,29 +171,25 @@ export function OrderAccountDossier({
   const serviceWindow = conditionMap.get("service_window");
 
   // Public target link
-  const publicHref = targetAccId
-    ? party === "owner"
-      ? `/account?view=accounts&accountId=${encodeURIComponent(targetAccId)}`
-      : `/accounts/${encodeURIComponent(targetAccId)}`
-    : null;
+  const publicHref = targetAccId ? `/accounts/${encodeURIComponent(targetAccId)}` : null;
 
   return (
-    <section className="account-module-card order-account-dossier-card" aria-label="关联账号完整档案">
+    <section className="account-module-card order-account-dossier-card" aria-label="关联账号当前公开资料">
       {/* 区分明确的卡片 Header */}
       <div className="order-dossier-header">
         <div className="order-dossier-header-title">
           <span className="order-dossier-tag">
             <Gamepad2 size={13} aria-hidden="true" />
-            账号完整档案
+            当前公开账号资料
           </span>
           <div className="order-dossier-title-text">
             <h3>{data.displayNo ? `账号 ${data.displayNo}` : "游戏账号规格"}</h3>
-            <span className="order-dossier-game-name">三角洲行动 · 角色与外观资产</span>
+            <span className="order-dossier-game-name">当前公开资料，不代表下单时快照</span>
           </div>
         </div>
         {publicHref ? (
           <Link className="order-dossier-public-link" href={publicHref} scroll={false}>
-            <span>{party === "owner" ? "管理本人账号" : "查看账号公开主页"}</span>
+            <span>查看账号公开主页</span>
             <ExternalLink size={13} aria-hidden="true" />
           </Link>
         ) : null}
@@ -203,7 +199,7 @@ export function OrderAccountDossier({
         {/* 左侧/上方：账号实机截图相册 */}
         <div className="order-dossier-gallery-col">
           <div className="order-dossier-gallery-title">
-            <h4>实机展示截图 ({mediaList.length} 张)</h4>
+            <h4>公开截图 ({mediaList.length} 张)</h4>
             {mediaList.length > 0 ? (
               <button
                 type="button"
@@ -226,7 +222,7 @@ export function OrderAccountDossier({
               >
                 <LegacyAccountImage
                   src={currentMedia.url}
-                  alt={`账号实机截图 第 ${activeImageIdx + 1} 张`}
+                  alt={`账号公开截图 第 ${activeImageIdx + 1} 张`}
                   className="order-dossier-main-img"
                   loading="eager"
                 />
@@ -290,7 +286,7 @@ export function OrderAccountDossier({
           ) : (
             <div className="order-dossier-no-media">
               <ImageOff size={24} aria-hidden="true" />
-              <span>号主暂未上传实机截图</span>
+              <span>暂无可展示的公开截图</span>
             </div>
           )}
         </div>
@@ -414,15 +410,15 @@ export function OrderAccountDossier({
 
           {/* 分组 4：安全信用与服务时间 */}
           <div className="order-dossier-spec-section order-dossier-trust-section">
-            <h4 className="order-dossier-section-title">安全认证与交付约定</h4>
+            <h4 className="order-dossier-section-title">号主声明与服务时间</h4>
             <div className="order-dossier-trust-badges">
               <div className="order-dossier-trust-item">
-                <CheckCircle2 size={13} className="trust-icon success" aria-hidden="true" />
-                <span>{data.faceIsSelf ? "号主声明本人脸" : "人脸认证已审核"}</span>
+                <Shield size={13} className="trust-icon" aria-hidden="true" />
+                <span>{data.faceIsSelf === true ? "号主声明本人脸" : data.faceIsSelf === false ? "号主声明非本人脸" : "人脸声明未提供"}</span>
               </div>
               <div className="order-dossier-trust-item">
-                <CheckCircle2 size={13} className="trust-icon success" aria-hidden="true" />
-                <span>{data.banRecord ? "存在封禁提示" : "号主声明无封禁记录"}</span>
+                <Shield size={13} className="trust-icon" aria-hidden="true" />
+                <span>{data.banRecord === true ? "号主声明有封禁记录" : data.banRecord === false ? "号主声明无封禁记录" : "封禁记录声明未提供"}</span>
               </div>
               {serviceWindow ? (
                 <div className="order-dossier-trust-item">

@@ -27,7 +27,7 @@ async function setup(t, key, tabPath = "/finance", permissions = ["finance.read"
   const tree = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
   const vite = sharedVite ??= await createServer({ configFile: false, resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } }, root: tree, cacheDir: path.resolve(tree, "tmp/admin-test-cache/admin-finance"), plugins: [react()], optimizeDeps:{noDiscovery:true,include:[]}, server: { middlewareMode: true, hmr: false, ws:false, watch:null } });
   const { AdminFinanceView, clearFinanceContexts, registerFinanceOrigin, financeOriginPath, financeContextIdentity } = await vite.ssrLoadModule("/apps/admin/src/views/admin-finance-view.tsx");
-  const Component = overview ? (await vite.ssrLoadModule('/apps/admin/src/views/finance-overview.tsx')).FinanceOverviewView : AdminFinanceView;
+  const Component = overview === 'channels' ? (await vite.ssrLoadModule('/apps/admin/src/views/finance-channels.tsx')).FinanceChannels : overview ? (await vite.ssrLoadModule('/apps/admin/src/views/finance-overview.tsx')).FinanceOverviewView : AdminFinanceView;
   const formats=await vite.ssrLoadModule('/apps/admin/src/views/admin-finance-api.ts');
   const node = browser.document.createElement("div"); browser.document.body.append(node); const root = createRoot(node);
   const opened = [], queries = [], props = { tab: { id: key, path: tabPath, kind: "unknown", title: "资金", query: {}, closable: true }, snapshot: { ...baseSnapshot, adminUserId: key, session: { ...baseSnapshot.session, id: key }, permissions }, onOpenPath: (...args) => opened.push(args), onQueryChange: query => queries.push(query), onRefresh: async () => props.snapshot, refreshNonce: 0 };
@@ -227,7 +227,7 @@ function overviewPayload(range='7d',extra={}) { return {version:'admin.finance-o
 
 test('overview uses one server aggregate, separates payment and allocation clocks, and preserves zero owner',async t=>{
  const calls=[];globalThis.fetch=async url=>{calls.push(String(url));return response(overviewPayload());};const ui=await setup(t,'overview-clocks','/finance',undefined,true);await ui.render();await until(()=>ui.node.textContent.includes('SETTLED-ORDER'));
- assert.equal(calls.length,1);assert.match(calls[0],/\/finance\/overview\?range=7d$/);assert.match(ui.node.textContent,/510\.00 元/);assert.match(ui.node.textContent,/按付款确认时间/);assert.match(ui.node.textContent,/按结算入账时间/);assert.match(ui.node.textContent,/零额号主/);assert.match(ui.node.textContent,/号主净额0\.00 元/);assert.match(ui.node.textContent,/−123\.45 元/);assert.match(ui.node.textContent,/成本依据不完整，未计算/);assert.match(ui.node.textContent,/CANCELLED-LATE/);assert.doesNotMatch(ui.node.textContent,/银行已到账|净贡献200\.00/);
+ assert.equal(calls.length,1);assert.match(calls[0],/\/finance\/overview\?range=7d$/);assert.match(ui.node.textContent,/510\.00 元/);assert.match(ui.node.textContent,/按付款确认时间/);assert.match(ui.node.textContent,/按结算入账时间/);assert.match(ui.node.textContent,/零额号主/);assert.match(ui.node.textContent,/号主净额\s*0\.00 元/);assert.match(ui.node.textContent,/−123\.45 元/);assert.match(ui.node.textContent,/成本依据不完整，未计算/);assert.doesNotMatch(ui.node.textContent,/CANCELLED-LATE|PAID-ORDER|待办|净收入/);assert.doesNotMatch(ui.node.textContent,/银行已到账|净贡献200\.00/);
  const link=[...ui.node.querySelectorAll('button')].find(x=>x.textContent.includes('SETTLED-ORDER'));await act(async()=>link.click());const target=new URL(ui.opened.at(-1)[0],'http://local');assert.equal(target.pathname,'/finance/documents/ORDER%3Aposting');assert.equal(target.searchParams.get('financeReturn'),'/finance?range=7d');
 });
 test('overview refuses bulk read without finance.read and old responses cannot paint a changed identity',async t=>{
@@ -238,8 +238,23 @@ test('overview read failure remains distinct from an empty period and refresh cl
  let mode='error';globalThis.fetch=async()=>mode==='error'?response({error:{code:'NOT_FOUND'}},404):response(overviewPayload('7d',{confirmedPayments:{...overviewPayload().confirmedPayments,count:'0',amountCents:'0'},recentSettlements:[]}));const ui=await setup(t,'overview-empty','/finance',undefined,true);await ui.render();await until(()=>ui.node.textContent.includes('当前服务尚未提供'));assert.doesNotMatch(ui.node.textContent,/0\.00 元/);
  mode='empty';await act(async()=>[...ui.node.querySelectorAll('button')].find(x=>x.textContent==='重新读取').click());await until(()=>ui.node.textContent.includes('本期没有结算分配记录'));assert.match(ui.node.textContent,/0\.00 元/);ui.props.refreshNonce++;mode='error';await ui.render();await until(()=>ui.node.textContent.includes('当前服务尚未提供'));assert.doesNotMatch(ui.node.textContent,/PAID-ORDER/);
 });
-test('overview partial responsibilities show known subtotal and unknown count without claiming bank result',async t=>{
- globalThis.fetch=async()=>response(overviewPayload('7d',{queues:{refunds:{...unavailableQueue,knowledge:'PARTIAL',count:'3',amountCents:'5000',unknownCount:'2',overdueCount:'1',items:[{id:'duty',source:'LEGACY_DUTY',status:'PENDING',amountCents:null,recordedAmountCents:'2000',documentRef:'LEGACY_ORDER:one',dueAt:null}],hasMore:true},withdrawals:unavailableQueue}}));const ui=await setup(t,'overview-partial','/finance',undefined,true);await ui.render();await until(()=>ui.node.textContent.includes('已知金额小计'));assert.match(ui.node.textContent,/已知金额小计 50\.00 元/);assert.match(ui.node.textContent,/2 笔金额待核/);assert.match(ui.node.textContent,/已到期 1 笔/);assert.match(ui.node.textContent,/待办依据尚未取得，不能判断为0笔/);assert.doesNotMatch(ui.node.textContent,/未退款|银行未退|已退款/);
+test('overview keeps legacy order amounts and posted wallet buckets separate from native payment',async t=>{
+ let legacy={state:'RECORDED',count:'1',knownAmountCents:'7400',missingAmountCount:'2',sourceUndatedCount:'3',timeBasis:'source_paid_at'};
+ globalThis.fetch=async()=>response(overviewPayload('7d',{legacyOrderPayments:legacy,ledgerBalances:[
+  {bucket:'AVAILABLE',balanceCents:'12345',state:'KNOWN'},{bucket:'GUARANTEE_HELD',balanceCents:'0',state:'UNKNOWN'},
+  {bucket:'RESERVED',balanceCents:'2600',state:'KNOWN'},{bucket:'REFUND_PAYABLE',balanceCents:'0',state:'KNOWN'},
+ ]}));
+ const ui=await setup(t,'overview-legacy','/finance',undefined,true);await ui.render();await until(()=>ui.node.textContent.includes('74.00 元'));
+ assert.match(ui.node.textContent,/新平台订单实付510\.00 元/);
+ assert.match(ui.node.textContent,/旧平台订单实付记录74\.00 元[\s\S]*1 笔金额已知 · 按旧单付款时间[\s\S]*本期 2 笔金额待核 · 来源中另有 3 笔付款时间待核/);
+ const balances=ui.node.querySelector('[aria-labelledby="finance-balances-title"]');
+ assert.match(balances.textContent,/用户可用[\s\S]*123\.45 元/);
+ assert.match(balances.textContent,/号主上架保证金[\s\S]*未核定/);
+ assert.match(balances.textContent,/提现预留[\s\S]*26\.00 元/);
+ assert.match(balances.textContent,/退款应付[\s\S]*0\.00 元/);
+ assert.doesNotMatch(ui.node.textContent,/584\.00 元|银行已到账/);
+ legacy={...legacy,count:'0',knownAmountCents:'0'};ui.props.refreshNonce++;await ui.render();
+ await until(()=>ui.node.textContent.includes('旧平台订单实付记录未核定'));
 });
 test('native detail shows APPLIED payment without posting and uses frozen owner versus renter fee payers',async t=>{
  const lifecycle={origin:'NATIVE',orderStatus:'PAID',payment:{state:'SITE_ACCEPTED',amountCents:'368686',confirmedAt:'2026-10-30T01:00:00Z',source:'CONTROLLED',hasReviewPayment:true},postingState:'NOT_POSTED'};
@@ -264,23 +279,49 @@ test('overview range switch discards late data and a scope-denied refresh clears
  mode='denied';ui.props.refreshNonce++;await ui.render();await until(()=>ui.node.textContent.includes('财务总览暂不可读取'));assert.doesNotMatch(ui.node.textContent,/SETTLED-ORDER|510\.00/);
 });
 
-test('written-off review receipts remain original records outside current responsibility tasks',async t=>{
- const empty={...unavailableQueue,knowledge:'KNOWN',count:'0',amountCents:'0',unknownCount:'0',overdueCount:'0',items:[]};const original=overviewPayload();
- globalThis.fetch=async()=>response(overviewPayload('7d',{queues:{refunds:empty,withdrawals:{...empty,overdueCount:null}},pendingSettlement:{...original.pendingSettlement,count:'0',amountCents:'0',items:[]},reviewPayments:{...original.reviewPayments,sourceScope:'ORIGINAL_REVIEW_RECORDS',currentOutstandingOnly:false,reasonCodes:['REVIEW_RECORD_MAY_HAVE_BEEN_WRITTEN_OFF']}}));
- const ui=await setup(t,'review-written-off','/finance',undefined,true);await ui.render();await until(()=>ui.node.textContent.includes('异常收款原始记录'));
- const tasks=ui.node.querySelector('section[aria-labelledby="finance-current-tasks-title"]'),records=ui.node.querySelector('section[aria-labelledby="finance-review-records-title"]');
- assert.match(tasks.textContent,/0 笔 · 0\.00 元/);assert.doesNotMatch(tasks.textContent,/CANCELLED-LATE|31\.00|异常款待核/);
- assert.match(records.textContent,/1 笔原始记录 · 已知记录金额 31\.00 元/);assert.match(records.textContent,/原记录可能已核销；当前待处理以退款责任队列为准/);assert.match(records.textContent,/不代表当前待办或未核销责任/);assert.equal(tasks.contains(records),false);
+test('overview keeps obligations out of the dashboard and links to the refund business list',async t=>{
+ const queue={...unavailableQueue,knowledge:'PARTIAL',count:'38',amountCents:'0',unknownCount:'38',items:[{id:'duty',source:'LEGACY_DUTY',status:'PENDING',recordedAmountCents:'18100'}],hasMore:true};
+ globalThis.fetch=async()=>response(overviewPayload('7d',{queues:{refunds:queue,withdrawals:unavailableQueue}}));
+ const ui=await setup(t,'overview-lookup','/finance',undefined,true);await ui.render();await until(()=>ui.node.textContent.includes('SETTLED-ORDER'));
+ assert.doesNotMatch(ui.node.textContent,/38 笔|181\.00|CANCELLED-LATE|PAID-ORDER|待办|待处理/);
+ assert.match(ui.node.querySelector('.finance-kpi-grid').textContent,/旧平台订单实付记录未核定/);
+ await act(async()=>[...ui.node.querySelectorAll('button')].find(b=>b.textContent==='退款单据').click());
+ const url = new URL(ui.opened.at(-1)[0], 'http://local');
+ assert.equal(url.pathname, '/finance/search');
+ assert.equal(url.searchParams.get('kind'), 'REFUND');
+ assert.equal(url.searchParams.get('financeReturn'), '/finance?range=7d');
 });
 
-test('unadmitted legacy refund duties are completely excluded from overview pending tasks',async t=>{
- const legacyQueue={...unavailableQueue,knowledge:'PARTIAL',count:'38',amountCents:'0',unknownCount:'38',unknownDueCount:'38',overdueCount:'0',items:[{id:'duty-1',source:'LEGACY_DUTY',status:'SOURCE_RESPONSIBILITY_REVIEW',amountCents:null,recordedAmountCents:'18100',documentRef:'LEGACY_ORDER:one',dueAt:null}],sources:[{source:'POSTING',count:'0',unknownCount:'0',amountCents:'0'},{source:'REVIEW_CONFIRMATION',count:'0',unknownCount:'0',amountCents:'0'},{source:'PRESTART_TERMINATION',count:'0',unknownCount:'0',amountCents:'0'},{source:'LEGACY_DUTY',count:'38',unknownCount:'38',amountCents:'0'}],hasMore:true};
- globalThis.fetch=async()=>response(overviewPayload('7d',{queues:{refunds:legacyQueue,withdrawals:unavailableQueue}}));
- const ui=await setup(t,'legacy-duty-excluded','/finance',undefined,true);await ui.render();
- await until(()=>ui.node.textContent.includes('用户退款'));
- const tasks=ui.node.querySelector('section[aria-labelledby="finance-current-tasks-title"]');
- assert.match(tasks.textContent,/用户退款[\s\S]*?0 笔 · 0\.00 元/);
- assert.match(tasks.textContent,/当前范围没有待核事项/);
- assert.doesNotMatch(tasks.textContent,/38 笔/);
- assert.doesNotMatch(tasks.textContent,/LEGACY_ORDER|181\.00/);
+test('JoinPay lookup uses exact channel serial and links only API-scoped orders with a private return context',async t=>{
+ const requests=[];
+ globalThis.fetch=async url=>{
+  requests.push(String(url));
+  if(String(url).includes('/channel-evidence/originals/')) return response({kind:'ORIGINAL_SEARCH',bankArrival:'UNKNOWN',search:{status:'FOUND',candidates:[
+   {productFamily:'WEIXIN_NATIVE',objectKind:'PAYMENT_REQUEST',objectId:'PAY-NO-SCOPE',merchantIdentityId:'merchant-a',merchantOrderNo:'merchant-other',orderId:null,state:'SITE_ACCEPTED'},
+   {productFamily:'WEIXIN_NATIVE',objectKind:'PAYMENT_REQUEST',objectId:'PAY-1',merchantOrderNo:'merchant-in',orderId:'order_in_scope',state:'SITE_ACCEPTED'},
+  ]}});
+  if(String(url).includes('/channel-evidence/orders/')) return response({kind:'ORDER',orderId:'order_in_scope',bankArrival:'UNKNOWN',payment:{status:'AVAILABLE',merchantOrderNo:'merchant-in',productFamily:'WEIXIN_NATIVE'},refund:{status:'NOT_INTEGRATED'}});
+  return response({error:{code:'NOT_FOUND'}},404);
+ };
+ const ui=await setup(t,'channel-search','/finance/channels',['order.read','finance.read','finance.document.read'],'channels');
+ const initial=ui.registerFinanceOrigin('/finance/channels',ui.financeContextIdentity(ui.props.snapshot),{merchant:'merchant-a',ref:'',trx:'serial-1',family:'WEIXIN_NATIVE'});
+ ui.props.tab={...ui.props.tab,query:{evidenceOrigin:initial}};
+ await ui.render();
+ await until(()=>ui.node.textContent.includes('查看关联订单'));
+ assert.equal(ui.node.querySelectorAll('table button').length,1);
+ const search = new URL(requests.find(url=>url.includes('/channel-evidence/originals/')), 'http://local');
+ assert.equal(search.searchParams.get('productFamily'),'WEIXIN_NATIVE');
+ assert.equal(search.searchParams.get('channelTrxNo'),'serial-1');
+ assert.equal(search.searchParams.has('merchantOrderNo'),false);
+ await act(async()=>[...ui.node.querySelectorAll('button')].find(b=>b.textContent==='查看关联订单').click());
+ const target=new URL(ui.opened.at(-1)[0],'http://local');
+ assert.equal(target.pathname,'/orders/order_in_scope');assert.equal(target.searchParams.get('section'),'finance');
+ assert.doesNotMatch(target.href,/merchant-a|serial-1/);
+ const back=ui.financeOriginPath(target.searchParams.get('financeOrigin'),ui.props.snapshot,target.searchParams.get('financeReturn'));
+ const restored=new URL(back,'http://local');assert.equal(restored.pathname,'/finance/channels');assert(restored.searchParams.has('evidenceOrigin'));
+ ui.props.tab={...ui.props.tab,query:Object.fromEntries(restored.searchParams)};await ui.render();await until(()=>requests.filter(url=>url.includes('/channel-evidence/originals/')).length===2);
+ assert.equal(ui.node.querySelector('input[aria-label="渠道流水"]').value,'serial-1');
+ ui.props.tab={...ui.props.tab,query:{fromOrderId:'order_in_scope'}};await ui.render();await until(()=>ui.node.textContent.includes('商户原单号 merchant-in'));
+ assert.match(ui.node.textContent,/银行到账未核定/);
+ ui.props.snapshot={...ui.props.snapshot,permissions:['finance.read']};await ui.render();assert.doesNotMatch(ui.node.textContent,/商户原单号 merchant-in|查看关联订单/);
 });

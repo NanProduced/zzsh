@@ -1280,42 +1280,28 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
   });
   const editHref = `/publish?accountId=${encodeURIComponent(account.id)}&edit=1`;
   const editLabel = !version ? "填写账号资料" : version.reviewState === "DRAFT" ? "继续编辑资料" : "修改账号资料";
-  const [publicImages, setPublicImages] = useState<string[]>([]);
+  const galleryKey = galleryMedia.map(item => item.assetId).join("|");
+  const [imageState, setImageState] = useState<{ accountId: string; key: string; status: "loading" | "ready" | "unknown"; urls: string[] }>({ accountId: account.id, key: galleryKey, status: "loading", urls: [] });
+  const images = imageState.accountId === account.id && imageState.key === galleryKey ? imageState : { status: "loading" as const, urls: [] };
+  const publicImages = images.urls;
   const [activeImgIndex, setActiveImgIndex] = useState(0);
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [copiedNo, setCopiedNo] = useState(false);
 
   useEffect(() => {
     const controller = new AbortController();
-    const loadImages = async () => {
-      try {
-        let listing: any = null;
-        if (account.id) {
-          listing = await supplyApi.listing(account.id, controller.signal).catch(() => null);
-        }
-        if (!listing && account.display_no) {
-          listing = await supplyApi.lookupListing(account.display_no, null, controller.signal).catch(() => null);
-        }
-        if (listing) {
-          const converted = toListingDetail(listing);
-          const urls = (converted.media ?? []).map((m: any) => typeof m === "string" ? m : m?.url).filter(Boolean);
-          if (urls.length) {
-            setPublicImages(urls);
-            return;
-          }
-        }
-        if (galleryMedia.length) {
-          setPublicImages(galleryMedia.map((m: any) => mediaAccessUrl(m.assetId)));
-        }
-      } catch {
-        if (galleryMedia.length) {
-          setPublicImages(galleryMedia.map((m: any) => mediaAccessUrl(m.assetId)));
-        }
-      }
-    };
-    void loadImages();
+    setImageState({ accountId: account.id, key: galleryKey, status: galleryMedia.length ? "ready" : "loading", urls: galleryMedia.map(item => mediaAccessUrl(item.assetId)) });
+    setActiveImgIndex(0);
+    setLightboxOpen(false);
+    void supplyApi.listing(account.id, controller.signal).then(listing => {
+      if (listing.id !== account.id) throw new Error("Listing identity mismatch");
+      const urls = toListingDetail(listing).media.map(item => item.url);
+      if (!controller.signal.aborted && (urls.length || !galleryMedia.length)) setImageState({ accountId: account.id, key: galleryKey, status: "ready", urls });
+    }).catch(() => { if (!controller.signal.aborted && !galleryMedia.length) setImageState({ accountId: account.id, key: galleryKey, status: "unknown", urls: [] }); });
     return () => controller.abort();
-  }, [account.id, account.display_no]);
+  // The fallback contains only this account's display bindings.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [account.id, galleryKey]);
 
 
   return <div className="supply-account-detail account-module-card">
@@ -1324,7 +1310,7 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
       {cover ? <img className="supply-detail-cover" src={mediaAccessUrl(cover.assetId)} alt="" width={176} height={99} onError={(event) => { event.currentTarget.style.display = "none"; }} /> : null}
       <div className="supply-detail-hero-copy">
         <div className="supply-detail-hero-title-row">
-          <span className="mra-game-tag">{gameName || "三角洲行动"}</span>
+          {gameName ? <span className="mra-game-tag">{gameName}</span> : null}
           <h1 className="supply-detail-title">{displayTitle}</h1>
           {account.display_no ? <span className="mra-meta-pill mra-no-pill"><span>账号 {account.display_no}</span><AccountCopyInline text={account.display_no} /></span> : <span className="mra-meta-pill">编号待分配</span>}
         </div>
@@ -1363,14 +1349,14 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
           <div className="account-module-card-header">
             <div className="supply-section-title-wrap">
               <Images size={17} className="supply-section-icon" aria-hidden="true" />
-              <h2 className="supply-section-title">实机截图画廊</h2>
+              <h2 className="supply-section-title">账号展示图</h2>
             </div>
-            <span className="supply-section-note">{publicImages.length ? `共 ${publicImages.length} 张实机截图 · 点击放大` : "暂无展示图"}</span>
+            <span className="supply-section-note">{publicImages.length ? `共 ${publicImages.length} 张展示图 · 点击放大` : images.status === "loading" ? "正在读取" : images.status === "unknown" ? "展示图暂未确认" : "暂无展示图"}</span>
           </div>
           {publicImages.length ? (
             <div className="supply-gallery-body">
               <div className="supply-gallery-main" onClick={() => setLightboxOpen(true)} title="点击全屏查看大图">
-                <LegacyAccountImage src={publicImages[activeImgIndex] || publicImages[0]} alt="游戏实机截图" className="supply-gallery-hero-img" />
+                <LegacyAccountImage src={publicImages[activeImgIndex] ?? publicImages[0] ?? null} alt="游戏公开截图" className="supply-gallery-hero-img" />
                 <span className="supply-gallery-zoom-pill"><Sparkles size={13} aria-hidden="true" />点击放大预览</span>
               </div>
               {publicImages.length > 1 ? (
@@ -1392,7 +1378,7 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
           ) : (
             <div className="supply-gallery-empty">
               <ImageOff size={28} aria-hidden="true" />
-              <p>暂无公开展示图</p>
+              <p>{images.status === "loading" ? "正在读取展示图。" : images.status === "unknown" ? "展示图暂时无法确认。" : "暂无展示图。"}</p>
             </div>
           )}
         </section>
@@ -1402,7 +1388,7 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
           <div className="account-module-card-header">
             <div className="supply-section-title-wrap">
               <SlidersHorizontal size={17} className="supply-section-icon" aria-hidden="true" />
-              <h2 className="supply-section-title">核心战力与账号配置</h2>
+              <h2 className="supply-section-title">历史属性与资源</h2>
             </div>
             <span className="supply-section-note">{historicalDisplay ? `更新于 ${displayTime(historicalDisplay.sourceUpdatedAt) ?? "时间待核"}` : "历史记录"}</span>
           </div>
@@ -1444,13 +1430,13 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
               <div className="supply-quad-cell">
                 <h3 className="supply-quad-title"><ShieldCheck size={14} aria-hidden="true" />安全与信用声明</h3>
                 <div className="supply-pill-grid">
-                  <div className="supply-spec-pill is-safe">
-                    <span className="supply-spec-pill-k">实名认证</span>
-                    <strong className="supply-spec-pill-v">本人人脸实名</strong>
+                  <div className="supply-spec-pill">
+                    <span className="supply-spec-pill-k">人脸声明</span>
+                    <strong className="supply-spec-pill-v">{historicalDisplay.attributes.face_is_self === true ? "号主声明本人脸" : historicalDisplay.attributes.face_is_self === false ? "号主声明非本人脸" : "未提供"}</strong>
                   </div>
-                  <div className="supply-spec-pill is-safe">
-                    <span className="supply-spec-pill-k">账号信用</span>
-                    <strong className="supply-spec-pill-v">无封号记录</strong>
+                  <div className="supply-spec-pill">
+                    <span className="supply-spec-pill-k">封禁记录声明</span>
+                    <strong className="supply-spec-pill-v">{historicalDisplay.attributes.ban_record === true ? "号主声明有封禁记录" : historicalDisplay.attributes.ban_record === false ? "号主声明无封禁记录" : "未提供"}</strong>
                   </div>
                   {historicalConditions.filter(c => !["safe_box_code", "grading_code", "character_level", "secret_kd", "vit_level", "bear_level", "dive_level", "login_method_code", "region_province", "region_city", "service_window"].includes(c.key)).map(item => (
                     <div key={item.key} className="supply-spec-pill">
@@ -1461,7 +1447,9 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
                 </div>
               </div>
             </div>
-          </> : null}
+            {Object.values(historicalDisplay.attributes).some(value => value === null) ? <p role="status">部分属性未提供或尚待核实。</p> : null}
+            <p>这些是历史资料，请以当前上架信息和状态为准。</p>
+          </> : <p role="status">部分账号资料暂未确认。</p>}
         </section> : (!historical && conditions.length ? <section className="supply-block account-module-card supply-specs-card">
           <div className="account-module-card-header">
             <div className="supply-section-title-wrap">
@@ -1481,15 +1469,15 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
             <div className="account-module-card-header">
               <div className="supply-section-title-wrap">
                 <Package size={17} className="supply-section-icon" aria-hidden="true" />
-                <h2 className="supply-section-title">在架物资清单</h2>
+                <h2 className="supply-section-title">历史账号资源</h2>
               </div>
-              <span className="supply-section-note">已过滤无存量项，以实际在架数据为准</span>
+              <span className="supply-section-note">按历史资料展示</span>
             </div>
-            {historicalDisplay.resources.filter(r => r.quantity !== null && r.quantity !== "0" && r.quantity !== 0).length ? (
+            {historicalDisplay.resources.length ? (
               <div className="supply-resources-chips">
-                {historicalDisplay.resources.filter(r => r.quantity !== null && r.quantity !== "0" && r.quantity !== 0).map(item => (
+                {historicalDisplay.resources.map(item => (
                   <div key={item.code} className="supply-resource-chip">
-                    <span className="supply-resource-name">{item.name}</span>
+                    <span className="supply-resource-name">{item.name}：</span>
                     <strong className="supply-resource-qty">{historicalQuantityText(item.quantity, item.unit)}</strong>
                   </div>
                 ))}
@@ -1506,6 +1494,7 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
             </div>
           </div>
           <ul className="supply-resource-list">{resources.map((row, index) => <li key={`${row.name}-${index}`}><span>{row.name}</span><strong>{row.quantity ?? "未返回"} {row.unit}</strong></li>)}</ul>
+          <details className="supply-inline-fold"><summary>查看报价明细</summary><table className="supply-stock-table"><thead><tr><th scope="col">物资</th><th scope="col">数量</th><th scope="col">号主侧单价</th><th scope="col">号主侧费用</th></tr></thead><tbody>{resources.map((row, index) => <tr key={`${row.name}-${index}`}><th scope="row">{row.name}{row.unit ? <small>{row.unit}</small> : null}</th><td>{row.quantity ?? "未返回"}</td><td>{row.ownerUnit ?? "未返回"}</td><td>{row.ownerAmount ?? "未返回"}</td></tr>)}</tbody>{quote?.ownerTotal ? <tfoot><tr><th scope="row" colSpan={3}>发布报价合计</th><td>{moneyText(quote.ownerTotal)}</td></tr></tfoot> : null}</table></details>
         </section> : null)}
 
         {/* 补充折叠区域：皮肤与权益、审核资料、修改记录 */}
@@ -1533,7 +1522,7 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
           </details> : null}
 
           {evidenceMedia.length ? <details className="supply-block supply-block--fold">
-            <summary><strong>审核资料</strong><span>{evidenceMedia.length} 张 · 仅本人可见</span><ChevronDown size={16} aria-hidden="true" /></summary>
+          <summary><strong>审核资料</strong><span>{evidenceMedia.length} 张 · 仅本人及审核人员可见</span><ChevronDown size={16} aria-hidden="true" /></summary>
             <div className="supply-fold-body"><ul className="supply-media-thumbs">{evidenceMedia.map((item) => <li key={item.assetId}><AccountMedia assetId={item.assetId} alt="" className="supply-media-thumb" /></li>)}</ul></div>
           </details> : null}
 
@@ -1563,26 +1552,26 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
               <h2 className="supply-section-title">出租设置与收益</h2>
             </div>
             <span className="supply-mode-badge">
-              {({ ordinary: "普通租赁", custom: "定制租赁", fast: "极速租赁" } as Record<string, string>)[historicalDisplay?.rentalMode ?? ""] ?? "普通出租"}
+              {({ ordinary: "普通租赁", custom: "定制租赁", fast: "极速租赁" } as Record<string, string>)[historicalDisplay?.rentalMode ?? quote?.rentalMode ?? ""] ?? "出租方式待确认"}
             </span>
           </div>
 
-          <div className="supply-revenue-hero">
+          {historical ? <div className="supply-revenue-hero">
             <div className="supply-revenue-stat">
-              <span className="supply-revenue-label">哈夫币租金</span>
+              <span className="supply-revenue-label">哈夫币租金记录</span>
               <div className="supply-revenue-num-wrap">
                 <span className="supply-revenue-symbol">¥</span>
-                <strong className="supply-revenue-num">{historical?.historicalQuote.haffRentYuan ?? (quote?.ownerTotal ? moneyText(quote.ownerTotal).replace("元", "").trim() : "0.00")}</strong>
+                <strong className="supply-revenue-num">{historical.historicalQuote.haffRentYuan}</strong>
               </div>
             </div>
             <div className="supply-revenue-stat">
               <span className="supply-revenue-label">押金记录</span>
               <div className="supply-revenue-num-wrap">
                 <span className="supply-revenue-symbol">¥</span>
-                <strong className="supply-revenue-num">{historical?.historicalQuote.depositYuan ?? (quote?.publisherBailRequirement ? String(quote.publisherBailRequirement.amount) : "0.00")}</strong>
+                <strong className="supply-revenue-num">{historical.historicalQuote.depositYuan}</strong>
               </div>
             </div>
-          </div>
+          </div> : <div className="supply-revenue-stat"><span className="supply-revenue-label">上架报价</span><strong className="supply-revenue-num">{moneyText(quote?.ownerTotal)}</strong></div>}
 
           <div className="supply-revenue-sub-grid">
             <div className="supply-revenue-sub-cell">
@@ -1590,13 +1579,13 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
               <strong className="supply-rev-sub-v">{historical ? `${historical.historicalQuote.termDays} 天` : (quote?.termSeconds ? termLabel(quote.termSeconds) : "未提供")}</strong>
             </div>
             <div className="supply-revenue-sub-cell">
-              <span className="supply-rev-sub-k">物资金额</span>
-              <strong className="supply-rev-sub-v">{historical ? `${historical.historicalQuote.goodsYuan} 元` : "0.00 元"}</strong>
+              <span className="supply-rev-sub-k">{historical ? "物资金额记录" : "哈夫币出租比例"}</span>
+              <strong className="supply-rev-sub-v">{historical ? `${historical.historicalQuote.goodsYuan} 元` : quote?.ownerHaffRatio ? `1 元 = ${quote.ownerHaffRatio} 万哈夫币` : "待确认"}</strong>
             </div>
           </div>
 
           <div className="supply-revenue-foot">
-            <Link href={`/account?view=leased&source=legacy&accountId=${encodeURIComponent(account.id)}`} className="supply-side-order-btn">
+            <Link href={`/account?view=leased&accountId=${encodeURIComponent(account.id)}`} className="supply-side-order-btn">
               <span>查看该账号的出租订单</span>
               <ChevronRight size={15} aria-hidden="true" />
             </Link>
@@ -1614,11 +1603,7 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
           <div className="supply-duty-content">
             <div className="supply-duty-row">
               <span className="supply-duty-k">上架时保证金要求</span>
-              <strong className="supply-duty-v">{quote?.publisherBailRequirement ? `${quote.publisherBailRequirement.amount} 元` : "已核对"}</strong>
-            </div>
-            <div className="supply-duty-row">
-              <span className="supply-duty-k">账号信用风控</span>
-              <strong className="supply-duty-v is-safe">信用良好 · 正常</strong>
+              <strong className="supply-duty-v">{quote?.publisherBailRequirement ? `${quote.publisherBailRequirement.amount} 元` : "待确认"}</strong>
             </div>
             <div className="supply-duty-note">
               <p>查看本账号当前应缴保证金状态与信用分值。</p>
@@ -1636,10 +1621,10 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
 
     {/* 全屏 Lightbox 大图预览 */}
     {lightboxOpen && publicImages.length ? (
-      <div className="supply-lightbox-overlay" role="dialog" aria-modal="true" aria-label="全屏查看实机截图" onClick={() => setLightboxOpen(false)}>
+      <div className="supply-lightbox-overlay" role="dialog" aria-modal="true" aria-label="全屏查看账号展示图" onClick={() => setLightboxOpen(false)}>
         <div className="supply-lightbox-modal" onClick={(e) => e.stopPropagation()}>
           <button type="button" className="supply-lightbox-close" onClick={() => setLightboxOpen(false)} aria-label="关闭预览"><X size={20} /></button>
-          <LegacyAccountImage src={publicImages[activeImgIndex]} alt={`实机截图 ${activeImgIndex + 1}`} className="supply-lightbox-img" />
+          <LegacyAccountImage src={publicImages[activeImgIndex] ?? null} alt={`截图 ${activeImgIndex + 1}`} className="supply-lightbox-img" />
           {publicImages.length > 1 ? (
             <div className="supply-lightbox-nav">
               <button type="button" className="supply-lightbox-arrow" disabled={activeImgIndex === 0} onClick={() => setActiveImgIndex(i => Math.max(0, i - 1))} aria-label="上一张">‹</button>

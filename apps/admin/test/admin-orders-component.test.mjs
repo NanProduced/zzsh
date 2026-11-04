@@ -610,7 +610,7 @@ for(const [status,days,haff,total]of [['CANCELLED','13','130000000','685.00'],['
   assert.equal(node.textContent.includes('本单冻结账号摘要'),false);
 });
 
-test('CHAIN order detail orders identity, frozen parties, prepay/channel, fulfillment, settlement and funds evidence once', async t => {
+test('CHAIN order detail separates fulfillment, business funds, JoinPay evidence and trace records', async t => {
   const {root,node,AdminOrderChainView}=await setup(t);
   const value={...chainOrder,id:'chain-order-detail',displayNo:'CHAIN-DETAIL',source:{origin:'NATIVE'}};
   const paymentSummary={contractVersion:'admin-order-payment-summary.v1',integration:'CONTROLLED_LOCAL',productionPaymentCapability:false,originalRequest:{id:'req',channelOrderNo:'MERCHANT-1',method:'ALIPAY_NATIVE',amount:{cents:'15908',currency:'CNY'},merchantIdentityId:'m',protocolVersion:'1',keyVersionRef:'k',createdAt:value.createdAt},latestTrustedObservation:null,acceptance:{state:'APPLIED',confirmationId:'c',reasonCode:null},conflicts:null,recovery:null,settlement:'NOT_INTEGRATED',unknowns:null,updatedAt:null};
@@ -621,10 +621,14 @@ test('CHAIN order detail orders identity, frozen parties, prepay/channel, fulfil
   assert(headings.indexOf('当前情况')<headings.indexOf('本单账号和双方'));
   assert(headings.indexOf('本单账号和双方')<headings.indexOf('关键费用'));
   assert(headings.indexOf('关键费用')<headings.indexOf('履约与处理记录'));
-  assert(headings.indexOf('履约与处理记录')<headings.indexOf('结算与退款'));
-  assert(headings.indexOf('结算与退款')<headings.indexOf('资金凭证与来源记录'));
+  assert(headings.indexOf('履约与处理记录')<headings.indexOf('结算与退款依据'));
+  assert(headings.indexOf('结算与退款依据')<headings.indexOf('汇聚渠道证据'));
+  assert(headings.indexOf('汇聚渠道证据')<headings.indexOf('资金凭证与来源记录'));
   assert.equal((text.match(/本单账号和双方/g)??[]).length,1,'account/parties are not duplicated in the aside');
-  const toggle=[...node.querySelectorAll('button')].find(button=>button.textContent.includes('查看付款依据'));
+  await act(async()=>[...node.querySelectorAll('[role=tab]')].find(tab=>tab.textContent==='资金与退款').click());
+  const channel=[...node.querySelectorAll('summary')].find(summary=>summary.textContent==='本单付款渠道状态');
+  await act(async()=>channel.click());
+  const toggle=[...channel.parentElement.querySelectorAll('button')].find(button=>button.textContent.includes('查看付款依据'));
   await act(async()=>toggle.click());await settle();
   const payment=node.textContent;
   assert.match(payment,/渠道观察/);assert.match(payment,/本站接纳/);assert.match(payment,/商户订单号/);assert.match(payment,/MERCHANT-1/);
