@@ -24,7 +24,7 @@ export function contentMediaChoiceIssue(definition: ResourceDefinition | null, i
 }
 export function ContentMediaEditor(props: ContentEditorProps) {
   const initial = props.detail.draft?.payload ?? props.detail.published?.payload ?? props.detail.baseline ?? props.detail.current.payload ?? props.detail.editorSource?.version.payload;
-  if (!initial || initial.kind === "guide" || initial.kind === "notice") return <StatusMessage error="未能读取图片位置，请返回列表重试。" />;
+  if (!initial || initial.kind === "guide" || initial.kind === "notice" || initial.kind === "footer") return <StatusMessage error="未能读取图片位置，请返回列表重试。" />;
   return <MediaEditor {...props} initial={initial} />;
 }
 function MediaEditor({ detail, initial, locked, busy, pending, operationError, success, canEdit, canPublish, canUpload, canReview, onClose, onRecover, onWrite, onDirtyChange }: ContentEditorProps & { initial: PlacementResource }) {
@@ -36,7 +36,7 @@ function MediaEditor({ detail, initial, locked, busy, pending, operationError, s
   useEffect(() => { onDirtyChange(dirty || locked); }, [dirty, locked, onDirtyChange]);
   useEffect(() => () => onDirtyChange(false), [onDirtyChange]);
   useEffect(() => { if (!canEdit) setRestoring(null); }, [canEdit]);
-  const current = detail.current.payload, currentMedia = current && current.kind !== "guide" && current.kind !== "notice" ? placementMedia(current) : null;
+  const current = detail.current.payload, currentMedia = current && current.kind !== "guide" && current.kind !== "notice" && current.kind !== "footer" ? placementMedia(current) : null;
   const boundId = currentMedia && "qrMediaId" in currentMedia ? currentMedia.qrMediaId : currentMedia && "mediaId" in currentMedia ? currentMedia.mediaId : null;
   const oldId = boundId && detail.current.media.some(row => row.id === boundId && row.url) ? boundId : null;
   const nextId = "qrMediaId" in media ? media.qrMediaId : "mediaId" in media ? media.mediaId : null;

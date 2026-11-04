@@ -633,6 +633,30 @@ test("QR replacement cancels before submit, freezes cancel while saving, and pub
   assert.equal(publishedPayload.title, before.title); assert.equal(publishedPayload.description, before.description); assert.equal(publishedPayload.imageAlt, before.imageAlt);
 });
 
+test("footer editor saves a revisioned draft before publish and respects read-only access", async t => {
+  const key = "placement:FOOTER", definition = RESOURCE_DEFINITIONS.find(row => row.key === key), baseline = DEFAULT_RESOURCES[key];
+  let revision = "2", draft = { id: "footer_draft", sequence: 2, state: "DRAFT", revision: "1", payload: baseline }, published = { id: "footer_pub", sequence: 1, state: "PUBLISHED", payload: baseline };
+  const current = () => ({ schema: RESOURCE_SCHEMA, key, source: "MANAGED", state: "available", payload: published.payload, media: [] });
+  const detail = () => ({ key, definition, item: { id: "footer_item", revision, gameId: null }, draft, published, versions: [], current: current(), baseline: null });
+  const h = await mountHarness(t, { perms: PLATFORM_PERMS, fetchImpl: router([
+    { match: "/api/bff/admin/content/items", response: () => json(itemsPage([])) },
+    { match: "/api/bff/admin/content/resources", response: () => json({ items: [{ current: current(), definition, metadata: { itemId: "footer_item", revision, hasDraft: Boolean(draft) } }], nextCursor: null, limit: 5 }) },
+    { match: `/api/bff/admin/content/resources/${encodeURIComponent(key)}`, response: () => json(detail()) },
+    { method: "PUT", match: `/api/bff/admin/content/resources/${encodeURIComponent(key)}/draft`, response: async (_url, init) => { const body = JSON.parse(init.body); assert.equal(body.expectedRevision, "2"); draft = { ...draft, payload: body.payload }; revision = "3"; return json(detail()); } },
+    { method: "POST", match: `/api/bff/admin/content/resources/${encodeURIComponent(key)}/publish`, response: async (_url, init) => { const body = JSON.parse(init.body); assert.deepEqual(body, { versionId: "footer_draft", expectedRevision: "3" }); published = { id: "footer_draft", sequence: 2, state: "PUBLISHED", payload: draft.payload }; draft = null; revision = "4"; return json(detail()); } },
+  ]) });
+  await h.click(h.btn("图片与二维码")); await h.click(h.btn("编辑页脚"));
+  assert.ok(h.gets.some(request => request.path.endsWith("/content/resources") && new URLSearchParams(request.query).get("includeFooter") === "1"));
+  const label = [...h.el.querySelectorAll("label")].find(node => node.textContent === "版权主体（留空隐藏）");
+  const input = h.browser.document.getElementById(label.htmlFor);
+  await act(async () => { Object.getOwnPropertyDescriptor(h.browser.HTMLInputElement.prototype, "value").set.call(input, "新版权主体"); input.dispatchEvent(new h.browser.Event("input", { bubbles: true })); });
+  await h.settle(); assert.ok(h.btn("发布页脚").disabled, "unsaved changes cannot publish");
+  await h.click(h.btn("保存草稿")); assert.equal(published.payload.copyright, baseline.copyright, "save does not update the public snapshot");
+  await h.click(h.btn("发布页脚")); assert.equal(published.payload.copyright, "新版权主体");
+  await h.render(0, ["content.platform.read"]); await h.settle(); await h.click(h.btn("图片与二维码")); await h.click(h.btn("查看"));
+  assert.equal(h.btn("保存草稿"), undefined); assert.equal(h.btn("发布页脚"), undefined);
+});
+
 test("late resource detail cannot reopen an editor after switching sections", async t => {
   const payload = DEFAULT_GUIDES[0], key = `guide:${payload.slug}`;
   const current = { schema: RESOURCE_SCHEMA, key, source: "BUILTIN", state: "available", payload, media: [] };
@@ -646,7 +670,7 @@ test("late resource detail cannot reopen an editor after switching sections", as
   await h.click(h.btn("规则与手册")); await h.click(h.btn("编辑文档")); await h.click(h.btn("图片与二维码"));
   await act(async () => { finishDetail(json({ key, definition: null, item: null, current, baseline: payload, draft: null, published: null, versions: [] })); }); await h.settle();
   assert.equal(h.el.querySelector('[aria-label="内容编辑器"]'), null);
-  assert.ok(h.textOf().includes("用户页面图片")); assert.equal(h.writes.length, 0);
+  assert.ok(h.textOf().includes("用户页面展示")); assert.equal(h.writes.length, 0);
 });
 
 test("resource restore confirmation is cleared when edit permission is lost", async t => {

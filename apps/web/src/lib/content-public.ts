@@ -58,3 +58,11 @@ export async function fetchContentResources(kind: "guide" | "placement", options
   } while (cursor);
   return items;
 }
+
+export async function fetchFooterResource(options: { base?: string; fetcher?: typeof fetch; signal?: AbortSignal } = {}): Promise<PublicContentResource> {
+  const response = await (options.fetcher ?? fetch)(`${options.base ?? "/api/content"}/resources/${encodeURIComponent("placement:FOOTER")}`, { cache: "no-store", signal: options.signal, redirect: "error" });
+  if (!response.ok) throw new ContentReadError();
+  const item = parsePublicContentResource(await response.json());
+  if (item.key !== "placement:FOOTER") throw new ContentReadError();
+  return item;
+}

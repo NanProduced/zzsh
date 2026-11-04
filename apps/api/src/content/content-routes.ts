@@ -211,24 +211,27 @@ function managedKey(raw: string): string {
   catch (error) { throw invalid(error instanceof Error ? error.message : "Resource key is invalid"); }
 }
 
-export function resourcePage(query: URLSearchParams, scope?: ResourceScope): { kind?: "guide" | "placement"; after?: string; limit: number } {
+export function resourcePage(query: URLSearchParams, scope?: ResourceScope): { kind?: "guide" | "placement"; after?: string; limit: number; includeFooter?: boolean } {
   const kind = query.get("kind");
   if (kind !== null && kind !== "guide" && kind !== "placement") throw invalid("Resource kind is invalid");
+  const footer = query.get("includeFooter");
+  if (footer !== null && (footer !== "1" || scope?.scope !== "platform" || query.getAll("includeFooter").length !== 1)) throw invalid("Resource capability is invalid");
+  const includeFooter = footer === "1";
   const limit = parseLimit(query, 5);
   if (limit > 5) throw invalid("Resource pages support at most 5 complete documents");
   const cursor = query.get("cursor");
   let after: string | undefined;
   if (cursor !== null) {
     const value = decodeCursor(cursor, entry => entry.kind === kind && entry.limit === limit
-      && entry.scope === (scope?.scope ?? null) && entry.gameId === (scope?.gameId ?? null));
+      && entry.scope === (scope?.scope ?? null) && entry.gameId === (scope?.gameId ?? null) && Boolean(entry.footer) === includeFooter);
     if (typeof value.after !== "string") throw invalid("Resource cursor is invalid");
     after = managedKey(value.after);
   }
-  return { ...(kind ? { kind } : {}), ...(after ? { after } : {}), limit };
+  return { ...(kind ? { kind } : {}), ...(after ? { after } : {}), ...(includeFooter ? { includeFooter: true } : {}), limit };
 }
 
-function resourceCursor(after: string | null, input: { kind?: string; limit: number }, scope?: ResourceScope): string | null {
-  return after ? Buffer.from(JSON.stringify({ v: 1, after, kind: input.kind ?? null, limit: input.limit, scope: scope?.scope ?? null, gameId: scope?.gameId ?? null })).toString("base64url") : null;
+function resourceCursor(after: string | null, input: { kind?: string; limit: number; includeFooter?: boolean }, scope?: ResourceScope): string | null {
+  return after ? Buffer.from(JSON.stringify({ v: 1, after, kind: input.kind ?? null, limit: input.limit, scope: scope?.scope ?? null, gameId: scope?.gameId ?? null, ...(input.includeFooter ? { footer: true } : {}) })).toString("base64url") : null;
 }
 
 async function authorizeResource(client: PoolClient, actor: WriteActor, action: ContentAction, key: string, creatingGameId?: string | null): Promise<ContentItemRow | null> {

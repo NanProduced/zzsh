@@ -40,7 +40,12 @@ export type CarouselSlide = {
   sortOrder: number; startsAt: string | null; endsAt: string | null;
 };
 export type CarouselResource = { kind: "carousel"; title: string; slides: readonly CarouselSlide[] };
-export type ContentResource = GuideResource | NoticeResource | ContactResource | BannerResource | CarouselResource;
+export type FooterResource = {
+  kind: "footer"; title: string; copyright: string; icp: string; policeRegion: string; policeCode: string; licenseUrl: string | null;
+  help: readonly { label: string; href: string }[]; support: readonly { label: string; href: string }[]; complaint: boolean;
+  socials: readonly { label: string; href: string | null; qrMediaId: string | null }[];
+};
+export type ContentResource = GuideResource | NoticeResource | ContactResource | BannerResource | CarouselResource | FooterResource;
 export type PublicContentResource = {
   schema: "content-resource.v1"; key: string; source: "BUILTIN" | "MANAGED" | "LEGACY";
   state: "available" | "withdrawn" | "unpublished"; payload: ContentResource | null;

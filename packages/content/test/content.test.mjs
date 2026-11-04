@@ -2,6 +2,23 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { DEFAULT_GUIDES as REGISTERED_GUIDES, DEFAULT_RESOURCES, validateResource, validateResourceKey, validateResourceMedia, safeContentLink, resourceMediaIds, resourceText } from "../index.cjs";
+
+test("footer configuration validates links, filing identifiers and QR references", () => {
+  const key = "placement:FOOTER", base = DEFAULT_RESOURCES[key];
+  const configured = { ...base, help: [{ label: "账号", href: "/accounts" }, { label: "外部", href: "https://example.test/path" }], socials: [{ label: "渠道", href: null, qrMediaId: "qr_1" }] };
+  assert.deepEqual(resourceMediaIds(validateResource(key, configured)), ["qr_1"]);
+  validateResourceMedia(configured, [{ id: "qr_1", width: 512, height: 512 }]);
+  assert.throws(() => validateResourceMedia(configured, [{ id: "qr_1", width: 512, height: 256 }]), /图片/);
+  for (const href of ["javascript:alert(1)", "//evil.test", "%2Fhelp", "/%2f%2fevil.test", "/%2e%2e/secret", "https://user:pass@example.test", "http://example.test", "https:example.test", "https:///example.test", "https://example.test/%0aevil", "https:\\evil.test"]) {
+    assert.throws(() => validateResource(key, { ...base, licenseUrl: href }), href);
+  }
+  assert.throws(() => validateResource(key, { ...base, policeCode: "123" }), /公安备案/);
+  assert.throws(() => validateResource(key, { ...base, icp: "随意备案" }), /ICP备案/);
+  assert.throws(() => validateResource(key, { ...base, socials: [{ label: "空渠道", href: null, qrMediaId: null }] }), /链接或二维码/);
+  assert.throws(() => validateResource(key, { ...base, help: [{ label: "动态", href: "/updates" }] }), /固定入口/);
+  assert.equal(validateResource(key, { ...base, licenseUrl: "https://Example.test" }).licenseUrl, "https://example.test/");
+  assert.deepEqual(validateResource(key, { ...base, help: [], support: [], socials: [], icp: "", policeRegion: "", policeCode: "", complaint: false }).help, []);
+});
 const DEFAULT_GUIDES = JSON.parse(fs.readFileSync(new URL("./fixtures/legacy-guides.json", import.meta.url), "utf8")).map(guide => ({kind: "guide", ...guide}));
 
 test("all existing guides and registered placements preserve their content and identifiers", () => {

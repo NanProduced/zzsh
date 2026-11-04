@@ -6,7 +6,7 @@ import {
   prepareResourceDraft, replaceResourceMedia, requireResourceMedia, restoreContentDraft, saveContentDraft, saveContentMediaDraft,
   type ContentItemRow, type ContentVersionRow,
 } from "../src/content/content";
-import { readPublicResource } from "../src/content/managed-content";
+import { listResourceKeys, readPublicResource } from "../src/content/managed-content";
 import { resourcePage } from "../src/content/content-routes";
 
 const KEY = "guide:rental-getting-started";
@@ -169,6 +169,30 @@ test("public payload and metadata are selected from the same published version, 
   assert.equal(JSON.stringify(resource).includes("新的未公开正文"), false);
 });
 
+test("footer draft stays private and public media qualification is checked again", async () => {
+  const key = "placement:FOOTER", base = DEFAULT_RESOURCES[key]!;
+  assert.equal(base.kind, "footer");
+  if (base.kind !== "footer") return;
+  const store = new ContentStore(); store.item.resourceKey = key;
+  const published = { ...base, copyright: "线上主体", socials: [{ label: "公开渠道", href: null, qrMediaId: MEDIA_ID }] };
+  const draft = { ...base, copyright: "未发布主体", socials: [] };
+  store.versions = [store.version("published", published, "PUBLISHED", 1), store.version("draft", draft, "DRAFT", 2)];
+  await requireResourceMedia(store.client(), published, true, key);
+  assert.ok(store.statements.some(sql => sql.includes("FOR SHARE")));
+  let resource = await readPublicResource(store.client(), key);
+  assert.equal(resource.payload?.kind === "footer" && resource.payload.copyright, "线上主体");
+  assert.equal(resource.media[0]?.url, `/api/v1/content/media/${MEDIA_ID}/content`);
+  assert.doesNotMatch(JSON.stringify(resource), /未发布主体/);
+  store.media[0]!.accessClass = "PRIVATE_REVIEW";
+  await assert.rejects(() => requireResourceMedia(store.client(), published, true, key), /approved and publicly displayable/);
+  resource = await readPublicResource(store.client(), key);
+  assert.equal(resource.media[0]?.url, null);
+  store.versions = [store.version("draft-only", draft, "DRAFT", 1)];
+  resource = await readPublicResource(store.client(), key);
+  assert.equal(resource.source, "BUILTIN");
+  assert.equal(resource.payload?.kind === "footer" && resource.payload.copyright, base.copyright);
+});
+
 test("an explicit CAS restore of the saved legacy carousel draft rebuilds fixed slots without guessing media mappings", async () => {
   const store = new ContentStore(); store.item.resourceKey = "placement:HOME_HERO";
   const template = DEFAULT_RESOURCES["placement:HOME_HERO"]!;
@@ -218,6 +242,24 @@ test("resource pages cap both scopes at five, bind cursors to that limit and fit
     media: ids.map(id => ({ id, url: `/api/v1/content/media/${encodeURIComponent(id)}/content` })) };
   const bytes = Buffer.byteLength(JSON.stringify({ items: Array.from({ length: 5 }, () => item), limit: 5, nextCursor: null }));
   assert.ok(bytes < 2 * 1024 * 1024, `${bytes} exceeds the Web response limit`);
+});
+
+test("footer capability is opt-in for platform admin lists and bound to the cursor", async () => {
+  const scope = { scope: "platform" as const }, queries: { sql: string; params: unknown[] }[] = [];
+  const client = { query: async (sql: string, params: unknown[]) => { queries.push({ sql, params }); return { rows: [] }; } } as unknown as PoolClient;
+  const old = resourcePage(new URLSearchParams(), scope);
+  const current = resourcePage(new URLSearchParams({ includeFooter: "1" }), scope);
+  await listResourceKeys(client, { ...old, scope });
+  await listResourceKeys(client, { ...current, scope });
+  await listResourceKeys(client, { limit: 5 });
+  assert.deepEqual(queries.map(query => query.params[7]), [false, true, false]);
+  assert.ok(queries.every(query => query.sql.includes("key <> 'placement:FOOTER'")));
+  const oldCursor = Buffer.from(JSON.stringify({ v: 1, after: KEY, kind: null, limit: 5, scope: "platform", gameId: null })).toString("base64url");
+  const newCursor = Buffer.from(JSON.stringify({ v: 1, after: KEY, kind: null, limit: 5, scope: "platform", gameId: null, footer: true })).toString("base64url");
+  assert.equal(resourcePage(new URLSearchParams({ cursor: oldCursor }), scope).after, KEY);
+  assert.equal(resourcePage(new URLSearchParams({ cursor: newCursor, includeFooter: "1" }), scope).after, KEY);
+  assert.throws(() => resourcePage(new URLSearchParams({ cursor: oldCursor, includeFooter: "1" }), scope), /Cursor/);
+  assert.throws(() => resourcePage(new URLSearchParams({ includeFooter: "1" })), /capability/);
 });
 
 // Source registration only; real schema/ACL upgrade still needs a dedicated PostgreSQL run.

@@ -84,7 +84,7 @@ export async function readPublicResource(client: PoolClient, key: string): Promi
   return result;
 }
 
-export async function listResourceKeys(client: PoolClient, input: { scope?: ResourceScope; kind?: "guide" | "placement"; after?: string; limit: number }): Promise<{ keys: string[]; nextCursor: string | null }> {
+export async function listResourceKeys(client: PoolClient, input: { scope?: ResourceScope; kind?: "guide" | "placement"; after?: string; limit: number; includeFooter?: boolean }): Promise<{ keys: string[]; nextCursor: string | null }> {
   const defaults = input.scope?.scope === "game" ? [] : Object.keys(DEFAULT_RESOURCES);
   const gameId = input.scope?.scope === "game" ? input.scope.gameId : null;
   const rows = await client.query<{ key: string }>(
@@ -93,8 +93,8 @@ export async function listResourceKeys(client: PoolClient, input: { scope?: Reso
       UNION SELECT i."resource_key" AS key FROM "zzsh_content"."content_item" i
         WHERE i."type" = 'RESOURCE' AND ($2::boolean OR i."game_id" IS NOT DISTINCT FROM $3::text)
           AND ($7::boolean OR EXISTS (SELECT 1 FROM "zzsh_content"."content_version" v WHERE v."item_id" = i."id" AND v."published_at" IS NOT NULL))
-    ) resources WHERE ($4::text IS NULL OR key LIKE $4) AND key > $5 ORDER BY key LIMIT $6`,
-    [defaults, input.scope === undefined, gameId, input.kind ? `${input.kind}:%` : null, input.after ?? "", input.limit + 1, input.scope !== undefined],
+    ) resources WHERE ($4::text IS NULL OR key LIKE $4) AND key > $5 AND ($8::boolean OR key <> 'placement:FOOTER') ORDER BY key LIMIT $6`,
+    [defaults, input.scope === undefined, gameId, input.kind ? `${input.kind}:%` : null, input.after ?? "", input.limit + 1, input.scope !== undefined, input.scope?.scope === "platform" && input.includeFooter === true],
   );
   const more = rows.rows.length > input.limit;
   const keys = rows.rows.slice(0, input.limit).map(row => row.key);
@@ -102,7 +102,7 @@ export async function listResourceKeys(client: PoolClient, input: { scope?: Reso
 }
 
 // One version query for the page keeps the public help index independent of its number of articles.
-export async function listPublicResources(client: PoolClient, input: { scope?: ResourceScope; kind?: "guide" | "placement"; after?: string; limit: number }): Promise<{ items: PublicContentResource[]; nextCursor: string | null }> {
+export async function listPublicResources(client: PoolClient, input: { scope?: ResourceScope; kind?: "guide" | "placement"; after?: string; limit: number; includeFooter?: boolean }): Promise<{ items: PublicContentResource[]; nextCursor: string | null }> {
   const page = await listResourceKeys(client, input);
   if (!page.keys.length) return { items: [], nextCursor: null };
   const rows = await client.query<{

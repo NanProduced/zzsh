@@ -48,6 +48,18 @@ test('public resource client validates schema, media eligibility and finite pagi
   await assert.rejects(()=>fetchContentResources('placement',{fetcher:async()=>new Response(null,{status:503})}));
 });
 
+test('footer detail uses the public proxy and rejects unsafe payloads',async()=>{
+  const {fetchFooterResource}=await import('../src/lib/content-public.ts');
+  const {DEFAULT_RESOURCES}=await import('@zzsh/content');
+  const payload=DEFAULT_RESOURCES['placement:FOOTER'];
+  const entry={schema:'content-resource.v1',key:'placement:FOOTER',source:'BUILTIN',state:'available',payload,media:[],version:null};
+  let call;
+  assert.equal((await fetchFooterResource({fetcher:async(url,options)=>{call={url,options};return Response.json(entry);}})).key,'placement:FOOTER');
+  assert.match(call.url,/resources\/placement%3AFOOTER$/);assert.equal(call.options.cache,'no-store');
+  await assert.rejects(()=>fetchFooterResource({fetcher:async()=>Response.json({...entry,payload:{...payload,licenseUrl:'javascript:alert(1)'}})}));
+  await assert.rejects(()=>fetchFooterResource({fetcher:async()=>Response.json({...entry,key:'placement:FOLLOW'})}));
+});
+
 test('resource reads use bounded five-item pages and no-store for every cursor request',async()=>{
   const {fetchContentResources}=await import('../src/lib/content-public.ts');
   const {DEFAULT_GUIDES}=await import('@zzsh/content');

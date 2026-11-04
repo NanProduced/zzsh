@@ -11,6 +11,9 @@ const DEFAULT_GUIDES = require("./default-guides.json").map((article) => ({ kind
 const notice = (title, sections) => ({ kind: "notice", title, sections: sections.map(([id, heading, text]) => ({ id, title: heading, blocks: [{ type: "paragraph", text }] })) });
 const contact = (title, description) => ({ kind: "contact", title, description, handle: "", qrMediaId: null, imageAlt: `${title}二维码`, enabled: false });
 const placements = {
+  FOOTER: { kind: "footer", title: "网站页脚", copyright: "杭州鑫峰互娱网络科技有限公司", icp: "浙ICP备2026028260号", policeRegion: "浙", policeCode: "33010802014464", licenseUrl: null,
+    help: [{ label: "租号流程", href: "/help/rental-getting-started" }, { label: "费用与租期", href: "/help/fees-overview" }, { label: "发布须知", href: "/help/publish-prepare" }],
+    support: [{ label: "帮助中心", href: "/help" }], complaint: true, socials: [] },
   HOME_HERO: { kind: "carousel", title: "首页轮播", slides: [
     { id: "delta", title: "资源账号租赁", description: "", imageAlt: "资源账号租赁", linkUrl: "/accounts", sortOrder: 3 },
     { id: "protection", title: "未成年人保护", description: "", imageAlt: "未成年人保护", linkUrl: "/help/minor-protection", sortOrder: 2 },
@@ -41,6 +44,7 @@ const placements = {
   RENTAL_FEES: notice("报价费用说明", [["help", "费用说明", "物资先预付，最终按实际消耗和适用条款结算。公开参考费用不能替代个人报价，会员价格与实际租客押金由服务端核定。"]]),
 };
 const labels = {
+  FOOTER: ["网站页脚", "site", ["全站 · 页脚"]],
   HOME_HERO: ["首页轮播", "site", ["首页 · 中央轮播（桌面与手机）"]],
   FOLLOW: ["全站关注二维码", "site", ["全站工具条 · 关注我们"]],
   MARKET_PLAYER_GROUP: ["玩家交流群", "market", ["三角洲账号市场 · 顶部联系卡"]],
@@ -59,6 +63,7 @@ const DEFAULT_RESOURCES = Object.fromEntries([
   ...Object.entries(placements).map(([key, payload]) => [`placement:${key}`, payload]),
 ]);
 const MEDIA_RULES = {
+  footer: { minWidth: 256, minHeight: 256, aspectRatio: 1, aspectTolerance: .02, recommendedSize: "512×512 PNG" },
   contact: { minWidth: 256, minHeight: 256, aspectRatio: 1, aspectTolerance: .02, recommendedSize: "512×512 PNG" },
   banner: { minWidth: 810, minHeight: 270, aspectRatio: 3, aspectTolerance: .05, recommendedSize: "1620×540" },
   carousel: { minWidth: 920, minHeight: 400, aspectRatio: 2.3, aspectTolerance: .05, recommendedSize: "1840×800" },
@@ -99,6 +104,18 @@ function safeContentLink(value) {
   const segment = decoded.split(/[/?#]/).filter(Boolean)[0];
   if (segment && !["accounts", "publish", "account", "help", "legal"].includes(segment)) fail("链接目标尚未开放");
   return result;
+}
+function safeFooterLink(value) {
+  const result = text(value, 500, "链接");
+  let decoded;
+  try { decoded = decodeURIComponent(result); } catch { fail("链接编码无效"); }
+  if (/[\\\s]/.test(decoded) || controls.test(decoded)) fail("链接格式无效");
+  if (result.startsWith("/") && decoded.startsWith("/") && !decoded.startsWith("//") && !decoded.split(/[?#]/)[0].split("/").some(part => part === "." || part === "..")) return result;
+  if (!/^https:\/\/[^/]/i.test(result)) fail("链接须为站内路径或完整的 HTTPS 地址");
+  let url;
+  try { url = new URL(result); } catch { fail("链接须为站内路径或 HTTPS 地址"); }
+  if (url.protocol !== "https:" || !url.hostname || url.username || url.password) fail("链接须为安全的 HTTPS 地址");
+  return url.href;
 }
 function block(input) {
   object(input, ["type", "text", "ordered", "items", "tone", "caption", "columns", "rows", "mediaId", "alt", "href"], "内容块");
@@ -163,7 +180,26 @@ function validateResource(key, input) {
   const builtin = DEFAULT_RESOURCES[key];
   if (key.startsWith("guide:") ? input.kind !== "guide" : input.kind !== builtin.kind) fail("内容类型与展示位置不匹配");
   let result;
-  if (input.kind === "carousel") {
+  if (input.kind === "footer") {
+    object(input, ["kind", "title", "copyright", "icp", "policeRegion", "policeCode", "licenseUrl", "help", "support", "complaint", "socials"], "网站页脚");
+    const links = (value, label) => {
+      if (!Array.isArray(value) || value.length > 8) fail(`${label}数量超出范围`);
+      return value.map(entry => { object(entry, ["label", "href"], label); return { label: text(entry.label, 40, "链接文字"), href: safeFooterLink(entry.href) }; });
+    };
+    if (!Array.isArray(input.socials) || input.socials.length > 6) fail("社交渠道数量超出范围");
+    const socials = input.socials.map(entry => {
+      object(entry, ["label", "href", "qrMediaId"], "社交渠道");
+      const href = entry.href === null ? null : safeFooterLink(entry.href), qrMediaId = mediaId(entry.qrMediaId, true);
+      if (!href && !qrMediaId) fail("社交渠道须配置链接或二维码");
+      return { label: text(entry.label, 40, "社交渠道名称"), href, qrMediaId };
+    });
+    const icp = text(input.icp, 40, "ICP备案号", true), policeRegion = text(input.policeRegion, 6, "公安备案地区", true), policeCode = text(input.policeCode, 14, "公安备案编号", true);
+    if (icp && !/^[\u4e00-\u9fff]{1,4}ICP备\d{8,12}号(?:-\d+)?$/.test(icp)) fail("ICP备案号格式无效");
+    if ((policeRegion || policeCode) && (!/^[\u4e00-\u9fff]{1,6}$/.test(policeRegion) || !/^\d{14}$/.test(policeCode))) fail("公安备案地区与14位编号须同时填写");
+    const help = links(input.help, "使用帮助"), support = links(input.support, "服务支持"), allLinks = [...help, ...support].map(link => link.href);
+    if (new Set(allLinks).size !== allLinks.length || allLinks.some(href => ["/updates", "/legal/terms", "/legal/privacy"].includes(href.split(/[?#]/)[0]))) fail("链接重复或与固定入口重复");
+    result = { kind: "footer", title: text(input.title, 200, "标题"), copyright: text(input.copyright, 120, "版权主体", true), icp, policeRegion, policeCode, licenseUrl: input.licenseUrl === null ? null : safeFooterLink(input.licenseUrl), help, support, complaint: boolean(input.complaint, "投诉建议入口"), socials };
+  } else if (input.kind === "carousel") {
     object(input, ["kind", "title", "slides"], "轮播");
     if (!Array.isArray(input.slides) || input.slides.length > 30) fail("轮播最多 30 张");
     const ids = new Set();
@@ -214,6 +250,7 @@ function validateResource(key, input) {
 }
 function resourceMediaIds(value) {
   const ids = [];
+  if (value.kind === "footer") ids.push(...value.socials.map(entry => entry.qrMediaId).filter(Boolean));
   if (value.kind === "carousel") for (const slide of value.slides) ids.push(...[slide.mediaId, slide.mobileMediaId].filter(Boolean));
   if (value.kind === "contact" && value.qrMediaId) ids.push(value.qrMediaId);
   if (value.kind === "banner") ids.push(...[value.mediaId, value.mobileMediaId].filter(Boolean));
@@ -224,6 +261,7 @@ function resourceMediaIds(value) {
   return [...new Set(ids)].sort();
 }
 function resourceText(value) {
+  if (value.kind === "footer") return [value.title, value.copyright, value.icp, ...value.help.map(link => link.label), ...value.support.map(link => link.label), ...value.socials.map(link => link.label)].join("\n");
   if (value.kind === "carousel") return [value.title, ...value.slides.map((slide) => `${slide.title}\n${slide.description}`)].join("\n\n");
   if (value.kind === "contact") return [value.title, value.description, value.handle].join("\n");
   if (value.kind === "banner") return [value.title, value.description].join("\n");

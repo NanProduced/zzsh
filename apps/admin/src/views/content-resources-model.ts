@@ -24,7 +24,7 @@ export function contentTime(value: string | null | undefined): string {
   return Number.isNaN(date.getTime()) ? "时间未知" : timeFormatter.format(date);
 }
 
-export const RESOURCE_KIND_LABEL = { guide: "帮助手册", notice: "流程说明", contact: "联系二维码", banner: "页面海报", carousel: "首页轮播" } as const;
+export const RESOURCE_KIND_LABEL = { guide: "帮助手册", notice: "流程说明", contact: "联系二维码", banner: "页面海报", carousel: "首页轮播", footer: "网站页脚" } as const;
 export const RESOURCE_CATEGORY_LABEL = { rental: "租号与使用", publish: "出租与管理", fees: "费用与资金", account: "账号与安全", "after-sale": "售后与保障", membership: "会员与邀请", agreement: "协议与规则" } as const;
 
 export type ResourceStateTone = "success" | "warning" | "info" | "secondary" | "unknown";
