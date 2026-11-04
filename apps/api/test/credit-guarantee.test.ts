@@ -10,11 +10,16 @@ test("only accounts with a guarantee fact become page rows", () => {
   assert.equal(isGuaranteeRequirementFact(context("UNKNOWN", { reasonCode: "STANDARD_QUOTE_UNAVAILABLE", baseCents: null })), false);
   assert.equal(isGuaranteeRequirementFact(context("UNKNOWN", { reasonCode: "CREDIT_UNINITIALIZED", score: null })), false);
   assert.equal(isGuaranteeRequirementFact(context("UNKNOWN", { reasonCode: "ZERO_AMOUNT_PROVIDER_UNSUPPORTED" })), false);
-  // A recorded requirement stays listable even when its own projection is unresolved.
-  assert.equal(isGuaranteeRequirementFact(context("UNKNOWN", { requirementId: "requirement-1", reasonCode: "PAYMENT_LEDGER_UNRECONCILED" })), true);
-  for (const state of ["NOT_REQUIRED", "REQUIRED", "PAYMENT_PENDING", "SATISFIED", "REFUND_REQUESTED", "REFUND_PROCESSING", "REFUNDED", "FAILED"]) {
-    assert.equal(isGuaranteeRequirementFact(context(state)), true, state);
+  // NOT_REQUIRED means the policy asks for nothing: a 100-point owner must not inherit a guarantee
+  // status from merely owning an account.
+  assert.equal(isGuaranteeRequirementFact(context("NOT_REQUIRED", { baseCents: "8800", score: 100 })), false);
+  // Listed facts: a requirement to pay now, or a recorded requirement that is mid-flight/paid/refunded.
+  assert.equal(isGuaranteeRequirementFact(context("REQUIRED", { baseCents: "8800", requiredCents: "440", score: 70 })), true);
+  for (const state of ["PAYMENT_PENDING", "SATISFIED", "REFUND_REQUESTED", "REFUND_PROCESSING", "REFUNDED", "FAILED"]) {
+    assert.equal(isGuaranteeRequirementFact(context(state, { requirementId: "requirement-1" })), true, state);
   }
+  // An unresolved projection stays listable only while a recorded requirement is behind it.
+  assert.equal(isGuaranteeRequirementFact(context("UNKNOWN", { requirementId: "requirement-1", reasonCode: "PAYMENT_LEDGER_UNRECONCILED" })), true);
 });
 
 test("credit guarantee uses exact integer HALF_UP and the 100 yuan cap", () => {

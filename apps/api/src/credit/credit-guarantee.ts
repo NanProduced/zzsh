@@ -678,16 +678,21 @@ export async function readGuaranteeContextsBatch(client: PoolClient, ownerUserId
 }
 
 /**
- * A guarantee row is a *requirement*, so the page may only list one where a guarantee fact exists:
- * a recorded owner_guarantee_requirement for this account tuple, or a policy outcome that was actually
- * computed from the account's current quote. `UNKNOWN` without a requirement record carries no fact —
- * it is what an account with no current quote (unlisted / imported without a declaration), no credit
- * file, or nothing to guarantee projects — so listing it would invent a "pending confirmation" the
- * owner has nothing to confirm and no row to act on. The projection itself keeps returning that
- * UNKNOWN context, because the supply gate must stay closed (fail-closed) for the same accounts.
+ * A guarantee row is a *requirement*, so the page may only list one where a guarantee fact exists.
+ * Listed: a current requirement to pay (REQUIRED), and a recorded requirement that is being paid,
+ * satisfied, refunded or failed (PAYMENT_PENDING / SATISFIED / REFUND_REQUESTED / REFUND_PROCESSING /
+ * REFUNDED / FAILED), plus an unresolved projection that still has a recorded requirement behind it.
+ * Not listed: NOT_REQUIRED (the policy asks for nothing, so there is no guarantee status to show) and
+ * UNKNOWN without a requirement record (no current quote / no credit file / nothing to guarantee —
+ * the pseudo rows this predicate was added for). The migration initialises every user at 100 points and
+ * the old platform had neither a credit score nor a guarantee scheme, so merely owning an account must
+ * never produce a guarantee status. The projection itself keeps returning NOT_REQUIRED/UNKNOWN, so the
+ * supply gate stays closed (fail-closed) and unchanged for exactly the same accounts.
  */
 export function isGuaranteeRequirementFact(context: GuaranteeContext): boolean {
-  return context.state !== "UNKNOWN" || context.requirementId !== undefined;
+  if (context.state === "NOT_REQUIRED") return false;
+  if (context.state === "UNKNOWN") return context.requirementId !== undefined;
+  return true;
 }
 
 function projectGuaranteeContext(row: GuaranteeContextRow, policy: FundingPolicy, credit: GuaranteeCreditRow | undefined, binding: GuaranteeBindingRow | undefined): GuaranteeContext {
