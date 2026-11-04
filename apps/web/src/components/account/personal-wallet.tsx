@@ -205,6 +205,7 @@ export function PersonalWallet({ scope }: { scope: string }) {
   const w = read.wallet, records = visiblePage.value;
   const recordsComplete = records?.listCoverage.knowledge === "KNOWN" && records.listCoverage.scope !== "POSTED_LEDGER_ONLY";
   const rawItems = records?.items ?? [];
+  const recentItems = rawItems.filter(entry => entry.sourceKind !== "OPENING").slice(0, 5);
   const displayItems = rawItems.filter(e => {
     if (filterOnlyReal && !(e.kind === "POSTED" && e.bucket === "AVAILABLE" && e.sourceKind !== "OPENING")) return false;
     if (timeRange !== "ALL") {
@@ -332,7 +333,7 @@ export function PersonalWallet({ scope }: { scope: string }) {
             </div>
             <Link href={href("entries")} scroll={false} className="wallet-view-all-link">全部流水<ChevronRight size={14} aria-hidden="true" /></Link>
           </div>
-          {records?.items.length ? (
+          {records && recentItems.length ? (
             <div className="account-module-card wallet-table-card">
               <div className="wallet-table-header" aria-hidden="true">
                 <span className="th-col th-time">时间</span>
@@ -342,7 +343,7 @@ export function PersonalWallet({ scope }: { scope: string }) {
                 <span className="th-col th-action"></span>
               </div>
               <div className="wallet-table-body">
-                <EntryRows items={records.items.slice(0, 5)} bucket={records.bucket} onOpen={rememberList} />
+                <EntryRows items={recentItems} bucket={records.bucket} onOpen={rememberList} />
               </div>
             </div>
           ) : visiblePage.busy ? (

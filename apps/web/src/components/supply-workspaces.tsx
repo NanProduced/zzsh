@@ -1552,11 +1552,24 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
               <h2 className="supply-section-title">出租设置与收益</h2>
             </div>
             <span className="supply-mode-badge">
-              {({ ordinary: "普通租赁", custom: "定制租赁", fast: "极速租赁" } as Record<string, string>)[historicalDisplay?.rentalMode ?? quote?.rentalMode ?? ""] ?? "出租方式待确认"}
+              {({ ordinary: "普通租赁", custom: "定制租赁", fast: "极速租赁" } as Record<string, string>)[quote?.rentalMode ?? historicalDisplay?.rentalMode ?? ""] ?? "出租方式待确认"}
             </span>
           </div>
 
-          {historical ? <div className="supply-revenue-hero">
+          {quote || !historical ? <>
+            <div className="supply-revenue-stat"><span className="supply-revenue-label">上架报价</span><strong className="supply-revenue-num">{moneyText(quote?.ownerTotal)}</strong></div>
+            <div className="supply-revenue-sub-grid">
+              <div className="supply-revenue-sub-cell">
+                <span className="supply-rev-sub-k">约定租期</span>
+                <strong className="supply-rev-sub-v">{quote?.termSeconds ? termLabel(quote.termSeconds) : "未提供"}</strong>
+              </div>
+              <div className="supply-revenue-sub-cell">
+                <span className="supply-rev-sub-k">哈夫币出租比例</span>
+                <strong className="supply-rev-sub-v">{quote?.ownerHaffRatio ? `1 元 = ${quote.ownerHaffRatio} 万哈夫币` : "待确认"}</strong>
+              </div>
+            </div>
+          </> : null}
+          {historical ? <><div className="supply-revenue-hero">
             <div className="supply-revenue-stat">
               <span className="supply-revenue-label">哈夫币租金记录</span>
               <div className="supply-revenue-num-wrap">
@@ -1571,18 +1584,18 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
                 <strong className="supply-revenue-num">{historical.historicalQuote.depositYuan}</strong>
               </div>
             </div>
-          </div> : <div className="supply-revenue-stat"><span className="supply-revenue-label">上架报价</span><strong className="supply-revenue-num">{moneyText(quote?.ownerTotal)}</strong></div>}
+          </div>
 
           <div className="supply-revenue-sub-grid">
             <div className="supply-revenue-sub-cell">
-              <span className="supply-rev-sub-k">约定租期</span>
-              <strong className="supply-rev-sub-v">{historical ? `${historical.historicalQuote.termDays} 天` : (quote?.termSeconds ? termLabel(quote.termSeconds) : "未提供")}</strong>
+              <span className="supply-rev-sub-k">租期记录</span>
+              <strong className="supply-rev-sub-v">{historical.historicalQuote.termDays} 天</strong>
             </div>
             <div className="supply-revenue-sub-cell">
-              <span className="supply-rev-sub-k">{historical ? "物资金额记录" : "哈夫币出租比例"}</span>
-              <strong className="supply-rev-sub-v">{historical ? `${historical.historicalQuote.goodsYuan} 元` : quote?.ownerHaffRatio ? `1 元 = ${quote.ownerHaffRatio} 万哈夫币` : "待确认"}</strong>
+              <span className="supply-rev-sub-k">物资金额记录</span>
+              <strong className="supply-rev-sub-v">{historical.historicalQuote.goodsYuan} 元</strong>
             </div>
-          </div>
+          </div></> : null}
 
           <div className="supply-revenue-foot">
             <Link href={`/account?view=leased&accountId=${encodeURIComponent(account.id)}`} className="supply-side-order-btn">

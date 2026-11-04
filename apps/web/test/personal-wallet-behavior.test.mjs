@@ -77,6 +77,12 @@ test('opening and historical observations are not offered as new balance movemen
  }finally{await p.close();}
 });
 
+test('the overview keeps the opening out of recent activity',async()=>{
+ const movement={...entry,id:'ledger:movement',sourceKind:'NATIVE_SETTLEMENT'};
+ const p=await probe(async url=>reply(String(url).includes('/entries?')?{...page(),items:[entry,movement]}:wallet()),'');
+ try{await p.render();const rows=[...p.host.querySelectorAll('.wallet-overview-table-section .wallet-record')];assert.deepEqual(rows.map(row=>row.dataset.walletEntry),['ledger:movement']);assert.doesNotMatch(p.host.querySelector('.wallet-overview-table-section').textContent,/余额期初/);}finally{await p.close();}
+});
+
 test('time filter uses the displayed posting time and excludes unknown times',async()=>{
  const date=days=>new Date(Date.now()-days*86400000).toISOString();
  const items=[{...entry,id:'ledger:recent',sourceKind:'NATIVE_SETTLEMENT',occurredAt:date(20),postedAt:date(2)},

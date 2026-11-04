@@ -1,11 +1,13 @@
 "use client";
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { ArrowLeft } from "lucide-react";
 import { useUserSession } from "@/components/session/user-session-provider";
 import { orderApi, formatOrderMoney, formatOrderTime, OrderRequestError, type LegacyOrder, type LegacyOrderPage, type OrderParty, type OrderStatusFilter, type OrderSearchFilters } from "@/lib/order-client";
 import { orderTermLabel, orderUrl } from "@/components/order/order-presentation";
 import "./order.css";
 import { LegacyContinuationPanel } from "./legacy-continuation-panel";
+import { OrderAccountDossier } from "./order-account-dossier";
 import { orderAccountTitle, orderAmountFacts, orderListingSourceLabel, orderResourceLines, orderUsesResourceSummary } from "@/lib/order-display";
 
 export function legacyOrderHref(party: OrderParty, page = 1, orderId?: string, accountId?: string) {
@@ -65,20 +67,35 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
       </nav>
     </div>
   </section>;
-  return <section className="order-detail-view">
-    <Link href={orderUrl(party, status, accountId, undefined, undefined, filters)} scroll={false}>返回订单列表</Link>
-    <header><h2>{data.displayNo || "订单"}</h2><p>{orderAccountTitle(data)}</p><p>{orderTermLabel(data)}</p><strong>{data.source.statusLabel || "状态待确认"}</strong></header>
-    {data.listingFacts?.source === "LEGACY_ACCOUNT_SNAPSHOT" ? <p className="order-muted">{orderListingSourceLabel(data)}；原单资源与金额分别保留。</p> : orderUsesResourceSummary(data) ? <p className="order-muted">账号资料来自本单记录。</p> : null}
-    {orderResourceLines(data).length ? <section className="account-module-card"><h3>本单资源记录</h3><dl className="order-facts">
-      {orderResourceLines(data).map(resource => <div key={resource.code}><dt>{resource.name}</dt><dd>{resource.value}</dd></div>)}
-    </dl></section> : null}
-    {notice}
-    <section className="account-module-card"><h3>{party === "owner" ? "出租收益记录" : "金额记录"}</h3>{party === "owner" ? <>{recordedIncome ? <><p className="order-amount-total">{formatOrderMoney(recordedIncome)}</p><p className="order-muted">记录金额仅供查看，余额请以钱包为准。</p></> : <p className="order-muted">收益金额待确认。</p>}<Link href="/account?view=wallet" scroll={false}>查看钱包记录</Link></> : <dl className="order-facts">
+  const resources = orderResourceLines(data);
+  const accountNo = data.account.readable ? data.account.displayNo : null;
+  return <section className="order-detail-view order-detail-legacy-modern">
+    <Link className="order-detail-back" href={orderUrl(party, status, accountId, undefined, undefined, filters)} scroll={false}><ArrowLeft size={16} aria-hidden="true" />返回订单列表</Link>
+    <header className="order-legacy-hero-card">
+      <div className="order-legacy-hero-row">
+        <strong className="order-status" data-state={data.status === "PENDING_PAYMENT" ? "pending" : data.status.toLowerCase()}>{data.source.statusLabel || "状态待确认"}</strong>
+        <div className="order-legacy-id-group">
+          {data.displayNo ? <span className="order-id-badge">订单号 <strong>{data.displayNo}</strong></span> : null}
+          {accountNo ? <span className="order-id-badge">账号编号 <strong>{accountNo}</strong></span> : null}
+        </div>
+      </div>
+      <h2 className="order-legacy-hero-title">{orderAccountTitle(data)}</h2>
+      <p className="order-legacy-hero-meta">{orderTermLabel(data)}</p>
+      {data.listingFacts?.source === "LEGACY_ACCOUNT_SNAPSHOT" ? <p className="order-muted">{orderListingSourceLabel(data)}；原单资源与金额分别保留。</p> : orderUsesResourceSummary(data) ? <p className="order-muted">账号资料来自本单记录。</p> : null}
+    </header>
+    <section className="account-module-card order-legacy-bill-card"><h3>{party === "owner" ? "出租收益记录" : "金额记录"}</h3>{party === "owner" ? <div className="order-owner-income-block">{recordedIncome ? <><p className="order-amount-total">{formatOrderMoney(recordedIncome)}</p><p className="order-muted">记录金额仅供查看，余额请以钱包为准。</p></> : <p className="order-muted">收益金额待确认。</p>}<Link className="order-wallet-link" href="/account?view=wallet" scroll={false}>查看钱包记录</Link></div> : <dl className="order-facts order-bill-facts">
       <div><dt>应付金额</dt><dd>{formatOrderMoney(data.legacyAmounts?.required)}</dd></div>
       <div><dt>已付金额</dt><dd>{formatOrderMoney(data.legacyAmounts?.paid)}</dd></div>
       <div><dt>押金</dt><dd>{formatOrderMoney(data.legacyAmounts?.deposit)}</dd></div>
       <div><dt>退款记录金额</dt><dd>{formatOrderMoney(data.legacyAmounts?.refund)}</dd></div>
-    </dl>}</section>
+    </dl>}{notice}</section>
+    {resources.length ? <section className="account-module-card order-legacy-assets-card">
+      <div className="account-module-card-header"><h3>本单资源记录</h3></div>
+      <dl className="order-legacy-resources-grid">
+        {resources.map(resource => <div className="order-legacy-resource-chip" key={resource.code}><dt className="resource-chip-name">{resource.name}</dt><dd className="resource-chip-val">{resource.value}</dd></div>)}
+      </dl>
+    </section> : null}
+    {data.account.readable && data.account.id ? <OrderAccountDossier accountId={data.account.id} accountDisplayNo={accountNo} party={party} listingFacts={data.listingFacts} /> : null}
     <LegacyContinuationPanel orderId={data.id} party={party} onOrderChanged={() => {
       setState({ scope, loading: true, data: null, error: "" });
       setReload(n => n + 1);
@@ -87,7 +104,6 @@ export function LegacyOrderWorkspace({ party, orderId, page: pageText, accountId
     <section className="account-module-card"><h3>订单信息</h3><dl className="order-facts">
       <div><dt>创建时间</dt><dd>{formatOrderTime(data.createdAt)}</dd></div><div><dt>支付记录时间</dt><dd>{formatOrderTime(data.paidAt)}</dd></div>
       <div><dt>完成时间</dt><dd>{formatOrderTime(data.completedAt)}</dd></div><div><dt>取消时间</dt><dd>{formatOrderTime(data.cancelledAt)}</dd></div>
-      {data.account.readable ? <div><dt>账号编号</dt><dd>{data.account.displayNo ?? "暂未提供"}</dd></div> : null}
     </dl>{data.account.readable && data.account.id && party === "owner" ? <Link href={`/account?view=accounts&accountId=${encodeURIComponent(data.account.id)}`}>查看本人账号</Link> : null}</section>
   </section>;
 }

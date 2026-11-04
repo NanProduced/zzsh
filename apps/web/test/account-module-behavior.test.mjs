@@ -823,6 +823,8 @@ test("account quote keeps owner total and guarantee separate and never invents u
   try{await p.render('accounts','acc-truth');const revenue=p.host.querySelector('.supply-side-revenue-card'),duty=p.host.querySelector('.supply-side-duty-card');
     assert.match(revenue.textContent,/上架报价280\.00 元/);assert.match(revenue.textContent,/1 元 = 50 万哈夫币/);assert.doesNotMatch(revenue.textContent,/押金记录|300\.00/);assert.match(duty.textContent,/上架时保证金要求300\.00 元/);assert.equal(revenue.querySelector('a').getAttribute('href'),'/account?view=leased&accountId=acc-truth');assert.doesNotMatch(p.host.textContent,/信用良好|已核对/);
   }finally{await p.close();}
+  const mixed=await probe({detail:{...detail,historicalRead:historicalAccount()}});
+  try{await mixed.render('accounts','acc-truth');const revenue=mixed.host.querySelector('.supply-side-revenue-card');assert.match(revenue.textContent,/上架报价280\.00 元/);assert.match(revenue.textContent,/1 元 = 50 万哈夫币/);assert.match(revenue.textContent,/哈夫币租金记录¥12\.30/);}finally{await mixed.close();}
   const empty=await probe({detail:detailOf('acc-empty')});
   try{await empty.render('accounts','acc-empty');assert.match(empty.host.querySelector('.supply-side-revenue-card').textContent,/上架报价待确认/);assert.match(empty.host.querySelector('.supply-side-duty-card').textContent,/上架时保证金要求待确认/);assert.doesNotMatch(empty.host.textContent,/0\.00 元|信用良好|已核对/);}finally{await empty.close();}
 });

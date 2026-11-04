@@ -622,6 +622,10 @@ test("legacy detail labels current imported account facts separately from origin
   });
   try {
     await probe.render({party:"renter",orderId:orderA.id,source:"legacy"});
+    const header = probe.host.querySelector(".order-legacy-hero-card");
+    assert.ok(header?.querySelector("h2")?.textContent.includes("130 M 哈夫币"));
+    assert.ok(header?.querySelector(".order-status")?.textContent);
+    assert.ok(probe.host.querySelector(".order-legacy-bill-card"));
     assert.match(probe.host.textContent,/130 M 哈夫币/); assert.match(probe.host.textContent,/当前账号资料（迁入时记录）/);
     assert.match(probe.host.textContent,/本单资源记录/); assert.match(probe.host.textContent,/12\.50/);
     assert.doesNotMatch(probe.host.textContent,/账号资料来自本单记录/);
