@@ -151,7 +151,7 @@ class FakeClient {
     if (sql.startsWith('UPDATE zzsh_auth_user."user" SET "phoneNumber"')) {
       const row = this.users.get(String(values[0]));
       if (!row || (row.updatedAt ?? "2026-11-02T00:00:00.000000Z") !== values[3] || (row.username ?? null) !== values[4] || row.phoneNumber !== values[5] || row.phoneNumberVerified !== values[6]) return { rows: [], rowCount: 0 };
-      row.phoneNumber = values[1] as string | null; row.phoneNumberVerified = false; row.username = String(values[2]); row.displayUsername = row.username; row.updatedAt = "2026-11-02T00:00:01.000000Z";
+      row.phoneNumber = values[1] as string | null; row.phoneNumberVerified = row.phoneNumber !== null; row.username = String(values[2]); row.displayUsername = row.username; row.updatedAt = "2026-11-02T00:00:01.000000Z";
       return { rows: [], rowCount: 1 };
     }
     if (sql.startsWith('SELECT "id","suspended" FROM "zzsh_auth_user"."user" WHERE "id"=$1')) {
@@ -202,7 +202,7 @@ class FakeClient {
       return { rows: [], rowCount: 1 };
     }
     if (sql.startsWith('INSERT INTO "zzsh_auth_user"."user"')) {
-      const row: UserRow = { id: String(values[0]), name: String(values[1]), email: String(values[2]), phoneNumber: values[4] === null ? null : String(values[4]), phoneNumberVerified: false, suspended: false,
+      const row: UserRow = { id: String(values[0]), name: String(values[1]), email: String(values[2]), phoneNumber: values[4] === null ? null : String(values[4]), phoneNumberVerified: values[6] === true, suspended: false,
         ...(values.length > 5 ? { username: String(values[5]) } : {}) };
       this.users.set(row.id, row);
       return { rows: [], rowCount: 1 };
@@ -283,6 +283,14 @@ function contactEvidence(base: LegacyOwnerEvidence, sourceSn = "OLD" + base.lega
     deleted: base.status.deleted, disabled: base.status.disabled, mobile: base.mobile, sourceContactRef: base.evidenceRef + ":mobile", sourceContactDigest: "d".repeat(64) }]).get(base.legacyId)!;
   return { ...base, contactProjection: projection };
 }
+
+test("contact-aware import verifies only the admitted authentication phone", async () => {
+  const fake = new FakeClient(); fake.isBoss = true;
+  const payload = contactEvidence(evidence());
+  const result = await migrateLegacyOwner(asClient(fake), { evidence: payload, evidenceDigest: legacyOwnerEvidenceDigest(payload) }, ACTOR);
+  assert.equal(fake.users.get(result.userId)?.phoneNumber, "+86" + MOBILE);
+  assert.equal(fake.users.get(result.userId)?.phoneNumberVerified, true);
+});
 
 test("contact-aware importer persists a phone-null real subject and exact legacy alias without inventing a credential", async () => {
   const fake = new FakeClient(); fake.isBoss = true;

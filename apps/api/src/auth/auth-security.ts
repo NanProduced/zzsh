@@ -1765,7 +1765,7 @@ async function completeRecovery(request: NodeRequest, response: NodeResponse, re
   sendSuccess(response, result.response, requestId);
 }
 
-export type LegacyCredentialOutcome = "retry" | "none";
+export type LegacyCredentialOutcome = "retry" | "none" | "change-required" | "already-changed" | "new-password-invalid";
 
 export type LegacyCredentialLookup = { username: string } | { phoneNumber: string } | { userId: string };
 
@@ -1795,7 +1795,7 @@ export async function attemptLegacyCredentialUpgrade(
 /** Same compatibility path, sharing the caller's lock/transaction with session creation or reset. */
 export async function verifyUserCredentialInTransaction(
   client: PoolClient, verifyPassword: PasswordVerifier, hashPassword: PasswordHasher,
-  lookup: LegacyCredentialLookup, password: string, requestId: string, mode: "active-only" | "sign-in" = "active-only",
+  lookup: LegacyCredentialLookup, password: string, requestId: string, mode: "active-only" | "sign-in" = "active-only", newPassword?: string,
 ): Promise<LegacyCredentialOutcome> {
     const account = await client.query<{
       id: string;
@@ -1823,7 +1823,9 @@ export async function verifyUserCredentialInTransaction(
     if ((row.suspended || row.accountStatus !== "ACTIVE") && !(mode === "sign-in" && frozen)) return "none";
     if (!row.legacyPasswordMd5) {
       if (!row.password) return "none";
-      return await verifyPassword(password, row.password) ? "retry" : "none";
+      if (!await verifyPassword(password, row.password)) return "none";
+      if (newPassword !== undefined) return "already-changed";
+      return "retry";
     }
     const legacyHash = row.legacyPasswordVersion === "legacy-md5-v1" && row.legacyPasswordSalt !== null
       ? createHash("md5").update(password + row.legacyPasswordSalt, "utf8").digest("hex")
@@ -1832,7 +1834,11 @@ export async function verifyUserCredentialInTransaction(
         : undefined;
     if (!legacyHash || !sameSecret(row.legacyPasswordMd5, legacyHash)) return "none";
     if (frozen) return "retry";
-    const passwordHash = await hashPassword(password);
+    if (mode === "sign-in" && newPassword === undefined) return "change-required";
+    if (newPassword !== undefined && (newPassword.length < 12 || newPassword.length > 128 || newPassword === password)) {
+      return "new-password-invalid";
+    }
+    const passwordHash = await hashPassword(newPassword ?? password);
     await setAuditContext(client, "user", row.userId, undefined, requestId);
     const updated = await client.query(
       `UPDATE "zzsh_auth_user"."account"

@@ -394,7 +394,7 @@ test('R1: route coordinator must not complete a pending login for a different co
  const p=await mountAuthComponent(coordinator,'AuthOverlayProvider',{children:null},{
   url:'http://127.0.0.1:4200/account?view=accounts',pathname:'/account',initialStatus:'guest',
   confirmUserId:'user_B',
-  fetch:async()=>Response.json({status:true,userId:'user_A'}),
+  fetch:async url=>String(url).endsWith('/legal-documents/current')?Response.json({terms:null,privacy:null}):Response.json({status:true,userId:'user_A'}),
  });
  try{
   await p.click('密码登录');await p.input('auth-identifier','13800138000');await p.input('auth-terms',true);await p.input('auth-password','test-password');
@@ -439,7 +439,8 @@ test("a same-subject session notification cannot unmount the form before confirm
   const confirmation = new Promise(resolve => { resolveConfirm = resolve; });
   const p = await mountAuthComponent(coordinator, "AuthOverlayProvider", { children: null }, {
     url: "http://127.0.0.1:4200/account?view=accounts", pathname: "/account", initialStatus: "guest",
-    confirm: () => confirmation, fetch: async () => Response.json({ status: true, userId: "user_A" }),
+    confirm: () => confirmation, fetch: async url => String(url).endsWith("/legal-documents/current")
+      ? Response.json({terms:null,privacy:null}) : Response.json({ status: true, userId: "user_A" }),
   });
   try {
     await p.click("密码登录"); await p.input("auth-identifier", "13800138000"); await p.input("auth-terms", true); await p.input("auth-password", "test-password"); await p.submit();

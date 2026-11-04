@@ -61,7 +61,7 @@ async function invoke(status: number, options: { drift?: boolean; storageFailure
   const raw = phoneFactory(pool, endpoint, AuthError, cookie);
   const context = { json: (body: unknown) => Response.json(body), headers: new Headers(), context: { password: {} } };
   const plugin = factory(endpoint, AuthError, cookie, pool, [], false, false, {
-    dispatch: async (_identifier: string, password: string, _headers: Headers, _kind: unknown, legalAcceptance: unknown) => {
+    dispatch: async (_identifier: string, password: string, _headers: Headers, legalAcceptance: unknown) => {
       return raw({ ...context, body: { phoneNumber: "+8613800138000", password, ...(legalAcceptance === undefined ? {} : { legalAcceptance }) } });
     },
   });

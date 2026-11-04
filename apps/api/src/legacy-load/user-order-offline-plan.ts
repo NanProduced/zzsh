@@ -28,19 +28,19 @@ export type ProjectedIdentity = {
   accountStatus: "CANCELLED" | "FROZEN" | "ACTIVE";
   identityStatus: "VERIFIED" | "UNVERIFIED";
   ageStatus: "ADULT" | "MINOR" | "UNKNOWN";
-  phoneNumberVerified: false;
+  phoneNumberVerified: boolean;
   loginProven: false;
   tradingProven: false;
   identityMeaning: "inherited-source-fact";
 };
 
 /** Mirrors derivedStatusValues. Deleted wins. This does not prove a login or a trade. */
-export function projectIdentityStatus(status: { deleted: boolean; disabled: boolean; realNameBound: boolean; ageAdult: boolean | null }): ProjectedIdentity {
+export function projectIdentityStatus(status: { deleted: boolean; disabled: boolean; realNameBound: boolean; ageAdult: boolean | null }, phoneNumberVerified = false): ProjectedIdentity {
   return {
     accountStatus: status.deleted ? "CANCELLED" : status.disabled ? "FROZEN" : "ACTIVE",
     identityStatus: status.realNameBound ? "VERIFIED" : "UNVERIFIED",
     ageStatus: status.ageAdult === true ? "ADULT" : status.ageAdult === false ? "MINOR" : "UNKNOWN",
-    phoneNumberVerified: false,
+    phoneNumberVerified,
     loginProven: false,
     tradingProven: false,
     identityMeaning: "inherited-source-fact",
@@ -118,7 +118,7 @@ export function planLegacyUser(row: UserSourceRow, seenMobiles: ReadonlySet<stri
     if (!normalized.evidence.contactProjection && canonicalMobile !== null && seenMobiles.has(canonicalMobile)) return { parameterReady: false, disposition: "ISOLATED" as const, reason: "MOBILE_DUPLICATE", writeAllowed: false as const, writes: 0 };
     // Not writer-ready, but the row still holds its phone so the winner stays the smallest source id.
     if (flags.highRisk === null) return { parameterReady: false, disposition: "ISOLATED" as const, reason: "FIELD_NOT_EXTRACTED:is_high_risk", claimedMobile: canonicalMobile, writeAllowed: false as const, writes: 0 };
-    const projected = projectIdentityStatus(normalized.evidence.status);
+    const projected = projectIdentityStatus(normalized.evidence.status, normalized.evidence.contactProjection?.authenticationPhone != null);
     const blockers = ["TRADING_ADMISSION_NOT_DECIDED", ...(flags.highRisk ? ["HIGH_RISK_RETAINED"] : [])];
     return {
       parameterReady: true,

@@ -49,7 +49,7 @@ import { normalizeMainlandPhone } from "./phone-number";
 import { mountAuthSecurityHandlers, preflightAuthRealmSecurity, type AdminSecurityNotification, type AuthSecurityOptions } from "./auth-security";
 import { buildAdminSelfSecurityPlugin, ADMIN_SELF_SECURITY_MESSAGES } from "./admin-self-security-plugin";
 import { adminSecurityCommandId, deriveAdminSecurityCommandKey } from "./admin-security-commands";
-import { createTransactionalUserSession, buildTransactionalPhoneSignIn, buildTransactionalLegacyNumberSignIn } from "./user-auth-session";
+import { createTransactionalUserSession, buildTransactionalPhoneSignIn } from "./user-auth-session";
 import { hasLegacyPhoneConflict, readUserPasswordState, resolveLegacyNumberLogin, type UserPasswordState } from "./legacy-login";
 import { buildUserSecurityPlugin, type UserSecurityDelivery } from "./user-security";
 import { createFakeRealNameProvider, handleUserIdentityRoute, type RealNameProvider, type UserObligationReader } from "./user-identity";
@@ -478,16 +478,22 @@ async function safeWebAuthHandler(
     if (response.status >= 400 && !controlled) {
       headers.delete("content-length");
       headers.set("content-type", "application/json; charset=utf-8");
-      const parsed: unknown = response.status === 403 || response.status === 503 ? await response.clone().json().catch(() => null) : null;
+      const phoneSignIn = request.method === "POST" && ["/api/auth/user/sign-in/phone-number", "/api/auth/user/sign-in/identifier"].includes(new URL(request.url).pathname);
+      const parsed: unknown = response.status === 403 || response.status === 503 || phoneSignIn && (response.status === 400 || response.status === 409)
+        ? await response.clone().json().catch(() => null) : null;
       const bodyCode = typeof parsed === "object" && parsed !== null && "code" in parsed ? (parsed as { code?: unknown }).code : undefined;
-      const frozenSignIn = response.status === 403 && request.method === "POST" && bodyCode === "ACCOUNT_FROZEN"
-        && ["/api/auth/user/sign-in/phone-number", "/api/auth/user/sign-in/identifier"].includes(new URL(request.url).pathname);
+      const frozenSignIn = phoneSignIn && response.status === 403 && bodyCode === "ACCOUNT_FROZEN";
+      const legacyPasswordReason = phoneSignIn && (
+        response.status === 409 && (bodyCode === "LEGACY_PASSWORD_CHANGE_REQUIRED" || bodyCode === "LEGACY_PASSWORD_ALREADY_CHANGED")
+        || response.status === 400 && bodyCode === "LEGACY_NEW_PASSWORD_INVALID"
+      ) ? bodyCode : undefined;
       const dependencyFailure = response.status === 503 && bodyCode === "AUTH_DEPENDENCY_UNAVAILABLE";
       return new Response(JSON.stringify({
         error: {
           code: authErrorCode(response.status),
           message: frozenSignIn ? "账号已被冻结，如有疑问请联系客服" : dependencyFailure ? "Authentication dependency unavailable" : response.status >= 500 ? "Internal server error" : "Authentication request rejected",
           ...(frozenSignIn ? { reason: "ACCOUNT_FROZEN" } : {}),
+          ...(legacyPasswordReason ? { reason: legacyPasswordReason } : {}),
           ...(dependencyFailure ? { reason: "AUTH_DEPENDENCY_UNAVAILABLE" } : {}),
           requestId,
         },
@@ -542,7 +548,7 @@ function buildPhoneRegistrationPlugin(
   outbox: Map<string, { code: string; sentAt: string; purpose: "phone-verification" | "password-reset" | "phone-registration" }>,
   fakeSmsEnabled: boolean,
   localSmsMock: boolean,
-  signInIdentifier: { dispatch?: (identifier: string, password: string, headers: Headers, kind?: "phone" | "legacy-number", legalAcceptance?: unknown) => Promise<Response> },
+  signInIdentifier: { dispatch?: (identifier: string, password: string, headers: Headers, legalAcceptance?: unknown, newPassword?: string) => Promise<Response> },
   nativeWalletOrigin?: NativeOriginResource,
   creditGuaranteeEnabled = false,
   distributionScope?: LocalDistributionScope,
@@ -588,15 +594,14 @@ function buildPhoneRegistrationPlugin(
     endpoints: {
       signInIdentifier: createAuthEndpoint("/sign-in/identifier", { method: "POST", metadata: noStore }, async (ctx) => {
         try {
-        const body = bodyOf(ctx.body, ["identifier", "password", "kind", "legalAcceptance"]);
+        const body = bodyOf(ctx.body, ["identifier", "password", "kind", "legalAcceptance", "newPassword"]);
         const identifier = typeof body.identifier === "string" ? body.identifier.trim() : "";
         const password = passwordFrom(body);
         if (!identifier || identifier.length > 128 || !signInIdentifier.dispatch) {
           throw new APIError("BAD_REQUEST", { message: "Invalid authentication request" });
         }
-        const kind = body.kind === undefined ? undefined : body.kind === "phone" || body.kind === "legacy-number" ? body.kind : null;
-        if (kind === null) throw new APIError("BAD_REQUEST", { message: "Invalid authentication request" });
-        return await signInIdentifier.dispatch(identifier, password, ctx.headers ?? new Headers(), kind, body.legalAcceptance);
+        if (body.kind !== undefined && body.kind !== "phone" || body.newPassword !== undefined && typeof body.newPassword !== "string") throw new APIError("BAD_REQUEST", { message: "Invalid authentication request" });
+        return await signInIdentifier.dispatch(identifier, password, ctx.headers ?? new Headers(), body.legalAcceptance, body.newPassword as string | undefined);
         } catch (error) { return authDomainError(error); }
       }),
       sendPhoneRegistrationOTP: createAuthEndpoint("/phone-registration/send-otp", { method: "POST", metadata: noStore }, async (ctx) => {
@@ -1042,7 +1047,7 @@ export async function mountAuthHandlers(
     },
   } : undefined;
   // Filled right after the user auth instance exists; the after hook only runs at request time.
-  const signInIdentifier: { dispatch?: (identifier: string, password: string, headers: Headers, kind?: "phone" | "legacy-number", legalAcceptance?: unknown) => Promise<Response> } = {};
+  const signInIdentifier: { dispatch?: (identifier: string, password: string, headers: Headers, legalAcceptance?: unknown, newPassword?: string) => Promise<Response> } = {};
   const common = {
     baseURL: options.apiOrigin,
     trustedOrigins,
@@ -1082,7 +1087,6 @@ export async function mountAuthHandlers(
       bearer(),
       buildFakePhoneNumberPlugin(phoneNumber, fakeSmsOutbox, options.localSmsMock === true, buildTransactionalPhoneSignIn(options.pool, createAuthEndpoint, APIError, setSessionCookie)),
       buildPhoneRegistrationPlugin(createAuthEndpoint, APIError, setSessionCookie, options.pool, fakeSmsOutbox, options.fakeSmsOutbox !== undefined || options.localSmsMock === true, options.localSmsMock === true, signInIdentifier, options.nativeWalletOrigin, options.creditGuaranteeEnabled === true, options.distributionScope, userThrottle, options.userSmsSender),
-      { id: "legacy-number-compatibility", endpoints: { signInLegacyNumber: buildTransactionalLegacyNumberSignIn(options.pool, createAuthEndpoint, APIError, setSessionCookie) } },
       userSecurityPlugin,
     ],
     advanced: {
@@ -1137,11 +1141,10 @@ export async function mountAuthHandlers(
     },
   });
 
-  signInIdentifier.dispatch = async (identifier, password, headers, kind, legalAcceptance) => {
-    if (kind === "legacy-number") return await userAuth.api.signInLegacyNumber({ body: { identifier, password, ...(legalAcceptance === undefined ? {} : { legalAcceptance }) }, headers, asResponse: true }) as Response;
+  signInIdentifier.dispatch = async (identifier, password, headers, legalAcceptance, newPassword) => {
     const phoneNumber = normalizeMainlandPhone(identifier);
     if (!phoneNumber) throw new APIError("BAD_REQUEST", { message: "Phone authentication required" });
-    const response = await userAuth.api.signInPhoneNumber({ body: { phoneNumber, password, ...(legalAcceptance === undefined ? {} : { legalAcceptance }) }, headers, asResponse: true });
+    const response = await userAuth.api.signInPhoneNumber({ body: { phoneNumber, password, ...(newPassword === undefined ? {} : { newPassword }), ...(legalAcceptance === undefined ? {} : { legalAcceptance }) }, headers, asResponse: true });
     return response as Response;
   };
 

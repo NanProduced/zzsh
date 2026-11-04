@@ -29,6 +29,7 @@ export async function webAuthRequest<T>(path: string, body?: Record<string, unkn
 export function authErrorMessage(error: unknown, context: "read" | "verify" | "login" = "verify"): string {
   if (!(error instanceof WebAuthError)) return "暂时无法确认，请稍后重新读取。";
   if (error.status === 429) return "操作太频繁，请稍候再试。";
+  if (error.reason === "LEGACY_NEW_PASSWORD_INVALID") return "请设置不同于原密码的 12–128 位新密码。";
   if (context === "login" && (error.status === 400 || error.status === 401)) return "手机号或密码不正确，请检查后再试。";
   if (error.status === 401) return "登录已失效或验证不正确，请重新确认。";
   if (error.reason === "CAPTCHA_REQUIRED") return "请完成安全验证后重试。旧版本客户端需要升级；账号不会因此被锁定。";

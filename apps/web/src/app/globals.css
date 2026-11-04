@@ -1854,15 +1854,12 @@ html[data-theme="dark"] .account-card--grid .breakdown-total-val--unconfirmed {
 .auth-password-toggle { position: absolute; right: 7px; min-height: 36px; padding: 4px 8px; border: 0; background: transparent; color: var(--color-accent-brand-ink); font-size: 12px; font-weight: 700; }
 .auth-consent { display: grid; grid-template-columns: 24px minmax(0,1fr); align-items: start; gap: 10px; color: var(--color-text-secondary); font-size: 13px; line-height: 1.7; }
 .auth-consent input { width: 24px; height: 24px; margin: 0; accent-color: var(--color-accent-brand); }
-.auth-consent label { display: flex; align-items: center; min-height: 44px; color: inherit; cursor: pointer; }
+.auth-consent label { color: inherit; cursor: pointer; }
 .auth-consent a { color: var(--color-accent-brand-ink); text-decoration: underline; text-underline-offset: 3px; }
 .auth-consent .auth-field-help { display: block; margin-top: 4px; }
 .auth-consent-docs { margin: 0; }
-.auth-consent-version { margin: 4px 0 0; color: var(--color-text-muted); font-size: 11px; line-height: 1.5; }
-/* 未同意协议：主动作给明确的“还不可继续”状态，按钮仍可聚焦可点击以触发原校验与焦点引导。 */
-.auth-submit.is-consent-pending { background: var(--color-bg-elevated); color: var(--color-text-secondary); border-color: var(--color-border-default); }
-.auth-submit.is-consent-pending:hover { background: var(--color-bg-card-hover); color: var(--color-text-primary); }
-.auth-consent-hint { margin: 8px 0 0; color: var(--color-text-secondary); font-size: 12px; line-height: 1.6; }
+.auth-consent-note, .auth-consent .auth-field-error { margin: 4px 0 0; font-size: 12px; line-height: 1.5; }
+.auth-consent-note button { padding: 0; border: 0; background: none; color: var(--color-accent-brand-ink); text-decoration: underline; text-underline-offset: 3px; }
 .auth-status, .auth-recovery, .auth-unavailable { margin: 0; padding: 12px 13px; border: 1px solid; border-radius: 9px; font-size: 12px; line-height: 1.65; }
 .auth-status.is-error { border-color: color-mix(in srgb,var(--color-status-error) 55%,var(--color-border-default)); background: color-mix(in srgb,var(--color-status-error) 10%,var(--color-bg-surface)); color: var(--auth-error-text,#ffb4ad); }
 .auth-status.is-success { border-color: color-mix(in srgb,var(--color-status-success) 55%,var(--color-border-default)); background: color-mix(in srgb,var(--color-status-success) 10%,var(--color-bg-surface)); color: var(--color-text-primary); }
@@ -2230,13 +2227,13 @@ html[data-theme="light"] .auth-brand-copy { color:#14181e; }
 html[data-theme="light"] .auth-brand-copy .brand-logo { filter:none; }
 
 /* Compact login: one navigation row, two inputs, one primary action. */
-.auth-dialog-content { width:min(740px,calc(100vw - 32px)); }
-.auth-dialog-layout { grid-template-columns:280px minmax(0,1fr); }
-.auth-brand-panel { min-height:480px; }
+.auth-dialog-content { width:min(880px,calc(100vw - 32px)); }
+.auth-dialog-layout { grid-template-columns:minmax(0,38fr) minmax(0,62fr); }
+.auth-brand-panel { min-height:460px; }
 .auth-brand-copy { padding:30px 24px; }
 .auth-brand-copy p { font-size:27px; }
-.auth-dialog-form { padding:32px 34px 24px; }
-.auth-dialog-form .auth-form { gap:18px; min-height:100%; }
+.auth-dialog-form { display:grid; align-content:center; padding:44px 36px 32px; }
+.auth-dialog-form .auth-form { gap:20px; }
 .auth-methods { border:0; gap:24px; align-items:center; }
 .auth-methods button { font-size:16px; white-space:nowrap; padding:8px 0; }
 .auth-dialog-form .auth-fields { display:flex; flex-direction:column; gap:16px; }
@@ -2250,29 +2247,17 @@ html[data-theme="light"] .auth-brand-copy .brand-logo { filter:none; }
 .auth-secondary-actions button { background:none; border:0; padding:0; color:var(--color-text-secondary); }
 .auth-secondary-actions .auth-switch-link { text-decoration:none; min-height:24px; }
 .auth-dialog-form .auth-submit { margin-top:8px; }
-.auth-dialog-form .auth-consent { margin-top:auto; padding-top:12px; }
-.auth-dialog-form .auth-consent label { min-height:unset; line-height:1.4; }
+.auth-dialog-form .auth-consent { align-items:start; }
 .auth-status { order:0; }
 @media(max-width:699px) {
  .auth-dialog-layout { grid-template-columns:minmax(0,1fr); }
  .auth-dialog-content { width:calc(100vw - 24px); }
  .auth-dialog-form { padding:32px 20px 20px; }
- .auth-dialog-form .auth-form { min-height:360px; }
  .auth-methods { justify-content:space-between; gap:12px; }
  .auth-methods button { font-size:15px; }
 }
 html[data-theme="light"] .auth-code-row .button,html[data-theme="light"] .auth-password-toggle,html[data-theme="light"] .auth-consent a,html[data-theme="light"] .auth-page-links a,html[data-theme="light"] .auth-page-back:hover { color:#865200; }
 html[data-theme="light"] :focus-visible { outline-color:var(--color-focus-ring); }
-
-/* Stable panel: form fits comfortably within container without scrollbars */
-.auth-dialog-content { height:min(520px,calc(100dvh - 32px)); max-height:none; overflow:hidden; }
-.auth-dialog-layout { height:100%; min-height:0; }
-.auth-brand-panel { min-height:0; height:100%; }
-.auth-dialog-form { padding-top:56px; min-height:0; height:100%; overflow-y:auto; overscroll-behavior:contain; }
-.auth-dialog-form .auth-form { min-height:100%; display:flex; flex-direction:column; }
-.auth-dialog-form .auth-fields { flex:1; }
-.auth-methods { flex-shrink:0; }
-@media(max-width:699px) { .auth-dialog-content { height:min(520px,calc(100dvh - 24px)); max-height:none; } }
 
 /* Service CTAs: visible keywords, separate scene art, stable card geometry. */
 .service-benefits { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; margin-bottom:24px; }

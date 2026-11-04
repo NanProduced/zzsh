@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { readUserPasswordState, resolveLegacyNumberLogin } from "../src/auth/legacy-login";
-import { buildTransactionalLegacyNumberSignIn } from "../src/auth/user-auth-session";
+import { buildTransactionalPhoneSignIn } from "../src/auth/user-auth-session";
 import type { Pool } from "pg";
 import { legacyOwnerUserId } from "../src/supply/legacy-user-migration";
 import { createHash } from "node:crypto";
@@ -43,37 +43,24 @@ test('invalid public-number input is rejected before any query and database fail
  for(const input of ['', ' ZZ000019','ZZ000019 ','x'.repeat(129),'ZZ\n19']){const p=db([snRow]);assert.equal(await resolveLegacyNumberLogin(p,input),null);assert.equal(p.calls.length,0);}
  await assert.rejects(resolveLegacyNumberLogin({query:async()=>{throw Error('dependency failed');}},'ZZ000019'),/dependency failed/);
 });
-test('internal legacy SDK endpoint keeps a strict public-number/password body and unknown number cannot create a session',async()=>{
- const {APIError}=await import('better-auth/api');let schema:any,handler:any,endpointPath='',cookies=0;const sql:string[]=[];
- const pool={connect:async()=>({release(){},query:async(text:string)=>{sql.push(text);return{rows:[]};}})} as unknown as Pool;
- const endpoint=((p:string,o:any,h:any)=>{endpointPath=p;schema=o.body;handler=h;return h;}) as never;
- buildTransactionalLegacyNumberSignIn(pool,endpoint,APIError,(async()=>{cookies++;}) as never);
- assert.equal(endpointPath,'/sign-in/legacy-number');assert.equal(schema.safeParse({identifier:'ZZ000019',password:'old-short'}).success,true);
- for(const extra of [{userId:snRow.id},{email:'test@example.invalid'},{username:'ZZ000019'}])assert.equal(schema.safeParse({identifier:'ZZ000019',password:'old-short',...extra}).success,false);
- await assert.rejects(handler({body:{identifier:'missing',password:'old-short'},headers:new Headers(),context:{}}),(error:any)=>error.status==='UNAUTHORIZED');
- assert.equal(cookies,0);assert(sql.includes('ROLLBACK'));assert(!sql.some(s=>/^\s*(INSERT|UPDATE|DELETE)/.test(s)));
-});
-
-test('legacy alias is re-resolved after the user lock and a changed binding never reaches credentials',async()=>{
- const {APIError}=await import('better-auth/api');
- for(const change of ['removed','reassigned','user-deleted']){
-  let lookups=0,cookies=0;const sql:string[]=[];
-  const pool={connect:async()=>({release(){},query:async(text:string)=>{
-   sql.push(text);
-   if(text.includes('SELECT u.id,u.username')){lookups++;return{rows:lookups===1?[snRow]:change==='reassigned'?[{...snRow,id:legacyOwnerUserId('legacy_mysql_restore','la_user','905'),legacy_id:'905',projection_id:'905'}]:[]};}
-   if(text.includes('SELECT id FROM zzsh_auth_user."user"'))return{rows:change==='user-deleted'?[]:[{id:snRow.id}]};
-   if(['BEGIN','COMMIT','ROLLBACK'].includes(text))return{rows:[]};
-   throw Error('MUST_NOT_REACH_CREDENTIALS_OR_SESSION');
+test("the real phone endpoint challenges a correct old password before writing a session", async () => {
+  const {APIError} = await import("better-auth/api");
+  const credential = credentialClient({password:null, legacyPasswordVersion:"legacy-md5-v0", legacyPasswordMd5:createHash("md5").update("original").digest("hex"), suspended:false, accountStatus:"ACTIVE"});
+  const sql: string[] = [];
+  let cookies = 0;
+  const pool = {connect:async()=>({release(){},query:async(text:string)=>{
+    sql.push(text);
+    if(text.includes('SELECT id FROM zzsh_auth_user."user"')) return {rows:[{id:"user-test"}]};
+    if(text.includes('FOR UPDATE OF a')) return credential.client.query(text);
+    return {rows:[]};
   }})} as unknown as Pool;
-  let handler:any;const endpoint=((_p:string,_o:any,h:any)=>{handler=h;return h;}) as never;
-  buildTransactionalLegacyNumberSignIn(pool,endpoint,APIError,(async()=>{cookies++;}) as never);
-  await assert.rejects(handler({body:{identifier:'ZZ000019',password:'correct'},headers:new Headers(),context:{}}),(error:any)=>error.status==='UNAUTHORIZED');
-  assert.equal(lookups,2);assert.equal(cookies,0);assert(sql.includes('ROLLBACK'));assert(!sql.includes('COMMIT'));
-  const lock=sql.findIndex(text=>text.includes('FOR UPDATE'));
-  assert(lock>0);assert(sql[lock+1]!.includes('SELECT u.id,u.username'));
- }
+  let handler: any;
+  const endpoint = ((_path:string,_options:unknown,fn:unknown)=>{handler=fn;return fn;}) as never;
+  buildTransactionalPhoneSignIn(pool,endpoint,APIError,(async()=>{cookies++;}) as never);
+  await assert.rejects(handler({body:{phoneNumber:"13800000000",password:"original"},headers:new Headers(),context:{password:{verify:credential.verify,hash:credential.hash}}}), (error:any)=>error.status==="CONFLICT"&&error.body?.code==="LEGACY_PASSWORD_CHANGE_REQUIRED");
+  assert.equal(cookies,0); assert.equal(credential.hashed,0);
+  assert(sql.includes("ROLLBACK")); assert(!sql.some(text=>/^\s*(INSERT|UPDATE|DELETE)/.test(text)));
 });
-
 test('the real user runtime alias field is returned by the SDK but cannot be written on create or update',async()=>{
  const filename=[resolve(process.cwd(),'apps/api/src/auth/auth-runtime.ts'),resolve(process.cwd(),'src/auth/auth-runtime.ts')].find(existsSync);
  assert(filename,'run from the repository or API root');
@@ -171,12 +158,16 @@ for (const mode of ["active-only", "sign-in"] as const) {
   }
 }
 
-test("active credentials keep their existing verification and legacy upgrade behavior", async () => {
+test("active phone login requires a different new password before upgrading a legacy credential", async () => {
   const modern = credentialClient({ suspended: false, accountStatus: "ACTIVE" });
   assert.equal(await verifyUserCredentialInTransaction(modern.client, modern.verify, modern.hash, { phoneNumber: "+8613800000000" }, "correct", "test", "sign-in"), "retry");
   const legacy = credentialClient({ suspended: false, accountStatus: "ACTIVE", password: null,
     legacyPasswordMd5: createHash("md5").update("correct").digest("hex"), legacyPasswordVersion: "legacy-md5-v0" });
-  assert.equal(await verifyUserCredentialInTransaction(legacy.client, legacy.verify, legacy.hash, { phoneNumber: "+8613800000000" }, "correct", "test", "sign-in"), "retry");
+  const lookup = { phoneNumber: "+8613800000000" };
+  assert.equal(await verifyUserCredentialInTransaction(legacy.client, legacy.verify, legacy.hash, lookup, "correct", "test", "sign-in"), "change-required");
+  assert.equal(await verifyUserCredentialInTransaction(legacy.client, legacy.verify, legacy.hash, lookup, "correct", "test", "sign-in", "short"), "new-password-invalid");
+  assert.equal(legacy.hashed, 0);
+  assert.equal(await verifyUserCredentialInTransaction(legacy.client, legacy.verify, legacy.hash, lookup, "correct", "test", "sign-in", "different-fixture-password"), "retry");
   assert.equal(legacy.hashed, 1);
   assert.ok(legacy.calls.some(q => q.includes('UPDATE "zzsh_auth_user"."account"')));
   assert.ok(legacy.calls.some(q => /INSERT[\s\S]*audit_event/.test(q)));

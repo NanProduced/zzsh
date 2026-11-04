@@ -119,13 +119,20 @@ export async function runUserSecurityChecks(o: {
   await o.migration.query(`INSERT INTO zzsh_iam.user_identity_state (user_id,account_status,identity_status,age_status,provider,version,updated_at) VALUES ($1,'ACTIVE','UNVERIFIED','UNKNOWN','legacy_mysql_restore',1,clock_timestamp())`, [legacyId]);
   await o.migration.query(`INSERT INTO zzsh_auth_user.account (id,"accountId","providerId","userId",password,"legacyPasswordMd5","legacyPasswordVersion","legacyPasswordSalt","createdAt","updatedAt") VALUES ($1,$2,'credential',$2,NULL,$3,'legacy-md5-v1',$4,clock_timestamp(),clock_timestamp())`, ["account_" + randomUUID().replaceAll("-", ""), legacyId, digest, salt]);
   assert.equal((await call("/sign-in/phone-number", { phoneNumber: legacyPhone, password: legacyPassword.trim() })).response.status, 401);
-  const [first, parallel] = await Promise.all([call("/sign-in/phone-number", { phoneNumber: legacyPhone, password: legacyPassword }), call("/sign-in/phone-number", { phoneNumber: legacyPhone, password: legacyPassword })]);
-  assert.equal(first.response.status, 200); assert.equal(parallel.response.status, 200);
+  const change = await call("/sign-in/phone-number", { phoneNumber: legacyPhone, password: legacyPassword });
+  assert.equal(change.response.status, 409);
+  assert.equal(change.body?.error?.reason, "LEGACY_PASSWORD_CHANGE_REQUIRED");
+  assert.equal(change.response.headers.get("set-cookie"), null);
+  const upgradedPassword = randomBytes(18).toString("base64url");
+  const upgrade = { phoneNumber: legacyPhone, password: legacyPassword, newPassword: upgradedPassword };
+  const concurrent = await Promise.all([call("/sign-in/phone-number", upgrade), call("/sign-in/phone-number", upgrade)]);
+  assert.deepEqual(concurrent.map(result => result.response.status).sort(), [200, 401]);
   const upgraded = (await o.runtime.query(`SELECT password IS NOT NULL AS modern,"legacyPasswordMd5" IS NULL AS cleared FROM zzsh_auth_user.account WHERE "userId"=$1`, [legacyId])).rows[0];
   assert.ok(upgraded.modern && upgraded.cleared);
-  assert.equal((await call("/sign-in/phone-number", { phoneNumber: legacyPhone, password: legacyPassword })).response.status, 200);
+  assert.equal((await call("/sign-in/phone-number", { phoneNumber: legacyPhone, password: legacyPassword })).response.status, 401);
+  assert.equal((await call("/sign-in/phone-number", { phoneNumber: legacyPhone, password: upgradedPassword })).response.status, 200);
   assert.equal((await o.runtime.query(`SELECT count(*)::int AS n FROM zzsh_iam.audit_event WHERE action='user.legacy_password.upgraded' AND actor_id=$1`, [legacyId])).rows[0].n, 1);
-  pass("T03/T04:short exact legacy v1 password, concurrent first upgrade, same-password repeat");
+  pass("T03/T04:short exact legacy v1 password, single concurrent replacement, old password retired");
 
   let fixtureSequence = 10;
   const legacyFixture = async (version = "legacy-md5-v1") => {
@@ -140,7 +147,7 @@ export async function runUserSecurityChecks(o: {
   };
   const opaquePasswordState = async (id: string) => (await o.runtime.query(`SELECT password IS NOT NULL AS modern,"legacyPasswordMd5" IS NOT NULL AS legacy FROM zzsh_auth_user.account WHERE "userId"=$1`, [id])).rows[0];
   const v0 = await legacyFixture("legacy-md5-v0");
-  assert.equal((await call("/sign-in/phone-number", { phoneNumber: v0.number, password: v0.value })).response.status, 200);
+  assert.equal((await call("/sign-in/phone-number", { phoneNumber: v0.number, password: v0.value, newPassword: upgradedPassword })).response.status, 200);
   const unknownVersion = await legacyFixture("legacy-unknown");
   assert.equal((await call("/sign-in/phone-number", { phoneNumber: unknownVersion.number, password: unknownVersion.value })).response.status, 401);
   assert.ok((await opaquePasswordState(unknownVersion.id)).legacy && !(await opaquePasswordState(unknownVersion.id)).modern);
@@ -148,11 +155,11 @@ export async function runUserSecurityChecks(o: {
 
   const rollbackLegacy = await legacyFixture();
   await o.migration.query(`REVOKE INSERT ON zzsh_iam.audit_event FROM "${o.runtimeRole}"`);
-  try { assert.equal((await call("/sign-in/phone-number", { phoneNumber: rollbackLegacy.number, password: rollbackLegacy.value })).response.status, 500); }
+  try { assert.equal((await call("/sign-in/phone-number", { phoneNumber: rollbackLegacy.number, password: rollbackLegacy.value, newPassword: upgradedPassword })).response.status, 500); }
   finally { await o.migration.query(`GRANT INSERT ON zzsh_iam.audit_event TO "${o.runtimeRole}"`); }
   assert.ok((await opaquePasswordState(rollbackLegacy.id)).legacy && !(await opaquePasswordState(rollbackLegacy.id)).modern);
   assert.equal((await o.runtime.query(`SELECT count(*)::int AS n FROM zzsh_auth_user.session WHERE "userId"=$1`, [rollbackLegacy.id])).rows[0].n, 0);
-  assert.equal((await call("/sign-in/phone-number", { phoneNumber: rollbackLegacy.number, password: rollbackLegacy.value })).response.status, 200);
+  assert.equal((await call("/sign-in/phone-number", { phoneNumber: rollbackLegacy.number, password: rollbackLegacy.value, newPassword: upgradedPassword })).response.status, 200);
   pass("T04:upgrade audit failure rolls back credential and session, retry remains legal");
 
   const sessionFailurePhone = "+8613900020001";
@@ -166,7 +173,7 @@ export async function runUserSecurityChecks(o: {
   pass("T01/T09:session failure rolls back registration and challenge consumption atomically");
 
   const proofFixture = await legacyFixture(); const proofJar = o.jar();
-  assert.equal((await call("/sign-in/phone-number", { phoneNumber: proofFixture.number, password: proofFixture.value }, proofJar)).response.status, 200);
+  assert.equal((await call("/sign-in/phone-number", { phoneNumber: proofFixture.number, password: proofFixture.value, newPassword: upgradedPassword }, proofJar)).response.status, 200);
   const challengeResponse = await call("/security/challenge/send", { purpose: "password", channel: "phone" }, proofJar);
   const challengeId = challengeResponse.body?.challengeId as string;
   const delivery = o.security.get(challengeId)!;
@@ -187,7 +194,7 @@ export async function runUserSecurityChecks(o: {
 
   const race = await legacyFixture(); const racePassword = randomBytes(18).toString("base64url");
   const resetProof = await proof("recovery", "phone", undefined, o.jar(), "current", undefined, race.number);
-  const raceResults = await Promise.all([call("/sign-in/phone-number", { phoneNumber: race.number, password: race.value }), call("/security/recovery/complete", { proofId: resetProof, newPassword: racePassword })]);
+  const raceResults = await Promise.all([call("/sign-in/phone-number", { phoneNumber: race.number, password: race.value, newPassword: upgradedPassword }), call("/security/recovery/complete", { proofId: resetProof, newPassword: racePassword })]);
   assert.equal(raceResults[1].response.status, 200);
   assert.ok([200, 401].includes(raceResults[0].response.status));
   assert.equal((await call("/sign-in/phone-number", { phoneNumber: race.number, password: race.value })).response.status, 401);
@@ -216,8 +223,9 @@ export async function runUserSecurityChecks(o: {
 
   const sessionsFixture = await legacyFixture();
   const sessionA = o.jar(), sessionB = o.jar(), sessionC = o.jar(), foreignJar = o.jar();
-  for (const device of [sessionA, sessionB, sessionC]) assert.equal((await call("/sign-in/phone-number", { phoneNumber: sessionsFixture.number, password: sessionsFixture.value }, device)).response.status, 200);
-  assert.equal((await call("/sign-in/phone-number", { phoneNumber: legacyPhone, password: legacyPassword }, foreignJar)).response.status, 200);
+  assert.equal((await call("/sign-in/phone-number", { phoneNumber: sessionsFixture.number, password: sessionsFixture.value, newPassword: upgradedPassword }, sessionA)).response.status, 200);
+  for (const device of [sessionB, sessionC]) assert.equal((await call("/sign-in/phone-number", { phoneNumber: sessionsFixture.number, password: upgradedPassword }, device)).response.status, 200);
+  assert.equal((await call("/sign-in/phone-number", { phoneNumber: legacyPhone, password: upgradedPassword }, foreignJar)).response.status, 200);
   const ownSessions = (await call("/security/sessions", undefined, sessionA)).body?.sessions as Array<Record<string, unknown>>;
   assert.equal(ownSessions.length, 3); assert.equal(ownSessions.filter(item => item.isCurrent).length, 1);
   assert.ok(ownSessions.every(item => !["token", "pinHash", "userId", "ipAddress"].some(key => key in item)));

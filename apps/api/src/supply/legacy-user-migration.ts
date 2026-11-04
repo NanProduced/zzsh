@@ -275,6 +275,7 @@ export async function migrateLegacyOwner(
       const userId = legacyOwnerUserId(evidence.sourceSystem, evidence.sourceEntity, evidence.legacyId);
       const projection = evidence.contactProjection;
       const phoneNumber = projection ? projection.authenticationPhone : `+86${evidence.mobile}`;
+      const phoneNumberVerified = projection?.authenticationPhone != null;
       const email = projection ? `legacy-${sha256Hex(userId)}@phone.zzsh.invalid` : `phone-${sha256Hex(phoneNumber!)}@phone.zzsh.invalid`;
       const providerReference = `${evidence.sourceEntity}:${evidence.legacyId}`;
       const existing = (await client.query<{ id: string; name: string; email: string; phoneNumber: string | null; phoneNumberVerified: boolean; suspended: boolean; username?: string | null }>(
@@ -292,7 +293,7 @@ export async function migrateLegacyOwner(
           row.email === email &&
           row.phoneNumber === phoneNumber &&
           (!projection || row.username === projection.sourceSn) &&
-          row.phoneNumberVerified === false &&
+          (row.phoneNumberVerified === false || phoneNumberVerified && row.phoneNumberVerified === true) &&
           row.suspended === false;
         if (!userMatches) throw conflict("The legacy owner conflicts with an existing local user");
         const identity = (
@@ -356,9 +357,9 @@ export async function migrateLegacyOwner(
       }
       const now = new Date();
       await client.query(projection
-        ? `INSERT INTO "zzsh_auth_user"."user" ("id","name","email","emailVerified","createdAt","updatedAt","phoneNumber","phoneNumberVerified","suspended","username","displayUsername") VALUES ($1,$2,$3,false,$4,$4,$5,false,false,$6,$6)`
+        ? `INSERT INTO "zzsh_auth_user"."user" ("id","name","email","emailVerified","createdAt","updatedAt","phoneNumber","phoneNumberVerified","suspended","username","displayUsername") VALUES ($1,$2,$3,false,$4,$4,$5,$7,false,$6,$6)`
         : `INSERT INTO "zzsh_auth_user"."user" ("id","name","email","emailVerified","createdAt","updatedAt","phoneNumber","phoneNumberVerified","suspended") VALUES ($1,$2,$3,false,$4,$4,$5,false,false)`,
-        projection ? [userId, evidence.nickname, email, now, phoneNumber, projection.sourceSn] : [userId, evidence.nickname, email, now, phoneNumber]);
+        projection ? [userId, evidence.nickname, email, now, phoneNumber, projection.sourceSn, phoneNumberVerified] : [userId, evidence.nickname, email, now, phoneNumber]);
       await ensureInitialProfileAvatar(client, "user", userId, actor.requestId);
       if (evidence.legacyPassword) {
         await client.query(
@@ -404,7 +405,7 @@ export async function migrateLegacyOwner(
           status: evidence.status,
           hasLegacyPassword: Boolean(evidence.legacyPassword),
           legacyPasswordVersion: evidence.legacyPassword?.version ?? null,
-          phoneNumberVerified: false,
+          phoneNumberVerified,
           ...(projection ? { contactProjection: { ...projection, authenticationPhone: undefined, authenticationPhoneBound: phoneNumber !== null } } : {}),
           result: "MIGRATED",
         },
@@ -514,7 +515,7 @@ export async function reconcileLegacyOwnerContactProjection(client: PoolClient, 
       const occupied = (await client.query<{ id: string }>(`SELECT id FROM zzsh_auth_user."user" WHERE id<>$1 AND (username=$2 OR ($3::text IS NOT NULL AND "phoneNumber"=$3)) FOR UPDATE`, [userId, projection.sourceSn, projection.authenticationPhone])).rows;
       if (occupied.length) throw conflict("Reviewed legacy authentication projection is occupied by another identity");
       await setAuditContext(client, "admin", actor.id, actor.sessionId, actor.requestId);
-      const update = await client.query(`UPDATE zzsh_auth_user."user" SET "phoneNumber"=$2,"phoneNumberVerified"=false,username=$3,"displayUsername"=$3,"updatedAt"=clock_timestamp()
+      const update = await client.query(`UPDATE zzsh_auth_user."user" SET "phoneNumber"=$2,"phoneNumberVerified"=($2::text IS NOT NULL),username=$3,"displayUsername"=$3,"updatedAt"=clock_timestamp()
         WHERE id=$1 AND "updatedAt"=$4::timestamptz AND username IS NOT DISTINCT FROM $5::text AND "phoneNumber" IS NOT DISTINCT FROM $6::text AND "phoneNumberVerified" IS NOT DISTINCT FROM $7::boolean`,
         [userId, projection.authenticationPhone, projection.sourceSn, current.updatedAt, current.username, current.phoneNumber, current.phoneNumberVerified]);
       if (update.rowCount !== 1) throw conflict("Legacy contact compare-and-set failed");
