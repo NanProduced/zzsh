@@ -90,8 +90,8 @@ test("external history A-B-A-B cancels late A and an unapplied draft does not qu
 test('historical balance proof stays unknown beside known ledger flow and proved zero stays zero',async t=>{
   const row={bucket:'AVAILABLE',openingBalance:'0',knownInflows:'18000',knownOutflows:'0',migrationMovement:'0',closingBalance:'18000',difference:'0',ledgerOpeningBalance:'0',ledgerClosingBalance:'18000',ledgerDifference:'0',knowledge:'UNKNOWN',balanceBasis:{knowledge:'UNKNOWN',origin:null,sourceCutoff:null,openingPostedAt:null,reasonCodes:['PERIOD_BALANCE_PROOF_NOT_AVAILABLE']},reasonCodes:[],unknownCount:0,unknownTimeCount:0,coveredHistoricalCount:45,uncoveredHistoricalCount:0};
   globalThis.fetch=async url=>response(payload(url,{entries:[],gaps:[],reconciliation:[row,{...row,bucket:'RESERVED',knownInflows:'0',closingBalance:'0',knowledge:'KNOWN',balanceBasis:{...row.balanceBasis,knowledge:'KNOWN',origin:'NATIVE_GENESIS'}}]}));
-  const ui=await setup(t,'honest-balances','/finance/period');await ui.render();await until(()=>ui.node.textContent.includes('部分期间余额尚未核定'));
-  const rows=[...ui.node.querySelectorAll('tbody tr')];assert.match(rows[0].textContent,/余额未核定/);assert.equal(rows[0].children[1].textContent,'0.00 元已核余额 未核定');assert.match(rows[0].children[3].textContent,/180\.00/);assert.equal(rows[0].children[5].textContent,'180.00 元已核余额 未核定');assert.equal(rows[0].children[6].textContent,'0.00 元已核差额 未核定');
+  const ui=await setup(t,'honest-balances','/finance/period');await ui.render();await until(()=>ui.node.textContent.includes('部分期间余额尚未记录'));
+  const rows=[...ui.node.querySelectorAll('tbody tr')];assert.match(rows[0].textContent,/余额未记录/);assert.equal(rows[0].children[1].textContent,'0.00 元已核余额 未记录');assert.match(rows[0].children[3].textContent,/180\.00/);assert.equal(rows[0].children[5].textContent,'180.00 元已核余额 未记录');assert.equal(rows[0].children[6].textContent,'0.00 元已核差额 未记录');
   assert.equal(rows[1].children[1].textContent,'0.00 元已核余额 0.00 元');assert.equal(rows[1].children[6].textContent,'0.00 元已核差额 0.00 元');assert.match(ui.node.textContent,/单次最多367天/);assert.match(ui.node.textContent,/外部差异：未取得对账依据，未计算/);
 });
 test('withdrawal document shows only application, fee, payable, target/source and never upgrades local success to bank arrival', async t => {
@@ -123,7 +123,7 @@ test('CHAIN a cancelled unpaid order document is named as an unsettled original,
 });
 test('business candidates show server bucket facts and subject scope without computing a grand total',async t=>{
   globalThis.fetch=async url=>response(payload(url,{documents:[{...document,kind:'SETTLEMENT',state:'POSTED',requestedAmountCents:null,summaryScope:'SUBJECT',subjectEntryCount:1,documentEntryCount:null,amounts:[{bucket:'AVAILABLE',knownNetCents:'9000',unknownCount:0},{bucket:'REFUND_PAYABLE',knownNetCents:'0',unknownCount:1}]}]}));
-  const ui=await setup(t,'candidate-facts');await ui.render();await until(()=>ui.node.textContent.includes('本人相关 1 条'));assert.match(ui.node.textContent,/全单条数未读取/);assert.match(ui.node.textContent,/用户可用 90\.00 元/);assert.match(ui.node.textContent,/退款应付 未核定/);assert.doesNotMatch(ui.node.textContent,/总资金|净利润/);
+  const ui=await setup(t,'candidate-facts');await ui.render();await until(()=>ui.node.textContent.includes('本人相关 1 条'));assert.match(ui.node.textContent,/全单条数未读取/);assert.match(ui.node.textContent,/用户可用 90\.00 元/);assert.match(ui.node.textContent,/退款应付 未记录/);assert.doesNotMatch(ui.node.textContent,/总资金|净利润/);
 });
 
 async function typeSearch(ui,value){const input=ui.node.querySelector('#finance-lookup');await act(async()=>{Object.getOwnPropertyDescriptor(ui.browser.HTMLInputElement.prototype,'value').set.call(input,value);input.dispatchEvent(new Event('input',{bubbles:true}));});await act(async()=>ui.node.querySelector('form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));}
@@ -152,8 +152,8 @@ test('period subject does not leak a phone and an invalid date range does not is
 test('distribution event is separate from current state and planned due time, missing frozen evidence stays unknown',async t=>{
   const entry={id:'l1',documentRef:'DISTRIBUTION:e1',documentNumber:'D1',subjectId:'u1',subjectName:'用户一',bucket:'PENDING_EARNINGS',direction:'IN',deltaCents:'95',knowledge:'KNOWN',kind:'DISTRIBUTION',state:'SETTLED',classification:'POSTED',occurredAt:'2026-10-03T01:00:00Z',evidence:{eventAction:'ACCRUE'},reasonCodes:[]};
   globalThis.fetch=async url=>response(payload(url,{document:{...document,ref:'DISTRIBUTION:e1',kind:'DISTRIBUTION',state:'SETTLED'},entries:[entry],evidence:{dueAt:'2026-10-05T01:00:00Z'},related:[],reasonCodes:[]}));
-  const ui=await setup(t,'distribution','/finance/documents/DISTRIBUTION%3Ae1');await ui.render();await until(()=>ui.node.textContent.includes('冻结计佣依据未核定'));await act(async()=>[...ui.node.querySelectorAll('button')].find(x=>x.textContent.startsWith('凭证分录')).click());assert.match(ui.node.textContent,/分销计提/);assert.match(ui.node.textContent,/当前收益状态：已结算/);assert.match(ui.node.textContent,/计划转可用时间/);assert.doesNotMatch(ui.node.textContent,/结算日期/);
-  assert.equal(ui.formats.financeEntryEvent({...entry,evidence:{eventAction:'RECOVER'}}),'分销追偿');assert.equal(ui.formats.financeEntryEvent({...entry,evidence:{eventAction:'FUTURE',eventKind:'EARNING_PENDING'}}),'分销事件待核');
+  const ui=await setup(t,'distribution','/finance/documents/DISTRIBUTION%3Ae1');await ui.render();await until(()=>ui.node.textContent.includes('冻结计佣依据未记录'));await act(async()=>[...ui.node.querySelectorAll('button')].find(x=>x.textContent.startsWith('凭证分录')).click());assert.match(ui.node.textContent,/分销计提/);assert.match(ui.node.textContent,/当前收益状态：已结算/);assert.match(ui.node.textContent,/计划转可用时间/);assert.doesNotMatch(ui.node.textContent,/结算日期/);
+  assert.equal(ui.formats.financeEntryEvent({...entry,evidence:{eventAction:'RECOVER'}}),'分销追偿');assert.equal(ui.formats.financeEntryEvent({...entry,evidence:{eventAction:'FUTURE',eventKind:'EARNING_PENDING'}}),'分销事件未记录');
 });
 test('origin context returns original filters and is invalid for another identity',async t=>{
   globalThis.fetch=async url=>response(payload(url));const ui=await setup(t,'origin-scope');await ui.render();const path='/finance?q=20260913125844629986&kind=WITHDRAWAL&page=2';const token=ui.registerFinanceOrigin(path,ui.financeContextIdentity(ui.props.snapshot));assert.equal(ui.financeOriginPath(token,ui.props.snapshot),path);assert.equal(ui.financeOriginPath(token,{...ui.props.snapshot,session:{...ui.props.snapshot.session,id:'another'}}),undefined);
@@ -163,13 +163,13 @@ test('a full reload fallback preserves public finance filters but cannot navigat
   assert.equal(ui.financeOriginPath(undefined,{...ui.props.snapshot,permissions:[]},path),undefined);assert.equal(ui.financeOriginPath(undefined,ui.props.snapshot,'https://example.com/finance'),undefined);
 });
 test('wallet unknown remains unknown even when an inconsistent payload includes zero cents',async t=>{
-  globalThis.fetch=async url=>response(payload(url,{subject:{id:'u1',name:'用户一'},wallet:{buckets:{available:{amountCents:'0',knowledge:'UNKNOWN',scope:'POSTED_LEDGER_ONLY'}},withdrawable:{amountCents:null,reasonCodes:[]},coverage:{knowledge:'UNKNOWN'},snapshotVersion:'v1'}}));const ui=await setup(t,'wallet-unknown','/finance/users/u1');await ui.render();await until(()=>ui.node.textContent.includes('资金来源覆盖'));assert.equal(ui.node.querySelector('.finance-wallet dd').textContent,'未核定');assert.match(ui.node.textContent,/仅已入账账本/);
+  globalThis.fetch=async url=>response(payload(url,{subject:{id:'u1',name:'用户一'},wallet:{buckets:{available:{amountCents:'0',knowledge:'UNKNOWN',scope:'POSTED_LEDGER_ONLY'}},withdrawable:{amountCents:null,reasonCodes:[]},coverage:{knowledge:'UNKNOWN'},snapshotVersion:'v1'}}));const ui=await setup(t,'wallet-unknown','/finance/users/u1');await ui.render();await until(()=>ui.node.textContent.includes('资金来源覆盖'));assert.equal(ui.node.querySelector('.finance-wallet dd').textContent,'未记录');assert.match(ui.node.textContent,/仅已入账账本/);
 });
 test('R1 formatted phone API gate and explicit unknown distribution action fail closed',async t=>{
   globalThis.fetch=async url=>response(payload(url));const ui=await setup(t,'r1-pure-gates');await ui.render();
   for(const q of ['+86 (138) 1234-5678','138.1234.5678','＋８６（１３８）１２３４－５６７８','备注 138.1234.5678'])assert.throws(()=>ui.formats.financeQuery({...ui.formats.defaultFinanceFilters(false),q}),q);
   for(const q of ['20260913125844629986','13812345-678a-4abc-8abc-0123456789ab','user_aa13812345678bb0123456789abcdef012345678','ORDER:order_aa13812345678bb0123456789abcdef012345678','http://127.0.0.1:4221/orders/13812345-678a-4abc-8abc-0123456789ab'])assert.doesNotThrow(()=>ui.formats.financeQuery({...ui.formats.defaultFinanceFilters(false),q}),q);
-  const base={kind:'DISTRIBUTION',evidence:{eventAction:null,eventKind:'EARNING_REVOKED'}};assert.equal(ui.formats.financeEntryEvent(base),'分销事件待核');assert.equal(ui.formats.financeEntryEvent({...base,evidence:{eventKind:'EARNING_REVOKED'}}),'分销事件待核');assert.equal(ui.formats.financeEntryEvent({...base,evidence:{eventAction:'REVOKE',eventKind:'EARNING_REVOKED'}}),'分销撤销');assert.equal(ui.formats.financeEntryEvent({...base,evidence:{eventAction:'RECOVER',eventKind:'EARNING_REVOKED'}}),'分销追偿');
+  const base={kind:'DISTRIBUTION',evidence:{eventAction:null,eventKind:'EARNING_REVOKED'}};assert.equal(ui.formats.financeEntryEvent(base),'分销事件未记录');assert.equal(ui.formats.financeEntryEvent({...base,evidence:{eventKind:'EARNING_REVOKED'}}),'分销事件未记录');assert.equal(ui.formats.financeEntryEvent({...base,evidence:{eventAction:'REVOKE',eventKind:'EARNING_REVOKED'}}),'分销撤销');assert.equal(ui.formats.financeEntryEvent({...base,evidence:{eventAction:'RECOVER',eventKind:'EARNING_REVOKED'}}),'分销追偿');
 });
 test('R1 late phone POST cannot overwrite an externally replaced business query',async t=>{
   let release;const calls=[];globalThis.fetch=async(url,init={})=>{calls.push({url:String(url),init});if(String(url).endsWith('/users/lookup'))return new Promise(resolve=>{release=()=>resolve(response({items:[{userId:'user_late',name:'迟到用户',accountStatus:'ACTIVE',source:{kind:'LOCAL'},identityStatus:'UNKNOWN',ageStatus:'UNKNOWN'}],nextCursor:null,limit:20}));});return response(payload(url));};
@@ -246,15 +246,15 @@ test('overview keeps legacy order amounts and posted wallet buckets separate fro
  ]}));
  const ui=await setup(t,'overview-legacy','/finance',undefined,true);await ui.render();await until(()=>ui.node.textContent.includes('74.00 元'));
  assert.match(ui.node.textContent,/新平台订单实付510\.00 元/);
- assert.match(ui.node.textContent,/旧平台订单实付记录74\.00 元[\s\S]*1 笔金额已知 · 按旧单付款时间[\s\S]*本期 2 笔金额待核 · 来源中另有 3 笔付款时间待核/);
+ assert.match(ui.node.textContent,/旧平台订单实付记录74\.00 元[\s\S]*1 笔金额已知 · 按旧单付款时间[\s\S]*本期 2 笔金额未记录 · 来源中另有 3 笔付款时间未记录/);
  const balances=ui.node.querySelector('[aria-labelledby="finance-balances-title"]');
  assert.match(balances.textContent,/用户可用[\s\S]*123\.45 元/);
- assert.match(balances.textContent,/号主上架保证金[\s\S]*未核定/);
+ assert.match(balances.textContent,/号主上架保证金[\s\S]*未记录/);
  assert.match(balances.textContent,/提现预留[\s\S]*26\.00 元/);
  assert.match(balances.textContent,/退款应付[\s\S]*0\.00 元/);
  assert.doesNotMatch(ui.node.textContent,/584\.00 元|银行已到账/);
  legacy={...legacy,count:'0',knownAmountCents:'0'};ui.props.refreshNonce++;await ui.render();
- await until(()=>ui.node.textContent.includes('旧平台订单实付记录未核定'));
+ await until(()=>ui.node.textContent.includes('旧平台订单实付记录未记录'));
 });
 test('native detail shows APPLIED payment without posting and uses frozen owner versus renter fee payers',async t=>{
  const lifecycle={origin:'NATIVE',orderStatus:'PAID',payment:{state:'SITE_ACCEPTED',amountCents:'368686',confirmedAt:'2026-10-30T01:00:00Z',source:'CONTROLLED',hasReviewPayment:true},postingState:'NOT_POSTED'};
@@ -284,7 +284,7 @@ test('overview keeps obligations out of the dashboard and links to the refund bu
  globalThis.fetch=async()=>response(overviewPayload('7d',{queues:{refunds:queue,withdrawals:unavailableQueue}}));
  const ui=await setup(t,'overview-lookup','/finance',undefined,true);await ui.render();await until(()=>ui.node.textContent.includes('SETTLED-ORDER'));
  assert.doesNotMatch(ui.node.textContent,/38 笔|181\.00|CANCELLED-LATE|PAID-ORDER|待办|待处理/);
- assert.match(ui.node.querySelector('.finance-kpi-grid').textContent,/旧平台订单实付记录未核定/);
+ assert.match(ui.node.querySelector('.finance-kpi-grid').textContent,/旧平台订单实付记录未记录/);
  await act(async()=>[...ui.node.querySelectorAll('button')].find(b=>b.textContent==='退款单据').click());
  const url = new URL(ui.opened.at(-1)[0], 'http://local');
  assert.equal(url.pathname, '/finance/search');
@@ -322,6 +322,6 @@ test('JoinPay lookup uses exact channel serial and links only API-scoped orders 
  ui.props.tab={...ui.props.tab,query:Object.fromEntries(restored.searchParams)};await ui.render();await until(()=>requests.filter(url=>url.includes('/channel-evidence/originals/')).length===2);
  assert.equal(ui.node.querySelector('input[aria-label="渠道流水"]').value,'serial-1');
  ui.props.tab={...ui.props.tab,query:{fromOrderId:'order_in_scope'}};await ui.render();await until(()=>ui.node.textContent.includes('商户原单号 merchant-in'));
- assert.match(ui.node.textContent,/银行到账未核定/);
+ assert.match(ui.node.textContent,/银行到账未记录/);
  ui.props.snapshot={...ui.props.snapshot,permissions:['finance.read']};await ui.render();assert.doesNotMatch(ui.node.textContent,/商户原单号 merchant-in|查看关联订单/);
 });

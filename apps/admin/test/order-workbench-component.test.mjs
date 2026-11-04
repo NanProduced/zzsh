@@ -114,7 +114,7 @@ test("READY group list, role-attributed chat and the complementary order rail co
   assert.doesNotMatch(aside.textContent, /区服|计划租期|实付金额/, "no cover, server, planned period or payment amount is invented");
   assert.equal(aside.querySelector('[data-action="order-open-inventory"]').getAttribute("href"), "/orders/order-8842", "the full list links the existing order detail page");
   assert.ok(aside.querySelector('[data-action="open-fulfillment-panel"]'), "the limited fulfillment action stays in the rail");
-  assert.doesNotMatch(aside.textContent, /待核对期初|未开租/, "the rail does not repeat the stage facts shown above the chat");
+  assert.doesNotMatch(aside.textContent, /未确认期初|未开租/, "the rail does not repeat the stage facts shown above the chat");
 });
 
 test("admin custom conversation opens the platform message menu on a row", async (t) => {
@@ -189,7 +189,7 @@ test("settlement unavailable keeps the conversation readable and never defaults 
   assert.match(task.textContent, /本环境未启用结算记录/);
   assert.match(task.textContent, /不影响本单沟通/);
   assert.doesNotMatch(task.textContent, /未找到此内容|无权/, "404 never claims a permission problem");
-  assert.doesNotMatch(task.textContent, /待核对期初|核对并录入期初/, "a failed read is not presented as a missing opening");
+  assert.doesNotMatch(task.textContent, /未确认期初|核对并录入期初/, "a failed read is not presented as a missing opening");
   assert.equal(task.querySelector('[role="alert"]'), null, "an unavailable surface is neutral, not a red error");
   assert.ok(byText(node, "重新读取"), "the only offered action is another read");
   assert.equal(node.querySelectorAll(".im-support-fulfillment-lines input").length, 0);
@@ -413,7 +413,7 @@ test("the admin custom conversation renders an order-stage card with both sides"
       { itemId: "item_haff", name: "哈夫币", quantity: "10000000", unitPrice: null, amount: null, buyerUnitPrice: "1", ownerUnitPrice: "0.8", buyerAmount: "10000000", ownerAmount: "8000000", platformContribution: "2000000" },
       { itemId: "item_case", name: "装备箱", quantity: "3", unitPrice: null, amount: null, buyerUnitPrice: "6000", ownerUnitPrice: "5000", buyerAmount: "18000", ownerAmount: "15000", platformContribution: "3000" },
       { itemId: "item_zero", name: "零号弹匣", quantity: "0", unitPrice: null, amount: null, buyerUnitPrice: "7000", ownerUnitPrice: "6000", buyerAmount: "0", ownerAmount: "0", platformContribution: "0" },
-      { itemId: "item_unknown_qty", name: "神秘物资", quantity: "待核对", unitPrice: null, amount: null, buyerUnitPrice: "0", ownerUnitPrice: "0", buyerAmount: "0", ownerAmount: "0", platformContribution: "0" },
+      { itemId: "item_unknown_qty", name: "神秘物资", quantity: "未确认", unitPrice: null, amount: null, buyerUnitPrice: "0", ownerUnitPrice: "0", buyerAmount: "0", ownerAmount: "0", platformContribution: "0" },
     ],
     staff: { buyerRentalAmount: "10018000", ownerRentalAmount: "8015000", buyerTotal: "10018000", ownerTotal: "8015000", platformContribution: "2003000" },
   };

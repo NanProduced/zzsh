@@ -38,7 +38,7 @@ export const ORDER_STATUS_LABELS: Record<string, string> = {
   PAID: '已支付',
   CANCELLED: '已取消',
   COMPLETED: '已完成',
-  UNKNOWN: '源状态待核',
+  UNKNOWN: '源状态未记录',
 };
 
 export const CANCEL_ACTOR_MAP: Record<string, string> = {
@@ -58,7 +58,7 @@ export const OPENING_STATE_LABELS: Record<OrderProgress['opening']['state'], str
   AWAITING_CONFIRMATION: '待期初确认',
   NOT_STARTED: '未开租',
   NOT_APPLICABLE: '开租不适用',
-  UNKNOWN: '开租待核',
+  UNKNOWN: '开租未记录',
 };
 
 export const ENDING_STATE_LABELS: Record<OrderProgress['ending']['state'], string> = {
@@ -70,7 +70,7 @@ export const ENDING_STATE_LABELS: Record<OrderProgress['ending']['state'], strin
   READY: '待过账',
   NOT_STARTED: '未进入结算',
   NOT_APPLICABLE: '结算不适用',
-  UNKNOWN: '结束待核',
+  UNKNOWN: '结束未记录',
 };
 
 export function cancelReasonText(reason: string | null | undefined): string {
@@ -79,10 +79,10 @@ export function cancelReasonText(reason: string | null | undefined): string {
 }
 
 export function orderPaymentLabel(payment?: OrderStagesPayment | null, origin?: string): string {
-  if (!payment) return '支付事实待核';
+  if (!payment) return '支付事实未记录';
   if (payment.state === 'RECORDED_PAID') return '支付已记录';
   if (payment.state === 'RECORDED_UNPAID') return origin === 'LEGACY' ? '原系统记录未付，渠道结果另核' : '本站尚未确认付款';
-  return '支付事实待核';
+  return '支付事实未记录';
 }
 
 function stageTone(state: string): 'done' | 'unknown' | 'none' | 'cancel' | 'active' {
@@ -115,7 +115,7 @@ export function OrderStages({
   const p = o.payment;
   const pState = p?.state;
   const paid = {
-    name: pState === 'UNKNOWN' || !pState ? '支付待核' : pState === 'RECORDED_UNPAID' ? '未支付' : '支付',
+    name: pState === 'UNKNOWN' || !pState ? '支付未记录' : pState === 'RECORDED_UNPAID' ? '未支付' : '支付',
     Icon: CreditCard,
     state: pState === 'RECORDED_PAID' ? 'done' : pState === 'UNKNOWN' || !pState ? 'unknown' : 'none',
     time: pState === 'RECORDED_PAID' ? (p?.recordedAt ?? o.paidAt ?? null) : null,
@@ -133,13 +133,13 @@ export function OrderStages({
       ? [
           { name: '创建', Icon: FileText, state: o.createdAt ? 'done' : 'unknown', time: o.createdAt },
           paid,
-          { name: o.source?.statusLabel || ORDER_STATUS_LABELS[o.status] || '原来源阶段待核', Icon: Flag, state: o.status === 'COMPLETED' && o.completedAt ? 'done' : 'active', time: o.status === 'COMPLETED' ? (o.completedAt ?? null) : null },
+          { name: o.source?.statusLabel || ORDER_STATUS_LABELS[o.status] || '原来源阶段未记录', Icon: Flag, state: o.status === 'COMPLETED' && o.completedAt ? 'done' : 'active', time: o.status === 'COMPLETED' ? (o.completedAt ?? null) : null },
         ]
       : [
           { name: '创建', Icon: FileText, state: o.createdAt ? 'done' : 'unknown', time: o.createdAt },
           paid,
           {
-            name: opening ? OPENING_STATE_LABELS[opening] : '开租待核',
+            name: opening ? OPENING_STATE_LABELS[opening] : '开租未记录',
             Icon: KeyRound,
             state: stageTone(opening ?? 'UNKNOWN'),
             time: progress?.opening.confirmedAtUtc ?? null,
@@ -153,22 +153,22 @@ export function OrderStages({
           },
         ];
 
-  const sourceLabel = legacy ? `${o.source?.statusLabel ?? '历史状态待核'} · ` : '';
+  const sourceLabel = legacy ? `${o.source?.statusLabel ?? '历史状态未记录'} · ` : '';
   const paymentText = orderPaymentLabel(p, o.source?.origin);
-  const refundText = o.status === 'CANCELLED' && pState === 'RECORDED_PAID' ? ' · 退款待核' : '';
+  const refundText = o.status === 'CANCELLED' && pState === 'RECORDED_PAID' ? ' · 退款未记录' : '';
   const cancelText = o.status === 'CANCELLED' && o.cancelReason ? ` · ${cancelReasonText(o.cancelReason)}` : '';
   const compactText = o.status === 'CANCELLED' ? null : progress
     ? `${OPENING_STATE_LABELS[progress.opening.state]} · ${ENDING_STATE_LABELS[progress.ending.state]}`
     : legacy
-      ? o.source?.statusLabel ?? ORDER_STATUS_LABELS[o.status] ?? '原来源阶段待核'
-      : o.status === 'COMPLETED' ? '开租待核 · 已完成' : '开租待核';
+      ? o.source?.statusLabel ?? ORDER_STATUS_LABELS[o.status] ?? '原来源阶段未记录'
+      : o.status === 'COMPLETED' ? '开租未记录 · 已完成' : '开租未记录';
 
   if (variant === 'compact') {
     // 列表只保留关键阶段：创建、支付与最远已发生/待处理节点；完整节点留在详情。
     const furthest = [...facts].reverse().find(f => f.state !== 'none') ?? facts[facts.length - 1];
     const compactFacts = facts.length > 3 ? [facts[0]!, facts[1]!, furthest!].filter((f, index, all) => all.indexOf(f) === index) : facts;
     return <TooltipProvider delay={150}><div className={`oc-stages oc-stages-compact ${className ?? ''}`.trim()}>
-      <div className="oc-compact-meta"><strong className="oc-stage-label">{ORDER_STATUS_LABELS[o.status] ?? '状态待核'}</strong>{/* 列表禁止噪音文案：紧凑说明不显示退款待核等待核提示，详情保留 */}<small>{compactText ? `${compactText} · ` : ''}{paymentText}{cancelText}</small></div>
+      <div className="oc-compact-meta"><strong className="oc-stage-label">{ORDER_STATUS_LABELS[o.status] ?? '状态未记录'}</strong>{/* 列表禁止噪音文案：紧凑说明不显示退款未记录等未记录提示，详情保留 */}<small>{compactText ? `${compactText} · ` : ''}{paymentText}{cancelText}</small></div>
       <ol aria-label="订单进度">
         {compactFacts.map((f, i) => {
           // 被折叠的中间节点并入最远节点的提示中，保证时间不丢
@@ -184,7 +184,7 @@ export function OrderStages({
 
   return (
     <TooltipProvider delay={150}><div className={`oc-stages ${className ?? ''}`.trim()}>
-      <strong className="oc-stage-label">{ORDER_STATUS_LABELS[o.status] ?? '状态待核'}</strong>
+      <strong className="oc-stage-label">{ORDER_STATUS_LABELS[o.status] ?? '状态未记录'}</strong>
       <ol aria-label="订单进度">
         {facts.map((f, i) => (
           <li key={f.name} className={f.state}>
@@ -207,7 +207,7 @@ export function OrderStages({
 }
 
 type StageFact = { name: string; Icon: ComponentType<{ size?: number }>; state: string; time?: string | null };
-const stageStateText: Record<string, string> = { done: '已完成', active: '进行中', cancel: '已终止', none: '未发生', unknown: '待核' };
+const stageStateText: Record<string, string> = { done: '已完成', active: '进行中', cancel: '已终止', none: '未发生', unknown: '未记录' };
 /** 单个进度节点：悬停/聚焦显示北京时间；触屏点按打开；折叠节点的时间一并列出。 */
 function StageNode({ fact: f, size, omitted }: { fact: StageFact; size: number; omitted: StageFact[] }) {
   const [open, setOpen] = useState(false);
@@ -220,7 +220,7 @@ function StageNode({ fact: f, size, omitted }: { fact: StageFact; size: number; 
     </TooltipTrigger>
     <TooltipContent>
       <div className="grid gap-0.5">
-        {[f, ...omitted].map(x => <span key={x.name}>{x.name} · {stageStateText[x.state] ?? '待核'} · {x.state === 'none' ? '未发生' : orderTime(x.time)}</span>)}
+        {[f, ...omitted].map(x => <span key={x.name}>{x.name} · {stageStateText[x.state] ?? '未记录'} · {x.state === 'none' ? '未发生' : orderTime(x.time)}</span>)}
         <span className="opacity-70">北京时间</span>
       </div>
     </TooltipContent>

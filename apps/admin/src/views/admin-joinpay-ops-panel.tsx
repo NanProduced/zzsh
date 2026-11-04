@@ -24,7 +24,7 @@ export function normalRefundBasis(state: string, evidence: { readiness?: string;
   if (legacy) return { ...base, eligible: false, reason: "旧平台订单按原来源核对，不在此发起新平台退款" };
   if (state !== "ready" || !evidence) return { ...base, eligible: false, reason: "未取得本单资金凭证，不能证明正常退款资格" };
   if (evidence.readiness !== "READY") return { ...base, eligible: false, reason: "资金凭证未就绪，不能证明正常退款资格" };
-  if (evidence.posting?.state !== "POSTED") return { ...base, eligible: false, reason: evidence.posting?.state === "NOT_POSTED" ? "本单未形成正常过账责任（未过账不当作0，也不开放普通退款）" : "过账状态未核定，不开放普通退款" };
+  if (evidence.posting?.state !== "POSTED") return { ...base, eligible: false, reason: evidence.posting?.state === "NOT_POSTED" ? "本单未形成正常过账责任（未过账不当作0，也不开放普通退款）" : "过账状态未记录，不开放普通退款" };
   const c = evidence.refundPayable?.knowledge === "KNOWN" ? evidence.refundPayable.cents ?? null : null;
   if (c === null || !CENTS.test(c)) return { ...base, eligible: false, reason: "应退责任未知或为0，不开放普通退款" };
   return { ...base, refundPayableCents: c, eligible: true, reason: "已核过账责任" };
@@ -61,7 +61,7 @@ export function queryOutcomeText(r: QueryResult | null, status?: number, expecte
   if (status === 202 || r.outcome.kind === "UNKNOWN") return "已提交查询，结果未知；请稍后刷新本地记录，不要重复发起退款";
   if (r.outcome.kind === "SKIPPED") return `未发起渠道查询：${skipText[r.outcome.reason ?? ""] ?? "原因未知，需按原单核对"}`;
   if (r.outcome.kind === "NOT_DISPATCHED") return "尚未派发，无可补查的原单";
-  return `已取得渠道观察（${r.outcome.event ?? "?"}）；银行到账仍未核定`;
+  return `已取得渠道观察（${r.outcome.event ?? "?"}）；银行到账仍未记录`;
 }
 function validQueryResult(r: QueryResult | null, expected?: QueryBinding): r is QueryResult {
   if (!r || r.contractVersion !== "admin-joinpay-query.v1" || r.channelArrival !== "UNKNOWN"
@@ -113,7 +113,7 @@ function NativeRefundForm({ orderId, canWrite, basis, binding, onAttentionChange
         || !["ALLOCATED", "CONSUMED", "RELEASED"].includes(receipt.budgetDisposition)
         || receipt.channel?.result !== (receipt.replayed ? "UNKNOWN" : "NOT_SUBMITTED") || receipt.channel?.bankArrival !== "UNKNOWN") throw new AdminApiError(0, "INVALID_REFUND_RECEIPT");
       clearSaved(orderId,binding,key);
-      setPending(null); setNote(receipt.replayed ? "已找回原本地退款申请；渠道结果与到账未核定" : "已建立本地退款申请；渠道提交与到账未核定"); await load();
+      setPending(null); setNote(receipt.replayed ? "已找回原本地退款申请；渠道结果与到账未记录" : "已建立本地退款申请；渠道提交与到账未记录"); await load();
     } catch (e) {
       const unknown = e instanceof AdminApiError && (e.status === 0 || e.status === 503 || e.status >= 500);
       setNote(unknown || recovering ? `${unknown ? "结果未知" : friendlyError(e)}：已保留原幂等键，只能按原键恢复，不会生成新申请` : friendlyError(e));
@@ -130,7 +130,7 @@ function NativeRefundForm({ orderId, canWrite, basis, binding, onAttentionChange
     {!canWrite ? <p className="oc-fact-note">逐笔退款申请读取需要订单结算命令权限；只读资金权限请看上方资金凭证与退款摘要。</p>
       : items === undefined ? <Button size="sm" variant="secondary" onClick={() => void load()}>读取退款申请</Button> : items === null ? <p className="oc-fact-note">退款申请读取不可用；不能据此认定没有退款。</p>
       : items.length ? <ul className="space-y-1">{items.map(i => <li key={i.intentId}><span>{i.refundOrderNo} · 申请 {cents(i.amountCents)} · 本地状态 {i.state}{i.requiresReview ? " · 需复核" : ""}</span>
-        <small className="ml-2 text-xs text-muted-foreground">原责任 {cents(i.postingResponsibility.frozenCents)} · 已分配 {cents(i.postingResponsibility.allocatedCents)} · 尚未分配责任 {cents(i.postingResponsibility.remainingCents)} · 预算 {i.budgetDisposition}{i.latestObservation ? ` · 最近渠道观察 ${i.latestObservation.event}` : ""} · 银行到账未核定</small>
+        <small className="ml-2 text-xs text-muted-foreground">原责任 {cents(i.postingResponsibility.frozenCents)} · 已分配 {cents(i.postingResponsibility.allocatedCents)} · 尚未分配责任 {cents(i.postingResponsibility.remainingCents)} · 预算 {i.budgetDisposition}{i.latestObservation ? ` · 最近渠道观察 ${i.latestObservation.event}` : ""} · 银行到账未记录</small>
         {canWrite ? <Button size="sm" variant="secondary" disabled={busy} onClick={() => void query(i.intentId)}>按原号补查</Button> : null}</li>)}</ul>
       : <p className="oc-fact-note">本单暂无退款申请。</p>}
     {canWrite && basis ? <p className="oc-fact-note" data-refund-basis={basis.eligible ? "eligible" : "closed"}>原单 {orderId} · 过账 {basis.postingRef ?? "未知"} · 已核应退责任 {cents(basis.refundPayableCents)} · 责任到期 {basis.refundDueAt ?? "未知"} · 预算以申请回执为准{basis.eligible ? "" : ` · 普通退款关闭：${basis.reason}`} · 异常退款不在此开放</p> : null}
@@ -148,7 +148,7 @@ type WorkerOne = { configured: boolean; running: boolean; failureCode: string | 
 type WorkerStatus = { refund: WorkerOne; payout: WorkerOne; collection: WorkerOne };
 type AccountSummary = { integration: string; knowledge: string; latestVerifiedSnapshot: Record<string, unknown> | null };
 const workerText = (w: WorkerOne) => !w.configured ? "未装配" : `${w.running ? "运行中" : "未运行"}${w.failureCode ? ` · 最近失败 ${w.failureCode}${w.failurePhase ? `/${w.failurePhase}` : ""}` : ""} · 最近成功查询时间未提供`;
-const accountText = (a: AccountSummary | undefined) => !a ? "未读取" : a.integration !== "INTEGRATED" ? "未接入" : a.knowledge === "KNOWN" ? "已取得渠道余额快照（以渠道为准）" : "余额未核定";
+const accountText = (a: AccountSummary | undefined) => !a ? "未读取" : a.integration !== "INTEGRATED" ? "未接入" : a.knowledge === "KNOWN" ? "已取得渠道余额快照（以渠道为准）" : "余额未记录";
 
 /** 资金页渠道运维：worker白名单状态与商户账户摘要；均为只读，不显示银行全量数据。 */
 /** 提现QUERY-only：只按原提现单号补查，不发起新提现/重发/换收款目标；需finance.withdrawal.query。 */
@@ -251,7 +251,7 @@ export function AdminJoinpayOpsPanel({ canRead, canWithdrawalQuery = false }: { 
       <Input aria-label="商户标识" value={merchant} onChange={e => { resetMerchant(); setMerchant(e.target.value.trim()); }} placeholder="商户标识" className="h-8 w-36 text-xs font-mono" />
       <Button size="sm" type="button" onClick={() => void lookup()}>读取账户摘要</Button>
     </div>
-    {account ? <p className="text-xs">可用账户：{accountText(account.available)} · 收款账户：{accountText(account.collection)} · 资产合计：未核定（渠道余额不是资产）· 银行到账未核定</p> : null}
+    {account ? <p className="text-xs">可用账户：{accountText(account.available)} · 收款账户：{accountText(account.collection)} · 资产合计：未记录（渠道余额不是资产）· 银行到账未记录</p> : null}
     {note ? <p role="status" className="text-xs text-destructive">{note}</p> : null}
     {canWithdrawalQuery ? <AdminWithdrawalQueryBox /> : null}
     <p className="oc-fact-note text-xs">本地补查状态与渠道余额均不等于银行到账；旧来源与对账差异按原来源核对，不在此自动结论。</p>

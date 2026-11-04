@@ -3,26 +3,26 @@ import { beijingCalendarDate } from "../workspace/beijing-time";
 import { findPhoneClue } from "../workspace/tab-model";
 
 export const FINANCE_ACCESS_FAILURE_EVENT = "zzsh-admin-finance-access-failure";
-export const bucketLabels: Record<string, string> = { AVAILABLE: "用户可用", RESERVED: "提现预留", GUARANTEE_HELD: "号主上架保证金", REFUND_PAYABLE: "退款应付", PENDING_EARNINGS: "待结算收益", PLATFORM: "平台权益", CLEARING: "待核对款项", OPENING_BASIS: "旧平台余额结转" };
-export const bucketNature: Record<string, string> = { AVAILABLE: "用户负债", RESERVED: "用户负债", GUARANTEE_HELD: "保证金责任", REFUND_PAYABLE: "退款责任", PENDING_EARNINGS: "收益责任", PLATFORM: "平台权益", CLEARING: "待核对款项", OPENING_BASIS: "余额来源" };
+export const bucketLabels: Record<string, string> = { AVAILABLE: "用户可用", RESERVED: "提现预留", GUARANTEE_HELD: "号主上架保证金", REFUND_PAYABLE: "退款应付", PENDING_EARNINGS: "待结算收益", PLATFORM: "平台权益", CLEARING: "未核对款项", OPENING_BASIS: "旧平台余额结转" };
+export const bucketNature: Record<string, string> = { AVAILABLE: "用户负债", RESERVED: "用户负债", GUARANTEE_HELD: "保证金责任", REFUND_PAYABLE: "退款责任", PENDING_EARNINGS: "收益责任", PLATFORM: "平台权益", CLEARING: "未核对款项", OPENING_BASIS: "余额来源" };
 /** 旧平台余额结转只在对账口径里出现，不进入资金查找的业务类别下拉。 */
 export const businessBucketLabels: Record<string, string> = Object.fromEntries(Object.entries(bucketLabels).filter(([bucket]) => bucket !== "OPENING_BASIS"));
 export const kindLabels: Record<string, string> = { OPENING: "迁移期初", SETTLEMENT: "订单结算", PAYMENT: "付款记录", WITHDRAWAL: "提现", EARNINGS: "历史流水", DISTRIBUTION: "分销", GUARANTEE: "上架保证金" };
 kindLabels.REFUND = "退款责任";
-export const stateLabels: Record<string, string> = { POSTED: "已入账", RESERVED: "已预留", SUBMITTING: "提交中", PROCESSING: "处理中", UNKNOWN: "结果未知", SUCCEEDED: "本地成功记录", FAILED: "失败", RECONCILIATION_REQUIRED: "结果冲突待核", HISTORICAL_OBSERVED: "历史观察" };
+export const stateLabels: Record<string, string> = { POSTED: "已入账", RESERVED: "已预留", SUBMITTING: "提交中", PROCESSING: "处理中", UNKNOWN: "结果未知", SUCCEEDED: "本地成功记录", FAILED: "失败", RECONCILIATION_REQUIRED: "结果冲突，需核对", HISTORICAL_OBSERVED: "历史观察" };
 Object.assign(stateLabels, { ORDER_RECORDED: "订单记录", HISTORICAL_ORDER_RECORDED: "历史订单记录" });
 Object.assign(stateLabels,{PENDING:'待结算',SETTLED:'已结算',REVOKED:'已撤销',RECOVERY_REQUIRED:'待追回'});
 stateLabels.REFUND_PAYABLE_RECORDED = "应退责任已记录";
 export const reasonLabels: Record<string, string> = {
   ALL_SUBJECTS_PERIOD_BALANCE_NOT_PROVABLE: '全平台集合未提供各主体完整的期间余额依据，请按具体用户核对',
   FILTERED_PERIOD_BALANCE_NOT_PROVABLE: '业务或状态筛选仅覆盖部分分录，不能据此核定完整期间余额',
-  HISTORICAL_PERIOD_BALANCE_NOT_PROVABLE: '所选期间早于新账承接入账时刻，历史余额未核定',
+  HISTORICAL_PERIOD_BALANCE_NOT_PROVABLE: '所选期间早于新账承接入账时刻，历史余额未记录',
   POSTED_LEDGER_ONLY: '仅证明已准入的新账分录，不代表完整历史或渠道余额',
   WALLET_ORIGIN_NOT_VERIFIED: '钱包期初来源未通过核定',
   OPENING_ORIGIN_BINDING_NOT_VERIFIED: '期初、主体与原入账关联未通过核定',
   OPENING_ORIGIN_SOURCE_NOT_VERIFIED: '原始期初来源未通过核定',
   OPENING_ORIGIN_TIME_NOT_VERIFIED: '期初来源截止与新账入账时刻未通过核定',
-  AMBIGUOUS_OPENING_ORIGIN: '期初依据存在多个候选，余额未核定',
+  AMBIGUOUS_OPENING_ORIGIN: '期初依据存在多个候选，余额未记录',
   ORIGINAL_BASIS_UNAVAILABLE: '未取得原计佣依据',
   AMBIGUOUS_ORIGINAL_BASIS: '原计佣依据存在多个候选',
   FROZEN_CALCULATION_NOT_VERIFIED: '冻结计佣依据未通过完整校验',
@@ -30,19 +30,19 @@ export const reasonLabels: Record<string, string> = {
   CURRENT_LEDGER_EXCLUDES_UNADMITTED_LEGACY:'当前勾稽仅覆盖已入账分录，待承接的历史责任另行核对',
   ZERO_FACT_NO_LEDGER_OR_CHANNEL_PAYMENT:'这是有依据的零额事实，没有资金分录或渠道支付',
   CHANNEL_ARRIVAL_NOT_PROVED:'账内记录不证明渠道到账',
-  GLOBAL_RESERVED_AND_WITHDRAWABLE_NOT_ADMITTED: "完整预留和可提现范围尚未核定",
-  SOURCE_COVERAGE_UNKNOWN: "资金来源覆盖未核定", SOURCE_COVERAGE_NOT_ADMITTED: "资金来源覆盖未准入",
+  GLOBAL_RESERVED_AND_WITHDRAWABLE_NOT_ADMITTED: "完整预留和可提现范围尚未记录",
+  SOURCE_COVERAGE_UNKNOWN: "资金来源覆盖未记录", SOURCE_COVERAGE_NOT_ADMITTED: "资金来源覆盖未准入",
   WITHDRAWAL_POLICY_NOT_ACTIVE: "可提现政策未启用", WITHDRAWAL_SOURCE_NOT_AVAILABLE: "提现读取来源尚未就绪",
   WITHDRAWAL_SOURCE_UNAVAILABLE: "原提现申请未取得", NATIVE_DISTRIBUTION_NOT_AVAILABLE: "当前收益政策和结算来源尚未接入",
   CHANNEL_COST_NOT_AVAILABLE: "渠道费用未取得", HISTORICAL_NOT_ADMITTED: "历史事实未纳入期初覆盖，未改变当前余额",
-  HISTORICAL_STATUS_NOT_CHANNEL_RESULT: "旧状态不代表渠道到账", AMOUNT_OR_DIRECTION_UNKNOWN: "金额或方向未核定",
-  HISTORICAL_GUARANTEE_NOT_CURRENT_HELD:'历史缴付观察不等于当前在押，当前责任待核定',
-  INVALID_EXACT_AMOUNT: "金额格式待核", LOCAL_CONTROLLED_NOT_BANK_RECEIPT: "本地受控结果，不代表银行到账",
+  HISTORICAL_STATUS_NOT_CHANNEL_RESULT: "旧状态不代表渠道到账", AMOUNT_OR_DIRECTION_UNKNOWN: "金额或方向未记录",
+  HISTORICAL_GUARANTEE_NOT_CURRENT_HELD:'历史缴付观察不等于当前在押，当前责任未记录',
+  INVALID_EXACT_AMOUNT: "金额格式未记录", LOCAL_CONTROLLED_NOT_BANK_RECEIPT: "本地受控结果，不代表银行到账",
   LOCAL_OPERATION_NOT_APPLIED: "原本地渠道记录与申请结果尚未一致，资金处置仍按已入账分录核对",
   ORIGINAL_ORDER_REFERENCE_UNRESOLVED: "原订单尚未按来源引用解析", ORIGINAL_ORDER_REFERENCE_AMBIGUOUS: "原订单有多个来源候选，需逐一核对",
   ORDER_RECORD_NOT_CHANNEL_RESULT: "订单及付款记录不代表渠道到账", ORDER_NO_CURRENT_POSTING: "该单据没有当前入账分录",
   REFUND_PAYMENT_SOURCE_NOT_AVAILABLE: "退款出款依据尚未取得，应退责任按账内分录核对",
-  DISTRIBUTION_AND_CHANNEL_COST_NOT_ADMITTED: "分销扣除和渠道成本尚未核定，未计算净利润",
+  DISTRIBUTION_AND_CHANNEL_COST_NOT_ADMITTED: "分销扣除和渠道成本尚未记录，未计算净利润",
 };
 export type FinanceFilters = { scope: string; from: string; to: string; period: boolean; bucket: string; kind: string; state: string; q: string };
 export function defaultFinanceFilters(period: boolean): FinanceFilters { const today = beijingCalendarDate(); return { scope: "ALL", from: today, to: today, period, bucket: "ALL", kind: "ALL", state: "ALL", q: "" }; }
@@ -51,11 +51,11 @@ export function financeQuery(filters: FinanceFilters): URLSearchParams {
   return new URLSearchParams({ ...filters, period: filters.period ? "1" : "0" });
 }
 export function financeMoney(cents: string | null | undefined): string {
-  if (cents === null || cents === undefined || !/^-?\d+$/.test(cents)) return "未核定";
+  if (cents === null || cents === undefined || !/^-?\d+$/.test(cents)) return "未记录";
   const value = BigInt(cents), abs = value < 0n ? -value : value;
   return `${value < 0n ? "−" : ""}${(abs / 100n).toLocaleString("zh-CN")}.${(abs % 100n).toString().padStart(2, "0")} 元`;
 }
-export function financeTime(value: string | null | undefined): string { return !value || !Number.isFinite(Date.parse(value)) ? "时间未核定" : new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date(value)); }
+export function financeTime(value: string | null | undefined): string { return !value || !Number.isFinite(Date.parse(value)) ? "时间未记录" : new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date(value)); }
 export type HistoricalFinancePurpose = 'SETTLEMENT_INCOME' | 'OWNER_RENTAL_INCOME' | 'DISTRIBUTION_INCOME' | 'WITHDRAWAL_APPLICATION' | 'WITHDRAWAL_DEBIT' | 'WITHDRAWAL_REJECTED_RETURN' | 'TRANSFER_FAILED_RETURN' | 'WECHAT_WITHDRAWAL_FAILED_RETURN' | 'PLATFORM_CREDIT' | 'PLATFORM_DEBIT' | 'DEPOSIT_COMPENSATION' | 'TASK_SETTLEMENT' | 'UNKNOWN';
 export type HistoricalFinanceDisplay = {refundAttempts?:{source:{type:'LEGACY_MYSQL';entity:'la_refund_log';id:string};originalNumber:string|null;originalStatus:string|null;recordedAmountCents:string|null;occurredAt:string|null;updatedAt:string|null;channelArrival:'UNKNOWN';reasonCodes:string[]}[];sourceRefundFlags?:string[];
   changeType: string | null; purposeCode: HistoricalFinancePurpose; purposeLabel: string; originalLogNumber: string | null;
@@ -73,7 +73,7 @@ export function financeRecordNumber(record: FinanceRecord, fallback: string): st
 export function financeRecordState(record: FinanceRecord): string {
   if (!financeIsHistorical(record) && record.state === "SUCCEEDED") return sourceFamily(record) === "WITHDRAWAL" || record.sourceEntity === "withdrawal_intent" ? "本地受控成功" : "本地成功记录，渠道另核";
   const original = record.historical?.originalStatusLabel;
-  return financeIsHistorical(record) ? original ? original.startsWith('旧平台') ? original : `旧平台状态：${original}` : '旧平台记录' : stateLabels[record.state] ?? '状态待核';
+  return financeIsHistorical(record) ? original ? original.startsWith('旧平台') ? original : `旧平台状态：${original}` : '旧平台记录' : stateLabels[record.state] ?? '状态未记录';
 }
 export function historicalAssociationPath(historical: HistoricalFinanceDisplay | undefined, access: { orderRead: boolean; documentRead: boolean }): string | null {
   const association = historical?.association;
@@ -93,15 +93,15 @@ export type FinanceOrderLifecycle = { origin: 'NATIVE' | 'LEGACY_MYSQL'; orderSt
 export type FinanceDocument = { ref: string; number: string; kind: string; state: string; occurredAt: string | null; requestedAmountCents: string | null; subjects: { id: string; name: string }[]; entryCount: number; ledgerEntryCount?: number; summaryScope?: 'DOCUMENT' | 'SUBJECT'; subjectEntryCount?: number; documentEntryCount?: number | null; amounts: { bucket: string; knownNetCents: string; unknownCount: number }[]; historical?: HistoricalFinanceDisplay; orderLifecycle?: FinanceOrderLifecycle; parties?: { owner: { id: string; name: string }; renter: { id: string; name: string } } };
 export function financeEntryScope(document: FinanceDocument): string {
   if (["PAYMENT_REQUEST","REFUND_INTENT"].includes(sourceFamily(document)) || sourceFamily(document)==="JOINPAY_WITHDRAWAL" && document.ledgerEntryCount===0) return "业务记录 · 不计账内收支";
-  if (sourceFamily(document)==="JOINPAY_WITHDRAWAL" && document.ledgerEntryCount===undefined) return `${document.entryCount} 条记录 · 过账依据待核`;
+  if (sourceFamily(document)==="JOINPAY_WITHDRAWAL" && document.ledgerEntryCount===undefined) return `${document.entryCount} 条记录 · 过账依据未记录`;
   return document.summaryScope === 'SUBJECT' ? `本人相关 ${document.subjectEntryCount ?? document.entryCount} 条${document.documentEntryCount == null ? ' · 全单条数未读取' : ` / 全单 ${document.documentEntryCount} 条`}` : `${document.entryCount} 条${financeIsHistorical(document) ? '历史记录' : '分录'}`;
 }
 export function financeEntryEvent(entry: FinanceEntry): string {
   if (entry.kind !== 'DISTRIBUTION') return financeBusinessLabel(entry);
   const evidence = entry.evidence ?? {};
-  if (Object.hasOwn(evidence,'eventAction')) return ({ACCRUE:'分销计提',SETTLE:'分销转可用',REVOKE:'分销撤销',RECOVER:'分销追偿'} as Record<string,string>)[evidence.eventAction??'']??'分销事件待核';
+  if (Object.hasOwn(evidence,'eventAction')) return ({ACCRUE:'分销计提',SETTLE:'分销转可用',REVOKE:'分销撤销',RECOVER:'分销追偿'} as Record<string,string>)[evidence.eventAction??'']??'分销事件未记录';
   // Old APIs have no action field; EARNING_REVOKED cannot distinguish revoke from recover.
-  return ({EARNING_PENDING:'分销计提',EARNING_SETTLED:'分销转可用'} as Record<string,string>)[evidence.eventKind??'']??'分销事件待核';
+  return ({EARNING_PENDING:'分销计提',EARNING_SETTLED:'分销转可用'} as Record<string,string>)[evidence.eventKind??'']??'分销事件未记录';
 }
 export type OrderSettlementMoney = { knowledge: 'KNOWN' | 'UNKNOWN'; cents: string | null; reasonCodes: string[] };
 export type FinancePlatformComponent = { code: string; cents: string; payer: 'OWNER' | 'RENTER' | 'NONE' | null; feeBase: string | null; feeRate: string | null };

@@ -82,10 +82,10 @@ test('permission loss cannot retain a previously authorized order number or link
 });
 
 test('unresolved and ambiguous facts expose no guessed association and retain unknown amounts and original codes',async t=>{
-  const unknown=state=>({...debit,ref:`HISTORY_EARNINGS:${state}`,historical:{...historical,changeType:'9999',purposeCode:'UNKNOWN',purposeLabel:'用途待核',recordedAmountCents:null,balanceAfterCents:'-10',feeCents:null,netCents:null,association:{...association,state,number:'UNPROVED_NUMBER',documentRef:'UNPROVED_REF',path:'/orders/UNPROVED_ID'}}});
-  const ui=await mount(t,{documents:[unknown('UNRESOLVED'),unknown('AMBIGUOUS')]});await waitFor(()=>ui.host.textContent.includes('用途待核'));
-  assert.match(ui.host.textContent,/关联待核/);assert.match(ui.host.textContent,/多条关联候选/);assert.doesNotMatch(ui.host.textContent,/UNPROVED_/);assert.equal(ui.host.querySelector('[data-historical-association] button'),null);
-  await click(button('历史记录详情',ui.host));assert.match(ui.host.textContent,/9999/);assert.match(ui.host.textContent,/−0\.10 元/);assert.match(ui.host.textContent,/未核定/);
+  const unknown=state=>({...debit,ref:`HISTORY_EARNINGS:${state}`,historical:{...historical,changeType:'9999',purposeCode:'UNKNOWN',purposeLabel:'用途未记录',recordedAmountCents:null,balanceAfterCents:'-10',feeCents:null,netCents:null,association:{...association,state,number:'UNPROVED_NUMBER',documentRef:'UNPROVED_REF',path:'/orders/UNPROVED_ID'}}});
+  const ui=await mount(t,{documents:[unknown('UNRESOLVED'),unknown('AMBIGUOUS')]});await waitFor(()=>ui.host.textContent.includes('用途未记录'));
+  assert.match(ui.host.textContent,/关联未记录/);assert.match(ui.host.textContent,/多条关联候选/);assert.doesNotMatch(ui.host.textContent,/UNPROVED_/);assert.equal(ui.host.querySelector('[data-historical-association] button'),null);
+  await click(button('历史记录详情',ui.host));assert.match(ui.host.textContent,/9999/);assert.match(ui.host.textContent,/−0\.10 元/);assert.match(ui.host.textContent,/未记录/);
 });
 
 test('purpose comes from the API rather than the amount sign and unsafe association routes are ignored',()=>{

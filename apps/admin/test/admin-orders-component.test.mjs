@@ -205,7 +205,7 @@ test("order details render before a pending settlement read and keep paid-withou
   };
   await act(async () => root.render(createElement(AdminOrdersView, { snapshot: snapshotFor("detail-pending"), objectOnly: true, initialOrderId: paidUnknown.id, onOpenPath: () => {}, onQueryChange: () => {}, refreshNonce: 0 })));
   await until(() => node.textContent.includes("PAID-UNKNOWN"));
-  assert.equal(node.textContent.includes("支付时间待确认"), true);
+  assert.equal(node.textContent.includes("支付时间未记录"), true);
   assert.equal(node.textContent.includes("未形成支付事实"), false);
   releaseSettlement();
   await settle();
@@ -222,7 +222,7 @@ test("settlement 404 leaves the order body visible", async (t) => {
   };
   await act(async () => root.render(createElement(AdminOrdersView, { snapshot: snapshotFor("detail-404"), objectOnly: true, initialOrderId: completedUnknown.id, onOpenPath: () => {}, onQueryChange: () => {}, refreshNonce: 0 })));
   await until(() => node.textContent.includes("COMPLETED-UNKNOWN"));
-  assert.equal(node.textContent.includes("支付时间待确认"), true);
+  assert.equal(node.textContent.includes("支付时间未记录"), true);
   assert.equal(node.textContent.includes("未形成支付事实"), false);
   releaseSettlement();
   await settle();
@@ -232,10 +232,10 @@ test("settlement 404 leaves the order body visible", async (t) => {
 test("lifecycle payment copy follows status and paidAt facts", async (t) => {
   const { root, node, AdminOrdersView } = await setup(t);
   const cases = [
-    { status: "PAID", paidAt: null, displayNo: "LIFE-PAID", expect: "支付时间待确认", forbid: "未形成支付事实" },
-    { status: "COMPLETED", paidAt: null, displayNo: "LIFE-COMPLETED", expect: "支付时间待确认", forbid: "未形成支付事实" },
-    { status: "PENDING_PAYMENT", paidAt: null, displayNo: "LIFE-PENDING", expect: "等待支付", forbid: "支付时间待确认" },
-    { status: "CANCELLED", paidAt: null, displayNo: "LIFE-CANCELLED", expect: "未形成支付事实", forbid: "支付时间待确认" },
+    { status: "PAID", paidAt: null, displayNo: "LIFE-PAID", expect: "支付时间未记录", forbid: "未形成支付事实" },
+    { status: "COMPLETED", paidAt: null, displayNo: "LIFE-COMPLETED", expect: "支付时间未记录", forbid: "未形成支付事实" },
+    { status: "PENDING_PAYMENT", paidAt: null, displayNo: "LIFE-PENDING", expect: "等待支付", forbid: "支付时间未记录" },
+    { status: "CANCELLED", paidAt: null, displayNo: "LIFE-CANCELLED", expect: "未形成支付事实", forbid: "支付时间未记录" },
   ];
   for (const item of cases) {
     const current = { ...order, id: `order_${item.displayNo}`, displayNo: item.displayNo, status: item.status, paidAt: item.paidAt };
@@ -287,7 +287,7 @@ test('numbered chain survives StrictMode cancellation and separates paid cancell
   globalThis.fetch = async () => response({ order:chainOrder });
   await act(async () => root.render(createElement(AdminOrderChainView, {...chainProps('chain-detail'), objectOnly:true, initialOrderId:chainOrder.id})));
   await until(() => node.textContent.includes('关键费用'));
-  assert(node.textContent.includes('支付时间待确认')); assert(node.textContent.includes('未知')); assert(node.textContent.includes('¥0.00'));
+  assert(node.textContent.includes('支付时间未记录')); assert(node.textContent.includes('未知')); assert(node.textContent.includes('¥0.00'));
 });
 
 
@@ -366,8 +366,8 @@ test('U3 order fee label follows the stage while the split stays visible and pay
   globalThis.fetch=async()=>response({items:[current],page:1,pageSize:20,total:1,contextKey:'fee-root'});
   const cases=[
     {status:'PENDING_PAYMENT',label:'本次预付',payment:'RECORDED_UNPAID',breakdown:{basis:'NATIVE_FROZEN_ORDER_QUOTE',completeness:'COMPLETE',haffRental:{amount:'98.08'},materialsPrepay:{amount:'11.00'}},expect:['哈夫租金 ¥98.08','物资预付 ¥11.00','押金 ¥50.00']},
-    {status:'COMPLETED',label:'原预付',payment:'RECORDED_PAID',breakdown:{basis:'NATIVE_FROZEN_ORDER_QUOTE',completeness:'PARTIAL',haffRental:{amount:'98.08'},materialsPrepay:null},expect:['哈夫租金 ¥98.08','物资预付 分项待核','押金 ¥50.00']},
-    {status:'CANCELLED',label:'原单金额',payment:'UNKNOWN',breakdown:null,expect:['哈夫租金/物资预付分项待核','押金 ¥50.00','支付事实待核']},
+    {status:'COMPLETED',label:'原预付',payment:'RECORDED_PAID',breakdown:{basis:'NATIVE_FROZEN_ORDER_QUOTE',completeness:'PARTIAL',haffRental:{amount:'98.08'},materialsPrepay:null},expect:['哈夫租金 ¥98.08','物资预付 分项未记录','押金 ¥50.00']},
+    {status:'CANCELLED',label:'原单金额',payment:'UNKNOWN',breakdown:null,expect:['哈夫租金/物资预付分项未记录','押金 ¥50.00','支付事实未记录']},
   ];
   for(const [index,item] of cases.entries()){
     current={...order,id:'fee-'+index,displayNo:'FEE-'+index,status:item.status,payment:{state:item.payment,recordedAt:null,recordedAmount:null},prepaymentBreakdown:item.breakdown,amounts:{...order.amounts,deposit:{currency:'CNY',unit:'yuan',amount:'50.00',scale:2},totalDue:{currency:'CNY',unit:'yuan',amount:'159.08',scale:2}},source:{origin:'NATIVE'}};
@@ -377,7 +377,7 @@ test('U3 order fee label follows the stage while the split stays visible and pay
     // 列表只显示订单金额；分项、付款与退款事实只在详情
     assert.match(fee,/^订单金额¥159\.08(见详情)?$/);
     assert.equal(fee.includes('见详情'),item.status==='COMPLETED');
-    for(const text of [...item.expect,item.label,'哈夫租金','押金','未形成支付','退款待核','分项待核']) assert.equal(fee.includes(text),false,`${item.status}: ${text} from ${fee}`);
+    for(const text of [...item.expect,item.label,'哈夫租金','押金','未形成支付','退款未记录','分项未记录']) assert.equal(fee.includes(text),false,`${item.status}: ${text} from ${fee}`);
   }
   // 金额缺失显示未知（不当作 0）；无财务权限显示「—」
   current={...order,id:'fee-missing',displayNo:'FEE-MISSING',status:'PAID',amounts:{...order.amounts,totalDue:null},source:{origin:'NATIVE'}};
@@ -418,7 +418,7 @@ test('progress nodes expose Beijing times by keyboard/aria and never mark unevid
   assert.match(triggers[0].getAttribute('aria-label'),/创建：.*10:00.*北京时间/);
   assert.match(triggers[1].getAttribute('aria-label'),/支付：.*11:30/);
   const last=triggers[2].getAttribute('aria-label');
-  assert.match(last,/时间未记录/);assert.match(last,/开租待核/,'omitted middle node is listed in the tooltip');
+  assert.match(last,/时间未记录/);assert.match(last,/开租未记录/,'omitted middle node is listed in the tooltip');
   assert.equal(triggers[2].closest('li').className,'unknown','completion without evidence is not shown as done');
   assert.equal(triggers[0].tagName,'BUTTON');
 });
@@ -440,7 +440,7 @@ test('master: order detail separates lack of permission, unknown parts and verif
   value={...value,id:'clarity-legacy',displayNo:'CLARITY-LEGACY',source:{origin:'LEGACY',statusLabel:'已取消'},payment:{state:'RECORDED_UNPAID',recordedAt:null,recordedAmount:null},prepaymentReconciliation:{state:'MISMATCH',arithmetic:'MISMATCH',closed:false},legacyResources:{state:'KNOWN',source:'LEGACY_ORIGINAL_ORDER',items:[{code:'x',name:'原单物资',quantity:'4',unit:null,zero:false}]},frozenAccount:{source:'ACCOUNT_PUBLIC_VERSION',haff:null,materials:[],termDays:null,termSeconds:null,loginMethodText:null}};
   await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('clarity-legacy'),objectOnly:true,initialOrderId:value.id})));await until(()=>node.textContent.includes('CLARITY-LEGACY'));
   assert.match(node.textContent,/账号资料（与账号页一致）/);assert.doesNotMatch(node.textContent,/历史账号|旧单资源数量/);
-  assert.match(node.textContent,/原单记录，合计尚未核对/);assert.match(node.textContent,/完整构成仍待核对/);assert.match(node.textContent,/未记录付款/);assert.doesNotMatch(node.textContent,/本单冻结账号摘要 · 历史/);
+  assert.match(node.textContent,/原单记录，合计尚未核对/);assert.match(node.textContent,/完整构成仍未确认/);assert.match(node.textContent,/未记录付款/);assert.doesNotMatch(node.textContent,/本单冻结账号摘要 · 历史/);
 });
 
 test('order detail exposes pending original-refund recovery above tabs and keeps its original key on navigation', async t => {
@@ -503,7 +503,7 @@ test('CHAIN refund intents keep their own coverage, budget and review facts apar
   assert.match(text,/RF-1[\s\S]*10\.00/);assert.match(text,/RF-2[\s\S]*25\.00/);
   assert.match(text,/本地退款成功记录/);assert.doesNotMatch(text,/本地受控成功/);assert.match(text,/需人工复核/);
   assert.match(text,/预算已用/);assert.match(text,/预算释放/);
-  assert.match(text,/渠道到账未核定/);assert.equal(text.includes('银行已到账'),false);
+  assert.match(text,/渠道到账未记录/);assert.equal(text.includes('银行已到账'),false);
 });
 test('CHAIN abnormal refund shows readable reasons without claiming channel arrival', async t => {
   const {root,node,AdminOrderChainView}=await setup(t);
@@ -527,10 +527,10 @@ test('optional finance/group reads are independent and never call controlled set
   assert(node.textContent.includes(native.displayNo));assert.equal(node.querySelectorAll('[aria-busy="true"]').length,1);
   await act(async () => finishFinance(response({error:{code:'NOT_FOUND'}},404)));await until(()=>node.textContent.includes('未找到当前范围内可读的资金单据'));
   const bodyReads=calls.filter(p=>p.includes('readMode')).length;mode='ready';await act(async () => buttonNamed(node,'重新读取资金依据').click());await until(()=>node.textContent.includes('尚未提供受权订单资金依据'));
-  assert.equal(calls.filter(p=>p.includes('readMode')).length,bodyReads);assert(node.textContent.includes('开租待核'));
+  assert.equal(calls.filter(p=>p.includes('readMode')).length,bodyReads);assert(node.textContent.includes('开租未记录'));
   mode='slow';await act(async () => root.render(createElement(AdminOrderChainView,{...props,refreshNonce:1})));await until(()=>node.textContent.includes('关键费用'));const stale=finishFinance;
   mode='ready';await act(async () => root.render(createElement(AdminOrderChainView,{...props,initialOrderId:'native-current'})));await until(()=>node.textContent.includes('NATIVE-CURRENT'));
-  await act(async () => stale(response(proof('/finance/documents/ORDER:native-old'))));assert(node.textContent.includes('NATIVE-CURRENT'));assert(!node.textContent.includes('NATIVE-OLD'));assert(node.textContent.includes('开租待核'));assert(!calls.some(p=>p.includes('/settlement')));
+  await act(async () => stale(response(proof('/finance/documents/ORDER:native-old'))));assert(node.textContent.includes('NATIVE-CURRENT'));assert(!node.textContent.includes('NATIVE-OLD'));assert(node.textContent.includes('开租未记录'));assert(!calls.some(p=>p.includes('/settlement')));
 });
 
 test('legacy finance links preserve original attempts and clear on finance permission loss', async t => {
@@ -550,7 +550,7 @@ test('legacy finance links preserve original attempts and clear on finance permi
   const props={...chainProps('legacy-observations'),objectOnly:true,initialOrderId:legacy.id,onOpenPath:(path)=>opened.push(path)};
   await act(async()=>root.render(createElement(AdminOrderChainView,{...props,snapshot:{...props.snapshot,permissions:['order.read','finance.read']}})));
   await until(()=>node.textContent.includes('ORIGINAL-ATTEMPT'));
-  assert.match(node.textContent,/ORIGINAL-REFUND[\s\S]*685\.00[\s\S]*ORIGINAL-ATTEMPT[\s\S]*渠道到账待确认/);
+  assert.match(node.textContent,/ORIGINAL-REFUND[\s\S]*685\.00[\s\S]*ORIGINAL-ATTEMPT[\s\S]*渠道到账未记录/);
   assert.doesNotMatch(node.textContent,/退款已到账|旧来源退款未接入/);
   await act(async()=>buttonNamed(node,'原退款 ORIGINAL-REFUND').click());
   assert.ok(opened.some(path=>path.startsWith('/finance/documents/'+encodeURIComponent(ref))));
@@ -638,9 +638,9 @@ test('server progress drives opening/ending without inferring them from PAID or 
   const {root,node,AdminOrderChainView}=await setup(t);
   const base={...chainOrder,id:'progress-order',displayNo:'PROGRESS-ORDER',source:{origin:'NATIVE'},payment:{state:'RECORDED_PAID',recordedAt:null,recordedAmount:null}};
   const cases=[
-    {status:'PAID',progress:undefined,expect:['开租待核'],forbid:['已开租']},
-    {status:'PAID',progress:{asOfUtc:'2026-10-25T00:00:00.000000Z',opening:{state:'CONFIRMED',confirmedAtUtc:'2026-10-25T01:00:00.000000Z'},ending:{state:'PENDING_PARTIES',currentVersionNo:2,postedAtUtc:null}},expect:['已开租','待双方确认'],forbid:['开租待核']},
-    {status:'CANCELLED',paidAt:null,payment:{state:'RECORDED_UNPAID',recordedAt:null,recordedAmount:null},progress:{asOfUtc:'2026-10-25T00:00:00.000000Z',opening:{state:'NOT_APPLICABLE',confirmedAtUtc:null},ending:{state:'NOT_APPLICABLE',currentVersionNo:null,postedAtUtc:null}},expect:['开租不适用','结算不适用'],forbid:['开租待核','退款待核']},
+    {status:'PAID',progress:undefined,expect:['开租未记录'],forbid:['已开租']},
+    {status:'PAID',progress:{asOfUtc:'2026-10-25T00:00:00.000000Z',opening:{state:'CONFIRMED',confirmedAtUtc:'2026-10-25T01:00:00.000000Z'},ending:{state:'PENDING_PARTIES',currentVersionNo:2,postedAtUtc:null}},expect:['已开租','待双方确认'],forbid:['开租未记录']},
+    {status:'CANCELLED',paidAt:null,payment:{state:'RECORDED_UNPAID',recordedAt:null,recordedAmount:null},progress:{asOfUtc:'2026-10-25T00:00:00.000000Z',opening:{state:'NOT_APPLICABLE',confirmedAtUtc:null},ending:{state:'NOT_APPLICABLE',currentVersionNo:null,postedAtUtc:null}},expect:['开租不适用','结算不适用'],forbid:['开租未记录','退款未记录']},
   ];
   for(const [index,item] of cases.entries()){
     const order={...base,...item};
@@ -744,8 +744,8 @@ test('channel payment summary keeps local acceptance and simulated evidence dist
     {integration:'JOINPAY',dataOrigin:'JOINPAY_PROVIDER',productionPaymentCapability:false,acceptance:{state:'APPLIED'},text:'汇聚原确认 · 本地已接纳',
       latestTrustedObservation:{source:'QUERY',evidenceLevel:'JOINPAY_VERIFIED',providerTimeZone:'EXPLICIT_OFFSET',providerTimeOffsetMinutes:480,providerPaidAt:'2026-10-23T02:00:00Z'}},
     {integration:'JOINPAY',dataOrigin:'JOINPAY_CANDIDATE',productionPaymentCapability:true,acceptance:{state:'NONE'},text:'汇聚请求候选不构成已付款'},
-    {integration:'JOINPAY',dataOrigin:'FUTURE_SOURCE',productionPaymentCapability:true,text:'摘要版本待核对'},
-    {integration:'JOINPAY',dataOrigin:'UNKNOWN',unknowns:['UNKNOWN_PAYMENT_SOURCE'],acceptance:{state:'APPLIED'},text:'付款来源待核'}];
+    {integration:'JOINPAY',dataOrigin:'FUTURE_SOURCE',productionPaymentCapability:true,text:'摘要版本未确认'},
+    {integration:'JOINPAY',dataOrigin:'UNKNOWN',unknowns:['UNKNOWN_PAYMENT_SOURCE'],acceptance:{state:'APPLIED'},text:'付款来源未记录'}];
   for(const [index,item] of cases.entries()){
     const current={...chainOrder,id:'channel-'+index,displayNo:'CHANNEL-'+index,source:{origin:'NATIVE'}};
     globalThis.fetch=async url=>String(url).includes('readMode=combined')?response({order:current,paymentSummary:{...base,...item}}):response({error:{code:'NOT_FOUND'}},404);
@@ -754,7 +754,7 @@ test('channel payment summary keeps local acceptance and simulated evidence dist
     assert.equal(node.textContent.includes('汇聚已收款'),false);assert.equal(node.textContent.includes('渠道已到账'),false);
     assert.equal([...node.querySelectorAll('button')].some(button=>button.textContent.includes('人工补查')),false);
     if(item.dataOrigin==='JOINPAY_PROVIDER'||item.dataOrigin==='JOINPAY_CANDIDATE')assert.equal(node.textContent.includes('当前为本地协议验证环境'),false);
-    if(item.dataOrigin==='JOINPAY_PROVIDER')assert.equal(node.textContent.includes('摘要版本待核对'),false);
+    if(item.dataOrigin==='JOINPAY_PROVIDER')assert.equal(node.textContent.includes('摘要版本未确认'),false);
     if(item.dataOrigin==='JOINPAY_PROVIDER'&&item.unknowns?.includes('PAYMENT_SOURCE_DIFFERS_FROM_REQUEST'))assert.equal(node.textContent.includes('本地受控接纳'),false);
     if(item.latestTrustedObservation){
       const toggle=[...node.querySelectorAll('button')].find(button=>button.textContent.includes('查看付款依据'));
@@ -773,7 +773,7 @@ test('FLOW02 Root F1: cancelled payment remains paid, known unpaid, or unknown',
   const fee=node.querySelector('.oc-table td.oc-amount').textContent;
   // 取消单列表同样只显示订单金额，支付/退款事实不进列表费用栏
   assert.match(fee,/^订单金额/);
-  for(const text of ['原单金额','哈夫租金','物资预付','押金','退款待核','未形成支付','待核'])assert.equal(fee.includes(text),false,text);
+  for(const text of ['原单金额','哈夫租金','物资预付','押金','退款未记录','未形成支付','未记录'])assert.equal(fee.includes(text),false,text);
  }
 });
 
@@ -784,11 +784,11 @@ test('FLOW02 visual: cancelled compact progress omits inapplicable stages and ke
   await act(async()=>root.render(createElement(AdminOrderChainView,chainProps('visual-cancelled'))));
   await until(()=>node.querySelector('.oc-stages-compact'));
   const text=node.querySelector('.oc-stages-compact').textContent;
-  assert(text.includes('已取消')&&text.includes('支付事实待核'));
+  assert(text.includes('已取消')&&text.includes('支付事实未记录'));
   assert(!text.includes('开租不适用')&&!text.includes('结算不适用'));
   const timeline=node.querySelector('.oc-stages-compact ol[aria-label="订单进度"]');
   assert.ok(timeline,'compact mode is an icon timeline, not two text lines');
-  assert.deepEqual([...timeline.querySelectorAll('li .oc-stage-name')].map(item=>item.textContent),['创建','支付待核','取消']);
+  assert.deepEqual([...timeline.querySelectorAll('li .oc-stage-name')].map(item=>item.textContent),['创建','支付未记录','取消']);
   assert.equal(timeline.querySelectorAll('li svg').length,3,'each stage keeps its icon');
   assert.equal(timeline.querySelectorAll('li .oc-stage-line').length,2,'connectors are rendered between stages');
   assert.ok(timeline.querySelector('li.cancel'),'the cancelled stage is named and not color-only');
@@ -865,7 +865,7 @@ test('order detail separates unformed payment from missing time and sums refund 
  const text=node.textContent;
  assert.match(text,/本单应退责任：¥50\.00/);
  assert.match(text,/逐笔退款申请：0 笔/);
- assert.match(text,/银行到账：未核定/);
+ assert.match(text,/银行到账：未记录/);
  const record=node.querySelector('.oc-records').textContent;
  assert.match(record,/本站尚未确认付款/);
  assert.match(record,/暂无已接纳付款时间/);
@@ -890,7 +890,7 @@ test('payment absence labels distinguish unaccepted native pointers, old source 
   for (const [origin, state, expected, forbidden] of [
     ['NATIVE', 'RECORDED_UNPAID', '本站尚未确认付款', '未形成支付'],
     ['LEGACY', 'RECORDED_UNPAID', '原系统记录未付，渠道结果另核', '本站尚未确认付款'],
-    ['NATIVE', 'UNKNOWN', '支付事实待核', '本站尚未确认付款'],
+    ['NATIVE', 'UNKNOWN', '支付事实未记录', '本站尚未确认付款'],
     ['NATIVE', 'RECORDED_PAID', '支付已记录', '本站尚未确认付款'],
   ]) await t.test(`${origin}/${state}`, async child => {
     const { root, node, AdminOrderChainView } = await setup(child);
@@ -901,7 +901,7 @@ test('payment absence labels distinguish unaccepted native pointers, old source 
     const record = node.querySelector('.oc-records').textContent;
     assert.match(record, new RegExp(expected)); assert.equal(record.includes(forbidden), false);
     if (state === 'RECORDED_UNPAID' && origin === 'NATIVE') assert.match(record, /暂无已接纳付款时间/);
-    if (state === 'RECORDED_PAID') assert.match(record, /支付时间待确认/);
+    if (state === 'RECORDED_PAID') assert.match(record, /支付时间未记录/);
   });
 });
 
@@ -913,15 +913,15 @@ test('unknown payment time does not imply an observed payment occurred', async t
  await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps('unknown-payment-time'),objectOnly:true,initialOrderId:value.id})));
  await until(()=>node.querySelector('.oc-records'));
  const record=node.querySelector('.oc-records').textContent;
- assert.match(record,/支付事实与时间待核/);assert.equal(record.includes('支付发生时间未记录'),false);
+ assert.match(record,/支付事实与时间未记录/);assert.equal(record.includes('支付发生时间未记录'),false);
 });
 
 test('original manual-close queue sends the exact approved filter and marks unresolved funds', async t => {
   const { root, node, AdminOrderChainView } = await setup(t), calls = [];
-  const row = { ...chainOrder, source: { origin: 'NATIVE' }, cancelReason: 'MANUAL_CLOSE', fundsResolution: { status: 'REVIEW_REQUIRED', code: 'HISTORICAL_MANUAL_CLOSE', sourceLabel: '原人工关闭，资金处理待核实' } };
+  const row = { ...chainOrder, source: { origin: 'NATIVE' }, cancelReason: 'MANUAL_CLOSE', fundsResolution: { status: 'REVIEW_REQUIRED', code: 'HISTORICAL_MANUAL_CLOSE', sourceLabel: '原人工关闭，资金处理未确认' } };
   globalThis.fetch = async input => { calls.push(new URL(String(input), 'http://localhost')); return response(chainPage([row])); };
   await act(async () => root.render(createElement(AdminOrderChainView, { ...chainProps('manual-funds-queue'), initialQuery: { fundsResolution: 'MANUAL_CLOSE', origin: 'NATIVE' } })));
-  await until(() => node.textContent.includes('原人工关闭，资金处理待核实'));
+  await until(() => node.textContent.includes('原人工关闭，资金处理未确认'));
   assert.equal(calls.at(-1).searchParams.get('fundsResolution'), 'MANUAL_CLOSE');
   assert.equal(calls.at(-1).searchParams.get('origin'), 'NATIVE');
   assert.doesNotMatch(node.textContent, /退款已到账|资金已处理完成/);

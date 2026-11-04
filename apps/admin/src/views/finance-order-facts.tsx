@@ -5,7 +5,7 @@ export function financeOrderState(document: FinanceDocument): string | undefined
   const lifecycle = document.orderLifecycle;
   if (!lifecycle) return undefined;
   const posting = lifecycle.postingState === 'NOT_POSTED' ? lifecycle.orderStatus === 'PAID' && lifecycle.payment.state === 'SITE_ACCEPTED' ? '待结算分配' : lifecycle.orderStatus === 'CANCELLED' ? '未产生结算分配，退款责任另核' : '未产生结算分配' : lifecycle.postingState === 'POSTED' ? '已有结算分配' : lifecycle.postingState === 'LEGACY_OBSERVATION' ? '旧单责任另核' : '分配依据未取得';
-  return [orderStates[lifecycle.orderStatus] ?? '订单状态待核', lifecycle.payment.state === 'SITE_ACCEPTED' ? '本站已确认付款' : lifecycle.payment.state === 'REVIEW_REQUIRED' ? '有异常收款原始记录，当前责任另核' : lifecycle.payment.state === 'NO_ACCEPTED_PAYMENT' ? '本站尚未确认付款' : lifecycle.payment.state === 'LEGACY_RECORDED' ? '旧平台付款观察' : '付款依据未取得', posting].join(' · ');
+  return [orderStates[lifecycle.orderStatus] ?? '订单状态未记录', lifecycle.payment.state === 'SITE_ACCEPTED' ? '本站已确认付款' : lifecycle.payment.state === 'REVIEW_REQUIRED' ? '有异常收款原始记录，当前责任另核' : lifecycle.payment.state === 'NO_ACCEPTED_PAYMENT' ? '本站尚未确认付款' : lifecycle.payment.state === 'LEGACY_RECORDED' ? '旧平台付款观察' : '付款依据未取得', posting].join(' · ');
 }
 
 export function FinanceOrderPayment({ document }: { document: FinanceDocument }) {

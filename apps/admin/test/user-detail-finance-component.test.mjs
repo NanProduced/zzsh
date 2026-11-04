@@ -143,9 +143,9 @@ test("finance failure does not hide consumption or open unauthorized document ta
 
 test("unknown adjustment is never rendered as zero or a complete total",async t=>{
   const ui=await mount(t,{wallet:{state:"unknown",reason:"SOURCE_COVERAGE_NOT_ADMITTED"},consume:async()=>({...consumption,knowledge:"UNKNOWN",amountCents:null,knownAmountCents:"0",unknownCount:1,components:{haffRentCents:null,itemConsumptionCents:null,earlyMakeupCents:null,renterFeeCents:null},items:[{...line,knowledge:"UNKNOWN",amountCents:null,haffRentCents:null,itemConsumptionCents:null,earlyMakeupCents:null,renterFeeCents:null,reasonCodes:["MANUAL_RENTER_ADJUSTMENT_UNALLOCATED"]}]})});
-  await waitFor(()=>ui.host.textContent.includes("调整待核"));
-  assert.match(ui.host.textContent,/1 笔待核/);assert.match(ui.host.textContent,/已核部分 0\.00 元/);
-  assert.doesNotMatch(ui.host.textContent,/100\.00 元/);assert.match(ui.host.textContent,/可用余额待核/);
+  await waitFor(()=>ui.host.textContent.includes("调整未记录"));
+  assert.match(ui.host.textContent,/1 笔未记录/);assert.match(ui.host.textContent,/已核部分 0\.00 元/);
+  assert.doesNotMatch(ui.host.textContent,/100\.00 元/);assert.match(ui.host.textContent,/可用余额未记录/);
 });
 
 test("independent requests show skeletons and permission loss immediately unmounts private data",async t=>{

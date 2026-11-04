@@ -16,7 +16,7 @@ export function channelEvidenceStatusDisplay(section: { status?: string; coverag
   if (section.status === "FORBIDDEN") return { kind: "unauthorized", text: STATUS_TEXT.FORBIDDEN! };
   if (section.status === "UNAVAILABLE") return { kind: "unknown", text: STATUS_TEXT.UNAVAILABLE! };
   if (section.status === "NOT_FOUND_LOCAL") return { kind: "not-found", text: STATUS_TEXT.NOT_FOUND_LOCAL! };
-  if (!["AVAILABLE", "INTEGRATED", "FOUND"].includes(section.status)) return { kind: "unknown", text: STATUS_TEXT[section.status] ?? "状态待核" };
+  if (!["AVAILABLE", "INTEGRATED", "FOUND"].includes(section.status)) return { kind: "unknown", text: STATUS_TEXT[section.status] ?? "状态未记录" };
   return { kind: "ready", text: STATUS_TEXT[section.status]! };
 }
 /** 金额只在服务端给出精确分值时显示；null/缺失显示“未知”，不补 0。 */
@@ -31,6 +31,6 @@ export function sourceFamilyText(source: { sourceType?: string | null; sourceSys
   const raw = [source.sourceType, source.sourceSystem, source.sourceEntity].filter(Boolean).join("/");
   if (!raw) return "未取得";
   const owner = LEGACY.test(`${source.sourceSystem ?? ""} ${source.sourceType ?? ""}`) ? "旧平台迁移来源"
-    : /^zzsh$/i.test(source.sourceSystem ?? "") || source.sourceType === "NATIVE" ? "本平台来源" : "来源未核定";
+    : /^zzsh$/i.test(source.sourceSystem ?? "") || source.sourceType === "NATIVE" ? "本平台来源" : "来源未记录";
   return `${owner}（原标识 ${raw}）`;
 }

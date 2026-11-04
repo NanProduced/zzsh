@@ -103,7 +103,7 @@ export function FinanceOverviewView({ tab, snapshot, refreshNonce, onOpenPath, o
             <div className="finance-kpi-value">{financeMoney(legacyAmount)}</div>
             {legacy?.state === 'RECORDED' ? <>
               <p className="finance-kpi-meta">{legacy.count} 笔金额已知 · 按旧单付款时间{legacy.missingAmountCount !== '0' && legacyAmount !== null ? ' · 已知金额小计' : ''}</p>
-              <p className="finance-kpi-meta">本期 {legacy.missingAmountCount} 笔金额待核 · 来源中另有 {legacy.sourceUndatedCount} 笔付款时间待核</p>
+              <p className="finance-kpi-meta">本期 {legacy.missingAmountCount} 笔金额未记录 · 来源中另有 {legacy.sourceUndatedCount} 笔付款时间未记录</p>
             </> : <p className="finance-kpi-meta">未取得旧订单付款汇总</p>}
           </article>
           <article className="finance-kpi-card">
@@ -152,12 +152,12 @@ export function FinanceOverviewView({ tab, snapshot, refreshNonce, onOpenPath, o
           <p className="finance-secondary">截至 {financeTime(data.asOf)} · 仅已入账范围</p>
           <dl className="finance-balance-list">
             {data.ledgerBalances.map(row => <div key={row.bucket}>
-              <dt>{bucketLabels[row.bucket] ?? '资金类别待核'}<small>{bucketNature[row.bucket] ?? '性质待核'}</small></dt>
+              <dt>{bucketLabels[row.bucket] ?? '资金类别未记录'}<small>{bucketNature[row.bucket] ?? '性质未记录'}</small></dt>
               <dd className="tabular-nums">{financeMoney(row.state === 'KNOWN' ? row.balanceCents : null)}</dd>
             </div>)}
           </dl>
           <p className="finance-secondary">全平台余额证明未取得，已登记 {data.coverage.registeredSubjects} / {data.coverage.totalCurrentSubjects} 个主体。</p>
-          <p className="finance-secondary">{data.channels.state === 'NOT_CONFIGURED' ? '汇聚渠道尚未配置' : '汇聚余额快照未取得'} · 银行到账未核定</p>
+          <p className="finance-secondary">{data.channels.state === 'NOT_CONFIGURED' ? '汇聚渠道尚未配置' : '汇聚余额快照未取得'} · 银行到账未记录</p>
         </section>
       </div>
     </>}

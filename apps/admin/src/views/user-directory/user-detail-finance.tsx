@@ -17,7 +17,7 @@ import { sanitizeFinanceReturn, type WorkspaceTab } from '@/workspace/tab-model'
 
 type Props = Pick<PageProps,"refreshNonce"|"onOpenPath"> & { adapter:UserDirectoryData; user:User; tab?:WorkspaceTab; onQueryChange?:(query:Record<string,string>)=>void };
 const components = {haffRentCents:"哈夫币实耗租金",itemConsumptionCents:"物品实耗费用",earlyMakeupCents:"提前结束补足",renterFeeCents:"租客承担包赔费"} as const;
-const money = (value:string|null|undefined) => value == null ? "待核" : financeMoney(value);
+const money = (value:string|null|undefined) => value == null ? "未记录" : financeMoney(value);
 const day = (date:Date) => `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
 const identity = (adapter:UserDirectoryData) => `${adapter.snapshot.adminUserId}:${adapter.snapshot.session.id}:${adapter.snapshot.security.isBoss}:${[...adapter.snapshot.permissions].sort().join("|")}`;
 
@@ -37,13 +37,13 @@ function Consumption({adapter,user,refreshNonce,onOpenPath}:Props) {
       <Message kind="error" title="消费记录读取失败" retry={retry}>{errorText(result.error)}</Message>:<>
         <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
           <strong className="text-2xl font-semibold tabular-nums tracking-tight">{money(result.data.amountCents)}</strong>
-          <span className="text-sm text-muted-foreground">{result.data.knowledge==="UNKNOWN"?`${result.data.unknownCount} 笔待核，已核部分 ${money(result.data.knownAmountCents)}`:"不含押金、号主收入和分销奖励"}</span>
+          <span className="text-sm text-muted-foreground">{result.data.knowledge==="UNKNOWN"?`${result.data.unknownCount} 笔未记录，已核部分 ${money(result.data.knownAmountCents)}`:"不含押金、号主收入和分销奖励"}</span>
         </div>
         <dl className="grid grid-cols-1 gap-4 rounded-lg border p-4 sm:grid-cols-2 xl:grid-cols-4">
           {Object.entries(components).map(([key,label])=><div key={key}><dt className="text-xs text-muted-foreground">{label}</dt><dd className="mt-1 text-sm font-medium tabular-nums">{money(result.data.components[key as keyof typeof components])}</dd></div>)}
         </dl>
         <p className="text-xs text-muted-foreground">旧平台消费暂不能汇总。历史账目与新平台结算分开核对。</p>
-        {result.data.unknownCount>0?<Message title="部分结算金额待核">相关订单的调整金额或结算依据尚未核清，未计入完整合计。</Message>:null}
+        {result.data.unknownCount>0?<Message title="部分结算金额未记录">相关订单的调整金额或结算依据尚未核清，未计入完整合计。</Message>:null}
         <ListTable empty={result.data.total===0?<p className="text-sm text-muted-foreground">暂无新平台已结算消费。</p>:undefined}>
           <Table aria-label="用户租赁消费明细" className="min-w-[860px]">
             <TableHeader><TableRow><TableHead>订单 / 结算时间</TableHead>{Object.values(components).map(label=><TableHead key={label} className="text-right">{label}</TableHead>)}<TableHead className="text-right">本单消费</TableHead><TableHead>核对状态</TableHead></TableRow></TableHeader>
@@ -51,7 +51,7 @@ function Consumption({adapter,user,refreshNonce,onOpenPath}:Props) {
               <TableCell>{canOrder?<Button variant="link" className="h-auto p-0 text-foreground" onClick={()=>onOpenPath(`/orders/${encodeURIComponent(item.orderId)}`,item.displayNo)}>{item.displayNo}<ArrowUpRightIcon aria-hidden className="size-3.5"/></Button>:<span className="font-medium">{item.displayNo}</span>}<span className="mt-1 block text-xs text-muted-foreground">{financeTime(item.postedAt)}</span></TableCell>
               {Object.keys(components).map(key=><TableCell key={key} className="text-right tabular-nums">{money(item[key as keyof typeof components])}</TableCell>)}
               <TableCell className="text-right font-medium tabular-nums">{money(item.amountCents)}</TableCell>
-              <TableCell><Badge variant={item.knowledge==="KNOWN"?"success":"warning"}>{item.knowledge==="KNOWN"?"已核对":item.reasonCodes.includes("MANUAL_RENTER_ADJUSTMENT_UNALLOCATED")?"调整待核":"结算待核"}</Badge></TableCell>
+              <TableCell><Badge variant={item.knowledge==="KNOWN"?"success":"warning"}>{item.knowledge==="KNOWN"?"已核对":item.reasonCodes.includes("MANUAL_RENTER_ADJUSTMENT_UNALLOCATED")?"调整未记录":"结算未记录"}</Badge></TableCell>
             </TableRow>)}</TableBody>
           </Table>
         </ListTable>
@@ -105,7 +105,7 @@ function FinanceDocuments({adapter,user,refreshNonce,onOpenPath,tab,onQueryChang
             <TableBody>{result.data.documents?.map(document=><TableRow key={document.ref}>
               <TableCell className="min-w-52 whitespace-normal align-top"><span className="font-medium">{financeRecordNumber(document,document.number)}</span><span className="mt-1 block text-xs text-muted-foreground">{financeTime(document.occurredAt)}</span><HistoricalFinanceDetail historical={document.historical} recordKind={document.kind} orderRead={adapter.snapshot.security.isBoss||adapter.has(PERMISSION.orders)} documentRead={canDocument} onOpenPath={openRelated}/></TableCell>
               <TableCell className="whitespace-normal align-top">{financeBusinessLabel(document)}<small className="mt-1 block text-muted-foreground">{financeEntryScope(document)}</small></TableCell>
-              <TableCell className="tabular-nums align-top">{financeIsHistorical(document)&&document.kind==='WITHDRAWAL'&&document.requestedAmountCents!==null?`原申请 ${money(document.requestedAmountCents)}`:document.amounts.length?document.amounts.map(amount=><span key={amount.bucket} className="block text-sm">{financeIsHistorical(document)?'历史变动':bucketLabels[amount.bucket]??"其他科目"} {amount.unknownCount?"待核":money(amount.knownNetCents)}</span>):document.requestedAmountCents===null?"待核":`${financeIsHistorical(document)?'原申请':'申请'} ${money(document.requestedAmountCents)}`}</TableCell>
+              <TableCell className="tabular-nums align-top">{financeIsHistorical(document)&&document.kind==='WITHDRAWAL'&&document.requestedAmountCents!==null?`原申请 ${money(document.requestedAmountCents)}`:document.amounts.length?document.amounts.map(amount=><span key={amount.bucket} className="block text-sm">{financeIsHistorical(document)?'历史变动':bucketLabels[amount.bucket]??"其他科目"} {amount.unknownCount?"未记录":money(amount.knownNetCents)}</span>):document.requestedAmountCents===null?"未记录":`${financeIsHistorical(document)?'原申请':'申请'} ${money(document.requestedAmountCents)}`}</TableCell>
               <TableCell className="whitespace-normal align-top"><Badge variant={financeIsHistorical(document)?'outline':document.state==="RECONCILIATION_REQUIRED"||document.state==="UNKNOWN"?"warning":"secondary"}>{financeRecordState(document)}</Badge></TableCell>
               <TableCell className="text-right">{canDocument?<Button size="sm" variant="ghost" aria-label={financeIsHistorical(document)?`查看历史记录 ${document.historical?.originalLogNumber||document.number}`:`查看资金单据 ${document.number}`} onClick={()=>open(document.ref)}>查看<ArrowUpRightIcon aria-hidden className="size-3.5"/></Button>:<span className="text-xs text-muted-foreground">无单据查看权限</span>}</TableCell>
             </TableRow>)}</TableBody>
@@ -123,7 +123,7 @@ export function UserDetailFinance(props:Props) {
   const allowed=canConsume||adapter.has(PERMISSION.walletRead);
   if(!allowed)return <Message kind="denied" title="当前账号没有用户资金查看权限"/>;
   return <div className="space-y-6" data-user-detail-finance>
-    <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1"><h2 className="text-base font-semibold">可用余额</h2><strong className="text-xl font-semibold tabular-nums">{user.walletSummary?.state==="ready"?money(user.walletSummary.amountCents):user.walletSummary?.state==="denied"?"无查看权限":"待核"}</strong><span className="text-xs text-muted-foreground">已申请提现的金额不计入；可用余额不是资产总额，保证金、押金与在途资金另行核对</span></div>
+    <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1"><h2 className="text-base font-semibold">可用余额</h2><strong className="text-xl font-semibold tabular-nums">{user.walletSummary?.state==="ready"?money(user.walletSummary.amountCents):user.walletSummary?.state==="denied"?"无查看权限":"未记录"}</strong><span className="text-xs text-muted-foreground">已申请提现的金额不计入；可用余额不是资产总额，保证金、押金与在途资金另行核对</span></div>
     {canConsume?<Consumption {...props}/>:null}
     {full?<FinanceDocuments {...props}/>:null}
     {full?<ChannelEvidenceLookup canRead canSearch/>:null}

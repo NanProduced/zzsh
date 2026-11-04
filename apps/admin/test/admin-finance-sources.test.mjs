@@ -13,11 +13,23 @@ async function probe(entry){const w=new Window({url:'http://fixture.invalid/fina
  const host=w.document.createElement('div');w.document.body.append(host);const root=require('react-dom/client').createRoot(host),frames=[];function Frame(){React.useLayoutEffect(()=>{frames.push(host.textContent);});return React.createElement(view.AdminFinanceView,props);}return{host,calls,frames,async render(next={}){props={...props,...next};await React.act(async()=>root.render(React.createElement(Frame)));for(let i=0;i<3;i++)await React.act(async()=>{await new Promise(setImmediate);});},revoke(){props={...props,snapshot:{...snapshot,permissions:[]}};},async close(){view.clearFinanceContexts();await React.act(async()=>root.unmount());await w.happyDOM.abort();}};
 }
 test('actual finance document shows known old paid records separately from unknown current held and labels its source conflict',async()=>{
- const p=await probe(source);try{await p.render();assert.match(p.host.textContent,/历史已付记录合计5\.00 元/);assert.match(p.host.textContent,/当前在押责任未核定/);assert.match(p.host.textContent,/保证金来源观察，当前在押待核/);assert.match(p.host.textContent,/原账号金额与支付记录不一致/);assert.doesNotMatch(p.host.textContent,/申请 5\.00|来源判断PAID_RECORD|资金分录已成功/);assert(p.calls.every(c=>c[2]==='GET'&&c[0].startsWith('/finance/documents/')));}finally{await p.close();}
+ const p=await probe(source);try{await p.render();assert.match(p.host.textContent,/历史已付记录合计5\.00 元/);assert.match(p.host.textContent,/当前在押责任未记录/);assert.match(p.host.textContent,/保证金来源观察，当前在押未记录/);assert.match(p.host.textContent,/原账号金额与支付记录不一致/);assert.doesNotMatch(p.host.textContent,/申请 5\.00|来源判断PAID_RECORD|资金分录已成功/);assert(p.calls.every(c=>c[2]==='GET'&&c[0].startsWith('/finance/documents/')));}finally{await p.close();}
 });
 test('actual zero finalization document explicitly has no financial ledger or channel payment',async()=>{
  const entry={...source,id:'history:zero-duty',documentRef:'LEGACY_DUTY:duty-zero',kind:'REFUND',bucket:'REFUND_PAYABLE',state:'SETTLED',classification:'ZERO_FINALIZATION',deltaCents:'0',knowledge:'KNOWN',evidence:{},reasonCodes:['ZERO_FACT_NO_LEDGER_OR_CHANNEL_PAYMENT']},p=await probe(entry);try{await p.render();assert.match(p.host.textContent,/零额终定，无资金分录/);assert.match(p.host.textContent,/没有资金分录或渠道支付/);assert.match(p.host.textContent,/0\.00 元/);}finally{await p.close();}
 });
 test('removing finance permission hides the source facts at the new render, before passive effects',async()=>{
  const p=await probe(source);try{await p.render();assert.match(p.host.textContent,/VISIBLE-OWNER/);p.frames.length=0;p.revoke();await p.render();assert(p.frames.every(t=>!t.includes('VISIBLE-OWNER')&&!t.includes('历史已付记录合计')));assert.match(p.host.textContent,/没有该项资金读取能力/);}finally{await p.close();}
+});
+
+test('opening basis bucket is labelled for reconciliation and excluded from the business filter',()=>{
+ const m=new Module(tree+'/apps/admin/src/views/admin-finance-api.cjs');m.filename=tree+'/apps/admin/src/views/admin-finance-api.cjs';m.paths=Module._nodeModulePaths(tree);
+ m.require=name=>name==='../api'?{API_ROOT:'/api/bff/admin',ADMIN_AUTH_FAILURE_EVENT:'fixture-auth-failure',AdminApiError,adminRequest:async()=>{}}:name==='../workspace/beijing-time'?{beijingCalendarDate:()=>'2026-10-15'}:require(tree+'/apps/admin/src/workspace/tab-model.ts');
+ m._compile(compile(readFileSync(tree+'/apps/admin/src/views/admin-finance-api.ts','utf8')),m.filename);
+ const {bucketLabels,businessBucketLabels,bucketNature}=m.exports;
+ assert.equal(bucketLabels.OPENING_BASIS,'旧平台余额结转');
+ assert.equal(bucketNature.OPENING_BASIS,'余额来源');
+ assert.equal(businessBucketLabels.OPENING_BASIS,undefined,'the business lookup filter never offers the opening basis bucket');
+ assert.equal(businessBucketLabels.AVAILABLE,'用户可用');
+ assert.equal(bucketLabels.CLEARING,'未核对款项');
 });

@@ -429,7 +429,7 @@ test('U-DETAIL: finance section performs independent read of wallet in CENT and 
   assert.ok(calls.some(c => c.url.includes('/finance/subjects/')));
   assert.ok(text.includes('150.00 元'));
   assert.ok(text.includes('50.00 元'),'reserved cents remain readable in the relevant financial document');
-  assert.ok(text.includes('待核'),'unknown consumption is not inferred from available balance');
+  assert.ok(text.includes('未记录'),'unknown consumption is not inferred from available balance');
   assert.ok(namedButton('完整资金核对'));
 });
 

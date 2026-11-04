@@ -22,7 +22,7 @@ const order = {
   status: "PAID",
   accountId: "account_1",
   accountDisplayNo: null,
-  title: "编号待核账号",
+  title: "编号未记录账号",
   gameId: "game_delta",
   ownerUserId: "user-owner-1",
   renterUserId: "user-renter-1",

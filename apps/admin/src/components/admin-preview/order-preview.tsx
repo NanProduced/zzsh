@@ -28,7 +28,7 @@ export interface OrderPreviewProps {
 
 /**
  * 订单基础预览卡片：只吃当前行已有金额与状态事实。
- * 严禁混用应付/押金/渠道资金，缺失即留白或标示待核，支持单动作复制订单号。
+ * 严禁混用应付/押金/渠道资金，缺失即留白或标示未记录，支持单动作复制订单号。
  * 中性呈现租客与号主双方受权名称，去本单身份/对方主观视角。
  */
 export function OrderPreviewCard({
@@ -50,7 +50,7 @@ export function OrderPreviewCard({
   openLabel = '查看订单详情',
   deniedReason = '无查看权限',
 }: OrderPreviewProps) {
-  const numberText = displayNo || '订单编号待核';
+  const numberText = displayNo || '订单编号未记录';
   const isPaid = status === 'PAID' || status === 'COMPLETED';
   const isPending = status === 'PENDING_PAYMENT';
 

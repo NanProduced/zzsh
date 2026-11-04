@@ -215,7 +215,7 @@ function assignmentLabel(order: AdminOrder): string {
 }
 
 function paymentTime(order: AdminOrder): string {
-  if (order.status === "PAID" || order.status === "COMPLETED") return order.paidAt ? formatDate(order.paidAt) : "支付时间待确认";
+  if (order.status === "PAID" || order.status === "COMPLETED") return order.paidAt ? formatDate(order.paidAt) : "支付时间未记录";
   return "—";
 }
 
@@ -607,12 +607,12 @@ function LifecyclePanel({ order, state, response }: { order: AdminOrder; state: 
     {
       label: "支付",
       state: order.status === "PAID" || order.status === "COMPLETED" ? "done" : order.status === "PENDING_PAYMENT" ? "current" : "idle",
-      detail: order.paidAt ? formatDate(order.paidAt) : order.status === "PAID" || order.status === "COMPLETED" ? "支付时间待确认" : order.status === "PENDING_PAYMENT" ? "等待支付" : "未形成支付事实",
+      detail: order.paidAt ? formatDate(order.paidAt) : order.status === "PAID" || order.status === "COMPLETED" ? "支付时间未记录" : order.status === "PENDING_PAYMENT" ? "等待支付" : "未形成支付事实",
     },
     {
       label: "派单 / 群就绪",
       state: assignment?.teamReady ? "done" : assignment ? "current" : "unknown",
-      detail: assignment?.teamReady ? "供应商群已就绪" : assignment ? assignment.state === "ASSIGNED" ? "已分配，群状态待确认" : "等待分配" : "未返回履约事实",
+      detail: assignment?.teamReady ? "供应商群已就绪" : assignment ? assignment.state === "ASSIGNED" ? "已分配，群状态未记录" : "等待分配" : "未返回履约事实",
     },
     {
       label: "开租",

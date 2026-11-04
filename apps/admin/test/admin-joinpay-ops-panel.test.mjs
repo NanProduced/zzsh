@@ -66,7 +66,7 @@ test('a valid local receipt can complete request recovery without claiming chann
     amountCents: '100', currency: 'CNY', state: 'READY', budgetDisposition: 'ALLOCATED',
     channel: { result: 'NOT_SUBMITTED', bankArrival: 'UNKNOWN' } }));
   await ui.submit(); assert.equal(ui.pending(), null); assert.match(ui.host.textContent, /已建立本地退款申请/);
-  assert.match(ui.host.textContent, /到账未核定/);
+  assert.match(ui.host.textContent, /到账未记录/);
 });
 
 test('storage failure blocks a first refund POST instead of losing its original key on reload', async t => {

@@ -8,14 +8,14 @@ import { financeMoney, financeTime } from './admin-finance-api';
 export function AdminOrderPaymentSummary({ summary }: { summary?: Summary | null }) {
   const unknownSource = summary?.unknowns?.includes('UNKNOWN_PAYMENT_SOURCE')
     || (summary?.dataOrigin === 'UNKNOWN' && summary.integration !== 'NOT_INTEGRATED');
-  if (unknownSource) return <section className="oc-section"><h2>渠道付款</h2><p className="oc-fact-note">付款来源待核，暂不据此认定付款或渠道到账。</p></section>;
+  if (unknownSource) return <section className="oc-section"><h2>渠道付款</h2><p className="oc-fact-note">付款来源未记录，暂不据此认定付款或渠道到账。</p></section>;
   if (!summary || summary.integration === 'NOT_INTEGRATED') {
     return <section className="oc-section"><h2>渠道付款</h2><p className="oc-fact-note">渠道付款摘要暂不可用，请按订单支付记录核对。</p></section>;
   }
   if (summary.contractVersion !== 'admin-order-payment-summary.v1' || typeof summary.productionPaymentCapability !== 'boolean'
     || !['NOT_INTEGRATED', 'CONTROLLED_LOCAL', 'JOINPAY'].includes(summary.integration)
     || (summary.dataOrigin !== undefined && !['SYNTHETIC_PROTOCOL', 'LOCAL_CONTROLLED', 'JOINPAY_CANDIDATE', 'JOINPAY_PROVIDER', 'UNKNOWN'].includes(summary.dataOrigin))) {
-    return <section className="oc-section"><h2>渠道付款</h2><p className="oc-fact-note">摘要版本待核对。</p></section>;
+    return <section className="oc-section"><h2>渠道付款</h2><p className="oc-fact-note">摘要版本未确认。</p></section>;
   }
   const acceptance = summary.acceptance?.state;
   const acceptanceText = acceptance === 'APPLIED' ? '本站已接纳' : acceptance === 'REVIEW_REQUIRED' ? '本站待人工复核' : acceptance === 'PENDING' ? '等待本站接纳' : '暂无本站接纳记录';
@@ -52,7 +52,7 @@ export function AdminOrderPaymentSummary({ summary }: { summary?: Summary | null
           <dt>本站接纳</dt><dd>{acceptanceText}</dd>
           {summary.originalRequest?.channelOrderNo ? <><dt>商户订单号</dt><dd>{summary.originalRequest.channelOrderNo}</dd></> : null}
           {observation?.channelTrxNo ? <><dt>渠道流水</dt><dd>{observation.channelTrxNo}</dd></> : null}
-          {summary.originalRequest?.amount ? <><dt>请求金额</dt><dd>{summary.originalRequest.amount.currency === 'CNY' ? financeMoney(summary.originalRequest.amount.cents) : '币种待核'}</dd></> : null}
+          {summary.originalRequest?.amount ? <><dt>请求金额</dt><dd>{summary.originalRequest.amount.currency === 'CNY' ? financeMoney(summary.originalRequest.amount.cents) : '币种未记录'}</dd></> : null}
           {observation?.evidenceLevel === 'JOINPAY_VERIFIED' && observation.providerTimeZone === 'EXPLICIT_OFFSET' && observation.providerPaidAt
             ? <><dt>渠道原付款时间</dt><dd>{financeTime(observation.providerPaidAt)}（按已核时区换算）</dd></> : null}
           <dt>新付款能力</dt><dd>{summary.productionPaymentCapability ? '已就绪；不表示本单已付款' : '未启用；历史付款依据仍保留'}</dd>

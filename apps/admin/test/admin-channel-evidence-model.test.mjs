@@ -24,5 +24,5 @@ test('source family labels legacy sources and keeps raw tags as trace only', () 
   assert.match(sourceFamilyText({ sourceType: 'WITHDRAWAL', sourceSystem: 'ZZSH', sourceEntity: 'intent' }), /^本平台来源/);
   assert.equal(sourceFamilyText(null), '未取得');
   assert.equal(sourceFamilyText({}), '未取得');
-  assert.match(sourceFamilyText({ sourceType: 'FUTURE_SOURCE' }), /^来源未核定/);
+  assert.match(sourceFamilyText({ sourceType: 'FUTURE_SOURCE' }), /^来源未记录/);
 });

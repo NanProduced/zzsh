@@ -64,15 +64,15 @@ export function OrderChannelEvidence({ orderId, canRead, autoLoad = false }: { o
     {state?.display ? <Failure display={state.display}/> : null}
     {body ? <ul className="space-y-2">
       <Line title="汇聚收款" section={payment}/>
-      {payment?.merchantOrderNo ? <li>商户 {text(payment.merchantIdentityId)} · 商户原单号 {payment.merchantOrderNo} · {familyLabels[payment.productFamily] ?? '支付方式待核'}</li> : null}
+      {payment?.merchantOrderNo ? <li>商户 {text(payment.merchantIdentityId)} · 商户原单号 {payment.merchantOrderNo} · {familyLabels[payment.productFamily] ?? '支付方式未记录'}</li> : null}
       {payment?.request ? <li>请求金额 {money(payment.amounts?.requested)} · 本站接纳 {money(payment.amounts?.accepted)} · 渠道实收 {money(payment.amounts?.trustedChannel)}</li> : null}
-      {payment?.trustedObservation ? <li>渠道状态 {payment.trustedObservation.channelStatus === 'SUCCEEDED' ? '渠道报告成功' : payment.trustedObservation.channelStatus === 'FAILED' ? '渠道报告失败' : payment.trustedObservation.channelStatus === 'CREATED_UNPAID' ? '渠道报告未付' : '待核'} · 渠道流水 {text(payment.trustedObservation.channelTrxNo)} · 核对时间 {financeTime(payment.trustedObservation.observedAt)}</li> : null}
+      {payment?.trustedObservation ? <li>渠道状态 {payment.trustedObservation.channelStatus === 'SUCCEEDED' ? '渠道报告成功' : payment.trustedObservation.channelStatus === 'FAILED' ? '渠道报告失败' : payment.trustedObservation.channelStatus === 'CREATED_UNPAID' ? '渠道报告未付' : '未记录'} · 渠道流水 {text(payment.trustedObservation.channelTrxNo)} · 核对时间 {financeTime(payment.trustedObservation.observedAt)}</li> : null}
       <Line title="汇聚退款" section={refund}/>
       {Array.isArray(refund?.intents) ? refund.intents.map((intent: Section) => <li key={text(intent.intentId)}>
         退款单 {text(intent.refundOrderNo)} · 申请 {money(intent.amount)} · 本地状态 {stateLabels[text(intent.localState)] ?? text(intent.localState)} · 渠道实退 {money({cents:intent.trustedActualCents})} · 退款流水 {text(intent.trustedRefundTrxNo)}
       </li>) : null}
     </ul> : state?.body ? <p role="status">本次返回的渠道证据与订单不匹配。</p> : null}
-    <p className="oc-fact-note">只读本地登记证据，不发起渠道查询；银行到账未核定。</p>
+    <p className="oc-fact-note">只读本地登记证据，不发起渠道查询；银行到账未记录。</p>
   </div>;
 }
 
@@ -142,8 +142,8 @@ export function ChannelEvidenceLookup({ canRead, canSearch, onOpenOrder, initial
     {s ? <ul><Line title="原单检索" section={s}/>{Array.isArray(s.candidates) ? <li>候选 {s.candidates.length} 条{s.truncated ? "（已截断，非全部）" : ""}</li> : null}</ul> : null}
     {s && Array.isArray(s.candidates) && s.candidates.length ? <div className="overflow-x-auto"><table data-evidence-candidates><thead><tr><th>汇聚业务</th><th>商户原号 / 渠道流水</th><th>本地状态</th><th>记录金额</th><th>证据等级</th><th>登记时间</th><th>关联与证据</th></tr></thead>
       <tbody>{(s.candidates as any[]).map((c, i) => <tr key={`${text(c?.objectKind)}:${text(c?.objectId)}:${i}`} data-requires-review={c?.requiresReview ? "true" : "false"}>
-        <td>{familyLabels[text(c?.productFamily)] ?? "渠道业务待核"}</td><td>{text(c?.merchantOrderNo)} / {c?.channelTransactionRecorded ? text(c?.channelTrxNo) : "未登记"}</td>
-        <td>{stateLabels[text(c?.state)] ?? text(c?.state)}{c?.fundsDisposition ? ` · ${text(c.fundsDisposition)}` : ""}{c?.requiresReview ? " · 待核" : ""}</td><td>{money(c?.amount)} {text(c?.amount?.currency)}</td>
+        <td>{familyLabels[text(c?.productFamily)] ?? "渠道业务未记录"}</td><td>{text(c?.merchantOrderNo)} / {c?.channelTransactionRecorded ? text(c?.channelTrxNo) : "未登记"}</td>
+        <td>{stateLabels[text(c?.state)] ?? text(c?.state)}{c?.fundsDisposition ? ` · ${text(c.fundsDisposition)}` : ""}{c?.requiresReview ? " · 未记录" : ""}</td><td>{money(c?.amount)} {text(c?.amount?.currency)}</td>
         <td>{text(c?.evidenceLevel)}</td><td>{financeTime(c?.recordedAt)}</td><td>{c?.objectKind === 'JOINPAY_WITHDRAWAL_INTENT' && typeof c.objectId === 'string' && REF.test(c.objectId) && c.merchantIdentityId === merchant
           ? <Button variant="link" size="sm" onClick={() => void load('/finance/channel-evidence/withdrawals/' + encodeURIComponent(merchant) + '/' + encodeURIComponent(c.objectId), seq, setState, '提现申请 [' + c.objectId + ']')}>查看出款证据</Button>
           : onOpenOrder && typeof c?.orderId === "string" && REF.test(c.orderId)
