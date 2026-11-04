@@ -15,7 +15,7 @@ import { validateFundingPolicy, validateOwnerDepositDeclaration } from "./fundin
 import { DELTA_INFO_SOURCE_DICTIONARY, projectDeltaQuote } from "./delta-rental";
 import { publishedListingFeeDisplay, quoteFeeSummary } from "./tenant-price-projection";
 export { quoteFeeSummary } from "./tenant-price-projection";
-import { boundBaseRenterRatio, evaluatePublication, listingCandidatePage, listingDetail, listingPageShared, publicListingAttributes, readPublishingAccounts, publicListingBasis, publicListingMemo, readPublicListing, type ListingDetailPrefetch, type ListingPageShared, type ListingPublication, type ListingVersion, type PublishingAccount, type SupplyGate, type SupplyGateReader } from "./publishing";
+import { boundBaseRenterRatio, declaredTitleOrNull, evaluatePublication, listingCandidatePage, listingDetail, listingPageShared, publicListingAttributes, readPublishingAccounts, publicListingBasis, publicListingMemo, readPublicListing, type ListingDetailPrefetch, type ListingPageShared, type ListingPublication, type ListingVersion, type PublishingAccount, type SupplyGate, type SupplyGateReader } from "./publishing";
 import { projectPublicAttributeDisplay, publicLoginMethodOptions } from "./listing-query";
 import { conflict, forbidden, invalid, notFound, sha256Hex } from "./supply-util";
 import { SecurityApiError } from "../auth/security-core";
@@ -735,6 +735,10 @@ export async function listSupervision(client: PoolClient, viewer: SupervisionVie
         const { values, where } = candidateWhere(scanAfter), p = (value: unknown) => "$" + values.push(value);
         const rows = (await client.query(`SELECT a.id,a.id AS "accountId",a.display_no AS "displayNo",a.owner_user_id AS "ownerId",a.revision::text AS "revision",${sortAt} AS "sortAt",${timestamp("a.created_at")} AS "accountCreatedAt",${timestamp("a.updated_at")} AS "accountUpdatedAt",v.id AS "versionId",v.sequence::text AS sequence,v.title,v.review_state AS "reviewState",${timestamp("v.created_at")} AS "versionCreatedAt",v.rule_release_id AS "ruleReleaseId",v.term_option_code AS "termOptionCode",v.payload#>>'{ruleRefs,priceVersionId}' AS "priceVersionId",u.name AS "ownerName",g.name AS "gameName",(${stateSql.occupied}) AS "statusOccupied",(${stateSql.completed}) AS "statusCompleted"${hasCheapFilters ? `,(${legacySourceSql}) AS "filterLegacy"${needsDisplayVersion ? `,(${haffSql})::text AS "filterHaff",(${depositSql})::text AS "filterDeposit",(${displayAttributes}->>'login_method_code') AS "filterLogin"` : ""}` : ""} ${from} WHERE ${where.join(" AND ")} ORDER BY ${sort} DESC,a.id COLLATE "C" DESC LIMIT ${p(fetchLimit)}`, values)).rows;
         if (!rows.length) break;
+        // A-5: the imported placeholder ("历史资料待核实") is a marker for "no title", not a name. The
+        // owner-facing list already treats it as null (declaredTitleOrNull); the admin list must not
+        // present it as an account name either. The reason stays in publicBasis/unknownReason fields.
+        for (const row of rows) row.title = declaredTitleOrNull(row.title);
         scanned += rows.length;
         const matchingRows = hasCheapFilters ? rows.filter(row => matchesCheapFilters(q, row)) : rows;
         if (matchingRows.length) items.push(...await project(matchingRows));
@@ -834,3 +838,4 @@ export async function readSupervision(client: PoolClient, a: PublishingAccount, 
         ? await readLegacyPathCounts(client, a.id, detail.version.id) : null;
     return { ...detail, legacyMediaCounts, decisions: managementAccess ? detail.decisions : [], contractVersion: SUPERVISION_READ_VERSION, contextKey: viewer.contextKey, history, previousDeclaration: previous?.version?.declaration ?? null, previousPresentation: previous?.version?.presentation ?? null, duplicateHints, supervision: { managementAccess: managementAccess ? "READY" : "DENIED", historical, facts, changes, previousVersion: previous?.version ?? null, originalRestrictionVersion: originalRestriction?.version ?? null, restrictionHistory: { state: !managementAccess ? "DENIED" : events.length ? "KNOWN" : "NOT_RECORDED", items: events, limit: 20 }, ownerLink: viewer.access.permissions.has("user.directory.read") ? { state: "READY", userId: a.owner_user_id } : { state: "DENIED" }, orders: orders ? { state: "READY", ...orders } : { state: "DENIED", permission: "order.read" } } };
 }
+

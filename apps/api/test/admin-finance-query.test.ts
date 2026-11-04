@@ -254,7 +254,8 @@ test('lookup raw snapshot keys are equivalent to full evidence across filters, p
    assert.deepEqual(fixture.query(next.text,next.values).rows,fixture.query(old.text,old.values).rows,JSON.stringify({q,scope,kind,page}));comparisons++;
   }
   const filters=parseAdminFinanceFilters(new URLSearchParams('period=0'),new Date(),false),query=financeLookupPageSql(ADMIN_FINANCE_LEDGER_SQL,adminFinanceObservationSql({},true),{native_orders:true,legacy_orders:true},{filters,lookup:{exact:false},page:1,pageSize:20},true),rows=fixture.query(query.text,query.values).rows;
-  assert.equal(comparisons,252);assert(rows.some(r=>r.ref==='ORDER:o2'),'an unposted unpaid order remains a real document');assert.equal(rows.filter(r=>r.ref==='ORDER:o1').length,1);assert.equal(Number(rows[0]!.entry_count),5);
+  assert.equal(comparisons,252);assert(rows.some(r=>r.ref==='ORDER:o2'),'an unposted unpaid order remains a real document');assert.equal(rows.filter(r=>r.ref==='ORDER:o1').length,1);// A-3: the withdrawal application's 1002/1003/1004/1005 posting no longer ranks as its own document, so the paged口径 counts applications instead of technical rows.
+ assert.equal(Number(rows[0]!.entry_count),4);
   for(const exact of [false,true])for(const period of ['0','1'])for(const bucket of ['ALL','AVAILABLE','PENDING_EARNINGS'])for(const state of ['ALL','HISTORICAL_OBSERVED','ORDER_RECORDED']){
    const f=parseAdminFinanceFilters(new URLSearchParams({q:'FLOW-1',period,bucket,state,from:'2026-10-03',to:'2026-10-03'}),new Date(),false),scope={filters:f,lookup:{exact},page:1,pageSize:2};
    const old=financeLookupPageSql(ADMIN_FINANCE_LEDGER_SQL,adminFinanceObservationSql({}),{native_orders:true,legacy_orders:true},scope),next=financeLookupPageSql(ADMIN_FINANCE_LEDGER_SQL,adminFinanceObservationSql({},true),{native_orders:true,legacy_orders:true},scope,true);
@@ -337,3 +338,4 @@ test('exact source key pagination preserves all three families and a null occurr
   assert.deepEqual(first.map(r=>r.ref),['PAYMENT_REQUEST:pc','REFUND_INTENT:rc']);assert.deepEqual(next.map(r=>r.ref),['JOINPAY_WITHDRAWAL:wc']);assert.equal(Number(first[0]!.document_count),3);assert.equal(Number(next[0]!.entry_count),0);
  }finally{fixture.close();}
 });
+
